@@ -484,6 +484,127 @@ impl<'a> Decoder<'a> {
         Ok((component_planes, warnings))
     }
 
+    /// Decode arithmetic-coded planes (SOF9 sequential).
+    fn decode_arithmetic_planes(
+        &self,
+        frame: &FrameHeader,
+        quant_tables: &[&QuantTable],
+        num_components: usize,
+        mcus_x: usize,
+        mcus_y: usize,
+        block_size: usize,
+    ) -> Result<(Vec<Vec<u8>>, Vec<DecodeWarning>)> {
+        use crate::decode::arithmetic::ArithDecoder;
+
+        let scan = &self.metadata.scan;
+
+        // Allocate component planes
+        let mut component_planes: Vec<Vec<u8>> = frame
+            .components
+            .iter()
+            .map(|comp| {
+                let comp_w = mcus_x * comp.horizontal_sampling as usize * block_size;
+                let comp_h = mcus_y * comp.vertical_sampling as usize * block_size;
+                let size = comp_w * comp_h;
+                let mut v = Vec::with_capacity(size);
+                unsafe { v.set_len(size) };
+                v
+            })
+            .collect();
+
+        struct CompLayout {
+            comp_w: usize,
+            h_blocks: usize,
+            v_blocks: usize,
+        }
+        let comp_layouts: Vec<CompLayout> = frame
+            .components
+            .iter()
+            .map(|comp| CompLayout {
+                comp_w: mcus_x * comp.horizontal_sampling as usize * block_size,
+                h_blocks: comp.horizontal_sampling as usize,
+                v_blocks: comp.vertical_sampling as usize,
+            })
+            .collect();
+
+        // Build component map from scan selectors
+        let scan_comps: Vec<(usize, usize, usize)> = scan
+            .components
+            .iter()
+            .map(|sc| {
+                let comp_idx = frame
+                    .components
+                    .iter()
+                    .position(|fc| fc.id == sc.component_id)
+                    .unwrap_or(0);
+                (
+                    comp_idx,
+                    sc.dc_table_index as usize,
+                    sc.ac_table_index as usize,
+                )
+            })
+            .collect();
+
+        let entropy_data = &self.raw_data[self.metadata.entropy_data_offset..];
+        let mut arith = ArithDecoder::new(entropy_data, 0);
+
+        // Set conditioning parameters
+        for i in 0..4 {
+            let (l, u) = self.metadata.arith_dc_params[i];
+            arith.set_dc_conditioning(i, l, u);
+            arith.set_ac_conditioning(i, self.metadata.arith_ac_params[i]);
+        }
+
+        let mut coeffs = [0i16; 64];
+
+        for mcu_y in 0..mcus_y {
+            for mcu_x in 0..mcus_x {
+                for &(comp_idx, dc_tbl, ac_tbl) in &scan_comps {
+                    let layout = &comp_layouts[comp_idx];
+                    let qt_values = &quant_tables[comp_idx].values;
+
+                    for v in 0..layout.v_blocks {
+                        for h in 0..layout.h_blocks {
+                            coeffs = [0i16; 64];
+
+                            // Arithmetic decode DC + AC
+                            arith.decode_dc_sequential(&mut coeffs, comp_idx, dc_tbl)?;
+                            arith.decode_ac_sequential(&mut coeffs, ac_tbl)?;
+
+                            // IDCT
+                            let bx = mcu_x * layout.h_blocks + h;
+                            let by = mcu_y * layout.v_blocks + v;
+                            let x_offset = bx * block_size;
+                            let y_offset = by * block_size;
+
+                            let plane = &mut component_planes[comp_idx];
+                            let stride = layout.comp_w;
+
+                            if block_size == 8 {
+                                let out_ptr =
+                                    unsafe { plane.as_mut_ptr().add(y_offset * stride + x_offset) };
+                                unsafe {
+                                    self.idct_islow_strided(&coeffs, qt_values, out_ptr, stride);
+                                }
+                            } else {
+                                // Scaled IDCT
+                                unsafe {
+                                    let out_ptr =
+                                        plane.as_mut_ptr().add(y_offset * stride + x_offset);
+                                    self.idct_scaled_strided(
+                                        &coeffs, qt_values, out_ptr, stride, block_size,
+                                    );
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        Ok((component_planes, Vec::new()))
+    }
+
     /// Decode progressive (multi-scan) into component planes.
     /// Accumulates DCT coefficients across all scans, then runs IDCT.
     fn decode_progressive_planes(
@@ -901,8 +1022,17 @@ impl<'a> Decoder<'a> {
             })
             .collect::<Result<Vec<_>>>()?;
 
-        // Decode component planes — different paths for baseline vs progressive
-        let (component_planes, warnings) = if frame.is_progressive {
+        // Decode component planes — different paths for baseline vs progressive vs arithmetic
+        let (component_planes, warnings) = if self.metadata.is_arithmetic {
+            self.decode_arithmetic_planes(
+                frame,
+                &quant_tables,
+                num_components,
+                mcus_x,
+                mcus_y,
+                block_size,
+            )?
+        } else if frame.is_progressive {
             self.decode_progressive_planes(
                 frame,
                 &quant_tables,

@@ -1,3 +1,4 @@
+pub mod arithmetic;
 pub mod bitstream;
 pub mod color;
 pub mod dequant;

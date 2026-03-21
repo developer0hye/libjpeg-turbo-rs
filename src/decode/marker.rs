@@ -14,8 +14,14 @@ const SOI: u8 = 0xD8;
 const EOI: u8 = 0xD9;
 const SOF0: u8 = 0xC0;
 const SOF2: u8 = 0xC2;
+<<<<<<< HEAD
 const SOF3: u8 = 0xC3; // Lossless, Huffman-coded
+=======
+const SOF9: u8 = 0xC9; // Arithmetic sequential
+const SOF10: u8 = 0xCA; // Arithmetic progressive
+>>>>>>> 1282706 (feat: add arithmetic entropy coding (encode + decode))
 const DHT: u8 = 0xC4;
+const DAC: u8 = 0xCC; // Define arithmetic conditioning
 const DQT: u8 = 0xDB;
 const SOS: u8 = 0xDA;
 const DRI: u8 = 0xDD;
@@ -58,6 +64,12 @@ pub struct JpegMetadata {
     pub icc_chunks: Vec<IccChunk>,
     /// Raw EXIF TIFF data from the first APP1 marker (after "Exif\0\0" header).
     pub exif_data: Option<Vec<u8>>,
+    /// True if using arithmetic entropy coding (SOF9/SOF10).
+    pub is_arithmetic: bool,
+    /// DAC conditioning: DC parameters (L, U) per table.
+    pub arith_dc_params: [(u8, u8); 4],
+    /// DAC conditioning: AC parameter (Kx) per table.
+    pub arith_ac_params: [u8; 4],
 }
 
 /// Reads and parses JPEG markers from a byte slice.
@@ -86,6 +98,9 @@ impl<'a> MarkerReader<'a> {
         let mut adobe_transform: u8 = 0;
         let mut icc_chunks: Vec<IccChunk> = Vec::new();
         let mut exif_data: Option<Vec<u8>> = None;
+        let mut is_arithmetic = false;
+        let mut arith_dc_params: [(u8, u8); 4] = [(0, 1); 4];
+        let mut arith_ac_params: [u8; 4] = [5; 4];
 
         loop {
             let marker = self.read_marker()?;
@@ -98,6 +113,19 @@ impl<'a> MarkerReader<'a> {
                 }
                 SOF3 => {
                     frame = Some(self.read_sof(false, true)?);
+                }
+                SOF9 => {
+                    // Arithmetic sequential
+                    frame = Some(self.read_sof(false)?);
+                    is_arithmetic = true;
+                }
+                SOF10 => {
+                    // Arithmetic progressive
+                    frame = Some(self.read_sof(true)?);
+                    is_arithmetic = true;
+                }
+                DAC => {
+                    self.read_dac(&mut arith_dc_params, &mut arith_ac_params)?;
                 }
                 DQT => {
                     self.read_dqt(&mut quant_tables)?;
@@ -178,6 +206,9 @@ impl<'a> MarkerReader<'a> {
             adobe_transform,
             icc_chunks,
             exif_data,
+            is_arithmetic,
+            arith_dc_params,
+            arith_ac_params,
         })
     }
 
@@ -459,6 +490,33 @@ impl<'a> MarkerReader<'a> {
     fn read_dri(&mut self) -> Result<u16> {
         let _length = self.read_u16_be()?;
         self.read_u16_be()
+    }
+
+    /// Parse DAC (Define Arithmetic Conditioning) marker.
+    fn read_dac(&mut self, dc_params: &mut [(u8, u8); 4], ac_params: &mut [u8; 4]) -> Result<()> {
+        let length = self.read_u16_be()? as usize;
+        let end = self.pos + length - 2;
+
+        while self.pos < end {
+            let tc_tb = self.read_u8()?;
+            let tc = tc_tb >> 4; // table class: 0=DC, 1=AC
+            let tb = (tc_tb & 0x0F) as usize; // table index
+            let val = self.read_u8()?;
+
+            if tb >= 4 {
+                continue;
+            }
+            if tc == 0 {
+                // DC: val = L | (U << 4)
+                let l = val & 0x0F;
+                let u = val >> 4;
+                dc_params[tb] = (l, u);
+            } else {
+                // AC: val = Kx
+                ac_params[tb] = val;
+            }
+        }
+        Ok(())
     }
 
     fn read_sos(&mut self) -> Result<ScanHeader> {

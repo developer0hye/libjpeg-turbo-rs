@@ -226,6 +226,7 @@ pub fn compress(
     Ok(output)
 }
 
+<<<<<<< HEAD
 /// Per-component block layout for progressive encoding.
 struct CompLayout {
     blocks_x: usize,
@@ -239,6 +240,12 @@ struct CompLayout {
 /// Buffers all DCT coefficients, then encodes across multiple scans
 /// following a standard scan progression script.
 pub fn compress_progressive(
+=======
+/// Compress with arithmetic entropy coding (SOF9).
+///
+/// Uses the QM-coder binary arithmetic encoder instead of Huffman coding.
+pub fn compress_arithmetic(
+>>>>>>> 1282706 (feat: add arithmetic entropy coding (encode + decode))
     pixels: &[u8],
     width: usize,
     height: usize,
@@ -246,8 +253,14 @@ pub fn compress_progressive(
     quality: u8,
     subsampling: Subsampling,
 ) -> Result<Vec<u8>> {
+<<<<<<< HEAD
     use crate::encode::progressive::simple_progression;
 
+=======
+    use crate::encode::arithmetic::ArithEncoder;
+
+    // Validate inputs
+>>>>>>> 1282706 (feat: add arithmetic entropy coding (encode + decode))
     if width == 0 || height == 0 {
         return Err(JpegError::CorruptData(
             "image dimensions must be non-zero".to_string(),
@@ -264,16 +277,28 @@ pub fn compress_progressive(
     }
 
     let is_grayscale = pixel_format == PixelFormat::Grayscale;
+<<<<<<< HEAD
     let num_components = if is_grayscale { 1 } else { 3 };
 
+=======
+
+    // Generate quantization tables
+>>>>>>> 1282706 (feat: add arithmetic entropy coding (encode + decode))
     let luma_quant = tables::quality_scale_quant_table(&tables::STD_LUMINANCE_QUANT_TABLE, quality);
     let chroma_quant =
         tables::quality_scale_quant_table(&tables::STD_CHROMINANCE_QUANT_TABLE, quality);
     let luma_divisors = scale_quant_for_fdct(&luma_quant);
     let chroma_divisors = scale_quant_for_fdct(&chroma_quant);
 
+<<<<<<< HEAD
     let (y_plane, cb_plane, cr_plane) = convert_to_ycbcr(pixels, width, height, pixel_format)?;
 
+=======
+    // Color convert
+    let (y_plane, cb_plane, cr_plane) = convert_to_ycbcr(pixels, width, height, pixel_format)?;
+
+    // MCU dimensions
+>>>>>>> 1282706 (feat: add arithmetic entropy coding (encode + decode))
     let (mcu_w, mcu_h) = if is_grayscale {
         (8, 8)
     } else {
@@ -283,7 +308,11 @@ pub fn compress_progressive(
             Subsampling::S420 => (16, 16),
             _ => {
                 return Err(JpegError::Unsupported(format!(
+<<<<<<< HEAD
                     "subsampling {:?} not supported for progressive encoding",
+=======
+                    "subsampling mode {:?} not supported for arithmetic encoding",
+>>>>>>> 1282706 (feat: add arithmetic entropy coding (encode + decode))
                     subsampling
                 )));
             }
@@ -293,6 +322,7 @@ pub fn compress_progressive(
     let mcus_x = (width + mcu_w - 1) / mcu_w;
     let mcus_y = (height + mcu_h - 1) / mcu_h;
 
+<<<<<<< HEAD
     // Compute per-component block dimensions
     let (h_samp, v_samp) = if is_grayscale {
         (1usize, 1usize)
@@ -352,10 +382,22 @@ pub fn compress_progressive(
             if is_grayscale {
                 let bx = mcu_x;
                 let by = mcu_y;
+=======
+    // FDCT + quantize all blocks
+    let mut all_blocks: Vec<[i16; 64]> = Vec::new();
+
+    for mcu_row in 0..mcus_y {
+        for mcu_col in 0..mcus_x {
+            let x0 = mcu_col * mcu_w;
+            let y0 = mcu_row * mcu_h;
+
+            if is_grayscale {
+>>>>>>> 1282706 (feat: add arithmetic entropy coding (encode + decode))
                 let mut block = [0i16; 64];
                 extract_block(&y_plane, width, height, x0, y0, &mut block);
                 let mut dct = [0i32; 64];
                 fdct::fdct_islow(&block, &mut dct);
+<<<<<<< HEAD
                 quant::quantize_block(&dct, &luma_divisors, &mut coeff_bufs[0][by * mcus_x + bx]);
             } else {
                 // Y blocks
@@ -425,11 +467,75 @@ pub fn compress_progressive(
                         &chroma_divisors,
                         &mut coeff_bufs[2][by * mcus_x + bx],
                     );
+=======
+                let mut q = [0i16; 64];
+                quant::quantize_block(&dct, &luma_divisors, &mut q);
+                all_blocks.push(q);
+            } else {
+                match subsampling {
+                    Subsampling::S444 => {
+                        for (plane, divisors) in [
+                            (&y_plane, &luma_divisors),
+                            (&cb_plane, &chroma_divisors),
+                            (&cr_plane, &chroma_divisors),
+                        ] {
+                            let mut block = [0i16; 64];
+                            extract_block(plane, width, height, x0, y0, &mut block);
+                            let mut dct = [0i32; 64];
+                            fdct::fdct_islow(&block, &mut dct);
+                            let mut q = [0i16; 64];
+                            quant::quantize_block(&dct, divisors, &mut q);
+                            all_blocks.push(q);
+                        }
+                    }
+                    Subsampling::S422 => {
+                        for dx in [0, 8] {
+                            let mut block = [0i16; 64];
+                            extract_block(&y_plane, width, height, x0 + dx, y0, &mut block);
+                            let mut dct = [0i32; 64];
+                            fdct::fdct_islow(&block, &mut dct);
+                            let mut q = [0i16; 64];
+                            quant::quantize_block(&dct, &luma_divisors, &mut q);
+                            all_blocks.push(q);
+                        }
+                        for plane in [&cb_plane, &cr_plane] {
+                            let mut block = [0i16; 64];
+                            downsample_chroma_block(plane, width, height, x0, y0, 2, 1, &mut block);
+                            let mut dct = [0i32; 64];
+                            fdct::fdct_islow(&block, &mut dct);
+                            let mut q = [0i16; 64];
+                            quant::quantize_block(&dct, &chroma_divisors, &mut q);
+                            all_blocks.push(q);
+                        }
+                    }
+                    Subsampling::S420 => {
+                        for (dx, dy) in [(0, 0), (8, 0), (0, 8), (8, 8)] {
+                            let mut block = [0i16; 64];
+                            extract_block(&y_plane, width, height, x0 + dx, y0 + dy, &mut block);
+                            let mut dct = [0i32; 64];
+                            fdct::fdct_islow(&block, &mut dct);
+                            let mut q = [0i16; 64];
+                            quant::quantize_block(&dct, &luma_divisors, &mut q);
+                            all_blocks.push(q);
+                        }
+                        for plane in [&cb_plane, &cr_plane] {
+                            let mut block = [0i16; 64];
+                            downsample_chroma_block(plane, width, height, x0, y0, 2, 2, &mut block);
+                            let mut dct = [0i32; 64];
+                            fdct::fdct_islow(&block, &mut dct);
+                            let mut q = [0i16; 64];
+                            quant::quantize_block(&dct, &chroma_divisors, &mut q);
+                            all_blocks.push(q);
+                        }
+                    }
+                    _ => unreachable!(),
+>>>>>>> 1282706 (feat: add arithmetic entropy coding (encode + decode))
                 }
             }
         }
     }
 
+<<<<<<< HEAD
     // Build Huffman tables
     let dc_luma_table = build_huff_table(&tables::DC_LUMINANCE_BITS, &tables::DC_LUMINANCE_VALUES);
     let ac_luma_table = build_huff_table(&tables::AC_LUMINANCE_BITS, &tables::AC_LUMINANCE_VALUES);
@@ -443,6 +549,46 @@ pub fn compress_progressive(
 
     // Assemble output
     let mut output = Vec::with_capacity(width * height * 2);
+=======
+    // Arithmetic encode all blocks
+    let mut arith_enc = ArithEncoder::new(width * height);
+    let mut block_idx = 0;
+
+    for _mcu_row in 0..mcus_y {
+        for _mcu_col in 0..mcus_x {
+            if is_grayscale {
+                arith_enc.encode_dc_sequential(&all_blocks[block_idx], 0, 0);
+                arith_enc.encode_ac_sequential(&all_blocks[block_idx], 0);
+                block_idx += 1;
+            } else {
+                let y_blocks = match subsampling {
+                    Subsampling::S444 => 1,
+                    Subsampling::S422 => 2,
+                    Subsampling::S420 => 4,
+                    _ => unreachable!(),
+                };
+                for _ in 0..y_blocks {
+                    arith_enc.encode_dc_sequential(&all_blocks[block_idx], 0, 0);
+                    arith_enc.encode_ac_sequential(&all_blocks[block_idx], 0);
+                    block_idx += 1;
+                }
+                // Cb
+                arith_enc.encode_dc_sequential(&all_blocks[block_idx], 1, 1);
+                arith_enc.encode_ac_sequential(&all_blocks[block_idx], 1);
+                block_idx += 1;
+                // Cr
+                arith_enc.encode_dc_sequential(&all_blocks[block_idx], 2, 1);
+                arith_enc.encode_ac_sequential(&all_blocks[block_idx], 1);
+                block_idx += 1;
+            }
+        }
+    }
+
+    arith_enc.finish();
+
+    // Assemble output
+    let mut output = Vec::with_capacity(arith_enc.data().len() + 1024);
+>>>>>>> 1282706 (feat: add arithmetic entropy coding (encode + decode))
 
     marker_writer::write_soi(&mut output);
     marker_writer::write_app0_jfif(&mut output);
@@ -453,6 +599,7 @@ pub fn compress_progressive(
         marker_writer::write_dqt(&mut output, 1, &chroma_quant);
     }
 
+<<<<<<< HEAD
     // SOF2 (progressive)
     if is_grayscale {
         let components = vec![(1, 1, 1, 0)];
@@ -552,12 +699,48 @@ pub fn compress_progressive(
         bit_writer.flush();
         output.extend_from_slice(bit_writer.data());
     }
+=======
+    // SOF9 (arithmetic sequential)
+    if is_grayscale {
+        let components = vec![(1, 1, 1, 0)];
+        marker_writer::write_sof9(&mut output, width as u16, height as u16, &components);
+    } else {
+        let (h_samp, v_samp) = match subsampling {
+            Subsampling::S444 => (1, 1),
+            Subsampling::S422 => (2, 1),
+            Subsampling::S420 => (2, 2),
+            _ => unreachable!(),
+        };
+        let components = vec![(1, h_samp, v_samp, 0), (2, 1, 1, 1), (3, 1, 1, 1)];
+        marker_writer::write_sof9(&mut output, width as u16, height as u16, &components);
+    }
+
+    // DAC marker
+    let dc_params = [(0u8, 1u8), (0, 1)];
+    let ac_params = [5u8, 5];
+    let num_dc = if is_grayscale { 1 } else { 2 };
+    let num_ac = if is_grayscale { 1 } else { 2 };
+    marker_writer::write_dac(&mut output, num_dc, &dc_params, num_ac, &ac_params);
+
+    // SOS
+    if is_grayscale {
+        let scan_components = vec![(1, 0, 0)];
+        marker_writer::write_sos(&mut output, &scan_components);
+    } else {
+        let scan_components = vec![(1, 0, 0), (2, 1, 1), (3, 1, 1)];
+        marker_writer::write_sos(&mut output, &scan_components);
+    }
+
+    // Entropy-coded data
+    output.extend_from_slice(arith_enc.data());
+>>>>>>> 1282706 (feat: add arithmetic entropy coding (encode + decode))
 
     marker_writer::write_eoi(&mut output);
 
     Ok(output)
 }
 
+<<<<<<< HEAD
 /// Encode a progressive DC scan.
 #[allow(clippy::too_many_arguments)]
 fn encode_progressive_dc_scan(
@@ -748,6 +931,8 @@ fn encode_ac_value_prog(value: i16) -> (u16, u8) {
     (magnitude_bits, size)
 }
 
+=======
+>>>>>>> 1282706 (feat: add arithmetic entropy coding (encode + decode))
 /// Scale quantization table values by 8 to create divisor table for the islow FDCT.
 ///
 /// The islow FDCT output is scaled up by a factor of 8 (one factor of sqrt(8)

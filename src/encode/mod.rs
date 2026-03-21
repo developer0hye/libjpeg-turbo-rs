@@ -1,3 +1,4 @@
+pub mod arithmetic;
 pub mod color;
 pub mod fdct;
 pub mod huff_opt;
