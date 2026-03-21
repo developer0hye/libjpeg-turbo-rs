@@ -3,32 +3,24 @@ use crate::common::huffman_table::HuffmanTable;
 use crate::decode::bitstream::BitReader;
 
 /// Extend a variable-length bit value to a signed integer (JPEG ones' complement).
+#[inline(always)]
 fn extend(value: u16, size: u8) -> i16 {
-    if size == 0 {
-        return 0;
-    }
-    let half = 1i16 << (size - 1);
-    if (value as i16) < half {
-        value as i16 - (2 * half - 1)
-    } else {
-        value as i16
-    }
+    // Branchless: if value < 2^(size-1) then value - (2^size - 1), else value
+    let half = 1u16 << (size - 1);
+    let mask = (0u16.wrapping_sub((value < half) as u16)) as i16; // 0 or -1
+    let offset = ((1i16 << size) - 1) & mask;
+    value as i16 - offset
 }
 
 /// Decode one DC coefficient from the bitstream.
+#[inline]
 pub fn decode_dc_coefficient(reader: &mut BitReader, table: &HuffmanTable) -> Result<i16> {
     let peek = reader.peek_bits(16)?;
-    let (category, code_len) = table.lookup(peek, 16)?;
-    reader.read_bits(code_len)?;
+    let (category, code_len) = table.lookup(peek)?;
+    reader.skip_bits(code_len);
 
     if category == 0 {
         return Ok(0);
-    }
-    if category > 15 {
-        return Err(JpegError::CorruptData(format!(
-            "DC category {} out of range",
-            category
-        )));
     }
 
     let extra_bits = reader.read_bits(category)?;
@@ -37,6 +29,7 @@ pub fn decode_dc_coefficient(reader: &mut BitReader, table: &HuffmanTable) -> Re
 
 /// Decode AC coefficients for one 8x8 block.
 /// Fills `coeffs[1..64]` in zigzag order. `coeffs[0]` (DC) is not touched.
+#[inline]
 pub fn decode_ac_coefficients(
     reader: &mut BitReader,
     table: &HuffmanTable,
@@ -46,26 +39,23 @@ pub fn decode_ac_coefficients(
 
     while index < 64 {
         let peek = reader.peek_bits(16)?;
-        let (symbol, code_len) = table.lookup(peek, 16)?;
-        reader.read_bits(code_len)?;
+        let (symbol, code_len) = table.lookup(peek)?;
+        reader.skip_bits(code_len);
 
         let run_length = (symbol >> 4) as usize;
-        let bit_size = (symbol & 0x0F) as u8;
+        let bit_size = symbol & 0x0F;
 
         if bit_size == 0 {
             if run_length == 0 {
-                // EOB
-                return Ok(());
+                return Ok(()); // EOB
             }
             if run_length == 15 {
-                // ZRL — skip 16 zeros
-                index += 16;
+                index += 16; // ZRL
                 continue;
             }
-            return Err(JpegError::CorruptData(format!(
-                "invalid AC symbol: run={}, size={}",
-                run_length, bit_size
-            )));
+            return Err(JpegError::CorruptData(
+                "invalid AC run/size combination".into(),
+            ));
         }
 
         index += run_length;

@@ -44,6 +44,53 @@ impl<'a> Decoder<'a> {
         decoder.decode_image()
     }
 
+    /// Fancy h2v2 upsample using dispatch for the horizontal h2v1 pass.
+    /// Vertical blend is done inline; horizontal upsample goes through
+    /// `self.routines.fancy_upsample_h2v1` (NEON on aarch64).
+    fn fancy_h2v2_dispatch(
+        &self,
+        input: &[u8],
+        in_width: usize,
+        in_height: usize,
+        output: &mut [u8],
+        out_width: usize,
+    ) {
+        let mut row_above = vec![0u8; in_width];
+        let mut row_below = vec![0u8; in_width];
+
+        for y in 0..in_height {
+            let cur_row = &input[y * in_width..(y + 1) * in_width];
+            let above = if y > 0 {
+                &input[(y - 1) * in_width..y * in_width]
+            } else {
+                cur_row
+            };
+            let below = if y + 1 < in_height {
+                &input[(y + 1) * in_width..(y + 2) * in_width]
+            } else {
+                cur_row
+            };
+
+            for x in 0..in_width {
+                row_above[x] = ((3 * cur_row[x] as u16 + above[x] as u16 + 2) >> 2) as u8;
+                row_below[x] = ((3 * cur_row[x] as u16 + below[x] as u16 + 2) >> 2) as u8;
+            }
+
+            let out_y_top = y * 2;
+            let out_y_bot = y * 2 + 1;
+            (self.routines.fancy_upsample_h2v1)(
+                &row_above,
+                in_width,
+                &mut output[out_y_top * out_width..],
+            );
+            (self.routines.fancy_upsample_h2v1)(
+                &row_below,
+                in_width,
+                &mut output[out_y_bot * out_width..],
+            );
+        }
+    }
+
     fn decode_image(&self) -> Result<Image> {
         let frame = &self.metadata.frame;
         let scan = &self.metadata.scan;
@@ -133,7 +180,13 @@ impl<'a> Decoder<'a> {
         let entropy_data = &self.raw_data[self.metadata.entropy_data_offset..];
         let mut bit_reader = BitReader::new(entropy_data);
         let mut mcu_decoder = McuDecoder::new(num_components);
-        let mut blocks = Vec::new();
+        // Pre-allocate blocks for the largest possible MCU (max_h * max_v * num_components)
+        let max_blocks_per_mcu: usize = frame
+            .components
+            .iter()
+            .map(|c| (c.horizontal_sampling as usize) * (c.vertical_sampling as usize))
+            .sum();
+        let mut blocks = Vec::with_capacity(max_blocks_per_mcu);
         let mut mcu_count: u16 = 0;
 
         for mcu_y in 0..mcus_y {
@@ -221,21 +274,20 @@ impl<'a> Decoder<'a> {
                     );
                 }
             } else if h_factor == 2 && v_factor == 2 {
-                upsample::fancy_h2v2(
+                // Vertical blend + horizontal upsample via dispatch (uses NEON h2v1)
+                self.fancy_h2v2_dispatch(
                     &component_planes[1],
                     cb_w,
                     cb_h,
                     &mut cb_full,
                     full_width,
-                    full_height,
                 );
-                upsample::fancy_h2v2(
+                self.fancy_h2v2_dispatch(
                     &component_planes[2],
                     cb_w,
                     cb_h,
                     &mut cr_full,
                     full_width,
-                    full_height,
                 );
             } else {
                 return Err(JpegError::Unsupported(format!(

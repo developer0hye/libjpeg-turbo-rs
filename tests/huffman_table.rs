@@ -14,15 +14,15 @@ fn lookup_known_codes() {
     let values: Vec<u8> = vec![0x00, 0x01, 0x02];
     let table = HuffmanTable::build(&bits, &values).unwrap();
 
-    let (symbol, length) = table.lookup(0b0000_0000_0000_0000, 16).unwrap();
+    let (symbol, length) = table.lookup(0b0000_0000_0000_0000).unwrap();
     assert_eq!(symbol, 0x00);
     assert_eq!(length, 1);
 
-    let (symbol, length) = table.lookup(0b1000_0000_0000_0000, 16).unwrap();
+    let (symbol, length) = table.lookup(0b1000_0000_0000_0000).unwrap();
     assert_eq!(symbol, 0x01);
     assert_eq!(length, 2);
 
-    let (symbol, length) = table.lookup(0b1100_0000_0000_0000, 16).unwrap();
+    let (symbol, length) = table.lookup(0b1100_0000_0000_0000).unwrap();
     assert_eq!(symbol, 0x02);
     assert_eq!(length, 3);
 }

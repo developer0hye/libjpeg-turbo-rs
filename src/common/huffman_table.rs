@@ -15,26 +15,23 @@ struct LookupEntry {
 /// a fallback slow path for codes longer than 8 bits.
 #[derive(Debug, Clone)]
 pub struct HuffmanTable {
-    fast: Vec<LookupEntry>,
+    fast: Box<[LookupEntry; LOOKUP_SIZE]>,
     maxcode: [i32; 18],
     valoffset: [i32; 18],
     values: Vec<u8>,
     count: usize,
+    /// Minimum code length that requires the slow path (> LOOKUP_BITS).
+    min_slow_length: u8,
 }
 
 impl HuffmanTable {
     /// Build a Huffman table from DHT marker data.
-    ///
-    /// `bits[0]` is unused; `bits[i]` for i in 1..=16 is the count of codes with length i.
-    /// `values` contains the symbol values in code-length order.
     pub fn build(bits: &[u8; 17], values: &[u8]) -> Result<Self> {
         let total_symbols: usize = bits[1..=16].iter().map(|&b| b as usize).sum();
         if values.len() < total_symbols {
-            return Err(JpegError::CorruptData(format!(
-                "Huffman table: expected {} symbols, got {}",
-                total_symbols,
-                values.len()
-            )));
+            return Err(JpegError::CorruptData(
+                "Huffman table: insufficient symbol data".into(),
+            ));
         }
 
         // Generate code values for each symbol (JPEG spec Figure C.1)
@@ -52,17 +49,21 @@ impl HuffmanTable {
         let mut maxcode = [-1i32; 18];
         let mut valoffset = [0i32; 18];
         let mut symbol_index: usize = 0;
+        let mut min_slow_length: u8 = 17; // will be updated if slow-path codes exist
         for length in 1..=16usize {
             let count = bits[length] as usize;
             if count > 0 {
                 valoffset[length] = symbol_index as i32 - huffcode[symbol_index].0 as i32;
                 symbol_index += count;
                 maxcode[length] = huffcode[symbol_index - 1].0 as i32;
+                if length > LOOKUP_BITS && (min_slow_length as usize) > length {
+                    min_slow_length = length as u8;
+                }
             }
         }
 
         // Build fast lookup table for codes <= 8 bits
-        let mut fast = vec![LookupEntry::default(); LOOKUP_SIZE];
+        let mut fast = Box::new([LookupEntry::default(); LOOKUP_SIZE]);
         for (i, &(code_val, code_len)) in huffcode.iter().enumerate() {
             if code_len <= LOOKUP_BITS {
                 let code_shifted = (code_val as usize) << (LOOKUP_BITS - code_len);
@@ -82,36 +83,43 @@ impl HuffmanTable {
             valoffset,
             values: values[..total_symbols].to_vec(),
             count: total_symbols,
+            min_slow_length,
         })
     }
 
-    /// Look up a symbol from the first bits of `bits_msb`.
+    /// Look up a symbol from the first 16 bits of the bitstream.
     ///
-    /// `bits_msb` should have the next bits left-aligned (MSB first).
+    /// `bits_msb` contains the next 16 bits, MSB-aligned.
     /// Returns `(symbol, code_length)`.
-    pub fn lookup(&self, bits_msb: u16, available_bits: u8) -> Result<(u8, u8)> {
-        if available_bits == 0 {
-            return Err(JpegError::UnexpectedEof);
-        }
-
+    #[inline(always)]
+    pub fn lookup(&self, bits_msb: u16) -> Result<(u8, u8)> {
         // Fast path: use top 8 bits as index
         let index = (bits_msb >> 8) as usize;
-        let entry = &self.fast[index];
-        if entry.length > 0 && entry.length <= available_bits {
+        let entry = self.fast[index];
+        if entry.length > 0 {
             return Ok((entry.symbol, entry.length));
         }
 
-        // Slow path: bit-by-bit for codes > 8 bits
-        let mut code = (bits_msb >> 15) as i32;
-        for length in 1..=16u8 {
-            if code <= self.maxcode[length as usize] {
-                let index = (code + self.valoffset[length as usize]) as usize;
-                if index < self.values.len() {
-                    return Ok((self.values[index], length));
+        // Slow path: codes > 8 bits
+        self.lookup_slow(bits_msb)
+    }
+
+    #[cold]
+    fn lookup_slow(&self, bits_msb: u16) -> Result<(u8, u8)> {
+        // Build the code incrementally starting from the minimum slow-path length
+        let start = self.min_slow_length.max(1) as usize;
+        // Reconstruct code at `start` bits from the MSB
+        let mut code = (bits_msb >> (16 - start)) as i32;
+
+        for length in start..=16usize {
+            if code <= self.maxcode[length] {
+                let idx = (code + self.valoffset[length]) as usize;
+                if idx < self.values.len() {
+                    return Ok((self.values[idx], length as u8));
                 }
             }
             if length < 16 {
-                code = (code << 1) | ((bits_msb >> (14 - length as u16 + 1)) & 1) as i32;
+                code = (code << 1) | ((bits_msb >> (15 - length)) & 1) as i32;
             }
         }
 
