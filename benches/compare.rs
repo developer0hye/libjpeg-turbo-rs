@@ -1,30 +1,58 @@
 use criterion::{black_box, criterion_group, criterion_main, Criterion};
 
-fn bench_ours(c: &mut Criterion) {
-    let jpeg_data = std::fs::read("tests/fixtures/gradient_640x480.jpg")
-        .expect("gradient_640x480.jpg fixture required");
-
-    c.bench_function("ours_640x480", |b| {
-        b.iter(|| {
-            let image = libjpeg_turbo_rs::decompress(black_box(&jpeg_data)).unwrap();
-            black_box(&image.data);
-        })
-    });
+struct CompareCase {
+    name: &'static str,
+    path: &'static str,
 }
 
-fn bench_zune(c: &mut Criterion) {
-    let jpeg_data = std::fs::read("tests/fixtures/gradient_640x480.jpg")
-        .expect("gradient_640x480.jpg fixture required");
+const COMPARE_CASES: &[CompareCase] = &[
+    CompareCase {
+        name: "640x480",
+        path: "tests/fixtures/gradient_640x480.jpg",
+    },
+    CompareCase {
+        name: "1920x1080",
+        path: "tests/fixtures/photo_1920x1080_420.jpg",
+    },
+    CompareCase {
+        name: "320x240_444",
+        path: "tests/fixtures/photo_320x240_444.jpg",
+    },
+    CompareCase {
+        name: "graphic_640x480",
+        path: "tests/fixtures/graphic_640x480_420.jpg",
+    },
+];
 
-    c.bench_function("zune_640x480", |b| {
-        b.iter(|| {
-            let cursor = std::io::Cursor::new(black_box(&jpeg_data));
-            let mut decoder = zune_jpeg::JpegDecoder::new(cursor);
-            let pixels = decoder.decode().unwrap();
-            black_box(&pixels);
-        })
-    });
+fn bench_ours_matrix(c: &mut Criterion) {
+    for case in COMPARE_CASES {
+        let jpeg_data =
+            std::fs::read(case.path).unwrap_or_else(|_| panic!("{} fixture required", case.path));
+
+        c.bench_function(&format!("ours_{}", case.name), |b| {
+            b.iter(|| {
+                let image = libjpeg_turbo_rs::decompress(black_box(&jpeg_data)).unwrap();
+                black_box(&image.data);
+            })
+        });
+    }
 }
 
-criterion_group!(benches, bench_ours, bench_zune);
+fn bench_zune_matrix(c: &mut Criterion) {
+    for case in COMPARE_CASES {
+        let jpeg_data =
+            std::fs::read(case.path).unwrap_or_else(|_| panic!("{} fixture required", case.path));
+
+        c.bench_function(&format!("zune_{}", case.name), |b| {
+            b.iter(|| {
+                let cursor = std::io::Cursor::new(black_box(&jpeg_data));
+                let mut decoder = zune_jpeg::JpegDecoder::new(cursor);
+                let pixels = decoder.decode().unwrap();
+                black_box(&pixels);
+            })
+        });
+    }
+}
+
+criterion_group!(benches, bench_ours_matrix, bench_zune_matrix);
 criterion_main!(benches);
