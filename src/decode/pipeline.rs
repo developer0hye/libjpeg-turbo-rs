@@ -1,4 +1,4 @@
-use crate::common::error::{JpegError, Result};
+use crate::common::error::{DecodeWarning, JpegError, Result};
 use crate::common::huffman_table::HuffmanTable;
 use crate::common::icc;
 use crate::common::quant_table::QuantTable;
@@ -40,6 +40,8 @@ pub struct Image {
     pub icc_profile: Option<Vec<u8>>,
     /// Raw EXIF TIFF data from APP1 marker, if present.
     pub exif_data: Option<Vec<u8>>,
+    /// Warnings accumulated during lenient decoding.
+    pub warnings: Vec<DecodeWarning>,
 }
 
 impl Image {
@@ -68,6 +70,7 @@ pub struct Decoder<'a> {
     routines: SimdRoutines,
     output_format: Option<PixelFormat>,
     scale: ScalingFactor,
+    lenient: bool,
 }
 
 impl<'a> Decoder<'a> {
@@ -81,6 +84,7 @@ impl<'a> Decoder<'a> {
             routines,
             output_format: None,
             scale: ScalingFactor::default(),
+            lenient: false,
         })
     }
 
@@ -96,6 +100,11 @@ impl<'a> Decoder<'a> {
     /// Set the decompression scaling factor (e.g., 1/2, 1/4, 1/8).
     pub fn set_scale(&mut self, scale: ScalingFactor) {
         self.scale = scale;
+    }
+
+    /// Enable lenient mode: continue decoding on errors, filling corrupt areas with gray.
+    pub fn set_lenient(&mut self, lenient: bool) {
+        self.lenient = lenient;
     }
 
     pub fn decode(data: &'a [u8]) -> Result<Image> {
@@ -311,6 +320,7 @@ impl<'a> Decoder<'a> {
     }
 
     /// Decode baseline (single-scan) into component planes.
+    /// Returns component planes and any warnings (in lenient mode).
     fn decode_baseline_planes(
         &self,
         frame: &FrameHeader,
@@ -319,7 +329,7 @@ impl<'a> Decoder<'a> {
         mcus_x: usize,
         mcus_y: usize,
         block_size: usize,
-    ) -> Result<Vec<Vec<u8>>> {
+    ) -> Result<(Vec<Vec<u8>>, Vec<DecodeWarning>)> {
         let scan = &self.metadata.scan;
 
         // Allocate component planes (MCU-aligned, scaled by block_size)
@@ -363,8 +373,10 @@ impl<'a> Decoder<'a> {
         let mut mcu_decoder = McuDecoder::new(num_components);
         let mut mcu_count: u16 = 0;
         let mut coeffs = [0i16; 64];
+        let mut warnings: Vec<DecodeWarning> = Vec::new();
+        let total_mcus = mcus_x * mcus_y;
 
-        for mcu_y in 0..mcus_y {
+        'mcu_loop: for mcu_y in 0..mcus_y {
             for mcu_x in 0..mcus_x {
                 if self.metadata.restart_interval > 0
                     && mcu_count > 0
@@ -375,6 +387,8 @@ impl<'a> Decoder<'a> {
                 }
 
                 let mut plan_idx = 0;
+                let mut mcu_error = false;
+
                 for (comp_idx, layout) in comp_layouts.iter().enumerate() {
                     let qt_values = &quant_tables[comp_idx].values;
                     let plan = &mcu_plan[plan_idx];
@@ -382,13 +396,43 @@ impl<'a> Decoder<'a> {
 
                     for v in 0..layout.v_blocks {
                         for h in 0..layout.h_blocks {
-                            mcu_decoder.decode_block(
+                            let decode_result = mcu_decoder.decode_block(
                                 &mut bit_reader,
                                 plan.comp_idx,
                                 plan.dc_table,
                                 plan.ac_table,
                                 &mut coeffs,
-                            )?;
+                            );
+
+                            match decode_result {
+                                Ok(()) => {}
+                                Err(e) if self.lenient => {
+                                    // Fill this block with zeros (will become mid-gray after IDCT)
+                                    coeffs = [0i16; 64];
+                                    if !mcu_error {
+                                        warnings.push(DecodeWarning::HuffmanError {
+                                            mcu_x,
+                                            mcu_y,
+                                            message: e.to_string(),
+                                        });
+                                        mcu_error = true;
+                                    }
+                                    // Check if this was an EOF — if so, fill remaining and break
+                                    if matches!(e, JpegError::UnexpectedEof) {
+                                        warnings.push(DecodeWarning::TruncatedData {
+                                            decoded_mcus: mcu_count as usize,
+                                            total_mcus,
+                                        });
+                                        // Fill remaining planes with 128 (mid-gray)
+                                        for plane in &mut component_planes {
+                                            plane.fill(128);
+                                        }
+                                        break 'mcu_loop;
+                                    }
+                                    mcu_decoder.reset();
+                                }
+                                Err(e) => return Err(e),
+                            }
 
                             let block_x = (mcu_x * layout.h_blocks + h) * block_size;
                             let block_y = (mcu_y * layout.v_blocks + v) * block_size;
@@ -409,10 +453,23 @@ impl<'a> Decoder<'a> {
                 }
 
                 mcu_count += 1;
+
+                // Check for truncated data (BitReader reached EOF mid-decode)
+                if bit_reader.is_eof() && (mcu_count as usize) < total_mcus {
+                    if self.lenient {
+                        warnings.push(DecodeWarning::TruncatedData {
+                            decoded_mcus: mcu_count as usize,
+                            total_mcus,
+                        });
+                        break 'mcu_loop;
+                    } else {
+                        return Err(JpegError::UnexpectedEof);
+                    }
+                }
             }
         }
 
-        Ok(component_planes)
+        Ok((component_planes, warnings))
     }
 
     /// Decode progressive (multi-scan) into component planes.
@@ -427,7 +484,7 @@ impl<'a> Decoder<'a> {
         max_h: usize,
         max_v: usize,
         block_size: usize,
-    ) -> Result<Vec<Vec<u8>>> {
+    ) -> Result<(Vec<Vec<u8>>, Vec<DecodeWarning>)> {
         // Per-component coefficient buffers: blocks_x * blocks_y blocks of 64 coefficients
         let comp_infos: Vec<CompInfo> = frame
             .components
@@ -495,7 +552,9 @@ impl<'a> Decoder<'a> {
             }
         }
 
-        Ok(component_planes)
+        // Progressive decoding doesn't have per-MCU error recovery yet;
+        // errors in scans propagate normally.
+        Ok((component_planes, Vec::new()))
     }
 
     /// Decode one progressive scan's entropy data into the coefficient buffers.
@@ -831,7 +890,7 @@ impl<'a> Decoder<'a> {
             .collect::<Result<Vec<_>>>()?;
 
         // Decode component planes — different paths for baseline vs progressive
-        let component_planes = if frame.is_progressive {
+        let (component_planes, warnings) = if frame.is_progressive {
             self.decode_progressive_planes(
                 frame,
                 &quant_tables,
@@ -872,6 +931,7 @@ impl<'a> Decoder<'a> {
                     data,
                     icc_profile: icc_profile.clone(),
                     exif_data: exif_data.clone(),
+                    warnings: warnings.clone(),
                 })
             } else {
                 // Expand grayscale to requested color format
@@ -918,6 +978,7 @@ impl<'a> Decoder<'a> {
                     data,
                     icc_profile: icc_profile.clone(),
                     exif_data: exif_data.clone(),
+                    warnings: warnings.clone(),
                 })
             }
         } else if num_components == 3 {
@@ -1008,6 +1069,7 @@ impl<'a> Decoder<'a> {
                     data,
                     icc_profile: icc_profile.clone(),
                     exif_data: exif_data.clone(),
+                    warnings: warnings.clone(),
                 });
             }
 
@@ -1033,6 +1095,7 @@ impl<'a> Decoder<'a> {
                 data,
                 icc_profile: icc_profile.clone(),
                 exif_data: exif_data.clone(),
+                warnings: warnings.clone(),
             })
         } else if num_components == 4 {
             self.decode_4_component(
@@ -1049,6 +1112,7 @@ impl<'a> Decoder<'a> {
                 block_size,
                 icc_profile,
                 exif_data,
+                warnings,
             )
         } else {
             Err(JpegError::Unsupported(format!(
@@ -1103,6 +1167,7 @@ impl<'a> Decoder<'a> {
         block_size: usize,
         icc_profile: Option<Vec<u8>>,
         exif_data: Option<Vec<u8>>,
+        warnings: Vec<DecodeWarning>,
     ) -> Result<Image> {
         let color_space = self.detect_color_space();
         let out_format = self.output_format.unwrap_or(PixelFormat::Cmyk);
@@ -1193,6 +1258,7 @@ impl<'a> Decoder<'a> {
                 height,
                 icc_profile,
                 exif_data,
+                warnings,
             );
         }
 
@@ -1211,6 +1277,7 @@ impl<'a> Decoder<'a> {
             height,
             icc_profile,
             exif_data,
+            warnings,
         )
     }
 
@@ -1232,6 +1299,7 @@ impl<'a> Decoder<'a> {
         height: usize,
         icc_profile: Option<Vec<u8>>,
         exif_data: Option<Vec<u8>>,
+        warnings: Vec<DecodeWarning>,
     ) -> Result<Image> {
         use crate::decode::color;
 
@@ -1338,6 +1406,7 @@ impl<'a> Decoder<'a> {
             data,
             icc_profile,
             exif_data,
+            warnings,
         })
     }
 }

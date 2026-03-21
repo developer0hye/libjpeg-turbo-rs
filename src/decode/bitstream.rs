@@ -114,4 +114,9 @@ impl<'a> BitReader<'a> {
     pub fn position(&self) -> usize {
         self.pos
     }
+
+    /// Returns true if the reader has exhausted all input data.
+    pub fn is_eof(&self) -> bool {
+        self.pos >= self.data.len()
+    }
 }
