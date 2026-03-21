@@ -1,12 +1,20 @@
 use crate::common::error::{JpegError, Result};
+use crate::common::quant_table::QuantTable;
 use crate::common::types::*;
 use crate::decode::bitstream::BitReader;
-use crate::decode::color;
-use crate::decode::dequant;
-use crate::decode::entropy::McuDecoder;
-use crate::decode::idct;
+use crate::decode::entropy::{self, McuDecoder};
 use crate::decode::marker::{JpegMetadata, MarkerReader};
-use crate::decode::upsample;
+use crate::simd::{self, SimdRoutines};
+
+/// Vertical triangle-filter blend: out[i] = (3*cur[i] + neighbor[i] + 2) >> 2.
+/// Auto-vectorizes well on aarch64 with NEON.
+#[cfg(not(all(target_arch = "aarch64", feature = "simd")))]
+#[inline]
+fn vertical_blend(cur: &[u8], neighbor: &[u8], output: &mut [u8], width: usize) {
+    for i in 0..width {
+        output[i] = ((3 * cur[i] as u16 + neighbor[i] as u16 + 2) >> 2) as u8;
+    }
+}
 
 /// Decoded image data.
 #[derive(Debug)]
@@ -21,15 +29,18 @@ pub struct Image {
 pub struct Decoder<'a> {
     metadata: JpegMetadata,
     raw_data: &'a [u8],
+    routines: SimdRoutines,
 }
 
 impl<'a> Decoder<'a> {
     pub fn new(data: &'a [u8]) -> Result<Self> {
         let mut reader = MarkerReader::new(data);
         let metadata = reader.read_markers()?;
+        let routines = simd::detect();
         Ok(Self {
             metadata,
             raw_data: data,
+            routines,
         })
     }
 
@@ -42,7 +53,130 @@ impl<'a> Decoder<'a> {
         decoder.decode_image()
     }
 
-    fn decode_image(&self) -> Result<Image> {
+    #[inline(always)]
+    fn idct_islow(&self, coeffs: &[i16; 64], quant: &[u16; 64], output: &mut [u8; 64]) {
+        #[cfg(all(target_arch = "aarch64", feature = "simd"))]
+        {
+            return crate::simd::aarch64::idct::neon_idct_islow(coeffs, quant, output);
+        }
+
+        #[allow(unreachable_code)]
+        (self.routines.idct_islow)(coeffs, quant, output)
+    }
+
+    /// IDCT writing directly to a strided destination buffer (no intermediate copy).
+    ///
+    /// # Safety
+    /// `output` must point to at least `7 * stride + 8` writable bytes.
+    #[inline(always)]
+    unsafe fn idct_islow_strided(
+        &self,
+        coeffs: &[i16; 64],
+        quant: &[u16; 64],
+        output: *mut u8,
+        stride: usize,
+    ) {
+        #[cfg(all(target_arch = "aarch64", feature = "simd"))]
+        {
+            return crate::simd::aarch64::idct::neon_idct_islow_strided(
+                coeffs, quant, output, stride,
+            );
+        }
+
+        // Scalar fallback: IDCT into temp buffer, then copy row-by-row.
+        #[allow(unreachable_code)]
+        {
+            let mut tmp = [0u8; 64];
+            (self.routines.idct_islow)(coeffs, quant, &mut tmp);
+            for row in 0..8 {
+                std::ptr::copy_nonoverlapping(
+                    tmp.as_ptr().add(row * 8),
+                    output.add(row * stride),
+                    8,
+                );
+            }
+        }
+    }
+
+    #[inline(always)]
+    fn ycbcr_to_rgb_row(&self, y: &[u8], cb: &[u8], cr: &[u8], rgb: &mut [u8], width: usize) {
+        #[cfg(all(target_arch = "aarch64", feature = "simd"))]
+        {
+            return crate::simd::aarch64::color::neon_ycbcr_to_rgb_row(y, cb, cr, rgb, width);
+        }
+
+        #[allow(unreachable_code)]
+        (self.routines.ycbcr_to_rgb_row)(y, cb, cr, rgb, width)
+    }
+
+    #[inline(always)]
+    fn fancy_upsample_h2v1(&self, input: &[u8], in_width: usize, output: &mut [u8]) {
+        #[cfg(all(target_arch = "aarch64", feature = "simd"))]
+        {
+            return crate::simd::aarch64::upsample::neon_fancy_upsample_h2v1(
+                input, in_width, output,
+            );
+        }
+
+        #[allow(unreachable_code)]
+        (self.routines.fancy_upsample_h2v1)(input, in_width, output)
+    }
+
+    /// Fancy h2v2 upsample. On aarch64 this uses a dedicated helper that
+    /// fuses the two vertical blends into one pass before the h2v1 stage.
+    fn fancy_h2v2(
+        &self,
+        input: &[u8],
+        in_width: usize,
+        in_height: usize,
+        output: &mut [u8],
+        out_width: usize,
+    ) {
+        #[cfg(all(target_arch = "aarch64", feature = "simd"))]
+        {
+            return crate::simd::aarch64::upsample::neon_fancy_upsample_h2v2(
+                input, in_width, in_height, output, out_width,
+            );
+        }
+
+        #[cfg(not(all(target_arch = "aarch64", feature = "simd")))]
+        {
+            let mut row_above = vec![0u8; in_width];
+            let mut row_below = vec![0u8; in_width];
+
+            for y in 0..in_height {
+                let cur_row = &input[y * in_width..(y + 1) * in_width];
+                let above = if y > 0 {
+                    &input[(y - 1) * in_width..y * in_width]
+                } else {
+                    cur_row
+                };
+                let below = if y + 1 < in_height {
+                    &input[(y + 1) * in_width..(y + 2) * in_width]
+                } else {
+                    cur_row
+                };
+
+                vertical_blend(cur_row, above, &mut row_above, in_width);
+                vertical_blend(cur_row, below, &mut row_below, in_width);
+
+                let out_y_top = y * 2;
+                let out_y_bot = y * 2 + 1;
+                self.fancy_upsample_h2v1(
+                    &row_above,
+                    in_width,
+                    &mut output[out_y_top * out_width..],
+                );
+                self.fancy_upsample_h2v1(
+                    &row_below,
+                    in_width,
+                    &mut output[out_y_bot * out_width..],
+                );
+            }
+        }
+    }
+
+    pub(crate) fn decode_image(&self) -> Result<Image> {
         let frame = &self.metadata.frame;
         let scan = &self.metadata.scan;
         let width = frame.width as usize;
@@ -76,23 +210,68 @@ impl<'a> Decoder<'a> {
         let full_width = mcus_x * mcu_width;
         let full_height = mcus_y * mcu_height;
 
-        // Allocate component planes (MCU-aligned)
+        // Allocate component planes (MCU-aligned, uninitialized — every pixel
+        // will be written by the MCU decode loop before any read).
         let mut component_planes: Vec<Vec<u8>> = frame
             .components
             .iter()
             .map(|comp| {
                 let comp_w = mcus_x * comp.horizontal_sampling as usize * 8;
                 let comp_h = mcus_y * comp.vertical_sampling as usize * 8;
-                vec![0u8; comp_w * comp_h]
+                let size = comp_w * comp_h;
+                let mut v = Vec::with_capacity(size);
+                // SAFETY: MCU decode loop writes every pixel in the plane.
+                unsafe { v.set_len(size) };
+                v
             })
             .collect();
 
-        // Decode all MCUs
+        // Pre-resolve Huffman tables and component layout (once, not per-MCU)
+        let mcu_plan = entropy::resolve_mcu_plan(
+            frame,
+            scan,
+            &self.metadata.dc_huffman_tables,
+            &self.metadata.ac_huffman_tables,
+        )?;
+
+        // Pre-resolve quant tables per component (once, not per-block)
+        let quant_tables: Vec<&QuantTable> = frame
+            .components
+            .iter()
+            .map(|comp| {
+                self.metadata.quant_tables[comp.quant_table_index as usize]
+                    .as_ref()
+                    .ok_or_else(|| {
+                        JpegError::CorruptData(format!(
+                            "missing quant table {}",
+                            comp.quant_table_index
+                        ))
+                    })
+            })
+            .collect::<Result<Vec<_>>>()?;
+
+        // Pre-compute per-component layout constants
+        struct CompLayout {
+            comp_w: usize,
+            h_blocks: usize,
+            v_blocks: usize,
+        }
+        let comp_layouts: Vec<CompLayout> = frame
+            .components
+            .iter()
+            .map(|comp| CompLayout {
+                comp_w: mcus_x * comp.horizontal_sampling as usize * 8,
+                h_blocks: comp.horizontal_sampling as usize,
+                v_blocks: comp.vertical_sampling as usize,
+            })
+            .collect();
+
+        // Decode all MCUs — fused decode + strided IDCT directly into planes
         let entropy_data = &self.raw_data[self.metadata.entropy_data_offset..];
         let mut bit_reader = BitReader::new(entropy_data);
         let mut mcu_decoder = McuDecoder::new(num_components);
-        let mut blocks = Vec::new();
         let mut mcu_count: u16 = 0;
+        let mut coeffs = [0i16; 64];
 
         for mcu_y in 0..mcus_y {
             for mcu_x in 0..mcus_x {
@@ -104,46 +283,31 @@ impl<'a> Decoder<'a> {
                     mcu_decoder.reset();
                 }
 
-                mcu_decoder.decode_mcu(
-                    &mut bit_reader,
-                    frame,
-                    scan,
-                    &self.metadata.dc_huffman_tables,
-                    &self.metadata.ac_huffman_tables,
-                    &mut blocks,
-                )?;
+                let mut plan_idx = 0;
+                for (comp_idx, layout) in comp_layouts.iter().enumerate() {
+                    let qt_values = &quant_tables[comp_idx].values;
+                    let plan = &mcu_plan[plan_idx];
+                    plan_idx += 1;
 
-                let mut block_idx = 0;
-                for (comp_idx, comp) in frame.components.iter().enumerate() {
-                    let comp_w = mcus_x * comp.horizontal_sampling as usize * 8;
-                    let h_blocks = comp.horizontal_sampling as usize;
-                    let v_blocks = comp.vertical_sampling as usize;
+                    for v in 0..layout.v_blocks {
+                        for h in 0..layout.h_blocks {
+                            mcu_decoder.decode_block(
+                                &mut bit_reader,
+                                plan.comp_idx,
+                                plan.dc_table,
+                                plan.ac_table,
+                                &mut coeffs,
+                            )?;
 
-                    for v in 0..v_blocks {
-                        for h in 0..h_blocks {
-                            let zigzag_coeffs = &blocks[block_idx];
-                            block_idx += 1;
+                            let block_x = (mcu_x * layout.h_blocks + h) * 8;
+                            let block_y = (mcu_y * layout.v_blocks + v) * 8;
+                            let dst_offset = block_y * layout.comp_w + block_x;
 
-                            let qt = self.metadata.quant_tables[comp.quant_table_index as usize]
-                                .as_ref()
-                                .ok_or(JpegError::CorruptData(format!(
-                                    "missing quant table {}",
-                                    comp.quant_table_index
-                                )))?;
-                            let dequantized = dequant::dequantize_block(zigzag_coeffs, qt);
-                            let spatial = idct::idct_8x8(&dequantized);
-
-                            let block_x = (mcu_x * h_blocks + h) * 8;
-                            let block_y = (mcu_y * v_blocks + v) * 8;
-
-                            for row in 0..8 {
-                                for col in 0..8 {
-                                    let val =
-                                        (spatial[row * 8 + col] as i32 + 128).clamp(0, 255) as u8;
-                                    let px = block_x + col;
-                                    let py = block_y + row;
-                                    component_planes[comp_idx][py * comp_w + px] = val;
-                                }
+                            // SAFETY: dst_offset + 7*comp_w + 8 is within the
+                            // component plane (MCU-aligned allocation).
+                            unsafe {
+                                let dst = component_planes[comp_idx].as_mut_ptr().add(dst_offset);
+                                self.idct_islow_strided(&coeffs, qt_values, dst, layout.comp_w);
                             }
                         }
                     }
@@ -177,44 +341,37 @@ impl<'a> Decoder<'a> {
             let h_factor = max_h / cb_comp.horizontal_sampling as usize;
             let v_factor = max_v / cb_comp.vertical_sampling as usize;
 
-            let mut cb_full = vec![0u8; full_width * full_height];
-            let mut cr_full = vec![0u8; full_width * full_height];
+            // Uninitialized allocation — every pixel will be written by
+            // upsample or clone before being read by color conversion.
+            let alloc_size = full_width * full_height;
+            let mut cb_full = Vec::with_capacity(alloc_size);
+            let mut cr_full = Vec::with_capacity(alloc_size);
+            // SAFETY: all code paths below write every element before reading.
+            unsafe {
+                cb_full.set_len(alloc_size);
+                cr_full.set_len(alloc_size);
+            }
 
             if h_factor == 1 && v_factor == 1 {
                 cb_full = component_planes[1].clone();
                 cr_full = component_planes[2].clone();
             } else if h_factor == 2 && v_factor == 1 {
                 for row in 0..cb_h {
-                    upsample::fancy_h2v1(
+                    self.fancy_upsample_h2v1(
                         &component_planes[1][row * cb_w..],
                         cb_w,
                         &mut cb_full[row * full_width..],
-                        full_width,
                     );
-                    upsample::fancy_h2v1(
+                    self.fancy_upsample_h2v1(
                         &component_planes[2][row * cb_w..],
                         cb_w,
                         &mut cr_full[row * full_width..],
-                        full_width,
                     );
                 }
             } else if h_factor == 2 && v_factor == 2 {
-                upsample::fancy_h2v2(
-                    &component_planes[1],
-                    cb_w,
-                    cb_h,
-                    &mut cb_full,
-                    full_width,
-                    full_height,
-                );
-                upsample::fancy_h2v2(
-                    &component_planes[2],
-                    cb_w,
-                    cb_h,
-                    &mut cr_full,
-                    full_width,
-                    full_height,
-                );
+                // Vertical blend + horizontal upsample via dispatch (uses NEON h2v1)
+                self.fancy_h2v2(&component_planes[1], cb_w, cb_h, &mut cb_full, full_width);
+                self.fancy_h2v2(&component_planes[2], cb_w, cb_h, &mut cr_full, full_width);
             } else {
                 return Err(JpegError::Unsupported(format!(
                     "subsampling {}x{} not yet supported",
@@ -222,9 +379,12 @@ impl<'a> Decoder<'a> {
                 )));
             }
 
-            let mut data = vec![0u8; width * height * 3];
+            let data_size = width * height * 3;
+            let mut data = Vec::with_capacity(data_size);
+            // SAFETY: color conversion writes every pixel in the output.
+            unsafe { data.set_len(data_size) };
             for y in 0..height {
-                color::ycbcr_to_rgb_row(
+                self.ycbcr_to_rgb_row(
                     &y_plane[y * y_width..],
                     &cb_full[y * full_width..],
                     &cr_full[y * full_width..],

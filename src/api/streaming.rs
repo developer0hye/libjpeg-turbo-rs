@@ -1,6 +1,6 @@
 use crate::common::error::Result;
 use crate::common::types::FrameHeader;
-use crate::decode::pipeline::Decoder;
+use crate::decode::pipeline::{Decoder, Image};
 
 /// Streaming JPEG decoder — reads header first, then decodes on demand.
 pub struct StreamingDecoder<'a> {
@@ -15,5 +15,10 @@ impl<'a> StreamingDecoder<'a> {
 
     pub fn header(&self) -> &FrameHeader {
         self.inner.header()
+    }
+
+    /// Decode the JPEG payload using the already-parsed metadata.
+    pub fn decode(&self) -> Result<Image> {
+        self.inner.decode_image()
     }
 }

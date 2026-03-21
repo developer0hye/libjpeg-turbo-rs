@@ -2,6 +2,11 @@
 
 Rust port of libjpeg-turbo with equivalent or better performance.
 
+# Reference Source
+
+- `references/libjpeg-turbo/` contains the original libjpeg-turbo C source. Read and reference it during implementation for algorithm details, edge cases, and correctness verification.
+- `references/zune-image/crates/zune-jpeg/` contains zune-jpeg, the fastest pure-Rust JPEG decoder. Reference its optimization techniques, but our goal is to outperform it.
+
 # Project Rules
 
 - Always communicate and work in English.
@@ -50,6 +55,20 @@ Rust port of libjpeg-turbo with equivalent or better performance.
 - Use `///` doc comments for public API items. Use `//` for internal notes.
 - Mark known limitations with `TODO(reason)` or `FIXME(reason)` — always include why.
 - Delete comments when the code changes — outdated comments are worse than no comments.
+
+## Performance Optimization (Experiment Tracking)
+
+When optimizing performance, follow the experiment-driven workflow in `experiments/README.md`.
+
+**Key rules:**
+
+- **Record every attempt** in `experiments/<target>.tsv` — successes, failures, and crashes. Failures are data.
+- **Per-target logs**: each optimization area (idct, huffman, color, upsample, pipeline) has its own TSV. **Only read the relevant TSV** when starting work on a target — do NOT read all experiment logs. This prevents context pollution and keeps focus.
+- **Benchmark harness**: always use `cargo bench -- decode_640x480` as the single metric. Compare against `experiments/baseline.txt` for the C reference.
+- **Keep/discard protocol**: if benchmark improves → commit + append `keep`. If regresses → `git checkout --` to revert + append `discard` with explanation of WHY it failed. If crash → append `crash` with error summary.
+- **Description must explain causality**: not "tried X" but "tried X because profiling showed Y; failed because Z" or "tried X because Y; saved N us because Z".
+- **Profile before optimizing**: always `samply record` or `sample` to identify the actual hotspot before changing code. Don't guess.
+- **One change at a time**: isolate each experiment to a single variable. If you change two things and perf improves, you don't know which one helped.
 
 ## Git Configuration
 
