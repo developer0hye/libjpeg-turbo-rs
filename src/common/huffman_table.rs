@@ -105,6 +105,7 @@ impl HuffmanTable {
     }
 
     #[cold]
+    #[inline(never)]
     fn lookup_slow(&self, bits_msb: u16) -> Result<(u8, u8)> {
         // Build the code incrementally starting from the minimum slow-path length
         let start = self.min_slow_length.max(1) as usize;
