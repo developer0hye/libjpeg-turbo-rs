@@ -218,7 +218,18 @@ impl<'a> Decoder<'a> {
                                 &mut coeffs,
                             )?;
 
-                            (self.routines.idct_islow)(&coeffs, qt_values, &mut block_u8);
+                            #[cfg(all(target_arch = "aarch64", feature = "simd"))]
+                            {
+                                crate::simd::aarch64::idct::neon_idct_islow(
+                                    &coeffs,
+                                    qt_values,
+                                    &mut block_u8,
+                                );
+                            }
+                            #[cfg(not(all(target_arch = "aarch64", feature = "simd")))]
+                            {
+                                (self.routines.idct_islow)(&coeffs, qt_values, &mut block_u8);
+                            }
 
                             let block_x = (mcu_x * layout.h_blocks + h) * 8;
                             let block_y = (mcu_y * layout.v_blocks + v) * 8;

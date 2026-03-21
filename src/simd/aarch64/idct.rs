@@ -60,52 +60,36 @@ const IDCT_CONSTS: IdctConsts = IdctConsts {
 pub fn neon_idct_islow(coeffs: &[i16; 64], quant: &[u16; 64], output: &mut [u8; 64]) {
     // SAFETY: NEON is mandatory on aarch64 (ARMv8).
     unsafe {
-        // NEON dequantize: 8 rows × vmul_s16 = 8 instructions for 64 multiplies
-        let mut dequantized = [0i16; 64];
-        let cptr = coeffs.as_ptr();
-        let qptr = quant.as_ptr() as *const i16; // u16 reinterpreted as i16 for vmul
-        let dptr = dequantized.as_mut_ptr();
-        use std::arch::aarch64::*;
-        let mut i = 0;
-        while i < 64 {
-            let c = vld1q_s16(cptr.add(i));
-            let q = vld1q_s16(qptr.add(i));
-            let d = vmulq_s16(c, q);
-            vst1q_s16(dptr.add(i), d);
-            i += 8;
-        }
-
-        neon_idct_islow_inner(&dequantized, output);
+        neon_idct_islow_fused(coeffs.as_ptr(), quant.as_ptr() as *const i16, output);
     }
 }
 
-/// Inner NEON IDCT operating on natural-order dequantized coefficients.
+/// Fused dequant + IDCT: loads raw coefficients and quant table, multiplies
+/// during the load phase (like libjpeg-turbo's C NEON), eliminating the
+/// intermediate dequantized buffer entirely.
 ///
 /// # Safety
-/// Requires aarch64 NEON support (always available on ARMv8).
+/// Requires aarch64 NEON. `cptr`/`qptr` must point to 64-element i16 arrays.
 #[target_feature(enable = "neon")]
-unsafe fn neon_idct_islow_inner(dequantized: &[i16; 64], output: &mut [u8; 64]) {
-    let ptr = dequantized.as_ptr();
-
-    // Load constant vectors for lane-indexed multiplies
+unsafe fn neon_idct_islow_fused(cptr: *const i16, qptr: *const i16, output: &mut [u8; 64]) {
     let consts0: int16x4_t = vld1_s16(IDCT_CONSTS.data.as_ptr());
     let consts1: int16x4_t = vld1_s16(IDCT_CONSTS.data.as_ptr().add(4));
     let consts2: int16x4_t = vld1_s16(IDCT_CONSTS.data.as_ptr().add(8));
 
     // --- Pass 1: columns, left 4×8 half ---
-    let mut ws_l = [0i16; 32]; // workspace left half (4 columns × 8 rows)
-    let mut ws_r = [0i16; 32]; // workspace right half
+    // Fused load+dequant: vmul_s16(coeff, quant) during load
+    let mut ws_l = [0i16; 32];
+    let mut ws_r = [0i16; 32];
 
     {
-        // Load left half of each row (columns 0-3)
-        let row0 = vld1_s16(ptr);
-        let row1 = vld1_s16(ptr.add(8));
-        let row2 = vld1_s16(ptr.add(16));
-        let row3 = vld1_s16(ptr.add(24));
-        let row4 = vld1_s16(ptr.add(32));
-        let row5 = vld1_s16(ptr.add(40));
-        let row6 = vld1_s16(ptr.add(48));
-        let row7 = vld1_s16(ptr.add(56));
+        let row0 = vmul_s16(vld1_s16(cptr), vld1_s16(qptr));
+        let row1 = vmul_s16(vld1_s16(cptr.add(8)), vld1_s16(qptr.add(8)));
+        let row2 = vmul_s16(vld1_s16(cptr.add(16)), vld1_s16(qptr.add(16)));
+        let row3 = vmul_s16(vld1_s16(cptr.add(24)), vld1_s16(qptr.add(24)));
+        let row4 = vmul_s16(vld1_s16(cptr.add(32)), vld1_s16(qptr.add(32)));
+        let row5 = vmul_s16(vld1_s16(cptr.add(40)), vld1_s16(qptr.add(40)));
+        let row6 = vmul_s16(vld1_s16(cptr.add(48)), vld1_s16(qptr.add(48)));
+        let row7 = vmul_s16(vld1_s16(cptr.add(56)), vld1_s16(qptr.add(56)));
 
         // Check sparsity
         let bitmap = vorr_s16(vorr_s16(vorr_s16(row7, row6), row5), row4);
@@ -157,14 +141,14 @@ unsafe fn neon_idct_islow_inner(dequantized: &[i16; 64], output: &mut [u8; 64]) 
     // --- Pass 1: columns, right 4×8 half ---
     let mut right_all_zero = false;
     {
-        let row0 = vld1_s16(ptr.add(4));
-        let row1 = vld1_s16(ptr.add(12));
-        let row2 = vld1_s16(ptr.add(20));
-        let row3 = vld1_s16(ptr.add(28));
-        let row4 = vld1_s16(ptr.add(36));
-        let row5 = vld1_s16(ptr.add(44));
-        let row6 = vld1_s16(ptr.add(52));
-        let row7 = vld1_s16(ptr.add(60));
+        let row0 = vmul_s16(vld1_s16(cptr.add(4)), vld1_s16(qptr.add(4)));
+        let row1 = vmul_s16(vld1_s16(cptr.add(12)), vld1_s16(qptr.add(12)));
+        let row2 = vmul_s16(vld1_s16(cptr.add(20)), vld1_s16(qptr.add(20)));
+        let row3 = vmul_s16(vld1_s16(cptr.add(28)), vld1_s16(qptr.add(28)));
+        let row4 = vmul_s16(vld1_s16(cptr.add(36)), vld1_s16(qptr.add(36)));
+        let row5 = vmul_s16(vld1_s16(cptr.add(44)), vld1_s16(qptr.add(44)));
+        let row6 = vmul_s16(vld1_s16(cptr.add(52)), vld1_s16(qptr.add(52)));
+        let row7 = vmul_s16(vld1_s16(cptr.add(60)), vld1_s16(qptr.add(60)));
 
         let bitmap = vorr_s16(vorr_s16(vorr_s16(row7, row6), row5), row4);
         let bitmap_4567: i64 = vget_lane_s64(vreinterpret_s64_s16(bitmap), 0);
