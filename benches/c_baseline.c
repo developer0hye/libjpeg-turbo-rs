@@ -73,6 +73,10 @@ int main(void) {
     /* Subsampling modes */
     bench_file("tests/fixtures/photo_320x240_444.jpg",    5000);
     bench_file("tests/fixtures/photo_320x240_422.jpg",    5000);
+    bench_file("tests/fixtures/photo_640x480_444.jpg",    5000);
+    bench_file("tests/fixtures/photo_640x480_422.jpg",    5000);
+    bench_file("tests/fixtures/photo_1920x1080_444.jpg",   500);
+    bench_file("tests/fixtures/photo_1920x1080_422.jpg",   500);
 
     /* Content types */
     bench_file("tests/fixtures/graphic_640x480_420.jpg",  5000);
