@@ -4,3 +4,4 @@ commit	time_us	status	description
 03365ee	435	keep	Infallible BitReader: peek_bits/read_bits return u16 directly (no Result wrapping). EOF returns 0. Eliminates 2 error-path branches per AC coefficient decode iteration. Also #[inline(never)] on lookup_slow.
 uncommitted	435	discard	Attempted fast 4-byte bulk fill in BitReader (check 4 bytes for 0xFF, load all at once if clean). No improvement — branch predictor already handles per-byte 0xFF check well. Reverted.
 bd24482	421	keep	9-bit Huffman fast-lookup table (512 entries, was 256). Catches more AC codes on fast path. 10-bit tested but worse (1024 entries hurts L1 cache).
+fbf4133	414	keep	Infallible lookup_fast() for AC decode: returns raw (u8,u8) tuple, no Result. AC loop uses it for fast path, falls back to lookup() for long codes. Eliminates Result discriminant from hot inner loop. DC fast-path tested but HURT perf (code layout change confused branch predictor) — kept DC using lookup().
