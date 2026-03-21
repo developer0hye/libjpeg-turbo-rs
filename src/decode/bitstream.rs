@@ -49,12 +49,12 @@ impl<'a> BitReader<'a> {
         }
         let next = self.data[self.pos];
         if next == 0x00 {
-            self.pos += 1;
-            0xFF
-        } else if (0xD0..=0xD7).contains(&next) {
+            // Byte-stuffed 0xFF — consume the 0x00 and return 0xFF data.
             self.pos += 1;
             0xFF
         } else {
+            // Any other marker (restart, SOS, EOI, etc.) — stop feeding data.
+            // Back up so the marker can be found by reset().
             self.pos -= 1;
             0
         }
@@ -87,5 +87,18 @@ impl<'a> BitReader<'a> {
     pub fn reset(&mut self) {
         self.bit_buffer = 0;
         self.bits_left = 0;
+
+        // Skip past the restart marker (0xFF 0xDn) if present.
+        while self.pos < self.data.len() {
+            if self.data[self.pos] == 0xFF {
+                self.pos += 1;
+                if self.pos < self.data.len() && (0xD0..=0xD7).contains(&self.data[self.pos]) {
+                    self.pos += 1;
+                    break;
+                }
+            } else {
+                break;
+            }
+        }
     }
 }
