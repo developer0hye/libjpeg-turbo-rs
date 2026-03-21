@@ -1,6 +1,7 @@
 //! NEON fancy h2v1 upsampling tests.
 #![cfg(target_arch = "aarch64")]
 
+use libjpeg_turbo_rs::decode::upsample;
 use libjpeg_turbo_rs::simd;
 
 fn scalar_upsample(input: &[u8], in_width: usize) -> Vec<u8> {
@@ -16,6 +17,36 @@ fn neon_upsample(input: &[u8], in_width: usize) -> Vec<u8> {
     let routines = libjpeg_turbo_rs::simd::aarch64::routines();
     let mut output = vec![0u8; in_width * 2];
     (routines.fancy_upsample_h2v1)(input, in_width, &mut output);
+    output
+}
+
+fn scalar_upsample_h2v2(input: &[u8], in_width: usize, in_height: usize) -> Vec<u8> {
+    let out_width = in_width * 2;
+    let out_height = in_height * 2;
+    let mut output = vec![0u8; out_width * out_height];
+    upsample::fancy_h2v2(
+        input,
+        in_width,
+        in_height,
+        &mut output,
+        out_width,
+        out_height,
+    );
+    output
+}
+
+fn neon_upsample_h2v2(input: &[u8], in_width: usize, in_height: usize) -> Vec<u8> {
+    let out_width = in_width * 2;
+    let out_height = in_height * 2;
+    let mut output = vec![0u8; out_width * out_height];
+    libjpeg_turbo_rs::simd::aarch64::upsample::neon_fancy_upsample_h2v2(
+        input,
+        in_width,
+        in_height,
+        &mut output,
+        out_width,
+    );
+    output.truncate(out_width * out_height);
     output
 }
 
@@ -102,4 +133,32 @@ fn neon_upsample_large_random() {
     let scalar = scalar_upsample(&input, 960);
     let neon = neon_upsample(&input, 960);
     assert_eq!(neon, scalar, "large random (960) mismatch");
+}
+
+#[test]
+fn neon_h2v2_gradient_matches_scalar() {
+    let in_width = 32;
+    let in_height = 8;
+    let input: Vec<u8> = (0..(in_width * in_height))
+        .map(|i: usize| (i.wrapping_mul(7) % 251) as u8)
+        .collect();
+    let scalar = scalar_upsample_h2v2(&input, in_width, in_height);
+    let neon = neon_upsample_h2v2(&input, in_width, in_height);
+    assert_eq!(neon, scalar, "gradient h2v2 mismatch");
+}
+
+#[test]
+fn neon_h2v2_random_short_rows_match_scalar() {
+    let in_width = 9;
+    let in_height = 5;
+    let mut seed: u32 = 0x1357_2468;
+    let input: Vec<u8> = (0..(in_width * in_height))
+        .map(|_| {
+            seed = seed.wrapping_mul(1103515245).wrapping_add(12345);
+            (seed >> 16) as u8
+        })
+        .collect();
+    let scalar = scalar_upsample_h2v2(&input, in_width, in_height);
+    let neon = neon_upsample_h2v2(&input, in_width, in_height);
+    assert_eq!(neon, scalar, "short-row h2v2 mismatch");
 }

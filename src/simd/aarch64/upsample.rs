@@ -90,3 +90,101 @@ unsafe fn neon_fancy_h2v1_inner(input: &[u8], in_width: usize, output: &mut [u8]
 
     let _ = inner_count;
 }
+
+/// NEON fancy 2x2 upsample.
+///
+/// Matches the existing two-stage implementation:
+/// vertical blend into two scratch rows, then horizontal fancy h2v1.
+pub fn neon_fancy_upsample_h2v2(
+    input: &[u8],
+    in_width: usize,
+    in_height: usize,
+    output: &mut [u8],
+    out_width: usize,
+) {
+    if in_width == 0 || in_height == 0 {
+        return;
+    }
+
+    let mut row_above = vec![0u8; in_width];
+    let mut row_below = vec![0u8; in_width];
+
+    for y in 0..in_height {
+        let cur_row = &input[y * in_width..(y + 1) * in_width];
+        let above = if y > 0 {
+            &input[(y - 1) * in_width..y * in_width]
+        } else {
+            cur_row
+        };
+        let below = if y + 1 < in_height {
+            &input[(y + 1) * in_width..(y + 2) * in_width]
+        } else {
+            cur_row
+        };
+
+        // SAFETY: NEON is mandatory on aarch64 and slices are all `in_width` long.
+        unsafe {
+            neon_vertical_blend_rows(cur_row, above, below, &mut row_above, &mut row_below);
+        }
+
+        let out_y_top = y * 2;
+        let out_y_bot = y * 2 + 1;
+        neon_fancy_upsample_h2v1(&row_above, in_width, &mut output[out_y_top * out_width..]);
+        neon_fancy_upsample_h2v1(&row_below, in_width, &mut output[out_y_bot * out_width..]);
+    }
+}
+
+#[target_feature(enable = "neon")]
+unsafe fn neon_vertical_blend_rows(
+    cur: &[u8],
+    above: &[u8],
+    below: &[u8],
+    out_above: &mut [u8],
+    out_below: &mut [u8],
+) {
+    let cur_ptr = cur.as_ptr();
+    let above_ptr = above.as_ptr();
+    let below_ptr = below.as_ptr();
+    let out_above_ptr = out_above.as_mut_ptr();
+    let out_below_ptr = out_below.as_mut_ptr();
+
+    let two = vdupq_n_u16(2);
+    let mut i: usize = 0;
+    let width = cur.len();
+
+    while i + 16 <= width {
+        let cur_v = vld1q_u8(cur_ptr.add(i));
+        let above_v = vld1q_u8(above_ptr.add(i));
+        let below_v = vld1q_u8(below_ptr.add(i));
+
+        let cur_lo = vmovl_u8(vget_low_u8(cur_v));
+        let cur_hi = vmovl_u8(vget_high_u8(cur_v));
+        let above_lo = vmovl_u8(vget_low_u8(above_v));
+        let above_hi = vmovl_u8(vget_high_u8(above_v));
+        let below_lo = vmovl_u8(vget_low_u8(below_v));
+        let below_hi = vmovl_u8(vget_high_u8(below_v));
+
+        let top_lo = vaddq_u16(vaddq_u16(vmulq_n_u16(cur_lo, 3), above_lo), two);
+        let top_hi = vaddq_u16(vaddq_u16(vmulq_n_u16(cur_hi, 3), above_hi), two);
+        let bot_lo = vaddq_u16(vaddq_u16(vmulq_n_u16(cur_lo, 3), below_lo), two);
+        let bot_hi = vaddq_u16(vaddq_u16(vmulq_n_u16(cur_hi, 3), below_hi), two);
+
+        vst1q_u8(
+            out_above_ptr.add(i),
+            vcombine_u8(vshrn_n_u16(top_lo, 2), vshrn_n_u16(top_hi, 2)),
+        );
+        vst1q_u8(
+            out_below_ptr.add(i),
+            vcombine_u8(vshrn_n_u16(bot_lo, 2), vshrn_n_u16(bot_hi, 2)),
+        );
+
+        i += 16;
+    }
+
+    while i < width {
+        let cur_px = cur[i] as u16;
+        out_above[i] = ((3 * cur_px + above[i] as u16 + 2) >> 2) as u8;
+        out_below[i] = ((3 * cur_px + below[i] as u16 + 2) >> 2) as u8;
+        i += 1;
+    }
+}
