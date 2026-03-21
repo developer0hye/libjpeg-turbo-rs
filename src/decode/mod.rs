@@ -5,6 +5,7 @@ pub mod entropy;
 pub mod huffman;
 pub mod idct;
 pub mod idct_scaled;
+pub mod lossless;
 pub mod marker;
 pub mod pipeline;
 pub mod progressive;
