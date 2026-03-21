@@ -7,6 +7,15 @@ use crate::decode::marker::{JpegMetadata, MarkerReader};
 use crate::decode::upsample;
 use crate::simd::{self, SimdRoutines};
 
+/// Vertical triangle-filter blend: out[i] = (3*cur[i] + neighbor[i] + 2) >> 2.
+/// Auto-vectorizes well on aarch64 with NEON.
+#[inline]
+fn vertical_blend(cur: &[u8], neighbor: &[u8], output: &mut [u8], width: usize) {
+    for i in 0..width {
+        output[i] = ((3 * cur[i] as u16 + neighbor[i] as u16 + 2) >> 2) as u8;
+    }
+}
+
 /// Decoded image data.
 #[derive(Debug)]
 pub struct Image {
@@ -71,10 +80,8 @@ impl<'a> Decoder<'a> {
                 cur_row
             };
 
-            for x in 0..in_width {
-                row_above[x] = ((3 * cur_row[x] as u16 + above[x] as u16 + 2) >> 2) as u8;
-                row_below[x] = ((3 * cur_row[x] as u16 + below[x] as u16 + 2) >> 2) as u8;
-            }
+            vertical_blend(cur_row, above, &mut row_above, in_width);
+            vertical_blend(cur_row, below, &mut row_below, in_width);
 
             let out_y_top = y * 2;
             let out_y_bot = y * 2 + 1;
@@ -217,8 +224,7 @@ impl<'a> Decoder<'a> {
                             let block_y = (mcu_y * layout.v_blocks + v) * 8;
 
                             for row in 0..8 {
-                                let py = block_y + row;
-                                let dst_start = py * layout.comp_w + block_x;
+                                let dst_start = (block_y + row) * layout.comp_w + block_x;
                                 component_planes[comp_idx][dst_start..dst_start + 8]
                                     .copy_from_slice(&block_u8[row * 8..row * 8 + 8]);
                             }

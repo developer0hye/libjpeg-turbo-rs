@@ -84,6 +84,12 @@ impl<'a> BitReader<'a> {
     /// Read and consume `count` bits (max 16).
     #[inline(always)]
     pub fn read_bits(&mut self, count: u8) -> Result<u16> {
+        // Fast path: enough bits already in buffer (common after peek+skip)
+        if self.bits_left >= count {
+            self.bits_left -= count;
+            let val = (self.bit_buffer >> self.bits_left) & ((1u64 << count) - 1);
+            return Ok(val as u16);
+        }
         self.fill_buffer(count)?;
         self.bits_left -= count;
         let val = (self.bit_buffer >> self.bits_left) & ((1u64 << count) - 1);
