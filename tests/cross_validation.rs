@@ -122,6 +122,38 @@ fn xval_checker_640x480_420() {
     );
 }
 
+// --- HD / FHD / 2K / 4K ---
+
+#[test]
+fn xval_photo_1280x720_420() {
+    assert_matches_reference(
+        "tests/fixtures/photo_1280x720_420.jpg",
+        "tests/fixtures/ref/photo_1280x720_420.rgb",
+        1280,
+        720,
+    );
+}
+
+#[test]
+fn xval_photo_2560x1440_420() {
+    assert_matches_reference(
+        "tests/fixtures/photo_2560x1440_420.jpg",
+        "tests/fixtures/ref/photo_2560x1440_420.rgb",
+        2560,
+        1440,
+    );
+}
+
+#[test]
+fn xval_photo_3840x2160_420() {
+    assert_matches_reference(
+        "tests/fixtures/photo_3840x2160_420.jpg",
+        "tests/fixtures/ref/photo_3840x2160_420.rgb",
+        3840,
+        2160,
+    );
+}
+
 // --- Restart markers ---
 
 #[test]
