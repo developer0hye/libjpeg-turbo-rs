@@ -91,7 +91,7 @@ impl McuDecoder {
     }
 
     /// Decode one 8x8 block of DCT coefficients (in natural/row-major order).
-    #[inline]
+    #[inline(always)]
     pub fn decode_block(
         &mut self,
         reader: &mut BitReader,

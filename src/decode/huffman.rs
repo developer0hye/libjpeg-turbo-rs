@@ -16,28 +16,7 @@ pub fn decode_dc_coefficient(reader: &mut BitReader, table: &HuffmanTable) -> Re
     let peek = reader.peek_bits(16);
     let (s, l) = table.lookup_fast(peek);
 
-    if l > 0 {
-        // Fast path: combined Huffman + extra bits from single peek.
-        let category = s;
-        if category == 0 {
-            reader.skip_bits(l);
-            return Ok(0);
-        }
-        let total = l + category;
-        if total <= 16 {
-            // Both code and extra bits fit in the 16-bit peek.
-            let extra_bits = ((peek >> (16 - total)) & ((1u16 << category) - 1)) as u16;
-            reader.skip_bits(total);
-            return Ok(extend(extra_bits, category));
-        }
-        // Code fits but extra bits extend beyond peek — fall through.
-        reader.skip_bits(l);
-        let extra_bits = reader.read_bits(category);
-        return Ok(extend(extra_bits, category));
-    }
-
-    // Slow path: code longer than LOOKUP_BITS.
-    let (category, code_len) = table.lookup(peek)?;
+    let (category, code_len) = if l > 0 { (s, l) } else { table.lookup(peek)? };
     reader.skip_bits(code_len);
 
     if category == 0 {
@@ -87,19 +66,11 @@ pub fn decode_ac_coefficients(
                 ));
             }
 
-            // Combined decode: extract extra bits directly from the peeked
-            // value and skip code_len + bit_size in one operation.
-            // peek_bits(16) fills the buffer to ≥25 bits, so the combined
-            // skip of up to 16 bits is always safe.
-            let total = l + bit_size;
-            let extra_bits = if total <= 16 {
-                let v = ((peek >> (16 - total)) & ((1u16 << bit_size) - 1)) as u16;
-                reader.skip_bits(total);
-                v
-            } else {
-                reader.skip_bits(l);
-                reader.read_bits(bit_size)
-            };
+            // Skip Huffman code bits, then read extra magnitude bits.
+            // fill_buffer guarantees ≥56 bits after fill; we consume at
+            // most 9+10=19, so read_bits never triggers a refill here.
+            reader.skip_bits(l);
+            let extra_bits = reader.read_bits(bit_size);
 
             // SAFETY: index < 64 (checked above), ZIGZAG_ORDER values are all < 64.
             unsafe {
