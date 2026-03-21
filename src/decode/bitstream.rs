@@ -3,8 +3,7 @@ use crate::common::error::Result;
 /// Reads individual bits from JPEG entropy-coded data.
 /// Handles byte stuffing (0xFF 0x00 -> 0xFF) and detects restart markers.
 ///
-/// Uses a 64-bit buffer to minimize refill frequency — typically one refill
-/// covers multiple Huffman symbol decodes.
+/// Uses a 64-bit buffer to minimize refill frequency.
 pub struct BitReader<'a> {
     data: &'a [u8],
     pos: usize,
@@ -24,17 +23,12 @@ impl<'a> BitReader<'a> {
         }
     }
 
-    /// Ensure at least `needed` bits are in the buffer (max 32).
-    /// Uses a 64-bit buffer so we can fill aggressively and reduce
-    /// the number of fill_buffer calls per decode cycle.
+    /// Ensure at least `needed` bits are in the buffer.
     #[inline(always)]
     fn fill_buffer(&mut self, needed: u8) -> Result<()> {
-        // Fill until we have at least 32 bits (or `needed`, whichever is more).
-        // This over-fills intentionally so subsequent read_bits/peek_bits calls
-        // often don't need to refill at all.
         while self.bits_left < needed.max(25) {
             if self.bits_left > 56 {
-                break; // Can't fit another byte
+                break;
             }
             let byte = self.read_next_byte()?;
             self.bit_buffer = (self.bit_buffer << 8) | byte as u64;
@@ -55,7 +49,6 @@ impl<'a> BitReader<'a> {
             return Ok(byte);
         }
 
-        // Handle 0xFF prefix
         if self.pos >= self.data.len() {
             return Ok(0);
         }
@@ -76,7 +69,9 @@ impl<'a> BitReader<'a> {
     /// Peek at the next `count` bits without consuming them (max 16).
     #[inline(always)]
     pub fn peek_bits(&mut self, count: u8) -> Result<u16> {
-        self.fill_buffer(count)?;
+        if self.bits_left < count {
+            self.fill_buffer(count)?;
+        }
         let shift = self.bits_left - count;
         Ok(((self.bit_buffer >> shift) & ((1u64 << count) - 1)) as u16)
     }
@@ -84,13 +79,9 @@ impl<'a> BitReader<'a> {
     /// Read and consume `count` bits (max 16).
     #[inline(always)]
     pub fn read_bits(&mut self, count: u8) -> Result<u16> {
-        // Fast path: enough bits already in buffer (common after peek+skip)
-        if self.bits_left >= count {
-            self.bits_left -= count;
-            let val = (self.bit_buffer >> self.bits_left) & ((1u64 << count) - 1);
-            return Ok(val as u16);
+        if self.bits_left < count {
+            self.fill_buffer(count)?;
         }
-        self.fill_buffer(count)?;
         self.bits_left -= count;
         let val = (self.bit_buffer >> self.bits_left) & ((1u64 << count) - 1);
         Ok(val as u16)

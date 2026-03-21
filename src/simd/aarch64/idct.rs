@@ -58,17 +58,23 @@ const IDCT_CONSTS: IdctConsts = IdctConsts {
 /// `quant`: 64 u16 quantization values in natural (row-major) order.
 /// `output`: 64 u8 samples in natural (row-major) order.
 pub fn neon_idct_islow(coeffs: &[i16; 64], quant: &[u16; 64], output: &mut [u8; 64]) {
-    // Coefficients are already in natural (row-major) order — dequantize in place.
-    let mut dequantized = [0i16; 64];
-    let mut i = 0;
-    while i < 64 {
-        dequantized[i] = coeffs[i].wrapping_mul(quant[i] as i16);
-        i += 1;
-    }
-
-    // SAFETY: NEON is mandatory on aarch64 (ARMv8). All intrinsics used are
-    // standard NEON operations available on all ARMv8 processors.
+    // SAFETY: NEON is mandatory on aarch64 (ARMv8).
     unsafe {
+        // NEON dequantize: 8 rows × vmul_s16 = 8 instructions for 64 multiplies
+        let mut dequantized = [0i16; 64];
+        let cptr = coeffs.as_ptr();
+        let qptr = quant.as_ptr() as *const i16; // u16 reinterpreted as i16 for vmul
+        let dptr = dequantized.as_mut_ptr();
+        use std::arch::aarch64::*;
+        let mut i = 0;
+        while i < 64 {
+            let c = vld1q_s16(cptr.add(i));
+            let q = vld1q_s16(qptr.add(i));
+            let d = vmulq_s16(c, q);
+            vst1q_s16(dptr.add(i), d);
+            i += 8;
+        }
+
         neon_idct_islow_inner(&dequantized, output);
     }
 }
