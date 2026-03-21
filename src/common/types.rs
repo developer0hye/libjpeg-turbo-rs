@@ -128,6 +128,45 @@ pub struct ScanComponentSelector {
     pub ac_table_index: u8,
 }
 
+/// Decompression scaling factor.
+///
+/// Controls the output size via reduced IDCT. Supported ratios: 1/1, 1/2, 1/4, 1/8.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ScalingFactor {
+    pub num: u32,
+    pub denom: u32,
+}
+
+impl ScalingFactor {
+    pub fn new(num: u32, denom: u32) -> Self {
+        Self { num, denom }
+    }
+
+    /// The IDCT block output size for this scaling factor.
+    /// 8 for full, 4 for 1/2, 2 for 1/4, 1 for 1/8.
+    pub fn block_size(self) -> usize {
+        let ratio_x8 = (self.num * 8 + self.denom - 1) / self.denom;
+        match ratio_x8 {
+            0 => 1,
+            1 => 1,
+            2 => 2,
+            3..=4 => 4,
+            _ => 8,
+        }
+    }
+
+    /// Compute scaled output dimension: ceil(input_dim * num / denom).
+    pub fn scale_dim(self, input_dim: usize) -> usize {
+        (input_dim * self.num as usize + self.denom as usize - 1) / self.denom as usize
+    }
+}
+
+impl Default for ScalingFactor {
+    fn default() -> Self {
+        Self { num: 1, denom: 1 }
+    }
+}
+
 /// One chunk of an ICC profile stored in an APP2 marker.
 ///
 /// ICC profiles larger than 65519 bytes are split across multiple APP2 markers,

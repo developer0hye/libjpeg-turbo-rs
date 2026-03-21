@@ -1,5 +1,5 @@
 use crate::common::error::Result;
-use crate::common::types::FrameHeader;
+use crate::common::types::{FrameHeader, PixelFormat, ScalingFactor};
 use crate::decode::pipeline::{Decoder, Image};
 
 /// Streaming JPEG decoder — reads header first, then decodes on demand.
@@ -15,6 +15,16 @@ impl<'a> StreamingDecoder<'a> {
 
     pub fn header(&self) -> &FrameHeader {
         self.inner.header()
+    }
+
+    /// Set the output pixel format.
+    pub fn set_output_format(&mut self, format: PixelFormat) {
+        self.inner.set_output_format(format);
+    }
+
+    /// Set the decompression scaling factor.
+    pub fn set_scale(&mut self, scale: ScalingFactor) {
+        self.inner.set_scale(scale);
     }
 
     /// Decode the JPEG payload using the already-parsed metadata.

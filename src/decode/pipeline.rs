@@ -5,6 +5,7 @@ use crate::common::quant_table::QuantTable;
 use crate::common::types::*;
 use crate::decode::bitstream::BitReader;
 use crate::decode::entropy::{self, McuDecoder};
+use crate::decode::idct_scaled;
 use crate::decode::marker::{JpegMetadata, MarkerReader, ScanInfo};
 use crate::decode::progressive;
 use crate::simd::{self, SimdRoutines};
@@ -66,6 +67,7 @@ pub struct Decoder<'a> {
     raw_data: &'a [u8],
     routines: SimdRoutines,
     output_format: Option<PixelFormat>,
+    scale: ScalingFactor,
 }
 
 impl<'a> Decoder<'a> {
@@ -78,6 +80,7 @@ impl<'a> Decoder<'a> {
             raw_data: data,
             routines,
             output_format: None,
+            scale: ScalingFactor::default(),
         })
     }
 
@@ -88,6 +91,11 @@ impl<'a> Decoder<'a> {
     /// Set the desired output pixel format.
     pub fn set_output_format(&mut self, format: PixelFormat) {
         self.output_format = Some(format);
+    }
+
+    /// Set the decompression scaling factor (e.g., 1/2, 1/4, 1/8).
+    pub fn set_scale(&mut self, scale: ScalingFactor) {
+        self.scale = scale;
     }
 
     pub fn decode(data: &'a [u8]) -> Result<Image> {
@@ -144,6 +152,28 @@ impl<'a> Decoder<'a> {
                     8,
                 );
             }
+        }
+    }
+
+    /// Scale-aware IDCT dispatch: picks 8x8, 4x4, 2x2, or 1x1 based on block_size.
+    ///
+    /// # Safety
+    /// `output` must point to sufficient writable bytes for the chosen block_size × stride.
+    #[inline(always)]
+    unsafe fn idct_scaled_strided(
+        &self,
+        coeffs: &[i16; 64],
+        quant: &[u16; 64],
+        output: *mut u8,
+        stride: usize,
+        block_size: usize,
+    ) {
+        match block_size {
+            8 => self.idct_islow_strided(coeffs, quant, output, stride),
+            4 => idct_scaled::idct_4x4_strided(coeffs, quant, output, stride),
+            2 => idct_scaled::idct_2x2_strided(coeffs, quant, output, stride),
+            1 => idct_scaled::idct_1x1_strided(coeffs, quant, output, stride),
+            _ => unreachable!("invalid block_size: {}", block_size),
         }
     }
 
@@ -288,16 +318,17 @@ impl<'a> Decoder<'a> {
         num_components: usize,
         mcus_x: usize,
         mcus_y: usize,
+        block_size: usize,
     ) -> Result<Vec<Vec<u8>>> {
         let scan = &self.metadata.scan;
 
-        // Allocate component planes (MCU-aligned)
+        // Allocate component planes (MCU-aligned, scaled by block_size)
         let mut component_planes: Vec<Vec<u8>> = frame
             .components
             .iter()
             .map(|comp| {
-                let comp_w = mcus_x * comp.horizontal_sampling as usize * 8;
-                let comp_h = mcus_y * comp.vertical_sampling as usize * 8;
+                let comp_w = mcus_x * comp.horizontal_sampling as usize * block_size;
+                let comp_h = mcus_y * comp.vertical_sampling as usize * block_size;
                 let size = comp_w * comp_h;
                 let mut v = Vec::with_capacity(size);
                 unsafe { v.set_len(size) };
@@ -321,7 +352,7 @@ impl<'a> Decoder<'a> {
             .components
             .iter()
             .map(|comp| CompLayout {
-                comp_w: mcus_x * comp.horizontal_sampling as usize * 8,
+                comp_w: mcus_x * comp.horizontal_sampling as usize * block_size,
                 h_blocks: comp.horizontal_sampling as usize,
                 v_blocks: comp.vertical_sampling as usize,
             })
@@ -359,13 +390,19 @@ impl<'a> Decoder<'a> {
                                 &mut coeffs,
                             )?;
 
-                            let block_x = (mcu_x * layout.h_blocks + h) * 8;
-                            let block_y = (mcu_y * layout.v_blocks + v) * 8;
+                            let block_x = (mcu_x * layout.h_blocks + h) * block_size;
+                            let block_y = (mcu_y * layout.v_blocks + v) * block_size;
                             let dst_offset = block_y * layout.comp_w + block_x;
 
                             unsafe {
                                 let dst = component_planes[comp_idx].as_mut_ptr().add(dst_offset);
-                                self.idct_islow_strided(&coeffs, qt_values, dst, layout.comp_w);
+                                self.idct_scaled_strided(
+                                    &coeffs,
+                                    qt_values,
+                                    dst,
+                                    layout.comp_w,
+                                    block_size,
+                                );
                             }
                         }
                     }
@@ -389,6 +426,7 @@ impl<'a> Decoder<'a> {
         mcus_y: usize,
         max_h: usize,
         max_v: usize,
+        block_size: usize,
     ) -> Result<Vec<Vec<u8>>> {
         // Per-component coefficient buffers: blocks_x * blocks_y blocks of 64 coefficients
         let comp_infos: Vec<CompInfo> = frame
@@ -402,7 +440,7 @@ impl<'a> Decoder<'a> {
                     blocks_y: mcus_y * v_samp,
                     h_samp,
                     v_samp,
-                    comp_w: mcus_x * h_samp * 8,
+                    comp_w: mcus_x * h_samp * block_size,
                 }
             })
             .collect();
@@ -431,7 +469,7 @@ impl<'a> Decoder<'a> {
         let mut component_planes: Vec<Vec<u8>> = comp_infos
             .iter()
             .map(|ci| {
-                let size = ci.comp_w * ci.blocks_y * 8;
+                let size = ci.comp_w * ci.blocks_y * block_size;
                 let mut v = Vec::with_capacity(size);
                 unsafe { v.set_len(size) };
                 v
@@ -445,13 +483,13 @@ impl<'a> Decoder<'a> {
                     let block_idx = by * ci.blocks_x + bx;
                     let coeffs = &coeff_bufs[comp_idx][block_idx];
 
-                    let px_x = bx * 8;
-                    let px_y = by * 8;
+                    let px_x = bx * block_size;
+                    let px_y = by * block_size;
                     let dst_offset = px_y * ci.comp_w + px_x;
 
                     unsafe {
                         let dst = component_planes[comp_idx].as_mut_ptr().add(dst_offset);
-                        self.idct_islow_strided(coeffs, qt_values, dst, ci.comp_w);
+                        self.idct_scaled_strided(coeffs, qt_values, dst, ci.comp_w, block_size);
                     }
                 }
             }
@@ -762,12 +800,19 @@ impl<'a> Decoder<'a> {
             .max()
             .unwrap_or(1);
 
+        let block_size = self.scale.block_size();
         let mcu_width = max_h * 8;
         let mcu_height = max_v * 8;
         let mcus_x = (width + mcu_width - 1) / mcu_width;
         let mcus_y = (height + mcu_height - 1) / mcu_height;
-        let full_width = mcus_x * mcu_width;
-        let full_height = mcus_y * mcu_height;
+        // Scaled output dimensions
+        let scaled_mcu_w = max_h * block_size;
+        let scaled_mcu_h = max_v * block_size;
+        let full_width = mcus_x * scaled_mcu_w;
+        let full_height = mcus_y * scaled_mcu_h;
+        // Final output dimensions (may be smaller than full due to MCU alignment)
+        let out_width = self.scale.scale_dim(width);
+        let out_height = self.scale.scale_dim(height);
 
         // Pre-resolve quant tables per component (once, not per-block)
         let quant_tables: Vec<&QuantTable> = frame
@@ -795,24 +840,34 @@ impl<'a> Decoder<'a> {
                 mcus_y,
                 max_h,
                 max_v,
+                block_size,
             )?
         } else {
-            self.decode_baseline_planes(frame, &quant_tables, num_components, mcus_x, mcus_y)?
+            self.decode_baseline_planes(
+                frame,
+                &quant_tables,
+                num_components,
+                mcus_x,
+                mcus_y,
+                block_size,
+            )?
         };
 
         // Upsample and color convert
         if num_components == 1 {
             let out_format = self.output_format.unwrap_or(PixelFormat::Grayscale);
-            let comp_w = mcus_x * frame.components[0].horizontal_sampling as usize * 8;
+            let comp_w = mcus_x * frame.components[0].horizontal_sampling as usize * block_size;
 
             if out_format == PixelFormat::Grayscale {
-                let mut data = Vec::with_capacity(width * height);
-                for y in 0..height {
-                    data.extend_from_slice(&component_planes[0][y * comp_w..y * comp_w + width]);
+                let mut data = Vec::with_capacity(out_width * out_height);
+                for y in 0..out_height {
+                    data.extend_from_slice(
+                        &component_planes[0][y * comp_w..y * comp_w + out_width],
+                    );
                 }
                 Ok(Image {
-                    width,
-                    height,
+                    width: out_width,
+                    height: out_height,
                     pixel_format: PixelFormat::Grayscale,
                     data,
                     icc_profile: icc_profile.clone(),
@@ -821,13 +876,13 @@ impl<'a> Decoder<'a> {
             } else {
                 // Expand grayscale to requested color format
                 let bpp = out_format.bytes_per_pixel();
-                let data_size = width * height * bpp;
+                let data_size = out_width * out_height * bpp;
                 let mut data = Vec::with_capacity(data_size);
                 unsafe { data.set_len(data_size) };
-                for y in 0..height {
-                    let row = &component_planes[0][y * comp_w..y * comp_w + width];
-                    let out_row = &mut data[y * width * bpp..(y + 1) * width * bpp];
-                    for x in 0..width {
+                for y in 0..out_height {
+                    let row = &component_planes[0][y * comp_w..y * comp_w + out_width];
+                    let out_row = &mut data[y * out_width * bpp..(y + 1) * out_width * bpp];
+                    for x in 0..out_width {
                         let v = row[x];
                         match out_format {
                             PixelFormat::Rgb => {
@@ -857,8 +912,8 @@ impl<'a> Decoder<'a> {
                     }
                 }
                 Ok(Image {
-                    width,
-                    height,
+                    width: out_width,
+                    height: out_height,
                     pixel_format: out_format,
                     data,
                     icc_profile: icc_profile.clone(),
@@ -875,11 +930,11 @@ impl<'a> Decoder<'a> {
             let bpp = out_format.bytes_per_pixel();
 
             let y_plane = &component_planes[0];
-            let y_width = mcus_x * frame.components[0].horizontal_sampling as usize * 8;
+            let y_width = mcus_x * frame.components[0].horizontal_sampling as usize * block_size;
 
             let cb_comp = &frame.components[1];
-            let cb_w = mcus_x * cb_comp.horizontal_sampling as usize * 8;
-            let cb_h = mcus_y * cb_comp.vertical_sampling as usize * 8;
+            let cb_w = mcus_x * cb_comp.horizontal_sampling as usize * block_size;
+            let cb_h = mcus_y * cb_comp.vertical_sampling as usize * block_size;
 
             let h_factor = max_h / cb_comp.horizontal_sampling as usize;
             let v_factor = max_v / cb_comp.vertical_sampling as usize;
@@ -932,23 +987,23 @@ impl<'a> Decoder<'a> {
                 // We use a trick: leak the Vecs temporarily, do the conversion,
                 // then reconstruct and drop them. But simpler: just use a nested scope.
                 // Actually, let's just do the color conversion here and return.
-                let data_size = width * height * bpp;
+                let data_size = out_width * out_height * bpp;
                 let mut data = Vec::with_capacity(data_size);
                 unsafe { data.set_len(data_size) };
-                for y in 0..height {
+                for y in 0..out_height {
                     self.color_convert_row(
                         out_format,
                         &y_plane[y * y_width..],
                         &cb_full[y * full_width..],
                         &cr_full[y * full_width..],
-                        &mut data[y * width * bpp..],
-                        width,
+                        &mut data[y * out_width * bpp..],
+                        out_width,
                     );
                 }
 
                 return Ok(Image {
-                    width,
-                    height,
+                    width: out_width,
+                    height: out_height,
                     pixel_format: out_format,
                     data,
                     icc_profile: icc_profile.clone(),
@@ -957,23 +1012,23 @@ impl<'a> Decoder<'a> {
             }
 
             // 4:4:4 path (no upsampling)
-            let data_size = width * height * bpp;
+            let data_size = out_width * out_height * bpp;
             let mut data = Vec::with_capacity(data_size);
             unsafe { data.set_len(data_size) };
-            for y in 0..height {
+            for y in 0..out_height {
                 self.color_convert_row(
                     out_format,
                     &y_plane[y * y_width..],
                     &cb_data[y * cb_stride..],
                     &cr_data[y * cr_stride..],
-                    &mut data[y * width * bpp..],
-                    width,
+                    &mut data[y * out_width * bpp..],
+                    out_width,
                 );
             }
 
             Ok(Image {
-                width,
-                height,
+                width: out_width,
+                height: out_height,
                 pixel_format: out_format,
                 data,
                 icc_profile: icc_profile.clone(),
@@ -983,14 +1038,15 @@ impl<'a> Decoder<'a> {
             self.decode_4_component(
                 &component_planes,
                 frame,
-                width,
-                height,
+                out_width,
+                out_height,
                 mcus_x,
                 mcus_y,
                 max_h,
                 max_v,
                 full_width,
                 full_height,
+                block_size,
                 icc_profile,
                 exif_data,
             )
@@ -1044,6 +1100,7 @@ impl<'a> Decoder<'a> {
         max_v: usize,
         full_width: usize,
         full_height: usize,
+        block_size: usize,
         icc_profile: Option<Vec<u8>>,
         exif_data: Option<Vec<u8>>,
     ) -> Result<Image> {
@@ -1057,14 +1114,14 @@ impl<'a> Decoder<'a> {
         }
 
         // Component 0 is always full-resolution (Y or C).
-        let comp0_w = mcus_x * frame.components[0].horizontal_sampling as usize * 8;
+        let comp0_w = mcus_x * frame.components[0].horizontal_sampling as usize * block_size;
 
         // For YCCK, components 1-2 may be subsampled (chroma), component 3 (K) is full.
         // For CMYK, all components are typically the same resolution.
         let comp1 = &frame.components[1];
-        let comp1_w = mcus_x * comp1.horizontal_sampling as usize * 8;
-        let comp1_h = mcus_y * comp1.vertical_sampling as usize * 8;
-        let comp3_w = mcus_x * frame.components[3].horizontal_sampling as usize * 8;
+        let comp1_w = mcus_x * comp1.horizontal_sampling as usize * block_size;
+        let comp1_h = mcus_y * comp1.vertical_sampling as usize * block_size;
+        let comp3_w = mcus_x * frame.components[3].horizontal_sampling as usize * block_size;
 
         let h_factor = max_h / comp1.horizontal_sampling as usize;
         let v_factor = max_v / comp1.vertical_sampling as usize;
