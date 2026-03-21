@@ -176,18 +176,13 @@ impl<'a> Decoder<'a> {
             })
             .collect();
 
-        // Decode all MCUs
+        // Decode all MCUs — fused decode + IDCT + store, no intermediate Vec
         let entropy_data = &self.raw_data[self.metadata.entropy_data_offset..];
         let mut bit_reader = BitReader::new(entropy_data);
         let mut mcu_decoder = McuDecoder::new(num_components);
-        // Pre-allocate blocks for the largest possible MCU (max_h * max_v * num_components)
-        let max_blocks_per_mcu: usize = frame
-            .components
-            .iter()
-            .map(|c| (c.horizontal_sampling as usize) * (c.vertical_sampling as usize))
-            .sum();
-        let mut blocks = Vec::with_capacity(max_blocks_per_mcu);
         let mut mcu_count: u16 = 0;
+        let mut coeffs = [0i16; 64];
+        let mut block_u8 = [0u8; 64];
 
         for mcu_y in 0..mcus_y {
             for mcu_x in 0..mcus_x {
@@ -199,19 +194,24 @@ impl<'a> Decoder<'a> {
                     mcu_decoder.reset();
                 }
 
-                mcu_decoder.decode_mcu_fast(&mut bit_reader, &mcu_plan, &mut blocks)?;
-
-                let mut block_idx = 0;
+                // Fused: for each component, decode block → IDCT → store directly
+                let mut plan_idx = 0;
                 for (comp_idx, layout) in comp_layouts.iter().enumerate() {
                     let qt_values = &quant_tables[comp_idx].values;
+                    let plan = &mcu_plan[plan_idx];
+                    plan_idx += 1;
 
                     for v in 0..layout.v_blocks {
                         for h in 0..layout.h_blocks {
-                            let zigzag_coeffs = &blocks[block_idx];
-                            block_idx += 1;
+                            mcu_decoder.decode_block(
+                                &mut bit_reader,
+                                plan.comp_idx,
+                                plan.dc_table,
+                                plan.ac_table,
+                                &mut coeffs,
+                            )?;
 
-                            let mut block_u8 = [0u8; 64];
-                            (self.routines.idct_islow)(zigzag_coeffs, qt_values, &mut block_u8);
+                            (self.routines.idct_islow)(&coeffs, qt_values, &mut block_u8);
 
                             let block_x = (mcu_x * layout.h_blocks + h) * 8;
                             let block_y = (mcu_y * layout.v_blocks + v) * 8;
