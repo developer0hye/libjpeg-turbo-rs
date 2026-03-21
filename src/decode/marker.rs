@@ -6,6 +6,9 @@ use crate::common::types::*;
 /// "ICC_PROFILE\0" identifier (12 bytes) in APP2 markers.
 const ICC_PROFILE_HEADER: &[u8; 12] = b"ICC_PROFILE\0";
 
+/// "Exif\0\0" identifier (6 bytes) in APP1 markers.
+const EXIF_HEADER: &[u8; 6] = b"Exif\0\0";
+
 // JPEG marker codes
 const SOI: u8 = 0xD8;
 const EOI: u8 = 0xD9;
@@ -52,6 +55,8 @@ pub struct JpegMetadata {
     pub adobe_transform: u8,
     /// ICC profile chunks from APP2 markers (reassembled via `common::icc`).
     pub icc_chunks: Vec<IccChunk>,
+    /// Raw EXIF TIFF data from the first APP1 marker (after "Exif\0\0" header).
+    pub exif_data: Option<Vec<u8>>,
 }
 
 /// Reads and parses JPEG markers from a byte slice.
@@ -79,6 +84,7 @@ impl<'a> MarkerReader<'a> {
         let mut saw_adobe_marker: bool = false;
         let mut adobe_transform: u8 = 0;
         let mut icc_chunks: Vec<IccChunk> = Vec::new();
+        let mut exif_data: Option<Vec<u8>> = None;
 
         loop {
             let marker = self.read_marker()?;
@@ -120,6 +126,10 @@ impl<'a> MarkerReader<'a> {
                 }
                 EOI => {
                     break;
+                }
+                // APP1 (EXIF) — parse for EXIF metadata
+                0xE1 => {
+                    self.read_app1(&mut exif_data)?;
                 }
                 // APP2 (ICC profile) — parse for ICC profile chunks
                 0xE2 => {
@@ -163,6 +173,7 @@ impl<'a> MarkerReader<'a> {
             saw_adobe_marker,
             adobe_transform,
             icc_chunks,
+            exif_data,
         })
     }
 
@@ -268,6 +279,30 @@ impl<'a> MarkerReader<'a> {
             // Skip "Adobe" (5) + version (2) + flags0 (2) + flags1 (2) = 11 bytes
             *transform = self.data[self.pos + 11];
             *saw_adobe = true;
+        }
+
+        self.pos = end;
+        Ok(())
+    }
+
+    /// Parse APP1 marker for EXIF data.
+    /// Only the first EXIF APP1 is stored; subsequent ones are skipped.
+    fn read_app1(&mut self, exif_data: &mut Option<Vec<u8>>) -> Result<()> {
+        let length = self.read_u16_be()? as usize;
+        if length < 2 {
+            return Err(JpegError::CorruptData("APP1 segment length < 2".into()));
+        }
+        let end = self.pos + length - 2;
+
+        // "Exif\0\0" header is 6 bytes; only store first EXIF APP1
+        if exif_data.is_none()
+            && length >= 8
+            && self.pos + 6 <= self.data.len()
+            && &self.data[self.pos..self.pos + 6] == EXIF_HEADER
+        {
+            let data_start = self.pos + 6;
+            let data_len = end.saturating_sub(data_start);
+            *exif_data = Some(self.data[data_start..data_start + data_len].to_vec());
         }
 
         self.pos = end;
