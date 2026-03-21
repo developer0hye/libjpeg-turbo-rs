@@ -1,0 +1,5 @@
+# Reference baselines for decode_640x480 (gradient_640x480.jpg, 4:2:0, 26KB)
+# Measured on Apple M2, macOS 26.3.1
+
+C libjpeg-turbo 3.1.3 (NEON):     ~352 us
+C libjpeg-turbo 3.1.3 (scalar):   ~1224 us

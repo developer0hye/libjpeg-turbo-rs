@@ -1,4 +1,4 @@
-use crate::common::quant_table::{QuantTable, ZIGZAG_ORDER};
+use crate::common::quant_table::{QuantTable, NATURAL_ORDER};
 
 /// Dequantize a block of DCT coefficients.
 ///
@@ -7,9 +7,11 @@ use crate::common::quant_table::{QuantTable, ZIGZAG_ORDER};
 /// quantization table values.
 pub fn dequantize_block(zigzag_coeffs: &[i16; 64], table: &QuantTable) -> [i16; 64] {
     let mut natural = [0i16; 64];
-    for (zigzag_idx, &coeff) in zigzag_coeffs.iter().enumerate() {
-        let natural_idx = ZIGZAG_ORDER[zigzag_idx];
-        natural[natural_idx] = coeff * table.values[natural_idx] as i16;
+    let mut i = 0;
+    while i < 64 {
+        let zz = NATURAL_ORDER[i];
+        natural[i] = zigzag_coeffs[zz] * table.values[i] as i16;
+        i += 1;
     }
     natural
 }

@@ -12,6 +12,19 @@ pub const ZIGZAG_ORDER: [usize; 64] = [
     53, 60, 61, 54, 47, 55, 62, 63,
 ];
 
+/// Inverse zigzag: maps natural index → zigzag index.
+/// `NATURAL_ORDER[n]` = the zigzag position that holds the coefficient for natural position `n`.
+#[rustfmt::skip]
+pub const NATURAL_ORDER: [usize; 64] = {
+    let mut table = [0usize; 64];
+    let mut i = 0;
+    while i < 64 {
+        table[ZIGZAG_ORDER[i]] = i;
+        i += 1;
+    }
+    table
+};
+
 /// A 64-entry quantization table stored in natural (row-major) order.
 #[derive(Debug, Clone)]
 pub struct QuantTable {
