@@ -71,6 +71,10 @@ pub struct Decoder<'a> {
     output_format: Option<PixelFormat>,
     scale: ScalingFactor,
     lenient: bool,
+    /// Horizontal crop offset (iMCU-aligned).
+    crop_x: Option<usize>,
+    /// Horizontal crop width.
+    crop_width: Option<usize>,
 }
 
 impl<'a> Decoder<'a> {
@@ -85,6 +89,8 @@ impl<'a> Decoder<'a> {
             output_format: None,
             scale: ScalingFactor::default(),
             lenient: false,
+            crop_x: None,
+            crop_width: None,
         })
     }
 
@@ -105,6 +111,12 @@ impl<'a> Decoder<'a> {
     /// Enable lenient mode: continue decoding on errors, filling corrupt areas with gray.
     pub fn set_lenient(&mut self, lenient: bool) {
         self.lenient = lenient;
+    }
+
+    /// Set horizontal crop region. Offsets are auto-aligned to iMCU boundaries.
+    pub fn set_crop(&mut self, x: usize, width: usize) {
+        self.crop_x = Some(x);
+        self.crop_width = Some(width);
     }
 
     pub fn decode(data: &'a [u8]) -> Result<Image> {
