@@ -127,3 +127,17 @@ pub struct ScanComponentSelector {
     /// AC Huffman table index (0-3).
     pub ac_table_index: u8,
 }
+
+/// One chunk of an ICC profile stored in an APP2 marker.
+///
+/// ICC profiles larger than 65519 bytes are split across multiple APP2 markers,
+/// each carrying a sequence number and total count.
+#[derive(Debug, Clone)]
+pub struct IccChunk {
+    /// 1-based sequence number of this chunk.
+    pub seq_no: u8,
+    /// Total number of chunks for the complete profile.
+    pub num_markers: u8,
+    /// Raw profile data for this chunk.
+    pub data: Vec<u8>,
+}

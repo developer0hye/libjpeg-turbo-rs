@@ -3,6 +3,9 @@ use crate::common::huffman_table::HuffmanTable;
 use crate::common::quant_table::QuantTable;
 use crate::common::types::*;
 
+/// "ICC_PROFILE\0" identifier (12 bytes) in APP2 markers.
+const ICC_PROFILE_HEADER: &[u8; 12] = b"ICC_PROFILE\0";
+
 // JPEG marker codes
 const SOI: u8 = 0xD8;
 const EOI: u8 = 0xD9;
@@ -47,6 +50,8 @@ pub struct JpegMetadata {
     pub saw_adobe_marker: bool,
     /// Adobe color transform code (0 = CMYK/RGB, 1 = YCbCr, 2 = YCCK).
     pub adobe_transform: u8,
+    /// ICC profile chunks from APP2 markers (reassembled via `common::icc`).
+    pub icc_chunks: Vec<IccChunk>,
 }
 
 /// Reads and parses JPEG markers from a byte slice.
@@ -73,6 +78,7 @@ impl<'a> MarkerReader<'a> {
         let mut scans: Vec<ScanInfo> = Vec::new();
         let mut saw_adobe_marker: bool = false;
         let mut adobe_transform: u8 = 0;
+        let mut icc_chunks: Vec<IccChunk> = Vec::new();
 
         loop {
             let marker = self.read_marker()?;
@@ -115,6 +121,10 @@ impl<'a> MarkerReader<'a> {
                 EOI => {
                     break;
                 }
+                // APP2 (ICC profile) — parse for ICC profile chunks
+                0xE2 => {
+                    self.read_app2(&mut icc_chunks)?;
+                }
                 // APP14 (Adobe marker) — parse for color transform info
                 0xEE => {
                     self.read_app14(&mut saw_adobe_marker, &mut adobe_transform)?;
@@ -152,6 +162,7 @@ impl<'a> MarkerReader<'a> {
             scans,
             saw_adobe_marker,
             adobe_transform,
+            icc_chunks,
         })
     }
 
@@ -257,6 +268,36 @@ impl<'a> MarkerReader<'a> {
             // Skip "Adobe" (5) + version (2) + flags0 (2) + flags1 (2) = 11 bytes
             *transform = self.data[self.pos + 11];
             *saw_adobe = true;
+        }
+
+        self.pos = end;
+        Ok(())
+    }
+
+    /// Parse APP2 marker for ICC profile data.
+    /// ICC profile chunks have a 14-byte overhead: "ICC_PROFILE\0" (12) + seq_no (1) + num_markers (1).
+    fn read_app2(&mut self, icc_chunks: &mut Vec<IccChunk>) -> Result<()> {
+        let length = self.read_u16_be()? as usize;
+        if length < 2 {
+            return Err(JpegError::CorruptData("APP2 segment length < 2".into()));
+        }
+        let end = self.pos + length - 2;
+
+        // ICC_PROFILE header: 12 bytes identifier + 1 seq_no + 1 num_markers = 14 bytes overhead
+        if length >= 16
+            && self.pos + 14 <= self.data.len()
+            && &self.data[self.pos..self.pos + 12] == ICC_PROFILE_HEADER
+        {
+            let seq_no = self.data[self.pos + 12];
+            let num_markers = self.data[self.pos + 13];
+            let data_start = self.pos + 14;
+            let data_len = end.saturating_sub(data_start);
+            let data = self.data[data_start..data_start + data_len].to_vec();
+            icc_chunks.push(IccChunk {
+                seq_no,
+                num_markers,
+                data,
+            });
         }
 
         self.pos = end;
