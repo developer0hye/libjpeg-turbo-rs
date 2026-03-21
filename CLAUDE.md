@@ -63,7 +63,7 @@ When optimizing performance, follow the experiment-driven workflow in `experimen
 **Key rules:**
 
 - **Record every attempt** in `experiments/<target>.tsv` — successes, failures, and crashes. Failures are data.
-- **Per-target folders**: each optimization area (idct, huffman, upsample, pipeline) has its own subfolder under `experiments/` with a `log.tsv`. **Only read the relevant folder** when starting work on a target — do NOT read other targets' folders. This prevents context pollution and keeps focus.
+- **Per-target logs**: each optimization area (idct, huffman, color, upsample, pipeline) has its own TSV. **Only read the relevant TSV** when starting work on a target — do NOT read all experiment logs. This prevents context pollution and keeps focus.
 - **Benchmark harness**: always use `cargo bench -- decode_640x480` as the single metric. Compare against `experiments/baseline.txt` for the C reference.
 - **Keep/discard protocol**: if benchmark improves → commit + append `keep`. If regresses → `git checkout --` to revert + append `discard` with explanation of WHY it failed. If crash → append `crash` with error summary.
 - **Description must explain causality**: not "tried X" but "tried X because profiling showed Y; failed because Z" or "tried X because Y; saved N us because Z".

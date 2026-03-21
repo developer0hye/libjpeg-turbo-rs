@@ -6,8 +6,9 @@ use crate::decode::bitstream::BitReader;
 /// Extend a variable-length bit value to a signed integer (JPEG ones' complement).
 #[inline(always)]
 fn extend(value: u16, size: u8) -> i16 {
+    // Branchless: if value < 2^(size-1) then value - (2^size - 1), else value
     let half = 1u16 << (size - 1);
-    let mask = (0u16.wrapping_sub((value < half) as u16)) as i16;
+    let mask = (0u16.wrapping_sub((value < half) as u16)) as i16; // 0 or -1
     let offset = ((1i16 << size) - 1) & mask;
     value as i16 - offset
 }
@@ -15,7 +16,7 @@ fn extend(value: u16, size: u8) -> i16 {
 /// Decode one DC coefficient from the bitstream.
 #[inline]
 pub fn decode_dc_coefficient(reader: &mut BitReader, table: &HuffmanTable) -> Result<i16> {
-    let peek = reader.peek_bits(16);
+    let peek = reader.peek_bits(16)?;
     let (category, code_len) = table.lookup(peek)?;
     reader.skip_bits(code_len);
 
@@ -23,11 +24,15 @@ pub fn decode_dc_coefficient(reader: &mut BitReader, table: &HuffmanTable) -> Re
         return Ok(0);
     }
 
-    let extra_bits = reader.read_bits(category);
+    let extra_bits = reader.read_bits(category)?;
     Ok(extend(extra_bits, category))
 }
 
 /// Decode AC coefficients for one 8x8 block, writing to natural (row-major) order.
+///
+/// Decodes zigzag-ordered AC coefficients from the bitstream and writes them
+/// directly to their natural-order positions in `coeffs`. `coeffs[0]` (DC) is
+/// not touched.
 #[inline]
 pub fn decode_ac_coefficients(
     reader: &mut BitReader,
@@ -37,7 +42,7 @@ pub fn decode_ac_coefficients(
     let mut index: usize = 1;
 
     while index < 64 {
-        let peek = reader.peek_bits(16);
+        let peek = reader.peek_bits(16)?;
         let (symbol, code_len) = table.lookup(peek)?;
         reader.skip_bits(code_len);
 
@@ -64,7 +69,8 @@ pub fn decode_ac_coefficients(
             ));
         }
 
-        let extra_bits = reader.read_bits(bit_size);
+        let extra_bits = reader.read_bits(bit_size)?;
+        // Write directly to natural-order position
         coeffs[ZIGZAG_ORDER[index]] = extend(extra_bits, bit_size);
         index += 1;
     }

@@ -1,13 +1,15 @@
+use crate::common::error::Result;
+
 /// Reads individual bits from JPEG entropy-coded data.
 /// Handles byte stuffing (0xFF 0x00 -> 0xFF) and detects restart markers.
 ///
 /// Uses a 64-bit buffer to minimize refill frequency.
-/// All read/peek operations are infallible — they return 0 at EOF.
 pub struct BitReader<'a> {
     data: &'a [u8],
     pos: usize,
     bit_buffer: u64,
     bits_left: u8,
+    hit_marker: bool,
 }
 
 impl<'a> BitReader<'a> {
@@ -17,71 +19,72 @@ impl<'a> BitReader<'a> {
             pos: 0,
             bit_buffer: 0,
             bits_left: 0,
+            hit_marker: false,
         }
     }
 
     /// Ensure at least `needed` bits are in the buffer.
     #[inline(always)]
-    fn fill_buffer(&mut self, needed: u8) {
+    fn fill_buffer(&mut self, needed: u8) -> Result<()> {
         while self.bits_left < needed.max(25) {
             if self.bits_left > 56 {
                 break;
             }
-            let byte = self.read_next_byte();
+            let byte = self.read_next_byte()?;
             self.bit_buffer = (self.bit_buffer << 8) | byte as u64;
             self.bits_left += 8;
         }
+        Ok(())
     }
 
     #[inline(always)]
-    fn read_next_byte(&mut self) -> u8 {
+    fn read_next_byte(&mut self) -> Result<u8> {
         if self.pos >= self.data.len() {
-            return 0;
+            return Ok(0);
         }
         let byte = self.data[self.pos];
         self.pos += 1;
 
         if byte != 0xFF {
-            return byte;
+            return Ok(byte);
         }
 
         if self.pos >= self.data.len() {
-            return 0;
+            return Ok(0);
         }
         let next = self.data[self.pos];
         if next == 0x00 {
-            // Byte stuffing: 0xFF 0x00 -> 0xFF
             self.pos += 1;
-            0xFF
+            Ok(0xFF)
         } else if (0xD0..=0xD7).contains(&next) {
-            // Restart marker
             self.pos += 1;
-            0xFF
+            Ok(0xFF)
         } else {
-            // Real marker — back up, pad with zero
             self.pos -= 1;
-            0
+            self.hit_marker = true;
+            Ok(0)
         }
     }
 
     /// Peek at the next `count` bits without consuming them (max 16).
     #[inline(always)]
-    pub fn peek_bits(&mut self, count: u8) -> u16 {
+    pub fn peek_bits(&mut self, count: u8) -> Result<u16> {
         if self.bits_left < count {
-            self.fill_buffer(count);
+            self.fill_buffer(count)?;
         }
         let shift = self.bits_left - count;
-        ((self.bit_buffer >> shift) & ((1u64 << count) - 1)) as u16
+        Ok(((self.bit_buffer >> shift) & ((1u64 << count) - 1)) as u16)
     }
 
     /// Read and consume `count` bits (max 16).
     #[inline(always)]
-    pub fn read_bits(&mut self, count: u8) -> u16 {
+    pub fn read_bits(&mut self, count: u8) -> Result<u16> {
         if self.bits_left < count {
-            self.fill_buffer(count);
+            self.fill_buffer(count)?;
         }
         self.bits_left -= count;
-        ((self.bit_buffer >> self.bits_left) & ((1u64 << count) - 1)) as u16
+        let val = (self.bit_buffer >> self.bits_left) & ((1u64 << count) - 1);
+        Ok(val as u16)
     }
 
     /// Consume `count` bits that were already peeked.
@@ -95,5 +98,6 @@ impl<'a> BitReader<'a> {
     pub fn reset(&mut self) {
         self.bit_buffer = 0;
         self.bits_left = 0;
+        self.hit_marker = false;
     }
 }

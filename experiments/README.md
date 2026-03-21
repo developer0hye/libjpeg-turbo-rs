@@ -8,18 +8,13 @@ Performance optimization experiment tracking. Inspired by [karpathy/autoresearch
 experiments/
 ├── README.md          # This file
 ├── baseline.txt       # Reference: C libjpeg-turbo benchmark results
-├── <target>/          # One subfolder per optimization area
-│   ├── log.tsv        # Experiment ledger (append-only)
-│   ├── notes.md       # (optional) Hypotheses, reference links, dead-end rationale
-│   └── profile.txt    # (optional) Profiler output snapshots
+├── <target>.tsv       # Per-target experiment log (one file per optimization area)
 └── ...
 ```
 
-Current targets: `pipeline/`, `huffman/`, `idct/`, `upsample/`.
-
 ## Per-Target TSV Format
 
-Each optimization area gets its own subfolder with a `log.tsv`. When switching targets, **read only that subfolder** — not the others. This prevents context pollution and keeps focus.
+Each optimization area (idct, huffman, color, upsample, pipeline, etc.) gets its own `.tsv` file. This allows reading only the relevant history when switching targets, avoiding context pollution.
 
 **Columns** (tab-separated):
 
