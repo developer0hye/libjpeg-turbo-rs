@@ -1,0 +1,5 @@
+commit	time_us	status	description
+4cece20	665	keep	BitReader.skip_bits() avoids redundant fill_buffer after peek. HuffmanTable uses Box<[LookupEntry;256]> instead of Vec. #[inline(always)] on lookup, #[cold] on slow path, start slow path at min_slow_length. Branchless extend(). Eliminated format!() in error paths.
+384673f	596	keep	Fast-path read_bits: skip fill_buffer when bits_left >= count (common after peek+skip). Saves one comparison per read_bits call.
+03365ee	435	keep	Infallible BitReader: peek_bits/read_bits return u16 directly (no Result wrapping). EOF returns 0. Eliminates 2 error-path branches per AC coefficient decode iteration. Also #[inline(never)] on lookup_slow.
+uncommitted	435	discard	Attempted fast 4-byte bulk fill in BitReader (check 4 bytes for 0xFF, load all at once if clean). No improvement — branch predictor already handles per-byte 0xFF check well. Reverted.

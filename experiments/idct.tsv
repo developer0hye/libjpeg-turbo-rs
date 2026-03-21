@@ -1,0 +1,7 @@
+commit	time_us	status	description
+2ba6fc3	1736	keep	NEON IDCT 8x8: port of jidctint-neon.c. 3-tier sparsity (all-zero, sparse rows 4-7, regular). Individual bench: 40ns NEON vs 75ns scalar (1.9x).
+384673f	596	keep	Gather-based zigzag reorder: sequential writes (natural order), random reads (NATURAL_ORDER table). Slightly better cache behavior than scatter.
+6e3adb5	451	keep	Eliminated zigzag reorder entirely: Huffman decoder now writes to natural order. IDCT just does element-wise dequant multiply. Massive win (-145 us).
+03365ee	446	keep	NEON-ize dequant multiply: 8x vmulq_s16 replaces 64-iteration scalar loop. Also direct IDCT call on aarch64 (avoids fn pointer blr overhead).
+03365ee	435	keep	Fused dequant into IDCT pass1 loads: vmul_s16(vld1_s16(coeff), vld1_s16(quant)) during row load. Eliminates intermediate dequantized[] buffer (8 stores + 8 loads saved).
+uncommitted	442	discard	NEON vertical_blend in h2v2: explicit vmlal_u8 + vshrn. No improvement over auto-vectorized scalar — compiler was already generating NEON for the simple loop.
