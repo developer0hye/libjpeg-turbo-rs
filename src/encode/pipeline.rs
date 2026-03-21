@@ -226,6 +226,528 @@ pub fn compress(
     Ok(output)
 }
 
+/// Per-component block layout for progressive encoding.
+struct CompLayout {
+    blocks_x: usize,
+    blocks_y: usize,
+    h_blocks: usize,
+    v_blocks: usize,
+}
+
+/// Compress as progressive JPEG (SOF2, multi-scan).
+///
+/// Buffers all DCT coefficients, then encodes across multiple scans
+/// following a standard scan progression script.
+pub fn compress_progressive(
+    pixels: &[u8],
+    width: usize,
+    height: usize,
+    pixel_format: PixelFormat,
+    quality: u8,
+    subsampling: Subsampling,
+) -> Result<Vec<u8>> {
+    use crate::encode::progressive::simple_progression;
+
+    if width == 0 || height == 0 {
+        return Err(JpegError::CorruptData(
+            "image dimensions must be non-zero".to_string(),
+        ));
+    }
+
+    let bpp = pixel_format.bytes_per_pixel();
+    let expected_size = width * height * bpp;
+    if pixels.len() < expected_size {
+        return Err(JpegError::BufferTooSmall {
+            need: expected_size,
+            got: pixels.len(),
+        });
+    }
+
+    let is_grayscale = pixel_format == PixelFormat::Grayscale;
+    let num_components = if is_grayscale { 1 } else { 3 };
+
+    let luma_quant = tables::quality_scale_quant_table(&tables::STD_LUMINANCE_QUANT_TABLE, quality);
+    let chroma_quant =
+        tables::quality_scale_quant_table(&tables::STD_CHROMINANCE_QUANT_TABLE, quality);
+    let luma_divisors = scale_quant_for_fdct(&luma_quant);
+    let chroma_divisors = scale_quant_for_fdct(&chroma_quant);
+
+    let (y_plane, cb_plane, cr_plane) = convert_to_ycbcr(pixels, width, height, pixel_format)?;
+
+    let (mcu_w, mcu_h) = if is_grayscale {
+        (8, 8)
+    } else {
+        match subsampling {
+            Subsampling::S444 => (8, 8),
+            Subsampling::S422 => (16, 8),
+            Subsampling::S420 => (16, 16),
+            _ => {
+                return Err(JpegError::Unsupported(format!(
+                    "subsampling {:?} not supported for progressive encoding",
+                    subsampling
+                )));
+            }
+        }
+    };
+
+    let mcus_x = (width + mcu_w - 1) / mcu_w;
+    let mcus_y = (height + mcu_h - 1) / mcu_h;
+
+    // Compute per-component block dimensions
+    let (h_samp, v_samp) = if is_grayscale {
+        (1usize, 1usize)
+    } else {
+        match subsampling {
+            Subsampling::S444 => (1, 1),
+            Subsampling::S422 => (2, 1),
+            Subsampling::S420 => (2, 2),
+            _ => unreachable!(),
+        }
+    };
+
+    // CompLayout defined at module level below
+
+    let comp_layouts: Vec<CompLayout> = if is_grayscale {
+        vec![CompLayout {
+            blocks_x: mcus_x,
+            blocks_y: mcus_y,
+            h_blocks: 1,
+            v_blocks: 1,
+        }]
+    } else {
+        vec![
+            CompLayout {
+                blocks_x: mcus_x * h_samp,
+                blocks_y: mcus_y * v_samp,
+                h_blocks: h_samp,
+                v_blocks: v_samp,
+            },
+            CompLayout {
+                blocks_x: mcus_x,
+                blocks_y: mcus_y,
+                h_blocks: 1,
+                v_blocks: 1,
+            },
+            CompLayout {
+                blocks_x: mcus_x,
+                blocks_y: mcus_y,
+                h_blocks: 1,
+                v_blocks: 1,
+            },
+        ]
+    };
+
+    // Buffer all quantized coefficients per component
+    let mut coeff_bufs: Vec<Vec<[i16; 64]>> = comp_layouts
+        .iter()
+        .map(|cl| vec![[0i16; 64]; cl.blocks_x * cl.blocks_y])
+        .collect();
+
+    // FDCT + quantize all blocks into coefficient buffers
+    for mcu_y in 0..mcus_y {
+        for mcu_x in 0..mcus_x {
+            let x0 = mcu_x * mcu_w;
+            let y0 = mcu_y * mcu_h;
+
+            if is_grayscale {
+                let bx = mcu_x;
+                let by = mcu_y;
+                let mut block = [0i16; 64];
+                extract_block(&y_plane, width, height, x0, y0, &mut block);
+                let mut dct = [0i32; 64];
+                fdct::fdct_islow(&block, &mut dct);
+                quant::quantize_block(&dct, &luma_divisors, &mut coeff_bufs[0][by * mcus_x + bx]);
+            } else {
+                // Y blocks
+                for bv in 0..v_samp {
+                    for bh in 0..h_samp {
+                        let bx = mcu_x * h_samp + bh;
+                        let by = mcu_y * v_samp + bv;
+                        let mut block = [0i16; 64];
+                        extract_block(
+                            &y_plane,
+                            width,
+                            height,
+                            x0 + bh * 8,
+                            y0 + bv * 8,
+                            &mut block,
+                        );
+                        let mut dct = [0i32; 64];
+                        fdct::fdct_islow(&block, &mut dct);
+                        let blocks_x = comp_layouts[0].blocks_x;
+                        quant::quantize_block(
+                            &dct,
+                            &luma_divisors,
+                            &mut coeff_bufs[0][by * blocks_x + bx],
+                        );
+                    }
+                }
+                // Cb block
+                {
+                    let bx = mcu_x;
+                    let by = mcu_y;
+                    let mut block = [0i16; 64];
+                    let hf = if h_samp > 1 { 2 } else { 1 };
+                    let vf = if v_samp > 1 { 2 } else { 1 };
+                    if hf == 1 && vf == 1 {
+                        extract_block(&cb_plane, width, height, x0, y0, &mut block);
+                    } else {
+                        downsample_chroma_block(
+                            &cb_plane, width, height, x0, y0, hf, vf, &mut block,
+                        );
+                    }
+                    let mut dct = [0i32; 64];
+                    fdct::fdct_islow(&block, &mut dct);
+                    quant::quantize_block(
+                        &dct,
+                        &chroma_divisors,
+                        &mut coeff_bufs[1][by * mcus_x + bx],
+                    );
+                }
+                // Cr block
+                {
+                    let bx = mcu_x;
+                    let by = mcu_y;
+                    let mut block = [0i16; 64];
+                    let hf = if h_samp > 1 { 2 } else { 1 };
+                    let vf = if v_samp > 1 { 2 } else { 1 };
+                    if hf == 1 && vf == 1 {
+                        extract_block(&cr_plane, width, height, x0, y0, &mut block);
+                    } else {
+                        downsample_chroma_block(
+                            &cr_plane, width, height, x0, y0, hf, vf, &mut block,
+                        );
+                    }
+                    let mut dct = [0i32; 64];
+                    fdct::fdct_islow(&block, &mut dct);
+                    quant::quantize_block(
+                        &dct,
+                        &chroma_divisors,
+                        &mut coeff_bufs[2][by * mcus_x + bx],
+                    );
+                }
+            }
+        }
+    }
+
+    // Build Huffman tables
+    let dc_luma_table = build_huff_table(&tables::DC_LUMINANCE_BITS, &tables::DC_LUMINANCE_VALUES);
+    let ac_luma_table = build_huff_table(&tables::AC_LUMINANCE_BITS, &tables::AC_LUMINANCE_VALUES);
+    let dc_chroma_table =
+        build_huff_table(&tables::DC_CHROMINANCE_BITS, &tables::DC_CHROMINANCE_VALUES);
+    let ac_chroma_table =
+        build_huff_table(&tables::AC_CHROMINANCE_BITS, &tables::AC_CHROMINANCE_VALUES);
+
+    // Generate scan progression
+    let scans = simple_progression(num_components);
+
+    // Assemble output
+    let mut output = Vec::with_capacity(width * height * 2);
+
+    marker_writer::write_soi(&mut output);
+    marker_writer::write_app0_jfif(&mut output);
+
+    // Quantization tables
+    marker_writer::write_dqt(&mut output, 0, &luma_quant);
+    if !is_grayscale {
+        marker_writer::write_dqt(&mut output, 1, &chroma_quant);
+    }
+
+    // SOF2 (progressive)
+    if is_grayscale {
+        let components = vec![(1, 1, 1, 0)];
+        marker_writer::write_sof2(&mut output, width as u16, height as u16, &components);
+    } else {
+        let components = vec![
+            (1, h_samp as u8, v_samp as u8, 0),
+            (2, 1, 1, 1),
+            (3, 1, 1, 1),
+        ];
+        marker_writer::write_sof2(&mut output, width as u16, height as u16, &components);
+    }
+
+    // Huffman tables (write all before scans)
+    marker_writer::write_dht(
+        &mut output,
+        0,
+        0,
+        &tables::DC_LUMINANCE_BITS,
+        &tables::DC_LUMINANCE_VALUES,
+    );
+    marker_writer::write_dht(
+        &mut output,
+        1,
+        0,
+        &tables::AC_LUMINANCE_BITS,
+        &tables::AC_LUMINANCE_VALUES,
+    );
+    if !is_grayscale {
+        marker_writer::write_dht(
+            &mut output,
+            0,
+            1,
+            &tables::DC_CHROMINANCE_BITS,
+            &tables::DC_CHROMINANCE_VALUES,
+        );
+        marker_writer::write_dht(
+            &mut output,
+            1,
+            1,
+            &tables::AC_CHROMINANCE_BITS,
+            &tables::AC_CHROMINANCE_VALUES,
+        );
+    }
+
+    // Encode each scan
+    for scan in &scans {
+        // Build SOS component list
+        let sos_comps: Vec<(u8, u8, u8)> = scan
+            .component_indices
+            .iter()
+            .map(|&ci| {
+                let comp_id = (ci + 1) as u8;
+                let (dc_tbl, ac_tbl) = if ci == 0 { (0, 0) } else { (1, 1) };
+                (comp_id, dc_tbl, ac_tbl)
+            })
+            .collect();
+
+        marker_writer::write_sos_progressive(
+            &mut output,
+            &sos_comps,
+            scan.ss,
+            scan.se,
+            scan.ah,
+            scan.al,
+        );
+
+        // Encode scan data
+        let mut bit_writer = BitWriter::new(width * height / 4);
+
+        if scan.ss == 0 && scan.se == 0 {
+            // DC scan
+            encode_progressive_dc_scan(
+                &coeff_bufs,
+                &comp_layouts,
+                scan,
+                mcus_x,
+                mcus_y,
+                &dc_luma_table,
+                &dc_chroma_table,
+                &mut bit_writer,
+            );
+        } else {
+            // AC scan
+            encode_progressive_ac_scan(
+                &coeff_bufs,
+                &comp_layouts,
+                scan,
+                mcus_x,
+                mcus_y,
+                &ac_luma_table,
+                &ac_chroma_table,
+                &mut bit_writer,
+            );
+        }
+
+        bit_writer.flush();
+        output.extend_from_slice(bit_writer.data());
+    }
+
+    marker_writer::write_eoi(&mut output);
+
+    Ok(output)
+}
+
+/// Encode a progressive DC scan.
+#[allow(clippy::too_many_arguments)]
+fn encode_progressive_dc_scan(
+    coeff_bufs: &[Vec<[i16; 64]>],
+    comp_layouts: &[CompLayout],
+    scan: &crate::encode::progressive::ProgressiveScan,
+    mcus_x: usize,
+    mcus_y: usize,
+    dc_luma_table: &HuffTable,
+    dc_chroma_table: &HuffTable,
+    writer: &mut BitWriter,
+) {
+    let al = scan.al;
+    let ah = scan.ah;
+    let mut prev_dc = vec![0i16; scan.component_indices.len()];
+
+    for mcu_y in 0..mcus_y {
+        for mcu_x in 0..mcus_x {
+            for (scan_ci, &ci) in scan.component_indices.iter().enumerate() {
+                let layout = &comp_layouts[ci];
+                let dc_table = if ci == 0 {
+                    dc_luma_table
+                } else {
+                    dc_chroma_table
+                };
+
+                for bv in 0..layout.v_blocks {
+                    for bh in 0..layout.h_blocks {
+                        let bx = mcu_x * layout.h_blocks + bh;
+                        let by = mcu_y * layout.v_blocks + bv;
+                        let block = &coeff_bufs[ci][by * layout.blocks_x + bx];
+
+                        if ah == 0 {
+                            // DC first scan: encode (DC >> Al)
+                            let dc = block[0] >> al;
+                            let diff = dc - prev_dc[scan_ci];
+                            prev_dc[scan_ci] = dc;
+
+                            let (magnitude_bits, category) = encode_dc_value_prog(diff);
+                            writer.write_bits(
+                                dc_table.ehufco[category as usize],
+                                dc_table.ehufsi[category as usize],
+                            );
+                            if category > 0 {
+                                writer.write_bits(magnitude_bits, category);
+                            }
+                        } else {
+                            // DC refine: single bit
+                            let bit = ((block[0] >> al) & 1) as u16;
+                            writer.write_bits(bit, 1);
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Encode a progressive AC scan (single component).
+#[allow(clippy::too_many_arguments)]
+fn encode_progressive_ac_scan(
+    coeff_bufs: &[Vec<[i16; 64]>],
+    comp_layouts: &[CompLayout],
+    scan: &crate::encode::progressive::ProgressiveScan,
+    mcus_x: usize,
+    mcus_y: usize,
+    ac_luma_table: &HuffTable,
+    ac_chroma_table: &HuffTable,
+    writer: &mut BitWriter,
+) {
+    let ci = scan.component_indices[0]; // AC scans are single-component
+    let layout = &comp_layouts[ci];
+    let ac_table = if ci == 0 {
+        ac_luma_table
+    } else {
+        ac_chroma_table
+    };
+    let ss = scan.ss as usize;
+    let se = scan.se as usize;
+    let al = scan.al;
+    let ah = scan.ah;
+
+    // For progressive AC: iterate all blocks in raster order
+    for mcu_y in 0..mcus_y {
+        for mcu_x in 0..mcus_x {
+            for bv in 0..layout.v_blocks {
+                for bh in 0..layout.h_blocks {
+                    let bx = mcu_x * layout.h_blocks + bh;
+                    let by = mcu_y * layout.v_blocks + bv;
+                    let block = &coeff_bufs[ci][by * layout.blocks_x + bx];
+
+                    if ah == 0 {
+                        // AC first scan
+                        let mut zero_run: u8 = 0;
+                        for k in ss..=se {
+                            let ac = block[k] >> al;
+                            if ac == 0 {
+                                zero_run += 1;
+                            } else {
+                                while zero_run >= 16 {
+                                    writer.write_bits(ac_table.ehufco[0xF0], ac_table.ehufsi[0xF0]);
+                                    zero_run -= 16;
+                                }
+                                let (mag, size) = encode_ac_value_prog(ac);
+                                let symbol = ((zero_run as u16) << 4) | (size as u16);
+                                writer.write_bits(
+                                    ac_table.ehufco[symbol as usize],
+                                    ac_table.ehufsi[symbol as usize],
+                                );
+                                if size > 0 {
+                                    writer.write_bits(mag, size);
+                                }
+                                zero_run = 0;
+                            }
+                        }
+                        if zero_run > 0 {
+                            writer.write_bits(ac_table.ehufco[0x00], ac_table.ehufsi[0x00]);
+                        }
+                    } else {
+                        // AC refine scan: encode single refinement bit per nonzero coeff
+                        let mut zero_run: u8 = 0;
+                        for k in ss..=se {
+                            let ac = block[k];
+                            let prev_val = ac >> (al + 1);
+                            let cur_bit = (ac >> al) & 1;
+
+                            if prev_val == 0 {
+                                if cur_bit == 0 {
+                                    zero_run += 1;
+                                } else {
+                                    while zero_run >= 16 {
+                                        writer.write_bits(
+                                            ac_table.ehufco[0xF0],
+                                            ac_table.ehufsi[0xF0],
+                                        );
+                                        zero_run -= 16;
+                                    }
+                                    let symbol = ((zero_run as u16) << 4) | 1;
+                                    writer.write_bits(
+                                        ac_table.ehufco[symbol as usize],
+                                        ac_table.ehufsi[symbol as usize],
+                                    );
+                                    writer.write_bits(cur_bit as u16, 1);
+                                    zero_run = 0;
+                                }
+                            } else {
+                                // Already nonzero: emit refinement bit
+                                writer.write_bits(cur_bit as u16, 1);
+                            }
+                        }
+                        if zero_run > 0 {
+                            writer.write_bits(ac_table.ehufco[0x00], ac_table.ehufsi[0x00]);
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Encode DC value for progressive (same as baseline but can handle shifted values).
+fn encode_dc_value_prog(diff: i16) -> (u16, u8) {
+    if diff == 0 {
+        return (0, 0);
+    }
+    let abs_diff = diff.unsigned_abs();
+    let category = 16 - abs_diff.leading_zeros() as u8;
+    let magnitude_bits = if diff > 0 {
+        diff as u16
+    } else {
+        (diff - 1) as u16
+    };
+    (magnitude_bits, category)
+}
+
+/// Encode AC value for progressive.
+fn encode_ac_value_prog(value: i16) -> (u16, u8) {
+    if value == 0 {
+        return (0, 0);
+    }
+    let abs_val = value.unsigned_abs();
+    let size = 16 - abs_val.leading_zeros() as u8;
+    let magnitude_bits = if value > 0 {
+        value as u16
+    } else {
+        (value - 1) as u16
+    };
+    (magnitude_bits, size)
+}
+
 /// Scale quantization table values by 8 to create divisor table for the islow FDCT.
 ///
 /// The islow FDCT output is scaled up by a factor of 8 (one factor of sqrt(8)

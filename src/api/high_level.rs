@@ -52,17 +52,6 @@ pub fn decompress_cropped(data: &[u8], region: CropRegion) -> Result<Image> {
 }
 
 /// Compress raw pixel data into a JPEG byte stream.
-///
-/// # Arguments
-/// * `pixels` - Raw pixel data in the format specified by `pixel_format`
-/// * `width` - Image width in pixels
-/// * `height` - Image height in pixels
-/// * `pixel_format` - Pixel format of the input data
-/// * `quality` - JPEG quality factor (1-100, where 100 is best quality)
-/// * `subsampling` - Chroma subsampling mode
-///
-/// # Returns
-/// A `Vec<u8>` containing the complete JPEG file data.
 pub fn compress(
     pixels: &[u8],
     width: usize,
@@ -86,4 +75,18 @@ pub fn compress_optimized(
     subsampling: Subsampling,
 ) -> Result<Vec<u8>> {
     encoder::compress_optimized(pixels, width, height, pixel_format, quality, subsampling)
+}
+
+/// Compress as progressive JPEG (SOF2, multi-scan).
+///
+/// Produces a progressive JPEG that renders incrementally during download.
+pub fn compress_progressive(
+    pixels: &[u8],
+    width: usize,
+    height: usize,
+    pixel_format: PixelFormat,
+    quality: u8,
+    subsampling: Subsampling,
+) -> Result<Vec<u8>> {
+    encoder::compress_progressive(pixels, width, height, pixel_format, quality, subsampling)
 }
