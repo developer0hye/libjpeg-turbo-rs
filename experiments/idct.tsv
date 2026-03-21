@@ -5,3 +5,4 @@ commit	time_us	status	description
 03365ee	446	keep	NEON-ize dequant multiply: 8x vmulq_s16 replaces 64-iteration scalar loop. Also direct IDCT call on aarch64 (avoids fn pointer blr overhead).
 03365ee	435	keep	Fused dequant into IDCT pass1 loads: vmul_s16(vld1_s16(coeff), vld1_s16(quant)) during row load. Eliminates intermediate dequantized[] buffer (8 stores + 8 loads saved).
 uncommitted	442	discard	NEON vertical_blend in h2v2: explicit vmlal_u8 + vshrn. No improvement over auto-vectorized scalar — compiler was already generating NEON for the simple loop.
+74fe5cc	348	keep	Strided IDCT output: add stride parameter to NEON pass2 so IDCT writes directly into component plane. Eliminates intermediate [u8;64] buffer + 8× copy_from_slice per block (57600 copies/frame). Profile showed 36% of time in decode_image (includes copy overhead). Saved ~45 µs.
