@@ -4,7 +4,6 @@ use crate::common::types::*;
 use crate::decode::bitstream::BitReader;
 use crate::decode::entropy::{self, McuDecoder};
 use crate::decode::marker::{JpegMetadata, MarkerReader};
-use crate::decode::upsample;
 use crate::simd::{self, SimdRoutines};
 
 /// Vertical triangle-filter blend: out[i] = (3*cur[i] + neighbor[i] + 2) >> 2.
@@ -53,6 +52,41 @@ impl<'a> Decoder<'a> {
         decoder.decode_image()
     }
 
+    #[inline(always)]
+    fn idct_islow(&self, coeffs: &[i16; 64], quant: &[u16; 64], output: &mut [u8; 64]) {
+        #[cfg(all(target_arch = "aarch64", feature = "simd"))]
+        {
+            return crate::simd::aarch64::idct::neon_idct_islow(coeffs, quant, output);
+        }
+
+        #[allow(unreachable_code)]
+        (self.routines.idct_islow)(coeffs, quant, output)
+    }
+
+    #[inline(always)]
+    fn ycbcr_to_rgb_row(&self, y: &[u8], cb: &[u8], cr: &[u8], rgb: &mut [u8], width: usize) {
+        #[cfg(all(target_arch = "aarch64", feature = "simd"))]
+        {
+            return crate::simd::aarch64::color::neon_ycbcr_to_rgb_row(y, cb, cr, rgb, width);
+        }
+
+        #[allow(unreachable_code)]
+        (self.routines.ycbcr_to_rgb_row)(y, cb, cr, rgb, width)
+    }
+
+    #[inline(always)]
+    fn fancy_upsample_h2v1(&self, input: &[u8], in_width: usize, output: &mut [u8]) {
+        #[cfg(all(target_arch = "aarch64", feature = "simd"))]
+        {
+            return crate::simd::aarch64::upsample::neon_fancy_upsample_h2v1(
+                input, in_width, output,
+            );
+        }
+
+        #[allow(unreachable_code)]
+        (self.routines.fancy_upsample_h2v1)(input, in_width, output)
+    }
+
     /// Fancy h2v2 upsample using dispatch for the horizontal h2v1 pass.
     /// Vertical blend is done inline; horizontal upsample goes through
     /// `self.routines.fancy_upsample_h2v1` (NEON on aarch64).
@@ -85,16 +119,8 @@ impl<'a> Decoder<'a> {
 
             let out_y_top = y * 2;
             let out_y_bot = y * 2 + 1;
-            (self.routines.fancy_upsample_h2v1)(
-                &row_above,
-                in_width,
-                &mut output[out_y_top * out_width..],
-            );
-            (self.routines.fancy_upsample_h2v1)(
-                &row_below,
-                in_width,
-                &mut output[out_y_bot * out_width..],
-            );
+            self.fancy_upsample_h2v1(&row_above, in_width, &mut output[out_y_top * out_width..]);
+            self.fancy_upsample_h2v1(&row_below, in_width, &mut output[out_y_bot * out_width..]);
         }
     }
 
@@ -223,18 +249,7 @@ impl<'a> Decoder<'a> {
                                 &mut coeffs,
                             )?;
 
-                            #[cfg(all(target_arch = "aarch64", feature = "simd"))]
-                            {
-                                crate::simd::aarch64::idct::neon_idct_islow(
-                                    &coeffs,
-                                    qt_values,
-                                    &mut block_u8,
-                                );
-                            }
-                            #[cfg(not(all(target_arch = "aarch64", feature = "simd")))]
-                            {
-                                (self.routines.idct_islow)(&coeffs, qt_values, &mut block_u8);
-                            }
+                            self.idct_islow(&coeffs, qt_values, &mut block_u8);
 
                             let block_x = (mcu_x * layout.h_blocks + h) * 8;
                             let block_y = (mcu_y * layout.v_blocks + v) * 8;
@@ -292,12 +307,12 @@ impl<'a> Decoder<'a> {
                 cr_full = component_planes[2].clone();
             } else if h_factor == 2 && v_factor == 1 {
                 for row in 0..cb_h {
-                    (self.routines.fancy_upsample_h2v1)(
+                    self.fancy_upsample_h2v1(
                         &component_planes[1][row * cb_w..],
                         cb_w,
                         &mut cb_full[row * full_width..],
                     );
-                    (self.routines.fancy_upsample_h2v1)(
+                    self.fancy_upsample_h2v1(
                         &component_planes[2][row * cb_w..],
                         cb_w,
                         &mut cr_full[row * full_width..],
@@ -331,7 +346,7 @@ impl<'a> Decoder<'a> {
             // SAFETY: color conversion writes every pixel in the output.
             unsafe { data.set_len(data_size) };
             for y in 0..height {
-                (self.routines.ycbcr_to_rgb_row)(
+                self.ycbcr_to_rgb_row(
                     &y_plane[y * y_width..],
                     &cb_full[y * full_width..],
                     &cr_full[y * full_width..],

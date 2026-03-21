@@ -72,14 +72,14 @@ pub fn resolve_mcu_plan<'a>(
 
 /// Decodes MCUs from entropy-coded data. Manages DC prediction per component.
 pub struct McuDecoder {
-    dc_pred: Vec<i16>,
+    dc_pred: [i16; 4],
 }
 
 impl McuDecoder {
     pub fn new(num_components: usize) -> Self {
-        Self {
-            dc_pred: vec![0; num_components],
-        }
+        debug_assert!(num_components <= 4);
+        let _ = num_components;
+        Self { dc_pred: [0; 4] }
     }
 
     pub fn dc_prediction(&self, component_index: usize) -> i16 {
@@ -87,9 +87,7 @@ impl McuDecoder {
     }
 
     pub fn reset(&mut self) {
-        for pred in self.dc_pred.iter_mut() {
-            *pred = 0;
-        }
+        self.dc_pred = [0; 4];
     }
 
     /// Decode one 8x8 block of DCT coefficients (in natural/row-major order).
@@ -105,8 +103,9 @@ impl McuDecoder {
         *coeffs = [0i16; 64];
 
         let dc_diff = huffman::decode_dc_coefficient(reader, dc_table)?;
-        self.dc_pred[component_index] += dc_diff;
-        coeffs[0] = self.dc_pred[component_index];
+        let dc_pred = &mut self.dc_pred[component_index];
+        *dc_pred += dc_diff;
+        coeffs[0] = *dc_pred;
 
         huffman::decode_ac_coefficients(reader, ac_table, coeffs)?;
 

@@ -1,4 +1,5 @@
 use criterion::{black_box, criterion_group, criterion_main, Criterion};
+use libjpeg_turbo_rs::api::streaming::StreamingDecoder;
 use libjpeg_turbo_rs::simd;
 
 fn bench_idct_8x8(c: &mut Criterion) {
@@ -72,11 +73,38 @@ fn bench_full_decode(c: &mut Criterion) {
     });
 }
 
+fn bench_decoder_new(c: &mut Criterion) {
+    let jpeg_data = std::fs::read("tests/fixtures/gradient_640x480.jpg")
+        .expect("gradient_640x480.jpg fixture required for benchmarks");
+
+    c.bench_function("decoder_new_640x480", |b| {
+        b.iter(|| {
+            let decoder = StreamingDecoder::new(black_box(&jpeg_data)).unwrap();
+            black_box(decoder.header());
+        })
+    });
+}
+
+fn bench_full_decode_reuse_header(c: &mut Criterion) {
+    let jpeg_data = std::fs::read("tests/fixtures/gradient_640x480.jpg")
+        .expect("gradient_640x480.jpg fixture required for benchmarks");
+    let decoder = StreamingDecoder::new(&jpeg_data).expect("streaming decoder fixture");
+
+    c.bench_function("decode_640x480_reuse_header", |b| {
+        b.iter(|| {
+            let image = decoder.decode().unwrap();
+            black_box(&image.data);
+        })
+    });
+}
+
 criterion_group!(
     benches,
     bench_idct_8x8,
     bench_ycbcr_to_rgb_row,
     bench_fancy_upsample_h2v1,
+    bench_decoder_new,
     bench_full_decode,
+    bench_full_decode_reuse_header,
 );
 criterion_main!(benches);
