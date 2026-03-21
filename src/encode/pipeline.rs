@@ -658,6 +658,455 @@ fn encode_downsampled_chroma_block(
     HuffmanEncoder::encode_block(writer, &quantized, prev_dc, dc_table, ac_table);
 }
 
+/// Compress with optimized Huffman tables (2-pass encoding).
+///
+/// Pass 1: FDCT + quantize all blocks, gather symbol frequencies.
+/// Pass 2: Generate optimal Huffman tables, encode with them.
+/// Produces smaller output than `compress()` at the cost of an extra pass.
+pub fn compress_optimized(
+    pixels: &[u8],
+    width: usize,
+    height: usize,
+    pixel_format: PixelFormat,
+    quality: u8,
+    subsampling: Subsampling,
+) -> Result<Vec<u8>> {
+    // Validate inputs
+    if width == 0 || height == 0 {
+        return Err(JpegError::CorruptData(
+            "image dimensions must be non-zero".to_string(),
+        ));
+    }
+
+    let bpp = pixel_format.bytes_per_pixel();
+    let expected_size = width * height * bpp;
+    if pixels.len() < expected_size {
+        return Err(JpegError::BufferTooSmall {
+            need: expected_size,
+            got: pixels.len(),
+        });
+    }
+
+    let is_grayscale = pixel_format == PixelFormat::Grayscale;
+
+    // Generate quantization tables
+    let luma_quant = tables::quality_scale_quant_table(&tables::STD_LUMINANCE_QUANT_TABLE, quality);
+    let chroma_quant =
+        tables::quality_scale_quant_table(&tables::STD_CHROMINANCE_QUANT_TABLE, quality);
+    let luma_divisors = scale_quant_for_fdct(&luma_quant);
+    let chroma_divisors = scale_quant_for_fdct(&chroma_quant);
+
+    // Color convert
+    let (y_plane, cb_plane, cr_plane) = convert_to_ycbcr(pixels, width, height, pixel_format)?;
+
+    // Determine MCU dimensions
+    let (mcu_w, mcu_h) = if is_grayscale {
+        (8, 8)
+    } else {
+        match subsampling {
+            Subsampling::S444 => (8, 8),
+            Subsampling::S422 => (16, 8),
+            Subsampling::S420 => (16, 16),
+            _ => {
+                return Err(JpegError::Unsupported(format!(
+                    "subsampling mode {:?} not supported for encoding",
+                    subsampling
+                )));
+            }
+        }
+    };
+
+    let mcus_x = (width + mcu_w - 1) / mcu_w;
+    let mcus_y = (height + mcu_h - 1) / mcu_h;
+
+    // === Pass 1: FDCT + quantize all blocks, gather symbol frequencies ===
+    use crate::encode::huff_opt;
+
+    // Frequency arrays: DC lum, DC chr, AC lum, AC chr
+    let mut dc_luma_freq = [0u32; 257];
+    let mut dc_chroma_freq = [0u32; 257];
+    let mut ac_luma_freq = [0u32; 257];
+    let mut ac_chroma_freq = [0u32; 257];
+
+    // Buffer all quantized blocks for pass 2
+    let mut all_blocks: Vec<[i16; 64]> = Vec::new();
+
+    let mut prev_dc_y: i16 = 0;
+    let mut prev_dc_cb: i16 = 0;
+    let mut prev_dc_cr: i16 = 0;
+
+    for mcu_row in 0..mcus_y {
+        for mcu_col in 0..mcus_x {
+            let x0 = mcu_col * mcu_w;
+            let y0 = mcu_row * mcu_h;
+
+            if is_grayscale {
+                let q = gather_block(&y_plane, width, height, x0, y0, &luma_divisors);
+                let diff = q[0] - prev_dc_y;
+                prev_dc_y = q[0];
+                huff_opt::gather_dc_symbol(diff, &mut dc_luma_freq);
+                huff_opt::gather_ac_symbols(&q, &mut ac_luma_freq);
+                all_blocks.push(q);
+            } else {
+                match subsampling {
+                    Subsampling::S444 => {
+                        // 1 Y + 1 Cb + 1 Cr
+                        let yq = gather_block(&y_plane, width, height, x0, y0, &luma_divisors);
+                        let diff = yq[0] - prev_dc_y;
+                        prev_dc_y = yq[0];
+                        huff_opt::gather_dc_symbol(diff, &mut dc_luma_freq);
+                        huff_opt::gather_ac_symbols(&yq, &mut ac_luma_freq);
+                        all_blocks.push(yq);
+
+                        let cbq = gather_block(&cb_plane, width, height, x0, y0, &chroma_divisors);
+                        let diff = cbq[0] - prev_dc_cb;
+                        prev_dc_cb = cbq[0];
+                        huff_opt::gather_dc_symbol(diff, &mut dc_chroma_freq);
+                        huff_opt::gather_ac_symbols(&cbq, &mut ac_chroma_freq);
+                        all_blocks.push(cbq);
+
+                        let crq = gather_block(&cr_plane, width, height, x0, y0, &chroma_divisors);
+                        let diff = crq[0] - prev_dc_cr;
+                        prev_dc_cr = crq[0];
+                        huff_opt::gather_dc_symbol(diff, &mut dc_chroma_freq);
+                        huff_opt::gather_ac_symbols(&crq, &mut ac_chroma_freq);
+                        all_blocks.push(crq);
+                    }
+                    Subsampling::S422 => {
+                        // 2 Y blocks + 1 Cb + 1 Cr
+                        for dx in [0, 8] {
+                            let yq =
+                                gather_block(&y_plane, width, height, x0 + dx, y0, &luma_divisors);
+                            let diff = yq[0] - prev_dc_y;
+                            prev_dc_y = yq[0];
+                            huff_opt::gather_dc_symbol(diff, &mut dc_luma_freq);
+                            huff_opt::gather_ac_symbols(&yq, &mut ac_luma_freq);
+                            all_blocks.push(yq);
+                        }
+                        let cbq = gather_downsampled_block(
+                            &cb_plane,
+                            width,
+                            height,
+                            x0,
+                            y0,
+                            2,
+                            1,
+                            &chroma_divisors,
+                        );
+                        let diff = cbq[0] - prev_dc_cb;
+                        prev_dc_cb = cbq[0];
+                        huff_opt::gather_dc_symbol(diff, &mut dc_chroma_freq);
+                        huff_opt::gather_ac_symbols(&cbq, &mut ac_chroma_freq);
+                        all_blocks.push(cbq);
+
+                        let crq = gather_downsampled_block(
+                            &cr_plane,
+                            width,
+                            height,
+                            x0,
+                            y0,
+                            2,
+                            1,
+                            &chroma_divisors,
+                        );
+                        let diff = crq[0] - prev_dc_cr;
+                        prev_dc_cr = crq[0];
+                        huff_opt::gather_dc_symbol(diff, &mut dc_chroma_freq);
+                        huff_opt::gather_ac_symbols(&crq, &mut ac_chroma_freq);
+                        all_blocks.push(crq);
+                    }
+                    Subsampling::S420 => {
+                        // 4 Y blocks + 1 Cb + 1 Cr
+                        for (dx, dy) in [(0, 0), (8, 0), (0, 8), (8, 8)] {
+                            let yq = gather_block(
+                                &y_plane,
+                                width,
+                                height,
+                                x0 + dx,
+                                y0 + dy,
+                                &luma_divisors,
+                            );
+                            let diff = yq[0] - prev_dc_y;
+                            prev_dc_y = yq[0];
+                            huff_opt::gather_dc_symbol(diff, &mut dc_luma_freq);
+                            huff_opt::gather_ac_symbols(&yq, &mut ac_luma_freq);
+                            all_blocks.push(yq);
+                        }
+                        let cbq = gather_downsampled_block(
+                            &cb_plane,
+                            width,
+                            height,
+                            x0,
+                            y0,
+                            2,
+                            2,
+                            &chroma_divisors,
+                        );
+                        let diff = cbq[0] - prev_dc_cb;
+                        prev_dc_cb = cbq[0];
+                        huff_opt::gather_dc_symbol(diff, &mut dc_chroma_freq);
+                        huff_opt::gather_ac_symbols(&cbq, &mut ac_chroma_freq);
+                        all_blocks.push(cbq);
+
+                        let crq = gather_downsampled_block(
+                            &cr_plane,
+                            width,
+                            height,
+                            x0,
+                            y0,
+                            2,
+                            2,
+                            &chroma_divisors,
+                        );
+                        let diff = crq[0] - prev_dc_cr;
+                        prev_dc_cr = crq[0];
+                        huff_opt::gather_dc_symbol(diff, &mut dc_chroma_freq);
+                        huff_opt::gather_ac_symbols(&crq, &mut ac_chroma_freq);
+                        all_blocks.push(crq);
+                    }
+                    _ => unreachable!(),
+                }
+            }
+        }
+    }
+
+    // Add pseudo-symbol (required for optimal table generation)
+    dc_luma_freq[256] = 1;
+    ac_luma_freq[256] = 1;
+    dc_chroma_freq[256] = 1;
+    ac_chroma_freq[256] = 1;
+
+    // Generate optimal tables
+    let (dc_luma_bits, dc_luma_values) = huff_opt::gen_optimal_table(&dc_luma_freq);
+    let (ac_luma_bits, ac_luma_values) = huff_opt::gen_optimal_table(&ac_luma_freq);
+    let (dc_chroma_bits, dc_chroma_values) = huff_opt::gen_optimal_table(&dc_chroma_freq);
+    let (ac_chroma_bits, ac_chroma_values) = huff_opt::gen_optimal_table(&ac_chroma_freq);
+
+    // Build encoding tables from optimal bits/values
+    let dc_luma_table = build_huff_table(&dc_luma_bits, &dc_luma_values);
+    let ac_luma_table = build_huff_table(&ac_luma_bits, &ac_luma_values);
+    let dc_chroma_table = build_huff_table(&dc_chroma_bits, &dc_chroma_values);
+    let ac_chroma_table = build_huff_table(&ac_chroma_bits, &ac_chroma_values);
+
+    // === Pass 2: Encode all buffered blocks with optimal tables ===
+    let mut bit_writer = BitWriter::new(width * height);
+    let mut prev_dc_y: i16 = 0;
+    let mut prev_dc_cb: i16 = 0;
+    let mut prev_dc_cr: i16 = 0;
+    let mut block_idx = 0;
+
+    for _mcu_row in 0..mcus_y {
+        for _mcu_col in 0..mcus_x {
+            if is_grayscale {
+                HuffmanEncoder::encode_block(
+                    &mut bit_writer,
+                    &all_blocks[block_idx],
+                    &mut prev_dc_y,
+                    &dc_luma_table,
+                    &ac_luma_table,
+                );
+                block_idx += 1;
+            } else {
+                match subsampling {
+                    Subsampling::S444 => {
+                        HuffmanEncoder::encode_block(
+                            &mut bit_writer,
+                            &all_blocks[block_idx],
+                            &mut prev_dc_y,
+                            &dc_luma_table,
+                            &ac_luma_table,
+                        );
+                        block_idx += 1;
+                        HuffmanEncoder::encode_block(
+                            &mut bit_writer,
+                            &all_blocks[block_idx],
+                            &mut prev_dc_cb,
+                            &dc_chroma_table,
+                            &ac_chroma_table,
+                        );
+                        block_idx += 1;
+                        HuffmanEncoder::encode_block(
+                            &mut bit_writer,
+                            &all_blocks[block_idx],
+                            &mut prev_dc_cr,
+                            &dc_chroma_table,
+                            &ac_chroma_table,
+                        );
+                        block_idx += 1;
+                    }
+                    Subsampling::S422 => {
+                        for _ in 0..2 {
+                            HuffmanEncoder::encode_block(
+                                &mut bit_writer,
+                                &all_blocks[block_idx],
+                                &mut prev_dc_y,
+                                &dc_luma_table,
+                                &ac_luma_table,
+                            );
+                            block_idx += 1;
+                        }
+                        HuffmanEncoder::encode_block(
+                            &mut bit_writer,
+                            &all_blocks[block_idx],
+                            &mut prev_dc_cb,
+                            &dc_chroma_table,
+                            &ac_chroma_table,
+                        );
+                        block_idx += 1;
+                        HuffmanEncoder::encode_block(
+                            &mut bit_writer,
+                            &all_blocks[block_idx],
+                            &mut prev_dc_cr,
+                            &dc_chroma_table,
+                            &ac_chroma_table,
+                        );
+                        block_idx += 1;
+                    }
+                    Subsampling::S420 => {
+                        for _ in 0..4 {
+                            HuffmanEncoder::encode_block(
+                                &mut bit_writer,
+                                &all_blocks[block_idx],
+                                &mut prev_dc_y,
+                                &dc_luma_table,
+                                &ac_luma_table,
+                            );
+                            block_idx += 1;
+                        }
+                        HuffmanEncoder::encode_block(
+                            &mut bit_writer,
+                            &all_blocks[block_idx],
+                            &mut prev_dc_cb,
+                            &dc_chroma_table,
+                            &ac_chroma_table,
+                        );
+                        block_idx += 1;
+                        HuffmanEncoder::encode_block(
+                            &mut bit_writer,
+                            &all_blocks[block_idx],
+                            &mut prev_dc_cr,
+                            &dc_chroma_table,
+                            &ac_chroma_table,
+                        );
+                        block_idx += 1;
+                    }
+                    _ => unreachable!(),
+                }
+            }
+        }
+    }
+
+    bit_writer.flush();
+
+    // Assemble output with optimal DHT markers
+    let mut output = Vec::with_capacity(bit_writer.data().len() + 1024);
+
+    marker_writer::write_soi(&mut output);
+    marker_writer::write_app0_jfif(&mut output);
+
+    // Quantization tables
+    marker_writer::write_dqt(&mut output, 0, &luma_quant);
+    if !is_grayscale {
+        marker_writer::write_dqt(&mut output, 1, &chroma_quant);
+    }
+
+    // Frame header
+    if is_grayscale {
+        let components = vec![(1, 1, 1, 0)];
+        marker_writer::write_sof0(&mut output, width as u16, height as u16, &components);
+    } else {
+        let (h_samp, v_samp) = match subsampling {
+            Subsampling::S444 => (1, 1),
+            Subsampling::S422 => (2, 1),
+            Subsampling::S420 => (2, 2),
+            _ => unreachable!(),
+        };
+        let components = vec![(1, h_samp, v_samp, 0), (2, 1, 1, 1), (3, 1, 1, 1)];
+        marker_writer::write_sof0(&mut output, width as u16, height as u16, &components);
+    }
+
+    // Write optimal Huffman tables
+    marker_writer::write_dht(&mut output, 0, 0, &dc_luma_bits, &dc_luma_values);
+    marker_writer::write_dht(&mut output, 1, 0, &ac_luma_bits, &ac_luma_values);
+    if !is_grayscale {
+        marker_writer::write_dht(&mut output, 0, 1, &dc_chroma_bits, &dc_chroma_values);
+        marker_writer::write_dht(&mut output, 1, 1, &ac_chroma_bits, &ac_chroma_values);
+    }
+
+    // Scan header
+    if is_grayscale {
+        let scan_components = vec![(1, 0, 0)];
+        marker_writer::write_sos(&mut output, &scan_components);
+    } else {
+        let scan_components = vec![(1, 0, 0), (2, 1, 1), (3, 1, 1)];
+        marker_writer::write_sos(&mut output, &scan_components);
+    }
+
+    // Entropy-coded data
+    output.extend_from_slice(bit_writer.data());
+    marker_writer::write_eoi(&mut output);
+
+    Ok(output)
+}
+
+/// FDCT + quantize a single block, return the quantized coefficients.
+fn gather_block(
+    plane: &[u8],
+    plane_width: usize,
+    plane_height: usize,
+    block_x: usize,
+    block_y: usize,
+    quant_table: &[u16; 64],
+) -> [i16; 64] {
+    let mut block = [0i16; 64];
+    extract_block(
+        plane,
+        plane_width,
+        plane_height,
+        block_x,
+        block_y,
+        &mut block,
+    );
+
+    let mut dct_output = [0i32; 64];
+    fdct::fdct_islow(&block, &mut dct_output);
+
+    let mut quantized = [0i16; 64];
+    quant::quantize_block(&dct_output, quant_table, &mut quantized);
+    quantized
+}
+
+/// FDCT + quantize a downsampled chroma block, return the quantized coefficients.
+fn gather_downsampled_block(
+    plane: &[u8],
+    plane_width: usize,
+    plane_height: usize,
+    block_x: usize,
+    block_y: usize,
+    h_factor: usize,
+    v_factor: usize,
+    quant_table: &[u16; 64],
+) -> [i16; 64] {
+    let mut block = [0i16; 64];
+    downsample_chroma_block(
+        plane,
+        plane_width,
+        plane_height,
+        block_x,
+        block_y,
+        h_factor,
+        v_factor,
+        &mut block,
+    );
+
+    let mut dct_output = [0i32; 64];
+    fdct::fdct_islow(&block, &mut dct_output);
+
+    let mut quantized = [0i16; 64];
+    quant::quantize_block(&dct_output, quant_table, &mut quantized);
+    quantized
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
