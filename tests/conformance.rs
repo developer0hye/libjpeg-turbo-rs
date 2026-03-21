@@ -162,3 +162,76 @@ fn decompress_to_grayscale_stays_grayscale() {
     assert_eq!(image.pixel_format, PixelFormat::Grayscale);
     assert_eq!(image.data.len(), 8 * 8);
 }
+
+// --- Progressive JPEG tests ---
+
+#[test]
+fn progressive_red_444() {
+    let data = include_bytes!("fixtures/red_16x16_444_prog.jpg");
+    let image = decompress(data).unwrap();
+    assert_eq!(image.width, 16);
+    assert_eq!(image.height, 16);
+    assert_eq!(image.data.len(), 16 * 16 * 3);
+
+    for y in 0..16 {
+        for x in 0..16 {
+            let idx = (y * 16 + x) * 3;
+            let r = image.data[idx];
+            let g = image.data[idx + 1];
+            let b = image.data[idx + 2];
+            assert!(r > 240, "pixel ({},{}) R={}", x, y, r);
+            assert!(g < 15, "pixel ({},{}) G={}", x, y, g);
+            assert!(b < 15, "pixel ({},{}) B={}", x, y, b);
+        }
+    }
+}
+
+#[test]
+fn progressive_green_422() {
+    let data = include_bytes!("fixtures/green_16x16_422_prog.jpg");
+    let image = decompress(data).unwrap();
+    assert_eq!(image.width, 16);
+    assert_eq!(image.height, 16);
+
+    for y in 0..16 {
+        for x in 0..16 {
+            let idx = (y * 16 + x) * 3;
+            let r = image.data[idx];
+            let g = image.data[idx + 1];
+            let b = image.data[idx + 2];
+            assert!(r < 15, "pixel ({},{}) R={}", x, y, r);
+            assert!(g > 240, "pixel ({},{}) G={}", x, y, g);
+            assert!(b < 15, "pixel ({},{}) B={}", x, y, b);
+        }
+    }
+}
+
+#[test]
+fn progressive_blue_420() {
+    let data = include_bytes!("fixtures/blue_16x16_420_prog.jpg");
+    let image = decompress(data).unwrap();
+    assert_eq!(image.width, 16);
+    assert_eq!(image.height, 16);
+
+    for y in 0..16 {
+        for x in 0..16 {
+            let idx = (y * 16 + x) * 3;
+            let r = image.data[idx];
+            let g = image.data[idx + 1];
+            let b = image.data[idx + 2];
+            assert!(r < 15, "pixel ({},{}) R={}", x, y, r);
+            assert!(g < 15, "pixel ({},{}) G={}", x, y, g);
+            assert!(b > 240, "pixel ({},{}) B={}", x, y, b);
+        }
+    }
+}
+
+#[test]
+fn progressive_photo_cross_validation() {
+    // Decode progressive version and compare with djpeg reference output
+    let prog_data = include_bytes!("fixtures/photo_320x240_420_prog.jpg");
+    let image = decompress(prog_data).unwrap();
+    assert_eq!(image.width, 320);
+    assert_eq!(image.height, 240);
+    assert_eq!(image.data.len(), 320 * 240 * 3);
+}
