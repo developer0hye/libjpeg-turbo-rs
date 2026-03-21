@@ -7,23 +7,42 @@ use crate::common::types::*;
 const SOI: u8 = 0xD8;
 const EOI: u8 = 0xD9;
 const SOF0: u8 = 0xC0;
+const SOF2: u8 = 0xC2;
 const DHT: u8 = 0xC4;
 const DQT: u8 = 0xDB;
 const SOS: u8 = 0xDA;
 const DRI: u8 = 0xDD;
 const COM: u8 = 0xFE;
 
-/// All metadata parsed from JPEG markers before the entropy-coded data.
+/// Per-scan info with Huffman table snapshot (needed because tables can be
+/// redefined between scans in progressive JPEG).
+#[derive(Debug, Clone)]
+pub struct ScanInfo {
+    pub header: ScanHeader,
+    /// Byte offset where this scan's entropy-coded data begins.
+    pub data_offset: usize,
+    pub dc_huffman_tables: [Option<HuffmanTable>; 4],
+    pub ac_huffman_tables: [Option<HuffmanTable>; 4],
+    pub restart_interval: u16,
+}
+
+/// All metadata parsed from JPEG markers.
+///
+/// For baseline: one scan, entropy_data_offset points to its data.
+/// For progressive: multiple scans with separate offsets and table snapshots.
 #[derive(Debug)]
 pub struct JpegMetadata {
     pub frame: FrameHeader,
+    /// First scan header (used by baseline path).
     pub scan: ScanHeader,
     pub quant_tables: [Option<QuantTable>; 4],
     pub dc_huffman_tables: [Option<HuffmanTable>; 4],
     pub ac_huffman_tables: [Option<HuffmanTable>; 4],
     pub restart_interval: u16,
-    /// Byte offset where entropy-coded data begins.
+    /// Byte offset where the first scan's entropy-coded data begins.
     pub entropy_data_offset: usize,
+    /// For progressive: all scans with table snapshots.
+    pub scans: Vec<ScanInfo>,
 }
 
 /// Reads and parses JPEG markers from a byte slice.
@@ -37,22 +56,26 @@ impl<'a> MarkerReader<'a> {
         Self { data, pos: 0 }
     }
 
-    /// Parse all markers up to and including SOS.
+    /// Parse all markers. For baseline, stops after first SOS.
+    /// For progressive, reads all SOS markers until EOI.
     pub fn read_markers(&mut self) -> Result<JpegMetadata> {
         self.expect_marker(SOI)?;
 
         let mut frame: Option<FrameHeader> = None;
-        let mut scan: Option<ScanHeader> = None;
         let mut quant_tables: [Option<QuantTable>; 4] = [None, None, None, None];
         let mut dc_huffman_tables: [Option<HuffmanTable>; 4] = [None, None, None, None];
         let mut ac_huffman_tables: [Option<HuffmanTable>; 4] = [None, None, None, None];
         let mut restart_interval: u16 = 0;
+        let mut scans: Vec<ScanInfo> = Vec::new();
 
         loop {
             let marker = self.read_marker()?;
             match marker {
                 SOF0 => {
-                    frame = Some(self.read_sof()?);
+                    frame = Some(self.read_sof(false)?);
+                }
+                SOF2 => {
+                    frame = Some(self.read_sof(true)?);
                 }
                 DQT => {
                     self.read_dqt(&mut quant_tables)?;
@@ -64,11 +87,27 @@ impl<'a> MarkerReader<'a> {
                     restart_interval = self.read_dri()?;
                 }
                 SOS => {
-                    scan = Some(self.read_sos()?);
-                    break;
+                    let header = self.read_sos()?;
+                    let offset = self.pos;
+                    scans.push(ScanInfo {
+                        header,
+                        data_offset: offset,
+                        dc_huffman_tables: dc_huffman_tables.clone(),
+                        ac_huffman_tables: ac_huffman_tables.clone(),
+                        restart_interval,
+                    });
+
+                    let is_progressive = frame.as_ref().map_or(false, |f| f.is_progressive);
+                    if !is_progressive {
+                        // Baseline: single scan, stop here
+                        break;
+                    }
+
+                    // Progressive: skip entropy data to find next marker
+                    self.skip_entropy_data();
                 }
                 EOI => {
-                    return Err(JpegError::CorruptData("unexpected EOI before SOS".into()));
+                    break;
                 }
                 // Skip APPn and COM markers
                 m if (0xE0..=0xEF).contains(&m) || m == COM => {
@@ -85,17 +124,52 @@ impl<'a> MarkerReader<'a> {
         }
 
         let frame = frame.ok_or(JpegError::CorruptData("missing SOF marker".into()))?;
-        let scan = scan.ok_or(JpegError::CorruptData("missing SOS marker".into()))?;
+        if scans.is_empty() {
+            return Err(JpegError::CorruptData("missing SOS marker".into()));
+        }
+
+        let first_scan = scans[0].header.clone();
+        let first_offset = scans[0].data_offset;
 
         Ok(JpegMetadata {
             frame,
-            scan,
+            scan: first_scan,
             quant_tables,
             dc_huffman_tables,
             ac_huffman_tables,
             restart_interval,
-            entropy_data_offset: self.pos,
+            entropy_data_offset: first_offset,
+            scans,
         })
+    }
+
+    /// Skip past entropy-coded data to find the next marker.
+    /// Entropy data ends at an unescaped 0xFF byte followed by a non-zero, non-RST marker.
+    fn skip_entropy_data(&mut self) {
+        while self.pos < self.data.len() {
+            if self.data[self.pos] != 0xFF {
+                self.pos += 1;
+                continue;
+            }
+            // Found 0xFF — check next byte
+            if self.pos + 1 >= self.data.len() {
+                self.pos += 1;
+                return;
+            }
+            let next = self.data[self.pos + 1];
+            if next == 0x00 {
+                // Byte-stuffed 0xFF data — skip both bytes
+                self.pos += 2;
+            } else if (0xD0..=0xD7).contains(&next) {
+                // Restart marker — skip it and continue scanning entropy data
+                self.pos += 2;
+            } else {
+                // Real marker — leave pos at 0xFF so read_marker can find it
+                // read_marker skips 0xFF prefix bytes, so point to the 0xFF
+                self.pos += 1; // skip past 0xFF, read_marker will read the marker byte
+                return;
+            }
+        }
     }
 
     fn expect_marker(&mut self, expected: u8) -> Result<()> {
@@ -154,7 +228,7 @@ impl<'a> MarkerReader<'a> {
         Ok(())
     }
 
-    fn read_sof(&mut self) -> Result<FrameHeader> {
+    fn read_sof(&mut self, is_progressive: bool) -> Result<FrameHeader> {
         let length = self.read_u16_be()? as usize;
         let start = self.pos;
 
@@ -186,6 +260,7 @@ impl<'a> MarkerReader<'a> {
             height,
             width,
             components,
+            is_progressive,
         })
     }
 
@@ -285,11 +360,18 @@ impl<'a> MarkerReader<'a> {
             });
         }
 
-        // Skip: Ss, Se, Ah|Al
-        let _ss = self.read_u8()?;
-        let _se = self.read_u8()?;
-        let _ahl = self.read_u8()?;
+        let ss = self.read_u8()?;
+        let se = self.read_u8()?;
+        let ahl = self.read_u8()?;
+        let ah = ahl >> 4;
+        let al = ahl & 0x0F;
 
-        Ok(ScanHeader { components })
+        Ok(ScanHeader {
+            components,
+            spec_start: ss,
+            spec_end: se,
+            succ_high: ah,
+            succ_low: al,
+        })
     }
 }
