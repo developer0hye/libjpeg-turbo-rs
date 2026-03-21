@@ -11,8 +11,20 @@ const COMPARE_CASES: &[CompareCase] = &[
         path: "tests/fixtures/gradient_640x480.jpg",
     },
     CompareCase {
+        name: "1280x720",
+        path: "tests/fixtures/photo_1280x720_420.jpg",
+    },
+    CompareCase {
         name: "1920x1080",
         path: "tests/fixtures/photo_1920x1080_420.jpg",
+    },
+    CompareCase {
+        name: "2560x1440",
+        path: "tests/fixtures/photo_2560x1440_420.jpg",
+    },
+    CompareCase {
+        name: "3840x2160",
+        path: "tests/fixtures/photo_3840x2160_420.jpg",
     },
     CompareCase {
         name: "320x240_444",

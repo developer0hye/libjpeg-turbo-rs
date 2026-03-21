@@ -83,8 +83,20 @@ const BENCH_CASES: &[BenchCase] = &[
         path: "tests/fixtures/gradient_640x480.jpg",
     },
     BenchCase {
+        name: "photo_1280x720_420",
+        path: "tests/fixtures/photo_1280x720_420.jpg",
+    },
+    BenchCase {
         name: "photo_1920x1080_420",
         path: "tests/fixtures/photo_1920x1080_420.jpg",
+    },
+    BenchCase {
+        name: "photo_2560x1440_420",
+        path: "tests/fixtures/photo_2560x1440_420.jpg",
+    },
+    BenchCase {
+        name: "photo_3840x2160_420",
+        path: "tests/fixtures/photo_3840x2160_420.jpg",
     },
     // Subsampling modes (same content, 320x240)
     BenchCase {
