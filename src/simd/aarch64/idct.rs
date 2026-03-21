@@ -9,8 +9,6 @@
 
 use std::arch::aarch64::*;
 
-use crate::common::quant_table::NATURAL_ORDER;
-
 const CONST_BITS: i32 = 13;
 const PASS1_BITS: i32 = 2;
 
@@ -60,20 +58,18 @@ const IDCT_CONSTS: IdctConsts = IdctConsts {
 /// `quant`: 64 u16 quantization values in natural (row-major) order.
 /// `output`: 64 u8 samples in natural (row-major) order.
 pub fn neon_idct_islow(coeffs: &[i16; 64], quant: &[u16; 64], output: &mut [u8; 64]) {
-    // Gather from zigzag to natural order and dequantize.
-    // Sequential writes (natural order), random reads (zigzag positions).
-    let mut natural = [0i16; 64];
+    // Coefficients are already in natural (row-major) order — dequantize in place.
+    let mut dequantized = [0i16; 64];
     let mut i = 0;
     while i < 64 {
-        let zz = NATURAL_ORDER[i];
-        natural[i] = coeffs[zz].wrapping_mul(quant[i] as i16);
+        dequantized[i] = coeffs[i].wrapping_mul(quant[i] as i16);
         i += 1;
     }
 
     // SAFETY: NEON is mandatory on aarch64 (ARMv8). All intrinsics used are
     // standard NEON operations available on all ARMv8 processors.
     unsafe {
-        neon_idct_islow_inner(&natural, output);
+        neon_idct_islow_inner(&dequantized, output);
     }
 }
 

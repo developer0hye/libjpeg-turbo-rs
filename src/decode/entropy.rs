@@ -92,7 +92,7 @@ impl McuDecoder {
         }
     }
 
-    /// Decode one 8x8 block of DCT coefficients (in zigzag order).
+    /// Decode one 8x8 block of DCT coefficients (in natural/row-major order).
     #[inline]
     pub fn decode_block(
         &mut self,

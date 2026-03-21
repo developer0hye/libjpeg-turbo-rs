@@ -3,8 +3,6 @@ use libjpeg_turbo_rs::simd::{self, SimdRoutines};
 #[test]
 fn detect_returns_valid_routines() {
     let routines: SimdRoutines = simd::detect();
-    // All function pointers should be non-null (they're fn pointers, always valid).
-    // Just call them with trivial data to verify they don't panic.
     let coeffs = [0i16; 64];
     let quant = [1u16; 64];
     let mut output = [0u8; 64];
@@ -19,14 +17,11 @@ fn detect_returns_valid_routines() {
 
 #[test]
 fn forcenone_forces_scalar() {
-    // With JSIMD_FORCENONE=1, detect() should return scalar routines.
     std::env::set_var("JSIMD_FORCENONE", "1");
     let routines = simd::detect();
     std::env::remove_var("JSIMD_FORCENONE");
 
-    // Verify scalar works correctly on a known block.
-    // DC=800 with quant=1: IDCT normalizes by 1/8 per dimension, so
-    // spatial = descale(800 << PASS1_BITS, PASS1_BITS+3) = 100, +128 = 228.
+    // DC=800 with quant=1 in natural order position 0
     let mut coeffs = [0i16; 64];
     coeffs[0] = 800;
     let quant = [1u16; 64];
@@ -41,43 +36,41 @@ fn forcenone_forces_scalar() {
 
 #[test]
 fn scalar_idct_matches_existing_functions() {
-    use libjpeg_turbo_rs::decode::dequant;
     use libjpeg_turbo_rs::decode::idct;
 
-    // Create a block with known coefficients (zigzag order)
-    let mut zigzag_coeffs = [0i16; 64];
-    zigzag_coeffs[0] = 200; // DC
-    zigzag_coeffs[1] = -30; // AC(0,1)
-    zigzag_coeffs[2] = 15; // AC(1,0)
-    zigzag_coeffs[3] = -5; // AC(2,0)
+    // Create a block with known coefficients in natural (row-major) order.
+    // Position [0] = DC, [1] = (0,1), [8] = (1,0), [16] = (2,0)
+    let mut natural_coeffs = [0i16; 64];
+    natural_coeffs[0] = 200; // DC
+    natural_coeffs[1] = -30; // (0,1)
+    natural_coeffs[8] = 15; // (1,0)
+    natural_coeffs[16] = -5; // (2,0)
 
-    // Quant table (natural order values; the SimdRoutines idct_islow takes
-    // zigzag coefficients + natural-order quant table)
     let mut quant_values = [1u16; 64];
     quant_values[0] = 16;
     quant_values[1] = 11;
     quant_values[8] = 12;
     quant_values[16] = 14;
 
-    // Compute expected result using existing scalar functions
-    let quant_table = libjpeg_turbo_rs::common::quant_table::QuantTable {
-        values: quant_values,
-    };
-    let dequantized = dequant::dequantize_block(&zigzag_coeffs, &quant_table);
+    // Compute expected: dequantize then IDCT then level-shift
+    let mut dequantized = [0i16; 64];
+    for i in 0..64 {
+        dequantized[i] = natural_coeffs[i].wrapping_mul(quant_values[i] as i16);
+    }
     let spatial = idct::idct_8x8(&dequantized);
     let mut expected = [0u8; 64];
     for i in 0..64 {
         expected[i] = (spatial[i] as i32 + 128).clamp(0, 255) as u8;
     }
 
-    // Compute using scalar SIMD wrapper
+    // Compute using SIMD wrapper (coeffs now in natural order)
     let routines = simd::detect();
     let mut actual = [0u8; 64];
-    (routines.idct_islow)(&zigzag_coeffs, &quant_values, &mut actual);
+    (routines.idct_islow)(&natural_coeffs, &quant_values, &mut actual);
 
     assert_eq!(
         actual, expected,
-        "scalar SIMD wrapper should match existing dequant+idct+level-shift"
+        "SIMD wrapper should match dequant+idct+level-shift"
     );
 }
 
@@ -87,7 +80,6 @@ fn scalar_ycbcr_to_rgb_matches_existing() {
 
     let routines = simd::detect();
 
-    // Test with a gradient
     let width = 32;
     let y: Vec<u8> = (0..width).map(|i| (i * 8) as u8).collect();
     let cb: Vec<u8> = (0..width).map(|i| (128 + i) as u8).collect();
@@ -123,8 +115,6 @@ fn scalar_fancy_upsample_matches_existing() {
 
 #[test]
 fn no_simd_feature_compiles_scalar() {
-    // This test just verifies detect() returns valid routines.
-    // When built with --no-default-features, SIMD is disabled.
     let routines = simd::detect();
     let coeffs = [0i16; 64];
     let quant = [1u16; 64];

@@ -3,8 +3,7 @@
 //! These wrap the existing `decode::*` functions with the unified signatures
 //! expected by the dispatch table.
 
-use crate::common::quant_table::QuantTable;
-use crate::decode::{color, dequant, idct, upsample};
+use crate::decode::{color, idct, upsample};
 use crate::simd::SimdRoutines;
 
 /// Return a `SimdRoutines` table using pure-scalar implementations.
@@ -18,12 +17,15 @@ pub fn routines() -> SimdRoutines {
 
 /// Combined dequant + IDCT + level-shift + clamp.
 ///
-/// `coeffs`: 64 coefficients in zigzag order.
+/// `coeffs`: 64 coefficients in natural (row-major) order.
 /// `quant`: quantization table in natural (row-major) order.
 /// `output`: 64 u8 samples in natural order.
 fn scalar_idct_islow(coeffs: &[i16; 64], quant: &[u16; 64], output: &mut [u8; 64]) {
-    let qt = QuantTable { values: *quant };
-    let dequantized = dequant::dequantize_block(coeffs, &qt);
+    // Dequantize: coeffs are already in natural order, just multiply
+    let mut dequantized = [0i16; 64];
+    for i in 0..64 {
+        dequantized[i] = coeffs[i].wrapping_mul(quant[i] as i16);
+    }
     let spatial = idct::idct_8x8(&dequantized);
     for i in 0..64 {
         output[i] = (spatial[i] as i32 + 128).clamp(0, 255) as u8;

@@ -1,5 +1,6 @@
 use crate::common::error::{JpegError, Result};
 use crate::common::huffman_table::HuffmanTable;
+use crate::common::quant_table::ZIGZAG_ORDER;
 use crate::decode::bitstream::BitReader;
 
 /// Extend a variable-length bit value to a signed integer (JPEG ones' complement).
@@ -27,8 +28,11 @@ pub fn decode_dc_coefficient(reader: &mut BitReader, table: &HuffmanTable) -> Re
     Ok(extend(extra_bits, category))
 }
 
-/// Decode AC coefficients for one 8x8 block.
-/// Fills `coeffs[1..64]` in zigzag order. `coeffs[0]` (DC) is not touched.
+/// Decode AC coefficients for one 8x8 block, writing to natural (row-major) order.
+///
+/// Decodes zigzag-ordered AC coefficients from the bitstream and writes them
+/// directly to their natural-order positions in `coeffs`. `coeffs[0]` (DC) is
+/// not touched.
 #[inline]
 pub fn decode_ac_coefficients(
     reader: &mut BitReader,
@@ -66,7 +70,8 @@ pub fn decode_ac_coefficients(
         }
 
         let extra_bits = reader.read_bits(bit_size)?;
-        coeffs[index] = extend(extra_bits, bit_size);
+        // Write directly to natural-order position
+        coeffs[ZIGZAG_ORDER[index]] = extend(extra_bits, bit_size);
         index += 1;
     }
 

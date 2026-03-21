@@ -2,6 +2,11 @@
 
 Rust port of libjpeg-turbo with equivalent or better performance.
 
+# Reference Source
+
+- `references/libjpeg-turbo/` contains the original libjpeg-turbo C source. Read and reference it during implementation for algorithm details, edge cases, and correctness verification.
+- `references/zune-image/crates/zune-jpeg/` contains zune-jpeg, the fastest pure-Rust JPEG decoder. Reference its optimization techniques, but our goal is to outperform it.
+
 # Project Rules
 
 - Always communicate and work in English.

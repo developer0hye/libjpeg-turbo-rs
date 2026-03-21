@@ -15,7 +15,7 @@ pub mod x86_64;
 /// Function-pointer dispatch table for SIMD-accelerated decode operations.
 pub struct SimdRoutines {
     /// Combined dequant + IDCT + level-shift + clamp → u8 output.
-    /// `coeffs` are in zigzag order, `quant` is in natural (row-major) order.
+    /// `coeffs` and `quant` are both in natural (row-major) order.
     pub idct_islow: fn(coeffs: &[i16; 64], quant: &[u16; 64], output: &mut [u8; 64]),
 
     /// YCbCr → interleaved RGB, one row.
