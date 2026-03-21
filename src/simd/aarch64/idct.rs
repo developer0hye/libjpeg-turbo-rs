@@ -102,6 +102,7 @@ unsafe fn neon_idct_islow_core(cptr: *const i16, qptr: *const i16, output: *mut 
 
     // --- Pass 1: columns, left 4×8 half ---
     // Fused load+dequant: vmul_s16(coeff, quant) during load
+    let mut left_dc_only = false;
     let mut ws_l = [0i16; 32];
     let mut ws_r = [0i16; 32];
 
@@ -124,7 +125,13 @@ unsafe fn neon_idct_islow_core(cptr: *const i16, qptr: *const i16, output: *mut 
             let ac_bitmap: i64 = vget_lane_s64(vreinterpret_s64_s16(bitmap_ac), 0);
 
             if ac_bitmap == 0 {
-                // DC-only: replicate DC value
+                // Check if positions 1-3 of row0 are also zero (true DC-only).
+                // row0 = [pos0(DC), pos1, pos2, pos3] — mask out DC.
+                let row0_ac_mask = vcreate_s16(0xFFFF_FFFF_FFFF_0000u64);
+                let row0_ac = vand_s16(row0, row0_ac_mask);
+                let row0_ac_bits: i64 = vget_lane_s64(vreinterpret_s64_s16(row0_ac), 0);
+                left_dc_only = row0_ac_bits == 0;
+
                 let dcval = vshl_n_s16::<PASS1_BITS>(row0);
                 let quad: int16x4x4_t = int16x4x4_t(dcval, dcval, dcval, dcval);
                 vst4_s16(ws_l.as_mut_ptr(), quad);
@@ -184,6 +191,17 @@ unsafe fn neon_idct_islow_core(cptr: *const i16, qptr: *const i16, output: *mut 
             let right_all_bitmap: i64 = vget_lane_s64(vreinterpret_s64_s16(bitmap_all), 0);
 
             if right_all_bitmap == 0 {
+                if left_dc_only {
+                    // Pure DC block: entire right half zero + left DC-only.
+                    // Skip pass2 — fill output with the DC pixel value directly.
+                    let dc_dequant = (*cptr as i32) * (*qptr as i32);
+                    let pixel_val = (((dc_dequant + 4) >> 3) + 128).clamp(0, 255) as u8;
+                    let fill: uint8x8_t = vdup_n_u8(pixel_val);
+                    for row in 0..8 {
+                        vst1_u8(output.add(row * stride), fill);
+                    }
+                    return;
+                }
                 // Entire right half is zero — skip, use sparse pass 2
                 right_all_zero = true;
             } else {
