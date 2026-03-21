@@ -98,7 +98,7 @@ impl<'a> Decoder<'a> {
         }
     }
 
-    fn decode_image(&self) -> Result<Image> {
+    pub(crate) fn decode_image(&self) -> Result<Image> {
         let frame = &self.metadata.frame;
         let scan = &self.metadata.scan;
         let width = frame.width as usize;
@@ -132,14 +132,19 @@ impl<'a> Decoder<'a> {
         let full_width = mcus_x * mcu_width;
         let full_height = mcus_y * mcu_height;
 
-        // Allocate component planes (MCU-aligned)
+        // Allocate component planes (MCU-aligned, uninitialized — every pixel
+        // will be written by the MCU decode loop before any read).
         let mut component_planes: Vec<Vec<u8>> = frame
             .components
             .iter()
             .map(|comp| {
                 let comp_w = mcus_x * comp.horizontal_sampling as usize * 8;
                 let comp_h = mcus_y * comp.vertical_sampling as usize * 8;
-                vec![0u8; comp_w * comp_h]
+                let size = comp_w * comp_h;
+                let mut v = Vec::with_capacity(size);
+                // SAFETY: MCU decode loop writes every pixel in the plane.
+                unsafe { v.set_len(size) };
+                v
             })
             .collect();
 
@@ -271,8 +276,16 @@ impl<'a> Decoder<'a> {
             let h_factor = max_h / cb_comp.horizontal_sampling as usize;
             let v_factor = max_v / cb_comp.vertical_sampling as usize;
 
-            let mut cb_full = vec![0u8; full_width * full_height];
-            let mut cr_full = vec![0u8; full_width * full_height];
+            // Uninitialized allocation — every pixel will be written by
+            // upsample or clone before being read by color conversion.
+            let alloc_size = full_width * full_height;
+            let mut cb_full = Vec::with_capacity(alloc_size);
+            let mut cr_full = Vec::with_capacity(alloc_size);
+            // SAFETY: all code paths below write every element before reading.
+            unsafe {
+                cb_full.set_len(alloc_size);
+                cr_full.set_len(alloc_size);
+            }
 
             if h_factor == 1 && v_factor == 1 {
                 cb_full = component_planes[1].clone();

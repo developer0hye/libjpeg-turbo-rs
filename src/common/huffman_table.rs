@@ -1,6 +1,6 @@
 use crate::common::error::{JpegError, Result};
 
-const LOOKUP_BITS: usize = 8;
+const LOOKUP_BITS: usize = 9;
 const LOOKUP_SIZE: usize = 1 << LOOKUP_BITS;
 
 /// Entry in the fast lookup table.
@@ -93,8 +93,8 @@ impl HuffmanTable {
     /// Returns `(symbol, code_length)`.
     #[inline(always)]
     pub fn lookup(&self, bits_msb: u16) -> Result<(u8, u8)> {
-        // Fast path: use top 8 bits as index
-        let index = (bits_msb >> 8) as usize;
+        // Fast path: use top LOOKUP_BITS bits as index
+        let index = (bits_msb >> (16 - LOOKUP_BITS)) as usize;
         let entry = self.fast[index];
         if entry.length > 0 {
             return Ok((entry.symbol, entry.length));
