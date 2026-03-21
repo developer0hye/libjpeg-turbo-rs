@@ -26,6 +26,38 @@ pub fn ycbcr_to_rgb_row(y: &[u8], cb: &[u8], cr: &[u8], rgb: &mut [u8], width: u
     }
 }
 
+/// Convert a row of YCbCr pixels to interleaved RGBA (alpha = 255).
+pub fn ycbcr_to_rgba_row(y: &[u8], cb: &[u8], cr: &[u8], rgba: &mut [u8], width: usize) {
+    for x in 0..width {
+        let (r, g, b) = ycbcr_to_rgb_pixel(y[x], cb[x], cr[x]);
+        rgba[x * 4] = r;
+        rgba[x * 4 + 1] = g;
+        rgba[x * 4 + 2] = b;
+        rgba[x * 4 + 3] = 255;
+    }
+}
+
+/// Convert a row of YCbCr pixels to interleaved BGR.
+pub fn ycbcr_to_bgr_row(y: &[u8], cb: &[u8], cr: &[u8], bgr: &mut [u8], width: usize) {
+    for x in 0..width {
+        let (r, g, b) = ycbcr_to_rgb_pixel(y[x], cb[x], cr[x]);
+        bgr[x * 3] = b;
+        bgr[x * 3 + 1] = g;
+        bgr[x * 3 + 2] = r;
+    }
+}
+
+/// Convert a row of YCbCr pixels to interleaved BGRA (alpha = 255).
+pub fn ycbcr_to_bgra_row(y: &[u8], cb: &[u8], cr: &[u8], bgra: &mut [u8], width: usize) {
+    for x in 0..width {
+        let (r, g, b) = ycbcr_to_rgb_pixel(y[x], cb[x], cr[x]);
+        bgra[x * 4] = b;
+        bgra[x * 4 + 1] = g;
+        bgra[x * 4 + 2] = r;
+        bgra[x * 4 + 3] = 255;
+    }
+}
+
 /// Copy grayscale values directly (no color conversion needed).
 pub fn grayscale_row(y: &[u8], output: &mut [u8], width: usize) {
     output[..width].copy_from_slice(&y[..width]);
