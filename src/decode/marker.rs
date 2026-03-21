@@ -43,6 +43,10 @@ pub struct JpegMetadata {
     pub entropy_data_offset: usize,
     /// For progressive: all scans with table snapshots.
     pub scans: Vec<ScanInfo>,
+    /// True if an Adobe APP14 marker was found.
+    pub saw_adobe_marker: bool,
+    /// Adobe color transform code (0 = CMYK/RGB, 1 = YCbCr, 2 = YCCK).
+    pub adobe_transform: u8,
 }
 
 /// Reads and parses JPEG markers from a byte slice.
@@ -67,6 +71,8 @@ impl<'a> MarkerReader<'a> {
         let mut ac_huffman_tables: [Option<HuffmanTable>; 4] = [None, None, None, None];
         let mut restart_interval: u16 = 0;
         let mut scans: Vec<ScanInfo> = Vec::new();
+        let mut saw_adobe_marker: bool = false;
+        let mut adobe_transform: u8 = 0;
 
         loop {
             let marker = self.read_marker()?;
@@ -109,7 +115,11 @@ impl<'a> MarkerReader<'a> {
                 EOI => {
                     break;
                 }
-                // Skip APPn and COM markers
+                // APP14 (Adobe marker) — parse for color transform info
+                0xEE => {
+                    self.read_app14(&mut saw_adobe_marker, &mut adobe_transform)?;
+                }
+                // Skip other APPn and COM markers
                 m if (0xE0..=0xEF).contains(&m) || m == COM => {
                     self.skip_marker_segment()?;
                 }
@@ -140,6 +150,8 @@ impl<'a> MarkerReader<'a> {
             restart_interval,
             entropy_data_offset: first_offset,
             scans,
+            saw_adobe_marker,
+            adobe_transform,
         })
     }
 
@@ -225,6 +237,29 @@ impl<'a> MarkerReader<'a> {
             return Err(JpegError::UnexpectedEof);
         }
         self.pos += skip;
+        Ok(())
+    }
+
+    /// Parse Adobe APP14 marker to extract color transform.
+    /// Transform values: 0 = CMYK or RGB, 1 = YCbCr, 2 = YCCK.
+    fn read_app14(&mut self, saw_adobe: &mut bool, transform: &mut u8) -> Result<()> {
+        let length = self.read_u16_be()? as usize;
+        if length < 2 {
+            return Err(JpegError::CorruptData("APP14 segment length < 2".into()));
+        }
+        let end = self.pos + length - 2;
+
+        // Adobe APP14 marker starts with "Adobe" (5 bytes) and is at least 12 bytes
+        if length >= 14
+            && self.pos + 12 <= self.data.len()
+            && &self.data[self.pos..self.pos + 5] == b"Adobe"
+        {
+            // Skip "Adobe" (5) + version (2) + flags0 (2) + flags1 (2) = 11 bytes
+            *transform = self.data[self.pos + 11];
+            *saw_adobe = true;
+        }
+
+        self.pos = end;
         Ok(())
     }
 
