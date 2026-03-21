@@ -13,6 +13,14 @@ pub fn decompress_to(data: &[u8], format: PixelFormat) -> Result<Image> {
     Decoder::decode_to(data, format)
 }
 
+/// Decompress a JPEG in lenient mode — continue on errors, filling corrupt areas with gray.
+/// The returned Image may have non-empty `warnings` if errors were encountered.
+pub fn decompress_lenient(data: &[u8]) -> Result<Image> {
+    let mut decoder = Decoder::new(data)?;
+    decoder.set_lenient(true);
+    decoder.decode_image()
+}
+
 /// Compress raw pixel data into a JPEG byte stream.
 ///
 /// # Arguments

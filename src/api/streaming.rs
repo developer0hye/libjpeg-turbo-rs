@@ -27,6 +27,11 @@ impl<'a> StreamingDecoder<'a> {
         self.inner.set_scale(scale);
     }
 
+    /// Enable lenient mode: continue on errors, filling corrupt areas with gray.
+    pub fn set_lenient(&mut self, lenient: bool) {
+        self.inner.set_lenient(lenient);
+    }
+
     /// Decode the JPEG payload using the already-parsed metadata.
     pub fn decode(&self) -> Result<Image> {
         self.inner.decode_image()
