@@ -2,11 +2,13 @@
 //!
 //! NEON is mandatory on ARMv8, so no runtime feature detection is needed.
 
+pub mod idct;
+
 use crate::simd::SimdRoutines;
 
 /// Return NEON-accelerated routines.
-/// Currently returns scalar fallbacks; NEON kernels are added in later steps.
 pub fn routines() -> SimdRoutines {
-    // Start with scalar; NEON kernels will replace these as they're implemented.
-    crate::simd::scalar::routines()
+    let mut r = crate::simd::scalar::routines();
+    r.idct_islow = idct::neon_idct_islow;
+    r
 }
