@@ -1,5 +1,120 @@
 use libjpeg_turbo_rs::decode::color;
 
+// --- YCCK → CMYK tests ---
+
+#[test]
+fn ycck_to_cmyk_neutral_gray() {
+    // YCbCr = (128, 128, 128) → RGB = (128, 128, 128) → CMY = (127, 127, 127)
+    // K passes through unchanged.
+    let y_plane = [128u8];
+    let cb = [128u8];
+    let cr = [128u8];
+    let k = [200u8];
+    let mut cmyk = [0u8; 4];
+    color::ycck_to_cmyk_row(&y_plane, &cb, &cr, &k, &mut cmyk, 1);
+    assert_eq!(cmyk[0], 127); // C = 255 - R = 255 - 128
+    assert_eq!(cmyk[1], 127); // M = 255 - G
+    assert_eq!(cmyk[2], 127); // Y = 255 - B
+    assert_eq!(cmyk[3], 200); // K unchanged
+}
+
+#[test]
+fn ycck_to_cmyk_white() {
+    // YCbCr = (255, 128, 128) → RGB = (255, 255, 255) → CMY = (0, 0, 0), K passes through.
+    let y_plane = [255u8];
+    let cb = [128u8];
+    let cr = [128u8];
+    let k = [0u8]; // K=0 means no black
+    let mut cmyk = [0u8; 4];
+    color::ycck_to_cmyk_row(&y_plane, &cb, &cr, &k, &mut cmyk, 1);
+    assert_eq!(cmyk[0], 0); // C = 255 - 255
+    assert_eq!(cmyk[1], 0); // M
+    assert_eq!(cmyk[2], 0); // Y
+    assert_eq!(cmyk[3], 0); // K
+}
+
+#[test]
+fn ycck_to_cmyk_black() {
+    // YCbCr = (0, 128, 128) → RGB = (0, 0, 0) → CMY = (255, 255, 255)
+    let y_plane = [0u8];
+    let cb = [128u8];
+    let cr = [128u8];
+    let k = [255u8];
+    let mut cmyk = [0u8; 4];
+    color::ycck_to_cmyk_row(&y_plane, &cb, &cr, &k, &mut cmyk, 1);
+    assert_eq!(cmyk[0], 255); // C
+    assert_eq!(cmyk[1], 255); // M
+    assert_eq!(cmyk[2], 255); // Y
+    assert_eq!(cmyk[3], 255); // K
+}
+
+#[test]
+fn ycck_to_cmyk_bulk() {
+    let y_plane = [255u8, 0, 128];
+    let cb = [128u8, 128, 128];
+    let cr = [128u8, 128, 128];
+    let k = [10u8, 20, 30];
+    let mut cmyk = [0u8; 12];
+    color::ycck_to_cmyk_row(&y_plane, &cb, &cr, &k, &mut cmyk, 3);
+    // Pixel 0: white → CMY=(0,0,0), K=10
+    assert_eq!(&cmyk[0..4], &[0, 0, 0, 10]);
+    // Pixel 1: black → CMY=(255,255,255), K=20
+    assert_eq!(&cmyk[4..8], &[255, 255, 255, 20]);
+    // Pixel 2: gray → CMY=(127,127,127), K=30
+    assert_eq!(&cmyk[8..12], &[127, 127, 127, 30]);
+}
+
+// --- CMYK → RGB tests ---
+
+#[test]
+fn cmyk_to_rgb_pure_white() {
+    // CMYK (0, 0, 0, 0) → RGB (255, 255, 255)
+    let c = [0u8];
+    let m = [0u8];
+    let y_plane = [0u8];
+    let k = [0u8];
+    let mut rgb = [0u8; 3];
+    color::cmyk_to_rgb_row(&c, &m, &y_plane, &k, &mut rgb, 1);
+    assert_eq!(&rgb, &[255, 255, 255]);
+}
+
+#[test]
+fn cmyk_to_rgb_pure_black() {
+    // CMYK (0, 0, 0, 255) → RGB (0, 0, 0)
+    let c = [0u8];
+    let m = [0u8];
+    let y_plane = [0u8];
+    let k = [255u8];
+    let mut rgb = [0u8; 3];
+    color::cmyk_to_rgb_row(&c, &m, &y_plane, &k, &mut rgb, 1);
+    assert_eq!(&rgb, &[0, 0, 0]);
+}
+
+#[test]
+fn cmyk_to_rgb_pure_cyan() {
+    // CMYK (255, 0, 0, 0) → RGB (0, 255, 255)
+    let c = [255u8];
+    let m = [0u8];
+    let y_plane = [0u8];
+    let k = [0u8];
+    let mut rgb = [0u8; 3];
+    color::cmyk_to_rgb_row(&c, &m, &y_plane, &k, &mut rgb, 1);
+    assert_eq!(&rgb, &[0, 255, 255]);
+}
+
+#[test]
+fn cmyk_to_rgb_bulk() {
+    let c = [0u8, 0, 255];
+    let m = [0u8, 0, 0];
+    let y_plane = [0u8, 0, 0];
+    let k = [0u8, 255, 0];
+    let mut rgb = [0u8; 9];
+    color::cmyk_to_rgb_row(&c, &m, &y_plane, &k, &mut rgb, 3);
+    assert_eq!(&rgb[0..3], &[255, 255, 255]); // white
+    assert_eq!(&rgb[3..6], &[0, 0, 0]); // black
+    assert_eq!(&rgb[6..9], &[0, 255, 255]); // cyan
+}
+
 #[test]
 fn ycbcr_to_rgb_white() {
     let (r, g, b) = color::ycbcr_to_rgb_pixel(255, 128, 128);

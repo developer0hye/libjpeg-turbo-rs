@@ -60,6 +60,8 @@ pub enum PixelFormat {
     Rgba,
     Bgr,
     Bgra,
+    /// Raw CMYK output (4 bytes per pixel: C, M, Y, K).
+    Cmyk,
 }
 
 impl PixelFormat {
@@ -67,7 +69,7 @@ impl PixelFormat {
         match self {
             Self::Grayscale => 1,
             Self::Rgb | Self::Bgr => 3,
-            Self::Rgba | Self::Bgra => 4,
+            Self::Rgba | Self::Bgra | Self::Cmyk => 4,
         }
     }
 }

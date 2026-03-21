@@ -183,7 +183,9 @@ impl<'a> Decoder<'a> {
             PixelFormat::Rgba => self.ycbcr_to_rgba_row(y, cb, cr, out, width),
             PixelFormat::Bgr => self.ycbcr_to_bgr_row(y, cb, cr, out, width),
             PixelFormat::Bgra => self.ycbcr_to_bgra_row(y, cb, cr, out, width),
-            PixelFormat::Grayscale => unreachable!("grayscale handled separately"),
+            PixelFormat::Grayscale | PixelFormat::Cmyk => {
+                unreachable!("grayscale/cmyk handled separately")
+            }
         }
     }
 
@@ -817,7 +819,7 @@ impl<'a> Decoder<'a> {
                                 out_row[x * 4 + 2] = v;
                                 out_row[x * 4 + 3] = 255;
                             }
-                            PixelFormat::Grayscale => unreachable!(),
+                            PixelFormat::Grayscale | PixelFormat::Cmyk => unreachable!(),
                         }
                     }
                 }
@@ -938,11 +940,296 @@ impl<'a> Decoder<'a> {
                 pixel_format: out_format,
                 data,
             })
+        } else if num_components == 4 {
+            self.decode_4_component(
+                &component_planes,
+                frame,
+                width,
+                height,
+                mcus_x,
+                mcus_y,
+                max_h,
+                max_v,
+                full_width,
+                full_height,
+            )
         } else {
             Err(JpegError::Unsupported(format!(
                 "{} components not yet supported",
                 num_components
             )))
         }
+    }
+
+    /// Determine the JPEG color space from component count and Adobe marker.
+    /// Follows the same heuristic as libjpeg-turbo (jdapimin.c).
+    fn detect_color_space(&self) -> ColorSpace {
+        let num_components = self.metadata.frame.components.len();
+        match num_components {
+            1 => ColorSpace::Grayscale,
+            3 => {
+                if self.metadata.saw_adobe_marker && self.metadata.adobe_transform == 0 {
+                    ColorSpace::Rgb
+                } else {
+                    ColorSpace::YCbCr
+                }
+            }
+            4 => {
+                if self.metadata.saw_adobe_marker {
+                    match self.metadata.adobe_transform {
+                        0 => ColorSpace::Cmyk,
+                        2 => ColorSpace::Ycck,
+                        _ => ColorSpace::Ycck, // default for unknown Adobe transforms
+                    }
+                } else {
+                    ColorSpace::Cmyk // no Adobe marker → assume CMYK
+                }
+            }
+            _ => ColorSpace::YCbCr, // fallback
+        }
+    }
+
+    /// Decode a 4-component (CMYK/YCCK) image.
+    #[allow(clippy::too_many_arguments)]
+    fn decode_4_component(
+        &self,
+        component_planes: &[Vec<u8>],
+        frame: &FrameHeader,
+        width: usize,
+        height: usize,
+        mcus_x: usize,
+        mcus_y: usize,
+        max_h: usize,
+        max_v: usize,
+        full_width: usize,
+        full_height: usize,
+    ) -> Result<Image> {
+        let color_space = self.detect_color_space();
+        let out_format = self.output_format.unwrap_or(PixelFormat::Cmyk);
+
+        if out_format == PixelFormat::Grayscale {
+            return Err(JpegError::Unsupported(
+                "cannot convert CMYK/YCCK to grayscale".to_string(),
+            ));
+        }
+
+        // Component 0 is always full-resolution (Y or C).
+        let comp0_w = mcus_x * frame.components[0].horizontal_sampling as usize * 8;
+
+        // For YCCK, components 1-2 may be subsampled (chroma), component 3 (K) is full.
+        // For CMYK, all components are typically the same resolution.
+        let comp1 = &frame.components[1];
+        let comp1_w = mcus_x * comp1.horizontal_sampling as usize * 8;
+        let comp1_h = mcus_y * comp1.vertical_sampling as usize * 8;
+        let comp3_w = mcus_x * frame.components[3].horizontal_sampling as usize * 8;
+
+        let h_factor = max_h / comp1.horizontal_sampling as usize;
+        let v_factor = max_v / comp1.vertical_sampling as usize;
+
+        // Upsample chroma if needed (for YCCK subsampled images)
+        let (plane1, plane2, p1_stride, p2_stride): (&[u8], &[u8], usize, usize);
+
+        if h_factor == 1 && v_factor == 1 {
+            plane1 = &component_planes[1];
+            plane2 = &component_planes[2];
+            p1_stride = comp1_w;
+            p2_stride = comp1_w;
+        } else {
+            let alloc_size = full_width * full_height;
+            let mut p1_full = Vec::with_capacity(alloc_size);
+            let mut p2_full = Vec::with_capacity(alloc_size);
+            unsafe {
+                p1_full.set_len(alloc_size);
+                p2_full.set_len(alloc_size);
+            }
+
+            if h_factor == 2 && v_factor == 1 {
+                for row in 0..comp1_h {
+                    self.fancy_upsample_h2v1(
+                        &component_planes[1][row * comp1_w..],
+                        comp1_w,
+                        &mut p1_full[row * full_width..],
+                    );
+                    self.fancy_upsample_h2v1(
+                        &component_planes[2][row * comp1_w..],
+                        comp1_w,
+                        &mut p2_full[row * full_width..],
+                    );
+                }
+            } else if h_factor == 2 && v_factor == 2 {
+                self.fancy_h2v2(
+                    &component_planes[1],
+                    comp1_w,
+                    comp1_h,
+                    &mut p1_full,
+                    full_width,
+                );
+                self.fancy_h2v2(
+                    &component_planes[2],
+                    comp1_w,
+                    comp1_h,
+                    &mut p2_full,
+                    full_width,
+                );
+            } else {
+                return Err(JpegError::Unsupported(format!(
+                    "4-component subsampling {}x{} not yet supported",
+                    h_factor, v_factor
+                )));
+            }
+
+            return self.convert_4comp_output(
+                color_space,
+                out_format,
+                &component_planes[0],
+                comp0_w,
+                &p1_full,
+                full_width,
+                &p2_full,
+                full_width,
+                &component_planes[3],
+                comp3_w,
+                width,
+                height,
+            );
+        }
+
+        self.convert_4comp_output(
+            color_space,
+            out_format,
+            &component_planes[0],
+            comp0_w,
+            plane1,
+            p1_stride,
+            plane2,
+            p2_stride,
+            &component_planes[3],
+            comp3_w,
+            width,
+            height,
+        )
+    }
+
+    /// Color-convert 4 component planes to the output format.
+    #[allow(clippy::too_many_arguments)]
+    fn convert_4comp_output(
+        &self,
+        color_space: ColorSpace,
+        out_format: PixelFormat,
+        plane0: &[u8],
+        p0_stride: usize,
+        plane1: &[u8],
+        p1_stride: usize,
+        plane2: &[u8],
+        p2_stride: usize,
+        plane3: &[u8],
+        p3_stride: usize,
+        width: usize,
+        height: usize,
+    ) -> Result<Image> {
+        use crate::decode::color;
+
+        let bpp = out_format.bytes_per_pixel();
+        let data_size = width * height * bpp;
+        let mut data = Vec::with_capacity(data_size);
+        unsafe { data.set_len(data_size) };
+
+        for y in 0..height {
+            let p0 = &plane0[y * p0_stride..];
+            let p1 = &plane1[y * p1_stride..];
+            let p2 = &plane2[y * p2_stride..];
+            let p3 = &plane3[y * p3_stride..];
+            let out = &mut data[y * width * bpp..];
+
+            match (color_space, out_format) {
+                // CMYK → CMYK: passthrough
+                (ColorSpace::Cmyk, PixelFormat::Cmyk) => {
+                    color::cmyk_passthrough_row(p0, p1, p2, p3, out, width);
+                }
+                // CMYK → RGB/RGBA/BGR/BGRA: direct conversion
+                (ColorSpace::Cmyk, PixelFormat::Rgb) => {
+                    color::cmyk_to_rgb_row(p0, p1, p2, p3, out, width);
+                }
+                (ColorSpace::Cmyk, PixelFormat::Rgba) => {
+                    color::cmyk_to_rgba_row(p0, p1, p2, p3, out, width);
+                }
+                (ColorSpace::Cmyk, PixelFormat::Bgr) => {
+                    color::cmyk_to_bgr_row(p0, p1, p2, p3, out, width);
+                }
+                (ColorSpace::Cmyk, PixelFormat::Bgra) => {
+                    color::cmyk_to_bgra_row(p0, p1, p2, p3, out, width);
+                }
+                // YCCK → CMYK: YCbCr→RGB→invert→CMYK, K passthrough
+                (ColorSpace::Ycck, PixelFormat::Cmyk) => {
+                    color::ycck_to_cmyk_row(p0, p1, p2, p3, out, width);
+                }
+                // YCCK → RGB: convert YCCK→CMYK first (into temp), then CMYK→RGB
+                (ColorSpace::Ycck, PixelFormat::Rgb) => {
+                    let mut cmyk_buf = vec![0u8; width * 4];
+                    color::ycck_to_cmyk_row(p0, p1, p2, p3, &mut cmyk_buf, width);
+                    for x in 0..width {
+                        let ki = 255 - cmyk_buf[x * 4 + 3] as u16;
+                        out[x * 3] = (((255 - cmyk_buf[x * 4] as u16) * ki + 127) / 255) as u8;
+                        out[x * 3 + 1] =
+                            (((255 - cmyk_buf[x * 4 + 1] as u16) * ki + 127) / 255) as u8;
+                        out[x * 3 + 2] =
+                            (((255 - cmyk_buf[x * 4 + 2] as u16) * ki + 127) / 255) as u8;
+                    }
+                }
+                (ColorSpace::Ycck, PixelFormat::Rgba) => {
+                    let mut cmyk_buf = vec![0u8; width * 4];
+                    color::ycck_to_cmyk_row(p0, p1, p2, p3, &mut cmyk_buf, width);
+                    for x in 0..width {
+                        let ki = 255 - cmyk_buf[x * 4 + 3] as u16;
+                        out[x * 4] = (((255 - cmyk_buf[x * 4] as u16) * ki + 127) / 255) as u8;
+                        out[x * 4 + 1] =
+                            (((255 - cmyk_buf[x * 4 + 1] as u16) * ki + 127) / 255) as u8;
+                        out[x * 4 + 2] =
+                            (((255 - cmyk_buf[x * 4 + 2] as u16) * ki + 127) / 255) as u8;
+                        out[x * 4 + 3] = 255;
+                    }
+                }
+                (ColorSpace::Ycck, PixelFormat::Bgr) => {
+                    let mut cmyk_buf = vec![0u8; width * 4];
+                    color::ycck_to_cmyk_row(p0, p1, p2, p3, &mut cmyk_buf, width);
+                    for x in 0..width {
+                        let ki = 255 - cmyk_buf[x * 4 + 3] as u16;
+                        let r = (((255 - cmyk_buf[x * 4] as u16) * ki + 127) / 255) as u8;
+                        let g = (((255 - cmyk_buf[x * 4 + 1] as u16) * ki + 127) / 255) as u8;
+                        let b = (((255 - cmyk_buf[x * 4 + 2] as u16) * ki + 127) / 255) as u8;
+                        out[x * 3] = b;
+                        out[x * 3 + 1] = g;
+                        out[x * 3 + 2] = r;
+                    }
+                }
+                (ColorSpace::Ycck, PixelFormat::Bgra) => {
+                    let mut cmyk_buf = vec![0u8; width * 4];
+                    color::ycck_to_cmyk_row(p0, p1, p2, p3, &mut cmyk_buf, width);
+                    for x in 0..width {
+                        let ki = 255 - cmyk_buf[x * 4 + 3] as u16;
+                        let r = (((255 - cmyk_buf[x * 4] as u16) * ki + 127) / 255) as u8;
+                        let g = (((255 - cmyk_buf[x * 4 + 1] as u16) * ki + 127) / 255) as u8;
+                        let b = (((255 - cmyk_buf[x * 4 + 2] as u16) * ki + 127) / 255) as u8;
+                        out[x * 4] = b;
+                        out[x * 4 + 1] = g;
+                        out[x * 4 + 2] = r;
+                        out[x * 4 + 3] = 255;
+                    }
+                }
+                _ => {
+                    return Err(JpegError::Unsupported(format!(
+                        "unsupported conversion: {:?} → {:?}",
+                        color_space, out_format
+                    )));
+                }
+            }
+        }
+
+        Ok(Image {
+            width,
+            height,
+            pixel_format: out_format,
+            data,
+        })
     }
 }
