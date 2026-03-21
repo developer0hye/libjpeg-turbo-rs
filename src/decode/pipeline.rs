@@ -1,12 +1,10 @@
 use crate::common::error::{JpegError, Result};
 use crate::common::types::*;
 use crate::decode::bitstream::BitReader;
-use crate::decode::color;
-use crate::decode::dequant;
 use crate::decode::entropy::McuDecoder;
-use crate::decode::idct;
 use crate::decode::marker::{JpegMetadata, MarkerReader};
 use crate::decode::upsample;
+use crate::simd::{self, SimdRoutines};
 
 /// Decoded image data.
 #[derive(Debug)]
@@ -21,15 +19,18 @@ pub struct Image {
 pub struct Decoder<'a> {
     metadata: JpegMetadata,
     raw_data: &'a [u8],
+    routines: SimdRoutines,
 }
 
 impl<'a> Decoder<'a> {
     pub fn new(data: &'a [u8]) -> Result<Self> {
         let mut reader = MarkerReader::new(data);
         let metadata = reader.read_markers()?;
+        let routines = simd::detect();
         Ok(Self {
             metadata,
             raw_data: data,
+            routines,
         })
     }
 
@@ -130,19 +131,19 @@ impl<'a> Decoder<'a> {
                                     "missing quant table {}",
                                     comp.quant_table_index
                                 )))?;
-                            let dequantized = dequant::dequantize_block(zigzag_coeffs, qt);
-                            let spatial = idct::idct_8x8(&dequantized);
+
+                            let mut block_u8 = [0u8; 64];
+                            (self.routines.idct_islow)(zigzag_coeffs, &qt.values, &mut block_u8);
 
                             let block_x = (mcu_x * h_blocks + h) * 8;
                             let block_y = (mcu_y * v_blocks + v) * 8;
 
                             for row in 0..8 {
                                 for col in 0..8 {
-                                    let val =
-                                        (spatial[row * 8 + col] as i32 + 128).clamp(0, 255) as u8;
                                     let px = block_x + col;
                                     let py = block_y + row;
-                                    component_planes[comp_idx][py * comp_w + px] = val;
+                                    component_planes[comp_idx][py * comp_w + px] =
+                                        block_u8[row * 8 + col];
                                 }
                             }
                         }
@@ -185,17 +186,15 @@ impl<'a> Decoder<'a> {
                 cr_full = component_planes[2].clone();
             } else if h_factor == 2 && v_factor == 1 {
                 for row in 0..cb_h {
-                    upsample::fancy_h2v1(
+                    (self.routines.fancy_upsample_h2v1)(
                         &component_planes[1][row * cb_w..],
                         cb_w,
                         &mut cb_full[row * full_width..],
-                        full_width,
                     );
-                    upsample::fancy_h2v1(
+                    (self.routines.fancy_upsample_h2v1)(
                         &component_planes[2][row * cb_w..],
                         cb_w,
                         &mut cr_full[row * full_width..],
-                        full_width,
                     );
                 }
             } else if h_factor == 2 && v_factor == 2 {
@@ -224,7 +223,7 @@ impl<'a> Decoder<'a> {
 
             let mut data = vec![0u8; width * height * 3];
             for y in 0..height {
-                color::ycbcr_to_rgb_row(
+                (self.routines.ycbcr_to_rgb_row)(
                     &y_plane[y * y_width..],
                     &cb_full[y * full_width..],
                     &cr_full[y * full_width..],
