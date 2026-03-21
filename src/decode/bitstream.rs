@@ -101,4 +101,17 @@ impl<'a> BitReader<'a> {
             }
         }
     }
+
+    /// Set the byte position directly (for progressive multi-scan).
+    /// Resets the bit buffer.
+    pub fn set_position(&mut self, pos: usize) {
+        self.pos = pos;
+        self.bit_buffer = 0;
+        self.bits_left = 0;
+    }
+
+    /// Return current byte position in the underlying data.
+    pub fn position(&self) -> usize {
+        self.pos
+    }
 }

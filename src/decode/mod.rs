@@ -6,4 +6,5 @@ pub mod huffman;
 pub mod idct;
 pub mod marker;
 pub mod pipeline;
+pub mod progressive;
 pub mod upsample;

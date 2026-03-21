@@ -116,6 +116,9 @@ impl HuffmanTable {
     fn lookup_slow(&self, bits_msb: u16) -> Result<(u8, u8)> {
         // Build the code incrementally starting from the minimum slow-path length
         let start = self.min_slow_length.max(1) as usize;
+        if start > 16 {
+            return Err(JpegError::CorruptData("invalid Huffman code".into()));
+        }
         // Reconstruct code at `start` bits from the MSB
         let mut code = (bits_msb >> (16 - start)) as i32;
 
