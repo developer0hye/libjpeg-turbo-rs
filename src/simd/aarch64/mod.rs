@@ -4,6 +4,7 @@
 
 pub mod color;
 pub mod idct;
+pub mod upsample;
 
 use crate::simd::SimdRoutines;
 
@@ -12,6 +13,6 @@ pub fn routines() -> SimdRoutines {
     SimdRoutines {
         idct_islow: idct::neon_idct_islow,
         ycbcr_to_rgb_row: color::neon_ycbcr_to_rgb_row,
-        fancy_upsample_h2v1: crate::simd::scalar::routines().fancy_upsample_h2v1,
+        fancy_upsample_h2v1: upsample::neon_fancy_upsample_h2v1,
     }
 }
