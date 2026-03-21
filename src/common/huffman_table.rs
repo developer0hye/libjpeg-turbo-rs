@@ -93,7 +93,7 @@ impl HuffmanTable {
     /// Returns `(symbol, code_length)`.
     #[inline(always)]
     pub fn lookup(&self, bits_msb: u16) -> Result<(u8, u8)> {
-        // Fast path: use top 8 bits as index
+        // Fast path: use top 8 bits as index (handles ~95% of symbols)
         let index = (bits_msb >> 8) as usize;
         let entry = self.fast[index];
         if entry.length > 0 {
@@ -105,10 +105,9 @@ impl HuffmanTable {
     }
 
     #[cold]
+    #[inline(never)]
     fn lookup_slow(&self, bits_msb: u16) -> Result<(u8, u8)> {
-        // Build the code incrementally starting from the minimum slow-path length
         let start = self.min_slow_length.max(1) as usize;
-        // Reconstruct code at `start` bits from the MSB
         let mut code = (bits_msb >> (16 - start)) as i32;
 
         for length in start..=16usize {
