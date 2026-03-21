@@ -35,7 +35,14 @@ pub fn decode_ac_coefficients(
 
     while index < 64 {
         let peek = reader.peek_bits(16);
-        let (symbol, code_len) = table.lookup(peek)?;
+        let (symbol, code_len) = {
+            let (s, l) = table.lookup_fast(peek);
+            if l > 0 {
+                (s, l)
+            } else {
+                table.lookup(peek)?
+            }
+        };
         reader.skip_bits(code_len);
 
         let run_length = (symbol >> 4) as usize;

@@ -97,11 +97,23 @@ impl HuffmanTable {
         let index = (bits_msb >> (16 - LOOKUP_BITS)) as usize;
         let entry = self.fast[index];
         if entry.length > 0 {
+            // Return directly — compiler can often elide the Result wrapping
+            // when the caller immediately destructures with `?`.
             return Ok((entry.symbol, entry.length));
         }
 
-        // Slow path: codes > 8 bits
+        // Slow path: codes > LOOKUP_BITS bits
         self.lookup_slow(bits_msb)
+    }
+
+    /// Fast lookup that returns a raw (symbol, length) pair.
+    /// Returns (0, 0) if the code is longer than LOOKUP_BITS bits.
+    /// Callers should check `length > 0` and fall back to `lookup()` if false.
+    #[inline(always)]
+    pub fn lookup_fast(&self, bits_msb: u16) -> (u8, u8) {
+        let index = (bits_msb >> (16 - LOOKUP_BITS)) as usize;
+        let entry = self.fast[index];
+        (entry.symbol, entry.length)
     }
 
     #[cold]
