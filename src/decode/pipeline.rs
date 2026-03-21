@@ -37,12 +37,26 @@ pub struct Image {
     pub data: Vec<u8>,
     /// Reassembled ICC profile from APP2 markers, if present and valid.
     pub icc_profile: Option<Vec<u8>>,
+    /// Raw EXIF TIFF data from APP1 marker, if present.
+    pub exif_data: Option<Vec<u8>>,
 }
 
 impl Image {
     /// Returns the ICC color profile embedded in this JPEG, if any.
     pub fn icc_profile(&self) -> Option<&[u8]> {
         self.icc_profile.as_deref()
+    }
+
+    /// Returns the raw EXIF TIFF data, if present.
+    pub fn exif_data(&self) -> Option<&[u8]> {
+        self.exif_data.as_deref()
+    }
+
+    /// Parses and returns the EXIF orientation tag (1-8), if present.
+    pub fn exif_orientation(&self) -> Option<u8> {
+        self.exif_data
+            .as_ref()
+            .and_then(|d| crate::common::exif::parse_orientation(d))
     }
 }
 
@@ -725,6 +739,7 @@ impl<'a> Decoder<'a> {
         let width = frame.width as usize;
         let height = frame.height as usize;
         let icc_profile = self.icc_profile();
+        let exif_data = self.metadata.exif_data.clone();
 
         if frame.precision != 8 {
             return Err(JpegError::Unsupported(format!(
@@ -801,6 +816,7 @@ impl<'a> Decoder<'a> {
                     pixel_format: PixelFormat::Grayscale,
                     data,
                     icc_profile: icc_profile.clone(),
+                    exif_data: exif_data.clone(),
                 })
             } else {
                 // Expand grayscale to requested color format
@@ -846,6 +862,7 @@ impl<'a> Decoder<'a> {
                     pixel_format: out_format,
                     data,
                     icc_profile: icc_profile.clone(),
+                    exif_data: exif_data.clone(),
                 })
             }
         } else if num_components == 3 {
@@ -935,6 +952,7 @@ impl<'a> Decoder<'a> {
                     pixel_format: out_format,
                     data,
                     icc_profile: icc_profile.clone(),
+                    exif_data: exif_data.clone(),
                 });
             }
 
@@ -959,6 +977,7 @@ impl<'a> Decoder<'a> {
                 pixel_format: out_format,
                 data,
                 icc_profile: icc_profile.clone(),
+                exif_data: exif_data.clone(),
             })
         } else if num_components == 4 {
             self.decode_4_component(
@@ -973,6 +992,7 @@ impl<'a> Decoder<'a> {
                 full_width,
                 full_height,
                 icc_profile,
+                exif_data,
             )
         } else {
             Err(JpegError::Unsupported(format!(
@@ -1025,6 +1045,7 @@ impl<'a> Decoder<'a> {
         full_width: usize,
         full_height: usize,
         icc_profile: Option<Vec<u8>>,
+        exif_data: Option<Vec<u8>>,
     ) -> Result<Image> {
         let color_space = self.detect_color_space();
         let out_format = self.output_format.unwrap_or(PixelFormat::Cmyk);
@@ -1114,6 +1135,7 @@ impl<'a> Decoder<'a> {
                 width,
                 height,
                 icc_profile,
+                exif_data,
             );
         }
 
@@ -1131,6 +1153,7 @@ impl<'a> Decoder<'a> {
             width,
             height,
             icc_profile,
+            exif_data,
         )
     }
 
@@ -1151,6 +1174,7 @@ impl<'a> Decoder<'a> {
         width: usize,
         height: usize,
         icc_profile: Option<Vec<u8>>,
+        exif_data: Option<Vec<u8>>,
     ) -> Result<Image> {
         use crate::decode::color;
 
@@ -1256,6 +1280,7 @@ impl<'a> Decoder<'a> {
             pixel_format: out_format,
             data,
             icc_profile,
+            exif_data,
         })
     }
 }
