@@ -8,6 +8,7 @@ use crate::simd::{self, SimdRoutines};
 
 /// Vertical triangle-filter blend: out[i] = (3*cur[i] + neighbor[i] + 2) >> 2.
 /// Auto-vectorizes well on aarch64 with NEON.
+#[cfg(not(all(target_arch = "aarch64", feature = "simd")))]
 #[inline]
 fn vertical_blend(cur: &[u8], neighbor: &[u8], output: &mut [u8], width: usize) {
     for i in 0..width {
@@ -63,6 +64,40 @@ impl<'a> Decoder<'a> {
         (self.routines.idct_islow)(coeffs, quant, output)
     }
 
+    /// IDCT writing directly to a strided destination buffer (no intermediate copy).
+    ///
+    /// # Safety
+    /// `output` must point to at least `7 * stride + 8` writable bytes.
+    #[inline(always)]
+    unsafe fn idct_islow_strided(
+        &self,
+        coeffs: &[i16; 64],
+        quant: &[u16; 64],
+        output: *mut u8,
+        stride: usize,
+    ) {
+        #[cfg(all(target_arch = "aarch64", feature = "simd"))]
+        {
+            return crate::simd::aarch64::idct::neon_idct_islow_strided(
+                coeffs, quant, output, stride,
+            );
+        }
+
+        // Scalar fallback: IDCT into temp buffer, then copy row-by-row.
+        #[allow(unreachable_code)]
+        {
+            let mut tmp = [0u8; 64];
+            (self.routines.idct_islow)(coeffs, quant, &mut tmp);
+            for row in 0..8 {
+                std::ptr::copy_nonoverlapping(
+                    tmp.as_ptr().add(row * 8),
+                    output.add(row * stride),
+                    8,
+                );
+            }
+        }
+    }
+
     #[inline(always)]
     fn ycbcr_to_rgb_row(&self, y: &[u8], cb: &[u8], cr: &[u8], rgb: &mut [u8], width: usize) {
         #[cfg(all(target_arch = "aarch64", feature = "simd"))]
@@ -87,10 +122,9 @@ impl<'a> Decoder<'a> {
         (self.routines.fancy_upsample_h2v1)(input, in_width, output)
     }
 
-    /// Fancy h2v2 upsample using dispatch for the horizontal h2v1 pass.
-    /// Vertical blend is done inline; horizontal upsample goes through
-    /// `self.routines.fancy_upsample_h2v1` (NEON on aarch64).
-    fn fancy_h2v2_dispatch(
+    /// Fancy h2v2 upsample. On aarch64 this uses a dedicated helper that
+    /// fuses the two vertical blends into one pass before the h2v1 stage.
+    fn fancy_h2v2(
         &self,
         input: &[u8],
         in_width: usize,
@@ -98,29 +132,47 @@ impl<'a> Decoder<'a> {
         output: &mut [u8],
         out_width: usize,
     ) {
-        let mut row_above = vec![0u8; in_width];
-        let mut row_below = vec![0u8; in_width];
+        #[cfg(all(target_arch = "aarch64", feature = "simd"))]
+        {
+            return crate::simd::aarch64::upsample::neon_fancy_upsample_h2v2(
+                input, in_width, in_height, output, out_width,
+            );
+        }
 
-        for y in 0..in_height {
-            let cur_row = &input[y * in_width..(y + 1) * in_width];
-            let above = if y > 0 {
-                &input[(y - 1) * in_width..y * in_width]
-            } else {
-                cur_row
-            };
-            let below = if y + 1 < in_height {
-                &input[(y + 1) * in_width..(y + 2) * in_width]
-            } else {
-                cur_row
-            };
+        #[cfg(not(all(target_arch = "aarch64", feature = "simd")))]
+        {
+            let mut row_above = vec![0u8; in_width];
+            let mut row_below = vec![0u8; in_width];
 
-            vertical_blend(cur_row, above, &mut row_above, in_width);
-            vertical_blend(cur_row, below, &mut row_below, in_width);
+            for y in 0..in_height {
+                let cur_row = &input[y * in_width..(y + 1) * in_width];
+                let above = if y > 0 {
+                    &input[(y - 1) * in_width..y * in_width]
+                } else {
+                    cur_row
+                };
+                let below = if y + 1 < in_height {
+                    &input[(y + 1) * in_width..(y + 2) * in_width]
+                } else {
+                    cur_row
+                };
 
-            let out_y_top = y * 2;
-            let out_y_bot = y * 2 + 1;
-            self.fancy_upsample_h2v1(&row_above, in_width, &mut output[out_y_top * out_width..]);
-            self.fancy_upsample_h2v1(&row_below, in_width, &mut output[out_y_bot * out_width..]);
+                vertical_blend(cur_row, above, &mut row_above, in_width);
+                vertical_blend(cur_row, below, &mut row_below, in_width);
+
+                let out_y_top = y * 2;
+                let out_y_bot = y * 2 + 1;
+                self.fancy_upsample_h2v1(
+                    &row_above,
+                    in_width,
+                    &mut output[out_y_top * out_width..],
+                );
+                self.fancy_upsample_h2v1(
+                    &row_below,
+                    in_width,
+                    &mut output[out_y_bot * out_width..],
+                );
+            }
         }
     }
 
@@ -214,13 +266,12 @@ impl<'a> Decoder<'a> {
             })
             .collect();
 
-        // Decode all MCUs — fused decode + IDCT + store, no intermediate Vec
+        // Decode all MCUs — fused decode + strided IDCT directly into planes
         let entropy_data = &self.raw_data[self.metadata.entropy_data_offset..];
         let mut bit_reader = BitReader::new(entropy_data);
         let mut mcu_decoder = McuDecoder::new(num_components);
         let mut mcu_count: u16 = 0;
         let mut coeffs = [0i16; 64];
-        let mut block_u8 = [0u8; 64];
 
         for mcu_y in 0..mcus_y {
             for mcu_x in 0..mcus_x {
@@ -232,7 +283,6 @@ impl<'a> Decoder<'a> {
                     mcu_decoder.reset();
                 }
 
-                // Fused: for each component, decode block → IDCT → store directly
                 let mut plan_idx = 0;
                 for (comp_idx, layout) in comp_layouts.iter().enumerate() {
                     let qt_values = &quant_tables[comp_idx].values;
@@ -249,15 +299,15 @@ impl<'a> Decoder<'a> {
                                 &mut coeffs,
                             )?;
 
-                            self.idct_islow(&coeffs, qt_values, &mut block_u8);
-
                             let block_x = (mcu_x * layout.h_blocks + h) * 8;
                             let block_y = (mcu_y * layout.v_blocks + v) * 8;
+                            let dst_offset = block_y * layout.comp_w + block_x;
 
-                            for row in 0..8 {
-                                let dst_start = (block_y + row) * layout.comp_w + block_x;
-                                component_planes[comp_idx][dst_start..dst_start + 8]
-                                    .copy_from_slice(&block_u8[row * 8..row * 8 + 8]);
+                            // SAFETY: dst_offset + 7*comp_w + 8 is within the
+                            // component plane (MCU-aligned allocation).
+                            unsafe {
+                                let dst = component_planes[comp_idx].as_mut_ptr().add(dst_offset);
+                                self.idct_islow_strided(&coeffs, qt_values, dst, layout.comp_w);
                             }
                         }
                     }
@@ -320,20 +370,8 @@ impl<'a> Decoder<'a> {
                 }
             } else if h_factor == 2 && v_factor == 2 {
                 // Vertical blend + horizontal upsample via dispatch (uses NEON h2v1)
-                self.fancy_h2v2_dispatch(
-                    &component_planes[1],
-                    cb_w,
-                    cb_h,
-                    &mut cb_full,
-                    full_width,
-                );
-                self.fancy_h2v2_dispatch(
-                    &component_planes[2],
-                    cb_w,
-                    cb_h,
-                    &mut cr_full,
-                    full_width,
-                );
+                self.fancy_h2v2(&component_planes[1], cb_w, cb_h, &mut cb_full, full_width);
+                self.fancy_h2v2(&component_planes[2], cb_w, cb_h, &mut cr_full, full_width);
             } else {
                 return Err(JpegError::Unsupported(format!(
                     "subsampling {}x{} not yet supported",

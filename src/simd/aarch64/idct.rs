@@ -60,8 +60,31 @@ const IDCT_CONSTS: IdctConsts = IdctConsts {
 pub fn neon_idct_islow(coeffs: &[i16; 64], quant: &[u16; 64], output: &mut [u8; 64]) {
     // SAFETY: NEON is mandatory on aarch64 (ARMv8).
     unsafe {
-        neon_idct_islow_fused(coeffs.as_ptr(), quant.as_ptr() as *const i16, output);
+        neon_idct_islow_core(
+            coeffs.as_ptr(),
+            quant.as_ptr() as *const i16,
+            output.as_mut_ptr(),
+            8,
+        );
     }
+}
+
+/// Strided variant: writes 8×8 block directly to `output` with row stride `stride`.
+///
+/// # Safety
+/// `output` must point to at least `7 * stride + 8` writable bytes.
+pub unsafe fn neon_idct_islow_strided(
+    coeffs: &[i16; 64],
+    quant: &[u16; 64],
+    output: *mut u8,
+    stride: usize,
+) {
+    neon_idct_islow_core(
+        coeffs.as_ptr(),
+        quant.as_ptr() as *const i16,
+        output,
+        stride,
+    );
 }
 
 /// Fused dequant + IDCT: loads raw coefficients and quant table, multiplies
@@ -70,8 +93,9 @@ pub fn neon_idct_islow(coeffs: &[i16; 64], quant: &[u16; 64], output: &mut [u8; 
 ///
 /// # Safety
 /// Requires aarch64 NEON. `cptr`/`qptr` must point to 64-element i16 arrays.
+/// `output` must have at least `7 * stride + 8` writable bytes.
 #[target_feature(enable = "neon")]
-unsafe fn neon_idct_islow_fused(cptr: *const i16, qptr: *const i16, output: &mut [u8; 64]) {
+unsafe fn neon_idct_islow_core(cptr: *const i16, qptr: *const i16, output: *mut u8, stride: usize) {
     let consts0: int16x4_t = vld1_s16(IDCT_CONSTS.data.as_ptr());
     let consts1: int16x4_t = vld1_s16(IDCT_CONSTS.data.as_ptr().add(4));
     let consts2: int16x4_t = vld1_s16(IDCT_CONSTS.data.as_ptr().add(8));
@@ -214,25 +238,11 @@ unsafe fn neon_idct_islow_fused(cptr: *const i16, qptr: *const i16, output: &mut
     // ws_r processes rows 4,5,6,7 → output rows 4,5,6,7
 
     if right_all_zero {
-        idct_pass2_sparse(ws_l.as_ptr(), output.as_mut_ptr(), 0);
-        idct_pass2_sparse(ws_r.as_ptr(), output.as_mut_ptr(), 4);
+        idct_pass2_sparse(ws_l.as_ptr(), output, 0, stride);
+        idct_pass2_sparse(ws_r.as_ptr(), output, 4, stride);
     } else {
-        idct_pass2_regular(
-            ws_l.as_ptr(),
-            output.as_mut_ptr(),
-            0,
-            consts0,
-            consts1,
-            consts2,
-        );
-        idct_pass2_regular(
-            ws_r.as_ptr(),
-            output.as_mut_ptr(),
-            4,
-            consts0,
-            consts1,
-            consts2,
-        );
+        idct_pass2_regular(ws_l.as_ptr(), output, 0, stride, consts0, consts1, consts2);
+        idct_pass2_regular(ws_r.as_ptr(), output, 4, stride, consts0, consts1, consts2);
     }
 }
 
@@ -402,6 +412,7 @@ unsafe fn idct_pass2_regular(
     workspace: *const i16,
     output: *mut u8,
     buf_offset: usize,
+    stride: usize,
     consts0: int16x4_t,
     consts1: int16x4_t,
     consts2: int16x4_t,
@@ -490,10 +501,10 @@ unsafe fn idct_pass2_regular(
 
     // Store 4 rows, each row gets 8 bytes (4 from left half + 4 from right half)
     // buf_offset: 0 for rows 0-3, 4 for rows 4-7
-    let out_row0 = output.add((buf_offset + 0) * 8);
-    let out_row1 = output.add((buf_offset + 1) * 8);
-    let out_row2 = output.add((buf_offset + 2) * 8);
-    let out_row3 = output.add((buf_offset + 3) * 8);
+    let out_row0 = output.add((buf_offset + 0) * stride);
+    let out_row1 = output.add((buf_offset + 1) * stride);
+    let out_row2 = output.add((buf_offset + 2) * stride);
+    let out_row3 = output.add((buf_offset + 3) * stride);
 
     vst4_lane_u16::<0>(out_row0 as *mut u16, cols_all);
     vst4_lane_u16::<1>(out_row1 as *mut u16, cols_all);
@@ -506,7 +517,12 @@ unsafe fn idct_pass2_regular(
 /// # Safety
 /// Requires NEON.
 #[target_feature(enable = "neon")]
-unsafe fn idct_pass2_sparse(workspace: *const i16, output: *mut u8, buf_offset: usize) {
+unsafe fn idct_pass2_sparse(
+    workspace: *const i16,
+    output: *mut u8,
+    buf_offset: usize,
+    stride: usize,
+) {
     let consts0: int16x4_t = vld1_s16(IDCT_CONSTS.data.as_ptr());
     let consts1: int16x4_t = vld1_s16(IDCT_CONSTS.data.as_ptr().add(4));
     let consts2: int16x4_t = vld1_s16(IDCT_CONSTS.data.as_ptr().add(8));
@@ -569,10 +585,10 @@ unsafe fn idct_pass2_sparse(workspace: *const i16, output: *mut u8, buf_offset: 
         vreinterpret_u16_u8(cols_45_67.1),
     );
 
-    let out_row0 = output.add((buf_offset + 0) * 8);
-    let out_row1 = output.add((buf_offset + 1) * 8);
-    let out_row2 = output.add((buf_offset + 2) * 8);
-    let out_row3 = output.add((buf_offset + 3) * 8);
+    let out_row0 = output.add((buf_offset + 0) * stride);
+    let out_row1 = output.add((buf_offset + 1) * stride);
+    let out_row2 = output.add((buf_offset + 2) * stride);
+    let out_row3 = output.add((buf_offset + 3) * stride);
 
     vst4_lane_u16::<0>(out_row0 as *mut u16, cols_all);
     vst4_lane_u16::<1>(out_row1 as *mut u16, cols_all);
