@@ -3,3 +3,4 @@ commit	time_us	status	description
 384673f	596	keep	Fast-path read_bits: skip fill_buffer when bits_left >= count (common after peek+skip). Saves one comparison per read_bits call.
 03365ee	435	keep	Infallible BitReader: peek_bits/read_bits return u16 directly (no Result wrapping). EOF returns 0. Eliminates 2 error-path branches per AC coefficient decode iteration. Also #[inline(never)] on lookup_slow.
 uncommitted	435	discard	Attempted fast 4-byte bulk fill in BitReader (check 4 bytes for 0xFF, load all at once if clean). No improvement — branch predictor already handles per-byte 0xFF check well. Reverted.
+bd24482	421	keep	9-bit Huffman fast-lookup table (512 entries, was 256). Catches more AC codes on fast path. 10-bit tested but worse (1024 entries hurts L1 cache).

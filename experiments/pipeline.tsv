@@ -3,3 +3,4 @@ none	1736	keep	Phase 2 baseline: SIMD dispatch + NEON IDCT/color/upsample wired 
 f6391d7	982	keep	Eliminate format!() from MCU hot loop: pre-resolve Huffman tables + quant tables + component layout once before loop. format!() in ok_or() was 55% of decode time.
 aa4a7f4	623	keep	Fuse decode+IDCT into single MCU loop (eliminate intermediate Vec<blocks>), upgrade BitReader to 64-bit buffer with eager fill to 25+ bits
 6e3adb5	451	keep	Write coefficients in natural order from Huffman decoder (ZIGZAG_ORDER lookup per AC coeff), eliminating full 64-element zigzag reorder from IDCT. Biggest single win.
+bd24482	421	keep	Uninitialized component planes + chroma buffers: skip ~1.2MB memset/frame. Vec::with_capacity + set_len instead of vec![0u8; n]. Safe because MCU loop + upsample write every pixel before read.
