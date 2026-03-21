@@ -22,7 +22,7 @@ impl<'a> BitReader<'a> {
 
     #[inline(always)]
     fn fill_buffer(&mut self, needed: u8) {
-        while self.bits_left < needed.max(25) {
+        while self.bits_left < needed.max(56) {
             if self.bits_left > 56 {
                 break;
             }
