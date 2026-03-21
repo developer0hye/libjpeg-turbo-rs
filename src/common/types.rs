@@ -96,6 +96,8 @@ pub struct FrameHeader {
     pub width: u16,
     /// Per-component info.
     pub components: Vec<ComponentInfo>,
+    /// True for SOF2 (progressive DCT).
+    pub is_progressive: bool,
 }
 
 /// Parsed from the SOS marker — describes one scan.
@@ -103,6 +105,14 @@ pub struct FrameHeader {
 pub struct ScanHeader {
     /// Component selectors for this scan.
     pub components: Vec<ScanComponentSelector>,
+    /// Spectral selection start (0 for DC, 1..63 for AC).
+    pub spec_start: u8,
+    /// Spectral selection end (0 for DC-only, up to 63).
+    pub spec_end: u8,
+    /// Successive approximation high bit position (0 = first scan for this band).
+    pub succ_high: u8,
+    /// Successive approximation low bit position.
+    pub succ_low: u8,
 }
 
 /// Per-component selector within a scan.
