@@ -98,7 +98,7 @@ const BENCH_CASES: &[BenchCase] = &[
         name: "photo_3840x2160_420",
         path: "tests/fixtures/photo_3840x2160_420.jpg",
     },
-    // Subsampling modes (same content, 320x240)
+    // Subsampling modes
     BenchCase {
         name: "photo_320x240_444",
         path: "tests/fixtures/photo_320x240_444.jpg",
@@ -106,6 +106,22 @@ const BENCH_CASES: &[BenchCase] = &[
     BenchCase {
         name: "photo_320x240_422",
         path: "tests/fixtures/photo_320x240_422.jpg",
+    },
+    BenchCase {
+        name: "photo_640x480_444",
+        path: "tests/fixtures/photo_640x480_444.jpg",
+    },
+    BenchCase {
+        name: "photo_640x480_422",
+        path: "tests/fixtures/photo_640x480_422.jpg",
+    },
+    BenchCase {
+        name: "photo_1920x1080_444",
+        path: "tests/fixtures/photo_1920x1080_444.jpg",
+    },
+    BenchCase {
+        name: "photo_1920x1080_422",
+        path: "tests/fixtures/photo_1920x1080_422.jpg",
     },
     // Content types (640x480)
     BenchCase {

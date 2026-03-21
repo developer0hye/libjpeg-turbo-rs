@@ -154,6 +154,50 @@ fn xval_photo_3840x2160_420() {
     );
 }
 
+// --- Subsampling at 640x480 ---
+
+#[test]
+fn xval_photo_640x480_444() {
+    assert_matches_reference(
+        "tests/fixtures/photo_640x480_444.jpg",
+        "tests/fixtures/ref/photo_640x480_444.rgb",
+        640,
+        480,
+    );
+}
+
+#[test]
+fn xval_photo_640x480_422() {
+    assert_matches_reference(
+        "tests/fixtures/photo_640x480_422.jpg",
+        "tests/fixtures/ref/photo_640x480_422.rgb",
+        640,
+        480,
+    );
+}
+
+// --- Subsampling at 1080p ---
+
+#[test]
+fn xval_photo_1920x1080_444() {
+    assert_matches_reference(
+        "tests/fixtures/photo_1920x1080_444.jpg",
+        "tests/fixtures/ref/photo_1920x1080_444.rgb",
+        1920,
+        1080,
+    );
+}
+
+#[test]
+fn xval_photo_1920x1080_422() {
+    assert_matches_reference(
+        "tests/fixtures/photo_1920x1080_422.jpg",
+        "tests/fixtures/ref/photo_1920x1080_422.rgb",
+        1920,
+        1080,
+    );
+}
+
 // --- Restart markers ---
 
 #[test]
