@@ -5,6 +5,10 @@ edition = "2021"
 description = "Pure Rust reimplementation of libjpeg-turbo"
 license = "MIT OR Apache-2.0"
 
+[features]
+default = ["simd"]
+simd = []
+
 [dependencies]
 thiserror = "2"
 
