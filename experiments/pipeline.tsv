@@ -8,3 +8,7 @@ bd24482	421	keep	Uninitialized component planes + chroma buffers: skip ~1.2MB me
 74fe5cc	348	keep	Strided IDCT output: write directly to component plane, eliminating [u8;64] temp + 8x copy_from_slice per block. Matches C libjpeg-turbo 352 µs reference.
 uncommitted	388	discard	Fused upsample+color convert: process 2 output rows at a time with small row buffers instead of full-size Cb/Cr intermediate. Theory: eliminate 4MB cache-busting buffers at 1080p. Reality: lost NEON h2v2 function (used scalar vertical_blend), and per-row function call overhead outweighed cache benefit. 640×480 regressed 348→388; 1080p unchanged. Reverted.
 3b4b12a	346/11909	keep	Aggressive bit buffer fill (56 bits): photo 1080p 12914→11909 (−8%). See huffman.tsv for details.
+d40302e	354/11411	keep	Simplified Huffman decode: removed combined-peek branch, inline(always) decode_block. Photo 1080p: 11878→11411 (−3.9%).
+uncommitted	343/11580	discard	Fused upsample+color #2: NEON vertical_blend + h2v1 + color per row pair, but #[target_feature] dispatch overhead per call × 8 calls/row × 240 rows = ~15µs overhead. Reverted.
+uncommitted	343/11579	discard	Fused upsample+color #3: single #[target_feature] merged function. Also tried #[inline] on NEON functions — hurt 1080p. Marginal improvement at 4K but regression at 640×480. Reverted.
+97770a8	296/1422	keep	DC-only IDCT fast path: graphic 640×480: 341→296 (−13%), graphic 1080p: 1772→1422 (−20%). Photo/gradient unchanged.
