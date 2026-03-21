@@ -30,6 +30,7 @@ pub struct Decoder<'a> {
     metadata: JpegMetadata,
     raw_data: &'a [u8],
     routines: SimdRoutines,
+    output_format: Option<PixelFormat>,
 }
 
 impl<'a> Decoder<'a> {
@@ -41,6 +42,7 @@ impl<'a> Decoder<'a> {
             metadata,
             raw_data: data,
             routines,
+            output_format: None,
         })
     }
 
@@ -48,8 +50,19 @@ impl<'a> Decoder<'a> {
         &self.metadata.frame
     }
 
+    /// Set the desired output pixel format.
+    pub fn set_output_format(&mut self, format: PixelFormat) {
+        self.output_format = Some(format);
+    }
+
     pub fn decode(data: &'a [u8]) -> Result<Image> {
         let decoder = Self::new(data)?;
+        decoder.decode_image()
+    }
+
+    pub fn decode_to(data: &'a [u8], format: PixelFormat) -> Result<Image> {
+        let mut decoder = Self::new(data)?;
+        decoder.set_output_format(format);
         decoder.decode_image()
     }
 
@@ -99,14 +112,67 @@ impl<'a> Decoder<'a> {
     }
 
     #[inline(always)]
-    fn ycbcr_to_rgb_row(&self, y: &[u8], cb: &[u8], cr: &[u8], rgb: &mut [u8], width: usize) {
+    fn ycbcr_to_rgb_row(&self, y: &[u8], cb: &[u8], cr: &[u8], out: &mut [u8], width: usize) {
         #[cfg(all(target_arch = "aarch64", feature = "simd"))]
         {
-            return crate::simd::aarch64::color::neon_ycbcr_to_rgb_row(y, cb, cr, rgb, width);
+            return crate::simd::aarch64::color::neon_ycbcr_to_rgb_row(y, cb, cr, out, width);
         }
 
         #[allow(unreachable_code)]
-        (self.routines.ycbcr_to_rgb_row)(y, cb, cr, rgb, width)
+        (self.routines.ycbcr_to_rgb_row)(y, cb, cr, out, width)
+    }
+
+    #[inline(always)]
+    fn ycbcr_to_rgba_row(&self, y: &[u8], cb: &[u8], cr: &[u8], out: &mut [u8], width: usize) {
+        #[cfg(all(target_arch = "aarch64", feature = "simd"))]
+        {
+            return crate::simd::aarch64::color::neon_ycbcr_to_rgba_row(y, cb, cr, out, width);
+        }
+
+        #[allow(unreachable_code)]
+        crate::decode::color::ycbcr_to_rgba_row(y, cb, cr, out, width)
+    }
+
+    #[inline(always)]
+    fn ycbcr_to_bgr_row(&self, y: &[u8], cb: &[u8], cr: &[u8], out: &mut [u8], width: usize) {
+        #[cfg(all(target_arch = "aarch64", feature = "simd"))]
+        {
+            return crate::simd::aarch64::color::neon_ycbcr_to_bgr_row(y, cb, cr, out, width);
+        }
+
+        #[allow(unreachable_code)]
+        crate::decode::color::ycbcr_to_bgr_row(y, cb, cr, out, width)
+    }
+
+    #[inline(always)]
+    fn ycbcr_to_bgra_row(&self, y: &[u8], cb: &[u8], cr: &[u8], out: &mut [u8], width: usize) {
+        #[cfg(all(target_arch = "aarch64", feature = "simd"))]
+        {
+            return crate::simd::aarch64::color::neon_ycbcr_to_bgra_row(y, cb, cr, out, width);
+        }
+
+        #[allow(unreachable_code)]
+        crate::decode::color::ycbcr_to_bgra_row(y, cb, cr, out, width)
+    }
+
+    /// Dispatch color conversion for one row based on the target pixel format.
+    #[inline(always)]
+    fn color_convert_row(
+        &self,
+        format: PixelFormat,
+        y: &[u8],
+        cb: &[u8],
+        cr: &[u8],
+        out: &mut [u8],
+        width: usize,
+    ) {
+        match format {
+            PixelFormat::Rgb => self.ycbcr_to_rgb_row(y, cb, cr, out, width),
+            PixelFormat::Rgba => self.ycbcr_to_rgba_row(y, cb, cr, out, width),
+            PixelFormat::Bgr => self.ycbcr_to_bgr_row(y, cb, cr, out, width),
+            PixelFormat::Bgra => self.ycbcr_to_bgra_row(y, cb, cr, out, width),
+            PixelFormat::Grayscale => unreachable!("grayscale handled separately"),
+        }
     }
 
     #[inline(always)]
@@ -319,18 +385,74 @@ impl<'a> Decoder<'a> {
 
         // Upsample and color convert
         if num_components == 1 {
+            let out_format = self.output_format.unwrap_or(PixelFormat::Grayscale);
             let comp_w = mcus_x * frame.components[0].horizontal_sampling as usize * 8;
-            let mut data = Vec::with_capacity(width * height);
-            for y in 0..height {
-                data.extend_from_slice(&component_planes[0][y * comp_w..y * comp_w + width]);
+
+            if out_format == PixelFormat::Grayscale {
+                let mut data = Vec::with_capacity(width * height);
+                for y in 0..height {
+                    data.extend_from_slice(&component_planes[0][y * comp_w..y * comp_w + width]);
+                }
+                Ok(Image {
+                    width,
+                    height,
+                    pixel_format: PixelFormat::Grayscale,
+                    data,
+                })
+            } else {
+                // Expand grayscale to requested color format
+                let bpp = out_format.bytes_per_pixel();
+                let data_size = width * height * bpp;
+                let mut data = Vec::with_capacity(data_size);
+                unsafe { data.set_len(data_size) };
+                for y in 0..height {
+                    let row = &component_planes[0][y * comp_w..y * comp_w + width];
+                    let out_row = &mut data[y * width * bpp..(y + 1) * width * bpp];
+                    for x in 0..width {
+                        let v = row[x];
+                        match out_format {
+                            PixelFormat::Rgb => {
+                                out_row[x * 3] = v;
+                                out_row[x * 3 + 1] = v;
+                                out_row[x * 3 + 2] = v;
+                            }
+                            PixelFormat::Rgba => {
+                                out_row[x * 4] = v;
+                                out_row[x * 4 + 1] = v;
+                                out_row[x * 4 + 2] = v;
+                                out_row[x * 4 + 3] = 255;
+                            }
+                            PixelFormat::Bgr => {
+                                out_row[x * 3] = v;
+                                out_row[x * 3 + 1] = v;
+                                out_row[x * 3 + 2] = v;
+                            }
+                            PixelFormat::Bgra => {
+                                out_row[x * 4] = v;
+                                out_row[x * 4 + 1] = v;
+                                out_row[x * 4 + 2] = v;
+                                out_row[x * 4 + 3] = 255;
+                            }
+                            PixelFormat::Grayscale => unreachable!(),
+                        }
+                    }
+                }
+                Ok(Image {
+                    width,
+                    height,
+                    pixel_format: out_format,
+                    data,
+                })
             }
-            Ok(Image {
-                width,
-                height,
-                pixel_format: PixelFormat::Grayscale,
-                data,
-            })
         } else if num_components == 3 {
+            let out_format = self.output_format.unwrap_or(PixelFormat::Rgb);
+            if out_format == PixelFormat::Grayscale {
+                return Err(JpegError::Unsupported(
+                    "cannot convert color JPEG to grayscale".to_string(),
+                ));
+            }
+            let bpp = out_format.bytes_per_pixel();
+
             let y_plane = &component_planes[0];
             let y_width = mcus_x * frame.components[0].horizontal_sampling as usize * 8;
 
@@ -341,54 +463,87 @@ impl<'a> Decoder<'a> {
             let h_factor = max_h / cb_comp.horizontal_sampling as usize;
             let v_factor = max_v / cb_comp.vertical_sampling as usize;
 
-            // Uninitialized allocation — every pixel will be written by
-            // upsample or clone before being read by color conversion.
-            let alloc_size = full_width * full_height;
-            let mut cb_full = Vec::with_capacity(alloc_size);
-            let mut cr_full = Vec::with_capacity(alloc_size);
-            // SAFETY: all code paths below write every element before reading.
-            unsafe {
-                cb_full.set_len(alloc_size);
-                cr_full.set_len(alloc_size);
-            }
+            // For 4:4:4, use component planes directly without clone.
+            // For subsampled modes, upsample into separate buffers.
+            let (cb_data, cr_data, cb_stride, cr_stride): (&[u8], &[u8], usize, usize);
 
             if h_factor == 1 && v_factor == 1 {
-                cb_full = component_planes[1].clone();
-                cr_full = component_planes[2].clone();
-            } else if h_factor == 2 && v_factor == 1 {
-                for row in 0..cb_h {
-                    self.fancy_upsample_h2v1(
-                        &component_planes[1][row * cb_w..],
-                        cb_w,
-                        &mut cb_full[row * full_width..],
-                    );
-                    self.fancy_upsample_h2v1(
-                        &component_planes[2][row * cb_w..],
-                        cb_w,
-                        &mut cr_full[row * full_width..],
+                // 4:4:4: no upsampling needed — reference planes directly
+                cb_data = &component_planes[1];
+                cr_data = &component_planes[2];
+                cb_stride = cb_w;
+                cr_stride = cb_w;
+            } else {
+                // Allocate upsampled buffers
+                let alloc_size = full_width * full_height;
+                let mut cb_full = Vec::with_capacity(alloc_size);
+                let mut cr_full = Vec::with_capacity(alloc_size);
+                // SAFETY: all code paths below write every element before reading.
+                unsafe {
+                    cb_full.set_len(alloc_size);
+                    cr_full.set_len(alloc_size);
+                }
+
+                if h_factor == 2 && v_factor == 1 {
+                    for row in 0..cb_h {
+                        self.fancy_upsample_h2v1(
+                            &component_planes[1][row * cb_w..],
+                            cb_w,
+                            &mut cb_full[row * full_width..],
+                        );
+                        self.fancy_upsample_h2v1(
+                            &component_planes[2][row * cb_w..],
+                            cb_w,
+                            &mut cr_full[row * full_width..],
+                        );
+                    }
+                } else if h_factor == 2 && v_factor == 2 {
+                    self.fancy_h2v2(&component_planes[1], cb_w, cb_h, &mut cb_full, full_width);
+                    self.fancy_h2v2(&component_planes[2], cb_w, cb_h, &mut cr_full, full_width);
+                } else {
+                    return Err(JpegError::Unsupported(format!(
+                        "subsampling {}x{} not yet supported",
+                        h_factor, v_factor
+                    )));
+                }
+
+                // Rebind as immutable references for color conversion below.
+                // We use a trick: leak the Vecs temporarily, do the conversion,
+                // then reconstruct and drop them. But simpler: just use a nested scope.
+                // Actually, let's just do the color conversion here and return.
+                let data_size = width * height * bpp;
+                let mut data = Vec::with_capacity(data_size);
+                unsafe { data.set_len(data_size) };
+                for y in 0..height {
+                    self.color_convert_row(
+                        out_format,
+                        &y_plane[y * y_width..],
+                        &cb_full[y * full_width..],
+                        &cr_full[y * full_width..],
+                        &mut data[y * width * bpp..],
+                        width,
                     );
                 }
-            } else if h_factor == 2 && v_factor == 2 {
-                // Vertical blend + horizontal upsample via dispatch (uses NEON h2v1)
-                self.fancy_h2v2(&component_planes[1], cb_w, cb_h, &mut cb_full, full_width);
-                self.fancy_h2v2(&component_planes[2], cb_w, cb_h, &mut cr_full, full_width);
-            } else {
-                return Err(JpegError::Unsupported(format!(
-                    "subsampling {}x{} not yet supported",
-                    h_factor, v_factor
-                )));
+
+                return Ok(Image {
+                    width,
+                    height,
+                    pixel_format: out_format,
+                    data,
+                });
             }
 
-            let data_size = width * height * 3;
+            // 4:4:4 path (no upsampling)
+            let data_size = width * height * bpp;
             let mut data = Vec::with_capacity(data_size);
-            // SAFETY: color conversion writes every pixel in the output.
             unsafe { data.set_len(data_size) };
             for y in 0..height {
-                self.ycbcr_to_rgb_row(
+                self.color_convert_row(
+                    out_format,
                     &y_plane[y * y_width..],
-                    &cb_full[y * full_width..],
-                    &cr_full[y * full_width..],
-                    &mut data[y * width * 3..],
+                    &cb_data[y * cb_stride..],
+                    &cr_data[y * cr_stride..],
+                    &mut data[y * width * bpp..],
                     width,
                 );
             }
@@ -396,7 +551,7 @@ impl<'a> Decoder<'a> {
             Ok(Image {
                 width,
                 height,
-                pixel_format: PixelFormat::Rgb,
+                pixel_format: out_format,
                 data,
             })
         } else {
