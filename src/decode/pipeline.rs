@@ -326,7 +326,10 @@ impl<'a> Decoder<'a> {
                 )));
             }
 
-            let mut data = vec![0u8; width * height * 3];
+            let data_size = width * height * 3;
+            let mut data = Vec::with_capacity(data_size);
+            // SAFETY: color conversion writes every pixel in the output.
+            unsafe { data.set_len(data_size) };
             for y in 0..height {
                 (self.routines.ycbcr_to_rgb_row)(
                     &y_plane[y * y_width..],
