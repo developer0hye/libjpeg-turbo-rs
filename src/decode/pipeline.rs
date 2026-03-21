@@ -1,7 +1,8 @@
 use crate::common::error::{JpegError, Result};
+use crate::common::quant_table::QuantTable;
 use crate::common::types::*;
 use crate::decode::bitstream::BitReader;
-use crate::decode::entropy::McuDecoder;
+use crate::decode::entropy::{self, McuDecoder};
 use crate::decode::marker::{JpegMetadata, MarkerReader};
 use crate::decode::upsample;
 use crate::simd::{self, SimdRoutines};
@@ -88,6 +89,46 @@ impl<'a> Decoder<'a> {
             })
             .collect();
 
+        // Pre-resolve Huffman tables and component layout (once, not per-MCU)
+        let mcu_plan = entropy::resolve_mcu_plan(
+            frame,
+            scan,
+            &self.metadata.dc_huffman_tables,
+            &self.metadata.ac_huffman_tables,
+        )?;
+
+        // Pre-resolve quant tables per component (once, not per-block)
+        let quant_tables: Vec<&QuantTable> = frame
+            .components
+            .iter()
+            .map(|comp| {
+                self.metadata.quant_tables[comp.quant_table_index as usize]
+                    .as_ref()
+                    .ok_or_else(|| {
+                        JpegError::CorruptData(format!(
+                            "missing quant table {}",
+                            comp.quant_table_index
+                        ))
+                    })
+            })
+            .collect::<Result<Vec<_>>>()?;
+
+        // Pre-compute per-component layout constants
+        struct CompLayout {
+            comp_w: usize,
+            h_blocks: usize,
+            v_blocks: usize,
+        }
+        let comp_layouts: Vec<CompLayout> = frame
+            .components
+            .iter()
+            .map(|comp| CompLayout {
+                comp_w: mcus_x * comp.horizontal_sampling as usize * 8,
+                h_blocks: comp.horizontal_sampling as usize,
+                v_blocks: comp.vertical_sampling as usize,
+            })
+            .collect();
+
         // Decode all MCUs
         let entropy_data = &self.raw_data[self.metadata.entropy_data_offset..];
         let mut bit_reader = BitReader::new(entropy_data);
@@ -105,46 +146,28 @@ impl<'a> Decoder<'a> {
                     mcu_decoder.reset();
                 }
 
-                mcu_decoder.decode_mcu(
-                    &mut bit_reader,
-                    frame,
-                    scan,
-                    &self.metadata.dc_huffman_tables,
-                    &self.metadata.ac_huffman_tables,
-                    &mut blocks,
-                )?;
+                mcu_decoder.decode_mcu_fast(&mut bit_reader, &mcu_plan, &mut blocks)?;
 
                 let mut block_idx = 0;
-                for (comp_idx, comp) in frame.components.iter().enumerate() {
-                    let comp_w = mcus_x * comp.horizontal_sampling as usize * 8;
-                    let h_blocks = comp.horizontal_sampling as usize;
-                    let v_blocks = comp.vertical_sampling as usize;
+                for (comp_idx, layout) in comp_layouts.iter().enumerate() {
+                    let qt_values = &quant_tables[comp_idx].values;
 
-                    for v in 0..v_blocks {
-                        for h in 0..h_blocks {
+                    for v in 0..layout.v_blocks {
+                        for h in 0..layout.h_blocks {
                             let zigzag_coeffs = &blocks[block_idx];
                             block_idx += 1;
 
-                            let qt = self.metadata.quant_tables[comp.quant_table_index as usize]
-                                .as_ref()
-                                .ok_or(JpegError::CorruptData(format!(
-                                    "missing quant table {}",
-                                    comp.quant_table_index
-                                )))?;
-
                             let mut block_u8 = [0u8; 64];
-                            (self.routines.idct_islow)(zigzag_coeffs, &qt.values, &mut block_u8);
+                            (self.routines.idct_islow)(zigzag_coeffs, qt_values, &mut block_u8);
 
-                            let block_x = (mcu_x * h_blocks + h) * 8;
-                            let block_y = (mcu_y * v_blocks + v) * 8;
+                            let block_x = (mcu_x * layout.h_blocks + h) * 8;
+                            let block_y = (mcu_y * layout.v_blocks + v) * 8;
 
                             for row in 0..8 {
-                                for col in 0..8 {
-                                    let px = block_x + col;
-                                    let py = block_y + row;
-                                    component_planes[comp_idx][py * comp_w + px] =
-                                        block_u8[row * 8 + col];
-                                }
+                                let py = block_y + row;
+                                let dst_start = py * layout.comp_w + block_x;
+                                component_planes[comp_idx][dst_start..dst_start + 8]
+                                    .copy_from_slice(&block_u8[row * 8..row * 8 + 8]);
                             }
                         }
                     }
