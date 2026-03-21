@@ -78,6 +78,7 @@ impl<'a> Decoder<'a> {
     }
 
     #[inline(always)]
+    #[allow(dead_code)]
     fn idct_islow(&self, coeffs: &[i16; 64], quant: &[u16; 64], output: &mut [u8; 64]) {
         #[cfg(all(target_arch = "aarch64", feature = "simd"))]
         {
@@ -357,7 +358,7 @@ impl<'a> Decoder<'a> {
         &self,
         frame: &FrameHeader,
         quant_tables: &[&QuantTable],
-        num_components: usize,
+        _num_components: usize,
         mcus_x: usize,
         mcus_y: usize,
         max_h: usize,
@@ -594,10 +595,10 @@ impl<'a> Decoder<'a> {
         comp_infos: &[CompInfo],
         coeff_bufs: &mut [Vec<[i16; 64]>],
         bit_reader: &mut BitReader,
-        mcus_x: usize,
-        mcus_y: usize,
-        max_h: usize,
-        max_v: usize,
+        _mcus_x: usize,
+        _mcus_y: usize,
+        _max_h: usize,
+        _max_v: usize,
         is_dc: bool,
         ss: u8,
         se: u8,
