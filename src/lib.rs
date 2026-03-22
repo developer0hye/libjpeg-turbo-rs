@@ -24,6 +24,7 @@ pub use api::precision::{
 pub use api::quality::quality_scaling;
 pub use api::quantize::requantize;
 pub use api::raw_data::{compress_raw, decompress_raw, RawImage};
+pub use encode::marker_writer::MarkerStreamWriter;
 /// Color quantization for 8-bit indexed/palette output.
 pub mod quantize {
     pub use crate::api::quantize::{
