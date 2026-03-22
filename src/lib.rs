@@ -24,6 +24,7 @@ pub mod quantize {
         dequantize, quantize, DitherMode, QuantizeOptions, QuantizedImage,
     };
 }
+pub use api::progressive_output::ProgressiveDecoder;
 pub use api::scanline::{ScanlineDecoder, ScanlineEncoder};
 /// Streaming I/O functions for reading/writing JPEG via `std::io` traits and file paths.
 pub use api::stream;
