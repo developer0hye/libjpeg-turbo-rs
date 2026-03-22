@@ -1,10 +1,25 @@
-//! x86_64 SIMD implementations (SSE2/AVX2 stubs).
+//! x86_64 SIMD implementations (AVX2).
 //!
-//! Currently returns scalar fallbacks. Future work will add SSE2/AVX2 kernels.
+//! Provides AVX2-accelerated kernels for IDCT, color conversion, and upsampling
+//! with scalar fallback.
+
+pub mod avx2_color;
+pub mod avx2_idct;
+pub mod avx2_upsample;
 
 use crate::simd::SimdRoutines;
 
-/// Return x86_64 SIMD routines (currently scalar fallback).
+/// Return x86_64 SIMD routines.
+///
+/// Selects AVX2 if available, otherwise falls back to scalar.
 pub fn routines() -> SimdRoutines {
+    if is_x86_feature_detected!("avx2") {
+        return SimdRoutines {
+            idct_islow: avx2_idct::avx2_idct_islow,
+            ycbcr_to_rgb_row: avx2_color::avx2_ycbcr_to_rgb_row,
+            fancy_upsample_h2v1: avx2_upsample::avx2_fancy_upsample_h2v1,
+        };
+    }
+
     crate::simd::scalar::routines()
 }
