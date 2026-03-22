@@ -1286,6 +1286,22 @@ impl<'a> Decoder<'a> {
         icc_profile: Option<Vec<u8>>,
         exif_data: Option<Vec<u8>>,
     ) -> Result<Image> {
+        if self.metadata.is_arithmetic {
+            self.decode_lossless_arithmetic(frame, width, height, icc_profile, exif_data)
+        } else {
+            self.decode_lossless_huffman(frame, width, height, icc_profile, exif_data)
+        }
+    }
+
+    /// Decode lossless JPEG with Huffman entropy coding (SOF3).
+    fn decode_lossless_huffman(
+        &self,
+        frame: &FrameHeader,
+        width: usize,
+        height: usize,
+        icc_profile: Option<Vec<u8>>,
+        exif_data: Option<Vec<u8>>,
+    ) -> Result<Image> {
         let scan = &self.metadata.scan;
         let precision = frame.precision;
         let psv = scan.spec_start; // Predictor selection value (Ss field)
@@ -1340,70 +1356,7 @@ impl<'a> Decoder<'a> {
                 prev_row = Some(output[row_start..row_start + width].to_vec());
             }
 
-            // Convert to output format
-            let out_format = self.output_format.unwrap_or(PixelFormat::Grayscale);
-            let bpp = out_format.bytes_per_pixel();
-
-            if out_format == PixelFormat::Grayscale {
-                let mut data = Vec::with_capacity(width * height);
-                for &sample in &output {
-                    let val = if pt > 0 {
-                        ((sample as u32) << pt) as u8
-                    } else {
-                        sample as u8
-                    };
-                    data.push(val);
-                }
-                Ok(Image {
-                    width,
-                    height,
-                    pixel_format: PixelFormat::Grayscale,
-                    precision: 8,
-                    data,
-                    icc_profile,
-                    exif_data,
-                    comment: self.metadata.comment.clone(),
-                    density: self.metadata.density,
-                    saved_markers: Vec::new(),
-                    warnings: Vec::new(),
-                })
-            } else {
-                let mut data = Vec::with_capacity(width * height * bpp);
-                for &sample in &output {
-                    let val = if pt > 0 {
-                        ((sample as u32) << pt) as u8
-                    } else {
-                        sample as u8
-                    };
-                    match out_format {
-                        PixelFormat::Rgb | PixelFormat::Bgr => {
-                            data.push(val);
-                            data.push(val);
-                            data.push(val);
-                        }
-                        PixelFormat::Rgba | PixelFormat::Bgra => {
-                            data.push(val);
-                            data.push(val);
-                            data.push(val);
-                            data.push(255);
-                        }
-                        _ => unreachable!(),
-                    }
-                }
-                Ok(Image {
-                    width,
-                    height,
-                    pixel_format: out_format,
-                    precision: 8,
-                    data,
-                    icc_profile,
-                    exif_data,
-                    comment: self.metadata.comment.clone(),
-                    density: self.metadata.density,
-                    saved_markers: Vec::new(),
-                    warnings: Vec::new(),
-                })
-            }
+            self.lossless_output_grayscale(&output, width, height, pt, icc_profile, exif_data)
         } else if num_components == 3 {
             // Multi-component (color) lossless decode — interleaved scan
             let mut comp_planes: Vec<Vec<u16>> =
@@ -1438,53 +1391,191 @@ impl<'a> Decoder<'a> {
                 }
             }
 
-            // Color convert YCbCr → RGB and output
-            let out_format = self.output_format.unwrap_or(PixelFormat::Rgb);
-            let bpp = out_format.bytes_per_pixel();
-            let mut data = Vec::with_capacity(width * height * bpp);
+            self.lossless_output_color(&comp_planes, width, height, icc_profile, exif_data)
+        } else {
+            Err(JpegError::Unsupported(format!(
+                "{} components not yet supported for lossless",
+                num_components
+            )))
+        }
+    }
 
-            for i in 0..width * height {
-                let y_val = comp_planes[0][i] as i32;
-                let cb_val = comp_planes[1][i] as i32;
-                let cr_val = comp_planes[2][i] as i32;
+    /// Decode lossless JPEG with arithmetic entropy coding (SOF11).
+    fn decode_lossless_arithmetic(
+        &self,
+        frame: &FrameHeader,
+        width: usize,
+        height: usize,
+        icc_profile: Option<Vec<u8>>,
+        exif_data: Option<Vec<u8>>,
+    ) -> Result<Image> {
+        use crate::decode::arithmetic::ArithDecoder;
 
-                // YCbCr to RGB (JFIF convention: Y,Cb,Cr centered at 128)
-                let r = (y_val + ((cr_val - 128) * 359 + 128) / 256).clamp(0, 255) as u8;
-                let g = (y_val - ((cb_val - 128) * 88 + (cr_val - 128) * 183 - 128) / 256)
-                    .clamp(0, 255) as u8;
-                let b = (y_val + ((cb_val - 128) * 454 + 128) / 256).clamp(0, 255) as u8;
+        let scan = &self.metadata.scan;
+        let precision = frame.precision;
+        let psv = scan.spec_start;
+        let pt = scan.succ_low;
 
-                match out_format {
-                    PixelFormat::Rgb => {
-                        data.push(r);
-                        data.push(g);
-                        data.push(b);
+        if psv < 1 || psv > 7 {
+            return Err(JpegError::Unsupported(format!(
+                "lossless predictor {} (must be 1-7)",
+                psv
+            )));
+        }
+
+        let num_components = frame.components.len();
+
+        // Resolve DC table indices for each scan component
+        let dc_tbl_indices: Vec<usize> = scan
+            .components
+            .iter()
+            .take(num_components)
+            .map(|sc| sc.dc_table_index as usize)
+            .collect();
+
+        let entropy_data = &self.raw_data[self.metadata.entropy_data_offset..];
+        let mut arith = ArithDecoder::new(entropy_data, 0);
+
+        // Set conditioning parameters from DAC marker
+        for i in 0..4 {
+            let (l, u) = self.metadata.arith_dc_params[i];
+            arith.set_dc_conditioning(i, l, u);
+            arith.set_ac_conditioning(i, self.metadata.arith_ac_params[i]);
+        }
+
+        if num_components == 1 {
+            let dc_tbl = dc_tbl_indices[0];
+            let mut output = vec![0u16; width * height];
+            let mut prev_row: Option<Vec<u16>> = None;
+
+            for y in 0..height {
+                let row_start = y * width;
+                let mut diffs = Vec::with_capacity(width);
+                for _ in 0..width {
+                    // Save previous accumulated DC to extract the raw difference
+                    let prev_dc: i32 = arith.last_dc_val[0];
+                    let mut block: [i16; 64] = [0i16; 64];
+                    arith.decode_dc_sequential(&mut block, 0, dc_tbl)?;
+                    let diff: i16 = ((arith.last_dc_val[0] - prev_dc) as i16) as i16;
+                    diffs.push(diff);
+                }
+                lossless::undifference_row(
+                    &diffs,
+                    prev_row.as_deref(),
+                    &mut output[row_start..row_start + width],
+                    psv,
+                    precision,
+                    pt,
+                    y == 0,
+                );
+                prev_row = Some(output[row_start..row_start + width].to_vec());
+            }
+
+            self.lossless_output_grayscale(&output, width, height, pt, icc_profile, exif_data)
+        } else if num_components == 3 {
+            let mut comp_planes: Vec<Vec<u16>> =
+                (0..3).map(|_| vec![0u16; width * height]).collect();
+            let mut prev_rows: Vec<Option<Vec<u16>>> = vec![None; 3];
+
+            for y in 0..height {
+                let row_start = y * width;
+                let mut comp_diffs: Vec<Vec<i16>> =
+                    (0..3).map(|_| Vec::with_capacity(width)).collect();
+
+                // Interleaved: for each pixel, decode diff for each component
+                for _ in 0..width {
+                    for c in 0..3 {
+                        let prev_dc: i32 = arith.last_dc_val[c];
+                        let mut block: [i16; 64] = [0i16; 64];
+                        arith.decode_dc_sequential(&mut block, c, dc_tbl_indices[c])?;
+                        let diff: i16 = (arith.last_dc_val[c] - prev_dc) as i16;
+                        comp_diffs[c].push(diff);
                     }
-                    PixelFormat::Bgr => {
-                        data.push(b);
-                        data.push(g);
-                        data.push(r);
-                    }
-                    PixelFormat::Rgba => {
-                        data.push(r);
-                        data.push(g);
-                        data.push(b);
-                        data.push(255);
-                    }
-                    PixelFormat::Bgra => {
-                        data.push(b);
-                        data.push(g);
-                        data.push(r);
-                        data.push(255);
-                    }
-                    _ => {
-                        return Err(JpegError::Unsupported(
-                            "cannot convert lossless 3-component to requested format".to_string(),
-                        ));
-                    }
+                }
+
+                // Undifference each component
+                for c in 0..3 {
+                    lossless::undifference_row(
+                        &comp_diffs[c],
+                        prev_rows[c].as_deref(),
+                        &mut comp_planes[c][row_start..row_start + width],
+                        psv,
+                        precision,
+                        pt,
+                        y == 0,
+                    );
+                    prev_rows[c] = Some(comp_planes[c][row_start..row_start + width].to_vec());
                 }
             }
 
+            self.lossless_output_color(&comp_planes, width, height, icc_profile, exif_data)
+        } else {
+            Err(JpegError::Unsupported(format!(
+                "{} components not yet supported for lossless",
+                num_components
+            )))
+        }
+    }
+
+    /// Convert decoded lossless grayscale samples to output Image.
+    fn lossless_output_grayscale(
+        &self,
+        output: &[u16],
+        width: usize,
+        height: usize,
+        pt: u8,
+        icc_profile: Option<Vec<u8>>,
+        exif_data: Option<Vec<u8>>,
+    ) -> Result<Image> {
+        let out_format = self.output_format.unwrap_or(PixelFormat::Grayscale);
+        let bpp = out_format.bytes_per_pixel();
+
+        if out_format == PixelFormat::Grayscale {
+            let mut data = Vec::with_capacity(width * height);
+            for &sample in output {
+                let val = if pt > 0 {
+                    ((sample as u32) << pt) as u8
+                } else {
+                    sample as u8
+                };
+                data.push(val);
+            }
+            Ok(Image {
+                width,
+                height,
+                pixel_format: PixelFormat::Grayscale,
+                precision: 8,
+                data,
+                icc_profile,
+                exif_data,
+                comment: self.metadata.comment.clone(),
+                density: self.metadata.density,
+                saved_markers: Vec::new(),
+                warnings: Vec::new(),
+            })
+        } else {
+            let mut data = Vec::with_capacity(width * height * bpp);
+            for &sample in output {
+                let val = if pt > 0 {
+                    ((sample as u32) << pt) as u8
+                } else {
+                    sample as u8
+                };
+                match out_format {
+                    PixelFormat::Rgb | PixelFormat::Bgr => {
+                        data.push(val);
+                        data.push(val);
+                        data.push(val);
+                    }
+                    PixelFormat::Rgba | PixelFormat::Bgra => {
+                        data.push(val);
+                        data.push(val);
+                        data.push(val);
+                        data.push(255);
+                    }
+                    _ => unreachable!(),
+                }
+            }
             Ok(Image {
                 width,
                 height,
@@ -1498,12 +1589,77 @@ impl<'a> Decoder<'a> {
                 saved_markers: Vec::new(),
                 warnings: Vec::new(),
             })
-        } else {
-            Err(JpegError::Unsupported(format!(
-                "{} components not yet supported for lossless",
-                num_components
-            )))
         }
+    }
+
+    /// Convert decoded lossless YCbCr component planes to output Image.
+    fn lossless_output_color(
+        &self,
+        comp_planes: &[Vec<u16>],
+        width: usize,
+        height: usize,
+        icc_profile: Option<Vec<u8>>,
+        exif_data: Option<Vec<u8>>,
+    ) -> Result<Image> {
+        let out_format = self.output_format.unwrap_or(PixelFormat::Rgb);
+        let bpp = out_format.bytes_per_pixel();
+        let mut data = Vec::with_capacity(width * height * bpp);
+
+        for i in 0..width * height {
+            let y_val = comp_planes[0][i] as i32;
+            let cb_val = comp_planes[1][i] as i32;
+            let cr_val = comp_planes[2][i] as i32;
+
+            // YCbCr to RGB (JFIF convention: Y,Cb,Cr centered at 128)
+            let r = (y_val + ((cr_val - 128) * 359 + 128) / 256).clamp(0, 255) as u8;
+            let g = (y_val - ((cb_val - 128) * 88 + (cr_val - 128) * 183 - 128) / 256).clamp(0, 255)
+                as u8;
+            let b = (y_val + ((cb_val - 128) * 454 + 128) / 256).clamp(0, 255) as u8;
+
+            match out_format {
+                PixelFormat::Rgb => {
+                    data.push(r);
+                    data.push(g);
+                    data.push(b);
+                }
+                PixelFormat::Bgr => {
+                    data.push(b);
+                    data.push(g);
+                    data.push(r);
+                }
+                PixelFormat::Rgba => {
+                    data.push(r);
+                    data.push(g);
+                    data.push(b);
+                    data.push(255);
+                }
+                PixelFormat::Bgra => {
+                    data.push(b);
+                    data.push(g);
+                    data.push(r);
+                    data.push(255);
+                }
+                _ => {
+                    return Err(JpegError::Unsupported(
+                        "cannot convert lossless 3-component to requested format".to_string(),
+                    ));
+                }
+            }
+        }
+
+        Ok(Image {
+            width,
+            height,
+            pixel_format: out_format,
+            precision: 8,
+            data,
+            icc_profile,
+            exif_data,
+            comment: self.metadata.comment.clone(),
+            density: self.metadata.density,
+            saved_markers: Vec::new(),
+            warnings: Vec::new(),
+        })
     }
 
     pub fn decode_image(&self) -> Result<Image> {
@@ -1560,7 +1716,7 @@ impl<'a> Decoder<'a> {
         let out_width = self.scale.scale_dim(width);
         let out_height = self.scale.scale_dim(height);
 
-        // Lossless JPEG (SOF3) — different pipeline, no IDCT/quant
+        // Lossless JPEG (SOF3/SOF11) — different pipeline, no IDCT/quant
         if frame.is_lossless {
             return self.decode_lossless_image(frame, width, height, icc_profile, exif_data);
         }

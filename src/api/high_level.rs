@@ -204,6 +204,28 @@ pub fn compress_arithmetic_progressive(
     )
 }
 
+/// Compress as lossless JPEG with arithmetic entropy coding (SOF11).
+///
+/// Uses predictor-based lossless encoding with arithmetic (QM-coder) entropy
+/// coding instead of Huffman. Produces exact pixel-identical output when decoded.
+pub fn compress_lossless_arithmetic(
+    pixels: &[u8],
+    width: usize,
+    height: usize,
+    pixel_format: PixelFormat,
+    predictor: u8,
+    point_transform: u8,
+) -> Result<Vec<u8>> {
+    encoder::compress_lossless_arithmetic(
+        pixels,
+        width,
+        height,
+        pixel_format,
+        predictor,
+        point_transform,
+    )
+}
+
 /// Compress with arithmetic entropy coding (SOF9).
 ///
 /// Uses QM-coder binary arithmetic coding instead of Huffman coding.
