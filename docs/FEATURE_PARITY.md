@@ -236,12 +236,12 @@
 - [x] `output_scanline` tracking (`ScanlineDecoder::output_scanline()`)
 
 ### Color Quantization (8-bit indexed output)
-- [ ] `quantize_colors` — Enable color quantization
-- [ ] `desired_number_of_colors` / `actual_number_of_colors`
-- [ ] `dither_mode` — JDITHER_NONE / JDITHER_ORDERED / JDITHER_FS
-- [ ] `two_pass_quantize` — Two-pass color selection
-- [ ] `colormap` — External colormap input
-- [ ] `enable_1pass_quant` / `enable_2pass_quant` / `enable_external_quant`
+- [x] `quantize_colors` — Enable color quantization (`quantize::quantize()`)
+- [x] `desired_number_of_colors` / `actual_number_of_colors` (`QuantizeOptions::num_colors`, `QuantizedImage::palette.len()`)
+- [x] `dither_mode` — JDITHER_NONE / JDITHER_ORDERED / JDITHER_FS (`DitherMode` enum)
+- [x] `two_pass_quantize` — Two-pass color selection (`QuantizeOptions::two_pass`, median-cut algorithm)
+- [x] `colormap` — External colormap input (`QuantizeOptions::colormap`)
+- [x] `enable_1pass_quant` / `enable_2pass_quant` / `enable_external_quant` (`QuantizeOptions::two_pass` + `colormap`)
 - [ ] `jpeg_new_colormap()` — Update colormap
 
 ---
@@ -410,12 +410,12 @@
 
 ## 15. TJ3 Handle / Parameter API
 
-- [ ] `tj3Init()` / `tj3Destroy()` — Handle lifecycle
-- [ ] `tj3Set()` / `tj3Get()` — Generic parameter get/set
-- [ ] All 26 TJPARAM values as runtime parameters
-- [ ] `tj3SetICCProfile()` / `tj3GetICCProfile()` — ICC via handle
-- [ ] `tj3SetScalingFactor()` / `tj3SetCroppingRegion()` — Decode options via handle
-- [ ] `tj3GetScalingFactors()` — Query available scaling factors
+- [x] `tj3Init()` / `tj3Destroy()` — Handle lifecycle (`TjHandle::new()` / Drop)
+- [x] `tj3Set()` / `tj3Get()` — Generic parameter get/set (`TjHandle::set()` / `TjHandle::get()`)
+- [x] All 26 TJPARAM values as runtime parameters (`TjParam` enum)
+- [x] `tj3SetICCProfile()` / `tj3GetICCProfile()` — ICC via handle (`TjHandle::set_icc_profile()` / `TjHandle::icc_profile()`)
+- [x] `tj3SetScalingFactor()` / `tj3SetCroppingRegion()` — Decode options via handle (`TjHandle::set_scaling_factor()` / `TjHandle::set_cropping_region()`)
+- [x] `tj3GetScalingFactors()` — Query available scaling factors (`TjHandle::scaling_factors()`)
 
 ---
 
@@ -441,7 +441,7 @@
 | Memory & I/O | 8 | ~20 | ~40% |
 | Error handling | 5 | ~14 | ~36% |
 | Progress | 4 | 4 | 100% |
-| TJ3 Handle API | 0 | ~6 | 0% |
+| TJ3 Handle API | 6 | 6 | 100% |
 
 ---
 
