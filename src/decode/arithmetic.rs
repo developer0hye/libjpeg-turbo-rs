@@ -3,6 +3,7 @@
 /// Precise port of jdarith.c from libjpeg-turbo.
 use crate::common::arith_tables::*;
 use crate::common::error::{JpegError, Result};
+use crate::common::quant_table::ZIGZAG_ORDER;
 
 #[derive(Clone, Copy)]
 enum StatRef {
@@ -316,6 +317,195 @@ impl<'a> ArithDecoder<'a> {
             k += 1;
         }
 
+        Ok(())
+    }
+
+    /// Decode DC coefficient for progressive first scan (arithmetic).
+    pub fn decode_dc_first_progressive(
+        &mut self,
+        block: &mut [i16; 64],
+        comp_idx: usize,
+        dc_tbl: usize,
+        al: u8,
+    ) -> Result<()> {
+        // Same as decode_dc_sequential but output is LEFT_SHIFT(last_dc_val, al)
+        let s0 = self.dc_context[comp_idx];
+
+        if self.decode(StatRef::Dc(dc_tbl, s0))? == 0 {
+            self.dc_context[comp_idx] = 0;
+            block[0] = ((self.last_dc_val[comp_idx] as i32) << al) as i16;
+            return Ok(());
+        }
+
+        let sign = self.decode(StatRef::Dc(dc_tbl, s0 + 1))? as usize;
+        let st_base = s0 + 2 + sign;
+
+        let mut m: i32 = self.decode(StatRef::Dc(dc_tbl, st_base))? as i32;
+        if m != 0 {
+            let mut x1 = 20usize;
+            while self.decode(StatRef::Dc(dc_tbl, x1))? != 0 {
+                m <<= 1;
+                if m == 0x8000 {
+                    return Err(JpegError::CorruptData("arithmetic DC overflow".into()));
+                }
+                x1 += 1;
+            }
+        }
+
+        let l_thresh = (1i32 << self.arith_dc_l[dc_tbl]) >> 1;
+        let u_thresh = (1i32 << self.arith_dc_u[dc_tbl]) >> 1;
+        if m < l_thresh {
+            self.dc_context[comp_idx] = 0;
+        } else if m > u_thresh {
+            self.dc_context[comp_idx] = 12 + sign * 4;
+        } else {
+            self.dc_context[comp_idx] = 4 + sign * 4;
+        }
+
+        let mut v = m;
+        let mut bit_mask = m >> 1;
+        while bit_mask != 0 {
+            if self.decode(StatRef::Fixed(0))? != 0 {
+                v |= bit_mask;
+            }
+            bit_mask >>= 1;
+        }
+
+        v += 1;
+        let v = if sign != 0 { -v } else { v };
+
+        self.last_dc_val[comp_idx] = (self.last_dc_val[comp_idx] + v) & 0xFFFF;
+        block[0] = ((self.last_dc_val[comp_idx] as i32) << al) as i16;
+        Ok(())
+    }
+
+    /// Decode DC refinement for progressive (arithmetic).
+    pub fn decode_dc_refine_progressive(&mut self, block: &mut [i16; 64], al: u8) -> Result<()> {
+        let p1 = 1i16 << al;
+        if self.decode(StatRef::Fixed(0))? != 0 {
+            block[0] |= p1;
+        }
+        Ok(())
+    }
+
+    /// Decode AC first scan for progressive (arithmetic).
+    pub fn decode_ac_first_progressive(
+        &mut self,
+        block: &mut [i16; 64],
+        ac_tbl: usize,
+        ss: u8,
+        se: u8,
+        al: u8,
+    ) -> Result<()> {
+        let mut k = ss as usize;
+        while k <= se as usize {
+            let mut st = 3 * (k - 1);
+            if self.decode(StatRef::Ac(ac_tbl, st))? != 0 {
+                break; // EOB
+            }
+            while self.decode(StatRef::Ac(ac_tbl, st + 1))? == 0 {
+                st += 3;
+                k += 1;
+                if k > se as usize {
+                    return Err(JpegError::CorruptData(
+                        "arithmetic AC spectral overflow".into(),
+                    ));
+                }
+            }
+            let sign = self.decode(StatRef::Fixed(0))?;
+            let st_mag = st + 2;
+            let mut m: i32 = self.decode(StatRef::Ac(ac_tbl, st_mag))? as i32;
+            if m != 0 {
+                if self.decode(StatRef::Ac(ac_tbl, st_mag))? != 0 {
+                    m <<= 1;
+                    let kx = self.arith_ac_k[ac_tbl] as usize;
+                    let mut ext_st = if k <= kx { 189 } else { 217 };
+                    while self.decode(StatRef::Ac(ac_tbl, ext_st))? != 0 {
+                        m <<= 1;
+                        if m == 0x8000 {
+                            return Err(JpegError::CorruptData("arithmetic AC overflow".into()));
+                        }
+                        ext_st += 1;
+                    }
+                }
+            }
+            let mut v = m;
+            let mut bit_mask = m >> 1;
+            while bit_mask != 0 {
+                if self.decode(StatRef::Fixed(0))? != 0 {
+                    v |= bit_mask;
+                }
+                bit_mask >>= 1;
+            }
+            v += 1;
+            let v = if sign != 0 { -v } else { v };
+            // Output in natural (dezigzagged) order, shifted by al
+            block[ZIGZAG_ORDER[k]] = ((v as i32) << al) as i16;
+            k += 1;
+        }
+        Ok(())
+    }
+
+    /// Decode AC refinement for progressive (arithmetic).
+    pub fn decode_ac_refine_progressive(
+        &mut self,
+        block: &mut [i16; 64],
+        ac_tbl: usize,
+        ss: u8,
+        se: u8,
+        al: u8,
+    ) -> Result<()> {
+        let p1 = 1i16 << al;
+        let m1 = (-1i16) << al;
+
+        // Establish EOBx (previous stage end-of-block) index
+        let mut kex = se as usize;
+        while kex > 0 {
+            if block[ZIGZAG_ORDER[kex]] != 0 {
+                break;
+            }
+            kex -= 1;
+        }
+
+        let mut k = ss as usize;
+        while k <= se as usize {
+            let st = 3 * (k - 1);
+            if k > kex {
+                if self.decode(StatRef::Ac(ac_tbl, st))? != 0 {
+                    break; // EOB
+                }
+            }
+            loop {
+                let natural = ZIGZAG_ORDER[k];
+                if block[natural] != 0 {
+                    // Previously nonzero coefficient: read correction bit
+                    if self.decode(StatRef::Ac(ac_tbl, st + 2))? != 0 {
+                        if block[natural] < 0 {
+                            block[natural] = block[natural].wrapping_add(m1);
+                        } else {
+                            block[natural] = block[natural].wrapping_add(p1);
+                        }
+                    }
+                    break;
+                }
+                if self.decode(StatRef::Ac(ac_tbl, st + 1))? != 0 {
+                    // Newly nonzero coefficient
+                    if self.decode(StatRef::Fixed(0))? != 0 {
+                        block[natural] = m1;
+                    } else {
+                        block[natural] = p1;
+                    }
+                    break;
+                }
+                k += 1;
+                if k > se as usize {
+                    return Err(JpegError::CorruptData(
+                        "arithmetic AC spectral overflow".into(),
+                    ));
+                }
+            }
+            k += 1;
+        }
         Ok(())
     }
 
