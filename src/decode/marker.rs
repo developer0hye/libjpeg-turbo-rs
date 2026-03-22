@@ -72,17 +72,52 @@ pub struct JpegMetadata {
     pub arith_dc_params: [(u8, u8); 4],
     /// DAC conditioning: AC parameter (Kx) per table.
     pub arith_ac_params: [u8; 4],
+    /// Saved APP/COM markers according to the marker save configuration.
+    pub saved_markers: Vec<SavedMarker>,
 }
 
 /// Reads and parses JPEG markers from a byte slice.
 pub struct MarkerReader<'a> {
     data: &'a [u8],
     pos: usize,
+    marker_save_config: MarkerSaveConfig,
 }
 
 impl<'a> MarkerReader<'a> {
     pub fn new(data: &'a [u8]) -> Self {
-        Self { data, pos: 0 }
+        Self {
+            data,
+            pos: 0,
+            marker_save_config: MarkerSaveConfig::None,
+        }
+    }
+
+    /// Set the marker save configuration.
+    pub fn set_marker_save_config(&mut self, config: MarkerSaveConfig) {
+        self.marker_save_config = config;
+    }
+
+    /// Check whether a given marker code should be saved according to config.
+    fn should_save_marker(&self, code: u8) -> bool {
+        match &self.marker_save_config {
+            MarkerSaveConfig::None => false,
+            MarkerSaveConfig::All => (0xE0..=0xEF).contains(&code) || code == COM,
+            MarkerSaveConfig::AppOnly => (0xE0..=0xEF).contains(&code),
+            MarkerSaveConfig::Specific(codes) => codes.contains(&code),
+        }
+    }
+
+    /// Read a marker segment's raw data without advancing pos.
+    /// Returns the data portion (after the 2-byte length field).
+    fn peek_marker_data(&self) -> Option<Vec<u8>> {
+        if self.pos + 2 > self.data.len() {
+            return None;
+        }
+        let length = u16::from_be_bytes([self.data[self.pos], self.data[self.pos + 1]]) as usize;
+        if length < 2 || self.pos + length > self.data.len() {
+            return None;
+        }
+        Some(self.data[self.pos + 2..self.pos + length].to_vec())
     }
 
     /// Parse all markers. For baseline, stops after first SOS.
@@ -105,6 +140,7 @@ impl<'a> MarkerReader<'a> {
         let mut arith_ac_params: [u8; 4] = [5; 4];
         let mut comment: Option<String> = None;
         let mut density: DensityInfo = DensityInfo::default();
+        let mut saved_markers: Vec<SavedMarker> = Vec::new();
 
         loop {
             let marker = self.read_marker()?;
@@ -170,26 +206,71 @@ impl<'a> MarkerReader<'a> {
                 }
                 // APP1 (EXIF) — parse for EXIF metadata
                 0xE1 => {
+                    if self.should_save_marker(0xE1) {
+                        if let Some(raw) = self.peek_marker_data() {
+                            saved_markers.push(SavedMarker {
+                                code: 0xE1,
+                                data: raw,
+                            });
+                        }
+                    }
                     self.read_app1(&mut exif_data)?;
                 }
                 // APP2 (ICC profile) — parse for ICC profile chunks
                 0xE2 => {
+                    if self.should_save_marker(0xE2) {
+                        if let Some(raw) = self.peek_marker_data() {
+                            saved_markers.push(SavedMarker {
+                                code: 0xE2,
+                                data: raw,
+                            });
+                        }
+                    }
                     self.read_app2(&mut icc_chunks)?;
                 }
                 // APP14 (Adobe marker) — parse for color transform info
                 0xEE => {
+                    if self.should_save_marker(0xEE) {
+                        if let Some(raw) = self.peek_marker_data() {
+                            saved_markers.push(SavedMarker {
+                                code: 0xEE,
+                                data: raw,
+                            });
+                        }
+                    }
                     self.read_app14(&mut saw_adobe_marker, &mut adobe_transform)?;
                 }
                 // APP0 (JFIF) — parse for density info
                 0xE0 => {
+                    if self.should_save_marker(0xE0) {
+                        if let Some(raw) = self.peek_marker_data() {
+                            saved_markers.push(SavedMarker {
+                                code: 0xE0,
+                                data: raw,
+                            });
+                        }
+                    }
                     self.read_app0(&mut density)?;
                 }
                 // COM marker — parse comment text
                 COM => {
+                    if self.should_save_marker(COM) {
+                        if let Some(raw) = self.peek_marker_data() {
+                            saved_markers.push(SavedMarker {
+                                code: COM,
+                                data: raw,
+                            });
+                        }
+                    }
                     self.read_com(&mut comment)?;
                 }
-                // Skip other APPn markers
+                // Other APPn markers — save if configured, then skip
                 m if (0xE3..=0xEF).contains(&m) => {
+                    if self.should_save_marker(m) {
+                        if let Some(raw) = self.peek_marker_data() {
+                            saved_markers.push(SavedMarker { code: m, data: raw });
+                        }
+                    }
                     self.skip_marker_segment()?;
                 }
                 // Skip other markers with length
@@ -228,6 +309,7 @@ impl<'a> MarkerReader<'a> {
             is_arithmetic,
             arith_dc_params,
             arith_ac_params,
+            saved_markers,
         })
     }
 
