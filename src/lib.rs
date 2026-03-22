@@ -8,7 +8,7 @@ pub mod transform;
 pub use api::coefficient::{
     read_coefficients, transform_jpeg as transform, write_coefficients, JpegCoefficients,
 };
-pub use api::encoder::Encoder;
+pub use api::encoder::{Encoder, HuffmanTableDef};
 pub use api::high_level::{
     compress, compress_arithmetic, compress_lossless, compress_lossless_extended,
     compress_optimized, compress_progressive, compress_with_metadata, decompress,
