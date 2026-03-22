@@ -143,6 +143,55 @@ pub fn write_sos(buf: &mut Vec<u8>, components: &[(u8, u8, u8)]) {
     buf.push(0); // Ah << 4 | Al
 }
 
+/// Write SOF2 (Start Of Frame, Progressive DCT) marker.
+///
+/// Same structure as SOF0 but uses marker code 0xC2.
+pub fn write_sof2(buf: &mut Vec<u8>, width: u16, height: u16, components: &[(u8, u8, u8, u8)]) {
+    buf.push(0xFF);
+    buf.push(0xC2); // SOF2
+
+    let length: u16 = 2 + 1 + 2 + 2 + 1 + (components.len() as u16 * 3);
+    buf.extend_from_slice(&length.to_be_bytes());
+
+    buf.push(8); // 8-bit precision
+    buf.extend_from_slice(&height.to_be_bytes());
+    buf.extend_from_slice(&width.to_be_bytes());
+    buf.push(components.len() as u8);
+
+    for &(id, h_samp, v_samp, quant_tbl_id) in components {
+        buf.push(id);
+        buf.push((h_samp << 4) | v_samp);
+        buf.push(quant_tbl_id);
+    }
+}
+
+/// Write SOS marker for progressive scan with spectral selection and successive approximation.
+pub fn write_sos_progressive(
+    buf: &mut Vec<u8>,
+    components: &[(u8, u8, u8)],
+    ss: u8,
+    se: u8,
+    ah: u8,
+    al: u8,
+) {
+    buf.push(0xFF);
+    buf.push(0xDA); // SOS
+
+    let length: u16 = 2 + 1 + (components.len() as u16 * 2) + 3;
+    buf.extend_from_slice(&length.to_be_bytes());
+
+    buf.push(components.len() as u8);
+
+    for &(id, dc_tbl, ac_tbl) in components {
+        buf.push(id);
+        buf.push((dc_tbl << 4) | ac_tbl);
+    }
+
+    buf.push(ss);
+    buf.push(se);
+    buf.push((ah << 4) | al);
+}
+
 /// Write EOI (End Of Image) marker: 0xFFD9.
 pub fn write_eoi(buf: &mut Vec<u8>) {
     buf.push(0xFF);
