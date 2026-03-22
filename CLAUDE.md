@@ -7,6 +7,13 @@ Rust port of libjpeg-turbo with equivalent or better performance.
 - `references/libjpeg-turbo/` contains the original libjpeg-turbo C source. Read and reference it during implementation for algorithm details, edge cases, and correctness verification.
 - `references/zune-image/crates/zune-jpeg/` contains zune-jpeg, the fastest pure-Rust JPEG decoder. Reference its optimization techniques, but our goal is to outperform it.
 
+# Feature Parity Tracking
+
+- **Read `docs/FEATURE_PARITY.md` before starting any feature work.** It is the checklist of every feature with `[x]`/`[ ]` status.
+- **Use `docs/C_API_REFERENCE.md` as the definitive mapping** of every C function → Rust equivalent (✅/❌/🔶).
+- After implementing a feature, update **both** docs: checkbox in FEATURE_PARITY.md and status in C_API_REFERENCE.md.
+- Follow the priority roadmap at the bottom of FEATURE_PARITY.md when choosing what to work on next.
+
 # Project Rules
 
 - Always communicate and work in English.
