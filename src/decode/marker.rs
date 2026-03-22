@@ -14,12 +14,9 @@ const SOI: u8 = 0xD8;
 const EOI: u8 = 0xD9;
 const SOF0: u8 = 0xC0;
 const SOF2: u8 = 0xC2;
-<<<<<<< HEAD
 const SOF3: u8 = 0xC3; // Lossless, Huffman-coded
-=======
 const SOF9: u8 = 0xC9; // Arithmetic sequential
 const SOF10: u8 = 0xCA; // Arithmetic progressive
->>>>>>> 1282706 (feat: add arithmetic entropy coding (encode + decode))
 const DHT: u8 = 0xC4;
 const DAC: u8 = 0xCC; // Define arithmetic conditioning
 const DQT: u8 = 0xDB;
@@ -116,12 +113,12 @@ impl<'a> MarkerReader<'a> {
                 }
                 SOF9 => {
                     // Arithmetic sequential
-                    frame = Some(self.read_sof(false)?);
+                    frame = Some(self.read_sof(false, false)?);
                     is_arithmetic = true;
                 }
                 SOF10 => {
                     // Arithmetic progressive
-                    frame = Some(self.read_sof(true)?);
+                    frame = Some(self.read_sof(true, false)?);
                     is_arithmetic = true;
                 }
                 DAC => {
