@@ -117,6 +117,15 @@ pub struct ScanHeader {
     pub succ_low: u8,
 }
 
+/// Region of interest for cropped decompression.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CropRegion {
+    pub x: usize,
+    pub y: usize,
+    pub width: usize,
+    pub height: usize,
+}
+
 /// Per-component selector within a scan.
 #[derive(Debug, Clone, Copy)]
 pub struct ScanComponentSelector {
