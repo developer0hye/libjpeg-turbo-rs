@@ -1332,6 +1332,231 @@ fn compress_lossless_rgb(
     Ok(output)
 }
 
+/// Compress as lossless JPEG with arithmetic entropy coding (SOF11).
+///
+/// Same predictor-based pipeline as SOF3 but uses ArithEncoder instead of
+/// Huffman coding. Writes SOF11 (0xCB) marker and DAC conditioning parameters.
+pub fn compress_lossless_arithmetic(
+    pixels: &[u8],
+    width: usize,
+    height: usize,
+    pixel_format: PixelFormat,
+    predictor: u8,
+    point_transform: u8,
+) -> Result<Vec<u8>> {
+    if predictor < 1 || predictor > 7 {
+        return Err(JpegError::Unsupported(format!(
+            "lossless predictor must be 1-7, got {}",
+            predictor
+        )));
+    }
+
+    if point_transform > 15 {
+        return Err(JpegError::Unsupported(format!(
+            "point transform must be 0-15, got {}",
+            point_transform
+        )));
+    }
+
+    if width == 0 || height == 0 {
+        return Err(JpegError::CorruptData(
+            "image dimensions must be non-zero".to_string(),
+        ));
+    }
+
+    let bpp: usize = pixel_format.bytes_per_pixel();
+    let expected_size: usize = width * height * bpp;
+    if pixels.len() < expected_size {
+        return Err(JpegError::BufferTooSmall {
+            need: expected_size,
+            got: pixels.len(),
+        });
+    }
+
+    match pixel_format {
+        PixelFormat::Grayscale => compress_lossless_arithmetic_grayscale(
+            pixels,
+            width,
+            height,
+            predictor,
+            point_transform,
+        ),
+        PixelFormat::Rgb => {
+            compress_lossless_arithmetic_rgb(pixels, width, height, predictor, point_transform)
+        }
+        _ => Err(JpegError::Unsupported(format!(
+            "lossless arithmetic encoding does not support {:?}, use Grayscale or Rgb",
+            pixel_format
+        ))),
+    }
+}
+
+/// Encode a single-component (grayscale) lossless JPEG with arithmetic coding.
+fn compress_lossless_arithmetic_grayscale(
+    pixels: &[u8],
+    width: usize,
+    height: usize,
+    predictor: u8,
+    point_transform: u8,
+) -> Result<Vec<u8>> {
+    use crate::encode::arithmetic::ArithEncoder;
+
+    let precision: u8 = 8;
+
+    let mut arith_enc: ArithEncoder = ArithEncoder::new(width * height);
+
+    // Encode each pixel's difference as a DC coefficient
+    for y in 0..height {
+        for x in 0..width {
+            let pixel: i32 = pixels[y * width + x] as i32;
+            let signed_diff: i16 = lossless_diff(
+                pixel,
+                x,
+                y,
+                pixels,
+                width,
+                predictor,
+                point_transform,
+                precision,
+            );
+            // Pack the difference into block[0] and encode as DC-only
+            let mut block: [i16; 64] = [0i16; 64];
+            block[0] = signed_diff.wrapping_add(arith_enc.last_dc_val[0] as i16);
+            arith_enc.encode_dc_sequential(&block, 0, 0);
+        }
+    }
+
+    arith_enc.finish();
+
+    let mut output: Vec<u8> = Vec::with_capacity(arith_enc.data().len() + 256);
+
+    marker_writer::write_soi(&mut output);
+
+    // SOF11 with 1 component
+    let components: Vec<(u8, u8, u8, u8)> = vec![(1, 1, 1, 0)];
+    marker_writer::write_sof11(
+        &mut output,
+        width as u16,
+        height as u16,
+        precision,
+        &components,
+    );
+
+    // DAC marker for DC table 0
+    let dc_params: [(u8, u8); 2] = [(0u8, 1u8), (0, 1)];
+    let ac_params: [u8; 2] = [5u8, 5];
+    marker_writer::write_dac(&mut output, 1, &dc_params, 0, &ac_params);
+
+    // SOS for lossless scan
+    let scan_components: Vec<(u8, u8)> = vec![(1, 0)];
+    marker_writer::write_sos_lossless(&mut output, &scan_components, predictor, point_transform);
+
+    output.extend_from_slice(arith_enc.data());
+
+    marker_writer::write_eoi(&mut output);
+
+    Ok(output)
+}
+
+/// Encode a 3-component (RGB via YCbCr) interleaved lossless JPEG with arithmetic coding.
+fn compress_lossless_arithmetic_rgb(
+    pixels: &[u8],
+    width: usize,
+    height: usize,
+    predictor: u8,
+    point_transform: u8,
+) -> Result<Vec<u8>> {
+    use crate::encode::arithmetic::ArithEncoder;
+
+    let precision: u8 = 8;
+    let num_pixels: usize = width * height;
+
+    // Convert RGB to YCbCr planes
+    let mut y_plane: Vec<u8> = vec![0u8; num_pixels];
+    let mut cb_plane: Vec<u8> = vec![0u8; num_pixels];
+    let mut cr_plane: Vec<u8> = vec![0u8; num_pixels];
+
+    for row in 0..height {
+        let row_start: usize = row * width * 3;
+        let plane_start: usize = row * width;
+        color::rgb_to_ycbcr_row(
+            &pixels[row_start..row_start + width * 3],
+            &mut y_plane[plane_start..plane_start + width],
+            &mut cb_plane[plane_start..plane_start + width],
+            &mut cr_plane[plane_start..plane_start + width],
+            width,
+        );
+    }
+
+    let planes: [&[u8]; 3] = [&y_plane, &cb_plane, &cr_plane];
+    // comp_idx 0=Y uses dc_tbl 0, comp_idx 1=Cb and 2=Cr use dc_tbl 1
+    let dc_tbls: [usize; 3] = [0, 1, 1];
+
+    let mut arith_enc: ArithEncoder = ArithEncoder::new(num_pixels * 3);
+
+    // Interleaved encoding: for each pixel, encode diff for Y, Cb, Cr
+    for y in 0..height {
+        for x in 0..width {
+            for c in 0..3 {
+                let pixel: i32 = planes[c][y * width + x] as i32;
+                let signed_diff: i16 = lossless_diff(
+                    pixel,
+                    x,
+                    y,
+                    planes[c],
+                    width,
+                    predictor,
+                    point_transform,
+                    precision,
+                );
+                // Pack the difference into block[0] and encode as DC-only
+                let mut block: [i16; 64] = [0i16; 64];
+                block[0] = signed_diff.wrapping_add(arith_enc.last_dc_val[c] as i16);
+                arith_enc.encode_dc_sequential(&block, c, dc_tbls[c]);
+            }
+        }
+    }
+
+    arith_enc.finish();
+
+    let mut output: Vec<u8> = Vec::with_capacity(arith_enc.data().len() + 512);
+
+    marker_writer::write_soi(&mut output);
+
+    // SOF11 with 3 components: Y(id=1), Cb(id=2), Cr(id=3), all 1x1, qt=0
+    let components: Vec<(u8, u8, u8, u8)> = vec![
+        (1, 1, 1, 0), // Y
+        (2, 1, 1, 0), // Cb
+        (3, 1, 1, 0), // Cr
+    ];
+    marker_writer::write_sof11(
+        &mut output,
+        width as u16,
+        height as u16,
+        precision,
+        &components,
+    );
+
+    // DAC marker for DC tables 0 and 1
+    let dc_params: [(u8, u8); 2] = [(0u8, 1u8), (0, 1)];
+    let ac_params: [u8; 2] = [5u8, 5];
+    marker_writer::write_dac(&mut output, 2, &dc_params, 0, &ac_params);
+
+    // SOS with 3 components: Y uses DC table 0, Cb/Cr use DC table 1
+    let scan_components: Vec<(u8, u8)> = vec![
+        (1, 0), // Y -> DC table 0
+        (2, 1), // Cb -> DC table 1
+        (3, 1), // Cr -> DC table 1
+    ];
+    marker_writer::write_sos_lossless(&mut output, &scan_components, predictor, point_transform);
+
+    output.extend_from_slice(arith_enc.data());
+
+    marker_writer::write_eoi(&mut output);
+
+    Ok(output)
+}
+
 /// Per-component block layout for progressive encoding.
 struct CompLayout {
     blocks_x: usize,

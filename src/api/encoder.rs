@@ -305,7 +305,16 @@ impl<'a> Encoder<'a> {
             effective_format = self.pixel_format;
         }
 
-        let base = if self.lossless {
+        let base = if self.lossless && self.arithmetic {
+            encoder::compress_lossless_arithmetic(
+                effective_pixels,
+                self.width,
+                self.height,
+                effective_format,
+                self.lossless_predictor,
+                self.lossless_point_transform,
+            )?
+        } else if self.lossless {
             encoder::compress_lossless_extended(
                 effective_pixels,
                 self.width,
