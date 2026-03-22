@@ -4,7 +4,7 @@
 /// and marker writing to produce a valid baseline JPEG file.
 use crate::api::encoder::HuffmanTableDef;
 use crate::common::error::{JpegError, Result};
-use crate::common::types::{DctMethod, PixelFormat, ScanScript, Subsampling};
+use crate::common::types::{DctMethod, PixelFormat, SavedMarker, ScanScript, Subsampling};
 use crate::encode::color;
 use crate::encode::fdct;
 use crate::encode::huffman_encode::{build_huff_table, BitWriter, HuffTable, HuffmanEncoder};
@@ -959,6 +959,33 @@ pub fn inject_comment(base: &[u8], text: &str) -> Vec<u8> {
     let mut out = Vec::with_capacity(base.len() + text.len() + 6);
     out.extend_from_slice(&base[..insert_pos]);
     marker_writer::write_com(&mut out, text);
+    out.extend_from_slice(&base[insert_pos..]);
+    out
+}
+
+/// Inject saved markers (APP/COM) into an existing JPEG byte stream.
+///
+/// Markers are inserted after SOI + APP0 (and any existing metadata markers),
+/// preserving the same insertion point pattern as `inject_metadata`/`inject_comment`.
+pub fn inject_saved_markers(base: &[u8], markers: &[SavedMarker]) -> Vec<u8> {
+    if markers.is_empty() {
+        return base.to_vec();
+    }
+
+    // Find insertion point after APP0 JFIF marker (SOI + APP0)
+    let insert_pos: usize = if base.len() >= 4 && base[2] == 0xFF && base[3] == 0xE0 {
+        let app0_len: usize = u16::from_be_bytes([base[4], base[5]]) as usize;
+        2 + 2 + app0_len
+    } else {
+        2
+    };
+
+    let extra: usize = markers.iter().map(|m| m.data.len() + 4).sum();
+    let mut out: Vec<u8> = Vec::with_capacity(base.len() + extra);
+    out.extend_from_slice(&base[..insert_pos]);
+    for marker in markers {
+        marker_writer::write_marker(&mut out, marker.code, &marker.data);
+    }
     out.extend_from_slice(&base[insert_pos..]);
     out
 }
