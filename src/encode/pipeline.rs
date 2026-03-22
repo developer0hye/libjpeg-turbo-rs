@@ -1970,6 +1970,429 @@ pub fn compress_arithmetic(
     Ok(output)
 }
 
+/// Compress with arithmetic progressive encoding (SOF10).
+///
+/// Combines progressive multi-scan encoding with arithmetic entropy coding.
+/// Buffers all DCT coefficients, then encodes across multiple scans using
+/// a standard scan progression script with ArithEncoder.
+pub fn compress_arithmetic_progressive(
+    pixels: &[u8],
+    width: usize,
+    height: usize,
+    pixel_format: PixelFormat,
+    quality: u8,
+    subsampling: Subsampling,
+) -> Result<Vec<u8>> {
+    use crate::encode::arithmetic::ArithEncoder;
+    use crate::encode::progressive::simple_progression;
+
+    if width == 0 || height == 0 {
+        return Err(JpegError::CorruptData(
+            "image dimensions must be non-zero".to_string(),
+        ));
+    }
+
+    let bpp: usize = pixel_format.bytes_per_pixel();
+    let expected_size: usize = width * height * bpp;
+    if pixels.len() < expected_size {
+        return Err(JpegError::BufferTooSmall {
+            need: expected_size,
+            got: pixels.len(),
+        });
+    }
+
+    let is_grayscale: bool = pixel_format == PixelFormat::Grayscale;
+    let num_components: usize = if is_grayscale { 1 } else { 3 };
+
+    let luma_quant: [u16; 64] =
+        tables::quality_scale_quant_table(&tables::STD_LUMINANCE_QUANT_TABLE, quality);
+    let chroma_quant: [u16; 64] =
+        tables::quality_scale_quant_table(&tables::STD_CHROMINANCE_QUANT_TABLE, quality);
+    let luma_divisors: [u16; 64] = scale_quant_for_fdct(&luma_quant);
+    let chroma_divisors: [u16; 64] = scale_quant_for_fdct(&chroma_quant);
+
+    let (y_plane, cb_plane, cr_plane) = convert_to_ycbcr(pixels, width, height, pixel_format)?;
+
+    let (mcu_w, mcu_h): (usize, usize) = if is_grayscale {
+        (8, 8)
+    } else {
+        match subsampling {
+            Subsampling::S444 => (8, 8),
+            Subsampling::S422 => (16, 8),
+            Subsampling::S420 => (16, 16),
+            Subsampling::S440 => (8, 16),
+            Subsampling::S411 => (32, 8),
+        }
+    };
+
+    let mcus_x: usize = (width + mcu_w - 1) / mcu_w;
+    let mcus_y: usize = (height + mcu_h - 1) / mcu_h;
+
+    // Compute per-component block dimensions
+    let (h_samp, v_samp): (usize, usize) = if is_grayscale {
+        (1, 1)
+    } else {
+        let (h, v) = subsampling.sampling_factors();
+        (h as usize, v as usize)
+    };
+
+    let comp_layouts: Vec<CompLayout> = if is_grayscale {
+        vec![CompLayout {
+            blocks_x: mcus_x,
+            blocks_y: mcus_y,
+            h_blocks: 1,
+            v_blocks: 1,
+        }]
+    } else {
+        vec![
+            CompLayout {
+                blocks_x: mcus_x * h_samp,
+                blocks_y: mcus_y * v_samp,
+                h_blocks: h_samp,
+                v_blocks: v_samp,
+            },
+            CompLayout {
+                blocks_x: mcus_x,
+                blocks_y: mcus_y,
+                h_blocks: 1,
+                v_blocks: 1,
+            },
+            CompLayout {
+                blocks_x: mcus_x,
+                blocks_y: mcus_y,
+                h_blocks: 1,
+                v_blocks: 1,
+            },
+        ]
+    };
+
+    // Buffer all quantized coefficients per component
+    let mut coeff_bufs: Vec<Vec<[i16; 64]>> = comp_layouts
+        .iter()
+        .map(|cl| vec![[0i16; 64]; cl.blocks_x * cl.blocks_y])
+        .collect();
+
+    // FDCT + quantize all blocks into coefficient buffers
+    for mcu_y in 0..mcus_y {
+        for mcu_x in 0..mcus_x {
+            let x0: usize = mcu_x * mcu_w;
+            let y0: usize = mcu_y * mcu_h;
+
+            if is_grayscale {
+                let bx: usize = mcu_x;
+                let by: usize = mcu_y;
+                let mut block = [0i16; 64];
+                extract_block(&y_plane, width, height, x0, y0, &mut block);
+                let mut dct = [0i32; 64];
+                fdct::fdct_islow(&block, &mut dct);
+                quant::quantize_block(&dct, &luma_divisors, &mut coeff_bufs[0][by * mcus_x + bx]);
+            } else {
+                // Y blocks
+                for bv in 0..v_samp {
+                    for bh in 0..h_samp {
+                        let bx: usize = mcu_x * h_samp + bh;
+                        let by: usize = mcu_y * v_samp + bv;
+                        let mut block = [0i16; 64];
+                        extract_block(
+                            &y_plane,
+                            width,
+                            height,
+                            x0 + bh * 8,
+                            y0 + bv * 8,
+                            &mut block,
+                        );
+                        let mut dct = [0i32; 64];
+                        fdct::fdct_islow(&block, &mut dct);
+                        let blocks_x: usize = comp_layouts[0].blocks_x;
+                        quant::quantize_block(
+                            &dct,
+                            &luma_divisors,
+                            &mut coeff_bufs[0][by * blocks_x + bx],
+                        );
+                    }
+                }
+                // Cb block
+                {
+                    let bx: usize = mcu_x;
+                    let by: usize = mcu_y;
+                    let mut block = [0i16; 64];
+                    let hf: usize = if h_samp > 1 { 2 } else { 1 };
+                    let vf: usize = if v_samp > 1 { 2 } else { 1 };
+                    if hf == 1 && vf == 1 {
+                        extract_block(&cb_plane, width, height, x0, y0, &mut block);
+                    } else {
+                        downsample_chroma_block(
+                            &cb_plane, width, height, x0, y0, hf, vf, &mut block,
+                        );
+                    }
+                    let mut dct = [0i32; 64];
+                    fdct::fdct_islow(&block, &mut dct);
+                    quant::quantize_block(
+                        &dct,
+                        &chroma_divisors,
+                        &mut coeff_bufs[1][by * mcus_x + bx],
+                    );
+                }
+                // Cr block
+                {
+                    let bx: usize = mcu_x;
+                    let by: usize = mcu_y;
+                    let mut block = [0i16; 64];
+                    let hf: usize = if h_samp > 1 { 2 } else { 1 };
+                    let vf: usize = if v_samp > 1 { 2 } else { 1 };
+                    if hf == 1 && vf == 1 {
+                        extract_block(&cr_plane, width, height, x0, y0, &mut block);
+                    } else {
+                        downsample_chroma_block(
+                            &cr_plane, width, height, x0, y0, hf, vf, &mut block,
+                        );
+                    }
+                    let mut dct = [0i32; 64];
+                    fdct::fdct_islow(&block, &mut dct);
+                    quant::quantize_block(
+                        &dct,
+                        &chroma_divisors,
+                        &mut coeff_bufs[2][by * mcus_x + bx],
+                    );
+                }
+            }
+        }
+    }
+
+    // Generate scan progression
+    let scans = simple_progression(num_components);
+
+    // Assemble output
+    let mut output: Vec<u8> = Vec::with_capacity(width * height * 2);
+
+    marker_writer::write_soi(&mut output);
+    marker_writer::write_app0_jfif(&mut output);
+
+    // Quantization tables
+    marker_writer::write_dqt(&mut output, 0, &luma_quant);
+    if !is_grayscale {
+        marker_writer::write_dqt(&mut output, 1, &chroma_quant);
+    }
+
+    // SOF10 (arithmetic progressive)
+    if is_grayscale {
+        let components = vec![(1, 1, 1, 0)];
+        marker_writer::write_sof10(&mut output, width as u16, height as u16, &components);
+    } else {
+        let components = vec![
+            (1, h_samp as u8, v_samp as u8, 0),
+            (2, 1, 1, 1),
+            (3, 1, 1, 1),
+        ];
+        marker_writer::write_sof10(&mut output, width as u16, height as u16, &components);
+    }
+
+    // DAC marker for arithmetic conditioning parameters
+    let dc_params: [(u8, u8); 2] = [(0u8, 1u8), (0, 1)];
+    let ac_params: [u8; 2] = [5u8, 5];
+    let num_dc: usize = if is_grayscale { 1 } else { 2 };
+    let num_ac: usize = if is_grayscale { 1 } else { 2 };
+    marker_writer::write_dac(&mut output, num_dc, &dc_params, num_ac, &ac_params);
+
+    // Encode each scan with arithmetic coding
+    let mut arith_enc: ArithEncoder = ArithEncoder::new(width * height / 4);
+
+    for scan in &scans {
+        // Reset encoder state for each scan
+        arith_enc.reset();
+
+        // Build SOS component list
+        let sos_comps: Vec<(u8, u8, u8)> = scan
+            .component_indices
+            .iter()
+            .map(|&ci| {
+                let comp_id: u8 = (ci + 1) as u8;
+                let (dc_tbl, ac_tbl): (u8, u8) = if ci == 0 { (0, 0) } else { (1, 1) };
+                (comp_id, dc_tbl, ac_tbl)
+            })
+            .collect();
+
+        marker_writer::write_sos_progressive(
+            &mut output,
+            &sos_comps,
+            scan.ss,
+            scan.se,
+            scan.ah,
+            scan.al,
+        );
+
+        let is_dc_scan: bool = scan.ss == 0 && scan.se == 0;
+
+        if is_dc_scan {
+            if scan.ah == 0 {
+                // DC first scan
+                encode_arith_dc_first_scan(
+                    &coeff_bufs,
+                    &comp_layouts,
+                    scan,
+                    mcus_x,
+                    mcus_y,
+                    &mut arith_enc,
+                );
+            } else {
+                // DC refine scan
+                encode_arith_dc_refine_scan(
+                    &coeff_bufs,
+                    &comp_layouts,
+                    scan,
+                    mcus_x,
+                    mcus_y,
+                    &mut arith_enc,
+                );
+            }
+        } else if scan.ah == 0 {
+            // AC first scan
+            encode_arith_ac_first_scan(
+                &coeff_bufs,
+                &comp_layouts,
+                scan,
+                mcus_x,
+                mcus_y,
+                &mut arith_enc,
+            );
+        } else {
+            // AC refine scan
+            encode_arith_ac_refine_scan(
+                &coeff_bufs,
+                &comp_layouts,
+                scan,
+                mcus_x,
+                mcus_y,
+                &mut arith_enc,
+            );
+        }
+
+        arith_enc.finish();
+        output.extend_from_slice(arith_enc.data());
+    }
+
+    marker_writer::write_eoi(&mut output);
+
+    Ok(output)
+}
+
+/// Encode arithmetic DC first scan (Ah=0) across all MCUs.
+fn encode_arith_dc_first_scan(
+    coeff_bufs: &[Vec<[i16; 64]>],
+    comp_layouts: &[CompLayout],
+    scan: &crate::encode::progressive::ProgressiveScan,
+    mcus_x: usize,
+    mcus_y: usize,
+    arith_enc: &mut crate::encode::arithmetic::ArithEncoder,
+) {
+    let al: u8 = scan.al;
+
+    for mcu_y in 0..mcus_y {
+        for mcu_x in 0..mcus_x {
+            for &ci in &scan.component_indices {
+                let layout: &CompLayout = &comp_layouts[ci];
+                let dc_tbl: usize = if ci == 0 { 0 } else { 1 };
+
+                for bv in 0..layout.v_blocks {
+                    for bh in 0..layout.h_blocks {
+                        let bx: usize = mcu_x * layout.h_blocks + bh;
+                        let by: usize = mcu_y * layout.v_blocks + bv;
+                        let block: &[i16; 64] = &coeff_bufs[ci][by * layout.blocks_x + bx];
+
+                        arith_enc.encode_dc_first(block, ci, dc_tbl, al);
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Encode arithmetic DC refine scan (Ah!=0) across all MCUs.
+fn encode_arith_dc_refine_scan(
+    coeff_bufs: &[Vec<[i16; 64]>],
+    comp_layouts: &[CompLayout],
+    scan: &crate::encode::progressive::ProgressiveScan,
+    mcus_x: usize,
+    mcus_y: usize,
+    arith_enc: &mut crate::encode::arithmetic::ArithEncoder,
+) {
+    let al: u8 = scan.al;
+
+    for mcu_y in 0..mcus_y {
+        for mcu_x in 0..mcus_x {
+            for &ci in &scan.component_indices {
+                let layout: &CompLayout = &comp_layouts[ci];
+
+                for bv in 0..layout.v_blocks {
+                    for bh in 0..layout.h_blocks {
+                        let bx: usize = mcu_x * layout.h_blocks + bh;
+                        let by: usize = mcu_y * layout.v_blocks + bv;
+                        let block: &[i16; 64] = &coeff_bufs[ci][by * layout.blocks_x + bx];
+
+                        arith_enc.encode_dc_refine(block, al);
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Encode arithmetic AC first scan (Ah=0, single component).
+fn encode_arith_ac_first_scan(
+    coeff_bufs: &[Vec<[i16; 64]>],
+    comp_layouts: &[CompLayout],
+    scan: &crate::encode::progressive::ProgressiveScan,
+    mcus_x: usize,
+    mcus_y: usize,
+    arith_enc: &mut crate::encode::arithmetic::ArithEncoder,
+) {
+    let ci: usize = scan.component_indices[0]; // AC scans are single-component
+    let layout: &CompLayout = &comp_layouts[ci];
+    let ac_tbl: usize = if ci == 0 { 0 } else { 1 };
+
+    for mcu_y in 0..mcus_y {
+        for mcu_x in 0..mcus_x {
+            for bv in 0..layout.v_blocks {
+                for bh in 0..layout.h_blocks {
+                    let bx: usize = mcu_x * layout.h_blocks + bh;
+                    let by: usize = mcu_y * layout.v_blocks + bv;
+                    let block: &[i16; 64] = &coeff_bufs[ci][by * layout.blocks_x + bx];
+
+                    arith_enc.encode_ac_first(block, ac_tbl, scan.ss, scan.se, scan.al);
+                }
+            }
+        }
+    }
+}
+
+/// Encode arithmetic AC refine scan (Ah!=0, single component).
+fn encode_arith_ac_refine_scan(
+    coeff_bufs: &[Vec<[i16; 64]>],
+    comp_layouts: &[CompLayout],
+    scan: &crate::encode::progressive::ProgressiveScan,
+    mcus_x: usize,
+    mcus_y: usize,
+    arith_enc: &mut crate::encode::arithmetic::ArithEncoder,
+) {
+    let ci: usize = scan.component_indices[0]; // AC scans are single-component
+    let layout: &CompLayout = &comp_layouts[ci];
+    let ac_tbl: usize = if ci == 0 { 0 } else { 1 };
+
+    for mcu_y in 0..mcus_y {
+        for mcu_x in 0..mcus_x {
+            for bv in 0..layout.v_blocks {
+                for bh in 0..layout.h_blocks {
+                    let bx: usize = mcu_x * layout.h_blocks + bh;
+                    let by: usize = mcu_y * layout.v_blocks + bv;
+                    let block: &[i16; 64] = &coeff_bufs[ci][by * layout.blocks_x + bx];
+
+                    arith_enc.encode_ac_refine(block, ac_tbl, scan.ss, scan.se, scan.al, scan.ah);
+                }
+            }
+        }
+    }
+}
+
 /// Encode a progressive DC scan.
 #[allow(clippy::too_many_arguments)]
 fn encode_progressive_dc_scan(
