@@ -23,6 +23,7 @@ pub struct Encoder<'a> {
     progressive: bool,
     arithmetic: bool,
     lossless: bool,
+    grayscale_from_color: bool,
     restart_interval: Option<RestartConfig>,
     icc_profile: Option<&'a [u8]>,
     exif_data: Option<&'a [u8]>,
@@ -44,6 +45,7 @@ impl<'a> Encoder<'a> {
             progressive: false,
             arithmetic: false,
             lossless: false,
+            grayscale_from_color: false,
             restart_interval: None,
             icc_profile: None,
             exif_data: None,
@@ -85,6 +87,16 @@ impl<'a> Encoder<'a> {
     /// Enable lossless JPEG mode (SOF3).
     pub fn lossless(mut self, lossless: bool) -> Self {
         self.lossless = lossless;
+        self
+    }
+
+    /// Convert color input (RGB/RGBA/BGR/BGRA) to single-component grayscale JPEG.
+    ///
+    /// When enabled, the encoder extracts only the Y (luminance) channel from
+    /// the color input and writes a 1-component grayscale JPEG. Has no effect
+    /// when the input pixel format is already Grayscale.
+    pub fn grayscale_from_color(mut self, grayscale_from_color: bool) -> Self {
+        self.grayscale_from_color = grayscale_from_color;
         self
     }
 
@@ -161,65 +173,139 @@ impl<'a> Encoder<'a> {
         self.custom_quant_tables.iter().any(|t| t.is_some())
     }
 
+    /// Extract the Y (luminance) channel from color pixels.
+    ///
+    /// Uses ITU-R BT.601 coefficients matching libjpeg-turbo's color conversion.
+    /// Returns a Vec<u8> containing one luminance byte per pixel.
+    fn extract_luminance(
+        pixels: &[u8],
+        width: usize,
+        height: usize,
+        pixel_format: PixelFormat,
+    ) -> Vec<u8> {
+        let pixel_count: usize = width * height;
+        let mut y_plane: Vec<u8> = Vec::with_capacity(pixel_count);
+
+        match pixel_format {
+            PixelFormat::Grayscale => {
+                y_plane.extend_from_slice(&pixels[..pixel_count]);
+            }
+            PixelFormat::Rgb => {
+                for chunk in pixels[..pixel_count * 3].chunks_exact(3) {
+                    let r = chunk[0] as u32;
+                    let g = chunk[1] as u32;
+                    let b = chunk[2] as u32;
+                    // BT.601: Y = 0.299*R + 0.587*G + 0.114*B
+                    // Fixed-point: (19595*R + 38470*G + 7471*B + 32768) >> 16
+                    y_plane.push(((19595 * r + 38470 * g + 7471 * b + 32768) >> 16) as u8);
+                }
+            }
+            PixelFormat::Rgba => {
+                for chunk in pixels[..pixel_count * 4].chunks_exact(4) {
+                    let r = chunk[0] as u32;
+                    let g = chunk[1] as u32;
+                    let b = chunk[2] as u32;
+                    y_plane.push(((19595 * r + 38470 * g + 7471 * b + 32768) >> 16) as u8);
+                }
+            }
+            PixelFormat::Bgr => {
+                for chunk in pixels[..pixel_count * 3].chunks_exact(3) {
+                    let b = chunk[0] as u32;
+                    let g = chunk[1] as u32;
+                    let r = chunk[2] as u32;
+                    y_plane.push(((19595 * r + 38470 * g + 7471 * b + 32768) >> 16) as u8);
+                }
+            }
+            PixelFormat::Bgra => {
+                for chunk in pixels[..pixel_count * 4].chunks_exact(4) {
+                    let b = chunk[0] as u32;
+                    let g = chunk[1] as u32;
+                    let r = chunk[2] as u32;
+                    y_plane.push(((19595 * r + 38470 * g + 7471 * b + 32768) >> 16) as u8);
+                }
+            }
+            PixelFormat::Cmyk => {
+                // CMYK grayscale extraction not supported; return zeros
+                y_plane.resize(pixel_count, 128);
+            }
+        }
+
+        y_plane
+    }
+
     /// Encode and return the JPEG byte stream.
     pub fn encode(&self) -> Result<Vec<u8>> {
         let restart_interval = self.compute_restart_interval();
 
+        // When grayscale_from_color is set, extract the Y channel from color input
+        // and compress as a single-component grayscale JPEG.
+        let (effective_pixels, effective_format);
+        let grayscale_buf: Vec<u8>;
+        if self.grayscale_from_color && self.pixel_format != PixelFormat::Grayscale {
+            grayscale_buf =
+                Self::extract_luminance(self.pixels, self.width, self.height, self.pixel_format);
+            effective_pixels = &grayscale_buf[..];
+            effective_format = PixelFormat::Grayscale;
+        } else {
+            effective_pixels = self.pixels;
+            effective_format = self.pixel_format;
+        }
+
         let base = if self.lossless {
-            encoder::compress_lossless(self.pixels, self.width, self.height, self.pixel_format)?
+            encoder::compress_lossless(effective_pixels, self.width, self.height, effective_format)?
         } else if self.arithmetic {
             encoder::compress_arithmetic(
-                self.pixels,
+                effective_pixels,
                 self.width,
                 self.height,
-                self.pixel_format,
+                effective_format,
                 self.quality,
                 self.subsampling,
             )?
         } else if self.progressive {
             encoder::compress_progressive(
-                self.pixels,
+                effective_pixels,
                 self.width,
                 self.height,
-                self.pixel_format,
+                effective_format,
                 self.quality,
                 self.subsampling,
             )?
         } else if self.optimize_huffman {
             encoder::compress_optimized(
-                self.pixels,
+                effective_pixels,
                 self.width,
                 self.height,
-                self.pixel_format,
+                effective_format,
                 self.quality,
                 self.subsampling,
             )?
         } else if self.has_custom_quant_tables() {
             encoder::compress_custom_quant(
-                self.pixels,
+                effective_pixels,
                 self.width,
                 self.height,
-                self.pixel_format,
+                effective_format,
                 self.quality,
                 self.subsampling,
                 &self.custom_quant_tables,
             )?
         } else if restart_interval > 0 {
             encoder::compress_with_restart(
-                self.pixels,
+                effective_pixels,
                 self.width,
                 self.height,
-                self.pixel_format,
+                effective_format,
                 self.quality,
                 self.subsampling,
                 restart_interval,
             )?
         } else {
             encoder::compress(
-                self.pixels,
+                effective_pixels,
                 self.width,
                 self.height,
-                self.pixel_format,
+                effective_format,
                 self.quality,
                 self.subsampling,
             )?
