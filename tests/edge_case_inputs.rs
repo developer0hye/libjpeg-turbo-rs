@@ -347,21 +347,14 @@ fn lossless_point_transform_7() {
 }
 
 #[test]
-fn lossless_point_transform_15_errors_or_handles() {
-    // point_transform=15 is beyond 8-bit range; should either error or not panic.
-    // Currently the encoder panics on shift overflow, so we catch it here.
-    // TODO(correctness): encoder should return Err instead of panicking for pt>7 with 8-bit
-    let result = std::panic::catch_unwind(|| {
-        let pixels: Vec<u8> = (0..64).map(|i| (i * 4) as u8).collect();
-        compress_lossless_extended(&pixels, 8, 8, PixelFormat::Grayscale, 1, 15)
-    });
-    // Either Ok(Err(...)) or Err(panic) — both are acceptable; the test ensures
-    // we observe the behavior without crashing the test harness.
-    match result {
-        Ok(Ok(_)) => {}  // Unlikely but fine
-        Ok(Err(_)) => {} // Proper error return
-        Err(_) => {}     // Panic caught — encoder needs fixing but test is aware
-    }
+fn lossless_point_transform_15_returns_error() {
+    // point_transform=15 is beyond 8-bit range (must be < precision=8).
+    let pixels: Vec<u8> = (0..64).map(|i| (i * 4) as u8).collect();
+    let result = compress_lossless_extended(&pixels, 8, 8, PixelFormat::Grayscale, 1, 15);
+    assert!(
+        result.is_err(),
+        "pt=15 with 8-bit precision should be rejected"
+    );
 }
 
 #[test]
