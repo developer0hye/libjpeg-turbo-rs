@@ -143,35 +143,19 @@ pub fn write_sos(buf: &mut Vec<u8>, components: &[(u8, u8, u8)]) {
     buf.push(0); // Ah << 4 | Al
 }
 
-<<<<<<< HEAD
 /// Write SOF2 (Start Of Frame, Progressive DCT) marker.
 ///
 /// Same structure as SOF0 but uses marker code 0xC2.
 pub fn write_sof2(buf: &mut Vec<u8>, width: u16, height: u16, components: &[(u8, u8, u8, u8)]) {
     buf.push(0xFF);
     buf.push(0xC2); // SOF2
-=======
-/// Write SOF9 (Start Of Frame, Arithmetic Sequential) marker.
-///
-/// Same structure as SOF0 but uses marker code 0xC9.
-pub fn write_sof9(buf: &mut Vec<u8>, width: u16, height: u16, components: &[(u8, u8, u8, u8)]) {
-    buf.push(0xFF);
-    buf.push(0xC9); // SOF9
->>>>>>> 1282706 (feat: add arithmetic entropy coding (encode + decode))
 
     let length: u16 = 2 + 1 + 2 + 2 + 1 + (components.len() as u16 * 3);
     buf.extend_from_slice(&length.to_be_bytes());
 
     buf.push(8); // 8-bit precision
-<<<<<<< HEAD
     buf.extend_from_slice(&height.to_be_bytes());
     buf.extend_from_slice(&width.to_be_bytes());
-=======
-
-    buf.extend_from_slice(&height.to_be_bytes());
-    buf.extend_from_slice(&width.to_be_bytes());
-
->>>>>>> 1282706 (feat: add arithmetic entropy coding (encode + decode))
     buf.push(components.len() as u8);
 
     for &(id, h_samp, v_samp, quant_tbl_id) in components {
@@ -181,7 +165,28 @@ pub fn write_sof9(buf: &mut Vec<u8>, width: u16, height: u16, components: &[(u8,
     }
 }
 
-<<<<<<< HEAD
+/// Write SOF9 (Start Of Frame, Arithmetic Sequential) marker.
+///
+/// Same structure as SOF0 but uses marker code 0xC9.
+pub fn write_sof9(buf: &mut Vec<u8>, width: u16, height: u16, components: &[(u8, u8, u8, u8)]) {
+    buf.push(0xFF);
+    buf.push(0xC9); // SOF9
+
+    let length: u16 = 2 + 1 + 2 + 2 + 1 + (components.len() as u16 * 3);
+    buf.extend_from_slice(&length.to_be_bytes());
+
+    buf.push(8); // 8-bit precision
+    buf.extend_from_slice(&height.to_be_bytes());
+    buf.extend_from_slice(&width.to_be_bytes());
+    buf.push(components.len() as u8);
+
+    for &(id, h_samp, v_samp, quant_tbl_id) in components {
+        buf.push(id);
+        buf.push((h_samp << 4) | v_samp);
+        buf.push(quant_tbl_id);
+    }
+}
+
 /// Write SOS marker for progressive scan with spectral selection and successive approximation.
 pub fn write_sos_progressive(
     buf: &mut Vec<u8>,
@@ -207,7 +212,8 @@ pub fn write_sos_progressive(
     buf.push(ss);
     buf.push(se);
     buf.push((ah << 4) | al);
-=======
+}
+
 /// Write DAC (Define Arithmetic Conditioning) marker.
 ///
 /// `dc_params`: (L, U) per DC table. `ac_params`: Kx per AC table.
@@ -234,7 +240,6 @@ pub fn write_dac(
         buf.push(0x10 | i as u8); // Tc=1 (AC), Tb=i
         buf.push(ac_params[i]);
     }
->>>>>>> 1282706 (feat: add arithmetic entropy coding (encode + decode))
 }
 
 /// Write EOI (End Of Image) marker: 0xFFD9.
