@@ -74,6 +74,33 @@ pub fn rgba_to_ycbcr_row(rgba: &[u8], y: &mut [u8], cb: &mut [u8], cr: &mut [u8]
     }
 }
 
+/// Convert a row of pixels to Y, Cb, Cr planes using explicit channel offsets.
+///
+/// Supports any pixel format where R, G, B channels are at known byte offsets
+/// within each `bpp`-byte pixel (Rgbx, Bgrx, Xrgb, Xbgr, Argb, Abgr, etc.).
+pub fn generic_to_ycbcr_row(
+    pixels: &[u8],
+    y: &mut [u8],
+    cb: &mut [u8],
+    cr: &mut [u8],
+    width: usize,
+    bpp: usize,
+    r_off: usize,
+    g_off: usize,
+    b_off: usize,
+) {
+    for i in 0..width {
+        let base: usize = i * bpp;
+        let r = pixels[base + r_off] as i32;
+        let g = pixels[base + g_off] as i32;
+        let b = pixels[base + b_off] as i32;
+        let (y_val, cb_val, cr_val) = rgb_to_ycbcr(r, g, b);
+        y[i] = y_val;
+        cb[i] = cb_val;
+        cr[i] = cr_val;
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

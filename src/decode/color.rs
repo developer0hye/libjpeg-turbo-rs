@@ -58,6 +58,42 @@ pub fn ycbcr_to_bgra_row(y: &[u8], cb: &[u8], cr: &[u8], bgra: &mut [u8], width:
     }
 }
 
+/// Convert a row of YCbCr pixels to an output format using explicit channel offsets.
+///
+/// Places R, G, B at `r_off`, `g_off`, `b_off` within each `bpp`-byte pixel.
+/// The remaining byte (padding/alpha) is set to 255.
+pub fn ycbcr_to_generic_4bpp_row(
+    y: &[u8],
+    cb: &[u8],
+    cr: &[u8],
+    out: &mut [u8],
+    width: usize,
+    r_off: usize,
+    g_off: usize,
+    b_off: usize,
+    pad_off: usize,
+) {
+    for x in 0..width {
+        let (r, g, b) = ycbcr_to_rgb_pixel(y[x], cb[x], cr[x]);
+        let base: usize = x * 4;
+        out[base + r_off] = r;
+        out[base + g_off] = g;
+        out[base + b_off] = b;
+        out[base + pad_off] = 255;
+    }
+}
+
+/// Convert a row of YCbCr pixels to Rgb565 (5-6-5 packed, native endian).
+pub fn ycbcr_to_rgb565_row(y: &[u8], cb: &[u8], cr: &[u8], out: &mut [u8], width: usize) {
+    for x in 0..width {
+        let (r, g, b) = ycbcr_to_rgb_pixel(y[x], cb[x], cr[x]);
+        let packed: u16 = ((r as u16 >> 3) << 11) | ((g as u16 >> 2) << 5) | (b as u16 >> 3);
+        let bytes: [u8; 2] = packed.to_ne_bytes();
+        out[x * 2] = bytes[0];
+        out[x * 2 + 1] = bytes[1];
+    }
+}
+
 /// Copy grayscale values directly (no color conversion needed).
 pub fn grayscale_row(y: &[u8], output: &mut [u8], width: usize) {
     output[..width].copy_from_slice(&y[..width]);
