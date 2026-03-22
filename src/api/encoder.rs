@@ -301,6 +301,15 @@ impl<'a> Encoder<'a> {
                 self.lossless_predictor,
                 self.lossless_point_transform,
             )?
+        } else if self.arithmetic && self.progressive {
+            encoder::compress_arithmetic_progressive(
+                effective_pixels,
+                self.width,
+                self.height,
+                effective_format,
+                self.quality,
+                self.subsampling,
+            )?
         } else if self.arithmetic {
             encoder::compress_arithmetic(
                 effective_pixels,
