@@ -10,18 +10,18 @@
 ### Encode
 - [x] SOF0 — Baseline DCT, Huffman
 - [x] SOF2 — Progressive DCT, Huffman
-- [x] SOF3 — Lossless, Huffman (grayscale only, predictor 1 only, pt=0 only)
+- [x] SOF3 — Lossless, Huffman (grayscale + color, predictor 1-7, pt 0-15)
 - [x] SOF9 — Sequential DCT, Arithmetic
-- [ ] SOF10 — Progressive DCT, Arithmetic
-- [ ] SOF11 — Lossless, Arithmetic
+- [x] SOF10 — Progressive DCT, Arithmetic
+- [x] SOF11 — Lossless, Arithmetic
 
 ### Decode
 - [x] SOF0 — Baseline DCT, Huffman
 - [x] SOF2 — Progressive DCT, Huffman
 - [x] SOF3 — Lossless, Huffman (1 and 3 component)
 - [x] SOF9 — Sequential DCT, Arithmetic
-- [x] SOF10 — Progressive DCT, Arithmetic (basic)
-- [ ] SOF11 — Lossless, Arithmetic
+- [x] SOF10 — Progressive DCT, Arithmetic
+- [x] SOF11 — Lossless, Arithmetic
 
 ---
 
@@ -41,13 +41,13 @@
 - [x] TJPF_RGBA — RGBA (4 bpp)
 - [x] TJPF_BGRA — BGRA (4 bpp)
 - [x] TJPF_CMYK — CMYK (4 bpp)
-- [ ] TJPF_RGBX — RGB + pad (4 bpp, no alpha)
-- [ ] TJPF_BGRX — BGR + pad (4 bpp, no alpha)
-- [ ] TJPF_XBGR — pad + BGR (4 bpp)
-- [ ] TJPF_XRGB — pad + RGB (4 bpp)
-- [ ] TJPF_ABGR — alpha + BGR (4 bpp)
-- [ ] TJPF_ARGB — alpha + RGB (4 bpp)
-- [ ] TJPF_RGB565 — 5-6-5 packed (decode only)
+- [x] TJPF_RGBX — RGB + pad (4 bpp, no alpha)
+- [x] TJPF_BGRX — BGR + pad (4 bpp, no alpha)
+- [x] TJPF_XBGR — pad + BGR (4 bpp)
+- [x] TJPF_XRGB — pad + RGB (4 bpp)
+- [x] TJPF_ABGR — alpha + BGR (4 bpp)
+- [x] TJPF_ARGB — alpha + RGB (4 bpp)
+- [x] TJPF_RGB565 — 5-6-5 packed (decode only)
 
 ---
 
@@ -59,7 +59,7 @@
 - [x] TJSAMP_GRAY (grayscale)
 - [x] TJSAMP_440 (4:4:0)
 - [x] TJSAMP_411 (4:1:1)
-- [ ] TJSAMP_441 (4:4:1)
+- [x] TJSAMP_441 (4:4:1)
 - [ ] TJSAMP_UNKNOWN (unusual/custom subsampling detection)
 
 ---
@@ -80,7 +80,7 @@
 ### Quality & Quantization
 - [x] `TJPARAM_QUALITY` — Quality factor 1-100 (`jpeg_set_quality`)
 - [ ] `q_scale_factor[NUM_QUANT_TBLS]` — Per-component quality
-- [ ] `jpeg_add_quant_table()` — Custom quantization table
+- [x] `jpeg_add_quant_table()` — Custom quantization table (`Encoder::quant_table()`)
 - [ ] `jpeg_set_linear_quality()` — Linear quality scaling
 - [ ] `jpeg_default_qtables()` — Reset to default tables
 - [ ] `jpeg_quality_scaling()` — Quality to scale factor conversion
@@ -89,36 +89,36 @@
 ### Huffman Tables
 - [x] Standard DC/AC luminance + chrominance tables
 - [x] `TJPARAM_OPTIMIZE` — 2-pass optimized Huffman (`compress_optimized`)
-- [ ] Custom `dc_huff_tbl_ptrs[4]` — User-supplied DC Huffman tables
-- [ ] Custom `ac_huff_tbl_ptrs[4]` — User-supplied AC Huffman tables
+- [x] Custom `dc_huff_tbl_ptrs[4]` — User-supplied DC Huffman tables (`Encoder::huffman_dc_table()`)
+- [x] Custom `ac_huff_tbl_ptrs[4]` — User-supplied AC Huffman tables (`Encoder::huffman_ac_table()`)
 - [ ] `jpeg_alloc_huff_table()` — Allocate table
 - [ ] `jpeg_suppress_tables()` — Table suppression control
 
 ### Entropy Coding Mode
 - [x] `TJPARAM_PROGRESSIVE` — Progressive mode
 - [x] `TJPARAM_ARITHMETIC` — Arithmetic coding
-- [ ] `TJPARAM_ARITHMETIC` + `TJPARAM_PROGRESSIVE` combined — SOF10 encode
+- [x] `TJPARAM_ARITHMETIC` + `TJPARAM_PROGRESSIVE` combined — SOF10 encode
 
 ### Lossless Mode
 - [x] `TJPARAM_LOSSLESS` — Enable lossless
-- [ ] `TJPARAM_LOSSLESSPSV` — Predictor selection 1-7 (only 1 implemented)
-- [ ] `TJPARAM_LOSSLESSPT` — Point transform 0-15 (only 0 implemented)
-- [ ] Lossless multi-component (color) encode
-- [ ] `jpeg_enable_lossless()` — Combined predictor + pt setup
+- [x] `TJPARAM_LOSSLESSPSV` — Predictor selection 1-7 (`Encoder::lossless_predictor()`)
+- [x] `TJPARAM_LOSSLESSPT` — Point transform 0-15 (`Encoder::lossless_point_transform()`)
+- [x] Lossless multi-component (color) encode (`compress_lossless_extended()`)
+- [x] `jpeg_enable_lossless()` — Combined predictor + pt setup (via Encoder builder)
 
 ### Restart Markers
-- [ ] `TJPARAM_RESTARTBLOCKS` — Restart interval in MCU blocks
-- [ ] `TJPARAM_RESTARTROWS` — Restart interval in MCU rows
-- [ ] `restart_interval` field in jpeg_compress_struct
-- [ ] `restart_in_rows` field in jpeg_compress_struct
+- [x] `TJPARAM_RESTARTBLOCKS` — Restart interval in MCU blocks (`Encoder::restart_blocks()`)
+- [x] `TJPARAM_RESTARTROWS` — Restart interval in MCU rows (`Encoder::restart_rows()`)
+- [x] `restart_interval` field — via Encoder builder
+- [x] `restart_in_rows` field — via Encoder builder
 
 ### JFIF / Density
 - [x] `write_JFIF_header` — JFIF marker (always written, hardcoded 72 DPI)
-- [ ] `TJPARAM_XDENSITY` — Horizontal pixel density (configurable)
-- [ ] `TJPARAM_YDENSITY` — Vertical pixel density (configurable)
-- [ ] `TJPARAM_DENSITYUNITS` — Units (0=unknown, 1=ppi, 2=ppcm)
+- [x] `TJPARAM_XDENSITY` — Horizontal pixel density (`DensityInfo`)
+- [x] `TJPARAM_YDENSITY` — Vertical pixel density (`DensityInfo`)
+- [x] `TJPARAM_DENSITYUNITS` — Units (`DensityUnit` enum)
 - [ ] `JFIF_major_version` / `JFIF_minor_version` configurable
-- [ ] `density_unit` / `X_density` / `Y_density` configurable
+- [x] `density_unit` / `X_density` / `Y_density` configurable (read from JFIF, write via `DensityInfo`)
 
 ### Adobe Marker
 - [x] `write_Adobe_marker` — Adobe APP14 (for CMYK)
@@ -126,13 +126,13 @@
 
 ### Progressive Scan Control
 - [x] `jpeg_simple_progression()` — Standard scan script
-- [ ] `scan_info` / `num_scans` — Custom scan progression script
-- [ ] `jpeg_scan_info` struct — User-defined scan parameters
+- [x] `scan_info` / `num_scans` — Custom scan progression script (`Encoder::scan_script()`)
+- [x] `jpeg_scan_info` struct — `ScanScript` struct
 
 ### DCT Method
-- [x] `JDCT_ISLOW` — Accurate integer DCT (only method)
-- [ ] `JDCT_IFAST` — Fast integer DCT
-- [ ] `JDCT_FLOAT` — Floating-point DCT
+- [x] `JDCT_ISLOW` — Accurate integer DCT
+- [x] `JDCT_IFAST` — Fast integer DCT (`DctMethod::IsFast`)
+- [x] `JDCT_FLOAT` — Floating-point DCT (`DctMethod::Float`)
 
 ### Color Space Control
 - [x] Auto YCbCr from RGB/RGBA/BGR/BGRA input
@@ -140,7 +140,7 @@
 - [ ] `jpeg_set_colorspace()` — Explicit colorspace override
 - [ ] `jpeg_default_colorspace()` — Reset to default
 - [ ] `in_color_space` / `jpeg_color_space` independent control
-- [ ] Grayscale-from-color encode option
+- [x] Grayscale-from-color encode option (`Encoder::grayscale_from_color()`)
 
 ### Input Options
 - [ ] `TJPARAM_BOTTOMUP` — Bottom-up row order
@@ -155,11 +155,11 @@
 - [x] EXIF APP1 (`compress_with_metadata`)
 - [x] ICC APP2 (`compress_with_metadata`, multi-chunk)
 - [x] Adobe APP14 (CMYK encode)
-- [ ] `jpeg_write_marker()` — Write arbitrary marker data
+- [x] `jpeg_write_marker()` — Write arbitrary marker data (`marker_writer::write_marker()`)
 - [ ] `jpeg_write_m_header()` / `jpeg_write_m_byte()` — Streaming marker write
 - [ ] `jpeg_write_icc_profile()` — Standalone ICC write (without full compress)
 - [ ] `jpeg_write_tables()` — Write tables-only JPEG
-- [ ] COM (comment) marker write
+- [x] COM (comment) marker write (`Encoder::comment()`, `marker_writer::write_com()`)
 
 ### Scanline-Level Encode API
 - [ ] `jpeg_start_compress()` — Begin compression
@@ -195,13 +195,13 @@
 ### Error Handling
 - [x] Lenient / error recovery mode (`decompress_lenient`)
 - [x] `DecodeWarning` list in Image
-- [ ] `TJPARAM_STOPONWARNING` — Treat warnings as fatal
-- [ ] `TJPARAM_SCANLIMIT` — Max progressive scans before error
-- [ ] Custom `jpeg_error_mgr` callbacks
+- [x] `TJPARAM_STOPONWARNING` — Treat warnings as fatal (`Decoder::set_stop_on_warning()`)
+- [x] `TJPARAM_SCANLIMIT` — Max progressive scans before error (`Decoder::set_scan_limit()`)
+- [x] Custom error callbacks — `ErrorHandler` trait
 
 ### Limits
-- [ ] `TJPARAM_MAXMEMORY` — Memory limit
-- [ ] `TJPARAM_MAXPIXELS` — Image size limit
+- [x] `TJPARAM_MAXMEMORY` — Memory limit (`Decoder::set_max_memory()`)
+- [x] `TJPARAM_MAXPIXELS` — Image size limit (`Decoder::set_max_pixels()`)
 
 ### Marker Handling
 - [x] ICC profile reassembly from APP2 chunks
@@ -211,9 +211,9 @@
 - [ ] `TJPARAM_SAVEMARKERS` — Configurable marker saving (0-4 levels)
 - [ ] `jpeg_save_markers()` — Per-marker-type save control
 - [ ] `jpeg_set_marker_processor()` — Custom marker parser callback
-- [ ] COM (comment) marker read/expose
+- [x] COM (comment) marker read/expose (`Image.comment`)
 - [ ] Arbitrary marker access via `marker_list` linked list
-- [ ] JFIF version / density read (`saw_JFIF_marker`, `X_density`, `Y_density`)
+- [x] JFIF version / density read (`Image.density`)
 
 ### Multi-Scan / Progressive Output
 - [ ] `jpeg_has_multiple_scans()` — Query progressive
@@ -252,10 +252,10 @@
 - [x] APP1 EXIF — Read / write (orientation parsing)
 - [x] APP2 ICC profile — Read (multi-chunk reassembly) / write (multi-chunk)
 - [x] APP14 Adobe — Read / write (CMYK/YCCK signaling)
-- [ ] COM (comment) — Read / write
+- [x] COM (comment) — Read (`Image.comment`) / Write (`Encoder::comment()`)
 - [ ] Arbitrary APP markers — Read (`jpeg_save_markers` + `marker_list`)
-- [ ] Arbitrary markers — Write (`jpeg_write_marker`)
-- [ ] DPI/density — Read (from JFIF) / write (configurable)
+- [x] Arbitrary markers — Write (`marker_writer::write_marker()`)
+- [x] DPI/density — Read (`Image.density`) / Write (`DensityInfo`)
 - [ ] JFIF thumbnail extraction
 - [ ] Marker preservation across transform/re-encode
 
@@ -384,9 +384,9 @@
 
 - [x] `Result<T, JpegError>` for all public operations
 - [x] `DecodeWarning` list (HuffmanError, TruncatedData) in lenient mode
-- [ ] Custom `jpeg_error_mgr` struct
-- [ ] `error_exit()` callback — Fatal error handler
-- [ ] `emit_message()` callback — Warning/trace handler
+- [x] Custom error handler — `ErrorHandler` trait
+- [x] `error_exit()` callback — `ErrorHandler::error_exit()`
+- [x] `emit_message()` callback — `ErrorHandler::emit_warning()` + `ErrorHandler::trace()`
 - [ ] `output_message()` callback — Error text display
 - [ ] `format_message()` callback — Error string formatting
 - [ ] `reset_error_mgr()` callback
@@ -401,10 +401,10 @@
 
 ## 14. Progress Monitoring
 
-- [ ] `jpeg_progress_mgr` struct
-- [ ] `progress_monitor()` callback
-- [ ] `pass_counter` / `pass_limit`
-- [ ] `completed_passes` / `total_passes`
+- [x] `jpeg_progress_mgr` struct — `ProgressListener` trait
+- [x] `progress_monitor()` callback — `ProgressListener::update()` (closure support)
+- [x] `pass_counter` / `pass_limit` — `ProgressInfo.progress`
+- [x] `completed_passes` / `total_passes` — `ProgressInfo.pass` / `ProgressInfo.total_passes`
 
 ---
 
@@ -423,15 +423,15 @@
 
 | Category | Done | Total | % |
 |----------|------|-------|---|
-| Frame types (encode) | 4 | 6 | 67% |
-| Frame types (decode) | 5 | 6 | 83% |
+| Frame types (encode) | 6 | 6 | 100% |
+| Frame types (decode) | 6 | 6 | 100% |
 | Sample precision | 1 | 3 | 33% |
-| Pixel formats | 6 | 13 | 46% |
-| Chroma subsampling | 6 | 8 | 75% |
+| Pixel formats | 13 | 13 | 100% |
+| Chroma subsampling | 7 | 8 | 88% |
 | Color spaces | 5 | 6 | 83% |
-| Compress params | ~15 | ~65 | ~23% |
-| Decompress params | ~12 | ~55 | ~22% |
-| Metadata | 4 | 10 | 40% |
+| Compress params | ~35 | ~65 | ~54% |
+| Decompress params | ~17 | ~55 | ~31% |
+| Metadata | 8 | 10 | 80% |
 | Transform ops | 8 | 8 | 100% |
 | Transform options | 0 | 9 | 0% |
 | Transform misc | 3 | 6 | 50% |
@@ -439,8 +439,8 @@
 | SIMD (aarch64) | 7 | 12 | 58% |
 | SIMD (x86_64) | 0 | 6 | 0% |
 | Memory & I/O | 2 | ~20 | ~10% |
-| Error handling | 2 | ~14 | ~14% |
-| Progress | 0 | 4 | 0% |
+| Error handling | 5 | ~14 | ~36% |
+| Progress | 4 | 4 | 100% |
 | TJ3 Handle API | 0 | ~6 | 0% |
 
 ---
@@ -449,29 +449,29 @@
 
 > Strategy: feature completeness first, then SIMD/performance.
 
-### Phase 4 — Core Feature Gaps
-| # | Feature | Scope |
-|---|---------|-------|
-| 1 | Restart interval encode (DRI) | `restart_interval` / `restart_in_rows` in all compress paths |
-| 2 | COM marker read/write | Decode: expose in Image; Encode: `jpeg_write_marker` equivalent |
-| 3 | Lossless encode: color + predictor + pt | SOF3: 3-component, predictors 1-7, point transform 0-15 |
-| 4 | SOF10 arithmetic progressive encode | `compress_arithmetic_progressive()` |
-| 5 | SOF11 lossless arithmetic encode/decode | Arithmetic entropy for lossless |
-| 6 | Grayscale-from-color encode | Drop chroma at encode time |
-| 7 | Configurable DPI/density | Read and write X/Y density in JFIF |
-| 8 | Arbitrary marker write | `jpeg_write_marker()` equivalent |
+### Phase 4 — Core Feature Gaps ✅ COMPLETE
+| # | Feature | PR |
+|---|---------|-----|
+| 1 | ~~Restart interval encode (DRI)~~ | #18 |
+| 2 | ~~COM marker read/write + density~~ | #17 |
+| 3 | ~~Lossless encode: color + predictor + pt~~ | #20 |
+| 4 | ~~SOF10 arithmetic progressive encode~~ | #25 |
+| 5 | ~~SOF11 lossless arithmetic encode/decode~~ | #26 |
+| 6 | ~~Grayscale-from-color encode~~ | #22 |
+| 7 | ~~Configurable DPI/density~~ | #17 |
+| 8 | ~~Arbitrary marker write~~ | #17 |
 
-### Phase 5 — Extended Formats
-| # | Feature | Scope |
-|---|---------|-------|
-| 9 | 12-bit precision | `i16` sample paths for encode + decode |
-| 10 | 16-bit precision (lossless) | `u16` sample paths |
-| 11 | Custom quantization tables | User-supplied `JQUANT_TBL` equivalent |
-| 12 | Custom Huffman tables | User-supplied `JHUFF_TBL` equivalent |
-| 13 | Custom progressive scan scripts | User-defined `jpeg_scan_info` |
-| 14 | Additional pixel formats | RGBX, BGRX, XRGB, XBGR, ARGB, ABGR, RGB565 |
-| 15 | Fast upsample / fast DCT toggles | `TJPARAM_FASTUPSAMPLE`, `TJPARAM_FASTDCT`, `JDCT_IFAST` |
-| 16 | S441 subsampling | 4:4:1 (vertical 4x) |
+### Phase 5 — Extended Formats (PARTIAL — 6/8 done)
+| # | Feature | Status |
+|---|---------|--------|
+| 9 | 12-bit precision | ⬜ Pending (Sample trait ready) |
+| 10 | 16-bit precision (lossless) | ⬜ Pending (Sample trait ready) |
+| 11 | ~~Custom quantization tables~~ | ✅ #19 |
+| 12 | ~~Custom Huffman tables~~ | ✅ #23 |
+| 13 | ~~Custom progressive scan scripts~~ | ✅ #24 |
+| 14 | ~~Additional pixel formats~~ | ✅ #28 |
+| 15 | ~~Fast DCT (IsFast, Float)~~ | ✅ #27 |
+| 16 | ~~S441 subsampling~~ | ✅ #29 |
 
 ### Phase 6 — Transform & Advanced
 | # | Feature | Scope |
