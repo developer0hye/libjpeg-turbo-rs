@@ -112,6 +112,29 @@ pub fn compress_progressive(
     encoder::compress_progressive(pixels, width, height, pixel_format, quality, subsampling)
 }
 
+/// Compress with optional ICC profile and/or EXIF metadata embedded.
+pub fn compress_with_metadata(
+    pixels: &[u8],
+    width: usize,
+    height: usize,
+    pixel_format: PixelFormat,
+    quality: u8,
+    subsampling: Subsampling,
+    icc_profile: Option<&[u8]>,
+    exif_data: Option<&[u8]>,
+) -> Result<Vec<u8>> {
+    encoder::compress_with_metadata(
+        pixels,
+        width,
+        height,
+        pixel_format,
+        quality,
+        subsampling,
+        icc_profile,
+        exif_data,
+    )
+}
+
 /// Compress with arithmetic entropy coding (SOF9).
 ///
 /// Uses QM-coder binary arithmetic coding instead of Huffman coding.
