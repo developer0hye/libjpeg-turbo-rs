@@ -50,6 +50,17 @@ impl Subsampling {
             Self::S420 | Self::S440 => 2,
         }
     }
+
+    /// Returns (h_sampling_factor, v_sampling_factor) for SOF component definitions.
+    pub fn sampling_factors(self) -> (u8, u8) {
+        match self {
+            Self::S444 => (1, 1),
+            Self::S422 => (2, 1),
+            Self::S420 => (2, 2),
+            Self::S440 => (1, 2),
+            Self::S411 => (4, 1),
+        }
+    }
 }
 
 /// Output pixel formats.
