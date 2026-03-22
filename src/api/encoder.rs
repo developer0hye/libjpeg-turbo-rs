@@ -2,6 +2,15 @@ use crate::common::error::Result;
 use crate::common::types::{PixelFormat, Subsampling};
 use crate::encode::pipeline as encoder;
 
+/// Configuration for DRI restart interval encoding.
+#[derive(Debug, Clone, Copy)]
+pub enum RestartConfig {
+    /// Restart every N MCU blocks.
+    Blocks(u16),
+    /// Restart every N MCU rows.
+    Rows(u16),
+}
+
 /// JPEG encoder with builder-pattern configuration.
 pub struct Encoder<'a> {
     pixels: &'a [u8],
@@ -14,6 +23,7 @@ pub struct Encoder<'a> {
     progressive: bool,
     arithmetic: bool,
     lossless: bool,
+    restart_interval: Option<RestartConfig>,
     icc_profile: Option<&'a [u8]>,
     exif_data: Option<&'a [u8]>,
     comment: Option<&'a str>,
@@ -33,6 +43,7 @@ impl<'a> Encoder<'a> {
             progressive: false,
             arithmetic: false,
             lossless: false,
+            restart_interval: None,
             icc_profile: None,
             exif_data: None,
             comment: None,
@@ -75,6 +86,24 @@ impl<'a> Encoder<'a> {
         self
     }
 
+    /// Set restart interval in MCU blocks.
+    ///
+    /// A restart marker (RST0..RST7) will be emitted every `n` MCU blocks,
+    /// allowing partial error recovery during decoding.
+    pub fn restart_blocks(mut self, n: u16) -> Self {
+        self.restart_interval = Some(RestartConfig::Blocks(n));
+        self
+    }
+
+    /// Set restart interval in MCU rows.
+    ///
+    /// A restart marker will be emitted after every `n` rows of MCUs.
+    /// The actual interval in blocks is `n * mcus_per_row`.
+    pub fn restart_rows(mut self, n: u16) -> Self {
+        self.restart_interval = Some(RestartConfig::Rows(n));
+        self
+    }
+
     /// Embed an ICC color profile.
     pub fn icc_profile(mut self, data: &'a [u8]) -> Self {
         self.icc_profile = Some(data);
@@ -93,8 +122,31 @@ impl<'a> Encoder<'a> {
         self
     }
 
+    /// Compute the restart interval in MCU blocks from the configured restart setting.
+    fn compute_restart_interval(&self) -> u16 {
+        match self.restart_interval {
+            None => 0,
+            Some(RestartConfig::Blocks(n)) => n,
+            Some(RestartConfig::Rows(n)) => {
+                let mcu_w = if self.pixel_format == PixelFormat::Grayscale {
+                    8
+                } else {
+                    match self.subsampling {
+                        Subsampling::S444 | Subsampling::S440 => 8,
+                        Subsampling::S422 | Subsampling::S420 => 16,
+                        Subsampling::S411 => 32,
+                    }
+                };
+                let mcus_x = ((self.width + mcu_w - 1) / mcu_w) as u16;
+                n.saturating_mul(mcus_x)
+            }
+        }
+    }
+
     /// Encode and return the JPEG byte stream.
     pub fn encode(&self) -> Result<Vec<u8>> {
+        let restart_interval = self.compute_restart_interval();
+
         let base = if self.lossless {
             encoder::compress_lossless(self.pixels, self.width, self.height, self.pixel_format)?
         } else if self.arithmetic {
@@ -123,6 +175,16 @@ impl<'a> Encoder<'a> {
                 self.pixel_format,
                 self.quality,
                 self.subsampling,
+            )?
+        } else if restart_interval > 0 {
+            encoder::compress_with_restart(
+                self.pixels,
+                self.width,
+                self.height,
+                self.pixel_format,
+                self.quality,
+                self.subsampling,
+                restart_interval,
             )?
         } else {
             encoder::compress(
