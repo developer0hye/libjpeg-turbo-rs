@@ -330,16 +330,16 @@
 - [x] YCbCr → BGRA row conversion
 - [x] Fancy H2V1 upsample
 - [x] Fancy H2V2 upsample
-- [ ] Forward DCT (FDCT) for encoder
-- [ ] Chroma downsample for encoder
+- [x] Forward DCT (FDCT) for encoder
+- [x] Chroma downsample for encoder
 - [ ] Quantization for encoder
 - [ ] Scaled IDCT (4x4, 2x2, 1x1) NEON variants
-- [ ] RGB → YCbCr (encode-side color conversion)
+- [x] RGB → YCbCr (encode-side color conversion)
 
 ### x86_64
-- [ ] SSE2 IDCT
-- [ ] SSE2 color conversion (YCbCr→RGB)
-- [ ] SSE2 upsample (H2V1, H2V2)
+- [x] SSE2 IDCT
+- [x] SSE2 color conversion (YCbCr→RGB)
+- [x] SSE2 upsample (H2V1, H2V2)
 - [x] AVX2 IDCT
 - [x] AVX2 color conversion
 - [x] AVX2 upsample
@@ -436,7 +436,7 @@
 | Transform options | 9 | 9 | 100% |
 | Transform misc | 4 | 6 | 67% |
 | YUV/Planar API | 12 | 12 | 100% |
-| SIMD (aarch64) | 7 | 12 | 58% |
+| SIMD (aarch64) | 10 | 12 | 83% |
 | SIMD (x86_64) | 3 | 6 | 50% |
 | Memory & I/O | 8 | ~20 | ~40% |
 | Error handling | 5 | ~14 | ~36% |
