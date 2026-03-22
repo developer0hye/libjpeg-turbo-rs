@@ -1,0 +1,190 @@
+use libjpeg_turbo_rs::{decompress, JpegError};
+
+/// Build a minimal SOF3 (lossless) JPEG in memory for testing.
+/// Creates a tiny 4x2 grayscale image with predictor 1 (left), no point transform.
+fn make_lossless_jpeg(pixels: &[u8], width: u16, height: u16, precision: u8) -> Vec<u8> {
+    let mut out = Vec::new();
+
+    // SOI
+    out.extend_from_slice(&[0xFF, 0xD8]);
+
+    // DQT marker (required even for lossless, though not used; write dummy)
+    // Actually SOF3 doesn't use quant tables, so we skip it.
+
+    // DHT — DC Huffman table 0
+    // Encode differences using a simple variable-length code.
+    // We use the standard DC luminance table for simplicity.
+    let dc_bits: [u8; 17] = [0, 0, 1, 5, 1, 1, 1, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0];
+    let dc_values: &[u8] = &[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11];
+    out.extend_from_slice(&[0xFF, 0xC4]); // DHT marker
+    let dht_len: u16 = 2 + 1 + 16 + dc_values.len() as u16;
+    out.extend_from_slice(&dht_len.to_be_bytes());
+    out.push(0x00); // DC table 0
+    out.extend_from_slice(&dc_bits[1..]);
+    out.extend_from_slice(dc_values);
+
+    // SOF3 — Lossless, Huffman-coded
+    out.extend_from_slice(&[0xFF, 0xC3]);
+    let sof_len: u16 = 2 + 1 + 2 + 2 + 1 + 3; // 1 component
+    out.extend_from_slice(&sof_len.to_be_bytes());
+    out.push(precision); // sample precision
+    out.extend_from_slice(&height.to_be_bytes());
+    out.extend_from_slice(&width.to_be_bytes());
+    out.push(1); // 1 component
+    out.push(1); // component id
+    out.push(0x11); // h=1, v=1
+    out.push(0); // quant table 0 (unused for lossless)
+
+    // SOS — Start of Scan
+    out.extend_from_slice(&[0xFF, 0xDA]);
+    let sos_len: u16 = 2 + 1 + 2 + 3; // 1 component + 3 params
+    out.extend_from_slice(&sos_len.to_be_bytes());
+    out.push(1); // 1 component
+    out.push(1); // component id
+    out.push(0x00); // DC table 0, AC table 0
+    out.push(1); // Ss = predictor selection value (1 = left)
+    out.push(0); // Se = 0
+    out.push(0x00); // Ah=0, Al=0 (point transform = 0)
+
+    // Entropy-coded data: encode differences using DC Huffman coding
+    let mut bit_buf: u32 = 0;
+    let mut bit_count: u32 = 0;
+
+    // Build the Huffman encoding table from the same bits/values
+    let huff_codes = build_dc_encode_table(&dc_bits, dc_values);
+
+    let initial_pred = 1u32 << (precision as u32 - 1); // 128 for 8-bit
+    let mask = (1u32 << precision) - 1;
+
+    for y in 0..height as usize {
+        for x in 0..width as usize {
+            let pixel = pixels[y * width as usize + x] as i32;
+            let prediction = if y == 0 && x == 0 {
+                initial_pred as i32
+            } else if y == 0 {
+                pixels[y * width as usize + x - 1] as i32
+            } else if x == 0 {
+                pixels[(y - 1) * width as usize + x] as i32
+            } else {
+                // predictor 1 = left
+                pixels[y * width as usize + x - 1] as i32
+            };
+
+            let diff = ((pixel - prediction) as i32) & (mask as i32);
+            // Encode diff as signed: if >= 2^(p-1), it's negative
+            let signed_diff = if diff >= (1 << (precision - 1)) {
+                diff - (1 << precision)
+            } else {
+                diff
+            };
+
+            // Determine category and encode
+            let (category, extra_bits, extra_len) = categorize_dc(signed_diff);
+            let (code, code_len) = huff_codes[category as usize];
+
+            bit_buf = (bit_buf << code_len) | code as u32;
+            bit_count += code_len as u32;
+            if extra_len > 0 {
+                bit_buf = (bit_buf << extra_len) | extra_bits as u32;
+                bit_count += extra_len as u32;
+            }
+
+            // Flush complete bytes
+            while bit_count >= 8 {
+                bit_count -= 8;
+                let byte = (bit_buf >> bit_count) as u8;
+                out.push(byte);
+                if byte == 0xFF {
+                    out.push(0x00); // byte stuffing
+                }
+                bit_buf &= (1 << bit_count) - 1;
+            }
+        }
+    }
+
+    // Pad remaining bits with 1s
+    if bit_count > 0 {
+        let padding = 8 - bit_count;
+        bit_buf = (bit_buf << padding) | ((1 << padding) - 1);
+        let byte = bit_buf as u8;
+        out.push(byte);
+        if byte == 0xFF {
+            out.push(0x00);
+        }
+    }
+
+    // EOI
+    out.extend_from_slice(&[0xFF, 0xD9]);
+
+    out
+}
+
+fn build_dc_encode_table(bits: &[u8; 17], values: &[u8]) -> Vec<(u16, u8)> {
+    // Build codes from JPEG standard Huffman table specification
+    let mut table = vec![(0u16, 0u8); 17]; // category 0..16
+    let mut code: u16 = 0;
+    let mut idx = 0;
+    for length in 1..=16u8 {
+        for _ in 0..bits[length as usize] {
+            if idx < values.len() {
+                table[values[idx] as usize] = (code, length);
+                idx += 1;
+            }
+            code += 1;
+        }
+        code <<= 1;
+    }
+    table
+}
+
+fn categorize_dc(diff: i32) -> (u8, u16, u8) {
+    if diff == 0 {
+        return (0, 0, 0);
+    }
+    let abs_diff = diff.unsigned_abs();
+    let category = 32 - abs_diff.leading_zeros() as u8;
+    let extra = if diff > 0 {
+        diff as u16
+    } else {
+        (diff + (1 << category) - 1) as u16
+    };
+    (category, extra, category)
+}
+
+#[test]
+fn decode_lossless_grayscale_flat() {
+    let pixels = vec![128u8; 4 * 2];
+    let jpeg = make_lossless_jpeg(&pixels, 4, 2, 8);
+    let img = decompress(&jpeg).unwrap();
+    assert_eq!(img.width, 4);
+    assert_eq!(img.height, 2);
+    assert_eq!(img.data.len(), 4 * 2);
+    for &p in &img.data {
+        assert_eq!(p, 128);
+    }
+}
+
+#[test]
+fn decode_lossless_grayscale_gradient() {
+    let mut pixels = vec![0u8; 8 * 4];
+    for y in 0..4 {
+        for x in 0..8 {
+            pixels[y * 8 + x] = (x * 30 + y * 10) as u8;
+        }
+    }
+    let jpeg = make_lossless_jpeg(&pixels, 8, 4, 8);
+    let img = decompress(&jpeg).unwrap();
+    assert_eq!(img.width, 8);
+    assert_eq!(img.height, 4);
+    assert_eq!(img.data, pixels);
+}
+
+#[test]
+fn decode_lossless_grayscale_ramp() {
+    let pixels: Vec<u8> = (0..=255).collect();
+    let jpeg = make_lossless_jpeg(&pixels, 16, 16, 8);
+    let img = decompress(&jpeg).unwrap();
+    assert_eq!(img.width, 16);
+    assert_eq!(img.height, 16);
+    assert_eq!(img.data, pixels);
+}
