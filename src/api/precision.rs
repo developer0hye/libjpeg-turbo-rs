@@ -27,11 +27,13 @@ pub struct Image12 {
 /// Decoded 16-bit JPEG image.
 #[derive(Debug)]
 pub struct Image16 {
-    /// Pixel data as 16-bit samples (0-65535).
+    /// Pixel data as 16-bit samples (0..2^precision - 1).
     pub data: Vec<u16>,
     pub width: usize,
     pub height: usize,
     pub num_components: usize,
+    /// Sample precision in bits (2-16). Default is 16 for backward compatibility.
+    pub precision: u8,
 }
 
 // ============================================================
@@ -844,6 +846,7 @@ pub fn decompress_16bit(data: &[u8]) -> Result<Image16> {
             width,
             height,
             num_components: 1,
+            precision: 16,
         })
     } else {
         let mut planes: Vec<Vec<u16>> = (0..nc).map(|_| vec![0u16; width * height]).collect();
@@ -885,6 +888,7 @@ pub fn decompress_16bit(data: &[u8]) -> Result<Image16> {
             width,
             height,
             num_components: nc,
+            precision: 16,
         })
     }
 }
@@ -1048,4 +1052,300 @@ pub fn read_scanlines_16(data: &[u8], num_lines: usize) -> Result<Vec<Vec<u16>>>
         rows.push(image.data[start..start + row_len].to_vec());
     }
     Ok(rows)
+}
+
+// ============================================================
+// Arbitrary-precision lossless compress (2-16 bit)
+// ============================================================
+
+/// Compress lossless JPEG with arbitrary precision (2-16 bit).
+///
+/// Pixel values must be in range `0..(2^precision - 1)`.
+/// For precisions <= 8, values fit in `u8` but we accept `u16` for API uniformity.
+pub fn compress_lossless_arbitrary(
+    pixels: &[u16],
+    width: usize,
+    height: usize,
+    num_components: usize,
+    precision: u8,
+    predictor: u8,
+    point_transform: u8,
+) -> Result<Vec<u8>> {
+    if precision < 2 || precision > 16 {
+        return Err(JpegError::Unsupported(format!(
+            "lossless precision must be 2-16, got {}",
+            precision
+        )));
+    }
+    if predictor < 1 || predictor > 7 {
+        return Err(JpegError::Unsupported(format!(
+            "lossless predictor must be 1-7, got {}",
+            predictor
+        )));
+    }
+    if point_transform >= precision {
+        return Err(JpegError::Unsupported(format!(
+            "point transform must be 0..{} (< precision {}), got {}",
+            precision - 1,
+            precision,
+            point_transform
+        )));
+    }
+    if width == 0 || height == 0 {
+        return Err(JpegError::CorruptData(
+            "image dimensions must be non-zero".to_string(),
+        ));
+    }
+    if num_components != 1 && num_components != 3 {
+        return Err(JpegError::Unsupported(format!(
+            "lossless supports 1 or 3 components, got {}",
+            num_components
+        )));
+    }
+    let expected: usize = width * height * num_components;
+    if pixels.len() < expected {
+        return Err(JpegError::BufferTooSmall {
+            need: expected,
+            got: pixels.len(),
+        });
+    }
+    // Validate that all pixel values are within the precision range
+    let max_val: u16 = ((1u32 << precision as u32) - 1) as u16;
+    for (idx, &val) in pixels[..expected].iter().enumerate() {
+        if val > max_val {
+            return Err(JpegError::Unsupported(format!(
+                "pixel[{}] value {} exceeds max {} for {}-bit precision",
+                idx, val, max_val, precision
+            )));
+        }
+    }
+    if num_components == 1 {
+        compress_arbitrary_gray(pixels, width, height, precision, predictor, point_transform)
+    } else {
+        compress_arbitrary_multi(
+            pixels,
+            width,
+            height,
+            num_components,
+            precision,
+            predictor,
+            point_transform,
+        )
+    }
+}
+
+fn compress_arbitrary_gray(
+    pixels: &[u16],
+    width: usize,
+    height: usize,
+    precision: u8,
+    predictor: u8,
+    pt: u8,
+) -> Result<Vec<u8>> {
+    let dc_table = build_huff_table(&DC_LUMA_EXT_BITS, &DC_LUMA_EXT_VALUES);
+    let mut bw = BitWriter::new(width * height * 2);
+    for y in 0..height {
+        for x in 0..width {
+            let diff = lossless_diff_16(
+                pixels[y * width + x] as i32,
+                x,
+                y,
+                pixels,
+                width,
+                predictor,
+                pt,
+                precision,
+            );
+            encode_dc_only_wide(&mut bw, diff, &dc_table);
+        }
+    }
+    bw.flush();
+    let mut out = Vec::with_capacity(bw.data().len() + 256);
+    marker_writer::write_soi(&mut out);
+    marker_writer::write_dht(&mut out, 0, 0, &DC_LUMA_EXT_BITS, &DC_LUMA_EXT_VALUES);
+    marker_writer::write_sof3(
+        &mut out,
+        width as u16,
+        height as u16,
+        precision,
+        &[(1, 1, 1, 0)],
+    );
+    marker_writer::write_sos_lossless(&mut out, &[(1, 0)], predictor, pt);
+    out.extend_from_slice(bw.data());
+    marker_writer::write_eoi(&mut out);
+    Ok(out)
+}
+
+fn compress_arbitrary_multi(
+    pixels: &[u16],
+    width: usize,
+    height: usize,
+    nc: usize,
+    precision: u8,
+    predictor: u8,
+    pt: u8,
+) -> Result<Vec<u8>> {
+    let np: usize = width * height;
+    let planes: Vec<Vec<u16>> = (0..nc)
+        .map(|c| (0..np).map(|i| pixels[i * nc + c]).collect())
+        .collect();
+    let dc_luma = build_huff_table(&DC_LUMA_EXT_BITS, &DC_LUMA_EXT_VALUES);
+    let dc_chroma = build_huff_table(&DC_CHROMA_EXT_BITS, &DC_CHROMA_EXT_VALUES);
+    let mut bw = BitWriter::new(np * nc * 2);
+    for y in 0..height {
+        for x in 0..width {
+            for c in 0..nc {
+                let diff = lossless_diff_16(
+                    planes[c][y * width + x] as i32,
+                    x,
+                    y,
+                    &planes[c],
+                    width,
+                    predictor,
+                    pt,
+                    precision,
+                );
+                let t = if c == 0 { &dc_luma } else { &dc_chroma };
+                encode_dc_only_wide(&mut bw, diff, t);
+            }
+        }
+    }
+    bw.flush();
+    let mut out = Vec::with_capacity(bw.data().len() + 512);
+    marker_writer::write_soi(&mut out);
+    marker_writer::write_dht(&mut out, 0, 0, &DC_LUMA_EXT_BITS, &DC_LUMA_EXT_VALUES);
+    marker_writer::write_dht(&mut out, 0, 1, &DC_CHROMA_EXT_BITS, &DC_CHROMA_EXT_VALUES);
+    let comps: Vec<(u8, u8, u8, u8)> = (0..nc).map(|c| (c as u8 + 1, 1, 1, 0)).collect();
+    marker_writer::write_sof3(&mut out, width as u16, height as u16, precision, &comps);
+    let sc: Vec<(u8, u8)> = (0..nc)
+        .map(|c| (c as u8 + 1, if c == 0 { 0 } else { 1 }))
+        .collect();
+    marker_writer::write_sos_lossless(&mut out, &sc, predictor, pt);
+    out.extend_from_slice(bw.data());
+    marker_writer::write_eoi(&mut out);
+    Ok(out)
+}
+
+// ============================================================
+// Arbitrary-precision lossless decompress (2-16 bit)
+// ============================================================
+
+/// Decompress lossless JPEG with arbitrary precision (2-16 bit).
+///
+/// Reads the precision from the SOF3 marker and returns an `Image16`
+/// with the `precision` field set accordingly.
+pub fn decompress_lossless_arbitrary(data: &[u8]) -> Result<Image16> {
+    let mut reader = MarkerReader::new(data);
+    let metadata = reader.read_markers()?;
+    let frame = &metadata.frame;
+    let width: usize = frame.width as usize;
+    let height: usize = frame.height as usize;
+    let nc: usize = frame.components.len();
+    let precision: u8 = frame.precision;
+    if precision < 2 || precision > 16 {
+        return Err(JpegError::Unsupported(format!(
+            "lossless precision must be 2-16, got {}",
+            precision
+        )));
+    }
+    if !frame.is_lossless {
+        return Err(JpegError::Unsupported(
+            "decompress_lossless_arbitrary requires lossless JPEG (SOF3)".to_string(),
+        ));
+    }
+    let scan = &metadata.scan;
+    let psv: u8 = scan.spec_start;
+    let pt: u8 = scan.succ_low;
+    if psv < 1 || psv > 7 {
+        return Err(JpegError::Unsupported(format!(
+            "lossless predictor {} (must be 1-7)",
+            psv
+        )));
+    }
+    let mut dc_tables = Vec::with_capacity(nc);
+    for i in 0..scan.components.len().min(nc) {
+        let idx: usize = scan.components[i].dc_table_index as usize;
+        dc_tables.push(
+            metadata.dc_huffman_tables[idx]
+                .as_ref()
+                .ok_or_else(|| JpegError::CorruptData(format!("missing DC table {}", idx)))?,
+        );
+    }
+    let entropy = &data[metadata.entropy_data_offset..];
+    let mut br = BitReader::new(entropy);
+    if nc == 1 {
+        let mut output = vec![0u16; width * height];
+        let mut prev_row: Option<Vec<u16>> = None;
+        for y in 0..height {
+            let rs: usize = y * width;
+            let mut diffs = Vec::with_capacity(width);
+            for _ in 0..width {
+                diffs.push(decode_dc_wide(&mut br, dc_tables[0])?);
+            }
+            undifference_row_16(
+                &diffs,
+                prev_row.as_deref(),
+                &mut output[rs..rs + width],
+                psv,
+                precision,
+                pt,
+                y == 0,
+            );
+            prev_row = Some(output[rs..rs + width].to_vec());
+        }
+        if pt > 0 {
+            for v in output.iter_mut() {
+                *v = ((*v as u32) << pt) as u16;
+            }
+        }
+        Ok(Image16 {
+            data: output,
+            width,
+            height,
+            num_components: 1,
+            precision,
+        })
+    } else {
+        let mut planes: Vec<Vec<u16>> = (0..nc).map(|_| vec![0u16; width * height]).collect();
+        let mut prev_rows: Vec<Option<Vec<u16>>> = vec![None; nc];
+        for y in 0..height {
+            let rs: usize = y * width;
+            let mut cd: Vec<Vec<i16>> = (0..nc).map(|_| Vec::with_capacity(width)).collect();
+            for _ in 0..width {
+                for c in 0..nc {
+                    cd[c].push(decode_dc_wide(&mut br, dc_tables[c])?);
+                }
+            }
+            for c in 0..nc {
+                undifference_row_16(
+                    &cd[c],
+                    prev_rows[c].as_deref(),
+                    &mut planes[c][rs..rs + width],
+                    psv,
+                    precision,
+                    pt,
+                    y == 0,
+                );
+                prev_rows[c] = Some(planes[c][rs..rs + width].to_vec());
+            }
+        }
+        let mut result = Vec::with_capacity(width * height * nc);
+        for i in 0..width * height {
+            for c in 0..nc {
+                let v: u16 = if pt > 0 {
+                    ((planes[c][i] as u32) << pt) as u16
+                } else {
+                    planes[c][i]
+                };
+                result.push(v);
+            }
+        }
+        Ok(Image16 {
+            data: result,
+            width,
+            height,
+            num_components: nc,
+            precision,
+        })
+    }
 }

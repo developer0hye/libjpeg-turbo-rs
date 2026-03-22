@@ -49,8 +49,9 @@ pub use transform::{MarkerCopyMode, TransformOp, TransformOptions};
 /// 12-bit and 16-bit sample precision support.
 pub mod precision {
     pub use crate::api::precision::{
-        compress_12bit, compress_16bit, decompress_12bit, decompress_16bit, read_scanlines_12,
-        read_scanlines_16, write_scanlines_12, write_scanlines_16, Image12, Image16,
+        compress_12bit, compress_16bit, compress_lossless_arbitrary, decompress_12bit,
+        decompress_16bit, decompress_lossless_arbitrary, read_scanlines_12, read_scanlines_16,
+        write_scanlines_12, write_scanlines_16, Image12, Image16,
     };
 }
 /// TJ3-compatible handle/parameter API.

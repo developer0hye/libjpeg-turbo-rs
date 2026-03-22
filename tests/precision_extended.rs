@@ -1,19 +1,14 @@
 //! Extended precision tests for lossless JPEG encoding/decoding.
 //!
 //! The C libjpeg-turbo test suite tests lossless JPEG at every precision from
-//! 2-bit to 16-bit. Our implementation currently supports:
-//! - 8-bit lossless via `compress_lossless` / `compress_lossless_extended` (u8 samples, hardcoded precision=8)
-//! - 12-bit lossy via `compress_12bit` / `decompress_12bit` (i16 samples, hardcoded precision=12)
-//! - 16-bit lossless via `compress_16bit` / `decompress_16bit` (u16 samples, hardcoded precision=16)
+//! 2-bit to 16-bit. Our implementation supports:
+//! - 8-bit lossless via `compress_lossless` / `compress_lossless_extended` (u8 samples, precision=8)
+//! - 12-bit lossy via `compress_12bit` / `decompress_12bit` (i16 samples, precision=12)
+//! - 16-bit lossless via `compress_16bit` / `decompress_16bit` (u16 samples, precision=16)
+//! - Arbitrary 2-16 bit lossless via `compress_lossless_arbitrary` / `decompress_lossless_arbitrary`
 //!
-//! Arbitrary precision (2-7, 9-11, 13-15) is NOT supported because:
-//! - The 8-bit API uses `u8` and hardcodes precision=8 in the SOF marker
-//! - The 16-bit API hardcodes precision=16 in the SOF marker
-//! - There is no API parameter to specify arbitrary bit depth
-//!
-//! This test file:
-//! - Tests all 3 supported precision levels (8, 12, 16) thoroughly
-//! - Documents which precisions are unsupported
+//! This test file tests the fixed-precision APIs (8, 12, 16).
+//! For per-precision 2-16 bit tests, see `precision_arbitrary.rs`.
 
 use libjpeg_turbo_rs::common::types::Subsampling;
 use libjpeg_turbo_rs::precision::{
@@ -387,16 +382,13 @@ fn lossless_precision_16_large_image() {
 }
 
 // ---------------------------------------------------------------------------
-// Unsupported precision documentation
+// Fixed-precision API compatibility with lower bit-depth values
 // ---------------------------------------------------------------------------
 
-/// Document that arbitrary precision values (2-7, 9-11, 13-15) are not
-/// supported by the current API. The 8-bit API uses u8 (precision=8),
-/// 12-bit uses i16 (precision=12), 16-bit uses u16 (precision=16).
-///
-/// These tests verify that values that fit within supported ranges work
-/// correctly, demonstrating the limitation is in the bit-depth encoding,
-/// not in the value range.
+/// Verify that values from lower precisions (2-7 bit) roundtrip correctly
+/// through the 8-bit API. The 8-bit API writes precision=8 in the SOF marker,
+/// but values within range are preserved exactly.
+/// For true per-precision encoding, use `compress_lossless_arbitrary`.
 #[test]
 fn precision_2_through_7_fit_in_8bit_api() {
     // Values from 2-bit (0-3) through 7-bit (0-127) all fit in u8.

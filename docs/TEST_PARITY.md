@@ -16,7 +16,7 @@
 - [x] 8-bit precision — `tjunittest_compat.rs`
 - [x] 12-bit precision — `tjunittest_compat.rs`, `precision.rs`
 - [x] 16-bit lossless precision — `tjunittest_compat.rs`, `precision.rs`
-- [ ] 2-7, 9-11, 13-15 bit lossless precision (per-precision tests) — only 8/12/16 tested
+- [x] 2-16 bit lossless precision (per-precision tests) — `precision_arbitrary.rs`
 - [x] YUV encode/decode pipeline — `tjunittest_yuv.rs`, `yuv_api.rs`
 - [ ] YUV no-padding mode (`-yuv-nopad`) — not tested
 - [x] Lossless JPEG (PSV 1-7, PT variations) — `tjunittest_compat.rs`, `lossless_encode.rs`
@@ -90,7 +90,7 @@
 - [x] Optimized Huffman (`-o`) — `tjunittest_compat.rs`, `huff_opt.rs`
 - [x] Lossless PSV 1-7 × PT 0-14 (pt < precision) — `tjunittest_compat.rs`, `lossless_encode.rs`
 - [x] 8-bit and 12-bit lossy precision — `tjunittest_compat.rs`, `precision.rs`
-- [x] 2-16 bit lossless precision (per-bit) — partial (8/12/16 only)
+- [x] 2-16 bit lossless precision (per-bit) — `precision_arbitrary.rs`
 - [ ] Grayscale-from-RGB encode (`-g` flag) in full matrix — tested individually, not in matrix
 - [ ] RGB-direct encode (`-rg` flag, no YCbCr conversion) in full matrix — not in matrix
 - [ ] `-baseline` flag forced with quality=1 — `force_baseline` exists but not in matrix
@@ -115,7 +115,7 @@
 - [ ] Grayscale output in full matrix (only when nosmooth="") — not in matrix
 - [x] ICC profile extraction — `metadata_write.rs`
 - [ ] ICC profile extraction MD5 comparison against C djpeg — not done
-- [ ] 2-16 bit lossless decompression per-precision — only 8/12/16
+- [x] 2-16 bit lossless decompression per-precision — `precision_arbitrary.rs`
 - [ ] MD5/binary comparison between our decoder and C djpeg — not implemented
 - [x] PPM/PGM output format — `cross_encoder_compat.rs`
 - [x] RGB output from grayscale JPEG — `decode_toggles.rs`
@@ -156,7 +156,7 @@
 - [x] 8-bit (primary) — extensive coverage
 - [x] 12-bit — `precision.rs`, `tjunittest_compat.rs`
 - [x] 16-bit lossless — `precision.rs`, `tjunittest_compat.rs`
-- [ ] 2-7, 9-11, 13-15 bit (per-precision lossless) — C tests each individually
+- [x] 2-16 bit arbitrary lossless precision — `precision_arbitrary.rs`
 
 ### Subsampling Configurations
 - [x] 4:4:4
@@ -458,7 +458,7 @@ These are the individual cjpeg/djpeg/jpegtran tests defined via `add_bittest()` 
 4. **Extended scaling factors** — C tests 15 scales; we test 4
 5. **Non-standard sampling (3x2)** — C tests 3x2 float/ifast; we don't support arbitrary factors
 6. **Tiled operations** — C tests 5 tile sizes; we have none
-7. **Per-precision lossless (2-15 bit)** — C tests each; we only test 8/12/16
+7. ~~**Per-precision lossless (2-16 bit)**~~ -- done, `precision_arbitrary.rs`
 8. **Exhaustive crop matrix** — C tests 100+ crop regions; we test ~10
 9. **DCT method cross-product** — C cross-products DCT × subsampling × quality; we test individually
 10. **FP variance handling** — C has per-platform expected values; we don't
