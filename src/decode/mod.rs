@@ -8,6 +8,7 @@ pub mod idct;
 pub mod idct_scaled;
 pub mod lossless;
 pub mod marker;
+pub mod merged_upsample;
 pub mod pipeline;
 pub mod progressive;
 pub mod toggles;

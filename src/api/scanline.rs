@@ -72,6 +72,15 @@ impl<'a> ScanlineDecoder<'a> {
         self.decoder.output_colorspace = Some(cs);
     }
 
+    /// Enable merged upsampling optimization (combines upsample + color convert).
+    ///
+    /// When enabled and subsampling is 4:2:0 or 4:2:2, uses a merged path that
+    /// avoids intermediate chroma buffers. Faster but uses box-filter replication
+    /// instead of fancy triangle-filter upsampling.
+    pub fn set_merged_upsample(&mut self, enabled: bool) {
+        self.decoder.merged_upsample = enabled;
+    }
+
     /// Set horizontal crop region for scanline-level decoding.
     pub fn set_crop_x(&mut self, x: usize, width: usize) {
         self.crop_x = Some((x, width));
