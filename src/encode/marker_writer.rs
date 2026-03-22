@@ -278,6 +278,20 @@ pub fn write_app2_icc(buf: &mut Vec<u8>, profile: &[u8]) {
     }
 }
 
+/// Write Adobe APP14 marker for CMYK/YCCK color space identification.
+/// transform: 0 = CMYK, 1 = YCbCr, 2 = YCCK
+pub fn write_app14_adobe(buf: &mut Vec<u8>, transform: u8) {
+    buf.push(0xFF);
+    buf.push(0xEE); // APP14
+    let length: u16 = 14; // 2 (length) + 5 (Adobe) + 2 (version) + 2 (flags0) + 2 (flags1) + 1 (transform)
+    buf.extend_from_slice(&length.to_be_bytes());
+    buf.extend_from_slice(b"Adobe"); // identifier
+    buf.extend_from_slice(&100u16.to_be_bytes()); // version
+    buf.extend_from_slice(&0u16.to_be_bytes()); // flags0
+    buf.extend_from_slice(&0u16.to_be_bytes()); // flags1
+    buf.push(transform); // color transform
+}
+
 /// Write EOI (End Of Image) marker: 0xFFD9.
 pub fn write_eoi(buf: &mut Vec<u8>) {
     buf.push(0xFF);
