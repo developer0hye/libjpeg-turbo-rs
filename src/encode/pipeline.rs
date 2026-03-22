@@ -4,7 +4,7 @@
 /// and marker writing to produce a valid baseline JPEG file.
 use crate::api::encoder::HuffmanTableDef;
 use crate::common::error::{JpegError, Result};
-use crate::common::types::{PixelFormat, ScanScript, Subsampling};
+use crate::common::types::{DctMethod, PixelFormat, ScanScript, Subsampling};
 use crate::encode::color;
 use crate::encode::fdct;
 use crate::encode::huffman_encode::{build_huff_table, BitWriter, HuffTable, HuffmanEncoder};
@@ -32,6 +32,7 @@ pub fn compress(
     pixel_format: PixelFormat,
     quality: u8,
     subsampling: Subsampling,
+    dct_method: DctMethod,
 ) -> Result<Vec<u8>> {
     // Validate inputs
     if width == 0 || height == 0 {
@@ -49,7 +50,7 @@ pub fn compress(
         });
     }
 
-    // CMYK: 4-component path, no color conversion
+    // CMYK: 4-component path, no color conversion (ignores dct_method for now)
     if pixel_format == PixelFormat::Cmyk {
         return compress_cmyk(pixels, width, height, quality);
     }
@@ -94,6 +95,9 @@ pub fn compress(
     let mcus_x = (width + mcu_w - 1) / mcu_w;
     let mcus_y = (height + mcu_h - 1) / mcu_h;
 
+    // Select the forward DCT function based on the configured method
+    let fdct_fn: fn(&[i16; 64], &mut [i32; 64]) = fdct::select_fdct(dct_method);
+
     // Entropy encode all MCUs
     let mut bit_writer = BitWriter::new(width * height);
     let mut prev_dc_y: i16 = 0;
@@ -117,6 +121,7 @@ pub fn compress(
                     &ac_luma_table,
                     &mut bit_writer,
                     &mut prev_dc_y,
+                    fdct_fn,
                 );
             } else {
                 encode_color_mcu(
@@ -138,6 +143,7 @@ pub fn compress(
                     &mut prev_dc_y,
                     &mut prev_dc_cb,
                     &mut prev_dc_cr,
+                    fdct_fn,
                 );
             }
         }
@@ -356,6 +362,7 @@ pub fn compress_custom_huffman(
                     &ac_luma_table,
                     &mut bit_writer,
                     &mut prev_dc_y,
+                    fdct::fdct_islow,
                 );
             } else {
                 encode_color_mcu(
@@ -377,6 +384,7 @@ pub fn compress_custom_huffman(
                     &mut prev_dc_y,
                     &mut prev_dc_cb,
                     &mut prev_dc_cr,
+                    fdct::fdct_islow,
                 );
             }
         }
@@ -477,6 +485,7 @@ pub fn compress_custom_quant(
     let is_grayscale = pixel_format == PixelFormat::Grayscale;
 
     // Use custom tables when provided, otherwise fall back to quality-scaled defaults
+    // compress_custom_quant: resolve quant tables
     let luma_quant = match custom_quant[0] {
         Some(table) => table,
         None => tables::quality_scale_quant_table(&tables::STD_LUMINANCE_QUANT_TABLE, quality),
@@ -542,6 +551,7 @@ pub fn compress_custom_quant(
                     &ac_luma_table,
                     &mut bit_writer,
                     &mut prev_dc_y,
+                    fdct::fdct_islow,
                 );
             } else {
                 encode_color_mcu(
@@ -563,6 +573,7 @@ pub fn compress_custom_quant(
                     &mut prev_dc_y,
                     &mut prev_dc_cb,
                     &mut prev_dc_cr,
+                    fdct::fdct_islow,
                 );
             }
         }
@@ -758,6 +769,7 @@ pub fn compress_with_restart(
                     &ac_luma_table,
                     &mut bit_writer,
                     &mut prev_dc_y,
+                    fdct::fdct_islow,
                 );
             } else {
                 encode_color_mcu(
@@ -779,6 +791,7 @@ pub fn compress_with_restart(
                     &mut prev_dc_y,
                     &mut prev_dc_cb,
                     &mut prev_dc_cr,
+                    fdct::fdct_islow,
                 );
             }
 
@@ -885,7 +898,15 @@ pub fn compress_with_metadata(
     icc_profile: Option<&[u8]>,
     exif_data: Option<&[u8]>,
 ) -> Result<Vec<u8>> {
-    let base = compress(pixels, width, height, pixel_format, quality, subsampling)?;
+    let base = compress(
+        pixels,
+        width,
+        height,
+        pixel_format,
+        quality,
+        subsampling,
+        DctMethod::IsLow,
+    )?;
     inject_metadata(&base, icc_profile, exif_data)
 }
 
@@ -988,6 +1009,7 @@ fn compress_cmyk(pixels: &[u8], width: usize, height: usize, quality: u8) -> Res
                     &ac_table,
                     &mut bit_writer,
                     &mut prev_dc[c],
+                    fdct::fdct_islow,
                 );
             }
         }
@@ -2980,6 +3002,7 @@ fn encode_single_block(
     ac_table: &HuffTable,
     writer: &mut BitWriter,
     prev_dc: &mut i16,
+    fdct_fn: fn(&[i16; 64], &mut [i32; 64]),
 ) {
     let mut block = [0i16; 64];
     extract_block(
@@ -2992,7 +3015,7 @@ fn encode_single_block(
     );
 
     let mut dct_output = [0i32; 64];
-    fdct::fdct_islow(&block, &mut dct_output);
+    fdct_fn(&block, &mut dct_output);
 
     let mut quantized = [0i16; 64];
     quant::quantize_block(&dct_output, quant_table, &mut quantized);
@@ -3021,6 +3044,7 @@ fn encode_color_mcu(
     prev_dc_y: &mut i16,
     prev_dc_cb: &mut i16,
     prev_dc_cr: &mut i16,
+    fdct_fn: fn(&[i16; 64], &mut [i32; 64]),
 ) {
     match subsampling {
         Subsampling::S444 => {
@@ -3036,6 +3060,7 @@ fn encode_color_mcu(
                 ac_luma_table,
                 writer,
                 prev_dc_y,
+                fdct_fn,
             );
             encode_single_block(
                 cb_plane,
@@ -3048,6 +3073,7 @@ fn encode_color_mcu(
                 ac_chroma_table,
                 writer,
                 prev_dc_cb,
+                fdct_fn,
             );
             encode_single_block(
                 cr_plane,
@@ -3060,6 +3086,7 @@ fn encode_color_mcu(
                 ac_chroma_table,
                 writer,
                 prev_dc_cr,
+                fdct_fn,
             );
         }
         Subsampling::S422 => {
@@ -3075,6 +3102,7 @@ fn encode_color_mcu(
                 ac_luma_table,
                 writer,
                 prev_dc_y,
+                fdct_fn,
             );
             encode_single_block(
                 y_plane,
@@ -3087,6 +3115,7 @@ fn encode_color_mcu(
                 ac_luma_table,
                 writer,
                 prev_dc_y,
+                fdct_fn,
             );
             // Downsample chroma: 2x1 box filter
             encode_downsampled_chroma_block(
@@ -3102,6 +3131,7 @@ fn encode_color_mcu(
                 ac_chroma_table,
                 writer,
                 prev_dc_cb,
+                fdct_fn,
             );
             encode_downsampled_chroma_block(
                 cr_plane,
@@ -3116,6 +3146,7 @@ fn encode_color_mcu(
                 ac_chroma_table,
                 writer,
                 prev_dc_cr,
+                fdct_fn,
             );
         }
         Subsampling::S420 => {
@@ -3132,6 +3163,7 @@ fn encode_color_mcu(
                 ac_luma_table,
                 writer,
                 prev_dc_y,
+                fdct_fn,
             );
             encode_single_block(
                 y_plane,
@@ -3144,6 +3176,7 @@ fn encode_color_mcu(
                 ac_luma_table,
                 writer,
                 prev_dc_y,
+                fdct_fn,
             );
             encode_single_block(
                 y_plane,
@@ -3156,6 +3189,7 @@ fn encode_color_mcu(
                 ac_luma_table,
                 writer,
                 prev_dc_y,
+                fdct_fn,
             );
             encode_single_block(
                 y_plane,
@@ -3168,6 +3202,7 @@ fn encode_color_mcu(
                 ac_luma_table,
                 writer,
                 prev_dc_y,
+                fdct_fn,
             );
             // Downsample chroma: 2x2 box filter
             encode_downsampled_chroma_block(
@@ -3183,6 +3218,7 @@ fn encode_color_mcu(
                 ac_chroma_table,
                 writer,
                 prev_dc_cb,
+                fdct_fn,
             );
             encode_downsampled_chroma_block(
                 cr_plane,
@@ -3197,6 +3233,7 @@ fn encode_color_mcu(
                 ac_chroma_table,
                 writer,
                 prev_dc_cr,
+                fdct_fn,
             );
         }
         Subsampling::S440 => {
@@ -3212,6 +3249,7 @@ fn encode_color_mcu(
                 ac_luma_table,
                 writer,
                 prev_dc_y,
+                fdct_fn,
             );
             encode_single_block(
                 y_plane,
@@ -3224,6 +3262,7 @@ fn encode_color_mcu(
                 ac_luma_table,
                 writer,
                 prev_dc_y,
+                fdct_fn,
             );
             // Cb/Cr downsampled 1x2
             encode_downsampled_chroma_block(
@@ -3239,6 +3278,7 @@ fn encode_color_mcu(
                 ac_chroma_table,
                 writer,
                 prev_dc_cb,
+                fdct_fn,
             );
             encode_downsampled_chroma_block(
                 cr_plane,
@@ -3253,6 +3293,7 @@ fn encode_color_mcu(
                 ac_chroma_table,
                 writer,
                 prev_dc_cr,
+                fdct_fn,
             );
         }
         Subsampling::S411 => {
@@ -3269,6 +3310,7 @@ fn encode_color_mcu(
                     ac_luma_table,
                     writer,
                     prev_dc_y,
+                    fdct_fn,
                 );
             }
             // Cb/Cr downsampled 4x1
@@ -3285,6 +3327,7 @@ fn encode_color_mcu(
                 ac_chroma_table,
                 writer,
                 prev_dc_cb,
+                fdct_fn,
             );
             encode_downsampled_chroma_block(
                 cr_plane,
@@ -3299,6 +3342,7 @@ fn encode_color_mcu(
                 ac_chroma_table,
                 writer,
                 prev_dc_cr,
+                fdct_fn,
             );
         }
     }
@@ -3319,6 +3363,7 @@ fn encode_downsampled_chroma_block(
     ac_table: &HuffTable,
     writer: &mut BitWriter,
     prev_dc: &mut i16,
+    fdct_fn: fn(&[i16; 64], &mut [i32; 64]),
 ) {
     let mut block = [0i16; 64];
     downsample_chroma_block(
@@ -3333,7 +3378,7 @@ fn encode_downsampled_chroma_block(
     );
 
     let mut dct_output = [0i32; 64];
-    fdct::fdct_islow(&block, &mut dct_output);
+    fdct_fn(&block, &mut dct_output);
 
     let mut quantized = [0i16; 64];
     quant::quantize_block(&dct_output, quant_table, &mut quantized);
@@ -3929,7 +3974,15 @@ mod tests {
     fn compress_grayscale_1x1() {
         // Minimal 1x1 grayscale image
         let pixels = [128u8];
-        let result = compress(&pixels, 1, 1, PixelFormat::Grayscale, 75, Subsampling::S444);
+        let result = compress(
+            &pixels,
+            1,
+            1,
+            PixelFormat::Grayscale,
+            75,
+            Subsampling::S444,
+            DctMethod::IsLow,
+        );
         assert!(result.is_ok());
         let jpeg = result.unwrap();
         // Check SOI marker
@@ -3949,7 +4002,15 @@ mod tests {
             pixels[i * 3 + 1] = 0; // G
             pixels[i * 3 + 2] = 0; // B
         }
-        let result = compress(&pixels, 8, 8, PixelFormat::Rgb, 75, Subsampling::S444);
+        let result = compress(
+            &pixels,
+            8,
+            8,
+            PixelFormat::Rgb,
+            75,
+            Subsampling::S444,
+            DctMethod::IsLow,
+        );
         assert!(result.is_ok());
         let jpeg = result.unwrap();
         assert_eq!(jpeg[0], 0xFF);
@@ -3967,7 +4028,15 @@ mod tests {
             pixels[i * 3 + 1] = 255;
             pixels[i * 3 + 2] = 0;
         }
-        let result = compress(&pixels, 16, 8, PixelFormat::Rgb, 75, Subsampling::S422);
+        let result = compress(
+            &pixels,
+            16,
+            8,
+            PixelFormat::Rgb,
+            75,
+            Subsampling::S422,
+            DctMethod::IsLow,
+        );
         assert!(result.is_ok());
     }
 
@@ -3980,7 +4049,15 @@ mod tests {
             pixels[i * 3 + 1] = 0;
             pixels[i * 3 + 2] = 255;
         }
-        let result = compress(&pixels, 16, 16, PixelFormat::Rgb, 75, Subsampling::S420);
+        let result = compress(
+            &pixels,
+            16,
+            16,
+            PixelFormat::Rgb,
+            75,
+            Subsampling::S420,
+            DctMethod::IsLow,
+        );
         assert!(result.is_ok());
     }
 
@@ -3988,7 +4065,15 @@ mod tests {
     fn compress_non_multiple_of_8() {
         // 10x6 image (not a multiple of 8 in either dimension)
         let pixels = vec![128u8; 10 * 6 * 3];
-        let result = compress(&pixels, 10, 6, PixelFormat::Rgb, 50, Subsampling::S444);
+        let result = compress(
+            &pixels,
+            10,
+            6,
+            PixelFormat::Rgb,
+            50,
+            Subsampling::S444,
+            DctMethod::IsLow,
+        );
         assert!(result.is_ok());
     }
 
@@ -3996,42 +4081,90 @@ mod tests {
     fn compress_non_multiple_of_16_420() {
         // 13x11 image with 4:2:0 (MCU = 16x16)
         let pixels = vec![200u8; 13 * 11 * 3];
-        let result = compress(&pixels, 13, 11, PixelFormat::Rgb, 90, Subsampling::S420);
+        let result = compress(
+            &pixels,
+            13,
+            11,
+            PixelFormat::Rgb,
+            90,
+            Subsampling::S420,
+            DctMethod::IsLow,
+        );
         assert!(result.is_ok());
     }
 
     #[test]
     fn compress_rgba_input() {
         let pixels = vec![128u8; 8 * 8 * 4];
-        let result = compress(&pixels, 8, 8, PixelFormat::Rgba, 75, Subsampling::S444);
+        let result = compress(
+            &pixels,
+            8,
+            8,
+            PixelFormat::Rgba,
+            75,
+            Subsampling::S444,
+            DctMethod::IsLow,
+        );
         assert!(result.is_ok());
     }
 
     #[test]
     fn compress_bgr_input() {
         let pixels = vec![128u8; 8 * 8 * 3];
-        let result = compress(&pixels, 8, 8, PixelFormat::Bgr, 75, Subsampling::S444);
+        let result = compress(
+            &pixels,
+            8,
+            8,
+            PixelFormat::Bgr,
+            75,
+            Subsampling::S444,
+            DctMethod::IsLow,
+        );
         assert!(result.is_ok());
     }
 
     #[test]
     fn compress_bgra_input() {
         let pixels = vec![128u8; 8 * 8 * 4];
-        let result = compress(&pixels, 8, 8, PixelFormat::Bgra, 75, Subsampling::S444);
+        let result = compress(
+            &pixels,
+            8,
+            8,
+            PixelFormat::Bgra,
+            75,
+            Subsampling::S444,
+            DctMethod::IsLow,
+        );
         assert!(result.is_ok());
     }
 
     #[test]
     fn compress_rejects_zero_dimensions() {
         let pixels = vec![128u8; 64];
-        let result = compress(&pixels, 0, 8, PixelFormat::Grayscale, 75, Subsampling::S444);
+        let result = compress(
+            &pixels,
+            0,
+            8,
+            PixelFormat::Grayscale,
+            75,
+            Subsampling::S444,
+            DctMethod::IsLow,
+        );
         assert!(result.is_err());
     }
 
     #[test]
     fn compress_rejects_buffer_too_small() {
         let pixels = vec![128u8; 10];
-        let result = compress(&pixels, 8, 8, PixelFormat::Rgb, 75, Subsampling::S444);
+        let result = compress(
+            &pixels,
+            8,
+            8,
+            PixelFormat::Rgb,
+            75,
+            Subsampling::S444,
+            DctMethod::IsLow,
+        );
         assert!(result.is_err());
     }
 
@@ -4039,10 +4172,26 @@ mod tests {
     fn compress_quality_extremes() {
         let pixels = vec![128u8; 8 * 8 * 3];
         // Quality 1 (worst)
-        let result1 = compress(&pixels, 8, 8, PixelFormat::Rgb, 1, Subsampling::S444);
+        let result1 = compress(
+            &pixels,
+            8,
+            8,
+            PixelFormat::Rgb,
+            1,
+            Subsampling::S444,
+            DctMethod::IsLow,
+        );
         assert!(result1.is_ok());
         // Quality 100 (best)
-        let result100 = compress(&pixels, 8, 8, PixelFormat::Rgb, 100, Subsampling::S444);
+        let result100 = compress(
+            &pixels,
+            8,
+            8,
+            PixelFormat::Rgb,
+            100,
+            Subsampling::S444,
+            DctMethod::IsLow,
+        );
         assert!(result100.is_ok());
         // Higher quality should generally produce larger output
         assert!(result100.unwrap().len() >= result1.unwrap().len());
@@ -4061,6 +4210,7 @@ mod tests {
             PixelFormat::Grayscale,
             100,
             Subsampling::S444,
+            DctMethod::IsLow,
         )
         .unwrap();
 
@@ -4096,6 +4246,7 @@ mod tests {
             PixelFormat::Rgb,
             100,
             Subsampling::S444,
+            DctMethod::IsLow,
         )
         .unwrap();
 
@@ -4119,7 +4270,15 @@ mod tests {
     #[test]
     fn compress_cmyk_produces_valid_jpeg() {
         let pixels = vec![128u8; 8 * 8 * 4];
-        let result = compress(&pixels, 8, 8, PixelFormat::Cmyk, 75, Subsampling::S444);
+        let result = compress(
+            &pixels,
+            8,
+            8,
+            PixelFormat::Cmyk,
+            75,
+            Subsampling::S444,
+            DctMethod::IsLow,
+        );
         assert!(result.is_ok());
     }
 
