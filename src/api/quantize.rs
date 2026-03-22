@@ -108,6 +108,35 @@ pub fn quantize(
     })
 }
 
+/// Re-quantize an already-quantized image with a new colormap/palette.
+///
+/// Dequantizes the image (palette lookup) then re-quantizes with the new palette.
+/// This implements `jpeg_new_colormap()` functionality.
+pub fn requantize(
+    image: &QuantizedImage,
+    new_palette: &[[u8; 3]],
+    dither: DitherMode,
+) -> QuantizedImage {
+    // Dequantize to RGB pixels
+    let pixels: Vec<u8> = dequantize(image);
+
+    // Re-map pixels to new palette
+    let indices: Vec<u8> = match dither {
+        DitherMode::None => map_nearest(&pixels, new_palette, image.width * image.height),
+        DitherMode::Ordered => map_ordered_dither(&pixels, new_palette, image.width, image.height),
+        DitherMode::FloydSteinberg => {
+            map_floyd_steinberg(&pixels, new_palette, image.width, image.height)
+        }
+    };
+
+    QuantizedImage {
+        indices,
+        palette: new_palette.to_vec(),
+        width: image.width,
+        height: image.height,
+    }
+}
+
 /// Convert a quantized indexed image back to packed RGB pixels.
 pub fn dequantize(image: &QuantizedImage) -> Vec<u8> {
     let mut pixels: Vec<u8> = Vec::with_capacity(image.indices.len() * 3);

@@ -935,3 +935,117 @@ fn decode_dc_wide(
         Ok(((-1i32 << category as i32) + 1 + extra_bits as i32) as i16)
     }
 }
+
+// ============================================================
+// 12-bit scanline wrappers
+// ============================================================
+
+/// Write 12-bit scanlines (i16 samples, 0-4095) to a JPEG byte stream.
+///
+/// Collects all rows into a flat buffer, then delegates to `compress_12bit`.
+/// Each row must contain `width * num_components` samples.
+pub fn write_scanlines_12(
+    rows: &[&[i16]],
+    width: usize,
+    height: usize,
+    num_components: usize,
+    quality: u8,
+    subsampling: Subsampling,
+) -> Result<Vec<u8>> {
+    if rows.len() != height {
+        return Err(JpegError::Unsupported(format!(
+            "expected {} rows, got {}",
+            height,
+            rows.len()
+        )));
+    }
+    let row_len: usize = width * num_components;
+    let mut flat: Vec<i16> = Vec::with_capacity(row_len * height);
+    for row in rows.iter() {
+        if row.len() < row_len {
+            return Err(JpegError::BufferTooSmall {
+                need: row_len,
+                got: row.len(),
+            });
+        }
+        flat.extend_from_slice(&row[..row_len]);
+    }
+    compress_12bit(&flat, width, height, num_components, quality, subsampling)
+}
+
+/// Read 12-bit scanlines from a JPEG byte stream.
+///
+/// Decompresses the full image via `decompress_12bit`, then splits the result
+/// into per-row vectors of `i16` samples.
+pub fn read_scanlines_12(data: &[u8], num_lines: usize) -> Result<Vec<Vec<i16>>> {
+    let image: Image12 = decompress_12bit(data)?;
+    let row_len: usize = image.width * image.num_components;
+    let lines_to_read: usize = num_lines.min(image.height);
+    let mut rows: Vec<Vec<i16>> = Vec::with_capacity(lines_to_read);
+    for y in 0..lines_to_read {
+        let start: usize = y * row_len;
+        rows.push(image.data[start..start + row_len].to_vec());
+    }
+    Ok(rows)
+}
+
+// ============================================================
+// 16-bit scanline wrappers
+// ============================================================
+
+/// Write 16-bit scanlines (u16 samples, 0-65535) to a lossless JPEG byte stream.
+///
+/// Collects all rows into a flat buffer, then delegates to `compress_16bit`.
+/// 16-bit JPEG is lossless only (SOF3). Each row must contain
+/// `width * num_components` samples.
+pub fn write_scanlines_16(
+    rows: &[&[u16]],
+    width: usize,
+    height: usize,
+    num_components: usize,
+    predictor: u8,
+    point_transform: u8,
+) -> Result<Vec<u8>> {
+    if rows.len() != height {
+        return Err(JpegError::Unsupported(format!(
+            "expected {} rows, got {}",
+            height,
+            rows.len()
+        )));
+    }
+    let row_len: usize = width * num_components;
+    let mut flat: Vec<u16> = Vec::with_capacity(row_len * height);
+    for row in rows.iter() {
+        if row.len() < row_len {
+            return Err(JpegError::BufferTooSmall {
+                need: row_len,
+                got: row.len(),
+            });
+        }
+        flat.extend_from_slice(&row[..row_len]);
+    }
+    compress_16bit(
+        &flat,
+        width,
+        height,
+        num_components,
+        predictor,
+        point_transform,
+    )
+}
+
+/// Read 16-bit scanlines from a lossless JPEG byte stream.
+///
+/// Decompresses the full image via `decompress_16bit`, then splits the result
+/// into per-row vectors of `u16` samples.
+pub fn read_scanlines_16(data: &[u8], num_lines: usize) -> Result<Vec<Vec<u16>>> {
+    let image: Image16 = decompress_16bit(data)?;
+    let row_len: usize = image.width * image.num_components;
+    let lines_to_read: usize = num_lines.min(image.height);
+    let mut rows: Vec<Vec<u16>> = Vec::with_capacity(lines_to_read);
+    for y in 0..lines_to_read {
+        let start: usize = y * row_len;
+        rows.push(image.data[start..start + row_len].to_vec());
+    }
+    Ok(rows)
+}

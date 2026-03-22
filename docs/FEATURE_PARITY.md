@@ -166,8 +166,8 @@
 - [x] `jpeg_write_scanlines()` — Write scanline rows (`ScanlineEncoder::write_scanlines()`)
 - [x] `jpeg_finish_compress()` — Finalize compression (`ScanlineEncoder::finish()`)
 - [x] `jpeg_write_raw_data()` — Write raw downsampled data (`compress_raw()`)
-- [ ] `jpeg12_write_scanlines()` — 12-bit scanlines
-- [ ] `jpeg16_write_scanlines()` — 16-bit scanlines
+- [x] `jpeg12_write_scanlines()` — 12-bit scanlines (`write_scanlines_12()`)
+- [x] `jpeg16_write_scanlines()` — 16-bit scanlines (`write_scanlines_16()`)
 - [x] `jpeg_calc_jpeg_dimensions()` — Compute output dimensions (`calc_jpeg_dimensions()`)
 - [x] `next_scanline` tracking (`ScanlineEncoder::next_scanline()`)
 
@@ -179,7 +179,7 @@
 - [x] Output pixel format selection (`decompress_to`)
 - [x] Scaled IDCT — 1/1, 1/2, 1/4, 1/8 (`set_scale`)
 - [x] Crop decode (`decompress_cropped`, `set_crop_region`)
-- [ ] `TJPARAM_BOTTOMUP` — Bottom-up row order
+- [x] `TJPARAM_BOTTOMUP` — Bottom-up row order (`ScanlineDecoder::set_bottom_up()`)
 - [x] `out_color_space` — Explicit output colorspace (`Decoder::set_output_colorspace()`)
 - [x] YCbCr/YUV raw output (skip color conversion) (`decompress_raw()`)
 - [x] `raw_data_out` — Raw downsampled component output (`decompress_raw()`)
@@ -230,8 +230,8 @@
 - [x] `jpeg_crop_scanline()` — Scanline-level horizontal crop (`ScanlineDecoder::set_crop_x()`)
 - [x] `jpeg_finish_decompress()` — Finalize decompression (`ScanlineDecoder::finish()`)
 - [x] `jpeg_read_raw_data()` — Read raw downsampled data (`decompress_raw()`)
-- [ ] `jpeg12_read_scanlines()` / `jpeg12_skip_scanlines()` / `jpeg12_crop_scanline()`
-- [ ] `jpeg16_read_scanlines()`
+- [x] `jpeg12_read_scanlines()` / `jpeg12_skip_scanlines()` / `jpeg12_crop_scanline()` (`read_scanlines_12()`)
+- [x] `jpeg16_read_scanlines()` (`read_scanlines_16()`)
 - [x] `jpeg_calc_output_dimensions()` / `jpeg_core_output_dimensions()` (`calc_output_dimensions()`, `calc_jpeg_dimensions()`)
 - [x] `output_scanline` tracking (`ScanlineDecoder::output_scanline()`)
 
@@ -242,7 +242,7 @@
 - [x] `two_pass_quantize` — Two-pass color selection (`QuantizeOptions::two_pass`, median-cut algorithm)
 - [x] `colormap` — External colormap input (`QuantizeOptions::colormap`)
 - [x] `enable_1pass_quant` / `enable_2pass_quant` / `enable_external_quant` (`QuantizeOptions::two_pass` + `colormap`)
-- [ ] `jpeg_new_colormap()` — Update colormap
+- [x] `jpeg_new_colormap()` — Update colormap (`requantize()`)
 
 ---
 
@@ -359,7 +359,7 @@
 - [x] `jpeg_mem_dest()` / `jpeg_mem_src()` — C memory I/O (Rust equivalent: already native)
 - [x] Custom `jpeg_destination_mgr` — User-defined output stream (`stream::compress_to_writer`)
 - [x] Custom `jpeg_source_mgr` — User-defined input stream (`stream::decompress_from_reader`)
-- [ ] `TJPARAM_NOREALLOC` — Pre-allocated output buffer
+- [x] `TJPARAM_NOREALLOC` — Pre-allocated output buffer (`compress_into()`)
 
 ### Buffer Size Calculation
 - [x] `tj3JPEGBufSize()` — Worst-case JPEG output size (`jpeg_buf_size()`)
