@@ -90,3 +90,17 @@ pub fn compress_progressive(
 ) -> Result<Vec<u8>> {
     encoder::compress_progressive(pixels, width, height, pixel_format, quality, subsampling)
 }
+
+/// Compress with arithmetic entropy coding (SOF9).
+///
+/// Uses QM-coder binary arithmetic coding instead of Huffman coding.
+pub fn compress_arithmetic(
+    pixels: &[u8],
+    width: usize,
+    height: usize,
+    pixel_format: PixelFormat,
+    quality: u8,
+    subsampling: Subsampling,
+) -> Result<Vec<u8>> {
+    encoder::compress_arithmetic(pixels, width, height, pixel_format, quality, subsampling)
+}
