@@ -49,9 +49,9 @@
 ## 2. Validation Methodologies
 
 ### Exact Binary Validation
-- [ ] Byte-for-byte file comparison (`cmp` equivalent) — not used (pixel-level instead)
-- [ ] MD5 hash validation of compressed output — not implemented
-- [ ] Expected MD5 hashes per test configuration — not stored
+- [x] Byte-for-byte file comparison (`cmp` equivalent) — `bitstream_stability.rs` (deterministic encoding verification)
+- [x] MD5 hash validation of compressed output — `bitstream_stability.rs`, `bitstream_regression.rs` (hash-based determinism + regression)
+- [x] Expected MD5 hashes per test configuration — `reference_hashes.json` (11 configurations stored)
 
 ### Pixel Value Validation
 - [x] checkBuf equivalent (pixel-level roundtrip verification) — `verify_roundtrip()` in tjunittest_compat.rs
@@ -430,7 +430,7 @@ These are the individual cjpeg/djpeg/jpegtran tests defined via `add_bittest()` 
 |----------|------|-------|---|
 | tjunittest equivalents | 14 | 17 | 82% |
 | tjbench equivalents | 4 | 8 | 50% |
-| Validation methods | 10 | 15 | 67% |
+| Validation methods | 13 | 15 | 87% |
 | tjcomptest matrix | 10 | 13 | 77% |
 | tjdecomptest matrix | 7 | 11 | 64% |
 | tjtrantest matrix | 8 | 10 | 80% |
@@ -454,7 +454,7 @@ These are the individual cjpeg/djpeg/jpegtran tests defined via `add_bittest()` 
 ### Key Gaps (Priority Order)
 1. **Merged upsampling (420m, 422m)** — C tests extensively; we don't implement this optimization
 2. **RGB565 dithered/undithered** — C tests 8 RGB565 combinations; we test 0
-3. **MD5/binary comparison** — C validates bitstream identity; we only validate pixels
+3. **MD5/binary comparison** — deterministic encoding + regression hashes implemented (`bitstream_stability.rs`, `bitstream_regression.rs`); cross-encoder comparison with C still missing
 4. **Extended scaling factors** — C tests 15 scales; we test 4
 5. **Non-standard sampling (3x2)** — C tests 3x2 float/ifast; we don't support arbitrary factors
 6. **Tiled operations** — C tests 5 tile sizes; we have none
