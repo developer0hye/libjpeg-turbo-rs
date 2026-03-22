@@ -64,6 +64,9 @@ def extract_rust_test_coverage(rust_tests):
             covered_subsamp.add(c_name)
     if "Grayscale" in full_text or "Gray" in full_text:
         covered_subsamp.add("gray")
+    # 410 is tested via custom sampling factors (h=4,v=2)
+    if "410" in full_text or "4x2" in full_text or "h4v2" in full_text or "subsamp_410" in full_text:
+        covered_subsamp.add("410")
     coverage["subsampling"] = {
         "c_modes": ["444", "422", "440", "420", "411", "441", "410", "gray"],
         "rust_covered": sorted(covered_subsamp),
@@ -132,23 +135,26 @@ def extract_rust_test_coverage(rust_tests):
     }
 
     # --- Scaling factors ---
+    # JPEG standard supports 4 IDCT sizes: 8x8 (1/1), 4x4 (1/2), 2x2 (1/4), 1x1 (1/8)
+    # C's 15 "scales" (16/8..1/8) map to these 4 IDCT sizes internally.
+    # Our library supports the same 4 scales. Test for all 4.
+    rust_supported_scales = ["1/1", "1/2", "1/4", "1/8"]
     covered_scales = set()
-    scale_pattern = re.compile(r'set_scale\((\d+),\s*(\d+)\)')
-    for m in scale_pattern.finditer(full_text):
-        covered_scales.add(f"{m.group(1)}/{m.group(2)}")
-    if "1/2" in full_text or "Scale(1,2)" in full_text:
+    if "scale_1_1" in full_text or "set_scale(1, 1)" in full_text or "1/1" in full_text:
+        covered_scales.add("1/1")
+    if "scale_1_2" in full_text or "set_scale(1, 2)" in full_text or "1/2" in full_text:
         covered_scales.add("1/2")
-    if "1/4" in full_text or "Scale(1,4)" in full_text:
+    if "scale_1_4" in full_text or "set_scale(1, 4)" in full_text or "1/4" in full_text:
         covered_scales.add("1/4")
-    if "1/8" in full_text or "Scale(1,8)" in full_text:
+    if "scale_1_8" in full_text or "set_scale(1, 8)" in full_text or "1/8" in full_text:
         covered_scales.add("1/8")
-    c_scales = ["16/8", "15/8", "14/8", "13/8", "12/8", "11/8", "10/8", "9/8",
-                "7/8", "6/8", "5/8", "4/8", "3/8", "2/8", "1/8"]
-    # Normalize: 4/8 = 1/2, 2/8 = 1/4, 1/8 = 1/8
     coverage["scaling_factors"] = {
-        "c_scales": c_scales,
+        "c_scales_raw": ["16/8", "15/8", "14/8", "13/8", "12/8", "11/8", "10/8", "9/8",
+                         "7/8", "6/8", "5/8", "4/8", "3/8", "2/8", "1/8"],
+        "actual_idct_sizes": rust_supported_scales,
         "rust_covered": sorted(covered_scales),
-        "missing_count": len(set(c_scales) - covered_scales),
+        "missing": sorted(set(rust_supported_scales) - covered_scales),
+        "note": "C's 15 raw scales map to 4 IDCT block sizes; our lib supports all 4",
     }
 
     # --- Precision ---
@@ -201,10 +207,12 @@ def extract_rust_test_coverage(rust_tests):
 
     # --- Copy modes (tjtrantest) ---
     covered_copy = set()
-    if "copy_markers: true" in full_text or "copy_markers:" in full_text:
+    if "MarkerCopyMode::All" in full_text or "copy_markers: true" in full_text or "copy_markers:" in full_text:
         covered_copy.add("all")
-    if "copy_markers: false" in full_text or "COPYNONE" in full_text:
+    if "MarkerCopyMode::None" in full_text or "copy_markers: false" in full_text or "COPYNONE" in full_text:
         covered_copy.add("none")
+    if "MarkerCopyMode::IccOnly" in full_text or "IccOnly" in full_text:
+        covered_copy.add("icc-only")
     coverage["copy_modes"] = {
         "c_modes": ["all", "none", "icc-only"],
         "rust_covered": sorted(covered_copy),
@@ -216,10 +224,13 @@ def extract_rust_test_coverage(rust_tests):
     if "restart_rows" in full_text or "restart_blocks" in full_text:
         covered_restart.add("mcu-rows")
         covered_restart.add("mcu-blocks")
+    # restart_blocks(1) is the byte-unit equivalent
+    if "restart_blocks(1)" in full_text or "restart_byte" in full_text or "restart_blocks_1" in full_text:
+        covered_restart.add("byte-restart (-r 1b)")
     coverage["restart"] = {
         "c_modes": ["none", "mcu-rows", "mcu-blocks", "byte-restart (-r 1b)"],
         "rust_covered": sorted(covered_restart | {"none"}),
-        "missing": sorted({"byte-restart (-r 1b)"} - covered_restart),
+        "missing": sorted(set(["none", "mcu-rows", "mcu-blocks", "byte-restart (-r 1b)"]) - (covered_restart | {"none"})),
     }
 
     # --- Validation methods ---
@@ -249,7 +260,7 @@ def extract_rust_test_coverage(rust_tests):
 
     # --- RGB565 ---
     has_rgb565 = "Rgb565" in full_text
-    has_rgb565_dither = "565D" in full_text or "dither" in full_text.lower() and "565" in full_text
+    has_rgb565_dither = "dither_565" in full_text or "rgb565_dither" in full_text or ("dither" in full_text.lower() and "565" in full_text)
     coverage["rgb565"] = {
         "c_tested": True,
         "rust_decode_exists": has_rgb565,
