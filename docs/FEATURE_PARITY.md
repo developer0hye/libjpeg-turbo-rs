@@ -191,6 +191,8 @@
 - [x] `TJPARAM_FASTDCT` — Fast IDCT vs accurate toggle (`Decoder::set_fast_dct()`)
 - [x] `do_block_smoothing` toggle (`Decoder::set_block_smoothing()`)
 - [x] `dct_method` selection (ISLOW/IFAST/FLOAT) (`Decoder::set_dct_method()`)
+- [x] RGB565 ordered dithering (`Decoder::set_dither_565()`)
+- [x] 4:1:0 (H=4,V=2) subsampling decode — arbitrary factor upsampling
 
 ### Error Handling
 - [x] Lenient / error recovery mode (`decompress_lenient`)
@@ -280,7 +282,8 @@
 - [x] TJXOPT_GRAY (8) — Convert to grayscale during transform (`TransformOptions.grayscale`)
 - [x] TJXOPT_NOOUTPUT (16) — Dry run (no output image) (`TransformOptions.no_output`)
 - [x] TJXOPT_PROGRESSIVE (32) — Output as progressive JPEG (`TransformOptions.progressive`)
-- [x] TJXOPT_COPYNONE (64) — Discard all non-essential markers (`TransformOptions.copy_markers = false`)
+- [x] TJXOPT_COPYNONE (64) — Discard all non-essential markers (`MarkerCopyMode::None`)
+- [x] `-copy icc` — Copy only ICC profile markers (`MarkerCopyMode::IccOnly`)
 - [x] TJXOPT_ARITHMETIC (128) — Output with arithmetic coding (`TransformOptions.arithmetic`)
 - [x] TJXOPT_OPTIMIZE (256) — Output with optimized Huffman (`TransformOptions.optimize`)
 
