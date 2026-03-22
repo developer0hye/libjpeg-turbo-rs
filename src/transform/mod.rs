@@ -41,11 +41,11 @@ impl Default for TransformInfo {
     }
 }
 
-/// All 9 TJXOPT transform flags matching libjpeg-turbo's jpegtran options.
+/// All 9 TJXOPT transform flags matching libjpeg-turbo's jpegtran options,
+/// plus a user callback for coefficient inspection/modification.
 ///
 /// Controls lossless JPEG transforms including spatial operations, partial MCU
 /// handling, grayscale conversion, and output encoding options.
-#[derive(Debug, Clone)]
 pub struct TransformOptions {
     /// Spatial transform to apply (flip, rotate, transpose, etc.).
     pub op: TransformOp,
@@ -76,6 +76,11 @@ pub struct TransformOptions {
     /// Copy APP/COM markers from input to output (default: true).
     /// When false, corresponds to TJXOPT_COPYNONE.
     pub copy_markers: bool,
+    /// User callback for inspecting/modifying DCT coefficients during transform.
+    /// Called once per block after the spatial transform is applied.
+    /// Arguments: (block: &mut [i16; 64], component_index: usize, block_x: usize, block_y: usize)
+    /// Corresponds to `tjtransform.customFilter`.
+    pub custom_filter: Option<Box<dyn Fn(&mut [i16; 64], usize, usize, usize)>>,
 }
 
 impl Default for TransformOptions {
@@ -91,6 +96,28 @@ impl Default for TransformOptions {
             arithmetic: false,
             optimize: false,
             copy_markers: true,
+            custom_filter: None,
         }
+    }
+}
+
+impl std::fmt::Debug for TransformOptions {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TransformOptions")
+            .field("op", &self.op)
+            .field("perfect", &self.perfect)
+            .field("trim", &self.trim)
+            .field("crop", &self.crop)
+            .field("grayscale", &self.grayscale)
+            .field("no_output", &self.no_output)
+            .field("progressive", &self.progressive)
+            .field("arithmetic", &self.arithmetic)
+            .field("optimize", &self.optimize)
+            .field("copy_markers", &self.copy_markers)
+            .field(
+                "custom_filter",
+                &self.custom_filter.as_ref().map(|_| "<filter fn>"),
+            )
+            .finish()
     }
 }
