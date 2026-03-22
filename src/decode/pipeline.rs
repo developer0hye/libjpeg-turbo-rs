@@ -43,6 +43,12 @@ pub struct Image {
     pub icc_profile: Option<Vec<u8>>,
     /// Raw EXIF TIFF data from APP1 marker, if present.
     pub exif_data: Option<Vec<u8>>,
+    /// COM marker text, if present.
+    pub comment: Option<String>,
+    /// Pixel density from JFIF header.
+    pub density: DensityInfo,
+    /// Saved APP/COM markers.
+    pub saved_markers: Vec<SavedMarker>,
     /// Warnings accumulated during lenient decoding.
     pub warnings: Vec<DecodeWarning>,
 }
@@ -1356,6 +1362,9 @@ impl<'a> Decoder<'a> {
                     data,
                     icc_profile,
                     exif_data,
+                    comment: self.metadata.comment.clone(),
+                    density: self.metadata.density,
+                    saved_markers: Vec::new(),
                     warnings: Vec::new(),
                 })
             } else {
@@ -1389,6 +1398,9 @@ impl<'a> Decoder<'a> {
                     data,
                     icc_profile,
                     exif_data,
+                    comment: self.metadata.comment.clone(),
+                    density: self.metadata.density,
+                    saved_markers: Vec::new(),
                     warnings: Vec::new(),
                 })
             }
@@ -1481,6 +1493,9 @@ impl<'a> Decoder<'a> {
                 data,
                 icc_profile,
                 exif_data,
+                comment: self.metadata.comment.clone(),
+                density: self.metadata.density,
+                saved_markers: Vec::new(),
                 warnings: Vec::new(),
             })
         } else {
@@ -1629,6 +1644,9 @@ impl<'a> Decoder<'a> {
                     data,
                     icc_profile: icc_profile.clone(),
                     exif_data: exif_data.clone(),
+                    comment: self.metadata.comment.clone(),
+                    density: self.metadata.density,
+                    saved_markers: Vec::new(),
                     warnings: warnings.clone(),
                 })
             } else {
@@ -1677,6 +1695,9 @@ impl<'a> Decoder<'a> {
                     data,
                     icc_profile: icc_profile.clone(),
                     exif_data: exif_data.clone(),
+                    comment: self.metadata.comment.clone(),
+                    density: self.metadata.density,
+                    saved_markers: Vec::new(),
                     warnings: warnings.clone(),
                 })
             }
@@ -1787,6 +1808,9 @@ impl<'a> Decoder<'a> {
                     data,
                     icc_profile: icc_profile.clone(),
                     exif_data: exif_data.clone(),
+                    comment: self.metadata.comment.clone(),
+                    density: self.metadata.density,
+                    saved_markers: Vec::new(),
                     warnings: warnings.clone(),
                 });
             }
@@ -1814,6 +1838,9 @@ impl<'a> Decoder<'a> {
                 data,
                 icc_profile: icc_profile.clone(),
                 exif_data: exif_data.clone(),
+                comment: self.metadata.comment.clone(),
+                density: self.metadata.density,
+                saved_markers: Vec::new(),
                 warnings: warnings.clone(),
             })
         } else if num_components == 4 {
@@ -2126,6 +2153,9 @@ impl<'a> Decoder<'a> {
             data,
             icc_profile,
             exif_data,
+            comment: self.metadata.comment.clone(),
+            density: self.metadata.density,
+            saved_markers: Vec::new(),
             warnings,
         })
     }
