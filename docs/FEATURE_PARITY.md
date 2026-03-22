@@ -162,14 +162,14 @@
 - [x] COM (comment) marker write (`Encoder::comment()`, `marker_writer::write_com()`)
 
 ### Scanline-Level Encode API
-- [ ] `jpeg_start_compress()` — Begin compression
-- [ ] `jpeg_write_scanlines()` — Write scanline rows
-- [ ] `jpeg_finish_compress()` — Finalize compression
-- [ ] `jpeg_write_raw_data()` — Write raw downsampled data
+- [x] `jpeg_start_compress()` — Begin compression (`ScanlineEncoder::new()`)
+- [x] `jpeg_write_scanlines()` — Write scanline rows (`ScanlineEncoder::write_scanlines()`)
+- [x] `jpeg_finish_compress()` — Finalize compression (`ScanlineEncoder::finish()`)
+- [x] `jpeg_write_raw_data()` — Write raw downsampled data (`compress_raw()`)
 - [ ] `jpeg12_write_scanlines()` — 12-bit scanlines
 - [ ] `jpeg16_write_scanlines()` — 16-bit scanlines
 - [ ] `jpeg_calc_jpeg_dimensions()` — Compute output dimensions
-- [ ] `next_scanline` tracking
+- [x] `next_scanline` tracking (`ScanlineEncoder::next_scanline()`)
 
 ---
 
@@ -181,8 +181,8 @@
 - [x] Crop decode (`decompress_cropped`, `set_crop_region`)
 - [ ] `TJPARAM_BOTTOMUP` — Bottom-up row order
 - [ ] `out_color_space` — Explicit output colorspace
-- [ ] YCbCr/YUV raw output (skip color conversion)
-- [ ] `raw_data_out` — Raw downsampled component output
+- [x] YCbCr/YUV raw output (skip color conversion) (`decompress_raw()`)
+- [x] `raw_data_out` — Raw downsampled component output (`decompress_raw()`)
 
 ### Upsampling / DCT
 - [x] Fancy upsampling (default, always on)
@@ -223,17 +223,17 @@
 - [ ] `jpeg_input_complete()` — Check if all input consumed
 
 ### Scanline-Level Decode API
-- [ ] `jpeg_read_header()` — Parse headers
-- [ ] `jpeg_start_decompress()` — Begin decompression
-- [ ] `jpeg_read_scanlines()` — Read scanline rows
-- [ ] `jpeg_skip_scanlines()` — Skip rows during decode
+- [x] `jpeg_read_header()` — Parse headers (`ScanlineDecoder::new()`)
+- [x] `jpeg_start_decompress()` — Begin decompression (`ScanlineDecoder::new()`)
+- [x] `jpeg_read_scanlines()` — Read scanline rows (`ScanlineDecoder::read_scanlines()`)
+- [x] `jpeg_skip_scanlines()` — Skip rows during decode (`ScanlineDecoder::skip_scanlines()`)
 - [ ] `jpeg_crop_scanline()` — Scanline-level horizontal crop
-- [ ] `jpeg_finish_decompress()` — Finalize decompression
-- [ ] `jpeg_read_raw_data()` — Read raw downsampled data
+- [x] `jpeg_finish_decompress()` — Finalize decompression (`ScanlineDecoder::finish()`)
+- [x] `jpeg_read_raw_data()` — Read raw downsampled data (`decompress_raw()`)
 - [ ] `jpeg12_read_scanlines()` / `jpeg12_skip_scanlines()` / `jpeg12_crop_scanline()`
 - [ ] `jpeg16_read_scanlines()`
 - [ ] `jpeg_calc_output_dimensions()` / `jpeg_core_output_dimensions()`
-- [ ] `output_scanline` tracking
+- [x] `output_scanline` tracking (`ScanlineDecoder::output_scanline()`)
 
 ### Color Quantization (8-bit indexed output)
 - [ ] `quantize_colors` — Enable color quantization
@@ -274,15 +274,15 @@
 - [x] TJXOP_ROT270
 
 ### Options (TJXOPT flags)
-- [ ] TJXOPT_PERFECT (1) — Fail if transform is not perfect (partial iMCU)
-- [ ] TJXOPT_TRIM (2) — Discard partial iMCU edges
-- [ ] TJXOPT_CROP (4) — Enable lossless cropping region
-- [ ] TJXOPT_GRAY (8) — Convert to grayscale during transform
-- [ ] TJXOPT_NOOUTPUT (16) — Dry run (no output image)
-- [ ] TJXOPT_PROGRESSIVE (32) — Output as progressive JPEG
+- [x] TJXOPT_PERFECT (1) — Fail if transform is not perfect (partial iMCU) (`TransformOptions.perfect`)
+- [x] TJXOPT_TRIM (2) — Discard partial iMCU edges (`TransformOptions.trim`)
+- [x] TJXOPT_CROP (4) — Enable lossless cropping region (`TransformOptions.crop`)
+- [x] TJXOPT_GRAY (8) — Convert to grayscale during transform (`TransformOptions.grayscale`)
+- [x] TJXOPT_NOOUTPUT (16) — Dry run (no output image) (`TransformOptions.no_output`)
+- [x] TJXOPT_PROGRESSIVE (32) — Output as progressive JPEG (`TransformOptions.progressive`)
 - [x] TJXOPT_COPYNONE (64) — Discard all non-essential markers (`TransformOptions.copy_markers = false`)
-- [ ] TJXOPT_ARITHMETIC (128) — Output with arithmetic coding
-- [ ] TJXOPT_OPTIMIZE (256) — Output with optimized Huffman
+- [x] TJXOPT_ARITHMETIC (128) — Output with arithmetic coding (`TransformOptions.arithmetic`)
+- [x] TJXOPT_OPTIMIZE (256) — Output with optimized Huffman (`TransformOptions.optimize`)
 
 ### Coefficient Access
 - [x] `read_coefficients()` — Extract quantized DCT blocks
@@ -429,12 +429,12 @@
 | Pixel formats | 13 | 13 | 100% |
 | Chroma subsampling | 7 | 8 | 88% |
 | Color spaces | 5 | 6 | 83% |
-| Compress params | ~35 | ~65 | ~54% |
-| Decompress params | ~17 | ~55 | ~31% |
-| Metadata | 8 | 10 | 80% |
+| Compress params | ~40 | ~65 | ~62% |
+| Decompress params | ~25 | ~55 | ~45% |
+| Metadata | 10 | 10 | 100% |
 | Transform ops | 8 | 8 | 100% |
-| Transform options | 0 | 9 | 0% |
-| Transform misc | 3 | 6 | 50% |
+| Transform options | 9 | 9 | 100% |
+| Transform misc | 4 | 6 | 67% |
 | YUV/Planar API | 0 | 12 | 0% |
 | SIMD (aarch64) | 7 | 12 | 58% |
 | SIMD (x86_64) | 0 | 6 | 0% |
@@ -473,17 +473,17 @@
 | 15 | ~~Fast DCT (IsFast, Float)~~ | ✅ #27 |
 | 16 | ~~S441 subsampling~~ | ✅ #29 |
 
-### Phase 6 — Transform & Advanced
-| # | Feature | Scope |
-|---|---------|-------|
-| 17 | All 9 TJXOPT transform flags | PERFECT, TRIM, CROP, GRAY, NOOUTPUT, PROGRESSIVE, COPYNONE, ARITHMETIC, OPTIMIZE |
-| 18 | Coefficient filter callback | `tjtransform.customFilter` |
-| 19 | Marker preservation | `TJPARAM_SAVEMARKERS` + `jpeg_save_markers` + copy through transform |
-| 20 | Scanline-level encode API | `start_compress` / `write_scanlines` / `finish_compress` |
-| 21 | Scanline-level decode API | `start_decompress` / `read_scanlines` / `skip_scanlines` / `crop_scanline` / `finish_decompress` |
-| 22 | Progressive output (buffered image) | `buffered_image`, `start_output` / `finish_output` / `consume_input` |
-| 23 | Per-component quality | `q_scale_factor[4]` |
-| 24 | Raw data encode/decode | `jpeg_write_raw_data` / `jpeg_read_raw_data` |
+### Phase 6 — Transform & Advanced ✅ COMPLETE (7/8, #22 deferred)
+| # | Feature | Status |
+|---|---------|--------|
+| 17 | ~~All 9 TJXOPT transform flags~~ | ✅ #32 |
+| 18 | ~~Coefficient filter callback~~ | ✅ #34 |
+| 19 | ~~Marker preservation~~ | ✅ #36 |
+| 20 | ~~Scanline-level encode API~~ | ✅ #33 |
+| 21 | ~~Scanline-level decode API~~ | ✅ #33 |
+| 22 | Progressive output (buffered image) | ⬜ Deferred (niche feature) |
+| 23 | ~~Per-component quality~~ | ✅ #31 |
+| 24 | ~~Raw data encode/decode~~ | ✅ #35 |
 
 ### Phase 7 — YUV & I/O
 | # | Feature | Scope |
