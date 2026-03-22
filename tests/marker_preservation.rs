@@ -133,7 +133,7 @@ fn transform_with_copy_markers_preserves_markers() {
     let jpeg: Vec<u8> = make_jpeg_with_markers();
     let options = TransformOptions {
         op: TransformOp::HFlip,
-        copy_markers: true,
+        copy_markers: libjpeg_turbo_rs::MarkerCopyMode::All,
         ..TransformOptions::default()
     };
 
@@ -148,7 +148,7 @@ fn transform_with_copy_markers_preserves_markers() {
         .iter()
         .filter(|m| m.code == 0xE3)
         .collect();
-    assert!(!app3.is_empty(), "copy_markers=true should preserve APP3");
+    assert!(!app3.is_empty(), "copy_markers=All should preserve APP3");
     assert_eq!(app3[0].data, b"CustomAPP3Data");
 
     let app5: Vec<&SavedMarker> = image
@@ -156,7 +156,7 @@ fn transform_with_copy_markers_preserves_markers() {
         .iter()
         .filter(|m| m.code == 0xE5)
         .collect();
-    assert!(!app5.is_empty(), "copy_markers=true should preserve APP5");
+    assert!(!app5.is_empty(), "copy_markers=All should preserve APP5");
     assert_eq!(app5[0].data, b"APP5-payload");
 }
 
@@ -165,7 +165,7 @@ fn transform_with_copy_markers_false_strips_markers() {
     let jpeg: Vec<u8> = make_jpeg_with_markers();
     let options = TransformOptions {
         op: TransformOp::HFlip,
-        copy_markers: false,
+        copy_markers: libjpeg_turbo_rs::MarkerCopyMode::None,
         ..TransformOptions::default()
     };
 

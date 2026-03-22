@@ -103,7 +103,7 @@
 
 ### tjdecomptest.in (Decompression Validation ~2000-3000 combos)
 - [x] 7 subsampling modes (444, 422, 440, 420, 411, 441, gray) — `conformance.rs`
-- [ ] 4:1:0 (410) subsampling decode — not tested
+- [x] 4:1:0 (410) subsampling decode — `subsamp_410.rs`
 - [x] 5 crop regions (14x14+23+23, 21x21+4+4, 18x18+13+13, 21x21+0+0, 24x26+20+18) — partial (`crop_skip.rs`)
 - [ ] Crop × subsampling × scale full cross-product — only individual tests
 - [ ] 15 scaling factors (16/8 thru 1/8) — only 1/2, 1/4, 1/8 tested
@@ -123,9 +123,9 @@
 ### tjtrantest.in (Transform Validation)
 - [x] All 8 transform types — `tjunittest_transform.rs`, `transform.rs`
 - [x] 7 subsampling modes + grayscale — `tjunittest_transform.rs`
-- [ ] Copy mode: `-c a` (all markers) — only `copy_markers=true`
-- [ ] Copy mode: `-c n` (no markers) — only `copy_markers=false`
-- [ ] Copy mode: `-c i` (ICC only) — not implemented
+- [x] Copy mode: `-c a` (all markers) — `copy_mode.rs` (`MarkerCopyMode::All`)
+- [x] Copy mode: `-c n` (no markers) — `copy_mode.rs` (`MarkerCopyMode::None`)
+- [x] Copy mode: `-c i` (ICC only) — `copy_mode.rs` (`MarkerCopyMode::IccOnly`)
 - [x] 6 crop regions in transform — `tjunittest_transform.rs`, `transform_options.rs`
 - [x] Grayscale conversion during transform — `transform_options.rs`
 - [x] Progressive output from transform — `tjunittest_transform.rs`
@@ -165,7 +165,7 @@
 - [x] 4:4:0
 - [x] 4:1:1
 - [x] 4:4:1
-- [ ] 4:1:0 (decompression only, rare) — not tested
+- [x] 4:1:0 (decompression only, rare) — `subsamp_410.rs`
 - [x] Grayscale
 
 ### DCT Methods
@@ -187,7 +187,7 @@
 - [x] Grayscale — extensive
 - [x] CMYK — `cmyk_encode.rs`
 - [ ] RGB565 encode (decode only) — decode tested in `pixel_formats.rs`
-- [ ] Dithered/undithered RGB565 — not tested
+- [x] Dithered/undithered RGB565 — `rgb565_dither.rs`
 
 ### Scaling Factors (Decompression)
 - [x] 1/1 (no scale) — default
@@ -332,8 +332,8 @@ These are the individual cjpeg/djpeg/jpegtran tests defined via `add_bittest()` 
 - [ ] `420m-q100-ifast-prog` — merged upsampling 420 progressive — not implemented
 - [x] `gray-islow` — grayscale decode — `conformance.rs`
 - [x] `gray-islow-rgb` — grayscale to RGB output — `decode_toggles.rs`
-- [ ] `rgb-islow-565` — RGB565 decode (no dither) — decode only, no validation
-- [ ] `rgb-islow-565D` — RGB565 decode (dithered) — no dithered RGB565
+- [x] `rgb-islow-565` — RGB565 decode (no dither) — `rgb565_dither.rs`
+- [x] `rgb-islow-565D` — RGB565 decode (dithered) — `rgb565_dither.rs`
 - [ ] `gray-islow-565` — grayscale to RGB565 — not tested
 - [ ] `gray-islow-565D` — grayscale to dithered RGB565 — not tested
 - [ ] `422m-ifast-565` — merged 422 RGB565 — not implemented
@@ -368,8 +368,8 @@ These are the individual cjpeg/djpeg/jpegtran tests defined via `add_bittest()` 
 - [ ] Arbitrary H×V factor combinations beyond standard modes
 
 ### RGB565 Output (Dithered/Undithered)
-- [ ] RGB565 no-dither decode — `PixelFormat::Rgb565` exists but limited testing
-- [ ] RGB565 dithered decode — dithering in RGB565 not implemented
+- [x] RGB565 no-dither decode — `rgb565_dither.rs`, `pixel_formats.rs`
+- [x] RGB565 dithered decode — `rgb565_dither.rs` (`Decoder::set_dither_565()`)
 - [ ] RGB565 with grayscale input
 - [ ] RGB565 with merged upsampling
 
