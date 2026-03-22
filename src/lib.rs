@@ -5,6 +5,9 @@ pub mod encode;
 pub mod simd;
 pub mod transform;
 
+pub use api::coefficient::{
+    read_coefficients, transform_jpeg as transform, write_coefficients, JpegCoefficients,
+};
 pub use api::high_level::{
     compress, compress_arithmetic, compress_optimized, compress_progressive, decompress,
     decompress_cropped, decompress_lenient, decompress_to,
@@ -12,3 +15,4 @@ pub use api::high_level::{
 pub use common::error::{DecodeWarning, JpegError, Result};
 pub use common::types::*;
 pub use decode::pipeline::Image;
+pub use transform::TransformOp;
