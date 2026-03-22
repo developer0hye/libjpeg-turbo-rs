@@ -4,6 +4,7 @@ pub mod high_level;
 pub mod image_io;
 pub mod precision;
 pub mod progressive_output;
+pub mod quality;
 pub mod quantize;
 pub mod raw_data;
 pub mod scanline;

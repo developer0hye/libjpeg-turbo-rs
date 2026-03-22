@@ -84,7 +84,7 @@ pub fn compress(
         (8, 8)
     } else {
         match subsampling {
-            Subsampling::S444 => (8, 8),
+            Subsampling::S444 | Subsampling::Unknown => (8, 8),
             Subsampling::S422 => (16, 8),
             Subsampling::S420 => (16, 16),
             Subsampling::S440 => (8, 16),
@@ -329,7 +329,7 @@ pub fn compress_custom_huffman(
         (8, 8)
     } else {
         match subsampling {
-            Subsampling::S444 => (8, 8),
+            Subsampling::S444 | Subsampling::Unknown => (8, 8),
             Subsampling::S422 => (16, 8),
             Subsampling::S420 => (16, 16),
             Subsampling::S440 => (8, 16),
@@ -519,7 +519,7 @@ pub fn compress_custom_quant(
         (8, 8)
     } else {
         match subsampling {
-            Subsampling::S444 => (8, 8),
+            Subsampling::S444 | Subsampling::Unknown => (8, 8),
             Subsampling::S422 => (16, 8),
             Subsampling::S420 => (16, 16),
             Subsampling::S440 => (8, 16),
@@ -724,7 +724,7 @@ pub fn compress_with_restart(
         (8, 8)
     } else {
         match subsampling {
-            Subsampling::S444 => (8, 8),
+            Subsampling::S444 | Subsampling::Unknown => (8, 8),
             Subsampling::S422 => (16, 8),
             Subsampling::S420 => (16, 16),
             Subsampling::S440 => (8, 16),
@@ -1722,7 +1722,7 @@ fn compress_progressive_with_scans(
         (8, 8)
     } else {
         match subsampling {
-            Subsampling::S444 => (8, 8),
+            Subsampling::S444 | Subsampling::Unknown => (8, 8),
             Subsampling::S422 => (16, 8),
             Subsampling::S420 => (16, 16),
             Subsampling::S440 => (8, 16),
@@ -2035,7 +2035,7 @@ pub fn compress_arithmetic(
         (8, 8)
     } else {
         match subsampling {
-            Subsampling::S444 => (8, 8),
+            Subsampling::S444 | Subsampling::Unknown => (8, 8),
             Subsampling::S422 => (16, 8),
             Subsampling::S420 => (16, 16),
             Subsampling::S440 => (8, 16),
@@ -2065,7 +2065,7 @@ pub fn compress_arithmetic(
                 all_blocks.push(q);
             } else {
                 match subsampling {
-                    Subsampling::S444 => {
+                    Subsampling::S444 | Subsampling::Unknown => {
                         for (plane, divisors) in [
                             (&y_plane, &luma_divisors),
                             (&cb_plane, &chroma_divisors),
@@ -2200,7 +2200,7 @@ pub fn compress_arithmetic(
                 block_idx += 1;
             } else {
                 let y_blocks = match subsampling {
-                    Subsampling::S444 => 1,
+                    Subsampling::S444 | Subsampling::Unknown => 1,
                     Subsampling::S422 => 2,
                     Subsampling::S420 => 4,
                     Subsampling::S440 => 2,
@@ -2318,7 +2318,7 @@ pub fn compress_arithmetic_progressive(
         (8, 8)
     } else {
         match subsampling {
-            Subsampling::S444 => (8, 8),
+            Subsampling::S444 | Subsampling::Unknown => (8, 8),
             Subsampling::S422 => (16, 8),
             Subsampling::S420 => (16, 16),
             Subsampling::S440 => (8, 16),
@@ -3132,7 +3132,7 @@ fn encode_color_mcu(
     fdct_fn: fn(&[i16; 64], &mut [i32; 64]),
 ) {
     match subsampling {
-        Subsampling::S444 => {
+        Subsampling::S444 | Subsampling::Unknown => {
             // 1 Y block + 1 Cb block + 1 Cr block
             encode_single_block(
                 y_plane,
@@ -3566,7 +3566,7 @@ pub fn compress_optimized(
         (8, 8)
     } else {
         match subsampling {
-            Subsampling::S444 => (8, 8),
+            Subsampling::S444 | Subsampling::Unknown => (8, 8),
             Subsampling::S422 => (16, 8),
             Subsampling::S420 => (16, 16),
             Subsampling::S440 => (8, 16),
@@ -3608,7 +3608,7 @@ pub fn compress_optimized(
                 all_blocks.push(q);
             } else {
                 match subsampling {
-                    Subsampling::S444 => {
+                    Subsampling::S444 | Subsampling::Unknown => {
                         // 1 Y + 1 Cb + 1 Cr
                         let yq = gather_block(&y_plane, width, height, x0, y0, &luma_divisors);
                         let diff = yq[0] - prev_dc_y;
@@ -3895,7 +3895,7 @@ pub fn compress_optimized(
                 block_idx += 1;
             } else {
                 match subsampling {
-                    Subsampling::S444 => {
+                    Subsampling::S444 | Subsampling::Unknown => {
                         HuffmanEncoder::encode_block(
                             &mut bit_writer,
                             &all_blocks[block_idx],
@@ -4234,7 +4234,7 @@ pub fn compress_raw(
         (8, 8)
     } else {
         match subsampling {
-            Subsampling::S444 => (8, 8),
+            Subsampling::S444 | Subsampling::Unknown => (8, 8),
             Subsampling::S422 => (16, 8),
             Subsampling::S420 => (16, 16),
             Subsampling::S440 => (8, 16),
