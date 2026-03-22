@@ -1,3 +1,4 @@
+pub mod arith_tables;
 pub mod error;
 pub mod exif;
 pub mod huffman_table;
