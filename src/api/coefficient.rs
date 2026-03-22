@@ -9,7 +9,7 @@ use crate::encode::huffman_encode::{build_huff_table, BitWriter, HuffmanEncoder}
 use crate::encode::marker_writer;
 use crate::encode::tables;
 use crate::transform::spatial;
-use crate::transform::TransformOp;
+use crate::transform::{TransformOp, TransformOptions};
 
 /// Per-component DCT coefficient data.
 #[derive(Debug, Clone)]
@@ -351,6 +351,416 @@ pub fn transform_jpeg(data: &[u8], op: TransformOp) -> Result<Vec<u8>> {
     }
 
     write_coefficients(&coeffs)
+}
+
+/// Apply a lossless transform with full TJXOPT-compatible options.
+///
+/// Supports all 9 flags from libjpeg-turbo: perfect, trim, crop, grayscale,
+/// no_output, progressive, arithmetic, optimize, and copy_markers.
+pub fn transform_jpeg_with_options(data: &[u8], options: &TransformOptions) -> Result<Vec<u8>> {
+    let mut coeffs = read_coefficients(data)?;
+    let op: TransformOp = options.op;
+
+    // Determine iMCU dimensions from the coefficient data.
+    let max_h: usize = coeffs
+        .components
+        .iter()
+        .map(|c| c.h_sampling as usize)
+        .max()
+        .unwrap_or(1);
+    let max_v: usize = coeffs
+        .components
+        .iter()
+        .map(|c| c.v_sampling as usize)
+        .max()
+        .unwrap_or(1);
+    let imcu_w: usize = max_h * 8;
+    let imcu_h: usize = max_v * 8;
+
+    // For transforms that swap dimensions, use swapped iMCU sizes for alignment checks.
+    let swaps_dims: bool = matches!(
+        op,
+        TransformOp::Transpose | TransformOp::Transverse | TransformOp::Rot90 | TransformOp::Rot270
+    );
+
+    // Check which dimension(s) need to be iMCU-aligned for this transform.
+    let needs_width_aligned: bool = matches!(
+        op,
+        TransformOp::HFlip
+            | TransformOp::Transverse
+            | TransformOp::Rot90
+            | TransformOp::Rot180
+            | TransformOp::Rot270
+    );
+    let needs_height_aligned: bool = matches!(
+        op,
+        TransformOp::VFlip
+            | TransformOp::Transverse
+            | TransformOp::Rot90
+            | TransformOp::Rot180
+            | TransformOp::Rot270
+    );
+
+    let width_aligned: bool = (coeffs.width as usize) % imcu_w == 0;
+    let height_aligned: bool = (coeffs.height as usize) % imcu_h == 0;
+
+    let has_partial_width: bool = needs_width_aligned && !width_aligned;
+    let has_partial_height: bool = needs_height_aligned && !height_aligned;
+
+    // PERFECT: fail if partial iMCU blocks exist for this transform.
+    if options.perfect && (has_partial_width || has_partial_height) {
+        return Err(JpegError::CorruptData(format!(
+            "perfect transform requested but image {}x{} is not iMCU-aligned (iMCU={}x{})",
+            coeffs.width, coeffs.height, imcu_w, imcu_h
+        )));
+    }
+
+    // TRIM: discard partial iMCU blocks at edges.
+    if options.trim && (has_partial_width || has_partial_height) {
+        let trimmed_w: usize = if has_partial_width {
+            (coeffs.width as usize / imcu_w) * imcu_w
+        } else {
+            coeffs.width as usize
+        };
+        let trimmed_h: usize = if has_partial_height {
+            (coeffs.height as usize / imcu_h) * imcu_h
+        } else {
+            coeffs.height as usize
+        };
+
+        if trimmed_w == 0 || trimmed_h == 0 {
+            return Err(JpegError::CorruptData(
+                "trim would remove all image data".to_string(),
+            ));
+        }
+
+        coeffs.width = trimmed_w as u16;
+        coeffs.height = trimmed_h as u16;
+
+        // Trim coefficient arrays for each component.
+        for comp in &mut coeffs.components {
+            let new_bx: usize = (trimmed_w + 7) / 8 * comp.h_sampling as usize / max_h;
+            let new_by: usize = (trimmed_h + 7) / 8 * comp.v_sampling as usize / max_v;
+
+            // Only need to rebuild if we actually trimmed columns or rows.
+            if new_bx < comp.blocks_x || new_by < comp.blocks_y {
+                let mut new_blocks: Vec<[i16; 64]> = Vec::with_capacity(new_bx * new_by);
+                for by in 0..new_by {
+                    for bx in 0..new_bx {
+                        let old_idx: usize = by * comp.blocks_x + bx;
+                        new_blocks.push(comp.blocks[old_idx]);
+                    }
+                }
+                comp.blocks = new_blocks;
+                comp.blocks_x = new_bx;
+                comp.blocks_y = new_by;
+            }
+        }
+    }
+
+    // CROP: crop coefficient arrays to the specified region.
+    if let Some(crop) = &options.crop {
+        // Align crop region to iMCU boundaries.
+        let crop_x_blocks: usize = crop.x / 8;
+        let crop_y_blocks: usize = crop.y / 8;
+        let crop_w: usize = crop.width.min(coeffs.width as usize - crop.x);
+        let crop_h: usize = crop.height.min(coeffs.height as usize - crop.y);
+        let crop_w_blocks: usize = (crop_w + 7) / 8;
+        let crop_h_blocks: usize = (crop_h + 7) / 8;
+
+        coeffs.width = crop_w.min(crop_w_blocks * 8) as u16;
+        coeffs.height = crop_h.min(crop_h_blocks * 8) as u16;
+
+        for comp in &mut coeffs.components {
+            let comp_crop_x: usize = crop_x_blocks * comp.h_sampling as usize / max_h;
+            let comp_crop_y: usize = crop_y_blocks * comp.v_sampling as usize / max_v;
+            let comp_crop_w: usize = crop_w_blocks * comp.h_sampling as usize / max_h;
+            let comp_crop_h: usize = crop_h_blocks * comp.v_sampling as usize / max_v;
+
+            let new_bx: usize = comp_crop_w.min(comp.blocks_x - comp_crop_x);
+            let new_by: usize = comp_crop_h.min(comp.blocks_y - comp_crop_y);
+
+            let mut new_blocks: Vec<[i16; 64]> = Vec::with_capacity(new_bx * new_by);
+            for by in 0..new_by {
+                for bx in 0..new_bx {
+                    let old_idx: usize = (comp_crop_y + by) * comp.blocks_x + (comp_crop_x + bx);
+                    new_blocks.push(comp.blocks[old_idx]);
+                }
+            }
+            comp.blocks = new_blocks;
+            comp.blocks_x = new_bx;
+            comp.blocks_y = new_by;
+        }
+    }
+
+    // GRAYSCALE: drop all non-Y components.
+    if options.grayscale && coeffs.components.len() > 1 {
+        coeffs.components.truncate(1);
+        // Normalize sampling factors to 1x1 for single-component.
+        coeffs.components[0].h_sampling = 1;
+        coeffs.components[0].v_sampling = 1;
+        // Keep only the first quant table.
+        if coeffs.quant_tables.len() > 1 {
+            coeffs.quant_tables.truncate(1);
+        }
+        coeffs.components[0].quant_table_index = 0;
+    }
+
+    // Apply spatial transform (reuses existing logic from transform_jpeg).
+    if op != TransformOp::None {
+        let transform_fn: fn(&[i16; 64], &mut [i16; 64]) = match op {
+            TransformOp::None => spatial::do_nothing,
+            TransformOp::HFlip => spatial::do_flip_h,
+            TransformOp::VFlip => spatial::do_flip_v,
+            TransformOp::Transpose => spatial::do_transpose,
+            TransformOp::Transverse => spatial::do_transverse,
+            TransformOp::Rot90 => spatial::do_rot_90,
+            TransformOp::Rot180 => spatial::do_rot_180,
+            TransformOp::Rot270 => spatial::do_rot_270,
+        };
+
+        for comp in &mut coeffs.components {
+            let old_bx: usize = comp.blocks_x;
+            let old_by: usize = comp.blocks_y;
+            let mut new_blocks: Vec<[i16; 64]> = vec![[0i16; 64]; old_bx * old_by];
+
+            if swaps_dims {
+                for by in 0..old_by {
+                    for bx in 0..old_bx {
+                        let src_idx: usize = by * old_bx + bx;
+                        let dst_idx: usize = bx * old_by + by;
+                        transform_fn(&comp.blocks[src_idx], &mut new_blocks[dst_idx]);
+                    }
+                }
+                comp.blocks_x = old_by;
+                comp.blocks_y = old_bx;
+            } else if matches!(op, TransformOp::HFlip) {
+                for by in 0..old_by {
+                    for bx in 0..old_bx {
+                        let src_idx: usize = by * old_bx + bx;
+                        let dst_idx: usize = by * old_bx + (old_bx - 1 - bx);
+                        transform_fn(&comp.blocks[src_idx], &mut new_blocks[dst_idx]);
+                    }
+                }
+            } else if matches!(op, TransformOp::VFlip) {
+                for by in 0..old_by {
+                    for bx in 0..old_bx {
+                        let src_idx: usize = by * old_bx + bx;
+                        let dst_idx: usize = (old_by - 1 - by) * old_bx + bx;
+                        transform_fn(&comp.blocks[src_idx], &mut new_blocks[dst_idx]);
+                    }
+                }
+            } else if matches!(op, TransformOp::Rot180) {
+                for by in 0..old_by {
+                    for bx in 0..old_bx {
+                        let src_idx: usize = by * old_bx + bx;
+                        let dst_idx: usize = (old_by - 1 - by) * old_bx + (old_bx - 1 - bx);
+                        transform_fn(&comp.blocks[src_idx], &mut new_blocks[dst_idx]);
+                    }
+                }
+            } else {
+                for i in 0..comp.blocks.len() {
+                    transform_fn(&comp.blocks[i], &mut new_blocks[i]);
+                }
+            }
+
+            comp.blocks = new_blocks;
+        }
+
+        if swaps_dims {
+            std::mem::swap(&mut coeffs.width, &mut coeffs.height);
+            for comp in &mut coeffs.components {
+                std::mem::swap(&mut comp.h_sampling, &mut comp.v_sampling);
+            }
+        }
+    }
+
+    // NO_OUTPUT: skip writing, return empty.
+    if options.no_output {
+        return Ok(Vec::new());
+    }
+
+    // Write output with the appropriate encoding.
+    if options.optimize {
+        write_coefficients_optimized(&coeffs)
+    } else {
+        write_coefficients(&coeffs)
+    }
+}
+
+/// Write DCT coefficients with optimized Huffman tables (2-pass encoding).
+///
+/// Pass 1 gathers symbol frequencies from the coefficient data, then
+/// generates optimal Huffman tables. Pass 2 encodes with those tables.
+fn write_coefficients_optimized(coeffs: &JpegCoefficients) -> Result<Vec<u8>> {
+    use crate::encode::huff_opt;
+
+    let num_components: usize = coeffs.components.len();
+    let is_grayscale: bool = num_components == 1;
+
+    let max_h: usize = coeffs
+        .components
+        .iter()
+        .map(|c| c.h_sampling as usize)
+        .max()
+        .unwrap_or(1);
+    let max_v: usize = coeffs
+        .components
+        .iter()
+        .map(|c| c.v_sampling as usize)
+        .max()
+        .unwrap_or(1);
+    let mcus_x: usize = coeffs.components[0].blocks_x / coeffs.components[0].h_sampling as usize;
+    let mcus_y: usize = coeffs.components[0].blocks_y / coeffs.components[0].v_sampling as usize;
+
+    // === Pass 1: gather symbol frequencies ===
+    let mut dc_luma_freq = [0u32; 257];
+    let mut dc_chroma_freq = [0u32; 257];
+    let mut ac_luma_freq = [0u32; 257];
+    let mut ac_chroma_freq = [0u32; 257];
+
+    let mut prev_dc: Vec<i16> = vec![0i16; num_components];
+
+    for mcu_y in 0..mcus_y {
+        for mcu_x in 0..mcus_x {
+            for (ci, comp) in coeffs.components.iter().enumerate() {
+                let dc_freq: &mut [u32; 257] = if ci == 0 {
+                    &mut dc_luma_freq
+                } else {
+                    &mut dc_chroma_freq
+                };
+                let ac_freq: &mut [u32; 257] = if ci == 0 {
+                    &mut ac_luma_freq
+                } else {
+                    &mut ac_chroma_freq
+                };
+
+                for v in 0..comp.v_sampling as usize {
+                    for h in 0..comp.h_sampling as usize {
+                        let bx: usize = mcu_x * comp.h_sampling as usize + h;
+                        let by: usize = mcu_y * comp.v_sampling as usize + v;
+                        let block_idx: usize = by * comp.blocks_x + bx;
+                        let block: &[i16; 64] = &comp.blocks[block_idx];
+
+                        let diff: i16 = block[0] - prev_dc[ci];
+                        prev_dc[ci] = block[0];
+                        huff_opt::gather_dc_symbol(diff, dc_freq);
+                        huff_opt::gather_ac_symbols(block, ac_freq);
+                    }
+                }
+            }
+        }
+    }
+
+    // Add pseudo-symbol (required by Annex K.2 optimal table generation).
+    dc_luma_freq[256] = 1;
+    ac_luma_freq[256] = 1;
+    dc_chroma_freq[256] = 1;
+    ac_chroma_freq[256] = 1;
+
+    // Generate optimal tables.
+    let (dc_luma_bits, dc_luma_values) = huff_opt::gen_optimal_table(&dc_luma_freq);
+    let (ac_luma_bits, ac_luma_values) = huff_opt::gen_optimal_table(&ac_luma_freq);
+    let (dc_chroma_bits, dc_chroma_values) = huff_opt::gen_optimal_table(&dc_chroma_freq);
+    let (ac_chroma_bits, ac_chroma_values) = huff_opt::gen_optimal_table(&ac_chroma_freq);
+
+    // Build encoding tables from optimal bits/values.
+    let dc_luma_table = build_huff_table(&dc_luma_bits, &dc_luma_values);
+    let ac_luma_table = build_huff_table(&ac_luma_bits, &ac_luma_values);
+    let dc_chroma_table = build_huff_table(&dc_chroma_bits, &dc_chroma_values);
+    let ac_chroma_table = build_huff_table(&ac_chroma_bits, &ac_chroma_values);
+
+    // === Pass 2: entropy encode with optimal tables ===
+    let mut bit_writer = BitWriter::new(coeffs.width as usize * coeffs.height as usize);
+    let mut prev_dc_pass2: Vec<i16> = vec![0i16; num_components];
+
+    for mcu_y in 0..mcus_y {
+        for mcu_x in 0..mcus_x {
+            for (ci, comp) in coeffs.components.iter().enumerate() {
+                let dc_table = if ci == 0 {
+                    &dc_luma_table
+                } else {
+                    &dc_chroma_table
+                };
+                let ac_table = if ci == 0 {
+                    &ac_luma_table
+                } else {
+                    &ac_chroma_table
+                };
+
+                for v in 0..comp.v_sampling as usize {
+                    for h in 0..comp.h_sampling as usize {
+                        let bx: usize = mcu_x * comp.h_sampling as usize + h;
+                        let by: usize = mcu_y * comp.v_sampling as usize + v;
+                        let block_idx: usize = by * comp.blocks_x + bx;
+                        let block: &[i16; 64] = &comp.blocks[block_idx];
+
+                        HuffmanEncoder::encode_block(
+                            &mut bit_writer,
+                            block,
+                            &mut prev_dc_pass2[ci],
+                            dc_table,
+                            ac_table,
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    bit_writer.flush();
+
+    // === Assemble output ===
+    let mut output: Vec<u8> = Vec::with_capacity(bit_writer.data().len() + 1024);
+
+    marker_writer::write_soi(&mut output);
+    marker_writer::write_app0_jfif(&mut output);
+
+    // Quantization tables.
+    for (i, qt) in coeffs.quant_tables.iter().enumerate() {
+        marker_writer::write_dqt(&mut output, i as u8, qt);
+    }
+
+    // Frame header (SOF0).
+    let components: Vec<(u8, u8, u8, u8)> = coeffs
+        .components
+        .iter()
+        .enumerate()
+        .map(|(i, c)| {
+            (
+                (i + 1) as u8,
+                c.h_sampling,
+                c.v_sampling,
+                c.quant_table_index,
+            )
+        })
+        .collect();
+    marker_writer::write_sof0(&mut output, coeffs.width, coeffs.height, &components);
+
+    // Optimized Huffman tables.
+    marker_writer::write_dht(&mut output, 0, 0, &dc_luma_bits, &dc_luma_values);
+    marker_writer::write_dht(&mut output, 1, 0, &ac_luma_bits, &ac_luma_values);
+    if !is_grayscale {
+        marker_writer::write_dht(&mut output, 0, 1, &dc_chroma_bits, &dc_chroma_values);
+        marker_writer::write_dht(&mut output, 1, 1, &ac_chroma_bits, &ac_chroma_values);
+    }
+
+    // Scan header.
+    let scan_components: Vec<(u8, u8, u8)> = coeffs
+        .components
+        .iter()
+        .enumerate()
+        .map(|(i, _)| {
+            let tbl: u8 = if i == 0 { 0u8 } else { 1u8 };
+            ((i + 1) as u8, tbl, tbl)
+        })
+        .collect();
+    marker_writer::write_sos(&mut output, &scan_components);
+
+    output.extend_from_slice(bit_writer.data());
+    marker_writer::write_eoi(&mut output);
+
+    Ok(output)
 }
 
 /// Convert a block from natural (row-major) order to zigzag order.
