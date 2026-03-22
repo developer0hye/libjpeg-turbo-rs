@@ -3,6 +3,12 @@ use crate::common::huffman_table::HuffmanTable;
 use crate::common::quant_table::QuantTable;
 use crate::common::types::*;
 
+/// "ICC_PROFILE\0" identifier (12 bytes) in APP2 markers.
+const ICC_PROFILE_HEADER: &[u8; 12] = b"ICC_PROFILE\0";
+
+/// "Exif\0\0" identifier (6 bytes) in APP1 markers.
+const EXIF_HEADER: &[u8; 6] = b"Exif\0\0";
+
 // JPEG marker codes
 const SOI: u8 = 0xD8;
 const EOI: u8 = 0xD9;
@@ -43,6 +49,14 @@ pub struct JpegMetadata {
     pub entropy_data_offset: usize,
     /// For progressive: all scans with table snapshots.
     pub scans: Vec<ScanInfo>,
+    /// True if an Adobe APP14 marker was found.
+    pub saw_adobe_marker: bool,
+    /// Adobe color transform code (0 = CMYK/RGB, 1 = YCbCr, 2 = YCCK).
+    pub adobe_transform: u8,
+    /// ICC profile chunks from APP2 markers (reassembled via `common::icc`).
+    pub icc_chunks: Vec<IccChunk>,
+    /// Raw EXIF TIFF data from the first APP1 marker (after "Exif\0\0" header).
+    pub exif_data: Option<Vec<u8>>,
 }
 
 /// Reads and parses JPEG markers from a byte slice.
@@ -67,6 +81,10 @@ impl<'a> MarkerReader<'a> {
         let mut ac_huffman_tables: [Option<HuffmanTable>; 4] = [None, None, None, None];
         let mut restart_interval: u16 = 0;
         let mut scans: Vec<ScanInfo> = Vec::new();
+        let mut saw_adobe_marker: bool = false;
+        let mut adobe_transform: u8 = 0;
+        let mut icc_chunks: Vec<IccChunk> = Vec::new();
+        let mut exif_data: Option<Vec<u8>> = None;
 
         loop {
             let marker = self.read_marker()?;
@@ -109,7 +127,19 @@ impl<'a> MarkerReader<'a> {
                 EOI => {
                     break;
                 }
-                // Skip APPn and COM markers
+                // APP1 (EXIF) — parse for EXIF metadata
+                0xE1 => {
+                    self.read_app1(&mut exif_data)?;
+                }
+                // APP2 (ICC profile) — parse for ICC profile chunks
+                0xE2 => {
+                    self.read_app2(&mut icc_chunks)?;
+                }
+                // APP14 (Adobe marker) — parse for color transform info
+                0xEE => {
+                    self.read_app14(&mut saw_adobe_marker, &mut adobe_transform)?;
+                }
+                // Skip other APPn and COM markers
                 m if (0xE0..=0xEF).contains(&m) || m == COM => {
                     self.skip_marker_segment()?;
                 }
@@ -140,6 +170,10 @@ impl<'a> MarkerReader<'a> {
             restart_interval,
             entropy_data_offset: first_offset,
             scans,
+            saw_adobe_marker,
+            adobe_transform,
+            icc_chunks,
+            exif_data,
         })
     }
 
@@ -225,6 +259,83 @@ impl<'a> MarkerReader<'a> {
             return Err(JpegError::UnexpectedEof);
         }
         self.pos += skip;
+        Ok(())
+    }
+
+    /// Parse Adobe APP14 marker to extract color transform.
+    /// Transform values: 0 = CMYK or RGB, 1 = YCbCr, 2 = YCCK.
+    fn read_app14(&mut self, saw_adobe: &mut bool, transform: &mut u8) -> Result<()> {
+        let length = self.read_u16_be()? as usize;
+        if length < 2 {
+            return Err(JpegError::CorruptData("APP14 segment length < 2".into()));
+        }
+        let end = self.pos + length - 2;
+
+        // Adobe APP14 marker starts with "Adobe" (5 bytes) and is at least 12 bytes
+        if length >= 14
+            && self.pos + 12 <= self.data.len()
+            && &self.data[self.pos..self.pos + 5] == b"Adobe"
+        {
+            // Skip "Adobe" (5) + version (2) + flags0 (2) + flags1 (2) = 11 bytes
+            *transform = self.data[self.pos + 11];
+            *saw_adobe = true;
+        }
+
+        self.pos = end;
+        Ok(())
+    }
+
+    /// Parse APP1 marker for EXIF data.
+    /// Only the first EXIF APP1 is stored; subsequent ones are skipped.
+    fn read_app1(&mut self, exif_data: &mut Option<Vec<u8>>) -> Result<()> {
+        let length = self.read_u16_be()? as usize;
+        if length < 2 {
+            return Err(JpegError::CorruptData("APP1 segment length < 2".into()));
+        }
+        let end = self.pos + length - 2;
+
+        // "Exif\0\0" header is 6 bytes; only store first EXIF APP1
+        if exif_data.is_none()
+            && length >= 8
+            && self.pos + 6 <= self.data.len()
+            && &self.data[self.pos..self.pos + 6] == EXIF_HEADER
+        {
+            let data_start = self.pos + 6;
+            let data_len = end.saturating_sub(data_start);
+            *exif_data = Some(self.data[data_start..data_start + data_len].to_vec());
+        }
+
+        self.pos = end;
+        Ok(())
+    }
+
+    /// Parse APP2 marker for ICC profile data.
+    /// ICC profile chunks have a 14-byte overhead: "ICC_PROFILE\0" (12) + seq_no (1) + num_markers (1).
+    fn read_app2(&mut self, icc_chunks: &mut Vec<IccChunk>) -> Result<()> {
+        let length = self.read_u16_be()? as usize;
+        if length < 2 {
+            return Err(JpegError::CorruptData("APP2 segment length < 2".into()));
+        }
+        let end = self.pos + length - 2;
+
+        // ICC_PROFILE header: 12 bytes identifier + 1 seq_no + 1 num_markers = 14 bytes overhead
+        if length >= 16
+            && self.pos + 14 <= self.data.len()
+            && &self.data[self.pos..self.pos + 12] == ICC_PROFILE_HEADER
+        {
+            let seq_no = self.data[self.pos + 12];
+            let num_markers = self.data[self.pos + 13];
+            let data_start = self.pos + 14;
+            let data_len = end.saturating_sub(data_start);
+            let data = self.data[data_start..data_start + data_len].to_vec();
+            icc_chunks.push(IccChunk {
+                seq_no,
+                num_markers,
+                data,
+            });
+        }
+
+        self.pos = end;
         Ok(())
     }
 

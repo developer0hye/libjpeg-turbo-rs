@@ -25,3 +25,19 @@ pub enum JpegError {
 
 /// Convenience alias used throughout the crate.
 pub type Result<T> = std::result::Result<T, JpegError>;
+
+/// Non-fatal warning that allows recovery in lenient mode.
+#[derive(Debug, Clone)]
+pub enum DecodeWarning {
+    /// Huffman decode error at the given MCU position.
+    HuffmanError {
+        mcu_x: usize,
+        mcu_y: usize,
+        message: String,
+    },
+    /// Data ended before all MCUs were decoded.
+    TruncatedData {
+        decoded_mcus: usize,
+        total_mcus: usize,
+    },
+}
