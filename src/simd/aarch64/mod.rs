@@ -3,6 +3,9 @@
 //! NEON is mandatory on ARMv8, so no runtime feature detection is needed.
 
 pub mod color;
+pub mod color_encode;
+pub mod downsample;
+pub mod fdct;
 pub mod idct;
 pub mod upsample;
 
