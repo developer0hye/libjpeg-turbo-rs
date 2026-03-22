@@ -181,6 +181,29 @@ pub fn compress_lossless_extended(
     )
 }
 
+/// Compress with arithmetic progressive encoding (SOF10).
+///
+/// Combines progressive multi-scan encoding with arithmetic entropy coding.
+/// Produces a progressive JPEG that renders incrementally and uses arithmetic
+/// coding for better compression than Huffman-based progressive.
+pub fn compress_arithmetic_progressive(
+    pixels: &[u8],
+    width: usize,
+    height: usize,
+    pixel_format: PixelFormat,
+    quality: u8,
+    subsampling: Subsampling,
+) -> Result<Vec<u8>> {
+    encoder::compress_arithmetic_progressive(
+        pixels,
+        width,
+        height,
+        pixel_format,
+        quality,
+        subsampling,
+    )
+}
+
 /// Compress with arithmetic entropy coding (SOF9).
 ///
 /// Uses QM-coder binary arithmetic coding instead of Huffman coding.

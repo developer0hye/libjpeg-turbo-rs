@@ -187,6 +187,28 @@ pub fn write_sof9(buf: &mut Vec<u8>, width: u16, height: u16, components: &[(u8,
     }
 }
 
+/// Write SOF10 (Start Of Frame, Arithmetic Progressive DCT) marker.
+///
+/// Same structure as SOF2 but uses marker code 0xCA for arithmetic coding.
+pub fn write_sof10(buf: &mut Vec<u8>, width: u16, height: u16, components: &[(u8, u8, u8, u8)]) {
+    buf.push(0xFF);
+    buf.push(0xCA); // SOF10
+
+    let length: u16 = 2 + 1 + 2 + 2 + 1 + (components.len() as u16 * 3);
+    buf.extend_from_slice(&length.to_be_bytes());
+
+    buf.push(8); // 8-bit precision
+    buf.extend_from_slice(&height.to_be_bytes());
+    buf.extend_from_slice(&width.to_be_bytes());
+    buf.push(components.len() as u8);
+
+    for &(id, h_samp, v_samp, quant_tbl_id) in components {
+        buf.push(id);
+        buf.push((h_samp << 4) | v_samp);
+        buf.push(quant_tbl_id);
+    }
+}
+
 /// Write SOS marker for progressive scan with spectral selection and successive approximation.
 pub fn write_sos_progressive(
     buf: &mut Vec<u8>,
