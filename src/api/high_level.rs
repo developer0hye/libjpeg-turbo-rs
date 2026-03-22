@@ -73,3 +73,17 @@ pub fn compress(
 ) -> Result<Vec<u8>> {
     encoder::compress(pixels, width, height, pixel_format, quality, subsampling)
 }
+
+/// Compress with optimized Huffman tables (2-pass encoding).
+///
+/// Produces smaller output than `compress()` at the cost of an extra encoding pass.
+pub fn compress_optimized(
+    pixels: &[u8],
+    width: usize,
+    height: usize,
+    pixel_format: PixelFormat,
+    quality: u8,
+    subsampling: Subsampling,
+) -> Result<Vec<u8>> {
+    encoder::compress_optimized(pixels, width, height, pixel_format, quality, subsampling)
+}
