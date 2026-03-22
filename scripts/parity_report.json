@@ -1,0 +1,395 @@
+{
+  "summary": {
+    "c_estimated_test_cases": 44125,
+    "rust_test_count": 930,
+    "rust_test_files": 81,
+    "test_parity_md_checked": 202,
+    "test_parity_md_unchecked": 95
+  },
+  "dimension_coverage": {
+    "subsampling": {
+      "c_modes": [
+        "444",
+        "422",
+        "440",
+        "420",
+        "411",
+        "441",
+        "410",
+        "gray"
+      ],
+      "rust_covered": [
+        "411",
+        "420",
+        "422",
+        "440",
+        "441",
+        "444",
+        "gray"
+      ],
+      "missing": [
+        "410"
+      ]
+    },
+    "pixel_formats": {
+      "c_formats": [
+        "TJPF_ABGR",
+        "TJPF_ARGB",
+        "TJPF_BGR",
+        "TJPF_BGRA",
+        "TJPF_BGRX",
+        "TJPF_CMYK",
+        "TJPF_GRAY",
+        "TJPF_RGB",
+        "TJPF_RGBA",
+        "TJPF_RGBX",
+        "TJPF_XBGR",
+        "TJPF_XRGB"
+      ],
+      "rust_covered": [
+        "TJPF_ABGR",
+        "TJPF_ARGB",
+        "TJPF_BGR",
+        "TJPF_BGRA",
+        "TJPF_BGRX",
+        "TJPF_CMYK",
+        "TJPF_GRAY",
+        "TJPF_RGB",
+        "TJPF_RGBA",
+        "TJPF_RGBX",
+        "TJPF_XBGR",
+        "TJPF_XRGB"
+      ],
+      "missing": []
+    },
+    "quality_levels": {
+      "c_levels": [
+        1,
+        75,
+        100
+      ],
+      "rust_covered": [
+        1,
+        50,
+        75,
+        90,
+        100
+      ],
+      "missing": []
+    },
+    "dct_methods": {
+      "c_methods": [
+        "islow",
+        "ifast",
+        "float"
+      ],
+      "rust_covered": [
+        "float",
+        "ifast",
+        "islow"
+      ],
+      "missing": []
+    },
+    "entropy_coding": {
+      "c_modes": [
+        "baseline",
+        "optimized",
+        "arithmetic",
+        "progressive",
+        "progressive+arithmetic"
+      ],
+      "rust_covered": [
+        "arithmetic",
+        "baseline",
+        "optimized",
+        "progressive",
+        "progressive+arithmetic"
+      ],
+      "missing": []
+    },
+    "scaling_factors": {
+      "c_scales": [
+        "16/8",
+        "15/8",
+        "14/8",
+        "13/8",
+        "12/8",
+        "11/8",
+        "10/8",
+        "9/8",
+        "7/8",
+        "6/8",
+        "5/8",
+        "4/8",
+        "3/8",
+        "2/8",
+        "1/8"
+      ],
+      "rust_covered": [
+        "1/2",
+        "1/4",
+        "1/8"
+      ],
+      "missing_count": 14
+    },
+    "precision": {
+      "c_precisions": [
+        2,
+        3,
+        4,
+        5,
+        6,
+        7,
+        8,
+        9,
+        10,
+        11,
+        12,
+        13,
+        14,
+        15,
+        16
+      ],
+      "rust_covered": [
+        8,
+        12,
+        16
+      ],
+      "missing": [
+        2,
+        3,
+        4,
+        5,
+        6,
+        7,
+        9,
+        10,
+        11,
+        13,
+        14,
+        15
+      ]
+    },
+    "transform_ops": {
+      "c_ops": [
+        "hflip",
+        "none",
+        "rot180",
+        "rot270",
+        "rot90",
+        "transpose",
+        "transverse",
+        "vflip"
+      ],
+      "rust_covered": [
+        "hflip",
+        "none",
+        "rot180",
+        "rot270",
+        "rot90",
+        "transpose",
+        "transverse",
+        "vflip"
+      ],
+      "missing": []
+    },
+    "crop_regions": {
+      "c_regions": [
+        "14x14+23+23",
+        "21x21+4+4",
+        "18x18+13+13",
+        "21x21+0+0",
+        "24x26+20+18"
+      ],
+      "rust_covered": [],
+      "missing": [
+        "14x14+23+23",
+        "18x18+13+13",
+        "21x21+0+0",
+        "21x21+4+4",
+        "24x26+20+18"
+      ]
+    },
+    "copy_modes": {
+      "c_modes": [
+        "all",
+        "none",
+        "icc-only"
+      ],
+      "rust_covered": [
+        "all",
+        "none"
+      ],
+      "missing": [
+        "icc-only"
+      ]
+    },
+    "restart": {
+      "c_modes": [
+        "none",
+        "mcu-rows",
+        "mcu-blocks",
+        "byte-restart (-r 1b)"
+      ],
+      "rust_covered": [
+        "mcu-blocks",
+        "mcu-rows",
+        "none"
+      ],
+      "missing": [
+        "byte-restart (-r 1b)"
+      ]
+    },
+    "validation_methods": {
+      "c_methods": [
+        "MD5 hash comparison",
+        "binary file cmp",
+        "pixel tolerance check"
+      ],
+      "rust_methods": [
+        "pixel tolerance check",
+        "PSNR measurement"
+      ],
+      "missing": [
+        "MD5 hash comparison",
+        "binary file cmp"
+      ]
+    },
+    "merged_upsampling": {
+      "c_tested": true,
+      "rust_tested": false,
+      "note": "420m/422m merged upsampling optimization not implemented in Rust"
+    },
+    "rgb565": {
+      "c_tested": true,
+      "rust_decode_exists": true,
+      "rust_dithered": true,
+      "missing": "dithered RGB565, RGB565 with merged upsampling"
+    },
+    "cross_product_testing": {
+      "c_approach": "Full nested loops (6+ deep) with skip conditions",
+      "rust_approach": "Grouped tests with representative combinations",
+      "has_rust_cross_product": true,
+      "gap": "C tests ~44K combos, Rust tests ~1K individual tests"
+    }
+  },
+  "gaps": [
+    {
+      "dimension": "subsampling",
+      "missing_items": [
+        "410"
+      ],
+      "count": 1
+    },
+    {
+      "dimension": "precision",
+      "missing_items": [
+        2,
+        3,
+        4,
+        5,
+        6,
+        7,
+        9,
+        10,
+        11,
+        13,
+        14,
+        15
+      ],
+      "count": 12
+    },
+    {
+      "dimension": "crop_regions",
+      "missing_items": [
+        "14x14+23+23",
+        "18x18+13+13",
+        "21x21+0+0",
+        "21x21+4+4",
+        "24x26+20+18"
+      ],
+      "count": 5
+    },
+    {
+      "dimension": "copy_modes",
+      "missing_items": [
+        "icc-only"
+      ],
+      "count": 1
+    },
+    {
+      "dimension": "restart",
+      "missing_items": [
+        "byte-restart (-r 1b)"
+      ],
+      "count": 1
+    },
+    {
+      "dimension": "validation_methods",
+      "missing_items": [
+        "MD5 hash comparison",
+        "binary file cmp"
+      ],
+      "count": 2
+    },
+    {
+      "dimension": "rgb565",
+      "missing_items": "dithered RGB565, RGB565 with merged upsampling",
+      "count": 1
+    }
+  ],
+  "strengths": [
+    "Malformed input testing (37 tests) \u2014 C relies on OSS-Fuzz, we have explicit tests",
+    "Extreme dimension testing (50 tests) \u2014 not in C unit tests",
+    "Concurrency testing (8 tests) \u2014 C is single-threaded tests only",
+    "Memory limit enforcement testing (17 tests) \u2014 more explicit than C",
+    "6 cargo-fuzz targets with seed corpus",
+    "Progressive scan-by-scan API testing \u2014 not in C TurboJPEG API",
+    "Builder pattern interaction testing",
+    "Send/Sync trait compile-time verification"
+  ],
+  "key_gaps_ordered": [
+    {
+      "priority": 1,
+      "gap": "Cross-product coverage",
+      "detail": "C tests ~44,125 parameter combinations; Rust has ~930 individual tests",
+      "impact": "May miss interactions between parameters"
+    },
+    {
+      "priority": 2,
+      "gap": "MD5/binary bitstream validation",
+      "detail": "C validates exact bitstream identity via MD5; Rust validates pixel-level only",
+      "impact": "Cannot detect bitstream-level regressions (e.g., changed marker order)"
+    },
+    {
+      "priority": 3,
+      "gap": "Scaling factors",
+      "detail": "C tests 15 factors; Rust tests 3",
+      "impact": "Missing intermediate scale decode paths"
+    },
+    {
+      "priority": 4,
+      "gap": "Merged upsampling (420m/422m)",
+      "detail": "C tests merged upsampling variants; Rust doesn't implement this optimization",
+      "impact": "Performance gap, not correctness"
+    },
+    {
+      "priority": 5,
+      "gap": "Precision coverage",
+      "detail": "C tests precisions 2-16; Rust tests [8, 12, 16]",
+      "impact": "Missing lossless precision variants 2-7, 9-11, 13-15"
+    },
+    {
+      "priority": 6,
+      "gap": "RGB565 dithered decode",
+      "detail": "C tests 8 RGB565 combinations; Rust has basic RGB565 decode only",
+      "impact": "Low-end display output path untested"
+    },
+    {
+      "priority": 7,
+      "gap": "Copy mode: ICC-only",
+      "detail": "C tjtrantest tests -c i (copy ICC only); Rust only has all/none",
+      "impact": "Missing transform marker copy granularity"
+    }
+  ]
+}
