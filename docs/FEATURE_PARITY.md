@@ -355,10 +355,10 @@
 ### Source / Destination
 - [x] Memory-to-memory compress (`Vec<u8>` output)
 - [x] Memory-to-memory decompress (byte slice → `Image`)
-- [ ] `jpeg_stdio_dest()` / `jpeg_stdio_src()` — File I/O
-- [ ] `jpeg_mem_dest()` / `jpeg_mem_src()` — C memory I/O (Rust equivalent: already native)
-- [ ] Custom `jpeg_destination_mgr` — User-defined output stream
-- [ ] Custom `jpeg_source_mgr` — User-defined input stream
+- [x] `jpeg_stdio_dest()` / `jpeg_stdio_src()` — File I/O (`stream::compress_to_file` / `stream::decompress_from_file`)
+- [x] `jpeg_mem_dest()` / `jpeg_mem_src()` — C memory I/O (Rust equivalent: already native)
+- [x] Custom `jpeg_destination_mgr` — User-defined output stream (`stream::compress_to_writer`)
+- [x] Custom `jpeg_source_mgr` — User-defined input stream (`stream::decompress_from_reader`)
 - [ ] `TJPARAM_NOREALLOC` — Pre-allocated output buffer
 
 ### Buffer Size Calculation
@@ -367,8 +367,8 @@
 - [ ] `tj3TransformBufSize()` — Transform output buffer size
 
 ### Image File I/O (BMP/PPM)
-- [ ] `tj3LoadImage8()` / `tj3LoadImage12()` / `tj3LoadImage16()`
-- [ ] `tj3SaveImage8()` / `tj3SaveImage12()` / `tj3SaveImage16()`
+- [x] `tj3LoadImage8()` / `tj3LoadImage12()` / `tj3LoadImage16()` — 8-bit implemented (`load_image` / `load_image_from_bytes`)
+- [x] `tj3SaveImage8()` / `tj3SaveImage12()` / `tj3SaveImage16()` — 8-bit implemented (`save_bmp` / `save_ppm`)
 
 ### Memory Management
 - [ ] Custom `jpeg_memory_mgr` — Pool-based allocator
@@ -438,7 +438,7 @@
 | YUV/Planar API | 0 | 12 | 0% |
 | SIMD (aarch64) | 7 | 12 | 58% |
 | SIMD (x86_64) | 0 | 6 | 0% |
-| Memory & I/O | 2 | ~20 | ~10% |
+| Memory & I/O | 8 | ~20 | ~40% |
 | Error handling | 5 | ~14 | ~36% |
 | Progress | 4 | 4 | 100% |
 | TJ3 Handle API | 0 | ~6 | 0% |
