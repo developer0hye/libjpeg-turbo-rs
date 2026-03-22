@@ -2,6 +2,7 @@ pub mod coefficient;
 pub mod encoder;
 pub mod high_level;
 pub mod image_io;
+pub mod precision;
 pub mod progressive_output;
 pub mod quantize;
 pub mod raw_data;
