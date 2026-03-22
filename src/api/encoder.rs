@@ -1,6 +1,7 @@
 use crate::common::error::Result;
 use crate::common::types::{DctMethod, PixelFormat, ScanScript, Subsampling};
 use crate::encode::pipeline as encoder;
+use crate::encode::tables;
 
 /// Configuration for DRI restart interval encoding.
 #[derive(Debug, Clone, Copy)]
@@ -43,6 +44,7 @@ pub struct Encoder<'a> {
     exif_data: Option<&'a [u8]>,
     comment: Option<&'a str>,
     scan_script: Option<Vec<ScanScript>>,
+    quality_factors: Option<[u8; 4]>,
     custom_quant_tables: [Option<[u16; 64]>; 4],
     custom_huffman_dc: [Option<HuffmanTableDef>; 4],
     custom_huffman_ac: [Option<HuffmanTableDef>; 4],
@@ -67,6 +69,7 @@ impl<'a> Encoder<'a> {
             lossless_point_transform: 0,
             grayscale_from_color: false,
             restart_interval: None,
+            quality_factors: None,
             scan_script: None,
             icc_profile: None,
             exif_data: None,
@@ -81,6 +84,18 @@ impl<'a> Encoder<'a> {
     /// Set JPEG quality (1-100, default 75).
     pub fn quality(mut self, quality: u8) -> Self {
         self.quality = quality;
+        self
+    }
+
+    /// Set per-component quality for a specific quantization table slot (0-3).
+    ///
+    /// This allows different quality levels for each component. For example,
+    /// table 0 controls luma quality and table 1 controls chroma quality.
+    /// Slots without explicit quality factors fall back to the global quality.
+    pub fn quality_factor(mut self, table_index: usize, quality: u8) -> Self {
+        assert!(table_index < 4, "quality factor table index must be 0..3");
+        let factors = self.quality_factors.get_or_insert([self.quality; 4]);
+        factors[table_index] = quality;
         self
     }
 
@@ -248,9 +263,32 @@ impl<'a> Encoder<'a> {
         }
     }
 
-    /// Returns true if any custom quantization table has been set.
+    /// Build effective quantization tables, merging per-component quality factors
+    /// with any explicitly set custom quant tables. Custom quant tables take
+    /// priority over quality factors for the same slot.
+    fn effective_quant_tables(&self) -> [Option<[u16; 64]>; 4] {
+        let mut result = self.custom_quant_tables;
+        if let Some(factors) = self.quality_factors {
+            // Standard base tables: slot 0 = luminance, slots 1-3 = chrominance
+            let base_tables: [&[u8; 64]; 4] = [
+                &tables::STD_LUMINANCE_QUANT_TABLE,
+                &tables::STD_CHROMINANCE_QUANT_TABLE,
+                &tables::STD_CHROMINANCE_QUANT_TABLE,
+                &tables::STD_CHROMINANCE_QUANT_TABLE,
+            ];
+            for (i, base) in base_tables.iter().enumerate() {
+                if result[i].is_none() {
+                    result[i] = Some(tables::quality_scale_quant_table(base, factors[i]));
+                }
+            }
+        }
+        result
+    }
+
+    /// Returns true if any custom quantization table has been set, either
+    /// explicitly or via per-component quality factors.
     fn has_custom_quant_tables(&self) -> bool {
-        self.custom_quant_tables.iter().any(|t| t.is_some())
+        self.custom_quant_tables.iter().any(|t| t.is_some()) || self.quality_factors.is_some()
     }
 
     /// Returns true if any custom Huffman table has been set.
@@ -415,6 +453,7 @@ impl<'a> Encoder<'a> {
                 &self.custom_huffman_ac,
             )?
         } else if self.has_custom_quant_tables() {
+            let effective_tables = self.effective_quant_tables();
             encoder::compress_custom_quant(
                 effective_pixels,
                 self.width,
@@ -422,7 +461,7 @@ impl<'a> Encoder<'a> {
                 effective_format,
                 self.quality,
                 self.subsampling,
-                &self.custom_quant_tables,
+                &effective_tables,
             )?
         } else if restart_interval > 0 {
             encoder::compress_with_restart(
