@@ -1,0 +1,10 @@
+#![no_main]
+use libfuzzer_sys::fuzz_target;
+
+fuzz_target!(|data: &[u8]| {
+    // Read coefficients from arbitrary data, then attempt to write them back.
+    // Neither read_coefficients nor write_coefficients should panic.
+    if let Ok(coefficients) = libjpeg_turbo_rs::read_coefficients(data) {
+        let _ = libjpeg_turbo_rs::write_coefficients(&coefficients);
+    }
+});
