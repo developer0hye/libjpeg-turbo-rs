@@ -4,11 +4,12 @@
 /// and marker writing to produce a valid baseline JPEG file.
 use crate::api::encoder::HuffmanTableDef;
 use crate::common::error::{JpegError, Result};
-use crate::common::types::{PixelFormat, Subsampling};
+use crate::common::types::{PixelFormat, ScanScript, Subsampling};
 use crate::encode::color;
 use crate::encode::fdct;
 use crate::encode::huffman_encode::{build_huff_table, BitWriter, HuffTable, HuffmanEncoder};
 use crate::encode::marker_writer;
+use crate::encode::progressive::ProgressiveScan;
 use crate::encode::quant;
 use crate::encode::tables;
 
@@ -1342,7 +1343,7 @@ struct CompLayout {
 /// Compress as progressive JPEG (SOF2, multi-scan).
 ///
 /// Buffers all DCT coefficients, then encodes across multiple scans
-/// following a standard scan progression script.
+/// following the default `simple_progression()` scan script.
 pub fn compress_progressive(
     pixels: &[u8],
     width: usize,
@@ -1353,6 +1354,67 @@ pub fn compress_progressive(
 ) -> Result<Vec<u8>> {
     use crate::encode::progressive::simple_progression;
 
+    let is_grayscale = pixel_format == PixelFormat::Grayscale;
+    let num_components = if is_grayscale { 1 } else { 3 };
+    let scans = simple_progression(num_components);
+
+    compress_progressive_with_scans(
+        pixels,
+        width,
+        height,
+        pixel_format,
+        quality,
+        subsampling,
+        &scans,
+    )
+}
+
+/// Compress as progressive JPEG (SOF2) with a user-supplied scan script.
+///
+/// Same as `compress_progressive` but uses the provided `ScanScript` entries
+/// instead of the default `simple_progression()` scan order.
+pub fn compress_progressive_custom(
+    pixels: &[u8],
+    width: usize,
+    height: usize,
+    pixel_format: PixelFormat,
+    quality: u8,
+    subsampling: Subsampling,
+    script: &[ScanScript],
+) -> Result<Vec<u8>> {
+    // Convert user-facing ScanScript to internal ProgressiveScan representation
+    let scans: Vec<ProgressiveScan> = script
+        .iter()
+        .map(|s| ProgressiveScan {
+            component_indices: s.components.iter().map(|&c| c as usize).collect(),
+            ss: s.ss,
+            se: s.se,
+            ah: s.ah,
+            al: s.al,
+        })
+        .collect();
+
+    compress_progressive_with_scans(
+        pixels,
+        width,
+        height,
+        pixel_format,
+        quality,
+        subsampling,
+        &scans,
+    )
+}
+
+/// Shared progressive encoding logic used by both default and custom scan scripts.
+fn compress_progressive_with_scans(
+    pixels: &[u8],
+    width: usize,
+    height: usize,
+    pixel_format: PixelFormat,
+    quality: u8,
+    subsampling: Subsampling,
+    scans: &[ProgressiveScan],
+) -> Result<Vec<u8>> {
     if width == 0 || height == 0 {
         return Err(JpegError::CorruptData(
             "image dimensions must be non-zero".to_string(),
@@ -1369,7 +1431,6 @@ pub fn compress_progressive(
     }
 
     let is_grayscale = pixel_format == PixelFormat::Grayscale;
-    let num_components = if is_grayscale { 1 } else { 3 };
 
     let luma_quant = tables::quality_scale_quant_table(&tables::STD_LUMINANCE_QUANT_TABLE, quality);
     let chroma_quant =
@@ -1394,7 +1455,6 @@ pub fn compress_progressive(
     let mcus_x = (width + mcu_w - 1) / mcu_w;
     let mcus_y = (height + mcu_h - 1) / mcu_h;
 
-    // Compute per-component block dimensions
     let (h_samp, v_samp) = if is_grayscale {
         (1usize, 1usize)
     } else {
@@ -1533,9 +1593,6 @@ pub fn compress_progressive(
     let ac_chroma_table =
         build_huff_table(&tables::AC_CHROMINANCE_BITS, &tables::AC_CHROMINANCE_VALUES);
 
-    // Generate scan progression
-    let scans = simple_progression(num_components);
-
     // Assemble output
     let mut output = Vec::with_capacity(width * height * 2);
 
@@ -1594,7 +1651,7 @@ pub fn compress_progressive(
     }
 
     // Encode each scan
-    for scan in &scans {
+    for scan in scans {
         // Build SOS component list
         let sos_comps: Vec<(u8, u8, u8)> = scan
             .component_indices
