@@ -117,12 +117,12 @@
 - [x] `TJPARAM_XDENSITY` — Horizontal pixel density (`DensityInfo`)
 - [x] `TJPARAM_YDENSITY` — Vertical pixel density (`DensityInfo`)
 - [x] `TJPARAM_DENSITYUNITS` — Units (`DensityUnit` enum)
-- [ ] `JFIF_major_version` / `JFIF_minor_version` configurable
+- [x] `JFIF_major_version` / `JFIF_minor_version` configurable (`Encoder::jfif_version()`)
 - [x] `density_unit` / `X_density` / `Y_density` configurable (read from JFIF, write via `DensityInfo`)
 
 ### Adobe Marker
 - [x] `write_Adobe_marker` — Adobe APP14 (for CMYK)
-- [ ] `write_Adobe_marker` toggle — Enable/disable
+- [x] `write_Adobe_marker` toggle — Enable/disable (`Encoder::write_adobe_marker()`)
 
 ### Progressive Scan Control
 - [x] `jpeg_simple_progression()` — Standard scan script
@@ -144,9 +144,9 @@
 
 ### Input Options
 - [x] `TJPARAM_BOTTOMUP` — Bottom-up row order (`Encoder::bottom_up()`)
-- [ ] `raw_data_in` — Encode from raw downsampled component data
-- [ ] `smoothing_factor` — Input smoothing (0-100)
-- [ ] `do_fancy_downsampling` — Fancy vs simple chroma downsample
+- [x] `raw_data_in` — Encode from raw downsampled component data (`compress_raw()`)
+- [x] `smoothing_factor` — Input smoothing (0-100) (`Encoder::smoothing_factor()`)
+- [x] `do_fancy_downsampling` — Fancy vs simple chroma downsample (`Encoder::fancy_downsampling()`)
 - [ ] `CCIR601_sampling` — CCIR 601 sampling convention
 - [ ] `input_gamma` — Input gamma correction
 
@@ -156,7 +156,7 @@
 - [x] ICC APP2 (`compress_with_metadata`, multi-chunk)
 - [x] Adobe APP14 (CMYK encode)
 - [x] `jpeg_write_marker()` — Write arbitrary marker data (`marker_writer::write_marker()`)
-- [ ] `jpeg_write_m_header()` / `jpeg_write_m_byte()` — Streaming marker write
+- [x] `jpeg_write_m_header()` / `jpeg_write_m_byte()` — Streaming marker write (`MarkerStreamWriter`)
 - [ ] `jpeg_write_icc_profile()` — Standalone ICC write (without full compress)
 - [ ] `jpeg_write_tables()` — Write tables-only JPEG
 - [x] COM (comment) marker write (`Encoder::comment()`, `marker_writer::write_com()`)
@@ -210,7 +210,7 @@
 - [x] Restart marker (DRI/RST) handling
 - [x] `TJPARAM_SAVEMARKERS` — Configurable marker saving (`MarkerSaveConfig` enum: None/All/AppOnly/Specific)
 - [x] `jpeg_save_markers()` — Per-marker-type save control (`Decoder::save_markers()`)
-- [ ] `jpeg_set_marker_processor()` — Custom marker parser callback
+- [x] `jpeg_set_marker_processor()` — Custom marker parser callback (`Decoder::set_marker_processor()`)
 - [x] COM (comment) marker read/expose (`Image.comment`)
 - [x] Arbitrary marker access via `marker_list` linked list (`Image.markers()` / `Image.saved_markers`)
 - [x] JFIF version / density read (`Image.density`)

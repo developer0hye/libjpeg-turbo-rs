@@ -109,6 +109,8 @@ pub struct Decoder<'a> {
     pub(crate) block_smoothing: bool,
     /// Output colorspace override.
     pub(crate) output_colorspace: Option<ColorSpace>,
+    /// Custom marker processor callbacks, keyed by marker code.
+    marker_processors: std::collections::HashMap<u8, Box<dyn Fn(&[u8]) -> Option<Vec<u8>>>>,
 }
 
 impl<'a> Decoder<'a> {
@@ -136,6 +138,7 @@ impl<'a> Decoder<'a> {
             dct_method: DctMethod::IsLow,
             block_smoothing: false,
             output_colorspace: None,
+            marker_processors: std::collections::HashMap::new(),
         })
     }
 
@@ -231,6 +234,27 @@ impl<'a> Decoder<'a> {
         if let Ok(metadata) = reader.read_markers() {
             self.metadata = metadata;
         }
+    }
+
+    /// Register a custom marker processor callback for a specific marker type.
+    pub fn set_marker_processor<F>(&mut self, marker_type: u8, processor: F)
+    where
+        F: Fn(&[u8]) -> Option<Vec<u8>> + 'static,
+    {
+        let has_marker: bool = self
+            .metadata
+            .saved_markers
+            .iter()
+            .any(|m| m.code == marker_type);
+        if !has_marker {
+            let mut reader: MarkerReader<'_> = MarkerReader::new(self.raw_data);
+            reader.set_marker_save_config(MarkerSaveConfig::Specific(vec![marker_type]));
+            if let Ok(metadata) = reader.read_markers() {
+                self.metadata = metadata;
+            }
+        }
+        self.marker_processors
+            .insert(marker_type, Box::new(processor));
     }
 
     pub fn decode(data: &'a [u8]) -> Result<Image> {
@@ -1825,6 +1849,18 @@ impl<'a> Decoder<'a> {
     }
 
     pub fn decode_image(&self) -> Result<Image> {
+        let image: Image = self.decode_image_inner()?;
+        if !self.marker_processors.is_empty() {
+            for marker in &image.saved_markers {
+                if let Some(processor) = self.marker_processors.get(&marker.code) {
+                    processor(&marker.data);
+                }
+            }
+        }
+        Ok(image)
+    }
+
+    fn decode_image_inner(&self) -> Result<Image> {
         let frame = &self.metadata.frame;
         let width = frame.width as usize;
         let height = frame.height as usize;
