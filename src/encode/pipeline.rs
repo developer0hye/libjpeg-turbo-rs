@@ -47,6 +47,11 @@ pub fn compress(
         });
     }
 
+    // CMYK: 4-component path, no color conversion
+    if pixel_format == PixelFormat::Cmyk {
+        return compress_cmyk(pixels, width, height, quality);
+    }
+
     let is_grayscale = pixel_format == PixelFormat::Grayscale;
 
     // Generate scaled quantization tables (for DQT markers)
@@ -256,6 +261,103 @@ pub fn compress_with_metadata(
     }
     out.extend_from_slice(&base[insert_pos..]);
     Ok(out)
+}
+
+/// Compress CMYK pixel data as a 4-component JPEG with Adobe APP14 marker.
+///
+/// All 4 components use 1x1 sampling and the same quantization table.
+/// No color conversion — CMYK values are encoded directly.
+fn compress_cmyk(pixels: &[u8], width: usize, height: usize, quality: u8) -> Result<Vec<u8>> {
+    let quant_table =
+        tables::quality_scale_quant_table(&tables::STD_LUMINANCE_QUANT_TABLE, quality);
+    let divisors = scale_quant_for_fdct(&quant_table);
+
+    let dc_table = build_huff_table(&tables::DC_LUMINANCE_BITS, &tables::DC_LUMINANCE_VALUES);
+    let ac_table = build_huff_table(&tables::AC_LUMINANCE_BITS, &tables::AC_LUMINANCE_VALUES);
+
+    // Extract 4 component planes from interleaved CMYK
+    let num_pixels = width * height;
+    let mut planes: [Vec<u8>; 4] = [
+        vec![0u8; num_pixels],
+        vec![0u8; num_pixels],
+        vec![0u8; num_pixels],
+        vec![0u8; num_pixels],
+    ];
+    for i in 0..num_pixels {
+        planes[0][i] = pixels[i * 4];
+        planes[1][i] = pixels[i * 4 + 1];
+        planes[2][i] = pixels[i * 4 + 2];
+        planes[3][i] = pixels[i * 4 + 3];
+    }
+
+    // MCU = 8x8 (all 1x1 sampling)
+    let mcus_x = (width + 7) / 8;
+    let mcus_y = (height + 7) / 8;
+
+    let mut bit_writer = BitWriter::new(width * height);
+    let mut prev_dc = [0i16; 4];
+
+    for mcu_row in 0..mcus_y {
+        for mcu_col in 0..mcus_x {
+            let x0 = mcu_col * 8;
+            let y0 = mcu_row * 8;
+            for c in 0..4 {
+                encode_single_block(
+                    &planes[c],
+                    width,
+                    height,
+                    x0,
+                    y0,
+                    &divisors,
+                    &dc_table,
+                    &ac_table,
+                    &mut bit_writer,
+                    &mut prev_dc[c],
+                );
+            }
+        }
+    }
+
+    bit_writer.flush();
+
+    // Assemble output
+    let mut output = Vec::with_capacity(bit_writer.data().len() + 1024);
+
+    marker_writer::write_soi(&mut output);
+    marker_writer::write_app0_jfif(&mut output);
+    marker_writer::write_app14_adobe(&mut output, 0); // transform=0 for CMYK
+
+    // Single quant table for all 4 components
+    marker_writer::write_dqt(&mut output, 0, &quant_table);
+
+    // SOF0 with 4 components, all 1x1 sampling, same quant table
+    let components = vec![(1, 1, 1, 0), (2, 1, 1, 0), (3, 1, 1, 0), (4, 1, 1, 0)];
+    marker_writer::write_sof0(&mut output, width as u16, height as u16, &components);
+
+    // Single pair of Huffman tables shared by all 4 components
+    marker_writer::write_dht(
+        &mut output,
+        0,
+        0,
+        &tables::DC_LUMINANCE_BITS,
+        &tables::DC_LUMINANCE_VALUES,
+    );
+    marker_writer::write_dht(
+        &mut output,
+        1,
+        0,
+        &tables::AC_LUMINANCE_BITS,
+        &tables::AC_LUMINANCE_VALUES,
+    );
+
+    // SOS: 4 components, all using table 0
+    let scan_components = vec![(1, 0, 0), (2, 0, 0), (3, 0, 0), (4, 0, 0)];
+    marker_writer::write_sos(&mut output, &scan_components);
+
+    output.extend_from_slice(bit_writer.data());
+    marker_writer::write_eoi(&mut output);
+
+    Ok(output)
 }
 
 /// Per-component block layout for progressive encoding.
@@ -2339,10 +2441,10 @@ mod tests {
     }
 
     #[test]
-    fn compress_rejects_cmyk() {
+    fn compress_cmyk_produces_valid_jpeg() {
         let pixels = vec![128u8; 8 * 8 * 4];
         let result = compress(&pixels, 8, 8, PixelFormat::Cmyk, 75, Subsampling::S444);
-        assert!(result.is_err());
+        assert!(result.is_ok());
     }
 
     #[test]
