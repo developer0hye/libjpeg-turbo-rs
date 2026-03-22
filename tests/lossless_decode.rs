@@ -119,6 +119,146 @@ fn make_lossless_jpeg(pixels: &[u8], width: u16, height: u16, precision: u8) -> 
     out
 }
 
+/// Build a 3-component SOF3 (lossless) JPEG for testing.
+/// Interleaved scan: components decoded round-robin per pixel.
+fn make_lossless_jpeg_3comp(
+    y_data: &[u8],
+    cb_data: &[u8],
+    cr_data: &[u8],
+    width: u16,
+    height: u16,
+    precision: u8,
+) -> Vec<u8> {
+    let mut out = Vec::new();
+
+    // SOI
+    out.extend_from_slice(&[0xFF, 0xD8]);
+
+    // DHT — DC Huffman table 0
+    let dc_bits: [u8; 17] = [0, 0, 1, 5, 1, 1, 1, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0];
+    let dc_values: &[u8] = &[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11];
+    out.extend_from_slice(&[0xFF, 0xC4]);
+    let dht_len: u16 = 2 + 1 + 16 + dc_values.len() as u16;
+    out.extend_from_slice(&dht_len.to_be_bytes());
+    out.push(0x00); // DC table 0
+    out.extend_from_slice(&dc_bits[1..]);
+    out.extend_from_slice(dc_values);
+
+    // SOF3 — Lossless, Huffman-coded, 3 components
+    out.extend_from_slice(&[0xFF, 0xC3]);
+    let sof_len: u16 = 2 + 1 + 2 + 2 + 1 + 3 * 3; // 3 components
+    out.extend_from_slice(&sof_len.to_be_bytes());
+    out.push(precision);
+    out.extend_from_slice(&height.to_be_bytes());
+    out.extend_from_slice(&width.to_be_bytes());
+    out.push(3); // 3 components
+                 // Y: id=1, h=1, v=1, qt=0
+    out.push(1);
+    out.push(0x11);
+    out.push(0);
+    // Cb: id=2, h=1, v=1, qt=0
+    out.push(2);
+    out.push(0x11);
+    out.push(0);
+    // Cr: id=3, h=1, v=1, qt=0
+    out.push(3);
+    out.push(0x11);
+    out.push(0);
+
+    // SOS — 3 components, interleaved, predictor 1
+    out.extend_from_slice(&[0xFF, 0xDA]);
+    let sos_len: u16 = 2 + 1 + 3 * 2 + 3;
+    out.extend_from_slice(&sos_len.to_be_bytes());
+    out.push(3); // 3 components
+    out.push(1);
+    out.push(0x00); // Y: DC table 0
+    out.push(2);
+    out.push(0x00); // Cb: DC table 0
+    out.push(3);
+    out.push(0x00); // Cr: DC table 0
+    out.push(1); // Ss = predictor 1 (left)
+    out.push(0); // Se = 0
+    out.push(0x00); // Ah=0, Al=0
+
+    // Entropy-coded data: interleaved — for each pixel, encode Y diff, Cb diff, Cr diff
+    let huff_codes = build_dc_encode_table(&dc_bits, dc_values);
+    let initial_pred = 1u32 << (precision as u32 - 1);
+    let mask = (1u32 << precision) - 1;
+
+    let mut bit_buf: u32 = 0;
+    let mut bit_count: u32 = 0;
+
+    let planes: [&[u8]; 3] = [y_data, cb_data, cr_data];
+    let mut prev_rows: [Option<Vec<u16>>; 3] = [None, None, None];
+    let mut cur_rows: [Vec<u16>; 3] = [
+        vec![0u16; width as usize],
+        vec![0u16; width as usize],
+        vec![0u16; width as usize],
+    ];
+
+    for y in 0..height as usize {
+        for x in 0..width as usize {
+            for c in 0..3 {
+                let pixel = planes[c][y * width as usize + x] as i32;
+                let prediction = if y == 0 && x == 0 {
+                    initial_pred as i32
+                } else if y == 0 {
+                    cur_rows[c][x - 1] as i32
+                } else if x == 0 {
+                    prev_rows[c].as_ref().unwrap()[x] as i32
+                } else {
+                    cur_rows[c][x - 1] as i32
+                };
+
+                cur_rows[c][x] = pixel as u16;
+
+                let diff = ((pixel - prediction) as i32) & (mask as i32);
+                let signed_diff = if diff >= (1 << (precision - 1)) {
+                    diff - (1 << precision)
+                } else {
+                    diff
+                };
+
+                let (category, extra_bits, extra_len) = categorize_dc(signed_diff);
+                let (code, code_len) = huff_codes[category as usize];
+
+                bit_buf = (bit_buf << code_len) | code as u32;
+                bit_count += code_len as u32;
+                if extra_len > 0 {
+                    bit_buf = (bit_buf << extra_len) | extra_bits as u32;
+                    bit_count += extra_len as u32;
+                }
+
+                while bit_count >= 8 {
+                    bit_count -= 8;
+                    let byte = (bit_buf >> bit_count) as u8;
+                    out.push(byte);
+                    if byte == 0xFF {
+                        out.push(0x00);
+                    }
+                    bit_buf &= (1 << bit_count) - 1;
+                }
+            }
+        }
+        for c in 0..3 {
+            prev_rows[c] = Some(cur_rows[c].clone());
+        }
+    }
+
+    if bit_count > 0 {
+        let padding = 8 - bit_count;
+        bit_buf = (bit_buf << padding) | ((1 << padding) - 1);
+        let byte = bit_buf as u8;
+        out.push(byte);
+        if byte == 0xFF {
+            out.push(0x00);
+        }
+    }
+
+    out.extend_from_slice(&[0xFF, 0xD9]);
+    out
+}
+
 fn build_dc_encode_table(bits: &[u8; 17], values: &[u8]) -> Vec<(u16, u8)> {
     // Build codes from JPEG standard Huffman table specification
     let mut table = vec![(0u16, 0u8); 17]; // category 0..16
@@ -187,4 +327,30 @@ fn decode_lossless_grayscale_ramp() {
     assert_eq!(img.width, 16);
     assert_eq!(img.height, 16);
     assert_eq!(img.data, pixels);
+}
+
+#[test]
+fn decode_lossless_3comp_flat() {
+    let (w, h) = (4, 4);
+    let y_data = vec![128u8; w * h];
+    let cb_data = vec![100u8; w * h];
+    let cr_data = vec![150u8; w * h];
+    let jpeg = make_lossless_jpeg_3comp(&y_data, &cb_data, &cr_data, w as u16, h as u16, 8);
+    let img = decompress(&jpeg).unwrap();
+    assert_eq!(img.width, w);
+    assert_eq!(img.height, h);
+    assert_eq!(img.data.len(), w * h * 3);
+}
+
+#[test]
+fn decode_lossless_3comp_gradient() {
+    let (w, h) = (8, 4);
+    let y_data: Vec<u8> = (0..w * h).map(|i| (i * 3 % 256) as u8).collect();
+    let cb_data: Vec<u8> = (0..w * h).map(|i| (128 + i % 128) as u8).collect();
+    let cr_data: Vec<u8> = (0..w * h).map(|i| (64 + i * 2 % 192) as u8).collect();
+    let jpeg = make_lossless_jpeg_3comp(&y_data, &cb_data, &cr_data, w as u16, h as u16, 8);
+    let img = decompress(&jpeg).unwrap();
+    assert_eq!(img.width, w);
+    assert_eq!(img.height, h);
+    assert_eq!(img.data.len(), w * h * 3);
 }
