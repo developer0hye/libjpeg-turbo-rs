@@ -213,15 +213,19 @@ impl<'a> ArithDecoder<'a> {
 
         // Figure F.23: Decoding the magnitude category of v
         let mut m: i32 = self.decode(StatRef::Dc(dc_tbl, st_base))? as i32;
+        // Track the stats bin position (st) for Figure F.24.
+        // In C: st starts at st_base; if m!=0, st is set to dc_stats[tbl]+20
+        // and advances through the magnitude loop.
+        let mut st_pos: usize = st_base;
         if m != 0 {
             // Magnitude > 0, use X1 bins starting at index 20
-            let mut x1 = 20usize;
-            while self.decode(StatRef::Dc(dc_tbl, x1))? != 0 {
+            st_pos = 20;
+            while self.decode(StatRef::Dc(dc_tbl, st_pos))? != 0 {
                 m <<= 1;
                 if m == 0x8000 {
                     return Err(JpegError::CorruptData("arithmetic DC overflow".into()));
                 }
-                x1 += 1;
+                st_pos += 1;
             }
         }
 
@@ -237,10 +241,12 @@ impl<'a> ArithDecoder<'a> {
         }
 
         // Figure F.24: Decoding the magnitude bit pattern of v
+        // C reference: st += 14; same bin used for all magnitude bits
+        let mag_st: usize = st_pos + 14;
         let mut v = m;
         let mut bit_mask = m >> 1;
         while bit_mask != 0 {
-            if self.decode(StatRef::Fixed(0))? != 0 {
+            if self.decode(StatRef::Dc(dc_tbl, mag_st))? != 0 {
                 v |= bit_mask;
             }
             bit_mask >>= 1;
@@ -280,30 +286,33 @@ impl<'a> ArithDecoder<'a> {
 
             // Figure F.22: Decoding the sign of v
             let sign = self.decode(StatRef::Fixed(0))?;
-            let st_mag = st + 2;
+            // st += 2 in C (advance past EOB and zero-run bins to magnitude bin)
+            let mut st_pos: usize = st + 2;
 
             // Figure F.23: Decoding the magnitude category of v
-            let mut m: i32 = self.decode(StatRef::Ac(ac_tbl, st_mag))? as i32;
+            let mut m: i32 = self.decode(StatRef::Ac(ac_tbl, st_pos))? as i32;
             if m != 0 {
-                if self.decode(StatRef::Ac(ac_tbl, st_mag))? != 0 {
+                if self.decode(StatRef::Ac(ac_tbl, st_pos))? != 0 {
                     m <<= 1;
                     let kx = self.arith_ac_k[ac_tbl] as usize;
-                    let mut ext_st = if k <= kx { 189 } else { 217 };
-                    while self.decode(StatRef::Ac(ac_tbl, ext_st))? != 0 {
+                    st_pos = if k <= kx { 189 } else { 217 };
+                    while self.decode(StatRef::Ac(ac_tbl, st_pos))? != 0 {
                         m <<= 1;
                         if m == 0x8000 {
                             return Err(JpegError::CorruptData("arithmetic AC overflow".into()));
                         }
-                        ext_st += 1;
+                        st_pos += 1;
                     }
                 }
             }
 
             // Figure F.24: Decoding the magnitude bit pattern of v
+            // C reference: st += 14; same bin used for all magnitude bits
+            let mag_st: usize = st_pos + 14;
             let mut v = m;
             let mut bit_mask = m >> 1;
             while bit_mask != 0 {
-                if self.decode(StatRef::Fixed(0))? != 0 {
+                if self.decode(StatRef::Ac(ac_tbl, mag_st))? != 0 {
                     v |= bit_mask;
                 }
                 bit_mask >>= 1;
@@ -341,14 +350,15 @@ impl<'a> ArithDecoder<'a> {
         let st_base = s0 + 2 + sign;
 
         let mut m: i32 = self.decode(StatRef::Dc(dc_tbl, st_base))? as i32;
+        let mut st_pos: usize = st_base;
         if m != 0 {
-            let mut x1 = 20usize;
-            while self.decode(StatRef::Dc(dc_tbl, x1))? != 0 {
+            st_pos = 20;
+            while self.decode(StatRef::Dc(dc_tbl, st_pos))? != 0 {
                 m <<= 1;
                 if m == 0x8000 {
                     return Err(JpegError::CorruptData("arithmetic DC overflow".into()));
                 }
-                x1 += 1;
+                st_pos += 1;
             }
         }
 
@@ -362,10 +372,12 @@ impl<'a> ArithDecoder<'a> {
             self.dc_context[comp_idx] = 4 + sign * 4;
         }
 
+        // Figure F.24: C reference uses st += 14 from last magnitude bin
+        let mag_st: usize = st_pos + 14;
         let mut v = m;
         let mut bit_mask = m >> 1;
         while bit_mask != 0 {
-            if self.decode(StatRef::Fixed(0))? != 0 {
+            if self.decode(StatRef::Dc(dc_tbl, mag_st))? != 0 {
                 v |= bit_mask;
             }
             bit_mask >>= 1;
@@ -413,26 +425,29 @@ impl<'a> ArithDecoder<'a> {
                 }
             }
             let sign = self.decode(StatRef::Fixed(0))?;
-            let st_mag = st + 2;
-            let mut m: i32 = self.decode(StatRef::Ac(ac_tbl, st_mag))? as i32;
+            // st += 2 in C (advance to magnitude context bin)
+            let mut st_pos: usize = st + 2;
+            let mut m: i32 = self.decode(StatRef::Ac(ac_tbl, st_pos))? as i32;
             if m != 0 {
-                if self.decode(StatRef::Ac(ac_tbl, st_mag))? != 0 {
+                if self.decode(StatRef::Ac(ac_tbl, st_pos))? != 0 {
                     m <<= 1;
                     let kx = self.arith_ac_k[ac_tbl] as usize;
-                    let mut ext_st = if k <= kx { 189 } else { 217 };
-                    while self.decode(StatRef::Ac(ac_tbl, ext_st))? != 0 {
+                    st_pos = if k <= kx { 189 } else { 217 };
+                    while self.decode(StatRef::Ac(ac_tbl, st_pos))? != 0 {
                         m <<= 1;
                         if m == 0x8000 {
                             return Err(JpegError::CorruptData("arithmetic AC overflow".into()));
                         }
-                        ext_st += 1;
+                        st_pos += 1;
                     }
                 }
             }
+            // Figure F.24: C reference uses st += 14 from last magnitude bin
+            let mag_st: usize = st_pos + 14;
             let mut v = m;
             let mut bit_mask = m >> 1;
             while bit_mask != 0 {
-                if self.decode(StatRef::Fixed(0))? != 0 {
+                if self.decode(StatRef::Ac(ac_tbl, mag_st))? != 0 {
                     v |= bit_mask;
                 }
                 bit_mask >>= 1;

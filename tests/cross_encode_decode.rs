@@ -403,16 +403,11 @@ fn rust_encode_c_decode_progressive() {
         .output()
         .expect("failed to run djpeg");
 
-    if !output.status.success() {
-        // Known issue: progressive encoder may produce bitstreams that C
-        // djpeg rejects. Log it but don't fail the test suite -- the
-        // progressive encoder interop is tracked separately.
-        eprintln!(
-            "KNOWN ISSUE: djpeg rejected Rust progressive JPEG: {}",
-            String::from_utf8_lossy(&output.stderr).trim()
-        );
-        return;
-    }
+    assert!(
+        output.status.success(),
+        "djpeg failed on Rust progressive JPEG: {}",
+        String::from_utf8_lossy(&output.stderr).trim()
+    );
 
     let (dw, dh, c_pixels) = parse_ppm(tmp_ppm.path());
     assert_eq!(dw, w);
@@ -757,29 +752,20 @@ fn c_encode_rust_decode_various_quality() {
         }
 
         let jpeg: Vec<u8> = std::fs::read(tmp_jpg.path()).expect("read c-encoded JPEG");
-        match decompress(&jpeg) {
-            Ok(img) => {
-                assert!(
-                    img.width > 0 && img.height > 0,
-                    "q={}: decoded dimensions must be positive",
-                    q
-                );
-                assert_eq!(
-                    img.data.len(),
-                    img.width * img.height * img.pixel_format.bytes_per_pixel(),
-                    "q={}: data length mismatch",
-                    q
-                );
-            }
-            Err(e) => {
-                // Some quality settings may produce edge-case bitstreams
-                // our decoder cannot yet handle. Log and continue.
-                eprintln!(
-                    "KNOWN ISSUE: Rust decode failed for C-encoded q={}: {}",
-                    q, e
-                );
-            }
-        }
+        let img = decompress(&jpeg).unwrap_or_else(|e| {
+            panic!("Rust decode failed for C-encoded q={}: {}", q, e);
+        });
+        assert!(
+            img.width > 0 && img.height > 0,
+            "q={}: decoded dimensions must be positive",
+            q
+        );
+        assert_eq!(
+            img.data.len(),
+            img.width * img.height * img.pixel_format.bytes_per_pixel(),
+            "q={}: data length mismatch",
+            q
+        );
     }
 }
 
