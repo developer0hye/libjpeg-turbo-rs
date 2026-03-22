@@ -414,18 +414,29 @@ pub fn transform_jpeg(data: &[u8], op: TransformOp) -> Result<Vec<u8>> {
 /// Supports all 9 flags from libjpeg-turbo: perfect, trim, crop, grayscale,
 /// no_output, progressive, arithmetic, optimize, and copy_markers.
 pub fn transform_jpeg_with_options(data: &[u8], options: &TransformOptions) -> Result<Vec<u8>> {
-    // Read saved markers from the source if copy_markers is enabled.
-    let saved_markers: Vec<SavedMarker> = if options.copy_markers {
-        let mut reader: MarkerReader<'_> = MarkerReader::new(data);
-        reader.set_marker_save_config(MarkerSaveConfig::All);
-        let meta: JpegMetadata = reader.read_markers()?;
-        // Filter out JFIF APP0 since write_coefficients writes its own.
-        meta.saved_markers
-            .into_iter()
-            .filter(|m| m.code != 0xE0)
-            .collect()
-    } else {
-        Vec::new()
+    // Read saved markers from the source based on copy_markers mode.
+    let saved_markers: Vec<SavedMarker> = match options.copy_markers {
+        crate::transform::MarkerCopyMode::All => {
+            let mut reader: MarkerReader<'_> = MarkerReader::new(data);
+            reader.set_marker_save_config(MarkerSaveConfig::All);
+            let meta: JpegMetadata = reader.read_markers()?;
+            // Filter out JFIF APP0 since write_coefficients writes its own.
+            meta.saved_markers
+                .into_iter()
+                .filter(|m| m.code != 0xE0)
+                .collect()
+        }
+        crate::transform::MarkerCopyMode::IccOnly => {
+            let mut reader: MarkerReader<'_> = MarkerReader::new(data);
+            reader.set_marker_save_config(MarkerSaveConfig::All);
+            let meta: JpegMetadata = reader.read_markers()?;
+            // Keep only APP2 markers that contain ICC profile data.
+            meta.saved_markers
+                .into_iter()
+                .filter(|m| m.code == 0xE2)
+                .collect()
+        }
+        crate::transform::MarkerCopyMode::None => Vec::new(),
     };
 
     let mut coeffs = read_coefficients(data)?;

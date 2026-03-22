@@ -94,6 +94,63 @@ pub fn ycbcr_to_rgb565_row(y: &[u8], cb: &[u8], cr: &[u8], out: &mut [u8], width
     }
 }
 
+/// 4x4 ordered dither matrix for RGB565 output, matching libjpeg-turbo's jdcolor.c.
+///
+/// Each row is packed into a u32 with 4 dither values in the bytes.
+/// The matrix reduces quantization banding when truncating 8-bit RGB to 5-6-5.
+const DITHER_MATRIX: [u32; 4] = [0x0008_020A, 0x0C04_0E06, 0x030B_0109, 0x0F07_0D05];
+
+/// Convert a row of YCbCr pixels to dithered Rgb565 (5-6-5 packed, native endian).
+///
+/// Uses the same 4x4 ordered dither pattern as libjpeg-turbo. The `row_index`
+/// selects the dither row (typically `y & 3`).
+pub fn ycbcr_to_rgb565_dithered_row(
+    y: &[u8],
+    cb: &[u8],
+    cr: &[u8],
+    out: &mut [u8],
+    width: usize,
+    row_index: usize,
+) {
+    let mut dither: u32 = DITHER_MATRIX[row_index & 0x3];
+    for x in 0..width {
+        let (r, g, b) = ycbcr_to_rgb_pixel(y[x], cb[x], cr[x]);
+        let d: u8 = (dither & 0xFF) as u8;
+        // Add dither offset and clamp to 255 before truncation.
+        // R and B get full dither value (5-bit target = 3 bits lost).
+        // G gets half dither (6-bit target = 2 bits lost).
+        let rd: u8 = r.saturating_add(d);
+        let gd: u8 = g.saturating_add(d >> 1);
+        let bd: u8 = b.saturating_add(d);
+        let packed: u16 = ((rd as u16 >> 3) << 11) | ((gd as u16 >> 2) << 5) | (bd as u16 >> 3);
+        let bytes: [u8; 2] = packed.to_ne_bytes();
+        out[x * 2] = bytes[0];
+        out[x * 2 + 1] = bytes[1];
+        // Rotate dither: shift right by 8, wrap low byte to high.
+        dither = ((dither & 0xFF) << 24) | ((dither >> 8) & 0x00FF_FFFF);
+    }
+}
+
+/// Convert a grayscale value to dithered Rgb565 (5-6-5 packed, native endian).
+///
+/// For grayscale images decoded to RGB565 with dithering enabled.
+pub fn gray_to_rgb565_dithered_row(y: &[u8], out: &mut [u8], width: usize, row_index: usize) {
+    let mut dither: u32 = DITHER_MATRIX[row_index & 0x3];
+    for x in 0..width {
+        let v: u8 = y[x];
+        let d: u8 = (dither & 0xFF) as u8;
+        let vd_r: u8 = v.saturating_add(d);
+        let vd_g: u8 = v.saturating_add(d >> 1);
+        let vd_b: u8 = v.saturating_add(d);
+        let packed: u16 =
+            ((vd_r as u16 >> 3) << 11) | ((vd_g as u16 >> 2) << 5) | (vd_b as u16 >> 3);
+        let bytes: [u8; 2] = packed.to_ne_bytes();
+        out[x * 2] = bytes[0];
+        out[x * 2 + 1] = bytes[1];
+        dither = ((dither & 0xFF) << 24) | ((dither >> 8) & 0x00FF_FFFF);
+    }
+}
+
 /// Copy grayscale values directly (no color conversion needed).
 pub fn grayscale_row(y: &[u8], output: &mut [u8], width: usize) {
     output[..width].copy_from_slice(&y[..width]);

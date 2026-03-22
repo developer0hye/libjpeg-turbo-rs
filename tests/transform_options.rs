@@ -51,7 +51,7 @@ fn default_options_has_sensible_defaults() {
     assert!(!opts.progressive);
     assert!(!opts.arithmetic);
     assert!(!opts.optimize);
-    assert!(opts.copy_markers);
+    assert_eq!(opts.copy_markers, libjpeg_turbo_rs::MarkerCopyMode::All);
 }
 
 // --- Grayscale transform ---

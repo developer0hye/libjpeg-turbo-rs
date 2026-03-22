@@ -41,6 +41,36 @@ impl Default for TransformInfo {
     }
 }
 
+/// Marker copy behavior during transform.
+///
+/// Controls which APP and COM markers are preserved when writing transformed output.
+/// Corresponds to jpegtran's `-copy` option: `a` (all), `n` (none), `i` (ICC only).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MarkerCopyMode {
+    /// Copy all APP and COM markers (default). Corresponds to `-copy all` / TJXOPT default.
+    All,
+    /// Copy no markers. Corresponds to `-copy none` / TJXOPT_COPYNONE.
+    None,
+    /// Copy only ICC profile (APP2) markers. Corresponds to `-copy icc`.
+    IccOnly,
+}
+
+impl Default for MarkerCopyMode {
+    fn default() -> Self {
+        MarkerCopyMode::All
+    }
+}
+
+impl From<bool> for MarkerCopyMode {
+    fn from(value: bool) -> Self {
+        if value {
+            MarkerCopyMode::All
+        } else {
+            MarkerCopyMode::None
+        }
+    }
+}
+
 /// All 9 TJXOPT transform flags matching libjpeg-turbo's jpegtran options,
 /// plus a user callback for coefficient inspection/modification.
 ///
@@ -73,9 +103,9 @@ pub struct TransformOptions {
     /// Re-encode output with optimized Huffman tables (2-pass).
     /// Corresponds to TJXOPT_OPTIMIZE (libjpeg-turbo 3.x).
     pub optimize: bool,
-    /// Copy APP/COM markers from input to output (default: true).
-    /// When false, corresponds to TJXOPT_COPYNONE.
-    pub copy_markers: bool,
+    /// Marker copy behavior: All (default), None (TJXOPT_COPYNONE), or IccOnly.
+    /// See [`MarkerCopyMode`] for details.
+    pub copy_markers: MarkerCopyMode,
     /// User callback for inspecting/modifying DCT coefficients during transform.
     /// Called once per block after the spatial transform is applied.
     /// Arguments: (block: &mut [i16; 64], component_index: usize, block_x: usize, block_y: usize)
@@ -95,7 +125,7 @@ impl Default for TransformOptions {
             progressive: false,
             arithmetic: false,
             optimize: false,
-            copy_markers: true,
+            copy_markers: MarkerCopyMode::All,
             custom_filter: None,
         }
     }

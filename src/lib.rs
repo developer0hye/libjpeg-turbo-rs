@@ -45,7 +45,7 @@ pub use common::sample::Sample;
 pub use common::traits::{DefaultErrorHandler, ErrorHandler, ProgressInfo, ProgressListener};
 pub use common::types::*;
 pub use decode::pipeline::Image;
-pub use transform::{TransformOp, TransformOptions};
+pub use transform::{MarkerCopyMode, TransformOp, TransformOptions};
 /// 12-bit and 16-bit sample precision support.
 pub mod precision {
     pub use crate::api::precision::{
