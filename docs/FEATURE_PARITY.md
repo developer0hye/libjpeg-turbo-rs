@@ -289,7 +289,7 @@
 - [x] `write_coefficients()` — Encode from coefficient blocks
 - [x] `transform_jpeg()` — Apply spatial transform
 - [ ] `jpeg_copy_critical_parameters()` — Copy tables between compress/decompress
-- [ ] `tjtransform.customFilter` — User callback for coefficient inspection/modification
+- [x] `tjtransform.customFilter` — User callback for coefficient inspection/modification
 - [ ] `tj3TransformBufSize()` — Output buffer size estimation
 
 ---

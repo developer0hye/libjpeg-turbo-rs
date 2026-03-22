@@ -575,6 +575,19 @@ pub fn transform_jpeg_with_options(data: &[u8], options: &TransformOptions) -> R
         }
     }
 
+    // CUSTOM_FILTER: invoke user callback on each block after spatial transform.
+    if let Some(ref filter) = options.custom_filter {
+        for (ci, comp) in coeffs.components.iter_mut().enumerate() {
+            let blocks_x: usize = comp.blocks_x;
+            for by in 0..comp.blocks_y {
+                for bx in 0..blocks_x {
+                    let block_idx: usize = by * blocks_x + bx;
+                    filter(&mut comp.blocks[block_idx], ci, bx, by);
+                }
+            }
+        }
+    }
+
     // NO_OUTPUT: skip writing, return empty.
     if options.no_output {
         return Ok(Vec::new());

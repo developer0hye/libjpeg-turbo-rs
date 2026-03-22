@@ -424,7 +424,7 @@
 |---|---|---|---|
 | `tjscalingfactor` | {num, denom} scaling ratio | `ScalingFactor` | ✅ |
 | `tjregion` | {x, y, w, h} crop region | `CropRegion` | ✅ |
-| `tjtransform` | {region, op, options, data, customFilter} | `TransformOp` (no options/filter) | 🔶 |
+| `tjtransform` | {region, op, options, data, customFilter} | `TransformOptions` (all fields incl. `custom_filter`) | ✅ |
 
 ---
 
