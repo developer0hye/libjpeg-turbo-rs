@@ -152,8 +152,8 @@
 
 | C Function | Description | Rust | Status |
 |---|---|---|---|
-| `tj3LoadImage8(handle, filename, &w, align, &h, &pf)` | Load BMP/PPM to 8-bit buffer | — | ❌ |
-| `tj3SaveImage8(handle, filename, buf, w, pitch, h, pf)` | Save 8-bit buffer to BMP/PPM | — | ❌ |
+| `tj3LoadImage8(handle, filename, &w, align, &h, &pf)` | Load BMP/PPM to 8-bit buffer | `load_image` / `load_image_from_bytes` | ✅ |
+| `tj3SaveImage8(handle, filename, buf, w, pitch, h, pf)` | Save 8-bit buffer to BMP/PPM | `save_bmp` / `save_ppm` | ✅ |
 | `tj3LoadImage12(...)` / `tj3SaveImage12(...)` | 12-bit file I/O | — | ❌ |
 | `tj3LoadImage16(...)` / `tj3SaveImage16(...)` | 16-bit file I/O | — | ❌ |
 
