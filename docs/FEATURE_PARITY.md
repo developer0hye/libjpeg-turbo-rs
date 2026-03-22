@@ -337,9 +337,9 @@
 - [ ] RGB → YCbCr (encode-side color conversion)
 
 ### x86_64
-- [ ] SSE2 IDCT
-- [ ] SSE2 color conversion (YCbCr→RGB)
-- [ ] SSE2 upsample (H2V1, H2V2)
+- [x] SSE2 IDCT
+- [x] SSE2 color conversion (YCbCr→RGB)
+- [x] SSE2 upsample (H2V1, H2V2)
 - [ ] AVX2 IDCT
 - [ ] AVX2 color conversion
 - [ ] AVX2 upsample
