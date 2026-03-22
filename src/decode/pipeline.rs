@@ -1101,102 +1101,184 @@ impl<'a> Decoder<'a> {
         }
 
         let num_components = frame.components.len();
-        if num_components != 1 {
-            return Err(JpegError::Unsupported(format!(
-                "lossless {} components (only grayscale supported)",
-                num_components
-            )));
-        }
 
-        // Resolve DC Huffman table (lossless uses DC tables only)
-        let dc_tbl_idx = scan.components[0].dc_table_index as usize;
-        let dc_table = self.metadata.dc_huffman_tables[dc_tbl_idx]
-            .as_ref()
-            .ok_or_else(|| {
-                JpegError::CorruptData(format!("missing DC Huffman table {}", dc_tbl_idx))
-            })?;
+        // Resolve DC Huffman tables for each scan component
+        let mut dc_tables: Vec<&HuffmanTable> = Vec::with_capacity(num_components);
+        for i in 0..scan.components.len().min(num_components) {
+            let dc_tbl_idx = scan.components[i].dc_table_index as usize;
+            let dc_table = self.metadata.dc_huffman_tables[dc_tbl_idx]
+                .as_ref()
+                .ok_or_else(|| {
+                    JpegError::CorruptData(format!("missing DC Huffman table {}", dc_tbl_idx))
+                })?;
+            dc_tables.push(dc_table);
+        }
 
         let entropy_data = &self.raw_data[self.metadata.entropy_data_offset..];
         let mut reader = BitReader::new(entropy_data);
 
-        let mask = ((1u32 << precision) - 1) as i32;
-        let initial_pred = 1i32 << (precision as i32 - pt as i32 - 1);
+        if num_components == 1 {
+            // Single-component (grayscale) lossless decode
+            let dc_table = dc_tables[0];
+            let mut output = vec![0u16; width * height];
+            let mut prev_row: Option<Vec<u16>> = None;
 
-        // Decode all samples using Huffman-coded differences + prediction
-        let mut output = vec![0u16; width * height];
-        let mut prev_row: Option<Vec<u16>> = None;
-
-        for y in 0..height {
-            let row_start = y * width;
-            let mut diffs = Vec::with_capacity(width);
-
-            // Decode one row of difference values using DC Huffman table
-            for _ in 0..width {
-                let diff = huffman::decode_dc_coefficient(&mut reader, dc_table)?;
-                diffs.push(diff);
+            for y in 0..height {
+                let row_start = y * width;
+                let mut diffs = Vec::with_capacity(width);
+                for _ in 0..width {
+                    let diff = huffman::decode_dc_coefficient(&mut reader, dc_table)?;
+                    diffs.push(diff);
+                }
+                lossless::undifference_row(
+                    &diffs,
+                    prev_row.as_deref(),
+                    &mut output[row_start..row_start + width],
+                    psv,
+                    precision,
+                    pt,
+                    y == 0,
+                );
+                prev_row = Some(output[row_start..row_start + width].to_vec());
             }
 
-            // Undifference using the selected predictor
-            lossless::undifference_row(
-                &diffs,
-                prev_row.as_deref(),
-                &mut output[row_start..row_start + width],
-                psv,
-                precision,
-                pt,
-                y == 0,
-            );
+            // Convert to output format
+            let out_format = self.output_format.unwrap_or(PixelFormat::Grayscale);
+            let bpp = out_format.bytes_per_pixel();
 
-            prev_row = Some(output[row_start..row_start + width].to_vec());
-        }
-
-        // Apply point transform (upscale) and convert to u8
-        let out_format = self.output_format.unwrap_or(PixelFormat::Grayscale);
-        let bpp = out_format.bytes_per_pixel();
-
-        if out_format == PixelFormat::Grayscale {
-            let mut data = Vec::with_capacity(width * height);
-            for &sample in &output {
-                let val = if pt > 0 {
-                    ((sample as u32) << pt) as u8
-                } else {
-                    sample as u8
-                };
-                data.push(val);
+            if out_format == PixelFormat::Grayscale {
+                let mut data = Vec::with_capacity(width * height);
+                for &sample in &output {
+                    let val = if pt > 0 {
+                        ((sample as u32) << pt) as u8
+                    } else {
+                        sample as u8
+                    };
+                    data.push(val);
+                }
+                Ok(Image {
+                    width,
+                    height,
+                    pixel_format: PixelFormat::Grayscale,
+                    data,
+                    icc_profile,
+                    exif_data,
+                    warnings: Vec::new(),
+                })
+            } else {
+                let mut data = Vec::with_capacity(width * height * bpp);
+                for &sample in &output {
+                    let val = if pt > 0 {
+                        ((sample as u32) << pt) as u8
+                    } else {
+                        sample as u8
+                    };
+                    match out_format {
+                        PixelFormat::Rgb | PixelFormat::Bgr => {
+                            data.push(val);
+                            data.push(val);
+                            data.push(val);
+                        }
+                        PixelFormat::Rgba | PixelFormat::Bgra => {
+                            data.push(val);
+                            data.push(val);
+                            data.push(val);
+                            data.push(255);
+                        }
+                        _ => unreachable!(),
+                    }
+                }
+                Ok(Image {
+                    width,
+                    height,
+                    pixel_format: out_format,
+                    data,
+                    icc_profile,
+                    exif_data,
+                    warnings: Vec::new(),
+                })
             }
-            Ok(Image {
-                width,
-                height,
-                pixel_format: PixelFormat::Grayscale,
-                data,
-                icc_profile,
-                exif_data,
-                warnings: Vec::new(),
-            })
-        } else {
-            // Expand to color format
-            let mut data = Vec::with_capacity(width * height * bpp);
-            for &sample in &output {
-                let val = if pt > 0 {
-                    ((sample as u32) << pt) as u8
-                } else {
-                    sample as u8
-                };
-                match out_format {
-                    PixelFormat::Rgb | PixelFormat::Bgr => {
-                        data.push(val);
-                        data.push(val);
-                        data.push(val);
+        } else if num_components == 3 {
+            // Multi-component (color) lossless decode — interleaved scan
+            let mut comp_planes: Vec<Vec<u16>> =
+                (0..3).map(|_| vec![0u16; width * height]).collect();
+            let mut prev_rows: Vec<Option<Vec<u16>>> = vec![None; 3];
+
+            for y in 0..height {
+                let row_start = y * width;
+                let mut comp_diffs: Vec<Vec<i16>> =
+                    (0..3).map(|_| Vec::with_capacity(width)).collect();
+
+                // Interleaved: for each pixel, decode diff for each component
+                for _ in 0..width {
+                    for c in 0..3 {
+                        let diff = huffman::decode_dc_coefficient(&mut reader, dc_tables[c])?;
+                        comp_diffs[c].push(diff);
                     }
-                    PixelFormat::Rgba | PixelFormat::Bgra => {
-                        data.push(val);
-                        data.push(val);
-                        data.push(val);
-                        data.push(255);
-                    }
-                    _ => unreachable!(),
+                }
+
+                // Undifference each component
+                for c in 0..3 {
+                    lossless::undifference_row(
+                        &comp_diffs[c],
+                        prev_rows[c].as_deref(),
+                        &mut comp_planes[c][row_start..row_start + width],
+                        psv,
+                        precision,
+                        pt,
+                        y == 0,
+                    );
+                    prev_rows[c] = Some(comp_planes[c][row_start..row_start + width].to_vec());
                 }
             }
+
+            // Color convert YCbCr → RGB and output
+            let out_format = self.output_format.unwrap_or(PixelFormat::Rgb);
+            let bpp = out_format.bytes_per_pixel();
+            let mut data = Vec::with_capacity(width * height * bpp);
+
+            for i in 0..width * height {
+                let y_val = comp_planes[0][i] as i32;
+                let cb_val = comp_planes[1][i] as i32;
+                let cr_val = comp_planes[2][i] as i32;
+
+                // YCbCr to RGB (JFIF convention: Y,Cb,Cr centered at 128)
+                let r = (y_val + ((cr_val - 128) * 359 + 128) / 256).clamp(0, 255) as u8;
+                let g = (y_val - ((cb_val - 128) * 88 + (cr_val - 128) * 183 - 128) / 256)
+                    .clamp(0, 255) as u8;
+                let b = (y_val + ((cb_val - 128) * 454 + 128) / 256).clamp(0, 255) as u8;
+
+                match out_format {
+                    PixelFormat::Rgb => {
+                        data.push(r);
+                        data.push(g);
+                        data.push(b);
+                    }
+                    PixelFormat::Bgr => {
+                        data.push(b);
+                        data.push(g);
+                        data.push(r);
+                    }
+                    PixelFormat::Rgba => {
+                        data.push(r);
+                        data.push(g);
+                        data.push(b);
+                        data.push(255);
+                    }
+                    PixelFormat::Bgra => {
+                        data.push(b);
+                        data.push(g);
+                        data.push(r);
+                        data.push(255);
+                    }
+                    _ => {
+                        return Err(JpegError::Unsupported(
+                            "cannot convert lossless 3-component to requested format".to_string(),
+                        ));
+                    }
+                }
+            }
+
             Ok(Image {
                 width,
                 height,
@@ -1206,6 +1288,11 @@ impl<'a> Decoder<'a> {
                 exif_data,
                 warnings: Vec::new(),
             })
+        } else {
+            Err(JpegError::Unsupported(format!(
+                "{} components not yet supported for lossless",
+                num_components
+            )))
         }
     }
 
