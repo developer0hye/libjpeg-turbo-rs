@@ -310,6 +310,25 @@ impl<'a> Decoder<'a> {
             PixelFormat::Rgba => self.ycbcr_to_rgba_row(y, cb, cr, out, width),
             PixelFormat::Bgr => self.ycbcr_to_bgr_row(y, cb, cr, out, width),
             PixelFormat::Bgra => self.ycbcr_to_bgra_row(y, cb, cr, out, width),
+            PixelFormat::Rgbx => {
+                crate::decode::color::ycbcr_to_generic_4bpp_row(y, cb, cr, out, width, 0, 1, 2, 3)
+            }
+            PixelFormat::Bgrx => {
+                crate::decode::color::ycbcr_to_generic_4bpp_row(y, cb, cr, out, width, 2, 1, 0, 3)
+            }
+            PixelFormat::Xrgb => {
+                crate::decode::color::ycbcr_to_generic_4bpp_row(y, cb, cr, out, width, 1, 2, 3, 0)
+            }
+            PixelFormat::Xbgr => {
+                crate::decode::color::ycbcr_to_generic_4bpp_row(y, cb, cr, out, width, 3, 2, 1, 0)
+            }
+            PixelFormat::Argb => {
+                crate::decode::color::ycbcr_to_generic_4bpp_row(y, cb, cr, out, width, 1, 2, 3, 0)
+            }
+            PixelFormat::Abgr => {
+                crate::decode::color::ycbcr_to_generic_4bpp_row(y, cb, cr, out, width, 3, 2, 1, 0)
+            }
+            PixelFormat::Rgb565 => crate::decode::color::ycbcr_to_rgb565_row(y, cb, cr, out, width),
             PixelFormat::Grayscale | PixelFormat::Cmyk => {
                 unreachable!("grayscale/cmyk handled separately")
             }
@@ -1567,11 +1586,30 @@ impl<'a> Decoder<'a> {
                         data.push(val);
                         data.push(val);
                     }
-                    PixelFormat::Rgba | PixelFormat::Bgra => {
+                    PixelFormat::Rgba
+                    | PixelFormat::Bgra
+                    | PixelFormat::Rgbx
+                    | PixelFormat::Bgrx
+                    | PixelFormat::Argb
+                    | PixelFormat::Abgr => {
                         data.push(val);
                         data.push(val);
                         data.push(val);
                         data.push(255);
+                    }
+                    PixelFormat::Xrgb | PixelFormat::Xbgr => {
+                        data.push(255);
+                        data.push(val);
+                        data.push(val);
+                        data.push(val);
+                    }
+                    PixelFormat::Rgb565 => {
+                        let packed: u16 = ((val as u16 >> 3) << 11)
+                            | ((val as u16 >> 2) << 5)
+                            | (val as u16 >> 3);
+                        let bytes: [u8; 2] = packed.to_ne_bytes();
+                        data.push(bytes[0]);
+                        data.push(bytes[1]);
                     }
                     _ => unreachable!(),
                 }
@@ -1627,17 +1665,36 @@ impl<'a> Decoder<'a> {
                     data.push(g);
                     data.push(r);
                 }
-                PixelFormat::Rgba => {
+                PixelFormat::Rgba | PixelFormat::Rgbx => {
                     data.push(r);
                     data.push(g);
                     data.push(b);
                     data.push(255);
                 }
-                PixelFormat::Bgra => {
+                PixelFormat::Bgra | PixelFormat::Bgrx => {
                     data.push(b);
                     data.push(g);
                     data.push(r);
                     data.push(255);
+                }
+                PixelFormat::Xrgb | PixelFormat::Argb => {
+                    data.push(255);
+                    data.push(r);
+                    data.push(g);
+                    data.push(b);
+                }
+                PixelFormat::Xbgr | PixelFormat::Abgr => {
+                    data.push(255);
+                    data.push(b);
+                    data.push(g);
+                    data.push(r);
+                }
+                PixelFormat::Rgb565 => {
+                    let packed: u16 =
+                        ((r as u16 >> 3) << 11) | ((g as u16 >> 2) << 5) | (b as u16 >> 3);
+                    let bytes: [u8; 2] = packed.to_ne_bytes();
+                    data.push(bytes[0]);
+                    data.push(bytes[1]);
                 }
                 _ => {
                     return Err(JpegError::Unsupported(
@@ -1817,27 +1874,36 @@ impl<'a> Decoder<'a> {
                     for x in 0..out_width {
                         let v = row[x];
                         match out_format {
-                            PixelFormat::Rgb => {
+                            PixelFormat::Rgb | PixelFormat::Bgr => {
                                 out_row[x * 3] = v;
                                 out_row[x * 3 + 1] = v;
                                 out_row[x * 3 + 2] = v;
                             }
-                            PixelFormat::Rgba => {
+                            PixelFormat::Rgba
+                            | PixelFormat::Bgra
+                            | PixelFormat::Rgbx
+                            | PixelFormat::Bgrx
+                            | PixelFormat::Argb
+                            | PixelFormat::Abgr => {
                                 out_row[x * 4] = v;
                                 out_row[x * 4 + 1] = v;
                                 out_row[x * 4 + 2] = v;
                                 out_row[x * 4 + 3] = 255;
                             }
-                            PixelFormat::Bgr => {
-                                out_row[x * 3] = v;
-                                out_row[x * 3 + 1] = v;
-                                out_row[x * 3 + 2] = v;
-                            }
-                            PixelFormat::Bgra => {
-                                out_row[x * 4] = v;
+                            PixelFormat::Xrgb | PixelFormat::Xbgr => {
+                                out_row[x * 4] = 255;
                                 out_row[x * 4 + 1] = v;
                                 out_row[x * 4 + 2] = v;
-                                out_row[x * 4 + 3] = 255;
+                                out_row[x * 4 + 3] = v;
+                            }
+                            PixelFormat::Rgb565 => {
+                                // Grayscale v → pack as R=G=B=v
+                                let packed: u16 = ((v as u16 >> 3) << 11)
+                                    | ((v as u16 >> 2) << 5)
+                                    | (v as u16 >> 3);
+                                let bytes: [u8; 2] = packed.to_ne_bytes();
+                                out_row[x * 2] = bytes[0];
+                                out_row[x * 2 + 1] = bytes[1];
                             }
                             PixelFormat::Grayscale | PixelFormat::Cmyk => unreachable!(),
                         }
@@ -2290,6 +2356,59 @@ impl<'a> Decoder<'a> {
                         out[x * 4 + 1] = g;
                         out[x * 4 + 2] = r;
                         out[x * 4 + 3] = 255;
+                    }
+                }
+                // CMYK → 4bpp offset-based formats
+                (
+                    ColorSpace::Cmyk,
+                    PixelFormat::Rgbx
+                    | PixelFormat::Bgrx
+                    | PixelFormat::Xrgb
+                    | PixelFormat::Xbgr
+                    | PixelFormat::Argb
+                    | PixelFormat::Abgr,
+                ) => {
+                    let r_off: usize = out_format.red_offset().unwrap();
+                    let g_off: usize = out_format.green_offset().unwrap();
+                    let b_off: usize = out_format.blue_offset().unwrap();
+                    // The remaining offset is 0+1+2+3=6 minus the other three
+                    let pad_off: usize = 6 - r_off - g_off - b_off;
+                    for x in 0..width {
+                        let ki = 255 - p3[x] as u16;
+                        let r = (((255 - p0[x] as u16) * ki + 127) / 255) as u8;
+                        let g = (((255 - p1[x] as u16) * ki + 127) / 255) as u8;
+                        let b = (((255 - p2[x] as u16) * ki + 127) / 255) as u8;
+                        out[x * 4 + r_off] = r;
+                        out[x * 4 + g_off] = g;
+                        out[x * 4 + b_off] = b;
+                        out[x * 4 + pad_off] = 255;
+                    }
+                }
+                // YCCK → 4bpp offset-based formats
+                (
+                    ColorSpace::Ycck,
+                    PixelFormat::Rgbx
+                    | PixelFormat::Bgrx
+                    | PixelFormat::Xrgb
+                    | PixelFormat::Xbgr
+                    | PixelFormat::Argb
+                    | PixelFormat::Abgr,
+                ) => {
+                    let r_off: usize = out_format.red_offset().unwrap();
+                    let g_off: usize = out_format.green_offset().unwrap();
+                    let b_off: usize = out_format.blue_offset().unwrap();
+                    let pad_off: usize = 6 - r_off - g_off - b_off;
+                    let mut cmyk_buf = vec![0u8; width * 4];
+                    color::ycck_to_cmyk_row(p0, p1, p2, p3, &mut cmyk_buf, width);
+                    for x in 0..width {
+                        let ki = 255 - cmyk_buf[x * 4 + 3] as u16;
+                        let r = (((255 - cmyk_buf[x * 4] as u16) * ki + 127) / 255) as u8;
+                        let g = (((255 - cmyk_buf[x * 4 + 1] as u16) * ki + 127) / 255) as u8;
+                        let b = (((255 - cmyk_buf[x * 4 + 2] as u16) * ki + 127) / 255) as u8;
+                        out[x * 4 + r_off] = r;
+                        out[x * 4 + g_off] = g;
+                        out[x * 4 + b_off] = b;
+                        out[x * 4 + pad_off] = 255;
                     }
                 }
                 _ => {

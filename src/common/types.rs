@@ -94,14 +94,73 @@ pub enum PixelFormat {
     Bgra,
     /// Raw CMYK output (4 bytes per pixel: C, M, Y, K).
     Cmyk,
+    /// RGB + padding byte (4bpp, padding ignored).
+    Rgbx,
+    /// BGR + padding byte (4bpp, padding ignored).
+    Bgrx,
+    /// Padding + RGB (4bpp, padding byte first).
+    Xrgb,
+    /// Padding + BGR (4bpp, padding byte first).
+    Xbgr,
+    /// Alpha + RGB (4bpp, alpha byte first).
+    Argb,
+    /// Alpha + BGR (4bpp, alpha byte first).
+    Abgr,
+    /// 5-6-5 packed RGB (2bpp, decode output only).
+    Rgb565,
 }
 
 impl PixelFormat {
     pub fn bytes_per_pixel(self) -> usize {
         match self {
             Self::Grayscale => 1,
+            Self::Rgb565 => 2,
             Self::Rgb | Self::Bgr => 3,
-            Self::Rgba | Self::Bgra | Self::Cmyk => 4,
+            Self::Rgba
+            | Self::Bgra
+            | Self::Cmyk
+            | Self::Rgbx
+            | Self::Bgrx
+            | Self::Xrgb
+            | Self::Xbgr
+            | Self::Argb
+            | Self::Abgr => 4,
+        }
+    }
+
+    /// Channel byte offset for red within one pixel.
+    /// Returns `None` for Grayscale, Cmyk, and Rgb565.
+    pub fn red_offset(self) -> Option<usize> {
+        match self {
+            Self::Rgb | Self::Rgba | Self::Rgbx => Some(0),
+            Self::Bgr | Self::Bgra | Self::Bgrx => Some(2),
+            Self::Xrgb | Self::Argb => Some(1),
+            Self::Xbgr | Self::Abgr => Some(3),
+            _ => None,
+        }
+    }
+
+    /// Channel byte offset for green within one pixel.
+    /// Returns `None` for Grayscale, Cmyk, and Rgb565.
+    pub fn green_offset(self) -> Option<usize> {
+        match self {
+            Self::Rgb | Self::Rgba | Self::Rgbx => Some(1),
+            Self::Bgr | Self::Bgra | Self::Bgrx => Some(1),
+            Self::Xrgb | Self::Argb => Some(2),
+            Self::Xbgr | Self::Abgr => Some(2),
+            _ => None,
+        }
+    }
+
+    /// Channel byte offset for blue within one pixel.
+    /// Returns `None` for Grayscale, Cmyk, and Rgb565.
+    pub fn blue_offset(self) -> Option<usize> {
+        match self {
+            Self::Rgb | Self::Rgba | Self::Rgbx => Some(2),
+            Self::Bgr | Self::Bgra | Self::Bgrx => Some(0),
+            Self::Xrgb | Self::Argb => Some(3),
+            Self::Xbgr | Self::Abgr => Some(1),
+            _ => None,
         }
     }
 }

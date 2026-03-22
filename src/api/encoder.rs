@@ -296,7 +296,27 @@ impl<'a> Encoder<'a> {
                     );
                 }
             }
+            PixelFormat::Rgbx
+            | PixelFormat::Xrgb
+            | PixelFormat::Argb
+            | PixelFormat::Bgrx
+            | PixelFormat::Xbgr
+            | PixelFormat::Abgr => {
+                let r_off: usize = pf.red_offset().unwrap();
+                let g_off: usize = pf.green_offset().unwrap();
+                let b_off: usize = pf.blue_offset().unwrap();
+                for c in pixels[..n * 4].chunks_exact(4) {
+                    y.push(
+                        ((19595 * c[r_off] as u32
+                            + 38470 * c[g_off] as u32
+                            + 7471 * c[b_off] as u32
+                            + 32768)
+                            >> 16) as u8,
+                    );
+                }
+            }
             PixelFormat::Cmyk => y.resize(n, 128),
+            PixelFormat::Rgb565 => y.resize(n, 128),
         }
         y
     }

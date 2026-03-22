@@ -2928,9 +2928,39 @@ fn convert_to_ycbcr(
                 );
             }
         }
+        PixelFormat::Rgbx
+        | PixelFormat::Bgrx
+        | PixelFormat::Xrgb
+        | PixelFormat::Xbgr
+        | PixelFormat::Argb
+        | PixelFormat::Abgr => {
+            let r_off: usize = pixel_format.red_offset().unwrap();
+            let g_off: usize = pixel_format.green_offset().unwrap();
+            let b_off: usize = pixel_format.blue_offset().unwrap();
+            for row in 0..height {
+                let src_offset: usize = row * width * bpp;
+                let dst_offset: usize = row * width;
+                color::generic_to_ycbcr_row(
+                    &pixels[src_offset..src_offset + width * bpp],
+                    &mut y_plane[dst_offset..dst_offset + width],
+                    &mut cb_plane[dst_offset..dst_offset + width],
+                    &mut cr_plane[dst_offset..dst_offset + width],
+                    width,
+                    bpp,
+                    r_off,
+                    g_off,
+                    b_off,
+                );
+            }
+        }
         PixelFormat::Cmyk => {
             return Err(JpegError::Unsupported(
                 "CMYK pixel format not supported for encoding".to_string(),
+            ));
+        }
+        PixelFormat::Rgb565 => {
+            return Err(JpegError::Unsupported(
+                "Rgb565 pixel format is decode-only and not supported for encoding".to_string(),
             ));
         }
     }
