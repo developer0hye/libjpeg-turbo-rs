@@ -6,8 +6,9 @@ pub mod simd;
 pub mod transform;
 
 pub use api::coefficient::{
-    read_coefficients, transform_jpeg as transform, transform_jpeg_with_options,
-    write_coefficients, JpegCoefficients,
+    copy_critical_parameters, read_coefficients, transform_jpeg as transform,
+    transform_jpeg_with_options, write_coefficients, EncoderComponentInfo, EncoderConfig,
+    JpegCoefficients,
 };
 pub use api::encoder::{Encoder, HuffmanTableDef};
 pub use api::high_level::{
@@ -30,9 +31,11 @@ pub use api::scanline::{ScanlineDecoder, ScanlineEncoder};
 /// Streaming I/O functions for reading/writing JPEG via `std::io` traits and file paths.
 pub use api::stream;
 pub use common::bufsize::{
-    jpeg_buf_size, yuv_buf_size, yuv_plane_height, yuv_plane_size, yuv_plane_width,
+    calc_jpeg_dimensions, calc_output_dimensions, jpeg_buf_size, transform_buf_size, yuv_buf_size,
+    yuv_plane_height, yuv_plane_size, yuv_plane_width,
 };
 pub use common::error::{DecodeWarning, JpegError, Result};
+pub use common::jfif::extract_jfif_thumbnail;
 pub use common::sample::Sample;
 pub use common::traits::{DefaultErrorHandler, ErrorHandler, ProgressInfo, ProgressListener};
 pub use common::types::*;
