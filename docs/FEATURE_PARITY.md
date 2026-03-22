@@ -192,6 +192,7 @@
 - [x] `do_block_smoothing` toggle (`Decoder::set_block_smoothing()`)
 - [x] `dct_method` selection (ISLOW/IFAST/FLOAT) (`Decoder::set_dct_method()`)
 - [x] RGB565 ordered dithering (`Decoder::set_dither_565()`)
+- [x] Merged upsampling (combined upsample + color convert for 422m/420m) (`Decoder::set_merged_upsample()`)
 - [x] 4:1:0 (H=4,V=2) subsampling decode — arbitrary factor upsampling
 
 ### Error Handling
@@ -333,6 +334,8 @@
 - [x] YCbCr → BGRA row conversion
 - [x] Fancy H2V1 upsample
 - [x] Fancy H2V2 upsample
+- [x] Merged H2V1 upsample + color convert (422m)
+- [x] Merged H2V2 upsample + color convert (420m)
 - [x] Forward DCT (FDCT) for encoder
 - [x] Chroma downsample for encoder
 - [x] Quantization for encoder
