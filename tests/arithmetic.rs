@@ -21,14 +21,41 @@ fn arithmetic_roundtrip_rgb_444() {
     assert_eq!(img.height, 32);
 }
 
-// TODO(arithmetic-420): 4:2:0 arithmetic coding has a known encoder termination
-// issue causing decode overflow. Needs more precise port of jcarith.c finish_pass.
 #[test]
-#[ignore]
 fn arithmetic_roundtrip_rgb_420() {
     let pixels = vec![128u8; 32 * 32 * 3];
     let jpeg =
         compress_arithmetic(&pixels, 32, 32, PixelFormat::Rgb, 75, Subsampling::S420).unwrap();
+    let img = decompress(&jpeg).unwrap();
+    assert_eq!(img.width, 32);
+    assert_eq!(img.height, 32);
+}
+
+/// Test with varied pixel data and larger image to exercise more encoder paths.
+#[test]
+fn arithmetic_roundtrip_rgb_420_gradient() {
+    let (w, h) = (64, 48);
+    let mut pixels = vec![0u8; w * h * 3];
+    for y in 0..h {
+        for x in 0..w {
+            let i = (y * w + x) * 3;
+            pixels[i] = (x * 4) as u8;
+            pixels[i + 1] = (y * 5) as u8;
+            pixels[i + 2] = ((x + y) * 2) as u8;
+        }
+    }
+    let jpeg = compress_arithmetic(&pixels, w, h, PixelFormat::Rgb, 90, Subsampling::S420).unwrap();
+    let img = decompress(&jpeg).unwrap();
+    assert_eq!(img.width, w);
+    assert_eq!(img.height, h);
+    assert_eq!(img.data.len(), w * h * 3);
+}
+
+#[test]
+fn arithmetic_roundtrip_rgb_422() {
+    let pixels = vec![128u8; 32 * 32 * 3];
+    let jpeg =
+        compress_arithmetic(&pixels, 32, 32, PixelFormat::Rgb, 75, Subsampling::S422).unwrap();
     let img = decompress(&jpeg).unwrap();
     assert_eq!(img.width, 32);
     assert_eq!(img.height, 32);
