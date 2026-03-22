@@ -89,6 +89,7 @@ pub fn compress(
             Subsampling::S420 => (16, 16),
             Subsampling::S440 => (8, 16),
             Subsampling::S411 => (32, 8),
+            Subsampling::S441 => (8, 32),
         }
     };
 
@@ -333,6 +334,7 @@ pub fn compress_custom_huffman(
             Subsampling::S420 => (16, 16),
             Subsampling::S440 => (8, 16),
             Subsampling::S411 => (32, 8),
+            Subsampling::S441 => (8, 32),
         }
     };
 
@@ -522,6 +524,7 @@ pub fn compress_custom_quant(
             Subsampling::S420 => (16, 16),
             Subsampling::S440 => (8, 16),
             Subsampling::S411 => (32, 8),
+            Subsampling::S441 => (8, 32),
         }
     };
 
@@ -726,6 +729,7 @@ pub fn compress_with_restart(
             Subsampling::S420 => (16, 16),
             Subsampling::S440 => (8, 16),
             Subsampling::S411 => (32, 8),
+            Subsampling::S441 => (8, 32),
         }
     };
 
@@ -1696,6 +1700,7 @@ fn compress_progressive_with_scans(
             Subsampling::S420 => (16, 16),
             Subsampling::S440 => (8, 16),
             Subsampling::S411 => (32, 8),
+            Subsampling::S441 => (8, 32),
         }
     };
 
@@ -2008,6 +2013,7 @@ pub fn compress_arithmetic(
             Subsampling::S420 => (16, 16),
             Subsampling::S440 => (8, 16),
             Subsampling::S411 => (32, 8),
+            Subsampling::S441 => (8, 32),
         }
     };
 
@@ -2129,6 +2135,27 @@ pub fn compress_arithmetic(
                             all_blocks.push(q);
                         }
                     }
+                    Subsampling::S441 => {
+                        // 4 Y blocks vertically
+                        for dy in [0, 8, 16, 24] {
+                            let mut block = [0i16; 64];
+                            extract_block(&y_plane, width, height, x0, y0 + dy, &mut block);
+                            let mut dct = [0i32; 64];
+                            fdct::fdct_islow(&block, &mut dct);
+                            let mut q = [0i16; 64];
+                            quant::quantize_block(&dct, &luma_divisors, &mut q);
+                            all_blocks.push(q);
+                        }
+                        for plane in [&cb_plane, &cr_plane] {
+                            let mut block = [0i16; 64];
+                            downsample_chroma_block(plane, width, height, x0, y0, 1, 4, &mut block);
+                            let mut dct = [0i32; 64];
+                            fdct::fdct_islow(&block, &mut dct);
+                            let mut q = [0i16; 64];
+                            quant::quantize_block(&dct, &chroma_divisors, &mut q);
+                            all_blocks.push(q);
+                        }
+                    }
                 }
             }
         }
@@ -2150,7 +2177,7 @@ pub fn compress_arithmetic(
                     Subsampling::S422 => 2,
                     Subsampling::S420 => 4,
                     Subsampling::S440 => 2,
-                    Subsampling::S411 => 4,
+                    Subsampling::S411 | Subsampling::S441 => 4,
                 };
                 for _ in 0..y_blocks {
                     arith_enc.encode_dc_sequential(&all_blocks[block_idx], 0, 0);
@@ -2269,6 +2296,7 @@ pub fn compress_arithmetic_progressive(
             Subsampling::S420 => (16, 16),
             Subsampling::S440 => (8, 16),
             Subsampling::S411 => (32, 8),
+            Subsampling::S441 => (8, 32),
         }
     };
 
@@ -3375,6 +3403,55 @@ fn encode_color_mcu(
                 fdct_fn,
             );
         }
+        Subsampling::S441 => {
+            // 4 Y blocks vertically
+            for i in 0..4 {
+                encode_single_block(
+                    y_plane,
+                    width,
+                    height,
+                    x0,
+                    y0 + i * 8,
+                    luma_quant,
+                    dc_luma_table,
+                    ac_luma_table,
+                    writer,
+                    prev_dc_y,
+                    fdct_fn,
+                );
+            }
+            // Cb/Cr downsampled 1x4
+            encode_downsampled_chroma_block(
+                cb_plane,
+                width,
+                height,
+                x0,
+                y0,
+                1,
+                4,
+                chroma_quant,
+                dc_chroma_table,
+                ac_chroma_table,
+                writer,
+                prev_dc_cb,
+                fdct_fn,
+            );
+            encode_downsampled_chroma_block(
+                cr_plane,
+                width,
+                height,
+                x0,
+                y0,
+                1,
+                4,
+                chroma_quant,
+                dc_chroma_table,
+                ac_chroma_table,
+                writer,
+                prev_dc_cr,
+                fdct_fn,
+            );
+        }
     }
 }
 
@@ -3467,6 +3544,7 @@ pub fn compress_optimized(
             Subsampling::S420 => (16, 16),
             Subsampling::S440 => (8, 16),
             Subsampling::S411 => (32, 8),
+            Subsampling::S441 => (8, 32),
         }
     };
 
@@ -3704,6 +3782,49 @@ pub fn compress_optimized(
                         huff_opt::gather_ac_symbols(&crq, &mut ac_chroma_freq);
                         all_blocks.push(crq);
                     }
+                    Subsampling::S441 => {
+                        // 4 Y blocks vertically
+                        for dy in [0usize, 8, 16, 24] {
+                            let yq =
+                                gather_block(&y_plane, width, height, x0, y0 + dy, &luma_divisors);
+                            let diff = yq[0] - prev_dc_y;
+                            prev_dc_y = yq[0];
+                            huff_opt::gather_dc_symbol(diff, &mut dc_luma_freq);
+                            huff_opt::gather_ac_symbols(&yq, &mut ac_luma_freq);
+                            all_blocks.push(yq);
+                        }
+                        let cbq = gather_downsampled_block(
+                            &cb_plane,
+                            width,
+                            height,
+                            x0,
+                            y0,
+                            1,
+                            4,
+                            &chroma_divisors,
+                        );
+                        let diff = cbq[0] - prev_dc_cb;
+                        prev_dc_cb = cbq[0];
+                        huff_opt::gather_dc_symbol(diff, &mut dc_chroma_freq);
+                        huff_opt::gather_ac_symbols(&cbq, &mut ac_chroma_freq);
+                        all_blocks.push(cbq);
+
+                        let crq = gather_downsampled_block(
+                            &cr_plane,
+                            width,
+                            height,
+                            x0,
+                            y0,
+                            1,
+                            4,
+                            &chroma_divisors,
+                        );
+                        let diff = crq[0] - prev_dc_cr;
+                        prev_dc_cr = crq[0];
+                        huff_opt::gather_dc_symbol(diff, &mut dc_chroma_freq);
+                        huff_opt::gather_ac_symbols(&crq, &mut ac_chroma_freq);
+                        all_blocks.push(crq);
+                    }
                 }
             }
         }
@@ -3857,7 +3978,7 @@ pub fn compress_optimized(
                         );
                         block_idx += 1;
                     }
-                    Subsampling::S411 => {
+                    Subsampling::S411 | Subsampling::S441 => {
                         for _ in 0..4 {
                             HuffmanEncoder::encode_block(
                                 &mut bit_writer,

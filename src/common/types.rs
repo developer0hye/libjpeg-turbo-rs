@@ -31,13 +31,15 @@ pub enum Subsampling {
     S440,
     /// 4:1:1 — horizontal 4x, vertical 1x
     S411,
+    /// 4:4:1 — horizontal 1x, vertical 4x
+    S441,
 }
 
 impl Subsampling {
     /// Max horizontal sampling factor (luma blocks per MCU row).
     pub fn mcu_width_blocks(self) -> usize {
         match self {
-            Self::S444 | Self::S440 => 1,
+            Self::S444 | Self::S440 | Self::S441 => 1,
             Self::S422 | Self::S420 => 2,
             Self::S411 => 4,
         }
@@ -48,6 +50,7 @@ impl Subsampling {
         match self {
             Self::S444 | Self::S422 | Self::S411 => 1,
             Self::S420 | Self::S440 => 2,
+            Self::S441 => 4,
         }
     }
 
@@ -59,6 +62,7 @@ impl Subsampling {
             Self::S420 => (2, 2),
             Self::S440 => (1, 2),
             Self::S411 => (4, 1),
+            Self::S441 => (1, 4),
         }
     }
 }
