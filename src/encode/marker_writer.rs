@@ -337,6 +337,29 @@ pub fn write_sof3(
     }
 }
 
+/// Write SOF11 (lossless, arithmetic-coded) frame header.
+pub fn write_sof11(
+    buf: &mut Vec<u8>,
+    width: u16,
+    height: u16,
+    precision: u8,
+    components: &[(u8, u8, u8, u8)],
+) {
+    buf.push(0xFF);
+    buf.push(0xCB); // SOF11
+    let length: u16 = 2 + 1 + 2 + 2 + 1 + (components.len() as u16 * 3);
+    buf.extend_from_slice(&length.to_be_bytes());
+    buf.push(precision);
+    buf.extend_from_slice(&height.to_be_bytes());
+    buf.extend_from_slice(&width.to_be_bytes());
+    buf.push(components.len() as u8);
+    for &(id, h_samp, v_samp, qt_idx) in components {
+        buf.push(id);
+        buf.push((h_samp << 4) | v_samp);
+        buf.push(qt_idx);
+    }
+}
+
 /// Write SOS for lossless scan. Ss=predictor (1-7), Se=0, Ah=0, Al=point_transform.
 pub fn write_sos_lossless(
     buf: &mut Vec<u8>,
