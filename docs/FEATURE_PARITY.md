@@ -208,11 +208,11 @@
 - [x] EXIF extraction + orientation (APP1)
 - [x] Adobe APP14 detection (CMYK/YCCK)
 - [x] Restart marker (DRI/RST) handling
-- [ ] `TJPARAM_SAVEMARKERS` — Configurable marker saving (0-4 levels)
-- [ ] `jpeg_save_markers()` — Per-marker-type save control
+- [x] `TJPARAM_SAVEMARKERS` — Configurable marker saving (`MarkerSaveConfig` enum: None/All/AppOnly/Specific)
+- [x] `jpeg_save_markers()` — Per-marker-type save control (`Decoder::save_markers()`)
 - [ ] `jpeg_set_marker_processor()` — Custom marker parser callback
 - [x] COM (comment) marker read/expose (`Image.comment`)
-- [ ] Arbitrary marker access via `marker_list` linked list
+- [x] Arbitrary marker access via `marker_list` linked list (`Image.markers()` / `Image.saved_markers`)
 - [x] JFIF version / density read (`Image.density`)
 
 ### Multi-Scan / Progressive Output
@@ -253,11 +253,11 @@
 - [x] APP2 ICC profile — Read (multi-chunk reassembly) / write (multi-chunk)
 - [x] APP14 Adobe — Read / write (CMYK/YCCK signaling)
 - [x] COM (comment) — Read (`Image.comment`) / Write (`Encoder::comment()`)
-- [ ] Arbitrary APP markers — Read (`jpeg_save_markers` + `marker_list`)
-- [x] Arbitrary markers — Write (`marker_writer::write_marker()`)
+- [x] Arbitrary APP markers — Read (`Decoder::save_markers()` + `Image.markers()`)
+- [x] Arbitrary markers — Write (`marker_writer::write_marker()`, `Encoder::saved_marker()`)
 - [x] DPI/density — Read (`Image.density`) / Write (`DensityInfo`)
 - [ ] JFIF thumbnail extraction
-- [ ] Marker preservation across transform/re-encode
+- [x] Marker preservation across transform/re-encode (`TransformOptions.copy_markers`)
 
 ---
 
@@ -280,7 +280,7 @@
 - [ ] TJXOPT_GRAY (8) — Convert to grayscale during transform
 - [ ] TJXOPT_NOOUTPUT (16) — Dry run (no output image)
 - [ ] TJXOPT_PROGRESSIVE (32) — Output as progressive JPEG
-- [ ] TJXOPT_COPYNONE (64) — Discard all non-essential markers
+- [x] TJXOPT_COPYNONE (64) — Discard all non-essential markers (`TransformOptions.copy_markers = false`)
 - [ ] TJXOPT_ARITHMETIC (128) — Output with arithmetic coding
 - [ ] TJXOPT_OPTIMIZE (256) — Output with optimized Huffman
 

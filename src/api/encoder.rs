@@ -1,5 +1,5 @@
 use crate::common::error::Result;
-use crate::common::types::{DctMethod, PixelFormat, ScanScript, Subsampling};
+use crate::common::types::{DctMethod, PixelFormat, SavedMarker, ScanScript, Subsampling};
 use crate::encode::pipeline as encoder;
 use crate::encode::tables;
 
@@ -49,6 +49,7 @@ pub struct Encoder<'a> {
     custom_huffman_dc: [Option<HuffmanTableDef>; 4],
     custom_huffman_ac: [Option<HuffmanTableDef>; 4],
     dct_method: DctMethod,
+    saved_markers: Vec<SavedMarker>,
 }
 
 impl<'a> Encoder<'a> {
@@ -78,6 +79,7 @@ impl<'a> Encoder<'a> {
             custom_huffman_dc: [None, None, None, None],
             custom_huffman_ac: [None, None, None, None],
             dct_method: DctMethod::IsLow,
+            saved_markers: Vec::new(),
         }
     }
 
@@ -198,6 +200,15 @@ impl<'a> Encoder<'a> {
     /// Set a COM (comment) marker in the JPEG output.
     pub fn comment(mut self, text: &'a str) -> Self {
         self.comment = Some(text);
+        self
+    }
+
+    /// Add a saved marker (APP or COM) to the JPEG output.
+    ///
+    /// Multiple markers of the same type can be added; they will appear
+    /// in the order added, after JFIF/ICC/EXIF but before DQT/SOF/SOS.
+    pub fn saved_marker(mut self, marker: SavedMarker) -> Self {
+        self.saved_markers.push(marker);
         self
     }
 
@@ -491,10 +502,19 @@ impl<'a> Encoder<'a> {
             base
         };
 
-        if let Some(text) = self.comment {
-            Ok(encoder::inject_comment(&with_meta, text))
+        let with_comment: Vec<u8> = if let Some(text) = self.comment {
+            encoder::inject_comment(&with_meta, text)
         } else {
-            Ok(with_meta)
+            with_meta
+        };
+
+        if self.saved_markers.is_empty() {
+            Ok(with_comment)
+        } else {
+            Ok(encoder::inject_saved_markers(
+                &with_comment,
+                &self.saved_markers,
+            ))
         }
     }
 }
