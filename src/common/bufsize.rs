@@ -5,6 +5,7 @@
 //! `tj3YUVPlaneSize`, `tj3YUVPlaneWidth`, and `tj3YUVPlaneHeight`.
 
 use super::types::Subsampling;
+use crate::transform::TransformOp;
 
 /// Rounds `value` up to the nearest multiple of `alignment`.
 ///
@@ -89,6 +90,60 @@ pub fn yuv_buf_size(width: usize, height: usize, subsampling: Subsampling) -> us
         total += yuv_plane_size(component, width, height, subsampling);
     }
     total
+}
+
+/// Worst-case transform output buffer size, accounting for dimension swaps.
+///
+/// Matches `tj3TransformBufSize()`. For transforms that swap width and height
+/// (Transpose, Transverse, Rot90, Rot270), dimensions are swapped before
+/// computing the buffer size via `jpeg_buf_size`.
+pub fn transform_buf_size(
+    width: usize,
+    height: usize,
+    subsampling: Subsampling,
+    op: TransformOp,
+) -> usize {
+    let swaps_dimensions: bool = matches!(
+        op,
+        TransformOp::Transpose | TransformOp::Transverse | TransformOp::Rot90 | TransformOp::Rot270
+    );
+
+    if swaps_dimensions {
+        jpeg_buf_size(height, width, subsampling)
+    } else {
+        jpeg_buf_size(width, height, subsampling)
+    }
+}
+
+/// Compute scaled output dimensions for decompression.
+///
+/// Matches `jpeg_calc_output_dimensions()`. Applies the scaling factor
+/// `scale_num / scale_denom` to both width and height, rounding up.
+pub fn calc_output_dimensions(
+    width: usize,
+    height: usize,
+    scale_num: u32,
+    scale_denom: u32,
+) -> (usize, usize) {
+    let out_width: usize =
+        (width * scale_num as usize + scale_denom as usize - 1) / scale_denom as usize;
+    let out_height: usize =
+        (height * scale_num as usize + scale_denom as usize - 1) / scale_denom as usize;
+    (out_width, out_height)
+}
+
+/// Compute MCU-padded JPEG dimensions for encoding.
+///
+/// Matches `jpeg_calc_jpeg_dimensions()`. Rounds width and height up to the
+/// nearest MCU boundary determined by the subsampling mode.
+pub fn calc_jpeg_dimensions(
+    width: usize,
+    height: usize,
+    subsampling: Subsampling,
+) -> (usize, usize) {
+    let mcu_width: usize = subsampling.mcu_width_blocks() * 8;
+    let mcu_height: usize = subsampling.mcu_height_blocks() * 8;
+    (pad(width, mcu_width), pad(height, mcu_height))
 }
 
 #[cfg(test)]
