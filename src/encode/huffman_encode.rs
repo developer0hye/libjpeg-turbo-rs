@@ -112,6 +112,32 @@ impl BitWriter {
         self.bits_in_buffer = bits_in_buffer;
     }
 
+    /// Flush bits to byte boundary for restart markers.
+    ///
+    /// Pads remaining bits with 1s, byte-stuffs 0xFF bytes.
+    /// Does NOT finalize the stream — the writer remains usable after this call.
+    pub fn flush_restart(&mut self) {
+        if self.bits_in_buffer > 0 {
+            let pad_bits = 8 - self.bits_in_buffer;
+            let padded = self.bit_buffer | (((1u32 << pad_bits) - 1) << (24 - self.bits_in_buffer));
+            let byte = (padded >> 24) as u8;
+            self.buffer.push(byte);
+            if byte == 0xFF {
+                self.buffer.push(0x00);
+            }
+            self.bit_buffer = 0;
+            self.bits_in_buffer = 0;
+        }
+    }
+
+    /// Write a raw restart marker (RST0..RST7) directly into the output.
+    ///
+    /// `index` is masked to 0..7. No byte stuffing is applied to the marker bytes.
+    pub fn write_restart_marker(&mut self, index: u8) {
+        self.buffer.push(0xFF);
+        self.buffer.push(0xD0 + (index & 7));
+    }
+
     /// Flush the bit buffer, padding remaining bits with 1s.
     ///
     /// Per the JPEG spec, the final byte is padded with 1-bits.
