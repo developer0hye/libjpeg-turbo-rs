@@ -109,6 +109,8 @@ pub struct Decoder<'a> {
     pub(crate) block_smoothing: bool,
     /// Output colorspace override.
     pub(crate) output_colorspace: Option<ColorSpace>,
+    /// Apply ordered dithering when outputting RGB565.
+    pub(crate) dither_565: bool,
     /// Custom marker processor callbacks, keyed by marker code.
     marker_processors: std::collections::HashMap<u8, Box<dyn Fn(&[u8]) -> Option<Vec<u8>>>>,
 }
@@ -138,6 +140,7 @@ impl<'a> Decoder<'a> {
             dct_method: DctMethod::IsLow,
             block_smoothing: false,
             output_colorspace: None,
+            dither_565: false,
             marker_processors: std::collections::HashMap::new(),
         })
     }
@@ -219,6 +222,15 @@ impl<'a> Decoder<'a> {
     /// Override the output color space.
     pub fn set_output_colorspace(&mut self, cs: ColorSpace) {
         self.output_colorspace = Some(cs);
+    }
+
+    /// Enable or disable ordered dithering for RGB565 output.
+    ///
+    /// When enabled, applies a 4x4 ordered dither pattern before truncating
+    /// 8-bit RGB to 5-6-5, reducing visible banding in smooth gradients.
+    /// Matches libjpeg-turbo's dithered RGB565 output mode.
+    pub fn set_dither_565(&mut self, dither: bool) {
+        self.dither_565 = dither;
     }
 
     /// Configure which markers to save during decoding.
@@ -381,6 +393,7 @@ impl<'a> Decoder<'a> {
     }
 
     /// Dispatch color conversion for one row based on the target pixel format.
+    /// `row_index` is the output row number, used for ordered dithering in RGB565 mode.
     #[inline(always)]
     fn color_convert_row(
         &self,
@@ -390,6 +403,7 @@ impl<'a> Decoder<'a> {
         cr: &[u8],
         out: &mut [u8],
         width: usize,
+        row_index: usize,
     ) {
         match format {
             PixelFormat::Rgb => self.ycbcr_to_rgb_row(y, cb, cr, out, width),
@@ -414,7 +428,15 @@ impl<'a> Decoder<'a> {
             PixelFormat::Abgr => {
                 crate::decode::color::ycbcr_to_generic_4bpp_row(y, cb, cr, out, width, 3, 2, 1, 0)
             }
-            PixelFormat::Rgb565 => crate::decode::color::ycbcr_to_rgb565_row(y, cb, cr, out, width),
+            PixelFormat::Rgb565 => {
+                if self.dither_565 {
+                    crate::decode::color::ycbcr_to_rgb565_dithered_row(
+                        y, cb, cr, out, width, row_index,
+                    )
+                } else {
+                    crate::decode::color::ycbcr_to_rgb565_row(y, cb, cr, out, width)
+                }
+            }
             PixelFormat::Grayscale | PixelFormat::Cmyk => {
                 unreachable!("grayscale/cmyk handled separately")
             }
@@ -2148,6 +2170,13 @@ impl<'a> Decoder<'a> {
                 for y in 0..out_height {
                     let row = &component_planes[0][y * comp_w..y * comp_w + out_width];
                     let out_row = &mut data[y * out_width * bpp..(y + 1) * out_width * bpp];
+                    // For dithered RGB565, use the dedicated row-level function.
+                    if out_format == PixelFormat::Rgb565 && self.dither_565 {
+                        crate::decode::color::gray_to_rgb565_dithered_row(
+                            row, out_row, out_width, y,
+                        );
+                        continue;
+                    }
                     for x in 0..out_width {
                         let v = row[x];
                         match out_format {
@@ -2174,7 +2203,7 @@ impl<'a> Decoder<'a> {
                                 out_row[x * 4 + 3] = v;
                             }
                             PixelFormat::Rgb565 => {
-                                // Grayscale v → pack as R=G=B=v
+                                // Grayscale v → pack as R=G=B=v (no dither)
                                 let packed: u16 = ((v as u16 >> 3) << 11)
                                     | ((v as u16 >> 2) << 5)
                                     | (v as u16 >> 3);
@@ -2324,6 +2353,7 @@ impl<'a> Decoder<'a> {
                         &cr_full[y * full_width..],
                         &mut data[y * out_width * bpp..],
                         out_width,
+                        y,
                     );
                 }
 
@@ -2354,6 +2384,7 @@ impl<'a> Decoder<'a> {
                     &cr_data[y * cr_stride..],
                     &mut data[y * out_width * bpp..],
                     out_width,
+                    y,
                 );
             }
 
