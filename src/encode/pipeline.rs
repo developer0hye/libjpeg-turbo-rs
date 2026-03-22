@@ -226,6 +226,47 @@ pub fn compress(
     Ok(output)
 }
 
+/// Compress with optional ICC profile and EXIF metadata.
+///
+/// Inserts APP1 (EXIF) and APP2 (ICC) markers after the APP0 JFIF marker.
+pub fn compress_with_metadata(
+    pixels: &[u8],
+    width: usize,
+    height: usize,
+    pixel_format: PixelFormat,
+    quality: u8,
+    subsampling: Subsampling,
+    icc_profile: Option<&[u8]>,
+    exif_data: Option<&[u8]>,
+) -> Result<Vec<u8>> {
+    let base = compress(pixels, width, height, pixel_format, quality, subsampling)?;
+
+    if icc_profile.is_none() && exif_data.is_none() {
+        return Ok(base);
+    }
+
+    // Find insertion point after APP0 JFIF marker (SOI + APP0)
+    let insert_pos = if base.len() >= 4 && base[2] == 0xFF && base[3] == 0xE0 {
+        let app0_len = u16::from_be_bytes([base[4], base[5]]) as usize;
+        2 + 2 + app0_len // SOI(2) + APP0 marker(2) + APP0 data
+    } else {
+        2 // After SOI only
+    };
+
+    let extra_cap =
+        icc_profile.map_or(0, |p| p.len() + 100) + exif_data.map_or(0, |e| e.len() + 20);
+    let mut out = Vec::with_capacity(base.len() + extra_cap);
+    out.extend_from_slice(&base[..insert_pos]);
+    if let Some(exif) = exif_data {
+        marker_writer::write_app1_exif(&mut out, exif);
+    }
+    if let Some(icc) = icc_profile {
+        marker_writer::write_app2_icc(&mut out, icc);
+    }
+    out.extend_from_slice(&base[insert_pos..]);
+    Ok(out)
+}
+
 /// Per-component block layout for progressive encoding.
 struct CompLayout {
     blocks_x: usize,
