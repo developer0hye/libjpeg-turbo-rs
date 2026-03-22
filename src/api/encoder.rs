@@ -1,5 +1,8 @@
+use crate::api::quality;
 use crate::common::error::Result;
-use crate::common::types::{DctMethod, PixelFormat, SavedMarker, ScanScript, Subsampling};
+use crate::common::types::{
+    ColorSpace, DctMethod, PixelFormat, SavedMarker, ScanScript, Subsampling,
+};
 use crate::encode::pipeline as encoder;
 use crate::encode::tables;
 
@@ -50,6 +53,15 @@ pub struct Encoder<'a> {
     custom_huffman_ac: [Option<HuffmanTableDef>; 4],
     dct_method: DctMethod,
     saved_markers: Vec<SavedMarker>,
+    /// When true, constrain quantization table values to 1-255 for baseline JPEG compatibility.
+    force_baseline: bool,
+    /// When true, pixel rows are read bottom-to-top.
+    bottom_up: bool,
+    /// Explicit JPEG colorspace override. When `None`, auto-detected from pixel format.
+    colorspace_override: Option<ColorSpace>,
+    /// Linear scale factor for quantization (set via `linear_quality()`).
+    /// When `Some`, overrides the quality-based scaling.
+    linear_scale_factor: Option<u32>,
 }
 
 impl<'a> Encoder<'a> {
@@ -80,6 +92,10 @@ impl<'a> Encoder<'a> {
             custom_huffman_ac: [None, None, None, None],
             dct_method: DctMethod::IsLow,
             saved_markers: Vec::new(),
+            force_baseline: false,
+            bottom_up: false,
+            colorspace_override: None,
+            linear_scale_factor: None,
         }
     }
 
@@ -222,6 +238,50 @@ impl<'a> Encoder<'a> {
         self
     }
 
+    /// Constrain quantization table values to 1-255 for baseline JPEG compatibility.
+    ///
+    /// When true, any quantization value exceeding 255 is clamped to 255.
+    /// This ensures the output JPEG is decodable by baseline-only decoders.
+    /// Matches libjpeg-turbo's `force_baseline` parameter on `jpeg_set_quality()`.
+    pub fn force_baseline(mut self, force: bool) -> Self {
+        self.force_baseline = force;
+        self
+    }
+
+    /// Read pixel rows bottom-to-top instead of top-to-bottom.
+    ///
+    /// When true, the encoder reverses the row order before encoding so that
+    /// the last row in the buffer becomes the first row in the JPEG image.
+    /// Matches libjpeg-turbo's `TJPARAM_BOTTOMUP`.
+    pub fn bottom_up(mut self, bottom_up: bool) -> Self {
+        self.bottom_up = bottom_up;
+        self
+    }
+
+    /// Set an explicit JPEG colorspace, overriding automatic detection.
+    ///
+    /// By default, the encoder auto-selects the JPEG colorspace based on the
+    /// input pixel format (e.g., RGB input -> YCbCr JPEG). This method lets
+    /// you override that choice, e.g., to store RGB data directly without
+    /// conversion to YCbCr. Matches libjpeg-turbo's `jpeg_set_colorspace()`.
+    pub fn colorspace(mut self, cs: ColorSpace) -> Self {
+        self.colorspace_override = Some(cs);
+        self
+    }
+
+    /// Set quality using a linear scale factor instead of the 1-100 quality rating.
+    ///
+    /// The scale factor directly controls quantization table scaling as a percentage:
+    /// - 100 means use the standard tables as-is (equivalent to quality 50)
+    /// - 50 means halve the table values (equivalent to quality 75)
+    /// - 200 means double the table values (equivalent to quality 25)
+    ///
+    /// Matches libjpeg-turbo's `jpeg_set_linear_quality()`.
+    pub fn linear_quality(mut self, scale_factor: u32) -> Self {
+        self.linear_scale_factor = Some(scale_factor);
+        self
+    }
+
     /// Set a custom quantization table for the given table slot (0-3).
     ///
     /// Index 0 is used for luma, index 1 for chroma. When set, the custom
@@ -263,7 +323,10 @@ impl<'a> Encoder<'a> {
                     8
                 } else {
                     match self.subsampling {
-                        Subsampling::S444 | Subsampling::S440 | Subsampling::S441 => 8,
+                        Subsampling::S444
+                        | Subsampling::S440
+                        | Subsampling::S441
+                        | Subsampling::Unknown => 8,
                         Subsampling::S422 | Subsampling::S420 => 16,
                         Subsampling::S411 => 32,
                     }
@@ -279,6 +342,18 @@ impl<'a> Encoder<'a> {
     /// priority over quality factors for the same slot.
     fn effective_quant_tables(&self) -> [Option<[u16; 64]>; 4] {
         let mut result = self.custom_quant_tables;
+
+        // Apply force_baseline clamping to explicit custom tables
+        if self.force_baseline {
+            for table in result.iter_mut().flatten() {
+                for val in table.iter_mut() {
+                    if *val > 255 {
+                        *val = 255;
+                    }
+                }
+            }
+        }
+
         if let Some(factors) = self.quality_factors {
             // Standard base tables: slot 0 = luminance, slots 1-3 = chrominance
             let base_tables: [&[u8; 64]; 4] = [
@@ -289,7 +364,12 @@ impl<'a> Encoder<'a> {
             ];
             for (i, base) in base_tables.iter().enumerate() {
                 if result[i].is_none() {
-                    result[i] = Some(tables::quality_scale_quant_table(base, factors[i]));
+                    let scale: u32 = quality::quality_scaling(factors[i]);
+                    result[i] = Some(quality::scale_quant_table_linear(
+                        base,
+                        scale,
+                        self.force_baseline,
+                    ));
                 }
             }
         }
@@ -306,6 +386,17 @@ impl<'a> Encoder<'a> {
     fn has_custom_huffman_tables(&self) -> bool {
         self.custom_huffman_dc.iter().any(|t| t.is_some())
             || self.custom_huffman_ac.iter().any(|t| t.is_some())
+    }
+
+    /// Flip pixel rows vertically for bottom-up encoding.
+    fn flip_rows(pixels: &[u8], width: usize, height: usize, bpp: usize) -> Vec<u8> {
+        let row_bytes: usize = width * bpp;
+        let mut flipped: Vec<u8> = Vec::with_capacity(pixels.len());
+        for row in (0..height).rev() {
+            let start: usize = row * row_bytes;
+            flipped.extend_from_slice(&pixels[start..start + row_bytes]);
+        }
+        flipped
     }
 
     /// Extract Y (luminance) from color pixels using BT.601 coefficients.
@@ -370,21 +461,65 @@ impl<'a> Encoder<'a> {
         y
     }
 
+    /// Determine the effective quality for encoding, accounting for linear_quality override.
+    fn effective_quality(&self) -> u8 {
+        if let Some(scale) = self.linear_scale_factor {
+            // Reverse-map the linear scale factor to a quality value.
+            // quality_scaling(q) produces the scale factor; we need the inverse.
+            // For q < 50: scale = 5000 / q  =>  q = 5000 / scale
+            // For q >= 50: scale = 200 - 2*q  =>  q = (200 - scale) / 2
+            // At the boundary q=50, scale=100.
+            if scale >= 100 {
+                // q < 50 range
+                let q: u32 = 5000 / scale.max(1);
+                q.clamp(1, 100) as u8
+            } else {
+                // q >= 50 range
+                let q: u32 = (200 - scale) / 2;
+                q.clamp(1, 100) as u8
+            }
+        } else {
+            self.quality
+        }
+    }
+
     /// Encode and return the JPEG byte stream.
     pub fn encode(&self) -> Result<Vec<u8>> {
         let restart_interval = self.compute_restart_interval();
+
+        // Handle bottom-up row flipping
+        let flipped_buf: Vec<u8>;
+        let input_pixels: &[u8] = if self.bottom_up {
+            flipped_buf = Self::flip_rows(
+                self.pixels,
+                self.width,
+                self.height,
+                self.pixel_format.bytes_per_pixel(),
+            );
+            &flipped_buf
+        } else {
+            self.pixels
+        };
 
         let (effective_pixels, effective_format);
         let gray_buf: Vec<u8>;
         if self.grayscale_from_color && self.pixel_format != PixelFormat::Grayscale {
             gray_buf =
-                Self::extract_luminance(self.pixels, self.width * self.height, self.pixel_format);
+                Self::extract_luminance(input_pixels, self.width * self.height, self.pixel_format);
             effective_pixels = &gray_buf[..];
             effective_format = PixelFormat::Grayscale;
         } else {
-            effective_pixels = self.pixels;
+            effective_pixels = input_pixels;
             effective_format = self.pixel_format;
         }
+
+        // Use the effective quality (handles linear_quality override)
+        let quality: u8 = self.effective_quality();
+
+        // Check if force_baseline or linear_quality requires custom quant tables
+        let needs_custom_quant: bool = self.force_baseline
+            || self.linear_scale_factor.is_some()
+            || self.has_custom_quant_tables();
 
         let base = if self.lossless && self.arithmetic {
             encoder::compress_lossless_arithmetic(
@@ -410,7 +545,7 @@ impl<'a> Encoder<'a> {
                 self.width,
                 self.height,
                 effective_format,
-                self.quality,
+                quality,
                 self.subsampling,
             )?
         } else if self.arithmetic {
@@ -419,7 +554,7 @@ impl<'a> Encoder<'a> {
                 self.width,
                 self.height,
                 effective_format,
-                self.quality,
+                quality,
                 self.subsampling,
             )?
         } else if self.progressive {
@@ -429,7 +564,7 @@ impl<'a> Encoder<'a> {
                     self.width,
                     self.height,
                     effective_format,
-                    self.quality,
+                    quality,
                     self.subsampling,
                     script,
                 )?
@@ -439,7 +574,7 @@ impl<'a> Encoder<'a> {
                     self.width,
                     self.height,
                     effective_format,
-                    self.quality,
+                    quality,
                     self.subsampling,
                 )?
             }
@@ -449,7 +584,7 @@ impl<'a> Encoder<'a> {
                 self.width,
                 self.height,
                 effective_format,
-                self.quality,
+                quality,
                 self.subsampling,
             )?
         } else if self.has_custom_huffman_tables() {
@@ -458,19 +593,19 @@ impl<'a> Encoder<'a> {
                 self.width,
                 self.height,
                 effective_format,
-                self.quality,
+                quality,
                 self.subsampling,
                 &self.custom_huffman_dc,
                 &self.custom_huffman_ac,
             )?
-        } else if self.has_custom_quant_tables() {
-            let effective_tables = self.effective_quant_tables();
+        } else if needs_custom_quant {
+            let effective_tables = self.build_quant_tables(quality);
             encoder::compress_custom_quant(
                 effective_pixels,
                 self.width,
                 self.height,
                 effective_format,
-                self.quality,
+                quality,
                 self.subsampling,
                 &effective_tables,
             )?
@@ -480,7 +615,7 @@ impl<'a> Encoder<'a> {
                 self.width,
                 self.height,
                 effective_format,
-                self.quality,
+                quality,
                 self.subsampling,
                 restart_interval,
             )?
@@ -490,7 +625,7 @@ impl<'a> Encoder<'a> {
                 self.width,
                 self.height,
                 effective_format,
-                self.quality,
+                quality,
                 self.subsampling,
                 self.dct_method,
             )?
@@ -516,5 +651,67 @@ impl<'a> Encoder<'a> {
                 &self.saved_markers,
             ))
         }
+    }
+
+    /// Build quantization tables for force_baseline / linear_quality scenarios.
+    fn build_quant_tables(&self, quality: u8) -> [Option<[u16; 64]>; 4] {
+        // Start with any explicit custom tables
+        let mut result = self.custom_quant_tables;
+
+        // Apply force_baseline clamping to explicit custom tables
+        if self.force_baseline {
+            for table in result.iter_mut().flatten() {
+                for val in table.iter_mut() {
+                    if *val > 255 {
+                        *val = 255;
+                    }
+                }
+            }
+        }
+
+        // For per-component quality factors
+        if let Some(factors) = self.quality_factors {
+            let base_tables: [&[u8; 64]; 4] = [
+                &tables::STD_LUMINANCE_QUANT_TABLE,
+                &tables::STD_CHROMINANCE_QUANT_TABLE,
+                &tables::STD_CHROMINANCE_QUANT_TABLE,
+                &tables::STD_CHROMINANCE_QUANT_TABLE,
+            ];
+            for (i, base) in base_tables.iter().enumerate() {
+                if result[i].is_none() {
+                    let scale: u32 = quality::quality_scaling(factors[i]);
+                    result[i] = Some(quality::scale_quant_table_linear(
+                        base,
+                        scale,
+                        self.force_baseline,
+                    ));
+                }
+            }
+            return result;
+        }
+
+        // For linear_quality or force_baseline without per-component factors
+        let scale: u32 = if let Some(sf) = self.linear_scale_factor {
+            sf
+        } else {
+            quality::quality_scaling(quality)
+        };
+
+        if result[0].is_none() {
+            result[0] = Some(quality::scale_quant_table_linear(
+                &tables::STD_LUMINANCE_QUANT_TABLE,
+                scale,
+                self.force_baseline,
+            ));
+        }
+        if result[1].is_none() {
+            result[1] = Some(quality::scale_quant_table_linear(
+                &tables::STD_CHROMINANCE_QUANT_TABLE,
+                scale,
+                self.force_baseline,
+            ));
+        }
+
+        result
     }
 }

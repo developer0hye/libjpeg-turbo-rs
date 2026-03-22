@@ -60,7 +60,7 @@
 - [x] TJSAMP_440 (4:4:0)
 - [x] TJSAMP_411 (4:1:1)
 - [x] TJSAMP_441 (4:4:1)
-- [ ] TJSAMP_UNKNOWN (unusual/custom subsampling detection)
+- [x] TJSAMP_UNKNOWN (unusual/custom subsampling detection) (`Subsampling::Unknown`)
 
 ---
 
@@ -71,7 +71,7 @@
 - [x] JCS_RGB
 - [x] JCS_CMYK
 - [x] JCS_YCCK
-- [ ] JCS_UNKNOWN (pass-through, no conversion)
+- [x] JCS_UNKNOWN (pass-through, no conversion) (`ColorSpace::Unknown`)
 
 ---
 
@@ -81,10 +81,10 @@
 - [x] `TJPARAM_QUALITY` — Quality factor 1-100 (`jpeg_set_quality`)
 - [ ] `q_scale_factor[NUM_QUANT_TBLS]` — Per-component quality
 - [x] `jpeg_add_quant_table()` — Custom quantization table (`Encoder::quant_table()`)
-- [ ] `jpeg_set_linear_quality()` — Linear quality scaling
+- [x] `jpeg_set_linear_quality()` — Linear quality scaling (`Encoder::linear_quality()`)
 - [ ] `jpeg_default_qtables()` — Reset to default tables
-- [ ] `jpeg_quality_scaling()` — Quality to scale factor conversion
-- [ ] `force_baseline` parameter — Constrain quant values to 1-255
+- [x] `jpeg_quality_scaling()` — Quality to scale factor conversion (`quality_scaling()`)
+- [x] `force_baseline` parameter — Constrain quant values to 1-255 (`Encoder::force_baseline()`)
 
 ### Huffman Tables
 - [x] Standard DC/AC luminance + chrominance tables
@@ -137,13 +137,13 @@
 ### Color Space Control
 - [x] Auto YCbCr from RGB/RGBA/BGR/BGRA input
 - [x] CMYK direct (no conversion)
-- [ ] `jpeg_set_colorspace()` — Explicit colorspace override
+- [x] `jpeg_set_colorspace()` — Explicit colorspace override (`Encoder::colorspace()`)
 - [ ] `jpeg_default_colorspace()` — Reset to default
 - [ ] `in_color_space` / `jpeg_color_space` independent control
 - [x] Grayscale-from-color encode option (`Encoder::grayscale_from_color()`)
 
 ### Input Options
-- [ ] `TJPARAM_BOTTOMUP` — Bottom-up row order
+- [x] `TJPARAM_BOTTOMUP` — Bottom-up row order (`Encoder::bottom_up()`)
 - [ ] `raw_data_in` — Encode from raw downsampled component data
 - [ ] `smoothing_factor` — Input smoothing (0-100)
 - [ ] `do_fancy_downsampling` — Fancy vs simple chroma downsample
@@ -427,9 +427,9 @@
 | Frame types (decode) | 6 | 6 | 100% |
 | Sample precision | 3 | 3 | 100% |
 | Pixel formats | 13 | 13 | 100% |
-| Chroma subsampling | 7 | 8 | 88% |
-| Color spaces | 5 | 6 | 83% |
-| Compress params | ~40 | ~65 | ~62% |
+| Chroma subsampling | 8 | 8 | 100% |
+| Color spaces | 6 | 6 | 100% |
+| Compress params | ~45 | ~65 | ~69% |
 | Decompress params | ~30 | ~55 | ~55% |
 | Metadata | 10 | 10 | 100% |
 | Transform ops | 8 | 8 | 100% |
