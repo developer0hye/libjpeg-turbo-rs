@@ -237,7 +237,7 @@ impl<'a> Encoder<'a> {
                     8
                 } else {
                     match self.subsampling {
-                        Subsampling::S444 | Subsampling::S440 => 8,
+                        Subsampling::S444 | Subsampling::S440 | Subsampling::S441 => 8,
                         Subsampling::S422 | Subsampling::S420 => 16,
                         Subsampling::S411 => 32,
                     }
