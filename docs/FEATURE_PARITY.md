@@ -332,8 +332,8 @@
 - [x] Fancy H2V2 upsample
 - [x] Forward DCT (FDCT) for encoder
 - [x] Chroma downsample for encoder
-- [ ] Quantization for encoder
-- [ ] Scaled IDCT (4x4, 2x2, 1x1) NEON variants
+- [x] Quantization for encoder
+- [x] Scaled IDCT (4x4, 2x2, 1x1) NEON variants
 - [x] RGB → YCbCr (encode-side color conversion)
 
 ### x86_64
