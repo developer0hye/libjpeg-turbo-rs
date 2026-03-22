@@ -266,7 +266,7 @@ pub fn encode_yuv_planes(
 /// Returns (horizontal_factor, vertical_factor) for chroma downsampling.
 fn subsampling_factors(subsampling: Subsampling) -> (usize, usize) {
     match subsampling {
-        Subsampling::S444 => (1, 1),
+        Subsampling::S444 | Subsampling::Unknown => (1, 1),
         Subsampling::S422 => (2, 1),
         Subsampling::S420 => (2, 2),
         Subsampling::S440 => (1, 2),
