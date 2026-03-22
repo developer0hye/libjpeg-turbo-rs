@@ -89,7 +89,15 @@ pub fn compress(
     quality: u8,
     subsampling: Subsampling,
 ) -> Result<Vec<u8>> {
-    encoder::compress(pixels, width, height, pixel_format, quality, subsampling)
+    encoder::compress(
+        pixels,
+        width,
+        height,
+        pixel_format,
+        quality,
+        subsampling,
+        crate::common::types::DctMethod::IsLow,
+    )
 }
 
 /// Compress with optimized Huffman tables (2-pass encoding).
