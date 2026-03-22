@@ -18,6 +18,12 @@ pub use api::high_level::{
 };
 pub use api::image_io::{load_image, load_image_from_bytes, save_bmp, save_ppm, LoadedImage};
 pub use api::raw_data::{compress_raw, decompress_raw, RawImage};
+/// Color quantization for 8-bit indexed/palette output.
+pub mod quantize {
+    pub use crate::api::quantize::{
+        dequantize, quantize, DitherMode, QuantizeOptions, QuantizedImage,
+    };
+}
 pub use api::scanline::{ScanlineDecoder, ScanlineEncoder};
 /// Streaming I/O functions for reading/writing JPEG via `std::io` traits and file paths.
 pub use api::stream;
@@ -30,3 +36,7 @@ pub use common::traits::{DefaultErrorHandler, ErrorHandler, ProgressInfo, Progre
 pub use common::types::*;
 pub use decode::pipeline::Image;
 pub use transform::{TransformOp, TransformOptions};
+/// TJ3-compatible handle/parameter API.
+pub mod tj3 {
+    pub use crate::api::tj3::{TjHandle, TjParam};
+}
