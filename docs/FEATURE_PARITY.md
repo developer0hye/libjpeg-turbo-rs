@@ -28,8 +28,8 @@
 ## 2. Sample Precision
 
 - [x] 8-bit (`JSAMPLE` / `u8`)
-- [ ] 12-bit (`J12SAMPLE` / `i16`) — `tj3Compress12`, `tj3Decompress12`, `jpeg12_write_scanlines`, `jpeg12_read_scanlines`
-- [ ] 16-bit (`J16SAMPLE` / `u16`, lossless only) — `tj3Compress16`, `tj3Decompress16`, `jpeg16_write_scanlines`, `jpeg16_read_scanlines`
+- [x] 12-bit (`J12SAMPLE` / `i16`) — `tj3Compress12`, `tj3Decompress12`, `jpeg12_write_scanlines`, `jpeg12_read_scanlines`
+- [x] 16-bit (`J16SAMPLE` / `u16`, lossless only) — `tj3Compress16`, `tj3Decompress16`, `jpeg16_write_scanlines`, `jpeg16_read_scanlines`
 
 ---
 
@@ -425,7 +425,7 @@
 |----------|------|-------|---|
 | Frame types (encode) | 6 | 6 | 100% |
 | Frame types (decode) | 6 | 6 | 100% |
-| Sample precision | 1 | 3 | 33% |
+| Sample precision | 3 | 3 | 100% |
 | Pixel formats | 13 | 13 | 100% |
 | Chroma subsampling | 7 | 8 | 88% |
 | Color spaces | 5 | 6 | 83% |
@@ -461,11 +461,11 @@
 | 7 | ~~Configurable DPI/density~~ | #17 |
 | 8 | ~~Arbitrary marker write~~ | #17 |
 
-### Phase 5 — Extended Formats (PARTIAL — 6/8 done)
+### Phase 5 — Extended Formats ✅ COMPLETE
 | # | Feature | Status |
 |---|---------|--------|
-| 9 | 12-bit precision | ⬜ Pending (Sample trait ready) |
-| 10 | 16-bit precision (lossless) | ⬜ Pending (Sample trait ready) |
+| 9 | 12-bit precision | ✅ |
+| 10 | 16-bit precision (lossless) | ✅ |
 | 11 | ~~Custom quantization tables~~ | ✅ #19 |
 | 12 | ~~Custom Huffman tables~~ | ✅ #23 |
 | 13 | ~~Custom progressive scan scripts~~ | ✅ #24 |
