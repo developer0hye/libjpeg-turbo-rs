@@ -569,6 +569,50 @@ impl<'a> Decoder<'a> {
         }
     }
 
+    /// Fancy h4v2 upsample: 4x horizontal, 2x vertical (for 4:1:0).
+    /// Each input row produces two output rows (vertical 2x via triangle filter),
+    /// then each row is horizontally expanded 4x using the h4v1 filter.
+    fn fancy_h4v2(
+        &self,
+        input: &[u8],
+        in_width: usize,
+        in_height: usize,
+        output: &mut [u8],
+        out_width: usize,
+    ) {
+        // Temporary buffer for one vertically-blended row before horizontal expansion.
+        let mut vert_row = vec![0u8; in_width];
+
+        for y in 0..in_height {
+            let cur_row = &input[y * in_width..(y + 1) * in_width];
+            let above = if y > 0 {
+                &input[(y - 1) * in_width..y * in_width]
+            } else {
+                cur_row
+            };
+            let below = if y + 1 < in_height {
+                &input[(y + 1) * in_width..(y + 2) * in_width]
+            } else {
+                cur_row
+            };
+
+            let out_y_top: usize = y * 2;
+            let out_y_bot: usize = y * 2 + 1;
+
+            // Vertical blend toward above, then horizontal 4x expand.
+            for i in 0..in_width {
+                vert_row[i] = ((3 * cur_row[i] as u16 + above[i] as u16 + 2) >> 2) as u8;
+            }
+            Self::fancy_upsample_h4v1(&vert_row, in_width, &mut output[out_y_top * out_width..]);
+
+            // Vertical blend toward below, then horizontal 4x expand.
+            for i in 0..in_width {
+                vert_row[i] = ((3 * cur_row[i] as u16 + below[i] as u16 + 2) >> 2) as u8;
+            }
+            Self::fancy_upsample_h4v1(&vert_row, in_width, &mut output[out_y_bot * out_width..]);
+        }
+    }
+
     /// Fancy h4v1 upsample: horizontal-only 4x (for S411).
     /// Each input sample produces 4 output samples using triangle filter horizontally.
     fn fancy_upsample_h4v1(input: &[u8], in_width: usize, output: &mut [u8]) {
@@ -2250,6 +2294,10 @@ impl<'a> Decoder<'a> {
                             &mut cr_full[row * full_width..],
                         );
                     }
+                } else if h_factor == 4 && v_factor == 2 {
+                    // 4:1:0: horizontal 4x + vertical 2x
+                    self.fancy_h4v2(&component_planes[1], cb_w, cb_h, &mut cb_full, full_width);
+                    self.fancy_h4v2(&component_planes[2], cb_w, cb_h, &mut cr_full, full_width);
                 } else if h_factor == 1 && v_factor == 4 {
                     // S441: vertical-only 4x upsampling
                     self.fancy_h1v4(&component_planes[1], cb_w, cb_h, &mut cb_full, full_width);
