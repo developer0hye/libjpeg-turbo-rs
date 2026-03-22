@@ -156,6 +156,31 @@ pub fn compress_lossless(
     encoder::compress_lossless(pixels, width, height, pixel_format)
 }
 
+/// Compress as lossless JPEG (SOF3) with configurable predictor and point transform.
+///
+/// Supports grayscale (1-component) and RGB (3-component interleaved via YCbCr).
+///
+/// # Arguments
+/// * `predictor` - Predictor selection value (1-7)
+/// * `point_transform` - Point transform value (0-15)
+pub fn compress_lossless_extended(
+    pixels: &[u8],
+    width: usize,
+    height: usize,
+    pixel_format: PixelFormat,
+    predictor: u8,
+    point_transform: u8,
+) -> Result<Vec<u8>> {
+    encoder::compress_lossless_extended(
+        pixels,
+        width,
+        height,
+        pixel_format,
+        predictor,
+        point_transform,
+    )
+}
+
 /// Compress with arithmetic entropy coding (SOF9).
 ///
 /// Uses QM-coder binary arithmetic coding instead of Huffman coding.
