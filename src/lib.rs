@@ -6,7 +6,8 @@ pub mod simd;
 pub mod transform;
 
 pub use api::coefficient::{
-    read_coefficients, transform_jpeg as transform, write_coefficients, JpegCoefficients,
+    read_coefficients, transform_jpeg as transform, transform_jpeg_with_options,
+    write_coefficients, JpegCoefficients,
 };
 pub use api::encoder::{Encoder, HuffmanTableDef};
 pub use api::high_level::{
@@ -23,4 +24,4 @@ pub use common::sample::Sample;
 pub use common::traits::{DefaultErrorHandler, ErrorHandler, ProgressInfo, ProgressListener};
 pub use common::types::*;
 pub use decode::pipeline::Image;
-pub use transform::TransformOp;
+pub use transform::{TransformOp, TransformOptions};
