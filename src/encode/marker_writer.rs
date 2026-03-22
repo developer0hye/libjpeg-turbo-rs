@@ -292,6 +292,50 @@ pub fn write_app14_adobe(buf: &mut Vec<u8>, transform: u8) {
     buf.push(transform); // color transform
 }
 
+/// Write SOF3 (lossless, Huffman-coded) frame header.
+pub fn write_sof3(
+    buf: &mut Vec<u8>,
+    width: u16,
+    height: u16,
+    precision: u8,
+    components: &[(u8, u8, u8, u8)],
+) {
+    buf.push(0xFF);
+    buf.push(0xC3); // SOF3
+    let length: u16 = 2 + 1 + 2 + 2 + 1 + (components.len() as u16 * 3);
+    buf.extend_from_slice(&length.to_be_bytes());
+    buf.push(precision);
+    buf.extend_from_slice(&height.to_be_bytes());
+    buf.extend_from_slice(&width.to_be_bytes());
+    buf.push(components.len() as u8);
+    for &(id, h_samp, v_samp, qt_idx) in components {
+        buf.push(id);
+        buf.push((h_samp << 4) | v_samp);
+        buf.push(qt_idx);
+    }
+}
+
+/// Write SOS for lossless scan. Ss=predictor (1-7), Se=0, Ah=0, Al=point_transform.
+pub fn write_sos_lossless(
+    buf: &mut Vec<u8>,
+    components: &[(u8, u8)],
+    predictor: u8,
+    point_transform: u8,
+) {
+    buf.push(0xFF);
+    buf.push(0xDA); // SOS
+    let length: u16 = 2 + 1 + (components.len() as u16 * 2) + 3;
+    buf.extend_from_slice(&length.to_be_bytes());
+    buf.push(components.len() as u8);
+    for &(id, dc_tbl) in components {
+        buf.push(id);
+        buf.push((dc_tbl << 4) | 0); // DC table only, AC unused
+    }
+    buf.push(predictor); // Ss = predictor selection (1-7)
+    buf.push(0); // Se = 0
+    buf.push(point_transform & 0x0F); // Ah=0, Al=point_transform
+}
+
 /// Write EOI (End Of Image) marker: 0xFFD9.
 pub fn write_eoi(buf: &mut Vec<u8>) {
     buf.push(0xFF);
