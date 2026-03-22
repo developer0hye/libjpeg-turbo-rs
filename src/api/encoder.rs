@@ -27,6 +27,7 @@ pub struct Encoder<'a> {
     icc_profile: Option<&'a [u8]>,
     exif_data: Option<&'a [u8]>,
     comment: Option<&'a str>,
+    custom_quant_tables: [Option<[u16; 64]>; 4],
 }
 
 impl<'a> Encoder<'a> {
@@ -47,6 +48,7 @@ impl<'a> Encoder<'a> {
             icc_profile: None,
             exif_data: None,
             comment: None,
+            custom_quant_tables: [None; 4],
         }
     }
 
@@ -122,6 +124,17 @@ impl<'a> Encoder<'a> {
         self
     }
 
+    /// Set a custom quantization table for the given table slot (0-3).
+    ///
+    /// Index 0 is used for luma, index 1 for chroma. When set, the custom
+    /// table overrides the quality-scaled standard table for that component.
+    /// Values are raw quantization coefficients in zigzag order.
+    pub fn quant_table(mut self, index: usize, table: [u16; 64]) -> Self {
+        assert!(index < 4, "quantization table index must be 0..3");
+        self.custom_quant_tables[index] = Some(table);
+        self
+    }
+
     /// Compute the restart interval in MCU blocks from the configured restart setting.
     fn compute_restart_interval(&self) -> u16 {
         match self.restart_interval {
@@ -141,6 +154,11 @@ impl<'a> Encoder<'a> {
                 n.saturating_mul(mcus_x)
             }
         }
+    }
+
+    /// Returns true if any custom quantization table has been set.
+    fn has_custom_quant_tables(&self) -> bool {
+        self.custom_quant_tables.iter().any(|t| t.is_some())
     }
 
     /// Encode and return the JPEG byte stream.
@@ -175,6 +193,16 @@ impl<'a> Encoder<'a> {
                 self.pixel_format,
                 self.quality,
                 self.subsampling,
+            )?
+        } else if self.has_custom_quant_tables() {
+            encoder::compress_custom_quant(
+                self.pixels,
+                self.width,
+                self.height,
+                self.pixel_format,
+                self.quality,
+                self.subsampling,
+                &self.custom_quant_tables,
             )?
         } else if restart_interval > 0 {
             encoder::compress_with_restart(
