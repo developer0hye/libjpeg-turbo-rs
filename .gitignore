@@ -1,2 +1,4 @@
 /target
 /references
+fuzz/target
+fuzz/artifacts

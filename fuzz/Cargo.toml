@@ -1,0 +1,52 @@
+[package]
+name = "libjpeg-turbo-rs-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+arbitrary = { version = "1", features = ["derive"] }
+
+[dependencies.libjpeg-turbo-rs]
+path = ".."
+
+# Prevent this from interfering with workspaces
+[workspace]
+members = ["."]
+
+[profile.release]
+debug = 1
+
+[[bin]]
+name = "fuzz_decompress"
+path = "fuzz_targets/fuzz_decompress.rs"
+doc = false
+
+[[bin]]
+name = "fuzz_decompress_lenient"
+path = "fuzz_targets/fuzz_decompress_lenient.rs"
+doc = false
+
+[[bin]]
+name = "fuzz_roundtrip"
+path = "fuzz_targets/fuzz_roundtrip.rs"
+doc = false
+
+[[bin]]
+name = "fuzz_read_coefficients"
+path = "fuzz_targets/fuzz_read_coefficients.rs"
+doc = false
+
+[[bin]]
+name = "fuzz_transform"
+path = "fuzz_targets/fuzz_transform.rs"
+doc = false
+
+[[bin]]
+name = "fuzz_progressive_decoder"
+path = "fuzz_targets/fuzz_progressive_decoder.rs"
+doc = false
