@@ -15,6 +15,7 @@ pub use api::high_level::{
 };
 pub use common::error::{DecodeWarning, JpegError, Result};
 pub use common::sample::Sample;
+pub use common::traits::{DefaultErrorHandler, ErrorHandler, ProgressInfo, ProgressListener};
 pub use common::types::*;
 pub use decode::pipeline::Image;
 pub use transform::TransformOp;
