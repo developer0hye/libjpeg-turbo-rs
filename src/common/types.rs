@@ -221,6 +221,25 @@ pub struct SavedMarker {
     pub data: Vec<u8>,
 }
 
+/// Progressive scan script entry.
+///
+/// Defines one scan in a custom progressive scan script. Users can build
+/// a `Vec<ScanScript>` to control the exact ordering and spectral/successive
+/// approximation parameters of each progressive scan pass.
+#[derive(Debug, Clone)]
+pub struct ScanScript {
+    /// Component indices (0-based) included in this scan.
+    pub components: Vec<u8>,
+    /// Spectral selection start (0 for DC).
+    pub ss: u8,
+    /// Spectral selection end (0 for DC-only, 63 for full AC).
+    pub se: u8,
+    /// Successive approximation high bit (0 for first pass).
+    pub ah: u8,
+    /// Successive approximation low bit.
+    pub al: u8,
+}
+
 /// One chunk of an ICC profile stored in an APP2 marker.
 ///
 /// ICC profiles larger than 65519 bytes are split across multiple APP2 markers,
