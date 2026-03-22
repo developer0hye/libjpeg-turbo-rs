@@ -79,12 +79,8 @@ pub fn compress(
             Subsampling::S444 => (8, 8),
             Subsampling::S422 => (16, 8),
             Subsampling::S420 => (16, 16),
-            _ => {
-                return Err(JpegError::Unsupported(format!(
-                    "subsampling mode {:?} not supported for encoding",
-                    subsampling
-                )));
-            }
+            Subsampling::S440 => (8, 16),
+            Subsampling::S411 => (32, 8),
         }
     };
 
@@ -159,12 +155,7 @@ pub fn compress(
         let components = vec![(1, 1, 1, 0)];
         marker_writer::write_sof0(&mut output, width as u16, height as u16, &components);
     } else {
-        let (h_samp, v_samp) = match subsampling {
-            Subsampling::S444 => (1, 1),
-            Subsampling::S422 => (2, 1),
-            Subsampling::S420 => (2, 2),
-            _ => unreachable!(),
-        };
+        let (h_samp, v_samp) = subsampling.sampling_factors();
         let components = vec![
             (1, h_samp, v_samp, 0), // Y
             (2, 1, 1, 1),           // Cb
@@ -281,12 +272,8 @@ pub fn compress_progressive(
             Subsampling::S444 => (8, 8),
             Subsampling::S422 => (16, 8),
             Subsampling::S420 => (16, 16),
-            _ => {
-                return Err(JpegError::Unsupported(format!(
-                    "subsampling {:?} not supported for progressive encoding",
-                    subsampling
-                )));
-            }
+            Subsampling::S440 => (8, 16),
+            Subsampling::S411 => (32, 8),
         }
     };
 
@@ -297,12 +284,8 @@ pub fn compress_progressive(
     let (h_samp, v_samp) = if is_grayscale {
         (1usize, 1usize)
     } else {
-        match subsampling {
-            Subsampling::S444 => (1, 1),
-            Subsampling::S422 => (2, 1),
-            Subsampling::S420 => (2, 2),
-            _ => unreachable!(),
-        }
+        let (h, v) = subsampling.sampling_factors();
+        (h as usize, v as usize)
     };
 
     let comp_layouts: Vec<CompLayout> = if is_grayscale {
@@ -605,12 +588,8 @@ pub fn compress_arithmetic(
             Subsampling::S444 => (8, 8),
             Subsampling::S422 => (16, 8),
             Subsampling::S420 => (16, 16),
-            _ => {
-                return Err(JpegError::Unsupported(format!(
-                    "subsampling mode {:?} not supported for arithmetic encoding",
-                    subsampling
-                )));
-            }
+            Subsampling::S440 => (8, 16),
+            Subsampling::S411 => (32, 8),
         }
     };
 
@@ -690,7 +669,48 @@ pub fn compress_arithmetic(
                             all_blocks.push(q);
                         }
                     }
-                    _ => unreachable!(),
+                    Subsampling::S440 => {
+                        // 2 Y blocks vertically
+                        for dy in [0, 8] {
+                            let mut block = [0i16; 64];
+                            extract_block(&y_plane, width, height, x0, y0 + dy, &mut block);
+                            let mut dct = [0i32; 64];
+                            fdct::fdct_islow(&block, &mut dct);
+                            let mut q = [0i16; 64];
+                            quant::quantize_block(&dct, &luma_divisors, &mut q);
+                            all_blocks.push(q);
+                        }
+                        for plane in [&cb_plane, &cr_plane] {
+                            let mut block = [0i16; 64];
+                            downsample_chroma_block(plane, width, height, x0, y0, 1, 2, &mut block);
+                            let mut dct = [0i32; 64];
+                            fdct::fdct_islow(&block, &mut dct);
+                            let mut q = [0i16; 64];
+                            quant::quantize_block(&dct, &chroma_divisors, &mut q);
+                            all_blocks.push(q);
+                        }
+                    }
+                    Subsampling::S411 => {
+                        // 4 Y blocks horizontally
+                        for dx in [0, 8, 16, 24] {
+                            let mut block = [0i16; 64];
+                            extract_block(&y_plane, width, height, x0 + dx, y0, &mut block);
+                            let mut dct = [0i32; 64];
+                            fdct::fdct_islow(&block, &mut dct);
+                            let mut q = [0i16; 64];
+                            quant::quantize_block(&dct, &luma_divisors, &mut q);
+                            all_blocks.push(q);
+                        }
+                        for plane in [&cb_plane, &cr_plane] {
+                            let mut block = [0i16; 64];
+                            downsample_chroma_block(plane, width, height, x0, y0, 4, 1, &mut block);
+                            let mut dct = [0i32; 64];
+                            fdct::fdct_islow(&block, &mut dct);
+                            let mut q = [0i16; 64];
+                            quant::quantize_block(&dct, &chroma_divisors, &mut q);
+                            all_blocks.push(q);
+                        }
+                    }
                 }
             }
         }
@@ -711,7 +731,8 @@ pub fn compress_arithmetic(
                     Subsampling::S444 => 1,
                     Subsampling::S422 => 2,
                     Subsampling::S420 => 4,
-                    _ => unreachable!(),
+                    Subsampling::S440 => 2,
+                    Subsampling::S411 => 4,
                 };
                 for _ in 0..y_blocks {
                     arith_enc.encode_dc_sequential(&all_blocks[block_idx], 0, 0);
@@ -749,12 +770,7 @@ pub fn compress_arithmetic(
         let components = vec![(1, 1, 1, 0)];
         marker_writer::write_sof9(&mut output, width as u16, height as u16, &components);
     } else {
-        let (h_samp, v_samp) = match subsampling {
-            Subsampling::S444 => (1, 1),
-            Subsampling::S422 => (2, 1),
-            Subsampling::S420 => (2, 2),
-            _ => unreachable!(),
-        };
+        let (h_samp, v_samp) = subsampling.sampling_factors();
         let components = vec![(1, h_samp, v_samp, 0), (2, 1, 1, 1), (3, 1, 1, 1)];
         marker_writer::write_sof9(&mut output, width as u16, height as u16, &components);
     }
@@ -1364,7 +1380,108 @@ fn encode_color_mcu(
                 prev_dc_cr,
             );
         }
-        _ => unreachable!(),
+        Subsampling::S440 => {
+            // 2 Y blocks vertically: (x0, y0) and (x0, y0+8)
+            encode_single_block(
+                y_plane,
+                width,
+                height,
+                x0,
+                y0,
+                luma_quant,
+                dc_luma_table,
+                ac_luma_table,
+                writer,
+                prev_dc_y,
+            );
+            encode_single_block(
+                y_plane,
+                width,
+                height,
+                x0,
+                y0 + 8,
+                luma_quant,
+                dc_luma_table,
+                ac_luma_table,
+                writer,
+                prev_dc_y,
+            );
+            // Cb/Cr downsampled 1x2
+            encode_downsampled_chroma_block(
+                cb_plane,
+                width,
+                height,
+                x0,
+                y0,
+                1,
+                2,
+                chroma_quant,
+                dc_chroma_table,
+                ac_chroma_table,
+                writer,
+                prev_dc_cb,
+            );
+            encode_downsampled_chroma_block(
+                cr_plane,
+                width,
+                height,
+                x0,
+                y0,
+                1,
+                2,
+                chroma_quant,
+                dc_chroma_table,
+                ac_chroma_table,
+                writer,
+                prev_dc_cr,
+            );
+        }
+        Subsampling::S411 => {
+            // 4 Y blocks horizontally
+            for i in 0..4 {
+                encode_single_block(
+                    y_plane,
+                    width,
+                    height,
+                    x0 + i * 8,
+                    y0,
+                    luma_quant,
+                    dc_luma_table,
+                    ac_luma_table,
+                    writer,
+                    prev_dc_y,
+                );
+            }
+            // Cb/Cr downsampled 4x1
+            encode_downsampled_chroma_block(
+                cb_plane,
+                width,
+                height,
+                x0,
+                y0,
+                4,
+                1,
+                chroma_quant,
+                dc_chroma_table,
+                ac_chroma_table,
+                writer,
+                prev_dc_cb,
+            );
+            encode_downsampled_chroma_block(
+                cr_plane,
+                width,
+                height,
+                x0,
+                y0,
+                4,
+                1,
+                chroma_quant,
+                dc_chroma_table,
+                ac_chroma_table,
+                writer,
+                prev_dc_cr,
+            );
+        }
     }
 }
 
@@ -1454,12 +1571,8 @@ pub fn compress_optimized(
             Subsampling::S444 => (8, 8),
             Subsampling::S422 => (16, 8),
             Subsampling::S420 => (16, 16),
-            _ => {
-                return Err(JpegError::Unsupported(format!(
-                    "subsampling mode {:?} not supported for encoding",
-                    subsampling
-                )));
-            }
+            Subsampling::S440 => (8, 16),
+            Subsampling::S411 => (32, 8),
         }
     };
 
@@ -1611,7 +1724,92 @@ pub fn compress_optimized(
                         huff_opt::gather_ac_symbols(&crq, &mut ac_chroma_freq);
                         all_blocks.push(crq);
                     }
-                    _ => unreachable!(),
+                    Subsampling::S440 => {
+                        // 2 Y blocks vertically
+                        for dy in [0usize, 8] {
+                            let yq =
+                                gather_block(&y_plane, width, height, x0, y0 + dy, &luma_divisors);
+                            let diff = yq[0] - prev_dc_y;
+                            prev_dc_y = yq[0];
+                            huff_opt::gather_dc_symbol(diff, &mut dc_luma_freq);
+                            huff_opt::gather_ac_symbols(&yq, &mut ac_luma_freq);
+                            all_blocks.push(yq);
+                        }
+                        let cbq = gather_downsampled_block(
+                            &cb_plane,
+                            width,
+                            height,
+                            x0,
+                            y0,
+                            1,
+                            2,
+                            &chroma_divisors,
+                        );
+                        let diff = cbq[0] - prev_dc_cb;
+                        prev_dc_cb = cbq[0];
+                        huff_opt::gather_dc_symbol(diff, &mut dc_chroma_freq);
+                        huff_opt::gather_ac_symbols(&cbq, &mut ac_chroma_freq);
+                        all_blocks.push(cbq);
+
+                        let crq = gather_downsampled_block(
+                            &cr_plane,
+                            width,
+                            height,
+                            x0,
+                            y0,
+                            1,
+                            2,
+                            &chroma_divisors,
+                        );
+                        let diff = crq[0] - prev_dc_cr;
+                        prev_dc_cr = crq[0];
+                        huff_opt::gather_dc_symbol(diff, &mut dc_chroma_freq);
+                        huff_opt::gather_ac_symbols(&crq, &mut ac_chroma_freq);
+                        all_blocks.push(crq);
+                    }
+                    Subsampling::S411 => {
+                        // 4 Y blocks horizontally
+                        for dx in [0usize, 8, 16, 24] {
+                            let yq =
+                                gather_block(&y_plane, width, height, x0 + dx, y0, &luma_divisors);
+                            let diff = yq[0] - prev_dc_y;
+                            prev_dc_y = yq[0];
+                            huff_opt::gather_dc_symbol(diff, &mut dc_luma_freq);
+                            huff_opt::gather_ac_symbols(&yq, &mut ac_luma_freq);
+                            all_blocks.push(yq);
+                        }
+                        let cbq = gather_downsampled_block(
+                            &cb_plane,
+                            width,
+                            height,
+                            x0,
+                            y0,
+                            4,
+                            1,
+                            &chroma_divisors,
+                        );
+                        let diff = cbq[0] - prev_dc_cb;
+                        prev_dc_cb = cbq[0];
+                        huff_opt::gather_dc_symbol(diff, &mut dc_chroma_freq);
+                        huff_opt::gather_ac_symbols(&cbq, &mut ac_chroma_freq);
+                        all_blocks.push(cbq);
+
+                        let crq = gather_downsampled_block(
+                            &cr_plane,
+                            width,
+                            height,
+                            x0,
+                            y0,
+                            4,
+                            1,
+                            &chroma_divisors,
+                        );
+                        let diff = crq[0] - prev_dc_cr;
+                        prev_dc_cr = crq[0];
+                        huff_opt::gather_dc_symbol(diff, &mut dc_chroma_freq);
+                        huff_opt::gather_ac_symbols(&crq, &mut ac_chroma_freq);
+                        all_blocks.push(crq);
+                    }
                 }
             }
         }
@@ -1737,7 +1935,62 @@ pub fn compress_optimized(
                         );
                         block_idx += 1;
                     }
-                    _ => unreachable!(),
+                    Subsampling::S440 => {
+                        for _ in 0..2 {
+                            HuffmanEncoder::encode_block(
+                                &mut bit_writer,
+                                &all_blocks[block_idx],
+                                &mut prev_dc_y,
+                                &dc_luma_table,
+                                &ac_luma_table,
+                            );
+                            block_idx += 1;
+                        }
+                        HuffmanEncoder::encode_block(
+                            &mut bit_writer,
+                            &all_blocks[block_idx],
+                            &mut prev_dc_cb,
+                            &dc_chroma_table,
+                            &ac_chroma_table,
+                        );
+                        block_idx += 1;
+                        HuffmanEncoder::encode_block(
+                            &mut bit_writer,
+                            &all_blocks[block_idx],
+                            &mut prev_dc_cr,
+                            &dc_chroma_table,
+                            &ac_chroma_table,
+                        );
+                        block_idx += 1;
+                    }
+                    Subsampling::S411 => {
+                        for _ in 0..4 {
+                            HuffmanEncoder::encode_block(
+                                &mut bit_writer,
+                                &all_blocks[block_idx],
+                                &mut prev_dc_y,
+                                &dc_luma_table,
+                                &ac_luma_table,
+                            );
+                            block_idx += 1;
+                        }
+                        HuffmanEncoder::encode_block(
+                            &mut bit_writer,
+                            &all_blocks[block_idx],
+                            &mut prev_dc_cb,
+                            &dc_chroma_table,
+                            &ac_chroma_table,
+                        );
+                        block_idx += 1;
+                        HuffmanEncoder::encode_block(
+                            &mut bit_writer,
+                            &all_blocks[block_idx],
+                            &mut prev_dc_cr,
+                            &dc_chroma_table,
+                            &ac_chroma_table,
+                        );
+                        block_idx += 1;
+                    }
                 }
             }
         }
@@ -1762,12 +2015,7 @@ pub fn compress_optimized(
         let components = vec![(1, 1, 1, 0)];
         marker_writer::write_sof0(&mut output, width as u16, height as u16, &components);
     } else {
-        let (h_samp, v_samp) = match subsampling {
-            Subsampling::S444 => (1, 1),
-            Subsampling::S422 => (2, 1),
-            Subsampling::S420 => (2, 2),
-            _ => unreachable!(),
-        };
+        let (h_samp, v_samp) = subsampling.sampling_factors();
         let components = vec![(1, h_samp, v_samp, 0), (2, 1, 1, 1), (3, 1, 1, 1)];
         marker_writer::write_sof0(&mut output, width as u16, height as u16, &components);
     }
