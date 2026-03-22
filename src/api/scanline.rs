@@ -16,6 +16,7 @@ pub struct ScanlineDecoder<'a> {
     decoded_image: Option<Image>,
     current_line: usize,
     crop_x: Option<(usize, usize)>,
+    bottom_up: bool,
 }
 
 impl<'a> ScanlineDecoder<'a> {
@@ -27,6 +28,7 @@ impl<'a> ScanlineDecoder<'a> {
             decoded_image: None,
             current_line: 0,
             crop_x: None,
+            bottom_up: false,
         })
     }
 
@@ -75,6 +77,15 @@ impl<'a> ScanlineDecoder<'a> {
         self.crop_x = Some((x, width));
     }
 
+    /// Enable or disable bottom-up row order.
+    ///
+    /// When true, the output rows are reversed after decompression so that
+    /// row 0 of the output corresponds to the last row of the image.
+    /// Matches libjpeg-turbo's `TJPARAM_BOTTOMUP` on the decode side.
+    pub fn set_bottom_up(&mut self, bottom_up: bool) {
+        self.bottom_up = bottom_up;
+    }
+
     /// Decode and copy one scanline into `buf`.
     pub fn read_scanline(&mut self, buf: &mut [u8]) -> Result<()> {
         self.ensure_decoded()?;
@@ -112,9 +123,25 @@ impl<'a> ScanlineDecoder<'a> {
             if let Some((crop_x_offset, crop_width)) = self.crop_x {
                 img = Self::apply_horizontal_crop(img, crop_x_offset, crop_width)?;
             }
+            if self.bottom_up {
+                img = Self::flip_rows_image(img);
+            }
             self.decoded_image = Some(img);
         }
         Ok(())
+    }
+
+    /// Reverse the row order of an image for bottom-up output.
+    fn flip_rows_image(mut img: Image) -> Image {
+        let bpp: usize = img.pixel_format.bytes_per_pixel();
+        let row_bytes: usize = img.width * bpp;
+        let mut flipped: Vec<u8> = Vec::with_capacity(img.data.len());
+        for row in (0..img.height).rev() {
+            let start: usize = row * row_bytes;
+            flipped.extend_from_slice(&img.data[start..start + row_bytes]);
+        }
+        img.data = flipped;
+        img
     }
 
     fn apply_horizontal_crop(img: Image, x: usize, width: usize) -> Result<Image> {
