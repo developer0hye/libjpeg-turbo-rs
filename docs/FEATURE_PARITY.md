@@ -493,18 +493,18 @@
 | 27 | ~~Custom source/dest managers~~ | ✅ #39 |
 | 28 | ~~File I/O helpers~~ | ✅ #38 |
 
-### Phase 8 — SIMD & Performance
-| # | Feature | Scope |
-|---|---------|-------|
-| 29 | x86_64 SSE2 | IDCT, color conversion, upsample |
-| 30 | x86_64 AVX2 | IDCT, color conversion, upsample |
-| 31 | aarch64 NEON extensions | FDCT, scaled IDCT, encode-side color/downsample |
+### Phase 8 — SIMD & Performance ✅ COMPLETE
+| # | Feature | Status |
+|---|---------|--------|
+| 29 | ~~x86_64 SSE2~~ | ✅ #44 |
+| 30 | ~~x86_64 AVX2~~ | ✅ #43 |
+| 31 | ~~aarch64 NEON extensions~~ | ✅ #42 |
 
-### Phase 9 — Full API Parity
-| # | Feature | Scope |
-|---|---------|-------|
-| 32 | TJ3 handle/parameter API | `tj3Init`/`tj3Set`/`tj3Get`/`tj3Destroy` pattern |
-| 33 | Custom error manager | `jpeg_error_mgr` callbacks |
-| 34 | Progress monitoring | `jpeg_progress_mgr` callback |
-| 35 | Color quantization | Palette reduction, dithering (NONE/ORDERED/FS) |
-| 36 | Custom memory manager | Pool-based allocation, virtual arrays |
+### Phase 9 — Full API Parity ✅ COMPLETE (practical features)
+| # | Feature | Status |
+|---|---------|--------|
+| 32 | ~~TJ3 handle/parameter API~~ | ✅ #45 |
+| 33 | Custom error manager | ✅ Already done (ErrorHandler trait, PR #17) |
+| 34 | Progress monitoring | ✅ Already done (ProgressListener trait) |
+| 35 | ~~Color quantization~~ | ✅ #46 |
+| 36 | Custom memory manager | ⬜ N/A in Rust (std allocator) |
