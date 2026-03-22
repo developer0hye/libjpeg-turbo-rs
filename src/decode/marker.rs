@@ -13,6 +13,7 @@ const EXIF_HEADER: &[u8; 6] = b"Exif\0\0";
 const SOI: u8 = 0xD8;
 const EOI: u8 = 0xD9;
 const SOF0: u8 = 0xC0;
+const SOF1: u8 = 0xC1; // Extended sequential, Huffman-coded
 const SOF2: u8 = 0xC2;
 const SOF3: u8 = 0xC3; // Lossless, Huffman-coded
 const SOF9: u8 = 0xC9; // Arithmetic sequential
@@ -145,7 +146,9 @@ impl<'a> MarkerReader<'a> {
         loop {
             let marker = self.read_marker()?;
             match marker {
-                SOF0 => {
+                SOF0 | SOF1 => {
+                    // SOF0 = baseline, SOF1 = extended sequential (e.g., 16-bit DQT)
+                    // Both are sequential DCT with Huffman coding, decoded identically.
                     frame = Some(self.read_sof(false, false)?);
                 }
                 SOF2 => {
