@@ -15,6 +15,9 @@ pub use api::high_level::{
     compress_progressive, compress_with_metadata, decompress, decompress_cropped,
     decompress_lenient, decompress_to,
 };
+pub use common::bufsize::{
+    jpeg_buf_size, yuv_buf_size, yuv_plane_height, yuv_plane_size, yuv_plane_width,
+};
 pub use common::error::{DecodeWarning, JpegError, Result};
 pub use common::sample::Sample;
 pub use common::traits::{DefaultErrorHandler, ErrorHandler, ProgressInfo, ProgressListener};
