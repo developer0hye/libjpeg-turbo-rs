@@ -70,6 +70,13 @@ impl Image {
             .as_ref()
             .and_then(|d| crate::common::exif::parse_orientation(d))
     }
+
+    /// Returns all saved markers (APP and COM) collected during decoding.
+    ///
+    /// Only populated when the decoder was configured with `save_markers()`.
+    pub fn markers(&self) -> &[SavedMarker] {
+        &self.saved_markers
+    }
 }
 
 /// JPEG decoder. Orchestrates the full decoding pipeline.
@@ -169,6 +176,21 @@ impl<'a> Decoder<'a> {
     /// Set maximum number of progressive scans before error.
     pub fn set_scan_limit(&mut self, limit: u32) {
         self.scan_limit = Some(limit);
+    }
+
+    /// Configure which markers to save during decoding.
+    ///
+    /// By default, the decoder only parses known markers (JFIF, ICC, EXIF, Adobe, COM)
+    /// and discards unknown APP markers. Call this to preserve arbitrary APP/COM markers
+    /// in the decoded `Image.saved_markers` field.
+    ///
+    /// This re-parses the JPEG header with the new configuration.
+    pub fn save_markers(&mut self, config: MarkerSaveConfig) {
+        let mut reader: MarkerReader<'_> = MarkerReader::new(self.raw_data);
+        reader.set_marker_save_config(config);
+        if let Ok(metadata) = reader.read_markers() {
+            self.metadata = metadata;
+        }
     }
 
     pub fn decode(data: &'a [u8]) -> Result<Image> {
@@ -1612,7 +1634,7 @@ impl<'a> Decoder<'a> {
                 exif_data,
                 comment: self.metadata.comment.clone(),
                 density: self.metadata.density,
-                saved_markers: Vec::new(),
+                saved_markers: self.metadata.saved_markers.clone(),
                 warnings: Vec::new(),
             })
         } else {
@@ -1667,7 +1689,7 @@ impl<'a> Decoder<'a> {
                 exif_data,
                 comment: self.metadata.comment.clone(),
                 density: self.metadata.density,
-                saved_markers: Vec::new(),
+                saved_markers: self.metadata.saved_markers.clone(),
                 warnings: Vec::new(),
             })
         }
@@ -1757,7 +1779,7 @@ impl<'a> Decoder<'a> {
             exif_data,
             comment: self.metadata.comment.clone(),
             density: self.metadata.density,
-            saved_markers: Vec::new(),
+            saved_markers: self.metadata.saved_markers.clone(),
             warnings: Vec::new(),
         })
     }
@@ -1902,7 +1924,7 @@ impl<'a> Decoder<'a> {
                     exif_data: exif_data.clone(),
                     comment: self.metadata.comment.clone(),
                     density: self.metadata.density,
-                    saved_markers: Vec::new(),
+                    saved_markers: self.metadata.saved_markers.clone(),
                     warnings: warnings.clone(),
                 })
             } else {
@@ -1962,7 +1984,7 @@ impl<'a> Decoder<'a> {
                     exif_data: exif_data.clone(),
                     comment: self.metadata.comment.clone(),
                     density: self.metadata.density,
-                    saved_markers: Vec::new(),
+                    saved_markers: self.metadata.saved_markers.clone(),
                     warnings: warnings.clone(),
                 })
             }
@@ -2079,7 +2101,7 @@ impl<'a> Decoder<'a> {
                     exif_data: exif_data.clone(),
                     comment: self.metadata.comment.clone(),
                     density: self.metadata.density,
-                    saved_markers: Vec::new(),
+                    saved_markers: self.metadata.saved_markers.clone(),
                     warnings: warnings.clone(),
                 });
             }
@@ -2109,7 +2131,7 @@ impl<'a> Decoder<'a> {
                 exif_data: exif_data.clone(),
                 comment: self.metadata.comment.clone(),
                 density: self.metadata.density,
-                saved_markers: Vec::new(),
+                saved_markers: self.metadata.saved_markers.clone(),
                 warnings: warnings.clone(),
             })
         } else if num_components == 4 {
@@ -2135,6 +2157,110 @@ impl<'a> Decoder<'a> {
                 num_components
             )))
         }
+    }
+
+    /// Decode JPEG to raw downsampled component planes.
+    ///
+    /// Returns component planes at their native (potentially subsampled)
+    /// resolution, without performing color conversion or upsampling.
+    /// This matches libjpeg-turbo's `jpeg_read_raw_data()` functionality.
+    pub fn decode_raw(self) -> Result<crate::api::raw_data::RawImage> {
+        let frame = &self.metadata.frame;
+        let width: usize = frame.width as usize;
+        let height: usize = frame.height as usize;
+        if frame.precision != 8 {
+            return Err(JpegError::Unsupported(format!(
+                "sample precision {} (only 8-bit supported)",
+                frame.precision
+            )));
+        }
+        let num_components: usize = frame.components.len();
+        let max_h: usize = frame
+            .components
+            .iter()
+            .map(|c| c.horizontal_sampling as usize)
+            .max()
+            .unwrap_or(1);
+        let max_v: usize = frame
+            .components
+            .iter()
+            .map(|c| c.vertical_sampling as usize)
+            .max()
+            .unwrap_or(1);
+        let block_size: usize = 8;
+        let mcu_width: usize = max_h * 8;
+        let mcu_height: usize = max_v * 8;
+        let mcus_x: usize = (width + mcu_width - 1) / mcu_width;
+        let mcus_y: usize = (height + mcu_height - 1) / mcu_height;
+        let quant_tables: Vec<&crate::common::quant_table::QuantTable> = frame
+            .components
+            .iter()
+            .map(|comp| {
+                self.metadata.quant_tables[comp.quant_table_index as usize]
+                    .as_ref()
+                    .ok_or_else(|| {
+                        JpegError::CorruptData(format!(
+                            "missing quant table {}",
+                            comp.quant_table_index
+                        ))
+                    })
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let (component_planes, _warnings) = if self.metadata.is_arithmetic && frame.is_progressive {
+            self.decode_arithmetic_progressive_planes(
+                frame,
+                &quant_tables,
+                num_components,
+                mcus_x,
+                mcus_y,
+                max_h,
+                max_v,
+                block_size,
+            )?
+        } else if self.metadata.is_arithmetic {
+            self.decode_arithmetic_planes(
+                frame,
+                &quant_tables,
+                num_components,
+                mcus_x,
+                mcus_y,
+                block_size,
+            )?
+        } else if frame.is_progressive {
+            self.decode_progressive_planes(
+                frame,
+                &quant_tables,
+                num_components,
+                mcus_x,
+                mcus_y,
+                max_h,
+                max_v,
+                block_size,
+            )?
+        } else {
+            self.decode_baseline_planes(
+                frame,
+                &quant_tables,
+                num_components,
+                mcus_x,
+                mcus_y,
+                block_size,
+            )?
+        };
+        let mut plane_widths: Vec<usize> = Vec::with_capacity(num_components);
+        let mut plane_heights: Vec<usize> = Vec::with_capacity(num_components);
+        for comp in &frame.components {
+            plane_widths.push(mcus_x * comp.horizontal_sampling as usize * block_size);
+            plane_heights.push(mcus_y * comp.vertical_sampling as usize * block_size);
+        }
+        Ok(crate::api::raw_data::RawImage {
+            planes: component_planes,
+            plane_widths,
+            plane_heights,
+            width,
+            height,
+            num_components,
+        })
     }
 
     /// Determine the JPEG color space from component count and Adobe marker.
@@ -2477,7 +2603,7 @@ impl<'a> Decoder<'a> {
             exif_data,
             comment: self.metadata.comment.clone(),
             density: self.metadata.density,
-            saved_markers: Vec::new(),
+            saved_markers: self.metadata.saved_markers.clone(),
             warnings,
         })
     }
