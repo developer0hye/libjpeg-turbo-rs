@@ -205,6 +205,20 @@ impl HuffmanEncoder {
             writer.write_bits(ac_table.ehufco[0x00], ac_table.ehufsi[0x00]);
         }
     }
+
+    /// Encode a single DC difference value (for lossless JPEG).
+    ///
+    /// Writes the Huffman code for the category, then the magnitude bits.
+    pub fn encode_dc_only(writer: &mut BitWriter, diff: i16, dc_table: &HuffTable) {
+        let (magnitude_bits, category) = encode_dc_value(diff);
+        writer.write_bits(
+            dc_table.ehufco[category as usize],
+            dc_table.ehufsi[category as usize],
+        );
+        if category > 0 {
+            writer.write_bits(magnitude_bits, category);
+        }
+    }
 }
 
 /// Compute the category and magnitude bits for a DC difference value.
