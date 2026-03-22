@@ -1,9 +1,11 @@
-use crate::common::error::{JpegError, Result};
+use crate::common::error::{DecodeWarning, JpegError, Result};
 use crate::common::huffman_table::HuffmanTable;
+use crate::common::icc;
 use crate::common::quant_table::QuantTable;
 use crate::common::types::*;
 use crate::decode::bitstream::BitReader;
 use crate::decode::entropy::{self, McuDecoder};
+use crate::decode::idct_scaled;
 use crate::decode::marker::{JpegMetadata, MarkerReader, ScanInfo};
 use crate::decode::progressive;
 use crate::simd::{self, SimdRoutines};
@@ -34,6 +36,31 @@ pub struct Image {
     pub height: usize,
     pub pixel_format: PixelFormat,
     pub data: Vec<u8>,
+    /// Reassembled ICC profile from APP2 markers, if present and valid.
+    pub icc_profile: Option<Vec<u8>>,
+    /// Raw EXIF TIFF data from APP1 marker, if present.
+    pub exif_data: Option<Vec<u8>>,
+    /// Warnings accumulated during lenient decoding.
+    pub warnings: Vec<DecodeWarning>,
+}
+
+impl Image {
+    /// Returns the ICC color profile embedded in this JPEG, if any.
+    pub fn icc_profile(&self) -> Option<&[u8]> {
+        self.icc_profile.as_deref()
+    }
+
+    /// Returns the raw EXIF TIFF data, if present.
+    pub fn exif_data(&self) -> Option<&[u8]> {
+        self.exif_data.as_deref()
+    }
+
+    /// Parses and returns the EXIF orientation tag (1-8), if present.
+    pub fn exif_orientation(&self) -> Option<u8> {
+        self.exif_data
+            .as_ref()
+            .and_then(|d| crate::common::exif::parse_orientation(d))
+    }
 }
 
 /// JPEG decoder. Orchestrates the full decoding pipeline.
@@ -42,6 +69,8 @@ pub struct Decoder<'a> {
     raw_data: &'a [u8],
     routines: SimdRoutines,
     output_format: Option<PixelFormat>,
+    scale: ScalingFactor,
+    lenient: bool,
 }
 
 impl<'a> Decoder<'a> {
@@ -54,6 +83,8 @@ impl<'a> Decoder<'a> {
             raw_data: data,
             routines,
             output_format: None,
+            scale: ScalingFactor::default(),
+            lenient: false,
         })
     }
 
@@ -64,6 +95,16 @@ impl<'a> Decoder<'a> {
     /// Set the desired output pixel format.
     pub fn set_output_format(&mut self, format: PixelFormat) {
         self.output_format = Some(format);
+    }
+
+    /// Set the decompression scaling factor (e.g., 1/2, 1/4, 1/8).
+    pub fn set_scale(&mut self, scale: ScalingFactor) {
+        self.scale = scale;
+    }
+
+    /// Enable lenient mode: continue decoding on errors, filling corrupt areas with gray.
+    pub fn set_lenient(&mut self, lenient: bool) {
+        self.lenient = lenient;
     }
 
     pub fn decode(data: &'a [u8]) -> Result<Image> {
@@ -120,6 +161,28 @@ impl<'a> Decoder<'a> {
                     8,
                 );
             }
+        }
+    }
+
+    /// Scale-aware IDCT dispatch: picks 8x8, 4x4, 2x2, or 1x1 based on block_size.
+    ///
+    /// # Safety
+    /// `output` must point to sufficient writable bytes for the chosen block_size × stride.
+    #[inline(always)]
+    unsafe fn idct_scaled_strided(
+        &self,
+        coeffs: &[i16; 64],
+        quant: &[u16; 64],
+        output: *mut u8,
+        stride: usize,
+        block_size: usize,
+    ) {
+        match block_size {
+            8 => self.idct_islow_strided(coeffs, quant, output, stride),
+            4 => idct_scaled::idct_4x4_strided(coeffs, quant, output, stride),
+            2 => idct_scaled::idct_2x2_strided(coeffs, quant, output, stride),
+            1 => idct_scaled::idct_1x1_strided(coeffs, quant, output, stride),
+            _ => unreachable!("invalid block_size: {}", block_size),
         }
     }
 
@@ -183,7 +246,9 @@ impl<'a> Decoder<'a> {
             PixelFormat::Rgba => self.ycbcr_to_rgba_row(y, cb, cr, out, width),
             PixelFormat::Bgr => self.ycbcr_to_bgr_row(y, cb, cr, out, width),
             PixelFormat::Bgra => self.ycbcr_to_bgra_row(y, cb, cr, out, width),
-            PixelFormat::Grayscale => unreachable!("grayscale handled separately"),
+            PixelFormat::Grayscale | PixelFormat::Cmyk => {
+                unreachable!("grayscale/cmyk handled separately")
+            }
         }
     }
 
@@ -255,6 +320,7 @@ impl<'a> Decoder<'a> {
     }
 
     /// Decode baseline (single-scan) into component planes.
+    /// Returns component planes and any warnings (in lenient mode).
     fn decode_baseline_planes(
         &self,
         frame: &FrameHeader,
@@ -262,16 +328,17 @@ impl<'a> Decoder<'a> {
         num_components: usize,
         mcus_x: usize,
         mcus_y: usize,
-    ) -> Result<Vec<Vec<u8>>> {
+        block_size: usize,
+    ) -> Result<(Vec<Vec<u8>>, Vec<DecodeWarning>)> {
         let scan = &self.metadata.scan;
 
-        // Allocate component planes (MCU-aligned)
+        // Allocate component planes (MCU-aligned, scaled by block_size)
         let mut component_planes: Vec<Vec<u8>> = frame
             .components
             .iter()
             .map(|comp| {
-                let comp_w = mcus_x * comp.horizontal_sampling as usize * 8;
-                let comp_h = mcus_y * comp.vertical_sampling as usize * 8;
+                let comp_w = mcus_x * comp.horizontal_sampling as usize * block_size;
+                let comp_h = mcus_y * comp.vertical_sampling as usize * block_size;
                 let size = comp_w * comp_h;
                 let mut v = Vec::with_capacity(size);
                 unsafe { v.set_len(size) };
@@ -295,7 +362,7 @@ impl<'a> Decoder<'a> {
             .components
             .iter()
             .map(|comp| CompLayout {
-                comp_w: mcus_x * comp.horizontal_sampling as usize * 8,
+                comp_w: mcus_x * comp.horizontal_sampling as usize * block_size,
                 h_blocks: comp.horizontal_sampling as usize,
                 v_blocks: comp.vertical_sampling as usize,
             })
@@ -306,8 +373,10 @@ impl<'a> Decoder<'a> {
         let mut mcu_decoder = McuDecoder::new(num_components);
         let mut mcu_count: u16 = 0;
         let mut coeffs = [0i16; 64];
+        let mut warnings: Vec<DecodeWarning> = Vec::new();
+        let total_mcus = mcus_x * mcus_y;
 
-        for mcu_y in 0..mcus_y {
+        'mcu_loop: for mcu_y in 0..mcus_y {
             for mcu_x in 0..mcus_x {
                 if self.metadata.restart_interval > 0
                     && mcu_count > 0
@@ -318,6 +387,8 @@ impl<'a> Decoder<'a> {
                 }
 
                 let mut plan_idx = 0;
+                let mut mcu_error = false;
+
                 for (comp_idx, layout) in comp_layouts.iter().enumerate() {
                     let qt_values = &quant_tables[comp_idx].values;
                     let plan = &mcu_plan[plan_idx];
@@ -325,31 +396,80 @@ impl<'a> Decoder<'a> {
 
                     for v in 0..layout.v_blocks {
                         for h in 0..layout.h_blocks {
-                            mcu_decoder.decode_block(
+                            let decode_result = mcu_decoder.decode_block(
                                 &mut bit_reader,
                                 plan.comp_idx,
                                 plan.dc_table,
                                 plan.ac_table,
                                 &mut coeffs,
-                            )?;
+                            );
 
-                            let block_x = (mcu_x * layout.h_blocks + h) * 8;
-                            let block_y = (mcu_y * layout.v_blocks + v) * 8;
+                            match decode_result {
+                                Ok(()) => {}
+                                Err(e) if self.lenient => {
+                                    // Fill this block with zeros (will become mid-gray after IDCT)
+                                    coeffs = [0i16; 64];
+                                    if !mcu_error {
+                                        warnings.push(DecodeWarning::HuffmanError {
+                                            mcu_x,
+                                            mcu_y,
+                                            message: e.to_string(),
+                                        });
+                                        mcu_error = true;
+                                    }
+                                    // Check if this was an EOF — if so, fill remaining and break
+                                    if matches!(e, JpegError::UnexpectedEof) {
+                                        warnings.push(DecodeWarning::TruncatedData {
+                                            decoded_mcus: mcu_count as usize,
+                                            total_mcus,
+                                        });
+                                        // Fill remaining planes with 128 (mid-gray)
+                                        for plane in &mut component_planes {
+                                            plane.fill(128);
+                                        }
+                                        break 'mcu_loop;
+                                    }
+                                    mcu_decoder.reset();
+                                }
+                                Err(e) => return Err(e),
+                            }
+
+                            let block_x = (mcu_x * layout.h_blocks + h) * block_size;
+                            let block_y = (mcu_y * layout.v_blocks + v) * block_size;
                             let dst_offset = block_y * layout.comp_w + block_x;
 
                             unsafe {
                                 let dst = component_planes[comp_idx].as_mut_ptr().add(dst_offset);
-                                self.idct_islow_strided(&coeffs, qt_values, dst, layout.comp_w);
+                                self.idct_scaled_strided(
+                                    &coeffs,
+                                    qt_values,
+                                    dst,
+                                    layout.comp_w,
+                                    block_size,
+                                );
                             }
                         }
                     }
                 }
 
                 mcu_count += 1;
+
+                // Check for truncated data (BitReader reached EOF mid-decode)
+                if bit_reader.is_eof() && (mcu_count as usize) < total_mcus {
+                    if self.lenient {
+                        warnings.push(DecodeWarning::TruncatedData {
+                            decoded_mcus: mcu_count as usize,
+                            total_mcus,
+                        });
+                        break 'mcu_loop;
+                    } else {
+                        return Err(JpegError::UnexpectedEof);
+                    }
+                }
             }
         }
 
-        Ok(component_planes)
+        Ok((component_planes, warnings))
     }
 
     /// Decode progressive (multi-scan) into component planes.
@@ -363,7 +483,8 @@ impl<'a> Decoder<'a> {
         mcus_y: usize,
         max_h: usize,
         max_v: usize,
-    ) -> Result<Vec<Vec<u8>>> {
+        block_size: usize,
+    ) -> Result<(Vec<Vec<u8>>, Vec<DecodeWarning>)> {
         // Per-component coefficient buffers: blocks_x * blocks_y blocks of 64 coefficients
         let comp_infos: Vec<CompInfo> = frame
             .components
@@ -376,7 +497,7 @@ impl<'a> Decoder<'a> {
                     blocks_y: mcus_y * v_samp,
                     h_samp,
                     v_samp,
-                    comp_w: mcus_x * h_samp * 8,
+                    comp_w: mcus_x * h_samp * block_size,
                 }
             })
             .collect();
@@ -405,7 +526,7 @@ impl<'a> Decoder<'a> {
         let mut component_planes: Vec<Vec<u8>> = comp_infos
             .iter()
             .map(|ci| {
-                let size = ci.comp_w * ci.blocks_y * 8;
+                let size = ci.comp_w * ci.blocks_y * block_size;
                 let mut v = Vec::with_capacity(size);
                 unsafe { v.set_len(size) };
                 v
@@ -419,19 +540,21 @@ impl<'a> Decoder<'a> {
                     let block_idx = by * ci.blocks_x + bx;
                     let coeffs = &coeff_bufs[comp_idx][block_idx];
 
-                    let px_x = bx * 8;
-                    let px_y = by * 8;
+                    let px_x = bx * block_size;
+                    let px_y = by * block_size;
                     let dst_offset = px_y * ci.comp_w + px_x;
 
                     unsafe {
                         let dst = component_planes[comp_idx].as_mut_ptr().add(dst_offset);
-                        self.idct_islow_strided(coeffs, qt_values, dst, ci.comp_w);
+                        self.idct_scaled_strided(coeffs, qt_values, dst, ci.comp_w, block_size);
                     }
                 }
             }
         }
 
-        Ok(component_planes)
+        // Progressive decoding doesn't have per-MCU error recovery yet;
+        // errors in scans propagate normally.
+        Ok((component_planes, Vec::new()))
     }
 
     /// Decode one progressive scan's entropy data into the coefficient buffers.
@@ -703,10 +826,17 @@ impl<'a> Decoder<'a> {
         })
     }
 
+    /// Reassemble ICC profile from parsed APP2 chunks.
+    fn icc_profile(&self) -> Option<Vec<u8>> {
+        icc::reassemble_icc_profile(&self.metadata.icc_chunks)
+    }
+
     pub(crate) fn decode_image(&self) -> Result<Image> {
         let frame = &self.metadata.frame;
         let width = frame.width as usize;
         let height = frame.height as usize;
+        let icc_profile = self.icc_profile();
+        let exif_data = self.metadata.exif_data.clone();
 
         if frame.precision != 8 {
             return Err(JpegError::Unsupported(format!(
@@ -729,12 +859,19 @@ impl<'a> Decoder<'a> {
             .max()
             .unwrap_or(1);
 
+        let block_size = self.scale.block_size();
         let mcu_width = max_h * 8;
         let mcu_height = max_v * 8;
         let mcus_x = (width + mcu_width - 1) / mcu_width;
         let mcus_y = (height + mcu_height - 1) / mcu_height;
-        let full_width = mcus_x * mcu_width;
-        let full_height = mcus_y * mcu_height;
+        // Scaled output dimensions
+        let scaled_mcu_w = max_h * block_size;
+        let scaled_mcu_h = max_v * block_size;
+        let full_width = mcus_x * scaled_mcu_w;
+        let full_height = mcus_y * scaled_mcu_h;
+        // Final output dimensions (may be smaller than full due to MCU alignment)
+        let out_width = self.scale.scale_dim(width);
+        let out_height = self.scale.scale_dim(height);
 
         // Pre-resolve quant tables per component (once, not per-block)
         let quant_tables: Vec<&QuantTable> = frame
@@ -753,7 +890,7 @@ impl<'a> Decoder<'a> {
             .collect::<Result<Vec<_>>>()?;
 
         // Decode component planes — different paths for baseline vs progressive
-        let component_planes = if frame.is_progressive {
+        let (component_planes, warnings) = if frame.is_progressive {
             self.decode_progressive_planes(
                 frame,
                 &quant_tables,
@@ -762,37 +899,50 @@ impl<'a> Decoder<'a> {
                 mcus_y,
                 max_h,
                 max_v,
+                block_size,
             )?
         } else {
-            self.decode_baseline_planes(frame, &quant_tables, num_components, mcus_x, mcus_y)?
+            self.decode_baseline_planes(
+                frame,
+                &quant_tables,
+                num_components,
+                mcus_x,
+                mcus_y,
+                block_size,
+            )?
         };
 
         // Upsample and color convert
         if num_components == 1 {
             let out_format = self.output_format.unwrap_or(PixelFormat::Grayscale);
-            let comp_w = mcus_x * frame.components[0].horizontal_sampling as usize * 8;
+            let comp_w = mcus_x * frame.components[0].horizontal_sampling as usize * block_size;
 
             if out_format == PixelFormat::Grayscale {
-                let mut data = Vec::with_capacity(width * height);
-                for y in 0..height {
-                    data.extend_from_slice(&component_planes[0][y * comp_w..y * comp_w + width]);
+                let mut data = Vec::with_capacity(out_width * out_height);
+                for y in 0..out_height {
+                    data.extend_from_slice(
+                        &component_planes[0][y * comp_w..y * comp_w + out_width],
+                    );
                 }
                 Ok(Image {
-                    width,
-                    height,
+                    width: out_width,
+                    height: out_height,
                     pixel_format: PixelFormat::Grayscale,
                     data,
+                    icc_profile: icc_profile.clone(),
+                    exif_data: exif_data.clone(),
+                    warnings: warnings.clone(),
                 })
             } else {
                 // Expand grayscale to requested color format
                 let bpp = out_format.bytes_per_pixel();
-                let data_size = width * height * bpp;
+                let data_size = out_width * out_height * bpp;
                 let mut data = Vec::with_capacity(data_size);
                 unsafe { data.set_len(data_size) };
-                for y in 0..height {
-                    let row = &component_planes[0][y * comp_w..y * comp_w + width];
-                    let out_row = &mut data[y * width * bpp..(y + 1) * width * bpp];
-                    for x in 0..width {
+                for y in 0..out_height {
+                    let row = &component_planes[0][y * comp_w..y * comp_w + out_width];
+                    let out_row = &mut data[y * out_width * bpp..(y + 1) * out_width * bpp];
+                    for x in 0..out_width {
                         let v = row[x];
                         match out_format {
                             PixelFormat::Rgb => {
@@ -817,15 +967,18 @@ impl<'a> Decoder<'a> {
                                 out_row[x * 4 + 2] = v;
                                 out_row[x * 4 + 3] = 255;
                             }
-                            PixelFormat::Grayscale => unreachable!(),
+                            PixelFormat::Grayscale | PixelFormat::Cmyk => unreachable!(),
                         }
                     }
                 }
                 Ok(Image {
-                    width,
-                    height,
+                    width: out_width,
+                    height: out_height,
                     pixel_format: out_format,
                     data,
+                    icc_profile: icc_profile.clone(),
+                    exif_data: exif_data.clone(),
+                    warnings: warnings.clone(),
                 })
             }
         } else if num_components == 3 {
@@ -838,11 +991,11 @@ impl<'a> Decoder<'a> {
             let bpp = out_format.bytes_per_pixel();
 
             let y_plane = &component_planes[0];
-            let y_width = mcus_x * frame.components[0].horizontal_sampling as usize * 8;
+            let y_width = mcus_x * frame.components[0].horizontal_sampling as usize * block_size;
 
             let cb_comp = &frame.components[1];
-            let cb_w = mcus_x * cb_comp.horizontal_sampling as usize * 8;
-            let cb_h = mcus_y * cb_comp.vertical_sampling as usize * 8;
+            let cb_w = mcus_x * cb_comp.horizontal_sampling as usize * block_size;
+            let cb_h = mcus_y * cb_comp.vertical_sampling as usize * block_size;
 
             let h_factor = max_h / cb_comp.horizontal_sampling as usize;
             let v_factor = max_v / cb_comp.vertical_sampling as usize;
@@ -895,54 +1048,365 @@ impl<'a> Decoder<'a> {
                 // We use a trick: leak the Vecs temporarily, do the conversion,
                 // then reconstruct and drop them. But simpler: just use a nested scope.
                 // Actually, let's just do the color conversion here and return.
-                let data_size = width * height * bpp;
+                let data_size = out_width * out_height * bpp;
                 let mut data = Vec::with_capacity(data_size);
                 unsafe { data.set_len(data_size) };
-                for y in 0..height {
+                for y in 0..out_height {
                     self.color_convert_row(
                         out_format,
                         &y_plane[y * y_width..],
                         &cb_full[y * full_width..],
                         &cr_full[y * full_width..],
-                        &mut data[y * width * bpp..],
-                        width,
+                        &mut data[y * out_width * bpp..],
+                        out_width,
                     );
                 }
 
                 return Ok(Image {
-                    width,
-                    height,
+                    width: out_width,
+                    height: out_height,
                     pixel_format: out_format,
                     data,
+                    icc_profile: icc_profile.clone(),
+                    exif_data: exif_data.clone(),
+                    warnings: warnings.clone(),
                 });
             }
 
             // 4:4:4 path (no upsampling)
-            let data_size = width * height * bpp;
+            let data_size = out_width * out_height * bpp;
             let mut data = Vec::with_capacity(data_size);
             unsafe { data.set_len(data_size) };
-            for y in 0..height {
+            for y in 0..out_height {
                 self.color_convert_row(
                     out_format,
                     &y_plane[y * y_width..],
                     &cb_data[y * cb_stride..],
                     &cr_data[y * cr_stride..],
-                    &mut data[y * width * bpp..],
-                    width,
+                    &mut data[y * out_width * bpp..],
+                    out_width,
                 );
             }
 
             Ok(Image {
-                width,
-                height,
+                width: out_width,
+                height: out_height,
                 pixel_format: out_format,
                 data,
+                icc_profile: icc_profile.clone(),
+                exif_data: exif_data.clone(),
+                warnings: warnings.clone(),
             })
+        } else if num_components == 4 {
+            self.decode_4_component(
+                &component_planes,
+                frame,
+                out_width,
+                out_height,
+                mcus_x,
+                mcus_y,
+                max_h,
+                max_v,
+                full_width,
+                full_height,
+                block_size,
+                icc_profile,
+                exif_data,
+                warnings,
+            )
         } else {
             Err(JpegError::Unsupported(format!(
                 "{} components not yet supported",
                 num_components
             )))
         }
+    }
+
+    /// Determine the JPEG color space from component count and Adobe marker.
+    /// Follows the same heuristic as libjpeg-turbo (jdapimin.c).
+    fn detect_color_space(&self) -> ColorSpace {
+        let num_components = self.metadata.frame.components.len();
+        match num_components {
+            1 => ColorSpace::Grayscale,
+            3 => {
+                if self.metadata.saw_adobe_marker && self.metadata.adobe_transform == 0 {
+                    ColorSpace::Rgb
+                } else {
+                    ColorSpace::YCbCr
+                }
+            }
+            4 => {
+                if self.metadata.saw_adobe_marker {
+                    match self.metadata.adobe_transform {
+                        0 => ColorSpace::Cmyk,
+                        2 => ColorSpace::Ycck,
+                        _ => ColorSpace::Ycck, // default for unknown Adobe transforms
+                    }
+                } else {
+                    ColorSpace::Cmyk // no Adobe marker → assume CMYK
+                }
+            }
+            _ => ColorSpace::YCbCr, // fallback
+        }
+    }
+
+    /// Decode a 4-component (CMYK/YCCK) image.
+    #[allow(clippy::too_many_arguments)]
+    fn decode_4_component(
+        &self,
+        component_planes: &[Vec<u8>],
+        frame: &FrameHeader,
+        width: usize,
+        height: usize,
+        mcus_x: usize,
+        mcus_y: usize,
+        max_h: usize,
+        max_v: usize,
+        full_width: usize,
+        full_height: usize,
+        block_size: usize,
+        icc_profile: Option<Vec<u8>>,
+        exif_data: Option<Vec<u8>>,
+        warnings: Vec<DecodeWarning>,
+    ) -> Result<Image> {
+        let color_space = self.detect_color_space();
+        let out_format = self.output_format.unwrap_or(PixelFormat::Cmyk);
+
+        if out_format == PixelFormat::Grayscale {
+            return Err(JpegError::Unsupported(
+                "cannot convert CMYK/YCCK to grayscale".to_string(),
+            ));
+        }
+
+        // Component 0 is always full-resolution (Y or C).
+        let comp0_w = mcus_x * frame.components[0].horizontal_sampling as usize * block_size;
+
+        // For YCCK, components 1-2 may be subsampled (chroma), component 3 (K) is full.
+        // For CMYK, all components are typically the same resolution.
+        let comp1 = &frame.components[1];
+        let comp1_w = mcus_x * comp1.horizontal_sampling as usize * block_size;
+        let comp1_h = mcus_y * comp1.vertical_sampling as usize * block_size;
+        let comp3_w = mcus_x * frame.components[3].horizontal_sampling as usize * block_size;
+
+        let h_factor = max_h / comp1.horizontal_sampling as usize;
+        let v_factor = max_v / comp1.vertical_sampling as usize;
+
+        // Upsample chroma if needed (for YCCK subsampled images)
+        let (plane1, plane2, p1_stride, p2_stride): (&[u8], &[u8], usize, usize);
+
+        if h_factor == 1 && v_factor == 1 {
+            plane1 = &component_planes[1];
+            plane2 = &component_planes[2];
+            p1_stride = comp1_w;
+            p2_stride = comp1_w;
+        } else {
+            let alloc_size = full_width * full_height;
+            let mut p1_full = Vec::with_capacity(alloc_size);
+            let mut p2_full = Vec::with_capacity(alloc_size);
+            unsafe {
+                p1_full.set_len(alloc_size);
+                p2_full.set_len(alloc_size);
+            }
+
+            if h_factor == 2 && v_factor == 1 {
+                for row in 0..comp1_h {
+                    self.fancy_upsample_h2v1(
+                        &component_planes[1][row * comp1_w..],
+                        comp1_w,
+                        &mut p1_full[row * full_width..],
+                    );
+                    self.fancy_upsample_h2v1(
+                        &component_planes[2][row * comp1_w..],
+                        comp1_w,
+                        &mut p2_full[row * full_width..],
+                    );
+                }
+            } else if h_factor == 2 && v_factor == 2 {
+                self.fancy_h2v2(
+                    &component_planes[1],
+                    comp1_w,
+                    comp1_h,
+                    &mut p1_full,
+                    full_width,
+                );
+                self.fancy_h2v2(
+                    &component_planes[2],
+                    comp1_w,
+                    comp1_h,
+                    &mut p2_full,
+                    full_width,
+                );
+            } else {
+                return Err(JpegError::Unsupported(format!(
+                    "4-component subsampling {}x{} not yet supported",
+                    h_factor, v_factor
+                )));
+            }
+
+            return self.convert_4comp_output(
+                color_space,
+                out_format,
+                &component_planes[0],
+                comp0_w,
+                &p1_full,
+                full_width,
+                &p2_full,
+                full_width,
+                &component_planes[3],
+                comp3_w,
+                width,
+                height,
+                icc_profile,
+                exif_data,
+                warnings,
+            );
+        }
+
+        self.convert_4comp_output(
+            color_space,
+            out_format,
+            &component_planes[0],
+            comp0_w,
+            plane1,
+            p1_stride,
+            plane2,
+            p2_stride,
+            &component_planes[3],
+            comp3_w,
+            width,
+            height,
+            icc_profile,
+            exif_data,
+            warnings,
+        )
+    }
+
+    /// Color-convert 4 component planes to the output format.
+    #[allow(clippy::too_many_arguments)]
+    fn convert_4comp_output(
+        &self,
+        color_space: ColorSpace,
+        out_format: PixelFormat,
+        plane0: &[u8],
+        p0_stride: usize,
+        plane1: &[u8],
+        p1_stride: usize,
+        plane2: &[u8],
+        p2_stride: usize,
+        plane3: &[u8],
+        p3_stride: usize,
+        width: usize,
+        height: usize,
+        icc_profile: Option<Vec<u8>>,
+        exif_data: Option<Vec<u8>>,
+        warnings: Vec<DecodeWarning>,
+    ) -> Result<Image> {
+        use crate::decode::color;
+
+        let bpp = out_format.bytes_per_pixel();
+        let data_size = width * height * bpp;
+        let mut data = Vec::with_capacity(data_size);
+        unsafe { data.set_len(data_size) };
+
+        for y in 0..height {
+            let p0 = &plane0[y * p0_stride..];
+            let p1 = &plane1[y * p1_stride..];
+            let p2 = &plane2[y * p2_stride..];
+            let p3 = &plane3[y * p3_stride..];
+            let out = &mut data[y * width * bpp..];
+
+            match (color_space, out_format) {
+                // CMYK → CMYK: passthrough
+                (ColorSpace::Cmyk, PixelFormat::Cmyk) => {
+                    color::cmyk_passthrough_row(p0, p1, p2, p3, out, width);
+                }
+                // CMYK → RGB/RGBA/BGR/BGRA: direct conversion
+                (ColorSpace::Cmyk, PixelFormat::Rgb) => {
+                    color::cmyk_to_rgb_row(p0, p1, p2, p3, out, width);
+                }
+                (ColorSpace::Cmyk, PixelFormat::Rgba) => {
+                    color::cmyk_to_rgba_row(p0, p1, p2, p3, out, width);
+                }
+                (ColorSpace::Cmyk, PixelFormat::Bgr) => {
+                    color::cmyk_to_bgr_row(p0, p1, p2, p3, out, width);
+                }
+                (ColorSpace::Cmyk, PixelFormat::Bgra) => {
+                    color::cmyk_to_bgra_row(p0, p1, p2, p3, out, width);
+                }
+                // YCCK → CMYK: YCbCr→RGB→invert→CMYK, K passthrough
+                (ColorSpace::Ycck, PixelFormat::Cmyk) => {
+                    color::ycck_to_cmyk_row(p0, p1, p2, p3, out, width);
+                }
+                // YCCK → RGB: convert YCCK→CMYK first (into temp), then CMYK→RGB
+                (ColorSpace::Ycck, PixelFormat::Rgb) => {
+                    let mut cmyk_buf = vec![0u8; width * 4];
+                    color::ycck_to_cmyk_row(p0, p1, p2, p3, &mut cmyk_buf, width);
+                    for x in 0..width {
+                        let ki = 255 - cmyk_buf[x * 4 + 3] as u16;
+                        out[x * 3] = (((255 - cmyk_buf[x * 4] as u16) * ki + 127) / 255) as u8;
+                        out[x * 3 + 1] =
+                            (((255 - cmyk_buf[x * 4 + 1] as u16) * ki + 127) / 255) as u8;
+                        out[x * 3 + 2] =
+                            (((255 - cmyk_buf[x * 4 + 2] as u16) * ki + 127) / 255) as u8;
+                    }
+                }
+                (ColorSpace::Ycck, PixelFormat::Rgba) => {
+                    let mut cmyk_buf = vec![0u8; width * 4];
+                    color::ycck_to_cmyk_row(p0, p1, p2, p3, &mut cmyk_buf, width);
+                    for x in 0..width {
+                        let ki = 255 - cmyk_buf[x * 4 + 3] as u16;
+                        out[x * 4] = (((255 - cmyk_buf[x * 4] as u16) * ki + 127) / 255) as u8;
+                        out[x * 4 + 1] =
+                            (((255 - cmyk_buf[x * 4 + 1] as u16) * ki + 127) / 255) as u8;
+                        out[x * 4 + 2] =
+                            (((255 - cmyk_buf[x * 4 + 2] as u16) * ki + 127) / 255) as u8;
+                        out[x * 4 + 3] = 255;
+                    }
+                }
+                (ColorSpace::Ycck, PixelFormat::Bgr) => {
+                    let mut cmyk_buf = vec![0u8; width * 4];
+                    color::ycck_to_cmyk_row(p0, p1, p2, p3, &mut cmyk_buf, width);
+                    for x in 0..width {
+                        let ki = 255 - cmyk_buf[x * 4 + 3] as u16;
+                        let r = (((255 - cmyk_buf[x * 4] as u16) * ki + 127) / 255) as u8;
+                        let g = (((255 - cmyk_buf[x * 4 + 1] as u16) * ki + 127) / 255) as u8;
+                        let b = (((255 - cmyk_buf[x * 4 + 2] as u16) * ki + 127) / 255) as u8;
+                        out[x * 3] = b;
+                        out[x * 3 + 1] = g;
+                        out[x * 3 + 2] = r;
+                    }
+                }
+                (ColorSpace::Ycck, PixelFormat::Bgra) => {
+                    let mut cmyk_buf = vec![0u8; width * 4];
+                    color::ycck_to_cmyk_row(p0, p1, p2, p3, &mut cmyk_buf, width);
+                    for x in 0..width {
+                        let ki = 255 - cmyk_buf[x * 4 + 3] as u16;
+                        let r = (((255 - cmyk_buf[x * 4] as u16) * ki + 127) / 255) as u8;
+                        let g = (((255 - cmyk_buf[x * 4 + 1] as u16) * ki + 127) / 255) as u8;
+                        let b = (((255 - cmyk_buf[x * 4 + 2] as u16) * ki + 127) / 255) as u8;
+                        out[x * 4] = b;
+                        out[x * 4 + 1] = g;
+                        out[x * 4 + 2] = r;
+                        out[x * 4 + 3] = 255;
+                    }
+                }
+                _ => {
+                    return Err(JpegError::Unsupported(format!(
+                        "unsupported conversion: {:?} → {:?}",
+                        color_space, out_format
+                    )));
+                }
+            }
+        }
+
+        Ok(Image {
+            width,
+            height,
+            pixel_format: out_format,
+            data,
+            icc_profile,
+            exif_data,
+            warnings,
+        })
     }
 }

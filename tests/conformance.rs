@@ -1,5 +1,75 @@
 use libjpeg_turbo_rs::{decompress, decompress_to, PixelFormat};
 
+// --- CMYK JPEG tests ---
+
+#[test]
+fn cmyk_jpeg_decodes_to_cmyk() {
+    let data = include_bytes!("../references/zune-image/test-images/jpeg/cymk.jpg");
+    let image = decompress(data).unwrap();
+    assert_eq!(image.width, 600);
+    assert_eq!(image.height, 397);
+    assert_eq!(image.pixel_format, PixelFormat::Cmyk);
+    assert_eq!(image.data.len(), 600 * 397 * 4);
+}
+
+#[test]
+fn cmyk_jpeg_to_rgb() {
+    let data = include_bytes!("../references/zune-image/test-images/jpeg/cymk.jpg");
+    let image = decompress_to(data, PixelFormat::Rgb).unwrap();
+    assert_eq!(image.width, 600);
+    assert_eq!(image.height, 397);
+    assert_eq!(image.pixel_format, PixelFormat::Rgb);
+    assert_eq!(image.data.len(), 600 * 397 * 3);
+    // Sanity: no all-zero rows (image should have color data)
+    let has_nonzero = image.data.iter().any(|&v| v > 0);
+    assert!(has_nonzero, "CMYK→RGB output should have color data");
+}
+
+#[test]
+fn four_component_jpeg_decodes() {
+    let data = include_bytes!("../references/zune-image/test-images/jpeg/four_components.jpg");
+    let image = decompress(data).unwrap();
+    assert_eq!(image.width, 1318);
+    assert_eq!(image.height, 611);
+    assert_eq!(image.pixel_format, PixelFormat::Cmyk);
+    assert_eq!(image.data.len(), 1318 * 611 * 4);
+}
+
+#[test]
+fn progressive_four_component_jpeg_decodes() {
+    let data = include_bytes!(
+        "../references/zune-image/test-images/jpeg/Kiara_limited_progressive_four_components.jpg"
+    );
+    let image = decompress(data).unwrap();
+    assert_eq!(image.width, 383);
+    assert_eq!(image.height, 740);
+    assert_eq!(image.pixel_format, PixelFormat::Cmyk);
+    assert_eq!(image.data.len(), 383 * 740 * 4);
+}
+
+#[test]
+fn cmyk_to_rgba_output() {
+    let data = include_bytes!("../references/zune-image/test-images/jpeg/cymk.jpg");
+    let image = decompress_to(data, PixelFormat::Rgba).unwrap();
+    assert_eq!(image.pixel_format, PixelFormat::Rgba);
+    assert_eq!(image.data.len(), 600 * 397 * 4);
+    // All alpha values must be 255
+    for y in 0..image.height {
+        for x in 0..image.width {
+            let a = image.data[(y * image.width + x) * 4 + 3];
+            assert_eq!(a, 255, "pixel ({},{}) A={}", x, y, a);
+        }
+    }
+}
+
+#[test]
+fn cmyk_to_bgr_output() {
+    let data = include_bytes!("../references/zune-image/test-images/jpeg/cymk.jpg");
+    let image = decompress_to(data, PixelFormat::Bgr).unwrap();
+    assert_eq!(image.pixel_format, PixelFormat::Bgr);
+    assert_eq!(image.data.len(), 600 * 397 * 3);
+}
+
 #[test]
 fn conformance_grayscale_8x8() {
     let data = include_bytes!("fixtures/gray_8x8.jpg");
