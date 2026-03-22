@@ -179,8 +179,8 @@
 
 | C Function | Description | Rust | Status |
 |---|---|---|---|
-| `jpeg_stdio_dest(cinfo, file)` | Output to FILE* | — | ❌ |
-| `jpeg_stdio_src(cinfo, file)` | Input from FILE* | — | ❌ |
+| `jpeg_stdio_dest(cinfo, file)` | Output to FILE* | `stream::compress_to_file` / `stream::compress_to_writer` | ✅ |
+| `jpeg_stdio_src(cinfo, file)` | Input from FILE* | `stream::decompress_from_file` / `stream::decompress_from_reader` | ✅ |
 | `jpeg_mem_dest(cinfo, &outbuf, &outsize)` | Output to memory buffer | `Vec<u8>` output (native) | ✅ |
 | `jpeg_mem_src(cinfo, inbuf, insize)` | Input from memory buffer | `&[u8]` input (native) | ✅ |
 
@@ -494,6 +494,6 @@
 | `jpeg_decompress_struct` | Full decompression state (~60 fields) | `Decoder` + `JpegMetadata` | 🔶 |
 | `jpeg_error_mgr` | Error handler (5 callbacks + state) | `JpegError` enum | 🔶 |
 | `jpeg_progress_mgr` | Progress callback + counters | — | ❌ |
-| `jpeg_destination_mgr` | Output stream (buffer + 3 callbacks) | `Vec<u8>` | 🔶 |
-| `jpeg_source_mgr` | Input stream (buffer + 5 callbacks) | `&[u8]` | 🔶 |
+| `jpeg_destination_mgr` | Output stream (buffer + 3 callbacks) | `stream::compress_to_writer<W: Write>` | ✅ |
+| `jpeg_source_mgr` | Input stream (buffer + 5 callbacks) | `stream::decompress_from_reader<R: Read>` | ✅ |
 | `jpeg_memory_mgr` | Memory allocator (12 methods) | Rust allocator | ❌ |
