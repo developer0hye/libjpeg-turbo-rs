@@ -6,6 +6,9 @@ pub enum ColorSpace {
     Rgb,
     Cmyk,
     Ycck,
+    /// Unknown / pass-through colorspace (no color conversion).
+    /// Matches libjpeg's `JCS_UNKNOWN`.
+    Unknown,
 }
 
 impl ColorSpace {
@@ -14,6 +17,7 @@ impl ColorSpace {
             Self::Grayscale => 1,
             Self::YCbCr | Self::Rgb => 3,
             Self::Cmyk | Self::Ycck => 4,
+            Self::Unknown => 3,
         }
     }
 }
@@ -33,13 +37,16 @@ pub enum Subsampling {
     S411,
     /// 4:4:1 — horizontal 1x, vertical 4x
     S441,
+    /// Unknown / non-standard subsampling factors.
+    /// Matches libjpeg's `TJSAMP_UNKNOWN`.
+    Unknown,
 }
 
 impl Subsampling {
     /// Max horizontal sampling factor (luma blocks per MCU row).
     pub fn mcu_width_blocks(self) -> usize {
         match self {
-            Self::S444 | Self::S440 | Self::S441 => 1,
+            Self::S444 | Self::S440 | Self::S441 | Self::Unknown => 1,
             Self::S422 | Self::S420 => 2,
             Self::S411 => 4,
         }
@@ -48,7 +55,7 @@ impl Subsampling {
     /// Max vertical sampling factor (luma blocks per MCU column).
     pub fn mcu_height_blocks(self) -> usize {
         match self {
-            Self::S444 | Self::S422 | Self::S411 => 1,
+            Self::S444 | Self::S422 | Self::S411 | Self::Unknown => 1,
             Self::S420 | Self::S440 => 2,
             Self::S441 => 4,
         }
@@ -57,7 +64,7 @@ impl Subsampling {
     /// Returns (h_sampling_factor, v_sampling_factor) for SOF component definitions.
     pub fn sampling_factors(self) -> (u8, u8) {
         match self {
-            Self::S444 => (1, 1),
+            Self::S444 | Self::Unknown => (1, 1),
             Self::S422 => (2, 1),
             Self::S420 => (2, 2),
             Self::S440 => (1, 2),
