@@ -236,9 +236,17 @@ pub fn compress_with_metadata(
     exif_data: Option<&[u8]>,
 ) -> Result<Vec<u8>> {
     let base = compress(pixels, width, height, pixel_format, quality, subsampling)?;
+    inject_metadata(&base, icc_profile, exif_data)
+}
 
+/// Insert APP1 (EXIF) and APP2 (ICC) markers into an existing JPEG byte stream.
+pub fn inject_metadata(
+    base: &[u8],
+    icc_profile: Option<&[u8]>,
+    exif_data: Option<&[u8]>,
+) -> Result<Vec<u8>> {
     if icc_profile.is_none() && exif_data.is_none() {
-        return Ok(base);
+        return Ok(base.to_vec());
     }
 
     // Find insertion point after APP0 JFIF marker (SOI + APP0)
