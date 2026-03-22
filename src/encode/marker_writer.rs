@@ -441,6 +441,43 @@ pub fn write_eoi(buf: &mut Vec<u8>) {
     buf.push(0xD9);
 }
 
+/// Streaming marker writer for building marker segments byte-by-byte.
+pub struct MarkerStreamWriter {
+    marker_type: u8,
+    data: Vec<u8>,
+}
+
+impl MarkerStreamWriter {
+    /// Create a new streaming marker writer for the given marker type.
+    pub fn new(marker_type: u8) -> Self {
+        Self {
+            marker_type,
+            data: Vec::new(),
+        }
+    }
+
+    /// Write a single byte to the marker data.
+    pub fn write_byte(&mut self, byte: u8) {
+        self.data.push(byte);
+    }
+
+    /// Write multiple bytes to the marker data.
+    pub fn write_bytes(&mut self, bytes: &[u8]) {
+        self.data.extend_from_slice(bytes);
+    }
+
+    /// Finish writing and return the complete marker segment.
+    pub fn finish(self) -> Vec<u8> {
+        let length: u16 = (2 + self.data.len()) as u16;
+        let mut segment: Vec<u8> = Vec::with_capacity(4 + self.data.len());
+        segment.push(0xFF);
+        segment.push(self.marker_type);
+        segment.extend_from_slice(&length.to_be_bytes());
+        segment.extend_from_slice(&self.data);
+        segment
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
