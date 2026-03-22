@@ -12,18 +12,22 @@ pub use api::coefficient::{
 };
 pub use api::encoder::{Encoder, HuffmanTableDef};
 pub use api::high_level::{
-    compress, compress_arithmetic, compress_arithmetic_progressive, compress_lossless,
-    compress_lossless_arithmetic, compress_lossless_extended, compress_optimized,
-    compress_progressive, compress_with_metadata, decompress, decompress_cropped,
-    decompress_lenient, decompress_to,
+    compress, compress_arithmetic, compress_arithmetic_progressive, compress_into,
+    compress_lossless, compress_lossless_arithmetic, compress_lossless_extended,
+    compress_optimized, compress_progressive, compress_with_metadata, decompress,
+    decompress_cropped, decompress_lenient, decompress_to,
 };
 pub use api::image_io::{load_image, load_image_from_bytes, save_bmp, save_ppm, LoadedImage};
+pub use api::precision::{
+    read_scanlines_12, read_scanlines_16, write_scanlines_12, write_scanlines_16,
+};
 pub use api::quality::quality_scaling;
+pub use api::quantize::requantize;
 pub use api::raw_data::{compress_raw, decompress_raw, RawImage};
 /// Color quantization for 8-bit indexed/palette output.
 pub mod quantize {
     pub use crate::api::quantize::{
-        dequantize, quantize, DitherMode, QuantizeOptions, QuantizedImage,
+        dequantize, quantize, requantize, DitherMode, QuantizeOptions, QuantizedImage,
     };
 }
 pub use api::progressive_output::ProgressiveDecoder;
@@ -44,7 +48,8 @@ pub use transform::{TransformOp, TransformOptions};
 /// 12-bit and 16-bit sample precision support.
 pub mod precision {
     pub use crate::api::precision::{
-        compress_12bit, compress_16bit, decompress_12bit, decompress_16bit, Image12, Image16,
+        compress_12bit, compress_16bit, decompress_12bit, decompress_16bit, read_scanlines_12,
+        read_scanlines_16, write_scanlines_12, write_scanlines_16, Image12, Image16,
     };
 }
 /// TJ3-compatible handle/parameter API.

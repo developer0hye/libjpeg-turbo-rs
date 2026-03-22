@@ -234,6 +234,39 @@ pub fn compress_lossless_arithmetic(
     )
 }
 
+/// Compress into a pre-allocated buffer. Returns the number of bytes written.
+///
+/// This avoids allocating a new `Vec<u8>` for the output. If the buffer is
+/// too small to hold the compressed JPEG, returns `JpegError::BufferTooSmall`.
+/// Matches libjpeg-turbo's `TJPARAM_NOREALLOC` behavior.
+pub fn compress_into(
+    buf: &mut [u8],
+    pixels: &[u8],
+    width: usize,
+    height: usize,
+    pixel_format: PixelFormat,
+    quality: u8,
+    subsampling: Subsampling,
+) -> Result<usize> {
+    let jpeg_data: Vec<u8> = encoder::compress(
+        pixels,
+        width,
+        height,
+        pixel_format,
+        quality,
+        subsampling,
+        crate::common::types::DctMethod::IsLow,
+    )?;
+    if jpeg_data.len() > buf.len() {
+        return Err(crate::common::error::JpegError::BufferTooSmall {
+            need: jpeg_data.len(),
+            got: buf.len(),
+        });
+    }
+    buf[..jpeg_data.len()].copy_from_slice(&jpeg_data);
+    Ok(jpeg_data.len())
+}
+
 /// Compress with arithmetic entropy coding (SOF9).
 ///
 /// Uses QM-coder binary arithmetic coding instead of Huffman coding.
