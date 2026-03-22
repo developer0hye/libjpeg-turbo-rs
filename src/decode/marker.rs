@@ -17,6 +17,7 @@ const SOF2: u8 = 0xC2;
 const SOF3: u8 = 0xC3; // Lossless, Huffman-coded
 const SOF9: u8 = 0xC9; // Arithmetic sequential
 const SOF10: u8 = 0xCA; // Arithmetic progressive
+const SOF11: u8 = 0xCB; // Lossless, arithmetic-coded
 const DHT: u8 = 0xC4;
 const DAC: u8 = 0xCC; // Define arithmetic conditioning
 const DQT: u8 = 0xDB;
@@ -125,6 +126,11 @@ impl<'a> MarkerReader<'a> {
                 SOF10 => {
                     // Arithmetic progressive
                     frame = Some(self.read_sof(true, false)?);
+                    is_arithmetic = true;
+                }
+                SOF11 => {
+                    // Lossless, arithmetic-coded
+                    frame = Some(self.read_sof(false, true)?);
                     is_arithmetic = true;
                 }
                 DAC => {
