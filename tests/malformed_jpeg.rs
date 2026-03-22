@@ -108,8 +108,7 @@ fn sof_width_zero() {
         jpeg[pos + 7] = 0;
         jpeg[pos + 8] = 0;
     }
-    // TODO(correctness): decoder should reject width=0 with an error
-    let _ = decompress(&jpeg);
+    assert!(decompress(&jpeg).is_err(), "width=0 should be rejected");
 }
 
 #[test]
@@ -220,13 +219,7 @@ fn sos_component_count_mismatch() {
             jpeg[ns_byte] = 0;
         }
     }
-    // TODO(correctness): decoder should return Err for Ns=0 instead of panicking
-    let result = std::panic::catch_unwind(|| decompress(&jpeg));
-    match result {
-        Ok(Ok(_)) => {}  // Unlikely but acceptable
-        Ok(Err(_)) => {} // Proper error return
-        Err(_) => {}     // Panic caught — decoder needs bounds check
-    }
+    assert!(decompress(&jpeg).is_err(), "SOS Ns=0 should be rejected");
 }
 
 // ===========================================================================
@@ -364,8 +357,10 @@ fn component_sampling_factor_too_large() {
             jpeg[sampling_byte] = 0x55;
         }
     }
-    // TODO(correctness): decoder should reject sampling factor > 4 with an error
-    let _ = decompress(&jpeg);
+    assert!(
+        decompress(&jpeg).is_err(),
+        "sampling factor > 4 should be rejected"
+    );
 }
 
 #[test]
