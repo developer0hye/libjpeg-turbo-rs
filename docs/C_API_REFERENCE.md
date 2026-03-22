@@ -32,7 +32,7 @@
 | `SUBSAMP` | Chroma subsampling | `subsampling: Subsampling` param | ✅ |
 | `JPEGWIDTH` | JPEG image width (read-only) | `Image.width` | ✅ |
 | `JPEGHEIGHT` | JPEG image height (read-only) | `Image.height` | ✅ |
-| `PRECISION` | Sample precision 2-16 bits | Hardcoded 8-bit | 🔶 |
+| `PRECISION` | Sample precision 2-16 bits | `compress_lossless_arbitrary()` / `decompress_lossless_arbitrary()` | ✅ |
 | `COLORSPACE` | JPEG colorspace | Auto-detected | 🔶 |
 | `FASTUPSAMPLE` | Nearest-neighbor upsampling | Always fancy | ❌ |
 | `FASTDCT` | Fast DCT/IDCT algorithm | Always ISLOW | ❌ |
@@ -196,7 +196,7 @@
 | `jpeg_default_qtables(cinfo, force_baseline)` | Reset quant tables | — | ❌ |
 | `jpeg_add_quant_table(cinfo, which, table, scale, force_baseline)` | Add custom quant table | — | ❌ |
 | `jpeg_quality_scaling(quality)` | Convert quality to scale factor | Internal in `tables::quality_scale_quant_table` | ✅ |
-| `jpeg_enable_lossless(cinfo, psv, pt)` | Enable lossless mode | `compress_lossless()` (psv=1, pt=0 only) | 🔶 |
+| `jpeg_enable_lossless(cinfo, psv, pt)` | Enable lossless mode | `compress_lossless()`, `compress_lossless_arbitrary()` | ✅ |
 | `jpeg_simple_progression(cinfo)` | Set standard progressive scan script | Used internally in `compress_progressive()` | ✅ |
 | `jpeg_suppress_tables(cinfo, suppress)` | Control table output | — | ❌ |
 | `jpeg_alloc_quant_table(cinfo)` | Allocate quant table | — | ❌ |
