@@ -355,6 +355,112 @@ fn compress_cmyk(pixels: &[u8], width: usize, height: usize, quality: u8) -> Res
     marker_writer::write_sos(&mut output, &scan_components);
 
     output.extend_from_slice(bit_writer.data());
+
+    marker_writer::write_eoi(&mut output);
+
+    Ok(output)
+}
+
+/// Compress as lossless JPEG (SOF3).
+///
+/// Uses predictor 1 (left) and no point transform.
+/// Produces exact pixel-identical output when decoded.
+pub fn compress_lossless(
+    pixels: &[u8],
+    width: usize,
+    height: usize,
+    pixel_format: PixelFormat,
+) -> Result<Vec<u8>> {
+    if pixel_format != PixelFormat::Grayscale {
+        return Err(JpegError::Unsupported(
+            "lossless encoding only supports grayscale".to_string(),
+        ));
+    }
+
+    if width == 0 || height == 0 {
+        return Err(JpegError::CorruptData(
+            "image dimensions must be non-zero".to_string(),
+        ));
+    }
+
+    if pixels.len() < width * height {
+        return Err(JpegError::BufferTooSmall {
+            need: width * height,
+            got: pixels.len(),
+        });
+    }
+
+    let precision: u8 = 8;
+    let predictor: u8 = 1; // left
+    let point_transform: u8 = 0;
+    let initial_pred: i32 = 1 << (precision as i32 - point_transform as i32 - 1); // 128
+    let mask: i32 = (1i32 << precision) - 1;
+
+    // Compute differences using predictor 1 (left)
+    // Then Huffman-encode each difference using DC coding (category + extra bits)
+    let mut bit_writer = BitWriter::new(width * height);
+    let dc_table = build_huff_table(&tables::DC_LUMINANCE_BITS, &tables::DC_LUMINANCE_VALUES);
+
+    for y in 0..height {
+        for x in 0..width {
+            let pixel = pixels[y * width + x] as i32;
+            let prediction = if y == 0 && x == 0 {
+                initial_pred
+            } else if y == 0 {
+                pixels[y * width + x - 1] as i32
+            } else if x == 0 {
+                pixels[(y - 1) * width + x] as i32
+            } else {
+                // predictor 1 = left
+                pixels[y * width + x - 1] as i32
+            };
+
+            let diff = (pixel - prediction) & mask;
+            // Convert to signed: if >= 2^(p-1), it's negative
+            let signed_diff = if diff >= (1 << (precision - 1)) {
+                diff - (1 << precision)
+            } else {
+                diff
+            };
+
+            // Encode as DC coefficient (category + extra bits)
+            HuffmanEncoder::encode_dc_only(&mut bit_writer, signed_diff as i16, &dc_table);
+        }
+    }
+
+    bit_writer.flush();
+
+    // Assemble: SOI, DHT (DC table), SOF3, SOS (predictor=1, pt=0), entropy data, EOI
+    let mut output = Vec::with_capacity(bit_writer.data().len() + 256);
+
+    marker_writer::write_soi(&mut output);
+
+    // DC Huffman table
+    marker_writer::write_dht(
+        &mut output,
+        0,
+        0,
+        &tables::DC_LUMINANCE_BITS,
+        &tables::DC_LUMINANCE_VALUES,
+    );
+
+    // SOF3 frame header
+    let components = vec![(1, 1, 1, 0)]; // id=1, h=1, v=1, qt=0
+    marker_writer::write_sof3(
+        &mut output,
+        width as u16,
+        height as u16,
+        precision,
+        &components,
+    );
+
+    // SOS lossless scan header
+    let scan_components = vec![(1, 0)]; // component 1, DC table 0
+    marker_writer::write_sos_lossless(&mut output, &scan_components, predictor, point_transform);
+
+    // Entropy data
+    output.extend_from_slice(bit_writer.data());
+
     marker_writer::write_eoi(&mut output);
 
     Ok(output)

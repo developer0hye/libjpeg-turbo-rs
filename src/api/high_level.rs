@@ -135,6 +135,19 @@ pub fn compress_with_metadata(
     )
 }
 
+/// Compress as lossless JPEG (SOF3).
+///
+/// Uses predictor 1 (left) with no point transform. Produces exact
+/// pixel-identical output when decoded. Currently supports grayscale only.
+pub fn compress_lossless(
+    pixels: &[u8],
+    width: usize,
+    height: usize,
+    pixel_format: PixelFormat,
+) -> Result<Vec<u8>> {
+    encoder::compress_lossless(pixels, width, height, pixel_format)
+}
+
 /// Compress with arithmetic entropy coding (SOF9).
 ///
 /// Uses QM-coder binary arithmetic coding instead of Huffman coding.
