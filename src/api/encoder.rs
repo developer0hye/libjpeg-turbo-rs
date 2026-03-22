@@ -11,6 +11,18 @@ pub enum RestartConfig {
     Rows(u16),
 }
 
+/// User-supplied Huffman table definition.
+///
+/// `bits[0]` is unused; `bits[1]..bits[16]` give the number of codes of each
+/// bit length, matching the DHT marker format in ITU-T T.81 Annex C.
+#[derive(Debug, Clone)]
+pub struct HuffmanTableDef {
+    /// Code-length counts. Index 0 is unused.
+    pub bits: [u8; 17],
+    /// Symbol values in order of increasing code length.
+    pub values: Vec<u8>,
+}
+
 /// JPEG encoder with builder-pattern configuration.
 pub struct Encoder<'a> {
     pixels: &'a [u8],
@@ -31,6 +43,8 @@ pub struct Encoder<'a> {
     exif_data: Option<&'a [u8]>,
     comment: Option<&'a str>,
     custom_quant_tables: [Option<[u16; 64]>; 4],
+    custom_huffman_dc: [Option<HuffmanTableDef>; 4],
+    custom_huffman_ac: [Option<HuffmanTableDef>; 4],
 }
 
 impl<'a> Encoder<'a> {
@@ -55,6 +69,8 @@ impl<'a> Encoder<'a> {
             exif_data: None,
             comment: None,
             custom_quant_tables: [None; 4],
+            custom_huffman_dc: [None, None, None, None],
+            custom_huffman_ac: [None, None, None, None],
         }
     }
 
@@ -166,6 +182,26 @@ impl<'a> Encoder<'a> {
         self
     }
 
+    /// Set a custom DC Huffman table for the given table slot (0-3).
+    ///
+    /// Index 0 is used for luma, index 1 for chroma. When set, the custom table
+    /// overrides the standard DC Huffman table for that slot during encoding.
+    pub fn huffman_dc_table(mut self, index: usize, table: HuffmanTableDef) -> Self {
+        assert!(index < 4, "Huffman table index must be 0..3");
+        self.custom_huffman_dc[index] = Some(table);
+        self
+    }
+
+    /// Set a custom AC Huffman table for the given table slot (0-3).
+    ///
+    /// Index 0 is used for luma, index 1 for chroma. When set, the custom table
+    /// overrides the standard AC Huffman table for that slot during encoding.
+    pub fn huffman_ac_table(mut self, index: usize, table: HuffmanTableDef) -> Self {
+        assert!(index < 4, "Huffman table index must be 0..3");
+        self.custom_huffman_ac[index] = Some(table);
+        self
+    }
+
     /// Compute the restart interval in MCU blocks from the configured restart setting.
     fn compute_restart_interval(&self) -> u16 {
         match self.restart_interval {
@@ -190,6 +226,12 @@ impl<'a> Encoder<'a> {
     /// Returns true if any custom quantization table has been set.
     fn has_custom_quant_tables(&self) -> bool {
         self.custom_quant_tables.iter().any(|t| t.is_some())
+    }
+
+    /// Returns true if any custom Huffman table has been set.
+    fn has_custom_huffman_tables(&self) -> bool {
+        self.custom_huffman_dc.iter().any(|t| t.is_some())
+            || self.custom_huffman_ac.iter().any(|t| t.is_some())
     }
 
     /// Extract Y (luminance) from color pixels using BT.601 coefficients.
@@ -285,6 +327,17 @@ impl<'a> Encoder<'a> {
                 effective_format,
                 self.quality,
                 self.subsampling,
+            )?
+        } else if self.has_custom_huffman_tables() {
+            encoder::compress_custom_huffman(
+                effective_pixels,
+                self.width,
+                self.height,
+                effective_format,
+                self.quality,
+                self.subsampling,
+                &self.custom_huffman_dc,
+                &self.custom_huffman_ac,
             )?
         } else if self.has_custom_quant_tables() {
             encoder::compress_custom_quant(
