@@ -23,6 +23,8 @@ pub struct Encoder<'a> {
     progressive: bool,
     arithmetic: bool,
     lossless: bool,
+    lossless_predictor: u8,
+    lossless_point_transform: u8,
     restart_interval: Option<RestartConfig>,
     icc_profile: Option<&'a [u8]>,
     exif_data: Option<&'a [u8]>,
@@ -44,6 +46,8 @@ impl<'a> Encoder<'a> {
             progressive: false,
             arithmetic: false,
             lossless: false,
+            lossless_predictor: 1,
+            lossless_point_transform: 0,
             restart_interval: None,
             icc_profile: None,
             exif_data: None,
@@ -85,6 +89,25 @@ impl<'a> Encoder<'a> {
     /// Enable lossless JPEG mode (SOF3).
     pub fn lossless(mut self, lossless: bool) -> Self {
         self.lossless = lossless;
+        self
+    }
+
+    /// Set the lossless predictor selection value (1-7).
+    ///
+    /// Only used when `lossless(true)` is set. Default is 1 (left neighbor).
+    /// See ITU-T T.81 Table H.1 for predictor definitions.
+    pub fn lossless_predictor(mut self, predictor: u8) -> Self {
+        self.lossless_predictor = predictor;
+        self
+    }
+
+    /// Set the lossless point transform value (0-15).
+    ///
+    /// Only used when `lossless(true)` is set. Default is 0 (no transform).
+    /// Shifts pixel values right by this amount before encoding, reducing
+    /// precision but improving compression.
+    pub fn lossless_point_transform(mut self, point_transform: u8) -> Self {
+        self.lossless_point_transform = point_transform;
         self
     }
 
@@ -166,7 +189,14 @@ impl<'a> Encoder<'a> {
         let restart_interval = self.compute_restart_interval();
 
         let base = if self.lossless {
-            encoder::compress_lossless(self.pixels, self.width, self.height, self.pixel_format)?
+            encoder::compress_lossless_extended(
+                self.pixels,
+                self.width,
+                self.height,
+                self.pixel_format,
+                self.lossless_predictor,
+                self.lossless_point_transform,
+            )?
         } else if self.arithmetic {
             encoder::compress_arithmetic(
                 self.pixels,
