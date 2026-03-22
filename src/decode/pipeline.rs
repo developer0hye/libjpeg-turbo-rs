@@ -111,6 +111,8 @@ pub struct Decoder<'a> {
     pub(crate) output_colorspace: Option<ColorSpace>,
     /// Apply ordered dithering when outputting RGB565.
     pub(crate) dither_565: bool,
+    /// Enable merged upsampling (combined upsample + color convert for H2V1/H2V2).
+    pub(crate) merged_upsample: bool,
     /// Custom marker processor callbacks, keyed by marker code.
     marker_processors: std::collections::HashMap<u8, Box<dyn Fn(&[u8]) -> Option<Vec<u8>>>>,
 }
@@ -141,6 +143,7 @@ impl<'a> Decoder<'a> {
             block_smoothing: false,
             output_colorspace: None,
             dither_565: false,
+            merged_upsample: false,
             marker_processors: std::collections::HashMap::new(),
         })
     }
@@ -231,6 +234,17 @@ impl<'a> Decoder<'a> {
     /// Matches libjpeg-turbo's dithered RGB565 output mode.
     pub fn set_dither_565(&mut self, dither: bool) {
         self.dither_565 = dither;
+    }
+
+    /// Enable merged upsampling optimization (combines upsample + color convert).
+    ///
+    /// When enabled and subsampling is 4:2:0 or 4:2:2, uses a merged path that
+    /// performs chroma upsampling and YCbCr->RGB conversion in a single pass.
+    /// This avoids writing upsampled chroma to intermediate buffers, improving
+    /// cache behavior. Slightly less accurate than separate fancy upsample
+    /// because merged uses box-filter (nearest-neighbor) chroma replication.
+    pub fn set_merged_upsample(&mut self, enabled: bool) {
+        self.merged_upsample = enabled;
     }
 
     /// Configure which markers to save during decoding.
@@ -2259,6 +2273,78 @@ impl<'a> Decoder<'a> {
                 cb_stride = cb_w;
                 cr_stride = cb_w;
             } else {
+                // Merged upsample path: combine upsample + color convert in one pass
+                // for H2V1 (4:2:2) and H2V2 (4:2:0), avoiding intermediate chroma buffers.
+                if self.merged_upsample
+                    && out_format == PixelFormat::Rgb
+                    && h_factor == 2
+                    && (v_factor == 1 || v_factor == 2)
+                {
+                    let data_size: usize = out_width * out_height * bpp;
+                    let mut data: Vec<u8> = Vec::with_capacity(data_size);
+                    unsafe { data.set_len(data_size) };
+
+                    if v_factor == 1 {
+                        // H2V1 (4:2:2): one chroma row per Y row
+                        for y in 0..out_height {
+                            crate::decode::merged_upsample::merged_h2v1_ycbcr_to_rgb(
+                                &y_plane[y * y_width..],
+                                &component_planes[1][y * cb_w..],
+                                &component_planes[2][y * cb_w..],
+                                &mut data[y * out_width * bpp..],
+                                out_width,
+                            );
+                        }
+                    } else {
+                        // H2V2 (4:2:0): one chroma row per 2 Y rows
+                        let row_pairs: usize = out_height / 2;
+                        for pair in 0..row_pairs {
+                            let y0: usize = pair * 2;
+                            let y1: usize = pair * 2 + 1;
+                            let chroma_row: usize = pair;
+                            let out0_start: usize = y0 * out_width * bpp;
+                            let out1_start: usize = y1 * out_width * bpp;
+                            // Split data into two non-overlapping mutable slices
+                            let (top, bottom) = data.split_at_mut(out1_start);
+                            crate::decode::merged_upsample::merged_h2v2_ycbcr_to_rgb(
+                                &y_plane[y0 * y_width..],
+                                &y_plane[y1 * y_width..],
+                                &component_planes[1][chroma_row * cb_w..],
+                                &component_planes[2][chroma_row * cb_w..],
+                                &mut top[out0_start..],
+                                bottom,
+                                out_width,
+                            );
+                        }
+                        // Handle odd height: last row uses H2V1 with last chroma row
+                        if out_height & 1 != 0 {
+                            let last_y: usize = out_height - 1;
+                            let chroma_row: usize = last_y / 2;
+                            crate::decode::merged_upsample::merged_h2v1_ycbcr_to_rgb(
+                                &y_plane[last_y * y_width..],
+                                &component_planes[1][chroma_row * cb_w..],
+                                &component_planes[2][chroma_row * cb_w..],
+                                &mut data[last_y * out_width * bpp..],
+                                out_width,
+                            );
+                        }
+                    }
+
+                    return Ok(Image {
+                        width: out_width,
+                        height: out_height,
+                        pixel_format: out_format,
+                        precision: 8,
+                        data,
+                        icc_profile: icc_profile.clone(),
+                        exif_data: exif_data.clone(),
+                        comment: self.metadata.comment.clone(),
+                        density: self.metadata.density,
+                        saved_markers: self.metadata.saved_markers.clone(),
+                        warnings: warnings.clone(),
+                    });
+                }
+
                 // Allocate upsampled buffers
                 let alloc_size = full_width * full_height;
                 let mut cb_full = Vec::with_capacity(alloc_size);

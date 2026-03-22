@@ -33,7 +33,7 @@
 - [ ] Extended scaling factors (2/1, 15/8, 7/4, 13/8, 3/2, 11/8, 5/4, 9/8, 7/8, 3/4, 5/8, 3/8) — only 1/2, 1/4, 1/8
 - [x] Partial decompression (cropping) — `crop_skip.rs`
 - [x] Transform + scale combinations — `tjunittest_transform.rs`
-- [ ] Merged YUV decompression (420m, 422m) — not tested
+- [x] Merged YUV decompression (420m, 422m) — `merged_upsample.rs`
 - [x] Performance benchmarking (Mpixels/sec) — `benches/decode.rs` (criterion)
 - [ ] Frame rate / throughput measurement in tests — benchmark only, not assertion-based
 
@@ -302,7 +302,7 @@
 - [x] Multiple pixel formats for YUV — `tjunittest_yuv.rs`
 - [x] Non-aligned dimensions — `tjunittest_yuv.rs`
 - [ ] YUV no-padding mode — not tested
-- [ ] Merged YUV decompression (420m, 422m) — not implemented
+- [x] Merged YUV decompression (420m, 422m) — `merged_upsample.rs`
 
 ---
 
@@ -328,8 +328,8 @@ These are the individual cjpeg/djpeg/jpegtran tests defined via `add_bittest()` 
 - [x] `rgb-islow` — baseline decode — `conformance.rs`
 - [x] `422-ifast` — fast DCT decode — `decode_toggles.rs`
 - [x] `440-islow` — 440 decode — `conformance.rs`
-- [ ] `422m-ifast` — merged upsampling 422 — not implemented
-- [ ] `420m-q100-ifast-prog` — merged upsampling 420 progressive — not implemented
+- [x] `422m-ifast` — merged upsampling 422 — `merged_upsample.rs`
+- [ ] `420m-q100-ifast-prog` — merged upsampling 420 progressive — not tested
 - [x] `gray-islow` — grayscale decode — `conformance.rs`
 - [x] `gray-islow-rgb` — grayscale to RGB output — `decode_toggles.rs`
 - [x] `rgb-islow-565` — RGB565 decode (no dither) — `rgb565_dither.rs`
@@ -347,14 +347,14 @@ These are the individual cjpeg/djpeg/jpegtran tests defined via `add_bittest()` 
 - [x] `444-islow-ari-crop37x37_0_0` — arithmetic + crop — `crop_skip.rs`
 - [x] `420-islow-ari-crop53x53_4_4` — arithmetic + crop — partial
 - [x] `444-islow-skip1_6` — small skip range — `scanline_api.rs`
-- [ ] `420m-islow-{scale}` — merged upsampling with 15 scales — not implemented
+- [ ] `420m-islow-{scale}` — merged upsampling with 15 scales — not tested
 - [x] `rgb-islow-icc-cmp` — ICC profile extraction — `metadata_write.rs`
 
 ### jpegtran Tests (Transform)
 - [x] `icc` — ICC copy through transform — `marker_preservation.rs`
 - [x] `crop` — lossless crop — `transform_options.rs`
 - [x] `420-islow-ari` (as transform) — arithmetic recode — `tjunittest_transform.rs`
-- [ ] `420m-ifast-ari` — merged upsampling arithmetic — not implemented
+- [ ] `420m-ifast-ari` — merged upsampling arithmetic — not tested
 
 ### 16-bit Specific (cjpeg16/djpeg16)
 - [x] `lossless` — 16-bit lossless encode/decode — `precision.rs`
@@ -374,8 +374,8 @@ These are the individual cjpeg/djpeg/jpegtran tests defined via `add_bittest()` 
 - [ ] RGB565 with merged upsampling
 
 ### Merged Upsampling (420m, 422m)
-- [ ] 420m decode (merged 2x2 upsample) — not implemented
-- [ ] 422m decode (merged 2x1 upsample) — not implemented
+- [x] 420m decode (merged 2x2 upsample) — `merged_upsample.rs`
+- [x] 422m decode (merged 2x1 upsample) — `merged_upsample.rs`
 - [ ] Merged upsampling + fast DCT
 - [ ] Merged upsampling + scaled decode
 - [ ] Merged upsampling + RGB565
@@ -447,12 +447,12 @@ These are the individual cjpeg/djpeg/jpegtran tests defined via `add_bittest()` 
 | YUV operations | 5 | 7 | 71% |
 | Fuzzing | 7 | 8 | 88% |
 | RGB565 specific | 0 | 6 | 0% |
-| Merged upsampling | 0 | 5 | 0% |
+| Merged upsampling | 2 | 5 | 40% |
 | Non-standard sampling | 0 | 2 | 0% |
 | FP variance handling | 0 | 3 | 0% |
 
 ### Key Gaps (Priority Order)
-1. **Merged upsampling (420m, 422m)** — C tests extensively; we don't implement this optimization
+1. **Merged upsampling (420m, 422m)** — Core 420m/422m implemented; remaining: progressive, scaled, RGB565 variants
 2. **RGB565 dithered/undithered** — C tests 8 RGB565 combinations; we test 0
 3. **MD5/binary comparison** — deterministic encoding + regression hashes implemented (`bitstream_stability.rs`, `bitstream_regression.rs`); cross-encoder comparison with C still missing
 4. **Extended scaling factors** — C tests 15 scales; we test 4
