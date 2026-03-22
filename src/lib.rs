@@ -16,8 +16,11 @@ pub use api::high_level::{
     compress_progressive, compress_with_metadata, decompress, decompress_cropped,
     decompress_lenient, decompress_to,
 };
+pub use api::image_io::{load_image, load_image_from_bytes, save_bmp, save_ppm, LoadedImage};
 pub use api::raw_data::{compress_raw, decompress_raw, RawImage};
 pub use api::scanline::{ScanlineDecoder, ScanlineEncoder};
+/// Streaming I/O functions for reading/writing JPEG via `std::io` traits and file paths.
+pub use api::stream;
 pub use common::bufsize::{
     jpeg_buf_size, yuv_buf_size, yuv_plane_height, yuv_plane_size, yuv_plane_width,
 };
