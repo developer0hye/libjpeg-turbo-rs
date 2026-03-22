@@ -13,6 +13,7 @@ pub use api::high_level::{
     compress_with_metadata, decompress, decompress_cropped, decompress_lenient, decompress_to,
 };
 pub use common::error::{DecodeWarning, JpegError, Result};
+pub use common::sample::Sample;
 pub use common::types::*;
 pub use decode::pipeline::Image;
 pub use transform::TransformOp;
