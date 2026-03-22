@@ -823,16 +823,44 @@ fn compress_cmyk(pixels: &[u8], width: usize, height: usize, quality: u8) -> Res
 ///
 /// Uses predictor 1 (left) and no point transform.
 /// Produces exact pixel-identical output when decoded.
+/// Currently supports grayscale only; use `compress_lossless_extended` for color.
 pub fn compress_lossless(
     pixels: &[u8],
     width: usize,
     height: usize,
     pixel_format: PixelFormat,
 ) -> Result<Vec<u8>> {
-    if pixel_format != PixelFormat::Grayscale {
-        return Err(JpegError::Unsupported(
-            "lossless encoding only supports grayscale".to_string(),
-        ));
+    compress_lossless_extended(pixels, width, height, pixel_format, 1, 0)
+}
+
+/// Compress as lossless JPEG (SOF3) with configurable predictor and point transform.
+///
+/// # Arguments
+/// * `predictor` - Predictor selection value (1-7), as defined in ITU-T T.81 Table H.1
+/// * `point_transform` - Point transform value (0-15), right-shifts pixel data before encoding
+///
+/// Supports grayscale (1-component) and RGB (3-component interleaved).
+/// For RGB, the encoder converts to YCbCr before encoding (JFIF convention).
+pub fn compress_lossless_extended(
+    pixels: &[u8],
+    width: usize,
+    height: usize,
+    pixel_format: PixelFormat,
+    predictor: u8,
+    point_transform: u8,
+) -> Result<Vec<u8>> {
+    if predictor < 1 || predictor > 7 {
+        return Err(JpegError::Unsupported(format!(
+            "lossless predictor must be 1-7, got {}",
+            predictor
+        )));
+    }
+
+    if point_transform > 15 {
+        return Err(JpegError::Unsupported(format!(
+            "point transform must be 0-15, got {}",
+            point_transform
+        )));
     }
 
     if width == 0 || height == 0 {
@@ -841,59 +869,110 @@ pub fn compress_lossless(
         ));
     }
 
-    if pixels.len() < width * height {
+    let bpp: usize = pixel_format.bytes_per_pixel();
+    let expected_size: usize = width * height * bpp;
+    if pixels.len() < expected_size {
         return Err(JpegError::BufferTooSmall {
-            need: width * height,
+            need: expected_size,
             got: pixels.len(),
         });
     }
 
-    let precision: u8 = 8;
-    let predictor: u8 = 1; // left
-    let point_transform: u8 = 0;
-    let initial_pred: i32 = 1 << (precision as i32 - point_transform as i32 - 1); // 128
-    let mask: i32 = (1i32 << precision) - 1;
+    match pixel_format {
+        PixelFormat::Grayscale => {
+            compress_lossless_grayscale(pixels, width, height, predictor, point_transform)
+        }
+        PixelFormat::Rgb => {
+            compress_lossless_rgb(pixels, width, height, predictor, point_transform)
+        }
+        _ => Err(JpegError::Unsupported(format!(
+            "lossless encoding does not support {:?}, use Grayscale or Rgb",
+            pixel_format
+        ))),
+    }
+}
 
-    // Compute differences using predictor 1 (left)
-    // Then Huffman-encode each difference using DC coding (category + extra bits)
-    let mut bit_writer = BitWriter::new(width * height);
-    let dc_table = build_huff_table(&tables::DC_LUMINANCE_BITS, &tables::DC_LUMINANCE_VALUES);
+/// Compute the lossless difference for a single sample.
+///
+/// Uses the `predict` function from the decoder's lossless module to
+/// compute the predicted value, then returns the signed difference.
+fn lossless_diff(
+    pixel: i32,
+    x: usize,
+    y: usize,
+    plane: &[u8],
+    width: usize,
+    predictor: u8,
+    point_transform: u8,
+    precision: u8,
+) -> i16 {
+    let mask: i32 = (1i32 << precision) - 1;
+    let initial_pred: i32 = 1 << (precision as i32 - point_transform as i32 - 1);
+
+    // Apply point transform: shift right before encoding
+    let sample: i32 = pixel >> point_transform as i32;
+
+    let prediction: i32 = if y == 0 && x == 0 {
+        initial_pred
+    } else if y == 0 {
+        // First row: predictor is always "left" (ra) regardless of psv
+        (plane[y * width + x - 1] as i32) >> point_transform as i32
+    } else if x == 0 {
+        // First column: predictor is always "above" (rb) regardless of psv
+        (plane[(y - 1) * width + x] as i32) >> point_transform as i32
+    } else {
+        let ra: i32 = (plane[y * width + x - 1] as i32) >> point_transform as i32;
+        let rb: i32 = (plane[(y - 1) * width + x] as i32) >> point_transform as i32;
+        let rc: i32 = (plane[(y - 1) * width + x - 1] as i32) >> point_transform as i32;
+        crate::decode::lossless::predict(predictor, ra, rb, rc)
+    };
+
+    let diff: i32 = (sample - prediction) & mask;
+    // Convert to signed: values >= 2^(p-1) represent negative differences
+    if diff >= (1 << (precision - 1)) {
+        (diff - (1 << precision)) as i16
+    } else {
+        diff as i16
+    }
+}
+
+/// Encode a single-component (grayscale) lossless JPEG.
+fn compress_lossless_grayscale(
+    pixels: &[u8],
+    width: usize,
+    height: usize,
+    predictor: u8,
+    point_transform: u8,
+) -> Result<Vec<u8>> {
+    let precision: u8 = 8;
+
+    let mut bit_writer: BitWriter = BitWriter::new(width * height);
+    let dc_table: HuffTable =
+        build_huff_table(&tables::DC_LUMINANCE_BITS, &tables::DC_LUMINANCE_VALUES);
 
     for y in 0..height {
         for x in 0..width {
-            let pixel = pixels[y * width + x] as i32;
-            let prediction = if y == 0 && x == 0 {
-                initial_pred
-            } else if y == 0 {
-                pixels[y * width + x - 1] as i32
-            } else if x == 0 {
-                pixels[(y - 1) * width + x] as i32
-            } else {
-                // predictor 1 = left
-                pixels[y * width + x - 1] as i32
-            };
-
-            let diff = (pixel - prediction) & mask;
-            // Convert to signed: if >= 2^(p-1), it's negative
-            let signed_diff = if diff >= (1 << (precision - 1)) {
-                diff - (1 << precision)
-            } else {
-                diff
-            };
-
-            // Encode as DC coefficient (category + extra bits)
-            HuffmanEncoder::encode_dc_only(&mut bit_writer, signed_diff as i16, &dc_table);
+            let pixel: i32 = pixels[y * width + x] as i32;
+            let signed_diff: i16 = lossless_diff(
+                pixel,
+                x,
+                y,
+                pixels,
+                width,
+                predictor,
+                point_transform,
+                precision,
+            );
+            HuffmanEncoder::encode_dc_only(&mut bit_writer, signed_diff, &dc_table);
         }
     }
 
     bit_writer.flush();
 
-    // Assemble: SOI, DHT (DC table), SOF3, SOS (predictor=1, pt=0), entropy data, EOI
-    let mut output = Vec::with_capacity(bit_writer.data().len() + 256);
+    let mut output: Vec<u8> = Vec::with_capacity(bit_writer.data().len() + 256);
 
     marker_writer::write_soi(&mut output);
 
-    // DC Huffman table
     marker_writer::write_dht(
         &mut output,
         0,
@@ -902,8 +981,7 @@ pub fn compress_lossless(
         &tables::DC_LUMINANCE_VALUES,
     );
 
-    // SOF3 frame header
-    let components = vec![(1, 1, 1, 0)]; // id=1, h=1, v=1, qt=0
+    let components: Vec<(u8, u8, u8, u8)> = vec![(1, 1, 1, 0)];
     marker_writer::write_sof3(
         &mut output,
         width as u16,
@@ -912,11 +990,124 @@ pub fn compress_lossless(
         &components,
     );
 
-    // SOS lossless scan header
-    let scan_components = vec![(1, 0)]; // component 1, DC table 0
+    let scan_components: Vec<(u8, u8)> = vec![(1, 0)];
     marker_writer::write_sos_lossless(&mut output, &scan_components, predictor, point_transform);
 
-    // Entropy data
+    output.extend_from_slice(bit_writer.data());
+
+    marker_writer::write_eoi(&mut output);
+
+    Ok(output)
+}
+
+/// Encode a 3-component (RGB via YCbCr) interleaved lossless JPEG.
+///
+/// Converts RGB to YCbCr (JFIF convention), then encodes each component
+/// interleaved: for each pixel, encode Y diff, Cb diff, Cr diff.
+fn compress_lossless_rgb(
+    pixels: &[u8],
+    width: usize,
+    height: usize,
+    predictor: u8,
+    point_transform: u8,
+) -> Result<Vec<u8>> {
+    let precision: u8 = 8;
+    let num_pixels: usize = width * height;
+
+    // Convert RGB to YCbCr planes
+    let mut y_plane: Vec<u8> = vec![0u8; num_pixels];
+    let mut cb_plane: Vec<u8> = vec![0u8; num_pixels];
+    let mut cr_plane: Vec<u8> = vec![0u8; num_pixels];
+
+    for row in 0..height {
+        let row_start: usize = row * width * 3;
+        let plane_start: usize = row * width;
+        color::rgb_to_ycbcr_row(
+            &pixels[row_start..row_start + width * 3],
+            &mut y_plane[plane_start..plane_start + width],
+            &mut cb_plane[plane_start..plane_start + width],
+            &mut cr_plane[plane_start..plane_start + width],
+            width,
+        );
+    }
+
+    let planes: [&[u8]; 3] = [&y_plane, &cb_plane, &cr_plane];
+
+    // Use luminance DC table for Y (table 0), chrominance DC table for Cb/Cr (table 1)
+    let dc_table_luma: HuffTable =
+        build_huff_table(&tables::DC_LUMINANCE_BITS, &tables::DC_LUMINANCE_VALUES);
+    let dc_table_chroma: HuffTable =
+        build_huff_table(&tables::DC_CHROMINANCE_BITS, &tables::DC_CHROMINANCE_VALUES);
+    let dc_tables: [&HuffTable; 3] = [&dc_table_luma, &dc_table_chroma, &dc_table_chroma];
+
+    let mut bit_writer: BitWriter = BitWriter::new(num_pixels * 3);
+
+    // Interleaved encoding: for each pixel, encode diff for Y, Cb, Cr
+    for y in 0..height {
+        for x in 0..width {
+            for c in 0..3 {
+                let pixel: i32 = planes[c][y * width + x] as i32;
+                let signed_diff: i16 = lossless_diff(
+                    pixel,
+                    x,
+                    y,
+                    planes[c],
+                    width,
+                    predictor,
+                    point_transform,
+                    precision,
+                );
+                HuffmanEncoder::encode_dc_only(&mut bit_writer, signed_diff, dc_tables[c]);
+            }
+        }
+    }
+
+    bit_writer.flush();
+
+    let mut output: Vec<u8> = Vec::with_capacity(bit_writer.data().len() + 512);
+
+    marker_writer::write_soi(&mut output);
+
+    // DC Huffman table 0 (luminance) for Y
+    marker_writer::write_dht(
+        &mut output,
+        0,
+        0,
+        &tables::DC_LUMINANCE_BITS,
+        &tables::DC_LUMINANCE_VALUES,
+    );
+
+    // DC Huffman table 1 (chrominance) for Cb, Cr
+    marker_writer::write_dht(
+        &mut output,
+        0,
+        1,
+        &tables::DC_CHROMINANCE_BITS,
+        &tables::DC_CHROMINANCE_VALUES,
+    );
+
+    // SOF3 with 3 components: Y(id=1), Cb(id=2), Cr(id=3), all 1x1, qt=0
+    let components: Vec<(u8, u8, u8, u8)> = vec![
+        (1, 1, 1, 0), // Y: id=1, h=1, v=1, qt=0
+        (2, 1, 1, 0), // Cb: id=2, h=1, v=1, qt=0
+        (3, 1, 1, 0), // Cr: id=3, h=1, v=1, qt=0
+    ];
+    marker_writer::write_sof3(
+        &mut output,
+        width as u16,
+        height as u16,
+        precision,
+        &components,
+    );
+
+    // SOS with 3 components: Y uses DC table 0, Cb/Cr use DC table 1
+    let scan_components: Vec<(u8, u8)> = vec![
+        (1, 0), // Y -> DC table 0
+        (2, 1), // Cb -> DC table 1
+        (3, 1), // Cr -> DC table 1
+    ];
+    marker_writer::write_sos_lossless(&mut output, &scan_components, predictor, point_transform);
+
     output.extend_from_slice(bit_writer.data());
 
     marker_writer::write_eoi(&mut output);
