@@ -4,6 +4,7 @@ pub mod error;
 pub mod exif;
 pub mod huffman_table;
 pub mod icc;
+pub mod jfif;
 pub mod quant_table;
 pub mod sample;
 pub mod traits;

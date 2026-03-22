@@ -43,6 +43,60 @@ pub struct JpegCoefficients {
     pub quant_tables: Vec<[u16; 64]>,
 }
 
+/// Per-component info extracted for re-encoding.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EncoderComponentInfo {
+    /// Horizontal sampling factor.
+    pub h_sampling: u8,
+    /// Vertical sampling factor.
+    pub v_sampling: u8,
+    /// Quantization table index.
+    pub quant_table_index: u8,
+}
+
+/// Critical JPEG parameters extracted from decoded coefficients for re-encoding.
+///
+/// Matches the subset of `jpeg_compress_struct` fields that
+/// `jpeg_copy_critical_parameters()` copies between a decompressor and compressor.
+#[derive(Debug, Clone)]
+pub struct EncoderConfig {
+    /// Image width in pixels.
+    pub width: usize,
+    /// Image height in pixels.
+    pub height: usize,
+    /// Number of components.
+    pub num_components: usize,
+    /// Per-component sampling and quantization info.
+    pub component_info: Vec<EncoderComponentInfo>,
+    /// Quantization tables (in zigzag order).
+    pub quant_tables: Vec<[u16; 64]>,
+}
+
+/// Copy critical JPEG parameters from decoded coefficients for re-encoding.
+///
+/// Extracts dimensions, sampling factors, and quantization tables from
+/// `JpegCoefficients` into an `EncoderConfig` suitable for driving a new
+/// encoding pass. Matches libjpeg-turbo's `jpeg_copy_critical_parameters()`.
+pub fn copy_critical_parameters(coeffs: &JpegCoefficients) -> EncoderConfig {
+    let component_info: Vec<EncoderComponentInfo> = coeffs
+        .components
+        .iter()
+        .map(|comp| EncoderComponentInfo {
+            h_sampling: comp.h_sampling,
+            v_sampling: comp.v_sampling,
+            quant_table_index: comp.quant_table_index,
+        })
+        .collect();
+
+    EncoderConfig {
+        width: coeffs.width as usize,
+        height: coeffs.height as usize,
+        num_components: coeffs.components.len(),
+        component_info,
+        quant_tables: coeffs.quant_tables.clone(),
+    }
+}
+
 /// Read DCT coefficients from a JPEG byte stream.
 ///
 /// Decodes entropy data to recover quantized DCT coefficients

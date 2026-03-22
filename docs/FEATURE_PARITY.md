@@ -168,7 +168,7 @@
 - [x] `jpeg_write_raw_data()` — Write raw downsampled data (`compress_raw()`)
 - [ ] `jpeg12_write_scanlines()` — 12-bit scanlines
 - [ ] `jpeg16_write_scanlines()` — 16-bit scanlines
-- [ ] `jpeg_calc_jpeg_dimensions()` — Compute output dimensions
+- [x] `jpeg_calc_jpeg_dimensions()` — Compute output dimensions (`calc_jpeg_dimensions()`)
 - [x] `next_scanline` tracking (`ScanlineEncoder::next_scanline()`)
 
 ---
@@ -232,7 +232,7 @@
 - [x] `jpeg_read_raw_data()` — Read raw downsampled data (`decompress_raw()`)
 - [ ] `jpeg12_read_scanlines()` / `jpeg12_skip_scanlines()` / `jpeg12_crop_scanline()`
 - [ ] `jpeg16_read_scanlines()`
-- [ ] `jpeg_calc_output_dimensions()` / `jpeg_core_output_dimensions()`
+- [x] `jpeg_calc_output_dimensions()` / `jpeg_core_output_dimensions()` (`calc_output_dimensions()`, `calc_jpeg_dimensions()`)
 - [x] `output_scanline` tracking (`ScanlineDecoder::output_scanline()`)
 
 ### Color Quantization (8-bit indexed output)
@@ -256,7 +256,7 @@
 - [x] Arbitrary APP markers — Read (`Decoder::save_markers()` + `Image.markers()`)
 - [x] Arbitrary markers — Write (`marker_writer::write_marker()`, `Encoder::saved_marker()`)
 - [x] DPI/density — Read (`Image.density`) / Write (`DensityInfo`)
-- [ ] JFIF thumbnail extraction
+- [x] JFIF thumbnail extraction (`extract_jfif_thumbnail()`)
 - [x] Marker preservation across transform/re-encode (`TransformOptions.copy_markers`)
 
 ---
@@ -288,9 +288,9 @@
 - [x] `read_coefficients()` — Extract quantized DCT blocks
 - [x] `write_coefficients()` — Encode from coefficient blocks
 - [x] `transform_jpeg()` — Apply spatial transform
-- [ ] `jpeg_copy_critical_parameters()` — Copy tables between compress/decompress
+- [x] `jpeg_copy_critical_parameters()` — Copy tables between compress/decompress (`copy_critical_parameters()`)
 - [x] `tjtransform.customFilter` — User callback for coefficient inspection/modification
-- [ ] `tj3TransformBufSize()` — Output buffer size estimation
+- [x] `tj3TransformBufSize()` — Output buffer size estimation (`transform_buf_size()`)
 
 ---
 
@@ -362,9 +362,9 @@
 - [ ] `TJPARAM_NOREALLOC` — Pre-allocated output buffer
 
 ### Buffer Size Calculation
-- [ ] `tj3JPEGBufSize()` — Worst-case JPEG output size
-- [ ] `tj3YUVBufSize()` — YUV buffer size
-- [ ] `tj3TransformBufSize()` — Transform output buffer size
+- [x] `tj3JPEGBufSize()` — Worst-case JPEG output size (`jpeg_buf_size()`)
+- [x] `tj3YUVBufSize()` — YUV buffer size (`yuv_buf_size()`)
+- [x] `tj3TransformBufSize()` — Transform output buffer size (`transform_buf_size()`)
 
 ### Image File I/O (BMP/PPM)
 - [x] `tj3LoadImage8()` / `tj3LoadImage12()` / `tj3LoadImage16()` — 8-bit implemented (`load_image` / `load_image_from_bytes`)
@@ -429,16 +429,16 @@
 | Pixel formats | 13 | 13 | 100% |
 | Chroma subsampling | 8 | 8 | 100% |
 | Color spaces | 6 | 6 | 100% |
-| Compress params | ~45 | ~65 | ~69% |
-| Decompress params | ~30 | ~55 | ~55% |
-| Metadata | 10 | 10 | 100% |
+| Compress params | ~46 | ~65 | ~71% |
+| Decompress params | ~31 | ~55 | ~56% |
+| Metadata | 11 | 11 | 100% |
 | Transform ops | 8 | 8 | 100% |
 | Transform options | 9 | 9 | 100% |
-| Transform misc | 4 | 6 | 67% |
+| Transform misc | 6 | 6 | 100% |
 | YUV/Planar API | 12 | 12 | 100% |
 | SIMD (aarch64) | 10 | 12 | 83% |
 | SIMD (x86_64) | 6 | 6 | 100% |
-| Memory & I/O | 8 | ~20 | ~40% |
+| Memory & I/O | 11 | ~20 | ~55% |
 | Error handling | 5 | ~14 | ~36% |
 | Progress | 4 | 4 | 100% |
 | TJ3 Handle API | 6 | 6 | 100% |
