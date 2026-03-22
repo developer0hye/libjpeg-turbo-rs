@@ -16,6 +16,7 @@ pub struct Encoder<'a> {
     lossless: bool,
     icc_profile: Option<&'a [u8]>,
     exif_data: Option<&'a [u8]>,
+    comment: Option<&'a str>,
 }
 
 impl<'a> Encoder<'a> {
@@ -34,6 +35,7 @@ impl<'a> Encoder<'a> {
             lossless: false,
             icc_profile: None,
             exif_data: None,
+            comment: None,
         }
     }
 
@@ -85,6 +87,12 @@ impl<'a> Encoder<'a> {
         self
     }
 
+    /// Set a COM (comment) marker in the JPEG output.
+    pub fn comment(mut self, text: &'a str) -> Self {
+        self.comment = Some(text);
+        self
+    }
+
     /// Encode and return the JPEG byte stream.
     pub fn encode(&self) -> Result<Vec<u8>> {
         let base = if self.lossless {
@@ -127,10 +135,16 @@ impl<'a> Encoder<'a> {
             )?
         };
 
-        if self.icc_profile.is_some() || self.exif_data.is_some() {
-            encoder::inject_metadata(&base, self.icc_profile, self.exif_data)
+        let with_meta = if self.icc_profile.is_some() || self.exif_data.is_some() {
+            encoder::inject_metadata(&base, self.icc_profile, self.exif_data)?
         } else {
-            Ok(base)
+            base
+        };
+
+        if let Some(text) = self.comment {
+            Ok(encoder::inject_comment(&with_meta, text))
+        } else {
+            Ok(with_meta)
         }
     }
 }

@@ -189,6 +189,38 @@ impl Default for ScalingFactor {
     }
 }
 
+/// Pixel density information from JFIF marker.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DensityInfo {
+    pub unit: DensityUnit,
+    pub x: u16,
+    pub y: u16,
+}
+
+impl Default for DensityInfo {
+    fn default() -> Self {
+        Self {
+            unit: DensityUnit::Dpi,
+            x: 72,
+            y: 72,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DensityUnit {
+    Unknown,
+    Dpi,
+    Dpcm,
+}
+
+/// A saved JPEG marker (APP or COM).
+#[derive(Debug, Clone)]
+pub struct SavedMarker {
+    pub code: u8,
+    pub data: Vec<u8>,
+}
+
 /// One chunk of an ICC profile stored in an APP2 marker.
 ///
 /// ICC profiles larger than 65519 bytes are split across multiple APP2 markers,

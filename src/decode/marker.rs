@@ -61,6 +61,10 @@ pub struct JpegMetadata {
     pub icc_chunks: Vec<IccChunk>,
     /// Raw EXIF TIFF data from the first APP1 marker (after "Exif\0\0" header).
     pub exif_data: Option<Vec<u8>>,
+    /// COM marker text, if present.
+    pub comment: Option<String>,
+    /// Pixel density from JFIF header.
+    pub density: DensityInfo,
     /// True if using arithmetic entropy coding (SOF9/SOF10).
     pub is_arithmetic: bool,
     /// DAC conditioning: DC parameters (L, U) per table.
@@ -98,6 +102,8 @@ impl<'a> MarkerReader<'a> {
         let mut is_arithmetic = false;
         let mut arith_dc_params: [(u8, u8); 4] = [(0, 1); 4];
         let mut arith_ac_params: [u8; 4] = [5; 4];
+        let mut comment: Option<String> = None;
+        let mut density: DensityInfo = DensityInfo::default();
 
         loop {
             let marker = self.read_marker()?;
@@ -168,8 +174,16 @@ impl<'a> MarkerReader<'a> {
                 0xEE => {
                     self.read_app14(&mut saw_adobe_marker, &mut adobe_transform)?;
                 }
-                // Skip other APPn and COM markers
-                m if (0xE0..=0xEF).contains(&m) || m == COM => {
+                // APP0 (JFIF) — parse for density info
+                0xE0 => {
+                    self.read_app0(&mut density)?;
+                }
+                // COM marker — parse comment text
+                COM => {
+                    self.read_com(&mut comment)?;
+                }
+                // Skip other APPn markers
+                m if (0xE3..=0xEF).contains(&m) => {
                     self.skip_marker_segment()?;
                 }
                 // Skip other markers with length
@@ -203,6 +217,8 @@ impl<'a> MarkerReader<'a> {
             adobe_transform,
             icc_chunks,
             exif_data,
+            comment,
+            density,
             is_arithmetic,
             arith_dc_params,
             arith_ac_params,
@@ -291,6 +307,52 @@ impl<'a> MarkerReader<'a> {
             return Err(JpegError::UnexpectedEof);
         }
         self.pos += skip;
+        Ok(())
+    }
+
+    /// Parse APP0 (JFIF) marker to extract pixel density info.
+    fn read_app0(&mut self, density: &mut DensityInfo) -> Result<()> {
+        let length = self.read_u16_be()? as usize;
+        if length < 2 {
+            return Err(JpegError::CorruptData("APP0 segment length < 2".into()));
+        }
+        let end = self.pos + length - 2;
+
+        // JFIF header: "JFIF\0" (5 bytes) + version (2) + units (1) + density (4) = 12 bytes min payload
+        if length >= 16
+            && self.pos + 12 <= self.data.len()
+            && &self.data[self.pos..self.pos + 5] == b"JFIF\0"
+        {
+            let unit_byte = self.data[self.pos + 7];
+            let x_density = u16::from_be_bytes([self.data[self.pos + 8], self.data[self.pos + 9]]);
+            let y_density =
+                u16::from_be_bytes([self.data[self.pos + 10], self.data[self.pos + 11]]);
+            density.unit = match unit_byte {
+                1 => DensityUnit::Dpi,
+                2 => DensityUnit::Dpcm,
+                _ => DensityUnit::Unknown,
+            };
+            density.x = x_density;
+            density.y = y_density;
+        }
+
+        self.pos = end;
+        Ok(())
+    }
+
+    /// Parse COM marker to extract comment text.
+    fn read_com(&mut self, comment: &mut Option<String>) -> Result<()> {
+        let length = self.read_u16_be()? as usize;
+        if length < 2 {
+            return Err(JpegError::CorruptData("COM segment length < 2".into()));
+        }
+        let text_len = length - 2;
+        if self.pos + text_len > self.data.len() {
+            return Err(JpegError::UnexpectedEof);
+        }
+        let data = &self.data[self.pos..self.pos + text_len];
+        self.pos += text_len;
+        *comment = Some(String::from_utf8_lossy(data).into_owned());
         Ok(())
     }
 
