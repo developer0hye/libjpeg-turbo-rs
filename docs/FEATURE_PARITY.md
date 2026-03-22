@@ -297,26 +297,26 @@
 ## 10. YUV / Planar API
 
 ### RGB → YUV (color conversion only, no JPEG)
-- [ ] `tj3EncodeYUV8()` — RGB → packed YUV buffer
-- [ ] `tj3EncodeYUVPlanes8()` — RGB → separate Y/Cb/Cr plane buffers
+- [x] `tj3EncodeYUV8()` — RGB → packed YUV buffer (`yuv::encode_yuv()`)
+- [x] `tj3EncodeYUVPlanes8()` — RGB → separate Y/Cb/Cr plane buffers (`yuv::encode_yuv_planes()`)
 
 ### YUV → JPEG (compress from YUV)
-- [ ] `tj3CompressFromYUV8()` — Packed YUV → JPEG
-- [ ] `tj3CompressFromYUVPlanes8()` — Planar YUV → JPEG
+- [x] `tj3CompressFromYUV8()` — Packed YUV → JPEG (`yuv::compress_from_yuv()`)
+- [x] `tj3CompressFromYUVPlanes8()` — Planar YUV → JPEG (`yuv::compress_from_yuv_planes()`)
 
 ### JPEG → YUV (decompress to YUV)
-- [ ] `tj3DecompressToYUV8()` — JPEG → packed YUV buffer
-- [ ] `tj3DecompressToYUVPlanes8()` — JPEG → separate Y/Cb/Cr plane buffers
+- [x] `tj3DecompressToYUV8()` — JPEG → packed YUV buffer (`yuv::decompress_to_yuv()`)
+- [x] `tj3DecompressToYUVPlanes8()` — JPEG → separate Y/Cb/Cr plane buffers (`yuv::decompress_to_yuv_planes()`)
 
 ### YUV → RGB (color conversion only, no JPEG)
-- [ ] `tj3DecodeYUV8()` — Packed YUV → RGB
-- [ ] `tj3DecodeYUVPlanes8()` — Planar YUV → RGB
+- [x] `tj3DecodeYUV8()` — Packed YUV → RGB (`yuv::decode_yuv()`)
+- [x] `tj3DecodeYUVPlanes8()` — Planar YUV → RGB (`yuv::decode_yuv_planes()`)
 
 ### Buffer Size Helpers
-- [ ] `tj3YUVBufSize()` — Total packed YUV buffer size
-- [ ] `tj3YUVPlaneSize()` — Single plane buffer size
-- [ ] `tj3YUVPlaneWidth()` — Plane width in samples
-- [ ] `tj3YUVPlaneHeight()` — Plane height in rows
+- [x] `tj3YUVBufSize()` — Total packed YUV buffer size (`yuv_buf_size()`)
+- [x] `tj3YUVPlaneSize()` — Single plane buffer size (`yuv_plane_size()`)
+- [x] `tj3YUVPlaneWidth()` — Plane width in samples (`yuv_plane_width()`)
+- [x] `tj3YUVPlaneHeight()` — Plane height in rows (`yuv_plane_height()`)
 
 ---
 
@@ -435,7 +435,7 @@
 | Transform ops | 8 | 8 | 100% |
 | Transform options | 9 | 9 | 100% |
 | Transform misc | 4 | 6 | 67% |
-| YUV/Planar API | 0 | 12 | 0% |
+| YUV/Planar API | 12 | 12 | 100% |
 | SIMD (aarch64) | 7 | 12 | 58% |
 | SIMD (x86_64) | 0 | 6 | 0% |
 | Memory & I/O | 8 | ~20 | ~40% |
@@ -488,9 +488,9 @@
 ### Phase 7 — YUV & I/O
 | # | Feature | Scope |
 |---|---------|-------|
-| 25 | YUV planar encode/decode | All 8 `tj3*YUV*` functions |
-| 26 | Buffer size calculation | `tj3JPEGBufSize`, `tj3YUVBufSize`, `tj3TransformBufSize` |
-| 27 | Custom source/dest managers | Streaming I/O abstraction |
+| 25 | ~~YUV planar encode/decode~~ | ✅ All 8 `tj3*YUV*` + 4 buf size helpers |
+| 26 | ~~Buffer size calculation~~ | ✅ `yuv_buf_size`, `yuv_plane_size/width/height`, `jpeg_buf_size` |
+| 27 | ~~Custom source/dest managers~~ | ✅ `stream::compress_to_writer` / `decompress_from_reader` / file helpers |
 | 28 | File I/O helpers | `tj3LoadImage*` / `tj3SaveImage*` (BMP/PPM) |
 
 ### Phase 8 — SIMD & Performance
