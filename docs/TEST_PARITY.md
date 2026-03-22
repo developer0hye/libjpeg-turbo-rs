@@ -281,7 +281,109 @@
 
 ---
 
-## 9. Features Unique to Our Implementation (Not in C)
+## 9. CMakeLists.txt add_bittest Specific Tests (48 tests)
+
+These are the individual cjpeg/djpeg/jpegtran tests defined via `add_bittest()` macro:
+
+### cjpeg Tests (Encode)
+- [x] `444-islow` — baseline 444 integer DCT — `tjunittest_compat.rs`
+- [x] `422-ifast-opt` — 422 fast DCT + optimized Huffman — `tjunittest_compat.rs`
+- [x] `440-islow` — 440 subsampling — `tjunittest_compat.rs`
+- [x] `420-q100-ifast-prog` — 420 quality=100 fast progressive — `tjunittest_compat.rs`
+- [x] `gray-islow` — grayscale integer DCT — `tjunittest_compat.rs`
+- [x] `420s-islow-opt` — 420 with smoothing + optimized — `niche_options.rs` (smoothing_factor)
+- [ ] `3x2-float-prog` — 3x2 sampling float DCT progressive — non-standard sampling not supported
+- [ ] `3x2-ifast-prog` — 3x2 sampling fast DCT progressive — non-standard sampling not supported
+- [x] `420-islow-ari` — 420 arithmetic encoding — `arithmetic.rs`
+- [x] `444-islow-progari` — 444 progressive + arithmetic — `sof10_encode.rs`
+- [x] `rgb-islow` with ICC profile — `metadata_write.rs`
+- [x] `lossless` (16-bit) — `precision.rs`
+
+### djpeg Tests (Decode)
+- [x] `rgb-islow` — baseline decode — `conformance.rs`
+- [x] `422-ifast` — fast DCT decode — `decode_toggles.rs`
+- [x] `440-islow` — 440 decode — `conformance.rs`
+- [ ] `422m-ifast` — merged upsampling 422 — not implemented
+- [ ] `420m-q100-ifast-prog` — merged upsampling 420 progressive — not implemented
+- [x] `gray-islow` — grayscale decode — `conformance.rs`
+- [x] `gray-islow-rgb` — grayscale to RGB output — `decode_toggles.rs`
+- [ ] `rgb-islow-565` — RGB565 decode (no dither) — decode only, no validation
+- [ ] `rgb-islow-565D` — RGB565 decode (dithered) — no dithered RGB565
+- [ ] `gray-islow-565` — grayscale to RGB565 — not tested
+- [ ] `gray-islow-565D` — grayscale to dithered RGB565 — not tested
+- [ ] `422m-ifast-565` — merged 422 RGB565 — not implemented
+- [ ] `422m-ifast-565D` — merged 422 dithered RGB565 — not implemented
+- [ ] `420m-islow-565` — merged 420 RGB565 — not implemented
+- [ ] `420m-islow-565D` — merged 420 dithered RGB565 — not implemented
+- [x] `420-islow-256` — 256-color quantized decode — `quantize.rs`
+- [x] `420-islow-skip15_31` — scanline skip — `scanline_api.rs`
+- [x] `420-islow-ari-skip16_139` — arithmetic + skip — partial
+- [x] `420-islow-prog-crop62x62_71_71` — progressive + crop — `crop_skip.rs`
+- [x] `444-islow-ari-crop37x37_0_0` — arithmetic + crop — `crop_skip.rs`
+- [x] `420-islow-ari-crop53x53_4_4` — arithmetic + crop — partial
+- [x] `444-islow-skip1_6` — small skip range — `scanline_api.rs`
+- [ ] `420m-islow-{scale}` — merged upsampling with 15 scales — not implemented
+- [x] `rgb-islow-icc-cmp` — ICC profile extraction — `metadata_write.rs`
+
+### jpegtran Tests (Transform)
+- [x] `icc` — ICC copy through transform — `marker_preservation.rs`
+- [x] `crop` — lossless crop — `transform_options.rs`
+- [x] `420-islow-ari` (as transform) — arithmetic recode — `tjunittest_transform.rs`
+- [ ] `420m-ifast-ari` — merged upsampling arithmetic — not implemented
+
+### 16-bit Specific (cjpeg16/djpeg16)
+- [x] `lossless` — 16-bit lossless encode/decode — `precision.rs`
+
+---
+
+## 10. Specific C Test Features Not Covered
+
+### Non-Standard Subsampling (3x2)
+- [ ] 3x2 horizontal × 2 vertical sampling factor — C tests `3x2-float-prog` and `3x2-ifast-prog`
+- [ ] Arbitrary H×V factor combinations beyond standard modes
+
+### RGB565 Output (Dithered/Undithered)
+- [ ] RGB565 no-dither decode — `PixelFormat::Rgb565` exists but limited testing
+- [ ] RGB565 dithered decode — dithering in RGB565 not implemented
+- [ ] RGB565 with grayscale input
+- [ ] RGB565 with merged upsampling
+
+### Merged Upsampling (420m, 422m)
+- [ ] 420m decode (merged 2x2 upsample) — not implemented
+- [ ] 422m decode (merged 2x1 upsample) — not implemented
+- [ ] Merged upsampling + fast DCT
+- [ ] Merged upsampling + scaled decode
+- [ ] Merged upsampling + RGB565
+
+### Smoothing Factor in Encode
+- [x] `420s-islow-opt` (smooth=1) — `niche_options.rs`
+- [ ] Smoothing factor validation via MD5/pixel comparison with C reference
+
+### Example Programs
+- [ ] `example-8bit-compress` — C example compile/run test
+- [ ] `example-8bit-decompress` — C example compile/run test
+- [ ] `example-12bit-compress/decompress` — 12-bit example test
+
+### strtest (String Utilities)
+- [ ] Internal string function tests — C-specific, not applicable to Rust
+
+### bmpsizetest (BMP Size Calculations)
+- [x] BMP dimension calculations — `image_io.rs`
+- [ ] In-memory BMP I/O via fmemopen — Rust uses Vec directly
+
+### Floating Point Variance Handling
+- [ ] Different expected hashes per FPU (SSE, fp-contract, 387, MSVC)
+- [ ] Platform-specific tolerance adjustment
+- [ ] Compiler-specific test expectations
+
+### Java API Tests
+- [ ] TJUnitTest-bi (Java BufferedImage tests) — not applicable (Rust, no Java)
+- [ ] TJUnitTest-bi-yuv — not applicable
+- [ ] TJUnitTest-bi-lossless — not applicable
+
+---
+
+## 11. Features Unique to Our Implementation (Not in C)
 
 - [x] Rust-specific: `Result<T, E>` error handling throughout
 - [x] Builder pattern for Encoder/Decoder configuration
@@ -291,6 +393,9 @@
 - [x] TjHandle (Rust port of C TJ3 handle pattern)
 - [x] Thread safety verification (Send/Sync)
 - [x] Property-based fuzzing with `arbitrary` crate
+- [x] Concurrent encode/decode testing — `concurrency.rs`
+- [x] Malformed JPEG robustness (37 tests) — `malformed_jpeg.rs`
+- [x] Extreme dimension testing (50 tests) — `extreme_dimensions.rs`
 
 ---
 
@@ -305,6 +410,9 @@
 | tjdecomptest matrix | 7 | 11 | 64% |
 | tjtrantest matrix | 8 | 10 | 80% |
 | croptest | 1 | 5 | 20% |
+| CMakeLists bittest (cjpeg) | 10 | 12 | 83% |
+| CMakeLists bittest (djpeg) | 11 | 22 | 50% |
+| CMakeLists bittest (jpegtran) | 3 | 4 | 75% |
 | Precision coverage | 3 | 5 | 60% |
 | Subsampling coverage | 7 | 8 | 88% |
 | Scaling factors | 4 | 16 | 25% |
@@ -313,11 +421,19 @@
 | Progressive | 7 | 8 | 88% |
 | YUV operations | 5 | 7 | 71% |
 | Fuzzing | 7 | 8 | 88% |
+| RGB565 specific | 0 | 6 | 0% |
+| Merged upsampling | 0 | 5 | 0% |
+| Non-standard sampling | 0 | 2 | 0% |
+| FP variance handling | 0 | 3 | 0% |
 
 ### Key Gaps (Priority Order)
-1. **MD5/binary comparison** — C validates bitstream identity; we only validate pixels
-2. **Extended scaling factors** — C tests 15 scales; we test 4
-3. **Tiled operations** — C tests 5 tile sizes; we have none
-4. **Per-precision lossless (2-15 bit)** — C tests each; we only test 8/12/16
-5. **Exhaustive crop matrix** — C tests 100+ crop regions; we test ~10
-6. **DCT method in full matrix** — C cross-products DCT × subsampling × quality; we test individually
+1. **Merged upsampling (420m, 422m)** — C tests extensively; we don't implement this optimization
+2. **RGB565 dithered/undithered** — C tests 8 RGB565 combinations; we test 0
+3. **MD5/binary comparison** — C validates bitstream identity; we only validate pixels
+4. **Extended scaling factors** — C tests 15 scales; we test 4
+5. **Non-standard sampling (3x2)** — C tests 3x2 float/ifast; we don't support arbitrary factors
+6. **Tiled operations** — C tests 5 tile sizes; we have none
+7. **Per-precision lossless (2-15 bit)** — C tests each; we only test 8/12/16
+8. **Exhaustive crop matrix** — C tests 100+ crop regions; we test ~10
+9. **DCT method cross-product** — C cross-products DCT × subsampling × quality; we test individually
+10. **FP variance handling** — C has per-platform expected values; we don't
