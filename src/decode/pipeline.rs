@@ -911,8 +911,17 @@ impl<'a> Decoder<'a> {
             .map(|ci| vec![[0i16; 64]; ci.blocks_x * ci.blocks_y])
             .collect();
 
-        // Process each scan
-        for scan_info in &self.metadata.scans {
+        // Process each scan, enforcing scan_limit if set
+        for (scan_idx, scan_info) in self.metadata.scans.iter().enumerate() {
+            if let Some(limit) = self.scan_limit {
+                if scan_idx as u32 >= limit {
+                    return Err(JpegError::Unsupported(format!(
+                        "progressive scan count {} exceeds limit of {}",
+                        scan_idx + 1,
+                        limit
+                    )));
+                }
+            }
             let scan_header = &scan_info.header;
             let is_dc = scan_header.spec_start == 0 && scan_header.spec_end == 0;
             let ah = scan_header.succ_high;
@@ -1072,8 +1081,17 @@ impl<'a> Decoder<'a> {
             .map(|ci| vec![[0i16; 64]; ci.blocks_x * ci.blocks_y])
             .collect();
 
-        // Process each scan
-        for scan_info in &self.metadata.scans {
+        // Process each scan, enforcing scan_limit if set
+        for (scan_idx, scan_info) in self.metadata.scans.iter().enumerate() {
+            if let Some(limit) = self.scan_limit {
+                if scan_idx as u32 >= limit {
+                    return Err(JpegError::Unsupported(format!(
+                        "progressive scan count {} exceeds limit of {}",
+                        scan_idx + 1,
+                        limit
+                    )));
+                }
+            }
             self.decode_progressive_scan(
                 frame,
                 scan_info,
@@ -1857,6 +1875,25 @@ impl<'a> Decoder<'a> {
                 }
             }
         }
+        // When stop_on_warning is enabled, any accumulated warning becomes fatal.
+        if self.stop_on_warning && !image.warnings.is_empty() {
+            let first_warning = &image.warnings[0];
+            let detail = match first_warning {
+                DecodeWarning::HuffmanError {
+                    mcu_x,
+                    mcu_y,
+                    message,
+                } => format!("Huffman error at MCU ({}, {}): {}", mcu_x, mcu_y, message),
+                DecodeWarning::TruncatedData {
+                    decoded_mcus,
+                    total_mcus,
+                } => format!("truncated: decoded {} of {} MCUs", decoded_mcus, total_mcus),
+            };
+            return Err(JpegError::CorruptData(format!(
+                "stop_on_warning: {}",
+                detail
+            )));
+        }
         Ok(image)
     }
 
@@ -1872,6 +1909,27 @@ impl<'a> Decoder<'a> {
                 return Err(JpegError::Unsupported(format!(
                     "image {}x{} ({} pixels) exceeds limit of {}",
                     width, height, total, max
+                )));
+            }
+        }
+
+        // Enforce max_memory: reject if estimated decode memory exceeds limit.
+        // Estimate = output_buffer + component_plane_buffers.
+        if let Some(max_mem) = self.max_memory {
+            let nc = frame.components.len();
+            let out_bpp = self
+                .output_format
+                .unwrap_or(if nc == 1 {
+                    PixelFormat::Grayscale
+                } else {
+                    PixelFormat::Rgb
+                })
+                .bytes_per_pixel();
+            let total_estimated = width * height * out_bpp + width * height * nc;
+            if total_estimated > max_mem {
+                return Err(JpegError::Unsupported(format!(
+                    "estimated decode memory {} bytes exceeds limit of {} bytes",
+                    total_estimated, max_mem
                 )));
             }
         }
