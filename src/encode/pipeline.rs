@@ -1126,9 +1126,9 @@ pub fn compress_lossless_extended(
         )));
     }
 
-    if point_transform > 15 {
+    if point_transform >= 8 {
         return Err(JpegError::Unsupported(format!(
-            "point transform must be 0-15, got {}",
+            "point transform must be 0-7 for 8-bit precision, got {}",
             point_transform
         )));
     }
@@ -1404,9 +1404,9 @@ pub fn compress_lossless_arithmetic(
         )));
     }
 
-    if point_transform > 15 {
+    if point_transform >= 8 {
         return Err(JpegError::Unsupported(format!(
-            "point transform must be 0-15, got {}",
+            "point transform must be 0-7 for 8-bit precision, got {}",
             point_transform
         )));
     }
