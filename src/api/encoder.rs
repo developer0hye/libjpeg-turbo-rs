@@ -1,5 +1,5 @@
 use crate::common::error::Result;
-use crate::common::types::{PixelFormat, ScanScript, Subsampling};
+use crate::common::types::{DctMethod, PixelFormat, ScanScript, Subsampling};
 use crate::encode::pipeline as encoder;
 
 /// Configuration for DRI restart interval encoding.
@@ -46,6 +46,7 @@ pub struct Encoder<'a> {
     custom_quant_tables: [Option<[u16; 64]>; 4],
     custom_huffman_dc: [Option<HuffmanTableDef>; 4],
     custom_huffman_ac: [Option<HuffmanTableDef>; 4],
+    dct_method: DctMethod,
 }
 
 impl<'a> Encoder<'a> {
@@ -73,6 +74,7 @@ impl<'a> Encoder<'a> {
             custom_quant_tables: [None; 4],
             custom_huffman_dc: [None, None, None, None],
             custom_huffman_ac: [None, None, None, None],
+            dct_method: DctMethod::IsLow,
         }
     }
 
@@ -181,6 +183,16 @@ impl<'a> Encoder<'a> {
     /// Set a COM (comment) marker in the JPEG output.
     pub fn comment(mut self, text: &'a str) -> Self {
         self.comment = Some(text);
+        self
+    }
+
+    /// Select the DCT algorithm for encoding (default: `DctMethod::IsLow`).
+    ///
+    /// - `IsLow`: accurate integer DCT (13-bit fixed-point)
+    /// - `IsFast`: fast integer DCT with reduced accuracy (8-bit fixed-point)
+    /// - `Float`: floating-point DCT
+    pub fn dct_method(mut self, method: DctMethod) -> Self {
+        self.dct_method = method;
         self
     }
 
@@ -410,6 +422,7 @@ impl<'a> Encoder<'a> {
                 effective_format,
                 self.quality,
                 self.subsampling,
+                self.dct_method,
             )?
         };
 

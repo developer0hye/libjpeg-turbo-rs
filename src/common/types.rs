@@ -63,6 +63,27 @@ impl Subsampling {
     }
 }
 
+/// DCT/IDCT algorithm selection.
+///
+/// Controls which forward DCT algorithm the encoder uses. All three methods
+/// produce valid JPEG output that any decoder can read. They differ in speed
+/// and accuracy trade-offs, matching libjpeg-turbo's `JDCT_ISLOW`, `JDCT_IFAST`,
+/// and `JDCT_FLOAT`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum DctMethod {
+    /// Accurate integer DCT (default). Uses 13-bit fixed-point arithmetic.
+    /// Matches libjpeg-turbo's `JDCT_ISLOW`.
+    #[default]
+    IsLow,
+    /// Fast integer DCT with reduced accuracy. Uses 8-bit fixed-point arithmetic
+    /// and the AA&N (Arai, Agui, Nakajima) algorithm with only 5 multiplies.
+    /// Matches libjpeg-turbo's `JDCT_IFAST`.
+    IsFast,
+    /// Floating-point DCT. Uses f64 arithmetic and the AA&N algorithm.
+    /// Matches libjpeg-turbo's `JDCT_FLOAT`.
+    Float,
+}
+
 /// Output pixel formats.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PixelFormat {
