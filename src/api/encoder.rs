@@ -1,5 +1,5 @@
 use crate::common::error::Result;
-use crate::common::types::{PixelFormat, Subsampling};
+use crate::common::types::{PixelFormat, ScanScript, Subsampling};
 use crate::encode::pipeline as encoder;
 
 /// Configuration for DRI restart interval encoding.
@@ -42,6 +42,7 @@ pub struct Encoder<'a> {
     icc_profile: Option<&'a [u8]>,
     exif_data: Option<&'a [u8]>,
     comment: Option<&'a str>,
+    scan_script: Option<Vec<ScanScript>>,
     custom_quant_tables: [Option<[u16; 64]>; 4],
     custom_huffman_dc: [Option<HuffmanTableDef>; 4],
     custom_huffman_ac: [Option<HuffmanTableDef>; 4],
@@ -65,6 +66,7 @@ impl<'a> Encoder<'a> {
             lossless_point_transform: 0,
             grayscale_from_color: false,
             restart_interval: None,
+            scan_script: None,
             icc_profile: None,
             exif_data: None,
             comment: None,
@@ -95,6 +97,17 @@ impl<'a> Encoder<'a> {
     /// Enable progressive JPEG mode.
     pub fn progressive(mut self, progressive: bool) -> Self {
         self.progressive = progressive;
+        self
+    }
+
+    /// Set a custom progressive scan script.
+    ///
+    /// When progressive mode is enabled, this script replaces the default
+    /// `simple_progression()` scan order. Each `ScanScript` entry defines
+    /// one scan pass with its component set and spectral/successive-approximation
+    /// parameters.
+    pub fn scan_script(mut self, script: Vec<ScanScript>) -> Self {
+        self.scan_script = Some(script);
         self
     }
 
@@ -311,14 +324,26 @@ impl<'a> Encoder<'a> {
                 self.subsampling,
             )?
         } else if self.progressive {
-            encoder::compress_progressive(
-                effective_pixels,
-                self.width,
-                self.height,
-                effective_format,
-                self.quality,
-                self.subsampling,
-            )?
+            if let Some(ref script) = self.scan_script {
+                encoder::compress_progressive_custom(
+                    effective_pixels,
+                    self.width,
+                    self.height,
+                    effective_format,
+                    self.quality,
+                    self.subsampling,
+                    script,
+                )?
+            } else {
+                encoder::compress_progressive(
+                    effective_pixels,
+                    self.width,
+                    self.height,
+                    effective_format,
+                    self.quality,
+                    self.subsampling,
+                )?
+            }
         } else if self.optimize_huffman {
             encoder::compress_optimized(
                 effective_pixels,
