@@ -216,11 +216,11 @@
 - [x] JFIF version / density read (`Image.density`)
 
 ### Multi-Scan / Progressive Output
-- [ ] `jpeg_has_multiple_scans()` — Query progressive
-- [ ] `buffered_image` mode — Enable scan-by-scan output
-- [ ] `jpeg_start_output()` / `jpeg_finish_output()` — Per-scan output control
-- [ ] `jpeg_consume_input()` — Incremental input processing
-- [ ] `jpeg_input_complete()` — Check if all input consumed
+- [x] `jpeg_has_multiple_scans()` — Query progressive (`ProgressiveDecoder::has_multiple_scans()`)
+- [x] `buffered_image` mode — Enable scan-by-scan output (`ProgressiveDecoder`)
+- [x] `jpeg_start_output()` / `jpeg_finish_output()` — Per-scan output control (`ProgressiveDecoder::output()` / `ProgressiveDecoder::finish()`)
+- [x] `jpeg_consume_input()` — Incremental input processing (`ProgressiveDecoder::consume_input()`)
+- [x] `jpeg_input_complete()` — Check if all input consumed (`ProgressiveDecoder::input_complete()`)
 
 ### Scanline-Level Decode API
 - [x] `jpeg_read_header()` — Parse headers (`ScanlineDecoder::new()`)
@@ -430,7 +430,7 @@
 | Chroma subsampling | 7 | 8 | 88% |
 | Color spaces | 5 | 6 | 83% |
 | Compress params | ~40 | ~65 | ~62% |
-| Decompress params | ~25 | ~55 | ~45% |
+| Decompress params | ~30 | ~55 | ~55% |
 | Metadata | 10 | 10 | 100% |
 | Transform ops | 8 | 8 | 100% |
 | Transform options | 9 | 9 | 100% |
@@ -473,7 +473,7 @@
 | 15 | ~~Fast DCT (IsFast, Float)~~ | ✅ #27 |
 | 16 | ~~S441 subsampling~~ | ✅ #29 |
 
-### Phase 6 — Transform & Advanced ✅ COMPLETE (7/8, #22 deferred)
+### Phase 6 — Transform & Advanced ✅ COMPLETE (8/8)
 | # | Feature | Status |
 |---|---------|--------|
 | 17 | ~~All 9 TJXOPT transform flags~~ | ✅ #32 |
@@ -481,7 +481,7 @@
 | 19 | ~~Marker preservation~~ | ✅ #36 |
 | 20 | ~~Scanline-level encode API~~ | ✅ #33 |
 | 21 | ~~Scanline-level decode API~~ | ✅ #33 |
-| 22 | Progressive output (buffered image) | ⬜ Deferred (niche feature) |
+| 22 | ~~Progressive output (buffered image)~~ | ✅ |
 | 23 | ~~Per-component quality~~ | ✅ #31 |
 | 24 | ~~Raw data encode/decode~~ | ✅ #35 |
 
