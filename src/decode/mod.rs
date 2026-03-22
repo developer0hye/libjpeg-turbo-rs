@@ -10,4 +10,5 @@ pub mod lossless;
 pub mod marker;
 pub mod pipeline;
 pub mod progressive;
+pub mod toggles;
 pub mod upsample;

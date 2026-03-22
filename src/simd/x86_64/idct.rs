@@ -175,18 +175,14 @@ unsafe fn sse2_idct_islow_inner(coeffs: &[i16; 64], quant: &[u16; 64], output: &
 
     for row_base in (0..8).step_by(4) {
         let r0: __m128i = _mm_loadu_si128(ws.as_ptr().add(row_base * 8) as *const __m128i);
-        let r0h: __m128i =
-            _mm_loadu_si128(ws.as_ptr().add(row_base * 8 + 4) as *const __m128i);
-        let r1: __m128i =
-            _mm_loadu_si128(ws.as_ptr().add((row_base + 1) * 8) as *const __m128i);
+        let r0h: __m128i = _mm_loadu_si128(ws.as_ptr().add(row_base * 8 + 4) as *const __m128i);
+        let r1: __m128i = _mm_loadu_si128(ws.as_ptr().add((row_base + 1) * 8) as *const __m128i);
         let r1h: __m128i =
             _mm_loadu_si128(ws.as_ptr().add((row_base + 1) * 8 + 4) as *const __m128i);
-        let r2: __m128i =
-            _mm_loadu_si128(ws.as_ptr().add((row_base + 2) * 8) as *const __m128i);
+        let r2: __m128i = _mm_loadu_si128(ws.as_ptr().add((row_base + 2) * 8) as *const __m128i);
         let r2h: __m128i =
             _mm_loadu_si128(ws.as_ptr().add((row_base + 2) * 8 + 4) as *const __m128i);
-        let r3: __m128i =
-            _mm_loadu_si128(ws.as_ptr().add((row_base + 3) * 8) as *const __m128i);
+        let r3: __m128i = _mm_loadu_si128(ws.as_ptr().add((row_base + 3) * 8) as *const __m128i);
         let r3h: __m128i =
             _mm_loadu_si128(ws.as_ptr().add((row_base + 3) * 8 + 4) as *const __m128i);
 
@@ -212,8 +208,7 @@ unsafe fn sse2_idct_islow_inner(coeffs: &[i16; 64], quant: &[u16; 64], output: &
         let col6: __m128i = _mm_unpacklo_epi64(t1h, t3h);
         let col7: __m128i = _mm_unpackhi_epi64(t1h, t3h);
 
-        let result: [__m128i; 8] =
-            idct_1d_pass(col0, col1, col2, col3, col4, col5, col6, col7);
+        let result: [__m128i; 8] = idct_1d_pass(col0, col1, col2, col3, col4, col5, col6, col7);
 
         for c in 0..8 {
             let descaled: __m128i = descale_p2(result[c]);
