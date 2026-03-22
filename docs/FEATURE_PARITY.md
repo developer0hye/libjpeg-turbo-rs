@@ -485,13 +485,13 @@
 | 23 | ~~Per-component quality~~ | ✅ #31 |
 | 24 | ~~Raw data encode/decode~~ | ✅ #35 |
 
-### Phase 7 — YUV & I/O
-| # | Feature | Scope |
-|---|---------|-------|
-| 25 | ~~YUV planar encode/decode~~ | ✅ All 8 `tj3*YUV*` + 4 buf size helpers |
-| 26 | ~~Buffer size calculation~~ | ✅ `yuv_buf_size`, `yuv_plane_size/width/height`, `jpeg_buf_size` |
-| 27 | ~~Custom source/dest managers~~ | ✅ `stream::compress_to_writer` / `decompress_from_reader` / file helpers |
-| 28 | File I/O helpers | `tj3LoadImage*` / `tj3SaveImage*` (BMP/PPM) |
+### Phase 7 — YUV & I/O ✅ COMPLETE
+| # | Feature | Status |
+|---|---------|--------|
+| 25 | ~~YUV planar encode/decode~~ | ✅ #40 |
+| 26 | ~~Buffer size calculation~~ | ✅ #30 |
+| 27 | ~~Custom source/dest managers~~ | ✅ #39 |
+| 28 | ~~File I/O helpers~~ | ✅ #38 |
 
 ### Phase 8 — SIMD & Performance
 | # | Feature | Scope |
