@@ -1,0 +1,1143 @@
+{
+  "cmake_tests": [
+    {
+      "name": "TJUnitTest",
+      "command": "${Java_JAVA_EXECUTABLE} ${JAVAARGS} -cp java/turbojpeg.jar -Djava.library.path=${CMAKE_CURRENT_BINARY_DIR}/${OBJDIR} TJUnitTest"
+    },
+    {
+      "name": "TJUnitTest-yuv",
+      "command": "${Java_JAVA_EXECUTABLE} ${JAVAARGS} -cp java/turbojpeg.jar -Djava.library.path=${CMAKE_CURRENT_BINARY_DIR}/${OBJDIR} TJUnitTest -yuv"
+    },
+    {
+      "name": "TJUnitTest-yuv-nopad",
+      "command": "${Java_JAVA_EXECUTABLE} ${JAVAARGS} -cp java/turbojpeg.jar -Djava.library.path=${CMAKE_CURRENT_BINARY_DIR}/${OBJDIR} TJUnitTest -yuv -noyuvpad"
+    },
+    {
+      "name": "TJUnitTest-lossless",
+      "command": "${Java_JAVA_EXECUTABLE} ${JAVAARGS} -cp java/turbojpeg.jar -Djava.library.path=${CMAKE_CURRENT_BINARY_DIR}/${OBJDIR} TJUnitTest -lossless"
+    },
+    {
+      "name": "TJUnitTest-bi",
+      "command": "${Java_JAVA_EXECUTABLE} ${JAVAARGS} -cp java/turbojpeg.jar -Djava.library.path=${CMAKE_CURRENT_BINARY_DIR}/${OBJDIR} TJUnitTest -bi"
+    },
+    {
+      "name": "TJUnitTest-bi-yuv",
+      "command": "${Java_JAVA_EXECUTABLE} ${JAVAARGS} -cp java/turbojpeg.jar -Djava.library.path=${CMAKE_CURRENT_BINARY_DIR}/${OBJDIR} TJUnitTest -bi -yuv"
+    },
+    {
+      "name": "TJUnitTest-bi-yuv-nopad",
+      "command": "${Java_JAVA_EXECUTABLE} ${JAVAARGS} -cp java/turbojpeg.jar -Djava.library.path=${CMAKE_CURRENT_BINARY_DIR}/${OBJDIR} TJUnitTest -bi -yuv -noyuvpad"
+    },
+    {
+      "name": "TJUnitTest-bi-lossless",
+      "command": "${Java_JAVA_EXECUTABLE} ${JAVAARGS} -cp java/turbojpeg.jar -Djava.library.path=${CMAKE_CURRENT_BINARY_DIR}/${OBJDIR} TJUnitTest -bi -lossless"
+    },
+    {
+      "name": "TJUnitTest-bmp",
+      "command": "${Java_JAVA_EXECUTABLE} ${JAVAARGS} -cp java/turbojpeg.jar -Djava.library.path=${CMAKE_CURRENT_BINARY_DIR}/${OBJDIR} TJUnitTest -bmp"
+    },
+    {
+      "name": "TJUnitTest12",
+      "command": "${Java_JAVA_EXECUTABLE} ${JAVAARGS} -cp java/turbojpeg.jar -Djava.library.path=${CMAKE_CURRENT_BINARY_DIR}/${OBJDIR} TJUnitTest -precision 12"
+    },
+    {
+      "name": "TJUnitTest${sample_bits}-lossless",
+      "command": "${Java_JAVA_EXECUTABLE} ${JAVAARGS} -cp java/turbojpeg.jar -Djava.library.path=${CMAKE_CURRENT_BINARY_DIR}/${OBJDIR} TJUnitTest -precision ${sample_bits} -lossless"
+    },
+    {
+      "name": "TJUnitTest${sample_bits}-bmp",
+      "command": "${Java_JAVA_EXECUTABLE} ${JAVAARGS} -cp java/turbojpeg.jar -Djava.library.path=${CMAKE_CURRENT_BINARY_DIR}/${OBJDIR} TJUnitTest -precision ${sample_bits} -bmp"
+    },
+    {
+      "name": "tjunittest-${libtype}",
+      "command": "tjunittest${suffix}"
+    },
+    {
+      "name": "tjunittest-${libtype}-alloc",
+      "command": "tjunittest${suffix} -alloc"
+    },
+    {
+      "name": "tjunittest-${libtype}-yuv",
+      "command": "tjunittest${suffix} -yuv"
+    },
+    {
+      "name": "tjunittest-${libtype}-yuv-alloc",
+      "command": "tjunittest${suffix} -yuv -alloc"
+    },
+    {
+      "name": "tjunittest-${libtype}-yuv-nopad",
+      "command": "tjunittest${suffix} -yuv -noyuvpad"
+    },
+    {
+      "name": "tjunittest-${libtype}-lossless",
+      "command": "tjunittest${suffix} -lossless"
+    },
+    {
+      "name": "tjunittest-${libtype}-lossless-alloc",
+      "command": "tjunittest${suffix} -lossless -alloc"
+    },
+    {
+      "name": "tjunittest-${libtype}-bmp",
+      "command": "tjunittest${suffix} -bmp"
+    },
+    {
+      "name": "tjunittest12-${libtype}",
+      "command": "tjunittest${suffix} -precision 12"
+    },
+    {
+      "name": "tjunittest12-${libtype}-alloc",
+      "command": "tjunittest${suffix} -precision 12 -alloc"
+    },
+    {
+      "name": "tjunittest${sample_bits}-${libtype}-lossless",
+      "command": "tjunittest${suffix} -precision ${sample_bits} -lossless"
+    },
+    {
+      "name": "tjunittest${sample_bits}-${libtype}-lossless-alloc",
+      "command": "tjunittest${suffix} -precision ${sample_bits} -lossless -alloc"
+    },
+    {
+      "name": "tjunittest${sample_bits}-${libtype}-bmp",
+      "command": "tjunittest${suffix} -precision ${sample_bits} -bmp"
+    },
+    {
+      "name": "${tjbench}-${libtype}-tile-cp",
+      "command": "${CMAKE_COMMAND} -E copy_if_different ${TESTIMAGES}/testorig.ppm ${testout}_tile.ppm"
+    },
+    {
+      "name": "${tjbench}-${libtype}-tile",
+      "command": "tjbench${suffix} ${testout}_tile.ppm 95 -precision ${sample_bits} -rgb -quiet -tile -benchtime 0.01 -warmup 0"
+    },
+    {
+      "name": "${tjbench}-${libtype}-tile-gray-${tile}x${tile}-cmp",
+      "command": "md5cmp ${MD5_PPM_GRAY_TILE} ${testout}_tile_GRAY_Q95_${tile}x${tile}.ppm"
+    },
+    {
+      "name": "${tjbench}-${libtype}-tile-${subsamp}-${tile}x${tile}-cmp",
+      "command": "md5cmp ${MD5_PPM_${subsamp}_${tile}x${tile}_TILE} ${testout}_tile_${subsamp}_Q95_${tile}x${tile}.ppm"
+    },
+    {
+      "name": "${tjbench}-${libtype}-tile-444-${tile}x${tile}-cmp",
+      "command": "md5cmp ${MD5_PPM_444_TILE} ${testout}_tile_444_Q95_${tile}x${tile}.ppm"
+    },
+    {
+      "name": "${tjbench}-${libtype}-tilem-cp",
+      "command": "${CMAKE_COMMAND} -E copy_if_different ${TESTIMAGES}/testorig.ppm ${testout}_tilem.ppm"
+    },
+    {
+      "name": "${tjbench}-${libtype}-tilem",
+      "command": "tjbench${suffix} ${testout}_tilem.ppm 95 -precision ${sample_bits} -rgb -fastupsample -quiet -tile -benchtime 0.01 -warmup 0"
+    },
+    {
+      "name": "${tjbench}-${libtype}-tile-420m-8x8-cmp",
+      "command": "md5cmp ${MD5_PPM_420M_8x8_TILE} ${testout}_tilem_420_Q95_8x8.ppm"
+    },
+    {
+      "name": "${tjbench}-${libtype}-tile-422m-8x8-cmp",
+      "command": "md5cmp ${MD5_PPM_422M_8x8_TILE} ${testout}_tilem_422_Q95_8x8.ppm"
+    },
+    {
+      "name": "${tjbench}-${libtype}-tile-${subsamp}m-${tile}x${tile}-cmp",
+      "command": "md5cmp ${MD5_PPM_${subsamp}M_TILE} ${testout}_tilem_${subsamp}_Q95_${tile}x${tile}.ppm"
+    },
+    {
+      "name": "bmpsizetest-${libtype}",
+      "command": "bmpsizetest${suffix}"
+    },
+    {
+      "name": "${PROG}-${libtype}-${NAME}",
+      "command": "${ACTUAL_PROG}${suffix} ${ACTUAL_ARGS} -outfile ${OUTFILE} ${INFILE}"
+    },
+    {
+      "name": "${PROG}-${libtype}-${NAME}-cmp",
+      "command": "md5cmp ${MD5SUM} ${OUTFILE}"
+    },
+    {
+      "name": "${djpeg}-${libtype}-rgb-islow-icc-cmp",
+      "command": "md5cmp b06a39d730129122e85c1363ed1bbc9e ${testout}_rgb_islow.icc"
+    },
+    {
+      "name": "${cjpeg}-${libtype}-420-islow-prog",
+      "command": "cjpeg${suffix} -dct int -prog -precision ${sample_bits} -outfile ${testout}_420_islow_prog.jpg ${TESTIMAGES}/testorig.ppm"
+    },
+    {
+      "name": "${cjpeg}-${libtype}-444-islow",
+      "command": "cjpeg${suffix} -dct int -sample 1x1 -precision ${sample_bits} -outfile ${testout}_444_islow.jpg ${TESTIMAGES}/testorig.ppm"
+    },
+    {
+      "name": "${cjpeg}-${libtype}-444-islow-prog",
+      "command": "cjpeg${suffix} -dct int -prog -precision ${sample_bits} -sample 1x1 -outfile ${testout}_444_islow_prog.jpg ${TESTIMAGES}/testorig.ppm"
+    },
+    {
+      "name": "${cjpeg}-${libtype}-444-islow-ari",
+      "command": "cjpeg${suffix} -dct int -arithmetic -sample 1x1 -precision ${sample_bits} -outfile ${testout}_444_islow_ari.jpg ${TESTIMAGES}/testorig.ppm"
+    },
+    {
+      "name": "example-${sample_bits}bit-${libtype}-compress",
+      "command": "example${suffix} compress -q 95 ${EXAMPLE_12BIT_ARG} ${testout}-example.jpg"
+    },
+    {
+      "name": "example-${sample_bits}bit-${libtype}-compress-cmp",
+      "command": "md5cmp ${MD5_JPEG_EXAMPLE_COMPRESS} ${testout}-example.jpg"
+    },
+    {
+      "name": "example-${sample_bits}bit-${libtype}-decompress",
+      "command": "example${suffix} decompress ${EXAMPLE_12BIT_ARG} ${TESTIMAGES}/${TESTORIG} ${testout}-example.ppm"
+    },
+    {
+      "name": "example-${sample_bits}bit-${libtype}-decompress-cmp",
+      "command": "md5cmp ${MD5_PPM_EXAMPLE_DECOMPRESS} ${testout}-example.ppm"
+    }
+  ],
+  "cmake_add_test_count": 47,
+  "cmake_bittests": [
+    {
+      "program": "cjpeg16",
+      "name": "lossless",
+      "args": "-lossless;4;-restart;1;-quality;1;-grayscale;-optimize;-dct;float;-smooth;100;-baseline;-qslots;1,0,0;-sample;1x2,3x4,2x1",
+      "outfile": "testout16_lossless.jpg",
+      "infile": "${TESTIMAGES}/testorig.ppm",
+      "md5": "${MD5_JPEG_LOSSLESS})"
+    },
+    {
+      "program": "djpeg16",
+      "name": "lossless",
+      "args": "-fast;-scale;1/8;-dct;float;-dither;none;-nosmooth;-onepass",
+      "outfile": "testout16_lossless.ppm",
+      "infile": "testout16_lossless.jpg",
+      "md5": "${MD5_PPM_LOSSLESS}"
+    },
+    {
+      "program": "${cjpeg}",
+      "name": "rgb-islow",
+      "args": "-rgb;-dct;int;-icc;${TESTIMAGES}/test1.icc",
+      "outfile": "${testout}_rgb_islow.jpg",
+      "infile": "${TESTIMAGES}/testorig.ppm",
+      "md5": "${MD5_JPEG_RGB_ISLOW})"
+    },
+    {
+      "program": "${djpeg}",
+      "name": "rgb-islow",
+      "args": "-dct;int;-ppm;-icc;${testout}_rgb_islow.icc",
+      "outfile": "${testout}_rgb_islow.ppm",
+      "infile": "${testout}_rgb_islow.jpg",
+      "md5": "${MD5_PPM_RGB_ISLOW}"
+    },
+    {
+      "program": "${jpegtran}",
+      "name": "icc",
+      "args": "-copy;all;-icc;${TESTIMAGES}/test3.icc",
+      "outfile": "${testout}_rgb_islow2.jpg",
+      "infile": "${testout}_rgb_islow.jpg",
+      "md5": "${MD5_JPEG_RGB_ISLOW2}"
+    },
+    {
+      "program": "${djpeg}",
+      "name": "rgb-islow-565",
+      "args": "-dct;int;-rgb565;-dither;none;-bmp",
+      "outfile": "${testout}_rgb_islow_565.bmp",
+      "infile": "${testout}_rgb_islow.jpg",
+      "md5": "${MD5_BMP_RGB_ISLOW_565}"
+    },
+    {
+      "program": "${djpeg}",
+      "name": "rgb-islow-565D",
+      "args": "-dct;int;-rgb565;-bmp",
+      "outfile": "${testout}_rgb_islow_565D.bmp",
+      "infile": "${testout}_rgb_islow.jpg",
+      "md5": "${MD5_BMP_RGB_ISLOW_565D}"
+    },
+    {
+      "program": "${cjpeg}",
+      "name": "422-ifast-opt",
+      "args": "-sample;2x1;-dct;fast;-opt",
+      "outfile": "${testout}_422_ifast_opt.jpg",
+      "infile": "${TESTIMAGES}/testorig.ppm",
+      "md5": "${MD5_JPEG_422_IFAST_OPT})"
+    },
+    {
+      "program": "${djpeg}",
+      "name": "422-ifast",
+      "args": "-dct;fast",
+      "outfile": "${testout}_422_ifast.ppm",
+      "infile": "${testout}_422_ifast_opt.jpg",
+      "md5": "${MD5_PPM_422_IFAST}"
+    },
+    {
+      "program": "${cjpeg}",
+      "name": "440-islow",
+      "args": "-sample;1x2;-dct;int",
+      "outfile": "${testout}_440_islow.jpg",
+      "infile": "${TESTIMAGES}/testorig.ppm",
+      "md5": "${MD5_JPEG_440_ISLOW})"
+    },
+    {
+      "program": "${djpeg}",
+      "name": "440-islow",
+      "args": "-dct;int",
+      "outfile": "${testout}_440_islow.ppm",
+      "infile": "${testout}_440_islow.jpg",
+      "md5": "${MD5_PPM_440_ISLOW}"
+    },
+    {
+      "program": "${djpeg}",
+      "name": "422m-ifast",
+      "args": "-dct;fast;-nosmooth",
+      "outfile": "${testout}_422m_ifast.ppm",
+      "infile": "${testout}_422_ifast_opt.jpg",
+      "md5": "${MD5_PPM_422M_IFAST}"
+    },
+    {
+      "program": "${djpeg}",
+      "name": "422m-ifast-565",
+      "args": "-dct;int;-nosmooth;-rgb565;-dither;none;-bmp",
+      "outfile": "${testout}_422m_ifast_565.bmp",
+      "infile": "${testout}_422_ifast_opt.jpg",
+      "md5": "${MD5_BMP_422M_IFAST_565}"
+    },
+    {
+      "program": "${djpeg}",
+      "name": "422m-ifast-565D",
+      "args": "-dct;int;-nosmooth;-rgb565;-bmp",
+      "outfile": "${testout}_422m_ifast_565D.bmp",
+      "infile": "${testout}_422_ifast_opt.jpg",
+      "md5": "${MD5_BMP_422M_IFAST_565D}"
+    },
+    {
+      "program": "${cjpeg}",
+      "name": "420-q100-ifast-prog",
+      "args": "-sample;2x2;-quality;100;-dct;fast;-scans;${TESTIMAGES}/test.scan",
+      "outfile": "${testout}_420_q100_ifast_prog.jpg",
+      "infile": "${TESTIMAGES}/testorig.ppm",
+      "md5": "${MD5_JPEG_420_IFAST_Q100_PROG})"
+    },
+    {
+      "program": "${djpeg}",
+      "name": "420-q100-ifast-prog",
+      "args": "-dct;fast",
+      "outfile": "${testout}_420_q100_ifast.ppm",
+      "infile": "${testout}_420_q100_ifast_prog.jpg",
+      "md5": "${MD5_PPM_420_Q100_IFAST}"
+    },
+    {
+      "program": "${djpeg}",
+      "name": "420m-q100-ifast-prog",
+      "args": "-dct;fast;-nosmooth",
+      "outfile": "${testout}_420m_q100_ifast.ppm",
+      "infile": "${testout}_420_q100_ifast_prog.jpg",
+      "md5": "${MD5_PPM_420M_Q100_IFAST}"
+    },
+    {
+      "program": "${cjpeg}",
+      "name": "gray-islow",
+      "args": "-gray;-dct;int",
+      "outfile": "${testout}_gray_islow.jpg",
+      "infile": "${TESTIMAGES}/testorig.ppm",
+      "md5": "${MD5_JPEG_GRAY_ISLOW})"
+    },
+    {
+      "program": "${djpeg}",
+      "name": "gray-islow",
+      "args": "-dct;int",
+      "outfile": "${testout}_gray_islow.ppm",
+      "infile": "${testout}_gray_islow.jpg",
+      "md5": "${MD5_PPM_GRAY_ISLOW}"
+    },
+    {
+      "program": "${djpeg}",
+      "name": "gray-islow-rgb",
+      "args": "-dct;int;-rgb",
+      "outfile": "${testout}_gray_islow_rgb.ppm",
+      "infile": "${testout}_gray_islow.jpg",
+      "md5": "${MD5_PPM_GRAY_ISLOW_RGB}"
+    },
+    {
+      "program": "${djpeg}",
+      "name": "gray-islow-565",
+      "args": "-dct;int;-rgb565;-dither;none;-bmp",
+      "outfile": "${testout}_gray_islow_565.bmp",
+      "infile": "${testout}_gray_islow.jpg",
+      "md5": "${MD5_BMP_GRAY_ISLOW_565}"
+    },
+    {
+      "program": "${djpeg}",
+      "name": "gray-islow-565D",
+      "args": "-dct;int;-rgb565;-bmp",
+      "outfile": "${testout}_gray_islow_565D.bmp",
+      "infile": "${testout}_gray_islow.jpg",
+      "md5": "${MD5_BMP_GRAY_ISLOW_565D}"
+    },
+    {
+      "program": "${cjpeg}",
+      "name": "420s-islow-opt",
+      "args": "-sample;2x2;-smooth;1;-dct;int;-opt",
+      "outfile": "${testout}_420s_islow_opt.jpg",
+      "infile": "${TESTIMAGES}/testorig.ppm",
+      "md5": "${MD5_JPEG_420S_ISLOW_OPT})"
+    },
+    {
+      "program": "${cjpeg}",
+      "name": "3x2-float-prog",
+      "args": "-sample;3x2;-dct;float;-prog",
+      "outfile": "${testout}_3x2_float_prog.jpg",
+      "infile": "${TESTIMAGES}/testorig.ppm",
+      "md5": "${MD5_JPEG_3x2_FLOAT_PROG_${FLOATTEST${sample_bits}_UC}})"
+    },
+    {
+      "program": "${djpeg}",
+      "name": "3x2-float-prog",
+      "args": "-dct;float",
+      "outfile": "${testout}_3x2_float.ppm",
+      "infile": "${testout}_3x2_float_prog.jpg",
+      "md5": "${MD5_PPM_3x2_FLOAT_${FLOATTEST${sample_bits}_UC}}"
+    },
+    {
+      "program": "${cjpeg}",
+      "name": "3x2-ifast-prog",
+      "args": "-sample;3x2;-dct;fast;-prog",
+      "outfile": "${testout}_3x2_ifast_prog.jpg",
+      "infile": "${TESTIMAGES}/testorig.ppm",
+      "md5": "${MD5_JPEG_3x2_IFAST_PROG})"
+    },
+    {
+      "program": "${djpeg}",
+      "name": "3x2-ifast-prog",
+      "args": "-dct;fast",
+      "outfile": "${testout}_3x2_ifast.ppm",
+      "infile": "${testout}_3x2_ifast_prog.jpg",
+      "md5": "${MD5_PPM_3x2_IFAST}"
+    },
+    {
+      "program": "${cjpeg}",
+      "name": "420-islow-ari",
+      "args": "-dct;int;-arithmetic",
+      "outfile": "${testout}_420_islow_ari.jpg",
+      "infile": "${TESTIMAGES}/testorig.ppm",
+      "md5": "${MD5_JPEG_420_ISLOW_ARI})"
+    },
+    {
+      "program": "${jpegtran}",
+      "name": "420-islow-ari",
+      "args": "-arithmetic",
+      "outfile": "${testout}_420_islow_ari2.jpg",
+      "infile": "${TESTIMAGES}/testimgint.jpg",
+      "md5": "${MD5_JPEG_420_ISLOW_ARI})"
+    },
+    {
+      "program": "${cjpeg}",
+      "name": "444-islow-progari",
+      "args": "-sample;1x1;-dct;int;-prog;-arithmetic",
+      "outfile": "${testout}_444_islow_progari.jpg",
+      "infile": "${TESTIMAGES}/testorig.ppm",
+      "md5": "${MD5_JPEG_444_ISLOW_PROGARI})"
+    },
+    {
+      "program": "${djpeg}",
+      "name": "420m-ifast-ari",
+      "args": "-fast;-skip;1,20;-ppm",
+      "outfile": "${testout}_420m_ifast_ari.ppm",
+      "infile": "${TESTIMAGES}/testimgari.jpg",
+      "md5": "${MD5_PPM_420M_IFAST_ARI})"
+    },
+    {
+      "program": "${jpegtran}",
+      "name": "420-islow",
+      "args": "",
+      "outfile": "${testout}_420_islow.jpg",
+      "infile": "${TESTIMAGES}/testimgari.jpg",
+      "md5": "${MD5_JPEG_420_ISLOW})"
+    },
+    {
+      "program": "${djpeg}",
+      "name": "420m-islow-${scale}",
+      "args": "-dct;int;-scale;${scalearg};-nosmooth;-ppm",
+      "outfile": "${testout}_420m_islow_${scale}.ppm",
+      "infile": "${TESTIMAGES}/${TESTORIG}",
+      "md5": "${MD5_PPM_420M_ISLOW_${scale}})"
+    },
+    {
+      "program": "${djpeg}",
+      "name": "420-islow-256",
+      "args": "-dct;int;-colors;256;-bmp",
+      "outfile": "${testout}_420_islow_256.bmp",
+      "infile": "${TESTIMAGES}/${TESTORIG}",
+      "md5": "${MD5_BMP_420_ISLOW_256})"
+    },
+    {
+      "program": "${djpeg}",
+      "name": "420-islow-565",
+      "args": "-dct;int;-rgb565;-dither;none;-bmp",
+      "outfile": "${testout}_420_islow_565.bmp",
+      "infile": "${TESTIMAGES}/${TESTORIG}",
+      "md5": "${MD5_BMP_420_ISLOW_565})"
+    },
+    {
+      "program": "${djpeg}",
+      "name": "420-islow-565D",
+      "args": "-dct;int;-rgb565;-bmp",
+      "outfile": "${testout}_420_islow_565D.bmp",
+      "infile": "${TESTIMAGES}/${TESTORIG}",
+      "md5": "${MD5_BMP_420_ISLOW_565D})"
+    },
+    {
+      "program": "${djpeg}",
+      "name": "420m-islow-565",
+      "args": "-dct;int;-nosmooth;-rgb565;-dither;none;-bmp",
+      "outfile": "${testout}_420m_islow_565.bmp",
+      "infile": "${TESTIMAGES}/${TESTORIG}",
+      "md5": "${MD5_BMP_420M_ISLOW_565})"
+    },
+    {
+      "program": "${djpeg}",
+      "name": "420m-islow-565D",
+      "args": "-dct;int;-nosmooth;-rgb565;-bmp",
+      "outfile": "${testout}_420m_islow_565D.bmp",
+      "infile": "${TESTIMAGES}/${TESTORIG}",
+      "md5": "${MD5_BMP_420M_ISLOW_565D})"
+    },
+    {
+      "program": "${cjpeg}",
+      "name": "lossless",
+      "args": "-lossless;4;-restart;1;-quality;1;-grayscale;-optimize;-dct;float;-smooth;100;-baseline;-qslots;1,0,0;-sample;1x2,3x4,2x1",
+      "outfile": "${testout}_lossless.jpg",
+      "infile": "${TESTIMAGES}/testorig.ppm",
+      "md5": "${MD5_JPEG_LOSSLESS})"
+    },
+    {
+      "program": "${djpeg}",
+      "name": "lossless",
+      "args": "-fast;-scale;1/8;-dct;float;-dither;none;-nosmooth;-onepass",
+      "outfile": "${testout}_lossless.ppm",
+      "infile": "${testout}_lossless.jpg",
+      "md5": "${MD5_PPM_LOSSLESS}"
+    },
+    {
+      "program": "${djpeg}",
+      "name": "420-islow-skip15_31",
+      "args": "-dct;int;-skip;15,31;-ppm",
+      "outfile": "${testout}_420_islow_skip15,31.ppm",
+      "infile": "${TESTIMAGES}/${TESTORIG}",
+      "md5": "${MD5_PPM_420_ISLOW_SKIP15_31})"
+    },
+    {
+      "program": "${djpeg}",
+      "name": "420-islow-ari-skip16_139",
+      "args": "-dct;int;-skip;16,139;-ppm",
+      "outfile": "${testout}_420_islow_ari_skip16,139.ppm",
+      "infile": "${TESTIMAGES}/testimgari.jpg",
+      "md5": "${MD5_PPM_420_ISLOW_ARI_SKIP16_139})"
+    },
+    {
+      "program": "${djpeg}",
+      "name": "420-islow-prog-crop62x62_71_71",
+      "args": "-dct;int;-crop;62x62+71+71;-ppm",
+      "outfile": "${testout}_420_islow_prog_crop62x62,71,71.ppm",
+      "infile": "${testout}_420_islow_prog.jpg",
+      "md5": "${MD5_PPM_420_ISLOW_PROG_CROP62x62_71_71}"
+    },
+    {
+      "program": "${djpeg}",
+      "name": "420-islow-ari-crop53x53_4_4",
+      "args": "-dct;int;-crop;53x53+4+4;-ppm",
+      "outfile": "${testout}_420_islow_ari_crop53x53,4,4.ppm",
+      "infile": "${TESTIMAGES}/testimgari.jpg",
+      "md5": "${MD5_PPM_420_ISLOW_ARI_CROP53x53_4_4})"
+    },
+    {
+      "program": "${djpeg}",
+      "name": "444-islow-skip1_6",
+      "args": "-dct;int;-skip;1,6;-ppm",
+      "outfile": "${testout}_444_islow_skip1,6.ppm",
+      "infile": "${testout}_444_islow.jpg",
+      "md5": "${MD5_PPM_444_ISLOW_SKIP1_6}"
+    },
+    {
+      "program": "${djpeg}",
+      "name": "444-islow-prog-crop98x98_13_13",
+      "args": "-dct;int;-crop;98x98+13+13;-ppm",
+      "outfile": "${testout}_444_islow_prog_crop98x98,13,13.ppm",
+      "infile": "${testout}_444_islow_prog.jpg",
+      "md5": "${MD5_PPM_444_ISLOW_PROG_CROP98x98_13_13}"
+    },
+    {
+      "program": "${djpeg}",
+      "name": "444-islow-ari-crop37x37_0_0",
+      "args": "-dct;int;-crop;37x37+0+0;-ppm",
+      "outfile": "${testout}_444_islow_ari_crop37x37,0,0.ppm",
+      "infile": "${testout}_444_islow_ari.jpg",
+      "md5": "${MD5_PPM_444_ISLOW_ARI_CROP37x37_0_0}"
+    },
+    {
+      "program": "${jpegtran}",
+      "name": "crop",
+      "args": "-crop;120x90+20+50;-transpose;-perfect",
+      "outfile": "${testout}_crop.jpg",
+      "infile": "${TESTIMAGES}/${TESTORIG}",
+      "md5": "${MD5_JPEG_CROP})"
+    }
+  ],
+  "cmake_add_bittest_count": 48,
+  "cmake_total_test_registrations": 143,
+  "tjcomptest": {
+    "axes": {
+      "precision": [
+        8,
+        12
+      ],
+      "restart": [
+        "",
+        "-r 1 -icc $IMGDIR/test3.icc",
+        "-r 1b"
+      ],
+      "arithmetic": [
+        "",
+        "-a"
+      ],
+      "dct": [
+        "",
+        "-dc fa"
+      ],
+      "optimize": [
+        "",
+        "-o"
+      ],
+      "progressive": [
+        "",
+        "-p"
+      ],
+      "quality": [
+        "",
+        "-q 1",
+        "-q 100"
+      ],
+      "subsampling": [
+        "444",
+        "422",
+        "440",
+        "420",
+        "411",
+        "441"
+      ],
+      "image_variants": [
+        "rgb",
+        "grayscale-from-rgb",
+        "rgb-as-rgb",
+        "gray"
+      ]
+    },
+    "skip_conditions": [
+      "optarg == '-o' and (ariarg == '-a' or precision == 12)",
+      "progarg == '-p' and optarg == '-o'"
+    ],
+    "estimated_lossy_combos": 3888,
+    "lossless_axes": {
+      "precision": [
+        2,
+        3,
+        4,
+        5,
+        6,
+        7,
+        8,
+        9,
+        10,
+        11,
+        12,
+        13,
+        14,
+        15,
+        16
+      ],
+      "psv": [
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7
+      ],
+      "pt_range": "0 to min(precision-1, 15)",
+      "restart": [
+        "",
+        "-r 1 -icc $IMGDIR/test3.icc"
+      ],
+      "images": [
+        "rgb",
+        "gray"
+      ]
+    },
+    "skip_conditions_lossless": [
+      "pt >= precision"
+    ],
+    "estimated_lossless_combos": 3780,
+    "total_combos": 7668
+  },
+  "tjdecomptest": {
+    "axes": {
+      "precision": [
+        8,
+        12
+      ],
+      "subsampling": [
+        "444",
+        "422",
+        "440",
+        "420",
+        "411",
+        "441",
+        "410",
+        "gray"
+      ],
+      "crop": [
+        "(none)",
+        "14x14+23+23",
+        "21x21+4+4",
+        "18x18+13+13",
+        "21x21+0+0",
+        "24x26+20+18"
+      ],
+      "scale": [
+        "(none)",
+        "16/8",
+        "15/8",
+        "14/8",
+        "13/8",
+        "12/8",
+        "11/8",
+        "10/8",
+        "9/8",
+        "7/8",
+        "6/8",
+        "5/8",
+        "4/8",
+        "3/8",
+        "2/8",
+        "1/8"
+      ],
+      "nosmooth": [
+        "",
+        "-nos"
+      ],
+      "dct": [
+        "",
+        "-dc fa"
+      ],
+      "output_variants": [
+        "native-format",
+        "grayscale-from-color (-g)",
+        "rgb-from-gray (-r)"
+      ]
+    },
+    "crop_regions": [
+      "14x14+23+23",
+      "21x21+4+4",
+      "18x18+13+13",
+      "21x21+0+0",
+      "24x26+20+18"
+    ],
+    "scale_factors": [
+      "16/8",
+      "15/8",
+      "14/8",
+      "13/8",
+      "12/8",
+      "11/8",
+      "10/8",
+      "9/8",
+      "7/8",
+      "6/8",
+      "5/8",
+      "4/8",
+      "3/8",
+      "2/8",
+      "1/8"
+    ],
+    "skip_conditions": [
+      "croparg != '' and subsamp == '410'",
+      "scalearg in ['1/8','2/8','3/8'] and croparg != ''",
+      "nsarg == '-nos' and subsamp not in ['422','420','440']",
+      "dctarg == '-dc fa' and (scalearg != '4/8' or subsamp not in ['420','410']) and scalearg != ''"
+    ],
+    "estimated_lossy_combos": 3066,
+    "lossless_axes": {
+      "precision": [
+        2,
+        3,
+        4,
+        5,
+        6,
+        7,
+        8,
+        9,
+        10,
+        11,
+        12,
+        13,
+        14,
+        15,
+        16
+      ],
+      "images": [
+        "rgb",
+        "gray"
+      ]
+    },
+    "estimated_lossless_combos": 30,
+    "total_combos": 3096
+  },
+  "tjtrantest": {
+    "axes": {
+      "precision": [
+        8,
+        12
+      ],
+      "subsampling": [
+        "444",
+        "422",
+        "440",
+        "420",
+        "411",
+        "441",
+        "410",
+        "gray"
+      ],
+      "arithmetic": [
+        "",
+        "-a"
+      ],
+      "copy_mode": [
+        "",
+        "-c i",
+        "-c n"
+      ],
+      "crop": [
+        "(none)",
+        "14x14+23+23",
+        "21x21+4+4",
+        "18x18+13+13",
+        "21x21+0+0",
+        "24x26+20+18"
+      ],
+      "transform": [
+        "",
+        "-f h",
+        "-f v",
+        "-ro 90",
+        "-ro 180",
+        "-ro 270",
+        "-t",
+        "-transv"
+      ],
+      "grayscale": [
+        "",
+        "-g"
+      ],
+      "optimize": [
+        "",
+        "-o"
+      ],
+      "progressive": [
+        "",
+        "-p"
+      ],
+      "restart": [
+        "",
+        "-r 1 -icc $IMGDIR/test3.icc",
+        "-r 1b"
+      ],
+      "trim": [
+        "",
+        "-tri"
+      ]
+    },
+    "crop_regions": [
+      "14x14+23+23",
+      "21x21+4+4",
+      "18x18+13+13",
+      "21x21+0+0",
+      "24x26+20+18"
+    ],
+    "transform_types": [
+      "(none)",
+      "flip-horizontal",
+      "flip-vertical",
+      "rotate-90",
+      "rotate-180",
+      "rotate-270",
+      "transpose",
+      "transverse"
+    ],
+    "copy_modes": [
+      "(default)",
+      "copy-icc",
+      "copy-none"
+    ],
+    "skip_conditions": [
+      "copyarg == '-c n' and subsamp not in ['411','420']",
+      "copyarg == '-c i' and subsamp != '420'",
+      "grayarg == '' and subsamp == '410' and croparg != ''",
+      "grayarg == '-g' and subsamp == 'gray'",
+      "optarg == '-o' and (ariarg == '-a' or precision == 12)",
+      "progarg == '-p' and optarg == '-o'",
+      "restartarg == '-r 1b' and croparg != ''",
+      "trimarg == '-tri' and (xformarg in ['-t',''] or croparg != '')"
+    ],
+    "estimated_combos": 22338
+  },
+  "croptest": {
+    "axes": {
+      "progressive": [
+        "",
+        "-progressive"
+      ],
+      "nosmooth": [
+        "",
+        "-nosmooth"
+      ],
+      "colors": [
+        "",
+        "-colors 256 -dither none -onepass"
+      ],
+      "Y_range": "0..16 (17 values)",
+      "H_range": "1..16 (16 values)",
+      "subsampling": [
+        "GRAY",
+        "420",
+        "422",
+        "440",
+        "444"
+      ]
+    },
+    "image": "vgl_6548_0026a.bmp",
+    "image_dimensions": "128x95",
+    "crop_spec_formula": "W=WIDTH-X-7, X=(Y*16)%128, special case Y>15: Y2=HEIGHT-H",
+    "Y_values": 17,
+    "H_values": 16,
+    "estimated_combos": 10880
+  },
+  "tjunittest": {
+    "test_functions": [
+      "overflowTest",
+      "doTest",
+      "bufSizeTest",
+      "bmpTest",
+      "compTest",
+      "decompTest",
+      "_decompTest"
+    ],
+    "all_static_functions": [
+      "initBuf",
+      "checkBuf",
+      "checkBufYUV",
+      "writeJPEG",
+      "compTest",
+      "_decompTest",
+      "decompTest",
+      "doTest",
+      "overflowTest",
+      "bufSizeTest",
+      "initBitmap",
+      "doBmpTest",
+      "bmpTest"
+    ],
+    "pixel_formats": [
+      "TJPF_RGB",
+      "TJPF_BGR",
+      "TJPF_RGBX",
+      "TJPF_BGRX",
+      "TJPF_XBGR",
+      "TJPF_XRGB",
+      "TJPF_GRAY",
+      "TJPF_RGBA",
+      "TJPF_BGRA",
+      "TJPF_ABGR",
+      "TJPF_ARGB",
+      "TJPF_CMYK"
+    ],
+    "pixel_format_groups": {
+      "_3sampleFormats": [
+        "TJPF_RGB",
+        "TJPF_BGR"
+      ],
+      "_4sampleFormats": [
+        "TJPF_RGBX",
+        "TJPF_BGRX",
+        "TJPF_XBGR",
+        "TJPF_XRGB",
+        "TJPF_CMYK"
+      ],
+      "_onlyGray": [
+        "TJPF_GRAY"
+      ],
+      "_onlyRGB": [
+        "TJPF_RGB"
+      ]
+    },
+    "subsampling_modes": [
+      "TJSAMP_444",
+      "TJSAMP_422",
+      "TJSAMP_420",
+      "TJSAMP_440",
+      "TJSAMP_411",
+      "TJSAMP_441",
+      "TJSAMP_GRAY"
+    ],
+    "flag_combinations": [
+      "doYUV=0, lossless=0, alloc=0  (default lossy)",
+      "doYUV=0, lossless=0, alloc=1  (lossy + alloc)",
+      "doYUV=1, lossless=0, alloc=0  (yuv)",
+      "doYUV=1, lossless=0, alloc=1  (yuv + alloc)",
+      "doYUV=1, yuvAlign=1            (yuv nopad)",
+      "doYUV=0, lossless=1, alloc=0  (lossless)",
+      "doYUV=0, lossless=1, alloc=1  (lossless + alloc)",
+      "bmp=1                          (bmp test)",
+      "precision=12                   (12-bit)",
+      "precision=12, alloc=1          (12-bit + alloc)",
+      "precision=N (2-16), lossless=1 (N-bit lossless)",
+      "precision=N (2-16), lossless=1, alloc=1",
+      "precision=N (2-16), bmp=1      (N-bit bmp)"
+    ],
+    "doTest_calls": {
+      "always_run": [
+        "doTest(35,39,_3sampleFormats,2,TJSAMP_444)",
+        "doTest(39,41,_4sampleFormats,5,TJSAMP_444)",
+        "doTest(41,35,_3sampleFormats,2,TJSAMP_422)"
+      ],
+      "lossy_only": [
+        "doTest(35,39,_4sampleFormats,5,TJSAMP_422)",
+        "doTest(39,41,_3sampleFormats,2,TJSAMP_420)",
+        "doTest(41,35,_4sampleFormats,5,TJSAMP_420)",
+        "doTest(35,39,_3sampleFormats,2,TJSAMP_440)",
+        "doTest(39,41,_4sampleFormats,5,TJSAMP_440)",
+        "doTest(41,35,_3sampleFormats,2,TJSAMP_411)",
+        "doTest(35,39,_4sampleFormats,5,TJSAMP_411)",
+        "doTest(39,41,_3sampleFormats,2,TJSAMP_441)",
+        "doTest(41,35,_4sampleFormats,5,TJSAMP_441)"
+      ],
+      "gray": [
+        "doTest(39,41,_onlyGray,1,TJSAMP_GRAY)"
+      ],
+      "gray_non_lossless": [
+        "doTest(41,35,_3sampleFormats,2,TJSAMP_GRAY)",
+        "doTest(35,39,_4sampleFormats,4,TJSAMP_GRAY)"
+      ],
+      "yuv_only": [
+        "doTest(48,48,_onlyRGB,1,TJSAMP_444)",
+        "doTest(48,48,_onlyRGB,1,TJSAMP_422)",
+        "doTest(48,48,_onlyRGB,1,TJSAMP_420)",
+        "doTest(48,48,_onlyRGB,1,TJSAMP_440)",
+        "doTest(48,48,_onlyRGB,1,TJSAMP_411)",
+        "doTest(48,48,_onlyRGB,1,TJSAMP_441)",
+        "doTest(48,48,_onlyRGB,1,TJSAMP_GRAY)",
+        "doTest(48,48,_onlyGray,1,TJSAMP_GRAY)"
+      ]
+    },
+    "bmpTest": {
+      "aligns": [
+        1,
+        2,
+        4,
+        8
+      ],
+      "num_pixel_formats": 12,
+      "combos_precision_8": 192,
+      "combos_other_precision": 96
+    }
+  },
+  "md5_hashes": {
+    "count": 81,
+    "variables": [
+      "MD5_BMP_420M_ISLOW_565",
+      "MD5_BMP_420M_ISLOW_565D",
+      "MD5_BMP_420_ISLOW_256",
+      "MD5_BMP_420_ISLOW_565",
+      "MD5_BMP_420_ISLOW_565D",
+      "MD5_BMP_422M_IFAST_565",
+      "MD5_BMP_422M_IFAST_565D",
+      "MD5_BMP_GRAY_ISLOW_565",
+      "MD5_BMP_GRAY_ISLOW_565D",
+      "MD5_BMP_RGB_ISLOW_565",
+      "MD5_BMP_RGB_ISLOW_565D",
+      "MD5_JPEG_3x2_FLOAT_PROG_387",
+      "MD5_JPEG_3x2_FLOAT_PROG_MSVC",
+      "MD5_JPEG_3x2_FLOAT_PROG_NO_FP_CONTRACT",
+      "MD5_JPEG_3x2_FLOAT_PROG_SSE",
+      "MD5_JPEG_3x2_IFAST_PROG",
+      "MD5_JPEG_420S_ISLOW_OPT",
+      "MD5_JPEG_420_IFAST_Q100_PROG",
+      "MD5_JPEG_420_ISLOW",
+      "MD5_JPEG_420_ISLOW_ARI",
+      "MD5_JPEG_422_IFAST_OPT",
+      "MD5_JPEG_440_ISLOW",
+      "MD5_JPEG_444_ISLOW_PROGARI",
+      "MD5_JPEG_CROP",
+      "MD5_JPEG_EXAMPLE_COMPRESS",
+      "MD5_JPEG_GRAY_ISLOW",
+      "MD5_JPEG_LOSSLESS",
+      "MD5_JPEG_RGB_ISLOW",
+      "MD5_JPEG_RGB_ISLOW2",
+      "MD5_PPM_3x2_FLOAT_387",
+      "MD5_PPM_3x2_FLOAT_FP_CONTRACT",
+      "MD5_PPM_3x2_FLOAT_MSVC",
+      "MD5_PPM_3x2_FLOAT_NO_FP_CONTRACT",
+      "MD5_PPM_3x2_FLOAT_SSE",
+      "MD5_PPM_3x2_IFAST",
+      "MD5_PPM_420M_8x8_TILE",
+      "MD5_PPM_420M_IFAST_ARI",
+      "MD5_PPM_420M_ISLOW_11_8",
+      "MD5_PPM_420M_ISLOW_13_8",
+      "MD5_PPM_420M_ISLOW_15_8",
+      "MD5_PPM_420M_ISLOW_1_2",
+      "MD5_PPM_420M_ISLOW_1_4",
+      "MD5_PPM_420M_ISLOW_1_8",
+      "MD5_PPM_420M_ISLOW_2_1",
+      "MD5_PPM_420M_ISLOW_3_4",
+      "MD5_PPM_420M_ISLOW_3_8",
+      "MD5_PPM_420M_ISLOW_5_8",
+      "MD5_PPM_420M_ISLOW_7_8",
+      "MD5_PPM_420M_ISLOW_9_8",
+      "MD5_PPM_420M_Q100_IFAST",
+      "MD5_PPM_420M_TILE",
+      "MD5_PPM_420_128x128_TILE",
+      "MD5_PPM_420_16x16_TILE",
+      "MD5_PPM_420_32x32_TILE",
+      "MD5_PPM_420_64x64_TILE",
+      "MD5_PPM_420_8x8_TILE",
+      "MD5_PPM_420_ISLOW_ARI_CROP53x53_4_4",
+      "MD5_PPM_420_ISLOW_ARI_SKIP16_139",
+      "MD5_PPM_420_ISLOW_PROG_CROP62x62_71_71",
+      "MD5_PPM_420_ISLOW_SKIP15_31",
+      "MD5_PPM_420_Q100_IFAST",
+      "MD5_PPM_422M_8x8_TILE",
+      "MD5_PPM_422M_IFAST",
+      "MD5_PPM_422M_TILE",
+      "MD5_PPM_422_128x128_TILE",
+      "MD5_PPM_422_16x16_TILE",
+      "MD5_PPM_422_32x32_TILE",
+      "MD5_PPM_422_64x64_TILE",
+      "MD5_PPM_422_8x8_TILE",
+      "MD5_PPM_422_IFAST",
+      "MD5_PPM_440_ISLOW",
+      "MD5_PPM_444_ISLOW_ARI_CROP37x37_0_0",
+      "MD5_PPM_444_ISLOW_PROG_CROP98x98_13_13",
+      "MD5_PPM_444_ISLOW_SKIP1_6",
+      "MD5_PPM_444_TILE",
+      "MD5_PPM_EXAMPLE_DECOMPRESS",
+      "MD5_PPM_GRAY_ISLOW",
+      "MD5_PPM_GRAY_ISLOW_RGB",
+      "MD5_PPM_GRAY_TILE",
+      "MD5_PPM_LOSSLESS",
+      "MD5_PPM_RGB_ISLOW"
+    ]
+  },
+  "total_estimated_test_cases": 44125,
+  "summary": {
+    "cmake_registered_tests": 143,
+    "tjcomptest_combos": 7668,
+    "tjdecomptest_combos": 3096,
+    "tjtrantest_combos": 22338,
+    "croptest_combos": 10880,
+    "grand_total": 44125
+  }
+}
