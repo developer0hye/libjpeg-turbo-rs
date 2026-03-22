@@ -14,6 +14,7 @@ const SOI: u8 = 0xD8;
 const EOI: u8 = 0xD9;
 const SOF0: u8 = 0xC0;
 const SOF2: u8 = 0xC2;
+const SOF3: u8 = 0xC3; // Lossless, Huffman-coded
 const DHT: u8 = 0xC4;
 const DQT: u8 = 0xDB;
 const SOS: u8 = 0xDA;
@@ -90,10 +91,13 @@ impl<'a> MarkerReader<'a> {
             let marker = self.read_marker()?;
             match marker {
                 SOF0 => {
-                    frame = Some(self.read_sof(false)?);
+                    frame = Some(self.read_sof(false, false)?);
                 }
                 SOF2 => {
-                    frame = Some(self.read_sof(true)?);
+                    frame = Some(self.read_sof(true, false)?);
+                }
+                SOF3 => {
+                    frame = Some(self.read_sof(false, true)?);
                 }
                 DQT => {
                     self.read_dqt(&mut quant_tables)?;
@@ -339,7 +343,7 @@ impl<'a> MarkerReader<'a> {
         Ok(())
     }
 
-    fn read_sof(&mut self, is_progressive: bool) -> Result<FrameHeader> {
+    fn read_sof(&mut self, is_progressive: bool, is_lossless: bool) -> Result<FrameHeader> {
         let length = self.read_u16_be()? as usize;
         let start = self.pos;
 
@@ -372,6 +376,7 @@ impl<'a> MarkerReader<'a> {
             width,
             components,
             is_progressive,
+            is_lossless,
         })
     }
 

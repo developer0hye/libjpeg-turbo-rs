@@ -100,6 +100,8 @@ pub struct FrameHeader {
     pub components: Vec<ComponentInfo>,
     /// True for SOF2 (progressive DCT).
     pub is_progressive: bool,
+    /// True for SOF3 (lossless Huffman-coded).
+    pub is_lossless: bool,
 }
 
 /// Parsed from the SOS marker — describes one scan.
