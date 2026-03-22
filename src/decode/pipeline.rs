@@ -5,7 +5,9 @@ use crate::common::quant_table::QuantTable;
 use crate::common::types::*;
 use crate::decode::bitstream::BitReader;
 use crate::decode::entropy::{self, McuDecoder};
+use crate::decode::huffman;
 use crate::decode::idct_scaled;
+use crate::decode::lossless;
 use crate::decode::marker::{JpegMetadata, MarkerReader, ScanInfo};
 use crate::decode::progressive;
 use crate::simd::{self, SimdRoutines};
@@ -1012,6 +1014,139 @@ impl<'a> Decoder<'a> {
         icc::reassemble_icc_profile(&self.metadata.icc_chunks)
     }
 
+    /// Decode a lossless JPEG (SOF3).
+    ///
+    /// Lossless JPEG uses Huffman-coded differences + prediction instead of DCT.
+    /// No quantization or IDCT is involved.
+    fn decode_lossless_image(
+        &self,
+        frame: &FrameHeader,
+        width: usize,
+        height: usize,
+        icc_profile: Option<Vec<u8>>,
+        exif_data: Option<Vec<u8>>,
+    ) -> Result<Image> {
+        let scan = &self.metadata.scan;
+        let precision = frame.precision;
+        let psv = scan.spec_start; // Predictor selection value (Ss field)
+        let pt = scan.succ_low; // Point transform (Al field)
+
+        if psv < 1 || psv > 7 {
+            return Err(JpegError::Unsupported(format!(
+                "lossless predictor {} (must be 1-7)",
+                psv
+            )));
+        }
+
+        let num_components = frame.components.len();
+        if num_components != 1 {
+            return Err(JpegError::Unsupported(format!(
+                "lossless {} components (only grayscale supported)",
+                num_components
+            )));
+        }
+
+        // Resolve DC Huffman table (lossless uses DC tables only)
+        let dc_tbl_idx = scan.components[0].dc_table_index as usize;
+        let dc_table = self.metadata.dc_huffman_tables[dc_tbl_idx]
+            .as_ref()
+            .ok_or_else(|| {
+                JpegError::CorruptData(format!("missing DC Huffman table {}", dc_tbl_idx))
+            })?;
+
+        let entropy_data = &self.raw_data[self.metadata.entropy_data_offset..];
+        let mut reader = BitReader::new(entropy_data);
+
+        let mask = ((1u32 << precision) - 1) as i32;
+        let initial_pred = 1i32 << (precision as i32 - pt as i32 - 1);
+
+        // Decode all samples using Huffman-coded differences + prediction
+        let mut output = vec![0u16; width * height];
+        let mut prev_row: Option<Vec<u16>> = None;
+
+        for y in 0..height {
+            let row_start = y * width;
+            let mut diffs = Vec::with_capacity(width);
+
+            // Decode one row of difference values using DC Huffman table
+            for _ in 0..width {
+                let diff = huffman::decode_dc_coefficient(&mut reader, dc_table)?;
+                diffs.push(diff);
+            }
+
+            // Undifference using the selected predictor
+            lossless::undifference_row(
+                &diffs,
+                prev_row.as_deref(),
+                &mut output[row_start..row_start + width],
+                psv,
+                precision,
+                pt,
+                y == 0,
+            );
+
+            prev_row = Some(output[row_start..row_start + width].to_vec());
+        }
+
+        // Apply point transform (upscale) and convert to u8
+        let out_format = self.output_format.unwrap_or(PixelFormat::Grayscale);
+        let bpp = out_format.bytes_per_pixel();
+
+        if out_format == PixelFormat::Grayscale {
+            let mut data = Vec::with_capacity(width * height);
+            for &sample in &output {
+                let val = if pt > 0 {
+                    ((sample as u32) << pt) as u8
+                } else {
+                    sample as u8
+                };
+                data.push(val);
+            }
+            Ok(Image {
+                width,
+                height,
+                pixel_format: PixelFormat::Grayscale,
+                data,
+                icc_profile,
+                exif_data,
+                warnings: Vec::new(),
+            })
+        } else {
+            // Expand to color format
+            let mut data = Vec::with_capacity(width * height * bpp);
+            for &sample in &output {
+                let val = if pt > 0 {
+                    ((sample as u32) << pt) as u8
+                } else {
+                    sample as u8
+                };
+                match out_format {
+                    PixelFormat::Rgb | PixelFormat::Bgr => {
+                        data.push(val);
+                        data.push(val);
+                        data.push(val);
+                    }
+                    PixelFormat::Rgba | PixelFormat::Bgra => {
+                        data.push(val);
+                        data.push(val);
+                        data.push(val);
+                        data.push(255);
+                    }
+                    _ => unreachable!(),
+                }
+            }
+            Ok(Image {
+                width,
+                height,
+                pixel_format: out_format,
+                data,
+                icc_profile,
+                exif_data,
+                warnings: Vec::new(),
+            })
+        }
+    }
+
     pub(crate) fn decode_image(&self) -> Result<Image> {
         let frame = &self.metadata.frame;
         let width = frame.width as usize;
@@ -1053,6 +1188,11 @@ impl<'a> Decoder<'a> {
         // Final output dimensions (may be smaller than full due to MCU alignment)
         let out_width = self.scale.scale_dim(width);
         let out_height = self.scale.scale_dim(height);
+
+        // Lossless JPEG (SOF3) — different pipeline, no IDCT/quant
+        if frame.is_lossless {
+            return self.decode_lossless_image(frame, width, height, icc_profile, exif_data);
+        }
 
         // Pre-resolve quant tables per component (once, not per-block)
         let quant_tables: Vec<&QuantTable> = frame
