@@ -236,12 +236,12 @@
 - [x] `output_scanline` tracking (`ScanlineDecoder::output_scanline()`)
 
 ### Color Quantization (8-bit indexed output)
-- [ ] `quantize_colors` — Enable color quantization
-- [ ] `desired_number_of_colors` / `actual_number_of_colors`
-- [ ] `dither_mode` — JDITHER_NONE / JDITHER_ORDERED / JDITHER_FS
-- [ ] `two_pass_quantize` — Two-pass color selection
-- [ ] `colormap` — External colormap input
-- [ ] `enable_1pass_quant` / `enable_2pass_quant` / `enable_external_quant`
+- [x] `quantize_colors` — Enable color quantization (`quantize::quantize()`)
+- [x] `desired_number_of_colors` / `actual_number_of_colors` (`QuantizeOptions::num_colors`, `QuantizedImage::palette.len()`)
+- [x] `dither_mode` — JDITHER_NONE / JDITHER_ORDERED / JDITHER_FS (`DitherMode` enum)
+- [x] `two_pass_quantize` — Two-pass color selection (`QuantizeOptions::two_pass`, median-cut algorithm)
+- [x] `colormap` — External colormap input (`QuantizeOptions::colormap`)
+- [x] `enable_1pass_quant` / `enable_2pass_quant` / `enable_external_quant` (`QuantizeOptions::two_pass` + `colormap`)
 - [ ] `jpeg_new_colormap()` — Update colormap
 
 ---
