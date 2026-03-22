@@ -7,49 +7,30 @@
 /// `ScanlineEncoder` accumulates pixel rows one at a time, then delegates to the
 /// existing compression pipeline on `finish()`.
 use crate::common::error::{JpegError, Result};
-use crate::common::types::{FrameHeader, PixelFormat, Subsampling};
+use crate::common::types::{ColorSpace, DctMethod, FrameHeader, PixelFormat, Subsampling};
 use crate::decode::pipeline::{Decoder, Image};
 
 /// Row-by-row JPEG decoder.
-///
-/// Uses a lazy-decode strategy: the full image is decoded on the first call to
-/// `read_scanline`, `skip_scanlines`, or `finish`. Subsequent reads serve rows
-/// directly from the in-memory buffer.
-///
-/// # Example
-/// ```no_run
-/// use libjpeg_turbo_rs::{ScanlineDecoder, PixelFormat};
-///
-/// let jpeg_data: &[u8] = &[]; // your JPEG bytes
-/// let mut dec = ScanlineDecoder::new(jpeg_data).unwrap();
-/// dec.set_output_format(PixelFormat::Rgb);
-/// let width = dec.header().width as usize;
-/// let mut row = vec![0u8; width * 3];
-/// while dec.output_scanline() < dec.header().height as usize {
-///     dec.read_scanline(&mut row).unwrap();
-/// }
-/// ```
 pub struct ScanlineDecoder<'a> {
     decoder: Decoder<'a>,
     decoded_image: Option<Image>,
     current_line: usize,
+    crop_x: Option<(usize, usize)>,
 }
 
 impl<'a> ScanlineDecoder<'a> {
     /// Create a new scanline decoder from raw JPEG data.
-    ///
-    /// Parses the JPEG header immediately but defers pixel decoding until
-    /// the first scanline read or `finish()` call.
     pub fn new(data: &'a [u8]) -> Result<Self> {
         let decoder: Decoder<'a> = Decoder::new(data)?;
         Ok(Self {
             decoder,
             decoded_image: None,
             current_line: 0,
+            crop_x: None,
         })
     }
 
-    /// Returns the JPEG frame header (dimensions, components, etc.).
+    /// Returns the JPEG frame header.
     pub fn header(&self) -> &FrameHeader {
         self.decoder.header()
     }
@@ -60,17 +41,41 @@ impl<'a> ScanlineDecoder<'a> {
     }
 
     /// Set the output pixel format before starting decode.
-    ///
-    /// Must be called before the first `read_scanline` or `finish`. Has no
-    /// effect after decoding has started.
     pub fn set_output_format(&mut self, format: PixelFormat) {
         self.decoder.set_output_format(format);
     }
 
-    /// Decode (lazily on first call) and copy one scanline into `buf`.
-    ///
-    /// The buffer must be at least `width * bytes_per_pixel` bytes long.
-    /// Returns an error if all scanlines have already been read.
+    /// Enable or disable fast (nearest-neighbor) upsampling.
+    pub fn set_fast_upsample(&mut self, fast: bool) {
+        self.decoder.fast_upsample = fast;
+    }
+
+    /// Enable or disable fast DCT for decoding.
+    pub fn set_fast_dct(&mut self, fast: bool) {
+        self.decoder.fast_dct = fast;
+    }
+
+    /// Set the DCT/IDCT method for decoding.
+    pub fn set_dct_method(&mut self, method: DctMethod) {
+        self.decoder.dct_method = method;
+    }
+
+    /// Enable or disable inter-block smoothing.
+    pub fn set_block_smoothing(&mut self, smooth: bool) {
+        self.decoder.block_smoothing = smooth;
+    }
+
+    /// Override the output color space.
+    pub fn set_output_colorspace(&mut self, cs: ColorSpace) {
+        self.decoder.output_colorspace = Some(cs);
+    }
+
+    /// Set horizontal crop region for scanline-level decoding.
+    pub fn set_crop_x(&mut self, x: usize, width: usize) {
+        self.crop_x = Some((x, width));
+    }
+
+    /// Decode and copy one scanline into `buf`.
     pub fn read_scanline(&mut self, buf: &mut [u8]) -> Result<()> {
         self.ensure_decoded()?;
         let img: &Image = self.decoded_image.as_ref().unwrap();
@@ -86,8 +91,6 @@ impl<'a> ScanlineDecoder<'a> {
     }
 
     /// Skip scanlines without copying data.
-    ///
-    /// Returns the actual number of lines skipped (clamped to remaining lines).
     pub fn skip_scanlines(&mut self, count: usize) -> Result<usize> {
         self.ensure_decoded()?;
         let img: &Image = self.decoded_image.as_ref().unwrap();
@@ -98,40 +101,56 @@ impl<'a> ScanlineDecoder<'a> {
     }
 
     /// Finalize and return the complete decoded Image.
-    ///
-    /// Triggers decoding if it hasn't happened yet.
     pub fn finish(mut self) -> Result<Image> {
         self.ensure_decoded()?;
         Ok(self.decoded_image.take().unwrap())
     }
 
-    /// Trigger lazy decode if not already done.
     fn ensure_decoded(&mut self) -> Result<()> {
         if self.decoded_image.is_none() {
-            self.decoded_image = Some(self.decoder.decode_image()?);
+            let mut img: Image = self.decoder.decode_image()?;
+            if let Some((crop_x_offset, crop_width)) = self.crop_x {
+                img = Self::apply_horizontal_crop(img, crop_x_offset, crop_width)?;
+            }
+            self.decoded_image = Some(img);
         }
         Ok(())
+    }
+
+    fn apply_horizontal_crop(img: Image, x: usize, width: usize) -> Result<Image> {
+        let bpp: usize = img.pixel_format.bytes_per_pixel();
+        if x + width > img.width {
+            return Err(JpegError::Unsupported(format!(
+                "crop region {}..{} exceeds image width {}",
+                x,
+                x + width,
+                img.width
+            )));
+        }
+        let src_row_bytes: usize = img.width * bpp;
+        let dst_row_bytes: usize = width * bpp;
+        let mut data: Vec<u8> = Vec::with_capacity(dst_row_bytes * img.height);
+        for y in 0..img.height {
+            let src_start: usize = y * src_row_bytes + x * bpp;
+            data.extend_from_slice(&img.data[src_start..src_start + dst_row_bytes]);
+        }
+        Ok(Image {
+            width,
+            height: img.height,
+            pixel_format: img.pixel_format,
+            precision: img.precision,
+            data,
+            icc_profile: img.icc_profile,
+            exif_data: img.exif_data,
+            comment: img.comment,
+            density: img.density,
+            saved_markers: img.saved_markers,
+            warnings: img.warnings,
+        })
     }
 }
 
 /// Row-by-row JPEG encoder.
-///
-/// Accumulates pixel data one scanline at a time, then compresses the complete
-/// image on `finish()`.
-///
-/// # Example
-/// ```no_run
-/// use libjpeg_turbo_rs::{ScanlineEncoder, PixelFormat, Subsampling};
-///
-/// let mut enc = ScanlineEncoder::new(640, 480, PixelFormat::Rgb);
-/// enc.set_quality(85);
-/// enc.set_subsampling(Subsampling::S422);
-/// let row = vec![128u8; 640 * 3];
-/// for _ in 0..480 {
-///     enc.write_scanline(&row).unwrap();
-/// }
-/// let jpeg_bytes = enc.finish().unwrap();
-/// ```
 pub struct ScanlineEncoder {
     pixels: Vec<u8>,
     width: usize,
@@ -143,7 +162,7 @@ pub struct ScanlineEncoder {
 }
 
 impl ScanlineEncoder {
-    /// Create a new scanline encoder for the given image dimensions and format.
+    /// Create a new scanline encoder.
     pub fn new(width: usize, height: usize, pixel_format: PixelFormat) -> Self {
         let bpp: usize = pixel_format.bytes_per_pixel();
         Self {
@@ -157,7 +176,7 @@ impl ScanlineEncoder {
         }
     }
 
-    /// Set JPEG quality factor (1-100, where 100 is best quality).
+    /// Set JPEG quality factor (1-100).
     pub fn set_quality(&mut self, quality: u8) {
         self.quality = quality;
     }
@@ -167,15 +186,12 @@ impl ScanlineEncoder {
         self.subsampling = subsampling;
     }
 
-    /// Returns the index of the next scanline to be written (0-based).
+    /// Returns the index of the next scanline to be written.
     pub fn next_scanline(&self) -> usize {
         self.current_line
     }
 
     /// Write one row of pixel data.
-    ///
-    /// The `row` slice must contain at least `width * bytes_per_pixel` bytes.
-    /// Returns an error if all scanlines have already been written.
     pub fn write_scanline(&mut self, row: &[u8]) -> Result<()> {
         if self.current_line >= self.height {
             return Err(JpegError::Unsupported("all scanlines written".into()));
@@ -189,8 +205,6 @@ impl ScanlineEncoder {
     }
 
     /// Compress all accumulated scanlines into a JPEG byte stream.
-    ///
-    /// Returns an error if not all scanlines have been written.
     pub fn finish(self) -> Result<Vec<u8>> {
         if self.current_line != self.height {
             return Err(JpegError::Unsupported(format!(

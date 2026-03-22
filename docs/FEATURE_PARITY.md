@@ -180,17 +180,17 @@
 - [x] Scaled IDCT — 1/1, 1/2, 1/4, 1/8 (`set_scale`)
 - [x] Crop decode (`decompress_cropped`, `set_crop_region`)
 - [ ] `TJPARAM_BOTTOMUP` — Bottom-up row order
-- [ ] `out_color_space` — Explicit output colorspace
+- [x] `out_color_space` — Explicit output colorspace (`Decoder::set_output_colorspace()`)
 - [x] YCbCr/YUV raw output (skip color conversion) (`decompress_raw()`)
 - [x] `raw_data_out` — Raw downsampled component output (`decompress_raw()`)
 
 ### Upsampling / DCT
 - [x] Fancy upsampling (default, always on)
-- [ ] `TJPARAM_FASTUPSAMPLE` — Nearest-neighbor upsampling toggle
-- [ ] `do_fancy_upsampling` toggle
-- [ ] `TJPARAM_FASTDCT` — Fast IDCT vs accurate toggle
-- [ ] `do_block_smoothing` toggle
-- [ ] `dct_method` selection (ISLOW/IFAST/FLOAT)
+- [x] `TJPARAM_FASTUPSAMPLE` — Nearest-neighbor upsampling toggle (`Decoder::set_fast_upsample()`)
+- [x] `do_fancy_upsampling` toggle (`Decoder::set_fast_upsample()`)
+- [x] `TJPARAM_FASTDCT` — Fast IDCT vs accurate toggle (`Decoder::set_fast_dct()`)
+- [x] `do_block_smoothing` toggle (`Decoder::set_block_smoothing()`)
+- [x] `dct_method` selection (ISLOW/IFAST/FLOAT) (`Decoder::set_dct_method()`)
 
 ### Error Handling
 - [x] Lenient / error recovery mode (`decompress_lenient`)
@@ -227,7 +227,7 @@
 - [x] `jpeg_start_decompress()` — Begin decompression (`ScanlineDecoder::new()`)
 - [x] `jpeg_read_scanlines()` — Read scanline rows (`ScanlineDecoder::read_scanlines()`)
 - [x] `jpeg_skip_scanlines()` — Skip rows during decode (`ScanlineDecoder::skip_scanlines()`)
-- [ ] `jpeg_crop_scanline()` — Scanline-level horizontal crop
+- [x] `jpeg_crop_scanline()` — Scanline-level horizontal crop (`ScanlineDecoder::set_crop_x()`)
 - [x] `jpeg_finish_decompress()` — Finalize decompression (`ScanlineDecoder::finish()`)
 - [x] `jpeg_read_raw_data()` — Read raw downsampled data (`decompress_raw()`)
 - [ ] `jpeg12_read_scanlines()` / `jpeg12_skip_scanlines()` / `jpeg12_crop_scanline()`
