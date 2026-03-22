@@ -79,37 +79,62 @@
 
 ## 3. Test Script Equivalents
 
-### tjcomptest.in (Compression Validation)
-- [x] All subsampling modes — `tjunittest_compat.rs`
-- [x] Quality levels (1, 75, 100) — `tjunittest_compat.rs`, `encode_boundaries.rs`
-- [x] Restart intervals — `restart_encode.rs`, `tjunittest_compat.rs`
-- [x] ICC profile embedding — `metadata_write.rs`, `icc_exif_edge_cases.rs`
-- [x] Arithmetic encoding — `tjunittest_compat.rs`, `arithmetic.rs`
-- [x] Progressive encoding — `tjunittest_compat.rs`, `progressive_enc.rs`
+### tjcomptest.in (Compression Validation ~6900 lossy + ~3360 lossless combos)
+- [x] All 6 subsampling modes (444, 422, 440, 420, 411, 441) — `tjunittest_compat.rs`
+- [x] Quality levels (default, 1, 100) — `tjunittest_compat.rs`, `encode_boundaries.rs`
+- [x] Restart intervals (`-r 1`, `-r 1b`) — `restart_encode.rs`, `tjunittest_compat.rs`
+- [x] ICC profile with restart (`-r 1 -icc test3.icc`) — `metadata_write.rs`
+- [x] Arithmetic encoding (`-a`) — `tjunittest_compat.rs`, `arithmetic.rs`
+- [x] Progressive encoding (`-p`) — `tjunittest_compat.rs`, `progressive_enc.rs`
 - [x] Progressive + Arithmetic — `tjunittest_compat.rs`
-- [x] Optimized Huffman — `tjunittest_compat.rs`, `huff_opt.rs`
-- [x] Lossless PSV/PT combinations — `tjunittest_compat.rs`, `lossless_encode.rs`
-- [ ] DCT method variation in compression (ifast, float) — encode uses IsLow only in matrix
+- [x] Optimized Huffman (`-o`) — `tjunittest_compat.rs`, `huff_opt.rs`
+- [x] Lossless PSV 1-7 × PT 0-14 (pt < precision) — `tjunittest_compat.rs`, `lossless_encode.rs`
+- [x] 8-bit and 12-bit lossy precision — `tjunittest_compat.rs`, `precision.rs`
+- [x] 2-16 bit lossless precision (per-bit) — partial (8/12/16 only)
+- [ ] Grayscale-from-RGB encode (`-g` flag) in full matrix — tested individually, not in matrix
+- [ ] RGB-direct encode (`-rg` flag, no YCbCr conversion) in full matrix — not in matrix
+- [ ] `-baseline` flag forced with quality=1 — `force_baseline` exists but not in matrix
+- [ ] `-r 1b` byte-unit restart interval — not distinguished from MCU-row restart
+- [ ] DCT method variation (`-dc fa`, `-dc f`) in compress matrix — tested individually
+- [ ] Full cross-product: precision × restart × ari × dct × opt × prog × quality × subsamp — we test subsets, not full cross
 - [ ] MD5 comparison between our encoder and C cjpeg — not implemented
-- [ ] Binary comparison between our encoder and C cjpeg — not implemented
+- [ ] Binary `cmp` between our encoder and C cjpeg — not implemented
+- [x] Grayscale input image encode — `tjunittest_compat.rs`, `grayscale_encode.rs`
 
-### tjdecomptest.in (Decompression Validation)
-- [x] All subsampling modes decode — `conformance.rs`, `tjunittest_compat.rs`
-- [x] Crop operations — `crop_skip.rs`
-- [ ] 15 scaling factors (only 1/2, 1/4, 1/8 tested) — missing 12 intermediate scales
-- [x] Smooth/no-smooth upsampling — `decode_toggles.rs`
+### tjdecomptest.in (Decompression Validation ~2000-3000 combos)
+- [x] 7 subsampling modes (444, 422, 440, 420, 411, 441, gray) — `conformance.rs`
+- [ ] 4:1:0 (410) subsampling decode — not tested
+- [x] 5 crop regions (14x14+23+23, 21x21+4+4, 18x18+13+13, 21x21+0+0, 24x26+20+18) — partial (`crop_skip.rs`)
+- [ ] Crop × subsampling × scale full cross-product — only individual tests
+- [ ] 15 scaling factors (16/8 thru 1/8) — only 1/2, 1/4, 1/8 tested
+- [x] No-smooth upsampling (`-nos`) — `decode_toggles.rs`
+- [ ] No-smooth × crop × scale cross-product — not tested
 - [x] DCT methods (fast, accurate) — `decode_toggles.rs`
-- [x] Grayscale decode from color JPEG — `decode_toggles.rs`
-- [ ] ICC profile extraction and comparison — extraction tested, not compared to C reference
-- [ ] MD5 comparison between our decoder and C djpeg — not implemented
-- [x] Multi-format output (PPM/RGB/Grayscale) — `cross_encoder_compat.rs`
+- [ ] Fast DCT limited to specific scale+subsamp combos (as in C) — not validated
+- [x] Grayscale output from color JPEG (`-g`) — `decode_toggles.rs`
+- [ ] Grayscale output in full matrix (only when nosmooth="") — not in matrix
+- [x] ICC profile extraction — `metadata_write.rs`
+- [ ] ICC profile extraction MD5 comparison against C djpeg — not done
+- [ ] 2-16 bit lossless decompression per-precision — only 8/12/16
+- [ ] MD5/binary comparison between our decoder and C djpeg — not implemented
+- [x] PPM/PGM output format — `cross_encoder_compat.rs`
+- [x] RGB output from grayscale JPEG — `decode_toggles.rs`
 
 ### tjtrantest.in (Transform Validation)
 - [x] All 8 transform types — `tjunittest_transform.rs`, `transform.rs`
-- [x] All subsampling modes — `tjunittest_transform.rs`
-- [ ] Copy modes (all, none, ICC only) — partial (copy_markers true/false only)
-- [x] Crop + transform — `tjunittest_transform.rs`, `transform_options.rs`
-- [x] Grayscale conversion during transform — `tjunittest_transform.rs`, `transform_options.rs`
+- [x] 7 subsampling modes + grayscale — `tjunittest_transform.rs`
+- [ ] Copy mode: `-c a` (all markers) — only `copy_markers=true`
+- [ ] Copy mode: `-c n` (no markers) — only `copy_markers=false`
+- [ ] Copy mode: `-c i` (ICC only) — not implemented
+- [x] 6 crop regions in transform — `tjunittest_transform.rs`, `transform_options.rs`
+- [x] Grayscale conversion during transform — `transform_options.rs`
+- [x] Progressive output from transform — `tjunittest_transform.rs`
+- [x] Arithmetic output from transform — `tjunittest_transform.rs`
+- [x] Optimized Huffman output — `transform_options.rs`
+- [ ] Restart intervals in transform output — not tested in transform context
+- [x] Trim flag — `transform_options.rs`
+- [ ] 8-bit and 12-bit precision transforms — only 8-bit tested
+- [ ] MD5/binary comparison against C jpegtran — not implemented
 - [x] Progressive output — `tjunittest_transform.rs`
 - [x] Arithmetic output — `tjunittest_transform.rs`
 - [x] Restart intervals in transform — not directly, but restart encode/decode tested
