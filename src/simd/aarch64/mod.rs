@@ -7,6 +7,8 @@ pub mod color_encode;
 pub mod downsample;
 pub mod fdct;
 pub mod idct;
+pub mod idct_scaled;
+pub mod quantize;
 pub mod upsample;
 
 use crate::simd::SimdRoutines;
