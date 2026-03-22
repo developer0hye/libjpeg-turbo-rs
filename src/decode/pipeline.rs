@@ -75,6 +75,10 @@ pub struct Decoder<'a> {
     crop_x: Option<usize>,
     /// Horizontal crop width.
     crop_width: Option<usize>,
+    /// Vertical crop offset in pixels (auto-aligned to MCU boundary).
+    crop_y: Option<usize>,
+    /// Vertical crop height in pixels.
+    crop_height: Option<usize>,
 }
 
 impl<'a> Decoder<'a> {
@@ -91,6 +95,8 @@ impl<'a> Decoder<'a> {
             lenient: false,
             crop_x: None,
             crop_width: None,
+            crop_y: None,
+            crop_height: None,
         })
     }
 
@@ -117,6 +123,15 @@ impl<'a> Decoder<'a> {
     pub fn set_crop(&mut self, x: usize, width: usize) {
         self.crop_x = Some(x);
         self.crop_width = Some(width);
+    }
+
+    /// Set full crop region (horizontal + vertical).
+    /// MCU rows outside the vertical range will skip IDCT during decoding.
+    pub fn set_crop_region(&mut self, x: usize, y: usize, width: usize, height: usize) {
+        self.crop_x = Some(x);
+        self.crop_width = Some(width);
+        self.crop_y = Some(y);
+        self.crop_height = Some(height);
     }
 
     pub fn decode(data: &'a [u8]) -> Result<Image> {
@@ -333,6 +348,8 @@ impl<'a> Decoder<'a> {
 
     /// Decode baseline (single-scan) into component planes.
     /// Returns component planes and any warnings (in lenient mode).
+    /// `mcu_row_range`: optional (start, end) MCU row range for IDCT skip optimization.
+    /// When set, only MCU rows in [start, end) get IDCT; planes are sized for this range only.
     fn decode_baseline_planes(
         &self,
         frame: &FrameHeader,
@@ -344,17 +361,17 @@ impl<'a> Decoder<'a> {
     ) -> Result<(Vec<Vec<u8>>, Vec<DecodeWarning>)> {
         let scan = &self.metadata.scan;
 
-        // Allocate component planes (MCU-aligned, scaled by block_size)
+        // Determine MCU row range for IDCT
+        let (mcu_y_start, mcu_y_end) = self.mcu_row_range(mcus_y, block_size, frame);
+
+        // Allocate component planes (full MCU-aligned size)
         let mut component_planes: Vec<Vec<u8>> = frame
             .components
             .iter()
             .map(|comp| {
                 let comp_w = mcus_x * comp.horizontal_sampling as usize * block_size;
                 let comp_h = mcus_y * comp.vertical_sampling as usize * block_size;
-                let size = comp_w * comp_h;
-                let mut v = Vec::with_capacity(size);
-                unsafe { v.set_len(size) };
-                v
+                vec![0u8; comp_w * comp_h]
             })
             .collect();
 
@@ -446,19 +463,23 @@ impl<'a> Decoder<'a> {
                                 Err(e) => return Err(e),
                             }
 
-                            let block_x = (mcu_x * layout.h_blocks + h) * block_size;
-                            let block_y = (mcu_y * layout.v_blocks + v) * block_size;
-                            let dst_offset = block_y * layout.comp_w + block_x;
+                            // Skip IDCT for MCU rows outside the active range
+                            if mcu_y >= mcu_y_start && mcu_y < mcu_y_end {
+                                let block_x = (mcu_x * layout.h_blocks + h) * block_size;
+                                let block_y = (mcu_y * layout.v_blocks + v) * block_size;
+                                let dst_offset = block_y * layout.comp_w + block_x;
 
-                            unsafe {
-                                let dst = component_planes[comp_idx].as_mut_ptr().add(dst_offset);
-                                self.idct_scaled_strided(
-                                    &coeffs,
-                                    qt_values,
-                                    dst,
-                                    layout.comp_w,
-                                    block_size,
-                                );
+                                unsafe {
+                                    let dst =
+                                        component_planes[comp_idx].as_mut_ptr().add(dst_offset);
+                                    self.idct_scaled_strided(
+                                        &coeffs,
+                                        qt_values,
+                                        dst,
+                                        layout.comp_w,
+                                        block_size,
+                                    );
+                                }
                             }
                         }
                     }
@@ -957,6 +978,33 @@ impl<'a> Decoder<'a> {
         tables[index as usize].as_ref().ok_or_else(|| {
             JpegError::CorruptData(format!("missing {} Huffman table {}", kind, index))
         })
+    }
+
+    /// Compute the MCU row range [start, end) needed for the vertical crop region.
+    /// Returns (0, mcus_y) when no crop is set.
+    fn mcu_row_range(
+        &self,
+        mcus_y: usize,
+        block_size: usize,
+        frame: &FrameHeader,
+    ) -> (usize, usize) {
+        let (crop_y, crop_h) = match (self.crop_y, self.crop_height) {
+            (Some(y), Some(h)) => (y, h),
+            _ => return (0, mcus_y),
+        };
+
+        let max_v = frame
+            .components
+            .iter()
+            .map(|c| c.vertical_sampling as usize)
+            .max()
+            .unwrap_or(1);
+        let mcu_pixel_h = max_v * block_size;
+
+        let mcu_start = crop_y / mcu_pixel_h;
+        let mcu_end = ((crop_y + crop_h + mcu_pixel_h - 1) / mcu_pixel_h).min(mcus_y);
+
+        (mcu_start, mcu_end)
     }
 
     /// Reassemble ICC profile from parsed APP2 chunks.
