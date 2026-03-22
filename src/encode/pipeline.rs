@@ -222,6 +222,229 @@ pub fn compress(
     Ok(output)
 }
 
+/// Compress raw pixel data into a JPEG byte stream with DRI restart markers.
+///
+/// `restart_interval` is the number of MCU blocks between restart markers.
+/// When non-zero, a DRI marker is written in the header and RST markers
+/// are inserted into the entropy-coded data at the specified interval.
+pub fn compress_with_restart(
+    pixels: &[u8],
+    width: usize,
+    height: usize,
+    pixel_format: PixelFormat,
+    quality: u8,
+    subsampling: Subsampling,
+    restart_interval: u16,
+) -> Result<Vec<u8>> {
+    // Validate inputs
+    if width == 0 || height == 0 {
+        return Err(JpegError::CorruptData(
+            "image dimensions must be non-zero".to_string(),
+        ));
+    }
+
+    let bpp = pixel_format.bytes_per_pixel();
+    let expected_size = width * height * bpp;
+    if pixels.len() < expected_size {
+        return Err(JpegError::BufferTooSmall {
+            need: expected_size,
+            got: pixels.len(),
+        });
+    }
+
+    // CMYK not supported with restart (fall through to normal compress)
+    if pixel_format == PixelFormat::Cmyk {
+        return compress_cmyk(pixels, width, height, quality);
+    }
+
+    let is_grayscale = pixel_format == PixelFormat::Grayscale;
+
+    // Generate scaled quantization tables
+    let luma_quant = tables::quality_scale_quant_table(&tables::STD_LUMINANCE_QUANT_TABLE, quality);
+    let chroma_quant =
+        tables::quality_scale_quant_table(&tables::STD_CHROMINANCE_QUANT_TABLE, quality);
+
+    let luma_divisors = scale_quant_for_fdct(&luma_quant);
+    let chroma_divisors = scale_quant_for_fdct(&chroma_quant);
+
+    // Build Huffman tables
+    let dc_luma_table = build_huff_table(&tables::DC_LUMINANCE_BITS, &tables::DC_LUMINANCE_VALUES);
+    let ac_luma_table = build_huff_table(&tables::AC_LUMINANCE_BITS, &tables::AC_LUMINANCE_VALUES);
+    let dc_chroma_table =
+        build_huff_table(&tables::DC_CHROMINANCE_BITS, &tables::DC_CHROMINANCE_VALUES);
+    let ac_chroma_table =
+        build_huff_table(&tables::AC_CHROMINANCE_BITS, &tables::AC_CHROMINANCE_VALUES);
+
+    // Color convert to YCbCr planes (or just Y for grayscale)
+    let (y_plane, cb_plane, cr_plane) = convert_to_ycbcr(pixels, width, height, pixel_format)?;
+
+    // Determine MCU dimensions based on subsampling
+    let (mcu_w, mcu_h) = if is_grayscale {
+        (8, 8)
+    } else {
+        match subsampling {
+            Subsampling::S444 => (8, 8),
+            Subsampling::S422 => (16, 8),
+            Subsampling::S420 => (16, 16),
+            Subsampling::S440 => (8, 16),
+            Subsampling::S411 => (32, 8),
+        }
+    };
+
+    let mcus_x = (width + mcu_w - 1) / mcu_w;
+    let mcus_y = (height + mcu_h - 1) / mcu_h;
+
+    // Entropy encode all MCUs with restart markers
+    let mut bit_writer = BitWriter::new(width * height);
+    let mut prev_dc_y: i16 = 0;
+    let mut prev_dc_cb: i16 = 0;
+    let mut prev_dc_cr: i16 = 0;
+    let mut mcu_count: u32 = 0;
+    let mut rst_count: u8 = 0;
+    let ri = restart_interval as u32;
+
+    for mcu_row in 0..mcus_y {
+        for mcu_col in 0..mcus_x {
+            // Insert restart marker between MCU intervals (not before the first MCU)
+            if ri > 0 && mcu_count > 0 && mcu_count % ri == 0 {
+                bit_writer.flush_restart();
+                bit_writer.write_restart_marker(rst_count);
+                rst_count = rst_count.wrapping_add(1);
+                // Reset DC predictors
+                prev_dc_y = 0;
+                prev_dc_cb = 0;
+                prev_dc_cr = 0;
+            }
+
+            let x0 = mcu_col * mcu_w;
+            let y0 = mcu_row * mcu_h;
+
+            if is_grayscale {
+                encode_single_block(
+                    &y_plane,
+                    width,
+                    height,
+                    x0,
+                    y0,
+                    &luma_divisors,
+                    &dc_luma_table,
+                    &ac_luma_table,
+                    &mut bit_writer,
+                    &mut prev_dc_y,
+                );
+            } else {
+                encode_color_mcu(
+                    &y_plane,
+                    &cb_plane,
+                    &cr_plane,
+                    width,
+                    height,
+                    x0,
+                    y0,
+                    subsampling,
+                    &luma_divisors,
+                    &chroma_divisors,
+                    &dc_luma_table,
+                    &ac_luma_table,
+                    &dc_chroma_table,
+                    &ac_chroma_table,
+                    &mut bit_writer,
+                    &mut prev_dc_y,
+                    &mut prev_dc_cb,
+                    &mut prev_dc_cr,
+                );
+            }
+
+            mcu_count += 1;
+        }
+    }
+
+    bit_writer.flush();
+
+    // Assemble output: markers + entropy data + EOI
+    let mut output = Vec::with_capacity(bit_writer.data().len() + 1024);
+
+    marker_writer::write_soi(&mut output);
+    marker_writer::write_app0_jfif(&mut output);
+
+    // DRI marker
+    if restart_interval > 0 {
+        marker_writer::write_dri(&mut output, restart_interval);
+    }
+
+    // Quantization tables
+    marker_writer::write_dqt(&mut output, 0, &luma_quant);
+    if !is_grayscale {
+        marker_writer::write_dqt(&mut output, 1, &chroma_quant);
+    }
+
+    // Frame header
+    if is_grayscale {
+        let components = vec![(1, 1, 1, 0)];
+        marker_writer::write_sof0(&mut output, width as u16, height as u16, &components);
+    } else {
+        let (h_samp, v_samp) = subsampling.sampling_factors();
+        let components = vec![
+            (1, h_samp, v_samp, 0), // Y
+            (2, 1, 1, 1),           // Cb
+            (3, 1, 1, 1),           // Cr
+        ];
+        marker_writer::write_sof0(&mut output, width as u16, height as u16, &components);
+    }
+
+    // Huffman tables
+    marker_writer::write_dht(
+        &mut output,
+        0,
+        0,
+        &tables::DC_LUMINANCE_BITS,
+        &tables::DC_LUMINANCE_VALUES,
+    );
+    marker_writer::write_dht(
+        &mut output,
+        1,
+        0,
+        &tables::AC_LUMINANCE_BITS,
+        &tables::AC_LUMINANCE_VALUES,
+    );
+    if !is_grayscale {
+        marker_writer::write_dht(
+            &mut output,
+            0,
+            1,
+            &tables::DC_CHROMINANCE_BITS,
+            &tables::DC_CHROMINANCE_VALUES,
+        );
+        marker_writer::write_dht(
+            &mut output,
+            1,
+            1,
+            &tables::AC_CHROMINANCE_BITS,
+            &tables::AC_CHROMINANCE_VALUES,
+        );
+    }
+
+    // Scan header
+    if is_grayscale {
+        let scan_components = vec![(1, 0, 0)];
+        marker_writer::write_sos(&mut output, &scan_components);
+    } else {
+        let scan_components = vec![
+            (1, 0, 0), // Y: DC table 0, AC table 0
+            (2, 1, 1), // Cb: DC table 1, AC table 1
+            (3, 1, 1), // Cr: DC table 1, AC table 1
+        ];
+        marker_writer::write_sos(&mut output, &scan_components);
+    }
+
+    // Entropy-coded data (includes embedded RST markers)
+    output.extend_from_slice(bit_writer.data());
+
+    marker_writer::write_eoi(&mut output);
+
+    Ok(output)
+}
+
 /// Compress with optional ICC profile and EXIF metadata.
 ///
 /// Inserts APP1 (EXIF) and APP2 (ICC) markers after the APP0 JFIF marker.
