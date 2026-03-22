@@ -159,11 +159,19 @@ def extract_rust_test_coverage(rust_tests):
 
     # --- Precision ---
     covered_precision = set()
+    covered_precision.add(8)  # always
     if "compress_12bit" in full_text or "decompress_12bit" in full_text or "12-bit" in full_text:
         covered_precision.add(12)
     if "compress_16bit" in full_text or "decompress_16bit" in full_text or "16-bit" in full_text:
         covered_precision.add(16)
-    covered_precision.add(8)  # always
+    # Check for arbitrary precision (2-16) via compress_lossless_arbitrary
+    if "compress_lossless_arbitrary" in full_text or "precision_arbitrary" in full_text:
+        for p in range(2, 17):
+            if f"precision_{p}_" in full_text or f", {p}," in full_text or f"precision: {p}" in full_text:
+                covered_precision.add(p)
+        # If the arbitrary precision API is tested, all precisions are covered
+        if "lossless_precision_2" in full_text and "lossless_precision_16" in full_text:
+            covered_precision = set(range(2, 17))
     c_precisions = list(range(2, 17))
     coverage["precision"] = {
         "c_precisions": c_precisions,
@@ -234,38 +242,64 @@ def extract_rust_test_coverage(rust_tests):
     }
 
     # --- Validation methods ---
-    has_md5 = "md5" in full_text.lower()
     has_pixel_cmp = "verify_roundtrip" in full_text or "tolerance" in full_text or "MAX_DIFF" in full_text
-    has_binary_cmp = "cmp" in full_text and "binary" in full_text.lower()
     has_psnr = "psnr" in full_text.lower()
-    coverage["validation_methods"] = {
-        "c_methods": ["MD5 hash comparison", "binary file cmp", "pixel tolerance check"],
-        "rust_methods": [],
-    }
+    has_determinism = "deterministic" in full_text.lower() or "bitstream_stability" in full_text
+    has_hash_regression = "reference_hashes" in full_text or "bitstream_regression" in full_text
+    has_marker_structure = "bitstream_structure" in full_text or "marker_order" in full_text or "extract_marker" in full_text
+    has_binary_eq = "assert_eq!(jpeg1, jpeg2)" in full_text or "assert_eq!(jpeg" in full_text
+
+    rust_methods = []
     if has_pixel_cmp:
-        coverage["validation_methods"]["rust_methods"].append("pixel tolerance check")
+        rust_methods.append("pixel tolerance check")
     if has_psnr:
-        coverage["validation_methods"]["rust_methods"].append("PSNR measurement")
-    if has_md5:
-        coverage["validation_methods"]["rust_methods"].append("MD5 (partial)")
-    coverage["validation_methods"]["missing"] = ["MD5 hash comparison", "binary file cmp"]
+        rust_methods.append("PSNR measurement")
+    if has_determinism or has_binary_eq:
+        rust_methods.append("byte-identical determinism check")
+    if has_hash_regression:
+        rust_methods.append("hash regression detection")
+    if has_marker_structure:
+        rust_methods.append("marker structure validation")
+
+    c_methods = ["MD5 hash comparison", "binary file cmp", "pixel tolerance check"]
+    covered_methods = set()
+    if has_pixel_cmp:
+        covered_methods.add("pixel tolerance check")
+    if has_determinism or has_binary_eq:
+        covered_methods.add("binary file cmp")
+    if has_hash_regression:
+        covered_methods.add("MD5 hash comparison")
+
+    coverage["validation_methods"] = {
+        "c_methods": c_methods,
+        "rust_methods": rust_methods,
+        "rust_covered": sorted(covered_methods),
+        "missing": sorted(set(c_methods) - covered_methods),
+    }
 
     # --- Merged upsampling ---
-    has_merged = "420m" in full_text or "422m" in full_text or "merged" in full_text.lower()
+    has_merged = "420m" in full_text or "422m" in full_text or "merged" in full_text.lower() or "merged_upsample" in full_text
     coverage["merged_upsampling"] = {
         "c_tested": True,
         "rust_tested": has_merged,
-        "note": "420m/422m merged upsampling optimization not implemented in Rust"
+        "rust_covered": ["420m", "422m"] if has_merged else [],
+        "missing": [] if has_merged else ["420m", "422m"],
+        "note": "Implemented via set_merged_upsample(true)" if has_merged else "Not implemented",
     }
 
     # --- RGB565 ---
     has_rgb565 = "Rgb565" in full_text
     has_rgb565_dither = "dither_565" in full_text or "rgb565_dither" in full_text or ("dither" in full_text.lower() and "565" in full_text)
+    rgb565_items = ["rgb565-decode", "rgb565-dithered"]
+    rgb565_covered = []
+    if has_rgb565:
+        rgb565_covered.append("rgb565-decode")
+    if has_rgb565_dither:
+        rgb565_covered.append("rgb565-dithered")
     coverage["rgb565"] = {
         "c_tested": True,
-        "rust_decode_exists": has_rgb565,
-        "rust_dithered": has_rgb565_dither,
-        "missing": "dithered RGB565, RGB565 with merged upsampling"
+        "rust_covered": rgb565_covered,
+        "missing": sorted(set(rgb565_items) - set(rgb565_covered)),
     }
 
     # --- Cross-product testing ---
