@@ -530,15 +530,33 @@ impl<'a> MarkerReader<'a> {
         let width = self.read_u16_be()?;
         let num_components = self.read_u8()? as usize;
 
+        if width == 0 {
+            return Err(JpegError::CorruptData("SOF width must not be 0".into()));
+        }
+        if num_components == 0 || num_components > 4 {
+            return Err(JpegError::CorruptData(format!(
+                "SOF component count must be 1-4, got {}",
+                num_components
+            )));
+        }
+
         let mut components = Vec::with_capacity(num_components);
         for _ in 0..num_components {
             let id = self.read_u8()?;
             let sampling = self.read_u8()?;
+            let h_samp = sampling >> 4;
+            let v_samp = sampling & 0x0F;
+            if h_samp == 0 || h_samp > 4 || v_samp == 0 || v_samp > 4 {
+                return Err(JpegError::CorruptData(format!(
+                    "sampling factor must be 1-4, got {}x{}",
+                    h_samp, v_samp
+                )));
+            }
             let quant_table_index = self.read_u8()?;
             components.push(ComponentInfo {
                 id,
-                horizontal_sampling: sampling >> 4,
-                vertical_sampling: sampling & 0x0F,
+                horizontal_sampling: h_samp,
+                vertical_sampling: v_samp,
                 quant_table_index,
             });
         }
@@ -669,6 +687,13 @@ impl<'a> MarkerReader<'a> {
     fn read_sos(&mut self) -> Result<ScanHeader> {
         let _length = self.read_u16_be()?;
         let num_components = self.read_u8()? as usize;
+
+        if num_components == 0 || num_components > 4 {
+            return Err(JpegError::CorruptData(format!(
+                "SOS component count must be 1-4, got {}",
+                num_components
+            )));
+        }
 
         let mut components = Vec::with_capacity(num_components);
         for _ in 0..num_components {
