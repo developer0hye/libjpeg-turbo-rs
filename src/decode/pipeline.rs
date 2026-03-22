@@ -99,6 +99,16 @@ pub struct Decoder<'a> {
     max_pixels: Option<usize>,
     max_memory: Option<usize>,
     scan_limit: Option<u32>,
+    /// Fast upsampling toggle.
+    pub(crate) fast_upsample: bool,
+    /// Fast DCT toggle.
+    pub(crate) fast_dct: bool,
+    /// DCT method for decode.
+    pub(crate) dct_method: DctMethod,
+    /// Block smoothing toggle.
+    pub(crate) block_smoothing: bool,
+    /// Output colorspace override.
+    pub(crate) output_colorspace: Option<ColorSpace>,
 }
 
 impl<'a> Decoder<'a> {
@@ -121,6 +131,11 @@ impl<'a> Decoder<'a> {
             max_pixels: None,
             max_memory: None,
             scan_limit: None,
+            fast_upsample: false,
+            fast_dct: false,
+            dct_method: DctMethod::IsLow,
+            block_smoothing: false,
+            output_colorspace: None,
         })
     }
 
@@ -176,6 +191,31 @@ impl<'a> Decoder<'a> {
     /// Set maximum number of progressive scans before error.
     pub fn set_scan_limit(&mut self, limit: u32) {
         self.scan_limit = Some(limit);
+    }
+
+    /// Enable or disable fast (nearest-neighbor) upsampling.
+    pub fn set_fast_upsample(&mut self, fast: bool) {
+        self.fast_upsample = fast;
+    }
+
+    /// Enable or disable fast DCT for decoding.
+    pub fn set_fast_dct(&mut self, fast: bool) {
+        self.fast_dct = fast;
+    }
+
+    /// Set the DCT/IDCT method for decoding.
+    pub fn set_dct_method(&mut self, method: DctMethod) {
+        self.dct_method = method;
+    }
+
+    /// Enable or disable inter-block smoothing.
+    pub fn set_block_smoothing(&mut self, smooth: bool) {
+        self.block_smoothing = smooth;
+    }
+
+    /// Override the output color space.
+    pub fn set_output_colorspace(&mut self, cs: ColorSpace) {
+        self.output_colorspace = Some(cs);
     }
 
     /// Configure which markers to save during decoding.
@@ -1902,6 +1942,40 @@ impl<'a> Decoder<'a> {
             )?
         };
 
+        // Apply block smoothing if requested
+        let (component_planes, warnings) = if self.block_smoothing {
+            let mut planes = component_planes;
+            for (ci, plane) in planes.iter_mut().enumerate() {
+                let comp_w: usize =
+                    mcus_x * frame.components[ci].horizontal_sampling as usize * block_size;
+                let comp_h: usize =
+                    mcus_y * frame.components[ci].vertical_sampling as usize * block_size;
+                crate::decode::toggles::apply_block_smoothing(plane, comp_w, comp_h);
+            }
+            (planes, warnings)
+        } else {
+            (component_planes, warnings)
+        };
+
+        // Handle output colorspace override
+        if let Some(cs) = self.output_colorspace {
+            return crate::decode::toggles::decode_with_colorspace_override(
+                cs,
+                &component_planes,
+                frame,
+                out_width,
+                out_height,
+                mcus_x,
+                block_size,
+                icc_profile,
+                exif_data,
+                self.metadata.comment.clone(),
+                self.metadata.density,
+                self.metadata.saved_markers.clone(),
+                warnings,
+            );
+        }
+
         // Upsample and color convert
         if num_components == 1 {
             let out_format = self.output_format.unwrap_or(PixelFormat::Grayscale);
@@ -2028,7 +2102,27 @@ impl<'a> Decoder<'a> {
                     cr_full.set_len(alloc_size);
                 }
 
-                if h_factor == 2 && v_factor == 1 {
+                if self.fast_upsample {
+                    // Nearest-neighbor upsampling (fast path)
+                    crate::decode::toggles::upsample_nearest(
+                        &component_planes[1],
+                        cb_w,
+                        cb_h,
+                        &mut cb_full,
+                        full_width,
+                        h_factor,
+                        v_factor,
+                    );
+                    crate::decode::toggles::upsample_nearest(
+                        &component_planes[2],
+                        cb_w,
+                        cb_h,
+                        &mut cr_full,
+                        full_width,
+                        h_factor,
+                        v_factor,
+                    );
+                } else if h_factor == 2 && v_factor == 1 {
                     for row in 0..cb_h {
                         self.fancy_upsample_h2v1(
                             &component_planes[1][row * cb_w..],
