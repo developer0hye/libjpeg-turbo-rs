@@ -18,6 +18,9 @@ pub struct ArithEncoder {
     a: u32,
     ct: i32,
     sc: i32,
+    /// Counter for pending 0x00 output values which might be discarded
+    /// at the end ("Pacman" termination per ITU-T T.81 Figure D.15).
+    zc: i32,
     buffer: i32,
 
     output: Vec<u8>,
@@ -41,6 +44,7 @@ impl ArithEncoder {
             a: 0x10000,
             ct: 11,
             sc: 0,
+            zc: 0,
             buffer: -1,
             output: Vec::with_capacity(capacity),
             last_dc_val: [0; 4],
@@ -54,11 +58,9 @@ impl ArithEncoder {
         }
     }
 
+    /// Raw byte output (matches C emit_byte — no auto-stuffing).
     fn emit_byte(&mut self, val: u8) {
         self.output.push(val);
-        if val == 0xFF {
-            self.output.push(0x00);
-        }
     }
 
     fn get_stat(&self, r: StatRef) -> u8 {
@@ -108,8 +110,9 @@ impl ArithEncoder {
             self.set_stat(r, (sv & 0x80) | nm);
         }
 
-        // Renormalization
-        while self.a < 0x8000 {
+        // Renormalization & data output per section D.1.6
+        // Matches jcarith.c arith_encode() renormalization exactly.
+        loop {
             self.a <<= 1;
             self.c <<= 1;
             self.ct -= 1;
@@ -117,197 +120,296 @@ impl ArithEncoder {
             if self.ct == 0 {
                 let temp = self.c >> 19;
                 if temp > 0xFF {
+                    // Handle overflow over all stacked 0xFF bytes
                     if self.buffer >= 0 {
-                        self.emit_byte((self.buffer as u8).wrapping_add(1));
+                        while self.zc > 0 {
+                            self.emit_byte(0x00);
+                            self.zc -= 1;
+                        }
+                        let byte = (self.buffer + 1) as u8;
+                        self.emit_byte(byte);
+                        if byte == 0xFF {
+                            self.emit_byte(0x00);
+                        }
                     }
-                    while self.sc > 0 {
-                        self.emit_byte(0x00);
-                        self.sc -= 1;
-                    }
+                    // Carry-over converts stacked 0xFF bytes to 0x00
+                    self.zc += self.sc;
+                    self.sc = 0;
                     self.buffer = (temp & 0xFF) as i32;
                 } else if temp == 0xFF {
                     self.sc += 1;
                 } else {
-                    if self.buffer >= 0 {
+                    // Output all stacked 0xFF bytes, they will not overflow
+                    if self.buffer == 0 {
+                        self.zc += 1;
+                    } else if self.buffer >= 0 {
+                        while self.zc > 0 {
+                            self.emit_byte(0x00);
+                            self.zc -= 1;
+                        }
                         self.emit_byte(self.buffer as u8);
                     }
-                    while self.sc > 0 {
-                        self.emit_byte(0xFF);
-                        self.sc -= 1;
+                    if self.sc > 0 {
+                        while self.zc > 0 {
+                            self.emit_byte(0x00);
+                            self.zc -= 1;
+                        }
+                        while self.sc > 0 {
+                            self.emit_byte(0xFF);
+                            self.emit_byte(0x00);
+                            self.sc -= 1;
+                        }
                     }
-                    self.buffer = temp as i32;
+                    self.buffer = (temp & 0xFF) as i32;
                 }
                 self.c &= 0x7FFFF;
-                self.ct = 8;
+                self.ct += 8;
+            }
+
+            if self.a >= 0x8000 {
+                break;
             }
         }
     }
 
     /// Encode DC coefficient for one block (sequential arithmetic).
+    ///
+    /// Ported from jcarith.c encode_mcu_DC_first / encode_mcu sections.
+    /// Context layout in dc_stats[tbl]:
+    ///   [0..3]   = zero diff context (S0, SS, SP, SN)
+    ///   [4..7]   = small positive diff context
+    ///   [8..11]  = small negative diff context
+    ///   [12..15] = large positive diff context
+    ///   [16..19] = large negative diff context
+    ///   [20..]   = magnitude category encoding (X1=20)
     pub fn encode_dc_sequential(&mut self, block: &[i16; 64], comp_idx: usize, dc_tbl: usize) {
         let dc_val = block[0] as i32;
-        let diff = dc_val - self.last_dc_val[comp_idx];
-        self.last_dc_val[comp_idx] = dc_val;
+        let mut v: i32 = dc_val - self.last_dc_val[comp_idx];
 
-        let ctx = self.dc_context[comp_idx];
+        // S0 = dc_stats[tbl][dc_context[ci]]
+        let s0 = self.dc_context[comp_idx];
 
-        // Step 1: Is difference nonzero?
-        let is_nonzero = if diff != 0 { 1u8 } else { 0u8 };
-        self.encode(StatRef::Dc(dc_tbl, ctx * 4), is_nonzero);
-
-        if diff == 0 {
+        if v == 0 {
+            // Zero difference
+            self.encode(StatRef::Dc(dc_tbl, s0), 0);
             self.dc_context[comp_idx] = 0;
             return;
         }
 
-        // Step 2: Sign
-        let (sign, abs_diff) = if diff < 0 {
-            (1u8, (-diff) as u32)
+        self.last_dc_val[comp_idx] = dc_val;
+        self.encode(StatRef::Dc(dc_tbl, s0), 1); // nonzero
+
+        // Sign encoding + stat pointer selection (Table F.4)
+        let st: usize;
+        if v > 0 {
+            self.encode(StatRef::Dc(dc_tbl, s0 + 1), 0); // SS: positive
+            st = s0 + 2; // SP
+            self.dc_context[comp_idx] = 4; // small positive
         } else {
-            (0u8, diff as u32)
-        };
-        self.encode(StatRef::Fixed(0), sign);
-
-        // Step 3: Magnitude (unary)
-        let stat_offset = (ctx * 4 + 2).min(DC_STAT_BINS - 1);
-        let mut m: u32 = 1;
-        while m < abs_diff {
-            self.encode(StatRef::Dc(dc_tbl, stat_offset), 1);
-            m <<= 1;
+            v = -v;
+            self.encode(StatRef::Dc(dc_tbl, s0 + 1), 1); // SS: negative
+            st = s0 + 3; // SN
+            self.dc_context[comp_idx] = 8; // small negative
         }
-        self.encode(StatRef::Dc(dc_tbl, stat_offset), 0);
 
-        // Step 4: Magnitude bits
-        if m > 1 {
-            let mut bit_pos = m >> 1;
-            while bit_pos > 0 {
-                let bit = if abs_diff & bit_pos != 0 { 1u8 } else { 0u8 };
+        // Magnitude category encoding (Figure F.8)
+        let mut m: i32 = 0;
+        v -= 1; // v is now (abs_diff - 1)
+        let v_orig = v; // save for magnitude bits
+        if v != 0 {
+            self.encode(StatRef::Dc(dc_tbl, st), 1);
+            m = 1;
+            let mut v2: i32 = v;
+            let mut x1 = 20usize; // Table F.4: X1 = 20
+            v2 >>= 1;
+            while v2 != 0 {
+                self.encode(StatRef::Dc(dc_tbl, x1), 1);
+                m <<= 1;
+                x1 += 1;
+                v2 >>= 1;
+            }
+            // Magnitude terminator at the X1 position
+            self.encode(StatRef::Dc(dc_tbl, x1), 0);
+
+            // Update context based on magnitude vs conditioning thresholds
+            let l_thresh = (1i32 << self.arith_dc_l[dc_tbl]) >> 1;
+            let u_thresh = (1i32 << self.arith_dc_u[dc_tbl]) >> 1;
+            if m < l_thresh {
+                self.dc_context[comp_idx] = 0;
+            } else if m > u_thresh {
+                self.dc_context[comp_idx] += 8; // promote to large category
+            }
+
+            // Magnitude bit pattern (Figure F.9) — uses fixed-probability bin
+            let mut bit_mask = m >> 1;
+            while bit_mask != 0 {
+                let bit = if (bit_mask & v_orig) != 0 { 1u8 } else { 0u8 };
                 self.encode(StatRef::Fixed(0), bit);
-                bit_pos >>= 1;
+                bit_mask >>= 1;
+            }
+        } else {
+            // v was 1 (abs_diff == 1), magnitude category 0
+            self.encode(StatRef::Dc(dc_tbl, st), 0);
+            // Context update: m=0 < any positive L threshold → set to 0
+            let l_thresh = (1i32 << self.arith_dc_l[dc_tbl]) >> 1;
+            if m < l_thresh {
+                self.dc_context[comp_idx] = 0;
             }
         }
-
-        // Update DC context
-        let l = self.arith_dc_l[dc_tbl] as i32;
-        let u = self.arith_dc_u[dc_tbl] as i32;
-        self.dc_context[comp_idx] = if diff < l {
-            4 + (if diff <= -(1 << u) { 12 } else { 0 })
-        } else if diff > u {
-            8 + (if diff >= (1 << u) { 12 } else { 0 })
-        } else {
-            0
-        };
     }
 
     /// Encode AC coefficients for one block (sequential arithmetic).
+    ///
+    /// Ported from jcarith.c encode_mcu (AC section).
+    /// Block is expected in zigzag order (as output by quantize_block).
     pub fn encode_ac_sequential(&mut self, block: &[i16; 64], ac_tbl: usize) {
-        // Find last nonzero coefficient
-        let mut last_nonzero = 0usize;
-        for k in (1..64).rev() {
-            if block[k] != 0 {
-                last_nonzero = k;
+        // Establish EOB (end-of-block) index
+        let mut ke: usize = 63;
+        while ke > 0 {
+            if block[ke] != 0 {
                 break;
             }
+            ke -= 1;
         }
 
+        // Encode AC coefficients (Figure F.5)
         let mut k = 1usize;
-        while k <= last_nonzero {
-            // Not EOB
-            let eob_idx = (3 * (k - 1)).min(AC_STAT_BINS - 1);
-            self.encode(StatRef::Ac(ac_tbl, eob_idx), 0);
+        while k <= ke {
+            let mut st = 3 * (k - 1);
+            self.encode(StatRef::Ac(ac_tbl, st), 0); // EOB decision: not EOB
 
             // Zero-run
-            while block[k] == 0 {
-                let zr_idx = (3 * (k - 1) + 1).min(AC_STAT_BINS - 1);
-                self.encode(StatRef::Ac(ac_tbl, zr_idx), 0);
+            let mut v: i32 = block[k] as i32;
+            while v == 0 {
+                self.encode(StatRef::Ac(ac_tbl, st + 1), 0);
+                st += 3;
                 k += 1;
+                v = block[k] as i32;
             }
-            let nz_idx = (3 * (k - 1) + 1).min(AC_STAT_BINS - 1);
-            self.encode(StatRef::Ac(ac_tbl, nz_idx), 1);
+            self.encode(StatRef::Ac(ac_tbl, st + 1), 1); // nonzero
 
             // Sign
-            let val = block[k];
-            let (sign, abs_val) = if val < 0 {
-                (1u8, (-val) as u32)
+            if v > 0 {
+                self.encode(StatRef::Fixed(0), 0);
             } else {
-                (0u8, val as u32)
-            };
-            self.encode(StatRef::Fixed(0), sign);
-
-            // Magnitude (unary)
-            let stat_base = (3 * (k - 1) + 2).min(AC_STAT_BINS - 1);
-            let mut m: u32 = 1;
-            while m < abs_val {
-                self.encode(StatRef::Ac(ac_tbl, stat_base), 1);
-                m <<= 1;
+                v = -v;
+                self.encode(StatRef::Fixed(0), 1);
             }
-            self.encode(StatRef::Ac(ac_tbl, stat_base), 0);
 
-            // Magnitude bits
-            if m > 1 {
-                let mut bit_pos = m >> 1;
-                while bit_pos > 0 {
-                    let bit = if abs_val & bit_pos != 0 { 1u8 } else { 0u8 };
-                    self.encode(StatRef::Fixed(0), bit);
-                    bit_pos >>= 1;
+            st += 2;
+
+            // Magnitude category encoding (Figure F.8)
+            let mut m: i32 = 0;
+            v -= 1;
+            let v_orig = v;
+            if v != 0 {
+                self.encode(StatRef::Ac(ac_tbl, st), 1);
+                m = 1;
+                let mut v2 = v >> 1;
+                if v2 != 0 {
+                    self.encode(StatRef::Ac(ac_tbl, st), 1);
+                    m <<= 1;
+                    let kx = self.arith_ac_k[ac_tbl] as usize;
+                    st = if k <= kx { 189 } else { 217 };
+                    v2 >>= 1;
+                    while v2 != 0 {
+                        self.encode(StatRef::Ac(ac_tbl, st), 1);
+                        m <<= 1;
+                        st += 1;
+                        v2 >>= 1;
+                    }
                 }
+            }
+            self.encode(StatRef::Ac(ac_tbl, st), 0); // magnitude terminator
+
+            // Magnitude bit pattern (Figure F.9)
+            let mut bit_mask = m >> 1;
+            while bit_mask != 0 {
+                let bit = if (bit_mask & v_orig) != 0 { 1u8 } else { 0u8 };
+                self.encode(StatRef::Fixed(0), bit);
+                bit_mask >>= 1;
             }
 
             k += 1;
         }
 
-        // EOB
-        if last_nonzero < 63 && k < 64 {
-            let idx = (3 * (k - 1)).min(AC_STAT_BINS - 1);
-            self.encode(StatRef::Ac(ac_tbl, idx), 1);
+        // Encode EOB decision if k <= 63
+        if k <= 63 {
+            let st = 3 * (k - 1);
+            self.encode(StatRef::Ac(ac_tbl, st), 1);
         }
     }
 
     /// Finish encoding: flush remaining bits.
+    ///
+    /// Implements Section D.1.8 of ITU-T T.81 with "Pacman" termination.
+    /// Ported from jcarith.c finish_pass().
     pub fn finish(&mut self) {
-        let temp = (self.a.wrapping_sub(1).wrapping_add(self.c)) & 0xFFFF0000;
-        let temp = if temp < self.c { temp + 0x8000 } else { temp };
-        self.c = temp;
+        // Find the c in the coding interval with the largest
+        // number of trailing zero bits
+        let temp: u32 = (self.a.wrapping_sub(1).wrapping_add(self.c)) & 0xFFFF0000;
+        self.c = if temp < self.c { temp + 0x8000 } else { temp };
 
-        // Flush final bytes
-        for _ in 0..2 {
-            self.c <<= 1;
-            self.ct -= 1;
-            if self.ct == 0 {
-                let byte = self.c >> 19;
-                if byte > 0xFF {
-                    if self.buffer >= 0 {
-                        self.emit_byte((self.buffer as u8).wrapping_add(1));
-                    }
-                    while self.sc > 0 {
-                        self.emit_byte(0x00);
-                        self.sc -= 1;
-                    }
-                    self.buffer = (byte & 0xFF) as i32;
-                } else if byte == 0xFF {
-                    self.sc += 1;
-                } else {
-                    if self.buffer >= 0 {
-                        self.emit_byte(self.buffer as u8);
-                    }
-                    while self.sc > 0 {
-                        self.emit_byte(0xFF);
-                        self.sc -= 1;
-                    }
-                    self.buffer = byte as i32;
+        // Send remaining bytes to output — shift by ct bits at once
+        self.c <<= self.ct;
+
+        if self.c & 0xF8000000 != 0 {
+            // One final overflow has to be handled
+            if self.buffer >= 0 {
+                while self.zc > 0 {
+                    self.emit_byte(0x00);
+                    self.zc -= 1;
                 }
-                self.c &= 0x7FFFF;
-                self.ct = 8;
+                let byte = (self.buffer + 1) as u8;
+                self.emit_byte(byte);
+                if byte == 0xFF {
+                    self.emit_byte(0x00);
+                }
+            }
+            // Carry-over converts stacked 0xFF bytes to 0x00
+            self.zc += self.sc;
+            self.sc = 0;
+        } else {
+            if self.buffer == 0 {
+                self.zc += 1;
+            } else if self.buffer >= 0 {
+                while self.zc > 0 {
+                    self.emit_byte(0x00);
+                    self.zc -= 1;
+                }
+                self.emit_byte(self.buffer as u8);
+            }
+            if self.sc > 0 {
+                while self.zc > 0 {
+                    self.emit_byte(0x00);
+                    self.zc -= 1;
+                }
+                while self.sc > 0 {
+                    self.emit_byte(0xFF);
+                    self.emit_byte(0x00);
+                    self.sc -= 1;
+                }
             }
         }
 
-        // Emit remaining buffer
-        if self.buffer >= 0 {
-            self.emit_byte(self.buffer as u8);
-        }
-        while self.sc > 0 {
-            self.emit_byte(0xFF);
-            self.sc -= 1;
+        // Output final bytes only if they are not 0x00
+        if self.c & 0x7FFF800 != 0 {
+            while self.zc > 0 {
+                self.emit_byte(0x00);
+                self.zc -= 1;
+            }
+            let byte1 = ((self.c >> 19) & 0xFF) as u8;
+            self.emit_byte(byte1);
+            if byte1 == 0xFF {
+                self.emit_byte(0x00);
+            }
+            if self.c & 0x7F800 != 0 {
+                let byte2 = ((self.c >> 11) & 0xFF) as u8;
+                self.emit_byte(byte2);
+                if byte2 == 0xFF {
+                    self.emit_byte(0x00);
+                }
+            }
         }
     }
 
