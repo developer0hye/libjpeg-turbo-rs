@@ -690,6 +690,169 @@ impl<'a> Decoder<'a> {
         Ok((component_planes, Vec::new()))
     }
 
+    /// Decode arithmetic progressive (SOF10) into component planes.
+    /// Accumulates DCT coefficients across all scans using ArithDecoder, then runs IDCT.
+    fn decode_arithmetic_progressive_planes(
+        &self,
+        frame: &FrameHeader,
+        quant_tables: &[&QuantTable],
+        _num_components: usize,
+        mcus_x: usize,
+        mcus_y: usize,
+        _max_h: usize,
+        _max_v: usize,
+        block_size: usize,
+    ) -> Result<(Vec<Vec<u8>>, Vec<DecodeWarning>)> {
+        use crate::decode::arithmetic::ArithDecoder;
+
+        // Per-component coefficient buffers
+        let comp_infos: Vec<CompInfo> = frame
+            .components
+            .iter()
+            .map(|comp| {
+                let h_samp = comp.horizontal_sampling as usize;
+                let v_samp = comp.vertical_sampling as usize;
+                CompInfo {
+                    blocks_x: mcus_x * h_samp,
+                    blocks_y: mcus_y * v_samp,
+                    h_samp,
+                    v_samp,
+                    comp_w: mcus_x * h_samp * block_size,
+                }
+            })
+            .collect();
+
+        // Allocate coefficient buffers (zero-initialized for progressive accumulation)
+        let mut coeff_bufs: Vec<Vec<[i16; 64]>> = comp_infos
+            .iter()
+            .map(|ci| vec![[0i16; 64]; ci.blocks_x * ci.blocks_y])
+            .collect();
+
+        // Process each scan
+        for scan_info in &self.metadata.scans {
+            let scan_header = &scan_info.header;
+            let is_dc = scan_header.spec_start == 0 && scan_header.spec_end == 0;
+            let ah = scan_header.succ_high;
+            let al = scan_header.succ_low;
+            let ss = scan_header.spec_start;
+            let se = scan_header.spec_end;
+
+            let entropy_data = &self.raw_data[scan_info.data_offset..];
+            let mut arith = ArithDecoder::new(entropy_data, 0);
+
+            // Set conditioning parameters from DAC markers
+            for i in 0..4 {
+                let (l, u) = self.metadata.arith_dc_params[i];
+                arith.set_dc_conditioning(i, l, u);
+                arith.set_ac_conditioning(i, self.metadata.arith_ac_params[i]);
+            }
+
+            // Resolve component indices for this scan
+            let scan_comp_indices: Vec<usize> = scan_header
+                .components
+                .iter()
+                .map(|sc| {
+                    frame
+                        .components
+                        .iter()
+                        .position(|fc| fc.id == sc.component_id)
+                        .ok_or_else(|| {
+                            JpegError::CorruptData(format!(
+                                "scan references unknown component {}",
+                                sc.component_id
+                            ))
+                        })
+                })
+                .collect::<Result<Vec<_>>>()?;
+
+            if scan_header.components.len() > 1 {
+                // Interleaved scan (DC only in progressive)
+                for mcu_y in 0..mcus_y {
+                    for mcu_x in 0..mcus_x {
+                        for (si, &comp_idx) in scan_comp_indices.iter().enumerate() {
+                            let ci = &comp_infos[comp_idx];
+                            let scan_comp = &scan_header.components[si];
+                            let dc_tbl = scan_comp.dc_table_index as usize;
+
+                            for v in 0..ci.v_samp {
+                                for h in 0..ci.h_samp {
+                                    let bx = mcu_x * ci.h_samp + h;
+                                    let by = mcu_y * ci.v_samp + v;
+                                    let block_idx = by * ci.blocks_x + bx;
+                                    let coeffs = &mut coeff_bufs[comp_idx][block_idx];
+
+                                    if is_dc && ah == 0 {
+                                        arith.decode_dc_first_progressive(
+                                            coeffs, comp_idx, dc_tbl, al,
+                                        )?;
+                                    } else if is_dc {
+                                        arith.decode_dc_refine_progressive(coeffs, al)?;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            } else {
+                // Non-interleaved scan (single component)
+                let comp_idx = scan_comp_indices[0];
+                let scan_comp = &scan_header.components[0];
+                let dc_tbl = scan_comp.dc_table_index as usize;
+                let ac_tbl = scan_comp.ac_table_index as usize;
+                let ci = &comp_infos[comp_idx];
+
+                for by in 0..ci.blocks_y {
+                    for bx in 0..ci.blocks_x {
+                        let block_idx = by * ci.blocks_x + bx;
+                        let coeffs = &mut coeff_bufs[comp_idx][block_idx];
+
+                        if is_dc && ah == 0 {
+                            arith.decode_dc_first_progressive(coeffs, comp_idx, dc_tbl, al)?;
+                        } else if is_dc {
+                            arith.decode_dc_refine_progressive(coeffs, al)?;
+                        } else if ah == 0 {
+                            arith.decode_ac_first_progressive(coeffs, ac_tbl, ss, se, al)?;
+                        } else {
+                            arith.decode_ac_refine_progressive(coeffs, ac_tbl, ss, se, al)?;
+                        }
+                    }
+                }
+            }
+        }
+
+        // IDCT all blocks into component planes
+        let mut component_planes: Vec<Vec<u8>> = comp_infos
+            .iter()
+            .map(|ci| {
+                let size = ci.comp_w * ci.blocks_y * block_size;
+                let mut v = Vec::with_capacity(size);
+                unsafe { v.set_len(size) };
+                v
+            })
+            .collect();
+
+        for (comp_idx, ci) in comp_infos.iter().enumerate() {
+            let qt_values = &quant_tables[comp_idx].values;
+            for by in 0..ci.blocks_y {
+                for bx in 0..ci.blocks_x {
+                    let block_idx = by * ci.blocks_x + bx;
+                    let coeffs = &coeff_bufs[comp_idx][block_idx];
+
+                    let px_x = bx * block_size;
+                    let px_y = by * block_size;
+                    let dst_offset = px_y * ci.comp_w + px_x;
+
+                    unsafe {
+                        let dst = component_planes[comp_idx].as_mut_ptr().add(dst_offset);
+                        self.idct_scaled_strided(coeffs, qt_values, dst, ci.comp_w, block_size);
+                    }
+                }
+            }
+        }
+
+        Ok((component_planes, Vec::new()))
+    }
+
     /// Decode progressive (multi-scan) into component planes.
     /// Accumulates DCT coefficients across all scans, then runs IDCT.
     fn decode_progressive_planes(
@@ -1360,7 +1523,18 @@ impl<'a> Decoder<'a> {
             .collect::<Result<Vec<_>>>()?;
 
         // Decode component planes — different paths for baseline vs progressive vs arithmetic
-        let (component_planes, warnings) = if self.metadata.is_arithmetic {
+        let (component_planes, warnings) = if self.metadata.is_arithmetic && frame.is_progressive {
+            self.decode_arithmetic_progressive_planes(
+                frame,
+                &quant_tables,
+                num_components,
+                mcus_x,
+                mcus_y,
+                max_h,
+                max_v,
+                block_size,
+            )?
+        } else if self.metadata.is_arithmetic {
             self.decode_arithmetic_planes(
                 frame,
                 &quant_tables,
