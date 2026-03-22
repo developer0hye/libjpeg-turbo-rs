@@ -4,9 +4,11 @@
 /// similar to libjpeg-turbo's jpegtran workflow.
 use crate::common::error::{JpegError, Result};
 use crate::common::quant_table::NATURAL_ORDER;
+use crate::common::types::{MarkerSaveConfig, SavedMarker};
 use crate::decode::marker::{JpegMetadata, MarkerReader};
 use crate::encode::huffman_encode::{build_huff_table, BitWriter, HuffmanEncoder};
 use crate::encode::marker_writer;
+use crate::encode::pipeline as encoder_pipeline;
 use crate::encode::tables;
 use crate::transform::spatial;
 use crate::transform::{TransformOp, TransformOptions};
@@ -358,6 +360,20 @@ pub fn transform_jpeg(data: &[u8], op: TransformOp) -> Result<Vec<u8>> {
 /// Supports all 9 flags from libjpeg-turbo: perfect, trim, crop, grayscale,
 /// no_output, progressive, arithmetic, optimize, and copy_markers.
 pub fn transform_jpeg_with_options(data: &[u8], options: &TransformOptions) -> Result<Vec<u8>> {
+    // Read saved markers from the source if copy_markers is enabled.
+    let saved_markers: Vec<SavedMarker> = if options.copy_markers {
+        let mut reader: MarkerReader<'_> = MarkerReader::new(data);
+        reader.set_marker_save_config(MarkerSaveConfig::All);
+        let meta: JpegMetadata = reader.read_markers()?;
+        // Filter out JFIF APP0 since write_coefficients writes its own.
+        meta.saved_markers
+            .into_iter()
+            .filter(|m| m.code != 0xE0)
+            .collect()
+    } else {
+        Vec::new()
+    };
+
     let mut coeffs = read_coefficients(data)?;
     let op: TransformOp = options.op;
 
@@ -581,10 +597,20 @@ pub fn transform_jpeg_with_options(data: &[u8], options: &TransformOptions) -> R
     }
 
     // Write output with the appropriate encoding.
-    if options.optimize {
-        write_coefficients_optimized(&coeffs)
+    let output: Vec<u8> = if options.optimize {
+        write_coefficients_optimized(&coeffs)?
     } else {
-        write_coefficients(&coeffs)
+        write_coefficients(&coeffs)?
+    };
+
+    // Inject saved markers from the source if copy_markers is enabled.
+    if !saved_markers.is_empty() {
+        Ok(encoder_pipeline::inject_saved_markers(
+            &output,
+            &saved_markers,
+        ))
+    } else {
+        Ok(output)
     }
 }
 

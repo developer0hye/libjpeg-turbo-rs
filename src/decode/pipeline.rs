@@ -70,6 +70,13 @@ impl Image {
             .as_ref()
             .and_then(|d| crate::common::exif::parse_orientation(d))
     }
+
+    /// Returns all saved markers (APP and COM) collected during decoding.
+    ///
+    /// Only populated when the decoder was configured with `save_markers()`.
+    pub fn markers(&self) -> &[SavedMarker] {
+        &self.saved_markers
+    }
 }
 
 /// JPEG decoder. Orchestrates the full decoding pipeline.
@@ -169,6 +176,21 @@ impl<'a> Decoder<'a> {
     /// Set maximum number of progressive scans before error.
     pub fn set_scan_limit(&mut self, limit: u32) {
         self.scan_limit = Some(limit);
+    }
+
+    /// Configure which markers to save during decoding.
+    ///
+    /// By default, the decoder only parses known markers (JFIF, ICC, EXIF, Adobe, COM)
+    /// and discards unknown APP markers. Call this to preserve arbitrary APP/COM markers
+    /// in the decoded `Image.saved_markers` field.
+    ///
+    /// This re-parses the JPEG header with the new configuration.
+    pub fn save_markers(&mut self, config: MarkerSaveConfig) {
+        let mut reader: MarkerReader<'_> = MarkerReader::new(self.raw_data);
+        reader.set_marker_save_config(config);
+        if let Ok(metadata) = reader.read_markers() {
+            self.metadata = metadata;
+        }
     }
 
     pub fn decode(data: &'a [u8]) -> Result<Image> {
@@ -1612,7 +1634,7 @@ impl<'a> Decoder<'a> {
                 exif_data,
                 comment: self.metadata.comment.clone(),
                 density: self.metadata.density,
-                saved_markers: Vec::new(),
+                saved_markers: self.metadata.saved_markers.clone(),
                 warnings: Vec::new(),
             })
         } else {
@@ -1667,7 +1689,7 @@ impl<'a> Decoder<'a> {
                 exif_data,
                 comment: self.metadata.comment.clone(),
                 density: self.metadata.density,
-                saved_markers: Vec::new(),
+                saved_markers: self.metadata.saved_markers.clone(),
                 warnings: Vec::new(),
             })
         }
@@ -1757,7 +1779,7 @@ impl<'a> Decoder<'a> {
             exif_data,
             comment: self.metadata.comment.clone(),
             density: self.metadata.density,
-            saved_markers: Vec::new(),
+            saved_markers: self.metadata.saved_markers.clone(),
             warnings: Vec::new(),
         })
     }
@@ -1902,7 +1924,7 @@ impl<'a> Decoder<'a> {
                     exif_data: exif_data.clone(),
                     comment: self.metadata.comment.clone(),
                     density: self.metadata.density,
-                    saved_markers: Vec::new(),
+                    saved_markers: self.metadata.saved_markers.clone(),
                     warnings: warnings.clone(),
                 })
             } else {
@@ -1962,7 +1984,7 @@ impl<'a> Decoder<'a> {
                     exif_data: exif_data.clone(),
                     comment: self.metadata.comment.clone(),
                     density: self.metadata.density,
-                    saved_markers: Vec::new(),
+                    saved_markers: self.metadata.saved_markers.clone(),
                     warnings: warnings.clone(),
                 })
             }
@@ -2079,7 +2101,7 @@ impl<'a> Decoder<'a> {
                     exif_data: exif_data.clone(),
                     comment: self.metadata.comment.clone(),
                     density: self.metadata.density,
-                    saved_markers: Vec::new(),
+                    saved_markers: self.metadata.saved_markers.clone(),
                     warnings: warnings.clone(),
                 });
             }
@@ -2109,7 +2131,7 @@ impl<'a> Decoder<'a> {
                 exif_data: exif_data.clone(),
                 comment: self.metadata.comment.clone(),
                 density: self.metadata.density,
-                saved_markers: Vec::new(),
+                saved_markers: self.metadata.saved_markers.clone(),
                 warnings: warnings.clone(),
             })
         } else if num_components == 4 {
@@ -2477,7 +2499,7 @@ impl<'a> Decoder<'a> {
             exif_data,
             comment: self.metadata.comment.clone(),
             density: self.metadata.density,
-            saved_markers: Vec::new(),
+            saved_markers: self.metadata.saved_markers.clone(),
             warnings,
         })
     }

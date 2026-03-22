@@ -301,8 +301,32 @@ pub enum DensityUnit {
 /// A saved JPEG marker (APP or COM).
 #[derive(Debug, Clone)]
 pub struct SavedMarker {
+    /// Marker code (e.g., 0xE0 for APP0, 0xFE for COM).
     pub code: u8,
+    /// Raw marker data (after the 2-byte length field).
     pub data: Vec<u8>,
+}
+
+/// Configuration for which markers the decoder should save.
+///
+/// Controls which APP and COM markers are preserved during decoding,
+/// matching libjpeg-turbo's `jpeg_save_markers()` / `TJPARAM_SAVEMARKERS`.
+#[derive(Debug, Clone)]
+pub enum MarkerSaveConfig {
+    /// Do not save any markers (default).
+    None,
+    /// Save all APP (0xE0-0xEF) and COM (0xFE) markers.
+    All,
+    /// Save only APP markers (0xE0-0xEF), not COM.
+    AppOnly,
+    /// Save only the specified marker codes.
+    Specific(Vec<u8>),
+}
+
+impl Default for MarkerSaveConfig {
+    fn default() -> Self {
+        MarkerSaveConfig::None
+    }
 }
 
 /// Progressive scan script entry.
