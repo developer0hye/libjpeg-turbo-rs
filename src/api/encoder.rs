@@ -25,6 +25,7 @@ pub struct Encoder<'a> {
     lossless: bool,
     lossless_predictor: u8,
     lossless_point_transform: u8,
+    grayscale_from_color: bool,
     restart_interval: Option<RestartConfig>,
     icc_profile: Option<&'a [u8]>,
     exif_data: Option<&'a [u8]>,
@@ -48,6 +49,7 @@ impl<'a> Encoder<'a> {
             lossless: false,
             lossless_predictor: 1,
             lossless_point_transform: 0,
+            grayscale_from_color: false,
             restart_interval: None,
             icc_profile: None,
             exif_data: None,
@@ -108,6 +110,12 @@ impl<'a> Encoder<'a> {
     /// precision but improving compression.
     pub fn lossless_point_transform(mut self, point_transform: u8) -> Self {
         self.lossless_point_transform = point_transform;
+        self
+    }
+
+    /// Convert color input to single-component grayscale by extracting Y (luminance).
+    pub fn grayscale_from_color(mut self, v: bool) -> Self {
+        self.grayscale_from_color = v;
         self
     }
 
@@ -184,72 +192,126 @@ impl<'a> Encoder<'a> {
         self.custom_quant_tables.iter().any(|t| t.is_some())
     }
 
+    /// Extract Y (luminance) from color pixels using BT.601 coefficients.
+    fn extract_luminance(pixels: &[u8], n: usize, pf: PixelFormat) -> Vec<u8> {
+        let mut y = Vec::with_capacity(n);
+        match pf {
+            PixelFormat::Grayscale => y.extend_from_slice(&pixels[..n]),
+            PixelFormat::Rgb => {
+                for c in pixels[..n * 3].chunks_exact(3) {
+                    y.push(
+                        ((19595 * c[0] as u32 + 38470 * c[1] as u32 + 7471 * c[2] as u32 + 32768)
+                            >> 16) as u8,
+                    );
+                }
+            }
+            PixelFormat::Rgba => {
+                for c in pixels[..n * 4].chunks_exact(4) {
+                    y.push(
+                        ((19595 * c[0] as u32 + 38470 * c[1] as u32 + 7471 * c[2] as u32 + 32768)
+                            >> 16) as u8,
+                    );
+                }
+            }
+            PixelFormat::Bgr => {
+                for c in pixels[..n * 3].chunks_exact(3) {
+                    y.push(
+                        ((19595 * c[2] as u32 + 38470 * c[1] as u32 + 7471 * c[0] as u32 + 32768)
+                            >> 16) as u8,
+                    );
+                }
+            }
+            PixelFormat::Bgra => {
+                for c in pixels[..n * 4].chunks_exact(4) {
+                    y.push(
+                        ((19595 * c[2] as u32 + 38470 * c[1] as u32 + 7471 * c[0] as u32 + 32768)
+                            >> 16) as u8,
+                    );
+                }
+            }
+            PixelFormat::Cmyk => y.resize(n, 128),
+        }
+        y
+    }
+
     /// Encode and return the JPEG byte stream.
     pub fn encode(&self) -> Result<Vec<u8>> {
         let restart_interval = self.compute_restart_interval();
 
+        let (effective_pixels, effective_format);
+        let gray_buf: Vec<u8>;
+        if self.grayscale_from_color && self.pixel_format != PixelFormat::Grayscale {
+            gray_buf =
+                Self::extract_luminance(self.pixels, self.width * self.height, self.pixel_format);
+            effective_pixels = &gray_buf[..];
+            effective_format = PixelFormat::Grayscale;
+        } else {
+            effective_pixels = self.pixels;
+            effective_format = self.pixel_format;
+        }
+
         let base = if self.lossless {
             encoder::compress_lossless_extended(
-                self.pixels,
+                effective_pixels,
                 self.width,
                 self.height,
-                self.pixel_format,
+                effective_format,
                 self.lossless_predictor,
                 self.lossless_point_transform,
             )?
         } else if self.arithmetic {
             encoder::compress_arithmetic(
-                self.pixels,
+                effective_pixels,
                 self.width,
                 self.height,
-                self.pixel_format,
+                effective_format,
                 self.quality,
                 self.subsampling,
             )?
         } else if self.progressive {
             encoder::compress_progressive(
-                self.pixels,
+                effective_pixels,
                 self.width,
                 self.height,
-                self.pixel_format,
+                effective_format,
                 self.quality,
                 self.subsampling,
             )?
         } else if self.optimize_huffman {
             encoder::compress_optimized(
-                self.pixels,
+                effective_pixels,
                 self.width,
                 self.height,
-                self.pixel_format,
+                effective_format,
                 self.quality,
                 self.subsampling,
             )?
         } else if self.has_custom_quant_tables() {
             encoder::compress_custom_quant(
-                self.pixels,
+                effective_pixels,
                 self.width,
                 self.height,
-                self.pixel_format,
+                effective_format,
                 self.quality,
                 self.subsampling,
                 &self.custom_quant_tables,
             )?
         } else if restart_interval > 0 {
             encoder::compress_with_restart(
-                self.pixels,
+                effective_pixels,
                 self.width,
                 self.height,
-                self.pixel_format,
+                effective_format,
                 self.quality,
                 self.subsampling,
                 restart_interval,
             )?
         } else {
             encoder::compress(
-                self.pixels,
+                effective_pixels,
                 self.width,
                 self.height,
-                self.pixel_format,
+                effective_format,
                 self.quality,
                 self.subsampling,
             )?
