@@ -2753,7 +2753,23 @@ fn encode_progressive_dc_scan(
     }
 }
 
+/// Emit buffered correction bits (for AC refine scans).
+fn emit_buffered_bits(bits: &[u8], writer: &mut BitWriter) {
+    for &bit in bits {
+        writer.write_bits(bit as u16, 1);
+    }
+}
+
 /// Encode a progressive AC scan (single component).
+///
+/// For AC first scan (ah==0): each block either encodes its non-zero
+/// coefficients or emits EOB (symbol 0x00). We emit one EOB per block
+/// rather than using EOBRUN batching, because the standard Huffman tables
+/// do not include EOBRUN category symbols (0x10, 0x20, ...).
+///
+/// For AC refine scan (ah!=0): correction bits for previously-nonzero
+/// coefficients must be buffered and emitted alongside ZRL/EOB/new-nonzero
+/// symbols, per ITU-T T.81 Figure G.7.
 #[allow(clippy::too_many_arguments)]
 fn encode_progressive_ac_scan(
     coeff_bufs: &[Vec<[i16; 64]>],
@@ -2787,71 +2803,132 @@ fn encode_progressive_ac_scan(
                     let block = &coeff_bufs[ci][by * layout.blocks_x + bx];
 
                     if ah == 0 {
-                        // AC first scan
-                        let mut zero_run: u8 = 0;
-                        for k in ss..=se {
-                            let ac = block[k] >> al;
-                            if ac == 0 {
-                                zero_run += 1;
-                            } else {
-                                while zero_run >= 16 {
-                                    writer.write_bits(ac_table.ehufco[0xF0], ac_table.ehufsi[0xF0]);
-                                    zero_run -= 16;
-                                }
-                                let (mag, size) = encode_ac_value_prog(ac);
-                                let symbol = ((zero_run as u16) << 4) | (size as u16);
-                                writer.write_bits(
-                                    ac_table.ehufco[symbol as usize],
-                                    ac_table.ehufsi[symbol as usize],
-                                );
-                                if size > 0 {
-                                    writer.write_bits(mag, size);
-                                }
-                                zero_run = 0;
-                            }
-                        }
-                        if zero_run > 0 {
-                            writer.write_bits(ac_table.ehufco[0x00], ac_table.ehufsi[0x00]);
-                        }
+                        encode_ac_first_block(block, ss, se, al, ac_table, writer);
                     } else {
-                        // AC refine scan: encode single refinement bit per nonzero coeff
-                        let mut zero_run: u8 = 0;
-                        for k in ss..=se {
-                            let ac = block[k];
-                            let prev_val = ac >> (al + 1);
-                            let cur_bit = (ac >> al) & 1;
-
-                            if prev_val == 0 {
-                                if cur_bit == 0 {
-                                    zero_run += 1;
-                                } else {
-                                    while zero_run >= 16 {
-                                        writer.write_bits(
-                                            ac_table.ehufco[0xF0],
-                                            ac_table.ehufsi[0xF0],
-                                        );
-                                        zero_run -= 16;
-                                    }
-                                    let symbol = ((zero_run as u16) << 4) | 1;
-                                    writer.write_bits(
-                                        ac_table.ehufco[symbol as usize],
-                                        ac_table.ehufsi[symbol as usize],
-                                    );
-                                    writer.write_bits(cur_bit as u16, 1);
-                                    zero_run = 0;
-                                }
-                            } else {
-                                // Already nonzero: emit refinement bit
-                                writer.write_bits(cur_bit as u16, 1);
-                            }
-                        }
-                        if zero_run > 0 {
-                            writer.write_bits(ac_table.ehufco[0x00], ac_table.ehufsi[0x00]);
-                        }
+                        encode_ac_refine_block(block, ss, se, al, ac_table, writer);
                     }
                 }
             }
         }
+    }
+}
+
+/// Encode one block for AC first scan (ah==0).
+///
+/// Uses simple per-block EOB (symbol 0x00) instead of EOBRUN batching,
+/// since the default Huffman tables lack EOBRUN category symbols.
+fn encode_ac_first_block(
+    block: &[i16; 64],
+    ss: usize,
+    se: usize,
+    al: u8,
+    ac_table: &HuffTable,
+    writer: &mut BitWriter,
+) {
+    let mut zero_run: u8 = 0;
+
+    for k in ss..=se {
+        let ac = block[k] >> al;
+        if ac == 0 {
+            zero_run += 1;
+        } else {
+            while zero_run >= 16 {
+                writer.write_bits(ac_table.ehufco[0xF0], ac_table.ehufsi[0xF0]);
+                zero_run -= 16;
+            }
+            let (mag, size) = encode_ac_value_prog(ac);
+            let symbol = ((zero_run as u16) << 4) | (size as u16);
+            writer.write_bits(
+                ac_table.ehufco[symbol as usize],
+                ac_table.ehufsi[symbol as usize],
+            );
+            if size > 0 {
+                writer.write_bits(mag, size);
+            }
+            zero_run = 0;
+        }
+    }
+    if zero_run > 0 {
+        // Trailing zeros: emit EOB
+        writer.write_bits(ac_table.ehufco[0x00], ac_table.ehufsi[0x00]);
+    }
+}
+
+/// Encode one block for AC refine scan (ah!=0) with correction bit buffering.
+///
+/// Per ITU-T T.81 Figure G.7, previously-nonzero coefficients emit correction
+/// bits that must be associated with the next Huffman symbol (ZRL, EOB, or
+/// newly-nonzero code). We buffer these bits and emit them after each symbol.
+fn encode_ac_refine_block(
+    block: &[i16; 64],
+    ss: usize,
+    se: usize,
+    al: u8,
+    ac_table: &HuffTable,
+    writer: &mut BitWriter,
+) {
+    let band_len: usize = se - ss + 1;
+
+    // Pre-pass: compute absolute shifted values and find EOB position.
+    let mut absvals: Vec<u16> = Vec::with_capacity(band_len);
+    let mut signs: Vec<u16> = Vec::with_capacity(band_len);
+    let mut eob_idx: i32 = -1; // index of last newly-nonzero coeff
+
+    for k in ss..=se {
+        let coeff: i32 = block[k] as i32;
+        let sign_mask: i32 = coeff >> 31;
+        let abs_coeff: i32 = (coeff ^ sign_mask) - sign_mask;
+        let shifted: u16 = (abs_coeff >> al) as u16;
+        absvals.push(shifted);
+        // sign bit: 1 = positive, 0 = negative
+        signs.push((sign_mask as u16).wrapping_add(1));
+        if shifted == 1 {
+            eob_idx = (absvals.len() as i32) - 1;
+        }
+    }
+
+    let mut r: usize = 0; // zero run length
+    let mut correction_bits: Vec<u8> = Vec::new();
+
+    for i in 0..band_len {
+        let temp: u16 = absvals[i];
+
+        if temp > 1 {
+            // Previously nonzero: buffer its correction bit
+            correction_bits.push((temp & 1) as u8);
+        } else if temp == 1 {
+            // Newly nonzero coefficient
+
+            // Emit ZRLs, but only while within the EOB boundary
+            while r > 15 && (i as i32) <= eob_idx {
+                writer.write_bits(ac_table.ehufco[0xF0], ac_table.ehufsi[0xF0]);
+                r -= 16;
+                // Emit buffered correction bits with this ZRL
+                emit_buffered_bits(&correction_bits, writer);
+                correction_bits.clear();
+            }
+
+            // Emit (run << 4) | 1
+            let symbol: usize = (r << 4) | 1;
+            writer.write_bits(ac_table.ehufco[symbol], ac_table.ehufsi[symbol]);
+
+            // Emit sign bit for newly-nonzero coefficient
+            writer.write_bits(signs[i], 1);
+
+            // Emit correction bits associated with this code
+            emit_buffered_bits(&correction_bits, writer);
+            correction_bits.clear();
+            r = 0;
+        } else {
+            // Zero coefficient: increment zero run
+            r += 1;
+        }
+    }
+
+    // Trailing zeros or remaining correction bits: emit EOB with correction bits
+    if r > 0 || !correction_bits.is_empty() {
+        writer.write_bits(ac_table.ehufco[0x00], ac_table.ehufsi[0x00]);
+        emit_buffered_bits(&correction_bits, writer);
     }
 }
 
