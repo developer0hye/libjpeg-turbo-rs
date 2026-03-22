@@ -1,5 +1,5 @@
 use crate::common::error::Result;
-use crate::common::types::{CropRegion, PixelFormat, Subsampling};
+use crate::common::types::{CropRegion, DensityInfo, PixelFormat, Subsampling};
 use crate::decode::pipeline::{Decoder, Image};
 use crate::encode::pipeline as encoder;
 
@@ -42,9 +42,13 @@ pub fn decompress_cropped(data: &[u8], region: CropRegion) -> Result<Image> {
             width: w,
             height: h,
             pixel_format: PixelFormat::Rgb,
+            precision: 8,
             data: Vec::new(),
             icc_profile: None,
             exif_data: None,
+            comment: None,
+            density: DensityInfo::default(),
+            saved_markers: Vec::new(),
             warnings: Vec::new(),
         });
     }
@@ -65,9 +69,13 @@ pub fn decompress_cropped(data: &[u8], region: CropRegion) -> Result<Image> {
         width: w,
         height: h,
         pixel_format: full.pixel_format,
+        precision: 8,
         data: cropped_data,
         icc_profile: full.icc_profile,
         exif_data: full.exif_data,
+        comment: full.comment,
+        density: full.density,
+        saved_markers: full.saved_markers,
         warnings: full.warnings,
     })
 }

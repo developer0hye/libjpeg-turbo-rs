@@ -336,6 +336,60 @@ pub fn write_sos_lossless(
     buf.push(point_transform & 0x0F); // Ah=0, Al=point_transform
 }
 
+/// Write COM (comment) marker.
+pub fn write_com(buf: &mut Vec<u8>, text: &str) {
+    buf.push(0xFF);
+    buf.push(0xFE);
+    let length: u16 = (2 + text.len()) as u16;
+    buf.extend_from_slice(&length.to_be_bytes());
+    buf.extend_from_slice(text.as_bytes());
+}
+
+/// Write DRI (restart interval) marker.
+pub fn write_dri(buf: &mut Vec<u8>, interval: u16) {
+    buf.push(0xFF);
+    buf.push(0xDD);
+    buf.extend_from_slice(&4u16.to_be_bytes());
+    buf.extend_from_slice(&interval.to_be_bytes());
+}
+
+/// Write arbitrary marker with data.
+pub fn write_marker(buf: &mut Vec<u8>, code: u8, data: &[u8]) {
+    buf.push(0xFF);
+    buf.push(code);
+    let length: u16 = (2 + data.len()) as u16;
+    buf.extend_from_slice(&length.to_be_bytes());
+    buf.extend_from_slice(data);
+}
+
+/// Write APP0 JFIF marker with custom density.
+pub fn write_app0_jfif_with_density(buf: &mut Vec<u8>, unit: u8, x_density: u16, y_density: u16) {
+    buf.push(0xFF);
+    buf.push(0xE0); // APP0
+
+    let length: u16 = 16;
+    buf.extend_from_slice(&length.to_be_bytes());
+
+    // JFIF identifier
+    buf.extend_from_slice(b"JFIF\0");
+
+    // Version 1.01
+    buf.push(1);
+    buf.push(1);
+
+    // Units
+    buf.push(unit);
+
+    // X density
+    buf.extend_from_slice(&x_density.to_be_bytes());
+    // Y density
+    buf.extend_from_slice(&y_density.to_be_bytes());
+
+    // Thumbnail: 0x0
+    buf.push(0);
+    buf.push(0);
+}
+
 /// Write EOI (End Of Image) marker: 0xFFD9.
 pub fn write_eoi(buf: &mut Vec<u8>) {
     buf.push(0xFF);

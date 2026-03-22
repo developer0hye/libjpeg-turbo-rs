@@ -37,11 +37,18 @@ pub struct Image {
     pub width: usize,
     pub height: usize,
     pub pixel_format: PixelFormat,
+    pub precision: u8,
     pub data: Vec<u8>,
     /// Reassembled ICC profile from APP2 markers, if present and valid.
     pub icc_profile: Option<Vec<u8>>,
     /// Raw EXIF TIFF data from APP1 marker, if present.
     pub exif_data: Option<Vec<u8>>,
+    /// COM marker text, if present.
+    pub comment: Option<String>,
+    /// Pixel density from JFIF header.
+    pub density: DensityInfo,
+    /// Saved APP/COM markers.
+    pub saved_markers: Vec<SavedMarker>,
     /// Warnings accumulated during lenient decoding.
     pub warnings: Vec<DecodeWarning>,
 }
@@ -81,6 +88,10 @@ pub struct Decoder<'a> {
     crop_y: Option<usize>,
     /// Vertical crop height in pixels.
     crop_height: Option<usize>,
+    stop_on_warning: bool,
+    max_pixels: Option<usize>,
+    max_memory: Option<usize>,
+    scan_limit: Option<u32>,
 }
 
 impl<'a> Decoder<'a> {
@@ -99,6 +110,10 @@ impl<'a> Decoder<'a> {
             crop_width: None,
             crop_y: None,
             crop_height: None,
+            stop_on_warning: false,
+            max_pixels: None,
+            max_memory: None,
+            scan_limit: None,
         })
     }
 
@@ -134,6 +149,26 @@ impl<'a> Decoder<'a> {
         self.crop_width = Some(width);
         self.crop_y = Some(y);
         self.crop_height = Some(height);
+    }
+
+    /// Treat warnings as fatal errors.
+    pub fn set_stop_on_warning(&mut self, stop: bool) {
+        self.stop_on_warning = stop;
+    }
+
+    /// Set maximum allowed image size in pixels. Reject images exceeding this.
+    pub fn set_max_pixels(&mut self, limit: usize) {
+        self.max_pixels = Some(limit);
+    }
+
+    /// Set maximum memory usage in bytes.
+    pub fn set_max_memory(&mut self, limit: usize) {
+        self.max_memory = Some(limit);
+    }
+
+    /// Set maximum number of progressive scans before error.
+    pub fn set_scan_limit(&mut self, limit: u32) {
+        self.scan_limit = Some(limit);
     }
 
     pub fn decode(data: &'a [u8]) -> Result<Image> {
@@ -1323,9 +1358,13 @@ impl<'a> Decoder<'a> {
                     width,
                     height,
                     pixel_format: PixelFormat::Grayscale,
+                    precision: 8,
                     data,
                     icc_profile,
                     exif_data,
+                    comment: self.metadata.comment.clone(),
+                    density: self.metadata.density,
+                    saved_markers: Vec::new(),
                     warnings: Vec::new(),
                 })
             } else {
@@ -1355,9 +1394,13 @@ impl<'a> Decoder<'a> {
                     width,
                     height,
                     pixel_format: out_format,
+                    precision: 8,
                     data,
                     icc_profile,
                     exif_data,
+                    comment: self.metadata.comment.clone(),
+                    density: self.metadata.density,
+                    saved_markers: Vec::new(),
                     warnings: Vec::new(),
                 })
             }
@@ -1446,9 +1489,13 @@ impl<'a> Decoder<'a> {
                 width,
                 height,
                 pixel_format: out_format,
+                precision: 8,
                 data,
                 icc_profile,
                 exif_data,
+                comment: self.metadata.comment.clone(),
+                density: self.metadata.density,
+                saved_markers: Vec::new(),
                 warnings: Vec::new(),
             })
         } else {
@@ -1459,10 +1506,22 @@ impl<'a> Decoder<'a> {
         }
     }
 
-    pub(crate) fn decode_image(&self) -> Result<Image> {
+    pub fn decode_image(&self) -> Result<Image> {
         let frame = &self.metadata.frame;
         let width = frame.width as usize;
         let height = frame.height as usize;
+
+        // Check pixel limit
+        if let Some(max) = self.max_pixels {
+            let total = width * height;
+            if total > max {
+                return Err(JpegError::Unsupported(format!(
+                    "image {}x{} ({} pixels) exceeds limit of {}",
+                    width, height, total, max
+                )));
+            }
+        }
+
         let icc_profile = self.icc_profile();
         let exif_data = self.metadata.exif_data.clone();
 
@@ -1581,9 +1640,13 @@ impl<'a> Decoder<'a> {
                     width: out_width,
                     height: out_height,
                     pixel_format: PixelFormat::Grayscale,
+                    precision: 8,
                     data,
                     icc_profile: icc_profile.clone(),
                     exif_data: exif_data.clone(),
+                    comment: self.metadata.comment.clone(),
+                    density: self.metadata.density,
+                    saved_markers: Vec::new(),
                     warnings: warnings.clone(),
                 })
             } else {
@@ -1628,9 +1691,13 @@ impl<'a> Decoder<'a> {
                     width: out_width,
                     height: out_height,
                     pixel_format: out_format,
+                    precision: 8,
                     data,
                     icc_profile: icc_profile.clone(),
                     exif_data: exif_data.clone(),
+                    comment: self.metadata.comment.clone(),
+                    density: self.metadata.density,
+                    saved_markers: Vec::new(),
                     warnings: warnings.clone(),
                 })
             }
@@ -1737,9 +1804,13 @@ impl<'a> Decoder<'a> {
                     width: out_width,
                     height: out_height,
                     pixel_format: out_format,
+                    precision: 8,
                     data,
                     icc_profile: icc_profile.clone(),
                     exif_data: exif_data.clone(),
+                    comment: self.metadata.comment.clone(),
+                    density: self.metadata.density,
+                    saved_markers: Vec::new(),
                     warnings: warnings.clone(),
                 });
             }
@@ -1763,9 +1834,13 @@ impl<'a> Decoder<'a> {
                 width: out_width,
                 height: out_height,
                 pixel_format: out_format,
+                precision: 8,
                 data,
                 icc_profile: icc_profile.clone(),
                 exif_data: exif_data.clone(),
+                comment: self.metadata.comment.clone(),
+                density: self.metadata.density,
+                saved_markers: Vec::new(),
                 warnings: warnings.clone(),
             })
         } else if num_components == 4 {
@@ -2074,9 +2149,13 @@ impl<'a> Decoder<'a> {
             width,
             height,
             pixel_format: out_format,
+            precision: 8,
             data,
             icc_profile,
             exif_data,
+            comment: self.metadata.comment.clone(),
+            density: self.metadata.density,
+            saved_markers: Vec::new(),
             warnings,
         })
     }

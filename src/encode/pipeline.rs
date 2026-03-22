@@ -236,9 +236,17 @@ pub fn compress_with_metadata(
     exif_data: Option<&[u8]>,
 ) -> Result<Vec<u8>> {
     let base = compress(pixels, width, height, pixel_format, quality, subsampling)?;
+    inject_metadata(&base, icc_profile, exif_data)
+}
 
+/// Insert APP1 (EXIF) and APP2 (ICC) markers into an existing JPEG byte stream.
+pub fn inject_metadata(
+    base: &[u8],
+    icc_profile: Option<&[u8]>,
+    exif_data: Option<&[u8]>,
+) -> Result<Vec<u8>> {
     if icc_profile.is_none() && exif_data.is_none() {
-        return Ok(base);
+        return Ok(base.to_vec());
     }
 
     // Find insertion point after APP0 JFIF marker (SOI + APP0)
@@ -261,6 +269,23 @@ pub fn compress_with_metadata(
     }
     out.extend_from_slice(&base[insert_pos..]);
     Ok(out)
+}
+
+/// Inject a COM (comment) marker into an existing JPEG byte stream, after APP0.
+pub fn inject_comment(base: &[u8], text: &str) -> Vec<u8> {
+    // Find insertion point after APP0 JFIF marker (SOI + APP0)
+    let insert_pos = if base.len() >= 4 && base[2] == 0xFF && base[3] == 0xE0 {
+        let app0_len = u16::from_be_bytes([base[4], base[5]]) as usize;
+        2 + 2 + app0_len // SOI(2) + APP0 marker(2) + APP0 data
+    } else {
+        2 // After SOI only
+    };
+
+    let mut out = Vec::with_capacity(base.len() + text.len() + 6);
+    out.extend_from_slice(&base[..insert_pos]);
+    marker_writer::write_com(&mut out, text);
+    out.extend_from_slice(&base[insert_pos..]);
+    out
 }
 
 /// Compress CMYK pixel data as a 4-component JPEG with Adobe APP14 marker.
