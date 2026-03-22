@@ -181,124 +181,138 @@ impl<'a> ArithDecoder<'a> {
     }
 
     /// Decode DC coefficient for one block (sequential arithmetic).
+    ///
+    /// Ported from jdarith.c decode_mcu (DC section).
+    /// Context layout in dc_stats[tbl]:
+    ///   [0..3]   = zero diff context (S0, SS, SP, SN)
+    ///   [4..7]   = small positive diff context
+    ///   [8..11]  = small negative diff context
+    ///   [12..15] = large positive diff context
+    ///   [16..19] = large negative diff context
+    ///   [20..]   = magnitude category encoding (X1=20)
     pub fn decode_dc_sequential(
         &mut self,
         block: &mut [i16; 64],
         comp_idx: usize,
         dc_tbl: usize,
     ) -> Result<()> {
-        let ctx = self.dc_context[comp_idx];
+        // S0 = dc_stats[tbl][dc_context[ci]]
+        let s0 = self.dc_context[comp_idx];
 
-        // Is DC difference nonzero?
-        let is_nonzero = self.decode(StatRef::Dc(dc_tbl, ctx * 4))?;
-
-        if is_nonzero == 0 {
+        // Figure F.19: Decode_DC_DIFF — is difference zero?
+        if self.decode(StatRef::Dc(dc_tbl, s0))? == 0 {
             self.dc_context[comp_idx] = 0;
             block[0] = self.last_dc_val[comp_idx] as i16;
             return Ok(());
         }
 
-        // Sign (fixed 0.5 probability)
-        let sign = self.decode(StatRef::Fixed(0))?;
+        // Figure F.22: Decoding the sign of v
+        let sign = self.decode(StatRef::Dc(dc_tbl, s0 + 1))? as usize;
+        let st_base = s0 + 2 + sign; // SP (s0+2) for positive, SN (s0+3) for negative
 
-        // Magnitude (unary)
-        let stat_offset = ctx * 4 + 2;
-        let mut m: i32 = 1;
-        loop {
-            let bit = self.decode(StatRef::Dc(dc_tbl, stat_offset))?;
-            if bit == 0 {
-                break;
-            }
-            m <<= 1;
-            if m > 0x7FFF {
-                return Err(JpegError::CorruptData("arithmetic DC overflow".into()));
-            }
-        }
-
-        // Magnitude bits
-        let mut v = m;
-        if m > 1 {
-            let mut bit_pos = m >> 1;
-            while bit_pos > 0 {
-                let bit = self.decode(StatRef::Fixed(0))?;
-                if bit != 0 {
-                    v |= bit_pos;
+        // Figure F.23: Decoding the magnitude category of v
+        let mut m: i32 = self.decode(StatRef::Dc(dc_tbl, st_base))? as i32;
+        if m != 0 {
+            // Magnitude > 0, use X1 bins starting at index 20
+            let mut x1 = 20usize;
+            while self.decode(StatRef::Dc(dc_tbl, x1))? != 0 {
+                m <<= 1;
+                if m == 0x8000 {
+                    return Err(JpegError::CorruptData("arithmetic DC overflow".into()));
                 }
-                bit_pos >>= 1;
+                x1 += 1;
             }
         }
 
+        // Section F.1.4.4.1.2: Establish dc_context conditioning category
+        let l_thresh = (1i32 << self.arith_dc_l[dc_tbl]) >> 1;
+        let u_thresh = (1i32 << self.arith_dc_u[dc_tbl]) >> 1;
+        if m < l_thresh {
+            self.dc_context[comp_idx] = 0; // zero diff category
+        } else if m > u_thresh {
+            self.dc_context[comp_idx] = 12 + sign * 4; // large diff category
+        } else {
+            self.dc_context[comp_idx] = 4 + sign * 4; // small diff category
+        }
+
+        // Figure F.24: Decoding the magnitude bit pattern of v
+        let mut v = m;
+        let mut bit_mask = m >> 1;
+        while bit_mask != 0 {
+            if self.decode(StatRef::Fixed(0))? != 0 {
+                v |= bit_mask;
+            }
+            bit_mask >>= 1;
+        }
+
+        v += 1; // v is 1-based
         let v = if sign != 0 { -v } else { v };
 
-        // Update DC context
-        let l = self.arith_dc_l[dc_tbl] as i32;
-        let u = self.arith_dc_u[dc_tbl] as i32;
-        self.dc_context[comp_idx] = if v < l {
-            4 + (if v <= -(1 << u) { 12 } else { 0 })
-        } else if v > u {
-            8 + (if v >= (1 << u) { 12 } else { 0 })
-        } else {
-            0
-        };
-
-        self.last_dc_val[comp_idx] += v;
+        self.last_dc_val[comp_idx] = (self.last_dc_val[comp_idx] + v) & 0xFFFF;
         block[0] = self.last_dc_val[comp_idx] as i16;
         Ok(())
     }
 
     /// Decode AC coefficients for one block (sequential arithmetic).
+    ///
+    /// Ported from jdarith.c decode_mcu (AC section).
+    /// Block output is in zigzag order (matching encoder's quantize_block output).
     pub fn decode_ac_sequential(&mut self, block: &mut [i16; 64], ac_tbl: usize) -> Result<()> {
         let mut k = 1usize;
-        while k < 64 {
-            // EOB?
-            let eob = self.decode(StatRef::Ac(ac_tbl, 3 * (k - 1)))?;
-            if eob != 0 {
-                break;
+        while k <= 63 {
+            // EOB decision
+            let mut st = 3 * (k - 1);
+            if self.decode(StatRef::Ac(ac_tbl, st))? != 0 {
+                break; // EOB
             }
 
             // Zero-run
-            loop {
-                let is_nonzero = self.decode(StatRef::Ac(ac_tbl, 3 * (k - 1) + 1))?;
-                if is_nonzero != 0 {
-                    break;
-                }
+            while self.decode(StatRef::Ac(ac_tbl, st + 1))? == 0 {
+                st += 3;
                 k += 1;
-                if k >= 64 {
-                    return Ok(());
+                if k > 63 {
+                    return Err(JpegError::CorruptData(
+                        "arithmetic AC spectral overflow".into(),
+                    ));
                 }
             }
 
-            // Sign
+            // Figure F.22: Decoding the sign of v
             let sign = self.decode(StatRef::Fixed(0))?;
+            let st_mag = st + 2;
 
-            // Magnitude (unary)
-            let stat_base = 3 * (k - 1) + 2;
-            let mut m: i32 = 1;
-            loop {
-                let bit = self.decode(StatRef::Ac(ac_tbl, stat_base))?;
-                if bit == 0 {
-                    break;
-                }
-                m <<= 1;
-                if m > 0x7FFF {
-                    return Err(JpegError::CorruptData("arithmetic AC overflow".into()));
-                }
-            }
-
-            // Magnitude bits
-            let mut v = m;
-            if m > 1 {
-                let mut bit_pos = m >> 1;
-                while bit_pos > 0 {
-                    let bit = self.decode(StatRef::Fixed(0))?;
-                    if bit != 0 {
-                        v |= bit_pos;
+            // Figure F.23: Decoding the magnitude category of v
+            let mut m: i32 = self.decode(StatRef::Ac(ac_tbl, st_mag))? as i32;
+            if m != 0 {
+                if self.decode(StatRef::Ac(ac_tbl, st_mag))? != 0 {
+                    m <<= 1;
+                    let kx = self.arith_ac_k[ac_tbl] as usize;
+                    let mut ext_st = if k <= kx { 189 } else { 217 };
+                    while self.decode(StatRef::Ac(ac_tbl, ext_st))? != 0 {
+                        m <<= 1;
+                        if m == 0x8000 {
+                            return Err(JpegError::CorruptData("arithmetic AC overflow".into()));
+                        }
+                        ext_st += 1;
                     }
-                    bit_pos >>= 1;
                 }
             }
 
-            block[k] = if sign != 0 { -v as i16 } else { v as i16 };
+            // Figure F.24: Decoding the magnitude bit pattern of v
+            let mut v = m;
+            let mut bit_mask = m >> 1;
+            while bit_mask != 0 {
+                if self.decode(StatRef::Fixed(0))? != 0 {
+                    v |= bit_mask;
+                }
+                bit_mask >>= 1;
+            }
+
+            v += 1; // v is 1-based
+            let v = if sign != 0 { -v } else { v };
+
+            // Output in zigzag order (block is already zigzag-ordered)
+            block[k] = v as i16;
             k += 1;
         }
 

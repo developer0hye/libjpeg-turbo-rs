@@ -242,6 +242,42 @@ pub fn write_dac(
     }
 }
 
+/// Write APP1 EXIF marker. `tiff_data` is raw TIFF-format EXIF data (after "Exif\0\0" header).
+pub fn write_app1_exif(buf: &mut Vec<u8>, tiff_data: &[u8]) {
+    let header = b"Exif\0\0";
+    let marker_len: u16 = (2 + header.len() + tiff_data.len()) as u16;
+
+    buf.push(0xFF);
+    buf.push(0xE1); // APP1
+    buf.extend_from_slice(&marker_len.to_be_bytes());
+    buf.extend_from_slice(header);
+    buf.extend_from_slice(tiff_data);
+}
+
+/// Write APP2 ICC profile markers. Splits profile into chunks of max 65519 bytes.
+pub fn write_app2_icc(buf: &mut Vec<u8>, profile: &[u8]) {
+    const ICC_OVERHEAD: usize = 14; // "ICC_PROFILE\0" + seq_no + num_markers
+    const MAX_DATA: usize = 65533 - ICC_OVERHEAD; // 65519
+
+    let num_markers = (profile.len() + MAX_DATA - 1) / MAX_DATA;
+    let mut offset = 0;
+
+    for seq in 1..=num_markers {
+        let chunk_len = (profile.len() - offset).min(MAX_DATA);
+        let marker_len: u16 = (ICC_OVERHEAD + chunk_len) as u16 + 2;
+
+        buf.push(0xFF);
+        buf.push(0xE2); // APP2
+        buf.extend_from_slice(&marker_len.to_be_bytes());
+        buf.extend_from_slice(b"ICC_PROFILE\0");
+        buf.push(seq as u8);
+        buf.push(num_markers as u8);
+        buf.extend_from_slice(&profile[offset..offset + chunk_len]);
+
+        offset += chunk_len;
+    }
+}
+
 /// Write EOI (End Of Image) marker: 0xFFD9.
 pub fn write_eoi(buf: &mut Vec<u8>) {
     buf.push(0xFF);

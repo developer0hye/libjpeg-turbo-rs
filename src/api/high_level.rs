@@ -23,17 +23,38 @@ pub fn decompress_lenient(data: &[u8]) -> Result<Image> {
 
 /// Decompress a cropped region of a JPEG.
 ///
-/// Performs a full decode then extracts the specified region.
+/// Uses MCU-level IDCT skip to avoid unnecessary computation on rows
+/// outside the crop region, then extracts the exact pixel region.
 /// Coordinates that exceed image bounds are clamped.
 pub fn decompress_cropped(data: &[u8], region: CropRegion) -> Result<Image> {
-    let full = Decoder::decode(data)?;
+    let mut decoder = Decoder::new(data)?;
+    let header = decoder.header();
+    let img_w = header.width as usize;
+    let img_h = header.height as usize;
+
+    let x = region.x.min(img_w);
+    let y = region.y.min(img_h);
+    let w = region.width.min(img_w.saturating_sub(x));
+    let h = region.height.min(img_h.saturating_sub(y));
+
+    if w == 0 || h == 0 {
+        return Ok(Image {
+            width: w,
+            height: h,
+            pixel_format: PixelFormat::Rgb,
+            data: Vec::new(),
+            icc_profile: None,
+            exif_data: None,
+            warnings: Vec::new(),
+        });
+    }
+
+    // Set crop region so the decoder skips IDCT on out-of-range MCU rows
+    decoder.set_crop_region(x, y, w, h);
+    let full = decoder.decode_image()?;
     let bpp = full.pixel_format.bytes_per_pixel();
 
-    let x = region.x.min(full.width);
-    let y = region.y.min(full.height);
-    let w = region.width.min(full.width.saturating_sub(x));
-    let h = region.height.min(full.height.saturating_sub(y));
-
+    // Extract the exact pixel region from the full-width output
     let mut cropped_data = Vec::with_capacity(w * h * bpp);
     for row in y..y + h {
         let start = (row * full.width + x) * bpp;
@@ -89,6 +110,29 @@ pub fn compress_progressive(
     subsampling: Subsampling,
 ) -> Result<Vec<u8>> {
     encoder::compress_progressive(pixels, width, height, pixel_format, quality, subsampling)
+}
+
+/// Compress with optional ICC profile and/or EXIF metadata embedded.
+pub fn compress_with_metadata(
+    pixels: &[u8],
+    width: usize,
+    height: usize,
+    pixel_format: PixelFormat,
+    quality: u8,
+    subsampling: Subsampling,
+    icc_profile: Option<&[u8]>,
+    exif_data: Option<&[u8]>,
+) -> Result<Vec<u8>> {
+    encoder::compress_with_metadata(
+        pixels,
+        width,
+        height,
+        pixel_format,
+        quality,
+        subsampling,
+        icc_profile,
+        exif_data,
+    )
 }
 
 /// Compress with arithmetic entropy coding (SOF9).

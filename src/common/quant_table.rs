@@ -30,6 +30,8 @@ pub const NATURAL_ORDER: [usize; 64] = {
 pub struct QuantTable {
     /// Values in natural (row-major) 8x8 order.
     pub values: [u16; 64],
+    /// Values in zigzag order (as stored in JPEG DQT markers).
+    pub zigzag: [u16; 64],
 }
 
 impl QuantTable {
@@ -39,7 +41,10 @@ impl QuantTable {
         for (zigzag_index, &value) in zigzag_data.iter().enumerate() {
             values[ZIGZAG_ORDER[zigzag_index]] = value;
         }
-        Self { values }
+        Self {
+            values,
+            zigzag: *zigzag_data,
+        }
     }
 
     /// Get value at (row, col) in the 8x8 block.
