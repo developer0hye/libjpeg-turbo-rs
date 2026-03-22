@@ -437,7 +437,7 @@
 | Transform misc | 4 | 6 | 67% |
 | YUV/Planar API | 12 | 12 | 100% |
 | SIMD (aarch64) | 10 | 12 | 83% |
-| SIMD (x86_64) | 3 | 6 | 50% |
+| SIMD (x86_64) | 6 | 6 | 100% |
 | Memory & I/O | 8 | ~20 | ~40% |
 | Error handling | 5 | ~14 | ~36% |
 | Progress | 4 | 4 | 100% |
