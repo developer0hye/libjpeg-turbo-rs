@@ -23,3 +23,5 @@ harness = false
 [[bench]]
 name = "compare"
 harness = false
+
+[profile.release]
