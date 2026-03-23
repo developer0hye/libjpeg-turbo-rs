@@ -307,9 +307,12 @@ fn tjcomptest_lossy_rgb() {
         Subsampling::S411,
         Subsampling::S441,
     ];
-    let qualities: [u8; 3] = [75, 1, 100];
-    let dct_methods: [(DctMethod, &str); 2] =
-        [(DctMethod::IsLow, "islow"), (DctMethod::Float, "float")];
+    let qualities: [u8; 4] = [75, 50, 1, 100];
+    let dct_methods: [(DctMethod, &str); 3] = [
+        (DctMethod::IsLow, "islow"),
+        (DctMethod::IsFast, "ifast"),
+        (DctMethod::Float, "float"),
+    ];
 
     let mut counters: TestCounters = TestCounters::new();
 
@@ -388,9 +391,12 @@ fn tjcomptest_lossy_grayscale_from_rgb() {
         Subsampling::S411,
         Subsampling::S441,
     ];
-    let qualities: [u8; 3] = [75, 1, 100];
-    let dct_methods: [(DctMethod, &str); 2] =
-        [(DctMethod::IsLow, "islow"), (DctMethod::Float, "float")];
+    let qualities: [u8; 4] = [75, 50, 1, 100];
+    let dct_methods: [(DctMethod, &str); 3] = [
+        (DctMethod::IsLow, "islow"),
+        (DctMethod::IsFast, "ifast"),
+        (DctMethod::Float, "float"),
+    ];
 
     let mut counters: TestCounters = TestCounters::new();
 
@@ -521,9 +527,12 @@ fn tjcomptest_lossy_grayscale_input() {
         Subsampling::S411,
         Subsampling::S441,
     ];
-    let qualities: [u8; 3] = [75, 1, 100];
-    let dct_methods: [(DctMethod, &str); 2] =
-        [(DctMethod::IsLow, "islow"), (DctMethod::Float, "float")];
+    let qualities: [u8; 4] = [75, 50, 1, 100];
+    let dct_methods: [(DctMethod, &str); 3] = [
+        (DctMethod::IsLow, "islow"),
+        (DctMethod::IsFast, "ifast"),
+        (DctMethod::Float, "float"),
+    ];
 
     let mut counters: TestCounters = TestCounters::new();
 
@@ -995,6 +1004,296 @@ fn tjcomptest_lossless_arbitrary_precision() {
 }
 
 // ---------------------------------------------------------------------------
+// Lossy cross-product: grayscale-from-RGB with ICC profile
+// ---------------------------------------------------------------------------
+
+/// Lossy compression with grayscale-from-color extraction and ICC profile.
+/// Adds the ICC profile axis on top of grayscale_from_color for broader coverage.
+#[test]
+fn tjcomptest_lossy_grayscale_from_rgb_icc() {
+    let (w, h): (usize, usize) = (32, 32);
+    let pixels: Vec<u8> = generate_rgb_pattern(w, h);
+    let icc_data: Vec<u8> = vec![0x42u8; 128];
+    let subsampling_modes: [Subsampling; 6] = [
+        Subsampling::S444,
+        Subsampling::S422,
+        Subsampling::S440,
+        Subsampling::S420,
+        Subsampling::S411,
+        Subsampling::S441,
+    ];
+    let qualities: [u8; 4] = [75, 50, 1, 100];
+    let dct_methods: [(DctMethod, &str); 2] =
+        [(DctMethod::IsLow, "islow"), (DctMethod::Float, "float")];
+
+    let mut counters: TestCounters = TestCounters::new();
+
+    for (use_restart, restart_label) in [(false, "none"), (true, "rows")] {
+        for use_arithmetic in [false, true] {
+            for &(dct_method, dct_label) in &dct_methods {
+                for use_progressive in [false, true] {
+                    for &quality in &qualities {
+                        for &subsamp in &subsampling_modes {
+                            let desc: String = format!(
+                                "ari={} prog={} dct={} restart={} q={} subsamp={:?} variant=gray_from_rgb_icc",
+                                use_arithmetic, use_progressive, dct_label, restart_label, quality, subsamp
+                            );
+
+                            let known: bool =
+                                is_known_lossy_failure(use_arithmetic, use_progressive, subsamp);
+
+                            let mut enc = Encoder::new(&pixels, w, h, PixelFormat::Rgb)
+                                .quality(quality)
+                                .subsampling(subsamp)
+                                .dct_method(dct_method)
+                                .grayscale_from_color(true)
+                                .icc_profile(&icc_data);
+
+                            if use_arithmetic {
+                                enc = enc.arithmetic(true);
+                            }
+                            if use_progressive {
+                                enc = enc.progressive(true);
+                            }
+                            if use_restart {
+                                enc = enc.restart_rows(1);
+                            }
+
+                            match enc.encode() {
+                                Ok(jpeg) => match decompress(&jpeg) {
+                                    Ok(img) => {
+                                        let mut ok: bool = true;
+                                        if img.width != w || img.height != h {
+                                            if known {
+                                                counters
+                                                    .record_known_fail(&desc, "dimension mismatch");
+                                            } else {
+                                                counters.record_unexpected_fail(
+                                                    &desc,
+                                                    "dimension mismatch",
+                                                );
+                                            }
+                                            ok = false;
+                                        }
+                                        if ok && img.pixel_format != PixelFormat::Grayscale {
+                                            if known {
+                                                counters
+                                                    .record_known_fail(&desc, "expected Grayscale");
+                                            } else {
+                                                counters.record_unexpected_fail(
+                                                    &desc,
+                                                    "expected Grayscale",
+                                                );
+                                            }
+                                            ok = false;
+                                        }
+                                        if ok {
+                                            counters.record_pass();
+                                        }
+                                    }
+                                    Err(e) => {
+                                        let reason: String = format!("decode failed: {}", e);
+                                        if known {
+                                            counters.record_known_fail(&desc, &reason);
+                                        } else {
+                                            counters.record_unexpected_fail(&desc, &reason);
+                                        }
+                                    }
+                                },
+                                Err(e) => {
+                                    let reason: String = format!("encode failed: {}", e);
+                                    if known {
+                                        counters.record_known_fail(&desc, &reason);
+                                    } else {
+                                        counters.record_unexpected_fail(&desc, &reason);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    counters.summarize("Lossy grayscale-from-RGB-ICC cross-product");
+    assert!(
+        counters.tested > 300,
+        "expected >300 combos, got {}",
+        counters.tested
+    );
+    counters.assert_no_unexpected();
+}
+
+// ---------------------------------------------------------------------------
+// Lossy cross-product: RGB colorspace override
+// ---------------------------------------------------------------------------
+
+/// Lossy compression with explicit RGB colorspace override (no YCbCr conversion).
+/// Tests the colorspace(ColorSpace::Rgb) path with all parameter combinations.
+#[test]
+fn tjcomptest_lossy_rgb_colorspace() {
+    let (w, h): (usize, usize) = (32, 32);
+    let pixels: Vec<u8> = generate_rgb_pattern(w, h);
+    let subsampling_modes: [Subsampling; 6] = [
+        Subsampling::S444,
+        Subsampling::S422,
+        Subsampling::S440,
+        Subsampling::S420,
+        Subsampling::S411,
+        Subsampling::S441,
+    ];
+    let qualities: [u8; 4] = [75, 50, 1, 100];
+
+    let mut counters: TestCounters = TestCounters::new();
+
+    for use_arithmetic in [false, true] {
+        for use_progressive in [false, true] {
+            for &quality in &qualities {
+                for &subsamp in &subsampling_modes {
+                    let desc: String = format!(
+                        "ari={} prog={} q={} subsamp={:?} variant=rgb_colorspace",
+                        use_arithmetic, use_progressive, quality, subsamp
+                    );
+
+                    let known: bool =
+                        is_known_lossy_failure(use_arithmetic, use_progressive, subsamp);
+
+                    let mut enc = Encoder::new(&pixels, w, h, PixelFormat::Rgb)
+                        .quality(quality)
+                        .subsampling(subsamp)
+                        .colorspace(libjpeg_turbo_rs::ColorSpace::Rgb);
+
+                    if use_arithmetic {
+                        enc = enc.arithmetic(true);
+                    }
+                    if use_progressive {
+                        enc = enc.progressive(true);
+                    }
+
+                    match enc.encode() {
+                        Ok(jpeg) => match decompress(&jpeg) {
+                            Ok(img) => {
+                                if img.width != w || img.height != h {
+                                    if known {
+                                        counters.record_known_fail(&desc, "dimension mismatch");
+                                    } else {
+                                        counters
+                                            .record_unexpected_fail(&desc, "dimension mismatch");
+                                    }
+                                } else {
+                                    counters.record_pass();
+                                }
+                            }
+                            Err(e) => {
+                                let reason: String = format!("decode failed: {}", e);
+                                if known {
+                                    counters.record_known_fail(&desc, &reason);
+                                } else {
+                                    counters.record_unexpected_fail(&desc, &reason);
+                                }
+                            }
+                        },
+                        Err(e) => {
+                            let reason: String = format!("encode failed: {}", e);
+                            if known {
+                                counters.record_known_fail(&desc, &reason);
+                            } else {
+                                counters.record_unexpected_fail(&desc, &reason);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    counters.summarize("Lossy RGB-colorspace cross-product");
+    assert!(
+        counters.tested > 90,
+        "expected >90 combos, got {}",
+        counters.tested
+    );
+    counters.assert_no_unexpected();
+}
+
+// ---------------------------------------------------------------------------
+// Lossy cross-product: ICC profile in main RGB loop
+// ---------------------------------------------------------------------------
+
+/// Lossy compression with ICC profile across all main axes (not just restart).
+/// Extends coverage by adding the ICC profile dimension to the RGB loop.
+#[test]
+fn tjcomptest_lossy_rgb_icc() {
+    let (w, h): (usize, usize) = (32, 32);
+    let pixels: Vec<u8> = generate_rgb_pattern(w, h);
+    let icc_data: Vec<u8> = vec![0x42u8; 128];
+    let subsampling_modes: [Subsampling; 6] = [
+        Subsampling::S444,
+        Subsampling::S422,
+        Subsampling::S440,
+        Subsampling::S420,
+        Subsampling::S411,
+        Subsampling::S441,
+    ];
+    let qualities: [u8; 4] = [75, 50, 1, 100];
+    let dct_methods: [(DctMethod, &str); 2] =
+        [(DctMethod::IsLow, "islow"), (DctMethod::Float, "float")];
+
+    let mut counters: TestCounters = TestCounters::new();
+
+    for use_arithmetic in [false, true] {
+        for &(dct_method, dct_label) in &dct_methods {
+            for use_optimize in [false, true] {
+                if use_optimize && use_arithmetic {
+                    continue;
+                }
+                for use_progressive in [false, true] {
+                    if use_progressive && use_optimize {
+                        continue;
+                    }
+                    for &quality in &qualities {
+                        for &subsamp in &subsampling_modes {
+                            let desc: String =
+                                format!(
+                                "ari={} prog={} opt={} dct={} q={} subsamp={:?} variant=rgb_icc",
+                                use_arithmetic, use_progressive, use_optimize, dct_label, quality,
+                                subsamp
+                            );
+                            run_lossy_roundtrip(
+                                &mut counters,
+                                &pixels,
+                                w,
+                                h,
+                                PixelFormat::Rgb,
+                                quality,
+                                subsamp,
+                                dct_method,
+                                use_arithmetic,
+                                use_progressive,
+                                use_optimize,
+                                None,
+                                Some(&icc_data),
+                                &desc,
+                                None,
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    counters.summarize("Lossy RGB+ICC cross-product");
+    assert!(
+        counters.tested > 200,
+        "expected >200 combos, got {}",
+        counters.tested
+    );
+    counters.assert_no_unexpected();
+}
+
+// ---------------------------------------------------------------------------
 // Summary
 // ---------------------------------------------------------------------------
 
@@ -1010,15 +1309,21 @@ fn tjcomptest_coverage_summary() {
     // restart_blocks: 2 ari x 2 prog x 3 q x 6 ss = 72
     // Lossless 8-bit: 7 PSV x 8 PT x 2 restart x 2 variants = 224
     // Arbitrary precision: 15 precisions x 7 PSV x variable PT x 2 variants ~ 1400+
-    // Total: ~3000+
+    // New: grayscale-from-RGB-ICC: ~384
+    // New: RGB-colorspace: ~192
+    // New: RGB+ICC: ~480
+    // Total: ~5000+
     println!("Cross-product compression test coverage:");
     println!("  Lossy RGB:                ~360 combinations");
     println!("  Lossy grayscale-from-RGB: ~360 combinations");
     println!("  Lossy grayscale input:    ~360 combinations");
     println!("  Lossy ICC+restart:        ~72 combinations");
     println!("  Lossy restart-blocks:     ~72 combinations");
+    println!("  Lossy gray-from-RGB+ICC:  ~384 combinations");
+    println!("  Lossy RGB-colorspace:     ~192 combinations");
+    println!("  Lossy RGB+ICC:            ~480 combinations");
     println!("  Lossless 8-bit:           ~224 combinations");
     println!("  Arbitrary precision:      ~1400+ combinations");
     println!("  -------");
-    println!("  Total:                    ~3000+ combinations");
+    println!("  Total:                    ~5000+ combinations");
 }
