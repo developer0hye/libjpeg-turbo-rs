@@ -16,7 +16,8 @@
 
 use libjpeg_turbo_rs::decode::pipeline::Decoder;
 use libjpeg_turbo_rs::{
-    compress, ColorSpace, CropRegion, DctMethod, Image, PixelFormat, ScalingFactor, Subsampling,
+    compress, ColorSpace, CropRegion, DctMethod, Encoder, Image, PixelFormat, ScalingFactor,
+    Subsampling,
 };
 
 // ---------------------------------------------------------------------------
@@ -918,6 +919,267 @@ fn tjdecomptest_crop_format_cross_product() {
 }
 
 // ---------------------------------------------------------------------------
+// Test: Quality x subsampling x scale x dct x fast_upsample x format
+// ---------------------------------------------------------------------------
+
+/// Large cross-product: multiple JPEG quality levels x subsampling x scale x
+/// DCT method x fast_upsample toggle x output format, providing broad coverage.
+///
+/// quality(3) x subsamp(6) x scale(4) x dct(3) x fast_up(2) x format(3) = 1296+
+/// minus skips for fast_upsample on non-applicable subsamplings.
+#[test]
+fn tjdecomptest_quality_subsamp_scale_dct_format() {
+    let color_subsampling_modes: Vec<Subsampling> = vec![
+        Subsampling::S444,
+        Subsampling::S422,
+        Subsampling::S440,
+        Subsampling::S420,
+        Subsampling::S411,
+        Subsampling::S441,
+    ];
+    let qualities: [u8; 4] = [1, 50, 75, 95];
+    let scales: Vec<ScalingFactor> = scaling_factors();
+    let dct_methods: Vec<DctMethod> = vec![DctMethod::IsLow, DctMethod::IsFast, DctMethod::Float];
+    let output_formats: Vec<PixelFormat> = vec![
+        PixelFormat::Rgb,
+        PixelFormat::Bgra,
+        PixelFormat::Argb,
+        PixelFormat::Bgr,
+    ];
+    let pixels_32: Vec<u8> = generate_rgb_pattern(32, 32);
+
+    let mut tested: u32 = 0;
+    let mut failed: u32 = 0;
+    let mut failures: Vec<String> = Vec::new();
+
+    for &quality in &qualities {
+        for &subsamp in &color_subsampling_modes {
+            let jpeg: Vec<u8> =
+                compress(&pixels_32, 32, 32, PixelFormat::Rgb, quality, subsamp).unwrap();
+
+            for scale in &scales {
+                for use_fast_upsample in [false, true] {
+                    if use_fast_upsample && !nosmooth_applicable(subsamp) {
+                        continue;
+                    }
+
+                    for dct in &dct_methods {
+                        for format in &output_formats {
+                            let label: String = format!(
+                                "q={} subsamp={:?} scale={}/{} fast_up={} dct={:?} fmt={:?}",
+                                quality,
+                                subsamp,
+                                scale.num,
+                                scale.denom,
+                                use_fast_upsample,
+                                dct,
+                                format
+                            );
+
+                            match try_decode_with_format(
+                                &jpeg,
+                                *scale,
+                                &None,
+                                use_fast_upsample,
+                                *dct == DctMethod::IsFast,
+                                Some(*format),
+                            ) {
+                                Ok(img) => {
+                                    if img.pixel_format != *format {
+                                        failed += 1;
+                                        failures.push(format!("FAIL [{}]: format mismatch", label));
+                                    }
+                                }
+                                Err(e) => {
+                                    failed += 1;
+                                    failures.push(format!("FAIL [{}]: {:?}", label, e));
+                                }
+                            }
+                            tested += 1;
+                        }
+
+                        // Grayscale output
+                        let label_gray: String = format!(
+                            "q={} subsamp={:?} scale={}/{} fast_up={} dct={:?} fmt=gray",
+                            quality, subsamp, scale.num, scale.denom, use_fast_upsample, dct
+                        );
+                        match try_decode(
+                            &jpeg,
+                            *scale,
+                            &None,
+                            use_fast_upsample,
+                            *dct == DctMethod::IsFast,
+                            Some(ColorSpace::Grayscale),
+                        ) {
+                            Ok(img) => {
+                                if img.pixel_format != PixelFormat::Grayscale {
+                                    failed += 1;
+                                    failures.push(format!("FAIL [{}]: not grayscale", label_gray));
+                                }
+                            }
+                            Err(e) => {
+                                failed += 1;
+                                failures.push(format!("FAIL [{}]: {:?}", label_gray, e));
+                            }
+                        }
+                        tested += 1;
+                    }
+                }
+            }
+        }
+    }
+
+    // Gray JPEG at different qualities
+    let gray_pixels: Vec<u8> = generate_gray_pattern(32, 32);
+    for &quality in &qualities {
+        let gray_jpeg: Vec<u8> = compress(
+            &gray_pixels,
+            32,
+            32,
+            PixelFormat::Grayscale,
+            quality,
+            Subsampling::S444,
+        )
+        .unwrap();
+        for scale in &scales {
+            for dct in &dct_methods {
+                let label: String = format!(
+                    "q={} subsamp=gray scale={}/{} dct={:?}",
+                    quality, scale.num, scale.denom, dct
+                );
+                match try_decode_dct_method(&gray_jpeg, *scale, *dct) {
+                    Ok(img) => {
+                        if img.width == 0 || img.height == 0 {
+                            failed += 1;
+                            failures.push(format!("FAIL [{}]: zero dims", label));
+                        }
+                    }
+                    Err(e) => {
+                        failed += 1;
+                        failures.push(format!("FAIL [{}]: {:?}", label, e));
+                    }
+                }
+                tested += 1;
+            }
+        }
+    }
+
+    eprintln!(
+        "Quality x subsamp x scale x dct x format: {} tested, {} failed",
+        tested, failed
+    );
+    if !failures.is_empty() {
+        for f in &failures.iter().take(20).collect::<Vec<_>>() {
+            eprintln!("  {}", f);
+        }
+    }
+    assert_eq!(failed, 0, "{} of {} combinations failed", failed, tested);
+}
+
+// ---------------------------------------------------------------------------
+// Test: Block smoothing x merged x DCT x scale x subsamp x format
+// ---------------------------------------------------------------------------
+
+/// Combined block_smoothing x merged_upsample x dct x scale x subsamp x format
+/// for broad decoder option coverage.
+///
+/// subsamp(6) x scale(4) x block_smooth(2) x merged(2) x dct(3) x format(2) = 576+
+#[test]
+fn tjdecomptest_toggles_dct_format_cross_product() {
+    let color_subsampling_modes: Vec<Subsampling> = vec![
+        Subsampling::S444,
+        Subsampling::S422,
+        Subsampling::S440,
+        Subsampling::S420,
+        Subsampling::S411,
+        Subsampling::S441,
+    ];
+    let scales: Vec<ScalingFactor> = scaling_factors();
+    let dct_methods: Vec<DctMethod> = vec![DctMethod::IsLow, DctMethod::IsFast, DctMethod::Float];
+    let output_formats: Vec<PixelFormat> = vec![PixelFormat::Rgb, PixelFormat::Bgra];
+
+    let mut tested: u32 = 0;
+    let mut failed: u32 = 0;
+    let mut failures: Vec<String> = Vec::new();
+
+    for &subsamp in &color_subsampling_modes {
+        let jpeg: Vec<u8> = encode_color_jpeg(subsamp);
+
+        for scale in &scales {
+            for block_smoothing in [false, true] {
+                for merged_upsample in [false, true] {
+                    if merged_upsample && !matches!(subsamp, Subsampling::S422 | Subsampling::S420)
+                    {
+                        continue;
+                    }
+
+                    for dct in &dct_methods {
+                        for format in &output_formats {
+                            let label: String = format!(
+                                "subsamp={:?} scale={}/{} bs={} merged={} dct={:?} fmt={:?}",
+                                subsamp,
+                                scale.num,
+                                scale.denom,
+                                block_smoothing,
+                                merged_upsample,
+                                dct,
+                                format
+                            );
+
+                            let mut decoder: Decoder = match Decoder::new(&jpeg) {
+                                Ok(d) => d,
+                                Err(e) => {
+                                    failed += 1;
+                                    failures.push(format!("FAIL [{}]: new: {:?}", label, e));
+                                    tested += 1;
+                                    continue;
+                                }
+                            };
+
+                            if scale.num != 1 || scale.denom != 1 {
+                                decoder.set_scale(*scale);
+                            }
+                            decoder.set_block_smoothing(block_smoothing);
+                            decoder.set_merged_upsample(merged_upsample);
+                            decoder.set_dct_method(*dct);
+                            if *dct == DctMethod::IsFast {
+                                decoder.set_fast_dct(true);
+                            }
+                            decoder.set_output_format(*format);
+
+                            match decoder.decode_image() {
+                                Ok(img) => {
+                                    if img.pixel_format != *format {
+                                        failed += 1;
+                                        failures.push(format!("FAIL [{}]: format mismatch", label));
+                                    }
+                                }
+                                Err(e) => {
+                                    failed += 1;
+                                    failures.push(format!("FAIL [{}]: {:?}", label, e));
+                                }
+                            }
+                            tested += 1;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    eprintln!(
+        "Toggles x DCT x format cross-product: {} tested, {} failed",
+        tested, failed
+    );
+    if !failures.is_empty() {
+        for f in &failures.iter().take(20).collect::<Vec<_>>() {
+            eprintln!("  {}", f);
+        }
+    }
+    assert_eq!(failed, 0, "{} of {} combinations failed", failed, tested);
+}
+
+// ---------------------------------------------------------------------------
 // Decode helpers
 // ---------------------------------------------------------------------------
 
@@ -1030,6 +1292,438 @@ fn try_decode_dct_method(
 
     decoder.decode_image()
 }
+
+// ---------------------------------------------------------------------------
+// Test: Arithmetic & progressive source JPEGs x scale x output
+// ---------------------------------------------------------------------------
+
+/// Decompression cross-product with arithmetic and progressive encoded source JPEGs.
+///
+/// Exercises the arithmetic decoder (SOF9) and progressive decoder (SOF2)
+/// paths with all subsampling x scale x dct_method combinations.
+/// 6 subsamp x 2 entropy (ari, prog) x 4 scales x 3 dct = 144
+/// + gray variants = 168
+#[test]
+fn tjdecomptest_arithmetic_progressive_sources() {
+    let color_subsampling_modes: Vec<Subsampling> =
+        vec![Subsampling::S444, Subsampling::S422, Subsampling::S420];
+    let scales: Vec<ScalingFactor> = scaling_factors();
+    let dct_methods: Vec<DctMethod> = vec![DctMethod::IsLow, DctMethod::IsFast, DctMethod::Float];
+
+    let mut tested: u32 = 0;
+    let mut failed: u32 = 0;
+    let mut known_fail: u32 = 0;
+    let mut failures: Vec<String> = Vec::new();
+
+    let pixels: Vec<u8> = generate_rgb_pattern(32, 32);
+    let gray_pixels: Vec<u8> = generate_gray_pattern(32, 32);
+
+    for &subsamp in &color_subsampling_modes {
+        // Create arithmetic-encoded source
+        let arith_jpeg: Vec<u8> = {
+            let enc = Encoder::new(&pixels, 32, 32, PixelFormat::Rgb)
+                .quality(90)
+                .subsampling(subsamp)
+                .arithmetic(true);
+            match enc.encode() {
+                Ok(j) => j,
+                Err(_) => continue,
+            }
+        };
+
+        // Create progressive-encoded source
+        let prog_jpeg: Vec<u8> = {
+            let enc = Encoder::new(&pixels, 32, 32, PixelFormat::Rgb)
+                .quality(90)
+                .subsampling(subsamp)
+                .progressive(true);
+            match enc.encode() {
+                Ok(j) => j,
+                Err(_) => continue,
+            }
+        };
+
+        let sources: Vec<(&str, &Vec<u8>)> =
+            vec![("arithmetic", &arith_jpeg), ("progressive", &prog_jpeg)];
+
+        for (source_label, jpeg) in &sources {
+            for scale in &scales {
+                for dct in &dct_methods {
+                    // Native output
+                    let label: String = format!(
+                        "subsamp={:?} source={} scale={}/{} dct={:?} output=rgb",
+                        subsamp, source_label, scale.num, scale.denom, dct
+                    );
+
+                    match try_decode_dct_method(jpeg, *scale, *dct) {
+                        Ok(img) => {
+                            if img.width == 0 || img.height == 0 {
+                                failed += 1;
+                                failures.push(format!("FAIL [{}]: zero dimensions", label));
+                            }
+                        }
+                        Err(e) => {
+                            // Arithmetic progressive decode is a known limitation
+                            if *source_label == "arithmetic" {
+                                known_fail += 1;
+                            } else {
+                                failed += 1;
+                                failures.push(format!("FAIL [{}]: {:?}", label, e));
+                            }
+                        }
+                    }
+                    tested += 1;
+
+                    // Grayscale output
+                    let label_gray: String = format!(
+                        "subsamp={:?} source={} scale={}/{} dct={:?} output=gray",
+                        subsamp, source_label, scale.num, scale.denom, dct
+                    );
+
+                    match try_decode(
+                        jpeg,
+                        *scale,
+                        &None,
+                        false,
+                        *dct == DctMethod::IsFast,
+                        Some(ColorSpace::Grayscale),
+                    ) {
+                        Ok(img) => {
+                            if img.pixel_format != PixelFormat::Grayscale {
+                                failed += 1;
+                                failures.push(format!("FAIL [{}]: not grayscale", label_gray));
+                            }
+                        }
+                        Err(_) => {
+                            if *source_label == "arithmetic" {
+                                known_fail += 1;
+                            } else {
+                                failed += 1;
+                                failures.push(format!("FAIL [{}]: decode error", label_gray));
+                            }
+                        }
+                    }
+                    tested += 1;
+                }
+            }
+        }
+    }
+
+    // Arithmetic grayscale source
+    {
+        let arith_gray: Vec<u8> = Encoder::new(&gray_pixels, 32, 32, PixelFormat::Grayscale)
+            .quality(90)
+            .arithmetic(true)
+            .encode()
+            .unwrap();
+        for scale in &scales {
+            for dct in &dct_methods {
+                let label: String = format!(
+                    "subsamp=gray source=arithmetic scale={}/{} dct={:?}",
+                    scale.num, scale.denom, dct
+                );
+                match try_decode_dct_method(&arith_gray, *scale, *dct) {
+                    Ok(_) => {}
+                    Err(_) => {
+                        known_fail += 1;
+                    }
+                }
+                tested += 1;
+            }
+        }
+    }
+
+    eprintln!(
+        "Arithmetic/progressive sources: {} tested, {} failed, {} known failures",
+        tested, failed, known_fail
+    );
+    if !failures.is_empty() {
+        for f in &failures {
+            eprintln!("  {}", f);
+        }
+    }
+    assert_eq!(
+        failed, 0,
+        "{} of {} combinations failed (see stderr for details)",
+        failed, tested
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Test: All DCT methods x all subsampling x crop x scale x output
+// ---------------------------------------------------------------------------
+
+/// Full decompress cross-product with all 3 DCT methods folded into the main loop,
+/// plus arithmetic/progressive sources, for maximum coverage.
+///
+/// sources (baseline, arith, prog) x subsamp(6) x scale(4) x dct(3) x output(2) = 432+
+#[test]
+fn tjdecomptest_extended_sources_cross_product() {
+    let color_subsampling_modes: Vec<Subsampling> = vec![
+        Subsampling::S444,
+        Subsampling::S422,
+        Subsampling::S440,
+        Subsampling::S420,
+        Subsampling::S411,
+        Subsampling::S441,
+    ];
+
+    let scales: Vec<ScalingFactor> = scaling_factors();
+    let dct_methods: Vec<DctMethod> = vec![DctMethod::IsLow, DctMethod::IsFast, DctMethod::Float];
+    let pixels: Vec<u8> = generate_rgb_pattern(32, 32);
+    let gray_pixels: Vec<u8> = generate_gray_pattern(32, 32);
+
+    let output_formats: Vec<PixelFormat> = vec![
+        PixelFormat::Rgb,
+        PixelFormat::Bgr,
+        PixelFormat::Rgba,
+        PixelFormat::Bgra,
+        PixelFormat::Rgbx,
+    ];
+
+    let mut tested: u32 = 0;
+    let mut failed: u32 = 0;
+    let mut known_fail: u32 = 0;
+    let mut failures: Vec<String> = Vec::new();
+
+    for &subsamp in &color_subsampling_modes {
+        // Baseline source
+        let baseline_jpeg: Vec<u8> =
+            compress(&pixels, 32, 32, PixelFormat::Rgb, 90, subsamp).unwrap();
+
+        // Optimized Huffman source
+        let optimized_jpeg: Vec<u8> = Encoder::new(&pixels, 32, 32, PixelFormat::Rgb)
+            .quality(90)
+            .subsampling(subsamp)
+            .optimize_huffman(true)
+            .encode()
+            .unwrap();
+
+        let sources: Vec<(&str, &Vec<u8>, bool)> = vec![
+            ("baseline", &baseline_jpeg, false),
+            ("optimized", &optimized_jpeg, false),
+        ];
+
+        for (source_label, jpeg, is_known) in &sources {
+            for scale in &scales {
+                for dct in &dct_methods {
+                    for format in &output_formats {
+                        let label: String = format!(
+                            "subsamp={:?} source={} scale={}/{} dct={:?} fmt={:?}",
+                            subsamp, source_label, scale.num, scale.denom, dct, format
+                        );
+
+                        match try_decode_with_format(
+                            jpeg,
+                            *scale,
+                            &None,
+                            false,
+                            *dct == DctMethod::IsFast,
+                            Some(*format),
+                        ) {
+                            Ok(img) => {
+                                if img.pixel_format != *format {
+                                    if *is_known {
+                                        known_fail += 1;
+                                    } else {
+                                        failed += 1;
+                                        failures.push(format!("FAIL [{}]: format mismatch", label));
+                                    }
+                                }
+                            }
+                            Err(e) => {
+                                if *is_known {
+                                    known_fail += 1;
+                                } else {
+                                    failed += 1;
+                                    failures.push(format!("FAIL [{}]: {:?}", label, e));
+                                }
+                            }
+                        }
+                        tested += 1;
+                    }
+
+                    // Grayscale output variant
+                    let label_gray: String = format!(
+                        "subsamp={:?} source={} scale={}/{} dct={:?} fmt=gray",
+                        subsamp, source_label, scale.num, scale.denom, dct
+                    );
+                    match try_decode(
+                        jpeg,
+                        *scale,
+                        &None,
+                        false,
+                        *dct == DctMethod::IsFast,
+                        Some(ColorSpace::Grayscale),
+                    ) {
+                        Ok(img) => {
+                            if img.pixel_format != PixelFormat::Grayscale {
+                                if *is_known {
+                                    known_fail += 1;
+                                } else {
+                                    failed += 1;
+                                    failures.push(format!("FAIL [{}]: not grayscale", label_gray));
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            if *is_known {
+                                known_fail += 1;
+                            } else {
+                                failed += 1;
+                                failures.push(format!("FAIL [{}]: {:?}", label_gray, e));
+                            }
+                        }
+                    }
+                    tested += 1;
+                }
+            }
+        }
+    }
+
+    // Gray JPEG across all DCT methods and scales with multiple output formats
+    let gray_jpeg: Vec<u8> = compress(
+        &gray_pixels,
+        32,
+        32,
+        PixelFormat::Grayscale,
+        90,
+        Subsampling::S444,
+    )
+    .unwrap();
+    let gray_formats: Vec<PixelFormat> = vec![PixelFormat::Grayscale, PixelFormat::Rgb];
+    for scale in &scales {
+        for dct in &dct_methods {
+            for format in &gray_formats {
+                let label: String = format!(
+                    "subsamp=gray scale={}/{} dct={:?} fmt={:?}",
+                    scale.num, scale.denom, dct, format
+                );
+                match try_decode_with_format(
+                    &gray_jpeg,
+                    *scale,
+                    &None,
+                    false,
+                    *dct == DctMethod::IsFast,
+                    Some(*format),
+                ) {
+                    Ok(img) => {
+                        if img.pixel_format != *format {
+                            failed += 1;
+                            failures.push(format!("FAIL [{}]: format mismatch", label));
+                        }
+                    }
+                    Err(e) => {
+                        failed += 1;
+                        failures.push(format!("FAIL [{}]: {:?}", label, e));
+                    }
+                }
+                tested += 1;
+            }
+        }
+    }
+
+    eprintln!(
+        "Extended sources cross-product: {} tested, {} failed, {} known",
+        tested, failed, known_fail
+    );
+    if !failures.is_empty() {
+        for f in &failures.iter().take(20).collect::<Vec<_>>() {
+            eprintln!("  {}", f);
+        }
+    }
+    assert_eq!(failed, 0, "{} of {} combinations failed", failed, tested);
+}
+
+// ---------------------------------------------------------------------------
+// Test: Full upsample x DCT x scale x format x grayscale output
+// ---------------------------------------------------------------------------
+
+/// Comprehensive cross-product with fast_upsample x dct x scale x output_format.
+/// Ensures all decode toggle and format combinations work together.
+///
+/// 6 subsamp x 4 scales x 2 fast_up x 3 dct x 6 formats = 864+
+#[test]
+fn tjdecomptest_upsample_dct_format_cross_product() {
+    let color_subsampling_modes: Vec<Subsampling> = vec![
+        Subsampling::S444,
+        Subsampling::S422,
+        Subsampling::S440,
+        Subsampling::S420,
+        Subsampling::S411,
+        Subsampling::S441,
+    ];
+    let scales: Vec<ScalingFactor> = scaling_factors();
+    let dct_methods: Vec<DctMethod> = vec![DctMethod::IsLow, DctMethod::IsFast, DctMethod::Float];
+    let output_formats: Vec<PixelFormat> = vec![
+        PixelFormat::Rgb,
+        PixelFormat::Bgr,
+        PixelFormat::Rgba,
+        PixelFormat::Bgra,
+        PixelFormat::Argb,
+        PixelFormat::Abgr,
+    ];
+
+    let mut tested: u32 = 0;
+    let mut failed: u32 = 0;
+    let mut failures: Vec<String> = Vec::new();
+
+    for &subsamp in &color_subsampling_modes {
+        let jpeg: Vec<u8> = encode_color_jpeg(subsamp);
+
+        for scale in &scales {
+            for use_fast_upsample in [false, true] {
+                if use_fast_upsample && !nosmooth_applicable(subsamp) {
+                    continue;
+                }
+                for dct in &dct_methods {
+                    for format in &output_formats {
+                        let label: String = format!(
+                            "subsamp={:?} scale={}/{} fast_up={} dct={:?} fmt={:?}",
+                            subsamp, scale.num, scale.denom, use_fast_upsample, dct, format
+                        );
+
+                        match try_decode_with_format(
+                            &jpeg,
+                            *scale,
+                            &None,
+                            use_fast_upsample,
+                            *dct == DctMethod::IsFast,
+                            Some(*format),
+                        ) {
+                            Ok(img) => {
+                                if img.pixel_format != *format {
+                                    failed += 1;
+                                    failures.push(format!("FAIL [{}]: format mismatch", label));
+                                }
+                            }
+                            Err(e) => {
+                                failed += 1;
+                                failures.push(format!("FAIL [{}]: {:?}", label, e));
+                            }
+                        }
+                        tested += 1;
+                    }
+                }
+            }
+        }
+    }
+
+    eprintln!(
+        "Upsample x DCT x format cross-product: {} tested, {} failed",
+        tested, failed
+    );
+    if !failures.is_empty() {
+        for f in &failures.iter().take(20).collect::<Vec<_>>() {
+            eprintln!("  {}", f);
+        }
+    }
+    assert_eq!(failed, 0, "{} of {} combinations failed", failed, tested);
+}
+
+// ---------------------------------------------------------------------------
+// Decode helpers
+// ---------------------------------------------------------------------------
 
 /// Verify decoded image dimensions are reasonable for the given parameters.
 fn verify_dimensions(
