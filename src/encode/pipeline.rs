@@ -2890,38 +2890,33 @@ fn encode_ac_refine_block(
     let mut r: usize = 0; // zero run length
     let mut correction_bits: Vec<u8> = Vec::new();
 
+    // Main loop: matches C jcphuff.c ENCODE_COEFS_AC_REFINE.
+    // ZRL check happens BEFORE processing each nonzero coefficient.
     for i in 0..band_len {
         let temp: u16 = absvals[i];
 
+        if temp == 0 {
+            r += 1;
+            continue;
+        }
+
+        // Nonzero: check ZRL before processing (key fix)
+        while r > 15 && (i as i32) <= eob_idx {
+            writer.write_bits(ac_table.ehufco[0xF0], ac_table.ehufsi[0xF0]);
+            r -= 16;
+            emit_buffered_bits(&correction_bits, writer);
+            correction_bits.clear();
+        }
+
         if temp > 1 {
-            // Previously nonzero: buffer its correction bit
             correction_bits.push((temp & 1) as u8);
-        } else if temp == 1 {
-            // Newly nonzero coefficient
-
-            // Emit ZRLs, but only while within the EOB boundary
-            while r > 15 && (i as i32) <= eob_idx {
-                writer.write_bits(ac_table.ehufco[0xF0], ac_table.ehufsi[0xF0]);
-                r -= 16;
-                // Emit buffered correction bits with this ZRL
-                emit_buffered_bits(&correction_bits, writer);
-                correction_bits.clear();
-            }
-
-            // Emit (run << 4) | 1
+        } else {
             let symbol: usize = (r << 4) | 1;
             writer.write_bits(ac_table.ehufco[symbol], ac_table.ehufsi[symbol]);
-
-            // Emit sign bit for newly-nonzero coefficient
             writer.write_bits(signs[i], 1);
-
-            // Emit correction bits associated with this code
             emit_buffered_bits(&correction_bits, writer);
             correction_bits.clear();
             r = 0;
-        } else {
-            // Zero coefficient: increment zero run
-            r += 1;
         }
     }
 
