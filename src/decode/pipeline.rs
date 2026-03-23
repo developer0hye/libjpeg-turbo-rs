@@ -22,6 +22,42 @@ fn vertical_blend(cur: &[u8], neighbor: &[u8], output: &mut [u8], width: usize) 
     }
 }
 
+/// Generic nearest-neighbor upsampling for arbitrary h/v factor combinations.
+///
+/// Handles non-standard sampling factors like 3x2, 3x1, 1x3, 4x2 that lack
+/// dedicated optimized paths. Each input sample is replicated h_factor times
+/// horizontally and v_factor times vertically.
+fn upsample_generic_nearest(
+    input: &[u8],
+    in_width: usize,
+    in_height: usize,
+    output: &mut [u8],
+    out_stride: usize,
+    h_factor: usize,
+    v_factor: usize,
+) {
+    for y in 0..in_height {
+        let in_row: &[u8] = &input[y * in_width..y * in_width + in_width];
+        // Build one upsampled row (horizontal replication)
+        let out_y_base: usize = y * v_factor;
+        let first_out_row: usize = out_y_base * out_stride;
+        for x in 0..in_width {
+            let val: u8 = in_row[x];
+            let out_x: usize = x * h_factor;
+            for dx in 0..h_factor {
+                output[first_out_row + out_x + dx] = val;
+            }
+        }
+        // Replicate the row vertically
+        for dy in 1..v_factor {
+            let src_start: usize = first_out_row;
+            let dst_start: usize = (out_y_base + dy) * out_stride;
+            let copy_len: usize = in_width * h_factor;
+            output.copy_within(src_start..src_start + copy_len, dst_start);
+        }
+    }
+}
+
 /// Per-component layout info for progressive decoding.
 struct CompInfo {
     blocks_x: usize,
@@ -2418,10 +2454,26 @@ impl<'a> Decoder<'a> {
                     self.fancy_h1v4(&component_planes[1], cb_w, cb_h, &mut cb_full, full_width);
                     self.fancy_h1v4(&component_planes[2], cb_w, cb_h, &mut cr_full, full_width);
                 } else {
-                    return Err(JpegError::Unsupported(format!(
-                        "subsampling {}x{} not yet supported",
-                        h_factor, v_factor
-                    )));
+                    // Generic fallback for non-standard sampling factors (e.g. 3x2, 3x1, 1x3, 4x2).
+                    // Uses nearest-neighbor replication for any h/v factor combination.
+                    upsample_generic_nearest(
+                        &component_planes[1],
+                        cb_w,
+                        cb_h,
+                        &mut cb_full,
+                        full_width,
+                        h_factor,
+                        v_factor,
+                    );
+                    upsample_generic_nearest(
+                        &component_planes[2],
+                        cb_w,
+                        cb_h,
+                        &mut cr_full,
+                        full_width,
+                        h_factor,
+                        v_factor,
+                    );
                 }
 
                 // Rebind as immutable references for color conversion below.
@@ -2731,10 +2783,25 @@ impl<'a> Decoder<'a> {
                     full_width,
                 );
             } else {
-                return Err(JpegError::Unsupported(format!(
-                    "4-component subsampling {}x{} not yet supported",
-                    h_factor, v_factor
-                )));
+                // Generic fallback for non-standard 4-component sampling factors.
+                upsample_generic_nearest(
+                    &component_planes[1],
+                    comp1_w,
+                    comp1_h,
+                    &mut p1_full,
+                    full_width,
+                    h_factor,
+                    v_factor,
+                );
+                upsample_generic_nearest(
+                    &component_planes[2],
+                    comp1_w,
+                    comp1_h,
+                    &mut p2_full,
+                    full_width,
+                    h_factor,
+                    v_factor,
+                );
             }
 
             return self.convert_4comp_output(
