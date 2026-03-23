@@ -18,7 +18,7 @@ fn extend(value: u16, size: u8) -> i16 {
     (x + offset) as i16
 }
 
-#[inline]
+#[inline(always)]
 pub fn decode_dc_coefficient(reader: &mut BitReader, table: &HuffmanTable) -> Result<i16> {
     let peek = reader.peek_bits(16);
     let (s, l) = table.lookup_fast(peek);
@@ -34,7 +34,7 @@ pub fn decode_dc_coefficient(reader: &mut BitReader, table: &HuffmanTable) -> Re
     Ok(extend(extra_bits, category))
 }
 
-#[inline]
+#[inline(always)]
 pub fn decode_ac_coefficients(
     reader: &mut BitReader,
     table: &HuffmanTable,

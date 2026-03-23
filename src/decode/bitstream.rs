@@ -34,27 +34,27 @@ impl<'a> BitReader<'a> {
 
     #[inline(always)]
     fn read_next_byte(&mut self) -> u8 {
-        if self.pos >= self.data.len() {
+        let len: usize = self.data.len();
+        if self.pos >= len {
             return 0;
         }
-        let byte = self.data[self.pos];
+        // SAFETY: pos < len checked above.
+        let byte: u8 = unsafe { *self.data.get_unchecked(self.pos) };
         self.pos += 1;
 
         if byte != 0xFF {
             return byte;
         }
 
-        if self.pos >= self.data.len() {
+        if self.pos >= len {
             return 0;
         }
-        let next = self.data[self.pos];
+        // SAFETY: pos < len checked above.
+        let next: u8 = unsafe { *self.data.get_unchecked(self.pos) };
         if next == 0x00 {
-            // Byte-stuffed 0xFF — consume the 0x00 and return 0xFF data.
             self.pos += 1;
             0xFF
         } else {
-            // Any other marker (restart, SOS, EOI, etc.) — stop feeding data.
-            // Back up so the marker can be found by reset().
             self.pos -= 1;
             0
         }
