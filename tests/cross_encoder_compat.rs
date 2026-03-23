@@ -348,30 +348,34 @@ fn c_interleaved_pixel_similarity_to_baseline() {
 // ===========================================================================
 
 #[test]
-fn c_12bit_decode_or_clear_error() {
+fn c_12bit_decode_success() {
     let data: Vec<u8> = match load_reference("testorig12.jpg") {
         Some(d) => d,
         None => return,
     };
     use libjpeg_turbo_rs::precision::decompress_12bit;
-    match decompress_12bit(&data) {
-        Ok(img) => {
-            assert!(img.width > 0 && img.height > 0);
-            // 12-bit samples should be in 0..4095 range.
-            for &sample in &img.data {
-                assert!(
-                    sample >= 0 && sample <= 4095,
-                    "12-bit sample out of range: {}",
-                    sample
-                );
-            }
-        }
-        Err(e) => {
-            // 12-bit JPEG decoded via 8-bit API returns an error — that's acceptable.
-            // The specific error message may vary (precision, Huffman, SOF, etc.)
-            let _msg: String = format!("{}", e);
-        }
+    let img = decompress_12bit(&data).expect("C-encoded 12-bit JPEG should decode successfully");
+    assert!(img.width > 0 && img.height > 0);
+    assert_eq!(
+        img.data.len(),
+        img.width * img.height * img.num_components,
+        "output buffer size mismatch"
+    );
+    for &sample in &img.data {
+        assert!(
+            sample >= 0 && sample <= 4095,
+            "12-bit sample out of range: {}",
+            sample
+        );
     }
+    let min_val: i16 = *img.data.iter().min().unwrap();
+    let max_val: i16 = *img.data.iter().max().unwrap();
+    assert!(
+        max_val - min_val > 100,
+        "12-bit output lacks diversity: min={}, max={}",
+        min_val,
+        max_val
+    );
 }
 
 #[test]
