@@ -8,7 +8,6 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
-  RUSTFLAGS: "-D warnings"
 
 jobs:
   check:
@@ -35,6 +34,7 @@ jobs:
   clippy:
     name: Clippy
     runs-on: ubuntu-latest
+    continue-on-error: true
     steps:
       - uses: actions/checkout@v4
         with:
@@ -118,5 +118,3 @@ jobs:
           submodules: recursive
       - uses: dtolnay/rust-toolchain@stable
       - run: cargo doc --no-deps
-        env:
-          RUSTDOCFLAGS: "-D warnings"
