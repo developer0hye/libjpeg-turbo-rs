@@ -1098,18 +1098,6 @@ fn pixel_match_rust_vs_c_decode_arithmetic() {
         "testimgari.jpg: max_diff={}, mean_diff={:.4}",
         max_diff, mean_diff
     );
-    // The reference testimgari.jpg uses arithmetic coding. If differences are
-    // very large (>10), the arithmetic decoder has a fundamental issue that
-    // should be tracked separately. We log the result either way.
-    if max_diff > 10 {
-        eprintln!(
-            "KNOWN ISSUE: arithmetic decode pixel diff is very large (max={}, mean={:.2}). \
-             The Rust arithmetic decoder may produce incorrect output for this reference file.",
-            max_diff, mean_diff
-        );
-        // Don't fail -- this is a known limitation being tracked.
-        return;
-    }
     assert!(
         max_diff <= 2,
         "testimgari.jpg pixel max diff = {}, expected <= 2",
