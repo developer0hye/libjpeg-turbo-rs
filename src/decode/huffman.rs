@@ -3,12 +3,19 @@ use crate::common::huffman_table::HuffmanTable;
 use crate::common::quant_table::ZIGZAG_ORDER;
 use crate::decode::bitstream::BitReader;
 
+/// Sign-extend a Huffman extra-bits value (JPEG Figure F.12).
+/// Uses the same branchless formula as C libjpeg-turbo's HUFF_EXTEND:
+///   result = x + (((x - (1 << (s-1))) >> 31) & ((-1 << s) + 1))
+/// This correctly handles all category sizes 1-16 without overflow,
+/// which is needed for 12-bit JPEG where DC categories reach 15.
 #[inline(always)]
 fn extend(value: u16, size: u8) -> i16 {
-    let half = 1u16 << (size - 1);
-    let mask = (0u16.wrapping_sub((value < half) as u16)) as i16;
-    let offset = ((1i16 << size) - 1) & mask;
-    value as i16 - offset
+    let x = value as i32;
+    let s = size as i32;
+    let threshold = 1i32 << (s - 1);
+    let sign_mask = (x - threshold) >> 31;
+    let offset = sign_mask & ((-1i32 << s) + 1);
+    (x + offset) as i16
 }
 
 #[inline]
@@ -67,7 +74,7 @@ pub fn decode_ac_coefficients(
             }
 
             // Skip Huffman code bits, then read extra magnitude bits.
-            // fill_buffer guarantees ≥56 bits after fill; we consume at
+            // fill_buffer guarantees >=56 bits after fill; we consume at
             // most 9+10=19, so read_bits never triggers a refill here.
             reader.skip_bits(l);
             let extra_bits = reader.read_bits(bit_size);

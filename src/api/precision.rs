@@ -460,13 +460,17 @@ fn write_sof0_precision(
 // ============================================================
 
 /// Decompress JPEG to 12-bit sample data.
+/// Decompress a 12-bit JPEG (SOF1 extended sequential) to i16 samples.
+///
+/// Handles arbitrary chroma subsampling (4:4:4, 4:2:2, 4:2:0, etc.)
+/// by decoding at component resolution and upsampling to full size.
 pub fn decompress_12bit(data: &[u8]) -> Result<Image12> {
     let mut reader = MarkerReader::new(data);
     let metadata = reader.read_markers()?;
     let frame = &metadata.frame;
-    let width = frame.width as usize;
-    let height = frame.height as usize;
-    let num_components = frame.components.len();
+    let width: usize = frame.width as usize;
+    let height: usize = frame.height as usize;
+    let num_components: usize = frame.components.len();
     if frame.precision != 12 {
         return Err(JpegError::Unsupported(format!(
             "decompress_12bit requires precision=12, got {}",
@@ -492,68 +496,144 @@ pub fn decompress_12bit(data: &[u8]) -> Result<Image12> {
                 })
         })
         .collect::<Result<Vec<_>>>()?;
+    // Resolve Huffman tables from scan header, matching component order.
     let scan = &metadata.scan;
-    let mut dc_tables = Vec::with_capacity(num_components);
-    let mut ac_tables = Vec::with_capacity(num_components);
-    for i in 0..scan.components.len().min(num_components) {
-        let di = scan.components[i].dc_table_index as usize;
-        let ai = scan.components[i].ac_table_index as usize;
-        dc_tables.push(
+    let mut comp_dc_tables: Vec<&crate::common::huffman_table::HuffmanTable> =
+        Vec::with_capacity(num_components);
+    let mut comp_ac_tables: Vec<&crate::common::huffman_table::HuffmanTable> =
+        Vec::with_capacity(num_components);
+    for scan_comp in &scan.components {
+        let di: usize = scan_comp.dc_table_index as usize;
+        let ai: usize = scan_comp.ac_table_index as usize;
+        comp_dc_tables.push(
             metadata.dc_huffman_tables[di]
                 .as_ref()
                 .ok_or_else(|| JpegError::CorruptData(format!("missing DC table {}", di)))?,
         );
-        ac_tables.push(
+        comp_ac_tables.push(
             metadata.ac_huffman_tables[ai]
                 .as_ref()
                 .ok_or_else(|| JpegError::CorruptData(format!("missing AC table {}", ai)))?,
         );
     }
-    let entropy_data = &data[metadata.entropy_data_offset..];
-    let mut bit_reader = BitReader::new(entropy_data);
+    // Build component index mapping: scan order -> frame component index.
+    let scan_to_frame: Vec<usize> = scan
+        .components
+        .iter()
+        .map(|sc| {
+            frame
+                .components
+                .iter()
+                .position(|fc| fc.id == sc.component_id)
+                .ok_or_else(|| {
+                    JpegError::CorruptData(format!(
+                        "scan references unknown component id {}",
+                        sc.component_id
+                    ))
+                })
+        })
+        .collect::<Result<Vec<_>>>()?;
+    // Compute MCU dimensions based on max sampling factors.
+    let max_h_samp: usize = frame
+        .components
+        .iter()
+        .map(|c| c.horizontal_sampling as usize)
+        .max()
+        .unwrap_or(1);
+    let max_v_samp: usize = frame
+        .components
+        .iter()
+        .map(|c| c.vertical_sampling as usize)
+        .max()
+        .unwrap_or(1);
+    let mcu_width: usize = max_h_samp * 8;
+    let mcu_height: usize = max_v_samp * 8;
+    let mcus_x: usize = (width + mcu_width - 1) / mcu_width;
+    let mcus_y: usize = (height + mcu_height - 1) / mcu_height;
+    // Per-component sampling and plane dimensions.
+    let comp_h_samp: Vec<usize> = frame
+        .components
+        .iter()
+        .map(|c| c.horizontal_sampling as usize)
+        .collect();
+    let comp_v_samp: Vec<usize> = frame
+        .components
+        .iter()
+        .map(|c| c.vertical_sampling as usize)
+        .collect();
+    let comp_plane_w: Vec<usize> = comp_h_samp.iter().map(|&h| mcus_x * h * 8).collect();
+    let comp_plane_h: Vec<usize> = comp_v_samp.iter().map(|&v| mcus_y * v * 8).collect();
+    let entropy_data: &[u8] = &data[metadata.entropy_data_offset..];
+    let mut bit_reader: BitReader<'_> = BitReader::new(entropy_data);
     let level_shift: i32 = 2048;
-    let mcus_x = (width + 7) / 8;
-    let mcus_y = (height + 7) / 8;
-    let fw = mcus_x * 8;
-    let fh = mcus_y * 8;
-    let mut planes: Vec<Vec<i16>> = vec![vec![0i16; fw * fh]; num_components];
-    let mut prev_dc = vec![0i16; num_components];
+    let _ = mcu_height;
+    // Allocate per-component planes at component resolution.
+    let mut planes: Vec<Vec<i16>> = (0..num_components)
+        .map(|c| vec![0i16; comp_plane_w[c] * comp_plane_h[c]])
+        .collect();
+    let mut prev_dc: Vec<i32> = vec![0i32; num_components];
+    let mut mcu_count: u16 = 0;
     for mcu_row in 0..mcus_y {
         for mcu_col in 0..mcus_x {
-            let bx = mcu_col * 8;
-            let by = mcu_row * 8;
-            for c in 0..num_components {
-                let mut block = [0i16; 64];
-                let dc_diff = huffman::decode_dc_coefficient(&mut bit_reader, dc_tables[c])?;
-                block[0] = prev_dc[c] + dc_diff;
-                prev_dc[c] = block[0];
-                huffman::decode_ac_coefficients(&mut bit_reader, ac_tables[c], &mut block)?;
-                // Dequantize: block is already in natural order from decode_ac_coefficients
-                let qt = quant_tables[c];
-                let mut deq_i16 = [0i16; 64];
-                for k in 0..64 {
-                    let val: i32 = block[k] as i32 * qt.values[k] as i32;
-                    deq_i16[k] = val.clamp(-32768, 32767) as i16;
-                }
-                let idct_out = crate::decode::idct::idct_8x8(&deq_i16);
-                for row in 0..8 {
-                    for col in 0..8 {
-                        let py = by + row;
-                        let px = bx + col;
-                        if py < fh && px < fw {
-                            let val = idct_out[row * 8 + col] as i32 + level_shift;
-                            planes[c][py * fw + px] = val.clamp(0, 4095) as i16;
+            // Handle restart intervals.
+            if metadata.restart_interval > 0
+                && mcu_count > 0
+                && mcu_count % metadata.restart_interval == 0
+            {
+                bit_reader.reset();
+                prev_dc.fill(0);
+            }
+            // Decode blocks in scan order (matching C libjpeg-turbo MCU structure).
+            for (scan_idx, &frame_idx) in scan_to_frame.iter().enumerate() {
+                let h_samp: usize = comp_h_samp[frame_idx];
+                let v_samp: usize = comp_v_samp[frame_idx];
+                let pw: usize = comp_plane_w[frame_idx];
+                let qt = quant_tables[frame_idx];
+                let dc_table = comp_dc_tables[scan_idx];
+                let ac_table = comp_ac_tables[scan_idx];
+                for v in 0..v_samp {
+                    for h in 0..h_samp {
+                        let mut block = [0i16; 64];
+                        let dc_diff: i16 =
+                            huffman::decode_dc_coefficient(&mut bit_reader, dc_table)?;
+                        // Use i32 for DC prediction to avoid overflow with 12-bit range.
+                        prev_dc[frame_idx] += dc_diff as i32;
+                        block[0] = prev_dc[frame_idx].clamp(-32768, 32767) as i16;
+                        huffman::decode_ac_coefficients(&mut bit_reader, ac_table, &mut block)?;
+                        // Dequantize
+                        let mut deq = [0i16; 64];
+                        for k in 0..64 {
+                            let val: i32 = block[k] as i32 * qt.values[k] as i32;
+                            deq[k] = val.clamp(-32768, 32767) as i16;
+                        }
+                        // IDCT
+                        let idct_out: [i16; 64] = crate::decode::idct::idct_8x8(&deq);
+                        // Write to component plane at component resolution.
+                        let block_x: usize = (mcu_col * h_samp + h) * 8;
+                        let block_y: usize = (mcu_row * v_samp + v) * 8;
+                        for row in 0..8 {
+                            let py: usize = block_y + row;
+                            for col in 0..8 {
+                                let px: usize = block_x + col;
+                                let val: i32 = idct_out[row * 8 + col] as i32 + level_shift;
+                                planes[frame_idx][py * pw + px] = val.clamp(0, 4095) as i16;
+                            }
                         }
                     }
                 }
             }
+            mcu_count += 1;
         }
     }
-    let mut result = Vec::with_capacity(width * height * num_components);
+    // Interleave components into output, upsampling subsampled components.
+    let mut result: Vec<i16> = Vec::with_capacity(width * height * num_components);
     for y in 0..height {
         for x in 0..width {
             for c in 0..num_components {
-                result.push(planes[c][y * fw + x]);
+                // Map full-resolution pixel to component-resolution pixel.
+                let cx: usize = x * comp_h_samp[c] / max_h_samp;
+                let cy: usize = y * comp_v_samp[c] / max_v_samp;
+                result.push(planes[c][cy * comp_plane_w[c] + cx]);
             }
         }
     }
