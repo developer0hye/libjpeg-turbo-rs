@@ -1,5 +1,10 @@
 # Reference baselines for decode_640x480 (gradient_640x480.jpg, 4:2:0, 26KB)
 # Measured on Apple M2, macOS 26.3.1
+# Re-measured 2026-03-23 with standalone binary (5000 iters, avg of 5 runs)
 
-C libjpeg-turbo 3.1.3 (NEON):     ~352 us
-C libjpeg-turbo 3.1.3 (scalar):   ~1224 us
+C libjpeg-turbo 3.1.3 (NEON):     ~453 us  (standalone, header+decode per iter)
+Rust libjpeg-turbo-rs (NEON):      ~445 us  (criterion), ~480 us (standalone)
+
+# Previous measurements (methodology may differ):
+# C libjpeg-turbo 3.1.3 (NEON):   ~352 us
+# C libjpeg-turbo 3.1.3 (scalar): ~1224 us
