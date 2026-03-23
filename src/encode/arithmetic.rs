@@ -51,7 +51,7 @@ impl ArithEncoder {
             dc_context: [0; 4],
             dc_stats: [[0; DC_STAT_BINS]; 4],
             ac_stats: [[0; AC_STAT_BINS]; 4],
-            fixed_bin: [0; 4],
+            fixed_bin: [113, 0, 0, 0],
             arith_dc_l: [0; 4],
             arith_dc_u: [1; 4],
             arith_ac_k: [5; 4],
@@ -240,11 +240,12 @@ impl ArithEncoder {
                 self.dc_context[comp_idx] += 8; // promote to large category
             }
 
-            // Magnitude bit pattern (Figure F.9) — uses fixed-probability bin
+            // Magnitude bit pattern (Figure F.9) — uses adaptive stats bin st+14
+            let mag_st = x1 + 14;
             let mut bit_mask = m >> 1;
             while bit_mask != 0 {
                 let bit = if (bit_mask & v_orig) != 0 { 1u8 } else { 0u8 };
-                self.encode(StatRef::Fixed(0), bit);
+                self.encode(StatRef::Dc(dc_tbl, mag_st), bit);
                 bit_mask >>= 1;
             }
         } else {
@@ -322,11 +323,12 @@ impl ArithEncoder {
             }
             self.encode(StatRef::Ac(ac_tbl, st), 0); // magnitude terminator
 
-            // Magnitude bit pattern (Figure F.9)
+            // Magnitude bit pattern (Figure F.9) — uses adaptive stats bin st+14
+            let mag_st = st + 14;
             let mut bit_mask = m >> 1;
             while bit_mask != 0 {
                 let bit = if (bit_mask & v_orig) != 0 { 1u8 } else { 0u8 };
-                self.encode(StatRef::Fixed(0), bit);
+                self.encode(StatRef::Ac(ac_tbl, mag_st), bit);
                 bit_mask >>= 1;
             }
 
@@ -429,7 +431,7 @@ impl ArithEncoder {
         self.dc_context = [0; 4];
         self.dc_stats = [[0; DC_STAT_BINS]; 4];
         self.ac_stats = [[0; AC_STAT_BINS]; 4];
-        self.fixed_bin = [0; 4];
+        self.fixed_bin = [113, 0, 0, 0];
     }
 
     /// Encode DC coefficient for first progressive scan (DC first, Ah=0).
@@ -492,14 +494,12 @@ impl ArithEncoder {
                 self.dc_context[comp_idx] += 8;
             }
 
-            // Magnitude bit pattern (Figure F.9) — uses fixed-probability bin
-            // jcarith.c uses st += 14 here, which points into the stats array.
-            // Our sequential encoder uses Fixed(0) for compatibility; progressive
-            // follows the same approach for consistency.
+            // Magnitude bit pattern (Figure F.9) — uses adaptive stats bin st+14
+            let mag_st: usize = x1 + 14;
             let mut bit_mask: i32 = m >> 1;
             while bit_mask != 0 {
                 let bit: u8 = if (bit_mask & v_orig) != 0 { 1 } else { 0 };
-                self.encode(StatRef::Fixed(0), bit);
+                self.encode(StatRef::Dc(dc_tbl, mag_st), bit);
                 bit_mask >>= 1;
             }
         } else {
@@ -615,11 +615,12 @@ impl ArithEncoder {
             }
             self.encode(StatRef::Ac(ac_tbl, st), 0); // magnitude terminator
 
-            // Magnitude bit pattern (Figure F.9)
+            // Magnitude bit pattern (Figure F.9) — uses adaptive stats bin st+14
+            let mag_st: usize = st + 14;
             let mut bit_mask: i32 = m >> 1;
             while bit_mask != 0 {
                 let bit: u8 = if (bit_mask & v_orig) != 0 { 1 } else { 0 };
-                self.encode(StatRef::Fixed(0), bit);
+                self.encode(StatRef::Ac(ac_tbl, mag_st), bit);
                 bit_mask >>= 1;
             }
 

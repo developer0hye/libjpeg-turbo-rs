@@ -48,7 +48,7 @@ impl<'a> ArithDecoder<'a> {
             dc_context: [0; 4],
             dc_stats: [[0; DC_STAT_BINS]; 4],
             ac_stats: [[0; AC_STAT_BINS]; 4],
-            fixed_bin: [0; 4],
+            fixed_bin: [113, 0, 0, 0],
             arith_dc_l: [0; 4],
             arith_dc_u: [1; 4],
             arith_ac_k: [5; 4],
@@ -321,8 +321,8 @@ impl<'a> ArithDecoder<'a> {
             v += 1; // v is 1-based
             let v = if sign != 0 { -v } else { v };
 
-            // Output in zigzag order (block is already zigzag-ordered)
-            block[k] = v as i16;
+            // Output in natural (dezigzagged) order, matching C's jpeg_natural_order
+            block[ZIGZAG_ORDER[k]] = v as i16;
             k += 1;
         }
 
