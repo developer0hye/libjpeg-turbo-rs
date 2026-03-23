@@ -119,17 +119,15 @@ fn reference_progressive_matches_baseline_dimensions() {
 fn reference_12bit_decode() {
     use libjpeg_turbo_rs::precision::decompress_12bit;
     let data: &[u8] = include_bytes!("../references/libjpeg-turbo/testimages/testorig12.jpg");
-    match decompress_12bit(data) {
-        Ok(img) => {
-            assert!(img.width > 0 && img.height > 0);
-            for &v in &img.data {
-                assert!(v >= 0 && v <= 4095);
-            }
-        }
-        Err(_e) => {
-            // 12-bit C-encoded JPEG may not be fully compatible with our 12-bit decoder.
-            // Any error is acceptable as long as it doesn't panic.
-        }
+    let img = decompress_12bit(data).expect("C-encoded 12-bit JPEG should decode successfully");
+    assert!(img.width > 0 && img.height > 0);
+    assert_eq!(
+        img.data.len(),
+        img.width * img.height * img.num_components,
+        "output buffer size mismatch"
+    );
+    for &v in &img.data {
+        assert!(v >= 0 && v <= 4095, "12-bit sample {} out of range", v);
     }
 }
 
