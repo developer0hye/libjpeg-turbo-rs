@@ -403,15 +403,11 @@ fn rust_encode_c_decode_progressive() {
         .output()
         .expect("failed to run djpeg");
 
-    if !output.status.success() {
-        // Progressive AC refine encoding may not yet be fully C-compatible.
-        // Our decoder handles it, but C djpeg may reject it.
-        eprintln!(
-            "NOTE: djpeg rejected Rust progressive JPEG (AC refine interop): {}",
-            String::from_utf8_lossy(&output.stderr).trim()
-        );
-        return;
-    }
+    assert!(
+        output.status.success(),
+        "djpeg rejected Rust progressive JPEG: {}",
+        String::from_utf8_lossy(&output.stderr).trim()
+    );
 
     let (dw, dh, c_pixels) = parse_ppm(tmp_ppm.path());
     assert_eq!(dw, w);
@@ -424,6 +420,74 @@ fn rust_encode_c_decode_progressive() {
         "progressive pixel diff too large: {}",
         max_diff
     );
+}
+
+/// Verify progressive AC refine scans produce valid bitstreams that C djpeg
+/// accepts. Tests multiple image sizes and quality levels to exercise
+/// different coefficient patterns (zero-run lengths, correction bit counts).
+#[test]
+fn progressive_ac_refine_c_djpeg_compatible() {
+    let djpeg: PathBuf = match djpeg_path() {
+        Some(p) => p,
+        None => {
+            eprintln!("SKIP: djpeg not found");
+            return;
+        }
+    };
+
+    // Test several configurations to cover edge cases in AC refine:
+    // - Small image: few MCUs, short runs
+    // - Larger image: more MCUs, longer runs
+    // - Low quality: larger quantization, fewer nonzero coefficients
+    // - High quality: more nonzero coefficients, more correction bits
+    let configs: &[(usize, usize, u8, Subsampling)] = &[
+        (8, 8, 75, Subsampling::S444),
+        (48, 48, 50, Subsampling::S444),
+        (48, 48, 95, Subsampling::S444),
+        (64, 64, 75, Subsampling::S444),
+        (100, 75, 85, Subsampling::S444),
+    ];
+
+    for &(w, h, quality, subsampling) in configs {
+        let label: String = format!("{}x{}_q{}_{:?}", w, h, quality, subsampling);
+        let pixels: Vec<u8> = generate_pattern(w, h);
+
+        let jpeg: Vec<u8> =
+            compress_progressive(&pixels, w, h, PixelFormat::Rgb, quality, subsampling)
+                .expect("Rust progressive encode failed");
+
+        let tmp_jpg: TempFile = TempFile::new(&format!("acref_{}.jpg", label));
+        let tmp_ppm: TempFile = TempFile::new(&format!("acref_{}.ppm", label));
+        std::fs::write(tmp_jpg.path(), &jpeg).expect("write tmp");
+
+        let output = Command::new(&djpeg)
+            .arg("-ppm")
+            .arg("-outfile")
+            .arg(tmp_ppm.path())
+            .arg(tmp_jpg.path())
+            .output()
+            .expect("failed to run djpeg");
+
+        assert!(
+            output.status.success(),
+            "{}: djpeg rejected progressive JPEG: {}",
+            label,
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+
+        let (dw, dh, c_pixels) = parse_ppm(tmp_ppm.path());
+        assert_eq!(dw, w, "{}: width mismatch", label);
+        assert_eq!(dh, h, "{}: height mismatch", label);
+
+        let rust_img: Image = decompress_to(&jpeg, PixelFormat::Rgb).expect("Rust decode failed");
+        let max_diff: u8 = pixel_max_diff(&rust_img.data, &c_pixels);
+        assert!(
+            max_diff <= 2,
+            "{}: pixel max diff = {}, expected <= 2",
+            label,
+            max_diff
+        );
+    }
 }
 
 #[test]
