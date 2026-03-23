@@ -70,6 +70,11 @@ pub struct Encoder<'a> {
     jfif_version: Option<(u8, u8)>,
     /// Adobe APP14 marker control. `None` = auto. `Some(true)` = always. `Some(false)` = never.
     write_adobe_marker: Option<bool>,
+    /// Custom per-component sampling factors as (h, v) pairs.
+    /// When set, overrides the `subsampling` enum with explicit factors.
+    /// The first component (Y) defines the max sampling factor; subsequent
+    /// components (Cb, Cr) can use any factor from 1 to max_h/max_v.
+    custom_sampling_factors: Option<Vec<(u8, u8)>>,
 }
 
 impl<'a> Encoder<'a> {
@@ -108,6 +113,7 @@ impl<'a> Encoder<'a> {
             fancy_downsampling: true,
             jfif_version: None,
             write_adobe_marker: None,
+            custom_sampling_factors: None,
         }
     }
 
@@ -276,6 +282,23 @@ impl<'a> Encoder<'a> {
     /// and omitted for others. Matches libjpeg-turbo's `write_Adobe_marker`.
     pub fn write_adobe_marker(mut self, write: bool) -> Self {
         self.write_adobe_marker = Some(write);
+        self
+    }
+
+    /// Set explicit per-component sampling factors, overriding the `subsampling` enum.
+    ///
+    /// `factors` is a list of `(h_sampling, v_sampling)` per component. For a
+    /// 3-component YCbCr image, provide 3 entries:
+    /// - `factors[0]` = Y (luminance) sampling factor
+    /// - `factors[1]` = Cb sampling factor
+    /// - `factors[2]` = Cr sampling factor
+    ///
+    /// The first component typically has the largest factors (e.g., `(3, 2)` for
+    /// 3x2 sampling). Chroma components usually use `(1, 1)`.
+    ///
+    /// Valid factor values are 1..=4 for each dimension.
+    pub fn sampling_factors(mut self, factors: Vec<(u8, u8)>) -> Self {
+        self.custom_sampling_factors = Some(factors);
         self
     }
 
@@ -662,7 +685,16 @@ impl<'a> Encoder<'a> {
             || self.linear_scale_factor.is_some()
             || self.has_custom_quant_tables();
 
-        let base = if self.lossless && self.arithmetic {
+        let base = if let Some(ref factors) = self.custom_sampling_factors {
+            encoder::compress_custom_sampling(
+                effective_pixels,
+                self.width,
+                self.height,
+                effective_format,
+                quality,
+                factors,
+            )?
+        } else if self.lossless && self.arithmetic {
             encoder::compress_lossless_arithmetic(
                 effective_pixels,
                 self.width,
