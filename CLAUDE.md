@@ -69,6 +69,7 @@ When optimizing performance, follow the experiment-driven workflow in `experimen
 
 **Key rules:**
 
+- **Every change must pass all tests.** Run `cargo test` after each optimization attempt. If tests fail, fix the issue or revert — never commit broken code for a benchmark win.
 - **Record every attempt** in `experiments/<target>.tsv` — successes, failures, and crashes. Failures are data.
 - **Per-target logs**: each optimization area (idct, huffman, color, upsample, pipeline) has its own TSV. **Only read the relevant TSV** when starting work on a target — do NOT read all experiment logs. This prevents context pollution and keeps focus.
 - **Benchmark harness**: always use `cargo bench -- decode_640x480` as the single metric. Compare against `experiments/baseline.txt` for the C reference.

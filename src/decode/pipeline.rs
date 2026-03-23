@@ -727,14 +727,18 @@ impl<'a> Decoder<'a> {
         // Determine MCU row range for IDCT
         let (mcu_y_start, mcu_y_end) = self.mcu_row_range(mcus_y, block_size, frame);
 
-        // Allocate component planes (full MCU-aligned size)
+        // Allocate component planes (full MCU-aligned size, uninitialized).
+        // SAFETY: The MCU decode loop + IDCT writes every pixel before reading.
         let mut component_planes: Vec<Vec<u8>> = frame
             .components
             .iter()
             .map(|comp| {
                 let comp_w = mcus_x * comp.horizontal_sampling as usize * block_size;
                 let comp_h = mcus_y * comp.vertical_sampling as usize * block_size;
-                vec![0u8; comp_w * comp_h]
+                let size: usize = comp_w * comp_h;
+                let mut v: Vec<u8> = Vec::with_capacity(size);
+                unsafe { v.set_len(size) };
+                v
             })
             .collect();
 
