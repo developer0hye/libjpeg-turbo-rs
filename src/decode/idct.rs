@@ -21,11 +21,13 @@ const F_3_072: i32 = 25172;
 
 #[inline(always)]
 fn descale(x: i32, n: i32) -> i32 {
-    (x + (1 << (n - 1))) >> n
+    x.wrapping_add(1 << (n - 1)) >> n
 }
 
 /// Perform one pass of the 1-D IDCT on 8 values.
 /// Used for both column pass (pass 1) and row pass (pass 2).
+/// Uses wrapping arithmetic to match C's implicit i32 overflow behavior,
+/// which is safe and correct for the IDCT algorithm (especially with 12-bit input).
 #[inline(always)]
 fn idct_1d(s0: i32, s1: i32, s2: i32, s3: i32, s4: i32, s5: i32, s6: i32, s7: i32) -> [i32; 8] {
     // Even part
@@ -34,48 +36,48 @@ fn idct_1d(s0: i32, s1: i32, s2: i32, s3: i32, s4: i32, s5: i32, s6: i32, s7: i3
     let tmp2 = s4;
     let tmp3 = s6;
 
-    let z1 = (tmp1 + tmp3) * F_0_541;
-    let tmp2a = z1 + tmp3 * (-F_1_847);
-    let tmp3a = z1 + tmp1 * F_0_765;
+    let z1 = (tmp1.wrapping_add(tmp3)).wrapping_mul(F_0_541);
+    let tmp2a = z1.wrapping_add(tmp3.wrapping_mul(-F_1_847));
+    let tmp3a = z1.wrapping_add(tmp1.wrapping_mul(F_0_765));
 
-    let tmp0a = (tmp0 + tmp2) << CONST_BITS;
-    let tmp1a = (tmp0 - tmp2) << CONST_BITS;
+    let tmp0a = (tmp0.wrapping_add(tmp2)) << CONST_BITS;
+    let tmp1a = (tmp0.wrapping_sub(tmp2)) << CONST_BITS;
 
-    let tmp10 = tmp0a + tmp3a;
-    let tmp13 = tmp0a - tmp3a;
-    let tmp11 = tmp1a + tmp2a;
-    let tmp12 = tmp1a - tmp2a;
+    let tmp10 = tmp0a.wrapping_add(tmp3a);
+    let tmp13 = tmp0a.wrapping_sub(tmp3a);
+    let tmp11 = tmp1a.wrapping_add(tmp2a);
+    let tmp12 = tmp1a.wrapping_sub(tmp2a);
 
     // Odd part
-    let z1 = s7 + s1;
-    let z2 = s5 + s3;
-    let z3 = s7 + s3;
-    let z4 = s5 + s1;
-    let z5 = (z3 + z4) * F_1_175;
+    let z1 = s7.wrapping_add(s1);
+    let z2 = s5.wrapping_add(s3);
+    let z3 = s7.wrapping_add(s3);
+    let z4 = s5.wrapping_add(s1);
+    let z5 = (z3.wrapping_add(z4)).wrapping_mul(F_1_175);
 
-    let tmp0 = s7 * F_0_298;
-    let tmp1 = s5 * F_2_053;
-    let tmp2 = s3 * F_3_072;
-    let tmp3 = s1 * F_1_501;
-    let z1 = z1 * (-F_0_899);
-    let z2 = z2 * (-F_2_562);
-    let z3 = z3 * (-F_1_961) + z5;
-    let z4 = z4 * (-F_0_390) + z5;
+    let tmp0 = s7.wrapping_mul(F_0_298);
+    let tmp1 = s5.wrapping_mul(F_2_053);
+    let tmp2 = s3.wrapping_mul(F_3_072);
+    let tmp3 = s1.wrapping_mul(F_1_501);
+    let z1 = z1.wrapping_mul(-F_0_899);
+    let z2 = z2.wrapping_mul(-F_2_562);
+    let z3 = z3.wrapping_mul(-F_1_961).wrapping_add(z5);
+    let z4 = z4.wrapping_mul(-F_0_390).wrapping_add(z5);
 
-    let tmp0 = tmp0 + z1 + z3;
-    let tmp1 = tmp1 + z2 + z4;
-    let tmp2 = tmp2 + z2 + z3;
-    let tmp3 = tmp3 + z1 + z4;
+    let tmp0 = tmp0.wrapping_add(z1).wrapping_add(z3);
+    let tmp1 = tmp1.wrapping_add(z2).wrapping_add(z4);
+    let tmp2 = tmp2.wrapping_add(z2).wrapping_add(z3);
+    let tmp3 = tmp3.wrapping_add(z1).wrapping_add(z4);
 
     [
-        tmp10 + tmp3,
-        tmp11 + tmp2,
-        tmp12 + tmp1,
-        tmp13 + tmp0,
-        tmp13 - tmp0,
-        tmp12 - tmp1,
-        tmp11 - tmp2,
-        tmp10 - tmp3,
+        tmp10.wrapping_add(tmp3),
+        tmp11.wrapping_add(tmp2),
+        tmp12.wrapping_add(tmp1),
+        tmp13.wrapping_add(tmp0),
+        tmp13.wrapping_sub(tmp0),
+        tmp12.wrapping_sub(tmp1),
+        tmp11.wrapping_sub(tmp2),
+        tmp10.wrapping_sub(tmp3),
     ]
 }
 
