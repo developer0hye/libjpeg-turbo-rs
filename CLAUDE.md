@@ -72,7 +72,8 @@ When optimizing performance, follow the experiment-driven workflow in `experimen
 - **Every change must pass all tests.** Run `cargo test` after each optimization attempt. If tests fail, fix the issue or revert — never commit broken code for a benchmark win.
 - **Record every attempt** in `experiments/<target>.tsv` — successes, failures, and crashes. Failures are data.
 - **Per-target logs**: each optimization area (idct, huffman, color, upsample, pipeline) has its own TSV. **Only read the relevant TSV** when starting work on a target — do NOT read all experiment logs. This prevents context pollution and keeps focus.
-- **Benchmark harness**: always use `cargo bench -- decode_640x480` as the single metric. Compare against `experiments/baseline.txt` for the C reference.
+- **Benchmark harness**: use `cargo bench` full matrix for latency comparison. Quick iteration uses `cargo bench -- decode_640x480`. Always compare against C libjpeg-turbo using `examples/bench_c_matrix` (see below).
+- **Full benchmark matrix**: when reporting performance, run the full test matrix covering resolutions (64×64 → 3840×2160), subsampling (4:2:0, 4:2:2, 4:4:4), and content types (photo, graphic, checker, restart). Compare Rust vs C side-by-side for all cases.
 - **Keep/discard protocol**: if benchmark improves → commit + append `keep`. If regresses → `git checkout --` to revert + append `discard` with explanation of WHY it failed. If crash → append `crash` with error summary.
 - **Description must explain causality**: not "tried X" but "tried X because profiling showed Y; failed because Z" or "tried X because Y; saved N us because Z".
 - **Profile before optimizing**: always `samply record` or `sample` to identify the actual hotspot before changing code. Don't guess.
