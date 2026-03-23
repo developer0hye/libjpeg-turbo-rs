@@ -947,42 +947,107 @@ fn tjtrantest_restart_cross_product() {
 // ---------------------------------------------------------------------------
 
 /// The grand cross-product mirroring the exact loop nesting in tjtrantest.in:
-///   subsamp x arithmetic x copy_mode x crop x transform x grayscale x
-///   optimize x progressive x restart x trim
+///   subsamp x restart x arithmetic x copy_mode x crop x transform x grayscale x
+///   optimize x progressive x trim
 ///
 /// This exercises the widest combination space with all skip conditions
-/// ported from the C reference.
+/// ported from the C reference. Restart configs (none, rows=1, blocks=1)
+/// are folded directly into the loop to reach ~15000 combinations.
 #[test]
 fn tjtrantest_full_cross_product() {
-    // Pre-encode test JPEGs for each subsampling
-    let mut color_jpegs: Vec<(Subsampling, Vec<u8>)> = Vec::new();
-    for &s in &ALL_SUBSAMPLINGS {
-        color_jpegs.push((s, make_color_jpeg(s)));
+    // Pre-encode test JPEGs for each subsampling x restart config
+    let dummy_icc: Vec<u8> = vec![0u8; 128];
+
+    struct SourceJpeg {
+        subsamp: Option<Subsampling>,
+        restart_label: &'static str,
+        data: Vec<u8>,
     }
-    let gray_jpeg: Vec<u8> = make_gray_jpeg();
+
+    let mut all_sources: Vec<SourceJpeg> = Vec::new();
+
+    for &s in &ALL_SUBSAMPLINGS {
+        let pixels: Vec<u8> = gradient_rgb(48, 48);
+
+        // No restart
+        all_sources.push(SourceJpeg {
+            subsamp: Some(s),
+            restart_label: "none",
+            data: compress(&pixels, 48, 48, PixelFormat::Rgb, 90, s).unwrap(),
+        });
+
+        // Restart rows=1 with ICC
+        all_sources.push(SourceJpeg {
+            subsamp: Some(s),
+            restart_label: "rows",
+            data: Encoder::new(&pixels, 48, 48, PixelFormat::Rgb)
+                .quality(90)
+                .subsampling(s)
+                .restart_rows(1)
+                .icc_profile(&dummy_icc)
+                .encode()
+                .unwrap(),
+        });
+
+        // Restart blocks=1
+        all_sources.push(SourceJpeg {
+            subsamp: Some(s),
+            restart_label: "blocks",
+            data: Encoder::new(&pixels, 48, 48, PixelFormat::Rgb)
+                .quality(90)
+                .subsampling(s)
+                .restart_blocks(1)
+                .encode()
+                .unwrap(),
+        });
+    }
+
+    // Grayscale sources with each restart config
+    let gray_pixels: Vec<u8> = gradient_gray(48, 48);
+    all_sources.push(SourceJpeg {
+        subsamp: None,
+        restart_label: "none",
+        data: Encoder::new(&gray_pixels, 48, 48, PixelFormat::Grayscale)
+            .quality(90)
+            .encode()
+            .unwrap(),
+    });
+    all_sources.push(SourceJpeg {
+        subsamp: None,
+        restart_label: "rows",
+        data: Encoder::new(&gray_pixels, 48, 48, PixelFormat::Grayscale)
+            .quality(90)
+            .restart_rows(1)
+            .encode()
+            .unwrap(),
+    });
+    all_sources.push(SourceJpeg {
+        subsamp: None,
+        restart_label: "blocks",
+        data: Encoder::new(&gray_pixels, 48, 48, PixelFormat::Grayscale)
+            .quality(90)
+            .restart_blocks(1)
+            .encode()
+            .unwrap(),
+    });
 
     let mut tested: u32 = 0;
     let mut skipped: u32 = 0;
     let mut transform_errors: u32 = 0;
     let mut decode_failures: Vec<String> = Vec::new();
 
-    // Iterate all subsamplings plus grayscale
-    let subsamp_list: Vec<(Option<Subsampling>, &Vec<u8>)> = {
-        let mut list: Vec<(Option<Subsampling>, &Vec<u8>)> =
-            color_jpegs.iter().map(|(s, j)| (Some(*s), j)).collect();
-        list.push((None, &gray_jpeg)); // None = grayscale
-        list
-    };
-
-    for (subsamp_opt, jpeg) in &subsamp_list {
-        let is_gray_input: bool = subsamp_opt.is_none();
-        let subsamp_name: &str = subsamp_opt.map(|s| subsamp_label(s)).unwrap_or("gray");
+    for source in &all_sources {
+        let is_gray_input: bool = source.subsamp.is_none();
+        let subsamp_name: String = match source.subsamp {
+            Some(s) => format!("{}-{}", subsamp_label(s), source.restart_label),
+            None => format!("gray-{}", source.restart_label),
+        };
 
         for arithmetic in [false, true] {
             for &copy_mode in &ALL_COPY_MODES {
                 // C ref: copy=none only for 411 and 420
                 if copy_mode == MarkerCopyMode::None && !is_gray_input {
-                    let s = subsamp_opt.unwrap();
+                    let s = source.subsamp.unwrap();
                     if s != Subsampling::S411 && s != Subsampling::S420 {
                         skipped += 1;
                         continue;
@@ -990,7 +1055,7 @@ fn tjtrantest_full_cross_product() {
                 }
                 // C ref: copy=icc only for 420
                 if copy_mode == MarkerCopyMode::IccOnly && !is_gray_input {
-                    let s = subsamp_opt.unwrap();
+                    let s = source.subsamp.unwrap();
                     if s != Subsampling::S420 {
                         skipped += 1;
                         continue;
@@ -1014,8 +1079,6 @@ fn tjtrantest_full_cross_product() {
                                 skipped += 1;
                                 continue;
                             }
-                            // C ref: no crop on non-grayscale for some
-                            // subsamplings (we don't enforce this strictly)
 
                             for optimize in [false, true] {
                                 // C ref: skip optimize when arithmetic
@@ -1024,8 +1087,7 @@ fn tjtrantest_full_cross_product() {
                                     continue;
                                 }
                                 // Known limitation: Huffman optimizer can produce
-                                // corrupt output when combined with crop (coefficient
-                                // subsetting interacts badly with table optimization).
+                                // corrupt output when combined with crop.
                                 if optimize && crop.is_some() {
                                     skipped += 1;
                                     continue;
@@ -1074,7 +1136,7 @@ fn tjtrantest_full_cross_product() {
                                         };
 
                                         tested += 1;
-                                        match transform_jpeg_with_options(jpeg, &opts) {
+                                        match transform_jpeg_with_options(&source.data, &opts) {
                                             Ok(result) => {
                                                 if !result.is_empty() {
                                                     if let Err(e) = decompress(&result) {
@@ -1116,10 +1178,10 @@ fn tjtrantest_full_cross_product() {
         decode_failures.len()
     );
 
-    // The full cross-product should exercise a large number of combinations
+    // The full cross-product with restart folded in should reach ~15000+
     assert!(
-        tested >= 2000,
-        "Expected at least 2000 combos, got {}",
+        tested >= 5000,
+        "Expected at least 5000 combos, got {}",
         tested
     );
     assert!(
