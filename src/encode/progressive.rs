@@ -20,97 +20,73 @@ pub struct ProgressiveScan {
 
 /// Generate a simple progressive scan script.
 ///
-/// Follows libjpeg-turbo's default progression for 1 or 3 components:
+/// Follows libjpeg-turbo's default progression (jcparam.c `jpeg_simple_progression`).
+/// Uses successive approximation for both DC and AC coefficients:
+///
 /// 1. DC first (all components interleaved), Al=1
-/// 2. AC scans per-component for spectral bands (1-5, 6-63)
-/// 3. DC refine (all components), Al=0
-/// 4. AC refine scans per-component
+/// 2. AC first scans per-component for bands (1-5, 6-63), Al=2
+/// 3. AC refine scans per-component (1-63), Ah=2, Al=1
+/// 4. DC refine (all components), Ah=1, Al=0
+/// 5. AC refine scans per-component (1-63), Ah=1, Al=0
 pub fn simple_progression(num_components: usize) -> Vec<ProgressiveScan> {
     let mut scans = Vec::new();
+    let all_comps: Vec<usize> = (0..num_components).collect();
 
-    if num_components == 1 {
-        // Grayscale: DC successive approximation, AC full precision per band
-        let comp = vec![0];
+    // DC first scan: all components, Ah=0, Al=1
+    scans.push(ProgressiveScan {
+        component_indices: all_comps.clone(),
+        ss: 0,
+        se: 0,
+        ah: 0,
+        al: 1,
+    });
 
-        // DC first, Al=1
+    // AC first scans: per-component, spectral bands, Ah=0, Al=2
+    for ci in 0..num_components {
         scans.push(ProgressiveScan {
-            component_indices: comp.clone(),
-            ss: 0,
-            se: 0,
-            ah: 0,
-            al: 1,
-        });
-
-        // AC 1-5, Al=0
-        scans.push(ProgressiveScan {
-            component_indices: comp.clone(),
+            component_indices: vec![ci],
             ss: 1,
             se: 5,
             ah: 0,
-            al: 0,
+            al: 2,
         });
-
-        // AC 6-63, Al=0
+    }
+    for ci in 0..num_components {
         scans.push(ProgressiveScan {
-            component_indices: comp.clone(),
+            component_indices: vec![ci],
             ss: 6,
             se: 63,
             ah: 0,
-            al: 0,
+            al: 2,
         });
+    }
 
-        // DC refine, Al=0
+    // AC refine: per-component, full band, Ah=2, Al=1
+    for ci in 0..num_components {
         scans.push(ProgressiveScan {
-            component_indices: comp,
-            ss: 0,
-            se: 0,
-            ah: 1,
-            al: 0,
-        });
-    } else {
-        // Color: interleaved DC, per-component AC
-        // Uses DC successive approximation (first + refine) but no AC successive
-        // approximation refine scans. AC refine encoding is complex and the
-        // standard Huffman tables lack EOBRUN symbols needed for proper batching.
-        let all_comps: Vec<usize> = (0..num_components).collect();
-
-        // DC first scan: all components, Al=1
-        scans.push(ProgressiveScan {
-            component_indices: all_comps.clone(),
-            ss: 0,
-            se: 0,
-            ah: 0,
+            component_indices: vec![ci],
+            ss: 1,
+            se: 63,
+            ah: 2,
             al: 1,
         });
+    }
 
-        // AC scans: per-component, spectral bands
-        for ci in 0..num_components {
-            // AC 1-5, Al=0 (full precision, no refine needed)
-            scans.push(ProgressiveScan {
-                component_indices: vec![ci],
-                ss: 1,
-                se: 5,
-                ah: 0,
-                al: 0,
-            });
-        }
+    // DC refine: all components, Ah=1, Al=0
+    scans.push(ProgressiveScan {
+        component_indices: all_comps,
+        ss: 0,
+        se: 0,
+        ah: 1,
+        al: 0,
+    });
 
-        for ci in 0..num_components {
-            // AC 6-63, Al=0 (full precision, no refine needed)
-            scans.push(ProgressiveScan {
-                component_indices: vec![ci],
-                ss: 6,
-                se: 63,
-                ah: 0,
-                al: 0,
-            });
-        }
-
-        // DC refine: all components, Al=0
+    // AC refine: per-component, full band, Ah=1, Al=0
+    for ci in 0..num_components {
         scans.push(ProgressiveScan {
-            component_indices: all_comps,
-            ss: 0,
-            se: 0,
+            component_indices: vec![ci],
+            ss: 1,
+            se: 63,
             ah: 1,
             al: 0,
         });
@@ -126,20 +102,31 @@ mod tests {
     #[test]
     fn simple_progression_grayscale() {
         let scans = simple_progression(1);
-        assert!(scans.len() >= 4);
-        // First scan should be DC
+        // 1 DC first + 2 AC first + 1 AC refine + 1 DC refine + 1 AC refine = 6
+        assert_eq!(scans.len(), 6);
         assert_eq!(scans[0].ss, 0);
         assert_eq!(scans[0].se, 0);
+        assert_eq!(scans[0].ah, 0);
+        assert_eq!(scans[0].al, 1);
+        assert_eq!(scans[1].al, 2);
+        assert_eq!(scans[3].ah, 2);
+        assert_eq!(scans[3].al, 1);
+        assert_eq!(scans[5].ah, 1);
+        assert_eq!(scans[5].al, 0);
     }
 
     #[test]
     fn simple_progression_3_components() {
         let scans = simple_progression(3);
-        assert!(scans.len() >= 8);
-        // First scan: DC, all components, Al=1
+        // 1 DC first + 6 AC first + 3 AC refine + 1 DC refine + 3 AC refine = 14
+        assert_eq!(scans.len(), 14);
         assert_eq!(scans[0].ss, 0);
         assert_eq!(scans[0].se, 0);
         assert_eq!(scans[0].component_indices.len(), 3);
         assert_eq!(scans[0].al, 1);
+        let last = &scans[13];
+        assert_eq!(last.ah, 1);
+        assert_eq!(last.al, 0);
+        assert_eq!(last.component_indices, vec![2]);
     }
 }
