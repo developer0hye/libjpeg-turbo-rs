@@ -40,8 +40,9 @@ fn lookup_fast_known_codes() {
 
 #[test]
 fn lookup_fast_misses_long_codes() {
+    // Use an 11-bit code, which exceeds LOOKUP_BITS (10) and must fall back to slow path.
     let mut bits: [u8; 17] = [0; 17];
-    bits[10] = 1;
+    bits[11] = 1;
     let values: Vec<u8> = vec![0xAB];
     let table = HuffmanTable::build(&bits, &values).unwrap();
 
@@ -49,5 +50,5 @@ fn lookup_fast_misses_long_codes() {
 
     let (symbol, length) = table.lookup(0).unwrap();
     assert_eq!(symbol, 0xAB);
-    assert_eq!(length, 10);
+    assert_eq!(length, 11);
 }
