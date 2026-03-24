@@ -77,57 +77,51 @@ impl HuffmanTable {
 
         // Build fast lookup table for codes <= LOOKUP_BITS.
         // Lower 16 bits: (symbol << 8) | code_len.
-        let mut fast = Box::new([0u32; LOOKUP_SIZE]);
+        // Upper 16 bits: accelerated AC entry (built inline to avoid a second pass).
+        let mut fast: Box<[u32; LOOKUP_SIZE]> = vec![0u32; LOOKUP_SIZE]
+            .into_boxed_slice()
+            .try_into()
+            .unwrap();
         for (i, &(code_val, code_len)) in huffcode.iter().enumerate() {
             if code_len <= LOOKUP_BITS {
                 let code_shifted: usize = (code_val as usize) << (LOOKUP_BITS - code_len);
                 let fill_count: usize = 1 << (LOOKUP_BITS - code_len);
-                let entry: u16 = Self::pack_fast_entry(values[i], code_len as u8);
-                for j in 0..fill_count {
-                    fast[code_shifted | j] = entry as u32;
+                let symbol: u8 = values[i];
+                let base_entry: u32 = Self::pack_fast_entry(symbol, code_len as u8) as u32;
+
+                // Pre-compute AC acceleration for this symbol if applicable.
+                let mag_bits: u8 = symbol & 0x0F;
+                let total_bits: u8 = code_len as u8 + mag_bits;
+                let ac_eligible: bool = mag_bits > 0 && (total_bits as usize) <= LOOKUP_BITS;
+
+                if ac_eligible {
+                    let run: u8 = symbol >> 4;
+                    let shift: usize = LOOKUP_BITS - total_bits as usize;
+                    for j in 0..fill_count {
+                        let idx: usize = code_shifted | j;
+                        let extra: i16 =
+                            ((idx >> shift) & ((1usize << mag_bits as usize) - 1)) as i16;
+                        let threshold: i16 = 1i16 << (mag_bits - 1);
+                        let value: i16 = if extra >= threshold {
+                            extra
+                        } else {
+                            extra + ((!0i16) << mag_bits) + 1
+                        };
+                        let entry: u32 = if (-128i16..=127i16).contains(&value) {
+                            let ac_packed: i16 =
+                                (value << 8) | ((run as i16) << 4) | total_bits as i16;
+                            base_entry | ((ac_packed as u16 as u32) << 16)
+                        } else {
+                            base_entry
+                        };
+                        fast[idx] = entry;
+                    }
+                } else {
+                    for j in 0..fill_count {
+                        fast[code_shifted | j] = base_entry;
+                    }
                 }
             }
-        }
-
-        // Build accelerated AC entries in upper 16 bits.
-        // For each index, if the Huffman symbol encodes a non-zero AC
-        // coefficient whose total bit length fits in LOOKUP_BITS, pack
-        // the pre-sign-extended value into the upper half.
-        for i in 0..LOOKUP_SIZE {
-            let lower: u16 = fast[i] as u16;
-            if lower == 0 {
-                continue;
-            }
-            let (symbol, code_len) = Self::unpack_fast_entry(lower);
-            let mag_bits: u8 = symbol & 0x0F;
-            if mag_bits == 0 {
-                continue; // EOB or ZRL
-            }
-            let total_bits: u8 = code_len + mag_bits;
-            if (total_bits as usize) > LOOKUP_BITS {
-                continue;
-            }
-
-            // Extract magnitude bits from index: the first code_len bits
-            // are the Huffman code, the next mag_bits are extra bits.
-            let shift: usize = LOOKUP_BITS - total_bits as usize;
-            let extra: i16 = ((i >> shift) & ((1usize << mag_bits as usize) - 1)) as i16;
-
-            // Sign-extend (JPEG HUFF_EXTEND)
-            let threshold: i16 = 1i16 << (mag_bits - 1);
-            let value: i16 = if extra >= threshold {
-                extra
-            } else {
-                extra + ((!0i16) << mag_bits) + 1
-            };
-
-            if !(-128i16..=127i16).contains(&value) {
-                continue;
-            }
-
-            let run: u8 = symbol >> 4;
-            let ac_packed: i16 = (value << 8) | ((run as i16) << 4) | total_bits as i16;
-            fast[i] |= (ac_packed as u16 as u32) << 16;
         }
 
         Ok(Self {
