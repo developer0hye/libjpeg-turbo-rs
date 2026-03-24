@@ -1,14 +1,24 @@
 use crate::common::error::{JpegError, Result};
 
-const LOOKUP_BITS: usize = 9;
+const LOOKUP_BITS: usize = 10;
 const LOOKUP_SIZE: usize = 1 << LOOKUP_BITS;
 
 /// Huffman decoding table built from DHT marker data.
 /// Uses a fast lookup table for short codes, with a fallback slow
 /// path for codes longer than `LOOKUP_BITS`.
+///
+/// Each `fast` entry is a u32 packing two levels of decode info:
+///   - **Lower 16 bits**: standard entry — `[15:8]` symbol, `[7:0]` code length
+///   - **Upper 16 bits**: accelerated AC entry (stb_image / zune-jpeg technique)
+///     — `[31:24]` sign-extended coefficient (i8), `[23:20]` run, `[19:16]` total bits
+///     — 0 when fast AC is not applicable
+///
+/// For AC codes where `code_len + magnitude_bits ≤ LOOKUP_BITS`, the upper
+/// half pre-computes the coefficient value, eliminating a separate
+/// `read_bits` + sign-extend in the hot AC decode loop.
 #[derive(Debug, Clone)]
 pub struct HuffmanTable {
-    fast: Box<[u16; LOOKUP_SIZE]>,
+    fast: Box<[u32; LOOKUP_SIZE]>,
     maxcode: [i32; 18],
     valoffset: [i32; 18],
     values: Vec<u8>,
@@ -66,14 +76,50 @@ impl HuffmanTable {
         }
 
         // Build fast lookup table for codes <= LOOKUP_BITS.
-        let mut fast = Box::new([0u16; LOOKUP_SIZE]);
+        // Lower 16 bits: (symbol << 8) | code_len.
+        // Upper 16 bits: accelerated AC entry (built inline to avoid a second pass).
+        let mut fast: Box<[u32; LOOKUP_SIZE]> = vec![0u32; LOOKUP_SIZE]
+            .into_boxed_slice()
+            .try_into()
+            .unwrap();
         for (i, &(code_val, code_len)) in huffcode.iter().enumerate() {
             if code_len <= LOOKUP_BITS {
-                let code_shifted = (code_val as usize) << (LOOKUP_BITS - code_len);
-                let fill_count = 1 << (LOOKUP_BITS - code_len);
-                let entry = Self::pack_fast_entry(values[i], code_len as u8);
-                for j in 0..fill_count {
-                    fast[code_shifted | j] = entry;
+                let code_shifted: usize = (code_val as usize) << (LOOKUP_BITS - code_len);
+                let fill_count: usize = 1 << (LOOKUP_BITS - code_len);
+                let symbol: u8 = values[i];
+                let base_entry: u32 = Self::pack_fast_entry(symbol, code_len as u8) as u32;
+
+                // Pre-compute AC acceleration for this symbol if applicable.
+                let mag_bits: u8 = symbol & 0x0F;
+                let total_bits: u8 = code_len as u8 + mag_bits;
+                let ac_eligible: bool = mag_bits > 0 && (total_bits as usize) <= LOOKUP_BITS;
+
+                if ac_eligible {
+                    let run: u8 = symbol >> 4;
+                    let shift: usize = LOOKUP_BITS - total_bits as usize;
+                    for j in 0..fill_count {
+                        let idx: usize = code_shifted | j;
+                        let extra: i16 =
+                            ((idx >> shift) & ((1usize << mag_bits as usize) - 1)) as i16;
+                        let threshold: i16 = 1i16 << (mag_bits - 1);
+                        let value: i16 = if extra >= threshold {
+                            extra
+                        } else {
+                            extra + ((!0i16) << mag_bits) + 1
+                        };
+                        let entry: u32 = if (-128i16..=127i16).contains(&value) {
+                            let ac_packed: i16 =
+                                (value << 8) | ((run as i16) << 4) | total_bits as i16;
+                            base_entry | ((ac_packed as u16 as u32) << 16)
+                        } else {
+                            base_entry
+                        };
+                        fast[idx] = entry;
+                    }
+                } else {
+                    for j in 0..fill_count {
+                        fast[code_shifted | j] = base_entry;
+                    }
                 }
             }
         }
@@ -89,37 +135,41 @@ impl HuffmanTable {
     }
 
     /// Look up a symbol from the first 16 bits of the bitstream.
-    ///
-    /// `bits_msb` contains the next 16 bits, MSB-aligned.
-    /// Returns `(symbol, code_length)`.
     #[inline(always)]
     pub fn lookup(&self, bits_msb: u16) -> Result<(u8, u8)> {
-        let entry = self.fast[(bits_msb >> (16 - LOOKUP_BITS)) as usize];
-        if entry != 0 {
-            return Ok(Self::unpack_fast_entry(entry));
+        let entry: u32 = self.fast[(bits_msb >> (16 - LOOKUP_BITS)) as usize];
+        let lower: u16 = entry as u16;
+        if lower != 0 {
+            return Ok(Self::unpack_fast_entry(lower));
         }
-
-        // Slow path: codes > LOOKUP_BITS bits
         self.lookup_slow(bits_msb)
     }
 
-    /// Fast lookup that returns a raw (symbol, length) pair.
+    /// Fast lookup: returns (symbol, code_length) from the lower 16 bits.
     /// Returns (0, 0) if the code is longer than LOOKUP_BITS bits.
-    /// Callers should check `length > 0` and fall back to `lookup()` if false.
     #[inline(always)]
     pub fn lookup_fast(&self, bits_msb: u16) -> (u8, u8) {
-        Self::unpack_fast_entry(self.fast[(bits_msb >> (16 - LOOKUP_BITS)) as usize])
+        let entry: u32 = self.fast[(bits_msb >> (16 - LOOKUP_BITS)) as usize];
+        Self::unpack_fast_entry(entry as u16)
+    }
+
+    /// Combined lookup for AC decode: returns (fast_ac, symbol, code_len).
+    /// `fast_ac` is non-zero when the pre-computed AC path applies.
+    #[inline(always)]
+    pub fn lookup_combined(&self, bits_msb: u16) -> (i16, u8, u8) {
+        let entry: u32 = self.fast[(bits_msb >> (16 - LOOKUP_BITS)) as usize];
+        let ac: i16 = (entry >> 16) as i16;
+        let (symbol, code_len) = Self::unpack_fast_entry(entry as u16);
+        (ac, symbol, code_len)
     }
 
     #[cold]
     #[inline(never)]
     fn lookup_slow(&self, bits_msb: u16) -> Result<(u8, u8)> {
-        // Build the code incrementally starting from the minimum slow-path length
         let start = self.min_slow_length.max(1) as usize;
         if start > 16 {
             return Err(JpegError::CorruptData("invalid Huffman code".into()));
         }
-        // Reconstruct code at `start` bits from the MSB
         let mut code = (bits_msb >> (16 - start)) as i32;
 
         for length in start..=16usize {

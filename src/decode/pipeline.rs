@@ -727,14 +727,18 @@ impl<'a> Decoder<'a> {
         // Determine MCU row range for IDCT
         let (mcu_y_start, mcu_y_end) = self.mcu_row_range(mcus_y, block_size, frame);
 
-        // Allocate component planes (full MCU-aligned size)
+        // Allocate component planes (full MCU-aligned size, uninitialized).
+        // SAFETY: The MCU decode loop + IDCT writes every pixel before reading.
         let mut component_planes: Vec<Vec<u8>> = frame
             .components
             .iter()
             .map(|comp| {
                 let comp_w = mcus_x * comp.horizontal_sampling as usize * block_size;
                 let comp_h = mcus_y * comp.vertical_sampling as usize * block_size;
-                vec![0u8; comp_w * comp_h]
+                let size: usize = comp_w * comp_h;
+                let mut v: Vec<u8> = Vec::with_capacity(size);
+                unsafe { v.set_len(size) };
+                v
             })
             .collect();
 
@@ -768,72 +772,37 @@ impl<'a> Decoder<'a> {
         let mut warnings: Vec<DecodeWarning> = Vec::new();
         let total_mcus = mcus_x * mcus_y;
 
-        'mcu_loop: for mcu_y in 0..mcus_y {
-            for mcu_x in 0..mcus_x {
-                if self.metadata.restart_interval > 0
-                    && mcu_count > 0
-                    && mcu_count % self.metadata.restart_interval == 0
-                {
-                    bit_reader.reset();
-                    mcu_decoder.reset();
-                }
+        // Fast path: non-lenient, no cropping — tight loop with minimal branching.
+        // The lenient/crop path is below with full error recovery support.
+        if !self.lenient && mcu_y_start == 0 && mcu_y_end == mcus_y {
+            let restart_interval: u16 = self.metadata.restart_interval;
+            for mcu_y in 0..mcus_y {
+                for mcu_x in 0..mcus_x {
+                    if restart_interval > 0 && mcu_count > 0 && mcu_count % restart_interval == 0 {
+                        bit_reader.reset();
+                        mcu_decoder.reset();
+                    }
 
-                let mut plan_idx = 0;
-                let mut mcu_error = false;
+                    for (comp_idx, layout) in comp_layouts.iter().enumerate() {
+                        let qt_values: &[u16; 64] = &quant_tables[comp_idx].values;
+                        let plan = &mcu_plan[comp_idx];
 
-                for (comp_idx, layout) in comp_layouts.iter().enumerate() {
-                    let qt_values = &quant_tables[comp_idx].values;
-                    let plan = &mcu_plan[plan_idx];
-                    plan_idx += 1;
+                        for v in 0..layout.v_blocks {
+                            for h in 0..layout.h_blocks {
+                                mcu_decoder.decode_block(
+                                    &mut bit_reader,
+                                    plan.comp_idx,
+                                    plan.dc_table,
+                                    plan.ac_table,
+                                    &mut coeffs,
+                                )?;
 
-                    for v in 0..layout.v_blocks {
-                        for h in 0..layout.h_blocks {
-                            let decode_result = mcu_decoder.decode_block(
-                                &mut bit_reader,
-                                plan.comp_idx,
-                                plan.dc_table,
-                                plan.ac_table,
-                                &mut coeffs,
-                            );
-
-                            match decode_result {
-                                Ok(()) => {}
-                                Err(e) if self.lenient => {
-                                    // Fill this block with zeros (will become mid-gray after IDCT)
-                                    coeffs = [0i16; 64];
-                                    if !mcu_error {
-                                        warnings.push(DecodeWarning::HuffmanError {
-                                            mcu_x,
-                                            mcu_y,
-                                            message: e.to_string(),
-                                        });
-                                        mcu_error = true;
-                                    }
-                                    // Check if this was an EOF — if so, fill remaining and break
-                                    if matches!(e, JpegError::UnexpectedEof) {
-                                        warnings.push(DecodeWarning::TruncatedData {
-                                            decoded_mcus: mcu_count as usize,
-                                            total_mcus,
-                                        });
-                                        // Fill remaining planes with 128 (mid-gray)
-                                        for plane in &mut component_planes {
-                                            plane.fill(128);
-                                        }
-                                        break 'mcu_loop;
-                                    }
-                                    mcu_decoder.reset();
-                                }
-                                Err(e) => return Err(e),
-                            }
-
-                            // Skip IDCT for MCU rows outside the active range
-                            if mcu_y >= mcu_y_start && mcu_y < mcu_y_end {
-                                let block_x = (mcu_x * layout.h_blocks + h) * block_size;
-                                let block_y = (mcu_y * layout.v_blocks + v) * block_size;
-                                let dst_offset = block_y * layout.comp_w + block_x;
+                                let block_x: usize = (mcu_x * layout.h_blocks + h) * block_size;
+                                let block_y: usize = (mcu_y * layout.v_blocks + v) * block_size;
+                                let dst_offset: usize = block_y * layout.comp_w + block_x;
 
                                 unsafe {
-                                    let dst =
+                                    let dst: *mut u8 =
                                         component_planes[comp_idx].as_mut_ptr().add(dst_offset);
                                     self.idct_scaled_strided(
                                         &coeffs,
@@ -846,20 +815,104 @@ impl<'a> Decoder<'a> {
                             }
                         }
                     }
-                }
 
-                mcu_count += 1;
+                    mcu_count += 1;
 
-                // Check for truncated data (BitReader reached EOF mid-decode)
-                if bit_reader.is_eof() && (mcu_count as usize) < total_mcus {
-                    if self.lenient {
-                        warnings.push(DecodeWarning::TruncatedData {
-                            decoded_mcus: mcu_count as usize,
-                            total_mcus,
-                        });
-                        break 'mcu_loop;
-                    } else {
+                    if bit_reader.is_eof() && (mcu_count as usize) < total_mcus {
                         return Err(JpegError::UnexpectedEof);
+                    }
+                }
+            }
+        } else {
+            // General path: lenient mode with error recovery + crop support
+            'mcu_loop: for mcu_y in 0..mcus_y {
+                for mcu_x in 0..mcus_x {
+                    if self.metadata.restart_interval > 0
+                        && mcu_count > 0
+                        && mcu_count % self.metadata.restart_interval == 0
+                    {
+                        bit_reader.reset();
+                        mcu_decoder.reset();
+                    }
+
+                    let mut plan_idx = 0;
+                    let mut mcu_error = false;
+
+                    for (comp_idx, layout) in comp_layouts.iter().enumerate() {
+                        let qt_values = &quant_tables[comp_idx].values;
+                        let plan = &mcu_plan[plan_idx];
+                        plan_idx += 1;
+
+                        for v in 0..layout.v_blocks {
+                            for h in 0..layout.h_blocks {
+                                let decode_result = mcu_decoder.decode_block(
+                                    &mut bit_reader,
+                                    plan.comp_idx,
+                                    plan.dc_table,
+                                    plan.ac_table,
+                                    &mut coeffs,
+                                );
+
+                                match decode_result {
+                                    Ok(()) => {}
+                                    Err(e) if self.lenient => {
+                                        coeffs = [0i16; 64];
+                                        if !mcu_error {
+                                            warnings.push(DecodeWarning::HuffmanError {
+                                                mcu_x,
+                                                mcu_y,
+                                                message: e.to_string(),
+                                            });
+                                            mcu_error = true;
+                                        }
+                                        if matches!(e, JpegError::UnexpectedEof) {
+                                            warnings.push(DecodeWarning::TruncatedData {
+                                                decoded_mcus: mcu_count as usize,
+                                                total_mcus,
+                                            });
+                                            for plane in &mut component_planes {
+                                                plane.fill(128);
+                                            }
+                                            break 'mcu_loop;
+                                        }
+                                        mcu_decoder.reset();
+                                    }
+                                    Err(e) => return Err(e),
+                                }
+
+                                if mcu_y >= mcu_y_start && mcu_y < mcu_y_end {
+                                    let block_x: usize = (mcu_x * layout.h_blocks + h) * block_size;
+                                    let block_y: usize = (mcu_y * layout.v_blocks + v) * block_size;
+                                    let dst_offset: usize = block_y * layout.comp_w + block_x;
+
+                                    unsafe {
+                                        let dst: *mut u8 =
+                                            component_planes[comp_idx].as_mut_ptr().add(dst_offset);
+                                        self.idct_scaled_strided(
+                                            &coeffs,
+                                            qt_values,
+                                            dst,
+                                            layout.comp_w,
+                                            block_size,
+                                        );
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    mcu_count += 1;
+
+                    if bit_reader.is_eof() && (mcu_count as usize) < total_mcus {
+                        if self.lenient {
+                            warnings.push(DecodeWarning::TruncatedData {
+                                decoded_mcus: mcu_count as usize,
+                                total_mcus,
+                            });
+                            break 'mcu_loop;
+                        } else {
+                            return Err(JpegError::UnexpectedEof);
+                        }
                     }
                 }
             }
