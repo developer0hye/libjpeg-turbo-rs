@@ -50,27 +50,60 @@ unsafe fn neon_fancy_h2v1_inner(input: &[u8], in_width: usize, output: &mut [u8]
     let three_u8: uint8x8_t = vdup_n_u8(3);
     let two_u16: uint16x8_t = vdupq_n_u16(2);
 
-    let inner_count = in_width - 2; // number of interior samples (indices 1..in_width-1)
     let mut i: usize = 1; // current input index (interior starts at 1)
 
-    // NEON loop: process 8 interior samples per iteration.
-    // Reads input[i-1..i+9] (10 bytes), writes output[2*i..2*i+16] (16 bytes).
+    // 16-wide NEON loop: process 16 interior samples per iteration.
+    // Reads input[i-1..i+17] (18 bytes), writes output[2*i..2*i+32] (32 bytes).
+    while i + 16 <= in_width - 1 {
+        let left: uint8x16_t = vld1q_u8(inptr.add(i - 1));
+        let cur: uint8x16_t = vld1q_u8(inptr.add(i));
+        let right: uint8x16_t = vld1q_u8(inptr.add(i + 1));
+
+        let cur_lo: uint8x8_t = vget_low_u8(cur);
+        let cur_hi: uint8x8_t = vget_high_u8(cur);
+
+        // even = (3*cur + left + 2) >> 2
+        let even_lo: uint16x8_t = vaddq_u16(
+            vmlal_u8(vmovl_u8(vget_low_u8(left)), cur_lo, three_u8),
+            two_u16,
+        );
+        let even_hi: uint16x8_t = vaddq_u16(
+            vmlal_u8(vmovl_u8(vget_high_u8(left)), cur_hi, three_u8),
+            two_u16,
+        );
+        let even: uint8x16_t = vcombine_u8(vshrn_n_u16(even_lo, 2), vshrn_n_u16(even_hi, 2));
+
+        // odd = (3*cur + right + 2) >> 2
+        let odd_lo: uint16x8_t = vaddq_u16(
+            vmlal_u8(vmovl_u8(vget_low_u8(right)), cur_lo, three_u8),
+            two_u16,
+        );
+        let odd_hi: uint16x8_t = vaddq_u16(
+            vmlal_u8(vmovl_u8(vget_high_u8(right)), cur_hi, three_u8),
+            two_u16,
+        );
+        let odd: uint8x16_t = vcombine_u8(vshrn_n_u16(odd_lo, 2), vshrn_n_u16(odd_hi, 2));
+
+        // Interleave even/odd and store 32 bytes via vst2q
+        vst2q_u8(outptr.add(i * 2), uint8x16x2_t(even, odd));
+
+        i += 16;
+    }
+
+    // 8-wide NEON tail for remaining chunks.
     while i + 8 <= in_width - 1 {
         let left: uint8x8_t = vld1_u8(inptr.add(i - 1));
         let cur: uint8x8_t = vld1_u8(inptr.add(i));
         let right: uint8x8_t = vld1_u8(inptr.add(i + 1));
 
-        // even = (3*cur + left + 2) >> 2
         let mut even: uint16x8_t = vmlal_u8(vmovl_u8(left), cur, three_u8);
         even = vaddq_u16(even, two_u16);
         let even_u8: uint8x8_t = vshrn_n_u16(even, 2);
 
-        // odd = (3*cur + right + 2) >> 2
         let mut odd: uint16x8_t = vmlal_u8(vmovl_u8(right), cur, three_u8);
         odd = vaddq_u16(odd, two_u16);
         let odd_u8: uint8x8_t = vshrn_n_u16(odd, 2);
 
-        // Interleave even/odd and store 16 bytes
         let interleaved: uint8x8x2_t = vzip_u8(even_u8, odd_u8);
         vst1_u8(outptr.add(i * 2), interleaved.0);
         vst1_u8(outptr.add(i * 2 + 8), interleaved.1);
@@ -80,15 +113,13 @@ unsafe fn neon_fancy_h2v1_inner(input: &[u8], in_width: usize, output: &mut [u8]
 
     // Scalar tail for remaining interior samples
     while i < in_width - 1 {
-        let left = input[i - 1] as u16;
-        let cur = input[i] as u16;
-        let right = input[i + 1] as u16;
+        let left: u16 = input[i - 1] as u16;
+        let cur: u16 = input[i] as u16;
+        let right: u16 = input[i + 1] as u16;
         output[i * 2] = ((3 * cur + left + 2) >> 2) as u8;
         output[i * 2 + 1] = ((3 * cur + right + 2) >> 2) as u8;
         i += 1;
     }
-
-    let _ = inner_count;
 }
 
 /// NEON fancy 2x2 upsample.
