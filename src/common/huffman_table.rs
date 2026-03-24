@@ -1,6 +1,6 @@
 use crate::common::error::{JpegError, Result};
 
-const LOOKUP_BITS: usize = 9;
+const LOOKUP_BITS: usize = 10;
 const LOOKUP_SIZE: usize = 1 << LOOKUP_BITS;
 
 /// Huffman decoding table built from DHT marker data.
