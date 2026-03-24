@@ -18,7 +18,7 @@ fn extend(value: u16, size: u8) -> i16 {
     (x + offset) as i16
 }
 
-#[inline]
+#[inline(always)]
 pub fn decode_dc_coefficient(reader: &mut BitReader, table: &HuffmanTable) -> Result<i16> {
     let peek = reader.peek_bits(16);
     let (s, l) = table.lookup_fast(peek);
@@ -34,7 +34,7 @@ pub fn decode_dc_coefficient(reader: &mut BitReader, table: &HuffmanTable) -> Re
     Ok(extend(extra_bits, category))
 }
 
-#[inline]
+#[inline(always)]
 pub fn decode_ac_coefficients(
     reader: &mut BitReader,
     table: &HuffmanTable,
@@ -43,14 +43,37 @@ pub fn decode_ac_coefficients(
     let mut index: usize = 1;
 
     while index < 64 {
-        let peek = reader.peek_bits(16);
-        let (s, l) = table.lookup_fast(peek);
+        let peek: u16 = reader.peek_bits(16);
+        let (ac_entry, s, l) = table.lookup_combined(peek);
+
+        // Fast AC path: the table pre-computed the sign-extended coefficient.
+        if ac_entry != 0 {
+            let total_bits: u8 = (ac_entry & 0x0F) as u8;
+            let run: usize = ((ac_entry >> 4) & 0x0F) as usize;
+            let coeff: i16 = ac_entry >> 8;
+
+            index += run;
+            if index >= 64 {
+                return Err(JpegError::CorruptData(
+                    "AC coefficient index out of bounds".into(),
+                ));
+            }
+            reader.skip_bits(total_bits);
+
+            // SAFETY: index < 64 (checked above), ZIGZAG_ORDER values are all < 64.
+            unsafe {
+                let natural: usize = *ZIGZAG_ORDER.get_unchecked(index);
+                *coeffs.get_unchecked_mut(natural) = coeff;
+            }
+            index += 1;
+            continue;
+        }
 
         if l > 0 {
-            // Fast path: Huffman code resolved from lookup table.
-            // Extract run/size from the symbol.
-            let bit_size = s & 0x0F;
-            let run_length = (s >> 4) as usize;
+            // Normal fast path: EOB, ZRL, or codes whose total bits exceed
+            // LOOKUP_BITS (magnitude needs a separate read_bits call).
+            let bit_size: u8 = s & 0x0F;
+            let run_length: usize = (s >> 4) as usize;
 
             if bit_size == 0 {
                 reader.skip_bits(l);
@@ -73,15 +96,12 @@ pub fn decode_ac_coefficients(
                 ));
             }
 
-            // Skip Huffman code bits, then read extra magnitude bits.
-            // fill_buffer guarantees >=56 bits after fill; we consume at
-            // most 9+10=19, so read_bits never triggers a refill here.
             reader.skip_bits(l);
-            let extra_bits = reader.read_bits(bit_size);
+            let extra_bits: u16 = reader.read_bits(bit_size);
 
             // SAFETY: index < 64 (checked above), ZIGZAG_ORDER values are all < 64.
             unsafe {
-                let natural = *ZIGZAG_ORDER.get_unchecked(index);
+                let natural: usize = *ZIGZAG_ORDER.get_unchecked(index);
                 *coeffs.get_unchecked_mut(natural) = extend(extra_bits, bit_size);
             }
             index += 1;
@@ -90,8 +110,8 @@ pub fn decode_ac_coefficients(
             let (symbol, code_len) = table.lookup(peek)?;
             reader.skip_bits(code_len);
 
-            let run_length = (symbol >> 4) as usize;
-            let bit_size = symbol & 0x0F;
+            let run_length: usize = (symbol >> 4) as usize;
+            let bit_size: u8 = symbol & 0x0F;
 
             if bit_size == 0 {
                 if run_length == 0 {
@@ -113,7 +133,7 @@ pub fn decode_ac_coefficients(
                 ));
             }
 
-            let extra_bits = reader.read_bits(bit_size);
+            let extra_bits: u16 = reader.read_bits(bit_size);
             coeffs[ZIGZAG_ORDER[index]] = extend(extra_bits, bit_size);
             index += 1;
         }
