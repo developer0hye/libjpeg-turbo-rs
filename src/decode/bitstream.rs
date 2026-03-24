@@ -20,43 +20,101 @@ impl<'a> BitReader<'a> {
         }
     }
 
+    /// Appends one byte from `window` at `off` into the bit buffer.
+    /// Returns the updated offset (advances by 1, or 2 for byte-stuffed 0xFF 0x00).
+    /// `off` must be < 15 and `window.len()` must be 16.
     #[inline(always)]
-    fn fill_buffer(&mut self, needed: u8) {
-        while self.bits_left < needed.max(56) {
-            if self.bits_left > 56 {
-                break;
-            }
-            let byte = self.read_next_byte();
-            self.bit_buffer = (self.bit_buffer << 8) | byte as u64;
-            self.bits_left += 8;
+    fn get_byte(window: &[u8], off: usize, bit_buffer: &mut u64, bits_left: &mut u8) -> usize {
+        let byte: u8 = window[off];
+        let next_off: usize = off + 1;
+        if byte != 0xFF {
+            *bit_buffer = (*bit_buffer << 8) | byte as u64;
+            *bits_left += 8;
+            next_off
+        } else if window[next_off] == 0x00 {
+            *bit_buffer = (*bit_buffer << 8) | 0xFF_u64;
+            *bits_left += 8;
+            next_off + 1
+        } else {
+            // Marker — push zero, don't advance.
+            *bit_buffer <<= 8;
+            *bits_left += 8;
+            off
         }
     }
 
     #[inline(always)]
-    fn read_next_byte(&mut self) -> u8 {
-        let len: usize = self.data.len();
-        if self.pos >= len {
-            return 0;
-        }
-        // SAFETY: pos < len checked above.
-        let byte: u8 = unsafe { *self.data.get_unchecked(self.pos) };
-        self.pos += 1;
-
-        if byte != 0xFF {
-            return byte;
-        }
-
-        if self.pos >= len {
-            return 0;
-        }
-        // SAFETY: pos < len checked above.
-        let next: u8 = unsafe { *self.data.get_unchecked(self.pos) };
-        if next == 0x00 {
-            self.pos += 1;
-            0xFF
+    fn fill_buffer(&mut self, needed: u8) {
+        // Fast path: 16-byte window guarantees all accesses are in-bounds.
+        // Unrolled like C libjpeg-turbo's FILL_BIT_BUFFER_FAST: read up to 7 bytes
+        // in straight-line code, avoiding loop overhead.
+        let data: &[u8] = self.data;
+        let start: usize = self.pos;
+        if start + 16 <= data.len() {
+            let window: &[u8] = &data[start..start + 16];
+            let buf: &mut u64 = &mut self.bit_buffer;
+            let bl: &mut u8 = &mut self.bits_left;
+            let mut off: usize = 0;
+            if *bl < needed.max(56) && off < 15 {
+                off = Self::get_byte(window, off, buf, bl);
+            }
+            if *bl < needed.max(56) && off < 15 {
+                off = Self::get_byte(window, off, buf, bl);
+            }
+            if *bl < needed.max(56) && off < 15 {
+                off = Self::get_byte(window, off, buf, bl);
+            }
+            if *bl < needed.max(56) && off < 15 {
+                off = Self::get_byte(window, off, buf, bl);
+            }
+            if *bl < needed.max(56) && off < 15 {
+                off = Self::get_byte(window, off, buf, bl);
+            }
+            if *bl < needed.max(56) && off < 15 {
+                off = Self::get_byte(window, off, buf, bl);
+            }
+            if *bl < needed.max(56) && off < 15 {
+                off = Self::get_byte(window, off, buf, bl);
+            }
+            self.pos = start + off;
         } else {
-            self.pos -= 1;
-            0
+            self.fill_buffer_slow(needed);
+        }
+    }
+
+    #[inline(never)]
+    fn fill_buffer_slow(&mut self, needed: u8) {
+        while self.bits_left < needed.max(56) {
+            if self.bits_left > 56 {
+                break;
+            }
+            let pos: usize = self.pos;
+            let byte: u8 = match self.data.get(pos) {
+                Some(&b) => b,
+                None => {
+                    self.bit_buffer <<= 8;
+                    self.bits_left += 8;
+                    continue;
+                }
+            };
+            self.pos = pos + 1;
+            if byte != 0xFF {
+                self.bit_buffer = (self.bit_buffer << 8) | byte as u64;
+                self.bits_left += 8;
+                continue;
+            }
+            match self.data.get(pos + 1) {
+                Some(&0x00) => {
+                    self.pos = pos + 2;
+                    self.bit_buffer = (self.bit_buffer << 8) | 0xFF_u64;
+                    self.bits_left += 8;
+                }
+                _ => {
+                    self.pos = pos;
+                    self.bit_buffer <<= 8;
+                    self.bits_left += 8;
+                }
+            }
         }
     }
 
