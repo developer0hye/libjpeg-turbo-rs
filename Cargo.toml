@@ -24,4 +24,8 @@ harness = false
 name = "compare"
 harness = false
 
+[[bench]]
+name = "encode"
+harness = false
+
 [profile.release]

@@ -62,54 +62,93 @@ pub fn build_huff_table(bits: &[u8; 17], values: &[u8]) -> HuffTable {
 
 /// Bit-level writer that accumulates encoded JPEG entropy data.
 ///
-/// Handles MSB-first bit packing and JPEG byte stuffing (inserting 0x00 after 0xFF).
+/// Uses a 64-bit accumulator to reduce flush frequency. Handles MSB-first bit
+/// packing and JPEG byte stuffing (inserting 0x00 after 0xFF).
 pub struct BitWriter {
     /// Accumulated output bytes.
     buffer: Vec<u8>,
-    /// Bit accumulator (bits are packed from the MSB downward).
-    bit_buffer: u32,
-    /// Number of valid bits currently in the accumulator.
+    /// 64-bit accumulator — bits packed from MSB downward.
+    bit_buffer: u64,
+    /// Number of valid bits in the accumulator (0..56).
     bits_in_buffer: u8,
 }
 
 impl BitWriter {
     /// Create a new writer with the given initial byte capacity.
     pub fn new(capacity: usize) -> Self {
+        // Reserve 2x capacity for worst-case byte stuffing (every byte = 0xFF).
         Self {
-            buffer: Vec::with_capacity(capacity),
+            buffer: Vec::with_capacity(capacity.saturating_mul(2).max(1024)),
             bit_buffer: 0,
             bits_in_buffer: 0,
         }
     }
 
-    /// Write `size` bits from `code` (MSB-first).
+    /// Emit one byte with branchless JPEG 0xFF byte stuffing.
     ///
-    /// `size` must be in 1..=16. The lowest `size` bits of `code` are written.
+    /// Always writes the byte + a speculative 0x00 (2 bytes total), then
+    /// advances the length by 1 or 2 depending on whether stuffing was needed.
+    /// This eliminates the branch for the 0xFF check in the hot path.
+    ///
+    /// # Safety
+    /// Caller must ensure `self.buffer` has at least 2 bytes of spare capacity.
+    #[inline(always)]
+    unsafe fn emit_byte_unchecked(&mut self, byte: u8) {
+        let len: usize = self.buffer.len();
+        let ptr: *mut u8 = self.buffer.as_mut_ptr().add(len);
+        ptr.write(byte);
+        ptr.add(1).write(0x00);
+        // Branchless: advance by 2 if byte == 0xFF, else 1
+        let stuffed: usize = (byte == 0xFF) as usize;
+        self.buffer.set_len(len + 1 + stuffed);
+    }
+
+    /// Flush complete bytes from the accumulator.
+    ///
+    /// Uses unchecked writes for speed. Caller must ensure at least 8 bytes
+    /// of spare capacity in the buffer.
+    #[inline(always)]
+    fn drain_bytes(&mut self) {
+        while self.bits_in_buffer >= 8 {
+            let byte: u8 = (self.bit_buffer >> 56) as u8;
+            // SAFETY: caller ensures sufficient capacity; each iteration uses at most 2 bytes.
+            unsafe {
+                self.emit_byte_unchecked(byte);
+            }
+            self.bit_buffer <<= 8;
+            self.bits_in_buffer -= 8;
+        }
+    }
+
+    /// Emit one byte with JPEG 0xFF byte stuffing (safe version for non-hot paths).
+    #[inline(always)]
+    fn emit_byte(&mut self, byte: u8) {
+        self.buffer.push(byte);
+        if byte == 0xFF {
+            self.buffer.push(0x00);
+        }
+    }
+
+    /// Write `size` bits from `code` (MSB-first). Accepts up to 16 bits.
     #[inline]
     pub fn write_bits(&mut self, code: u16, size: u8) {
         debug_assert!(size > 0 && size <= 16);
+        self.put_bits(code as u32, size);
+    }
 
-        // Mask to ensure only `size` bits are used, then position them
-        // in the accumulator at the current insertion point.
-        let shift = 32 - self.bits_in_buffer - size;
-        let mask = (1u32 << size) - 1;
-        let mut bit_buffer = self.bit_buffer | ((code as u32 & mask) << shift);
-        let mut bits_in_buffer = self.bits_in_buffer + size;
-
-        // Emit complete bytes from the accumulator
-        while bits_in_buffer >= 8 {
-            let byte = (bit_buffer >> 24) as u8;
-            self.buffer.push(byte);
-            // JPEG byte stuffing: insert 0x00 after 0xFF
-            if byte == 0xFF {
-                self.buffer.push(0x00);
-            }
-            bit_buffer <<= 8;
-            bits_in_buffer -= 8;
-        }
-
-        self.bit_buffer = bit_buffer;
-        self.bits_in_buffer = bits_in_buffer;
+    /// Write up to 27 bits into the accumulator. Used for fused Huffman code +
+    /// magnitude bit writes.
+    #[inline]
+    pub fn put_bits(&mut self, code: u32, size: u8) {
+        debug_assert!(size <= 32);
+        // Mask to `size` bits then position at the MSB insertion point.
+        let mask: u64 = (1u64 << size) - 1;
+        let shift: u32 = 64 - self.bits_in_buffer as u32 - size as u32;
+        self.bit_buffer |= (code as u64 & mask) << shift;
+        self.bits_in_buffer += size;
+        // Ensure capacity for worst-case drain: 4 data bytes, each stuffed = 8
+        self.buffer.reserve(8);
+        self.drain_bytes();
     }
 
     /// Flush bits to byte boundary for restart markers.
@@ -118,13 +157,11 @@ impl BitWriter {
     /// Does NOT finalize the stream — the writer remains usable after this call.
     pub fn flush_restart(&mut self) {
         if self.bits_in_buffer > 0 {
-            let pad_bits = 8 - self.bits_in_buffer;
-            let padded = self.bit_buffer | (((1u32 << pad_bits) - 1) << (24 - self.bits_in_buffer));
-            let byte = (padded >> 24) as u8;
-            self.buffer.push(byte);
-            if byte == 0xFF {
-                self.buffer.push(0x00);
-            }
+            let pad_bits: u8 = 8 - self.bits_in_buffer;
+            // Padding goes at positions (60-n)..56 in the top byte — shift is always 56
+            self.bit_buffer |= ((1u64 << pad_bits) - 1) << 56;
+            let byte: u8 = (self.bit_buffer >> 56) as u8;
+            self.emit_byte(byte);
             self.bit_buffer = 0;
             self.bits_in_buffer = 0;
         }
@@ -143,16 +180,11 @@ impl BitWriter {
     /// Per the JPEG spec, the final byte is padded with 1-bits.
     pub fn flush(&mut self) {
         if self.bits_in_buffer > 0 {
-            // Pad remaining bits with 1s to fill the current byte.
-            // bits_in_buffer + pad_bits = 8, so the pad always starts at bit 24
-            // in the 32-bit accumulator.
-            let pad_bits = 8 - self.bits_in_buffer;
-            let padded = self.bit_buffer | (((1u32 << pad_bits) - 1) << 24);
-            let byte = (padded >> 24) as u8;
-            self.buffer.push(byte);
-            if byte == 0xFF {
-                self.buffer.push(0x00);
-            }
+            let pad_bits: u8 = 8 - self.bits_in_buffer;
+            // Padding goes at positions (60-n)..56 in the top byte — shift is always 56
+            self.bit_buffer |= ((1u64 << pad_bits) - 1) << 56;
+            let byte: u8 = (self.bit_buffer >> 56) as u8;
+            self.emit_byte(byte);
             self.bit_buffer = 0;
             self.bits_in_buffer = 0;
         }
@@ -182,53 +214,68 @@ impl HuffmanEncoder {
         dc_table: &HuffTable,
         ac_table: &HuffTable,
     ) {
-        // Encode DC coefficient (differential coding)
-        let dc = coeffs_zigzag[0];
-        let diff = dc - *prev_dc;
+        // --- DC coefficient (differential coding) ---
+        let dc: i16 = coeffs_zigzag[0];
+        let diff: i16 = dc - *prev_dc;
         *prev_dc = dc;
 
         let (magnitude_bits, category) = encode_dc_value(diff);
-        // Emit the Huffman code for the category
-        writer.write_bits(
-            dc_table.ehufco[category as usize],
-            dc_table.ehufsi[category as usize],
-        );
-        // Emit the magnitude bits (additional bits after the category code)
-        if category > 0 {
-            writer.write_bits(magnitude_bits, category);
+        if category == 0 {
+            writer.put_bits(dc_table.ehufco[0] as u32, dc_table.ehufsi[0]);
+        } else {
+            // Fuse Huffman code + magnitude into single put_bits call
+            let huff_code: u32 = dc_table.ehufco[category as usize] as u32;
+            let huff_size: u8 = dc_table.ehufsi[category as usize];
+            let mag_masked: u32 = magnitude_bits as u32 & ((1u32 << category) - 1);
+            let combined: u32 = (huff_code << category) | mag_masked;
+            writer.put_bits(combined, huff_size + category);
         }
 
-        // Encode AC coefficients (run-length encoding)
-        let mut zero_run: u8 = 0;
-        for k in 1..64 {
-            let ac = coeffs_zigzag[k];
-            if ac == 0 {
-                zero_run += 1;
-            } else {
-                // Emit ZRL (16 zeros) symbols for runs >= 16
-                while zero_run >= 16 {
-                    // Symbol 0xF0 = (15 zeros, size 0)
-                    writer.write_bits(ac_table.ehufco[0xF0], ac_table.ehufsi[0xF0]);
-                    zero_run -= 16;
-                }
+        // --- AC coefficients (run-length encoding with early EOB) ---
 
-                let (magnitude_bits, size) = encode_ac_value(ac);
-                // Symbol = (run << 4) | size
-                let symbol = ((zero_run as u16) << 4) | (size as u16);
-                writer.write_bits(
-                    ac_table.ehufco[symbol as usize],
-                    ac_table.ehufsi[symbol as usize],
-                );
-                if size > 0 {
-                    writer.write_bits(magnitude_bits, size);
-                }
-                zero_run = 0;
+        // Find last non-zero coefficient for early termination
+        let mut last_nonzero: usize = 0;
+        for k in (1..64).rev() {
+            if coeffs_zigzag[k] != 0 {
+                last_nonzero = k;
+                break;
             }
         }
 
-        // If the block ends with zeros, emit EOB (End Of Block)
-        if zero_run > 0 {
-            writer.write_bits(ac_table.ehufco[0x00], ac_table.ehufsi[0x00]);
+        if last_nonzero == 0 {
+            writer.put_bits(ac_table.ehufco[0x00] as u32, ac_table.ehufsi[0x00]);
+            return;
+        }
+
+        let mut zero_run: u8 = 0;
+        for k in 1..=last_nonzero {
+            let ac: i16 = coeffs_zigzag[k];
+            if ac == 0 {
+                zero_run += 1;
+                continue;
+            }
+
+            // Emit ZRL (16 zeros) symbols for runs >= 16
+            while zero_run >= 16 {
+                writer.put_bits(ac_table.ehufco[0xF0] as u32, ac_table.ehufsi[0xF0]);
+                zero_run -= 16;
+            }
+
+            let (magnitude_bits, nbits) = encode_ac_value(ac);
+            let symbol: usize = ((zero_run as usize) << 4) | (nbits as usize);
+            let huff_code: u32 = ac_table.ehufco[symbol] as u32;
+            let huff_size: u8 = ac_table.ehufsi[symbol];
+
+            // Fuse Huffman code + magnitude into single put_bits call
+            let mag_masked: u32 = magnitude_bits as u32 & ((1u32 << nbits) - 1);
+            let combined: u32 = (huff_code << nbits) | mag_masked;
+            writer.put_bits(combined, huff_size + nbits);
+            zero_run = 0;
+        }
+
+        // Emit EOB if there are trailing zeros after the last non-zero coefficient
+        if last_nonzero < 63 {
+            writer.put_bits(ac_table.ehufco[0x00] as u32, ac_table.ehufsi[0x00]);
         }
     }
 
@@ -255,12 +302,10 @@ fn encode_dc_value(diff: i16) -> (u16, u8) {
         return (0, 0);
     }
 
-    let abs_diff = diff.unsigned_abs();
-    let category = 16 - abs_diff.leading_zeros() as u8;
+    let abs_diff: u16 = diff.unsigned_abs();
+    let category: u8 = 16 - abs_diff.leading_zeros() as u8;
 
-    // For positive values, magnitude_bits = diff
-    // For negative values, magnitude_bits = diff - 1 (one's complement)
-    let magnitude_bits = if diff > 0 {
+    let magnitude_bits: u16 = if diff > 0 {
         diff as u16
     } else {
         (diff - 1) as u16
@@ -277,10 +322,10 @@ fn encode_ac_value(value: i16) -> (u16, u8) {
         return (0, 0);
     }
 
-    let abs_val = value.unsigned_abs();
-    let size = 16 - abs_val.leading_zeros() as u8;
+    let abs_val: u16 = value.unsigned_abs();
+    let size: u8 = 16 - abs_val.leading_zeros() as u8;
 
-    let magnitude_bits = if value > 0 {
+    let magnitude_bits: u16 = if value > 0 {
         value as u16
     } else {
         (value - 1) as u16
