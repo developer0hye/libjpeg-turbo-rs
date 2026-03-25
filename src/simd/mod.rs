@@ -26,6 +26,17 @@ pub struct SimdRoutines {
     pub fancy_upsample_h2v1: fn(input: &[u8], in_width: usize, output: &mut [u8]),
 }
 
+/// Pre-computed quantization divisor table with reciprocals for fast multiply-shift.
+///
+/// The NEON path uses `reciprocals` to avoid scalar division.
+/// The scalar path ignores reciprocals and divides directly using `divisors`.
+pub struct QuantDivisors {
+    /// Divisor values (quant × 8, matching FDCT output scaling).
+    pub divisors: [u16; 64],
+    /// Fixed-point reciprocals: `((1u32 << 16) + divisor - 1) / divisor` (ceiling).
+    pub reciprocals: [u16; 64],
+}
+
 /// Function-pointer dispatch table for SIMD-accelerated encode operations.
 pub struct EncoderSimdRoutines {
     /// RGB → YCbCr color conversion, one row.
@@ -33,9 +44,9 @@ pub struct EncoderSimdRoutines {
     pub rgb_to_ycbcr_row: fn(rgb: &[u8], y: &mut [u8], cb: &mut [u8], cr: &mut [u8], width: usize),
 
     /// Combined FDCT (islow) + quantize + zigzag reorder for one 8×8 block.
-    /// `quant` must be the pre-scaled divisor table (values × 8).
+    /// `quant` contains pre-scaled divisors and reciprocals.
     /// Output is in zigzag scan order, ready for Huffman encoding.
-    pub fdct_quantize: fn(input: &[i16; 64], quant: &[u16; 64], output: &mut [i16; 64]),
+    pub fdct_quantize: fn(input: &[i16; 64], quant: &QuantDivisors, output: &mut [i16; 64]),
 }
 
 /// Detect available SIMD features and return the best dispatch table.

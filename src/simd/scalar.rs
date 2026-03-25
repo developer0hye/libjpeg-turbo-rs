@@ -46,7 +46,7 @@ fn scalar_fancy_upsample_h2v1(input: &[u8], in_width: usize, output: &mut [u8]) 
 // --- Encoder dispatch ---
 
 use crate::encode::{color as enc_color, fdct, quant};
-use crate::simd::EncoderSimdRoutines;
+use crate::simd::{EncoderSimdRoutines, QuantDivisors};
 
 /// Return scalar encoder dispatch table.
 pub fn encoder_routines() -> EncoderSimdRoutines {
@@ -70,8 +70,12 @@ fn scalar_rgb_to_ycbcr_row_enc(
 /// Scalar fused FDCT (islow) + quantize + zigzag reorder.
 ///
 /// Calls `fdct_islow` (output i32) then `quantize_block` (zigzag reorder included).
-pub(crate) fn scalar_fdct_quantize(input: &[i16; 64], quant: &[u16; 64], output: &mut [i16; 64]) {
+pub(crate) fn scalar_fdct_quantize(
+    input: &[i16; 64],
+    quant: &QuantDivisors,
+    output: &mut [i16; 64],
+) {
     let mut dct_output: [i32; 64] = [0i32; 64];
     fdct::fdct_islow(input, &mut dct_output);
-    quant::quantize_block(&dct_output, quant, output);
+    quant::quantize_block(&dct_output, &quant.divisors, output);
 }

@@ -4,3 +4,4 @@ abc2f82	17799 (1080p_420 NEON)	keep	u64 accumulator + fused huff code+magnitude 
 uncommitted	18533 (1080p_420 NEON)	discard	fast-path interior blocks in extract_block/downsample_chroma_block (skip .min() bounds check); regressed because added branch cost > bounds-check savings; LLVM already optimizes min() well
 uncommitted	18987 (1080p_420 NEON)	discard	replaced NEON quantize with inline scalar (zero-skip + division); regressed vs NEON quantize because lost vectorized abs/round/sign operations
 bd6f4df	17730 (1080p_420 NEON)	keep	fused color conversion into MCU loop for RGB; converts MCU rows on-the-fly instead of full-plane; marginal speed gain but 67x memory reduction (6.2MB → 92KB)
+1632e93	17042 (1080p_420 NEON)	keep	branchless unchecked byte emission in BitWriter; direct ptr writes + speculative 0xFF stuffing; reserve(8) once per put_bits vs per-byte push; saved 688us (3.9%)

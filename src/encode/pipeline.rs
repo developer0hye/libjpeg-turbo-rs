@@ -10,6 +10,7 @@ use crate::encode::huffman_encode::{build_huff_table, BitWriter, HuffTable, Huff
 use crate::encode::marker_writer;
 use crate::encode::progressive::ProgressiveScan;
 use crate::encode::tables;
+use crate::simd::QuantDivisors;
 
 /// Compress raw pixel data into a JPEG byte stream.
 ///
@@ -96,7 +97,7 @@ pub fn compress(
 
     // NEON fused FDCT+quantize for IsLow (the common case and only NEON-supported variant).
     // IsFast/Float fall back to scalar fdct_islow — matches public API behavior.
-    let fdct_quantize_fn: fn(&[i16; 64], &[u16; 64], &mut [i16; 64]) =
+    let fdct_quantize_fn: fn(&[i16; 64], &QuantDivisors, &mut [i16; 64]) =
         if dct_method == DctMethod::IsLow {
             enc_simd.fdct_quantize
         } else {
@@ -2396,8 +2397,8 @@ pub fn compress_arithmetic_progressive(
         tables::quality_scale_quant_table(&tables::STD_LUMINANCE_QUANT_TABLE, quality);
     let chroma_quant: [u16; 64] =
         tables::quality_scale_quant_table(&tables::STD_CHROMINANCE_QUANT_TABLE, quality);
-    let luma_divisors: [u16; 64] = scale_quant_for_fdct(&luma_quant);
-    let chroma_divisors: [u16; 64] = scale_quant_for_fdct(&chroma_quant);
+    let luma_divisors: QuantDivisors = scale_quant_for_fdct(&luma_quant);
+    let chroma_divisors: QuantDivisors = scale_quant_for_fdct(&chroma_quant);
 
     let (y_plane, cb_plane, cr_plane) = convert_to_ycbcr(
         pixels,
@@ -3073,12 +3074,19 @@ fn encode_dc_value_prog(diff: i16) -> (u16, u8) {
 /// The islow FDCT output is scaled up by a factor of 8 (one factor of sqrt(8)
 /// per pass = 8 total). This scaling must be absorbed during quantization by
 /// multiplying the quant table values by 8 before dividing.
-fn scale_quant_for_fdct(quant_table: &[u16; 64]) -> [u16; 64] {
+fn scale_quant_for_fdct(quant_table: &[u16; 64]) -> QuantDivisors {
     let mut divisors = [0u16; 64];
+    let mut reciprocals = [0u16; 64];
     for i in 0..64 {
-        divisors[i] = quant_table[i] * 8;
+        let d: u32 = quant_table[i] as u32 * 8;
+        divisors[i] = d as u16;
+        // Ceiling reciprocal: ensures (x * recip) >> 16 == x / d for all valid x
+        reciprocals[i] = (((1u32 << 16) + d - 1) / d) as u16;
     }
-    divisors
+    QuantDivisors {
+        divisors,
+        reciprocals,
+    }
 }
 
 /// Convert input pixels to Y, Cb, Cr planes.
@@ -3266,12 +3274,12 @@ fn encode_single_block(
     plane_height: usize,
     block_x: usize,
     block_y: usize,
-    quant_table: &[u16; 64],
+    quant_table: &QuantDivisors,
     dc_table: &HuffTable,
     ac_table: &HuffTable,
     writer: &mut BitWriter,
     prev_dc: &mut i16,
-    fdct_quantize_fn: fn(&[i16; 64], &[u16; 64], &mut [i16; 64]),
+    fdct_quantize_fn: fn(&[i16; 64], &QuantDivisors, &mut [i16; 64]),
 ) {
     let mut block = [0i16; 64];
     extract_block(
@@ -3300,8 +3308,8 @@ fn encode_color_mcu(
     x0: usize,
     y0: usize,
     subsampling: Subsampling,
-    luma_quant: &[u16; 64],
-    chroma_quant: &[u16; 64],
+    luma_quant: &QuantDivisors,
+    chroma_quant: &QuantDivisors,
     dc_luma_table: &HuffTable,
     ac_luma_table: &HuffTable,
     dc_chroma_table: &HuffTable,
@@ -3310,7 +3318,7 @@ fn encode_color_mcu(
     prev_dc_y: &mut i16,
     prev_dc_cb: &mut i16,
     prev_dc_cr: &mut i16,
-    fdct_quantize_fn: fn(&[i16; 64], &[u16; 64], &mut [i16; 64]),
+    fdct_quantize_fn: fn(&[i16; 64], &QuantDivisors, &mut [i16; 64]),
 ) {
     match subsampling {
         Subsampling::S444 | Subsampling::Unknown => {
@@ -3673,12 +3681,12 @@ fn encode_downsampled_chroma_block(
     block_y: usize,
     h_factor: usize,
     v_factor: usize,
-    quant_table: &[u16; 64],
+    quant_table: &QuantDivisors,
     dc_table: &HuffTable,
     ac_table: &HuffTable,
     writer: &mut BitWriter,
     prev_dc: &mut i16,
-    fdct_quantize_fn: fn(&[i16; 64], &[u16; 64], &mut [i16; 64]),
+    fdct_quantize_fn: fn(&[i16; 64], &QuantDivisors, &mut [i16; 64]),
 ) {
     let mut block = [0i16; 64];
     downsample_chroma_block(
@@ -4351,8 +4359,8 @@ fn gather_block(
     plane_height: usize,
     block_x: usize,
     block_y: usize,
-    quant_table: &[u16; 64],
-    fdct_quantize_fn: fn(&[i16; 64], &[u16; 64], &mut [i16; 64]),
+    quant_table: &QuantDivisors,
+    fdct_quantize_fn: fn(&[i16; 64], &QuantDivisors, &mut [i16; 64]),
 ) -> [i16; 64] {
     let mut block = [0i16; 64];
     extract_block(
@@ -4378,8 +4386,8 @@ fn gather_downsampled_block(
     block_y: usize,
     h_factor: usize,
     v_factor: usize,
-    quant_table: &[u16; 64],
-    fdct_quantize_fn: fn(&[i16; 64], &[u16; 64], &mut [i16; 64]),
+    quant_table: &QuantDivisors,
+    fdct_quantize_fn: fn(&[i16; 64], &QuantDivisors, &mut [i16; 64]),
 ) -> [i16; 64] {
     let mut block = [0i16; 64];
     downsample_chroma_block(
@@ -4474,8 +4482,8 @@ pub fn compress_raw(
         tables::quality_scale_quant_table(&tables::STD_LUMINANCE_QUANT_TABLE, quality);
     let chroma_quant: [u16; 64] =
         tables::quality_scale_quant_table(&tables::STD_CHROMINANCE_QUANT_TABLE, quality);
-    let luma_divisors: [u16; 64] = scale_quant_for_fdct(&luma_quant);
-    let chroma_divisors: [u16; 64] = scale_quant_for_fdct(&chroma_quant);
+    let luma_divisors: QuantDivisors = scale_quant_for_fdct(&luma_quant);
+    let chroma_divisors: QuantDivisors = scale_quant_for_fdct(&chroma_quant);
     let dc_luma_table: HuffTable =
         build_huff_table(&tables::DC_LUMINANCE_BITS, &tables::DC_LUMINANCE_VALUES);
     let ac_luma_table: HuffTable =
@@ -4728,8 +4736,8 @@ pub fn compress_custom_sampling(
         tables::quality_scale_quant_table(&tables::STD_LUMINANCE_QUANT_TABLE, quality);
     let chroma_quant: [u16; 64] =
         tables::quality_scale_quant_table(&tables::STD_CHROMINANCE_QUANT_TABLE, quality);
-    let luma_divisors: [u16; 64] = scale_quant_for_fdct(&luma_quant);
-    let chroma_divisors: [u16; 64] = scale_quant_for_fdct(&chroma_quant);
+    let luma_divisors: QuantDivisors = scale_quant_for_fdct(&luma_quant);
+    let chroma_divisors: QuantDivisors = scale_quant_for_fdct(&chroma_quant);
 
     // Build Huffman tables
     let dc_luma_table: HuffTable =
