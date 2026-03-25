@@ -77,15 +77,6 @@ pub fn compress(
     // SIMD dispatch — used for both color conversion and FDCT+quantize
     let enc_simd = crate::simd::detect_encoder();
 
-    // Color convert to YCbCr planes (or just Y for grayscale)
-    let (y_plane, cb_plane, cr_plane) = convert_to_ycbcr(
-        pixels,
-        width,
-        height,
-        pixel_format,
-        enc_simd.rgb_to_ycbcr_row,
-    )?;
-
     // Determine MCU dimensions based on subsampling
     let (mcu_w, mcu_h) = if is_grayscale {
         (8, 8)
@@ -100,8 +91,8 @@ pub fn compress(
         }
     };
 
-    let mcus_x = (width + mcu_w - 1) / mcu_w;
-    let mcus_y = (height + mcu_h - 1) / mcu_h;
+    let mcus_x: usize = (width + mcu_w - 1) / mcu_w;
+    let mcus_y: usize = (height + mcu_h - 1) / mcu_h;
 
     // NEON fused FDCT+quantize for IsLow (the common case and only NEON-supported variant).
     // IsFast/Float fall back to scalar fdct_islow — matches public API behavior.
@@ -118,34 +109,53 @@ pub fn compress(
     let mut prev_dc_cb: i16 = 0;
     let mut prev_dc_cr: i16 = 0;
 
-    for mcu_row in 0..mcus_y {
-        for mcu_col in 0..mcus_x {
-            let x0 = mcu_col * mcu_w;
-            let y0 = mcu_row * mcu_h;
+    // Single-pass fused approach for RGB: convert MCU rows on-the-fly instead
+    // of pre-allocating full-size planes. Keeps data in L1/L2 cache between
+    // color conversion and encoding.
+    if pixel_format == PixelFormat::Rgb && !is_grayscale {
+        let rgb_to_ycbcr_fn = enc_simd.rgb_to_ycbcr_row;
+        let row_buf_size: usize = width * mcu_h;
+        let mut y_buf: Vec<u8> = vec![0u8; row_buf_size];
+        let mut cb_buf: Vec<u8> = vec![0u8; row_buf_size];
+        let mut cr_buf: Vec<u8> = vec![0u8; row_buf_size];
 
-            if is_grayscale {
-                encode_single_block(
-                    &y_plane,
+        for mcu_row in 0..mcus_y {
+            let y0: usize = mcu_row * mcu_h;
+            let rows_available: usize = (height - y0).min(mcu_h);
+
+            // Convert this MCU row's RGB data to YCbCr
+            for row in 0..rows_available {
+                let src_row: usize = y0 + row;
+                let src_offset: usize = src_row * width * 3;
+                let dst_offset: usize = row * width;
+                rgb_to_ycbcr_fn(
+                    &pixels[src_offset..src_offset + width * 3],
+                    &mut y_buf[dst_offset..dst_offset + width],
+                    &mut cb_buf[dst_offset..dst_offset + width],
+                    &mut cr_buf[dst_offset..dst_offset + width],
                     width,
-                    height,
-                    x0,
-                    y0,
-                    &luma_divisors,
-                    &dc_luma_table,
-                    &ac_luma_table,
-                    &mut bit_writer,
-                    &mut prev_dc_y,
-                    fdct_quantize_fn,
                 );
-            } else {
+            }
+            // Pad remaining rows by replicating the last row (edge handling)
+            for row in rows_available..mcu_h {
+                let dst_offset: usize = row * width;
+                let src_offset: usize = (rows_available - 1) * width;
+                y_buf.copy_within(src_offset..src_offset + width, dst_offset);
+                cb_buf.copy_within(src_offset..src_offset + width, dst_offset);
+                cr_buf.copy_within(src_offset..src_offset + width, dst_offset);
+            }
+
+            // Encode all MCUs in this row
+            for mcu_col in 0..mcus_x {
+                let x0: usize = mcu_col * mcu_w;
                 encode_color_mcu(
-                    &y_plane,
-                    &cb_plane,
-                    &cr_plane,
+                    &y_buf,
+                    &cb_buf,
+                    &cr_buf,
                     width,
-                    height,
+                    mcu_h,
                     x0,
-                    y0,
+                    0,
                     subsampling,
                     &luma_divisors,
                     &chroma_divisors,
@@ -159,6 +169,60 @@ pub fn compress(
                     &mut prev_dc_cr,
                     fdct_quantize_fn,
                 );
+            }
+        }
+    } else {
+        // Fallback: full-plane color conversion for non-RGB formats and grayscale
+        let (y_plane, cb_plane, cr_plane) = convert_to_ycbcr(
+            pixels,
+            width,
+            height,
+            pixel_format,
+            enc_simd.rgb_to_ycbcr_row,
+        )?;
+
+        for mcu_row in 0..mcus_y {
+            for mcu_col in 0..mcus_x {
+                let x0: usize = mcu_col * mcu_w;
+                let y0: usize = mcu_row * mcu_h;
+
+                if is_grayscale {
+                    encode_single_block(
+                        &y_plane,
+                        width,
+                        height,
+                        x0,
+                        y0,
+                        &luma_divisors,
+                        &dc_luma_table,
+                        &ac_luma_table,
+                        &mut bit_writer,
+                        &mut prev_dc_y,
+                        fdct_quantize_fn,
+                    );
+                } else {
+                    encode_color_mcu(
+                        &y_plane,
+                        &cb_plane,
+                        &cr_plane,
+                        width,
+                        height,
+                        x0,
+                        y0,
+                        subsampling,
+                        &luma_divisors,
+                        &chroma_divisors,
+                        &dc_luma_table,
+                        &ac_luma_table,
+                        &dc_chroma_table,
+                        &ac_chroma_table,
+                        &mut bit_writer,
+                        &mut prev_dc_y,
+                        &mut prev_dc_cb,
+                        &mut prev_dc_cr,
+                        fdct_quantize_fn,
+                    );
+                }
             }
         }
     }

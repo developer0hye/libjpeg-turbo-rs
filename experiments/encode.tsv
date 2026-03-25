@@ -1,2 +1,5 @@
 commit	time_us	status	description
 16a2509	19147 (1080p_420 NEON)	keep	baseline: fused fdct_quantize + color NEON dispatch wired; NEON=19147us vs scalar=29572us (35% faster); C libjpeg-turbo=4980us (Rust still 3.8x slower)
+abc2f82	17799 (1080p_420 NEON)	keep	u64 accumulator + fused huff code+magnitude writes + early EOB; profile showed Huffman at 56%; saved 1348us (7%); C=4980us (3.6x gap)
+uncommitted	18533 (1080p_420 NEON)	discard	fast-path interior blocks in extract_block/downsample_chroma_block (skip .min() bounds check); regressed because added branch cost > bounds-check savings; LLVM already optimizes min() well
+uncommitted	18987 (1080p_420 NEON)	discard	replaced NEON quantize with inline scalar (zero-skip + division); regressed vs NEON quantize because lost vectorized abs/round/sign operations
