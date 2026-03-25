@@ -270,16 +270,13 @@ impl HuffmanEncoder {
         *prev_dc = dc;
 
         let (magnitude_bits, category) = encode_dc_value(diff);
-        if category == 0 {
-            writer.put_bits(dc_table.ehufco[0] as u32, dc_table.ehufsi[0]);
-        } else {
-            // Fuse Huffman code + magnitude into single put_bits call
-            let huff_code: u32 = dc_table.ehufco[category as usize] as u32;
-            let huff_size: u8 = dc_table.ehufsi[category as usize];
-            let mag_masked: u32 = magnitude_bits as u32 & ((1u32 << category) - 1);
-            let combined: u32 = (huff_code << category) | mag_masked;
-            writer.put_bits(combined, huff_size + category);
-        }
+        // Fuse Huffman code + magnitude into single put_bits call.
+        // Works for category=0 too: (huff_code << 0) | 0 = huff_code.
+        let huff_code: u32 = dc_table.ehufco[category as usize] as u32;
+        let huff_size: u8 = dc_table.ehufsi[category as usize];
+        let mag_masked: u32 = magnitude_bits as u32 & ((1u32 << category) - 1);
+        let combined: u32 = (huff_code << category) | mag_masked;
+        writer.put_bits(combined, huff_size + category);
 
         // --- AC coefficients: bitmap zero-skip ---
         // Build a u64 bitmap of non-zero AC positions. Bit (64-k) is set when
@@ -348,40 +345,27 @@ impl HuffmanEncoder {
 /// Compute the category and magnitude bits for a DC difference value.
 ///
 /// Returns (magnitude_bits, category) where category is 0..11.
+/// Fully branchless: uses arithmetic shift for sign and leading_zeros for category.
+#[inline(always)]
 fn encode_dc_value(diff: i16) -> (u16, u8) {
-    if diff == 0 {
-        return (0, 0);
-    }
-
     let abs_diff: u16 = diff.unsigned_abs();
-    let category: u8 = 16 - abs_diff.leading_zeros() as u8;
-
-    let magnitude_bits: u16 = if diff > 0 {
-        diff as u16
-    } else {
-        (diff - 1) as u16
-    };
-
+    let category: u8 = (16 - abs_diff.leading_zeros()) as u8;
+    // Branchless magnitude: positive → value, negative → value-1 (one's complement)
+    let sign: i16 = diff >> 15; // 0 for non-negative, -1 for negative
+    let magnitude_bits: u16 = (diff.wrapping_add(sign)) as u16;
     (magnitude_bits, category)
 }
 
 /// Compute the category and magnitude bits for an AC coefficient value.
 ///
 /// Returns (magnitude_bits, size) where size is 1..10.
+/// Only called for non-zero values in the bitmap zero-skip loop.
+#[inline(always)]
 fn encode_ac_value(value: i16) -> (u16, u8) {
-    if value == 0 {
-        return (0, 0);
-    }
-
     let abs_val: u16 = value.unsigned_abs();
-    let size: u8 = 16 - abs_val.leading_zeros() as u8;
-
-    let magnitude_bits: u16 = if value > 0 {
-        value as u16
-    } else {
-        (value - 1) as u16
-    };
-
+    let size: u8 = (16 - abs_val.leading_zeros()) as u8;
+    let sign: i16 = value >> 15;
+    let magnitude_bits: u16 = (value.wrapping_add(sign)) as u16;
     (magnitude_bits, size)
 }
 

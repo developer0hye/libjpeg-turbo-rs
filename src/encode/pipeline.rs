@@ -3226,12 +3226,46 @@ fn extract_block(
     block_y: usize,
     block: &mut [i16; 64],
 ) {
+    // NEON fast path for interior blocks (no bounds checking needed)
+    #[cfg(target_arch = "aarch64")]
+    {
+        if block_x + 8 <= plane_width && block_y + 8 <= plane_height {
+            extract_block_neon(plane, plane_width, block_x, block_y, block);
+            return;
+        }
+    }
+
+    // Scalar fallback for border blocks
     for row in 0..8 {
-        let src_y = (block_y + row).min(plane_height - 1);
+        let src_y: usize = (block_y + row).min(plane_height - 1);
         for col in 0..8 {
-            let src_x = (block_x + col).min(plane_width - 1);
-            // Level-shift: subtract 128
+            let src_x: usize = (block_x + col).min(plane_width - 1);
             block[row * 8 + col] = plane[src_y * plane_width + src_x] as i16 - 128;
+        }
+    }
+}
+
+/// NEON-accelerated block extraction with level-shift for interior blocks.
+///
+/// Loads 8 bytes per row, widens to i16, subtracts 128. No bounds checking.
+#[cfg(target_arch = "aarch64")]
+fn extract_block_neon(
+    plane: &[u8],
+    plane_width: usize,
+    block_x: usize,
+    block_y: usize,
+    block: &mut [i16; 64],
+) {
+    use std::arch::aarch64::*;
+    unsafe {
+        let level_shift: int16x8_t = vdupq_n_s16(128);
+
+        for row in 0..8 {
+            let src_ptr: *const u8 = plane.as_ptr().add((block_y + row) * plane_width + block_x);
+            let pixels: uint8x8_t = vld1_u8(src_ptr);
+            let wide: int16x8_t = vreinterpretq_s16_u16(vmovl_u8(pixels));
+            let shifted: int16x8_t = vsubq_s16(wide, level_shift);
+            vst1q_s16(block.as_mut_ptr().add(row * 8), shifted);
         }
     }
 }
