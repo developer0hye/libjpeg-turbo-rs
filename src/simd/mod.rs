@@ -1,6 +1,6 @@
-//! SIMD dispatch layer for hot-path JPEG decode operations.
+//! SIMD dispatch layer for hot-path JPEG decode and encode operations.
 //!
-//! Resolves function pointers once at init time via `detect()`.
+//! Resolves function pointers once at init time via `detect()` / `detect_encoder()`.
 //! On aarch64, NEON is always available (ARMv8 mandatory).
 //! Set `JSIMD_FORCENONE=1` to force scalar fallback.
 
@@ -26,6 +26,29 @@ pub struct SimdRoutines {
     pub fancy_upsample_h2v1: fn(input: &[u8], in_width: usize, output: &mut [u8]),
 }
 
+/// Pre-computed quantization divisor table with reciprocals for fast multiply-shift.
+///
+/// The NEON path uses `reciprocals` to avoid scalar division.
+/// The scalar path ignores reciprocals and divides directly using `divisors`.
+pub struct QuantDivisors {
+    /// Divisor values (quant × 8, matching FDCT output scaling).
+    pub divisors: [u16; 64],
+    /// Fixed-point reciprocals: `((1u32 << 16) + divisor - 1) / divisor` (ceiling).
+    pub reciprocals: [u16; 64],
+}
+
+/// Function-pointer dispatch table for SIMD-accelerated encode operations.
+pub struct EncoderSimdRoutines {
+    /// RGB → YCbCr color conversion, one row.
+    /// Only handles interleaved RGB (3 bytes/pixel).
+    pub rgb_to_ycbcr_row: fn(rgb: &[u8], y: &mut [u8], cb: &mut [u8], cr: &mut [u8], width: usize),
+
+    /// Combined FDCT (islow) + quantize + zigzag reorder for one 8×8 block.
+    /// `quant` contains pre-scaled divisors and reciprocals.
+    /// Output is in zigzag scan order, ready for Huffman encoding.
+    pub fdct_quantize: fn(input: &[i16; 64], quant: &QuantDivisors, output: &mut [i16; 64]),
+}
+
 /// Detect available SIMD features and return the best dispatch table.
 ///
 /// Checks `JSIMD_FORCENONE` env var first. If set to "1", returns scalar.
@@ -47,4 +70,22 @@ pub fn detect() -> SimdRoutines {
 
     #[allow(unreachable_code)]
     scalar::routines()
+}
+
+/// Detect available SIMD features and return the best encoder dispatch table.
+pub fn detect_encoder() -> EncoderSimdRoutines {
+    if std::env::var("JSIMD_FORCENONE").ok().as_deref() == Some("1") {
+        return scalar::encoder_routines();
+    }
+
+    #[cfg(all(target_arch = "aarch64", feature = "simd"))]
+    {
+        return aarch64::encoder_routines();
+    }
+
+    // x86_64: no encoder SIMD yet, fall through to scalar
+    // TODO: add x86_64 encoder SIMD (SSE2/AVX2 FDCT, color conversion)
+
+    #[allow(unreachable_code)]
+    scalar::encoder_routines()
 }
