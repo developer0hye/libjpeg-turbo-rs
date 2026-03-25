@@ -76,30 +76,56 @@ pub struct BitWriter {
 impl BitWriter {
     /// Create a new writer with the given initial byte capacity.
     pub fn new(capacity: usize) -> Self {
+        // Reserve 2x capacity for worst-case byte stuffing (every byte = 0xFF).
         Self {
-            buffer: Vec::with_capacity(capacity),
+            buffer: Vec::with_capacity(capacity.saturating_mul(2).max(1024)),
             bit_buffer: 0,
             bits_in_buffer: 0,
         }
     }
 
-    /// Emit one byte with JPEG 0xFF byte stuffing.
+    /// Emit one byte with branchless JPEG 0xFF byte stuffing.
+    ///
+    /// Always writes the byte + a speculative 0x00 (2 bytes total), then
+    /// advances the length by 1 or 2 depending on whether stuffing was needed.
+    /// This eliminates the branch for the 0xFF check in the hot path.
+    ///
+    /// # Safety
+    /// Caller must ensure `self.buffer` has at least 2 bytes of spare capacity.
+    #[inline(always)]
+    unsafe fn emit_byte_unchecked(&mut self, byte: u8) {
+        let len: usize = self.buffer.len();
+        let ptr: *mut u8 = self.buffer.as_mut_ptr().add(len);
+        ptr.write(byte);
+        ptr.add(1).write(0x00);
+        // Branchless: advance by 2 if byte == 0xFF, else 1
+        let stuffed: usize = (byte == 0xFF) as usize;
+        self.buffer.set_len(len + 1 + stuffed);
+    }
+
+    /// Flush complete bytes from the accumulator.
+    ///
+    /// Uses unchecked writes for speed. Caller must ensure at least 8 bytes
+    /// of spare capacity in the buffer.
+    #[inline(always)]
+    fn drain_bytes(&mut self) {
+        while self.bits_in_buffer >= 8 {
+            let byte: u8 = (self.bit_buffer >> 56) as u8;
+            // SAFETY: caller ensures sufficient capacity; each iteration uses at most 2 bytes.
+            unsafe {
+                self.emit_byte_unchecked(byte);
+            }
+            self.bit_buffer <<= 8;
+            self.bits_in_buffer -= 8;
+        }
+    }
+
+    /// Emit one byte with JPEG 0xFF byte stuffing (safe version for non-hot paths).
     #[inline(always)]
     fn emit_byte(&mut self, byte: u8) {
         self.buffer.push(byte);
         if byte == 0xFF {
             self.buffer.push(0x00);
-        }
-    }
-
-    /// Flush complete bytes from the accumulator.
-    #[inline(always)]
-    fn drain_bytes(&mut self) {
-        while self.bits_in_buffer >= 8 {
-            let byte: u8 = (self.bit_buffer >> 56) as u8;
-            self.emit_byte(byte);
-            self.bit_buffer <<= 8;
-            self.bits_in_buffer -= 8;
         }
     }
 
@@ -120,6 +146,8 @@ impl BitWriter {
         let shift: u32 = 64 - self.bits_in_buffer as u32 - size as u32;
         self.bit_buffer |= (code as u64 & mask) << shift;
         self.bits_in_buffer += size;
+        // Ensure capacity for worst-case drain: 4 data bytes, each stuffed = 8
+        self.buffer.reserve(8);
         self.drain_bytes();
     }
 
