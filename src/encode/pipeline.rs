@@ -74,8 +74,17 @@ pub fn compress(
     let ac_chroma_table =
         build_huff_table(&tables::AC_CHROMINANCE_BITS, &tables::AC_CHROMINANCE_VALUES);
 
+    // SIMD dispatch — used for both color conversion and FDCT+quantize
+    let enc_simd = crate::simd::detect_encoder();
+
     // Color convert to YCbCr planes (or just Y for grayscale)
-    let (y_plane, cb_plane, cr_plane) = convert_to_ycbcr(pixels, width, height, pixel_format)?;
+    let (y_plane, cb_plane, cr_plane) = convert_to_ycbcr(
+        pixels,
+        width,
+        height,
+        pixel_format,
+        enc_simd.rgb_to_ycbcr_row,
+    )?;
 
     // Determine MCU dimensions based on subsampling
     let (mcu_w, mcu_h) = if is_grayscale {
@@ -96,7 +105,6 @@ pub fn compress(
 
     // NEON fused FDCT+quantize for IsLow (the common case and only NEON-supported variant).
     // IsFast/Float fall back to scalar fdct_islow — matches public API behavior.
-    let enc_simd = crate::simd::detect_encoder();
     let fdct_quantize_fn: fn(&[i16; 64], &[u16; 64], &mut [i16; 64]) =
         if dct_method == DctMethod::IsLow {
             enc_simd.fdct_quantize
@@ -326,8 +334,17 @@ pub fn compress_custom_huffman(
     let dc_chroma_table = build_huff_table(&dc_chroma_bits, &dc_chroma_vals);
     let ac_chroma_table = build_huff_table(&ac_chroma_bits, &ac_chroma_vals);
 
+    // SIMD dispatch — used for both color conversion and FDCT+quantize
+    let enc_simd = crate::simd::detect_encoder();
+
     // Color convert to YCbCr planes (or just Y for grayscale)
-    let (y_plane, cb_plane, cr_plane) = convert_to_ycbcr(pixels, width, height, pixel_format)?;
+    let (y_plane, cb_plane, cr_plane) = convert_to_ycbcr(
+        pixels,
+        width,
+        height,
+        pixel_format,
+        enc_simd.rgb_to_ycbcr_row,
+    )?;
 
     // Determine MCU dimensions based on subsampling
     let (mcu_w, mcu_h) = if is_grayscale {
@@ -347,7 +364,6 @@ pub fn compress_custom_huffman(
     let mcus_y = (height + mcu_h - 1) / mcu_h;
 
     // Entropy encode all MCUs
-    let enc_simd = crate::simd::detect_encoder();
     let mut bit_writer = BitWriter::new(width * height);
     let mut prev_dc_y: i16 = 0;
     let mut prev_dc_cb: i16 = 0;
@@ -517,8 +533,17 @@ pub fn compress_custom_quant(
     let ac_chroma_table =
         build_huff_table(&tables::AC_CHROMINANCE_BITS, &tables::AC_CHROMINANCE_VALUES);
 
+    // SIMD dispatch — used for both color conversion and FDCT+quantize
+    let enc_simd = crate::simd::detect_encoder();
+
     // Color convert to YCbCr planes (or just Y for grayscale)
-    let (y_plane, cb_plane, cr_plane) = convert_to_ycbcr(pixels, width, height, pixel_format)?;
+    let (y_plane, cb_plane, cr_plane) = convert_to_ycbcr(
+        pixels,
+        width,
+        height,
+        pixel_format,
+        enc_simd.rgb_to_ycbcr_row,
+    )?;
 
     // Determine MCU dimensions based on subsampling
     let (mcu_w, mcu_h) = if is_grayscale {
@@ -538,7 +563,6 @@ pub fn compress_custom_quant(
     let mcus_y = (height + mcu_h - 1) / mcu_h;
 
     // Entropy encode all MCUs
-    let enc_simd = crate::simd::detect_encoder();
     let mut bit_writer = BitWriter::new(width * height);
     let mut prev_dc_y: i16 = 0;
     let mut prev_dc_cb: i16 = 0;
@@ -723,8 +747,17 @@ pub fn compress_with_restart(
     let ac_chroma_table =
         build_huff_table(&tables::AC_CHROMINANCE_BITS, &tables::AC_CHROMINANCE_VALUES);
 
+    // SIMD dispatch — used for both color conversion and FDCT+quantize
+    let enc_simd = crate::simd::detect_encoder();
+
     // Color convert to YCbCr planes (or just Y for grayscale)
-    let (y_plane, cb_plane, cr_plane) = convert_to_ycbcr(pixels, width, height, pixel_format)?;
+    let (y_plane, cb_plane, cr_plane) = convert_to_ycbcr(
+        pixels,
+        width,
+        height,
+        pixel_format,
+        enc_simd.rgb_to_ycbcr_row,
+    )?;
 
     // Determine MCU dimensions based on subsampling
     let (mcu_w, mcu_h) = if is_grayscale {
@@ -744,7 +777,6 @@ pub fn compress_with_restart(
     let mcus_y = (height + mcu_h - 1) / mcu_h;
 
     // Entropy encode all MCUs with restart markers
-    let enc_simd = crate::simd::detect_encoder();
     let mut bit_writer = BitWriter::new(width * height);
     let mut prev_dc_y: i16 = 0;
     let mut prev_dc_cb: i16 = 0;
@@ -1725,7 +1757,13 @@ fn compress_progressive_with_scans(
     let luma_divisors = scale_quant_for_fdct(&luma_quant);
     let chroma_divisors = scale_quant_for_fdct(&chroma_quant);
 
-    let (y_plane, cb_plane, cr_plane) = convert_to_ycbcr(pixels, width, height, pixel_format)?;
+    let (y_plane, cb_plane, cr_plane) = convert_to_ycbcr(
+        pixels,
+        width,
+        height,
+        pixel_format,
+        crate::encode::color::rgb_to_ycbcr_row,
+    )?;
 
     let (mcu_w, mcu_h) = if is_grayscale {
         (8, 8)
@@ -2030,7 +2068,13 @@ pub fn compress_arithmetic(
     let chroma_divisors = scale_quant_for_fdct(&chroma_quant);
 
     // Color convert
-    let (y_plane, cb_plane, cr_plane) = convert_to_ycbcr(pixels, width, height, pixel_format)?;
+    let (y_plane, cb_plane, cr_plane) = convert_to_ycbcr(
+        pixels,
+        width,
+        height,
+        pixel_format,
+        crate::encode::color::rgb_to_ycbcr_row,
+    )?;
 
     // MCU dimensions
     let (mcu_w, mcu_h) = if is_grayscale {
@@ -2291,7 +2335,13 @@ pub fn compress_arithmetic_progressive(
     let luma_divisors: [u16; 64] = scale_quant_for_fdct(&luma_quant);
     let chroma_divisors: [u16; 64] = scale_quant_for_fdct(&chroma_quant);
 
-    let (y_plane, cb_plane, cr_plane) = convert_to_ycbcr(pixels, width, height, pixel_format)?;
+    let (y_plane, cb_plane, cr_plane) = convert_to_ycbcr(
+        pixels,
+        width,
+        height,
+        pixel_format,
+        crate::encode::color::rgb_to_ycbcr_row,
+    )?;
 
     let (mcu_w, mcu_h): (usize, usize) = if is_grayscale {
         (8, 8)
@@ -2973,6 +3023,7 @@ fn convert_to_ycbcr(
     width: usize,
     height: usize,
     pixel_format: PixelFormat,
+    rgb_to_ycbcr_row_fn: fn(&[u8], &mut [u8], &mut [u8], &mut [u8], usize),
 ) -> Result<(Vec<u8>, Vec<u8>, Vec<u8>)> {
     let plane_size = width * height;
     let mut y_plane = vec![0u8; plane_size];
@@ -2990,7 +3041,7 @@ fn convert_to_ycbcr(
             for row in 0..height {
                 let src_offset = row * width * bpp;
                 let dst_offset = row * width;
-                color::rgb_to_ycbcr_row(
+                rgb_to_ycbcr_row_fn(
                     &pixels[src_offset..src_offset + width * bpp],
                     &mut y_plane[dst_offset..dst_offset + width],
                     &mut cb_plane[dst_offset..dst_offset + width],
@@ -3621,8 +3672,17 @@ pub fn compress_optimized(
     let luma_divisors = scale_quant_for_fdct(&luma_quant);
     let chroma_divisors = scale_quant_for_fdct(&chroma_quant);
 
+    // SIMD dispatch — used for both color conversion and FDCT+quantize
+    let enc_simd = crate::simd::detect_encoder();
+
     // Color convert
-    let (y_plane, cb_plane, cr_plane) = convert_to_ycbcr(pixels, width, height, pixel_format)?;
+    let (y_plane, cb_plane, cr_plane) = convert_to_ycbcr(
+        pixels,
+        width,
+        height,
+        pixel_format,
+        enc_simd.rgb_to_ycbcr_row,
+    )?;
 
     // Determine MCU dimensions
     let (mcu_w, mcu_h) = if is_grayscale {
@@ -3643,7 +3703,6 @@ pub fn compress_optimized(
 
     // === Pass 1: FDCT + quantize all blocks, gather symbol frequencies ===
     use crate::encode::huff_opt;
-    let enc_simd = crate::simd::detect_encoder();
 
     // Frequency arrays: DC lum, DC chr, AC lum, AC chr
     let mut dc_luma_freq = [0u32; 257];
@@ -4618,11 +4677,19 @@ pub fn compress_custom_sampling(
     let ac_chroma_table: HuffTable =
         build_huff_table(&tables::AC_CHROMINANCE_BITS, &tables::AC_CHROMINANCE_VALUES);
 
+    // SIMD dispatch — used for both color conversion and FDCT+quantize
+    let enc_simd = crate::simd::detect_encoder();
+
     // Color convert
-    let (y_plane, cb_plane, cr_plane) = convert_to_ycbcr(pixels, width, height, pixel_format)?;
+    let (y_plane, cb_plane, cr_plane) = convert_to_ycbcr(
+        pixels,
+        width,
+        height,
+        pixel_format,
+        enc_simd.rgb_to_ycbcr_row,
+    )?;
 
     // FDCT function
-    let enc_simd = crate::simd::detect_encoder();
     let fdct_quantize_fn = enc_simd.fdct_quantize;
 
     // Entropy encode all MCUs
