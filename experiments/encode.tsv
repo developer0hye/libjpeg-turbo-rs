@@ -1,1 +1,2 @@
 commit	time_us	status	description
+16a2509	19147 (1080p_420 NEON)	keep	baseline: fused fdct_quantize + color NEON dispatch wired; NEON=19147us vs scalar=29572us (35% faster); C libjpeg-turbo=4980us (Rust still 3.8x slower)
