@@ -6,11 +6,9 @@ use crate::api::encoder::HuffmanTableDef;
 use crate::common::error::{JpegError, Result};
 use crate::common::types::{DctMethod, PixelFormat, SavedMarker, ScanScript, Subsampling};
 use crate::encode::color;
-use crate::encode::fdct;
 use crate::encode::huffman_encode::{build_huff_table, BitWriter, HuffTable, HuffmanEncoder};
 use crate::encode::marker_writer;
 use crate::encode::progressive::ProgressiveScan;
-use crate::encode::quant;
 use crate::encode::tables;
 
 /// Compress raw pixel data into a JPEG byte stream.
@@ -96,8 +94,15 @@ pub fn compress(
     let mcus_x = (width + mcu_w - 1) / mcu_w;
     let mcus_y = (height + mcu_h - 1) / mcu_h;
 
-    // Select the forward DCT function based on the configured method
-    let fdct_fn: fn(&[i16; 64], &mut [i32; 64]) = fdct::select_fdct(dct_method);
+    // NEON fused FDCT+quantize for IsLow (the common case and only NEON-supported variant).
+    // IsFast/Float fall back to scalar fdct_islow — matches public API behavior.
+    let enc_simd = crate::simd::detect_encoder();
+    let fdct_quantize_fn: fn(&[i16; 64], &[u16; 64], &mut [i16; 64]) =
+        if dct_method == DctMethod::IsLow {
+            enc_simd.fdct_quantize
+        } else {
+            crate::simd::scalar::scalar_fdct_quantize
+        };
 
     // Entropy encode all MCUs
     let mut bit_writer = BitWriter::new(width * height);
@@ -122,7 +127,7 @@ pub fn compress(
                     &ac_luma_table,
                     &mut bit_writer,
                     &mut prev_dc_y,
-                    fdct_fn,
+                    fdct_quantize_fn,
                 );
             } else {
                 encode_color_mcu(
@@ -144,7 +149,7 @@ pub fn compress(
                     &mut prev_dc_y,
                     &mut prev_dc_cb,
                     &mut prev_dc_cr,
-                    fdct_fn,
+                    fdct_quantize_fn,
                 );
             }
         }
@@ -342,6 +347,7 @@ pub fn compress_custom_huffman(
     let mcus_y = (height + mcu_h - 1) / mcu_h;
 
     // Entropy encode all MCUs
+    let enc_simd = crate::simd::detect_encoder();
     let mut bit_writer = BitWriter::new(width * height);
     let mut prev_dc_y: i16 = 0;
     let mut prev_dc_cb: i16 = 0;
@@ -364,7 +370,7 @@ pub fn compress_custom_huffman(
                     &ac_luma_table,
                     &mut bit_writer,
                     &mut prev_dc_y,
-                    fdct::fdct_islow,
+                    enc_simd.fdct_quantize,
                 );
             } else {
                 encode_color_mcu(
@@ -386,7 +392,7 @@ pub fn compress_custom_huffman(
                     &mut prev_dc_y,
                     &mut prev_dc_cb,
                     &mut prev_dc_cr,
-                    fdct::fdct_islow,
+                    enc_simd.fdct_quantize,
                 );
             }
         }
@@ -532,6 +538,7 @@ pub fn compress_custom_quant(
     let mcus_y = (height + mcu_h - 1) / mcu_h;
 
     // Entropy encode all MCUs
+    let enc_simd = crate::simd::detect_encoder();
     let mut bit_writer = BitWriter::new(width * height);
     let mut prev_dc_y: i16 = 0;
     let mut prev_dc_cb: i16 = 0;
@@ -554,7 +561,7 @@ pub fn compress_custom_quant(
                     &ac_luma_table,
                     &mut bit_writer,
                     &mut prev_dc_y,
-                    fdct::fdct_islow,
+                    enc_simd.fdct_quantize,
                 );
             } else {
                 encode_color_mcu(
@@ -576,7 +583,7 @@ pub fn compress_custom_quant(
                     &mut prev_dc_y,
                     &mut prev_dc_cb,
                     &mut prev_dc_cr,
-                    fdct::fdct_islow,
+                    enc_simd.fdct_quantize,
                 );
             }
         }
@@ -737,6 +744,7 @@ pub fn compress_with_restart(
     let mcus_y = (height + mcu_h - 1) / mcu_h;
 
     // Entropy encode all MCUs with restart markers
+    let enc_simd = crate::simd::detect_encoder();
     let mut bit_writer = BitWriter::new(width * height);
     let mut prev_dc_y: i16 = 0;
     let mut prev_dc_cb: i16 = 0;
@@ -773,7 +781,7 @@ pub fn compress_with_restart(
                     &ac_luma_table,
                     &mut bit_writer,
                     &mut prev_dc_y,
-                    fdct::fdct_islow,
+                    enc_simd.fdct_quantize,
                 );
             } else {
                 encode_color_mcu(
@@ -795,7 +803,7 @@ pub fn compress_with_restart(
                     &mut prev_dc_y,
                     &mut prev_dc_cb,
                     &mut prev_dc_cr,
-                    fdct::fdct_islow,
+                    enc_simd.fdct_quantize,
                 );
             }
 
@@ -1021,6 +1029,7 @@ fn compress_cmyk(pixels: &[u8], width: usize, height: usize, quality: u8) -> Res
     let mcus_x = (width + 7) / 8;
     let mcus_y = (height + 7) / 8;
 
+    let enc_simd = crate::simd::detect_encoder();
     let mut bit_writer = BitWriter::new(width * height);
     let mut prev_dc = [0i16; 4];
 
@@ -1040,7 +1049,7 @@ fn compress_cmyk(pixels: &[u8], width: usize, height: usize, quality: u8) -> Res
                     &ac_table,
                     &mut bit_writer,
                     &mut prev_dc[c],
-                    fdct::fdct_islow,
+                    enc_simd.fdct_quantize,
                 );
             }
         }
@@ -1778,6 +1787,7 @@ fn compress_progressive_with_scans(
         .collect();
 
     // FDCT + quantize all blocks into coefficient buffers
+    let scalar_fq = crate::simd::scalar::scalar_fdct_quantize;
     for mcu_y in 0..mcus_y {
         for mcu_x in 0..mcus_x {
             let x0 = mcu_x * mcu_w;
@@ -1788,9 +1798,7 @@ fn compress_progressive_with_scans(
                 let by = mcu_y;
                 let mut block = [0i16; 64];
                 extract_block(&y_plane, width, height, x0, y0, &mut block);
-                let mut dct = [0i32; 64];
-                fdct::fdct_islow(&block, &mut dct);
-                quant::quantize_block(&dct, &luma_divisors, &mut coeff_bufs[0][by * mcus_x + bx]);
+                scalar_fq(&block, &luma_divisors, &mut coeff_bufs[0][by * mcus_x + bx]);
             } else {
                 // Y blocks
                 for bv in 0..v_samp {
@@ -1806,11 +1814,9 @@ fn compress_progressive_with_scans(
                             y0 + bv * 8,
                             &mut block,
                         );
-                        let mut dct = [0i32; 64];
-                        fdct::fdct_islow(&block, &mut dct);
                         let blocks_x = comp_layouts[0].blocks_x;
-                        quant::quantize_block(
-                            &dct,
+                        scalar_fq(
+                            &block,
                             &luma_divisors,
                             &mut coeff_bufs[0][by * blocks_x + bx],
                         );
@@ -1830,10 +1836,8 @@ fn compress_progressive_with_scans(
                             &cb_plane, width, height, x0, y0, hf, vf, &mut block,
                         );
                     }
-                    let mut dct = [0i32; 64];
-                    fdct::fdct_islow(&block, &mut dct);
-                    quant::quantize_block(
-                        &dct,
+                    scalar_fq(
+                        &block,
                         &chroma_divisors,
                         &mut coeff_bufs[1][by * mcus_x + bx],
                     );
@@ -1852,10 +1856,8 @@ fn compress_progressive_with_scans(
                             &cr_plane, width, height, x0, y0, hf, vf, &mut block,
                         );
                     }
-                    let mut dct = [0i32; 64];
-                    fdct::fdct_islow(&block, &mut dct);
-                    quant::quantize_block(
-                        &dct,
+                    scalar_fq(
+                        &block,
                         &chroma_divisors,
                         &mut coeff_bufs[2][by * mcus_x + bx],
                     );
@@ -2048,6 +2050,7 @@ pub fn compress_arithmetic(
     let mcus_y = (height + mcu_h - 1) / mcu_h;
 
     // FDCT + quantize all blocks
+    let scalar_fq = crate::simd::scalar::scalar_fdct_quantize;
     let mut all_blocks: Vec<[i16; 64]> = Vec::new();
 
     for mcu_row in 0..mcus_y {
@@ -2058,10 +2061,8 @@ pub fn compress_arithmetic(
             if is_grayscale {
                 let mut block = [0i16; 64];
                 extract_block(&y_plane, width, height, x0, y0, &mut block);
-                let mut dct = [0i32; 64];
-                fdct::fdct_islow(&block, &mut dct);
                 let mut q = [0i16; 64];
-                quant::quantize_block(&dct, &luma_divisors, &mut q);
+                scalar_fq(&block, &luma_divisors, &mut q);
                 all_blocks.push(q);
             } else {
                 match subsampling {
@@ -2073,10 +2074,8 @@ pub fn compress_arithmetic(
                         ] {
                             let mut block = [0i16; 64];
                             extract_block(plane, width, height, x0, y0, &mut block);
-                            let mut dct = [0i32; 64];
-                            fdct::fdct_islow(&block, &mut dct);
                             let mut q = [0i16; 64];
-                            quant::quantize_block(&dct, divisors, &mut q);
+                            scalar_fq(&block, divisors, &mut q);
                             all_blocks.push(q);
                         }
                     }
@@ -2084,19 +2083,15 @@ pub fn compress_arithmetic(
                         for dx in [0, 8] {
                             let mut block = [0i16; 64];
                             extract_block(&y_plane, width, height, x0 + dx, y0, &mut block);
-                            let mut dct = [0i32; 64];
-                            fdct::fdct_islow(&block, &mut dct);
                             let mut q = [0i16; 64];
-                            quant::quantize_block(&dct, &luma_divisors, &mut q);
+                            scalar_fq(&block, &luma_divisors, &mut q);
                             all_blocks.push(q);
                         }
                         for plane in [&cb_plane, &cr_plane] {
                             let mut block = [0i16; 64];
                             downsample_chroma_block(plane, width, height, x0, y0, 2, 1, &mut block);
-                            let mut dct = [0i32; 64];
-                            fdct::fdct_islow(&block, &mut dct);
                             let mut q = [0i16; 64];
-                            quant::quantize_block(&dct, &chroma_divisors, &mut q);
+                            scalar_fq(&block, &chroma_divisors, &mut q);
                             all_blocks.push(q);
                         }
                     }
@@ -2104,19 +2099,15 @@ pub fn compress_arithmetic(
                         for (dx, dy) in [(0, 0), (8, 0), (0, 8), (8, 8)] {
                             let mut block = [0i16; 64];
                             extract_block(&y_plane, width, height, x0 + dx, y0 + dy, &mut block);
-                            let mut dct = [0i32; 64];
-                            fdct::fdct_islow(&block, &mut dct);
                             let mut q = [0i16; 64];
-                            quant::quantize_block(&dct, &luma_divisors, &mut q);
+                            scalar_fq(&block, &luma_divisors, &mut q);
                             all_blocks.push(q);
                         }
                         for plane in [&cb_plane, &cr_plane] {
                             let mut block = [0i16; 64];
                             downsample_chroma_block(plane, width, height, x0, y0, 2, 2, &mut block);
-                            let mut dct = [0i32; 64];
-                            fdct::fdct_islow(&block, &mut dct);
                             let mut q = [0i16; 64];
-                            quant::quantize_block(&dct, &chroma_divisors, &mut q);
+                            scalar_fq(&block, &chroma_divisors, &mut q);
                             all_blocks.push(q);
                         }
                     }
@@ -2125,19 +2116,15 @@ pub fn compress_arithmetic(
                         for dy in [0, 8] {
                             let mut block = [0i16; 64];
                             extract_block(&y_plane, width, height, x0, y0 + dy, &mut block);
-                            let mut dct = [0i32; 64];
-                            fdct::fdct_islow(&block, &mut dct);
                             let mut q = [0i16; 64];
-                            quant::quantize_block(&dct, &luma_divisors, &mut q);
+                            scalar_fq(&block, &luma_divisors, &mut q);
                             all_blocks.push(q);
                         }
                         for plane in [&cb_plane, &cr_plane] {
                             let mut block = [0i16; 64];
                             downsample_chroma_block(plane, width, height, x0, y0, 1, 2, &mut block);
-                            let mut dct = [0i32; 64];
-                            fdct::fdct_islow(&block, &mut dct);
                             let mut q = [0i16; 64];
-                            quant::quantize_block(&dct, &chroma_divisors, &mut q);
+                            scalar_fq(&block, &chroma_divisors, &mut q);
                             all_blocks.push(q);
                         }
                     }
@@ -2146,19 +2133,15 @@ pub fn compress_arithmetic(
                         for dx in [0, 8, 16, 24] {
                             let mut block = [0i16; 64];
                             extract_block(&y_plane, width, height, x0 + dx, y0, &mut block);
-                            let mut dct = [0i32; 64];
-                            fdct::fdct_islow(&block, &mut dct);
                             let mut q = [0i16; 64];
-                            quant::quantize_block(&dct, &luma_divisors, &mut q);
+                            scalar_fq(&block, &luma_divisors, &mut q);
                             all_blocks.push(q);
                         }
                         for plane in [&cb_plane, &cr_plane] {
                             let mut block = [0i16; 64];
                             downsample_chroma_block(plane, width, height, x0, y0, 4, 1, &mut block);
-                            let mut dct = [0i32; 64];
-                            fdct::fdct_islow(&block, &mut dct);
                             let mut q = [0i16; 64];
-                            quant::quantize_block(&dct, &chroma_divisors, &mut q);
+                            scalar_fq(&block, &chroma_divisors, &mut q);
                             all_blocks.push(q);
                         }
                     }
@@ -2167,19 +2150,15 @@ pub fn compress_arithmetic(
                         for dy in [0, 8, 16, 24] {
                             let mut block = [0i16; 64];
                             extract_block(&y_plane, width, height, x0, y0 + dy, &mut block);
-                            let mut dct = [0i32; 64];
-                            fdct::fdct_islow(&block, &mut dct);
                             let mut q = [0i16; 64];
-                            quant::quantize_block(&dct, &luma_divisors, &mut q);
+                            scalar_fq(&block, &luma_divisors, &mut q);
                             all_blocks.push(q);
                         }
                         for plane in [&cb_plane, &cr_plane] {
                             let mut block = [0i16; 64];
                             downsample_chroma_block(plane, width, height, x0, y0, 1, 4, &mut block);
-                            let mut dct = [0i32; 64];
-                            fdct::fdct_islow(&block, &mut dct);
                             let mut q = [0i16; 64];
-                            quant::quantize_block(&dct, &chroma_divisors, &mut q);
+                            scalar_fq(&block, &chroma_divisors, &mut q);
                             all_blocks.push(q);
                         }
                     }
@@ -2375,6 +2354,7 @@ pub fn compress_arithmetic_progressive(
         .collect();
 
     // FDCT + quantize all blocks into coefficient buffers
+    let scalar_fq = crate::simd::scalar::scalar_fdct_quantize;
     for mcu_y in 0..mcus_y {
         for mcu_x in 0..mcus_x {
             let x0: usize = mcu_x * mcu_w;
@@ -2385,9 +2365,7 @@ pub fn compress_arithmetic_progressive(
                 let by: usize = mcu_y;
                 let mut block = [0i16; 64];
                 extract_block(&y_plane, width, height, x0, y0, &mut block);
-                let mut dct = [0i32; 64];
-                fdct::fdct_islow(&block, &mut dct);
-                quant::quantize_block(&dct, &luma_divisors, &mut coeff_bufs[0][by * mcus_x + bx]);
+                scalar_fq(&block, &luma_divisors, &mut coeff_bufs[0][by * mcus_x + bx]);
             } else {
                 // Y blocks
                 for bv in 0..v_samp {
@@ -2403,11 +2381,9 @@ pub fn compress_arithmetic_progressive(
                             y0 + bv * 8,
                             &mut block,
                         );
-                        let mut dct = [0i32; 64];
-                        fdct::fdct_islow(&block, &mut dct);
                         let blocks_x: usize = comp_layouts[0].blocks_x;
-                        quant::quantize_block(
-                            &dct,
+                        scalar_fq(
+                            &block,
                             &luma_divisors,
                             &mut coeff_bufs[0][by * blocks_x + bx],
                         );
@@ -2427,10 +2403,8 @@ pub fn compress_arithmetic_progressive(
                             &cb_plane, width, height, x0, y0, hf, vf, &mut block,
                         );
                     }
-                    let mut dct = [0i32; 64];
-                    fdct::fdct_islow(&block, &mut dct);
-                    quant::quantize_block(
-                        &dct,
+                    scalar_fq(
+                        &block,
                         &chroma_divisors,
                         &mut coeff_bufs[1][by * mcus_x + bx],
                     );
@@ -2449,10 +2423,8 @@ pub fn compress_arithmetic_progressive(
                             &cr_plane, width, height, x0, y0, hf, vf, &mut block,
                         );
                     }
-                    let mut dct = [0i32; 64];
-                    fdct::fdct_islow(&block, &mut dct);
-                    quant::quantize_block(
-                        &dct,
+                    scalar_fq(
+                        &block,
                         &chroma_divisors,
                         &mut coeff_bufs[2][by * mcus_x + bx],
                     );
@@ -3184,7 +3156,7 @@ fn encode_single_block(
     ac_table: &HuffTable,
     writer: &mut BitWriter,
     prev_dc: &mut i16,
-    fdct_fn: fn(&[i16; 64], &mut [i32; 64]),
+    fdct_quantize_fn: fn(&[i16; 64], &[u16; 64], &mut [i16; 64]),
 ) {
     let mut block = [0i16; 64];
     extract_block(
@@ -3196,11 +3168,8 @@ fn encode_single_block(
         &mut block,
     );
 
-    let mut dct_output = [0i32; 64];
-    fdct_fn(&block, &mut dct_output);
-
     let mut quantized = [0i16; 64];
-    quant::quantize_block(&dct_output, quant_table, &mut quantized);
+    fdct_quantize_fn(&block, quant_table, &mut quantized);
 
     HuffmanEncoder::encode_block(writer, &quantized, prev_dc, dc_table, ac_table);
 }
@@ -3226,7 +3195,7 @@ fn encode_color_mcu(
     prev_dc_y: &mut i16,
     prev_dc_cb: &mut i16,
     prev_dc_cr: &mut i16,
-    fdct_fn: fn(&[i16; 64], &mut [i32; 64]),
+    fdct_quantize_fn: fn(&[i16; 64], &[u16; 64], &mut [i16; 64]),
 ) {
     match subsampling {
         Subsampling::S444 | Subsampling::Unknown => {
@@ -3242,7 +3211,7 @@ fn encode_color_mcu(
                 ac_luma_table,
                 writer,
                 prev_dc_y,
-                fdct_fn,
+                fdct_quantize_fn,
             );
             encode_single_block(
                 cb_plane,
@@ -3255,7 +3224,7 @@ fn encode_color_mcu(
                 ac_chroma_table,
                 writer,
                 prev_dc_cb,
-                fdct_fn,
+                fdct_quantize_fn,
             );
             encode_single_block(
                 cr_plane,
@@ -3268,7 +3237,7 @@ fn encode_color_mcu(
                 ac_chroma_table,
                 writer,
                 prev_dc_cr,
-                fdct_fn,
+                fdct_quantize_fn,
             );
         }
         Subsampling::S422 => {
@@ -3284,7 +3253,7 @@ fn encode_color_mcu(
                 ac_luma_table,
                 writer,
                 prev_dc_y,
-                fdct_fn,
+                fdct_quantize_fn,
             );
             encode_single_block(
                 y_plane,
@@ -3297,7 +3266,7 @@ fn encode_color_mcu(
                 ac_luma_table,
                 writer,
                 prev_dc_y,
-                fdct_fn,
+                fdct_quantize_fn,
             );
             // Downsample chroma: 2x1 box filter
             encode_downsampled_chroma_block(
@@ -3313,7 +3282,7 @@ fn encode_color_mcu(
                 ac_chroma_table,
                 writer,
                 prev_dc_cb,
-                fdct_fn,
+                fdct_quantize_fn,
             );
             encode_downsampled_chroma_block(
                 cr_plane,
@@ -3328,7 +3297,7 @@ fn encode_color_mcu(
                 ac_chroma_table,
                 writer,
                 prev_dc_cr,
-                fdct_fn,
+                fdct_quantize_fn,
             );
         }
         Subsampling::S420 => {
@@ -3345,7 +3314,7 @@ fn encode_color_mcu(
                 ac_luma_table,
                 writer,
                 prev_dc_y,
-                fdct_fn,
+                fdct_quantize_fn,
             );
             encode_single_block(
                 y_plane,
@@ -3358,7 +3327,7 @@ fn encode_color_mcu(
                 ac_luma_table,
                 writer,
                 prev_dc_y,
-                fdct_fn,
+                fdct_quantize_fn,
             );
             encode_single_block(
                 y_plane,
@@ -3371,7 +3340,7 @@ fn encode_color_mcu(
                 ac_luma_table,
                 writer,
                 prev_dc_y,
-                fdct_fn,
+                fdct_quantize_fn,
             );
             encode_single_block(
                 y_plane,
@@ -3384,7 +3353,7 @@ fn encode_color_mcu(
                 ac_luma_table,
                 writer,
                 prev_dc_y,
-                fdct_fn,
+                fdct_quantize_fn,
             );
             // Downsample chroma: 2x2 box filter
             encode_downsampled_chroma_block(
@@ -3400,7 +3369,7 @@ fn encode_color_mcu(
                 ac_chroma_table,
                 writer,
                 prev_dc_cb,
-                fdct_fn,
+                fdct_quantize_fn,
             );
             encode_downsampled_chroma_block(
                 cr_plane,
@@ -3415,7 +3384,7 @@ fn encode_color_mcu(
                 ac_chroma_table,
                 writer,
                 prev_dc_cr,
-                fdct_fn,
+                fdct_quantize_fn,
             );
         }
         Subsampling::S440 => {
@@ -3431,7 +3400,7 @@ fn encode_color_mcu(
                 ac_luma_table,
                 writer,
                 prev_dc_y,
-                fdct_fn,
+                fdct_quantize_fn,
             );
             encode_single_block(
                 y_plane,
@@ -3444,7 +3413,7 @@ fn encode_color_mcu(
                 ac_luma_table,
                 writer,
                 prev_dc_y,
-                fdct_fn,
+                fdct_quantize_fn,
             );
             // Cb/Cr downsampled 1x2
             encode_downsampled_chroma_block(
@@ -3460,7 +3429,7 @@ fn encode_color_mcu(
                 ac_chroma_table,
                 writer,
                 prev_dc_cb,
-                fdct_fn,
+                fdct_quantize_fn,
             );
             encode_downsampled_chroma_block(
                 cr_plane,
@@ -3475,7 +3444,7 @@ fn encode_color_mcu(
                 ac_chroma_table,
                 writer,
                 prev_dc_cr,
-                fdct_fn,
+                fdct_quantize_fn,
             );
         }
         Subsampling::S411 => {
@@ -3492,7 +3461,7 @@ fn encode_color_mcu(
                     ac_luma_table,
                     writer,
                     prev_dc_y,
-                    fdct_fn,
+                    fdct_quantize_fn,
                 );
             }
             // Cb/Cr downsampled 4x1
@@ -3509,7 +3478,7 @@ fn encode_color_mcu(
                 ac_chroma_table,
                 writer,
                 prev_dc_cb,
-                fdct_fn,
+                fdct_quantize_fn,
             );
             encode_downsampled_chroma_block(
                 cr_plane,
@@ -3524,7 +3493,7 @@ fn encode_color_mcu(
                 ac_chroma_table,
                 writer,
                 prev_dc_cr,
-                fdct_fn,
+                fdct_quantize_fn,
             );
         }
         Subsampling::S441 => {
@@ -3541,7 +3510,7 @@ fn encode_color_mcu(
                     ac_luma_table,
                     writer,
                     prev_dc_y,
-                    fdct_fn,
+                    fdct_quantize_fn,
                 );
             }
             // Cb/Cr downsampled 1x4
@@ -3558,7 +3527,7 @@ fn encode_color_mcu(
                 ac_chroma_table,
                 writer,
                 prev_dc_cb,
-                fdct_fn,
+                fdct_quantize_fn,
             );
             encode_downsampled_chroma_block(
                 cr_plane,
@@ -3573,7 +3542,7 @@ fn encode_color_mcu(
                 ac_chroma_table,
                 writer,
                 prev_dc_cr,
-                fdct_fn,
+                fdct_quantize_fn,
             );
         }
     }
@@ -3594,7 +3563,7 @@ fn encode_downsampled_chroma_block(
     ac_table: &HuffTable,
     writer: &mut BitWriter,
     prev_dc: &mut i16,
-    fdct_fn: fn(&[i16; 64], &mut [i32; 64]),
+    fdct_quantize_fn: fn(&[i16; 64], &[u16; 64], &mut [i16; 64]),
 ) {
     let mut block = [0i16; 64];
     downsample_chroma_block(
@@ -3608,11 +3577,8 @@ fn encode_downsampled_chroma_block(
         &mut block,
     );
 
-    let mut dct_output = [0i32; 64];
-    fdct_fn(&block, &mut dct_output);
-
     let mut quantized = [0i16; 64];
-    quant::quantize_block(&dct_output, quant_table, &mut quantized);
+    fdct_quantize_fn(&block, quant_table, &mut quantized);
 
     HuffmanEncoder::encode_block(writer, &quantized, prev_dc, dc_table, ac_table);
 }
@@ -3677,6 +3643,7 @@ pub fn compress_optimized(
 
     // === Pass 1: FDCT + quantize all blocks, gather symbol frequencies ===
     use crate::encode::huff_opt;
+    let enc_simd = crate::simd::detect_encoder();
 
     // Frequency arrays: DC lum, DC chr, AC lum, AC chr
     let mut dc_luma_freq = [0u32; 257];
@@ -3697,7 +3664,15 @@ pub fn compress_optimized(
             let y0 = mcu_row * mcu_h;
 
             if is_grayscale {
-                let q = gather_block(&y_plane, width, height, x0, y0, &luma_divisors);
+                let q = gather_block(
+                    &y_plane,
+                    width,
+                    height,
+                    x0,
+                    y0,
+                    &luma_divisors,
+                    enc_simd.fdct_quantize,
+                );
                 let diff = q[0] - prev_dc_y;
                 prev_dc_y = q[0];
                 huff_opt::gather_dc_symbol(diff, &mut dc_luma_freq);
@@ -3707,21 +3682,45 @@ pub fn compress_optimized(
                 match subsampling {
                     Subsampling::S444 | Subsampling::Unknown => {
                         // 1 Y + 1 Cb + 1 Cr
-                        let yq = gather_block(&y_plane, width, height, x0, y0, &luma_divisors);
+                        let yq = gather_block(
+                            &y_plane,
+                            width,
+                            height,
+                            x0,
+                            y0,
+                            &luma_divisors,
+                            enc_simd.fdct_quantize,
+                        );
                         let diff = yq[0] - prev_dc_y;
                         prev_dc_y = yq[0];
                         huff_opt::gather_dc_symbol(diff, &mut dc_luma_freq);
                         huff_opt::gather_ac_symbols(&yq, &mut ac_luma_freq);
                         all_blocks.push(yq);
 
-                        let cbq = gather_block(&cb_plane, width, height, x0, y0, &chroma_divisors);
+                        let cbq = gather_block(
+                            &cb_plane,
+                            width,
+                            height,
+                            x0,
+                            y0,
+                            &chroma_divisors,
+                            enc_simd.fdct_quantize,
+                        );
                         let diff = cbq[0] - prev_dc_cb;
                         prev_dc_cb = cbq[0];
                         huff_opt::gather_dc_symbol(diff, &mut dc_chroma_freq);
                         huff_opt::gather_ac_symbols(&cbq, &mut ac_chroma_freq);
                         all_blocks.push(cbq);
 
-                        let crq = gather_block(&cr_plane, width, height, x0, y0, &chroma_divisors);
+                        let crq = gather_block(
+                            &cr_plane,
+                            width,
+                            height,
+                            x0,
+                            y0,
+                            &chroma_divisors,
+                            enc_simd.fdct_quantize,
+                        );
                         let diff = crq[0] - prev_dc_cr;
                         prev_dc_cr = crq[0];
                         huff_opt::gather_dc_symbol(diff, &mut dc_chroma_freq);
@@ -3731,8 +3730,15 @@ pub fn compress_optimized(
                     Subsampling::S422 => {
                         // 2 Y blocks + 1 Cb + 1 Cr
                         for dx in [0, 8] {
-                            let yq =
-                                gather_block(&y_plane, width, height, x0 + dx, y0, &luma_divisors);
+                            let yq = gather_block(
+                                &y_plane,
+                                width,
+                                height,
+                                x0 + dx,
+                                y0,
+                                &luma_divisors,
+                                enc_simd.fdct_quantize,
+                            );
                             let diff = yq[0] - prev_dc_y;
                             prev_dc_y = yq[0];
                             huff_opt::gather_dc_symbol(diff, &mut dc_luma_freq);
@@ -3748,6 +3754,7 @@ pub fn compress_optimized(
                             2,
                             1,
                             &chroma_divisors,
+                            enc_simd.fdct_quantize,
                         );
                         let diff = cbq[0] - prev_dc_cb;
                         prev_dc_cb = cbq[0];
@@ -3764,6 +3771,7 @@ pub fn compress_optimized(
                             2,
                             1,
                             &chroma_divisors,
+                            enc_simd.fdct_quantize,
                         );
                         let diff = crq[0] - prev_dc_cr;
                         prev_dc_cr = crq[0];
@@ -3781,6 +3789,7 @@ pub fn compress_optimized(
                                 x0 + dx,
                                 y0 + dy,
                                 &luma_divisors,
+                                enc_simd.fdct_quantize,
                             );
                             let diff = yq[0] - prev_dc_y;
                             prev_dc_y = yq[0];
@@ -3797,6 +3806,7 @@ pub fn compress_optimized(
                             2,
                             2,
                             &chroma_divisors,
+                            enc_simd.fdct_quantize,
                         );
                         let diff = cbq[0] - prev_dc_cb;
                         prev_dc_cb = cbq[0];
@@ -3813,6 +3823,7 @@ pub fn compress_optimized(
                             2,
                             2,
                             &chroma_divisors,
+                            enc_simd.fdct_quantize,
                         );
                         let diff = crq[0] - prev_dc_cr;
                         prev_dc_cr = crq[0];
@@ -3823,8 +3834,15 @@ pub fn compress_optimized(
                     Subsampling::S440 => {
                         // 2 Y blocks vertically
                         for dy in [0usize, 8] {
-                            let yq =
-                                gather_block(&y_plane, width, height, x0, y0 + dy, &luma_divisors);
+                            let yq = gather_block(
+                                &y_plane,
+                                width,
+                                height,
+                                x0,
+                                y0 + dy,
+                                &luma_divisors,
+                                enc_simd.fdct_quantize,
+                            );
                             let diff = yq[0] - prev_dc_y;
                             prev_dc_y = yq[0];
                             huff_opt::gather_dc_symbol(diff, &mut dc_luma_freq);
@@ -3840,6 +3858,7 @@ pub fn compress_optimized(
                             1,
                             2,
                             &chroma_divisors,
+                            enc_simd.fdct_quantize,
                         );
                         let diff = cbq[0] - prev_dc_cb;
                         prev_dc_cb = cbq[0];
@@ -3856,6 +3875,7 @@ pub fn compress_optimized(
                             1,
                             2,
                             &chroma_divisors,
+                            enc_simd.fdct_quantize,
                         );
                         let diff = crq[0] - prev_dc_cr;
                         prev_dc_cr = crq[0];
@@ -3866,8 +3886,15 @@ pub fn compress_optimized(
                     Subsampling::S411 => {
                         // 4 Y blocks horizontally
                         for dx in [0usize, 8, 16, 24] {
-                            let yq =
-                                gather_block(&y_plane, width, height, x0 + dx, y0, &luma_divisors);
+                            let yq = gather_block(
+                                &y_plane,
+                                width,
+                                height,
+                                x0 + dx,
+                                y0,
+                                &luma_divisors,
+                                enc_simd.fdct_quantize,
+                            );
                             let diff = yq[0] - prev_dc_y;
                             prev_dc_y = yq[0];
                             huff_opt::gather_dc_symbol(diff, &mut dc_luma_freq);
@@ -3883,6 +3910,7 @@ pub fn compress_optimized(
                             4,
                             1,
                             &chroma_divisors,
+                            enc_simd.fdct_quantize,
                         );
                         let diff = cbq[0] - prev_dc_cb;
                         prev_dc_cb = cbq[0];
@@ -3899,6 +3927,7 @@ pub fn compress_optimized(
                             4,
                             1,
                             &chroma_divisors,
+                            enc_simd.fdct_quantize,
                         );
                         let diff = crq[0] - prev_dc_cr;
                         prev_dc_cr = crq[0];
@@ -3909,8 +3938,15 @@ pub fn compress_optimized(
                     Subsampling::S441 => {
                         // 4 Y blocks vertically
                         for dy in [0usize, 8, 16, 24] {
-                            let yq =
-                                gather_block(&y_plane, width, height, x0, y0 + dy, &luma_divisors);
+                            let yq = gather_block(
+                                &y_plane,
+                                width,
+                                height,
+                                x0,
+                                y0 + dy,
+                                &luma_divisors,
+                                enc_simd.fdct_quantize,
+                            );
                             let diff = yq[0] - prev_dc_y;
                             prev_dc_y = yq[0];
                             huff_opt::gather_dc_symbol(diff, &mut dc_luma_freq);
@@ -3926,6 +3962,7 @@ pub fn compress_optimized(
                             1,
                             4,
                             &chroma_divisors,
+                            enc_simd.fdct_quantize,
                         );
                         let diff = cbq[0] - prev_dc_cb;
                         prev_dc_cb = cbq[0];
@@ -3942,6 +3979,7 @@ pub fn compress_optimized(
                             1,
                             4,
                             &chroma_divisors,
+                            enc_simd.fdct_quantize,
                         );
                         let diff = crq[0] - prev_dc_cr;
                         prev_dc_cr = crq[0];
@@ -4191,6 +4229,7 @@ fn gather_block(
     block_x: usize,
     block_y: usize,
     quant_table: &[u16; 64],
+    fdct_quantize_fn: fn(&[i16; 64], &[u16; 64], &mut [i16; 64]),
 ) -> [i16; 64] {
     let mut block = [0i16; 64];
     extract_block(
@@ -4202,11 +4241,8 @@ fn gather_block(
         &mut block,
     );
 
-    let mut dct_output = [0i32; 64];
-    fdct::fdct_islow(&block, &mut dct_output);
-
     let mut quantized = [0i16; 64];
-    quant::quantize_block(&dct_output, quant_table, &mut quantized);
+    fdct_quantize_fn(&block, quant_table, &mut quantized);
     quantized
 }
 
@@ -4220,6 +4256,7 @@ fn gather_downsampled_block(
     h_factor: usize,
     v_factor: usize,
     quant_table: &[u16; 64],
+    fdct_quantize_fn: fn(&[i16; 64], &[u16; 64], &mut [i16; 64]),
 ) -> [i16; 64] {
     let mut block = [0i16; 64];
     downsample_chroma_block(
@@ -4233,11 +4270,8 @@ fn gather_downsampled_block(
         &mut block,
     );
 
-    let mut dct_output = [0i32; 64];
-    fdct::fdct_islow(&block, &mut dct_output);
-
     let mut quantized = [0i16; 64];
-    quant::quantize_block(&dct_output, quant_table, &mut quantized);
+    fdct_quantize_fn(&block, quant_table, &mut quantized);
     quantized
 }
 
@@ -4341,7 +4375,8 @@ pub fn compress_raw(
     };
     let mcus_x: usize = (image_width + mcu_w - 1) / mcu_w;
     let mcus_y: usize = (image_height + mcu_h - 1) / mcu_h;
-    let fdct_fn: fn(&[i16; 64], &mut [i32; 64]) = fdct::fdct_islow;
+    let enc_simd = crate::simd::detect_encoder();
+    let fdct_quantize_fn = enc_simd.fdct_quantize;
     let mut bit_writer: BitWriter = BitWriter::new(image_width * image_height);
     let mut prev_dc_y: i16 = 0;
     let mut prev_dc_cb: i16 = 0;
@@ -4362,7 +4397,7 @@ pub fn compress_raw(
                     &ac_luma_table,
                     &mut bit_writer,
                     &mut prev_dc_y,
-                    fdct_fn,
+                    fdct_quantize_fn,
                 );
             } else {
                 let h: usize = h_samp as usize;
@@ -4380,7 +4415,7 @@ pub fn compress_raw(
                             &ac_luma_table,
                             &mut bit_writer,
                             &mut prev_dc_y,
-                            fdct_fn,
+                            fdct_quantize_fn,
                         );
                     }
                 }
@@ -4397,7 +4432,7 @@ pub fn compress_raw(
                     &ac_chroma_table,
                     &mut bit_writer,
                     &mut prev_dc_cb,
-                    fdct_fn,
+                    fdct_quantize_fn,
                 );
                 encode_single_block(
                     planes[2],
@@ -4410,7 +4445,7 @@ pub fn compress_raw(
                     &ac_chroma_table,
                     &mut bit_writer,
                     &mut prev_dc_cr,
-                    fdct_fn,
+                    fdct_quantize_fn,
                 );
             }
         }
@@ -4587,7 +4622,8 @@ pub fn compress_custom_sampling(
     let (y_plane, cb_plane, cr_plane) = convert_to_ycbcr(pixels, width, height, pixel_format)?;
 
     // FDCT function
-    let fdct_fn: fn(&[i16; 64], &mut [i32; 64]) = fdct::fdct_islow;
+    let enc_simd = crate::simd::detect_encoder();
+    let fdct_quantize_fn = enc_simd.fdct_quantize;
 
     // Entropy encode all MCUs
     let mut bit_writer: BitWriter = BitWriter::new(width * height);
@@ -4618,7 +4654,7 @@ pub fn compress_custom_sampling(
                             &ac_luma_table,
                             &mut bit_writer,
                             &mut prev_dc_y,
-                            fdct_fn,
+                            fdct_quantize_fn,
                         );
                     }
                 }
@@ -4637,7 +4673,7 @@ pub fn compress_custom_sampling(
                             &ac_luma_table,
                             &mut bit_writer,
                             &mut prev_dc_y,
-                            fdct_fn,
+                            fdct_quantize_fn,
                         );
                     }
                 }
@@ -4664,7 +4700,7 @@ pub fn compress_custom_sampling(
                             &ac_chroma_table,
                             &mut bit_writer,
                             &mut prev_dc_cb,
-                            fdct_fn,
+                            fdct_quantize_fn,
                         );
                     }
                 }
@@ -4690,7 +4726,7 @@ pub fn compress_custom_sampling(
                             &ac_chroma_table,
                             &mut bit_writer,
                             &mut prev_dc_cr,
-                            fdct_fn,
+                            fdct_quantize_fn,
                         );
                     }
                 }
