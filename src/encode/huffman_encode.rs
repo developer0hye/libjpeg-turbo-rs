@@ -281,50 +281,51 @@ impl HuffmanEncoder {
             writer.put_bits(combined, huff_size + category);
         }
 
-        // --- AC coefficients (run-length encoding with early EOB) ---
-
-        // Find last non-zero coefficient for early termination
-        let mut last_nonzero: usize = 0;
-        for k in (1..64).rev() {
-            if coeffs_zigzag[k] != 0 {
-                last_nonzero = k;
-                break;
+        // --- AC coefficients: bitmap zero-skip ---
+        // Build a u64 bitmap of non-zero AC positions. Bit (64-k) is set when
+        // coeffs_zigzag[k] != 0 for k=1..63. leading_zeros() then jumps
+        // directly to the next non-zero coefficient, eliminating the
+        // per-coefficient `if ac == 0 { continue }` branch.
+        let mut bitmap: u64 = 0;
+        for k in 1u32..64 {
+            if coeffs_zigzag[k as usize] != 0 {
+                bitmap |= 1u64 << (64 - k);
             }
         }
 
-        if last_nonzero == 0 {
+        if bitmap == 0 {
             writer.put_bits(ac_table.ehufco[0x00] as u32, ac_table.ehufsi[0x00]);
             return;
         }
 
-        let mut zero_run: u8 = 0;
-        for k in 1..=last_nonzero {
-            let ac: i16 = coeffs_zigzag[k];
-            if ac == 0 {
-                zero_run += 1;
-                continue;
-            }
+        let mut pos: u32 = 1;
+        while bitmap != 0 {
+            let lz: u32 = bitmap.leading_zeros();
+            pos += lz;
+            bitmap <<= lz;
 
             // Emit ZRL (16 zeros) symbols for runs >= 16
-            while zero_run >= 16 {
+            let mut run: u32 = lz;
+            while run >= 16 {
                 writer.put_bits(ac_table.ehufco[0xF0] as u32, ac_table.ehufsi[0xF0]);
-                zero_run -= 16;
+                run -= 16;
             }
 
+            let ac: i16 = coeffs_zigzag[pos as usize];
             let (magnitude_bits, nbits) = encode_ac_value(ac);
-            let symbol: usize = ((zero_run as usize) << 4) | (nbits as usize);
+            let symbol: usize = ((run as usize) << 4) | (nbits as usize);
             let huff_code: u32 = ac_table.ehufco[symbol] as u32;
             let huff_size: u8 = ac_table.ehufsi[symbol];
-
-            // Fuse Huffman code + magnitude into single put_bits call
             let mag_masked: u32 = magnitude_bits as u32 & ((1u32 << nbits) - 1);
             let combined: u32 = (huff_code << nbits) | mag_masked;
             writer.put_bits(combined, huff_size + nbits);
-            zero_run = 0;
+
+            pos += 1;
+            bitmap <<= 1;
         }
 
         // Emit EOB if there are trailing zeros after the last non-zero coefficient
-        if last_nonzero < 63 {
+        if pos <= 63 {
             writer.put_bits(ac_table.ehufco[0x00] as u32, ac_table.ehufsi[0x00]);
         }
     }
