@@ -3405,6 +3405,27 @@ fn encode_single_block(
     prev_dc: &mut i16,
     fdct_quantize_fn: fn(&[i16; 64], &QuantDivisors, &mut [i16; 64]),
 ) {
+    let mut quantized = [0i16; 64];
+
+    // Fused path for interior blocks: load u8 → FDCT → quantize → zigzag
+    // without intermediate [i16; 64] buffer between extract and FDCT.
+    #[cfg(target_arch = "aarch64")]
+    {
+        if block_x + 8 <= plane_width && block_y + 8 <= plane_height {
+            unsafe {
+                crate::simd::aarch64::neon_extract_fdct_quantize(
+                    plane.as_ptr().add(block_y * plane_width + block_x),
+                    plane_width,
+                    quant_table,
+                    &mut quantized,
+                );
+            }
+            HuffmanEncoder::encode_block(writer, &quantized, prev_dc, dc_table, ac_table);
+            return;
+        }
+    }
+
+    // Fallback for border blocks: separate extract + fdct_quantize
     let mut block = [0i16; 64];
     extract_block(
         plane,
@@ -3414,8 +3435,6 @@ fn encode_single_block(
         block_y,
         &mut block,
     );
-
-    let mut quantized = [0i16; 64];
     fdct_quantize_fn(&block, quant_table, &mut quantized);
 
     HuffmanEncoder::encode_block(writer, &quantized, prev_dc, dc_table, ac_table);

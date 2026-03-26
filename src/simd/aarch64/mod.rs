@@ -55,6 +55,126 @@ fn neon_fdct_quantize(input: &[i16; 64], quant: &QuantDivisors, output: &mut [i1
     }
 }
 
+/// Fused extract (u8 → i16 level-shift) + FDCT + quantize + zigzag for interior blocks.
+///
+/// Loads 8×8 u8 pixels directly from the plane, widens to i16, level-shifts by -128,
+/// transposes into column-major, then runs the full FDCT + quantize + zigzag pipeline.
+/// Eliminates the intermediate `[i16; 64]` buffer between extract_block and neon_fdct.
+///
+/// # Safety
+/// `plane_ptr` must point to the top-left pixel of an interior 8×8 block.
+/// The next 7 rows must be at offsets `stride, 2*stride, ..., 7*stride`.
+/// `output` receives 64 quantized coefficients in zigzag order.
+pub unsafe fn neon_extract_fdct_quantize(
+    plane_ptr: *const u8,
+    stride: usize,
+    quant: &QuantDivisors,
+    output: &mut [i16; 64],
+) {
+    neon_extract_fdct_quantize_inner(plane_ptr, stride, quant, output);
+}
+
+#[target_feature(enable = "neon")]
+unsafe fn neon_extract_fdct_quantize_inner(
+    plane_ptr: *const u8,
+    stride: usize,
+    quant: &QuantDivisors,
+    output: &mut [i16; 64],
+) {
+    use std::arch::aarch64::*;
+
+    let level_shift: int16x8_t = vdupq_n_s16(128);
+
+    // Load 8 rows of u8, widen to i16, level-shift (-128)
+    let row0: int16x8_t = vsubq_s16(
+        vreinterpretq_s16_u16(vmovl_u8(vld1_u8(plane_ptr))),
+        level_shift,
+    );
+    let row1: int16x8_t = vsubq_s16(
+        vreinterpretq_s16_u16(vmovl_u8(vld1_u8(plane_ptr.add(stride)))),
+        level_shift,
+    );
+    let row2: int16x8_t = vsubq_s16(
+        vreinterpretq_s16_u16(vmovl_u8(vld1_u8(plane_ptr.add(stride * 2)))),
+        level_shift,
+    );
+    let row3: int16x8_t = vsubq_s16(
+        vreinterpretq_s16_u16(vmovl_u8(vld1_u8(plane_ptr.add(stride * 3)))),
+        level_shift,
+    );
+    let row4: int16x8_t = vsubq_s16(
+        vreinterpretq_s16_u16(vmovl_u8(vld1_u8(plane_ptr.add(stride * 4)))),
+        level_shift,
+    );
+    let row5: int16x8_t = vsubq_s16(
+        vreinterpretq_s16_u16(vmovl_u8(vld1_u8(plane_ptr.add(stride * 5)))),
+        level_shift,
+    );
+    let row6: int16x8_t = vsubq_s16(
+        vreinterpretq_s16_u16(vmovl_u8(vld1_u8(plane_ptr.add(stride * 6)))),
+        level_shift,
+    );
+    let row7: int16x8_t = vsubq_s16(
+        vreinterpretq_s16_u16(vmovl_u8(vld1_u8(plane_ptr.add(stride * 7)))),
+        level_shift,
+    );
+
+    // 8×8 transpose: row-major → column-major for FDCT pass 1
+    // Step 1: vtrnq_s16 on pairs (swap within 2×2 blocks)
+    let t01: int16x8x2_t = vtrnq_s16(row0, row1);
+    let t23: int16x8x2_t = vtrnq_s16(row2, row3);
+    let t45: int16x8x2_t = vtrnq_s16(row4, row5);
+    let t67: int16x8x2_t = vtrnq_s16(row6, row7);
+
+    // Step 2: vtrnq_s32 on interleaved pairs (swap within 4×4 blocks)
+    let u0145_l: int32x4x2_t =
+        vtrnq_s32(vreinterpretq_s32_s16(t01.0), vreinterpretq_s32_s16(t45.0));
+    let u0145_h: int32x4x2_t =
+        vtrnq_s32(vreinterpretq_s32_s16(t01.1), vreinterpretq_s32_s16(t45.1));
+    let u2367_l: int32x4x2_t =
+        vtrnq_s32(vreinterpretq_s32_s16(t23.0), vreinterpretq_s32_s16(t67.0));
+    let u2367_h: int32x4x2_t =
+        vtrnq_s32(vreinterpretq_s32_s16(t23.1), vreinterpretq_s32_s16(t67.1));
+
+    // Step 3: vzipq_s32 to merge into final columns
+    let cols_04: int32x4x2_t = vzipq_s32(u0145_l.0, u2367_l.0);
+    let cols_15: int32x4x2_t = vzipq_s32(u0145_h.0, u2367_h.0);
+    let cols_26: int32x4x2_t = vzipq_s32(u0145_l.1, u2367_l.1);
+    let cols_37: int32x4x2_t = vzipq_s32(u0145_h.1, u2367_h.1);
+
+    let col0: int16x8_t = vreinterpretq_s16_s32(cols_04.0);
+    let col1: int16x8_t = vreinterpretq_s16_s32(cols_15.0);
+    let col2: int16x8_t = vreinterpretq_s16_s32(cols_26.0);
+    let col3: int16x8_t = vreinterpretq_s16_s32(cols_37.0);
+    let col4: int16x8_t = vreinterpretq_s16_s32(cols_04.1);
+    let col5: int16x8_t = vreinterpretq_s16_s32(cols_15.1);
+    let col6: int16x8_t = vreinterpretq_s16_s32(cols_26.1);
+    let col7: int16x8_t = vreinterpretq_s16_s32(cols_37.1);
+
+    // Run FDCT + quantize + zigzag using the transposed columns
+    let mut dct_output: [i16; 64] = [0i16; 64];
+    fdct::neon_fdct_from_cols(
+        col0,
+        col1,
+        col2,
+        col3,
+        col4,
+        col5,
+        col6,
+        col7,
+        dct_output.as_mut_ptr(),
+    );
+
+    let mut natural: [i16; 64] = [0i16; 64];
+    neon_quantize_recip(
+        dct_output.as_ptr(),
+        quant.divisors.as_ptr(),
+        quant.reciprocals.as_ptr(),
+        natural.as_mut_ptr(),
+    );
+    neon_zigzag_reorder(natural.as_ptr(), output.as_mut_ptr());
+}
+
 /// NEON TBL zigzag reorder: shuffles 64 i16 coefficients from natural order
 /// to zigzag scan order using byte-level table lookup instructions.
 ///
