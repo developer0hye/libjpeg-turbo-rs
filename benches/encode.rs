@@ -1,5 +1,5 @@
 use criterion::{black_box, criterion_group, criterion_main, Criterion};
-use libjpeg_turbo_rs::simd;
+use libjpeg_turbo_rs::simd::{self, QuantDivisors};
 
 fn bench_fdct_quantize_8x8(c: &mut Criterion) {
     let enc = simd::detect_encoder();
@@ -8,7 +8,16 @@ fn bench_fdct_quantize_8x8(c: &mut Criterion) {
     for i in 0..64 {
         input[i] = (i as i16 * 3) - 96;
     }
-    let quant = [128u16; 64]; // pre-scaled (16 * 8)
+    let divisors = [128u16; 64]; // pre-scaled (16 * 8)
+    let mut reciprocals = [0u16; 64];
+    for i in 0..64 {
+        let d = divisors[i] as u32;
+        reciprocals[i] = (((1u32 << 16) + d - 1) / d) as u16;
+    }
+    let quant = QuantDivisors {
+        divisors,
+        reciprocals,
+    };
     let mut output = [0i16; 64];
 
     c.bench_function("fdct_quantize_8x8", |b| {
