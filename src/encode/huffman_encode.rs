@@ -303,6 +303,73 @@ impl BitWriter {
         // SAFETY: buf[..pos] has been written by our emit methods.
         unsafe { std::slice::from_raw_parts(self.buf, self.pos) }
     }
+
+    /// Hoist bit-accumulator and buffer pointer to local variables.
+    ///
+    /// Matches C libjpeg-turbo's pattern of hoisting `put_buffer`, `free_bits`,
+    /// and `buffer` to register-allocated locals for the entire encode loop.
+    /// Call `end_block` to write them back.
+    ///
+    /// Returns (put_buffer, free_bits, buffer_pointer).
+    ///
+    /// # Safety
+    /// Caller must ensure the buffer has enough capacity for the block's output,
+    /// and must call `end_block` before any other BitWriter method.
+    #[inline(always)]
+    pub unsafe fn begin_block(&mut self, reserve: usize) -> (u64, i32, *mut u8) {
+        self.ensure_capacity(reserve);
+        (self.put_buffer, self.free_bits, self.buf.add(self.pos))
+    }
+
+    /// Write back hoisted local variables after encoding a block.
+    ///
+    /// # Safety
+    /// `buf_ptr` must be within the allocated buffer bounds.
+    #[inline(always)]
+    pub unsafe fn end_block(&mut self, put_buffer: u64, free_bits: i32, buf_ptr: *mut u8) {
+        self.put_buffer = put_buffer;
+        self.free_bits = free_bits;
+        self.pos = buf_ptr.offset_from(self.buf) as usize;
+    }
+}
+
+/// Inline bit insertion using hoisted local variables.
+///
+/// Equivalent to `BitWriter::put_bits` but operates on register-local `pb`/`fb`/`buf`
+/// instead of struct fields, avoiding store-reload on every flush.
+#[inline(always)]
+unsafe fn local_put_bits(pb: &mut u64, fb: &mut i32, buf: &mut *mut u8, code: u32, size: u8) {
+    *fb -= size as i32;
+    if *fb >= 0 {
+        *pb = (*pb << size) | (code as u64);
+    } else {
+        local_put_and_flush(pb, fb, buf, code, size);
+    }
+}
+
+/// Handle accumulator overflow with hoisted local variables.
+#[cold]
+#[inline(always)]
+unsafe fn local_put_and_flush(pb: &mut u64, fb: &mut i32, buf: &mut *mut u8, code: u32, size: u8) {
+    let overshoot: u32 = (-*fb) as u32;
+    let fits: u32 = size as u32 - overshoot;
+    *pb = (*pb << fits) | ((code as u64) >> overshoot);
+
+    // Flush 8 bytes with 0xFF byte stuffing
+    let has_ff: u64 = (*pb & 0x8080_8080_8080_8080) & !(*pb).wrapping_add(0x0101_0101_0101_0101);
+    if has_ff == 0 {
+        (*buf).cast::<u64>().write_unaligned((*pb).to_be());
+        *buf = (*buf).add(8);
+    } else {
+        for byte in (*pb).to_be_bytes() {
+            (*buf).write(byte);
+            (*buf).add(1).write(0x00);
+            *buf = (*buf).add(1 + (byte == 0xFF) as usize);
+        }
+    }
+
+    *fb += 64;
+    *pb = code as u64;
 }
 
 /// Huffman encoder for JPEG 8x8 blocks.
@@ -323,30 +390,47 @@ impl HuffmanEncoder {
         dc_table: &HuffTable,
         ac_table: &HuffTable,
     ) {
-        // --- DC coefficient (differential coding) ---
-        let dc: i16 = coeffs_zigzag[0];
-        let diff: i16 = dc - *prev_dc;
-        *prev_dc = dc;
-
-        let (magnitude_bits, category) = encode_dc_value(diff);
-        // Fuse Huffman code + magnitude into single put_bits call.
-        // Works for category=0 too: (huff_code << 0) | 0 = huff_code.
-        let huff_code: u32 = dc_table.ehufco[category as usize] as u32;
-        let huff_size: u8 = dc_table.ehufsi[category as usize];
-        let mag_masked: u32 = magnitude_bits as u32 & ((1u32 << category) - 1);
-        let combined: u32 = (huff_code << category) | mag_masked;
-        writer.put_bits(combined, huff_size + category);
-
-        // --- AC coefficients ---
         #[cfg(target_arch = "aarch64")]
         {
+            // Hoist put_buffer/free_bits/buf to registers for entire block.
+            // 512 bytes worst-case: DC (4) + 63 AC × max 26 bits ≈ 205 bytes + stuffing.
             // SAFETY: NEON is mandatory on aarch64 (ARMv8).
-            unsafe { encode_ac_neon(writer, coeffs_zigzag, ac_table) };
+            unsafe {
+                let (mut pb, mut fb, mut buf) = writer.begin_block(512);
+
+                // --- DC coefficient (differential coding) ---
+                let dc: i16 = coeffs_zigzag[0];
+                let diff: i16 = dc - *prev_dc;
+                *prev_dc = dc;
+
+                let (magnitude_bits, category) = encode_dc_value(diff);
+                let huff_code: u32 = dc_table.ehufco[category as usize] as u32;
+                let huff_size: u8 = dc_table.ehufsi[category as usize];
+                let mag_masked: u32 = magnitude_bits as u32 & ((1u32 << category) - 1);
+                let combined: u32 = (huff_code << category) | mag_masked;
+                local_put_bits(&mut pb, &mut fb, &mut buf, combined, huff_size + category);
+
+                // --- AC coefficients ---
+                encode_ac_neon_local(&mut pb, &mut fb, &mut buf, coeffs_zigzag, ac_table);
+
+                writer.end_block(pb, fb, buf);
+            };
             return;
         }
 
         #[cfg(not(target_arch = "aarch64"))]
         {
+            // --- DC coefficient (differential coding) ---
+            let dc: i16 = coeffs_zigzag[0];
+            let diff: i16 = dc - *prev_dc;
+            *prev_dc = dc;
+
+            let (magnitude_bits, category) = encode_dc_value(diff);
+            let huff_code: u32 = dc_table.ehufco[category as usize] as u32;
+            let huff_size: u8 = dc_table.ehufsi[category as usize];
+            let mag_masked: u32 = magnitude_bits as u32 & ((1u32 << category) - 1);
+            let combined: u32 = (huff_code << category) | mag_masked;
+            writer.put_bits(combined, huff_size + category);
             encode_ac_scalar(writer, coeffs_zigzag, ac_table);
         }
     }
@@ -414,18 +498,25 @@ fn encode_ac_scalar(writer: &mut BitWriter, coeffs_zigzag: &[i16; 64], ac_table:
     }
 }
 
-/// NEON-accelerated AC coefficient encoding.
+/// NEON-accelerated AC coefficient encoding using hoisted local variables.
 ///
 /// Pre-computes nbits (category) and diff (magnitude) arrays for all 64
 /// coefficients using vectorized CLZ and XOR, builds the non-zero bitmap
-/// with NEON compare+narrow+pairwise-add, then runs the same Huffman loop
-/// reading from pre-computed arrays. Matches C libjpeg-turbo's jchuff-neon.c.
+/// with NEON compare+narrow+pairwise-add, then runs the Huffman loop using
+/// register-local `pb`/`fb`/`buf` (matching C libjpeg-turbo's jchuff-neon.c).
 ///
 /// # Safety
-/// Requires aarch64 NEON (mandatory on ARMv8).
+/// Requires aarch64 NEON (mandatory on ARMv8). `pb`, `fb`, `buf` must be
+/// valid hoisted state from `BitWriter::begin_block`.
 #[cfg(target_arch = "aarch64")]
 #[target_feature(enable = "neon")]
-unsafe fn encode_ac_neon(writer: &mut BitWriter, coeffs_zigzag: &[i16; 64], ac_table: &HuffTable) {
+unsafe fn encode_ac_neon_local(
+    pb: &mut u64,
+    fb: &mut i32,
+    buf: &mut *mut u8,
+    coeffs_zigzag: &[i16; 64],
+    ac_table: &HuffTable,
+) {
     use std::arch::aarch64::*;
 
     let mut block_nbits = [0u8; 64];
@@ -449,9 +540,7 @@ unsafe fn encode_ac_neon(writer: &mut BitWriter, coeffs_zigzag: &[i16; 64], ac_t
 
         // Pre-masked diff: for negative coefficients, XOR abs with
         // a mask that has only the low nbits bits set.
-        // sign = 0xFFFF for negative, 0x0000 for non-negative
         let sign: uint16x8_t = vreinterpretq_u16_s16(vshrq_n_s16::<15>(row));
-        // mask = sign >> lz = low (16-lz) = low (nbits) bits set for negative
         let mask: uint16x8_t = vshlq_u16(sign, vnegq_s16(lz));
         let diff: uint16x8_t = veorq_u16(vreinterpretq_u16_s16(abs_row), mask);
         vst1q_u16(block_diff.as_mut_ptr().add(offset), diff);
@@ -468,7 +557,13 @@ unsafe fn encode_ac_neon(writer: &mut BitWriter, coeffs_zigzag: &[i16; 64], ac_t
     bitmap <<= 1;
 
     if bitmap == 0 {
-        writer.put_bits(ac_table.ehufco[0x00] as u32, ac_table.ehufsi[0x00]);
+        local_put_bits(
+            pb,
+            fb,
+            buf,
+            ac_table.ehufco[0x00] as u32,
+            ac_table.ehufsi[0x00],
+        );
         return;
     }
 
@@ -483,7 +578,13 @@ unsafe fn encode_ac_neon(writer: &mut BitWriter, coeffs_zigzag: &[i16; 64], ac_t
 
         let mut run: u32 = lz;
         while run >= 16 {
-            writer.put_bits(ac_table.ehufco[0xF0] as u32, ac_table.ehufsi[0xF0]);
+            local_put_bits(
+                pb,
+                fb,
+                buf,
+                ac_table.ehufco[0xF0] as u32,
+                ac_table.ehufsi[0xF0],
+            );
             run -= 16;
         }
 
@@ -491,14 +592,20 @@ unsafe fn encode_ac_neon(writer: &mut BitWriter, coeffs_zigzag: &[i16; 64], ac_t
         let huff_code: u32 = ac_table.ehufco[symbol] as u32;
         let huff_size: u8 = ac_table.ehufsi[symbol];
         let combined: u32 = (huff_code << nbits) | diff;
-        writer.put_bits(combined, huff_size + nbits);
+        local_put_bits(pb, fb, buf, combined, huff_size + nbits);
 
         pos += 1;
         bitmap <<= 1;
     }
 
     if pos <= 63 {
-        writer.put_bits(ac_table.ehufco[0x00] as u32, ac_table.ehufsi[0x00]);
+        local_put_bits(
+            pb,
+            fb,
+            buf,
+            ac_table.ehufco[0x00] as u32,
+            ac_table.ehufsi[0x00],
+        );
     }
 }
 
