@@ -163,26 +163,33 @@ impl BitWriter {
     }
 
     /// Write `size` bits from `code` (MSB-first). Accepts up to 16 bits.
+    /// Masks code to size bits before writing.
     #[inline]
     pub fn write_bits(&mut self, code: u16, size: u8) {
         debug_assert!(size > 0 && size <= 16);
-        self.put_bits(code as u32, size);
+        let masked: u32 = code as u32 & ((1u32 << size) - 1);
+        self.put_bits(masked, size);
     }
 
-    /// Write up to 32 bits into the accumulator.
+    /// Write up to 32 pre-masked bits into the accumulator.
     ///
     /// Uses C libjpeg-turbo-style left-shift insertion: no per-call reserve,
     /// no per-call drain. Bytes are only emitted when the 64-bit buffer fills.
+    ///
+    /// `code` must have no set bits above position `size` (all callers
+    /// pre-mask via Huffman table lookup or magnitude masking).
     #[inline(always)]
     pub fn put_bits(&mut self, code: u32, size: u8) {
         debug_assert!(size > 0 && size <= 32);
-        // Mask to `size` bits — callers may pass unmasked magnitude values
-        let masked: u64 = code as u64 & ((1u64 << size) - 1);
+        debug_assert!(
+            size == 32 || code < (1u32 << size),
+            "code {code} exceeds {size} bits"
+        );
         self.free_bits -= size as i32;
         if self.free_bits >= 0 {
-            self.put_buffer = (self.put_buffer << size) | masked;
+            self.put_buffer = (self.put_buffer << size) | (code as u64);
         } else {
-            self.put_and_flush(masked as u32, size);
+            self.put_and_flush(code, size);
         }
     }
 
@@ -278,52 +285,17 @@ impl HuffmanEncoder {
         let combined: u32 = (huff_code << category) | mag_masked;
         writer.put_bits(combined, huff_size + category);
 
-        // --- AC coefficients: bitmap zero-skip ---
-        // Build a u64 bitmap of non-zero AC positions. Bit (64-k) is set when
-        // coeffs_zigzag[k] != 0 for k=1..63. leading_zeros() then jumps
-        // directly to the next non-zero coefficient, eliminating the
-        // per-coefficient `if ac == 0 { continue }` branch.
-        let mut bitmap: u64 = 0;
-        for k in 1u32..64 {
-            if coeffs_zigzag[k as usize] != 0 {
-                bitmap |= 1u64 << (64 - k);
-            }
-        }
-
-        if bitmap == 0 {
-            writer.put_bits(ac_table.ehufco[0x00] as u32, ac_table.ehufsi[0x00]);
+        // --- AC coefficients ---
+        #[cfg(target_arch = "aarch64")]
+        {
+            // SAFETY: NEON is mandatory on aarch64 (ARMv8).
+            unsafe { encode_ac_neon(writer, coeffs_zigzag, ac_table) };
             return;
         }
 
-        let mut pos: u32 = 1;
-        while bitmap != 0 {
-            let lz: u32 = bitmap.leading_zeros();
-            pos += lz;
-            bitmap <<= lz;
-
-            // Emit ZRL (16 zeros) symbols for runs >= 16
-            let mut run: u32 = lz;
-            while run >= 16 {
-                writer.put_bits(ac_table.ehufco[0xF0] as u32, ac_table.ehufsi[0xF0]);
-                run -= 16;
-            }
-
-            let ac: i16 = coeffs_zigzag[pos as usize];
-            let (magnitude_bits, nbits) = encode_ac_value(ac);
-            let symbol: usize = ((run as usize) << 4) | (nbits as usize);
-            let huff_code: u32 = ac_table.ehufco[symbol] as u32;
-            let huff_size: u8 = ac_table.ehufsi[symbol];
-            let mag_masked: u32 = magnitude_bits as u32 & ((1u32 << nbits) - 1);
-            let combined: u32 = (huff_code << nbits) | mag_masked;
-            writer.put_bits(combined, huff_size + nbits);
-
-            pos += 1;
-            bitmap <<= 1;
-        }
-
-        // Emit EOB if there are trailing zeros after the last non-zero coefficient
-        if pos <= 63 {
-            writer.put_bits(ac_table.ehufco[0x00] as u32, ac_table.ehufsi[0x00]);
+        #[cfg(not(target_arch = "aarch64"))]
+        {
+            encode_ac_scalar(writer, coeffs_zigzag, ac_table);
         }
     }
 
@@ -339,6 +311,142 @@ impl HuffmanEncoder {
         if category > 0 {
             writer.write_bits(magnitude_bits, category);
         }
+    }
+}
+
+/// Scalar AC coefficient encoding with bitmap zero-skip.
+///
+/// Builds a u64 bitmap of non-zero AC positions, then iterates using
+/// leading_zeros() to jump between non-zero coefficients.
+#[cfg(not(target_arch = "aarch64"))]
+fn encode_ac_scalar(writer: &mut BitWriter, coeffs_zigzag: &[i16; 64], ac_table: &HuffTable) {
+    let mut bitmap: u64 = 0;
+    for k in 1u32..64 {
+        if coeffs_zigzag[k as usize] != 0 {
+            bitmap |= 1u64 << (64 - k);
+        }
+    }
+
+    if bitmap == 0 {
+        writer.put_bits(ac_table.ehufco[0x00] as u32, ac_table.ehufsi[0x00]);
+        return;
+    }
+
+    let mut pos: u32 = 1;
+    while bitmap != 0 {
+        let lz: u32 = bitmap.leading_zeros();
+        pos += lz;
+        bitmap <<= lz;
+
+        let mut run: u32 = lz;
+        while run >= 16 {
+            writer.put_bits(ac_table.ehufco[0xF0] as u32, ac_table.ehufsi[0xF0]);
+            run -= 16;
+        }
+
+        let ac: i16 = coeffs_zigzag[pos as usize];
+        let (magnitude_bits, nbits) = encode_ac_value(ac);
+        let symbol: usize = ((run as usize) << 4) | (nbits as usize);
+        let huff_code: u32 = ac_table.ehufco[symbol] as u32;
+        let huff_size: u8 = ac_table.ehufsi[symbol];
+        let mag_masked: u32 = magnitude_bits as u32 & ((1u32 << nbits) - 1);
+        let combined: u32 = (huff_code << nbits) | mag_masked;
+        writer.put_bits(combined, huff_size + nbits);
+
+        pos += 1;
+        bitmap <<= 1;
+    }
+
+    if pos <= 63 {
+        writer.put_bits(ac_table.ehufco[0x00] as u32, ac_table.ehufsi[0x00]);
+    }
+}
+
+/// NEON-accelerated AC coefficient encoding.
+///
+/// Pre-computes nbits (category) and diff (magnitude) arrays for all 64
+/// coefficients using vectorized CLZ and XOR, builds the non-zero bitmap
+/// with NEON compare+narrow+pairwise-add, then runs the same Huffman loop
+/// reading from pre-computed arrays. Matches C libjpeg-turbo's jchuff-neon.c.
+///
+/// # Safety
+/// Requires aarch64 NEON (mandatory on ARMv8).
+#[cfg(target_arch = "aarch64")]
+#[target_feature(enable = "neon")]
+unsafe fn encode_ac_neon(writer: &mut BitWriter, coeffs_zigzag: &[i16; 64], ac_table: &HuffTable) {
+    use std::arch::aarch64::*;
+
+    let mut block_nbits = [0u8; 64];
+    let mut block_diff = [0u16; 64];
+    let mut bitmap: u64 = 0;
+
+    let sixteen: int16x8_t = vdupq_n_s16(16);
+    let zero: int16x8_t = vdupq_n_s16(0);
+    let weights: uint8x8_t = vcreate_u8(0x0102_0408_1020_4080_u64);
+
+    for chunk in 0..8u32 {
+        let offset: usize = (chunk * 8) as usize;
+        let row: int16x8_t = vld1q_s16(coeffs_zigzag.as_ptr().add(offset));
+
+        // abs + CLZ → nbits = 16 - leading_zeros(abs)
+        let abs_row: int16x8_t = vabsq_s16(row);
+        let lz: int16x8_t = vclzq_s16(abs_row);
+        let nbits_s16: int16x8_t = vsubq_s16(sixteen, lz);
+        let nbits_u8: uint8x8_t = vmovn_u16(vreinterpretq_u16_s16(nbits_s16));
+        vst1_u8(block_nbits.as_mut_ptr().add(offset), nbits_u8);
+
+        // Pre-masked diff: for negative coefficients, XOR abs with
+        // a mask that has only the low nbits bits set.
+        // sign = 0xFFFF for negative, 0x0000 for non-negative
+        let sign: uint16x8_t = vreinterpretq_u16_s16(vshrq_n_s16::<15>(row));
+        // mask = sign >> lz = low (16-lz) = low (nbits) bits set for negative
+        let mask: uint16x8_t = vshlq_u16(sign, vnegq_s16(lz));
+        let diff: uint16x8_t = veorq_u16(vreinterpretq_u16_s16(abs_row), mask);
+        vst1q_u16(block_diff.as_mut_ptr().add(offset), diff);
+
+        // Non-zero bitmap: compare, narrow to u8, AND with bit weights, sum
+        let ne: uint16x8_t = vmvnq_u16(vceqq_s16(row, zero));
+        let narrow: uint8x8_t = vmovn_u16(ne);
+        let masked: uint8x8_t = vand_u8(narrow, weights);
+        let byte: u8 = vaddv_u8(masked);
+        bitmap |= (byte as u64) << (56 - chunk * 8);
+    }
+
+    // Shift left 1 to remove DC bit (we only care about AC positions 1..63)
+    bitmap <<= 1;
+
+    if bitmap == 0 {
+        writer.put_bits(ac_table.ehufco[0x00] as u32, ac_table.ehufsi[0x00]);
+        return;
+    }
+
+    let mut pos: u32 = 1;
+    while bitmap != 0 {
+        let lz: u32 = bitmap.leading_zeros();
+        pos += lz;
+        bitmap <<= lz;
+
+        let nbits: u8 = *block_nbits.get_unchecked(pos as usize);
+        let diff: u32 = *block_diff.get_unchecked(pos as usize) as u32;
+
+        let mut run: u32 = lz;
+        while run >= 16 {
+            writer.put_bits(ac_table.ehufco[0xF0] as u32, ac_table.ehufsi[0xF0]);
+            run -= 16;
+        }
+
+        let symbol: usize = ((run as usize) << 4) | (nbits as usize);
+        let huff_code: u32 = ac_table.ehufco[symbol] as u32;
+        let huff_size: u8 = ac_table.ehufsi[symbol];
+        let combined: u32 = (huff_code << nbits) | diff;
+        writer.put_bits(combined, huff_size + nbits);
+
+        pos += 1;
+        bitmap <<= 1;
+    }
+
+    if pos <= 63 {
+        writer.put_bits(ac_table.ehufco[0x00] as u32, ac_table.ehufsi[0x00]);
     }
 }
 
@@ -360,6 +468,7 @@ fn encode_dc_value(diff: i16) -> (u16, u8) {
 ///
 /// Returns (magnitude_bits, size) where size is 1..10.
 /// Only called for non-zero values in the bitmap zero-skip loop.
+#[cfg(not(target_arch = "aarch64"))]
 #[inline(always)]
 fn encode_ac_value(value: i16) -> (u16, u8) {
     let abs_val: u16 = value.unsigned_abs();
