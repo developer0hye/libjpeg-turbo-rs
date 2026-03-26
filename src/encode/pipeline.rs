@@ -3226,12 +3226,46 @@ fn extract_block(
     block_y: usize,
     block: &mut [i16; 64],
 ) {
+    // NEON fast path for interior blocks (no bounds checking needed)
+    #[cfg(target_arch = "aarch64")]
+    {
+        if block_x + 8 <= plane_width && block_y + 8 <= plane_height {
+            extract_block_neon(plane, plane_width, block_x, block_y, block);
+            return;
+        }
+    }
+
+    // Scalar fallback for border blocks
     for row in 0..8 {
-        let src_y = (block_y + row).min(plane_height - 1);
+        let src_y: usize = (block_y + row).min(plane_height - 1);
         for col in 0..8 {
-            let src_x = (block_x + col).min(plane_width - 1);
-            // Level-shift: subtract 128
+            let src_x: usize = (block_x + col).min(plane_width - 1);
             block[row * 8 + col] = plane[src_y * plane_width + src_x] as i16 - 128;
+        }
+    }
+}
+
+/// NEON-accelerated block extraction with level-shift for interior blocks.
+///
+/// Loads 8 bytes per row, widens to i16, subtracts 128. No bounds checking.
+#[cfg(target_arch = "aarch64")]
+fn extract_block_neon(
+    plane: &[u8],
+    plane_width: usize,
+    block_x: usize,
+    block_y: usize,
+    block: &mut [i16; 64],
+) {
+    use std::arch::aarch64::*;
+    unsafe {
+        let level_shift: int16x8_t = vdupq_n_s16(128);
+
+        for row in 0..8 {
+            let src_ptr: *const u8 = plane.as_ptr().add((block_y + row) * plane_width + block_x);
+            let pixels: uint8x8_t = vld1_u8(src_ptr);
+            let wide: int16x8_t = vreinterpretq_s16_u16(vmovl_u8(pixels));
+            let shifted: int16x8_t = vsubq_s16(wide, level_shift);
+            vst1q_s16(block.as_mut_ptr().add(row * 8), shifted);
         }
     }
 }
@@ -3250,6 +3284,24 @@ fn downsample_chroma_block(
     v_factor: usize,
     block: &mut [i16; 64],
 ) {
+    // NEON fast path for interior blocks (no bounds checking needed)
+    #[cfg(target_arch = "aarch64")]
+    {
+        let src_w: usize = 8 * h_factor;
+        let src_h: usize = 8 * v_factor;
+        if block_x + src_w <= plane_width && block_y + src_h <= plane_height {
+            if h_factor == 2 && v_factor == 2 {
+                downsample_chroma_block_h2v2_neon(plane, plane_width, block_x, block_y, block);
+                return;
+            }
+            if h_factor == 2 && v_factor == 1 {
+                downsample_chroma_block_h2v1_neon(plane, plane_width, block_x, block_y, block);
+                return;
+            }
+        }
+    }
+
+    // Scalar fallback for border blocks and non-standard factors
     for row in 0..8 {
         for col in 0..8 {
             let mut sum: u32 = 0;
@@ -3262,6 +3314,78 @@ fn downsample_chroma_block(
             }
             let avg = (sum + (h_factor * v_factor / 2) as u32) / (h_factor * v_factor) as u32;
             block[row * 8 + col] = avg as i16 - 128;
+        }
+    }
+}
+
+/// NEON-accelerated H2V2 downsample + level-shift for interior chroma blocks.
+///
+/// Processes 16x16 source pixels → 8x8 output using vpadalq_u8 pairwise add.
+/// Each 2x2 block is averaged and level-shifted (-128) in NEON registers.
+#[cfg(target_arch = "aarch64")]
+fn downsample_chroma_block_h2v2_neon(
+    plane: &[u8],
+    plane_width: usize,
+    block_x: usize,
+    block_y: usize,
+    block: &mut [i16; 64],
+) {
+    use std::arch::aarch64::*;
+    unsafe {
+        // Rounding bias of 2 for divide-by-4 (matches scalar: (sum + 2) / 4)
+        let bias: uint16x8_t = vdupq_n_u16(2);
+        let level_shift: int16x8_t = vdupq_n_s16(128);
+
+        for row in 0..8 {
+            let sy: usize = block_y + row * 2;
+            let r0_ptr: *const u8 = plane.as_ptr().add(sy * plane_width + block_x);
+            let r1_ptr: *const u8 = plane.as_ptr().add((sy + 1) * plane_width + block_x);
+
+            let r0: uint8x16_t = vld1q_u8(r0_ptr);
+            let r1: uint8x16_t = vld1q_u8(r1_ptr);
+
+            // Pairwise-add adjacent u8 pairs from both rows into u16 sums
+            let mut sum: uint16x8_t = vpadalq_u8(bias, r0);
+            sum = vpadalq_u8(sum, r1);
+
+            // Divide by 4 and narrow to u8
+            let avg_u8: uint8x8_t = vshrn_n_u16(sum, 2);
+
+            // Widen to i16 and level-shift (-128)
+            let avg_i16: int16x8_t = vreinterpretq_s16_u16(vmovl_u8(avg_u8));
+            let shifted: int16x8_t = vsubq_s16(avg_i16, level_shift);
+
+            vst1q_s16(block.as_mut_ptr().add(row * 8), shifted);
+        }
+    }
+}
+
+/// NEON-accelerated H2V1 downsample + level-shift for interior chroma blocks.
+#[cfg(target_arch = "aarch64")]
+fn downsample_chroma_block_h2v1_neon(
+    plane: &[u8],
+    plane_width: usize,
+    block_x: usize,
+    block_y: usize,
+    block: &mut [i16; 64],
+) {
+    use std::arch::aarch64::*;
+    unsafe {
+        // Rounding bias of 1 for divide-by-2 (matches scalar: (sum + 1) / 2)
+        let bias: uint16x8_t = vdupq_n_u16(1);
+        let level_shift: int16x8_t = vdupq_n_s16(128);
+
+        for row in 0..8 {
+            let sy: usize = block_y + row;
+            let r_ptr: *const u8 = plane.as_ptr().add(sy * plane_width + block_x);
+
+            let r: uint8x16_t = vld1q_u8(r_ptr);
+            let sum: uint16x8_t = vpadalq_u8(bias, r);
+            let avg_u8: uint8x8_t = vshrn_n_u16(sum, 1);
+            let avg_i16: int16x8_t = vreinterpretq_s16_u16(vmovl_u8(avg_u8));
+            let shifted: int16x8_t = vsubq_s16(avg_i16, level_shift);
+
+            vst1q_s16(block.as_mut_ptr().add(row * 8), shifted);
         }
     }
 }
