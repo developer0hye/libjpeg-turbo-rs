@@ -66,9 +66,17 @@ pub fn build_huff_table(bits: &[u8; 17], values: &[u8]) -> HuffTable {
 /// packed via left-shift insertion (LSB → MSB) and flushed 8 bytes at a time
 /// when the accumulator fills. The flush uses a bitmask to detect 0xFF bytes,
 /// enabling a branch-free fast path when no byte stuffing is needed.
+///
+/// Uses a raw pointer + position instead of Vec for the output buffer,
+/// matching C libjpeg-turbo's raw buffer approach. This avoids Vec::reserve()
+/// and Vec::set_len() overhead on every flush.
 pub struct BitWriter {
-    /// Accumulated output bytes.
-    buffer: Vec<u8>,
+    /// Raw output buffer pointer (start of allocation).
+    buf: *mut u8,
+    /// Current write position in the buffer.
+    pos: usize,
+    /// Total allocated capacity in bytes.
+    cap: usize,
     /// 64-bit accumulator — new bits shift in from the right.
     /// When flushed, bytes are extracted MSB-first (earliest bits at top).
     put_buffer: u64,
@@ -77,28 +85,67 @@ pub struct BitWriter {
     free_bits: i32,
 }
 
+// SAFETY: BitWriter owns its buffer exclusively — no aliasing, no Send/Sync
+// constraints from the raw pointer beyond what a Vec<u8> would have.
+unsafe impl Send for BitWriter {}
+unsafe impl Sync for BitWriter {}
+
+impl Drop for BitWriter {
+    fn drop(&mut self) {
+        if self.cap > 0 {
+            // Reconstruct a Vec to handle deallocation correctly.
+            // SAFETY: ptr/cap came from Vec::into_raw_parts of a Vec<u8>.
+            unsafe {
+                let _ = Vec::from_raw_parts(self.buf, 0, self.cap);
+            }
+        }
+    }
+}
+
 impl BitWriter {
     /// Create a new writer with the given initial byte capacity.
     pub fn new(capacity: usize) -> Self {
+        let alloc_cap: usize = capacity.saturating_mul(2).max(1024);
+        let mut v: Vec<u8> = Vec::with_capacity(alloc_cap);
+        let ptr: *mut u8 = v.as_mut_ptr();
+        let cap: usize = v.capacity();
+        std::mem::forget(v);
         Self {
-            buffer: Vec::with_capacity(capacity.saturating_mul(2).max(1024)),
+            buf: ptr,
+            pos: 0,
+            cap,
             put_buffer: 0,
             free_bits: 64,
+        }
+    }
+
+    /// Ensure at least `additional` bytes of spare capacity, growing if needed.
+    fn ensure_capacity(&mut self, additional: usize) {
+        if self.pos + additional > self.cap {
+            // Reconstruct Vec, push to trigger growth, then re-extract.
+            let new_cap: usize = (self.cap * 2).max(self.pos + additional);
+            // SAFETY: ptr/pos/cap are consistent from our allocation.
+            unsafe {
+                let mut v: Vec<u8> = Vec::from_raw_parts(self.buf, self.pos, self.cap);
+                v.reserve(new_cap - self.pos);
+                self.buf = v.as_mut_ptr();
+                self.cap = v.capacity();
+                std::mem::forget(v);
+            }
         }
     }
 
     /// Emit one byte with branchless JPEG 0xFF byte stuffing.
     ///
     /// # Safety
-    /// Caller must ensure `self.buffer` has at least 2 bytes of spare capacity.
+    /// Caller must ensure at least 2 bytes of spare capacity remain.
     #[inline(always)]
     unsafe fn emit_byte_unchecked(&mut self, byte: u8) {
-        let len: usize = self.buffer.len();
-        let ptr: *mut u8 = self.buffer.as_mut_ptr().add(len);
+        let ptr: *mut u8 = self.buf.add(self.pos);
         ptr.write(byte);
         ptr.add(1).write(0x00);
         let stuffed: usize = (byte == 0xFF) as usize;
-        self.buffer.set_len(len + 1 + stuffed);
+        self.pos += 1 + stuffed;
     }
 
     /// Flush all 64 bits from the accumulator to output.
@@ -117,10 +164,9 @@ impl BitWriter {
         if has_ff == 0 {
             // Fast path: no 0xFF bytes, write 8 bytes in one shot
             unsafe {
-                let len: usize = self.buffer.len();
-                let ptr: *mut u8 = self.buffer.as_mut_ptr().add(len);
+                let ptr: *mut u8 = self.buf.add(self.pos);
                 ptr.cast::<u64>().write_unaligned(pb.to_be());
-                self.buffer.set_len(len + 8);
+                self.pos += 8;
             }
         } else {
             // Slow path: at least one 0xFF byte needs stuffing
@@ -145,7 +191,7 @@ impl BitWriter {
         let fits: u32 = size as u32 - overshoot;
         self.put_buffer = (self.put_buffer << fits) | ((code as u64) >> overshoot);
         // 8 data bytes + up to 8 stuffing bytes
-        self.buffer.reserve(16);
+        self.ensure_capacity(16);
         self.flush_buffer();
         self.free_bits += 64;
         // Remaining bits sit at the bottom of code; upper garbage bits will be
@@ -156,9 +202,9 @@ impl BitWriter {
     /// Emit one byte with JPEG 0xFF byte stuffing (safe version for non-hot paths).
     #[inline(always)]
     fn emit_byte(&mut self, byte: u8) {
-        self.buffer.push(byte);
-        if byte == 0xFF {
-            self.buffer.push(0x00);
+        self.ensure_capacity(2);
+        unsafe {
+            self.emit_byte_unchecked(byte);
         }
     }
 
@@ -236,8 +282,13 @@ impl BitWriter {
     ///
     /// `index` is masked to 0..7. No byte stuffing is applied to the marker bytes.
     pub fn write_restart_marker(&mut self, index: u8) {
-        self.buffer.push(0xFF);
-        self.buffer.push(0xD0 + (index & 7));
+        self.ensure_capacity(2);
+        unsafe {
+            let ptr: *mut u8 = self.buf.add(self.pos);
+            ptr.write(0xFF);
+            ptr.add(1).write(0xD0 + (index & 7));
+            self.pos += 2;
+        }
     }
 
     /// Flush the bit buffer, padding remaining bits with 1s.
@@ -249,7 +300,8 @@ impl BitWriter {
 
     /// Get a reference to the accumulated output bytes.
     pub fn data(&self) -> &[u8] {
-        &self.buffer
+        // SAFETY: buf[..pos] has been written by our emit methods.
+        unsafe { std::slice::from_raw_parts(self.buf, self.pos) }
     }
 }
 
