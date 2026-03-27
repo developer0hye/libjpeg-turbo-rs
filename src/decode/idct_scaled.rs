@@ -6,7 +6,6 @@
 /// - idct_1x1: 1x1 output (1/8 scale)
 ///
 /// Ported from libjpeg-turbo's jidctred.c.
-
 // Fixed-point constants (CONST_BITS = 13)
 const FIX_0_211164243: i32 = 1730;
 const FIX_0_509795579: i32 = 4176;
@@ -56,8 +55,8 @@ pub fn idct_4x4(coeffs: &[i16; 64], quant: &[u16; 64], output: &mut [u8; 16]) {
         if c(1) == 0 && c(2) == 0 && c(3) == 0 && c(5) == 0 && c(6) == 0 && c(7) == 0 {
             let dcval = c(0) << PASS1_BITS;
             let ws_col = if col < 4 { col } else { col - 1 };
-            workspace[0 * 7 + ws_col] = dcval;
-            workspace[1 * 7 + ws_col] = dcval;
+            workspace[ws_col] = dcval;
+            workspace[7 + ws_col] = dcval;
             workspace[2 * 7 + ws_col] = dcval;
             workspace[3 * 7 + ws_col] = dcval;
             continue;
@@ -86,9 +85,9 @@ pub fn idct_4x4(coeffs: &[i16; 64], quant: &[u16; 64], output: &mut [u8; 16]) {
             + z4 * FIX_2_562915447;
 
         let ws_col = if col < 4 { col } else { col - 1 };
-        workspace[0 * 7 + ws_col] = descale(tmp10 + tmp2, CONST_BITS - PASS1_BITS + 1);
+        workspace[ws_col] = descale(tmp10 + tmp2, CONST_BITS - PASS1_BITS + 1);
         workspace[3 * 7 + ws_col] = descale(tmp10 - tmp2, CONST_BITS - PASS1_BITS + 1);
-        workspace[1 * 7 + ws_col] = descale(tmp12 + tmp0, CONST_BITS - PASS1_BITS + 1);
+        workspace[7 + ws_col] = descale(tmp12 + tmp0, CONST_BITS - PASS1_BITS + 1);
         workspace[2 * 7 + ws_col] = descale(tmp12 - tmp0, CONST_BITS - PASS1_BITS + 1);
     }
 
@@ -160,8 +159,8 @@ pub fn idct_2x2(coeffs: &[i16; 64], quant: &[u16; 64], output: &mut [u8; 4]) {
                 7 => 4,
                 _ => unreachable!(),
             };
-            workspace[0 * 5 + ws_col] = dcval;
-            workspace[1 * 5 + ws_col] = dcval;
+            workspace[ws_col] = dcval;
+            workspace[5 + ws_col] = dcval;
             continue;
         }
 
@@ -182,8 +181,8 @@ pub fn idct_2x2(coeffs: &[i16; 64], quant: &[u16; 64], output: &mut [u8; 4]) {
             7 => 4,
             _ => unreachable!(),
         };
-        workspace[0 * 5 + ws_col] = descale(tmp10 + tmp0, CONST_BITS - PASS1_BITS + 2);
-        workspace[1 * 5 + ws_col] = descale(tmp10 - tmp0, CONST_BITS - PASS1_BITS + 2);
+        workspace[ws_col] = descale(tmp10 + tmp0, CONST_BITS - PASS1_BITS + 2);
+        workspace[5 + ws_col] = descale(tmp10 - tmp0, CONST_BITS - PASS1_BITS + 2);
     }
 
     // Pass 2: rows

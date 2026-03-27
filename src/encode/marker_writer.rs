@@ -57,8 +57,7 @@ pub fn write_dqt(buf: &mut Vec<u8>, table_id: u8, table: &[u16; 64]) {
     buf.push((precision << 4) | (table_id & 0x0F));
 
     // Write table values in zigzag order
-    for zigzag_pos in 0..64 {
-        let natural_idx = ZIGZAG_ORDER[zigzag_pos];
+    for &natural_idx in &ZIGZAG_ORDER[..64] {
         if is_16bit {
             buf.extend_from_slice(&table[natural_idx].to_be_bytes());
         } else {
@@ -253,14 +252,13 @@ pub fn write_dac(
     let length: u16 = 2 + (num_entries as u16 * 2);
     buf.extend_from_slice(&length.to_be_bytes());
 
-    for i in 0..num_dc {
+    for (i, &(l, u)) in dc_params[..num_dc].iter().enumerate() {
         buf.push(i as u8); // Tc=0 (DC), Tb=i
-        let (l, u) = dc_params[i];
         buf.push((u << 4) | l);
     }
-    for i in 0..num_ac {
+    for (i, &val) in ac_params[..num_ac].iter().enumerate() {
         buf.push(0x10 | i as u8); // Tc=1 (AC), Tb=i
-        buf.push(ac_params[i]);
+        buf.push(val);
     }
 }
 
@@ -281,7 +279,7 @@ pub fn write_app2_icc(buf: &mut Vec<u8>, profile: &[u8]) {
     const ICC_OVERHEAD: usize = 14; // "ICC_PROFILE\0" + seq_no + num_markers
     const MAX_DATA: usize = 65533 - ICC_OVERHEAD; // 65519
 
-    let num_markers = (profile.len() + MAX_DATA - 1) / MAX_DATA;
+    let num_markers = profile.len().div_ceil(MAX_DATA);
     let mut offset = 0;
 
     for seq in 1..=num_markers {
@@ -374,7 +372,7 @@ pub fn write_sos_lossless(
     buf.push(components.len() as u8);
     for &(id, dc_tbl) in components {
         buf.push(id);
-        buf.push((dc_tbl << 4) | 0); // DC table only, AC unused
+        buf.push(dc_tbl << 4); // DC table only, AC unused
     }
     buf.push(predictor); // Ss = predictor selection (1-7)
     buf.push(0); // Se = 0

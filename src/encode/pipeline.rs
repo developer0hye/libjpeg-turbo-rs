@@ -92,8 +92,8 @@ pub fn compress(
         }
     };
 
-    let mcus_x: usize = (width + mcu_w - 1) / mcu_w;
-    let mcus_y: usize = (height + mcu_h - 1) / mcu_h;
+    let mcus_x: usize = width.div_ceil(mcu_w);
+    let mcus_y: usize = height.div_ceil(mcu_h);
 
     // NEON fused FDCT+quantize for IsLow (the common case and only NEON-supported variant).
     // IsFast/Float fall back to scalar fdct_islow — matches public API behavior.
@@ -425,8 +425,8 @@ pub fn compress_custom_huffman(
         }
     };
 
-    let mcus_x = (width + mcu_w - 1) / mcu_w;
-    let mcus_y = (height + mcu_h - 1) / mcu_h;
+    let mcus_x = width.div_ceil(mcu_w);
+    let mcus_y = height.div_ceil(mcu_h);
 
     // Entropy encode all MCUs
     let mut bit_writer = BitWriter::new(width * height);
@@ -624,8 +624,8 @@ pub fn compress_custom_quant(
         }
     };
 
-    let mcus_x = (width + mcu_w - 1) / mcu_w;
-    let mcus_y = (height + mcu_h - 1) / mcu_h;
+    let mcus_x = width.div_ceil(mcu_w);
+    let mcus_y = height.div_ceil(mcu_h);
 
     // Entropy encode all MCUs
     let mut bit_writer = BitWriter::new(width * height);
@@ -838,8 +838,8 @@ pub fn compress_with_restart(
         }
     };
 
-    let mcus_x = (width + mcu_w - 1) / mcu_w;
-    let mcus_y = (height + mcu_h - 1) / mcu_h;
+    let mcus_x = width.div_ceil(mcu_w);
+    let mcus_y = height.div_ceil(mcu_h);
 
     // Entropy encode all MCUs with restart markers
     let mut bit_writer = BitWriter::new(width * height);
@@ -853,7 +853,7 @@ pub fn compress_with_restart(
     for mcu_row in 0..mcus_y {
         for mcu_col in 0..mcus_x {
             // Insert restart marker between MCU intervals (not before the first MCU)
-            if ri > 0 && mcu_count > 0 && mcu_count % ri == 0 {
+            if ri > 0 && mcu_count > 0 && mcu_count.is_multiple_of(ri) {
                 bit_writer.flush_restart();
                 bit_writer.write_restart_marker(rst_count);
                 rst_count = rst_count.wrapping_add(1);
@@ -997,6 +997,7 @@ pub fn compress_with_restart(
 /// Compress with optional ICC profile and EXIF metadata.
 ///
 /// Inserts APP1 (EXIF) and APP2 (ICC) markers after the APP0 JFIF marker.
+#[allow(clippy::too_many_arguments)]
 pub fn compress_with_metadata(
     pixels: &[u8],
     width: usize,
@@ -1123,8 +1124,8 @@ fn compress_cmyk(pixels: &[u8], width: usize, height: usize, quality: u8) -> Res
     }
 
     // MCU = 8x8 (all 1x1 sampling)
-    let mcus_x = (width + 7) / 8;
-    let mcus_y = (height + 7) / 8;
+    let mcus_x = width.div_ceil(8);
+    let mcus_y = height.div_ceil(8);
 
     let enc_simd = crate::simd::detect_encoder();
     let mut bit_writer = BitWriter::new(width * height);
@@ -1225,7 +1226,7 @@ pub fn compress_lossless_extended(
     predictor: u8,
     point_transform: u8,
 ) -> Result<Vec<u8>> {
-    if predictor < 1 || predictor > 7 {
+    if !(1..=7).contains(&predictor) {
         return Err(JpegError::Unsupported(format!(
             "lossless predictor must be 1-7, got {}",
             predictor
@@ -1272,6 +1273,7 @@ pub fn compress_lossless_extended(
 ///
 /// Uses the `predict` function from the decoder's lossless module to
 /// compute the predicted value, then returns the signed difference.
+#[allow(clippy::too_many_arguments)]
 fn lossless_diff(
     pixel: i32,
     x: usize,
@@ -1503,7 +1505,7 @@ pub fn compress_lossless_arithmetic(
     predictor: u8,
     point_transform: u8,
 ) -> Result<Vec<u8>> {
-    if predictor < 1 || predictor > 7 {
+    if !(1..=7).contains(&predictor) {
         return Err(JpegError::Unsupported(format!(
             "lossless predictor must be 1-7, got {}",
             predictor
@@ -1843,8 +1845,8 @@ fn compress_progressive_with_scans(
         }
     };
 
-    let mcus_x = (width + mcu_w - 1) / mcu_w;
-    let mcus_y = (height + mcu_h - 1) / mcu_h;
+    let mcus_x = width.div_ceil(mcu_w);
+    let mcus_y = height.div_ceil(mcu_h);
 
     let (h_samp, v_samp) = if is_grayscale {
         (1usize, 1usize)
@@ -2155,8 +2157,8 @@ pub fn compress_arithmetic(
         }
     };
 
-    let mcus_x = (width + mcu_w - 1) / mcu_w;
-    let mcus_y = (height + mcu_h - 1) / mcu_h;
+    let mcus_x = width.div_ceil(mcu_w);
+    let mcus_y = height.div_ceil(mcu_h);
 
     // FDCT + quantize all blocks
     let scalar_fq = crate::simd::scalar::scalar_fdct_quantize;
@@ -2421,8 +2423,8 @@ pub fn compress_arithmetic_progressive(
         }
     };
 
-    let mcus_x: usize = (width + mcu_w - 1) / mcu_w;
-    let mcus_y: usize = (height + mcu_h - 1) / mcu_h;
+    let mcus_x: usize = width.div_ceil(mcu_w);
+    let mcus_y: usize = height.div_ceil(mcu_h);
 
     // Compute per-component block dimensions
     let (h_samp, v_samp): (usize, usize) = if is_grayscale {
@@ -2914,8 +2916,7 @@ fn encode_ac_first_block(
 ) {
     let mut zero_run: u8 = 0;
 
-    for k in ss..=se {
-        let coeff: i16 = block[k];
+    for &coeff in &block[ss..=se] {
         if coeff == 0 {
             zero_run += 1;
             continue;
@@ -3081,7 +3082,7 @@ fn scale_quant_for_fdct(quant_table: &[u16; 64]) -> QuantDivisors {
         let d: u32 = quant_table[i] as u32 * 8;
         divisors[i] = d as u16;
         // Ceiling reciprocal: ensures (x * recip) >> 16 == x / d for all valid x
-        reciprocals[i] = (((1u32 << 16) + d - 1) / d) as u16;
+        reciprocals[i] = (1u32 << 16).div_ceil(d) as u16;
     }
     QuantDivisors {
         divisors,
@@ -3090,6 +3091,7 @@ fn scale_quant_for_fdct(quant_table: &[u16; 64]) -> QuantDivisors {
 }
 
 /// Convert input pixels to Y, Cb, Cr planes.
+#[allow(clippy::type_complexity)]
 fn convert_to_ycbcr(
     pixels: &[u8],
     width: usize,
@@ -3274,6 +3276,7 @@ fn extract_block_neon(
 ///
 /// For 4:2:2: averages 2x1 pixel groups horizontally.
 /// For 4:2:0: averages 2x2 pixel groups.
+#[allow(clippy::too_many_arguments)]
 fn downsample_chroma_block(
     plane: &[u8],
     plane_width: usize,
@@ -3405,6 +3408,27 @@ fn encode_single_block(
     prev_dc: &mut i16,
     fdct_quantize_fn: fn(&[i16; 64], &QuantDivisors, &mut [i16; 64]),
 ) {
+    let mut quantized = [0i16; 64];
+
+    // Fused path for interior blocks: load u8 → FDCT → quantize → zigzag
+    // without intermediate [i16; 64] buffer between extract and FDCT.
+    #[cfg(target_arch = "aarch64")]
+    {
+        if block_x + 8 <= plane_width && block_y + 8 <= plane_height {
+            unsafe {
+                crate::simd::aarch64::neon_extract_fdct_quantize(
+                    plane.as_ptr().add(block_y * plane_width + block_x),
+                    plane_width,
+                    quant_table,
+                    &mut quantized,
+                );
+            }
+            HuffmanEncoder::encode_block(writer, &quantized, prev_dc, dc_table, ac_table);
+            return;
+        }
+    }
+
+    // Fallback for border blocks: separate extract + fdct_quantize
     let mut block = [0i16; 64];
     extract_block(
         plane,
@@ -3414,8 +3438,6 @@ fn encode_single_block(
         block_y,
         &mut block,
     );
-
-    let mut quantized = [0i16; 64];
     fdct_quantize_fn(&block, quant_table, &mut quantized);
 
     HuffmanEncoder::encode_block(writer, &quantized, prev_dc, dc_table, ac_table);
@@ -3812,6 +3834,44 @@ fn encode_downsampled_chroma_block(
     prev_dc: &mut i16,
     fdct_quantize_fn: fn(&[i16; 64], &QuantDivisors, &mut [i16; 64]),
 ) {
+    // Fused NEON path: downsample + FDCT + quantize + zigzag in one pass,
+    // eliminating the intermediate [i16; 64] downsampled block.
+    #[cfg(target_arch = "aarch64")]
+    {
+        let src_w: usize = 8 * h_factor;
+        let src_h: usize = 8 * v_factor;
+        if block_x + src_w <= plane_width && block_y + src_h <= plane_height {
+            let plane_ptr: *const u8 =
+                unsafe { plane.as_ptr().add(block_y * plane_width + block_x) };
+            let mut quantized = [0i16; 64];
+            if h_factor == 2 && v_factor == 2 {
+                unsafe {
+                    crate::simd::aarch64::neon_downsample_h2v2_fdct_quantize(
+                        plane_ptr,
+                        plane_width,
+                        quant_table,
+                        &mut quantized,
+                    );
+                }
+                HuffmanEncoder::encode_block(writer, &quantized, prev_dc, dc_table, ac_table);
+                return;
+            }
+            if h_factor == 2 && v_factor == 1 {
+                unsafe {
+                    crate::simd::aarch64::neon_downsample_h2v1_fdct_quantize(
+                        plane_ptr,
+                        plane_width,
+                        quant_table,
+                        &mut quantized,
+                    );
+                }
+                HuffmanEncoder::encode_block(writer, &quantized, prev_dc, dc_table, ac_table);
+                return;
+            }
+        }
+    }
+
+    // Scalar fallback: separate downsample + FDCT+quantize
     let mut block = [0i16; 64];
     downsample_chroma_block(
         plane,
@@ -3894,8 +3954,8 @@ pub fn compress_optimized(
         }
     };
 
-    let mcus_x = (width + mcu_w - 1) / mcu_w;
-    let mcus_y = (height + mcu_h - 1) / mcu_h;
+    let mcus_x = width.div_ceil(mcu_w);
+    let mcus_y = height.div_ceil(mcu_h);
 
     // === Pass 1: FDCT + quantize all blocks, gather symbol frequencies ===
     use crate::encode::huff_opt;
@@ -4502,6 +4562,7 @@ fn gather_block(
 }
 
 /// FDCT + quantize a downsampled chroma block, return the quantized coefficients.
+#[allow(clippy::too_many_arguments)]
 fn gather_downsampled_block(
     plane: &[u8],
     plane_width: usize,
@@ -4570,8 +4631,8 @@ pub fn compress_raw(
     }
     let (h_samp, v_samp): (u8, u8) = subsampling.sampling_factors();
     if !is_grayscale {
-        let expected_cb_w: usize = (image_width + h_samp as usize - 1) / h_samp as usize;
-        let expected_cb_h: usize = (image_height + v_samp as usize - 1) / v_samp as usize;
+        let expected_cb_w: usize = image_width.div_ceil(h_samp as usize);
+        let expected_cb_h: usize = image_height.div_ceil(v_samp as usize);
         if plane_widths[0] != image_width || plane_heights[0] != image_height {
             return Err(JpegError::CorruptData(format!(
                 "Y plane dimensions {}x{} do not match image dimensions {}x{}",
@@ -4628,8 +4689,8 @@ pub fn compress_raw(
             Subsampling::S441 => (8, 32),
         }
     };
-    let mcus_x: usize = (image_width + mcu_w - 1) / mcu_w;
-    let mcus_y: usize = (image_height + mcu_h - 1) / mcu_h;
+    let mcus_x: usize = image_width.div_ceil(mcu_w);
+    let mcus_y: usize = image_height.div_ceil(mcu_h);
     let enc_simd = crate::simd::detect_encoder();
     let fdct_quantize_fn = enc_simd.fdct_quantize;
     let mut bit_writer: BitWriter = BitWriter::new(image_width * image_height);
@@ -4762,9 +4823,9 @@ pub fn compress_raw(
         );
     }
     if is_grayscale {
-        marker_writer::write_sos(&mut output, &vec![(1, 0, 0)]);
+        marker_writer::write_sos(&mut output, &[(1, 0, 0)]);
     } else {
-        marker_writer::write_sos(&mut output, &vec![(1, 0, 0), (2, 1, 1), (3, 1, 1)]);
+        marker_writer::write_sos(&mut output, &[(1, 0, 0), (2, 1, 1), (3, 1, 1)]);
     }
     output.extend_from_slice(bit_writer.data());
     marker_writer::write_eoi(&mut output);
@@ -4841,7 +4902,7 @@ pub fn compress_custom_sampling(
     // Validate that max_h and max_v are from component 0 (Y) for standard JPEG structure,
     // or at least that all factor ratios are valid integers.
     for (i, &(h, v)) in factors.iter().enumerate() {
-        if max_h % h != 0 || max_v % v != 0 {
+        if !max_h.is_multiple_of(h) || !max_v.is_multiple_of(v) {
             return Err(JpegError::CorruptData(format!(
                 "component {} sampling factors ({}, {}) must evenly divide max factors ({}, {})",
                 i, h, v, max_h, max_v
@@ -4852,8 +4913,8 @@ pub fn compress_custom_sampling(
     // MCU dimensions in pixels
     let mcu_w: usize = max_h as usize * 8;
     let mcu_h: usize = max_v as usize * 8;
-    let mcus_x: usize = (width + mcu_w - 1) / mcu_w;
-    let mcus_y: usize = (height + mcu_h - 1) / mcu_h;
+    let mcus_x: usize = width.div_ceil(mcu_w);
+    let mcus_y: usize = height.div_ceil(mcu_h);
 
     // Generate scaled quantization tables
     let luma_quant: [u16; 64] =

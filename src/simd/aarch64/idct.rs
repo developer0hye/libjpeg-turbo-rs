@@ -269,6 +269,7 @@ unsafe fn neon_idct_islow_core(cptr: *const i16, qptr: *const i16, output: *mut 
 /// # Safety
 /// Requires NEON.
 #[target_feature(enable = "neon")]
+#[allow(clippy::too_many_arguments)]
 unsafe fn idct_pass1_regular(
     row0: int16x4_t,
     row1: int16x4_t,
@@ -296,8 +297,8 @@ unsafe fn idct_pass1_regular(
     let z2_s16 = row0;
     let z3_s16 = row4;
 
-    let tmp0: int32x4_t = vshll_n_s16(vadd_s16(z2_s16, z3_s16), CONST_BITS as i32);
-    let tmp1: int32x4_t = vshll_n_s16(vsub_s16(z2_s16, z3_s16), CONST_BITS as i32);
+    let tmp0: int32x4_t = vshll_n_s16(vadd_s16(z2_s16, z3_s16), CONST_BITS);
+    let tmp1: int32x4_t = vshll_n_s16(vsub_s16(z2_s16, z3_s16), CONST_BITS);
 
     let tmp10 = vaddq_s32(tmp0, tmp3);
     let tmp13 = vsubq_s32(tmp0, tmp3);
@@ -361,6 +362,7 @@ unsafe fn idct_pass1_regular(
 /// # Safety
 /// Requires NEON.
 #[target_feature(enable = "neon")]
+#[allow(clippy::too_many_arguments)]
 unsafe fn idct_pass1_sparse(
     row0: int16x4_t,
     row1: int16x4_t,
@@ -379,8 +381,8 @@ unsafe fn idct_pass1_sparse(
     let tmp3: int32x4_t = vmull_lane_s16(z2_s16, consts1, 2); // z2 * (F_0_541+F_0_765)
 
     let z2_s16 = row0;
-    let tmp0: int32x4_t = vshll_n_s16(z2_s16, CONST_BITS as i32);
-    let tmp1: int32x4_t = vshll_n_s16(z2_s16, CONST_BITS as i32);
+    let tmp0: int32x4_t = vshll_n_s16(z2_s16, CONST_BITS);
+    let tmp1: int32x4_t = vshll_n_s16(z2_s16, CONST_BITS);
 
     let tmp10 = vaddq_s32(tmp0, tmp3);
     let tmp13 = vsubq_s32(tmp0, tmp3);
@@ -444,11 +446,12 @@ unsafe fn idct_pass2_regular(
     tmp2 = vmlal_lane_s16(tmp2, z3_s16, consts2, 1);
     tmp3 = vmlal_lane_s16(tmp3, z3_s16, consts0, 1);
 
+    #[allow(clippy::erasing_op)]
     let z2_s16 = vld1_s16(workspace.add(0 * 4));
     let z3_s16 = vld1_s16(workspace.add(4 * 4));
 
-    let tmp0: int32x4_t = vshll_n_s16(vadd_s16(z2_s16, z3_s16), CONST_BITS as i32);
-    let tmp1: int32x4_t = vshll_n_s16(vsub_s16(z2_s16, z3_s16), CONST_BITS as i32);
+    let tmp0: int32x4_t = vshll_n_s16(vadd_s16(z2_s16, z3_s16), CONST_BITS);
+    let tmp1: int32x4_t = vshll_n_s16(vsub_s16(z2_s16, z3_s16), CONST_BITS);
 
     let tmp10 = vaddq_s32(tmp0, tmp3);
     let tmp13 = vsubq_s32(tmp0, tmp3);
@@ -459,7 +462,7 @@ unsafe fn idct_pass2_regular(
     let tmp0_s16 = vld1_s16(workspace.add(7 * 4));
     let tmp1_s16 = vld1_s16(workspace.add(5 * 4));
     let tmp2_s16 = vld1_s16(workspace.add(3 * 4));
-    let tmp3_s16 = vld1_s16(workspace.add(1 * 4));
+    let tmp3_s16 = vld1_s16(workspace.add(4));
 
     let z3_s16 = vadd_s16(tmp0_s16, tmp2_s16);
     let z4_s16 = vadd_s16(tmp1_s16, tmp3_s16);
@@ -519,7 +522,7 @@ unsafe fn idct_pass2_regular(
 
     // Store 4 rows, each row gets 8 bytes (4 from left half + 4 from right half)
     // buf_offset: 0 for rows 0-3, 4 for rows 4-7
-    let out_row0 = output.add((buf_offset + 0) * stride);
+    let out_row0 = output.add(buf_offset * stride);
     let out_row1 = output.add((buf_offset + 1) * stride);
     let out_row2 = output.add((buf_offset + 2) * stride);
     let out_row3 = output.add((buf_offset + 3) * stride);
@@ -551,9 +554,10 @@ unsafe fn idct_pass2_sparse(
     let tmp2: int32x4_t = vmull_lane_s16(z2_s16, consts0, 1);
     let tmp3: int32x4_t = vmull_lane_s16(z2_s16, consts1, 2);
 
+    #[allow(clippy::erasing_op)]
     let z2_s16 = vld1_s16(workspace.add(0 * 4));
-    let tmp0: int32x4_t = vshll_n_s16(z2_s16, CONST_BITS as i32);
-    let tmp1: int32x4_t = vshll_n_s16(z2_s16, CONST_BITS as i32);
+    let tmp0: int32x4_t = vshll_n_s16(z2_s16, CONST_BITS);
+    let tmp1: int32x4_t = vshll_n_s16(z2_s16, CONST_BITS);
 
     let tmp10 = vaddq_s32(tmp0, tmp3);
     let tmp13 = vsubq_s32(tmp0, tmp3);
@@ -562,7 +566,7 @@ unsafe fn idct_pass2_sparse(
 
     // Odd part (tmp0_s16 = row7 = 0, tmp1_s16 = row5 = 0)
     let tmp2_s16 = vld1_s16(workspace.add(3 * 4));
-    let tmp3_s16 = vld1_s16(workspace.add(1 * 4));
+    let tmp3_s16 = vld1_s16(workspace.add(4));
 
     let z3_s16 = tmp2_s16;
     let z4_s16 = tmp3_s16;
@@ -603,7 +607,7 @@ unsafe fn idct_pass2_sparse(
         vreinterpret_u16_u8(cols_45_67.1),
     );
 
-    let out_row0 = output.add((buf_offset + 0) * stride);
+    let out_row0 = output.add(buf_offset * stride);
     let out_row1 = output.add((buf_offset + 1) * stride);
     let out_row2 = output.add((buf_offset + 2) * stride);
     let out_row3 = output.add((buf_offset + 3) * stride);

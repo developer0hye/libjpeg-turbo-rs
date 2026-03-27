@@ -89,8 +89,8 @@ pub fn decode_ac_first(
                     "progressive AC coefficient index out of bounds".into(),
                 ));
             }
-            let extra_bits = reader.read_bits(bit_size as u8);
-            let coeff = extend(extra_bits, bit_size as u8);
+            let extra_bits = reader.read_bits(bit_size);
+            let coeff = extend(extra_bits, bit_size);
             coeffs[ZIGZAG_ORDER[k]] = coeff << al;
             k += 1;
         } else {

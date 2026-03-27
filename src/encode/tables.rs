@@ -1,5 +1,4 @@
 /// Standard JPEG encoding tables from Annex K of ITU-T T.81.
-
 /// Standard luminance quantization table (Table K.1).
 /// Values are in natural (row-major) order.
 pub static STD_LUMINANCE_QUANT_TABLE: [u8; 64] = [

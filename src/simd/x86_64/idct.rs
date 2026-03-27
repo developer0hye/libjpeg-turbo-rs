@@ -62,6 +62,7 @@ unsafe fn mullo_epi32_sse2(a: __m128i, b: __m128i) -> __m128i {
 /// `s0..s7` are the 8 frequency-domain inputs, each an __m128i with 4 parallel values.
 /// Returns 8 outputs (spatial domain), still needing descale.
 #[inline(always)]
+#[allow(clippy::too_many_arguments)]
 unsafe fn idct_1d_pass(
     s0: __m128i,
     s1: __m128i,
@@ -146,7 +147,7 @@ unsafe fn sse2_idct_islow_inner(coeffs: &[i16; 64], quant: &[u16; 64], output: &
     // Process 4 columns at a time. Each __m128i holds [col+0, col+1, col+2, col+3].
     for col_base in (0..8).step_by(4) {
         let mut rows = [_mm_setzero_si128(); 8];
-        for row in 0..8 {
+        for (row, row_val) in rows.iter_mut().enumerate() {
             let idx: usize = row * 8 + col_base;
             let c0: i32 = coeffs[idx] as i32;
             let c1: i32 = coeffs[idx + 1] as i32;
@@ -156,15 +157,15 @@ unsafe fn sse2_idct_islow_inner(coeffs: &[i16; 64], quant: &[u16; 64], output: &
             let q1: i32 = quant[idx + 1] as i32;
             let q2: i32 = quant[idx + 2] as i32;
             let q3: i32 = quant[idx + 3] as i32;
-            rows[row] = _mm_set_epi32(c3 * q3, c2 * q2, c1 * q1, c0 * q0);
+            *row_val = _mm_set_epi32(c3 * q3, c2 * q2, c1 * q1, c0 * q0);
         }
 
         let result: [__m128i; 8] = idct_1d_pass(
             rows[0], rows[1], rows[2], rows[3], rows[4], rows[5], rows[6], rows[7],
         );
 
-        for row in 0..8 {
-            let descaled: __m128i = descale_p1(result[row]);
+        for (row, &res) in result.iter().enumerate() {
+            let descaled: __m128i = descale_p1(res);
             let idx: usize = row * 8 + col_base;
             _mm_storeu_si128(ws.as_mut_ptr().add(idx) as *mut __m128i, descaled);
         }

@@ -2,7 +2,6 @@
 ///
 /// This is a direct port of libjpeg-turbo's `jfdctint.c` (the "islow" forward DCT).
 /// It uses fixed-point arithmetic with CONST_BITS=13 and PASS1_BITS=2 for 8-bit samples.
-
 // Fixed-point constants for CONST_BITS = 13.
 // These match the pre-calculated values in libjpeg-turbo's jfdctint.c.
 const CONST_BITS: i32 = 13;
@@ -282,10 +281,10 @@ pub fn fdct_ifast(input: &[i16; 64], output: &mut [i32; 64]) {
     // The raw AA&N output for coefficient (row, col) is:
     //   islow_val * aanscale[row] * aanscale[col]
     // So we divide by the 2-D AA&N scale factor to get islow-equivalent output.
-    for row in 0..8 {
-        for col in 0..8 {
+    for (row, &row_scale) in AAN_SCALES.iter().enumerate() {
+        for (col, &col_scale) in AAN_SCALES.iter().enumerate() {
             let idx: usize = row * 8 + col;
-            let scale: i64 = (AAN_SCALES[row] as i64) * (AAN_SCALES[col] as i64);
+            let scale: i64 = (row_scale as i64) * (col_scale as i64);
             let raw: i64 = workspace[idx] as i64;
             // output = raw * 4096^2 / scale (fixed-point division)
             output[idx] = ((raw * (1i64 << (AAN_SCALE_BITS * 2))) / scale) as i32;
@@ -339,7 +338,7 @@ pub fn fdct_float(input: &[i16; 64], output: &mut [i32; 64]) {
         workspace[base] = tmp10 + tmp11;
         workspace[base + 4] = tmp10 - tmp11;
 
-        let z1: f64 = (tmp12 + tmp13) * 0.707106781;
+        let z1: f64 = (tmp12 + tmp13) * std::f64::consts::FRAC_1_SQRT_2;
         workspace[base + 2] = tmp13 + z1;
         workspace[base + 6] = tmp13 - z1;
 
@@ -351,7 +350,7 @@ pub fn fdct_float(input: &[i16; 64], output: &mut [i32; 64]) {
         let z5: f64 = (tmp10 - tmp12) * 0.382683433;
         let z2: f64 = 0.541196100 * tmp10 + z5;
         let z4: f64 = 1.306562965 * tmp12 + z5;
-        let z3: f64 = tmp11 * 0.707106781;
+        let z3: f64 = tmp11 * std::f64::consts::FRAC_1_SQRT_2;
 
         let z11: f64 = tmp7 + z3;
         let z13: f64 = tmp7 - z3;
@@ -382,7 +381,7 @@ pub fn fdct_float(input: &[i16; 64], output: &mut [i32; 64]) {
         workspace[col] = tmp10 + tmp11;
         workspace[col + 32] = tmp10 - tmp11;
 
-        let z1: f64 = (tmp12 + tmp13) * 0.707106781;
+        let z1: f64 = (tmp12 + tmp13) * std::f64::consts::FRAC_1_SQRT_2;
         workspace[col + 16] = tmp13 + z1;
         workspace[col + 48] = tmp13 - z1;
 
@@ -394,7 +393,7 @@ pub fn fdct_float(input: &[i16; 64], output: &mut [i32; 64]) {
         let z5: f64 = (tmp10 - tmp12) * 0.382683433;
         let z2: f64 = 0.541196100 * tmp10 + z5;
         let z4: f64 = 1.306562965 * tmp12 + z5;
-        let z3: f64 = tmp11 * 0.707106781;
+        let z3: f64 = tmp11 * std::f64::consts::FRAC_1_SQRT_2;
 
         let z11: f64 = tmp7 + z3;
         let z13: f64 = tmp7 - z3;
@@ -407,10 +406,10 @@ pub fn fdct_float(input: &[i16; 64], output: &mut [i32; 64]) {
 
     // Convert to i32 output, dividing by AA&N scale factors to match
     // fdct_islow's output format.
-    for row in 0..8 {
-        for col in 0..8 {
+    for (row, &row_scale) in AAN_SCALES.iter().enumerate() {
+        for (col, &col_scale) in AAN_SCALES.iter().enumerate() {
             let idx: usize = row * 8 + col;
-            let scale: f64 = AAN_SCALES[row] * AAN_SCALES[col];
+            let scale: f64 = row_scale * col_scale;
             // Divide by the 2-D AA&N scale factor to get islow-equivalent output.
             let val: f64 = workspace[idx] / scale;
             // Round to nearest integer (matching libjpeg behavior)
