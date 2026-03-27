@@ -519,31 +519,14 @@ unsafe fn encode_ac_neon_local(
 ) {
     use std::arch::aarch64::*;
 
-    let mut block_nbits = [0u8; 64];
-    let mut block_diff = [0u16; 64];
     let mut bitmap: u64 = 0;
 
-    let sixteen: int16x8_t = vdupq_n_s16(16);
     let zero: int16x8_t = vdupq_n_s16(0);
     let weights: uint8x8_t = vcreate_u8(0x0102_0408_1020_4080_u64);
 
     for chunk in 0..8u32 {
         let offset: usize = (chunk * 8) as usize;
         let row: int16x8_t = vld1q_s16(coeffs_zigzag.as_ptr().add(offset));
-
-        // abs + CLZ → nbits = 16 - leading_zeros(abs)
-        let abs_row: int16x8_t = vabsq_s16(row);
-        let lz: int16x8_t = vclzq_s16(abs_row);
-        let nbits_s16: int16x8_t = vsubq_s16(sixteen, lz);
-        let nbits_u8: uint8x8_t = vmovn_u16(vreinterpretq_u16_s16(nbits_s16));
-        vst1_u8(block_nbits.as_mut_ptr().add(offset), nbits_u8);
-
-        // Pre-masked diff: for negative coefficients, XOR abs with
-        // a mask that has only the low nbits bits set.
-        let sign: uint16x8_t = vreinterpretq_u16_s16(vshrq_n_s16::<15>(row));
-        let mask: uint16x8_t = vshlq_u16(sign, vnegq_s16(lz));
-        let diff: uint16x8_t = veorq_u16(vreinterpretq_u16_s16(abs_row), mask);
-        vst1q_u16(block_diff.as_mut_ptr().add(offset), diff);
 
         // Non-zero bitmap: compare, narrow to u8, AND with bit weights, sum
         let ne: uint16x8_t = vmvnq_u16(vceqq_s16(row, zero));
@@ -567,11 +550,51 @@ unsafe fn encode_ac_neon_local(
         return;
     }
 
+    if bitmap.count_ones() <= 8 {
+        encode_ac_sparse_local(pb, fb, buf, coeffs_zigzag, bitmap, ac_table);
+        return;
+    }
+
+    encode_ac_dense_neon_local(pb, fb, buf, coeffs_zigzag, bitmap, ac_table);
+}
+
+/// Dense NEON AC path: pre-compute nbits and masked diff for every coefficient.
+#[cfg(target_arch = "aarch64")]
+#[target_feature(enable = "neon")]
+unsafe fn encode_ac_dense_neon_local(
+    pb: &mut u64,
+    fb: &mut i32,
+    buf: &mut *mut u8,
+    coeffs_zigzag: &[i16; 64],
+    mut bitmap: u64,
+    ac_table: &HuffTable,
+) {
+    use std::arch::aarch64::*;
+
+    let mut block_nbits = [0u8; 64];
+    let mut block_diff = [0u16; 64];
+    let sixteen: int16x8_t = vdupq_n_s16(16);
+
+    for chunk in 0..8u32 {
+        let offset: usize = (chunk * 8) as usize;
+        let row: int16x8_t = vld1q_s16(coeffs_zigzag.as_ptr().add(offset));
+
+        let abs_row: int16x8_t = vabsq_s16(row);
+        let lz: int16x8_t = vclzq_s16(abs_row);
+        let nbits_s16: int16x8_t = vsubq_s16(sixteen, lz);
+        let nbits_u8: uint8x8_t = vmovn_u16(vreinterpretq_u16_s16(nbits_s16));
+        vst1_u8(block_nbits.as_mut_ptr().add(offset), nbits_u8);
+
+        let sign: uint16x8_t = vreinterpretq_u16_s16(vshrq_n_s16::<15>(row));
+        let mask: uint16x8_t = vshlq_u16(sign, vnegq_s16(lz));
+        let diff: uint16x8_t = veorq_u16(vreinterpretq_u16_s16(abs_row), mask);
+        vst1q_u16(block_diff.as_mut_ptr().add(offset), diff);
+    }
+
     let mut pos: u32 = 1;
     while bitmap != 0 {
         let lz: u32 = bitmap.leading_zeros();
         pos += lz;
-        bitmap <<= lz;
 
         let nbits: u8 = *block_nbits.get_unchecked(pos as usize);
         let diff: u32 = *block_diff.get_unchecked(pos as usize) as u32;
@@ -592,6 +615,61 @@ unsafe fn encode_ac_neon_local(
         let huff_code: u32 = ac_table.ehufco[symbol] as u32;
         let huff_size: u8 = ac_table.ehufsi[symbol];
         let combined: u32 = (huff_code << nbits) | diff;
+        local_put_bits(pb, fb, buf, combined, huff_size + nbits);
+
+        pos += 1;
+        bitmap <<= lz;
+        bitmap <<= 1;
+    }
+
+    if pos <= 63 {
+        local_put_bits(
+            pb,
+            fb,
+            buf,
+            ac_table.ehufco[0x00] as u32,
+            ac_table.ehufsi[0x00],
+        );
+    }
+}
+
+/// Sparse AC path: compute nbits and diff only for coefficients we actually emit.
+#[cfg(target_arch = "aarch64")]
+#[inline(always)]
+unsafe fn encode_ac_sparse_local(
+    pb: &mut u64,
+    fb: &mut i32,
+    buf: &mut *mut u8,
+    coeffs_zigzag: &[i16; 64],
+    mut bitmap: u64,
+    ac_table: &HuffTable,
+) {
+    let mut pos: u32 = 1;
+    while bitmap != 0 {
+        let lz: u32 = bitmap.leading_zeros();
+        pos += lz;
+        bitmap <<= lz;
+
+        let ac: i16 = *coeffs_zigzag.get_unchecked(pos as usize);
+        let (magnitude_bits, nbits) = encode_ac_value(ac);
+        let mag_masked: u32 = magnitude_bits as u32 & ((1u32 << nbits) - 1);
+
+        let mut run: u32 = lz;
+        while run >= 16 {
+            local_put_bits(
+                pb,
+                fb,
+                buf,
+                ac_table.ehufco[0xF0] as u32,
+                ac_table.ehufsi[0xF0],
+            );
+            run -= 16;
+        }
+
+        let symbol: usize = ((run as usize) << 4) | (nbits as usize);
+        let huff_code: u32 = ac_table.ehufco[symbol] as u32;
+        let huff_size: u8 = ac_table.ehufsi[symbol];
+        let combined: u32 = (huff_code << nbits) | mag_masked;
         local_put_bits(pb, fb, buf, combined, huff_size + nbits);
 
         pos += 1;
@@ -627,7 +705,6 @@ fn encode_dc_value(diff: i16) -> (u16, u8) {
 ///
 /// Returns (magnitude_bits, size) where size is 1..10.
 /// Only called for non-zero values in the bitmap zero-skip loop.
-#[cfg(not(target_arch = "aarch64"))]
 #[inline(always)]
 fn encode_ac_value(value: i16) -> (u16, u8) {
     let abs_val: u16 = value.unsigned_abs();
@@ -641,6 +718,54 @@ fn encode_ac_value(value: i16) -> (u16, u8) {
 mod tests {
     use super::*;
     use crate::encode::tables::*;
+
+    fn encode_block_reference(
+        coeffs: &[i16; 64],
+        prev_dc: &mut i16,
+        dc_table: &HuffTable,
+        ac_table: &HuffTable,
+    ) -> Vec<u8> {
+        let mut writer = BitWriter::new(256);
+
+        let dc: i16 = coeffs[0];
+        let diff: i16 = dc - *prev_dc;
+        *prev_dc = dc;
+
+        let (magnitude_bits, category) = encode_dc_value(diff);
+        writer.write_bits(
+            dc_table.ehufco[category as usize],
+            dc_table.ehufsi[category as usize],
+        );
+        if category > 0 {
+            writer.write_bits(magnitude_bits, category);
+        }
+
+        let mut run: usize = 0;
+        for &ac in &coeffs[1..] {
+            if ac == 0 {
+                run += 1;
+                continue;
+            }
+
+            while run >= 16 {
+                writer.write_bits(ac_table.ehufco[0xF0], ac_table.ehufsi[0xF0]);
+                run -= 16;
+            }
+
+            let (magnitude_bits, nbits) = encode_ac_value(ac);
+            let symbol: usize = (run << 4) | (nbits as usize);
+            writer.write_bits(ac_table.ehufco[symbol], ac_table.ehufsi[symbol]);
+            writer.write_bits(magnitude_bits, nbits);
+            run = 0;
+        }
+
+        if run > 0 {
+            writer.write_bits(ac_table.ehufco[0x00], ac_table.ehufsi[0x00]);
+        }
+
+        writer.flush();
+        writer.data().to_vec()
+    }
 
     #[test]
     fn build_dc_luminance_table() {
@@ -702,6 +827,21 @@ mod tests {
     }
 
     #[test]
+    fn encode_ac_positive() {
+        let (bits, size) = encode_ac_value(11);
+        assert_eq!(size, 4);
+        assert_eq!(bits, 11);
+    }
+
+    #[test]
+    fn encode_ac_negative() {
+        let (bits, size) = encode_ac_value(-11);
+        assert_eq!(size, 4);
+        assert_eq!(bits, (-12i16) as u16);
+        assert_eq!(bits & 0x0F, 0x04);
+    }
+
+    #[test]
     fn bit_writer_byte_stuffing() {
         let mut writer = BitWriter::new(16);
         // Write 0xFF as 8 bits
@@ -751,6 +891,51 @@ mod tests {
 
         HuffmanEncoder::encode_block(&mut writer, &coeffs, &mut prev_dc, &dc_table, &ac_table);
         assert_eq!(prev_dc, 42);
+    }
+
+    #[test]
+    fn encode_block_sparse_ac_matches_reference() {
+        let dc_table = build_huff_table(&DC_LUMINANCE_BITS, &DC_LUMINANCE_VALUES);
+        let ac_table = build_huff_table(&AC_LUMINANCE_BITS, &AC_LUMINANCE_VALUES);
+        let mut coeffs = [0i16; 64];
+        coeffs[0] = 17;
+        coeffs[3] = -3;
+        coeffs[20] = 2;
+        coeffs[37] = -1;
+        coeffs[63] = 1;
+
+        let mut ref_prev_dc: i16 = -5;
+        let expected = encode_block_reference(&coeffs, &mut ref_prev_dc, &dc_table, &ac_table);
+
+        let mut writer = BitWriter::new(256);
+        let mut prev_dc: i16 = -5;
+        HuffmanEncoder::encode_block(&mut writer, &coeffs, &mut prev_dc, &dc_table, &ac_table);
+        writer.flush();
+
+        assert_eq!(writer.data(), expected.as_slice());
+        assert_eq!(prev_dc, ref_prev_dc);
+    }
+
+    #[test]
+    fn encode_block_dense_ac_matches_reference() {
+        let dc_table = build_huff_table(&DC_LUMINANCE_BITS, &DC_LUMINANCE_VALUES);
+        let ac_table = build_huff_table(&AC_LUMINANCE_BITS, &AC_LUMINANCE_VALUES);
+        let mut coeffs = [0i16; 64];
+        coeffs[0] = -23;
+        for (idx, value) in [1, -2, 3, -4, 5, -6, 7, -8, 9].into_iter().enumerate() {
+            coeffs[idx + 1] = value;
+        }
+
+        let mut ref_prev_dc: i16 = 9;
+        let expected = encode_block_reference(&coeffs, &mut ref_prev_dc, &dc_table, &ac_table);
+
+        let mut writer = BitWriter::new(256);
+        let mut prev_dc: i16 = 9;
+        HuffmanEncoder::encode_block(&mut writer, &coeffs, &mut prev_dc, &dc_table, &ac_table);
+        writer.flush();
+
+        assert_eq!(writer.data(), expected.as_slice());
+        assert_eq!(prev_dc, ref_prev_dc);
     }
 
     #[test]
