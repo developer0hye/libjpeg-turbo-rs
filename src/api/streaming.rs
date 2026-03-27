@@ -47,7 +47,7 @@ impl<'a> StreamingDecoder<'a> {
 
         // Align xoffset down to iMCU boundary
         let aligned_x = (*xoffset / imcu_width) * imcu_width;
-        let aligned_end = ((*xoffset + *width + imcu_width - 1) / imcu_width) * imcu_width;
+        let aligned_end = (*xoffset + *width).div_ceil(imcu_width) * imcu_width;
         let aligned_width = (aligned_end - aligned_x).min(header.width as usize - aligned_x);
 
         *xoffset = aligned_x;

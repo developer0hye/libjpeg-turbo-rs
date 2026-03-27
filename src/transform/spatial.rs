@@ -2,7 +2,6 @@
 ///
 /// Each transform manipulates DCT coefficients directly in the frequency domain,
 /// avoiding decode/re-encode quality loss.
-
 /// No transform — copy block unchanged.
 pub fn do_nothing(src: &[i16; 64], dst: &mut [i16; 64]) {
     dst.copy_from_slice(src);

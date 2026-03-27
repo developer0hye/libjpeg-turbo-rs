@@ -2,7 +2,6 @@
 ///
 /// These functions convert between user-facing quality ratings (1-100)
 /// and the internal linear scale factors used to scale quantization tables.
-
 /// Convert a quality rating (0-100) to a linear scale factor.
 ///
 /// Matches libjpeg-turbo's `jpeg_quality_scaling()`. The returned scale factor
@@ -36,7 +35,7 @@ pub fn quality_scaling(quality: u8) -> u32 {
 /// * `table` - Base quantization table (64 values in natural order)
 /// * `scale_factor` - Linear scale factor (from `quality_scaling()`)
 /// * `force_baseline` - When true, clamp values to 1-255 for baseline compatibility.
-///                       When false, clamp to 1-32767 (12-bit max).
+///   When false, clamp to 1-32767 (12-bit max).
 pub fn scale_quant_table_linear(
     table: &[u8; 64],
     scale_factor: u32,

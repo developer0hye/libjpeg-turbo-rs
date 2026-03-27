@@ -81,8 +81,8 @@ impl ProgressiveDecoder {
 
         let mcu_w: usize = max_h * 8;
         let mcu_h: usize = max_v * 8;
-        let mcus_x: usize = (frame.width as usize + mcu_w - 1) / mcu_w;
-        let mcus_y: usize = (frame.height as usize + mcu_h - 1) / mcu_h;
+        let mcus_x: usize = (frame.width as usize).div_ceil(mcu_w);
+        let mcus_y: usize = (frame.height as usize).div_ceil(mcu_h);
 
         let comp_infos: Vec<CompInfo> = frame
             .components
@@ -202,7 +202,10 @@ impl ProgressiveDecoder {
             .map(|ci| {
                 let size: usize = ci.comp_w * ci.blocks_y * block_size;
                 let mut v: Vec<u8> = Vec::with_capacity(size);
-                unsafe { v.set_len(size) };
+                #[allow(clippy::uninit_vec)]
+                unsafe {
+                    v.set_len(size)
+                };
                 v
             })
             .collect();
@@ -360,7 +363,10 @@ impl ProgressiveDecoder {
 
             for mcu_y in 0..self.mcus_y {
                 for mcu_x in 0..self.mcus_x {
-                    if restart_interval > 0 && mcu_count > 0 && mcu_count % restart_interval == 0 {
+                    if restart_interval > 0
+                        && mcu_count > 0
+                        && mcu_count.is_multiple_of(restart_interval)
+                    {
                         bit_reader.reset();
                         dc_preds = [0i16; 4];
                     }
@@ -452,7 +458,10 @@ impl ProgressiveDecoder {
 
             for by in 0..blocks_y {
                 for bx in 0..blocks_x {
-                    if restart_interval > 0 && mcu_count > 0 && mcu_count % restart_interval == 0 {
+                    if restart_interval > 0
+                        && mcu_count > 0
+                        && mcu_count.is_multiple_of(restart_interval)
+                    {
                         bit_reader.reset();
                         dc_pred = 0;
                         eob_run = 0;
@@ -561,7 +570,10 @@ impl ProgressiveDecoder {
             // 4:4:4: no upsampling needed
             let data_size: usize = out_width * out_height * bpp;
             let mut data: Vec<u8> = Vec::with_capacity(data_size);
-            unsafe { data.set_len(data_size) };
+            #[allow(clippy::uninit_vec)]
+            unsafe {
+                data.set_len(data_size)
+            };
             for y in 0..out_height {
                 self.ycbcr_to_rgb_row(
                     &y_plane[y * y_width..],
@@ -638,7 +650,10 @@ impl ProgressiveDecoder {
 
             let data_size: usize = out_width * out_height * bpp;
             let mut data: Vec<u8> = Vec::with_capacity(data_size);
-            unsafe { data.set_len(data_size) };
+            #[allow(clippy::uninit_vec)]
+            unsafe {
+                data.set_len(data_size)
+            };
             for y in 0..out_height {
                 self.ycbcr_to_rgb_row(
                     &y_plane[y * y_width..],
@@ -682,7 +697,10 @@ impl ProgressiveDecoder {
         let bpp: usize = 4;
         let data_size: usize = out_width * out_height * bpp;
         let mut data: Vec<u8> = Vec::with_capacity(data_size);
-        unsafe { data.set_len(data_size) };
+        #[allow(clippy::uninit_vec)]
+        unsafe {
+            data.set_len(data_size)
+        };
 
         for y in 0..out_height {
             for x in 0..out_width {
@@ -745,9 +763,9 @@ impl ProgressiveDecoder {
     ) {
         #[cfg(all(target_arch = "aarch64", feature = "simd"))]
         {
-            return crate::simd::aarch64::upsample::neon_fancy_upsample_h2v2(
+            crate::simd::aarch64::upsample::neon_fancy_upsample_h2v2(
                 input, in_width, in_height, output, out_width,
-            );
+            )
         }
 
         #[cfg(not(all(target_arch = "aarch64", feature = "simd")))]

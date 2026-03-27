@@ -129,6 +129,7 @@ pub fn compress_progressive(
 }
 
 /// Compress with optional ICC profile and/or EXIF metadata embedded.
+#[allow(clippy::too_many_arguments)]
 pub fn compress_with_metadata(
     pixels: &[u8],
     width: usize,

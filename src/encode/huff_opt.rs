@@ -3,7 +3,6 @@
 /// Implements JPEG Annex K.2 algorithm to build optimal Huffman tables
 /// from observed symbol frequencies, producing smaller output than the
 /// standard JPEG tables.
-
 /// Gather DC symbol frequency (category of the DC difference).
 pub fn gather_dc_symbol(diff: i16, freq: &mut [u32; 257]) {
     let category = if diff == 0 {
@@ -17,8 +16,7 @@ pub fn gather_dc_symbol(diff: i16, freq: &mut [u32; 257]) {
 /// Gather AC symbol frequencies from a zigzag-ordered coefficient block.
 pub fn gather_ac_symbols(coeffs: &[i16; 64], freq: &mut [u32; 257]) {
     let mut zero_run: u8 = 0;
-    for k in 1..64 {
-        let ac = coeffs[k];
+    for &ac in &coeffs[1..64] {
         if ac == 0 {
             zero_run += 1;
         } else {
@@ -119,7 +117,7 @@ pub fn gen_optimal_table(freq: &[u32; 257]) -> ([u8; 17], Vec<u8>) {
         }
 
         // Link v2's chain to v1's chain
-        others[c] = v2 as i32;
+        others[c] = v2;
 
         // Increment code sizes for all symbols in v2's chain
         codesize[v2u] += 1;
@@ -132,9 +130,9 @@ pub fn gen_optimal_table(freq: &[u32; 257]) -> ([u8; 17], Vec<u8>) {
 
     // Count how many symbols have each code size
     let mut bits = [0u8; 33]; // temporary, larger than needed
-    for i in 0..n {
-        if codesize[i] > 0 {
-            let cs = codesize[i] as usize;
+    for &cs_val in &codesize[..n] {
+        if cs_val > 0 {
+            let cs = cs_val as usize;
             if cs < 33 {
                 bits[cs] += 1;
             }
@@ -174,9 +172,8 @@ pub fn gen_optimal_table(freq: &[u32; 257]) -> ([u8; 17], Vec<u8>) {
 
     // Build JPEG bits[1..=16]
     let mut jpeg_bits = [0u8; 17];
-    for i in 1..=16.min(max_code_len) {
-        jpeg_bits[i] = bits[i];
-    }
+    let copy_len: usize = 16.min(max_code_len);
+    jpeg_bits[1..=copy_len].copy_from_slice(&bits[1..=copy_len]);
 
     // Generate huffval: sorted by (code_size, symbol_value)
     let mut sym_sizes: Vec<(u32, usize)> = (0..n)

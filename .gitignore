@@ -2,3 +2,4 @@
 /references
 fuzz/target
 fuzz/artifacts
+.DS_Store

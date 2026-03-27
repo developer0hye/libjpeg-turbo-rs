@@ -19,6 +19,7 @@ pub struct SimdRoutines {
     pub idct_islow: fn(coeffs: &[i16; 64], quant: &[u16; 64], output: &mut [u8; 64]),
 
     /// YCbCr → interleaved RGB, one row.
+    #[allow(clippy::type_complexity)]
     pub ycbcr_to_rgb_row: fn(y: &[u8], cb: &[u8], cr: &[u8], rgb: &mut [u8], width: usize),
 
     /// Fancy horizontal 2x upsample, one row.
@@ -41,6 +42,7 @@ pub struct QuantDivisors {
 pub struct EncoderSimdRoutines {
     /// RGB → YCbCr color conversion, one row.
     /// Only handles interleaved RGB (3 bytes/pixel).
+    #[allow(clippy::type_complexity)]
     pub rgb_to_ycbcr_row: fn(rgb: &[u8], y: &mut [u8], cb: &mut [u8], cr: &mut [u8], width: usize),
 
     /// Combined FDCT (islow) + quantize + zigzag reorder for one 8×8 block.

@@ -2,7 +2,6 @@
 ///
 /// Implements the bit-packing, byte-stuffing, and run-length encoding
 /// required by the JPEG baseline sequential entropy coding specification.
-
 /// Precomputed Huffman encoding table.
 ///
 /// For each symbol (0..255), stores the Huffman code and its bit length.
@@ -256,8 +255,8 @@ impl BitWriter {
         let full_bytes: u32 = used / 8;
         let partial_bits: u32 = used % 8;
 
-        for i in 0..full_bytes as usize {
-            self.emit_byte(bytes[i]);
+        for &byte in &bytes[..full_bytes as usize] {
+            self.emit_byte(byte);
         }
 
         if partial_bits > 0 {
@@ -415,7 +414,6 @@ impl HuffmanEncoder {
 
                 writer.end_block(pb, fb, buf);
             };
-            return;
         }
 
         #[cfg(not(target_arch = "aarch64"))]

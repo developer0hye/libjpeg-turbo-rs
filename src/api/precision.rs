@@ -222,8 +222,8 @@ fn compress_12bit_grayscale(
     let luma_divisors = scale_quant_for_fdct(&luma_quant_12);
     let dc_table = build_huff_table(&tables::DC_LUMINANCE_BITS, &tables::DC_LUMINANCE_VALUES);
     let ac_table = build_huff_table(&tables::AC_LUMINANCE_BITS, &tables::AC_LUMINANCE_VALUES);
-    let mcus_x = (width + 7) / 8;
-    let mcus_y = (height + 7) / 8;
+    let mcus_x = width.div_ceil(8);
+    let mcus_y = height.div_ceil(8);
     let mut bit_writer = BitWriter::new(width * height);
     let mut prev_dc: i16 = 0;
     for mcu_row in 0..mcus_y {
@@ -236,8 +236,8 @@ fn compress_12bit_grayscale(
             fdct_12bit(&block, &mut dct_output);
             let mut quantized = [0i16; 64];
             quant::quantize_block(&dct_output, &luma_divisors, &mut quantized);
-            for k in 1..64 {
-                quantized[k] = quantized[k].clamp(-1023, 1023);
+            for q in &mut quantized[1..64] {
+                *q = (*q).clamp(-1023, 1023);
             }
             HuffmanEncoder::encode_block(
                 &mut bit_writer,
@@ -312,8 +312,8 @@ fn compress_12bit_color(
         comp_planes[1][i] = pixels[i * 3 + 1].clamp(0, 4095);
         comp_planes[2][i] = pixels[i * 3 + 2].clamp(0, 4095);
     }
-    let mcus_x = (width + 7) / 8;
-    let mcus_y = (height + 7) / 8;
+    let mcus_x = width.div_ceil(8);
+    let mcus_y = height.div_ceil(8);
     let mut bit_writer = BitWriter::new(num_pixels * 3);
     let mut prev_dc = [0i16; 3];
     let dc_tables = [&dc_luma, &dc_chroma, &dc_chroma];
@@ -338,8 +338,8 @@ fn compress_12bit_color(
                 fdct_12bit(&block, &mut dct_out);
                 let mut quantized = [0i16; 64];
                 quant::quantize_block(&dct_out, divisors_list[c], &mut quantized);
-                for k in 1..64 {
-                    quantized[k] = quantized[k].clamp(-1023, 1023);
+                for q in &mut quantized[1..64] {
+                    *q = (*q).clamp(-1023, 1023);
                 }
                 HuffmanEncoder::encode_block(
                     &mut bit_writer,
@@ -548,8 +548,8 @@ pub fn decompress_12bit(data: &[u8]) -> Result<Image12> {
         .unwrap_or(1);
     let mcu_width: usize = max_h_samp * 8;
     let mcu_height: usize = max_v_samp * 8;
-    let mcus_x: usize = (width + mcu_width - 1) / mcu_width;
-    let mcus_y: usize = (height + mcu_height - 1) / mcu_height;
+    let mcus_x: usize = width.div_ceil(mcu_width);
+    let mcus_y: usize = height.div_ceil(mcu_height);
     // Per-component sampling and plane dimensions.
     let comp_h_samp: Vec<usize> = frame
         .components
@@ -578,7 +578,7 @@ pub fn decompress_12bit(data: &[u8]) -> Result<Image12> {
             // Handle restart intervals.
             if metadata.restart_interval > 0
                 && mcu_count > 0
-                && mcu_count % metadata.restart_interval == 0
+                && mcu_count.is_multiple_of(metadata.restart_interval)
             {
                 bit_reader.reset();
                 prev_dc.fill(0);
@@ -658,7 +658,7 @@ pub fn compress_16bit(
     predictor: u8,
     point_transform: u8,
 ) -> Result<Vec<u8>> {
-    if predictor < 1 || predictor > 7 {
+    if !(1..=7).contains(&predictor) {
         return Err(JpegError::Unsupported(format!(
             "lossless predictor must be 1-7, got {}",
             predictor
@@ -762,12 +762,12 @@ fn compress_16bit_multi(
     let mut bw = BitWriter::new(np * nc * 2);
     for y in 0..height {
         for x in 0..width {
-            for c in 0..nc {
+            for (c, plane) in planes.iter().enumerate() {
                 let diff = lossless_diff_16(
-                    planes[c][y * width + x] as i32,
+                    plane[y * width + x] as i32,
                     x,
                     y,
-                    &planes[c],
+                    plane,
                     width,
                     predictor,
                     pt,
@@ -794,6 +794,7 @@ fn compress_16bit_multi(
     Ok(out)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn lossless_diff_16(
     pixel: i32,
     x: usize,
@@ -879,7 +880,7 @@ pub fn decompress_16bit(data: &[u8]) -> Result<Image16> {
     let scan = &metadata.scan;
     let psv = scan.spec_start;
     let pt = scan.succ_low;
-    if psv < 1 || psv > 7 {
+    if !(1..=7).contains(&psv) {
         return Err(JpegError::Unsupported(format!(
             "lossless predictor {} (must be 1-7)",
             psv
@@ -954,11 +955,11 @@ pub fn decompress_16bit(data: &[u8]) -> Result<Image16> {
         }
         let mut result = Vec::with_capacity(width * height * nc);
         for i in 0..width * height {
-            for c in 0..nc {
+            for plane in planes.iter().take(nc) {
                 let v = if pt > 0 {
-                    ((planes[c][i] as u32) << pt) as u16
+                    ((plane[i] as u32) << pt) as u16
                 } else {
-                    planes[c][i]
+                    plane[i]
                 };
                 result.push(v);
             }
@@ -1151,13 +1152,13 @@ pub fn compress_lossless_arbitrary(
     predictor: u8,
     point_transform: u8,
 ) -> Result<Vec<u8>> {
-    if precision < 2 || precision > 16 {
+    if !(2..=16).contains(&precision) {
         return Err(JpegError::Unsupported(format!(
             "lossless precision must be 2-16, got {}",
             precision
         )));
     }
-    if predictor < 1 || predictor > 7 {
+    if !(1..=7).contains(&predictor) {
         return Err(JpegError::Unsupported(format!(
             "lossless predictor must be 1-7, got {}",
             predictor
@@ -1274,12 +1275,12 @@ fn compress_arbitrary_multi(
     let mut bw = BitWriter::new(np * nc * 2);
     for y in 0..height {
         for x in 0..width {
-            for c in 0..nc {
+            for (c, plane) in planes.iter().enumerate() {
                 let diff = lossless_diff_16(
-                    planes[c][y * width + x] as i32,
+                    plane[y * width + x] as i32,
                     x,
                     y,
-                    &planes[c],
+                    plane,
                     width,
                     predictor,
                     pt,
@@ -1322,7 +1323,7 @@ pub fn decompress_lossless_arbitrary(data: &[u8]) -> Result<Image16> {
     let height: usize = frame.height as usize;
     let nc: usize = frame.components.len();
     let precision: u8 = frame.precision;
-    if precision < 2 || precision > 16 {
+    if !(2..=16).contains(&precision) {
         return Err(JpegError::Unsupported(format!(
             "lossless precision must be 2-16, got {}",
             precision
@@ -1336,7 +1337,7 @@ pub fn decompress_lossless_arbitrary(data: &[u8]) -> Result<Image16> {
     let scan = &metadata.scan;
     let psv: u8 = scan.spec_start;
     let pt: u8 = scan.succ_low;
-    if psv < 1 || psv > 7 {
+    if !(1..=7).contains(&psv) {
         return Err(JpegError::Unsupported(format!(
             "lossless predictor {} (must be 1-7)",
             psv
@@ -1411,11 +1412,11 @@ pub fn decompress_lossless_arbitrary(data: &[u8]) -> Result<Image16> {
         }
         let mut result = Vec::with_capacity(width * height * nc);
         for i in 0..width * height {
-            for c in 0..nc {
+            for plane in planes.iter().take(nc) {
                 let v: u16 = if pt > 0 {
-                    ((planes[c][i] as u32) << pt) as u16
+                    ((plane[i] as u32) << pt) as u16
                 } else {
-                    planes[c][i]
+                    plane[i]
                 };
                 result.push(v);
             }

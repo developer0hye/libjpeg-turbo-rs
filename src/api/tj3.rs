@@ -147,7 +147,7 @@ impl TjHandle {
     pub fn set(&mut self, param: TjParam, value: i32) -> Result<()> {
         match param {
             TjParam::Quality => {
-                if value < 1 || value > 100 {
+                if !(1..=100).contains(&value) {
                     return Err(JpegError::CorruptData(format!(
                         "quality must be 1-100, got {value}"
                     )));
@@ -155,7 +155,7 @@ impl TjHandle {
                 self.quality = value;
             }
             TjParam::Subsampling => {
-                if value < 0 || value > 5 {
+                if !(0..=5).contains(&value) {
                     return Err(JpegError::CorruptData(format!(
                         "subsampling must be 0-5, got {value}"
                     )));
@@ -172,7 +172,7 @@ impl TjHandle {
                 self.precision = value;
             }
             TjParam::ColorSpace => {
-                if value < 0 || value > 4 {
+                if !(0..=4).contains(&value) {
                     return Err(JpegError::CorruptData(format!(
                         "color space must be 0-4, got {value}"
                     )));
@@ -201,7 +201,7 @@ impl TjHandle {
                 self.lossless = if value != 0 { 1 } else { 0 };
             }
             TjParam::LosslessPsv => {
-                if value < 1 || value > 7 {
+                if !(1..=7).contains(&value) {
                     return Err(JpegError::CorruptData(format!(
                         "lossless PSV must be 1-7, got {value}"
                     )));
@@ -209,7 +209,7 @@ impl TjHandle {
                 self.lossless_psv = value;
             }
             TjParam::LosslessPt => {
-                if value < 0 || value > 15 {
+                if !(0..=15).contains(&value) {
                     return Err(JpegError::CorruptData(format!(
                         "lossless point transform must be 0-15, got {value}"
                     )));
@@ -229,7 +229,7 @@ impl TjHandle {
                 self.y_density = value;
             }
             TjParam::DensityUnits => {
-                if value < 0 || value > 2 {
+                if !(0..=2).contains(&value) {
                     return Err(JpegError::CorruptData(format!(
                         "density units must be 0-2, got {value}"
                     )));
