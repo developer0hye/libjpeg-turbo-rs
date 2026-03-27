@@ -39,7 +39,6 @@ fn neon_fdct_quantize(input: &[i16; 64], quant: &QuantDivisors, output: &mut [i1
     let mut dct_output: [i16; 64] = [0i16; 64];
     fdct::neon_fdct(input, &mut dct_output);
 
-    // Quantize using reciprocal multiply: result = (abs_coeff + quant/2) * recip >> 16
     let mut natural: [i16; 64] = [0i16; 64];
     // SAFETY: NEON is mandatory on aarch64 (ARMv8).
     unsafe {
@@ -118,6 +117,172 @@ unsafe fn neon_extract_fdct_quantize_inner(
         vreinterpretq_s16_u16(vmovl_u8(vld1_u8(plane_ptr.add(stride * 7)))),
         level_shift,
     );
+
+    neon_rows_fdct_quantize(
+        row0, row1, row2, row3, row4, row5, row6, row7, quant, output,
+    );
+}
+
+/// Fused 4:2:0 chroma downsample (16x16 → 8x8) + FDCT + quantize + zigzag.
+///
+/// # Safety
+/// `plane_ptr` must point to the top-left pixel of an interior 16x16 block.
+pub unsafe fn neon_downsample_h2v2_fdct_quantize(
+    plane_ptr: *const u8,
+    stride: usize,
+    quant: &QuantDivisors,
+    output: &mut [i16; 64],
+) {
+    neon_downsample_h2v2_fdct_quantize_inner(plane_ptr, stride, quant, output);
+}
+
+#[target_feature(enable = "neon")]
+unsafe fn neon_downsample_h2v2_fdct_quantize_inner(
+    plane_ptr: *const u8,
+    stride: usize,
+    quant: &QuantDivisors,
+    output: &mut [i16; 64],
+) {
+    use std::arch::aarch64::*;
+
+    let bias: uint16x8_t = vdupq_n_u16(2);
+    let level_shift: int16x8_t = vdupq_n_s16(128);
+
+    let row0 = neon_downsample_h2v2_row(plane_ptr, plane_ptr.add(stride), bias, level_shift);
+    let row1 = neon_downsample_h2v2_row(
+        plane_ptr.add(stride * 2),
+        plane_ptr.add(stride * 3),
+        bias,
+        level_shift,
+    );
+    let row2 = neon_downsample_h2v2_row(
+        plane_ptr.add(stride * 4),
+        plane_ptr.add(stride * 5),
+        bias,
+        level_shift,
+    );
+    let row3 = neon_downsample_h2v2_row(
+        plane_ptr.add(stride * 6),
+        plane_ptr.add(stride * 7),
+        bias,
+        level_shift,
+    );
+    let row4 = neon_downsample_h2v2_row(
+        plane_ptr.add(stride * 8),
+        plane_ptr.add(stride * 9),
+        bias,
+        level_shift,
+    );
+    let row5 = neon_downsample_h2v2_row(
+        plane_ptr.add(stride * 10),
+        plane_ptr.add(stride * 11),
+        bias,
+        level_shift,
+    );
+    let row6 = neon_downsample_h2v2_row(
+        plane_ptr.add(stride * 12),
+        plane_ptr.add(stride * 13),
+        bias,
+        level_shift,
+    );
+    let row7 = neon_downsample_h2v2_row(
+        plane_ptr.add(stride * 14),
+        plane_ptr.add(stride * 15),
+        bias,
+        level_shift,
+    );
+
+    neon_rows_fdct_quantize(
+        row0, row1, row2, row3, row4, row5, row6, row7, quant, output,
+    );
+}
+
+/// Fused 4:2:2 chroma downsample (16x8 → 8x8) + FDCT + quantize + zigzag.
+///
+/// # Safety
+/// `plane_ptr` must point to the top-left pixel of an interior 16x8 block.
+pub unsafe fn neon_downsample_h2v1_fdct_quantize(
+    plane_ptr: *const u8,
+    stride: usize,
+    quant: &QuantDivisors,
+    output: &mut [i16; 64],
+) {
+    neon_downsample_h2v1_fdct_quantize_inner(plane_ptr, stride, quant, output);
+}
+
+#[target_feature(enable = "neon")]
+unsafe fn neon_downsample_h2v1_fdct_quantize_inner(
+    plane_ptr: *const u8,
+    stride: usize,
+    quant: &QuantDivisors,
+    output: &mut [i16; 64],
+) {
+    use std::arch::aarch64::*;
+
+    let bias: uint16x8_t = vdupq_n_u16(1);
+    let level_shift: int16x8_t = vdupq_n_s16(128);
+
+    let row0 = neon_downsample_h2v1_row(plane_ptr, bias, level_shift);
+    let row1 = neon_downsample_h2v1_row(plane_ptr.add(stride), bias, level_shift);
+    let row2 = neon_downsample_h2v1_row(plane_ptr.add(stride * 2), bias, level_shift);
+    let row3 = neon_downsample_h2v1_row(plane_ptr.add(stride * 3), bias, level_shift);
+    let row4 = neon_downsample_h2v1_row(plane_ptr.add(stride * 4), bias, level_shift);
+    let row5 = neon_downsample_h2v1_row(plane_ptr.add(stride * 5), bias, level_shift);
+    let row6 = neon_downsample_h2v1_row(plane_ptr.add(stride * 6), bias, level_shift);
+    let row7 = neon_downsample_h2v1_row(plane_ptr.add(stride * 7), bias, level_shift);
+
+    neon_rows_fdct_quantize(
+        row0, row1, row2, row3, row4, row5, row6, row7, quant, output,
+    );
+}
+
+#[target_feature(enable = "neon")]
+unsafe fn neon_downsample_h2v2_row(
+    row0_ptr: *const u8,
+    row1_ptr: *const u8,
+    bias: std::arch::aarch64::uint16x8_t,
+    level_shift: std::arch::aarch64::int16x8_t,
+) -> std::arch::aarch64::int16x8_t {
+    use std::arch::aarch64::*;
+
+    let r0: uint8x16_t = vld1q_u8(row0_ptr);
+    let r1: uint8x16_t = vld1q_u8(row1_ptr);
+    let mut sum: uint16x8_t = vpadalq_u8(bias, r0);
+    sum = vpadalq_u8(sum, r1);
+    let avg_u8: uint8x8_t = vshrn_n_u16(sum, 2);
+    let avg_i16: int16x8_t = vreinterpretq_s16_u16(vmovl_u8(avg_u8));
+    vsubq_s16(avg_i16, level_shift)
+}
+
+#[target_feature(enable = "neon")]
+unsafe fn neon_downsample_h2v1_row(
+    row_ptr: *const u8,
+    bias: std::arch::aarch64::uint16x8_t,
+    level_shift: std::arch::aarch64::int16x8_t,
+) -> std::arch::aarch64::int16x8_t {
+    use std::arch::aarch64::*;
+
+    let row: uint8x16_t = vld1q_u8(row_ptr);
+    let sum: uint16x8_t = vpadalq_u8(bias, row);
+    let avg_u8: uint8x8_t = vshrn_n_u16(sum, 1);
+    let avg_i16: int16x8_t = vreinterpretq_s16_u16(vmovl_u8(avg_u8));
+    vsubq_s16(avg_i16, level_shift)
+}
+
+#[target_feature(enable = "neon")]
+unsafe fn neon_rows_fdct_quantize(
+    row0: std::arch::aarch64::int16x8_t,
+    row1: std::arch::aarch64::int16x8_t,
+    row2: std::arch::aarch64::int16x8_t,
+    row3: std::arch::aarch64::int16x8_t,
+    row4: std::arch::aarch64::int16x8_t,
+    row5: std::arch::aarch64::int16x8_t,
+    row6: std::arch::aarch64::int16x8_t,
+    row7: std::arch::aarch64::int16x8_t,
+    quant: &QuantDivisors,
+    output: &mut [i16; 64],
+) {
+    use std::arch::aarch64::*;
 
     // 8×8 transpose: row-major → column-major for FDCT pass 1
     // Step 1: vtrnq_s16 on pairs (swap within 2×2 blocks)
@@ -368,6 +533,72 @@ mod tests {
 
         neon_fdct_quantize(&input, &quant, &mut neon_output);
         scalar::scalar_fdct_quantize(&input, &quant, &mut scalar_output);
+
+        assert_eq!(neon_output, scalar_output);
+    }
+
+    fn scalar_downsample_block(
+        plane: &[u8],
+        stride: usize,
+        h_factor: usize,
+        v_factor: usize,
+    ) -> [i16; 64] {
+        let mut block = [0i16; 64];
+        for row in 0..8 {
+            for col in 0..8 {
+                let mut sum: u32 = 0;
+                for dy in 0..v_factor {
+                    for dx in 0..h_factor {
+                        sum += plane[(row * v_factor + dy) * stride + (col * h_factor + dx)] as u32;
+                    }
+                }
+                let avg = (sum + (h_factor * v_factor / 2) as u32) / (h_factor * v_factor) as u32;
+                block[row * 8 + col] = avg as i16 - 128;
+            }
+        }
+        block
+    }
+
+    #[test]
+    fn neon_downsample_h2v2_fdct_quantize_matches_scalar() {
+        let mut plane = [0u8; 16 * 16];
+        for row in 0..16 {
+            for col in 0..16 {
+                plane[row * 16 + col] = ((row * 17 + col * 13) & 0xFF) as u8;
+            }
+        }
+        let quant: QuantDivisors = make_quant([96u16; 64]);
+        let block = scalar_downsample_block(&plane, 16, 2, 2);
+
+        let mut neon_output = [0i16; 64];
+        let mut scalar_output = [0i16; 64];
+
+        unsafe {
+            neon_downsample_h2v2_fdct_quantize(plane.as_ptr(), 16, &quant, &mut neon_output);
+        }
+        scalar::scalar_fdct_quantize(&block, &quant, &mut scalar_output);
+
+        assert_eq!(neon_output, scalar_output);
+    }
+
+    #[test]
+    fn neon_downsample_h2v1_fdct_quantize_matches_scalar() {
+        let mut plane = [0u8; 16 * 8];
+        for row in 0..8 {
+            for col in 0..16 {
+                plane[row * 16 + col] = ((row * 29 + col * 11 + 7) & 0xFF) as u8;
+            }
+        }
+        let quant: QuantDivisors = make_quant([112u16; 64]);
+        let block = scalar_downsample_block(&plane, 16, 2, 1);
+
+        let mut neon_output = [0i16; 64];
+        let mut scalar_output = [0i16; 64];
+
+        unsafe {
+            neon_downsample_h2v1_fdct_quantize(plane.as_ptr(), 16, &quant, &mut neon_output);
+        }
+        scalar::scalar_fdct_quantize(&block, &quant, &mut scalar_output);
 
         assert_eq!(neon_output, scalar_output);
     }

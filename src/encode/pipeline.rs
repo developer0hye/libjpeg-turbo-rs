@@ -3831,6 +3831,38 @@ fn encode_downsampled_chroma_block(
     prev_dc: &mut i16,
     fdct_quantize_fn: fn(&[i16; 64], &QuantDivisors, &mut [i16; 64]),
 ) {
+    // Fused NEON path: downsample + FDCT + quantize + zigzag in one pass,
+    // eliminating the intermediate [i16; 64] downsampled block.
+    #[cfg(target_arch = "aarch64")]
+    {
+        let src_w: usize = 8 * h_factor;
+        let src_h: usize = 8 * v_factor;
+        if block_x + src_w <= plane_width && block_y + src_h <= plane_height {
+            let plane_ptr: *const u8 =
+                unsafe { plane.as_ptr().add(block_y * plane_width + block_x) };
+            let mut quantized = [0i16; 64];
+            if h_factor == 2 && v_factor == 2 {
+                unsafe {
+                    crate::simd::aarch64::neon_downsample_h2v2_fdct_quantize(
+                        plane_ptr, plane_width, quant_table, &mut quantized,
+                    );
+                }
+                HuffmanEncoder::encode_block(writer, &quantized, prev_dc, dc_table, ac_table);
+                return;
+            }
+            if h_factor == 2 && v_factor == 1 {
+                unsafe {
+                    crate::simd::aarch64::neon_downsample_h2v1_fdct_quantize(
+                        plane_ptr, plane_width, quant_table, &mut quantized,
+                    );
+                }
+                HuffmanEncoder::encode_block(writer, &quantized, prev_dc, dc_table, ac_table);
+                return;
+            }
+        }
+    }
+
+    // Scalar fallback: separate downsample + FDCT+quantize
     let mut block = [0i16; 64];
     downsample_chroma_block(
         plane,
