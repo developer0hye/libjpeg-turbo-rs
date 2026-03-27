@@ -7,7 +7,6 @@
 /// fixed-point computation *before* the right shift, exactly as libjpeg-turbo
 /// does, to prevent overflow when the shift result would be 128 (producing 256
 /// after a post-shift add).
-
 const SCALEBITS: i32 = 16;
 const ONE_HALF: i32 = 1 << (SCALEBITS - 1);
 /// Center offset for Cb/Cr, pre-shifted into fixed-point domain.
@@ -78,6 +77,7 @@ pub fn rgba_to_ycbcr_row(rgba: &[u8], y: &mut [u8], cb: &mut [u8], cr: &mut [u8]
 ///
 /// Supports any pixel format where R, G, B channels are at known byte offsets
 /// within each `bpp`-byte pixel (Rgbx, Bgrx, Xrgb, Xbgr, Argb, Abgr, etc.).
+#[allow(clippy::too_many_arguments)]
 pub fn generic_to_ycbcr_row(
     pixels: &[u8],
     y: &mut [u8],

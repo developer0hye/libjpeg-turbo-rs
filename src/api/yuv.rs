@@ -10,7 +10,7 @@
 /// Packed YUV format: Y plane concatenated with Cb plane then Cr plane.
 /// For grayscale, only the Y plane is present.
 use crate::api::raw_data::{compress_raw, decompress_raw};
-use crate::common::bufsize::{yuv_buf_size, yuv_plane_height, yuv_plane_size, yuv_plane_width};
+use crate::common::bufsize::{yuv_plane_height, yuv_plane_size, yuv_plane_width};
 use crate::common::error::{JpegError, Result};
 use crate::common::types::{PixelFormat, Subsampling};
 use crate::decode::color as decode_color;
@@ -104,7 +104,7 @@ pub fn encode_yuv_planes(
     validate_pixel_buffer(pixels, width, height, pixel_format)?;
 
     let is_gray: bool = is_grayscale_format(pixel_format);
-    let n_planes: usize = num_planes(pixel_format);
+    let _n_planes: usize = num_planes(pixel_format);
 
     // Compute plane dimensions
     let y_w: usize = yuv_plane_width(0, width, subsampling);
@@ -149,7 +149,7 @@ pub fn encode_yuv_planes(
     let mut full_cb: Vec<u8> = vec![0u8; y_w * y_h];
     let mut full_cr: Vec<u8> = vec![0u8; y_w * y_h];
 
-    let bpp: usize = pixel_format.bytes_per_pixel();
+    let _bpp: usize = pixel_format.bytes_per_pixel();
 
     // Convert each row
     match pixel_format {
@@ -489,8 +489,8 @@ fn detect_subsampling(raw: &crate::api::raw_data::RawImage) -> Result<Subsamplin
     let cb_h: usize = raw.plane_heights[1];
 
     // Compute ratios (use ceiling division for non-exact multiples)
-    let h_ratio: usize = (y_w + cb_w - 1) / cb_w;
-    let v_ratio: usize = (y_h + cb_h - 1) / cb_h;
+    let h_ratio: usize = y_w.div_ceil(cb_w);
+    let v_ratio: usize = y_h.div_ceil(cb_h);
 
     match (h_ratio, v_ratio) {
         (1, 1) => Ok(Subsampling::S444),

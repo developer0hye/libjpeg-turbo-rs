@@ -332,7 +332,7 @@ fn box_average(indices: &[usize], colors: &[[u8; 3]], counts: &[u64]) -> [u8; 3]
 /// Uses an NxNxN cube where N = cbrt(num_colors).
 fn build_palette_uniform(num_colors: usize) -> Vec<[u8; 3]> {
     let n: usize = (num_colors as f64).cbrt().floor() as usize;
-    let n: usize = n.max(1).min(6); // 6^3 = 216 max
+    let n: usize = n.clamp(1, 6); // 6^3 = 216 max
 
     let mut palette: Vec<[u8; 3]> = Vec::with_capacity(n * n * n);
     for r in 0..n {

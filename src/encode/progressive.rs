@@ -2,7 +2,6 @@
 ///
 /// Generates a simple progressive scan order following libjpeg-turbo's
 /// default progression (from jcparam.c simple_progression).
-
 /// Description of one progressive scan.
 #[derive(Debug, Clone)]
 pub struct ProgressiveScan {

@@ -160,8 +160,8 @@ unsafe fn neon_idct_4x4_core(cptr: *const i16, qptr: *const i16, output: &mut [u
         let quant_row7: int16x8_t = vld1q_s16(qptr.add(56));
 
         // Even part
-        let tmp0_l: int32x4_t = vshll_n_s16(vget_low_s16(row0), CONST_BITS as i32 + 1);
-        let tmp0_h: int32x4_t = vshll_n_s16(vget_high_s16(row0), CONST_BITS as i32 + 1);
+        let tmp0_l: int32x4_t = vshll_n_s16(vget_low_s16(row0), CONST_BITS + 1);
+        let tmp0_h: int32x4_t = vshll_n_s16(vget_high_s16(row0), CONST_BITS + 1);
 
         let z2: int16x8_t = vmulq_s16(row2, quant_row2);
         let z3: int16x8_t = vmulq_s16(row6, quant_row6);
@@ -245,7 +245,7 @@ unsafe fn neon_idct_4x4_core(cptr: *const i16, qptr: *const i16, output: &mut [u
     // Second pass of IDCT
 
     // Even part
-    let tmp0: int32x4_t = vshll_n_s16(col0, CONST_BITS as i32 + 1);
+    let tmp0: int32x4_t = vshll_n_s16(col0, CONST_BITS + 1);
     let mut tmp2: int32x4_t = vmull_lane_s16(col2, consts0, 0);
     tmp2 = vmlal_lane_s16(tmp2, col6, consts0, 1);
 
@@ -329,8 +329,8 @@ unsafe fn neon_idct_2x2_core(cptr: *const i16, qptr: *const i16, output: &mut [u
     // Pass 1: process columns
 
     // Even part
-    let tmp10_l: int32x4_t = vshll_n_s16(vget_low_s16(row0), CONST_BITS as i32 + 2);
-    let tmp10_h: int32x4_t = vshll_n_s16(vget_high_s16(row0), CONST_BITS as i32 + 2);
+    let tmp10_l: int32x4_t = vshll_n_s16(vget_low_s16(row0), CONST_BITS + 2);
+    let tmp10_h: int32x4_t = vshll_n_s16(vget_high_s16(row0), CONST_BITS + 2);
 
     // Odd part
     let mut tmp0_l: int32x4_t = vmull_lane_s16(vget_low_s16(row1), consts, 3);
@@ -369,7 +369,7 @@ unsafe fn neon_idct_2x2_core(cptr: *const i16, qptr: *const i16, output: &mut [u
     // Pass 2: process two rows
 
     // Even part: only col0 matters
-    let tmp10: int32x4_t = vshll_n_s16(vget_low_s16(cols_0246), CONST_BITS as i32 + 2);
+    let tmp10: int32x4_t = vshll_n_s16(vget_low_s16(cols_0246), CONST_BITS + 2);
 
     // Odd part
     let mut tmp0: int32x4_t = vmull_lane_s16(vget_low_s16(cols_1155), consts, 3);

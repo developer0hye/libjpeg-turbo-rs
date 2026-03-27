@@ -2,7 +2,6 @@
 ///
 /// Implements prediction and undifferencing for lossless JPEG
 /// as specified in ITU-T T.81 sections 14-15.
-
 /// Apply one of 7 lossless predictors.
 ///
 /// ra = left, rb = above, rc = upper-left (diagonal).

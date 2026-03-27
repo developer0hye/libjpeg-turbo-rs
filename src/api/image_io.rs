@@ -75,7 +75,7 @@ pub fn save_bmp<P: AsRef<Path>>(
     let file_size: u32 = 14 + 40 + pixel_data_size;
 
     // BMP file header (14 bytes)
-    writer.write_all(&[b'B', b'M'])?;
+    writer.write_all(b"BM")?;
     writer.write_all(&file_size.to_le_bytes())?;
     writer.write_all(&[0u8; 4])?; // reserved
     writer.write_all(&(14u32 + 40).to_le_bytes())?; // pixel data offset

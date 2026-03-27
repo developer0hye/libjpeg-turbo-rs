@@ -125,10 +125,8 @@ pub fn calc_output_dimensions(
     scale_num: u32,
     scale_denom: u32,
 ) -> (usize, usize) {
-    let out_width: usize =
-        (width * scale_num as usize + scale_denom as usize - 1) / scale_denom as usize;
-    let out_height: usize =
-        (height * scale_num as usize + scale_denom as usize - 1) / scale_denom as usize;
+    let out_width: usize = (width * scale_num as usize).div_ceil(scale_denom as usize);
+    let out_height: usize = (height * scale_num as usize).div_ceil(scale_denom as usize);
     (out_width, out_height)
 }
 

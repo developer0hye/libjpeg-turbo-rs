@@ -3,7 +3,6 @@
 ///
 /// Input: 64 dequantized coefficients in natural (row-major) order.
 /// Output: 64 spatial-domain sample values (not yet level-shifted or clamped).
-
 const CONST_BITS: i32 = 13;
 const PASS1_BITS: i32 = 2;
 const F_0_298: i32 = 2446;
@@ -29,6 +28,7 @@ fn descale(x: i32, n: i32) -> i32 {
 /// Uses wrapping arithmetic to match C's implicit i32 overflow behavior,
 /// which is safe and correct for the IDCT algorithm (especially with 12-bit input).
 #[inline(always)]
+#[allow(clippy::too_many_arguments)]
 fn idct_1d(s0: i32, s1: i32, s2: i32, s3: i32, s4: i32, s5: i32, s6: i32, s7: i32) -> [i32; 8] {
     // Even part
     let tmp0 = s0;

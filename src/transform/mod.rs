@@ -45,20 +45,15 @@ impl Default for TransformInfo {
 ///
 /// Controls which APP and COM markers are preserved when writing transformed output.
 /// Corresponds to jpegtran's `-copy` option: `a` (all), `n` (none), `i` (ICC only).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum MarkerCopyMode {
     /// Copy all APP and COM markers (default). Corresponds to `-copy all` / TJXOPT default.
+    #[default]
     All,
     /// Copy no markers. Corresponds to `-copy none` / TJXOPT_COPYNONE.
     None,
     /// Copy only ICC profile (APP2) markers. Corresponds to `-copy icc`.
     IccOnly,
-}
-
-impl Default for MarkerCopyMode {
-    fn default() -> Self {
-        MarkerCopyMode::All
-    }
 }
 
 impl From<bool> for MarkerCopyMode {
@@ -110,6 +105,7 @@ pub struct TransformOptions {
     /// Called once per block after the spatial transform is applied.
     /// Arguments: (block: &mut [i16; 64], component_index: usize, block_x: usize, block_y: usize)
     /// Corresponds to `tjtransform.customFilter`.
+    #[allow(clippy::type_complexity)]
     pub custom_filter: Option<Box<dyn Fn(&mut [i16; 64], usize, usize, usize)>>,
 }
 
