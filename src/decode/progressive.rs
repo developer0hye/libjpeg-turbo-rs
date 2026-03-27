@@ -66,39 +66,56 @@ pub fn decode_ac_first(
         return Ok(());
     }
 
+    let se_usize = se as usize;
     let mut k = ss as usize;
-    while k <= se as usize {
+    while k <= se_usize {
         let peek = reader.peek_bits(16);
-        let (symbol, code_len) = {
-            let (s, l) = ac_table.lookup_fast(peek);
-            if l > 0 {
-                (s, l)
-            } else {
-                ac_table.lookup(peek)?
-            }
-        };
-        reader.skip_bits(code_len);
 
-        let run_length = (symbol >> 4) as usize;
-        let bit_size = symbol & 0x0F;
-
-        if bit_size != 0 {
-            k += run_length;
-            if k > se as usize {
+        // Fast AC path: pre-computed coefficient from combined table entry.
+        // When al=0, this avoids a separate read_bits + sign-extend.
+        let (ac_entry, symbol, code_len) = ac_table.lookup_combined(peek);
+        if ac_entry != 0 && al == 0 {
+            let total_bits: u8 = (ac_entry & 0x0F) as u8;
+            let run: usize = ((ac_entry >> 4) & 0x0F) as usize;
+            let coeff: i16 = ac_entry >> 8;
+            k += run;
+            if k > se_usize {
                 return Err(JpegError::CorruptData(
                     "progressive AC coefficient index out of bounds".into(),
                 ));
             }
-            let extra_bits = reader.read_bits(bit_size);
-            let coeff = extend(extra_bits, bit_size);
-            coeffs[ZIGZAG_ORDER[k]] = coeff << al;
+            reader.skip_bits(total_bits);
+            // SAFETY: k <= se <= 63, ZIGZAG_ORDER values are all < 64.
+            unsafe {
+                *coeffs.get_unchecked_mut(*ZIGZAG_ORDER.get_unchecked(k)) = coeff;
+            }
             k += 1;
+            continue;
+        }
+
+        if code_len > 0 {
+            reader.skip_bits(code_len);
         } else {
-            if run_length == 15 {
-                // ZRL: skip 16 zero positions
+            let (s, l) = ac_table.lookup(peek)?;
+            reader.skip_bits(l);
+            let run_length = (s >> 4) as usize;
+            let bit_size = s & 0x0F;
+            if bit_size != 0 {
+                k += run_length;
+                if k > se_usize {
+                    return Err(JpegError::CorruptData(
+                        "progressive AC coefficient index out of bounds".into(),
+                    ));
+                }
+                let extra_bits = reader.read_bits(bit_size);
+                let coeff = extend(extra_bits, bit_size);
+                unsafe {
+                    *coeffs.get_unchecked_mut(*ZIGZAG_ORDER.get_unchecked(k)) = coeff << al;
+                }
+                k += 1;
+            } else if run_length == 15 {
                 k += 16;
             } else {
-                // EOB run: (1 << run_length) + extra_bits - 1 remaining blocks
                 *eob_run = (1u16 << run_length) - 1;
                 if run_length > 0 {
                     let extra = reader.read_bits(run_length as u8);
@@ -106,6 +123,35 @@ pub fn decode_ac_first(
                 }
                 return Ok(());
             }
+            continue;
+        }
+
+        let run_length = (symbol >> 4) as usize;
+        let bit_size = symbol & 0x0F;
+
+        if bit_size != 0 {
+            k += run_length;
+            if k > se_usize {
+                return Err(JpegError::CorruptData(
+                    "progressive AC coefficient index out of bounds".into(),
+                ));
+            }
+            let extra_bits = reader.read_bits(bit_size);
+            let coeff = extend(extra_bits, bit_size);
+            // SAFETY: k <= se <= 63, ZIGZAG_ORDER values are all < 64.
+            unsafe {
+                *coeffs.get_unchecked_mut(*ZIGZAG_ORDER.get_unchecked(k)) = coeff << al;
+            }
+            k += 1;
+        } else if run_length == 15 {
+            k += 16;
+        } else {
+            *eob_run = (1u16 << run_length) - 1;
+            if run_length > 0 {
+                let extra = reader.read_bits(run_length as u8);
+                *eob_run += extra;
+            }
+            return Ok(());
         }
     }
 
@@ -158,35 +204,29 @@ pub fn decode_ac_refine(
             } else {
                 new_val = 0;
                 if r != 15 {
-                    // EOB run: eob_run = (1 << r) + extra.
-                    // Unlike AC first, AC refine decrements eob_run for the
-                    // current block in the EOB processing below, so we use the
-                    // full count here (matching libjpeg-turbo's jdphuff.c).
                     *eob_run = 1u16 << r;
                     if r > 0 {
                         let extra = reader.read_bits(r as u8);
                         *eob_run += extra;
                     }
-                    // Fall through to refine remaining coefficients
                     break;
                 }
-                // ZRL: r stays 15, will be used below
             }
 
             // Scan through coefficients: apply correction bits to nonzero,
             // count zero-valued positions for run-length, then place new value.
+            // SAFETY: k <= se <= 63, ZIGZAG_ORDER values are all < 64.
             loop {
                 if k > se {
                     break;
                 }
-                let natural = ZIGZAG_ORDER[k];
-                if coeffs[natural] != 0 {
-                    // Already nonzero: read one correction bit
-                    apply_correction_bit(reader, &mut coeffs[natural], p1);
+                let natural = unsafe { *ZIGZAG_ORDER.get_unchecked(k) };
+                let c = unsafe { *coeffs.get_unchecked(natural) };
+                if c != 0 {
+                    apply_correction_bit(reader, unsafe { coeffs.get_unchecked_mut(natural) }, p1);
                 } else {
                     r -= 1;
                     if r < 0 {
-                        // Found the target zero position
                         break;
                     }
                 }
@@ -195,7 +235,8 @@ pub fn decode_ac_refine(
 
             // Store new nonzero coefficient (if this was a nonzero symbol)
             if new_val != 0 && k <= se {
-                coeffs[ZIGZAG_ORDER[k]] = new_val;
+                let natural = unsafe { *ZIGZAG_ORDER.get_unchecked(k) };
+                unsafe { *coeffs.get_unchecked_mut(natural) = new_val };
             }
             k += 1;
         }
@@ -204,9 +245,10 @@ pub fn decode_ac_refine(
     // EOB processing: refine all remaining nonzero coefficients in this block
     if *eob_run > 0 {
         while k <= se {
-            let natural = ZIGZAG_ORDER[k];
-            if coeffs[natural] != 0 {
-                apply_correction_bit(reader, &mut coeffs[natural], p1);
+            // SAFETY: k <= se <= 63, ZIGZAG_ORDER values are all < 64.
+            let natural = unsafe { *ZIGZAG_ORDER.get_unchecked(k) };
+            if unsafe { *coeffs.get_unchecked(natural) } != 0 {
+                apply_correction_bit(reader, unsafe { coeffs.get_unchecked_mut(natural) }, p1);
             }
             k += 1;
         }

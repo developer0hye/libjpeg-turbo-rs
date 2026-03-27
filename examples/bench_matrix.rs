@@ -23,6 +23,12 @@ fn main() {
         ("tests/fixtures/graphic_1920x1080_420.jpg", 500),
         // Restart markers
         ("tests/fixtures/photo_640x480_420_rst.jpg", 5000),
+        // Progressive (multi-scan)
+        ("tests/fixtures/photo_640x480_444_prog.jpg", 5000),
+        ("tests/fixtures/photo_640x480_422_prog.jpg", 5000),
+        ("tests/fixtures/photo_1920x1080_420_prog.jpg", 500),
+        ("tests/fixtures/photo_1920x1080_444_prog.jpg", 500),
+        ("tests/fixtures/photo_3840x2160_420_prog.jpg", 100),
     ];
 
     println!(
