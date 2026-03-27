@@ -362,6 +362,7 @@ unsafe fn neon_fdct_core(input: *const i16, output: *mut i16) {
 /// # Safety
 /// Requires aarch64 NEON. `output` must point to a 64-element i16 array.
 #[target_feature(enable = "neon")]
+#[allow(clippy::too_many_arguments)]
 pub unsafe fn neon_fdct_from_cols(
     col0_in: int16x8_t,
     col1_in: int16x8_t,
@@ -395,8 +396,8 @@ pub unsafe fn neon_fdct_from_cols(
     let tmp11: int16x8_t = vaddq_s16(tmp1, tmp2);
     let tmp12: int16x8_t = vsubq_s16(tmp1, tmp2);
 
-    let mut col0: int16x8_t = vshlq_n_s16(vaddq_s16(tmp10, tmp11), PASS1_BITS as _);
-    let mut col4: int16x8_t = vshlq_n_s16(vsubq_s16(tmp10, tmp11), PASS1_BITS as _);
+    let col0: int16x8_t = vshlq_n_s16(vaddq_s16(tmp10, tmp11), PASS1_BITS as _);
+    let col4: int16x8_t = vshlq_n_s16(vsubq_s16(tmp10, tmp11), PASS1_BITS as _);
 
     let tmp12_add_tmp13: int16x8_t = vaddq_s16(tmp12, tmp13);
     let z1_l: int32x4_t = vmull_lane_s16(vget_low_s16(tmp12_add_tmp13), consts0, 2);
@@ -404,14 +405,14 @@ pub unsafe fn neon_fdct_from_cols(
 
     let col2_l: int32x4_t = vmlal_lane_s16(z1_l, vget_low_s16(tmp13), consts0, 3);
     let col2_h: int32x4_t = vmlal_lane_s16(z1_h, vget_high_s16(tmp13), consts0, 3);
-    let mut col2: int16x8_t = vcombine_s16(
+    let col2: int16x8_t = vcombine_s16(
         vrshrn_n_s32(col2_l, DESCALE_P1 as _),
         vrshrn_n_s32(col2_h, DESCALE_P1 as _),
     );
 
     let col6_l: int32x4_t = vmlal_lane_s16(z1_l, vget_low_s16(tmp12), consts1, 3);
     let col6_h: int32x4_t = vmlal_lane_s16(z1_h, vget_high_s16(tmp12), consts1, 3);
-    let mut col6: int16x8_t = vcombine_s16(
+    let col6: int16x8_t = vcombine_s16(
         vrshrn_n_s32(col6_l, DESCALE_P1 as _),
         vrshrn_n_s32(col6_h, DESCALE_P1 as _),
     );
@@ -454,7 +455,7 @@ pub unsafe fn neon_fdct_from_cols(
     tmp4_h = vaddq_s32(tmp4_h, z1_h);
     tmp4_l = vaddq_s32(tmp4_l, z3_l);
     tmp4_h = vaddq_s32(tmp4_h, z3_h);
-    let mut col7: int16x8_t = vcombine_s16(
+    let col7: int16x8_t = vcombine_s16(
         vrshrn_n_s32(tmp4_l, DESCALE_P1 as _),
         vrshrn_n_s32(tmp4_h, DESCALE_P1 as _),
     );
@@ -463,7 +464,7 @@ pub unsafe fn neon_fdct_from_cols(
     tmp5_h = vaddq_s32(tmp5_h, z2_h);
     tmp5_l = vaddq_s32(tmp5_l, z4_l);
     tmp5_h = vaddq_s32(tmp5_h, z4_h);
-    let mut col5: int16x8_t = vcombine_s16(
+    let col5: int16x8_t = vcombine_s16(
         vrshrn_n_s32(tmp5_l, DESCALE_P1 as _),
         vrshrn_n_s32(tmp5_h, DESCALE_P1 as _),
     );
@@ -472,7 +473,7 @@ pub unsafe fn neon_fdct_from_cols(
     tmp6_h = vaddq_s32(tmp6_h, z2_h);
     tmp6_l = vaddq_s32(tmp6_l, z3_l);
     tmp6_h = vaddq_s32(tmp6_h, z3_h);
-    let mut col3: int16x8_t = vcombine_s16(
+    let col3: int16x8_t = vcombine_s16(
         vrshrn_n_s32(tmp6_l, DESCALE_P1 as _),
         vrshrn_n_s32(tmp6_h, DESCALE_P1 as _),
     );
@@ -481,7 +482,7 @@ pub unsafe fn neon_fdct_from_cols(
     tmp7_h = vaddq_s32(tmp7_h, z1_h);
     tmp7_l = vaddq_s32(tmp7_l, z4_l);
     tmp7_h = vaddq_s32(tmp7_h, z4_h);
-    let mut col1: int16x8_t = vcombine_s16(
+    let col1: int16x8_t = vcombine_s16(
         vrshrn_n_s32(tmp7_l, DESCALE_P1 as _),
         vrshrn_n_s32(tmp7_h, DESCALE_P1 as _),
     );

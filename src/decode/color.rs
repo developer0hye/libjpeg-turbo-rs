@@ -62,6 +62,7 @@ pub fn ycbcr_to_bgra_row(y: &[u8], cb: &[u8], cr: &[u8], bgra: &mut [u8], width:
 ///
 /// Places R, G, B at `r_off`, `g_off`, `b_off` within each `bpp`-byte pixel.
 /// The remaining byte (padding/alpha) is set to 255.
+#[allow(clippy::too_many_arguments)]
 pub fn ycbcr_to_generic_4bpp_row(
     y: &[u8],
     cb: &[u8],

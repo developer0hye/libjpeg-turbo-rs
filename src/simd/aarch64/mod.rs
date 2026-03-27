@@ -270,6 +270,7 @@ unsafe fn neon_downsample_h2v1_row(
 }
 
 #[target_feature(enable = "neon")]
+#[allow(clippy::too_many_arguments)]
 unsafe fn neon_rows_fdct_quantize(
     row0: std::arch::aarch64::int16x8_t,
     row1: std::arch::aarch64::int16x8_t,

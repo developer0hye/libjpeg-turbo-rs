@@ -195,7 +195,7 @@ impl<'a> MarkerReader<'a> {
                         restart_interval,
                     });
 
-                    let is_progressive = frame.as_ref().map_or(false, |f| f.is_progressive);
+                    let is_progressive = frame.as_ref().is_some_and(|f| f.is_progressive);
                     if !is_progressive {
                         // Baseline: single scan, stop here
                         break;
@@ -633,8 +633,8 @@ impl<'a> MarkerReader<'a> {
             }
 
             let mut bits = [0u8; 17];
-            for i in 1..=16 {
-                bits[i] = self.read_u8()?;
+            for b in &mut bits[1..=16] {
+                *b = self.read_u8()?;
             }
 
             let total: usize = bits[1..=16].iter().map(|&b| b as usize).sum();

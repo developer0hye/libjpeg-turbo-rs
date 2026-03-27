@@ -340,13 +340,13 @@ impl<'a> Encoder<'a> {
                         Subsampling::S411 => 32,
                     }
                 };
-                let mcus_x = ((self.width + mcu_w - 1) / mcu_w) as u16;
+                let mcus_x = self.width.div_ceil(mcu_w) as u16;
                 n.saturating_mul(mcus_x)
             }
         }
     }
 
-    fn effective_quant_tables(&self) -> [Option<[u16; 64]>; 4] {
+    fn _effective_quant_tables(&self) -> [Option<[u16; 64]>; 4] {
         let mut result = self.custom_quant_tables;
         if self.force_baseline {
             for table in result.iter_mut().flatten() {

@@ -258,7 +258,7 @@ impl ScalingFactor {
     /// The IDCT block output size for this scaling factor.
     /// 8 for full, 4 for 1/2, 2 for 1/4, 1 for 1/8.
     pub fn block_size(self) -> usize {
-        let ratio_x8 = (self.num * 8 + self.denom - 1) / self.denom;
+        let ratio_x8 = (self.num * 8).div_ceil(self.denom);
         match ratio_x8 {
             0 => 1,
             1 => 1,
@@ -270,7 +270,7 @@ impl ScalingFactor {
 
     /// Compute scaled output dimension: ceil(input_dim * num / denom).
     pub fn scale_dim(self, input_dim: usize) -> usize {
-        (input_dim * self.num as usize + self.denom as usize - 1) / self.denom as usize
+        (input_dim * self.num as usize).div_ceil(self.denom as usize)
     }
 }
 
@@ -318,9 +318,10 @@ pub struct SavedMarker {
 ///
 /// Controls which APP and COM markers are preserved during decoding,
 /// matching libjpeg-turbo's `jpeg_save_markers()` / `TJPARAM_SAVEMARKERS`.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub enum MarkerSaveConfig {
     /// Do not save any markers (default).
+    #[default]
     None,
     /// Save all APP (0xE0-0xEF) and COM (0xFE) markers.
     All,
@@ -328,12 +329,6 @@ pub enum MarkerSaveConfig {
     AppOnly,
     /// Save only the specified marker codes.
     Specific(Vec<u8>),
-}
-
-impl Default for MarkerSaveConfig {
-    fn default() -> Self {
-        MarkerSaveConfig::None
-    }
 }
 
 /// Progressive scan script entry.

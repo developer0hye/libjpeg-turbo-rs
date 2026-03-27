@@ -50,8 +50,8 @@ impl HuffmanTable {
         // Generate code values for each symbol (JPEG spec Figure C.1)
         let mut huffcode = Vec::with_capacity(total_symbols);
         let mut code: u32 = 0;
-        for length in 1..=16usize {
-            for _ in 0..bits[length] {
+        for (length, &bit_count) in bits.iter().enumerate().skip(1) {
+            for _ in 0..bit_count {
                 huffcode.push((code, length));
                 code += 1;
             }

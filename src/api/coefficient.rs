@@ -121,8 +121,8 @@ pub fn read_coefficients(data: &[u8]) -> Result<JpegCoefficients> {
 
     let mcu_w = max_h * 8;
     let mcu_h = max_v * 8;
-    let mcus_x = (frame.width as usize + mcu_w - 1) / mcu_w;
-    let mcus_y = (frame.height as usize + mcu_h - 1) / mcu_h;
+    let mcus_x = (frame.width as usize).div_ceil(mcu_w);
+    let mcus_y = (frame.height as usize).div_ceil(mcu_h);
 
     // Collect quant tables in natural (row-major) order for write_dqt compatibility
     let quant_tables: Vec<[u16; 64]> = metadata
@@ -185,13 +185,13 @@ pub fn write_coefficients(coeffs: &JpegCoefficients) -> Result<Vec<u8>> {
     let ac_chroma_table =
         build_huff_table(&tables::AC_CHROMINANCE_BITS, &tables::AC_CHROMINANCE_VALUES);
 
-    let max_h = coeffs
+    let _max_h = coeffs
         .components
         .iter()
         .map(|c| c.h_sampling as usize)
         .max()
         .unwrap_or(1);
-    let max_v = coeffs
+    let _max_v = coeffs
         .components
         .iter()
         .map(|c| c.v_sampling as usize)
@@ -390,8 +390,8 @@ pub fn transform_jpeg(data: &[u8], op: TransformOp) -> Result<Vec<u8>> {
             }
         } else {
             // Per-block only transform (shouldn't reach here for None)
-            for i in 0..comp.blocks.len() {
-                transform_fn(&comp.blocks[i], &mut new_blocks[i]);
+            for (i, new_block) in new_blocks.iter_mut().enumerate() {
+                transform_fn(&comp.blocks[i], new_block);
             }
         }
 
@@ -482,8 +482,8 @@ pub fn transform_jpeg_with_options(data: &[u8], options: &TransformOptions) -> R
             | TransformOp::Rot270
     );
 
-    let width_aligned: bool = (coeffs.width as usize) % imcu_w == 0;
-    let height_aligned: bool = (coeffs.height as usize) % imcu_h == 0;
+    let width_aligned: bool = (coeffs.width as usize).is_multiple_of(imcu_w);
+    let height_aligned: bool = (coeffs.height as usize).is_multiple_of(imcu_h);
 
     let has_partial_width: bool = needs_width_aligned && !width_aligned;
     let has_partial_height: bool = needs_height_aligned && !height_aligned;
@@ -520,8 +520,8 @@ pub fn transform_jpeg_with_options(data: &[u8], options: &TransformOptions) -> R
 
         // Trim coefficient arrays for each component.
         for comp in &mut coeffs.components {
-            let new_bx: usize = (trimmed_w + 7) / 8 * comp.h_sampling as usize / max_h;
-            let new_by: usize = (trimmed_h + 7) / 8 * comp.v_sampling as usize / max_v;
+            let new_bx: usize = trimmed_w.div_ceil(8) * comp.h_sampling as usize / max_h;
+            let new_by: usize = trimmed_h.div_ceil(8) * comp.v_sampling as usize / max_v;
 
             // Only need to rebuild if we actually trimmed columns or rows.
             if new_bx < comp.blocks_x || new_by < comp.blocks_y {
@@ -546,8 +546,8 @@ pub fn transform_jpeg_with_options(data: &[u8], options: &TransformOptions) -> R
         let crop_y_blocks: usize = crop.y / 8;
         let crop_w: usize = crop.width.min(coeffs.width as usize - crop.x);
         let crop_h: usize = crop.height.min(coeffs.height as usize - crop.y);
-        let crop_w_blocks: usize = (crop_w + 7) / 8;
-        let crop_h_blocks: usize = (crop_h + 7) / 8;
+        let crop_w_blocks: usize = crop_w.div_ceil(8);
+        let crop_h_blocks: usize = crop_h.div_ceil(8);
 
         coeffs.width = crop_w.min(crop_w_blocks * 8) as u16;
         coeffs.height = crop_h.min(crop_h_blocks * 8) as u16;
@@ -640,8 +640,8 @@ pub fn transform_jpeg_with_options(data: &[u8], options: &TransformOptions) -> R
                     }
                 }
             } else {
-                for i in 0..comp.blocks.len() {
-                    transform_fn(&comp.blocks[i], &mut new_blocks[i]);
+                for (i, new_block) in new_blocks.iter_mut().enumerate() {
+                    transform_fn(&comp.blocks[i], new_block);
                 }
             }
 
@@ -702,13 +702,13 @@ fn write_coefficients_optimized(coeffs: &JpegCoefficients) -> Result<Vec<u8>> {
     let num_components: usize = coeffs.components.len();
     let is_grayscale: bool = num_components == 1;
 
-    let max_h: usize = coeffs
+    let _max_h: usize = coeffs
         .components
         .iter()
         .map(|c| c.h_sampling as usize)
         .max()
         .unwrap_or(1);
-    let max_v: usize = coeffs
+    let _max_v: usize = coeffs
         .components
         .iter()
         .map(|c| c.v_sampling as usize)
@@ -917,16 +917,14 @@ fn decode_baseline_coefficients(
         for mcu_x in 0..mcus_x {
             if metadata.restart_interval > 0
                 && mcu_count > 0
-                && mcu_count % metadata.restart_interval == 0
+                && mcu_count.is_multiple_of(metadata.restart_interval)
             {
                 bit_reader.reset();
                 mcu_decoder.reset();
             }
 
-            let mut plan_idx = 0;
             for (comp_idx, comp) in comp_data.iter_mut().enumerate() {
-                let plan = &mcu_plan[plan_idx];
-                plan_idx += 1;
+                let plan = &mcu_plan[comp_idx];
 
                 let h_blocks = frame.components[comp_idx].horizontal_sampling as usize;
                 let v_blocks = frame.components[comp_idx].vertical_sampling as usize;
@@ -999,7 +997,7 @@ fn decode_arithmetic_coefficients(
         .iter()
         .map(|c| (c.h_sampling as usize, c.v_sampling as usize, c.blocks_x))
         .collect();
-    let mut coeffs = [0i16; 64];
+    let mut coeffs: [i16; 64];
 
     for mcu_y in 0..mcus_y {
         for mcu_x in 0..mcus_x {
@@ -1036,13 +1034,13 @@ fn decode_progressive_coefficients(
     use crate::decode::progressive;
 
     let frame = &metadata.frame;
-    let max_h = frame
+    let _max_h = frame
         .components
         .iter()
         .map(|c| c.horizontal_sampling as usize)
         .max()
         .unwrap_or(1);
-    let max_v = frame
+    let _max_v = frame
         .components
         .iter()
         .map(|c| c.vertical_sampling as usize)
@@ -1086,7 +1084,7 @@ fn decode_progressive_coefficients(
                 for mcu_x in 0..mcus_x {
                     if scan_info.restart_interval > 0
                         && mcu_count > 0
-                        && mcu_count % scan_info.restart_interval == 0
+                        && mcu_count.is_multiple_of(scan_info.restart_interval)
                     {
                         bit_reader.reset();
                         dc_preds = [0i16; 4];
@@ -1178,7 +1176,10 @@ fn decode_progressive_coefficients(
 
             for by in 0..comp_blocks_y {
                 for bx in 0..comp_blocks_x {
-                    if restart_interval > 0 && mcu_count > 0 && mcu_count % restart_interval == 0 {
+                    if restart_interval > 0
+                        && mcu_count > 0
+                        && mcu_count.is_multiple_of(restart_interval)
+                    {
                         bit_reader.reset();
                         dc_pred = 0;
                         eob_run = 0;

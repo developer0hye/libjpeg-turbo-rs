@@ -41,8 +41,7 @@ fn upsample_generic_nearest(
         // Build one upsampled row (horizontal replication)
         let out_y_base: usize = y * v_factor;
         let first_out_row: usize = out_y_base * out_stride;
-        for x in 0..in_width {
-            let val: u8 = in_row[x];
+        for (x, &val) in in_row.iter().enumerate() {
             let out_x: usize = x * h_factor;
             for dx in 0..h_factor {
                 output[first_out_row + out_x + dx] = val;
@@ -150,6 +149,7 @@ pub struct Decoder<'a> {
     /// Enable merged upsampling (combined upsample + color convert for H2V1/H2V2).
     pub(crate) merged_upsample: bool,
     /// Custom marker processor callbacks, keyed by marker code.
+    #[allow(clippy::type_complexity)]
     marker_processors: std::collections::HashMap<u8, Box<dyn Fn(&[u8]) -> Option<Vec<u8>>>>,
 }
 
@@ -445,6 +445,7 @@ impl<'a> Decoder<'a> {
     /// Dispatch color conversion for one row based on the target pixel format.
     /// `row_index` is the output row number, used for ordered dithering in RGB565 mode.
     #[inline(always)]
+    #[allow(clippy::too_many_arguments)]
     fn color_convert_row(
         &self,
         format: PixelFormat,
@@ -518,9 +519,9 @@ impl<'a> Decoder<'a> {
     ) {
         #[cfg(all(target_arch = "aarch64", feature = "simd"))]
         {
-            return crate::simd::aarch64::upsample::neon_fancy_upsample_h2v2(
+            crate::simd::aarch64::upsample::neon_fancy_upsample_h2v2(
                 input, in_width, in_height, output, out_width,
-            );
+            )
         }
 
         #[cfg(not(all(target_arch = "aarch64", feature = "simd")))]
@@ -729,6 +730,7 @@ impl<'a> Decoder<'a> {
 
         // Allocate component planes (full MCU-aligned size, uninitialized).
         // SAFETY: The MCU decode loop + IDCT writes every pixel before reading.
+        #[allow(clippy::uninit_vec)]
         let mut component_planes: Vec<Vec<u8>> = frame
             .components
             .iter()
@@ -778,7 +780,10 @@ impl<'a> Decoder<'a> {
             let restart_interval: u16 = self.metadata.restart_interval;
             for mcu_y in 0..mcus_y {
                 for mcu_x in 0..mcus_x {
-                    if restart_interval > 0 && mcu_count > 0 && mcu_count % restart_interval == 0 {
+                    if restart_interval > 0
+                        && mcu_count > 0
+                        && mcu_count.is_multiple_of(restart_interval)
+                    {
                         bit_reader.reset();
                         mcu_decoder.reset();
                     }
@@ -829,19 +834,17 @@ impl<'a> Decoder<'a> {
                 for mcu_x in 0..mcus_x {
                     if self.metadata.restart_interval > 0
                         && mcu_count > 0
-                        && mcu_count % self.metadata.restart_interval == 0
+                        && mcu_count.is_multiple_of(self.metadata.restart_interval)
                     {
                         bit_reader.reset();
                         mcu_decoder.reset();
                     }
 
-                    let mut plan_idx = 0;
                     let mut mcu_error = false;
 
                     for (comp_idx, layout) in comp_layouts.iter().enumerate() {
                         let qt_values = &quant_tables[comp_idx].values;
-                        let plan = &mcu_plan[plan_idx];
-                        plan_idx += 1;
+                        let plan = &mcu_plan[comp_idx];
 
                         for v in 0..layout.v_blocks {
                             for h in 0..layout.h_blocks {
@@ -926,7 +929,7 @@ impl<'a> Decoder<'a> {
         &self,
         frame: &FrameHeader,
         quant_tables: &[&QuantTable],
-        num_components: usize,
+        _num_components: usize,
         mcus_x: usize,
         mcus_y: usize,
         block_size: usize,
@@ -936,6 +939,7 @@ impl<'a> Decoder<'a> {
         let scan = &self.metadata.scan;
 
         // Allocate component planes
+        #[allow(clippy::uninit_vec)]
         let mut component_planes: Vec<Vec<u8>> = frame
             .components
             .iter()
@@ -992,7 +996,7 @@ impl<'a> Decoder<'a> {
             arith.set_ac_conditioning(i, self.metadata.arith_ac_params[i]);
         }
 
-        let mut coeffs = [0i16; 64];
+        let mut coeffs: [i16; 64];
 
         for mcu_y in 0..mcus_y {
             for mcu_x in 0..mcus_x {
@@ -1044,6 +1048,7 @@ impl<'a> Decoder<'a> {
 
     /// Decode arithmetic progressive (SOF10) into component planes.
     /// Accumulates DCT coefficients across all scans using ArithDecoder, then runs IDCT.
+    #[allow(clippy::too_many_arguments)]
     fn decode_arithmetic_progressive_planes(
         &self,
         frame: &FrameHeader,
@@ -1182,6 +1187,7 @@ impl<'a> Decoder<'a> {
         }
 
         // IDCT all blocks into component planes
+        #[allow(clippy::uninit_vec)]
         let mut component_planes: Vec<Vec<u8>> = comp_infos
             .iter()
             .map(|ci| {
@@ -1216,6 +1222,7 @@ impl<'a> Decoder<'a> {
 
     /// Decode progressive (multi-scan) into component planes.
     /// Accumulates DCT coefficients across all scans, then runs IDCT.
+    #[allow(clippy::too_many_arguments)]
     fn decode_progressive_planes(
         &self,
         frame: &FrameHeader,
@@ -1274,6 +1281,7 @@ impl<'a> Decoder<'a> {
         }
 
         // IDCT all blocks into component planes
+        #[allow(clippy::uninit_vec)]
         let mut component_planes: Vec<Vec<u8>> = comp_infos
             .iter()
             .map(|ci| {
@@ -1309,6 +1317,7 @@ impl<'a> Decoder<'a> {
     }
 
     /// Decode one progressive scan's entropy data into the coefficient buffers.
+    #[allow(clippy::too_many_arguments)]
     fn decode_progressive_scan(
         &self,
         frame: &FrameHeader,
@@ -1389,6 +1398,7 @@ impl<'a> Decoder<'a> {
     }
 
     /// Decode an interleaved progressive scan (multiple components, DC only).
+    #[allow(clippy::too_many_arguments)]
     fn decode_progressive_interleaved(
         &self,
         scan_info: &ScanInfo,
@@ -1412,7 +1422,7 @@ impl<'a> Decoder<'a> {
             for mcu_x in 0..mcus_x {
                 if scan_info.restart_interval > 0
                     && mcu_count > 0
-                    && mcu_count % scan_info.restart_interval == 0
+                    && mcu_count.is_multiple_of(scan_info.restart_interval)
                 {
                     bit_reader.reset();
                     dc_preds = [0i16; 4];
@@ -1516,7 +1526,10 @@ impl<'a> Decoder<'a> {
 
         for by in 0..ci.blocks_y {
             for bx in 0..ci.blocks_x {
-                if restart_interval > 0 && mcu_count > 0 && mcu_count % restart_interval == 0 {
+                if restart_interval > 0
+                    && mcu_count > 0
+                    && mcu_count.is_multiple_of(restart_interval)
+                {
                     bit_reader.reset();
                     dc_pred = 0;
                     eob_run = 0;
@@ -1599,7 +1612,7 @@ impl<'a> Decoder<'a> {
         let mcu_pixel_h = max_v * block_size;
 
         let mcu_start = crop_y / mcu_pixel_h;
-        let mcu_end = ((crop_y + crop_h + mcu_pixel_h - 1) / mcu_pixel_h).min(mcus_y);
+        let mcu_end = (crop_y + crop_h).div_ceil(mcu_pixel_h).min(mcus_y);
 
         (mcu_start, mcu_end)
     }
@@ -1642,7 +1655,7 @@ impl<'a> Decoder<'a> {
         let psv = scan.spec_start; // Predictor selection value (Ss field)
         let pt = scan.succ_low; // Point transform (Al field)
 
-        if psv < 1 || psv > 7 {
+        if !(1..=7).contains(&psv) {
             return Err(JpegError::Unsupported(format!(
                 "lossless predictor {} (must be 1-7)",
                 psv
@@ -1751,7 +1764,7 @@ impl<'a> Decoder<'a> {
         let psv = scan.spec_start;
         let pt = scan.succ_low;
 
-        if psv < 1 || psv > 7 {
+        if !(1..=7).contains(&psv) {
             return Err(JpegError::Unsupported(format!(
                 "lossless predictor {} (must be 1-7)",
                 psv
@@ -1791,7 +1804,7 @@ impl<'a> Decoder<'a> {
                     let prev_dc: i32 = arith.last_dc_val[0];
                     let mut block: [i16; 64] = [0i16; 64];
                     arith.decode_dc_sequential(&mut block, 0, dc_tbl)?;
-                    let diff: i16 = ((arith.last_dc_val[0] - prev_dc) as i16) as i16;
+                    let diff: i16 = (arith.last_dc_val[0] - prev_dc) as i16;
                     diffs.push(diff);
                 }
                 lossless::undifference_row(
@@ -1959,10 +1972,14 @@ impl<'a> Decoder<'a> {
         let bpp = out_format.bytes_per_pixel();
         let mut data = Vec::with_capacity(width * height * bpp);
 
-        for i in 0..width * height {
-            let y_val = comp_planes[0][i] as i32;
-            let cb_val = comp_planes[1][i] as i32;
-            let cr_val = comp_planes[2][i] as i32;
+        for ((&y_pix, &cb_pix), &cr_pix) in comp_planes[0]
+            .iter()
+            .zip(comp_planes[1].iter())
+            .zip(comp_planes[2].iter())
+        {
+            let y_val = y_pix as i32;
+            let cb_val = cb_pix as i32;
+            let cr_val = cr_pix as i32;
 
             // YCbCr to RGB (JFIF convention: Y,Cb,Cr centered at 128)
             let r = (y_val + ((cr_val - 128) * 359 + 128) / 256).clamp(0, 255) as u8;
@@ -2130,8 +2147,8 @@ impl<'a> Decoder<'a> {
         let block_size = self.scale.block_size();
         let mcu_width = max_h * 8;
         let mcu_height = max_v * 8;
-        let mcus_x = (width + mcu_width - 1) / mcu_width;
-        let mcus_y = (height + mcu_height - 1) / mcu_height;
+        let mcus_x = width.div_ceil(mcu_width);
+        let mcus_y = height.div_ceil(mcu_height);
         // Scaled output dimensions
         let scaled_mcu_w = max_h * block_size;
         let scaled_mcu_h = max_v * block_size;
@@ -2269,7 +2286,10 @@ impl<'a> Decoder<'a> {
                 let bpp = out_format.bytes_per_pixel();
                 let data_size = out_width * out_height * bpp;
                 let mut data = Vec::with_capacity(data_size);
-                unsafe { data.set_len(data_size) };
+                #[allow(clippy::uninit_vec)]
+                unsafe {
+                    data.set_len(data_size)
+                };
                 for y in 0..out_height {
                     let row = &component_planes[0][y * comp_w..y * comp_w + out_width];
                     let out_row = &mut data[y * out_width * bpp..(y + 1) * out_width * bpp];
@@ -2371,7 +2391,10 @@ impl<'a> Decoder<'a> {
                 {
                     let data_size: usize = out_width * out_height * bpp;
                     let mut data: Vec<u8> = Vec::with_capacity(data_size);
-                    unsafe { data.set_len(data_size) };
+                    #[allow(clippy::uninit_vec)]
+                    unsafe {
+                        data.set_len(data_size)
+                    };
 
                     if v_factor == 1 {
                         // H2V1 (4:2:2): one chroma row per Y row
@@ -2535,7 +2558,10 @@ impl<'a> Decoder<'a> {
                 // Actually, let's just do the color conversion here and return.
                 let data_size = out_width * out_height * bpp;
                 let mut data = Vec::with_capacity(data_size);
-                unsafe { data.set_len(data_size) };
+                #[allow(clippy::uninit_vec)]
+                unsafe {
+                    data.set_len(data_size)
+                };
                 for y in 0..out_height {
                     self.color_convert_row(
                         out_format,
@@ -2566,7 +2592,10 @@ impl<'a> Decoder<'a> {
             // 4:4:4 path (no upsampling)
             let data_size = out_width * out_height * bpp;
             let mut data = Vec::with_capacity(data_size);
-            unsafe { data.set_len(data_size) };
+            #[allow(clippy::uninit_vec)]
+            unsafe {
+                data.set_len(data_size)
+            };
             for y in 0..out_height {
                 self.color_convert_row(
                     out_format,
@@ -2648,8 +2677,8 @@ impl<'a> Decoder<'a> {
         let block_size: usize = 8;
         let mcu_width: usize = max_h * 8;
         let mcu_height: usize = max_v * 8;
-        let mcus_x: usize = (width + mcu_width - 1) / mcu_width;
-        let mcus_y: usize = (height + mcu_height - 1) / mcu_height;
+        let mcus_x: usize = width.div_ceil(mcu_width);
+        let mcus_y: usize = height.div_ceil(mcu_height);
         let quant_tables: Vec<&crate::common::quant_table::QuantTable> = frame
             .components
             .iter()
@@ -2920,7 +2949,10 @@ impl<'a> Decoder<'a> {
         let bpp = out_format.bytes_per_pixel();
         let data_size = width * height * bpp;
         let mut data = Vec::with_capacity(data_size);
-        unsafe { data.set_len(data_size) };
+        #[allow(clippy::uninit_vec)]
+        unsafe {
+            data.set_len(data_size)
+        };
 
         for y in 0..height {
             let p0 = &plane0[y * p0_stride..];

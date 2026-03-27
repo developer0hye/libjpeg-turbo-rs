@@ -291,18 +291,16 @@ impl<'a> ArithDecoder<'a> {
 
             // Figure F.23: Decoding the magnitude category of v
             let mut m: i32 = self.decode(StatRef::Ac(ac_tbl, st_pos))? as i32;
-            if m != 0 {
-                if self.decode(StatRef::Ac(ac_tbl, st_pos))? != 0 {
+            if m != 0 && self.decode(StatRef::Ac(ac_tbl, st_pos))? != 0 {
+                m <<= 1;
+                let kx = self.arith_ac_k[ac_tbl] as usize;
+                st_pos = if k <= kx { 189 } else { 217 };
+                while self.decode(StatRef::Ac(ac_tbl, st_pos))? != 0 {
                     m <<= 1;
-                    let kx = self.arith_ac_k[ac_tbl] as usize;
-                    st_pos = if k <= kx { 189 } else { 217 };
-                    while self.decode(StatRef::Ac(ac_tbl, st_pos))? != 0 {
-                        m <<= 1;
-                        if m == 0x8000 {
-                            return Err(JpegError::CorruptData("arithmetic AC overflow".into()));
-                        }
-                        st_pos += 1;
+                    if m == 0x8000 {
+                        return Err(JpegError::CorruptData("arithmetic AC overflow".into()));
                     }
+                    st_pos += 1;
                 }
             }
 
@@ -342,7 +340,7 @@ impl<'a> ArithDecoder<'a> {
 
         if self.decode(StatRef::Dc(dc_tbl, s0))? == 0 {
             self.dc_context[comp_idx] = 0;
-            block[0] = ((self.last_dc_val[comp_idx] as i32) << al) as i16;
+            block[0] = (self.last_dc_val[comp_idx] << al) as i16;
             return Ok(());
         }
 
@@ -387,7 +385,7 @@ impl<'a> ArithDecoder<'a> {
         let v = if sign != 0 { -v } else { v };
 
         self.last_dc_val[comp_idx] = (self.last_dc_val[comp_idx] + v) & 0xFFFF;
-        block[0] = ((self.last_dc_val[comp_idx] as i32) << al) as i16;
+        block[0] = (self.last_dc_val[comp_idx] << al) as i16;
         Ok(())
     }
 
@@ -428,18 +426,16 @@ impl<'a> ArithDecoder<'a> {
             // st += 2 in C (advance to magnitude context bin)
             let mut st_pos: usize = st + 2;
             let mut m: i32 = self.decode(StatRef::Ac(ac_tbl, st_pos))? as i32;
-            if m != 0 {
-                if self.decode(StatRef::Ac(ac_tbl, st_pos))? != 0 {
+            if m != 0 && self.decode(StatRef::Ac(ac_tbl, st_pos))? != 0 {
+                m <<= 1;
+                let kx = self.arith_ac_k[ac_tbl] as usize;
+                st_pos = if k <= kx { 189 } else { 217 };
+                while self.decode(StatRef::Ac(ac_tbl, st_pos))? != 0 {
                     m <<= 1;
-                    let kx = self.arith_ac_k[ac_tbl] as usize;
-                    st_pos = if k <= kx { 189 } else { 217 };
-                    while self.decode(StatRef::Ac(ac_tbl, st_pos))? != 0 {
-                        m <<= 1;
-                        if m == 0x8000 {
-                            return Err(JpegError::CorruptData("arithmetic AC overflow".into()));
-                        }
-                        st_pos += 1;
+                    if m == 0x8000 {
+                        return Err(JpegError::CorruptData("arithmetic AC overflow".into()));
                     }
+                    st_pos += 1;
                 }
             }
             // Figure F.24: C reference uses st += 14 from last magnitude bin
@@ -455,7 +451,7 @@ impl<'a> ArithDecoder<'a> {
             v += 1;
             let v = if sign != 0 { -v } else { v };
             // Output in natural (dezigzagged) order, shifted by al
-            block[ZIGZAG_ORDER[k]] = ((v as i32) << al) as i16;
+            block[ZIGZAG_ORDER[k]] = (v << al) as i16;
             k += 1;
         }
         Ok(())
@@ -485,10 +481,8 @@ impl<'a> ArithDecoder<'a> {
         let mut k = ss as usize;
         while k <= se as usize {
             let st = 3 * (k - 1);
-            if k > kex {
-                if self.decode(StatRef::Ac(ac_tbl, st))? != 0 {
-                    break; // EOB
-                }
+            if k > kex && self.decode(StatRef::Ac(ac_tbl, st))? != 0 {
+                break; // EOB
             }
             loop {
                 let natural = ZIGZAG_ORDER[k];
