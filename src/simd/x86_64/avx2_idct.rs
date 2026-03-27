@@ -12,6 +12,7 @@ use core::arch::x86_64::*;
 
 // IDCT constants matching libjpeg-turbo's jidctint.c
 const CONST_BITS: i32 = 13;
+#[allow(dead_code)]
 const PASS1_BITS: i32 = 2;
 
 const F_0_298: i32 = 2446;
@@ -51,10 +52,10 @@ unsafe fn avx2_idct_islow_inner(coeffs: &[i16; 64], quant: &[u16; 64], output: &
     // Step 1: Dequantize -- multiply coefficients by quantization table
     let mut rows: [__m128i; 8] = [_mm_setzero_si128(); 8];
 
-    for i in 0..8 {
+    for (i, row) in rows.iter_mut().enumerate() {
         let coeff_row = _mm_loadu_si128(coeffs.as_ptr().add(i * 8) as *const __m128i);
         let quant_row = _mm_loadu_si128(quant.as_ptr().add(i * 8) as *const __m128i);
-        rows[i] = _mm_mullo_epi16(coeff_row, quant_row);
+        *row = _mm_mullo_epi16(coeff_row, quant_row);
     }
 
     // Step 2: Column pass -- transpose to get columns, run 1-D IDCT

@@ -336,6 +336,7 @@ impl BitWriter {
 ///
 /// Equivalent to `BitWriter::put_bits` but operates on register-local `pb`/`fb`/`buf`
 /// instead of struct fields, avoiding store-reload on every flush.
+#[allow(dead_code)]
 #[inline(always)]
 unsafe fn local_put_bits(pb: &mut u64, fb: &mut i32, buf: &mut *mut u8, code: u32, size: u8) {
     *fb -= size as i32;
@@ -347,6 +348,7 @@ unsafe fn local_put_bits(pb: &mut u64, fb: &mut i32, buf: &mut *mut u8, code: u3
 }
 
 /// Handle accumulator overflow with hoisted local variables.
+#[allow(dead_code)]
 #[cold]
 #[inline(always)]
 unsafe fn local_put_and_flush(pb: &mut u64, fb: &mut i32, buf: &mut *mut u8, code: u32, size: u8) {
