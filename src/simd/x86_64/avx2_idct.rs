@@ -1,11 +1,11 @@
 //! AVX2-accelerated 8x8 IDCT (accurate integer, "islow").
 //!
-//! Port of the libjpeg-turbo IDCT algorithm using 256-bit AVX2 intrinsics.
+//! Port of the libjpeg-turbo IDCT algorithm using AVX2 intrinsics.
 //! Combines dequantization, IDCT, level-shift (+128), and clamping [0,255]
 //! into a single fused operation.
 //!
-//! Strategy: load 8x8 block as 8 x __m128i rows, widen to i32 using AVX2
-//! `_mm256_cvtepi16_epi32` for arithmetic, then narrow back to i16.
+//! Includes sparsity detection (DC-only fast path) matching the NEON
+//! implementation for significant speedup on typical JPEG blocks.
 
 #[cfg(target_arch = "x86_64")]
 use core::arch::x86_64::*;
@@ -30,23 +30,40 @@ const F_3_072: i32 = 25172;
 
 /// AVX2-accelerated combined dequant + IDCT + level-shift + clamp.
 ///
-/// `coeffs`: 64 i16 coefficients in natural (row-major) order.
-/// `quant`: 64 u16 quantization values in natural (row-major) order.
-/// `output`: 64 u8 samples in natural (row-major) order.
-///
 /// # Safety contract
 /// Caller must ensure AVX2 is available (dispatch in `x86_64/mod.rs` verifies this).
 pub fn avx2_idct_islow(coeffs: &[i16; 64], quant: &[u16; 64], output: &mut [u8; 64]) {
     // SAFETY: AVX2 availability guaranteed by dispatch in x86_64::routines().
     unsafe {
-        avx2_idct_islow_inner(coeffs, quant, output);
+        avx2_idct_islow_core(coeffs, quant, output.as_mut_ptr(), 8);
     }
 }
 
+/// Strided variant: writes 8x8 block directly to `output` with row stride `stride`.
+///
 /// # Safety
-/// Requires AVX2 support.
+/// `output` must point to at least `7 * stride + 8` writable bytes.
+/// Caller must ensure AVX2 is available.
+pub unsafe fn avx2_idct_islow_strided(
+    coeffs: &[i16; 64],
+    quant: &[u16; 64],
+    output: *mut u8,
+    stride: usize,
+) {
+    avx2_idct_islow_core(coeffs, quant, output, stride);
+}
+
+/// Core IDCT with configurable output stride.
+///
+/// # Safety
+/// Requires AVX2. `output` must point to at least `7 * stride + 8` writable bytes.
 #[target_feature(enable = "avx2")]
-unsafe fn avx2_idct_islow_inner(coeffs: &[i16; 64], quant: &[u16; 64], output: &mut [u8; 64]) {
+unsafe fn avx2_idct_islow_core(
+    coeffs: &[i16; 64],
+    quant: &[u16; 64],
+    output: *mut u8,
+    stride: usize,
+) {
     // Step 1: Dequantize -- multiply coefficients by quantization table
     let mut rows: [__m128i; 8] = [_mm_setzero_si128(); 8];
 
@@ -54,6 +71,40 @@ unsafe fn avx2_idct_islow_inner(coeffs: &[i16; 64], quant: &[u16; 64], output: &
         let coeff_row = _mm_loadu_si128(coeffs.as_ptr().add(i * 8) as *const __m128i);
         let quant_row = _mm_loadu_si128(quant.as_ptr().add(i * 8) as *const __m128i);
         *row = _mm_mullo_epi16(coeff_row, quant_row);
+    }
+
+    // Sparsity check: DC-only fast path
+    // OR all AC rows together, then OR with AC coefficients of row 0
+    let ac_bitmap = _mm_or_si128(
+        _mm_or_si128(
+            _mm_or_si128(rows[1], rows[2]),
+            _mm_or_si128(rows[3], rows[4]),
+        ),
+        _mm_or_si128(_mm_or_si128(rows[5], rows[6]), rows[7]),
+    );
+
+    // Check if all AC rows are zero
+    if _mm_testz_si128(ac_bitmap, ac_bitmap) != 0 {
+        // Also check if row0 has only DC (position 0) non-zero
+        // Mask out position 0 to check AC positions 1-7 of row 0
+        let ac_mask = _mm_setr_epi16(0, -1, -1, -1, -1, -1, -1, -1);
+        let row0_ac = _mm_and_si128(rows[0], ac_mask);
+
+        if _mm_testz_si128(row0_ac, row0_ac) != 0 {
+            // Pure DC block: compute DC pixel value and fill
+            let dc_coeff = *coeffs.as_ptr() as i32;
+            let dc_quant = *quant.as_ptr() as i32;
+            let dc_dequant = dc_coeff * dc_quant;
+            // IDCT of DC-only: value = (dequant + 4) >> 3, then level-shift +128
+            let pixel_val = (((dc_dequant + 4) >> 3) + 128).clamp(0, 255) as u8;
+
+            // Fill all 8 rows with the DC value
+            let fill = _mm_set1_epi8(pixel_val as i8);
+            for row in 0..8 {
+                _mm_storel_epi64(output.add(row * stride) as *mut __m128i, fill);
+            }
+            return;
+        }
     }
 
     // Step 2: Column pass -- transpose to get columns, run 1-D IDCT
@@ -64,18 +115,19 @@ unsafe fn avx2_idct_islow_inner(coeffs: &[i16; 64], quant: &[u16; 64], output: &
     let transposed_back = transpose_8x8_i16(col_results);
     let row_results = idct_pass_rows(transposed_back);
 
-    // Step 4: Level-shift (+128) and clamp [0,255]
+    // Step 4: Level-shift (+128) and clamp [0,255], write with stride
     let offset = _mm_set1_epi16(128);
-    let mut final_rows: [__m128i; 8] = [_mm_setzero_si128(); 8];
 
-    for i in 0..8 {
-        final_rows[i] = _mm_add_epi16(row_results[i], offset);
-    }
-
-    // Pack pairs of rows from i16 to u8 using _mm_packus_epi16 (saturating)
     for i in (0..8).step_by(2) {
-        let packed = _mm_packus_epi16(final_rows[i], final_rows[i + 1]);
-        _mm_storeu_si128(output.as_mut_ptr().add(i * 8) as *mut __m128i, packed);
+        let r0 = _mm_add_epi16(row_results[i], offset);
+        let r1 = _mm_add_epi16(row_results[i + 1], offset);
+        let packed = _mm_packus_epi16(r0, r1);
+        // Store each row separately at stride offsets
+        _mm_storel_epi64(output.add(i * stride) as *mut __m128i, packed);
+        _mm_storel_epi64(
+            output.add((i + 1) * stride) as *mut __m128i,
+            _mm_srli_si128(packed, 8),
+        );
     }
 }
 
@@ -85,7 +137,7 @@ unsafe fn avx2_idct_islow_inner(coeffs: &[i16; 64], quant: &[u16; 64], output: &
 /// Requires SSE2 (available under AVX2 target feature).
 #[target_feature(enable = "avx2")]
 #[inline]
-unsafe fn transpose_8x8_i16(rows: [__m128i; 8]) -> [__m128i; 8] {
+pub(crate) unsafe fn transpose_8x8_i16(rows: [__m128i; 8]) -> [__m128i; 8] {
     // Step 1: Interleave 16-bit values from pairs of rows
     let t0 = _mm_unpacklo_epi16(rows[0], rows[1]);
     let t1 = _mm_unpackhi_epi16(rows[0], rows[1]);
@@ -120,9 +172,6 @@ unsafe fn transpose_8x8_i16(rows: [__m128i; 8]) -> [__m128i; 8] {
 }
 
 /// Core 1-D IDCT arithmetic using AVX2 i32 operations.
-///
-/// `_mm256_srai_epi32` requires a compile-time constant for the immediate operand,
-/// so we use a macro to generate code with the shift baked in.
 macro_rules! idct_1d_avx2 {
     ($s:expr, $shift:literal) => {{
         let s = $s;
@@ -198,9 +247,6 @@ macro_rules! idct_1d_avx2 {
 }
 
 /// Column pass: IDCT with descale shift = CONST_BITS - PASS1_BITS = 11.
-///
-/// # Safety
-/// Requires AVX2.
 #[target_feature(enable = "avx2")]
 #[inline]
 unsafe fn idct_pass_columns(s: [__m128i; 8]) -> [__m128i; 8] {
@@ -208,9 +254,6 @@ unsafe fn idct_pass_columns(s: [__m128i; 8]) -> [__m128i; 8] {
 }
 
 /// Row pass: IDCT with descale shift = CONST_BITS + PASS1_BITS + 3 = 18.
-///
-/// # Safety
-/// Requires AVX2.
 #[target_feature(enable = "avx2")]
 #[inline]
 unsafe fn idct_pass_rows(s: [__m128i; 8]) -> [__m128i; 8] {
@@ -218,25 +261,11 @@ unsafe fn idct_pass_rows(s: [__m128i; 8]) -> [__m128i; 8] {
 }
 
 /// Narrow 8 x i32 in a __m256i to 8 x i16 in a __m128i (with saturation).
-///
-/// # Safety
-/// Requires AVX2.
 #[target_feature(enable = "avx2")]
 #[inline]
 unsafe fn narrow_i32_to_i16(v: __m256i) -> __m128i {
-    // _mm256_packs_epi32 operates on 128-bit lanes independently:
-    //   low128:  packs lo128(a), lo128(b) -> 8 x i16
-    //   high128: packs hi128(a), hi128(b) -> 8 x i16
-    //
-    // With packs_epi32(v, zero):
-    //   lane0: [v[0] v[1] v[2] v[3] | 0 0 0 0]  (i16)
-    //   lane1: [v[4] v[5] v[6] v[7] | 0 0 0 0]  (i16)
-    //
-    // Quadwords: [q0=v[0..3], q1=zeros, q2=v[4..7], q3=zeros]
-    // We want [v[0..3] v[4..7]] in a __m128i -> bring q0 and q2 together.
     let zero = _mm256_setzero_si256();
     let packed = _mm256_packs_epi32(v, zero);
-    // permute4x64: position 0=q0, position 1=q2 -> 0b_11_01_10_00
     let shuffled = _mm256_permute4x64_epi64::<0b_11_01_10_00>(packed);
     _mm256_castsi256_si128(shuffled)
 }
