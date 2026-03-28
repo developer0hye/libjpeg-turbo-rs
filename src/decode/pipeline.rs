@@ -1547,68 +1547,56 @@ impl<'a> Decoder<'a> {
             };
         }
 
-        // Split into four specialized loops to eliminate per-block branches
+        // Split into four specialized loops to eliminate per-block branches.
+        // Use direct iterator over the flat coefficient buffer to avoid
+        // per-block `by * blocks_x + bx` index computation and bounds checks.
+        let coeff_slice = &mut coeff_bufs[comp_idx];
+        let total_blocks = ci.blocks_x * ci.blocks_y;
+
         if is_dc && ah == 0 {
             let dc_table = dc_table.unwrap();
-            for by in 0..ci.blocks_y {
-                for bx in 0..ci.blocks_x {
-                    restart_check_dc!(bit_reader, dc_pred, restart_countdown, restart_interval);
-                    let block_idx = by * ci.blocks_x + bx;
-                    let coeffs = &mut coeff_bufs[comp_idx][block_idx];
-                    progressive::decode_dc_first(bit_reader, dc_table, &mut dc_pred, coeffs, al)?;
-                }
+            for coeffs in coeff_slice[..total_blocks].iter_mut() {
+                restart_check_dc!(bit_reader, dc_pred, restart_countdown, restart_interval);
+                progressive::decode_dc_first(bit_reader, dc_table, &mut dc_pred, coeffs, al)?;
             }
         } else if is_dc {
-            for by in 0..ci.blocks_y {
-                for bx in 0..ci.blocks_x {
-                    if restart_interval > 0 {
-                        if restart_countdown == 0 {
-                            bit_reader.reset();
-                            // DC refine doesn't use dc_pred, just reset bit reader
-                            restart_countdown = restart_interval;
-                        }
-                        restart_countdown -= 1;
+            for coeffs in coeff_slice[..total_blocks].iter_mut() {
+                if restart_interval > 0 {
+                    if restart_countdown == 0 {
+                        bit_reader.reset();
+                        restart_countdown = restart_interval;
                     }
-                    let block_idx = by * ci.blocks_x + bx;
-                    let coeffs = &mut coeff_bufs[comp_idx][block_idx];
-                    progressive::decode_dc_refine(bit_reader, coeffs, al)?;
+                    restart_countdown -= 1;
                 }
+                progressive::decode_dc_refine(bit_reader, coeffs, al)?;
             }
         } else if ah == 0 {
             let ac_table = ac_table.unwrap();
-            for by in 0..ci.blocks_y {
-                for bx in 0..ci.blocks_x {
-                    restart_check_ac!(bit_reader, eob_run, restart_countdown, restart_interval);
-                    let block_idx = by * ci.blocks_x + bx;
-                    let coeffs = &mut coeff_bufs[comp_idx][block_idx];
-                    progressive::decode_ac_first(
-                        bit_reader,
-                        ac_table,
-                        coeffs,
-                        ss,
-                        se,
-                        al,
-                        &mut eob_run,
-                    )?;
-                }
+            for coeffs in coeff_slice[..total_blocks].iter_mut() {
+                restart_check_ac!(bit_reader, eob_run, restart_countdown, restart_interval);
+                progressive::decode_ac_first(
+                    bit_reader,
+                    ac_table,
+                    coeffs,
+                    ss,
+                    se,
+                    al,
+                    &mut eob_run,
+                )?;
             }
         } else {
             let ac_table = ac_table.unwrap();
-            for by in 0..ci.blocks_y {
-                for bx in 0..ci.blocks_x {
-                    restart_check_ac!(bit_reader, eob_run, restart_countdown, restart_interval);
-                    let block_idx = by * ci.blocks_x + bx;
-                    let coeffs = &mut coeff_bufs[comp_idx][block_idx];
-                    progressive::decode_ac_refine(
-                        bit_reader,
-                        ac_table,
-                        coeffs,
-                        ss,
-                        se,
-                        al,
-                        &mut eob_run,
-                    )?;
-                }
+            for coeffs in coeff_slice[..total_blocks].iter_mut() {
+                restart_check_ac!(bit_reader, eob_run, restart_countdown, restart_interval);
+                progressive::decode_ac_refine(
+                    bit_reader,
+                    ac_table,
+                    coeffs,
+                    ss,
+                    se,
+                    al,
+                    &mut eob_run,
+                )?;
             }
         }
 
