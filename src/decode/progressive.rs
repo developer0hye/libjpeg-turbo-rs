@@ -72,12 +72,12 @@ pub fn decode_ac_first(
         let peek = reader.peek_bits(16);
 
         // Fast AC path: pre-computed coefficient from combined table entry.
-        // When al=0, this avoids a separate read_bits + sign-extend.
+        // Works for any al value — just apply the successive approximation shift.
         let (ac_entry, symbol, code_len) = ac_table.lookup_combined(peek);
-        if ac_entry != 0 && al == 0 {
+        if ac_entry != 0 {
             let total_bits: u8 = (ac_entry & 0x0F) as u8;
             let run: usize = ((ac_entry >> 4) & 0x0F) as usize;
-            let coeff: i16 = ac_entry >> 8;
+            let coeff: i16 = (ac_entry >> 8) << al;
             k += run;
             if k > se_usize {
                 return Err(JpegError::CorruptData(
@@ -93,38 +93,13 @@ pub fn decode_ac_first(
             continue;
         }
 
-        if code_len > 0 {
-            reader.skip_bits(code_len);
+        // Standard path: decode Huffman symbol then read extra bits
+        let (symbol, code_len) = if code_len > 0 {
+            (symbol, code_len)
         } else {
-            let (s, l) = ac_table.lookup(peek)?;
-            reader.skip_bits(l);
-            let run_length = (s >> 4) as usize;
-            let bit_size = s & 0x0F;
-            if bit_size != 0 {
-                k += run_length;
-                if k > se_usize {
-                    return Err(JpegError::CorruptData(
-                        "progressive AC coefficient index out of bounds".into(),
-                    ));
-                }
-                let extra_bits = reader.read_bits(bit_size);
-                let coeff = extend(extra_bits, bit_size);
-                unsafe {
-                    *coeffs.get_unchecked_mut(*ZIGZAG_ORDER.get_unchecked(k)) = coeff << al;
-                }
-                k += 1;
-            } else if run_length == 15 {
-                k += 16;
-            } else {
-                *eob_run = (1u16 << run_length) - 1;
-                if run_length > 0 {
-                    let extra = reader.read_bits(run_length as u8);
-                    *eob_run += extra;
-                }
-                return Ok(());
-            }
-            continue;
-        }
+            ac_table.lookup(peek)?
+        };
+        reader.skip_bits(code_len);
 
         let run_length = (symbol >> 4) as usize;
         let bit_size = symbol & 0x0F;
@@ -264,7 +239,6 @@ pub fn decode_ac_refine(
 fn apply_correction_bit(reader: &mut BitReader, coeff: &mut i16, p1: i16) {
     let bit = reader.read_bits(1);
     if bit != 0 {
-        // Only apply if the bit at this position isn't already set
         if (*coeff & p1) == 0 {
             if *coeff > 0 {
                 *coeff += p1;
