@@ -34,24 +34,9 @@ pub fn avx2_fancy_upsample_h2v1(input: &[u8], in_width: usize, output: &mut [u8]
         return;
     }
 
-    if is_x86_feature_detected!("avx2") {
-        // SAFETY: AVX2 is available (checked above).
-        unsafe {
-            avx2_fancy_h2v1_inner(input, in_width, output);
-        }
-    } else {
-        scalar_fancy_h2v1_interior(input, in_width, output);
-    }
-}
-
-/// Scalar fallback for interior samples.
-fn scalar_fancy_h2v1_interior(input: &[u8], in_width: usize, output: &mut [u8]) {
-    for x in 1..in_width - 1 {
-        let left = input[x - 1] as u16;
-        let cur = input[x] as u16;
-        let right = input[x + 1] as u16;
-        output[x * 2] = ((3 * cur + left + 2) >> 2) as u8;
-        output[x * 2 + 1] = ((3 * cur + right + 2) >> 2) as u8;
+    // SAFETY: AVX2 availability guaranteed by dispatch in x86_64::routines().
+    unsafe {
+        avx2_fancy_h2v1_inner(input, in_width, output);
     }
 }
 

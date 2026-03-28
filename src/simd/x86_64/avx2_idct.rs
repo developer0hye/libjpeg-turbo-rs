@@ -28,20 +28,18 @@ const F_2_053: i32 = 16819;
 const F_2_562: i32 = 20995;
 const F_3_072: i32 = 25172;
 
-/// Safe public wrapper. Checks for AVX2 at runtime.
+/// AVX2-accelerated combined dequant + IDCT + level-shift + clamp.
 ///
 /// `coeffs`: 64 i16 coefficients in natural (row-major) order.
 /// `quant`: 64 u16 quantization values in natural (row-major) order.
 /// `output`: 64 u8 samples in natural (row-major) order.
+///
+/// # Safety contract
+/// Caller must ensure AVX2 is available (dispatch in `x86_64/mod.rs` verifies this).
 pub fn avx2_idct_islow(coeffs: &[i16; 64], quant: &[u16; 64], output: &mut [u8; 64]) {
-    if is_x86_feature_detected!("avx2") {
-        // SAFETY: AVX2 is available (checked above).
-        unsafe {
-            avx2_idct_islow_inner(coeffs, quant, output);
-        }
-    } else {
-        let scalar_fn = crate::simd::scalar::routines().idct_islow;
-        scalar_fn(coeffs, quant, output);
+    // SAFETY: AVX2 availability guaranteed by dispatch in x86_64::routines().
+    unsafe {
+        avx2_idct_islow_inner(coeffs, quant, output);
     }
 }
 
