@@ -1,0 +1,36 @@
+# x86_64 Baseline: decode benchmarks before SIMD optimization
+# Measured on x86_64 Linux, 2026-03-28
+# CPU: Intel Core i5-10400 @ 2.90GHz (Comet Lake, AVX2+SSE4.2)
+
+## Micro-benchmarks
+idct_8x8:                40.3 ns
+ycbcr_to_rgb_row_640:   504.4 ns
+fancy_h2v1_320:          78.2 ns
+
+## Full decode (criterion)
+decode_640x480:          1.409 ms
+decode_640x480_reuse:    860 us
+
+## Decode matrix
+photo_64x64_420:         46.5 us
+photo_320x240_420:       612 us
+photo_320x240_422:       757 us
+photo_320x240_444:       1.092 ms
+photo_640x480_422:       2.612 ms
+photo_640x480_444:       3.871 ms
+photo_1280x720_420:      8.814 ms
+photo_1920x1080_420:     19.86 ms
+photo_1920x1080_422:     19.67 ms
+photo_1920x1080_444:     28.94 ms
+photo_2560x1440_420:     36.01 ms
+photo_3840x2160_420:     80.34 ms
+graphic_640x480_420:     887 us
+graphic_1920x1080_420:   5.149 ms
+checker_640x480_420:     1.432 ms
+photo_640x480_420_rst:   616 us
+prog_photo_640x480_444:  9.169 ms
+prog_photo_640x480_422:  6.536 ms
+
+## Comparison
+ours_graphic_640x480:    884 us
+zune_graphic_640x480:    676 us

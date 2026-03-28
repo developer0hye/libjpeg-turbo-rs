@@ -1,0 +1,3 @@
+commit	time_us	status	description
+baseline	40.3	keep	x86_64 AVX2 IDCT baseline: i32 arithmetic via cvtepi16_epi32, no sparsity detection, temp buffer copy for strided output. idct_8x8=40ns, graphic_640x480=887us
+2d4456b	41.9	keep	Added DC-only fast path (testz_si128 sparsity check) + strided output (storel_epi64 per row). idct_8x8 micro unchanged (test data has AC), but graphic_640x480: 887→549us (38% faster), graphic_1920x1080: 5149→2636us (49% faster). DC-only blocks dominate graphic content.
