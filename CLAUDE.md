@@ -4,8 +4,16 @@ Rust port of libjpeg-turbo with equivalent or better performance.
 
 # Reference Source
 
-- `references/libjpeg-turbo/` contains the original libjpeg-turbo C source. Read and reference it during implementation for algorithm details, edge cases, and correctness verification.
+- `references/libjpeg-turbo/` contains the original libjpeg-turbo C source (git submodule). Read and reference it during implementation for algorithm details, edge cases, and correctness verification.
 - `references/zune-image/crates/zune-jpeg/` contains zune-jpeg, the fastest pure-Rust JPEG decoder. Reference its optimization techniques, but our goal is to outperform it.
+- **x86_64 SIMD reference files** (read these before optimizing any hot path):
+  - IDCT: `references/libjpeg-turbo/simd/x86_64/jidctint-sse2.asm`, `jidctint-avx2.asm`
+  - Color conversion: `references/libjpeg-turbo/simd/x86_64/jdcolext-sse2.asm`, `jdcolext-avx2.asm` (core kernel, included by `jdcolor-*.asm` wrapper with per-format defines)
+  - Upsample: `references/libjpeg-turbo/simd/x86_64/jdsample-sse2.asm`, `jdsample-avx2.asm`
+  - Merged upsample+color: `references/libjpeg-turbo/simd/x86_64/jdmrgext-sse2.asm`, `jdmrgext-avx2.asm` (fused H2V1/H2V2 upsample + YCbCr→RGB, eliminates intermediate buffers)
+  - Huffman encode: `references/libjpeg-turbo/simd/x86_64/jchuff-sse2.asm`
+  - Dispatch: `references/libjpeg-turbo/simd/jsimd.h`, `simd/x86_64/jsimd.c`
+  - **Pattern**: C uses wrapper+core include pattern. Wrapper (`jdcolor-avx2.asm`) includes core (`jdcolext-avx2.asm`) multiple times with different `RGB_*` defines to generate per-format variants. Replicate this in Rust using macros.
 
 # Feature Parity Tracking
 
@@ -78,6 +86,8 @@ When optimizing performance, follow the experiment-driven workflow in `experimen
 - **Description must explain causality**: not "tried X" but "tried X because profiling showed Y; failed because Z" or "tried X because Y; saved N us because Z".
 - **Profile before optimizing**: always `samply record` or `sample` to identify the actual hotspot before changing code. Don't guess.
 - **One change at a time**: isolate each experiment to a single variable. If you change two things and perf improves, you don't know which one helped.
+- **Always compare against C libjpeg-turbo**: after every performance change, run `./bench_c_decode_linux` alongside `cargo bench` and report Rust/C ratio. The goal is to match or beat C libjpeg-turbo on all benchmarks. Use `examples/bench_c_decode_linux.c` (compile: `cc -O2 -o bench_c_decode_linux examples/bench_c_decode_linux.c -I$CONDA_PREFIX/include -L$CONDA_PREFIX/lib -ljpeg -Wl,-rpath,$CONDA_PREFIX/lib`).
+- **Study C SIMD before porting**: when optimizing a hot path, first download and study the corresponding libjpeg-turbo C/ASM SIMD implementation. Understand the algorithm, register allocation, and data flow before writing Rust. Port the design, not just the intrinsics.
 
 ## Git Configuration
 
