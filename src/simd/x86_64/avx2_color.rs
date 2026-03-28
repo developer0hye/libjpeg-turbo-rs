@@ -164,6 +164,21 @@ unsafe fn pack_i16_to_u8_avx2(v: __m256i) -> __m128i {
     _mm_packus_epi16(lo, hi)
 }
 
+/// Public wrapper for `store_rgb_interleaved_ssse3` callable from sibling modules.
+///
+/// # Safety
+/// Requires AVX2 (implies SSSE3). `out` must point to at least 48 writable bytes.
+#[target_feature(enable = "avx2")]
+#[inline]
+pub(crate) unsafe fn store_rgb_interleaved_ssse3_pub(
+    out: *mut u8,
+    r: __m128i,
+    g: __m128i,
+    b: __m128i,
+) {
+    store_rgb_interleaved_ssse3(out, r, g, b);
+}
+
 /// Store 16 pixels of interleaved RGB using SSSE3 byte shuffles.
 ///
 /// Input: r, g, b each contain 16 u8 values in a __m128i.

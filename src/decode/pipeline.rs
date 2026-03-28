@@ -514,6 +514,50 @@ impl<'a> Decoder<'a> {
         }
     }
 
+    /// Merged H2V1 upsample + color convert dispatch.
+    #[inline(always)]
+    fn merged_h2v1(y_row: &[u8], cb_row: &[u8], cr_row: &[u8], rgb_out: &mut [u8], width: usize) {
+        #[cfg(all(target_arch = "x86_64", feature = "simd"))]
+        {
+            if is_x86_feature_detected!("avx2") {
+                crate::simd::x86_64::avx2_merged::avx2_merged_h2v1_ycbcr_to_rgb(
+                    y_row, cb_row, cr_row, rgb_out, width,
+                );
+                return;
+            }
+        }
+
+        crate::decode::merged_upsample::merged_h2v1_ycbcr_to_rgb(
+            y_row, cb_row, cr_row, rgb_out, width,
+        );
+    }
+
+    /// Merged H2V2 upsample + color convert dispatch.
+    #[inline(always)]
+    fn merged_h2v2(
+        y_row0: &[u8],
+        y_row1: &[u8],
+        cb_row: &[u8],
+        cr_row: &[u8],
+        rgb_out0: &mut [u8],
+        rgb_out1: &mut [u8],
+        width: usize,
+    ) {
+        #[cfg(all(target_arch = "x86_64", feature = "simd"))]
+        {
+            if is_x86_feature_detected!("avx2") {
+                crate::simd::x86_64::avx2_merged::avx2_merged_h2v2_ycbcr_to_rgb(
+                    y_row0, y_row1, cb_row, cr_row, rgb_out0, rgb_out1, width,
+                );
+                return;
+            }
+        }
+
+        crate::decode::merged_upsample::merged_h2v2_ycbcr_to_rgb(
+            y_row0, y_row1, cb_row, cr_row, rgb_out0, rgb_out1, width,
+        );
+    }
+
     #[inline(always)]
     fn fancy_upsample_h2v1(&self, input: &[u8], in_width: usize, output: &mut [u8]) {
         #[cfg(all(target_arch = "aarch64", feature = "simd"))]
@@ -2443,7 +2487,7 @@ impl<'a> Decoder<'a> {
                     if v_factor == 1 {
                         // H2V1 (4:2:2): one chroma row per Y row
                         for y in 0..out_height {
-                            crate::decode::merged_upsample::merged_h2v1_ycbcr_to_rgb(
+                            Self::merged_h2v1(
                                 &y_plane[y * y_width..],
                                 &component_planes[1][y * cb_w..],
                                 &component_planes[2][y * cb_w..],
@@ -2462,7 +2506,7 @@ impl<'a> Decoder<'a> {
                             let out1_start: usize = y1 * out_width * bpp;
                             // Split data into two non-overlapping mutable slices
                             let (top, bottom) = data.split_at_mut(out1_start);
-                            crate::decode::merged_upsample::merged_h2v2_ycbcr_to_rgb(
+                            Self::merged_h2v2(
                                 &y_plane[y0 * y_width..],
                                 &y_plane[y1 * y_width..],
                                 &component_planes[1][chroma_row * cb_w..],
@@ -2476,7 +2520,7 @@ impl<'a> Decoder<'a> {
                         if out_height & 1 != 0 {
                             let last_y: usize = out_height - 1;
                             let chroma_row: usize = last_y / 2;
-                            crate::decode::merged_upsample::merged_h2v1_ycbcr_to_rgb(
+                            Self::merged_h2v1(
                                 &y_plane[last_y * y_width..],
                                 &component_planes[1][chroma_row * cb_w..],
                                 &component_planes[2][chroma_row * cb_w..],
