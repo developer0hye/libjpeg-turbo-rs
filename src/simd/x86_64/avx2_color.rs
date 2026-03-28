@@ -18,15 +18,14 @@
 #[cfg(target_arch = "x86_64")]
 use core::arch::x86_64::*;
 
-/// Safe public wrapper. Checks for AVX2 at runtime, falls back to scalar.
+/// AVX2-accelerated YCbCr to interleaved RGB row conversion.
+///
+/// # Safety contract
+/// Caller must ensure AVX2 is available (dispatch in `x86_64/mod.rs` verifies this).
 pub fn avx2_ycbcr_to_rgb_row(y: &[u8], cb: &[u8], cr: &[u8], rgb: &mut [u8], width: usize) {
-    if is_x86_feature_detected!("avx2") {
-        // SAFETY: AVX2 is available (checked above).
-        unsafe {
-            avx2_ycbcr_to_rgb_row_inner(y, cb, cr, rgb, width);
-        }
-    } else {
-        crate::decode::color::ycbcr_to_rgb_row(y, cb, cr, rgb, width);
+    // SAFETY: AVX2 availability guaranteed by dispatch in x86_64::routines().
+    unsafe {
+        avx2_ycbcr_to_rgb_row_inner(y, cb, cr, rgb, width);
     }
 }
 
