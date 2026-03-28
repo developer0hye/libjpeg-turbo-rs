@@ -1,3 +1,4 @@
 commit	time_us	status	description
 baseline	40.3	keep	x86_64 AVX2 IDCT baseline: i32 arithmetic via cvtepi16_epi32, no sparsity detection, temp buffer copy for strided output. idct_8x8=40ns, graphic_640x480=887us
 2d4456b	41.9	keep	Added DC-only fast path (testz_si128 sparsity check) + strided output (storel_epi64 per row). idct_8x8 micro unchanged (test data has AC), but graphic_640x480: 887→549us (38% faster), graphic_1920x1080: 5149→2636us (49% faster). DC-only blocks dominate graphic content.
+uncommitted	0	discard	Attempted full 256-bit ymm IDCT port matching C's jidctint-avx2.asm: vpmaddwd paired multiply, vperm2i128 column-pair layout, 4-phase dotranspose. Compiled but produced wrong output — _mm256_set_epi16 constant ordering is reversed vs NASM dw layout. Need to use _mm256_setr_epi16 or aligned memory loads. Reverted.
