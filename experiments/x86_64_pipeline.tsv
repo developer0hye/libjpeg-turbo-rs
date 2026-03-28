@@ -1,0 +1,3 @@
+commit	time_us	status	description
+baseline	19860	keep	photo_1920x1080_420 baseline on x86_64. C libjpeg-turbo = 14312us. Rust 39% slower.
+0794f27	19036	keep	After color i16+SSSE3 interleave + IDCT DC-only fast path + strided output. Rust 33% slower than C. Perf profile: 59% in decode_baseline_planes (Huffman), 13% in IDCT, 6% in color. Huffman is the dominant bottleneck.
