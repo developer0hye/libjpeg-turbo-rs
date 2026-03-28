@@ -13,12 +13,63 @@ use crate::decode::progressive;
 use crate::simd::{self, SimdRoutines};
 
 /// Vertical triangle-filter blend: out[i] = (3*cur[i] + neighbor[i] + 2) >> 2.
-/// Auto-vectorizes well on aarch64 with NEON.
 #[cfg(not(all(target_arch = "aarch64", feature = "simd")))]
 #[inline]
 fn vertical_blend(cur: &[u8], neighbor: &[u8], output: &mut [u8], width: usize) {
+    #[cfg(all(target_arch = "x86_64", feature = "simd"))]
+    {
+        if is_x86_feature_detected!("avx2") {
+            unsafe {
+                vertical_blend_avx2(cur, neighbor, output, width);
+            }
+            return;
+        }
+    }
     for i in 0..width {
         output[i] = ((3 * cur[i] as u16 + neighbor[i] as u16 + 2) >> 2) as u8;
+    }
+}
+
+/// AVX2 vertical blend: (3*cur + neighbor + 2) >> 2, 32 bytes per iteration.
+#[cfg(all(target_arch = "x86_64", feature = "simd"))]
+#[target_feature(enable = "avx2")]
+unsafe fn vertical_blend_avx2(cur: &[u8], neighbor: &[u8], output: &mut [u8], width: usize) {
+    use core::arch::x86_64::*;
+    let mut i: usize = 0;
+    let zero = _mm256_setzero_si256();
+    let two = _mm256_set1_epi16(2);
+    let three = _mm256_set1_epi16(3);
+
+    while i + 32 <= width {
+        let c = _mm256_loadu_si256(cur.as_ptr().add(i) as *const __m256i);
+        let n = _mm256_loadu_si256(neighbor.as_ptr().add(i) as *const __m256i);
+
+        // Process low 16 bytes
+        let c_lo = _mm256_unpacklo_epi8(c, zero);
+        let n_lo = _mm256_unpacklo_epi8(n, zero);
+        let r_lo = _mm256_srli_epi16(
+            _mm256_add_epi16(_mm256_add_epi16(_mm256_mullo_epi16(c_lo, three), n_lo), two),
+            2,
+        );
+
+        // Process high 16 bytes
+        let c_hi = _mm256_unpackhi_epi8(c, zero);
+        let n_hi = _mm256_unpackhi_epi8(n, zero);
+        let r_hi = _mm256_srli_epi16(
+            _mm256_add_epi16(_mm256_add_epi16(_mm256_mullo_epi16(c_hi, three), n_hi), two),
+            2,
+        );
+
+        // Pack back to u8
+        let packed = _mm256_packus_epi16(r_lo, r_hi);
+        _mm256_storeu_si256(output.as_mut_ptr().add(i) as *mut __m256i, packed);
+        i += 32;
+    }
+
+    // Scalar tail
+    while i < width {
+        output[i] = ((3 * cur[i] as u16 + neighbor[i] as u16 + 2) >> 2) as u8;
+        i += 1;
     }
 }
 
@@ -590,8 +641,8 @@ impl<'a> Decoder<'a> {
 
         #[cfg(not(all(target_arch = "aarch64", feature = "simd")))]
         {
-            let mut row_above = vec![0u8; in_width];
-            let mut row_below = vec![0u8; in_width];
+            let mut above_buf = vec![0u8; in_width];
+            let mut below_buf = vec![0u8; in_width];
 
             for y in 0..in_height {
                 let cur_row = &input[y * in_width..(y + 1) * in_width];
@@ -606,18 +657,18 @@ impl<'a> Decoder<'a> {
                     cur_row
                 };
 
-                vertical_blend(cur_row, above, &mut row_above, in_width);
-                vertical_blend(cur_row, below, &mut row_below, in_width);
+                vertical_blend(cur_row, above, &mut above_buf, in_width);
+                vertical_blend(cur_row, below, &mut below_buf, in_width);
 
                 let out_y_top = y * 2;
                 let out_y_bot = y * 2 + 1;
                 self.fancy_upsample_h2v1(
-                    &row_above,
+                    &above_buf,
                     in_width,
                     &mut output[out_y_top * out_width..],
                 );
                 self.fancy_upsample_h2v1(
-                    &row_below,
+                    &below_buf,
                     in_width,
                     &mut output[out_y_bot * out_width..],
                 );
