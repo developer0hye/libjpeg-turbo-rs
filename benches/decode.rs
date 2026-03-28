@@ -142,6 +142,27 @@ const BENCH_CASES: &[BenchCase] = &[
         name: "photo_640x480_420_rst",
         path: "tests/fixtures/photo_640x480_420_rst.jpg",
     },
+    // Progressive (multi-scan)
+    BenchCase {
+        name: "prog_photo_640x480_444",
+        path: "tests/fixtures/photo_640x480_444_prog.jpg",
+    },
+    BenchCase {
+        name: "prog_photo_640x480_422",
+        path: "tests/fixtures/photo_640x480_422_prog.jpg",
+    },
+    BenchCase {
+        name: "prog_photo_1920x1080_420",
+        path: "tests/fixtures/photo_1920x1080_420_prog.jpg",
+    },
+    BenchCase {
+        name: "prog_photo_1920x1080_444",
+        path: "tests/fixtures/photo_1920x1080_444_prog.jpg",
+    },
+    BenchCase {
+        name: "prog_photo_3840x2160_420",
+        path: "tests/fixtures/photo_3840x2160_420_prog.jpg",
+    },
 ];
 
 fn bench_full_decode_matrix(c: &mut Criterion) {
