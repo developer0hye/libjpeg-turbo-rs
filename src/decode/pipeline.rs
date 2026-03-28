@@ -1416,27 +1416,34 @@ impl<'a> Decoder<'a> {
     ) -> Result<()> {
         let scan = &scan_info.header;
         let mut dc_preds = [0i16; 4];
-        let mut mcu_count: u16 = 0;
+
+        // Pre-resolve Huffman tables outside the MCU loop
+        let dc_tables: Vec<&HuffmanTable> = scan
+            .components
+            .iter()
+            .map(|sc| Self::resolve_table(&scan_info.dc_huffman_tables, sc.dc_table_index, "DC"))
+            .collect::<Result<Vec<_>>>()?;
+
+        // Use countdown for restart interval to avoid modulo in hot loop
+        let restart_interval = scan_info.restart_interval as u32;
+        // Start at restart_interval so the first MCU doesn't trigger a reset.
+        // When restart_interval is 0, countdown is never checked.
+        let mut restart_countdown: u32 = restart_interval;
 
         for mcu_y in 0..mcus_y {
             for mcu_x in 0..mcus_x {
-                if scan_info.restart_interval > 0
-                    && mcu_count > 0
-                    && mcu_count.is_multiple_of(scan_info.restart_interval)
-                {
-                    bit_reader.reset();
-                    dc_preds = [0i16; 4];
+                if restart_interval > 0 {
+                    if restart_countdown == 0 {
+                        bit_reader.reset();
+                        dc_preds = [0i16; 4];
+                        restart_countdown = restart_interval;
+                    }
+                    restart_countdown -= 1;
                 }
 
                 for (si, &comp_idx) in scan_comp_indices.iter().enumerate() {
                     let ci = &comp_infos[comp_idx];
-                    let scan_comp = &scan.components[si];
-
-                    let dc_table = Self::resolve_table(
-                        &scan_info.dc_huffman_tables,
-                        scan_comp.dc_table_index,
-                        "DC",
-                    )?;
+                    let dc_table = dc_tables[si];
 
                     for v in 0..ci.v_samp {
                         for h in 0..ci.h_samp {
@@ -1461,8 +1468,6 @@ impl<'a> Decoder<'a> {
                         }
                     }
                 }
-
-                mcu_count += 1;
             }
         }
 
@@ -1492,19 +1497,11 @@ impl<'a> Decoder<'a> {
         let ci = &comp_infos[comp_idx];
         let mut dc_pred = 0i16;
         let mut eob_run = 0u16;
-        let mut mcu_count: u16 = 0;
 
-        // For non-interleaved scans, MCU is a single block.
-        // Iterate over all blocks in this component.
-        let restart_interval = if scan_info.restart_interval > 0 {
-            // Adjust restart interval for non-interleaved scans:
-            // In interleaved mode, restart interval counts MCUs.
-            // In non-interleaved mode, it counts blocks directly.
-            scan_info.restart_interval
-        } else {
-            0
-        };
+        let restart_interval = scan_info.restart_interval as u32;
+        let mut restart_countdown: u32 = restart_interval;
 
+        // Pre-resolve tables once before the block loop
         let dc_table = if is_dc {
             Some(Self::resolve_table(
                 &scan_info.dc_huffman_tables,
@@ -1524,55 +1521,82 @@ impl<'a> Decoder<'a> {
             None
         };
 
-        for by in 0..ci.blocks_y {
-            for bx in 0..ci.blocks_x {
-                if restart_interval > 0
-                    && mcu_count > 0
-                    && mcu_count.is_multiple_of(restart_interval)
-                {
-                    bit_reader.reset();
-                    dc_pred = 0;
-                    eob_run = 0;
-                }
-
-                let block_idx = by * ci.blocks_x + bx;
-                let coeffs = &mut coeff_bufs[comp_idx][block_idx];
-
-                if is_dc {
-                    if ah == 0 {
-                        progressive::decode_dc_first(
-                            bit_reader,
-                            dc_table.unwrap(),
-                            &mut dc_pred,
-                            coeffs,
-                            al,
-                        )?;
-                    } else {
-                        progressive::decode_dc_refine(bit_reader, coeffs, al)?;
+        // Macro to handle restart interval countdown in each specialized loop.
+        macro_rules! restart_check_dc {
+            ($bit_reader:expr, $dc_pred:expr, $countdown:expr, $interval:expr) => {
+                if $interval > 0 {
+                    if $countdown == 0 {
+                        $bit_reader.reset();
+                        $dc_pred = 0;
+                        $countdown = $interval;
                     }
-                } else if ah == 0 {
-                    progressive::decode_ac_first(
-                        bit_reader,
-                        ac_table.unwrap(),
-                        coeffs,
-                        ss,
-                        se,
-                        al,
-                        &mut eob_run,
-                    )?;
-                } else {
-                    progressive::decode_ac_refine(
-                        bit_reader,
-                        ac_table.unwrap(),
-                        coeffs,
-                        ss,
-                        se,
-                        al,
-                        &mut eob_run,
-                    )?;
+                    $countdown -= 1;
                 }
+            };
+        }
+        macro_rules! restart_check_ac {
+            ($bit_reader:expr, $eob_run:expr, $countdown:expr, $interval:expr) => {
+                if $interval > 0 {
+                    if $countdown == 0 {
+                        $bit_reader.reset();
+                        $eob_run = 0;
+                        $countdown = $interval;
+                    }
+                    $countdown -= 1;
+                }
+            };
+        }
 
-                mcu_count += 1;
+        // Split into four specialized loops to eliminate per-block branches.
+        // Use direct iterator over the flat coefficient buffer to avoid
+        // per-block `by * blocks_x + bx` index computation and bounds checks.
+        let coeff_slice = &mut coeff_bufs[comp_idx];
+        let total_blocks = ci.blocks_x * ci.blocks_y;
+
+        if is_dc && ah == 0 {
+            let dc_table = dc_table.unwrap();
+            for coeffs in coeff_slice[..total_blocks].iter_mut() {
+                restart_check_dc!(bit_reader, dc_pred, restart_countdown, restart_interval);
+                progressive::decode_dc_first(bit_reader, dc_table, &mut dc_pred, coeffs, al)?;
+            }
+        } else if is_dc {
+            for coeffs in coeff_slice[..total_blocks].iter_mut() {
+                if restart_interval > 0 {
+                    if restart_countdown == 0 {
+                        bit_reader.reset();
+                        restart_countdown = restart_interval;
+                    }
+                    restart_countdown -= 1;
+                }
+                progressive::decode_dc_refine(bit_reader, coeffs, al)?;
+            }
+        } else if ah == 0 {
+            let ac_table = ac_table.unwrap();
+            for coeffs in coeff_slice[..total_blocks].iter_mut() {
+                restart_check_ac!(bit_reader, eob_run, restart_countdown, restart_interval);
+                progressive::decode_ac_first(
+                    bit_reader,
+                    ac_table,
+                    coeffs,
+                    ss,
+                    se,
+                    al,
+                    &mut eob_run,
+                )?;
+            }
+        } else {
+            let ac_table = ac_table.unwrap();
+            for coeffs in coeff_slice[..total_blocks].iter_mut() {
+                restart_check_ac!(bit_reader, eob_run, restart_countdown, restart_interval);
+                progressive::decode_ac_refine(
+                    bit_reader,
+                    ac_table,
+                    coeffs,
+                    ss,
+                    se,
+                    al,
+                    &mut eob_run,
+                )?;
             }
         }
 
