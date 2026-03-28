@@ -1,3 +1,5 @@
 commit	time_us	status	description
 baseline	19860	keep	photo_1920x1080_420 baseline on x86_64. C libjpeg-turbo = 14312us. Rust 39% slower.
 0794f27	19036	keep	After color i16+SSSE3 interleave + IDCT DC-only fast path + strided output. Rust 33% slower than C. Perf profile: 59% in decode_baseline_planes (Huffman), 13% in IDCT, 6% in color. Huffman is the dominant bottleneck.
+245ba7c	24411	keep	After 256-bit IDCT + AVX2 vertical blend. Stable 2.9GHz (no turbo). C=20224us. Rust 21% slower on 1080p 4:2:0. But Rust BEATS C on 640x480 and below (863 vs 904us = 5% faster). Gap is cache-efficiency: C uses MCU-row pipeline (hot L2), Rust does full-plane IDCT→upsample→color (cold memory). Architectural change needed for large images.
+uncommitted	0	discard	AVX2 upsample 32-sample/iter rewrite: lane crossing vperm2i128 overhead cancelled throughput gains. No improvement over 16-sample/iter. Reverted.
