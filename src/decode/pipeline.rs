@@ -361,6 +361,26 @@ impl<'a> Decoder<'a> {
             );
         }
 
+        #[cfg(all(target_arch = "x86_64", feature = "simd"))]
+        {
+            if is_x86_feature_detected!("avx2") {
+                return crate::simd::x86_64::avx2_idct::avx2_idct_islow_strided(
+                    coeffs, quant, output, stride,
+                );
+            }
+            // SSE2 fallback: IDCT into temp buffer, then copy row-by-row.
+            let mut tmp = [0u8; 64];
+            (self.routines.idct_islow)(coeffs, quant, &mut tmp);
+            for row in 0..8 {
+                std::ptr::copy_nonoverlapping(
+                    tmp.as_ptr().add(row * 8),
+                    output.add(row * stride),
+                    8,
+                );
+            }
+            return;
+        }
+
         // Scalar fallback: IDCT into temp buffer, then copy row-by-row.
         #[allow(unreachable_code)]
         {
