@@ -238,13 +238,11 @@ pub fn decode_ac_refine(
 #[inline(always)]
 fn apply_correction_bit(reader: &mut BitReader, coeff: &mut i16, p1: i16) {
     let bit = reader.read_bits(1);
-    if bit != 0 {
-        if (*coeff & p1) == 0 {
-            if *coeff > 0 {
-                *coeff += p1;
-            } else {
-                *coeff -= p1;
-            }
+    if bit != 0 && (*coeff & p1) == 0 {
+        if *coeff > 0 {
+            *coeff += p1;
+        } else {
+            *coeff -= p1;
         }
     }
 }
