@@ -4066,11 +4066,25 @@ fn encode_downsampled_chroma_block(
             && block_x + src_w <= plane_width
             && block_y + src_h <= plane_height
         {
-            // Downsample to a local [i16; 64], then FDCT+quantize in-place
-            let mut block = [0i16; 64];
-            let downsample_ok: bool = if h_factor == 2 && v_factor == 2 {
+            // Truly fused downsample+FDCT+quantize for H2V2 (most common)
+            if h_factor == 2 && v_factor == 2 {
+                let mut quantized = [0i16; 64];
                 unsafe {
-                    downsample_chroma_block_h2v2_ssse3(
+                    crate::simd::x86_64::avx2_downsample_h2v2_fdct_quantize(
+                        plane.as_ptr().add(block_y * plane_width + block_x),
+                        plane_width,
+                        quant_table,
+                        &mut quantized,
+                    );
+                }
+                HuffmanEncoder::encode_block(writer, &quantized, prev_dc, dc_table, ac_table);
+                return;
+            }
+            // Separate downsample + FDCT for other modes
+            let mut block = [0i16; 64];
+            let downsample_ok: bool = if h_factor == 2 && v_factor == 1 {
+                unsafe {
+                    downsample_chroma_block_h2v1_ssse3(
                         plane,
                         plane_width,
                         block_x,
