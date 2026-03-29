@@ -3287,19 +3287,51 @@ fn downsample_chroma_block(
     v_factor: usize,
     block: &mut [i16; 64],
 ) {
-    // NEON fast path for interior blocks (no bounds checking needed)
-    #[cfg(target_arch = "aarch64")]
+    // SIMD fast path for interior blocks (no bounds checking needed)
     {
         let src_w: usize = 8 * h_factor;
         let src_h: usize = 8 * v_factor;
         if block_x + src_w <= plane_width && block_y + src_h <= plane_height {
-            if h_factor == 2 && v_factor == 2 {
-                downsample_chroma_block_h2v2_neon(plane, plane_width, block_x, block_y, block);
-                return;
+            #[cfg(target_arch = "aarch64")]
+            {
+                if h_factor == 2 && v_factor == 2 {
+                    downsample_chroma_block_h2v2_neon(plane, plane_width, block_x, block_y, block);
+                    return;
+                }
+                if h_factor == 2 && v_factor == 1 {
+                    downsample_chroma_block_h2v1_neon(plane, plane_width, block_x, block_y, block);
+                    return;
+                }
             }
-            if h_factor == 2 && v_factor == 1 {
-                downsample_chroma_block_h2v1_neon(plane, plane_width, block_x, block_y, block);
-                return;
+            #[cfg(target_arch = "x86_64")]
+            {
+                if is_x86_feature_detected!("ssse3") {
+                    if h_factor == 2 && v_factor == 2 {
+                        // SAFETY: SSSE3 availability checked above, interior block bounds verified.
+                        unsafe {
+                            downsample_chroma_block_h2v2_ssse3(
+                                plane,
+                                plane_width,
+                                block_x,
+                                block_y,
+                                block,
+                            );
+                        }
+                        return;
+                    }
+                    if h_factor == 2 && v_factor == 1 {
+                        unsafe {
+                            downsample_chroma_block_h2v1_ssse3(
+                                plane,
+                                plane_width,
+                                block_x,
+                                block_y,
+                                block,
+                            );
+                        }
+                        return;
+                    }
+                }
             }
         }
     }
@@ -3390,6 +3422,84 @@ fn downsample_chroma_block_h2v1_neon(
 
             vst1q_s16(block.as_mut_ptr().add(row * 8), shifted);
         }
+    }
+}
+
+/// SSSE3-accelerated H2V2 downsample + level-shift for interior chroma blocks.
+///
+/// Processes 16x16 source pixels → 8x8 output using maddubs pairwise add.
+/// Each 2x2 block is averaged and level-shifted (-128).
+///
+/// # Safety
+/// Requires SSSE3. Caller must ensure `block_x + 16 <= plane_width` and
+/// `block_y + 16 <= plane_height` (interior block bounds).
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "ssse3")]
+unsafe fn downsample_chroma_block_h2v2_ssse3(
+    plane: &[u8],
+    plane_width: usize,
+    block_x: usize,
+    block_y: usize,
+    block: &mut [i16; 64],
+) {
+    use core::arch::x86_64::*;
+
+    // maddubs(data, ones) computes pairwise sum of adjacent u8 pairs → i16
+    let ones: __m128i = _mm_set1_epi8(1);
+    let bias: __m128i = _mm_set1_epi16(2); // rounding for divide-by-4
+    let level_shift: __m128i = _mm_set1_epi16(128);
+
+    for row in 0..8 {
+        let sy: usize = block_y + row * 2;
+        let r0_ptr: *const u8 = plane.as_ptr().add(sy * plane_width + block_x);
+        let r1_ptr: *const u8 = plane.as_ptr().add((sy + 1) * plane_width + block_x);
+
+        let r0: __m128i = _mm_loadu_si128(r0_ptr as *const __m128i);
+        let r1: __m128i = _mm_loadu_si128(r1_ptr as *const __m128i);
+
+        // Pairwise add: sum adjacent u8 pairs from each row → i16
+        let sum0: __m128i = _mm_maddubs_epi16(r0, ones);
+        let sum1: __m128i = _mm_maddubs_epi16(r1, ones);
+
+        // Sum both rows + bias, divide by 4
+        let total: __m128i = _mm_add_epi16(_mm_add_epi16(sum0, sum1), bias);
+        let avg: __m128i = _mm_srai_epi16::<2>(total);
+
+        // Level-shift (-128) and store
+        let shifted: __m128i = _mm_sub_epi16(avg, level_shift);
+        _mm_storeu_si128(block.as_mut_ptr().add(row * 8) as *mut __m128i, shifted);
+    }
+}
+
+/// SSSE3-accelerated H2V1 downsample + level-shift for interior chroma blocks.
+///
+/// # Safety
+/// Requires SSSE3. Caller must ensure `block_x + 16 <= plane_width` and
+/// `block_y + 8 <= plane_height` (interior block bounds).
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "ssse3")]
+unsafe fn downsample_chroma_block_h2v1_ssse3(
+    plane: &[u8],
+    plane_width: usize,
+    block_x: usize,
+    block_y: usize,
+    block: &mut [i16; 64],
+) {
+    use core::arch::x86_64::*;
+
+    let ones: __m128i = _mm_set1_epi8(1);
+    let bias: __m128i = _mm_set1_epi16(1); // rounding for divide-by-2
+    let level_shift: __m128i = _mm_set1_epi16(128);
+
+    for row in 0..8 {
+        let sy: usize = block_y + row;
+        let r_ptr: *const u8 = plane.as_ptr().add(sy * plane_width + block_x);
+
+        let r: __m128i = _mm_loadu_si128(r_ptr as *const __m128i);
+        let sum: __m128i = _mm_add_epi16(_mm_maddubs_epi16(r, ones), bias);
+        let avg: __m128i = _mm_srai_epi16::<1>(sum);
+        let shifted: __m128i = _mm_sub_epi16(avg, level_shift);
+        _mm_storeu_si128(block.as_mut_ptr().add(row * 8) as *mut __m128i, shifted);
     }
 }
 
