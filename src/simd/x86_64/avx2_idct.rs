@@ -33,22 +33,22 @@ struct AlignedI16x16([i16; 16]);
 
 static PW_F130_F054_MF130_F054: AlignedI16x16 = AlignedI16x16([
     // lower 128: (F_0_541+F_0_765), F_0_541 repeated 4 times
-    (F_0_541 + F_0_765) as i16,
+    (F_0_541 + F_0_765),
     F_0_541,
-    (F_0_541 + F_0_765) as i16,
+    (F_0_541 + F_0_765),
     F_0_541,
-    (F_0_541 + F_0_765) as i16,
+    (F_0_541 + F_0_765),
     F_0_541,
-    (F_0_541 + F_0_765) as i16,
+    (F_0_541 + F_0_765),
     F_0_541,
     // upper 128: (F_0_541-F_1_847), F_0_541 repeated 4 times
-    (F_0_541 - F_1_847) as i16,
+    (F_0_541 - F_1_847),
     F_0_541,
-    (F_0_541 - F_1_847) as i16,
+    (F_0_541 - F_1_847),
     F_0_541,
-    (F_0_541 - F_1_847) as i16,
+    (F_0_541 - F_1_847),
     F_0_541,
-    (F_0_541 - F_1_847) as i16,
+    (F_0_541 - F_1_847),
     F_0_541,
 ]);
 
@@ -56,21 +56,21 @@ static PW_F130_F054_MF130_F054: AlignedI16x16 = AlignedI16x16([
 //   lower 128: times 4 dw (F_1_175-F_1_961), F_1_175  => z3 constants
 //   upper 128: times 4 dw (F_1_175-F_0_390), F_1_175  => z4 constants
 static PW_MF078_F117_F078_F117: AlignedI16x16 = AlignedI16x16([
-    (F_1_175 - F_1_961) as i16,
+    (F_1_175 - F_1_961),
     F_1_175,
-    (F_1_175 - F_1_961) as i16,
+    (F_1_175 - F_1_961),
     F_1_175,
-    (F_1_175 - F_1_961) as i16,
+    (F_1_175 - F_1_961),
     F_1_175,
-    (F_1_175 - F_1_961) as i16,
+    (F_1_175 - F_1_961),
     F_1_175,
-    (F_1_175 - F_0_390) as i16,
+    (F_1_175 - F_0_390),
     F_1_175,
-    (F_1_175 - F_0_390) as i16,
+    (F_1_175 - F_0_390),
     F_1_175,
-    (F_1_175 - F_0_390) as i16,
+    (F_1_175 - F_0_390),
     F_1_175,
-    (F_1_175 - F_0_390) as i16,
+    (F_1_175 - F_0_390),
     F_1_175,
 ]);
 
@@ -78,21 +78,21 @@ static PW_MF078_F117_F078_F117: AlignedI16x16 = AlignedI16x16([
 //   lower 128: times 4 dw (F_0_298-F_0_899), -F_0_899  => tmp0 constants
 //   upper 128: times 4 dw (F_2_053-F_2_562), -F_2_562  => tmp1 constants
 static PW_MF060_MF089_MF050_MF256: AlignedI16x16 = AlignedI16x16([
-    (F_0_298 - F_0_899) as i16,
+    (F_0_298 - F_0_899),
     -F_0_899,
-    (F_0_298 - F_0_899) as i16,
+    (F_0_298 - F_0_899),
     -F_0_899,
-    (F_0_298 - F_0_899) as i16,
+    (F_0_298 - F_0_899),
     -F_0_899,
-    (F_0_298 - F_0_899) as i16,
+    (F_0_298 - F_0_899),
     -F_0_899,
-    (F_2_053 - F_2_562) as i16,
+    (F_2_053 - F_2_562),
     -F_2_562,
-    (F_2_053 - F_2_562) as i16,
+    (F_2_053 - F_2_562),
     -F_2_562,
-    (F_2_053 - F_2_562) as i16,
+    (F_2_053 - F_2_562),
     -F_2_562,
-    (F_2_053 - F_2_562) as i16,
+    (F_2_053 - F_2_562),
     -F_2_562,
 ]);
 
@@ -101,21 +101,21 @@ static PW_MF060_MF089_MF050_MF256: AlignedI16x16 = AlignedI16x16([
 //   upper 128: times 4 dw -F_2_562, (F_3_072-F_2_562)  => tmp2 constants
 static PW_MF089_F060_MF256_F050: AlignedI16x16 = AlignedI16x16([
     -F_0_899,
-    (F_1_501 - F_0_899) as i16,
+    (F_1_501 - F_0_899),
     -F_0_899,
-    (F_1_501 - F_0_899) as i16,
+    (F_1_501 - F_0_899),
     -F_0_899,
-    (F_1_501 - F_0_899) as i16,
+    (F_1_501 - F_0_899),
     -F_0_899,
-    (F_1_501 - F_0_899) as i16,
+    (F_1_501 - F_0_899),
     -F_2_562,
-    (F_3_072 - F_2_562) as i16,
+    (F_3_072 - F_2_562),
     -F_2_562,
-    (F_3_072 - F_2_562) as i16,
+    (F_3_072 - F_2_562),
     -F_2_562,
-    (F_3_072 - F_2_562) as i16,
+    (F_3_072 - F_2_562),
     -F_2_562,
-    (F_3_072 - F_2_562) as i16,
+    (F_3_072 - F_2_562),
 ]);
 
 // PW_1_NEG1: lower 128 = 1,1,1,...  upper 128 = -1,-1,-1,...
@@ -427,36 +427,4 @@ unsafe fn dotranspose(
         _mm256_unpacklo_epi64(v2, v3),
         _mm256_unpackhi_epi64(v2, v3),
     )
-}
-
-/// SSE2 transpose helper (kept for SSE2 IDCT path).
-#[target_feature(enable = "avx2")]
-#[inline]
-pub(crate) unsafe fn transpose_8x8_i16(rows: [__m128i; 8]) -> [__m128i; 8] {
-    let t0 = _mm_unpacklo_epi16(rows[0], rows[1]);
-    let t1 = _mm_unpackhi_epi16(rows[0], rows[1]);
-    let t2 = _mm_unpacklo_epi16(rows[2], rows[3]);
-    let t3 = _mm_unpackhi_epi16(rows[2], rows[3]);
-    let t4 = _mm_unpacklo_epi16(rows[4], rows[5]);
-    let t5 = _mm_unpackhi_epi16(rows[4], rows[5]);
-    let t6 = _mm_unpacklo_epi16(rows[6], rows[7]);
-    let t7 = _mm_unpackhi_epi16(rows[6], rows[7]);
-    let u0 = _mm_unpacklo_epi32(t0, t2);
-    let u1 = _mm_unpackhi_epi32(t0, t2);
-    let u2 = _mm_unpacklo_epi32(t1, t3);
-    let u3 = _mm_unpackhi_epi32(t1, t3);
-    let u4 = _mm_unpacklo_epi32(t4, t6);
-    let u5 = _mm_unpackhi_epi32(t4, t6);
-    let u6 = _mm_unpacklo_epi32(t5, t7);
-    let u7 = _mm_unpackhi_epi32(t5, t7);
-    [
-        _mm_unpacklo_epi64(u0, u4),
-        _mm_unpackhi_epi64(u0, u4),
-        _mm_unpacklo_epi64(u1, u5),
-        _mm_unpackhi_epi64(u1, u5),
-        _mm_unpacklo_epi64(u2, u6),
-        _mm_unpackhi_epi64(u2, u6),
-        _mm_unpacklo_epi64(u3, u7),
-        _mm_unpackhi_epi64(u3, u7),
-    ]
 }
