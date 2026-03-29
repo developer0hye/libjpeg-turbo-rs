@@ -1,0 +1,6 @@
+commit	time_us	status	description
+baseline	43536	baseline	Original progressive encode: scalar FDCT+quantize, scalar color conversion, scalar AC encoding. 1920x1080 420 q75. C reference: 35388 µs (Rust 1.23x slower).
+f51c266	27575	keep	Switch from scalar_fdct_quantize to NEON neon_fdct_quantize via detect_encoder(). 1.58x speedup. Now 22% faster than C.
+fa537f7	27808	keep	Use NEON rgb_to_ycbcr_row in progressive/arithmetic encode paths. ~0% on large images (color conversion small fraction), 15% on 64x64.
+7741a8e	26804	keep	AC first: bitmap-based zero-skip via CTZ instead of linear scan. AC refine: stack [u8;64] instead of Vec heap alloc. 3.6% faster.
+d4bdfe3	24863	keep	Batch correction bits into u32 accumulator + single put_bits. Combine Huffman+magnitude in AC first/DC. Flatten AC scan loop. 7% faster. Now 30% faster than C.

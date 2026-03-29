@@ -1894,79 +1894,61 @@ fn compress_progressive_with_scans(
         .map(|cl| vec![[0i16; 64]; cl.blocks_x * cl.blocks_y])
         .collect();
 
-    // FDCT + quantize all blocks into coefficient buffers
+    // FDCT + quantize all blocks into coefficient buffers.
+    // On aarch64: use fused extract+FDCT+quantize for interior Y blocks
+    // and fused downsample+FDCT for chroma blocks (avoids intermediate buffers).
     for mcu_y in 0..mcus_y {
         for mcu_x in 0..mcus_x {
-            let x0 = mcu_x * mcu_w;
-            let y0 = mcu_y * mcu_h;
+            let x0: usize = mcu_x * mcu_w;
+            let y0: usize = mcu_y * mcu_h;
 
             if is_grayscale {
-                let bx = mcu_x;
-                let by = mcu_y;
-                let mut block = [0i16; 64];
-                extract_block(&y_plane, width, height, x0, y0, &mut block);
-                fdct_quantize_fn(&block, &luma_divisors, &mut coeff_bufs[0][by * mcus_x + bx]);
+                let bx: usize = mcu_x;
+                let by: usize = mcu_y;
+                progressive_fdct_y_block(
+                    &y_plane,
+                    width,
+                    height,
+                    x0,
+                    y0,
+                    &luma_divisors,
+                    fdct_quantize_fn,
+                    &mut coeff_bufs[0][by * mcus_x + bx],
+                );
             } else {
                 // Y blocks
+                let blocks_x: usize = comp_layouts[0].blocks_x;
                 for bv in 0..v_samp {
                     for bh in 0..h_samp {
-                        let bx = mcu_x * h_samp + bh;
-                        let by = mcu_y * v_samp + bv;
-                        let mut block = [0i16; 64];
-                        extract_block(
+                        let bx: usize = mcu_x * h_samp + bh;
+                        let by: usize = mcu_y * v_samp + bv;
+                        progressive_fdct_y_block(
                             &y_plane,
                             width,
                             height,
                             x0 + bh * 8,
                             y0 + bv * 8,
-                            &mut block,
-                        );
-                        let blocks_x = comp_layouts[0].blocks_x;
-                        fdct_quantize_fn(
-                            &block,
                             &luma_divisors,
+                            fdct_quantize_fn,
                             &mut coeff_bufs[0][by * blocks_x + bx],
                         );
                     }
                 }
-                // Cb block
-                {
-                    let bx = mcu_x;
-                    let by = mcu_y;
-                    let mut block = [0i16; 64];
-                    let hf = if h_samp > 1 { 2 } else { 1 };
-                    let vf = if v_samp > 1 { 2 } else { 1 };
-                    if hf == 1 && vf == 1 {
-                        extract_block(&cb_plane, width, height, x0, y0, &mut block);
-                    } else {
-                        downsample_chroma_block(
-                            &cb_plane, width, height, x0, y0, hf, vf, &mut block,
-                        );
-                    }
-                    fdct_quantize_fn(
-                        &block,
+                // Cb/Cr blocks
+                for (comp_idx, plane) in [(1usize, &cb_plane), (2usize, &cr_plane)] {
+                    let bx: usize = mcu_x;
+                    let by: usize = mcu_y;
+                    progressive_fdct_chroma_block(
+                        plane,
+                        width,
+                        height,
+                        x0,
+                        y0,
+                        h_samp,
+                        v_samp,
                         &chroma_divisors,
-                        &mut coeff_bufs[1][by * mcus_x + bx],
-                    );
-                }
-                // Cr block
-                {
-                    let bx = mcu_x;
-                    let by = mcu_y;
-                    let mut block = [0i16; 64];
-                    let hf = if h_samp > 1 { 2 } else { 1 };
-                    let vf = if v_samp > 1 { 2 } else { 1 };
-                    if hf == 1 && vf == 1 {
-                        extract_block(&cr_plane, width, height, x0, y0, &mut block);
-                    } else {
-                        downsample_chroma_block(
-                            &cr_plane, width, height, x0, y0, hf, vf, &mut block,
-                        );
-                    }
-                    fdct_quantize_fn(
-                        &block,
-                        &chroma_divisors,
-                        &mut coeff_bufs[2][by * mcus_x + bx],
+                        fdct_quantize_fn,
+                        &mut coeff_bufs[comp_idx][by * mcus_x + bx],
                     );
                 }
             }
@@ -3096,6 +3078,105 @@ fn scale_quant_for_fdct(quant_table: &[u16; 64]) -> QuantDivisors {
         divisors,
         reciprocals,
     }
+}
+
+/// FDCT+quantize a Y block. Uses fused extract+FDCT on aarch64 for interior blocks.
+#[inline]
+fn progressive_fdct_y_block(
+    plane: &[u8],
+    plane_w: usize,
+    plane_h: usize,
+    bx: usize,
+    by: usize,
+    quant: &QuantDivisors,
+    fdct_quantize_fn: fn(&[i16; 64], &QuantDivisors, &mut [i16; 64]),
+    output: &mut [i16; 64],
+) {
+    #[cfg(target_arch = "aarch64")]
+    {
+        // Interior block: use fused u8→FDCT+quantize+zigzag (no intermediate buffer)
+        if bx + 8 <= plane_w && by + 8 <= plane_h {
+            unsafe {
+                crate::simd::aarch64::neon_extract_fdct_quantize(
+                    plane.as_ptr().add(by * plane_w + bx),
+                    plane_w,
+                    quant,
+                    output,
+                );
+            }
+            return;
+        }
+    }
+    // Edge block or non-aarch64: scalar extract + FDCT
+    let mut block = [0i16; 64];
+    extract_block(plane, plane_w, plane_h, bx, by, &mut block);
+    fdct_quantize_fn(&block, quant, output);
+}
+
+/// FDCT+quantize a chroma block with optional downsampling.
+/// Uses fused downsample+FDCT on aarch64 for interior blocks.
+#[inline]
+#[allow(clippy::too_many_arguments)]
+fn progressive_fdct_chroma_block(
+    plane: &[u8],
+    plane_w: usize,
+    plane_h: usize,
+    x0: usize,
+    y0: usize,
+    h_samp: usize,
+    v_samp: usize,
+    quant: &QuantDivisors,
+    fdct_quantize_fn: fn(&[i16; 64], &QuantDivisors, &mut [i16; 64]),
+    output: &mut [i16; 64],
+) {
+    let hf: usize = if h_samp > 1 { 2 } else { 1 };
+    let vf: usize = if v_samp > 1 { 2 } else { 1 };
+
+    if hf == 1 && vf == 1 {
+        // No downsampling (4:4:4)
+        progressive_fdct_y_block(
+            plane,
+            plane_w,
+            plane_h,
+            x0,
+            y0,
+            quant,
+            fdct_quantize_fn,
+            output,
+        );
+        return;
+    }
+
+    #[cfg(target_arch = "aarch64")]
+    {
+        let src_w: usize = hf * 8; // 16 for h2, 8 for h1
+        let src_h: usize = vf * 8; // 16 for v2, 8 for v1
+        if x0 + src_w <= plane_w && y0 + src_h <= plane_h {
+            unsafe {
+                let ptr: *const u8 = plane.as_ptr().add(y0 * plane_w + x0);
+                if hf == 2 && vf == 2 {
+                    crate::simd::aarch64::neon_downsample_h2v2_fdct_quantize(
+                        ptr, plane_w, quant, output,
+                    );
+                } else if hf == 2 && vf == 1 {
+                    crate::simd::aarch64::neon_downsample_h2v1_fdct_quantize(
+                        ptr, plane_w, quant, output,
+                    );
+                } else {
+                    // Other subsampling modes: fallback
+                    let mut block = [0i16; 64];
+                    downsample_chroma_block(plane, plane_w, plane_h, x0, y0, hf, vf, &mut block);
+                    fdct_quantize_fn(&block, quant, output);
+                }
+            }
+            return;
+        }
+    }
+
+    // Edge block or non-aarch64: scalar downsample + FDCT
+    let mut block = [0i16; 64];
+    downsample_chroma_block(plane, plane_w, plane_h, x0, y0, hf, vf, &mut block);
+    fdct_quantize_fn(&block, quant, output);
 }
 
 /// Convert input pixels to Y, Cb, Cr planes.
