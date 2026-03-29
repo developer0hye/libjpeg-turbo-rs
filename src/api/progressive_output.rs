@@ -768,46 +768,17 @@ impl ProgressiveDecoder {
             )
         }
 
-        #[cfg(not(all(target_arch = "aarch64", feature = "simd")))]
+        // Fused H2V2: vertical + horizontal in one pass using >> 4 arithmetic.
+        #[allow(unreachable_code)]
         {
-            let mut row_above = vec![0u8; in_width];
-            let mut row_below = vec![0u8; in_width];
-
-            for y in 0..in_height {
-                let cur_row = &input[y * in_width..(y + 1) * in_width];
-                let above = if y > 0 {
-                    &input[(y - 1) * in_width..y * in_width]
-                } else {
-                    cur_row
-                };
-                let below = if y + 1 < in_height {
-                    &input[(y + 1) * in_width..(y + 2) * in_width]
-                } else {
-                    cur_row
-                };
-
-                // Top output row: blend current with above
-                for i in 0..in_width {
-                    row_above[i] = ((3 * cur_row[i] as u16 + above[i] as u16 + 2) >> 2) as u8;
-                }
-                // Bottom output row: blend current with below
-                for i in 0..in_width {
-                    row_below[i] = ((3 * cur_row[i] as u16 + below[i] as u16 + 2) >> 2) as u8;
-                }
-
-                let out_y_top = y * 2;
-                let out_y_bot = y * 2 + 1;
-                self.fancy_upsample_h2v1(
-                    &row_above,
-                    in_width,
-                    &mut output[out_y_top * out_width..],
-                );
-                self.fancy_upsample_h2v1(
-                    &row_below,
-                    in_width,
-                    &mut output[out_y_bot * out_width..],
-                );
-            }
+            crate::decode::upsample::fancy_h2v2(
+                input,
+                in_width,
+                in_height,
+                output,
+                out_width,
+                in_height * 2,
+            );
         }
     }
 
