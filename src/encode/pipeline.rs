@@ -2848,13 +2848,6 @@ fn encode_progressive_dc_scan(
     }
 }
 
-/// Emit buffered correction bits (for AC refine scans).
-fn emit_buffered_bits(bits: &[u8], writer: &mut BitWriter) {
-    for &bit in bits {
-        writer.write_bits(bit as u16, 1);
-    }
-}
-
 /// Encode a progressive AC scan (single component).
 ///
 /// For AC first scan (ah==0): each block either encodes its non-zero
@@ -2910,8 +2903,8 @@ fn encode_progressive_ac_scan(
 
 /// Encode one block for AC first scan (ah==0).
 ///
-/// Uses simple per-block EOB (symbol 0x00) instead of EOBRUN batching,
-/// since the default Huffman tables lack EOBRUN category symbols.
+/// Pre-computes values and bitmap to skip zero runs via CTZ, matching
+/// C's jcphuff.c prepare+encode pattern.
 fn encode_ac_first_block(
     block: &[i16; 64],
     ss: usize,
@@ -2920,41 +2913,59 @@ fn encode_ac_first_block(
     ac_table: &HuffTable,
     writer: &mut BitWriter,
 ) {
-    let mut zero_run: u8 = 0;
+    let band_len: usize = se - ss + 1;
 
-    for &coeff in &block[ss..=se] {
+    // Pre-compute: apply point transform, build nonzero bitmap, store values/diffs
+    let mut values = [0u16; 64];   // abs(coeff) >> al
+    let mut diffs = [0u16; 64];    // magnitude bits (one's complement for negative)
+    let mut zerobits: u64 = 0;     // bit set = nonzero after transform
+
+    for i in 0..band_len {
+        let coeff: i16 = block[ss + i];
         if coeff == 0 {
-            zero_run += 1;
             continue;
         }
-        // Per ITU-T T.81 and libjpeg-turbo jcphuff.c: the point transform
-        // for AC coefficients is integer division with rounding toward zero.
-        // We compute absolute value first, then shift. This matches C's
-        // `abs(coeff) >> Al` approach and avoids the rounding-toward-negative-
-        // infinity behavior of signed right shift.
         let sign_mask: i16 = coeff >> 15;
         let abs_coeff: i16 = (coeff ^ sign_mask) - sign_mask;
-        let temp: i16 = abs_coeff >> al;
+        let temp: u16 = (abs_coeff >> al) as u16;
         if temp == 0 {
-            // Nonzero coefficient became zero after point transform
-            zero_run += 1;
             continue;
         }
-        // For negative coeff: emit one's complement of abs value (= bitwise complement)
-        let temp2: u16 = (sign_mask ^ temp) as u16;
+        values[i] = temp;
+        diffs[i] = (sign_mask ^ (abs_coeff >> al)) as u16;
+        zerobits |= 1u64 << i;
+    }
 
+    if zerobits == 0 {
+        // All zeros: emit EOB
+        writer.write_bits(ac_table.ehufco[0x00], ac_table.ehufsi[0x00]);
+        return;
+    }
+
+    // Encode using bitmap to skip directly to nonzero coefficients
+    let mut prev_pos: usize = 0; // position after last encoded coeff (or start)
+
+    while zerobits != 0 {
+        let tz: u32 = zerobits.trailing_zeros();
+        let pos: usize = tz as usize;
+        zerobits &= zerobits - 1; // clear lowest set bit
+
+        let mut zero_run: usize = pos - prev_pos;
         while zero_run >= 16 {
             writer.write_bits(ac_table.ehufco[0xF0], ac_table.ehufsi[0xF0]);
             zero_run -= 16;
         }
-        let nbits: u8 = 16 - (temp as u16).leading_zeros() as u8;
-        let symbol: usize = ((zero_run as usize) << 4) | (nbits as usize);
+
+        let temp: u16 = values[pos];
+        let nbits: u8 = 16 - temp.leading_zeros() as u8;
+        let symbol: usize = (zero_run << 4) | (nbits as usize);
         writer.write_bits(ac_table.ehufco[symbol], ac_table.ehufsi[symbol]);
-        writer.write_bits(temp2, nbits);
-        zero_run = 0;
+        writer.write_bits(diffs[pos], nbits);
+        prev_pos = pos + 1;
     }
-    if zero_run > 0 {
-        // Trailing zeros: emit EOB
+
+    // If last nonzero wasn't at se, there are trailing zeros → emit EOB
+    if prev_pos < band_len {
         writer.write_bits(ac_table.ehufco[0x00], ac_table.ehufsi[0x00]);
     }
 }
@@ -2997,67 +3008,55 @@ fn encode_ac_refine_block(
 
     // Main loop: matches C's ENCODE_COEFS_AC_REFINE.
     // r = run length of zero coefficients
-    // correction_bits = buffered correction bits for previously-nonzero coefficients
+    // correction_bits = stack-allocated buffer for previously-nonzero correction bits
     let mut r: usize = 0;
-    let mut correction_bits: Vec<u8> = Vec::with_capacity(band_len);
+    let mut corr_buf = [0u8; 64];
+    let mut corr_len: usize = 0;
     let mut idx: usize = 0;
 
     while idx < band_len {
         let temp: u16 = absvals[idx];
 
         if temp == 0 {
-            // Zero coefficient: increment run length
             r += 1;
             idx += 1;
             continue;
         }
 
         // Emit any required ZRLs, but not if they can be folded into EOB.
-        // C: `while (r > 15 && (cabsvalue <= EOBPTR))`
-        // EOBPTR points to the last newly-nonzero coeff. We use eob (index+1),
-        // so `idx < eob` means we're at or before the last newly-nonzero.
         while r > 15 && idx < eob {
-            // Emit ZRL
             writer.write_bits(ac_table.ehufco[0xF0], ac_table.ehufsi[0xF0]);
             r -= 16;
-            // Emit buffered correction bits that must be associated with ZRL
-            emit_buffered_bits(&correction_bits, writer);
-            correction_bits.clear();
+            for i in 0..corr_len {
+                writer.write_bits(corr_buf[i] as u16, 1);
+            }
+            corr_len = 0;
         }
 
-        // If the coef was previously nonzero, it only needs a correction bit.
-        // NOTE: a straight translation of the spec's figure G.7 would suggest
-        // that we also need to test r > 15. But if r > 15, we can only get
-        // here if idx >= eob, which implies that this coefficient is not 1.
         if temp > 1 {
-            // The correction bit is the next bit of the absolute value.
-            correction_bits.push((temp & 1) as u8);
+            corr_buf[corr_len] = (temp & 1) as u8;
+            corr_len += 1;
             idx += 1;
             continue;
         }
 
         // temp == 1: newly-nonzero coefficient
-        // Count/emit Huffman symbol for run length / number of bits
         let symbol: usize = (r << 4) | 1;
         writer.write_bits(ac_table.ehufco[symbol], ac_table.ehufsi[symbol]);
-
-        // Emit output bit for newly-nonzero coef (sign bit)
-        // 1 = positive, 0 = negative (matches C: `(block[k] < 0) ? 0 : 1`)
         writer.write_bits(sign_bits[idx], 1);
-
-        // Emit buffered correction bits that must be associated with this code
-        emit_buffered_bits(&correction_bits, writer);
-        correction_bits.clear();
+        for i in 0..corr_len {
+            writer.write_bits(corr_buf[i] as u16, 1);
+        }
+        corr_len = 0;
         r = 0;
         idx += 1;
     }
 
-    // If there are trailing zeroes or remaining correction bits, emit EOB.
-    // C: `if (r > 0 || BR > 0) { entropy->EOBRUN++; entropy->BE += BR; }`
-    // We emit per-block EOB (EOBRUN=1) immediately instead of batching.
-    if r > 0 || !correction_bits.is_empty() {
+    if r > 0 || corr_len > 0 {
         writer.write_bits(ac_table.ehufco[0x00], ac_table.ehufsi[0x00]);
-        emit_buffered_bits(&correction_bits, writer);
+        for i in 0..corr_len {
+            writer.write_bits(corr_buf[i] as u16, 1);
+        }
     }
 }
 
