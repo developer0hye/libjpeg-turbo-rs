@@ -556,55 +556,52 @@ unsafe fn encode_ac_dense_lsb(
         *block_diff.get_unchecked_mut(i) = masked_diff;
     }
 
+    let ehufco: *const u16 = ac_table.ehufco.as_ptr();
+    let ehufsi: *const u8 = ac_table.ehufsi.as_ptr();
+
     let mut prev_pos: u32 = 0;
     while bitmap != 0 {
-        let tz: u32 = bitmap.trailing_zeros();
-        let pos: u32 = tz;
+        let pos: u32 = bitmap.trailing_zeros();
         let run: u32 = pos - prev_pos - 1;
         prev_pos = pos;
 
-        let nbits: u8 = *block_nbits.get_unchecked(pos as usize);
+        let nbits: u32 = *block_nbits.get_unchecked(pos as usize) as u32;
         let diff: u32 = *block_diff.get_unchecked(pos as usize) as u32;
 
-        let mut rem_run: u32 = run;
-        while rem_run >= 16 {
-            local_put_bits(
-                pb,
-                fb,
-                buf,
-                ac_table.ehufco[0xF0] as u32,
-                ac_table.ehufsi[0xF0],
-            );
-            rem_run -= 16;
+        let mut r: u32 = run;
+        while r >= 16 {
+            local_put_bits(pb, fb, buf, *ehufco.add(0xF0) as u32, *ehufsi.add(0xF0));
+            r -= 16;
         }
 
-        let symbol: usize = ((rem_run as usize) << 4) | (nbits as usize);
-        let huff_code: u32 = ac_table.ehufco[symbol] as u32;
-        let huff_size: u8 = ac_table.ehufsi[symbol];
-        let combined: u32 = (huff_code << nbits) | diff;
-        local_put_bits(pb, fb, buf, combined, huff_size + nbits);
-
-        // Clear lowest set bit (Kernighan's trick: bitmap &= bitmap - 1)
-        bitmap &= bitmap - 1;
-    }
-
-    if prev_pos < 63 {
+        let symbol: u32 = (r << 4) | nbits;
+        let huff_code: u32 = *ehufco.add(symbol as usize) as u32;
+        let huff_size: u32 = *ehufsi.add(symbol as usize) as u32;
         local_put_bits(
             pb,
             fb,
             buf,
-            ac_table.ehufco[0x00] as u32,
-            ac_table.ehufsi[0x00],
+            (huff_code << nbits) | diff,
+            (huff_size + nbits) as u8,
         );
+
+        bitmap &= bitmap - 1;
+    }
+
+    if prev_pos < 63 {
+        local_put_bits(pb, fb, buf, *ehufco.add(0x00) as u32, *ehufsi.add(0x00));
     }
 }
 
-/// Sparse AC path with LSB-first bitmap: compute magnitude on demand.
+/// AC emit loop with pre-loaded table pointers and minimal live variables.
+///
+/// Compared to the previous version, this reduces register pressure by:
+/// - Pre-loading ehufco/ehufsi raw pointers (avoids ac_table struct reload)
+/// - Using u32 for huff_size to avoid byte-width arithmetic
 ///
 /// # Safety
 /// `pb`, `fb`, `buf` must be valid hoisted state.
 #[cfg(target_arch = "x86_64")]
-#[inline(always)]
 unsafe fn encode_ac_sparse_lsb(
     pb: &mut u64,
     fb: &mut i32,
@@ -613,46 +610,47 @@ unsafe fn encode_ac_sparse_lsb(
     mut bitmap: u64,
     ac_table: &HuffTable,
 ) {
+    let ehufco: *const u16 = ac_table.ehufco.as_ptr();
+    let ehufsi: *const u8 = ac_table.ehufsi.as_ptr();
+    let coeffs: *const i16 = coeffs_zigzag.as_ptr();
+
     let mut prev_pos: u32 = 0;
     while bitmap != 0 {
-        let tz: u32 = bitmap.trailing_zeros();
-        let pos: u32 = tz;
+        let pos: u32 = bitmap.trailing_zeros();
         let run: u32 = pos - prev_pos - 1;
         prev_pos = pos;
 
-        let ac: i16 = *coeffs_zigzag.get_unchecked(pos as usize);
-        let (magnitude_bits, nbits) = encode_ac_value(ac);
-        let mag_masked: u32 = magnitude_bits as u32 & ((1u32 << nbits) - 1);
-
-        let mut rem_run: u32 = run;
-        while rem_run >= 16 {
-            local_put_bits(
-                pb,
-                fb,
-                buf,
-                ac_table.ehufco[0xF0] as u32,
-                ac_table.ehufsi[0xF0],
-            );
-            rem_run -= 16;
+        // Emit ZRL for long runs
+        let mut r: u32 = run;
+        while r >= 16 {
+            local_put_bits(pb, fb, buf, *ehufco.add(0xF0) as u32, *ehufsi.add(0xF0));
+            r -= 16;
         }
 
-        let symbol: usize = ((rem_run as usize) << 4) | (nbits as usize);
-        let huff_code: u32 = ac_table.ehufco[symbol] as u32;
-        let huff_size: u8 = ac_table.ehufsi[symbol];
-        let combined: u32 = (huff_code << nbits) | mag_masked;
-        local_put_bits(pb, fb, buf, combined, huff_size + nbits);
+        // Load coefficient, compute magnitude on demand
+        let ac: i16 = *coeffs.add(pos as usize);
+        let abs_val: u16 = ac.unsigned_abs();
+        let nbits: u32 = (16 - abs_val.leading_zeros()) as u32;
+        let sign: i16 = ac >> 15;
+        let mag: u32 = (ac.wrapping_add(sign) as u16 as u32) & ((1u32 << nbits) - 1);
+
+        // Emit combined Huffman code + magnitude
+        let symbol: u32 = (r << 4) | nbits;
+        let huff_code: u32 = *ehufco.add(symbol as usize) as u32;
+        let huff_size: u32 = *ehufsi.add(symbol as usize) as u32;
+        local_put_bits(
+            pb,
+            fb,
+            buf,
+            (huff_code << nbits) | mag,
+            (huff_size + nbits) as u8,
+        );
 
         bitmap &= bitmap - 1;
     }
 
     if prev_pos < 63 {
-        local_put_bits(
-            pb,
-            fb,
-            buf,
-            ac_table.ehufco[0x00] as u32,
-            ac_table.ehufsi[0x00],
-        );
+        local_put_bits(pb, fb, buf, *ehufco.add(0x00) as u32, *ehufsi.add(0x00));
     }
 }
 
