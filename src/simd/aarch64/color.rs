@@ -216,3 +216,97 @@ neon_color_convert_fn!(
         vst4_u8(p, uint8x8x4_t(b, g, r, a));
     }
 );
+
+// --- RGBX (4 bpp): [R G B 0xFF] — same pixel layout as RGBA ---
+neon_color_convert_fn!(
+    neon_ycbcr_to_rgbx_row, neon_ycbcr_to_rgbx_row_inner,
+    crate::decode::color::ycbcr_to_rgba_row, 4,
+    store16(r, g, b, p) => {
+        let x: uint8x16_t = vdupq_n_u8(255);
+        vst4q_u8(p, uint8x16x4_t(r, g, b, x));
+    },
+    store8(r, g, b, p) => {
+        let x: uint8x8_t = vdup_n_u8(255);
+        vst4_u8(p, uint8x8x4_t(r, g, b, x));
+    }
+);
+
+// --- BGRX (4 bpp): [B G R 0xFF] — same pixel layout as BGRA ---
+neon_color_convert_fn!(
+    neon_ycbcr_to_bgrx_row, neon_ycbcr_to_bgrx_row_inner,
+    crate::decode::color::ycbcr_to_bgra_row, 4,
+    store16(r, g, b, p) => {
+        let x: uint8x16_t = vdupq_n_u8(255);
+        vst4q_u8(p, uint8x16x4_t(b, g, r, x));
+    },
+    store8(r, g, b, p) => {
+        let x: uint8x8_t = vdup_n_u8(255);
+        vst4_u8(p, uint8x8x4_t(b, g, r, x));
+    }
+);
+
+// Scalar fallback for XRGB/ARGB layout: [pad/alpha R G B]
+fn scalar_ycbcr_to_xrgb_row(y: &[u8], cb: &[u8], cr: &[u8], out: &mut [u8], width: usize) {
+    crate::decode::color::ycbcr_to_generic_4bpp_row(y, cb, cr, out, width, 1, 2, 3, 0);
+}
+
+// Scalar fallback for XBGR/ABGR layout: [pad/alpha B G R]
+fn scalar_ycbcr_to_xbgr_row(y: &[u8], cb: &[u8], cr: &[u8], out: &mut [u8], width: usize) {
+    crate::decode::color::ycbcr_to_generic_4bpp_row(y, cb, cr, out, width, 3, 2, 1, 0);
+}
+
+// --- XRGB (4 bpp): [0xFF R G B] ---
+neon_color_convert_fn!(
+    neon_ycbcr_to_xrgb_row, neon_ycbcr_to_xrgb_row_inner,
+    scalar_ycbcr_to_xrgb_row, 4,
+    store16(r, g, b, p) => {
+        let x: uint8x16_t = vdupq_n_u8(255);
+        vst4q_u8(p, uint8x16x4_t(x, r, g, b));
+    },
+    store8(r, g, b, p) => {
+        let x: uint8x8_t = vdup_n_u8(255);
+        vst4_u8(p, uint8x8x4_t(x, r, g, b));
+    }
+);
+
+// --- XBGR (4 bpp): [0xFF B G R] ---
+neon_color_convert_fn!(
+    neon_ycbcr_to_xbgr_row, neon_ycbcr_to_xbgr_row_inner,
+    scalar_ycbcr_to_xbgr_row, 4,
+    store16(r, g, b, p) => {
+        let x: uint8x16_t = vdupq_n_u8(255);
+        vst4q_u8(p, uint8x16x4_t(x, b, g, r));
+    },
+    store8(r, g, b, p) => {
+        let x: uint8x8_t = vdup_n_u8(255);
+        vst4_u8(p, uint8x8x4_t(x, b, g, r));
+    }
+);
+
+// --- ARGB (4 bpp): [0xFF R G B] — same pixel layout as XRGB ---
+neon_color_convert_fn!(
+    neon_ycbcr_to_argb_row, neon_ycbcr_to_argb_row_inner,
+    scalar_ycbcr_to_xrgb_row, 4,
+    store16(r, g, b, p) => {
+        let a: uint8x16_t = vdupq_n_u8(255);
+        vst4q_u8(p, uint8x16x4_t(a, r, g, b));
+    },
+    store8(r, g, b, p) => {
+        let a: uint8x8_t = vdup_n_u8(255);
+        vst4_u8(p, uint8x8x4_t(a, r, g, b));
+    }
+);
+
+// --- ABGR (4 bpp): [0xFF B G R] — same pixel layout as XBGR ---
+neon_color_convert_fn!(
+    neon_ycbcr_to_abgr_row, neon_ycbcr_to_abgr_row_inner,
+    scalar_ycbcr_to_xbgr_row, 4,
+    store16(r, g, b, p) => {
+        let a: uint8x16_t = vdupq_n_u8(255);
+        vst4q_u8(p, uint8x16x4_t(a, b, g, r));
+    },
+    store8(r, g, b, p) => {
+        let a: uint8x8_t = vdup_n_u8(255);
+        vst4_u8(p, uint8x8x4_t(a, b, g, r));
+    }
+);
