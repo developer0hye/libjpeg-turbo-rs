@@ -4,3 +4,4 @@ f51c266	27575	keep	Switch from scalar_fdct_quantize to NEON neon_fdct_quantize v
 fa537f7	27808	keep	Use NEON rgb_to_ycbcr_row in progressive/arithmetic encode paths. ~0% on large images (color conversion small fraction), 15% on 64x64.
 7741a8e	26804	keep	AC first: bitmap-based zero-skip via CTZ instead of linear scan. AC refine: stack [u8;64] instead of Vec heap alloc. 3.6% faster.
 d4bdfe3	24863	keep	Batch correction bits into u32 accumulator + single put_bits. Combine Huffman+magnitude in AC first/DC. Flatten AC scan loop. 7% faster. Now 30% faster than C.
+0dbfc2f	24818	keep	Fused neon_extract_fdct_quantize for interior Y blocks, fused downsample+FDCT for chroma. Small gain (~0.5%) since FDCT is only 9% of total time. Final: 1920x1080 420 = 24818 µs, C = 34636 µs (Rust 1.40x faster).

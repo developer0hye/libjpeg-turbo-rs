@@ -122,10 +122,87 @@ fn bench_full_encode(c: &mut Criterion) {
     }
 }
 
+fn bench_progressive_encode(c: &mut Criterion) {
+    use libjpeg_turbo_rs::{PixelFormat, Subsampling};
+
+    struct EncodeCase {
+        name: &'static str,
+        fixture: &'static str,
+        subsampling: Subsampling,
+    }
+
+    let cases = [
+        EncodeCase {
+            name: "prog_encode_320x240_420",
+            fixture: "tests/fixtures/photo_320x240_420.jpg",
+            subsampling: Subsampling::S420,
+        },
+        EncodeCase {
+            name: "prog_encode_320x240_444",
+            fixture: "tests/fixtures/photo_320x240_444.jpg",
+            subsampling: Subsampling::S444,
+        },
+        EncodeCase {
+            name: "prog_encode_640x480_420",
+            fixture: "tests/fixtures/photo_640x480_422.jpg",
+            subsampling: Subsampling::S420,
+        },
+        EncodeCase {
+            name: "prog_encode_640x480_422",
+            fixture: "tests/fixtures/photo_640x480_422.jpg",
+            subsampling: Subsampling::S422,
+        },
+        EncodeCase {
+            name: "prog_encode_640x480_444",
+            fixture: "tests/fixtures/photo_640x480_444.jpg",
+            subsampling: Subsampling::S444,
+        },
+        EncodeCase {
+            name: "prog_encode_1920x1080_420",
+            fixture: "tests/fixtures/photo_1920x1080_420.jpg",
+            subsampling: Subsampling::S420,
+        },
+        EncodeCase {
+            name: "prog_encode_1920x1080_422",
+            fixture: "tests/fixtures/photo_1920x1080_422.jpg",
+            subsampling: Subsampling::S422,
+        },
+        EncodeCase {
+            name: "prog_encode_1920x1080_444",
+            fixture: "tests/fixtures/photo_1920x1080_444.jpg",
+            subsampling: Subsampling::S444,
+        },
+    ];
+
+    for case in &cases {
+        let jpeg_data = match std::fs::read(case.fixture) {
+            Ok(d) => d,
+            Err(_) => continue,
+        };
+        let image = libjpeg_turbo_rs::decompress(&jpeg_data).unwrap();
+
+        c.bench_function(case.name, |b| {
+            b.iter(|| {
+                let result = libjpeg_turbo_rs::compress_progressive(
+                    black_box(&image.data),
+                    image.width,
+                    image.height,
+                    PixelFormat::Rgb,
+                    75,
+                    case.subsampling,
+                )
+                .unwrap();
+                black_box(&result);
+            })
+        });
+    }
+}
+
 criterion_group!(
     benches,
     bench_fdct_quantize_8x8,
     bench_rgb_to_ycbcr_row,
     bench_full_encode,
+    bench_progressive_encode,
 );
 criterion_main!(benches);
