@@ -22,7 +22,7 @@ const F_2_562: i16 = 20995;
 const F_3_072: i16 = 25172;
 
 // Pre-combined vpmaddwd constant tables — exact layout matching C NASM.
-// Each `times 4 dw A, B` in NASM = 4 repeats of (A, B) as i16 pairs in 128-bit lane.
+// Each `times 4 dw A, B` in NASM = 4 repeats of (A, B) pairs in 128-bit lane.
 // ymm = [lower 128 bits | upper 128 bits], each lane has 4 pairs.
 //
 // PW_F130_F054_MF130_F054:
@@ -33,22 +33,22 @@ struct AlignedI16x16([i16; 16]);
 
 static PW_F130_F054_MF130_F054: AlignedI16x16 = AlignedI16x16([
     // lower 128: (F_0_541+F_0_765), F_0_541 repeated 4 times
-    (F_0_541 + F_0_765) as i16,
+    (F_0_541 + F_0_765),
     F_0_541,
-    (F_0_541 + F_0_765) as i16,
+    (F_0_541 + F_0_765),
     F_0_541,
-    (F_0_541 + F_0_765) as i16,
+    (F_0_541 + F_0_765),
     F_0_541,
-    (F_0_541 + F_0_765) as i16,
+    (F_0_541 + F_0_765),
     F_0_541,
     // upper 128: (F_0_541-F_1_847), F_0_541 repeated 4 times
-    (F_0_541 - F_1_847) as i16,
+    (F_0_541 - F_1_847),
     F_0_541,
-    (F_0_541 - F_1_847) as i16,
+    (F_0_541 - F_1_847),
     F_0_541,
-    (F_0_541 - F_1_847) as i16,
+    (F_0_541 - F_1_847),
     F_0_541,
-    (F_0_541 - F_1_847) as i16,
+    (F_0_541 - F_1_847),
     F_0_541,
 ]);
 
@@ -56,21 +56,21 @@ static PW_F130_F054_MF130_F054: AlignedI16x16 = AlignedI16x16([
 //   lower 128: times 4 dw (F_1_175-F_1_961), F_1_175  => z3 constants
 //   upper 128: times 4 dw (F_1_175-F_0_390), F_1_175  => z4 constants
 static PW_MF078_F117_F078_F117: AlignedI16x16 = AlignedI16x16([
-    (F_1_175 - F_1_961) as i16,
+    (F_1_175 - F_1_961),
     F_1_175,
-    (F_1_175 - F_1_961) as i16,
+    (F_1_175 - F_1_961),
     F_1_175,
-    (F_1_175 - F_1_961) as i16,
+    (F_1_175 - F_1_961),
     F_1_175,
-    (F_1_175 - F_1_961) as i16,
+    (F_1_175 - F_1_961),
     F_1_175,
-    (F_1_175 - F_0_390) as i16,
+    (F_1_175 - F_0_390),
     F_1_175,
-    (F_1_175 - F_0_390) as i16,
+    (F_1_175 - F_0_390),
     F_1_175,
-    (F_1_175 - F_0_390) as i16,
+    (F_1_175 - F_0_390),
     F_1_175,
-    (F_1_175 - F_0_390) as i16,
+    (F_1_175 - F_0_390),
     F_1_175,
 ]);
 
@@ -78,21 +78,21 @@ static PW_MF078_F117_F078_F117: AlignedI16x16 = AlignedI16x16([
 //   lower 128: times 4 dw (F_0_298-F_0_899), -F_0_899  => tmp0 constants
 //   upper 128: times 4 dw (F_2_053-F_2_562), -F_2_562  => tmp1 constants
 static PW_MF060_MF089_MF050_MF256: AlignedI16x16 = AlignedI16x16([
-    (F_0_298 - F_0_899) as i16,
+    (F_0_298 - F_0_899),
     -F_0_899,
-    (F_0_298 - F_0_899) as i16,
+    (F_0_298 - F_0_899),
     -F_0_899,
-    (F_0_298 - F_0_899) as i16,
+    (F_0_298 - F_0_899),
     -F_0_899,
-    (F_0_298 - F_0_899) as i16,
+    (F_0_298 - F_0_899),
     -F_0_899,
-    (F_2_053 - F_2_562) as i16,
+    (F_2_053 - F_2_562),
     -F_2_562,
-    (F_2_053 - F_2_562) as i16,
+    (F_2_053 - F_2_562),
     -F_2_562,
-    (F_2_053 - F_2_562) as i16,
+    (F_2_053 - F_2_562),
     -F_2_562,
-    (F_2_053 - F_2_562) as i16,
+    (F_2_053 - F_2_562),
     -F_2_562,
 ]);
 
@@ -101,21 +101,21 @@ static PW_MF060_MF089_MF050_MF256: AlignedI16x16 = AlignedI16x16([
 //   upper 128: times 4 dw -F_2_562, (F_3_072-F_2_562)  => tmp2 constants
 static PW_MF089_F060_MF256_F050: AlignedI16x16 = AlignedI16x16([
     -F_0_899,
-    (F_1_501 - F_0_899) as i16,
+    (F_1_501 - F_0_899),
     -F_0_899,
-    (F_1_501 - F_0_899) as i16,
+    (F_1_501 - F_0_899),
     -F_0_899,
-    (F_1_501 - F_0_899) as i16,
+    (F_1_501 - F_0_899),
     -F_0_899,
-    (F_1_501 - F_0_899) as i16,
+    (F_1_501 - F_0_899),
     -F_2_562,
-    (F_3_072 - F_2_562) as i16,
+    (F_3_072 - F_2_562),
     -F_2_562,
-    (F_3_072 - F_2_562) as i16,
+    (F_3_072 - F_2_562),
     -F_2_562,
-    (F_3_072 - F_2_562) as i16,
+    (F_3_072 - F_2_562),
     -F_2_562,
-    (F_3_072 - F_2_562) as i16,
+    (F_3_072 - F_2_562),
 ]);
 
 // PW_1_NEG1: lower 128 = 1,1,1,...  upper 128 = -1,-1,-1,...
@@ -133,6 +133,8 @@ pub fn avx2_idct_islow(coeffs: &[i16; 64], quant: &[u16; 64], output: &mut [u8; 
     unsafe { avx2_idct_islow_core(coeffs, quant, output.as_mut_ptr(), 8) }
 }
 
+/// # Safety
+/// Requires AVX2. `output` must point to at least `stride * 7 + 8` writable bytes.
 pub unsafe fn avx2_idct_islow_strided(
     coeffs: &[i16; 64],
     quant: &[u16; 64],
@@ -430,6 +432,7 @@ unsafe fn dotranspose(
 }
 
 /// SSE2 transpose helper (kept for SSE2 IDCT path).
+#[allow(dead_code)]
 #[target_feature(enable = "avx2")]
 #[inline]
 pub(crate) unsafe fn transpose_8x8_i16(rows: [__m128i; 8]) -> [__m128i; 8] {
