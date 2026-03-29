@@ -4,6 +4,7 @@
 //! with SSE2 as a secondary tier and scalar as the final fallback.
 
 pub mod avx2_color;
+pub mod avx2_fdct;
 pub mod avx2_idct;
 pub mod avx2_merged;
 pub mod avx2_upsample;
@@ -11,7 +12,7 @@ pub mod color;
 pub mod idct;
 pub mod upsample;
 
-use crate::simd::SimdRoutines;
+use crate::simd::{EncoderSimdRoutines, QuantDivisors, SimdRoutines};
 
 /// Return x86_64 SIMD routines.
 ///
@@ -34,4 +35,33 @@ pub fn routines() -> SimdRoutines {
     }
 
     crate::simd::scalar::routines()
+}
+
+/// Return x86_64 encoder SIMD routines.
+pub fn encoder_routines() -> EncoderSimdRoutines {
+    if is_x86_feature_detected!("avx2") {
+        let scalar = crate::simd::scalar::encoder_routines();
+        return EncoderSimdRoutines {
+            rgb_to_ycbcr_row: scalar.rgb_to_ycbcr_row, // TODO: AVX2 RGB→YCbCr
+            fdct_quantize: avx2_fdct_quantize,
+        };
+    }
+    crate::simd::scalar::encoder_routines()
+}
+
+/// AVX2 fused FDCT + quantize + zigzag.
+fn avx2_fdct_quantize(input: &[i16; 64], quant: &QuantDivisors, output: &mut [i16; 64]) {
+    // Step 1: AVX2 FDCT (in-place on a copy)
+    let mut dct_buf = *input;
+    avx2_fdct::avx2_fdct_islow(&mut dct_buf);
+
+    // Step 2: scalar quantize + zigzag (for now; AVX2 quantize is a future optimization)
+    let dct_i32: [i32; 64] = {
+        let mut arr = [0i32; 64];
+        for i in 0..64 {
+            arr[i] = dct_buf[i] as i32;
+        }
+        arr
+    };
+    crate::encode::quant::quantize_block(&dct_i32, &quant.divisors, output);
 }

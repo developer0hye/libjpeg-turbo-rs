@@ -85,8 +85,10 @@ pub fn detect_encoder() -> EncoderSimdRoutines {
         return aarch64::encoder_routines();
     }
 
-    // x86_64: no encoder SIMD yet, fall through to scalar
-    // TODO: add x86_64 encoder SIMD (SSE2/AVX2 FDCT, color conversion)
+    #[cfg(all(target_arch = "x86_64", feature = "simd"))]
+    {
+        return x86_64::encoder_routines();
+    }
 
     #[allow(unreachable_code)]
     scalar::encoder_routines()
