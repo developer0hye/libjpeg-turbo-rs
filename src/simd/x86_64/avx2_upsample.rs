@@ -1,10 +1,10 @@
 //! AVX2-accelerated fancy horizontal 2x upsampling using triangle filter.
 //!
-//! Processes 32 input samples per iteration using 256-bit registers.
+//! Processes 16 input samples per iteration using 256-bit registers.
 //!
-//! Triangle filter:
-//!   output\[2*i\]   = (3 * input\[i\] + input\[i-1\] + 2) >> 2
-//!   output\[2*i+1\] = (3 * input\[i\] + input\[i+1\] + 2) >> 2
+//! Triangle filter with alternating bias (matches libjpeg-turbo):
+//!   output\[2*i\]   = (3 * input\[i\] + input\[i-1\] + 1) >> 2  (even: +1)
+//!   output\[2*i+1\] = (3 * input\[i\] + input\[i+1\] + 2) >> 2  (odd:  +2)
 //!
 //! Edge samples: output\[0\] = input\[0\], output\[last\] = input\[last\].
 
@@ -27,7 +27,7 @@ pub fn avx2_fancy_upsample_h2v1(input: &[u8], in_width: usize, output: &mut [u8]
     output[1] = ((3 * input[0] as u16 + input[1] as u16 + 2) >> 2) as u8;
 
     let last = in_width - 1;
-    output[last * 2] = ((3 * input[last] as u16 + input[last - 1] as u16 + 2) >> 2) as u8;
+    output[last * 2] = ((3 * input[last] as u16 + input[last - 1] as u16 + 1) >> 2) as u8;
     output[last * 2 + 1] = input[last];
 
     if in_width <= 2 {
@@ -50,6 +50,7 @@ unsafe fn avx2_fancy_h2v1_inner(input: &[u8], in_width: usize, output: &mut [u8]
     let inptr = input.as_ptr();
     let outptr = output.as_mut_ptr();
 
+    let one_u16 = _mm256_set1_epi16(1);
     let two_u16 = _mm256_set1_epi16(2);
 
     let mut i: usize = 1;
@@ -71,11 +72,11 @@ unsafe fn avx2_fancy_h2v1_inner(input: &[u8], in_width: usize, output: &mut [u8]
         // 3 * cur (computed once and reused)
         let cur_x3 = _mm256_add_epi16(cur_lo, _mm256_add_epi16(cur_lo, cur_lo));
 
-        // even = (3*cur + left + 2) >> 2
+        // even = (3*cur + left + 1) >> 2  (bias +1 for even positions)
         let even =
-            _mm256_srli_epi16::<2>(_mm256_add_epi16(_mm256_add_epi16(cur_x3, left_lo), two_u16));
+            _mm256_srli_epi16::<2>(_mm256_add_epi16(_mm256_add_epi16(cur_x3, left_lo), one_u16));
 
-        // odd = (3*cur + right + 2) >> 2
+        // odd = (3*cur + right + 2) >> 2  (bias +2 for odd positions)
         let odd = _mm256_srli_epi16::<2>(_mm256_add_epi16(
             _mm256_add_epi16(cur_x3, right_lo),
             two_u16,
@@ -103,7 +104,7 @@ unsafe fn avx2_fancy_h2v1_inner(input: &[u8], in_width: usize, output: &mut [u8]
         let left_val = input[i - 1] as u16;
         let cur_val = input[i] as u16;
         let right_val = input[i + 1] as u16;
-        output[i * 2] = ((3 * cur_val + left_val + 2) >> 2) as u8;
+        output[i * 2] = ((3 * cur_val + left_val + 1) >> 2) as u8;
         output[i * 2 + 1] = ((3 * cur_val + right_val + 2) >> 2) as u8;
         i += 1;
     }

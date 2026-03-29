@@ -713,40 +713,19 @@ impl<'a> Decoder<'a> {
             )
         }
 
-        #[cfg(not(all(target_arch = "aarch64", feature = "simd")))]
+        // Fused H2V2: vertical + horizontal in one pass using >> 4 arithmetic.
+        // Matches C libjpeg-turbo h2v2_fancy_upsample exactly, avoiding
+        // double-rounding from the previous two-pass approach.
+        #[allow(unreachable_code)]
         {
-            let mut above_buf = vec![0u8; in_width];
-            let mut below_buf = vec![0u8; in_width];
-
-            for y in 0..in_height {
-                let cur_row = &input[y * in_width..(y + 1) * in_width];
-                let above = if y > 0 {
-                    &input[(y - 1) * in_width..y * in_width]
-                } else {
-                    cur_row
-                };
-                let below = if y + 1 < in_height {
-                    &input[(y + 1) * in_width..(y + 2) * in_width]
-                } else {
-                    cur_row
-                };
-
-                vertical_blend(cur_row, above, &mut above_buf, in_width);
-                vertical_blend(cur_row, below, &mut below_buf, in_width);
-
-                let out_y_top = y * 2;
-                let out_y_bot = y * 2 + 1;
-                self.fancy_upsample_h2v1(
-                    &above_buf,
-                    in_width,
-                    &mut output[out_y_top * out_width..],
-                );
-                self.fancy_upsample_h2v1(
-                    &below_buf,
-                    in_width,
-                    &mut output[out_y_bot * out_width..],
-                );
-            }
+            crate::decode::upsample::fancy_h2v2(
+                input,
+                in_width,
+                in_height,
+                output,
+                out_width,
+                in_height * 2,
+            );
         }
     }
 
