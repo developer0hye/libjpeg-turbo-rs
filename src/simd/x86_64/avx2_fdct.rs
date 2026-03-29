@@ -136,42 +136,50 @@ pub fn avx2_fdct_islow(data: &mut [i16; 64]) {
 unsafe fn avx2_fdct_islow_inner(data: &mut [i16; 64]) {
     let ptr = data.as_mut_ptr() as *mut __m256i;
 
-    // Load 4 ymm (2 rows each)
-    let ymm4 = _mm256_loadu_si256(ptr); // rows 0,1
-    let ymm5 = _mm256_loadu_si256(ptr.add(1)); // rows 2,3
-    let ymm6 = _mm256_loadu_si256(ptr.add(2)); // rows 4,5
-    let ymm7 = _mm256_loadu_si256(ptr.add(3)); // rows 6,7
+    let ymm4 = _mm256_loadu_si256(ptr);
+    let ymm5 = _mm256_loadu_si256(ptr.add(1));
+    let ymm6 = _mm256_loadu_si256(ptr.add(2));
+    let ymm7 = _mm256_loadu_si256(ptr.add(3));
 
-    // Rearrange: group row pairs for butterfly
-    // ymm0 = row0_row4, ymm1 = row1_row5, ymm2 = row2_row6, ymm3 = row3_row7
-    let ymm0 = _mm256_permute2x128_si256(ymm4, ymm6, 0x20);
-    let ymm1 = _mm256_permute2x128_si256(ymm4, ymm6, 0x31);
-    let ymm2 = _mm256_permute2x128_si256(ymm5, ymm7, 0x20);
-    let ymm3 = _mm256_permute2x128_si256(ymm5, ymm7, 0x31);
-
-    // --- Pass 1: rows (transpose first, then DCT) ---
-    let (t0, t1, t2, t3) = dotranspose_fdct(ymm0, ymm1, ymm2, ymm3);
-    let (d0, d1, d2, d3) = dofdct!(t0, t1, t2, t3, 1);
-    // d0=data0_4, d1=data3_1, d2=data2_6, d3=data7_5
-
-    // --- Pass 2: columns (rearrange, transpose, then DCT) ---
-    let c4 = _mm256_permute2x128_si256(d1, d3, 0x20); // data3_7
-    let c1 = _mm256_permute2x128_si256(d1, d3, 0x31); // data1_5
-
-    let (t0, t1, t2, t3) = dotranspose_fdct(d0, c1, d2, c4);
-    let (r0, r1, r2, r3) = dofdct!(t0, t1, t2, t3, 2);
-    // r0=data0_4, r1=data3_1, r2=data2_6, r3=data7_5
-
-    // Rearrange back to sequential row order and store
-    let out0 = _mm256_permute2x128_si256(r0, r1, 0x30); // data0_1
-    let out1 = _mm256_permute2x128_si256(r2, r1, 0x20); // data2_3
-    let out2 = _mm256_permute2x128_si256(r0, r3, 0x31); // data4_5
-    let out3 = _mm256_permute2x128_si256(r2, r3, 0x21); // data6_7
+    let (out0, out1, out2, out3) = avx2_fdct_core(ymm4, ymm5, ymm6, ymm7);
 
     _mm256_storeu_si256(ptr, out0);
     _mm256_storeu_si256(ptr.add(1), out1);
     _mm256_storeu_si256(ptr.add(2), out2);
     _mm256_storeu_si256(ptr.add(3), out3);
+}
+
+/// Core AVX2 FDCT: takes 4 ymm (rows 0-1, 2-3, 4-5, 6-7), returns 4 ymm in row order.
+///
+/// # Safety
+/// Requires AVX2.
+#[target_feature(enable = "avx2")]
+#[inline]
+pub(crate) unsafe fn avx2_fdct_core(
+    ymm4: __m256i,
+    ymm5: __m256i,
+    ymm6: __m256i,
+    ymm7: __m256i,
+) -> (__m256i, __m256i, __m256i, __m256i) {
+    let ymm0 = _mm256_permute2x128_si256(ymm4, ymm6, 0x20);
+    let ymm1 = _mm256_permute2x128_si256(ymm4, ymm6, 0x31);
+    let ymm2 = _mm256_permute2x128_si256(ymm5, ymm7, 0x20);
+    let ymm3 = _mm256_permute2x128_si256(ymm5, ymm7, 0x31);
+
+    let (t0, t1, t2, t3) = dotranspose_fdct(ymm0, ymm1, ymm2, ymm3);
+    let (d0, d1, d2, d3) = dofdct!(t0, t1, t2, t3, 1);
+
+    let c4 = _mm256_permute2x128_si256(d1, d3, 0x20);
+    let c1 = _mm256_permute2x128_si256(d1, d3, 0x31);
+    let (t0, t1, t2, t3) = dotranspose_fdct(d0, c1, d2, c4);
+    let (r0, r1, r2, r3) = dofdct!(t0, t1, t2, t3, 2);
+
+    (
+        _mm256_permute2x128_si256(r0, r1, 0x30),
+        _mm256_permute2x128_si256(r2, r1, 0x20),
+        _mm256_permute2x128_si256(r0, r3, 0x31),
+        _mm256_permute2x128_si256(r2, r3, 0x21),
+    )
 }
 
 /// FDCT transpose (different from IDCT transpose).
