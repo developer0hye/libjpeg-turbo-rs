@@ -1,7 +1,8 @@
 //! NEON-accelerated fancy horizontal 2x upsampling.
 //!
-//! Triangle filter: output[2i] = (3*input[i] + input[i-1] + 2) >> 2
-//!                  output[2i+1] = (3*input[i] + input[i+1] + 2) >> 2
+//! Triangle filter with alternating bias (matches C libjpeg-turbo):
+//!   output[2i]   = (3*input[i] + input[i-1] + 1) >> 2   (even: bias +1)
+//!   output[2i+1] = (3*input[i] + input[i+1] + 2) >> 2   (odd:  bias +2)
 //! Edge samples: output[0] = input[0], output[last] = input[last].
 //!
 //! Unlike libjpeg-turbo's NEON implementation which relies on over-allocated
@@ -25,7 +26,7 @@ pub fn neon_fancy_upsample_h2v1(input: &[u8], in_width: usize, output: &mut [u8]
     output[1] = ((3 * input[0] as u16 + input[1] as u16 + 2) >> 2) as u8;
 
     let last = in_width - 1;
-    output[last * 2] = ((3 * input[last] as u16 + input[last - 1] as u16 + 2) >> 2) as u8;
+    output[last * 2] = ((3 * input[last] as u16 + input[last - 1] as u16 + 1) >> 2) as u8;
     output[last * 2 + 1] = input[last];
 
     if in_width <= 2 {
@@ -48,7 +49,8 @@ unsafe fn neon_fancy_h2v1_inner(input: &[u8], in_width: usize, output: &mut [u8]
     let outptr = output.as_mut_ptr();
 
     let three_u8: uint8x8_t = vdup_n_u8(3);
-    let two_u16: uint16x8_t = vdupq_n_u16(2);
+    let one_u16: uint16x8_t = vdupq_n_u16(1); // bias for even pixels
+    let two_u16: uint16x8_t = vdupq_n_u16(2); // bias for odd pixels
 
     let mut i: usize = 1; // current input index (interior starts at 1)
 
@@ -62,14 +64,14 @@ unsafe fn neon_fancy_h2v1_inner(input: &[u8], in_width: usize, output: &mut [u8]
         let cur_lo: uint8x8_t = vget_low_u8(cur);
         let cur_hi: uint8x8_t = vget_high_u8(cur);
 
-        // even = (3*cur + left + 2) >> 2
+        // even = (3*cur + left + 1) >> 2
         let even_lo: uint16x8_t = vaddq_u16(
             vmlal_u8(vmovl_u8(vget_low_u8(left)), cur_lo, three_u8),
-            two_u16,
+            one_u16,
         );
         let even_hi: uint16x8_t = vaddq_u16(
             vmlal_u8(vmovl_u8(vget_high_u8(left)), cur_hi, three_u8),
-            two_u16,
+            one_u16,
         );
         let even: uint8x16_t = vcombine_u8(vshrn_n_u16(even_lo, 2), vshrn_n_u16(even_hi, 2));
 
@@ -97,7 +99,7 @@ unsafe fn neon_fancy_h2v1_inner(input: &[u8], in_width: usize, output: &mut [u8]
         let right: uint8x8_t = vld1_u8(inptr.add(i + 1));
 
         let mut even: uint16x8_t = vmlal_u8(vmovl_u8(left), cur, three_u8);
-        even = vaddq_u16(even, two_u16);
+        even = vaddq_u16(even, one_u16);
         let even_u8: uint8x8_t = vshrn_n_u16(even, 2);
 
         let mut odd: uint16x8_t = vmlal_u8(vmovl_u8(right), cur, three_u8);
@@ -116,7 +118,7 @@ unsafe fn neon_fancy_h2v1_inner(input: &[u8], in_width: usize, output: &mut [u8]
         let left: u16 = input[i - 1] as u16;
         let cur: u16 = input[i] as u16;
         let right: u16 = input[i + 1] as u16;
-        output[i * 2] = ((3 * cur + left + 2) >> 2) as u8;
+        output[i * 2] = ((3 * cur + left + 1) >> 2) as u8;
         output[i * 2 + 1] = ((3 * cur + right + 2) >> 2) as u8;
         i += 1;
     }
