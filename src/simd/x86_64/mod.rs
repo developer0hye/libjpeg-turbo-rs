@@ -4,6 +4,7 @@
 //! with SSE2 as a secondary tier and scalar as the final fallback.
 
 pub mod avx2_color;
+pub mod avx2_color_encode;
 pub mod avx2_fdct;
 pub mod avx2_idct;
 pub mod avx2_merged;
@@ -40,9 +41,8 @@ pub fn routines() -> SimdRoutines {
 /// Return x86_64 encoder SIMD routines.
 pub fn encoder_routines() -> EncoderSimdRoutines {
     if is_x86_feature_detected!("avx2") {
-        let scalar = crate::simd::scalar::encoder_routines();
         return EncoderSimdRoutines {
-            rgb_to_ycbcr_row: scalar.rgb_to_ycbcr_row, // TODO: AVX2 RGB→YCbCr
+            rgb_to_ycbcr_row: avx2_color_encode::avx2_rgb_to_ycbcr_row,
             fdct_quantize: avx2_fdct_quantize,
         };
     }
