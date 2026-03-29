@@ -1892,7 +1892,7 @@ fn compress_progressive_with_scans(
         .collect();
 
     // FDCT + quantize all blocks into coefficient buffers
-    let scalar_fq = crate::simd::scalar::scalar_fdct_quantize;
+    let fdct_quantize_fn = crate::simd::detect_encoder().fdct_quantize;
     for mcu_y in 0..mcus_y {
         for mcu_x in 0..mcus_x {
             let x0 = mcu_x * mcu_w;
@@ -1903,7 +1903,7 @@ fn compress_progressive_with_scans(
                 let by = mcu_y;
                 let mut block = [0i16; 64];
                 extract_block(&y_plane, width, height, x0, y0, &mut block);
-                scalar_fq(&block, &luma_divisors, &mut coeff_bufs[0][by * mcus_x + bx]);
+                fdct_quantize_fn(&block, &luma_divisors, &mut coeff_bufs[0][by * mcus_x + bx]);
             } else {
                 // Y blocks
                 for bv in 0..v_samp {
@@ -1920,7 +1920,7 @@ fn compress_progressive_with_scans(
                             &mut block,
                         );
                         let blocks_x = comp_layouts[0].blocks_x;
-                        scalar_fq(
+                        fdct_quantize_fn(
                             &block,
                             &luma_divisors,
                             &mut coeff_bufs[0][by * blocks_x + bx],
@@ -1941,7 +1941,7 @@ fn compress_progressive_with_scans(
                             &cb_plane, width, height, x0, y0, hf, vf, &mut block,
                         );
                     }
-                    scalar_fq(
+                    fdct_quantize_fn(
                         &block,
                         &chroma_divisors,
                         &mut coeff_bufs[1][by * mcus_x + bx],
@@ -1961,7 +1961,7 @@ fn compress_progressive_with_scans(
                             &cr_plane, width, height, x0, y0, hf, vf, &mut block,
                         );
                     }
-                    scalar_fq(
+                    fdct_quantize_fn(
                         &block,
                         &chroma_divisors,
                         &mut coeff_bufs[2][by * mcus_x + bx],
@@ -2161,7 +2161,7 @@ pub fn compress_arithmetic(
     let mcus_y = height.div_ceil(mcu_h);
 
     // FDCT + quantize all blocks
-    let scalar_fq = crate::simd::scalar::scalar_fdct_quantize;
+    let fdct_quantize_fn = crate::simd::detect_encoder().fdct_quantize;
     let mut all_blocks: Vec<[i16; 64]> = Vec::new();
 
     for mcu_row in 0..mcus_y {
@@ -2173,7 +2173,7 @@ pub fn compress_arithmetic(
                 let mut block = [0i16; 64];
                 extract_block(&y_plane, width, height, x0, y0, &mut block);
                 let mut q = [0i16; 64];
-                scalar_fq(&block, &luma_divisors, &mut q);
+                fdct_quantize_fn(&block, &luma_divisors, &mut q);
                 all_blocks.push(q);
             } else {
                 match subsampling {
@@ -2186,7 +2186,7 @@ pub fn compress_arithmetic(
                             let mut block = [0i16; 64];
                             extract_block(plane, width, height, x0, y0, &mut block);
                             let mut q = [0i16; 64];
-                            scalar_fq(&block, divisors, &mut q);
+                            fdct_quantize_fn(&block, divisors, &mut q);
                             all_blocks.push(q);
                         }
                     }
@@ -2195,14 +2195,14 @@ pub fn compress_arithmetic(
                             let mut block = [0i16; 64];
                             extract_block(&y_plane, width, height, x0 + dx, y0, &mut block);
                             let mut q = [0i16; 64];
-                            scalar_fq(&block, &luma_divisors, &mut q);
+                            fdct_quantize_fn(&block, &luma_divisors, &mut q);
                             all_blocks.push(q);
                         }
                         for plane in [&cb_plane, &cr_plane] {
                             let mut block = [0i16; 64];
                             downsample_chroma_block(plane, width, height, x0, y0, 2, 1, &mut block);
                             let mut q = [0i16; 64];
-                            scalar_fq(&block, &chroma_divisors, &mut q);
+                            fdct_quantize_fn(&block, &chroma_divisors, &mut q);
                             all_blocks.push(q);
                         }
                     }
@@ -2211,14 +2211,14 @@ pub fn compress_arithmetic(
                             let mut block = [0i16; 64];
                             extract_block(&y_plane, width, height, x0 + dx, y0 + dy, &mut block);
                             let mut q = [0i16; 64];
-                            scalar_fq(&block, &luma_divisors, &mut q);
+                            fdct_quantize_fn(&block, &luma_divisors, &mut q);
                             all_blocks.push(q);
                         }
                         for plane in [&cb_plane, &cr_plane] {
                             let mut block = [0i16; 64];
                             downsample_chroma_block(plane, width, height, x0, y0, 2, 2, &mut block);
                             let mut q = [0i16; 64];
-                            scalar_fq(&block, &chroma_divisors, &mut q);
+                            fdct_quantize_fn(&block, &chroma_divisors, &mut q);
                             all_blocks.push(q);
                         }
                     }
@@ -2228,14 +2228,14 @@ pub fn compress_arithmetic(
                             let mut block = [0i16; 64];
                             extract_block(&y_plane, width, height, x0, y0 + dy, &mut block);
                             let mut q = [0i16; 64];
-                            scalar_fq(&block, &luma_divisors, &mut q);
+                            fdct_quantize_fn(&block, &luma_divisors, &mut q);
                             all_blocks.push(q);
                         }
                         for plane in [&cb_plane, &cr_plane] {
                             let mut block = [0i16; 64];
                             downsample_chroma_block(plane, width, height, x0, y0, 1, 2, &mut block);
                             let mut q = [0i16; 64];
-                            scalar_fq(&block, &chroma_divisors, &mut q);
+                            fdct_quantize_fn(&block, &chroma_divisors, &mut q);
                             all_blocks.push(q);
                         }
                     }
@@ -2245,14 +2245,14 @@ pub fn compress_arithmetic(
                             let mut block = [0i16; 64];
                             extract_block(&y_plane, width, height, x0 + dx, y0, &mut block);
                             let mut q = [0i16; 64];
-                            scalar_fq(&block, &luma_divisors, &mut q);
+                            fdct_quantize_fn(&block, &luma_divisors, &mut q);
                             all_blocks.push(q);
                         }
                         for plane in [&cb_plane, &cr_plane] {
                             let mut block = [0i16; 64];
                             downsample_chroma_block(plane, width, height, x0, y0, 4, 1, &mut block);
                             let mut q = [0i16; 64];
-                            scalar_fq(&block, &chroma_divisors, &mut q);
+                            fdct_quantize_fn(&block, &chroma_divisors, &mut q);
                             all_blocks.push(q);
                         }
                     }
@@ -2262,14 +2262,14 @@ pub fn compress_arithmetic(
                             let mut block = [0i16; 64];
                             extract_block(&y_plane, width, height, x0, y0 + dy, &mut block);
                             let mut q = [0i16; 64];
-                            scalar_fq(&block, &luma_divisors, &mut q);
+                            fdct_quantize_fn(&block, &luma_divisors, &mut q);
                             all_blocks.push(q);
                         }
                         for plane in [&cb_plane, &cr_plane] {
                             let mut block = [0i16; 64];
                             downsample_chroma_block(plane, width, height, x0, y0, 1, 4, &mut block);
                             let mut q = [0i16; 64];
-                            scalar_fq(&block, &chroma_divisors, &mut q);
+                            fdct_quantize_fn(&block, &chroma_divisors, &mut q);
                             all_blocks.push(q);
                         }
                     }
@@ -2471,7 +2471,7 @@ pub fn compress_arithmetic_progressive(
         .collect();
 
     // FDCT + quantize all blocks into coefficient buffers
-    let scalar_fq = crate::simd::scalar::scalar_fdct_quantize;
+    let fdct_quantize_fn = crate::simd::detect_encoder().fdct_quantize;
     for mcu_y in 0..mcus_y {
         for mcu_x in 0..mcus_x {
             let x0: usize = mcu_x * mcu_w;
@@ -2482,7 +2482,7 @@ pub fn compress_arithmetic_progressive(
                 let by: usize = mcu_y;
                 let mut block = [0i16; 64];
                 extract_block(&y_plane, width, height, x0, y0, &mut block);
-                scalar_fq(&block, &luma_divisors, &mut coeff_bufs[0][by * mcus_x + bx]);
+                fdct_quantize_fn(&block, &luma_divisors, &mut coeff_bufs[0][by * mcus_x + bx]);
             } else {
                 // Y blocks
                 for bv in 0..v_samp {
@@ -2499,7 +2499,7 @@ pub fn compress_arithmetic_progressive(
                             &mut block,
                         );
                         let blocks_x: usize = comp_layouts[0].blocks_x;
-                        scalar_fq(
+                        fdct_quantize_fn(
                             &block,
                             &luma_divisors,
                             &mut coeff_bufs[0][by * blocks_x + bx],
@@ -2520,7 +2520,7 @@ pub fn compress_arithmetic_progressive(
                             &cb_plane, width, height, x0, y0, hf, vf, &mut block,
                         );
                     }
-                    scalar_fq(
+                    fdct_quantize_fn(
                         &block,
                         &chroma_divisors,
                         &mut coeff_bufs[1][by * mcus_x + bx],
@@ -2540,7 +2540,7 @@ pub fn compress_arithmetic_progressive(
                             &cr_plane, width, height, x0, y0, hf, vf, &mut block,
                         );
                     }
-                    scalar_fq(
+                    fdct_quantize_fn(
                         &block,
                         &chroma_divisors,
                         &mut coeff_bufs[2][by * mcus_x + bx],
