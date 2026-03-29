@@ -59,6 +59,8 @@ jobs:
     continue-on-error: true
     steps:
       - uses: actions/checkout@v4
+        with:
+          submodules: recursive
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - run: cargo test --tests
@@ -86,11 +88,13 @@ jobs:
     continue-on-error: true
     steps:
       - uses: actions/checkout@v4
+        with:
+          submodules: recursive
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - name: Install libjpeg-turbo tools
         run: sudo apt-get install -y libjpeg-turbo-progs
-      - run: cargo test cross_encode cross_check --tests
+      - run: cargo test "cross_encode|cross_check" --tests
         timeout-minutes: 15
 
   # SIMD tests on aarch64 (if self-hosted runner available)
