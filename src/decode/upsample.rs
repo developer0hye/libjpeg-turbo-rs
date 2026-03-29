@@ -114,7 +114,7 @@ pub fn fancy_h2v2(
 ///   colsum = cur * 3 + neighbor  (no rounding yet)
 ///   even pixel: (thiscolsum * 3 + lastcolsum + 8) >> 4
 ///   odd pixel:  (thiscolsum * 3 + nextcolsum + 7) >> 4
-fn fancy_h2v2_row(cur: &[u8], neighbor: &[u8], output: &mut [u8], in_width: usize) {
+pub fn fancy_h2v2_row(cur: &[u8], neighbor: &[u8], output: &mut [u8], in_width: usize) {
     if in_width == 0 {
         return;
     }
