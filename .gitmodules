@@ -1,3 +1,6 @@
 [submodule "references/libjpeg-turbo"]
 	path = references/libjpeg-turbo
 	url = https://github.com/libjpeg-turbo/libjpeg-turbo.git
+[submodule "references/zune-image"]
+	path = references/zune-image
+	url = https://github.com/etemesi254/zune-image.git
