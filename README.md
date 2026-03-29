@@ -4,25 +4,60 @@ Pure Rust reimplementation of [libjpeg-turbo](https://github.com/libjpeg-turbo/l
 
 ## Performance
 
+### x86_64 (AVX2)
+
+Benchmarked against C libjpeg-turbo 3.1.0 on x86_64 (AVX2), quality 75:
+
+#### Decoding
+
+| Image | Subsampling | Rust (us) | C (us) | Ratio |
+|-------|-------------|-----------|--------|-------|
+| 64x64 | 4:2:0 | 60 | 49 | 1.22x |
+| 320x240 | 4:2:0 | 797 | 774 | 1.03x |
+| 640x480 | 4:2:0 | 943 | 889 | 1.06x |
+| 640x480 | 4:2:2 | 3,409 | 3,393 | **1.00x** |
+| 640x480 | 4:4:4 | 4,969 | 5,165 | **0.96x** |
+| 1280x720 | 4:2:0 | 9,150 | 9,153 | **1.00x** |
+| 1920x1080 | 4:2:0 | 20,679 | 21,058 | **0.98x** |
+| 1920x1080 | 4:2:2 | 26,281 | 26,334 | **1.00x** |
+| 1920x1080 | 4:4:4 | 38,813 | 39,308 | **0.99x** |
+| 2560x1440 | 4:2:0 | 36,178 | 37,373 | **0.97x** |
+| 3840x2160 | 4:2:0 | 81,636 | 82,030 | **1.00x** |
+
+#### Encoding
+
+| Image | Subsampling | Rust (us) | C (us) | Ratio |
+|-------|-------------|-----------|--------|-------|
+| 320x240 | 4:2:0 | 458 | 426 | 1.07x |
+| 320x240 | 4:2:2 | 593 | 545 | 1.09x |
+| 320x240 | 4:4:4 | 822 | 796 | 1.03x |
+| 640x480 | 4:2:2 | 2,009 | 1,832 | 1.10x |
+| 640x480 | 4:4:4 | 2,580 | 2,740 | **0.94x** |
+| 1920x1080 | 4:2:0 | 12,707 | 11,203 | 1.13x |
+| 1920x1080 | 4:2:2 | 15,985 | 14,210 | 1.12x |
+| 1920x1080 | 4:4:4 | 22,305 | 21,067 | 1.06x |
+
+### aarch64 (NEON)
+
 Benchmarked against C libjpeg-turbo 3.1.0 on Apple Silicon (aarch64 NEON), quality 75:
 
-### Encoding (1920x1080)
+#### Decoding (1920x1080)
 
 | Subsampling | Rust (us) | C (us) | Ratio |
 |-------------|-----------|--------|-------|
-| 4:2:0 | 5274 | 5076 | 1.04x |
-| 4:2:2 | 6472 | 6441 | 1.00x |
-| 4:4:4 | 9633 | 9714 | **0.99x** |
+| 4:2:0 | 2,559 | 2,592 | **0.99x** |
+| 4:2:2 | 2,916 | 3,020 | **0.97x** |
+| 4:4:4 | 3,750 | 3,833 | **0.98x** |
 
-### Decoding (1920x1080)
+#### Encoding (1920x1080)
 
 | Subsampling | Rust (us) | C (us) | Ratio |
 |-------------|-----------|--------|-------|
-| 4:2:0 | 2559 | 2592 | **0.99x** |
-| 4:2:2 | 2916 | 3020 | **0.97x** |
-| 4:4:4 | 3750 | 3833 | **0.98x** |
+| 4:2:0 | 5,274 | 5,076 | 1.04x |
+| 4:2:2 | 6,472 | 6,441 | 1.00x |
+| 4:4:4 | 9,633 | 9,714 | **0.99x** |
 
-Rust matches or beats C in most configurations. See [`docs/ENCODING_PERFORMANCE.md`](docs/ENCODING_PERFORMANCE.md) for full results.
+Decoding matches or beats C on both platforms at larger resolutions. Encoding is near-parity on aarch64; x86_64 encoding has room for further SIMD optimization (Huffman coding). See [`docs/ENCODING_PERFORMANCE.md`](docs/ENCODING_PERFORMANCE.md) for full results.
 
 ## Quick Start
 
@@ -113,9 +148,9 @@ Grayscale, RGB, BGR, RGBA, BGRA, ARGB, ABGR, RGBX, BGRX, XRGB, XBGR, CMYK, RGB56
 | Platform | Backend | Status |
 |----------|---------|--------|
 | aarch64 | NEON | IDCT, FDCT, color convert, (de)quantize, up/downsample, zigzag, Huffman |
-| x86_64 | SSE2/AVX2 | IDCT, color convert (more coming) |
+| x86_64 | SSE2/AVX2 | IDCT, FDCT, color convert (all pixel formats), quantize+zigzag, upsample, merged upsample+color |
 
-aarch64 NEON is fully optimized across the entire encode/decode pipeline. x86_64 AVX2/SSE2 optimization is planned to bring the same level of performance to Intel/AMD platforms.
+Both platforms have comprehensive SIMD coverage across the encode/decode pipeline.
 
 All SIMD routines have scalar fallbacks. SIMD is enabled by default via the `simd` feature flag.
 
