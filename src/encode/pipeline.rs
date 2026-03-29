@@ -4093,17 +4093,6 @@ fn encode_downsampled_chroma_block(
                     );
                 }
                 true
-            } else if h_factor == 2 && v_factor == 1 {
-                unsafe {
-                    downsample_chroma_block_h2v1_ssse3(
-                        plane,
-                        plane_width,
-                        block_x,
-                        block_y,
-                        &mut block,
-                    );
-                }
-                true
             } else {
                 false
             };
