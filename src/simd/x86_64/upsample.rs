@@ -1,8 +1,8 @@
 //! SSE2-accelerated fancy horizontal 2x upsampling.
 //!
-//! Triangle filter:
-//!   output\[2i\]   = (3 * input\[i\] + input\[i-1\] + 2) >> 2
-//!   output\[2i+1\] = (3 * input\[i\] + input\[i+1\] + 2) >> 2
+//! Triangle filter with alternating bias (matches libjpeg-turbo):
+//!   output\[2i\]   = (3 * input\[i\] + input\[i-1\] + 1) >> 2  (even: +1)
+//!   output\[2i+1\] = (3 * input\[i\] + input\[i+1\] + 2) >> 2  (odd:  +2)
 //! Edge samples: output\[0\] = input\[0\], output\[last\] = input\[last\].
 //!
 //! Processes 8 interior samples at a time using SSE2 u16 arithmetic.
@@ -25,7 +25,7 @@ pub fn sse2_fancy_upsample_h2v1(input: &[u8], in_width: usize, output: &mut [u8]
     output[1] = ((3 * input[0] as u16 + input[1] as u16 + 2) >> 2) as u8;
 
     let last: usize = in_width - 1;
-    output[last * 2] = ((3 * input[last] as u16 + input[last - 1] as u16 + 2) >> 2) as u8;
+    output[last * 2] = ((3 * input[last] as u16 + input[last - 1] as u16 + 1) >> 2) as u8;
     output[last * 2 + 1] = input[last];
 
     if in_width <= 2 {
@@ -43,6 +43,7 @@ unsafe fn sse2_fancy_h2v1_inner(input: &[u8], in_width: usize, output: &mut [u8]
     let outptr: *mut u8 = output.as_mut_ptr();
 
     let three: __m128i = _mm_set1_epi16(3);
+    let one: __m128i = _mm_set1_epi16(1);
     let two: __m128i = _mm_set1_epi16(2);
 
     let mut i: usize = 1;
@@ -53,7 +54,9 @@ unsafe fn sse2_fancy_h2v1_inner(input: &[u8], in_width: usize, output: &mut [u8]
         let right: __m128i = load_u8x8_as_u16(inptr.add(i + 1));
 
         let cur3: __m128i = _mm_mullo_epi16(cur, three);
-        let even: __m128i = _mm_srli_epi16(_mm_add_epi16(_mm_add_epi16(cur3, left), two), 2);
+        // even: bias +1
+        let even: __m128i = _mm_srli_epi16(_mm_add_epi16(_mm_add_epi16(cur3, left), one), 2);
+        // odd: bias +2
         let odd: __m128i = _mm_srli_epi16(_mm_add_epi16(_mm_add_epi16(cur3, right), two), 2);
 
         let even_u8: __m128i = _mm_packus_epi16(even, _mm_setzero_si128());
@@ -69,7 +72,7 @@ unsafe fn sse2_fancy_h2v1_inner(input: &[u8], in_width: usize, output: &mut [u8]
         let left: u16 = input[i - 1] as u16;
         let cur: u16 = input[i] as u16;
         let right: u16 = input[i + 1] as u16;
-        output[i * 2] = ((3 * cur + left + 2) >> 2) as u8;
+        output[i * 2] = ((3 * cur + left + 1) >> 2) as u8;
         output[i * 2 + 1] = ((3 * cur + right + 2) >> 2) as u8;
         i += 1;
     }

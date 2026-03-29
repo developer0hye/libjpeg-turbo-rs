@@ -12,66 +12,6 @@ use crate::decode::marker::{JpegMetadata, MarkerReader, ScanInfo};
 use crate::decode::progressive;
 use crate::simd::{self, SimdRoutines};
 
-/// Vertical triangle-filter blend: out[i] = (3*cur[i] + neighbor[i] + 2) >> 2.
-#[inline]
-fn vertical_blend(cur: &[u8], neighbor: &[u8], output: &mut [u8], width: usize) {
-    #[cfg(all(target_arch = "x86_64", feature = "simd"))]
-    {
-        if is_x86_feature_detected!("avx2") {
-            unsafe {
-                vertical_blend_avx2(cur, neighbor, output, width);
-            }
-            return;
-        }
-    }
-    for i in 0..width {
-        output[i] = ((3 * cur[i] as u16 + neighbor[i] as u16 + 2) >> 2) as u8;
-    }
-}
-
-/// AVX2 vertical blend: (3*cur + neighbor + 2) >> 2, 32 bytes per iteration.
-#[cfg(all(target_arch = "x86_64", feature = "simd"))]
-#[target_feature(enable = "avx2")]
-unsafe fn vertical_blend_avx2(cur: &[u8], neighbor: &[u8], output: &mut [u8], width: usize) {
-    use core::arch::x86_64::*;
-    let mut i: usize = 0;
-    let zero = _mm256_setzero_si256();
-    let two = _mm256_set1_epi16(2);
-    let three = _mm256_set1_epi16(3);
-
-    while i + 32 <= width {
-        let c = _mm256_loadu_si256(cur.as_ptr().add(i) as *const __m256i);
-        let n = _mm256_loadu_si256(neighbor.as_ptr().add(i) as *const __m256i);
-
-        // Process low 16 bytes
-        let c_lo = _mm256_unpacklo_epi8(c, zero);
-        let n_lo = _mm256_unpacklo_epi8(n, zero);
-        let r_lo = _mm256_srli_epi16(
-            _mm256_add_epi16(_mm256_add_epi16(_mm256_mullo_epi16(c_lo, three), n_lo), two),
-            2,
-        );
-
-        // Process high 16 bytes
-        let c_hi = _mm256_unpackhi_epi8(c, zero);
-        let n_hi = _mm256_unpackhi_epi8(n, zero);
-        let r_hi = _mm256_srli_epi16(
-            _mm256_add_epi16(_mm256_add_epi16(_mm256_mullo_epi16(c_hi, three), n_hi), two),
-            2,
-        );
-
-        // Pack back to u8
-        let packed = _mm256_packus_epi16(r_lo, r_hi);
-        _mm256_storeu_si256(output.as_mut_ptr().add(i) as *mut __m256i, packed);
-        i += 32;
-    }
-
-    // Scalar tail
-    while i < width {
-        output[i] = ((3 * cur[i] as u16 + neighbor[i] as u16 + 2) >> 2) as u8;
-        i += 1;
-    }
-}
-
 /// Generic nearest-neighbor upsampling for arbitrary h/v factor combinations.
 ///
 /// Handles non-standard sampling factors like 3x2, 3x1, 1x3, 4x2 that lack
@@ -713,40 +653,19 @@ impl<'a> Decoder<'a> {
             )
         }
 
-        #[cfg(not(all(target_arch = "aarch64", feature = "simd")))]
+        // Fused H2V2: vertical + horizontal in one pass using >> 4 arithmetic.
+        // Matches C libjpeg-turbo h2v2_fancy_upsample exactly, avoiding
+        // double-rounding from the previous two-pass approach.
+        #[allow(unreachable_code)]
         {
-            let mut above_buf = vec![0u8; in_width];
-            let mut below_buf = vec![0u8; in_width];
-
-            for y in 0..in_height {
-                let cur_row = &input[y * in_width..(y + 1) * in_width];
-                let above = if y > 0 {
-                    &input[(y - 1) * in_width..y * in_width]
-                } else {
-                    cur_row
-                };
-                let below = if y + 1 < in_height {
-                    &input[(y + 1) * in_width..(y + 2) * in_width]
-                } else {
-                    cur_row
-                };
-
-                vertical_blend(cur_row, above, &mut above_buf, in_width);
-                vertical_blend(cur_row, below, &mut below_buf, in_width);
-
-                let out_y_top = y * 2;
-                let out_y_bot = y * 2 + 1;
-                self.fancy_upsample_h2v1(
-                    &above_buf,
-                    in_width,
-                    &mut output[out_y_top * out_width..],
-                );
-                self.fancy_upsample_h2v1(
-                    &below_buf,
-                    in_width,
-                    &mut output[out_y_bot * out_width..],
-                );
-            }
+            crate::decode::upsample::fancy_h2v2(
+                input,
+                in_width,
+                in_height,
+                output,
+                out_width,
+                in_height * 2,
+            );
         }
     }
 
@@ -2687,10 +2606,6 @@ impl<'a> Decoder<'a> {
                     let mut cb_row_bot = vec![0u8; full_width];
                     let mut cr_row_top = vec![0u8; full_width];
                     let mut cr_row_bot = vec![0u8; full_width];
-                    let mut cb_vblend_a = vec![0u8; cb_w];
-                    let mut cb_vblend_b = vec![0u8; cb_w];
-                    let mut cr_vblend_a = vec![0u8; cb_w];
-                    let mut cr_vblend_b = vec![0u8; cb_w];
 
                     for cy in 0..cb_h {
                         let cb_cur = &component_planes[1][cy * cb_w..(cy + 1) * cb_w];
@@ -2716,17 +2631,33 @@ impl<'a> Decoder<'a> {
                             cr_cur
                         };
 
-                        // Vertical blend + horizontal upsample for top output row
-                        vertical_blend(cb_cur, cb_above, &mut cb_vblend_a, cb_w);
-                        vertical_blend(cr_cur, cr_above, &mut cr_vblend_a, cb_w);
-                        self.fancy_upsample_h2v1(&cb_vblend_a, cb_w, &mut cb_row_top);
-                        self.fancy_upsample_h2v1(&cr_vblend_a, cb_w, &mut cr_row_top);
+                        // Fused vertical+horizontal upsample for top output row
+                        crate::decode::upsample::fancy_h2v2_row(
+                            cb_cur,
+                            cb_above,
+                            &mut cb_row_top,
+                            cb_w,
+                        );
+                        crate::decode::upsample::fancy_h2v2_row(
+                            cr_cur,
+                            cr_above,
+                            &mut cr_row_top,
+                            cb_w,
+                        );
 
-                        // Vertical blend + horizontal upsample for bottom output row
-                        vertical_blend(cb_cur, cb_below, &mut cb_vblend_b, cb_w);
-                        vertical_blend(cr_cur, cr_below, &mut cr_vblend_b, cb_w);
-                        self.fancy_upsample_h2v1(&cb_vblend_b, cb_w, &mut cb_row_bot);
-                        self.fancy_upsample_h2v1(&cr_vblend_b, cb_w, &mut cr_row_bot);
+                        // Fused vertical+horizontal upsample for bottom output row
+                        crate::decode::upsample::fancy_h2v2_row(
+                            cb_cur,
+                            cb_below,
+                            &mut cb_row_bot,
+                            cb_w,
+                        );
+                        crate::decode::upsample::fancy_h2v2_row(
+                            cr_cur,
+                            cr_below,
+                            &mut cr_row_bot,
+                            cb_w,
+                        );
 
                         // Color convert both output rows immediately
                         let out_y_top = cy * 2;
