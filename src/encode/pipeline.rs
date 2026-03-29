@@ -3084,9 +3084,19 @@ fn scale_quant_for_fdct(quant_table: &[u16; 64]) -> QuantDivisors {
         // Ceiling reciprocal: ensures (x * recip) >> 16 == x / d for all valid x
         reciprocals[i] = (1u32 << 16).div_ceil(d) as u16;
     }
+    // Pre-arrange in zigzag order for fused quantize+reorder
+    let zigzag = &crate::encode::tables::ZIGZAG_ORDER;
+    let mut divisors_zigzag = [0u16; 64];
+    let mut reciprocals_zigzag = [0u16; 64];
+    for zz in 0..64 {
+        divisors_zigzag[zz] = divisors[zigzag[zz]];
+        reciprocals_zigzag[zz] = reciprocals[zigzag[zz]];
+    }
     QuantDivisors {
         divisors,
         reciprocals,
+        divisors_zigzag,
+        reciprocals_zigzag,
     }
 }
 
