@@ -2640,8 +2640,102 @@ impl<'a> Decoder<'a> {
                         );
                     }
                 } else if h_factor == 2 && v_factor == 2 {
-                    self.fancy_h2v2(&component_planes[1], cb_w, cb_h, &mut cb_full, full_width);
-                    self.fancy_h2v2(&component_planes[2], cb_w, cb_h, &mut cr_full, full_width);
+                    // Row-streaming H2V2: fuse upsample + color convert to avoid
+                    // allocating full-size cb_full/cr_full buffers (~4MB for 1080p).
+                    // Process 2 output rows at a time, keeping data in L1/L2 cache.
+                    let data_size = out_width * out_height * bpp;
+                    let mut data = Vec::with_capacity(data_size);
+                    #[allow(clippy::uninit_vec)]
+                    unsafe {
+                        data.set_len(data_size)
+                    };
+
+                    // Small per-row upsample buffers (2 rows × full_width per component)
+                    let mut cb_row_top = vec![0u8; full_width];
+                    let mut cb_row_bot = vec![0u8; full_width];
+                    let mut cr_row_top = vec![0u8; full_width];
+                    let mut cr_row_bot = vec![0u8; full_width];
+                    let mut cb_vblend_a = vec![0u8; cb_w];
+                    let mut cb_vblend_b = vec![0u8; cb_w];
+                    let mut cr_vblend_a = vec![0u8; cb_w];
+                    let mut cr_vblend_b = vec![0u8; cb_w];
+
+                    for cy in 0..cb_h {
+                        let cb_cur = &component_planes[1][cy * cb_w..(cy + 1) * cb_w];
+                        let cr_cur = &component_planes[2][cy * cb_w..(cy + 1) * cb_w];
+                        let cb_above = if cy > 0 {
+                            &component_planes[1][(cy - 1) * cb_w..cy * cb_w]
+                        } else {
+                            cb_cur
+                        };
+                        let cb_below = if cy + 1 < cb_h {
+                            &component_planes[1][(cy + 1) * cb_w..(cy + 2) * cb_w]
+                        } else {
+                            cb_cur
+                        };
+                        let cr_above = if cy > 0 {
+                            &component_planes[2][(cy - 1) * cb_w..cy * cb_w]
+                        } else {
+                            cr_cur
+                        };
+                        let cr_below = if cy + 1 < cb_h {
+                            &component_planes[2][(cy + 1) * cb_w..(cy + 2) * cb_w]
+                        } else {
+                            cr_cur
+                        };
+
+                        // Vertical blend + horizontal upsample for top output row
+                        vertical_blend(cb_cur, cb_above, &mut cb_vblend_a, cb_w);
+                        vertical_blend(cr_cur, cr_above, &mut cr_vblend_a, cb_w);
+                        self.fancy_upsample_h2v1(&cb_vblend_a, cb_w, &mut cb_row_top);
+                        self.fancy_upsample_h2v1(&cr_vblend_a, cb_w, &mut cr_row_top);
+
+                        // Vertical blend + horizontal upsample for bottom output row
+                        vertical_blend(cb_cur, cb_below, &mut cb_vblend_b, cb_w);
+                        vertical_blend(cr_cur, cr_below, &mut cr_vblend_b, cb_w);
+                        self.fancy_upsample_h2v1(&cb_vblend_b, cb_w, &mut cb_row_bot);
+                        self.fancy_upsample_h2v1(&cr_vblend_b, cb_w, &mut cr_row_bot);
+
+                        // Color convert both output rows immediately
+                        let out_y_top = cy * 2;
+                        let out_y_bot = cy * 2 + 1;
+                        if out_y_top < out_height {
+                            self.color_convert_row(
+                                out_format,
+                                &y_plane[out_y_top * y_width..],
+                                &cb_row_top,
+                                &cr_row_top,
+                                &mut data[out_y_top * out_width * bpp..],
+                                out_width,
+                                out_y_top,
+                            );
+                        }
+                        if out_y_bot < out_height {
+                            self.color_convert_row(
+                                out_format,
+                                &y_plane[out_y_bot * y_width..],
+                                &cb_row_bot,
+                                &cr_row_bot,
+                                &mut data[out_y_bot * out_width * bpp..],
+                                out_width,
+                                out_y_bot,
+                            );
+                        }
+                    }
+
+                    return Ok(Image {
+                        width: out_width,
+                        height: out_height,
+                        pixel_format: out_format,
+                        precision: 8,
+                        data,
+                        icc_profile: icc_profile.clone(),
+                        exif_data: exif_data.clone(),
+                        comment: self.metadata.comment.clone(),
+                        density: self.metadata.density,
+                        saved_markers: self.metadata.saved_markers.clone(),
+                        warnings: warnings.clone(),
+                    });
                 } else if h_factor == 1 && v_factor == 2 {
                     // S440: vertical-only 2x
                     self.fancy_h1v2(&component_planes[1], cb_w, cb_h, &mut cb_full, full_width);
