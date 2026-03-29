@@ -51,9 +51,10 @@ pub struct EncoderSimdRoutines {
     pub rgb_to_ycbcr_row: fn(rgb: &[u8], y: &mut [u8], cb: &mut [u8], cr: &mut [u8], width: usize),
 
     /// Combined FDCT (islow) + quantize + zigzag reorder for one 8×8 block.
+    /// `input` is modified in-place by FDCT (caller must not read after call).
     /// `quant` contains pre-scaled divisors and reciprocals.
     /// Output is in zigzag scan order, ready for Huffman encoding.
-    pub fdct_quantize: fn(input: &[i16; 64], quant: &QuantDivisors, output: &mut [i16; 64]),
+    pub fdct_quantize: fn(input: &mut [i16; 64], quant: &QuantDivisors, output: &mut [i16; 64]),
 }
 
 /// Detect available SIMD features and return the best dispatch table.

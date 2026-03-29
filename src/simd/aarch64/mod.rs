@@ -35,7 +35,7 @@ pub fn encoder_routines() -> EncoderSimdRoutines {
 /// Uses pre-computed reciprocals to replace scalar division with
 /// widening multiply + shift, avoiding the NEON→scalar→NEON roundtrip
 /// that the old `neon_quantize` required for `u32 / u32`.
-fn neon_fdct_quantize(input: &[i16; 64], quant: &QuantDivisors, output: &mut [i16; 64]) {
+fn neon_fdct_quantize(input: &mut [i16; 64], quant: &QuantDivisors, output: &mut [i16; 64]) {
     let mut dct_output: [i16; 64] = [0i16; 64];
     fdct::neon_fdct(input, &mut dct_output);
 
