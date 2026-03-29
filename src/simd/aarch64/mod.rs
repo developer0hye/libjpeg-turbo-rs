@@ -508,22 +508,22 @@ mod tests {
         let mut neon_output: [i16; 64] = [0i16; 64];
         let mut scalar_output: [i16; 64] = [0i16; 64];
 
-        neon_fdct_quantize(&input, &quant, &mut neon_output);
-        scalar::scalar_fdct_quantize(&input, &quant, &mut scalar_output);
+        neon_fdct_quantize(&mut input, &quant, &mut neon_output);
+        scalar::scalar_fdct_quantize(&mut input, &quant, &mut scalar_output);
 
         assert_eq!(neon_output, scalar_output);
     }
 
     #[test]
     fn neon_fdct_quantize_matches_scalar_dc_only() {
-        let input: [i16; 64] = [50i16; 64];
+        let mut input: [i16; 64] = [50i16; 64];
         let quant: QuantDivisors = make_quant([128u16; 64]);
 
         let mut neon_output: [i16; 64] = [0i16; 64];
         let mut scalar_output: [i16; 64] = [0i16; 64];
 
-        neon_fdct_quantize(&input, &quant, &mut neon_output);
-        scalar::scalar_fdct_quantize(&input, &quant, &mut scalar_output);
+        neon_fdct_quantize(&mut input, &quant, &mut neon_output);
+        scalar::scalar_fdct_quantize(&mut input, &quant, &mut scalar_output);
 
         assert_eq!(neon_output, scalar_output);
     }
@@ -541,8 +541,8 @@ mod tests {
         let mut neon_output: [i16; 64] = [0i16; 64];
         let mut scalar_output: [i16; 64] = [0i16; 64];
 
-        neon_fdct_quantize(&input, &quant, &mut neon_output);
-        scalar::scalar_fdct_quantize(&input, &quant, &mut scalar_output);
+        neon_fdct_quantize(&mut input, &quant, &mut neon_output);
+        scalar::scalar_fdct_quantize(&mut input, &quant, &mut scalar_output);
 
         assert_eq!(neon_output, scalar_output);
     }
@@ -578,7 +578,7 @@ mod tests {
             }
         }
         let quant: QuantDivisors = make_quant([96u16; 64]);
-        let block = scalar_downsample_block(&plane, 16, 2, 2);
+        let mut block = scalar_downsample_block(&plane, 16, 2, 2);
 
         let mut neon_output = [0i16; 64];
         let mut scalar_output = [0i16; 64];
@@ -586,7 +586,7 @@ mod tests {
         unsafe {
             neon_downsample_h2v2_fdct_quantize(plane.as_ptr(), 16, &quant, &mut neon_output);
         }
-        scalar::scalar_fdct_quantize(&block, &quant, &mut scalar_output);
+        scalar::scalar_fdct_quantize(&mut block, &quant, &mut scalar_output);
 
         assert_eq!(neon_output, scalar_output);
     }
@@ -600,7 +600,7 @@ mod tests {
             }
         }
         let quant: QuantDivisors = make_quant([112u16; 64]);
-        let block = scalar_downsample_block(&plane, 16, 2, 1);
+        let mut block = scalar_downsample_block(&plane, 16, 2, 1);
 
         let mut neon_output = [0i16; 64];
         let mut scalar_output = [0i16; 64];
@@ -608,7 +608,7 @@ mod tests {
         unsafe {
             neon_downsample_h2v1_fdct_quantize(plane.as_ptr(), 16, &quant, &mut neon_output);
         }
-        scalar::scalar_fdct_quantize(&block, &quant, &mut scalar_output);
+        scalar::scalar_fdct_quantize(&mut block, &quant, &mut scalar_output);
 
         assert_eq!(neon_output, scalar_output);
     }

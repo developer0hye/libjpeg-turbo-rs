@@ -13,7 +13,6 @@ use crate::decode::progressive;
 use crate::simd::{self, SimdRoutines};
 
 /// Vertical triangle-filter blend: out[i] = (3*cur[i] + neighbor[i] + 2) >> 2.
-#[cfg(not(all(target_arch = "aarch64", feature = "simd")))]
 #[inline]
 fn vertical_blend(cur: &[u8], neighbor: &[u8], output: &mut [u8], width: usize) {
     #[cfg(all(target_arch = "x86_64", feature = "simd"))]

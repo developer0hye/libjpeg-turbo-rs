@@ -630,7 +630,7 @@ unsafe fn encode_ac_sparse_lsb(
         // Load coefficient, compute magnitude on demand
         let ac: i16 = *coeffs.add(pos as usize);
         let abs_val: u16 = ac.unsigned_abs();
-        let nbits: u32 = (16 - abs_val.leading_zeros()) as u32;
+        let nbits: u32 = 16 - abs_val.leading_zeros();
         let sign: i16 = ac >> 15;
         let mag: u32 = (ac.wrapping_add(sign) as u16 as u32) & ((1u32 << nbits) - 1);
 
@@ -939,6 +939,7 @@ fn encode_dc_value(diff: i16) -> (u16, u8) {
 ///
 /// Returns (magnitude_bits, size) where size is 1..10.
 /// Only called for non-zero values in the bitmap zero-skip loop.
+#[allow(dead_code)]
 #[inline(always)]
 fn encode_ac_value(value: i16) -> (u16, u8) {
     let abs_val: u16 = value.unsigned_abs();
