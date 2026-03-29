@@ -5,6 +5,7 @@
 
 pub mod avx2_color;
 pub mod avx2_idct;
+pub mod avx2_merged;
 pub mod avx2_upsample;
 pub mod color;
 pub mod idct;

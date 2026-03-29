@@ -1,0 +1,3 @@
+commit	time_us	status	description
+baseline	504.4	keep	x86_64 AVX2 color conversion baseline: i32 arithmetic, scalar byte-by-byte RGB interleave. ycbcr_to_rgb_row_640 = 504ns. decode_640x480 = 1410us
+68d896d	227.9	keep	Rewrote AVX2 color with i16 mulhi_epi16 arithmetic + SSSE3 pshufb RGB interleave. ycbcr_to_rgb_row_640: 504→228ns (2.2x). decode_640x480: 1410→756us. Eliminated all i32 widening, lane-crossing permutes, and scalar store loop.

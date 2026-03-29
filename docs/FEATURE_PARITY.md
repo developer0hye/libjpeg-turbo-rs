@@ -346,9 +346,16 @@
 - [x] SSE2 IDCT
 - [x] SSE2 color conversion (YCbCr→RGB)
 - [x] SSE2 upsample (H2V1, H2V2)
-- [x] AVX2 IDCT
-- [x] AVX2 color conversion
+- [x] AVX2 IDCT (full 256-bit ymm, vpmaddwd, DC-only fast path, strided output)
+- [x] AVX2 color conversion (i16 mulhi + SSSE3 pshufb interleave)
 - [x] AVX2 upsample
+- [x] AVX2 vertical blend for H2V2
+- [x] AVX2 merged H2V1 upsample + color convert
+- [x] AVX2 merged H2V2 upsample + color convert
+- [x] Row-streaming H2V2 upsample+color pipeline (fused, no full-plane alloc)
+- [ ] AVX2 color conversion for RGBA/BGR/BGRA formats
+- [ ] SSE2 IDCT DC-only fast path + strided output
+- [ ] x86_64 encoder SIMD (FDCT, color conversion, quantization)
 
 ### General
 - [x] Scalar fallback for all operations
