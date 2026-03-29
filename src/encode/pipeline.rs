@@ -3565,9 +3565,9 @@ fn encode_single_block(
 
     // Fused path for interior blocks: load u8 → FDCT → quantize → zigzag
     // without intermediate [i16; 64] buffer between extract and FDCT.
-    #[cfg(target_arch = "aarch64")]
-    {
-        if block_x + 8 <= plane_width && block_y + 8 <= plane_height {
+    if block_x + 8 <= plane_width && block_y + 8 <= plane_height {
+        #[cfg(target_arch = "aarch64")]
+        {
             unsafe {
                 crate::simd::aarch64::neon_extract_fdct_quantize(
                     plane.as_ptr().add(block_y * plane_width + block_x),
@@ -3578,6 +3578,21 @@ fn encode_single_block(
             }
             HuffmanEncoder::encode_block(writer, &quantized, prev_dc, dc_table, ac_table);
             return;
+        }
+        #[cfg(target_arch = "x86_64")]
+        {
+            if is_x86_feature_detected!("avx2") {
+                unsafe {
+                    crate::simd::x86_64::avx2_extract_fdct_quantize(
+                        plane.as_ptr().add(block_y * plane_width + block_x),
+                        plane_width,
+                        quant_table,
+                        &mut quantized,
+                    );
+                }
+                HuffmanEncoder::encode_block(writer, &quantized, prev_dc, dc_table, ac_table);
+                return;
+            }
         }
     }
 

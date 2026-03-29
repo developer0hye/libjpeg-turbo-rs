@@ -59,6 +59,64 @@ fn avx2_fdct_quantize(input: &[i16; 64], quant: &QuantDivisors, output: &mut [i1
     unsafe { avx2_quantize_zigzag(&dct_buf, quant, output) }
 }
 
+/// Fused extract (u8→i16 + level-shift) + FDCT + quantize + zigzag.
+///
+/// Loads 8 rows of 8 u8 pixels directly from a plane, widens to i16,
+/// level-shifts (-128), and feeds into the AVX2 FDCT+quantize pipeline.
+/// Eliminates the intermediate [i16; 64] extract_block buffer.
+///
+/// # Safety
+/// Requires AVX2. `plane_ptr` must point to valid pixel data with at least
+/// `stride * 7 + 8` accessible bytes from the start.
+#[target_feature(enable = "avx2")]
+pub(crate) unsafe fn avx2_extract_fdct_quantize(
+    plane_ptr: *const u8,
+    stride: usize,
+    quant: &QuantDivisors,
+    output: &mut [i16; 64],
+) {
+    use core::arch::x86_64::*;
+
+    let zeros: __m128i = _mm_setzero_si128();
+    let level_shift: __m128i = _mm_set1_epi16(128);
+
+    // Load 8 rows of 8 u8, widen to i16, level-shift (-128)
+    macro_rules! load_row {
+        ($row:expr) => {{
+            let ptr: *const u8 = plane_ptr.add(stride * $row);
+            let pixels: __m128i = _mm_loadl_epi64(ptr as *const __m128i);
+            _mm_sub_epi16(_mm_unpacklo_epi8(pixels, zeros), level_shift)
+        }};
+    }
+
+    let r0: __m128i = load_row!(0);
+    let r1: __m128i = load_row!(1);
+    let r2: __m128i = load_row!(2);
+    let r3: __m128i = load_row!(3);
+    let r4: __m128i = load_row!(4);
+    let r5: __m128i = load_row!(5);
+    let r6: __m128i = load_row!(6);
+    let r7: __m128i = load_row!(7);
+
+    // Pack pairs of rows into 256-bit registers (FDCT expects rows 0-1, 2-3, 4-5, 6-7)
+    let ymm01: __m256i = _mm256_inserti128_si256(_mm256_castsi128_si256(r0), r1, 1);
+    let ymm23: __m256i = _mm256_inserti128_si256(_mm256_castsi128_si256(r2), r3, 1);
+    let ymm45: __m256i = _mm256_inserti128_si256(_mm256_castsi128_si256(r4), r5, 1);
+    let ymm67: __m256i = _mm256_inserti128_si256(_mm256_castsi128_si256(r6), r7, 1);
+
+    // FDCT core (returns 4 ymm in row order)
+    let (out0, out1, out2, out3) = avx2_fdct::avx2_fdct_core(ymm01, ymm23, ymm45, ymm67);
+
+    // Store FDCT output for quantize+zigzag
+    let mut dct_buf = [0i16; 64];
+    _mm256_storeu_si256(dct_buf.as_mut_ptr() as *mut __m256i, out0);
+    _mm256_storeu_si256(dct_buf.as_mut_ptr().add(16) as *mut __m256i, out1);
+    _mm256_storeu_si256(dct_buf.as_mut_ptr().add(32) as *mut __m256i, out2);
+    _mm256_storeu_si256(dct_buf.as_mut_ptr().add(48) as *mut __m256i, out3);
+
+    avx2_quantize_zigzag(&dct_buf, quant, output);
+}
+
 /// AVX2 quantization: reciprocal multiply to avoid scalar division.
 ///
 /// For each coefficient: `quantized = round(coeff / divisor)`
