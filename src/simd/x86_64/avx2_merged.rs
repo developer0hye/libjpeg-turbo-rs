@@ -114,13 +114,14 @@ unsafe fn compute_chroma_deltas(cb16: __m256i, cr16: __m256i) -> (__m256i, __m25
     let g_lo_shifted = _mm256_srai_epi32::<16>(_mm256_add_epi32(g_lo_32, one_half));
     let g_hi_shifted = _mm256_srai_epi32::<16>(_mm256_add_epi32(g_hi_32, one_half));
 
-    // Pack i32 → i16 (signed saturation), fix AVX2 lane crossing
+    // Pack i32 → i16 (signed saturation).
+    // packs_epi32 on AVX2 operates per 128-bit lane, but since our unpacklo/hi
+    // also operate per-lane, the element order is already correct: lo lane gets
+    // indices 0-3 (from g_lo) and 4-7 (from g_hi), hi lane gets 8-11 and 12-15.
     let g_packed = _mm256_packs_epi32(g_lo_shifted, g_hi_shifted);
-    // packs_epi32 on AVX2 operates per 128-bit lane, need to fix order
-    let g_fixed = _mm256_permute4x64_epi64::<0b_11_01_10_00>(g_packed);
 
     // Subtract Cr: G-Y = (-0.344*Cb + 0.285*Cr) - Cr = -0.344*Cb - 0.714*Cr
-    let g_minus_y = _mm256_sub_epi16(g_fixed, cr_c);
+    let g_minus_y = _mm256_sub_epi16(g_packed, cr_c);
 
     (r_minus_y, g_minus_y, b_minus_y)
 }
