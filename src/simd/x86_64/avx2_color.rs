@@ -1,4 +1,4 @@
-//! AVX2-accelerated YCbCr -> RGB color conversion.
+//! AVX2-accelerated YCbCr -> multi-format color conversion.
 //!
 //! Processes 16 pixels at a time using 256-bit i16 arithmetic.
 //! Uses BT.601 coefficients with fixed-point matching libjpeg-turbo.
@@ -11,47 +11,13 @@
 //! Uses `_mm256_mulhi_epi16` to stay in i16 throughout, avoiding
 //! expensive i32 widening. Constants are scaled to fit i16 range
 //! with appropriate shift compensation.
+//!
+//! Per-format variants (RGB, RGBA, BGR, BGRA, RGBX, BGRX, XRGB, XBGR,
+//! ARGB, ABGR) are generated via the `avx2_color_convert_fn!` macro,
+//! mirroring libjpeg-turbo's C include+define pattern for `jdcolext-avx2.asm`.
 
 #[cfg(target_arch = "x86_64")]
 use core::arch::x86_64::*;
-
-// Scaled i16 constants for `mulhi_epi16` (result = (a * b) >> 16).
-//
-// For coefficients > 1.0, we halve them and left-shift the input by 1
-// to keep everything in i16 range, then add an extra copy to compensate.
-//
-// R: 1.40200 → mulhi(Cr<<1, 22971) + Cr ≈ ((Cr*2*22971)>>16) + Cr
-//    = Cr * (2*22971/65536 + 1) = Cr * 1.7009... wait, let me use the exact approach.
-//
-// Actually, use the approach from libjpeg-turbo's SSE2 color conversion:
-//   mulhi gives (a*b)>>16 with signed semantics.
-//   For 1.40200: use 1.40200 * 65536 = 91881. But 91881 > 32767.
-//   Split: 1.40200 = 0.40200 + 1.0. mulhi(Cr, 0.40200*65536) + Cr
-//   0.40200 * 65536 = 26345. Fits i16!
-//
-// Similarly for 1.77200: 1.77200 = 0.77200 + 1.0. 0.77200 * 65536 = 50578.
-// 50578 > 32767! So split further: 1.77200 = 0.77200 + 1.0.
-// Alternative: 1.772 * 32768 = 58065. Use mulhi(Cb<<1, 29033).
-// (Cb*2*29033) >> 16 = Cb * 58066/65536 = Cb * 0.886. Not right.
-//
-// Let's use the NEON-proven approach with different scaling:
-//   F_0_344 = 22554  (0.34414 * 65536)
-//   F_0_714 = 46802  (0.71414 * 65536)
-//   F_1_402 = 91881  (1.40200 * 65536)  — split as (F_1_402 - 65536) + 65536
-//   F_1_772 = 116130 (1.77200 * 65536)  — split as (F_1_772 - 65536) + 65536
-//
-// For mulhi_epi16 (which computes (a*b)>>16 for signed):
-//   R_offset = mulhi(Cr, F_1_402 - 65536) + Cr = mulhi(Cr, 26345) + Cr
-//   B_offset = mulhi(Cb, F_1_772 - 65536) + Cb = mulhi(Cb, 50594) — still > 32767!
-//   B_offset: 1.772 - 1.0 = 0.772. 0.772*65536 = 50594. Still too big.
-//   Split again: 1.772 - 2.0 = -0.228. mulhi(Cb, -0.228*65536) + 2*Cb.
-//   -0.228*65536 = -14942. mulhi(Cb, -14942) + 2*Cb.
-//
-// Even simpler: use the exact same approach as libjpeg-turbo jdcolext-sse2.asm:
-//   R = Y + Cr + mulhi(Cr, 26345)      // 26345 = (1.40200-1)*65536 = 0.402*65536
-//   G = Y - mulhi(Cb, 22554) - mulhi(Cr, 46802) + one_half_correction
-//     Actually G uses 16-bit: mulhi gives (a*b+rounding)>>16
-//   B = Y + Cb + Cb + mulhi(Cb, -14942) // -14942 = (1.772-2)*65536
 
 // Constants matching libjpeg-turbo jdcolext-avx2.asm (i16 for vpmulhw/vpmaddwd).
 /// FIX(0.40200) = 26345 (Cr→R, used with 2×Cr then >>1 rounding)
@@ -63,96 +29,50 @@ const PW_MF0344: i16 = -22554;
 /// For G channel vpmaddwd: FIX(0.28586) = 18734 = 65536 - FIX(0.71414) (Cr coefficient)
 const PW_F0285: i16 = 18734;
 
-/// AVX2-accelerated YCbCr to interleaved RGB row conversion.
+/// Compute R, G, B as `__m256i` (16 x i16) from Y, Cb, Cr vectors.
 ///
-/// # Safety contract
-/// Caller must ensure AVX2 is available (dispatch in `x86_64/mod.rs` verifies this).
-pub fn avx2_ycbcr_to_rgb_row(y: &[u8], cb: &[u8], cr: &[u8], rgb: &mut [u8], width: usize) {
-    // SAFETY: AVX2 availability guaranteed by dispatch in x86_64::routines().
-    unsafe {
-        avx2_ycbcr_to_rgb_row_inner(y, cb, cr, rgb, width);
-    }
-}
-
 /// # Safety
-/// Requires AVX2 support.
+/// Requires AVX2.
 #[target_feature(enable = "avx2")]
-unsafe fn avx2_ycbcr_to_rgb_row_inner(
-    y: &[u8],
-    cb: &[u8],
-    cr: &[u8],
-    rgb: &mut [u8],
-    width: usize,
-) {
-    let mut x: usize = 0;
-
+#[inline]
+unsafe fn compute_rgb_i16(
+    y16: __m256i,
+    cb16: __m256i,
+    cr16: __m256i,
+) -> (__m256i, __m256i, __m256i) {
     let offset_128 = _mm256_set1_epi16(128);
+    let cb_c = _mm256_sub_epi16(cb16, offset_128);
+    let cr_c = _mm256_sub_epi16(cr16, offset_128);
 
-    // Process 16 pixels per iteration (16 x i16 in __m256i)
-    while x + 16 <= width {
-        // Load 16 bytes of each channel and zero-extend u8 -> i16
-        let y16 = _mm256_cvtepu8_epi16(_mm_loadu_si128(y.as_ptr().add(x) as *const __m128i));
-        let cb16 = _mm256_cvtepu8_epi16(_mm_loadu_si128(cb.as_ptr().add(x) as *const __m128i));
-        let cr16 = _mm256_cvtepu8_epi16(_mm_loadu_si128(cr.as_ptr().add(x) as *const __m128i));
+    // R = Y + Cr + round(mulhi(2*Cr, F_0_402))
+    let one = _mm256_set1_epi16(1);
+    let cr2 = _mm256_add_epi16(cr_c, cr_c);
+    let r_mul = _mm256_mulhi_epi16(cr2, _mm256_set1_epi16(PW_F0402));
+    let r_mul_rounded = _mm256_srai_epi16::<1>(_mm256_add_epi16(r_mul, one));
+    let r16 = _mm256_add_epi16(y16, _mm256_add_epi16(cr_c, r_mul_rounded));
 
-        // Center chroma: Cb - 128, Cr - 128
-        let cb_c = _mm256_sub_epi16(cb16, offset_128);
-        let cr_c = _mm256_sub_epi16(cr16, offset_128);
+    // G = Y + ((vpmaddwd(Cb:Cr, -22554:18734) + 32768) >> 16) - Cr
+    let cb_cr_lo = _mm256_unpacklo_epi16(cb_c, cr_c);
+    let cb_cr_hi = _mm256_unpackhi_epi16(cb_c, cr_c);
+    let coeff =
+        _mm256_set1_epi32(((PW_F0285 as u16 as u32) << 16 | (PW_MF0344 as u16 as u32)) as i32);
+    let g_lo_32 = _mm256_madd_epi16(cb_cr_lo, coeff);
+    let g_hi_32 = _mm256_madd_epi16(cb_cr_hi, coeff);
+    let one_half = _mm256_set1_epi32(1 << 15);
+    let g_lo_shifted = _mm256_srai_epi32::<16>(_mm256_add_epi32(g_lo_32, one_half));
+    let g_hi_shifted = _mm256_srai_epi32::<16>(_mm256_add_epi32(g_hi_32, one_half));
+    let g_packed = _mm256_packs_epi32(g_lo_shifted, g_hi_shifted);
+    let g_minus_y = _mm256_sub_epi16(g_packed, cr_c);
+    let g16 = _mm256_add_epi16(y16, g_minus_y);
 
-        // R = Y + Cr + round(mulhi(2*Cr, F_0_402))
-        // Matches libjpeg-turbo: double input, mulhi, add 1, shift right 1.
-        let one = _mm256_set1_epi16(1);
-        let cr2 = _mm256_add_epi16(cr_c, cr_c);
-        let r_mul = _mm256_mulhi_epi16(cr2, _mm256_set1_epi16(PW_F0402));
-        let r_mul_rounded = _mm256_srai_epi16::<1>(_mm256_add_epi16(r_mul, one));
-        let r16 = _mm256_add_epi16(y16, _mm256_add_epi16(cr_c, r_mul_rounded));
+    // B = Y + 2*Cb + round(mulhi(2*Cb, MF_0_228))
+    let cb2 = _mm256_add_epi16(cb_c, cb_c);
+    let b_mul = _mm256_mulhi_epi16(cb2, _mm256_set1_epi16(PW_MF0228));
+    let b_mul_rounded = _mm256_srai_epi16::<1>(_mm256_add_epi16(b_mul, one));
+    let b_offset = _mm256_add_epi16(cb2, b_mul_rounded);
+    let b16 = _mm256_add_epi16(y16, b_offset);
 
-        // G = Y + ((vpmaddwd(Cb:Cr, -22554:18734) + 32768) >> 16) - Cr
-        // vpmaddwd pairs adjacent i16: result[i] = Cb[i]*(-22554) + Cr[i]*18734
-        // = -0.344*Cb + 0.285*Cr (i32). Subtract Cr: -0.344*Cb - 0.714*Cr
-        // This matches libjpeg-turbo jdcolext-avx2.asm and avx2_merged.rs.
-        let cb_cr_lo = _mm256_unpacklo_epi16(cb_c, cr_c);
-        let cb_cr_hi = _mm256_unpackhi_epi16(cb_c, cr_c);
-        let coeff =
-            _mm256_set1_epi32(((PW_F0285 as u16 as u32) << 16 | (PW_MF0344 as u16 as u32)) as i32);
-        let g_lo_32 = _mm256_madd_epi16(cb_cr_lo, coeff);
-        let g_hi_32 = _mm256_madd_epi16(cb_cr_hi, coeff);
-        let one_half = _mm256_set1_epi32(1 << 15);
-        let g_lo_shifted = _mm256_srai_epi32::<16>(_mm256_add_epi32(g_lo_32, one_half));
-        let g_hi_shifted = _mm256_srai_epi32::<16>(_mm256_add_epi32(g_hi_32, one_half));
-        let g_packed = _mm256_packs_epi32(g_lo_shifted, g_hi_shifted);
-        let g_minus_y = _mm256_sub_epi16(g_packed, cr_c);
-        let g16 = _mm256_add_epi16(y16, g_minus_y);
-
-        // B = Y + 2*Cb + round(mulhi(2*Cb, MF_0_228))
-        // Matches libjpeg-turbo: double input, mulhi, add 1, shift right 1.
-        let cb2 = _mm256_add_epi16(cb_c, cb_c);
-        let b_mul = _mm256_mulhi_epi16(cb2, _mm256_set1_epi16(PW_MF0228));
-        let b_mul_rounded = _mm256_srai_epi16::<1>(_mm256_add_epi16(b_mul, one));
-        let b_offset = _mm256_add_epi16(cb2, b_mul_rounded);
-        let b16 = _mm256_add_epi16(y16, b_offset);
-
-        // Pack i16 -> u8 with saturation, handling AVX2 lane crossing
-        let r_u8 = pack_i16_to_u8_avx2(r16);
-        let g_u8 = pack_i16_to_u8_avx2(g16);
-        let b_u8 = pack_i16_to_u8_avx2(b16);
-
-        // Interleave R, G, B into RGB triplets and store (48 bytes)
-        store_rgb_interleaved_ssse3(rgb.as_mut_ptr().add(x * 3), r_u8, g_u8, b_u8);
-
-        x += 16;
-    }
-
-    // Scalar tail for remaining pixels
-    if x < width {
-        crate::decode::color::ycbcr_to_rgb_row(
-            &y[x..],
-            &cb[x..],
-            &cr[x..],
-            &mut rgb[x * 3..],
-            width - x,
-        );
-    }
+    (r16, g16, b16)
 }
 
 /// Pack 16 x i16 in a __m256i to 16 x u8 in a __m128i (saturating, lane-crossing fix).
@@ -162,11 +82,6 @@ unsafe fn avx2_ycbcr_to_rgb_row_inner(
 #[target_feature(enable = "avx2")]
 #[inline]
 unsafe fn pack_i16_to_u8_avx2(v: __m256i) -> __m128i {
-    // _mm256_packus_epi16 packs within 128-bit lanes independently:
-    //   lo_lane: [v0..v7]  -> u8[0..7]  + u8[8..15] (from zero)
-    //   hi_lane: [v8..v15] -> u8[0..7]  + u8[8..15] (from zero)
-    // Result layout: [v0..v7 | 0..0 | v8..v15 | 0..0]
-    // We need: [v0..v7 v8..v15] in a __m128i.
     let lo = _mm256_castsi256_si128(v);
     let hi = _mm256_extracti128_si256::<1>(v);
     _mm_packus_epi16(lo, hi)
@@ -192,26 +107,16 @@ pub(crate) unsafe fn store_rgb_interleaved_ssse3_pub(
 /// Input: r, g, b each contain 16 u8 values in a __m128i.
 /// Output: 48 bytes of R0 G0 B0 R1 G1 B1 ... R15 G15 B15.
 ///
-/// Uses the classic 3-channel interleave with `_mm_shuffle_epi8` (pshufb)
-/// and `_mm_blendv_epi8` to build three 16-byte output chunks.
-///
 /// # Safety
 /// Requires SSSE3 + SSE4.1 (both implied by AVX2).
 /// `out` must point to at least 48 writable bytes.
 #[target_feature(enable = "avx2")]
 #[inline]
 unsafe fn store_rgb_interleaved_ssse3(out: *mut u8, r: __m128i, g: __m128i, b: __m128i) {
-    // Output layout (48 bytes, 3 x 16-byte stores):
-    // Chunk 0 [ 0..15]: R0  G0  B0  R1  G1  B1  R2  G2  B2  R3  G3  B3  R4  G4  B4  R5
-    // Chunk 1 [16..31]: G5  B5  R6  G6  B6  R7  G7  B7  R8  G8  B8  R9  G9  B9  R10 G10
+    // Chunk 0 [ 0..15]: R0 G0 B0 R1 G1 B1 R2 G2 B2 R3 G3 B3 R4 G4 B4 R5
+    // Chunk 1 [16..31]: G5 B5 R6 G6 B6 R7 G7 B7 R8 G8 B8 R9 G9 B9 R10 G10
     // Chunk 2 [32..47]: B10 R11 G11 B11 R12 G12 B12 R13 G13 B13 R14 G14 B14 R15 G15 B15
 
-    // Shuffle masks: for each output chunk, select bytes from R, G, or B.
-    // 0x80 = zero (don't care, will be filled by blend).
-
-    // Chunk 0: positions 0,3,6,9,12,15 from R (indices 0-5)
-    //          positions 1,4,7,10,13 from G (indices 0-4)
-    //          positions 2,5,8,11,14 from B (indices 0-4)
     let r_shuf0 = _mm_setr_epi8(0, -1, -1, 1, -1, -1, 2, -1, -1, 3, -1, -1, 4, -1, -1, 5);
     let g_shuf0 = _mm_setr_epi8(-1, 0, -1, -1, 1, -1, -1, 2, -1, -1, 3, -1, -1, 4, -1, -1);
     let b_shuf0 = _mm_setr_epi8(-1, -1, 0, -1, -1, 1, -1, -1, 2, -1, -1, 3, -1, -1, 4, -1);
@@ -221,9 +126,6 @@ unsafe fn store_rgb_interleaved_ssse3(out: *mut u8, r: __m128i, g: __m128i, b: _
     let c0_b = _mm_shuffle_epi8(b, b_shuf0);
     let chunk0 = _mm_or_si128(_mm_or_si128(c0_r, c0_g), c0_b);
 
-    // Chunk 1: positions 2,5,8,11,14 from R (indices 6-10)
-    //          positions 0,3,6,9,12,15 from G (indices 5-10)
-    //          positions 1,4,7,10,13 from B (indices 5-9)
     let r_shuf1 = _mm_setr_epi8(-1, -1, 6, -1, -1, 7, -1, -1, 8, -1, -1, 9, -1, -1, 10, -1);
     let g_shuf1 = _mm_setr_epi8(5, -1, -1, 6, -1, -1, 7, -1, -1, 8, -1, -1, 9, -1, -1, 10);
     let b_shuf1 = _mm_setr_epi8(-1, 5, -1, -1, 6, -1, -1, 7, -1, -1, 8, -1, -1, 9, -1, -1);
@@ -233,9 +135,6 @@ unsafe fn store_rgb_interleaved_ssse3(out: *mut u8, r: __m128i, g: __m128i, b: _
     let c1_b = _mm_shuffle_epi8(b, b_shuf1);
     let chunk1 = _mm_or_si128(_mm_or_si128(c1_r, c1_g), c1_b);
 
-    // Chunk 2: positions 1,4,7,10,13 from R (indices 11-15)
-    //          positions 2,5,8,11,14 from G (indices 11-15)
-    //          positions 0,3,6,9,12,15 from B (indices 10-15)
     let r_shuf2 = _mm_setr_epi8(
         -1, 11, -1, -1, 12, -1, -1, 13, -1, -1, 14, -1, -1, 15, -1, -1,
     );
@@ -251,8 +150,197 @@ unsafe fn store_rgb_interleaved_ssse3(out: *mut u8, r: __m128i, g: __m128i, b: _
     let c2_b = _mm_shuffle_epi8(b, b_shuf2);
     let chunk2 = _mm_or_si128(_mm_or_si128(c2_r, c2_g), c2_b);
 
-    // Store 48 bytes
     _mm_storeu_si128(out as *mut __m128i, chunk0);
     _mm_storeu_si128(out.add(16) as *mut __m128i, chunk1);
     _mm_storeu_si128(out.add(32) as *mut __m128i, chunk2);
 }
+
+/// Store 16 pixels of interleaved 4-byte format (e.g. RGBA, BGRA) using SSE2 unpacks.
+///
+/// Input: c0, c1, c2, c3 each contain 16 u8 values in a __m128i.
+/// Output: 64 bytes of [c0_0 c1_0 c2_0 c3_0  c0_1 c1_1 c2_1 c3_1 ...].
+///
+/// # Safety
+/// Requires SSE2 (implied by AVX2). `out` must point to at least 64 writable bytes.
+#[target_feature(enable = "avx2")]
+#[inline]
+unsafe fn store_4bpp_interleaved(out: *mut u8, c0: __m128i, c1: __m128i, c2: __m128i, c3: __m128i) {
+    // Interleave pairs: c0:c1 and c2:c3
+    let c01_lo = _mm_unpacklo_epi8(c0, c1); // [c0_0 c1_0 c0_1 c1_1 .. c0_7 c1_7]
+    let c01_hi = _mm_unpackhi_epi8(c0, c1); // [c0_8 c1_8 .. c0_15 c1_15]
+    let c23_lo = _mm_unpacklo_epi8(c2, c3); // [c2_0 c3_0 c2_1 c3_1 .. c2_7 c3_7]
+    let c23_hi = _mm_unpackhi_epi8(c2, c3); // [c2_8 c3_8 .. c2_15 c3_15]
+
+    // Interleave 16-bit pairs to form 32-bit pixels
+    let px_0_3 = _mm_unpacklo_epi16(c01_lo, c23_lo); // pixels 0-3
+    let px_4_7 = _mm_unpackhi_epi16(c01_lo, c23_lo); // pixels 4-7
+    let px_8_11 = _mm_unpacklo_epi16(c01_hi, c23_hi); // pixels 8-11
+    let px_12_15 = _mm_unpackhi_epi16(c01_hi, c23_hi); // pixels 12-15
+
+    _mm_storeu_si128(out as *mut __m128i, px_0_3);
+    _mm_storeu_si128(out.add(16) as *mut __m128i, px_4_7);
+    _mm_storeu_si128(out.add(32) as *mut __m128i, px_8_11);
+    _mm_storeu_si128(out.add(48) as *mut __m128i, px_12_15);
+}
+
+/// Generate a complete AVX2 color conversion function for a given pixel format.
+///
+/// This mirrors libjpeg-turbo's `jdcolext-avx2.asm` wrapper+core include pattern,
+/// where the wrapper defines `RGB_RED`, `RGB_GREEN`, `RGB_BLUE`, `RGB_PIXELSIZE`
+/// and includes the core conversion code. Here the macro generates per-format
+/// Rust functions with format-specific store logic.
+macro_rules! avx2_color_convert_fn {
+    (
+        $pub_name:ident, $inner_name:ident,
+        $scalar_fn:path, $bpp:expr,
+        store($r:ident, $g:ident, $b:ident, $ptr:ident) => $store_body:expr
+    ) => {
+        /// AVX2-accelerated YCbCr to interleaved pixel row conversion.
+        ///
+        /// # Safety contract
+        /// Caller must ensure AVX2 is available (dispatch verifies this).
+        pub fn $pub_name(y: &[u8], cb: &[u8], cr: &[u8], out: &mut [u8], width: usize) {
+            // SAFETY: AVX2 availability guaranteed by dispatch.
+            unsafe {
+                $inner_name(y, cb, cr, out, width);
+            }
+        }
+
+        /// # Safety
+        /// Requires AVX2 support.
+        #[target_feature(enable = "avx2")]
+        unsafe fn $inner_name(y: &[u8], cb: &[u8], cr: &[u8], out: &mut [u8], width: usize) {
+            let mut x: usize = 0;
+
+            while x + 16 <= width {
+                let y16 =
+                    _mm256_cvtepu8_epi16(_mm_loadu_si128(y.as_ptr().add(x) as *const __m128i));
+                let cb16 =
+                    _mm256_cvtepu8_epi16(_mm_loadu_si128(cb.as_ptr().add(x) as *const __m128i));
+                let cr16 =
+                    _mm256_cvtepu8_epi16(_mm_loadu_si128(cr.as_ptr().add(x) as *const __m128i));
+
+                let (r16, g16, b16) = compute_rgb_i16(y16, cb16, cr16);
+
+                let $r = pack_i16_to_u8_avx2(r16);
+                let $g = pack_i16_to_u8_avx2(g16);
+                let $b = pack_i16_to_u8_avx2(b16);
+                let $ptr = out.as_mut_ptr().add(x * $bpp);
+                $store_body;
+
+                x += 16;
+            }
+
+            // Scalar tail
+            if x < width {
+                $scalar_fn(&y[x..], &cb[x..], &cr[x..], &mut out[x * $bpp..], width - x);
+            }
+        }
+    };
+}
+
+// --- RGB (3 bpp) ---
+avx2_color_convert_fn!(
+    avx2_ycbcr_to_rgb_row, avx2_ycbcr_to_rgb_row_inner,
+    crate::decode::color::ycbcr_to_rgb_row, 3,
+    store(r, g, b, p) => {
+        store_rgb_interleaved_ssse3(p, r, g, b);
+    }
+);
+
+// --- RGBA (4 bpp): [R G B 0xFF] ---
+avx2_color_convert_fn!(
+    avx2_ycbcr_to_rgba_row, avx2_ycbcr_to_rgba_row_inner,
+    crate::decode::color::ycbcr_to_rgba_row, 4,
+    store(r, g, b, p) => {
+        let alpha = _mm_set1_epi8(-1); // 0xFF
+        store_4bpp_interleaved(p, r, g, b, alpha);
+    }
+);
+
+// --- BGR (3 bpp): [B G R] ---
+avx2_color_convert_fn!(
+    avx2_ycbcr_to_bgr_row, avx2_ycbcr_to_bgr_row_inner,
+    crate::decode::color::ycbcr_to_bgr_row, 3,
+    store(r, g, b, p) => {
+        store_rgb_interleaved_ssse3(p, b, g, r);
+    }
+);
+
+// --- BGRA (4 bpp): [B G R 0xFF] ---
+avx2_color_convert_fn!(
+    avx2_ycbcr_to_bgra_row, avx2_ycbcr_to_bgra_row_inner,
+    crate::decode::color::ycbcr_to_bgra_row, 4,
+    store(r, g, b, p) => {
+        let alpha = _mm_set1_epi8(-1);
+        store_4bpp_interleaved(p, b, g, r, alpha);
+    }
+);
+
+// --- RGBX (4 bpp): [R G B 0xFF] (same layout as RGBA) ---
+avx2_color_convert_fn!(
+    avx2_ycbcr_to_rgbx_row, avx2_ycbcr_to_rgbx_row_inner,
+    crate::decode::color::ycbcr_to_rgba_row, 4,
+    store(r, g, b, p) => {
+        let filler = _mm_set1_epi8(-1);
+        store_4bpp_interleaved(p, r, g, b, filler);
+    }
+);
+
+// --- BGRX (4 bpp): [B G R 0xFF] (same layout as BGRA) ---
+avx2_color_convert_fn!(
+    avx2_ycbcr_to_bgrx_row, avx2_ycbcr_to_bgrx_row_inner,
+    crate::decode::color::ycbcr_to_bgra_row, 4,
+    store(r, g, b, p) => {
+        let filler = _mm_set1_epi8(-1);
+        store_4bpp_interleaved(p, b, g, r, filler);
+    }
+);
+
+// Scalar fallbacks for formats that lack a dedicated scalar function.
+fn scalar_ycbcr_to_xrgb_row(y: &[u8], cb: &[u8], cr: &[u8], out: &mut [u8], width: usize) {
+    crate::decode::color::ycbcr_to_generic_4bpp_row(y, cb, cr, out, width, 1, 2, 3, 0);
+}
+fn scalar_ycbcr_to_xbgr_row(y: &[u8], cb: &[u8], cr: &[u8], out: &mut [u8], width: usize) {
+    crate::decode::color::ycbcr_to_generic_4bpp_row(y, cb, cr, out, width, 3, 2, 1, 0);
+}
+
+// --- XRGB (4 bpp): [0xFF R G B] ---
+avx2_color_convert_fn!(
+    avx2_ycbcr_to_xrgb_row, avx2_ycbcr_to_xrgb_row_inner,
+    scalar_ycbcr_to_xrgb_row, 4,
+    store(r, g, b, p) => {
+        let filler = _mm_set1_epi8(-1);
+        store_4bpp_interleaved(p, filler, r, g, b);
+    }
+);
+
+// --- XBGR (4 bpp): [0xFF B G R] ---
+avx2_color_convert_fn!(
+    avx2_ycbcr_to_xbgr_row, avx2_ycbcr_to_xbgr_row_inner,
+    scalar_ycbcr_to_xbgr_row, 4,
+    store(r, g, b, p) => {
+        let filler = _mm_set1_epi8(-1);
+        store_4bpp_interleaved(p, filler, b, g, r);
+    }
+);
+
+// --- ARGB (4 bpp): [0xFF R G B] (same pixel layout as XRGB) ---
+avx2_color_convert_fn!(
+    avx2_ycbcr_to_argb_row, avx2_ycbcr_to_argb_row_inner,
+    scalar_ycbcr_to_xrgb_row, 4,
+    store(r, g, b, p) => {
+        let alpha = _mm_set1_epi8(-1);
+        store_4bpp_interleaved(p, alpha, r, g, b);
+    }
+);
+
+// --- ABGR (4 bpp): [0xFF B G R] (same pixel layout as XBGR) ---
+avx2_color_convert_fn!(
+    avx2_ycbcr_to_abgr_row, avx2_ycbcr_to_abgr_row_inner,
+    scalar_ycbcr_to_xbgr_row, 4,
+    store(r, g, b, p) => {
+        let alpha = _mm_set1_epi8(-1);
+        store_4bpp_interleaved(p, alpha, b, g, r);
+    }
+);
