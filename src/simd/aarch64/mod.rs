@@ -478,9 +478,18 @@ mod tests {
             let d: u32 = divisors[i] as u32;
             reciprocals[i] = (((1u32 << 16) + d - 1) / d) as u16;
         }
+        let zigzag = &crate::encode::tables::ZIGZAG_ORDER;
+        let mut divisors_zigzag = [0u16; 64];
+        let mut reciprocals_zigzag = [0u16; 64];
+        for zz in 0..64 {
+            divisors_zigzag[zz] = divisors[zigzag[zz]];
+            reciprocals_zigzag[zz] = reciprocals[zigzag[zz]];
+        }
         QuantDivisors {
             divisors,
             reciprocals,
+            divisors_zigzag,
+            reciprocals_zigzag,
         }
     }
 

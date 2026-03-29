@@ -36,6 +36,11 @@ pub struct QuantDivisors {
     pub divisors: [u16; 64],
     /// Fixed-point reciprocals: `((1u32 << 16) + divisor - 1) / divisor` (ceiling).
     pub reciprocals: [u16; 64],
+    /// Divisors re-arranged in zigzag scan order for fused quantize+reorder.
+    /// `divisors_zigzag[zz] = divisors[ZIGZAG_ORDER[zz]]`
+    pub divisors_zigzag: [u16; 64],
+    /// Reciprocals re-arranged in zigzag scan order.
+    pub reciprocals_zigzag: [u16; 64],
 }
 
 /// Function-pointer dispatch table for SIMD-accelerated encode operations.
