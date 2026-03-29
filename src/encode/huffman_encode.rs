@@ -518,7 +518,10 @@ unsafe fn encode_ac_x86_64(
         return;
     }
 
-    if bitmap.count_ones() <= 8 {
+    // On x86_64 without vectorized CLZ, the dense pre-compute (auto-vectorized
+    // float trick) is expensive. The sparse path computes nbits/diff on demand
+    // using scalar leading_zeros(), which is faster for up to ~24 non-zero coefficients.
+    if bitmap.count_ones() <= 24 {
         encode_ac_sparse_lsb(pb, fb, buf, coeffs_zigzag, bitmap, ac_table);
     } else {
         encode_ac_dense_lsb(pb, fb, buf, coeffs_zigzag, bitmap, ac_table);
