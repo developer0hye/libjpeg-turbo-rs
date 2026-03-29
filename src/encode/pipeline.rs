@@ -3228,12 +3228,22 @@ fn extract_block(
     block_y: usize,
     block: &mut [i16; 64],
 ) {
-    // NEON fast path for interior blocks (no bounds checking needed)
-    #[cfg(target_arch = "aarch64")]
-    {
-        if block_x + 8 <= plane_width && block_y + 8 <= plane_height {
+    // SIMD fast path for interior blocks (no bounds checking needed)
+    if block_x + 8 <= plane_width && block_y + 8 <= plane_height {
+        #[cfg(target_arch = "aarch64")]
+        {
             extract_block_neon(plane, plane_width, block_x, block_y, block);
             return;
+        }
+        #[cfg(target_arch = "x86_64")]
+        {
+            if is_x86_feature_detected!("sse2") {
+                // SAFETY: SSE2 availability checked above, interior block bounds verified.
+                unsafe {
+                    extract_block_sse2(plane, plane_width, block_x, block_y, block);
+                }
+                return;
+            }
         }
     }
 
@@ -3269,6 +3279,39 @@ fn extract_block_neon(
             let shifted: int16x8_t = vsubq_s16(wide, level_shift);
             vst1q_s16(block.as_mut_ptr().add(row * 8), shifted);
         }
+    }
+}
+
+/// SSE2-accelerated block extraction with level-shift for interior blocks.
+///
+/// Loads 8 bytes per row, widens to i16, subtracts 128. No bounds checking.
+///
+/// # Safety
+/// Requires SSE2. Caller must ensure `block_x + 8 <= plane_width` and
+/// `block_y + 8 <= plane_height` (interior block bounds).
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "sse2")]
+unsafe fn extract_block_sse2(
+    plane: &[u8],
+    plane_width: usize,
+    block_x: usize,
+    block_y: usize,
+    block: &mut [i16; 64],
+) {
+    use core::arch::x86_64::*;
+
+    let level_shift: __m128i = _mm_set1_epi16(128);
+    let zeros: __m128i = _mm_setzero_si128();
+
+    for row in 0..8 {
+        let src_ptr: *const u8 = plane.as_ptr().add((block_y + row) * plane_width + block_x);
+        // Load 8 bytes (only low 64 bits used)
+        let pixels: __m128i = _mm_loadl_epi64(src_ptr as *const __m128i);
+        // Zero-extend u8 → i16
+        let wide: __m128i = _mm_unpacklo_epi8(pixels, zeros);
+        // Level-shift: subtract 128
+        let shifted: __m128i = _mm_sub_epi16(wide, level_shift);
+        _mm_storeu_si128(block.as_mut_ptr().add(row * 8) as *mut __m128i, shifted);
     }
 }
 
