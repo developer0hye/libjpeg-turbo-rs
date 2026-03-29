@@ -72,8 +72,7 @@ fn main() {
             }
         };
 
-        let image: libjpeg_turbo_rs::Image =
-            libjpeg_turbo_rs::decompress(&jpeg_data).unwrap();
+        let image: libjpeg_turbo_rs::Image = libjpeg_turbo_rs::decompress(&jpeg_data).unwrap();
         let pixels: &[u8] = &image.data;
         let width: usize = image.width;
         let height: usize = image.height;
