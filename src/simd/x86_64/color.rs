@@ -1,45 +1,28 @@
 //! SSE2-accelerated YCbCr to RGB color conversion.
 //!
-//! Uses fixed-point arithmetic matching the scalar implementation:
-//!   R = Y + ((91881 * (Cr - 128) + 32768) >> 16)
-//!   G = Y - ((22554 * (Cb - 128) + 46802 * (Cr - 128) + 32768) >> 16)
-//!   B = Y + ((116130 * (Cb - 128) + 32768) >> 16)
+//! Processes 8 pixels per iteration using i16 arithmetic in __m128i.
+//! Uses the same decomposed-coefficient approach as the AVX2 path
+//! to stay entirely in i16, avoiding i32 widening.
 //!
-//! Processes 4 pixels per iteration using SSE2 with i32 arithmetic to
-//! match the scalar path exactly.
+//! Equations (ITU-R BT.601, matching libjpeg-turbo):
+//!   R = Y + 1.40200 * (Cr - 128)
+//!   G = Y - 0.34414 * (Cb - 128) - 0.71414 * (Cr - 128)
+//!   B = Y + 1.77200 * (Cb - 128)
 
 #[cfg(target_arch = "x86_64")]
 use core::arch::x86_64::*;
 
-const FIX_1_40200: i32 = 91881;
-const FIX_0_34414: i32 = 22554;
-const FIX_0_71414: i32 = 46802;
-const FIX_1_77200: i32 = 116130;
-const HALF: i32 = 32768;
+// Same decomposed constants as AVX2 path (see avx2_color.rs for derivation).
+const CR_R_SUB1: i16 = 26345; // (1.40200 - 1.0) * 65536
+const CB_G: i16 = 22554; // 0.34414 * 65536
+const CR_G_SUB1: i16 = 46802_u16 as i16; // (0.71414 - 1.0) * 65536 = -18734 (wraps)
+const CB_B_SUB2: i16 = -14942; // (1.77200 - 2.0) * 65536
 
 /// SSE2-accelerated YCbCr to interleaved RGB row conversion.
 pub fn sse2_ycbcr_to_rgb_row(y: &[u8], cb: &[u8], cr: &[u8], rgb: &mut [u8], width: usize) {
     unsafe {
         sse2_ycbcr_to_rgb_row_inner(y, cb, cr, rgb, width);
     }
-}
-
-#[inline(always)]
-unsafe fn mullo_epi32_sse2(a: __m128i, b: __m128i) -> __m128i {
-    let mul02: __m128i = _mm_mul_epu32(a, b);
-    let a_odd: __m128i = _mm_srli_si128(a, 4);
-    let b_odd: __m128i = _mm_srli_si128(b, 4);
-    let mul13: __m128i = _mm_mul_epu32(a_odd, b_odd);
-    let lo02: __m128i = _mm_shuffle_epi32(mul02, 0b00_00_10_00);
-    let lo13: __m128i = _mm_shuffle_epi32(mul13, 0b00_00_10_00);
-    _mm_unpacklo_epi32(lo02, lo13)
-}
-
-#[inline(always)]
-unsafe fn clamp_and_pack(val: __m128i) -> __m128i {
-    let zero: __m128i = _mm_setzero_si128();
-    let packed_i16: __m128i = _mm_packs_epi32(val, zero);
-    _mm_packus_epi16(packed_i16, zero)
 }
 
 #[target_feature(enable = "sse2")]
@@ -50,96 +33,73 @@ unsafe fn sse2_ycbcr_to_rgb_row_inner(
     rgb: &mut [u8],
     width: usize,
 ) {
-    let fix_cr_r: __m128i = _mm_set1_epi32(FIX_1_40200);
-    let fix_cb_g: __m128i = _mm_set1_epi32(FIX_0_34414);
-    let fix_cr_g: __m128i = _mm_set1_epi32(FIX_0_71414);
-    let fix_cb_b: __m128i = _mm_set1_epi32(FIX_1_77200);
-    let half: __m128i = _mm_set1_epi32(HALF);
-    let center: __m128i = _mm_set1_epi32(128);
+    let offset_128 = _mm_set1_epi16(128);
+    let zero = _mm_setzero_si128();
 
-    let mut offset: usize = 0;
+    let mut x: usize = 0;
 
-    while offset + 4 <= width {
-        let y_i32: __m128i = _mm_set_epi32(
-            y[offset + 3] as i32,
-            y[offset + 2] as i32,
-            y[offset + 1] as i32,
-            y[offset] as i32,
+    // Process 8 pixels per iteration (8 x i16 in __m128i)
+    while x + 8 <= width {
+        // Load 8 bytes, zero-extend u8 -> i16
+        let y16 = _mm_unpacklo_epi8(_mm_loadl_epi64(y.as_ptr().add(x) as *const __m128i), zero);
+        let cb16 = _mm_unpacklo_epi8(_mm_loadl_epi64(cb.as_ptr().add(x) as *const __m128i), zero);
+        let cr16 = _mm_unpacklo_epi8(_mm_loadl_epi64(cr.as_ptr().add(x) as *const __m128i), zero);
+
+        let cb_c = _mm_sub_epi16(cb16, offset_128);
+        let cr_c = _mm_sub_epi16(cr16, offset_128);
+
+        // R = Y + Cr + mulhi(Cr, CR_R_SUB1)
+        let r_offset = _mm_add_epi16(cr_c, _mm_mulhi_epi16(cr_c, _mm_set1_epi16(CR_R_SUB1)));
+        let r16 = _mm_add_epi16(y16, r_offset);
+
+        // G = Y - mulhi(Cb, CB_G) - Cr - mulhi(Cr, CR_G_SUB1)
+        let g_cb = _mm_mulhi_epi16(cb_c, _mm_set1_epi16(CB_G));
+        let g_cr = _mm_add_epi16(cr_c, _mm_mulhi_epi16(cr_c, _mm_set1_epi16(CR_G_SUB1)));
+        let g16 = _mm_sub_epi16(_mm_sub_epi16(y16, g_cb), g_cr);
+
+        // B = Y + Cb + Cb + mulhi(Cb, CB_B_SUB2)
+        let b_offset = _mm_add_epi16(
+            _mm_add_epi16(cb_c, cb_c),
+            _mm_mulhi_epi16(cb_c, _mm_set1_epi16(CB_B_SUB2)),
         );
-        let cb_i32: __m128i = _mm_sub_epi32(
-            _mm_set_epi32(
-                cb[offset + 3] as i32,
-                cb[offset + 2] as i32,
-                cb[offset + 1] as i32,
-                cb[offset] as i32,
-            ),
-            center,
-        );
-        let cr_i32: __m128i = _mm_sub_epi32(
-            _mm_set_epi32(
-                cr[offset + 3] as i32,
-                cr[offset + 2] as i32,
-                cr[offset + 1] as i32,
-                cr[offset] as i32,
-            ),
-            center,
-        );
+        let b16 = _mm_add_epi16(y16, b_offset);
 
-        let r_offset: __m128i =
-            _mm_srai_epi32(_mm_add_epi32(mullo_epi32_sse2(fix_cr_r, cr_i32), half), 16);
-        let r: __m128i = _mm_add_epi32(y_i32, r_offset);
+        // Pack i16 -> u8 with saturation
+        let r_u8 = _mm_packus_epi16(r16, zero); // 8 u8 in low half
+        let g_u8 = _mm_packus_epi16(g16, zero);
+        let b_u8 = _mm_packus_epi16(b16, zero);
 
-        let g_offset: __m128i = _mm_srai_epi32(
-            _mm_add_epi32(
-                _mm_add_epi32(
-                    mullo_epi32_sse2(fix_cb_g, cb_i32),
-                    mullo_epi32_sse2(fix_cr_g, cr_i32),
-                ),
-                half,
-            ),
-            16,
-        );
-        let g: __m128i = _mm_sub_epi32(y_i32, g_offset);
+        // Interleave and store 24 bytes (8 RGB pixels)
+        // SSE2 approach: unpack pairs then combine
+        // RG interleave: R0 G0 R1 G1 R2 G2 R3 G3 R4 G4 R5 G5 R6 G6 R7 G7
+        let rg_lo = _mm_unpacklo_epi8(r_u8, g_u8); // 16 bytes: R0G0 R1G1 ...
 
-        let b_offset: __m128i =
-            _mm_srai_epi32(_mm_add_epi32(mullo_epi32_sse2(fix_cb_b, cb_i32), half), 16);
-        let b: __m128i = _mm_add_epi32(y_i32, b_offset);
-
-        let r_u8: __m128i = clamp_and_pack(r);
-        let g_u8: __m128i = clamp_and_pack(g);
-        let b_u8: __m128i = clamp_and_pack(b);
-
-        let mut r_bytes = [0u8; 16];
-        let mut g_bytes = [0u8; 16];
+        // We need: R0 G0 B0 R1 G1 B1 ...
+        // Extract to temp arrays and write (SSE2 doesn't have pshufb)
+        let mut rg_bytes = [0u8; 16];
         let mut b_bytes = [0u8; 16];
-        _mm_storeu_si128(r_bytes.as_mut_ptr() as *mut __m128i, r_u8);
-        _mm_storeu_si128(g_bytes.as_mut_ptr() as *mut __m128i, g_u8);
+        _mm_storeu_si128(rg_bytes.as_mut_ptr() as *mut __m128i, rg_lo);
         _mm_storeu_si128(b_bytes.as_mut_ptr() as *mut __m128i, b_u8);
 
-        let out_base: usize = offset * 3;
-        rgb[out_base] = r_bytes[0];
-        rgb[out_base + 1] = g_bytes[0];
-        rgb[out_base + 2] = b_bytes[0];
-        rgb[out_base + 3] = r_bytes[1];
-        rgb[out_base + 4] = g_bytes[1];
-        rgb[out_base + 5] = b_bytes[1];
-        rgb[out_base + 6] = r_bytes[2];
-        rgb[out_base + 7] = g_bytes[2];
-        rgb[out_base + 8] = b_bytes[2];
-        rgb[out_base + 9] = r_bytes[3];
-        rgb[out_base + 10] = g_bytes[3];
-        rgb[out_base + 11] = b_bytes[3];
+        let out_base = x * 3;
+        let out = rgb.as_mut_ptr().add(out_base);
+        for i in 0..8 {
+            *out.add(i * 3) = rg_bytes[i * 2];
+            *out.add(i * 3 + 1) = rg_bytes[i * 2 + 1];
+            *out.add(i * 3 + 2) = b_bytes[i];
+        }
 
-        offset += 4;
+        x += 8;
     }
 
-    if offset < width {
+    // Scalar tail
+    if x < width {
         crate::decode::color::ycbcr_to_rgb_row(
-            &y[offset..],
-            &cb[offset..],
-            &cr[offset..],
-            &mut rgb[offset * 3..],
-            width - offset,
+            &y[x..],
+            &cb[x..],
+            &cr[x..],
+            &mut rgb[x * 3..],
+            width - x,
         );
     }
 }

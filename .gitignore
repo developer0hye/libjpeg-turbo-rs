@@ -1,5 +1,7 @@
 /target
-/references
+# Reference sources tracked as submodules — do NOT ignore
+# /references
 fuzz/target
 fuzz/artifacts
 .DS_Store
+bench_c_decode_linux

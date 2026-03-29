@@ -13,12 +13,63 @@ use crate::decode::progressive;
 use crate::simd::{self, SimdRoutines};
 
 /// Vertical triangle-filter blend: out[i] = (3*cur[i] + neighbor[i] + 2) >> 2.
-/// Auto-vectorizes well on aarch64 with NEON.
 #[cfg(not(all(target_arch = "aarch64", feature = "simd")))]
 #[inline]
 fn vertical_blend(cur: &[u8], neighbor: &[u8], output: &mut [u8], width: usize) {
+    #[cfg(all(target_arch = "x86_64", feature = "simd"))]
+    {
+        if is_x86_feature_detected!("avx2") {
+            unsafe {
+                vertical_blend_avx2(cur, neighbor, output, width);
+            }
+            return;
+        }
+    }
     for i in 0..width {
         output[i] = ((3 * cur[i] as u16 + neighbor[i] as u16 + 2) >> 2) as u8;
+    }
+}
+
+/// AVX2 vertical blend: (3*cur + neighbor + 2) >> 2, 32 bytes per iteration.
+#[cfg(all(target_arch = "x86_64", feature = "simd"))]
+#[target_feature(enable = "avx2")]
+unsafe fn vertical_blend_avx2(cur: &[u8], neighbor: &[u8], output: &mut [u8], width: usize) {
+    use core::arch::x86_64::*;
+    let mut i: usize = 0;
+    let zero = _mm256_setzero_si256();
+    let two = _mm256_set1_epi16(2);
+    let three = _mm256_set1_epi16(3);
+
+    while i + 32 <= width {
+        let c = _mm256_loadu_si256(cur.as_ptr().add(i) as *const __m256i);
+        let n = _mm256_loadu_si256(neighbor.as_ptr().add(i) as *const __m256i);
+
+        // Process low 16 bytes
+        let c_lo = _mm256_unpacklo_epi8(c, zero);
+        let n_lo = _mm256_unpacklo_epi8(n, zero);
+        let r_lo = _mm256_srli_epi16(
+            _mm256_add_epi16(_mm256_add_epi16(_mm256_mullo_epi16(c_lo, three), n_lo), two),
+            2,
+        );
+
+        // Process high 16 bytes
+        let c_hi = _mm256_unpackhi_epi8(c, zero);
+        let n_hi = _mm256_unpackhi_epi8(n, zero);
+        let r_hi = _mm256_srli_epi16(
+            _mm256_add_epi16(_mm256_add_epi16(_mm256_mullo_epi16(c_hi, three), n_hi), two),
+            2,
+        );
+
+        // Pack back to u8
+        let packed = _mm256_packus_epi16(r_lo, r_hi);
+        _mm256_storeu_si256(output.as_mut_ptr().add(i) as *mut __m256i, packed);
+        i += 32;
+    }
+
+    // Scalar tail
+    while i < width {
+        output[i] = ((3 * cur[i] as u16 + neighbor[i] as u16 + 2) >> 2) as u8;
+        i += 1;
     }
 }
 
@@ -361,6 +412,26 @@ impl<'a> Decoder<'a> {
             );
         }
 
+        #[cfg(all(target_arch = "x86_64", feature = "simd"))]
+        {
+            if is_x86_feature_detected!("avx2") {
+                return crate::simd::x86_64::avx2_idct::avx2_idct_islow_strided(
+                    coeffs, quant, output, stride,
+                );
+            }
+            // SSE2 fallback: IDCT into temp buffer, then copy row-by-row.
+            let mut tmp = [0u8; 64];
+            (self.routines.idct_islow)(coeffs, quant, &mut tmp);
+            for row in 0..8 {
+                std::ptr::copy_nonoverlapping(
+                    tmp.as_ptr().add(row * 8),
+                    output.add(row * stride),
+                    8,
+                );
+            }
+            return;
+        }
+
         // Scalar fallback: IDCT into temp buffer, then copy row-by-row.
         #[allow(unreachable_code)]
         {
@@ -494,6 +565,50 @@ impl<'a> Decoder<'a> {
         }
     }
 
+    /// Merged H2V1 upsample + color convert dispatch.
+    #[inline(always)]
+    fn merged_h2v1(y_row: &[u8], cb_row: &[u8], cr_row: &[u8], rgb_out: &mut [u8], width: usize) {
+        #[cfg(all(target_arch = "x86_64", feature = "simd"))]
+        {
+            if is_x86_feature_detected!("avx2") {
+                crate::simd::x86_64::avx2_merged::avx2_merged_h2v1_ycbcr_to_rgb(
+                    y_row, cb_row, cr_row, rgb_out, width,
+                );
+                return;
+            }
+        }
+
+        crate::decode::merged_upsample::merged_h2v1_ycbcr_to_rgb(
+            y_row, cb_row, cr_row, rgb_out, width,
+        );
+    }
+
+    /// Merged H2V2 upsample + color convert dispatch.
+    #[inline(always)]
+    fn merged_h2v2(
+        y_row0: &[u8],
+        y_row1: &[u8],
+        cb_row: &[u8],
+        cr_row: &[u8],
+        rgb_out0: &mut [u8],
+        rgb_out1: &mut [u8],
+        width: usize,
+    ) {
+        #[cfg(all(target_arch = "x86_64", feature = "simd"))]
+        {
+            if is_x86_feature_detected!("avx2") {
+                crate::simd::x86_64::avx2_merged::avx2_merged_h2v2_ycbcr_to_rgb(
+                    y_row0, y_row1, cb_row, cr_row, rgb_out0, rgb_out1, width,
+                );
+                return;
+            }
+        }
+
+        crate::decode::merged_upsample::merged_h2v2_ycbcr_to_rgb(
+            y_row0, y_row1, cb_row, cr_row, rgb_out0, rgb_out1, width,
+        );
+    }
+
     #[inline(always)]
     fn fancy_upsample_h2v1(&self, input: &[u8], in_width: usize, output: &mut [u8]) {
         #[cfg(all(target_arch = "aarch64", feature = "simd"))]
@@ -526,8 +641,8 @@ impl<'a> Decoder<'a> {
 
         #[cfg(not(all(target_arch = "aarch64", feature = "simd")))]
         {
-            let mut row_above = vec![0u8; in_width];
-            let mut row_below = vec![0u8; in_width];
+            let mut above_buf = vec![0u8; in_width];
+            let mut below_buf = vec![0u8; in_width];
 
             for y in 0..in_height {
                 let cur_row = &input[y * in_width..(y + 1) * in_width];
@@ -542,18 +657,18 @@ impl<'a> Decoder<'a> {
                     cur_row
                 };
 
-                vertical_blend(cur_row, above, &mut row_above, in_width);
-                vertical_blend(cur_row, below, &mut row_below, in_width);
+                vertical_blend(cur_row, above, &mut above_buf, in_width);
+                vertical_blend(cur_row, below, &mut below_buf, in_width);
 
                 let out_y_top = y * 2;
                 let out_y_bot = y * 2 + 1;
                 self.fancy_upsample_h2v1(
-                    &row_above,
+                    &above_buf,
                     in_width,
                     &mut output[out_y_top * out_width..],
                 );
                 self.fancy_upsample_h2v1(
-                    &row_below,
+                    &below_buf,
                     in_width,
                     &mut output[out_y_bot * out_width..],
                 );
@@ -2423,7 +2538,7 @@ impl<'a> Decoder<'a> {
                     if v_factor == 1 {
                         // H2V1 (4:2:2): one chroma row per Y row
                         for y in 0..out_height {
-                            crate::decode::merged_upsample::merged_h2v1_ycbcr_to_rgb(
+                            Self::merged_h2v1(
                                 &y_plane[y * y_width..],
                                 &component_planes[1][y * cb_w..],
                                 &component_planes[2][y * cb_w..],
@@ -2442,7 +2557,7 @@ impl<'a> Decoder<'a> {
                             let out1_start: usize = y1 * out_width * bpp;
                             // Split data into two non-overlapping mutable slices
                             let (top, bottom) = data.split_at_mut(out1_start);
-                            crate::decode::merged_upsample::merged_h2v2_ycbcr_to_rgb(
+                            Self::merged_h2v2(
                                 &y_plane[y0 * y_width..],
                                 &y_plane[y1 * y_width..],
                                 &component_planes[1][chroma_row * cb_w..],
@@ -2456,7 +2571,7 @@ impl<'a> Decoder<'a> {
                         if out_height & 1 != 0 {
                             let last_y: usize = out_height - 1;
                             let chroma_row: usize = last_y / 2;
-                            crate::decode::merged_upsample::merged_h2v1_ycbcr_to_rgb(
+                            Self::merged_h2v1(
                                 &y_plane[last_y * y_width..],
                                 &component_planes[1][chroma_row * cb_w..],
                                 &component_planes[2][chroma_row * cb_w..],
@@ -2481,18 +2596,117 @@ impl<'a> Decoder<'a> {
                     });
                 }
 
-                // Allocate upsampled buffers
+                // Row-streaming H2V2: skip full-plane allocation, process 2 rows at a time.
+                if !self.fast_upsample && h_factor == 2 && v_factor == 2 {
+                    // Row-streaming H2V2: fuse upsample + color convert to avoid
+                    // allocating full-size cb_full/cr_full buffers (~4MB for 1080p).
+                    // Process 2 output rows at a time, keeping data in L1/L2 cache.
+                    let data_size = out_width * out_height * bpp;
+                    let mut data = Vec::with_capacity(data_size);
+                    #[allow(clippy::uninit_vec)]
+                    unsafe {
+                        data.set_len(data_size)
+                    };
+
+                    // Small per-row upsample buffers (2 rows × full_width per component)
+                    let mut cb_row_top = vec![0u8; full_width];
+                    let mut cb_row_bot = vec![0u8; full_width];
+                    let mut cr_row_top = vec![0u8; full_width];
+                    let mut cr_row_bot = vec![0u8; full_width];
+                    let mut cb_vblend_a = vec![0u8; cb_w];
+                    let mut cb_vblend_b = vec![0u8; cb_w];
+                    let mut cr_vblend_a = vec![0u8; cb_w];
+                    let mut cr_vblend_b = vec![0u8; cb_w];
+
+                    for cy in 0..cb_h {
+                        let cb_cur = &component_planes[1][cy * cb_w..(cy + 1) * cb_w];
+                        let cr_cur = &component_planes[2][cy * cb_w..(cy + 1) * cb_w];
+                        let cb_above = if cy > 0 {
+                            &component_planes[1][(cy - 1) * cb_w..cy * cb_w]
+                        } else {
+                            cb_cur
+                        };
+                        let cb_below = if cy + 1 < cb_h {
+                            &component_planes[1][(cy + 1) * cb_w..(cy + 2) * cb_w]
+                        } else {
+                            cb_cur
+                        };
+                        let cr_above = if cy > 0 {
+                            &component_planes[2][(cy - 1) * cb_w..cy * cb_w]
+                        } else {
+                            cr_cur
+                        };
+                        let cr_below = if cy + 1 < cb_h {
+                            &component_planes[2][(cy + 1) * cb_w..(cy + 2) * cb_w]
+                        } else {
+                            cr_cur
+                        };
+
+                        // Vertical blend + horizontal upsample for top output row
+                        vertical_blend(cb_cur, cb_above, &mut cb_vblend_a, cb_w);
+                        vertical_blend(cr_cur, cr_above, &mut cr_vblend_a, cb_w);
+                        self.fancy_upsample_h2v1(&cb_vblend_a, cb_w, &mut cb_row_top);
+                        self.fancy_upsample_h2v1(&cr_vblend_a, cb_w, &mut cr_row_top);
+
+                        // Vertical blend + horizontal upsample for bottom output row
+                        vertical_blend(cb_cur, cb_below, &mut cb_vblend_b, cb_w);
+                        vertical_blend(cr_cur, cr_below, &mut cr_vblend_b, cb_w);
+                        self.fancy_upsample_h2v1(&cb_vblend_b, cb_w, &mut cb_row_bot);
+                        self.fancy_upsample_h2v1(&cr_vblend_b, cb_w, &mut cr_row_bot);
+
+                        // Color convert both output rows immediately
+                        let out_y_top = cy * 2;
+                        let out_y_bot = cy * 2 + 1;
+                        if out_y_top < out_height {
+                            self.color_convert_row(
+                                out_format,
+                                &y_plane[out_y_top * y_width..],
+                                &cb_row_top,
+                                &cr_row_top,
+                                &mut data[out_y_top * out_width * bpp..],
+                                out_width,
+                                out_y_top,
+                            );
+                        }
+                        if out_y_bot < out_height {
+                            self.color_convert_row(
+                                out_format,
+                                &y_plane[out_y_bot * y_width..],
+                                &cb_row_bot,
+                                &cr_row_bot,
+                                &mut data[out_y_bot * out_width * bpp..],
+                                out_width,
+                                out_y_bot,
+                            );
+                        }
+                    }
+
+                    return Ok(Image {
+                        width: out_width,
+                        height: out_height,
+                        pixel_format: out_format,
+                        precision: 8,
+                        data,
+                        icc_profile: icc_profile.clone(),
+                        exif_data: exif_data.clone(),
+                        comment: self.metadata.comment.clone(),
+                        density: self.metadata.density,
+                        saved_markers: self.metadata.saved_markers.clone(),
+                        warnings: warnings.clone(),
+                    });
+                }
+
+                // All remaining paths need full-plane cb_full/cr_full buffers.
                 let alloc_size = full_width * full_height;
                 let mut cb_full = Vec::with_capacity(alloc_size);
                 let mut cr_full = Vec::with_capacity(alloc_size);
-                // SAFETY: all code paths below write every element before reading.
+                #[allow(clippy::uninit_vec)]
                 unsafe {
                     cb_full.set_len(alloc_size);
                     cr_full.set_len(alloc_size);
                 }
 
                 if self.fast_upsample {
-                    // Nearest-neighbor upsampling (fast path)
                     crate::decode::toggles::upsample_nearest(
                         &component_planes[1],
                         cb_w,
