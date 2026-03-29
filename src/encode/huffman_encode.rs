@@ -420,18 +420,38 @@ impl HuffmanEncoder {
 
         #[cfg(not(target_arch = "aarch64"))]
         {
-            // --- DC coefficient (differential coding) ---
-            let dc: i16 = coeffs_zigzag[0];
-            let diff: i16 = dc - *prev_dc;
-            *prev_dc = dc;
+            // Hoist put_buffer/free_bits/buf to registers for entire block,
+            // matching the aarch64 path. Avoids store-reload on every flush.
+            // SAFETY: begin_block/end_block contract upheld — no other BitWriter
+            // methods called between them. SSE2 is only used for bitmap
+            // construction (available on all x86_64 CPUs).
+            unsafe {
+                let (mut pb, mut fb, mut buf) = writer.begin_block(512);
 
-            let (magnitude_bits, category) = encode_dc_value(diff);
-            let huff_code: u32 = dc_table.ehufco[category as usize] as u32;
-            let huff_size: u8 = dc_table.ehufsi[category as usize];
-            let mag_masked: u32 = magnitude_bits as u32 & ((1u32 << category) - 1);
-            let combined: u32 = (huff_code << category) | mag_masked;
-            writer.put_bits(combined, huff_size + category);
-            encode_ac_scalar(writer, coeffs_zigzag, ac_table);
+                // --- DC coefficient (differential coding) ---
+                let dc: i16 = coeffs_zigzag[0];
+                let diff: i16 = dc - *prev_dc;
+                *prev_dc = dc;
+
+                let (magnitude_bits, category) = encode_dc_value(diff);
+                let huff_code: u32 = dc_table.ehufco[category as usize] as u32;
+                let huff_size: u8 = dc_table.ehufsi[category as usize];
+                let mag_masked: u32 = magnitude_bits as u32 & ((1u32 << category) - 1);
+                let combined: u32 = (huff_code << category) | mag_masked;
+                local_put_bits(&mut pb, &mut fb, &mut buf, combined, huff_size + category);
+
+                // --- AC coefficients ---
+                #[cfg(target_arch = "x86_64")]
+                {
+                    encode_ac_x86_64(&mut pb, &mut fb, &mut buf, coeffs_zigzag, ac_table);
+                }
+                #[cfg(not(target_arch = "x86_64"))]
+                {
+                    encode_ac_scalar_local(&mut pb, &mut fb, &mut buf, coeffs_zigzag, ac_table);
+                }
+
+                writer.end_block(pb, fb, buf);
+            }
         }
     }
 
@@ -450,21 +470,276 @@ impl HuffmanEncoder {
     }
 }
 
-/// Scalar AC coefficient encoding with bitmap zero-skip.
+/// x86_64 AC coefficient encoding with SSE2 bitmap + sparse/dense paths.
 ///
-/// Builds a u64 bitmap of non-zero AC positions, then iterates using
-/// leading_zeros() to jump between non-zero coefficients.
-#[cfg(not(target_arch = "aarch64"))]
-fn encode_ac_scalar(writer: &mut BitWriter, coeffs_zigzag: &[i16; 64], ac_table: &HuffTable) {
+/// Uses SSE2 `pcmpeqw` + `packsswb` + `pmovmskb` for vectorized non-zero
+/// detection (8 SSE2 ops vs 63 scalar comparisons), then dispatches to
+/// sparse path (<=8 non-zeros, on-demand magnitude) or dense path
+/// (pre-computed nbits/diff arrays).
+///
+/// # Safety
+/// `pb`, `fb`, `buf` must be valid hoisted state from `BitWriter::begin_block`.
+#[cfg(target_arch = "x86_64")]
+unsafe fn encode_ac_x86_64(
+    pb: &mut u64,
+    fb: &mut i32,
+    buf: &mut *mut u8,
+    coeffs_zigzag: &[i16; 64],
+    ac_table: &HuffTable,
+) {
+    use core::arch::x86_64::*;
+
+    let mut bitmap: u64 = 0;
+    let zeros: __m128i = _mm_setzero_si128();
+
+    // Build non-zero bitmap using SSE2: 8 chunks of 8 i16 words.
+    // LSB-first layout: bit 0 = position 0 (DC), bit 63 = position 63.
+    // Enables efficient traversal with trailing_zeros + clear-lowest-bit.
+    for chunk in 0..8u32 {
+        let offset: usize = (chunk * 8) as usize;
+        let row: __m128i = _mm_loadu_si128(coeffs_zigzag.as_ptr().add(offset) as *const __m128i);
+        let eq: __m128i = _mm_cmpeq_epi16(row, zeros);
+        let packed: __m128i = _mm_packs_epi16(eq, zeros);
+        let mask: u8 = _mm_movemask_epi8(packed) as u8;
+        bitmap |= (!mask as u64) << (chunk * 8);
+    }
+
+    // Clear DC bit (position 0) — we only care about AC positions 1..63
+    bitmap &= !1u64;
+
+    if bitmap == 0 {
+        local_put_bits(
+            pb,
+            fb,
+            buf,
+            ac_table.ehufco[0x00] as u32,
+            ac_table.ehufsi[0x00],
+        );
+        return;
+    }
+
+    // On x86_64 without vectorized CLZ, the dense pre-compute (auto-vectorized
+    // float trick) is expensive. The sparse path computes nbits/diff on demand
+    // using scalar leading_zeros(), which is faster for up to ~24 non-zero coefficients.
+    if bitmap.count_ones() <= 24 {
+        encode_ac_sparse_lsb(pb, fb, buf, coeffs_zigzag, bitmap, ac_table);
+    } else {
+        encode_ac_dense_lsb(pb, fb, buf, coeffs_zigzag, bitmap, ac_table);
+    }
+}
+
+/// Dense AC path with LSB-first bitmap: pre-compute nbits and magnitude.
+///
+/// # Safety
+/// `pb`, `fb`, `buf` must be valid hoisted state.
+#[cfg(target_arch = "x86_64")]
+unsafe fn encode_ac_dense_lsb(
+    pb: &mut u64,
+    fb: &mut i32,
+    buf: &mut *mut u8,
+    coeffs_zigzag: &[i16; 64],
+    mut bitmap: u64,
+    ac_table: &HuffTable,
+) {
+    let mut block_nbits = [0u8; 64];
+    let mut block_diff = [0u16; 64];
+
+    // Pre-compute nbits and masked magnitude for all 64 coefficients.
+    for i in 0..64 {
+        let val: i16 = *coeffs_zigzag.get_unchecked(i);
+        let abs_val: u16 = val.unsigned_abs();
+        let nbits: u8 = (16 - abs_val.leading_zeros()) as u8;
+        let sign: i16 = val >> 15;
+        let raw_diff: u16 = val.wrapping_add(sign) as u16;
+        let masked_diff: u16 = raw_diff & ((1u16 << nbits).wrapping_sub(1));
+        *block_nbits.get_unchecked_mut(i) = nbits;
+        *block_diff.get_unchecked_mut(i) = masked_diff;
+    }
+
+    let ehufco: *const u16 = ac_table.ehufco.as_ptr();
+    let ehufsi: *const u8 = ac_table.ehufsi.as_ptr();
+
+    let mut prev_pos: u32 = 0;
+    while bitmap != 0 {
+        let pos: u32 = bitmap.trailing_zeros();
+        let run: u32 = pos - prev_pos - 1;
+        prev_pos = pos;
+
+        let nbits: u32 = *block_nbits.get_unchecked(pos as usize) as u32;
+        let diff: u32 = *block_diff.get_unchecked(pos as usize) as u32;
+
+        let mut r: u32 = run;
+        while r >= 16 {
+            local_put_bits(pb, fb, buf, *ehufco.add(0xF0) as u32, *ehufsi.add(0xF0));
+            r -= 16;
+        }
+
+        let symbol: u32 = (r << 4) | nbits;
+        let huff_code: u32 = *ehufco.add(symbol as usize) as u32;
+        let huff_size: u32 = *ehufsi.add(symbol as usize) as u32;
+        local_put_bits(
+            pb,
+            fb,
+            buf,
+            (huff_code << nbits) | diff,
+            (huff_size + nbits) as u8,
+        );
+
+        bitmap &= bitmap - 1;
+    }
+
+    if prev_pos < 63 {
+        local_put_bits(pb, fb, buf, *ehufco.add(0x00) as u32, *ehufsi.add(0x00));
+    }
+}
+
+/// AC emit loop with pre-loaded table pointers and minimal live variables.
+///
+/// Compared to the previous version, this reduces register pressure by:
+/// - Pre-loading ehufco/ehufsi raw pointers (avoids ac_table struct reload)
+/// - Using u32 for huff_size to avoid byte-width arithmetic
+///
+/// # Safety
+/// `pb`, `fb`, `buf` must be valid hoisted state.
+#[cfg(target_arch = "x86_64")]
+unsafe fn encode_ac_sparse_lsb(
+    pb: &mut u64,
+    fb: &mut i32,
+    buf: &mut *mut u8,
+    coeffs_zigzag: &[i16; 64],
+    mut bitmap: u64,
+    ac_table: &HuffTable,
+) {
+    let ehufco: *const u16 = ac_table.ehufco.as_ptr();
+    let ehufsi: *const u8 = ac_table.ehufsi.as_ptr();
+    let coeffs: *const i16 = coeffs_zigzag.as_ptr();
+
+    let mut prev_pos: u32 = 0;
+    while bitmap != 0 {
+        let pos: u32 = bitmap.trailing_zeros();
+        let run: u32 = pos - prev_pos - 1;
+        prev_pos = pos;
+
+        // Emit ZRL for long runs
+        let mut r: u32 = run;
+        while r >= 16 {
+            local_put_bits(pb, fb, buf, *ehufco.add(0xF0) as u32, *ehufsi.add(0xF0));
+            r -= 16;
+        }
+
+        // Load coefficient, compute magnitude on demand
+        let ac: i16 = *coeffs.add(pos as usize);
+        let abs_val: u16 = ac.unsigned_abs();
+        let nbits: u32 = (16 - abs_val.leading_zeros()) as u32;
+        let sign: i16 = ac >> 15;
+        let mag: u32 = (ac.wrapping_add(sign) as u16 as u32) & ((1u32 << nbits) - 1);
+
+        // Emit combined Huffman code + magnitude
+        let symbol: u32 = (r << 4) | nbits;
+        let huff_code: u32 = *ehufco.add(symbol as usize) as u32;
+        let huff_size: u32 = *ehufsi.add(symbol as usize) as u32;
+        local_put_bits(
+            pb,
+            fb,
+            buf,
+            (huff_code << nbits) | mag,
+            (huff_size + nbits) as u8,
+        );
+
+        bitmap &= bitmap - 1;
+    }
+
+    if prev_pos < 63 {
+        local_put_bits(pb, fb, buf, *ehufco.add(0x00) as u32, *ehufsi.add(0x00));
+    }
+}
+
+/// Sparse AC path (MSB-first bitmap): compute nbits/diff on demand.
+///
+/// Used by aarch64 NEON path when <=8 AC coefficients are non-zero.
+///
+/// # Safety
+/// `pb`, `fb`, `buf` must be valid hoisted state.
+#[cfg(target_arch = "aarch64")]
+#[inline(always)]
+unsafe fn encode_ac_sparse_local(
+    pb: &mut u64,
+    fb: &mut i32,
+    buf: &mut *mut u8,
+    coeffs_zigzag: &[i16; 64],
+    mut bitmap: u64,
+    ac_table: &HuffTable,
+) {
+    let mut pos: u32 = 1;
+    while bitmap != 0 {
+        let lz: u32 = bitmap.leading_zeros();
+        pos += lz;
+        bitmap <<= lz;
+
+        let ac: i16 = *coeffs_zigzag.get_unchecked(pos as usize);
+        let (magnitude_bits, nbits) = encode_ac_value(ac);
+        let mag_masked: u32 = magnitude_bits as u32 & ((1u32 << nbits) - 1);
+
+        let mut run: u32 = lz;
+        while run >= 16 {
+            local_put_bits(
+                pb,
+                fb,
+                buf,
+                ac_table.ehufco[0xF0] as u32,
+                ac_table.ehufsi[0xF0],
+            );
+            run -= 16;
+        }
+
+        let symbol: usize = ((run as usize) << 4) | (nbits as usize);
+        let huff_code: u32 = ac_table.ehufco[symbol] as u32;
+        let huff_size: u8 = ac_table.ehufsi[symbol];
+        let combined: u32 = (huff_code << nbits) | mag_masked;
+        local_put_bits(pb, fb, buf, combined, huff_size + nbits);
+
+        pos += 1;
+        bitmap <<= 1;
+    }
+
+    if pos <= 63 {
+        local_put_bits(
+            pb,
+            fb,
+            buf,
+            ac_table.ehufco[0x00] as u32,
+            ac_table.ehufsi[0x00],
+        );
+    }
+}
+
+/// Scalar AC encoding with hoisted local variables (non-aarch64, non-x86_64 fallback).
+///
+/// # Safety
+/// `pb`, `fb`, `buf` must be valid hoisted state.
+#[cfg(not(any(target_arch = "aarch64", target_arch = "x86_64")))]
+unsafe fn encode_ac_scalar_local(
+    pb: &mut u64,
+    fb: &mut i32,
+    buf: &mut *mut u8,
+    coeffs_zigzag: &[i16; 64],
+    ac_table: &HuffTable,
+) {
     let mut bitmap: u64 = 0;
     for k in 1u32..64 {
-        if coeffs_zigzag[k as usize] != 0 {
+        if *coeffs_zigzag.get_unchecked(k as usize) != 0 {
             bitmap |= 1u64 << (64 - k);
         }
     }
 
     if bitmap == 0 {
-        writer.put_bits(ac_table.ehufco[0x00] as u32, ac_table.ehufsi[0x00]);
+        local_put_bits(
+            pb,
+            fb,
+            buf,
+            ac_table.ehufco[0x00] as u32,
+            ac_table.ehufsi[0x00],
+        );
         return;
     }
 
@@ -474,27 +749,40 @@ fn encode_ac_scalar(writer: &mut BitWriter, coeffs_zigzag: &[i16; 64], ac_table:
         pos += lz;
         bitmap <<= lz;
 
+        let ac: i16 = *coeffs_zigzag.get_unchecked(pos as usize);
+        let (magnitude_bits, nbits) = encode_ac_value(ac);
+        let mag_masked: u32 = magnitude_bits as u32 & ((1u32 << nbits) - 1);
+
         let mut run: u32 = lz;
         while run >= 16 {
-            writer.put_bits(ac_table.ehufco[0xF0] as u32, ac_table.ehufsi[0xF0]);
+            local_put_bits(
+                pb,
+                fb,
+                buf,
+                ac_table.ehufco[0xF0] as u32,
+                ac_table.ehufsi[0xF0],
+            );
             run -= 16;
         }
 
-        let ac: i16 = coeffs_zigzag[pos as usize];
-        let (magnitude_bits, nbits) = encode_ac_value(ac);
         let symbol: usize = ((run as usize) << 4) | (nbits as usize);
         let huff_code: u32 = ac_table.ehufco[symbol] as u32;
         let huff_size: u8 = ac_table.ehufsi[symbol];
-        let mag_masked: u32 = magnitude_bits as u32 & ((1u32 << nbits) - 1);
         let combined: u32 = (huff_code << nbits) | mag_masked;
-        writer.put_bits(combined, huff_size + nbits);
+        local_put_bits(pb, fb, buf, combined, huff_size + nbits);
 
         pos += 1;
         bitmap <<= 1;
     }
 
     if pos <= 63 {
-        writer.put_bits(ac_table.ehufco[0x00] as u32, ac_table.ehufsi[0x00]);
+        local_put_bits(
+            pb,
+            fb,
+            buf,
+            ac_table.ehufco[0x00] as u32,
+            ac_table.ehufsi[0x00],
+        );
     }
 }
 
@@ -619,60 +907,6 @@ unsafe fn encode_ac_dense_neon_local(
 
         pos += 1;
         bitmap <<= lz;
-        bitmap <<= 1;
-    }
-
-    if pos <= 63 {
-        local_put_bits(
-            pb,
-            fb,
-            buf,
-            ac_table.ehufco[0x00] as u32,
-            ac_table.ehufsi[0x00],
-        );
-    }
-}
-
-/// Sparse AC path: compute nbits and diff only for coefficients we actually emit.
-#[cfg(target_arch = "aarch64")]
-#[inline(always)]
-unsafe fn encode_ac_sparse_local(
-    pb: &mut u64,
-    fb: &mut i32,
-    buf: &mut *mut u8,
-    coeffs_zigzag: &[i16; 64],
-    mut bitmap: u64,
-    ac_table: &HuffTable,
-) {
-    let mut pos: u32 = 1;
-    while bitmap != 0 {
-        let lz: u32 = bitmap.leading_zeros();
-        pos += lz;
-        bitmap <<= lz;
-
-        let ac: i16 = *coeffs_zigzag.get_unchecked(pos as usize);
-        let (magnitude_bits, nbits) = encode_ac_value(ac);
-        let mag_masked: u32 = magnitude_bits as u32 & ((1u32 << nbits) - 1);
-
-        let mut run: u32 = lz;
-        while run >= 16 {
-            local_put_bits(
-                pb,
-                fb,
-                buf,
-                ac_table.ehufco[0xF0] as u32,
-                ac_table.ehufsi[0xF0],
-            );
-            run -= 16;
-        }
-
-        let symbol: usize = ((run as usize) << 4) | (nbits as usize);
-        let huff_code: u32 = ac_table.ehufco[symbol] as u32;
-        let huff_size: u8 = ac_table.ehufsi[symbol];
-        let combined: u32 = (huff_code << nbits) | mag_masked;
-        local_put_bits(pb, fb, buf, combined, huff_size + nbits);
-
-        pos += 1;
         bitmap <<= 1;
     }
 

@@ -97,7 +97,7 @@ pub fn compress(
 
     // NEON fused FDCT+quantize for IsLow (the common case and only NEON-supported variant).
     // IsFast/Float fall back to scalar fdct_islow — matches public API behavior.
-    let fdct_quantize_fn: fn(&[i16; 64], &QuantDivisors, &mut [i16; 64]) =
+    let fdct_quantize_fn: fn(&mut [i16; 64], &QuantDivisors, &mut [i16; 64]) =
         if dct_method == DctMethod::IsLow {
             enc_simd.fdct_quantize
         } else {
@@ -1903,7 +1903,11 @@ fn compress_progressive_with_scans(
                 let by = mcu_y;
                 let mut block = [0i16; 64];
                 extract_block(&y_plane, width, height, x0, y0, &mut block);
-                scalar_fq(&block, &luma_divisors, &mut coeff_bufs[0][by * mcus_x + bx]);
+                scalar_fq(
+                    &mut block,
+                    &luma_divisors,
+                    &mut coeff_bufs[0][by * mcus_x + bx],
+                );
             } else {
                 // Y blocks
                 for bv in 0..v_samp {
@@ -1921,7 +1925,7 @@ fn compress_progressive_with_scans(
                         );
                         let blocks_x = comp_layouts[0].blocks_x;
                         scalar_fq(
-                            &block,
+                            &mut block,
                             &luma_divisors,
                             &mut coeff_bufs[0][by * blocks_x + bx],
                         );
@@ -1942,7 +1946,7 @@ fn compress_progressive_with_scans(
                         );
                     }
                     scalar_fq(
-                        &block,
+                        &mut block,
                         &chroma_divisors,
                         &mut coeff_bufs[1][by * mcus_x + bx],
                     );
@@ -1962,7 +1966,7 @@ fn compress_progressive_with_scans(
                         );
                     }
                     scalar_fq(
-                        &block,
+                        &mut block,
                         &chroma_divisors,
                         &mut coeff_bufs[2][by * mcus_x + bx],
                     );
@@ -2173,7 +2177,7 @@ pub fn compress_arithmetic(
                 let mut block = [0i16; 64];
                 extract_block(&y_plane, width, height, x0, y0, &mut block);
                 let mut q = [0i16; 64];
-                scalar_fq(&block, &luma_divisors, &mut q);
+                scalar_fq(&mut block, &luma_divisors, &mut q);
                 all_blocks.push(q);
             } else {
                 match subsampling {
@@ -2186,7 +2190,7 @@ pub fn compress_arithmetic(
                             let mut block = [0i16; 64];
                             extract_block(plane, width, height, x0, y0, &mut block);
                             let mut q = [0i16; 64];
-                            scalar_fq(&block, divisors, &mut q);
+                            scalar_fq(&mut block, divisors, &mut q);
                             all_blocks.push(q);
                         }
                     }
@@ -2195,14 +2199,14 @@ pub fn compress_arithmetic(
                             let mut block = [0i16; 64];
                             extract_block(&y_plane, width, height, x0 + dx, y0, &mut block);
                             let mut q = [0i16; 64];
-                            scalar_fq(&block, &luma_divisors, &mut q);
+                            scalar_fq(&mut block, &luma_divisors, &mut q);
                             all_blocks.push(q);
                         }
                         for plane in [&cb_plane, &cr_plane] {
                             let mut block = [0i16; 64];
                             downsample_chroma_block(plane, width, height, x0, y0, 2, 1, &mut block);
                             let mut q = [0i16; 64];
-                            scalar_fq(&block, &chroma_divisors, &mut q);
+                            scalar_fq(&mut block, &chroma_divisors, &mut q);
                             all_blocks.push(q);
                         }
                     }
@@ -2211,14 +2215,14 @@ pub fn compress_arithmetic(
                             let mut block = [0i16; 64];
                             extract_block(&y_plane, width, height, x0 + dx, y0 + dy, &mut block);
                             let mut q = [0i16; 64];
-                            scalar_fq(&block, &luma_divisors, &mut q);
+                            scalar_fq(&mut block, &luma_divisors, &mut q);
                             all_blocks.push(q);
                         }
                         for plane in [&cb_plane, &cr_plane] {
                             let mut block = [0i16; 64];
                             downsample_chroma_block(plane, width, height, x0, y0, 2, 2, &mut block);
                             let mut q = [0i16; 64];
-                            scalar_fq(&block, &chroma_divisors, &mut q);
+                            scalar_fq(&mut block, &chroma_divisors, &mut q);
                             all_blocks.push(q);
                         }
                     }
@@ -2228,14 +2232,14 @@ pub fn compress_arithmetic(
                             let mut block = [0i16; 64];
                             extract_block(&y_plane, width, height, x0, y0 + dy, &mut block);
                             let mut q = [0i16; 64];
-                            scalar_fq(&block, &luma_divisors, &mut q);
+                            scalar_fq(&mut block, &luma_divisors, &mut q);
                             all_blocks.push(q);
                         }
                         for plane in [&cb_plane, &cr_plane] {
                             let mut block = [0i16; 64];
                             downsample_chroma_block(plane, width, height, x0, y0, 1, 2, &mut block);
                             let mut q = [0i16; 64];
-                            scalar_fq(&block, &chroma_divisors, &mut q);
+                            scalar_fq(&mut block, &chroma_divisors, &mut q);
                             all_blocks.push(q);
                         }
                     }
@@ -2245,14 +2249,14 @@ pub fn compress_arithmetic(
                             let mut block = [0i16; 64];
                             extract_block(&y_plane, width, height, x0 + dx, y0, &mut block);
                             let mut q = [0i16; 64];
-                            scalar_fq(&block, &luma_divisors, &mut q);
+                            scalar_fq(&mut block, &luma_divisors, &mut q);
                             all_blocks.push(q);
                         }
                         for plane in [&cb_plane, &cr_plane] {
                             let mut block = [0i16; 64];
                             downsample_chroma_block(plane, width, height, x0, y0, 4, 1, &mut block);
                             let mut q = [0i16; 64];
-                            scalar_fq(&block, &chroma_divisors, &mut q);
+                            scalar_fq(&mut block, &chroma_divisors, &mut q);
                             all_blocks.push(q);
                         }
                     }
@@ -2262,14 +2266,14 @@ pub fn compress_arithmetic(
                             let mut block = [0i16; 64];
                             extract_block(&y_plane, width, height, x0, y0 + dy, &mut block);
                             let mut q = [0i16; 64];
-                            scalar_fq(&block, &luma_divisors, &mut q);
+                            scalar_fq(&mut block, &luma_divisors, &mut q);
                             all_blocks.push(q);
                         }
                         for plane in [&cb_plane, &cr_plane] {
                             let mut block = [0i16; 64];
                             downsample_chroma_block(plane, width, height, x0, y0, 1, 4, &mut block);
                             let mut q = [0i16; 64];
-                            scalar_fq(&block, &chroma_divisors, &mut q);
+                            scalar_fq(&mut block, &chroma_divisors, &mut q);
                             all_blocks.push(q);
                         }
                     }
@@ -2482,7 +2486,11 @@ pub fn compress_arithmetic_progressive(
                 let by: usize = mcu_y;
                 let mut block = [0i16; 64];
                 extract_block(&y_plane, width, height, x0, y0, &mut block);
-                scalar_fq(&block, &luma_divisors, &mut coeff_bufs[0][by * mcus_x + bx]);
+                scalar_fq(
+                    &mut block,
+                    &luma_divisors,
+                    &mut coeff_bufs[0][by * mcus_x + bx],
+                );
             } else {
                 // Y blocks
                 for bv in 0..v_samp {
@@ -2500,7 +2508,7 @@ pub fn compress_arithmetic_progressive(
                         );
                         let blocks_x: usize = comp_layouts[0].blocks_x;
                         scalar_fq(
-                            &block,
+                            &mut block,
                             &luma_divisors,
                             &mut coeff_bufs[0][by * blocks_x + bx],
                         );
@@ -2521,7 +2529,7 @@ pub fn compress_arithmetic_progressive(
                         );
                     }
                     scalar_fq(
-                        &block,
+                        &mut block,
                         &chroma_divisors,
                         &mut coeff_bufs[1][by * mcus_x + bx],
                     );
@@ -2541,7 +2549,7 @@ pub fn compress_arithmetic_progressive(
                         );
                     }
                     scalar_fq(
-                        &block,
+                        &mut block,
                         &chroma_divisors,
                         &mut coeff_bufs[2][by * mcus_x + bx],
                     );
@@ -3084,9 +3092,19 @@ fn scale_quant_for_fdct(quant_table: &[u16; 64]) -> QuantDivisors {
         // Ceiling reciprocal: ensures (x * recip) >> 16 == x / d for all valid x
         reciprocals[i] = (1u32 << 16).div_ceil(d) as u16;
     }
+    // Pre-arrange in zigzag order for fused quantize+reorder
+    let zigzag = &crate::encode::tables::ZIGZAG_ORDER;
+    let mut divisors_zigzag = [0u16; 64];
+    let mut reciprocals_zigzag = [0u16; 64];
+    for zz in 0..64 {
+        divisors_zigzag[zz] = divisors[zigzag[zz]];
+        reciprocals_zigzag[zz] = reciprocals[zigzag[zz]];
+    }
     QuantDivisors {
         divisors,
         reciprocals,
+        divisors_zigzag,
+        reciprocals_zigzag,
     }
 }
 
@@ -3228,12 +3246,22 @@ fn extract_block(
     block_y: usize,
     block: &mut [i16; 64],
 ) {
-    // NEON fast path for interior blocks (no bounds checking needed)
-    #[cfg(target_arch = "aarch64")]
-    {
-        if block_x + 8 <= plane_width && block_y + 8 <= plane_height {
+    // SIMD fast path for interior blocks (no bounds checking needed)
+    if block_x + 8 <= plane_width && block_y + 8 <= plane_height {
+        #[cfg(target_arch = "aarch64")]
+        {
             extract_block_neon(plane, plane_width, block_x, block_y, block);
             return;
+        }
+        #[cfg(target_arch = "x86_64")]
+        {
+            if is_x86_feature_detected!("sse2") {
+                // SAFETY: SSE2 availability checked above, interior block bounds verified.
+                unsafe {
+                    extract_block_sse2(plane, plane_width, block_x, block_y, block);
+                }
+                return;
+            }
         }
     }
 
@@ -3272,6 +3300,39 @@ fn extract_block_neon(
     }
 }
 
+/// SSE2-accelerated block extraction with level-shift for interior blocks.
+///
+/// Loads 8 bytes per row, widens to i16, subtracts 128. No bounds checking.
+///
+/// # Safety
+/// Requires SSE2. Caller must ensure `block_x + 8 <= plane_width` and
+/// `block_y + 8 <= plane_height` (interior block bounds).
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "sse2")]
+unsafe fn extract_block_sse2(
+    plane: &[u8],
+    plane_width: usize,
+    block_x: usize,
+    block_y: usize,
+    block: &mut [i16; 64],
+) {
+    use core::arch::x86_64::*;
+
+    let level_shift: __m128i = _mm_set1_epi16(128);
+    let zeros: __m128i = _mm_setzero_si128();
+
+    for row in 0..8 {
+        let src_ptr: *const u8 = plane.as_ptr().add((block_y + row) * plane_width + block_x);
+        // Load 8 bytes (only low 64 bits used)
+        let pixels: __m128i = _mm_loadl_epi64(src_ptr as *const __m128i);
+        // Zero-extend u8 → i16
+        let wide: __m128i = _mm_unpacklo_epi8(pixels, zeros);
+        // Level-shift: subtract 128
+        let shifted: __m128i = _mm_sub_epi16(wide, level_shift);
+        _mm_storeu_si128(block.as_mut_ptr().add(row * 8) as *mut __m128i, shifted);
+    }
+}
+
 /// Downsample a chroma plane region using a box filter.
 ///
 /// For 4:2:2: averages 2x1 pixel groups horizontally.
@@ -3287,19 +3348,51 @@ fn downsample_chroma_block(
     v_factor: usize,
     block: &mut [i16; 64],
 ) {
-    // NEON fast path for interior blocks (no bounds checking needed)
-    #[cfg(target_arch = "aarch64")]
+    // SIMD fast path for interior blocks (no bounds checking needed)
     {
         let src_w: usize = 8 * h_factor;
         let src_h: usize = 8 * v_factor;
         if block_x + src_w <= plane_width && block_y + src_h <= plane_height {
-            if h_factor == 2 && v_factor == 2 {
-                downsample_chroma_block_h2v2_neon(plane, plane_width, block_x, block_y, block);
-                return;
+            #[cfg(target_arch = "aarch64")]
+            {
+                if h_factor == 2 && v_factor == 2 {
+                    downsample_chroma_block_h2v2_neon(plane, plane_width, block_x, block_y, block);
+                    return;
+                }
+                if h_factor == 2 && v_factor == 1 {
+                    downsample_chroma_block_h2v1_neon(plane, plane_width, block_x, block_y, block);
+                    return;
+                }
             }
-            if h_factor == 2 && v_factor == 1 {
-                downsample_chroma_block_h2v1_neon(plane, plane_width, block_x, block_y, block);
-                return;
+            #[cfg(target_arch = "x86_64")]
+            {
+                if is_x86_feature_detected!("ssse3") {
+                    if h_factor == 2 && v_factor == 2 {
+                        // SAFETY: SSSE3 availability checked above, interior block bounds verified.
+                        unsafe {
+                            downsample_chroma_block_h2v2_ssse3(
+                                plane,
+                                plane_width,
+                                block_x,
+                                block_y,
+                                block,
+                            );
+                        }
+                        return;
+                    }
+                    if h_factor == 2 && v_factor == 1 {
+                        unsafe {
+                            downsample_chroma_block_h2v1_ssse3(
+                                plane,
+                                plane_width,
+                                block_x,
+                                block_y,
+                                block,
+                            );
+                        }
+                        return;
+                    }
+                }
             }
         }
     }
@@ -3393,6 +3486,84 @@ fn downsample_chroma_block_h2v1_neon(
     }
 }
 
+/// SSSE3-accelerated H2V2 downsample + level-shift for interior chroma blocks.
+///
+/// Processes 16x16 source pixels → 8x8 output using maddubs pairwise add.
+/// Each 2x2 block is averaged and level-shifted (-128).
+///
+/// # Safety
+/// Requires SSSE3. Caller must ensure `block_x + 16 <= plane_width` and
+/// `block_y + 16 <= plane_height` (interior block bounds).
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "ssse3")]
+unsafe fn downsample_chroma_block_h2v2_ssse3(
+    plane: &[u8],
+    plane_width: usize,
+    block_x: usize,
+    block_y: usize,
+    block: &mut [i16; 64],
+) {
+    use core::arch::x86_64::*;
+
+    // maddubs(data, ones) computes pairwise sum of adjacent u8 pairs → i16
+    let ones: __m128i = _mm_set1_epi8(1);
+    let bias: __m128i = _mm_set1_epi16(2); // rounding for divide-by-4
+    let level_shift: __m128i = _mm_set1_epi16(128);
+
+    for row in 0..8 {
+        let sy: usize = block_y + row * 2;
+        let r0_ptr: *const u8 = plane.as_ptr().add(sy * plane_width + block_x);
+        let r1_ptr: *const u8 = plane.as_ptr().add((sy + 1) * plane_width + block_x);
+
+        let r0: __m128i = _mm_loadu_si128(r0_ptr as *const __m128i);
+        let r1: __m128i = _mm_loadu_si128(r1_ptr as *const __m128i);
+
+        // Pairwise add: sum adjacent u8 pairs from each row → i16
+        let sum0: __m128i = _mm_maddubs_epi16(r0, ones);
+        let sum1: __m128i = _mm_maddubs_epi16(r1, ones);
+
+        // Sum both rows + bias, divide by 4
+        let total: __m128i = _mm_add_epi16(_mm_add_epi16(sum0, sum1), bias);
+        let avg: __m128i = _mm_srai_epi16::<2>(total);
+
+        // Level-shift (-128) and store
+        let shifted: __m128i = _mm_sub_epi16(avg, level_shift);
+        _mm_storeu_si128(block.as_mut_ptr().add(row * 8) as *mut __m128i, shifted);
+    }
+}
+
+/// SSSE3-accelerated H2V1 downsample + level-shift for interior chroma blocks.
+///
+/// # Safety
+/// Requires SSSE3. Caller must ensure `block_x + 16 <= plane_width` and
+/// `block_y + 8 <= plane_height` (interior block bounds).
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "ssse3")]
+unsafe fn downsample_chroma_block_h2v1_ssse3(
+    plane: &[u8],
+    plane_width: usize,
+    block_x: usize,
+    block_y: usize,
+    block: &mut [i16; 64],
+) {
+    use core::arch::x86_64::*;
+
+    let ones: __m128i = _mm_set1_epi8(1);
+    let bias: __m128i = _mm_set1_epi16(1); // rounding for divide-by-2
+    let level_shift: __m128i = _mm_set1_epi16(128);
+
+    for row in 0..8 {
+        let sy: usize = block_y + row;
+        let r_ptr: *const u8 = plane.as_ptr().add(sy * plane_width + block_x);
+
+        let r: __m128i = _mm_loadu_si128(r_ptr as *const __m128i);
+        let sum: __m128i = _mm_add_epi16(_mm_maddubs_epi16(r, ones), bias);
+        let avg: __m128i = _mm_srai_epi16::<1>(sum);
+        let shifted: __m128i = _mm_sub_epi16(avg, level_shift);
+        _mm_storeu_si128(block.as_mut_ptr().add(row * 8) as *mut __m128i, shifted);
+    }
+}
+
 /// Encode a single 8x8 block through the DCT -> quantize -> Huffman pipeline.
 #[allow(clippy::too_many_arguments)]
 fn encode_single_block(
@@ -3406,15 +3577,15 @@ fn encode_single_block(
     ac_table: &HuffTable,
     writer: &mut BitWriter,
     prev_dc: &mut i16,
-    fdct_quantize_fn: fn(&[i16; 64], &QuantDivisors, &mut [i16; 64]),
+    fdct_quantize_fn: fn(&mut [i16; 64], &QuantDivisors, &mut [i16; 64]),
 ) {
     let mut quantized = [0i16; 64];
 
     // Fused path for interior blocks: load u8 → FDCT → quantize → zigzag
     // without intermediate [i16; 64] buffer between extract and FDCT.
-    #[cfg(target_arch = "aarch64")]
-    {
-        if block_x + 8 <= plane_width && block_y + 8 <= plane_height {
+    if block_x + 8 <= plane_width && block_y + 8 <= plane_height {
+        #[cfg(target_arch = "aarch64")]
+        {
             unsafe {
                 crate::simd::aarch64::neon_extract_fdct_quantize(
                     plane.as_ptr().add(block_y * plane_width + block_x),
@@ -3425,6 +3596,21 @@ fn encode_single_block(
             }
             HuffmanEncoder::encode_block(writer, &quantized, prev_dc, dc_table, ac_table);
             return;
+        }
+        #[cfg(target_arch = "x86_64")]
+        {
+            if is_x86_feature_detected!("avx2") {
+                unsafe {
+                    crate::simd::x86_64::avx2_extract_fdct_quantize(
+                        plane.as_ptr().add(block_y * plane_width + block_x),
+                        plane_width,
+                        quant_table,
+                        &mut quantized,
+                    );
+                }
+                HuffmanEncoder::encode_block(writer, &quantized, prev_dc, dc_table, ac_table);
+                return;
+            }
         }
     }
 
@@ -3438,7 +3624,7 @@ fn encode_single_block(
         block_y,
         &mut block,
     );
-    fdct_quantize_fn(&block, quant_table, &mut quantized);
+    fdct_quantize_fn(&mut block, quant_table, &mut quantized);
 
     HuffmanEncoder::encode_block(writer, &quantized, prev_dc, dc_table, ac_table);
 }
@@ -3464,7 +3650,7 @@ fn encode_color_mcu(
     prev_dc_y: &mut i16,
     prev_dc_cb: &mut i16,
     prev_dc_cr: &mut i16,
-    fdct_quantize_fn: fn(&[i16; 64], &QuantDivisors, &mut [i16; 64]),
+    fdct_quantize_fn: fn(&mut [i16; 64], &QuantDivisors, &mut [i16; 64]),
 ) {
     match subsampling {
         Subsampling::S444 | Subsampling::Unknown => {
@@ -3832,7 +4018,7 @@ fn encode_downsampled_chroma_block(
     ac_table: &HuffTable,
     writer: &mut BitWriter,
     prev_dc: &mut i16,
-    fdct_quantize_fn: fn(&[i16; 64], &QuantDivisors, &mut [i16; 64]),
+    fdct_quantize_fn: fn(&mut [i16; 64], &QuantDivisors, &mut [i16; 64]),
 ) {
     // Fused NEON path: downsample + FDCT + quantize + zigzag in one pass,
     // eliminating the intermediate [i16; 64] downsampled block.
@@ -3871,6 +4057,65 @@ fn encode_downsampled_chroma_block(
         }
     }
 
+    // x86_64 fused path: SSSE3 downsample → AVX2 FDCT+quantize+zigzag
+    #[cfg(target_arch = "x86_64")]
+    {
+        let src_w: usize = 8 * h_factor;
+        let src_h: usize = 8 * v_factor;
+        if is_x86_feature_detected!("avx2")
+            && block_x + src_w <= plane_width
+            && block_y + src_h <= plane_height
+        {
+            // Truly fused downsample+FDCT+quantize for H2V2 (most common)
+            if h_factor == 2 && v_factor == 2 {
+                let mut quantized = [0i16; 64];
+                unsafe {
+                    crate::simd::x86_64::avx2_downsample_h2v2_fdct_quantize(
+                        plane.as_ptr().add(block_y * plane_width + block_x),
+                        plane_width,
+                        quant_table,
+                        &mut quantized,
+                    );
+                }
+                HuffmanEncoder::encode_block(writer, &quantized, prev_dc, dc_table, ac_table);
+                return;
+            }
+            // Separate downsample + FDCT for other modes
+            let mut block = [0i16; 64];
+            let downsample_ok: bool = if h_factor == 2 && v_factor == 1 {
+                unsafe {
+                    downsample_chroma_block_h2v1_ssse3(
+                        plane,
+                        plane_width,
+                        block_x,
+                        block_y,
+                        &mut block,
+                    );
+                }
+                true
+            } else if h_factor == 2 && v_factor == 1 {
+                unsafe {
+                    downsample_chroma_block_h2v1_ssse3(
+                        plane,
+                        plane_width,
+                        block_x,
+                        block_y,
+                        &mut block,
+                    );
+                }
+                true
+            } else {
+                false
+            };
+            if downsample_ok {
+                let mut quantized = [0i16; 64];
+                fdct_quantize_fn(&mut block, quant_table, &mut quantized);
+                HuffmanEncoder::encode_block(writer, &quantized, prev_dc, dc_table, ac_table);
+                return;
+            }
+        }
+    }
+
     // Scalar fallback: separate downsample + FDCT+quantize
     let mut block = [0i16; 64];
     downsample_chroma_block(
@@ -3885,7 +4130,7 @@ fn encode_downsampled_chroma_block(
     );
 
     let mut quantized = [0i16; 64];
-    fdct_quantize_fn(&block, quant_table, &mut quantized);
+    fdct_quantize_fn(&mut block, quant_table, &mut quantized);
 
     HuffmanEncoder::encode_block(writer, &quantized, prev_dc, dc_table, ac_table);
 }
@@ -4544,7 +4789,7 @@ fn gather_block(
     block_x: usize,
     block_y: usize,
     quant_table: &QuantDivisors,
-    fdct_quantize_fn: fn(&[i16; 64], &QuantDivisors, &mut [i16; 64]),
+    fdct_quantize_fn: fn(&mut [i16; 64], &QuantDivisors, &mut [i16; 64]),
 ) -> [i16; 64] {
     let mut block = [0i16; 64];
     extract_block(
@@ -4557,7 +4802,7 @@ fn gather_block(
     );
 
     let mut quantized = [0i16; 64];
-    fdct_quantize_fn(&block, quant_table, &mut quantized);
+    fdct_quantize_fn(&mut block, quant_table, &mut quantized);
     quantized
 }
 
@@ -4572,7 +4817,7 @@ fn gather_downsampled_block(
     h_factor: usize,
     v_factor: usize,
     quant_table: &QuantDivisors,
-    fdct_quantize_fn: fn(&[i16; 64], &QuantDivisors, &mut [i16; 64]),
+    fdct_quantize_fn: fn(&mut [i16; 64], &QuantDivisors, &mut [i16; 64]),
 ) -> [i16; 64] {
     let mut block = [0i16; 64];
     downsample_chroma_block(
@@ -4587,7 +4832,7 @@ fn gather_downsampled_block(
     );
 
     let mut quantized = [0i16; 64];
-    fdct_quantize_fn(&block, quant_table, &mut quantized);
+    fdct_quantize_fn(&mut block, quant_table, &mut quantized);
     quantized
 }
 

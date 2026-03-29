@@ -71,7 +71,7 @@ fn scalar_rgb_to_ycbcr_row_enc(
 ///
 /// Calls `fdct_islow` (output i32) then `quantize_block` (zigzag reorder included).
 pub(crate) fn scalar_fdct_quantize(
-    input: &[i16; 64],
+    input: &mut [i16; 64],
     quant: &QuantDivisors,
     output: &mut [i16; 64],
 ) {

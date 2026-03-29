@@ -1,22 +1,29 @@
-/// Profiling target for encoding.
-/// Usage: samply record cargo run --release --example profile_encode
 fn main() {
-    use libjpeg_turbo_rs::{PixelFormat, Subsampling};
-
-    let jpeg_data = std::fs::read("tests/fixtures/photo_1920x1080_420.jpg").unwrap();
-    let image = libjpeg_turbo_rs::decompress(&jpeg_data).unwrap();
-
-    // Run enough iterations for samply to get good samples
-    for _ in 0..500 {
-        let result = libjpeg_turbo_rs::compress(
-            &image.data,
-            image.width,
-            image.height,
-            PixelFormat::Rgb,
-            75,
-            Subsampling::S420,
+    let jpeg = std::fs::read("tests/fixtures/photo_1920x1080_420.jpg").unwrap();
+    let img = libjpeg_turbo_rs::decompress(&jpeg).unwrap();
+    // Warmup
+    for _ in 0..5 {
+        let _ = libjpeg_turbo_rs::compress(
+            &img.data,
+            img.width,
+            img.height,
+            libjpeg_turbo_rs::PixelFormat::Rgb,
+            90,
+            libjpeg_turbo_rs::Subsampling::S420,
         )
         .unwrap();
-        std::hint::black_box(&result);
+    }
+    // Profile
+    for _ in 0..100 {
+        let out = libjpeg_turbo_rs::compress(
+            &img.data,
+            img.width,
+            img.height,
+            libjpeg_turbo_rs::PixelFormat::Rgb,
+            90,
+            libjpeg_turbo_rs::Subsampling::S420,
+        )
+        .unwrap();
+        std::hint::black_box(&out);
     }
 }
