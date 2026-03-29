@@ -492,23 +492,20 @@ unsafe fn encode_ac_x86_64(
     let mut bitmap: u64 = 0;
     let zeros: __m128i = _mm_setzero_si128();
 
-    // Build non-zero bitmap using SSE2: 8 chunks of 8 i16 words
+    // Build non-zero bitmap using SSE2: 8 chunks of 8 i16 words.
+    // LSB-first layout: bit 0 = position 0 (DC), bit 63 = position 63.
+    // Enables efficient traversal with trailing_zeros + clear-lowest-bit.
     for chunk in 0..8u32 {
         let offset: usize = (chunk * 8) as usize;
         let row: __m128i = _mm_loadu_si128(coeffs_zigzag.as_ptr().add(offset) as *const __m128i);
-        // cmpeq: 0xFFFF for zero, 0x0000 for nonzero
         let eq: __m128i = _mm_cmpeq_epi16(row, zeros);
-        // Pack i16 → i8 (saturating): 0xFF for zero, 0x00 for nonzero (in low 8 bytes)
         let packed: __m128i = _mm_packs_epi16(eq, zeros);
-        // Extract high bit of each byte → 8-bit mask (1 = zero coeff, LSB-first)
         let mask: u8 = _mm_movemask_epi8(packed) as u8;
-        // Invert (1 = nonzero) and reverse bits (LSB→MSB to match bitmap layout:
-        // bit 63 = position 0, bit 62 = position 1, etc.)
-        bitmap |= ((!mask).reverse_bits() as u64) << (56 - chunk * 8);
+        bitmap |= (!mask as u64) << (chunk * 8);
     }
 
-    // Shift left 1 to remove DC bit (we only care about AC positions 1..63)
-    bitmap <<= 1;
+    // Clear DC bit (position 0) — we only care about AC positions 1..63
+    bitmap &= !1u64;
 
     if bitmap == 0 {
         local_put_bits(
@@ -522,18 +519,18 @@ unsafe fn encode_ac_x86_64(
     }
 
     if bitmap.count_ones() <= 8 {
-        encode_ac_sparse_local(pb, fb, buf, coeffs_zigzag, bitmap, ac_table);
+        encode_ac_sparse_lsb(pb, fb, buf, coeffs_zigzag, bitmap, ac_table);
     } else {
-        encode_ac_dense_local(pb, fb, buf, coeffs_zigzag, bitmap, ac_table);
+        encode_ac_dense_lsb(pb, fb, buf, coeffs_zigzag, bitmap, ac_table);
     }
 }
 
-/// Dense AC path: pre-compute nbits and magnitude for all coefficients.
+/// Dense AC path with LSB-first bitmap: pre-compute nbits and magnitude.
 ///
 /// # Safety
 /// `pb`, `fb`, `buf` must be valid hoisted state.
 #[cfg(target_arch = "x86_64")]
-unsafe fn encode_ac_dense_local(
+unsafe fn encode_ac_dense_lsb(
     pb: &mut u64,
     fb: &mut i32,
     buf: &mut *mut u8,
@@ -545,29 +542,29 @@ unsafe fn encode_ac_dense_local(
     let mut block_diff = [0u16; 64];
 
     // Pre-compute nbits and masked magnitude for all 64 coefficients.
-    // Magnitude is pre-masked to nbits width so the emit loop can OR directly.
     for i in 0..64 {
         let val: i16 = *coeffs_zigzag.get_unchecked(i);
         let abs_val: u16 = val.unsigned_abs();
         let nbits: u8 = (16 - abs_val.leading_zeros()) as u8;
         let sign: i16 = val >> 15;
         let raw_diff: u16 = val.wrapping_add(sign) as u16;
-        // Mask to nbits width (e.g., for -5: nbits=3, raw_diff=0xFFFA → 0xFFFA & 7 = 2)
         let masked_diff: u16 = raw_diff & ((1u16 << nbits).wrapping_sub(1));
         *block_nbits.get_unchecked_mut(i) = nbits;
         *block_diff.get_unchecked_mut(i) = masked_diff;
     }
 
-    let mut pos: u32 = 1;
+    let mut prev_pos: u32 = 0;
     while bitmap != 0 {
-        let lz: u32 = bitmap.leading_zeros();
-        pos += lz;
+        let tz: u32 = bitmap.trailing_zeros();
+        let pos: u32 = tz;
+        let run: u32 = pos - prev_pos - 1;
+        prev_pos = pos;
 
         let nbits: u8 = *block_nbits.get_unchecked(pos as usize);
         let diff: u32 = *block_diff.get_unchecked(pos as usize) as u32;
 
-        let mut run: u32 = lz;
-        while run >= 16 {
+        let mut rem_run: u32 = run;
+        while rem_run >= 16 {
             local_put_bits(
                 pb,
                 fb,
@@ -575,21 +572,20 @@ unsafe fn encode_ac_dense_local(
                 ac_table.ehufco[0xF0] as u32,
                 ac_table.ehufsi[0xF0],
             );
-            run -= 16;
+            rem_run -= 16;
         }
 
-        let symbol: usize = ((run as usize) << 4) | (nbits as usize);
+        let symbol: usize = ((rem_run as usize) << 4) | (nbits as usize);
         let huff_code: u32 = ac_table.ehufco[symbol] as u32;
         let huff_size: u8 = ac_table.ehufsi[symbol];
         let combined: u32 = (huff_code << nbits) | diff;
         local_put_bits(pb, fb, buf, combined, huff_size + nbits);
 
-        pos += 1;
-        bitmap <<= lz;
-        bitmap <<= 1;
+        // Clear lowest set bit (Kernighan's trick: bitmap &= bitmap - 1)
+        bitmap &= bitmap - 1;
     }
 
-    if pos <= 63 {
+    if prev_pos < 63 {
         local_put_bits(
             pb,
             fb,
@@ -600,13 +596,70 @@ unsafe fn encode_ac_dense_local(
     }
 }
 
-/// Sparse AC path: compute nbits and diff only for coefficients we emit.
-///
-/// Used when <=8 AC coefficients are non-zero (typical for quantized blocks).
+/// Sparse AC path with LSB-first bitmap: compute magnitude on demand.
 ///
 /// # Safety
 /// `pb`, `fb`, `buf` must be valid hoisted state.
-#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+#[cfg(target_arch = "x86_64")]
+#[inline(always)]
+unsafe fn encode_ac_sparse_lsb(
+    pb: &mut u64,
+    fb: &mut i32,
+    buf: &mut *mut u8,
+    coeffs_zigzag: &[i16; 64],
+    mut bitmap: u64,
+    ac_table: &HuffTable,
+) {
+    let mut prev_pos: u32 = 0;
+    while bitmap != 0 {
+        let tz: u32 = bitmap.trailing_zeros();
+        let pos: u32 = tz;
+        let run: u32 = pos - prev_pos - 1;
+        prev_pos = pos;
+
+        let ac: i16 = *coeffs_zigzag.get_unchecked(pos as usize);
+        let (magnitude_bits, nbits) = encode_ac_value(ac);
+        let mag_masked: u32 = magnitude_bits as u32 & ((1u32 << nbits) - 1);
+
+        let mut rem_run: u32 = run;
+        while rem_run >= 16 {
+            local_put_bits(
+                pb,
+                fb,
+                buf,
+                ac_table.ehufco[0xF0] as u32,
+                ac_table.ehufsi[0xF0],
+            );
+            rem_run -= 16;
+        }
+
+        let symbol: usize = ((rem_run as usize) << 4) | (nbits as usize);
+        let huff_code: u32 = ac_table.ehufco[symbol] as u32;
+        let huff_size: u8 = ac_table.ehufsi[symbol];
+        let combined: u32 = (huff_code << nbits) | mag_masked;
+        local_put_bits(pb, fb, buf, combined, huff_size + nbits);
+
+        bitmap &= bitmap - 1;
+    }
+
+    if prev_pos < 63 {
+        local_put_bits(
+            pb,
+            fb,
+            buf,
+            ac_table.ehufco[0x00] as u32,
+            ac_table.ehufsi[0x00],
+        );
+    }
+}
+
+/// Sparse AC path (MSB-first bitmap): compute nbits/diff on demand.
+///
+/// Used by aarch64 NEON path when <=8 AC coefficients are non-zero.
+///
+/// # Safety
+/// `pb`, `fb`, `buf` must be valid hoisted state.
+#[cfg(target_arch = "aarch64")]
 #[inline(always)]
 unsafe fn encode_ac_sparse_local(
     pb: &mut u64,
