@@ -79,7 +79,7 @@
 
 ### Quality & Quantization
 - [x] `TJPARAM_QUALITY` — Quality factor 1-100 (`jpeg_set_quality`)
-- [ ] `q_scale_factor[NUM_QUANT_TBLS]` — Per-component quality
+- [x] `q_scale_factor[NUM_QUANT_TBLS]` — Per-component quality (`Encoder::quality_factor()`)
 - [x] `jpeg_add_quant_table()` — Custom quantization table (`Encoder::quant_table()`)
 - [x] `jpeg_set_linear_quality()` — Linear quality scaling (`Encoder::linear_quality()`)
 - [ ] `jpeg_default_qtables()` — Reset to default tables
@@ -355,7 +355,7 @@
 - [x] Row-streaming H2V2 upsample+color pipeline (fused, no full-plane alloc)
 - [ ] AVX2 color conversion for RGBA/BGR/BGRA formats
 - [ ] SSE2 IDCT DC-only fast path + strided output
-- [ ] x86_64 encoder SIMD (FDCT, color conversion, quantization)
+- [x] x86_64 encoder SIMD (AVX2 FDCT, RGB→YCbCr, quantization + zigzag)
 
 ### General
 - [x] Scalar fallback for all operations
@@ -450,7 +450,7 @@
 | Transform misc | 6 | 6 | 100% |
 | YUV/Planar API | 12 | 12 | 100% |
 | SIMD (aarch64) | 10 | 12 | 83% |
-| SIMD (x86_64) | 6 | 6 | 100% |
+| SIMD (x86_64) | 11 | 13 | 85% |
 | Memory & I/O | 11 | ~20 | ~55% |
 | Error handling | 5 | ~14 | ~36% |
 | Progress | 4 | 4 | 100% |
