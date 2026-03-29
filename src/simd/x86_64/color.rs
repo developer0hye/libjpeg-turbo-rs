@@ -12,11 +12,11 @@
 #[cfg(target_arch = "x86_64")]
 use core::arch::x86_64::*;
 
-// Same decomposed constants as AVX2 path (see avx2_color.rs for derivation).
-const CR_R_SUB1: i16 = 26345; // (1.40200 - 1.0) * 65536
-const CB_G: i16 = 22554; // 0.34414 * 65536
-const CR_G_SUB1: i16 = 46802_u16 as i16; // (0.71414 - 1.0) * 65536 = -18734 (wraps)
-const CB_B_SUB2: i16 = -14942; // (1.77200 - 2.0) * 65536
+// Constants matching libjpeg-turbo jdcolext-sse2.asm.
+const PW_F0402: i16 = 26345; // FIX(0.40200)
+const PW_MF0228: i16 = -14942; // -FIX(0.22800)
+const PW_MF0344: i16 = -22554; // -FIX(0.34414) for G vpmaddwd
+const PW_F0285: i16 = 18734; // FIX(0.28586) for G vpmaddwd
 
 /// SSE2-accelerated YCbCr to interleaved RGB row conversion.
 pub fn sse2_ycbcr_to_rgb_row(y: &[u8], cb: &[u8], cr: &[u8], rgb: &mut [u8], width: usize) {
@@ -48,21 +48,33 @@ unsafe fn sse2_ycbcr_to_rgb_row_inner(
         let cb_c = _mm_sub_epi16(cb16, offset_128);
         let cr_c = _mm_sub_epi16(cr16, offset_128);
 
-        // R = Y + Cr + mulhi(Cr, CR_R_SUB1)
-        let r_offset = _mm_add_epi16(cr_c, _mm_mulhi_epi16(cr_c, _mm_set1_epi16(CR_R_SUB1)));
-        let r16 = _mm_add_epi16(y16, r_offset);
+        // R = Y + Cr + round(mulhi(2*Cr, F_0_402))
+        let one = _mm_set1_epi16(1);
+        let cr2 = _mm_add_epi16(cr_c, cr_c);
+        let r_mul = _mm_mulhi_epi16(cr2, _mm_set1_epi16(PW_F0402));
+        let r_mul_rounded = _mm_srai_epi16(_mm_add_epi16(r_mul, one), 1);
+        let r16 = _mm_add_epi16(y16, _mm_add_epi16(cr_c, r_mul_rounded));
 
-        // G = Y - mulhi(Cb, CB_G) - Cr - mulhi(Cr, CR_G_SUB1)
-        let g_cb = _mm_mulhi_epi16(cb_c, _mm_set1_epi16(CB_G));
-        let g_cr = _mm_add_epi16(cr_c, _mm_mulhi_epi16(cr_c, _mm_set1_epi16(CR_G_SUB1)));
-        let g16 = _mm_sub_epi16(_mm_sub_epi16(y16, g_cb), g_cr);
+        // G = Y + ((pmaddwd(Cb:Cr, -22554:18734) + 32768) >> 16) - Cr
+        // Uses vpmaddwd for full i32 precision, matching libjpeg-turbo jdcolext-sse2.asm.
+        let cb_cr_lo = _mm_unpacklo_epi16(cb_c, cr_c);
+        let cb_cr_hi = _mm_unpackhi_epi16(cb_c, cr_c);
+        let coeff =
+            _mm_set1_epi32(((PW_F0285 as u16 as u32) << 16 | (PW_MF0344 as u16 as u32)) as i32);
+        let g_lo_32 = _mm_madd_epi16(cb_cr_lo, coeff);
+        let g_hi_32 = _mm_madd_epi16(cb_cr_hi, coeff);
+        let one_half = _mm_set1_epi32(1 << 15);
+        let g_lo_shifted = _mm_srai_epi32(_mm_add_epi32(g_lo_32, one_half), 16);
+        let g_hi_shifted = _mm_srai_epi32(_mm_add_epi32(g_hi_32, one_half), 16);
+        let g_packed = _mm_packs_epi32(g_lo_shifted, g_hi_shifted);
+        let g_minus_y = _mm_sub_epi16(g_packed, cr_c);
+        let g16 = _mm_add_epi16(y16, g_minus_y);
 
-        // B = Y + Cb + Cb + mulhi(Cb, CB_B_SUB2)
-        let b_offset = _mm_add_epi16(
-            _mm_add_epi16(cb_c, cb_c),
-            _mm_mulhi_epi16(cb_c, _mm_set1_epi16(CB_B_SUB2)),
-        );
-        let b16 = _mm_add_epi16(y16, b_offset);
+        // B = Y + 2*Cb + round(mulhi(2*Cb, MF_0_228))
+        let cb2 = _mm_add_epi16(cb_c, cb_c);
+        let b_mul = _mm_mulhi_epi16(cb2, _mm_set1_epi16(PW_MF0228));
+        let b_mul_rounded = _mm_srai_epi16(_mm_add_epi16(b_mul, one), 1);
+        let b16 = _mm_add_epi16(y16, _mm_add_epi16(cb2, b_mul_rounded));
 
         // Pack i16 -> u8 with saturation
         let r_u8 = _mm_packus_epi16(r16, zero); // 8 u8 in low half

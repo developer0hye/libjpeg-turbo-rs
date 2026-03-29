@@ -124,7 +124,7 @@ fn merged_matches_fast_upsample_exactly() {
 
         assert!(
             max_diff == 0,
-            "merged and fast_upsample should produce identical output, max diff = {}",
+            "merged and fast_upsample must produce identical output, max diff = {}",
             max_diff
         );
     }
