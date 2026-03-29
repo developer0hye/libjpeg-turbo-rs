@@ -40,6 +40,9 @@ static const BenchCase CASES[] = {
     {"tests/fixtures/photo_640x480_420_rst.jpg",     "photo_640x480_420_rst", 5000},
     {"tests/fixtures/photo_640x480_444_prog.jpg",    "prog_640x480_444",      5000},
     {"tests/fixtures/photo_640x480_422_prog.jpg",    "prog_640x480_422",      5000},
+    {"tests/fixtures/photo_1920x1080_420_prog.jpg",  "prog_1920x1080_420",     500},
+    {"tests/fixtures/photo_1920x1080_444_prog.jpg",  "prog_1920x1080_444",     500},
+    {"tests/fixtures/photo_3840x2160_420_prog.jpg",  "prog_3840x2160_420",     100},
     {NULL, NULL, 0}
 };
 
