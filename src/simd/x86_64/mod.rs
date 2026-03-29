@@ -50,13 +50,12 @@ pub fn encoder_routines() -> EncoderSimdRoutines {
 }
 
 /// AVX2 fused FDCT + quantize + zigzag.
-fn avx2_fdct_quantize(input: &[i16; 64], quant: &QuantDivisors, output: &mut [i16; 64]) {
-    // Step 1: AVX2 FDCT (in-place on a copy, outputs i16)
-    let mut dct_buf = *input;
-    avx2_fdct::avx2_fdct_islow(&mut dct_buf);
+fn avx2_fdct_quantize(input: &mut [i16; 64], quant: &QuantDivisors, output: &mut [i16; 64]) {
+    // Step 1: AVX2 FDCT (in-place, destroys input)
+    avx2_fdct::avx2_fdct_islow(input);
 
     // Step 2: AVX2 quantize using reciprocal multiply + zigzag reorder
-    unsafe { avx2_quantize_zigzag(&dct_buf, quant, output) }
+    unsafe { avx2_quantize_zigzag(input, quant, output) }
 }
 
 /// Fused extract (u8→i16 + level-shift) + FDCT + quantize + zigzag.
