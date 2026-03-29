@@ -46,3 +46,5 @@ uncommitted	15180 (1080p_420 x86_64)	discard	tried packed Huffman table (ehufco+
 uncommitted	12914 (1080p_420 x86_64)	discard	tried always-sparse (no dense path); regressed 3.8% at 1080p because blocks with >24 non-zeros benefit from vectorized precompute
 uncommitted	13065 (1080p_420 x86_64)	discard	tried 2x unrolled color conversion loop; regressed 3.5% from i-cache pressure (doubled loop body)
 uncommitted	13067 (1080p_420 x86_64)	discard	tried BMI1 target_feature on Huffman emit functions; regressed 4% because target_feature prevents inlining of local_put_bits
+uncommitted	12125 (1080p_420 x86_64)	discard	tried QuantizedBlock with full precompute (bitmap+nbits+magnitudes fused into quantize); 420 neutral but 444 regressed 2.1% because nbits precompute for all 64 coeffs is slower than on-demand sparse for typical sparsity
+uncommitted	13402 (1080p_420 x86_64)	discard	tried QuantizedBlock with bitmap-only precompute (no nbits); regressed 10.7% because breaking encode_block into quantize_full + encode_block_precomputed killed LTO's monolithic optimization of the hot path
