@@ -17,8 +17,8 @@ use crate::encode::pipeline as encoder;
 /// resolution in each dimension.
 #[derive(Debug, Clone)]
 pub struct RawImage {
-    /// Component plane data. planes[0] is Y (or the single grayscale component),
-    /// planes[1] is Cb, planes[2] is Cr.
+    /// Component plane data. planes\[0\] is Y (or the single grayscale component),
+    /// planes\[1\] is Cb, planes\[2\] is Cr.
     pub planes: Vec<Vec<u8>>,
     /// Width of each plane in samples (MCU-aligned).
     pub plane_widths: Vec<usize>,

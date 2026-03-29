@@ -3,10 +3,10 @@
 //! Processes 32 input samples per iteration using 256-bit registers.
 //!
 //! Triangle filter:
-//!   output[2*i]   = (3 * input[i] + input[i-1] + 2) >> 2
-//!   output[2*i+1] = (3 * input[i] + input[i+1] + 2) >> 2
+//!   output\[2*i\]   = (3 * input\[i\] + input\[i-1\] + 2) >> 2
+//!   output\[2*i+1\] = (3 * input\[i\] + input\[i+1\] + 2) >> 2
 //!
-//! Edge samples: output[0] = input[0], output[last] = input[last].
+//! Edge samples: output\[0\] = input\[0\], output\[last\] = input\[last\].
 
 #[cfg(target_arch = "x86_64")]
 use core::arch::x86_64::*;

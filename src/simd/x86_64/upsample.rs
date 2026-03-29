@@ -1,9 +1,9 @@
 //! SSE2-accelerated fancy horizontal 2x upsampling.
 //!
 //! Triangle filter:
-//!   output[2i]   = (3 * input[i] + input[i-1] + 2) >> 2
-//!   output[2i+1] = (3 * input[i] + input[i+1] + 2) >> 2
-//! Edge samples: output[0] = input[0], output[last] = input[last].
+//!   output\[2i\]   = (3 * input\[i\] + input\[i-1\] + 2) >> 2
+//!   output\[2i+1\] = (3 * input\[i\] + input\[i+1\] + 2) >> 2
+//! Edge samples: output\[0\] = input\[0\], output\[last\] = input\[last\].
 //!
 //! Processes 8 interior samples at a time using SSE2 u16 arithmetic.
 

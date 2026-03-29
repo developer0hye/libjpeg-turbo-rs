@@ -30,8 +30,8 @@ pub fn simple_h2v2(
 }
 
 /// Fancy horizontal 2x upsampling using triangle filter.
-/// Formula: output[2i] = (3*input[i] + input[i-1] + 2) >> 2
-///          output[2i+1] = (3*input[i] + input[i+1] + 2) >> 2
+/// Formula: output\[2i\] = (3*input\[i\] + input\[i-1\] + 2) >> 2
+///          output\[2i+1\] = (3*input\[i\] + input\[i+1\] + 2) >> 2
 pub fn fancy_h2v1(input: &[u8], in_width: usize, output: &mut [u8], _out_width: usize) {
     if in_width == 0 {
         return;
