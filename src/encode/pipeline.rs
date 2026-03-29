@@ -1818,6 +1818,9 @@ fn compress_progressive_with_scans(
 
     let is_grayscale = pixel_format == PixelFormat::Grayscale;
 
+    let enc_simd = crate::simd::detect_encoder();
+    let fdct_quantize_fn = enc_simd.fdct_quantize;
+
     let luma_quant = tables::quality_scale_quant_table(&tables::STD_LUMINANCE_QUANT_TABLE, quality);
     let chroma_quant =
         tables::quality_scale_quant_table(&tables::STD_CHROMINANCE_QUANT_TABLE, quality);
@@ -1829,7 +1832,7 @@ fn compress_progressive_with_scans(
         width,
         height,
         pixel_format,
-        crate::encode::color::rgb_to_ycbcr_row,
+        enc_simd.rgb_to_ycbcr_row,
     )?;
 
     let (mcu_w, mcu_h) = if is_grayscale {
@@ -1892,7 +1895,6 @@ fn compress_progressive_with_scans(
         .collect();
 
     // FDCT + quantize all blocks into coefficient buffers
-    let fdct_quantize_fn = crate::simd::detect_encoder().fdct_quantize;
     for mcu_y in 0..mcus_y {
         for mcu_x in 0..mcus_x {
             let x0 = mcu_x * mcu_w;
@@ -2127,6 +2129,9 @@ pub fn compress_arithmetic(
 
     let is_grayscale = pixel_format == PixelFormat::Grayscale;
 
+    let enc_simd = crate::simd::detect_encoder();
+    let fdct_quantize_fn = enc_simd.fdct_quantize;
+
     // Generate quantization tables
     let luma_quant = tables::quality_scale_quant_table(&tables::STD_LUMINANCE_QUANT_TABLE, quality);
     let chroma_quant =
@@ -2140,7 +2145,7 @@ pub fn compress_arithmetic(
         width,
         height,
         pixel_format,
-        crate::encode::color::rgb_to_ycbcr_row,
+        enc_simd.rgb_to_ycbcr_row,
     )?;
 
     // MCU dimensions
@@ -2161,7 +2166,6 @@ pub fn compress_arithmetic(
     let mcus_y = height.div_ceil(mcu_h);
 
     // FDCT + quantize all blocks
-    let fdct_quantize_fn = crate::simd::detect_encoder().fdct_quantize;
     let mut all_blocks: Vec<[i16; 64]> = Vec::new();
 
     for mcu_row in 0..mcus_y {
@@ -2395,6 +2399,9 @@ pub fn compress_arithmetic_progressive(
     let is_grayscale: bool = pixel_format == PixelFormat::Grayscale;
     let num_components: usize = if is_grayscale { 1 } else { 3 };
 
+    let enc_simd = crate::simd::detect_encoder();
+    let fdct_quantize_fn = enc_simd.fdct_quantize;
+
     let luma_quant: [u16; 64] =
         tables::quality_scale_quant_table(&tables::STD_LUMINANCE_QUANT_TABLE, quality);
     let chroma_quant: [u16; 64] =
@@ -2407,7 +2414,7 @@ pub fn compress_arithmetic_progressive(
         width,
         height,
         pixel_format,
-        crate::encode::color::rgb_to_ycbcr_row,
+        enc_simd.rgb_to_ycbcr_row,
     )?;
 
     let (mcu_w, mcu_h): (usize, usize) = if is_grayscale {
@@ -2471,7 +2478,6 @@ pub fn compress_arithmetic_progressive(
         .collect();
 
     // FDCT + quantize all blocks into coefficient buffers
-    let fdct_quantize_fn = crate::simd::detect_encoder().fdct_quantize;
     for mcu_y in 0..mcus_y {
         for mcu_x in 0..mcus_x {
             let x0: usize = mcu_x * mcu_w;
