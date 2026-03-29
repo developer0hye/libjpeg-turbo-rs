@@ -4057,6 +4057,51 @@ fn encode_downsampled_chroma_block(
         }
     }
 
+    // x86_64 fused path: SSSE3 downsample → AVX2 FDCT+quantize+zigzag
+    #[cfg(target_arch = "x86_64")]
+    {
+        let src_w: usize = 8 * h_factor;
+        let src_h: usize = 8 * v_factor;
+        if is_x86_feature_detected!("avx2")
+            && block_x + src_w <= plane_width
+            && block_y + src_h <= plane_height
+        {
+            // Downsample to a local [i16; 64], then FDCT+quantize in-place
+            let mut block = [0i16; 64];
+            let downsample_ok: bool = if h_factor == 2 && v_factor == 2 {
+                unsafe {
+                    downsample_chroma_block_h2v2_ssse3(
+                        plane,
+                        plane_width,
+                        block_x,
+                        block_y,
+                        &mut block,
+                    );
+                }
+                true
+            } else if h_factor == 2 && v_factor == 1 {
+                unsafe {
+                    downsample_chroma_block_h2v1_ssse3(
+                        plane,
+                        plane_width,
+                        block_x,
+                        block_y,
+                        &mut block,
+                    );
+                }
+                true
+            } else {
+                false
+            };
+            if downsample_ok {
+                let mut quantized = [0i16; 64];
+                fdct_quantize_fn(&mut block, quant_table, &mut quantized);
+                HuffmanEncoder::encode_block(writer, &quantized, prev_dc, dc_table, ac_table);
+                return;
+            }
+        }
+    }
+
     // Scalar fallback: separate downsample + FDCT+quantize
     let mut block = [0i16; 64];
     downsample_chroma_block(
