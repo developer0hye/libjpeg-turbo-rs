@@ -20,18 +20,43 @@ fn neon_upsample(input: &[u8], in_width: usize) -> Vec<u8> {
     output
 }
 
+/// Two-step scalar H2V2: vertical blend (>> 2) then scalar H2V1.
+/// Matches the NEON H2V2 algorithm (which also uses two-step).
+/// The fused `fancy_h2v2` uses a single >> 4 pass for better rounding
+/// but produces different results due to reduced intermediate truncation.
 fn scalar_upsample_h2v2(input: &[u8], in_width: usize, in_height: usize) -> Vec<u8> {
     let out_width = in_width * 2;
     let out_height = in_height * 2;
     let mut output = vec![0u8; out_width * out_height];
-    upsample::fancy_h2v2(
-        input,
-        in_width,
-        in_height,
-        &mut output,
-        out_width,
-        out_height,
-    );
+
+    for y in 0..in_height {
+        let cur_row = &input[y * in_width..(y + 1) * in_width];
+        let above = if y > 0 {
+            &input[(y - 1) * in_width..y * in_width]
+        } else {
+            cur_row
+        };
+        let below = if y + 1 < in_height {
+            &input[(y + 1) * in_width..(y + 2) * in_width]
+        } else {
+            cur_row
+        };
+
+        // Vertical blend (same as NEON vertical blend)
+        let mut row_above = vec![0u8; in_width];
+        let mut row_below = vec![0u8; in_width];
+        for i in 0..in_width {
+            let cur = cur_row[i] as u16;
+            row_above[i] = ((3 * cur + above[i] as u16 + 2) >> 2) as u8;
+            row_below[i] = ((3 * cur + below[i] as u16 + 2) >> 2) as u8;
+        }
+
+        // Horizontal H2V1 (scalar, matching corrected bias)
+        let top_offset = (y * 2) * out_width;
+        let bot_offset = (y * 2 + 1) * out_width;
+        upsample::fancy_h2v1(&row_above, in_width, &mut output[top_offset..], out_width);
+        upsample::fancy_h2v1(&row_below, in_width, &mut output[bot_offset..], out_width);
+    }
     output
 }
 
