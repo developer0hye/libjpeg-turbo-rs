@@ -51,17 +51,55 @@ pub fn encoder_routines() -> EncoderSimdRoutines {
 
 /// AVX2 fused FDCT + quantize + zigzag.
 fn avx2_fdct_quantize(input: &[i16; 64], quant: &QuantDivisors, output: &mut [i16; 64]) {
-    // Step 1: AVX2 FDCT (in-place on a copy)
+    // Step 1: AVX2 FDCT (in-place on a copy, outputs i16)
     let mut dct_buf = *input;
     avx2_fdct::avx2_fdct_islow(&mut dct_buf);
 
-    // Step 2: scalar quantize + zigzag (for now; AVX2 quantize is a future optimization)
-    let dct_i32: [i32; 64] = {
-        let mut arr = [0i32; 64];
-        for i in 0..64 {
-            arr[i] = dct_buf[i] as i32;
-        }
-        arr
-    };
-    crate::encode::quant::quantize_block(&dct_i32, &quant.divisors, output);
+    // Step 2: AVX2 quantize using reciprocal multiply + zigzag reorder
+    unsafe { avx2_quantize_zigzag(&dct_buf, quant, output) }
+}
+
+/// AVX2 quantization: reciprocal multiply to avoid scalar division.
+///
+/// For each coefficient: `quantized = round(coeff / divisor)`
+/// Implemented as: `quantized = sign(coeff) * ((abs(coeff) + divisor/2) * recip >> 16)`
+/// where `recip = ceil(2^16 / divisor)`.
+///
+/// # Safety
+/// Requires AVX2.
+#[target_feature(enable = "avx2")]
+unsafe fn avx2_quantize_zigzag(coeffs: &[i16; 64], quant: &QuantDivisors, output: &mut [i16; 64]) {
+    use core::arch::x86_64::*;
+
+    let mut natural = [0i16; 64];
+
+    // Process 16 coefficients per iteration (4 iterations for 64)
+    for i in (0..64).step_by(16) {
+        let c = _mm256_loadu_si256(coeffs.as_ptr().add(i) as *const __m256i);
+        let d = _mm256_loadu_si256(quant.divisors.as_ptr().add(i) as *const __m256i);
+        let r = _mm256_loadu_si256(quant.reciprocals.as_ptr().add(i) as *const __m256i);
+
+        // abs(coeff)
+        let sign = _mm256_srai_epi16::<15>(c); // all 1s if negative, all 0s if positive
+        let abs_c = _mm256_abs_epi16(c);
+
+        // Round: abs_c + (divisor >> 1)
+        let half_d = _mm256_srli_epi16::<1>(d);
+        let rounded = _mm256_add_epi16(abs_c, half_d);
+
+        // Multiply by reciprocal and take high 16 bits: (rounded * recip) >> 16
+        let quantized = _mm256_mulhi_epu16(rounded, r);
+
+        // Restore sign: xor with sign mask, then subtract sign mask
+        let result = _mm256_sub_epi16(_mm256_xor_si256(quantized, sign), sign);
+
+        // Store to temp buffer in natural order
+        _mm256_storeu_si256(natural.as_mut_ptr().add(i) as *mut __m256i, result);
+    }
+
+    // Zigzag reorder
+    let zigzag = &crate::encode::tables::ZIGZAG_ORDER;
+    for zz in 0..64 {
+        output[zz] = natural[zigzag[zz]];
+    }
 }
