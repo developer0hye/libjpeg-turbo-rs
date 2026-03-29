@@ -2,8 +2,25 @@
 name = "libjpeg-turbo-rs"
 version = "0.1.0"
 edition = "2021"
-description = "Pure Rust reimplementation of libjpeg-turbo"
+rust-version = "1.75"
+description = "Pure Rust reimplementation of libjpeg-turbo with NEON/AVX2 SIMD acceleration"
 license = "MIT OR Apache-2.0"
+repository = "https://github.com/developer0hye/libjpeg-turbo-rs"
+readme = "README.md"
+keywords = ["jpeg", "image", "simd", "encoder", "decoder"]
+categories = ["multimedia::images", "multimedia::encoding"]
+exclude = [
+    "references/",
+    "tests/fixtures/",
+    "examples/",
+    "benches/",
+    "docs/",
+    "experiments/",
+    "bench_c_*",
+    "*.md",
+    "!README.md",
+    ".github/",
+]
 
 [features]
 default = ["simd"]

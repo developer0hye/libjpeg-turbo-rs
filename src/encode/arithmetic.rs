@@ -175,7 +175,7 @@ impl ArithEncoder {
     /// Encode DC coefficient for one block (sequential arithmetic).
     ///
     /// Ported from jcarith.c encode_mcu_DC_first / encode_mcu sections.
-    /// Context layout in dc_stats[tbl]:
+    /// Context layout in dc_stats\[tbl\]:
     ///   [0..3]   = zero diff context (S0, SS, SP, SN)
     ///   [4..7]   = small positive diff context
     ///   [8..11]  = small negative diff context

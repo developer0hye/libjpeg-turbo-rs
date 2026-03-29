@@ -37,7 +37,7 @@ pub fn gather_ac_symbols(coeffs: &[i16; 64], freq: &mut [u32; 257]) {
 
 /// Generate optimal Huffman table from symbol frequencies.
 ///
-/// Returns (bits[17], huffval) in JPEG DHT format.
+/// Returns (bits\[17\], huffval) in JPEG DHT format.
 /// `freq[256]` is the pseudo-symbol (must have count >= 1).
 ///
 /// Implements JPEG Annex K.2: build Huffman tree, compute code sizes,

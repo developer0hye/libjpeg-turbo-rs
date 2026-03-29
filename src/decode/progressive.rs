@@ -22,7 +22,7 @@ fn extend(value: u16, size: u8) -> i16 {
 }
 
 /// Decode DC coefficient for first scan (Ah=0).
-/// Writes `(dc_pred + diff) << al` into coeffs[0].
+/// Writes `(dc_pred + diff) << al` into coeffs\[0\].
 #[inline]
 pub fn decode_dc_first(
     reader: &mut BitReader,
@@ -38,7 +38,7 @@ pub fn decode_dc_first(
 }
 
 /// Decode DC coefficient for refinement scan (Ah≠0).
-/// Adds one bit at position `al` to existing coeffs[0].
+/// Adds one bit at position `al` to existing coeffs\[0\].
 #[inline]
 pub fn decode_dc_refine(reader: &mut BitReader, coeffs: &mut [i16; 64], al: u8) -> Result<()> {
     let bit = reader.read_bits(1);
