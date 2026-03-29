@@ -1818,6 +1818,9 @@ fn compress_progressive_with_scans(
 
     let is_grayscale = pixel_format == PixelFormat::Grayscale;
 
+    let enc_simd = crate::simd::detect_encoder();
+    let fdct_quantize_fn = enc_simd.fdct_quantize;
+
     let luma_quant = tables::quality_scale_quant_table(&tables::STD_LUMINANCE_QUANT_TABLE, quality);
     let chroma_quant =
         tables::quality_scale_quant_table(&tables::STD_CHROMINANCE_QUANT_TABLE, quality);
@@ -1829,7 +1832,7 @@ fn compress_progressive_with_scans(
         width,
         height,
         pixel_format,
-        crate::encode::color::rgb_to_ycbcr_row,
+        enc_simd.rgb_to_ycbcr_row,
     )?;
 
     let (mcu_w, mcu_h) = if is_grayscale {
@@ -1891,84 +1894,61 @@ fn compress_progressive_with_scans(
         .map(|cl| vec![[0i16; 64]; cl.blocks_x * cl.blocks_y])
         .collect();
 
-    // FDCT + quantize all blocks into coefficient buffers
-    let scalar_fq = crate::simd::scalar::scalar_fdct_quantize;
+    // FDCT + quantize all blocks into coefficient buffers.
+    // Uses NEON FDCT+quantize via detect_encoder() and fused extract/downsample
+    // paths on aarch64 for interior blocks.
     for mcu_y in 0..mcus_y {
         for mcu_x in 0..mcus_x {
-            let x0 = mcu_x * mcu_w;
-            let y0 = mcu_y * mcu_h;
+            let x0: usize = mcu_x * mcu_w;
+            let y0: usize = mcu_y * mcu_h;
 
             if is_grayscale {
-                let bx = mcu_x;
-                let by = mcu_y;
-                let mut block = [0i16; 64];
-                extract_block(&y_plane, width, height, x0, y0, &mut block);
-                scalar_fq(
-                    &mut block,
+                let bx: usize = mcu_x;
+                let by: usize = mcu_y;
+                progressive_fdct_y_block(
+                    &y_plane,
+                    width,
+                    height,
+                    x0,
+                    y0,
                     &luma_divisors,
+                    fdct_quantize_fn,
                     &mut coeff_bufs[0][by * mcus_x + bx],
                 );
             } else {
                 // Y blocks
+                let blocks_x: usize = comp_layouts[0].blocks_x;
                 for bv in 0..v_samp {
                     for bh in 0..h_samp {
-                        let bx = mcu_x * h_samp + bh;
-                        let by = mcu_y * v_samp + bv;
-                        let mut block = [0i16; 64];
-                        extract_block(
+                        let bx: usize = mcu_x * h_samp + bh;
+                        let by: usize = mcu_y * v_samp + bv;
+                        progressive_fdct_y_block(
                             &y_plane,
                             width,
                             height,
                             x0 + bh * 8,
                             y0 + bv * 8,
-                            &mut block,
-                        );
-                        let blocks_x = comp_layouts[0].blocks_x;
-                        scalar_fq(
-                            &mut block,
                             &luma_divisors,
+                            fdct_quantize_fn,
                             &mut coeff_bufs[0][by * blocks_x + bx],
                         );
                     }
                 }
-                // Cb block
-                {
-                    let bx = mcu_x;
-                    let by = mcu_y;
-                    let mut block = [0i16; 64];
-                    let hf = if h_samp > 1 { 2 } else { 1 };
-                    let vf = if v_samp > 1 { 2 } else { 1 };
-                    if hf == 1 && vf == 1 {
-                        extract_block(&cb_plane, width, height, x0, y0, &mut block);
-                    } else {
-                        downsample_chroma_block(
-                            &cb_plane, width, height, x0, y0, hf, vf, &mut block,
-                        );
-                    }
-                    scalar_fq(
-                        &mut block,
+                // Cb/Cr blocks
+                for (comp_idx, plane) in [(1usize, &cb_plane), (2usize, &cr_plane)] {
+                    let bx: usize = mcu_x;
+                    let by: usize = mcu_y;
+                    progressive_fdct_chroma_block(
+                        plane,
+                        width,
+                        height,
+                        x0,
+                        y0,
+                        h_samp,
+                        v_samp,
                         &chroma_divisors,
-                        &mut coeff_bufs[1][by * mcus_x + bx],
-                    );
-                }
-                // Cr block
-                {
-                    let bx = mcu_x;
-                    let by = mcu_y;
-                    let mut block = [0i16; 64];
-                    let hf = if h_samp > 1 { 2 } else { 1 };
-                    let vf = if v_samp > 1 { 2 } else { 1 };
-                    if hf == 1 && vf == 1 {
-                        extract_block(&cr_plane, width, height, x0, y0, &mut block);
-                    } else {
-                        downsample_chroma_block(
-                            &cr_plane, width, height, x0, y0, hf, vf, &mut block,
-                        );
-                    }
-                    scalar_fq(
-                        &mut block,
-                        &chroma_divisors,
-                        &mut coeff_bufs[2][by * mcus_x + bx],
+                        fdct_quantize_fn,
+                        &mut coeff_bufs[comp_idx][by * mcus_x + bx],
                     );
                 }
             }
@@ -2131,6 +2111,8 @@ pub fn compress_arithmetic(
 
     let is_grayscale = pixel_format == PixelFormat::Grayscale;
 
+    let enc_simd = crate::simd::detect_encoder();
+
     // Generate quantization tables
     let luma_quant = tables::quality_scale_quant_table(&tables::STD_LUMINANCE_QUANT_TABLE, quality);
     let chroma_quant =
@@ -2144,7 +2126,7 @@ pub fn compress_arithmetic(
         width,
         height,
         pixel_format,
-        crate::encode::color::rgb_to_ycbcr_row,
+        enc_simd.rgb_to_ycbcr_row,
     )?;
 
     // MCU dimensions
@@ -2165,7 +2147,7 @@ pub fn compress_arithmetic(
     let mcus_y = height.div_ceil(mcu_h);
 
     // FDCT + quantize all blocks
-    let scalar_fq = crate::simd::scalar::scalar_fdct_quantize;
+    let fdct_quantize_fn = crate::simd::detect_encoder().fdct_quantize;
     let mut all_blocks: Vec<[i16; 64]> = Vec::new();
 
     for mcu_row in 0..mcus_y {
@@ -2177,7 +2159,7 @@ pub fn compress_arithmetic(
                 let mut block = [0i16; 64];
                 extract_block(&y_plane, width, height, x0, y0, &mut block);
                 let mut q = [0i16; 64];
-                scalar_fq(&mut block, &luma_divisors, &mut q);
+                fdct_quantize_fn(&mut block, &luma_divisors, &mut q);
                 all_blocks.push(q);
             } else {
                 match subsampling {
@@ -2190,7 +2172,7 @@ pub fn compress_arithmetic(
                             let mut block = [0i16; 64];
                             extract_block(plane, width, height, x0, y0, &mut block);
                             let mut q = [0i16; 64];
-                            scalar_fq(&mut block, divisors, &mut q);
+                            fdct_quantize_fn(&mut block, divisors, &mut q);
                             all_blocks.push(q);
                         }
                     }
@@ -2199,14 +2181,14 @@ pub fn compress_arithmetic(
                             let mut block = [0i16; 64];
                             extract_block(&y_plane, width, height, x0 + dx, y0, &mut block);
                             let mut q = [0i16; 64];
-                            scalar_fq(&mut block, &luma_divisors, &mut q);
+                            fdct_quantize_fn(&mut block, &luma_divisors, &mut q);
                             all_blocks.push(q);
                         }
                         for plane in [&cb_plane, &cr_plane] {
                             let mut block = [0i16; 64];
                             downsample_chroma_block(plane, width, height, x0, y0, 2, 1, &mut block);
                             let mut q = [0i16; 64];
-                            scalar_fq(&mut block, &chroma_divisors, &mut q);
+                            fdct_quantize_fn(&mut block, &chroma_divisors, &mut q);
                             all_blocks.push(q);
                         }
                     }
@@ -2215,14 +2197,14 @@ pub fn compress_arithmetic(
                             let mut block = [0i16; 64];
                             extract_block(&y_plane, width, height, x0 + dx, y0 + dy, &mut block);
                             let mut q = [0i16; 64];
-                            scalar_fq(&mut block, &luma_divisors, &mut q);
+                            fdct_quantize_fn(&mut block, &luma_divisors, &mut q);
                             all_blocks.push(q);
                         }
                         for plane in [&cb_plane, &cr_plane] {
                             let mut block = [0i16; 64];
                             downsample_chroma_block(plane, width, height, x0, y0, 2, 2, &mut block);
                             let mut q = [0i16; 64];
-                            scalar_fq(&mut block, &chroma_divisors, &mut q);
+                            fdct_quantize_fn(&mut block, &chroma_divisors, &mut q);
                             all_blocks.push(q);
                         }
                     }
@@ -2232,14 +2214,14 @@ pub fn compress_arithmetic(
                             let mut block = [0i16; 64];
                             extract_block(&y_plane, width, height, x0, y0 + dy, &mut block);
                             let mut q = [0i16; 64];
-                            scalar_fq(&mut block, &luma_divisors, &mut q);
+                            fdct_quantize_fn(&mut block, &luma_divisors, &mut q);
                             all_blocks.push(q);
                         }
                         for plane in [&cb_plane, &cr_plane] {
                             let mut block = [0i16; 64];
                             downsample_chroma_block(plane, width, height, x0, y0, 1, 2, &mut block);
                             let mut q = [0i16; 64];
-                            scalar_fq(&mut block, &chroma_divisors, &mut q);
+                            fdct_quantize_fn(&mut block, &chroma_divisors, &mut q);
                             all_blocks.push(q);
                         }
                     }
@@ -2249,14 +2231,14 @@ pub fn compress_arithmetic(
                             let mut block = [0i16; 64];
                             extract_block(&y_plane, width, height, x0 + dx, y0, &mut block);
                             let mut q = [0i16; 64];
-                            scalar_fq(&mut block, &luma_divisors, &mut q);
+                            fdct_quantize_fn(&mut block, &luma_divisors, &mut q);
                             all_blocks.push(q);
                         }
                         for plane in [&cb_plane, &cr_plane] {
                             let mut block = [0i16; 64];
                             downsample_chroma_block(plane, width, height, x0, y0, 4, 1, &mut block);
                             let mut q = [0i16; 64];
-                            scalar_fq(&mut block, &chroma_divisors, &mut q);
+                            fdct_quantize_fn(&mut block, &chroma_divisors, &mut q);
                             all_blocks.push(q);
                         }
                     }
@@ -2266,14 +2248,14 @@ pub fn compress_arithmetic(
                             let mut block = [0i16; 64];
                             extract_block(&y_plane, width, height, x0, y0 + dy, &mut block);
                             let mut q = [0i16; 64];
-                            scalar_fq(&mut block, &luma_divisors, &mut q);
+                            fdct_quantize_fn(&mut block, &luma_divisors, &mut q);
                             all_blocks.push(q);
                         }
                         for plane in [&cb_plane, &cr_plane] {
                             let mut block = [0i16; 64];
                             downsample_chroma_block(plane, width, height, x0, y0, 1, 4, &mut block);
                             let mut q = [0i16; 64];
-                            scalar_fq(&mut block, &chroma_divisors, &mut q);
+                            fdct_quantize_fn(&mut block, &chroma_divisors, &mut q);
                             all_blocks.push(q);
                         }
                     }
@@ -2399,6 +2381,8 @@ pub fn compress_arithmetic_progressive(
     let is_grayscale: bool = pixel_format == PixelFormat::Grayscale;
     let num_components: usize = if is_grayscale { 1 } else { 3 };
 
+    let enc_simd = crate::simd::detect_encoder();
+
     let luma_quant: [u16; 64] =
         tables::quality_scale_quant_table(&tables::STD_LUMINANCE_QUANT_TABLE, quality);
     let chroma_quant: [u16; 64] =
@@ -2411,7 +2395,7 @@ pub fn compress_arithmetic_progressive(
         width,
         height,
         pixel_format,
-        crate::encode::color::rgb_to_ycbcr_row,
+        enc_simd.rgb_to_ycbcr_row,
     )?;
 
     let (mcu_w, mcu_h): (usize, usize) = if is_grayscale {
@@ -2475,7 +2459,7 @@ pub fn compress_arithmetic_progressive(
         .collect();
 
     // FDCT + quantize all blocks into coefficient buffers
-    let scalar_fq = crate::simd::scalar::scalar_fdct_quantize;
+    let fdct_quantize_fn = crate::simd::detect_encoder().fdct_quantize;
     for mcu_y in 0..mcus_y {
         for mcu_x in 0..mcus_x {
             let x0: usize = mcu_x * mcu_w;
@@ -2486,7 +2470,7 @@ pub fn compress_arithmetic_progressive(
                 let by: usize = mcu_y;
                 let mut block = [0i16; 64];
                 extract_block(&y_plane, width, height, x0, y0, &mut block);
-                scalar_fq(
+                fdct_quantize_fn(
                     &mut block,
                     &luma_divisors,
                     &mut coeff_bufs[0][by * mcus_x + bx],
@@ -2507,7 +2491,7 @@ pub fn compress_arithmetic_progressive(
                             &mut block,
                         );
                         let blocks_x: usize = comp_layouts[0].blocks_x;
-                        scalar_fq(
+                        fdct_quantize_fn(
                             &mut block,
                             &luma_divisors,
                             &mut coeff_bufs[0][by * blocks_x + bx],
@@ -2528,7 +2512,7 @@ pub fn compress_arithmetic_progressive(
                             &cb_plane, width, height, x0, y0, hf, vf, &mut block,
                         );
                     }
-                    scalar_fq(
+                    fdct_quantize_fn(
                         &mut block,
                         &chroma_divisors,
                         &mut coeff_bufs[1][by * mcus_x + bx],
@@ -2548,7 +2532,7 @@ pub fn compress_arithmetic_progressive(
                             &cr_plane, width, height, x0, y0, hf, vf, &mut block,
                         );
                     }
-                    scalar_fq(
+                    fdct_quantize_fn(
                         &mut block,
                         &chroma_divisors,
                         &mut coeff_bufs[2][by * mcus_x + bx],
@@ -2826,22 +2810,27 @@ fn encode_progressive_dc_scan(
 
                         if ah == 0 {
                             // DC first scan: encode (DC >> Al)
-                            let dc = block[0] >> al;
-                            let diff = dc - prev_dc[scan_ci];
+                            let dc: i16 = block[0] >> al;
+                            let diff: i16 = dc - prev_dc[scan_ci];
                             prev_dc[scan_ci] = dc;
 
-                            let (magnitude_bits, category) = encode_dc_value_prog(diff);
-                            writer.write_bits(
-                                dc_table.ehufco[category as usize],
-                                dc_table.ehufsi[category as usize],
-                            );
-                            if category > 0 {
-                                writer.write_bits(magnitude_bits, category);
+                            if diff == 0 {
+                                writer.write_bits(dc_table.ehufco[0], dc_table.ehufsi[0]);
+                            } else {
+                                // Combined Huffman code + magnitude in one put_bits call
+                                let abs_diff: u16 = diff.unsigned_abs();
+                                let category: u8 = 16 - abs_diff.leading_zeros() as u8;
+                                let magnitude: u16 = if diff > 0 { diff as u16 } else { !abs_diff };
+                                let huff_code: u32 = dc_table.ehufco[category as usize] as u32;
+                                let huff_size: u8 = dc_table.ehufsi[category as usize];
+                                let mag_masked: u32 = magnitude as u32 & ((1u32 << category) - 1);
+                                let combined: u32 = (huff_code << category) | mag_masked;
+                                writer.put_bits(combined, huff_size + category);
                             }
                         } else {
                             // DC refine: single bit
-                            let bit = ((block[0] >> al) & 1) as u16;
-                            writer.write_bits(bit, 1);
+                            let bit: u32 = ((block[0] >> al) & 1) as u32;
+                            writer.put_bits(bit, 1);
                         }
                     }
                 }
@@ -2850,36 +2839,22 @@ fn encode_progressive_dc_scan(
     }
 }
 
-/// Emit buffered correction bits (for AC refine scans).
-fn emit_buffered_bits(bits: &[u8], writer: &mut BitWriter) {
-    for &bit in bits {
-        writer.write_bits(bit as u16, 1);
-    }
-}
-
 /// Encode a progressive AC scan (single component).
 ///
-/// For AC first scan (ah==0): each block either encodes its non-zero
-/// coefficients or emits EOB (symbol 0x00). We emit one EOB per block
-/// rather than using EOBRUN batching, because the standard Huffman tables
-/// do not include EOBRUN category symbols (0x10, 0x20, ...).
-///
-/// For AC refine scan (ah!=0): correction bits for previously-nonzero
-/// coefficients must be buffered and emitted alongside ZRL/EOB/new-nonzero
-/// symbols, per ITU-T T.81 Figure G.7.
+/// Iterates all blocks in flat raster order within the component buffer.
 #[allow(clippy::too_many_arguments)]
 fn encode_progressive_ac_scan(
     coeff_bufs: &[Vec<[i16; 64]>],
     comp_layouts: &[CompLayout],
     scan: &crate::encode::progressive::ProgressiveScan,
-    mcus_x: usize,
-    mcus_y: usize,
+    _mcus_x: usize,
+    _mcus_y: usize,
     ac_luma_table: &HuffTable,
     ac_chroma_table: &HuffTable,
     writer: &mut BitWriter,
 ) {
     let ci = scan.component_indices[0]; // AC scans are single-component
-    let layout = &comp_layouts[ci];
+    let _layout = &comp_layouts[ci];
     let ac_table = if ci == 0 {
         ac_luma_table
     } else {
@@ -2890,30 +2865,24 @@ fn encode_progressive_ac_scan(
     let al = scan.al;
     let ah = scan.ah;
 
-    // For progressive AC: iterate all blocks in raster order
-    for mcu_y in 0..mcus_y {
-        for mcu_x in 0..mcus_x {
-            for bv in 0..layout.v_blocks {
-                for bh in 0..layout.h_blocks {
-                    let bx = mcu_x * layout.h_blocks + bh;
-                    let by = mcu_y * layout.v_blocks + bv;
-                    let block = &coeff_bufs[ci][by * layout.blocks_x + bx];
-
-                    if ah == 0 {
-                        encode_ac_first_block(block, ss, se, al, ac_table, writer);
-                    } else {
-                        encode_ac_refine_block(block, ss, se, al, ac_table, writer);
-                    }
-                }
-            }
+    // Non-interleaved AC scans iterate blocks in raster order within the component.
+    let blocks: &[[i16; 64]] = &coeff_bufs[ci];
+    if ah == 0 {
+        for block in blocks.iter() {
+            encode_ac_first_block(block, ss, se, al, ac_table, writer);
+        }
+    } else {
+        for block in blocks.iter() {
+            encode_ac_refine_block(block, ss, se, al, ac_table, writer);
         }
     }
 }
 
 /// Encode one block for AC first scan (ah==0).
 ///
-/// Uses simple per-block EOB (symbol 0x00) instead of EOBRUN batching,
-/// since the default Huffman tables lack EOBRUN category symbols.
+/// Pre-computes values and bitmap to skip zero runs via CTZ, matching
+/// C's jcphuff.c prepare+encode pattern. Combines Huffman code + magnitude
+/// into single put_bits calls.
 fn encode_ac_first_block(
     block: &[i16; 64],
     ss: usize,
@@ -2922,42 +2891,71 @@ fn encode_ac_first_block(
     ac_table: &HuffTable,
     writer: &mut BitWriter,
 ) {
-    let mut zero_run: u8 = 0;
+    let band_len: usize = se - ss + 1;
 
-    for &coeff in &block[ss..=se] {
+    // Pre-compute: apply point transform, build nonzero bitmap, store values/diffs
+    let mut values = [0u16; 64]; // abs(coeff) >> al
+    let mut diffs = [0u16; 64]; // magnitude bits (one's complement for negative)
+    let mut zerobits: u64 = 0; // bit set = nonzero after transform
+
+    for i in 0..band_len {
+        let coeff: i16 = block[ss + i];
         if coeff == 0 {
-            zero_run += 1;
             continue;
         }
-        // Per ITU-T T.81 and libjpeg-turbo jcphuff.c: the point transform
-        // for AC coefficients is integer division with rounding toward zero.
-        // We compute absolute value first, then shift. This matches C's
-        // `abs(coeff) >> Al` approach and avoids the rounding-toward-negative-
-        // infinity behavior of signed right shift.
         let sign_mask: i16 = coeff >> 15;
         let abs_coeff: i16 = (coeff ^ sign_mask) - sign_mask;
-        let temp: i16 = abs_coeff >> al;
+        let temp: u16 = (abs_coeff >> al) as u16;
         if temp == 0 {
-            // Nonzero coefficient became zero after point transform
-            zero_run += 1;
             continue;
         }
-        // For negative coeff: emit one's complement of abs value (= bitwise complement)
-        let temp2: u16 = (sign_mask ^ temp) as u16;
+        values[i] = temp;
+        diffs[i] = (sign_mask ^ (abs_coeff >> al)) as u16;
+        zerobits |= 1u64 << i;
+    }
 
+    if zerobits == 0 {
+        writer.put_bits(ac_table.ehufco[0x00] as u32, ac_table.ehufsi[0x00]);
+        return;
+    }
+
+    // Pre-compute nbits for all nonzero positions
+    let mut nbits_arr = [0u8; 64];
+    {
+        let mut bits: u64 = zerobits;
+        while bits != 0 {
+            let pos: usize = bits.trailing_zeros() as usize;
+            bits &= bits - 1;
+            nbits_arr[pos] = 16 - values[pos].leading_zeros() as u8;
+        }
+    }
+
+    // Encode using bitmap to skip directly to nonzero coefficients
+    let mut prev_pos: usize = 0;
+
+    while zerobits != 0 {
+        let pos: usize = zerobits.trailing_zeros() as usize;
+        zerobits &= zerobits - 1;
+
+        let mut zero_run: usize = pos - prev_pos;
         while zero_run >= 16 {
-            writer.write_bits(ac_table.ehufco[0xF0], ac_table.ehufsi[0xF0]);
+            writer.put_bits(ac_table.ehufco[0xF0] as u32, ac_table.ehufsi[0xF0]);
             zero_run -= 16;
         }
-        let nbits: u8 = 16 - (temp as u16).leading_zeros() as u8;
-        let symbol: usize = ((zero_run as usize) << 4) | (nbits as usize);
-        writer.write_bits(ac_table.ehufco[symbol], ac_table.ehufsi[symbol]);
-        writer.write_bits(temp2, nbits);
-        zero_run = 0;
+
+        let nbits: u8 = nbits_arr[pos];
+        let symbol: usize = (zero_run << 4) | (nbits as usize);
+        // Combine Huffman code + magnitude bits into single put_bits call
+        let huff_code: u32 = ac_table.ehufco[symbol] as u32;
+        let huff_size: u8 = ac_table.ehufsi[symbol];
+        let mag_masked: u32 = diffs[pos] as u32 & ((1u32 << nbits) - 1);
+        let combined: u32 = (huff_code << nbits) | mag_masked;
+        writer.put_bits(combined, huff_size + nbits);
+        prev_pos = pos + 1;
     }
-    if zero_run > 0 {
-        // Trailing zeros: emit EOB
-        writer.write_bits(ac_table.ehufco[0x00], ac_table.ehufsi[0x00]);
+
+    if prev_pos < band_len {
+        writer.put_bits(ac_table.ehufco[0x00] as u32, ac_table.ehufsi[0x00]);
     }
 }
 
@@ -2998,84 +2996,156 @@ fn encode_ac_refine_block(
     }
 
     // Main loop: matches C's ENCODE_COEFS_AC_REFINE.
-    // r = run length of zero coefficients
-    // correction_bits = buffered correction bits for previously-nonzero coefficients
+    // Correction bits for previously-nonzero coefficients are packed into a u32
+    // accumulator and flushed in a single put_bits call (avoids per-bit write_bits).
     let mut r: usize = 0;
-    let mut correction_bits: Vec<u8> = Vec::with_capacity(band_len);
+    let mut corr_bits: u32 = 0; // packed correction bits (MSB-first)
+    let mut corr_len: u8 = 0; // number of buffered correction bits (max 63)
     let mut idx: usize = 0;
 
     while idx < band_len {
         let temp: u16 = absvals[idx];
 
         if temp == 0 {
-            // Zero coefficient: increment run length
             r += 1;
             idx += 1;
             continue;
         }
 
         // Emit any required ZRLs, but not if they can be folded into EOB.
-        // C: `while (r > 15 && (cabsvalue <= EOBPTR))`
-        // EOBPTR points to the last newly-nonzero coeff. We use eob (index+1),
-        // so `idx < eob` means we're at or before the last newly-nonzero.
         while r > 15 && idx < eob {
-            // Emit ZRL
-            writer.write_bits(ac_table.ehufco[0xF0], ac_table.ehufsi[0xF0]);
+            writer.put_bits(ac_table.ehufco[0xF0] as u32, ac_table.ehufsi[0xF0]);
             r -= 16;
-            // Emit buffered correction bits that must be associated with ZRL
-            emit_buffered_bits(&correction_bits, writer);
-            correction_bits.clear();
+            if corr_len > 0 {
+                writer.put_bits(corr_bits, corr_len);
+                corr_bits = 0;
+                corr_len = 0;
+            }
         }
 
-        // If the coef was previously nonzero, it only needs a correction bit.
-        // NOTE: a straight translation of the spec's figure G.7 would suggest
-        // that we also need to test r > 15. But if r > 15, we can only get
-        // here if idx >= eob, which implies that this coefficient is not 1.
         if temp > 1 {
-            // The correction bit is the next bit of the absolute value.
-            correction_bits.push((temp & 1) as u8);
+            corr_bits = (corr_bits << 1) | (temp & 1) as u32;
+            corr_len += 1;
             idx += 1;
             continue;
         }
 
         // temp == 1: newly-nonzero coefficient
-        // Count/emit Huffman symbol for run length / number of bits
         let symbol: usize = (r << 4) | 1;
-        writer.write_bits(ac_table.ehufco[symbol], ac_table.ehufsi[symbol]);
-
-        // Emit output bit for newly-nonzero coef (sign bit)
-        // 1 = positive, 0 = negative (matches C: `(block[k] < 0) ? 0 : 1`)
-        writer.write_bits(sign_bits[idx], 1);
-
-        // Emit buffered correction bits that must be associated with this code
-        emit_buffered_bits(&correction_bits, writer);
-        correction_bits.clear();
+        // Combine Huffman symbol + sign bit into single put_bits
+        let huff_code: u32 = ac_table.ehufco[symbol] as u32;
+        let huff_size: u8 = ac_table.ehufsi[symbol];
+        let combined: u32 = (huff_code << 1) | sign_bits[idx] as u32;
+        writer.put_bits(combined, huff_size + 1);
+        if corr_len > 0 {
+            writer.put_bits(corr_bits, corr_len);
+            corr_bits = 0;
+            corr_len = 0;
+        }
         r = 0;
         idx += 1;
     }
 
-    // If there are trailing zeroes or remaining correction bits, emit EOB.
-    // C: `if (r > 0 || BR > 0) { entropy->EOBRUN++; entropy->BE += BR; }`
-    // We emit per-block EOB (EOBRUN=1) immediately instead of batching.
-    if r > 0 || !correction_bits.is_empty() {
-        writer.write_bits(ac_table.ehufco[0x00], ac_table.ehufsi[0x00]);
-        emit_buffered_bits(&correction_bits, writer);
+    if r > 0 || corr_len > 0 {
+        writer.put_bits(ac_table.ehufco[0x00] as u32, ac_table.ehufsi[0x00]);
+        if corr_len > 0 {
+            writer.put_bits(corr_bits, corr_len);
+        }
     }
 }
 
-/// Encode DC value for progressive (same as baseline but can handle shifted values).
-fn encode_dc_value_prog(diff: i16) -> (u16, u8) {
-    if diff == 0 {
-        return (0, 0);
+/// FDCT+quantize a Y block. Uses fused extract+FDCT on aarch64 for interior blocks.
+#[inline]
+#[allow(clippy::too_many_arguments)]
+fn progressive_fdct_y_block(
+    plane: &[u8],
+    plane_w: usize,
+    plane_h: usize,
+    bx: usize,
+    by: usize,
+    quant: &QuantDivisors,
+    fdct_quantize_fn: fn(&mut [i16; 64], &QuantDivisors, &mut [i16; 64]),
+    output: &mut [i16; 64],
+) {
+    #[cfg(target_arch = "aarch64")]
+    {
+        if bx + 8 <= plane_w && by + 8 <= plane_h {
+            unsafe {
+                crate::simd::aarch64::neon_extract_fdct_quantize(
+                    plane.as_ptr().add(by * plane_w + bx),
+                    plane_w,
+                    quant,
+                    output,
+                );
+            }
+            return;
+        }
     }
-    let abs_diff = diff.unsigned_abs();
-    let category = 16 - abs_diff.leading_zeros() as u8;
-    let magnitude_bits = if diff > 0 {
-        diff as u16
-    } else {
-        (diff - 1) as u16
-    };
-    (magnitude_bits, category)
+    let mut block = [0i16; 64];
+    extract_block(plane, plane_w, plane_h, bx, by, &mut block);
+    fdct_quantize_fn(&mut block, quant, output);
+}
+
+/// FDCT+quantize a chroma block with optional downsampling.
+#[inline]
+#[allow(clippy::too_many_arguments)]
+fn progressive_fdct_chroma_block(
+    plane: &[u8],
+    plane_w: usize,
+    plane_h: usize,
+    x0: usize,
+    y0: usize,
+    h_samp: usize,
+    v_samp: usize,
+    quant: &QuantDivisors,
+    fdct_quantize_fn: fn(&mut [i16; 64], &QuantDivisors, &mut [i16; 64]),
+    output: &mut [i16; 64],
+) {
+    let hf: usize = if h_samp > 1 { 2 } else { 1 };
+    let vf: usize = if v_samp > 1 { 2 } else { 1 };
+
+    if hf == 1 && vf == 1 {
+        progressive_fdct_y_block(
+            plane,
+            plane_w,
+            plane_h,
+            x0,
+            y0,
+            quant,
+            fdct_quantize_fn,
+            output,
+        );
+        return;
+    }
+
+    #[cfg(target_arch = "aarch64")]
+    {
+        let src_w: usize = hf * 8;
+        let src_h: usize = vf * 8;
+        if x0 + src_w <= plane_w && y0 + src_h <= plane_h {
+            unsafe {
+                let ptr: *const u8 = plane.as_ptr().add(y0 * plane_w + x0);
+                if hf == 2 && vf == 2 {
+                    crate::simd::aarch64::neon_downsample_h2v2_fdct_quantize(
+                        ptr, plane_w, quant, output,
+                    );
+                } else if hf == 2 && vf == 1 {
+                    crate::simd::aarch64::neon_downsample_h2v1_fdct_quantize(
+                        ptr, plane_w, quant, output,
+                    );
+                } else {
+                    let mut block = [0i16; 64];
+                    downsample_chroma_block(plane, plane_w, plane_h, x0, y0, hf, vf, &mut block);
+                    fdct_quantize_fn(&mut block, quant, output);
+                }
+            }
+            return;
+        }
+    }
+
+    let mut block = [0i16; 64];
+    downsample_chroma_block(plane, plane_w, plane_h, x0, y0, hf, vf, &mut block);
+    fdct_quantize_fn(&mut block, quant, output);
 }
 
 /// Scale quantization table values by 8 to create divisor table for the islow FDCT.
