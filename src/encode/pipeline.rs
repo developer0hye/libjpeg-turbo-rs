@@ -2959,6 +2959,24 @@ fn encode_ac_first_block(
     }
 }
 
+/// Flush buffered correction bits. Handles >32 bits by splitting into two put_bits calls.
+#[inline]
+fn flush_corr_bits(writer: &mut BitWriter, corr_bits: &mut u64, corr_len: &mut u8) {
+    if *corr_len == 0 {
+        return;
+    }
+    if *corr_len <= 32 {
+        writer.put_bits(*corr_bits as u32, *corr_len);
+    } else {
+        // Split: emit high bits first, then low 32 bits
+        let hi_len: u8 = *corr_len - 32;
+        writer.put_bits((*corr_bits >> 32) as u32, hi_len);
+        writer.put_bits(*corr_bits as u32, 32);
+    }
+    *corr_bits = 0;
+    *corr_len = 0;
+}
+
 /// Encode one block for AC successive approximation refinement scan (ah!=0).
 ///
 /// Ported line-by-line from libjpeg-turbo jcphuff.c `encode_mcu_AC_refine`.
@@ -2996,10 +3014,10 @@ fn encode_ac_refine_block(
     }
 
     // Main loop: matches C's ENCODE_COEFS_AC_REFINE.
-    // Correction bits for previously-nonzero coefficients are packed into a u32
-    // accumulator and flushed in a single put_bits call (avoids per-bit write_bits).
+    // Correction bits for previously-nonzero coefficients are packed into a u64
+    // accumulator and flushed via put_bits (max 32 bits per call).
     let mut r: usize = 0;
-    let mut corr_bits: u32 = 0; // packed correction bits (MSB-first)
+    let mut corr_bits: u64 = 0; // packed correction bits (MSB-first)
     let mut corr_len: u8 = 0; // number of buffered correction bits (max 63)
     let mut idx: usize = 0;
 
@@ -3016,15 +3034,11 @@ fn encode_ac_refine_block(
         while r > 15 && idx < eob {
             writer.put_bits(ac_table.ehufco[0xF0] as u32, ac_table.ehufsi[0xF0]);
             r -= 16;
-            if corr_len > 0 {
-                writer.put_bits(corr_bits, corr_len);
-                corr_bits = 0;
-                corr_len = 0;
-            }
+            flush_corr_bits(writer, &mut corr_bits, &mut corr_len);
         }
 
         if temp > 1 {
-            corr_bits = (corr_bits << 1) | (temp & 1) as u32;
+            corr_bits = (corr_bits << 1) | (temp & 1) as u64;
             corr_len += 1;
             idx += 1;
             continue;
@@ -3037,20 +3051,14 @@ fn encode_ac_refine_block(
         let huff_size: u8 = ac_table.ehufsi[symbol];
         let combined: u32 = (huff_code << 1) | sign_bits[idx] as u32;
         writer.put_bits(combined, huff_size + 1);
-        if corr_len > 0 {
-            writer.put_bits(corr_bits, corr_len);
-            corr_bits = 0;
-            corr_len = 0;
-        }
+        flush_corr_bits(writer, &mut corr_bits, &mut corr_len);
         r = 0;
         idx += 1;
     }
 
     if r > 0 || corr_len > 0 {
         writer.put_bits(ac_table.ehufco[0x00] as u32, ac_table.ehufsi[0x00]);
-        if corr_len > 0 {
-            writer.put_bits(corr_bits, corr_len);
-        }
+        flush_corr_bits(writer, &mut corr_bits, &mut corr_len);
     }
 }
 
