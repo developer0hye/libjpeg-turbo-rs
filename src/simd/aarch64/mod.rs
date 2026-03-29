@@ -35,7 +35,7 @@ pub fn encoder_routines() -> EncoderSimdRoutines {
 /// Uses pre-computed reciprocals to replace scalar division with
 /// widening multiply + shift, avoiding the NEON→scalar→NEON roundtrip
 /// that the old `neon_quantize` required for `u32 / u32`.
-fn neon_fdct_quantize(input: &[i16; 64], quant: &QuantDivisors, output: &mut [i16; 64]) {
+fn neon_fdct_quantize(input: &mut [i16; 64], quant: &QuantDivisors, output: &mut [i16; 64]) {
     let mut dct_output: [i16; 64] = [0i16; 64];
     fdct::neon_fdct(input, &mut dct_output);
 
@@ -478,9 +478,18 @@ mod tests {
             let d: u32 = divisors[i] as u32;
             reciprocals[i] = (((1u32 << 16) + d - 1) / d) as u16;
         }
+        let zigzag = &crate::encode::tables::ZIGZAG_ORDER;
+        let mut divisors_zigzag = [0u16; 64];
+        let mut reciprocals_zigzag = [0u16; 64];
+        for zz in 0..64 {
+            divisors_zigzag[zz] = divisors[zigzag[zz]];
+            reciprocals_zigzag[zz] = reciprocals[zigzag[zz]];
+        }
         QuantDivisors {
             divisors,
             reciprocals,
+            divisors_zigzag,
+            reciprocals_zigzag,
         }
     }
 

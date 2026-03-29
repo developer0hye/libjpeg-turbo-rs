@@ -36,6 +36,11 @@ pub struct QuantDivisors {
     pub divisors: [u16; 64],
     /// Fixed-point reciprocals: `((1u32 << 16) + divisor - 1) / divisor` (ceiling).
     pub reciprocals: [u16; 64],
+    /// Divisors re-arranged in zigzag scan order for fused quantize+reorder.
+    /// `divisors_zigzag[zz] = divisors[ZIGZAG_ORDER[zz]]`
+    pub divisors_zigzag: [u16; 64],
+    /// Reciprocals re-arranged in zigzag scan order.
+    pub reciprocals_zigzag: [u16; 64],
 }
 
 /// Function-pointer dispatch table for SIMD-accelerated encode operations.
@@ -46,9 +51,10 @@ pub struct EncoderSimdRoutines {
     pub rgb_to_ycbcr_row: fn(rgb: &[u8], y: &mut [u8], cb: &mut [u8], cr: &mut [u8], width: usize),
 
     /// Combined FDCT (islow) + quantize + zigzag reorder for one 8×8 block.
+    /// `input` is modified in-place by FDCT (caller must not read after call).
     /// `quant` contains pre-scaled divisors and reciprocals.
     /// Output is in zigzag scan order, ready for Huffman encoding.
-    pub fdct_quantize: fn(input: &[i16; 64], quant: &QuantDivisors, output: &mut [i16; 64]),
+    pub fdct_quantize: fn(input: &mut [i16; 64], quant: &QuantDivisors, output: &mut [i16; 64]),
 }
 
 /// Detect available SIMD features and return the best dispatch table.
@@ -85,8 +91,10 @@ pub fn detect_encoder() -> EncoderSimdRoutines {
         return aarch64::encoder_routines();
     }
 
-    // x86_64: no encoder SIMD yet, fall through to scalar
-    // TODO: add x86_64 encoder SIMD (SSE2/AVX2 FDCT, color conversion)
+    #[cfg(all(target_arch = "x86_64", feature = "simd"))]
+    {
+        return x86_64::encoder_routines();
+    }
 
     #[allow(unreachable_code)]
     scalar::encoder_routines()
