@@ -53,16 +53,15 @@ use core::arch::x86_64::*;
 //     Actually G uses 16-bit: mulhi gives (a*b+rounding)>>16
 //   B = Y + Cb + Cb + mulhi(Cb, -14942) // -14942 = (1.772-2)*65536
 
-/// Cr coefficient for R: (1.40200 - 1.0) * 65536 = 26345
-const CR_R_SUB1: i16 = 26345;
-/// Cb coefficient for G: 0.34414 * 65536 = 22554
-const CB_G: i16 = 22554;
-/// Cr coefficient for G: 0.71414 * 65536 = 46802. Exceeds i16!
-/// Split: mulhi(Cr, 46802) = mulhi(Cr, 46802-65536) + Cr = mulhi(Cr, -18734) + Cr
-/// Actually 46802 fits in u16 but not i16 (max 32767). So we need the split.
-const CR_G_SUB1: i16 = 46802_u16 as i16; // wraps to -18734
-/// Cb coefficient for B: (1.77200 - 2.0) * 65536 = -14942
-const CB_B_SUB2: i16 = -14942;
+// Constants matching libjpeg-turbo jdcolext-avx2.asm (i16 for vpmulhw/vpmaddwd).
+/// FIX(0.40200) = 26345 (Cr→R, used with 2×Cr then >>1 rounding)
+const PW_F0402: i16 = 26345;
+/// -FIX(0.22800) = -14942 (Cb→B, used with 2×Cb then >>1 rounding)
+const PW_MF0228: i16 = -14942;
+/// For G channel vpmaddwd: -FIX(0.34414) = -22554 (Cb coefficient)
+const PW_MF0344: i16 = -22554;
+/// For G channel vpmaddwd: FIX(0.28586) = 18734 = 65536 - FIX(0.71414) (Cr coefficient)
+const PW_F0285: i16 = 18734;
 
 /// AVX2-accelerated YCbCr to interleaved RGB row conversion.
 ///
@@ -100,28 +99,37 @@ unsafe fn avx2_ycbcr_to_rgb_row_inner(
         let cb_c = _mm256_sub_epi16(cb16, offset_128);
         let cr_c = _mm256_sub_epi16(cr16, offset_128);
 
-        // R = Y + Cr + mulhi(Cr, CR_R_SUB1)
-        // mulhi(Cr, 26345) computes (Cr * 26345) >> 16 = Cr * 0.40200
-        // So total = Y + Cr * 1.40200
-        let r_offset =
-            _mm256_add_epi16(cr_c, _mm256_mulhi_epi16(cr_c, _mm256_set1_epi16(CR_R_SUB1)));
-        let r16 = _mm256_add_epi16(y16, r_offset);
+        // R = Y + Cr + round(mulhi(2*Cr, F_0_402))
+        // Matches libjpeg-turbo: double input, mulhi, add 1, shift right 1.
+        let one = _mm256_set1_epi16(1);
+        let cr2 = _mm256_add_epi16(cr_c, cr_c);
+        let r_mul = _mm256_mulhi_epi16(cr2, _mm256_set1_epi16(PW_F0402));
+        let r_mul_rounded = _mm256_srai_epi16::<1>(_mm256_add_epi16(r_mul, one));
+        let r16 = _mm256_add_epi16(y16, _mm256_add_epi16(cr_c, r_mul_rounded));
 
-        // G = Y - mulhi(Cb, CB_G) - Cr - mulhi(Cr, CR_G_SUB1)
-        // mulhi(Cb, 22554) = Cb * 0.34414
-        // mulhi(Cr, -18734) + Cr = Cr * (-18734/65536 + 1) = Cr * 0.71414
-        // G = Y - Cb*0.34414 - Cr*0.71414
-        let g_cb = _mm256_mulhi_epi16(cb_c, _mm256_set1_epi16(CB_G));
-        let g_cr = _mm256_add_epi16(cr_c, _mm256_mulhi_epi16(cr_c, _mm256_set1_epi16(CR_G_SUB1)));
-        let g16 = _mm256_sub_epi16(_mm256_sub_epi16(y16, g_cb), g_cr);
+        // G = Y + ((vpmaddwd(Cb:Cr, -22554:18734) + 32768) >> 16) - Cr
+        // vpmaddwd pairs adjacent i16: result[i] = Cb[i]*(-22554) + Cr[i]*18734
+        // = -0.344*Cb + 0.285*Cr (i32). Subtract Cr: -0.344*Cb - 0.714*Cr
+        // This matches libjpeg-turbo jdcolext-avx2.asm and avx2_merged.rs.
+        let cb_cr_lo = _mm256_unpacklo_epi16(cb_c, cr_c);
+        let cb_cr_hi = _mm256_unpackhi_epi16(cb_c, cr_c);
+        let coeff =
+            _mm256_set1_epi32(((PW_F0285 as u16 as u32) << 16 | (PW_MF0344 as u16 as u32)) as i32);
+        let g_lo_32 = _mm256_madd_epi16(cb_cr_lo, coeff);
+        let g_hi_32 = _mm256_madd_epi16(cb_cr_hi, coeff);
+        let one_half = _mm256_set1_epi32(1 << 15);
+        let g_lo_shifted = _mm256_srai_epi32::<16>(_mm256_add_epi32(g_lo_32, one_half));
+        let g_hi_shifted = _mm256_srai_epi32::<16>(_mm256_add_epi32(g_hi_32, one_half));
+        let g_packed = _mm256_packs_epi32(g_lo_shifted, g_hi_shifted);
+        let g_minus_y = _mm256_sub_epi16(g_packed, cr_c);
+        let g16 = _mm256_add_epi16(y16, g_minus_y);
 
-        // B = Y + Cb + Cb + mulhi(Cb, CB_B_SUB2)
-        // mulhi(Cb, -14942) = Cb * (-14942/65536) = Cb * -0.22800
-        // Total = Y + Cb * (2.0 - 0.228) = Y + Cb * 1.77200
-        let b_offset = _mm256_add_epi16(
-            _mm256_add_epi16(cb_c, cb_c),
-            _mm256_mulhi_epi16(cb_c, _mm256_set1_epi16(CB_B_SUB2)),
-        );
+        // B = Y + 2*Cb + round(mulhi(2*Cb, MF_0_228))
+        // Matches libjpeg-turbo: double input, mulhi, add 1, shift right 1.
+        let cb2 = _mm256_add_epi16(cb_c, cb_c);
+        let b_mul = _mm256_mulhi_epi16(cb2, _mm256_set1_epi16(PW_MF0228));
+        let b_mul_rounded = _mm256_srai_epi16::<1>(_mm256_add_epi16(b_mul, one));
+        let b_offset = _mm256_add_epi16(cb2, b_mul_rounded);
         let b16 = _mm256_add_epi16(y16, b_offset);
 
         // Pack i16 -> u8 with saturation, handling AVX2 lane crossing
