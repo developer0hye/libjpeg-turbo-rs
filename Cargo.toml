@@ -2,7 +2,7 @@
 name = "libjpeg-turbo-rs"
 version = "0.1.1"
 edition = "2021"
-rust-version = "1.75"
+rust-version = "1.87"
 description = "Pure Rust reimplementation of libjpeg-turbo with NEON/AVX2 SIMD acceleration"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/developer0hye/libjpeg-turbo-rs"
