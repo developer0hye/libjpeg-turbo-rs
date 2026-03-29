@@ -2596,50 +2596,8 @@ impl<'a> Decoder<'a> {
                     });
                 }
 
-                // Allocate upsampled buffers
-                let alloc_size = full_width * full_height;
-                let mut cb_full = Vec::with_capacity(alloc_size);
-                let mut cr_full = Vec::with_capacity(alloc_size);
-                // SAFETY: all code paths below write every element before reading.
-                unsafe {
-                    cb_full.set_len(alloc_size);
-                    cr_full.set_len(alloc_size);
-                }
-
-                if self.fast_upsample {
-                    // Nearest-neighbor upsampling (fast path)
-                    crate::decode::toggles::upsample_nearest(
-                        &component_planes[1],
-                        cb_w,
-                        cb_h,
-                        &mut cb_full,
-                        full_width,
-                        h_factor,
-                        v_factor,
-                    );
-                    crate::decode::toggles::upsample_nearest(
-                        &component_planes[2],
-                        cb_w,
-                        cb_h,
-                        &mut cr_full,
-                        full_width,
-                        h_factor,
-                        v_factor,
-                    );
-                } else if h_factor == 2 && v_factor == 1 {
-                    for row in 0..cb_h {
-                        self.fancy_upsample_h2v1(
-                            &component_planes[1][row * cb_w..],
-                            cb_w,
-                            &mut cb_full[row * full_width..],
-                        );
-                        self.fancy_upsample_h2v1(
-                            &component_planes[2][row * cb_w..],
-                            cb_w,
-                            &mut cr_full[row * full_width..],
-                        );
-                    }
-                } else if h_factor == 2 && v_factor == 2 {
+                // Row-streaming H2V2: skip full-plane allocation, process 2 rows at a time.
+                if !self.fast_upsample && h_factor == 2 && v_factor == 2 {
                     // Row-streaming H2V2: fuse upsample + color convert to avoid
                     // allocating full-size cb_full/cr_full buffers (~4MB for 1080p).
                     // Process 2 output rows at a time, keeping data in L1/L2 cache.
@@ -2736,6 +2694,53 @@ impl<'a> Decoder<'a> {
                         saved_markers: self.metadata.saved_markers.clone(),
                         warnings: warnings.clone(),
                     });
+                }
+
+                // All remaining paths need full-plane cb_full/cr_full buffers.
+                let alloc_size = full_width * full_height;
+                let mut cb_full = Vec::with_capacity(alloc_size);
+                let mut cr_full = Vec::with_capacity(alloc_size);
+                #[allow(clippy::uninit_vec)]
+                unsafe {
+                    cb_full.set_len(alloc_size);
+                    cr_full.set_len(alloc_size);
+                }
+
+                if self.fast_upsample {
+                    crate::decode::toggles::upsample_nearest(
+                        &component_planes[1],
+                        cb_w,
+                        cb_h,
+                        &mut cb_full,
+                        full_width,
+                        h_factor,
+                        v_factor,
+                    );
+                    crate::decode::toggles::upsample_nearest(
+                        &component_planes[2],
+                        cb_w,
+                        cb_h,
+                        &mut cr_full,
+                        full_width,
+                        h_factor,
+                        v_factor,
+                    );
+                } else if h_factor == 2 && v_factor == 1 {
+                    for row in 0..cb_h {
+                        self.fancy_upsample_h2v1(
+                            &component_planes[1][row * cb_w..],
+                            cb_w,
+                            &mut cb_full[row * full_width..],
+                        );
+                        self.fancy_upsample_h2v1(
+                            &component_planes[2][row * cb_w..],
+                            cb_w,
+                            &mut cr_full[row * full_width..],
+                        );
+                    }
+                } else if h_factor == 2 && v_factor == 2 {
+                    self.fancy_h2v2(&component_planes[1], cb_w, cb_h, &mut cb_full, full_width);
+                    self.fancy_h2v2(&component_planes[2], cb_w, cb_h, &mut cr_full, full_width);
                 } else if h_factor == 1 && v_factor == 2 {
                     // S440: vertical-only 2x
                     self.fancy_h1v2(&component_planes[1], cb_w, cb_h, &mut cb_full, full_width);
