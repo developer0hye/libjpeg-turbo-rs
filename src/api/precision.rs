@@ -459,6 +459,193 @@ fn write_sof0_precision(
 // 12-bit decompress
 // ============================================================
 
+/// Fused h2v2 fancy upsample for 12-bit (i16) planes.
+/// Exactly matches C jdsample.c h2v2_fancy_upsample: computes column sums
+/// (vertical blend) then horizontal interpolation with a single >>4 shift.
+#[allow(clippy::too_many_arguments)]
+fn fancy_upsample_12bit(
+    input: &[i16],
+    in_stride: usize,
+    in_w: usize,
+    in_h: usize,
+    h_factor: usize,
+    v_factor: usize,
+    output: &mut [i16],
+    out_w: usize,
+    out_h: usize,
+) {
+    if h_factor == 2 && v_factor == 2 {
+        // Fused h2v2: matches C h2v2_fancy_upsample exactly.
+        for y in 0..in_h {
+            let row0 = |x: usize| input[y * in_stride + x] as i32;
+            let above = |x: usize| {
+                if y > 0 {
+                    input[(y - 1) * in_stride + x] as i32
+                } else {
+                    row0(x)
+                }
+            };
+            let below = |x: usize| {
+                if y + 1 < in_h {
+                    input[(y + 1) * in_stride + x] as i32
+                } else {
+                    row0(x)
+                }
+            };
+
+            for v in 0..2 {
+                let oy: usize = y * 2 + v;
+                if oy >= out_h {
+                    break;
+                }
+                // inptr0 = nearest row, inptr1 = farther row
+                let (near, far): (Box<dyn Fn(usize) -> i32>, Box<dyn Fn(usize) -> i32>) = if v == 0
+                {
+                    (Box::new(|x| row0(x)), Box::new(|x| above(x)))
+                } else {
+                    (Box::new(|x| row0(x)), Box::new(|x| below(x)))
+                };
+
+                let colsum = |x: usize| near(x) * 3 + far(x);
+
+                if in_w == 0 {
+                    continue;
+                }
+                if in_w == 1 {
+                    let cs: i32 = colsum(0);
+                    if out_w > 0 {
+                        output[oy * out_w] = ((cs * 4 + 8) >> 4) as i16;
+                    }
+                    if out_w > 1 {
+                        output[oy * out_w + 1] = ((cs * 4 + 7) >> 4) as i16;
+                    }
+                    continue;
+                }
+
+                // First column
+                let mut this_cs: i32 = colsum(0);
+                let mut next_cs: i32 = colsum(1);
+                output[oy * out_w] = ((this_cs * 4 + 8) >> 4) as i16;
+                if out_w > 1 {
+                    output[oy * out_w + 1] = ((this_cs * 3 + next_cs + 7) >> 4) as i16;
+                }
+                let mut last_cs: i32 = this_cs;
+                this_cs = next_cs;
+
+                // Middle columns
+                for x in 1..in_w - 1 {
+                    next_cs = colsum(x + 1);
+                    let ox: usize = x * 2;
+                    if ox < out_w {
+                        output[oy * out_w + ox] = ((this_cs * 3 + last_cs + 8) >> 4) as i16;
+                    }
+                    if ox + 1 < out_w {
+                        output[oy * out_w + ox + 1] = ((this_cs * 3 + next_cs + 7) >> 4) as i16;
+                    }
+                    last_cs = this_cs;
+                    this_cs = next_cs;
+                }
+
+                // Last column
+                let ox: usize = (in_w - 1) * 2;
+                if ox < out_w {
+                    output[oy * out_w + ox] = ((this_cs * 3 + last_cs + 8) >> 4) as i16;
+                }
+                if ox + 1 < out_w {
+                    output[oy * out_w + ox + 1] = ((this_cs * 4 + 7) >> 4) as i16;
+                }
+            }
+        }
+    } else if h_factor == 2 && v_factor == 1 {
+        // h2v1: horizontal-only fancy upsample
+        for y in 0..in_h.min(out_h) {
+            let row = |x: usize| input[y * in_stride + x] as i32;
+            if in_w == 0 {
+                continue;
+            }
+            // First column
+            let inval: i32 = row(0);
+            output[y * out_w] = inval as i16;
+            if out_w > 1 && in_w > 1 {
+                output[y * out_w + 1] = ((inval * 3 + row(1) + 2) >> 2) as i16;
+            } else if out_w > 1 {
+                output[y * out_w + 1] = inval as i16;
+            }
+            // Middle
+            for x in 1..in_w - 1 {
+                let cur: i32 = row(x);
+                let ox: usize = x * 2;
+                if ox < out_w {
+                    output[y * out_w + ox] = ((cur * 3 + row(x - 1) + 1) >> 2) as i16;
+                }
+                if ox + 1 < out_w {
+                    output[y * out_w + ox + 1] = ((cur * 3 + row(x + 1) + 2) >> 2) as i16;
+                }
+            }
+            // Last column
+            if in_w > 1 {
+                let x: usize = in_w - 1;
+                let cur: i32 = row(x);
+                let ox: usize = x * 2;
+                if ox < out_w {
+                    output[y * out_w + ox] = ((cur * 3 + row(x - 1) + 1) >> 2) as i16;
+                }
+                if ox + 1 < out_w {
+                    output[y * out_w + ox + 1] = cur as i16;
+                }
+            }
+        }
+    } else if h_factor == 1 && v_factor == 2 {
+        // h1v2: vertical-only fancy upsample with ordered dither [1, 2]
+        for y in 0..in_h {
+            let cur = |x: usize| input[y * in_stride + x] as i32;
+            let above = |x: usize| {
+                if y > 0 {
+                    input[(y - 1) * in_stride + x] as i32
+                } else {
+                    cur(x)
+                }
+            };
+            let below = |x: usize| {
+                if y + 1 < in_h {
+                    input[(y + 1) * in_stride + x] as i32
+                } else {
+                    cur(x)
+                }
+            };
+            let oy_top: usize = y * 2;
+            let oy_bot: usize = y * 2 + 1;
+            for x in 0..out_w.min(in_w) {
+                if oy_top < out_h {
+                    output[oy_top * out_w + x] = ((3 * cur(x) + above(x) + 1) >> 2) as i16;
+                }
+                if oy_bot < out_h {
+                    output[oy_bot * out_w + x] = ((3 * cur(x) + below(x) + 2) >> 2) as i16;
+                }
+            }
+        }
+    } else {
+        // Generic nearest-neighbor
+        for y in 0..in_h {
+            for dy in 0..v_factor {
+                let oy: usize = y * v_factor + dy;
+                if oy >= out_h {
+                    break;
+                }
+                for x in 0..in_w {
+                    let val: i16 = input[y * in_stride + x];
+                    for dx in 0..h_factor {
+                        let ox: usize = x * h_factor + dx;
+                        if ox < out_w {
+                            output[oy * out_w + ox] = val;
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
 /// Decompress JPEG to 12-bit sample data.
 /// Decompress a 12-bit JPEG (SOF1 extended sequential) to i16 samples.
 ///
@@ -606,8 +793,8 @@ pub fn decompress_12bit(data: &[u8]) -> Result<Image12> {
                             let val: i32 = block[k] as i32 * qt.values[k] as i32;
                             deq[k] = val.clamp(-32768, 32767) as i16;
                         }
-                        // IDCT
-                        let idct_out: [i16; 64] = crate::decode::idct::idct_8x8(&deq);
+                        // IDCT — use 12-bit variant with PASS1_BITS=1 to avoid overflow
+                        let idct_out: [i16; 64] = crate::decode::idct::idct_8x8_12bit(&deq);
                         // Write to component plane at component resolution.
                         let block_x: usize = (mcu_col * h_samp + h) * 8;
                         let block_y: usize = (mcu_row * v_samp + v) * 8;
@@ -625,15 +812,64 @@ pub fn decompress_12bit(data: &[u8]) -> Result<Image12> {
             mcu_count += 1;
         }
     }
-    // Interleave components into output, upsampling subsampled components.
+    // Upsample chroma planes to full resolution using fancy triangle filter
+    // (matches C jdsample.c h2v2_fancy_upsample / h2v1_fancy_upsample).
+    let mut full_planes: Vec<Vec<i16>> = Vec::with_capacity(num_components);
+    for c in 0..num_components {
+        let h_factor: usize = max_h_samp / comp_h_samp[c];
+        let v_factor: usize = max_v_samp / comp_v_samp[c];
+        if h_factor == 1 && v_factor == 1 {
+            // No upsampling needed — copy as-is (trimmed to image size).
+            let pw: usize = comp_plane_w[c];
+            let mut full: Vec<i16> = vec![0i16; width * height];
+            for y in 0..height {
+                for x in 0..width {
+                    full[y * width + x] = planes[c][y * pw + x];
+                }
+            }
+            full_planes.push(full);
+        } else {
+            let in_w: usize = comp_plane_w[c].min(width / h_factor + 1);
+            let in_h: usize = comp_plane_h[c].min(height / v_factor + 1);
+            let pw: usize = comp_plane_w[c];
+            let mut full: Vec<i16> = vec![0i16; width * height];
+            fancy_upsample_12bit(
+                &planes[c], pw, in_w, in_h, h_factor, v_factor, &mut full, width, height,
+            );
+            full_planes.push(full);
+        }
+    }
+
+    // Interleave and convert YCbCr → RGB (or output raw for grayscale).
     let mut result: Vec<i16> = Vec::with_capacity(width * height * num_components);
-    for y in 0..height {
-        for x in 0..width {
-            for c in 0..num_components {
-                // Map full-resolution pixel to component-resolution pixel.
-                let cx: usize = x * comp_h_samp[c] / max_h_samp;
-                let cy: usize = y * comp_v_samp[c] / max_v_samp;
-                result.push(planes[c][cy * comp_plane_w[c] + cx]);
+    if num_components == 3 {
+        // YCbCr → RGB color conversion (12-bit range: 0–4095, center=2048).
+        // Matches C jdcolor.c exactly: SCALEBITS=16, FIX(x) = (x * 65536 + 0.5).
+        const FIX_1_402: i32 = 91881;
+        const FIX_0_344: i32 = 22554;
+        const FIX_0_714: i32 = 46802;
+        const FIX_1_772: i32 = 116130;
+        const ONE_HALF: i32 = 1 << 15; // 2^15
+        const SCALEBITS: i32 = 16;
+        for y in 0..height {
+            for x in 0..width {
+                let yy: i32 = full_planes[0][y * width + x] as i32;
+                let cb: i32 = full_planes[1][y * width + x] as i32 - 2048;
+                let cr: i32 = full_planes[2][y * width + x] as i32 - 2048;
+                let r: i32 = yy + ((FIX_1_402 * cr + ONE_HALF) >> SCALEBITS);
+                let g: i32 = yy + ((-FIX_0_344 * cb + -FIX_0_714 * cr + ONE_HALF) >> SCALEBITS);
+                let b: i32 = yy + ((FIX_1_772 * cb + ONE_HALF) >> SCALEBITS);
+                result.push(r.clamp(0, 4095) as i16);
+                result.push(g.clamp(0, 4095) as i16);
+                result.push(b.clamp(0, 4095) as i16);
+            }
+        }
+    } else {
+        for y in 0..height {
+            for x in 0..width {
+                for c in 0..num_components {
+                    result.push(full_planes[c][y * width + x]);
+                }
             }
         }
     }
