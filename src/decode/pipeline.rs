@@ -498,6 +498,7 @@ impl<'a> Decoder<'a> {
             PixelFormat::Rgba => self.ycbcr_to_rgba_row(y, cb, cr, out, width),
             PixelFormat::Bgr => self.ycbcr_to_bgr_row(y, cb, cr, out, width),
             PixelFormat::Bgra => self.ycbcr_to_bgra_row(y, cb, cr, out, width),
+            #[allow(unreachable_code)]
             PixelFormat::Rgbx => {
                 #[cfg(all(target_arch = "aarch64", feature = "simd"))]
                 {
@@ -516,6 +517,7 @@ impl<'a> Decoder<'a> {
                 }
                 crate::decode::color::ycbcr_to_generic_4bpp_row(y, cb, cr, out, width, 0, 1, 2, 3)
             }
+            #[allow(unreachable_code)]
             PixelFormat::Bgrx => {
                 #[cfg(all(target_arch = "aarch64", feature = "simd"))]
                 {
@@ -534,6 +536,7 @@ impl<'a> Decoder<'a> {
                 }
                 crate::decode::color::ycbcr_to_generic_4bpp_row(y, cb, cr, out, width, 2, 1, 0, 3)
             }
+            #[allow(unreachable_code)]
             PixelFormat::Xrgb => {
                 #[cfg(all(target_arch = "aarch64", feature = "simd"))]
                 {
@@ -552,6 +555,7 @@ impl<'a> Decoder<'a> {
                 }
                 crate::decode::color::ycbcr_to_generic_4bpp_row(y, cb, cr, out, width, 1, 2, 3, 0)
             }
+            #[allow(unreachable_code)]
             PixelFormat::Xbgr => {
                 #[cfg(all(target_arch = "aarch64", feature = "simd"))]
                 {
@@ -570,6 +574,7 @@ impl<'a> Decoder<'a> {
                 }
                 crate::decode::color::ycbcr_to_generic_4bpp_row(y, cb, cr, out, width, 3, 2, 1, 0)
             }
+            #[allow(unreachable_code)]
             PixelFormat::Argb => {
                 #[cfg(all(target_arch = "aarch64", feature = "simd"))]
                 {
@@ -588,6 +593,7 @@ impl<'a> Decoder<'a> {
                 }
                 crate::decode::color::ycbcr_to_generic_4bpp_row(y, cb, cr, out, width, 1, 2, 3, 0)
             }
+            #[allow(unreachable_code)]
             PixelFormat::Abgr => {
                 #[cfg(all(target_arch = "aarch64", feature = "simd"))]
                 {
