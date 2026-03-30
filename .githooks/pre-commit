@@ -1,0 +1,21 @@
+#!/bin/sh
+# Pre-commit hook: format check + clippy
+# Installed via: git config core.hooksPath .githooks
+
+set -e
+
+echo "[pre-commit] Running cargo fmt --check..."
+cargo fmt -- --check
+if [ $? -ne 0 ]; then
+    echo "[pre-commit] Format check failed. Run 'cargo fmt' first."
+    exit 1
+fi
+
+echo "[pre-commit] Running cargo clippy..."
+cargo clippy --lib -- -D warnings
+if [ $? -ne 0 ]; then
+    echo "[pre-commit] Clippy failed. Fix warnings before committing."
+    exit 1
+fi
+
+echo "[pre-commit] All checks passed."
