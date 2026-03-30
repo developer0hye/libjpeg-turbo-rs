@@ -344,18 +344,55 @@ pub fn transform_jpeg(data: &[u8], op: TransformOp) -> Result<Vec<u8>> {
         TransformOp::Transpose | TransformOp::Transverse | TransformOp::Rot90 | TransformOp::Rot270
     );
 
+    // Spatial transforms operate on natural (row-major) order coefficients.
+    // Blocks are stored in zigzag order, so convert before/after transform.
+    convert_all_to_natural(&mut coeffs.components);
+
     // Transform each component
     for comp in &mut coeffs.components {
         let old_bx = comp.blocks_x;
         let old_by = comp.blocks_y;
         let mut new_blocks = vec![[0i16; 64]; old_bx * old_by];
 
-        if swaps_dims {
-            // Transpose block grid + apply per-block transform
+        if matches!(op, TransformOp::Transpose) {
+            // Transpose: swap block (bx, by) → (by, bx)
             for by in 0..old_by {
                 for bx in 0..old_bx {
-                    let src_idx = by * old_bx + bx;
-                    let dst_idx = bx * old_by + by;
+                    let src_idx: usize = by * old_bx + bx;
+                    let dst_idx: usize = bx * old_by + by;
+                    transform_fn(&comp.blocks[src_idx], &mut new_blocks[dst_idx]);
+                }
+            }
+            comp.blocks_x = old_by;
+            comp.blocks_y = old_bx;
+        } else if matches!(op, TransformOp::Rot90) {
+            // Rot90 CW = transpose grid + reverse columns
+            for by in 0..old_by {
+                for bx in 0..old_bx {
+                    let src_idx: usize = by * old_bx + bx;
+                    let dst_idx: usize = bx * old_by + (old_by - 1 - by);
+                    transform_fn(&comp.blocks[src_idx], &mut new_blocks[dst_idx]);
+                }
+            }
+            comp.blocks_x = old_by;
+            comp.blocks_y = old_bx;
+        } else if matches!(op, TransformOp::Rot270) {
+            // Rot270 CW = transpose grid + reverse rows
+            for by in 0..old_by {
+                for bx in 0..old_bx {
+                    let src_idx: usize = by * old_bx + bx;
+                    let dst_idx: usize = (old_bx - 1 - bx) * old_by + by;
+                    transform_fn(&comp.blocks[src_idx], &mut new_blocks[dst_idx]);
+                }
+            }
+            comp.blocks_x = old_by;
+            comp.blocks_y = old_bx;
+        } else if matches!(op, TransformOp::Transverse) {
+            // Transverse = transpose grid + reverse both rows and columns
+            for by in 0..old_by {
+                for bx in 0..old_bx {
+                    let src_idx: usize = by * old_bx + bx;
+                    let dst_idx: usize = (old_bx - 1 - bx) * old_by + (old_by - 1 - by);
                     transform_fn(&comp.blocks[src_idx], &mut new_blocks[dst_idx]);
                 }
             }
@@ -397,6 +434,9 @@ pub fn transform_jpeg(data: &[u8], op: TransformOp) -> Result<Vec<u8>> {
 
         comp.blocks = new_blocks;
     }
+
+    // Convert back to zigzag order for encoder.
+    convert_all_to_zigzag(&mut coeffs.components);
 
     // Swap dimensions if needed
     if swaps_dims {
@@ -587,6 +627,12 @@ pub fn transform_jpeg_with_options(data: &[u8], options: &TransformOptions) -> R
         coeffs.components[0].quant_table_index = 0;
     }
 
+    // Spatial transforms operate on natural (row-major) order coefficients.
+    // Blocks are stored in zigzag order, so convert before/after transform.
+    if op != TransformOp::None {
+        convert_all_to_natural(&mut coeffs.components);
+    }
+
     // Apply spatial transform (reuses existing logic from transform_jpeg).
     if op != TransformOp::None {
         let transform_fn: fn(&[i16; 64], &mut [i16; 64]) = match op {
@@ -605,11 +651,41 @@ pub fn transform_jpeg_with_options(data: &[u8], options: &TransformOptions) -> R
             let old_by: usize = comp.blocks_y;
             let mut new_blocks: Vec<[i16; 64]> = vec![[0i16; 64]; old_bx * old_by];
 
-            if swaps_dims {
+            if matches!(op, TransformOp::Transpose) {
                 for by in 0..old_by {
                     for bx in 0..old_bx {
                         let src_idx: usize = by * old_bx + bx;
                         let dst_idx: usize = bx * old_by + by;
+                        transform_fn(&comp.blocks[src_idx], &mut new_blocks[dst_idx]);
+                    }
+                }
+                comp.blocks_x = old_by;
+                comp.blocks_y = old_bx;
+            } else if matches!(op, TransformOp::Rot90) {
+                for by in 0..old_by {
+                    for bx in 0..old_bx {
+                        let src_idx: usize = by * old_bx + bx;
+                        let dst_idx: usize = bx * old_by + (old_by - 1 - by);
+                        transform_fn(&comp.blocks[src_idx], &mut new_blocks[dst_idx]);
+                    }
+                }
+                comp.blocks_x = old_by;
+                comp.blocks_y = old_bx;
+            } else if matches!(op, TransformOp::Rot270) {
+                for by in 0..old_by {
+                    for bx in 0..old_bx {
+                        let src_idx: usize = by * old_bx + bx;
+                        let dst_idx: usize = (old_bx - 1 - bx) * old_by + by;
+                        transform_fn(&comp.blocks[src_idx], &mut new_blocks[dst_idx]);
+                    }
+                }
+                comp.blocks_x = old_by;
+                comp.blocks_y = old_bx;
+            } else if matches!(op, TransformOp::Transverse) {
+                for by in 0..old_by {
+                    for bx in 0..old_bx {
+                        let src_idx: usize = by * old_bx + bx;
+                        let dst_idx: usize = (old_bx - 1 - bx) * old_by + (old_by - 1 - by);
                         transform_fn(&comp.blocks[src_idx], &mut new_blocks[dst_idx]);
                     }
                 }
@@ -654,6 +730,9 @@ pub fn transform_jpeg_with_options(data: &[u8], options: &TransformOptions) -> R
                 std::mem::swap(&mut comp.h_sampling, &mut comp.v_sampling);
             }
         }
+
+        // Convert back to zigzag order for encoder.
+        convert_all_to_zigzag(&mut coeffs.components);
     }
 
     // CUSTOM_FILTER: invoke user callback on each block after spatial transform.
@@ -876,11 +955,29 @@ fn natural_to_zigzag(natural: &[i16; 64]) -> [i16; 64] {
     zigzag
 }
 
+/// Convert a block from zigzag order to natural (row-major) order.
+fn zigzag_to_natural(zigzag: &[i16; 64]) -> [i16; 64] {
+    let mut natural = [0i16; 64];
+    for i in 0..64 {
+        natural[i] = zigzag[NATURAL_ORDER[i]];
+    }
+    natural
+}
+
 /// Convert all blocks in comp_data from natural to zigzag order.
 fn convert_all_to_zigzag(comp_data: &mut [ComponentCoefficients]) {
     for comp in comp_data.iter_mut() {
         for block in &mut comp.blocks {
             *block = natural_to_zigzag(block);
+        }
+    }
+}
+
+/// Convert all blocks in comp_data from zigzag to natural order.
+fn convert_all_to_natural(comp_data: &mut [ComponentCoefficients]) {
+    for comp in comp_data.iter_mut() {
+        for block in &mut comp.blocks {
+            *block = zigzag_to_natural(block);
         }
     }
 }
