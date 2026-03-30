@@ -502,25 +502,22 @@ fn c_djpeg_cross_validation_common_subsamplings_diff_zero() {
     }
 }
 
-/// C djpeg cross-validation for S440 — currently has max_diff=2 (decode bug).
+/// C djpeg cross-validation for S440 — diff=0.
 #[test]
-#[ignore = "S440 decode has max_diff=2 vs C djpeg — upsample bug, see issue #112"]
 fn c_djpeg_cross_validation_s440_diff_zero() {
     let djpeg: PathBuf = djpeg_path().expect("djpeg required");
     c_djpeg_cross_validate_subsampling(&djpeg, Subsampling::S440);
 }
 
-/// C djpeg cross-validation for S411 — currently has max_diff=43 (decode bug).
+/// C djpeg cross-validation for S411 — diff=0.
 #[test]
-#[ignore = "S411 decode has max_diff=43 vs C djpeg — upsample bug, see issue #112"]
 fn c_djpeg_cross_validation_s411_diff_zero() {
     let djpeg: PathBuf = djpeg_path().expect("djpeg required");
     c_djpeg_cross_validate_subsampling(&djpeg, Subsampling::S411);
 }
 
-/// C djpeg cross-validation for S441 — currently has max_diff=41 (decode bug).
+/// C djpeg cross-validation for S441 — diff=0.
 #[test]
-#[ignore = "S441 decode has max_diff=41 vs C djpeg — upsample bug, see issue #112"]
 fn c_djpeg_cross_validation_s441_diff_zero() {
     let djpeg: PathBuf = djpeg_path().expect("djpeg required");
     c_djpeg_cross_validate_subsampling(&djpeg, Subsampling::S441);
