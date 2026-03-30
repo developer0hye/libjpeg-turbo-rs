@@ -477,20 +477,12 @@ fn fancy_upsample_12bit(
     if h_factor == 2 && v_factor == 2 {
         // Fused h2v2: matches C h2v2_fancy_upsample exactly.
         for y in 0..in_h {
-            let row0 = |x: usize| input[y * in_stride + x] as i32;
-            let above = |x: usize| {
-                if y > 0 {
-                    input[(y - 1) * in_stride + x] as i32
-                } else {
-                    row0(x)
-                }
-            };
-            let below = |x: usize| {
-                if y + 1 < in_h {
-                    input[(y + 1) * in_stride + x] as i32
-                } else {
-                    row0(x)
-                }
+            let cur_off: usize = y * in_stride;
+            let above_off: usize = if y > 0 { (y - 1) * in_stride } else { cur_off };
+            let below_off: usize = if y + 1 < in_h {
+                (y + 1) * in_stride
+            } else {
+                cur_off
             };
 
             for v in 0..2 {
@@ -499,14 +491,8 @@ fn fancy_upsample_12bit(
                     break;
                 }
                 // inptr0 = nearest row, inptr1 = farther row
-                let (near, far): (Box<dyn Fn(usize) -> i32>, Box<dyn Fn(usize) -> i32>) = if v == 0
-                {
-                    (Box::new(|x| row0(x)), Box::new(|x| above(x)))
-                } else {
-                    (Box::new(|x| row0(x)), Box::new(|x| below(x)))
-                };
-
-                let colsum = |x: usize| near(x) * 3 + far(x);
+                let far_off: usize = if v == 0 { above_off } else { below_off };
+                let colsum = |x: usize| input[cur_off + x] as i32 * 3 + input[far_off + x] as i32;
 
                 if in_w == 0 {
                     continue;
@@ -867,8 +853,8 @@ pub fn decompress_12bit(data: &[u8]) -> Result<Image12> {
     } else {
         for y in 0..height {
             for x in 0..width {
-                for c in 0..num_components {
-                    result.push(full_planes[c][y * width + x]);
+                for plane in &full_planes[..num_components] {
+                    result.push(plane[y * width + x]);
                 }
             }
         }
