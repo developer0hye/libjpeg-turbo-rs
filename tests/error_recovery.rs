@@ -1,4 +1,4 @@
-use libjpeg_turbo_rs::{decompress, decompress_lenient, DecodeWarning};
+use libjpeg_turbo_rs::{decompress, decompress_lenient};
 
 #[test]
 fn valid_jpeg_lenient_no_warnings() {
@@ -69,14 +69,12 @@ fn corrupt_middle_lenient_recovers() {
     for i in mid..mid + 100 {
         data[i] = 0x00;
     }
-    let result = decompress_lenient(&data);
-    // Should either succeed with warnings or succeed without warnings
-    // (corruption may land in non-critical area)
-    if let Ok(img) = result {
-        assert_eq!(img.width, 320);
-        assert_eq!(img.height, 240);
-        assert_eq!(img.data.len(), 320 * 240 * 3);
-    }
+    // Lenient decoder must recover from mid-stream corruption.
+    let img =
+        decompress_lenient(&data).expect("lenient decoder must recover from mid-stream corruption");
+    assert_eq!(img.width, 320);
+    assert_eq!(img.height, 240);
+    assert_eq!(img.data.len(), 320 * 240 * 3);
 }
 
 #[test]
@@ -84,12 +82,16 @@ fn very_short_truncation_lenient() {
     let data = include_bytes!("fixtures/photo_320x240_420.jpg");
     // Keep only markers and very beginning of entropy data
     let truncated = &data[..500.min(data.len())];
+    // Data this short (500 bytes) may not contain enough markers to decode.
+    // C djpeg also fails on this input. The requirement is: no panic.
+    // If it does succeed, verify output consistency.
     let result = decompress_lenient(truncated);
-    // Should return partial image, not panic
     if let Ok(img) = result {
         assert_eq!(
             img.data.len(),
-            img.width * img.height * img.pixel_format.bytes_per_pixel()
+            img.width * img.height * img.pixel_format.bytes_per_pixel(),
+            "very short truncation: output buffer size mismatch"
         );
     }
+    // Err is acceptable — C djpeg also fails on 500-byte truncation.
 }

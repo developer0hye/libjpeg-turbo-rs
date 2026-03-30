@@ -4,6 +4,9 @@
 //! (reference test images), and that our encoder produces spec-compliant output
 //! that round-trips correctly.
 
+use std::path::{Path, PathBuf};
+use std::process::Command;
+
 use libjpeg_turbo_rs::api::streaming::StreamingDecoder;
 use libjpeg_turbo_rs::{
     compress, compress_arithmetic, decompress, decompress_to, Image, PixelFormat, ScalingFactor,
@@ -244,10 +247,16 @@ fn c_arithmetic_pixel_similarity_to_baseline() {
     let baseline: Image = decompress_to(&baseline_data, PixelFormat::Rgb).unwrap();
     let arith: Image = decompress_to(&arith_data, PixelFormat::Rgb).unwrap();
 
-    // Both are encoded from the same source, so pixel values should be similar.
-    // Arithmetic coding does not change pixel values when the source is the same,
-    // but they were likely encoded with different quality or different entropy coder,
-    // so we allow a generous tolerance on mean absolute difference.
+    // Both are encoded from the same source with different entropy coders.
+    // Quantization tables may differ, so decoded pixels will not be identical,
+    // but should be very close. Actual measured: max_diff=17, mean_diff=0.31.
+    let max_diff: u8 = baseline
+        .data
+        .iter()
+        .zip(arith.data.iter())
+        .map(|(&a, &b)| (a as i16 - b as i16).unsigned_abs() as u8)
+        .max()
+        .unwrap_or(0);
     let total_diff: u64 = baseline
         .data
         .iter()
@@ -256,9 +265,14 @@ fn c_arithmetic_pixel_similarity_to_baseline() {
         .sum();
     let mean_diff: f64 = total_diff as f64 / baseline.data.len() as f64;
     assert!(
-        mean_diff < 100.0,
-        "baseline vs arithmetic mean pixel diff too large: {:.2}",
+        mean_diff < 1.0,
+        "baseline vs arithmetic mean pixel diff too large: {:.2} (expected < 1.0)",
         mean_diff
+    );
+    assert!(
+        max_diff <= 20,
+        "baseline vs arithmetic max pixel diff too large: {} (expected <= 20)",
+        max_diff
     );
 }
 
@@ -492,9 +506,10 @@ fn encode_q100_high_psnr() {
     let decoded: Image = decompress_to(&jpeg, PixelFormat::Rgb).unwrap();
 
     let psnr_val: f64 = psnr(&pixels, &decoded.data);
+    // Q100 with S444 should be near-lossless. Actual measured: ~51 dB.
     assert!(
-        psnr_val > 40.0,
-        "Q100 PSNR should be > 40 dB, got {:.1} dB",
+        psnr_val > 45.0,
+        "Q100 PSNR should be > 45 dB, got {:.1} dB",
         psnr_val
     );
 }
@@ -704,5 +719,187 @@ fn c_testorig_rgba_matches_rgb_channels() {
         assert_eq!(rgb_r, rgba_r, "pixel {}: R mismatch", p);
         assert_eq!(rgb_g, rgba_g, "pixel {}: G mismatch", p);
         assert_eq!(rgb_b, rgba_b, "pixel {}: B mismatch", p);
+    }
+}
+
+// ===========================================================================
+// Section 9: C djpeg cross-validation — Rust decode must match C decode exactly
+// ===========================================================================
+
+fn djpeg_path() -> Option<PathBuf> {
+    let homebrew: PathBuf = PathBuf::from("/opt/homebrew/bin/djpeg");
+    if homebrew.exists() {
+        return Some(homebrew);
+    }
+    Command::new("which")
+        .arg("djpeg")
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| PathBuf::from(String::from_utf8_lossy(&o.stdout).trim().to_string()))
+}
+
+fn parse_ppm(path: &Path) -> (usize, usize, Vec<u8>) {
+    let raw: Vec<u8> = std::fs::read(path).expect("failed to read PPM");
+    assert!(&raw[0..2] == b"P6", "not P6 PPM");
+    let mut idx: usize = 2;
+    loop {
+        while idx < raw.len() && raw[idx].is_ascii_whitespace() {
+            idx += 1;
+        }
+        if idx < raw.len() && raw[idx] == b'#' {
+            while idx < raw.len() && raw[idx] != b'\n' {
+                idx += 1;
+            }
+        } else {
+            break;
+        }
+    }
+    let (w, next) = read_ppm_number(&raw, idx);
+    idx = next;
+    while idx < raw.len() && raw[idx].is_ascii_whitespace() {
+        idx += 1;
+    }
+    let (h, next) = read_ppm_number(&raw, idx);
+    idx = next;
+    while idx < raw.len() && raw[idx].is_ascii_whitespace() {
+        idx += 1;
+    }
+    let (_maxval, next) = read_ppm_number(&raw, idx);
+    idx = next + 1;
+    (w, h, raw[idx..idx + w * h * 3].to_vec())
+}
+
+fn read_ppm_number(data: &[u8], idx: usize) -> (usize, usize) {
+    let mut end: usize = idx;
+    while end < data.len() && data[end].is_ascii_digit() {
+        end += 1;
+    }
+    (
+        std::str::from_utf8(&data[idx..end])
+            .unwrap()
+            .parse()
+            .unwrap(),
+        end,
+    )
+}
+
+/// Cross-validate: Rust decode of C-encoded reference images must produce
+/// pixel-identical output to C djpeg. Target: max_diff=0.
+#[test]
+fn c_djpeg_cross_validation_decode_diff_zero() {
+    let djpeg: PathBuf = match djpeg_path() {
+        Some(p) => p,
+        None => {
+            eprintln!("SKIP: djpeg not found");
+            return;
+        }
+    };
+
+    let reference_images: &[&str] = &["testorig.jpg", "testimgari.jpg", "testimgint.jpg"];
+
+    for &name in reference_images {
+        let jpeg_path: String = reference_path(name);
+        let data: Vec<u8> = match std::fs::read(&jpeg_path) {
+            Ok(d) => d,
+            Err(_) => continue,
+        };
+
+        // C djpeg decode
+        let tmp_ppm: String = format!("/tmp/ljt_cross_{}.ppm", name);
+        let output = Command::new(&djpeg)
+            .arg("-ppm")
+            .arg("-outfile")
+            .arg(&tmp_ppm)
+            .arg(&jpeg_path)
+            .output()
+            .expect("failed to run djpeg");
+        assert!(
+            output.status.success(),
+            "djpeg failed on {}: {}",
+            name,
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let (cw, ch, c_pixels) = parse_ppm(Path::new(&tmp_ppm));
+        std::fs::remove_file(&tmp_ppm).ok();
+
+        // Rust decode
+        let rust_img: Image = decompress_to(&data, PixelFormat::Rgb)
+            .unwrap_or_else(|e| panic!("Rust decode {} failed: {}", name, e));
+
+        assert_eq!(cw, rust_img.width, "{}: width mismatch", name);
+        assert_eq!(ch, rust_img.height, "{}: height mismatch", name);
+
+        let max_diff: u8 = c_pixels
+            .iter()
+            .zip(rust_img.data.iter())
+            .map(|(&a, &b)| (a as i16 - b as i16).unsigned_abs() as u8)
+            .max()
+            .unwrap_or(0);
+        assert_eq!(
+            max_diff, 0,
+            "{}: Rust vs C djpeg decode max_diff={} (must be 0)",
+            name, max_diff
+        );
+    }
+}
+
+/// Cross-validate: Rust encode then C djpeg decode must match Rust decode.
+/// Target: max_diff=0.
+#[test]
+fn c_djpeg_cross_validation_encode_roundtrip_diff_zero() {
+    let djpeg: PathBuf = match djpeg_path() {
+        Some(p) => p,
+        None => {
+            eprintln!("SKIP: djpeg not found");
+            return;
+        }
+    };
+
+    let (w, h): (usize, usize) = (64, 48);
+    let pixels: Vec<u8> = make_test_pattern(w, h);
+
+    let quality_subsamp: &[(u8, Subsampling)] = &[
+        (75, Subsampling::S444),
+        (75, Subsampling::S422),
+        (75, Subsampling::S420),
+        (90, Subsampling::S444),
+        (100, Subsampling::S444),
+    ];
+
+    for &(q, ss) in quality_subsamp {
+        let label: String = format!("Q{} {:?}", q, ss);
+        let jpeg: Vec<u8> = compress(&pixels, w, h, PixelFormat::Rgb, q, ss).unwrap();
+
+        // Rust decode
+        let rust_dec: Image = decompress_to(&jpeg, PixelFormat::Rgb).unwrap();
+
+        // C djpeg decode
+        let tmp_jpg: String = format!("/tmp/ljt_enc_{}_{:?}.jpg", q, ss);
+        let tmp_ppm: String = format!("/tmp/ljt_enc_{}_{:?}.ppm", q, ss);
+        std::fs::write(&tmp_jpg, &jpeg).unwrap();
+        let output = Command::new(&djpeg)
+            .arg("-ppm")
+            .arg("-outfile")
+            .arg(&tmp_ppm)
+            .arg(&tmp_jpg)
+            .output()
+            .expect("failed to run djpeg");
+        assert!(output.status.success(), "{}: djpeg failed", label);
+        let (_, _, c_pixels) = parse_ppm(Path::new(&tmp_ppm));
+        std::fs::remove_file(&tmp_jpg).ok();
+        std::fs::remove_file(&tmp_ppm).ok();
+
+        let max_diff: u8 = c_pixels
+            .iter()
+            .zip(rust_dec.data.iter())
+            .map(|(&a, &b)| (a as i16 - b as i16).unsigned_abs() as u8)
+            .max()
+            .unwrap_or(0);
+        assert_eq!(
+            max_diff, 0,
+            "{}: Rust encode → C djpeg decode vs Rust decode max_diff={} (must be 0)",
+            label, max_diff
+        );
     }
 }

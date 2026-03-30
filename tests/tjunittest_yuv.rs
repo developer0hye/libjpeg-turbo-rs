@@ -38,16 +38,28 @@ fn yuv_roundtrip_helper(subsamp: Subsampling) {
     );
     let decoded: Vec<u8> = yuv::decode_yuv(&yuv_packed, w, h, subsamp, PixelFormat::Rgb).unwrap();
     assert_eq!(decoded.len(), original.len());
-    for i in 0..original.len() {
-        let diff: i16 = original[i] as i16 - decoded[i] as i16;
-        assert!(
-            diff.abs() <= 12,
-            "YUV {:?} byte {} diff={}",
-            subsamp,
-            i,
-            diff
-        );
-    }
+    // RGB→YUV→RGB has inherent integer rounding losses.
+    // Measured actuals: S444=1, S422=4, S420=5, S440=3, S411=7, S441=7.
+    let max_diff: i16 = original
+        .iter()
+        .zip(decoded.iter())
+        .map(|(&a, &b)| (a as i16 - b as i16).abs())
+        .max()
+        .unwrap_or(0);
+    let tolerance: i16 = match subsamp {
+        Subsampling::S444 => 1,
+        Subsampling::S440 => 3,
+        Subsampling::S422 => 4,
+        Subsampling::S420 => 5,
+        _ => 7, // S411, S441
+    };
+    assert!(
+        max_diff <= tolerance,
+        "YUV {:?} max_diff={} (expected <= {})",
+        subsamp,
+        max_diff,
+        tolerance
+    );
 }
 
 #[test]
@@ -83,18 +95,29 @@ fn tjunittest_yuv_roundtrip_various_sizes() {
             let yuv: Vec<u8> = yuv::encode_yuv(&orig, w, h, PixelFormat::Rgb, ss).unwrap();
             let dec: Vec<u8> = yuv::decode_yuv(&yuv, w, h, ss, PixelFormat::Rgb).unwrap();
             assert_eq!(dec.len(), orig.len(), "{}x{} {:?}", w, h, ss);
-            for i in 0..orig.len() {
-                let diff: i16 = orig[i] as i16 - dec[i] as i16;
-                assert!(
-                    diff.abs() <= 12,
-                    "{}x{} {:?} byte {} diff={}",
-                    w,
-                    h,
-                    ss,
-                    i,
-                    diff
-                );
-            }
+            // RGB→YUV→RGB roundtrip loss is inherent to chroma subsampling.
+            // Loss varies by content and image size (small images have larger
+            // relative error from subsampling boundary effects).
+            // Measured: S444 max=1, S420 max=12 (at 16x16 gradient).
+            let max_diff: i16 = orig
+                .iter()
+                .zip(dec.iter())
+                .map(|(&a, &b)| (a as i16 - b as i16).abs())
+                .max()
+                .unwrap_or(0);
+            let tolerance: i16 = match ss {
+                Subsampling::S444 => 1,
+                _ => 12, // Chroma subsampling inherent loss
+            };
+            assert!(
+                max_diff <= tolerance,
+                "{}x{} {:?} max_diff={} (expected <= {})",
+                w,
+                h,
+                ss,
+                max_diff,
+                tolerance
+            );
         }
     }
 }
@@ -159,16 +182,27 @@ fn compress_from_yuv_helper(subsamp: Subsampling) {
     assert_eq!((img.width, img.height), (w, h));
     let direct: Vec<u8> = compress(&orig, w, h, PixelFormat::Rgb, 90, subsamp).unwrap();
     let dimg = decompress_to(&direct, PixelFormat::Rgb).unwrap();
-    for i in 0..orig.len() {
-        let diff: i16 = img.data[i] as i16 - dimg.data[i] as i16;
-        assert!(
-            diff.abs() <= 12,
-            "yuv vs direct {:?} byte {} diff={}",
-            subsamp,
-            i,
-            diff
-        );
-    }
+    // YUV-path and direct-path encode the same source at same quality.
+    // Decoded pixels should be very close. Differences come from
+    // integer rounding in RGB→YUV conversion.
+    let max_diff: i16 = img
+        .data
+        .iter()
+        .zip(dimg.data.iter())
+        .map(|(&a, &b)| (a as i16 - b as i16).abs())
+        .max()
+        .unwrap_or(0);
+    let tolerance: i16 = match subsamp {
+        Subsampling::S444 => 1,
+        _ => 5,
+    };
+    assert!(
+        max_diff <= tolerance,
+        "yuv vs direct {:?} max_diff={} (expected <= {})",
+        subsamp,
+        max_diff,
+        tolerance
+    );
 }
 
 #[test]
@@ -192,16 +226,25 @@ fn decompress_to_yuv_helper(subsamp: Subsampling) {
     let (yuv, yw, yh, ys) = yuv::decompress_to_yuv(&jpeg).unwrap();
     let via: Vec<u8> = yuv::decode_yuv(&yuv, yw, yh, ys, PixelFormat::Rgb).unwrap();
     assert_eq!(via.len(), direct.len());
-    for i in 0..direct.len() {
-        let diff: i16 = via[i] as i16 - direct[i] as i16;
-        assert!(
-            diff.abs() <= 12,
-            "yuv decode {:?} byte {} diff={}",
-            subsamp,
-            i,
-            diff
-        );
-    }
+    // JPEG→YUV→RGB vs JPEG→RGB directly: differences come from
+    // merged upsample+color vs separate YUV decode+color paths.
+    let max_diff: i16 = via
+        .iter()
+        .zip(direct.iter())
+        .map(|(&a, &b)| (a as i16 - b as i16).abs())
+        .max()
+        .unwrap_or(0);
+    let tolerance: i16 = match subsamp {
+        Subsampling::S444 => 1,
+        _ => 5,
+    };
+    assert!(
+        max_diff <= tolerance,
+        "yuv decode {:?} max_diff={} (expected <= {})",
+        subsamp,
+        max_diff,
+        tolerance
+    );
 }
 
 #[test]
