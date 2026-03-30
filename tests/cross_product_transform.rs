@@ -6,8 +6,9 @@
 ///
 /// Skip conditions mirror the C reference to avoid known-invalid combinations.
 use libjpeg_turbo_rs::{
-    compress, decompress, read_coefficients, transform_jpeg_with_options, CropRegion, Encoder,
-    MarkerCopyMode, PixelFormat, Subsampling, TransformOp, TransformOptions,
+    compress, decompress, decompress_to, read_coefficients, transform_jpeg_with_options,
+    CropRegion, Encoder, Image, MarkerCopyMode, PixelFormat, Subsampling, TransformOp,
+    TransformOptions,
 };
 
 // ---------------------------------------------------------------------------
@@ -1297,4 +1298,161 @@ fn tjtrantest_grayscale_component_count() {
 
     println!("Grayscale component count: {} tested", tested);
     assert!(tested >= 30, "Expected at least 30 combos, got {}", tested);
+}
+
+// ---------------------------------------------------------------------------
+// C jpegtran cross-validation helpers
+// ---------------------------------------------------------------------------
+
+use std::path::PathBuf;
+use std::process::Command;
+
+/// Find the jpegtran binary: check /opt/homebrew/bin/jpegtran first, then fall back to PATH.
+fn jpegtran_path() -> Option<PathBuf> {
+    let homebrew: PathBuf = PathBuf::from("/opt/homebrew/bin/jpegtran");
+    if homebrew.exists() {
+        return Some(homebrew);
+    }
+    Command::new("which")
+        .arg("jpegtran")
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| PathBuf::from(String::from_utf8_lossy(&o.stdout).trim().to_string()))
+}
+
+/// Find the djpeg binary: check /opt/homebrew/bin/djpeg first, then fall back to PATH.
+fn djpeg_path() -> Option<PathBuf> {
+    let homebrew: PathBuf = PathBuf::from("/opt/homebrew/bin/djpeg");
+    if homebrew.exists() {
+        return Some(homebrew);
+    }
+    Command::new("which")
+        .arg("djpeg")
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| PathBuf::from(String::from_utf8_lossy(&o.stdout).trim().to_string()))
+}
+
+// ---------------------------------------------------------------------------
+// Test 11: C jpegtran cross-validation — all ops, pixel diff = 0
+// ---------------------------------------------------------------------------
+
+/// Applies each transform op with both Rust `transform_jpeg` and C `jpegtran`,
+/// then decodes both outputs with Rust decompress and asserts max pixel diff = 0.
+///
+/// Skips gracefully if jpegtran is not found.
+#[test]
+fn c_jpegtran_cross_validation_all_ops_diff_zero() {
+    let jpegtran = match jpegtran_path() {
+        Some(p) => p,
+        None => {
+            eprintln!("SKIP: jpegtran not found — skipping C cross-validation");
+            return;
+        }
+    };
+
+    // Create a 48x48 S444 test JPEG using Rust compress
+    let pixels: Vec<u8> = gradient_rgb(48, 48);
+    let source_jpeg: Vec<u8> =
+        compress(&pixels, 48, 48, PixelFormat::Rgb, 90, Subsampling::S444).unwrap();
+
+    // Transform ops with their C jpegtran argument equivalents
+    let ops: [(TransformOp, &[&str]); 7] = [
+        (TransformOp::HFlip, &["-flip", "horizontal"]),
+        (TransformOp::VFlip, &["-flip", "vertical"]),
+        (TransformOp::Rot90, &["-rotate", "90"]),
+        (TransformOp::Rot180, &["-rotate", "180"]),
+        (TransformOp::Rot270, &["-rotate", "270"]),
+        (TransformOp::Transpose, &["-transpose"]),
+        (TransformOp::Transverse, &["-transverse"]),
+    ];
+
+    let tmp_dir: PathBuf = std::env::temp_dir();
+
+    for (op, c_args) in &ops {
+        let label: &str = op_label(*op);
+
+        // --- Rust transform ---
+        let rust_jpeg: Vec<u8> = transform_jpeg_with_options(
+            &source_jpeg,
+            &TransformOptions {
+                op: *op,
+                copy_markers: MarkerCopyMode::None,
+                ..TransformOptions::default()
+            },
+        )
+        .unwrap_or_else(|e| panic!("{}: Rust transform failed: {}", label, e));
+
+        // --- C jpegtran transform ---
+        let input_path: PathBuf = tmp_dir.join(format!("ljt_rs_jpegtran_input_{}.jpg", label));
+        let output_path: PathBuf = tmp_dir.join(format!("ljt_rs_jpegtran_output_{}.jpg", label));
+        std::fs::write(&input_path, &source_jpeg)
+            .unwrap_or_else(|e| panic!("{}: failed to write input file: {}", label, e));
+
+        let mut cmd = Command::new(&jpegtran);
+        cmd.args(*c_args)
+            .args(["-copy", "none"])
+            .arg("-outfile")
+            .arg(&output_path)
+            .arg(&input_path);
+
+        let c_result = cmd
+            .output()
+            .unwrap_or_else(|e| panic!("{}: failed to run jpegtran: {}", label, e));
+        assert!(
+            c_result.status.success(),
+            "{}: jpegtran failed: {}",
+            label,
+            String::from_utf8_lossy(&c_result.stderr)
+        );
+
+        let c_jpeg: Vec<u8> = std::fs::read(&output_path)
+            .unwrap_or_else(|e| panic!("{}: failed to read jpegtran output: {}", label, e));
+
+        // --- Decode both with Rust decompress ---
+        let rust_img: Image = decompress_to(&rust_jpeg, PixelFormat::Rgb)
+            .unwrap_or_else(|e| panic!("{}: failed to decode Rust transform output: {}", label, e));
+        let c_img: Image = decompress_to(&c_jpeg, PixelFormat::Rgb)
+            .unwrap_or_else(|e| panic!("{}: failed to decode C jpegtran output: {}", label, e));
+
+        // --- Assert dimensions match ---
+        assert_eq!(
+            (rust_img.width, rust_img.height),
+            (c_img.width, c_img.height),
+            "{}: dimension mismatch — Rust {}x{} vs C {}x{}",
+            label,
+            rust_img.width,
+            rust_img.height,
+            c_img.width,
+            c_img.height
+        );
+
+        // --- Assert pixel-exact match (max_diff = 0) ---
+        assert_eq!(
+            rust_img.data.len(),
+            c_img.data.len(),
+            "{}: pixel data length mismatch",
+            label
+        );
+
+        let max_diff: u8 = rust_img
+            .data
+            .iter()
+            .zip(c_img.data.iter())
+            .map(|(r, c)| (*r as i16 - *c as i16).unsigned_abs() as u8)
+            .max()
+            .unwrap_or(0);
+
+        assert_eq!(
+            max_diff, 0,
+            "{}: pixel max_diff = {} (expected 0)",
+            label, max_diff
+        );
+
+        // Cleanup temp files
+        let _ = std::fs::remove_file(&input_path);
+        let _ = std::fs::remove_file(&output_path);
+    }
 }
