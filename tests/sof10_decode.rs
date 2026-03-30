@@ -120,7 +120,6 @@ fn progressive_huffman_still_works() {
 /// C cjpeg -arithmetic -progressive produces SOF10 (0xCA).
 /// Validates Rust decode matches C djpeg pixel-by-pixel.
 #[test]
-#[ignore = "SOF10 arithmetic progressive decode bug: 'arithmetic AC spectral overflow'"]
 fn sof10_c_encoded_decode_pixel_validation() {
     let cjpeg: PathBuf = match cjpeg_path() {
         Some(p) => p,
