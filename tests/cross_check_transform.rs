@@ -269,14 +269,13 @@ fn rust_transform_matches_c_jpegtran() {
             name, rust_img.height, c_img.height
         );
 
-        // Lossless transforms produce identical DCT coefficients to C jpegtran.
-        // Huffman table generation may differ slightly between Rust and C,
-        // causing max_diff=1 at the decoded pixel level for some operations.
-        // The coefficients themselves are verified identical via file size match.
+        // Lossless transforms on MCU-aligned S444 images must produce
+        // byte-identical JPEG output to C jpegtran. Target: max_diff=0.
         let max_diff: u8 = pixel_max_diff(&rust_img.data, &c_img.data);
-        assert!(
-            max_diff <= 1,
-            "{}: decoded pixel max_diff={} (must be <= 1 vs C jpegtran). \
+        assert_eq!(
+            max_diff,
+            0,
+            "{}: decoded pixel max_diff={} (must be 0 vs C jpegtran). \
              Rust JPEG={} bytes, C JPEG={} bytes",
             name,
             max_diff,
@@ -458,9 +457,9 @@ fn transform_grayscale_cross_check() {
     let max_diff: u8 = pixel_max_diff(&rust_img.data, &c_img.data);
     // Grayscale transform drops chroma components; decoded luma must match
     // C jpegtran exactly. Target: max_diff=0.
-    assert!(
-        max_diff <= 1,
-        "grayscale transform: max_diff={} (must be <= 1 vs C jpegtran)",
+    assert_eq!(
+        max_diff, 0,
+        "grayscale transform: max_diff={} (must be 0 vs C jpegtran)",
         max_diff
     );
 }
@@ -544,9 +543,9 @@ fn transform_crop_cross_check() {
 
     let max_diff: u8 = pixel_max_diff(&rust_img.data, &c_img.data);
     // Crop on DCT blocks must match C jpegtran exactly. Target: max_diff=0.
-    assert!(
-        max_diff <= 1,
-        "crop transform: max_diff={} (must be <= 1 vs C jpegtran)",
+    assert_eq!(
+        max_diff, 0,
+        "crop transform: max_diff={} (must be 0 vs C jpegtran)",
         max_diff
     );
 }
@@ -826,9 +825,9 @@ fn transform_rotate_grayscale_cross_check() {
 
     let max_diff: u8 = pixel_max_diff(&rust_img.data, &c_img.data);
     // Rot180 + grayscale must match C jpegtran exactly. Target: max_diff=0.
-    assert!(
-        max_diff <= 1,
-        "rot180+grayscale: max_diff={} (must be <= 1 vs C jpegtran)",
+    assert_eq!(
+        max_diff, 0,
+        "rot180+grayscale: max_diff={} (must be 0 vs C jpegtran)",
         max_diff
     );
 }
