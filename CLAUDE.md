@@ -107,6 +107,7 @@ When optimizing performance, follow the experiment-driven workflow in `experimen
 
 - All commits must use the local git config `user.name` and `user.email`.
 - All commits must include `Signed-off-by` line (always use `git commit -s`).
+- **Pre-commit hook**: `.githooks/pre-commit` runs `cargo fmt --check` and `cargo clippy --lib -- -D warnings` before every commit. Activate after clone: `git config core.hooksPath .githooks`. CI runs the same checks — local clippy (aarch64) and CI clippy (x86_64) can differ due to `#[cfg(target_arch)]` blocks, so fix warnings for all platforms.
 
 ## Branching & PR Workflow
 
