@@ -17,7 +17,7 @@ use crate::simd::{self, SimdRoutines};
 /// Handles non-standard sampling factors like 3x2, 3x1, 1x3, 4x2 that lack
 /// dedicated optimized paths. Each input sample is replicated h_factor times
 /// horizontally and v_factor times vertically.
-fn upsample_generic_nearest(
+pub(crate) fn upsample_generic_nearest(
     input: &[u8],
     in_width: usize,
     in_height: usize,
@@ -741,9 +741,11 @@ impl<'a> Decoder<'a> {
             let (top_half, bot_half) = output.split_at_mut(out_y_bot * out_width);
             let out_top = &mut top_half[out_y_top * out_width..out_y_top * out_width + in_width];
             let out_bot = &mut bot_half[..in_width];
-            // Inline vertical blend: out[i] = (3*cur[i] + neighbor[i] + 2) >> 2
+            // Vertical triangle filter with ordered dither to avoid systematic
+            // rounding bias (matches C jdsample.c h1v2_fancy_upsample):
+            //   top row: bias=1, bottom row: bias=2
             for i in 0..in_width {
-                out_top[i] = ((3 * cur_row[i] as u16 + above[i] as u16 + 2) >> 2) as u8;
+                out_top[i] = ((3 * cur_row[i] as u16 + above[i] as u16 + 1) >> 2) as u8;
                 out_bot[i] = ((3 * cur_row[i] as u16 + below[i] as u16 + 2) >> 2) as u8;
             }
         }
@@ -2793,27 +2795,51 @@ impl<'a> Decoder<'a> {
                     self.fancy_h1v2(&component_planes[1], cb_w, cb_h, &mut cb_full, full_width);
                     self.fancy_h1v2(&component_planes[2], cb_w, cb_h, &mut cr_full, full_width);
                 } else if h_factor == 4 && v_factor == 1 {
-                    // S411: horizontal-only 4x
-                    for row in 0..cb_h {
-                        Self::fancy_upsample_h4v1(
-                            &component_planes[1][row * cb_w..row * cb_w + cb_w],
-                            cb_w,
-                            &mut cb_full[row * full_width..],
-                        );
-                        Self::fancy_upsample_h4v1(
-                            &component_planes[2][row * cb_w..row * cb_w + cb_w],
-                            cb_w,
-                            &mut cr_full[row * full_width..],
-                        );
-                    }
+                    // S411: horizontal-only 4x — C uses int_upsample (box filter),
+                    // not fancy interpolation. Use nearest-neighbor to match C.
+                    upsample_generic_nearest(
+                        &component_planes[1],
+                        cb_w,
+                        cb_h,
+                        &mut cb_full,
+                        full_width,
+                        h_factor,
+                        1,
+                    );
+                    upsample_generic_nearest(
+                        &component_planes[2],
+                        cb_w,
+                        cb_h,
+                        &mut cr_full,
+                        full_width,
+                        h_factor,
+                        1,
+                    );
                 } else if h_factor == 4 && v_factor == 2 {
                     // 4:1:0: horizontal 4x + vertical 2x
                     self.fancy_h4v2(&component_planes[1], cb_w, cb_h, &mut cb_full, full_width);
                     self.fancy_h4v2(&component_planes[2], cb_w, cb_h, &mut cr_full, full_width);
                 } else if h_factor == 1 && v_factor == 4 {
-                    // S441: vertical-only 4x upsampling
-                    self.fancy_h1v4(&component_planes[1], cb_w, cb_h, &mut cb_full, full_width);
-                    self.fancy_h1v4(&component_planes[2], cb_w, cb_h, &mut cr_full, full_width);
+                    // S441: vertical-only 4x — C uses int_upsample (box filter),
+                    // not fancy interpolation. Use nearest-neighbor to match C.
+                    upsample_generic_nearest(
+                        &component_planes[1],
+                        cb_w,
+                        cb_h,
+                        &mut cb_full,
+                        full_width,
+                        1,
+                        v_factor,
+                    );
+                    upsample_generic_nearest(
+                        &component_planes[2],
+                        cb_w,
+                        cb_h,
+                        &mut cr_full,
+                        full_width,
+                        1,
+                        v_factor,
+                    );
                 } else {
                     // Generic fallback for non-standard sampling factors (e.g. 3x2, 3x1, 1x3, 4x2).
                     // Uses nearest-neighbor replication for any h/v factor combination.

@@ -350,7 +350,6 @@ fn c_12bit_cjpeg_precision_rust_decode() {
 // ===========================================================================
 
 #[test]
-#[ignore = "12-bit IDCT broken: max_diff=3127, mean_diff=1012 vs C djpeg, see issue #112"]
 fn pixel_match_12bit_c_reference() {
     let djpeg: PathBuf = match djpeg_path() {
         Some(p) => p,
