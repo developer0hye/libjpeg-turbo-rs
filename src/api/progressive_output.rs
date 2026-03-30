@@ -12,7 +12,7 @@ use crate::common::quant_table::QuantTable;
 use crate::common::types::*;
 use crate::decode::bitstream::BitReader;
 use crate::decode::marker::{JpegMetadata, MarkerReader, ScanInfo};
-use crate::decode::pipeline::Image;
+use crate::decode::pipeline::{upsample_generic_nearest, Image};
 use crate::decode::progressive;
 use crate::simd::{self, SimdRoutines};
 
@@ -626,21 +626,45 @@ impl ProgressiveDecoder {
                 self.fancy_h1v2(&component_planes[1], cb_w, cb_h, &mut cb_full, full_width);
                 self.fancy_h1v2(&component_planes[2], cb_w, cb_h, &mut cr_full, full_width);
             } else if h_factor == 4 && v_factor == 1 {
-                for row in 0..cb_h {
-                    Self::fancy_upsample_h4v1(
-                        &component_planes[1][row * cb_w..row * cb_w + cb_w],
-                        cb_w,
-                        &mut cb_full[row * full_width..],
-                    );
-                    Self::fancy_upsample_h4v1(
-                        &component_planes[2][row * cb_w..row * cb_w + cb_w],
-                        cb_w,
-                        &mut cr_full[row * full_width..],
-                    );
-                }
+                // S411: C uses int_upsample (box filter), not fancy interpolation.
+                upsample_generic_nearest(
+                    &component_planes[1],
+                    cb_w,
+                    cb_h,
+                    &mut cb_full,
+                    full_width,
+                    h_factor,
+                    1,
+                );
+                upsample_generic_nearest(
+                    &component_planes[2],
+                    cb_w,
+                    cb_h,
+                    &mut cr_full,
+                    full_width,
+                    h_factor,
+                    1,
+                );
             } else if h_factor == 1 && v_factor == 4 {
-                self.fancy_h1v4(&component_planes[1], cb_w, cb_h, &mut cb_full, full_width);
-                self.fancy_h1v4(&component_planes[2], cb_w, cb_h, &mut cr_full, full_width);
+                // S441: C uses int_upsample (box filter), not fancy interpolation.
+                upsample_generic_nearest(
+                    &component_planes[1],
+                    cb_w,
+                    cb_h,
+                    &mut cb_full,
+                    full_width,
+                    1,
+                    v_factor,
+                );
+                upsample_generic_nearest(
+                    &component_planes[2],
+                    cb_w,
+                    cb_h,
+                    &mut cr_full,
+                    full_width,
+                    1,
+                    v_factor,
+                );
             } else {
                 return Err(JpegError::Unsupported(format!(
                     "subsampling {}x{} not supported in progressive output",
@@ -806,9 +830,10 @@ impl ProgressiveDecoder {
             let out_y_top: usize = y * 2;
             let out_y_bot: usize = y * 2 + 1;
 
+            // Ordered dither bias: top=1, bottom=2 (matches C jdsample.c)
             for i in 0..in_width {
                 output[out_y_top * out_width + i] =
-                    ((3 * cur_row[i] as u16 + above[i] as u16 + 2) >> 2) as u8;
+                    ((3 * cur_row[i] as u16 + above[i] as u16 + 1) >> 2) as u8;
                 output[out_y_bot * out_width + i] =
                     ((3 * cur_row[i] as u16 + below[i] as u16 + 2) >> 2) as u8;
             }

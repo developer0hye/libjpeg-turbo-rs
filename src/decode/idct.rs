@@ -81,6 +81,54 @@ fn idct_1d(s0: i32, s1: i32, s2: i32, s3: i32, s4: i32, s5: i32, s6: i32, s7: i3
     ]
 }
 
+/// 12-bit IDCT: uses PASS1_BITS=1 to avoid overflow with 12-bit sample range.
+/// Matches C jidctint.c with BITS_IN_JSAMPLE=12.
+pub fn idct_8x8_12bit(coeffs: &[i16; 64]) -> [i16; 64] {
+    const PASS1_BITS_12: i32 = 1;
+    let mut workspace = [0i32; 64];
+
+    // Pass 1: process columns
+    for col in 0..8 {
+        let s = |row: usize| coeffs[row * 8 + col] as i32;
+
+        if s(1) == 0 && s(2) == 0 && s(3) == 0 && s(4) == 0 && s(5) == 0 && s(6) == 0 && s(7) == 0 {
+            let dcval: i32 = s(0) << PASS1_BITS_12;
+            for row in 0..8 {
+                workspace[row * 8 + col] = dcval;
+            }
+            continue;
+        }
+
+        let result: [i32; 8] = idct_1d(s(0), s(1), s(2), s(3), s(4), s(5), s(6), s(7));
+        for (row, &val) in result.iter().enumerate() {
+            workspace[row * 8 + col] = descale(val, CONST_BITS - PASS1_BITS_12);
+        }
+    }
+
+    // Pass 2: process rows
+    let mut output = [0i16; 64];
+    let descale_bits: i32 = CONST_BITS + PASS1_BITS_12 + 3;
+
+    for row in 0..8 {
+        let w = |col: usize| workspace[row * 8 + col];
+
+        if w(1) == 0 && w(2) == 0 && w(3) == 0 && w(4) == 0 && w(5) == 0 && w(6) == 0 && w(7) == 0 {
+            let dcval: i16 = descale(w(0), PASS1_BITS_12 + 3) as i16;
+            for col in 0..8 {
+                output[row * 8 + col] = dcval;
+            }
+            continue;
+        }
+
+        let result: [i32; 8] = idct_1d(w(0), w(1), w(2), w(3), w(4), w(5), w(6), w(7));
+        for (col, &val) in result.iter().enumerate() {
+            output[row * 8 + col] = descale(val, descale_bits) as i16;
+        }
+    }
+
+    output
+}
+
 pub fn idct_8x8(coeffs: &[i16; 64]) -> [i16; 64] {
     let mut workspace = [0i32; 64];
 
