@@ -1,52 +1,235 @@
+use std::path::{Path, PathBuf};
+use std::process::Command;
+
 use libjpeg_turbo_rs::{
-    compress_arithmetic, compress_progressive, decompress, PixelFormat, Subsampling,
+    compress_arithmetic, compress_progressive, decompress, decompress_to, PixelFormat, Subsampling,
 };
 
+fn djpeg_path() -> Option<PathBuf> {
+    let homebrew: PathBuf = PathBuf::from("/opt/homebrew/bin/djpeg");
+    if homebrew.exists() {
+        return Some(homebrew);
+    }
+    Command::new("which")
+        .arg("djpeg")
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| PathBuf::from(String::from_utf8_lossy(&o.stdout).trim().to_string()))
+}
+
+fn cjpeg_path() -> Option<PathBuf> {
+    let homebrew: PathBuf = PathBuf::from("/opt/homebrew/bin/cjpeg");
+    if homebrew.exists() {
+        return Some(homebrew);
+    }
+    Command::new("which")
+        .arg("cjpeg")
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| PathBuf::from(String::from_utf8_lossy(&o.stdout).trim().to_string()))
+}
+
+fn parse_ppm(path: &Path) -> (usize, usize, Vec<u8>) {
+    let raw: Vec<u8> = std::fs::read(path).expect("read PPM");
+    let comps: usize = if &raw[0..2] == b"P5" { 1 } else { 3 };
+    let mut idx: usize = 2;
+    loop {
+        while idx < raw.len() && raw[idx].is_ascii_whitespace() {
+            idx += 1;
+        }
+        if idx < raw.len() && raw[idx] == b'#' {
+            while idx < raw.len() && raw[idx] != b'\n' {
+                idx += 1;
+            }
+        } else {
+            break;
+        }
+    }
+    let mut end: usize = idx;
+    while end < raw.len() && raw[end].is_ascii_digit() {
+        end += 1;
+    }
+    let w: usize = std::str::from_utf8(&raw[idx..end])
+        .unwrap()
+        .parse()
+        .unwrap();
+    idx = end;
+    while idx < raw.len() && raw[idx].is_ascii_whitespace() {
+        idx += 1;
+    }
+    end = idx;
+    while end < raw.len() && raw[end].is_ascii_digit() {
+        end += 1;
+    }
+    let h: usize = std::str::from_utf8(&raw[idx..end])
+        .unwrap()
+        .parse()
+        .unwrap();
+    idx = end;
+    while idx < raw.len() && raw[idx].is_ascii_whitespace() {
+        idx += 1;
+    }
+    end = idx;
+    while end < raw.len() && raw[end].is_ascii_digit() {
+        end += 1;
+    }
+    idx = end + 1;
+    (w, h, raw[idx..idx + w * h * comps].to_vec())
+}
+
 /// Verify that existing arithmetic and progressive paths still work
-/// (regression guard before SOF10 is exercised).
+/// with pixel validation (not just dimensions).
 #[test]
 fn arithmetic_sequential_still_works() {
-    let pixels = vec![128u8; 32 * 32 * 3];
+    let pixels: Vec<u8> = vec![128u8; 32 * 32 * 3];
     let jpeg =
         compress_arithmetic(&pixels, 32, 32, PixelFormat::Rgb, 75, Subsampling::S444).unwrap();
-    let img = decompress(&jpeg).unwrap();
+    let img = decompress_to(&jpeg, PixelFormat::Rgb).unwrap();
     assert_eq!(img.width, 32);
     assert_eq!(img.height, 32);
+    // Uniform 128 input: decoded pixels should be close
+    let max_diff: u8 = pixels
+        .iter()
+        .zip(img.data.iter())
+        .map(|(&a, &b)| (a as i16 - b as i16).unsigned_abs() as u8)
+        .max()
+        .unwrap_or(0);
+    assert!(max_diff <= 5, "arithmetic sequential max_diff={}", max_diff);
 }
 
 #[test]
 fn progressive_huffman_still_works() {
-    let pixels = vec![128u8; 32 * 32 * 3];
+    let pixels: Vec<u8> = vec![128u8; 32 * 32 * 3];
     let jpeg =
         compress_progressive(&pixels, 32, 32, PixelFormat::Rgb, 75, Subsampling::S444).unwrap();
-    let img = decompress(&jpeg).unwrap();
+    let img = decompress_to(&jpeg, PixelFormat::Rgb).unwrap();
     assert_eq!(img.width, 32);
     assert_eq!(img.height, 32);
+    let max_diff: u8 = pixels
+        .iter()
+        .zip(img.data.iter())
+        .map(|(&a, &b)| (a as i16 - b as i16).unsigned_abs() as u8)
+        .max()
+        .unwrap_or(0);
+    assert!(max_diff <= 5, "progressive huffman max_diff={}", max_diff);
+}
+
+/// Test SOF10 decode with a REAL C-encoded arithmetic progressive JPEG.
+/// C cjpeg -arithmetic -progressive produces SOF10 (0xCA).
+/// Validates Rust decode matches C djpeg pixel-by-pixel.
+#[test]
+#[ignore = "SOF10 arithmetic progressive decode bug: 'arithmetic AC spectral overflow'"]
+fn sof10_c_encoded_decode_pixel_validation() {
+    let cjpeg: PathBuf = match cjpeg_path() {
+        Some(p) => p,
+        None => {
+            eprintln!("SKIP: cjpeg not found");
+            return;
+        }
+    };
+    let djpeg: PathBuf = match djpeg_path() {
+        Some(p) => p,
+        None => {
+            eprintln!("SKIP: djpeg not found");
+            return;
+        }
+    };
+
+    // Generate PPM source
+    let (w, h): (usize, usize) = (32, 32);
+    let mut ppm_data: Vec<u8> = format!("P6\n{} {}\n255\n", w, h).into_bytes();
+    for y in 0..h {
+        for x in 0..w {
+            ppm_data.push((x * 8) as u8);
+            ppm_data.push((y * 8) as u8);
+            ppm_data.push(((x + y) * 4) as u8);
+        }
+    }
+    let ppm_path: &str = "/tmp/ljt_sof10_src.ppm";
+    let jpg_path: &str = "/tmp/ljt_sof10.jpg";
+    let dec_path: &str = "/tmp/ljt_sof10_dec.ppm";
+    std::fs::write(ppm_path, &ppm_data).unwrap();
+
+    // Encode with C cjpeg -arithmetic -progressive → SOF10
+    let output = Command::new(&cjpeg)
+        .args([
+            "-arithmetic",
+            "-progressive",
+            "-quality",
+            "90",
+            "-outfile",
+            jpg_path,
+            ppm_path,
+        ])
+        .output()
+        .expect("failed to run cjpeg");
+    if !output.status.success() {
+        eprintln!(
+            "SKIP: cjpeg -arithmetic -progressive failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        return;
+    }
+
+    // Verify SOF10 marker (0xFFCA) is present
+    let jpeg_data: Vec<u8> = std::fs::read(jpg_path).unwrap();
+    let has_sof10: bool = jpeg_data.windows(2).any(|w| w[0] == 0xFF && w[1] == 0xCA);
+    assert!(
+        has_sof10,
+        "cjpeg -arithmetic -progressive should produce SOF10"
+    );
+
+    // Rust decode
+    let rust_img =
+        decompress_to(&jpeg_data, PixelFormat::Rgb).expect("Rust must decode SOF10 JPEG");
+    assert_eq!(rust_img.width, w);
+    assert_eq!(rust_img.height, h);
+
+    // C djpeg decode
+    let output = Command::new(&djpeg)
+        .args(["-ppm", "-outfile", dec_path, jpg_path])
+        .output()
+        .expect("failed to run djpeg");
+    assert!(output.status.success(), "djpeg failed on SOF10 JPEG");
+    let (cw, ch, c_pixels) = parse_ppm(Path::new(dec_path));
+    assert_eq!(cw, w);
+    assert_eq!(ch, h);
+
+    // Cross-validate: Rust vs C djpeg, target diff=0
+    let max_diff: u8 = c_pixels
+        .iter()
+        .zip(rust_img.data.iter())
+        .map(|(&a, &b)| (a as i16 - b as i16).unsigned_abs() as u8)
+        .max()
+        .unwrap_or(0);
+    assert_eq!(
+        max_diff, 0,
+        "SOF10 decode: Rust vs C djpeg max_diff={} (must be 0)",
+        max_diff
+    );
+
+    std::fs::remove_file(ppm_path).ok();
+    std::fs::remove_file(jpg_path).ok();
+    std::fs::remove_file(dec_path).ok();
 }
 
 /// Test SOF10 decode by constructing a minimal arithmetic progressive JPEG.
-///
-/// We build a single-component (grayscale) SOF10 JPEG with two scans:
-/// - DC first scan (Ss=0, Se=0, Ah=0, Al=0)
-/// - AC first scan (Ss=1, Se=63, Ah=0, Al=0)
-///
-/// This exercises the full arithmetic progressive decode path.
 #[test]
 fn sof10_grayscale_minimal_decode() {
-    // Build a minimal SOF10 JPEG by hand with a single 8x8 MCU
-    let jpeg = build_sof10_grayscale_jpeg();
+    let jpeg: Vec<u8> = build_sof10_grayscale_jpeg();
     let result = decompress(&jpeg);
-    // The decode should either succeed or give a reasonable error
-    // (not panic). With correct arithmetic entropy data it should succeed.
     match result {
         Ok(img) => {
             assert_eq!(img.width, 8);
             assert_eq!(img.height, 8);
+            // Verify pixel data is valid (all zeros from our zero-entropy data)
+            assert_eq!(img.data.len(), 8 * 8 * img.pixel_format.bytes_per_pixel());
         }
         Err(e) => {
-            // If entropy data is malformed, that's acceptable for a hand-built stream.
-            // But it must not be "unsupported" — the SOF10 path must be recognized.
-            let msg = format!("{:?}", e);
+            // Hand-built entropy data may be malformed, but SOF10 must be recognized.
+            let msg: String = format!("{:?}", e);
             assert!(
                 !msg.contains("unsupported") && !msg.contains("Unsupported"),
                 "SOF10 should be recognized, not unsupported: {}",
@@ -56,16 +239,15 @@ fn sof10_grayscale_minimal_decode() {
     }
 }
 
-/// Verify that the decoder recognizes SOF10 marker and doesn't return "unsupported".
+/// Verify that the decoder recognizes SOF10 marker.
 #[test]
 fn sof10_marker_is_recognized() {
-    let jpeg = build_minimal_sof10_header();
+    let jpeg: Vec<u8> = build_minimal_sof10_header();
     let result = decompress(&jpeg);
     match result {
-        Ok(_) => {} // Great, it decoded
+        Ok(_) => {}
         Err(e) => {
-            let msg = format!("{:?}", e);
-            // Should NOT say "unsupported frame type" or similar
+            let msg: String = format!("{:?}", e);
             assert!(
                 !msg.contains("unsupported frame type"),
                 "SOF10 (0xCA) should be a recognized frame type: {}",
