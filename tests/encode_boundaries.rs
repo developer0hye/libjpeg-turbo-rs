@@ -1,4 +1,7 @@
-use libjpeg_turbo_rs::{compress, decompress, Encoder, PixelFormat, Subsampling};
+use std::path::{Path, PathBuf};
+use std::process::Command;
+
+use libjpeg_turbo_rs::{decompress, decompress_to, Encoder, PixelFormat, Subsampling};
 
 /// All 7 subsampling modes.
 const ALL_SUBSAMPLINGS: [Subsampling; 7] = [
@@ -83,9 +86,10 @@ fn quality_100_high_psnr() {
     assert_eq!(image.height, 32);
 
     let psnr = psnr_rgb(&pixels, &image.data);
+    // Q100 with S444 should be near-lossless. Actual measured: ~51 dB.
     assert!(
-        psnr > 30.0,
-        "quality=100 should produce high PSNR (>30 dB), got {:.1} dB",
+        psnr > 45.0,
+        "quality=100 should produce near-lossless PSNR (>45 dB), got {:.1} dB",
         psnr
     );
 }
@@ -378,4 +382,146 @@ fn quality_affects_file_size() {
         jpeg_q100.len(),
         jpeg_q1.len()
     );
+}
+
+// --- C djpeg cross-validation ---
+
+fn djpeg_path() -> Option<PathBuf> {
+    let homebrew: PathBuf = PathBuf::from("/opt/homebrew/bin/djpeg");
+    if homebrew.exists() {
+        return Some(homebrew);
+    }
+    Command::new("which")
+        .arg("djpeg")
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| PathBuf::from(String::from_utf8_lossy(&o.stdout).trim().to_string()))
+}
+
+fn parse_ppm(path: &Path) -> (usize, usize, Vec<u8>) {
+    let raw: Vec<u8> = std::fs::read(path).expect("failed to read PPM");
+    assert!(&raw[0..2] == b"P6", "not P6 PPM");
+    let mut idx: usize = 2;
+    loop {
+        while idx < raw.len() && raw[idx].is_ascii_whitespace() {
+            idx += 1;
+        }
+        if idx < raw.len() && raw[idx] == b'#' {
+            while idx < raw.len() && raw[idx] != b'\n' {
+                idx += 1;
+            }
+        } else {
+            break;
+        }
+    }
+    let (w, next) = read_ppm_num(&raw, idx);
+    idx = next;
+    while idx < raw.len() && raw[idx].is_ascii_whitespace() {
+        idx += 1;
+    }
+    let (h, next) = read_ppm_num(&raw, idx);
+    idx = next;
+    while idx < raw.len() && raw[idx].is_ascii_whitespace() {
+        idx += 1;
+    }
+    let (_maxval, next) = read_ppm_num(&raw, idx);
+    idx = next + 1;
+    (w, h, raw[idx..idx + w * h * 3].to_vec())
+}
+
+fn read_ppm_num(data: &[u8], idx: usize) -> (usize, usize) {
+    let mut end: usize = idx;
+    while end < data.len() && data[end].is_ascii_digit() {
+        end += 1;
+    }
+    (
+        std::str::from_utf8(&data[idx..end])
+            .unwrap()
+            .parse()
+            .unwrap(),
+        end,
+    )
+}
+
+fn c_djpeg_cross_validate_subsampling(djpeg: &Path, ss: Subsampling) {
+    let pixels: Vec<u8> = (0..32 * 32 * 3)
+        .map(|i| ((i * 37 + 13) % 256) as u8)
+        .collect();
+
+    let jpeg: Vec<u8> = Encoder::new(&pixels, 32, 32, PixelFormat::Rgb)
+        .quality(90)
+        .subsampling(ss)
+        .encode()
+        .unwrap();
+
+    let rust_dec = decompress_to(&jpeg, PixelFormat::Rgb).unwrap();
+
+    let tmp_jpg: String = format!("/tmp/ljt_eb_{:?}.jpg", ss);
+    let tmp_ppm: String = format!("/tmp/ljt_eb_{:?}.ppm", ss);
+    std::fs::write(&tmp_jpg, &jpeg).unwrap();
+
+    let output = Command::new(djpeg)
+        .arg("-ppm")
+        .arg("-outfile")
+        .arg(&tmp_ppm)
+        .arg(&tmp_jpg)
+        .output()
+        .expect("failed to run djpeg");
+    assert!(output.status.success(), "djpeg failed for {:?}", ss);
+
+    let (_, _, c_pixels) = parse_ppm(Path::new(&tmp_ppm));
+    std::fs::remove_file(&tmp_jpg).ok();
+    std::fs::remove_file(&tmp_ppm).ok();
+
+    let max_diff: u8 = c_pixels
+        .iter()
+        .zip(rust_dec.data.iter())
+        .map(|(&a, &b)| (a as i16 - b as i16).unsigned_abs() as u8)
+        .max()
+        .unwrap_or(0);
+    assert_eq!(
+        max_diff, 0,
+        "{:?}: C djpeg vs Rust decode max_diff={} (must be 0)",
+        ss, max_diff
+    );
+}
+
+/// C djpeg cross-validation for S444/S422/S420 — must match exactly.
+#[test]
+fn c_djpeg_cross_validation_common_subsamplings_diff_zero() {
+    let djpeg: PathBuf = match djpeg_path() {
+        Some(p) => p,
+        None => {
+            eprintln!("SKIP: djpeg not found");
+            return;
+        }
+    };
+    for &ss in &[Subsampling::S444, Subsampling::S422, Subsampling::S420] {
+        c_djpeg_cross_validate_subsampling(&djpeg, ss);
+    }
+}
+
+/// C djpeg cross-validation for S440 — currently has max_diff=2 (decode bug).
+#[test]
+#[ignore = "S440 decode has max_diff=2 vs C djpeg — upsample bug, see issue #112"]
+fn c_djpeg_cross_validation_s440_diff_zero() {
+    let djpeg: PathBuf = djpeg_path().expect("djpeg required");
+    c_djpeg_cross_validate_subsampling(&djpeg, Subsampling::S440);
+}
+
+/// C djpeg cross-validation for S411 — currently has max_diff=43 (decode bug).
+#[test]
+#[ignore = "S411 decode has max_diff=43 vs C djpeg — upsample bug, see issue #112"]
+fn c_djpeg_cross_validation_s411_diff_zero() {
+    let djpeg: PathBuf = djpeg_path().expect("djpeg required");
+    c_djpeg_cross_validate_subsampling(&djpeg, Subsampling::S411);
+}
+
+/// C djpeg cross-validation for S441 — currently has max_diff=41 (decode bug).
+#[test]
+#[ignore = "S441 decode has max_diff=41 vs C djpeg — upsample bug, see issue #112"]
+fn c_djpeg_cross_validation_s441_diff_zero() {
+    let djpeg: PathBuf = djpeg_path().expect("djpeg required");
+    c_djpeg_cross_validate_subsampling(&djpeg, Subsampling::S441);
 }

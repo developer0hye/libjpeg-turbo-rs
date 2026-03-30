@@ -280,9 +280,10 @@ fn rgbx_encode_decode_color_accuracy() {
         let r = img.data[i * 4] as i16;
         let g = img.data[i * 4 + 1] as i16;
         let b = img.data[i * 4 + 2] as i16;
-        assert!((r - 200).abs() < 5, "R channel deviation too large: {r}");
-        assert!((g - 100).abs() < 5, "G channel deviation too large: {g}");
-        assert!((b - 50).abs() < 5, "B channel deviation too large: {b}");
+        // Q100 roundtrip per-channel error should be minimal (JPEG lossy, max ~3).
+        assert!((r - 200).abs() <= 3, "R channel deviation too large: {r}");
+        assert!((g - 100).abs() <= 3, "G channel deviation too large: {g}");
+        assert!((b - 50).abs() <= 3, "B channel deviation too large: {b}");
         assert_eq!(img.data[i * 4 + 3], 255, "padding should be 255");
     }
 }
@@ -309,9 +310,10 @@ fn argb_channel_ordering_roundtrip() {
         let g = img.data[i * 4 + 2] as i16;
         let b = img.data[i * 4 + 3] as i16;
         assert_eq!(a, 255, "alpha should be 255");
-        assert!((r - 200).abs() < 5, "R channel deviation too large: {r}");
-        assert!((g - 100).abs() < 5, "G channel deviation too large: {g}");
-        assert!((b - 50).abs() < 5, "B channel deviation too large: {b}");
+        // Q100 roundtrip per-channel error should be minimal (JPEG lossy, max ~3).
+        assert!((r - 200).abs() <= 3, "R channel deviation too large: {r}");
+        assert!((g - 100).abs() <= 3, "G channel deviation too large: {g}");
+        assert!((b - 50).abs() <= 3, "B channel deviation too large: {b}");
     }
 }
 
