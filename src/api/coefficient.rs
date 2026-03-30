@@ -438,11 +438,16 @@ pub fn transform_jpeg(data: &[u8], op: TransformOp) -> Result<Vec<u8>> {
     // Convert back to zigzag order for encoder.
     convert_all_to_zigzag(&mut coeffs.components);
 
-    // Swap dimensions if needed
+    // Swap dimensions and transpose quant tables for dimension-swapping ops.
+    // When DCT blocks are transposed, the quant table must also be transposed
+    // so that each coefficient position uses the correct quantization value.
     if swaps_dims {
         std::mem::swap(&mut coeffs.width, &mut coeffs.height);
         for comp in &mut coeffs.components {
             std::mem::swap(&mut comp.h_sampling, &mut comp.v_sampling);
+        }
+        for qt in &mut coeffs.quant_tables {
+            transpose_quant_table(qt);
         }
     }
 
@@ -729,6 +734,9 @@ pub fn transform_jpeg_with_options(data: &[u8], options: &TransformOptions) -> R
             for comp in &mut coeffs.components {
                 std::mem::swap(&mut comp.h_sampling, &mut comp.v_sampling);
             }
+            for qt in &mut coeffs.quant_tables {
+                transpose_quant_table(qt);
+            }
         }
 
         // Convert back to zigzag order for encoder.
@@ -944,6 +952,19 @@ fn write_coefficients_optimized(coeffs: &JpegCoefficients) -> Result<Vec<u8>> {
     marker_writer::write_eoi(&mut output);
 
     Ok(output)
+}
+
+/// Transpose a quantization table (8x8 matrix) in-place.
+/// Required for dimension-swapping transforms (transpose, rot90, rot270, transverse)
+/// so that each coefficient position uses the correct quantization value.
+fn transpose_quant_table(qt: &mut [u16; 64]) {
+    let mut transposed: [u16; 64] = [0u16; 64];
+    for row in 0..8 {
+        for col in 0..8 {
+            transposed[col * 8 + row] = qt[row * 8 + col];
+        }
+    }
+    *qt = transposed;
 }
 
 /// Convert a block from natural (row-major) order to zigzag order.
