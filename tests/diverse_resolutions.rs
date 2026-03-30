@@ -173,11 +173,7 @@ macro_rules! diverse_test {
 diverse_test!(diverse_1x1_420, "cjpeg_1x1_420.jpg");
 diverse_test!(diverse_1x1_422, "cjpeg_1x1_422.jpg");
 diverse_test!(diverse_1x1_444, "cjpeg_1x1_444.jpg");
-diverse_test!(
-    diverse_3x5_portrait_420,
-    "cjpeg_3x5_portrait_420.jpg",
-    ignore = "3x5 420: h2v2 vertical edge case, max_diff=23"
-);
+diverse_test!(diverse_3x5_portrait_420, "cjpeg_3x5_portrait_420.jpg");
 diverse_test!(diverse_3x5_portrait_422, "cjpeg_3x5_portrait_422.jpg");
 diverse_test!(diverse_3x5_portrait_444, "cjpeg_3x5_portrait_444.jpg");
 diverse_test!(diverse_5x3_landscape_420, "cjpeg_5x3_landscape_420.jpg");
@@ -213,11 +209,7 @@ diverse_test!(diverse_63x127_1to2_444, "cjpeg_63x127_1to2_444.jpg");
 // --- Ultra-wide/tall strips ---
 diverse_test!(diverse_100x1_strip_420, "cjpeg_100x1_strip_420.jpg");
 diverse_test!(diverse_100x1_strip_444, "cjpeg_100x1_strip_444.jpg");
-diverse_test!(
-    diverse_1x100_strip_420,
-    "cjpeg_1x100_strip_420.jpg",
-    ignore = "1x100 420: 1-pixel wide h2v2 edge case, max_diff=2"
-);
+diverse_test!(diverse_1x100_strip_420, "cjpeg_1x100_strip_420.jpg");
 diverse_test!(diverse_1x100_strip_444, "cjpeg_1x100_strip_444.jpg");
 
 // --- Standard-ish with odd dimension ---
