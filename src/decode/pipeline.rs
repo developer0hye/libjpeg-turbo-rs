@@ -499,6 +499,13 @@ impl<'a> Decoder<'a> {
             PixelFormat::Bgr => self.ycbcr_to_bgr_row(y, cb, cr, out, width),
             PixelFormat::Bgra => self.ycbcr_to_bgra_row(y, cb, cr, out, width),
             PixelFormat::Rgbx => {
+                #[cfg(all(target_arch = "aarch64", feature = "simd"))]
+                {
+                    return crate::simd::aarch64::color::neon_ycbcr_to_rgbx_row(
+                        y, cb, cr, out, width,
+                    );
+                }
+
                 #[cfg(all(target_arch = "x86_64", feature = "simd"))]
                 {
                     if is_x86_feature_detected!("avx2") {
@@ -510,6 +517,13 @@ impl<'a> Decoder<'a> {
                 crate::decode::color::ycbcr_to_generic_4bpp_row(y, cb, cr, out, width, 0, 1, 2, 3)
             }
             PixelFormat::Bgrx => {
+                #[cfg(all(target_arch = "aarch64", feature = "simd"))]
+                {
+                    return crate::simd::aarch64::color::neon_ycbcr_to_bgrx_row(
+                        y, cb, cr, out, width,
+                    );
+                }
+
                 #[cfg(all(target_arch = "x86_64", feature = "simd"))]
                 {
                     if is_x86_feature_detected!("avx2") {
@@ -521,6 +535,13 @@ impl<'a> Decoder<'a> {
                 crate::decode::color::ycbcr_to_generic_4bpp_row(y, cb, cr, out, width, 2, 1, 0, 3)
             }
             PixelFormat::Xrgb => {
+                #[cfg(all(target_arch = "aarch64", feature = "simd"))]
+                {
+                    return crate::simd::aarch64::color::neon_ycbcr_to_xrgb_row(
+                        y, cb, cr, out, width,
+                    );
+                }
+
                 #[cfg(all(target_arch = "x86_64", feature = "simd"))]
                 {
                     if is_x86_feature_detected!("avx2") {
@@ -532,6 +553,13 @@ impl<'a> Decoder<'a> {
                 crate::decode::color::ycbcr_to_generic_4bpp_row(y, cb, cr, out, width, 1, 2, 3, 0)
             }
             PixelFormat::Xbgr => {
+                #[cfg(all(target_arch = "aarch64", feature = "simd"))]
+                {
+                    return crate::simd::aarch64::color::neon_ycbcr_to_xbgr_row(
+                        y, cb, cr, out, width,
+                    );
+                }
+
                 #[cfg(all(target_arch = "x86_64", feature = "simd"))]
                 {
                     if is_x86_feature_detected!("avx2") {
@@ -543,6 +571,13 @@ impl<'a> Decoder<'a> {
                 crate::decode::color::ycbcr_to_generic_4bpp_row(y, cb, cr, out, width, 3, 2, 1, 0)
             }
             PixelFormat::Argb => {
+                #[cfg(all(target_arch = "aarch64", feature = "simd"))]
+                {
+                    return crate::simd::aarch64::color::neon_ycbcr_to_argb_row(
+                        y, cb, cr, out, width,
+                    );
+                }
+
                 #[cfg(all(target_arch = "x86_64", feature = "simd"))]
                 {
                     if is_x86_feature_detected!("avx2") {
@@ -554,6 +589,13 @@ impl<'a> Decoder<'a> {
                 crate::decode::color::ycbcr_to_generic_4bpp_row(y, cb, cr, out, width, 1, 2, 3, 0)
             }
             PixelFormat::Abgr => {
+                #[cfg(all(target_arch = "aarch64", feature = "simd"))]
+                {
+                    return crate::simd::aarch64::color::neon_ycbcr_to_abgr_row(
+                        y, cb, cr, out, width,
+                    );
+                }
+
                 #[cfg(all(target_arch = "x86_64", feature = "simd"))]
                 {
                     if is_x86_feature_detected!("avx2") {
