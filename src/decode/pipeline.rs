@@ -751,49 +751,6 @@ impl<'a> Decoder<'a> {
         }
     }
 
-    /// Fancy h1v4 upsample: vertical-only 4x (for S441).
-    /// Each input row produces four output rows using triangle filter vertically.
-    /// Horizontal samples are copied 1:1.
-    fn fancy_h1v4(
-        &self,
-        input: &[u8],
-        in_width: usize,
-        in_height: usize,
-        output: &mut [u8],
-        out_width: usize,
-    ) {
-        for y in 0..in_height {
-            let cur_row = &input[y * in_width..(y + 1) * in_width];
-            let above = if y > 0 {
-                &input[(y - 1) * in_width..y * in_width]
-            } else {
-                cur_row
-            };
-            let below = if y + 1 < in_height {
-                &input[(y + 1) * in_width..(y + 2) * in_width]
-            } else {
-                cur_row
-            };
-
-            // 4 output rows per input row, mirroring h4v1 interpolation positions
-            // Positions: -3/8, -1/8, +1/8, +3/8 relative to center
-            let out_row_0 = y * 4;
-            let out_row_1 = y * 4 + 1;
-            let out_row_2 = y * 4 + 2;
-            let out_row_3 = y * 4 + 3;
-
-            for i in 0..in_width {
-                let a = above[i] as u16;
-                let c = cur_row[i] as u16;
-                let b = below[i] as u16;
-                output[out_row_0 * out_width + i] = ((a * 3 + c * 5 + 4) >> 3) as u8;
-                output[out_row_1 * out_width + i] = ((a + c * 7 + 4) >> 3) as u8;
-                output[out_row_2 * out_width + i] = ((c * 7 + b + 4) >> 3) as u8;
-                output[out_row_3 * out_width + i] = ((c * 5 + b * 3 + 4) >> 3) as u8;
-            }
-        }
-    }
-
     /// Fancy h4v2 upsample: 4x horizontal, 2x vertical (for 4:1:0).
     /// Each input row produces two output rows (vertical 2x via triangle filter),
     /// then each row is horizontally expanded 4x using the h4v1 filter.
