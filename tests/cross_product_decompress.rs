@@ -14,6 +14,10 @@
 //! - nosmooth only for 422/420/440
 //! - grayscale output only when nosmooth is off
 
+use std::io::Write;
+use std::path::PathBuf;
+use std::process::Command;
+
 use libjpeg_turbo_rs::decode::pipeline::Decoder;
 use libjpeg_turbo_rs::{
     compress, ColorSpace, CropRegion, DctMethod, Encoder, Image, PixelFormat, ScalingFactor,
@@ -1787,6 +1791,247 @@ fn verify_dimensions(
             "crop output height {} exceeds bounds for {}",
             img.height,
             label
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// C djpeg cross-validation helpers
+// ---------------------------------------------------------------------------
+
+/// Locate the djpeg binary. Checks /opt/homebrew/bin/djpeg first, then falls
+/// back to whatever `which djpeg` returns. Returns `None` when not found.
+fn djpeg_path() -> Option<PathBuf> {
+    let homebrew_path = PathBuf::from("/opt/homebrew/bin/djpeg");
+    if homebrew_path.exists() {
+        return Some(homebrew_path);
+    }
+
+    let output = Command::new("which").arg("djpeg").output().ok()?;
+    if output.status.success() {
+        let path_str: String = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        if !path_str.is_empty() {
+            let path = PathBuf::from(&path_str);
+            if path.exists() {
+                return Some(path);
+            }
+        }
+    }
+
+    None
+}
+
+/// Parse a binary PPM (P6) file into (width, height, rgb_pixels).
+/// Returns `None` if the file is not a valid P6 PPM.
+fn parse_ppm(data: &[u8]) -> Option<(usize, usize, Vec<u8>)> {
+    // PPM P6 format: "P6\n<width> <height>\n<maxval>\n<binary data>"
+    // Skip magic "P6"
+    if data.len() < 3 || &data[0..2] != b"P6" {
+        return None;
+    }
+    let mut pos: usize = 2;
+
+    // Skip whitespace
+    while pos < data.len()
+        && (data[pos] == b' ' || data[pos] == b'\n' || data[pos] == b'\r' || data[pos] == b'\t')
+    {
+        pos += 1;
+    }
+
+    // Skip comments
+    while pos < data.len() && data[pos] == b'#' {
+        while pos < data.len() && data[pos] != b'\n' {
+            pos += 1;
+        }
+        if pos < data.len() {
+            pos += 1; // skip newline
+        }
+    }
+
+    // Parse width
+    let width_start: usize = pos;
+    while pos < data.len() && data[pos].is_ascii_digit() {
+        pos += 1;
+    }
+    let width: usize = std::str::from_utf8(&data[width_start..pos])
+        .ok()?
+        .parse()
+        .ok()?;
+
+    // Skip whitespace
+    while pos < data.len()
+        && (data[pos] == b' ' || data[pos] == b'\n' || data[pos] == b'\r' || data[pos] == b'\t')
+    {
+        pos += 1;
+    }
+
+    // Skip comments
+    while pos < data.len() && data[pos] == b'#' {
+        while pos < data.len() && data[pos] != b'\n' {
+            pos += 1;
+        }
+        if pos < data.len() {
+            pos += 1;
+        }
+    }
+
+    // Parse height
+    let height_start: usize = pos;
+    while pos < data.len() && data[pos].is_ascii_digit() {
+        pos += 1;
+    }
+    let height: usize = std::str::from_utf8(&data[height_start..pos])
+        .ok()?
+        .parse()
+        .ok()?;
+
+    // Skip whitespace
+    while pos < data.len()
+        && (data[pos] == b' ' || data[pos] == b'\n' || data[pos] == b'\r' || data[pos] == b'\t')
+    {
+        pos += 1;
+    }
+
+    // Skip comments
+    while pos < data.len() && data[pos] == b'#' {
+        while pos < data.len() && data[pos] != b'\n' {
+            pos += 1;
+        }
+        if pos < data.len() {
+            pos += 1;
+        }
+    }
+
+    // Parse maxval
+    let maxval_start: usize = pos;
+    while pos < data.len() && data[pos].is_ascii_digit() {
+        pos += 1;
+    }
+    let _maxval: usize = std::str::from_utf8(&data[maxval_start..pos])
+        .ok()?
+        .parse()
+        .ok()?;
+
+    // Exactly one whitespace character after maxval
+    if pos < data.len()
+        && (data[pos] == b' ' || data[pos] == b'\n' || data[pos] == b'\r' || data[pos] == b'\t')
+    {
+        pos += 1;
+    }
+
+    // Remaining data is the pixel buffer
+    let expected_len: usize = width * height * 3;
+    if data.len() - pos < expected_len {
+        return None;
+    }
+
+    Some((width, height, data[pos..pos + expected_len].to_vec()))
+}
+
+// ---------------------------------------------------------------------------
+// Test: C djpeg cross-validation
+// ---------------------------------------------------------------------------
+
+/// Cross-validate Rust decoder against C djpeg for each subsampling mode.
+///
+/// For S444, S422, and S420:
+/// 1. Encode a 64x64 test image with Rust
+/// 2. Decode at full scale with both Rust and C djpeg
+/// 3. Assert the pixel data is identical (diff=0)
+#[test]
+fn c_djpeg_cross_validation_decompress_diff_zero() {
+    let djpeg: PathBuf = match djpeg_path() {
+        Some(p) => p,
+        None => {
+            eprintln!("SKIP: djpeg not found");
+            return;
+        }
+    };
+
+    let subsampling_modes: Vec<Subsampling> =
+        vec![Subsampling::S444, Subsampling::S422, Subsampling::S420];
+
+    for subsamp in &subsampling_modes {
+        let jpeg_data: Vec<u8> = encode_color_jpeg(*subsamp);
+
+        // --- Rust decode ---
+        let rust_image: Image = {
+            let mut decoder: Decoder = Decoder::new(&jpeg_data).expect("Rust decoder init failed");
+            decoder.set_output_format(PixelFormat::Rgb);
+            decoder
+                .decode_image()
+                .unwrap_or_else(|e| panic!("Rust decode failed for {:?}: {:?}", subsamp, e))
+        };
+
+        // --- C djpeg decode ---
+        let temp_dir: PathBuf = std::env::temp_dir();
+        let jpeg_path: PathBuf = temp_dir.join(format!("cross_val_{:?}.jpg", subsamp));
+        let ppm_path: PathBuf = temp_dir.join(format!("cross_val_{:?}.ppm", subsamp));
+
+        // Write JPEG to temp file
+        {
+            let mut file = std::fs::File::create(&jpeg_path)
+                .unwrap_or_else(|e| panic!("Failed to create temp JPEG {:?}: {:?}", jpeg_path, e));
+            file.write_all(&jpeg_data)
+                .unwrap_or_else(|e| panic!("Failed to write temp JPEG {:?}: {:?}", jpeg_path, e));
+        }
+
+        // Run djpeg
+        let djpeg_output = Command::new(&djpeg)
+            .arg("-ppm")
+            .arg("-outfile")
+            .arg(&ppm_path)
+            .arg(&jpeg_path)
+            .output()
+            .unwrap_or_else(|e| panic!("Failed to run djpeg for {:?}: {:?}", subsamp, e));
+
+        assert!(
+            djpeg_output.status.success(),
+            "djpeg failed for {:?}: {}",
+            subsamp,
+            String::from_utf8_lossy(&djpeg_output.stderr)
+        );
+
+        // Parse PPM output
+        let ppm_data: Vec<u8> = std::fs::read(&ppm_path)
+            .unwrap_or_else(|e| panic!("Failed to read PPM {:?}: {:?}", ppm_path, e));
+        let (c_width, c_height, c_pixels) =
+            parse_ppm(&ppm_data).unwrap_or_else(|| panic!("Failed to parse PPM for {:?}", subsamp));
+
+        // Verify dimensions match
+        assert_eq!(
+            rust_image.width, c_width,
+            "Width mismatch for {:?}: Rust={} C={}",
+            subsamp, rust_image.width, c_width
+        );
+        assert_eq!(
+            rust_image.height, c_height,
+            "Height mismatch for {:?}: Rust={} C={}",
+            subsamp, rust_image.height, c_height
+        );
+
+        // Assert pixel-exact match (diff=0)
+        assert_eq!(
+            rust_image.data.len(),
+            c_pixels.len(),
+            "Data length mismatch for {:?}: Rust={} C={}",
+            subsamp,
+            rust_image.data.len(),
+            c_pixels.len()
+        );
+        assert_eq!(
+            rust_image.data, c_pixels,
+            "Pixel data mismatch for {:?}: Rust and C djpeg outputs differ",
+            subsamp
+        );
+
+        // Cleanup temp files
+        let _ = std::fs::remove_file(&jpeg_path);
+        let _ = std::fs::remove_file(&ppm_path);
+
+        eprintln!(
+            "PASS: {:?} — {}x{} pixels match exactly",
+            subsamp, c_width, c_height
         );
     }
 }
