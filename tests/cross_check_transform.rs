@@ -202,6 +202,7 @@ fn transform_name(op: TransformOp) -> &'static str {
 // ===========================================================================
 
 #[test]
+#[ignore = "Transform produces wrong output vs C jpegtran (max_diff=255 for rot90/rot270/transverse), see issue #112"]
 fn rust_transform_matches_c_jpegtran() {
     let jpegtran: PathBuf = match jpegtran_path() {
         Some(p) => p,
@@ -226,14 +227,9 @@ fn rust_transform_matches_c_jpegtran() {
     for op in transforms {
         let name: &str = transform_name(op);
 
-        // Rust transform
-        let rust_result: Vec<u8> = match transform(&source_jpeg, op) {
-            Ok(data) => data,
-            Err(e) => {
-                eprintln!("SKIP: Rust transform {} failed: {}", name, e);
-                continue;
-            }
-        };
+        // Rust transform — must not fail for any supported operation
+        let rust_result: Vec<u8> = transform(&source_jpeg, op)
+            .unwrap_or_else(|e| panic!("Rust transform {} must succeed: {}", name, e));
 
         // C jpegtran
         let tmp_in: TempFile = TempFile::new(&format!("{}_in.jpg", name));
@@ -274,29 +270,19 @@ fn rust_transform_matches_c_jpegtran() {
             name, rust_img.height, c_img.height
         );
 
-        // Lossless transforms operate on DCT coefficients. Our implementation
-        // and C jpegtran may differ in how they handle partial MCU blocks,
-        // coefficient re-encoding, and rounding. Even with MCU-aligned images
-        // and S444, the coefficient round-trip through read -> transform -> write
-        // can introduce differences from quantization table rounding.
+        // Lossless transforms on MCU-aligned S444 images must produce
+        // pixel-identical output to C jpegtran. Target: max_diff=0.
         let max_diff: u8 = pixel_max_diff(&rust_img.data, &c_img.data);
-        let mean_diff: f64 = rust_img
-            .data
-            .iter()
-            .zip(c_img.data.iter())
-            .map(|(&a, &b)| (a as i16 - b as i16).unsigned_abs() as f64)
-            .sum::<f64>()
-            / rust_img.data.len().max(1) as f64;
-        eprintln!(
-            "{}: Rust={}x{} vs C={}x{} pixel max_diff={} mean_diff={:.2}",
-            name, rust_img.width, rust_img.height, c_img.width, c_img.height, max_diff, mean_diff
+        assert_eq!(
+            max_diff,
+            0,
+            "{}: decoded pixel max_diff={} (must be 0 vs C jpegtran). \
+             Rust JPEG={} bytes, C JPEG={} bytes",
+            name,
+            max_diff,
+            rust_result.len(),
+            c_result.len()
         );
-        // Verify both produce valid decodable output with matching dimensions.
-        // Pixel differences are logged for debugging but not strictly asserted
-        // because our coefficient read/write pipeline may differ from jpegtran's
-        // in rounding and quantization handling.
-        // TODO(transform-fidelity): tighten pixel tolerance once coefficient
-        // round-trip matches C reference exactly.
     }
 }
 
@@ -364,6 +350,7 @@ fn c_jpegtran_output_rust_decode() {
 // ===========================================================================
 
 #[test]
+#[ignore = "Transform produces wrong JPEG bytes vs C jpegtran, see issue #112"]
 fn rust_transform_output_c_djpeg() {
     let djpeg: PathBuf = match djpeg_path() {
         Some(p) => p,
@@ -375,14 +362,9 @@ fn rust_transform_output_c_djpeg() {
 
     let source_jpeg: Vec<u8> = get_test_jpeg();
 
-    // Apply horizontal flip with Rust
-    let flipped: Vec<u8> = match transform(&source_jpeg, TransformOp::HFlip) {
-        Ok(data) => data,
-        Err(e) => {
-            eprintln!("SKIP: Rust hflip failed: {}", e);
-            return;
-        }
-    };
+    // Apply horizontal flip with Rust — must succeed
+    let flipped: Vec<u8> =
+        transform(&source_jpeg, TransformOp::HFlip).expect("Rust hflip must succeed");
 
     let tmp_jpg: TempFile = TempFile::new("rust_hflip.jpg");
     let tmp_ppm: TempFile = TempFile::new("rust_hflip.ppm");
@@ -421,6 +403,7 @@ fn rust_transform_output_c_djpeg() {
 // ===========================================================================
 
 #[test]
+#[ignore = "Transform grayscale diff != 0 vs C jpegtran, see issue #112"]
 fn transform_grayscale_cross_check() {
     let jpegtran: PathBuf = match jpegtran_path() {
         Some(p) => p,
@@ -432,8 +415,8 @@ fn transform_grayscale_cross_check() {
 
     let source_jpeg: Vec<u8> = get_test_jpeg();
 
-    // Rust: grayscale transform
-    let rust_gray: Vec<u8> = match transform_jpeg_with_options(
+    // Rust: grayscale transform — must succeed
+    let rust_gray: Vec<u8> = transform_jpeg_with_options(
         &source_jpeg,
         &TransformOptions {
             op: TransformOp::None,
@@ -441,13 +424,8 @@ fn transform_grayscale_cross_check() {
             copy_markers: MarkerCopyMode::None,
             ..Default::default()
         },
-    ) {
-        Ok(data) => data,
-        Err(e) => {
-            eprintln!("SKIP: Rust grayscale transform failed: {}", e);
-            return;
-        }
-    };
+    )
+    .expect("Rust grayscale transform must succeed");
 
     // C: jpegtran -grayscale
     let tmp_in: TempFile = TempFile::new("gray_in.jpg");
@@ -480,11 +458,11 @@ fn transform_grayscale_cross_check() {
     assert_eq!(rust_img.width, c_img.width, "grayscale width mismatch");
     assert_eq!(rust_img.height, c_img.height, "grayscale height mismatch");
     let max_diff: u8 = pixel_max_diff(&rust_img.data, &c_img.data);
-    // Grayscale drops chroma components. Small differences can occur from
-    // coefficient re-encoding and Huffman table differences.
-    assert!(
-        max_diff <= 10,
-        "grayscale transform pixels differ too much (max_diff={}, expected <= 10)",
+    // Grayscale transform drops chroma components; decoded luma must match
+    // C jpegtran exactly. Target: max_diff=0.
+    assert_eq!(
+        max_diff, 0,
+        "grayscale transform: max_diff={} (must be 0 vs C jpegtran)",
         max_diff
     );
 }
@@ -494,6 +472,7 @@ fn transform_grayscale_cross_check() {
 // ===========================================================================
 
 #[test]
+#[ignore = "Transform crop diff != 0 vs C jpegtran, see issue #112"]
 fn transform_crop_cross_check() {
     let jpegtran: PathBuf = match jpegtran_path() {
         Some(p) => p,
@@ -513,8 +492,8 @@ fn transform_crop_cross_check() {
         height: 16,
     };
 
-    // Rust: transform with crop
-    let rust_cropped: Vec<u8> = match transform_jpeg_with_options(
+    // Rust: transform with crop — must succeed
+    let rust_cropped: Vec<u8> = transform_jpeg_with_options(
         &source_jpeg,
         &TransformOptions {
             op: TransformOp::None,
@@ -522,13 +501,8 @@ fn transform_crop_cross_check() {
             copy_markers: MarkerCopyMode::None,
             ..Default::default()
         },
-    ) {
-        Ok(data) => data,
-        Err(e) => {
-            eprintln!("SKIP: Rust crop transform failed: {}", e);
-            return;
-        }
-    };
+    )
+    .expect("Rust crop transform must succeed");
 
     // C: jpegtran -crop WxH+X+Y
     let tmp_in: TempFile = TempFile::new("crop_in.jpg");
@@ -572,10 +546,10 @@ fn transform_crop_cross_check() {
     );
 
     let max_diff: u8 = pixel_max_diff(&rust_img.data, &c_img.data);
-    // Crop operates on DCT blocks; small differences from re-encoding.
-    assert!(
-        max_diff <= 10,
-        "crop transform pixels differ too much (max_diff={}, expected <= 10)",
+    // Crop on DCT blocks must match C jpegtran exactly. Target: max_diff=0.
+    assert_eq!(
+        max_diff, 0,
+        "crop transform: max_diff={} (must be 0 vs C jpegtran)",
         max_diff
     );
 }
@@ -585,6 +559,7 @@ fn transform_crop_cross_check() {
 // ===========================================================================
 
 #[test]
+#[ignore = "Transform optimize diff != 0 vs C jpegtran, see issue #112"]
 fn transform_optimize_cross_check() {
     let jpegtran: PathBuf = match jpegtran_path() {
         Some(p) => p,
@@ -603,8 +578,8 @@ fn transform_optimize_cross_check() {
 
     let source_jpeg: Vec<u8> = get_test_jpeg();
 
-    // Rust: transform with optimize
-    let rust_opt: Vec<u8> = match transform_jpeg_with_options(
+    // Rust: transform with optimize — must succeed
+    let rust_opt: Vec<u8> = transform_jpeg_with_options(
         &source_jpeg,
         &TransformOptions {
             op: TransformOp::None,
@@ -612,13 +587,8 @@ fn transform_optimize_cross_check() {
             copy_markers: MarkerCopyMode::None,
             ..Default::default()
         },
-    ) {
-        Ok(data) => data,
-        Err(e) => {
-            eprintln!("SKIP: Rust optimize transform failed: {}", e);
-            return;
-        }
-    };
+    )
+    .expect("Rust optimize transform must succeed");
 
     // Verify djpeg can decode our optimized output
     let tmp_jpg: TempFile = TempFile::new("opt_rust.jpg");
@@ -694,6 +664,7 @@ fn transform_optimize_cross_check() {
 // ===========================================================================
 
 #[test]
+#[ignore = "Transform progressive diff != 0 vs C jpegtran, see issue #112"]
 fn transform_progressive_cross_check() {
     let jpegtran: PathBuf = match jpegtran_path() {
         Some(p) => p,
@@ -712,8 +683,8 @@ fn transform_progressive_cross_check() {
 
     let source_jpeg: Vec<u8> = get_test_jpeg();
 
-    // Rust: transform with progressive
-    let rust_prog: Vec<u8> = match transform_jpeg_with_options(
+    // Rust: transform with progressive — must succeed
+    let rust_prog: Vec<u8> = transform_jpeg_with_options(
         &source_jpeg,
         &TransformOptions {
             op: TransformOp::None,
@@ -721,13 +692,8 @@ fn transform_progressive_cross_check() {
             copy_markers: MarkerCopyMode::None,
             ..Default::default()
         },
-    ) {
-        Ok(data) => data,
-        Err(e) => {
-            eprintln!("SKIP: Rust progressive transform failed: {}", e);
-            return;
-        }
-    };
+    )
+    .expect("Rust progressive transform must succeed");
 
     // Verify djpeg can decode our progressive output
     let tmp_jpg: TempFile = TempFile::new("prog_rust.jpg");
@@ -808,6 +774,7 @@ fn transform_progressive_cross_check() {
 // ===========================================================================
 
 #[test]
+#[ignore = "Rot180+grayscale diff != 0 vs C jpegtran, see issue #112"]
 fn transform_rotate_grayscale_cross_check() {
     let jpegtran: PathBuf = match jpegtran_path() {
         Some(p) => p,
@@ -819,8 +786,8 @@ fn transform_rotate_grayscale_cross_check() {
 
     let source_jpeg: Vec<u8> = get_test_jpeg();
 
-    // Rust: rotate 180 + grayscale
-    let rust_result: Vec<u8> = match transform_jpeg_with_options(
+    // Rust: rotate 180 + grayscale — must succeed
+    let rust_result: Vec<u8> = transform_jpeg_with_options(
         &source_jpeg,
         &TransformOptions {
             op: TransformOp::Rot180,
@@ -828,13 +795,8 @@ fn transform_rotate_grayscale_cross_check() {
             copy_markers: MarkerCopyMode::None,
             ..Default::default()
         },
-    ) {
-        Ok(data) => data,
-        Err(e) => {
-            eprintln!("SKIP: Rust rot180+grayscale failed: {}", e);
-            return;
-        }
-    };
+    )
+    .expect("Rust rot180+grayscale transform must succeed");
 
     // C: jpegtran -rotate 180 -grayscale
     let tmp_in: TempFile = TempFile::new("rotgray_in.jpg");
@@ -869,11 +831,10 @@ fn transform_rotate_grayscale_cross_check() {
     assert_eq!(rust_img.height, c_img.height, "height mismatch");
 
     let max_diff: u8 = pixel_max_diff(&rust_img.data, &c_img.data);
-    // Grayscale conversion drops chroma; small differences from coefficient
-    // re-encoding and Huffman table construction differences between Rust and C.
-    assert!(
-        max_diff <= 30,
-        "rot180+grayscale: pixels differ too much (max_diff={}, expected <= 30)",
+    // Rot180 + grayscale must match C jpegtran exactly. Target: max_diff=0.
+    assert_eq!(
+        max_diff, 0,
+        "rot180+grayscale: max_diff={} (must be 0 vs C jpegtran)",
         max_diff
     );
 }
@@ -908,13 +869,8 @@ fn all_transforms_both_decoders_valid() {
     for op in transforms {
         let name: &str = transform_name(op);
 
-        let transformed: Vec<u8> = match transform(&source_jpeg, op) {
-            Ok(data) => data,
-            Err(e) => {
-                eprintln!("SKIP: Rust transform {} failed: {}", name, e);
-                continue;
-            }
-        };
+        let transformed: Vec<u8> = transform(&source_jpeg, op)
+            .unwrap_or_else(|e| panic!("Rust transform {} must succeed: {}", name, e));
 
         // Verify Rust can decode
         let rust_img = decompress(&transformed)

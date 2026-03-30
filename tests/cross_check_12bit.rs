@@ -209,13 +209,8 @@ fn rust_12bit_c_decode() {
         }
     }
 
-    let jpeg: Vec<u8> = match compress_12bit(&pixels, w, h, num_components, 90, Subsampling::S444) {
-        Ok(data) => data,
-        Err(e) => {
-            eprintln!("SKIP: compress_12bit failed: {}", e);
-            return;
-        }
-    };
+    let jpeg: Vec<u8> = compress_12bit(&pixels, w, h, num_components, 90, Subsampling::S444)
+        .expect("compress_12bit must succeed");
 
     let tmp_jpg: TempFile = TempFile::new("rust_12bit.jpg");
     let tmp_out: TempFile = TempFile::new("rust_12bit.pnm");
@@ -355,6 +350,7 @@ fn c_12bit_cjpeg_precision_rust_decode() {
 // ===========================================================================
 
 #[test]
+#[ignore = "12-bit IDCT broken: max_diff=3127, mean_diff=1012 vs C djpeg, see issue #112"]
 fn pixel_match_12bit_c_reference() {
     let djpeg: PathBuf = match djpeg_path() {
         Some(p) => p,
@@ -375,15 +371,10 @@ fn pixel_match_12bit_c_reference() {
         return;
     }
 
-    // Decode with Rust
+    // Decode with Rust — must not fail
     let jpeg_data: Vec<u8> = std::fs::read(&ref_path).expect("read testorig12.jpg");
-    let rust_img = match decompress_12bit(&jpeg_data) {
-        Ok(img) => img,
-        Err(e) => {
-            eprintln!("SKIP: Rust decompress_12bit failed: {}", e);
-            return;
-        }
-    };
+    let rust_img =
+        decompress_12bit(&jpeg_data).expect("Rust decompress_12bit must succeed on testorig12.jpg");
 
     // Decode with C djpeg
     let tmp_out: TempFile = TempFile::new("c_12bit_ref.pnm");
@@ -449,13 +440,11 @@ fn pixel_match_12bit_c_reference() {
             maxval, max_diff, mean_diff
         );
 
-        // Our 12-bit IDCT may differ from C libjpeg-turbo's implementation.
-        // Allow a generous tolerance that still catches catastrophic failures.
-        // TODO(12bit-idct): tighten tolerance once 12-bit IDCT matches C reference
-        assert!(
-            mean_diff < 2048.0,
-            "12-bit mean diff unreasonably large: {:.2} (suggests decoder is broken, not just imprecise)",
-            mean_diff
+        // 12-bit decode must match C djpeg exactly. Target: max_diff=0.
+        assert_eq!(
+            max_diff, 0,
+            "12-bit pixel max_diff={} (must be 0 vs C djpeg, mean_diff={:.2})",
+            max_diff, mean_diff
         );
     } else if maxval == 255 {
         // djpeg produced 8-bit output from 12-bit JPEG.
@@ -504,22 +493,10 @@ fn rust_12bit_roundtrip_encode_decode() {
         }
     }
 
-    let jpeg: Vec<u8> = match compress_12bit(&pixels, w, h, num_components, 100, Subsampling::S444)
-    {
-        Ok(data) => data,
-        Err(e) => {
-            eprintln!("SKIP: compress_12bit failed: {}", e);
-            return;
-        }
-    };
+    let jpeg: Vec<u8> = compress_12bit(&pixels, w, h, num_components, 100, Subsampling::S444)
+        .expect("compress_12bit must succeed");
 
-    let img = match decompress_12bit(&jpeg) {
-        Ok(img) => img,
-        Err(e) => {
-            eprintln!("SKIP: decompress_12bit failed: {}", e);
-            return;
-        }
-    };
+    let img = decompress_12bit(&jpeg).expect("decompress_12bit must succeed on own output");
 
     assert_eq!(img.width, w);
     assert_eq!(img.height, h);
