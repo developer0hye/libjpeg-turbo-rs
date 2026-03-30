@@ -673,6 +673,13 @@ impl<'a> Decoder<'a> {
 
     #[inline(always)]
     fn fancy_upsample_h2v1(&self, input: &[u8], in_width: usize, output: &mut [u8]) {
+        // For in_width <= 2, C's merged path uses box filter (no interpolation).
+        // NEON/SIMD paths may not handle this edge case correctly, so use scalar.
+        if in_width <= 2 {
+            crate::decode::upsample::fancy_h2v1(input, in_width, output, 0);
+            return;
+        }
+
         #[cfg(all(target_arch = "aarch64", feature = "simd"))]
         {
             return crate::simd::aarch64::upsample::neon_fancy_upsample_h2v1(
@@ -2510,6 +2517,13 @@ impl<'a> Decoder<'a> {
             let h_factor = max_h / cb_comp.horizontal_sampling as usize;
             let v_factor = max_v / cb_comp.vertical_sampling as usize;
 
+            // Actual chroma dimensions (may be smaller than MCU-aligned cb_w/cb_h).
+            // C libjpeg-turbo uses downsampled_width/height for upsample, not
+            // MCU-padded dimensions. Using MCU-padded values causes the upsample
+            // to interpolate padding data, producing wrong edge pixels.
+            let actual_cb_w: usize = out_width.div_ceil(h_factor);
+            let actual_cb_h: usize = out_height.div_ceil(v_factor);
+
             // For 4:4:4, use component planes directly without clone.
             // For subsampled modes, upsample into separate buffers.
             let (cb_data, cr_data, cb_stride, cr_stride): (&[u8], &[u8], usize, usize);
@@ -2614,26 +2628,27 @@ impl<'a> Decoder<'a> {
                     let mut cr_row_top = vec![0u8; full_width];
                     let mut cr_row_bot = vec![0u8; full_width];
 
-                    for cy in 0..cb_h {
-                        let cb_cur = &component_planes[1][cy * cb_w..(cy + 1) * cb_w];
-                        let cr_cur = &component_planes[2][cy * cb_w..(cy + 1) * cb_w];
+                    // Use actual chroma dimensions for upsample (not MCU-padded).
+                    for cy in 0..actual_cb_h {
+                        let cb_cur = &component_planes[1][cy * cb_w..cy * cb_w + actual_cb_w];
+                        let cr_cur = &component_planes[2][cy * cb_w..cy * cb_w + actual_cb_w];
                         let cb_above = if cy > 0 {
-                            &component_planes[1][(cy - 1) * cb_w..cy * cb_w]
+                            &component_planes[1][(cy - 1) * cb_w..(cy - 1) * cb_w + actual_cb_w]
                         } else {
                             cb_cur
                         };
-                        let cb_below = if cy + 1 < cb_h {
-                            &component_planes[1][(cy + 1) * cb_w..(cy + 2) * cb_w]
+                        let cb_below = if cy + 1 < actual_cb_h {
+                            &component_planes[1][(cy + 1) * cb_w..(cy + 1) * cb_w + actual_cb_w]
                         } else {
                             cb_cur
                         };
                         let cr_above = if cy > 0 {
-                            &component_planes[2][(cy - 1) * cb_w..cy * cb_w]
+                            &component_planes[2][(cy - 1) * cb_w..(cy - 1) * cb_w + actual_cb_w]
                         } else {
                             cr_cur
                         };
-                        let cr_below = if cy + 1 < cb_h {
-                            &component_planes[2][(cy + 1) * cb_w..(cy + 2) * cb_w]
+                        let cr_below = if cy + 1 < actual_cb_h {
+                            &component_planes[2][(cy + 1) * cb_w..(cy + 1) * cb_w + actual_cb_w]
                         } else {
                             cr_cur
                         };
@@ -2643,13 +2658,13 @@ impl<'a> Decoder<'a> {
                             cb_cur,
                             cb_above,
                             &mut cb_row_top,
-                            cb_w,
+                            actual_cb_w,
                         );
                         crate::decode::upsample::fancy_h2v2_row(
                             cr_cur,
                             cr_above,
                             &mut cr_row_top,
-                            cb_w,
+                            actual_cb_w,
                         );
 
                         // Fused vertical+horizontal upsample for bottom output row
@@ -2657,13 +2672,13 @@ impl<'a> Decoder<'a> {
                             cb_cur,
                             cb_below,
                             &mut cb_row_bot,
-                            cb_w,
+                            actual_cb_w,
                         );
                         crate::decode::upsample::fancy_h2v2_row(
                             cr_cur,
                             cr_below,
                             &mut cr_row_bot,
-                            cb_w,
+                            actual_cb_w,
                         );
 
                         // Color convert both output rows immediately
@@ -2738,25 +2753,53 @@ impl<'a> Decoder<'a> {
                         v_factor,
                     );
                 } else if h_factor == 2 && v_factor == 1 {
-                    for row in 0..cb_h {
+                    // Use actual chroma dimensions (not MCU-padded) to match C.
+                    for row in 0..actual_cb_h {
                         self.fancy_upsample_h2v1(
                             &component_planes[1][row * cb_w..],
-                            cb_w,
+                            actual_cb_w,
                             &mut cb_full[row * full_width..],
                         );
                         self.fancy_upsample_h2v1(
                             &component_planes[2][row * cb_w..],
-                            cb_w,
+                            actual_cb_w,
                             &mut cr_full[row * full_width..],
                         );
                     }
                 } else if h_factor == 2 && v_factor == 2 {
-                    self.fancy_h2v2(&component_planes[1], cb_w, cb_h, &mut cb_full, full_width);
-                    self.fancy_h2v2(&component_planes[2], cb_w, cb_h, &mut cr_full, full_width);
+                    // Use actual chroma dimensions (not MCU-padded) to match C.
+                    crate::decode::upsample::fancy_h2v2_strided(
+                        &component_planes[1],
+                        actual_cb_w,
+                        cb_w,
+                        actual_cb_h,
+                        &mut cb_full,
+                        full_width,
+                    );
+                    crate::decode::upsample::fancy_h2v2_strided(
+                        &component_planes[2],
+                        actual_cb_w,
+                        cb_w,
+                        actual_cb_h,
+                        &mut cr_full,
+                        full_width,
+                    );
                 } else if h_factor == 1 && v_factor == 2 {
-                    // S440: vertical-only 2x
-                    self.fancy_h1v2(&component_planes[1], cb_w, cb_h, &mut cb_full, full_width);
-                    self.fancy_h1v2(&component_planes[2], cb_w, cb_h, &mut cr_full, full_width);
+                    // S440: vertical-only 2x — use actual chroma height
+                    self.fancy_h1v2(
+                        &component_planes[1],
+                        cb_w,
+                        actual_cb_h,
+                        &mut cb_full,
+                        full_width,
+                    );
+                    self.fancy_h1v2(
+                        &component_planes[2],
+                        cb_w,
+                        actual_cb_h,
+                        &mut cr_full,
+                        full_width,
+                    );
                 } else if h_factor == 4 && v_factor == 1 {
                     // S411: horizontal-only 4x — C uses int_upsample (box filter),
                     // not fancy interpolation. Use nearest-neighbor to match C.
