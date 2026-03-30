@@ -9,6 +9,9 @@
 //! - arithmetic + progressive: SOF10 decode not yet fully supported
 //! - Huffman progressive + S440/S441: progressive scan script issue with these subsamplings
 
+use std::path::PathBuf;
+use std::process::Command;
+
 use libjpeg_turbo_rs::precision::{compress_lossless_arbitrary, decompress_lossless_arbitrary};
 use libjpeg_turbo_rs::{decompress, DctMethod, Encoder, PixelFormat, Subsampling};
 
@@ -155,6 +158,101 @@ impl TestCounters {
             self.unexpected_fail, self.tested
         );
     }
+}
+
+/// Find the djpeg binary path.
+///
+/// Checks `/opt/homebrew/bin/djpeg` first (macOS Homebrew), then falls back
+/// to `which djpeg` on the system PATH. Returns `None` if neither is found.
+fn djpeg_path() -> Option<PathBuf> {
+    let homebrew: PathBuf = PathBuf::from("/opt/homebrew/bin/djpeg");
+    if homebrew.exists() {
+        return Some(homebrew);
+    }
+    // Fall back to `which djpeg`
+    let output = Command::new("which").arg("djpeg").output().ok()?;
+    if output.status.success() {
+        let path_str: String = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        if !path_str.is_empty() {
+            let path: PathBuf = PathBuf::from(&path_str);
+            if path.exists() {
+                return Some(path);
+            }
+        }
+    }
+    None
+}
+
+/// Parse a PPM (P6 binary) file into raw RGB pixel data.
+///
+/// Returns `(width, height, data)` on success, or an error string on failure.
+fn parse_ppm(bytes: &[u8]) -> Result<(usize, usize, Vec<u8>), String> {
+    // PPM P6 format: "P6\n<width> <height>\n<maxval>\n<binary data>"
+    let header_end: usize = {
+        let mut newline_count: u32 = 0;
+        let mut pos: usize = 0;
+        while pos < bytes.len() && newline_count < 3 {
+            if bytes[pos] == b'\n' {
+                newline_count += 1;
+            }
+            pos += 1;
+        }
+        pos
+    };
+    if header_end >= bytes.len() {
+        return Err("PPM header too short".to_string());
+    }
+
+    let header: &str = std::str::from_utf8(&bytes[..header_end])
+        .map_err(|e| format!("PPM header UTF-8: {}", e))?;
+    let mut lines = header.lines();
+    let magic: &str = lines.next().ok_or("PPM: missing magic")?;
+    if magic != "P6" {
+        return Err(format!("PPM: expected P6, got {}", magic));
+    }
+
+    // Skip comment lines
+    let mut dims_line: Option<&str> = None;
+    let mut maxval_line: Option<&str> = None;
+    for line in lines {
+        if line.starts_with('#') {
+            continue;
+        }
+        if dims_line.is_none() {
+            dims_line = Some(line);
+        } else if maxval_line.is_none() {
+            maxval_line = Some(line);
+        }
+    }
+
+    let dims: &str = dims_line.ok_or("PPM: missing dimensions")?;
+    let parts: Vec<&str> = dims.split_whitespace().collect();
+    if parts.len() != 2 {
+        return Err(format!(
+            "PPM: expected 2 dimension values, got {}",
+            parts.len()
+        ));
+    }
+    let width: usize = parts[0]
+        .parse()
+        .map_err(|e| format!("PPM: bad width: {}", e))?;
+    let height: usize = parts[1]
+        .parse()
+        .map_err(|e| format!("PPM: bad height: {}", e))?;
+
+    let _maxval: &str = maxval_line.ok_or("PPM: missing maxval")?;
+
+    let pixel_data: &[u8] = &bytes[header_end..];
+    let expected_len: usize = width * height * 3;
+    if pixel_data.len() < expected_len {
+        return Err(format!(
+            "PPM: pixel data too short: expected {}, got {}",
+            expected_len,
+            pixel_data.len()
+        ));
+    }
+
+    Ok((width, height, pixel_data[..expected_len].to_vec()))
 }
 
 /// Run a lossy encode/decode roundtrip and record the result.
@@ -1324,6 +1422,147 @@ fn tjcomptest_coverage_summary() {
     println!("  Lossy RGB+ICC:            ~480 combinations");
     println!("  Lossless 8-bit:           ~224 combinations");
     println!("  Arbitrary precision:      ~1400+ combinations");
+    println!("  C djpeg cross-validation: 6 combinations");
     println!("  -------");
     println!("  Total:                    ~5000+ combinations");
+}
+
+// ---------------------------------------------------------------------------
+// C djpeg cross-validation: Rust encode -> Rust decode vs C djpeg decode
+// ---------------------------------------------------------------------------
+
+/// Cross-validates Rust encoder output by decoding with both Rust and C djpeg,
+/// then asserting the decoded pixels are identical.
+///
+/// Tests quality {75, 90} x subsampling {S444, S422, S420} = 6 combinations.
+/// Each JPEG is encoded with Rust's Encoder, then decoded by both Rust's
+/// `decompress` and the system's `djpeg` binary. The test asserts zero
+/// difference between the two decoded outputs.
+#[test]
+fn c_djpeg_cross_validation_encode_matrix_diff_zero() {
+    let djpeg: PathBuf = match djpeg_path() {
+        Some(p) => p,
+        None => {
+            eprintln!("SKIP: djpeg not found");
+            return;
+        }
+    };
+
+    let (w, h): (usize, usize) = (32, 32);
+    let pixels: Vec<u8> = generate_rgb_pattern(w, h);
+    let qualities: [u8; 2] = [75, 90];
+    let subsamplings: [Subsampling; 3] = [Subsampling::S444, Subsampling::S422, Subsampling::S420];
+
+    let temp_dir: PathBuf = std::env::temp_dir();
+
+    let mut tested: u32 = 0;
+    let mut passed: u32 = 0;
+
+    for &quality in &qualities {
+        for &subsamp in &subsamplings {
+            let desc: String = format!("q={} subsamp={:?}", quality, subsamp);
+
+            // Encode with Rust
+            let jpeg_data: Vec<u8> = Encoder::new(&pixels, w, h, PixelFormat::Rgb)
+                .quality(quality)
+                .subsampling(subsamp)
+                .encode()
+                .unwrap_or_else(|e| panic!("encode failed for {}: {}", desc, e));
+
+            // Decode with Rust
+            let rust_image = decompress(&jpeg_data)
+                .unwrap_or_else(|e| panic!("Rust decode failed for {}: {}", desc, e));
+            let rust_pixels: &[u8] = &rust_image.data;
+
+            // Write JPEG to temp file
+            let jpeg_path: PathBuf =
+                temp_dir.join(format!("cross_val_q{}_s{:?}.jpg", quality, subsamp));
+            let ppm_path: PathBuf =
+                temp_dir.join(format!("cross_val_q{}_s{:?}.ppm", quality, subsamp));
+
+            std::fs::write(&jpeg_path, &jpeg_data)
+                .unwrap_or_else(|e| panic!("write JPEG failed for {}: {}", desc, e));
+
+            // Decode with C djpeg
+            let djpeg_output = Command::new(&djpeg)
+                .arg("-ppm")
+                .arg("-outfile")
+                .arg(&ppm_path)
+                .arg(&jpeg_path)
+                .output()
+                .unwrap_or_else(|e| panic!("djpeg exec failed for {}: {}", desc, e));
+
+            if !djpeg_output.status.success() {
+                let stderr: String = String::from_utf8_lossy(&djpeg_output.stderr).to_string();
+                panic!("djpeg returned non-zero for {}: {}", desc, stderr);
+            }
+
+            // Parse PPM output
+            let ppm_bytes: Vec<u8> = std::fs::read(&ppm_path)
+                .unwrap_or_else(|e| panic!("read PPM failed for {}: {}", desc, e));
+            let (c_w, c_h, c_pixels) = parse_ppm(&ppm_bytes)
+                .unwrap_or_else(|e| panic!("parse PPM failed for {}: {}", desc, e));
+
+            // Clean up temp files
+            let _ = std::fs::remove_file(&jpeg_path);
+            let _ = std::fs::remove_file(&ppm_path);
+
+            // Validate dimensions match
+            assert_eq!(
+                (rust_image.width, rust_image.height),
+                (c_w, c_h),
+                "dimension mismatch for {}: Rust={}x{}, C={}x{}",
+                desc,
+                rust_image.width,
+                rust_image.height,
+                c_w,
+                c_h
+            );
+
+            // Rust decoder may output in RGB format; C djpeg -ppm always outputs RGB.
+            // Ensure we compare the same pixel format.
+            assert_eq!(
+                rust_image.pixel_format,
+                PixelFormat::Rgb,
+                "Rust decode produced {:?} instead of RGB for {}",
+                rust_image.pixel_format,
+                desc
+            );
+
+            // Assert diff=0 between Rust decode and C djpeg decode
+            assert_eq!(
+                rust_pixels.len(),
+                c_pixels.len(),
+                "pixel data length mismatch for {}: Rust={}, C={}",
+                desc,
+                rust_pixels.len(),
+                c_pixels.len()
+            );
+
+            let diff_count: usize = rust_pixels
+                .iter()
+                .zip(c_pixels.iter())
+                .filter(|(a, b)| a != b)
+                .count();
+
+            assert_eq!(
+                diff_count,
+                0,
+                "diff!=0 for {}: {} of {} bytes differ between Rust and C djpeg decode",
+                desc,
+                diff_count,
+                rust_pixels.len()
+            );
+
+            tested += 1;
+            passed += 1;
+            println!("PASS: c_djpeg cross-validation {}", desc);
+        }
+    }
+
+    println!(
+        "C djpeg cross-validation: {} tested, {} passed",
+        tested, passed
+    );
+    assert_eq!(tested, 6, "expected 6 combinations, got {}", tested);
 }
