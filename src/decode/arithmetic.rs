@@ -278,9 +278,8 @@ impl<'a> ArithDecoder<'a> {
                 st += 3;
                 k += 1;
                 if k > 63 {
-                    return Err(JpegError::CorruptData(
-                        "arithmetic AC spectral overflow".into(),
-                    ));
+                    // C libjpeg-turbo: WARNMS + return TRUE (tolerate overflow)
+                    return Ok(());
                 }
             }
 
@@ -298,7 +297,8 @@ impl<'a> ArithDecoder<'a> {
                 while self.decode(StatRef::Ac(ac_tbl, st_pos))? != 0 {
                     m <<= 1;
                     if m == 0x8000 {
-                        return Err(JpegError::CorruptData("arithmetic AC overflow".into()));
+                        // C libjpeg-turbo: WARNMS + return TRUE (tolerate overflow)
+                        return Ok(());
                     }
                     st_pos += 1;
                 }
@@ -417,9 +417,8 @@ impl<'a> ArithDecoder<'a> {
                 st += 3;
                 k += 1;
                 if k > se as usize {
-                    return Err(JpegError::CorruptData(
-                        "arithmetic AC spectral overflow".into(),
-                    ));
+                    // C libjpeg-turbo: WARNMS + return TRUE (tolerate overflow)
+                    return Ok(());
                 }
             }
             let sign = self.decode(StatRef::Fixed(0))?;
@@ -433,7 +432,8 @@ impl<'a> ArithDecoder<'a> {
                 while self.decode(StatRef::Ac(ac_tbl, st_pos))? != 0 {
                     m <<= 1;
                     if m == 0x8000 {
-                        return Err(JpegError::CorruptData("arithmetic AC overflow".into()));
+                        // C libjpeg-turbo: WARNMS + return TRUE (tolerate overflow)
+                        return Ok(());
                     }
                     st_pos += 1;
                 }
@@ -480,7 +480,7 @@ impl<'a> ArithDecoder<'a> {
 
         let mut k = ss as usize;
         while k <= se as usize {
-            let st = 3 * (k - 1);
+            let mut st = 3 * (k - 1);
             if k > kex && self.decode(StatRef::Ac(ac_tbl, st))? != 0 {
                 break; // EOB
             }
@@ -506,11 +506,11 @@ impl<'a> ArithDecoder<'a> {
                     }
                     break;
                 }
+                st += 3;
                 k += 1;
                 if k > se as usize {
-                    return Err(JpegError::CorruptData(
-                        "arithmetic AC spectral overflow".into(),
-                    ));
+                    // C libjpeg-turbo: WARNMS + return TRUE (tolerate overflow)
+                    return Ok(());
                 }
             }
             k += 1;

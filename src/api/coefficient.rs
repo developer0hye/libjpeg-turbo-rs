@@ -149,7 +149,16 @@ pub fn read_coefficients(data: &[u8]) -> Result<JpegCoefficients> {
         })
         .collect();
 
-    if frame.is_progressive {
+    if frame.is_progressive && metadata.is_arithmetic {
+        // SOF10: arithmetic progressive — use arithmetic decoder with progressive scans.
+        decode_arithmetic_progressive_coefficients(
+            data,
+            &metadata,
+            &mut comp_data,
+            mcus_x,
+            mcus_y,
+        )?;
+    } else if frame.is_progressive {
         decode_progressive_coefficients(data, &metadata, &mut comp_data, mcus_x, mcus_y)?;
     } else if metadata.is_arithmetic {
         decode_arithmetic_coefficients(data, &metadata, &mut comp_data, mcus_x, mcus_y)?;
@@ -1132,6 +1141,126 @@ fn decode_arithmetic_coefficients(
                         let by = mcu_y * v_blocks + v;
                         let block_idx = by * blocks_x + bx;
                         comp_data[comp_idx].blocks[block_idx] = coeffs;
+                    }
+                }
+            }
+        }
+    }
+
+    Ok(())
+}
+
+/// Decode SOF10 (arithmetic progressive) coefficients.
+fn decode_arithmetic_progressive_coefficients(
+    data: &[u8],
+    metadata: &JpegMetadata,
+    comp_data: &mut [ComponentCoefficients],
+    _mcus_x: usize,
+    _mcus_y: usize,
+) -> Result<()> {
+    use crate::decode::arithmetic::ArithDecoder;
+
+    let frame = &metadata.frame;
+
+    for scan_info in &metadata.scans {
+        let scan = &scan_info.header;
+        let ss: u8 = scan.spec_start;
+        let se: u8 = scan.spec_end;
+        let ah: u8 = scan.succ_high;
+        let al: u8 = scan.succ_low;
+        let is_dc: bool = ss == 0 && se == 0;
+
+        let entropy_data: &[u8] = &data[scan_info.data_offset..];
+        let mut arith: ArithDecoder<'_> = ArithDecoder::new(entropy_data, 0);
+
+        // Set arithmetic conditioning parameters
+        for i in 0..4 {
+            let (l, u) = metadata.arith_dc_params[i];
+            arith.set_dc_conditioning(i, l, u);
+            arith.set_ac_conditioning(i, metadata.arith_ac_params[i]);
+        }
+
+        let scan_comp_indices: Vec<usize> = scan
+            .components
+            .iter()
+            .map(|sc| {
+                frame
+                    .components
+                    .iter()
+                    .position(|fc| fc.id == sc.component_id)
+                    .unwrap_or(0)
+            })
+            .collect();
+
+        if scan.components.len() > 1 {
+            // Interleaved DC scan — iterate MCU by MCU
+            let max_h: usize = frame
+                .components
+                .iter()
+                .map(|c| c.horizontal_sampling as usize)
+                .max()
+                .unwrap_or(1);
+            let max_v: usize = frame
+                .components
+                .iter()
+                .map(|c| c.vertical_sampling as usize)
+                .max()
+                .unwrap_or(1);
+            let mcu_w: usize = max_h * 8;
+            let mcu_h: usize = max_v * 8;
+            let mcus_x: usize = (frame.width as usize).div_ceil(mcu_w);
+            let mcus_y: usize = (frame.height as usize).div_ceil(mcu_h);
+
+            for _mcu_y in 0..mcus_y {
+                for _mcu_x in 0..mcus_x {
+                    for (si, &comp_idx) in scan_comp_indices.iter().enumerate() {
+                        let h_samp: usize = frame.components[comp_idx].horizontal_sampling as usize;
+                        let v_samp: usize = frame.components[comp_idx].vertical_sampling as usize;
+                        let blocks_x: usize = comp_data[comp_idx].blocks_x;
+                        let dc_tbl: usize = scan.components[si].dc_table_index as usize;
+
+                        for v in 0..v_samp {
+                            for h in 0..h_samp {
+                                let bx: usize = _mcu_x * h_samp + h;
+                                let by: usize = _mcu_y * v_samp + v;
+                                let block_idx: usize = by * blocks_x + bx;
+                                let block: &mut [i16; 64] =
+                                    &mut comp_data[comp_idx].blocks[block_idx];
+
+                                if is_dc && ah == 0 {
+                                    arith
+                                        .decode_dc_first_progressive(block, comp_idx, dc_tbl, al)?;
+                                } else if is_dc {
+                                    arith.decode_dc_refine_progressive(block, al)?;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        } else {
+            // Non-interleaved scan (single component)
+            let comp_idx: usize = scan_comp_indices[0];
+            let comp_blocks_x: usize = comp_data[comp_idx].blocks_x;
+            let comp_blocks_y: usize = comp_data[comp_idx].blocks_y;
+            let dc_tbl: usize = scan.components[0].dc_table_index as usize;
+            let ac_tbl: usize = scan.components[0].ac_table_index as usize;
+
+            for by in 0..comp_blocks_y {
+                for bx in 0..comp_blocks_x {
+                    let block_idx: usize = by * comp_blocks_x + bx;
+                    let block: &mut [i16; 64] = &mut comp_data[comp_idx].blocks[block_idx];
+
+                    if is_dc {
+                        if ah == 0 {
+                            arith.decode_dc_first_progressive(block, comp_idx, dc_tbl, al)?;
+                        } else {
+                            arith.decode_dc_refine_progressive(block, al)?;
+                        }
+                    } else if ah == 0 {
+                        arith.decode_ac_first_progressive(block, ac_tbl, ss, se, al)?;
+                    } else {
+                        arith.decode_ac_refine_progressive(block, ac_tbl, ss, se, al)?;
                     }
                 }
             }
