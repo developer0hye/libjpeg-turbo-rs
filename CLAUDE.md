@@ -43,6 +43,19 @@ Rust port of libjpeg-turbo with equivalent or better performance.
 - **Optimize test execution speed.** Use `cargo test` with parallel execution (default behavior). Keep each test isolated — no shared mutable state.
 - **Skip tests when no runtime impact.** Non-runtime changes (docs, README, `.md`, CI pipeline config) should not trigger test runs.
 
+### C Cross-Validation (Mandatory)
+
+- **Every decode/encode/transform test MUST cross-validate against C libjpeg-turbo.** Target: diff=0 (pixel-identical to C djpeg/cjpeg/jpegtran output).
+- Use `djpeg` for decode comparison, `cjpeg` for encode comparison, `jpegtran` for transform comparison. Tool paths: check `/opt/homebrew/bin/` first, then `which`.
+- If C tools are not available, `eprintln!("SKIP: ... not found"); return;` is acceptable — but **never** for Rust-internal failures.
+
+### Strict Assertion Rules
+
+- **Never log diffs without asserting.** Every computed `max_diff`/`mean_diff` MUST have a corresponding `assert!`/`assert_eq!`. Logging without asserting is a meaningless test.
+- **Never silently skip on Rust errors.** `match result { Err(e) => { eprintln!("SKIP"); continue/return; } }` is **forbidden** for Rust library failures. Use `.expect()` or `.unwrap_or_else(|e| panic!(...))`. Silent skips hide bugs.
+- **Never use generous tolerances as placeholders.** If the implementation is not ready, use `#[ignore = "reason with issue number"]` instead of inflating tolerance (e.g., `mean_diff < 2048` for a 0–4095 range is meaningless).
+- **Tolerance must reflect measured reality + small margin**, not a guess. Measure the actual diff, then set tolerance to `actual + 1` or tighter. Document the measured value in a comment.
+
 ## Logging
 
 - Add structured logs at key decision points, state transitions, and external calls — not every line.
