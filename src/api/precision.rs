@@ -1071,7 +1071,8 @@ fn encode_dc_only_wide(
     } else {
         (diff - 1) as u16
     };
-    if category > 0 && category <= 16 {
+    // Category 16 is special per ITU-T T.81: no extra bits written.
+    if category > 0 && category < 16 {
         writer.write_bits(magnitude_bits, category);
     }
 }
@@ -1234,6 +1235,11 @@ fn decode_dc_wide(
     reader.skip_bits(code_len);
     if category == 0 {
         return Ok(0);
+    }
+    // Category 16 is a special case for 16-bit lossless JPEG (ITU-T T.81):
+    // it always represents the value 32768 without reading any extra bits.
+    if category == 16 {
+        return Ok(-32768i16);
     }
     let extra_bits = reader.read_bits(category);
     if extra_bits >= 1u16.wrapping_shl(category as u32 - 1) {

@@ -1744,21 +1744,24 @@ fn c_jpegtran_cross_validation_transform_diff_zero() {
 
     // -----------------------------------------------------------------------
     // Group 1: All 6 subsamplings x all 8 transform ops (basic, no flags)
-    // TODO(transform): S411 and S441 transforms produce different pixel output
-    // than C jpegtran (max_diff up to 173). C's do_flip_h (transupp.c) uses
-    // MCU-aware iteration with h_samp_factor/v_samp_factor strides, which
-    // differs from Rust's block-by-block approach for these rare subsamplings.
-    // The coefficient block rearrangement needs MCU-chunked iteration to match.
     // -----------------------------------------------------------------------
-    let known_good_subsamplings: [Subsampling; 4] = [
-        Subsampling::S444,
-        Subsampling::S422,
-        Subsampling::S440,
-        Subsampling::S420,
-    ];
-    for &subsamp in &known_good_subsamplings {
+    // Skip dimension-swapping transforms on S411/S441: these rare combos
+    // need edge-zone handling in the dimension-swap path (rot90/rot270/transverse).
+    // HFlip, VFlip, Rot180, None, Transpose all pass for S411/S441.
+    let skip_swap = |s: Subsampling, o: TransformOp| -> bool {
+        matches!(s, Subsampling::S411 | Subsampling::S441)
+            && matches!(
+                o,
+                TransformOp::Rot90 | TransformOp::Rot270 | TransformOp::Transverse
+            )
+    };
+    for &subsamp in &ALL_SUBSAMPLINGS {
         let source: Vec<u8> = make_color_jpeg(subsamp);
         for &op in &ALL_TRANSFORMS {
+            if skip_swap(subsamp, op) {
+                skipped += 1;
+                continue;
+            }
             let label: String = format!("{}-{}", subsamp_label(subsamp), op_label(op));
             let opts: TransformOptions = TransformOptions {
                 op,
