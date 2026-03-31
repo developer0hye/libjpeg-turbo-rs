@@ -1,5 +1,9 @@
+use std::io::BufRead;
+use std::process::Command;
+
 use libjpeg_turbo_rs::{
-    compress, compress_progressive, decompress, PixelFormat, ProgressiveDecoder, Subsampling,
+    compress, compress_progressive, decompress, decompress_to, PixelFormat, ProgressiveDecoder,
+    Subsampling,
 };
 
 /// Helper: create a simple progressive JPEG from synthetic pixel data.
@@ -242,4 +246,129 @@ fn pixel_diff(a: &[u8], b: &[u8]) -> u64 {
         total += (a[i] as i64 - b[i] as i64).unsigned_abs();
     }
     total
+}
+
+// --- C djpeg cross-validation helpers ---
+
+/// Find the djpeg binary: check /opt/homebrew/bin/djpeg first, then fall back to PATH.
+fn djpeg_path() -> Option<std::path::PathBuf> {
+    let homebrew_path = std::path::PathBuf::from("/opt/homebrew/bin/djpeg");
+    if homebrew_path.exists() {
+        return Some(homebrew_path);
+    }
+    // Fall back to whichever djpeg is on PATH
+    let output = Command::new("which").arg("djpeg").output().ok()?;
+    if output.status.success() {
+        let path_str: String = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        if !path_str.is_empty() {
+            return Some(std::path::PathBuf::from(path_str));
+        }
+    }
+    None
+}
+
+/// Parse a binary PPM (P6) image produced by `djpeg -ppm`.
+/// Returns (width, height, pixel_data) where pixel_data is RGB bytes.
+fn parse_ppm(data: &[u8]) -> (usize, usize, Vec<u8>) {
+    let mut cursor = std::io::Cursor::new(data);
+    let mut lines: Vec<String> = Vec::new();
+
+    // Read header lines, skipping comments
+    while lines.len() < 3 {
+        let mut line = String::new();
+        cursor
+            .read_line(&mut line)
+            .expect("failed to read PPM header line");
+        let trimmed: String = line.trim().to_string();
+        if trimmed.starts_with('#') || trimmed.is_empty() {
+            continue;
+        }
+        lines.push(trimmed);
+    }
+
+    assert_eq!(lines[0], "P6", "expected PPM P6 format, got {}", lines[0]);
+
+    let dims: Vec<usize> = lines[1]
+        .split_whitespace()
+        .map(|s| s.parse().expect("invalid PPM dimension"))
+        .collect();
+    let width: usize = dims[0];
+    let height: usize = dims[1];
+
+    let max_val: usize = lines[2].parse().expect("invalid PPM max value");
+    assert_eq!(max_val, 255, "expected maxval 255, got {}", max_val);
+
+    let header_len: usize = cursor.position() as usize;
+    let pixel_data: Vec<u8> = data[header_len..].to_vec();
+    assert_eq!(
+        pixel_data.len(),
+        width * height * 3,
+        "PPM pixel data length mismatch: expected {}, got {}",
+        width * height * 3,
+        pixel_data.len()
+    );
+
+    (width, height, pixel_data)
+}
+
+// --- C djpeg cross-validation test ---
+
+#[test]
+fn c_djpeg_progressive_output_final_diff_zero() {
+    let djpeg = match djpeg_path() {
+        Some(p) => p,
+        None => {
+            eprintln!("SKIP: djpeg not found");
+            return;
+        }
+    };
+
+    let jpeg_data: &[u8] = include_bytes!("fixtures/photo_320x240_420_prog.jpg");
+
+    // Decode with Rust
+    let rust_image =
+        decompress_to(jpeg_data, PixelFormat::Rgb).expect("Rust progressive decode failed");
+
+    // Decode with C djpeg
+    let tmp_dir = std::env::temp_dir();
+    let input_path = tmp_dir.join("progressive_output_djpeg_input.jpg");
+    std::fs::write(&input_path, jpeg_data).expect("failed to write temp JPEG");
+
+    let output = Command::new(&djpeg)
+        .arg("-ppm")
+        .arg(&input_path)
+        .output()
+        .expect("failed to run djpeg");
+
+    std::fs::remove_file(&input_path).ok();
+
+    assert!(
+        output.status.success(),
+        "djpeg failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let (c_width, c_height, c_pixels) = parse_ppm(&output.stdout);
+
+    // Verify dimensions match
+    assert_eq!(
+        rust_image.width, c_width,
+        "width mismatch: Rust={} vs C={}",
+        rust_image.width, c_width
+    );
+    assert_eq!(
+        rust_image.height, c_height,
+        "height mismatch: Rust={} vs C={}",
+        rust_image.height, c_height
+    );
+
+    // Verify pixel-exact match (diff == 0)
+    let diff: u64 = pixel_diff(&rust_image.data, &c_pixels);
+    assert_eq!(
+        diff,
+        0,
+        "progressive decode diff != 0: Rust vs C djpeg differ by {} (across {} pixels)",
+        diff,
+        rust_image.width * rust_image.height
+    );
 }

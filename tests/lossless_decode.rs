@@ -1,4 +1,7 @@
-use libjpeg_turbo_rs::{decompress, JpegError};
+use std::path::{Path, PathBuf};
+use std::process::Command;
+
+use libjpeg_turbo_rs::{compress_lossless, decompress, PixelFormat};
 
 /// Build a minimal SOF3 (lossless) JPEG in memory for testing.
 /// Creates a tiny 4x2 grayscale image with predictor 1 (left), no point transform.
@@ -353,4 +356,171 @@ fn decode_lossless_3comp_gradient() {
     assert_eq!(img.width, w);
     assert_eq!(img.height, h);
     assert_eq!(img.data.len(), w * h * 3);
+}
+
+// ===========================================================================
+// C djpeg cross-validation helpers
+// ===========================================================================
+
+/// Locate the `djpeg` binary, checking Homebrew first then PATH.
+fn djpeg_path() -> Option<PathBuf> {
+    let homebrew: PathBuf = PathBuf::from("/opt/homebrew/bin/djpeg");
+    if homebrew.exists() {
+        return Some(homebrew);
+    }
+    Command::new("which")
+        .arg("djpeg")
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| PathBuf::from(String::from_utf8_lossy(&o.stdout).trim().to_string()))
+}
+
+/// Check whether `djpeg` can handle SOF3 (lossless) by feeding it a lossless JPEG
+/// and seeing if it exits successfully.
+fn djpeg_supports_lossless(djpeg: &Path, lossless_jpeg: &[u8]) -> bool {
+    let tmp_dir = std::env::temp_dir();
+    let probe_path = tmp_dir.join(format!("ljt_lossless_probe_{}.jpg", std::process::id()));
+    if std::fs::write(&probe_path, lossless_jpeg).is_err() {
+        return false;
+    }
+    let result = Command::new(djpeg).arg("-pnm").arg(&probe_path).output();
+    std::fs::remove_file(&probe_path).ok();
+    match result {
+        Ok(o) => o.status.success(),
+        Err(_) => false,
+    }
+}
+
+/// Parse a binary PGM (P5) returning `(width, height, pixel_data)`.
+fn parse_pgm_data(raw: &[u8]) -> (usize, usize, Vec<u8>) {
+    assert!(raw.len() > 3, "PGM too short");
+    assert_eq!(&raw[0..2], b"P5", "not a P5 PGM");
+    let mut idx: usize = 2;
+    idx = skip_ws_comments(raw, idx);
+    let (width, next) = read_number(raw, idx);
+    idx = skip_ws_comments(raw, next);
+    let (height, next) = read_number(raw, idx);
+    idx = skip_ws_comments(raw, next);
+    let (_maxval, next) = read_number(raw, idx);
+    // Single whitespace byte separates header from data
+    idx = next + 1;
+    let data: Vec<u8> = raw[idx..].to_vec();
+    assert_eq!(data.len(), width * height, "PGM pixel data length mismatch");
+    (width, height, data)
+}
+
+fn skip_ws_comments(data: &[u8], mut idx: usize) -> usize {
+    loop {
+        while idx < data.len() && data[idx].is_ascii_whitespace() {
+            idx += 1;
+        }
+        if idx < data.len() && data[idx] == b'#' {
+            while idx < data.len() && data[idx] != b'\n' {
+                idx += 1;
+            }
+        } else {
+            break;
+        }
+    }
+    idx
+}
+
+fn read_number(data: &[u8], idx: usize) -> (usize, usize) {
+    let mut end: usize = idx;
+    while end < data.len() && data[end].is_ascii_digit() {
+        end += 1;
+    }
+    let val: usize = std::str::from_utf8(&data[idx..end])
+        .unwrap()
+        .parse()
+        .unwrap();
+    (val, end)
+}
+
+// ===========================================================================
+// C djpeg cross-validation test
+// ===========================================================================
+
+#[test]
+fn c_djpeg_lossless_decode_diff_zero() {
+    // Step 1: Locate djpeg, skip if not found.
+    let djpeg: PathBuf = match djpeg_path() {
+        Some(p) => p,
+        None => {
+            eprintln!("SKIP: djpeg not found on this system");
+            return;
+        }
+    };
+
+    // Step 2: Encode a 16x16 grayscale lossless JPEG with Rust.
+    let (w, h): (usize, usize) = (16, 16);
+    let pixels: Vec<u8> = (0..w * h).map(|i| (i % 256) as u8).collect();
+    let jpeg: Vec<u8> =
+        compress_lossless(&pixels, w, h, PixelFormat::Grayscale).expect("Rust lossless encode");
+
+    // Step 3: Check if djpeg supports SOF3 lossless. Skip gracefully if not.
+    if !djpeg_supports_lossless(&djpeg, &jpeg) {
+        eprintln!("SKIP: djpeg does not support lossless JPEG (SOF3)");
+        return;
+    }
+
+    // Step 4: Decode with Rust.
+    let rust_img = decompress(&jpeg).expect("Rust lossless decode");
+    assert_eq!(rust_img.width, w);
+    assert_eq!(rust_img.height, h);
+
+    // Step 5: Decode with C djpeg (output to PGM via stdout).
+    let tmp_dir = std::env::temp_dir();
+    let tmp_jpg = tmp_dir.join(format!("ljt_c_djpeg_lossless_{}.jpg", std::process::id()));
+    std::fs::write(&tmp_jpg, &jpeg).expect("write temp JPEG");
+
+    let output = Command::new(&djpeg)
+        .arg("-pnm")
+        .arg(&tmp_jpg)
+        .output()
+        .expect("failed to run djpeg");
+
+    std::fs::remove_file(&tmp_jpg).ok();
+
+    assert!(
+        output.status.success(),
+        "djpeg failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    // Step 6: Parse PGM from djpeg stdout and compare.
+    let (c_w, c_h, c_pixels) = parse_pgm_data(&output.stdout);
+    assert_eq!(c_w, w, "C djpeg width mismatch");
+    assert_eq!(c_h, h, "C djpeg height mismatch");
+
+    // Step 7: Assert pixel-exact match between Rust and C djpeg.
+    assert_eq!(
+        rust_img.data.len(),
+        c_pixels.len(),
+        "Rust and C pixel buffer lengths differ: rust={} c={}",
+        rust_img.data.len(),
+        c_pixels.len()
+    );
+
+    let mut max_diff: u8 = 0;
+    let mut mismatch_count: usize = 0;
+    for (i, (&r, &c)) in rust_img.data.iter().zip(c_pixels.iter()).enumerate() {
+        let diff: u8 = (r as i16 - c as i16).unsigned_abs() as u8;
+        if diff > 0 {
+            mismatch_count += 1;
+            if mismatch_count <= 5 {
+                eprintln!("  pixel {}: rust={} c={} diff={}", i, r, c, diff);
+            }
+        }
+        if diff > max_diff {
+            max_diff = diff;
+        }
+    }
+
+    assert_eq!(
+        max_diff, 0,
+        "lossless decode must be pixel-exact: {} pixels differ, max diff={}",
+        mismatch_count, max_diff
+    );
 }
