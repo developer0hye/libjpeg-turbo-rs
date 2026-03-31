@@ -303,3 +303,192 @@ fn save_ppm_invalid_pixel_count() {
     let result = save_ppm(&path, &pixels, 4, 4, PixelFormat::Rgb);
     assert!(result.is_err());
 }
+
+// -----------------------------------------------------------------------
+// C djpeg cross-validation for BMP output
+// -----------------------------------------------------------------------
+
+/// Path to C djpeg binary, or `None` if not installed.
+fn djpeg_path() -> Option<PathBuf> {
+    let homebrew: PathBuf = PathBuf::from("/opt/homebrew/bin/djpeg");
+    if homebrew.exists() {
+        return Some(homebrew);
+    }
+    std::process::Command::new("which")
+        .arg("djpeg")
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| PathBuf::from(String::from_utf8_lossy(&o.stdout).trim().to_string()))
+}
+
+struct IoTempFile {
+    path: PathBuf,
+}
+
+impl IoTempFile {
+    fn new(name: &str) -> Self {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+        let id: u64 = COUNTER.fetch_add(1, Ordering::Relaxed);
+        Self {
+            path: std::env::temp_dir().join(format!(
+                "ljt_imgio_{}_{}_{name}",
+                std::process::id(),
+                id
+            )),
+        }
+    }
+}
+
+impl Drop for IoTempFile {
+    fn drop(&mut self) {
+        std::fs::remove_file(&self.path).ok();
+    }
+}
+
+/// Parse BMP header and extract raw pixel data (bottom-up 24-bit BGR → top-down RGB).
+fn parse_bmp_pixels(data: &[u8]) -> (usize, usize, Vec<u8>) {
+    assert!(data.len() >= 54, "BMP too short for header");
+    assert_eq!(&data[0..2], b"BM", "not a BMP file");
+
+    let pixel_offset: u32 = u32::from_le_bytes([data[10], data[11], data[12], data[13]]);
+    let width: u32 = u32::from_le_bytes([data[18], data[19], data[20], data[21]]);
+    let height_raw: i32 = i32::from_le_bytes([data[22], data[23], data[24], data[25]]);
+    let bits_per_pixel: u16 = u16::from_le_bytes([data[28], data[29]]);
+    let height: u32 = height_raw.unsigned_abs();
+    let bottom_up: bool = height_raw > 0;
+
+    let bpp: usize = bits_per_pixel as usize / 8;
+    let row_stride: usize = ((width as usize * bpp + 3) / 4) * 4;
+
+    let mut pixels: Vec<u8> = Vec::with_capacity(width as usize * height as usize * 3);
+    for row in 0..height as usize {
+        let bmp_row: usize = if bottom_up {
+            height as usize - 1 - row
+        } else {
+            row
+        };
+        let start: usize = pixel_offset as usize + bmp_row * row_stride;
+        for x in 0..width as usize {
+            let offset: usize = start + x * bpp;
+            if offset + 2 < data.len() {
+                // BMP stores BGR; convert to RGB
+                pixels.push(data[offset + 2]); // R
+                pixels.push(data[offset + 1]); // G
+                pixels.push(data[offset]); // B
+            }
+        }
+    }
+
+    (width as usize, height as usize, pixels)
+}
+
+#[test]
+fn c_djpeg_cross_validation_bmp_output() {
+    let djpeg = match djpeg_path() {
+        Some(p) => p,
+        None => {
+            eprintln!("SKIP: djpeg not found");
+            return;
+        }
+    };
+
+    let width: usize = 48;
+    let height: usize = 32;
+    let source_pixels: Vec<u8> = make_test_rgb(width, height);
+
+    // Encode a JPEG from source pixels
+    let jpeg: Vec<u8> = libjpeg_turbo_rs::compress(
+        &source_pixels,
+        width,
+        height,
+        PixelFormat::Rgb,
+        95,
+        libjpeg_turbo_rs::Subsampling::S444,
+    )
+    .expect("compress failed");
+
+    let tmp_jpg = IoTempFile::new("bmp_xval.jpg");
+    let tmp_rust_bmp = IoTempFile::new("bmp_xval_rust.bmp");
+    let tmp_c_bmp = IoTempFile::new("bmp_xval_c.bmp");
+    std::fs::write(&tmp_jpg.path, &jpeg).expect("write temp JPEG");
+
+    // Decode with Rust and save as BMP
+    let rust_image = libjpeg_turbo_rs::decompress(&jpeg).expect("Rust decompress failed");
+    assert_eq!(rust_image.width, width);
+    assert_eq!(rust_image.height, height);
+    save_bmp(
+        &tmp_rust_bmp.path,
+        &rust_image.data,
+        rust_image.width,
+        rust_image.height,
+        PixelFormat::Rgb,
+    )
+    .expect("save_bmp failed");
+
+    // Decode with C djpeg -bmp
+    let output = std::process::Command::new(&djpeg)
+        .arg("-bmp")
+        .arg("-outfile")
+        .arg(&tmp_c_bmp.path)
+        .arg(&tmp_jpg.path)
+        .output()
+        .expect("failed to run djpeg");
+    assert!(
+        output.status.success(),
+        "djpeg -bmp failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    // Read both BMP files
+    let rust_bmp_data: Vec<u8> = std::fs::read(&tmp_rust_bmp.path).expect("read Rust BMP");
+    let c_bmp_data: Vec<u8> = std::fs::read(&tmp_c_bmp.path).expect("read C BMP");
+
+    // Try byte-for-byte comparison first
+    if rust_bmp_data == c_bmp_data {
+        // Perfect match
+        return;
+    }
+
+    // If BMP headers differ, compare extracted pixel data
+    let (r_w, r_h, rust_pixels) = parse_bmp_pixels(&rust_bmp_data);
+    let (c_w, c_h, c_pixels) = parse_bmp_pixels(&c_bmp_data);
+
+    assert_eq!(r_w, width, "Rust BMP width mismatch");
+    assert_eq!(r_h, height, "Rust BMP height mismatch");
+    assert_eq!(c_w, width, "C BMP width mismatch");
+    assert_eq!(c_h, height, "C BMP height mismatch");
+
+    assert_eq!(
+        rust_pixels.len(),
+        c_pixels.len(),
+        "pixel data length mismatch"
+    );
+
+    // Compare pixel data: diff should be 0 since both decode the same JPEG
+    let mut max_diff: u8 = 0;
+    let mut mismatch_count: usize = 0;
+    for (i, (&r, &c)) in rust_pixels.iter().zip(c_pixels.iter()).enumerate() {
+        let diff: u8 = (r as i16 - c as i16).unsigned_abs() as u8;
+        if diff > max_diff {
+            max_diff = diff;
+        }
+        if diff > 0 {
+            mismatch_count += 1;
+            if mismatch_count <= 5 {
+                let pixel: usize = i / 3;
+                let channel: &str = ["R", "G", "B"][i % 3];
+                eprintln!(
+                    "  bmp pixel {} channel {}: rust={} c={} diff={}",
+                    pixel, channel, r, c, diff
+                );
+            }
+        }
+    }
+    assert_eq!(
+        max_diff, 0,
+        "bmp cross-validation: {} pixels differ, max_diff={}",
+        mismatch_count, max_diff
+    );
+}
