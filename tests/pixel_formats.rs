@@ -1,3 +1,6 @@
+use std::path::PathBuf;
+use std::process::Command;
+
 use libjpeg_turbo_rs::{decompress, decompress_to, Encoder, PixelFormat};
 
 #[test]
@@ -355,4 +358,203 @@ fn grayscale_from_argb() {
     let img = decompress(&jpeg).unwrap();
     assert_eq!(img.pixel_format, PixelFormat::Grayscale);
     assert_eq!(img.width, 8);
+}
+
+// ===========================================================================
+// C djpeg cross-validation helpers
+// ===========================================================================
+
+/// Path to C djpeg binary, or `None` if not installed.
+fn djpeg_path() -> Option<PathBuf> {
+    let homebrew: PathBuf = PathBuf::from("/opt/homebrew/bin/djpeg");
+    if homebrew.exists() {
+        return Some(homebrew);
+    }
+    Command::new("which")
+        .arg("djpeg")
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| PathBuf::from(String::from_utf8_lossy(&o.stdout).trim().to_string()))
+}
+
+/// Parse a binary PPM (P6) file and return (width, height, rgb_pixels).
+///
+/// The returned `rgb_pixels` is a flat `Vec<u8>` with 3 bytes per pixel (R, G, B)
+/// in row-major order.
+fn parse_ppm(data: &[u8]) -> (usize, usize, Vec<u8>) {
+    assert!(data.len() > 2, "PPM data too small");
+    assert_eq!(&data[0..2], b"P6", "expected P6 (binary PPM) magic");
+
+    let mut idx: usize = 2;
+
+    // Skip whitespace and comments
+    idx = skip_ppm_ws_comments(data, idx);
+    let (width, next) = parse_ppm_number(data, idx);
+    idx = skip_ppm_ws_comments(data, next);
+    let (height, next) = parse_ppm_number(data, idx);
+    idx = skip_ppm_ws_comments(data, next);
+    let (maxval, next) = parse_ppm_number(data, idx);
+    assert_eq!(maxval, 255, "expected maxval 255, got {maxval}");
+
+    // Exactly one whitespace byte separates the header from the pixel data
+    idx = next + 1;
+
+    let expected_len: usize = width * height * 3;
+    assert!(
+        data.len() >= idx + expected_len,
+        "PPM pixel data too short: need {} bytes at offset {}, but file is {} bytes",
+        expected_len,
+        idx,
+        data.len()
+    );
+
+    let pixels: Vec<u8> = data[idx..idx + expected_len].to_vec();
+    (width, height, pixels)
+}
+
+fn skip_ppm_ws_comments(data: &[u8], mut idx: usize) -> usize {
+    loop {
+        while idx < data.len() && data[idx].is_ascii_whitespace() {
+            idx += 1;
+        }
+        if idx < data.len() && data[idx] == b'#' {
+            while idx < data.len() && data[idx] != b'\n' {
+                idx += 1;
+            }
+        } else {
+            break;
+        }
+    }
+    idx
+}
+
+fn parse_ppm_number(data: &[u8], idx: usize) -> (usize, usize) {
+    let mut end: usize = idx;
+    while end < data.len() && data[end].is_ascii_digit() {
+        end += 1;
+    }
+    let val: usize = std::str::from_utf8(&data[idx..end])
+        .expect("invalid UTF-8 in PPM header number")
+        .parse()
+        .expect("failed to parse PPM header number");
+    (val, end)
+}
+
+// ===========================================================================
+// C djpeg cross-validation test for 4-byte pixel formats
+// ===========================================================================
+
+/// Encodes a 16x16 image with each 4-byte pixel format (Rgbx, Bgrx, Xrgb,
+/// Xbgr, Argb, Abgr) using the Rust Encoder, then decodes each JPEG with
+/// both the Rust decoder (decompress_to RGB) and C djpeg (-ppm). Asserts
+/// that the RGB pixel data from both decoders is identical (diff = 0).
+///
+/// This validates that the Rust encoder produces standard-conformant JPEGs
+/// for all 4-byte pixel formats, and that the color channel ordering is
+/// handled correctly.
+#[test]
+fn c_djpeg_pixel_formats_diff_zero() {
+    let djpeg: PathBuf = match djpeg_path() {
+        Some(p) => p,
+        None => {
+            eprintln!("skipping c_djpeg_pixel_formats_diff_zero: djpeg not found");
+            return;
+        }
+    };
+
+    let formats: &[(PixelFormat, &str)] = &[
+        (PixelFormat::Rgbx, "Rgbx"),
+        (PixelFormat::Bgrx, "Bgrx"),
+        (PixelFormat::Xrgb, "Xrgb"),
+        (PixelFormat::Xbgr, "Xbgr"),
+        (PixelFormat::Argb, "Argb"),
+        (PixelFormat::Abgr, "Abgr"),
+    ];
+
+    let width: usize = 16;
+    let height: usize = 16;
+    let bpp: usize = 4;
+    let pid: u32 = std::process::id();
+
+    for &(format, name) in formats {
+        // Build a 16x16 image with varying pixel values.
+        // Place R, G, B into the correct channel offsets for this format.
+        let r_off: usize = format.red_offset().unwrap();
+        let g_off: usize = format.green_offset().unwrap();
+        let b_off: usize = format.blue_offset().unwrap();
+
+        let mut pixels: Vec<u8> = vec![0u8; width * height * bpp];
+        for i in 0..width * height {
+            let base: usize = i * bpp;
+            pixels[base + r_off] = ((i * 13 + 30) % 256) as u8;
+            pixels[base + g_off] = ((i * 7 + 80) % 256) as u8;
+            pixels[base + b_off] = ((i * 3 + 150) % 256) as u8;
+            // The padding/alpha byte stays 0 (or whatever default)
+        }
+
+        // Encode with Rust
+        let jpeg: Vec<u8> = Encoder::new(&pixels, width, height, format)
+            .quality(100)
+            .encode()
+            .unwrap_or_else(|e| panic!("[{name}] Rust encode failed: {e}"));
+
+        // Decode with Rust to RGB
+        let rust_img = decompress_to(&jpeg, PixelFormat::Rgb)
+            .unwrap_or_else(|e| panic!("[{name}] Rust decompress_to RGB failed: {e}"));
+        assert_eq!(rust_img.width, width, "[{name}] Rust decode width mismatch");
+        assert_eq!(
+            rust_img.height, height,
+            "[{name}] Rust decode height mismatch"
+        );
+        let rust_rgb: &[u8] = &rust_img.data;
+
+        // Decode with C djpeg to PPM (RGB)
+        let tmp_jpg: PathBuf = std::env::temp_dir().join(format!("ljt_pxfmt_{name}_{pid}.jpg"));
+        let tmp_ppm: PathBuf = std::env::temp_dir().join(format!("ljt_pxfmt_{name}_{pid}.ppm"));
+        std::fs::write(&tmp_jpg, &jpeg)
+            .unwrap_or_else(|e| panic!("[{name}] failed to write temp JPEG: {e}"));
+
+        let output = Command::new(&djpeg)
+            .arg("-ppm")
+            .arg("-outfile")
+            .arg(&tmp_ppm)
+            .arg(&tmp_jpg)
+            .output()
+            .unwrap_or_else(|e| panic!("[{name}] failed to run djpeg: {e}"));
+
+        let _ = std::fs::remove_file(&tmp_jpg);
+
+        assert!(
+            output.status.success(),
+            "[{name}] C djpeg failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+
+        let ppm_data: Vec<u8> = std::fs::read(&tmp_ppm)
+            .unwrap_or_else(|e| panic!("[{name}] failed to read djpeg PPM output: {e}"));
+        let _ = std::fs::remove_file(&tmp_ppm);
+
+        let (c_w, c_h, c_rgb) = parse_ppm(&ppm_data);
+        assert_eq!(c_w, width, "[{name}] djpeg output width mismatch");
+        assert_eq!(c_h, height, "[{name}] djpeg output height mismatch");
+
+        // Compare RGB pixels: diff must be exactly 0
+        assert_eq!(
+            rust_rgb.len(),
+            c_rgb.len(),
+            "[{name}] RGB data length mismatch: Rust={} vs C={}",
+            rust_rgb.len(),
+            c_rgb.len()
+        );
+        for (idx, (r, c)) in rust_rgb.iter().zip(c_rgb.iter()).enumerate() {
+            assert_eq!(
+                r,
+                c,
+                "[{name}] pixel diff at byte {idx}: Rust={r} vs C={c} (pixel {}, channel {})",
+                idx / 3,
+                ["R", "G", "B"][idx % 3]
+            );
+        }
+    }
 }
