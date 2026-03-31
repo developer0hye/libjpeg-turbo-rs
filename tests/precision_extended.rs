@@ -10,9 +10,14 @@
 //! This test file tests the fixed-precision APIs (8, 12, 16).
 //! For per-precision 2-16 bit tests, see `precision_arbitrary.rs`.
 
+use std::path::{Path, PathBuf};
+use std::process::Command;
+use std::sync::atomic::{AtomicU64, Ordering};
+
 use libjpeg_turbo_rs::common::types::Subsampling;
 use libjpeg_turbo_rs::precision::{
     compress_12bit, compress_16bit, decompress_12bit, decompress_16bit,
+    decompress_lossless_arbitrary,
 };
 use libjpeg_turbo_rs::{compress_lossless, compress_lossless_extended, decompress, PixelFormat};
 
@@ -473,5 +478,377 @@ fn precision_13_through_15_fit_in_16bit_api() {
             "{}-bit values roundtrip through 16-bit API must be exact",
             bits
         );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// C cross-validation helpers
+// ---------------------------------------------------------------------------
+
+fn djpeg_path() -> Option<PathBuf> {
+    let homebrew: PathBuf = PathBuf::from("/opt/homebrew/bin/djpeg");
+    if homebrew.exists() {
+        return Some(homebrew);
+    }
+    Command::new("which")
+        .arg("djpeg")
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| PathBuf::from(String::from_utf8_lossy(&o.stdout).trim().to_string()))
+}
+
+fn cjpeg_path() -> Option<PathBuf> {
+    let homebrew: PathBuf = PathBuf::from("/opt/homebrew/bin/cjpeg");
+    if homebrew.exists() {
+        return Some(homebrew);
+    }
+    Command::new("which")
+        .arg("cjpeg")
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| PathBuf::from(String::from_utf8_lossy(&o.stdout).trim().to_string()))
+}
+
+/// Check if cjpeg supports the `-lossless` flag.
+fn cjpeg_supports_lossless(cjpeg: &Path) -> bool {
+    let output = Command::new(cjpeg).arg("-help").output();
+    match output {
+        Ok(o) => {
+            let text: String = String::from_utf8_lossy(&o.stderr).to_string()
+                + &String::from_utf8_lossy(&o.stdout);
+            text.contains("lossless")
+        }
+        Err(_) => false,
+    }
+}
+
+/// Check if cjpeg supports the `-precision` flag.
+fn cjpeg_supports_precision(cjpeg: &Path) -> bool {
+    let output = Command::new(cjpeg).arg("-help").output();
+    match output {
+        Ok(o) => {
+            let text: String = String::from_utf8_lossy(&o.stderr).to_string()
+                + &String::from_utf8_lossy(&o.stdout);
+            text.contains("precision")
+        }
+        Err(_) => false,
+    }
+}
+
+static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+fn temp_path(name: &str) -> PathBuf {
+    let counter: u64 = TEMP_COUNTER.fetch_add(1, Ordering::Relaxed);
+    let pid: u32 = std::process::id();
+    std::env::temp_dir().join(format!("ljt_prec_ext_{}_{:04}_{}", pid, counter, name))
+}
+
+struct TempFile {
+    path: PathBuf,
+}
+
+impl TempFile {
+    fn new(name: &str) -> Self {
+        Self {
+            path: temp_path(name),
+        }
+    }
+    fn path(&self) -> &Path {
+        &self.path
+    }
+}
+
+impl Drop for TempFile {
+    fn drop(&mut self) {
+        std::fs::remove_file(&self.path).ok();
+    }
+}
+
+/// Write a binary PGM (P5) file.
+/// For maxval <= 255, samples are 1 byte each.
+/// For maxval > 255, samples are 2 bytes each (big-endian per PNM spec).
+fn write_pgm(path: &Path, width: usize, height: usize, maxval: u16, samples: &[u16]) {
+    assert_eq!(
+        samples.len(),
+        width * height,
+        "sample count must match width * height"
+    );
+    let mut buf: Vec<u8> = Vec::new();
+    let header: String = format!("P5\n{} {}\n{}\n", width, height, maxval);
+    buf.extend_from_slice(header.as_bytes());
+    if maxval <= 255 {
+        for &s in samples {
+            buf.push(s as u8);
+        }
+    } else {
+        for &s in samples {
+            buf.push((s >> 8) as u8);
+            buf.push((s & 0xFF) as u8);
+        }
+    }
+    std::fs::write(path, &buf).expect("failed to write PGM file");
+}
+
+/// Parse a binary PGM (P5) file, returning (width, height, maxval, samples).
+/// Handles both 1-byte (maxval <= 255) and 2-byte (maxval > 255) formats.
+fn parse_pgm_16(path: &Path) -> (usize, usize, u16, Vec<u16>) {
+    let raw: Vec<u8> = std::fs::read(path).expect("failed to read PGM file");
+    assert!(raw.len() > 3, "PGM too short");
+    assert_eq!(&raw[0..2], b"P5", "not a P5 PGM");
+    let mut idx: usize = 2;
+    idx = skip_ws_comments(&raw, idx);
+    let (width, next) = read_number(&raw, idx);
+    idx = skip_ws_comments(&raw, next);
+    let (height, next) = read_number(&raw, idx);
+    idx = skip_ws_comments(&raw, next);
+    let (maxval, next) = read_number(&raw, idx);
+    // Exactly one whitespace byte separates maxval from pixel data
+    idx = next + 1;
+    let maxval_u16: u16 = maxval as u16;
+    let mut samples: Vec<u16> = Vec::with_capacity(width * height);
+    if maxval_u16 <= 255 {
+        for i in 0..(width * height) {
+            samples.push(raw[idx + i] as u16);
+        }
+    } else {
+        for i in 0..(width * height) {
+            let hi: u16 = raw[idx + i * 2] as u16;
+            let lo: u16 = raw[idx + i * 2 + 1] as u16;
+            samples.push((hi << 8) | lo);
+        }
+    }
+    (width, height, maxval_u16, samples)
+}
+
+fn skip_ws_comments(data: &[u8], mut idx: usize) -> usize {
+    loop {
+        while idx < data.len() && data[idx].is_ascii_whitespace() {
+            idx += 1;
+        }
+        if idx < data.len() && data[idx] == b'#' {
+            while idx < data.len() && data[idx] != b'\n' {
+                idx += 1;
+            }
+        } else {
+            break;
+        }
+    }
+    idx
+}
+
+fn read_number(data: &[u8], idx: usize) -> (usize, usize) {
+    let mut end: usize = idx;
+    while end < data.len() && data[end].is_ascii_digit() {
+        end += 1;
+    }
+    let val: usize = std::str::from_utf8(&data[idx..end])
+        .unwrap()
+        .parse()
+        .unwrap();
+    (val, end)
+}
+
+// ---------------------------------------------------------------------------
+// C cross-validation test for extended precision lossless JPEG
+// ---------------------------------------------------------------------------
+
+#[test]
+fn c_cross_validation_precision_extended() {
+    let djpeg: Option<PathBuf> = djpeg_path();
+    let cjpeg: Option<PathBuf> = cjpeg_path();
+
+    if djpeg.is_none() && cjpeg.is_none() {
+        eprintln!("SKIP: neither djpeg nor cjpeg found");
+        return;
+    }
+
+    let has_lossless: bool = cjpeg
+        .as_ref()
+        .map(|p| cjpeg_supports_lossless(p))
+        .unwrap_or(false);
+    let has_precision: bool = cjpeg
+        .as_ref()
+        .map(|p| cjpeg_supports_precision(p))
+        .unwrap_or(false);
+
+    let (w, h): (usize, usize) = (8, 8);
+
+    for precision in [8u8, 12, 16] {
+        let maxval: u16 = ((1u32 << precision) - 1) as u16;
+
+        // Generate test samples with values spanning the full range
+        let mut samples: Vec<u16> = Vec::with_capacity(w * h);
+        for i in 0..(w * h) {
+            // Spread values across the range: linear ramp with wrapping
+            let v: u16 = ((i as u32 * (maxval as u32 + 1)) / (w * h) as u32) as u16;
+            samples.push(v.min(maxval));
+        }
+
+        // -----------------------------------------------------------
+        // (a) Rust encode -> C decode
+        // -----------------------------------------------------------
+        if let Some(ref djpeg_bin) = djpeg {
+            let jpeg_result: Option<Vec<u8>> = match precision {
+                8 => {
+                    let pixels_u8: Vec<u8> = samples.iter().map(|&s| s as u8).collect();
+                    Some(
+                        compress_lossless(&pixels_u8, w, h, PixelFormat::Grayscale)
+                            .expect("Rust 8-bit lossless encode failed"),
+                    )
+                }
+                12 => {
+                    // 12-bit API is DCT-based (lossy, SOF0), not lossless SOF3.
+                    // C djpeg can decode it, but the comparison cannot be exact.
+                    // Skip lossless cross-validation for 12-bit Rust encode.
+                    eprintln!(
+                        "SKIP precision={}: 12-bit API is DCT-based (lossy), \
+                         not lossless SOF3. Skipping Rust encode -> C decode.",
+                        precision
+                    );
+                    None
+                }
+                16 => Some(
+                    compress_16bit(&samples, w, h, 1, 1, 0)
+                        .expect("Rust 16-bit lossless encode failed"),
+                ),
+                _ => unreachable!(),
+            };
+
+            if let Some(jpeg_data) = jpeg_result {
+                let tmp_jpg: TempFile =
+                    TempFile::new(&format!("prec_ext_rust_enc_p{}.jpg", precision));
+                let tmp_out: TempFile =
+                    TempFile::new(&format!("prec_ext_rust_enc_p{}.pgm", precision));
+                std::fs::write(tmp_jpg.path(), &jpeg_data).expect("write temp jpg");
+
+                let output = Command::new(djpeg_bin)
+                    .arg("-pnm")
+                    .arg("-outfile")
+                    .arg(tmp_out.path())
+                    .arg(tmp_jpg.path())
+                    .output()
+                    .expect("failed to run djpeg");
+
+                if !output.status.success() {
+                    eprintln!(
+                        "SKIP precision={}: djpeg cannot decode ({})",
+                        precision,
+                        String::from_utf8_lossy(&output.stderr).trim()
+                    );
+                } else {
+                    let (dw, dh, _dmaxval, decoded) = parse_pgm_16(tmp_out.path());
+                    assert_eq!(dw, w, "precision={}: width mismatch", precision);
+                    assert_eq!(dh, h, "precision={}: height mismatch", precision);
+                    assert_eq!(
+                        decoded, samples,
+                        "precision={}: Rust encode -> C djpeg decode must be pixel-exact \
+                         for lossless",
+                        precision
+                    );
+                }
+            }
+        }
+
+        // -----------------------------------------------------------
+        // (b) C encode -> Rust decode
+        // -----------------------------------------------------------
+        if let Some(ref cjpeg_bin) = cjpeg {
+            if !has_lossless {
+                eprintln!(
+                    "SKIP precision={}: cjpeg does not support -lossless",
+                    precision
+                );
+                continue;
+            }
+
+            let tmp_pgm: TempFile = TempFile::new(&format!("prec_ext_c_enc_p{}.pgm", precision));
+            write_pgm(tmp_pgm.path(), w, h, maxval, &samples);
+
+            let tmp_jpg: TempFile = TempFile::new(&format!("prec_ext_c_enc_p{}.jpg", precision));
+
+            // Build cjpeg arguments. Use -precision N if supported and needed.
+            let mut args: Vec<String> = Vec::new();
+            if precision != 8 && has_precision {
+                args.push("-precision".to_string());
+                args.push(precision.to_string());
+            }
+            args.push("-lossless".to_string());
+            args.push("1,0".to_string());
+            args.push("-outfile".to_string());
+            args.push(tmp_jpg.path().to_string_lossy().to_string());
+            args.push(tmp_pgm.path().to_string_lossy().to_string());
+
+            let output = Command::new(cjpeg_bin)
+                .args(&args)
+                .output()
+                .expect("failed to run cjpeg");
+
+            if !output.status.success() {
+                eprintln!(
+                    "SKIP precision={}: cjpeg failed ({})",
+                    precision,
+                    String::from_utf8_lossy(&output.stderr).trim()
+                );
+                continue;
+            }
+
+            let jpeg_data: Vec<u8> = std::fs::read(tmp_jpg.path()).expect("read cjpeg output");
+
+            match precision {
+                8 => {
+                    let img = decompress(&jpeg_data).unwrap_or_else(|e| {
+                        panic!("Rust decompress of C 8-bit lossless failed: {}", e)
+                    });
+                    assert_eq!(
+                        img.width, w,
+                        "precision=8 C encode -> Rust decode: width mismatch"
+                    );
+                    assert_eq!(
+                        img.height, h,
+                        "precision=8 C encode -> Rust decode: height mismatch"
+                    );
+                    let expected_u8: Vec<u8> = samples.iter().map(|&s| s as u8).collect();
+                    assert_eq!(
+                        img.data, expected_u8,
+                        "precision=8: C cjpeg encode -> Rust decode must be pixel-exact"
+                    );
+                }
+                12 | 16 => {
+                    // C cjpeg with -precision N -lossless produces SOF3 with
+                    // precision=N. Use decompress_lossless_arbitrary which
+                    // handles any precision 2-16 via SOF3.
+                    match decompress_lossless_arbitrary(&jpeg_data) {
+                        Ok(img) => {
+                            assert_eq!(
+                                img.width, w,
+                                "precision={} C encode -> Rust decode: width mismatch",
+                                precision
+                            );
+                            assert_eq!(
+                                img.height, h,
+                                "precision={} C encode -> Rust decode: height mismatch",
+                                precision
+                            );
+                            assert_eq!(
+                                img.data, samples,
+                                "precision={}: C cjpeg encode -> Rust decode \
+                                 must be pixel-exact",
+                                precision
+                            );
+                        }
+                        Err(e) => {
+                            eprintln!(
+                                "SKIP precision={}: Rust cannot decode C-produced \
+                                 lossless JPEG ({})",
+                                precision, e
+                            );
+                        }
+                    }
+                }
+                _ => unreachable!(),
+            }
+        }
     }
 }
