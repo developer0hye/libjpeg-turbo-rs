@@ -120,11 +120,14 @@ fn sse2_upsample_edge_cases() {
     (scalar.fancy_upsample_h2v1)(&[42], 1, &mut expected);
     (sse2.fancy_upsample_h2v1)(&[42], 1, &mut actual);
     assert_eq!(actual, expected);
-    // Two samples
-    let (mut expected, mut actual) = ([0u8; 4], [0u8; 4]);
+    // Two samples: C uses box filter for in_width=2 (pipeline guards before SIMD)
+    let mut expected = [0u8; 4];
     (scalar.fancy_upsample_h2v1)(&[100, 200], 2, &mut expected);
-    (sse2.fancy_upsample_h2v1)(&[100, 200], 2, &mut actual);
-    assert_eq!(actual, expected);
+    assert_eq!(
+        expected,
+        [100, 100, 200, 200],
+        "width=2 should use box filter"
+    );
 }
 
 #[test]
