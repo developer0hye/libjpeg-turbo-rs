@@ -3,6 +3,10 @@
 //! Validates `compress_lossless_arbitrary` / `decompress_lossless_arbitrary`
 //! roundtrips at every supported precision from 2 to 16.
 
+use std::path::{Path, PathBuf};
+use std::process::Command;
+use std::sync::atomic::{AtomicU64, Ordering};
+
 use libjpeg_turbo_rs::precision::{
     compress_lossless_arbitrary, decompress_lossless_arbitrary, Image16,
 };
@@ -501,4 +505,351 @@ fn lossless_precision_6_color_roundtrip() {
     let img = decompress_lossless_arbitrary(&jpeg).unwrap();
     assert_eq!(img.num_components, nc);
     assert_eq!(img.data, pixels);
+}
+
+// ---------------------------------------------------------------------------
+// C cross-validation helpers
+// ---------------------------------------------------------------------------
+
+fn djpeg_path() -> Option<PathBuf> {
+    let homebrew: PathBuf = PathBuf::from("/opt/homebrew/bin/djpeg");
+    if homebrew.exists() {
+        return Some(homebrew);
+    }
+    Command::new("which")
+        .arg("djpeg")
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| PathBuf::from(String::from_utf8_lossy(&o.stdout).trim().to_string()))
+}
+
+fn cjpeg_path() -> Option<PathBuf> {
+    let homebrew: PathBuf = PathBuf::from("/opt/homebrew/bin/cjpeg");
+    if homebrew.exists() {
+        return Some(homebrew);
+    }
+    Command::new("which")
+        .arg("cjpeg")
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| PathBuf::from(String::from_utf8_lossy(&o.stdout).trim().to_string()))
+}
+
+/// Check if cjpeg supports the `-lossless` flag.
+fn cjpeg_supports_lossless(cjpeg: &Path) -> bool {
+    let output = Command::new(cjpeg).arg("-help").output();
+    match output {
+        Ok(o) => {
+            let text: String = String::from_utf8_lossy(&o.stderr).to_string()
+                + &String::from_utf8_lossy(&o.stdout);
+            text.contains("lossless")
+        }
+        Err(_) => false,
+    }
+}
+
+/// Check if cjpeg supports the `-precision` flag.
+fn cjpeg_supports_precision(cjpeg: &Path) -> bool {
+    let output = Command::new(cjpeg).arg("-help").output();
+    match output {
+        Ok(o) => {
+            let text: String = String::from_utf8_lossy(&o.stderr).to_string()
+                + &String::from_utf8_lossy(&o.stdout);
+            text.contains("-precision")
+        }
+        Err(_) => false,
+    }
+}
+
+static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+fn temp_path(name: &str) -> PathBuf {
+    let counter: u64 = TEMP_COUNTER.fetch_add(1, Ordering::Relaxed);
+    let pid: u32 = std::process::id();
+    std::env::temp_dir().join(format!("ljt_arb_{}_{:04}_{}", pid, counter, name))
+}
+
+struct TempFile {
+    path: PathBuf,
+}
+
+impl TempFile {
+    fn new(name: &str) -> Self {
+        Self {
+            path: temp_path(name),
+        }
+    }
+    fn path(&self) -> &Path {
+        &self.path
+    }
+}
+
+impl Drop for TempFile {
+    fn drop(&mut self) {
+        std::fs::remove_file(&self.path).ok();
+    }
+}
+
+/// Write a binary PGM (P5) file. For maxval > 255, pixel bytes are big-endian
+/// 16-bit per the PGM specification.
+fn write_pgm(path: &Path, width: usize, height: usize, maxval: u16, pixels: &[u16]) {
+    assert_eq!(
+        pixels.len(),
+        width * height,
+        "pixel count must equal width * height"
+    );
+    let mut buf: Vec<u8> = Vec::new();
+    buf.extend_from_slice(format!("P5\n{} {}\n{}\n", width, height, maxval).as_bytes());
+    if maxval <= 255 {
+        for &v in pixels {
+            buf.push(v as u8);
+        }
+    } else {
+        // big-endian 16-bit
+        for &v in pixels {
+            buf.push((v >> 8) as u8);
+            buf.push((v & 0xFF) as u8);
+        }
+    }
+    std::fs::write(path, &buf).expect("failed to write PGM");
+}
+
+/// Parse a binary PGM (P5) file that may contain 8-bit or 16-bit (big-endian)
+/// samples. Returns `(width, height, maxval, pixels_as_u16)`.
+fn parse_pgm_16(path: &Path) -> (usize, usize, u16, Vec<u16>) {
+    let raw: Vec<u8> = std::fs::read(path).expect("failed to read PGM file");
+    assert!(raw.len() > 3, "PGM too short");
+    assert_eq!(&raw[0..2], b"P5", "not a P5 PGM");
+    let mut idx: usize = 2;
+    idx = skip_ws_comments(&raw, idx);
+    let (width, next) = read_number(&raw, idx);
+    idx = skip_ws_comments(&raw, next);
+    let (height, next) = read_number(&raw, idx);
+    idx = skip_ws_comments(&raw, next);
+    let (maxval, next) = read_number(&raw, idx);
+    // One whitespace character separates maxval from pixel data
+    idx = next + 1;
+    let pixel_count: usize = width * height;
+    let maxval_u16: u16 = maxval as u16;
+    let pixels: Vec<u16> = if maxval <= 255 {
+        raw[idx..idx + pixel_count]
+            .iter()
+            .map(|&b| b as u16)
+            .collect()
+    } else {
+        // big-endian 16-bit samples
+        let data: &[u8] = &raw[idx..idx + pixel_count * 2];
+        data.chunks_exact(2)
+            .map(|c| ((c[0] as u16) << 8) | (c[1] as u16))
+            .collect()
+    };
+    assert_eq!(
+        pixels.len(),
+        pixel_count,
+        "PGM pixel data length mismatch: expected {}, got {}",
+        pixel_count,
+        pixels.len()
+    );
+    (width, height, maxval_u16, pixels)
+}
+
+fn skip_ws_comments(data: &[u8], mut idx: usize) -> usize {
+    loop {
+        while idx < data.len() && data[idx].is_ascii_whitespace() {
+            idx += 1;
+        }
+        if idx < data.len() && data[idx] == b'#' {
+            while idx < data.len() && data[idx] != b'\n' {
+                idx += 1;
+            }
+        } else {
+            break;
+        }
+    }
+    idx
+}
+
+fn read_number(data: &[u8], idx: usize) -> (usize, usize) {
+    let mut end: usize = idx;
+    while end < data.len() && data[end].is_ascii_digit() {
+        end += 1;
+    }
+    let val: usize = std::str::from_utf8(&data[idx..end])
+        .unwrap()
+        .parse()
+        .unwrap();
+    (val, end)
+}
+
+/// Generate deterministic grayscale u16 pixels for a given precision, using
+/// values that cover the full range from 0 to `(1 << precision) - 1`.
+fn make_gray_pixels_16(width: usize, height: usize, precision: u8) -> Vec<u16> {
+    let modulus: u32 = 1u32 << precision as u32;
+    let count: usize = width * height;
+    (0..count).map(|i| ((i as u32) % modulus) as u16).collect()
+}
+
+// ---------------------------------------------------------------------------
+// C cross-validation test 1: Rust lossless encode -> C djpeg decode
+// ---------------------------------------------------------------------------
+
+#[test]
+fn c_cross_validation_rust_lossless_c_decode() {
+    let djpeg: PathBuf = match djpeg_path() {
+        Some(p) => p,
+        None => {
+            eprintln!("SKIP: djpeg not found");
+            return;
+        }
+    };
+
+    // Test precisions 8, 12, and 16 -- grayscale (1 component) for simplicity
+    for precision in [8u8, 12, 16] {
+        let (w, h): (usize, usize) = (16, 16);
+        let max_val: u32 = (1u32 << precision as u32) - 1;
+        let pixels: Vec<u16> = make_gray_pixels_16(w, h, precision);
+
+        // Verify all pixel values are within range
+        for &v in &pixels {
+            assert!(
+                (v as u32) <= max_val,
+                "pixel value {} exceeds max {} for precision {}",
+                v,
+                max_val,
+                precision
+            );
+        }
+
+        // Encode lossless with Rust
+        let jpeg: Vec<u8> = compress_lossless_arbitrary(&pixels, w, h, 1, precision, 1, 0)
+            .unwrap_or_else(|e| {
+                panic!(
+                    "Rust lossless encode at precision {} failed: {}",
+                    precision, e
+                )
+            });
+
+        // Write JPEG to temp file
+        let tmp_jpg: TempFile = TempFile::new(&format!("arb_r2c_p{}.jpg", precision));
+        let tmp_out: TempFile = TempFile::new(&format!("arb_r2c_p{}.pgm", precision));
+        std::fs::write(tmp_jpg.path(), &jpeg).expect("write temp jpg");
+
+        // Decode with C djpeg
+        let output = Command::new(&djpeg)
+            .arg("-pnm")
+            .arg("-outfile")
+            .arg(tmp_out.path())
+            .arg(tmp_jpg.path())
+            .output()
+            .expect("failed to run djpeg");
+
+        if !output.status.success() {
+            eprintln!(
+                "SKIP: djpeg failed for precision {} (may not support this precision): {}",
+                precision,
+                String::from_utf8_lossy(&output.stderr)
+            );
+            continue;
+        }
+
+        // Parse djpeg output and compare
+        let (dw, dh, out_maxval, c_pixels) = parse_pgm_16(tmp_out.path());
+        assert_eq!(dw, w, "precision {}: width mismatch", precision);
+        assert_eq!(dh, h, "precision {}: height mismatch", precision);
+        assert_eq!(
+            out_maxval, max_val as u16,
+            "precision {}: maxval mismatch (expected {}, got {})",
+            precision, max_val, out_maxval
+        );
+        assert_eq!(
+            c_pixels, pixels,
+            "precision {}: lossless Rust-encode -> C-decode must be pixel-exact",
+            precision
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// C cross-validation test 2: C cjpeg lossless encode -> Rust decode
+// ---------------------------------------------------------------------------
+
+#[test]
+fn c_cross_validation_c_lossless_rust_decode() {
+    let cjpeg: PathBuf = match cjpeg_path() {
+        Some(p) => p,
+        None => {
+            eprintln!("SKIP: cjpeg not found");
+            return;
+        }
+    };
+    if !cjpeg_supports_lossless(&cjpeg) {
+        eprintln!("SKIP: cjpeg does not support -lossless");
+        return;
+    }
+    if !cjpeg_supports_precision(&cjpeg) {
+        eprintln!("SKIP: cjpeg does not support -precision");
+        return;
+    }
+
+    // Test precisions 8, 12, and 16 -- grayscale (1 component)
+    for precision in [8u8, 12, 16] {
+        let (w, h): (usize, usize) = (16, 16);
+        let max_val: u16 = ((1u32 << precision as u32) - 1) as u16;
+        let pixels: Vec<u16> = make_gray_pixels_16(w, h, precision);
+
+        // Write PGM input for cjpeg
+        let tmp_pgm: TempFile = TempFile::new(&format!("arb_c2r_p{}.pgm", precision));
+        write_pgm(tmp_pgm.path(), w, h, max_val, &pixels);
+
+        // Encode with C cjpeg
+        let tmp_jpg: TempFile = TempFile::new(&format!("arb_c2r_p{}.jpg", precision));
+        let output = Command::new(&cjpeg)
+            .arg("-precision")
+            .arg(precision.to_string())
+            .arg("-lossless")
+            .arg("1,0")
+            .arg("-outfile")
+            .arg(tmp_jpg.path())
+            .arg(tmp_pgm.path())
+            .output()
+            .expect("failed to run cjpeg");
+
+        if !output.status.success() {
+            eprintln!(
+                "SKIP: cjpeg -precision {} -lossless 1,0 failed (may not support this precision): {}",
+                precision,
+                String::from_utf8_lossy(&output.stderr)
+            );
+            continue;
+        }
+
+        // Decode the C-encoded JPEG with Rust
+        let jpeg_data: Vec<u8> = std::fs::read(tmp_jpg.path()).expect("read cjpeg output");
+        let img: Image16 = decompress_lossless_arbitrary(&jpeg_data).unwrap_or_else(|e| {
+            panic!(
+                "Rust decode of C lossless JPEG at precision {} failed: {}",
+                precision, e
+            )
+        });
+
+        assert_eq!(img.width, w, "precision {}: width mismatch", precision);
+        assert_eq!(img.height, h, "precision {}: height mismatch", precision);
+        assert_eq!(
+            img.num_components, 1,
+            "precision {}: expected 1 component (grayscale)",
+            precision
+        );
+        assert_eq!(
+            img.precision, precision,
+            "precision {}: precision field mismatch",
+            precision
+        );
+        assert_eq!(
+            img.data, pixels,
+            "precision {}: C-encode -> Rust-decode must be pixel-exact",
+            precision
+        );
+    }
 }

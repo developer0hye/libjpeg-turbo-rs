@@ -257,3 +257,235 @@ fn c_djpeg_custom_quant_diff_zero() {
         mismatch_count, max_diff
     );
 }
+
+/// Helper: temp file with auto-cleanup on drop.
+struct QuantTempFile {
+    path: PathBuf,
+}
+
+impl QuantTempFile {
+    fn new(name: &str) -> Self {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+        let id: u64 = COUNTER.fetch_add(1, Ordering::Relaxed);
+        Self {
+            path: std::env::temp_dir().join(format!("ljt_cq_{}_{}_{name}", std::process::id(), id)),
+        }
+    }
+}
+
+impl Drop for QuantTempFile {
+    fn drop(&mut self) {
+        std::fs::remove_file(&self.path).ok();
+    }
+}
+
+/// Encode with per-component quality (luma=90, chroma=50), decode with both
+/// C djpeg and Rust, assert pixel-identical output (diff=0).
+#[test]
+fn c_djpeg_cross_validation_per_component_quality() {
+    let djpeg: PathBuf = match djpeg_path() {
+        Some(p) => p,
+        None => {
+            eprintln!("SKIP: djpeg not found");
+            return;
+        }
+    };
+
+    let width: usize = 48;
+    let height: usize = 48;
+
+    // Deterministic varied-content pixel data
+    let mut pixels: Vec<u8> = Vec::with_capacity(width * height * 3);
+    for y in 0..height {
+        for x in 0..width {
+            let r: u8 = ((x * 7 + y * 13) % 256) as u8;
+            let g: u8 = ((x * 11 + y * 3 + 50) % 256) as u8;
+            let b: u8 = ((x * 5 + y * 17 + 100) % 256) as u8;
+            pixels.push(r);
+            pixels.push(g);
+            pixels.push(b);
+        }
+    }
+
+    // Encode with Rust: luma quality=90, chroma quality=50
+    let jpeg_data: Vec<u8> = Encoder::new(&pixels, width, height, PixelFormat::Rgb)
+        .quality(75)
+        .subsampling(Subsampling::S444)
+        .quality_factor(0, 90) // luma
+        .quality_factor(1, 50) // chroma
+        .encode()
+        .expect("Rust encode with per-component quality failed");
+
+    // Decode with Rust
+    let rust_image = decompress(&jpeg_data).expect("Rust decode failed");
+    assert_eq!(rust_image.width, width);
+    assert_eq!(rust_image.height, height);
+
+    // Decode with C djpeg
+    let tmp_jpg = QuantTempFile::new("per_comp_q.jpg");
+    let tmp_ppm = QuantTempFile::new("per_comp_q.ppm");
+
+    std::fs::write(&tmp_jpg.path, &jpeg_data).expect("write temp JPEG");
+
+    let output = Command::new(&djpeg)
+        .args(["-ppm", "-outfile"])
+        .arg(&tmp_ppm.path)
+        .arg(&tmp_jpg.path)
+        .output()
+        .expect("failed to run djpeg");
+    assert!(
+        output.status.success(),
+        "djpeg failed on per-component quality JPEG: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let (c_width, c_height, c_pixels) = parse_ppm(&tmp_ppm.path);
+    assert_eq!(c_width, width, "C djpeg width mismatch");
+    assert_eq!(c_height, height, "C djpeg height mismatch");
+
+    // Compare: Rust vs C decoded pixels must be identical
+    assert_eq!(
+        rust_image.data.len(),
+        c_pixels.len(),
+        "pixel data length mismatch: Rust={} C={}",
+        rust_image.data.len(),
+        c_pixels.len()
+    );
+
+    let mut max_diff: u8 = 0;
+    let mut mismatch_count: usize = 0;
+    for (i, (&r, &c)) in rust_image.data.iter().zip(c_pixels.iter()).enumerate() {
+        let diff: u8 = (r as i16 - c as i16).unsigned_abs() as u8;
+        if diff > max_diff {
+            max_diff = diff;
+        }
+        if diff > 0 {
+            mismatch_count += 1;
+            if mismatch_count <= 5 {
+                let pixel: usize = i / 3;
+                let channel: &str = ["R", "G", "B"][i % 3];
+                eprintln!(
+                    "  per_comp_q: pixel {} channel {}: rust={} c={} diff={}",
+                    pixel, channel, r, c, diff
+                );
+            }
+        }
+    }
+
+    assert_eq!(
+        max_diff, 0,
+        "per-component quality: Rust vs C djpeg mismatch: {} samples differ, max_diff={}",
+        mismatch_count, max_diff
+    );
+}
+
+/// Encode with custom quantization tables (non-default values), decode with
+/// both C djpeg and Rust, assert pixel-identical output (diff=0).
+#[test]
+fn c_djpeg_cross_validation_custom_quant_tables() {
+    let djpeg: PathBuf = match djpeg_path() {
+        Some(p) => p,
+        None => {
+            eprintln!("SKIP: djpeg not found");
+            return;
+        }
+    };
+
+    let width: usize = 48;
+    let height: usize = 48;
+
+    // Deterministic varied-content pixel data
+    let mut pixels: Vec<u8> = Vec::with_capacity(width * height * 3);
+    for y in 0..height {
+        for x in 0..width {
+            let r: u8 = ((x * 13 + y * 7 + 31) % 256) as u8;
+            let g: u8 = ((x * 3 + y * 19 + 67) % 256) as u8;
+            let b: u8 = ((x * 17 + y * 11 + 113) % 256) as u8;
+            pixels.push(r);
+            pixels.push(g);
+            pixels.push(b);
+        }
+    }
+
+    // Non-default custom quantization tables: ascending values 2..65
+    let mut luma_table: [u16; 64] = [0u16; 64];
+    for (i, v) in luma_table.iter_mut().enumerate() {
+        *v = (i as u16 + 2).min(255);
+    }
+    let mut chroma_table: [u16; 64] = [0u16; 64];
+    for (i, v) in chroma_table.iter_mut().enumerate() {
+        *v = (i as u16 * 2 + 4).min(255);
+    }
+
+    // Encode with Rust using custom quant tables
+    let jpeg_data: Vec<u8> = Encoder::new(&pixels, width, height, PixelFormat::Rgb)
+        .quality(100) // quality=100 avoids scaling the custom tables
+        .subsampling(Subsampling::S444)
+        .quant_table(0, luma_table)
+        .quant_table(1, chroma_table)
+        .encode()
+        .expect("Rust encode with custom quant tables failed");
+
+    // Decode with Rust
+    let rust_image = decompress(&jpeg_data).expect("Rust decode failed");
+    assert_eq!(rust_image.width, width);
+    assert_eq!(rust_image.height, height);
+
+    // Decode with C djpeg
+    let tmp_jpg = QuantTempFile::new("custom_qt.jpg");
+    let tmp_ppm = QuantTempFile::new("custom_qt.ppm");
+
+    std::fs::write(&tmp_jpg.path, &jpeg_data).expect("write temp JPEG");
+
+    let output = Command::new(&djpeg)
+        .args(["-ppm", "-outfile"])
+        .arg(&tmp_ppm.path)
+        .arg(&tmp_jpg.path)
+        .output()
+        .expect("failed to run djpeg");
+    assert!(
+        output.status.success(),
+        "djpeg failed on custom quant table JPEG: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let (c_width, c_height, c_pixels) = parse_ppm(&tmp_ppm.path);
+    assert_eq!(c_width, width, "C djpeg width mismatch");
+    assert_eq!(c_height, height, "C djpeg height mismatch");
+
+    // Compare: Rust vs C decoded pixels must be identical
+    assert_eq!(
+        rust_image.data.len(),
+        c_pixels.len(),
+        "pixel data length mismatch: Rust={} C={}",
+        rust_image.data.len(),
+        c_pixels.len()
+    );
+
+    let mut max_diff: u8 = 0;
+    let mut mismatch_count: usize = 0;
+    for (i, (&r, &c)) in rust_image.data.iter().zip(c_pixels.iter()).enumerate() {
+        let diff: u8 = (r as i16 - c as i16).unsigned_abs() as u8;
+        if diff > max_diff {
+            max_diff = diff;
+        }
+        if diff > 0 {
+            mismatch_count += 1;
+            if mismatch_count <= 5 {
+                let pixel: usize = i / 3;
+                let channel: &str = ["R", "G", "B"][i % 3];
+                eprintln!(
+                    "  custom_qt: pixel {} channel {}: rust={} c={} diff={}",
+                    pixel, channel, r, c, diff
+                );
+            }
+        }
+    }
+
+    assert_eq!(
+        max_diff, 0,
+        "custom quant tables: Rust vs C djpeg mismatch: {} samples differ, max_diff={}",
+        mismatch_count, max_diff
+    );
+}

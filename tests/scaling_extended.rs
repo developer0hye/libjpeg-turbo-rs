@@ -757,9 +757,8 @@ fn c_djpeg_scaling_full_diff_zero() {
 }
 
 /// Pixel-exact comparison for scaled decodes (1/2, 1/4, 1/8) against C djpeg.
-/// Ignored because scaled IDCT kernels may differ from C libjpeg-turbo.
+/// Per-component IDCT sizes match C libjpeg-turbo, producing diff=0.
 #[test]
-#[ignore = "Scaled IDCT pixel values may differ from C djpeg"]
 fn c_djpeg_scaling_scaled_pixel_diff_zero() {
     let djpeg = match djpeg_path() {
         Some(p) => p,

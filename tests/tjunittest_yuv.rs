@@ -1,4 +1,8 @@
 /// YUV conversion validation tests.
+use std::path::{Path, PathBuf};
+use std::process::Command;
+use std::sync::atomic::{AtomicU64, Ordering};
+
 use libjpeg_turbo_rs::api::yuv;
 use libjpeg_turbo_rs::{
     compress, decompress_to, yuv_buf_size, yuv_plane_height, yuv_plane_size, yuv_plane_width,
@@ -292,4 +296,279 @@ fn tjunittest_yuv_encode_multiple_pixel_formats() {
         assert_eq!(yuv.len(), yuv_buf_size(w, h, Subsampling::S444), "{:?}", pf);
         assert!(yuv.iter().any(|&v| v > 0), "{:?}", pf);
     }
+}
+
+// ---------------------------------------------------------------------------
+// C djpeg cross-validation helpers
+// ---------------------------------------------------------------------------
+
+static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+fn temp_path(name: &str) -> PathBuf {
+    let counter: u64 = TEMP_COUNTER.fetch_add(1, Ordering::Relaxed);
+    let pid: u32 = std::process::id();
+    std::env::temp_dir().join(format!("ljt_rs_yuv_{}_{:04}_{}", pid, counter, name))
+}
+
+struct TempFile {
+    path: PathBuf,
+}
+
+impl TempFile {
+    fn new(name: &str) -> Self {
+        Self {
+            path: temp_path(name),
+        }
+    }
+
+    fn path(&self) -> &Path {
+        &self.path
+    }
+}
+
+impl Drop for TempFile {
+    fn drop(&mut self) {
+        std::fs::remove_file(&self.path).ok();
+    }
+}
+
+/// Locate the djpeg binary. Checks /opt/homebrew/bin/djpeg first, then falls
+/// back to whatever `which djpeg` returns. Returns `None` when not found.
+fn djpeg_path() -> Option<PathBuf> {
+    let homebrew_path: PathBuf = PathBuf::from("/opt/homebrew/bin/djpeg");
+    if homebrew_path.exists() {
+        return Some(homebrew_path);
+    }
+
+    let output = Command::new("which").arg("djpeg").output().ok()?;
+    if output.status.success() {
+        let path_str: String = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        if !path_str.is_empty() {
+            let path: PathBuf = PathBuf::from(&path_str);
+            if path.exists() {
+                return Some(path);
+            }
+        }
+    }
+
+    None
+}
+
+/// Parse a binary PPM (P6) file into (width, height, rgb_pixels).
+/// Returns `None` if the file is not a valid P6 PPM.
+fn parse_ppm(data: &[u8]) -> Option<(usize, usize, Vec<u8>)> {
+    if data.len() < 3 || &data[0..2] != b"P6" {
+        return None;
+    }
+    let mut pos: usize = 2;
+
+    // Skip whitespace
+    while pos < data.len()
+        && (data[pos] == b' ' || data[pos] == b'\n' || data[pos] == b'\r' || data[pos] == b'\t')
+    {
+        pos += 1;
+    }
+
+    // Skip comments
+    while pos < data.len() && data[pos] == b'#' {
+        while pos < data.len() && data[pos] != b'\n' {
+            pos += 1;
+        }
+        if pos < data.len() {
+            pos += 1;
+        }
+    }
+
+    // Parse width
+    let width_start: usize = pos;
+    while pos < data.len() && data[pos].is_ascii_digit() {
+        pos += 1;
+    }
+    let width: usize = std::str::from_utf8(&data[width_start..pos])
+        .ok()?
+        .parse()
+        .ok()?;
+
+    // Skip whitespace
+    while pos < data.len()
+        && (data[pos] == b' ' || data[pos] == b'\n' || data[pos] == b'\r' || data[pos] == b'\t')
+    {
+        pos += 1;
+    }
+
+    // Skip comments
+    while pos < data.len() && data[pos] == b'#' {
+        while pos < data.len() && data[pos] != b'\n' {
+            pos += 1;
+        }
+        if pos < data.len() {
+            pos += 1;
+        }
+    }
+
+    // Parse height
+    let height_start: usize = pos;
+    while pos < data.len() && data[pos].is_ascii_digit() {
+        pos += 1;
+    }
+    let height: usize = std::str::from_utf8(&data[height_start..pos])
+        .ok()?
+        .parse()
+        .ok()?;
+
+    // Skip whitespace
+    while pos < data.len()
+        && (data[pos] == b' ' || data[pos] == b'\n' || data[pos] == b'\r' || data[pos] == b'\t')
+    {
+        pos += 1;
+    }
+
+    // Skip comments
+    while pos < data.len() && data[pos] == b'#' {
+        while pos < data.len() && data[pos] != b'\n' {
+            pos += 1;
+        }
+        if pos < data.len() {
+            pos += 1;
+        }
+    }
+
+    // Parse maxval
+    let maxval_start: usize = pos;
+    while pos < data.len() && data[pos].is_ascii_digit() {
+        pos += 1;
+    }
+    let _maxval: usize = std::str::from_utf8(&data[maxval_start..pos])
+        .ok()?
+        .parse()
+        .ok()?;
+
+    // Exactly one whitespace character after maxval
+    if pos < data.len()
+        && (data[pos] == b' ' || data[pos] == b'\n' || data[pos] == b'\r' || data[pos] == b'\t')
+    {
+        pos += 1;
+    }
+
+    // Remaining data is the pixel buffer
+    let expected_len: usize = width * height * 3;
+    if data.len() - pos < expected_len {
+        return None;
+    }
+
+    Some((width, height, data[pos..pos + expected_len].to_vec()))
+}
+
+// ---------------------------------------------------------------------------
+// Test: C djpeg cross-validation for YUV roundtrip
+// ---------------------------------------------------------------------------
+
+/// Cross-validate Rust YUV→JPEG compression against C djpeg.
+///
+/// For S444, S422, S420:
+/// 1. Encode a 48x48 RGB pattern to YUV with Rust
+/// 2. Compress YUV to JPEG with Rust
+/// 3. Decode JPEG with both C djpeg and Rust decompress()
+/// 4. Assert pixel-identical output (diff=0)
+///
+/// This validates that the YUV→JPEG compression path produces standard-
+/// compliant JPEG files that C libjpeg-turbo decodes identically to Rust.
+#[test]
+fn c_djpeg_cross_validation_yuv_roundtrip() {
+    let djpeg: PathBuf = match djpeg_path() {
+        Some(p) => p,
+        None => {
+            eprintln!("SKIP: djpeg not found");
+            return;
+        }
+    };
+
+    let (w, h): (usize, usize) = (48, 48);
+    let rgb: Vec<u8> = gradient_rgb(w, h);
+
+    let subsamplings: [Subsampling; 3] = [Subsampling::S444, Subsampling::S422, Subsampling::S420];
+    let mut tested: usize = 0;
+    let mut passed: usize = 0;
+
+    for &ss in &subsamplings {
+        tested += 1;
+
+        // Step 1: Encode RGB to YUV with Rust
+        let yuv: Vec<u8> =
+            yuv::encode_yuv(&rgb, w, h, PixelFormat::Rgb, ss).expect("encode_yuv failed");
+
+        // Step 2: Compress YUV to JPEG with Rust
+        let jpeg: Vec<u8> =
+            yuv::compress_from_yuv(&yuv, w, h, ss, 90).expect("compress_from_yuv failed");
+        assert!(!jpeg.is_empty(), "JPEG output is empty for {:?}", ss);
+
+        // Step 3: Write JPEG to temp file
+        let tmp: TempFile = TempFile::new(&format!("yuv_xval_{:?}.jpg", ss));
+        std::fs::write(tmp.path(), &jpeg)
+            .unwrap_or_else(|e| panic!("failed to write temp JPEG: {}", e));
+
+        // Step 4: Decode with C djpeg -ppm
+        let c_output = Command::new(&djpeg)
+            .args(["-ppm"])
+            .arg(tmp.path())
+            .output()
+            .unwrap_or_else(|e| panic!("djpeg execution failed: {}", e));
+        assert!(
+            c_output.status.success(),
+            "djpeg failed for {:?}: {}",
+            ss,
+            String::from_utf8_lossy(&c_output.stderr)
+        );
+
+        let (c_w, c_h, c_pixels): (usize, usize, Vec<u8>) = parse_ppm(&c_output.stdout)
+            .unwrap_or_else(|| panic!("failed to parse djpeg PPM output for {:?}", ss));
+        assert_eq!(
+            (c_w, c_h),
+            (w, h),
+            "C djpeg dimensions mismatch for {:?}",
+            ss
+        );
+
+        // Step 5: Decode with Rust decompress()
+        let rust_img = decompress_to(&jpeg, PixelFormat::Rgb)
+            .unwrap_or_else(|e| panic!("Rust decompress failed for {:?}: {}", ss, e));
+        assert_eq!(
+            (rust_img.width, rust_img.height),
+            (w, h),
+            "Rust decode dimensions mismatch for {:?}",
+            ss
+        );
+
+        // Step 6: Compare Rust decode vs C djpeg decode (diff=0)
+        assert_eq!(
+            rust_img.data.len(),
+            c_pixels.len(),
+            "pixel buffer length mismatch for {:?}: rust={} c={}",
+            ss,
+            rust_img.data.len(),
+            c_pixels.len()
+        );
+
+        let max_diff: i16 = rust_img
+            .data
+            .iter()
+            .zip(c_pixels.iter())
+            .map(|(&a, &b)| (a as i16 - b as i16).abs())
+            .max()
+            .unwrap_or(0);
+
+        assert_eq!(
+            max_diff, 0,
+            "Rust vs C djpeg pixel diff must be 0 for {:?}, got max_diff={}",
+            ss, max_diff
+        );
+
+        passed += 1;
+    }
+
+    assert_eq!(
+        passed, tested,
+        "not all subsampling modes passed: {}/{}",
+        passed, tested
+    );
 }

@@ -6,8 +6,9 @@ use crate::decode::bitstream::BitReader;
 /// Sign-extend a Huffman extra-bits value (JPEG Figure F.12).
 /// Uses the same branchless formula as C libjpeg-turbo's HUFF_EXTEND:
 ///   result = x + (((x - (1 << (s-1))) >> 31) & ((-1 << s) + 1))
-/// This correctly handles all category sizes 1-16 without overflow,
+/// This correctly handles all category sizes 1-15 without overflow,
 /// which is needed for 12-bit JPEG where DC categories reach 15.
+/// Category 16 (lossless 16-bit) is handled separately in decode_dc_coefficient.
 #[inline(always)]
 fn extend(value: u16, size: u8) -> i16 {
     let x = value as i32;
@@ -28,6 +29,12 @@ pub fn decode_dc_coefficient(reader: &mut BitReader, table: &HuffmanTable) -> Re
 
     if category == 0 {
         return Ok(0);
+    }
+
+    // Category 16 is a special case for 16-bit lossless JPEG (ITU-T T.81):
+    // it always represents the value 32768 without reading any extra bits.
+    if category == 16 {
+        return Ok(-32768i16);
     }
 
     let extra_bits = reader.read_bits(category);
