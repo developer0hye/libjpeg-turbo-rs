@@ -1,3 +1,7 @@
+use std::path::{Path, PathBuf};
+use std::process::Command;
+use std::sync::atomic::{AtomicU64, Ordering};
+
 use libjpeg_turbo_rs::{
     compress_progressive, decompress, Encoder, PixelFormat, ProgressiveDecoder, ScanScript,
     Subsampling,
@@ -499,4 +503,300 @@ fn build_tiff_with_orientation(orientation: u16) -> Vec<u8> {
     data.extend_from_slice(&0u16.to_le_bytes());
     data.extend_from_slice(&0u32.to_le_bytes());
     data
+}
+
+// ============================================================
+// C djpeg cross-validation helpers
+// ============================================================
+
+fn djpeg_path() -> Option<PathBuf> {
+    let homebrew: PathBuf = PathBuf::from("/opt/homebrew/bin/djpeg");
+    if homebrew.exists() {
+        return Some(homebrew);
+    }
+    Command::new("which")
+        .arg("djpeg")
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| PathBuf::from(String::from_utf8_lossy(&o.stdout).trim().to_string()))
+}
+
+static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+fn temp_path(name: &str) -> PathBuf {
+    let counter: u64 = TEMP_COUNTER.fetch_add(1, Ordering::Relaxed);
+    let pid: u32 = std::process::id();
+    std::env::temp_dir().join(format!("ljt_progscan_{}_{:04}_{}", pid, counter, name))
+}
+
+struct TempFile {
+    path: PathBuf,
+}
+
+impl TempFile {
+    fn new(name: &str) -> Self {
+        Self {
+            path: temp_path(name),
+        }
+    }
+    fn path(&self) -> &Path {
+        &self.path
+    }
+}
+
+impl Drop for TempFile {
+    fn drop(&mut self) {
+        std::fs::remove_file(&self.path).ok();
+    }
+}
+
+/// Parse a binary PPM (P6) file and return `(width, height, data)`.
+fn parse_ppm(path: &Path) -> (usize, usize, Vec<u8>) {
+    let raw: Vec<u8> = std::fs::read(path).expect("failed to read PPM file");
+    assert!(raw.len() > 3, "PPM too short");
+    assert_eq!(&raw[0..2], b"P6", "not a P6 PPM");
+    let mut idx: usize = 2;
+    idx = skip_ws_comments(&raw, idx);
+    let (width, next) = read_number(&raw, idx);
+    idx = skip_ws_comments(&raw, next);
+    let (height, next) = read_number(&raw, idx);
+    idx = skip_ws_comments(&raw, next);
+    let (_maxval, next) = read_number(&raw, idx);
+    idx = next + 1;
+    let data: Vec<u8> = raw[idx..].to_vec();
+    assert_eq!(
+        data.len(),
+        width * height * 3,
+        "PPM pixel data length mismatch"
+    );
+    (width, height, data)
+}
+
+fn skip_ws_comments(data: &[u8], mut idx: usize) -> usize {
+    loop {
+        while idx < data.len() && data[idx].is_ascii_whitespace() {
+            idx += 1;
+        }
+        if idx < data.len() && data[idx] == b'#' {
+            while idx < data.len() && data[idx] != b'\n' {
+                idx += 1;
+            }
+        } else {
+            break;
+        }
+    }
+    idx
+}
+
+fn read_number(data: &[u8], idx: usize) -> (usize, usize) {
+    let mut end: usize = idx;
+    while end < data.len() && data[end].is_ascii_digit() {
+        end += 1;
+    }
+    let val: usize = std::str::from_utf8(&data[idx..end])
+        .unwrap()
+        .parse()
+        .unwrap();
+    (val, end)
+}
+
+/// Helper to cross-validate a progressive JPEG against C djpeg.
+/// Decodes with both Rust and C djpeg and asserts pixel-identical output.
+fn cross_validate_progressive_jpeg(djpeg: &Path, jpeg_data: &[u8], label: &str) {
+    let tmp_jpeg: TempFile = TempFile::new(&format!("{}.jpg", label));
+    let tmp_ppm: TempFile = TempFile::new(&format!("{}.ppm", label));
+    std::fs::write(tmp_jpeg.path(), jpeg_data).expect("write JPEG");
+
+    // Decode with C djpeg
+    let output = Command::new(djpeg)
+        .arg("-ppm")
+        .arg("-outfile")
+        .arg(tmp_ppm.path())
+        .arg(tmp_jpeg.path())
+        .output()
+        .expect("failed to run djpeg");
+    assert!(
+        output.status.success(),
+        "{}: djpeg failed: {}",
+        label,
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let (c_w, c_h, c_pixels) = parse_ppm(tmp_ppm.path());
+
+    // Decode with Rust
+    let rust_img = decompress(jpeg_data)
+        .unwrap_or_else(|e| panic!("{}: Rust decompress failed: {}", label, e));
+
+    assert_eq!(
+        rust_img.width, c_w,
+        "{}: width mismatch Rust={} C={}",
+        label, rust_img.width, c_w
+    );
+    assert_eq!(
+        rust_img.height, c_h,
+        "{}: height mismatch Rust={} C={}",
+        label, rust_img.height, c_h
+    );
+    assert_eq!(
+        rust_img.data.len(),
+        c_pixels.len(),
+        "{}: pixel data length mismatch",
+        label
+    );
+
+    let max_diff: u8 = rust_img
+        .data
+        .iter()
+        .zip(c_pixels.iter())
+        .map(|(&r, &c)| (r as i16 - c as i16).unsigned_abs() as u8)
+        .max()
+        .unwrap_or(0);
+    assert_eq!(
+        max_diff, 0,
+        "{}: Rust vs C djpeg max_diff={} (must be 0)",
+        label, max_diff
+    );
+}
+
+// ============================================================
+// C djpeg cross-validation test
+// ============================================================
+
+#[test]
+fn c_djpeg_cross_validation_progressive_edge_cases() {
+    let djpeg: PathBuf = match djpeg_path() {
+        Some(p) => p,
+        None => {
+            eprintln!("SKIP: djpeg not found");
+            return;
+        }
+    };
+
+    let pixels: Vec<u8> = make_pixels(32, 32, 3);
+
+    // Case 1: Default progressive encoding (420)
+    {
+        let jpeg: Vec<u8> =
+            compress_progressive(&pixels, 32, 32, PixelFormat::Rgb, 75, Subsampling::S420)
+                .expect("compress_progressive default must succeed");
+        cross_validate_progressive_jpeg(&djpeg, &jpeg, "default_progressive_420");
+    }
+
+    // Case 2: Default progressive encoding (444)
+    {
+        let jpeg: Vec<u8> =
+            compress_progressive(&pixels, 32, 32, PixelFormat::Rgb, 75, Subsampling::S444)
+                .expect("compress_progressive 444 must succeed");
+        cross_validate_progressive_jpeg(&djpeg, &jpeg, "default_progressive_444");
+    }
+
+    // Case 3: Custom scan script — standard multi-scan with separate DC and AC
+    {
+        let script: Vec<ScanScript> = vec![
+            // Interleaved DC for all components
+            ScanScript {
+                components: vec![0, 1, 2],
+                ss: 0,
+                se: 0,
+                ah: 0,
+                al: 0,
+            },
+            // Y AC
+            ScanScript {
+                components: vec![0],
+                ss: 1,
+                se: 63,
+                ah: 0,
+                al: 0,
+            },
+            // Cb AC
+            ScanScript {
+                components: vec![1],
+                ss: 1,
+                se: 63,
+                ah: 0,
+                al: 0,
+            },
+            // Cr AC
+            ScanScript {
+                components: vec![2],
+                ss: 1,
+                se: 63,
+                ah: 0,
+                al: 0,
+            },
+        ];
+        let jpeg: Vec<u8> = Encoder::new(&pixels, 32, 32, PixelFormat::Rgb)
+            .quality(75)
+            .subsampling(Subsampling::S444)
+            .progressive(true)
+            .scan_script(script)
+            .encode()
+            .expect("custom multi-scan progressive must succeed");
+        cross_validate_progressive_jpeg(&djpeg, &jpeg, "custom_multi_scan");
+    }
+
+    // Case 4: Custom scan script — unusual spectral ordering
+    {
+        let script: Vec<ScanScript> = vec![
+            // DC for all components
+            ScanScript {
+                components: vec![0, 1, 2],
+                ss: 0,
+                se: 0,
+                ah: 0,
+                al: 0,
+            },
+            // Y: low AC (1-5)
+            ScanScript {
+                components: vec![0],
+                ss: 1,
+                se: 5,
+                ah: 0,
+                al: 0,
+            },
+            // Y: high AC (6-63)
+            ScanScript {
+                components: vec![0],
+                ss: 6,
+                se: 63,
+                ah: 0,
+                al: 0,
+            },
+            // Cb: full AC
+            ScanScript {
+                components: vec![1],
+                ss: 1,
+                se: 63,
+                ah: 0,
+                al: 0,
+            },
+            // Cr: full AC
+            ScanScript {
+                components: vec![2],
+                ss: 1,
+                se: 63,
+                ah: 0,
+                al: 0,
+            },
+        ];
+        let jpeg: Vec<u8> = Encoder::new(&pixels, 32, 32, PixelFormat::Rgb)
+            .quality(75)
+            .subsampling(Subsampling::S444)
+            .progressive(true)
+            .scan_script(script)
+            .encode()
+            .expect("custom spectral progressive must succeed");
+        cross_validate_progressive_jpeg(&djpeg, &jpeg, "custom_spectral_ordering");
+    }
+
+    // Case 5: Progressive with 422 subsampling
+    {
+        let jpeg: Vec<u8> =
+            compress_progressive(&pixels, 32, 32, PixelFormat::Rgb, 75, Subsampling::S422)
+                .expect("compress_progressive 422 must succeed");
+        cross_validate_progressive_jpeg(&djpeg, &jpeg, "default_progressive_422");
+    }
 }
