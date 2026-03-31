@@ -8,7 +8,7 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use libjpeg_turbo_rs::{decompress_to, PixelFormat};
+use libjpeg_turbo_rs::{compress, decompress_to, PixelFormat, Subsampling};
 
 fn djpeg_path() -> Option<PathBuf> {
     let homebrew: PathBuf = PathBuf::from("/opt/homebrew/bin/djpeg");
@@ -258,3 +258,97 @@ diverse_test!(
     diverse_479x641_vga_portrait_odd_444,
     "cjpeg_479x641_vga_portrait_odd_444.jpg"
 );
+
+// ===========================================================================
+// Rare subsampling modes: S440, S411, S441
+// ===========================================================================
+
+#[test]
+fn c_djpeg_cross_validation_rare_subsampling() {
+    let djpeg: PathBuf = match djpeg_path() {
+        Some(p) => p,
+        None => {
+            eprintln!("SKIP: djpeg not found");
+            return;
+        }
+    };
+
+    let (w, h): (usize, usize) = (48, 48);
+    let mut pixels: Vec<u8> = Vec::with_capacity(w * h * 3);
+    for y in 0..h {
+        for x in 0..w {
+            pixels.push(((x * 255) / w) as u8);
+            pixels.push(((y * 255) / h) as u8);
+            pixels.push((((x + y) * 127) / (w + h)) as u8);
+        }
+    }
+
+    let rare_modes: [(&str, Subsampling); 3] = [
+        ("S440", Subsampling::S440),
+        ("S411", Subsampling::S411),
+        ("S441", Subsampling::S441),
+    ];
+
+    for (name, subsampling) in &rare_modes {
+        // Encode with Rust
+        let jpeg_data: Vec<u8> = compress(&pixels, w, h, PixelFormat::Rgb, 90, *subsampling)
+            .unwrap_or_else(|e| panic!("{}: Rust compress failed: {}", name, e));
+
+        // Decode with Rust
+        let rust_img = decompress_to(&jpeg_data, PixelFormat::Rgb)
+            .unwrap_or_else(|e| panic!("{}: Rust decode failed: {}", name, e));
+
+        // Decode with C djpeg
+        let tmp_jpg: String = format!("/tmp/ljt_rare_{}_{}.jpg", name, std::process::id());
+        let tmp_ppm: String = format!("{}.ppm", &tmp_jpg[..tmp_jpg.len() - 4]);
+        std::fs::write(&tmp_jpg, &jpeg_data).unwrap();
+
+        let output = Command::new(&djpeg)
+            .arg("-ppm")
+            .arg("-outfile")
+            .arg(&tmp_ppm)
+            .arg(&tmp_jpg)
+            .output()
+            .expect("failed to run djpeg");
+        assert!(
+            output.status.success(),
+            "{}: djpeg failed: {}",
+            name,
+            String::from_utf8_lossy(&output.stderr)
+        );
+
+        let (cw, ch, c_pixels) = parse_ppm(Path::new(&tmp_ppm));
+        std::fs::remove_file(&tmp_jpg).ok();
+        std::fs::remove_file(&tmp_ppm).ok();
+
+        assert_eq!(
+            rust_img.width, cw,
+            "{}: width mismatch (rust={} c={})",
+            name, rust_img.width, cw
+        );
+        assert_eq!(
+            rust_img.height, ch,
+            "{}: height mismatch (rust={} c={})",
+            name, rust_img.height, ch
+        );
+        assert_eq!(
+            rust_img.data.len(),
+            c_pixels.len(),
+            "{}: pixel data length mismatch",
+            name
+        );
+
+        let max_diff: u8 = rust_img
+            .data
+            .iter()
+            .zip(c_pixels.iter())
+            .map(|(&a, &b)| (a as i16 - b as i16).unsigned_abs() as u8)
+            .max()
+            .unwrap_or(0);
+        assert_eq!(
+            max_diff, 0,
+            "{}: max_diff={} (must be 0 vs C djpeg)",
+            name, max_diff
+        );
+    }
+}

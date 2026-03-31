@@ -899,3 +899,286 @@ fn all_transforms_both_decoders_valid() {
         assert_eq!(dh, rust_img.height, "{}: djpeg height mismatch", name);
     }
 }
+
+// ===========================================================================
+// Transform + progressive re-encode cross-check (all 8 transforms)
+// ===========================================================================
+
+#[test]
+fn c_jpegtran_progressive_reencode() {
+    let jpegtran: PathBuf = match jpegtran_path() {
+        Some(p) => p,
+        None => {
+            eprintln!("SKIP: jpegtran not found");
+            return;
+        }
+    };
+    let djpeg: PathBuf = match djpeg_path() {
+        Some(p) => p,
+        None => {
+            eprintln!("SKIP: djpeg not found");
+            return;
+        }
+    };
+
+    let source_jpeg: Vec<u8> = get_test_jpeg();
+
+    let transforms: [TransformOp; 8] = [
+        TransformOp::None,
+        TransformOp::HFlip,
+        TransformOp::VFlip,
+        TransformOp::Rot90,
+        TransformOp::Rot180,
+        TransformOp::Rot270,
+        TransformOp::Transpose,
+        TransformOp::Transverse,
+    ];
+
+    for op in transforms {
+        let name: &str = transform_name(op);
+
+        // Rust: transform with progressive=true
+        let rust_result: Vec<u8> = transform_jpeg_with_options(
+            &source_jpeg,
+            &TransformOptions {
+                op,
+                progressive: true,
+                copy_markers: MarkerCopyMode::None,
+                ..Default::default()
+            },
+        )
+        .unwrap_or_else(|e| panic!("Rust progressive transform {} must succeed: {}", name, e));
+
+        // C: jpegtran -progressive <transform-args>
+        let tmp_in: TempFile = TempFile::new(&format!("prog_{}_in.jpg", name));
+        let tmp_c_out: TempFile = TempFile::new(&format!("prog_{}_c.jpg", name));
+        std::fs::write(tmp_in.path(), &source_jpeg).expect("write source");
+
+        let mut cmd = Command::new(&jpegtran);
+        cmd.arg("-progressive");
+        cmd.arg("-copy").arg("none");
+        let args: Vec<String> = jpegtran_args_for_op(op);
+        for arg in &args {
+            cmd.arg(arg);
+        }
+        cmd.arg("-outfile").arg(tmp_c_out.path()).arg(tmp_in.path());
+
+        let output = cmd.output().expect("failed to run jpegtran");
+        assert!(
+            output.status.success(),
+            "jpegtran -progressive {} failed: {}",
+            name,
+            String::from_utf8_lossy(&output.stderr)
+        );
+
+        // Decode Rust result with C djpeg
+        let tmp_rust_jpg: TempFile = TempFile::new(&format!("prog_{}_rust.jpg", name));
+        let tmp_rust_ppm: TempFile = TempFile::new(&format!("prog_{}_rust.ppm", name));
+        std::fs::write(tmp_rust_jpg.path(), &rust_result).expect("write Rust result");
+
+        let output = Command::new(&djpeg)
+            .arg("-ppm")
+            .arg("-outfile")
+            .arg(tmp_rust_ppm.path())
+            .arg(tmp_rust_jpg.path())
+            .output()
+            .expect("failed to run djpeg on Rust result");
+        assert!(
+            output.status.success(),
+            "djpeg failed on Rust progressive {} output: {}",
+            name,
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let (rw, rh, rust_pixels) = parse_ppm(tmp_rust_ppm.path());
+
+        // Decode C result with C djpeg
+        let tmp_c_ppm: TempFile = TempFile::new(&format!("prog_{}_c.ppm", name));
+        let output = Command::new(&djpeg)
+            .arg("-ppm")
+            .arg("-outfile")
+            .arg(tmp_c_ppm.path())
+            .arg(tmp_c_out.path())
+            .output()
+            .expect("failed to run djpeg on C result");
+        assert!(
+            output.status.success(),
+            "djpeg failed on C progressive {} output: {}",
+            name,
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let (cw, ch, c_pixels) = parse_ppm(tmp_c_ppm.path());
+
+        assert_eq!(
+            rw, cw,
+            "progressive {}: width mismatch (rust={} c={})",
+            name, rw, cw
+        );
+        assert_eq!(
+            rh, ch,
+            "progressive {}: height mismatch (rust={} c={})",
+            name, rh, ch
+        );
+
+        let max_diff: u8 = pixel_max_diff(&rust_pixels, &c_pixels);
+        assert_eq!(
+            max_diff, 0,
+            "progressive {}: max_diff={} (must be 0 vs C jpegtran -progressive)",
+            name, max_diff
+        );
+    }
+}
+
+// ===========================================================================
+// Transform + arithmetic re-encode cross-check (all 8 transforms)
+// ===========================================================================
+
+#[test]
+fn c_jpegtran_arithmetic_reencode() {
+    let jpegtran: PathBuf = match jpegtran_path() {
+        Some(p) => p,
+        None => {
+            eprintln!("SKIP: jpegtran not found");
+            return;
+        }
+    };
+    let djpeg: PathBuf = match djpeg_path() {
+        Some(p) => p,
+        None => {
+            eprintln!("SKIP: djpeg not found");
+            return;
+        }
+    };
+
+    let source_jpeg: Vec<u8> = get_test_jpeg();
+
+    // Check if C jpegtran supports arithmetic coding by doing a test run
+    {
+        let tmp_in: TempFile = TempFile::new("arith_probe_in.jpg");
+        let tmp_out: TempFile = TempFile::new("arith_probe_out.jpg");
+        std::fs::write(tmp_in.path(), &source_jpeg).expect("write source");
+        let output = Command::new(&jpegtran)
+            .arg("-arithmetic")
+            .arg("-outfile")
+            .arg(tmp_out.path())
+            .arg(tmp_in.path())
+            .output()
+            .expect("failed to run jpegtran");
+        if !output.status.success() {
+            let stderr: String = String::from_utf8_lossy(&output.stderr).to_string();
+            if stderr.to_lowercase().contains("arithmetic") {
+                eprintln!(
+                    "SKIP: C jpegtran does not support arithmetic coding: {}",
+                    stderr.trim()
+                );
+                return;
+            }
+            // Some other error — still skip gracefully
+            eprintln!("SKIP: C jpegtran -arithmetic failed: {}", stderr.trim());
+            return;
+        }
+    }
+
+    let transforms: [TransformOp; 8] = [
+        TransformOp::None,
+        TransformOp::HFlip,
+        TransformOp::VFlip,
+        TransformOp::Rot90,
+        TransformOp::Rot180,
+        TransformOp::Rot270,
+        TransformOp::Transpose,
+        TransformOp::Transverse,
+    ];
+
+    for op in transforms {
+        let name: &str = transform_name(op);
+
+        // Rust: transform with arithmetic=true
+        let rust_result: Vec<u8> = transform_jpeg_with_options(
+            &source_jpeg,
+            &TransformOptions {
+                op,
+                arithmetic: true,
+                copy_markers: MarkerCopyMode::None,
+                ..Default::default()
+            },
+        )
+        .unwrap_or_else(|e| panic!("Rust arithmetic transform {} must succeed: {}", name, e));
+
+        // C: jpegtran -arithmetic <transform-args>
+        let tmp_in: TempFile = TempFile::new(&format!("arith_{}_in.jpg", name));
+        let tmp_c_out: TempFile = TempFile::new(&format!("arith_{}_c.jpg", name));
+        std::fs::write(tmp_in.path(), &source_jpeg).expect("write source");
+
+        let mut cmd = Command::new(&jpegtran);
+        cmd.arg("-arithmetic");
+        cmd.arg("-copy").arg("none");
+        let args: Vec<String> = jpegtran_args_for_op(op);
+        for arg in &args {
+            cmd.arg(arg);
+        }
+        cmd.arg("-outfile").arg(tmp_c_out.path()).arg(tmp_in.path());
+
+        let output = cmd.output().expect("failed to run jpegtran");
+        assert!(
+            output.status.success(),
+            "jpegtran -arithmetic {} failed: {}",
+            name,
+            String::from_utf8_lossy(&output.stderr)
+        );
+
+        // Decode Rust result with C djpeg
+        let tmp_rust_jpg: TempFile = TempFile::new(&format!("arith_{}_rust.jpg", name));
+        let tmp_rust_ppm: TempFile = TempFile::new(&format!("arith_{}_rust.ppm", name));
+        std::fs::write(tmp_rust_jpg.path(), &rust_result).expect("write Rust result");
+
+        let output = Command::new(&djpeg)
+            .arg("-ppm")
+            .arg("-outfile")
+            .arg(tmp_rust_ppm.path())
+            .arg(tmp_rust_jpg.path())
+            .output()
+            .expect("failed to run djpeg on Rust result");
+        assert!(
+            output.status.success(),
+            "djpeg failed on Rust arithmetic {} output: {}",
+            name,
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let (rw, rh, rust_pixels) = parse_ppm(tmp_rust_ppm.path());
+
+        // Decode C result with C djpeg
+        let tmp_c_ppm: TempFile = TempFile::new(&format!("arith_{}_c.ppm", name));
+        let output = Command::new(&djpeg)
+            .arg("-ppm")
+            .arg("-outfile")
+            .arg(tmp_c_ppm.path())
+            .arg(tmp_c_out.path())
+            .output()
+            .expect("failed to run djpeg on C result");
+        assert!(
+            output.status.success(),
+            "djpeg failed on C arithmetic {} output: {}",
+            name,
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let (cw, ch, c_pixels) = parse_ppm(tmp_c_ppm.path());
+
+        assert_eq!(
+            rw, cw,
+            "arithmetic {}: width mismatch (rust={} c={})",
+            name, rw, cw
+        );
+        assert_eq!(
+            rh, ch,
+            "arithmetic {}: height mismatch (rust={} c={})",
+            name, rh, ch
+        );
+
+        let max_diff: u8 = pixel_max_diff(&rust_pixels, &c_pixels);
+        assert_eq!(
+            max_diff, 0,
+            "arithmetic {}: max_diff={} (must be 0 vs C jpegtran -arithmetic)",
+            name, max_diff
+        );
+    }
+}

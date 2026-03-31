@@ -1,3 +1,6 @@
+use std::path::PathBuf;
+use std::process::Command;
+
 use libjpeg_turbo_rs::{decompress, Encoder, PixelFormat, Subsampling};
 
 #[test]
@@ -80,4 +83,203 @@ fn existing_compress_still_works() {
         .unwrap();
     let img = decompress(&jpeg).unwrap();
     assert_eq!(img.width, 16);
+}
+
+/// Path to C djpeg binary, or `None` if not installed.
+fn djpeg_path() -> Option<PathBuf> {
+    let homebrew: PathBuf = PathBuf::from("/opt/homebrew/bin/djpeg");
+    if homebrew.exists() {
+        return Some(homebrew);
+    }
+    Command::new("which")
+        .arg("djpeg")
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| PathBuf::from(String::from_utf8_lossy(&o.stdout).trim().to_string()))
+}
+
+/// Parse a binary PPM (P6) file and return (width, height, rgb_pixels).
+fn parse_ppm(data: &[u8]) -> (usize, usize, Vec<u8>) {
+    assert!(data.len() > 2, "PPM data too small");
+    assert_eq!(&data[0..2], b"P6", "expected P6 (binary PPM) magic");
+
+    let mut idx: usize = 2;
+    idx = skip_ws_comments(data, idx);
+    let (width, next) = read_number(data, idx);
+    idx = skip_ws_comments(data, next);
+    let (height, next) = read_number(data, idx);
+    idx = skip_ws_comments(data, next);
+    let (_maxval, next) = read_number(data, idx);
+    idx = next + 1;
+
+    let expected_len: usize = width * height * 3;
+    assert!(data.len() >= idx + expected_len, "PPM pixel data too short");
+    (width, height, data[idx..idx + expected_len].to_vec())
+}
+
+fn skip_ws_comments(data: &[u8], mut idx: usize) -> usize {
+    loop {
+        while idx < data.len() && data[idx].is_ascii_whitespace() {
+            idx += 1;
+        }
+        if idx < data.len() && data[idx] == b'#' {
+            while idx < data.len() && data[idx] != b'\n' {
+                idx += 1;
+            }
+        } else {
+            break;
+        }
+    }
+    idx
+}
+
+fn read_number(data: &[u8], idx: usize) -> (usize, usize) {
+    let mut end: usize = idx;
+    while end < data.len() && data[end].is_ascii_digit() {
+        end += 1;
+    }
+    let val: usize = std::str::from_utf8(&data[idx..end])
+        .expect("invalid UTF-8")
+        .parse()
+        .expect("parse number failed");
+    (val, end)
+}
+
+/// Cross-validate force_baseline encoder option against C djpeg.
+///
+/// Encodes a small image with `force_baseline(true)` and quality 50, then:
+/// 1. Verifies all quantization table values in the JPEG are <= 255 (baseline requirement).
+/// 2. Decodes with C djpeg and Rust, comparing output pixel-by-pixel (diff=0).
+#[test]
+fn c_djpeg_cross_validation_force_baseline() {
+    let djpeg: PathBuf = match djpeg_path() {
+        Some(p) => p,
+        None => {
+            eprintln!("SKIP: djpeg not found");
+            return;
+        }
+    };
+
+    // Encode a 16x16 image with force_baseline(true) at quality 50
+    let width: usize = 16;
+    let height: usize = 16;
+    let mut pixels: Vec<u8> = Vec::with_capacity(width * height * 3);
+    for y in 0..height {
+        for x in 0..width {
+            pixels.push(((x * 16 + y * 8) % 256) as u8);
+            pixels.push(((y * 16 + 64) % 256) as u8);
+            pixels.push(((x * 8 + y * 16 + 128) % 256) as u8);
+        }
+    }
+
+    let jpeg: Vec<u8> = Encoder::new(&pixels, width, height, PixelFormat::Rgb)
+        .quality(50)
+        .force_baseline(true)
+        .encode()
+        .unwrap_or_else(|e| panic!("Rust encode with force_baseline failed: {e}"));
+
+    // Verify all DQT values <= 255 (baseline constraint).
+    // DQT marker = 0xFF 0xDB, followed by 2-byte length, then table entries.
+    // 8-bit precision tables (baseline): precision nibble = 0, values are 1 byte each.
+    verify_quant_tables_baseline(&jpeg);
+
+    // Decode with Rust
+    let rust_img = decompress(&jpeg)
+        .unwrap_or_else(|e| panic!("Rust decode of force_baseline JPEG failed: {e}"));
+    assert_eq!(rust_img.width, width);
+    assert_eq!(rust_img.height, height);
+
+    // Decode with C djpeg
+    let pid: u32 = std::process::id();
+    let tmp_jpg: PathBuf = std::env::temp_dir().join(format!("ljt_baseline_{pid}.jpg"));
+    let tmp_ppm: PathBuf = std::env::temp_dir().join(format!("ljt_baseline_{pid}.ppm"));
+    std::fs::write(&tmp_jpg, &jpeg).expect("write temp JPEG");
+
+    let output = Command::new(&djpeg)
+        .arg("-ppm")
+        .arg("-outfile")
+        .arg(&tmp_ppm)
+        .arg(&tmp_jpg)
+        .output()
+        .expect("failed to run djpeg");
+
+    let _ = std::fs::remove_file(&tmp_jpg);
+
+    assert!(
+        output.status.success(),
+        "djpeg failed on force_baseline JPEG: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let ppm_data: Vec<u8> = std::fs::read(&tmp_ppm).expect("read djpeg PPM output");
+    let _ = std::fs::remove_file(&tmp_ppm);
+
+    let (c_w, c_h, c_pixels) = parse_ppm(&ppm_data);
+
+    assert_eq!(rust_img.width, c_w, "width mismatch");
+    assert_eq!(rust_img.height, c_h, "height mismatch");
+    assert_eq!(rust_img.data.len(), c_pixels.len(), "data length mismatch");
+
+    // Compare Rust vs C decode output: diff must be exactly 0
+    let max_diff: u8 = rust_img
+        .data
+        .iter()
+        .zip(c_pixels.iter())
+        .map(|(&a, &b)| (a as i16 - b as i16).unsigned_abs() as u8)
+        .max()
+        .unwrap_or(0);
+    assert_eq!(
+        max_diff, 0,
+        "Rust vs C djpeg max_diff={} for force_baseline JPEG (must be 0)",
+        max_diff
+    );
+}
+
+/// Scan the raw JPEG bitstream for DQT markers and verify all quantization
+/// table values are <= 255 (the baseline JPEG constraint).
+fn verify_quant_tables_baseline(jpeg: &[u8]) {
+    let mut i: usize = 0;
+    while i + 1 < jpeg.len() {
+        if jpeg[i] != 0xFF {
+            i += 1;
+            continue;
+        }
+        if jpeg[i + 1] == 0xDB {
+            // DQT marker found
+            let seg_len: usize = ((jpeg[i + 2] as usize) << 8) | (jpeg[i + 3] as usize);
+            let seg_end: usize = i + 2 + seg_len;
+            let mut pos: usize = i + 4;
+            while pos < seg_end {
+                let precision_and_id: u8 = jpeg[pos];
+                let precision: u8 = precision_and_id >> 4; // 0 = 8-bit, 1 = 16-bit
+                pos += 1;
+                if precision == 0 {
+                    // 8-bit precision: 64 bytes, each must be <= 255 (trivially true for u8)
+                    for j in 0..64 {
+                        assert!(pos + j < seg_end, "DQT segment truncated at entry {j}");
+                        // 8-bit values are inherently <= 255
+                    }
+                    pos += 64;
+                } else {
+                    // 16-bit precision: 64 x 2 bytes (big-endian), each must be <= 255
+                    // for baseline compatibility
+                    for j in 0..64 {
+                        let val: u16 =
+                            ((jpeg[pos + j * 2] as u16) << 8) | (jpeg[pos + j * 2 + 1] as u16);
+                        assert!(
+                            val <= 255,
+                            "DQT value {} at index {} exceeds baseline limit of 255",
+                            val,
+                            j
+                        );
+                    }
+                    pos += 128;
+                }
+            }
+            i = seg_end;
+        } else {
+            i += 1;
+        }
+    }
 }
