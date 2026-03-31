@@ -252,10 +252,9 @@ fn c_djpeg_scaled_decode_diff_zero() {
     let input_jpg = tmp_dir.join("scale_decode_test_input.jpg");
     std::fs::write(&input_jpg, jpeg_data).expect("failed to write temp JPEG");
 
-    // Only 1/1 (full scale) is verified diff=0 against C djpeg.
-    // Scaled decoding (1/2, 1/4, 1/8) uses different IDCT kernels that
-    // don't yet match C's output. Tested separately as #[ignore].
-    let scale_factors: &[(u32, u32)] = &[(1, 1)];
+    // All scale factors (1/1, 1/2, 1/4, 1/8) verified diff=0 against C djpeg.
+    // Per-component IDCT sizes match C libjpeg-turbo's jpeg_calc_output_dimensions.
+    let scale_factors: &[(u32, u32)] = &[(1, 1), (1, 2), (1, 4), (1, 8)];
 
     for &(num, denom) in scale_factors {
         // --- Rust decode ---
@@ -324,10 +323,9 @@ fn c_djpeg_scaled_decode_diff_zero() {
     let _ = std::fs::remove_file(&input_jpg);
 }
 
-/// Scaled decode (1/2, 1/4, 1/8) vs C djpeg — currently differs due to
-/// scaled IDCT kernel differences.
+/// Scaled decode (1/2, 1/4, 1/8) vs C djpeg — per-component IDCT sizes
+/// match C libjpeg-turbo's jpeg_calc_output_dimensions, producing diff=0.
 #[test]
-#[ignore = "Scaled IDCT (1/2, 1/4, 1/8) does not yet match C djpeg output"]
 fn c_djpeg_scaled_decode_half_quarter_eighth_diff_zero() {
     let djpeg = match djpeg_path() {
         Some(p) => p,

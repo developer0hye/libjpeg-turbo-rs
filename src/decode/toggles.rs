@@ -68,7 +68,7 @@ pub fn decode_with_colorspace_override(
     out_width: usize,
     out_height: usize,
     mcus_x: usize,
-    block_size: usize,
+    comp_block_sizes: &[usize],
     icc_profile: Option<Vec<u8>>,
     exif_data: Option<Vec<u8>>,
     comment: Option<String>,
@@ -78,7 +78,8 @@ pub fn decode_with_colorspace_override(
 ) -> Result<Image> {
     match target_cs {
         ColorSpace::Grayscale => {
-            let cw: usize = mcus_x * frame.components[0].horizontal_sampling as usize * block_size;
+            let cw: usize =
+                mcus_x * frame.components[0].horizontal_sampling as usize * comp_block_sizes[0];
             let mut data: Vec<u8> = Vec::with_capacity(out_width * out_height);
             for y in 0..out_height {
                 data.extend_from_slice(&component_planes[0][y * cw..y * cw + out_width]);
@@ -103,12 +104,14 @@ pub fn decode_with_colorspace_override(
                     "YCbCr output requires 3+ components".into(),
                 ));
             }
-            let cw: usize = mcus_x * frame.components[0].horizontal_sampling as usize * block_size;
-            let cbw: usize = mcus_x * frame.components[1].horizontal_sampling as usize * block_size;
-            let hf: usize = frame.components[0].horizontal_sampling as usize
-                / frame.components[1].horizontal_sampling as usize;
-            let vf: usize = frame.components[0].vertical_sampling as usize
-                / frame.components[1].vertical_sampling as usize;
+            let cw: usize =
+                mcus_x * frame.components[0].horizontal_sampling as usize * comp_block_sizes[0];
+            let cbw: usize =
+                mcus_x * frame.components[1].horizontal_sampling as usize * comp_block_sizes[1];
+            // Effective upsample factors considering per-component IDCT sizes
+            let hf: usize = cw / cbw;
+            let vf: usize = (frame.components[0].vertical_sampling as usize * comp_block_sizes[0])
+                / (frame.components[1].vertical_sampling as usize * comp_block_sizes[1]);
             let mut data: Vec<u8> = Vec::with_capacity(out_width * out_height * 3);
             for y in 0..out_height {
                 for x in 0..out_width {
