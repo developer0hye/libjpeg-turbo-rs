@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 use std::process::Command;
 
-use libjpeg_turbo_rs::{decompress, decompress_to, Encoder, PixelFormat};
+use libjpeg_turbo_rs::{compress, decompress, decompress_to, Encoder, PixelFormat, Subsampling};
 
 #[test]
 fn pixel_format_bytes_per_pixel() {
@@ -557,4 +557,143 @@ fn c_djpeg_pixel_formats_diff_zero() {
             );
         }
     }
+}
+
+/// Cross-validate Rust BGR decode against C djpeg -bmp output.
+///
+/// C `djpeg -bmp` outputs a Windows BMP file with BGR pixel order (bottom-up).
+/// We decode the same JPEG with Rust `decompress_to(PixelFormat::Bgr)` and
+/// compare the raw BGR pixel data (after flipping BMP rows to top-down order).
+/// Target: diff=0.
+#[test]
+fn c_djpeg_cross_validation_bmp_bgr() {
+    let djpeg: PathBuf = match djpeg_path() {
+        Some(p) => p,
+        None => {
+            eprintln!("SKIP: djpeg not found");
+            return;
+        }
+    };
+
+    // Create a 32x32 test JPEG with varied content
+    let width: usize = 32;
+    let height: usize = 32;
+    let mut pixels: Vec<u8> = Vec::with_capacity(width * height * 3);
+    for y in 0..height {
+        for x in 0..width {
+            pixels.push(((x * 8 + y * 4) % 256) as u8); // R
+            pixels.push(((y * 8 + 64) % 256) as u8); // G
+            pixels.push(((x * 4 + y * 8 + 128) % 256) as u8); // B
+        }
+    }
+    let jpeg_data: Vec<u8> = compress(
+        &pixels,
+        width,
+        height,
+        PixelFormat::Rgb,
+        100,
+        Subsampling::S444,
+    )
+    .expect("compress must succeed");
+
+    let pid: u32 = std::process::id();
+    let tmp_jpg: PathBuf = std::env::temp_dir().join(format!("ljt_bgr_bmp_{pid}.jpg"));
+    let tmp_bmp: PathBuf = std::env::temp_dir().join(format!("ljt_bgr_bmp_{pid}.bmp"));
+
+    std::fs::write(&tmp_jpg, &jpeg_data).expect("write temp JPEG");
+
+    // Decode with C djpeg -bmp
+    let output = Command::new(&djpeg)
+        .arg("-bmp")
+        .arg("-outfile")
+        .arg(&tmp_bmp)
+        .arg(&tmp_jpg)
+        .output()
+        .expect("failed to run djpeg");
+
+    let _ = std::fs::remove_file(&tmp_jpg);
+
+    assert!(
+        output.status.success(),
+        "djpeg -bmp failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let bmp_data: Vec<u8> = std::fs::read(&tmp_bmp).expect("read djpeg BMP output");
+    let _ = std::fs::remove_file(&tmp_bmp);
+
+    // Parse BMP header to extract raw BGR pixels
+    let (bmp_w, bmp_h, bmp_pixels) = parse_bmp_bgr(&bmp_data);
+
+    // Decode with Rust to BGR
+    let rust_img = decompress_to(&jpeg_data, PixelFormat::Bgr)
+        .unwrap_or_else(|e| panic!("Rust decompress_to BGR failed: {e}"));
+
+    assert_eq!(rust_img.width, bmp_w, "width mismatch Rust vs C BMP");
+    assert_eq!(rust_img.height, bmp_h, "height mismatch Rust vs C BMP");
+    assert_eq!(
+        rust_img.data.len(),
+        bmp_pixels.len(),
+        "BGR data length mismatch: Rust={} vs C={}",
+        rust_img.data.len(),
+        bmp_pixels.len()
+    );
+
+    // Compare BGR pixels: diff must be exactly 0
+    let max_diff: u8 = rust_img
+        .data
+        .iter()
+        .zip(bmp_pixels.iter())
+        .map(|(&a, &b)| (a as i16 - b as i16).unsigned_abs() as u8)
+        .max()
+        .unwrap_or(0);
+    assert_eq!(
+        max_diff, 0,
+        "Rust BGR vs C djpeg BMP max_diff={} (must be 0)",
+        max_diff
+    );
+}
+
+/// Parse a Windows BMP file and extract raw BGR pixel data in top-down row order.
+///
+/// BMP stores rows bottom-up by default, so we flip them to match top-down order.
+/// Returns (width, height, bgr_pixels).
+fn parse_bmp_bgr(data: &[u8]) -> (usize, usize, Vec<u8>) {
+    assert!(data.len() > 54, "BMP data too short for header");
+    assert_eq!(&data[0..2], b"BM", "not a BMP file");
+
+    // BMP info header starts at offset 14
+    let bmp_width: i32 = i32::from_le_bytes([data[18], data[19], data[20], data[21]]);
+    let bmp_height: i32 = i32::from_le_bytes([data[22], data[23], data[24], data[25]]);
+    let bits_per_pixel: u16 = u16::from_le_bytes([data[28], data[29]]);
+    let pixel_offset: u32 = u32::from_le_bytes([data[10], data[11], data[12], data[13]]);
+
+    assert_eq!(
+        bits_per_pixel, 24,
+        "expected 24-bit BMP, got {bits_per_pixel}-bit"
+    );
+
+    let w: usize = bmp_width.unsigned_abs() as usize;
+    // Positive height means bottom-up row order
+    let bottom_up: bool = bmp_height > 0;
+    let h: usize = bmp_height.unsigned_abs() as usize;
+
+    // BMP rows are padded to 4-byte boundaries
+    let row_stride: usize = (w * 3 + 3) & !3;
+    let pix_start: usize = pixel_offset as usize;
+
+    assert!(
+        data.len() >= pix_start + row_stride * h,
+        "BMP pixel data truncated"
+    );
+
+    let mut bgr_pixels: Vec<u8> = Vec::with_capacity(w * h * 3);
+    for row in 0..h {
+        // Map to the correct BMP row (bottom-up or top-down)
+        let bmp_row: usize = if bottom_up { h - 1 - row } else { row };
+        let row_start: usize = pix_start + bmp_row * row_stride;
+        bgr_pixels.extend_from_slice(&data[row_start..row_start + w * 3]);
+    }
+
+    (w, h, bgr_pixels)
 }
