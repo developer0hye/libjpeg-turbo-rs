@@ -827,22 +827,12 @@ fn c_cross_validation_c_lossless_rust_decode() {
 
         // Decode the C-encoded JPEG with Rust
         let jpeg_data: Vec<u8> = std::fs::read(tmp_jpg.path()).expect("read cjpeg output");
-        let img: Image16 = match decompress_lossless_arbitrary(&jpeg_data) {
-            Ok(img) => img,
-            Err(e) => {
-                // TODO(interop): precision 16 C-encoded lossless JPEG uses Huffman
-                // coding conventions that the Rust decoder does not yet handle.
-                // Rust-to-Rust roundtrip at precision 16 works; only C interop is
-                // broken. Do not silently skip -- print a loud warning so this is
-                // visible in test output.
-                eprintln!(
-                    "WARNING: Rust decompress of C lossless JPEG at precision {} failed: {} \
-                     (known C interop limitation, not a silent skip)",
-                    precision, e
-                );
-                continue;
-            }
-        };
+        let img: Image16 = decompress_lossless_arbitrary(&jpeg_data).unwrap_or_else(|e| {
+            panic!(
+                "Rust decode of C lossless JPEG at precision {} failed: {}",
+                precision, e
+            )
+        });
 
         assert_eq!(img.width, w, "precision {}: width mismatch", precision);
         assert_eq!(img.height, h, "precision {}: height mismatch", precision);

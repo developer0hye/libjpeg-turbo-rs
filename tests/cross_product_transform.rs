@@ -1745,8 +1745,10 @@ fn c_jpegtran_cross_validation_transform_diff_zero() {
     // -----------------------------------------------------------------------
     // Group 1: All 6 subsamplings x all 8 transform ops (basic, no flags)
     // TODO(transform): S411 and S441 transforms produce different pixel output
-    // than C jpegtran (max_diff up to 173). These rare subsamplings need
-    // investigation for transform coefficient rearrangement correctness.
+    // than C jpegtran (max_diff up to 173). C's do_flip_h (transupp.c) uses
+    // MCU-aware iteration with h_samp_factor/v_samp_factor strides, which
+    // differs from Rust's block-by-block approach for these rare subsamplings.
+    // The coefficient block rearrangement needs MCU-chunked iteration to match.
     // -----------------------------------------------------------------------
     let known_good_subsamplings: [Subsampling; 4] = [
         Subsampling::S444,
@@ -1871,16 +1873,15 @@ fn c_jpegtran_cross_validation_transform_diff_zero() {
     }
 
     // -----------------------------------------------------------------------
-    // Group 5: S444 x trim-applicable ops with trim=true (unaligned image)
-    // TODO(trim): Rust trim produces different output dimensions than C jpegtran
-    // for dimension-swapping transforms (rot90, rot270). Only test non-swapping
-    // transforms until the trim implementation is fixed.
+    // Group 5: S444 x 6 trim-applicable ops with trim=true (unaligned image)
     // -----------------------------------------------------------------------
     {
-        let trim_ops: [TransformOp; 4] = [
+        let trim_ops: [TransformOp; 6] = [
             TransformOp::HFlip,
             TransformOp::VFlip,
+            TransformOp::Rot90,
             TransformOp::Rot180,
+            TransformOp::Rot270,
             TransformOp::Transverse,
         ];
         let source: Vec<u8> = make_unaligned_jpeg(Subsampling::S444);
@@ -1910,12 +1911,12 @@ fn c_jpegtran_cross_validation_transform_diff_zero() {
     }
 
     // -----------------------------------------------------------------------
-    // Group 6: Crop transforms — SKIPPED
-    // TODO(crop): Rust crop transform uses exact requested dimensions while
-    // C jpegtran extends crop to MCU boundaries (e.g., crop 14x14+23+23 on
-    // 48x48 S444 → C gives 21x21 because X rounds down to MCU boundary 16,
-    // extending width to cover the full region). The Rust crop semantics need
-    // to be aligned with C jpegtran behavior before cross-validation.
+    // Group 6: Crop transforms — skipped for pixel comparison.
+    // Crop dimension alignment is now correct (MCU boundary extension matches
+    // C jpegtran), but write_coefficients re-encodes with different Huffman
+    // tables than the source JPEG, producing different decoded pixel values
+    // in the non-MCU-aligned border region. The cross_check_transform.rs
+    // tests validate crop with MCU-aligned images (diff=0 there).
     // -----------------------------------------------------------------------
 
     // -----------------------------------------------------------------------

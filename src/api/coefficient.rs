@@ -551,13 +551,27 @@ pub fn transform_jpeg_with_options(data: &[u8], options: &TransformOptions) -> R
     }
 
     // TRIM: discard partial iMCU blocks at edges.
+    // For dimension-swapping transforms (rot90, rot270), C jpegtran only
+    // trims selectively: rot90 trims what becomes the output width (source
+    // height), rot270 trims what becomes the output height (source width).
     if options.trim && (has_partial_width || has_partial_height) {
-        let trimmed_w: usize = if has_partial_width {
+        let trim_width: bool = match op {
+            // ROT90: source height → output width, only trim source height
+            TransformOp::Rot90 => false,
+            _ => has_partial_width,
+        };
+        let trim_height: bool = match op {
+            // ROT270: source width → output height, only trim source width
+            TransformOp::Rot270 => false,
+            _ => has_partial_height,
+        };
+
+        let trimmed_w: usize = if trim_width {
             (coeffs.width as usize / imcu_w) * imcu_w
         } else {
             coeffs.width as usize
         };
-        let trimmed_h: usize = if has_partial_height {
+        let trimmed_h: usize = if trim_height {
             (coeffs.height as usize / imcu_h) * imcu_h
         } else {
             coeffs.height as usize
@@ -594,17 +608,29 @@ pub fn transform_jpeg_with_options(data: &[u8], options: &TransformOptions) -> R
     }
 
     // CROP: crop coefficient arrays to the specified region.
+    // Matches C jpegtran semantics: X/Y are rounded DOWN to iMCU boundaries,
+    // and output dimensions are extended to fully cover the requested region.
     if let Some(crop) = &options.crop {
-        // Align crop region to iMCU boundaries.
-        let crop_x_blocks: usize = crop.x / 8;
-        let crop_y_blocks: usize = crop.y / 8;
-        let crop_w: usize = crop.width.min(coeffs.width as usize - crop.x);
-        let crop_h: usize = crop.height.min(coeffs.height as usize - crop.y);
-        let crop_w_blocks: usize = crop_w.div_ceil(8);
-        let crop_h_blocks: usize = crop_h.div_ceil(8);
+        let imcu_w: usize = max_h as usize * 8;
+        let imcu_h: usize = max_v as usize * 8;
+        let remainder_x: usize = crop.x % imcu_w;
+        let remainder_y: usize = crop.y % imcu_h;
 
-        coeffs.width = crop_w.min(crop_w_blocks * 8) as u16;
-        coeffs.height = crop_h.min(crop_h_blocks * 8) as u16;
+        // Block-level offsets (rounded down to iMCU boundary)
+        let crop_x_blocks: usize = crop.x / imcu_w * max_h as usize;
+        let crop_y_blocks: usize = crop.y / imcu_h * max_v as usize;
+
+        // Extend output size to cover the full requested region from the
+        // MCU-aligned start position.
+        let out_w: usize =
+            (crop.width + remainder_x).min(coeffs.width as usize - (crop.x - remainder_x));
+        let out_h: usize =
+            (crop.height + remainder_y).min(coeffs.height as usize - (crop.y - remainder_y));
+        let crop_w_blocks: usize = out_w.div_ceil(8);
+        let crop_h_blocks: usize = out_h.div_ceil(8);
+
+        coeffs.width = out_w as u16;
+        coeffs.height = out_h as u16;
 
         for comp in &mut coeffs.components {
             let comp_crop_x: usize = crop_x_blocks * comp.h_sampling as usize / max_h;
