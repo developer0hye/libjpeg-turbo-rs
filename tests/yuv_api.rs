@@ -2,6 +2,10 @@
 ///
 /// These tests cover the full set of `encode_yuv`, `decode_yuv`,
 /// `compress_from_yuv`, `decompress_to_yuv` functions plus buffer size helpers.
+use std::path::{Path, PathBuf};
+use std::process::Command;
+use std::sync::atomic::{AtomicU64, Ordering};
+
 use libjpeg_turbo_rs::api::yuv;
 use libjpeg_turbo_rs::{
     compress, decompress, yuv_buf_size, yuv_plane_height, yuv_plane_size, yuv_plane_width,
@@ -528,4 +532,345 @@ fn encode_decode_yuv_non_aligned_dimensions() {
     )
     .unwrap();
     assert_eq!(decoded.len(), width * height * 3);
+}
+
+// ──────────────────────────────────────────────
+// C djpeg cross-validation helpers
+// ──────────────────────────────────────────────
+
+/// Path to C djpeg binary, or `None` if not installed.
+fn djpeg_path() -> Option<PathBuf> {
+    let homebrew: PathBuf = PathBuf::from("/opt/homebrew/bin/djpeg");
+    if homebrew.exists() {
+        return Some(homebrew);
+    }
+    Command::new("which")
+        .arg("djpeg")
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| PathBuf::from(String::from_utf8_lossy(&o.stdout).trim().to_string()))
+}
+
+/// Global atomic counter for unique temp file names across parallel tests.
+static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+/// Create a unique temp file path.
+fn temp_path(name: &str) -> PathBuf {
+    let counter: u64 = TEMP_COUNTER.fetch_add(1, Ordering::Relaxed);
+    let pid: u32 = std::process::id();
+    std::env::temp_dir().join(format!("ljt_yuv_{}_{:04}_{}", pid, counter, name))
+}
+
+/// RAII temp file that deletes on drop.
+struct TempFile {
+    path: PathBuf,
+}
+
+impl TempFile {
+    fn new(name: &str) -> Self {
+        Self {
+            path: temp_path(name),
+        }
+    }
+
+    fn path(&self) -> &Path {
+        &self.path
+    }
+}
+
+impl Drop for TempFile {
+    fn drop(&mut self) {
+        std::fs::remove_file(&self.path).ok();
+    }
+}
+
+/// Parse a binary PPM (P6) file and return `(width, height, data)`.
+/// `data` contains raw RGB bytes.
+fn parse_ppm(path: &Path) -> (usize, usize, Vec<u8>) {
+    let raw: Vec<u8> = std::fs::read(path).expect("failed to read PPM file");
+    assert!(raw.len() > 3, "PPM too short");
+    assert_eq!(&raw[0..2], b"P6", "not a P6 PPM");
+    let mut idx: usize = 2;
+    idx = skip_whitespace_and_comments(&raw, idx);
+    let (width, next) = read_ascii_number(&raw, idx);
+    idx = skip_whitespace_and_comments(&raw, next);
+    let (height, next) = read_ascii_number(&raw, idx);
+    idx = skip_whitespace_and_comments(&raw, next);
+    let (_maxval, next) = read_ascii_number(&raw, idx);
+    // Exactly one whitespace byte after maxval before binary data
+    idx = next + 1;
+    let data: Vec<u8> = raw[idx..].to_vec();
+    assert_eq!(
+        data.len(),
+        width * height * 3,
+        "PPM pixel data length mismatch: expected {}, got {}",
+        width * height * 3,
+        data.len()
+    );
+    (width, height, data)
+}
+
+fn skip_whitespace_and_comments(data: &[u8], mut idx: usize) -> usize {
+    loop {
+        while idx < data.len() && data[idx].is_ascii_whitespace() {
+            idx += 1;
+        }
+        if idx < data.len() && data[idx] == b'#' {
+            while idx < data.len() && data[idx] != b'\n' {
+                idx += 1;
+            }
+        } else {
+            break;
+        }
+    }
+    idx
+}
+
+fn read_ascii_number(data: &[u8], idx: usize) -> (usize, usize) {
+    let start: usize = idx;
+    let mut end: usize = idx;
+    while end < data.len() && data[end].is_ascii_digit() {
+        end += 1;
+    }
+    let val: usize = std::str::from_utf8(&data[start..end])
+        .unwrap()
+        .parse()
+        .unwrap();
+    (val, end)
+}
+
+// ──────────────────────────────────────────────
+// 8. C djpeg cross-validation: YUV compress path
+// ──────────────────────────────────────────────
+
+/// Validates that the RGB → YUV → JPEG path produces output identical
+/// to what Rust's standard decoder produces, and that C djpeg can decode
+/// the result with diff=0 vs Rust decode.
+#[test]
+fn c_djpeg_cross_validation_yuv_compress() {
+    let djpeg: PathBuf = match djpeg_path() {
+        Some(p) => p,
+        None => {
+            eprintln!("SKIP: djpeg not found");
+            return;
+        }
+    };
+
+    let width: usize = 48;
+    let height: usize = 48;
+    let quality: u8 = 95;
+
+    for &subsampling in &[Subsampling::S444, Subsampling::S422, Subsampling::S420] {
+        let pixels: Vec<u8> = gradient_rgb(width, height);
+
+        // RGB → YUV (packed)
+        let yuv_packed: Vec<u8> =
+            yuv::encode_yuv(&pixels, width, height, PixelFormat::Rgb, subsampling)
+                .expect("encode_yuv failed");
+
+        // YUV → JPEG
+        let jpeg_data: Vec<u8> =
+            yuv::compress_from_yuv(&yuv_packed, width, height, subsampling, quality)
+                .expect("compress_from_yuv failed");
+
+        // Verify JPEG starts with SOI marker
+        assert_eq!(jpeg_data[0], 0xFF);
+        assert_eq!(jpeg_data[1], 0xD8);
+
+        // Decode with Rust
+        let rust_image = decompress(&jpeg_data).expect("Rust decompress failed");
+        assert_eq!(rust_image.width, width);
+        assert_eq!(rust_image.height, height);
+
+        // Decode with C djpeg
+        let label: &str = match subsampling {
+            Subsampling::S444 => "444",
+            Subsampling::S422 => "422",
+            Subsampling::S420 => "420",
+            _ => "other",
+        };
+        let tmp_jpg: TempFile = TempFile::new(&format!("yuv_compress_{}.jpg", label));
+        let tmp_ppm: TempFile = TempFile::new(&format!("yuv_compress_{}.ppm", label));
+        std::fs::write(tmp_jpg.path(), &jpeg_data).expect("write tmp jpg");
+
+        let output = Command::new(&djpeg)
+            .arg("-ppm")
+            .arg("-outfile")
+            .arg(tmp_ppm.path())
+            .arg(tmp_jpg.path())
+            .output()
+            .expect("failed to run djpeg");
+
+        assert!(
+            output.status.success(),
+            "djpeg failed for subsampling {}: {}",
+            label,
+            String::from_utf8_lossy(&output.stderr)
+        );
+
+        let (c_width, c_height, c_pixels) = parse_ppm(tmp_ppm.path());
+        assert_eq!(c_width, width, "C djpeg width mismatch for {}", label);
+        assert_eq!(c_height, height, "C djpeg height mismatch for {}", label);
+
+        // Compare Rust decode vs C djpeg decode: expect diff=0
+        // Both decoders are processing the same JPEG, so output must match exactly.
+        let rust_pixels: &[u8] = &rust_image.data;
+        assert_eq!(
+            rust_pixels.len(),
+            c_pixels.len(),
+            "pixel buffer size mismatch for {}",
+            label
+        );
+
+        let max_diff: u8 = rust_pixels
+            .iter()
+            .zip(c_pixels.iter())
+            .map(|(&a, &b)| (a as i16 - b as i16).unsigned_abs() as u8)
+            .max()
+            .unwrap_or(0);
+
+        assert_eq!(
+            max_diff, 0,
+            "Rust vs C djpeg decode diff={} for subsampling {} (expected 0)",
+            max_diff, label
+        );
+    }
+}
+
+// ──────────────────────────────────────────────
+// 9. C djpeg cross-validation: YUV decompress path
+// ──────────────────────────────────────────────
+
+/// Validates that JPEG → YUV → JPEG roundtrip produces output that
+/// C djpeg can decode. Compares both the original and re-encoded JPEG
+/// via C djpeg to confirm C-compatibility of the YUV decompress path.
+#[test]
+fn c_djpeg_cross_validation_yuv_decompress() {
+    let djpeg: PathBuf = match djpeg_path() {
+        Some(p) => p,
+        None => {
+            eprintln!("SKIP: djpeg not found");
+            return;
+        }
+    };
+
+    let width: usize = 48;
+    let height: usize = 48;
+    let quality: u8 = 95;
+
+    for &subsampling in &[Subsampling::S444, Subsampling::S422, Subsampling::S420] {
+        let pixels: Vec<u8> = gradient_rgb(width, height);
+
+        // Create original JPEG via standard compress
+        let original_jpeg: Vec<u8> = compress(
+            &pixels,
+            width,
+            height,
+            PixelFormat::Rgb,
+            quality,
+            subsampling,
+        )
+        .expect("compress failed");
+
+        // Decompress JPEG to YUV
+        let (yuv_buf, dec_w, dec_h, dec_sub) =
+            yuv::decompress_to_yuv(&original_jpeg).expect("decompress_to_yuv failed");
+        assert_eq!(dec_w, width);
+        assert_eq!(dec_h, height);
+        assert_eq!(dec_sub, subsampling);
+
+        // Re-compress from YUV back to JPEG
+        let reencoded_jpeg: Vec<u8> =
+            yuv::compress_from_yuv(&yuv_buf, dec_w, dec_h, dec_sub, quality)
+                .expect("compress_from_yuv failed");
+
+        let label: &str = match subsampling {
+            Subsampling::S444 => "444",
+            Subsampling::S422 => "422",
+            Subsampling::S420 => "420",
+            _ => "other",
+        };
+
+        // Decode original JPEG with C djpeg
+        let tmp_orig_jpg: TempFile = TempFile::new(&format!("yuv_decomp_orig_{}.jpg", label));
+        let tmp_orig_ppm: TempFile = TempFile::new(&format!("yuv_decomp_orig_{}.ppm", label));
+        std::fs::write(tmp_orig_jpg.path(), &original_jpeg).expect("write tmp orig jpg");
+
+        let output_orig = Command::new(&djpeg)
+            .arg("-ppm")
+            .arg("-outfile")
+            .arg(tmp_orig_ppm.path())
+            .arg(tmp_orig_jpg.path())
+            .output()
+            .expect("failed to run djpeg on original");
+
+        assert!(
+            output_orig.status.success(),
+            "djpeg failed on original for {}: {}",
+            label,
+            String::from_utf8_lossy(&output_orig.stderr)
+        );
+
+        let (orig_c_w, orig_c_h, orig_c_pixels) = parse_ppm(tmp_orig_ppm.path());
+        assert_eq!(orig_c_w, width);
+        assert_eq!(orig_c_h, height);
+
+        // Decode re-encoded JPEG with C djpeg
+        let tmp_reenc_jpg: TempFile = TempFile::new(&format!("yuv_decomp_reenc_{}.jpg", label));
+        let tmp_reenc_ppm: TempFile = TempFile::new(&format!("yuv_decomp_reenc_{}.ppm", label));
+        std::fs::write(tmp_reenc_jpg.path(), &reencoded_jpeg).expect("write tmp reenc jpg");
+
+        let output_reenc = Command::new(&djpeg)
+            .arg("-ppm")
+            .arg("-outfile")
+            .arg(tmp_reenc_ppm.path())
+            .arg(tmp_reenc_jpg.path())
+            .output()
+            .expect("failed to run djpeg on re-encoded");
+
+        assert!(
+            output_reenc.status.success(),
+            "djpeg failed on re-encoded JPEG for {}: {}",
+            label,
+            String::from_utf8_lossy(&output_reenc.stderr)
+        );
+
+        let (reenc_c_w, reenc_c_h, reenc_c_pixels) = parse_ppm(tmp_reenc_ppm.path());
+        assert_eq!(reenc_c_w, width);
+        assert_eq!(reenc_c_h, height);
+
+        // Also decode re-encoded JPEG with Rust
+        let rust_reenc_image =
+            decompress(&reencoded_jpeg).expect("Rust decompress of re-encoded failed");
+        assert_eq!(rust_reenc_image.width, width);
+        assert_eq!(rust_reenc_image.height, height);
+
+        // Rust decode of re-encoded JPEG vs C djpeg decode of re-encoded JPEG: diff=0
+        let rust_reenc_pixels: &[u8] = &rust_reenc_image.data;
+        assert_eq!(
+            rust_reenc_pixels.len(),
+            reenc_c_pixels.len(),
+            "re-encoded pixel buffer size mismatch for {}",
+            label
+        );
+
+        let max_diff_reenc: u8 = rust_reenc_pixels
+            .iter()
+            .zip(reenc_c_pixels.iter())
+            .map(|(&a, &b)| (a as i16 - b as i16).unsigned_abs() as u8)
+            .max()
+            .unwrap_or(0);
+
+        assert_eq!(
+            max_diff_reenc, 0,
+            "Rust vs C djpeg decode of re-encoded JPEG: diff={} for {} (expected 0)",
+            max_diff_reenc, label
+        );
+
+        // Verify C djpeg can decode both original and re-encoded successfully
+        // (dimensions match, pixel counts match — quality may differ due to
+        // re-encoding, so we do not compare original vs re-encoded pixels)
+        assert_eq!(orig_c_pixels.len(), reenc_c_pixels.len());
+    }
 }
