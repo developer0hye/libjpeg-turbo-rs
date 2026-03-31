@@ -2546,7 +2546,12 @@ impl<'a> Decoder<'a> {
                 // When actual_cb_w <= 2, C's merged upsample uses box filter for the
                 // entire image (the NEON/SIMD fancy path doesn't kick in). Use box
                 // filter (fast_upsample equivalent) to match C exactly.
-                if !self.fast_upsample && h_factor == 2 && v_factor == 2 && actual_cb_w > 2 {
+                if !self.fast_upsample
+                    && h_factor == 2
+                    && v_factor == 2
+                    && actual_cb_w > 2
+                    && block_size == 8
+                {
                     // Row-streaming H2V2: fuse upsample + color convert to avoid
                     // allocating full-size cb_full/cr_full buffers (~4MB for 1080p).
                     // Process 2 output rows at a time, keeping data in L1/L2 cache.
@@ -2668,9 +2673,10 @@ impl<'a> Decoder<'a> {
                     cr_full.set_len(alloc_size);
                 }
 
-                // C's merged upsample uses box filter when actual_cb_w <= 2
-                // (the SIMD fancy path requires at least 3 chroma columns).
-                let use_box_filter: bool = self.fast_upsample || actual_cb_w <= 2;
+                // C's merged upsample uses box filter when:
+                // - actual_cb_w <= 2 (SIMD fancy requires >= 3 columns)
+                // - scaled decode (block_size < 8): C always uses box filter for scaled output
+                let use_box_filter: bool = self.fast_upsample || actual_cb_w <= 2 || block_size < 8;
 
                 if use_box_filter {
                     crate::decode::toggles::upsample_nearest(
