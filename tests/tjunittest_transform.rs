@@ -1,7 +1,11 @@
 /// Transform validation matrix tests.
+use std::path::{Path, PathBuf};
+use std::process::Command;
+use std::sync::atomic::{AtomicU64, Ordering};
+
 use libjpeg_turbo_rs::{
     compress, decompress, read_coefficients, transform, transform_jpeg_with_options,
-    write_coefficients, PixelFormat, Subsampling, TransformOp, TransformOptions,
+    write_coefficients, MarkerCopyMode, PixelFormat, Subsampling, TransformOp, TransformOptions,
 };
 
 fn gradient_rgb(width: usize, height: usize) -> Vec<u8> {
@@ -690,4 +694,618 @@ fn tjunittest_no_dimension_swap_hflip_vflip_rot180() {
         let img = decompress(&transform(&jpeg, op).unwrap()).unwrap();
         assert_eq!((img.width, img.height), (w, h), "{:?}", op);
     }
+}
+
+// ===========================================================================
+// C jpegtran cross-validation helpers
+// ===========================================================================
+
+fn jpegtran_path() -> Option<PathBuf> {
+    let homebrew: PathBuf = PathBuf::from("/opt/homebrew/bin/jpegtran");
+    if homebrew.exists() {
+        return Some(homebrew);
+    }
+    Command::new("which")
+        .arg("jpegtran")
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| PathBuf::from(String::from_utf8_lossy(&o.stdout).trim().to_string()))
+}
+
+fn djpeg_path() -> Option<PathBuf> {
+    let homebrew: PathBuf = PathBuf::from("/opt/homebrew/bin/djpeg");
+    if homebrew.exists() {
+        return Some(homebrew);
+    }
+    Command::new("which")
+        .arg("djpeg")
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| PathBuf::from(String::from_utf8_lossy(&o.stdout).trim().to_string()))
+}
+
+static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+fn temp_path_xv(name: &str) -> PathBuf {
+    let counter: u64 = TEMP_COUNTER.fetch_add(1, Ordering::Relaxed);
+    let pid: u32 = std::process::id();
+    std::env::temp_dir().join(format!("ljt_tjxform_{}_{:04}_{}", pid, counter, name))
+}
+
+struct TempFile {
+    path: PathBuf,
+}
+
+impl TempFile {
+    fn new(name: &str) -> Self {
+        Self {
+            path: temp_path_xv(name),
+        }
+    }
+    fn path(&self) -> &Path {
+        &self.path
+    }
+}
+
+impl Drop for TempFile {
+    fn drop(&mut self) {
+        std::fs::remove_file(&self.path).ok();
+    }
+}
+
+/// Parse a binary PNM file (P5 PGM or P6 PPM) and return `(width, height, pixel_data)`.
+/// For P5 (grayscale), pixel data is returned as-is (1 byte per pixel).
+/// For P6 (RGB), pixel data is returned as-is (3 bytes per pixel).
+fn parse_pnm(path: &Path) -> (usize, usize, Vec<u8>) {
+    let raw: Vec<u8> = std::fs::read(path).expect("failed to read PNM file");
+    assert!(raw.len() > 3, "PNM too short");
+    let magic: &[u8] = &raw[0..2];
+    let channels: usize = if magic == b"P6" {
+        3
+    } else if magic == b"P5" {
+        1
+    } else {
+        panic!(
+            "unsupported PNM magic: {:?} (expected P5 or P6)",
+            std::str::from_utf8(magic).unwrap_or("??")
+        );
+    };
+    let mut idx: usize = 2;
+    idx = ppm_skip_ws_comments(&raw, idx);
+    let (width, next) = ppm_read_number(&raw, idx);
+    idx = ppm_skip_ws_comments(&raw, next);
+    let (height, next) = ppm_read_number(&raw, idx);
+    idx = ppm_skip_ws_comments(&raw, next);
+    let (_maxval, next) = ppm_read_number(&raw, idx);
+    // One byte of whitespace after maxval before pixel data
+    idx = next + 1;
+    let data: Vec<u8> = raw[idx..].to_vec();
+    let expected: usize = width * height * channels;
+    assert_eq!(
+        data.len(),
+        expected,
+        "PNM pixel data length mismatch: expected {}x{}x{}={}, got {}",
+        width,
+        height,
+        channels,
+        expected,
+        data.len()
+    );
+    (width, height, data)
+}
+
+fn ppm_skip_ws_comments(data: &[u8], mut idx: usize) -> usize {
+    loop {
+        while idx < data.len() && data[idx].is_ascii_whitespace() {
+            idx += 1;
+        }
+        if idx < data.len() && data[idx] == b'#' {
+            while idx < data.len() && data[idx] != b'\n' {
+                idx += 1;
+            }
+        } else {
+            break;
+        }
+    }
+    idx
+}
+
+fn ppm_read_number(data: &[u8], idx: usize) -> (usize, usize) {
+    let mut end: usize = idx;
+    while end < data.len() && data[end].is_ascii_digit() {
+        end += 1;
+    }
+    let val: usize = std::str::from_utf8(&data[idx..end])
+        .unwrap()
+        .parse()
+        .unwrap();
+    (val, end)
+}
+
+/// Map TransformOp to jpegtran CLI arguments.
+fn jpegtran_args_for_op(op: TransformOp) -> Vec<String> {
+    match op {
+        TransformOp::None => vec![],
+        TransformOp::HFlip => vec!["-flip".to_string(), "horizontal".to_string()],
+        TransformOp::VFlip => vec!["-flip".to_string(), "vertical".to_string()],
+        TransformOp::Rot90 => vec!["-rotate".to_string(), "90".to_string()],
+        TransformOp::Rot180 => vec!["-rotate".to_string(), "180".to_string()],
+        TransformOp::Rot270 => vec!["-rotate".to_string(), "270".to_string()],
+        TransformOp::Transpose => vec!["-transpose".to_string()],
+        TransformOp::Transverse => vec!["-transverse".to_string()],
+    }
+}
+
+/// Generate RGB pixel data with a gradient pattern.
+fn gen_rgb(width: usize, height: usize) -> Vec<u8> {
+    let mut px: Vec<u8> = Vec::with_capacity(width * height * 3);
+    for y in 0..height {
+        for x in 0..width {
+            px.push(((x * 255) / width.max(1)) as u8);
+            px.push(((y * 255) / height.max(1)) as u8);
+            px.push((((x + y) * 127) / (width + height).max(1)) as u8);
+        }
+    }
+    px
+}
+
+// ===========================================================================
+// C jpegtran cross-validation test
+// ===========================================================================
+
+#[test]
+fn c_jpegtran_cross_validation_tjunittest_transform() {
+    let jpegtran: PathBuf = match jpegtran_path() {
+        Some(p) => p,
+        None => {
+            eprintln!("SKIP: jpegtran not found");
+            return;
+        }
+    };
+    let djpeg: PathBuf = match djpeg_path() {
+        Some(p) => p,
+        None => {
+            eprintln!("SKIP: djpeg not found");
+            return;
+        }
+    };
+
+    // Create source JPEG: 48x48, S444, quality 90
+    let source_jpeg: Vec<u8> = compress(
+        &gen_rgb(48, 48),
+        48,
+        48,
+        PixelFormat::Rgb,
+        90,
+        Subsampling::S444,
+    )
+    .expect("compress source image");
+
+    let mut tested: usize = 0;
+    let mut passed: usize = 0;
+
+    // -----------------------------------------------------------------------
+    // Part 1: All 8 transform operations
+    // -----------------------------------------------------------------------
+    for &op in &ALL_TRANSFORMS {
+        let op_name: &str = match op {
+            TransformOp::None => "none",
+            TransformOp::HFlip => "hflip",
+            TransformOp::VFlip => "vflip",
+            TransformOp::Rot90 => "rot90",
+            TransformOp::Rot180 => "rot180",
+            TransformOp::Rot270 => "rot270",
+            TransformOp::Transpose => "transpose",
+            TransformOp::Transverse => "transverse",
+        };
+
+        // (a) Apply transform with Rust
+        let rust_jpeg: Vec<u8> = transform_jpeg_with_options(
+            &source_jpeg,
+            &TransformOptions {
+                op,
+                copy_markers: MarkerCopyMode::None,
+                ..Default::default()
+            },
+        )
+        .unwrap_or_else(|e| panic!("Rust transform {:?} must succeed: {}", op, e));
+
+        // (b) Write source JPEG to temp file
+        let tmp_src: TempFile = TempFile::new(&format!("xv_{}_src.jpg", op_name));
+        std::fs::write(tmp_src.path(), &source_jpeg).expect("write source JPEG");
+
+        // (c) Run C jpegtran with matching flags
+        let tmp_c_out: TempFile = TempFile::new(&format!("xv_{}_c.jpg", op_name));
+        let args: Vec<String> = jpegtran_args_for_op(op);
+        let mut cmd = Command::new(&jpegtran);
+        for arg in &args {
+            cmd.arg(arg);
+        }
+        cmd.arg("-copy")
+            .arg("none")
+            .arg("-outfile")
+            .arg(tmp_c_out.path())
+            .arg(tmp_src.path());
+        let output = cmd.output().expect("failed to run jpegtran");
+        assert!(
+            output.status.success(),
+            "jpegtran {:?} failed: {}",
+            op,
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let _c_jpeg: Vec<u8> = std::fs::read(tmp_c_out.path()).expect("read jpegtran output");
+
+        // (d) Run C djpeg -ppm on BOTH the Rust output and C jpegtran output
+        let tmp_rust_jpg: TempFile = TempFile::new(&format!("xv_{}_rust.jpg", op_name));
+        let tmp_rust_ppm: TempFile = TempFile::new(&format!("xv_{}_rust.ppm", op_name));
+        let tmp_c_ppm: TempFile = TempFile::new(&format!("xv_{}_c.ppm", op_name));
+
+        std::fs::write(tmp_rust_jpg.path(), &rust_jpeg).expect("write Rust JPEG");
+
+        // djpeg on Rust output
+        let output = Command::new(&djpeg)
+            .arg("-ppm")
+            .arg("-outfile")
+            .arg(tmp_rust_ppm.path())
+            .arg(tmp_rust_jpg.path())
+            .output()
+            .expect("failed to run djpeg on Rust output");
+        assert!(
+            output.status.success(),
+            "djpeg failed on Rust {} output: {}",
+            op_name,
+            String::from_utf8_lossy(&output.stderr)
+        );
+
+        // djpeg on C output
+        let output = Command::new(&djpeg)
+            .arg("-ppm")
+            .arg("-outfile")
+            .arg(tmp_c_ppm.path())
+            .arg(tmp_c_out.path())
+            .output()
+            .expect("failed to run djpeg on C output");
+        assert!(
+            output.status.success(),
+            "djpeg failed on C {} output: {}",
+            op_name,
+            String::from_utf8_lossy(&output.stderr)
+        );
+
+        // (e) Compare pixel data byte-for-byte (diff=0)
+        let (rw, rh, rust_pixels) = parse_pnm(tmp_rust_ppm.path());
+        let (cw, ch, c_pixels) = parse_pnm(tmp_c_ppm.path());
+
+        assert_eq!(
+            rw, cw,
+            "{}: width mismatch (Rust={}, C={})",
+            op_name, rw, cw
+        );
+        assert_eq!(
+            rh, ch,
+            "{}: height mismatch (Rust={}, C={})",
+            op_name, rh, ch
+        );
+        assert_eq!(
+            rust_pixels.len(),
+            c_pixels.len(),
+            "{}: pixel buffer length mismatch",
+            op_name
+        );
+
+        let max_diff: u8 = rust_pixels
+            .iter()
+            .zip(c_pixels.iter())
+            .map(|(&a, &b)| (a as i16 - b as i16).unsigned_abs() as u8)
+            .max()
+            .unwrap_or(0);
+
+        assert_eq!(
+            max_diff, 0,
+            "{}: pixel max_diff={} (must be 0 vs C jpegtran via djpeg)",
+            op_name, max_diff
+        );
+
+        tested += 1;
+        passed += 1;
+        eprintln!(
+            "  PASS: transform {:?} -- {}x{} pixels identical",
+            op, rw, rh
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Part 2: Transform with grayscale flag
+    // -----------------------------------------------------------------------
+    {
+        let rust_jpeg: Vec<u8> = transform_jpeg_with_options(
+            &source_jpeg,
+            &TransformOptions {
+                op: TransformOp::Rot90,
+                grayscale: true,
+                copy_markers: MarkerCopyMode::None,
+                ..Default::default()
+            },
+        )
+        .expect("Rust grayscale+rot90 transform must succeed");
+
+        let tmp_src: TempFile = TempFile::new("xv_gray_rot90_src.jpg");
+        std::fs::write(tmp_src.path(), &source_jpeg).expect("write source");
+
+        let tmp_c_out: TempFile = TempFile::new("xv_gray_rot90_c.jpg");
+        let output = Command::new(&jpegtran)
+            .arg("-grayscale")
+            .arg("-rotate")
+            .arg("90")
+            .arg("-copy")
+            .arg("none")
+            .arg("-outfile")
+            .arg(tmp_c_out.path())
+            .arg(tmp_src.path())
+            .output()
+            .expect("failed to run jpegtran -grayscale -rotate 90");
+        assert!(
+            output.status.success(),
+            "jpegtran -grayscale -rotate 90 failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+
+        // Decode both with djpeg -ppm (grayscale JPEG decoded to PPM will be grayscale-as-RGB)
+        let tmp_rust_jpg: TempFile = TempFile::new("xv_gray_rot90_rust.jpg");
+        let tmp_rust_ppm: TempFile = TempFile::new("xv_gray_rot90_rust.ppm");
+        let tmp_c_ppm: TempFile = TempFile::new("xv_gray_rot90_c.ppm");
+
+        std::fs::write(tmp_rust_jpg.path(), &rust_jpeg).expect("write Rust JPEG");
+
+        let output = Command::new(&djpeg)
+            .arg("-ppm")
+            .arg("-outfile")
+            .arg(tmp_rust_ppm.path())
+            .arg(tmp_rust_jpg.path())
+            .output()
+            .expect("djpeg on Rust grayscale output");
+        assert!(
+            output.status.success(),
+            "djpeg failed on Rust grayscale+rot90: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+
+        let output = Command::new(&djpeg)
+            .arg("-ppm")
+            .arg("-outfile")
+            .arg(tmp_c_ppm.path())
+            .arg(tmp_c_out.path())
+            .output()
+            .expect("djpeg on C grayscale output");
+        assert!(
+            output.status.success(),
+            "djpeg failed on C grayscale+rot90: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+
+        let (rw, rh, rust_pixels) = parse_pnm(tmp_rust_ppm.path());
+        let (cw, ch, c_pixels) = parse_pnm(tmp_c_ppm.path());
+
+        assert_eq!(rw, cw, "grayscale+rot90: width mismatch");
+        assert_eq!(rh, ch, "grayscale+rot90: height mismatch");
+
+        let max_diff: u8 = rust_pixels
+            .iter()
+            .zip(c_pixels.iter())
+            .map(|(&a, &b)| (a as i16 - b as i16).unsigned_abs() as u8)
+            .max()
+            .unwrap_or(0);
+
+        assert_eq!(
+            max_diff, 0,
+            "grayscale+rot90: pixel max_diff={} (must be 0 vs C jpegtran via djpeg)",
+            max_diff
+        );
+
+        tested += 1;
+        passed += 1;
+        eprintln!("  PASS: grayscale+rot90 -- {}x{} pixels identical", rw, rh);
+    }
+
+    // -----------------------------------------------------------------------
+    // Part 3: Transform with progressive flag
+    // -----------------------------------------------------------------------
+    {
+        let rust_jpeg: Vec<u8> = transform_jpeg_with_options(
+            &source_jpeg,
+            &TransformOptions {
+                op: TransformOp::Rot90,
+                progressive: true,
+                copy_markers: MarkerCopyMode::None,
+                ..Default::default()
+            },
+        )
+        .expect("Rust progressive+rot90 transform must succeed");
+
+        let tmp_src: TempFile = TempFile::new("xv_prog_rot90_src.jpg");
+        std::fs::write(tmp_src.path(), &source_jpeg).expect("write source");
+
+        let tmp_c_out: TempFile = TempFile::new("xv_prog_rot90_c.jpg");
+        let output = Command::new(&jpegtran)
+            .arg("-progressive")
+            .arg("-rotate")
+            .arg("90")
+            .arg("-copy")
+            .arg("none")
+            .arg("-outfile")
+            .arg(tmp_c_out.path())
+            .arg(tmp_src.path())
+            .output()
+            .expect("failed to run jpegtran -progressive -rotate 90");
+        assert!(
+            output.status.success(),
+            "jpegtran -progressive -rotate 90 failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+
+        let tmp_rust_jpg: TempFile = TempFile::new("xv_prog_rot90_rust.jpg");
+        let tmp_rust_ppm: TempFile = TempFile::new("xv_prog_rot90_rust.ppm");
+        let tmp_c_ppm: TempFile = TempFile::new("xv_prog_rot90_c.ppm");
+
+        std::fs::write(tmp_rust_jpg.path(), &rust_jpeg).expect("write Rust JPEG");
+
+        let output = Command::new(&djpeg)
+            .arg("-ppm")
+            .arg("-outfile")
+            .arg(tmp_rust_ppm.path())
+            .arg(tmp_rust_jpg.path())
+            .output()
+            .expect("djpeg on Rust progressive output");
+        assert!(
+            output.status.success(),
+            "djpeg failed on Rust progressive+rot90: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+
+        let output = Command::new(&djpeg)
+            .arg("-ppm")
+            .arg("-outfile")
+            .arg(tmp_c_ppm.path())
+            .arg(tmp_c_out.path())
+            .output()
+            .expect("djpeg on C progressive output");
+        assert!(
+            output.status.success(),
+            "djpeg failed on C progressive+rot90: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+
+        let (rw, rh, rust_pixels) = parse_pnm(tmp_rust_ppm.path());
+        let (cw, ch, c_pixels) = parse_pnm(tmp_c_ppm.path());
+
+        assert_eq!(rw, cw, "progressive+rot90: width mismatch");
+        assert_eq!(rh, ch, "progressive+rot90: height mismatch");
+
+        let max_diff: u8 = rust_pixels
+            .iter()
+            .zip(c_pixels.iter())
+            .map(|(&a, &b)| (a as i16 - b as i16).unsigned_abs() as u8)
+            .max()
+            .unwrap_or(0);
+
+        assert_eq!(
+            max_diff, 0,
+            "progressive+rot90: pixel max_diff={} (must be 0 vs C jpegtran via djpeg)",
+            max_diff
+        );
+
+        tested += 1;
+        passed += 1;
+        eprintln!(
+            "  PASS: progressive+rot90 -- {}x{} pixels identical",
+            rw, rh
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Part 4: Transform with optimize flag
+    // -----------------------------------------------------------------------
+    {
+        let rust_jpeg: Vec<u8> = transform_jpeg_with_options(
+            &source_jpeg,
+            &TransformOptions {
+                op: TransformOp::Rot90,
+                optimize: true,
+                copy_markers: MarkerCopyMode::None,
+                ..Default::default()
+            },
+        )
+        .expect("Rust optimize+rot90 transform must succeed");
+
+        let tmp_src: TempFile = TempFile::new("xv_opt_rot90_src.jpg");
+        std::fs::write(tmp_src.path(), &source_jpeg).expect("write source");
+
+        let tmp_c_out: TempFile = TempFile::new("xv_opt_rot90_c.jpg");
+        let output = Command::new(&jpegtran)
+            .arg("-optimize")
+            .arg("-rotate")
+            .arg("90")
+            .arg("-copy")
+            .arg("none")
+            .arg("-outfile")
+            .arg(tmp_c_out.path())
+            .arg(tmp_src.path())
+            .output()
+            .expect("failed to run jpegtran -optimize -rotate 90");
+        assert!(
+            output.status.success(),
+            "jpegtran -optimize -rotate 90 failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+
+        let tmp_rust_jpg: TempFile = TempFile::new("xv_opt_rot90_rust.jpg");
+        let tmp_rust_ppm: TempFile = TempFile::new("xv_opt_rot90_rust.ppm");
+        let tmp_c_ppm: TempFile = TempFile::new("xv_opt_rot90_c.ppm");
+
+        std::fs::write(tmp_rust_jpg.path(), &rust_jpeg).expect("write Rust JPEG");
+
+        let output = Command::new(&djpeg)
+            .arg("-ppm")
+            .arg("-outfile")
+            .arg(tmp_rust_ppm.path())
+            .arg(tmp_rust_jpg.path())
+            .output()
+            .expect("djpeg on Rust optimize output");
+        assert!(
+            output.status.success(),
+            "djpeg failed on Rust optimize+rot90: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+
+        let output = Command::new(&djpeg)
+            .arg("-ppm")
+            .arg("-outfile")
+            .arg(tmp_c_ppm.path())
+            .arg(tmp_c_out.path())
+            .output()
+            .expect("djpeg on C optimize output");
+        assert!(
+            output.status.success(),
+            "djpeg failed on C optimize+rot90: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+
+        let (rw, rh, rust_pixels) = parse_pnm(tmp_rust_ppm.path());
+        let (cw, ch, c_pixels) = parse_pnm(tmp_c_ppm.path());
+
+        assert_eq!(rw, cw, "optimize+rot90: width mismatch");
+        assert_eq!(rh, ch, "optimize+rot90: height mismatch");
+
+        let max_diff: u8 = rust_pixels
+            .iter()
+            .zip(c_pixels.iter())
+            .map(|(&a, &b)| (a as i16 - b as i16).unsigned_abs() as u8)
+            .max()
+            .unwrap_or(0);
+
+        assert_eq!(
+            max_diff, 0,
+            "optimize+rot90: pixel max_diff={} (must be 0 vs C jpegtran via djpeg)",
+            max_diff
+        );
+
+        tested += 1;
+        passed += 1;
+        eprintln!("  PASS: optimize+rot90 -- {}x{} pixels identical", rw, rh);
+    }
+
+    // -----------------------------------------------------------------------
+    // Summary
+    // -----------------------------------------------------------------------
+    eprintln!(
+        "c_jpegtran_cross_validation_tjunittest_transform: {}/{} passed",
+        passed, tested
+    );
+    assert_eq!(
+        passed, tested,
+        "not all combinations passed: {}/{} passed",
+        passed, tested
+    );
 }

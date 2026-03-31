@@ -458,13 +458,15 @@ impl HuffmanEncoder {
     /// Encode a single DC difference value (for lossless JPEG).
     ///
     /// Writes the Huffman code for the category, then the magnitude bits.
+    /// Category 16 is special per ITU-T T.81: only the Huffman code is
+    /// written, with no extra bits (always represents 32768/-32768).
     pub fn encode_dc_only(writer: &mut BitWriter, diff: i16, dc_table: &HuffTable) {
         let (magnitude_bits, category) = encode_dc_value(diff);
         writer.write_bits(
             dc_table.ehufco[category as usize],
             dc_table.ehufsi[category as usize],
         );
-        if category > 0 {
+        if category > 0 && category < 16 {
             writer.write_bits(magnitude_bits, category);
         }
     }

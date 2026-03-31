@@ -54,6 +54,7 @@ struct CompInfo {
     h_samp: usize,
     v_samp: usize,
     comp_w: usize,
+    block_size: usize,
 }
 
 /// Decoded image data.
@@ -406,6 +407,52 @@ impl<'a> Decoder<'a> {
             1 => idct_scaled::idct_1x1_strided(coeffs, quant, output, stride),
             _ => unreachable!("invalid block_size: {}", block_size),
         }
+    }
+
+    /// Compute per-component IDCT block size for scaled decode.
+    ///
+    /// Matches C libjpeg-turbo's `jpeg_calc_output_dimensions` (jdmaster.c):
+    /// chroma components get a larger IDCT to absorb subsampling factors,
+    /// eliminating spatial upsampling. For example, 4:2:0 at 1/2 scale uses
+    /// 4x4 IDCT for Y but 8x8 IDCT for Cb/Cr, so all planes end up the same
+    /// pixel dimensions — no upsample needed.
+    fn compute_comp_block_size(
+        min_block_size: usize,
+        max_h: usize,
+        max_v: usize,
+        h_samp: usize,
+        v_samp: usize,
+    ) -> usize {
+        let mut ssize: usize = min_block_size;
+        while ssize < 8
+            && (max_h * min_block_size).is_multiple_of(h_samp * ssize * 2)
+            && (max_v * min_block_size).is_multiple_of(v_samp * ssize * 2)
+        {
+            ssize *= 2;
+        }
+        ssize
+    }
+
+    /// Compute per-component block sizes for all components in a frame.
+    fn compute_all_comp_block_sizes(
+        min_block_size: usize,
+        max_h: usize,
+        max_v: usize,
+        frame: &FrameHeader,
+    ) -> Vec<usize> {
+        frame
+            .components
+            .iter()
+            .map(|comp| {
+                Self::compute_comp_block_size(
+                    min_block_size,
+                    max_h,
+                    max_v,
+                    comp.horizontal_sampling as usize,
+                    comp.vertical_sampling as usize,
+                )
+            })
+            .collect()
     }
 
     #[inline(always)]
@@ -775,9 +822,10 @@ impl<'a> Decoder<'a> {
         num_components: usize,
         mcus_x: usize,
         mcus_y: usize,
-        block_size: usize,
+        comp_block_sizes: &[usize],
     ) -> Result<(Vec<Vec<u8>>, Vec<DecodeWarning>)> {
         let scan = &self.metadata.scan;
+        let block_size: usize = comp_block_sizes[0]; // min (luma) block size for MCU row range
 
         // Determine MCU row range for IDCT
         let (mcu_y_start, mcu_y_end) = self.mcu_row_range(mcus_y, block_size, frame);
@@ -788,9 +836,10 @@ impl<'a> Decoder<'a> {
         let mut component_planes: Vec<Vec<u8>> = frame
             .components
             .iter()
-            .map(|comp| {
-                let comp_w = mcus_x * comp.horizontal_sampling as usize * block_size;
-                let comp_h = mcus_y * comp.vertical_sampling as usize * block_size;
+            .enumerate()
+            .map(|(ci, comp)| {
+                let comp_w = mcus_x * comp.horizontal_sampling as usize * comp_block_sizes[ci];
+                let comp_h = mcus_y * comp.vertical_sampling as usize * comp_block_sizes[ci];
                 let size: usize = comp_w * comp_h;
                 let mut v: Vec<u8> = Vec::with_capacity(size);
                 unsafe { v.set_len(size) };
@@ -809,14 +858,17 @@ impl<'a> Decoder<'a> {
             comp_w: usize,
             h_blocks: usize,
             v_blocks: usize,
+            block_size: usize,
         }
         let comp_layouts: Vec<CompLayout> = frame
             .components
             .iter()
-            .map(|comp| CompLayout {
-                comp_w: mcus_x * comp.horizontal_sampling as usize * block_size,
+            .enumerate()
+            .map(|(ci, comp)| CompLayout {
+                comp_w: mcus_x * comp.horizontal_sampling as usize * comp_block_sizes[ci],
                 h_blocks: comp.horizontal_sampling as usize,
                 v_blocks: comp.vertical_sampling as usize,
+                block_size: comp_block_sizes[ci],
             })
             .collect();
 
@@ -856,8 +908,9 @@ impl<'a> Decoder<'a> {
                                     &mut coeffs,
                                 )?;
 
-                                let block_x: usize = (mcu_x * layout.h_blocks + h) * block_size;
-                                let block_y: usize = (mcu_y * layout.v_blocks + v) * block_size;
+                                let bs: usize = layout.block_size;
+                                let block_x: usize = (mcu_x * layout.h_blocks + h) * bs;
+                                let block_y: usize = (mcu_y * layout.v_blocks + v) * bs;
                                 let dst_offset: usize = block_y * layout.comp_w + block_x;
 
                                 unsafe {
@@ -868,7 +921,7 @@ impl<'a> Decoder<'a> {
                                         qt_values,
                                         dst,
                                         layout.comp_w,
-                                        block_size,
+                                        bs,
                                     );
                                 }
                             }
@@ -938,8 +991,9 @@ impl<'a> Decoder<'a> {
                                 }
 
                                 if mcu_y >= mcu_y_start && mcu_y < mcu_y_end {
-                                    let block_x: usize = (mcu_x * layout.h_blocks + h) * block_size;
-                                    let block_y: usize = (mcu_y * layout.v_blocks + v) * block_size;
+                                    let bs: usize = layout.block_size;
+                                    let block_x: usize = (mcu_x * layout.h_blocks + h) * bs;
+                                    let block_y: usize = (mcu_y * layout.v_blocks + v) * bs;
                                     let dst_offset: usize = block_y * layout.comp_w + block_x;
 
                                     unsafe {
@@ -950,7 +1004,7 @@ impl<'a> Decoder<'a> {
                                             qt_values,
                                             dst,
                                             layout.comp_w,
-                                            block_size,
+                                            bs,
                                         );
                                     }
                                 }
@@ -986,7 +1040,7 @@ impl<'a> Decoder<'a> {
         _num_components: usize,
         mcus_x: usize,
         mcus_y: usize,
-        block_size: usize,
+        comp_block_sizes: &[usize],
     ) -> Result<(Vec<Vec<u8>>, Vec<DecodeWarning>)> {
         use crate::decode::arithmetic::ArithDecoder;
 
@@ -997,9 +1051,10 @@ impl<'a> Decoder<'a> {
         let mut component_planes: Vec<Vec<u8>> = frame
             .components
             .iter()
-            .map(|comp| {
-                let comp_w = mcus_x * comp.horizontal_sampling as usize * block_size;
-                let comp_h = mcus_y * comp.vertical_sampling as usize * block_size;
+            .enumerate()
+            .map(|(ci, comp)| {
+                let comp_w = mcus_x * comp.horizontal_sampling as usize * comp_block_sizes[ci];
+                let comp_h = mcus_y * comp.vertical_sampling as usize * comp_block_sizes[ci];
                 let size = comp_w * comp_h;
                 let mut v = Vec::with_capacity(size);
                 unsafe { v.set_len(size) };
@@ -1011,14 +1066,17 @@ impl<'a> Decoder<'a> {
             comp_w: usize,
             h_blocks: usize,
             v_blocks: usize,
+            block_size: usize,
         }
         let comp_layouts: Vec<CompLayout> = frame
             .components
             .iter()
-            .map(|comp| CompLayout {
-                comp_w: mcus_x * comp.horizontal_sampling as usize * block_size,
+            .enumerate()
+            .map(|(ci, comp)| CompLayout {
+                comp_w: mcus_x * comp.horizontal_sampling as usize * comp_block_sizes[ci],
                 h_blocks: comp.horizontal_sampling as usize,
                 v_blocks: comp.vertical_sampling as usize,
+                block_size: comp_block_sizes[ci],
             })
             .collect();
 
@@ -1067,29 +1125,18 @@ impl<'a> Decoder<'a> {
                             arith.decode_ac_sequential(&mut coeffs, ac_tbl)?;
 
                             // IDCT
+                            let bs: usize = layout.block_size;
                             let bx = mcu_x * layout.h_blocks + h;
                             let by = mcu_y * layout.v_blocks + v;
-                            let x_offset = bx * block_size;
-                            let y_offset = by * block_size;
+                            let x_offset = bx * bs;
+                            let y_offset = by * bs;
 
                             let plane = &mut component_planes[comp_idx];
                             let stride = layout.comp_w;
 
-                            if block_size == 8 {
-                                let out_ptr =
-                                    unsafe { plane.as_mut_ptr().add(y_offset * stride + x_offset) };
-                                unsafe {
-                                    self.idct_islow_strided(&coeffs, qt_values, out_ptr, stride);
-                                }
-                            } else {
-                                // Scaled IDCT
-                                unsafe {
-                                    let out_ptr =
-                                        plane.as_mut_ptr().add(y_offset * stride + x_offset);
-                                    self.idct_scaled_strided(
-                                        &coeffs, qt_values, out_ptr, stride, block_size,
-                                    );
-                                }
+                            unsafe {
+                                let out_ptr = plane.as_mut_ptr().add(y_offset * stride + x_offset);
+                                self.idct_scaled_strided(&coeffs, qt_values, out_ptr, stride, bs);
                             }
                         }
                     }
@@ -1112,7 +1159,7 @@ impl<'a> Decoder<'a> {
         mcus_y: usize,
         _max_h: usize,
         _max_v: usize,
-        block_size: usize,
+        comp_block_sizes: &[usize],
     ) -> Result<(Vec<Vec<u8>>, Vec<DecodeWarning>)> {
         use crate::decode::arithmetic::ArithDecoder;
 
@@ -1120,7 +1167,8 @@ impl<'a> Decoder<'a> {
         let comp_infos: Vec<CompInfo> = frame
             .components
             .iter()
-            .map(|comp| {
+            .enumerate()
+            .map(|(ci, comp)| {
                 let h_samp = comp.horizontal_sampling as usize;
                 let v_samp = comp.vertical_sampling as usize;
                 CompInfo {
@@ -1128,7 +1176,8 @@ impl<'a> Decoder<'a> {
                     blocks_y: mcus_y * v_samp,
                     h_samp,
                     v_samp,
-                    comp_w: mcus_x * h_samp * block_size,
+                    comp_w: mcus_x * h_samp * comp_block_sizes[ci],
+                    block_size: comp_block_sizes[ci],
                 }
             })
             .collect();
@@ -1245,7 +1294,7 @@ impl<'a> Decoder<'a> {
         let mut component_planes: Vec<Vec<u8>> = comp_infos
             .iter()
             .map(|ci| {
-                let size = ci.comp_w * ci.blocks_y * block_size;
+                let size = ci.comp_w * ci.blocks_y * ci.block_size;
                 let mut v = Vec::with_capacity(size);
                 unsafe { v.set_len(size) };
                 v
@@ -1254,18 +1303,19 @@ impl<'a> Decoder<'a> {
 
         for (comp_idx, ci) in comp_infos.iter().enumerate() {
             let qt_values = &quant_tables[comp_idx].values;
+            let bs: usize = ci.block_size;
             for by in 0..ci.blocks_y {
                 for bx in 0..ci.blocks_x {
                     let block_idx = by * ci.blocks_x + bx;
                     let coeffs = &coeff_bufs[comp_idx][block_idx];
 
-                    let px_x = bx * block_size;
-                    let px_y = by * block_size;
+                    let px_x = bx * bs;
+                    let px_y = by * bs;
                     let dst_offset = px_y * ci.comp_w + px_x;
 
                     unsafe {
                         let dst = component_planes[comp_idx].as_mut_ptr().add(dst_offset);
-                        self.idct_scaled_strided(coeffs, qt_values, dst, ci.comp_w, block_size);
+                        self.idct_scaled_strided(coeffs, qt_values, dst, ci.comp_w, bs);
                     }
                 }
             }
@@ -1286,13 +1336,14 @@ impl<'a> Decoder<'a> {
         mcus_y: usize,
         max_h: usize,
         max_v: usize,
-        block_size: usize,
+        comp_block_sizes: &[usize],
     ) -> Result<(Vec<Vec<u8>>, Vec<DecodeWarning>)> {
         // Per-component coefficient buffers: blocks_x * blocks_y blocks of 64 coefficients
         let comp_infos: Vec<CompInfo> = frame
             .components
             .iter()
-            .map(|comp| {
+            .enumerate()
+            .map(|(ci, comp)| {
                 let h_samp = comp.horizontal_sampling as usize;
                 let v_samp = comp.vertical_sampling as usize;
                 CompInfo {
@@ -1300,7 +1351,8 @@ impl<'a> Decoder<'a> {
                     blocks_y: mcus_y * v_samp,
                     h_samp,
                     v_samp,
-                    comp_w: mcus_x * h_samp * block_size,
+                    comp_w: mcus_x * h_samp * comp_block_sizes[ci],
+                    block_size: comp_block_sizes[ci],
                 }
             })
             .collect();
@@ -1339,7 +1391,7 @@ impl<'a> Decoder<'a> {
         let mut component_planes: Vec<Vec<u8>> = comp_infos
             .iter()
             .map(|ci| {
-                let size = ci.comp_w * ci.blocks_y * block_size;
+                let size = ci.comp_w * ci.blocks_y * ci.block_size;
                 let mut v = Vec::with_capacity(size);
                 unsafe { v.set_len(size) };
                 v
@@ -1348,18 +1400,19 @@ impl<'a> Decoder<'a> {
 
         for (comp_idx, ci) in comp_infos.iter().enumerate() {
             let qt_values = &quant_tables[comp_idx].values;
+            let bs: usize = ci.block_size;
             for by in 0..ci.blocks_y {
                 for bx in 0..ci.blocks_x {
                     let block_idx = by * ci.blocks_x + bx;
                     let coeffs = &coeff_bufs[comp_idx][block_idx];
 
-                    let px_x = bx * block_size;
-                    let px_y = by * block_size;
+                    let px_x = bx * bs;
+                    let px_y = by * bs;
                     let dst_offset = px_y * ci.comp_w + px_x;
 
                     unsafe {
                         let dst = component_planes[comp_idx].as_mut_ptr().add(dst_offset);
-                        self.idct_scaled_strided(coeffs, qt_values, dst, ci.comp_w, block_size);
+                        self.idct_scaled_strided(coeffs, qt_values, dst, ci.comp_w, bs);
                     }
                 }
             }
@@ -2223,6 +2276,10 @@ impl<'a> Decoder<'a> {
             .unwrap_or(1);
 
         let block_size = self.scale.block_size();
+        // Per-component IDCT block sizes: chroma components may use a larger
+        // IDCT to absorb subsampling factors (matches C libjpeg-turbo).
+        let comp_block_sizes: Vec<usize> =
+            Self::compute_all_comp_block_sizes(block_size, max_h, max_v, frame);
         let mcu_width = max_h * 8;
         let mcu_height = max_v * 8;
         let mcus_x = width.div_ceil(mcu_width);
@@ -2267,7 +2324,7 @@ impl<'a> Decoder<'a> {
                 mcus_y,
                 max_h,
                 max_v,
-                block_size,
+                &comp_block_sizes,
             )?
         } else if self.metadata.is_arithmetic {
             self.decode_arithmetic_planes(
@@ -2276,7 +2333,7 @@ impl<'a> Decoder<'a> {
                 num_components,
                 mcus_x,
                 mcus_y,
-                block_size,
+                &comp_block_sizes,
             )?
         } else if frame.is_progressive {
             self.decode_progressive_planes(
@@ -2287,7 +2344,7 @@ impl<'a> Decoder<'a> {
                 mcus_y,
                 max_h,
                 max_v,
-                block_size,
+                &comp_block_sizes,
             )?
         } else {
             self.decode_baseline_planes(
@@ -2296,7 +2353,7 @@ impl<'a> Decoder<'a> {
                 num_components,
                 mcus_x,
                 mcus_y,
-                block_size,
+                &comp_block_sizes,
             )?
         };
 
@@ -2304,10 +2361,11 @@ impl<'a> Decoder<'a> {
         let (component_planes, warnings) = if self.block_smoothing {
             let mut planes = component_planes;
             for (ci, plane) in planes.iter_mut().enumerate() {
-                let comp_w: usize =
-                    mcus_x * frame.components[ci].horizontal_sampling as usize * block_size;
+                let comp_w: usize = mcus_x
+                    * frame.components[ci].horizontal_sampling as usize
+                    * comp_block_sizes[ci];
                 let comp_h: usize =
-                    mcus_y * frame.components[ci].vertical_sampling as usize * block_size;
+                    mcus_y * frame.components[ci].vertical_sampling as usize * comp_block_sizes[ci];
                 crate::decode::toggles::apply_block_smoothing(plane, comp_w, comp_h);
             }
             (planes, warnings)
@@ -2324,7 +2382,7 @@ impl<'a> Decoder<'a> {
                 out_width,
                 out_height,
                 mcus_x,
-                block_size,
+                &comp_block_sizes,
                 icc_profile,
                 exif_data,
                 self.metadata.comment.clone(),
@@ -2337,7 +2395,8 @@ impl<'a> Decoder<'a> {
         // Upsample and color convert
         if num_components == 1 {
             let out_format = self.output_format.unwrap_or(PixelFormat::Grayscale);
-            let comp_w = mcus_x * frame.components[0].horizontal_sampling as usize * block_size;
+            let comp_w =
+                mcus_x * frame.components[0].horizontal_sampling as usize * comp_block_sizes[0];
 
             if out_format == PixelFormat::Grayscale {
                 let mut data = Vec::with_capacity(out_width * out_height);
@@ -2440,14 +2499,20 @@ impl<'a> Decoder<'a> {
             let bpp = out_format.bytes_per_pixel();
 
             let y_plane = &component_planes[0];
-            let y_width = mcus_x * frame.components[0].horizontal_sampling as usize * block_size;
+            let y_width =
+                mcus_x * frame.components[0].horizontal_sampling as usize * comp_block_sizes[0];
 
             let cb_comp = &frame.components[1];
-            let cb_w = mcus_x * cb_comp.horizontal_sampling as usize * block_size;
-            let cb_h = mcus_y * cb_comp.vertical_sampling as usize * block_size;
+            let cb_w = mcus_x * cb_comp.horizontal_sampling as usize * comp_block_sizes[1];
+            let cb_h = mcus_y * cb_comp.vertical_sampling as usize * comp_block_sizes[1];
 
-            let h_factor = max_h / cb_comp.horizontal_sampling as usize;
-            let v_factor = max_v / cb_comp.vertical_sampling as usize;
+            // Effective upsample factors considering per-component IDCT sizes.
+            // For scaled decode, chroma may use a larger IDCT that absorbs subsampling,
+            // making the effective factor 1 (no upsample needed).
+            let h_factor = y_width / cb_w;
+            let v_factor =
+                (mcus_y * frame.components[0].vertical_sampling as usize * comp_block_sizes[0])
+                    / (mcus_y * cb_comp.vertical_sampling as usize * comp_block_sizes[1]);
 
             // Actual chroma dimensions (may be smaller than MCU-aligned cb_w/cb_h).
             // C libjpeg-turbo uses downsampled_width/height for upsample, not
@@ -2675,8 +2740,9 @@ impl<'a> Decoder<'a> {
 
                 // C's merged upsample uses box filter when:
                 // - actual_cb_w <= 2 (SIMD fancy requires >= 3 columns)
-                // - scaled decode (block_size < 8): C always uses box filter for scaled output
-                let use_box_filter: bool = self.fast_upsample || actual_cb_w <= 2 || block_size < 8;
+                // - scaled decode with chroma still needing upsample (chroma IDCT < 8)
+                let use_box_filter: bool =
+                    self.fast_upsample || actual_cb_w <= 2 || comp_block_sizes[1] < 8;
 
                 if use_box_filter {
                     crate::decode::toggles::upsample_nearest(
@@ -2912,7 +2978,7 @@ impl<'a> Decoder<'a> {
                 max_v,
                 full_width,
                 full_height,
-                block_size,
+                &comp_block_sizes,
                 icc_profile,
                 exif_data,
                 warnings,
@@ -2954,6 +3020,8 @@ impl<'a> Decoder<'a> {
             .max()
             .unwrap_or(1);
         let block_size: usize = 8;
+        // Raw data decode always uses full-size (8x8) IDCT for all components
+        let comp_block_sizes: Vec<usize> = vec![block_size; num_components];
         let mcu_width: usize = max_h * 8;
         let mcu_height: usize = max_v * 8;
         let mcus_x: usize = width.div_ceil(mcu_width);
@@ -2981,7 +3049,7 @@ impl<'a> Decoder<'a> {
                 mcus_y,
                 max_h,
                 max_v,
-                block_size,
+                &comp_block_sizes,
             )?
         } else if self.metadata.is_arithmetic {
             self.decode_arithmetic_planes(
@@ -2990,7 +3058,7 @@ impl<'a> Decoder<'a> {
                 num_components,
                 mcus_x,
                 mcus_y,
-                block_size,
+                &comp_block_sizes,
             )?
         } else if frame.is_progressive {
             self.decode_progressive_planes(
@@ -3001,7 +3069,7 @@ impl<'a> Decoder<'a> {
                 mcus_y,
                 max_h,
                 max_v,
-                block_size,
+                &comp_block_sizes,
             )?
         } else {
             self.decode_baseline_planes(
@@ -3010,14 +3078,14 @@ impl<'a> Decoder<'a> {
                 num_components,
                 mcus_x,
                 mcus_y,
-                block_size,
+                &comp_block_sizes,
             )?
         };
         let mut plane_widths: Vec<usize> = Vec::with_capacity(num_components);
         let mut plane_heights: Vec<usize> = Vec::with_capacity(num_components);
-        for comp in &frame.components {
-            plane_widths.push(mcus_x * comp.horizontal_sampling as usize * block_size);
-            plane_heights.push(mcus_y * comp.vertical_sampling as usize * block_size);
+        for (ci, comp) in frame.components.iter().enumerate() {
+            plane_widths.push(mcus_x * comp.horizontal_sampling as usize * comp_block_sizes[ci]);
+            plane_heights.push(mcus_y * comp.vertical_sampling as usize * comp_block_sizes[ci]);
         }
         Ok(crate::api::raw_data::RawImage {
             planes: component_planes,
@@ -3067,11 +3135,11 @@ impl<'a> Decoder<'a> {
         height: usize,
         mcus_x: usize,
         mcus_y: usize,
-        max_h: usize,
-        max_v: usize,
+        _max_h: usize,
+        _max_v: usize,
         full_width: usize,
         full_height: usize,
-        block_size: usize,
+        comp_block_sizes: &[usize],
         icc_profile: Option<Vec<u8>>,
         exif_data: Option<Vec<u8>>,
         warnings: Vec<DecodeWarning>,
@@ -3086,17 +3154,21 @@ impl<'a> Decoder<'a> {
         }
 
         // Component 0 is always full-resolution (Y or C).
-        let comp0_w = mcus_x * frame.components[0].horizontal_sampling as usize * block_size;
+        let comp0_w =
+            mcus_x * frame.components[0].horizontal_sampling as usize * comp_block_sizes[0];
 
         // For YCCK, components 1-2 may be subsampled (chroma), component 3 (K) is full.
         // For CMYK, all components are typically the same resolution.
         let comp1 = &frame.components[1];
-        let comp1_w = mcus_x * comp1.horizontal_sampling as usize * block_size;
-        let comp1_h = mcus_y * comp1.vertical_sampling as usize * block_size;
-        let comp3_w = mcus_x * frame.components[3].horizontal_sampling as usize * block_size;
+        let comp1_w = mcus_x * comp1.horizontal_sampling as usize * comp_block_sizes[1];
+        let comp1_h = mcus_y * comp1.vertical_sampling as usize * comp_block_sizes[1];
+        let comp3_w =
+            mcus_x * frame.components[3].horizontal_sampling as usize * comp_block_sizes[3];
 
-        let h_factor = max_h / comp1.horizontal_sampling as usize;
-        let v_factor = max_v / comp1.vertical_sampling as usize;
+        let h_factor = comp0_w / comp1_w;
+        let v_factor =
+            (mcus_y * frame.components[0].vertical_sampling as usize * comp_block_sizes[0])
+                / (mcus_y * comp1.vertical_sampling as usize * comp_block_sizes[1]);
 
         // Upsample chroma if needed (for YCCK subsampled images)
         let (plane1, plane2, p1_stride, p2_stride): (&[u8], &[u8], usize, usize);

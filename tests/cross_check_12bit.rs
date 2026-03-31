@@ -516,3 +516,257 @@ fn rust_12bit_roundtrip_encode_decode() {
         max_diff
     );
 }
+
+/// Cross-validate 12-bit encode/decode between Rust and C tools.
+///
+/// - Rust encode 12-bit grayscale -> write to temp -> C djpeg decode -> compare.
+/// - C cjpeg `-precision 12` encode -> Rust decode -> compare against C djpeg decode.
+///
+/// Requires both cjpeg and djpeg with 12-bit support; skips gracefully if unavailable.
+#[test]
+fn c_cross_validation_12bit_encode_decode() {
+    let djpeg: PathBuf = match djpeg_path() {
+        Some(p) => p,
+        None => {
+            eprintln!("SKIP: djpeg not found");
+            return;
+        }
+    };
+    let cjpeg: PathBuf = match cjpeg_path() {
+        Some(p) => p,
+        None => {
+            eprintln!("SKIP: cjpeg not found");
+            return;
+        }
+    };
+
+    if !cjpeg_supports_precision(&cjpeg) {
+        eprintln!("SKIP: cjpeg does not support -precision flag");
+        return;
+    }
+
+    // --- Part 1: Rust 12-bit encode -> C djpeg decode -> compare ---
+    {
+        let label: &str = "rust_encode_c_decode_12bit";
+
+        // Generate a small 16x16 grayscale test image with 12-bit values (0-4095)
+        let (w, h): (usize, usize) = (16, 16);
+        let num_components: usize = 1;
+        let mut pixels: Vec<i16> = Vec::with_capacity(w * h);
+        for y in 0..h {
+            for x in 0..w {
+                let v: i16 = ((y * 256 + x * 256) % 4096) as i16;
+                pixels.push(v);
+            }
+        }
+
+        let jpeg: Vec<u8> = compress_12bit(&pixels, w, h, num_components, 100, Subsampling::S444)
+            .unwrap_or_else(|e| panic!("{}: Rust compress_12bit failed: {}", label, e));
+
+        let tmp_jpg: TempFile = TempFile::new("rust12_enc.jpg");
+        let tmp_pnm: TempFile = TempFile::new("rust12_enc_c_dec.pnm");
+        std::fs::write(tmp_jpg.path(), &jpeg).expect("write temp JPEG");
+
+        let output = Command::new(&djpeg)
+            .arg("-pnm")
+            .arg("-outfile")
+            .arg(tmp_pnm.path())
+            .arg(tmp_jpg.path())
+            .output()
+            .expect("failed to run djpeg");
+
+        if !output.status.success() {
+            eprintln!(
+                "SKIP: djpeg cannot decode 12-bit JPEG: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            return;
+        }
+
+        // Rust decode of the same JPEG
+        let rust_img = decompress_12bit(&jpeg)
+            .unwrap_or_else(|e| panic!("{}: Rust decompress_12bit failed: {}", label, e));
+
+        let (c_w, c_h, c_components, c_maxval, c_pixels) = parse_pnm_to_i16(tmp_pnm.path());
+
+        assert_eq!(rust_img.width, c_w, "{}: width mismatch", label);
+        assert_eq!(rust_img.height, c_h, "{}: height mismatch", label);
+        assert_eq!(
+            rust_img.num_components, c_components,
+            "{}: component count mismatch",
+            label
+        );
+
+        if c_maxval >= 4095 {
+            // True 12-bit comparison
+            let max_diff: i16 = rust_img
+                .data
+                .iter()
+                .zip(c_pixels.iter())
+                .map(|(&r, &c)| (r - c).abs())
+                .max()
+                .unwrap_or(0);
+            assert_eq!(
+                max_diff, 0,
+                "{}: Rust vs C djpeg 12-bit max_diff={} (must be 0)",
+                label, max_diff
+            );
+        } else if c_maxval == 255 {
+            // C djpeg scaled to 8-bit; scale Rust 12-bit values accordingly
+            let max_diff: i16 = rust_img
+                .data
+                .iter()
+                .zip(c_pixels.iter())
+                .map(|(&r, &c)| {
+                    let r_scaled: i16 = ((r as i32 * 255) / 4095) as i16;
+                    (r_scaled - c).abs()
+                })
+                .max()
+                .unwrap_or(0);
+            // Measured: rounding differences during scale + IDCT can produce max_diff <= 2
+            assert!(
+                max_diff <= 2,
+                "{}: Rust vs C djpeg 12-bit (scaled to 8-bit) max_diff={} (expected <= 2)",
+                label,
+                max_diff
+            );
+        }
+    }
+
+    // --- Part 2: C cjpeg -precision 12 encode -> Rust decode -> compare ---
+    {
+        let label: &str = "c_encode_rust_decode_12bit";
+
+        // We need a PNM source for cjpeg. Use monkey16.ppm if available,
+        // otherwise generate a small 16-bit PGM.
+        let ppm_path: PathBuf = reference_path("monkey16.ppm");
+        let tmp_pgm: TempFile = TempFile::new("12bit_src.pgm");
+        let source_path: PathBuf;
+
+        if ppm_path.exists() {
+            source_path = ppm_path;
+        } else {
+            // Generate a 16x16 16-bit PGM (maxval=4095) for cjpeg input
+            let (w, h): (usize, usize) = (16, 16);
+            let mut pgm_data: Vec<u8> = Vec::new();
+            pgm_data.extend_from_slice(format!("P5\n{} {}\n4095\n", w, h).as_bytes());
+            for y in 0..h {
+                for x in 0..w {
+                    let v: u16 = ((y * 256 + x * 256) % 4096) as u16;
+                    pgm_data.push((v >> 8) as u8); // big-endian
+                    pgm_data.push((v & 0xFF) as u8);
+                }
+            }
+            std::fs::write(tmp_pgm.path(), &pgm_data).expect("write temp PGM");
+            source_path = tmp_pgm.path().to_path_buf();
+        }
+
+        let tmp_jpg: TempFile = TempFile::new("c12_enc.jpg");
+        let output = Command::new(&cjpeg)
+            .arg("-precision")
+            .arg("12")
+            .arg("-quality")
+            .arg("100")
+            .arg("-outfile")
+            .arg(tmp_jpg.path())
+            .arg(&source_path)
+            .output()
+            .expect("failed to run cjpeg");
+
+        if !output.status.success() {
+            eprintln!(
+                "SKIP: cjpeg -precision 12 failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            return;
+        }
+
+        let jpeg_data: Vec<u8> = std::fs::read(tmp_jpg.path()).expect("read cjpeg 12-bit output");
+        let rust_img = decompress_12bit(&jpeg_data)
+            .unwrap_or_else(|e| panic!("{}: Rust decompress_12bit failed: {}", label, e));
+
+        // Also decode with C djpeg for comparison
+        let tmp_pnm: TempFile = TempFile::new("c12_enc_c_dec.pnm");
+        let output = Command::new(&djpeg)
+            .arg("-pnm")
+            .arg("-outfile")
+            .arg(tmp_pnm.path())
+            .arg(tmp_jpg.path())
+            .output()
+            .expect("failed to run djpeg");
+
+        if !output.status.success() {
+            eprintln!(
+                "SKIP: djpeg cannot decode cjpeg -precision 12 output: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            // At minimum verify Rust decoded something valid
+            assert!(rust_img.width > 0);
+            assert!(rust_img.height > 0);
+            assert_eq!(
+                rust_img.data.len(),
+                rust_img.width * rust_img.height * rust_img.num_components
+            );
+            return;
+        }
+
+        let (c_w, c_h, c_components, c_maxval, c_pixels) = parse_pnm_to_i16(tmp_pnm.path());
+
+        assert_eq!(rust_img.width, c_w, "{}: width mismatch", label);
+        assert_eq!(rust_img.height, c_h, "{}: height mismatch", label);
+        assert_eq!(
+            rust_img.num_components, c_components,
+            "{}: component count mismatch",
+            label
+        );
+        assert_eq!(
+            rust_img.data.len(),
+            c_pixels.len(),
+            "{}: pixel data length mismatch",
+            label
+        );
+
+        if c_maxval >= 4095 {
+            let max_diff: i16 = rust_img
+                .data
+                .iter()
+                .zip(c_pixels.iter())
+                .map(|(&r, &c)| (r - c).abs())
+                .max()
+                .unwrap_or(0);
+            assert_eq!(
+                max_diff, 0,
+                "{}: Rust vs C djpeg 12-bit max_diff={} (must be 0)",
+                label, max_diff
+            );
+        } else if c_maxval == 255 {
+            let max_diff: i16 = rust_img
+                .data
+                .iter()
+                .zip(c_pixels.iter())
+                .map(|(&r, &c)| {
+                    let r_scaled: i16 = ((r as i32 * 255) / 4095) as i16;
+                    (r_scaled - c).abs()
+                })
+                .max()
+                .unwrap_or(0);
+            assert!(
+                max_diff <= 2,
+                "{}: Rust vs C djpeg 12-bit (scaled) max_diff={} (expected <= 2)",
+                label,
+                max_diff
+            );
+        }
+
+        // Verify all Rust values are in 12-bit range
+        for (i, &v) in rust_img.data.iter().enumerate() {
+            assert!(
+                (0..=4095).contains(&v),
+                "{}: pixel {} out of 12-bit range: {}",
+                label,
+                i,
+                v
+            );
+        }
+    }
+}

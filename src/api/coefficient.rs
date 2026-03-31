@@ -551,13 +551,27 @@ pub fn transform_jpeg_with_options(data: &[u8], options: &TransformOptions) -> R
     }
 
     // TRIM: discard partial iMCU blocks at edges.
+    // For dimension-swapping transforms (rot90, rot270), C jpegtran only
+    // trims selectively: rot90 trims what becomes the output width (source
+    // height), rot270 trims what becomes the output height (source width).
     if options.trim && (has_partial_width || has_partial_height) {
-        let trimmed_w: usize = if has_partial_width {
+        let trim_width: bool = match op {
+            // ROT90: source height → output width, only trim source height
+            TransformOp::Rot90 => false,
+            _ => has_partial_width,
+        };
+        let trim_height: bool = match op {
+            // ROT270: source width → output height, only trim source width
+            TransformOp::Rot270 => false,
+            _ => has_partial_height,
+        };
+
+        let trimmed_w: usize = if trim_width {
             (coeffs.width as usize / imcu_w) * imcu_w
         } else {
             coeffs.width as usize
         };
-        let trimmed_h: usize = if has_partial_height {
+        let trimmed_h: usize = if trim_height {
             (coeffs.height as usize / imcu_h) * imcu_h
         } else {
             coeffs.height as usize
@@ -594,17 +608,29 @@ pub fn transform_jpeg_with_options(data: &[u8], options: &TransformOptions) -> R
     }
 
     // CROP: crop coefficient arrays to the specified region.
+    // Matches C jpegtran semantics: X/Y are rounded DOWN to iMCU boundaries,
+    // and output dimensions are extended to fully cover the requested region.
     if let Some(crop) = &options.crop {
-        // Align crop region to iMCU boundaries.
-        let crop_x_blocks: usize = crop.x / 8;
-        let crop_y_blocks: usize = crop.y / 8;
-        let crop_w: usize = crop.width.min(coeffs.width as usize - crop.x);
-        let crop_h: usize = crop.height.min(coeffs.height as usize - crop.y);
-        let crop_w_blocks: usize = crop_w.div_ceil(8);
-        let crop_h_blocks: usize = crop_h.div_ceil(8);
+        let imcu_w: usize = max_h as usize * 8;
+        let imcu_h: usize = max_v as usize * 8;
+        let remainder_x: usize = crop.x % imcu_w;
+        let remainder_y: usize = crop.y % imcu_h;
 
-        coeffs.width = crop_w.min(crop_w_blocks * 8) as u16;
-        coeffs.height = crop_h.min(crop_h_blocks * 8) as u16;
+        // Block-level offsets (rounded down to iMCU boundary)
+        let crop_x_blocks: usize = crop.x / imcu_w * max_h as usize;
+        let crop_y_blocks: usize = crop.y / imcu_h * max_v as usize;
+
+        // Extend output size to cover the full requested region from the
+        // MCU-aligned start position.
+        let out_w: usize =
+            (crop.width + remainder_x).min(coeffs.width as usize - (crop.x - remainder_x));
+        let out_h: usize =
+            (crop.height + remainder_y).min(coeffs.height as usize - (crop.y - remainder_y));
+        let crop_w_blocks: usize = out_w.div_ceil(8);
+        let crop_h_blocks: usize = out_h.div_ceil(8);
+
+        coeffs.width = out_w as u16;
+        coeffs.height = out_h as u16;
 
         for comp in &mut coeffs.components {
             let comp_crop_x: usize = crop_x_blocks * comp.h_sampling as usize / max_h;
@@ -648,6 +674,9 @@ pub fn transform_jpeg_with_options(data: &[u8], options: &TransformOptions) -> R
     }
 
     // Apply spatial transform (reuses existing logic from transform_jpeg).
+    // C libjpeg-turbo only transforms blocks within full MCU columns/rows,
+    // leaving partial edge MCU blocks untouched. comp_w/comp_h are the
+    // "mirrorable" region sizes per component.
     if op != TransformOp::None {
         let transform_fn: fn(&[i16; 64], &mut [i16; 64]) = match op {
             TransformOp::None => spatial::do_nothing,
@@ -660,73 +689,111 @@ pub fn transform_jpeg_with_options(data: &[u8], options: &TransformOptions) -> R
             TransformOp::Rot270 => spatial::do_rot_270,
         };
 
+        // Full MCU columns/rows (partial edge MCUs excluded from transform).
+        let mcu_cols: usize = coeffs.width as usize / (max_h * 8);
+        let mcu_rows: usize = coeffs.height as usize / (max_v * 8);
+
         for comp in &mut coeffs.components {
             let old_bx: usize = comp.blocks_x;
             let old_by: usize = comp.blocks_y;
+            // Mirrorable region: only full MCU blocks participate in transform.
+            let comp_w: usize = mcu_cols * comp.h_sampling as usize;
+            let comp_h: usize = mcu_rows * comp.v_sampling as usize;
             let mut new_blocks: Vec<[i16; 64]> = vec![[0i16; 64]; old_bx * old_by];
 
+            // Copy all blocks first (edge blocks stay untouched).
+            new_blocks.copy_from_slice(&comp.blocks);
+
             if matches!(op, TransformOp::Transpose) {
+                let mut new_blocks2: Vec<[i16; 64]> = vec![[0i16; 64]; old_bx * old_by];
                 for by in 0..old_by {
                     for bx in 0..old_bx {
                         let src_idx: usize = by * old_bx + bx;
                         let dst_idx: usize = bx * old_by + by;
-                        transform_fn(&comp.blocks[src_idx], &mut new_blocks[dst_idx]);
+                        transform_fn(&comp.blocks[src_idx], &mut new_blocks2[dst_idx]);
                     }
                 }
+                new_blocks = new_blocks2;
                 comp.blocks_x = old_by;
                 comp.blocks_y = old_bx;
             } else if matches!(op, TransformOp::Rot90) {
+                let mut new_blocks2: Vec<[i16; 64]> = vec![[0i16; 64]; old_bx * old_by];
                 for by in 0..old_by {
                     for bx in 0..old_bx {
                         let src_idx: usize = by * old_bx + bx;
                         let dst_idx: usize = bx * old_by + (old_by - 1 - by);
-                        transform_fn(&comp.blocks[src_idx], &mut new_blocks[dst_idx]);
+                        transform_fn(&comp.blocks[src_idx], &mut new_blocks2[dst_idx]);
                     }
                 }
+                new_blocks = new_blocks2;
                 comp.blocks_x = old_by;
                 comp.blocks_y = old_bx;
             } else if matches!(op, TransformOp::Rot270) {
+                let mut new_blocks2: Vec<[i16; 64]> = vec![[0i16; 64]; old_bx * old_by];
                 for by in 0..old_by {
                     for bx in 0..old_bx {
                         let src_idx: usize = by * old_bx + bx;
                         let dst_idx: usize = (old_bx - 1 - bx) * old_by + by;
-                        transform_fn(&comp.blocks[src_idx], &mut new_blocks[dst_idx]);
+                        transform_fn(&comp.blocks[src_idx], &mut new_blocks2[dst_idx]);
                     }
                 }
+                new_blocks = new_blocks2;
                 comp.blocks_x = old_by;
                 comp.blocks_y = old_bx;
             } else if matches!(op, TransformOp::Transverse) {
+                let mut new_blocks2: Vec<[i16; 64]> = vec![[0i16; 64]; old_bx * old_by];
                 for by in 0..old_by {
                     for bx in 0..old_bx {
                         let src_idx: usize = by * old_bx + bx;
                         let dst_idx: usize = (old_bx - 1 - bx) * old_by + (old_by - 1 - by);
-                        transform_fn(&comp.blocks[src_idx], &mut new_blocks[dst_idx]);
+                        transform_fn(&comp.blocks[src_idx], &mut new_blocks2[dst_idx]);
                     }
                 }
+                new_blocks = new_blocks2;
                 comp.blocks_x = old_by;
                 comp.blocks_y = old_bx;
             } else if matches!(op, TransformOp::HFlip) {
+                // Only flip within the mirrorable region (comp_w blocks).
+                // Edge blocks beyond comp_w are left untouched.
                 for by in 0..old_by {
-                    for bx in 0..old_bx {
+                    for bx in 0..comp_w {
                         let src_idx: usize = by * old_bx + bx;
-                        let dst_idx: usize = by * old_bx + (old_bx - 1 - bx);
+                        let dst_idx: usize = by * old_bx + (comp_w - 1 - bx);
                         transform_fn(&comp.blocks[src_idx], &mut new_blocks[dst_idx]);
                     }
                 }
             } else if matches!(op, TransformOp::VFlip) {
-                for by in 0..old_by {
+                // Only flip within the mirrorable region (comp_h rows).
+                for by in 0..comp_h {
                     for bx in 0..old_bx {
                         let src_idx: usize = by * old_bx + bx;
-                        let dst_idx: usize = (old_by - 1 - by) * old_bx + bx;
+                        let dst_idx: usize = (comp_h - 1 - by) * old_bx + bx;
                         transform_fn(&comp.blocks[src_idx], &mut new_blocks[dst_idx]);
                     }
                 }
             } else if matches!(op, TransformOp::Rot180) {
+                // 4-zone approach matching C transupp.c do_rot_180:
+                // Zone 1 (bx<comp_w, by<comp_h): full 180° (both axes mirror)
+                // Zone 2 (bx>=comp_w, by<comp_h): only vertical mirror
+                // Zone 3 (bx<comp_w, by>=comp_h): only horizontal mirror
+                // Zone 4 (bx>=comp_w, by>=comp_h): copy verbatim (already done)
                 for by in 0..old_by {
                     for bx in 0..old_bx {
                         let src_idx: usize = by * old_bx + bx;
-                        let dst_idx: usize = (old_by - 1 - by) * old_bx + (old_bx - 1 - bx);
-                        transform_fn(&comp.blocks[src_idx], &mut new_blocks[dst_idx]);
+                        if by < comp_h && bx < comp_w {
+                            // Zone 1: full 180° rotation
+                            let dst_idx: usize = (comp_h - 1 - by) * old_bx + (comp_w - 1 - bx);
+                            transform_fn(&comp.blocks[src_idx], &mut new_blocks[dst_idx]);
+                        } else if by < comp_h {
+                            // Zone 2: only vertical mirror (right edge)
+                            let dst_idx: usize = (comp_h - 1 - by) * old_bx + bx;
+                            spatial::do_flip_v(&comp.blocks[src_idx], &mut new_blocks[dst_idx]);
+                        } else if bx < comp_w {
+                            // Zone 3: only horizontal mirror (bottom edge)
+                            let dst_idx: usize = by * old_bx + (comp_w - 1 - bx);
+                            spatial::do_flip_h(&comp.blocks[src_idx], &mut new_blocks[dst_idx]);
+                        }
+                        // Zone 4: already copied verbatim from copy_from_slice
                     }
                 }
             } else {

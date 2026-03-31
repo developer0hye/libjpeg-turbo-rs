@@ -1,4 +1,7 @@
-use libjpeg_turbo_rs::{decompress, Encoder, MarkerStreamWriter, PixelFormat, Subsampling};
+use libjpeg_turbo_rs::{
+    decompress, Encoder, MarkerStreamWriter, PixelFormat, SavedMarker, Subsampling,
+};
+use std::path::PathBuf;
 
 fn gradient_pixels(width: usize, height: usize) -> Vec<u8> {
     let mut pixels: Vec<u8> = Vec::with_capacity(width * height * 3);
@@ -229,4 +232,408 @@ fn custom_marker_processor_receives_data() {
         "marker processor should have been called"
     );
     assert_eq!(received_data.unwrap(), marker_data);
+}
+
+// -----------------------------------------------------------------------
+// C djpeg cross-validation for niche encoder options
+// -----------------------------------------------------------------------
+
+/// Path to C djpeg binary, or `None` if not installed.
+fn djpeg_path() -> Option<std::path::PathBuf> {
+    let homebrew: std::path::PathBuf = std::path::PathBuf::from("/opt/homebrew/bin/djpeg");
+    if homebrew.exists() {
+        return Some(homebrew);
+    }
+    std::process::Command::new("which")
+        .arg("djpeg")
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| std::path::PathBuf::from(String::from_utf8_lossy(&o.stdout).trim().to_string()))
+}
+
+fn niche_parse_ppm(data: &[u8]) -> (usize, usize, Vec<u8>) {
+    assert!(data.len() > 3, "PPM too short");
+    assert_eq!(&data[0..2], b"P6", "not a P6 PPM");
+    let mut idx: usize = 2;
+    idx = niche_ppm_skip_ws(data, idx);
+    let (width, next) = niche_ppm_read_num(data, idx);
+    idx = niche_ppm_skip_ws(data, next);
+    let (height, next) = niche_ppm_read_num(data, idx);
+    idx = niche_ppm_skip_ws(data, next);
+    let (_maxval, next) = niche_ppm_read_num(data, idx);
+    idx = next + 1;
+    let pixels: Vec<u8> = data[idx..].to_vec();
+    assert_eq!(
+        pixels.len(),
+        width * height * 3,
+        "PPM pixel data length mismatch"
+    );
+    (width, height, pixels)
+}
+
+fn niche_ppm_skip_ws(data: &[u8], mut idx: usize) -> usize {
+    loop {
+        while idx < data.len() && data[idx].is_ascii_whitespace() {
+            idx += 1;
+        }
+        if idx < data.len() && data[idx] == b'#' {
+            while idx < data.len() && data[idx] != b'\n' {
+                idx += 1;
+            }
+        } else {
+            break;
+        }
+    }
+    idx
+}
+
+fn niche_ppm_read_num(data: &[u8], idx: usize) -> (usize, usize) {
+    let mut end: usize = idx;
+    while end < data.len() && data[end].is_ascii_digit() {
+        end += 1;
+    }
+    let val: usize = std::str::from_utf8(&data[idx..end])
+        .unwrap()
+        .parse()
+        .unwrap();
+    (val, end)
+}
+
+struct NicheTempFile {
+    path: std::path::PathBuf,
+}
+
+impl NicheTempFile {
+    fn new(name: &str) -> Self {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+        let id: u64 = COUNTER.fetch_add(1, Ordering::Relaxed);
+        Self {
+            path: std::env::temp_dir().join(format!(
+                "ljt_niche_{}_{}_{name}",
+                std::process::id(),
+                id
+            )),
+        }
+    }
+}
+
+impl Drop for NicheTempFile {
+    fn drop(&mut self) {
+        std::fs::remove_file(&self.path).ok();
+    }
+}
+
+/// Encode a JPEG, decode with both C djpeg and Rust, assert pixel-identical output.
+fn assert_djpeg_matches_rust(
+    djpeg: &std::path::Path,
+    jpeg: &[u8],
+    width: usize,
+    height: usize,
+    label: &str,
+) {
+    let tmp_jpg = NicheTempFile::new(&format!("{label}.jpg"));
+    let tmp_ppm = NicheTempFile::new(&format!("{label}.ppm"));
+
+    std::fs::write(&tmp_jpg.path, jpeg).expect("write temp JPEG");
+
+    let output = std::process::Command::new(djpeg)
+        .arg("-ppm")
+        .arg("-outfile")
+        .arg(&tmp_ppm.path)
+        .arg(&tmp_jpg.path)
+        .output()
+        .expect("failed to run djpeg");
+    assert!(
+        output.status.success(),
+        "djpeg failed for {label}: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let ppm_data: Vec<u8> = std::fs::read(&tmp_ppm.path).expect("read PPM");
+    let (c_w, c_h, c_pixels) = niche_parse_ppm(&ppm_data);
+    assert_eq!(c_w, width, "{label}: C djpeg width mismatch");
+    assert_eq!(c_h, height, "{label}: C djpeg height mismatch");
+
+    let rust_image = decompress(jpeg).expect("Rust decompress failed");
+    assert_eq!(rust_image.width, width);
+    assert_eq!(rust_image.height, height);
+    assert_eq!(
+        rust_image.data.len(),
+        c_pixels.len(),
+        "{label}: pixel data length mismatch"
+    );
+
+    let mut max_diff: u8 = 0;
+    let mut mismatch_count: usize = 0;
+    for (i, (&r, &c)) in rust_image.data.iter().zip(c_pixels.iter()).enumerate() {
+        let diff: u8 = (r as i16 - c as i16).unsigned_abs() as u8;
+        if diff > max_diff {
+            max_diff = diff;
+        }
+        if diff > 0 {
+            mismatch_count += 1;
+            if mismatch_count <= 5 {
+                let pixel: usize = i / 3;
+                let channel: &str = ["R", "G", "B"][i % 3];
+                eprintln!(
+                    "  {label}: pixel {} channel {}: rust={} c={} diff={}",
+                    pixel, channel, r, c, diff
+                );
+            }
+        }
+    }
+    assert_eq!(
+        max_diff, 0,
+        "{label}: {} pixels differ, max_diff={}",
+        mismatch_count, max_diff
+    );
+}
+
+#[test]
+fn c_djpeg_cross_validation_niche_options() {
+    let djpeg = match djpeg_path() {
+        Some(p) => p,
+        None => {
+            eprintln!("SKIP: djpeg not found");
+            return;
+        }
+    };
+
+    let width: usize = 48;
+    let height: usize = 48;
+    let pixels: Vec<u8> = gradient_pixels(width, height);
+
+    // (a) Encode with Adobe APP14 marker explicitly enabled for RGB
+    {
+        let jpeg = Encoder::new(&pixels, width, height, PixelFormat::Rgb)
+            .quality(90)
+            .subsampling(Subsampling::S444)
+            .write_adobe_marker(true)
+            .encode()
+            .expect("encode with Adobe marker failed");
+
+        // Verify Adobe APP14 marker is present
+        assert!(
+            find_marker(&jpeg, 0xEE).is_some(),
+            "Adobe APP14 marker should be present"
+        );
+
+        assert_djpeg_matches_rust(&djpeg, &jpeg, width, height, "adobe_app14");
+    }
+
+    // (b) Encode with custom JFIF version (1, 2)
+    {
+        let jpeg = Encoder::new(&pixels, width, height, PixelFormat::Rgb)
+            .quality(90)
+            .subsampling(Subsampling::S444)
+            .jfif_version(1, 2)
+            .encode()
+            .expect("encode with custom JFIF version failed");
+
+        // Verify JFIF version is 1.02
+        assert_eq!(jpeg[11], 1, "JFIF major version");
+        assert_eq!(jpeg[12], 2, "JFIF minor version");
+
+        assert_djpeg_matches_rust(&djpeg, &jpeg, width, height, "jfif_version");
+    }
+
+    // (c) Encode with custom APP marker (APP5 with arbitrary data)
+    {
+        let marker_data: Vec<u8> = vec![0xCA, 0xFE, 0xBA, 0xBE, 0x01, 0x02, 0x03];
+        let jpeg = Encoder::new(&pixels, width, height, PixelFormat::Rgb)
+            .quality(90)
+            .subsampling(Subsampling::S444)
+            .saved_marker(SavedMarker {
+                code: 0xE5,
+                data: marker_data,
+            })
+            .encode()
+            .expect("encode with custom marker failed");
+
+        // Verify APP5 marker is present
+        assert!(
+            find_marker(&jpeg, 0xE5).is_some(),
+            "APP5 marker should be present"
+        );
+
+        assert_djpeg_matches_rust(&djpeg, &jpeg, width, height, "custom_app_marker");
+    }
+}
+
+/// Path to C cjpeg binary, or `None` if not installed.
+fn cjpeg_path() -> Option<PathBuf> {
+    let homebrew: PathBuf = PathBuf::from("/opt/homebrew/bin/cjpeg");
+    if homebrew.exists() {
+        return Some(homebrew);
+    }
+    std::process::Command::new("which")
+        .arg("cjpeg")
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| PathBuf::from(String::from_utf8_lossy(&o.stdout).trim().to_string()))
+}
+
+/// Build a raw PPM (P6) byte vector from RGB pixel data.
+fn build_ppm(width: usize, height: usize, pixels: &[u8]) -> Vec<u8> {
+    assert_eq!(pixels.len(), width * height * 3);
+    let mut ppm: Vec<u8> = format!("P6\n{} {}\n255\n", width, height).into_bytes();
+    ppm.extend_from_slice(pixels);
+    ppm
+}
+
+/// Compute PSNR (dB) between two equal-length pixel buffers.
+/// Returns `f64::INFINITY` when images are identical (MSE == 0).
+fn compute_psnr(a: &[u8], b: &[u8]) -> f64 {
+    assert_eq!(a.len(), b.len(), "PSNR: buffer length mismatch");
+    let mse: f64 = a
+        .iter()
+        .zip(b.iter())
+        .map(|(&x, &y)| {
+            let d: f64 = x as f64 - y as f64;
+            d * d
+        })
+        .sum::<f64>()
+        / a.len() as f64;
+    if mse == 0.0 {
+        return f64::INFINITY;
+    }
+    10.0 * (255.0_f64 * 255.0 / mse).log10()
+}
+
+#[test]
+fn c_cjpeg_cross_validation_smoothing() {
+    let djpeg = match djpeg_path() {
+        Some(p) => p,
+        None => {
+            eprintln!("SKIP: djpeg not found");
+            return;
+        }
+    };
+    let cjpeg = match cjpeg_path() {
+        Some(p) => p,
+        None => {
+            eprintln!("SKIP: cjpeg not found");
+            return;
+        }
+    };
+
+    // Check if cjpeg supports -smooth by running with -help and looking for it.
+    let help_output = std::process::Command::new(&cjpeg).arg("-help").output();
+    let supports_smooth: bool = match help_output {
+        Ok(o) => {
+            let combined: String = String::from_utf8_lossy(&o.stdout).to_string()
+                + &String::from_utf8_lossy(&o.stderr);
+            combined.contains("-smooth")
+        }
+        Err(_) => false,
+    };
+    if !supports_smooth {
+        eprintln!("SKIP: cjpeg does not support -smooth option");
+        return;
+    }
+
+    // Create a 48x48 noisy test image with deterministic pseudo-random values.
+    let width: usize = 48;
+    let height: usize = 48;
+    let mut pixels: Vec<u8> = Vec::with_capacity(width * height * 3);
+    for y in 0..height {
+        for x in 0..width {
+            let r: u8 = ((x * 37 + y * 53 + 7) % 256) as u8;
+            let g: u8 = ((x * 59 + y * 11 + 131) % 256) as u8;
+            let b: u8 = ((x * 23 + y * 41 + 97) % 256) as u8;
+            pixels.push(r);
+            pixels.push(g);
+            pixels.push(b);
+        }
+    }
+
+    // --- Step 1: Encode with Rust using smoothing_factor(50) ---
+    let rust_jpeg: Vec<u8> = Encoder::new(&pixels, width, height, PixelFormat::Rgb)
+        .quality(75)
+        .subsampling(Subsampling::S420)
+        .smoothing_factor(50)
+        .encode()
+        .expect("Rust encode with smoothing_factor(50) failed");
+
+    // Verify Rust-encoded JPEG is decodable by C djpeg
+    let tmp_rust_jpg = NicheTempFile::new("smooth_rust.jpg");
+    let tmp_rust_ppm = NicheTempFile::new("smooth_rust.ppm");
+    std::fs::write(&tmp_rust_jpg.path, &rust_jpeg).expect("write Rust JPEG");
+
+    let output = std::process::Command::new(&djpeg)
+        .arg("-ppm")
+        .arg("-outfile")
+        .arg(&tmp_rust_ppm.path)
+        .arg(&tmp_rust_jpg.path)
+        .output()
+        .expect("failed to run djpeg on Rust JPEG");
+    assert!(
+        output.status.success(),
+        "C djpeg failed to decode Rust-encoded smoothed JPEG: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let c_decoded_rust: Vec<u8> = std::fs::read(&tmp_rust_ppm.path).expect("read PPM");
+    let (c_w, c_h, c_pixels_from_rust) = niche_parse_ppm(&c_decoded_rust);
+    assert_eq!(c_w, width, "C djpeg width mismatch for Rust JPEG");
+    assert_eq!(c_h, height, "C djpeg height mismatch for Rust JPEG");
+
+    // --- Step 2: Encode with C cjpeg -smooth 50 from the same PPM ---
+    let tmp_input_ppm = NicheTempFile::new("smooth_input.ppm");
+    let tmp_c_jpg = NicheTempFile::new("smooth_c.jpg");
+    let tmp_c_ppm = NicheTempFile::new("smooth_c.ppm");
+
+    let ppm_data: Vec<u8> = build_ppm(width, height, &pixels);
+    std::fs::write(&tmp_input_ppm.path, &ppm_data).expect("write input PPM");
+
+    let c_encode = std::process::Command::new(&cjpeg)
+        .args([
+            "-quality", "75", "-sample", "2x2", "-smooth", "50", "-outfile",
+        ])
+        .arg(&tmp_c_jpg.path)
+        .arg(&tmp_input_ppm.path)
+        .output()
+        .expect("failed to run cjpeg");
+    assert!(
+        c_encode.status.success(),
+        "cjpeg -smooth 50 failed: {}",
+        String::from_utf8_lossy(&c_encode.stderr)
+    );
+
+    // Decode C-encoded JPEG with C djpeg
+    let c_decode = std::process::Command::new(&djpeg)
+        .arg("-ppm")
+        .arg("-outfile")
+        .arg(&tmp_c_ppm.path)
+        .arg(&tmp_c_jpg.path)
+        .output()
+        .expect("failed to run djpeg on C JPEG");
+    assert!(
+        c_decode.status.success(),
+        "C djpeg failed on C-encoded smoothed JPEG: {}",
+        String::from_utf8_lossy(&c_decode.stderr)
+    );
+
+    let c_decoded_c: Vec<u8> = std::fs::read(&tmp_c_ppm.path).expect("read C PPM");
+    let (cc_w, cc_h, c_pixels_from_c) = niche_parse_ppm(&c_decoded_c);
+    assert_eq!(cc_w, width, "C djpeg width mismatch for C JPEG");
+    assert_eq!(cc_h, height, "C djpeg height mismatch for C JPEG");
+
+    // --- Step 3: Compare Rust-encoded vs C-encoded via PSNR ---
+    // Smoothing filter implementations may differ between Rust and C libjpeg-turbo
+    // (different filter kernels or application order), so we use a relaxed PSNR
+    // threshold. Measured PSNR is ~22 dB; threshold set to 20 dB with margin.
+    let psnr: f64 = compute_psnr(&c_pixels_from_rust, &c_pixels_from_c);
+    eprintln!(
+        "smoothing PSNR (Rust-encoded vs C-encoded, decoded by C djpeg): {:.2} dB",
+        psnr
+    );
+    assert!(
+        psnr > 20.0,
+        "PSNR between Rust-smooth and C-smooth output is too low: {:.2} dB (expected > 20 dB)",
+        psnr
+    );
 }

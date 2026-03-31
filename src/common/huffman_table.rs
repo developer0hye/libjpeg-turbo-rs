@@ -192,3 +192,35 @@ impl HuffmanTable {
         self.count
     }
 }
+
+#[cfg(test)]
+mod tests_sym16 {
+    use super::*;
+
+    #[test]
+    fn table_with_symbol_16() {
+        // Matches the DHT from C 16-bit lossless: bits=[1,1,1,...], symbols=[14,0,16]
+        let bits: [u8; 17] = [0, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+        let values: &[u8] = &[14, 0, 16];
+        let table = HuffmanTable::build(&bits, values).expect("build failed");
+
+        // Code 0 (1 bit) → symbol 14
+        // Test with peek_bits = 0b0_0000000_00000000 = 0x0000
+        let (sym, len) = table.lookup_fast(0x0000);
+        assert_eq!((sym, len), (14, 1), "0 → symbol 14, len 1");
+
+        // Code 10 (2 bits) → symbol 0
+        // peek_bits = 0b10_000000_00000000 = 0x8000
+        let (sym, len) = table.lookup_fast(0x8000);
+        assert_eq!((sym, len), (0, 2), "10 → symbol 0, len 2");
+
+        // Code 110 (3 bits) → symbol 16
+        // peek_bits = 0b110_00000_00000000 = 0xC000
+        let (sym, len) = table.lookup_fast(0xC000);
+        assert_eq!((sym, len), (16, 3), "110 → symbol 16, len 3");
+
+        // Also test via the general lookup method
+        let (sym, len) = table.lookup(0xC000).expect("lookup failed");
+        assert_eq!((sym, len), (16, 3));
+    }
+}
