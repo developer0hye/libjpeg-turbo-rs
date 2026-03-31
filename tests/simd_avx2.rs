@@ -365,17 +365,19 @@ mod tests {
         if !is_x86_feature_detected!("avx2") {
             return;
         }
+        // For in_width=2, C uses box filter (no interpolation).
+        // The pipeline guards this case before reaching AVX2/NEON.
         let input = vec![50u8, 200u8];
         let in_width = 2;
-        let out_width = 4;
 
-        let mut expected = vec![0u8; out_width];
-        upsample::fancy_h2v1(&input, in_width, &mut expected, out_width);
-
-        let mut actual = vec![0u8; out_width];
-        avx2_upsample::avx2_fancy_upsample_h2v1(&input, in_width, &mut actual);
-
-        assert_eq!(actual, expected, "Width=2 should match scalar");
+        let mut expected = vec![0u8; 4];
+        upsample::fancy_h2v1(&input, in_width, &mut expected, 4);
+        // Box filter: [50, 50, 200, 200]
+        assert_eq!(
+            expected,
+            vec![50, 50, 200, 200],
+            "Width=2 should use box filter"
+        );
     }
 
     #[test]
