@@ -231,6 +231,199 @@ fn compress_to_writer_uses_write_trait() {
     assert_eq!(jpeg_bytes[1], 0xD8);
 }
 
+// -----------------------------------------------------------------------
+// C djpeg cross-validation
+// -----------------------------------------------------------------------
+
+/// Path to C djpeg binary, or `None` if not installed.
+fn djpeg_path() -> Option<std::path::PathBuf> {
+    let homebrew: std::path::PathBuf = std::path::PathBuf::from("/opt/homebrew/bin/djpeg");
+    if homebrew.exists() {
+        return Some(homebrew);
+    }
+    std::process::Command::new("which")
+        .arg("djpeg")
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| std::path::PathBuf::from(String::from_utf8_lossy(&o.stdout).trim().to_string()))
+}
+
+/// Parse a binary PPM (P6) file and return `(width, height, pixel_data)`.
+fn parse_ppm(data: &[u8]) -> (usize, usize, Vec<u8>) {
+    assert!(data.len() > 3, "PPM too short");
+    assert_eq!(&data[0..2], b"P6", "not a P6 PPM");
+    let mut idx: usize = 2;
+    // skip whitespace/comments
+    idx = ppm_skip_ws(data, idx);
+    let (width, next) = ppm_read_num(data, idx);
+    idx = ppm_skip_ws(data, next);
+    let (height, next) = ppm_read_num(data, idx);
+    idx = ppm_skip_ws(data, next);
+    let (_maxval, next) = ppm_read_num(data, idx);
+    idx = next + 1; // single whitespace byte before pixel data
+    let pixels: Vec<u8> = data[idx..].to_vec();
+    assert_eq!(
+        pixels.len(),
+        width * height * 3,
+        "PPM pixel data length mismatch"
+    );
+    (width, height, pixels)
+}
+
+fn ppm_skip_ws(data: &[u8], mut idx: usize) -> usize {
+    loop {
+        while idx < data.len() && data[idx].is_ascii_whitespace() {
+            idx += 1;
+        }
+        if idx < data.len() && data[idx] == b'#' {
+            while idx < data.len() && data[idx] != b'\n' {
+                idx += 1;
+            }
+        } else {
+            break;
+        }
+    }
+    idx
+}
+
+fn ppm_read_num(data: &[u8], idx: usize) -> (usize, usize) {
+    let mut end: usize = idx;
+    while end < data.len() && data[end].is_ascii_digit() {
+        end += 1;
+    }
+    let val: usize = std::str::from_utf8(&data[idx..end])
+        .unwrap()
+        .parse()
+        .unwrap();
+    (val, end)
+}
+
+/// RAII temp file that deletes on drop.
+struct TempFile {
+    path: std::path::PathBuf,
+}
+
+impl TempFile {
+    fn new(name: &str) -> Self {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+        let id: u64 = COUNTER.fetch_add(1, Ordering::Relaxed);
+        Self {
+            path: std::env::temp_dir().join(format!(
+                "ljt_stream_io_{}_{}_{name}",
+                std::process::id(),
+                id
+            )),
+        }
+    }
+}
+
+impl Drop for TempFile {
+    fn drop(&mut self) {
+        std::fs::remove_file(&self.path).ok();
+    }
+}
+
+#[test]
+fn c_djpeg_cross_validation_stream_io() {
+    let djpeg = match djpeg_path() {
+        Some(p) => p,
+        None => {
+            eprintln!("SKIP: djpeg not found");
+            return;
+        }
+    };
+
+    let width: usize = 48;
+    let height: usize = 48;
+    // Generate RGB gradient source pixels
+    let mut source_pixels: Vec<u8> = Vec::with_capacity(width * height * 3);
+    for y in 0..height {
+        for x in 0..width {
+            let r: u8 = ((x * 255) / width.max(1)) as u8;
+            let g: u8 = ((y * 255) / height.max(1)) as u8;
+            let b: u8 = (((x + y) * 127) / (width + height).max(1)) as u8;
+            source_pixels.push(r);
+            source_pixels.push(g);
+            source_pixels.push(b);
+        }
+    }
+
+    // Encode using compress_to_writer
+    let mut jpeg_buf: Vec<u8> = Vec::new();
+    stream::compress_to_writer(
+        &mut jpeg_buf,
+        &source_pixels,
+        width,
+        height,
+        PixelFormat::Rgb,
+        90,
+        Subsampling::S444,
+    )
+    .expect("compress_to_writer failed");
+
+    // Write JPEG to temp file for djpeg
+    let tmp_jpg = TempFile::new("stream_xval.jpg");
+    let tmp_ppm = TempFile::new("stream_xval.ppm");
+    std::fs::write(&tmp_jpg.path, &jpeg_buf).expect("write temp JPEG");
+
+    // Decode with C djpeg
+    let output = std::process::Command::new(&djpeg)
+        .arg("-ppm")
+        .arg("-outfile")
+        .arg(&tmp_ppm.path)
+        .arg(&tmp_jpg.path)
+        .output()
+        .expect("failed to run djpeg");
+    assert!(
+        output.status.success(),
+        "djpeg failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let ppm_data: Vec<u8> = std::fs::read(&tmp_ppm.path).expect("read PPM output");
+    let (c_w, c_h, c_pixels) = parse_ppm(&ppm_data);
+    assert_eq!(c_w, width, "C djpeg width mismatch");
+    assert_eq!(c_h, height, "C djpeg height mismatch");
+
+    // Decode with Rust
+    let rust_image: Image = decompress(&jpeg_buf).expect("Rust decompress failed");
+    assert_eq!(rust_image.width, width);
+    assert_eq!(rust_image.height, height);
+
+    // Compare pixel-by-pixel: diff must be 0
+    assert_eq!(
+        rust_image.data.len(),
+        c_pixels.len(),
+        "pixel data length mismatch"
+    );
+    let mut max_diff: u8 = 0;
+    let mut mismatch_count: usize = 0;
+    for (i, (&r, &c)) in rust_image.data.iter().zip(c_pixels.iter()).enumerate() {
+        let diff: u8 = (r as i16 - c as i16).unsigned_abs() as u8;
+        if diff > max_diff {
+            max_diff = diff;
+        }
+        if diff > 0 {
+            mismatch_count += 1;
+            if mismatch_count <= 5 {
+                let pixel: usize = i / 3;
+                let channel: &str = ["R", "G", "B"][i % 3];
+                eprintln!(
+                    "  pixel {} channel {}: rust={} c={} diff={}",
+                    pixel, channel, r, c, diff
+                );
+            }
+        }
+    }
+    assert_eq!(
+        max_diff, 0,
+        "stream_io cross-validation: {} pixels differ, max_diff={}",
+        mismatch_count, max_diff
+    );
+}
+
 #[test]
 fn file_roundtrip_grayscale() {
     let width: usize = 32;
