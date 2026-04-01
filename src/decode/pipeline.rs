@@ -2551,6 +2551,116 @@ impl<'a> Decoder<'a> {
         Ok(image)
     }
 
+    /// Decode a 12-bit JPEG by delegating to `decompress_12bit`, then scaling
+    /// the 12-bit samples (0-4095) down to 8-bit (0-255). Converts to the
+    /// requested output pixel format if one was set.
+    fn decode_12bit_as_8bit(
+        &self,
+        icc_profile: Option<Vec<u8>>,
+        exif_data: Option<Vec<u8>>,
+    ) -> Result<Image> {
+        let img12 = crate::api::precision::decompress_12bit(self.raw_data)?;
+        let num_components: usize = img12.num_components;
+
+        // Determine output format: default to Grayscale for 1-component,
+        // RGB for 3-component, same as the 8-bit path.
+        let default_format: PixelFormat = if num_components == 1 {
+            PixelFormat::Grayscale
+        } else {
+            PixelFormat::Rgb
+        };
+        let out_format: PixelFormat = self.output_format.unwrap_or(default_format);
+
+        // Scale 12-bit i16 samples to 8-bit u8: val * 255 / 4095.
+        // This matches C djpeg's 12-to-8 bit downscaling.
+        let width: usize = img12.width;
+        let height: usize = img12.height;
+
+        if num_components == 1 {
+            // Grayscale: scale directly, ignore output format conversion
+            // (only Grayscale makes sense for 1-component).
+            let mut data: Vec<u8> = Vec::with_capacity(width * height);
+            for &val in &img12.data {
+                let clamped: i16 = val.clamp(0, 4095);
+                data.push((clamped as u32 * 255 / 4095) as u8);
+            }
+            Ok(Image {
+                width,
+                height,
+                pixel_format: PixelFormat::Grayscale,
+                precision: 8,
+                data,
+                icc_profile,
+                exif_data,
+                comment: self.metadata.comment.clone(),
+                density: self.metadata.density,
+                saved_markers: self.metadata.saved_markers.clone(),
+                warnings: Vec::new(),
+            })
+        } else {
+            // Color image: img12.data is interleaved RGB (3 values per pixel).
+            // Convert to the requested output format.
+            let bpp: usize = out_format.bytes_per_pixel();
+            let mut data: Vec<u8> = vec![0u8; width * height * bpp];
+
+            let r_off: Option<usize> = out_format.red_offset();
+            let g_off: Option<usize> = out_format.green_offset();
+            let b_off: Option<usize> = out_format.blue_offset();
+
+            for i in 0..(width * height) {
+                let src_idx: usize = i * 3;
+                let r: u8 = (img12.data[src_idx].clamp(0, 4095) as u32 * 255 / 4095) as u8;
+                let g: u8 = (img12.data[src_idx + 1].clamp(0, 4095) as u32 * 255 / 4095) as u8;
+                let b: u8 = (img12.data[src_idx + 2].clamp(0, 4095) as u32 * 255 / 4095) as u8;
+                let dst_idx: usize = i * bpp;
+
+                match out_format {
+                    PixelFormat::Rgb => {
+                        data[dst_idx] = r;
+                        data[dst_idx + 1] = g;
+                        data[dst_idx + 2] = b;
+                    }
+                    PixelFormat::Grayscale => {
+                        // Approximate luminance from RGB.
+                        data[dst_idx] =
+                            ((r as u32 * 77 + g as u32 * 150 + b as u32 * 29) >> 8) as u8;
+                    }
+                    _ => {
+                        // Use offset-based mapping for all other RGB-derived formats.
+                        if let (Some(ro), Some(go), Some(bo)) = (r_off, g_off, b_off) {
+                            data[dst_idx + ro] = r;
+                            data[dst_idx + go] = g;
+                            data[dst_idx + bo] = b;
+                            // Fill alpha/padding byte to 0xFF for 4-bpp formats.
+                            if bpp == 4 {
+                                let alpha_off: usize = 6 - ro - go - bo;
+                                data[dst_idx + alpha_off] = 0xFF;
+                            }
+                        } else {
+                            return Err(JpegError::Unsupported(format!(
+                                "cannot convert 12-bit color JPEG to {:?}",
+                                out_format
+                            )));
+                        }
+                    }
+                }
+            }
+            Ok(Image {
+                width,
+                height,
+                pixel_format: out_format,
+                precision: 8,
+                data,
+                icc_profile,
+                exif_data,
+                comment: self.metadata.comment.clone(),
+                density: self.metadata.density,
+                saved_markers: self.metadata.saved_markers.clone(),
+                warnings: Vec::new(),
+            })
+        }
+    }
+
     fn decode_image_inner(&self) -> Result<Image> {
         let frame = &self.metadata.frame;
         let width = frame.width as usize;
@@ -2590,6 +2700,13 @@ impl<'a> Decoder<'a> {
 
         let icc_profile = self.icc_profile();
         let exif_data = self.metadata.exif_data.clone();
+
+        // Handle 12-bit JPEG transparently: decode via the 12-bit path, then
+        // scale samples from 0-4095 to 0-255 so callers get standard 8-bit output.
+        // This matches C djpeg behavior which handles 12-bit JPEGs automatically.
+        if frame.precision == 12 {
+            return self.decode_12bit_as_8bit(icc_profile, exif_data);
+        }
 
         if frame.precision != 8 {
             return Err(JpegError::Unsupported(format!(

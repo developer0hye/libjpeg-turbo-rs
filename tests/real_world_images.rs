@@ -6,7 +6,6 @@
 //! 3. Compares pixel output (target: diff=0)
 //!
 //! Known exception categories (gracefully skipped):
-//! - 12-bit images (`*12bit*`): Rust 8-bit decoder returns error
 //! - Arithmetic images (`*arithmetic*`): skipped if either decoder fails
 //! - Images that cause Rust decoder panics (internal bugs): skipped with message
 //! - Images that cause Rust decoder errors: skipped if in known-issue list
@@ -56,23 +55,42 @@ fn parse_ppm(data: &[u8]) -> Option<(usize, usize, usize, Vec<u8>)> {
     idx = skip_ws_comments(data, next);
     let (height, next) = read_number(data, idx)?;
     idx = skip_ws_comments(data, next);
-    let (_maxval, next) = read_number(data, idx)?;
+    let (maxval, next) = read_number(data, idx)?;
     // Exactly one whitespace byte after maxval before pixel data
     idx = next + 1;
 
     let components: usize = if is_pgm { 1 } else { 3 };
-    let expected_len: usize = width * height * components;
-    let pixel_data: &[u8] = &data[idx..];
-    if pixel_data.len() < expected_len {
-        return None;
-    }
+    let num_samples: usize = width * height * components;
 
-    Some((
-        width,
-        height,
-        components,
-        pixel_data[..expected_len].to_vec(),
-    ))
+    if maxval > 255 {
+        // 16-bit (2 bytes per sample, big-endian). Scale to 8-bit.
+        let raw_len: usize = num_samples * 2;
+        let pixel_data: &[u8] = &data[idx..];
+        if pixel_data.len() < raw_len {
+            return None;
+        }
+        let mut out: Vec<u8> = Vec::with_capacity(num_samples);
+        for i in 0..num_samples {
+            let hi: u16 = pixel_data[i * 2] as u16;
+            let lo: u16 = pixel_data[i * 2 + 1] as u16;
+            let val: u16 = (hi << 8) | lo;
+            // Scale from 0..maxval to 0..255
+            out.push((val as u32 * 255 / maxval as u32) as u8);
+        }
+        Some((width, height, components, out))
+    } else {
+        // 8-bit (1 byte per sample)
+        let pixel_data: &[u8] = &data[idx..];
+        if pixel_data.len() < num_samples {
+            return None;
+        }
+        Some((
+            width,
+            height,
+            components,
+            pixel_data[..num_samples].to_vec(),
+        ))
+    }
 }
 
 fn skip_ws_comments(data: &[u8], mut idx: usize) -> usize {
@@ -179,10 +197,6 @@ fn filter_files(files: &[PathBuf], substrings: &[&str]) -> Vec<PathBuf> {
 // ===========================================================================
 // Image classification helpers
 // ===========================================================================
-
-fn is_12bit_image(filename: &str) -> bool {
-    filename.contains("12bit")
-}
 
 fn is_arithmetic_image(filename: &str) -> bool {
     filename.contains("arithmetic")
@@ -360,16 +374,6 @@ fn validate_single_image(djpeg: &Path, jpeg_path: &Path) -> TestRecord {
         .to_string();
 
     eprintln!("  Testing: {}", filename);
-
-    // --- Known exception: 12-bit images ---
-    if is_12bit_image(&filename) {
-        return TestRecord {
-            filename,
-            result: ImageResult::Skip {
-                reason: "12-bit precision (8-bit decoder not applicable)".to_string(),
-            },
-        };
-    }
 
     // --- Known decoder issues (panics/errors) ---
     if is_known_decode_issue(&filename) {
