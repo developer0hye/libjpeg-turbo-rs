@@ -2840,38 +2840,54 @@ impl<'a> Decoder<'a> {
                 mcus_x * frame.components[0].horizontal_sampling as usize * comp_block_sizes[0];
 
             let cb_comp = &frame.components[1];
+            let cr_comp = &frame.components[2];
             let cb_w = mcus_x * cb_comp.horizontal_sampling as usize * comp_block_sizes[1];
             let cb_h = mcus_y * cb_comp.vertical_sampling as usize * comp_block_sizes[1];
+            let cr_w = mcus_x * cr_comp.horizontal_sampling as usize * comp_block_sizes[2];
+            let cr_h = mcus_y * cr_comp.vertical_sampling as usize * comp_block_sizes[2];
 
-            // Effective upsample factors considering per-component IDCT sizes.
+            let y_height =
+                mcus_y * frame.components[0].vertical_sampling as usize * comp_block_sizes[0];
+
+            // Per-component effective upsample factors.
             // For scaled decode, chroma may use a larger IDCT that absorbs subsampling,
             // making the effective factor 1 (no upsample needed).
-            let h_factor = y_width / cb_w;
-            let v_factor =
-                (mcus_y * frame.components[0].vertical_sampling as usize * comp_block_sizes[0])
-                    / (mcus_y * cb_comp.vertical_sampling as usize * comp_block_sizes[1]);
+            let cb_h_factor: usize = y_width / cb_w;
+            let cb_v_factor: usize = y_height / cb_h;
+            let cr_h_factor: usize = y_width / cr_w;
+            let cr_v_factor: usize = y_height / cr_h;
+
+            // When both chroma components have the same factors, use the shared
+            // factor variables that the existing optimized paths expect.
+            let uniform_chroma: bool = cb_h_factor == cr_h_factor && cb_v_factor == cr_v_factor;
+            let h_factor: usize = cb_h_factor;
+            let v_factor: usize = cb_v_factor;
 
             // Actual chroma dimensions (may be smaller than MCU-aligned cb_w/cb_h).
             // C libjpeg-turbo uses downsampled_width/height for upsample, not
             // MCU-padded dimensions. Using MCU-padded values causes the upsample
             // to interpolate padding data, producing wrong edge pixels.
-            let actual_cb_w: usize = out_width.div_ceil(h_factor);
-            let actual_cb_h: usize = out_height.div_ceil(v_factor);
+            let actual_cb_w: usize = out_width.div_ceil(cb_h_factor);
+            let actual_cb_h: usize = out_height.div_ceil(cb_v_factor);
+            let actual_cr_w: usize = out_width.div_ceil(cr_h_factor);
+            let actual_cr_h: usize = out_height.div_ceil(cr_v_factor);
 
             // For 4:4:4, use component planes directly without clone.
             // For subsampled modes, upsample into separate buffers.
             let (cb_data, cr_data, cb_stride, cr_stride): (&[u8], &[u8], usize, usize);
 
-            if h_factor == 1 && v_factor == 1 {
+            if cb_h_factor == 1 && cb_v_factor == 1 && cr_h_factor == 1 && cr_v_factor == 1 {
                 // 4:4:4: no upsampling needed — reference planes directly
                 cb_data = &component_planes[1];
                 cr_data = &component_planes[2];
                 cb_stride = cb_w;
-                cr_stride = cb_w;
+                cr_stride = cr_w;
             } else {
                 // Merged upsample path: combine upsample + color convert in one pass
                 // for H2V1 (4:2:2) and H2V2 (4:2:0), avoiding intermediate chroma buffers.
+                // Only available when both chroma components have the same sampling factors.
                 if self.merged_upsample
+                    && uniform_chroma
                     && out_format == PixelFormat::Rgb
                     && h_factor == 2
                     && (v_factor == 1 || v_factor == 2)
@@ -2948,7 +2964,9 @@ impl<'a> Decoder<'a> {
                 // When actual_cb_w <= 2, C's merged upsample uses box filter for the
                 // entire image (the NEON/SIMD fancy path doesn't kick in). Use box
                 // filter (fast_upsample equivalent) to match C exactly.
+                // Only available when both chroma components have the same sampling factors.
                 if !self.fast_upsample
+                    && uniform_chroma
                     && h_factor == 2
                     && v_factor == 2
                     && actual_cb_w > 2
@@ -3075,163 +3093,85 @@ impl<'a> Decoder<'a> {
                     cr_full.set_len(alloc_size);
                 }
 
-                // C's merged upsample uses box filter when:
-                // - actual_cb_w <= 2 (SIMD fancy requires >= 3 columns)
-                // - scaled decode with chroma still needing upsample (chroma IDCT < 8)
-                let use_box_filter: bool =
-                    self.fast_upsample || actual_cb_w <= 2 || comp_block_sizes[1] < 8;
-
-                if use_box_filter {
-                    crate::decode::toggles::upsample_nearest(
+                // Upsample each chroma component independently using its own factors.
+                // This handles non-uniform chroma sampling (e.g. Cb=2x1, Cr=1x1)
+                // where each component needs a different upsample strategy.
+                for (
+                    comp_plane,
+                    comp_full,
+                    comp_w,
+                    comp_h,
+                    comp_hf,
+                    comp_vf,
+                    actual_w,
+                    actual_h,
+                    comp_bs,
+                ) in [
+                    (
                         &component_planes[1],
-                        cb_w,
-                        cb_h,
                         &mut cb_full,
-                        full_width,
-                        h_factor,
-                        v_factor,
-                    );
-                    crate::decode::toggles::upsample_nearest(
-                        &component_planes[2],
                         cb_w,
                         cb_h,
+                        cb_h_factor,
+                        cb_v_factor,
+                        actual_cb_w,
+                        actual_cb_h,
+                        comp_block_sizes[1],
+                    ),
+                    (
+                        &component_planes[2],
                         &mut cr_full,
-                        full_width,
-                        h_factor,
-                        v_factor,
-                    );
-                } else if h_factor == 2 && v_factor == 1 {
-                    // Use actual chroma dimensions (not MCU-padded) to match C.
-                    for row in 0..actual_cb_h {
-                        self.fancy_upsample_h2v1(
-                            &component_planes[1][row * cb_w..],
-                            actual_cb_w,
-                            &mut cb_full[row * full_width..],
+                        cr_w,
+                        cr_h,
+                        cr_h_factor,
+                        cr_v_factor,
+                        actual_cr_w,
+                        actual_cr_h,
+                        comp_block_sizes[2],
+                    ),
+                ] {
+                    // C's merged upsample uses box filter when:
+                    // - actual chroma width <= 2 (SIMD fancy requires >= 3 columns)
+                    // - scaled decode with chroma still needing upsample (chroma IDCT < 8)
+                    let use_box_filter: bool = self.fast_upsample || actual_w <= 2 || comp_bs < 8;
+
+                    if comp_hf == 1 && comp_vf == 1 {
+                        // No upsampling needed for this component — copy directly.
+                        for row in 0..full_height.min(comp_h) {
+                            let src_start: usize = row * comp_w;
+                            let dst_start: usize = row * full_width;
+                            let copy_len: usize = full_width.min(comp_w);
+                            comp_full[dst_start..dst_start + copy_len]
+                                .copy_from_slice(&comp_plane[src_start..src_start + copy_len]);
+                        }
+                    } else if use_box_filter {
+                        crate::decode::toggles::upsample_nearest(
+                            comp_plane, comp_w, comp_h, comp_full, full_width, comp_hf, comp_vf,
                         );
-                        self.fancy_upsample_h2v1(
-                            &component_planes[2][row * cb_w..],
-                            actual_cb_w,
-                            &mut cr_full[row * full_width..],
+                    } else if comp_hf == 2 && comp_vf == 1 {
+                        // H2V1: horizontal-only 2x fancy upsample.
+                        for row in 0..actual_h {
+                            self.fancy_upsample_h2v1(
+                                &comp_plane[row * comp_w..],
+                                actual_w,
+                                &mut comp_full[row * full_width..],
+                            );
+                        }
+                    } else if comp_hf == 2 && comp_vf == 2 {
+                        // H2V2: fused 2D triangle filter fancy upsample.
+                        crate::decode::upsample::fancy_h2v2_strided(
+                            comp_plane, actual_w, comp_w, actual_h, comp_full, full_width,
+                        );
+                    } else if comp_hf == 1 && comp_vf == 2 {
+                        // H1V2: vertical-only 2x fancy upsample.
+                        self.fancy_h1v2(comp_plane, comp_w, actual_h, comp_full, full_width);
+                    } else {
+                        // Generic fallback: nearest-neighbor for any factor combination
+                        // (4x1, 4x2, 1x4, 3x2, etc.).
+                        upsample_generic_nearest(
+                            comp_plane, comp_w, comp_h, comp_full, full_width, comp_hf, comp_vf,
                         );
                     }
-                } else if h_factor == 2 && v_factor == 2 {
-                    // Use actual chroma dimensions (not MCU-padded) to match C.
-                    crate::decode::upsample::fancy_h2v2_strided(
-                        &component_planes[1],
-                        actual_cb_w,
-                        cb_w,
-                        actual_cb_h,
-                        &mut cb_full,
-                        full_width,
-                    );
-                    crate::decode::upsample::fancy_h2v2_strided(
-                        &component_planes[2],
-                        actual_cb_w,
-                        cb_w,
-                        actual_cb_h,
-                        &mut cr_full,
-                        full_width,
-                    );
-                } else if h_factor == 1 && v_factor == 2 {
-                    // S440: vertical-only 2x — use actual chroma height
-                    self.fancy_h1v2(
-                        &component_planes[1],
-                        cb_w,
-                        actual_cb_h,
-                        &mut cb_full,
-                        full_width,
-                    );
-                    self.fancy_h1v2(
-                        &component_planes[2],
-                        cb_w,
-                        actual_cb_h,
-                        &mut cr_full,
-                        full_width,
-                    );
-                } else if h_factor == 4 && v_factor == 1 {
-                    // S411: horizontal-only 4x — C uses int_upsample (box filter),
-                    // not fancy interpolation. Use nearest-neighbor to match C.
-                    upsample_generic_nearest(
-                        &component_planes[1],
-                        cb_w,
-                        cb_h,
-                        &mut cb_full,
-                        full_width,
-                        h_factor,
-                        1,
-                    );
-                    upsample_generic_nearest(
-                        &component_planes[2],
-                        cb_w,
-                        cb_h,
-                        &mut cr_full,
-                        full_width,
-                        h_factor,
-                        1,
-                    );
-                } else if h_factor == 4 && v_factor == 2 {
-                    // 4:1:0: C uses int_upsample (box filter) for all factors
-                    // beyond h2v1/h2v2. Use nearest-neighbor to match C.
-                    upsample_generic_nearest(
-                        &component_planes[1],
-                        cb_w,
-                        cb_h,
-                        &mut cb_full,
-                        full_width,
-                        h_factor,
-                        v_factor,
-                    );
-                    upsample_generic_nearest(
-                        &component_planes[2],
-                        cb_w,
-                        cb_h,
-                        &mut cr_full,
-                        full_width,
-                        h_factor,
-                        v_factor,
-                    );
-                } else if h_factor == 1 && v_factor == 4 {
-                    // S441: vertical-only 4x — C uses int_upsample (box filter),
-                    // not fancy interpolation. Use nearest-neighbor to match C.
-                    upsample_generic_nearest(
-                        &component_planes[1],
-                        cb_w,
-                        cb_h,
-                        &mut cb_full,
-                        full_width,
-                        1,
-                        v_factor,
-                    );
-                    upsample_generic_nearest(
-                        &component_planes[2],
-                        cb_w,
-                        cb_h,
-                        &mut cr_full,
-                        full_width,
-                        1,
-                        v_factor,
-                    );
-                } else {
-                    // Generic fallback for non-standard sampling factors (e.g. 3x2, 3x1, 1x3, 4x2).
-                    // Uses nearest-neighbor replication for any h/v factor combination.
-                    upsample_generic_nearest(
-                        &component_planes[1],
-                        cb_w,
-                        cb_h,
-                        &mut cb_full,
-                        full_width,
-                        h_factor,
-                        v_factor,
-                    );
-                    upsample_generic_nearest(
-                        &component_planes[2],
-                        cb_w,
-                        cb_h,
-                        &mut cr_full,
-                        full_width,
-                        h_factor,
-                        v_factor,
-                    );
                 }
 
                 // Rebind as immutable references for color conversion below.
