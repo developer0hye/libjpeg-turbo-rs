@@ -196,12 +196,20 @@ impl<'a> MarkerReader<'a> {
                     });
 
                     let is_progressive = frame.as_ref().is_some_and(|f| f.is_progressive);
-                    if !is_progressive {
-                        // Baseline: single scan, stop here
+                    // Non-interleaved baseline: SOS has fewer components than
+                    // the frame.  Continue reading to find remaining SOS markers.
+                    let scan_comp_count = scans.last().unwrap().header.components.len();
+                    let is_non_interleaved_baseline = !is_progressive
+                        && frame
+                            .as_ref()
+                            .is_some_and(|f| scan_comp_count < f.components.len());
+                    if !is_progressive && !is_non_interleaved_baseline {
+                        // Interleaved baseline: single scan, stop here
                         break;
                     }
 
-                    // Progressive: skip entropy data to find next marker
+                    // Progressive or non-interleaved baseline: skip entropy
+                    // data to find next marker
                     self.skip_entropy_data();
                 }
                 EOI => {
