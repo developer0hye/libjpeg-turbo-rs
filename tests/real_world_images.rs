@@ -191,13 +191,7 @@ fn is_arithmetic_image(filename: &str) -> bool {
 /// Known issues table: (filename_pattern, reason).
 /// Images matching these patterns are skipped with the given reason.
 /// These represent existing Rust decoder bugs tracked separately.
-const KNOWN_DECODE_ISSUES: &[(&str, &str)] = &[
-    // Non-uniform chroma sampling (2x1 + 1x1) causes upsample crash
-    (
-        "zune_synthetic_progressive",
-        "non-uniform chroma sampling factors (2x1 + 1x1) not supported",
-    ),
-];
+const KNOWN_DECODE_ISSUES: &[(&str, &str)] = &[];
 
 fn is_known_decode_issue(filename: &str) -> bool {
     KNOWN_DECODE_ISSUES
