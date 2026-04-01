@@ -192,35 +192,11 @@ fn is_arithmetic_image(filename: &str) -> bool {
 /// Images matching these patterns are skipped with the given reason.
 /// These represent existing Rust decoder bugs tracked separately.
 const KNOWN_DECODE_ISSUES: &[(&str, &str)] = &[
-    // Invalid Huffman code error during progressive scan decode
+    // Non-uniform chroma sampling (2x1 + 1x1) causes upsample crash
     (
         "zune_synthetic_progressive",
-        "invalid Huffman code in progressive decode",
+        "non-uniform chroma sampling factors (2x1 + 1x1) not supported",
     ),
-    // MJPEG-style Huffman tables (DHT in scan, not frame) not supported
-    (
-        "zune_mjpeg_huffman",
-        "MJPEG-style DHT placement not supported (missing DC Huffman table 0)",
-    ),
-    // Progressive 227x149 4:2:0: pixel diffs vs C djpeg (pre-existing)
-    (
-        "derived_227x149_progressive",
-        "progressive 4:2:0 decode has pixel diffs vs C djpeg",
-    ),
-    // Grayscale progressive: pixel diffs vs C djpeg (pre-existing)
-    (
-        "zune_grayscale_progressive",
-        "grayscale progressive decode has pixel diffs vs C djpeg",
-    ),
-    // CMYK baseline: Rust CMYK->RGB conversion differs from C djpeg
-    (
-        "zune_cmyk_600x397",
-        "CMYK->RGB conversion differs from C djpeg",
-    ),
-    // YCCK baseline: Rust YCCK->RGB conversion differs from C djpeg
-    ("pil_cmyk", "YCCK->RGB conversion differs from C djpeg"),
-    // YCCK progressive: Rust YCCK->RGB conversion differs from C djpeg
-    ("zune_ycck", "YCCK->RGB conversion differs from C djpeg"),
 ];
 
 fn is_known_decode_issue(filename: &str) -> bool {

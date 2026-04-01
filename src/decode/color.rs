@@ -174,23 +174,24 @@ pub fn ycck_to_cmyk_row(y: &[u8], cb: &[u8], cr: &[u8], k: &[u8], cmyk: &mut [u8
 
 /// Convert a row of CMYK pixels to interleaved RGB.
 ///
-/// Uses the standard formula: R = (255 - C) * (255 - K) / 255, etc.
+/// JPEG CMYK stores values in complement form (0 = full ink, 255 = no ink).
+/// Matches C libjpeg-turbo's cmyk_to_rgb formula: R = C * K / 255.
 pub fn cmyk_to_rgb_row(c: &[u8], m: &[u8], y: &[u8], k: &[u8], rgb: &mut [u8], width: usize) {
     for x in 0..width {
-        let ki = 255 - k[x] as u16;
-        rgb[x * 3] = (((255 - c[x] as u16) * ki + 127) / 255) as u8;
-        rgb[x * 3 + 1] = (((255 - m[x] as u16) * ki + 127) / 255) as u8;
-        rgb[x * 3 + 2] = (((255 - y[x] as u16) * ki + 127) / 255) as u8;
+        let kv = k[x] as u16;
+        rgb[x * 3] = ((c[x] as u16 * kv + 127) / 255) as u8;
+        rgb[x * 3 + 1] = ((m[x] as u16 * kv + 127) / 255) as u8;
+        rgb[x * 3 + 2] = ((y[x] as u16 * kv + 127) / 255) as u8;
     }
 }
 
 /// Convert a row of CMYK pixels to interleaved RGBA (alpha = 255).
 pub fn cmyk_to_rgba_row(c: &[u8], m: &[u8], y: &[u8], k: &[u8], rgba: &mut [u8], width: usize) {
     for x in 0..width {
-        let ki = 255 - k[x] as u16;
-        rgba[x * 4] = (((255 - c[x] as u16) * ki + 127) / 255) as u8;
-        rgba[x * 4 + 1] = (((255 - m[x] as u16) * ki + 127) / 255) as u8;
-        rgba[x * 4 + 2] = (((255 - y[x] as u16) * ki + 127) / 255) as u8;
+        let kv = k[x] as u16;
+        rgba[x * 4] = ((c[x] as u16 * kv + 127) / 255) as u8;
+        rgba[x * 4 + 1] = ((m[x] as u16 * kv + 127) / 255) as u8;
+        rgba[x * 4 + 2] = ((y[x] as u16 * kv + 127) / 255) as u8;
         rgba[x * 4 + 3] = 255;
     }
 }
@@ -198,10 +199,10 @@ pub fn cmyk_to_rgba_row(c: &[u8], m: &[u8], y: &[u8], k: &[u8], rgba: &mut [u8],
 /// Convert a row of CMYK pixels to interleaved BGR.
 pub fn cmyk_to_bgr_row(c: &[u8], m: &[u8], y: &[u8], k: &[u8], bgr: &mut [u8], width: usize) {
     for x in 0..width {
-        let ki = 255 - k[x] as u16;
-        let r = (((255 - c[x] as u16) * ki + 127) / 255) as u8;
-        let g = (((255 - m[x] as u16) * ki + 127) / 255) as u8;
-        let b = (((255 - y[x] as u16) * ki + 127) / 255) as u8;
+        let kv = k[x] as u16;
+        let r = ((c[x] as u16 * kv + 127) / 255) as u8;
+        let g = ((m[x] as u16 * kv + 127) / 255) as u8;
+        let b = ((y[x] as u16 * kv + 127) / 255) as u8;
         bgr[x * 3] = b;
         bgr[x * 3 + 1] = g;
         bgr[x * 3 + 2] = r;
@@ -211,10 +212,10 @@ pub fn cmyk_to_bgr_row(c: &[u8], m: &[u8], y: &[u8], k: &[u8], bgr: &mut [u8], w
 /// Convert a row of CMYK pixels to interleaved BGRA (alpha = 255).
 pub fn cmyk_to_bgra_row(c: &[u8], m: &[u8], y: &[u8], k: &[u8], bgra: &mut [u8], width: usize) {
     for x in 0..width {
-        let ki = 255 - k[x] as u16;
-        let r = (((255 - c[x] as u16) * ki + 127) / 255) as u8;
-        let g = (((255 - m[x] as u16) * ki + 127) / 255) as u8;
-        let b = (((255 - y[x] as u16) * ki + 127) / 255) as u8;
+        let kv = k[x] as u16;
+        let r = ((c[x] as u16 * kv + 127) / 255) as u8;
+        let g = ((m[x] as u16 * kv + 127) / 255) as u8;
+        let b = ((y[x] as u16 * kv + 127) / 255) as u8;
         bgra[x * 4] = b;
         bgra[x * 4 + 1] = g;
         bgra[x * 4 + 2] = r;

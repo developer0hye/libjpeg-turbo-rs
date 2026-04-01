@@ -65,14 +65,17 @@ fn ycck_to_cmyk_bulk() {
 }
 
 // --- CMYK → RGB tests ---
+// JPEG CMYK uses complement form matching C libjpeg-turbo's cmyk.h:
+//   R = C * K / 255, G = M * K / 255, B = Y * K / 255
+// White in JPEG CMYK = (255, 255, 255, 255), Black = (0, 0, 0, 0).
 
 #[test]
 fn cmyk_to_rgb_pure_white() {
-    // CMYK (0, 0, 0, 0) → RGB (255, 255, 255)
-    let c = [0u8];
-    let m = [0u8];
-    let y_plane = [0u8];
-    let k = [0u8];
+    // JPEG CMYK white (255, 255, 255, 255) → RGB (255, 255, 255)
+    let c = [255u8];
+    let m = [255u8];
+    let y_plane = [255u8];
+    let k = [255u8];
     let mut rgb = [0u8; 3];
     color::cmyk_to_rgb_row(&c, &m, &y_plane, &k, &mut rgb, 1);
     assert_eq!(&rgb, &[255, 255, 255]);
@@ -80,11 +83,11 @@ fn cmyk_to_rgb_pure_white() {
 
 #[test]
 fn cmyk_to_rgb_pure_black() {
-    // CMYK (0, 0, 0, 255) → RGB (0, 0, 0)
+    // JPEG CMYK black (0, 0, 0, 0) → RGB (0, 0, 0)
     let c = [0u8];
     let m = [0u8];
     let y_plane = [0u8];
-    let k = [255u8];
+    let k = [0u8];
     let mut rgb = [0u8; 3];
     color::cmyk_to_rgb_row(&c, &m, &y_plane, &k, &mut rgb, 1);
     assert_eq!(&rgb, &[0, 0, 0]);
@@ -92,11 +95,12 @@ fn cmyk_to_rgb_pure_black() {
 
 #[test]
 fn cmyk_to_rgb_pure_cyan() {
-    // CMYK (255, 0, 0, 0) → RGB (0, 255, 255)
-    let c = [255u8];
-    let m = [0u8];
-    let y_plane = [0u8];
-    let k = [0u8];
+    // JPEG CMYK: C=0 means full cyan ink → R=0; M=255,Y=255 → G,B at full
+    // (0, 255, 255, 255) → R=0, G=255, B=255
+    let c = [0u8];
+    let m = [255u8];
+    let y_plane = [255u8];
+    let k = [255u8];
     let mut rgb = [0u8; 3];
     color::cmyk_to_rgb_row(&c, &m, &y_plane, &k, &mut rgb, 1);
     assert_eq!(&rgb, &[0, 255, 255]);
@@ -104,15 +108,16 @@ fn cmyk_to_rgb_pure_cyan() {
 
 #[test]
 fn cmyk_to_rgb_bulk() {
-    let c = [0u8, 0, 255];
-    let m = [0u8, 0, 0];
-    let y_plane = [0u8, 0, 0];
-    let k = [0u8, 255, 0];
+    // white=(255,255,255,255), black=(0,0,0,0), pure red=(255,0,0,255)
+    let c = [255u8, 0, 255];
+    let m = [255u8, 0, 0];
+    let y_plane = [255u8, 0, 0];
+    let k = [255u8, 0, 255];
     let mut rgb = [0u8; 9];
     color::cmyk_to_rgb_row(&c, &m, &y_plane, &k, &mut rgb, 3);
     assert_eq!(&rgb[0..3], &[255, 255, 255]); // white
     assert_eq!(&rgb[3..6], &[0, 0, 0]); // black
-    assert_eq!(&rgb[6..9], &[0, 255, 255]); // cyan
+    assert_eq!(&rgb[6..9], &[255, 0, 0]); // red
 }
 
 #[test]

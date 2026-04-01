@@ -49,12 +49,20 @@ pub(crate) fn upsample_generic_nearest(
 
 /// Per-component layout info for progressive decoding.
 struct CompInfo {
+    /// Buffer width in blocks (rounded up to MCU alignment: mcus_x * h_samp).
     blocks_x: usize,
+    /// Buffer height in blocks (rounded up to MCU alignment: mcus_y * v_samp).
     blocks_y: usize,
     h_samp: usize,
     v_samp: usize,
     comp_w: usize,
     block_size: usize,
+    /// Actual number of encoded block columns for non-interleaved scans.
+    /// = ceil(image_width * h_samp / (max_h * block_size))
+    width_in_blocks: usize,
+    /// Actual number of encoded block rows for non-interleaved scans.
+    /// = ceil(image_height * v_samp / (max_v * block_size))
+    height_in_blocks: usize,
 }
 
 /// Decoded image data.
@@ -147,7 +155,10 @@ pub struct Decoder<'a> {
 impl<'a> Decoder<'a> {
     pub fn new(data: &'a [u8]) -> Result<Self> {
         let mut reader = MarkerReader::new(data);
-        let metadata = reader.read_markers()?;
+        let mut metadata = reader.read_markers()?;
+        // MJPEG frames may omit Huffman tables; provide standard defaults
+        // (JPEG spec section K.3), matching C libjpeg-turbo's std_huff_tables().
+        Self::fill_default_huffman_tables(&mut metadata);
         let routines = simd::detect();
         Ok(Self {
             metadata,
@@ -173,6 +184,140 @@ impl<'a> Decoder<'a> {
             merged_upsample: false,
             marker_processors: std::collections::HashMap::new(),
         })
+    }
+
+    /// Fill in standard JPEG Huffman tables when no DHT markers were present.
+    ///
+    /// MJPEG frames typically omit DHT markers entirely, relying on the decoder
+    /// to provide the standard tables from JPEG spec section K.3.
+    /// Only fills when ALL table slots are `None` (no DHT was parsed at all).
+    fn fill_default_huffman_tables(metadata: &mut JpegMetadata) {
+        use crate::common::huffman_table::HuffmanTable;
+
+        // Only fill defaults if no DHT markers were present at all.
+        // If any table was defined (even if some slots are empty), respect the
+        // original DHT data and do not override.
+        let any_dc = metadata.dc_huffman_tables.iter().any(|t| t.is_some());
+        let any_ac = metadata.ac_huffman_tables.iter().any(|t| t.is_some());
+        if any_dc || any_ac {
+            return;
+        }
+
+        // Standard DC luminance (table 0)
+        #[rustfmt::skip]
+        const BITS_DC_LUM: [u8; 17] = [
+            0, 0, 1, 5, 1, 1, 1, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0
+        ];
+        #[rustfmt::skip]
+        const VALS_DC_LUM: [u8; 12] = [
+            0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11
+        ];
+
+        // Standard DC chrominance (table 1)
+        #[rustfmt::skip]
+        const BITS_DC_CHR: [u8; 17] = [
+            0, 0, 3, 1, 1, 1, 1, 1, 1, 1, 1, 1, 0, 0, 0, 0, 0
+        ];
+        #[rustfmt::skip]
+        const VALS_DC_CHR: [u8; 12] = [
+            0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11
+        ];
+
+        // Standard AC luminance (table 0)
+        #[rustfmt::skip]
+        const BITS_AC_LUM: [u8; 17] = [
+            0, 0, 2, 1, 3, 3, 2, 4, 3, 5, 5, 4, 4, 0, 0, 1, 0x7d
+        ];
+        #[rustfmt::skip]
+        const VALS_AC_LUM: [u8; 162] = [
+            0x01, 0x02, 0x03, 0x00, 0x04, 0x11, 0x05, 0x12,
+            0x21, 0x31, 0x41, 0x06, 0x13, 0x51, 0x61, 0x07,
+            0x22, 0x71, 0x14, 0x32, 0x81, 0x91, 0xa1, 0x08,
+            0x23, 0x42, 0xb1, 0xc1, 0x15, 0x52, 0xd1, 0xf0,
+            0x24, 0x33, 0x62, 0x72, 0x82, 0x09, 0x0a, 0x16,
+            0x17, 0x18, 0x19, 0x1a, 0x25, 0x26, 0x27, 0x28,
+            0x29, 0x2a, 0x34, 0x35, 0x36, 0x37, 0x38, 0x39,
+            0x3a, 0x43, 0x44, 0x45, 0x46, 0x47, 0x48, 0x49,
+            0x4a, 0x53, 0x54, 0x55, 0x56, 0x57, 0x58, 0x59,
+            0x5a, 0x63, 0x64, 0x65, 0x66, 0x67, 0x68, 0x69,
+            0x6a, 0x73, 0x74, 0x75, 0x76, 0x77, 0x78, 0x79,
+            0x7a, 0x83, 0x84, 0x85, 0x86, 0x87, 0x88, 0x89,
+            0x8a, 0x92, 0x93, 0x94, 0x95, 0x96, 0x97, 0x98,
+            0x99, 0x9a, 0xa2, 0xa3, 0xa4, 0xa5, 0xa6, 0xa7,
+            0xa8, 0xa9, 0xaa, 0xb2, 0xb3, 0xb4, 0xb5, 0xb6,
+            0xb7, 0xb8, 0xb9, 0xba, 0xc2, 0xc3, 0xc4, 0xc5,
+            0xc6, 0xc7, 0xc8, 0xc9, 0xca, 0xd2, 0xd3, 0xd4,
+            0xd5, 0xd6, 0xd7, 0xd8, 0xd9, 0xda, 0xe1, 0xe2,
+            0xe3, 0xe4, 0xe5, 0xe6, 0xe7, 0xe8, 0xe9, 0xea,
+            0xf1, 0xf2, 0xf3, 0xf4, 0xf5, 0xf6, 0xf7, 0xf8,
+            0xf9, 0xfa,
+        ];
+
+        // Standard AC chrominance (table 1)
+        #[rustfmt::skip]
+        const BITS_AC_CHR: [u8; 17] = [
+            0, 0, 2, 1, 2, 4, 4, 3, 4, 7, 5, 4, 4, 0, 1, 2, 0x77
+        ];
+        #[rustfmt::skip]
+        const VALS_AC_CHR: [u8; 162] = [
+            0x00, 0x01, 0x02, 0x03, 0x11, 0x04, 0x05, 0x21,
+            0x31, 0x06, 0x12, 0x41, 0x51, 0x07, 0x61, 0x71,
+            0x13, 0x22, 0x32, 0x81, 0x08, 0x14, 0x42, 0x91,
+            0xa1, 0xb1, 0xc1, 0x09, 0x23, 0x33, 0x52, 0xf0,
+            0x15, 0x62, 0x72, 0xd1, 0x0a, 0x16, 0x24, 0x34,
+            0xe1, 0x25, 0xf1, 0x17, 0x18, 0x19, 0x1a, 0x26,
+            0x27, 0x28, 0x29, 0x2a, 0x35, 0x36, 0x37, 0x38,
+            0x39, 0x3a, 0x43, 0x44, 0x45, 0x46, 0x47, 0x48,
+            0x49, 0x4a, 0x53, 0x54, 0x55, 0x56, 0x57, 0x58,
+            0x59, 0x5a, 0x63, 0x64, 0x65, 0x66, 0x67, 0x68,
+            0x69, 0x6a, 0x73, 0x74, 0x75, 0x76, 0x77, 0x78,
+            0x79, 0x7a, 0x82, 0x83, 0x84, 0x85, 0x86, 0x87,
+            0x88, 0x89, 0x8a, 0x92, 0x93, 0x94, 0x95, 0x96,
+            0x97, 0x98, 0x99, 0x9a, 0xa2, 0xa3, 0xa4, 0xa5,
+            0xa6, 0xa7, 0xa8, 0xa9, 0xaa, 0xb2, 0xb3, 0xb4,
+            0xb5, 0xb6, 0xb7, 0xb8, 0xb9, 0xba, 0xc2, 0xc3,
+            0xc4, 0xc5, 0xc6, 0xc7, 0xc8, 0xc9, 0xca, 0xd2,
+            0xd3, 0xd4, 0xd5, 0xd6, 0xd7, 0xd8, 0xd9, 0xda,
+            0xe2, 0xe3, 0xe4, 0xe5, 0xe6, 0xe7, 0xe8, 0xe9,
+            0xea, 0xf2, 0xf3, 0xf4, 0xf5, 0xf6, 0xf7, 0xf8,
+            0xf9, 0xfa,
+        ];
+
+        // Fill missing DC tables
+        if metadata.dc_huffman_tables[0].is_none() {
+            if let Ok(tbl) = HuffmanTable::build(&BITS_DC_LUM, &VALS_DC_LUM) {
+                metadata.dc_huffman_tables[0] = Some(tbl);
+            }
+        }
+        if metadata.dc_huffman_tables[1].is_none() {
+            if let Ok(tbl) = HuffmanTable::build(&BITS_DC_CHR, &VALS_DC_CHR) {
+                metadata.dc_huffman_tables[1] = Some(tbl);
+            }
+        }
+
+        // Fill missing AC tables
+        if metadata.ac_huffman_tables[0].is_none() {
+            if let Ok(tbl) = HuffmanTable::build(&BITS_AC_LUM, &VALS_AC_LUM) {
+                metadata.ac_huffman_tables[0] = Some(tbl);
+            }
+        }
+        if metadata.ac_huffman_tables[1].is_none() {
+            if let Ok(tbl) = HuffmanTable::build(&BITS_AC_CHR, &VALS_AC_CHR) {
+                metadata.ac_huffman_tables[1] = Some(tbl);
+            }
+        }
+
+        // Also fill in ScanInfo Huffman tables for the first scan if needed
+        for scan in &mut metadata.scans {
+            for i in 0..4 {
+                if scan.dc_huffman_tables[i].is_none() && metadata.dc_huffman_tables[i].is_some() {
+                    scan.dc_huffman_tables[i] = metadata.dc_huffman_tables[i].clone();
+                }
+                if scan.ac_huffman_tables[i].is_none() && metadata.ac_huffman_tables[i].is_some() {
+                    scan.ac_huffman_tables[i] = metadata.ac_huffman_tables[i].clone();
+                }
+            }
+        }
     }
 
     pub fn header(&self) -> &FrameHeader {
@@ -824,6 +969,19 @@ impl<'a> Decoder<'a> {
         mcus_y: usize,
         comp_block_sizes: &[usize],
     ) -> Result<(Vec<Vec<u8>>, Vec<DecodeWarning>)> {
+        // Non-interleaved baseline: multiple SOS markers, each with a single component.
+        // Dispatch to dedicated multi-scan path.
+        if self.metadata.scans.len() > 1 {
+            return self.decode_non_interleaved_baseline_planes(
+                frame,
+                quant_tables,
+                num_components,
+                mcus_x,
+                mcus_y,
+                comp_block_sizes,
+            );
+        }
+
         let scan = &self.metadata.scan;
         let block_size: usize = comp_block_sizes[0]; // min (luma) block size for MCU row range
 
@@ -1032,6 +1190,152 @@ impl<'a> Decoder<'a> {
         Ok((component_planes, warnings))
     }
 
+    /// Decode non-interleaved baseline JPEG (multiple SOS markers, one component per scan).
+    ///
+    /// Each SOS contains a single component with full DC+AC coefficients (ss=0, se=63).
+    /// The MCU for a non-interleaved scan is a single 8x8 block, and blocks are
+    /// iterated in raster order: blocks_x * blocks_y total blocks per scan.
+    #[allow(clippy::too_many_arguments)]
+    fn decode_non_interleaved_baseline_planes(
+        &self,
+        frame: &FrameHeader,
+        quant_tables: &[&QuantTable],
+        _num_components: usize,
+        mcus_x: usize,
+        mcus_y: usize,
+        comp_block_sizes: &[usize],
+    ) -> Result<(Vec<Vec<u8>>, Vec<DecodeWarning>)> {
+        // Allocate component planes (full MCU-aligned size, zero-initialized).
+        // Zero-init is needed because non-interleaved scans may encode fewer
+        // blocks than the plane holds (padding blocks at right/bottom edges).
+        let mut component_planes: Vec<Vec<u8>> = frame
+            .components
+            .iter()
+            .enumerate()
+            .map(|(ci, comp)| {
+                let comp_w: usize =
+                    mcus_x * comp.horizontal_sampling as usize * comp_block_sizes[ci];
+                let comp_h: usize = mcus_y * comp.vertical_sampling as usize * comp_block_sizes[ci];
+                let size: usize = comp_w * comp_h;
+                vec![0u8; size]
+            })
+            .collect();
+
+        // Process each scan independently
+        for scan_info in &self.metadata.scans {
+            let scan = &scan_info.header;
+
+            // Each non-interleaved scan should have exactly 1 component
+            if scan.components.len() != 1 {
+                return Err(JpegError::CorruptData(format!(
+                    "non-interleaved baseline scan has {} components, expected 1",
+                    scan.components.len()
+                )));
+            }
+
+            let scan_comp = &scan.components[0];
+
+            // Find the frame component index for this scan's component
+            let comp_idx: usize = frame
+                .components
+                .iter()
+                .position(|fc| fc.id == scan_comp.component_id)
+                .ok_or_else(|| {
+                    JpegError::CorruptData(format!(
+                        "scan references unknown component id {}",
+                        scan_comp.component_id
+                    ))
+                })?;
+
+            let comp = &frame.components[comp_idx];
+            let h_samp: usize = comp.horizontal_sampling as usize;
+            let v_samp: usize = comp.vertical_sampling as usize;
+            let max_h: usize = frame
+                .components
+                .iter()
+                .map(|c| c.horizontal_sampling as usize)
+                .max()
+                .unwrap_or(1);
+            let max_v: usize = frame
+                .components
+                .iter()
+                .map(|c| c.vertical_sampling as usize)
+                .max()
+                .unwrap_or(1);
+
+            // For non-interleaved scans, the number of encoded blocks is based on
+            // the component's actual sample dimensions (JPEG spec ITU T.81 A.2.3):
+            //   comp_samples = ceil(image_dim * h_samp / max_h)
+            //   encoded_blocks = ceil(comp_samples / 8)
+            let comp_width_samples: usize = (frame.width as usize * h_samp).div_ceil(max_h);
+            let comp_height_samples: usize = (frame.height as usize * v_samp).div_ceil(max_v);
+            let encoded_blocks_x: usize = comp_width_samples.div_ceil(8);
+            let encoded_blocks_y: usize = comp_height_samples.div_ceil(8);
+
+            // The plane is allocated based on the interleaved MCU grid,
+            // which may have more blocks than the encoded data.
+            let plane_blocks_x: usize = mcus_x * h_samp;
+            let bs: usize = comp_block_sizes[comp_idx];
+            let comp_w: usize = plane_blocks_x * bs;
+
+            // Resolve Huffman tables for this scan
+            let dc_table: &HuffmanTable =
+                Self::resolve_table(&scan_info.dc_huffman_tables, scan_comp.dc_table_index, "DC")?;
+            let ac_table: &HuffmanTable =
+                Self::resolve_table(&scan_info.ac_huffman_tables, scan_comp.ac_table_index, "AC")?;
+
+            let qt_values: &[u16; 64] = &quant_tables[comp_idx].values;
+
+            let entropy_data: &[u8] = &self.raw_data[scan_info.data_offset..];
+            let mut bit_reader: BitReader = BitReader::new(entropy_data);
+            // Fresh DC prediction per scan (each non-interleaved scan starts at 0)
+            let mut mcu_decoder: McuDecoder = McuDecoder::new(frame.components.len());
+            let mut coeffs: [i16; 64] = [0i16; 64];
+
+            let restart_interval: u32 = scan_info.restart_interval as u32;
+            let mut mcu_count: u32 = 0;
+
+            // In a non-interleaved scan, each MCU is a single block.
+            // Iterate over encoded blocks (may be fewer than plane blocks
+            // when image dimensions don't align with the MCU grid).
+            for by in 0..encoded_blocks_y {
+                for bx in 0..encoded_blocks_x {
+                    // Restart interval handling
+                    if restart_interval > 0
+                        && mcu_count > 0
+                        && mcu_count.is_multiple_of(restart_interval)
+                    {
+                        bit_reader.reset();
+                        mcu_decoder.reset();
+                    }
+
+                    // Decode one 8x8 block
+                    mcu_decoder.decode_block(
+                        &mut bit_reader,
+                        comp_idx,
+                        dc_table,
+                        ac_table,
+                        &mut coeffs,
+                    )?;
+
+                    // IDCT and store into the component plane
+                    let block_x: usize = bx * bs;
+                    let block_y: usize = by * bs;
+                    let dst_offset: usize = block_y * comp_w + block_x;
+
+                    unsafe {
+                        let dst: *mut u8 = component_planes[comp_idx].as_mut_ptr().add(dst_offset);
+                        self.idct_scaled_strided(&coeffs, qt_values, dst, comp_w, bs);
+                    }
+
+                    mcu_count += 1;
+                }
+            }
+        }
+
+        Ok((component_planes, Vec::new()))
+    }
+
     /// Decode arithmetic-coded planes (SOF9 sequential).
     fn decode_arithmetic_planes(
         &self,
@@ -1157,11 +1461,15 @@ impl<'a> Decoder<'a> {
         _num_components: usize,
         mcus_x: usize,
         mcus_y: usize,
-        _max_h: usize,
-        _max_v: usize,
+        max_h: usize,
+        max_v: usize,
         comp_block_sizes: &[usize],
     ) -> Result<(Vec<Vec<u8>>, Vec<DecodeWarning>)> {
         use crate::decode::arithmetic::ArithDecoder;
+
+        let img_w = frame.width as usize;
+        let img_h = frame.height as usize;
+        let dct_size: usize = 8;
 
         // Per-component coefficient buffers
         let comp_infos: Vec<CompInfo> = frame
@@ -1171,13 +1479,16 @@ impl<'a> Decoder<'a> {
             .map(|(ci, comp)| {
                 let h_samp = comp.horizontal_sampling as usize;
                 let v_samp = comp.vertical_sampling as usize;
+                let bs = comp_block_sizes[ci];
                 CompInfo {
                     blocks_x: mcus_x * h_samp,
                     blocks_y: mcus_y * v_samp,
                     h_samp,
                     v_samp,
-                    comp_w: mcus_x * h_samp * comp_block_sizes[ci],
-                    block_size: comp_block_sizes[ci],
+                    comp_w: mcus_x * h_samp * bs,
+                    block_size: bs,
+                    width_in_blocks: (img_w * h_samp).div_ceil(max_h * dct_size),
+                    height_in_blocks: (img_h * v_samp).div_ceil(max_v * dct_size),
                 }
             })
             .collect();
@@ -1269,10 +1580,13 @@ impl<'a> Decoder<'a> {
                 let dc_tbl = scan_comp.dc_table_index as usize;
                 let ac_tbl = scan_comp.ac_table_index as usize;
                 let ci = &comp_infos[comp_idx];
+                let scan_bx = ci.width_in_blocks;
+                let scan_by = ci.height_in_blocks;
+                let stride = ci.blocks_x;
 
-                for by in 0..ci.blocks_y {
-                    for bx in 0..ci.blocks_x {
-                        let block_idx = by * ci.blocks_x + bx;
+                for by in 0..scan_by {
+                    for bx in 0..scan_bx {
+                        let block_idx = by * stride + bx;
                         let coeffs = &mut coeff_bufs[comp_idx][block_idx];
 
                         if is_dc && ah == 0 {
@@ -1338,7 +1652,13 @@ impl<'a> Decoder<'a> {
         max_v: usize,
         comp_block_sizes: &[usize],
     ) -> Result<(Vec<Vec<u8>>, Vec<DecodeWarning>)> {
-        // Per-component coefficient buffers: blocks_x * blocks_y blocks of 64 coefficients
+        let img_w = frame.width as usize;
+        let img_h = frame.height as usize;
+
+        // Per-component coefficient buffers: blocks_x * blocks_y blocks of 64 coefficients.
+        // width_in_blocks/height_in_blocks use DCT block size (8), not the scaled
+        // output block size, because coefficient buffers are indexed by 8x8 DCT blocks.
+        let dct_size: usize = 8;
         let comp_infos: Vec<CompInfo> = frame
             .components
             .iter()
@@ -1346,13 +1666,16 @@ impl<'a> Decoder<'a> {
             .map(|(ci, comp)| {
                 let h_samp = comp.horizontal_sampling as usize;
                 let v_samp = comp.vertical_sampling as usize;
+                let bs = comp_block_sizes[ci];
                 CompInfo {
                     blocks_x: mcus_x * h_samp,
                     blocks_y: mcus_y * v_samp,
                     h_samp,
                     v_samp,
-                    comp_w: mcus_x * h_samp * comp_block_sizes[ci],
-                    block_size: comp_block_sizes[ci],
+                    comp_w: mcus_x * h_samp * bs,
+                    block_size: bs,
+                    width_in_blocks: (img_w * h_samp).div_ceil(max_h * dct_size),
+                    height_in_blocks: (img_h * v_samp).div_ceil(max_v * dct_size),
                 }
             })
             .collect();
@@ -1654,56 +1977,70 @@ impl<'a> Decoder<'a> {
             };
         }
 
-        // Split into four specialized loops to eliminate per-block branches.
-        // Use direct iterator over the flat coefficient buffer to avoid
-        // per-block `by * blocks_x + bx` index computation and bounds checks.
+        // Non-interleaved scans use width_in_blocks/height_in_blocks for iteration,
+        // which may be smaller than blocks_x/blocks_y (the MCU-aligned buffer size).
+        // Dummy blocks at the right/bottom edges only receive DC from interleaved scans.
         let coeff_slice = &mut coeff_bufs[comp_idx];
-        let total_blocks = ci.blocks_x * ci.blocks_y;
+        let scan_blocks_x = ci.width_in_blocks;
+        let scan_blocks_y = ci.height_in_blocks;
+        let stride = ci.blocks_x; // buffer stride (MCU-aligned)
 
         if is_dc && ah == 0 {
             let dc_table = dc_table.unwrap();
-            for coeffs in coeff_slice[..total_blocks].iter_mut() {
-                restart_check_dc!(bit_reader, dc_pred, restart_countdown, restart_interval);
-                progressive::decode_dc_first(bit_reader, dc_table, &mut dc_pred, coeffs, al)?;
+            for by in 0..scan_blocks_y {
+                for bx in 0..scan_blocks_x {
+                    restart_check_dc!(bit_reader, dc_pred, restart_countdown, restart_interval);
+                    let coeffs = &mut coeff_slice[by * stride + bx];
+                    progressive::decode_dc_first(bit_reader, dc_table, &mut dc_pred, coeffs, al)?;
+                }
             }
         } else if is_dc {
-            for coeffs in coeff_slice[..total_blocks].iter_mut() {
-                if restart_interval > 0 {
-                    if restart_countdown == 0 {
-                        bit_reader.reset();
-                        restart_countdown = restart_interval;
+            for by in 0..scan_blocks_y {
+                for bx in 0..scan_blocks_x {
+                    if restart_interval > 0 {
+                        if restart_countdown == 0 {
+                            bit_reader.reset();
+                            restart_countdown = restart_interval;
+                        }
+                        restart_countdown -= 1;
                     }
-                    restart_countdown -= 1;
+                    let coeffs = &mut coeff_slice[by * stride + bx];
+                    progressive::decode_dc_refine(bit_reader, coeffs, al)?;
                 }
-                progressive::decode_dc_refine(bit_reader, coeffs, al)?;
             }
         } else if ah == 0 {
             let ac_table = ac_table.unwrap();
-            for coeffs in coeff_slice[..total_blocks].iter_mut() {
-                restart_check_ac!(bit_reader, eob_run, restart_countdown, restart_interval);
-                progressive::decode_ac_first(
-                    bit_reader,
-                    ac_table,
-                    coeffs,
-                    ss,
-                    se,
-                    al,
-                    &mut eob_run,
-                )?;
+            for by in 0..scan_blocks_y {
+                for bx in 0..scan_blocks_x {
+                    restart_check_ac!(bit_reader, eob_run, restart_countdown, restart_interval);
+                    let coeffs = &mut coeff_slice[by * stride + bx];
+                    progressive::decode_ac_first(
+                        bit_reader,
+                        ac_table,
+                        coeffs,
+                        ss,
+                        se,
+                        al,
+                        &mut eob_run,
+                    )?;
+                }
             }
         } else {
             let ac_table = ac_table.unwrap();
-            for coeffs in coeff_slice[..total_blocks].iter_mut() {
-                restart_check_ac!(bit_reader, eob_run, restart_countdown, restart_interval);
-                progressive::decode_ac_refine(
-                    bit_reader,
-                    ac_table,
-                    coeffs,
-                    ss,
-                    se,
-                    al,
-                    &mut eob_run,
-                )?;
+            for by in 0..scan_blocks_y {
+                for bx in 0..scan_blocks_x {
+                    restart_check_ac!(bit_reader, eob_run, restart_countdown, restart_interval);
+                    let coeffs = &mut coeff_slice[by * stride + bx];
+                    progressive::decode_ac_refine(
+                        bit_reader,
+                        ac_table,
+                        coeffs,
+                        ss,
+                        se,
+                        al,
+                        &mut eob_run,
+                    )?;
+                }
             }
         }
 
@@ -3339,24 +3676,20 @@ impl<'a> Decoder<'a> {
                     let mut cmyk_buf = vec![0u8; width * 4];
                     color::ycck_to_cmyk_row(p0, p1, p2, p3, &mut cmyk_buf, width);
                     for x in 0..width {
-                        let ki = 255 - cmyk_buf[x * 4 + 3] as u16;
-                        out[x * 3] = (((255 - cmyk_buf[x * 4] as u16) * ki + 127) / 255) as u8;
-                        out[x * 3 + 1] =
-                            (((255 - cmyk_buf[x * 4 + 1] as u16) * ki + 127) / 255) as u8;
-                        out[x * 3 + 2] =
-                            (((255 - cmyk_buf[x * 4 + 2] as u16) * ki + 127) / 255) as u8;
+                        let kv = cmyk_buf[x * 4 + 3] as u16;
+                        out[x * 3] = ((cmyk_buf[x * 4] as u16 * kv + 127) / 255) as u8;
+                        out[x * 3 + 1] = ((cmyk_buf[x * 4 + 1] as u16 * kv + 127) / 255) as u8;
+                        out[x * 3 + 2] = ((cmyk_buf[x * 4 + 2] as u16 * kv + 127) / 255) as u8;
                     }
                 }
                 (ColorSpace::Ycck, PixelFormat::Rgba) => {
                     let mut cmyk_buf = vec![0u8; width * 4];
                     color::ycck_to_cmyk_row(p0, p1, p2, p3, &mut cmyk_buf, width);
                     for x in 0..width {
-                        let ki = 255 - cmyk_buf[x * 4 + 3] as u16;
-                        out[x * 4] = (((255 - cmyk_buf[x * 4] as u16) * ki + 127) / 255) as u8;
-                        out[x * 4 + 1] =
-                            (((255 - cmyk_buf[x * 4 + 1] as u16) * ki + 127) / 255) as u8;
-                        out[x * 4 + 2] =
-                            (((255 - cmyk_buf[x * 4 + 2] as u16) * ki + 127) / 255) as u8;
+                        let kv = cmyk_buf[x * 4 + 3] as u16;
+                        out[x * 4] = ((cmyk_buf[x * 4] as u16 * kv + 127) / 255) as u8;
+                        out[x * 4 + 1] = ((cmyk_buf[x * 4 + 1] as u16 * kv + 127) / 255) as u8;
+                        out[x * 4 + 2] = ((cmyk_buf[x * 4 + 2] as u16 * kv + 127) / 255) as u8;
                         out[x * 4 + 3] = 255;
                     }
                 }
@@ -3364,10 +3697,10 @@ impl<'a> Decoder<'a> {
                     let mut cmyk_buf = vec![0u8; width * 4];
                     color::ycck_to_cmyk_row(p0, p1, p2, p3, &mut cmyk_buf, width);
                     for x in 0..width {
-                        let ki = 255 - cmyk_buf[x * 4 + 3] as u16;
-                        let r = (((255 - cmyk_buf[x * 4] as u16) * ki + 127) / 255) as u8;
-                        let g = (((255 - cmyk_buf[x * 4 + 1] as u16) * ki + 127) / 255) as u8;
-                        let b = (((255 - cmyk_buf[x * 4 + 2] as u16) * ki + 127) / 255) as u8;
+                        let kv = cmyk_buf[x * 4 + 3] as u16;
+                        let r = ((cmyk_buf[x * 4] as u16 * kv + 127) / 255) as u8;
+                        let g = ((cmyk_buf[x * 4 + 1] as u16 * kv + 127) / 255) as u8;
+                        let b = ((cmyk_buf[x * 4 + 2] as u16 * kv + 127) / 255) as u8;
                         out[x * 3] = b;
                         out[x * 3 + 1] = g;
                         out[x * 3 + 2] = r;
@@ -3377,10 +3710,10 @@ impl<'a> Decoder<'a> {
                     let mut cmyk_buf = vec![0u8; width * 4];
                     color::ycck_to_cmyk_row(p0, p1, p2, p3, &mut cmyk_buf, width);
                     for x in 0..width {
-                        let ki = 255 - cmyk_buf[x * 4 + 3] as u16;
-                        let r = (((255 - cmyk_buf[x * 4] as u16) * ki + 127) / 255) as u8;
-                        let g = (((255 - cmyk_buf[x * 4 + 1] as u16) * ki + 127) / 255) as u8;
-                        let b = (((255 - cmyk_buf[x * 4 + 2] as u16) * ki + 127) / 255) as u8;
+                        let kv = cmyk_buf[x * 4 + 3] as u16;
+                        let r = ((cmyk_buf[x * 4] as u16 * kv + 127) / 255) as u8;
+                        let g = ((cmyk_buf[x * 4 + 1] as u16 * kv + 127) / 255) as u8;
+                        let b = ((cmyk_buf[x * 4 + 2] as u16 * kv + 127) / 255) as u8;
                         out[x * 4] = b;
                         out[x * 4 + 1] = g;
                         out[x * 4 + 2] = r;
@@ -3403,10 +3736,10 @@ impl<'a> Decoder<'a> {
                     // The remaining offset is 0+1+2+3=6 minus the other three
                     let pad_off: usize = 6 - r_off - g_off - b_off;
                     for x in 0..width {
-                        let ki = 255 - p3[x] as u16;
-                        let r = (((255 - p0[x] as u16) * ki + 127) / 255) as u8;
-                        let g = (((255 - p1[x] as u16) * ki + 127) / 255) as u8;
-                        let b = (((255 - p2[x] as u16) * ki + 127) / 255) as u8;
+                        let kv = p3[x] as u16;
+                        let r = ((p0[x] as u16 * kv + 127) / 255) as u8;
+                        let g = ((p1[x] as u16 * kv + 127) / 255) as u8;
+                        let b = ((p2[x] as u16 * kv + 127) / 255) as u8;
                         out[x * 4 + r_off] = r;
                         out[x * 4 + g_off] = g;
                         out[x * 4 + b_off] = b;
@@ -3430,10 +3763,10 @@ impl<'a> Decoder<'a> {
                     let mut cmyk_buf = vec![0u8; width * 4];
                     color::ycck_to_cmyk_row(p0, p1, p2, p3, &mut cmyk_buf, width);
                     for x in 0..width {
-                        let ki = 255 - cmyk_buf[x * 4 + 3] as u16;
-                        let r = (((255 - cmyk_buf[x * 4] as u16) * ki + 127) / 255) as u8;
-                        let g = (((255 - cmyk_buf[x * 4 + 1] as u16) * ki + 127) / 255) as u8;
-                        let b = (((255 - cmyk_buf[x * 4 + 2] as u16) * ki + 127) / 255) as u8;
+                        let kv = cmyk_buf[x * 4 + 3] as u16;
+                        let r = ((cmyk_buf[x * 4] as u16 * kv + 127) / 255) as u8;
+                        let g = ((cmyk_buf[x * 4 + 1] as u16 * kv + 127) / 255) as u8;
+                        let b = ((cmyk_buf[x * 4 + 2] as u16 * kv + 127) / 255) as u8;
                         out[x * 4 + r_off] = r;
                         out[x * 4 + g_off] = g;
                         out[x * 4 + b_off] = b;
