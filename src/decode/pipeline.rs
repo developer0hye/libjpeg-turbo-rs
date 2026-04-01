@@ -875,7 +875,7 @@ impl<'a> Decoder<'a> {
         let entropy_data = &self.raw_data[self.metadata.entropy_data_offset..];
         let mut bit_reader = BitReader::new(entropy_data);
         let mut mcu_decoder = McuDecoder::new(num_components);
-        let mut mcu_count: u16 = 0;
+        let mut mcu_count: u32 = 0;
         let mut coeffs = [0i16; 64];
         let mut warnings: Vec<DecodeWarning> = Vec::new();
         let total_mcus = mcus_x * mcus_y;
@@ -883,7 +883,7 @@ impl<'a> Decoder<'a> {
         // Fast path: non-lenient, no cropping — tight loop with minimal branching.
         // The lenient/crop path is below with full error recovery support.
         if !self.lenient && mcu_y_start == 0 && mcu_y_end == mcus_y {
-            let restart_interval: u16 = self.metadata.restart_interval;
+            let restart_interval: u32 = self.metadata.restart_interval as u32;
             for mcu_y in 0..mcus_y {
                 for mcu_x in 0..mcus_x {
                     if restart_interval > 0
@@ -941,7 +941,7 @@ impl<'a> Decoder<'a> {
                 for mcu_x in 0..mcus_x {
                     if self.metadata.restart_interval > 0
                         && mcu_count > 0
-                        && mcu_count.is_multiple_of(self.metadata.restart_interval)
+                        && mcu_count.is_multiple_of(self.metadata.restart_interval as u32)
                     {
                         bit_reader.reset();
                         mcu_decoder.reset();
