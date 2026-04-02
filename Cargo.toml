@@ -1,6 +1,6 @@
 [package]
 name = "libjpeg-turbo-rs"
-version = "0.2.1"
+version = "0.3.0"
 edition = "2021"
 rust-version = "1.87"
 description = "Pure Rust reimplementation of libjpeg-turbo with NEON/AVX2 SIMD acceleration"
