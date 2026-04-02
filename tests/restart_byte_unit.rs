@@ -11,6 +11,10 @@
 //! - Verifies roundtrip correctness with the smallest restart interval
 //! - Tests multiple subsampling modes and image sizes
 
+use std::io::Write;
+use std::path::PathBuf;
+use std::process::Command;
+
 use libjpeg_turbo_rs::{decompress, Encoder, PixelFormat, Subsampling};
 
 // ---------------------------------------------------------------------------
@@ -350,5 +354,465 @@ fn decode_fixture_with_restart_markers() {
     assert!(
         rst_count > 0,
         "fixture photo_640x480_420_rst.jpg should contain RST markers"
+    );
+}
+
+// ===========================================================================
+// C djpeg cross-validation helpers
+// ===========================================================================
+
+/// Locate the djpeg binary. Checks /opt/homebrew/bin/djpeg first, then falls
+/// back to whatever `which djpeg` returns. Returns `None` when not found.
+fn djpeg_path() -> Option<PathBuf> {
+    let homebrew_path: PathBuf = PathBuf::from("/opt/homebrew/bin/djpeg");
+    if homebrew_path.exists() {
+        return Some(homebrew_path);
+    }
+
+    let output = Command::new("which").arg("djpeg").output().ok()?;
+    if output.status.success() {
+        let path_str: String = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        if !path_str.is_empty() {
+            let path: PathBuf = PathBuf::from(&path_str);
+            if path.exists() {
+                return Some(path);
+            }
+        }
+    }
+
+    None
+}
+
+/// Parse a binary PPM (P6) image into (width, height, rgb_pixels).
+/// Returns `None` if the data is not a valid P6 PPM.
+fn parse_ppm(data: &[u8]) -> Option<(usize, usize, Vec<u8>)> {
+    if data.len() < 3 || &data[0..2] != b"P6" {
+        return None;
+    }
+    let mut pos: usize = 2;
+
+    // Skip whitespace
+    while pos < data.len() && data[pos].is_ascii_whitespace() {
+        pos += 1;
+    }
+    // Skip comments
+    while pos < data.len() && data[pos] == b'#' {
+        while pos < data.len() && data[pos] != b'\n' {
+            pos += 1;
+        }
+        if pos < data.len() {
+            pos += 1;
+        }
+    }
+
+    // Parse width
+    let width_start: usize = pos;
+    while pos < data.len() && data[pos].is_ascii_digit() {
+        pos += 1;
+    }
+    let width: usize = std::str::from_utf8(&data[width_start..pos])
+        .ok()?
+        .parse()
+        .ok()?;
+
+    // Skip whitespace
+    while pos < data.len() && data[pos].is_ascii_whitespace() {
+        pos += 1;
+    }
+    // Skip comments
+    while pos < data.len() && data[pos] == b'#' {
+        while pos < data.len() && data[pos] != b'\n' {
+            pos += 1;
+        }
+        if pos < data.len() {
+            pos += 1;
+        }
+    }
+
+    // Parse height
+    let height_start: usize = pos;
+    while pos < data.len() && data[pos].is_ascii_digit() {
+        pos += 1;
+    }
+    let height: usize = std::str::from_utf8(&data[height_start..pos])
+        .ok()?
+        .parse()
+        .ok()?;
+
+    // Skip whitespace
+    while pos < data.len() && data[pos].is_ascii_whitespace() {
+        pos += 1;
+    }
+    // Skip comments
+    while pos < data.len() && data[pos] == b'#' {
+        while pos < data.len() && data[pos] != b'\n' {
+            pos += 1;
+        }
+        if pos < data.len() {
+            pos += 1;
+        }
+    }
+
+    // Parse maxval
+    let maxval_start: usize = pos;
+    while pos < data.len() && data[pos].is_ascii_digit() {
+        pos += 1;
+    }
+    let _maxval: usize = std::str::from_utf8(&data[maxval_start..pos])
+        .ok()?
+        .parse()
+        .ok()?;
+
+    // Exactly one whitespace character after maxval before binary data
+    if pos < data.len() && data[pos].is_ascii_whitespace() {
+        pos += 1;
+    }
+
+    let expected_len: usize = width * height * 3;
+    if data.len() - pos < expected_len {
+        return None;
+    }
+
+    Some((width, height, data[pos..pos + expected_len].to_vec()))
+}
+
+// ===========================================================================
+// C djpeg cross-validation tests for restart markers
+// ===========================================================================
+
+/// Encode 32x32 RGB with S444 and restart_blocks(1), decode with both Rust and
+/// C djpeg, assert pixel-identical output (diff=0).
+#[test]
+fn c_djpeg_restart_blocks_1_decode_matches() {
+    let djpeg: PathBuf = match djpeg_path() {
+        Some(p) => p,
+        None => {
+            eprintln!("SKIP: djpeg not found");
+            return;
+        }
+    };
+
+    let width: usize = 32;
+    let height: usize = 32;
+    let pixels: Vec<u8> = make_pixels(width, height, 3);
+
+    let jpeg: Vec<u8> = Encoder::new(&pixels, width, height, PixelFormat::Rgb)
+        .quality(90)
+        .subsampling(Subsampling::S444)
+        .restart_blocks(1)
+        .encode()
+        .expect("Rust encode failed for restart_blocks(1) S444 32x32");
+
+    // Rust decode
+    let rust_image = decompress(&jpeg).expect("Rust decompress failed for restart_blocks(1)");
+    assert_eq!(rust_image.width, width);
+    assert_eq!(rust_image.height, height);
+
+    // Write JPEG to temp file for C djpeg
+    let temp_dir: PathBuf = std::env::temp_dir();
+    let jpeg_path: PathBuf = temp_dir.join("rst_xval_blocks1_444.jpg");
+    let ppm_path: PathBuf = temp_dir.join("rst_xval_blocks1_444.ppm");
+
+    {
+        let mut file = std::fs::File::create(&jpeg_path)
+            .unwrap_or_else(|e| panic!("Failed to create temp JPEG {:?}: {:?}", jpeg_path, e));
+        file.write_all(&jpeg)
+            .unwrap_or_else(|e| panic!("Failed to write temp JPEG {:?}: {:?}", jpeg_path, e));
+    }
+
+    // Run C djpeg
+    let djpeg_output = Command::new(&djpeg)
+        .arg("-ppm")
+        .arg("-outfile")
+        .arg(&ppm_path)
+        .arg(&jpeg_path)
+        .output()
+        .unwrap_or_else(|e| panic!("Failed to run djpeg: {:?}", e));
+
+    assert!(
+        djpeg_output.status.success(),
+        "djpeg failed: {}",
+        String::from_utf8_lossy(&djpeg_output.stderr)
+    );
+
+    // Parse PPM output from C djpeg
+    let ppm_data: Vec<u8> = std::fs::read(&ppm_path)
+        .unwrap_or_else(|e| panic!("Failed to read PPM {:?}: {:?}", ppm_path, e));
+    let (c_width, c_height, c_pixels) =
+        parse_ppm(&ppm_data).expect("Failed to parse PPM output from djpeg");
+
+    // Cleanup temp files
+    let _ = std::fs::remove_file(&jpeg_path);
+    let _ = std::fs::remove_file(&ppm_path);
+
+    // Verify dimensions match
+    assert_eq!(
+        rust_image.width, c_width,
+        "Width mismatch: Rust={} C={}",
+        rust_image.width, c_width
+    );
+    assert_eq!(
+        rust_image.height, c_height,
+        "Height mismatch: Rust={} C={}",
+        rust_image.height, c_height
+    );
+    assert_eq!(
+        rust_image.data.len(),
+        c_pixels.len(),
+        "Data length mismatch: Rust={} C={}",
+        rust_image.data.len(),
+        c_pixels.len()
+    );
+
+    // Assert pixel-exact match (diff=0)
+    let mut max_diff: u8 = 0;
+    let mut mismatches: usize = 0;
+    for (i, (&ours, &theirs)) in rust_image.data.iter().zip(c_pixels.iter()).enumerate() {
+        let diff: u8 = (ours as i16 - theirs as i16).unsigned_abs() as u8;
+        if diff > 0 {
+            mismatches += 1;
+            if mismatches <= 5 {
+                let pixel: usize = i / 3;
+                let channel: &str = ["R", "G", "B"][i % 3];
+                eprintln!(
+                    "  pixel {} channel {}: rust={} c={} diff={}",
+                    pixel, channel, ours, theirs, diff
+                );
+            }
+        }
+        if diff > max_diff {
+            max_diff = diff;
+        }
+    }
+
+    assert_eq!(
+        mismatches, 0,
+        "restart_blocks(1) S444 32x32: {} pixels differ (max diff={}), expected diff=0",
+        mismatches, max_diff
+    );
+}
+
+/// Encode 37x29 RGB with S420 and restart_blocks(1) (non-MCU-aligned dimensions),
+/// decode with both Rust and C djpeg, assert pixel-identical output (diff=0).
+#[test]
+fn c_djpeg_restart_420_non_aligned_matches() {
+    let djpeg: PathBuf = match djpeg_path() {
+        Some(p) => p,
+        None => {
+            eprintln!("SKIP: djpeg not found");
+            return;
+        }
+    };
+
+    let width: usize = 37;
+    let height: usize = 29;
+    let pixels: Vec<u8> = make_pixels(width, height, 3);
+
+    let jpeg: Vec<u8> = Encoder::new(&pixels, width, height, PixelFormat::Rgb)
+        .quality(90)
+        .subsampling(Subsampling::S420)
+        .restart_blocks(1)
+        .encode()
+        .expect("Rust encode failed for restart_blocks(1) S420 37x29");
+
+    // Rust decode
+    let rust_image =
+        decompress(&jpeg).expect("Rust decompress failed for restart_blocks(1) S420 37x29");
+    assert_eq!(rust_image.width, width);
+    assert_eq!(rust_image.height, height);
+
+    // Write JPEG to temp file for C djpeg
+    let temp_dir: PathBuf = std::env::temp_dir();
+    let jpeg_path: PathBuf = temp_dir.join("rst_xval_blocks1_420_37x29.jpg");
+    let ppm_path: PathBuf = temp_dir.join("rst_xval_blocks1_420_37x29.ppm");
+
+    {
+        let mut file = std::fs::File::create(&jpeg_path)
+            .unwrap_or_else(|e| panic!("Failed to create temp JPEG {:?}: {:?}", jpeg_path, e));
+        file.write_all(&jpeg)
+            .unwrap_or_else(|e| panic!("Failed to write temp JPEG {:?}: {:?}", jpeg_path, e));
+    }
+
+    // Run C djpeg
+    let djpeg_output = Command::new(&djpeg)
+        .arg("-ppm")
+        .arg("-outfile")
+        .arg(&ppm_path)
+        .arg(&jpeg_path)
+        .output()
+        .unwrap_or_else(|e| panic!("Failed to run djpeg: {:?}", e));
+
+    assert!(
+        djpeg_output.status.success(),
+        "djpeg failed: {}",
+        String::from_utf8_lossy(&djpeg_output.stderr)
+    );
+
+    // Parse PPM output from C djpeg
+    let ppm_data: Vec<u8> = std::fs::read(&ppm_path)
+        .unwrap_or_else(|e| panic!("Failed to read PPM {:?}: {:?}", ppm_path, e));
+    let (c_width, c_height, c_pixels) =
+        parse_ppm(&ppm_data).expect("Failed to parse PPM output from djpeg");
+
+    // Cleanup temp files
+    let _ = std::fs::remove_file(&jpeg_path);
+    let _ = std::fs::remove_file(&ppm_path);
+
+    // Verify dimensions match
+    assert_eq!(
+        rust_image.width, c_width,
+        "Width mismatch: Rust={} C={}",
+        rust_image.width, c_width
+    );
+    assert_eq!(
+        rust_image.height, c_height,
+        "Height mismatch: Rust={} C={}",
+        rust_image.height, c_height
+    );
+    assert_eq!(
+        rust_image.data.len(),
+        c_pixels.len(),
+        "Data length mismatch: Rust={} C={}",
+        rust_image.data.len(),
+        c_pixels.len()
+    );
+
+    // Assert pixel-exact match (diff=0)
+    let mut max_diff: u8 = 0;
+    let mut mismatches: usize = 0;
+    for (i, (&ours, &theirs)) in rust_image.data.iter().zip(c_pixels.iter()).enumerate() {
+        let diff: u8 = (ours as i16 - theirs as i16).unsigned_abs() as u8;
+        if diff > 0 {
+            mismatches += 1;
+            if mismatches <= 5 {
+                let pixel: usize = i / 3;
+                let channel: &str = ["R", "G", "B"][i % 3];
+                eprintln!(
+                    "  pixel {} channel {}: rust={} c={} diff={}",
+                    pixel, channel, ours, theirs, diff
+                );
+            }
+        }
+        if diff > max_diff {
+            max_diff = diff;
+        }
+    }
+
+    assert_eq!(
+        mismatches, 0,
+        "restart_blocks(1) S420 37x29: {} pixels differ (max diff={}), expected diff=0",
+        mismatches, max_diff
+    );
+}
+
+/// Encode 32x32 RGB with S444 and restart_blocks(2), decode with both Rust and
+/// C djpeg, assert pixel-identical output (diff=0).
+#[test]
+fn c_djpeg_restart_blocks_2_matches() {
+    let djpeg: PathBuf = match djpeg_path() {
+        Some(p) => p,
+        None => {
+            eprintln!("SKIP: djpeg not found");
+            return;
+        }
+    };
+
+    let width: usize = 32;
+    let height: usize = 32;
+    let pixels: Vec<u8> = make_pixels(width, height, 3);
+
+    let jpeg: Vec<u8> = Encoder::new(&pixels, width, height, PixelFormat::Rgb)
+        .quality(90)
+        .subsampling(Subsampling::S444)
+        .restart_blocks(2)
+        .encode()
+        .expect("Rust encode failed for restart_blocks(2) S444 32x32");
+
+    // Rust decode
+    let rust_image = decompress(&jpeg).expect("Rust decompress failed for restart_blocks(2)");
+    assert_eq!(rust_image.width, width);
+    assert_eq!(rust_image.height, height);
+
+    // Write JPEG to temp file for C djpeg
+    let temp_dir: PathBuf = std::env::temp_dir();
+    let jpeg_path: PathBuf = temp_dir.join("rst_xval_blocks2_444.jpg");
+    let ppm_path: PathBuf = temp_dir.join("rst_xval_blocks2_444.ppm");
+
+    {
+        let mut file = std::fs::File::create(&jpeg_path)
+            .unwrap_or_else(|e| panic!("Failed to create temp JPEG {:?}: {:?}", jpeg_path, e));
+        file.write_all(&jpeg)
+            .unwrap_or_else(|e| panic!("Failed to write temp JPEG {:?}: {:?}", jpeg_path, e));
+    }
+
+    // Run C djpeg
+    let djpeg_output = Command::new(&djpeg)
+        .arg("-ppm")
+        .arg("-outfile")
+        .arg(&ppm_path)
+        .arg(&jpeg_path)
+        .output()
+        .unwrap_or_else(|e| panic!("Failed to run djpeg: {:?}", e));
+
+    assert!(
+        djpeg_output.status.success(),
+        "djpeg failed: {}",
+        String::from_utf8_lossy(&djpeg_output.stderr)
+    );
+
+    // Parse PPM output from C djpeg
+    let ppm_data: Vec<u8> = std::fs::read(&ppm_path)
+        .unwrap_or_else(|e| panic!("Failed to read PPM {:?}: {:?}", ppm_path, e));
+    let (c_width, c_height, c_pixels) =
+        parse_ppm(&ppm_data).expect("Failed to parse PPM output from djpeg");
+
+    // Cleanup temp files
+    let _ = std::fs::remove_file(&jpeg_path);
+    let _ = std::fs::remove_file(&ppm_path);
+
+    // Verify dimensions match
+    assert_eq!(
+        rust_image.width, c_width,
+        "Width mismatch: Rust={} C={}",
+        rust_image.width, c_width
+    );
+    assert_eq!(
+        rust_image.height, c_height,
+        "Height mismatch: Rust={} C={}",
+        rust_image.height, c_height
+    );
+    assert_eq!(
+        rust_image.data.len(),
+        c_pixels.len(),
+        "Data length mismatch: Rust={} C={}",
+        rust_image.data.len(),
+        c_pixels.len()
+    );
+
+    // Assert pixel-exact match (diff=0)
+    let mut max_diff: u8 = 0;
+    let mut mismatches: usize = 0;
+    for (i, (&ours, &theirs)) in rust_image.data.iter().zip(c_pixels.iter()).enumerate() {
+        let diff: u8 = (ours as i16 - theirs as i16).unsigned_abs() as u8;
+        if diff > 0 {
+            mismatches += 1;
+            if mismatches <= 5 {
+                let pixel: usize = i / 3;
+                let channel: &str = ["R", "G", "B"][i % 3];
+                eprintln!(
+                    "  pixel {} channel {}: rust={} c={} diff={}",
+                    pixel, channel, ours, theirs, diff
+                );
+            }
+        }
+        if diff > max_diff {
+            max_diff = diff;
+        }
+    }
+
+    assert_eq!(
+        mismatches, 0,
+        "restart_blocks(2) S444 32x32: {} pixels differ (max diff={}), expected diff=0",
+        mismatches, max_diff
     );
 }

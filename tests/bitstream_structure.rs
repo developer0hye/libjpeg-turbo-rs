@@ -3,6 +3,9 @@
 //! Verify the exact structure and ordering of markers in our encoder output.
 //! Each coding mode has a defined marker sequence that must be respected.
 
+use std::path::PathBuf;
+use std::process::Command;
+
 use libjpeg_turbo_rs::{
     compress, compress_arithmetic, compress_arithmetic_progressive, compress_lossless,
     compress_optimized, compress_progressive, compress_with_metadata, PixelFormat, Subsampling,
@@ -560,5 +563,328 @@ fn dqt_count_matches_component_needs() {
     assert!(
         gray_dqt >= 1,
         "grayscale JPEG must have at least 1 DQT marker, found {gray_dqt}"
+    );
+}
+
+// ===========================================================================
+// C cross-validation helpers
+// ===========================================================================
+
+/// Path to C cjpeg binary, or `None` if not installed.
+fn cjpeg_path() -> Option<PathBuf> {
+    let homebrew: PathBuf = PathBuf::from("/opt/homebrew/bin/cjpeg");
+    if homebrew.exists() {
+        return Some(homebrew);
+    }
+    Command::new("which")
+        .arg("cjpeg")
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| PathBuf::from(String::from_utf8_lossy(&o.stdout).trim().to_string()))
+}
+
+/// Generate a binary PPM (P6) file from 16x16 RGB pixels.
+fn generate_ppm(width: usize, height: usize, pixels: &[u8]) -> Vec<u8> {
+    let mut ppm: Vec<u8> = format!("P6\n{} {}\n255\n", width, height).into_bytes();
+    ppm.extend_from_slice(pixels);
+    ppm
+}
+
+/// Generate a binary PGM (P5) file from grayscale pixels.
+fn generate_pgm(width: usize, height: usize, pixels: &[u8]) -> Vec<u8> {
+    let mut pgm: Vec<u8> = format!("P5\n{} {}\n255\n", width, height).into_bytes();
+    pgm.extend_from_slice(pixels);
+    pgm
+}
+
+/// Extract only structural marker types, filtering out RST markers (0xD0-0xD7)
+/// which appear inside entropy-coded segments and can vary between encoders.
+fn extract_structural_marker_types(jpeg: &[u8]) -> Vec<u8> {
+    let all: Vec<u8> = extract_marker_sequence(jpeg);
+    all.into_iter()
+        .filter(|&m| !(0xD0..=0xD7).contains(&m))
+        .collect()
+}
+
+/// Encode pixels with C cjpeg and return the JPEG bytes. Returns `None` if cjpeg fails.
+fn encode_with_cjpeg(cjpeg: &PathBuf, ppm_bytes: &[u8], extra_args: &[&str]) -> Option<Vec<u8>> {
+    use std::io::Write;
+    let mut cmd: Command = Command::new(cjpeg);
+    for arg in extra_args {
+        cmd.arg(arg);
+    }
+    cmd.stdin(std::process::Stdio::piped());
+    cmd.stdout(std::process::Stdio::piped());
+    cmd.stderr(std::process::Stdio::piped());
+
+    let mut child = cmd.spawn().ok()?;
+    if let Some(ref mut stdin) = child.stdin {
+        stdin.write_all(ppm_bytes).ok()?;
+    }
+    let output = child.wait_with_output().ok()?;
+    if !output.status.success() {
+        eprintln!("cjpeg failed: {}", String::from_utf8_lossy(&output.stderr));
+        return None;
+    }
+    Some(output.stdout)
+}
+
+// ===========================================================================
+// C cross-validation: marker structure comparison
+// ===========================================================================
+
+#[test]
+fn c_cjpeg_baseline_marker_order_matches() {
+    let cjpeg: PathBuf = match cjpeg_path() {
+        Some(p) => p,
+        None => {
+            eprintln!("SKIP: cjpeg not found");
+            return;
+        }
+    };
+
+    let width: usize = 16;
+    let height: usize = 16;
+    let pixels: Vec<u8> = test_pixels(width, height);
+
+    // Encode with Rust
+    let rust_jpeg: Vec<u8> = compress(
+        &pixels,
+        width,
+        height,
+        PixelFormat::Rgb,
+        75,
+        Subsampling::S420,
+    )
+    .unwrap();
+
+    // Encode with C cjpeg
+    let ppm: Vec<u8> = generate_ppm(width, height, &pixels);
+    let c_jpeg: Vec<u8> = encode_with_cjpeg(&cjpeg, &ppm, &["-quality", "75", "-sample", "2x2"])
+        .expect("cjpeg baseline encoding failed");
+
+    // Extract structural marker type sequences
+    let rust_markers: Vec<u8> = extract_structural_marker_types(&rust_jpeg);
+    let c_markers: Vec<u8> = extract_structural_marker_types(&c_jpeg);
+
+    // Both must start with SOI
+    assert_eq!(rust_markers[0], SOI, "Rust: first marker must be SOI");
+    assert_eq!(c_markers[0], SOI, "C: first marker must be SOI");
+
+    // Both must end with EOI
+    assert_eq!(
+        *rust_markers.last().unwrap(),
+        EOI,
+        "Rust: last marker must be EOI"
+    );
+    assert_eq!(
+        *c_markers.last().unwrap(),
+        EOI,
+        "C: last marker must be EOI"
+    );
+
+    // Compare marker type sequences — both should have the same structural markers
+    assert_eq!(
+        rust_markers, c_markers,
+        "Marker type sequence must match between Rust and C cjpeg.\nRust: {:02X?}\nC:    {:02X?}",
+        rust_markers, c_markers
+    );
+}
+
+#[test]
+fn c_cjpeg_progressive_has_multiple_sos() {
+    let cjpeg: PathBuf = match cjpeg_path() {
+        Some(p) => p,
+        None => {
+            eprintln!("SKIP: cjpeg not found");
+            return;
+        }
+    };
+
+    let width: usize = 16;
+    let height: usize = 16;
+    let pixels: Vec<u8> = test_pixels(width, height);
+
+    // Encode progressive with Rust
+    let rust_jpeg: Vec<u8> = compress_progressive(
+        &pixels,
+        width,
+        height,
+        PixelFormat::Rgb,
+        75,
+        Subsampling::S444,
+    )
+    .unwrap();
+
+    // Encode progressive with C cjpeg
+    let ppm: Vec<u8> = generate_ppm(width, height, &pixels);
+    let c_jpeg: Vec<u8> = encode_with_cjpeg(
+        &cjpeg,
+        &ppm,
+        &["-quality", "75", "-sample", "1x1", "-progressive"],
+    )
+    .expect("cjpeg progressive encoding failed");
+
+    // Extract full marker sequences
+    let rust_markers: Vec<u8> = extract_structural_marker_types(&rust_jpeg);
+    let c_markers: Vec<u8> = extract_structural_marker_types(&c_jpeg);
+
+    // Both must contain SOF2 (progressive DCT)
+    assert!(
+        rust_markers.contains(&SOF2),
+        "Rust progressive must contain SOF2"
+    );
+    assert!(c_markers.contains(&SOF2), "C progressive must contain SOF2");
+
+    // Neither should contain SOF0
+    assert!(
+        !rust_markers.contains(&SOF0),
+        "Rust progressive must not contain SOF0"
+    );
+    assert!(
+        !c_markers.contains(&SOF0),
+        "C progressive must not contain SOF0"
+    );
+
+    // Both must have multiple SOS markers (multiple scans)
+    let rust_sos_count: usize = count_marker(&rust_markers, SOS);
+    let c_sos_count: usize = count_marker(&c_markers, SOS);
+    assert!(
+        rust_sos_count > 1,
+        "Rust progressive must have multiple SOS markers, found {rust_sos_count}"
+    );
+    assert!(
+        c_sos_count > 1,
+        "C progressive must have multiple SOS markers, found {c_sos_count}"
+    );
+}
+
+#[test]
+fn c_cjpeg_optimized_structure_matches() {
+    let cjpeg: PathBuf = match cjpeg_path() {
+        Some(p) => p,
+        None => {
+            eprintln!("SKIP: cjpeg not found");
+            return;
+        }
+    };
+
+    let width: usize = 16;
+    let height: usize = 16;
+    let pixels: Vec<u8> = test_pixels(width, height);
+
+    // Encode with optimized Huffman tables using Rust
+    let rust_jpeg: Vec<u8> = compress_optimized(
+        &pixels,
+        width,
+        height,
+        PixelFormat::Rgb,
+        75,
+        Subsampling::S420,
+    )
+    .unwrap();
+
+    // Encode with optimized Huffman tables using C cjpeg
+    let ppm: Vec<u8> = generate_ppm(width, height, &pixels);
+    let c_jpeg: Vec<u8> = encode_with_cjpeg(
+        &cjpeg,
+        &ppm,
+        &["-quality", "75", "-sample", "2x2", "-optimize"],
+    )
+    .expect("cjpeg optimized encoding failed");
+
+    // Extract structural marker type sequences
+    let rust_markers: Vec<u8> = extract_structural_marker_types(&rust_jpeg);
+    let c_markers: Vec<u8> = extract_structural_marker_types(&c_jpeg);
+
+    // Both must use SOF0 (baseline DCT with optimized Huffman tables)
+    assert!(
+        rust_markers.contains(&SOF0),
+        "Rust optimized must contain SOF0"
+    );
+    assert!(c_markers.contains(&SOF0), "C optimized must contain SOF0");
+
+    // Both must have DHT, not DAC
+    assert!(
+        rust_markers.contains(&DHT),
+        "Rust optimized must contain DHT"
+    );
+    assert!(c_markers.contains(&DHT), "C optimized must contain DHT");
+    assert!(
+        !rust_markers.contains(&DAC),
+        "Rust optimized must not contain DAC"
+    );
+    assert!(
+        !c_markers.contains(&DAC),
+        "C optimized must not contain DAC"
+    );
+
+    // Compare marker type sequences
+    assert_eq!(
+        rust_markers, c_markers,
+        "Optimized marker type sequence must match between Rust and C cjpeg.\nRust: {:02X?}\nC:    {:02X?}",
+        rust_markers, c_markers
+    );
+}
+
+#[test]
+fn c_cjpeg_grayscale_structure_matches() {
+    let cjpeg: PathBuf = match cjpeg_path() {
+        Some(p) => p,
+        None => {
+            eprintln!("SKIP: cjpeg not found");
+            return;
+        }
+    };
+
+    let width: usize = 16;
+    let height: usize = 16;
+    let pixels: Vec<u8> = gray_pixels(width, height);
+
+    // Encode grayscale with Rust
+    let rust_jpeg: Vec<u8> = compress(
+        &pixels,
+        width,
+        height,
+        PixelFormat::Grayscale,
+        75,
+        Subsampling::S444,
+    )
+    .unwrap();
+
+    // Encode grayscale with C cjpeg (PGM input)
+    let pgm: Vec<u8> = generate_pgm(width, height, &pixels);
+    let c_jpeg: Vec<u8> = encode_with_cjpeg(&cjpeg, &pgm, &["-quality", "75", "-grayscale"])
+        .expect("cjpeg grayscale encoding failed");
+
+    // Extract structural marker type sequences
+    let rust_markers: Vec<u8> = extract_structural_marker_types(&rust_jpeg);
+    let c_markers: Vec<u8> = extract_structural_marker_types(&c_jpeg);
+
+    // Both must contain SOF0
+    assert!(
+        rust_markers.contains(&SOF0),
+        "Rust grayscale must contain SOF0"
+    );
+    assert!(c_markers.contains(&SOF0), "C grayscale must contain SOF0");
+
+    // Both must have exactly 1 SOS (baseline single-component)
+    let rust_sos_count: usize = count_marker(&rust_markers, SOS);
+    let c_sos_count: usize = count_marker(&c_markers, SOS);
+    assert_eq!(
+        rust_sos_count, 1,
+        "Rust grayscale must have exactly 1 SOS, found {rust_sos_count}"
+    );
+    assert_eq!(
+        c_sos_count, 1,
+        "C grayscale must have exactly 1 SOS, found {c_sos_count}"
+    );
+
+    // Compare marker type sequences
+    assert_eq!(
+        rust_markers, c_markers,
+        "Grayscale marker type sequence must match between Rust and C cjpeg.\nRust: {:02X?}\nC:    {:02X?}",
+        rust_markers, c_markers
     );
 }

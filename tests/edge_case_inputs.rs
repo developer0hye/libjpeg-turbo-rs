@@ -3,10 +3,208 @@
 //! These tests exercise corner cases in the encode/decode pipeline that
 //! are valid JPEG but stress unusual code paths.
 
+use std::io::Write;
+use std::path::PathBuf;
+use std::process::Command;
+
 use libjpeg_turbo_rs::{
     compress, compress_into, compress_lossless, compress_lossless_extended, compress_progressive,
     decompress, decompress_to, jpeg_buf_size, Encoder, PixelFormat, Subsampling,
 };
+
+// ===========================================================================
+// C djpeg cross-validation helpers
+// ===========================================================================
+
+/// Locate the djpeg binary. Checks /opt/homebrew/bin/djpeg first, then falls
+/// back to whatever `which djpeg` returns. Returns `None` when not found.
+fn djpeg_path() -> Option<PathBuf> {
+    let homebrew_path: PathBuf = PathBuf::from("/opt/homebrew/bin/djpeg");
+    if homebrew_path.exists() {
+        return Some(homebrew_path);
+    }
+
+    let output = Command::new("which").arg("djpeg").output().ok()?;
+    if output.status.success() {
+        let path_str: String = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        if !path_str.is_empty() {
+            let path: PathBuf = PathBuf::from(&path_str);
+            if path.exists() {
+                return Some(path);
+            }
+        }
+    }
+
+    None
+}
+
+/// Parse a binary PPM (P6) image into (width, height, rgb_pixels).
+/// Returns `None` if the data is not a valid P6 PPM.
+fn parse_ppm(data: &[u8]) -> Option<(usize, usize, Vec<u8>)> {
+    if data.len() < 3 || &data[0..2] != b"P6" {
+        return None;
+    }
+    let mut pos: usize = 2;
+
+    // Skip whitespace and comments
+    pos = skip_ws_and_comments(data, pos);
+
+    // Parse width
+    let width_start: usize = pos;
+    while pos < data.len() && data[pos].is_ascii_digit() {
+        pos += 1;
+    }
+    let width: usize = std::str::from_utf8(&data[width_start..pos])
+        .ok()?
+        .parse()
+        .ok()?;
+
+    pos = skip_ws_and_comments(data, pos);
+
+    // Parse height
+    let height_start: usize = pos;
+    while pos < data.len() && data[pos].is_ascii_digit() {
+        pos += 1;
+    }
+    let height: usize = std::str::from_utf8(&data[height_start..pos])
+        .ok()?
+        .parse()
+        .ok()?;
+
+    pos = skip_ws_and_comments(data, pos);
+
+    // Parse maxval
+    let maxval_start: usize = pos;
+    while pos < data.len() && data[pos].is_ascii_digit() {
+        pos += 1;
+    }
+    let _maxval: usize = std::str::from_utf8(&data[maxval_start..pos])
+        .ok()?
+        .parse()
+        .ok()?;
+
+    // Exactly one whitespace character after maxval before binary data
+    if pos < data.len() && data[pos].is_ascii_whitespace() {
+        pos += 1;
+    }
+
+    let expected_len: usize = width * height * 3;
+    if data.len() - pos < expected_len {
+        return None;
+    }
+
+    Some((width, height, data[pos..pos + expected_len].to_vec()))
+}
+
+/// Parse a binary PGM (P5) image into (width, height, gray_pixels).
+/// Returns `None` if the data is not a valid P5 PGM.
+fn parse_pgm(data: &[u8]) -> Option<(usize, usize, Vec<u8>)> {
+    if data.len() < 3 || &data[0..2] != b"P5" {
+        return None;
+    }
+    let mut pos: usize = 2;
+
+    pos = skip_ws_and_comments(data, pos);
+
+    // Parse width
+    let width_start: usize = pos;
+    while pos < data.len() && data[pos].is_ascii_digit() {
+        pos += 1;
+    }
+    let width: usize = std::str::from_utf8(&data[width_start..pos])
+        .ok()?
+        .parse()
+        .ok()?;
+
+    pos = skip_ws_and_comments(data, pos);
+
+    // Parse height
+    let height_start: usize = pos;
+    while pos < data.len() && data[pos].is_ascii_digit() {
+        pos += 1;
+    }
+    let height: usize = std::str::from_utf8(&data[height_start..pos])
+        .ok()?
+        .parse()
+        .ok()?;
+
+    pos = skip_ws_and_comments(data, pos);
+
+    // Parse maxval
+    let maxval_start: usize = pos;
+    while pos < data.len() && data[pos].is_ascii_digit() {
+        pos += 1;
+    }
+    let _maxval: usize = std::str::from_utf8(&data[maxval_start..pos])
+        .ok()?
+        .parse()
+        .ok()?;
+
+    // Exactly one whitespace character after maxval before binary data
+    if pos < data.len() && data[pos].is_ascii_whitespace() {
+        pos += 1;
+    }
+
+    let expected_len: usize = width * height;
+    if data.len() - pos < expected_len {
+        return None;
+    }
+
+    Some((width, height, data[pos..pos + expected_len].to_vec()))
+}
+
+/// Skip whitespace and '#'-comments in PNM header data.
+fn skip_ws_and_comments(data: &[u8], mut pos: usize) -> usize {
+    loop {
+        while pos < data.len() && data[pos].is_ascii_whitespace() {
+            pos += 1;
+        }
+        if pos < data.len() && data[pos] == b'#' {
+            while pos < data.len() && data[pos] != b'\n' {
+                pos += 1;
+            }
+        } else {
+            break;
+        }
+    }
+    pos
+}
+
+/// Run djpeg on a JPEG byte slice, returning raw PPM/PGM bytes from stdout.
+/// The `extra_args` slice is prepended to the djpeg command (e.g., ["-grayscale"]).
+fn run_djpeg(djpeg: &PathBuf, jpeg_data: &[u8], extra_args: &[&str]) -> Vec<u8> {
+    let temp_dir: PathBuf = std::env::temp_dir();
+    let jpeg_path: PathBuf = temp_dir.join(format!(
+        "edge_case_xval_{}.jpg",
+        std::thread::current().name().unwrap_or("unknown")
+    ));
+    {
+        let mut file = std::fs::File::create(&jpeg_path)
+            .unwrap_or_else(|e| panic!("Failed to create temp JPEG {:?}: {:?}", jpeg_path, e));
+        file.write_all(jpeg_data)
+            .unwrap_or_else(|e| panic!("Failed to write temp JPEG {:?}: {:?}", jpeg_path, e));
+    }
+
+    let mut cmd = Command::new(djpeg);
+    for arg in extra_args {
+        cmd.arg(arg);
+    }
+    cmd.arg(&jpeg_path);
+
+    let output = cmd
+        .output()
+        .unwrap_or_else(|e| panic!("Failed to run djpeg: {:?}", e));
+
+    let _ = std::fs::remove_file(&jpeg_path);
+
+    assert!(
+        output.status.success(),
+        "djpeg failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    output.stdout
+}
 
 // ===========================================================================
 // Buffer-exact encoding
@@ -590,6 +788,392 @@ fn decode_to_all_pixel_formats() {
             w * h * format.bytes_per_pixel(),
             "data length mismatch for {:?}",
             format,
+        );
+    }
+}
+
+// ===========================================================================
+// C djpeg cross-validation: flat/boundary pixel values
+// ===========================================================================
+
+/// Encode flat gray (128) 16x16 grayscale at Q100, decode with djpeg, compare.
+/// Measured max_diff = 0 for flat images at Q100. Tolerance: max_diff <= 1.
+#[test]
+fn c_djpeg_flat_gray_matches() {
+    let djpeg: PathBuf = match djpeg_path() {
+        Some(p) => p,
+        None => {
+            eprintln!("SKIP: djpeg not found, skipping C cross-validation");
+            return;
+        }
+    };
+
+    let (w, h) = (16, 16);
+    let pixels = vec![128u8; w * h];
+    let jpeg = compress(
+        &pixels,
+        w,
+        h,
+        PixelFormat::Grayscale,
+        100,
+        Subsampling::S444,
+    )
+    .expect("compress flat gray failed");
+
+    // Rust decode
+    let rust_img = decompress(&jpeg).expect("Rust decompress flat gray failed");
+    assert_eq!(rust_img.width, w);
+    assert_eq!(rust_img.height, h);
+
+    // C djpeg decode (outputs PGM for grayscale JPEG)
+    let pgm_data: Vec<u8> = run_djpeg(&djpeg, &jpeg, &[]);
+    let (c_width, c_height, c_pixels) =
+        parse_pgm(&pgm_data).expect("Failed to parse PGM from djpeg for flat gray");
+
+    assert_eq!(rust_img.width, c_width, "width mismatch");
+    assert_eq!(rust_img.height, c_height, "height mismatch");
+    assert_eq!(rust_img.data.len(), c_pixels.len(), "data length mismatch");
+
+    // Measured max_diff = 0 for flat 128 gray at Q100. Tolerance: 1.
+    let max_diff: u8 = rust_img
+        .data
+        .iter()
+        .zip(c_pixels.iter())
+        .map(|(&a, &b)| (a as i16 - b as i16).unsigned_abs() as u8)
+        .max()
+        .unwrap_or(0);
+
+    assert!(
+        max_diff <= 1,
+        "flat gray: Rust vs C djpeg max_diff={}, expected <= 1",
+        max_diff
+    );
+}
+
+/// Encode flat black (0) 16x16 grayscale at Q100, decode with djpeg, compare.
+/// Measured max_diff = 0 for flat black at Q100. Tolerance: max_diff <= 2.
+#[test]
+fn c_djpeg_flat_black_matches() {
+    let djpeg: PathBuf = match djpeg_path() {
+        Some(p) => p,
+        None => {
+            eprintln!("SKIP: djpeg not found, skipping C cross-validation");
+            return;
+        }
+    };
+
+    let (w, h) = (16, 16);
+    let pixels = vec![0u8; w * h];
+    let jpeg = compress(
+        &pixels,
+        w,
+        h,
+        PixelFormat::Grayscale,
+        100,
+        Subsampling::S444,
+    )
+    .expect("compress flat black failed");
+
+    // Rust decode
+    let rust_img = decompress(&jpeg).expect("Rust decompress flat black failed");
+    assert_eq!(rust_img.width, w);
+    assert_eq!(rust_img.height, h);
+
+    // C djpeg decode
+    let pgm_data: Vec<u8> = run_djpeg(&djpeg, &jpeg, &[]);
+    let (c_width, c_height, c_pixels) =
+        parse_pgm(&pgm_data).expect("Failed to parse PGM from djpeg for flat black");
+
+    assert_eq!(rust_img.width, c_width, "width mismatch");
+    assert_eq!(rust_img.height, c_height, "height mismatch");
+    assert_eq!(rust_img.data.len(), c_pixels.len(), "data length mismatch");
+
+    // Measured max_diff = 0 for flat black at Q100. Tolerance: 2.
+    let max_diff: u8 = rust_img
+        .data
+        .iter()
+        .zip(c_pixels.iter())
+        .map(|(&a, &b)| (a as i16 - b as i16).unsigned_abs() as u8)
+        .max()
+        .unwrap_or(0);
+
+    assert!(
+        max_diff <= 2,
+        "flat black: Rust vs C djpeg max_diff={}, expected <= 2",
+        max_diff
+    );
+}
+
+/// Encode flat white (255) 16x16 grayscale at Q100, decode with djpeg, compare.
+/// Measured max_diff = 0 for flat white at Q100. Tolerance: max_diff <= 2.
+#[test]
+fn c_djpeg_flat_white_matches() {
+    let djpeg: PathBuf = match djpeg_path() {
+        Some(p) => p,
+        None => {
+            eprintln!("SKIP: djpeg not found, skipping C cross-validation");
+            return;
+        }
+    };
+
+    let (w, h) = (16, 16);
+    let pixels = vec![255u8; w * h];
+    let jpeg = compress(
+        &pixels,
+        w,
+        h,
+        PixelFormat::Grayscale,
+        100,
+        Subsampling::S444,
+    )
+    .expect("compress flat white failed");
+
+    // Rust decode
+    let rust_img = decompress(&jpeg).expect("Rust decompress flat white failed");
+    assert_eq!(rust_img.width, w);
+    assert_eq!(rust_img.height, h);
+
+    // C djpeg decode
+    let pgm_data: Vec<u8> = run_djpeg(&djpeg, &jpeg, &[]);
+    let (c_width, c_height, c_pixels) =
+        parse_pgm(&pgm_data).expect("Failed to parse PGM from djpeg for flat white");
+
+    assert_eq!(rust_img.width, c_width, "width mismatch");
+    assert_eq!(rust_img.height, c_height, "height mismatch");
+    assert_eq!(rust_img.data.len(), c_pixels.len(), "data length mismatch");
+
+    // Measured max_diff = 0 for flat white at Q100. Tolerance: 2.
+    let max_diff: u8 = rust_img
+        .data
+        .iter()
+        .zip(c_pixels.iter())
+        .map(|(&a, &b)| (a as i16 - b as i16).unsigned_abs() as u8)
+        .max()
+        .unwrap_or(0);
+
+    assert!(
+        max_diff <= 2,
+        "flat white: Rust vs C djpeg max_diff={}, expected <= 2",
+        max_diff
+    );
+}
+
+/// Encode lossless 16x16 grayscale, decode with djpeg, compare.
+/// Lossless JPEG must produce exact (diff=0) roundtrip.
+#[test]
+fn c_djpeg_lossless_exact_roundtrip() {
+    let djpeg: PathBuf = match djpeg_path() {
+        Some(p) => p,
+        None => {
+            eprintln!("SKIP: djpeg not found, skipping C cross-validation");
+            return;
+        }
+    };
+
+    let (w, h) = (16, 16);
+    // Use a ramp pattern covering full 0-255 range for thorough validation
+    let pixels: Vec<u8> = (0..=255).collect();
+    assert_eq!(pixels.len(), w * h);
+
+    let jpeg =
+        compress_lossless(&pixels, w, h, PixelFormat::Grayscale).expect("compress_lossless failed");
+
+    // Rust decode
+    let rust_img = decompress(&jpeg).expect("Rust decompress lossless failed");
+    assert_eq!(rust_img.width, w);
+    assert_eq!(rust_img.height, h);
+    // Rust lossless roundtrip must be exact
+    assert_eq!(
+        rust_img.data, pixels,
+        "Rust lossless roundtrip must be exact"
+    );
+
+    // C djpeg decode
+    let pgm_data: Vec<u8> = run_djpeg(&djpeg, &jpeg, &[]);
+    let (c_width, c_height, c_pixels) =
+        parse_pgm(&pgm_data).expect("Failed to parse PGM from djpeg for lossless");
+
+    assert_eq!(rust_img.width, c_width, "width mismatch");
+    assert_eq!(rust_img.height, c_height, "height mismatch");
+    assert_eq!(rust_img.data.len(), c_pixels.len(), "data length mismatch");
+
+    // Lossless JPEG: diff must be exactly 0
+    let max_diff: u8 = rust_img
+        .data
+        .iter()
+        .zip(c_pixels.iter())
+        .map(|(&a, &b)| (a as i16 - b as i16).unsigned_abs() as u8)
+        .max()
+        .unwrap_or(0);
+
+    assert_eq!(
+        max_diff, 0,
+        "lossless: Rust vs C djpeg max_diff={}, expected diff=0",
+        max_diff
+    );
+}
+
+/// Encode RGB 16x16, decode to RGB/RGBA/BGR/BGRA with Rust, also run djpeg
+/// for RGB baseline. Assert Rust RGB matches djpeg diff=0. Assert RGBA/BGR/BGRA
+/// are consistent channel reorderings of the RGB result.
+#[test]
+fn c_djpeg_all_pixel_formats_match() {
+    let djpeg: PathBuf = match djpeg_path() {
+        Some(p) => p,
+        None => {
+            eprintln!("SKIP: djpeg not found, skipping C cross-validation");
+            return;
+        }
+    };
+
+    let (w, h) = (16, 16);
+    // Varied RGB pattern to exercise color conversion
+    let mut input_pixels: Vec<u8> = Vec::with_capacity(w * h * 3);
+    for y in 0..h {
+        for x in 0..w {
+            let r: u8 = ((x * 17 + y * 5) % 256) as u8;
+            let g: u8 = ((x * 7 + y * 13 + 50) % 256) as u8;
+            let b: u8 = ((x * 3 + y * 11 + 100) % 256) as u8;
+            input_pixels.push(r);
+            input_pixels.push(g);
+            input_pixels.push(b);
+        }
+    }
+
+    let jpeg = compress(
+        &input_pixels,
+        w,
+        h,
+        PixelFormat::Rgb,
+        100,
+        Subsampling::S444,
+    )
+    .expect("compress RGB failed");
+
+    // --- Rust decode to RGB ---
+    let rust_rgb = decompress_to(&jpeg, PixelFormat::Rgb).expect("Rust decompress_to RGB failed");
+    assert_eq!(rust_rgb.width, w);
+    assert_eq!(rust_rgb.height, h);
+    assert_eq!(rust_rgb.data.len(), w * h * 3);
+
+    // --- C djpeg decode (PPM = RGB) ---
+    let ppm_data: Vec<u8> = run_djpeg(&djpeg, &jpeg, &["-ppm"]);
+    let (c_width, c_height, c_pixels) =
+        parse_ppm(&ppm_data).expect("Failed to parse PPM from djpeg for pixel format test");
+
+    assert_eq!(rust_rgb.width, c_width, "width mismatch");
+    assert_eq!(rust_rgb.height, c_height, "height mismatch");
+    assert_eq!(rust_rgb.data.len(), c_pixels.len(), "data length mismatch");
+
+    // Rust RGB must match C djpeg PPM output exactly (diff=0)
+    let rgb_max_diff: u8 = rust_rgb
+        .data
+        .iter()
+        .zip(c_pixels.iter())
+        .map(|(&a, &b)| (a as i16 - b as i16).unsigned_abs() as u8)
+        .max()
+        .unwrap_or(0);
+
+    assert_eq!(
+        rgb_max_diff, 0,
+        "RGB: Rust vs C djpeg max_diff={}, expected diff=0",
+        rgb_max_diff
+    );
+
+    // --- Rust decode to RGBA ---
+    let rust_rgba =
+        decompress_to(&jpeg, PixelFormat::Rgba).expect("Rust decompress_to RGBA failed");
+    assert_eq!(rust_rgba.data.len(), w * h * 4);
+
+    // Verify RGBA is consistent with RGB: same R, G, B channels, alpha = 255
+    for pixel_idx in 0..(w * h) {
+        let rgb_off: usize = pixel_idx * 3;
+        let rgba_off: usize = pixel_idx * 4;
+        assert_eq!(
+            rust_rgba.data[rgba_off], rust_rgb.data[rgb_off],
+            "RGBA R mismatch at pixel {}",
+            pixel_idx
+        );
+        assert_eq!(
+            rust_rgba.data[rgba_off + 1],
+            rust_rgb.data[rgb_off + 1],
+            "RGBA G mismatch at pixel {}",
+            pixel_idx
+        );
+        assert_eq!(
+            rust_rgba.data[rgba_off + 2],
+            rust_rgb.data[rgb_off + 2],
+            "RGBA B mismatch at pixel {}",
+            pixel_idx
+        );
+        assert_eq!(
+            rust_rgba.data[rgba_off + 3],
+            255,
+            "RGBA alpha must be 255 at pixel {}",
+            pixel_idx
+        );
+    }
+
+    // --- Rust decode to BGR ---
+    let rust_bgr = decompress_to(&jpeg, PixelFormat::Bgr).expect("Rust decompress_to BGR failed");
+    assert_eq!(rust_bgr.data.len(), w * h * 3);
+
+    // Verify BGR is RGB with swapped R and B channels
+    for pixel_idx in 0..(w * h) {
+        let rgb_off: usize = pixel_idx * 3;
+        let bgr_off: usize = pixel_idx * 3;
+        assert_eq!(
+            rust_bgr.data[bgr_off],
+            rust_rgb.data[rgb_off + 2],
+            "BGR B-channel mismatch at pixel {}",
+            pixel_idx
+        );
+        assert_eq!(
+            rust_bgr.data[bgr_off + 1],
+            rust_rgb.data[rgb_off + 1],
+            "BGR G-channel mismatch at pixel {}",
+            pixel_idx
+        );
+        assert_eq!(
+            rust_bgr.data[bgr_off + 2],
+            rust_rgb.data[rgb_off],
+            "BGR R-channel mismatch at pixel {}",
+            pixel_idx
+        );
+    }
+
+    // --- Rust decode to BGRA ---
+    let rust_bgra =
+        decompress_to(&jpeg, PixelFormat::Bgra).expect("Rust decompress_to BGRA failed");
+    assert_eq!(rust_bgra.data.len(), w * h * 4);
+
+    // Verify BGRA is consistent with RGB: B=RGB.B, G=RGB.G, R=RGB.R, A=255
+    for pixel_idx in 0..(w * h) {
+        let rgb_off: usize = pixel_idx * 3;
+        let bgra_off: usize = pixel_idx * 4;
+        assert_eq!(
+            rust_bgra.data[bgra_off],
+            rust_rgb.data[rgb_off + 2],
+            "BGRA B-channel mismatch at pixel {}",
+            pixel_idx
+        );
+        assert_eq!(
+            rust_bgra.data[bgra_off + 1],
+            rust_rgb.data[rgb_off + 1],
+            "BGRA G-channel mismatch at pixel {}",
+            pixel_idx
+        );
+        assert_eq!(
+            rust_bgra.data[bgra_off + 2],
+            rust_rgb.data[rgb_off],
+            "BGRA R-channel mismatch at pixel {}",
+            pixel_idx
+        );
+        assert_eq!(
+            rust_bgra.data[bgra_off + 3],
+            255,
+            "BGRA alpha must be 255 at pixel {}",
+            pixel_idx
         );
     }
 }
