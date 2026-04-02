@@ -659,3 +659,446 @@ fn icc_survives_rust_rot90_matches_c_jpegtran() {
         "Rust decode of C-rotated JPEG should find ICC"
     );
 }
+
+// ===========================================================================
+// 6. ICC 1-byte profile roundtrip through C djpeg
+// ===========================================================================
+
+#[test]
+fn c_djpeg_icc_1_byte_profile_roundtrip() {
+    let djpeg: PathBuf = match djpeg_path() {
+        Some(p) => p,
+        None => {
+            eprintln!("SKIP: djpeg not found");
+            return;
+        }
+    };
+    if !djpeg_supports_icc_extract(&djpeg) {
+        eprintln!("SKIP: djpeg does not support -icc flag");
+        return;
+    }
+
+    let tiny_icc: Vec<u8> = vec![0xAA];
+    let (w, h): (usize, usize) = (8, 8);
+    let pixels: Vec<u8> = generate_test_pixels(w, h);
+
+    let jpeg: Vec<u8> = compress_with_metadata(
+        &pixels,
+        w,
+        h,
+        PixelFormat::Rgb,
+        75,
+        Subsampling::S444,
+        Some(&tiny_icc),
+        None,
+    )
+    .expect("Rust compress with 1-byte ICC");
+
+    let tmp_jpg: TempFile = TempFile::new("icc_1byte.jpg");
+    let tmp_icc: TempFile = TempFile::new("icc_1byte_extracted.icc");
+    let tmp_ppm: TempFile = TempFile::new("icc_1byte.ppm");
+    std::fs::write(tmp_jpg.path(), &jpeg).expect("write temp jpg");
+
+    let output = Command::new(&djpeg)
+        .arg("-icc")
+        .arg(tmp_icc.path())
+        .arg("-ppm")
+        .arg("-outfile")
+        .arg(tmp_ppm.path())
+        .arg(tmp_jpg.path())
+        .output()
+        .expect("failed to run djpeg");
+
+    assert!(
+        output.status.success(),
+        "djpeg -icc failed on 1-byte ICC JPEG: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let extracted_icc: Vec<u8> = std::fs::read(tmp_icc.path()).expect("read extracted ICC");
+    assert_eq!(
+        extracted_icc,
+        tiny_icc,
+        "extracted ICC should be byte-identical to original 1-byte ICC (got {} bytes)",
+        extracted_icc.len()
+    );
+}
+
+// ===========================================================================
+// 7. ICC at exact chunk boundary (65519 bytes = max single APP2 chunk)
+// ===========================================================================
+
+#[test]
+fn c_djpeg_icc_exact_chunk_boundary_65519() {
+    let djpeg: PathBuf = match djpeg_path() {
+        Some(p) => p,
+        None => {
+            eprintln!("SKIP: djpeg not found");
+            return;
+        }
+    };
+    if !djpeg_supports_icc_extract(&djpeg) {
+        eprintln!("SKIP: djpeg does not support -icc flag");
+        return;
+    }
+
+    // 65519 bytes is the maximum ICC payload in a single APP2 chunk:
+    // APP2 segment = 65535 max, minus 2 (length) minus 14 (ICC_PROFILE\0 + seq + total) = 65519
+    let boundary_icc: Vec<u8> = (0..65519u32).map(|i| (i % 256) as u8).collect();
+    let (w, h): (usize, usize) = (16, 16);
+    let pixels: Vec<u8> = generate_test_pixels(w, h);
+
+    let jpeg: Vec<u8> = compress_with_metadata(
+        &pixels,
+        w,
+        h,
+        PixelFormat::Rgb,
+        75,
+        Subsampling::S444,
+        Some(&boundary_icc),
+        None,
+    )
+    .expect("Rust compress with 65519-byte ICC");
+
+    let tmp_jpg: TempFile = TempFile::new("icc_boundary.jpg");
+    let tmp_icc: TempFile = TempFile::new("icc_boundary_extracted.icc");
+    let tmp_ppm: TempFile = TempFile::new("icc_boundary.ppm");
+    std::fs::write(tmp_jpg.path(), &jpeg).expect("write temp jpg");
+
+    let output = Command::new(&djpeg)
+        .arg("-icc")
+        .arg(tmp_icc.path())
+        .arg("-ppm")
+        .arg("-outfile")
+        .arg(tmp_ppm.path())
+        .arg(tmp_jpg.path())
+        .output()
+        .expect("failed to run djpeg");
+
+    assert!(
+        output.status.success(),
+        "djpeg -icc failed on 65519-byte ICC JPEG: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let extracted_icc: Vec<u8> = std::fs::read(tmp_icc.path()).expect("read extracted ICC");
+    assert_eq!(
+        extracted_icc.len(),
+        boundary_icc.len(),
+        "extracted ICC size mismatch: got {}, expected {}",
+        extracted_icc.len(),
+        boundary_icc.len()
+    );
+    assert_eq!(
+        extracted_icc, boundary_icc,
+        "extracted ICC should be byte-identical to original 65519-byte ICC"
+    );
+}
+
+// ===========================================================================
+// 8. ~60KB EXIF data roundtrip through C djpeg
+// ===========================================================================
+
+/// Build minimal valid TIFF header with 0 IFD entries (14 bytes).
+fn build_minimal_tiff() -> Vec<u8> {
+    let mut data: Vec<u8> = Vec::new();
+    data.extend_from_slice(b"II");
+    data.extend_from_slice(&42u16.to_le_bytes());
+    data.extend_from_slice(&8u32.to_le_bytes());
+    // IFD0: 0 entries
+    data.extend_from_slice(&0u16.to_le_bytes());
+    // Next IFD offset = 0
+    data.extend_from_slice(&0u32.to_le_bytes());
+    data
+}
+
+#[test]
+fn c_djpeg_exif_near_limit_60kb_roundtrip() {
+    let djpeg: PathBuf = match djpeg_path() {
+        Some(p) => p,
+        None => {
+            eprintln!("SKIP: djpeg not found");
+            return;
+        }
+    };
+
+    // ~60KB EXIF data (under the APP1 65527-byte limit)
+    let near_limit_exif: Vec<u8> = {
+        let mut data: Vec<u8> = build_minimal_tiff();
+        data.resize(60_000, 0x00);
+        data
+    };
+
+    let (w, h): (usize, usize) = (16, 16);
+    let pixels: Vec<u8> = generate_test_pixels(w, h);
+
+    let jpeg: Vec<u8> = compress_with_metadata(
+        &pixels,
+        w,
+        h,
+        PixelFormat::Rgb,
+        75,
+        Subsampling::S444,
+        None,
+        Some(&near_limit_exif),
+    )
+    .expect("Rust compress with ~60KB EXIF");
+
+    let tmp_jpg: TempFile = TempFile::new("exif_60kb.jpg");
+    let tmp_ppm: TempFile = TempFile::new("exif_60kb.ppm");
+    std::fs::write(tmp_jpg.path(), &jpeg).expect("write temp jpg");
+
+    let output = Command::new(&djpeg)
+        .arg("-ppm")
+        .arg("-outfile")
+        .arg(tmp_ppm.path())
+        .arg(tmp_jpg.path())
+        .output()
+        .expect("failed to run djpeg");
+
+    assert!(
+        output.status.success(),
+        "djpeg failed on JPEG with ~60KB EXIF: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let img = decompress(&jpeg).expect("Rust decompress of JPEG with ~60KB EXIF");
+    assert_eq!(
+        img.exif_data(),
+        Some(near_limit_exif.as_slice()),
+        "~60KB EXIF should survive Rust encode -> Rust decode roundtrip"
+    );
+}
+
+// ===========================================================================
+// 9. Minimal TIFF/EXIF header roundtrip through C djpeg
+// ===========================================================================
+
+#[test]
+fn c_djpeg_exif_minimal_tiff_header_roundtrip() {
+    let djpeg: PathBuf = match djpeg_path() {
+        Some(p) => p,
+        None => {
+            eprintln!("SKIP: djpeg not found");
+            return;
+        }
+    };
+
+    let minimal_exif: Vec<u8> = build_minimal_tiff();
+
+    let (w, h): (usize, usize) = (8, 8);
+    let pixels: Vec<u8> = generate_test_pixels(w, h);
+
+    let jpeg: Vec<u8> = compress_with_metadata(
+        &pixels,
+        w,
+        h,
+        PixelFormat::Rgb,
+        75,
+        Subsampling::S444,
+        None,
+        Some(&minimal_exif),
+    )
+    .expect("Rust compress with minimal TIFF EXIF");
+
+    let tmp_jpg: TempFile = TempFile::new("exif_minimal.jpg");
+    let tmp_ppm: TempFile = TempFile::new("exif_minimal.ppm");
+    std::fs::write(tmp_jpg.path(), &jpeg).expect("write temp jpg");
+
+    let output = Command::new(&djpeg)
+        .arg("-ppm")
+        .arg("-outfile")
+        .arg(tmp_ppm.path())
+        .arg(tmp_jpg.path())
+        .output()
+        .expect("failed to run djpeg");
+
+    assert!(
+        output.status.success(),
+        "djpeg failed on JPEG with minimal TIFF EXIF: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let img = decompress(&jpeg).expect("Rust decompress of JPEG with minimal TIFF EXIF");
+    assert_eq!(
+        img.exif_data(),
+        Some(minimal_exif.as_slice()),
+        "minimal TIFF EXIF header should survive Rust encode -> Rust decode roundtrip"
+    );
+}
+
+// ===========================================================================
+// 10. ~60KB COM comment roundtrip through rdjpgcom and Rust
+// ===========================================================================
+
+#[test]
+fn c_djpeg_comment_near_limit_60kb_roundtrip() {
+    let djpeg: PathBuf = match djpeg_path() {
+        Some(p) => p,
+        None => {
+            eprintln!("SKIP: djpeg not found");
+            return;
+        }
+    };
+
+    let large_comment: String = "X".repeat(60_000);
+
+    let (w, h): (usize, usize) = (8, 8);
+    let pixels: Vec<u8> = generate_test_pixels(w, h);
+
+    let jpeg: Vec<u8> = Encoder::new(&pixels, w, h, PixelFormat::Rgb)
+        .quality(75)
+        .comment(&large_comment)
+        .encode()
+        .expect("Rust encode with ~60KB comment");
+
+    let tmp_jpg: TempFile = TempFile::new("comment_60kb.jpg");
+    let tmp_ppm: TempFile = TempFile::new("comment_60kb.ppm");
+    std::fs::write(tmp_jpg.path(), &jpeg).expect("write temp jpg");
+
+    let output = Command::new(&djpeg)
+        .arg("-ppm")
+        .arg("-outfile")
+        .arg(tmp_ppm.path())
+        .arg(tmp_jpg.path())
+        .output()
+        .expect("failed to run djpeg");
+
+    assert!(
+        output.status.success(),
+        "djpeg failed on JPEG with ~60KB comment: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    if let Some(rdjpgcom) = rdjpgcom_path() {
+        let rdjpg_output = Command::new(&rdjpgcom)
+            .arg("-raw")
+            .arg(tmp_jpg.path())
+            .output()
+            .expect("failed to run rdjpgcom");
+
+        assert!(
+            rdjpg_output.status.success(),
+            "rdjpgcom failed on JPEG with ~60KB comment: {}",
+            String::from_utf8_lossy(&rdjpg_output.stderr)
+        );
+
+        let stdout: String = String::from_utf8_lossy(&rdjpg_output.stdout).to_string();
+        assert!(
+            stdout.contains("XXXX"),
+            "rdjpgcom should find our repeated-X comment in the JPEG"
+        );
+    }
+
+    let img = decompress(&jpeg).expect("Rust decompress of JPEG with ~60KB comment");
+    assert_eq!(
+        img.comment.as_deref(),
+        Some(large_comment.as_str()),
+        "~60KB comment should survive Rust encode -> Rust decode roundtrip"
+    );
+}
+
+// ===========================================================================
+// 11. Two independent encodes with different ICC profiles (state isolation)
+// ===========================================================================
+
+#[test]
+fn c_djpeg_icc_two_independent_encodes() {
+    let djpeg: PathBuf = match djpeg_path() {
+        Some(p) => p,
+        None => {
+            eprintln!("SKIP: djpeg not found");
+            return;
+        }
+    };
+    if !djpeg_supports_icc_extract(&djpeg) {
+        eprintln!("SKIP: djpeg does not support -icc flag");
+        return;
+    }
+
+    let (w, h): (usize, usize) = (8, 8);
+    let pixels: Vec<u8> = generate_test_pixels(w, h);
+
+    let icc_a: Vec<u8> = (0..1024u32).map(|i| (i % 251) as u8).collect();
+    let icc_b: Vec<u8> = (0..2048u32).map(|i| (i % 239) as u8).collect();
+
+    let jpeg_a: Vec<u8> = compress_with_metadata(
+        &pixels,
+        w,
+        h,
+        PixelFormat::Rgb,
+        75,
+        Subsampling::S444,
+        Some(&icc_a),
+        None,
+    )
+    .expect("Rust compress JPEG A with 1KB ICC");
+
+    let jpeg_b: Vec<u8> = compress_with_metadata(
+        &pixels,
+        w,
+        h,
+        PixelFormat::Rgb,
+        75,
+        Subsampling::S444,
+        Some(&icc_b),
+        None,
+    )
+    .expect("Rust compress JPEG B with 2KB ICC");
+
+    let tmp_jpg_a: TempFile = TempFile::new("icc_indep_a.jpg");
+    let tmp_icc_a: TempFile = TempFile::new("icc_indep_a_extracted.icc");
+    let tmp_ppm_a: TempFile = TempFile::new("icc_indep_a.ppm");
+    std::fs::write(tmp_jpg_a.path(), &jpeg_a).expect("write temp jpg A");
+
+    let output_a = Command::new(&djpeg)
+        .arg("-icc")
+        .arg(tmp_icc_a.path())
+        .arg("-ppm")
+        .arg("-outfile")
+        .arg(tmp_ppm_a.path())
+        .arg(tmp_jpg_a.path())
+        .output()
+        .expect("failed to run djpeg on JPEG A");
+    assert!(
+        output_a.status.success(),
+        "djpeg -icc failed on JPEG A: {}",
+        String::from_utf8_lossy(&output_a.stderr)
+    );
+
+    let tmp_jpg_b: TempFile = TempFile::new("icc_indep_b.jpg");
+    let tmp_icc_b: TempFile = TempFile::new("icc_indep_b_extracted.icc");
+    let tmp_ppm_b: TempFile = TempFile::new("icc_indep_b.ppm");
+    std::fs::write(tmp_jpg_b.path(), &jpeg_b).expect("write temp jpg B");
+
+    let output_b = Command::new(&djpeg)
+        .arg("-icc")
+        .arg(tmp_icc_b.path())
+        .arg("-ppm")
+        .arg("-outfile")
+        .arg(tmp_ppm_b.path())
+        .arg(tmp_jpg_b.path())
+        .output()
+        .expect("failed to run djpeg on JPEG B");
+    assert!(
+        output_b.status.success(),
+        "djpeg -icc failed on JPEG B: {}",
+        String::from_utf8_lossy(&output_b.stderr)
+    );
+
+    let extracted_a: Vec<u8> = std::fs::read(tmp_icc_a.path()).expect("read extracted ICC A");
+    let extracted_b: Vec<u8> = std::fs::read(tmp_icc_b.path()).expect("read extracted ICC B");
+
+    assert_eq!(
+        extracted_a, icc_a,
+        "extracted ICC A should be byte-identical to original 1KB ICC"
+    );
+    assert_eq!(
+        extracted_b, icc_b,
+        "extracted ICC B should be byte-identical to original 2KB ICC"
+    );
+    assert_ne!(
+        extracted_a, extracted_b,
+        "the two ICC profiles should be different (state isolation)"
+    );
+}
