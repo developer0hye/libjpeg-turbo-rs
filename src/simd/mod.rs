@@ -14,9 +14,15 @@ pub mod x86_64;
 
 /// Function-pointer dispatch table for SIMD-accelerated decode operations.
 pub struct SimdRoutines {
-    /// Combined dequant + IDCT + level-shift + clamp → u8 output.
+    /// Combined dequant + IDCT (ISLOW) + level-shift + clamp → u8 output.
     /// `coeffs` and `quant` are both in natural (row-major) order.
     pub idct_islow: fn(coeffs: &[i16; 64], quant: &[u16; 64], output: &mut [u8; 64]),
+
+    /// Combined dequant + IDCT (IFAST) + level-shift + clamp → u8 output.
+    pub idct_ifast: fn(coeffs: &[i16; 64], quant: &[u16; 64], output: &mut [u8; 64]),
+
+    /// Combined dequant + IDCT (Float) + level-shift + clamp → u8 output.
+    pub idct_float: fn(coeffs: &[i16; 64], quant: &[u16; 64], output: &mut [u8; 64]),
 
     /// YCbCr → interleaved RGB, one row.
     #[allow(clippy::type_complexity)]
