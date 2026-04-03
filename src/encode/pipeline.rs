@@ -4277,36 +4277,62 @@ fn encode_mcu_444_x86_64(
     fdct_quantize_fn: fn(&mut [i16; 64], &QuantDivisors, &mut [i16; 64]),
 ) {
     let mut q: [[i16; 64]; 3] = [[0i16; 64]; 3];
-    fdct_quantize_block(
-        y_plane,
-        width,
-        height,
-        x0,
-        y0,
-        luma_quant,
-        fdct_quantize_fn,
-        &mut q[0],
-    );
-    fdct_quantize_block(
-        cb_plane,
-        width,
-        height,
-        x0,
-        y0,
-        chroma_quant,
-        fdct_quantize_fn,
-        &mut q[1],
-    );
-    fdct_quantize_block(
-        cr_plane,
-        width,
-        height,
-        x0,
-        y0,
-        chroma_quant,
-        fdct_quantize_fn,
-        &mut q[2],
-    );
+    let has_avx2: bool = is_x86_feature_detected!("avx2");
+    let interior: bool = x0 + 8 <= width && y0 + 8 <= height;
+
+    if interior && has_avx2 {
+        unsafe {
+            crate::simd::x86_64::avx2_extract_fdct_quantize(
+                y_plane.as_ptr().add(y0 * width + x0),
+                width,
+                luma_quant,
+                &mut q[0],
+            );
+            crate::simd::x86_64::avx2_extract_fdct_quantize(
+                cb_plane.as_ptr().add(y0 * width + x0),
+                width,
+                chroma_quant,
+                &mut q[1],
+            );
+            crate::simd::x86_64::avx2_extract_fdct_quantize(
+                cr_plane.as_ptr().add(y0 * width + x0),
+                width,
+                chroma_quant,
+                &mut q[2],
+            );
+        }
+    } else {
+        fdct_quantize_block(
+            y_plane,
+            width,
+            height,
+            x0,
+            y0,
+            luma_quant,
+            fdct_quantize_fn,
+            &mut q[0],
+        );
+        fdct_quantize_block(
+            cb_plane,
+            width,
+            height,
+            x0,
+            y0,
+            chroma_quant,
+            fdct_quantize_fn,
+            &mut q[1],
+        );
+        fdct_quantize_block(
+            cr_plane,
+            width,
+            height,
+            x0,
+            y0,
+            chroma_quant,
+            fdct_quantize_fn,
+            &mut q[2],
+        );
+    }
 
     unsafe {
         let (mut pb, mut fb, mut buf) = writer.begin_block(1536);
@@ -4367,46 +4393,75 @@ fn encode_mcu_422_x86_64(
     fdct_quantize_fn: fn(&mut [i16; 64], &QuantDivisors, &mut [i16; 64]),
 ) {
     let mut q: [[i16; 64]; 4] = [[0i16; 64]; 4];
-    fdct_quantize_block(
-        y_plane,
-        width,
-        height,
-        x0,
-        y0,
-        luma_quant,
-        fdct_quantize_fn,
-        &mut q[0],
-    );
-    fdct_quantize_block(
-        y_plane,
-        width,
-        height,
-        x0 + 8,
-        y0,
-        luma_quant,
-        fdct_quantize_fn,
-        &mut q[1],
-    );
-    fdct_quantize_chroma_h2v1(
-        cb_plane,
-        width,
-        height,
-        x0,
-        y0,
-        chroma_quant,
-        fdct_quantize_fn,
-        &mut q[2],
-    );
-    fdct_quantize_chroma_h2v1(
-        cr_plane,
-        width,
-        height,
-        x0,
-        y0,
-        chroma_quant,
-        fdct_quantize_fn,
-        &mut q[3],
-    );
+    let has_avx2: bool = is_x86_feature_detected!("avx2");
+    // Interior check: 2 Y blocks (16 wide) + H2V1 chroma (16 wide, 8 tall)
+    let interior: bool = x0 + 16 <= width && y0 + 8 <= height;
+
+    if interior && has_avx2 {
+        unsafe {
+            let y_ptr: *const u8 = y_plane.as_ptr().add(y0 * width + x0);
+            crate::simd::x86_64::avx2_extract_fdct_quantize(y_ptr, width, luma_quant, &mut q[0]);
+            crate::simd::x86_64::avx2_extract_fdct_quantize(
+                y_ptr.add(8),
+                width,
+                luma_quant,
+                &mut q[1],
+            );
+            crate::simd::x86_64::avx2_downsample_h2v1_fdct_quantize(
+                cb_plane.as_ptr().add(y0 * width + x0),
+                width,
+                chroma_quant,
+                &mut q[2],
+            );
+            crate::simd::x86_64::avx2_downsample_h2v1_fdct_quantize(
+                cr_plane.as_ptr().add(y0 * width + x0),
+                width,
+                chroma_quant,
+                &mut q[3],
+            );
+        }
+    } else {
+        fdct_quantize_block(
+            y_plane,
+            width,
+            height,
+            x0,
+            y0,
+            luma_quant,
+            fdct_quantize_fn,
+            &mut q[0],
+        );
+        fdct_quantize_block(
+            y_plane,
+            width,
+            height,
+            x0 + 8,
+            y0,
+            luma_quant,
+            fdct_quantize_fn,
+            &mut q[1],
+        );
+        fdct_quantize_chroma_h2v1(
+            cb_plane,
+            width,
+            height,
+            x0,
+            y0,
+            chroma_quant,
+            fdct_quantize_fn,
+            &mut q[2],
+        );
+        fdct_quantize_chroma_h2v1(
+            cr_plane,
+            width,
+            height,
+            x0,
+            y0,
+            chroma_quant,
+            fdct_quantize_fn,
+            &mut q[3],
+        );
+    }
 
     unsafe {
         let (mut pb, mut fb, mut buf) = writer.begin_block(2048);
@@ -4478,48 +4533,43 @@ fn encode_mcu_420_x86_64(
     fdct_quantize_fn: fn(&mut [i16; 64], &QuantDivisors, &mut [i16; 64]),
 ) {
     // Phase 1: FDCT + quantize all 6 blocks (4 Y + 1 Cb + 1 Cr)
+    // Cache feature detection once per MCU (not per block).
     let mut q: [[i16; 64]; 6] = [[0i16; 64]; 6];
+    let has_avx2: bool = is_x86_feature_detected!("avx2");
 
-    // Y blocks: top-left, top-right, bottom-left, bottom-right
-    let y_offsets: [(usize, usize); 4] = [(x0, y0), (x0 + 8, y0), (x0, y0 + 8), (x0 + 8, y0 + 8)];
-    for (idx, &(bx, by)) in y_offsets.iter().enumerate() {
-        if bx + 8 <= width && by + 8 <= height && is_x86_feature_detected!("avx2") {
-            unsafe {
-                crate::simd::x86_64::avx2_extract_fdct_quantize(
-                    y_plane.as_ptr().add(by * width + bx),
-                    width,
-                    luma_quant,
-                    &mut q[idx],
-                );
-            }
-            continue;
-        }
-        let mut block = [0i16; 64];
-        extract_block(y_plane, width, height, bx, by, &mut block);
-        fdct_quantize_fn(&mut block, luma_quant, &mut q[idx]);
-    }
+    // Check if all 4 Y blocks and both chroma blocks are interior (common case).
+    // For 1080p with 16x16 MCUs, only edge MCUs fail this check.
+    let interior: bool = x0 + 16 <= width && y0 + 16 <= height;
 
-    // Cb block (H2V2 downsampled)
-    let cb_src_w: usize = 16;
-    let cb_src_h: usize = 16;
-    if x0 + cb_src_w <= width && y0 + cb_src_h <= height && is_x86_feature_detected!("avx2") {
+    if interior && has_avx2 {
+        // Fast path: all blocks are interior, use fused SIMD for everything
         unsafe {
+            let y_ptr: *const u8 = y_plane.as_ptr().add(y0 * width + x0);
+            crate::simd::x86_64::avx2_extract_fdct_quantize(y_ptr, width, luma_quant, &mut q[0]);
+            crate::simd::x86_64::avx2_extract_fdct_quantize(
+                y_ptr.add(8),
+                width,
+                luma_quant,
+                &mut q[1],
+            );
+            crate::simd::x86_64::avx2_extract_fdct_quantize(
+                y_ptr.add(8 * width),
+                width,
+                luma_quant,
+                &mut q[2],
+            );
+            crate::simd::x86_64::avx2_extract_fdct_quantize(
+                y_ptr.add(8 * width + 8),
+                width,
+                luma_quant,
+                &mut q[3],
+            );
             crate::simd::x86_64::avx2_downsample_h2v2_fdct_quantize(
                 cb_plane.as_ptr().add(y0 * width + x0),
                 width,
                 chroma_quant,
                 &mut q[4],
             );
-        }
-    } else {
-        let mut block = [0i16; 64];
-        downsample_chroma_block(cb_plane, width, height, x0, y0, 2, 2, &mut block);
-        fdct_quantize_fn(&mut block, chroma_quant, &mut q[4]);
-    }
-
-    // Cr block (H2V2 downsampled)
-    if x0 + cb_src_w <= width && y0 + cb_src_h <= height && is_x86_feature_detected!("avx2") {
-        unsafe {
             crate::simd::x86_64::avx2_downsample_h2v2_fdct_quantize(
                 cr_plane.as_ptr().add(y0 * width + x0),
                 width,
@@ -4528,9 +4578,53 @@ fn encode_mcu_420_x86_64(
             );
         }
     } else {
-        let mut block = [0i16; 64];
-        downsample_chroma_block(cr_plane, width, height, x0, y0, 2, 2, &mut block);
-        fdct_quantize_fn(&mut block, chroma_quant, &mut q[5]);
+        // Slow path: handle edge MCUs with per-block bounds checking
+        let y_offsets: [(usize, usize); 4] =
+            [(x0, y0), (x0 + 8, y0), (x0, y0 + 8), (x0 + 8, y0 + 8)];
+        for (idx, &(bx, by)) in y_offsets.iter().enumerate() {
+            if has_avx2 && bx + 8 <= width && by + 8 <= height {
+                unsafe {
+                    crate::simd::x86_64::avx2_extract_fdct_quantize(
+                        y_plane.as_ptr().add(by * width + bx),
+                        width,
+                        luma_quant,
+                        &mut q[idx],
+                    );
+                }
+            } else {
+                let mut block = [0i16; 64];
+                extract_block(y_plane, width, height, bx, by, &mut block);
+                fdct_quantize_fn(&mut block, luma_quant, &mut q[idx]);
+            }
+        }
+        if has_avx2 && x0 + 16 <= width && y0 + 16 <= height {
+            unsafe {
+                crate::simd::x86_64::avx2_downsample_h2v2_fdct_quantize(
+                    cb_plane.as_ptr().add(y0 * width + x0),
+                    width,
+                    chroma_quant,
+                    &mut q[4],
+                );
+            }
+        } else {
+            let mut block = [0i16; 64];
+            downsample_chroma_block(cb_plane, width, height, x0, y0, 2, 2, &mut block);
+            fdct_quantize_fn(&mut block, chroma_quant, &mut q[4]);
+        }
+        if has_avx2 && x0 + 16 <= width && y0 + 16 <= height {
+            unsafe {
+                crate::simd::x86_64::avx2_downsample_h2v2_fdct_quantize(
+                    cr_plane.as_ptr().add(y0 * width + x0),
+                    width,
+                    chroma_quant,
+                    &mut q[5],
+                );
+            }
+        } else {
+            let mut block = [0i16; 64];
+            downsample_chroma_block(cr_plane, width, height, x0, y0, 2, 2, &mut block);
+            fdct_quantize_fn(&mut block, chroma_quant, &mut q[5]);
+        }
     }
 
     // Phase 2: Huffman encode all 6 blocks with MCU-level hoisted state.
