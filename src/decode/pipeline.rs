@@ -466,6 +466,16 @@ impl<'a> Decoder<'a> {
         decoder.decode_image()
     }
 
+    /// Select the IDCT function based on the configured DCT method.
+    #[inline(always)]
+    fn idct_fn(&self) -> fn(&[i16; 64], &[u16; 64], &mut [u8; 64]) {
+        match self.dct_method {
+            DctMethod::IsFast => self.routines.idct_ifast,
+            DctMethod::Float => self.routines.idct_float,
+            DctMethod::IsLow => self.routines.idct_islow,
+        }
+    }
+
     #[inline(always)]
     #[allow(dead_code)]
     fn idct_islow(&self, coeffs: &[i16; 64], quant: &[u16; 64], output: &mut [u8; 64]) {
@@ -479,6 +489,7 @@ impl<'a> Decoder<'a> {
     }
 
     /// IDCT writing directly to a strided destination buffer (no intermediate copy).
+    /// Dispatches to ISLOW/IFAST/Float based on `self.dct_method`.
     ///
     /// # Safety
     /// `output` must point to at least `7 * stride + 8` writable bytes.
@@ -490,38 +501,31 @@ impl<'a> Decoder<'a> {
         output: *mut u8,
         stride: usize,
     ) {
-        #[cfg(all(target_arch = "aarch64", feature = "simd"))]
-        {
-            return crate::simd::aarch64::idct::neon_idct_islow_strided(
-                coeffs, quant, output, stride,
-            );
-        }
-
-        #[cfg(all(target_arch = "x86_64", feature = "simd"))]
-        {
-            if is_x86_feature_detected!("avx2") {
-                return crate::simd::x86_64::avx2_idct::avx2_idct_islow_strided(
+        // For ISLOW, use optimized strided SIMD paths when available.
+        if matches!(self.dct_method, DctMethod::IsLow) {
+            #[cfg(all(target_arch = "aarch64", feature = "simd"))]
+            {
+                return crate::simd::aarch64::idct::neon_idct_islow_strided(
                     coeffs, quant, output, stride,
                 );
             }
-            // SSE2 fallback: IDCT into temp buffer, then copy row-by-row.
-            let mut tmp = [0u8; 64];
-            (self.routines.idct_islow)(coeffs, quant, &mut tmp);
-            for row in 0..8 {
-                std::ptr::copy_nonoverlapping(
-                    tmp.as_ptr().add(row * 8),
-                    output.add(row * stride),
-                    8,
-                );
+
+            #[cfg(all(target_arch = "x86_64", feature = "simd"))]
+            {
+                if is_x86_feature_detected!("avx2") {
+                    return crate::simd::x86_64::avx2_idct::avx2_idct_islow_strided(
+                        coeffs, quant, output, stride,
+                    );
+                }
             }
-            return;
         }
 
-        // Scalar fallback: IDCT into temp buffer, then copy row-by-row.
+        // Generic path: IDCT into temp buffer, then copy row-by-row.
         #[allow(unreachable_code)]
         {
+            let idct = self.idct_fn();
             let mut tmp = [0u8; 64];
-            (self.routines.idct_islow)(coeffs, quant, &mut tmp);
+            idct(coeffs, quant, &mut tmp);
             for row in 0..8 {
                 std::ptr::copy_nonoverlapping(
                     tmp.as_ptr().add(row * 8),

@@ -17,6 +17,8 @@ use crate::simd::{EncoderSimdRoutines, QuantDivisors, SimdRoutines};
 pub fn routines() -> SimdRoutines {
     SimdRoutines {
         idct_islow: idct::neon_idct_islow,
+        idct_ifast: crate::simd::scalar::scalar_idct_ifast,
+        idct_float: crate::simd::scalar::scalar_idct_float,
         ycbcr_to_rgb_row: color::neon_ycbcr_to_rgb_row,
         fancy_upsample_h2v1: upsample::neon_fancy_upsample_h2v1,
     }
