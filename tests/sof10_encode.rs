@@ -318,3 +318,276 @@ fn c_djpeg_sof10_encode_diff_zero() {
         max_diff, mismatch_count
     );
 }
+
+/// Parse a binary PGM (P5) file and return (width, height, grayscale_pixels).
+fn parse_pgm(path: &Path) -> (usize, usize, Vec<u8>) {
+    let raw: Vec<u8> = std::fs::read(path).expect("read PGM");
+    assert!(&raw[0..2] == b"P5", "not P5 PGM");
+    let mut idx: usize = 2;
+    loop {
+        while idx < raw.len() && raw[idx].is_ascii_whitespace() {
+            idx += 1;
+        }
+        if idx < raw.len() && raw[idx] == b'#' {
+            while idx < raw.len() && raw[idx] != b'\n' {
+                idx += 1;
+            }
+        } else {
+            break;
+        }
+    }
+    let mut end: usize = idx;
+    while end < raw.len() && raw[end].is_ascii_digit() {
+        end += 1;
+    }
+    let w: usize = std::str::from_utf8(&raw[idx..end])
+        .unwrap()
+        .parse()
+        .unwrap();
+    idx = end;
+    while idx < raw.len() && raw[idx].is_ascii_whitespace() {
+        idx += 1;
+    }
+    end = idx;
+    while end < raw.len() && raw[end].is_ascii_digit() {
+        end += 1;
+    }
+    let h: usize = std::str::from_utf8(&raw[idx..end])
+        .unwrap()
+        .parse()
+        .unwrap();
+    idx = end;
+    while idx < raw.len() && raw[idx].is_ascii_whitespace() {
+        idx += 1;
+    }
+    end = idx;
+    while end < raw.len() && raw[end].is_ascii_digit() {
+        end += 1;
+    }
+    idx = end + 1;
+    (w, h, raw[idx..idx + w * h].to_vec())
+}
+
+/// Extended C djpeg cross-validation for SOF10: EncoderBuilder path,
+/// grayscale, and various quality levels.
+#[test]
+fn c_djpeg_sof10_encode_extended_diff_zero() {
+    let djpeg: PathBuf = match djpeg_path() {
+        Some(p) => p,
+        None => {
+            eprintln!("SKIP: djpeg not found");
+            return;
+        }
+    };
+
+    let (w, h): (usize, usize) = (48, 48);
+    let pid: u32 = std::process::id();
+
+    // Generate a deterministic RGB test pattern
+    let mut pixels: Vec<u8> = Vec::with_capacity(w * h * 3);
+    for y in 0..h {
+        for x in 0..w {
+            let r: u8 = ((x * 255) / w.max(1)) as u8;
+            let g: u8 = ((y * 255) / h.max(1)) as u8;
+            let b: u8 = (((x + y) * 127) / (w + h).max(1)) as u8;
+            pixels.push(r);
+            pixels.push(g);
+            pixels.push(b);
+        }
+    }
+
+    // --- SOF10 via EncoderBuilder (arithmetic + progressive) ---
+    {
+        let jpeg: Vec<u8> = Encoder::new(&pixels, w, h, PixelFormat::Rgb)
+            .quality(90)
+            .arithmetic(true)
+            .progressive(true)
+            .subsampling(Subsampling::S444)
+            .encode()
+            .unwrap_or_else(|e| panic!("SOF10 EncoderBuilder encode failed: {e}"));
+
+        let has_sof10: bool = jpeg
+            .windows(2)
+            .any(|pair| pair[0] == 0xFF && pair[1] == 0xCA);
+        assert!(
+            has_sof10,
+            "EncoderBuilder arithmetic+progressive must produce SOF10 marker"
+        );
+
+        let rust_img = decompress_to(&jpeg, PixelFormat::Rgb)
+            .expect("Rust must decode SOF10 JPEG (EncoderBuilder)");
+        assert_eq!(rust_img.width, w);
+        assert_eq!(rust_img.height, h);
+
+        let tmp_jpg: PathBuf =
+            std::env::temp_dir().join(format!("ljt_sof10_ext_builder_{pid}.jpg"));
+        let tmp_ppm: PathBuf =
+            std::env::temp_dir().join(format!("ljt_sof10_ext_builder_{pid}.ppm"));
+        std::fs::write(&tmp_jpg, &jpeg).unwrap();
+
+        let output = Command::new(&djpeg)
+            .args([
+                "-ppm",
+                "-outfile",
+                tmp_ppm.to_str().unwrap(),
+                tmp_jpg.to_str().unwrap(),
+            ])
+            .output()
+            .expect("failed to run djpeg");
+        assert!(
+            output.status.success(),
+            "djpeg failed on SOF10 EncoderBuilder JPEG: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+
+        let (cw, ch, c_pixels) = parse_ppm(Path::new(&tmp_ppm));
+        std::fs::remove_file(&tmp_jpg).ok();
+        std::fs::remove_file(&tmp_ppm).ok();
+
+        assert_eq!(cw, w, "SOF10 EncoderBuilder: width mismatch");
+        assert_eq!(ch, h, "SOF10 EncoderBuilder: height mismatch");
+
+        let max_diff: u8 = rust_img
+            .data
+            .iter()
+            .zip(c_pixels.iter())
+            .map(|(&a, &b)| (a as i16 - b as i16).unsigned_abs() as u8)
+            .max()
+            .unwrap_or(0);
+        assert_eq!(
+            max_diff, 0,
+            "SOF10 EncoderBuilder: Rust vs C djpeg max_diff={} (must be 0)",
+            max_diff
+        );
+    }
+
+    // --- SOF10 grayscale ---
+    {
+        let gray_pixels: Vec<u8> = (0..32 * 32).map(|i| ((i * 37 + 13) % 256) as u8).collect();
+        let jpeg: Vec<u8> = compress_arithmetic_progressive(
+            &gray_pixels,
+            32,
+            32,
+            PixelFormat::Grayscale,
+            90,
+            Subsampling::S444,
+        )
+        .unwrap_or_else(|e| panic!("SOF10 grayscale encode failed: {e}"));
+
+        let has_sof10: bool = jpeg
+            .windows(2)
+            .any(|pair| pair[0] == 0xFF && pair[1] == 0xCA);
+        assert!(has_sof10, "SOF10 grayscale must contain SOF10 marker");
+
+        let rust_img = decompress_to(&jpeg, PixelFormat::Grayscale)
+            .expect("Rust must decode SOF10 grayscale JPEG");
+        assert_eq!(rust_img.width, 32);
+        assert_eq!(rust_img.height, 32);
+        assert_eq!(rust_img.pixel_format, PixelFormat::Grayscale);
+
+        let tmp_jpg: PathBuf = std::env::temp_dir().join(format!("ljt_sof10_ext_gray_{pid}.jpg"));
+        let tmp_pgm: PathBuf = std::env::temp_dir().join(format!("ljt_sof10_ext_gray_{pid}.pgm"));
+        std::fs::write(&tmp_jpg, &jpeg).unwrap();
+
+        let output = Command::new(&djpeg)
+            .args([
+                "-pnm",
+                "-outfile",
+                tmp_pgm.to_str().unwrap(),
+                tmp_jpg.to_str().unwrap(),
+            ])
+            .output()
+            .expect("failed to run djpeg");
+        assert!(
+            output.status.success(),
+            "djpeg failed on SOF10 grayscale JPEG: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+
+        let (cw, ch, c_pixels) = parse_pgm(Path::new(&tmp_pgm));
+        std::fs::remove_file(&tmp_jpg).ok();
+        std::fs::remove_file(&tmp_pgm).ok();
+
+        assert_eq!(cw, 32, "SOF10 grayscale: width mismatch");
+        assert_eq!(ch, 32, "SOF10 grayscale: height mismatch");
+
+        let max_diff: u8 = rust_img
+            .data
+            .iter()
+            .zip(c_pixels.iter())
+            .map(|(&a, &b)| (a as i16 - b as i16).unsigned_abs() as u8)
+            .max()
+            .unwrap_or(0);
+        assert_eq!(
+            max_diff, 0,
+            "SOF10 grayscale: Rust vs C djpeg max_diff={} (must be 0)",
+            max_diff
+        );
+    }
+
+    // --- SOF10 various quality levels ---
+    {
+        for &quality in &[50u8, 75, 90, 100] {
+            let jpeg: Vec<u8> = compress_arithmetic_progressive(
+                &pixels,
+                w,
+                h,
+                PixelFormat::Rgb,
+                quality,
+                Subsampling::S444,
+            )
+            .unwrap_or_else(|e| panic!("SOF10 Q{} encode failed: {e}", quality));
+
+            let has_sof10: bool = jpeg
+                .windows(2)
+                .any(|pair| pair[0] == 0xFF && pair[1] == 0xCA);
+            assert!(has_sof10, "SOF10 Q{} must contain SOF10 marker", quality);
+
+            let rust_img = decompress_to(&jpeg, PixelFormat::Rgb)
+                .unwrap_or_else(|e| panic!("Rust decode SOF10 Q{} failed: {e}", quality));
+            assert_eq!(rust_img.width, w, "SOF10 Q{}: width mismatch", quality);
+            assert_eq!(rust_img.height, h, "SOF10 Q{}: height mismatch", quality);
+
+            let label: String = format!("sof10_q{}", quality);
+            let tmp_jpg: PathBuf = std::env::temp_dir().join(format!("ljt_{label}_{pid}.jpg"));
+            let tmp_ppm: PathBuf = std::env::temp_dir().join(format!("ljt_{label}_{pid}.ppm"));
+            std::fs::write(&tmp_jpg, &jpeg).unwrap();
+
+            let output = Command::new(&djpeg)
+                .args([
+                    "-ppm",
+                    "-outfile",
+                    tmp_ppm.to_str().unwrap(),
+                    tmp_jpg.to_str().unwrap(),
+                ])
+                .output()
+                .expect("failed to run djpeg");
+            assert!(
+                output.status.success(),
+                "djpeg failed on SOF10 Q{} JPEG: {}",
+                quality,
+                String::from_utf8_lossy(&output.stderr)
+            );
+
+            let (cw, ch, c_pixels) = parse_ppm(Path::new(&tmp_ppm));
+            std::fs::remove_file(&tmp_jpg).ok();
+            std::fs::remove_file(&tmp_ppm).ok();
+
+            assert_eq!(cw, w, "SOF10 Q{}: C width mismatch", quality);
+            assert_eq!(ch, h, "SOF10 Q{}: C height mismatch", quality);
+
+            let max_diff: u8 = rust_img
+                .data
+                .iter()
+                .zip(c_pixels.iter())
+                .map(|(&a, &b)| (a as i16 - b as i16).unsigned_abs() as u8)
+                .max()
+                .unwrap_or(0);
+            assert_eq!(
+                max_diff, 0,
+                "SOF10 Q{}: Rust vs C djpeg max_diff={} (must be 0)",
+                quality, max_diff
+            );
+        }
+    }
+}

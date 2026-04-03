@@ -360,7 +360,7 @@ fn parse_bmp_pixels(data: &[u8]) -> (usize, usize, Vec<u8>) {
     let bottom_up: bool = height_raw > 0;
 
     let bpp: usize = bits_per_pixel as usize / 8;
-    let row_stride: usize = ((width as usize * bpp + 3) / 4) * 4;
+    let row_stride: usize = (width as usize * bpp).div_ceil(4) * 4;
 
     let mut pixels: Vec<u8> = Vec::with_capacity(width as usize * height as usize * 3);
     for row in 0..height as usize {
@@ -491,4 +491,259 @@ fn c_djpeg_cross_validation_bmp_output() {
         "bmp cross-validation: {} pixels differ, max_diff={}",
         mismatch_count, max_diff
     );
+}
+
+// -----------------------------------------------------------------------
+// C djpeg cross-validation for PPM output
+// -----------------------------------------------------------------------
+
+/// Parse a binary PPM (P6) file and return `(width, height, rgb_pixels)`.
+fn parse_ppm_pixels(data: &[u8]) -> (usize, usize, Vec<u8>) {
+    assert!(data.len() > 3, "PPM too short");
+    assert_eq!(&data[0..2], b"P6", "not a P6 PPM");
+    let mut idx: usize = 2;
+    idx = skip_ws_comments_ppm(data, idx);
+    let (width, next) = read_number_ppm(data, idx);
+    idx = skip_ws_comments_ppm(data, next);
+    let (height, next) = read_number_ppm(data, idx);
+    idx = skip_ws_comments_ppm(data, next);
+    let (_maxval, next) = read_number_ppm(data, idx);
+    // One whitespace byte after maxval before binary data
+    idx = next + 1;
+    let pixels: Vec<u8> = data[idx..].to_vec();
+    assert_eq!(
+        pixels.len(),
+        width * height * 3,
+        "PPM pixel data length mismatch: expected {}, got {}",
+        width * height * 3,
+        pixels.len()
+    );
+    (width, height, pixels)
+}
+
+/// Parse a binary PGM (P5) file and return `(width, height, gray_pixels)`.
+fn parse_pgm_pixels(data: &[u8]) -> (usize, usize, Vec<u8>) {
+    assert!(data.len() > 3, "PGM too short");
+    assert_eq!(&data[0..2], b"P5", "not a P5 PGM");
+    let mut idx: usize = 2;
+    idx = skip_ws_comments_ppm(data, idx);
+    let (width, next) = read_number_ppm(data, idx);
+    idx = skip_ws_comments_ppm(data, next);
+    let (height, next) = read_number_ppm(data, idx);
+    idx = skip_ws_comments_ppm(data, next);
+    let (_maxval, next) = read_number_ppm(data, idx);
+    idx = next + 1;
+    let pixels: Vec<u8> = data[idx..].to_vec();
+    assert_eq!(
+        pixels.len(),
+        width * height,
+        "PGM pixel data length mismatch: expected {}, got {}",
+        width * height,
+        pixels.len()
+    );
+    (width, height, pixels)
+}
+
+fn skip_ws_comments_ppm(data: &[u8], mut idx: usize) -> usize {
+    loop {
+        while idx < data.len() && data[idx].is_ascii_whitespace() {
+            idx += 1;
+        }
+        if idx < data.len() && data[idx] == b'#' {
+            while idx < data.len() && data[idx] != b'\n' {
+                idx += 1;
+            }
+        } else {
+            break;
+        }
+    }
+    idx
+}
+
+fn read_number_ppm(data: &[u8], idx: usize) -> (usize, usize) {
+    let mut end: usize = idx;
+    while end < data.len() && data[end].is_ascii_digit() {
+        end += 1;
+    }
+    let val: usize = std::str::from_utf8(&data[idx..end])
+        .unwrap()
+        .parse()
+        .unwrap();
+    (val, end)
+}
+
+/// Maximum absolute per-channel difference between two pixel buffers.
+fn pixel_max_diff(a: &[u8], b: &[u8]) -> u8 {
+    assert_eq!(a.len(), b.len(), "pixel buffers must have equal length");
+    a.iter()
+        .zip(b.iter())
+        .map(|(&x, &y)| (x as i16 - y as i16).unsigned_abs() as u8)
+        .max()
+        .unwrap_or(0)
+}
+
+/// Cross-validate PPM output: Rust decode vs C djpeg -ppm, diff=0.
+/// Tests multiple image sizes to catch row-alignment or stride issues.
+#[test]
+fn c_djpeg_image_io_ppm_diff_zero() {
+    let djpeg: PathBuf = match djpeg_path() {
+        Some(p) => p,
+        None => {
+            eprintln!("SKIP: djpeg not found");
+            return;
+        }
+    };
+
+    // Test multiple sizes: normal, odd width (row padding edge case), small
+    let test_cases: &[(usize, usize)] = &[(48, 32), (31, 17), (7, 5), (100, 64)];
+
+    for &(width, height) in test_cases {
+        let source_pixels: Vec<u8> = make_test_rgb(width, height);
+
+        // Encode a JPEG using 4:4:4 at quality 95
+        let jpeg: Vec<u8> = libjpeg_turbo_rs::compress(
+            &source_pixels,
+            width,
+            height,
+            PixelFormat::Rgb,
+            95,
+            libjpeg_turbo_rs::Subsampling::S444,
+        )
+        .unwrap_or_else(|e| panic!("compress {}x{} failed: {}", width, height, e));
+
+        let tmp_jpg = IoTempFile::new(&format!("ppm_xval_{}x{}.jpg", width, height));
+        let tmp_c_ppm = IoTempFile::new(&format!("ppm_xval_c_{}x{}.ppm", width, height));
+        std::fs::write(&tmp_jpg.path, &jpeg).expect("write temp JPEG");
+
+        // Rust decode
+        let rust_image = libjpeg_turbo_rs::decompress(&jpeg)
+            .unwrap_or_else(|e| panic!("Rust decompress {}x{} failed: {}", width, height, e));
+        assert_eq!(
+            rust_image.width, width,
+            "Rust width mismatch for {}x{}",
+            width, height
+        );
+        assert_eq!(
+            rust_image.height, height,
+            "Rust height mismatch for {}x{}",
+            width, height
+        );
+
+        // C djpeg -ppm decode
+        let output = std::process::Command::new(&djpeg)
+            .arg("-ppm")
+            .arg("-outfile")
+            .arg(&tmp_c_ppm.path)
+            .arg(&tmp_jpg.path)
+            .output()
+            .expect("failed to run djpeg");
+        assert!(
+            output.status.success(),
+            "djpeg -ppm failed for {}x{}: {}",
+            width,
+            height,
+            String::from_utf8_lossy(&output.stderr)
+        );
+
+        // Parse C PPM output
+        let c_ppm_data: Vec<u8> = std::fs::read(&tmp_c_ppm.path).expect("read C PPM");
+        let (c_w, c_h, c_pixels) = parse_ppm_pixels(&c_ppm_data);
+        assert_eq!(c_w, width, "C PPM width mismatch for {}x{}", width, height);
+        assert_eq!(
+            c_h, height,
+            "C PPM height mismatch for {}x{}",
+            width, height
+        );
+
+        // Compare: both decode the same JPEG, target diff=0
+        let max_diff: u8 = pixel_max_diff(&rust_image.data, &c_pixels);
+        assert_eq!(
+            max_diff, 0,
+            "ppm cross-validation {}x{}: max_diff={} (must be 0)",
+            width, height, max_diff
+        );
+    }
+}
+
+/// Cross-validate grayscale BMP output: Rust decode vs C djpeg -bmp -grayscale.
+/// djpeg -bmp for a grayscale JPEG produces an 8-bit BMP with a palette.
+/// We compare decoded pixel values rather than raw BMP bytes.
+#[test]
+fn c_djpeg_image_io_grayscale_bmp_diff_zero() {
+    let djpeg: PathBuf = match djpeg_path() {
+        Some(p) => p,
+        None => {
+            eprintln!("SKIP: djpeg not found");
+            return;
+        }
+    };
+
+    // Test multiple sizes including odd widths for row padding edge cases
+    let test_cases: &[(usize, usize)] = &[(32, 24), (31, 17), (7, 5)];
+
+    for &(width, height) in test_cases {
+        let gray_pixels: Vec<u8> = make_test_gray(width, height);
+
+        // Encode grayscale JPEG
+        let jpeg: Vec<u8> = libjpeg_turbo_rs::compress(
+            &gray_pixels,
+            width,
+            height,
+            PixelFormat::Grayscale,
+            95,
+            libjpeg_turbo_rs::Subsampling::S444,
+        )
+        .unwrap_or_else(|e| panic!("compress grayscale {}x{} failed: {}", width, height, e));
+
+        let tmp_jpg = IoTempFile::new(&format!("gray_bmp_xval_{}x{}.jpg", width, height));
+        let tmp_c_ppm = IoTempFile::new(&format!("gray_bmp_xval_c_{}x{}.ppm", width, height));
+        std::fs::write(&tmp_jpg.path, &jpeg).expect("write temp JPEG");
+
+        // Rust decode as grayscale
+        let rust_image = libjpeg_turbo_rs::decompress_to(&jpeg, PixelFormat::Grayscale)
+            .unwrap_or_else(|e| {
+                panic!(
+                    "Rust decompress grayscale {}x{} failed: {}",
+                    width, height, e
+                )
+            });
+        assert_eq!(rust_image.width, width);
+        assert_eq!(rust_image.height, height);
+        assert_eq!(rust_image.data.len(), width * height);
+
+        // C djpeg outputs grayscale as PGM when using -ppm flag
+        // (djpeg detects 1-component JPEG and writes P5 PGM instead of P6 PPM)
+        let output = std::process::Command::new(&djpeg)
+            .arg("-ppm")
+            .arg("-outfile")
+            .arg(&tmp_c_ppm.path)
+            .arg(&tmp_jpg.path)
+            .output()
+            .expect("failed to run djpeg");
+        assert!(
+            output.status.success(),
+            "djpeg -ppm (grayscale) failed for {}x{}: {}",
+            width,
+            height,
+            String::from_utf8_lossy(&output.stderr)
+        );
+
+        // Parse C PGM output (djpeg writes P5 for grayscale)
+        let c_pgm_data: Vec<u8> = std::fs::read(&tmp_c_ppm.path).expect("read C PGM");
+        let (c_w, c_h, c_pixels) = parse_pgm_pixels(&c_pgm_data);
+        assert_eq!(c_w, width, "C PGM width mismatch for {}x{}", width, height);
+        assert_eq!(
+            c_h, height,
+            "C PGM height mismatch for {}x{}",
+            width, height
+        );
+
+        // Compare grayscale pixel data: target diff=0
+        let max_diff: u8 = pixel_max_diff(&rust_image.data, &c_pixels);
+        assert_eq!(
+            max_diff, 0,
+            "grayscale bmp cross-validation {}x{}: max_diff={} (must be 0)",
+            width, height, max_diff
+        );
+    }
 }
