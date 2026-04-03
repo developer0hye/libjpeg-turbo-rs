@@ -4210,6 +4210,22 @@ fn fdct_quantize_chroma_h2v1(
     fdct_quantize_fn: fn(&mut [i16; 64], &QuantDivisors, &mut [i16; 64]),
     out: &mut [i16; 64],
 ) {
+    // Fused path: downsample + FDCT + quantize in one pass (AVX2)
+    if block_x + 16 <= plane_width
+        && block_y + 8 <= plane_height
+        && is_x86_feature_detected!("avx2")
+    {
+        unsafe {
+            crate::simd::x86_64::avx2_downsample_h2v1_fdct_quantize(
+                plane.as_ptr().add(block_y * plane_width + block_x),
+                plane_width,
+                quant,
+                out,
+            );
+        }
+        return;
+    }
+    // Separate downsample + FDCT (SSSE3 downsample only)
     if block_x + 16 <= plane_width
         && block_y + 8 <= plane_height
         && is_x86_feature_detected!("ssse3")
@@ -4613,7 +4629,7 @@ fn encode_downsampled_chroma_block(
         }
     }
 
-    // x86_64 fused path: SSSE3 downsample → AVX2 FDCT+quantize+zigzag
+    // x86_64 fused path: AVX2 downsample+FDCT+quantize+zigzag
     #[cfg(target_arch = "x86_64")]
     {
         let src_w: usize = 8 * h_factor;
@@ -4622,7 +4638,7 @@ fn encode_downsampled_chroma_block(
             && block_x + src_w <= plane_width
             && block_y + src_h <= plane_height
         {
-            // Truly fused downsample+FDCT+quantize for H2V2 (most common)
+            // Fused downsample+FDCT+quantize for H2V2
             if h_factor == 2 && v_factor == 2 {
                 let mut quantized = [0i16; 64];
                 unsafe {
@@ -4636,25 +4652,17 @@ fn encode_downsampled_chroma_block(
                 HuffmanEncoder::encode_block(writer, &quantized, prev_dc, dc_table, ac_table);
                 return;
             }
-            // Separate downsample + FDCT for other modes
-            let mut block = [0i16; 64];
-            let downsample_ok: bool = if h_factor == 2 && v_factor == 1 {
+            // Fused downsample+FDCT+quantize for H2V1
+            if h_factor == 2 && v_factor == 1 {
+                let mut quantized = [0i16; 64];
                 unsafe {
-                    downsample_chroma_block_h2v1_ssse3(
-                        plane,
+                    crate::simd::x86_64::avx2_downsample_h2v1_fdct_quantize(
+                        plane.as_ptr().add(block_y * plane_width + block_x),
                         plane_width,
-                        block_x,
-                        block_y,
-                        &mut block,
+                        quant_table,
+                        &mut quantized,
                     );
                 }
-                true
-            } else {
-                false
-            };
-            if downsample_ok {
-                let mut quantized = [0i16; 64];
-                fdct_quantize_fn(&mut block, quant_table, &mut quantized);
                 HuffmanEncoder::encode_block(writer, &quantized, prev_dc, dc_table, ac_table);
                 return;
             }
