@@ -327,11 +327,7 @@ fn c_djpeg_cross_validation_decode_toggles() {
     }
 
     // (b) fast_dct
-    // Rust's set_fast_dct(true) currently maps to ISLOW (the flag is a no-op until
-    // fast IDCT is implemented). Compare against C djpeg `-dct fast` which also uses
-    // a fast IDCT. When Rust gains a true fast IDCT, this should produce diff=0 against
-    // C `-dct fast`. For now, compare against C default (ISLOW) to verify the flag
-    // doesn't corrupt output.
+    // set_fast_dct(true) selects IFAST IDCT, matching C djpeg `-dct fast`.
     {
         let label: &str = "fast_dct";
         let mut dec = ScanlineDecoder::new(jpeg_data).unwrap();
@@ -341,11 +337,12 @@ fn c_djpeg_cross_validation_decode_toggles() {
             .finish()
             .unwrap_or_else(|e| panic!("{}: Rust decode failed: {}", label, e));
 
-        // Compare against C djpeg default (ISLOW), which matches what Rust produces
-        // regardless of the fast_dct flag.
+        // Compare against C djpeg -dct fast (IFAST IDCT)
         let tmp_ppm: PathBuf = tmp_dir.join("decode_toggles_fast_dct.ppm");
         let output = Command::new(&djpeg)
             .arg("-ppm")
+            .arg("-dct")
+            .arg("fast")
             .arg("-outfile")
             .arg(&tmp_ppm)
             .arg(&input_jpg)
@@ -678,15 +675,14 @@ fn c_djpeg_cross_validation_block_smoothing() {
             .max()
             .unwrap_or(0);
 
-        if max_diff > 0 {
-            // Block smoothing algorithm may differ between Rust and C.
-            // Verify dimensions and data length match (structural validity).
-            eprintln!(
-                "{}: Rust block_smoothing=true vs C djpeg default: max_diff={} \
-                 (not pixel-identical, but dimensions and data length match)",
-                label, max_diff
-            );
-        }
+        // For fully decoded progressive JPEGs, smoothing_ok() returns false
+        // (all coefficients are accurate), so block smoothing is a no-op.
+        // Both Rust and C should produce identical output.
+        assert_eq!(
+            max_diff, 0,
+            "{}: Rust block_smoothing=true vs C djpeg default: max_diff={} (must be 0)",
+            label, max_diff
+        );
     }
 
     // (a2) Also verify C djpeg can decode the progressive JPEG and dimensions match
@@ -728,8 +724,11 @@ fn c_djpeg_cross_validation_block_smoothing() {
         );
     }
 
-    // (b) Rust with block_smoothing=false — verify it still produces valid output
-    // and differs from the smoothed version (proving the toggle works).
+    // (b) Rust with block_smoothing=false — verify it still produces valid output.
+    // For a fully decoded progressive JPEG (all scans complete, all coefficients
+    // accurate), C libjpeg-turbo's smoothing_ok() returns FALSE because no AC
+    // coefficients are imprecise. So smoothing on vs off produces identical output
+    // for fully decoded progressive JPEGs. This matches C behavior.
     {
         let label: &str = "block_smoothing_off";
         let mut dec = ScanlineDecoder::new(jpeg_data).unwrap();
@@ -763,17 +762,12 @@ fn c_djpeg_cross_validation_block_smoothing() {
             label
         );
 
-        // For progressive JPEGs, block smoothing on vs off should produce
-        // different output (the smoothing interpolates across block boundaries).
-        let differences: usize = rust_img_off
-            .data
-            .iter()
-            .zip(rust_img_on.data.iter())
-            .filter(|(a, b)| a != b)
-            .count();
+        // For fully decoded progressive JPEGs (all scans present), smoothing_ok()
+        // returns false because all coef_bits are 0. So on vs off may be identical.
+        // This is correct C-compatible behavior. Just verify both produce valid output.
         assert!(
-            differences > 0,
-            "{}: block_smoothing on vs off should differ for progressive JPEG",
+            !rust_img_off.data.is_empty(),
+            "{}: data should not be empty",
             label
         );
     }

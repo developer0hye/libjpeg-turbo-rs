@@ -382,6 +382,11 @@ impl<'a> Decoder<'a> {
     /// Enable or disable fast DCT for decoding.
     pub fn set_fast_dct(&mut self, fast: bool) {
         self.fast_dct = fast;
+        if fast {
+            self.dct_method = DctMethod::IsFast;
+        } else if self.dct_method == DctMethod::IsFast {
+            self.dct_method = DctMethod::IsLow;
+        }
     }
 
     /// Set the DCT/IDCT method for decoding.
@@ -1655,6 +1660,7 @@ impl<'a> Decoder<'a> {
         max_h: usize,
         max_v: usize,
         comp_block_sizes: &[usize],
+        block_smoothing: bool,
     ) -> Result<(Vec<Vec<u8>>, Vec<DecodeWarning>)> {
         let img_w = frame.width as usize;
         let img_h = frame.height as usize;
@@ -1711,6 +1717,26 @@ impl<'a> Decoder<'a> {
                 max_h,
                 max_v,
             )?;
+        }
+
+        // Apply coefficient-level block smoothing before IDCT (if requested).
+        // This matches C libjpeg-turbo's decompress_smooth_data() approach:
+        // smooth the DCT coefficients, then run IDCT on the smoothed coefficients.
+        if block_smoothing {
+            let coef_bits_all: Vec<[i32; 10]> =
+                crate::decode::toggles::compute_coef_bits(&self.metadata.scans, frame);
+            for (comp_idx, ci) in comp_infos.iter().enumerate() {
+                let cb: &[i32; 10] = &coef_bits_all[comp_idx];
+                if crate::decode::toggles::smoothing_ok_for_component(cb, quant_tables[comp_idx]) {
+                    crate::decode::toggles::apply_block_smoothing_coeffs(
+                        &mut coeff_bufs[comp_idx],
+                        ci.blocks_x,
+                        ci.blocks_y,
+                        cb,
+                        quant_tables[comp_idx],
+                    );
+                }
+            }
         }
 
         // IDCT all blocks into component planes
@@ -2803,6 +2829,7 @@ impl<'a> Decoder<'a> {
                 max_h,
                 max_v,
                 &comp_block_sizes,
+                self.block_smoothing,
             )?
         } else {
             self.decode_baseline_planes(
@@ -2813,22 +2840,6 @@ impl<'a> Decoder<'a> {
                 mcus_y,
                 &comp_block_sizes,
             )?
-        };
-
-        // Apply block smoothing if requested
-        let (component_planes, warnings) = if self.block_smoothing {
-            let mut planes = component_planes;
-            for (ci, plane) in planes.iter_mut().enumerate() {
-                let comp_w: usize = mcus_x
-                    * frame.components[ci].horizontal_sampling as usize
-                    * comp_block_sizes[ci];
-                let comp_h: usize =
-                    mcus_y * frame.components[ci].vertical_sampling as usize * comp_block_sizes[ci];
-                crate::decode::toggles::apply_block_smoothing(plane, comp_w, comp_h);
-            }
-            (planes, warnings)
-        } else {
-            (component_planes, warnings)
         };
 
         // Handle output colorspace override
@@ -3459,6 +3470,7 @@ impl<'a> Decoder<'a> {
                 max_h,
                 max_v,
                 &comp_block_sizes,
+                false, // raw data decode: no block smoothing
             )?
         } else {
             self.decode_baseline_planes(
