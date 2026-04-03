@@ -504,6 +504,8 @@ mod tests {
         use libjpeg_turbo_rs::simd::SimdRoutines;
         let _routines = SimdRoutines {
             idct_islow: avx2_idct::avx2_idct_islow,
+            idct_ifast: libjpeg_turbo_rs::simd::scalar::scalar_idct_ifast,
+            idct_float: libjpeg_turbo_rs::simd::scalar::scalar_idct_float,
             ycbcr_to_rgb_row: avx2_color::avx2_ycbcr_to_rgb_row,
             fancy_upsample_h2v1: avx2_upsample::avx2_fancy_upsample_h2v1,
         };

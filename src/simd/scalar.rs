@@ -10,6 +10,8 @@ use crate::simd::SimdRoutines;
 pub fn routines() -> SimdRoutines {
     SimdRoutines {
         idct_islow: scalar_idct_islow,
+        idct_ifast: scalar_idct_ifast,
+        idct_float: scalar_idct_float,
         ycbcr_to_rgb_row: scalar_ycbcr_to_rgb_row,
         fancy_upsample_h2v1: scalar_fancy_upsample_h2v1,
     }
@@ -27,6 +29,22 @@ fn scalar_idct_islow(coeffs: &[i16; 64], quant: &[u16; 64], output: &mut [u8; 64
         dequantized[i] = coeffs[i].wrapping_mul(quant[i] as i16);
     }
     let spatial = idct::idct_8x8(&dequantized);
+    for i in 0..64 {
+        output[i] = (spatial[i] as i32 + 128).clamp(0, 255) as u8;
+    }
+}
+
+/// Combined dequant + IFAST IDCT + level-shift + clamp.
+pub fn scalar_idct_ifast(coeffs: &[i16; 64], quant: &[u16; 64], output: &mut [u8; 64]) {
+    let spatial = idct::idct_ifast_8x8(coeffs, quant);
+    for i in 0..64 {
+        output[i] = (spatial[i] as i32 + 128).clamp(0, 255) as u8;
+    }
+}
+
+/// Combined dequant + Float IDCT + level-shift + clamp.
+pub fn scalar_idct_float(coeffs: &[i16; 64], quant: &[u16; 64], output: &mut [u8; 64]) {
+    let spatial = idct::idct_float_8x8(coeffs, quant);
     for i in 0..64 {
         output[i] = (spatial[i] as i32 + 128).clamp(0, 255) as u8;
     }
