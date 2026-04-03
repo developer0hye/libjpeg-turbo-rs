@@ -306,3 +306,469 @@ fn cross_1009x1013_s444() {
 fn cross_15x15_s420() {
     cross_check(15, 15, Subsampling::S420, "15x15_s420");
 }
+
+// ===========================================================================
+// 7. Remaining 1x1 subsampling modes
+// ===========================================================================
+
+#[test]
+fn cross_1x1_s440() {
+    cross_check(1, 1, Subsampling::S440, "1x1_s440");
+}
+
+#[test]
+fn cross_1x1_s411() {
+    cross_check(1, 1, Subsampling::S411, "1x1_s411");
+}
+
+#[test]
+fn cross_1x1_s441() {
+    cross_check(1, 1, Subsampling::S441, "1x1_s441");
+}
+
+// ===========================================================================
+// 8. 1x2 and 2x1 minimal multi-pixel
+// ===========================================================================
+
+#[test]
+fn cross_1x2_s444() {
+    cross_check(1, 2, Subsampling::S444, "1x2_s444");
+}
+
+#[test]
+fn cross_2x1_s444() {
+    cross_check(2, 1, Subsampling::S444, "2x1_s444");
+}
+
+#[test]
+fn cross_1x2_s420() {
+    cross_check(1, 2, Subsampling::S420, "1x2_s420");
+}
+
+#[test]
+fn cross_2x1_s420() {
+    cross_check(2, 1, Subsampling::S420, "2x1_s420");
+}
+
+// ===========================================================================
+// 9. Extreme aspect ratios with S420
+// ===========================================================================
+
+#[test]
+fn cross_1x100_s420() {
+    cross_check(1, 100, Subsampling::S420, "1x100_s420");
+}
+
+#[test]
+fn cross_100x1_s420() {
+    cross_check(100, 1, Subsampling::S420, "100x1_s420");
+}
+
+// ===========================================================================
+// 10. 7x7 non-MCU-aligned — all subsampling modes
+// ===========================================================================
+
+#[test]
+fn cross_7x7_s444() {
+    cross_check(7, 7, Subsampling::S444, "7x7_s444");
+}
+
+#[test]
+fn cross_7x7_s422() {
+    cross_check(7, 7, Subsampling::S422, "7x7_s422");
+}
+
+#[test]
+fn cross_7x7_s440() {
+    cross_check(7, 7, Subsampling::S440, "7x7_s440");
+}
+
+#[test]
+fn cross_7x7_s411() {
+    cross_check(7, 7, Subsampling::S411, "7x7_s411");
+}
+
+#[test]
+fn cross_7x7_s441() {
+    cross_check(7, 7, Subsampling::S441, "7x7_s441");
+}
+
+// ===========================================================================
+// 11. 31x17 partial MCU (S411 — MCU width=32)
+// ===========================================================================
+
+#[test]
+fn cross_31x17_s411() {
+    cross_check(31, 17, Subsampling::S411, "31x17_s411");
+}
+
+// ===========================================================================
+// 12. Prime dimensions — remaining subsampling modes
+// ===========================================================================
+
+#[test]
+fn cross_1009x1013_s420() {
+    cross_check(1009, 1013, Subsampling::S420, "1009x1013_s420");
+}
+
+#[test]
+fn cross_1009x1013_s411() {
+    cross_check(1009, 1013, Subsampling::S411, "1009x1013_s411");
+}
+
+// ===========================================================================
+// 13. Odd dimensions 3x5 — all subsampling modes
+// ===========================================================================
+
+#[test]
+fn cross_3x5_s444() {
+    cross_check(3, 5, Subsampling::S444, "3x5_s444");
+}
+
+#[test]
+fn cross_3x5_s422() {
+    cross_check(3, 5, Subsampling::S422, "3x5_s422");
+}
+
+#[test]
+fn cross_3x5_s420() {
+    cross_check(3, 5, Subsampling::S420, "3x5_s420");
+}
+
+#[test]
+fn cross_3x5_s440() {
+    cross_check(3, 5, Subsampling::S440, "3x5_s440");
+}
+
+#[test]
+fn cross_3x5_s411() {
+    cross_check(3, 5, Subsampling::S411, "3x5_s411");
+}
+
+#[test]
+fn cross_3x5_s441() {
+    cross_check(3, 5, Subsampling::S441, "3x5_s441");
+}
+
+// ===========================================================================
+// 14. Odd dimensions 9x11 — all subsampling modes
+// ===========================================================================
+
+#[test]
+fn cross_9x11_s444() {
+    cross_check(9, 11, Subsampling::S444, "9x11_s444");
+}
+
+#[test]
+fn cross_9x11_s422() {
+    cross_check(9, 11, Subsampling::S422, "9x11_s422");
+}
+
+#[test]
+fn cross_9x11_s420() {
+    cross_check(9, 11, Subsampling::S420, "9x11_s420");
+}
+
+#[test]
+fn cross_9x11_s440() {
+    cross_check(9, 11, Subsampling::S440, "9x11_s440");
+}
+
+#[test]
+fn cross_9x11_s411() {
+    cross_check(9, 11, Subsampling::S411, "9x11_s411");
+}
+
+#[test]
+fn cross_9x11_s441() {
+    cross_check(9, 11, Subsampling::S441, "9x11_s441");
+}
+
+// ===========================================================================
+// 15. Quality extremes × odd dimensions × subsampling
+// ===========================================================================
+
+/// Encode at quality extreme, decode with both Rust and C djpeg, compare pixels.
+fn cross_check_quality(
+    width: usize,
+    height: usize,
+    quality: u8,
+    subsampling: Subsampling,
+    label: &str,
+) {
+    let djpeg: PathBuf = match djpeg_path() {
+        Some(p) => p,
+        None => {
+            eprintln!("SKIP: djpeg not found, skipping C cross-validation");
+            return;
+        }
+    };
+
+    let pixels: Vec<u8> = generate_gradient(width, height);
+    let jpeg: Vec<u8> = compress(
+        &pixels,
+        width,
+        height,
+        PixelFormat::Rgb,
+        quality,
+        subsampling,
+    )
+    .unwrap_or_else(|e| panic!("{}: Rust compress failed: {}", label, e));
+
+    let rust_image =
+        decompress(&jpeg).unwrap_or_else(|e| panic!("{}: Rust decompress failed: {}", label, e));
+    assert_eq!(rust_image.width, width, "{}: width mismatch", label);
+    assert_eq!(rust_image.height, height, "{}: height mismatch", label);
+
+    let jpeg_path: PathBuf = temp_path(&format!("{}.jpg", label));
+    let ppm_path: PathBuf = temp_path(&format!("{}.ppm", label));
+    {
+        let mut file = std::fs::File::create(&jpeg_path)
+            .unwrap_or_else(|e| panic!("{}: create temp JPEG: {}", label, e));
+        file.write_all(&jpeg)
+            .unwrap_or_else(|e| panic!("{}: write temp JPEG: {}", label, e));
+    }
+
+    let djpeg_output = Command::new(&djpeg)
+        .arg("-ppm")
+        .arg("-outfile")
+        .arg(&ppm_path)
+        .arg(&jpeg_path)
+        .output()
+        .unwrap_or_else(|e| panic!("{}: failed to run djpeg: {}", label, e));
+    assert!(
+        djpeg_output.status.success(),
+        "{}: djpeg failed: {}",
+        label,
+        String::from_utf8_lossy(&djpeg_output.stderr),
+    );
+
+    let ppm_data: Vec<u8> =
+        std::fs::read(&ppm_path).unwrap_or_else(|e| panic!("{}: read PPM: {}", label, e));
+    let (c_width, c_height, c_pixels) = parse_ppm(&ppm_data);
+
+    let _ = std::fs::remove_file(&jpeg_path);
+    let _ = std::fs::remove_file(&ppm_path);
+
+    assert_eq!(c_width, width, "{}: C width mismatch", label);
+    assert_eq!(c_height, height, "{}: C height mismatch", label);
+
+    let mut max_diff: u8 = 0;
+    let mut mismatches: usize = 0;
+    for (i, (&ours, &theirs)) in rust_image.data.iter().zip(c_pixels.iter()).enumerate() {
+        let diff: u8 = (ours as i16 - theirs as i16).unsigned_abs() as u8;
+        if diff > 0 {
+            mismatches += 1;
+            if mismatches <= 5 {
+                let pixel: usize = i / 3;
+                let channel: &str = ["R", "G", "B"][i % 3];
+                eprintln!(
+                    "  {}: pixel {} channel {}: rust={} c={} diff={}",
+                    label, pixel, channel, ours, theirs, diff,
+                );
+            }
+        }
+        if diff > max_diff {
+            max_diff = diff;
+        }
+    }
+
+    assert_eq!(
+        mismatches, 0,
+        "{}: {} pixels differ (max_diff={}), expected diff=0",
+        label, mismatches, max_diff,
+    );
+}
+
+#[test]
+fn cross_q1_16x16_s444() {
+    cross_check_quality(16, 16, 1, Subsampling::S444, "q1_16x16_s444");
+}
+
+#[test]
+fn cross_q100_16x16_s444() {
+    cross_check_quality(16, 16, 100, Subsampling::S444, "q100_16x16_s444");
+}
+
+#[test]
+fn cross_q1_64x64_s420() {
+    cross_check_quality(64, 64, 1, Subsampling::S420, "q1_64x64_s420");
+}
+
+#[test]
+fn cross_q100_64x64_s420() {
+    cross_check_quality(64, 64, 100, Subsampling::S420, "q100_64x64_s420");
+}
+
+#[test]
+fn cross_q1_5x3_s420() {
+    cross_check_quality(5, 3, 1, Subsampling::S420, "q1_5x3_s420");
+}
+
+#[test]
+fn cross_q100_5x3_s420() {
+    cross_check_quality(5, 3, 100, Subsampling::S420, "q100_5x3_s420");
+}
+
+#[test]
+fn cross_q1_13x7_s411() {
+    cross_check_quality(13, 7, 1, Subsampling::S411, "q1_13x7_s411");
+}
+
+#[test]
+fn cross_q100_13x7_s411() {
+    cross_check_quality(13, 7, 100, Subsampling::S411, "q100_13x7_s411");
+}
+
+#[test]
+fn cross_q1_11x9_s441() {
+    cross_check_quality(11, 9, 1, Subsampling::S441, "q1_11x9_s441");
+}
+
+#[test]
+fn cross_q100_11x9_s441() {
+    cross_check_quality(11, 9, 100, Subsampling::S441, "q100_11x9_s441");
+}
+
+// ===========================================================================
+// 16. Grayscale extreme dimensions
+// ===========================================================================
+
+/// Encode grayscale, decode with both Rust and C djpeg -grayscale, compare.
+fn cross_check_gray(width: usize, height: usize, quality: u8, label: &str) {
+    let djpeg: PathBuf = match djpeg_path() {
+        Some(p) => p,
+        None => {
+            eprintln!("SKIP: djpeg not found, skipping C cross-validation");
+            return;
+        }
+    };
+
+    let pixels: Vec<u8> = (0..width * height).map(|i| (i % 251) as u8).collect();
+    let jpeg: Vec<u8> = compress(
+        &pixels,
+        width,
+        height,
+        PixelFormat::Grayscale,
+        quality,
+        Subsampling::S444,
+    )
+    .unwrap_or_else(|e| panic!("{}: Rust compress failed: {}", label, e));
+
+    let rust_image =
+        decompress(&jpeg).unwrap_or_else(|e| panic!("{}: Rust decompress failed: {}", label, e));
+    assert_eq!(rust_image.width, width, "{}: width mismatch", label);
+    assert_eq!(rust_image.height, height, "{}: height mismatch", label);
+
+    let jpeg_path: PathBuf = temp_path(&format!("{}.jpg", label));
+    let pgm_path: PathBuf = temp_path(&format!("{}.pgm", label));
+    {
+        let mut file = std::fs::File::create(&jpeg_path)
+            .unwrap_or_else(|e| panic!("{}: create temp JPEG: {}", label, e));
+        file.write_all(&jpeg)
+            .unwrap_or_else(|e| panic!("{}: write temp JPEG: {}", label, e));
+    }
+
+    let djpeg_output = Command::new(&djpeg)
+        .arg("-grayscale")
+        .arg("-outfile")
+        .arg(&pgm_path)
+        .arg(&jpeg_path)
+        .output()
+        .unwrap_or_else(|e| panic!("{}: failed to run djpeg: {}", label, e));
+    assert!(
+        djpeg_output.status.success(),
+        "{}: djpeg failed: {}",
+        label,
+        String::from_utf8_lossy(&djpeg_output.stderr),
+    );
+
+    let pgm_data: Vec<u8> =
+        std::fs::read(&pgm_path).unwrap_or_else(|e| panic!("{}: read PGM: {}", label, e));
+    let (c_width, c_height, c_pixels) = parse_pgm(&pgm_data);
+
+    let _ = std::fs::remove_file(&jpeg_path);
+    let _ = std::fs::remove_file(&pgm_path);
+
+    assert_eq!(c_width, width, "{}: C width mismatch", label);
+    assert_eq!(c_height, height, "{}: C height mismatch", label);
+
+    let mut max_diff: u8 = 0;
+    let mut mismatches: usize = 0;
+    for (i, (&ours, &theirs)) in rust_image.data.iter().zip(c_pixels.iter()).enumerate() {
+        let diff: u8 = (ours as i16 - theirs as i16).unsigned_abs() as u8;
+        if diff > 0 {
+            mismatches += 1;
+            if mismatches <= 5 {
+                eprintln!(
+                    "  {}: pixel {} gray: rust={} c={} diff={}",
+                    label, i, ours, theirs, diff,
+                );
+            }
+        }
+        if diff > max_diff {
+            max_diff = diff;
+        }
+    }
+
+    assert_eq!(
+        mismatches, 0,
+        "{}: {} pixels differ (max_diff={}), expected diff=0",
+        label, mismatches, max_diff,
+    );
+}
+
+/// Parse a binary PGM (P5) image into (width, height, gray_pixels).
+fn parse_pgm(data: &[u8]) -> (usize, usize, Vec<u8>) {
+    assert!(data.len() > 3, "PGM data too short");
+    assert_eq!(&data[0..2], b"P5", "not a P5 PGM");
+
+    let mut pos: usize = 2;
+    pos = skip_ws_comments(data, pos);
+    let (width, next) = read_number(data, pos);
+    pos = skip_ws_comments(data, next);
+    let (height, next) = read_number(data, pos);
+    pos = skip_ws_comments(data, next);
+    let (_maxval, next) = read_number(data, pos);
+    pos = next + 1;
+
+    let expected_len: usize = width * height;
+    assert!(
+        data.len() - pos >= expected_len,
+        "PGM pixel data too short: need {} bytes, have {}",
+        expected_len,
+        data.len() - pos,
+    );
+
+    (width, height, data[pos..pos + expected_len].to_vec())
+}
+
+#[test]
+fn cross_gray_1x1() {
+    cross_check_gray(1, 1, 75, "gray_1x1");
+}
+
+#[test]
+fn cross_gray_16x16_q1() {
+    cross_check_gray(16, 16, 1, "gray_16x16_q1");
+}
+
+#[test]
+fn cross_gray_16x16_q100() {
+    cross_check_gray(16, 16, 100, "gray_16x16_q100");
+}
+
+#[test]
+fn cross_gray_7x7() {
+    cross_check_gray(7, 7, 75, "gray_7x7");
+}
+
+#[test]
+fn cross_gray_100x1() {
+    cross_check_gray(100, 1, 75, "gray_100x1");
+}
+
+#[test]
+fn cross_gray_1x100() {
+    cross_check_gray(1, 100, 75, "gray_1x100");
+}

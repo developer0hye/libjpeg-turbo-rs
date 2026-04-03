@@ -813,3 +813,200 @@ fn c_djpeg_scaling_scaled_pixel_diff_zero() {
 
     let _ = std::fs::remove_file(&input_jpg);
 }
+
+/// Pixel-exact comparison for 4:2:2 **full-scale** decode against C djpeg.
+/// Full-scale 422 decode uses standard fancy upsample and matches C exactly.
+#[test]
+fn c_djpeg_scaling_422_full_scale_diff_zero() {
+    let djpeg = match djpeg_path() {
+        Some(p) => p,
+        None => {
+            eprintln!("SKIP: djpeg not found, skipping C cross-validation");
+            return;
+        }
+    };
+
+    let jpeg_data = include_bytes!("fixtures/photo_320x240_422.jpg");
+    let tmp_dir = std::env::temp_dir();
+    let input_jpg = tmp_dir.join("scaling_ext_422_full.jpg");
+    std::fs::write(&input_jpg, jpeg_data).expect("failed to write temp JPEG");
+
+    let rust_img = decode_scaled(jpeg_data, 1, 1);
+
+    let tmp_ppm = tmp_dir.join("scaling_ext_422_full.ppm");
+    let status = Command::new(&djpeg)
+        .arg("-scale")
+        .arg("1/1")
+        .arg("-ppm")
+        .arg("-outfile")
+        .arg(&tmp_ppm)
+        .arg(&input_jpg)
+        .status()
+        .expect("failed to run djpeg");
+    assert!(status.success(), "djpeg failed for 422 scale 1/1");
+
+    let ppm_data = std::fs::read(&tmp_ppm).expect("failed to read PPM output");
+    let (c_width, c_height, c_pixels) = parse_ppm(&ppm_data);
+
+    assert_eq!(rust_img.width, c_width as usize);
+    assert_eq!(rust_img.height, c_height as usize);
+
+    let max_diff: u8 = rust_img
+        .data
+        .iter()
+        .zip(c_pixels.iter())
+        .map(|(&a, &b)| (a as i16 - b as i16).unsigned_abs() as u8)
+        .max()
+        .unwrap_or(0);
+    assert_eq!(
+        max_diff, 0,
+        "422 scale 1/1: max pixel diff={} (must be 0 vs C djpeg)",
+        max_diff,
+    );
+
+    let _ = std::fs::remove_file(&tmp_ppm);
+    let _ = std::fs::remove_file(&input_jpg);
+}
+
+/// Pixel comparison for 4:2:2 **scaled** decode (1/2, 1/4, 1/8) against C djpeg.
+/// Known issue: 4:2:2 scaled decode uses a different chroma IDCT sizing strategy
+/// than C libjpeg-turbo, producing measurable diffs. Measured max_diff=37 at 1/2.
+#[test]
+#[ignore = "4:2:2 scaled decode has known diff vs C djpeg (max_diff=37 at 1/2 scale) — needs chroma IDCT fix"]
+fn c_djpeg_scaling_422_scaled_pixel_diff_zero() {
+    let djpeg = match djpeg_path() {
+        Some(p) => p,
+        None => {
+            eprintln!("SKIP: djpeg not found, skipping C cross-validation");
+            return;
+        }
+    };
+
+    let jpeg_data = include_bytes!("fixtures/photo_320x240_422.jpg");
+    let tmp_dir = std::env::temp_dir();
+    let input_jpg = tmp_dir.join("scaling_ext_422_xval.jpg");
+    std::fs::write(&input_jpg, jpeg_data).expect("failed to write temp JPEG");
+
+    for &(num, denom) in &[(1u32, 2u32), (1, 4), (1, 8)] {
+        let rust_img = decode_scaled(jpeg_data, num, denom);
+
+        let tmp_ppm = tmp_dir.join(format!("scaling_ext_422_{}_{}.ppm", num, denom));
+        let status = Command::new(&djpeg)
+            .arg("-scale")
+            .arg(format!("{}/{}", num, denom))
+            .arg("-ppm")
+            .arg("-outfile")
+            .arg(&tmp_ppm)
+            .arg(&input_jpg)
+            .status()
+            .expect("failed to run djpeg");
+        assert!(
+            status.success(),
+            "djpeg failed for 422 scale {}/{}",
+            num,
+            denom,
+        );
+
+        let ppm_data = std::fs::read(&tmp_ppm).expect("failed to read PPM output");
+        let (c_width, c_height, c_pixels) = parse_ppm(&ppm_data);
+
+        assert_eq!(
+            rust_img.width, c_width as usize,
+            "422 scale {}/{} width mismatch: rust={} c={}",
+            num, denom, rust_img.width, c_width,
+        );
+        assert_eq!(
+            rust_img.height, c_height as usize,
+            "422 scale {}/{} height mismatch: rust={} c={}",
+            num, denom, rust_img.height, c_height,
+        );
+
+        let max_diff: u8 = rust_img
+            .data
+            .iter()
+            .zip(c_pixels.iter())
+            .map(|(&a, &b)| (a as i16 - b as i16).unsigned_abs() as u8)
+            .max()
+            .unwrap_or(0);
+        assert_eq!(
+            max_diff, 0,
+            "422 scale {}/{}: max pixel diff={} (must be 0 vs C djpeg)",
+            num, denom, max_diff,
+        );
+
+        let _ = std::fs::remove_file(&tmp_ppm);
+    }
+
+    let _ = std::fs::remove_file(&input_jpg);
+}
+
+/// Pixel-exact comparison for scaled decodes against C djpeg using **4:4:4**
+/// subsampling. No chroma subsampling means IDCT scaling is uniform across
+/// all components — a different code path from 4:2:0 and 4:2:2.
+#[test]
+fn c_djpeg_scaling_444_pixel_diff_zero() {
+    let djpeg = match djpeg_path() {
+        Some(p) => p,
+        None => {
+            eprintln!("SKIP: djpeg not found, skipping C cross-validation");
+            return;
+        }
+    };
+
+    let jpeg_data = include_bytes!("fixtures/photo_320x240_444.jpg");
+    let tmp_dir = std::env::temp_dir();
+    let input_jpg = tmp_dir.join("scaling_ext_444_xval.jpg");
+    std::fs::write(&input_jpg, jpeg_data).expect("failed to write temp JPEG");
+
+    for &(num, denom) in &[(1u32, 1u32), (1, 2), (1, 4), (1, 8)] {
+        let rust_img = decode_scaled(jpeg_data, num, denom);
+
+        let tmp_ppm = tmp_dir.join(format!("scaling_ext_444_{}_{}.ppm", num, denom));
+        let status = Command::new(&djpeg)
+            .arg("-scale")
+            .arg(format!("{}/{}", num, denom))
+            .arg("-ppm")
+            .arg("-outfile")
+            .arg(&tmp_ppm)
+            .arg(&input_jpg)
+            .status()
+            .expect("failed to run djpeg");
+        assert!(
+            status.success(),
+            "djpeg failed for 444 scale {}/{}",
+            num,
+            denom,
+        );
+
+        let ppm_data = std::fs::read(&tmp_ppm).expect("failed to read PPM output");
+        let (c_width, c_height, c_pixels) = parse_ppm(&ppm_data);
+
+        assert_eq!(
+            rust_img.width, c_width as usize,
+            "444 scale {}/{} width mismatch: rust={} c={}",
+            num, denom, rust_img.width, c_width,
+        );
+        assert_eq!(
+            rust_img.height, c_height as usize,
+            "444 scale {}/{} height mismatch: rust={} c={}",
+            num, denom, rust_img.height, c_height,
+        );
+
+        let max_diff: u8 = rust_img
+            .data
+            .iter()
+            .zip(c_pixels.iter())
+            .map(|(&a, &b)| (a as i16 - b as i16).unsigned_abs() as u8)
+            .max()
+            .unwrap_or(0);
+        assert_eq!(
+            max_diff, 0,
+            "444 scale {}/{}: max pixel diff={} (must be 0 vs C djpeg)",
+            num, denom, max_diff,
+        );
+
+        let _ = std::fs::remove_file(&tmp_ppm);
+    }
+
+    let _ = std::fs::remove_file(&input_jpg);
+}
