@@ -311,7 +311,205 @@ fn parse_ppm(data: &[u8]) -> (usize, usize, Vec<u8>) {
     (width, height, pixel_data)
 }
 
-// --- C djpeg cross-validation test ---
+// --- C djpeg cross-validation tests ---
+
+/// Decode a JPEG with C djpeg to PPM and return (width, height, RGB pixels).
+fn decode_with_djpeg(
+    djpeg: &std::path::Path,
+    jpeg_data: &[u8],
+    label: &str,
+) -> (usize, usize, Vec<u8>) {
+    let tmp_dir = std::env::temp_dir();
+    let input_path = tmp_dir.join(format!("progressive_{}_djpeg_input.jpg", label));
+    std::fs::write(&input_path, jpeg_data).expect("failed to write temp JPEG");
+
+    let output = Command::new(djpeg)
+        .arg("-ppm")
+        .arg(&input_path)
+        .output()
+        .expect("failed to run djpeg");
+
+    std::fs::remove_file(&input_path).ok();
+
+    assert!(
+        output.status.success(),
+        "djpeg failed for {}: {}",
+        label,
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    parse_ppm(&output.stdout)
+}
+
+/// Validate progressive scan-by-scan output: consume scans one-by-one via
+/// ProgressiveDecoder, then compare the final output against C djpeg.
+/// djpeg does not support intermediate scan output, so we validate that:
+/// 1. Each intermediate output is a valid image with correct dimensions.
+/// 2. Quality improves monotonically (later scans have smaller diff vs final).
+/// 3. The final progressive output is pixel-identical to C djpeg (diff=0).
+#[test]
+fn c_djpeg_progressive_intermediate_diff_zero() {
+    let djpeg = match djpeg_path() {
+        Some(p) => p,
+        None => {
+            eprintln!("SKIP: djpeg not found");
+            return;
+        }
+    };
+
+    let progressive_fixtures: &[(&str, &[u8])] = &[
+        (
+            "photo_320x240_420_prog",
+            include_bytes!("fixtures/photo_320x240_420_prog.jpg"),
+        ),
+        (
+            "photo_640x480_422_prog",
+            include_bytes!("fixtures/photo_640x480_422_prog.jpg"),
+        ),
+        (
+            "photo_640x480_444_prog",
+            include_bytes!("fixtures/photo_640x480_444_prog.jpg"),
+        ),
+        (
+            "red_16x16_444_prog",
+            include_bytes!("fixtures/red_16x16_444_prog.jpg"),
+        ),
+        (
+            "green_16x16_422_prog",
+            include_bytes!("fixtures/green_16x16_422_prog.jpg"),
+        ),
+        (
+            "blue_16x16_420_prog",
+            include_bytes!("fixtures/blue_16x16_420_prog.jpg"),
+        ),
+    ];
+
+    for &(label, jpeg_data) in progressive_fixtures {
+        // Get C djpeg reference output (final image)
+        let (c_width, c_height, c_pixels) = decode_with_djpeg(&djpeg, jpeg_data, label);
+
+        // Decode scan-by-scan with Rust ProgressiveDecoder
+        let mut decoder = ProgressiveDecoder::new(jpeg_data)
+            .unwrap_or_else(|e| panic!("{}: ProgressiveDecoder::new failed: {}", label, e));
+
+        assert_eq!(
+            decoder.width(),
+            c_width,
+            "{}: width mismatch before consume: Rust={} C={}",
+            label,
+            decoder.width(),
+            c_width
+        );
+        assert_eq!(
+            decoder.height(),
+            c_height,
+            "{}: height mismatch before consume: Rust={} C={}",
+            label,
+            decoder.height(),
+            c_height
+        );
+
+        // Consume all scans one-by-one, validating intermediate outputs
+        let total_scans: usize = decoder.num_scans();
+        assert!(
+            total_scans >= 2,
+            "{}: expected at least 2 scans for progressive JPEG, got {}",
+            label,
+            total_scans
+        );
+
+        let mut prev_diff: Option<u64> = None;
+        for scan_idx in 0..total_scans {
+            let consumed: bool = decoder.consume_input().unwrap_or_else(|e| {
+                panic!("{}: consume_input scan {} failed: {}", label, scan_idx, e)
+            });
+            assert!(consumed, "{}: scan {} should be consumed", label, scan_idx);
+
+            let image = decoder.output().unwrap_or_else(|e| {
+                panic!("{}: output after scan {} failed: {}", label, scan_idx, e)
+            });
+
+            // Each intermediate output must have correct dimensions
+            assert_eq!(
+                image.width, c_width,
+                "{}: scan {} width mismatch",
+                label, scan_idx
+            );
+            assert_eq!(
+                image.height, c_height,
+                "{}: scan {} height mismatch",
+                label, scan_idx
+            );
+            assert!(
+                !image.data.is_empty(),
+                "{}: scan {} output is empty",
+                label,
+                scan_idx
+            );
+
+            // Quality should improve monotonically (diff decreases or stays same)
+            let current_diff: u64 = pixel_diff(&image.data, &c_pixels);
+            if let Some(prev) = prev_diff {
+                assert!(
+                    current_diff <= prev,
+                    "{}: scan {} diff ({}) > scan {} diff ({}), quality should not regress",
+                    label,
+                    scan_idx,
+                    current_diff,
+                    scan_idx - 1,
+                    prev
+                );
+            }
+            prev_diff = Some(current_diff);
+        }
+
+        assert!(
+            decoder.input_complete(),
+            "{}: should be complete after consuming all scans",
+            label
+        );
+
+        // Final output from ProgressiveDecoder must be pixel-identical to C djpeg
+        let final_image = decoder
+            .output()
+            .unwrap_or_else(|e| panic!("{}: final output failed: {}", label, e));
+
+        assert_eq!(
+            final_image.data.len(),
+            c_pixels.len(),
+            "{}: final pixel data length mismatch (rust={}, c={})",
+            label,
+            final_image.data.len(),
+            c_pixels.len()
+        );
+
+        let mut diff_count: usize = 0;
+        let mut max_diff: u8 = 0;
+        let mut first_diff_idx: Option<usize> = None;
+        for (i, (&rust_byte, &c_byte)) in final_image.data.iter().zip(c_pixels.iter()).enumerate() {
+            let d = (rust_byte as i16 - c_byte as i16).unsigned_abs() as u8;
+            if d > 0 {
+                if first_diff_idx.is_none() {
+                    first_diff_idx = Some(i);
+                }
+                diff_count += 1;
+                if d > max_diff {
+                    max_diff = d;
+                }
+            }
+        }
+
+        assert_eq!(
+            diff_count,
+            0,
+            "{}: final progressive output differs from C djpeg: {} bytes differ (max_diff={}, first_diff_at_byte={})",
+            label,
+            diff_count,
+            max_diff,
+            first_diff_idx.unwrap_or(0)
+        );
+    }
+}
 
 #[test]
 fn c_djpeg_progressive_output_final_diff_zero() {

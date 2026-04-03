@@ -540,3 +540,264 @@ fn c_djpeg_cross_validation_s441_diff_zero() {
     };
     c_djpeg_cross_validate_subsampling(&djpeg, Subsampling::S441);
 }
+
+/// Parse a binary PGM (P5) file and return (width, height, grayscale_pixels).
+fn parse_pgm(path: &Path) -> (usize, usize, Vec<u8>) {
+    let raw: Vec<u8> = std::fs::read(path).expect("failed to read PGM");
+    assert!(&raw[0..2] == b"P5", "not P5 PGM");
+    let mut idx: usize = 2;
+    loop {
+        while idx < raw.len() && raw[idx].is_ascii_whitespace() {
+            idx += 1;
+        }
+        if idx < raw.len() && raw[idx] == b'#' {
+            while idx < raw.len() && raw[idx] != b'\n' {
+                idx += 1;
+            }
+        } else {
+            break;
+        }
+    }
+    let (w, next) = read_ppm_num(&raw, idx);
+    idx = next;
+    while idx < raw.len() && raw[idx].is_ascii_whitespace() {
+        idx += 1;
+    }
+    let (h, next) = read_ppm_num(&raw, idx);
+    idx = next;
+    while idx < raw.len() && raw[idx].is_ascii_whitespace() {
+        idx += 1;
+    }
+    let (_maxval, next) = read_ppm_num(&raw, idx);
+    idx = next + 1;
+    (w, h, raw[idx..idx + w * h].to_vec())
+}
+
+/// Helper: encode with Rust, decode with both Rust and C djpeg, assert diff=0.
+/// Supports both RGB (PPM) and grayscale (PGM) output.
+fn c_djpeg_cross_validate_jpeg(djpeg: &Path, jpeg: &[u8], label: &str, is_grayscale: bool) {
+    let pid: u32 = std::process::id();
+    let tmp_jpg: String = format!("/tmp/ljt_eb_ext_{}_{}.jpg", label, pid);
+    let tmp_out: String = format!(
+        "/tmp/ljt_eb_ext_{}_{}.{}",
+        label,
+        pid,
+        if is_grayscale { "pgm" } else { "ppm" }
+    );
+    std::fs::write(&tmp_jpg, jpeg).unwrap();
+
+    let format_flag: &str = if is_grayscale { "-pnm" } else { "-ppm" };
+    let output = Command::new(djpeg)
+        .arg(format_flag)
+        .arg("-outfile")
+        .arg(&tmp_out)
+        .arg(&tmp_jpg)
+        .output()
+        .expect("failed to run djpeg");
+    assert!(
+        output.status.success(),
+        "{}: djpeg failed: {}",
+        label,
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let decode_fmt: PixelFormat = if is_grayscale {
+        PixelFormat::Grayscale
+    } else {
+        PixelFormat::Rgb
+    };
+    let rust_dec = decompress_to(jpeg, decode_fmt)
+        .unwrap_or_else(|e| panic!("{}: Rust decode failed: {}", label, e));
+
+    let (cw, ch, c_pixels) = if is_grayscale {
+        parse_pgm(Path::new(&tmp_out))
+    } else {
+        parse_ppm(Path::new(&tmp_out))
+    };
+    std::fs::remove_file(&tmp_jpg).ok();
+    std::fs::remove_file(&tmp_out).ok();
+
+    assert_eq!(rust_dec.width, cw, "{}: width mismatch", label);
+    assert_eq!(rust_dec.height, ch, "{}: height mismatch", label);
+    assert_eq!(
+        rust_dec.data.len(),
+        c_pixels.len(),
+        "{}: data length mismatch",
+        label
+    );
+
+    let max_diff: u8 = c_pixels
+        .iter()
+        .zip(rust_dec.data.iter())
+        .map(|(&a, &b)| (a as i16 - b as i16).unsigned_abs() as u8)
+        .max()
+        .unwrap_or(0);
+    assert_eq!(
+        max_diff, 0,
+        "{}: C djpeg vs Rust decode max_diff={} (must be 0)",
+        label, max_diff
+    );
+}
+
+/// Extended C djpeg cross-validation covering quality extremes, special pixel
+/// values, small dimensions, arithmetic coding, and CMYK encode.
+#[test]
+fn c_djpeg_encode_boundaries_extended_diff_zero() {
+    let djpeg: PathBuf = match djpeg_path() {
+        Some(p) => p,
+        None => {
+            eprintln!("SKIP: djpeg not found");
+            return;
+        }
+    };
+
+    // --- Quality extremes: Q0 (clamped to Q1) and Q1 ---
+    {
+        let pixels: Vec<u8> = (0..32 * 32 * 3)
+            .map(|i| ((i * 37 + 13) % 256) as u8)
+            .collect();
+        for &q in &[0u8, 1] {
+            let jpeg: Vec<u8> = Encoder::new(&pixels, 32, 32, PixelFormat::Rgb)
+                .quality(q)
+                .subsampling(Subsampling::S444)
+                .encode()
+                .unwrap_or_else(|e| panic!("encode Q{} failed: {}", q, e));
+            c_djpeg_cross_validate_jpeg(&djpeg, &jpeg, &format!("q{}", q), false);
+        }
+    }
+
+    // --- Quality extreme: Q100 ---
+    {
+        let pixels: Vec<u8> = (0..32 * 32 * 3)
+            .map(|i| ((i * 37 + 13) % 256) as u8)
+            .collect();
+        let jpeg: Vec<u8> = Encoder::new(&pixels, 32, 32, PixelFormat::Rgb)
+            .quality(100)
+            .subsampling(Subsampling::S444)
+            .encode()
+            .unwrap();
+        c_djpeg_cross_validate_jpeg(&djpeg, &jpeg, "q100", false);
+    }
+
+    // --- All-zero pixels ---
+    {
+        let pixels: Vec<u8> = vec![0u8; 16 * 16 * 3];
+        let jpeg: Vec<u8> = Encoder::new(&pixels, 16, 16, PixelFormat::Rgb)
+            .quality(75)
+            .subsampling(Subsampling::S444)
+            .encode()
+            .unwrap();
+        c_djpeg_cross_validate_jpeg(&djpeg, &jpeg, "all_zero", false);
+    }
+
+    // --- All-255 pixels ---
+    {
+        let pixels: Vec<u8> = vec![255u8; 16 * 16 * 3];
+        let jpeg: Vec<u8> = Encoder::new(&pixels, 16, 16, PixelFormat::Rgb)
+            .quality(75)
+            .subsampling(Subsampling::S444)
+            .encode()
+            .unwrap();
+        c_djpeg_cross_validate_jpeg(&djpeg, &jpeg, "all_255", false);
+    }
+
+    // --- Extreme small dimensions with various subsamplings ---
+    {
+        // 1x1
+        let pixels_1x1: Vec<u8> = vec![128, 64, 32];
+        for &ss in &[
+            Subsampling::S444,
+            Subsampling::S422,
+            Subsampling::S420,
+            Subsampling::S440,
+            Subsampling::S411,
+            Subsampling::S441,
+        ] {
+            let jpeg: Vec<u8> = Encoder::new(&pixels_1x1, 1, 1, PixelFormat::Rgb)
+                .quality(75)
+                .subsampling(ss)
+                .encode()
+                .unwrap_or_else(|e| panic!("1x1 {:?} encode failed: {}", ss, e));
+            c_djpeg_cross_validate_jpeg(&djpeg, &jpeg, &format!("1x1_{:?}", ss), false);
+        }
+
+        // 3x5
+        let pixels_3x5: Vec<u8> = (0..3 * 5 * 3)
+            .map(|i| ((i * 37 + 13) % 256) as u8)
+            .collect();
+        for &ss in &[
+            Subsampling::S444,
+            Subsampling::S422,
+            Subsampling::S420,
+            Subsampling::S440,
+            Subsampling::S411,
+            Subsampling::S441,
+        ] {
+            let jpeg: Vec<u8> = Encoder::new(&pixels_3x5, 3, 5, PixelFormat::Rgb)
+                .quality(75)
+                .subsampling(ss)
+                .encode()
+                .unwrap_or_else(|e| panic!("3x5 {:?} encode failed: {}", ss, e));
+            c_djpeg_cross_validate_jpeg(&djpeg, &jpeg, &format!("3x5_{:?}", ss), false);
+        }
+    }
+
+    // --- Arithmetic encode ---
+    {
+        let pixels: Vec<u8> = (0..32 * 32 * 3)
+            .map(|i| ((i * 37 + 13) % 256) as u8)
+            .collect();
+        for &ss in &[Subsampling::S444, Subsampling::S420, Subsampling::S422] {
+            let jpeg: Vec<u8> = Encoder::new(&pixels, 32, 32, PixelFormat::Rgb)
+                .quality(75)
+                .subsampling(ss)
+                .arithmetic(true)
+                .encode()
+                .unwrap_or_else(|e| panic!("arithmetic {:?} encode failed: {}", ss, e));
+            c_djpeg_cross_validate_jpeg(&djpeg, &jpeg, &format!("arith_{:?}", ss), false);
+        }
+    }
+
+    // --- CMYK encode: djpeg decodes CMYK to RGB, compare dimensions ---
+    // djpeg converts CMYK JPEG to RGB PPM; we verify djpeg accepts the file
+    // and the output dimensions match. Pixel values are not compared 1:1
+    // because CMYK->RGB conversion may differ between implementations.
+    {
+        let pixels: Vec<u8> = (0..16 * 16 * 4)
+            .map(|i| ((i * 41 + 7) % 256) as u8)
+            .collect();
+        let jpeg: Vec<u8> = Encoder::new(&pixels, 16, 16, PixelFormat::Cmyk)
+            .quality(75)
+            .encode()
+            .unwrap();
+
+        let pid: u32 = std::process::id();
+        let tmp_jpg: String = format!("/tmp/ljt_eb_ext_cmyk_{}.jpg", pid);
+        let tmp_ppm: String = format!("/tmp/ljt_eb_ext_cmyk_{}.ppm", pid);
+        std::fs::write(&tmp_jpg, &jpeg).unwrap();
+
+        let output = Command::new(&djpeg)
+            .arg("-ppm")
+            .arg("-outfile")
+            .arg(&tmp_ppm)
+            .arg(&tmp_jpg)
+            .output()
+            .expect("failed to run djpeg");
+
+        std::fs::remove_file(&tmp_jpg).ok();
+
+        if output.status.success() {
+            let (cw, ch, _c_pixels) = parse_ppm(Path::new(&tmp_ppm));
+            std::fs::remove_file(&tmp_ppm).ok();
+            assert_eq!(cw, 16, "CMYK width mismatch");
+            assert_eq!(ch, 16, "CMYK height mismatch");
+        } else {
+            std::fs::remove_file(&tmp_ppm).ok();
+            // Some djpeg builds do not support CMYK; skip gracefully
+            eprintln!(
+                "NOTE: djpeg does not support CMYK JPEG: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+    }
+}

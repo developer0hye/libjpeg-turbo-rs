@@ -315,3 +315,36 @@ fn c_djpeg_streaming_420_matches() {
     let photo_420: &[u8] = include_bytes!("fixtures/photo_320x240_420.jpg");
     assert_streaming_matches_djpeg(photo_420, &djpeg, "photo_320x240_420");
 }
+
+/// Verify that StreamingDecoder produces pixel-identical output to C djpeg
+/// for all subsampling modes using real-world photo fixtures.
+/// Existing tests cover small synthetic fixtures; this test covers real photos
+/// at 4:4:4 and 4:2:2 (4:2:0 is already covered by c_djpeg_streaming_420_matches).
+#[test]
+fn c_djpeg_streaming_all_subsamplings_diff_zero() {
+    let djpeg: PathBuf = match djpeg_path() {
+        Some(p) => p,
+        None => {
+            eprintln!("SKIP: djpeg not found, skipping C cross-validation");
+            return;
+        }
+    };
+
+    // 4:4:4 real-world photos (existing test only uses synthetic gradient_640x480)
+    let photo_444_320: &[u8] = include_bytes!("fixtures/photo_320x240_444.jpg");
+    assert_streaming_matches_djpeg(photo_444_320, &djpeg, "photo_320x240_444");
+
+    let photo_444_640: &[u8] = include_bytes!("fixtures/photo_640x480_444.jpg");
+    assert_streaming_matches_djpeg(photo_444_640, &djpeg, "photo_640x480_444");
+
+    // 4:2:2 real-world photos (existing test only uses synthetic green_16x16_422)
+    let photo_422_320: &[u8] = include_bytes!("fixtures/photo_320x240_422.jpg");
+    assert_streaming_matches_djpeg(photo_422_320, &djpeg, "photo_320x240_422");
+
+    let photo_422_640: &[u8] = include_bytes!("fixtures/photo_640x480_422.jpg");
+    assert_streaming_matches_djpeg(photo_422_640, &djpeg, "photo_640x480_422");
+
+    // 4:2:0 additional fixture (photo_640x480_420 complements the existing 320x240)
+    let photo_420_640: &[u8] = include_bytes!("fixtures/photo_640x480_420.jpg");
+    assert_streaming_matches_djpeg(photo_420_640, &djpeg, "photo_640x480_420");
+}
