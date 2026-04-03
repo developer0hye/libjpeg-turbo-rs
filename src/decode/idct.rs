@@ -148,33 +148,34 @@ const IFAST_FIX_1_414: i32 = 362;
 const IFAST_FIX_1_848: i32 = 473;
 const IFAST_FIX_2_613: i32 = 669;
 
-/// IFAST MULTIPLY: multiply then descale by 8 bits, no rounding.
-#[inline(always)]
-fn ifast_multiply(var: i32, constant: i32) -> i32 {
-    (var * constant) >> 8
-}
-
 /// Combined dequant + IFAST IDCT.
 ///
-/// `coeffs`: raw quantized coefficients in natural order.
-/// `quant`: standard quantization table (same as ISLOW uses).
-/// Returns spatial-domain values (before level-shift/clamp), same as `idct_8x8`.
+/// Matches C libjpeg-turbo's `jidctfst.c` exactly, including 16-bit DCTELEM
+/// truncation at each intermediate step (C uses `short` for all temporaries).
 #[allow(clippy::identity_op, clippy::erasing_op)]
 pub fn idct_ifast_8x8(coeffs: &[i16; 64], quant: &[u16; 64]) -> [i16; 64] {
-    // Build IFAST-scaled quant table: (quant[i] * AANSCALES[i] + 2048) >> 12
-    // This matches jddctmgr.c: DESCALE(quantval * aanscale, CONST_BITS_AAN - IFAST_SCALE_BITS)
-    //   = DESCALE(quantval * aanscale, 14 - 2) = (val + 2048) >> 12
     let mut ifast_quant = [0i16; 64];
     for i in 0..64 {
         ifast_quant[i] = ((quant[i] as i32 * AANSCALES[i] + (1 << 11)) >> 12) as i16;
     }
 
+    // Truncate to i16 then widen back, matching C's DCTELEM (short) truncation.
+    #[inline(always)]
+    fn d(v: i32) -> i32 {
+        v as i16 as i32
+    }
+
+    #[inline(always)]
+    fn ifast_mul(var: i32, constant: i32) -> i32 {
+        d((var * constant) >> 8)
+    }
+
     let mut workspace = [0i32; 64];
 
-    // Pass 1: process columns
+    // Pass 1: process columns — dequantize truncates to i16 like C's DCTELEM
     for col in 0..8 {
         let dequant = |row: usize| -> i32 {
-            (coeffs[row * 8 + col] as i32) * (ifast_quant[row * 8 + col] as i32)
+            d((coeffs[row * 8 + col] as i32) * (ifast_quant[row * 8 + col] as i32))
         };
 
         if coeffs[1 * 8 + col] == 0
@@ -197,37 +198,36 @@ pub fn idct_ifast_8x8(coeffs: &[i16; 64], quant: &[u16; 64]) -> [i16; 64] {
         let tmp2 = dequant(4);
         let tmp3 = dequant(6);
 
-        // Even part
-        let tmp10 = tmp0 + tmp2;
-        let tmp11 = tmp0 - tmp2;
-        let tmp13 = tmp1 + tmp3;
-        let tmp12 = ifast_multiply(tmp1 - tmp3, IFAST_FIX_1_414) - tmp13;
-        let e0 = tmp10 + tmp13;
-        let e3 = tmp10 - tmp13;
-        let e1 = tmp11 + tmp12;
-        let e2 = tmp11 - tmp12;
+        let tmp10 = d(tmp0 + tmp2);
+        let tmp11 = d(tmp0 - tmp2);
+        let tmp13 = d(tmp1 + tmp3);
+        let tmp12 = d(ifast_mul(d(tmp1 - tmp3), IFAST_FIX_1_414) - tmp13);
+        let e0 = d(tmp10 + tmp13);
+        let e3 = d(tmp10 - tmp13);
+        let e1 = d(tmp11 + tmp12);
+        let e2 = d(tmp11 - tmp12);
 
-        // Odd part
         let tmp4 = dequant(1);
         let tmp5 = dequant(3);
         let tmp6 = dequant(5);
         let tmp7 = dequant(7);
 
-        let z13 = tmp6 + tmp5;
-        let z10 = tmp6 - tmp5;
-        let z11 = tmp4 + tmp7;
-        let z12 = tmp4 - tmp7;
+        let z13 = d(tmp6 + tmp5);
+        let z10 = d(tmp6 - tmp5);
+        let z11 = d(tmp4 + tmp7);
+        let z12 = d(tmp4 - tmp7);
 
-        let o7 = z11 + z13;
-        let o11 = ifast_multiply(z11 - z13, IFAST_FIX_1_414);
-        let z5 = ifast_multiply(z10 + z12, IFAST_FIX_1_848);
-        let o10 = ifast_multiply(z12, IFAST_FIX_1_082) - z5;
-        let o12 = ifast_multiply(z10, -IFAST_FIX_2_613) + z5;
+        let o7 = d(z11 + z13);
+        let o11 = ifast_mul(d(z11 - z13), IFAST_FIX_1_414);
+        let z5 = ifast_mul(d(z10 + z12), IFAST_FIX_1_848);
+        let o10 = d(ifast_mul(z12, IFAST_FIX_1_082) - z5);
+        let o12 = d(ifast_mul(z10, -IFAST_FIX_2_613) + z5);
 
-        let o6 = o12 - o7;
-        let o5 = o11 - o6;
-        let o4 = o10 + o5;
+        let o6 = d(o12 - o7);
+        let o5 = d(o11 - o6);
+        let o4 = d(o10 + o5);
 
+        // Final writes: C does (int)(tmp0 + tmp7) — no truncation
         workspace[0 * 8 + col] = e0 + o7;
         workspace[7 * 8 + col] = e0 - o7;
         workspace[1 * 8 + col] = e1 + o6;
@@ -238,15 +238,21 @@ pub fn idct_ifast_8x8(coeffs: &[i16; 64], quant: &[u16; 64]) -> [i16; 64] {
         workspace[3 * 8 + col] = e3 - o4;
     }
 
-    // Pass 2: process rows, descale by PASS1_BITS + 3 = 5 (no rounding)
+    // Pass 2: process rows — C casts workspace ints to DCTELEM (short)
     let mut output = [0i16; 64];
 
     for row in 0..8 {
-        let w = |c: usize| workspace[row * 8 + c];
+        let w = |c: usize| d(workspace[row * 8 + c]);
 
-        if w(1) == 0 && w(2) == 0 && w(3) == 0 && w(4) == 0 && w(5) == 0 && w(6) == 0 && w(7) == 0 {
-            // IFAST: no rounding in descale
-            let dcval: i16 = (w(0) >> 5) as i16;
+        if workspace[row * 8 + 1] == 0
+            && workspace[row * 8 + 2] == 0
+            && workspace[row * 8 + 3] == 0
+            && workspace[row * 8 + 4] == 0
+            && workspace[row * 8 + 5] == 0
+            && workspace[row * 8 + 6] == 0
+            && workspace[row * 8 + 7] == 0
+        {
+            let dcval: i16 = (d(workspace[row * 8]) >> 5) as i16;
             for c in 0..8 {
                 output[row * 8 + c] = dcval;
             }
@@ -258,31 +264,30 @@ pub fn idct_ifast_8x8(coeffs: &[i16; 64], quant: &[u16; 64]) -> [i16; 64] {
         let tmp2 = w(4);
         let tmp3 = w(6);
 
-        let tmp10 = tmp0 + tmp2;
-        let tmp11 = tmp0 - tmp2;
-        let tmp13 = tmp1 + tmp3;
-        let tmp12 = ifast_multiply(tmp1 - tmp3, IFAST_FIX_1_414) - tmp13;
-        let e0 = tmp10 + tmp13;
-        let e3 = tmp10 - tmp13;
-        let e1 = tmp11 + tmp12;
-        let e2 = tmp11 - tmp12;
+        let tmp10 = d(tmp0 + tmp2);
+        let tmp11 = d(tmp0 - tmp2);
+        let tmp13 = d(tmp1 + tmp3);
+        let tmp12 = d(ifast_mul(d(tmp1 - tmp3), IFAST_FIX_1_414) - tmp13);
+        let e0 = d(tmp10 + tmp13);
+        let e3 = d(tmp10 - tmp13);
+        let e1 = d(tmp11 + tmp12);
+        let e2 = d(tmp11 - tmp12);
 
-        let z13 = w(5) + w(3);
-        let z10 = w(5) - w(3);
-        let z11 = w(1) + w(7);
-        let z12 = w(1) - w(7);
+        let z13 = d(w(5) + w(3));
+        let z10 = d(w(5) - w(3));
+        let z11 = d(w(1) + w(7));
+        let z12 = d(w(1) - w(7));
 
-        let o7 = z11 + z13;
-        let o11 = ifast_multiply(z11 - z13, IFAST_FIX_1_414);
-        let z5 = ifast_multiply(z10 + z12, IFAST_FIX_1_848);
-        let o10 = ifast_multiply(z12, IFAST_FIX_1_082) - z5;
-        let o12 = ifast_multiply(z10, -IFAST_FIX_2_613) + z5;
+        let o7 = d(z11 + z13);
+        let o11 = ifast_mul(d(z11 - z13), IFAST_FIX_1_414);
+        let z5 = ifast_mul(d(z10 + z12), IFAST_FIX_1_848);
+        let o10 = d(ifast_mul(z12, IFAST_FIX_1_082) - z5);
+        let o12 = d(ifast_mul(z10, -IFAST_FIX_2_613) + z5);
 
-        let o6 = o12 - o7;
-        let o5 = o11 - o6;
-        let o4 = o10 + o5;
+        let o6 = d(o12 - o7);
+        let o5 = d(o11 - o6);
+        let o4 = d(o10 + o5);
 
-        // IFAST: no rounding descale (>> 5)
         output[row * 8 + 0] = ((e0 + o7) >> 5) as i16;
         output[row * 8 + 7] = ((e0 - o7) >> 5) as i16;
         output[row * 8 + 1] = ((e1 + o6) >> 5) as i16;

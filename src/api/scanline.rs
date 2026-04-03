@@ -54,7 +54,7 @@ impl<'a> ScanlineDecoder<'a> {
 
     /// Enable or disable fast DCT for decoding.
     pub fn set_fast_dct(&mut self, fast: bool) {
-        self.decoder.fast_dct = fast;
+        self.decoder.set_fast_dct(fast);
     }
 
     /// Set the DCT/IDCT method for decoding.
