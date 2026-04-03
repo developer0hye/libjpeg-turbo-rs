@@ -455,6 +455,38 @@ impl HuffmanEncoder {
         }
     }
 
+    /// Encode a block using already-hoisted BitWriter state.
+    ///
+    /// Avoids the begin_block/end_block overhead, allowing MCU-level hoisting
+    /// where one begin/end pair covers all blocks in the MCU.
+    ///
+    /// # Safety
+    /// `pb`, `fb`, `buf` must be valid hoisted state from `BitWriter::begin_block`.
+    #[cfg(target_arch = "x86_64")]
+    #[inline(always)]
+    pub unsafe fn encode_block_hoisted(
+        pb: &mut u64,
+        fb: &mut i32,
+        buf: &mut *mut u8,
+        coeffs_zigzag: &[i16; 64],
+        prev_dc: &mut i16,
+        dc_table: &HuffTable,
+        ac_table: &HuffTable,
+    ) {
+        let dc: i16 = coeffs_zigzag[0];
+        let diff: i16 = dc - *prev_dc;
+        *prev_dc = dc;
+
+        let (magnitude_bits, category) = encode_dc_value(diff);
+        let huff_code: u32 = dc_table.ehufco[category as usize] as u32;
+        let huff_size: u8 = dc_table.ehufsi[category as usize];
+        let mag_masked: u32 = magnitude_bits as u32 & ((1u32 << category) - 1);
+        let combined: u32 = (huff_code << category) | mag_masked;
+        local_put_bits(pb, fb, buf, combined, huff_size + category);
+
+        encode_ac_x86_64(pb, fb, buf, coeffs_zigzag, ac_table);
+    }
+
     /// Encode a single DC difference value (for lossless JPEG).
     ///
     /// Writes the Huffman code for the category, then the magnitude bits.

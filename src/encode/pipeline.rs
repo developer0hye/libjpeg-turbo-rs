@@ -3732,193 +3732,272 @@ fn encode_color_mcu(
 ) {
     match subsampling {
         Subsampling::S444 | Subsampling::Unknown => {
-            // 1 Y block + 1 Cb block + 1 Cr block
-            encode_single_block(
-                y_plane,
-                width,
-                height,
-                x0,
-                y0,
-                luma_quant,
-                dc_luma_table,
-                ac_luma_table,
-                writer,
-                prev_dc_y,
-                fdct_quantize_fn,
-            );
-            encode_single_block(
-                cb_plane,
-                width,
-                height,
-                x0,
-                y0,
-                chroma_quant,
-                dc_chroma_table,
-                ac_chroma_table,
-                writer,
-                prev_dc_cb,
-                fdct_quantize_fn,
-            );
-            encode_single_block(
-                cr_plane,
-                width,
-                height,
-                x0,
-                y0,
-                chroma_quant,
-                dc_chroma_table,
-                ac_chroma_table,
-                writer,
-                prev_dc_cr,
-                fdct_quantize_fn,
-            );
+            // 1 Y + 1 Cb + 1 Cr = 3 blocks, MCU-level hoisting saves 2 begin/end pairs
+            #[cfg(target_arch = "x86_64")]
+            {
+                encode_mcu_444_x86_64(
+                    y_plane,
+                    cb_plane,
+                    cr_plane,
+                    width,
+                    height,
+                    x0,
+                    y0,
+                    luma_quant,
+                    chroma_quant,
+                    dc_luma_table,
+                    ac_luma_table,
+                    dc_chroma_table,
+                    ac_chroma_table,
+                    writer,
+                    prev_dc_y,
+                    prev_dc_cb,
+                    prev_dc_cr,
+                    fdct_quantize_fn,
+                );
+            }
+            #[cfg(not(target_arch = "x86_64"))]
+            {
+                encode_single_block(
+                    y_plane,
+                    width,
+                    height,
+                    x0,
+                    y0,
+                    luma_quant,
+                    dc_luma_table,
+                    ac_luma_table,
+                    writer,
+                    prev_dc_y,
+                    fdct_quantize_fn,
+                );
+                encode_single_block(
+                    cb_plane,
+                    width,
+                    height,
+                    x0,
+                    y0,
+                    chroma_quant,
+                    dc_chroma_table,
+                    ac_chroma_table,
+                    writer,
+                    prev_dc_cb,
+                    fdct_quantize_fn,
+                );
+                encode_single_block(
+                    cr_plane,
+                    width,
+                    height,
+                    x0,
+                    y0,
+                    chroma_quant,
+                    dc_chroma_table,
+                    ac_chroma_table,
+                    writer,
+                    prev_dc_cr,
+                    fdct_quantize_fn,
+                );
+            }
         }
         Subsampling::S422 => {
-            // 2 Y blocks (left 8x8, right 8x8) + 1 downsampled Cb + 1 downsampled Cr
-            encode_single_block(
-                y_plane,
-                width,
-                height,
-                x0,
-                y0,
-                luma_quant,
-                dc_luma_table,
-                ac_luma_table,
-                writer,
-                prev_dc_y,
-                fdct_quantize_fn,
-            );
-            encode_single_block(
-                y_plane,
-                width,
-                height,
-                x0 + 8,
-                y0,
-                luma_quant,
-                dc_luma_table,
-                ac_luma_table,
-                writer,
-                prev_dc_y,
-                fdct_quantize_fn,
-            );
-            // Downsample chroma: 2x1 box filter
-            encode_downsampled_chroma_block(
-                cb_plane,
-                width,
-                height,
-                x0,
-                y0,
-                2,
-                1,
-                chroma_quant,
-                dc_chroma_table,
-                ac_chroma_table,
-                writer,
-                prev_dc_cb,
-                fdct_quantize_fn,
-            );
-            encode_downsampled_chroma_block(
-                cr_plane,
-                width,
-                height,
-                x0,
-                y0,
-                2,
-                1,
-                chroma_quant,
-                dc_chroma_table,
-                ac_chroma_table,
-                writer,
-                prev_dc_cr,
-                fdct_quantize_fn,
-            );
+            // 2 Y + 1 Cb + 1 Cr = 4 blocks, MCU-level hoisting saves 3 begin/end pairs
+            #[cfg(target_arch = "x86_64")]
+            {
+                encode_mcu_422_x86_64(
+                    y_plane,
+                    cb_plane,
+                    cr_plane,
+                    width,
+                    height,
+                    x0,
+                    y0,
+                    luma_quant,
+                    chroma_quant,
+                    dc_luma_table,
+                    ac_luma_table,
+                    dc_chroma_table,
+                    ac_chroma_table,
+                    writer,
+                    prev_dc_y,
+                    prev_dc_cb,
+                    prev_dc_cr,
+                    fdct_quantize_fn,
+                );
+            }
+            #[cfg(not(target_arch = "x86_64"))]
+            {
+                encode_single_block(
+                    y_plane,
+                    width,
+                    height,
+                    x0,
+                    y0,
+                    luma_quant,
+                    dc_luma_table,
+                    ac_luma_table,
+                    writer,
+                    prev_dc_y,
+                    fdct_quantize_fn,
+                );
+                encode_single_block(
+                    y_plane,
+                    width,
+                    height,
+                    x0 + 8,
+                    y0,
+                    luma_quant,
+                    dc_luma_table,
+                    ac_luma_table,
+                    writer,
+                    prev_dc_y,
+                    fdct_quantize_fn,
+                );
+                encode_downsampled_chroma_block(
+                    cb_plane,
+                    width,
+                    height,
+                    x0,
+                    y0,
+                    2,
+                    1,
+                    chroma_quant,
+                    dc_chroma_table,
+                    ac_chroma_table,
+                    writer,
+                    prev_dc_cb,
+                    fdct_quantize_fn,
+                );
+                encode_downsampled_chroma_block(
+                    cr_plane,
+                    width,
+                    height,
+                    x0,
+                    y0,
+                    2,
+                    1,
+                    chroma_quant,
+                    dc_chroma_table,
+                    ac_chroma_table,
+                    writer,
+                    prev_dc_cr,
+                    fdct_quantize_fn,
+                );
+            }
         }
         Subsampling::S420 => {
             // 4 Y blocks (2x2 arrangement) + 1 downsampled Cb + 1 downsampled Cr
-            // Y blocks in order: top-left, top-right, bottom-left, bottom-right
-            encode_single_block(
-                y_plane,
-                width,
-                height,
-                x0,
-                y0,
-                luma_quant,
-                dc_luma_table,
-                ac_luma_table,
-                writer,
-                prev_dc_y,
-                fdct_quantize_fn,
-            );
-            encode_single_block(
-                y_plane,
-                width,
-                height,
-                x0 + 8,
-                y0,
-                luma_quant,
-                dc_luma_table,
-                ac_luma_table,
-                writer,
-                prev_dc_y,
-                fdct_quantize_fn,
-            );
-            encode_single_block(
-                y_plane,
-                width,
-                height,
-                x0,
-                y0 + 8,
-                luma_quant,
-                dc_luma_table,
-                ac_luma_table,
-                writer,
-                prev_dc_y,
-                fdct_quantize_fn,
-            );
-            encode_single_block(
-                y_plane,
-                width,
-                height,
-                x0 + 8,
-                y0 + 8,
-                luma_quant,
-                dc_luma_table,
-                ac_luma_table,
-                writer,
-                prev_dc_y,
-                fdct_quantize_fn,
-            );
-            // Downsample chroma: 2x2 box filter
-            encode_downsampled_chroma_block(
-                cb_plane,
-                width,
-                height,
-                x0,
-                y0,
-                2,
-                2,
-                chroma_quant,
-                dc_chroma_table,
-                ac_chroma_table,
-                writer,
-                prev_dc_cb,
-                fdct_quantize_fn,
-            );
-            encode_downsampled_chroma_block(
-                cr_plane,
-                width,
-                height,
-                x0,
-                y0,
-                2,
-                2,
-                chroma_quant,
-                dc_chroma_table,
-                ac_chroma_table,
-                writer,
-                prev_dc_cr,
-                fdct_quantize_fn,
-            );
+            // Optimized path: do all FDCT+quantize first, then all Huffman encoding
+            // with a single hoisted begin_block/end_block per MCU (saves 5 pairs).
+            #[cfg(target_arch = "x86_64")]
+            {
+                encode_mcu_420_x86_64(
+                    y_plane,
+                    cb_plane,
+                    cr_plane,
+                    width,
+                    height,
+                    x0,
+                    y0,
+                    luma_quant,
+                    chroma_quant,
+                    dc_luma_table,
+                    ac_luma_table,
+                    dc_chroma_table,
+                    ac_chroma_table,
+                    writer,
+                    prev_dc_y,
+                    prev_dc_cb,
+                    prev_dc_cr,
+                    fdct_quantize_fn,
+                );
+            }
+            #[cfg(not(target_arch = "x86_64"))]
+            {
+                // Y blocks in order: top-left, top-right, bottom-left, bottom-right
+                encode_single_block(
+                    y_plane,
+                    width,
+                    height,
+                    x0,
+                    y0,
+                    luma_quant,
+                    dc_luma_table,
+                    ac_luma_table,
+                    writer,
+                    prev_dc_y,
+                    fdct_quantize_fn,
+                );
+                encode_single_block(
+                    y_plane,
+                    width,
+                    height,
+                    x0 + 8,
+                    y0,
+                    luma_quant,
+                    dc_luma_table,
+                    ac_luma_table,
+                    writer,
+                    prev_dc_y,
+                    fdct_quantize_fn,
+                );
+                encode_single_block(
+                    y_plane,
+                    width,
+                    height,
+                    x0,
+                    y0 + 8,
+                    luma_quant,
+                    dc_luma_table,
+                    ac_luma_table,
+                    writer,
+                    prev_dc_y,
+                    fdct_quantize_fn,
+                );
+                encode_single_block(
+                    y_plane,
+                    width,
+                    height,
+                    x0 + 8,
+                    y0 + 8,
+                    luma_quant,
+                    dc_luma_table,
+                    ac_luma_table,
+                    writer,
+                    prev_dc_y,
+                    fdct_quantize_fn,
+                );
+                // Downsample chroma: 2x2 box filter
+                encode_downsampled_chroma_block(
+                    cb_plane,
+                    width,
+                    height,
+                    x0,
+                    y0,
+                    2,
+                    2,
+                    chroma_quant,
+                    dc_chroma_table,
+                    ac_chroma_table,
+                    writer,
+                    prev_dc_cb,
+                    fdct_quantize_fn,
+                );
+                encode_downsampled_chroma_block(
+                    cr_plane,
+                    width,
+                    height,
+                    x0,
+                    y0,
+                    2,
+                    2,
+                    chroma_quant,
+                    dc_chroma_table,
+                    ac_chroma_table,
+                    writer,
+                    prev_dc_cr,
+                    fdct_quantize_fn,
+                );
+            }
         }
         Subsampling::S440 => {
             // 2 Y blocks vertically: (x0, y0) and (x0, y0+8)
@@ -4081,6 +4160,515 @@ fn encode_color_mcu(
     }
 }
 
+/// Helper: FDCT+quantize a single block (interior: fused SIMD, border: scalar fallback).
+#[cfg(target_arch = "x86_64")]
+#[allow(clippy::too_many_arguments)]
+fn fdct_quantize_block(
+    plane: &[u8],
+    plane_width: usize,
+    plane_height: usize,
+    block_x: usize,
+    block_y: usize,
+    quant: &QuantDivisors,
+    fdct_quantize_fn: fn(&mut [i16; 64], &QuantDivisors, &mut [i16; 64]),
+    out: &mut [i16; 64],
+) {
+    if block_x + 8 <= plane_width && block_y + 8 <= plane_height && is_x86_feature_detected!("avx2")
+    {
+        unsafe {
+            crate::simd::x86_64::avx2_extract_fdct_quantize(
+                plane.as_ptr().add(block_y * plane_width + block_x),
+                plane_width,
+                quant,
+                out,
+            );
+        }
+    } else {
+        let mut block = [0i16; 64];
+        extract_block(
+            plane,
+            plane_width,
+            plane_height,
+            block_x,
+            block_y,
+            &mut block,
+        );
+        fdct_quantize_fn(&mut block, quant, out);
+    }
+}
+
+/// Helper: FDCT+quantize a downsampled H2V1 chroma block.
+#[cfg(target_arch = "x86_64")]
+#[allow(clippy::too_many_arguments)]
+fn fdct_quantize_chroma_h2v1(
+    plane: &[u8],
+    plane_width: usize,
+    plane_height: usize,
+    block_x: usize,
+    block_y: usize,
+    quant: &QuantDivisors,
+    fdct_quantize_fn: fn(&mut [i16; 64], &QuantDivisors, &mut [i16; 64]),
+    out: &mut [i16; 64],
+) {
+    // Fused path: downsample + FDCT + quantize in one pass (AVX2)
+    if block_x + 16 <= plane_width
+        && block_y + 8 <= plane_height
+        && is_x86_feature_detected!("avx2")
+    {
+        unsafe {
+            crate::simd::x86_64::avx2_downsample_h2v1_fdct_quantize(
+                plane.as_ptr().add(block_y * plane_width + block_x),
+                plane_width,
+                quant,
+                out,
+            );
+        }
+        return;
+    }
+    // Separate downsample + FDCT (SSSE3 downsample only)
+    if block_x + 16 <= plane_width
+        && block_y + 8 <= plane_height
+        && is_x86_feature_detected!("ssse3")
+    {
+        let mut block = [0i16; 64];
+        unsafe {
+            downsample_chroma_block_h2v1_ssse3(plane, plane_width, block_x, block_y, &mut block);
+        }
+        fdct_quantize_fn(&mut block, quant, out);
+    } else {
+        let mut block = [0i16; 64];
+        downsample_chroma_block(
+            plane,
+            plane_width,
+            plane_height,
+            block_x,
+            block_y,
+            2,
+            1,
+            &mut block,
+        );
+        fdct_quantize_fn(&mut block, quant, out);
+    }
+}
+
+/// Optimized 4:4:4 MCU encoding with MCU-level BitWriter hoisting.
+///
+/// 3 blocks (Y + Cb + Cr), saves 2 begin/end pairs per MCU.
+#[cfg(target_arch = "x86_64")]
+#[allow(clippy::too_many_arguments)]
+fn encode_mcu_444_x86_64(
+    y_plane: &[u8],
+    cb_plane: &[u8],
+    cr_plane: &[u8],
+    width: usize,
+    height: usize,
+    x0: usize,
+    y0: usize,
+    luma_quant: &QuantDivisors,
+    chroma_quant: &QuantDivisors,
+    dc_luma_table: &HuffTable,
+    ac_luma_table: &HuffTable,
+    dc_chroma_table: &HuffTable,
+    ac_chroma_table: &HuffTable,
+    writer: &mut BitWriter,
+    prev_dc_y: &mut i16,
+    prev_dc_cb: &mut i16,
+    prev_dc_cr: &mut i16,
+    fdct_quantize_fn: fn(&mut [i16; 64], &QuantDivisors, &mut [i16; 64]),
+) {
+    let mut q: [[i16; 64]; 3] = [[0i16; 64]; 3];
+    let has_avx2: bool = is_x86_feature_detected!("avx2");
+    let interior: bool = x0 + 8 <= width && y0 + 8 <= height;
+
+    if interior && has_avx2 {
+        unsafe {
+            crate::simd::x86_64::avx2_extract_fdct_quantize(
+                y_plane.as_ptr().add(y0 * width + x0),
+                width,
+                luma_quant,
+                &mut q[0],
+            );
+            crate::simd::x86_64::avx2_extract_fdct_quantize(
+                cb_plane.as_ptr().add(y0 * width + x0),
+                width,
+                chroma_quant,
+                &mut q[1],
+            );
+            crate::simd::x86_64::avx2_extract_fdct_quantize(
+                cr_plane.as_ptr().add(y0 * width + x0),
+                width,
+                chroma_quant,
+                &mut q[2],
+            );
+        }
+    } else {
+        fdct_quantize_block(
+            y_plane,
+            width,
+            height,
+            x0,
+            y0,
+            luma_quant,
+            fdct_quantize_fn,
+            &mut q[0],
+        );
+        fdct_quantize_block(
+            cb_plane,
+            width,
+            height,
+            x0,
+            y0,
+            chroma_quant,
+            fdct_quantize_fn,
+            &mut q[1],
+        );
+        fdct_quantize_block(
+            cr_plane,
+            width,
+            height,
+            x0,
+            y0,
+            chroma_quant,
+            fdct_quantize_fn,
+            &mut q[2],
+        );
+    }
+
+    unsafe {
+        let (mut pb, mut fb, mut buf) = writer.begin_block(1536);
+        HuffmanEncoder::encode_block_hoisted(
+            &mut pb,
+            &mut fb,
+            &mut buf,
+            &q[0],
+            prev_dc_y,
+            dc_luma_table,
+            ac_luma_table,
+        );
+        HuffmanEncoder::encode_block_hoisted(
+            &mut pb,
+            &mut fb,
+            &mut buf,
+            &q[1],
+            prev_dc_cb,
+            dc_chroma_table,
+            ac_chroma_table,
+        );
+        HuffmanEncoder::encode_block_hoisted(
+            &mut pb,
+            &mut fb,
+            &mut buf,
+            &q[2],
+            prev_dc_cr,
+            dc_chroma_table,
+            ac_chroma_table,
+        );
+        writer.end_block(pb, fb, buf);
+    }
+}
+
+/// Optimized 4:2:2 MCU encoding with MCU-level BitWriter hoisting.
+///
+/// 4 blocks (2 Y + Cb + Cr), saves 3 begin/end pairs per MCU.
+#[cfg(target_arch = "x86_64")]
+#[allow(clippy::too_many_arguments)]
+fn encode_mcu_422_x86_64(
+    y_plane: &[u8],
+    cb_plane: &[u8],
+    cr_plane: &[u8],
+    width: usize,
+    height: usize,
+    x0: usize,
+    y0: usize,
+    luma_quant: &QuantDivisors,
+    chroma_quant: &QuantDivisors,
+    dc_luma_table: &HuffTable,
+    ac_luma_table: &HuffTable,
+    dc_chroma_table: &HuffTable,
+    ac_chroma_table: &HuffTable,
+    writer: &mut BitWriter,
+    prev_dc_y: &mut i16,
+    prev_dc_cb: &mut i16,
+    prev_dc_cr: &mut i16,
+    fdct_quantize_fn: fn(&mut [i16; 64], &QuantDivisors, &mut [i16; 64]),
+) {
+    let mut q: [[i16; 64]; 4] = [[0i16; 64]; 4];
+    let has_avx2: bool = is_x86_feature_detected!("avx2");
+    // Interior check: 2 Y blocks (16 wide) + H2V1 chroma (16 wide, 8 tall)
+    let interior: bool = x0 + 16 <= width && y0 + 8 <= height;
+
+    if interior && has_avx2 {
+        unsafe {
+            let y_ptr: *const u8 = y_plane.as_ptr().add(y0 * width + x0);
+            crate::simd::x86_64::avx2_extract_fdct_quantize(y_ptr, width, luma_quant, &mut q[0]);
+            crate::simd::x86_64::avx2_extract_fdct_quantize(
+                y_ptr.add(8),
+                width,
+                luma_quant,
+                &mut q[1],
+            );
+            crate::simd::x86_64::avx2_downsample_h2v1_fdct_quantize(
+                cb_plane.as_ptr().add(y0 * width + x0),
+                width,
+                chroma_quant,
+                &mut q[2],
+            );
+            crate::simd::x86_64::avx2_downsample_h2v1_fdct_quantize(
+                cr_plane.as_ptr().add(y0 * width + x0),
+                width,
+                chroma_quant,
+                &mut q[3],
+            );
+        }
+    } else {
+        fdct_quantize_block(
+            y_plane,
+            width,
+            height,
+            x0,
+            y0,
+            luma_quant,
+            fdct_quantize_fn,
+            &mut q[0],
+        );
+        fdct_quantize_block(
+            y_plane,
+            width,
+            height,
+            x0 + 8,
+            y0,
+            luma_quant,
+            fdct_quantize_fn,
+            &mut q[1],
+        );
+        fdct_quantize_chroma_h2v1(
+            cb_plane,
+            width,
+            height,
+            x0,
+            y0,
+            chroma_quant,
+            fdct_quantize_fn,
+            &mut q[2],
+        );
+        fdct_quantize_chroma_h2v1(
+            cr_plane,
+            width,
+            height,
+            x0,
+            y0,
+            chroma_quant,
+            fdct_quantize_fn,
+            &mut q[3],
+        );
+    }
+
+    unsafe {
+        let (mut pb, mut fb, mut buf) = writer.begin_block(2048);
+        HuffmanEncoder::encode_block_hoisted(
+            &mut pb,
+            &mut fb,
+            &mut buf,
+            &q[0],
+            prev_dc_y,
+            dc_luma_table,
+            ac_luma_table,
+        );
+        HuffmanEncoder::encode_block_hoisted(
+            &mut pb,
+            &mut fb,
+            &mut buf,
+            &q[1],
+            prev_dc_y,
+            dc_luma_table,
+            ac_luma_table,
+        );
+        HuffmanEncoder::encode_block_hoisted(
+            &mut pb,
+            &mut fb,
+            &mut buf,
+            &q[2],
+            prev_dc_cb,
+            dc_chroma_table,
+            ac_chroma_table,
+        );
+        HuffmanEncoder::encode_block_hoisted(
+            &mut pb,
+            &mut fb,
+            &mut buf,
+            &q[3],
+            prev_dc_cr,
+            dc_chroma_table,
+            ac_chroma_table,
+        );
+        writer.end_block(pb, fb, buf);
+    }
+}
+
+/// Optimized 4:2:0 MCU encoding with MCU-level BitWriter hoisting.
+///
+/// Does all FDCT+quantize for 6 blocks first, then all Huffman encoding in one
+/// hoisted begin_block/end_block pair. Saves 5 begin/end pairs per MCU.
+/// 6 blocks × 128 bytes = 768 bytes of quantized data fits in L1.
+#[cfg(target_arch = "x86_64")]
+#[allow(clippy::too_many_arguments)]
+fn encode_mcu_420_x86_64(
+    y_plane: &[u8],
+    cb_plane: &[u8],
+    cr_plane: &[u8],
+    width: usize,
+    height: usize,
+    x0: usize,
+    y0: usize,
+    luma_quant: &QuantDivisors,
+    chroma_quant: &QuantDivisors,
+    dc_luma_table: &HuffTable,
+    ac_luma_table: &HuffTable,
+    dc_chroma_table: &HuffTable,
+    ac_chroma_table: &HuffTable,
+    writer: &mut BitWriter,
+    prev_dc_y: &mut i16,
+    prev_dc_cb: &mut i16,
+    prev_dc_cr: &mut i16,
+    fdct_quantize_fn: fn(&mut [i16; 64], &QuantDivisors, &mut [i16; 64]),
+) {
+    // Phase 1: FDCT + quantize all 6 blocks (4 Y + 1 Cb + 1 Cr)
+    // Cache feature detection once per MCU (not per block).
+    let mut q: [[i16; 64]; 6] = [[0i16; 64]; 6];
+    let has_avx2: bool = is_x86_feature_detected!("avx2");
+
+    // Check if all 4 Y blocks and both chroma blocks are interior (common case).
+    // For 1080p with 16x16 MCUs, only edge MCUs fail this check.
+    let interior: bool = x0 + 16 <= width && y0 + 16 <= height;
+
+    if interior && has_avx2 {
+        // Fast path: all blocks are interior, use fused SIMD for everything
+        unsafe {
+            let y_ptr: *const u8 = y_plane.as_ptr().add(y0 * width + x0);
+            crate::simd::x86_64::avx2_extract_fdct_quantize(y_ptr, width, luma_quant, &mut q[0]);
+            crate::simd::x86_64::avx2_extract_fdct_quantize(
+                y_ptr.add(8),
+                width,
+                luma_quant,
+                &mut q[1],
+            );
+            crate::simd::x86_64::avx2_extract_fdct_quantize(
+                y_ptr.add(8 * width),
+                width,
+                luma_quant,
+                &mut q[2],
+            );
+            crate::simd::x86_64::avx2_extract_fdct_quantize(
+                y_ptr.add(8 * width + 8),
+                width,
+                luma_quant,
+                &mut q[3],
+            );
+            crate::simd::x86_64::avx2_downsample_h2v2_fdct_quantize(
+                cb_plane.as_ptr().add(y0 * width + x0),
+                width,
+                chroma_quant,
+                &mut q[4],
+            );
+            crate::simd::x86_64::avx2_downsample_h2v2_fdct_quantize(
+                cr_plane.as_ptr().add(y0 * width + x0),
+                width,
+                chroma_quant,
+                &mut q[5],
+            );
+        }
+    } else {
+        // Slow path: handle edge MCUs with per-block bounds checking
+        let y_offsets: [(usize, usize); 4] =
+            [(x0, y0), (x0 + 8, y0), (x0, y0 + 8), (x0 + 8, y0 + 8)];
+        for (idx, &(bx, by)) in y_offsets.iter().enumerate() {
+            if has_avx2 && bx + 8 <= width && by + 8 <= height {
+                unsafe {
+                    crate::simd::x86_64::avx2_extract_fdct_quantize(
+                        y_plane.as_ptr().add(by * width + bx),
+                        width,
+                        luma_quant,
+                        &mut q[idx],
+                    );
+                }
+            } else {
+                let mut block = [0i16; 64];
+                extract_block(y_plane, width, height, bx, by, &mut block);
+                fdct_quantize_fn(&mut block, luma_quant, &mut q[idx]);
+            }
+        }
+        if has_avx2 && x0 + 16 <= width && y0 + 16 <= height {
+            unsafe {
+                crate::simd::x86_64::avx2_downsample_h2v2_fdct_quantize(
+                    cb_plane.as_ptr().add(y0 * width + x0),
+                    width,
+                    chroma_quant,
+                    &mut q[4],
+                );
+            }
+        } else {
+            let mut block = [0i16; 64];
+            downsample_chroma_block(cb_plane, width, height, x0, y0, 2, 2, &mut block);
+            fdct_quantize_fn(&mut block, chroma_quant, &mut q[4]);
+        }
+        if has_avx2 && x0 + 16 <= width && y0 + 16 <= height {
+            unsafe {
+                crate::simd::x86_64::avx2_downsample_h2v2_fdct_quantize(
+                    cr_plane.as_ptr().add(y0 * width + x0),
+                    width,
+                    chroma_quant,
+                    &mut q[5],
+                );
+            }
+        } else {
+            let mut block = [0i16; 64];
+            downsample_chroma_block(cr_plane, width, height, x0, y0, 2, 2, &mut block);
+            fdct_quantize_fn(&mut block, chroma_quant, &mut q[5]);
+        }
+    }
+
+    // Phase 2: Huffman encode all 6 blocks with MCU-level hoisted state.
+    // 3072 bytes = 6 blocks × 512 bytes worst-case per block.
+    unsafe {
+        let (mut pb, mut fb, mut buf) = writer.begin_block(3072);
+
+        // 4 Y blocks
+        for block in q.iter().take(4) {
+            HuffmanEncoder::encode_block_hoisted(
+                &mut pb,
+                &mut fb,
+                &mut buf,
+                block,
+                prev_dc_y,
+                dc_luma_table,
+                ac_luma_table,
+            );
+        }
+        // Cb
+        HuffmanEncoder::encode_block_hoisted(
+            &mut pb,
+            &mut fb,
+            &mut buf,
+            &q[4],
+            prev_dc_cb,
+            dc_chroma_table,
+            ac_chroma_table,
+        );
+        // Cr
+        HuffmanEncoder::encode_block_hoisted(
+            &mut pb,
+            &mut fb,
+            &mut buf,
+            &q[5],
+            prev_dc_cr,
+            dc_chroma_table,
+            ac_chroma_table,
+        );
+
+        writer.end_block(pb, fb, buf);
+    }
+}
+
 /// Encode a downsampled chroma block through the full pipeline.
 #[allow(clippy::too_many_arguments)]
 fn encode_downsampled_chroma_block(
@@ -4135,7 +4723,7 @@ fn encode_downsampled_chroma_block(
         }
     }
 
-    // x86_64 fused path: SSSE3 downsample → AVX2 FDCT+quantize+zigzag
+    // x86_64 fused path: AVX2 downsample+FDCT+quantize+zigzag
     #[cfg(target_arch = "x86_64")]
     {
         let src_w: usize = 8 * h_factor;
@@ -4144,7 +4732,7 @@ fn encode_downsampled_chroma_block(
             && block_x + src_w <= plane_width
             && block_y + src_h <= plane_height
         {
-            // Truly fused downsample+FDCT+quantize for H2V2 (most common)
+            // Fused downsample+FDCT+quantize for H2V2
             if h_factor == 2 && v_factor == 2 {
                 let mut quantized = [0i16; 64];
                 unsafe {
@@ -4158,25 +4746,17 @@ fn encode_downsampled_chroma_block(
                 HuffmanEncoder::encode_block(writer, &quantized, prev_dc, dc_table, ac_table);
                 return;
             }
-            // Separate downsample + FDCT for other modes
-            let mut block = [0i16; 64];
-            let downsample_ok: bool = if h_factor == 2 && v_factor == 1 {
+            // Fused downsample+FDCT+quantize for H2V1
+            if h_factor == 2 && v_factor == 1 {
+                let mut quantized = [0i16; 64];
                 unsafe {
-                    downsample_chroma_block_h2v1_ssse3(
-                        plane,
+                    crate::simd::x86_64::avx2_downsample_h2v1_fdct_quantize(
+                        plane.as_ptr().add(block_y * plane_width + block_x),
                         plane_width,
-                        block_x,
-                        block_y,
-                        &mut block,
+                        quant_table,
+                        &mut quantized,
                     );
                 }
-                true
-            } else {
-                false
-            };
-            if downsample_ok {
-                let mut quantized = [0i16; 64];
-                fdct_quantize_fn(&mut block, quant_table, &mut quantized);
                 HuffmanEncoder::encode_block(writer, &quantized, prev_dc, dc_table, ac_table);
                 return;
             }
