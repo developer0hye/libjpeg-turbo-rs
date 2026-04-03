@@ -3213,17 +3213,7 @@ impl<'a> Decoder<'a> {
                 // Upsample each chroma component independently using its own factors.
                 // This handles non-uniform chroma sampling (e.g. Cb=2x1, Cr=1x1)
                 // where each component needs a different upsample strategy.
-                for (
-                    comp_plane,
-                    comp_full,
-                    comp_w,
-                    comp_h,
-                    comp_hf,
-                    comp_vf,
-                    actual_w,
-                    actual_h,
-                    comp_bs,
-                ) in [
+                for (comp_plane, comp_full, comp_w, comp_h, comp_hf, comp_vf, actual_w, actual_h) in [
                     (
                         &component_planes[1],
                         &mut cb_full,
@@ -3233,7 +3223,6 @@ impl<'a> Decoder<'a> {
                         cb_v_factor,
                         actual_cb_w,
                         actual_cb_h,
-                        comp_block_sizes[1],
                     ),
                     (
                         &component_planes[2],
@@ -3244,13 +3233,15 @@ impl<'a> Decoder<'a> {
                         cr_v_factor,
                         actual_cr_w,
                         actual_cr_h,
-                        comp_block_sizes[2],
                     ),
                 ] {
-                    // C's merged upsample uses box filter when:
-                    // - actual chroma width <= 2 (SIMD fancy requires >= 3 columns)
-                    // - scaled decode with chroma still needing upsample (chroma IDCT < 8)
-                    let use_box_filter: bool = self.fast_upsample || actual_w <= 2 || comp_bs < 8;
+                    // C libjpeg-turbo uses box filter when:
+                    // - fast_upsample requested, OR
+                    // - actual chroma width <= 2 (fancy filter needs >= 3 columns), OR
+                    // - min_DCT_scaled_size == 1 (jdsample.c line 478: jdmainct.c
+                    //   doesn't support context rows at this size)
+                    let use_box_filter: bool =
+                        self.fast_upsample || actual_w <= 2 || block_size == 1;
 
                     if comp_hf == 1 && comp_vf == 1 {
                         // No upsampling needed for this component — copy directly.
