@@ -552,79 +552,12 @@ unsafe fn encode_ac_x86_64(
         return;
     }
 
-    // On x86_64 without vectorized CLZ, the dense pre-compute (auto-vectorized
-    // float trick) is expensive. The sparse path computes nbits/diff on demand
-    // using scalar leading_zeros(), which is faster for up to ~24 non-zero coefficients.
-    if bitmap.count_ones() <= 24 {
-        encode_ac_sparse_lsb(pb, fb, buf, coeffs_zigzag, bitmap, ac_table);
-    } else {
-        encode_ac_dense_lsb(pb, fb, buf, coeffs_zigzag, bitmap, ac_table);
-    }
-}
-
-/// Dense AC path with LSB-first bitmap: pre-compute nbits and magnitude.
-///
-/// # Safety
-/// `pb`, `fb`, `buf` must be valid hoisted state.
-#[cfg(target_arch = "x86_64")]
-unsafe fn encode_ac_dense_lsb(
-    pb: &mut u64,
-    fb: &mut i32,
-    buf: &mut *mut u8,
-    coeffs_zigzag: &[i16; 64],
-    mut bitmap: u64,
-    ac_table: &HuffTable,
-) {
-    let mut block_nbits = [0u8; 64];
-    let mut block_diff = [0u16; 64];
-
-    // Pre-compute nbits and masked magnitude for all 64 coefficients.
-    for i in 0..64 {
-        let val: i16 = *coeffs_zigzag.get_unchecked(i);
-        let abs_val: u16 = val.unsigned_abs();
-        let nbits: u8 = (16 - abs_val.leading_zeros()) as u8;
-        let sign: i16 = val >> 15;
-        let raw_diff: u16 = val.wrapping_add(sign) as u16;
-        let masked_diff: u16 = raw_diff & ((1u16 << nbits).wrapping_sub(1));
-        *block_nbits.get_unchecked_mut(i) = nbits;
-        *block_diff.get_unchecked_mut(i) = masked_diff;
-    }
-
-    let ehufco: *const u16 = ac_table.ehufco.as_ptr();
-    let ehufsi: *const u8 = ac_table.ehufsi.as_ptr();
-
-    let mut prev_pos: u32 = 0;
-    while bitmap != 0 {
-        let pos: u32 = bitmap.trailing_zeros();
-        let run: u32 = pos - prev_pos - 1;
-        prev_pos = pos;
-
-        let nbits: u32 = *block_nbits.get_unchecked(pos as usize) as u32;
-        let diff: u32 = *block_diff.get_unchecked(pos as usize) as u32;
-
-        let mut r: u32 = run;
-        while r >= 16 {
-            local_put_bits(pb, fb, buf, *ehufco.add(0xF0) as u32, *ehufsi.add(0xF0));
-            r -= 16;
-        }
-
-        let symbol: u32 = (r << 4) | nbits;
-        let huff_code: u32 = *ehufco.add(symbol as usize) as u32;
-        let huff_size: u32 = *ehufsi.add(symbol as usize) as u32;
-        local_put_bits(
-            pb,
-            fb,
-            buf,
-            (huff_code << nbits) | diff,
-            (huff_size + nbits) as u8,
-        );
-
-        bitmap &= bitmap - 1;
-    }
-
-    if prev_pos < 63 {
-        local_put_bits(pb, fb, buf, *ehufco.add(0x00) as u32, *ehufsi.add(0x00));
-    }
+    // Always use sparse (on-demand) path: compute nbits/diff per non-zero
+    // coefficient using scalar leading_zeros() (single lzcnt instruction).
+    // The dense pre-compute path (float trick auto-vectorization) costs ~16%
+    // of encode time for blocks with >24 non-zeros, but the per-coefficient
+    // savings don't recoup the upfront cost for typical JPEG sparsity.
+    encode_ac_sparse_lsb(pb, fb, buf, coeffs_zigzag, bitmap, ac_table);
 }
 
 /// AC emit loop with pre-loaded table pointers and minimal live variables.
