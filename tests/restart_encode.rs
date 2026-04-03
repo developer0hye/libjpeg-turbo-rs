@@ -282,3 +282,241 @@ fn c_djpeg_restart_encode_diff_zero() {
         );
     }
 }
+
+/// Parse a binary PGM (P5) file from raw bytes and return `(width, height, pixels)`.
+fn parse_pgm(data: &[u8]) -> (usize, usize, Vec<u8>) {
+    assert!(data.len() > 3, "PGM too short");
+    assert_eq!(&data[0..2], b"P5", "not a P5 PGM");
+    let mut idx: usize = 2;
+    idx = skip_ppm_ws(data, idx);
+    let (width, next) = parse_ppm_number(data, idx);
+    idx = skip_ppm_ws(data, next);
+    let (height, next) = parse_ppm_number(data, idx);
+    idx = skip_ppm_ws(data, next);
+    let (_maxval, next) = parse_ppm_number(data, idx);
+    idx = next + 1;
+    let pixels: Vec<u8> = data[idx..].to_vec();
+    assert_eq!(
+        pixels.len(),
+        width * height,
+        "PGM pixel data length mismatch: expected {}, got {}",
+        width * height,
+        pixels.len()
+    );
+    (width, height, pixels)
+}
+
+/// Run C djpeg on JPEG bytes via stdin, returning the process output.
+fn run_djpeg(djpeg: &std::path::Path, jpeg: &[u8], flag: &str) -> std::process::Output {
+    Command::new(djpeg)
+        .arg(flag)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .and_then(|mut child| {
+            use std::io::Write;
+            child
+                .stdin
+                .as_mut()
+                .unwrap()
+                .write_all(jpeg)
+                .expect("write jpeg to djpeg stdin");
+            child.wait_with_output()
+        })
+        .expect("failed to run djpeg")
+}
+
+/// Extended C cross-validation for restart markers: restart_blocks (not just rows),
+/// S420 + restart, and grayscale + restart. Each sub-test encodes with Rust,
+/// decodes with both Rust and C djpeg, and asserts pixel diff = 0.
+#[test]
+fn c_djpeg_restart_encode_extended_diff_zero() {
+    let djpeg: PathBuf = match djpeg_path() {
+        Some(p) => p,
+        None => {
+            eprintln!("SKIP: djpeg not found, skipping c_djpeg_restart_encode_extended_diff_zero");
+            return;
+        }
+    };
+
+    let width: usize = 32;
+    let height: usize = 32;
+
+    // Build a gradient image for consistent, non-trivial content
+    let mut rgb_pixels: Vec<u8> = vec![0u8; width * height * 3];
+    for y in 0..height {
+        for x in 0..width {
+            let idx: usize = (y * width + x) * 3;
+            rgb_pixels[idx] = (x * 255 / (width - 1)) as u8;
+            rgb_pixels[idx + 1] = (y * 255 / (height - 1)) as u8;
+            rgb_pixels[idx + 2] = ((x + y) * 255 / (width + height - 2)) as u8;
+        }
+    }
+
+    // --- Sub-test 1: restart_blocks (not restart_rows) with various block counts ---
+    for restart_blocks in [1u16, 2u16, 8u16] {
+        let jpeg: Vec<u8> = Encoder::new(&rgb_pixels, width, height, PixelFormat::Rgb)
+            .quality(90)
+            .subsampling(Subsampling::S444)
+            .restart_blocks(restart_blocks)
+            .encode()
+            .unwrap_or_else(|e| {
+                panic!(
+                    "restart_blocks={}: Rust encode failed: {}",
+                    restart_blocks, e
+                )
+            });
+
+        // Verify DRI marker present
+        let has_dri: bool = jpeg.windows(2).any(|w| w[0] == 0xFF && w[1] == 0xDD);
+        assert!(
+            has_dri,
+            "restart_blocks={}: missing DRI marker",
+            restart_blocks
+        );
+
+        let rust_img = decompress_to(&jpeg, PixelFormat::Rgb).unwrap_or_else(|e| {
+            panic!(
+                "restart_blocks={}: Rust decompress failed: {}",
+                restart_blocks, e
+            )
+        });
+
+        let output = run_djpeg(&djpeg, &jpeg, "-ppm");
+        assert!(
+            output.status.success(),
+            "restart_blocks={}: djpeg failed: {}",
+            restart_blocks,
+            String::from_utf8_lossy(&output.stderr)
+        );
+
+        let (c_w, c_h, c_pixels) = parse_ppm(&output.stdout);
+        assert_eq!(
+            c_w, width,
+            "restart_blocks={}: C width mismatch",
+            restart_blocks
+        );
+        assert_eq!(
+            c_h, height,
+            "restart_blocks={}: C height mismatch",
+            restart_blocks
+        );
+        assert_eq!(
+            rust_img.data.len(),
+            c_pixels.len(),
+            "restart_blocks={}: pixel buffer length mismatch",
+            restart_blocks
+        );
+
+        let max_diff: u8 = rust_img
+            .data
+            .iter()
+            .zip(c_pixels.iter())
+            .map(|(&r, &c)| (r as i16 - c as i16).unsigned_abs() as u8)
+            .max()
+            .unwrap_or(0);
+        assert_eq!(
+            max_diff, 0,
+            "restart_blocks={}: Rust vs C djpeg max_diff={}, expected 0",
+            restart_blocks, max_diff
+        );
+    }
+
+    // --- Sub-test 2: S420 + restart ---
+    {
+        let jpeg: Vec<u8> = Encoder::new(&rgb_pixels, width, height, PixelFormat::Rgb)
+            .quality(85)
+            .subsampling(Subsampling::S420)
+            .restart_rows(1)
+            .encode()
+            .expect("S420 + restart encode failed");
+
+        let has_dri: bool = jpeg.windows(2).any(|w| w[0] == 0xFF && w[1] == 0xDD);
+        assert!(has_dri, "S420 + restart: missing DRI marker");
+
+        let rust_img =
+            decompress_to(&jpeg, PixelFormat::Rgb).expect("Rust decompress S420+restart failed");
+
+        let output = run_djpeg(&djpeg, &jpeg, "-ppm");
+        assert!(
+            output.status.success(),
+            "S420 + restart: djpeg failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+
+        let (c_w, c_h, c_pixels) = parse_ppm(&output.stdout);
+        assert_eq!(c_w, width, "S420 + restart: C width mismatch");
+        assert_eq!(c_h, height, "S420 + restart: C height mismatch");
+        assert_eq!(
+            rust_img.data.len(),
+            c_pixels.len(),
+            "S420 + restart: pixel buffer length mismatch"
+        );
+
+        let max_diff: u8 = rust_img
+            .data
+            .iter()
+            .zip(c_pixels.iter())
+            .map(|(&r, &c)| (r as i16 - c as i16).unsigned_abs() as u8)
+            .max()
+            .unwrap_or(0);
+        assert_eq!(
+            max_diff, 0,
+            "S420 + restart: Rust vs C djpeg max_diff={}, expected 0",
+            max_diff
+        );
+    }
+
+    // --- Sub-test 3: Grayscale + restart ---
+    {
+        let gray_pixels: Vec<u8> = (0..width * height)
+            .map(|i| {
+                let x: usize = i % width;
+                let y: usize = i / width;
+                ((x * 255) / (width - 1).max(1) + (y * 127) / (height - 1).max(1)) as u8
+            })
+            .collect();
+
+        let jpeg: Vec<u8> = Encoder::new(&gray_pixels, width, height, PixelFormat::Grayscale)
+            .quality(90)
+            .restart_rows(2)
+            .encode()
+            .expect("grayscale + restart encode failed");
+
+        let has_dri: bool = jpeg.windows(2).any(|w| w[0] == 0xFF && w[1] == 0xDD);
+        assert!(has_dri, "grayscale + restart: missing DRI marker");
+
+        let rust_img = decompress(&jpeg).expect("Rust decompress grayscale+restart failed");
+
+        // djpeg with -pnm auto-selects PGM for grayscale
+        let output = run_djpeg(&djpeg, &jpeg, "-pnm");
+        assert!(
+            output.status.success(),
+            "grayscale + restart: djpeg failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+
+        let (c_w, c_h, c_pixels) = parse_pgm(&output.stdout);
+        assert_eq!(c_w, width, "grayscale + restart: C width mismatch");
+        assert_eq!(c_h, height, "grayscale + restart: C height mismatch");
+        assert_eq!(
+            rust_img.data.len(),
+            c_pixels.len(),
+            "grayscale + restart: pixel buffer length mismatch"
+        );
+
+        let max_diff: u8 = rust_img
+            .data
+            .iter()
+            .zip(c_pixels.iter())
+            .map(|(&r, &c)| (r as i16 - c as i16).unsigned_abs() as u8)
+            .max()
+            .unwrap_or(0);
+        assert_eq!(
+            max_diff, 0,
+            "grayscale + restart: Rust vs C djpeg max_diff={}, expected 0",
+            max_diff
+        );
+    }
+}

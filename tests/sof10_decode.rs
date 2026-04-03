@@ -2,7 +2,8 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use libjpeg_turbo_rs::{
-    compress_arithmetic, compress_progressive, decompress, decompress_to, PixelFormat, Subsampling,
+    compress_arithmetic, compress_arithmetic_progressive, compress_progressive, decompress,
+    decompress_to, PixelFormat, Subsampling,
 };
 
 fn djpeg_path() -> Option<PathBuf> {
@@ -306,6 +307,204 @@ fn build_minimal_sof10_header() -> Vec<u8> {
     out.extend_from_slice(&[0xFF, 0xD9]);
 
     out
+}
+
+/// Cross-validate SOF10 (progressive arithmetic) decode: Rust vs C djpeg, diff=0.
+/// Tests:
+/// 1. C-encoded SOF10 fixture (cjpeg -arithmetic -progressive) decoded by both
+/// 2. Rust-encoded SOF10 (compress_arithmetic_progressive) decoded by both
+#[test]
+fn c_djpeg_sof10_decode_diff_zero() {
+    let cjpeg: PathBuf = match cjpeg_path() {
+        Some(p) => p,
+        None => {
+            eprintln!("SKIP: cjpeg not found");
+            return;
+        }
+    };
+    let djpeg: PathBuf = match djpeg_path() {
+        Some(p) => p,
+        None => {
+            eprintln!("SKIP: djpeg not found");
+            return;
+        }
+    };
+
+    // --- Test 1: C-encoded SOF10 fixture ---
+    {
+        // Generate PPM source with gradient pattern
+        let (w, h): (usize, usize) = (48, 32);
+        let mut ppm_data: Vec<u8> = format!("P6\n{} {}\n255\n", w, h).into_bytes();
+        for y in 0..h {
+            for x in 0..w {
+                ppm_data.push(((x * 255) / w) as u8);
+                ppm_data.push(((y * 255) / h) as u8);
+                ppm_data.push((((x + y) * 127) / (w + h)) as u8);
+            }
+        }
+
+        let ppm_path: String = format!("/tmp/ljt_sof10_xval_{}_src.ppm", std::process::id());
+        let jpg_path: String = format!("/tmp/ljt_sof10_xval_{}_c_enc.jpg", std::process::id());
+        let c_dec_ppm: String = format!("/tmp/ljt_sof10_xval_{}_c_dec.ppm", std::process::id());
+        std::fs::write(&ppm_path, &ppm_data).unwrap();
+
+        // Encode with C cjpeg -arithmetic -progressive -> SOF10
+        let output = Command::new(&cjpeg)
+            .args([
+                "-arithmetic",
+                "-progressive",
+                "-quality",
+                "90",
+                "-outfile",
+                &jpg_path,
+                &ppm_path,
+            ])
+            .output()
+            .expect("failed to run cjpeg");
+        if !output.status.success() {
+            eprintln!(
+                "SKIP: cjpeg -arithmetic -progressive failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            std::fs::remove_file(&ppm_path).ok();
+            return;
+        }
+
+        let jpeg_data: Vec<u8> = std::fs::read(&jpg_path).unwrap();
+
+        // Verify SOF10 marker (0xFFCA) is present
+        let has_sof10: bool = jpeg_data
+            .windows(2)
+            .any(|pair| pair[0] == 0xFF && pair[1] == 0xCA);
+        assert!(
+            has_sof10,
+            "cjpeg -arithmetic -progressive must produce SOF10 (0xFFCA)"
+        );
+
+        // Rust decode
+        let rust_img = decompress_to(&jpeg_data, PixelFormat::Rgb)
+            .expect("Rust must decode C-encoded SOF10 JPEG");
+        assert_eq!(rust_img.width, w);
+        assert_eq!(rust_img.height, h);
+
+        // C djpeg decode
+        let output = Command::new(&djpeg)
+            .args(["-ppm", "-outfile", &c_dec_ppm, &jpg_path])
+            .output()
+            .expect("failed to run djpeg");
+        assert!(
+            output.status.success(),
+            "djpeg failed on C-encoded SOF10 JPEG: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let (cw, ch, c_pixels) = parse_ppm(Path::new(&c_dec_ppm));
+        assert_eq!(cw, w);
+        assert_eq!(ch, h);
+
+        // Cross-validate: Rust vs C djpeg, target diff=0
+        assert_eq!(
+            rust_img.data.len(),
+            c_pixels.len(),
+            "pixel data length mismatch for C-encoded SOF10"
+        );
+        let max_diff: u8 = rust_img
+            .data
+            .iter()
+            .zip(c_pixels.iter())
+            .map(|(&a, &b)| (a as i16 - b as i16).unsigned_abs() as u8)
+            .max()
+            .unwrap_or(0);
+        assert_eq!(
+            max_diff, 0,
+            "C-encoded SOF10: Rust vs C djpeg max_diff={} (must be 0)",
+            max_diff
+        );
+
+        std::fs::remove_file(&ppm_path).ok();
+        std::fs::remove_file(&jpg_path).ok();
+        std::fs::remove_file(&c_dec_ppm).ok();
+    }
+
+    // --- Test 2: Rust-encoded SOF10 (compress_arithmetic_progressive) ---
+    {
+        let (w, h): (usize, usize) = (48, 32);
+        let mut source_pixels: Vec<u8> = Vec::with_capacity(w * h * 3);
+        for y in 0..h {
+            for x in 0..w {
+                source_pixels.push(((x * 255) / w) as u8);
+                source_pixels.push(((y * 255) / h) as u8);
+                source_pixels.push((((x + y) * 127) / (w + h)) as u8);
+            }
+        }
+
+        // Rust encode as SOF10 (arithmetic progressive)
+        let jpeg: Vec<u8> = compress_arithmetic_progressive(
+            &source_pixels,
+            w,
+            h,
+            PixelFormat::Rgb,
+            90,
+            Subsampling::S444,
+        )
+        .expect("Rust compress_arithmetic_progressive must succeed");
+
+        // Verify SOF10 marker
+        let has_sof10: bool = jpeg
+            .windows(2)
+            .any(|pair| pair[0] == 0xFF && pair[1] == 0xCA);
+        assert!(
+            has_sof10,
+            "Rust compress_arithmetic_progressive must produce SOF10 (0xFFCA)"
+        );
+
+        let rust_jpg_path: String =
+            format!("/tmp/ljt_sof10_xval_{}_rust_enc.jpg", std::process::id());
+        let rust_c_dec_ppm: String =
+            format!("/tmp/ljt_sof10_xval_{}_rust_c_dec.ppm", std::process::id());
+        std::fs::write(&rust_jpg_path, &jpeg).unwrap();
+
+        // Rust decode of Rust-encoded SOF10
+        let rust_img =
+            decompress_to(&jpeg, PixelFormat::Rgb).expect("Rust must decode its own SOF10 JPEG");
+        assert_eq!(rust_img.width, w);
+        assert_eq!(rust_img.height, h);
+
+        // C djpeg decode of Rust-encoded SOF10
+        let output = Command::new(&djpeg)
+            .args(["-ppm", "-outfile", &rust_c_dec_ppm, &rust_jpg_path])
+            .output()
+            .expect("failed to run djpeg");
+        assert!(
+            output.status.success(),
+            "djpeg failed on Rust-encoded SOF10 JPEG: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let (cw, ch, c_pixels) = parse_ppm(Path::new(&rust_c_dec_ppm));
+        assert_eq!(cw, w);
+        assert_eq!(ch, h);
+
+        // Cross-validate: Rust decode vs C djpeg decode, target diff=0
+        assert_eq!(
+            rust_img.data.len(),
+            c_pixels.len(),
+            "pixel data length mismatch for Rust-encoded SOF10"
+        );
+        let max_diff: u8 = rust_img
+            .data
+            .iter()
+            .zip(c_pixels.iter())
+            .map(|(&a, &b)| (a as i16 - b as i16).unsigned_abs() as u8)
+            .max()
+            .unwrap_or(0);
+        assert_eq!(
+            max_diff, 0,
+            "Rust-encoded SOF10: Rust vs C djpeg max_diff={} (must be 0)",
+            max_diff
+        );
+
+        std::fs::remove_file(&rust_jpg_path).ok();
+        std::fs::remove_file(&rust_c_dec_ppm).ok();
+    }
 }
 
 /// Build a minimal single-MCU SOF10 JPEG for decode testing.

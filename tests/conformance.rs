@@ -396,7 +396,136 @@ fn decode_with_djpeg(djpeg: &std::path::Path, jpeg_data: &[u8]) -> Vec<u8> {
     pixels
 }
 
-// --- C djpeg cross-validation test ---
+// --- C djpeg cross-validation tests ---
+
+#[test]
+fn c_djpeg_conformance_cmyk_diff_zero() {
+    let djpeg = match djpeg_path() {
+        Some(p) => p,
+        None => {
+            eprintln!("SKIP: djpeg not found");
+            return;
+        }
+    };
+
+    // CMYK and 4-component JPEG → RGB: djpeg converts CMYK to RGB when writing PPM
+    let cmyk_fixtures: &[(&str, &[u8])] = &[
+        (
+            "cymk.jpg",
+            include_bytes!("../references/zune-image/test-images/jpeg/cymk.jpg"),
+        ),
+        (
+            "four_components.jpg",
+            include_bytes!("../references/zune-image/test-images/jpeg/four_components.jpg"),
+        ),
+        (
+            "Kiara_limited_progressive_four_components.jpg",
+            include_bytes!(
+                "../references/zune-image/test-images/jpeg/Kiara_limited_progressive_four_components.jpg"
+            ),
+        ),
+    ];
+
+    for &(name, jpeg_data) in cmyk_fixtures {
+        let rust_image = decompress_to(jpeg_data, PixelFormat::Rgb)
+            .unwrap_or_else(|e| panic!("{}: Rust CMYK→RGB decode failed: {}", name, e));
+
+        let c_pixels = decode_with_djpeg(&djpeg, jpeg_data);
+
+        assert_eq!(
+            rust_image.data.len(),
+            c_pixels.len(),
+            "{}: pixel data length mismatch (rust={}, c={})",
+            name,
+            rust_image.data.len(),
+            c_pixels.len()
+        );
+
+        let mut diff_count: usize = 0;
+        let mut max_diff: u8 = 0;
+        let mut first_diff_idx: Option<usize> = None;
+        for (i, (&rust_byte, &c_byte)) in rust_image.data.iter().zip(c_pixels.iter()).enumerate() {
+            let d = (rust_byte as i16 - c_byte as i16).unsigned_abs() as u8;
+            if d > 0 {
+                if first_diff_idx.is_none() {
+                    first_diff_idx = Some(i);
+                }
+                diff_count += 1;
+                if d > max_diff {
+                    max_diff = d;
+                }
+            }
+        }
+
+        assert_eq!(
+            diff_count,
+            0,
+            "{}: {} bytes differ (max_diff={}, first_diff_at_byte={})",
+            name,
+            diff_count,
+            max_diff,
+            first_diff_idx.unwrap_or(0)
+        );
+    }
+
+    // Progressive variants: decode progressive color fixtures against djpeg
+    let progressive_fixtures: &[(&str, &[u8])] = &[
+        (
+            "red_16x16_444_prog.jpg",
+            include_bytes!("fixtures/red_16x16_444_prog.jpg"),
+        ),
+        (
+            "green_16x16_422_prog.jpg",
+            include_bytes!("fixtures/green_16x16_422_prog.jpg"),
+        ),
+        (
+            "blue_16x16_420_prog.jpg",
+            include_bytes!("fixtures/blue_16x16_420_prog.jpg"),
+        ),
+    ];
+
+    for &(name, jpeg_data) in progressive_fixtures {
+        let rust_image = decompress_to(jpeg_data, PixelFormat::Rgb)
+            .unwrap_or_else(|e| panic!("{}: Rust progressive decode failed: {}", name, e));
+
+        let c_pixels = decode_with_djpeg(&djpeg, jpeg_data);
+
+        assert_eq!(
+            rust_image.data.len(),
+            c_pixels.len(),
+            "{}: pixel data length mismatch (rust={}, c={})",
+            name,
+            rust_image.data.len(),
+            c_pixels.len()
+        );
+
+        let mut diff_count: usize = 0;
+        let mut max_diff: u8 = 0;
+        let mut first_diff_idx: Option<usize> = None;
+        for (i, (&rust_byte, &c_byte)) in rust_image.data.iter().zip(c_pixels.iter()).enumerate() {
+            let d = (rust_byte as i16 - c_byte as i16).unsigned_abs() as u8;
+            if d > 0 {
+                if first_diff_idx.is_none() {
+                    first_diff_idx = Some(i);
+                }
+                diff_count += 1;
+                if d > max_diff {
+                    max_diff = d;
+                }
+            }
+        }
+
+        assert_eq!(
+            diff_count,
+            0,
+            "{}: {} bytes differ (max_diff={}, first_diff_at_byte={})",
+            name,
+            diff_count,
+            max_diff,
+            first_diff_idx.unwrap_or(0)
+        );
+    }
+}
 
 #[test]
 fn c_djpeg_fixture_decode_diff_zero() {
