@@ -868,11 +868,8 @@ fn c_djpeg_scaling_422_full_scale_diff_zero() {
     let _ = std::fs::remove_file(&input_jpg);
 }
 
-/// Pixel comparison for 4:2:2 **scaled** decode (1/2, 1/4, 1/8) against C djpeg.
-/// Known issue: 4:2:2 scaled decode uses a different chroma IDCT sizing strategy
-/// than C libjpeg-turbo, producing measurable diffs. Measured max_diff=37 at 1/2.
+/// Pixel-exact comparison for 4:2:2 **scaled** decode (1/2, 1/4, 1/8) against C djpeg.
 #[test]
-#[ignore = "4:2:2 scaled decode has known diff vs C djpeg (max_diff=37 at 1/2 scale) — needs chroma IDCT fix"]
 fn c_djpeg_scaling_422_scaled_pixel_diff_zero() {
     let djpeg = match djpeg_path() {
         Some(p) => p,
