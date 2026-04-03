@@ -222,6 +222,52 @@ fn ppm_read_number(data: &[u8], idx: usize) -> (usize, usize) {
     (val, end)
 }
 
+/// Parse a binary PGM (P5) file from raw bytes and return `(width, height, pixels)`.
+fn parse_pgm(data: &[u8]) -> (usize, usize, Vec<u8>) {
+    assert!(data.len() > 3, "PGM too short");
+    assert_eq!(&data[0..2], b"P5", "not a P5 PGM");
+    let mut idx: usize = 2;
+    idx = ppm_skip_ws(data, idx);
+    let (width, next) = ppm_read_number(data, idx);
+    idx = ppm_skip_ws(data, next);
+    let (height, next) = ppm_read_number(data, idx);
+    idx = ppm_skip_ws(data, next);
+    let (_maxval, next) = ppm_read_number(data, idx);
+    idx = next + 1;
+    let pixels: Vec<u8> = data[idx..].to_vec();
+    assert_eq!(
+        pixels.len(),
+        width * height,
+        "PGM pixel data length mismatch: expected {}, got {}",
+        width * height,
+        pixels.len()
+    );
+    (width, height, pixels)
+}
+
+/// Decode JPEG bytes with C djpeg, returning raw pixel data.
+/// For RGB output, pass `-ppm`; for grayscale, pass `-pnm` (djpeg auto-selects PGM).
+fn run_djpeg(djpeg: &std::path::Path, jpeg: &[u8], flag: &str) -> std::process::Output {
+    let output = Command::new(djpeg)
+        .arg(flag)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .and_then(|mut child| {
+            use std::io::Write;
+            child
+                .stdin
+                .as_mut()
+                .unwrap()
+                .write_all(jpeg)
+                .expect("write jpeg to djpeg stdin");
+            child.wait_with_output()
+        })
+        .expect("failed to run djpeg");
+    output
+}
+
 #[test]
 fn c_djpeg_progressive_encode_diff_zero() {
     let djpeg: PathBuf = match djpeg_path() {
@@ -289,4 +335,160 @@ fn c_djpeg_progressive_encode_diff_zero() {
         "Rust vs C djpeg pixel diff must be 0, got max_diff={}",
         max_diff
     );
+}
+
+/// Extended C cross-validation for progressive encoding: AC refine with gradient,
+/// grayscale progressive, and various chroma subsamplings (420, 422, 444).
+/// Each scenario: Rust progressive encode -> C djpeg decode -> diff must be 0.
+#[test]
+fn c_djpeg_progressive_enc_extended_diff_zero() {
+    let djpeg: PathBuf = match djpeg_path() {
+        Some(p) => p,
+        None => {
+            eprintln!("SKIP: djpeg not found, skipping c_djpeg_progressive_enc_extended_diff_zero");
+            return;
+        }
+    };
+
+    let width: usize = 64;
+    let height: usize = 64;
+
+    // --- Sub-test 1: AC refine progressive encode (high quality triggers refine scans) ---
+    {
+        let pixels: Vec<u8> = gradient_pixels(width, height, 3);
+        let jpeg: Vec<u8> = compress_progressive(
+            &pixels,
+            width,
+            height,
+            PixelFormat::Rgb,
+            95,
+            Subsampling::S444,
+        )
+        .expect("AC refine progressive encode failed");
+
+        let output = run_djpeg(&djpeg, &jpeg, "-ppm");
+        assert!(
+            output.status.success(),
+            "djpeg failed on AC refine progressive: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+
+        let (c_w, c_h, c_pixels) = parse_ppm(&output.stdout);
+        assert_eq!(c_w, width, "AC refine: C width mismatch");
+        assert_eq!(c_h, height, "AC refine: C height mismatch");
+
+        let rust_img = decompress(&jpeg).expect("Rust decompress AC refine failed");
+        assert_eq!(
+            rust_img.data.len(),
+            c_pixels.len(),
+            "AC refine: pixel buffer length mismatch"
+        );
+
+        let max_diff: u8 = rust_img
+            .data
+            .iter()
+            .zip(c_pixels.iter())
+            .map(|(&r, &c)| (r as i16 - c as i16).unsigned_abs() as u8)
+            .max()
+            .unwrap_or(0);
+        assert_eq!(
+            max_diff, 0,
+            "AC refine progressive: Rust vs C djpeg max_diff={}, expected 0",
+            max_diff
+        );
+    }
+
+    // --- Sub-test 2: Grayscale progressive encode ---
+    {
+        let pixels: Vec<u8> = gradient_pixels(width, height, 1);
+        let jpeg: Vec<u8> = compress_progressive(
+            &pixels,
+            width,
+            height,
+            PixelFormat::Grayscale,
+            90,
+            Subsampling::S444,
+        )
+        .expect("grayscale progressive encode failed");
+
+        // djpeg with -pnm auto-selects PGM for grayscale
+        let output = run_djpeg(&djpeg, &jpeg, "-pnm");
+        assert!(
+            output.status.success(),
+            "djpeg failed on grayscale progressive: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+
+        let (c_w, c_h, c_pixels) = parse_pgm(&output.stdout);
+        assert_eq!(c_w, width, "grayscale progressive: C width mismatch");
+        assert_eq!(c_h, height, "grayscale progressive: C height mismatch");
+
+        let rust_img = decompress(&jpeg).expect("Rust decompress grayscale progressive failed");
+        assert_eq!(
+            rust_img.data.len(),
+            c_pixels.len(),
+            "grayscale progressive: pixel buffer length mismatch"
+        );
+
+        let max_diff: u8 = rust_img
+            .data
+            .iter()
+            .zip(c_pixels.iter())
+            .map(|(&r, &c)| (r as i16 - c as i16).unsigned_abs() as u8)
+            .max()
+            .unwrap_or(0);
+        assert_eq!(
+            max_diff, 0,
+            "grayscale progressive: Rust vs C djpeg max_diff={}, expected 0",
+            max_diff
+        );
+    }
+
+    // --- Sub-test 3: Progressive with various subsamplings (420, 422, 444) ---
+    let subsamplings: [(Subsampling, &str); 3] = [
+        (Subsampling::S420, "420"),
+        (Subsampling::S422, "422"),
+        (Subsampling::S444, "444"),
+    ];
+
+    for (subsampling, label) in &subsamplings {
+        let pixels: Vec<u8> = gradient_pixels(width, height, 3);
+        let jpeg: Vec<u8> =
+            compress_progressive(&pixels, width, height, PixelFormat::Rgb, 85, *subsampling)
+                .unwrap_or_else(|_| panic!("progressive {} encode failed", label));
+
+        let output = run_djpeg(&djpeg, &jpeg, "-ppm");
+        assert!(
+            output.status.success(),
+            "djpeg failed on progressive {}: {}",
+            label,
+            String::from_utf8_lossy(&output.stderr)
+        );
+
+        let (c_w, c_h, c_pixels) = parse_ppm(&output.stdout);
+        assert_eq!(c_w, width, "progressive {}: C width mismatch", label);
+        assert_eq!(c_h, height, "progressive {}: C height mismatch", label);
+
+        let rust_img = decompress(&jpeg)
+            .unwrap_or_else(|e| panic!("Rust decompress progressive {} failed: {}", label, e));
+        assert_eq!(
+            rust_img.data.len(),
+            c_pixels.len(),
+            "progressive {}: pixel buffer length mismatch",
+            label
+        );
+
+        let max_diff: u8 = rust_img
+            .data
+            .iter()
+            .zip(c_pixels.iter())
+            .map(|(&r, &c)| (r as i16 - c as i16).unsigned_abs() as u8)
+            .max()
+            .unwrap_or(0);
+        assert_eq!(
+            max_diff, 0,
+            "progressive {}: Rust vs C djpeg max_diff={}, expected 0",
+            label, max_diff
+        );
+    }
 }
