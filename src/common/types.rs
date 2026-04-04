@@ -285,9 +285,9 @@ pub struct DensityInfo {
 impl Default for DensityInfo {
     fn default() -> Self {
         Self {
-            unit: DensityUnit::Dpi,
-            x: 72,
-            y: 72,
+            unit: DensityUnit::Unknown,
+            x: 1,
+            y: 1,
         }
     }
 }

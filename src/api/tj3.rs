@@ -126,9 +126,9 @@ impl TjHandle {
             lossless_pt: 0,
             restart_blocks: 0,
             restart_rows: 0,
-            x_density: 72,
-            y_density: 72,
-            density_units: 1, // DPI
+            x_density: 1,
+            y_density: 1,
+            density_units: 0, // DPI
             max_memory: 0,
             max_pixels: 0,
             bottom_up: 0,

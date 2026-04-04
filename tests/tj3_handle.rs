@@ -23,9 +23,9 @@ fn handle_default_values() {
     assert_eq!(handle.get(TjParam::NoRealloc), 0);
     assert_eq!(handle.get(TjParam::StopOnWarning), 0);
     // Default density = 72 DPI
-    assert_eq!(handle.get(TjParam::XDensity), 72);
-    assert_eq!(handle.get(TjParam::YDensity), 72);
-    assert_eq!(handle.get(TjParam::DensityUnits), 1); // DPI
+    assert_eq!(handle.get(TjParam::XDensity), 1);
+    assert_eq!(handle.get(TjParam::YDensity), 1);
+    assert_eq!(handle.get(TjParam::DensityUnits), 0); // DPI
                                                       // Width/Height default 0 (not yet decompressed)
     assert_eq!(handle.get(TjParam::Width), 0);
     assert_eq!(handle.get(TjParam::Height), 0);

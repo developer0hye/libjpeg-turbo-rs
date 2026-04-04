@@ -20,9 +20,9 @@ fn default_density_is_72dpi() {
         .encode()
         .unwrap();
     let img = decompress(&jpeg).unwrap();
-    assert_eq!(img.density.x, 72);
-    assert_eq!(img.density.y, 72);
-    assert_eq!(img.density.unit, DensityUnit::Dpi);
+    assert_eq!(img.density.x, 1);
+    assert_eq!(img.density.y, 1);
+    assert_eq!(img.density.unit, DensityUnit::Unknown);
 }
 
 #[test]
@@ -47,7 +47,7 @@ fn write_com_marker() {
 #[test]
 fn density_info_default() {
     let d = DensityInfo::default();
-    assert_eq!(d.unit, DensityUnit::Dpi);
-    assert_eq!(d.x, 72);
-    assert_eq!(d.y, 72);
+    assert_eq!(d.unit, DensityUnit::Unknown);
+    assert_eq!(d.x, 1);
+    assert_eq!(d.y, 1);
 }

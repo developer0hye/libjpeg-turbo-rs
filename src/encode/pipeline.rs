@@ -3455,8 +3455,18 @@ fn downsample_chroma_block(
         }
     }
 
-    // Scalar fallback for border blocks and non-standard factors
+    // Scalar fallback: alternating bias matching C libjpeg-turbo jcsample.c
+    let divisor: u32 = (h_factor * v_factor) as u32;
+    let use_alt: bool = (h_factor == 2 && v_factor == 1) || (h_factor == 2 && v_factor == 2);
     for row in 0..8 {
+        let mut bias: u32 = if h_factor == 2 && v_factor == 1 {
+            0
+        } else if h_factor == 2 && v_factor == 2 {
+            1
+        } else {
+            divisor / 2
+        };
+        let toggle: u32 = if h_factor == 2 && v_factor == 1 { 1 } else { 3 };
         for col in 0..8 {
             let mut sum: u32 = 0;
             for dy in 0..v_factor {
@@ -3466,8 +3476,11 @@ fn downsample_chroma_block(
                     sum += plane[sy * plane_width + sx] as u32;
                 }
             }
-            let avg = (sum + (h_factor * v_factor / 2) as u32) / (h_factor * v_factor) as u32;
+            let avg = (sum + bias) / divisor;
             block[row * 8 + col] = avg as i16 - 128;
+            if use_alt {
+                bias ^= toggle;
+            }
         }
     }
 }
@@ -3487,7 +3500,7 @@ fn downsample_chroma_block_h2v2_neon(
     use std::arch::aarch64::*;
     unsafe {
         // Rounding bias of 2 for divide-by-4 (matches scalar: (sum + 2) / 4)
-        let bias: uint16x8_t = vdupq_n_u16(2);
+        let bias: uint16x8_t = vreinterpretq_u16_u32(vdupq_n_u32(0x00020001));
         let level_shift: int16x8_t = vdupq_n_s16(128);
 
         for row in 0..8 {
@@ -3526,7 +3539,7 @@ fn downsample_chroma_block_h2v1_neon(
     use std::arch::aarch64::*;
     unsafe {
         // Rounding bias of 1 for divide-by-2 (matches scalar: (sum + 1) / 2)
-        let bias: uint16x8_t = vdupq_n_u16(1);
+        let bias: uint16x8_t = vreinterpretq_u16_u32(vdupq_n_u32(0x00010000));
         let level_shift: int16x8_t = vdupq_n_s16(128);
 
         for row in 0..8 {
@@ -3565,7 +3578,7 @@ unsafe fn downsample_chroma_block_h2v2_ssse3(
 
     // maddubs(data, ones) computes pairwise sum of adjacent u8 pairs → i16
     let ones: __m128i = _mm_set1_epi8(1);
-    let bias: __m128i = _mm_set1_epi16(2); // rounding for divide-by-4
+    let bias: __m128i = _mm_set_epi16(2, 1, 2, 1, 2, 1, 2, 1); // rounding for divide-by-4
     let level_shift: __m128i = _mm_set1_epi16(128);
 
     for row in 0..8 {
@@ -3607,7 +3620,7 @@ unsafe fn downsample_chroma_block_h2v1_ssse3(
     use core::arch::x86_64::*;
 
     let ones: __m128i = _mm_set1_epi8(1);
-    let bias: __m128i = _mm_set1_epi16(1); // rounding for divide-by-2
+    let bias: __m128i = _mm_set_epi16(1, 0, 1, 0, 1, 0, 1, 0); // rounding for divide-by-2
     let level_shift: __m128i = _mm_set1_epi16(128);
 
     for row in 0..8 {
