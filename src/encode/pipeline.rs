@@ -122,18 +122,9 @@ pub fn compress(
         let padded_w: usize = mcus_x * mcu_w;
         let padded_h: usize = mcu_h;
         let row_buf_size: usize = padded_w * padded_h;
-        // Initialize to 128: in YCbCr, 128 is the neutral value that produces
-        // zero after level-shift (-128), matching C's zero-filled coefficient
-        // buffers for trailing blocks beyond width_in_blocks.
-        let mut y_buf: Vec<u8> = vec![128u8; row_buf_size];
-        let mut cb_buf: Vec<u8> = vec![128u8; row_buf_size];
-        let mut cr_buf: Vec<u8> = vec![128u8; row_buf_size];
-
-        // Compute width_in_blocks per component (matching C's jccoefct.c allocation).
-        // Luma and chroma may have different width_in_blocks.
-        let (h_samp, _v_samp) = subsampling.sampling_factors();
-        let luma_wib: usize = width.div_ceil(8); // ceil(width * h_samp / (max_h * 8))
-        let luma_pad_w: usize = luma_wib * 8; // expand_right_edge pads to this
+        let mut y_buf: Vec<u8> = vec![0u8; row_buf_size];
+        let mut cb_buf: Vec<u8> = vec![0u8; row_buf_size];
+        let mut cr_buf: Vec<u8> = vec![0u8; row_buf_size];
 
         for mcu_row in 0..mcus_y {
             let y0: usize = mcu_row * mcu_h;
@@ -151,23 +142,14 @@ pub fn compress(
                     &mut cr_buf[dst_offset..dst_offset + width],
                     width,
                 );
-                // Pad right edge matching C libjpeg-turbo's per-component behavior:
-                // - Luma: pad to luma_pad_w (width_in_blocks * 8). Beyond this,
-                //   C leaves coefficient buffers as zeros (blocks never FDCT'd).
-                //   We fill with 128 (→ 0 after level-shift → zero coefficients).
-                // - Chroma: pad source to padded_w (MCU-aligned) for downsampling.
-                //   C's expand_right_edge pads chroma input to full MCU width.
+                // Pad right edge by replicating last pixel to MCU-aligned width,
+                // matching C libjpeg-turbo's expand_right_edge behavior.
                 if width < padded_w {
                     let last_y: u8 = y_buf[dst_offset + width - 1];
                     let last_cb: u8 = cb_buf[dst_offset + width - 1];
                     let last_cr: u8 = cr_buf[dst_offset + width - 1];
-                    // Luma: replicate up to luma_pad_w, then 128 for trailing blocks
-                    for x in width..luma_pad_w.min(padded_w) {
-                        y_buf[dst_offset + x] = last_y;
-                    }
-                    // Trailing luma columns stay at 128 (init value)
-                    // Chroma: replicate to full MCU width for downsampling
                     for x in width..padded_w {
+                        y_buf[dst_offset + x] = last_y;
                         cb_buf[dst_offset + x] = last_cb;
                         cr_buf[dst_offset + x] = last_cr;
                     }
