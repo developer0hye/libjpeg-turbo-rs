@@ -105,7 +105,7 @@ fn c_xval_encoder_binary_quality_subsamp() {
                 &pixels,
                 w,
                 h,
-                &["-quality", &q_arg, "-sample", cjpeg_samp],
+                &["-quality", &q_arg, "-sample", cjpeg_samp, "-baseline"],
                 &label,
             );
 
