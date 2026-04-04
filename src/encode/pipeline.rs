@@ -1378,10 +1378,10 @@ fn compress_lossless_grayscale(
     Ok(output)
 }
 
-/// Encode a 3-component (RGB via YCbCr) interleaved lossless JPEG.
+/// Encode a 3-component RGB interleaved lossless JPEG.
 ///
-/// Converts RGB to YCbCr (JFIF convention), then encodes each component
-/// interleaved: for each pixel, encode Y diff, Cb diff, Cr diff.
+/// Stores raw RGB component values with no color conversion, matching
+/// C libjpeg-turbo behavior for lossless JPEG (JCS_RGB, no YCbCr conversion).
 fn compress_lossless_rgb(
     pixels: &[u8],
     width: usize,
@@ -1392,31 +1392,23 @@ fn compress_lossless_rgb(
     let precision: u8 = 8;
     let num_pixels: usize = width * height;
 
-    // Convert RGB to YCbCr planes
-    let mut y_plane: Vec<u8> = vec![0u8; num_pixels];
-    let mut cb_plane: Vec<u8> = vec![0u8; num_pixels];
-    let mut cr_plane: Vec<u8> = vec![0u8; num_pixels];
+    // Split interleaved RGB into separate planes (no color conversion)
+    let mut r_plane: Vec<u8> = vec![0u8; num_pixels];
+    let mut g_plane: Vec<u8> = vec![0u8; num_pixels];
+    let mut b_plane: Vec<u8> = vec![0u8; num_pixels];
 
-    for row in 0..height {
-        let row_start: usize = row * width * 3;
-        let plane_start: usize = row * width;
-        color::rgb_to_ycbcr_row(
-            &pixels[row_start..row_start + width * 3],
-            &mut y_plane[plane_start..plane_start + width],
-            &mut cb_plane[plane_start..plane_start + width],
-            &mut cr_plane[plane_start..plane_start + width],
-            width,
-        );
+    for i in 0..num_pixels {
+        r_plane[i] = pixels[i * 3];
+        g_plane[i] = pixels[i * 3 + 1];
+        b_plane[i] = pixels[i * 3 + 2];
     }
 
-    let planes: [&[u8]; 3] = [&y_plane, &cb_plane, &cr_plane];
+    let planes: [&[u8]; 3] = [&r_plane, &g_plane, &b_plane];
 
-    // Use luminance DC table for Y (table 0), chrominance DC table for Cb/Cr (table 1)
+    // Use luminance DC table for all 3 components (no chrominance table needed)
     let dc_table_luma: HuffTable =
         build_huff_table(&tables::DC_LUMINANCE_BITS, &tables::DC_LUMINANCE_VALUES);
-    let dc_table_chroma: HuffTable =
-        build_huff_table(&tables::DC_CHROMINANCE_BITS, &tables::DC_CHROMINANCE_VALUES);
-    let dc_tables: [&HuffTable; 3] = [&dc_table_luma, &dc_table_chroma, &dc_table_chroma];
+    let dc_tables: [&HuffTable; 3] = [&dc_table_luma, &dc_table_luma, &dc_table_luma];
 
     let mut bit_writer: BitWriter = BitWriter::new(num_pixels * 3);
 
@@ -1446,7 +1438,7 @@ fn compress_lossless_rgb(
 
     marker_writer::write_soi(&mut output);
 
-    // DC Huffman table 0 (luminance) for Y
+    // DC Huffman table 0 (luminance) for all 3 components
     marker_writer::write_dht(
         &mut output,
         0,
@@ -1455,20 +1447,11 @@ fn compress_lossless_rgb(
         &tables::DC_LUMINANCE_VALUES,
     );
 
-    // DC Huffman table 1 (chrominance) for Cb, Cr
-    marker_writer::write_dht(
-        &mut output,
-        0,
-        1,
-        &tables::DC_CHROMINANCE_BITS,
-        &tables::DC_CHROMINANCE_VALUES,
-    );
-
-    // SOF3 with 3 components: Y(id=1), Cb(id=2), Cr(id=3), all 1x1, qt=0
+    // SOF3 with 3 components: R(id=1), G(id=2), B(id=3), all 1x1, qt=0
     let components: Vec<(u8, u8, u8, u8)> = vec![
-        (1, 1, 1, 0), // Y: id=1, h=1, v=1, qt=0
-        (2, 1, 1, 0), // Cb: id=2, h=1, v=1, qt=0
-        (3, 1, 1, 0), // Cr: id=3, h=1, v=1, qt=0
+        (1, 1, 1, 0), // R: id=1, h=1, v=1, qt=0
+        (2, 1, 1, 0), // G: id=2, h=1, v=1, qt=0
+        (3, 1, 1, 0), // B: id=3, h=1, v=1, qt=0
     ];
     marker_writer::write_sof3(
         &mut output,
@@ -1478,11 +1461,11 @@ fn compress_lossless_rgb(
         &components,
     );
 
-    // SOS with 3 components: Y uses DC table 0, Cb/Cr use DC table 1
+    // SOS with 3 components: all use DC table 0
     let scan_components: Vec<(u8, u8)> = vec![
-        (1, 0), // Y -> DC table 0
-        (2, 1), // Cb -> DC table 1
-        (3, 1), // Cr -> DC table 1
+        (1, 0), // R -> DC table 0
+        (2, 0), // G -> DC table 0
+        (3, 0), // B -> DC table 0
     ];
     marker_writer::write_sos_lossless(&mut output, &scan_components, predictor, point_transform);
 
@@ -1619,7 +1602,10 @@ fn compress_lossless_arithmetic_grayscale(
     Ok(output)
 }
 
-/// Encode a 3-component (RGB via YCbCr) interleaved lossless JPEG with arithmetic coding.
+/// Encode a 3-component RGB interleaved lossless JPEG with arithmetic coding.
+///
+/// Stores raw RGB component values with no color conversion, matching
+/// C libjpeg-turbo behavior for lossless JPEG (JCS_RGB, no YCbCr conversion).
 fn compress_lossless_arithmetic_rgb(
     pixels: &[u8],
     width: usize,
@@ -1632,26 +1618,20 @@ fn compress_lossless_arithmetic_rgb(
     let precision: u8 = 8;
     let num_pixels: usize = width * height;
 
-    // Convert RGB to YCbCr planes
-    let mut y_plane: Vec<u8> = vec![0u8; num_pixels];
-    let mut cb_plane: Vec<u8> = vec![0u8; num_pixels];
-    let mut cr_plane: Vec<u8> = vec![0u8; num_pixels];
+    // Split interleaved RGB into separate planes (no color conversion)
+    let mut r_plane: Vec<u8> = vec![0u8; num_pixels];
+    let mut g_plane: Vec<u8> = vec![0u8; num_pixels];
+    let mut b_plane: Vec<u8> = vec![0u8; num_pixels];
 
-    for row in 0..height {
-        let row_start: usize = row * width * 3;
-        let plane_start: usize = row * width;
-        color::rgb_to_ycbcr_row(
-            &pixels[row_start..row_start + width * 3],
-            &mut y_plane[plane_start..plane_start + width],
-            &mut cb_plane[plane_start..plane_start + width],
-            &mut cr_plane[plane_start..plane_start + width],
-            width,
-        );
+    for i in 0..num_pixels {
+        r_plane[i] = pixels[i * 3];
+        g_plane[i] = pixels[i * 3 + 1];
+        b_plane[i] = pixels[i * 3 + 2];
     }
 
-    let planes: [&[u8]; 3] = [&y_plane, &cb_plane, &cr_plane];
-    // comp_idx 0=Y uses dc_tbl 0, comp_idx 1=Cb and 2=Cr use dc_tbl 1
-    let dc_tbls: [usize; 3] = [0, 1, 1];
+    let planes: [&[u8]; 3] = [&r_plane, &g_plane, &b_plane];
+    // All components use DC table 0 (no chrominance table)
+    let dc_tbls: [usize; 3] = [0, 0, 0];
 
     let mut arith_enc: ArithEncoder = ArithEncoder::new(num_pixels * 3);
 
@@ -1684,11 +1664,11 @@ fn compress_lossless_arithmetic_rgb(
 
     marker_writer::write_soi(&mut output);
 
-    // SOF11 with 3 components: Y(id=1), Cb(id=2), Cr(id=3), all 1x1, qt=0
+    // SOF11 with 3 components: R(id=1), G(id=2), B(id=3), all 1x1, qt=0
     let components: Vec<(u8, u8, u8, u8)> = vec![
-        (1, 1, 1, 0), // Y
-        (2, 1, 1, 0), // Cb
-        (3, 1, 1, 0), // Cr
+        (1, 1, 1, 0), // R
+        (2, 1, 1, 0), // G
+        (3, 1, 1, 0), // B
     ];
     marker_writer::write_sof11(
         &mut output,
@@ -1698,16 +1678,16 @@ fn compress_lossless_arithmetic_rgb(
         &components,
     );
 
-    // DAC marker for DC tables 0 and 1
+    // DAC marker for DC table 0 only
     let dc_params: [(u8, u8); 2] = [(0u8, 1u8), (0, 1)];
     let ac_params: [u8; 2] = [5u8, 5];
-    marker_writer::write_dac(&mut output, 2, &dc_params, 0, &ac_params);
+    marker_writer::write_dac(&mut output, 1, &dc_params, 0, &ac_params);
 
-    // SOS with 3 components: Y uses DC table 0, Cb/Cr use DC table 1
+    // SOS with 3 components: all use DC table 0
     let scan_components: Vec<(u8, u8)> = vec![
-        (1, 0), // Y -> DC table 0
-        (2, 1), // Cb -> DC table 1
-        (3, 1), // Cr -> DC table 1
+        (1, 0), // R -> DC table 0
+        (2, 0), // G -> DC table 0
+        (3, 0), // B -> DC table 0
     ];
     marker_writer::write_sos_lossless(&mut output, &scan_components, predictor, point_transform);
 
