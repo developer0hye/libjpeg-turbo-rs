@@ -368,21 +368,21 @@ fn intermediate_scale_block_size_mapping() {
     // Verify ScalingFactor::block_size() for all 15 C test factors
     let cases: Vec<(u32, u32, usize)> = vec![
         // (num, denom, expected_block_size)
-        (16, 8, 8), // 2.0x -> full IDCT
-        (15, 8, 8), // 1.875x -> full IDCT
-        (14, 8, 8), // 1.75x -> full IDCT
-        (13, 8, 8), // 1.625x -> full IDCT
-        (12, 8, 8), // 1.5x -> full IDCT
-        (11, 8, 8), // 1.375x -> full IDCT
-        (10, 8, 8), // 1.25x -> full IDCT
-        (9, 8, 8),  // 1.125x -> full IDCT
+        (16, 8, 16), // 2.0x -> 16x16 IDCT
+        (15, 8, 15), // 1.875x -> 15x15 IDCT
+        (14, 8, 14), // 1.75x -> 14x14 IDCT
+        (13, 8, 13), // 1.625x -> 13x13 IDCT
+        (12, 8, 12), // 1.5x -> 12x12 IDCT
+        (11, 8, 11), // 1.375x -> 11x11 IDCT
+        (10, 8, 10), // 1.25x -> 10x10 IDCT
+        (9, 8, 9),   // 1.125x -> 9x9 IDCT
         // 8/8 = 1.0x -> full IDCT (canonical 1/1)
         (8, 8, 8),
-        (7, 8, 8), // 0.875x -> full IDCT (ratio_x8=7, >=5)
-        (6, 8, 8), // 0.75x -> full IDCT (ratio_x8=6, >=5)
-        (5, 8, 8), // 0.625x -> full IDCT (ratio_x8=5, >=5)
+        (7, 8, 7), // 0.875x -> 7x7 IDCT
+        (6, 8, 6), // 0.75x -> 6x6 IDCT
+        (5, 8, 5), // 0.625x -> 5x5 IDCT
         (4, 8, 4), // 0.5x -> half IDCT (ratio_x8=4)
-        (3, 8, 4), // 0.375x -> half IDCT (ratio_x8=3)
+        (3, 8, 3), // 0.375x -> 3x3 IDCT
         (2, 8, 2), // 0.25x -> quarter IDCT (ratio_x8=2)
         (1, 8, 1), // 0.125x -> eighth IDCT (ratio_x8=1)
     ];

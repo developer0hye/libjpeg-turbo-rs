@@ -6,6 +6,7 @@ use crate::common::types::*;
 use crate::decode::bitstream::BitReader;
 use crate::decode::entropy::{self, McuDecoder};
 use crate::decode::huffman;
+use crate::decode::idct_extended;
 use crate::decode::idct_scaled;
 use crate::decode::lossless;
 use crate::decode::marker::{JpegMetadata, MarkerReader, ScanInfo};
@@ -555,8 +556,20 @@ impl<'a> Decoder<'a> {
         block_size: usize,
     ) {
         match block_size {
+            16 => idct_extended::idct_16x16_strided(coeffs, quant, output, stride),
+            15 => idct_extended::idct_15x15_strided(coeffs, quant, output, stride),
+            14 => idct_extended::idct_14x14_strided(coeffs, quant, output, stride),
+            13 => idct_extended::idct_13x13_strided(coeffs, quant, output, stride),
+            12 => idct_extended::idct_12x12_strided(coeffs, quant, output, stride),
+            11 => idct_extended::idct_11x11_strided(coeffs, quant, output, stride),
+            10 => idct_extended::idct_10x10_strided(coeffs, quant, output, stride),
+            9 => idct_extended::idct_9x9_strided(coeffs, quant, output, stride),
             8 => self.idct_islow_strided(coeffs, quant, output, stride),
+            7 => idct_extended::idct_7x7_strided(coeffs, quant, output, stride),
+            6 => idct_extended::idct_6x6_strided(coeffs, quant, output, stride),
+            5 => idct_extended::idct_5x5_strided(coeffs, quant, output, stride),
             4 => idct_scaled::idct_4x4_strided(coeffs, quant, output, stride),
+            3 => idct_extended::idct_3x3_strided(coeffs, quant, output, stride),
             2 => idct_scaled::idct_2x2_strided(coeffs, quant, output, stride),
             1 => idct_scaled::idct_1x1_strided(coeffs, quant, output, stride),
             _ => unreachable!("invalid block_size: {}", block_size),

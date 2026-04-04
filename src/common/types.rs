@@ -259,13 +259,7 @@ impl ScalingFactor {
     /// 8 for full, 4 for 1/2, 2 for 1/4, 1 for 1/8.
     pub fn block_size(self) -> usize {
         let ratio_x8 = (self.num * 8).div_ceil(self.denom);
-        match ratio_x8 {
-            0 => 1,
-            1 => 1,
-            2 => 2,
-            3..=4 => 4,
-            _ => 8,
-        }
+        (ratio_x8 as usize).clamp(1, 16)
     }
 
     /// Compute scaled output dimension: ceil(input_dim * num / denom).

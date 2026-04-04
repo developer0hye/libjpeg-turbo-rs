@@ -177,7 +177,7 @@
 
 ### Output Format
 - [x] Output pixel format selection (`decompress_to`)
-- [x] Scaled IDCT — 1/1, 1/2, 1/4, 1/8 (`set_scale`)
+- [x] Scaled IDCT — all 16 factors: 1/8 through 2/1 (`set_scale`)
 - [x] Crop decode (`decompress_cropped`, `set_crop_region`)
 - [x] `TJPARAM_BOTTOMUP` — Bottom-up row order (`ScanlineDecoder::set_bottom_up()`)
 - [x] `out_color_space` — Explicit output colorspace (`Decoder::set_output_colorspace()`)

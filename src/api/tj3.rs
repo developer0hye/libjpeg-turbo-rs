@@ -304,9 +304,10 @@ impl TjHandle {
     ///
     /// Only the standard JPEG scaling factors are supported: 1/1, 1/2, 1/4, 1/8.
     pub fn set_scaling_factor(&mut self, num: u32, denom: u32) -> Result<()> {
-        if num != 1 || !matches!(denom, 1 | 2 | 4 | 8) {
+        let valid = Self::scaling_factors();
+        if !valid.contains(&(num, denom)) {
             return Err(JpegError::CorruptData(format!(
-                "unsupported scaling factor {num}/{denom}, must be 1/1, 1/2, 1/4, or 1/8"
+                "unsupported scaling factor {num}/{denom}"
             )));
         }
         self.scaling_factor = ScalingFactor::new(num, denom);
@@ -322,7 +323,24 @@ impl TjHandle {
     ///
     /// Returns all supported (numerator, denominator) pairs for JPEG decompression scaling.
     pub fn scaling_factors() -> Vec<(u32, u32)> {
-        vec![(1, 1), (1, 2), (1, 4), (1, 8)]
+        vec![
+            (2, 1),
+            (15, 8),
+            (7, 4),
+            (13, 8),
+            (3, 2),
+            (11, 8),
+            (5, 4),
+            (9, 8),
+            (1, 1),
+            (7, 8),
+            (3, 4),
+            (5, 8),
+            (1, 2),
+            (3, 8),
+            (1, 4),
+            (1, 8),
+        ]
     }
 
     /// Convert the subsampling integer to the `Subsampling` enum.
