@@ -607,53 +607,6 @@ pub fn transform_jpeg_with_options(data: &[u8], options: &TransformOptions) -> R
         }
     }
 
-    // CROP: crop coefficient arrays to the specified region.
-    // Matches C jpegtran semantics: X/Y are rounded DOWN to iMCU boundaries,
-    // and output dimensions are extended to fully cover the requested region.
-    if let Some(crop) = &options.crop {
-        let imcu_w: usize = max_h as usize * 8;
-        let imcu_h: usize = max_v as usize * 8;
-        let remainder_x: usize = crop.x % imcu_w;
-        let remainder_y: usize = crop.y % imcu_h;
-
-        // Block-level offsets (rounded down to iMCU boundary)
-        let crop_x_blocks: usize = crop.x / imcu_w * max_h as usize;
-        let crop_y_blocks: usize = crop.y / imcu_h * max_v as usize;
-
-        // Extend output size to cover the full requested region from the
-        // MCU-aligned start position.
-        let out_w: usize =
-            (crop.width + remainder_x).min(coeffs.width as usize - (crop.x - remainder_x));
-        let out_h: usize =
-            (crop.height + remainder_y).min(coeffs.height as usize - (crop.y - remainder_y));
-        let crop_w_blocks: usize = out_w.div_ceil(8);
-        let crop_h_blocks: usize = out_h.div_ceil(8);
-
-        coeffs.width = out_w as u16;
-        coeffs.height = out_h as u16;
-
-        for comp in &mut coeffs.components {
-            let comp_crop_x: usize = crop_x_blocks * comp.h_sampling as usize / max_h;
-            let comp_crop_y: usize = crop_y_blocks * comp.v_sampling as usize / max_v;
-            let comp_crop_w: usize = crop_w_blocks * comp.h_sampling as usize / max_h;
-            let comp_crop_h: usize = crop_h_blocks * comp.v_sampling as usize / max_v;
-
-            let new_bx: usize = comp_crop_w.min(comp.blocks_x - comp_crop_x);
-            let new_by: usize = comp_crop_h.min(comp.blocks_y - comp_crop_y);
-
-            let mut new_blocks: Vec<[i16; 64]> = Vec::with_capacity(new_bx * new_by);
-            for by in 0..new_by {
-                for bx in 0..new_bx {
-                    let old_idx: usize = (comp_crop_y + by) * comp.blocks_x + (comp_crop_x + bx);
-                    new_blocks.push(comp.blocks[old_idx]);
-                }
-            }
-            comp.blocks = new_blocks;
-            comp.blocks_x = new_bx;
-            comp.blocks_y = new_by;
-        }
-    }
-
     // GRAYSCALE: drop all non-Y components.
     if options.grayscale && coeffs.components.len() > 1 {
         coeffs.components.truncate(1);
@@ -817,6 +770,71 @@ pub fn transform_jpeg_with_options(data: &[u8], options: &TransformOptions) -> R
 
         // Convert back to zigzag order for encoder.
         convert_all_to_zigzag(&mut coeffs.components);
+    }
+
+    // CROP: crop coefficient arrays to the specified region.
+    // Applied AFTER spatial transform (crop coordinates are in output space).
+    // Matches C jpegtran semantics: X/Y are rounded DOWN to iMCU boundaries,
+    // and output dimensions are extended to fully cover the requested region.
+    if let Some(crop) = &options.crop {
+        // Recompute max sampling factors from post-transform state
+        // (dimension-swapping transforms swap h/v sampling factors).
+        let post_max_h: usize = coeffs
+            .components
+            .iter()
+            .map(|c| c.h_sampling as usize)
+            .max()
+            .unwrap_or(1);
+        let post_max_v: usize = coeffs
+            .components
+            .iter()
+            .map(|c| c.v_sampling as usize)
+            .max()
+            .unwrap_or(1);
+        let imcu_w: usize = post_max_h * 8;
+        let imcu_h: usize = post_max_v * 8;
+        let remainder_x: usize = crop.x % imcu_w;
+        let remainder_y: usize = crop.y % imcu_h;
+
+        // Block-level offsets (rounded down to iMCU boundary)
+        let crop_x_blocks: usize = crop.x / imcu_w * post_max_h;
+        let crop_y_blocks: usize = crop.y / imcu_h * post_max_v;
+
+        // Extend output size to cover the full requested region from the
+        // MCU-aligned start position.
+        let out_w: usize =
+            (crop.width + remainder_x).min(coeffs.width as usize - (crop.x - remainder_x));
+        let out_h: usize =
+            (crop.height + remainder_y).min(coeffs.height as usize - (crop.y - remainder_y));
+        // Compute block dimensions in iMCU units first, then multiply by sampling
+        // factor. This guarantees block counts are always multiples of max_h/max_v,
+        // matching C libjpeg-turbo's transupp.c:1805-1822 approach.
+        let crop_w_blocks: usize = out_w.div_ceil(imcu_w) * post_max_h;
+        let crop_h_blocks: usize = out_h.div_ceil(imcu_h) * post_max_v;
+
+        coeffs.width = out_w as u16;
+        coeffs.height = out_h as u16;
+
+        for comp in &mut coeffs.components {
+            let comp_crop_x: usize = crop_x_blocks * comp.h_sampling as usize / post_max_h;
+            let comp_crop_y: usize = crop_y_blocks * comp.v_sampling as usize / post_max_v;
+            let comp_crop_w: usize = crop_w_blocks * comp.h_sampling as usize / post_max_h;
+            let comp_crop_h: usize = crop_h_blocks * comp.v_sampling as usize / post_max_v;
+
+            let new_bx: usize = comp_crop_w.min(comp.blocks_x - comp_crop_x);
+            let new_by: usize = comp_crop_h.min(comp.blocks_y - comp_crop_y);
+
+            let mut new_blocks: Vec<[i16; 64]> = Vec::with_capacity(new_bx * new_by);
+            for by in 0..new_by {
+                for bx in 0..new_bx {
+                    let old_idx: usize = (comp_crop_y + by) * comp.blocks_x + (comp_crop_x + bx);
+                    new_blocks.push(comp.blocks[old_idx]);
+                }
+            }
+            comp.blocks = new_blocks;
+            comp.blocks_x = new_bx;
+            comp.blocks_y = new_by;
+        }
     }
 
     // CUSTOM_FILTER: invoke user callback on each block after spatial transform.
