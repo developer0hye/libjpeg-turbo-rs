@@ -47,8 +47,7 @@ fn lossless_encode_flat_image() {
 
 #[test]
 fn lossless_encode_rgb_roundtrip() {
-    // 3-component lossless roundtrip via YCbCr.
-    // Integer color conversion introduces up to +/- 2 per channel.
+    // 3-component lossless RGB roundtrip: raw RGB stored directly, no color conversion.
     let (w, h) = (8, 8);
     let mut pixels = vec![0u8; w * h * 3];
     for i in 0..w * h {
@@ -61,18 +60,10 @@ fn lossless_encode_rgb_roundtrip() {
     assert_eq!(img.width, w);
     assert_eq!(img.height, h);
     assert_eq!(img.data.len(), w * h * 3);
-    // Allow small rounding differences from YCbCr <-> RGB conversion
-    for (i, (&got, &expected)) in img.data.iter().zip(pixels.iter()).enumerate() {
-        let diff = (got as i16 - expected as i16).abs();
-        assert!(
-            diff <= 2,
-            "pixel byte {} differs by {}: expected {}, got {}",
-            i,
-            diff,
-            pixels[i],
-            img.data[i]
-        );
-    }
+    assert_eq!(
+        img.data, pixels,
+        "Lossless RGB roundtrip should be pixel-exact"
+    );
 }
 
 #[test]
@@ -705,49 +696,9 @@ fn c_djpeg_lossless_encode_extended_diff_zero() {
         assert_eq!(ppm_w, w, "RGB lossless: C width mismatch");
         assert_eq!(ppm_h, h, "RGB lossless: C height mismatch");
 
-        // Compute expected YCbCr from original RGB using the same JFIF conversion
-        // constants as the encoder (matching libjpeg-turbo's jccolor.c).
-        // C djpeg outputs raw YCbCr for lossless, so we compare against that.
-        let mut expected_ycbcr: Vec<u8> = vec![0u8; w * h * 3];
-        for i in 0..w * h {
-            let r: i32 = pixels[i * 3] as i32;
-            let g: i32 = pixels[i * 3 + 1] as i32;
-            let b: i32 = pixels[i * 3 + 2] as i32;
-            // JFIF RGB->YCbCr using libjpeg-turbo fixed-point constants
-            // (SCALEBITS=16, ONE_HALF=1<<15, CBCR_OFFSET=128<<16)
-            let one_half: i32 = 1 << 15;
-            let cbcr_offset: i32 = 128 << 16;
-            let y_val: i32 = (19595 * r + 38470 * g + 7471 * b + one_half) >> 16;
-            let cb_val: i32 =
-                (-11059 * r - 21709 * g + 32768 * b + cbcr_offset + one_half - 1) >> 16;
-            let cr_val: i32 = (32768 * r - 27439 * g - 5329 * b + cbcr_offset + one_half - 1) >> 16;
-            expected_ycbcr[i * 3] = y_val as u8;
-            expected_ycbcr[i * 3 + 1] = cb_val as u8;
-            expected_ycbcr[i * 3 + 2] = cr_val as u8;
-        }
-
         assert_eq!(
-            expected_ycbcr.len(),
-            c_pixels.len(),
-            "RGB lossless: YCbCr buffer length mismatch"
-        );
-
-        // Lossless: expected YCbCr must match C djpeg output exactly (diff=0)
-        let mut mismatch_count: usize = 0;
-        let mut max_diff: u8 = 0;
-        for i in 0..expected_ycbcr.len() {
-            let diff: u8 = (expected_ycbcr[i] as i16 - c_pixels[i] as i16).unsigned_abs() as u8;
-            if diff > max_diff {
-                max_diff = diff;
-            }
-            if diff != 0 {
-                mismatch_count += 1;
-            }
-        }
-        assert_eq!(
-            mismatch_count, 0,
-            "RGB lossless: expected YCbCr vs C djpeg must match exactly: {} mismatches, max_diff={}",
-            mismatch_count, max_diff
+            c_pixels, pixels,
+            "RGB lossless: C djpeg output must be pixel-exact with original RGB"
         );
     }
 

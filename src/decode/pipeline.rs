@@ -2457,7 +2457,10 @@ impl<'a> Decoder<'a> {
         }
     }
 
-    /// Convert decoded lossless YCbCr component planes to output Image.
+    /// Convert decoded lossless RGB component planes to output Image.
+    ///
+    /// Lossless JPEG stores raw RGB values with no color conversion (matching
+    /// C libjpeg-turbo JCS_RGB behavior), so we output component values directly.
     fn lossless_output_color(
         &self,
         comp_planes: &[Vec<u16>],
@@ -2470,20 +2473,15 @@ impl<'a> Decoder<'a> {
         let bpp = out_format.bytes_per_pixel();
         let mut data = Vec::with_capacity(width * height * bpp);
 
-        for ((&y_pix, &cb_pix), &cr_pix) in comp_planes[0]
+        for ((&r_pix, &g_pix), &b_pix) in comp_planes[0]
             .iter()
             .zip(comp_planes[1].iter())
             .zip(comp_planes[2].iter())
         {
-            let y_val = y_pix as i32;
-            let cb_val = cb_pix as i32;
-            let cr_val = cr_pix as i32;
-
-            // YCbCr to RGB (JFIF convention: Y,Cb,Cr centered at 128)
-            let r = (y_val + ((cr_val - 128) * 359 + 128) / 256).clamp(0, 255) as u8;
-            let g = (y_val - ((cb_val - 128) * 88 + (cr_val - 128) * 183 - 128) / 256).clamp(0, 255)
-                as u8;
-            let b = (y_val + ((cb_val - 128) * 454 + 128) / 256).clamp(0, 255) as u8;
+            // Raw RGB: output component values directly (no color conversion)
+            let r: u8 = r_pix.min(255) as u8;
+            let g: u8 = g_pix.min(255) as u8;
+            let b: u8 = b_pix.min(255) as u8;
 
             match out_format {
                 PixelFormat::Rgb => {
