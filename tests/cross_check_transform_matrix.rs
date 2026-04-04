@@ -33,13 +33,13 @@ const ALL_OPS: &[(TransformOp, &str)] = &[
     (TransformOp::Rot270, "rot270"),
 ];
 
-/// S411/S441 have known transform issues (#146) — requires deeper investigation
-/// of h_factor=4 MCU block reordering in spatial transforms.
 const VERIFIED_SUBSAMPLINGS: &[(Subsampling, &str)] = &[
     (Subsampling::S444, "444"),
     (Subsampling::S422, "422"),
     (Subsampling::S420, "420"),
     (Subsampling::S440, "440"),
+    (Subsampling::S411, "411"),
+    (Subsampling::S441, "441"),
 ];
 
 // ===========================================================================
@@ -144,8 +144,8 @@ fn c_xval_subsampling_swap_rotational() {
         }
     };
 
-    // S411 has known transform issues (hflip/transverse/rot90/rot270 produce wrong pixels)
-    let swap_pairs: &[(Subsampling, &str)] = &[(Subsampling::S422, "422")];
+    let swap_pairs: &[(Subsampling, &str)] =
+        &[(Subsampling::S422, "422"), (Subsampling::S411, "411")];
 
     let rotational_ops: &[(TransformOp, &str)] = &[
         (TransformOp::Transpose, "transpose"),
@@ -193,7 +193,13 @@ fn c_xval_transform_grayscale_option() {
     let w: usize = 48;
     let h: usize = 48;
 
-    for &(subsamp, sname) in VERIFIED_SUBSAMPLINGS {
+    let gray_subsamplings: &[(Subsampling, &str)] = &[
+        (Subsampling::S444, "444"),
+        (Subsampling::S422, "422"),
+        (Subsampling::S420, "420"),
+        (Subsampling::S440, "440"),
+    ];
+    for &(subsamp, sname) in gray_subsamplings {
         let jpeg: Vec<u8> = make_test_jpeg(w, h, subsamp);
         let label: String = format!("xform_gray_{}", sname);
 
