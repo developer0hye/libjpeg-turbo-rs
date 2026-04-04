@@ -5,6 +5,7 @@ pub mod dequant;
 pub mod entropy;
 pub mod huffman;
 pub mod idct;
+pub mod idct_extended;
 pub mod idct_scaled;
 pub mod lossless;
 pub mod marker;
