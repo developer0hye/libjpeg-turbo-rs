@@ -3136,33 +3136,88 @@ fn progressive_fdct_chroma_block(
     fdct_quantize_fn(&mut block, quant, output);
 }
 
+/// Find highest set bit position (1-indexed). Returns 0 for val=0.
+/// Port of C libjpeg-turbo's `flss` from jcdctmgr.c.
+fn flss(val: u16) -> i32 {
+    if val == 0 {
+        return 0;
+    }
+    16 - val.leading_zeros() as i32
+}
+
+/// Compute adaptive-precision reciprocal for exact SIMD quantization.
+/// Port of C libjpeg-turbo's `compute_reciprocal` from jcdctmgr.c.
+///
+/// Returns (reciprocal, correction, shift).
+pub fn compute_reciprocal(divisor: u16) -> (u16, u16, i16) {
+    if divisor <= 1 {
+        return (1, 0, -(std::mem::size_of::<i16>() as i16 * 8));
+    }
+
+    let b: i32 = flss(divisor) - 1;
+    let r: i32 = 16 + b; // adaptive precision
+
+    let fq: u32 = (1u32 << r) / divisor as u32;
+    let fr: u32 = (1u32 << r) % divisor as u32;
+
+    let mut recip: u32 = fq;
+    let mut corr: u16 = (divisor / 2) as u16;
+    let mut r: i32 = r;
+
+    if fr == 0 {
+        // Divisor is power of two: fq is one bit too large, adjust
+        recip >>= 1;
+        r -= 1;
+    } else if fr <= (divisor as u32 / 2) {
+        // Fractional part < 0.5: round down, bump correction
+        corr += 1;
+    } else {
+        // Fractional part > 0.5: round up
+        recip += 1;
+    }
+
+    let shift: i16 = (r - 16) as i16;
+    (recip as u16, corr, shift)
+}
+
 /// Scale quantization table values by 8 to create divisor table for the islow FDCT.
 ///
-/// The islow FDCT output is scaled up by a factor of 8 (one factor of sqrt(8)
-/// per pass = 8 total). This scaling must be absorbed during quantization by
-/// multiplying the quant table values by 8 before dividing.
+/// Uses C libjpeg-turbo's adaptive-precision reciprocal algorithm for exact
+/// SIMD quantization (no rounding errors vs true integer division).
 fn scale_quant_for_fdct(quant_table: &[u16; 64]) -> QuantDivisors {
     let mut divisors = [0u16; 64];
     let mut reciprocals = [0u16; 64];
+    let mut corrections = [0u16; 64];
+    let mut shifts = [0i16; 64];
     for i in 0..64 {
-        let d: u32 = quant_table[i] as u32 * 8;
-        divisors[i] = d as u16;
-        // Ceiling reciprocal: ensures (x * recip) >> 16 == x / d for all valid x
-        reciprocals[i] = (1u32 << 16).div_ceil(d) as u16;
+        let d: u16 = (quant_table[i] as u32 * 8) as u16;
+        divisors[i] = d;
+        let (recip, corr, shift) = compute_reciprocal(d);
+        reciprocals[i] = recip;
+        corrections[i] = corr;
+        shifts[i] = shift;
     }
     // Pre-arrange in zigzag order for fused quantize+reorder
     let zigzag = &crate::encode::tables::ZIGZAG_ORDER;
     let mut divisors_zigzag = [0u16; 64];
     let mut reciprocals_zigzag = [0u16; 64];
+    let mut corrections_zigzag = [0u16; 64];
+    let mut shifts_zigzag = [0i16; 64];
     for zz in 0..64 {
         divisors_zigzag[zz] = divisors[zigzag[zz]];
         reciprocals_zigzag[zz] = reciprocals[zigzag[zz]];
+        corrections_zigzag[zz] = corrections[zigzag[zz]];
+        shifts_zigzag[zz] = shifts[zigzag[zz]];
     }
     QuantDivisors {
         divisors,
         reciprocals,
+        corrections,
+        shifts,
         divisors_zigzag,
         reciprocals_zigzag,
+        corrections_zigzag,
+        shifts_zigzag,
     }
 }
 

@@ -46,8 +46,9 @@ fn neon_fdct_quantize(input: &mut [i16; 64], quant: &QuantDivisors, output: &mut
     unsafe {
         neon_quantize_recip(
             dct_output.as_ptr(),
-            quant.divisors.as_ptr(),
             quant.reciprocals.as_ptr(),
+            quant.corrections.as_ptr(),
+            quant.shifts.as_ptr(),
             natural.as_mut_ptr(),
         );
         // NEON TBL zigzag reorder: use vqtbl4q_u8 to shuffle 128 bytes
@@ -336,8 +337,9 @@ unsafe fn neon_rows_fdct_quantize(
     let mut natural: [i16; 64] = [0i16; 64];
     neon_quantize_recip(
         dct_output.as_ptr(),
-        quant.divisors.as_ptr(),
         quant.reciprocals.as_ptr(),
+        quant.corrections.as_ptr(),
+        quant.shifts.as_ptr(),
         natural.as_mut_ptr(),
     );
     neon_zigzag_reorder(natural.as_ptr(), output.as_mut_ptr());
@@ -411,27 +413,31 @@ static ZIGZAG_TBL_HI: [u8; 128] = [
     0x2A, 0x2B, 0x38, 0x39, 0x3A, 0x3B, 0x2C, 0x2D, 0x1E, 0x1F, 0x2E, 0x2F, 0x3C, 0x3D, 0x3E, 0x3F,
 ];
 
-/// NEON quantization using reciprocal multiply-shift (no scalar division).
+/// NEON quantization using adaptive-precision reciprocal multiply-shift.
 ///
-/// For each coefficient: `result = round(abs_coeff / divisor)`
-///                      `≈ (abs_coeff + divisor/2) * reciprocal >> 16`
+/// Port of C libjpeg-turbo's `jsimd_quantize_neon` from jquanti-neon.c.
+/// For each coefficient: `result = (abs_coeff + correction) * reciprocal >> 16 >> shift`
+/// The per-element correction and shift values ensure exact results matching
+/// true integer division.
 ///
 /// # Safety
 /// Requires aarch64 NEON. All pointers must point to 64-element arrays.
 #[target_feature(enable = "neon")]
 unsafe fn neon_quantize_recip(
     coeffs_ptr: *const i16,
-    divisors_ptr: *const u16,
     recip_ptr: *const u16,
+    corr_ptr: *const u16,
+    shift_ptr: *const i16,
     out_ptr: *mut i16,
 ) {
     use std::arch::aarch64::*;
 
     for i in (0..64).step_by(8) {
-        // Load 8 coefficients and 8 divisor/reciprocal values
+        // Load 8 coefficients, reciprocals, corrections, and shifts
         let coeffs: int16x8_t = vld1q_s16(coeffs_ptr.add(i));
-        let divs: uint16x8_t = vld1q_u16(divisors_ptr.add(i));
         let recips: uint16x8_t = vld1q_u16(recip_ptr.add(i));
+        let corrs: uint16x8_t = vld1q_u16(corr_ptr.add(i));
+        let shifts: int16x8_t = vld1q_s16(shift_ptr.add(i));
 
         // Sign mask: -1 for negative, 0 for non-negative
         let sign: int16x8_t = vshrq_n_s16::<15>(coeffs);
@@ -439,29 +445,29 @@ unsafe fn neon_quantize_recip(
         // Absolute value
         let abs_coeffs: uint16x8_t = vreinterpretq_u16_s16(vabsq_s16(coeffs));
 
-        // Add half-divisor for rounding: abs_coeff + (divisor >> 1)
-        let half_div: uint16x8_t = vshrq_n_u16::<1>(divs);
-        let rounded: uint16x8_t = vaddq_u16(abs_coeffs, half_div);
+        // Add correction (includes rounding factor, adjusted per compute_reciprocal)
+        let corrected: uint16x8_t = vaddq_u16(abs_coeffs, corrs);
 
-        // Widening multiply: (rounded * reciprocal) → u32, then >> 16
-        // Process low 4 and high 4 elements separately
-        let rounded_lo: uint16x4_t = vget_low_u16(rounded);
-        let rounded_hi: uint16x4_t = vget_high_u16(rounded);
+        // Widening multiply: (corrected * reciprocal) → u32, then >> 16
+        let corr_lo: uint16x4_t = vget_low_u16(corrected);
+        let corr_hi: uint16x4_t = vget_high_u16(corrected);
         let recip_lo: uint16x4_t = vget_low_u16(recips);
         let recip_hi: uint16x4_t = vget_high_u16(recips);
 
-        // vmull: u16×u16 → u32 (widening multiply)
-        let prod_lo: uint32x4_t = vmull_u16(rounded_lo, recip_lo);
-        let prod_hi: uint32x4_t = vmull_u16(rounded_hi, recip_hi);
+        let prod_lo: uint32x4_t = vmull_u16(corr_lo, recip_lo);
+        let prod_hi: uint32x4_t = vmull_u16(corr_hi, recip_hi);
 
-        // Shift right by 16 and narrow back to u16
+        // Fixed shift right by 16 (extract high half)
         let result_lo: uint16x4_t = vshrn_n_u32::<16>(prod_lo);
         let result_hi: uint16x4_t = vshrn_n_u32::<16>(prod_hi);
-        let result_u16: uint16x8_t = vcombine_u16(result_lo, result_hi);
-        let result_s16: int16x8_t = vreinterpretq_s16_u16(result_u16);
+        let mut result: int16x8_t = vreinterpretq_s16_u16(vcombine_u16(result_lo, result_hi));
+
+        // Per-element variable shift: result >>= shift
+        // NEON vshl with negative count = right shift
+        result = vreinterpretq_s16_u16(vshlq_u16(vreinterpretq_u16_s16(result), vnegq_s16(shifts)));
 
         // Restore sign: (result ^ sign) - sign
-        let signed_result: int16x8_t = vsubq_s16(veorq_s16(result_s16, sign), sign);
+        let signed_result: int16x8_t = vsubq_s16(veorq_s16(result, sign), sign);
 
         vst1q_s16(out_ptr.add(i), signed_result);
     }
@@ -473,25 +479,38 @@ mod tests {
     use crate::simd::scalar;
     use crate::simd::QuantDivisors;
 
-    /// Build a QuantDivisors from divisor values, computing ceiling reciprocals.
+    /// Build a QuantDivisors from divisor values using adaptive-precision reciprocals.
     fn make_quant(divisors: [u16; 64]) -> QuantDivisors {
-        let mut reciprocals: [u16; 64] = [0u16; 64];
+        use crate::encode::pipeline::compute_reciprocal;
+        let mut reciprocals = [0u16; 64];
+        let mut corrections = [0u16; 64];
+        let mut shifts = [0i16; 64];
         for i in 0..64 {
-            let d: u32 = divisors[i] as u32;
-            reciprocals[i] = (((1u32 << 16) + d - 1) / d) as u16;
+            let (r, c, s) = compute_reciprocal(divisors[i]);
+            reciprocals[i] = r;
+            corrections[i] = c;
+            shifts[i] = s;
         }
         let zigzag = &crate::encode::tables::ZIGZAG_ORDER;
         let mut divisors_zigzag = [0u16; 64];
         let mut reciprocals_zigzag = [0u16; 64];
+        let mut corrections_zigzag = [0u16; 64];
+        let mut shifts_zigzag = [0i16; 64];
         for zz in 0..64 {
             divisors_zigzag[zz] = divisors[zigzag[zz]];
             reciprocals_zigzag[zz] = reciprocals[zigzag[zz]];
+            corrections_zigzag[zz] = corrections[zigzag[zz]];
+            shifts_zigzag[zz] = shifts[zigzag[zz]];
         }
         QuantDivisors {
             divisors,
             reciprocals,
+            corrections,
+            shifts,
             divisors_zigzag,
             reciprocals_zigzag,
+            corrections_zigzag,
+            shifts_zigzag,
         }
     }
 

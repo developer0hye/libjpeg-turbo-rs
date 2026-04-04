@@ -33,20 +33,31 @@ pub struct SimdRoutines {
     pub fancy_upsample_h2v1: fn(input: &[u8], in_width: usize, output: &mut [u8]),
 }
 
-/// Pre-computed quantization divisor table with reciprocals for fast multiply-shift.
+/// Pre-computed quantization divisor table with adaptive-precision reciprocals.
 ///
-/// The NEON path uses `reciprocals` to avoid scalar division.
-/// The scalar path ignores reciprocals and divides directly using `divisors`.
+/// Uses C libjpeg-turbo's `compute_reciprocal` algorithm for exact results:
+/// reciprocal precision adapts per-element, with a correction factor and
+/// per-element variable shift to match true integer division.
+///
+/// The NEON path uses `reciprocals`, `corrections`, `shifts` to avoid scalar division.
+/// The scalar path ignores these and divides directly using `divisors`.
 pub struct QuantDivisors {
     /// Divisor values (quant × 8, matching FDCT output scaling).
     pub divisors: [u16; 64],
-    /// Fixed-point reciprocals: `((1u32 << 16) + divisor - 1) / divisor` (ceiling).
+    /// Adaptive-precision reciprocals (see `compute_reciprocal`).
     pub reciprocals: [u16; 64],
+    /// Correction factors: divisor/2, adjusted +1 when reciprocal was rounded down.
+    pub corrections: [u16; 64],
+    /// Per-element right-shift amounts: `r - 16` where `r = 16 + flss(divisor) - 1`.
+    pub shifts: [i16; 64],
     /// Divisors re-arranged in zigzag scan order for fused quantize+reorder.
-    /// `divisors_zigzag[zz] = divisors[ZIGZAG_ORDER[zz]]`
     pub divisors_zigzag: [u16; 64],
     /// Reciprocals re-arranged in zigzag scan order.
     pub reciprocals_zigzag: [u16; 64],
+    /// Corrections re-arranged in zigzag scan order.
+    pub corrections_zigzag: [u16; 64],
+    /// Shifts re-arranged in zigzag scan order.
+    pub shifts_zigzag: [i16; 64],
 }
 
 /// Function-pointer dispatch table for SIMD-accelerated encode operations.
