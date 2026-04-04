@@ -147,7 +147,7 @@ unsafe fn neon_downsample_h2v2_fdct_quantize_inner(
 ) {
     use std::arch::aarch64::*;
 
-    let bias: uint16x8_t = vdupq_n_u16(2);
+    let bias: uint16x8_t = vreinterpretq_u16_u32(vdupq_n_u32(0x00020001));
     let level_shift: int16x8_t = vdupq_n_s16(128);
 
     let row0 = neon_downsample_h2v2_row(plane_ptr, plane_ptr.add(stride), bias, level_shift);
@@ -221,7 +221,7 @@ unsafe fn neon_downsample_h2v1_fdct_quantize_inner(
 ) {
     use std::arch::aarch64::*;
 
-    let bias: uint16x8_t = vdupq_n_u16(1);
+    let bias: uint16x8_t = vreinterpretq_u16_u32(vdupq_n_u32(0x00010000));
     let level_shift: int16x8_t = vdupq_n_s16(128);
 
     let row0 = neon_downsample_h2v1_row(plane_ptr, bias, level_shift);

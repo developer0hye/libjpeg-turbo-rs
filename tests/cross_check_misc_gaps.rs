@@ -727,7 +727,7 @@ fn c_xval_quantize_16_colors() {
 /// Density info preservation: encode a JPEG, decode it, and verify the JFIF
 /// density values round-trip correctly. Also verify C djpeg can decode it.
 ///
-/// The default encoder writes JFIF with density 72x72 DPI. We verify that
+/// The default encoder writes JFIF with density 1x1, units=0. We verify that
 /// the decoded Image.density matches what was written.
 #[test]
 fn c_xval_density_preservation() {
@@ -742,7 +742,7 @@ fn c_xval_density_preservation() {
     let (w, h): (usize, usize) = (32, 32);
     let pixels: Vec<u8> = generate_gradient(w, h);
 
-    // Encode with default settings (JFIF density 72x72 DPI by default)
+    // Encode with default settings (JFIF density 1x1, units=0 by default)
     let jpeg_data: Vec<u8> = compress(&pixels, w, h, PixelFormat::Rgb, 80, Subsampling::S444)
         .expect("compress must succeed");
 
@@ -751,28 +751,28 @@ fn c_xval_density_preservation() {
     assert_eq!(decoded.width, w, "width mismatch");
     assert_eq!(decoded.height, h, "height mismatch");
 
-    // The default encoder writes JFIF APP0 with density 72x72 DPI (unit=1).
+    // The default encoder writes JFIF APP0 with density 1x1, units=0 (unit=1).
     // Verify density fields are populated.
     eprintln!(
         "density: unit={:?}, x={}, y={}",
         decoded.density.unit, decoded.density.x, decoded.density.y
     );
 
-    // The default JFIF marker writes x_density=72, y_density=72, unit=DPI(1).
+    // The default JFIF marker writes x_density=1, y_density=1, unit=Unknown(0).
     assert_eq!(
-        decoded.density.x, 72,
-        "expected x_density=72, got {}",
+        decoded.density.x, 1,
+        "expected x_density=1, got {}",
         decoded.density.x
     );
     assert_eq!(
-        decoded.density.y, 72,
-        "expected y_density=72, got {}",
+        decoded.density.y, 1,
+        "expected y_density=1, got {}",
         decoded.density.y
     );
     assert_eq!(
         decoded.density.unit,
-        libjpeg_turbo_rs::DensityUnit::Dpi,
-        "expected DensityUnit::Dpi"
+        libjpeg_turbo_rs::DensityUnit::Unknown,
+        "expected DensityUnit::Unknown"
     );
 
     // Verify C djpeg can decode the JPEG
