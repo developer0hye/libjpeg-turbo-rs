@@ -11,7 +11,7 @@ use crate::encode::marker_writer;
 use crate::encode::pipeline as encoder_pipeline;
 use crate::encode::tables;
 use crate::transform::spatial;
-use crate::transform::{TransformOp, TransformOptions};
+use crate::transform::{MarkerCopyMode, TransformOp, TransformOptions};
 
 /// Per-component DCT coefficient data.
 #[derive(Debug, Clone)]
@@ -328,139 +328,16 @@ pub fn write_coefficients(coeffs: &JpegCoefficients) -> Result<Vec<u8>> {
 
 /// Apply a lossless transform to a JPEG image.
 ///
-/// Reads DCT coefficients, applies the spatial transform, adjusts
-/// dimensions, and writes back to JPEG. No quality loss.
+/// Delegates to [`transform_jpeg_with_options`] with default options.
 pub fn transform_jpeg(data: &[u8], op: TransformOp) -> Result<Vec<u8>> {
-    let mut coeffs = read_coefficients(data)?;
-
-    if op == TransformOp::None {
-        return write_coefficients(&coeffs);
-    }
-
-    let transform_fn: fn(&[i16; 64], &mut [i16; 64]) = match op {
-        TransformOp::None => spatial::do_nothing,
-        TransformOp::HFlip => spatial::do_flip_h,
-        TransformOp::VFlip => spatial::do_flip_v,
-        TransformOp::Transpose => spatial::do_transpose,
-        TransformOp::Transverse => spatial::do_transverse,
-        TransformOp::Rot90 => spatial::do_rot_90,
-        TransformOp::Rot180 => spatial::do_rot_180,
-        TransformOp::Rot270 => spatial::do_rot_270,
-    };
-
-    let swaps_dims = matches!(
-        op,
-        TransformOp::Transpose | TransformOp::Transverse | TransformOp::Rot90 | TransformOp::Rot270
-    );
-
-    // Spatial transforms operate on natural (row-major) order coefficients.
-    // Blocks are stored in zigzag order, so convert before/after transform.
-    convert_all_to_natural(&mut coeffs.components);
-
-    // Transform each component
-    for comp in &mut coeffs.components {
-        let old_bx = comp.blocks_x;
-        let old_by = comp.blocks_y;
-        let mut new_blocks = vec![[0i16; 64]; old_bx * old_by];
-
-        if matches!(op, TransformOp::Transpose) {
-            // Transpose: swap block (bx, by) → (by, bx)
-            for by in 0..old_by {
-                for bx in 0..old_bx {
-                    let src_idx: usize = by * old_bx + bx;
-                    let dst_idx: usize = bx * old_by + by;
-                    transform_fn(&comp.blocks[src_idx], &mut new_blocks[dst_idx]);
-                }
-            }
-            comp.blocks_x = old_by;
-            comp.blocks_y = old_bx;
-        } else if matches!(op, TransformOp::Rot90) {
-            // Rot90 CW = transpose grid + reverse columns
-            for by in 0..old_by {
-                for bx in 0..old_bx {
-                    let src_idx: usize = by * old_bx + bx;
-                    let dst_idx: usize = bx * old_by + (old_by - 1 - by);
-                    transform_fn(&comp.blocks[src_idx], &mut new_blocks[dst_idx]);
-                }
-            }
-            comp.blocks_x = old_by;
-            comp.blocks_y = old_bx;
-        } else if matches!(op, TransformOp::Rot270) {
-            // Rot270 CW = transpose grid + reverse rows
-            for by in 0..old_by {
-                for bx in 0..old_bx {
-                    let src_idx: usize = by * old_bx + bx;
-                    let dst_idx: usize = (old_bx - 1 - bx) * old_by + by;
-                    transform_fn(&comp.blocks[src_idx], &mut new_blocks[dst_idx]);
-                }
-            }
-            comp.blocks_x = old_by;
-            comp.blocks_y = old_bx;
-        } else if matches!(op, TransformOp::Transverse) {
-            // Transverse = transpose grid + reverse both rows and columns
-            for by in 0..old_by {
-                for bx in 0..old_bx {
-                    let src_idx: usize = by * old_bx + bx;
-                    let dst_idx: usize = (old_bx - 1 - bx) * old_by + (old_by - 1 - by);
-                    transform_fn(&comp.blocks[src_idx], &mut new_blocks[dst_idx]);
-                }
-            }
-            comp.blocks_x = old_by;
-            comp.blocks_y = old_bx;
-        } else if matches!(op, TransformOp::HFlip) {
-            // Horizontal flip: reverse block columns
-            for by in 0..old_by {
-                for bx in 0..old_bx {
-                    let src_idx = by * old_bx + bx;
-                    let dst_idx = by * old_bx + (old_bx - 1 - bx);
-                    transform_fn(&comp.blocks[src_idx], &mut new_blocks[dst_idx]);
-                }
-            }
-        } else if matches!(op, TransformOp::VFlip) {
-            // Vertical flip: reverse block rows
-            for by in 0..old_by {
-                for bx in 0..old_bx {
-                    let src_idx = by * old_bx + bx;
-                    let dst_idx = (old_by - 1 - by) * old_bx + bx;
-                    transform_fn(&comp.blocks[src_idx], &mut new_blocks[dst_idx]);
-                }
-            }
-        } else if matches!(op, TransformOp::Rot180) {
-            // Rotate 180: reverse both rows and columns
-            for by in 0..old_by {
-                for bx in 0..old_bx {
-                    let src_idx = by * old_bx + bx;
-                    let dst_idx = (old_by - 1 - by) * old_bx + (old_bx - 1 - bx);
-                    transform_fn(&comp.blocks[src_idx], &mut new_blocks[dst_idx]);
-                }
-            }
-        } else {
-            // Per-block only transform (shouldn't reach here for None)
-            for (i, new_block) in new_blocks.iter_mut().enumerate() {
-                transform_fn(&comp.blocks[i], new_block);
-            }
-        }
-
-        comp.blocks = new_blocks;
-    }
-
-    // Convert back to zigzag order for encoder.
-    convert_all_to_zigzag(&mut coeffs.components);
-
-    // Swap dimensions and transpose quant tables for dimension-swapping ops.
-    // When DCT blocks are transposed, the quant table must also be transposed
-    // so that each coefficient position uses the correct quantization value.
-    if swaps_dims {
-        std::mem::swap(&mut coeffs.width, &mut coeffs.height);
-        for comp in &mut coeffs.components {
-            std::mem::swap(&mut comp.h_sampling, &mut comp.v_sampling);
-        }
-        for qt in &mut coeffs.quant_tables {
-            transpose_quant_table(qt);
-        }
-    }
-
-    write_coefficients(&coeffs)
+    transform_jpeg_with_options(
+        data,
+        &TransformOptions {
+            op,
+            copy_markers: MarkerCopyMode::None,
+            ..Default::default()
+        },
+    )
 }
 
 /// Apply a lossless transform with full TJXOPT-compatible options.
@@ -671,11 +548,17 @@ pub fn transform_jpeg_with_options(data: &[u8], options: &TransformOptions) -> R
                 comp.blocks_y = old_bx;
             } else if matches!(op, TransformOp::Rot90) {
                 let mut new_blocks2: Vec<[i16; 64]> = vec![[0i16; 64]; old_bx * old_by];
+                let new_bx: usize = old_by;
                 for by in 0..old_by {
                     for bx in 0..old_bx {
                         let src_idx: usize = by * old_bx + bx;
-                        let dst_idx: usize = bx * old_by + (old_by - 1 - by);
-                        transform_fn(&comp.blocks[src_idx], &mut new_blocks2[dst_idx]);
+                        if by < comp_h {
+                            let dst_idx: usize = bx * new_bx + (comp_h - 1 - by);
+                            transform_fn(&comp.blocks[src_idx], &mut new_blocks2[dst_idx]);
+                        } else {
+                            let dst_idx: usize = bx * new_bx + by;
+                            spatial::do_transpose(&comp.blocks[src_idx], &mut new_blocks2[dst_idx]);
+                        }
                     }
                 }
                 new_blocks = new_blocks2;
@@ -683,11 +566,17 @@ pub fn transform_jpeg_with_options(data: &[u8], options: &TransformOptions) -> R
                 comp.blocks_y = old_bx;
             } else if matches!(op, TransformOp::Rot270) {
                 let mut new_blocks2: Vec<[i16; 64]> = vec![[0i16; 64]; old_bx * old_by];
+                let new_bx: usize = old_by;
                 for by in 0..old_by {
                     for bx in 0..old_bx {
                         let src_idx: usize = by * old_bx + bx;
-                        let dst_idx: usize = (old_bx - 1 - bx) * old_by + by;
-                        transform_fn(&comp.blocks[src_idx], &mut new_blocks2[dst_idx]);
+                        if bx < comp_w {
+                            let dst_idx: usize = (comp_w - 1 - bx) * new_bx + by;
+                            transform_fn(&comp.blocks[src_idx], &mut new_blocks2[dst_idx]);
+                        } else {
+                            let dst_idx: usize = bx * new_bx + by;
+                            spatial::do_transpose(&comp.blocks[src_idx], &mut new_blocks2[dst_idx]);
+                        }
                     }
                 }
                 new_blocks = new_blocks2;
@@ -695,11 +584,25 @@ pub fn transform_jpeg_with_options(data: &[u8], options: &TransformOptions) -> R
                 comp.blocks_y = old_bx;
             } else if matches!(op, TransformOp::Transverse) {
                 let mut new_blocks2: Vec<[i16; 64]> = vec![[0i16; 64]; old_bx * old_by];
+                let new_bx: usize = old_by;
                 for by in 0..old_by {
                     for bx in 0..old_bx {
                         let src_idx: usize = by * old_bx + bx;
-                        let dst_idx: usize = (old_bx - 1 - bx) * old_by + (old_by - 1 - by);
-                        transform_fn(&comp.blocks[src_idx], &mut new_blocks2[dst_idx]);
+                        let in_h: bool = by < comp_h;
+                        let in_w: bool = bx < comp_w;
+                        if in_h && in_w {
+                            let dst_idx: usize = (comp_w - 1 - bx) * new_bx + (comp_h - 1 - by);
+                            transform_fn(&comp.blocks[src_idx], &mut new_blocks2[dst_idx]);
+                        } else if !in_h && in_w {
+                            let dst_idx: usize = (comp_w - 1 - bx) * new_bx + by;
+                            spatial::do_rot_270(&comp.blocks[src_idx], &mut new_blocks2[dst_idx]);
+                        } else if in_h && !in_w {
+                            let dst_idx: usize = bx * new_bx + (comp_h - 1 - by);
+                            spatial::do_rot_90(&comp.blocks[src_idx], &mut new_blocks2[dst_idx]);
+                        } else {
+                            let dst_idx: usize = bx * new_bx + by;
+                            spatial::do_transpose(&comp.blocks[src_idx], &mut new_blocks2[dst_idx]);
+                        }
                     }
                 }
                 new_blocks = new_blocks2;
