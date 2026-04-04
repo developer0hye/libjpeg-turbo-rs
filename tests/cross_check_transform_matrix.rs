@@ -33,8 +33,8 @@ const ALL_OPS: &[(TransformOp, &str)] = &[
     (TransformOp::Rot270, "rot270"),
 ];
 
-/// Subsamplings that produce pixel-identical transforms to C jpegtran.
-/// S411/S441 have known issues with horizontal-flip-based transforms.
+/// S411/S441 have known transform issues (#146) — requires deeper investigation
+/// of h_factor=4 MCU block reordering in spatial transforms.
 const VERIFIED_SUBSAMPLINGS: &[(Subsampling, &str)] = &[
     (Subsampling::S444, "444"),
     (Subsampling::S422, "422"),
@@ -346,8 +346,11 @@ fn c_xval_transform_crop_regions() {
         (32, 16, 80, 64, "80x64+32+16"),
     ];
 
-    // S420 crop produces corrupt JPEG output — known library issue
-    for &(subsamp, sname) in &[(Subsampling::S444, "444"), (Subsampling::S422, "422")] {
+    for &(subsamp, sname) in &[
+        (Subsampling::S444, "444"),
+        (Subsampling::S422, "422"),
+        (Subsampling::S420, "420"),
+    ] {
         let jpeg: Vec<u8> = make_test_jpeg(w, h, subsamp);
 
         for &(cx, cy, cw, ch, cname) in crops {
@@ -400,8 +403,13 @@ fn c_xval_transform_with_crop() {
     let h: usize = 96;
     let jpeg: Vec<u8> = make_test_jpeg(w, h, Subsampling::S444);
 
-    // Crop combined with any spatial transform has known pixel mismatch issues
-    let ops: &[(TransformOp, &str)] = &[(TransformOp::None, "none")];
+    let ops: &[(TransformOp, &str)] = &[
+        (TransformOp::None, "none"),
+        (TransformOp::HFlip, "hflip"),
+        (TransformOp::VFlip, "vflip"),
+        (TransformOp::Rot90, "rot90"),
+        (TransformOp::Rot180, "rot180"),
+    ];
 
     let crop: CropRegion = CropRegion {
         x: 16,
