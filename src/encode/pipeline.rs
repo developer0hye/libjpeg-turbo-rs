@@ -115,10 +115,25 @@ pub fn compress(
     // color conversion and encoding.
     if pixel_format == PixelFormat::Rgb && !is_grayscale {
         let rgb_to_ycbcr_fn = enc_simd.rgb_to_ycbcr_row;
-        let row_buf_size: usize = width * mcu_h;
-        let mut y_buf: Vec<u8> = vec![0u8; row_buf_size];
-        let mut cb_buf: Vec<u8> = vec![0u8; row_buf_size];
-        let mut cr_buf: Vec<u8> = vec![0u8; row_buf_size];
+        // Pad buffer width to MCU-aligned, matching C libjpeg-turbo's behavior.
+        // C allocates coefficient buffers padded to MCU boundaries and pads input
+        // with expand_right_edge up to width_in_blocks * DCTSIZE per component.
+        // Blocks beyond width_in_blocks are left as zeros in C (never FDCT'd).
+        let padded_w: usize = mcus_x * mcu_w;
+        let padded_h: usize = mcu_h;
+        let row_buf_size: usize = padded_w * padded_h;
+        // Initialize to 128: in YCbCr, 128 is the neutral value that produces
+        // zero after level-shift (-128), matching C's zero-filled coefficient
+        // buffers for trailing blocks beyond width_in_blocks.
+        let mut y_buf: Vec<u8> = vec![128u8; row_buf_size];
+        let mut cb_buf: Vec<u8> = vec![128u8; row_buf_size];
+        let mut cr_buf: Vec<u8> = vec![128u8; row_buf_size];
+
+        // Compute width_in_blocks per component (matching C's jccoefct.c allocation).
+        // Luma and chroma may have different width_in_blocks.
+        let (h_samp, _v_samp) = subsampling.sampling_factors();
+        let luma_wib: usize = width.div_ceil(8); // ceil(width * h_samp / (max_h * 8))
+        let luma_pad_w: usize = luma_wib * 8; // expand_right_edge pads to this
 
         for mcu_row in 0..mcus_y {
             let y0: usize = mcu_row * mcu_h;
@@ -128,7 +143,7 @@ pub fn compress(
             for row in 0..rows_available {
                 let src_row: usize = y0 + row;
                 let src_offset: usize = src_row * width * 3;
-                let dst_offset: usize = row * width;
+                let dst_offset: usize = row * padded_w;
                 rgb_to_ycbcr_fn(
                     &pixels[src_offset..src_offset + width * 3],
                     &mut y_buf[dst_offset..dst_offset + width],
@@ -136,14 +151,35 @@ pub fn compress(
                     &mut cr_buf[dst_offset..dst_offset + width],
                     width,
                 );
+                // Pad right edge matching C libjpeg-turbo's per-component behavior:
+                // - Luma: pad to luma_pad_w (width_in_blocks * 8). Beyond this,
+                //   C leaves coefficient buffers as zeros (blocks never FDCT'd).
+                //   We fill with 128 (→ 0 after level-shift → zero coefficients).
+                // - Chroma: pad source to padded_w (MCU-aligned) for downsampling.
+                //   C's expand_right_edge pads chroma input to full MCU width.
+                if width < padded_w {
+                    let last_y: u8 = y_buf[dst_offset + width - 1];
+                    let last_cb: u8 = cb_buf[dst_offset + width - 1];
+                    let last_cr: u8 = cr_buf[dst_offset + width - 1];
+                    // Luma: replicate up to luma_pad_w, then 128 for trailing blocks
+                    for x in width..luma_pad_w.min(padded_w) {
+                        y_buf[dst_offset + x] = last_y;
+                    }
+                    // Trailing luma columns stay at 128 (init value)
+                    // Chroma: replicate to full MCU width for downsampling
+                    for x in width..padded_w {
+                        cb_buf[dst_offset + x] = last_cb;
+                        cr_buf[dst_offset + x] = last_cr;
+                    }
+                }
             }
             // Pad remaining rows by replicating the last row (edge handling)
-            for row in rows_available..mcu_h {
-                let dst_offset: usize = row * width;
-                let src_offset: usize = (rows_available - 1) * width;
-                y_buf.copy_within(src_offset..src_offset + width, dst_offset);
-                cb_buf.copy_within(src_offset..src_offset + width, dst_offset);
-                cr_buf.copy_within(src_offset..src_offset + width, dst_offset);
+            for row in rows_available..padded_h {
+                let dst_offset: usize = row * padded_w;
+                let src_offset: usize = (rows_available - 1) * padded_w;
+                y_buf.copy_within(src_offset..src_offset + padded_w, dst_offset);
+                cb_buf.copy_within(src_offset..src_offset + padded_w, dst_offset);
+                cr_buf.copy_within(src_offset..src_offset + padded_w, dst_offset);
             }
 
             // Encode all MCUs in this row
@@ -153,8 +189,8 @@ pub fn compress(
                     &y_buf,
                     &cb_buf,
                     &cr_buf,
-                    width,
-                    mcu_h,
+                    padded_w,
+                    padded_h,
                     x0,
                     0,
                     subsampling,
