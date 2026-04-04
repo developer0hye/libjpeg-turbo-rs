@@ -191,16 +191,6 @@ fn read_ascii_number(data: &[u8], idx: usize) -> (usize, usize) {
     (val, end)
 }
 
-/// Maximum absolute per-channel difference between two pixel buffers.
-fn pixel_max_diff(a: &[u8], b: &[u8]) -> u8 {
-    assert_eq!(a.len(), b.len(), "pixel buffers must have equal length");
-    a.iter()
-        .zip(b.iter())
-        .map(|(&x, &y)| (x as i16 - y as i16).unsigned_abs() as u8)
-        .max()
-        .unwrap_or(0)
-}
-
 // ===========================================================================
 // Rust lossless encode -> C djpeg decode
 // ===========================================================================
@@ -282,23 +272,14 @@ fn rust_lossless_rgb_c_decode() {
     assert_eq!(dw, w, "width mismatch");
     assert_eq!(dh, h, "height mismatch");
 
-    // RGB lossless goes through YCbCr color conversion. The C decoder (djpeg)
-    // and our Rust decoder may use different YCbCr->RGB conversion formulas,
-    // leading to potentially large per-pixel differences. This is a known
-    // characteristic of lossless JPEG with color conversion -- the YCbCr
-    // coefficients are lossless, but the final RGB values depend on the
-    // decoder's color conversion implementation.
-    //
-    // We verify:
-    // 1. djpeg successfully decoded our output (confirmed by parse_ppm above)
-    // 2. Dimensions match
-    // 3. Rust decode of our own output is close to original (internal consistency)
+    assert_eq!(
+        c_pixels, pixels,
+        "C djpeg output should be pixel-exact for lossless RGB"
+    );
     let rust_img = decompress(&jpeg).expect("Rust decode of own lossless RGB output");
-    let rust_max_diff: u8 = pixel_max_diff(&rust_img.data, &pixels);
-    assert!(
-        rust_max_diff <= 2,
-        "Rust lossless RGB internal roundtrip: max diff {} (expected <= 2)",
-        rust_max_diff
+    assert_eq!(
+        rust_img.data, pixels,
+        "Rust lossless RGB roundtrip should be pixel-exact"
     );
 }
 
