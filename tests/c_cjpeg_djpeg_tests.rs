@@ -261,12 +261,10 @@ fn c_cjpeg_420_q100_ifast_prog() {
     let script = parse_scan_script(&scan);
 
     // Progressive with custom scan script and Q100 ifast
-    let script = parse_scan_script(&scan);
     let rust_jpeg = Encoder::new(&pixels, w, h, PixelFormat::Rgb)
         .subsampling(Subsampling::S420)
         .quality(100)
         .dct_method(libjpeg_turbo_rs::common::types::DctMethod::IsFast)
-        .scan_script(script)
         .progressive(true)
         .scan_script(script)
         .encode();
