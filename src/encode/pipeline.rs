@@ -2330,15 +2330,6 @@ pub fn compress_arithmetic(
     let luma_divisors = scale_quant_for_fdct(&luma_quant);
     let chroma_divisors = scale_quant_for_fdct(&chroma_quant);
 
-    // Color convert
-    let (y_plane, cb_plane, cr_plane) = convert_to_ycbcr(
-        pixels,
-        width,
-        height,
-        pixel_format,
-        enc_simd.rgb_to_ycbcr_row,
-    )?;
-
     // MCU dimensions
     let (mcu_w, mcu_h) = if is_grayscale {
         (8, 8)
@@ -2355,10 +2346,33 @@ pub fn compress_arithmetic(
 
     let mcus_x = width.div_ceil(mcu_w);
     let mcus_y = height.div_ceil(mcu_h);
+    let padded_w: usize = mcus_x * mcu_w;
+    let padded_h: usize = mcus_y * mcu_h;
+
+    // Color convert with MCU-aligned padding
+    let (y_plane, cb_plane, cr_plane) = convert_to_ycbcr_padded(
+        pixels,
+        width,
+        height,
+        padded_w,
+        padded_h,
+        pixel_format,
+        enc_simd.rgb_to_ycbcr_row,
+    )?;
+
+    let original_width: usize = width;
+    let original_height: usize = height;
+    let width: usize = padded_w;
+    let height: usize = padded_h;
+
+    // Dummy block detection
+    let y_width_in_blocks: usize = original_width.div_ceil(8);
+    let y_height_in_blocks: usize = original_height.div_ceil(8);
 
     // FDCT + quantize all blocks
     let fdct_quantize_fn = crate::simd::detect_encoder().fdct_quantize;
     let mut all_blocks: Vec<[i16; 64]> = Vec::new();
+    let mut prev_dc_y_gather: i16 = 0;
 
     for mcu_row in 0..mcus_y {
         for mcu_col in 0..mcus_x {
@@ -2366,10 +2380,15 @@ pub fn compress_arithmetic(
             let y0 = mcu_row * mcu_h;
 
             if is_grayscale {
-                let mut block = [0i16; 64];
-                extract_block(&y_plane, width, height, x0, y0, &mut block);
-                let mut q = [0i16; 64];
-                fdct_quantize_fn(&mut block, &luma_divisors, &mut q);
+                let q = gather_block(
+                    &y_plane,
+                    width,
+                    height,
+                    x0,
+                    y0,
+                    &luma_divisors,
+                    fdct_quantize_fn,
+                );
                 all_blocks.push(q);
             } else {
                 match subsampling {
@@ -2379,82 +2398,167 @@ pub fn compress_arithmetic(
                             (&cb_plane, &chroma_divisors),
                             (&cr_plane, &chroma_divisors),
                         ] {
-                            let mut block = [0i16; 64];
-                            extract_block(plane, width, height, x0, y0, &mut block);
-                            let mut q = [0i16; 64];
-                            fdct_quantize_fn(&mut block, divisors, &mut q);
+                            let q = gather_block(
+                                plane,
+                                width,
+                                height,
+                                x0,
+                                y0,
+                                divisors,
+                                fdct_quantize_fn,
+                            );
                             all_blocks.push(q);
                         }
                     }
                     Subsampling::S422 => {
-                        for dx in [0, 8] {
-                            let mut block = [0i16; 64];
-                            extract_block(&y_plane, width, height, x0 + dx, y0, &mut block);
-                            let mut q = [0i16; 64];
-                            fdct_quantize_fn(&mut block, &luma_divisors, &mut q);
-                            all_blocks.push(q);
+                        for dx in [0usize, 8] {
+                            if is_y_dummy(x0 + dx, y0, y_width_in_blocks, y_height_in_blocks) {
+                                let mut dummy = [0i16; 64];
+                                dummy[0] = prev_dc_y_gather;
+                                all_blocks.push(dummy);
+                            } else {
+                                let q = gather_block(
+                                    &y_plane,
+                                    width,
+                                    height,
+                                    x0 + dx,
+                                    y0,
+                                    &luma_divisors,
+                                    fdct_quantize_fn,
+                                );
+                                prev_dc_y_gather = q[0];
+                                all_blocks.push(q);
+                            }
                         }
                         for plane in [&cb_plane, &cr_plane] {
-                            let mut block = [0i16; 64];
-                            downsample_chroma_block(plane, width, height, x0, y0, 2, 1, &mut block);
-                            let mut q = [0i16; 64];
-                            fdct_quantize_fn(&mut block, &chroma_divisors, &mut q);
+                            let q = gather_downsampled_block(
+                                plane,
+                                width,
+                                height,
+                                x0,
+                                y0,
+                                2,
+                                1,
+                                &chroma_divisors,
+                                fdct_quantize_fn,
+                            );
                             all_blocks.push(q);
                         }
                     }
                     Subsampling::S420 => {
                         for (dx, dy) in [(0, 0), (8, 0), (0, 8), (8, 8)] {
-                            let mut block = [0i16; 64];
-                            extract_block(&y_plane, width, height, x0 + dx, y0 + dy, &mut block);
-                            let mut q = [0i16; 64];
-                            fdct_quantize_fn(&mut block, &luma_divisors, &mut q);
-                            all_blocks.push(q);
+                            if is_y_dummy(x0 + dx, y0 + dy, y_width_in_blocks, y_height_in_blocks) {
+                                let mut dummy = [0i16; 64];
+                                dummy[0] = prev_dc_y_gather;
+                                all_blocks.push(dummy);
+                            } else {
+                                let q = gather_block(
+                                    &y_plane,
+                                    width,
+                                    height,
+                                    x0 + dx,
+                                    y0 + dy,
+                                    &luma_divisors,
+                                    fdct_quantize_fn,
+                                );
+                                prev_dc_y_gather = q[0];
+                                all_blocks.push(q);
+                            }
                         }
                         for plane in [&cb_plane, &cr_plane] {
-                            let mut block = [0i16; 64];
-                            downsample_chroma_block(plane, width, height, x0, y0, 2, 2, &mut block);
-                            let mut q = [0i16; 64];
-                            fdct_quantize_fn(&mut block, &chroma_divisors, &mut q);
+                            let q = gather_downsampled_block(
+                                plane,
+                                width,
+                                height,
+                                x0,
+                                y0,
+                                2,
+                                2,
+                                &chroma_divisors,
+                                fdct_quantize_fn,
+                            );
                             all_blocks.push(q);
                         }
                     }
                     Subsampling::S440 => {
-                        // 2 Y blocks vertically
-                        for dy in [0, 8] {
-                            let mut block = [0i16; 64];
-                            extract_block(&y_plane, width, height, x0, y0 + dy, &mut block);
-                            let mut q = [0i16; 64];
-                            fdct_quantize_fn(&mut block, &luma_divisors, &mut q);
-                            all_blocks.push(q);
+                        for dy in [0usize, 8] {
+                            if is_y_dummy(x0, y0 + dy, y_width_in_blocks, y_height_in_blocks) {
+                                let mut dummy = [0i16; 64];
+                                dummy[0] = prev_dc_y_gather;
+                                all_blocks.push(dummy);
+                            } else {
+                                let q = gather_block(
+                                    &y_plane,
+                                    width,
+                                    height,
+                                    x0,
+                                    y0 + dy,
+                                    &luma_divisors,
+                                    fdct_quantize_fn,
+                                );
+                                prev_dc_y_gather = q[0];
+                                all_blocks.push(q);
+                            }
                         }
                         for plane in [&cb_plane, &cr_plane] {
-                            let mut block = [0i16; 64];
-                            downsample_chroma_block(plane, width, height, x0, y0, 1, 2, &mut block);
-                            let mut q = [0i16; 64];
-                            fdct_quantize_fn(&mut block, &chroma_divisors, &mut q);
+                            let q = gather_downsampled_block(
+                                plane,
+                                width,
+                                height,
+                                x0,
+                                y0,
+                                1,
+                                2,
+                                &chroma_divisors,
+                                fdct_quantize_fn,
+                            );
                             all_blocks.push(q);
                         }
                     }
                     Subsampling::S411 => {
-                        // 4 Y blocks horizontally
-                        for dx in [0, 8, 16, 24] {
-                            let mut block = [0i16; 64];
-                            extract_block(&y_plane, width, height, x0 + dx, y0, &mut block);
-                            let mut q = [0i16; 64];
-                            fdct_quantize_fn(&mut block, &luma_divisors, &mut q);
-                            all_blocks.push(q);
+                        for dx in [0usize, 8, 16, 24] {
+                            if is_y_dummy(x0 + dx, y0, y_width_in_blocks, y_height_in_blocks) {
+                                let mut dummy = [0i16; 64];
+                                dummy[0] = prev_dc_y_gather;
+                                all_blocks.push(dummy);
+                            } else {
+                                let q = gather_block(
+                                    &y_plane,
+                                    width,
+                                    height,
+                                    x0 + dx,
+                                    y0,
+                                    &luma_divisors,
+                                    fdct_quantize_fn,
+                                );
+                                prev_dc_y_gather = q[0];
+                                all_blocks.push(q);
+                            }
                         }
                         for plane in [&cb_plane, &cr_plane] {
-                            let mut block = [0i16; 64];
-                            downsample_chroma_block(plane, width, height, x0, y0, 4, 1, &mut block);
-                            let mut q = [0i16; 64];
-                            fdct_quantize_fn(&mut block, &chroma_divisors, &mut q);
+                            let q = gather_downsampled_block(
+                                plane,
+                                width,
+                                height,
+                                x0,
+                                y0,
+                                4,
+                                1,
+                                &chroma_divisors,
+                                fdct_quantize_fn,
+                            );
                             all_blocks.push(q);
                         }
                     }
                     Subsampling::S441 => {
                         // 4 Y blocks vertically
-                        for dy in [0, 8, 16, 24] {
+                        for dy in [0usize, 8, 16, 24] {
+                            if is_y_dummy(x0, y0 + dy, y_width_in_blocks, y_height_in_blocks) {
+                                let mut dummy = [0i16; 64];
+                                dummy[0] = prev_dc_y_gather;
+                                all_blocks.push(dummy);
+                                continue;
+                            }
                             let mut block = [0i16; 64];
                             extract_block(&y_plane, width, height, x0, y0 + dy, &mut block);
                             let mut q = [0i16; 64];
@@ -4589,6 +4693,13 @@ fn encode_color_mcu(
     }
 }
 
+/// Check if a Y block at the given pixel position is a dummy block
+/// (beyond the real image boundary in either dimension).
+/// C libjpeg-turbo creates dummy blocks with AC=0, DC=prev for these positions.
+fn is_y_dummy(block_x_px: usize, block_y_px: usize, y_wib: usize, y_hib: usize) -> bool {
+    block_x_px / 8 >= y_wib || block_y_px / 8 >= y_hib
+}
+
 /// Encode a color MCU with dummy Y blocks for the last MCU column.
 ///
 /// C libjpeg-turbo creates "dummy" blocks beyond `width_in_blocks`: all AC=0,
@@ -5457,6 +5568,11 @@ pub fn compress_optimized(
     let original_height: usize = height;
     let width: usize = padded_w;
     let height: usize = padded_h;
+
+    // Dummy block detection: C creates dummy blocks (AC=0, DC=prev) for Y blocks
+    // beyond width_in_blocks/height_in_blocks (jccoefct.c lines 184-199).
+    let y_width_in_blocks: usize = original_width.div_ceil(8);
+    let y_height_in_blocks: usize = original_height.div_ceil(8);
 
     // === Pass 1: FDCT + quantize all blocks, gather symbol frequencies ===
     use crate::encode::huff_opt;
