@@ -32,10 +32,30 @@ pub fn decompress_cropped(data: &[u8], region: CropRegion) -> Result<Image> {
     let img_w = header.width as usize;
     let img_h = header.height as usize;
 
-    let x = region.x.min(img_w);
-    let y = region.y.min(img_h);
-    let w = region.width.min(img_w.saturating_sub(x));
-    let h = region.height.min(img_h.saturating_sub(y));
+    // Compute iMCU column alignment matching C jpeg_crop_scanline():
+    //   align = min_DCT_scaled_size * max_h_samp_factor
+    // For standard (no scaling): min_DCT_scaled_size = 8 (DCTSIZE).
+    let max_h_samp: usize = header
+        .components
+        .iter()
+        .map(|c| c.horizontal_sampling as usize)
+        .max()
+        .unwrap_or(1);
+    let align: usize = if header.components.len() == 1 {
+        8 // single-component: align to DCTSIZE only
+    } else {
+        8 * max_h_samp // multi-component: align to iMCU column width
+    };
+
+    let input_x: usize = region.x.min(img_w);
+    let y: usize = region.y.min(img_h);
+
+    // Snap x down to nearest iMCU boundary (C: xoffset = (input_xoffset / align) * align)
+    let x: usize = (input_x / align) * align;
+    // Extend width to keep the right edge at the originally requested position
+    // (C: width = width + input_xoffset - xoffset)
+    let w: usize = (region.width + input_x - x).min(img_w.saturating_sub(x));
+    let h: usize = region.height.min(img_h.saturating_sub(y));
 
     if w == 0 || h == 0 {
         return Ok(Image {

@@ -420,6 +420,147 @@ pub fn transform_with_c_jpegtran(
     })
 }
 
+// ===========================================================================
+// General-purpose C tool wrappers (for c_tj*test.rs parity tests)
+// ===========================================================================
+
+/// Run C djpeg with arbitrary arguments, writing output to `out_path`.
+/// The JPEG input is provided as a file path (not bytes) so the caller
+/// controls temp file lifetime.  Panics if djpeg fails.
+pub fn run_c_djpeg(djpeg: &Path, args: &[&str], jpeg_path: &Path, out_path: &Path) {
+    let output: std::process::Output = Command::new(djpeg)
+        .args(args)
+        .arg("-outfile")
+        .arg(out_path)
+        .arg(jpeg_path)
+        .output()
+        .unwrap_or_else(|e| panic!("Failed to run djpeg: {:?}", e));
+
+    assert!(
+        output.status.success(),
+        "djpeg failed (args={:?}, input={:?}): {}",
+        args,
+        jpeg_path,
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+/// Run C cjpeg with arbitrary arguments, writing output JPEG to `out_path`.
+/// Input is a file path (PPM/PGM/PNG/BMP).  Panics if cjpeg fails.
+pub fn run_c_cjpeg(cjpeg: &Path, args: &[&str], input_path: &Path, out_path: &Path) {
+    let output: std::process::Output = Command::new(cjpeg)
+        .args(args)
+        .arg("-outfile")
+        .arg(out_path)
+        .arg(input_path)
+        .output()
+        .unwrap_or_else(|e| panic!("Failed to run cjpeg: {:?}", e));
+
+    assert!(
+        output.status.success(),
+        "cjpeg failed (args={:?}, input={:?}): {}",
+        args,
+        input_path,
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+/// Run C jpegtran with arbitrary arguments, writing output to `out_path`.
+/// Input is a JPEG file path.  Panics if jpegtran fails.
+pub fn run_c_jpegtran(jpegtran: &Path, args: &[&str], input_path: &Path, out_path: &Path) {
+    let output: std::process::Output = Command::new(jpegtran)
+        .args(args)
+        .arg("-outfile")
+        .arg(out_path)
+        .arg(input_path)
+        .output()
+        .unwrap_or_else(|e| panic!("Failed to run jpegtran: {:?}", e));
+
+    assert!(
+        output.status.success(),
+        "jpegtran failed (args={:?}, input={:?}): {}",
+        args,
+        input_path,
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+// ===========================================================================
+// File-level comparison (C `cmp` equivalent)
+// ===========================================================================
+
+/// Assert two files are byte-for-byte identical.  Panics with diagnostic
+/// information on the first differing byte.
+pub fn assert_files_identical(path_a: &Path, path_b: &Path, label: &str) {
+    let data_a: Vec<u8> = std::fs::read(path_a)
+        .unwrap_or_else(|e| panic!("{}: failed to read {:?}: {:?}", label, path_a, e));
+    let data_b: Vec<u8> = std::fs::read(path_b)
+        .unwrap_or_else(|e| panic!("{}: failed to read {:?}: {:?}", label, path_b, e));
+
+    if data_a == data_b {
+        return;
+    }
+
+    // Find first differing byte for diagnostics.
+    let min_len: usize = data_a.len().min(data_b.len());
+    let first_diff: Option<usize> = (0..min_len).find(|&i| data_a[i] != data_b[i]);
+    if let Some(pos) = first_diff {
+        panic!(
+            "{}: files differ at byte {} (a=0x{:02x}, b=0x{:02x}); a_len={}, b_len={}\n  a: {:?}\n  b: {:?}",
+            label, pos, data_a[pos], data_b[pos], data_a.len(), data_b.len(), path_a, path_b
+        );
+    } else {
+        panic!(
+            "{}: files differ in length (a={}, b={})\n  a: {:?}\n  b: {:?}",
+            label,
+            data_a.len(),
+            data_b.len(),
+            path_a,
+            path_b
+        );
+    }
+}
+
+// ===========================================================================
+// File writers for C tool input
+// ===========================================================================
+
+/// Write an RGB PPM (P6) file to disk.
+pub fn write_ppm_file(path: &Path, width: usize, height: usize, pixels: &[u8]) {
+    let ppm: Vec<u8> = build_ppm(pixels, width, height);
+    std::fs::write(path, &ppm)
+        .unwrap_or_else(|e| panic!("Failed to write PPM {:?}: {:?}", path, e));
+}
+
+/// Write a grayscale PGM (P5) file to disk.
+pub fn write_pgm_file(path: &Path, width: usize, height: usize, pixels: &[u8]) {
+    let pgm: Vec<u8> = build_pgm(pixels, width, height);
+    std::fs::write(path, &pgm)
+        .unwrap_or_else(|e| panic!("Failed to write PGM {:?}: {:?}", path, e));
+}
+
+/// Generate a gradient grayscale test image (1 byte per pixel).
+pub fn generate_gradient_gray(width: usize, height: usize) -> Vec<u8> {
+    let mut pixels: Vec<u8> = Vec::with_capacity(width * height);
+    for y in 0..height {
+        for x in 0..width {
+            let val: u8 = (((x + y) * 255) / (width + height).max(1)) as u8;
+            pixels.push(val);
+        }
+    }
+    pixels
+}
+
+/// Read an ICC profile from a file.  Panics on error.
+pub fn read_icc_profile(path: &Path) -> Vec<u8> {
+    std::fs::read(path).unwrap_or_else(|e| panic!("Failed to read ICC profile {:?}: {:?}", path, e))
+}
+
+/// Path to the C libjpeg-turbo test images directory.
+pub fn c_testimages_dir() -> PathBuf {
+    PathBuf::from("references/libjpeg-turbo/testimages")
+}
+
 /// Build a raw PPM (P6) file from RGB pixel data.
 pub fn build_ppm(pixels: &[u8], width: usize, height: usize) -> Vec<u8> {
     let header: String = format!("P6\n{} {}\n255\n", width, height);
