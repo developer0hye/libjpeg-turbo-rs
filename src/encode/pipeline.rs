@@ -3790,7 +3790,8 @@ pub fn compute_reciprocal(divisor: u16) -> (u16, u16, u16, i16) {
 
 /// Scale quantization table for the IFAST FDCT.
 ///
-/// TODO(#163): use AA&N-scaled divisors with `fdct_ifast_raw` for true ifast parity.
+/// Currently delegates to `scale_quant_for_fdct` since our `fdct_ifast` rescales
+/// to islow-equivalent output. TODO(#163): use AA&N-scaled divisors with `fdct_ifast_raw`.
 fn scale_quant_for_ifast(quant_table: &[u16; 64]) -> QuantDivisors {
     scale_quant_for_fdct(quant_table)
 }
