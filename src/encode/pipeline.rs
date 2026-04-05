@@ -4154,6 +4154,147 @@ unsafe fn downsample_chroma_block_h2v1_ssse3(
     }
 }
 
+/// Apply fullsize smooth filter to a component plane, matching C's `fullsize_smooth_downsample`.
+fn fullsize_smooth_plane(
+    plane: &[u8],
+    width: usize,
+    height: usize,
+    smoothing_factor: u8,
+) -> Vec<u8> {
+    let sf: i64 = smoothing_factor as i64;
+    let memberscale: i64 = 65536 - sf * 512;
+    let neighscale: i64 = sf * 64;
+    let mut output: Vec<u8> = vec![0u8; plane.len()];
+    for row in 0..height {
+        let above_row: usize = if row == 0 { 0 } else { row - 1 };
+        let below_row: usize = if row + 1 >= height { row } else { row + 1 };
+        let inp: &[u8] = &plane[row * width..];
+        let abv: &[u8] = &plane[above_row * width..];
+        let blw: &[u8] = &plane[below_row * width..];
+        let out: &mut [u8] = &mut output[row * width..];
+        if width <= 1 {
+            if width == 1 {
+                let membersum: i64 = inp[0] as i64;
+                let colsum: i64 = abv[0] as i64 + blw[0] as i64 + inp[0] as i64;
+                let neighsum: i64 = colsum + (colsum - membersum) + colsum;
+                let result: i64 = (membersum * memberscale + neighsum * neighscale + 32768) >> 16;
+                out[0] = result.clamp(0, 255) as u8;
+            }
+            continue;
+        }
+        let mut colsum: i64 = abv[0] as i64 + blw[0] as i64 + inp[0] as i64;
+        let membersum: i64 = inp[0] as i64;
+        let mut nextcolsum: i64 = abv[1] as i64 + blw[1] as i64 + inp[1] as i64;
+        let neighsum: i64 = colsum + (colsum - membersum) + nextcolsum;
+        let result: i64 = (membersum * memberscale + neighsum * neighscale + 32768) >> 16;
+        out[0] = result.clamp(0, 255) as u8;
+        let mut lastcolsum: i64 = colsum;
+        colsum = nextcolsum;
+        for col in 1..width - 1 {
+            let membersum: i64 = inp[col] as i64;
+            nextcolsum = abv[col + 1] as i64 + blw[col + 1] as i64 + inp[col + 1] as i64;
+            let neighsum: i64 = lastcolsum + (colsum - membersum) + nextcolsum;
+            let result: i64 = (membersum * memberscale + neighsum * neighscale + 32768) >> 16;
+            out[col] = result.clamp(0, 255) as u8;
+            lastcolsum = colsum;
+            colsum = nextcolsum;
+        }
+        let col: usize = width - 1;
+        let membersum: i64 = inp[col] as i64;
+        let neighsum: i64 = lastcolsum + (colsum - membersum) + colsum;
+        let result: i64 = (membersum * memberscale + neighsum * neighscale + 32768) >> 16;
+        out[col] = result.clamp(0, 255) as u8;
+    }
+    output
+}
+
+/// Smooth-downsample a chroma plane from full to half resolution,
+/// matching C's `h2v2_smooth_downsample` (jcsample.c lines 308-387).
+fn h2v2_smooth_downsample_plane(
+    plane: &[u8],
+    in_width: usize,
+    in_height: usize,
+    smoothing_factor: u8,
+) -> Vec<u8> {
+    let sf: i64 = smoothing_factor as i64;
+    let memberscale: i64 = 16384 - sf * 80;
+    let neighscale: i64 = sf * 16;
+    let out_width: usize = in_width / 2;
+    let out_height: usize = in_height / 2;
+    let mut output: Vec<u8> = vec![0u8; out_width * out_height];
+    for out_row in 0..out_height {
+        let in_row: usize = out_row * 2;
+        let above_row: usize = if in_row == 0 { 0 } else { in_row - 1 };
+        let below_row: usize = (in_row + 2).min(in_height - 1);
+        let r1_row: usize = (in_row + 1).min(in_height - 1);
+        let r0: &[u8] = &plane[in_row * in_width..];
+        let r1: &[u8] = &plane[r1_row * in_width..];
+        let abv: &[u8] = &plane[above_row * in_width..];
+        let blw: &[u8] = &plane[below_row * in_width..];
+        let out: &mut [u8] = &mut output[out_row * out_width..];
+        if out_width == 0 {
+            continue;
+        }
+        {
+            let r: usize = 2usize.min(in_width - 1);
+            let membersum: i64 = r0[0] as i64 + r0[1] as i64 + r1[0] as i64 + r1[1] as i64;
+            let mut neighsum: i64 = abv[0] as i64
+                + abv[1] as i64
+                + blw[0] as i64
+                + blw[1] as i64
+                + r0[0] as i64
+                + r0[r] as i64
+                + r1[0] as i64
+                + r1[r] as i64;
+            neighsum += neighsum;
+            neighsum += abv[0] as i64 + abv[r] as i64 + blw[0] as i64 + blw[r] as i64;
+            let result: i64 = (membersum * memberscale + neighsum * neighscale + 32768) >> 16;
+            out[0] = result.clamp(0, 255) as u8;
+        }
+        let middle_end: usize = out_width.saturating_sub(1);
+        for c_base in (2..middle_end * 2).step_by(2) {
+            let membersum: i64 = r0[c_base] as i64
+                + r0[c_base + 1] as i64
+                + r1[c_base] as i64
+                + r1[c_base + 1] as i64;
+            let mut neighsum: i64 = abv[c_base] as i64
+                + abv[c_base + 1] as i64
+                + blw[c_base] as i64
+                + blw[c_base + 1] as i64
+                + r0[c_base - 1] as i64
+                + r0[c_base + 2] as i64
+                + r1[c_base - 1] as i64
+                + r1[c_base + 2] as i64;
+            neighsum += neighsum;
+            neighsum += abv[c_base - 1] as i64
+                + abv[c_base + 2] as i64
+                + blw[c_base - 1] as i64
+                + blw[c_base + 2] as i64;
+            let result: i64 = (membersum * memberscale + neighsum * neighscale + 32768) >> 16;
+            out[c_base / 2] = result.clamp(0, 255) as u8;
+        }
+        if out_width > 1 {
+            let out_col: usize = out_width - 1;
+            let c: usize = out_col * 2;
+            let c1: usize = (c + 1).min(in_width - 1);
+            let membersum: i64 = r0[c] as i64 + r0[c1] as i64 + r1[c] as i64 + r1[c1] as i64;
+            let mut neighsum: i64 = abv[c] as i64
+                + abv[c1] as i64
+                + blw[c] as i64
+                + blw[c1] as i64
+                + r0[c - 1] as i64
+                + r0[c1] as i64
+                + r1[c - 1] as i64
+                + r1[c1] as i64;
+            neighsum += neighsum;
+            neighsum += abv[c - 1] as i64 + abv[c1] as i64 + blw[c - 1] as i64 + blw[c1] as i64;
+            let result: i64 = (membersum * memberscale + neighsum * neighscale + 32768) >> 16;
+            out[out_col] = result.clamp(0, 255) as u8;
+        }
+    }
+    output
+}
+
 /// Encode a single 8x8 block through the DCT -> quantize -> Huffman pipeline.
 #[allow(clippy::too_many_arguments)]
 fn encode_single_block(
@@ -5519,6 +5660,7 @@ fn encode_downsampled_chroma_block(
 /// Pass 1: FDCT + quantize all blocks, gather symbol frequencies.
 /// Pass 2: Generate optimal Huffman tables, encode with them.
 /// Produces smaller output than `compress()` at the cost of an extra pass.
+#[allow(clippy::too_many_arguments)]
 pub fn compress_optimized(
     pixels: &[u8],
     width: usize,
@@ -5526,6 +5668,7 @@ pub fn compress_optimized(
     pixel_format: PixelFormat,
     quality: u8,
     subsampling: Subsampling,
+    smoothing_factor: u8,
 ) -> Result<Vec<u8>> {
     // Validate inputs
     if width == 0 || height == 0 {
@@ -5584,6 +5727,24 @@ pub fn compress_optimized(
         pixel_format,
         enc_simd.rgb_to_ycbcr_row,
     )?;
+
+    // Apply smoothing to component planes when smoothing_factor > 0.
+    let y_plane: Vec<u8> = if smoothing_factor > 0 && !is_grayscale {
+        fullsize_smooth_plane(&y_plane, padded_w, padded_h, smoothing_factor)
+    } else {
+        y_plane
+    };
+    let use_smooth_chroma: bool =
+        smoothing_factor > 0 && !is_grayscale && subsampling == Subsampling::S420;
+    let cb_smooth: Vec<u8>;
+    let cr_smooth: Vec<u8>;
+    if use_smooth_chroma {
+        cb_smooth = h2v2_smooth_downsample_plane(&cb_plane, padded_w, padded_h, smoothing_factor);
+        cr_smooth = h2v2_smooth_downsample_plane(&cr_plane, padded_w, padded_h, smoothing_factor);
+    } else {
+        cb_smooth = Vec::new();
+        cr_smooth = Vec::new();
+    }
 
     // Shadow width/height with padded values so all encode loops use padded planes.
     // The planes are already padded to padded_w × padded_h by convert_to_ycbcr_padded.
@@ -5747,49 +5908,83 @@ pub fn compress_optimized(
                     Subsampling::S420 => {
                         // 4 Y blocks + 1 Cb + 1 Cr
                         for (dx, dy) in [(0, 0), (8, 0), (0, 8), (8, 8)] {
-                            let yq = gather_block(
-                                &y_plane,
-                                width,
-                                height,
-                                x0 + dx,
-                                y0 + dy,
-                                &luma_divisors,
-                                enc_simd.fdct_quantize,
-                            );
+                            let block_col: usize = (x0 + dx) / 8;
+                            let block_row: usize = (y0 + dy) / 8;
+                            let yq = if block_col >= y_width_in_blocks
+                                || block_row >= y_height_in_blocks
+                            {
+                                let mut dummy = [0i16; 64];
+                                dummy[0] = prev_dc_y;
+                                dummy
+                            } else {
+                                gather_block(
+                                    &y_plane,
+                                    width,
+                                    height,
+                                    x0 + dx,
+                                    y0 + dy,
+                                    &luma_divisors,
+                                    enc_simd.fdct_quantize,
+                                )
+                            };
                             let diff = yq[0] - prev_dc_y;
                             prev_dc_y = yq[0];
                             huff_opt::gather_dc_symbol(diff, &mut dc_luma_freq);
                             huff_opt::gather_ac_symbols(&yq, &mut ac_luma_freq);
                             all_blocks.push(yq);
                         }
-                        let cbq = gather_downsampled_block(
-                            &cb_plane,
-                            width,
-                            height,
-                            x0,
-                            y0,
-                            2,
-                            2,
-                            &chroma_divisors,
-                            enc_simd.fdct_quantize,
-                        );
+                        let cbq = if use_smooth_chroma {
+                            gather_block(
+                                &cb_smooth,
+                                width / 2,
+                                height / 2,
+                                x0 / 2,
+                                y0 / 2,
+                                &chroma_divisors,
+                                enc_simd.fdct_quantize,
+                            )
+                        } else {
+                            gather_downsampled_block(
+                                &cb_plane,
+                                width,
+                                height,
+                                x0,
+                                y0,
+                                2,
+                                2,
+                                &chroma_divisors,
+                                enc_simd.fdct_quantize,
+                            )
+                        };
                         let diff = cbq[0] - prev_dc_cb;
                         prev_dc_cb = cbq[0];
                         huff_opt::gather_dc_symbol(diff, &mut dc_chroma_freq);
                         huff_opt::gather_ac_symbols(&cbq, &mut ac_chroma_freq);
                         all_blocks.push(cbq);
 
-                        let crq = gather_downsampled_block(
-                            &cr_plane,
-                            width,
-                            height,
-                            x0,
-                            y0,
-                            2,
-                            2,
-                            &chroma_divisors,
-                            enc_simd.fdct_quantize,
-                        );
+                        let crq = if use_smooth_chroma {
+                            gather_block(
+                                &cr_smooth,
+                                width / 2,
+                                height / 2,
+                                x0 / 2,
+                                y0 / 2,
+                                &chroma_divisors,
+                                enc_simd.fdct_quantize,
+                            )
+                        } else {
+                            gather_downsampled_block(
+                                &cr_plane,
+                                width,
+                                height,
+                                x0,
+                                y0,
+                                2,
+                                2,
+                                &chroma_divisors,
+                                enc_simd.fdct_quantize,
+                            )
+                        };
                         let diff = crq[0] - prev_dc_cr;
                         prev_dc_cr = crq[0];
                         huff_opt::gather_dc_symbol(diff, &mut dc_chroma_freq);
