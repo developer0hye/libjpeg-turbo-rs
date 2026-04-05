@@ -237,11 +237,15 @@ pub(crate) unsafe fn avx2_downsample_h2v1_fdct_quantize(
     avx2_quantize_zigzag(&dct_buf, quant, output);
 }
 
-/// AVX2 quantization: reciprocal multiply to avoid scalar division.
+/// AVX2 quantization: adaptive-precision reciprocal multiply matching C libjpeg-turbo.
 ///
-/// For each coefficient: `quantized = round(coeff / divisor)`
-/// Implemented as: `quantized = sign(coeff) * ((abs(coeff) + divisor/2) * recip >> 16)`
-/// where `recip = ceil(2^16 / divisor)`.
+/// Uses three pre-computed tables per element (from `compute_reciprocal`):
+/// - `corrections`: rounding factor (divisor/2, adjusted for reciprocal precision)
+/// - `reciprocals`: adaptive-precision reciprocal
+/// - `scales`: `1 << (32 - r)`, converts per-element variable shift into a second `mulhi`
+///
+/// Algorithm: `quantized = sign(coeff) * mulhi(mulhi(abs(coeff) + correction, reciprocal), scale)`
+/// This matches C libjpeg-turbo's `jsimd_quantize_avx2` in `jquanti-avx2.asm`.
 ///
 /// # Safety
 /// Requires AVX2.
@@ -249,10 +253,6 @@ pub(crate) unsafe fn avx2_downsample_h2v1_fdct_quantize(
 unsafe fn avx2_quantize_zigzag(coeffs: &[i16; 64], quant: &QuantDivisors, output: &mut [i16; 64]) {
     use core::arch::x86_64::*;
 
-    // Quantize in zigzag order: read coefficients from natural order using
-    // ZIGZAG_ORDER lookup, quantize with zigzag-ordered quant tables, write
-    // directly to output in zigzag order. Eliminates the intermediate buffer
-    // and scalar zigzag reorder loop.
     let zigzag = &crate::encode::tables::ZIGZAG_ORDER;
 
     for i in (0..64).step_by(16) {
@@ -261,20 +261,24 @@ unsafe fn avx2_quantize_zigzag(coeffs: &[i16; 64], quant: &QuantDivisors, output
         for j in 0..16 {
             coeff_buf[j] = *coeffs.get_unchecked(zigzag[i + j]);
         }
-        let c = _mm256_loadu_si256(coeff_buf.as_ptr() as *const __m256i);
+        let c: __m256i = _mm256_loadu_si256(coeff_buf.as_ptr() as *const __m256i);
 
-        // Load zigzag-ordered quant divisors and reciprocals (sequential)
-        let d = _mm256_loadu_si256(quant.divisors_zigzag.as_ptr().add(i) as *const __m256i);
-        let r = _mm256_loadu_si256(quant.reciprocals_zigzag.as_ptr().add(i) as *const __m256i);
+        // Load zigzag-ordered correction, reciprocal, and scale tables
+        let corr: __m256i =
+            _mm256_loadu_si256(quant.corrections_zigzag.as_ptr().add(i) as *const __m256i);
+        let recip: __m256i =
+            _mm256_loadu_si256(quant.reciprocals_zigzag.as_ptr().add(i) as *const __m256i);
+        let scale: __m256i =
+            _mm256_loadu_si256(quant.scales_zigzag.as_ptr().add(i) as *const __m256i);
 
-        let sign = _mm256_srai_epi16::<15>(c);
-        let abs_c = _mm256_abs_epi16(c);
-        let half_d = _mm256_srli_epi16::<1>(d);
-        let rounded = _mm256_add_epi16(abs_c, half_d);
-        let quantized = _mm256_mulhi_epu16(rounded, r);
-        let result = _mm256_sub_epi16(_mm256_xor_si256(quantized, sign), sign);
+        let abs_c: __m256i = _mm256_abs_epi16(c);
+        let corrected: __m256i = _mm256_add_epi16(abs_c, corr); // abs + correction
+        let step1: __m256i = _mm256_mulhi_epu16(corrected, recip); // * reciprocal >> 16
+        let step2: __m256i = _mm256_mulhi_epu16(step1, scale); // * scale >> 16
 
-        // Store directly in zigzag order
+        // Restore sign: vpsignw(result, original) — zero stays zero, sign matched otherwise
+        let result: __m256i = _mm256_sign_epi16(step2, c);
+
         _mm256_storeu_si256(output.as_mut_ptr().add(i) as *mut __m256i, result);
     }
 }
