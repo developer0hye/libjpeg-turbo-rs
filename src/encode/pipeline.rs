@@ -1947,6 +1947,7 @@ pub fn compress_progressive(
     pixel_format: PixelFormat,
     quality: u8,
     subsampling: Subsampling,
+    dct_method: DctMethod,
 ) -> Result<Vec<u8>> {
     use crate::encode::progressive::simple_progression;
 
@@ -1962,6 +1963,7 @@ pub fn compress_progressive(
         quality,
         subsampling,
         &scans,
+        dct_method,
     )
 }
 
@@ -1977,6 +1979,7 @@ pub fn compress_progressive_custom(
     quality: u8,
     subsampling: Subsampling,
     script: &[ScanScript],
+    dct_method: DctMethod,
 ) -> Result<Vec<u8>> {
     // Convert user-facing ScanScript to internal ProgressiveScan representation
     let scans: Vec<ProgressiveScan> = script
@@ -1998,6 +2001,7 @@ pub fn compress_progressive_custom(
         quality,
         subsampling,
         &scans,
+        dct_method,
     )
 }
 
@@ -2010,6 +2014,7 @@ fn compress_progressive_with_scans(
     quality: u8,
     subsampling: Subsampling,
     scans: &[ProgressiveScan],
+    dct_method: DctMethod,
 ) -> Result<Vec<u8>> {
     if width == 0 || height == 0 {
         return Err(JpegError::CorruptData(
