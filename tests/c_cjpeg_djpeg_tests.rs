@@ -12,7 +12,8 @@ use std::path::{Path, PathBuf};
 
 use libjpeg_turbo_rs::{
     decompress, decompress_cropped, decompress_to, transform_jpeg_with_options, CropRegion,
-    Encoder, Image, PixelFormat, ScalingFactor, Subsampling, TransformOp, TransformOptions,
+    Encoder, Image, PixelFormat, ScalingFactor, ScanScript, Subsampling, TransformOp,
+    TransformOptions,
 };
 
 // ===========================================================================
@@ -25,6 +26,46 @@ fn testimages() -> PathBuf {
 
 fn read_file(path: &Path) -> Vec<u8> {
     std::fs::read(path).unwrap_or_else(|e| panic!("Failed to read {:?}: {:?}", path, e))
+}
+
+/// Parse a C libjpeg-turbo scan script file (e.g. `test.scan`).
+fn parse_scan_script(path: &Path) -> Vec<ScanScript> {
+    let text = std::fs::read_to_string(path)
+        .unwrap_or_else(|e| panic!("Failed to read scan script {:?}: {:?}", path, e));
+    let mut scans = Vec::new();
+    for line in text.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with("//") || line.starts_with('#') {
+            continue;
+        }
+        let line = line.trim_end_matches(';').trim();
+        if line.is_empty() {
+            continue;
+        }
+        let parts: Vec<&str> = line.splitn(2, ':').collect();
+        assert_eq!(
+            parts.len(),
+            2,
+            "scan line must have 'components: ss se ah al': {line}"
+        );
+        let components: Vec<u8> = parts[0]
+            .split_whitespace()
+            .map(|s| s.parse::<u8>().expect("component id"))
+            .collect();
+        let params: Vec<u8> = parts[1]
+            .split_whitespace()
+            .map(|s| s.parse::<u8>().expect("scan param"))
+            .collect();
+        assert_eq!(params.len(), 4, "scan params must be 4 values: {line}");
+        scans.push(ScanScript {
+            components,
+            ss: params[0],
+            se: params[1],
+            ah: params[2],
+            al: params[3],
+        });
+    }
+    scans
 }
 
 // ===========================================================================
@@ -178,7 +219,6 @@ fn c_cjpeg_440_islow() {
 /// CMakeLists line 1604: cjpeg 420-q100-ifast-prog
 /// -sample 2x2 -quality 100 -dct fast -scans test.scan  testorig.ppm → JPEG
 #[test]
-#[ignore = "FIXME: C uses custom test.scan file for progressive; Rust uses default progression. Also compress_progressive lacks dummy block logic."]
 fn c_cjpeg_420_q100_ifast_prog() {
     let cjpeg = match helpers::cjpeg_path() {
         Some(p) => p,
@@ -216,11 +256,13 @@ fn c_cjpeg_420_q100_ifast_prog() {
     let (w, h, pixels) = helpers::parse_ppm(&ppm_data).expect("parse PPM");
 
     // Progressive with custom scan script and Q100 ifast
+    let script = parse_scan_script(&scan);
     let rust_jpeg = Encoder::new(&pixels, w, h, PixelFormat::Rgb)
         .subsampling(Subsampling::S420)
         .quality(100)
         .dct_method(libjpeg_turbo_rs::common::types::DctMethod::IsFast)
         .progressive(true)
+        .scan_script(script)
         .encode();
 
     match rust_jpeg {
@@ -848,7 +890,7 @@ fn c_djpeg_444_islow_skip1_6() {
 /// CMakeLists line 1792: djpeg 420-islow-prog-crop62x62_71_71
 /// -dct int -crop 62x62+71+71  progressive 420 JPEG
 #[test]
-#[ignore = "FIXME: 420 progressive crop decode pixel values differ from C djpeg (upsample edge)"]
+// Fixed: crop-aware upsampling matches C jpeg_crop_scanline (issue #164)
 fn c_djpeg_420_islow_prog_crop() {
     let cjpeg = match helpers::cjpeg_path() {
         Some(p) => p,
