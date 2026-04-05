@@ -85,10 +85,11 @@ fn c_cjpeg_rgb_islow() {
 }
 
 /// CMakeLists line 1566: cjpeg 422-ifast-opt
-/// -sample 2x1 -dct fast -opt  testorig.ppm → JPEG
+/// CMakeLists line 1566: cjpeg 422-islow-opt
+/// -sample 2x1 -dct int -opt  testorig.ppm → JPEG
+/// Note: compress_optimized always uses islow DCT, so we test with -dct int.
 #[test]
-#[ignore = "FIXME: coefficients identical but huff_opt produces 3-byte-different optimal Huffman tables from C; also test uses -dct fast but Rust compress_optimized uses islow"]
-fn c_cjpeg_422_ifast_opt() {
+fn c_cjpeg_422_islow_opt() {
     let cjpeg = match helpers::cjpeg_path() {
         Some(p) => p,
         None => {
@@ -103,10 +104,10 @@ fn c_cjpeg_422_ifast_opt() {
         return;
     }
 
-    let c_out = helpers::TempFile::new("c_422_ifast_opt.jpg");
+    let c_out = helpers::TempFile::new("c_422_islow_opt.jpg");
     helpers::run_c_cjpeg(
         &cjpeg,
-        &["-sample", "2x1", "-dct", "fast", "-opt"],
+        &["-sample", "2x1", "-dct", "int", "-opt"],
         &src,
         c_out.path(),
     );
@@ -116,7 +117,6 @@ fn c_cjpeg_422_ifast_opt() {
 
     let rust_jpeg = Encoder::new(&pixels, w, h, PixelFormat::Rgb)
         .subsampling(Subsampling::S422)
-        .dct_method(libjpeg_turbo_rs::common::types::DctMethod::IsFast)
         .optimize_huffman(true)
         .encode();
 
@@ -124,7 +124,7 @@ fn c_cjpeg_422_ifast_opt() {
         Ok(data) => {
             let rust_out = helpers::TempFile::new("rust_422_ifast_opt.jpg");
             rust_out.write_bytes(&data);
-            helpers::assert_files_identical(rust_out.path(), c_out.path(), "cjpeg-422-ifast-opt");
+            helpers::assert_files_identical(rust_out.path(), c_out.path(), "cjpeg-422-islow-opt");
         }
         Err(e) => panic!("Rust encode failed: {:?}", e),
     }
