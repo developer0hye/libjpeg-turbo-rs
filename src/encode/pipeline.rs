@@ -5015,14 +5015,87 @@ fn encode_downsampled_chroma_block(
         }
     }
 
-    // Scalar fallback: separate downsample + FDCT+quantize
+    // Edge block: pad source area locally and use NEON/AVX2 fused path.
+    // This matches C libjpeg-turbo's expand_right_edge + SIMD downsample behavior.
+    let src_w: usize = 8 * h_factor;
+    let src_h: usize = 8 * v_factor;
+    let mut local_buf = vec![0u8; src_w * src_h];
+    for row in 0..src_h {
+        let src_y: usize = (block_y + row).min(plane_height - 1);
+        for col in 0..src_w {
+            let src_x: usize = (block_x + col).min(plane_width - 1);
+            local_buf[row * src_w + col] = plane[src_y * plane_width + src_x];
+        }
+    }
+
+    // Try NEON/AVX2 fused downsample+FDCT+quantize on the padded local buffer
+    #[cfg(target_arch = "aarch64")]
+    {
+        let mut quantized = [0i16; 64];
+        if h_factor == 2 && v_factor == 2 {
+            unsafe {
+                crate::simd::aarch64::neon_downsample_h2v2_fdct_quantize(
+                    local_buf.as_ptr(),
+                    src_w,
+                    quant_table,
+                    &mut quantized,
+                );
+            }
+            HuffmanEncoder::encode_block(writer, &quantized, prev_dc, dc_table, ac_table);
+            return;
+        }
+        if h_factor == 2 && v_factor == 1 {
+            unsafe {
+                crate::simd::aarch64::neon_downsample_h2v1_fdct_quantize(
+                    local_buf.as_ptr(),
+                    src_w,
+                    quant_table,
+                    &mut quantized,
+                );
+            }
+            HuffmanEncoder::encode_block(writer, &quantized, prev_dc, dc_table, ac_table);
+            return;
+        }
+    }
+    #[cfg(target_arch = "x86_64")]
+    {
+        if is_x86_feature_detected!("avx2") {
+            let mut quantized = [0i16; 64];
+            if h_factor == 2 && v_factor == 2 {
+                unsafe {
+                    crate::simd::x86_64::avx2_downsample_h2v2_fdct_quantize(
+                        local_buf.as_ptr(),
+                        src_w,
+                        quant_table,
+                        &mut quantized,
+                    );
+                }
+                HuffmanEncoder::encode_block(writer, &quantized, prev_dc, dc_table, ac_table);
+                return;
+            }
+            if h_factor == 2 && v_factor == 1 {
+                unsafe {
+                    crate::simd::x86_64::avx2_downsample_h2v1_fdct_quantize(
+                        local_buf.as_ptr(),
+                        src_w,
+                        quant_table,
+                        &mut quantized,
+                    );
+                }
+                HuffmanEncoder::encode_block(writer, &quantized, prev_dc, dc_table, ac_table);
+                return;
+            }
+        }
+    }
+
+    // Scalar fallback (non-SIMD platforms): downsample from padded buffer
     let mut block = [0i16; 64];
     downsample_chroma_block(
-        plane,
-        plane_width,
-        plane_height,
-        block_x,
-        block_y,
+        &local_buf,
+        src_w,
+        src_h,
+        0,
+        0,
         h_factor,
         v_factor,
         &mut block,
