@@ -6142,11 +6142,21 @@ pub fn compress_optimized(
     // Frame header
     if is_grayscale {
         let components = vec![(1, 1, 1, 0)];
-        marker_writer::write_sof0(&mut output, width as u16, height as u16, &components);
+        marker_writer::write_sof0(
+            &mut output,
+            original_width as u16,
+            original_height as u16,
+            &components,
+        );
     } else {
         let (h_samp, v_samp) = subsampling.sampling_factors();
         let components = vec![(1, h_samp, v_samp, 0), (2, 1, 1, 1), (3, 1, 1, 1)];
-        marker_writer::write_sof0(&mut output, width as u16, height as u16, &components);
+        marker_writer::write_sof0(
+            &mut output,
+            original_width as u16,
+            original_height as u16,
+            &components,
+        );
     }
 
     // Write optimal Huffman tables
