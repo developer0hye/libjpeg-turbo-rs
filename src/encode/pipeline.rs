@@ -1261,7 +1261,7 @@ pub fn compress_rgb_direct(
     width: usize,
     height: usize,
     quality: u8,
-    dct_method: DctMethod,
+    _dct_method: DctMethod,
     icc_profile: Option<&[u8]>,
 ) -> Result<Vec<u8>> {
     let quant_table =
