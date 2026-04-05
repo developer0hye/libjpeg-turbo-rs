@@ -472,42 +472,6 @@ impl<'a> Encoder<'a> {
         }
     }
 
-    fn apply_smoothing(
-        pixels: &[u8],
-        width: usize,
-        height: usize,
-        bpp: usize,
-        strength: u8,
-    ) -> Vec<u8> {
-        if strength == 0 || width <= 2 || height <= 2 {
-            return pixels.to_vec();
-        }
-        let row_stride: usize = width * bpp;
-        let mut output: Vec<u8> = pixels.to_vec();
-        let neighbor_weight: u32 = (strength as u32 * 3) / 100 + 1;
-        let center_weight: u32 = 256 - 8 * neighbor_weight;
-        for y in 1..height - 1 {
-            for x in 1..width - 1 {
-                for c in 0..bpp {
-                    let idx: usize = y * row_stride + x * bpp + c;
-                    let center: u32 = pixels[idx] as u32;
-                    let top: u32 = pixels[idx - row_stride] as u32;
-                    let bottom: u32 = pixels[idx + row_stride] as u32;
-                    let left: u32 = pixels[idx - bpp] as u32;
-                    let right: u32 = pixels[idx + bpp] as u32;
-                    let tl: u32 = pixels[idx - row_stride - bpp] as u32;
-                    let tr: u32 = pixels[idx - row_stride + bpp] as u32;
-                    let bl: u32 = pixels[idx + row_stride - bpp] as u32;
-                    let br: u32 = pixels[idx + row_stride + bpp] as u32;
-                    let sum: u32 = center * center_weight
-                        + (top + bottom + left + right + tl + tr + bl + br) * neighbor_weight;
-                    output[idx] = (sum >> 8).min(255) as u8;
-                }
-            }
-        }
-        output
-    }
-
     fn apply_triangle_prefilter(
         pixels: &[u8],
         width: usize,
@@ -634,26 +598,16 @@ impl<'a> Encoder<'a> {
             self.pixels
         };
 
-        // Apply smoothing filter if requested
-        let smoothed_buf: Vec<u8>;
-        let after_smooth: &[u8] = if self.smoothing_factor > 0 {
-            smoothed_buf = Self::apply_smoothing(
-                input_pixels,
-                self.width,
-                self.height,
-                self.pixel_format.bytes_per_pixel(),
-                self.smoothing_factor,
-            );
-            &smoothed_buf
-        } else {
-            input_pixels
-        };
+        // Smoothing is handled inside the pipeline (compress_optimized applies
+        // fullsize_smooth + h2v2_smooth_downsample matching C libjpeg-turbo).
+        let after_smooth: &[u8] = input_pixels;
 
         // Apply fancy downsampling pre-filter if enabled and subsampling is active.
         // Skip when grayscale_from_color: grayscale has no chroma, so no downsampling
         // prefilter should be applied (matches C cjpeg -grayscale behavior).
         let fancy_buf: Vec<u8>;
         let after_fancy: &[u8] = if self.fancy_downsampling
+            && self.smoothing_factor == 0
             && !self.grayscale_from_color
             && self.pixel_format != PixelFormat::Grayscale
             && self.pixel_format != PixelFormat::Cmyk
@@ -805,6 +759,7 @@ impl<'a> Encoder<'a> {
                 effective_format,
                 quality,
                 self.subsampling,
+                self.smoothing_factor,
             )?
         } else if self.has_custom_huffman_tables() {
             encoder::compress_custom_huffman(

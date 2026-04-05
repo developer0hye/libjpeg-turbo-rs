@@ -131,7 +131,7 @@ pub fn compress_optimized(
     quality: u8,
     subsampling: Subsampling,
 ) -> Result<Vec<u8>> {
-    encoder::compress_optimized(pixels, width, height, pixel_format, quality, subsampling)
+    encoder::compress_optimized(pixels, width, height, pixel_format, quality, subsampling, 0)
 }
 
 /// Compress as progressive JPEG (SOF2, multi-scan).
