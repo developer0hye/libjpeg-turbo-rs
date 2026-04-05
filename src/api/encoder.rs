@@ -681,6 +681,23 @@ impl<'a> Encoder<'a> {
         }
 
         let quality: u8 = self.effective_quality();
+
+        // RGB-direct encoding: bypass color conversion entirely.
+        // Matches C cjpeg `-rgb` (JCS_RGB colorspace).
+        if self.colorspace_override == Some(ColorSpace::Rgb)
+            && effective_format == PixelFormat::Rgb
+        {
+            let base = encoder::compress_rgb_direct(
+                effective_pixels,
+                self.width,
+                self.height,
+                quality,
+                self.dct_method,
+                self.icc_profile,
+            )?;
+            return Ok(base);
+        }
+
         let needs_custom_quant: bool = self.force_baseline
             || self.linear_scale_factor.is_some()
             || self.has_custom_quant_tables();

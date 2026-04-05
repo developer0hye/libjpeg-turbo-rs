@@ -37,7 +37,7 @@ fn read_file(path: &Path) -> Vec<u8> {
 /// -rgb -dct int -icc test1.icc  testorig.ppm → JPEG
 /// Validates: RGB colorspace encode with ICC profile, islow DCT.
 #[test]
-#[ignore = "FIXME: encoder output differs from C cjpeg on non-MCU-aligned testorig.ppm (RGB colorspace)"]
+#[ignore = "FIXME: RGB direct encode works but non-MCU-aligned edge block padding differs from C cjpeg (227x149)"]
 fn c_cjpeg_rgb_islow() {
     let cjpeg = match helpers::cjpeg_path() {
         Some(p) => p,

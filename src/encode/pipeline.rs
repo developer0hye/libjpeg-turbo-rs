@@ -1126,7 +1126,6 @@ fn compress_cmyk(pixels: &[u8], width: usize, height: usize, quality: u8) -> Res
     let dc_table = build_huff_table(&tables::DC_LUMINANCE_BITS, &tables::DC_LUMINANCE_VALUES);
     let ac_table = build_huff_table(&tables::AC_LUMINANCE_BITS, &tables::AC_LUMINANCE_VALUES);
 
-    // Extract 4 component planes from interleaved CMYK
     let num_pixels = width * height;
     let mut planes: [Vec<u8>; 4] = [
         vec![0u8; num_pixels],
@@ -1141,7 +1140,6 @@ fn compress_cmyk(pixels: &[u8], width: usize, height: usize, quality: u8) -> Res
         planes[3][i] = pixels[i * 4 + 3];
     }
 
-    // MCU = 8x8 (all 1x1 sampling)
     let mcus_x = width.div_ceil(8);
     let mcus_y = height.div_ceil(8);
 
@@ -1173,21 +1171,17 @@ fn compress_cmyk(pixels: &[u8], width: usize, height: usize, quality: u8) -> Res
 
     bit_writer.flush();
 
-    // Assemble output
     let mut output = Vec::with_capacity(bit_writer.data().len() + 1024);
 
     marker_writer::write_soi(&mut output);
     marker_writer::write_app0_jfif(&mut output);
-    marker_writer::write_app14_adobe(&mut output, 0); // transform=0 for CMYK
+    marker_writer::write_app14_adobe(&mut output, 0);
 
-    // Single quant table for all 4 components
     marker_writer::write_dqt(&mut output, 0, &quant_table);
 
-    // SOF0 with 4 components, all 1x1 sampling, same quant table
     let components = vec![(1, 1, 1, 0), (2, 1, 1, 0), (3, 1, 1, 0), (4, 1, 1, 0)];
     marker_writer::write_sof0(&mut output, width as u16, height as u16, &components);
 
-    // Single pair of Huffman tables shared by all 4 components
     marker_writer::write_dht(
         &mut output,
         0,
@@ -1203,12 +1197,119 @@ fn compress_cmyk(pixels: &[u8], width: usize, height: usize, quality: u8) -> Res
         &tables::AC_LUMINANCE_VALUES,
     );
 
-    // SOS: 4 components, all using table 0
     let scan_components = vec![(1, 0, 0), (2, 0, 0), (3, 0, 0), (4, 0, 0)];
     marker_writer::write_sos(&mut output, &scan_components);
 
     output.extend_from_slice(bit_writer.data());
 
+    marker_writer::write_eoi(&mut output);
+
+    Ok(output)
+}
+
+/// Compress RGB pixels directly without color conversion (JCS_RGB / `cjpeg -rgb`).
+///
+/// Component IDs follow C libjpeg-turbo convention: R=82('R'), G=71('G'), B=66('B').
+/// All 3 components use 1x1 sampling and the same luminance quantization table.
+/// Produces Adobe APP14 marker with transform=0 (no JFIF APP0).
+pub fn compress_rgb_direct(
+    pixels: &[u8],
+    width: usize,
+    height: usize,
+    quality: u8,
+    dct_method: DctMethod,
+    icc_profile: Option<&[u8]>,
+) -> Result<Vec<u8>> {
+    let quant_table =
+        tables::quality_scale_quant_table(&tables::STD_LUMINANCE_QUANT_TABLE, quality);
+    let divisors = scale_quant_for_fdct(&quant_table);
+
+    let dc_table = build_huff_table(&tables::DC_LUMINANCE_BITS, &tables::DC_LUMINANCE_VALUES);
+    let ac_table = build_huff_table(&tables::AC_LUMINANCE_BITS, &tables::AC_LUMINANCE_VALUES);
+
+    // Extract 3 component planes from interleaved RGB
+    let num_pixels: usize = width * height;
+    let mut planes: [Vec<u8>; 3] = [
+        vec![0u8; num_pixels],
+        vec![0u8; num_pixels],
+        vec![0u8; num_pixels],
+    ];
+    for i in 0..num_pixels {
+        planes[0][i] = pixels[i * 3];     // R
+        planes[1][i] = pixels[i * 3 + 1]; // G
+        planes[2][i] = pixels[i * 3 + 2]; // B
+    }
+
+    let mcus_x: usize = width.div_ceil(8);
+    let mcus_y: usize = height.div_ceil(8);
+
+    let enc_simd = crate::simd::detect_encoder();
+    let mut bit_writer = BitWriter::new(width * height);
+    let mut prev_dc = [0i16; 3];
+
+    for mcu_row in 0..mcus_y {
+        for mcu_col in 0..mcus_x {
+            let x0: usize = mcu_col * 8;
+            let y0: usize = mcu_row * 8;
+            for c in 0..3 {
+                encode_single_block(
+                    &planes[c],
+                    width,
+                    height,
+                    x0,
+                    y0,
+                    &divisors,
+                    &dc_table,
+                    &ac_table,
+                    &mut bit_writer,
+                    &mut prev_dc[c],
+                    enc_simd.fdct_quantize,
+                );
+            }
+        }
+    }
+
+    bit_writer.flush();
+
+    let mut output: Vec<u8> = Vec::with_capacity(bit_writer.data().len() + 1024);
+
+    marker_writer::write_soi(&mut output);
+    // RGB: Adobe APP14 with transform=0, NO JFIF APP0
+    marker_writer::write_app14_adobe(&mut output, 0);
+
+    // ICC profile immediately after APP14 (matching C cjpeg marker order)
+    if let Some(icc) = icc_profile {
+        marker_writer::write_app2_icc(&mut output, icc);
+    }
+
+    // Single quant table for all 3 components
+    marker_writer::write_dqt(&mut output, 0, &quant_table);
+
+    // SOF0: component IDs = 'R'(82), 'G'(71), 'B'(66), all 1x1, qt=0
+    let components: Vec<(u8, u8, u8, u8)> = vec![(82, 1, 1, 0), (71, 1, 1, 0), (66, 1, 1, 0)];
+    marker_writer::write_sof0(&mut output, width as u16, height as u16, &components);
+
+    // Single pair of Huffman tables
+    marker_writer::write_dht(
+        &mut output,
+        0,
+        0,
+        &tables::DC_LUMINANCE_BITS,
+        &tables::DC_LUMINANCE_VALUES,
+    );
+    marker_writer::write_dht(
+        &mut output,
+        1,
+        0,
+        &tables::AC_LUMINANCE_BITS,
+        &tables::AC_LUMINANCE_VALUES,
+    );
+
+    // SOS: 3 components, all using table 0
+    let scan_components: Vec<(u8, u8, u8)> = vec![(82, 0, 0), (71, 0, 0), (66, 0, 0)];
+    marker_writer::write_sos(&mut output, &scan_components);
+
+    output.extend_from_slice(bit_writer.data());
     marker_writer::write_eoi(&mut output);
 
     Ok(output)
