@@ -231,8 +231,7 @@ pub fn compress(
                 }
             }
             if src_h < dst_h {
-                let last_row: Vec<u8> =
-                    padded[(src_h - 1) * dst_w..src_h * dst_w].to_vec();
+                let last_row: Vec<u8> = padded[(src_h - 1) * dst_w..src_h * dst_w].to_vec();
                 for row in src_h..dst_h {
                     let dst_start: usize = row * dst_w;
                     padded[dst_start..dst_start + dst_w].copy_from_slice(&last_row);
@@ -241,12 +240,9 @@ pub fn compress(
             padded
         }
 
-        let y_plane_padded: Vec<u8> =
-            pad_plane(&y_plane, width, height, padded_w, padded_h);
-        let cb_plane_padded: Vec<u8> =
-            pad_plane(&cb_plane, width, height, padded_w, padded_h);
-        let cr_plane_padded: Vec<u8> =
-            pad_plane(&cr_plane, width, height, padded_w, padded_h);
+        let y_plane_padded: Vec<u8> = pad_plane(&y_plane, width, height, padded_w, padded_h);
+        let cb_plane_padded: Vec<u8> = pad_plane(&cb_plane, width, height, padded_w, padded_h);
+        let cr_plane_padded: Vec<u8> = pad_plane(&cr_plane, width, height, padded_w, padded_h);
 
         for mcu_row in 0..mcus_y {
             for mcu_col in 0..mcus_x {
@@ -1265,7 +1261,7 @@ pub fn compress_rgb_direct(
     width: usize,
     height: usize,
     quality: u8,
-    dct_method: DctMethod,
+    _dct_method: DctMethod,
     icc_profile: Option<&[u8]>,
 ) -> Result<Vec<u8>> {
     let quant_table =
@@ -1283,7 +1279,7 @@ pub fn compress_rgb_direct(
         vec![0u8; num_pixels],
     ];
     for i in 0..num_pixels {
-        planes[0][i] = pixels[i * 3];     // R
+        planes[0][i] = pixels[i * 3]; // R
         planes[1][i] = pixels[i * 3 + 1]; // G
         planes[2][i] = pixels[i * 3 + 2]; // B
     }
@@ -3328,7 +3324,7 @@ pub fn compute_reciprocal(divisor: u16) -> (u16, u16, i16) {
     let fr: u32 = (1u32 << r) % divisor as u32;
 
     let mut recip: u32 = fq;
-    let mut corr: u16 = (divisor / 2) as u16;
+    let mut corr: u16 = divisor / 2;
     let mut r: i32 = r;
 
     if fr == 0 {
@@ -3389,6 +3385,113 @@ fn scale_quant_for_fdct(quant_table: &[u16; 64]) -> QuantDivisors {
 }
 
 /// Convert input pixels to Y, Cb, Cr planes.
+#[allow(clippy::type_complexity)]
+/// Convert pixels to YCbCr planes with MCU-aligned padding.
+///
+/// Returns `(y_plane, cb_plane, cr_plane, padded_w, padded_h)` where planes are
+/// padded to `padded_w × padded_h` with replicated-last-pixel/row matching C
+/// libjpeg-turbo's `expand_right_edge` behavior.  All blocks (including edge)
+/// are interior to the padded dimensions, so the NEON fused FDCT+quantize path
+/// is always taken, ensuring byte-identical output with C.
+fn convert_to_ycbcr_padded(
+    pixels: &[u8],
+    width: usize,
+    height: usize,
+    padded_w: usize,
+    padded_h: usize,
+    pixel_format: PixelFormat,
+    rgb_to_ycbcr_row_fn: fn(&[u8], &mut [u8], &mut [u8], &mut [u8], usize),
+) -> Result<(Vec<u8>, Vec<u8>, Vec<u8>)> {
+    let plane_size: usize = padded_w * padded_h;
+    let mut y_plane: Vec<u8> = vec![0u8; plane_size];
+    let mut cb_plane: Vec<u8> = vec![0u8; plane_size];
+    let mut cr_plane: Vec<u8> = vec![0u8; plane_size];
+
+    let bpp: usize = pixel_format.bytes_per_pixel();
+
+    match pixel_format {
+        PixelFormat::Grayscale => {
+            for row in 0..height {
+                let src_start: usize = row * width;
+                let dst_start: usize = row * padded_w;
+                y_plane[dst_start..dst_start + width]
+                    .copy_from_slice(&pixels[src_start..src_start + width]);
+                // Right-edge padding
+                if width < padded_w {
+                    let last_val: u8 = pixels[src_start + width - 1];
+                    for x in width..padded_w {
+                        y_plane[dst_start + x] = last_val;
+                    }
+                }
+            }
+        }
+        PixelFormat::Rgb => {
+            for row in 0..height {
+                let src_offset: usize = row * width * bpp;
+                let dst_offset: usize = row * padded_w;
+                rgb_to_ycbcr_row_fn(
+                    &pixels[src_offset..src_offset + width * bpp],
+                    &mut y_plane[dst_offset..dst_offset + width],
+                    &mut cb_plane[dst_offset..dst_offset + width],
+                    &mut cr_plane[dst_offset..dst_offset + width],
+                    width,
+                );
+                // Right-edge padding
+                if width < padded_w {
+                    let last_y: u8 = y_plane[dst_offset + width - 1];
+                    let last_cb: u8 = cb_plane[dst_offset + width - 1];
+                    let last_cr: u8 = cr_plane[dst_offset + width - 1];
+                    for x in width..padded_w {
+                        y_plane[dst_offset + x] = last_y;
+                        cb_plane[dst_offset + x] = last_cb;
+                        cr_plane[dst_offset + x] = last_cr;
+                    }
+                }
+            }
+        }
+        _ => {
+            // Non-RGB formats: use convert_to_ycbcr then pad
+            let (y_raw, cb_raw, cr_raw) =
+                convert_to_ycbcr(pixels, width, height, pixel_format, rgb_to_ycbcr_row_fn)?;
+            for row in 0..height {
+                let src_start: usize = row * width;
+                let dst_start: usize = row * padded_w;
+                y_plane[dst_start..dst_start + width]
+                    .copy_from_slice(&y_raw[src_start..src_start + width]);
+                cb_plane[dst_start..dst_start + width]
+                    .copy_from_slice(&cb_raw[src_start..src_start + width]);
+                cr_plane[dst_start..dst_start + width]
+                    .copy_from_slice(&cr_raw[src_start..src_start + width]);
+                if width < padded_w {
+                    let last_y: u8 = y_raw[src_start + width - 1];
+                    let last_cb: u8 = cb_raw[src_start + width - 1];
+                    let last_cr: u8 = cr_raw[src_start + width - 1];
+                    for x in width..padded_w {
+                        y_plane[dst_start + x] = last_y;
+                        cb_plane[dst_start + x] = last_cb;
+                        cr_plane[dst_start + x] = last_cr;
+                    }
+                }
+            }
+        }
+    }
+
+    // Bottom-edge padding: replicate last row
+    if height < padded_h {
+        let last_row: Vec<u8> = y_plane[(height - 1) * padded_w..height * padded_w].to_vec();
+        let last_cb: Vec<u8> = cb_plane[(height - 1) * padded_w..height * padded_w].to_vec();
+        let last_cr: Vec<u8> = cr_plane[(height - 1) * padded_w..height * padded_w].to_vec();
+        for row in height..padded_h {
+            let dst: usize = row * padded_w;
+            y_plane[dst..dst + padded_w].copy_from_slice(&last_row);
+            cb_plane[dst..dst + padded_w].copy_from_slice(&last_cb);
+            cr_plane[dst..dst + padded_w].copy_from_slice(&last_cr);
+        }
+    }
+
+    Ok((y_plane, cb_plane, cr_plane))
+}
+
 #[allow(clippy::type_complexity)]
 fn convert_to_ycbcr(
     pixels: &[u8],
@@ -3679,7 +3782,7 @@ fn downsample_chroma_block(
 
     // Scalar fallback: alternating bias matching C libjpeg-turbo jcsample.c
     let divisor: u32 = (h_factor * v_factor) as u32;
-    let use_alt: bool = (h_factor == 2 && v_factor == 1) || (h_factor == 2 && v_factor == 2);
+    let use_alt: bool = h_factor == 2 && (v_factor == 1 || v_factor == 2);
     for row in 0..8 {
         let mut bias: u32 = if h_factor == 2 && v_factor == 1 {
             0
@@ -3909,36 +4012,22 @@ fn encode_single_block(
 
     // Border blocks: pad to a local 8×8 buffer with replicated-last-pixel,
     // then use the NEON/AVX2 fused path.  This ensures byte-identical output
-    // with C libjpeg-turbo's expand_right_edge + NEON convsamp/fdct path
-    // for all encode functions (compress, compress_optimized, compress_arithmetic, etc.).
-    let mut local_buf = [0u8; 64]; // 8×8 padded block
-    for row in 0..8usize {
-        let src_y: usize = (block_y + row).min(plane_height - 1);
-        for col in 0..8usize {
-            let src_x: usize = (block_x + col).min(plane_width - 1);
-            local_buf[row * 8 + col] = plane[src_y * plane_width + src_x];
+    // with C libjpeg-turbo's expand_right_edge + NEON convsamp/fdct path.
+    let is_edge: bool = block_x + 8 > plane_width || block_y + 8 > plane_height;
+    if is_edge {
+        let mut local_buf = [0u8; 64]; // 8×8 padded block
+        for row in 0..8usize {
+            let src_y: usize = (block_y + row).min(plane_height - 1);
+            for col in 0..8usize {
+                let src_x: usize = (block_x + col).min(plane_width - 1);
+                local_buf[row * 8 + col] = plane[src_y * plane_width + src_x];
+            }
         }
-    }
 
-    // Use the fused NEON/AVX2 path on the padded 8×8 buffer (stride=8, always interior)
-    #[cfg(target_arch = "aarch64")]
-    {
-        unsafe {
-            crate::simd::aarch64::neon_extract_fdct_quantize(
-                local_buf.as_ptr(),
-                8, // stride = 8 for the local buffer
-                quant_table,
-                &mut quantized,
-            );
-        }
-        HuffmanEncoder::encode_block(writer, &quantized, prev_dc, dc_table, ac_table);
-        return;
-    }
-    #[cfg(target_arch = "x86_64")]
-    {
-        if is_x86_feature_detected!("avx2") {
+        #[cfg(target_arch = "aarch64")]
+        {
             unsafe {
-                crate::simd::x86_64::avx2_extract_fdct_quantize(
+                crate::simd::aarch64::neon_extract_fdct_quantize(
                     local_buf.as_ptr(),
                     8,
                     quant_table,
@@ -3948,13 +4037,34 @@ fn encode_single_block(
             HuffmanEncoder::encode_block(writer, &quantized, prev_dc, dc_table, ac_table);
             return;
         }
+        #[cfg(target_arch = "x86_64")]
+        {
+            if is_x86_feature_detected!("avx2") {
+                unsafe {
+                    crate::simd::x86_64::avx2_extract_fdct_quantize(
+                        local_buf.as_ptr(),
+                        8,
+                        quant_table,
+                        &mut quantized,
+                    );
+                }
+                HuffmanEncoder::encode_block(writer, &quantized, prev_dc, dc_table, ac_table);
+                return;
+            }
+        }
     }
 
-    // Scalar fallback (non-SIMD platforms)
+    // Fallback for border blocks (non-SIMD) or interior blocks without AVX2:
+    // use extract_block + fdct_quantize_fn
     let mut block = [0i16; 64];
-    for i in 0..64 {
-        block[i] = local_buf[i] as i16 - 128;
-    }
+    extract_block(
+        plane,
+        plane_width,
+        plane_height,
+        block_x,
+        block_y,
+        &mut block,
+    );
     fdct_quantize_fn(&mut block, quant_table, &mut quantized);
     HuffmanEncoder::encode_block(writer, &quantized, prev_dc, dc_table, ac_table);
 }
@@ -5091,14 +5201,7 @@ fn encode_downsampled_chroma_block(
     // Scalar fallback (non-SIMD platforms): downsample from padded buffer
     let mut block = [0i16; 64];
     downsample_chroma_block(
-        &local_buf,
-        src_w,
-        src_h,
-        0,
-        0,
-        h_factor,
-        v_factor,
-        &mut block,
+        &local_buf, src_w, src_h, 0, 0, h_factor, v_factor, &mut block,
     );
 
     let mut quantized = [0i16; 64];
@@ -5148,15 +5251,6 @@ pub fn compress_optimized(
     // SIMD dispatch — used for both color conversion and FDCT+quantize
     let enc_simd = crate::simd::detect_encoder();
 
-    // Color convert
-    let (y_plane, cb_plane, cr_plane) = convert_to_ycbcr(
-        pixels,
-        width,
-        height,
-        pixel_format,
-        enc_simd.rgb_to_ycbcr_row,
-    )?;
-
     // Determine MCU dimensions
     let (mcu_w, mcu_h) = if is_grayscale {
         (8, 8)
@@ -5173,6 +5267,24 @@ pub fn compress_optimized(
 
     let mcus_x = width.div_ceil(mcu_w);
     let mcus_y = height.div_ceil(mcu_h);
+    let padded_w: usize = mcus_x * mcu_w;
+    let padded_h: usize = mcus_y * mcu_h;
+
+    // Color convert with MCU-aligned padding (matches C expand_right_edge)
+    let (y_plane, cb_plane, cr_plane) = convert_to_ycbcr_padded(
+        pixels,
+        width,
+        height,
+        padded_w,
+        padded_h,
+        pixel_format,
+        enc_simd.rgb_to_ycbcr_row,
+    )?;
+
+    // Shadow width/height with padded values so all encode loops use padded planes.
+    // The planes are already padded to padded_w × padded_h by convert_to_ycbcr_padded.
+    let width: usize = padded_w;
+    let height: usize = padded_h;
 
     // === Pass 1: FDCT + quantize all blocks, gather symbol frequencies ===
     use crate::encode::huff_opt;
@@ -5763,6 +5875,78 @@ fn gather_block(
     quant_table: &QuantDivisors,
     fdct_quantize_fn: fn(&mut [i16; 64], &QuantDivisors, &mut [i16; 64]),
 ) -> [i16; 64] {
+    let mut quantized = [0i16; 64];
+
+    // NEON/AVX2 fused path for interior blocks
+    if block_x + 8 <= plane_width && block_y + 8 <= plane_height {
+        #[cfg(target_arch = "aarch64")]
+        {
+            unsafe {
+                crate::simd::aarch64::neon_extract_fdct_quantize(
+                    plane.as_ptr().add(block_y * plane_width + block_x),
+                    plane_width,
+                    quant_table,
+                    &mut quantized,
+                );
+            }
+            return quantized;
+        }
+        #[cfg(target_arch = "x86_64")]
+        {
+            if is_x86_feature_detected!("avx2") {
+                unsafe {
+                    crate::simd::x86_64::avx2_extract_fdct_quantize(
+                        plane.as_ptr().add(block_y * plane_width + block_x),
+                        plane_width,
+                        quant_table,
+                        &mut quantized,
+                    );
+                }
+                return quantized;
+            }
+        }
+    }
+
+    // Edge blocks: pad to 8×8 then use NEON/AVX2
+    let is_edge: bool = block_x + 8 > plane_width || block_y + 8 > plane_height;
+    if is_edge {
+        let mut local_buf = [0u8; 64];
+        for row in 0..8usize {
+            let src_y = (block_y + row).min(plane_height - 1);
+            for col in 0..8usize {
+                let src_x = (block_x + col).min(plane_width - 1);
+                local_buf[row * 8 + col] = plane[src_y * plane_width + src_x];
+            }
+        }
+        #[cfg(target_arch = "aarch64")]
+        {
+            unsafe {
+                crate::simd::aarch64::neon_extract_fdct_quantize(
+                    local_buf.as_ptr(),
+                    8,
+                    quant_table,
+                    &mut quantized,
+                );
+            }
+            return quantized;
+        }
+        #[cfg(target_arch = "x86_64")]
+        {
+            if is_x86_feature_detected!("avx2") {
+                unsafe {
+                    crate::simd::x86_64::avx2_extract_fdct_quantize(
+                        local_buf.as_ptr(),
+                        8,
+                        quant_table,
+                        &mut quantized,
+                    );
+                }
+                return quantized;
+            }
+        }
+    }
+
+    // Fallback: extract_block (with SSE2 for interior) + fdct_quantize
     let mut block = [0i16; 64];
     extract_block(
         plane,
@@ -5772,8 +5956,6 @@ fn gather_block(
         block_y,
         &mut block,
     );
-
-    let mut quantized = [0i16; 64];
     fdct_quantize_fn(&mut block, quant_table, &mut quantized);
     quantized
 }
@@ -5791,18 +5973,136 @@ fn gather_downsampled_block(
     quant_table: &QuantDivisors,
     fdct_quantize_fn: fn(&mut [i16; 64], &QuantDivisors, &mut [i16; 64]),
 ) -> [i16; 64] {
+    let src_w: usize = 8 * h_factor;
+    let src_h: usize = 8 * v_factor;
+
+    // NEON/AVX2 fused downsample+FDCT+quantize for interior blocks
+    if block_x + src_w <= plane_width && block_y + src_h <= plane_height {
+        #[cfg(target_arch = "aarch64")]
+        {
+            let mut quantized = [0i16; 64];
+            if h_factor == 2 && v_factor == 2 {
+                unsafe {
+                    crate::simd::aarch64::neon_downsample_h2v2_fdct_quantize(
+                        plane.as_ptr().add(block_y * plane_width + block_x),
+                        plane_width,
+                        quant_table,
+                        &mut quantized,
+                    );
+                }
+                return quantized;
+            }
+            if h_factor == 2 && v_factor == 1 {
+                unsafe {
+                    crate::simd::aarch64::neon_downsample_h2v1_fdct_quantize(
+                        plane.as_ptr().add(block_y * plane_width + block_x),
+                        plane_width,
+                        quant_table,
+                        &mut quantized,
+                    );
+                }
+                return quantized;
+            }
+        }
+        #[cfg(target_arch = "x86_64")]
+        {
+            if is_x86_feature_detected!("avx2") {
+                let mut quantized = [0i16; 64];
+                if h_factor == 2 && v_factor == 2 {
+                    unsafe {
+                        crate::simd::x86_64::avx2_downsample_h2v2_fdct_quantize(
+                            plane.as_ptr().add(block_y * plane_width + block_x),
+                            plane_width,
+                            quant_table,
+                            &mut quantized,
+                        );
+                    }
+                    return quantized;
+                }
+                if h_factor == 2 && v_factor == 1 {
+                    unsafe {
+                        crate::simd::x86_64::avx2_downsample_h2v1_fdct_quantize(
+                            plane.as_ptr().add(block_y * plane_width + block_x),
+                            plane_width,
+                            quant_table,
+                            &mut quantized,
+                        );
+                    }
+                    return quantized;
+                }
+            }
+        }
+    }
+
+    // Edge block: pad source area locally and use NEON/AVX2
+    let mut local_buf = vec![0u8; src_w * src_h];
+    for row in 0..src_h {
+        let src_y = (block_y + row).min(plane_height - 1);
+        for col in 0..src_w {
+            let src_x = (block_x + col).min(plane_width - 1);
+            local_buf[row * src_w + col] = plane[src_y * plane_width + src_x];
+        }
+    }
+    #[cfg(target_arch = "aarch64")]
+    {
+        let mut quantized = [0i16; 64];
+        if h_factor == 2 && v_factor == 2 {
+            unsafe {
+                crate::simd::aarch64::neon_downsample_h2v2_fdct_quantize(
+                    local_buf.as_ptr(),
+                    src_w,
+                    quant_table,
+                    &mut quantized,
+                );
+            }
+            return quantized;
+        }
+        if h_factor == 2 && v_factor == 1 {
+            unsafe {
+                crate::simd::aarch64::neon_downsample_h2v1_fdct_quantize(
+                    local_buf.as_ptr(),
+                    src_w,
+                    quant_table,
+                    &mut quantized,
+                );
+            }
+            return quantized;
+        }
+    }
+    #[cfg(target_arch = "x86_64")]
+    {
+        if is_x86_feature_detected!("avx2") {
+            let mut quantized = [0i16; 64];
+            if h_factor == 2 && v_factor == 2 {
+                unsafe {
+                    crate::simd::x86_64::avx2_downsample_h2v2_fdct_quantize(
+                        local_buf.as_ptr(),
+                        src_w,
+                        quant_table,
+                        &mut quantized,
+                    );
+                }
+                return quantized;
+            }
+            if h_factor == 2 && v_factor == 1 {
+                unsafe {
+                    crate::simd::x86_64::avx2_downsample_h2v1_fdct_quantize(
+                        local_buf.as_ptr(),
+                        src_w,
+                        quant_table,
+                        &mut quantized,
+                    );
+                }
+                return quantized;
+            }
+        }
+    }
+
+    // Scalar fallback
     let mut block = [0i16; 64];
     downsample_chroma_block(
-        plane,
-        plane_width,
-        plane_height,
-        block_x,
-        block_y,
-        h_factor,
-        v_factor,
-        &mut block,
+        &local_buf, src_w, src_h, 0, 0, h_factor, v_factor, &mut block,
     );
-
     let mut quantized = [0i16; 64];
     fdct_quantize_fn(&mut block, quant_table, &mut quantized);
     quantized

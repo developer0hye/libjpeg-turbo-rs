@@ -714,8 +714,7 @@ impl<'a> Encoder<'a> {
 
         // RGB-direct encoding: bypass color conversion entirely.
         // Matches C cjpeg `-rgb` (JCS_RGB colorspace).
-        if self.colorspace_override == Some(ColorSpace::Rgb)
-            && effective_format == PixelFormat::Rgb
+        if self.colorspace_override == Some(ColorSpace::Rgb) && effective_format == PixelFormat::Rgb
         {
             let base = encoder::compress_rgb_direct(
                 effective_pixels,

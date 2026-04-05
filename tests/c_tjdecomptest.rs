@@ -38,15 +38,60 @@ struct SubsampEntry {
 }
 
 const SUBSAMP_TABLE: &[SubsampEntry] = &[
-    SubsampEntry { label: "444", samp_opt: "1x1", nosmooth_supported: false, rust_supported: true  },
-    SubsampEntry { label: "422", samp_opt: "2x1", nosmooth_supported: true,  rust_supported: true  },
-    SubsampEntry { label: "440", samp_opt: "1x2", nosmooth_supported: true,  rust_supported: true  },
-    SubsampEntry { label: "420", samp_opt: "2x2", nosmooth_supported: true,  rust_supported: true  },
-    SubsampEntry { label: "411", samp_opt: "4x1", nosmooth_supported: false, rust_supported: true  },
-    SubsampEntry { label: "441", samp_opt: "1x4", nosmooth_supported: false, rust_supported: true  },
-    SubsampEntry { label: "410", samp_opt: "4x2", nosmooth_supported: false, rust_supported: true  },
-    SubsampEntry { label: "24",  samp_opt: "2x4", nosmooth_supported: false, rust_supported: true  },
-    SubsampEntry { label: "32",  samp_opt: "3x2", nosmooth_supported: false, rust_supported: false },
+    SubsampEntry {
+        label: "444",
+        samp_opt: "1x1",
+        nosmooth_supported: false,
+        rust_supported: true,
+    },
+    SubsampEntry {
+        label: "422",
+        samp_opt: "2x1",
+        nosmooth_supported: true,
+        rust_supported: true,
+    },
+    SubsampEntry {
+        label: "440",
+        samp_opt: "1x2",
+        nosmooth_supported: true,
+        rust_supported: true,
+    },
+    SubsampEntry {
+        label: "420",
+        samp_opt: "2x2",
+        nosmooth_supported: true,
+        rust_supported: true,
+    },
+    SubsampEntry {
+        label: "411",
+        samp_opt: "4x1",
+        nosmooth_supported: false,
+        rust_supported: true,
+    },
+    SubsampEntry {
+        label: "441",
+        samp_opt: "1x4",
+        nosmooth_supported: false,
+        rust_supported: true,
+    },
+    SubsampEntry {
+        label: "410",
+        samp_opt: "4x2",
+        nosmooth_supported: false,
+        rust_supported: true,
+    },
+    SubsampEntry {
+        label: "24",
+        samp_opt: "2x4",
+        nosmooth_supported: false,
+        rust_supported: true,
+    },
+    SubsampEntry {
+        label: "32",
+        samp_opt: "3x2",
+        nosmooth_supported: false,
+        rust_supported: false,
+    },
 ];
 
 // All crop regions from the C script (-cr args).
@@ -63,22 +108,8 @@ const CROP_ARGS: &[&str] = &[
 // Scale arguments from the C script (-s args). "" means no scale (1/1).
 #[cfg(feature = "full-c-parity")]
 const SCALE_ARGS: &[&str] = &[
-    "",
-    "16/8",
-    "15/8",
-    "14/8",
-    "13/8",
-    "12/8",
-    "11/8",
-    "10/8",
-    "9/8",
-    "7/8",
-    "6/8",
-    "5/8",
-    "4/8",
-    "3/8",
-    "2/8",
-    "1/8",
+    "", "16/8", "15/8", "14/8", "13/8", "12/8", "11/8", "10/8", "9/8", "7/8", "6/8", "5/8", "4/8",
+    "3/8", "2/8", "1/8",
 ];
 
 // Small scales that cannot be combined with crop (C script rule).
@@ -111,20 +142,11 @@ fn parse_crop(s: &str) -> (usize, usize, usize, usize) {
 
 /// Generate the test JPEG for a given subsampling using C cjpeg.
 /// Returns the path to the generated JPEG temp file (kept alive by TempFile).
-fn generate_test_jpeg(
-    cjpeg: &Path,
-    entry: &SubsampEntry,
-    out_path: &Path,
-) {
+fn generate_test_jpeg(cjpeg: &Path, entry: &SubsampEntry, out_path: &Path) {
     let img_dir: PathBuf = helpers::c_testimages_dir();
     let rgb_img: PathBuf = img_dir.join("testorig.ppm");
 
-    helpers::run_c_cjpeg(
-        cjpeg,
-        &["-sa", entry.samp_opt],
-        &rgb_img,
-        out_path,
-    );
+    helpers::run_c_cjpeg(cjpeg, &["-sa", entry.samp_opt], &rgb_img, out_path);
 }
 
 /// Decode a JPEG with our Rust Decoder and write the RGB output as PPM.
@@ -165,7 +187,10 @@ fn rust_decode_rgb(
     let img = match dec.decode_image() {
         Ok(i) => i,
         Err(e) => {
-            eprintln!("SKIP: Rust decode failed (scale={:?} crop={:?}): {:?}", scale_arg, crop_arg, e);
+            eprintln!(
+                "SKIP: Rust decode failed (scale={:?} crop={:?}): {:?}",
+                scale_arg, crop_arg, e
+            );
             return false;
         }
     };
@@ -213,7 +238,10 @@ fn rust_decode_gray(
     let img = match dec.decode_image() {
         Ok(i) => i,
         Err(e) => {
-            eprintln!("SKIP: Rust gray decode failed (scale={:?} crop={:?}): {:?}", scale_arg, crop_arg, e);
+            eprintln!(
+                "SKIP: Rust gray decode failed (scale={:?} crop={:?}): {:?}",
+                scale_arg, crop_arg, e
+            );
             return false;
         }
     };
@@ -288,7 +316,8 @@ fn run_combo(
         label_prefix, entry.label, scale_str, crop_str, nosmooth, dct_fast
     );
 
-    let (rgb_djpeg_args, gray_djpeg_args) = build_djpeg_args(scale_arg, crop_arg, nosmooth, dct_fast);
+    let (rgb_djpeg_args, gray_djpeg_args) =
+        build_djpeg_args(scale_arg, crop_arg, nosmooth, dct_fast);
     let rgb_djpeg_refs: Vec<&str> = rgb_djpeg_args.iter().map(|s| s.as_str()).collect();
     let gray_djpeg_refs: Vec<&str> = gray_djpeg_args.iter().map(|s| s.as_str()).collect();
 
@@ -296,7 +325,14 @@ fn run_combo(
     let rust_ppm: helpers::TempFile = helpers::TempFile::new(&format!("{}_rust.ppm", label));
     let c_ppm: helpers::TempFile = helpers::TempFile::new(&format!("{}_c.ppm", label));
 
-    if rust_decode_rgb(jpeg_path, scale_arg, crop_arg, nosmooth, dct_fast, rust_ppm.path()) {
+    if rust_decode_rgb(
+        jpeg_path,
+        scale_arg,
+        crop_arg,
+        nosmooth,
+        dct_fast,
+        rust_ppm.path(),
+    ) {
         helpers::run_c_djpeg(djpeg, &rgb_djpeg_refs, jpeg_path, c_ppm.path());
         helpers::assert_files_identical(rust_ppm.path(), c_ppm.path(), &format!("{} RGB", label));
         count += 1;
@@ -307,9 +343,20 @@ fn run_combo(
         let rust_pgm: helpers::TempFile = helpers::TempFile::new(&format!("{}_rust.pgm", label));
         let c_pgm: helpers::TempFile = helpers::TempFile::new(&format!("{}_c.pgm", label));
 
-        if rust_decode_gray(jpeg_path, scale_arg, crop_arg, nosmooth, dct_fast, rust_pgm.path()) {
+        if rust_decode_gray(
+            jpeg_path,
+            scale_arg,
+            crop_arg,
+            nosmooth,
+            dct_fast,
+            rust_pgm.path(),
+        ) {
             helpers::run_c_djpeg(djpeg, &gray_djpeg_refs, jpeg_path, c_pgm.path());
-            helpers::assert_files_identical(rust_pgm.path(), c_pgm.path(), &format!("{} GRAY", label));
+            helpers::assert_files_identical(
+                rust_pgm.path(),
+                c_pgm.path(),
+                &format!("{} GRAY", label),
+            );
             count += 1;
         }
     }
@@ -382,8 +429,7 @@ fn run_decode_matrix(
                     // Simplified: we test dct_fast only when include_dct_fast=true and
                     // the scale is 4/8 with subsamp 420, or scale is empty.
                     let dct_fast_values: &[bool] = if include_dct_fast
-                        && ((scale_arg == "4/8"
-                            && (entry.label == "420" || entry.label == "32"))
+                        && ((scale_arg == "4/8" && (entry.label == "420" || entry.label == "32"))
                             || scale_arg.is_empty())
                     {
                         &[false, true]
