@@ -88,12 +88,7 @@ fn generate_test_pixels() -> Vec<u8> {
 
 /// Generate a test JPEG using C cjpeg (matching the C croptest.in approach).
 /// Falls back to Rust compress if cjpeg is unavailable.
-fn make_test_jpeg_with_c(
-    cjpeg: &Path,
-    pixels: &[u8],
-    samp: &SampConfig,
-    prog: bool,
-) -> Vec<u8> {
+fn make_test_jpeg_with_c(cjpeg: &Path, pixels: &[u8], samp: &SampConfig, prog: bool) -> Vec<u8> {
     let ppm: Vec<u8> = if samp.is_gray {
         // Convert RGB to grayscale for cjpeg input
         let gray_pixels: Vec<u8> = pixels
@@ -114,7 +109,8 @@ fn make_test_jpeg_with_c(
     let ppm_tmp: helpers::TempFile = helpers::TempFile::new("croptest_src.ppm");
     ppm_tmp.write_bytes(&ppm);
 
-    let jpeg_tmp: helpers::TempFile = helpers::TempFile::new(&format!("croptest_{}.jpg", samp.name));
+    let jpeg_tmp: helpers::TempFile =
+        helpers::TempFile::new(&format!("croptest_{}.jpg", samp.name));
 
     let mut args: Vec<&str> = Vec::new();
     if prog {
@@ -124,8 +120,7 @@ fn make_test_jpeg_with_c(
 
     helpers::run_c_cjpeg(cjpeg, &args, ppm_tmp.path(), jpeg_tmp.path());
 
-    std::fs::read(jpeg_tmp.path())
-        .unwrap_or_else(|e| panic!("failed to read cjpeg output: {e}"))
+    std::fs::read(jpeg_tmp.path()).unwrap_or_else(|e| panic!("failed to read cjpeg output: {e}"))
 }
 
 /// Generate test JPEG using Rust encoder (fallback when cjpeg is unavailable).
@@ -150,8 +145,15 @@ fn make_test_jpeg_rust(pixels: &[u8], samp: &SampConfig) -> Vec<u8> {
         )
         .expect("compress grayscale must succeed")
     } else {
-        compress(pixels, WIDTH, HEIGHT, PixelFormat::Rgb, 95, samp.subsampling)
-            .expect("compress must succeed")
+        compress(
+            pixels,
+            WIDTH,
+            HEIGHT,
+            PixelFormat::Rgb,
+            95,
+            samp.subsampling,
+        )
+        .expect("compress must succeed")
     }
 }
 
@@ -284,15 +286,12 @@ fn run_crop_scenario(
     let c_extracted: Vec<u8> = if c_w == effective_w && channels == bpp {
         c_pixels
     } else if c_w >= effective_w && channels == bpp {
-        let mut extracted: Vec<u8> =
-            Vec::with_capacity(effective_w * effective_h * bpp);
+        let mut extracted: Vec<u8> = Vec::with_capacity(effective_w * effective_h * bpp);
         for row in 0..effective_h {
             let src_start: usize = row * c_w * channels + crop_x * channels;
             let src_end: usize = src_start + effective_w * channels;
             if src_end > c_pixels.len() {
-                eprintln!(
-                    "SKIP: [{scenario_label}] C buffer too short at row {row}"
-                );
+                eprintln!("SKIP: [{scenario_label}] C buffer too short at row {row}");
                 return false;
             }
             extracted.extend_from_slice(&c_pixels[src_start..src_end]);
@@ -301,8 +300,7 @@ fn run_crop_scenario(
     } else if channels == 3 && bpp == 1 && c_w >= effective_w {
         // djpeg -rgb outputs 3-channel PPM for grayscale; Rust outputs 1-channel.
         // Extract the red channel from C PPM (R==G==B for grayscale).
-        let mut extracted: Vec<u8> =
-            Vec::with_capacity(effective_w * effective_h);
+        let mut extracted: Vec<u8> = Vec::with_capacity(effective_w * effective_h);
         for row in 0..effective_h {
             for x in 0..effective_w {
                 let src_idx: usize = (row * c_w + crop_x + x) * 3;
@@ -357,9 +355,15 @@ fn c_croptest_quick() {
 
     // Verify djpeg supports -crop
     {
-        let probe_jpeg: Vec<u8> =
-            compress(&generate_test_pixels(), WIDTH, HEIGHT, PixelFormat::Rgb, 75, Subsampling::S444)
-                .expect("probe compress must succeed");
+        let probe_jpeg: Vec<u8> = compress(
+            &generate_test_pixels(),
+            WIDTH,
+            HEIGHT,
+            PixelFormat::Rgb,
+            75,
+            Subsampling::S444,
+        )
+        .expect("probe compress must succeed");
         let probe_tmp: helpers::TempFile = helpers::TempFile::new("probe.jpg");
         let probe_out: helpers::TempFile = helpers::TempFile::new("probe.ppm");
         probe_tmp.write_bytes(&probe_jpeg);
@@ -400,21 +404,12 @@ fn c_croptest_quick() {
                     None => make_test_jpeg_rust(&pixels, samp),
                 };
 
-                let label: String = format!(
-                    "quick_y{y_iter}_h{h_iter}_{}",
-                    samp.name
-                );
+                let label: String = format!("quick_y{y_iter}_h{h_iter}_{}", samp.name);
 
                 let ok: bool = run_crop_scenario(
-                    &djpeg,
-                    &jpeg_data,
-                    crop_w,
-                    crop_h,
-                    crop_x,
-                    crop_y,
+                    &djpeg, &jpeg_data, crop_w, crop_h, crop_x, crop_y,
                     false, // nosmooth=false for quick test
-                    samp.name,
-                    &label,
+                    samp.name, &label,
                 );
                 if ok {
                     compared += 1;
@@ -425,9 +420,7 @@ fn c_croptest_quick() {
         }
     }
 
-    eprintln!(
-        "c_croptest_quick: {compared} scenarios compared, {skipped} skipped"
-    );
+    eprintln!("c_croptest_quick: {compared} scenarios compared, {skipped} skipped");
     assert!(
         compared > 0,
         "c_croptest_quick: no scenarios were successfully compared"
@@ -466,8 +459,7 @@ fn c_croptest_quick_420() {
                 };
                 let label: String = format!("quick420gray_y{y_iter}_h{h_iter}_{}", samp.name);
                 run_crop_scenario(
-                    &djpeg, &jpeg_data, crop_w, crop_h, crop_x, crop_y,
-                    false, samp.name, &label,
+                    &djpeg, &jpeg_data, crop_w, crop_h, crop_x, crop_y, false, samp.name, &label,
                 );
             }
         }
@@ -503,8 +495,7 @@ fn c_croptest_quick_gray() {
             };
             let label: String = format!("quick_gray_y{y_iter}_h{h_iter}");
             if run_crop_scenario(
-                &djpeg, &jpeg_data, crop_w, crop_h, crop_x, crop_y,
-                false, samp.name, &label,
+                &djpeg, &jpeg_data, crop_w, crop_h, crop_x, crop_y, false, samp.name, &label,
             ) {
                 compared += 1;
             }
@@ -539,9 +530,15 @@ fn c_croptest_full() {
 
     // Verify djpeg supports -crop
     {
-        let probe_jpeg: Vec<u8> =
-            compress(&generate_test_pixels(), WIDTH, HEIGHT, PixelFormat::Rgb, 75, Subsampling::S444)
-                .expect("probe compress");
+        let probe_jpeg: Vec<u8> = compress(
+            &generate_test_pixels(),
+            WIDTH,
+            HEIGHT,
+            PixelFormat::Rgb,
+            75,
+            Subsampling::S444,
+        )
+        .expect("probe compress");
         let probe_tmp: helpers::TempFile = helpers::TempFile::new("full_probe.jpg");
         let probe_out: helpers::TempFile = helpers::TempFile::new("full_probe.ppm");
         probe_tmp.write_bytes(&probe_jpeg);
@@ -578,35 +575,23 @@ fn c_croptest_full() {
 
                 for y_iter in 0..=16usize {
                     for h_iter in 1..=16usize {
-                        let (crop_w, crop_h, crop_x, crop_y) =
-                            compute_crop_spec(y_iter, h_iter);
+                        let (crop_w, crop_h, crop_x, crop_y) = compute_crop_spec(y_iter, h_iter);
 
                         for samp in SAMP_CONFIGS {
                             // Generate test JPEG
                             let jpeg_data: Vec<u8> = match &cjpeg {
-                                Some(cj) => {
-                                    make_test_jpeg_with_c(cj, &pixels, samp, prog)
-                                }
+                                Some(cj) => make_test_jpeg_with_c(cj, &pixels, samp, prog),
                                 None => make_test_jpeg_rust(&pixels, samp),
                             };
 
                             let label: String = format!(
                                 "full_prog{}_ns{}_y{y_iter}_h{h_iter}_{}",
-                                prog as u8,
-                                nosmooth as u8,
-                                samp.name
+                                prog as u8, nosmooth as u8, samp.name
                             );
 
                             let ok: bool = run_crop_scenario(
-                                &djpeg,
-                                &jpeg_data,
-                                crop_w,
-                                crop_h,
-                                crop_x,
-                                crop_y,
-                                nosmooth,
-                                samp.name,
-                                &label,
+                                &djpeg, &jpeg_data, crop_w, crop_h, crop_x, crop_y, nosmooth,
+                                samp.name, &label,
                             );
                             if ok {
                                 compared += 1;
@@ -620,9 +605,7 @@ fn c_croptest_full() {
         }
     }
 
-    eprintln!(
-        "c_croptest_full: {compared} scenarios compared, {skipped} skipped"
-    );
+    eprintln!("c_croptest_full: {compared} scenarios compared, {skipped} skipped");
     assert!(
         compared > 0,
         "c_croptest_full: no scenarios were successfully compared"
