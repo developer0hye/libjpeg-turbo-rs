@@ -87,7 +87,7 @@ fn c_cjpeg_rgb_islow() {
 /// CMakeLists line 1566: cjpeg 422-ifast-opt
 /// -sample 2x1 -dct fast -opt  testorig.ppm → JPEG
 #[test]
-#[ignore = "FIXME: compress_optimized uses separate gather path (not fused RGB fast path); needs dummy blocks in 2-pass loop"]
+#[ignore = "FIXME: coefficients identical but huff_opt produces 3-byte-different optimal Huffman tables from C; also test uses -dct fast but Rust compress_optimized uses islow"]
 fn c_cjpeg_422_ifast_opt() {
     let cjpeg = match helpers::cjpeg_path() {
         Some(p) => p,
@@ -178,7 +178,7 @@ fn c_cjpeg_440_islow() {
 /// CMakeLists line 1604: cjpeg 420-q100-ifast-prog
 /// -sample 2x2 -quality 100 -dct fast -scans test.scan  testorig.ppm → JPEG
 #[test]
-#[ignore = "FIXME: S420 progressive non-MCU-aligned edge chroma downsample differs (MCU-aligned is byte-identical)"]
+#[ignore = "FIXME: C uses custom test.scan file for progressive; Rust uses default progression. Also compress_progressive lacks dummy block logic."]
 fn c_cjpeg_420_q100_ifast_prog() {
     let cjpeg = match helpers::cjpeg_path() {
         Some(p) => p,
@@ -281,7 +281,7 @@ fn c_cjpeg_gray_islow() {
 /// CMakeLists line 1648: cjpeg 420s-islow-opt
 /// -sample 2x2 -smooth 1 -dct int -opt  testorig.ppm → JPEG with smoothing
 #[test]
-#[ignore = "FIXME: compress_optimized + smoothing uses separate gather path; needs dummy blocks in 2-pass loop"]
+#[ignore = "FIXME: C uses h2v2_smooth_downsample for -smooth 1; Rust applies smoothing as pre-filter before color conversion (different architecture)"]
 fn c_cjpeg_420s_islow_opt() {
     let cjpeg = match helpers::cjpeg_path() {
         Some(p) => p,
@@ -1016,7 +1016,7 @@ fn c_jpegtran_icc() {
 
 /// CMakeLists line 1677: cjpeg 420-islow-ari (arithmetic encode)
 #[test]
-#[ignore = "FIXME: compress_arithmetic uses separate gather path; needs dummy blocks in encode loop"]
+#[ignore = "FIXME: same-size output but byte 164 differs; arithmetic entropy coder serialization difference (coefficients padded correctly)"]
 fn c_cjpeg_420_islow_ari() {
     let cjpeg = match helpers::cjpeg_path() {
         Some(p) => p,
