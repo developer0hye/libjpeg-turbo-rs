@@ -1,5 +1,5 @@
 use crate::common::error::Result;
-use crate::common::types::{CropRegion, DensityInfo, PixelFormat, Subsampling};
+use crate::common::types::{CropRegion, DctMethod, DensityInfo, PixelFormat, Subsampling};
 use crate::decode::pipeline::{Decoder, Image};
 use crate::encode::pipeline as encoder;
 
@@ -152,7 +152,15 @@ pub fn compress_progressive(
     quality: u8,
     subsampling: Subsampling,
 ) -> Result<Vec<u8>> {
-    encoder::compress_progressive(pixels, width, height, pixel_format, quality, subsampling)
+    encoder::compress_progressive(
+        pixels,
+        width,
+        height,
+        pixel_format,
+        quality,
+        subsampling,
+        DctMethod::IsLow,
+    )
 }
 
 /// Compress with optional ICC profile and/or EXIF metadata embedded.
