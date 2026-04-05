@@ -281,7 +281,6 @@ fn c_cjpeg_gray_islow() {
 /// CMakeLists line 1648: cjpeg 420s-islow-opt
 /// -sample 2x2 -smooth 1 -dct int -opt  testorig.ppm → JPEG with smoothing
 #[test]
-#[ignore = "FIXME: C uses h2v2_smooth_downsample for -smooth 1; Rust applies smoothing as pre-filter before color conversion (different architecture)"]
 fn c_cjpeg_420s_islow_opt() {
     let cjpeg = match helpers::cjpeg_path() {
         Some(p) => p,
