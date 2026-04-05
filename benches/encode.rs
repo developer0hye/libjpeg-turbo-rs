@@ -8,23 +8,42 @@ fn bench_fdct_quantize_8x8(c: &mut Criterion) {
     for i in 0..64 {
         input[i] = (i as i16 * 3) - 96;
     }
+    use libjpeg_turbo_rs::encode::pipeline::compute_reciprocal;
     let divisors = [128u16; 64]; // pre-scaled (16 * 8)
     let mut reciprocals = [0u16; 64];
+    let mut corrections = [0u16; 64];
+    let mut shifts = [0i16; 64];
+    let mut scales = [0u16; 64];
     for i in 0..64 {
-        let d = divisors[i] as u32;
-        reciprocals[i] = (((1u32 << 16) + d - 1) / d) as u16;
+        let (r, c, sc, s) = compute_reciprocal(divisors[i]);
+        reciprocals[i] = r;
+        corrections[i] = c;
+        scales[i] = sc;
+        shifts[i] = s;
     }
     let mut divisors_zigzag = [0u16; 64];
     let mut reciprocals_zigzag = [0u16; 64];
+    let mut corrections_zigzag = [0u16; 64];
+    let mut shifts_zigzag = [0i16; 64];
+    let mut scales_zigzag = [0u16; 64];
     for i in 0..64 {
         divisors_zigzag[i] = divisors[i];
         reciprocals_zigzag[i] = reciprocals[i];
+        corrections_zigzag[i] = corrections[i];
+        shifts_zigzag[i] = shifts[i];
+        scales_zigzag[i] = scales[i];
     }
     let quant = QuantDivisors {
         divisors,
         reciprocals,
+        corrections,
+        shifts,
+        scales,
         divisors_zigzag,
         reciprocals_zigzag,
+        corrections_zigzag,
+        shifts_zigzag,
+        scales_zigzag,
     };
     let mut output = [0i16; 64];
 
