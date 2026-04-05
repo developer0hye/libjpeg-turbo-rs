@@ -3492,10 +3492,13 @@ fn flss(val: u16) -> i32 {
 /// Compute adaptive-precision reciprocal for exact SIMD quantization.
 /// Port of C libjpeg-turbo's `compute_reciprocal` from jcdctmgr.c.
 ///
-/// Returns (reciprocal, correction, shift).
-pub fn compute_reciprocal(divisor: u16) -> (u16, u16, i16) {
+/// Returns (reciprocal, correction, scale, shift).
+/// - NEON uses (reciprocal, correction, shift) with per-element variable shift.
+/// - AVX2 uses (reciprocal, correction, scale) with two `pmulhuw` ops (matching C).
+pub fn compute_reciprocal(divisor: u16) -> (u16, u16, u16, i16) {
     if divisor <= 1 {
-        return (1, 0, -(std::mem::size_of::<i16>() as i16 * 8));
+        // scale=1 for the identity case (matches C: dtbl[DCTSIZE2*2] = 1)
+        return (1, 0, 1, -(std::mem::size_of::<i16>() as i16 * 8));
     }
 
     let b: i32 = flss(divisor) - 1;
@@ -3521,7 +3524,11 @@ pub fn compute_reciprocal(divisor: u16) -> (u16, u16, i16) {
     }
 
     let shift: i16 = (r - 16) as i16;
-    (recip as u16, corr, shift)
+    // Scale for AVX2: replaces per-element variable shift with a second mulhi.
+    // scale = 1 << (32 - r), so mulhi(x, scale) == x >> (r - 16) == x >> shift.
+    // Matches C: dtbl[DCTSIZE2 * 2] = (DCTELEM)(1 << (sizeof(DCTELEM)*8*2 - r))
+    let scale: u16 = (1u32 << (32 - r)) as u16;
+    (recip as u16, corr, scale, shift)
 }
 
 /// Scale quantization table values by 8 to create divisor table for the islow FDCT.
@@ -3533,12 +3540,14 @@ fn scale_quant_for_fdct(quant_table: &[u16; 64]) -> QuantDivisors {
     let mut reciprocals = [0u16; 64];
     let mut corrections = [0u16; 64];
     let mut shifts = [0i16; 64];
+    let mut scales = [0u16; 64];
     for i in 0..64 {
         let d: u16 = (quant_table[i] as u32 * 8) as u16;
         divisors[i] = d;
-        let (recip, corr, shift) = compute_reciprocal(d);
+        let (recip, corr, scale, shift) = compute_reciprocal(d);
         reciprocals[i] = recip;
         corrections[i] = corr;
+        scales[i] = scale;
         shifts[i] = shift;
     }
     // Pre-arrange in zigzag order for fused quantize+reorder
@@ -3547,21 +3556,25 @@ fn scale_quant_for_fdct(quant_table: &[u16; 64]) -> QuantDivisors {
     let mut reciprocals_zigzag = [0u16; 64];
     let mut corrections_zigzag = [0u16; 64];
     let mut shifts_zigzag = [0i16; 64];
+    let mut scales_zigzag = [0u16; 64];
     for zz in 0..64 {
         divisors_zigzag[zz] = divisors[zigzag[zz]];
         reciprocals_zigzag[zz] = reciprocals[zigzag[zz]];
         corrections_zigzag[zz] = corrections[zigzag[zz]];
         shifts_zigzag[zz] = shifts[zigzag[zz]];
+        scales_zigzag[zz] = scales[zigzag[zz]];
     }
     QuantDivisors {
         divisors,
         reciprocals,
         corrections,
         shifts,
+        scales,
         divisors_zigzag,
         reciprocals_zigzag,
         corrections_zigzag,
         shifts_zigzag,
+        scales_zigzag,
     }
 }
 

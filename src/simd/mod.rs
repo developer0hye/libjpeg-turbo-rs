@@ -40,6 +40,7 @@ pub struct SimdRoutines {
 /// per-element variable shift to match true integer division.
 ///
 /// The NEON path uses `reciprocals`, `corrections`, `shifts` to avoid scalar division.
+/// The AVX2 path uses `reciprocals`, `corrections`, `scales` (two `mulhi` ops, matching C).
 /// The scalar path ignores these and divides directly using `divisors`.
 pub struct QuantDivisors {
     /// Divisor values (quant × 8, matching FDCT output scaling).
@@ -50,6 +51,9 @@ pub struct QuantDivisors {
     pub corrections: [u16; 64],
     /// Per-element right-shift amounts: `r - 16` where `r = 16 + flss(divisor) - 1`.
     pub shifts: [i16; 64],
+    /// Scale factors for AVX2: `1 << (32 - r)`, replacing per-element shift with a
+    /// second `pmulhuw`. Matches C libjpeg-turbo's SCALE table in jcdctmgr.c.
+    pub scales: [u16; 64],
     /// Divisors re-arranged in zigzag scan order for fused quantize+reorder.
     pub divisors_zigzag: [u16; 64],
     /// Reciprocals re-arranged in zigzag scan order.
@@ -58,6 +62,8 @@ pub struct QuantDivisors {
     pub corrections_zigzag: [u16; 64],
     /// Shifts re-arranged in zigzag scan order.
     pub shifts_zigzag: [i16; 64],
+    /// Scales re-arranged in zigzag scan order.
+    pub scales_zigzag: [u16; 64],
 }
 
 /// Function-pointer dispatch table for SIMD-accelerated encode operations.

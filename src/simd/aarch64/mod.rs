@@ -485,10 +485,12 @@ mod tests {
         let mut reciprocals = [0u16; 64];
         let mut corrections = [0u16; 64];
         let mut shifts = [0i16; 64];
+        let mut scales = [0u16; 64];
         for i in 0..64 {
-            let (r, c, s) = compute_reciprocal(divisors[i]);
+            let (r, c, sc, s) = compute_reciprocal(divisors[i]);
             reciprocals[i] = r;
             corrections[i] = c;
+            scales[i] = sc;
             shifts[i] = s;
         }
         let zigzag = &crate::encode::tables::ZIGZAG_ORDER;
@@ -496,21 +498,25 @@ mod tests {
         let mut reciprocals_zigzag = [0u16; 64];
         let mut corrections_zigzag = [0u16; 64];
         let mut shifts_zigzag = [0i16; 64];
+        let mut scales_zigzag = [0u16; 64];
         for zz in 0..64 {
             divisors_zigzag[zz] = divisors[zigzag[zz]];
             reciprocals_zigzag[zz] = reciprocals[zigzag[zz]];
             corrections_zigzag[zz] = corrections[zigzag[zz]];
             shifts_zigzag[zz] = shifts[zigzag[zz]];
+            scales_zigzag[zz] = scales[zigzag[zz]];
         }
         QuantDivisors {
             divisors,
             reciprocals,
             corrections,
             shifts,
+            scales,
             divisors_zigzag,
             reciprocals_zigzag,
             corrections_zigzag,
             shifts_zigzag,
+            scales_zigzag,
         }
     }
 
