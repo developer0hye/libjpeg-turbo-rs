@@ -12,8 +12,8 @@
 
 mod helpers;
 
-use libjpeg_turbo_rs::{Encoder, PixelFormat, Subsampling};
 use libjpeg_turbo_rs::common::types::DctMethod;
+use libjpeg_turbo_rs::{Encoder, PixelFormat, Subsampling};
 use std::path::{Path, PathBuf};
 
 // ---------------------------------------------------------------------------
@@ -65,7 +65,7 @@ fn run_lossy_combo(
     rgb_ppm_path: &Path,
     gray_pgm_path: &Path,
     sampi: usize,
-    quality: Option<u8>,       // None = default (75)
+    quality: Option<u8>, // None = default (75)
     force_baseline: bool,
     restart_blocks: Option<u16>,
     restart_rows: Option<u16>,
@@ -209,7 +209,10 @@ fn run_lossy_combo(
     // prefiltered vs non-prefiltered Y extraction diverges for sampi > 0.
     // S444 (sampi==0) matches because no chroma prefiltering is applied.
     {
-        let label = format!("{}_gray_from_rgb_samp{}", label_prefix, TJCOMP_SUBSAMP[sampi]);
+        let label = format!(
+            "{}_gray_from_rgb_samp{}",
+            label_prefix, TJCOMP_SUBSAMP[sampi]
+        );
         if sampi != 0 {
             eprintln!(
                 "SKIP: {} — cjpeg -gr with non-S444 subsampling applies fancy downsampling \
@@ -285,7 +288,10 @@ fn run_lossy_combo(
     // combination cannot be byte-identical and must be skipped.
     {
         let label = format!("{}_rgb_cs_samp{}", label_prefix, TJCOMP_SUBSAMP[sampi]);
-        eprintln!("SKIP: {} — ColorSpace::Rgb not wired into Encoder compress path", label);
+        eprintln!(
+            "SKIP: {} — ColorSpace::Rgb not wired into Encoder compress path",
+            label
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -307,64 +313,64 @@ fn run_lossy_combo(
                 label
             );
         } else {
-        // Write PGM to a temp file for cjpeg
-        let gray_ppm_tmp = helpers::TempFile::new(&format!("{}_gray_in.pgm", label));
-        helpers::write_pgm_file(gray_ppm_tmp.path(), gray_w, gray_h, &gray_pixels);
+            // Write PGM to a temp file for cjpeg
+            let gray_ppm_tmp = helpers::TempFile::new(&format!("{}_gray_in.pgm", label));
+            helpers::write_pgm_file(gray_ppm_tmp.path(), gray_w, gray_h, &gray_pixels);
 
-        let mut enc = Encoder::new(&gray_pixels, gray_w, gray_h, PixelFormat::Grayscale);
-        // Grayscale has no chroma, but disable prefilter for consistency.
-        enc = enc.fancy_downsampling(false);
-        enc = apply_subsampling(enc, sampi);
-        if let Some(q) = quality {
-            enc = enc.quality(q);
-        }
-        if force_baseline {
-            enc = enc.force_baseline(true);
-        }
-        if let Some(n) = restart_blocks {
-            enc = enc.restart_blocks(n);
-        } else if let Some(n) = restart_rows {
-            enc = enc.restart_rows(n);
-        }
-        if let Some(ref icc) = icc_data {
-            enc = enc.icc_profile(icc);
-        }
-        if arithmetic {
-            enc = enc.arithmetic(true);
-        }
-        if dct_float {
-            enc = enc.dct_method(DctMethod::Float);
-        }
-        if optimize {
-            enc = enc.optimize_huffman(true);
-        }
-        if progressive {
-            enc = enc.progressive(true);
-        }
+            let mut enc = Encoder::new(&gray_pixels, gray_w, gray_h, PixelFormat::Grayscale);
+            // Grayscale has no chroma, but disable prefilter for consistency.
+            enc = enc.fancy_downsampling(false);
+            enc = apply_subsampling(enc, sampi);
+            if let Some(q) = quality {
+                enc = enc.quality(q);
+            }
+            if force_baseline {
+                enc = enc.force_baseline(true);
+            }
+            if let Some(n) = restart_blocks {
+                enc = enc.restart_blocks(n);
+            } else if let Some(n) = restart_rows {
+                enc = enc.restart_rows(n);
+            }
+            if let Some(ref icc) = icc_data {
+                enc = enc.icc_profile(icc);
+            }
+            if arithmetic {
+                enc = enc.arithmetic(true);
+            }
+            if dct_float {
+                enc = enc.dct_method(DctMethod::Float);
+            }
+            if optimize {
+                enc = enc.optimize_huffman(true);
+            }
+            if progressive {
+                enc = enc.progressive(true);
+            }
 
-        let rust_jpeg = enc.encode().expect("Rust encode failed");
-        let rust_out = helpers::TempFile::new(&format!("{}_rust.jpg", label));
-        rust_out.write_bytes(&rust_jpeg);
+            let rust_jpeg = enc.encode().expect("Rust encode failed");
+            let rust_out = helpers::TempFile::new(&format!("{}_rust.jpg", label));
+            rust_out.write_bytes(&rust_jpeg);
 
-        let mut c_args: Vec<&str> = Vec::new();
-        for a in &cjpeg_misc {
-            c_args.push(a.as_str());
-        }
-        for a in &cjpeg_restart_args {
-            c_args.push(a.as_str());
-        }
-        for a in &icc_cjpeg_args {
-            c_args.push(a.as_str());
-        }
-        for a in &cjpeg_qual_args {
-            c_args.push(a.as_str());
-        }
-        c_args.push("-sa");
-        c_args.push(CJPEG_SAMP[sampi]);
+            let mut c_args: Vec<&str> = Vec::new();
+            for a in &cjpeg_misc {
+                c_args.push(a.as_str());
+            }
+            for a in &cjpeg_restart_args {
+                c_args.push(a.as_str());
+            }
+            for a in &icc_cjpeg_args {
+                c_args.push(a.as_str());
+            }
+            for a in &cjpeg_qual_args {
+                c_args.push(a.as_str());
+            }
+            c_args.push("-sa");
+            c_args.push(CJPEG_SAMP[sampi]);
 
-        let c_out = helpers::TempFile::new(&format!("{}_c.jpg", label));
-        helpers::run_c_cjpeg(cjpeg, &c_args, gray_ppm_tmp.path(), c_out.path());
-        helpers::assert_files_identical(rust_out.path(), c_out.path(), &label);
+            let c_out = helpers::TempFile::new(&format!("{}_c.jpg", label));
+            helpers::run_c_cjpeg(cjpeg, &c_args, gray_ppm_tmp.path(), c_out.path());
+            helpers::assert_files_identical(rust_out.path(), c_out.path(), &label);
         } // end else (sampi == 0)
     }
 }
@@ -441,10 +447,8 @@ fn c_tjcomptest_lossy_quick() {
     // Both are covered by the full test matrix.
 
     // quality variants: default (75) and Q100
-    let qual_cases: &[(Option<u8>, bool, &str)] = &[
-        (None,      false, "qdef"),
-        (Some(100), false, "q100"),
-    ];
+    let qual_cases: &[(Option<u8>, bool, &str)] =
+        &[(None, false, "qdef"), (Some(100), false, "q100")];
 
     // sampi quick subset: 444, 422, 420
     let sampi_quick: &[usize] = &[0, 1, 3];
@@ -452,8 +456,7 @@ fn c_tjcomptest_lossy_quick() {
     // No-restart, no-ICC case only
     for &(quality, force_baseline, qtag) in qual_cases {
         for &sampi in sampi_quick {
-            let label = format!("lossy_quick_p8_r0_{}_samp{}",
-                qtag, TJCOMP_SUBSAMP[sampi]);
+            let label = format!("lossy_quick_p8_r0_{}_samp{}", qtag, TJCOMP_SUBSAMP[sampi]);
 
             run_lossy_combo(
                 &cjpeg,
@@ -508,7 +511,10 @@ fn c_tjcomptest_lossy_full() {
     for precision in [8u8, 12u8] {
         // Precision 12 requires a separate compress path not yet implemented.
         if precision != 8 {
-            eprintln!("SKIP: precision={} not yet implemented, skipping", precision);
+            eprintln!(
+                "SKIP: precision={} not yet implemented, skipping",
+                precision
+            );
             continue;
         }
 
@@ -535,9 +541,24 @@ fn c_tjcomptest_lossy_full() {
         }
         let icc_path_ref: &Path = &icc_file;
         let restart_cases: Vec<RestartCase> = vec![
-            RestartCase { restart_blocks: None,    restart_rows: None,    icc: None,               tag: "r0"    },
-            RestartCase { restart_blocks: Some(1), restart_rows: None,    icc: Some(icc_path_ref), tag: "r1icc" },
-            RestartCase { restart_blocks: None,    restart_rows: Some(1), icc: None,               tag: "r1b"   },
+            RestartCase {
+                restart_blocks: None,
+                restart_rows: None,
+                icc: None,
+                tag: "r0",
+            },
+            RestartCase {
+                restart_blocks: Some(1),
+                restart_rows: None,
+                icc: Some(icc_path_ref),
+                tag: "r1icc",
+            },
+            RestartCase {
+                restart_blocks: None,
+                restart_rows: Some(1),
+                icc: None,
+                tag: "r1b",
+            },
         ];
 
         for rc in &restart_cases {
@@ -571,8 +592,8 @@ fn c_tjcomptest_lossy_full() {
                             // for qualarg in "" "-q 1" "-q 100"
                             for qual_idx in 0..3usize {
                                 let (quality, force_baseline): (Option<u8>, bool) = match qual_idx {
-                                    0 => (None,      false),
-                                    1 => (Some(1),   true),
+                                    0 => (None, false),
+                                    1 => (Some(1), true),
                                     2 => (Some(100), false),
                                     _ => unreachable!(),
                                 };
@@ -586,9 +607,13 @@ fn c_tjcomptest_lossy_full() {
                                 for sampi in 0..8usize {
                                     let label = format!(
                                         "lossy_full_p{}_{}_{}_a{}_dc{}_o{}_p{}_samp{}",
-                                        precision, rc.tag, qtag,
-                                        arithmetic as u8, dct_float as u8,
-                                        optimize as u8, progressive as u8,
+                                        precision,
+                                        rc.tag,
+                                        qtag,
+                                        arithmetic as u8,
+                                        dct_float as u8,
+                                        optimize as u8,
+                                        progressive as u8,
                                         TJCOMP_SUBSAMP[sampi]
                                     );
 
@@ -631,7 +656,7 @@ fn c_tjcomptest_lossy_full() {
 #[allow(dead_code)]
 fn run_lossless_combo(
     cjpeg: &Path,
-    source_path: &Path,       // PPM or PGM for cjpeg input
+    source_path: &Path, // PPM or PGM for cjpeg input
     pixels: &[u8],
     width: usize,
     height: usize,
@@ -658,9 +683,10 @@ fn run_lossless_combo(
     let icc_data: Option<Vec<u8>> = icc_path.map(|p| helpers::read_icc_profile(p));
 
     let mut enc = Encoder::new(pixels, width, height, pixel_format);
-    enc = enc.lossless(true)
-             .lossless_predictor(psv)
-             .lossless_point_transform(pt);
+    enc = enc
+        .lossless(true)
+        .lossless_predictor(psv)
+        .lossless_point_transform(pt);
     if let Some(n) = restart_blocks {
         enc = enc.restart_blocks(n);
     }
@@ -732,10 +758,8 @@ fn c_tjcomptest_lossless_quick() {
     let icc_path_ref: &Path = &icc_file;
 
     // restartarg cases: none and "-r 1 -icc"
-    let restart_cases: &[(Option<u16>, Option<&Path>, &str)] = &[
-        (None,    None,              "r0"),
-        (Some(1), Some(icc_path_ref), "r1icc"),
-    ];
+    let restart_cases: &[(Option<u16>, Option<&Path>, &str)] =
+        &[(None, None, "r0"), (Some(1), Some(icc_path_ref), "r1icc")];
 
     let psv_quick: &[u8] = &[1, 4, 7];
     let pt_quick: &[u8] = &[0, 1];
@@ -835,10 +859,8 @@ fn c_tjcomptest_lossless_full() {
         for psv in 1u8..=7u8 {
             for pt in 0u8..precision {
                 // Mirrors: for restartarg in "" "-r 1 -icc …"
-                let restart_cases: &[(Option<u16>, Option<&Path>, &str)] = &[
-                    (None,    None,               "r0"),
-                    (Some(1), Some(icc_path_ref), "r1icc"),
-                ];
+                let restart_cases: &[(Option<u16>, Option<&Path>, &str)] =
+                    &[(None, None, "r0"), (Some(1), Some(icc_path_ref), "r1icc")];
 
                 for &(restart_blocks, icc_path, rtag) in restart_cases {
                     if icc_path.is_some() && !icc_file.exists() {
