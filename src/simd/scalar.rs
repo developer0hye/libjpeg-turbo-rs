@@ -98,13 +98,16 @@ pub(crate) fn scalar_fdct_quantize(
     quant::quantize_block(&dct_output, &quant.divisors, output);
 }
 
-/// Scalar fused FDCT (ifast raw) + quantize + zigzag reorder.
+/// Scalar fused FDCT (ifast) + quantize + zigzag reorder.
+///
+/// Calls `fdct_ifast` then `quantize_block`. The ifast DCT normalizes its output
+/// to the same factor-of-8 scale as islow, so the same divisors apply.
 pub(crate) fn scalar_fdct_ifast_quantize(
     input: &mut [i16; 64],
     quant: &QuantDivisors,
     output: &mut [i16; 64],
 ) {
     let mut dct_output: [i32; 64] = [0i32; 64];
-    fdct::fdct_ifast_raw(input, &mut dct_output);
+    fdct::fdct_ifast(input, &mut dct_output);
     quant::quantize_block(&dct_output, &quant.divisors, output);
 }
