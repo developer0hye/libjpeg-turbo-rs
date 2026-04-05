@@ -110,7 +110,7 @@ impl<'a> Encoder<'a> {
             colorspace_override: None,
             linear_scale_factor: None,
             smoothing_factor: 0,
-            fancy_downsampling: true,
+            fancy_downsampling: false,
             jfif_version: None,
             write_adobe_marker: None,
             custom_sampling_factors: None,
