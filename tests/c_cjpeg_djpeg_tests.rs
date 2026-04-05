@@ -35,7 +35,7 @@ fn read_file(path: &Path) -> Vec<u8> {
 /// -rgb -dct int -icc test1.icc  testorig.ppm → JPEG
 /// Validates: RGB colorspace encode with ICC profile, islow DCT.
 #[test]
-#[ignore = "FIXME: RGB direct encode works but non-MCU-aligned edge block padding differs from C cjpeg (227x149)"]
+// Previously ignored — fixed by dummy blocks + disabling fancy prefilter
 fn c_cjpeg_rgb_islow() {
     let cjpeg = match helpers::cjpeg_path() {
         Some(p) => p,
@@ -87,7 +87,7 @@ fn c_cjpeg_rgb_islow() {
 /// CMakeLists line 1566: cjpeg 422-ifast-opt
 /// -sample 2x1 -dct fast -opt  testorig.ppm → JPEG
 #[test]
-#[ignore = "FIXME: S422 non-MCU-aligned edge chroma downsample differs (MCU-aligned is byte-identical)"]
+#[ignore = "FIXME: compress_optimized uses separate gather path (not fused RGB fast path); needs dummy blocks in 2-pass loop"]
 fn c_cjpeg_422_ifast_opt() {
     let cjpeg = match helpers::cjpeg_path() {
         Some(p) => p,
@@ -133,7 +133,7 @@ fn c_cjpeg_422_ifast_opt() {
 /// CMakeLists line 1576: cjpeg 440-islow
 /// -sample 1x2 -dct int  testorig.ppm → JPEG
 #[test]
-#[ignore = "FIXME: S440 non-MCU-aligned edge chroma downsample differs (MCU-aligned is byte-identical)"]
+// Previously ignored — fixed by dummy blocks + disabling fancy prefilter
 fn c_cjpeg_440_islow() {
     let cjpeg = match helpers::cjpeg_path() {
         Some(p) => p,
@@ -281,7 +281,7 @@ fn c_cjpeg_gray_islow() {
 /// CMakeLists line 1648: cjpeg 420s-islow-opt
 /// -sample 2x2 -smooth 1 -dct int -opt  testorig.ppm → JPEG with smoothing
 #[test]
-#[ignore = "FIXME: S420 smooth non-MCU-aligned edge chroma downsample differs (MCU-aligned is byte-identical)"]
+#[ignore = "FIXME: compress_optimized + smoothing uses separate gather path; needs dummy blocks in 2-pass loop"]
 fn c_cjpeg_420s_islow_opt() {
     let cjpeg = match helpers::cjpeg_path() {
         Some(p) => p,
@@ -1016,7 +1016,7 @@ fn c_jpegtran_icc() {
 
 /// CMakeLists line 1677: cjpeg 420-islow-ari (arithmetic encode)
 #[test]
-#[ignore = "FIXME: S420 arithmetic non-MCU-aligned edge chroma downsample differs (MCU-aligned is byte-identical)"]
+#[ignore = "FIXME: compress_arithmetic uses separate gather path; needs dummy blocks in encode loop"]
 fn c_cjpeg_420_islow_ari() {
     let cjpeg = match helpers::cjpeg_path() {
         Some(p) => p,
