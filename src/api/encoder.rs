@@ -740,6 +740,7 @@ impl<'a> Encoder<'a> {
                     quality,
                     self.subsampling,
                     script,
+                    self.dct_method,
                 )?
             } else {
                 encoder::compress_progressive(
@@ -749,6 +750,7 @@ impl<'a> Encoder<'a> {
                     effective_format,
                     quality,
                     self.subsampling,
+                    self.dct_method,
                 )?
             }
         } else if self.optimize_huffman {
