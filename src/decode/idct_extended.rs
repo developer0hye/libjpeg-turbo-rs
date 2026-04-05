@@ -1,3 +1,7 @@
+// These constants are exact fixed-point values ported from C's jidctint.c,
+// not approximations of std::f64::consts — changing them would alter the IDCT output.
+#![allow(clippy::approx_constant)]
+
 /// Extended IDCT kernels for all 16 JPEG scaling factors.
 /// Ported from libjpeg-turbo's jidctint.c.
 const CONST_BITS: i32 = 13;
@@ -1076,6 +1080,7 @@ pub fn idct_16x16(coeffs: &[i16; 64], quant: &[u16; 64], output: &mut [u8; 256])
 
 macro_rules! strided_wrapper {
     ($name:ident, $inner:ident, $n:expr) => {
+        #[allow(clippy::missing_safety_doc)]
         pub unsafe fn $name(coeffs: &[i16; 64], quant: &[u16; 64], output: *mut u8, stride: usize) {
             let mut tmp = [0u8; $n * $n];
             $inner(coeffs, quant, &mut tmp);
