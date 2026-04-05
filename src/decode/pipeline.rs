@@ -2971,11 +2971,71 @@ impl<'a> Decoder<'a> {
             }
         } else if num_components == 3 {
             let out_format = self.output_format.unwrap_or(PixelFormat::Rgb);
+            let jpeg_color_space: ColorSpace = self.detect_color_space();
+
+            // Handle grayscale output request
             if out_format == PixelFormat::Grayscale {
+                // For RGB-colorspace JPEGs, grayscale output is the Y channel;
+                // for YCbCr, it's also just the Y channel.  Both work the same.
+                // However, the simple "copy Y" path only works when the output
+                // colorspace is the same (no conversion needed).  For now, reject.
                 return Err(JpegError::Unsupported(
                     "cannot convert color JPEG to grayscale".to_string(),
                 ));
             }
+
+            // For RGB-colorspace JPEGs (e.g., cjpeg -rgb with Adobe APP14
+            // transform=0), component planes store raw R,G,B — no YCbCr→RGB
+            // conversion needed.  Interleave planes directly.
+            if jpeg_color_space == ColorSpace::Rgb
+                && out_format == PixelFormat::Rgb
+            {
+                let r_plane: &[u8] = &component_planes[0];
+                let g_plane: &[u8] = &component_planes[1];
+                let b_plane: &[u8] = &component_planes[2];
+                let r_stride: usize = mcus_x
+                    * frame.components[0].horizontal_sampling as usize
+                    * comp_block_sizes[0];
+                let g_stride: usize = mcus_x
+                    * frame.components[1].horizontal_sampling as usize
+                    * comp_block_sizes[1];
+                let b_stride: usize = mcus_x
+                    * frame.components[2].horizontal_sampling as usize
+                    * comp_block_sizes[2];
+
+                let data_size: usize = out_width * out_height * 3;
+                let mut data: Vec<u8> = Vec::with_capacity(data_size);
+                #[allow(clippy::uninit_vec)]
+                unsafe {
+                    data.set_len(data_size)
+                };
+                for y in 0..out_height {
+                    let r_row: &[u8] = &r_plane[y * r_stride..];
+                    let g_row: &[u8] = &g_plane[y * g_stride..];
+                    let b_row: &[u8] = &b_plane[y * b_stride..];
+                    let out_row: &mut [u8] = &mut data[y * out_width * 3..][..out_width * 3];
+                    for x in 0..out_width {
+                        out_row[x * 3] = r_row[x];
+                        out_row[x * 3 + 1] = g_row[x];
+                        out_row[x * 3 + 2] = b_row[x];
+                    }
+                }
+
+                return Ok(Image {
+                    width: out_width,
+                    height: out_height,
+                    pixel_format: out_format,
+                    precision: 8,
+                    data,
+                    icc_profile: icc_profile.clone(),
+                    exif_data: exif_data.clone(),
+                    comment: self.metadata.comment.clone(),
+                    density: self.metadata.density,
+                    saved_markers: self.metadata.saved_markers.clone(),
+                    warnings: warnings.clone(),
+                });
+            }
+
             let bpp = out_format.bytes_per_pixel();
 
             let y_plane = &component_planes[0];
