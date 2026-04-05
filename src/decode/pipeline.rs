@@ -2987,21 +2987,16 @@ impl<'a> Decoder<'a> {
             // For RGB-colorspace JPEGs (e.g., cjpeg -rgb with Adobe APP14
             // transform=0), component planes store raw R,G,B — no YCbCr→RGB
             // conversion needed.  Interleave planes directly.
-            if jpeg_color_space == ColorSpace::Rgb
-                && out_format == PixelFormat::Rgb
-            {
+            if jpeg_color_space == ColorSpace::Rgb && out_format == PixelFormat::Rgb {
                 let r_plane: &[u8] = &component_planes[0];
                 let g_plane: &[u8] = &component_planes[1];
                 let b_plane: &[u8] = &component_planes[2];
-                let r_stride: usize = mcus_x
-                    * frame.components[0].horizontal_sampling as usize
-                    * comp_block_sizes[0];
-                let g_stride: usize = mcus_x
-                    * frame.components[1].horizontal_sampling as usize
-                    * comp_block_sizes[1];
-                let b_stride: usize = mcus_x
-                    * frame.components[2].horizontal_sampling as usize
-                    * comp_block_sizes[2];
+                let r_stride: usize =
+                    mcus_x * frame.components[0].horizontal_sampling as usize * comp_block_sizes[0];
+                let g_stride: usize =
+                    mcus_x * frame.components[1].horizontal_sampling as usize * comp_block_sizes[1];
+                let b_stride: usize =
+                    mcus_x * frame.components[2].horizontal_sampling as usize * comp_block_sizes[2];
 
                 let data_size: usize = out_width * out_height * 3;
                 let mut data: Vec<u8> = Vec::with_capacity(data_size);

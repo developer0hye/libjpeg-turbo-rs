@@ -56,11 +56,36 @@ const SUBSAMPLINGS: &[(&str, &str)] = &[
 /// 21x21+0+0, 24x26+20+18.
 #[cfg(feature = "full-c-parity")]
 const CROP_REGIONS: &[CropRegion] = &[
-    CropRegion { x: 23, y: 23, width: 14, height: 14 },
-    CropRegion { x: 4, y: 4, width: 21, height: 21 },
-    CropRegion { x: 13, y: 13, width: 18, height: 18 },
-    CropRegion { x: 0, y: 0, width: 21, height: 21 },
-    CropRegion { x: 20, y: 18, width: 24, height: 26 },
+    CropRegion {
+        x: 23,
+        y: 23,
+        width: 14,
+        height: 14,
+    },
+    CropRegion {
+        x: 4,
+        y: 4,
+        width: 21,
+        height: 21,
+    },
+    CropRegion {
+        x: 13,
+        y: 13,
+        width: 18,
+        height: 18,
+    },
+    CropRegion {
+        x: 0,
+        y: 0,
+        width: 21,
+        height: 21,
+    },
+    CropRegion {
+        x: 20,
+        y: 18,
+        width: 24,
+        height: 26,
+    },
 ];
 
 // ---------------------------------------------------------------------------
@@ -91,7 +116,13 @@ fn make_source_jpeg(cjpeg: &Path, sample_arg: &str, label: &str) -> Vec<u8> {
     let ppm_path: PathBuf = helpers::c_testimages_dir().join("testorig.ppm");
     let safe_label: String = label
         .chars()
-        .map(|c| if c.is_alphanumeric() || c == '-' { c } else { '_' })
+        .map(|c| {
+            if c.is_alphanumeric() || c == '-' {
+                c
+            } else {
+                '_'
+            }
+        })
         .collect();
     let out_file: helpers::TempFile = helpers::TempFile::new(&format!("src_{}.jpg", safe_label));
     helpers::run_c_cjpeg(cjpeg, &["-sample", sample_arg], &ppm_path, out_file.path());
@@ -227,7 +258,15 @@ fn run_one_combo(
     label: &str,
 ) -> bool {
     let rust_opts: TransformOptions = match try_rust_opts(
-        op, arithmetic, copy_mode, crop, grayscale, optimize, progressive, restart, trim,
+        op,
+        arithmetic,
+        copy_mode,
+        crop,
+        grayscale,
+        optimize,
+        progressive,
+        restart,
+        trim,
     ) {
         Some(o) => o,
         None => return false,
@@ -238,14 +277,28 @@ fn run_one_combo(
         .map(|c| format!("{}x{}+{}+{}", c.width, c.height, c.x, c.y))
         .unwrap_or_default();
 
-    let jtran_args: Vec<String> =
-        build_jpegtran_args(xform_flag, copy_mode, crop, grayscale, optimize, progressive, trim, &crop_str);
+    let jtran_args: Vec<String> = build_jpegtran_args(
+        xform_flag,
+        copy_mode,
+        crop,
+        grayscale,
+        optimize,
+        progressive,
+        trim,
+        &crop_str,
+    );
     let jtran_str_refs: Vec<&str> = jtran_args.iter().map(|s| s.as_str()).collect();
 
     // Sanitize label for use in file names (replace path-unsafe chars).
     let safe_label: String = label
         .chars()
-        .map(|c| if c.is_alphanumeric() || c == '-' || c == '.' { c } else { '_' })
+        .map(|c| {
+            if c.is_alphanumeric() || c == '-' || c == '.' {
+                c
+            } else {
+                '_'
+            }
+        })
         .collect();
 
     // Write source JPEG to a temp file for jpegtran.
@@ -257,8 +310,7 @@ fn run_one_combo(
         .unwrap_or_else(|e| panic!("{}: Rust transform failed: {:?}", label, e));
 
     // Write Rust result for comparison.
-    let rust_file: helpers::TempFile =
-        helpers::TempFile::new(&format!("{}_rust.jpg", safe_label));
+    let rust_file: helpers::TempFile = helpers::TempFile::new(&format!("{}_rust.jpg", safe_label));
     rust_file.write_bytes(&rust_result);
 
     // Run C jpegtran.
@@ -299,10 +351,7 @@ fn c_tjtrantest_quick() {
     };
 
     // Quick subset: S444 and S422 (byte-identical with jpegtran).
-    let quick_subsamps: &[(&str, &str)] = &[
-        ("1x1", "444"),
-        ("2x1", "422"),
-    ];
+    let quick_subsamps: &[(&str, &str)] = &[("1x1", "444"), ("2x1", "422")];
 
     let mut tested: u32 = 0;
 
@@ -313,7 +362,11 @@ fn c_tjtrantest_quick() {
             let label: String = format!(
                 "quick/subsamp={} op={}",
                 subsamp_label,
-                if xform_flag.is_empty() { "none" } else { xform_flag }
+                if xform_flag.is_empty() {
+                    "none"
+                } else {
+                    xform_flag
+                }
             );
 
             run_one_combo(
@@ -321,14 +374,14 @@ fn c_tjtrantest_quick() {
                 &source,
                 op,
                 xform_flag,
-                false,               // arithmetic
+                false, // arithmetic
                 MarkerCopyMode::All,
-                None,                // crop
-                false,               // grayscale
-                false,               // optimize
-                false,               // progressive
+                None,  // crop
+                false, // grayscale
+                false, // optimize
+                false, // progressive
                 RestartArg::None,
-                false,               // trim
+                false, // trim
                 &label,
             );
 
@@ -372,7 +425,11 @@ fn c_tjtrantest_quick_420() {
     for &(op, xform_flag) in ALL_TRANSFORMS {
         let label: String = format!(
             "quick_420/op={}",
-            if xform_flag.is_empty() { "none" } else { xform_flag }
+            if xform_flag.is_empty() {
+                "none"
+            } else {
+                xform_flag
+            }
         );
 
         run_one_combo(
@@ -472,11 +529,9 @@ fn c_tjtrantest_full() {
                                         skipped += 1;
                                         continue;
                                     }
-                                    for restart in [
-                                        RestartArg::None,
-                                        RestartArg::WithIcc,
-                                        RestartArg::Bits,
-                                    ] {
+                                    for restart in
+                                        [RestartArg::None, RestartArg::WithIcc, RestartArg::Bits]
+                                    {
                                         if restart == RestartArg::Bits && crop_opt.is_some() {
                                             skipped += 1;
                                             continue;
@@ -504,7 +559,11 @@ fn c_tjtrantest_full() {
                                                         c.width, c.height, c.x, c.y
                                                     ))
                                                     .unwrap_or_else(|| "none".into()),
-                                                if xform_flag.is_empty() { "none" } else { xform_flag },
+                                                if xform_flag.is_empty() {
+                                                    "none"
+                                                } else {
+                                                    xform_flag
+                                                },
                                                 grayscale,
                                                 optimize,
                                                 progressive,
@@ -566,9 +625,7 @@ fn c_tjtrantest_full() {
                             skipped += 1;
                             continue;
                         }
-                        for restart in
-                            [RestartArg::None, RestartArg::WithIcc, RestartArg::Bits]
-                        {
+                        for restart in [RestartArg::None, RestartArg::WithIcc, RestartArg::Bits] {
                             if restart == RestartArg::Bits && crop_opt.is_some() {
                                 skipped += 1;
                                 continue;
@@ -593,7 +650,11 @@ fn c_tjtrantest_full() {
                                             c.width, c.height, c.x, c.y
                                         ))
                                         .unwrap_or_else(|| "none".into()),
-                                    if xform_flag.is_empty() { "none" } else { xform_flag },
+                                    if xform_flag.is_empty() {
+                                        "none"
+                                    } else {
+                                        xform_flag
+                                    },
                                     optimize,
                                     progressive,
                                     restart,
@@ -629,10 +690,7 @@ fn c_tjtrantest_full() {
         }
     }
 
-    println!(
-        "c_tjtrantest_full: {} tested, {} skipped",
-        tested, skipped
-    );
+    println!("c_tjtrantest_full: {} tested, {} skipped", tested, skipped);
     assert!(
         tested > 0,
         "Expected at least some combos to be tested, got 0"
