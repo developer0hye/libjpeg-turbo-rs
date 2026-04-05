@@ -3324,7 +3324,7 @@ pub fn compute_reciprocal(divisor: u16) -> (u16, u16, i16) {
     let fr: u32 = (1u32 << r) % divisor as u32;
 
     let mut recip: u32 = fq;
-    let mut corr: u16 = (divisor / 2) as u16;
+    let mut corr: u16 = divisor / 2;
     let mut r: i32 = r;
 
     if fr == 0 {
@@ -3492,6 +3492,7 @@ fn convert_to_ycbcr_padded(
     Ok((y_plane, cb_plane, cr_plane))
 }
 
+#[allow(clippy::type_complexity)]
 fn convert_to_ycbcr(
     pixels: &[u8],
     width: usize,
@@ -3781,7 +3782,7 @@ fn downsample_chroma_block(
 
     // Scalar fallback: alternating bias matching C libjpeg-turbo jcsample.c
     let divisor: u32 = (h_factor * v_factor) as u32;
-    let use_alt: bool = (h_factor == 2 && v_factor == 1) || (h_factor == 2 && v_factor == 2);
+    let use_alt: bool = h_factor == 2 && (v_factor == 1 || v_factor == 2);
     for row in 0..8 {
         let mut bias: u32 = if h_factor == 2 && v_factor == 1 {
             0
