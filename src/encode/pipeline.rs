@@ -164,30 +164,97 @@ pub fn compress(
                 cr_buf.copy_within(src_offset..src_offset + padded_w, dst_offset);
             }
 
-            // Encode all MCUs in this row
+            // Encode all MCUs in this row.
+            // For the last MCU column, C libjpeg-turbo creates "dummy" blocks
+            // for components that extend beyond width_in_blocks: all AC=0, DC
+            // copied from the previous block (jccoefct.c lines 184-191).
+            let (h_samp, v_samp) = subsampling.sampling_factors();
+            let y_width_in_blocks: usize = width.div_ceil(8);
+            let y_height_in_blocks: usize = height.div_ceil(8);
+            let y_mcu_width: usize = h_samp as usize;
+            let y_mcu_height: usize = v_samp as usize;
+            let y_last_col_width: usize = {
+                let rem: usize = y_width_in_blocks % y_mcu_width;
+                if rem == 0 {
+                    y_mcu_width
+                } else {
+                    rem
+                }
+            };
+            let y_last_row_height: usize = {
+                let rem: usize = y_height_in_blocks % y_mcu_height;
+                if rem == 0 {
+                    y_mcu_height
+                } else {
+                    rem
+                }
+            };
+            let is_last_mcu_row: bool = mcu_row == mcus_y - 1;
+            let eff_row_height: usize = if is_last_mcu_row {
+                y_last_row_height
+            } else {
+                y_mcu_height
+            };
+
             for mcu_col in 0..mcus_x {
                 let x0: usize = mcu_col * mcu_w;
-                encode_color_mcu(
-                    &y_buf,
-                    &cb_buf,
-                    &cr_buf,
-                    padded_w,
-                    padded_h,
-                    x0,
-                    0,
-                    subsampling,
-                    &luma_divisors,
-                    &chroma_divisors,
-                    &dc_luma_table,
-                    &ac_luma_table,
-                    &dc_chroma_table,
-                    &ac_chroma_table,
-                    &mut bit_writer,
-                    &mut prev_dc_y,
-                    &mut prev_dc_cb,
-                    &mut prev_dc_cr,
-                    fdct_quantize_fn,
-                );
+                let is_last_mcu_col: bool = mcu_col == mcus_x - 1;
+                let eff_col_width: usize = if is_last_mcu_col {
+                    y_last_col_width
+                } else {
+                    y_mcu_width
+                };
+
+                let need_dummies: bool =
+                    eff_col_width < y_mcu_width || eff_row_height < y_mcu_height;
+
+                if need_dummies {
+                    encode_color_mcu_with_dummies(
+                        &y_buf,
+                        &cb_buf,
+                        &cr_buf,
+                        padded_w,
+                        padded_h,
+                        x0,
+                        0,
+                        subsampling,
+                        &luma_divisors,
+                        &chroma_divisors,
+                        &dc_luma_table,
+                        &ac_luma_table,
+                        &dc_chroma_table,
+                        &ac_chroma_table,
+                        &mut bit_writer,
+                        &mut prev_dc_y,
+                        &mut prev_dc_cb,
+                        &mut prev_dc_cr,
+                        fdct_quantize_fn,
+                        eff_col_width,
+                        eff_row_height,
+                    );
+                } else {
+                    encode_color_mcu(
+                        &y_buf,
+                        &cb_buf,
+                        &cr_buf,
+                        padded_w,
+                        padded_h,
+                        x0,
+                        0,
+                        subsampling,
+                        &luma_divisors,
+                        &chroma_divisors,
+                        &dc_luma_table,
+                        &ac_luma_table,
+                        &dc_chroma_table,
+                        &ac_chroma_table,
+                        &mut bit_writer,
+                        &mut prev_dc_y,
+                        &mut prev_dc_cb,
+                        &mut prev_dc_cr,
+                        fdct_quantize_fn,
+                    );
+                }
             }
         }
     } else {
@@ -4522,6 +4589,109 @@ fn encode_color_mcu(
     }
 }
 
+/// Encode a color MCU with dummy Y blocks for the last MCU column.
+///
+/// C libjpeg-turbo creates "dummy" blocks beyond `width_in_blocks`: all AC=0,
+/// DC = previous block's DC (jccoefct.c lines 184-191). This produces smaller
+/// output than FDCT'ing the padded pixel data.
+#[allow(clippy::too_many_arguments)]
+fn encode_color_mcu_with_dummies(
+    y_plane: &[u8],
+    cb_plane: &[u8],
+    cr_plane: &[u8],
+    width: usize,
+    height: usize,
+    x0: usize,
+    y0: usize,
+    subsampling: Subsampling,
+    luma_quant: &QuantDivisors,
+    chroma_quant: &QuantDivisors,
+    dc_luma_table: &HuffTable,
+    ac_luma_table: &HuffTable,
+    dc_chroma_table: &HuffTable,
+    ac_chroma_table: &HuffTable,
+    writer: &mut BitWriter,
+    prev_dc_y: &mut i16,
+    prev_dc_cb: &mut i16,
+    prev_dc_cr: &mut i16,
+    fdct_quantize_fn: fn(&mut [i16; 64], &QuantDivisors, &mut [i16; 64]),
+    eff_col_width: usize,
+    eff_row_height: usize,
+) {
+    let (h_samp, v_samp) = subsampling.sampling_factors();
+    let y_mcu_width: usize = h_samp as usize;
+    let y_mcu_height: usize = v_samp as usize;
+
+    // Encode Y blocks: real blocks where vy < eff_row_height && hx < eff_col_width,
+    // dummy blocks elsewhere (AC=0, DC=prev_dc, matching C jccoefct.c lines 184-199).
+    for vy in 0..y_mcu_height {
+        let is_dummy_row: bool = vy >= eff_row_height;
+        for hx in 0..y_mcu_width {
+            let is_dummy_col: bool = hx >= eff_col_width;
+            if is_dummy_row || is_dummy_col {
+                // Dummy block: AC=0, DC=previous block's DC
+                let mut dummy = [0i16; 64];
+                dummy[0] = *prev_dc_y;
+                HuffmanEncoder::encode_block(
+                    writer,
+                    &dummy,
+                    prev_dc_y,
+                    dc_luma_table,
+                    ac_luma_table,
+                );
+            } else {
+                let bx: usize = x0 + hx * 8;
+                let by: usize = y0 + vy * 8;
+                encode_single_block(
+                    y_plane,
+                    width,
+                    height,
+                    bx,
+                    by,
+                    luma_quant,
+                    dc_luma_table,
+                    ac_luma_table,
+                    writer,
+                    prev_dc_y,
+                    fdct_quantize_fn,
+                );
+            }
+        }
+    }
+
+    // Chroma blocks: always encode normally (chroma MCU_width=1 for S422/S420)
+    encode_downsampled_chroma_block(
+        cb_plane,
+        width,
+        height,
+        x0,
+        y0,
+        h_samp as usize,
+        v_samp as usize,
+        chroma_quant,
+        dc_chroma_table,
+        ac_chroma_table,
+        writer,
+        prev_dc_cb,
+        fdct_quantize_fn,
+    );
+    encode_downsampled_chroma_block(
+        cr_plane,
+        width,
+        height,
+        x0,
+        y0,
+        h_samp as usize,
+        v_samp as usize,
+        chroma_quant,
+        dc_chroma_table,
+        ac_chroma_table,
+        writer,
+        prev_dc_cr,
+        fdct_quantize_fn,
+    );
+}
+
 /// Helper: FDCT+quantize a single block (interior: fused SIMD, border: scalar fallback).
 #[cfg(target_arch = "x86_64")]
 #[allow(clippy::too_many_arguments)]
@@ -5283,6 +5453,8 @@ pub fn compress_optimized(
 
     // Shadow width/height with padded values so all encode loops use padded planes.
     // The planes are already padded to padded_w × padded_h by convert_to_ycbcr_padded.
+    let original_width: usize = width;
+    let original_height: usize = height;
     let width: usize = padded_w;
     let height: usize = padded_h;
 
@@ -5373,16 +5545,26 @@ pub fn compress_optimized(
                     }
                     Subsampling::S422 => {
                         // 2 Y blocks + 1 Cb + 1 Cr
-                        for dx in [0, 8] {
-                            let yq = gather_block(
-                                &y_plane,
-                                width,
-                                height,
-                                x0 + dx,
-                                y0,
-                                &luma_divisors,
-                                enc_simd.fdct_quantize,
-                            );
+                        // y_width_in_blocks = ceil(original_width / 8)
+                        let y_wib: usize = original_width.div_ceil(8);
+                        for dx in [0usize, 8] {
+                            let block_col: usize = (x0 + dx) / 8;
+                            let yq = if block_col >= y_wib {
+                                // Dummy block: AC=0, DC=prev (C jccoefct.c lines 184-191)
+                                let mut dummy = [0i16; 64];
+                                dummy[0] = prev_dc_y;
+                                dummy
+                            } else {
+                                gather_block(
+                                    &y_plane,
+                                    width,
+                                    height,
+                                    x0 + dx,
+                                    y0,
+                                    &luma_divisors,
+                                    enc_simd.fdct_quantize,
+                                )
+                            };
                             let diff = yq[0] - prev_dc_y;
                             prev_dc_y = yq[0];
                             huff_opt::gather_dc_symbol(diff, &mut dc_luma_freq);
