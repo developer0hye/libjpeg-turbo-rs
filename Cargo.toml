@@ -26,6 +26,7 @@ exclude = [
 [features]
 default = ["simd"]
 simd = []
+full-c-parity = []
 
 [dependencies]
 thiserror = "2"
