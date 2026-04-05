@@ -292,6 +292,93 @@ pub fn fdct_ifast(input: &[i16; 64], output: &mut [i32; 64]) {
     }
 }
 
+/// Raw IFAST FDCT matching C jfdctfst.c exactly (i16 workspace, no AA&N rescaling).
+pub fn fdct_ifast_raw(input: &[i16; 64], output: &mut [i32; 64]) {
+    #[inline(always)]
+    fn mul(v: i16, c: i32) -> i16 {
+        ((v as i32 * c) >> 8) as i16
+    }
+    let mut d: [i16; 64] = *input;
+    // Pass 1: rows
+    for r in 0..8 {
+        let b = r * 8;
+        let (t0, t7) = (d[b].wrapping_add(d[b + 7]), d[b].wrapping_sub(d[b + 7]));
+        let (t1, t6) = (
+            d[b + 1].wrapping_add(d[b + 6]),
+            d[b + 1].wrapping_sub(d[b + 6]),
+        );
+        let (t2, t5) = (
+            d[b + 2].wrapping_add(d[b + 5]),
+            d[b + 2].wrapping_sub(d[b + 5]),
+        );
+        let (t3, t4) = (
+            d[b + 3].wrapping_add(d[b + 4]),
+            d[b + 3].wrapping_sub(d[b + 4]),
+        );
+        let (t10, t13) = (t0.wrapping_add(t3), t0.wrapping_sub(t3));
+        let (t11, t12) = (t1.wrapping_add(t2), t1.wrapping_sub(t2));
+        d[b] = t10.wrapping_add(t11);
+        d[b + 4] = t10.wrapping_sub(t11);
+        let z1 = mul(t12.wrapping_add(t13), 181);
+        d[b + 2] = t13.wrapping_add(z1);
+        d[b + 6] = t13.wrapping_sub(z1);
+        let (t10, t11, t12) = (
+            t4.wrapping_add(t5),
+            t5.wrapping_add(t6),
+            t6.wrapping_add(t7),
+        );
+        let z5 = mul(t10.wrapping_sub(t12), 98);
+        let z2 = mul(t10, 139).wrapping_add(z5);
+        let z4 = mul(t12, 334).wrapping_add(z5);
+        let z3 = mul(t11, 181);
+        let (z11, z13) = (t7.wrapping_add(z3), t7.wrapping_sub(z3));
+        d[b + 5] = z13.wrapping_add(z2);
+        d[b + 3] = z13.wrapping_sub(z2);
+        d[b + 1] = z11.wrapping_add(z4);
+        d[b + 7] = z11.wrapping_sub(z4);
+    }
+    // Pass 2: columns
+    for c in 0..8usize {
+        let (t0, t7) = (d[c].wrapping_add(d[c + 56]), d[c].wrapping_sub(d[c + 56]));
+        let (t1, t6) = (
+            d[c + 8].wrapping_add(d[c + 48]),
+            d[c + 8].wrapping_sub(d[c + 48]),
+        );
+        let (t2, t5) = (
+            d[c + 16].wrapping_add(d[c + 40]),
+            d[c + 16].wrapping_sub(d[c + 40]),
+        );
+        let (t3, t4) = (
+            d[c + 24].wrapping_add(d[c + 32]),
+            d[c + 24].wrapping_sub(d[c + 32]),
+        );
+        let (t10, t13) = (t0.wrapping_add(t3), t0.wrapping_sub(t3));
+        let (t11, t12) = (t1.wrapping_add(t2), t1.wrapping_sub(t2));
+        d[c] = t10.wrapping_add(t11);
+        d[c + 32] = t10.wrapping_sub(t11);
+        let z1 = mul(t12.wrapping_add(t13), 181);
+        d[c + 16] = t13.wrapping_add(z1);
+        d[c + 48] = t13.wrapping_sub(z1);
+        let (t10, t11, t12) = (
+            t4.wrapping_add(t5),
+            t5.wrapping_add(t6),
+            t6.wrapping_add(t7),
+        );
+        let z5 = mul(t10.wrapping_sub(t12), 98);
+        let z2 = mul(t10, 139).wrapping_add(z5);
+        let z4 = mul(t12, 334).wrapping_add(z5);
+        let z3 = mul(t11, 181);
+        let (z11, z13) = (t7.wrapping_add(z3), t7.wrapping_sub(z3));
+        d[c + 40] = z13.wrapping_add(z2);
+        d[c + 24] = z13.wrapping_sub(z2);
+        d[c + 8] = z11.wrapping_add(z4);
+        d[c + 56] = z11.wrapping_sub(z4);
+    }
+    for i in 0..64 {
+        output[i] = d[i] as i32;
+    }
+}
+
 /// Forward DCT (floating-point) — AA&N algorithm.
 ///
 /// Port of libjpeg-turbo's `jfdctflt.c`. Uses f64 arithmetic for maximum
