@@ -432,7 +432,7 @@ fn c_croptest_quick() {
 /// S420 crop has edge-block handling differences (max_diff=75).
 /// GRAY produces channel/width mismatch with djpeg PPM output.
 #[test]
-#[ignore = "S420 crop: C djpeg uses jpeg_crop_scanline which affects upsample context at boundary; Rust does full decode + pixel crop. Pixel diff up to 75."]
+// Fixed: crop-aware upsampling matches C jpeg_crop_scanline (issue #164)
 fn c_croptest_quick_420() {
     let cjpeg: Option<PathBuf> = helpers::cjpeg_path();
     let djpeg: PathBuf = match helpers::djpeg_path() {

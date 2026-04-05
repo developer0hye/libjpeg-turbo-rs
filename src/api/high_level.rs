@@ -73,16 +73,23 @@ pub fn decompress_cropped(data: &[u8], region: CropRegion) -> Result<Image> {
         });
     }
 
-    // Set crop region so the decoder skips IDCT on out-of-range MCU rows
+    // Disable merged upsample for crop decode: C djpeg uses fancy merged
+    // upsample by default, but Rust's merged path is box-filter. The fancy
+    // row-streaming H2V2 path matches C's behavior at crop boundaries.
+    decoder.merged_upsample = false;
+
+    // Set crop region: the decoder produces output at MCU-aligned crop width
+    // (matching C jpeg_crop_scanline), so only y-axis extraction is needed.
     decoder.set_crop_region(x, y, w, h);
     let full = decoder.decode_image()?;
     let bpp = full.pixel_format.bytes_per_pixel();
 
-    // Extract the exact pixel region from the full-width output
+    // Decoder output width is the crop width (w); extract y-axis rows only.
+    let row_bytes: usize = full.width * bpp;
     let mut cropped_data = Vec::with_capacity(w * h * bpp);
     for row in y..y + h {
-        let start = (row * full.width + x) * bpp;
-        cropped_data.extend_from_slice(&full.data[start..start + w * bpp]);
+        let start: usize = row * row_bytes;
+        cropped_data.extend_from_slice(&full.data[start..start + row_bytes]);
     }
 
     Ok(Image {

@@ -2125,6 +2125,11 @@ impl<'a> Decoder<'a> {
         let mcu_start = crop_y / mcu_pixel_h;
         let mcu_end = (crop_y + crop_h).div_ceil(mcu_pixel_h).min(mcus_y);
 
+        // Extend by 1 MCU row on each side so the fancy upsampler has valid
+        // vertical context at the crop boundary (it reads neighbor rows).
+        let mcu_start = mcu_start.saturating_sub(1);
+        let mcu_end = (mcu_end + 1).min(mcus_y);
+
         (mcu_start, mcu_end)
     }
 
@@ -2872,6 +2877,32 @@ impl<'a> Decoder<'a> {
             );
         }
 
+        // Crop-aware output: when crop_x/crop_width are set, the output
+        // narrows to the crop width. Per-component plane offsets ensure the
+        // upsampler sees the crop boundary as the image edge, matching C
+        // jpeg_crop_scanline behavior exactly.
+        let comp_x_offsets: Vec<usize> = if let Some(cx) = self.crop_x {
+            frame
+                .components
+                .iter()
+                .map(|comp| cx * comp.horizontal_sampling as usize / max_h)
+                .collect()
+        } else {
+            vec![0; num_components]
+        };
+        let out_width: usize = self.crop_width.unwrap_or(out_width);
+        // Cap output height to the extended MCU range (crop MCU range + 1 row
+        // context on each side). IDCT is skipped outside this range, so
+        // component planes contain garbage beyond it.
+        let out_height: usize = if let (Some(cy), Some(ch)) = (self.crop_y, self.crop_height) {
+            let mcu_h: usize = max_v * block_size;
+            let mcu_end: usize = (cy + ch).div_ceil(mcu_h);
+            let extended_end: usize = (mcu_end + 1).min(mcus_y);
+            (extended_end * mcu_h).min(out_height)
+        } else {
+            out_height
+        };
+
         // Upsample and color convert
         if num_components == 1 {
             let out_format = self.output_format.unwrap_or(PixelFormat::Grayscale);
@@ -2881,8 +2912,9 @@ impl<'a> Decoder<'a> {
             if out_format == PixelFormat::Grayscale {
                 let mut data = Vec::with_capacity(out_width * out_height);
                 for y in 0..out_height {
+                    let off: usize = comp_x_offsets[0];
                     data.extend_from_slice(
-                        &component_planes[0][y * comp_w..y * comp_w + out_width],
+                        &component_planes[0][y * comp_w + off..y * comp_w + off + out_width],
                     );
                 }
                 Ok(Image {
@@ -2908,7 +2940,8 @@ impl<'a> Decoder<'a> {
                     data.set_len(data_size)
                 };
                 for y in 0..out_height {
-                    let row = &component_planes[0][y * comp_w..y * comp_w + out_width];
+                    let row = &component_planes[0][y * comp_w + comp_x_offsets[0]
+                        ..y * comp_w + comp_x_offsets[0] + out_width];
                     let out_row = &mut data[y * out_width * bpp..(y + 1) * out_width * bpp];
                     // For dithered RGB565, use the dedicated row-level function.
                     if out_format == PixelFormat::Rgb565 && self.dither_565 {
@@ -3005,9 +3038,9 @@ impl<'a> Decoder<'a> {
                     data.set_len(data_size)
                 };
                 for y in 0..out_height {
-                    let r_row: &[u8] = &r_plane[y * r_stride..];
-                    let g_row: &[u8] = &g_plane[y * g_stride..];
-                    let b_row: &[u8] = &b_plane[y * b_stride..];
+                    let r_row: &[u8] = &r_plane[y * r_stride + comp_x_offsets[0]..];
+                    let g_row: &[u8] = &g_plane[y * g_stride + comp_x_offsets[1]..];
+                    let b_row: &[u8] = &b_plane[y * b_stride + comp_x_offsets[2]..];
                     let out_row: &mut [u8] = &mut data[y * out_width * 3..][..out_width * 3];
                     for x in 0..out_width {
                         out_row[x * 3] = r_row[x];
@@ -3101,9 +3134,9 @@ impl<'a> Decoder<'a> {
                         // H2V1 (4:2:2): one chroma row per Y row
                         for y in 0..out_height {
                             Self::merged_h2v1(
-                                &y_plane[y * y_width..],
-                                &component_planes[1][y * cb_w..],
-                                &component_planes[2][y * cb_w..],
+                                &y_plane[y * y_width + comp_x_offsets[0]..],
+                                &component_planes[1][y * cb_w + comp_x_offsets[1]..],
+                                &component_planes[2][y * cb_w + comp_x_offsets[2]..],
                                 &mut data[y * out_width * bpp..],
                                 out_width,
                             );
@@ -3120,10 +3153,10 @@ impl<'a> Decoder<'a> {
                             // Split data into two non-overlapping mutable slices
                             let (top, bottom) = data.split_at_mut(out1_start);
                             Self::merged_h2v2(
-                                &y_plane[y0 * y_width..],
-                                &y_plane[y1 * y_width..],
-                                &component_planes[1][chroma_row * cb_w..],
-                                &component_planes[2][chroma_row * cb_w..],
+                                &y_plane[y0 * y_width + comp_x_offsets[0]..],
+                                &y_plane[y1 * y_width + comp_x_offsets[0]..],
+                                &component_planes[1][chroma_row * cb_w + comp_x_offsets[1]..],
+                                &component_planes[2][chroma_row * cb_w + comp_x_offsets[2]..],
                                 &mut top[out0_start..],
                                 bottom,
                                 out_width,
@@ -3134,9 +3167,9 @@ impl<'a> Decoder<'a> {
                             let last_y: usize = out_height - 1;
                             let chroma_row: usize = last_y / 2;
                             Self::merged_h2v1(
-                                &y_plane[last_y * y_width..],
-                                &component_planes[1][chroma_row * cb_w..],
-                                &component_planes[2][chroma_row * cb_w..],
+                                &y_plane[last_y * y_width + comp_x_offsets[0]..],
+                                &component_planes[1][chroma_row * cb_w + comp_x_offsets[1]..],
+                                &component_planes[2][chroma_row * cb_w + comp_x_offsets[2]..],
                                 &mut data[last_y * out_width * bpp..],
                                 out_width,
                             );
@@ -3187,26 +3220,34 @@ impl<'a> Decoder<'a> {
                     let mut cr_row_bot = vec![0u8; full_width];
 
                     // Use actual chroma dimensions for upsample (not MCU-padded).
+                    let cb_off: usize = comp_x_offsets[1];
+                    let cr_off: usize = comp_x_offsets[2];
                     for cy in 0..actual_cb_h {
-                        let cb_cur = &component_planes[1][cy * cb_w..cy * cb_w + actual_cb_w];
-                        let cr_cur = &component_planes[2][cy * cb_w..cy * cb_w + actual_cb_w];
+                        let cb_cur = &component_planes[1]
+                            [cy * cb_w + cb_off..cy * cb_w + cb_off + actual_cb_w];
+                        let cr_cur = &component_planes[2]
+                            [cy * cb_w + cr_off..cy * cb_w + cr_off + actual_cb_w];
                         let cb_above = if cy > 0 {
-                            &component_planes[1][(cy - 1) * cb_w..(cy - 1) * cb_w + actual_cb_w]
+                            &component_planes[1]
+                                [(cy - 1) * cb_w + cb_off..(cy - 1) * cb_w + cb_off + actual_cb_w]
                         } else {
                             cb_cur
                         };
                         let cb_below = if cy + 1 < actual_cb_h {
-                            &component_planes[1][(cy + 1) * cb_w..(cy + 1) * cb_w + actual_cb_w]
+                            &component_planes[1]
+                                [(cy + 1) * cb_w + cb_off..(cy + 1) * cb_w + cb_off + actual_cb_w]
                         } else {
                             cb_cur
                         };
                         let cr_above = if cy > 0 {
-                            &component_planes[2][(cy - 1) * cb_w..(cy - 1) * cb_w + actual_cb_w]
+                            &component_planes[2]
+                                [(cy - 1) * cb_w + cr_off..(cy - 1) * cb_w + cr_off + actual_cb_w]
                         } else {
                             cr_cur
                         };
                         let cr_below = if cy + 1 < actual_cb_h {
-                            &component_planes[2][(cy + 1) * cb_w..(cy + 1) * cb_w + actual_cb_w]
+                            &component_planes[2]
+                                [(cy + 1) * cb_w + cr_off..(cy + 1) * cb_w + cr_off + actual_cb_w]
                         } else {
                             cr_cur
                         };
@@ -3242,10 +3283,11 @@ impl<'a> Decoder<'a> {
                         // Color convert both output rows immediately
                         let out_y_top = cy * 2;
                         let out_y_bot = cy * 2 + 1;
+                        let y_off: usize = comp_x_offsets[0];
                         if out_y_top < out_height {
                             self.color_convert_row(
                                 out_format,
-                                &y_plane[out_y_top * y_width..],
+                                &y_plane[out_y_top * y_width + y_off..],
                                 &cb_row_top,
                                 &cr_row_top,
                                 &mut data[out_y_top * out_width * bpp..],
@@ -3256,7 +3298,7 @@ impl<'a> Decoder<'a> {
                         if out_y_bot < out_height {
                             self.color_convert_row(
                                 out_format,
-                                &y_plane[out_y_bot * y_width..],
+                                &y_plane[out_y_bot * y_width + y_off..],
                                 &cb_row_bot,
                                 &cr_row_bot,
                                 &mut data[out_y_bot * out_width * bpp..],
@@ -3294,7 +3336,17 @@ impl<'a> Decoder<'a> {
                 // Upsample each chroma component independently using its own factors.
                 // This handles non-uniform chroma sampling (e.g. Cb=2x1, Cr=1x1)
                 // where each component needs a different upsample strategy.
-                for (comp_plane, comp_full, comp_w, comp_h, comp_hf, comp_vf, actual_w, actual_h) in [
+                for (
+                    comp_plane,
+                    comp_full,
+                    comp_w,
+                    comp_h,
+                    comp_hf,
+                    comp_vf,
+                    actual_w,
+                    actual_h,
+                    comp_off,
+                ) in [
                     (
                         &component_planes[1],
                         &mut cb_full,
@@ -3304,6 +3356,7 @@ impl<'a> Decoder<'a> {
                         cb_v_factor,
                         actual_cb_w,
                         actual_cb_h,
+                        comp_x_offsets[1],
                     ),
                     (
                         &component_planes[2],
@@ -3314,6 +3367,7 @@ impl<'a> Decoder<'a> {
                         cr_v_factor,
                         actual_cr_w,
                         actual_cr_h,
+                        comp_x_offsets[2],
                     ),
                 ] {
                     // C libjpeg-turbo uses box filter when:
@@ -3326,22 +3380,34 @@ impl<'a> Decoder<'a> {
 
                     if comp_hf == 1 && comp_vf == 1 {
                         // No upsampling needed for this component — copy directly.
+                        let copy_len: usize = actual_w.min(full_width);
                         for row in 0..full_height.min(comp_h) {
-                            let src_start: usize = row * comp_w;
+                            let src_start: usize = row * comp_w + comp_off;
                             let dst_start: usize = row * full_width;
-                            let copy_len: usize = full_width.min(comp_w);
                             comp_full[dst_start..dst_start + copy_len]
                                 .copy_from_slice(&comp_plane[src_start..src_start + copy_len]);
                         }
                     } else if use_box_filter {
-                        crate::decode::toggles::upsample_nearest(
-                            comp_plane, comp_w, comp_h, comp_full, full_width, comp_hf, comp_vf,
-                        );
+                        if comp_off > 0 {
+                            let mut cropped: Vec<u8> = Vec::with_capacity(actual_w * actual_h);
+                            for row in 0..comp_h.min(actual_h) {
+                                let s: usize = row * comp_w + comp_off;
+                                cropped.extend_from_slice(&comp_plane[s..s + actual_w]);
+                            }
+                            crate::decode::toggles::upsample_nearest(
+                                &cropped, actual_w, actual_h, comp_full, full_width, comp_hf,
+                                comp_vf,
+                            );
+                        } else {
+                            crate::decode::toggles::upsample_nearest(
+                                comp_plane, comp_w, comp_h, comp_full, full_width, comp_hf, comp_vf,
+                            );
+                        }
                     } else if comp_hf == 2 && comp_vf == 1 {
                         // H2V1: horizontal-only 2x fancy upsample.
                         for row in 0..actual_h {
                             self.fancy_upsample_h2v1(
-                                &comp_plane[row * comp_w..],
+                                &comp_plane[row * comp_w + comp_off..],
                                 actual_w,
                                 &mut comp_full[row * full_width..],
                             );
@@ -3349,17 +3415,42 @@ impl<'a> Decoder<'a> {
                     } else if comp_hf == 2 && comp_vf == 2 {
                         // H2V2: fused 2D triangle filter fancy upsample.
                         crate::decode::upsample::fancy_h2v2_strided(
-                            comp_plane, actual_w, comp_w, actual_h, comp_full, full_width,
+                            &comp_plane[comp_off..],
+                            actual_w,
+                            comp_w,
+                            actual_h,
+                            comp_full,
+                            full_width,
                         );
                     } else if comp_hf == 1 && comp_vf == 2 {
                         // H1V2: vertical-only 2x fancy upsample.
-                        self.fancy_h1v2(comp_plane, comp_w, actual_h, comp_full, full_width);
+                        if comp_off > 0 {
+                            let mut cropped: Vec<u8> = Vec::with_capacity(actual_w * actual_h);
+                            for row in 0..actual_h {
+                                let s: usize = row * comp_w + comp_off;
+                                cropped.extend_from_slice(&comp_plane[s..s + actual_w]);
+                            }
+                            self.fancy_h1v2(&cropped, actual_w, actual_h, comp_full, full_width);
+                        } else {
+                            self.fancy_h1v2(comp_plane, comp_w, actual_h, comp_full, full_width);
+                        }
                     } else {
-                        // Generic fallback: nearest-neighbor for any factor combination
-                        // (4x1, 4x2, 1x4, 3x2, etc.).
-                        upsample_generic_nearest(
-                            comp_plane, comp_w, comp_h, comp_full, full_width, comp_hf, comp_vf,
-                        );
+                        // Generic fallback: nearest-neighbor for any factor combination.
+                        if comp_off > 0 {
+                            let mut cropped: Vec<u8> = Vec::with_capacity(actual_w * actual_h);
+                            for row in 0..comp_h.min(actual_h) {
+                                let s: usize = row * comp_w + comp_off;
+                                cropped.extend_from_slice(&comp_plane[s..s + actual_w]);
+                            }
+                            upsample_generic_nearest(
+                                &cropped, actual_w, actual_h, comp_full, full_width, comp_hf,
+                                comp_vf,
+                            );
+                        } else {
+                            upsample_generic_nearest(
+                                comp_plane, comp_w, comp_h, comp_full, full_width, comp_hf, comp_vf,
+                            );
+                        }
                     }
                 }
 
@@ -3376,7 +3467,7 @@ impl<'a> Decoder<'a> {
                 for y in 0..out_height {
                     self.color_convert_row(
                         out_format,
-                        &y_plane[y * y_width..],
+                        &y_plane[y * y_width + comp_x_offsets[0]..],
                         &cb_full[y * full_width..],
                         &cr_full[y * full_width..],
                         &mut data[y * out_width * bpp..],
@@ -3410,9 +3501,9 @@ impl<'a> Decoder<'a> {
             for y in 0..out_height {
                 self.color_convert_row(
                     out_format,
-                    &y_plane[y * y_width..],
-                    &cb_data[y * cb_stride..],
-                    &cr_data[y * cr_stride..],
+                    &y_plane[y * y_width + comp_x_offsets[0]..],
+                    &cb_data[y * cb_stride + comp_x_offsets[1]..],
+                    &cr_data[y * cr_stride + comp_x_offsets[2]..],
                     &mut data[y * out_width * bpp..],
                     out_width,
                     y,
