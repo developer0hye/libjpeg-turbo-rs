@@ -200,6 +200,54 @@ pub fn compress(
             enc_simd.rgb_to_ycbcr_row,
         )?;
 
+        // Pad all planes to MCU-aligned dimensions so all blocks (including edge
+        // blocks) go through the NEON fused FDCT+quantize path instead of the
+        // scalar fallback.  This matches C libjpeg-turbo's expand_right_edge
+        // behavior and ensures byte-identical output.
+        let padded_w: usize = mcus_x * mcu_w;
+        let padded_h: usize = mcus_y * mcu_h;
+
+        fn pad_plane(
+            plane: &[u8],
+            src_w: usize,
+            src_h: usize,
+            dst_w: usize,
+            dst_h: usize,
+        ) -> Vec<u8> {
+            if src_w == dst_w && src_h == dst_h {
+                return plane.to_vec();
+            }
+            let mut padded: Vec<u8> = vec![0u8; dst_w * dst_h];
+            for row in 0..src_h {
+                let src_start: usize = row * src_w;
+                let dst_start: usize = row * dst_w;
+                padded[dst_start..dst_start + src_w]
+                    .copy_from_slice(&plane[src_start..src_start + src_w]);
+                if src_w < dst_w {
+                    let last_val: u8 = plane[src_start + src_w - 1];
+                    for x in src_w..dst_w {
+                        padded[dst_start + x] = last_val;
+                    }
+                }
+            }
+            if src_h < dst_h {
+                let last_row: Vec<u8> =
+                    padded[(src_h - 1) * dst_w..src_h * dst_w].to_vec();
+                for row in src_h..dst_h {
+                    let dst_start: usize = row * dst_w;
+                    padded[dst_start..dst_start + dst_w].copy_from_slice(&last_row);
+                }
+            }
+            padded
+        }
+
+        let y_plane_padded: Vec<u8> =
+            pad_plane(&y_plane, width, height, padded_w, padded_h);
+        let cb_plane_padded: Vec<u8> =
+            pad_plane(&cb_plane, width, height, padded_w, padded_h);
+        let cr_plane_padded: Vec<u8> =
+            pad_plane(&cr_plane, width, height, padded_w, padded_h);
+
         for mcu_row in 0..mcus_y {
             for mcu_col in 0..mcus_x {
                 let x0: usize = mcu_col * mcu_w;
@@ -207,9 +255,9 @@ pub fn compress(
 
                 if is_grayscale {
                     encode_single_block(
-                        &y_plane,
-                        width,
-                        height,
+                        &y_plane_padded,
+                        padded_w,
+                        padded_h,
                         x0,
                         y0,
                         &luma_divisors,
@@ -221,11 +269,11 @@ pub fn compress(
                     );
                 } else {
                     encode_color_mcu(
-                        &y_plane,
-                        &cb_plane,
-                        &cr_plane,
-                        width,
-                        height,
+                        &y_plane_padded,
+                        &cb_plane_padded,
+                        &cr_plane_padded,
+                        padded_w,
+                        padded_h,
                         x0,
                         y0,
                         subsampling,
@@ -3859,18 +3907,55 @@ fn encode_single_block(
         }
     }
 
-    // Fallback for border blocks: separate extract + fdct_quantize
-    let mut block = [0i16; 64];
-    extract_block(
-        plane,
-        plane_width,
-        plane_height,
-        block_x,
-        block_y,
-        &mut block,
-    );
-    fdct_quantize_fn(&mut block, quant_table, &mut quantized);
+    // Border blocks: pad to a local 8×8 buffer with replicated-last-pixel,
+    // then use the NEON/AVX2 fused path.  This ensures byte-identical output
+    // with C libjpeg-turbo's expand_right_edge + NEON convsamp/fdct path
+    // for all encode functions (compress, compress_optimized, compress_arithmetic, etc.).
+    let mut local_buf = [0u8; 64]; // 8×8 padded block
+    for row in 0..8usize {
+        let src_y: usize = (block_y + row).min(plane_height - 1);
+        for col in 0..8usize {
+            let src_x: usize = (block_x + col).min(plane_width - 1);
+            local_buf[row * 8 + col] = plane[src_y * plane_width + src_x];
+        }
+    }
 
+    // Use the fused NEON/AVX2 path on the padded 8×8 buffer (stride=8, always interior)
+    #[cfg(target_arch = "aarch64")]
+    {
+        unsafe {
+            crate::simd::aarch64::neon_extract_fdct_quantize(
+                local_buf.as_ptr(),
+                8, // stride = 8 for the local buffer
+                quant_table,
+                &mut quantized,
+            );
+        }
+        HuffmanEncoder::encode_block(writer, &quantized, prev_dc, dc_table, ac_table);
+        return;
+    }
+    #[cfg(target_arch = "x86_64")]
+    {
+        if is_x86_feature_detected!("avx2") {
+            unsafe {
+                crate::simd::x86_64::avx2_extract_fdct_quantize(
+                    local_buf.as_ptr(),
+                    8,
+                    quant_table,
+                    &mut quantized,
+                );
+            }
+            HuffmanEncoder::encode_block(writer, &quantized, prev_dc, dc_table, ac_table);
+            return;
+        }
+    }
+
+    // Scalar fallback (non-SIMD platforms)
+    let mut block = [0i16; 64];
+    for i in 0..64 {
+        block[i] = local_buf[i] as i16 - 128;
+    }
+    fdct_quantize_fn(&mut block, quant_table, &mut quantized);
     HuffmanEncoder::encode_block(writer, &quantized, prev_dc, dc_table, ac_table);
 }
 
