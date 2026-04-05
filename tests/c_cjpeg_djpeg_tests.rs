@@ -242,7 +242,7 @@ fn c_cjpeg_420_q100_ifast_prog() {
 /// CMakeLists line 1620: cjpeg gray-islow
 /// -gray -dct int -noicc  testorig.ppm → grayscale JPEG
 #[test]
-#[ignore = "FIXME: encoder grayscale islow output differs from C cjpeg on non-MCU-aligned image"]
+// Previously ignored — fixed by skipping fancy prefilter for grayscale + SIMD Y extraction
 fn c_cjpeg_gray_islow() {
     let cjpeg = match helpers::cjpeg_path() {
         Some(p) => p,
