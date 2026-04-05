@@ -43,30 +43,29 @@ pub fn gather_ac_symbols(coeffs: &[i16; 64], freq: &mut [u32; 257]) {
 /// Implements JPEG Annex K.2: build Huffman tree, compute code sizes,
 /// limit to 16-bit max code length, and generate bits[]/huffval[].
 pub fn gen_optimal_table(freq: &[u32; 257]) -> ([u8; 17], Vec<u8>) {
-    // Collect symbols with nonzero frequency
-    let mut symbols: Vec<(u32, usize)> = freq
-        .iter()
-        .enumerate()
-        .filter(|(_, &f)| f > 0)
-        .map(|(i, &f)| (f, i))
-        .collect();
+    // Match C's jchuff.c jpeg_gen_optimal_table exactly:
+    // Compact nonzero frequencies in original symbol order (0..256),
+    // preserving nz_index mapping. Do NOT sort by frequency.
+    let mut freq_work = [0i64; 257];
+    let mut nz_index = [0usize; 257];
+    let mut n: usize = 0;
+    // Ensure pseudo-symbol 256 has nonzero count
+    let mut freq_copy = *freq;
+    freq_copy[256] = freq_copy[256].max(1);
+    for i in 0..257 {
+        if freq_copy[i] > 0 {
+            nz_index[n] = i;
+            freq_work[n] = freq_copy[i] as i64;
+            n += 1;
+        }
+    }
 
-    if symbols.is_empty() {
+    if n == 0 {
         return ([0u8; 17], Vec::new());
     }
 
-    // If only one real symbol, we still need 2 symbols for a valid Huffman tree.
-    // The pseudo-symbol (256) ensures this in practice.
-    if symbols.len() == 1 {
-        // Add a dummy symbol with frequency 1
-        let dummy = if symbols[0].1 == 0 { 1 } else { 0 };
-        symbols.push((1, dummy));
-    }
-
-    let n = symbols.len();
-
-    // Sort by frequency (ascending), break ties by symbol value
-    symbols.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)));
+    // symbols array for compatibility with sym_codesize mapping later
+    let symbols: Vec<(u32, usize)> = (0..n).map(|i| (freq_work[i] as u32, nz_index[i])).collect();
 
     // Build Huffman tree using the package-merge-like approach from jchuff.c.
     // We use the standard algorithm: repeatedly merge two smallest nodes.
@@ -76,37 +75,44 @@ pub fn gen_optimal_table(freq: &[u32; 257]) -> ([u8; 17], Vec<u8>) {
     // "others" array for tree traversal (-1 = no link)
     let mut others = vec![-1i32; n];
 
-    // Frequency array (mutable, nodes get merged)
-    let mut freqs: Vec<i64> = symbols.iter().map(|(f, _)| *f as i64).collect();
+    // Repeatedly merge the two smallest-frequency nodes.
+    // Matches C jchuff.c lines 974-1024 exactly.
+    const MERGED: i64 = 1_000_000_001;
 
-    // Repeatedly merge the two smallest-frequency nodes
-    for _ in 0..n - 1 {
-        // Find the two smallest active nodes
-        let mut v1: i32 = -1;
-        let mut v2: i32 = -1;
+    loop {
+        // Find the two smallest active nodes.
+        // Use <= (not <) to match C's tie-breaking: "In case of ties,
+        // take the larger symbol number" (jchuff.c line 976-977).
+        let mut c1: i32 = -1;
+        let mut c2: i32 = -1;
+        let mut v: i64 = 1_000_000_000;
+        let mut v2: i64 = 1_000_000_000;
 
         for i in 0..n {
-            if freqs[i] < 0 {
-                continue; // already merged
-            }
-            if v1 < 0 || freqs[i] < freqs[v1 as usize] {
-                v2 = v1;
-                v1 = i as i32;
-            } else if v2 < 0 || freqs[i] < freqs[v2 as usize] {
-                v2 = i as i32;
+            if freq_work[i] <= v2 {
+                if freq_work[i] <= v {
+                    c2 = c1;
+                    v2 = v;
+                    v = freq_work[i];
+                    c1 = i as i32;
+                } else {
+                    v2 = freq_work[i];
+                    c2 = i as i32;
+                }
             }
         }
 
-        if v1 < 0 || v2 < 0 {
+        // Done if we've merged everything into one frequency
+        if c2 < 0 {
             break;
         }
 
-        let v1u = v1 as usize;
-        let v2u = v2 as usize;
+        let v1u = c1 as usize;
+        let v2u = c2 as usize;
 
-        // Merge v2 into v1
-        freqs[v1u] += freqs[v2u];
-        freqs[v2u] = -1; // mark merged
+        // Merge c2 into c1
+        freq_work[v1u] += freq_work[v2u];
+        freq_work[v2u] = MERGED; // mark merged (matching C's 1000000001L)
 
         // Increment code sizes for all symbols in v1's chain
         codesize[v1u] += 1;
@@ -116,8 +122,8 @@ pub fn gen_optimal_table(freq: &[u32; 257]) -> ([u8; 17], Vec<u8>) {
             codesize[c] += 1;
         }
 
-        // Link v2's chain to v1's chain
-        others[c] = v2;
+        // Link c2's chain to c1's chain
+        others[c] = c2;
 
         // Increment code sizes for all symbols in v2's chain
         codesize[v2u] += 1;
@@ -140,49 +146,64 @@ pub fn gen_optimal_table(freq: &[u32; 257]) -> ([u8; 17], Vec<u8>) {
     }
 
     // Limit code lengths to 16 bits (JPEG maximum).
-    // JPEG Annex K.2 Figure K.3: Adjust bit-length counts.
-    let mut max_code_len = 32.min(bits.len() - 1);
-    while max_code_len > 0 && bits[max_code_len] == 0 {
-        max_code_len -= 1;
-    }
-
-    while max_code_len > 16 {
-        // Move codes from length max_code_len down toward length 16
-        // by splitting a code at length max_code_len-1
-        let mut j = max_code_len - 2;
-        while j > 0 && bits[j] == 0 {
-            j -= 1;
+    // Matches C jchuff.c lines 1058-1074 exactly.
+    {
+        let mut i: usize = 32.min(bits.len() - 1);
+        while i > 16 {
+            while bits[i] > 0 {
+                let mut j: usize = i - 2;
+                while bits[j] == 0 {
+                    j -= 1;
+                }
+                bits[i] -= 2;
+                bits[i - 1] += 1;
+                bits[j + 1] += 2;
+                bits[j] -= 1;
+            }
+            i -= 1;
         }
-
-        // One code at length j becomes a prefix: generates two codes at j+1
-        // One of those replaces one code at max_code_len
-        bits[max_code_len] -= 2;
-        bits[max_code_len - 1] += 1;
-        bits[j + 1] += 2;
-        bits[j] -= 1;
-
-        // Recompute max_code_len
-        while max_code_len > 16 && bits[max_code_len] == 0 {
-            max_code_len -= 1;
+        // Remove pseudo-symbol (256) from largest codelength still in use
+        while bits[i] == 0 {
+            i -= 1;
         }
+        bits[i] -= 1;
     }
-
-    // Remove pseudo-symbol (256) from the count: it gets the longest code
-    bits[max_code_len] -= 1;
 
     // Build JPEG bits[1..=16]
     let mut jpeg_bits = [0u8; 17];
-    let copy_len: usize = 16.min(max_code_len);
-    jpeg_bits[1..=copy_len].copy_from_slice(&bits[1..=copy_len]);
+    jpeg_bits[1..=16].copy_from_slice(&bits[1..=16]);
 
-    // Generate huffval: sorted by (code_size, symbol_value)
-    let mut sym_sizes: Vec<(u32, usize)> = (0..n)
-        .filter(|&i| codesize[i] > 0 && symbols[i].1 < 256)
-        .map(|i| (codesize[i], symbols[i].1))
-        .collect();
-    sym_sizes.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)));
+    // Generate huffval: C uses bit_pos[codesize[i]] with nz_index ordering
+    // (jchuff.c lines 1041-1085). nz_index is in ascending symbol value order.
+    // Since Rust's `symbols` is sorted by frequency, we need to map back
+    // to symbol value order.
+    //
+    // Build sym_codesize[symbol_value] = codesize for that symbol.
+    let mut sym_codesize = [0u32; 257];
+    for i in 0..n {
+        sym_codesize[symbols[i].1] = codesize[i];
+    }
 
-    let huffval: Vec<u8> = sym_sizes.iter().map(|(_, sym)| *sym as u8).collect();
+    // Compute bit_pos from original codesizes
+    let mut bit_pos = [0usize; 33];
+    {
+        let mut p: usize = 0;
+        for len in 1..=32usize {
+            bit_pos[len] = p;
+            p += sym_codesize.iter().filter(|&&cs| cs == len as u32).count();
+        }
+    }
+
+    // Place symbols in ascending symbol value order, grouped by code length.
+    let total_symbols: usize = sym_codesize[..256].iter().filter(|&&cs| cs > 0).count();
+    let mut huffval = vec![0u8; total_symbols];
+    for sym in 0..256usize {
+        if sym_codesize[sym] > 0 {
+            let cs = sym_codesize[sym] as usize;
+            huffval[bit_pos[cs]] = sym as u8;
+            bit_pos[cs] += 1;
+        }
+    }
 
     (jpeg_bits, huffval)
 }

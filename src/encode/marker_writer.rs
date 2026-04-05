@@ -252,13 +252,19 @@ pub fn write_dac(
     let length: u16 = 2 + (num_entries as u16 * 2);
     buf.extend_from_slice(&length.to_be_bytes());
 
-    for (i, &(l, u)) in dc_params[..num_dc].iter().enumerate() {
-        buf.push(i as u8); // Tc=0 (DC), Tb=i
-        buf.push((u << 4) | l);
-    }
-    for (i, &val) in ac_params[..num_ac].iter().enumerate() {
-        buf.push(0x10 | i as u8); // Tc=1 (AC), Tb=i
-        buf.push(val);
+    // Write entries interleaved by table index (DC0, AC0, DC1, AC1, ...)
+    // matching C libjpeg-turbo's jcarith.c emit_dac output order.
+    let max_tables: usize = num_dc.max(num_ac);
+    for i in 0..max_tables {
+        if i < num_dc {
+            let (l, u) = dc_params[i];
+            buf.push(i as u8); // Tc=0 (DC), Tb=i
+            buf.push((u << 4) | l);
+        }
+        if i < num_ac {
+            buf.push(0x10 | i as u8); // Tc=1 (AC), Tb=i
+            buf.push(ac_params[i]);
+        }
     }
 }
 
