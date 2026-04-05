@@ -27,8 +27,6 @@ fn read_file(path: &Path) -> Vec<u8> {
     std::fs::read(path).unwrap_or_else(|e| panic!("Failed to read {:?}: {:?}", path, e))
 }
 
-
-
 // ===========================================================================
 // 8-bit cjpeg encode tests
 // ===========================================================================
@@ -89,7 +87,7 @@ fn c_cjpeg_rgb_islow() {
 /// CMakeLists line 1566: cjpeg 422-ifast-opt
 /// -sample 2x1 -dct fast -opt  testorig.ppm → JPEG
 #[test]
-#[ignore = "FIXME: encoder 422 ifast opt output differs from C cjpeg on non-MCU-aligned image"]
+#[ignore = "FIXME: S422 non-MCU-aligned edge chroma downsample differs (MCU-aligned is byte-identical)"]
 fn c_cjpeg_422_ifast_opt() {
     let cjpeg = match helpers::cjpeg_path() {
         Some(p) => p,
@@ -126,11 +124,7 @@ fn c_cjpeg_422_ifast_opt() {
         Ok(data) => {
             let rust_out = helpers::TempFile::new("rust_422_ifast_opt.jpg");
             rust_out.write_bytes(&data);
-            helpers::assert_files_identical(
-                rust_out.path(),
-                c_out.path(),
-                "cjpeg-422-ifast-opt",
-            );
+            helpers::assert_files_identical(rust_out.path(), c_out.path(), "cjpeg-422-ifast-opt");
         }
         Err(e) => panic!("Rust encode failed: {:?}", e),
     }
@@ -139,7 +133,7 @@ fn c_cjpeg_422_ifast_opt() {
 /// CMakeLists line 1576: cjpeg 440-islow
 /// -sample 1x2 -dct int  testorig.ppm → JPEG
 #[test]
-#[ignore = "FIXME: encoder 440 islow output differs from C cjpeg on non-MCU-aligned image"]
+#[ignore = "FIXME: S440 non-MCU-aligned edge chroma downsample differs (MCU-aligned is byte-identical)"]
 fn c_cjpeg_440_islow() {
     let cjpeg = match helpers::cjpeg_path() {
         Some(p) => p,
@@ -156,7 +150,12 @@ fn c_cjpeg_440_islow() {
     }
 
     let c_out = helpers::TempFile::new("c_440_islow.jpg");
-    helpers::run_c_cjpeg(&cjpeg, &["-sample", "1x2", "-dct", "int"], &src, c_out.path());
+    helpers::run_c_cjpeg(
+        &cjpeg,
+        &["-sample", "1x2", "-dct", "int"],
+        &src,
+        c_out.path(),
+    );
 
     let ppm_data = read_file(&src);
     let (w, h, pixels) = helpers::parse_ppm(&ppm_data).expect("parse PPM");
@@ -179,7 +178,7 @@ fn c_cjpeg_440_islow() {
 /// CMakeLists line 1604: cjpeg 420-q100-ifast-prog
 /// -sample 2x2 -quality 100 -dct fast -scans test.scan  testorig.ppm → JPEG
 #[test]
-#[ignore = "FIXME: encoder 420 Q100 ifast progressive output differs from C cjpeg"]
+#[ignore = "FIXME: S420 progressive non-MCU-aligned edge chroma downsample differs (MCU-aligned is byte-identical)"]
 fn c_cjpeg_420_q100_ifast_prog() {
     let cjpeg = match helpers::cjpeg_path() {
         Some(p) => p,
@@ -259,12 +258,7 @@ fn c_cjpeg_gray_islow() {
     }
 
     let c_out = helpers::TempFile::new("c_gray_islow.jpg");
-    helpers::run_c_cjpeg(
-        &cjpeg,
-        &["-grayscale", "-dct", "int"],
-        &src,
-        c_out.path(),
-    );
+    helpers::run_c_cjpeg(&cjpeg, &["-grayscale", "-dct", "int"], &src, c_out.path());
 
     let ppm_data = read_file(&src);
     let (w, h, pixels) = helpers::parse_ppm(&ppm_data).expect("parse PPM");
@@ -287,7 +281,7 @@ fn c_cjpeg_gray_islow() {
 /// CMakeLists line 1648: cjpeg 420s-islow-opt
 /// -sample 2x2 -smooth 1 -dct int -opt  testorig.ppm → JPEG with smoothing
 #[test]
-#[ignore = "FIXME: encoder 420 smooth islow opt output differs from C cjpeg on non-MCU-aligned image"]
+#[ignore = "FIXME: S420 smooth non-MCU-aligned edge chroma downsample differs (MCU-aligned is byte-identical)"]
 fn c_cjpeg_420s_islow_opt() {
     let cjpeg = match helpers::cjpeg_path() {
         Some(p) => p,
@@ -325,11 +319,7 @@ fn c_cjpeg_420s_islow_opt() {
         Ok(data) => {
             let rust_out = helpers::TempFile::new("rust_420s_islow_opt.jpg");
             rust_out.write_bytes(&data);
-            helpers::assert_files_identical(
-                rust_out.path(),
-                c_out.path(),
-                "cjpeg-420s-islow-opt",
-            );
+            helpers::assert_files_identical(rust_out.path(), c_out.path(), "cjpeg-420s-islow-opt");
         }
         Err(e) => panic!("Rust encode failed: {:?}", e),
     }
@@ -357,9 +347,23 @@ fn c_cjpeg_lossless() {
     helpers::run_c_cjpeg(
         &cjpeg,
         &[
-            "-lossless", "4", "-restart", "1", "-quality", "1", "-grayscale",
-            "-optimize", "-dct", "float", "-smooth", "100", "-baseline",
-            "-qslots", "1,0,0", "-sample", "1x2,3x4,2x1",
+            "-lossless",
+            "4",
+            "-restart",
+            "1",
+            "-quality",
+            "1",
+            "-grayscale",
+            "-optimize",
+            "-dct",
+            "float",
+            "-smooth",
+            "100",
+            "-baseline",
+            "-qslots",
+            "1,0,0",
+            "-sample",
+            "1x2,3x4,2x1",
         ],
         &src,
         c_out.path(),
@@ -434,7 +438,12 @@ fn c_djpeg_rgb_islow() {
 
     // Decode with C djpeg
     let c_ppm = helpers::TempFile::new("c_rgb_islow.ppm");
-    helpers::run_c_djpeg(&djpeg, &["-dct", "int", "-ppm"], jpeg_file.path(), c_ppm.path());
+    helpers::run_c_djpeg(
+        &djpeg,
+        &["-dct", "int", "-ppm"],
+        jpeg_file.path(),
+        c_ppm.path(),
+    );
 
     // Decode with Rust
     let jpeg_data = read_file(jpeg_file.path());
@@ -482,12 +491,17 @@ fn c_djpeg_422_ifast() {
 
     // Decode with djpeg
     let c_ppm = helpers::TempFile::new("c_422_ifast.ppm");
-    helpers::run_c_djpeg(&djpeg, &["-dct", "fast", "-ppm"], jpeg_file.path(), c_ppm.path());
+    helpers::run_c_djpeg(
+        &djpeg,
+        &["-dct", "fast", "-ppm"],
+        jpeg_file.path(),
+        c_ppm.path(),
+    );
 
     // Decode with Rust — must use ifast DCT to match C djpeg -dct fast
     let jpeg_data = read_file(jpeg_file.path());
-    let mut decoder = libjpeg_turbo_rs::api::scanline::ScanlineDecoder::new(&jpeg_data)
-        .expect("decoder init");
+    let mut decoder =
+        libjpeg_turbo_rs::api::scanline::ScanlineDecoder::new(&jpeg_data).expect("decoder init");
     decoder.set_fast_dct(true);
     let img = decoder.finish().expect("Rust decode failed");
     let rust_ppm = helpers::TempFile::new("rust_422_ifast.ppm");
@@ -528,7 +542,12 @@ fn c_djpeg_440_islow() {
     );
 
     let c_ppm = helpers::TempFile::new("c_440_islow.ppm");
-    helpers::run_c_djpeg(&djpeg, &["-dct", "int", "-ppm"], jpeg_file.path(), c_ppm.path());
+    helpers::run_c_djpeg(
+        &djpeg,
+        &["-dct", "int", "-ppm"],
+        jpeg_file.path(),
+        c_ppm.path(),
+    );
 
     let jpeg_data = read_file(jpeg_file.path());
     let img: Image = decompress_to(&jpeg_data, PixelFormat::Rgb).expect("decode failed");
@@ -580,8 +599,8 @@ fn c_djpeg_422m_ifast() {
 
     // Rust: decode with fast upsample (nosmooth) + ifast DCT
     let jpeg_data = read_file(jpeg_file.path());
-    let mut decoder = libjpeg_turbo_rs::api::scanline::ScanlineDecoder::new(&jpeg_data)
-        .expect("decoder init");
+    let mut decoder =
+        libjpeg_turbo_rs::api::scanline::ScanlineDecoder::new(&jpeg_data).expect("decoder init");
     decoder.set_fast_upsample(true);
     decoder.set_fast_dct(true);
     let img = decoder.finish().expect("decode failed");
@@ -625,7 +644,12 @@ fn c_djpeg_gray_islow() {
 
     // Decode gray with C djpeg
     let c_pgm = helpers::TempFile::new("c_gray_islow.pgm");
-    helpers::run_c_djpeg(&djpeg, &["-dct", "int", "-ppm"], jpeg_file.path(), c_pgm.path());
+    helpers::run_c_djpeg(
+        &djpeg,
+        &["-dct", "int", "-ppm"],
+        jpeg_file.path(),
+        c_pgm.path(),
+    );
 
     // Decode with Rust
     let jpeg_data = read_file(jpeg_file.path());
@@ -726,12 +750,13 @@ fn c_djpeg_420m_islow_scaled_down() {
             c_out.path(),
         );
 
-        let mut decoder = libjpeg_turbo_rs::decode::pipeline::Decoder::new(&jpeg_data)
-            .expect("decoder init");
+        let mut decoder =
+            libjpeg_turbo_rs::decode::pipeline::Decoder::new(&jpeg_data).expect("decoder init");
         decoder.set_scale(ScalingFactor { num, denom });
         decoder.set_fast_upsample(true);
         let img = decoder.decode_image().expect("decode failed");
-        let rust_out = helpers::TempFile::new(&format!("rust_420m_{}.ppm", scale.replace('/', "_")));
+        let rust_out =
+            helpers::TempFile::new(&format!("rust_420m_{}.ppm", scale.replace('/', "_")));
         helpers::write_ppm_file(rust_out.path(), img.width, img.height, &img.data);
 
         helpers::assert_files_identical(
@@ -779,12 +804,13 @@ fn c_djpeg_420m_islow_scaled_up() {
 
         // Use internal Decoder which supports both set_scale and set_fast_upsample
         // to match C djpeg -nosmooth
-        let mut decoder = libjpeg_turbo_rs::decode::pipeline::Decoder::new(&jpeg_data)
-            .expect("decoder init");
+        let mut decoder =
+            libjpeg_turbo_rs::decode::pipeline::Decoder::new(&jpeg_data).expect("decoder init");
         decoder.set_scale(ScalingFactor { num, denom });
         decoder.set_fast_upsample(true);
         let img = decoder.decode_image().expect("decode failed");
-        let rust_out = helpers::TempFile::new(&format!("rust_420m_up_{}.ppm", scale.replace('/', "_")));
+        let rust_out =
+            helpers::TempFile::new(&format!("rust_420m_up_{}.ppm", scale.replace('/', "_")));
         helpers::write_ppm_file(rust_out.path(), img.width, img.height, &img.data);
 
         helpers::assert_files_identical(
@@ -847,12 +873,7 @@ fn c_djpeg_420_islow_prog_crop() {
 
     // Create progressive 420 JPEG
     let jpeg_file = helpers::TempFile::new("420_islow_prog.jpg");
-    helpers::run_c_cjpeg(
-        &cjpeg,
-        &["-dct", "int", "-prog"],
-        &src,
-        jpeg_file.path(),
-    );
+    helpers::run_c_cjpeg(&cjpeg, &["-dct", "int", "-prog"], &src, jpeg_file.path());
 
     // djpeg with crop
     let c_ppm = helpers::TempFile::new("c_420_prog_crop.ppm");
@@ -865,12 +886,16 @@ fn c_djpeg_420_islow_prog_crop() {
 
     // Rust crop decode
     let jpeg_data = read_file(jpeg_file.path());
-    let img = decompress_cropped(&jpeg_data, CropRegion {
-        x: 71,
-        y: 71,
-        width: 62,
-        height: 62,
-    }).expect("crop decode failed");
+    let img = decompress_cropped(
+        &jpeg_data,
+        CropRegion {
+            x: 71,
+            y: 71,
+            width: 62,
+            height: 62,
+        },
+    )
+    .expect("crop decode failed");
     let rust_ppm = helpers::TempFile::new("rust_420_prog_crop.ppm");
     helpers::write_ppm_file(rust_ppm.path(), img.width, img.height, &img.data);
 
@@ -918,12 +943,16 @@ fn c_djpeg_444_islow_prog_crop() {
     );
 
     let jpeg_data = read_file(jpeg_file.path());
-    let img = decompress_cropped(&jpeg_data, CropRegion {
-        x: 13,
-        y: 13,
-        width: 98,
-        height: 98,
-    }).expect("crop decode failed");
+    let img = decompress_cropped(
+        &jpeg_data,
+        CropRegion {
+            x: 13,
+            y: 13,
+            width: 98,
+            height: 98,
+        },
+    )
+    .expect("crop decode failed");
     let rust_ppm = helpers::TempFile::new("rust_444_prog_crop.ppm");
     helpers::write_ppm_file(rust_ppm.path(), img.width, img.height, &img.data);
 
@@ -987,7 +1016,7 @@ fn c_jpegtran_icc() {
 
 /// CMakeLists line 1677: cjpeg 420-islow-ari (arithmetic encode)
 #[test]
-#[ignore = "FIXME: encoder 420 arithmetic output differs from C cjpeg on non-MCU-aligned image"]
+#[ignore = "FIXME: S420 arithmetic non-MCU-aligned edge chroma downsample differs (MCU-aligned is byte-identical)"]
 fn c_cjpeg_420_islow_ari() {
     let cjpeg = match helpers::cjpeg_path() {
         Some(p) => p,
@@ -1003,12 +1032,7 @@ fn c_cjpeg_420_islow_ari() {
     }
 
     let c_out = helpers::TempFile::new("c_420_islow_ari.jpg");
-    helpers::run_c_cjpeg(
-        &cjpeg,
-        &["-dct", "int", "-arithmetic"],
-        &src,
-        c_out.path(),
-    );
+    helpers::run_c_cjpeg(&cjpeg, &["-dct", "int", "-arithmetic"], &src, c_out.path());
 
     let ppm_data = read_file(&src);
     let (w, h, pixels) = helpers::parse_ppm(&ppm_data).expect("parse PPM");
@@ -1022,11 +1046,7 @@ fn c_cjpeg_420_islow_ari() {
         Ok(data) => {
             let rust_out = helpers::TempFile::new("rust_420_islow_ari.jpg");
             rust_out.write_bytes(&data);
-            helpers::assert_files_identical(
-                rust_out.path(),
-                c_out.path(),
-                "cjpeg-420-islow-ari",
-            );
+            helpers::assert_files_identical(rust_out.path(), c_out.path(), "cjpeg-420-islow-ari");
         }
         Err(e) => panic!("Rust arithmetic encode failed: {:?}", e),
     }
