@@ -1016,7 +1016,7 @@ fn c_jpegtran_icc() {
 
 /// CMakeLists line 1677: cjpeg 420-islow-ari (arithmetic encode)
 #[test]
-#[ignore = "FIXME: same-size output but byte 164 differs; arithmetic entropy coder serialization difference (coefficients padded correctly)"]
+// Previously ignored — fixed by DAC marker interleaving + SOF height + padded planes
 fn c_cjpeg_420_islow_ari() {
     let cjpeg = match helpers::cjpeg_path() {
         Some(p) => p,
