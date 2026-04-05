@@ -649,9 +649,12 @@ impl<'a> Encoder<'a> {
             input_pixels
         };
 
-        // Apply fancy downsampling pre-filter if enabled and subsampling is active
+        // Apply fancy downsampling pre-filter if enabled and subsampling is active.
+        // Skip when grayscale_from_color: grayscale has no chroma, so no downsampling
+        // prefilter should be applied (matches C cjpeg -grayscale behavior).
         let fancy_buf: Vec<u8>;
         let after_fancy: &[u8] = if self.fancy_downsampling
+            && !self.grayscale_from_color
             && self.pixel_format != PixelFormat::Grayscale
             && self.pixel_format != PixelFormat::Cmyk
             && self.subsampling != Subsampling::S444
@@ -671,8 +674,35 @@ impl<'a> Encoder<'a> {
         let (effective_pixels, effective_format);
         let gray_buf: Vec<u8>;
         if self.grayscale_from_color && self.pixel_format != PixelFormat::Grayscale {
-            gray_buf =
-                Self::extract_luminance(after_fancy, self.width * self.height, self.pixel_format);
+            // Use the SIMD-dispatched rgb_to_ycbcr_row to extract Y channel.
+            // This matches C libjpeg-turbo's NEON rgb_gray_convert, ensuring
+            // byte-identical output.  extract_luminance() uses scalar math which
+            // can differ by ±1 from NEON due to intermediate rounding.
+            if self.pixel_format == PixelFormat::Rgb {
+                let enc_simd = crate::simd::detect_encoder();
+                let n: usize = self.width * self.height;
+                let mut y_plane: Vec<u8> = vec![0u8; n];
+                let mut cb_dummy: Vec<u8> = vec![0u8; n];
+                let mut cr_dummy: Vec<u8> = vec![0u8; n];
+                for row in 0..self.height {
+                    let src_off: usize = row * self.width * 3;
+                    let dst_off: usize = row * self.width;
+                    (enc_simd.rgb_to_ycbcr_row)(
+                        &after_fancy[src_off..src_off + self.width * 3],
+                        &mut y_plane[dst_off..dst_off + self.width],
+                        &mut cb_dummy[dst_off..dst_off + self.width],
+                        &mut cr_dummy[dst_off..dst_off + self.width],
+                        self.width,
+                    );
+                }
+                gray_buf = y_plane;
+            } else {
+                gray_buf = Self::extract_luminance(
+                    after_fancy,
+                    self.width * self.height,
+                    self.pixel_format,
+                );
+            }
             effective_pixels = &gray_buf[..];
             effective_format = PixelFormat::Grayscale;
         } else {
@@ -681,6 +711,23 @@ impl<'a> Encoder<'a> {
         }
 
         let quality: u8 = self.effective_quality();
+
+        // RGB-direct encoding: bypass color conversion entirely.
+        // Matches C cjpeg `-rgb` (JCS_RGB colorspace).
+        if self.colorspace_override == Some(ColorSpace::Rgb)
+            && effective_format == PixelFormat::Rgb
+        {
+            let base = encoder::compress_rgb_direct(
+                effective_pixels,
+                self.width,
+                self.height,
+                quality,
+                self.dct_method,
+                self.icc_profile,
+            )?;
+            return Ok(base);
+        }
+
         let needs_custom_quant: bool = self.force_baseline
             || self.linear_scale_factor.is_some()
             || self.has_custom_quant_tables();

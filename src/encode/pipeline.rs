@@ -200,6 +200,54 @@ pub fn compress(
             enc_simd.rgb_to_ycbcr_row,
         )?;
 
+        // Pad all planes to MCU-aligned dimensions so all blocks (including edge
+        // blocks) go through the NEON fused FDCT+quantize path instead of the
+        // scalar fallback.  This matches C libjpeg-turbo's expand_right_edge
+        // behavior and ensures byte-identical output.
+        let padded_w: usize = mcus_x * mcu_w;
+        let padded_h: usize = mcus_y * mcu_h;
+
+        fn pad_plane(
+            plane: &[u8],
+            src_w: usize,
+            src_h: usize,
+            dst_w: usize,
+            dst_h: usize,
+        ) -> Vec<u8> {
+            if src_w == dst_w && src_h == dst_h {
+                return plane.to_vec();
+            }
+            let mut padded: Vec<u8> = vec![0u8; dst_w * dst_h];
+            for row in 0..src_h {
+                let src_start: usize = row * src_w;
+                let dst_start: usize = row * dst_w;
+                padded[dst_start..dst_start + src_w]
+                    .copy_from_slice(&plane[src_start..src_start + src_w]);
+                if src_w < dst_w {
+                    let last_val: u8 = plane[src_start + src_w - 1];
+                    for x in src_w..dst_w {
+                        padded[dst_start + x] = last_val;
+                    }
+                }
+            }
+            if src_h < dst_h {
+                let last_row: Vec<u8> =
+                    padded[(src_h - 1) * dst_w..src_h * dst_w].to_vec();
+                for row in src_h..dst_h {
+                    let dst_start: usize = row * dst_w;
+                    padded[dst_start..dst_start + dst_w].copy_from_slice(&last_row);
+                }
+            }
+            padded
+        }
+
+        let y_plane_padded: Vec<u8> =
+            pad_plane(&y_plane, width, height, padded_w, padded_h);
+        let cb_plane_padded: Vec<u8> =
+            pad_plane(&cb_plane, width, height, padded_w, padded_h);
+        let cr_plane_padded: Vec<u8> =
+            pad_plane(&cr_plane, width, height, padded_w, padded_h);
+
         for mcu_row in 0..mcus_y {
             for mcu_col in 0..mcus_x {
                 let x0: usize = mcu_col * mcu_w;
@@ -207,9 +255,9 @@ pub fn compress(
 
                 if is_grayscale {
                     encode_single_block(
-                        &y_plane,
-                        width,
-                        height,
+                        &y_plane_padded,
+                        padded_w,
+                        padded_h,
                         x0,
                         y0,
                         &luma_divisors,
@@ -221,11 +269,11 @@ pub fn compress(
                     );
                 } else {
                     encode_color_mcu(
-                        &y_plane,
-                        &cb_plane,
-                        &cr_plane,
-                        width,
-                        height,
+                        &y_plane_padded,
+                        &cb_plane_padded,
+                        &cr_plane_padded,
+                        padded_w,
+                        padded_h,
                         x0,
                         y0,
                         subsampling,
@@ -1126,7 +1174,6 @@ fn compress_cmyk(pixels: &[u8], width: usize, height: usize, quality: u8) -> Res
     let dc_table = build_huff_table(&tables::DC_LUMINANCE_BITS, &tables::DC_LUMINANCE_VALUES);
     let ac_table = build_huff_table(&tables::AC_LUMINANCE_BITS, &tables::AC_LUMINANCE_VALUES);
 
-    // Extract 4 component planes from interleaved CMYK
     let num_pixels = width * height;
     let mut planes: [Vec<u8>; 4] = [
         vec![0u8; num_pixels],
@@ -1141,7 +1188,6 @@ fn compress_cmyk(pixels: &[u8], width: usize, height: usize, quality: u8) -> Res
         planes[3][i] = pixels[i * 4 + 3];
     }
 
-    // MCU = 8x8 (all 1x1 sampling)
     let mcus_x = width.div_ceil(8);
     let mcus_y = height.div_ceil(8);
 
@@ -1173,21 +1219,17 @@ fn compress_cmyk(pixels: &[u8], width: usize, height: usize, quality: u8) -> Res
 
     bit_writer.flush();
 
-    // Assemble output
     let mut output = Vec::with_capacity(bit_writer.data().len() + 1024);
 
     marker_writer::write_soi(&mut output);
     marker_writer::write_app0_jfif(&mut output);
-    marker_writer::write_app14_adobe(&mut output, 0); // transform=0 for CMYK
+    marker_writer::write_app14_adobe(&mut output, 0);
 
-    // Single quant table for all 4 components
     marker_writer::write_dqt(&mut output, 0, &quant_table);
 
-    // SOF0 with 4 components, all 1x1 sampling, same quant table
     let components = vec![(1, 1, 1, 0), (2, 1, 1, 0), (3, 1, 1, 0), (4, 1, 1, 0)];
     marker_writer::write_sof0(&mut output, width as u16, height as u16, &components);
 
-    // Single pair of Huffman tables shared by all 4 components
     marker_writer::write_dht(
         &mut output,
         0,
@@ -1203,12 +1245,119 @@ fn compress_cmyk(pixels: &[u8], width: usize, height: usize, quality: u8) -> Res
         &tables::AC_LUMINANCE_VALUES,
     );
 
-    // SOS: 4 components, all using table 0
     let scan_components = vec![(1, 0, 0), (2, 0, 0), (3, 0, 0), (4, 0, 0)];
     marker_writer::write_sos(&mut output, &scan_components);
 
     output.extend_from_slice(bit_writer.data());
 
+    marker_writer::write_eoi(&mut output);
+
+    Ok(output)
+}
+
+/// Compress RGB pixels directly without color conversion (JCS_RGB / `cjpeg -rgb`).
+///
+/// Component IDs follow C libjpeg-turbo convention: R=82('R'), G=71('G'), B=66('B').
+/// All 3 components use 1x1 sampling and the same luminance quantization table.
+/// Produces Adobe APP14 marker with transform=0 (no JFIF APP0).
+pub fn compress_rgb_direct(
+    pixels: &[u8],
+    width: usize,
+    height: usize,
+    quality: u8,
+    dct_method: DctMethod,
+    icc_profile: Option<&[u8]>,
+) -> Result<Vec<u8>> {
+    let quant_table =
+        tables::quality_scale_quant_table(&tables::STD_LUMINANCE_QUANT_TABLE, quality);
+    let divisors = scale_quant_for_fdct(&quant_table);
+
+    let dc_table = build_huff_table(&tables::DC_LUMINANCE_BITS, &tables::DC_LUMINANCE_VALUES);
+    let ac_table = build_huff_table(&tables::AC_LUMINANCE_BITS, &tables::AC_LUMINANCE_VALUES);
+
+    // Extract 3 component planes from interleaved RGB
+    let num_pixels: usize = width * height;
+    let mut planes: [Vec<u8>; 3] = [
+        vec![0u8; num_pixels],
+        vec![0u8; num_pixels],
+        vec![0u8; num_pixels],
+    ];
+    for i in 0..num_pixels {
+        planes[0][i] = pixels[i * 3];     // R
+        planes[1][i] = pixels[i * 3 + 1]; // G
+        planes[2][i] = pixels[i * 3 + 2]; // B
+    }
+
+    let mcus_x: usize = width.div_ceil(8);
+    let mcus_y: usize = height.div_ceil(8);
+
+    let enc_simd = crate::simd::detect_encoder();
+    let mut bit_writer = BitWriter::new(width * height);
+    let mut prev_dc = [0i16; 3];
+
+    for mcu_row in 0..mcus_y {
+        for mcu_col in 0..mcus_x {
+            let x0: usize = mcu_col * 8;
+            let y0: usize = mcu_row * 8;
+            for c in 0..3 {
+                encode_single_block(
+                    &planes[c],
+                    width,
+                    height,
+                    x0,
+                    y0,
+                    &divisors,
+                    &dc_table,
+                    &ac_table,
+                    &mut bit_writer,
+                    &mut prev_dc[c],
+                    enc_simd.fdct_quantize,
+                );
+            }
+        }
+    }
+
+    bit_writer.flush();
+
+    let mut output: Vec<u8> = Vec::with_capacity(bit_writer.data().len() + 1024);
+
+    marker_writer::write_soi(&mut output);
+    // RGB: Adobe APP14 with transform=0, NO JFIF APP0
+    marker_writer::write_app14_adobe(&mut output, 0);
+
+    // ICC profile immediately after APP14 (matching C cjpeg marker order)
+    if let Some(icc) = icc_profile {
+        marker_writer::write_app2_icc(&mut output, icc);
+    }
+
+    // Single quant table for all 3 components
+    marker_writer::write_dqt(&mut output, 0, &quant_table);
+
+    // SOF0: component IDs = 'R'(82), 'G'(71), 'B'(66), all 1x1, qt=0
+    let components: Vec<(u8, u8, u8, u8)> = vec![(82, 1, 1, 0), (71, 1, 1, 0), (66, 1, 1, 0)];
+    marker_writer::write_sof0(&mut output, width as u16, height as u16, &components);
+
+    // Single pair of Huffman tables
+    marker_writer::write_dht(
+        &mut output,
+        0,
+        0,
+        &tables::DC_LUMINANCE_BITS,
+        &tables::DC_LUMINANCE_VALUES,
+    );
+    marker_writer::write_dht(
+        &mut output,
+        1,
+        0,
+        &tables::AC_LUMINANCE_BITS,
+        &tables::AC_LUMINANCE_VALUES,
+    );
+
+    // SOS: 3 components, all using table 0
+    let scan_components: Vec<(u8, u8, u8)> = vec![(82, 0, 0), (71, 0, 0), (66, 0, 0)];
+    marker_writer::write_sos(&mut output, &scan_components);
+
+    output.extend_from_slice(bit_writer.data());
     marker_writer::write_eoi(&mut output);
 
     Ok(output)
@@ -3758,18 +3907,55 @@ fn encode_single_block(
         }
     }
 
-    // Fallback for border blocks: separate extract + fdct_quantize
-    let mut block = [0i16; 64];
-    extract_block(
-        plane,
-        plane_width,
-        plane_height,
-        block_x,
-        block_y,
-        &mut block,
-    );
-    fdct_quantize_fn(&mut block, quant_table, &mut quantized);
+    // Border blocks: pad to a local 8×8 buffer with replicated-last-pixel,
+    // then use the NEON/AVX2 fused path.  This ensures byte-identical output
+    // with C libjpeg-turbo's expand_right_edge + NEON convsamp/fdct path
+    // for all encode functions (compress, compress_optimized, compress_arithmetic, etc.).
+    let mut local_buf = [0u8; 64]; // 8×8 padded block
+    for row in 0..8usize {
+        let src_y: usize = (block_y + row).min(plane_height - 1);
+        for col in 0..8usize {
+            let src_x: usize = (block_x + col).min(plane_width - 1);
+            local_buf[row * 8 + col] = plane[src_y * plane_width + src_x];
+        }
+    }
 
+    // Use the fused NEON/AVX2 path on the padded 8×8 buffer (stride=8, always interior)
+    #[cfg(target_arch = "aarch64")]
+    {
+        unsafe {
+            crate::simd::aarch64::neon_extract_fdct_quantize(
+                local_buf.as_ptr(),
+                8, // stride = 8 for the local buffer
+                quant_table,
+                &mut quantized,
+            );
+        }
+        HuffmanEncoder::encode_block(writer, &quantized, prev_dc, dc_table, ac_table);
+        return;
+    }
+    #[cfg(target_arch = "x86_64")]
+    {
+        if is_x86_feature_detected!("avx2") {
+            unsafe {
+                crate::simd::x86_64::avx2_extract_fdct_quantize(
+                    local_buf.as_ptr(),
+                    8,
+                    quant_table,
+                    &mut quantized,
+                );
+            }
+            HuffmanEncoder::encode_block(writer, &quantized, prev_dc, dc_table, ac_table);
+            return;
+        }
+    }
+
+    // Scalar fallback (non-SIMD platforms)
+    let mut block = [0i16; 64];
+    for i in 0..64 {
+        block[i] = local_buf[i] as i16 - 128;
+    }
+    fdct_quantize_fn(&mut block, quant_table, &mut quantized);
     HuffmanEncoder::encode_block(writer, &quantized, prev_dc, dc_table, ac_table);
 }
 
@@ -4829,14 +5015,87 @@ fn encode_downsampled_chroma_block(
         }
     }
 
-    // Scalar fallback: separate downsample + FDCT+quantize
+    // Edge block: pad source area locally and use NEON/AVX2 fused path.
+    // This matches C libjpeg-turbo's expand_right_edge + SIMD downsample behavior.
+    let src_w: usize = 8 * h_factor;
+    let src_h: usize = 8 * v_factor;
+    let mut local_buf = vec![0u8; src_w * src_h];
+    for row in 0..src_h {
+        let src_y: usize = (block_y + row).min(plane_height - 1);
+        for col in 0..src_w {
+            let src_x: usize = (block_x + col).min(plane_width - 1);
+            local_buf[row * src_w + col] = plane[src_y * plane_width + src_x];
+        }
+    }
+
+    // Try NEON/AVX2 fused downsample+FDCT+quantize on the padded local buffer
+    #[cfg(target_arch = "aarch64")]
+    {
+        let mut quantized = [0i16; 64];
+        if h_factor == 2 && v_factor == 2 {
+            unsafe {
+                crate::simd::aarch64::neon_downsample_h2v2_fdct_quantize(
+                    local_buf.as_ptr(),
+                    src_w,
+                    quant_table,
+                    &mut quantized,
+                );
+            }
+            HuffmanEncoder::encode_block(writer, &quantized, prev_dc, dc_table, ac_table);
+            return;
+        }
+        if h_factor == 2 && v_factor == 1 {
+            unsafe {
+                crate::simd::aarch64::neon_downsample_h2v1_fdct_quantize(
+                    local_buf.as_ptr(),
+                    src_w,
+                    quant_table,
+                    &mut quantized,
+                );
+            }
+            HuffmanEncoder::encode_block(writer, &quantized, prev_dc, dc_table, ac_table);
+            return;
+        }
+    }
+    #[cfg(target_arch = "x86_64")]
+    {
+        if is_x86_feature_detected!("avx2") {
+            let mut quantized = [0i16; 64];
+            if h_factor == 2 && v_factor == 2 {
+                unsafe {
+                    crate::simd::x86_64::avx2_downsample_h2v2_fdct_quantize(
+                        local_buf.as_ptr(),
+                        src_w,
+                        quant_table,
+                        &mut quantized,
+                    );
+                }
+                HuffmanEncoder::encode_block(writer, &quantized, prev_dc, dc_table, ac_table);
+                return;
+            }
+            if h_factor == 2 && v_factor == 1 {
+                unsafe {
+                    crate::simd::x86_64::avx2_downsample_h2v1_fdct_quantize(
+                        local_buf.as_ptr(),
+                        src_w,
+                        quant_table,
+                        &mut quantized,
+                    );
+                }
+                HuffmanEncoder::encode_block(writer, &quantized, prev_dc, dc_table, ac_table);
+                return;
+            }
+        }
+    }
+
+    // Scalar fallback (non-SIMD platforms): downsample from padded buffer
     let mut block = [0i16; 64];
     downsample_chroma_block(
-        plane,
-        plane_width,
-        plane_height,
-        block_x,
-        block_y,
+        &local_buf,
+        src_w,
+        src_h,
+        0,
+        0,
         h_factor,
         v_factor,
         &mut block,
