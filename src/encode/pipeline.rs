@@ -1971,6 +1971,7 @@ pub fn compress_progressive(
 ///
 /// Same as `compress_progressive` but uses the provided `ScanScript` entries
 /// instead of the default `simple_progression()` scan order.
+#[allow(clippy::too_many_arguments)]
 pub fn compress_progressive_custom(
     pixels: &[u8],
     width: usize,
@@ -2034,13 +2035,26 @@ fn compress_progressive_with_scans(
     let is_grayscale = pixel_format == PixelFormat::Grayscale;
 
     let enc_simd = crate::simd::detect_encoder();
-    let fdct_quantize_fn = enc_simd.fdct_quantize;
+    let fdct_quantize_fn: fn(&mut [i16; 64], &QuantDivisors, &mut [i16; 64]) = match dct_method {
+        DctMethod::IsLow => enc_simd.fdct_quantize,
+        DctMethod::IsFast => crate::simd::scalar::scalar_fdct_ifast_quantize,
+        DctMethod::Float => crate::simd::scalar::scalar_fdct_quantize,
+    };
+    let use_simd_fdct: bool = dct_method == DctMethod::IsLow;
 
     let luma_quant = tables::quality_scale_quant_table(&tables::STD_LUMINANCE_QUANT_TABLE, quality);
     let chroma_quant =
         tables::quality_scale_quant_table(&tables::STD_CHROMINANCE_QUANT_TABLE, quality);
-    let luma_divisors = scale_quant_for_fdct(&luma_quant);
-    let chroma_divisors = scale_quant_for_fdct(&chroma_quant);
+    let luma_divisors = if dct_method == DctMethod::IsFast {
+        scale_quant_for_ifast(&luma_quant)
+    } else {
+        scale_quant_for_fdct(&luma_quant)
+    };
+    let chroma_divisors = if dct_method == DctMethod::IsFast {
+        scale_quant_for_ifast(&chroma_quant)
+    } else {
+        scale_quant_for_fdct(&chroma_quant)
+    };
 
     let (y_plane, cb_plane, cr_plane) = convert_to_ycbcr(
         pixels,
@@ -2129,6 +2143,7 @@ fn compress_progressive_with_scans(
                     &luma_divisors,
                     fdct_quantize_fn,
                     &mut coeff_bufs[0][by * mcus_x + bx],
+                    use_simd_fdct,
                 );
             } else {
                 // Y blocks
@@ -2146,6 +2161,7 @@ fn compress_progressive_with_scans(
                             &luma_divisors,
                             fdct_quantize_fn,
                             &mut coeff_bufs[0][by * blocks_x + bx],
+                            use_simd_fdct,
                         );
                     }
                 }
@@ -2164,19 +2180,12 @@ fn compress_progressive_with_scans(
                         &chroma_divisors,
                         fdct_quantize_fn,
                         &mut coeff_bufs[comp_idx][by * mcus_x + bx],
+                        use_simd_fdct,
                     );
                 }
             }
         }
     }
-
-    // Build Huffman tables
-    let dc_luma_table = build_huff_table(&tables::DC_LUMINANCE_BITS, &tables::DC_LUMINANCE_VALUES);
-    let ac_luma_table = build_huff_table(&tables::AC_LUMINANCE_BITS, &tables::AC_LUMINANCE_VALUES);
-    let dc_chroma_table =
-        build_huff_table(&tables::DC_CHROMINANCE_BITS, &tables::DC_CHROMINANCE_VALUES);
-    let ac_chroma_table =
-        build_huff_table(&tables::AC_CHROMINANCE_BITS, &tables::AC_CHROMINANCE_VALUES);
 
     // Assemble output
     let mut output = Vec::with_capacity(width * height * 2);
@@ -2203,65 +2212,135 @@ fn compress_progressive_with_scans(
         marker_writer::write_sof2(&mut output, width as u16, height as u16, &components);
     }
 
-    // Huffman tables (write all before scans)
-    marker_writer::write_dht(
-        &mut output,
-        0,
-        0,
-        &tables::DC_LUMINANCE_BITS,
-        &tables::DC_LUMINANCE_VALUES,
-    );
-    marker_writer::write_dht(
-        &mut output,
-        1,
-        0,
-        &tables::AC_LUMINANCE_BITS,
-        &tables::AC_LUMINANCE_VALUES,
-    );
-    if !is_grayscale {
-        marker_writer::write_dht(
-            &mut output,
-            0,
-            1,
-            &tables::DC_CHROMINANCE_BITS,
-            &tables::DC_CHROMINANCE_VALUES,
-        );
-        marker_writer::write_dht(
-            &mut output,
-            1,
-            1,
-            &tables::AC_CHROMINANCE_BITS,
-            &tables::AC_CHROMINANCE_VALUES,
-        );
-    }
-
-    // Encode each scan
+    // Encode each scan with per-scan optimized Huffman tables.
+    // DC first scans (ss=0, se=0, ah=0): gather DC frequencies, generate optimal
+    // table, write DHT, encode. DC refine scans (ah>0): no DHT, just encode.
+    // AC scans (ss>0): gather AC frequencies, generate optimal table, write DHT, encode.
     for scan in scans {
+        let is_dc_scan: bool = scan.ss == 0 && scan.se == 0;
+        let is_first_scan: bool = scan.ah == 0;
+
         // Build SOS component list
         let sos_comps: Vec<(u8, u8, u8)> = scan
             .component_indices
             .iter()
             .map(|&ci| {
                 let comp_id = (ci + 1) as u8;
-                let (dc_tbl, ac_tbl) = if ci == 0 { (0, 0) } else { (1, 1) };
+                let (dc_tbl, ac_tbl) = if ci == 0 { (0u8, 0u8) } else { (1u8, 1u8) };
                 (comp_id, dc_tbl, ac_tbl)
             })
             .collect();
 
-        marker_writer::write_sos_progressive(
-            &mut output,
-            &sos_comps,
-            scan.ss,
-            scan.se,
-            scan.ah,
-            scan.al,
-        );
+        if is_dc_scan && is_first_scan {
+            // DC first scan: gather DC symbol frequencies, generate optimal tables,
+            // write DHT markers before SOS.
+            let mut dc_luma_freq = [0u32; 257];
+            let mut dc_chroma_freq = [0u32; 257];
+            // Seed pseudo-symbol to ensure valid table even if no symbols appear
+            dc_luma_freq[256] = 1;
+            dc_chroma_freq[256] = 1;
 
-        // Encode scan data
-        let mut bit_writer = BitWriter::new(width * height / 4);
+            let mut prev_dc = vec![0i16; scan.component_indices.len()];
+            for mcu_y in 0..mcus_y {
+                for mcu_x in 0..mcus_x {
+                    for (scan_ci, &ci) in scan.component_indices.iter().enumerate() {
+                        let layout = &comp_layouts[ci];
+                        let freq = if ci == 0 {
+                            &mut dc_luma_freq
+                        } else {
+                            &mut dc_chroma_freq
+                        };
+                        for bv in 0..layout.v_blocks {
+                            for bh in 0..layout.h_blocks {
+                                let bx: usize = mcu_x * layout.h_blocks + bh;
+                                let by: usize = mcu_y * layout.v_blocks + bv;
+                                let block: &[i16; 64] = &coeff_bufs[ci][by * layout.blocks_x + bx];
+                                let dc: i16 = block[0] >> scan.al;
+                                let diff: i16 = dc - prev_dc[scan_ci];
+                                prev_dc[scan_ci] = dc;
+                                crate::encode::huff_opt::gather_dc_symbol(diff, freq);
+                            }
+                        }
+                    }
+                }
+            }
 
-        if scan.ss == 0 && scan.se == 0 {
-            // DC scan
+            let (dc_luma_bits, dc_luma_values) =
+                crate::encode::huff_opt::gen_optimal_table(&dc_luma_freq);
+            marker_writer::write_dht(&mut output, 0, 0, &dc_luma_bits, &dc_luma_values);
+
+            if !is_grayscale {
+                let (dc_chroma_bits, dc_chroma_values) =
+                    crate::encode::huff_opt::gen_optimal_table(&dc_chroma_freq);
+                marker_writer::write_dht(&mut output, 0, 1, &dc_chroma_bits, &dc_chroma_values);
+
+                marker_writer::write_sos_progressive(
+                    &mut output,
+                    &sos_comps,
+                    scan.ss,
+                    scan.se,
+                    scan.ah,
+                    scan.al,
+                );
+
+                let dc_luma_table: HuffTable = build_huff_table(&dc_luma_bits, &dc_luma_values);
+                let dc_chroma_table: HuffTable =
+                    build_huff_table(&dc_chroma_bits, &dc_chroma_values);
+                let mut bit_writer = BitWriter::new(width * height / 4);
+                encode_progressive_dc_scan(
+                    &coeff_bufs,
+                    &comp_layouts,
+                    scan,
+                    mcus_x,
+                    mcus_y,
+                    &dc_luma_table,
+                    &dc_chroma_table,
+                    &mut bit_writer,
+                );
+                bit_writer.flush();
+                output.extend_from_slice(bit_writer.data());
+            } else {
+                marker_writer::write_sos_progressive(
+                    &mut output,
+                    &sos_comps,
+                    scan.ss,
+                    scan.se,
+                    scan.ah,
+                    scan.al,
+                );
+
+                let dc_luma_table: HuffTable = build_huff_table(&dc_luma_bits, &dc_luma_values);
+                let dc_chroma_table: HuffTable =
+                    build_huff_table(&tables::DC_CHROMINANCE_BITS, &tables::DC_CHROMINANCE_VALUES);
+                let mut bit_writer = BitWriter::new(width * height / 4);
+                encode_progressive_dc_scan(
+                    &coeff_bufs,
+                    &comp_layouts,
+                    scan,
+                    mcus_x,
+                    mcus_y,
+                    &dc_luma_table,
+                    &dc_chroma_table,
+                    &mut bit_writer,
+                );
+                bit_writer.flush();
+                output.extend_from_slice(bit_writer.data());
+            }
+        } else if is_dc_scan {
+            // DC refinement scan (ah > 0): no DHT needed, just write SOS and encode.
+            let dc_luma_table: HuffTable =
+                build_huff_table(&tables::DC_LUMINANCE_BITS, &tables::DC_LUMINANCE_VALUES);
+            let dc_chroma_table: HuffTable =
+                build_huff_table(&tables::DC_CHROMINANCE_BITS, &tables::DC_CHROMINANCE_VALUES);
+            marker_writer::write_sos_progressive(
+                &mut output,
+                &sos_comps,
+                scan.ss,
+                scan.se,
+                scan.ah,
+                scan.al,
+            );
+            let mut bit_writer = BitWriter::new(width * height / 4);
             encode_progressive_dc_scan(
                 &coeff_bufs,
                 &comp_layouts,
@@ -2272,27 +2351,195 @@ fn compress_progressive_with_scans(
                 &dc_chroma_table,
                 &mut bit_writer,
             );
+            bit_writer.flush();
+            output.extend_from_slice(bit_writer.data());
         } else {
-            // AC scan
+            // AC scan (ss > 0): generate optimal Huffman table from actual symbol
+            // frequencies, write DHT, then encode. Both first (ah==0) and refine
+            // (ah>0) scans get their own optimal table since they emit different symbols.
+            let ci: usize = scan.component_indices[0];
+            let mut ac_freq = [0u32; 257];
+            ac_freq[256] = 1;
+            if scan.ah == 0 {
+                gather_progressive_ac_freq(
+                    &coeff_bufs[ci],
+                    scan.ss,
+                    scan.se,
+                    scan.al,
+                    &mut ac_freq,
+                );
+            } else {
+                gather_progressive_ac_refine_freq(
+                    &coeff_bufs[ci],
+                    scan.ss,
+                    scan.se,
+                    scan.al,
+                    &mut ac_freq,
+                );
+            }
+
+            let (ac_bits, ac_values) = crate::encode::huff_opt::gen_optimal_table(&ac_freq);
+            let table_id: u8 = if ci == 0 { 0 } else { 1 };
+            marker_writer::write_dht(&mut output, 1, table_id, &ac_bits, &ac_values);
+
+            marker_writer::write_sos_progressive(
+                &mut output,
+                &sos_comps,
+                scan.ss,
+                scan.se,
+                scan.ah,
+                scan.al,
+            );
+
+            let ac_table: HuffTable = build_huff_table(&ac_bits, &ac_values);
+            // Use ac_table for both luma and chroma slots; each AC scan is single-component.
+            let mut bit_writer = BitWriter::new(width * height / 4);
             encode_progressive_ac_scan(
                 &coeff_bufs,
                 &comp_layouts,
                 scan,
                 mcus_x,
                 mcus_y,
-                &ac_luma_table,
-                &ac_chroma_table,
+                &ac_table,
+                &ac_table,
                 &mut bit_writer,
             );
+            bit_writer.flush();
+            output.extend_from_slice(bit_writer.data());
         }
-
-        bit_writer.flush();
-        output.extend_from_slice(bit_writer.data());
     }
 
     marker_writer::write_eoi(&mut output);
 
     Ok(output)
+}
+
+/// Gather AC symbol frequencies for a progressive AC scan (ah==0, first scan).
+///
+/// Mirrors the zero-run / EOB logic from `encode_ac_first_block` to produce
+/// accurate symbol frequency counts for optimal Huffman table generation.
+/// `ss` and `se` are the spectral band limits (1..=63); `al` is the point transform.
+fn gather_progressive_ac_freq(blocks: &[[i16; 64]], ss: u8, se: u8, al: u8, freq: &mut [u32; 257]) {
+    let ss_usize: usize = ss as usize;
+    let se_usize: usize = se as usize;
+    let band_len: usize = se_usize - ss_usize + 1;
+
+    for block in blocks.iter() {
+        // Apply point transform and find nonzero positions, matching encode_ac_first_block.
+        let mut zerobits: u64 = 0;
+        let mut values = [0u16; 64];
+
+        for i in 0..band_len {
+            let coeff: i16 = block[ss_usize + i];
+            if coeff == 0 {
+                continue;
+            }
+            let sign_mask: i16 = coeff >> 15;
+            let abs_coeff: i16 = (coeff ^ sign_mask) - sign_mask;
+            let temp: u16 = (abs_coeff >> al) as u16;
+            if temp == 0 {
+                continue;
+            }
+            values[i] = temp;
+            zerobits |= 1u64 << i;
+        }
+
+        if zerobits == 0 {
+            // EOB symbol
+            freq[0x00] += 1;
+            continue;
+        }
+
+        let mut prev_pos: usize = 0;
+        let mut bits = zerobits;
+        while bits != 0 {
+            let pos: usize = bits.trailing_zeros() as usize;
+            bits &= bits - 1;
+
+            let mut zero_run: usize = pos - prev_pos;
+            while zero_run >= 16 {
+                freq[0xF0] += 1; // ZRL
+                zero_run -= 16;
+            }
+            let nbits: u8 = 16 - values[pos].leading_zeros() as u8;
+            let symbol: usize = (zero_run << 4) | (nbits as usize);
+            freq[symbol] += 1;
+            prev_pos = pos + 1;
+        }
+
+        if prev_pos < band_len {
+            freq[0x00] += 1; // EOB
+        }
+    }
+}
+
+/// Gather AC symbol frequencies for a progressive AC refinement scan (ah > 0).
+///
+/// Mirrors the symbol-emission logic from `encode_ac_refine_block`: only ZRL (0xF0),
+/// EOB (0x00), and `(run, 1)` symbols are emitted; the size is always 1.
+fn gather_progressive_ac_refine_freq(
+    blocks: &[[i16; 64]],
+    ss: u8,
+    se: u8,
+    al: u8,
+    freq: &mut [u32; 257],
+) {
+    let ss_usize: usize = ss as usize;
+    let se_usize: usize = se as usize;
+    let band_len: usize = se_usize - ss_usize + 1;
+
+    for block in blocks.iter() {
+        // Pre-pass: compute absvals and find EOB position (last newly-nonzero coeff).
+        let mut absvals = [0u16; 64];
+        let mut eob: usize = 0;
+
+        for i in 0..band_len {
+            let coeff: i32 = block[ss_usize + i] as i32;
+            let sign_mask: i32 = coeff >> 31;
+            let abs_coeff: i32 = (coeff ^ sign_mask) - sign_mask;
+            let temp: u16 = (abs_coeff >> al) as u16;
+            absvals[i] = temp;
+            if temp == 1 {
+                eob = i + 1;
+            }
+        }
+
+        // Main gather loop matching encode_ac_refine_block symbol emission.
+        let mut r: usize = 0;
+        let mut idx: usize = 0;
+
+        while idx < band_len {
+            let temp: u16 = absvals[idx];
+
+            if temp == 0 {
+                r += 1;
+                idx += 1;
+                continue;
+            }
+
+            // Emit ZRL symbols for runs that exceed 15, but not if they fold into EOB.
+            while r > 15 && idx < eob {
+                freq[0xF0] += 1; // ZRL
+                r -= 16;
+            }
+
+            if temp > 1 {
+                // Previously-nonzero: emits a correction bit (no Huffman symbol).
+                idx += 1;
+                continue;
+            }
+
+            // temp == 1: newly-nonzero — emits (r, 1) symbol.
+            let symbol: usize = (r << 4) | 1;
+            freq[symbol] += 1;
+            r = 0;
+            idx += 1;
+        }
+
+        if r > 0 {
+            freq[0x00] += 1; // EOB
+        }
+    }
 }
 
 /// Compress with arithmetic entropy coding (SOF9).
@@ -3403,10 +3650,11 @@ fn progressive_fdct_y_block(
     quant: &QuantDivisors,
     fdct_quantize_fn: fn(&mut [i16; 64], &QuantDivisors, &mut [i16; 64]),
     output: &mut [i16; 64],
+    use_simd_fdct: bool,
 ) {
     #[cfg(target_arch = "aarch64")]
     {
-        if bx + 8 <= plane_w && by + 8 <= plane_h {
+        if use_simd_fdct && bx + 8 <= plane_w && by + 8 <= plane_h {
             unsafe {
                 crate::simd::aarch64::neon_extract_fdct_quantize(
                     plane.as_ptr().add(by * plane_w + bx),
@@ -3418,6 +3666,7 @@ fn progressive_fdct_y_block(
             return;
         }
     }
+    let _ = use_simd_fdct;
     let mut block = [0i16; 64];
     extract_block(plane, plane_w, plane_h, bx, by, &mut block);
     fdct_quantize_fn(&mut block, quant, output);
@@ -3437,6 +3686,7 @@ fn progressive_fdct_chroma_block(
     quant: &QuantDivisors,
     fdct_quantize_fn: fn(&mut [i16; 64], &QuantDivisors, &mut [i16; 64]),
     output: &mut [i16; 64],
+    use_simd_fdct: bool,
 ) {
     let hf: usize = if h_samp > 1 { 2 } else { 1 };
     let vf: usize = if v_samp > 1 { 2 } else { 1 };
@@ -3451,6 +3701,7 @@ fn progressive_fdct_chroma_block(
             quant,
             fdct_quantize_fn,
             output,
+            use_simd_fdct,
         );
         return;
     }
@@ -3459,7 +3710,7 @@ fn progressive_fdct_chroma_block(
     {
         let src_w: usize = hf * 8;
         let src_h: usize = vf * 8;
-        if x0 + src_w <= plane_w && y0 + src_h <= plane_h {
+        if use_simd_fdct && x0 + src_w <= plane_w && y0 + src_h <= plane_h {
             unsafe {
                 let ptr: *const u8 = plane.as_ptr().add(y0 * plane_w + x0);
                 if hf == 2 && vf == 2 {
@@ -3480,6 +3731,7 @@ fn progressive_fdct_chroma_block(
         }
     }
 
+    let _ = use_simd_fdct;
     let mut block = [0i16; 64];
     downsample_chroma_block(plane, plane_w, plane_h, x0, y0, hf, vf, &mut block);
     fdct_quantize_fn(&mut block, quant, output);
@@ -3536,6 +3788,13 @@ pub fn compute_reciprocal(divisor: u16) -> (u16, u16, u16, i16) {
     (recip as u16, corr, scale, shift)
 }
 
+/// Scale quantization table for the IFAST FDCT.
+///
+/// TODO(#163): use AA&N-scaled divisors with `fdct_ifast_raw` for true ifast parity.
+fn scale_quant_for_ifast(quant_table: &[u16; 64]) -> QuantDivisors {
+    scale_quant_for_fdct(quant_table)
+}
+
 /// Scale quantization table values by 8 to create divisor table for the islow FDCT.
 ///
 /// Uses C libjpeg-turbo's adaptive-precision reciprocal algorithm for exact
@@ -3555,7 +3814,6 @@ fn scale_quant_for_fdct(quant_table: &[u16; 64]) -> QuantDivisors {
         scales[i] = scale;
         shifts[i] = shift;
     }
-    // Pre-arrange in zigzag order for fused quantize+reorder
     let zigzag = &crate::encode::tables::ZIGZAG_ORDER;
     let mut divisors_zigzag = [0u16; 64];
     let mut reciprocals_zigzag = [0u16; 64];
