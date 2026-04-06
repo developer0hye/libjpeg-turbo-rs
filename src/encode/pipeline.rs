@@ -61,11 +61,19 @@ pub fn compress(
     let chroma_quant =
         tables::quality_scale_quant_table(&tables::STD_CHROMINANCE_QUANT_TABLE, quality);
 
-    // The islow FDCT leaves a factor-of-8 scaling in its output. To absorb this,
-    // the divisor tables used during quantization multiply the quant values by 8,
-    // matching libjpeg-turbo's jcdctmgr.c (quantval[i] << 3).
-    let luma_divisors = scale_quant_for_fdct(&luma_quant);
-    let chroma_divisors = scale_quant_for_fdct(&chroma_quant);
+    // Divisor tables scale quant values for the chosen FDCT method.
+    // IsLow: multiply by 8 (islow leaves factor-of-8 in output).
+    // IsFast: multiply by AA&N scale factors (ifast_raw leaves AA&N-scaled output).
+    let luma_divisors = if dct_method == DctMethod::IsFast {
+        scale_quant_for_ifast(&luma_quant)
+    } else {
+        scale_quant_for_fdct(&luma_quant)
+    };
+    let chroma_divisors = if dct_method == DctMethod::IsFast {
+        scale_quant_for_ifast(&chroma_quant)
+    } else {
+        scale_quant_for_fdct(&chroma_quant)
+    };
 
     // Build Huffman tables
     let dc_luma_table = build_huff_table(&tables::DC_LUMINANCE_BITS, &tables::DC_LUMINANCE_VALUES);
@@ -95,14 +103,12 @@ pub fn compress(
     let mcus_x: usize = width.div_ceil(mcu_w);
     let mcus_y: usize = height.div_ceil(mcu_h);
 
-    // NEON fused FDCT+quantize for IsLow (the common case and only NEON-supported variant).
-    // IsFast/Float fall back to scalar fdct_islow — matches public API behavior.
-    let fdct_quantize_fn: fn(&mut [i16; 64], &QuantDivisors, &mut [i16; 64]) =
-        if dct_method == DctMethod::IsLow {
-            enc_simd.fdct_quantize
-        } else {
-            crate::simd::scalar::scalar_fdct_quantize
-        };
+    // Dispatch FDCT+quantize based on DCT method.
+    let fdct_quantize_fn: fn(&mut [i16; 64], &QuantDivisors, &mut [i16; 64]) = match dct_method {
+        DctMethod::IsLow => enc_simd.fdct_quantize,
+        DctMethod::IsFast => crate::simd::scalar::scalar_fdct_ifast_quantize,
+        DctMethod::Float => crate::simd::scalar::scalar_fdct_quantize,
+    };
 
     // Entropy encode all MCUs
     let mut bit_writer = BitWriter::new(width * height);
@@ -3833,12 +3839,54 @@ pub fn compute_reciprocal(divisor: u16) -> (u16, u16, u16, i16) {
     (recip as u16, corr, scale, shift)
 }
 
-/// Scale quantization table for the IFAST FDCT.
+/// Scale quantization table for the IFAST FDCT using AA&N scale factors.
 ///
-/// Currently delegates to `scale_quant_for_fdct` since our `fdct_ifast` rescales
-/// to islow-equivalent output. TODO(#163): use AA&N-scaled divisors with `fdct_ifast_raw`.
+/// Computes `DESCALE(quant[i] * aanscales[i], CONST_BITS - 3)` where
+/// `CONST_BITS = 14`, matching C libjpeg-turbo's `jcdctmgr.c` ifast divisor
+/// computation exactly. Paired with `fdct_ifast_raw` (no AA&N rescaling).
 fn scale_quant_for_ifast(quant_table: &[u16; 64]) -> QuantDivisors {
-    scale_quant_for_fdct(quant_table)
+    use crate::encode::fdct::AANSCALES;
+    let mut divisors = [0u16; 64];
+    let mut reciprocals = [0u16; 64];
+    let mut corrections = [0u16; 64];
+    let mut shifts = [0i16; 64];
+    let mut scales = [0u16; 64];
+    for i in 0..64 {
+        // DESCALE(quant * aanscale, 14 - 3) = (quant * aanscale + 1024) >> 11
+        let product: i64 = quant_table[i] as i64 * AANSCALES[i] as i64;
+        let d: u16 = ((product + (1i64 << 10)) >> 11) as u16;
+        divisors[i] = d;
+        let (recip, corr, scale, shift) = compute_reciprocal(d);
+        reciprocals[i] = recip;
+        corrections[i] = corr;
+        scales[i] = scale;
+        shifts[i] = shift;
+    }
+    let zigzag = &crate::encode::tables::ZIGZAG_ORDER;
+    let mut divisors_zigzag = [0u16; 64];
+    let mut reciprocals_zigzag = [0u16; 64];
+    let mut corrections_zigzag = [0u16; 64];
+    let mut shifts_zigzag = [0i16; 64];
+    let mut scales_zigzag = [0u16; 64];
+    for zz in 0..64 {
+        divisors_zigzag[zz] = divisors[zigzag[zz]];
+        reciprocals_zigzag[zz] = reciprocals[zigzag[zz]];
+        corrections_zigzag[zz] = corrections[zigzag[zz]];
+        shifts_zigzag[zz] = shifts[zigzag[zz]];
+        scales_zigzag[zz] = scales[zigzag[zz]];
+    }
+    QuantDivisors {
+        divisors,
+        reciprocals,
+        corrections,
+        shifts,
+        scales,
+        divisors_zigzag,
+        reciprocals_zigzag,
+        corrections_zigzag,
+        shifts_zigzag,
+        scales_zigzag,
+    }
 }
 
 /// Scale quantization table values by 8 to create divisor table for the islow FDCT.
@@ -4621,9 +4669,21 @@ fn encode_single_block(
 ) {
     let mut quantized = [0i16; 64];
 
+    // The fused SIMD path uses islow FDCT internally. Skip it for ifast/float
+    // so the caller-provided fdct_quantize_fn (with correct divisors) is used.
+    let is_ifast: bool = std::ptr::eq(
+        fdct_quantize_fn as *const (),
+        crate::simd::scalar::scalar_fdct_ifast_quantize as *const (),
+    );
+    let is_float: bool = std::ptr::eq(
+        fdct_quantize_fn as *const (),
+        crate::simd::scalar::scalar_fdct_quantize as *const (),
+    );
+    let use_fused_simd: bool = !is_ifast && !is_float;
+
     // Fused path for interior blocks: load u8 → FDCT → quantize → zigzag
     // without intermediate [i16; 64] buffer between extract and FDCT.
-    if block_x + 8 <= plane_width && block_y + 8 <= plane_height {
+    if use_fused_simd && block_x + 8 <= plane_width && block_y + 8 <= plane_height {
         #[cfg(target_arch = "aarch64")]
         {
             unsafe {
@@ -4668,24 +4728,11 @@ fn encode_single_block(
             }
         }
 
-        #[cfg(target_arch = "aarch64")]
-        {
-            unsafe {
-                crate::simd::aarch64::neon_extract_fdct_quantize(
-                    local_buf.as_ptr(),
-                    8,
-                    quant_table,
-                    &mut quantized,
-                );
-            }
-            HuffmanEncoder::encode_block(writer, &quantized, prev_dc, dc_table, ac_table);
-            return;
-        }
-        #[cfg(target_arch = "x86_64")]
-        {
-            if is_x86_feature_detected!("avx2") {
+        if use_fused_simd {
+            #[cfg(target_arch = "aarch64")]
+            {
                 unsafe {
-                    crate::simd::x86_64::avx2_extract_fdct_quantize(
+                    crate::simd::aarch64::neon_extract_fdct_quantize(
                         local_buf.as_ptr(),
                         8,
                         quant_table,
@@ -4695,11 +4742,26 @@ fn encode_single_block(
                 HuffmanEncoder::encode_block(writer, &quantized, prev_dc, dc_table, ac_table);
                 return;
             }
+            #[cfg(target_arch = "x86_64")]
+            {
+                if is_x86_feature_detected!("avx2") {
+                    unsafe {
+                        crate::simd::x86_64::avx2_extract_fdct_quantize(
+                            local_buf.as_ptr(),
+                            8,
+                            quant_table,
+                            &mut quantized,
+                        );
+                    }
+                    HuffmanEncoder::encode_block(writer, &quantized, prev_dc, dc_table, ac_table);
+                    return;
+                }
+            }
         }
     }
 
-    // Fallback for border blocks (non-SIMD) or interior blocks without AVX2:
-    // use extract_block + fdct_quantize_fn
+    // Generic path: extract block + caller-provided FDCT+quantize.
+    // Used for ifast, float, and non-SIMD fallback.
     let mut block = [0i16; 64];
     extract_block(
         plane,
@@ -5802,10 +5864,21 @@ fn encode_downsampled_chroma_block(
     prev_dc: &mut i16,
     fdct_quantize_fn: fn(&mut [i16; 64], &QuantDivisors, &mut [i16; 64]),
 ) {
+    // The fused SIMD paths use islow FDCT; skip for ifast/float.
+    let is_ifast: bool = std::ptr::eq(
+        fdct_quantize_fn as *const (),
+        crate::simd::scalar::scalar_fdct_ifast_quantize as *const (),
+    );
+    let is_float: bool = std::ptr::eq(
+        fdct_quantize_fn as *const (),
+        crate::simd::scalar::scalar_fdct_quantize as *const (),
+    );
+    let use_fused_simd: bool = !is_ifast && !is_float;
+
     // Fused NEON path: downsample + FDCT + quantize + zigzag in one pass,
     // eliminating the intermediate [i16; 64] downsampled block.
     #[cfg(target_arch = "aarch64")]
-    {
+    if use_fused_simd {
         let src_w: usize = 8 * h_factor;
         let src_h: usize = 8 * v_factor;
         if block_x + src_w <= plane_width && block_y + src_h <= plane_height {
@@ -5841,7 +5914,7 @@ fn encode_downsampled_chroma_block(
 
     // x86_64 fused path: AVX2 downsample+FDCT+quantize+zigzag
     #[cfg(target_arch = "x86_64")]
-    {
+    if use_fused_simd {
         let src_w: usize = 8 * h_factor;
         let src_h: usize = 8 * v_factor;
         if is_x86_feature_detected!("avx2")
@@ -5893,41 +5966,13 @@ fn encode_downsampled_chroma_block(
     }
 
     // Try NEON/AVX2 fused downsample+FDCT+quantize on the padded local buffer
-    #[cfg(target_arch = "aarch64")]
-    {
-        let mut quantized = [0i16; 64];
-        if h_factor == 2 && v_factor == 2 {
-            unsafe {
-                crate::simd::aarch64::neon_downsample_h2v2_fdct_quantize(
-                    local_buf.as_ptr(),
-                    src_w,
-                    quant_table,
-                    &mut quantized,
-                );
-            }
-            HuffmanEncoder::encode_block(writer, &quantized, prev_dc, dc_table, ac_table);
-            return;
-        }
-        if h_factor == 2 && v_factor == 1 {
-            unsafe {
-                crate::simd::aarch64::neon_downsample_h2v1_fdct_quantize(
-                    local_buf.as_ptr(),
-                    src_w,
-                    quant_table,
-                    &mut quantized,
-                );
-            }
-            HuffmanEncoder::encode_block(writer, &quantized, prev_dc, dc_table, ac_table);
-            return;
-        }
-    }
-    #[cfg(target_arch = "x86_64")]
-    {
-        if is_x86_feature_detected!("avx2") {
+    if use_fused_simd {
+        #[cfg(target_arch = "aarch64")]
+        {
             let mut quantized = [0i16; 64];
             if h_factor == 2 && v_factor == 2 {
                 unsafe {
-                    crate::simd::x86_64::avx2_downsample_h2v2_fdct_quantize(
+                    crate::simd::aarch64::neon_downsample_h2v2_fdct_quantize(
                         local_buf.as_ptr(),
                         src_w,
                         quant_table,
@@ -5939,7 +5984,7 @@ fn encode_downsampled_chroma_block(
             }
             if h_factor == 2 && v_factor == 1 {
                 unsafe {
-                    crate::simd::x86_64::avx2_downsample_h2v1_fdct_quantize(
+                    crate::simd::aarch64::neon_downsample_h2v1_fdct_quantize(
                         local_buf.as_ptr(),
                         src_w,
                         quant_table,
@@ -5948,6 +5993,36 @@ fn encode_downsampled_chroma_block(
                 }
                 HuffmanEncoder::encode_block(writer, &quantized, prev_dc, dc_table, ac_table);
                 return;
+            }
+        }
+        #[cfg(target_arch = "x86_64")]
+        {
+            if is_x86_feature_detected!("avx2") {
+                let mut quantized = [0i16; 64];
+                if h_factor == 2 && v_factor == 2 {
+                    unsafe {
+                        crate::simd::x86_64::avx2_downsample_h2v2_fdct_quantize(
+                            local_buf.as_ptr(),
+                            src_w,
+                            quant_table,
+                            &mut quantized,
+                        );
+                    }
+                    HuffmanEncoder::encode_block(writer, &quantized, prev_dc, dc_table, ac_table);
+                    return;
+                }
+                if h_factor == 2 && v_factor == 1 {
+                    unsafe {
+                        crate::simd::x86_64::avx2_downsample_h2v1_fdct_quantize(
+                            local_buf.as_ptr(),
+                            src_w,
+                            quant_table,
+                            &mut quantized,
+                        );
+                    }
+                    HuffmanEncoder::encode_block(writer, &quantized, prev_dc, dc_table, ac_table);
+                    return;
+                }
             }
         }
     }
