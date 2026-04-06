@@ -12,7 +12,7 @@ use std::path::{Path, PathBuf};
 
 use libjpeg_turbo_rs::{
     decompress, decompress_cropped, decompress_to, transform_jpeg_with_options, CropRegion,
-    Encoder, Image, PixelFormat, ScanScript, ScalingFactor, Subsampling, TransformOp,
+    Encoder, Image, PixelFormat, ScalingFactor, ScanScript, Subsampling, TransformOp,
     TransformOptions,
 };
 
