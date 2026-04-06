@@ -222,7 +222,7 @@ fn c_cjpeg_440_islow() {
 /// CMakeLists line 1604: cjpeg 420-q100-ifast-prog
 /// -sample 2x2 -quality 100 -dct fast -scans test.scan  testorig.ppm → JPEG
 #[test]
-#[ignore = "WIP: scan script + ifast FDCT + dummy blocks implemented; remaining: per-scan optimized Huffman + chroma downsample parity"]
+#[ignore = "WIP"]
 fn c_cjpeg_420_q100_ifast_prog() {
     let cjpeg = match helpers::cjpeg_path() {
         Some(p) => p,
@@ -271,6 +271,7 @@ fn c_cjpeg_420_q100_ifast_prog() {
 
     match rust_jpeg {
         Ok(data) => {
+            std::fs::write("/tmp/rust_ifast_final.jpg", &data).ok();
             let rust_out = helpers::TempFile::new("rust_420_q100_ifast_prog.jpg");
             rust_out.write_bytes(&data);
             helpers::assert_files_identical(
