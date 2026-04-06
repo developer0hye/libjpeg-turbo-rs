@@ -2123,9 +2123,31 @@ fn compress_progressive_with_scans(
         .map(|cl| vec![[0i16; 64]; cl.blocks_x * cl.blocks_y])
         .collect();
 
+    // Per-component actual block counts (width_in_blocks × height_in_blocks).
+    // For non-interleaved AC scans, C libjpeg-turbo only encodes this many blocks,
+    // not the MCU-padded count. Must match decoder expectations from SOF2 dimensions.
+    let comp_wib: Vec<usize> = if is_grayscale {
+        vec![width.div_ceil(8)]
+    } else {
+        vec![
+            width.div_ceil(8),          // Y
+            width.div_ceil(h_samp * 8), // Cb
+            width.div_ceil(h_samp * 8), // Cr
+        ]
+    };
+    let comp_hib: Vec<usize> = if is_grayscale {
+        vec![height.div_ceil(8)]
+    } else {
+        vec![
+            height.div_ceil(8),          // Y
+            height.div_ceil(v_samp * 8), // Cb
+            height.div_ceil(v_samp * 8), // Cr
+        ]
+    };
+
     // FDCT + quantize all blocks into coefficient buffers.
-    // Uses NEON FDCT+quantize via detect_encoder() and fused extract/downsample
-    // paths on aarch64 for interior blocks.
+    // In progressive mode, ALL blocks are FDCT'd including edge blocks
+    // (extract_block replicates edge pixels). No dummy block skipping.
     for mcu_y in 0..mcus_y {
         for mcu_x in 0..mcus_x {
             let x0: usize = mcu_x * mcu_w;
@@ -2360,17 +2382,20 @@ fn compress_progressive_with_scans(
             let ci: usize = scan.component_indices[0];
             let mut ac_freq = [0u32; 257];
             ac_freq[256] = 1;
+            // Non-interleaved AC scans iterate width_in_blocks × height_in_blocks,
+            // not the full MCU-padded buffer. Build a slice of actual blocks in raster order.
+            let wib: usize = comp_wib[ci];
+            let hib: usize = comp_hib[ci];
+            let layout = &comp_layouts[ci];
+            let actual_blocks: Vec<[i16; 64]> = (0..hib)
+                .flat_map(|by| (0..wib).map(move |bx| (bx, by)))
+                .map(|(bx, by)| coeff_bufs[ci][by * layout.blocks_x + bx])
+                .collect();
             if scan.ah == 0 {
-                gather_progressive_ac_freq(
-                    &coeff_bufs[ci],
-                    scan.ss,
-                    scan.se,
-                    scan.al,
-                    &mut ac_freq,
-                );
+                gather_progressive_ac_freq(&actual_blocks, scan.ss, scan.se, scan.al, &mut ac_freq);
             } else {
                 gather_progressive_ac_refine_freq(
-                    &coeff_bufs[ci],
+                    &actual_blocks,
                     scan.ss,
                     scan.se,
                     scan.al,
@@ -2392,18 +2417,33 @@ fn compress_progressive_with_scans(
             );
 
             let ac_table: HuffTable = build_huff_table(&ac_bits, &ac_values);
-            // Use ac_table for both luma and chroma slots; each AC scan is single-component.
             let mut bit_writer = BitWriter::new(width * height / 4);
-            encode_progressive_ac_scan(
-                &coeff_bufs,
-                &comp_layouts,
-                scan,
-                mcus_x,
-                mcus_y,
-                &ac_table,
-                &ac_table,
-                &mut bit_writer,
-            );
+            // Encode only actual blocks (width_in_blocks × height_in_blocks)
+            let ss_enc: usize = scan.ss as usize;
+            let se_enc: usize = scan.se as usize;
+            if scan.ah == 0 {
+                for block in actual_blocks.iter() {
+                    encode_ac_first_block(
+                        block,
+                        ss_enc,
+                        se_enc,
+                        scan.al,
+                        &ac_table,
+                        &mut bit_writer,
+                    );
+                }
+            } else {
+                for block in actual_blocks.iter() {
+                    encode_ac_refine_block(
+                        block,
+                        ss_enc,
+                        se_enc,
+                        scan.al,
+                        &ac_table,
+                        &mut bit_writer,
+                    );
+                }
+            }
             bit_writer.flush();
             output.extend_from_slice(bit_writer.data());
         }
@@ -2505,7 +2545,9 @@ fn gather_progressive_ac_refine_freq(
         }
 
         // Main gather loop matching encode_ac_refine_block symbol emission.
+        // Track corr_count to match the encoder's `corr_len > 0` EOB condition.
         let mut r: usize = 0;
+        let mut corr_count: usize = 0;
         let mut idx: usize = 0;
 
         while idx < band_len {
@@ -2521,22 +2563,25 @@ fn gather_progressive_ac_refine_freq(
             while r > 15 && idx < eob {
                 freq[0xF0] += 1; // ZRL
                 r -= 16;
+                corr_count = 0; // flush_corr_bits resets corr_len in encoder
             }
 
             if temp > 1 {
                 // Previously-nonzero: emits a correction bit (no Huffman symbol).
+                corr_count += 1;
                 idx += 1;
                 continue;
             }
 
-            // temp == 1: newly-nonzero — emits (r, 1) symbol.
+            // temp == 1: newly-nonzero — emits (r, 1) symbol + flush correction bits.
             let symbol: usize = (r << 4) | 1;
             freq[symbol] += 1;
             r = 0;
+            corr_count = 0;
             idx += 1;
         }
 
-        if r > 0 {
+        if r > 0 || corr_count > 0 {
             freq[0x00] += 1; // EOB
         }
     }
