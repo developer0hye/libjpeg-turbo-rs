@@ -795,6 +795,18 @@ impl<'a> Encoder<'a> {
                 self.subsampling,
                 restart_interval,
             )?
+        } else if self.smoothing_factor > 0 {
+            // Smoothing requires full-plane buffering, only available in the
+            // optimized path. Route there when smoothing is requested.
+            encoder::compress_optimized(
+                effective_pixels,
+                self.width,
+                self.height,
+                effective_format,
+                quality,
+                self.subsampling,
+                self.smoothing_factor,
+            )?
         } else {
             encoder::compress(
                 effective_pixels,
