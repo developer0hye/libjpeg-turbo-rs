@@ -46,8 +46,11 @@ fn generate_grayscale_pattern(width: usize, height: usize) -> Vec<u8> {
     pixels
 }
 
-/// Load the reference hashes from the JSON file.
+/// Load the reference hashes from the arch-specific JSON file.
 fn load_reference_hashes() -> HashMap<String, Option<String>> {
+    #[cfg(target_arch = "x86_64")]
+    let json_str: &str = include_str!("reference_hashes_x86_64.json");
+    #[cfg(not(target_arch = "x86_64"))]
     let json_str: &str = include_str!("reference_hashes.json");
     // Minimal JSON parsing: extract key-value pairs.
     // The file has a simple flat structure: { "key": "value" | null, ... }

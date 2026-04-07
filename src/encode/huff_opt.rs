@@ -52,10 +52,10 @@ pub fn gen_optimal_table(freq: &[u32; 257]) -> ([u8; 17], Vec<u8>) {
     // Ensure pseudo-symbol 256 has nonzero count
     let mut freq_copy = *freq;
     freq_copy[256] = freq_copy[256].max(1);
-    for i in 0..257 {
-        if freq_copy[i] > 0 {
+    for (i, &f) in freq_copy.iter().enumerate() {
+        if f > 0 {
             nz_index[n] = i;
-            freq_work[n] = freq_copy[i] as i64;
+            freq_work[n] = f as i64;
             n += 1;
         }
     }
@@ -88,15 +88,15 @@ pub fn gen_optimal_table(freq: &[u32; 257]) -> ([u8; 17], Vec<u8>) {
         let mut v: i64 = 1_000_000_000;
         let mut v2: i64 = 1_000_000_000;
 
-        for i in 0..n {
-            if freq_work[i] <= v2 {
-                if freq_work[i] <= v {
+        for (i, &fw) in freq_work[..n].iter().enumerate() {
+            if fw <= v2 {
+                if fw <= v {
                     c2 = c1;
                     v2 = v;
-                    v = freq_work[i];
+                    v = fw;
                     c1 = i as i32;
                 } else {
-                    v2 = freq_work[i];
+                    v2 = fw;
                     c2 = i as i32;
                 }
             }
@@ -188,8 +188,8 @@ pub fn gen_optimal_table(freq: &[u32; 257]) -> ([u8; 17], Vec<u8>) {
     let mut bit_pos = [0usize; 33];
     {
         let mut p: usize = 0;
-        for len in 1..=32usize {
-            bit_pos[len] = p;
+        for (len, bp) in bit_pos.iter_mut().enumerate().skip(1) {
+            *bp = p;
             p += sym_codesize.iter().filter(|&&cs| cs == len as u32).count();
         }
     }
@@ -197,11 +197,11 @@ pub fn gen_optimal_table(freq: &[u32; 257]) -> ([u8; 17], Vec<u8>) {
     // Place symbols in ascending symbol value order, grouped by code length.
     let total_symbols: usize = sym_codesize[..256].iter().filter(|&&cs| cs > 0).count();
     let mut huffval = vec![0u8; total_symbols];
-    for sym in 0..256usize {
-        if sym_codesize[sym] > 0 {
-            let cs = sym_codesize[sym] as usize;
-            huffval[bit_pos[cs]] = sym as u8;
-            bit_pos[cs] += 1;
+    for (sym, &cs) in sym_codesize[..256].iter().enumerate() {
+        if cs > 0 {
+            let cs_usize = cs as usize;
+            huffval[bit_pos[cs_usize]] = sym as u8;
+            bit_pos[cs_usize] += 1;
         }
     }
 

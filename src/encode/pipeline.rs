@@ -2013,6 +2013,7 @@ pub fn compress_progressive_custom(
 }
 
 /// Shared progressive encoding logic used by both default and custom scan scripts.
+#[allow(clippy::too_many_arguments)]
 fn compress_progressive_with_scans(
     pixels: &[u8],
     width: usize,
@@ -3559,7 +3560,7 @@ fn encode_progressive_dc_scan(
 /// Encode a progressive AC scan (single component).
 ///
 /// Iterates all blocks in flat raster order within the component buffer.
-#[allow(clippy::too_many_arguments)]
+#[allow(dead_code, clippy::too_many_arguments)]
 fn encode_progressive_ac_scan(
     coeff_bufs: &[Vec<[i16; 64]>],
     comp_layouts: &[CompLayout],
@@ -3714,7 +3715,7 @@ fn emit_eobrun(ac_table: &HuffTable, writer: &mut BitWriter, eobrun: &mut u32) {
     let huff_code: u32 = ac_table.ehufco[symbol] as u32;
     let huff_size: u8 = ac_table.ehufsi[symbol];
     if nbits > 0 {
-        let combined: u32 = (huff_code << nbits) | (*eobrun as u32 & ((1u32 << nbits) - 1));
+        let combined: u32 = (huff_code << nbits) | (*eobrun & ((1u32 << nbits) - 1));
         writer.put_bits(combined, huff_size + nbits);
     } else {
         writer.put_bits(huff_code, huff_size);
@@ -3754,7 +3755,7 @@ fn emit_eobrun_with_corr(
     let huff_code: u32 = ac_table.ehufco[symbol] as u32;
     let huff_size: u8 = ac_table.ehufsi[symbol];
     if nbits > 0 {
-        let combined: u32 = (huff_code << nbits) | (*eobrun as u32 & ((1u32 << nbits) - 1));
+        let combined: u32 = (huff_code << nbits) | (*eobrun & ((1u32 << nbits) - 1));
         writer.put_bits(combined, huff_size + nbits);
     } else {
         writer.put_bits(huff_code, huff_size);
@@ -3778,6 +3779,7 @@ fn emit_eobrun_with_corr(
 /// Per-block correction bits (BR) are kept in a local array and flushed
 /// after each Huffman symbol, while cross-block bits (BE) accumulate in
 /// `corr_buffer` and are flushed only when the EOBRUN is emitted.
+#[allow(clippy::too_many_arguments)]
 fn encode_ac_refine_block(
     block: &[i16; 64],
     ss: usize,
