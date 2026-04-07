@@ -604,6 +604,7 @@ fn run_transform_test(jpegtran: &Path, jpeg_data: &[u8], op: TransformOp) -> Tes
 
     let out_tmp: TempFile = TempFile::new("jt_out.jpg");
     let mut cmd = Command::new(jpegtran);
+    cmd.arg("-copy").arg("none");
     cmd.args(&jt_args);
     cmd.args([
         "-outfile",
