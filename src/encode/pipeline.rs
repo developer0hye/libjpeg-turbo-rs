@@ -2263,13 +2263,16 @@ fn compress_progressive_with_scans(
         let is_dc_scan: bool = scan.ss == 0 && scan.se == 0;
         let is_first_scan: bool = scan.ah == 0;
 
-        // Build SOS component list
+        // Build SOS component list.
+        // Per JPEG spec: DC-only scans (Ss=0) set Ta=0, AC-only scans (Ss>0) set Td=0.
         let sos_comps: Vec<(u8, u8, u8)> = scan
             .component_indices
             .iter()
             .map(|&ci| {
                 let comp_id = (ci + 1) as u8;
-                let (dc_tbl, ac_tbl) = if ci == 0 { (0u8, 0u8) } else { (1u8, 1u8) };
+                let tbl_idx: u8 = if ci == 0 { 0 } else { 1 };
+                let dc_tbl: u8 = if is_dc_scan { tbl_idx } else { 0 };
+                let ac_tbl: u8 = if is_dc_scan { 0 } else { tbl_idx };
                 (comp_id, dc_tbl, ac_tbl)
             })
             .collect();
@@ -2460,6 +2463,7 @@ fn compress_progressive_with_scans(
                 }
             } else {
                 let mut eobrun: u32 = 0;
+                let mut corr_buffer: Vec<u8> = Vec::with_capacity(MAX_CORR_BITS);
                 for block in actual_blocks.iter() {
                     encode_ac_refine_block(
                         block,
@@ -2469,11 +2473,17 @@ fn compress_progressive_with_scans(
                         &ac_table,
                         &mut bit_writer,
                         &mut eobrun,
+                        &mut corr_buffer,
                     );
                 }
-                // Note: refine EOBRUN with correction-bit buffering not yet
-                // implemented — each block emits its own EOB inline.
-                let _ = eobrun;
+                if eobrun > 0 {
+                    emit_eobrun_with_corr(
+                        &ac_table,
+                        &mut bit_writer,
+                        &mut eobrun,
+                        &mut corr_buffer,
+                    );
+                }
             }
             bit_writer.flush();
             output.extend_from_slice(bit_writer.data());
@@ -2574,8 +2584,10 @@ fn emit_eobrun_freq(eobrun: u32, freq: &mut [u32; 257]) {
 
 /// Gather AC symbol frequencies for a progressive AC refinement scan (ah > 0).
 ///
-/// Mirrors the symbol-emission logic from `encode_ac_refine_block`: only ZRL (0xF0),
-/// EOB (0x00), and `(run, 1)` symbols are emitted; the size is always 1.
+/// Mirrors the symbol-emission logic from `encode_ac_refine_block` with cross-block
+/// EOBRUN batching: only ZRL (0xF0), EOB (batched via EOBRUN), and `(run, 1)`
+/// symbols are counted. EOBRUN batching affects which EOB symbol (nbits << 4)
+/// is emitted, so frequencies must match the encoder exactly.
 fn gather_progressive_ac_refine_freq(
     blocks: &[[i16; 64]],
     ss: u8,
@@ -2586,6 +2598,9 @@ fn gather_progressive_ac_refine_freq(
     let ss_usize: usize = ss as usize;
     let se_usize: usize = se as usize;
     let band_len: usize = se_usize - ss_usize + 1;
+
+    let mut eobrun: u32 = 0;
+    let mut be: usize = 0; // count of cross-block buffered correction bits
 
     for block in blocks.iter() {
         let mut absvals = [0u16; 64];
@@ -2603,7 +2618,7 @@ fn gather_progressive_ac_refine_freq(
         }
 
         let mut r: usize = 0;
-        let mut corr_count: usize = 0;
+        let mut br: usize = 0; // this block's correction bit count
         let mut idx: usize = 0;
 
         while idx < band_len {
@@ -2616,29 +2631,51 @@ fn gather_progressive_ac_refine_freq(
             }
 
             while r > 15 && idx < eob_pos {
+                // Flush EOBRUN before ZRL
+                if eobrun > 0 {
+                    emit_eobrun_freq(eobrun, freq);
+                    eobrun = 0;
+                    be = 0;
+                }
                 freq[0xF0] += 1;
                 r -= 16;
-                corr_count = 0;
+                br = 0;
             }
 
             if temp > 1 {
-                corr_count += 1;
+                br += 1;
                 idx += 1;
                 continue;
             }
 
+            // Newly nonzero: flush EOBRUN before emitting symbol
+            if eobrun > 0 {
+                emit_eobrun_freq(eobrun, freq);
+                eobrun = 0;
+                be = 0;
+            }
             let symbol: usize = (r << 4) | 1;
             freq[symbol] += 1;
             r = 0;
-            corr_count = 0;
+            br = 0;
             idx += 1;
         }
 
-        if r > 0 || corr_count > 0 {
-            // No EOBRUN batching for refine scans yet — matches encoder behavior.
-            // TODO(#163): implement cross-block correction-bit buffering for EOBRUN.
-            freq[0x00] += 1;
+        // Trailing zeroes or correction bits → accumulate EOBRUN
+        if r > 0 || br > 0 {
+            eobrun += 1;
+            be += br;
+            if eobrun == 0x7FFF || be > (MAX_CORR_BITS - 64 + 1) {
+                emit_eobrun_freq(eobrun, freq);
+                eobrun = 0;
+                be = 0;
+            }
         }
+    }
+
+    // Flush trailing EOBRUN
+    if eobrun > 0 {
+        emit_eobrun_freq(eobrun, freq);
     }
 }
 
@@ -3260,13 +3297,17 @@ pub fn compress_arithmetic_progressive(
         // Reset encoder state for each scan
         arith_enc.reset();
 
-        // Build SOS component list
+        // Build SOS component list.
+        // Per JPEG spec: DC-only scans (Ss=0) set Ta=0, AC-only scans (Ss>0) set Td=0.
+        let is_dc_scan_arith: bool = scan.ss == 0;
         let sos_comps: Vec<(u8, u8, u8)> = scan
             .component_indices
             .iter()
             .map(|&ci| {
                 let comp_id: u8 = (ci + 1) as u8;
-                let (dc_tbl, ac_tbl): (u8, u8) = if ci == 0 { (0, 0) } else { (1, 1) };
+                let tbl_idx: u8 = if ci == 0 { 0 } else { 1 };
+                let dc_tbl: u8 = if is_dc_scan_arith { tbl_idx } else { 0 };
+                let ac_tbl: u8 = if is_dc_scan_arith { 0 } else { tbl_idx };
                 (comp_id, dc_tbl, ac_tbl)
             })
             .collect();
@@ -3553,10 +3594,22 @@ fn encode_progressive_ac_scan(
         }
     } else {
         let mut eobrun: u32 = 0;
+        let mut corr_buffer: Vec<u8> = Vec::with_capacity(MAX_CORR_BITS);
         for block in blocks.iter() {
-            encode_ac_refine_block(block, ss, se, al, ac_table, writer, &mut eobrun);
+            encode_ac_refine_block(
+                block,
+                ss,
+                se,
+                al,
+                ac_table,
+                writer,
+                &mut eobrun,
+                &mut corr_buffer,
+            );
         }
-        let _ = eobrun;
+        if eobrun > 0 {
+            emit_eobrun_with_corr(ac_table, writer, &mut eobrun, &mut corr_buffer);
+        }
     }
 }
 
@@ -3669,30 +3722,62 @@ fn emit_eobrun(ac_table: &HuffTable, writer: &mut BitWriter, eobrun: &mut u32) {
     *eobrun = 0;
 }
 
-/// Flush buffered correction bits. Handles >32 bits by splitting into two put_bits calls.
+/// Maximum number of correction bits buffered across blocks for AC refine EOBRUN.
+/// Matches C libjpeg-turbo's MAX_CORR_BITS in jcphuff.c.
+const MAX_CORR_BITS: usize = 1000;
+
+/// Emit buffered correction bits from a byte slice.
+/// Each byte holds a single bit value (0 or 1).
+/// Matches C libjpeg-turbo's emit_buffered_bits in jcphuff.c.
 #[inline]
-fn flush_corr_bits(writer: &mut BitWriter, corr_bits: &mut u64, corr_len: &mut u8) {
-    if *corr_len == 0 {
+fn emit_buffered_bits(writer: &mut BitWriter, bits: &[u8]) {
+    for &bit in bits {
+        writer.put_bits(bit as u32, 1);
+    }
+}
+
+/// Emit pending EOBRUN symbol and all buffered correction bits.
+/// Used by AC refine scans where correction bits must be associated with the
+/// EOBRUN symbol. Matches C libjpeg-turbo's emit_eobrun in jcphuff.c when
+/// combined with the correction bit buffer (entropy->bit_buffer / entropy->BE).
+fn emit_eobrun_with_corr(
+    ac_table: &HuffTable,
+    writer: &mut BitWriter,
+    eobrun: &mut u32,
+    corr_buffer: &mut Vec<u8>,
+) {
+    if *eobrun == 0 {
         return;
     }
-    if *corr_len <= 32 {
-        writer.put_bits(*corr_bits as u32, *corr_len);
+    let nbits: u8 = (32 - (*eobrun).leading_zeros()) as u8 - 1;
+    let symbol: usize = (nbits as usize) << 4;
+    let huff_code: u32 = ac_table.ehufco[symbol] as u32;
+    let huff_size: u8 = ac_table.ehufsi[symbol];
+    if nbits > 0 {
+        let combined: u32 = (huff_code << nbits) | (*eobrun as u32 & ((1u32 << nbits) - 1));
+        writer.put_bits(combined, huff_size + nbits);
     } else {
-        // Split: emit high bits first, then low 32 bits
-        let hi_len: u8 = *corr_len - 32;
-        writer.put_bits((*corr_bits >> 32) as u32, hi_len);
-        writer.put_bits(*corr_bits as u32, 32);
+        writer.put_bits(huff_code, huff_size);
     }
-    *corr_bits = 0;
-    *corr_len = 0;
+    *eobrun = 0;
+
+    // Emit all buffered correction bits
+    emit_buffered_bits(writer, corr_buffer);
+    corr_buffer.clear();
 }
 
 /// Encode one block for AC successive approximation refinement scan (ah!=0).
 ///
-/// Ported line-by-line from libjpeg-turbo jcphuff.c `encode_mcu_AC_refine`.
+/// Ported from libjpeg-turbo jcphuff.c `encode_mcu_AC_refine`.
 /// Per ITU-T T.81 Figure G.7, previously-nonzero coefficients emit correction
 /// bits that must be associated with the next Huffman symbol (ZRL, EOB, or
-/// newly-nonzero code). We buffer these bits and emit them after each symbol.
+/// newly-nonzero code).
+///
+/// EOBRUN is batched across blocks with correction bits buffered in
+/// `corr_buffer` (matching C's `entropy->bit_buffer` / `entropy->BE`).
+/// Per-block correction bits (BR) are kept in a local array and flushed
+/// after each Huffman symbol, while cross-block bits (BE) accumulate in
+/// `corr_buffer` and are flushed only when the EOBRUN is emitted.
 fn encode_ac_refine_block(
     block: &[i16; 64],
     ss: usize,
@@ -3700,7 +3785,8 @@ fn encode_ac_refine_block(
     al: u8,
     ac_table: &HuffTable,
     writer: &mut BitWriter,
-    _eobrun: &mut u32,
+    eobrun: &mut u32,
+    corr_buffer: &mut Vec<u8>,
 ) {
     let band_len: usize = se - ss + 1;
 
@@ -3721,8 +3807,9 @@ fn encode_ac_refine_block(
     }
 
     let mut r: usize = 0;
-    let mut corr_bits: u64 = 0;
-    let mut corr_len: u8 = 0;
+    // BR: this block's correction bits (separate from cross-block BE in corr_buffer)
+    let mut br_bits: [u8; 64] = [0u8; 64];
+    let mut br: usize = 0;
     let mut idx: usize = 0;
 
     while idx < band_len {
@@ -3734,35 +3821,51 @@ fn encode_ac_refine_block(
             continue;
         }
 
+        // Emit ZRLs for zero runs > 15, but not if they can be folded into EOB
         while r > 15 && idx < eob_pos {
+            // Flush pending EOBRUN + BE correction bits
+            emit_eobrun_with_corr(ac_table, writer, eobrun, corr_buffer);
+            // Emit ZRL symbol
             writer.put_bits(ac_table.ehufco[0xF0] as u32, ac_table.ehufsi[0xF0]);
             r -= 16;
-            flush_corr_bits(writer, &mut corr_bits, &mut corr_len);
+            // Emit this block's buffered correction bits (BR)
+            emit_buffered_bits(writer, &br_bits[..br]);
+            br = 0;
         }
 
         if temp > 1 {
-            corr_bits = (corr_bits << 1) | (temp & 1) as u64;
-            corr_len += 1;
+            // Previously nonzero: buffer correction bit
+            br_bits[br] = (temp & 1) as u8;
+            br += 1;
             idx += 1;
             continue;
         }
+
+        // Newly nonzero (temp == 1): flush EOBRUN, emit symbol + sign bit
+        emit_eobrun_with_corr(ac_table, writer, eobrun, corr_buffer);
 
         let symbol: usize = (r << 4) | 1;
         let huff_code: u32 = ac_table.ehufco[symbol] as u32;
         let huff_size: u8 = ac_table.ehufsi[symbol];
         let combined: u32 = (huff_code << 1) | sign_bits[idx] as u32;
         writer.put_bits(combined, huff_size + 1);
-        flush_corr_bits(writer, &mut corr_bits, &mut corr_len);
+
+        // Emit this block's buffered correction bits (BR)
+        emit_buffered_bits(writer, &br_bits[..br]);
+        br = 0;
         r = 0;
         idx += 1;
     }
 
-    if r > 0 || corr_len > 0 {
-        // AC refine EOBRUN with correction-bit buffering is complex;
-        // for now emit individual EOB + correction bits per block.
-        // TODO(#163): implement cross-block correction-bit buffering for full EOBRUN parity.
-        writer.put_bits(ac_table.ehufco[0x00] as u32, ac_table.ehufsi[0x00]);
-        flush_corr_bits(writer, &mut corr_bits, &mut corr_len);
+    // Trailing zeroes or correction bits → accumulate EOBRUN
+    if r > 0 || br > 0 {
+        *eobrun += 1;
+        // Append this block's correction bits (BR) to cross-block buffer (BE)
+        corr_buffer.extend_from_slice(&br_bits[..br]);
+        // Force flush to prevent overflow of EOBRUN counter or correction buffer
+        if *eobrun == 0x7FFF || corr_buffer.len() > (MAX_CORR_BITS - 64 + 1) {
+            emit_eobrun_with_corr(ac_table, writer, eobrun, corr_buffer);
+        }
     }
 }
 
