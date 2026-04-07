@@ -2007,6 +2007,7 @@ pub fn compress_progressive_custom(
 }
 
 /// Shared progressive encoding logic used by both default and custom scan scripts.
+#[allow(clippy::too_many_arguments)]
 fn compress_progressive_with_scans(
     pixels: &[u8],
     width: usize,
@@ -2383,19 +2384,29 @@ fn compress_progressive_with_scans(
             let mut ac_freq = [0u32; 257];
             ac_freq[256] = 1;
             // Non-interleaved AC scans iterate width_in_blocks × height_in_blocks,
-            // not the full MCU-padded buffer. Build a slice of actual blocks in raster order.
+            // not the full MCU-padded buffer. Iterate with stride to avoid Vec copy.
             let wib: usize = comp_wib[ci];
             let hib: usize = comp_hib[ci];
             let layout = &comp_layouts[ci];
-            let actual_blocks: Vec<[i16; 64]> = (0..hib)
-                .flat_map(|by| (0..wib).map(move |bx| (bx, by)))
-                .map(|(bx, by)| coeff_bufs[ci][by * layout.blocks_x + bx])
-                .collect();
+            let stride: usize = layout.blocks_x;
+            let comp_buf: &[[i16; 64]] = &coeff_bufs[ci];
             if scan.ah == 0 {
-                gather_progressive_ac_freq(&actual_blocks, scan.ss, scan.se, scan.al, &mut ac_freq);
+                gather_progressive_ac_freq_strided(
+                    comp_buf,
+                    stride,
+                    wib,
+                    hib,
+                    scan.ss,
+                    scan.se,
+                    scan.al,
+                    &mut ac_freq,
+                );
             } else {
-                gather_progressive_ac_refine_freq(
-                    &actual_blocks,
+                gather_progressive_ac_refine_freq_strided(
+                    comp_buf,
+                    stride,
+                    wib,
+                    hib,
                     scan.ss,
                     scan.se,
                     scan.al,
@@ -2418,31 +2429,47 @@ fn compress_progressive_with_scans(
 
             let ac_table: HuffTable = build_huff_table(&ac_bits, &ac_values);
             let mut bit_writer = BitWriter::new(width * height / 4);
-            // Encode only actual blocks (width_in_blocks × height_in_blocks)
             let ss_enc: usize = scan.ss as usize;
             let se_enc: usize = scan.se as usize;
-            if scan.ah == 0 {
-                for block in actual_blocks.iter() {
-                    encode_ac_first_block(
-                        block,
-                        ss_enc,
-                        se_enc,
-                        scan.al,
-                        &ac_table,
-                        &mut bit_writer,
-                    );
+            // Hoist BitWriter state for entire AC scan, iterate with stride.
+            // Worst-case per block: 63 AC × 26 bits ≈ 205 bytes + stuffing.
+            let reserve: usize = (wib * hib * 256).max(1024);
+            unsafe {
+                let (mut pb, mut fb, mut buf_ptr) = bit_writer.begin_block(reserve);
+                if scan.ah == 0 {
+                    for by in 0..hib {
+                        for bx in 0..wib {
+                            let block: &[i16; 64] = &comp_buf[by * stride + bx];
+                            encode_ac_first_block_hoisted(
+                                block,
+                                ss_enc,
+                                se_enc,
+                                scan.al,
+                                &ac_table,
+                                &mut pb,
+                                &mut fb,
+                                &mut buf_ptr,
+                            );
+                        }
+                    }
+                } else {
+                    for by in 0..hib {
+                        for bx in 0..wib {
+                            let block: &[i16; 64] = &comp_buf[by * stride + bx];
+                            encode_ac_refine_block_hoisted(
+                                block,
+                                ss_enc,
+                                se_enc,
+                                scan.al,
+                                &ac_table,
+                                &mut pb,
+                                &mut fb,
+                                &mut buf_ptr,
+                            );
+                        }
+                    }
                 }
-            } else {
-                for block in actual_blocks.iter() {
-                    encode_ac_refine_block(
-                        block,
-                        ss_enc,
-                        se_enc,
-                        scan.al,
-                        &ac_table,
-                        &mut bit_writer,
-                    );
-                }
+                bit_writer.end_block(pb, fb, buf_ptr);
             }
             bit_writer.flush();
             output.extend_from_slice(bit_writer.data());
@@ -2456,69 +2483,14 @@ fn compress_progressive_with_scans(
 
 /// Gather AC symbol frequencies for a progressive AC scan (ah==0, first scan).
 ///
-/// Mirrors the zero-run / EOB logic from `encode_ac_first_block` to produce
-/// accurate symbol frequency counts for optimal Huffman table generation.
+/// Iterates blocks in raster order using stride-based access to avoid Vec allocation.
 /// `ss` and `se` are the spectral band limits (1..=63); `al` is the point transform.
-fn gather_progressive_ac_freq(blocks: &[[i16; 64]], ss: u8, se: u8, al: u8, freq: &mut [u32; 257]) {
-    let ss_usize: usize = ss as usize;
-    let se_usize: usize = se as usize;
-    let band_len: usize = se_usize - ss_usize + 1;
-
-    for block in blocks.iter() {
-        // Apply point transform and find nonzero positions, matching encode_ac_first_block.
-        let mut zerobits: u64 = 0;
-        let mut values = [0u16; 64];
-
-        for i in 0..band_len {
-            let coeff: i16 = block[ss_usize + i];
-            if coeff == 0 {
-                continue;
-            }
-            let sign_mask: i16 = coeff >> 15;
-            let abs_coeff: i16 = (coeff ^ sign_mask) - sign_mask;
-            let temp: u16 = (abs_coeff >> al) as u16;
-            if temp == 0 {
-                continue;
-            }
-            values[i] = temp;
-            zerobits |= 1u64 << i;
-        }
-
-        if zerobits == 0 {
-            // EOB symbol
-            freq[0x00] += 1;
-            continue;
-        }
-
-        let mut prev_pos: usize = 0;
-        let mut bits = zerobits;
-        while bits != 0 {
-            let pos: usize = bits.trailing_zeros() as usize;
-            bits &= bits - 1;
-
-            let mut zero_run: usize = pos - prev_pos;
-            while zero_run >= 16 {
-                freq[0xF0] += 1; // ZRL
-                zero_run -= 16;
-            }
-            let nbits: u8 = 16 - values[pos].leading_zeros() as u8;
-            let symbol: usize = (zero_run << 4) | (nbits as usize);
-            freq[symbol] += 1;
-            prev_pos = pos + 1;
-        }
-
-        if prev_pos < band_len {
-            freq[0x00] += 1; // EOB
-        }
-    }
-}
-
-/// Gather AC symbol frequencies for a progressive AC refinement scan (ah > 0).
-///
-/// Mirrors the symbol-emission logic from `encode_ac_refine_block`: only ZRL (0xF0),
-/// EOB (0x00), and `(run, 1)` symbols are emitted; the size is always 1.
-fn gather_progressive_ac_refine_freq(
-    blocks: &[[i16; 64]],
+#[allow(clippy::too_many_arguments)]
+fn gather_progressive_ac_freq_strided(
+    comp_buf: &[[i16; 64]],
+    stride: usize,
+    wib: usize,
+    hib: usize,
     ss: u8,
     se: u8,
     al: u8,
@@ -2528,61 +2500,131 @@ fn gather_progressive_ac_refine_freq(
     let se_usize: usize = se as usize;
     let band_len: usize = se_usize - ss_usize + 1;
 
-    for block in blocks.iter() {
-        // Pre-pass: compute absvals and find EOB position (last newly-nonzero coeff).
-        let mut absvals = [0u16; 64];
-        let mut eob: usize = 0;
+    for by in 0..hib {
+        let row_base: usize = by * stride;
+        for bx in 0..wib {
+            let block: &[i16; 64] = &comp_buf[row_base + bx];
 
-        for i in 0..band_len {
-            let coeff: i32 = block[ss_usize + i] as i32;
-            let sign_mask: i32 = coeff >> 31;
-            let abs_coeff: i32 = (coeff ^ sign_mask) - sign_mask;
-            let temp: u16 = (abs_coeff >> al) as u16;
-            absvals[i] = temp;
-            if temp == 1 {
-                eob = i + 1;
+            let mut zerobits: u64 = 0;
+            let mut values = [0u16; 64];
+
+            for i in 0..band_len {
+                let coeff: i16 = block[ss_usize + i];
+                if coeff == 0 {
+                    continue;
+                }
+                let sign_mask: i16 = coeff >> 15;
+                let abs_coeff: i16 = (coeff ^ sign_mask) - sign_mask;
+                let temp: u16 = (abs_coeff >> al) as u16;
+                if temp == 0 {
+                    continue;
+                }
+                values[i] = temp;
+                zerobits |= 1u64 << i;
             }
-        }
 
-        // Main gather loop matching encode_ac_refine_block symbol emission.
-        // Track corr_count to match the encoder's `corr_len > 0` EOB condition.
-        let mut r: usize = 0;
-        let mut corr_count: usize = 0;
-        let mut idx: usize = 0;
-
-        while idx < band_len {
-            let temp: u16 = absvals[idx];
-
-            if temp == 0 {
-                r += 1;
-                idx += 1;
+            if zerobits == 0 {
+                freq[0x00] += 1;
                 continue;
             }
 
-            // Emit ZRL symbols for runs that exceed 15, but not if they fold into EOB.
-            while r > 15 && idx < eob {
-                freq[0xF0] += 1; // ZRL
-                r -= 16;
-                corr_count = 0; // flush_corr_bits resets corr_len in encoder
+            let mut prev_pos: usize = 0;
+            let mut bits = zerobits;
+            while bits != 0 {
+                let pos: usize = bits.trailing_zeros() as usize;
+                bits &= bits - 1;
+
+                let mut zero_run: usize = pos - prev_pos;
+                while zero_run >= 16 {
+                    freq[0xF0] += 1;
+                    zero_run -= 16;
+                }
+                let nbits: u8 = 16 - values[pos].leading_zeros() as u8;
+                let symbol: usize = (zero_run << 4) | (nbits as usize);
+                freq[symbol] += 1;
+                prev_pos = pos + 1;
             }
 
-            if temp > 1 {
-                // Previously-nonzero: emits a correction bit (no Huffman symbol).
-                corr_count += 1;
-                idx += 1;
-                continue;
+            if prev_pos < band_len {
+                freq[0x00] += 1;
             }
-
-            // temp == 1: newly-nonzero — emits (r, 1) symbol + flush correction bits.
-            let symbol: usize = (r << 4) | 1;
-            freq[symbol] += 1;
-            r = 0;
-            corr_count = 0;
-            idx += 1;
         }
+    }
+}
 
-        if r > 0 || corr_count > 0 {
-            freq[0x00] += 1; // EOB
+/// Gather AC symbol frequencies for a progressive AC refinement scan (ah > 0).
+///
+/// Iterates blocks with stride-based access. Mirrors the symbol-emission logic
+/// from `encode_ac_refine_block_hoisted`.
+#[allow(clippy::too_many_arguments)]
+fn gather_progressive_ac_refine_freq_strided(
+    comp_buf: &[[i16; 64]],
+    stride: usize,
+    wib: usize,
+    hib: usize,
+    ss: u8,
+    se: u8,
+    al: u8,
+    freq: &mut [u32; 257],
+) {
+    let ss_usize: usize = ss as usize;
+    let se_usize: usize = se as usize;
+    let band_len: usize = se_usize - ss_usize + 1;
+
+    for by in 0..hib {
+        let row_base: usize = by * stride;
+        for bx in 0..wib {
+            let block: &[i16; 64] = &comp_buf[row_base + bx];
+
+            let mut absvals = [0u16; 64];
+            let mut eob: usize = 0;
+
+            for i in 0..band_len {
+                let coeff: i32 = block[ss_usize + i] as i32;
+                let sign_mask: i32 = coeff >> 31;
+                let abs_coeff: i32 = (coeff ^ sign_mask) - sign_mask;
+                let temp: u16 = (abs_coeff >> al) as u16;
+                absvals[i] = temp;
+                if temp == 1 {
+                    eob = i + 1;
+                }
+            }
+
+            let mut r: usize = 0;
+            let mut corr_count: usize = 0;
+            let mut idx: usize = 0;
+
+            while idx < band_len {
+                let temp: u16 = absvals[idx];
+
+                if temp == 0 {
+                    r += 1;
+                    idx += 1;
+                    continue;
+                }
+
+                while r > 15 && idx < eob {
+                    freq[0xF0] += 1;
+                    r -= 16;
+                    corr_count = 0;
+                }
+
+                if temp > 1 {
+                    corr_count += 1;
+                    idx += 1;
+                    continue;
+                }
+
+                let symbol: usize = (r << 4) | 1;
+                freq[symbol] += 1;
+                r = 0;
+                corr_count = 0;
+                idx += 1;
+            }
+
+            if r > 0 || corr_count > 0 {
+                freq[0x00] += 1;
+            }
         }
     }
 }
@@ -3409,109 +3451,102 @@ fn encode_progressive_dc_scan(
     dc_chroma_table: &HuffTable,
     writer: &mut BitWriter,
 ) {
+    use crate::encode::huffman_encode::local_put_bits;
+
     let al = scan.al;
     let ah = scan.ah;
     let mut prev_dc = vec![0i16; scan.component_indices.len()];
 
-    for mcu_y in 0..mcus_y {
-        for mcu_x in 0..mcus_x {
-            for (scan_ci, &ci) in scan.component_indices.iter().enumerate() {
-                let layout = &comp_layouts[ci];
-                let dc_table = if ci == 0 {
-                    dc_luma_table
-                } else {
-                    dc_chroma_table
-                };
+    // Hoist BitWriter state to register-local variables for entire scan.
+    // Worst-case per MCU: 6 blocks × (32 bits DC) = 24 bytes + stuffing.
+    // Reserve generously for the full scan.
+    let total_mcus: usize = mcus_x * mcus_y;
+    let reserve: usize = (total_mcus * 6 * 8).max(1024);
+    unsafe {
+        let (mut pb, mut fb, mut buf) = writer.begin_block(reserve);
 
-                for bv in 0..layout.v_blocks {
-                    for bh in 0..layout.h_blocks {
-                        let bx = mcu_x * layout.h_blocks + bh;
-                        let by = mcu_y * layout.v_blocks + bv;
-                        let block = &coeff_bufs[ci][by * layout.blocks_x + bx];
+        for mcu_y in 0..mcus_y {
+            for mcu_x in 0..mcus_x {
+                for (scan_ci, &ci) in scan.component_indices.iter().enumerate() {
+                    let layout = &comp_layouts[ci];
+                    let dc_table = if ci == 0 {
+                        dc_luma_table
+                    } else {
+                        dc_chroma_table
+                    };
 
-                        if ah == 0 {
-                            // DC first scan: encode (DC >> Al)
-                            let dc: i16 = block[0] >> al;
-                            let diff: i16 = dc - prev_dc[scan_ci];
-                            prev_dc[scan_ci] = dc;
+                    for bv in 0..layout.v_blocks {
+                        for bh in 0..layout.h_blocks {
+                            let bx = mcu_x * layout.h_blocks + bh;
+                            let by = mcu_y * layout.v_blocks + bv;
+                            let block = &coeff_bufs[ci][by * layout.blocks_x + bx];
 
-                            if diff == 0 {
-                                writer.write_bits(dc_table.ehufco[0], dc_table.ehufsi[0]);
+                            if ah == 0 {
+                                // DC first scan: encode (DC >> Al)
+                                let dc: i16 = block[0] >> al;
+                                let diff: i16 = dc - prev_dc[scan_ci];
+                                prev_dc[scan_ci] = dc;
+
+                                if diff == 0 {
+                                    let code: u32 = dc_table.ehufco[0] as u32;
+                                    let size: u8 = dc_table.ehufsi[0];
+                                    local_put_bits(&mut pb, &mut fb, &mut buf, code, size);
+                                } else {
+                                    let abs_diff: u16 = diff.unsigned_abs();
+                                    let category: u8 = 16 - abs_diff.leading_zeros() as u8;
+                                    let magnitude: u16 =
+                                        if diff > 0 { diff as u16 } else { !abs_diff };
+                                    let huff_code: u32 = dc_table.ehufco[category as usize] as u32;
+                                    let huff_size: u8 = dc_table.ehufsi[category as usize];
+                                    let mag_masked: u32 =
+                                        magnitude as u32 & ((1u32 << category) - 1);
+                                    let combined: u32 = (huff_code << category) | mag_masked;
+                                    local_put_bits(
+                                        &mut pb,
+                                        &mut fb,
+                                        &mut buf,
+                                        combined,
+                                        huff_size + category,
+                                    );
+                                }
                             } else {
-                                // Combined Huffman code + magnitude in one put_bits call
-                                let abs_diff: u16 = diff.unsigned_abs();
-                                let category: u8 = 16 - abs_diff.leading_zeros() as u8;
-                                let magnitude: u16 = if diff > 0 { diff as u16 } else { !abs_diff };
-                                let huff_code: u32 = dc_table.ehufco[category as usize] as u32;
-                                let huff_size: u8 = dc_table.ehufsi[category as usize];
-                                let mag_masked: u32 = magnitude as u32 & ((1u32 << category) - 1);
-                                let combined: u32 = (huff_code << category) | mag_masked;
-                                writer.put_bits(combined, huff_size + category);
+                                // DC refine: single bit
+                                let bit: u32 = ((block[0] >> al) & 1) as u32;
+                                local_put_bits(&mut pb, &mut fb, &mut buf, bit, 1);
                             }
-                        } else {
-                            // DC refine: single bit
-                            let bit: u32 = ((block[0] >> al) & 1) as u32;
-                            writer.put_bits(bit, 1);
                         }
                     }
                 }
             }
         }
+
+        writer.end_block(pb, fb, buf);
     }
 }
 
-/// Encode a progressive AC scan (single component).
-///
-/// Iterates all blocks in flat raster order within the component buffer.
-#[allow(clippy::too_many_arguments)]
-fn encode_progressive_ac_scan(
-    coeff_bufs: &[Vec<[i16; 64]>],
-    comp_layouts: &[CompLayout],
-    scan: &crate::encode::progressive::ProgressiveScan,
-    _mcus_x: usize,
-    _mcus_y: usize,
-    ac_luma_table: &HuffTable,
-    ac_chroma_table: &HuffTable,
-    writer: &mut BitWriter,
-) {
-    let ci = scan.component_indices[0]; // AC scans are single-component
-    let _layout = &comp_layouts[ci];
-    let ac_table = if ci == 0 {
-        ac_luma_table
-    } else {
-        ac_chroma_table
-    };
-    let ss = scan.ss as usize;
-    let se = scan.se as usize;
-    let al = scan.al;
-    let ah = scan.ah;
-
-    // Non-interleaved AC scans iterate blocks in raster order within the component.
-    let blocks: &[[i16; 64]] = &coeff_bufs[ci];
-    if ah == 0 {
-        for block in blocks.iter() {
-            encode_ac_first_block(block, ss, se, al, ac_table, writer);
-        }
-    } else {
-        for block in blocks.iter() {
-            encode_ac_refine_block(block, ss, se, al, ac_table, writer);
-        }
-    }
-}
-
-/// Encode one block for AC first scan (ah==0).
+/// Encode one block for AC first scan (ah==0) using hoisted BitWriter state.
 ///
 /// Pre-computes values and bitmap to skip zero runs via CTZ, matching
 /// C's jcphuff.c prepare+encode pattern. Combines Huffman code + magnitude
 /// into single put_bits calls.
-fn encode_ac_first_block(
+/// Encode one block for AC first scan (ah==0) using hoisted BitWriter state.
+///
+/// # Safety
+/// `pb`, `fb`, `buf` must be valid hoisted state from `BitWriter::begin_block`.
+#[inline]
+#[allow(clippy::too_many_arguments)]
+unsafe fn encode_ac_first_block_hoisted(
     block: &[i16; 64],
     ss: usize,
     se: usize,
     al: u8,
     ac_table: &HuffTable,
-    writer: &mut BitWriter,
+    pb: &mut u64,
+    fb: &mut i32,
+    buf: &mut *mut u8,
 ) {
+    use crate::encode::huffman_encode::local_put_bits;
+
     let band_len: usize = se - ss + 1;
 
     // Pre-compute: apply point transform, build nonzero bitmap, store values/diffs
@@ -3536,7 +3571,13 @@ fn encode_ac_first_block(
     }
 
     if zerobits == 0 {
-        writer.put_bits(ac_table.ehufco[0x00] as u32, ac_table.ehufsi[0x00]);
+        local_put_bits(
+            pb,
+            fb,
+            buf,
+            ac_table.ehufco[0x00] as u32,
+            ac_table.ehufsi[0x00],
+        );
         return;
     }
 
@@ -3552,6 +3593,8 @@ fn encode_ac_first_block(
     }
 
     // Encode using bitmap to skip directly to nonzero coefficients
+    let ehufco: *const u16 = ac_table.ehufco.as_ptr();
+    let ehufsi: *const u8 = ac_table.ehufsi.as_ptr();
     let mut prev_pos: usize = 0;
 
     while zerobits != 0 {
@@ -3560,39 +3603,48 @@ fn encode_ac_first_block(
 
         let mut zero_run: usize = pos - prev_pos;
         while zero_run >= 16 {
-            writer.put_bits(ac_table.ehufco[0xF0] as u32, ac_table.ehufsi[0xF0]);
+            local_put_bits(pb, fb, buf, *ehufco.add(0xF0) as u32, *ehufsi.add(0xF0));
             zero_run -= 16;
         }
 
         let nbits: u8 = nbits_arr[pos];
         let symbol: usize = (zero_run << 4) | (nbits as usize);
-        // Combine Huffman code + magnitude bits into single put_bits call
-        let huff_code: u32 = ac_table.ehufco[symbol] as u32;
-        let huff_size: u8 = ac_table.ehufsi[symbol];
+        let huff_code: u32 = *ehufco.add(symbol) as u32;
+        let huff_size: u8 = *ehufsi.add(symbol);
         let mag_masked: u32 = diffs[pos] as u32 & ((1u32 << nbits) - 1);
         let combined: u32 = (huff_code << nbits) | mag_masked;
-        writer.put_bits(combined, huff_size + nbits);
+        local_put_bits(pb, fb, buf, combined, huff_size + nbits);
         prev_pos = pos + 1;
     }
 
     if prev_pos < band_len {
-        writer.put_bits(ac_table.ehufco[0x00] as u32, ac_table.ehufsi[0x00]);
+        local_put_bits(pb, fb, buf, *ehufco.add(0x00) as u32, *ehufsi.add(0x00));
     }
 }
 
-/// Flush buffered correction bits. Handles >32 bits by splitting into two put_bits calls.
+/// Flush buffered correction bits using hoisted BitWriter state.
+///
+/// # Safety
+/// `pb`, `fb`, `buf` must be valid hoisted state from `BitWriter::begin_block`.
 #[inline]
-fn flush_corr_bits(writer: &mut BitWriter, corr_bits: &mut u64, corr_len: &mut u8) {
+unsafe fn flush_corr_bits_hoisted(
+    pb: &mut u64,
+    fb: &mut i32,
+    buf: &mut *mut u8,
+    corr_bits: &mut u64,
+    corr_len: &mut u8,
+) {
+    use crate::encode::huffman_encode::local_put_bits;
+
     if *corr_len == 0 {
         return;
     }
     if *corr_len <= 32 {
-        writer.put_bits(*corr_bits as u32, *corr_len);
+        local_put_bits(pb, fb, buf, *corr_bits as u32, *corr_len);
     } else {
-        // Split: emit high bits first, then low 32 bits
         let hi_len: u8 = *corr_len - 32;
-        writer.put_bits((*corr_bits >> 32) as u32, hi_len);
-        writer.put_bits(*corr_bits as u32, 32);
+        local_put_bits(pb, fb, buf, (*corr_bits >> 32) as u32, hi_len);
+        local_put_bits(pb, fb, buf, *corr_bits as u32, 32);
     }
     *corr_bits = 0;
     *corr_len = 0;
@@ -3604,42 +3656,49 @@ fn flush_corr_bits(writer: &mut BitWriter, corr_bits: &mut u64, corr_len: &mut u
 /// Per ITU-T T.81 Figure G.7, previously-nonzero coefficients emit correction
 /// bits that must be associated with the next Huffman symbol (ZRL, EOB, or
 /// newly-nonzero code). We buffer these bits and emit them after each symbol.
-fn encode_ac_refine_block(
+/// Encode one block for AC successive approximation refinement scan (ah!=0)
+/// using hoisted BitWriter state.
+///
+/// # Safety
+/// `pb`, `fb`, `buf` must be valid hoisted state from `BitWriter::begin_block`.
+#[inline]
+#[allow(clippy::too_many_arguments)]
+unsafe fn encode_ac_refine_block_hoisted(
     block: &[i16; 64],
     ss: usize,
     se: usize,
     al: u8,
     ac_table: &HuffTable,
-    writer: &mut BitWriter,
+    pb: &mut u64,
+    fb: &mut i32,
+    buf: &mut *mut u8,
 ) {
+    use crate::encode::huffman_encode::local_put_bits;
+
     let band_len: usize = se - ss + 1;
 
-    // Pre-pass: compute absolute shifted values and find EOB position.
-    // Matches C's encode_mcu_AC_refine_prepare / COMPUTE_ABSVALUES_AC_REFINE.
     let mut absvals = [0u16; 64];
     let mut sign_bits = [0u16; 64];
-    let mut eob: usize = 0; // index past last newly-nonzero coeff (0 = no newly-nonzero)
+    let mut eob: usize = 0;
 
     for i in 0..band_len {
         let coeff: i32 = block[ss + i] as i32;
-        // Compute absolute value via sign-mask trick (matches C's portable abs)
         let sign_mask: i32 = coeff >> 31;
         let abs_coeff: i32 = (coeff ^ sign_mask) - sign_mask;
         let temp: u16 = (abs_coeff >> al) as u16;
         absvals[i] = temp;
-        // sign bit: 1 = positive (sign_mask=0 -> 0+1=1), 0 = negative (sign_mask=-1 -> -1+1=0)
         sign_bits[i] = (sign_mask as u16).wrapping_add(1);
         if temp == 1 {
-            eob = i + 1; // EOB = index+1 of last newly-nonzero coef
+            eob = i + 1;
         }
     }
 
-    // Main loop: matches C's ENCODE_COEFS_AC_REFINE.
-    // Correction bits for previously-nonzero coefficients are packed into a u64
-    // accumulator and flushed via put_bits (max 32 bits per call).
+    let ehufco: *const u16 = ac_table.ehufco.as_ptr();
+    let ehufsi: *const u8 = ac_table.ehufsi.as_ptr();
+
     let mut r: usize = 0;
-    let mut corr_bits: u64 = 0; // packed correction bits (MSB-first)
-    let mut corr_len: u8 = 0; // number of buffered correction bits (max 63)
+    let mut corr_bits: u64 = 0;
+    let mut corr_len: u8 = 0;
     let mut idx: usize = 0;
 
     while idx < band_len {
@@ -3651,11 +3710,10 @@ fn encode_ac_refine_block(
             continue;
         }
 
-        // Emit any required ZRLs, but not if they can be folded into EOB.
         while r > 15 && idx < eob {
-            writer.put_bits(ac_table.ehufco[0xF0] as u32, ac_table.ehufsi[0xF0]);
+            local_put_bits(pb, fb, buf, *ehufco.add(0xF0) as u32, *ehufsi.add(0xF0));
             r -= 16;
-            flush_corr_bits(writer, &mut corr_bits, &mut corr_len);
+            flush_corr_bits_hoisted(pb, fb, buf, &mut corr_bits, &mut corr_len);
         }
 
         if temp > 1 {
@@ -3667,19 +3725,18 @@ fn encode_ac_refine_block(
 
         // temp == 1: newly-nonzero coefficient
         let symbol: usize = (r << 4) | 1;
-        // Combine Huffman symbol + sign bit into single put_bits
-        let huff_code: u32 = ac_table.ehufco[symbol] as u32;
-        let huff_size: u8 = ac_table.ehufsi[symbol];
+        let huff_code: u32 = *ehufco.add(symbol) as u32;
+        let huff_size: u8 = *ehufsi.add(symbol);
         let combined: u32 = (huff_code << 1) | sign_bits[idx] as u32;
-        writer.put_bits(combined, huff_size + 1);
-        flush_corr_bits(writer, &mut corr_bits, &mut corr_len);
+        local_put_bits(pb, fb, buf, combined, huff_size + 1);
+        flush_corr_bits_hoisted(pb, fb, buf, &mut corr_bits, &mut corr_len);
         r = 0;
         idx += 1;
     }
 
     if r > 0 || corr_len > 0 {
-        writer.put_bits(ac_table.ehufco[0x00] as u32, ac_table.ehufsi[0x00]);
-        flush_corr_bits(writer, &mut corr_bits, &mut corr_len);
+        local_put_bits(pb, fb, buf, *ehufco.add(0x00) as u32, *ehufsi.add(0x00));
+        flush_corr_bits_hoisted(pb, fb, buf, &mut corr_bits, &mut corr_len);
     }
 }
 

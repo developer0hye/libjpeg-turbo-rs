@@ -338,7 +338,13 @@ impl BitWriter {
 /// instead of struct fields, avoiding store-reload on every flush.
 #[allow(dead_code)]
 #[inline(always)]
-unsafe fn local_put_bits(pb: &mut u64, fb: &mut i32, buf: &mut *mut u8, code: u32, size: u8) {
+pub(crate) unsafe fn local_put_bits(
+    pb: &mut u64,
+    fb: &mut i32,
+    buf: &mut *mut u8,
+    code: u32,
+    size: u8,
+) {
     *fb -= size as i32;
     if *fb >= 0 {
         *pb = (*pb << size) | (code as u64);
@@ -351,7 +357,13 @@ unsafe fn local_put_bits(pb: &mut u64, fb: &mut i32, buf: &mut *mut u8, code: u3
 #[allow(dead_code)]
 #[cold]
 #[inline(always)]
-unsafe fn local_put_and_flush(pb: &mut u64, fb: &mut i32, buf: &mut *mut u8, code: u32, size: u8) {
+pub(crate) unsafe fn local_put_and_flush(
+    pb: &mut u64,
+    fb: &mut i32,
+    buf: &mut *mut u8,
+    code: u32,
+    size: u8,
+) {
     let overshoot: u32 = (-*fb) as u32;
     let fits: u32 = size as u32 - overshoot;
     *pb = (*pb << fits) | ((code as u64) >> overshoot);
