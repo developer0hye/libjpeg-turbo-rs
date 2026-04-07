@@ -2881,7 +2881,12 @@ impl<'a> Decoder<'a> {
         // narrows to the crop width. Per-component plane offsets ensure the
         // upsampler sees the crop boundary as the image edge, matching C
         // jpeg_crop_scanline behavior exactly.
-        let comp_x_offsets: Vec<usize> = if let Some(cx) = self.crop_x {
+        // Crop coordinates are in the original image space; scale them to
+        // the output space so they index correctly into scaled component planes.
+        let scaled_crop_x: Option<usize> = self.crop_x.map(|cx| self.scale.scale_dim(cx));
+        let scaled_crop_w: Option<usize> = self.crop_width.map(|cw| self.scale.scale_dim(cw));
+        let comp_x_offsets: Vec<usize> = if let Some(cx) = scaled_crop_x {
+            let cx: usize = cx.min(out_width.saturating_sub(1));
             frame
                 .components
                 .iter()
@@ -2890,7 +2895,12 @@ impl<'a> Decoder<'a> {
         } else {
             vec![0; num_components]
         };
-        let out_width: usize = self.crop_width.unwrap_or(out_width);
+        let out_width: usize = if let Some(cw) = scaled_crop_w {
+            let cx: usize = scaled_crop_x.unwrap_or(0).min(out_width);
+            cw.min(out_width.saturating_sub(cx))
+        } else {
+            out_width
+        };
         // Cap output height to the extended MCU range (crop MCU range + 1 row
         // context on each side). IDCT is skipped outside this range, so
         // component planes contain garbage beyond it.
