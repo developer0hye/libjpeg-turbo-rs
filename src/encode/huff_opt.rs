@@ -60,7 +60,9 @@ pub fn gen_optimal_table(freq: &[u32; 257]) -> ([u8; 17], Vec<u8>) {
         }
     }
 
-    if n == 0 {
+    if n <= 1 {
+        // n==0: no symbols at all; n==1: only the pseudo-symbol (256).
+        // Either way, there are no real symbols to encode.
         return ([0u8; 17], Vec::new());
     }
 
@@ -273,6 +275,20 @@ mod tests {
         assert!(total <= 256); // 256 real symbols (excluding pseudo)
         assert!(total > 0);
         assert_eq!(total, values.len());
+    }
+
+    #[test]
+    fn gen_optimal_table_pseudo_symbol_only() {
+        // Regression test: only the pseudo-symbol (256) has non-zero freq.
+        // This triggers when optimize_huffman is used with grayscale_from_color
+        // and chroma tables have no real symbols. Previously panicked with
+        // usize underflow in the code-length reduction loop.
+        let mut freq = [0u32; 257];
+        freq[256] = 1;
+        let (bits, values) = gen_optimal_table(&freq);
+        let total: usize = bits[1..=16].iter().map(|&b| b as usize).sum();
+        assert_eq!(total, 0);
+        assert!(values.is_empty());
     }
 
     #[test]
