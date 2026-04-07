@@ -187,15 +187,19 @@ fn handle_icc_profile() {
 #[test]
 fn handle_scaling_factor() {
     let mut handle = TjHandle::new();
-    // Valid scaling factors
+    // Valid scaling factors (standard JPEG IDCT scales)
     handle.set_scaling_factor(1, 1).unwrap();
     handle.set_scaling_factor(1, 2).unwrap();
     handle.set_scaling_factor(1, 4).unwrap();
     handle.set_scaling_factor(1, 8).unwrap();
+    handle.set_scaling_factor(2, 1).unwrap();
+    handle.set_scaling_factor(3, 2).unwrap();
+    handle.set_scaling_factor(3, 4).unwrap();
+    handle.set_scaling_factor(3, 8).unwrap();
     // Invalid scaling factor
     assert!(handle.set_scaling_factor(1, 3).is_err());
     assert!(handle.set_scaling_factor(0, 1).is_err());
-    assert!(handle.set_scaling_factor(2, 1).is_err());
+    assert!(handle.set_scaling_factor(4, 1).is_err());
 }
 
 #[test]
@@ -218,7 +222,7 @@ fn handle_scaling_factors_list() {
     assert!(factors.contains(&(1, 2)));
     assert!(factors.contains(&(1, 4)));
     assert!(factors.contains(&(1, 8)));
-    assert_eq!(factors.len(), 4);
+    assert_eq!(factors.len(), 16);
 }
 
 #[test]
