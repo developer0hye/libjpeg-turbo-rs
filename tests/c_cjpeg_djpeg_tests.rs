@@ -222,7 +222,7 @@ fn c_cjpeg_440_islow() {
 /// CMakeLists line 1604: cjpeg 420-q100-ifast-prog
 /// -sample 2x2 -quality 100 -dct fast -scans test.scan  testorig.ppm → JPEG
 #[test]
-#[ignore = "WIP"]
+#[ignore = "decoded pixels identical; AC refine scans lack EOBRUN batching (correction-bit buffering needed)"]
 fn c_cjpeg_420_q100_ifast_prog() {
     let cjpeg = match helpers::cjpeg_path() {
         Some(p) => p,

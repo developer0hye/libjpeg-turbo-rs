@@ -63,7 +63,7 @@ fn scalar_fancy_upsample_h2v1(input: &[u8], in_width: usize, output: &mut [u8]) 
 
 // --- Encoder dispatch ---
 
-use crate::encode::{color as enc_color, fdct, quant};
+use crate::encode::{color as enc_color, fdct};
 use crate::simd::{EncoderSimdRoutines, QuantDivisors};
 
 /// Return scalar encoder dispatch table.
@@ -87,7 +87,7 @@ fn scalar_rgb_to_ycbcr_row_enc(
 
 /// Scalar fused FDCT (islow) + quantize + zigzag reorder.
 ///
-/// Calls `fdct_islow` (output i32) then `quantize_block` (zigzag reorder included).
+/// Calls `fdct_islow` (output i32) then reciprocal-based quantization matching C.
 pub(crate) fn scalar_fdct_quantize(
     input: &mut [i16; 64],
     quant: &QuantDivisors,
@@ -95,19 +95,49 @@ pub(crate) fn scalar_fdct_quantize(
 ) {
     let mut dct_output: [i32; 64] = [0i32; 64];
     fdct::fdct_islow(input, &mut dct_output);
-    quant::quantize_block(&dct_output, &quant.divisors, output);
+    quantize_reciprocal(&dct_output, quant, output);
 }
 
 /// Scalar fused FDCT (ifast) + quantize + zigzag reorder.
 ///
-/// Uses `fdct_ifast` which rescales to islow-equivalent output.
-/// TODO(#163): switch to `fdct_ifast_raw` + `scale_quant_for_ifast` for true ifast parity.
+/// Uses `fdct_ifast_raw` (no AA&N rescaling) paired with AA&N-scaled divisors
+/// from `scale_quant_for_ifast`, matching C libjpeg-turbo's ifast path exactly.
 pub(crate) fn scalar_fdct_ifast_quantize(
     input: &mut [i16; 64],
     quant: &QuantDivisors,
     output: &mut [i16; 64],
 ) {
     let mut dct_output: [i32; 64] = [0i32; 64];
-    fdct::fdct_ifast(input, &mut dct_output);
-    quant::quantize_block(&dct_output, &quant.divisors, output);
+    fdct::fdct_ifast_raw(input, &mut dct_output);
+    quantize_reciprocal(&dct_output, quant, output);
+}
+
+/// Scalar reciprocal-based quantization matching C libjpeg-turbo's `quantize()`.
+///
+/// Uses pre-computed reciprocal, correction, and shift from `compute_reciprocal`
+/// to avoid scalar division. Produces identical results to C's SIMD quantization.
+///
+/// Algorithm: `result = sign(coeff) * ((abs(coeff) + correction) * reciprocal >> 16 >> shift)`
+fn quantize_reciprocal(coeffs: &[i32; 64], quant: &QuantDivisors, output: &mut [i16; 64]) {
+    let zigzag = &crate::encode::tables::ZIGZAG_ORDER;
+    for zz in 0..64 {
+        let natural_idx: usize = zigzag[zz];
+        // C's quantize() operates on DCTELEM (i16) workspace values
+        let coeff: i16 = coeffs[natural_idx] as i16;
+        let recip: u32 = quant.reciprocals[natural_idx] as u32;
+        let corr: u32 = quant.corrections[natural_idx] as u32;
+        // C uses signed int for shift: shift + sizeof(DCTELEM)*8 = shift + 16
+        let total_shift: i32 = quant.shifts[natural_idx] as i32 + 16;
+
+        if coeff < 0 {
+            let temp: u32 = (-coeff as i32) as u32;
+            let product: u32 = (temp.wrapping_add(corr)).wrapping_mul(recip);
+            let result: i16 = (product >> total_shift as u32) as i16;
+            output[zz] = -result;
+        } else {
+            let temp: u32 = coeff as u32;
+            let product: u32 = (temp.wrapping_add(corr)).wrapping_mul(recip);
+            output[zz] = (product >> total_shift as u32) as i16;
+        };
+    }
 }
