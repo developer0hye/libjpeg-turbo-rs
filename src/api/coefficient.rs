@@ -28,6 +28,8 @@ pub struct ComponentCoefficients {
     pub v_sampling: u8,
     /// Quantization table index.
     pub quant_table_index: u8,
+    /// Component identifier from the source JPEG (1=Y, 2=Cb, 3=Cr per JFIF).
+    pub component_id: u8,
 }
 
 /// Complete coefficient representation of a JPEG image.
@@ -41,6 +43,8 @@ pub struct JpegCoefficients {
     pub components: Vec<ComponentCoefficients>,
     /// Quantization tables (up to 4, in zigzag order).
     pub quant_tables: Vec<[u16; 64]>,
+    /// Restart interval from the source JPEG (0 = no restart markers).
+    pub restart_interval: u16,
 }
 
 /// Per-component info extracted for re-encoding.
@@ -145,6 +149,7 @@ pub fn read_coefficients(data: &[u8]) -> Result<JpegCoefficients> {
                 h_sampling: comp.horizontal_sampling,
                 v_sampling: comp.vertical_sampling,
                 quant_table_index: comp.quant_table_index,
+                component_id: comp.id,
             }
         })
         .collect();
@@ -175,6 +180,7 @@ pub fn read_coefficients(data: &[u8]) -> Result<JpegCoefficients> {
         height: frame.height,
         components: comp_data,
         quant_tables,
+        restart_interval: metadata.restart_interval,
     })
 }
 
@@ -260,14 +266,13 @@ pub fn write_coefficients(coeffs: &JpegCoefficients) -> Result<Vec<u8>> {
         marker_writer::write_dqt(&mut output, i as u8, qt);
     }
 
-    // Frame header (SOF0)
+    // Frame header (SOF0) — preserve source component IDs
     let components: Vec<(u8, u8, u8, u8)> = coeffs
         .components
         .iter()
-        .enumerate()
-        .map(|(i, c)| {
+        .map(|c| {
             (
-                (i + 1) as u8,
+                c.component_id,
                 c.h_sampling,
                 c.v_sampling,
                 c.quant_table_index,
@@ -308,14 +313,14 @@ pub fn write_coefficients(coeffs: &JpegCoefficients) -> Result<Vec<u8>> {
         );
     }
 
-    // Scan header
+    // Scan header — preserve source component IDs
     let scan_components: Vec<(u8, u8, u8)> = coeffs
         .components
         .iter()
         .enumerate()
-        .map(|(i, _)| {
+        .map(|(i, c)| {
             let tbl = if i == 0 { 0u8 } else { 1u8 };
-            ((i + 1) as u8, tbl, tbl)
+            (c.component_id, tbl, tbl)
         })
         .collect();
     marker_writer::write_sos(&mut output, &scan_components);
@@ -909,14 +914,13 @@ fn write_coefficients_optimized(coeffs: &JpegCoefficients) -> Result<Vec<u8>> {
         marker_writer::write_dqt(&mut output, i as u8, qt);
     }
 
-    // Frame header (SOF0).
+    // Frame header (SOF0) — preserve source component IDs.
     let components: Vec<(u8, u8, u8, u8)> = coeffs
         .components
         .iter()
-        .enumerate()
-        .map(|(i, c)| {
+        .map(|c| {
             (
-                (i + 1) as u8,
+                c.component_id,
                 c.h_sampling,
                 c.v_sampling,
                 c.quant_table_index,
@@ -933,14 +937,14 @@ fn write_coefficients_optimized(coeffs: &JpegCoefficients) -> Result<Vec<u8>> {
         marker_writer::write_dht(&mut output, 1, 1, &ac_chroma_bits, &ac_chroma_values);
     }
 
-    // Scan header.
+    // Scan header — preserve source component IDs.
     let scan_components: Vec<(u8, u8, u8)> = coeffs
         .components
         .iter()
         .enumerate()
-        .map(|(i, _)| {
+        .map(|(i, c)| {
             let tbl: u8 = if i == 0 { 0u8 } else { 1u8 };
-            ((i + 1) as u8, tbl, tbl)
+            (c.component_id, tbl, tbl)
         })
         .collect();
     marker_writer::write_sos(&mut output, &scan_components);
