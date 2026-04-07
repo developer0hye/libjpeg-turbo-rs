@@ -509,6 +509,19 @@ pub fn fdct_float(input: &[i16; 64], output: &mut [i32; 64]) {
     }
 }
 
+/// AA&N (Arai, Agui, Nakajima) scale factors for the ifast FDCT, pre-computed
+/// as 14-bit fixed-point values. Each entry is `scalefactor[row] * scalefactor[col]`
+/// where `scalefactor[0] = 1` and `scalefactor[k] = cos(k*PI/16) * sqrt(2)` for k=1..7.
+///
+/// Source: libjpeg-turbo `jcdctmgr.c` lines 289–299.
+pub const AANSCALES: [u16; 64] = [
+    16384, 22725, 21407, 19266, 16384, 12873, 8867, 4520, 22725, 31521, 29692, 26722, 22725, 17855,
+    12299, 6270, 21407, 29692, 27969, 25172, 21407, 16819, 11585, 5906, 19266, 26722, 25172, 22654,
+    19266, 15137, 10426, 5315, 16384, 22725, 21407, 19266, 16384, 12873, 8867, 4520, 12873, 17855,
+    16819, 15137, 12873, 10114, 6967, 3552, 8867, 12299, 11585, 10426, 8867, 6967, 4799, 2446,
+    4520, 6270, 5906, 5315, 4520, 3552, 2446, 1247,
+];
+
 /// Returns the appropriate FDCT function for the given DCT method.
 pub fn select_fdct(method: crate::common::types::DctMethod) -> fn(&[i16; 64], &mut [i32; 64]) {
     match method {

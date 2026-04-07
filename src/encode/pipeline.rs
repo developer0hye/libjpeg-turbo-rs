@@ -61,11 +61,19 @@ pub fn compress(
     let chroma_quant =
         tables::quality_scale_quant_table(&tables::STD_CHROMINANCE_QUANT_TABLE, quality);
 
-    // The islow FDCT leaves a factor-of-8 scaling in its output. To absorb this,
-    // the divisor tables used during quantization multiply the quant values by 8,
-    // matching libjpeg-turbo's jcdctmgr.c (quantval[i] << 3).
-    let luma_divisors = scale_quant_for_fdct(&luma_quant);
-    let chroma_divisors = scale_quant_for_fdct(&chroma_quant);
+    // Divisor tables scale quant values for the chosen FDCT method.
+    // IsLow: multiply by 8 (islow leaves factor-of-8 in output).
+    // IsFast: multiply by AA&N scale factors (ifast_raw leaves AA&N-scaled output).
+    let luma_divisors = if dct_method == DctMethod::IsFast {
+        scale_quant_for_ifast(&luma_quant)
+    } else {
+        scale_quant_for_fdct(&luma_quant)
+    };
+    let chroma_divisors = if dct_method == DctMethod::IsFast {
+        scale_quant_for_ifast(&chroma_quant)
+    } else {
+        scale_quant_for_fdct(&chroma_quant)
+    };
 
     // Build Huffman tables
     let dc_luma_table = build_huff_table(&tables::DC_LUMINANCE_BITS, &tables::DC_LUMINANCE_VALUES);
@@ -95,14 +103,12 @@ pub fn compress(
     let mcus_x: usize = width.div_ceil(mcu_w);
     let mcus_y: usize = height.div_ceil(mcu_h);
 
-    // NEON fused FDCT+quantize for IsLow (the common case and only NEON-supported variant).
-    // IsFast/Float fall back to scalar fdct_islow — matches public API behavior.
-    let fdct_quantize_fn: fn(&mut [i16; 64], &QuantDivisors, &mut [i16; 64]) =
-        if dct_method == DctMethod::IsLow {
-            enc_simd.fdct_quantize
-        } else {
-            crate::simd::scalar::scalar_fdct_quantize
-        };
+    // Dispatch FDCT+quantize based on DCT method.
+    let fdct_quantize_fn: fn(&mut [i16; 64], &QuantDivisors, &mut [i16; 64]) = match dct_method {
+        DctMethod::IsLow => enc_simd.fdct_quantize,
+        DctMethod::IsFast => crate::simd::scalar::scalar_fdct_ifast_quantize,
+        DctMethod::Float => crate::simd::scalar::scalar_fdct_quantize,
+    };
 
     // Entropy encode all MCUs
     let mut bit_writer = BitWriter::new(width * height);
@@ -2146,8 +2152,13 @@ fn compress_progressive_with_scans(
     };
 
     // FDCT + quantize all blocks into coefficient buffers.
-    // In progressive mode, ALL blocks are FDCT'd including edge blocks
-    // (extract_block replicates edge pixels). No dummy block skipping.
+    // For blocks beyond width_in_blocks or height_in_blocks, C libjpeg-turbo
+    // creates "dummy" blocks (all AC=0, DC=previous block's DC) instead of
+    // FDCT'ing edge-replicated pixels (jccoefct.c lines 184-200).
+    let y_wib: usize = comp_wib[0];
+    let y_hib: usize = comp_hib[0];
+    let mut prev_dc_y_prog: i16 = 0;
+
     for mcu_y in 0..mcus_y {
         for mcu_x in 0..mcus_x {
             let x0: usize = mcu_x * mcu_w;
@@ -2156,17 +2167,22 @@ fn compress_progressive_with_scans(
             if is_grayscale {
                 let bx: usize = mcu_x;
                 let by: usize = mcu_y;
-                progressive_fdct_y_block(
-                    &y_plane,
-                    width,
-                    height,
-                    x0,
-                    y0,
-                    &luma_divisors,
-                    fdct_quantize_fn,
-                    &mut coeff_bufs[0][by * mcus_x + bx],
-                    use_simd_fdct,
-                );
+                if is_y_dummy(x0, y0, y_wib, y_hib) {
+                    coeff_bufs[0][by * mcus_x + bx][0] = prev_dc_y_prog;
+                } else {
+                    progressive_fdct_y_block(
+                        &y_plane,
+                        width,
+                        height,
+                        x0,
+                        y0,
+                        &luma_divisors,
+                        fdct_quantize_fn,
+                        &mut coeff_bufs[0][by * mcus_x + bx],
+                        use_simd_fdct,
+                    );
+                    prev_dc_y_prog = coeff_bufs[0][by * mcus_x + bx][0];
+                }
             } else {
                 // Y blocks
                 let blocks_x: usize = comp_layouts[0].blocks_x;
@@ -2174,17 +2190,22 @@ fn compress_progressive_with_scans(
                     for bh in 0..h_samp {
                         let bx: usize = mcu_x * h_samp + bh;
                         let by: usize = mcu_y * v_samp + bv;
-                        progressive_fdct_y_block(
-                            &y_plane,
-                            width,
-                            height,
-                            x0 + bh * 8,
-                            y0 + bv * 8,
-                            &luma_divisors,
-                            fdct_quantize_fn,
-                            &mut coeff_bufs[0][by * blocks_x + bx],
-                            use_simd_fdct,
-                        );
+                        if is_y_dummy(x0 + bh * 8, y0 + bv * 8, y_wib, y_hib) {
+                            coeff_bufs[0][by * blocks_x + bx][0] = prev_dc_y_prog;
+                        } else {
+                            progressive_fdct_y_block(
+                                &y_plane,
+                                width,
+                                height,
+                                x0 + bh * 8,
+                                y0 + bv * 8,
+                                &luma_divisors,
+                                fdct_quantize_fn,
+                                &mut coeff_bufs[0][by * blocks_x + bx],
+                                use_simd_fdct,
+                            );
+                            prev_dc_y_prog = coeff_bufs[0][by * blocks_x + bx][0];
+                        }
                     }
                 }
                 // Cb/Cr blocks
@@ -2422,6 +2443,7 @@ fn compress_progressive_with_scans(
             let ss_enc: usize = scan.ss as usize;
             let se_enc: usize = scan.se as usize;
             if scan.ah == 0 {
+                let mut eobrun: u32 = 0;
                 for block in actual_blocks.iter() {
                     encode_ac_first_block(
                         block,
@@ -2430,9 +2452,14 @@ fn compress_progressive_with_scans(
                         scan.al,
                         &ac_table,
                         &mut bit_writer,
+                        &mut eobrun,
                     );
                 }
+                if eobrun > 0 {
+                    emit_eobrun(&ac_table, &mut bit_writer, &mut eobrun);
+                }
             } else {
+                let mut eobrun: u32 = 0;
                 for block in actual_blocks.iter() {
                     encode_ac_refine_block(
                         block,
@@ -2441,8 +2468,12 @@ fn compress_progressive_with_scans(
                         scan.al,
                         &ac_table,
                         &mut bit_writer,
+                        &mut eobrun,
                     );
                 }
+                // Note: refine EOBRUN with correction-bit buffering not yet
+                // implemented — each block emits its own EOB inline.
+                let _ = eobrun;
             }
             bit_writer.flush();
             output.extend_from_slice(bit_writer.data());
@@ -2463,9 +2494,9 @@ fn gather_progressive_ac_freq(blocks: &[[i16; 64]], ss: u8, se: u8, al: u8, freq
     let ss_usize: usize = ss as usize;
     let se_usize: usize = se as usize;
     let band_len: usize = se_usize - ss_usize + 1;
+    let mut eobrun: u32 = 0;
 
     for block in blocks.iter() {
-        // Apply point transform and find nonzero positions, matching encode_ac_first_block.
         let mut zerobits: u64 = 0;
         let mut values = [0u16; 64];
 
@@ -2485,9 +2516,19 @@ fn gather_progressive_ac_freq(blocks: &[[i16; 64]], ss: u8, se: u8, al: u8, freq
         }
 
         if zerobits == 0 {
-            // EOB symbol
-            freq[0x00] += 1;
+            // Accumulate EOBRUN instead of emitting individual EOB
+            eobrun += 1;
+            if eobrun == 0x7FFF {
+                emit_eobrun_freq(eobrun, freq);
+                eobrun = 0;
+            }
             continue;
+        }
+
+        // Flush pending EOBRUN before encoding nonzero coefficients
+        if eobrun > 0 {
+            emit_eobrun_freq(eobrun, freq);
+            eobrun = 0;
         }
 
         let mut prev_pos: usize = 0;
@@ -2508,9 +2549,27 @@ fn gather_progressive_ac_freq(blocks: &[[i16; 64]], ss: u8, se: u8, al: u8, freq
         }
 
         if prev_pos < band_len {
-            freq[0x00] += 1; // EOB
+            // Trailing zeros → start EOBRUN
+            eobrun += 1;
+            if eobrun == 0x7FFF {
+                emit_eobrun_freq(eobrun, freq);
+                eobrun = 0;
+            }
         }
     }
+
+    // Flush any remaining EOBRUN at end of scan
+    if eobrun > 0 {
+        emit_eobrun_freq(eobrun, freq);
+    }
+}
+
+/// Emit EOBRUN symbol frequency: nbits = JPEG_NBITS(eobrun) - 1, symbol = nbits << 4.
+/// Matches C libjpeg-turbo's emit_eobrun in jcphuff.c.
+fn emit_eobrun_freq(eobrun: u32, freq: &mut [u32; 257]) {
+    let nbits: u8 = (32 - eobrun.leading_zeros()) as u8 - 1; // JPEG_NBITS_NONZERO - 1
+    let symbol: usize = (nbits as usize) << 4;
+    freq[symbol] += 1;
 }
 
 /// Gather AC symbol frequencies for a progressive AC refinement scan (ah > 0).
@@ -2529,9 +2588,8 @@ fn gather_progressive_ac_refine_freq(
     let band_len: usize = se_usize - ss_usize + 1;
 
     for block in blocks.iter() {
-        // Pre-pass: compute absvals and find EOB position (last newly-nonzero coeff).
         let mut absvals = [0u16; 64];
-        let mut eob: usize = 0;
+        let mut eob_pos: usize = 0;
 
         for i in 0..band_len {
             let coeff: i32 = block[ss_usize + i] as i32;
@@ -2540,12 +2598,10 @@ fn gather_progressive_ac_refine_freq(
             let temp: u16 = (abs_coeff >> al) as u16;
             absvals[i] = temp;
             if temp == 1 {
-                eob = i + 1;
+                eob_pos = i + 1;
             }
         }
 
-        // Main gather loop matching encode_ac_refine_block symbol emission.
-        // Track corr_count to match the encoder's `corr_len > 0` EOB condition.
         let mut r: usize = 0;
         let mut corr_count: usize = 0;
         let mut idx: usize = 0;
@@ -2559,21 +2615,18 @@ fn gather_progressive_ac_refine_freq(
                 continue;
             }
 
-            // Emit ZRL symbols for runs that exceed 15, but not if they fold into EOB.
-            while r > 15 && idx < eob {
-                freq[0xF0] += 1; // ZRL
+            while r > 15 && idx < eob_pos {
+                freq[0xF0] += 1;
                 r -= 16;
-                corr_count = 0; // flush_corr_bits resets corr_len in encoder
+                corr_count = 0;
             }
 
             if temp > 1 {
-                // Previously-nonzero: emits a correction bit (no Huffman symbol).
                 corr_count += 1;
                 idx += 1;
                 continue;
             }
 
-            // temp == 1: newly-nonzero — emits (r, 1) symbol + flush correction bits.
             let symbol: usize = (r << 4) | 1;
             freq[symbol] += 1;
             r = 0;
@@ -2582,7 +2635,9 @@ fn gather_progressive_ac_refine_freq(
         }
 
         if r > 0 || corr_count > 0 {
-            freq[0x00] += 1; // EOB
+            // No EOBRUN batching for refine scans yet — matches encoder behavior.
+            // TODO(#163): implement cross-block correction-bit buffering for EOBRUN.
+            freq[0x00] += 1;
         }
     }
 }
@@ -3489,13 +3544,19 @@ fn encode_progressive_ac_scan(
     // Non-interleaved AC scans iterate blocks in raster order within the component.
     let blocks: &[[i16; 64]] = &coeff_bufs[ci];
     if ah == 0 {
+        let mut eobrun: u32 = 0;
         for block in blocks.iter() {
-            encode_ac_first_block(block, ss, se, al, ac_table, writer);
+            encode_ac_first_block(block, ss, se, al, ac_table, writer, &mut eobrun);
+        }
+        if eobrun > 0 {
+            emit_eobrun(ac_table, writer, &mut eobrun);
         }
     } else {
+        let mut eobrun: u32 = 0;
         for block in blocks.iter() {
-            encode_ac_refine_block(block, ss, se, al, ac_table, writer);
+            encode_ac_refine_block(block, ss, se, al, ac_table, writer, &mut eobrun);
         }
+        let _ = eobrun;
     }
 }
 
@@ -3511,13 +3572,13 @@ fn encode_ac_first_block(
     al: u8,
     ac_table: &HuffTable,
     writer: &mut BitWriter,
+    eobrun: &mut u32,
 ) {
     let band_len: usize = se - ss + 1;
 
-    // Pre-compute: apply point transform, build nonzero bitmap, store values/diffs
-    let mut values = [0u16; 64]; // abs(coeff) >> al
-    let mut diffs = [0u16; 64]; // magnitude bits (one's complement for negative)
-    let mut zerobits: u64 = 0; // bit set = nonzero after transform
+    let mut values = [0u16; 64];
+    let mut diffs = [0u16; 64];
+    let mut zerobits: u64 = 0;
 
     for i in 0..band_len {
         let coeff: i16 = block[ss + i];
@@ -3536,11 +3597,19 @@ fn encode_ac_first_block(
     }
 
     if zerobits == 0 {
-        writer.put_bits(ac_table.ehufco[0x00] as u32, ac_table.ehufsi[0x00]);
+        // Accumulate EOBRUN
+        *eobrun += 1;
+        if *eobrun == 0x7FFF {
+            emit_eobrun(ac_table, writer, eobrun);
+        }
         return;
     }
 
-    // Pre-compute nbits for all nonzero positions
+    // Flush pending EOBRUN before encoding nonzero coefficients
+    if *eobrun > 0 {
+        emit_eobrun(ac_table, writer, eobrun);
+    }
+
     let mut nbits_arr = [0u8; 64];
     {
         let mut bits: u64 = zerobits;
@@ -3551,7 +3620,6 @@ fn encode_ac_first_block(
         }
     }
 
-    // Encode using bitmap to skip directly to nonzero coefficients
     let mut prev_pos: usize = 0;
 
     while zerobits != 0 {
@@ -3566,7 +3634,6 @@ fn encode_ac_first_block(
 
         let nbits: u8 = nbits_arr[pos];
         let symbol: usize = (zero_run << 4) | (nbits as usize);
-        // Combine Huffman code + magnitude bits into single put_bits call
         let huff_code: u32 = ac_table.ehufco[symbol] as u32;
         let huff_size: u8 = ac_table.ehufsi[symbol];
         let mag_masked: u32 = diffs[pos] as u32 & ((1u32 << nbits) - 1);
@@ -3576,8 +3643,30 @@ fn encode_ac_first_block(
     }
 
     if prev_pos < band_len {
-        writer.put_bits(ac_table.ehufco[0x00] as u32, ac_table.ehufsi[0x00]);
+        // Trailing zeros → accumulate EOBRUN
+        *eobrun += 1;
+        if *eobrun == 0x7FFF {
+            emit_eobrun(ac_table, writer, eobrun);
+        }
     }
+}
+
+/// Emit buffered EOBRUN to the bitstream. Matches C's emit_eobrun in jcphuff.c.
+fn emit_eobrun(ac_table: &HuffTable, writer: &mut BitWriter, eobrun: &mut u32) {
+    if *eobrun == 0 {
+        return;
+    }
+    let nbits: u8 = (32 - (*eobrun).leading_zeros()) as u8 - 1;
+    let symbol: usize = (nbits as usize) << 4;
+    let huff_code: u32 = ac_table.ehufco[symbol] as u32;
+    let huff_size: u8 = ac_table.ehufsi[symbol];
+    if nbits > 0 {
+        let combined: u32 = (huff_code << nbits) | (*eobrun as u32 & ((1u32 << nbits) - 1));
+        writer.put_bits(combined, huff_size + nbits);
+    } else {
+        writer.put_bits(huff_code, huff_size);
+    }
+    *eobrun = 0;
 }
 
 /// Flush buffered correction bits. Handles >32 bits by splitting into two put_bits calls.
@@ -3611,35 +3700,29 @@ fn encode_ac_refine_block(
     al: u8,
     ac_table: &HuffTable,
     writer: &mut BitWriter,
+    _eobrun: &mut u32,
 ) {
     let band_len: usize = se - ss + 1;
 
-    // Pre-pass: compute absolute shifted values and find EOB position.
-    // Matches C's encode_mcu_AC_refine_prepare / COMPUTE_ABSVALUES_AC_REFINE.
     let mut absvals = [0u16; 64];
     let mut sign_bits = [0u16; 64];
-    let mut eob: usize = 0; // index past last newly-nonzero coeff (0 = no newly-nonzero)
+    let mut eob_pos: usize = 0;
 
     for i in 0..band_len {
         let coeff: i32 = block[ss + i] as i32;
-        // Compute absolute value via sign-mask trick (matches C's portable abs)
         let sign_mask: i32 = coeff >> 31;
         let abs_coeff: i32 = (coeff ^ sign_mask) - sign_mask;
         let temp: u16 = (abs_coeff >> al) as u16;
         absvals[i] = temp;
-        // sign bit: 1 = positive (sign_mask=0 -> 0+1=1), 0 = negative (sign_mask=-1 -> -1+1=0)
         sign_bits[i] = (sign_mask as u16).wrapping_add(1);
         if temp == 1 {
-            eob = i + 1; // EOB = index+1 of last newly-nonzero coef
+            eob_pos = i + 1;
         }
     }
 
-    // Main loop: matches C's ENCODE_COEFS_AC_REFINE.
-    // Correction bits for previously-nonzero coefficients are packed into a u64
-    // accumulator and flushed via put_bits (max 32 bits per call).
     let mut r: usize = 0;
-    let mut corr_bits: u64 = 0; // packed correction bits (MSB-first)
-    let mut corr_len: u8 = 0; // number of buffered correction bits (max 63)
+    let mut corr_bits: u64 = 0;
+    let mut corr_len: u8 = 0;
     let mut idx: usize = 0;
 
     while idx < band_len {
@@ -3651,8 +3734,7 @@ fn encode_ac_refine_block(
             continue;
         }
 
-        // Emit any required ZRLs, but not if they can be folded into EOB.
-        while r > 15 && idx < eob {
+        while r > 15 && idx < eob_pos {
             writer.put_bits(ac_table.ehufco[0xF0] as u32, ac_table.ehufsi[0xF0]);
             r -= 16;
             flush_corr_bits(writer, &mut corr_bits, &mut corr_len);
@@ -3665,9 +3747,7 @@ fn encode_ac_refine_block(
             continue;
         }
 
-        // temp == 1: newly-nonzero coefficient
         let symbol: usize = (r << 4) | 1;
-        // Combine Huffman symbol + sign bit into single put_bits
         let huff_code: u32 = ac_table.ehufco[symbol] as u32;
         let huff_size: u8 = ac_table.ehufsi[symbol];
         let combined: u32 = (huff_code << 1) | sign_bits[idx] as u32;
@@ -3678,6 +3758,9 @@ fn encode_ac_refine_block(
     }
 
     if r > 0 || corr_len > 0 {
+        // AC refine EOBRUN with correction-bit buffering is complex;
+        // for now emit individual EOB + correction bits per block.
+        // TODO(#163): implement cross-block correction-bit buffering for full EOBRUN parity.
         writer.put_bits(ac_table.ehufco[0x00] as u32, ac_table.ehufsi[0x00]);
         flush_corr_bits(writer, &mut corr_bits, &mut corr_len);
     }
@@ -3833,12 +3916,54 @@ pub fn compute_reciprocal(divisor: u16) -> (u16, u16, u16, i16) {
     (recip as u16, corr, scale, shift)
 }
 
-/// Scale quantization table for the IFAST FDCT.
+/// Scale quantization table for the IFAST FDCT using AA&N scale factors.
 ///
-/// Currently delegates to `scale_quant_for_fdct` since our `fdct_ifast` rescales
-/// to islow-equivalent output. TODO(#163): use AA&N-scaled divisors with `fdct_ifast_raw`.
+/// Computes `DESCALE(quant[i] * aanscales[i], CONST_BITS - 3)` where
+/// `CONST_BITS = 14`, matching C libjpeg-turbo's `jcdctmgr.c` ifast divisor
+/// computation exactly. Paired with `fdct_ifast_raw` (no AA&N rescaling).
 fn scale_quant_for_ifast(quant_table: &[u16; 64]) -> QuantDivisors {
-    scale_quant_for_fdct(quant_table)
+    use crate::encode::fdct::AANSCALES;
+    let mut divisors = [0u16; 64];
+    let mut reciprocals = [0u16; 64];
+    let mut corrections = [0u16; 64];
+    let mut shifts = [0i16; 64];
+    let mut scales = [0u16; 64];
+    for i in 0..64 {
+        // DESCALE(quant * aanscale, 14 - 3) = (quant * aanscale + 1024) >> 11
+        let product: i64 = quant_table[i] as i64 * AANSCALES[i] as i64;
+        let d: u16 = ((product + (1i64 << 10)) >> 11) as u16;
+        divisors[i] = d;
+        let (recip, corr, scale, shift) = compute_reciprocal(d);
+        reciprocals[i] = recip;
+        corrections[i] = corr;
+        scales[i] = scale;
+        shifts[i] = shift;
+    }
+    let zigzag = &crate::encode::tables::ZIGZAG_ORDER;
+    let mut divisors_zigzag = [0u16; 64];
+    let mut reciprocals_zigzag = [0u16; 64];
+    let mut corrections_zigzag = [0u16; 64];
+    let mut shifts_zigzag = [0i16; 64];
+    let mut scales_zigzag = [0u16; 64];
+    for zz in 0..64 {
+        divisors_zigzag[zz] = divisors[zigzag[zz]];
+        reciprocals_zigzag[zz] = reciprocals[zigzag[zz]];
+        corrections_zigzag[zz] = corrections[zigzag[zz]];
+        shifts_zigzag[zz] = shifts[zigzag[zz]];
+        scales_zigzag[zz] = scales[zigzag[zz]];
+    }
+    QuantDivisors {
+        divisors,
+        reciprocals,
+        corrections,
+        shifts,
+        scales,
+        divisors_zigzag,
+        reciprocals_zigzag,
+        corrections_zigzag,
+        shifts_zigzag,
+        scales_zigzag,
+    }
 }
 
 /// Scale quantization table values by 8 to create divisor table for the islow FDCT.
@@ -4621,9 +4746,21 @@ fn encode_single_block(
 ) {
     let mut quantized = [0i16; 64];
 
+    // The fused SIMD path uses islow FDCT internally. Skip it for ifast/float
+    // so the caller-provided fdct_quantize_fn (with correct divisors) is used.
+    let is_ifast: bool = std::ptr::eq(
+        fdct_quantize_fn as *const (),
+        crate::simd::scalar::scalar_fdct_ifast_quantize as *const (),
+    );
+    let is_float: bool = std::ptr::eq(
+        fdct_quantize_fn as *const (),
+        crate::simd::scalar::scalar_fdct_quantize as *const (),
+    );
+    let use_fused_simd: bool = !is_ifast && !is_float;
+
     // Fused path for interior blocks: load u8 → FDCT → quantize → zigzag
     // without intermediate [i16; 64] buffer between extract and FDCT.
-    if block_x + 8 <= plane_width && block_y + 8 <= plane_height {
+    if use_fused_simd && block_x + 8 <= plane_width && block_y + 8 <= plane_height {
         #[cfg(target_arch = "aarch64")]
         {
             unsafe {
@@ -4668,24 +4805,11 @@ fn encode_single_block(
             }
         }
 
-        #[cfg(target_arch = "aarch64")]
-        {
-            unsafe {
-                crate::simd::aarch64::neon_extract_fdct_quantize(
-                    local_buf.as_ptr(),
-                    8,
-                    quant_table,
-                    &mut quantized,
-                );
-            }
-            HuffmanEncoder::encode_block(writer, &quantized, prev_dc, dc_table, ac_table);
-            return;
-        }
-        #[cfg(target_arch = "x86_64")]
-        {
-            if is_x86_feature_detected!("avx2") {
+        if use_fused_simd {
+            #[cfg(target_arch = "aarch64")]
+            {
                 unsafe {
-                    crate::simd::x86_64::avx2_extract_fdct_quantize(
+                    crate::simd::aarch64::neon_extract_fdct_quantize(
                         local_buf.as_ptr(),
                         8,
                         quant_table,
@@ -4695,11 +4819,26 @@ fn encode_single_block(
                 HuffmanEncoder::encode_block(writer, &quantized, prev_dc, dc_table, ac_table);
                 return;
             }
+            #[cfg(target_arch = "x86_64")]
+            {
+                if is_x86_feature_detected!("avx2") {
+                    unsafe {
+                        crate::simd::x86_64::avx2_extract_fdct_quantize(
+                            local_buf.as_ptr(),
+                            8,
+                            quant_table,
+                            &mut quantized,
+                        );
+                    }
+                    HuffmanEncoder::encode_block(writer, &quantized, prev_dc, dc_table, ac_table);
+                    return;
+                }
+            }
         }
     }
 
-    // Fallback for border blocks (non-SIMD) or interior blocks without AVX2:
-    // use extract_block + fdct_quantize_fn
+    // Generic path: extract block + caller-provided FDCT+quantize.
+    // Used for ifast, float, and non-SIMD fallback.
     let mut block = [0i16; 64];
     extract_block(
         plane,
@@ -5802,10 +5941,21 @@ fn encode_downsampled_chroma_block(
     prev_dc: &mut i16,
     fdct_quantize_fn: fn(&mut [i16; 64], &QuantDivisors, &mut [i16; 64]),
 ) {
+    // The fused SIMD paths use islow FDCT; skip for ifast/float.
+    let is_ifast: bool = std::ptr::eq(
+        fdct_quantize_fn as *const (),
+        crate::simd::scalar::scalar_fdct_ifast_quantize as *const (),
+    );
+    let is_float: bool = std::ptr::eq(
+        fdct_quantize_fn as *const (),
+        crate::simd::scalar::scalar_fdct_quantize as *const (),
+    );
+    let use_fused_simd: bool = !is_ifast && !is_float;
+
     // Fused NEON path: downsample + FDCT + quantize + zigzag in one pass,
     // eliminating the intermediate [i16; 64] downsampled block.
     #[cfg(target_arch = "aarch64")]
-    {
+    if use_fused_simd {
         let src_w: usize = 8 * h_factor;
         let src_h: usize = 8 * v_factor;
         if block_x + src_w <= plane_width && block_y + src_h <= plane_height {
@@ -5841,7 +5991,7 @@ fn encode_downsampled_chroma_block(
 
     // x86_64 fused path: AVX2 downsample+FDCT+quantize+zigzag
     #[cfg(target_arch = "x86_64")]
-    {
+    if use_fused_simd {
         let src_w: usize = 8 * h_factor;
         let src_h: usize = 8 * v_factor;
         if is_x86_feature_detected!("avx2")
@@ -5893,41 +6043,13 @@ fn encode_downsampled_chroma_block(
     }
 
     // Try NEON/AVX2 fused downsample+FDCT+quantize on the padded local buffer
-    #[cfg(target_arch = "aarch64")]
-    {
-        let mut quantized = [0i16; 64];
-        if h_factor == 2 && v_factor == 2 {
-            unsafe {
-                crate::simd::aarch64::neon_downsample_h2v2_fdct_quantize(
-                    local_buf.as_ptr(),
-                    src_w,
-                    quant_table,
-                    &mut quantized,
-                );
-            }
-            HuffmanEncoder::encode_block(writer, &quantized, prev_dc, dc_table, ac_table);
-            return;
-        }
-        if h_factor == 2 && v_factor == 1 {
-            unsafe {
-                crate::simd::aarch64::neon_downsample_h2v1_fdct_quantize(
-                    local_buf.as_ptr(),
-                    src_w,
-                    quant_table,
-                    &mut quantized,
-                );
-            }
-            HuffmanEncoder::encode_block(writer, &quantized, prev_dc, dc_table, ac_table);
-            return;
-        }
-    }
-    #[cfg(target_arch = "x86_64")]
-    {
-        if is_x86_feature_detected!("avx2") {
+    if use_fused_simd {
+        #[cfg(target_arch = "aarch64")]
+        {
             let mut quantized = [0i16; 64];
             if h_factor == 2 && v_factor == 2 {
                 unsafe {
-                    crate::simd::x86_64::avx2_downsample_h2v2_fdct_quantize(
+                    crate::simd::aarch64::neon_downsample_h2v2_fdct_quantize(
                         local_buf.as_ptr(),
                         src_w,
                         quant_table,
@@ -5939,7 +6061,7 @@ fn encode_downsampled_chroma_block(
             }
             if h_factor == 2 && v_factor == 1 {
                 unsafe {
-                    crate::simd::x86_64::avx2_downsample_h2v1_fdct_quantize(
+                    crate::simd::aarch64::neon_downsample_h2v1_fdct_quantize(
                         local_buf.as_ptr(),
                         src_w,
                         quant_table,
@@ -5948,6 +6070,36 @@ fn encode_downsampled_chroma_block(
                 }
                 HuffmanEncoder::encode_block(writer, &quantized, prev_dc, dc_table, ac_table);
                 return;
+            }
+        }
+        #[cfg(target_arch = "x86_64")]
+        {
+            if is_x86_feature_detected!("avx2") {
+                let mut quantized = [0i16; 64];
+                if h_factor == 2 && v_factor == 2 {
+                    unsafe {
+                        crate::simd::x86_64::avx2_downsample_h2v2_fdct_quantize(
+                            local_buf.as_ptr(),
+                            src_w,
+                            quant_table,
+                            &mut quantized,
+                        );
+                    }
+                    HuffmanEncoder::encode_block(writer, &quantized, prev_dc, dc_table, ac_table);
+                    return;
+                }
+                if h_factor == 2 && v_factor == 1 {
+                    unsafe {
+                        crate::simd::x86_64::avx2_downsample_h2v1_fdct_quantize(
+                            local_buf.as_ptr(),
+                            src_w,
+                            quant_table,
+                            &mut quantized,
+                        );
+                    }
+                    HuffmanEncoder::encode_block(writer, &quantized, prev_dc, dc_table, ac_table);
+                    return;
+                }
             }
         }
     }
