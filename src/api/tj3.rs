@@ -302,7 +302,7 @@ impl TjHandle {
 
     /// Set scaling factor for decompression.
     ///
-    /// Only the standard JPEG scaling factors are supported: 1/1, 1/2, 1/4, 1/8.
+    /// Supports all 16 JPEG IDCT scaling factors from 1/8 to 2/1.
     pub fn set_scaling_factor(&mut self, num: u32, denom: u32) -> Result<()> {
         let valid = Self::scaling_factors();
         if !valid.contains(&(num, denom)) {
