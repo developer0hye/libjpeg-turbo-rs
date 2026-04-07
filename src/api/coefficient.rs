@@ -1025,14 +1025,14 @@ fn decode_baseline_coefficients(
     let entropy_data = &data[metadata.entropy_data_offset..];
     let mut bit_reader = BitReader::new(entropy_data);
     let mut mcu_decoder = entropy::McuDecoder::new(frame.components.len());
-    let mut mcu_count: u16 = 0;
+    let mut mcu_count: u32 = 0;
     let mut coeffs = [0i16; 64];
 
     for mcu_y in 0..mcus_y {
         for mcu_x in 0..mcus_x {
             if metadata.restart_interval > 0
                 && mcu_count > 0
-                && mcu_count.is_multiple_of(metadata.restart_interval)
+                && mcu_count.is_multiple_of(metadata.restart_interval as u32)
             {
                 bit_reader.reset();
                 mcu_decoder.reset();
@@ -1229,14 +1229,32 @@ fn decode_arithmetic_progressive_coefficients(
         } else {
             // Non-interleaved scan (single component)
             let comp_idx: usize = scan_comp_indices[0];
-            let comp_blocks_x: usize = comp_data[comp_idx].blocks_x;
-            let comp_blocks_y: usize = comp_data[comp_idx].blocks_y;
+            // Use actual data block counts for non-interleaved scans, not MCU-padded.
+            // The JPEG bitstream contains exactly width_in_blocks * height_in_blocks
+            // data units per component (C libjpeg-turbo jdinput.c:119-124,175-176).
+            let arith_max_h: usize = frame
+                .components
+                .iter()
+                .map(|c| c.horizontal_sampling as usize)
+                .max()
+                .unwrap_or(1);
+            let arith_max_v: usize = frame
+                .components
+                .iter()
+                .map(|c| c.vertical_sampling as usize)
+                .max()
+                .unwrap_or(1);
+            let h_samp: usize = comp_data[comp_idx].h_sampling as usize;
+            let v_samp: usize = comp_data[comp_idx].v_sampling as usize;
+            let comp_blocks_x: usize = (frame.width as usize * h_samp).div_ceil(arith_max_h * 8);
+            let comp_blocks_y: usize = (frame.height as usize * v_samp).div_ceil(arith_max_v * 8);
+            let stride_x: usize = comp_data[comp_idx].blocks_x;
             let dc_tbl: usize = scan.components[0].dc_table_index as usize;
             let ac_tbl: usize = scan.components[0].ac_table_index as usize;
 
             for by in 0..comp_blocks_y {
                 for bx in 0..comp_blocks_x {
-                    let block_idx: usize = by * comp_blocks_x + bx;
+                    let block_idx: usize = by * stride_x + bx;
                     let block: &mut [i16; 64] = &mut comp_data[comp_idx].blocks[block_idx];
 
                     if is_dc {
@@ -1269,13 +1287,13 @@ fn decode_progressive_coefficients(
     use crate::decode::progressive;
 
     let frame = &metadata.frame;
-    let _max_h = frame
+    let max_h = frame
         .components
         .iter()
         .map(|c| c.horizontal_sampling as usize)
         .max()
         .unwrap_or(1);
-    let _max_v = frame
+    let max_v = frame
         .components
         .iter()
         .map(|c| c.vertical_sampling as usize)
@@ -1313,13 +1331,13 @@ fn decode_progressive_coefficients(
         if scan.components.len() > 1 {
             // Interleaved scan (DC only)
             let mut dc_preds = [0i16; 4];
-            let mut mcu_count: u16 = 0;
+            let mut mcu_count: u32 = 0;
 
             for mcu_y in 0..mcus_y {
                 for mcu_x in 0..mcus_x {
                     if scan_info.restart_interval > 0
                         && mcu_count > 0
-                        && mcu_count.is_multiple_of(scan_info.restart_interval)
+                        && mcu_count.is_multiple_of(scan_info.restart_interval as u32)
                     {
                         bit_reader.reset();
                         dc_preds = [0i16; 4];
@@ -1372,11 +1390,17 @@ fn decode_progressive_coefficients(
             // Non-interleaved scan
             let comp_idx = scan_comp_indices[0];
             let scan_comp = &scan.components[0];
-            let comp_blocks_x = comp_data[comp_idx].blocks_x;
-            let comp_blocks_y = comp_data[comp_idx].blocks_y;
+            // Use actual data block counts for non-interleaved scans, not MCU-padded.
+            // The JPEG bitstream contains exactly width_in_blocks * height_in_blocks
+            // data units per component (C libjpeg-turbo jdinput.c:119-124,175-176).
+            let h_samp: usize = comp_data[comp_idx].h_sampling as usize;
+            let v_samp: usize = comp_data[comp_idx].v_sampling as usize;
+            let comp_blocks_x: usize = (frame.width as usize * h_samp).div_ceil(max_h * 8);
+            let comp_blocks_y: usize = (frame.height as usize * v_samp).div_ceil(max_v * 8);
+            let stride_x: usize = comp_data[comp_idx].blocks_x;
             let mut dc_pred = 0i16;
             let mut eob_run = 0u16;
-            let mut mcu_count: u16 = 0;
+            let mut mcu_count: u32 = 0;
 
             let dc_table = if is_dc {
                 Some(
@@ -1407,7 +1431,7 @@ fn decode_progressive_coefficients(
                 None
             };
 
-            let restart_interval = scan_info.restart_interval;
+            let restart_interval = scan_info.restart_interval as u32;
 
             for by in 0..comp_blocks_y {
                 for bx in 0..comp_blocks_x {
@@ -1420,7 +1444,7 @@ fn decode_progressive_coefficients(
                         eob_run = 0;
                     }
 
-                    let block_idx = by * comp_blocks_x + bx;
+                    let block_idx = by * stride_x + bx;
                     let coeffs = &mut comp_data[comp_idx].blocks[block_idx];
 
                     if is_dc {
