@@ -2235,6 +2235,22 @@ fn compress_progressive_with_scans(
         marker_writer::write_sof2(&mut output, width as u16, height as u16, &components);
     }
 
+    // Pre-allocate reusable buffers for AC scan precomputation.
+    // Sized for the largest component (Y) to avoid per-scan allocation.
+    let max_blocks: usize = comp_layouts
+        .iter()
+        .map(|cl| cl.blocks_x * cl.blocks_y)
+        .max()
+        .unwrap_or(0);
+    // AC first precomp buffers
+    let mut precomp_zerobits: Vec<u64> = Vec::with_capacity(max_blocks);
+    let mut precomp_nbits: Vec<[u8; 64]> = Vec::with_capacity(max_blocks);
+    let mut precomp_diffs: Vec<[u16; 64]> = Vec::with_capacity(max_blocks);
+    // AC refine precomp buffers
+    let mut precomp_absvals: Vec<[u16; 64]> = Vec::with_capacity(max_blocks);
+    let mut precomp_signs: Vec<[u16; 64]> = Vec::with_capacity(max_blocks);
+    let mut precomp_eob: Vec<usize> = Vec::with_capacity(max_blocks);
+
     // Encode each scan with per-scan optimized Huffman tables.
     // DC first scans (ss=0, se=0, ah=0): gather DC frequencies, generate optimal
     // table, write DHT, encode. DC refine scans (ah>0): no DHT, just encode.
@@ -2396,11 +2412,11 @@ fn compress_progressive_with_scans(
 
             if scan.ah == 0 {
                 // AC first: fused gather+precompute, then lean encode.
-                // Single pass over coefficients computes bitmap/nbits/diffs AND frequencies.
+                // Reuse pre-allocated buffers (cleared each scan, no new allocation).
                 let num_blocks: usize = wib * hib;
-                let mut precomp_zerobits: Vec<u64> = Vec::with_capacity(num_blocks);
-                let mut precomp_nbits: Vec<[u8; 64]> = Vec::with_capacity(num_blocks);
-                let mut precomp_diffs: Vec<[u16; 64]> = Vec::with_capacity(num_blocks);
+                precomp_zerobits.clear();
+                precomp_nbits.clear();
+                precomp_diffs.clear();
 
                 for by in 0..hib {
                     let row_base: usize = by * stride;
@@ -2410,21 +2426,15 @@ fn compress_progressive_with_scans(
                         let mut values = [0u16; 64];
                         let mut diffs = [0u16; 64];
 
-                        for i in 0..band_len {
-                            let coeff: i16 = block[ss_enc + i];
-                            if coeff == 0 {
-                                continue;
-                            }
-                            let sign_mask: i16 = coeff >> 15;
-                            let abs_coeff: i16 = (coeff ^ sign_mask) - sign_mask;
-                            let temp: u16 = (abs_coeff >> scan.al) as u16;
-                            if temp == 0 {
-                                continue;
-                            }
-                            values[i] = temp;
-                            diffs[i] = (sign_mask ^ (abs_coeff >> scan.al)) as u16;
-                            zerobits |= 1u64 << i;
-                        }
+                        prepare_ac_first_coeffs(
+                            block,
+                            ss_enc,
+                            band_len,
+                            scan.al,
+                            &mut zerobits,
+                            &mut values,
+                            &mut diffs,
+                        );
 
                         // Compute nbits + gather frequencies in one pass over bitmap
                         let mut nbits_arr = [0u8; 64];
@@ -2546,10 +2556,11 @@ fn compress_progressive_with_scans(
                 output.extend_from_slice(bit_writer.data());
             } else {
                 // AC refine: fused gather+precompute, then lean encode.
+                // Reuse pre-allocated buffers.
                 let num_blocks: usize = wib * hib;
-                let mut precomp_absvals: Vec<[u16; 64]> = Vec::with_capacity(num_blocks);
-                let mut precomp_signs: Vec<[u16; 64]> = Vec::with_capacity(num_blocks);
-                let mut precomp_eob: Vec<usize> = Vec::with_capacity(num_blocks);
+                precomp_absvals.clear();
+                precomp_signs.clear();
+                precomp_eob.clear();
 
                 for by in 0..hib {
                     let row_base: usize = by * stride;
@@ -2557,19 +2568,14 @@ fn compress_progressive_with_scans(
                         let block: &[i16; 64] = &comp_buf[row_base + bx];
                         let mut absvals = [0u16; 64];
                         let mut sign_bits = [0u16; 64];
-                        let mut eob: usize = 0;
-
-                        for i in 0..band_len {
-                            let coeff: i32 = block[ss_enc + i] as i32;
-                            let sign_mask: i32 = coeff >> 31;
-                            let abs_coeff: i32 = (coeff ^ sign_mask) - sign_mask;
-                            let temp: u16 = (abs_coeff >> scan.al) as u16;
-                            absvals[i] = temp;
-                            sign_bits[i] = (sign_mask as u16).wrapping_add(1);
-                            if temp == 1 {
-                                eob = i + 1;
-                            }
-                        }
+                        let eob: usize = prepare_ac_refine_coeffs(
+                            block,
+                            ss_enc,
+                            band_len,
+                            scan.al,
+                            &mut absvals,
+                            &mut sign_bits,
+                        );
 
                         // Gather frequencies
                         let mut r: usize = 0;
@@ -2717,7 +2723,215 @@ fn compress_progressive_with_scans(
     Ok(output)
 }
 
-// Old standalone gather/encode functions removed — logic fused into scan loop above.
+/// Prepare AC first coefficients: compute abs, point transform, bitmap, and diffs.
+///
+/// Populates `zerobits` (nonzero bitmap), `values` (abs >> al), and `diffs` (magnitude bits).
+/// On x86_64 with SSE2, uses vectorized abs + shift + comparison for bitmap construction.
+#[inline]
+fn prepare_ac_first_coeffs(
+    block: &[i16; 64],
+    ss: usize,
+    band_len: usize,
+    al: u8,
+    zerobits: &mut u64,
+    values: &mut [u16; 64],
+    diffs: &mut [u16; 64],
+) {
+    #[cfg(target_arch = "x86_64")]
+    {
+        // SSE2 path: process 8 coefficients at a time
+        unsafe { prepare_ac_first_sse2(block, ss, band_len, al, zerobits, values, diffs) };
+        return;
+    }
+
+    #[cfg(not(target_arch = "x86_64"))]
+    {
+        let mut bits: u64 = 0;
+        for i in 0..band_len {
+            let coeff: i16 = block[ss + i];
+            if coeff == 0 {
+                continue;
+            }
+            let sign_mask: i16 = coeff >> 15;
+            let abs_coeff: i16 = (coeff ^ sign_mask) - sign_mask;
+            let temp: u16 = (abs_coeff >> al) as u16;
+            if temp == 0 {
+                continue;
+            }
+            values[i] = temp;
+            diffs[i] = (sign_mask ^ (abs_coeff >> al)) as u16;
+            bits |= 1u64 << i;
+        }
+        *zerobits = bits;
+    }
+}
+
+/// SSE2-accelerated AC first coefficient preparation.
+///
+/// Processes 8 i16 coefficients per iteration using:
+/// - Sign-mask abs via `(x ^ (x>>15)) - (x>>15)` (SSE2, no SSSE3 needed)
+/// - Arithmetic right shift for point transform
+/// - Non-zero comparison → movemask for bitmap construction
+/// - Magnitude bits via XOR with sign mask
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "sse2")]
+unsafe fn prepare_ac_first_sse2(
+    block: &[i16; 64],
+    ss: usize,
+    band_len: usize,
+    al: u8,
+    zerobits: &mut u64,
+    values: &mut [u16; 64],
+    diffs: &mut [u16; 64],
+) {
+    use core::arch::x86_64::*;
+
+    let al_vec: __m128i = _mm_cvtsi64_si128(al as i64);
+    let zeros: __m128i = _mm_setzero_si128();
+    let mut bitmap: u64 = 0;
+    let src: *const i16 = block.as_ptr().add(ss);
+    let val_ptr: *mut u16 = values.as_mut_ptr();
+    let diff_ptr: *mut u16 = diffs.as_mut_ptr();
+
+    // Process full chunks of 8
+    let full_chunks: usize = band_len / 8;
+    for chunk in 0..full_chunks {
+        let offset: usize = chunk * 8;
+        let raw: __m128i = _mm_loadu_si128(src.add(offset) as *const __m128i);
+
+        // abs(raw) via sign-mask trick: (x ^ (x>>15)) - (x>>15)
+        let sign: __m128i = _mm_srai_epi16(raw, 15);
+        let abs_val: __m128i = _mm_sub_epi16(_mm_xor_si128(raw, sign), sign);
+
+        // Point transform: abs >> al
+        let shifted: __m128i = _mm_sra_epi16(abs_val, al_vec);
+
+        // Non-zero mask for bitmap
+        let nz: __m128i = _mm_cmpgt_epi16(shifted, zeros);
+        let packed: __m128i = _mm_packs_epi16(nz, zeros);
+        let mask: u8 = _mm_movemask_epi8(packed) as u8;
+        bitmap |= (mask as u64) << offset;
+
+        // Store values (abs >> al) and diffs (sign ^ (abs >> al))
+        _mm_storeu_si128(val_ptr.add(offset) as *mut __m128i, shifted);
+        let diff_vec: __m128i = _mm_xor_si128(sign, shifted);
+        _mm_storeu_si128(diff_ptr.add(offset) as *mut __m128i, diff_vec);
+    }
+
+    // Handle remaining coefficients (< 8) with scalar
+    let remainder_start: usize = full_chunks * 8;
+    for i in remainder_start..band_len {
+        let coeff: i16 = *src.add(i);
+        if coeff == 0 {
+            continue;
+        }
+        let sign_mask: i16 = coeff >> 15;
+        let abs_coeff: i16 = (coeff ^ sign_mask) - sign_mask;
+        let temp: u16 = (abs_coeff >> al) as u16;
+        if temp == 0 {
+            continue;
+        }
+        *val_ptr.add(i) = temp;
+        *diff_ptr.add(i) = (sign_mask ^ (abs_coeff >> al)) as u16;
+        bitmap |= 1u64 << i;
+    }
+
+    *zerobits = bitmap;
+}
+
+/// Prepare AC refine coefficients: compute abs, point transform, sign bits, and find EOB.
+///
+/// Returns `eob` (index past last newly-nonzero coefficient, 0 = no newly-nonzero).
+#[inline]
+fn prepare_ac_refine_coeffs(
+    block: &[i16; 64],
+    ss: usize,
+    band_len: usize,
+    al: u8,
+    absvals: &mut [u16; 64],
+    sign_bits: &mut [u16; 64],
+) -> usize {
+    #[cfg(target_arch = "x86_64")]
+    {
+        return unsafe { prepare_ac_refine_sse2(block, ss, band_len, al, absvals, sign_bits) };
+    }
+
+    #[cfg(not(target_arch = "x86_64"))]
+    {
+        let mut eob: usize = 0;
+        for i in 0..band_len {
+            let coeff: i32 = block[ss + i] as i32;
+            let sign_mask: i32 = coeff >> 31;
+            let abs_coeff: i32 = (coeff ^ sign_mask) - sign_mask;
+            let temp: u16 = (abs_coeff >> al) as u16;
+            absvals[i] = temp;
+            sign_bits[i] = (sign_mask as u16).wrapping_add(1);
+            if temp == 1 {
+                eob = i + 1;
+            }
+        }
+        eob
+    }
+}
+
+/// SSE2-accelerated AC refine coefficient preparation.
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "sse2")]
+unsafe fn prepare_ac_refine_sse2(
+    block: &[i16; 64],
+    ss: usize,
+    band_len: usize,
+    al: u8,
+    absvals: &mut [u16; 64],
+    sign_bits: &mut [u16; 64],
+) -> usize {
+    use core::arch::x86_64::*;
+
+    let al_vec: __m128i = _mm_cvtsi64_si128(al as i64);
+    let ones: __m128i = _mm_set1_epi16(1);
+    let src: *const i16 = block.as_ptr().add(ss);
+    let abs_ptr: *mut u16 = absvals.as_mut_ptr();
+    let sign_ptr: *mut u16 = sign_bits.as_mut_ptr();
+
+    let full_chunks: usize = band_len / 8;
+    for chunk in 0..full_chunks {
+        let offset: usize = chunk * 8;
+        let raw: __m128i = _mm_loadu_si128(src.add(offset) as *const __m128i);
+
+        // abs via sign-mask
+        let sign: __m128i = _mm_srai_epi16(raw, 15);
+        let abs_val: __m128i = _mm_sub_epi16(_mm_xor_si128(raw, sign), sign);
+
+        // Point transform
+        let shifted: __m128i = _mm_sra_epi16(abs_val, al_vec);
+        _mm_storeu_si128(abs_ptr.add(offset) as *mut __m128i, shifted);
+
+        // sign_bits = (sign_mask as u16).wrapping_add(1) = sign + 1
+        // sign is all-1s (-1) for negative, all-0s for non-negative
+        let sign_out: __m128i = _mm_add_epi16(sign, ones);
+        _mm_storeu_si128(sign_ptr.add(offset) as *mut __m128i, sign_out);
+    }
+
+    // Scalar remainder
+    let remainder_start: usize = full_chunks * 8;
+    for i in remainder_start..band_len {
+        let coeff: i32 = *src.add(i) as i32;
+        let sign_mask: i32 = coeff >> 31;
+        let abs_coeff: i32 = (coeff ^ sign_mask) - sign_mask;
+        let temp: u16 = (abs_coeff >> al) as u16;
+        *abs_ptr.add(i) = temp;
+        *sign_ptr.add(i) = (sign_mask as u16).wrapping_add(1);
+    }
+
+    // Find EOB (last position where abs>>al == 1) — scalar scan
+    let mut eob: usize = 0;
+    for i in 0..band_len {
+        if *abs_ptr.add(i) == 1 {
+            eob = i + 1;
+        }
+    }
+    eob
+}
 
 /// Compress with arithmetic entropy coding (SOF9).
 ///
