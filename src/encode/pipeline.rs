@@ -341,9 +341,62 @@ pub fn compress(
             padded
         }
 
+        /// Pad a chroma plane using row-group replication to match C libjpeg-turbo's
+        /// two-phase approach (jcprepct.c + jccoefct.c).
+        fn pad_chroma_plane(
+            plane: &[u8],
+            src_w: usize,
+            src_h: usize,
+            dst_w: usize,
+            dst_h: usize,
+            max_v: usize,
+        ) -> Vec<u8> {
+            if src_w == dst_w && src_h == dst_h {
+                return plane.to_vec();
+            }
+            let mut padded: Vec<u8> = vec![0u8; dst_w * dst_h];
+            for row in 0..src_h {
+                let src_start: usize = row * src_w;
+                let dst_start: usize = row * dst_w;
+                padded[dst_start..dst_start + src_w]
+                    .copy_from_slice(&plane[src_start..src_start + src_w]);
+                if src_w < dst_w {
+                    let last_val: u8 = plane[src_start + src_w - 1];
+                    for x in src_w..dst_w {
+                        padded[dst_start + x] = last_val;
+                    }
+                }
+            }
+            if src_h < dst_h {
+                let row_group_end: usize = src_h.div_ceil(max_v).min(dst_h / max_v) * max_v;
+                let last_row: Vec<u8> = padded[(src_h - 1) * dst_w..src_h * dst_w].to_vec();
+                // Phase 1: pad to row group boundary
+                for row in src_h..row_group_end.min(dst_h) {
+                    let dst_start: usize = row * dst_w;
+                    padded[dst_start..dst_start + dst_w].copy_from_slice(&last_row);
+                }
+                // Phase 2: replicate last complete row group
+                if row_group_end < dst_h {
+                    let group_start: usize = row_group_end - max_v;
+                    for row in row_group_end..dst_h {
+                        let src_row: usize = group_start + (row - row_group_end) % max_v;
+                        let dst_start: usize = row * dst_w;
+                        let src_start: usize = src_row * dst_w;
+                        let src_data: Vec<u8> = padded[src_start..src_start + dst_w].to_vec();
+                        padded[dst_start..dst_start + dst_w].copy_from_slice(&src_data);
+                    }
+                }
+            }
+            padded
+        }
+
+        let (_, v_samp) = subsampling.sampling_factors();
+        let fb_max_v: usize = v_samp as usize;
         let y_plane_padded: Vec<u8> = pad_plane(&y_plane, width, height, padded_w, padded_h);
-        let cb_plane_padded: Vec<u8> = pad_plane(&cb_plane, width, height, padded_w, padded_h);
-        let cr_plane_padded: Vec<u8> = pad_plane(&cr_plane, width, height, padded_w, padded_h);
+        let cb_plane_padded: Vec<u8> =
+            pad_chroma_plane(&cb_plane, width, height, padded_w, padded_h, fb_max_v);
+        let cr_plane_padded: Vec<u8> =
+            pad_chroma_plane(&cr_plane, width, height, padded_w, padded_h, fb_max_v);
 
         for mcu_row in 0..mcus_y {
             for mcu_col in 0..mcus_x {
@@ -2776,6 +2829,7 @@ pub fn compress_arithmetic(
         padded_h,
         pixel_format,
         enc_simd.rgb_to_ycbcr_row,
+        mcu_h / 8,
     )?;
 
     let original_width: usize = width;
@@ -4154,6 +4208,7 @@ fn scale_quant_for_fdct(quant_table: &[u16; 64]) -> QuantDivisors {
 /// libjpeg-turbo's `expand_right_edge` behavior.  All blocks (including edge)
 /// are interior to the padded dimensions, so the NEON fused FDCT+quantize path
 /// is always taken, ensuring byte-identical output with C.
+#[allow(clippy::too_many_arguments)]
 fn convert_to_ycbcr_padded(
     pixels: &[u8],
     width: usize,
@@ -4162,6 +4217,7 @@ fn convert_to_ycbcr_padded(
     padded_h: usize,
     pixel_format: PixelFormat,
     rgb_to_ycbcr_row_fn: fn(&[u8], &mut [u8], &mut [u8], &mut [u8], usize),
+    max_v_samp: usize,
 ) -> Result<(Vec<u8>, Vec<u8>, Vec<u8>)> {
     let plane_size: usize = padded_w * padded_h;
     let mut y_plane: Vec<u8> = vec![0u8; plane_size];
@@ -4237,16 +4293,38 @@ fn convert_to_ycbcr_padded(
         }
     }
 
-    // Bottom-edge padding: replicate last row
+    // Bottom-edge padding: Y uses last-row replication, Cb/Cr use row-group
+    // replication to match C libjpeg-turbo's two-phase approach.
     if height < padded_h {
         let last_row: Vec<u8> = y_plane[(height - 1) * padded_w..height * padded_w].to_vec();
-        let last_cb: Vec<u8> = cb_plane[(height - 1) * padded_w..height * padded_w].to_vec();
-        let last_cr: Vec<u8> = cr_plane[(height - 1) * padded_w..height * padded_w].to_vec();
         for row in height..padded_h {
             let dst: usize = row * padded_w;
             y_plane[dst..dst + padded_w].copy_from_slice(&last_row);
+        }
+
+        // Chroma: row-group replication
+        let row_group_end: usize =
+            height.div_ceil(max_v_samp).min(padded_h / max_v_samp) * max_v_samp;
+        let last_cb: Vec<u8> = cb_plane[(height - 1) * padded_w..height * padded_w].to_vec();
+        let last_cr: Vec<u8> = cr_plane[(height - 1) * padded_w..height * padded_w].to_vec();
+        // Phase 1: pad to row group boundary
+        for row in height..row_group_end.min(padded_h) {
+            let dst: usize = row * padded_w;
             cb_plane[dst..dst + padded_w].copy_from_slice(&last_cb);
             cr_plane[dst..dst + padded_w].copy_from_slice(&last_cr);
+        }
+        // Phase 2: replicate last complete row group
+        if row_group_end < padded_h {
+            let group_start: usize = row_group_end - max_v_samp;
+            for row in row_group_end..padded_h {
+                let src_row: usize = group_start + (row - row_group_end) % max_v_samp;
+                let dst: usize = row * padded_w;
+                let src: usize = src_row * padded_w;
+                let cb_src: Vec<u8> = cb_plane[src..src + padded_w].to_vec();
+                let cr_src: Vec<u8> = cr_plane[src..src + padded_w].to_vec();
+                cb_plane[dst..dst + padded_w].copy_from_slice(&cb_src);
+                cr_plane[dst..dst + padded_w].copy_from_slice(&cr_src);
+            }
         }
     }
 
@@ -6320,6 +6398,7 @@ pub fn compress_optimized(
         padded_h,
         pixel_format,
         enc_simd.rgb_to_ycbcr_row,
+        mcu_h / 8,
     )?;
 
     // Apply smoothing to component planes when smoothing_factor > 0.
