@@ -161,13 +161,41 @@ pub fn compress(
                     }
                 }
             }
-            // Pad remaining rows by replicating the last row (edge handling)
+            // Pad remaining rows to match C libjpeg-turbo's behavior:
+            // Y component: replicate last real row (jccoefct.c expand_bottom_edge)
+            // Cb/Cr components: replicate last complete row group so that chroma
+            // downsampling produces the same result as C's two-phase approach
+            // (jcprepct.c pads to row group, downsamples, then replicates the
+            // downsampled output in jccoefct.c).
+            let last_row_offset: usize = (rows_available - 1) * padded_w;
+
+            // Y: simple last-row replication (matches C's luma behavior)
             for row in rows_available..padded_h {
                 let dst_offset: usize = row * padded_w;
-                let src_offset: usize = (rows_available - 1) * padded_w;
-                y_buf.copy_within(src_offset..src_offset + padded_w, dst_offset);
-                cb_buf.copy_within(src_offset..src_offset + padded_w, dst_offset);
-                cr_buf.copy_within(src_offset..src_offset + padded_w, dst_offset);
+                y_buf.copy_within(last_row_offset..last_row_offset + padded_w, dst_offset);
+            }
+
+            // Cb/Cr: row-group replication for correct chroma downsampling
+            let max_v: usize = subsampling.sampling_factors().1 as usize;
+            let row_group_end: usize = rows_available.div_ceil(max_v).min(padded_h / max_v) * max_v;
+
+            // Phase 1: complete the last row group (replicate last real row)
+            for row in rows_available..row_group_end.min(padded_h) {
+                let dst_offset: usize = row * padded_w;
+                cb_buf.copy_within(last_row_offset..last_row_offset + padded_w, dst_offset);
+                cr_buf.copy_within(last_row_offset..last_row_offset + padded_w, dst_offset);
+            }
+
+            // Phase 2: replicate the last complete row group
+            if row_group_end < padded_h {
+                let group_start: usize = row_group_end - max_v;
+                for row in row_group_end..padded_h {
+                    let src_row: usize = group_start + (row - row_group_end) % max_v;
+                    let dst_offset: usize = row * padded_w;
+                    let src_offset: usize = src_row * padded_w;
+                    cb_buf.copy_within(src_offset..src_offset + padded_w, dst_offset);
+                    cr_buf.copy_within(src_offset..src_offset + padded_w, dst_offset);
+                }
             }
 
             // Encode all MCUs in this row.
