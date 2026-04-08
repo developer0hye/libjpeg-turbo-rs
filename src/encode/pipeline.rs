@@ -2242,9 +2242,9 @@ fn compress_progressive_with_scans(
         .map(|cl| cl.blocks_x * cl.blocks_y)
         .max()
         .unwrap_or(0);
-    // AC first precomp buffers
+    // AC first precomp buffers (values for on-the-fly nbits via leading_zeros)
     let mut precomp_zerobits: Vec<u64> = Vec::with_capacity(max_blocks);
-    let mut precomp_nbits: Vec<[u8; 64]> = Vec::with_capacity(max_blocks);
+    let mut precomp_values: Vec<[u16; 64]> = Vec::with_capacity(max_blocks);
     let mut precomp_diffs: Vec<[u16; 64]> = Vec::with_capacity(max_blocks);
     // AC refine precomp buffers
     let mut precomp_absvals: Vec<[u16; 64]> = Vec::with_capacity(max_blocks);
@@ -2415,7 +2415,7 @@ fn compress_progressive_with_scans(
                 // Reuse pre-allocated buffers (cleared each scan, no new allocation).
                 let num_blocks: usize = wib * hib;
                 precomp_zerobits.clear();
-                precomp_nbits.clear();
+                precomp_values.clear();
                 precomp_diffs.clear();
 
                 for by in 0..hib {
@@ -2436,26 +2436,24 @@ fn compress_progressive_with_scans(
                             &mut diffs,
                         );
 
-                        // Compute nbits + gather frequencies in one pass over bitmap
-                        let mut nbits_arr = [0u8; 64];
+                        // Gather frequencies from bitmap (nbits computed on-the-fly)
                         if zerobits == 0 {
-                            ac_freq[0x00] += 1; // EOB
+                            ac_freq[0x00] += 1;
                         } else {
                             let mut prev_pos: usize = 0;
                             let mut bits: u64 = zerobits;
                             while bits != 0 {
                                 let pos: usize = bits.trailing_zeros() as usize;
                                 bits &= bits - 1;
-                                let nbits: u8 = 16 - values[pos].leading_zeros() as u8;
-                                nbits_arr[pos] = nbits;
+                                let nbits: u32 =
+                                    16 - unsafe { *values.get_unchecked(pos) }.leading_zeros();
 
                                 let mut zero_run: usize = pos - prev_pos;
                                 while zero_run >= 16 {
                                     ac_freq[0xF0] += 1;
                                     zero_run -= 16;
                                 }
-                                let symbol: usize = (zero_run << 4) | (nbits as usize);
-                                ac_freq[symbol] += 1;
+                                ac_freq[(zero_run << 4) | nbits as usize] += 1;
                                 prev_pos = pos + 1;
                             }
                             if prev_pos < band_len {
@@ -2464,7 +2462,7 @@ fn compress_progressive_with_scans(
                         }
 
                         precomp_zerobits.push(zerobits);
-                        precomp_nbits.push(nbits_arr);
+                        precomp_values.push(values);
                         precomp_diffs.push(diffs);
                     }
                 }
@@ -2492,8 +2490,12 @@ fn compress_progressive_with_scans(
                     let ehufco: *const u16 = ac_table.ehufco.as_ptr();
                     let ehufsi: *const u8 = ac_table.ehufsi.as_ptr();
 
+                    let zb_ptr: *const u64 = precomp_zerobits.as_ptr();
+                    let val_arr: *const [u16; 64] = precomp_values.as_ptr();
+                    let diff_arr: *const [u16; 64] = precomp_diffs.as_ptr();
+
                     for blk_idx in 0..num_blocks {
-                        let mut zerobits: u64 = precomp_zerobits[blk_idx];
+                        let mut zerobits: u64 = *zb_ptr.add(blk_idx);
                         if zerobits == 0 {
                             local_put_bits(
                                 &mut pb,
@@ -2505,15 +2507,15 @@ fn compress_progressive_with_scans(
                             continue;
                         }
 
-                        let nbits_arr: &[u8; 64] = &precomp_nbits[blk_idx];
-                        let diffs_arr: &[u16; 64] = &precomp_diffs[blk_idx];
-                        let mut prev_pos: usize = 0;
+                        let vals: *const u16 = (*val_arr.add(blk_idx)).as_ptr();
+                        let dfs: *const u16 = (*diff_arr.add(blk_idx)).as_ptr();
+                        let mut prev_pos: u32 = 0;
 
                         while zerobits != 0 {
-                            let pos: usize = zerobits.trailing_zeros() as usize;
+                            let pos: u32 = zerobits.trailing_zeros();
                             zerobits &= zerobits - 1;
 
-                            let mut zero_run: usize = pos - prev_pos;
+                            let mut zero_run: u32 = pos - prev_pos;
                             while zero_run >= 16 {
                                 local_put_bits(
                                     &mut pb,
@@ -2525,22 +2527,22 @@ fn compress_progressive_with_scans(
                                 zero_run -= 16;
                             }
 
-                            let nbits: u8 = nbits_arr[pos];
-                            let symbol: usize = (zero_run << 4) | (nbits as usize);
-                            let huff_code: u32 = *ehufco.add(symbol) as u32;
-                            let huff_size: u8 = *ehufsi.add(symbol);
-                            let mag: u32 = diffs_arr[pos] as u32 & ((1u32 << nbits) - 1);
+                            let nbits: u32 = 16 - (*vals.add(pos as usize)).leading_zeros();
+                            let symbol: u32 = (zero_run << 4) | nbits;
+                            let huff_code: u32 = *ehufco.add(symbol as usize) as u32;
+                            let huff_size: u32 = *ehufsi.add(symbol as usize) as u32;
+                            let mag: u32 = *dfs.add(pos as usize) as u32 & ((1u32 << nbits) - 1);
                             local_put_bits(
                                 &mut pb,
                                 &mut fb,
                                 &mut buf_ptr,
                                 (huff_code << nbits) | mag,
-                                huff_size + nbits,
+                                (huff_size + nbits) as u8,
                             );
                             prev_pos = pos + 1;
                         }
 
-                        if prev_pos < band_len {
+                        if (prev_pos as usize) < band_len {
                             local_put_bits(
                                 &mut pb,
                                 &mut fb,
@@ -2637,10 +2639,14 @@ fn compress_progressive_with_scans(
                     let ehufco: *const u16 = ac_table.ehufco.as_ptr();
                     let ehufsi: *const u8 = ac_table.ehufsi.as_ptr();
 
+                    let abs_arr: *const [u16; 64] = precomp_absvals.as_ptr();
+                    let sign_arr: *const [u16; 64] = precomp_signs.as_ptr();
+                    let eob_arr: *const usize = precomp_eob.as_ptr();
+
                     for blk_idx in 0..num_blocks {
-                        let absvals: &[u16; 64] = &precomp_absvals[blk_idx];
-                        let sign_bits: &[u16; 64] = &precomp_signs[blk_idx];
-                        let eob: usize = precomp_eob[blk_idx];
+                        let av: *const u16 = (*abs_arr.add(blk_idx)).as_ptr();
+                        let sv: *const u16 = (*sign_arr.add(blk_idx)).as_ptr();
+                        let eob: usize = *eob_arr.add(blk_idx);
 
                         let mut r: usize = 0;
                         let mut corr_bits: u64 = 0;
@@ -2648,7 +2654,7 @@ fn compress_progressive_with_scans(
                         let mut idx: usize = 0;
 
                         while idx < band_len {
-                            let temp: u16 = absvals[idx];
+                            let temp: u16 = *av.add(idx);
                             if temp == 0 {
                                 r += 1;
                                 idx += 1;
@@ -2681,7 +2687,7 @@ fn compress_progressive_with_scans(
                             let symbol: usize = (r << 4) | 1;
                             let huff_code: u32 = *ehufco.add(symbol) as u32;
                             let huff_size: u8 = *ehufsi.add(symbol);
-                            let combined: u32 = (huff_code << 1) | sign_bits[idx] as u32;
+                            let combined: u32 = (huff_code << 1) | *sv.add(idx) as u32;
                             local_put_bits(&mut pb, &mut fb, &mut buf_ptr, combined, huff_size + 1);
                             flush_corr_bits_hoisted(
                                 &mut pb,
@@ -2774,7 +2780,7 @@ fn prepare_ac_first_coeffs(
 /// - Non-zero comparison → movemask for bitmap construction
 /// - Magnitude bits via XOR with sign mask
 #[cfg(target_arch = "x86_64")]
-#[target_feature(enable = "sse2")]
+#[inline(always)]
 unsafe fn prepare_ac_first_sse2(
     block: &[i16; 64],
     ss: usize,
@@ -2876,7 +2882,7 @@ fn prepare_ac_refine_coeffs(
 
 /// SSE2-accelerated AC refine coefficient preparation.
 #[cfg(target_arch = "x86_64")]
-#[target_feature(enable = "sse2")]
+#[inline(always)]
 unsafe fn prepare_ac_refine_sse2(
     block: &[i16; 64],
     ss: usize,
