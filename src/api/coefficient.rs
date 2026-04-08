@@ -45,6 +45,12 @@ pub struct JpegCoefficients {
     pub quant_tables: Vec<[u16; 64]>,
     /// Restart interval from the source JPEG (0 = no restart markers).
     pub restart_interval: u16,
+    /// JFIF density units from source (0=aspect ratio, 1=DPI, 2=DPCM).
+    pub density_unit: u8,
+    /// JFIF X density from source.
+    pub x_density: u16,
+    /// JFIF Y density from source.
+    pub y_density: u16,
 }
 
 /// Per-component info extracted for re-encoding.
@@ -175,12 +181,22 @@ pub fn read_coefficients(data: &[u8]) -> Result<JpegCoefficients> {
     // convert to zigzag order for encoder compatibility.
     convert_all_to_zigzag(&mut comp_data);
 
+    let density: &crate::common::types::DensityInfo = &metadata.density;
+    let density_unit: u8 = match density.unit {
+        crate::common::types::DensityUnit::Unknown => 0,
+        crate::common::types::DensityUnit::Dpi => 1,
+        crate::common::types::DensityUnit::Dpcm => 2,
+    };
+
     Ok(JpegCoefficients {
         width: frame.width,
         height: frame.height,
         components: comp_data,
         quant_tables,
         restart_interval: metadata.restart_interval,
+        density_unit,
+        x_density: density.x,
+        y_density: density.y,
     })
 }
 
@@ -200,13 +216,13 @@ pub fn write_coefficients(coeffs: &JpegCoefficients) -> Result<Vec<u8>> {
     let ac_chroma_table =
         build_huff_table(&tables::AC_CHROMINANCE_BITS, &tables::AC_CHROMINANCE_VALUES);
 
-    let _max_h = coeffs
+    let max_h: usize = coeffs
         .components
         .iter()
         .map(|c| c.h_sampling as usize)
         .max()
         .unwrap_or(1);
-    let _max_v = coeffs
+    let max_v: usize = coeffs
         .components
         .iter()
         .map(|c| c.v_sampling as usize)
@@ -215,9 +231,24 @@ pub fn write_coefficients(coeffs: &JpegCoefficients) -> Result<Vec<u8>> {
     let mcus_x = coeffs.components[0].blocks_x / coeffs.components[0].h_sampling as usize;
     let mcus_y = coeffs.components[0].blocks_y / coeffs.components[0].v_sampling as usize;
 
+    // Compute actual data block counts per component (not MCU-padded).
+    // Blocks beyond these are "dummy" blocks: DC copied from last real block,
+    // AC all zeros. Matches C libjpeg-turbo jccoefct.c:184-191.
+    let data_blocks_x: Vec<usize> = coeffs
+        .components
+        .iter()
+        .map(|c| (coeffs.width as usize * c.h_sampling as usize).div_ceil(max_h * 8))
+        .collect();
+    let data_blocks_y: Vec<usize> = coeffs
+        .components
+        .iter()
+        .map(|c| (coeffs.height as usize * c.v_sampling as usize).div_ceil(max_v * 8))
+        .collect();
+
     // Entropy encode
     let mut bit_writer = BitWriter::new(coeffs.width as usize * coeffs.height as usize);
     let mut prev_dc = vec![0i16; num_components];
+    let dummy_block: [i16; 64] = [0i16; 64];
 
     for mcu_y in 0..mcus_y {
         for mcu_x in 0..mcus_x {
@@ -237,16 +268,31 @@ pub fn write_coefficients(coeffs: &JpegCoefficients) -> Result<Vec<u8>> {
                     for h in 0..comp.h_sampling as usize {
                         let bx = mcu_x * comp.h_sampling as usize + h;
                         let by = mcu_y * comp.v_sampling as usize + v;
-                        let block_idx = by * comp.blocks_x + bx;
-                        let block = &comp.blocks[block_idx];
+                        let is_dummy: bool = bx >= data_blocks_x[ci] || by >= data_blocks_y[ci];
 
-                        HuffmanEncoder::encode_block(
-                            &mut bit_writer,
-                            block,
-                            &mut prev_dc[ci],
-                            dc_table,
-                            ac_table,
-                        );
+                        if is_dummy {
+                            // Dummy block: DC = prev_dc (encodes as 0 diff), AC = 0.
+                            // Matches C jccoefct.c:184-191 behavior.
+                            let mut dblock: [i16; 64] = dummy_block;
+                            dblock[0] = prev_dc[ci];
+                            HuffmanEncoder::encode_block(
+                                &mut bit_writer,
+                                &dblock,
+                                &mut prev_dc[ci],
+                                dc_table,
+                                ac_table,
+                            );
+                        } else {
+                            let block_idx = by * comp.blocks_x + bx;
+                            let block = &comp.blocks[block_idx];
+                            HuffmanEncoder::encode_block(
+                                &mut bit_writer,
+                                block,
+                                &mut prev_dc[ci],
+                                dc_table,
+                                ac_table,
+                            );
+                        }
                     }
                 }
             }
@@ -259,14 +305,25 @@ pub fn write_coefficients(coeffs: &JpegCoefficients) -> Result<Vec<u8>> {
     let mut output = Vec::with_capacity(bit_writer.data().len() + 1024);
 
     marker_writer::write_soi(&mut output);
-    marker_writer::write_app0_jfif(&mut output);
+    // Preserve source JFIF density (matches C jpegtran behavior)
+    marker_writer::write_app0_jfif_with_density(
+        &mut output,
+        coeffs.density_unit,
+        coeffs.x_density,
+        coeffs.y_density,
+    );
 
     // Quantization tables
     for (i, qt) in coeffs.quant_tables.iter().enumerate() {
         marker_writer::write_dqt(&mut output, i as u8, qt);
     }
 
-    // Frame header (SOF0) — preserve source component IDs
+    // Frame header — use SOF1 (extended sequential) when quant tables need 16-bit
+    // precision (values > 255), matching C jpegtran behavior. Otherwise SOF0 (baseline).
+    let needs_extended: bool = coeffs
+        .quant_tables
+        .iter()
+        .any(|qt| qt.iter().any(|&v| v > 255));
     let components: Vec<(u8, u8, u8, u8)> = coeffs
         .components
         .iter()
@@ -279,7 +336,19 @@ pub fn write_coefficients(coeffs: &JpegCoefficients) -> Result<Vec<u8>> {
             )
         })
         .collect();
-    marker_writer::write_sof0(&mut output, coeffs.width, coeffs.height, &components);
+    output.push(0xFF);
+    output.push(if needs_extended { 0xC1 } else { 0xC0 });
+    let sof_len: u16 = 2 + 1 + 2 + 2 + 1 + (components.len() as u16 * 3);
+    output.extend_from_slice(&sof_len.to_be_bytes());
+    output.push(8); // sample precision
+    output.extend_from_slice(&coeffs.height.to_be_bytes());
+    output.extend_from_slice(&coeffs.width.to_be_bytes());
+    output.push(components.len() as u8);
+    for &(id, h_samp, v_samp, quant_tbl_id) in &components {
+        output.push(id);
+        output.push((h_samp << 4) | v_samp);
+        output.push(quant_tbl_id);
+    }
 
     // Huffman tables
     marker_writer::write_dht(
@@ -791,13 +860,13 @@ fn write_coefficients_optimized(coeffs: &JpegCoefficients) -> Result<Vec<u8>> {
     let num_components: usize = coeffs.components.len();
     let is_grayscale: bool = num_components == 1;
 
-    let _max_h: usize = coeffs
+    let opt_max_h: usize = coeffs
         .components
         .iter()
         .map(|c| c.h_sampling as usize)
         .max()
         .unwrap_or(1);
-    let _max_v: usize = coeffs
+    let opt_max_v: usize = coeffs
         .components
         .iter()
         .map(|c| c.v_sampling as usize)
@@ -806,6 +875,17 @@ fn write_coefficients_optimized(coeffs: &JpegCoefficients) -> Result<Vec<u8>> {
     let mcus_x: usize = coeffs.components[0].blocks_x / coeffs.components[0].h_sampling as usize;
     let mcus_y: usize = coeffs.components[0].blocks_y / coeffs.components[0].v_sampling as usize;
 
+    let opt_data_bx: Vec<usize> = coeffs
+        .components
+        .iter()
+        .map(|c| (coeffs.width as usize * c.h_sampling as usize).div_ceil(opt_max_h * 8))
+        .collect();
+    let opt_data_by: Vec<usize> = coeffs
+        .components
+        .iter()
+        .map(|c| (coeffs.height as usize * c.v_sampling as usize).div_ceil(opt_max_v * 8))
+        .collect();
+
     // === Pass 1: gather symbol frequencies ===
     let mut dc_luma_freq = [0u32; 257];
     let mut dc_chroma_freq = [0u32; 257];
@@ -813,6 +893,7 @@ fn write_coefficients_optimized(coeffs: &JpegCoefficients) -> Result<Vec<u8>> {
     let mut ac_chroma_freq = [0u32; 257];
 
     let mut prev_dc: Vec<i16> = vec![0i16; num_components];
+    let opt_dummy: [i16; 64] = [0i16; 64];
 
     for mcu_y in 0..mcus_y {
         for mcu_x in 0..mcus_x {
@@ -832,11 +913,18 @@ fn write_coefficients_optimized(coeffs: &JpegCoefficients) -> Result<Vec<u8>> {
                     for h in 0..comp.h_sampling as usize {
                         let bx: usize = mcu_x * comp.h_sampling as usize + h;
                         let by: usize = mcu_y * comp.v_sampling as usize + v;
-                        let block_idx: usize = by * comp.blocks_x + bx;
-                        let block: &[i16; 64] = &comp.blocks[block_idx];
+                        let is_dummy: bool = bx >= opt_data_bx[ci] || by >= opt_data_by[ci];
 
-                        let diff: i16 = block[0] - prev_dc[ci];
-                        prev_dc[ci] = block[0];
+                        let block: &[i16; 64] = if is_dummy {
+                            &opt_dummy
+                        } else {
+                            let block_idx: usize = by * comp.blocks_x + bx;
+                            &comp.blocks[block_idx]
+                        };
+
+                        let dc_val: i16 = if is_dummy { prev_dc[ci] } else { block[0] };
+                        let diff: i16 = dc_val - prev_dc[ci];
+                        prev_dc[ci] = dc_val;
                         huff_opt::gather_dc_symbol(diff, dc_freq);
                         huff_opt::gather_ac_symbols(block, ac_freq);
                     }
@@ -885,16 +973,29 @@ fn write_coefficients_optimized(coeffs: &JpegCoefficients) -> Result<Vec<u8>> {
                     for h in 0..comp.h_sampling as usize {
                         let bx: usize = mcu_x * comp.h_sampling as usize + h;
                         let by: usize = mcu_y * comp.v_sampling as usize + v;
-                        let block_idx: usize = by * comp.blocks_x + bx;
-                        let block: &[i16; 64] = &comp.blocks[block_idx];
+                        let is_dummy: bool = bx >= opt_data_bx[ci] || by >= opt_data_by[ci];
 
-                        HuffmanEncoder::encode_block(
-                            &mut bit_writer,
-                            block,
-                            &mut prev_dc_pass2[ci],
-                            dc_table,
-                            ac_table,
-                        );
+                        if is_dummy {
+                            let mut dblock: [i16; 64] = opt_dummy;
+                            dblock[0] = prev_dc_pass2[ci];
+                            HuffmanEncoder::encode_block(
+                                &mut bit_writer,
+                                &dblock,
+                                &mut prev_dc_pass2[ci],
+                                dc_table,
+                                ac_table,
+                            );
+                        } else {
+                            let block_idx: usize = by * comp.blocks_x + bx;
+                            let block: &[i16; 64] = &comp.blocks[block_idx];
+                            HuffmanEncoder::encode_block(
+                                &mut bit_writer,
+                                block,
+                                &mut prev_dc_pass2[ci],
+                                dc_table,
+                                ac_table,
+                            );
+                        }
                     }
                 }
             }
@@ -907,15 +1008,24 @@ fn write_coefficients_optimized(coeffs: &JpegCoefficients) -> Result<Vec<u8>> {
     let mut output: Vec<u8> = Vec::with_capacity(bit_writer.data().len() + 1024);
 
     marker_writer::write_soi(&mut output);
-    marker_writer::write_app0_jfif(&mut output);
+    marker_writer::write_app0_jfif_with_density(
+        &mut output,
+        coeffs.density_unit,
+        coeffs.x_density,
+        coeffs.y_density,
+    );
 
     // Quantization tables.
     for (i, qt) in coeffs.quant_tables.iter().enumerate() {
         marker_writer::write_dqt(&mut output, i as u8, qt);
     }
 
-    // Frame header (SOF0) — preserve source component IDs.
-    let components: Vec<(u8, u8, u8, u8)> = coeffs
+    // Frame header — SOF1 for 16-bit quant tables, SOF0 otherwise
+    let opt_needs_ext: bool = coeffs
+        .quant_tables
+        .iter()
+        .any(|qt| qt.iter().any(|&v| v > 255));
+    let opt_comps: Vec<(u8, u8, u8, u8)> = coeffs
         .components
         .iter()
         .map(|c| {
@@ -927,7 +1037,19 @@ fn write_coefficients_optimized(coeffs: &JpegCoefficients) -> Result<Vec<u8>> {
             )
         })
         .collect();
-    marker_writer::write_sof0(&mut output, coeffs.width, coeffs.height, &components);
+    output.push(0xFF);
+    output.push(if opt_needs_ext { 0xC1 } else { 0xC0 });
+    let opt_sof_len: u16 = 2 + 1 + 2 + 2 + 1 + (opt_comps.len() as u16 * 3);
+    output.extend_from_slice(&opt_sof_len.to_be_bytes());
+    output.push(8);
+    output.extend_from_slice(&coeffs.height.to_be_bytes());
+    output.extend_from_slice(&coeffs.width.to_be_bytes());
+    output.push(opt_comps.len() as u8);
+    for &(id, h_samp, v_samp, quant_tbl_id) in &opt_comps {
+        output.push(id);
+        output.push((h_samp << 4) | v_samp);
+        output.push(quant_tbl_id);
+    }
 
     // Optimized Huffman tables.
     marker_writer::write_dht(&mut output, 0, 0, &dc_luma_bits, &dc_luma_values);

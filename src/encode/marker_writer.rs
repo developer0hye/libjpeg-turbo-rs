@@ -26,12 +26,12 @@ pub fn write_app0_jfif(buf: &mut Vec<u8>) {
     buf.push(1); // major
     buf.push(1); // minor
 
-    // Units: 1 = dots per inch
+    // Units: 0 = no units (aspect ratio only)
     buf.push(0);
 
-    // X density: 72
+    // X density: 1 (aspect ratio)
     buf.extend_from_slice(&1u16.to_be_bytes());
-    // Y density: 72
+    // Y density: 1
     buf.extend_from_slice(&1u16.to_be_bytes());
 
     // Thumbnail: 0x0
