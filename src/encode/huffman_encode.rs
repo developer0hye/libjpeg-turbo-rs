@@ -297,6 +297,16 @@ impl BitWriter {
         self.drain_remaining();
     }
 
+    /// Reset the writer for reuse, keeping the allocated buffer.
+    ///
+    /// Clears position and accumulator without deallocating. This avoids
+    /// repeated allocation when encoding multiple progressive scans.
+    pub fn reset(&mut self) {
+        self.pos = 0;
+        self.put_buffer = 0;
+        self.free_bits = 64;
+    }
+
     /// Get a reference to the accumulated output bytes.
     pub fn data(&self) -> &[u8] {
         // SAFETY: buf[..pos] has been written by our emit methods.

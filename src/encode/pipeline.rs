@@ -2251,24 +2251,23 @@ fn compress_progressive_with_scans(
     let mut precomp_signs: Vec<[u16; 64]> = Vec::with_capacity(max_blocks);
     let mut precomp_eob: Vec<usize> = Vec::with_capacity(max_blocks);
 
+    // Single BitWriter reused across all scans (reset between scans, no realloc).
+    let mut bit_writer = BitWriter::new(width * height);
+
     // Encode each scan with per-scan optimized Huffman tables.
-    // DC first scans (ss=0, se=0, ah=0): gather DC frequencies, generate optimal
-    // table, write DHT, encode. DC refine scans (ah>0): no DHT, just encode.
-    // AC scans (ss>0): gather AC frequencies, generate optimal table, write DHT, encode.
     for scan in scans {
         let is_dc_scan: bool = scan.ss == 0 && scan.se == 0;
         let is_first_scan: bool = scan.ah == 0;
 
-        // Build SOS component list
-        let sos_comps: Vec<(u8, u8, u8)> = scan
-            .component_indices
-            .iter()
-            .map(|&ci| {
-                let comp_id = (ci + 1) as u8;
-                let (dc_tbl, ac_tbl) = if ci == 0 { (0u8, 0u8) } else { (1u8, 1u8) };
-                (comp_id, dc_tbl, ac_tbl)
-            })
-            .collect();
+        // Build SOS component list on stack (max 3 components, no heap alloc)
+        let mut sos_comps = [(0u8, 0u8, 0u8); 3];
+        let sos_len: usize = scan.component_indices.len();
+        for (j, &ci) in scan.component_indices.iter().enumerate() {
+            let comp_id = (ci + 1) as u8;
+            let (dc_tbl, ac_tbl) = if ci == 0 { (0u8, 0u8) } else { (1u8, 1u8) };
+            sos_comps[j] = (comp_id, dc_tbl, ac_tbl);
+        }
+        let sos_comps_slice: &[(u8, u8, u8)] = &sos_comps[..sos_len];
 
         if is_dc_scan && is_first_scan {
             // DC first scan: gather DC symbol frequencies, generate optimal tables,
@@ -2315,7 +2314,7 @@ fn compress_progressive_with_scans(
 
                 marker_writer::write_sos_progressive(
                     &mut output,
-                    &sos_comps,
+                    sos_comps_slice,
                     scan.ss,
                     scan.se,
                     scan.ah,
@@ -2325,7 +2324,7 @@ fn compress_progressive_with_scans(
                 let dc_luma_table: HuffTable = build_huff_table(&dc_luma_bits, &dc_luma_values);
                 let dc_chroma_table: HuffTable =
                     build_huff_table(&dc_chroma_bits, &dc_chroma_values);
-                let mut bit_writer = BitWriter::new(width * height / 4);
+                bit_writer.reset();
                 encode_progressive_dc_scan(
                     &coeff_bufs,
                     &comp_layouts,
@@ -2341,7 +2340,7 @@ fn compress_progressive_with_scans(
             } else {
                 marker_writer::write_sos_progressive(
                     &mut output,
-                    &sos_comps,
+                    sos_comps_slice,
                     scan.ss,
                     scan.se,
                     scan.ah,
@@ -2351,7 +2350,7 @@ fn compress_progressive_with_scans(
                 let dc_luma_table: HuffTable = build_huff_table(&dc_luma_bits, &dc_luma_values);
                 let dc_chroma_table: HuffTable =
                     build_huff_table(&tables::DC_CHROMINANCE_BITS, &tables::DC_CHROMINANCE_VALUES);
-                let mut bit_writer = BitWriter::new(width * height / 4);
+                bit_writer.reset();
                 encode_progressive_dc_scan(
                     &coeff_bufs,
                     &comp_layouts,
@@ -2373,13 +2372,13 @@ fn compress_progressive_with_scans(
                 build_huff_table(&tables::DC_CHROMINANCE_BITS, &tables::DC_CHROMINANCE_VALUES);
             marker_writer::write_sos_progressive(
                 &mut output,
-                &sos_comps,
+                sos_comps_slice,
                 scan.ss,
                 scan.se,
                 scan.ah,
                 scan.al,
             );
-            let mut bit_writer = BitWriter::new(width * height / 4);
+            bit_writer.reset();
             encode_progressive_dc_scan(
                 &coeff_bufs,
                 &comp_layouts,
@@ -2473,7 +2472,7 @@ fn compress_progressive_with_scans(
                 marker_writer::write_dht(&mut output, 1, table_id, &ac_bits, &ac_values);
                 marker_writer::write_sos_progressive(
                     &mut output,
-                    &sos_comps,
+                    sos_comps_slice,
                     scan.ss,
                     scan.se,
                     scan.ah,
@@ -2482,7 +2481,7 @@ fn compress_progressive_with_scans(
 
                 // Lean encode: only walk precomputed bitmaps, no coefficient access
                 let ac_table: HuffTable = build_huff_table(&ac_bits, &ac_values);
-                let mut bit_writer = BitWriter::new(width * height / 4);
+                bit_writer.reset();
                 let reserve: usize = (num_blocks * 256).max(1024);
                 unsafe {
                     use crate::encode::huffman_encode::local_put_bits;
@@ -2622,7 +2621,7 @@ fn compress_progressive_with_scans(
                 marker_writer::write_dht(&mut output, 1, table_id, &ac_bits, &ac_values);
                 marker_writer::write_sos_progressive(
                     &mut output,
-                    &sos_comps,
+                    sos_comps_slice,
                     scan.ss,
                     scan.se,
                     scan.ah,
@@ -2631,7 +2630,7 @@ fn compress_progressive_with_scans(
 
                 // Lean encode: use precomputed absvals/signs/eob
                 let ac_table: HuffTable = build_huff_table(&ac_bits, &ac_values);
-                let mut bit_writer = BitWriter::new(width * height / 4);
+                bit_writer.reset();
                 let reserve: usize = (num_blocks * 256).max(1024);
                 unsafe {
                     use crate::encode::huffman_encode::local_put_bits;
