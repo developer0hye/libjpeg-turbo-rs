@@ -297,6 +297,17 @@ impl BitWriter {
         self.drain_remaining();
     }
 
+    /// Reset the writer state for reuse across progressive scans.
+    ///
+    /// Clears position and bit accumulator without deallocating the buffer.
+    /// Avoids the cost of `BitWriter::new()` per scan by reusing the same
+    /// allocation.
+    pub fn reset(&mut self) {
+        self.pos = 0;
+        self.put_buffer = 0;
+        self.free_bits = 64;
+    }
+
     /// Get a reference to the accumulated output bytes.
     pub fn data(&self) -> &[u8] {
         // SAFETY: buf[..pos] has been written by our emit methods.
@@ -338,7 +349,13 @@ impl BitWriter {
 /// instead of struct fields, avoiding store-reload on every flush.
 #[allow(dead_code)]
 #[inline(always)]
-unsafe fn local_put_bits(pb: &mut u64, fb: &mut i32, buf: &mut *mut u8, code: u32, size: u8) {
+pub(crate) unsafe fn local_put_bits(
+    pb: &mut u64,
+    fb: &mut i32,
+    buf: &mut *mut u8,
+    code: u32,
+    size: u8,
+) {
     *fb -= size as i32;
     if *fb >= 0 {
         *pb = (*pb << size) | (code as u64);
@@ -351,7 +368,13 @@ unsafe fn local_put_bits(pb: &mut u64, fb: &mut i32, buf: &mut *mut u8, code: u3
 #[allow(dead_code)]
 #[cold]
 #[inline(always)]
-unsafe fn local_put_and_flush(pb: &mut u64, fb: &mut i32, buf: &mut *mut u8, code: u32, size: u8) {
+pub(crate) unsafe fn local_put_and_flush(
+    pb: &mut u64,
+    fb: &mut i32,
+    buf: &mut *mut u8,
+    code: u32,
+    size: u8,
+) {
     let overshoot: u32 = (-*fb) as u32;
     let fits: u32 = size as u32 - overshoot;
     *pb = (*pb << fits) | ((code as u64) >> overshoot);
@@ -371,6 +394,36 @@ unsafe fn local_put_and_flush(pb: &mut u64, fb: &mut i32, buf: &mut *mut u8, cod
 
     *fb += 64;
     *pb = code as u64;
+}
+
+/// Drain remaining bits from hoisted local variables, padding with 1s.
+///
+/// Equivalent to `BitWriter::drain_remaining` but operates on register-local
+/// `pb`/`fb`/`buf`, used to finalize a progressive DC scan encoded directly
+/// into an output Vec.
+#[inline(always)]
+pub(crate) unsafe fn local_drain_bits(pb: &mut u64, fb: &mut i32, buf: &mut *mut u8) {
+    let used: u32 = (64 - *fb) as u32;
+    if used == 0 {
+        return;
+    }
+    let aligned: u64 = *pb << (*fb as u32);
+    let bytes: [u8; 8] = aligned.to_be_bytes();
+    let full_bytes: u32 = used / 8;
+    let partial_bits: u32 = used % 8;
+    for &byte in &bytes[..full_bytes as usize] {
+        (*buf).write(byte);
+        (*buf).add(1).write(0x00);
+        *buf = (*buf).add(1 + (byte == 0xFF) as usize);
+    }
+    if partial_bits > 0 {
+        let byte: u8 = bytes[full_bytes as usize] | ((1u8 << (8 - partial_bits)) - 1);
+        (*buf).write(byte);
+        (*buf).add(1).write(0x00);
+        *buf = (*buf).add(1 + (byte == 0xFF) as usize);
+    }
+    *pb = 0;
+    *fb = 64;
 }
 
 /// Huffman encoder for JPEG 8x8 blocks.

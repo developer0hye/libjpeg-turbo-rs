@@ -6,7 +6,9 @@ use crate::api::encoder::HuffmanTableDef;
 use crate::common::error::{JpegError, Result};
 use crate::common::types::{DctMethod, PixelFormat, SavedMarker, ScanScript, Subsampling};
 use crate::encode::color;
-use crate::encode::huffman_encode::{build_huff_table, BitWriter, HuffTable, HuffmanEncoder};
+use crate::encode::huffman_encode::{
+    build_huff_table, local_drain_bits, local_put_bits, BitWriter, HuffTable, HuffmanEncoder,
+};
 use crate::encode::marker_writer;
 use crate::encode::progressive::ProgressiveScan;
 use crate::encode::tables;
@@ -2256,6 +2258,22 @@ fn compress_progressive_with_scans(
         marker_writer::write_sof2(&mut output, width as u16, height as u16, &components);
     }
 
+    // Single BitWriter reused across all scans (reset instead of reallocate).
+    let mut bit_writer: BitWriter = BitWriter::new(width * height / 4);
+
+    // Pre-allocate precomp buffers outside the scan loop (clear+reuse per scan).
+    let max_blocks: usize = comp_layouts
+        .iter()
+        .map(|cl| cl.blocks_x * cl.blocks_y)
+        .max()
+        .unwrap_or(0);
+    let mut precomp_zerobits: Vec<u64> = Vec::with_capacity(max_blocks);
+    let mut precomp_values: Vec<[u16; 64]> = Vec::with_capacity(max_blocks);
+    let mut precomp_diffs: Vec<[u16; 64]> = Vec::with_capacity(max_blocks);
+    let mut precomp_absvals: Vec<[u16; 64]> = Vec::with_capacity(max_blocks);
+    let mut precomp_signs: Vec<[u16; 64]> = Vec::with_capacity(max_blocks);
+    let mut precomp_eob: Vec<usize> = Vec::with_capacity(max_blocks);
+
     // Encode each scan with per-scan optimized Huffman tables.
     // DC first scans (ss=0, se=0, ah=0): gather DC frequencies, generate optimal
     // table, write DHT, encode. DC refine scans (ah>0): no DHT, just encode.
@@ -2264,19 +2282,17 @@ fn compress_progressive_with_scans(
         let is_dc_scan: bool = scan.ss == 0 && scan.se == 0;
         let is_first_scan: bool = scan.ah == 0;
 
-        // Build SOS component list.
-        // Per JPEG spec: DC-only scans (Ss=0) set Ta=0, AC-only scans (Ss>0) set Td=0.
-        let sos_comps: Vec<(u8, u8, u8)> = scan
-            .component_indices
-            .iter()
-            .map(|&ci| {
-                let comp_id = (ci + 1) as u8;
-                let tbl_idx: u8 = if ci == 0 { 0 } else { 1 };
-                let dc_tbl: u8 = if is_dc_scan { tbl_idx } else { 0 };
-                let ac_tbl: u8 = if is_dc_scan { 0 } else { tbl_idx };
-                (comp_id, dc_tbl, ac_tbl)
-            })
-            .collect();
+        // Stack-allocate SOS component list (max 3 components in JPEG).
+        let mut sos_comps: [(u8, u8, u8); 3] = [(0, 0, 0); 3];
+        let sos_len: usize = scan.component_indices.len();
+        for (idx, &ci) in scan.component_indices.iter().enumerate() {
+            let comp_id: u8 = (ci + 1) as u8;
+            let tbl_idx: u8 = if ci == 0 { 0 } else { 1 };
+            let dc_tbl: u8 = if is_dc_scan { tbl_idx } else { 0 };
+            let ac_tbl: u8 = if is_dc_scan { 0 } else { tbl_idx };
+            sos_comps[idx] = (comp_id, dc_tbl, ac_tbl);
+        }
+        let sos_slice: &[(u8, u8, u8)] = &sos_comps[..sos_len];
 
         if is_dc_scan && is_first_scan {
             // DC first scan: gather DC symbol frequencies, generate optimal tables,
@@ -2287,7 +2303,7 @@ fn compress_progressive_with_scans(
             dc_luma_freq[256] = 1;
             dc_chroma_freq[256] = 1;
 
-            let mut prev_dc = vec![0i16; scan.component_indices.len()];
+            let mut prev_dc: [i16; 4] = [0i16; 4];
             for mcu_y in 0..mcus_y {
                 for mcu_x in 0..mcus_x {
                     for (scan_ci, &ci) in scan.component_indices.iter().enumerate() {
@@ -2323,7 +2339,7 @@ fn compress_progressive_with_scans(
 
                 marker_writer::write_sos_progressive(
                     &mut output,
-                    &sos_comps,
+                    sos_slice,
                     scan.ss,
                     scan.se,
                     scan.ah,
@@ -2333,7 +2349,6 @@ fn compress_progressive_with_scans(
                 let dc_luma_table: HuffTable = build_huff_table(&dc_luma_bits, &dc_luma_values);
                 let dc_chroma_table: HuffTable =
                     build_huff_table(&dc_chroma_bits, &dc_chroma_values);
-                let mut bit_writer = BitWriter::new(width * height / 4);
                 encode_progressive_dc_scan(
                     &coeff_bufs,
                     &comp_layouts,
@@ -2342,14 +2357,12 @@ fn compress_progressive_with_scans(
                     mcus_y,
                     &dc_luma_table,
                     &dc_chroma_table,
-                    &mut bit_writer,
+                    &mut output,
                 );
-                bit_writer.flush();
-                output.extend_from_slice(bit_writer.data());
             } else {
                 marker_writer::write_sos_progressive(
                     &mut output,
-                    &sos_comps,
+                    sos_slice,
                     scan.ss,
                     scan.se,
                     scan.ah,
@@ -2359,7 +2372,6 @@ fn compress_progressive_with_scans(
                 let dc_luma_table: HuffTable = build_huff_table(&dc_luma_bits, &dc_luma_values);
                 let dc_chroma_table: HuffTable =
                     build_huff_table(&tables::DC_CHROMINANCE_BITS, &tables::DC_CHROMINANCE_VALUES);
-                let mut bit_writer = BitWriter::new(width * height / 4);
                 encode_progressive_dc_scan(
                     &coeff_bufs,
                     &comp_layouts,
@@ -2368,10 +2380,8 @@ fn compress_progressive_with_scans(
                     mcus_y,
                     &dc_luma_table,
                     &dc_chroma_table,
-                    &mut bit_writer,
+                    &mut output,
                 );
-                bit_writer.flush();
-                output.extend_from_slice(bit_writer.data());
             }
         } else if is_dc_scan {
             // DC refinement scan (ah > 0): no DHT needed, just write SOS and encode.
@@ -2381,13 +2391,12 @@ fn compress_progressive_with_scans(
                 build_huff_table(&tables::DC_CHROMINANCE_BITS, &tables::DC_CHROMINANCE_VALUES);
             marker_writer::write_sos_progressive(
                 &mut output,
-                &sos_comps,
+                sos_slice,
                 scan.ss,
                 scan.se,
                 scan.ah,
                 scan.al,
             );
-            let mut bit_writer = BitWriter::new(width * height / 4);
             encode_progressive_dc_scan(
                 &coeff_bufs,
                 &comp_layouts,
@@ -2396,87 +2405,361 @@ fn compress_progressive_with_scans(
                 mcus_y,
                 &dc_luma_table,
                 &dc_chroma_table,
-                &mut bit_writer,
+                &mut output,
             );
-            bit_writer.flush();
-            output.extend_from_slice(bit_writer.data());
         } else {
-            // AC scan (ss > 0): generate optimal Huffman table from actual symbol
-            // frequencies, write DHT, then encode. Both first (ah==0) and refine
-            // (ah>0) scans get their own optimal table since they emit different symbols.
+            // AC scan (ss > 0): fused gather+encode with precomputed block data.
+            // Eliminates actual_blocks Vec copy by iterating coeff_bufs with stride.
             let ci: usize = scan.component_indices[0];
             let mut ac_freq = [0u32; 257];
             ac_freq[256] = 1;
-            // Non-interleaved AC scans iterate width_in_blocks × height_in_blocks,
-            // not the full MCU-padded buffer. Build a slice of actual blocks in raster order.
             let wib: usize = comp_wib[ci];
             let hib: usize = comp_hib[ci];
             let layout = &comp_layouts[ci];
-            let actual_blocks: Vec<[i16; 64]> = (0..hib)
-                .flat_map(|by| (0..wib).map(move |bx| (bx, by)))
-                .map(|(bx, by)| coeff_bufs[ci][by * layout.blocks_x + bx])
-                .collect();
-            if scan.ah == 0 {
-                gather_progressive_ac_freq(&actual_blocks, scan.ss, scan.se, scan.al, &mut ac_freq);
-            } else {
-                gather_progressive_ac_refine_freq(
-                    &actual_blocks,
-                    scan.ss,
-                    scan.se,
-                    scan.al,
-                    &mut ac_freq,
-                );
-            }
-
-            let (ac_bits, ac_values) = crate::encode::huff_opt::gen_optimal_table(&ac_freq);
-            let table_id: u8 = if ci == 0 { 0 } else { 1 };
-            marker_writer::write_dht(&mut output, 1, table_id, &ac_bits, &ac_values);
-
-            marker_writer::write_sos_progressive(
-                &mut output,
-                &sos_comps,
-                scan.ss,
-                scan.se,
-                scan.ah,
-                scan.al,
-            );
-
-            let ac_table: HuffTable = build_huff_table(&ac_bits, &ac_values);
-            let mut bit_writer = BitWriter::new(width * height / 4);
-            // Encode only actual blocks (width_in_blocks × height_in_blocks)
+            let stride: usize = layout.blocks_x;
+            let num_blocks: usize = wib * hib;
             let ss_enc: usize = scan.ss as usize;
             let se_enc: usize = scan.se as usize;
+            let band_len: usize = se_enc - ss_enc + 1;
+
             if scan.ah == 0 {
-                let mut eobrun: u32 = 0;
-                for block in actual_blocks.iter() {
-                    encode_ac_first_block(
-                        block,
-                        ss_enc,
-                        se_enc,
-                        scan.al,
-                        &ac_table,
-                        &mut bit_writer,
-                        &mut eobrun,
-                    );
+                // AC first scan: gather frequencies + precompute per-block data
+                precomp_zerobits.clear();
+                precomp_values.clear();
+                precomp_diffs.clear();
+
+                let mut eobrun_gather: u32 = 0;
+
+                for by in 0..hib {
+                    for bx in 0..wib {
+                        let block: &[i16; 64] = &coeff_bufs[ci][by * stride + bx];
+
+                        let mut zerobits: u64 = 0;
+                        let mut values = [0u16; 64];
+                        let mut diffs = [0u16; 64];
+
+                        prepare_ac_first_coeffs(
+                            block,
+                            ss_enc,
+                            band_len,
+                            scan.al,
+                            &mut zerobits,
+                            &mut values,
+                            &mut diffs,
+                        );
+
+                        precomp_zerobits.push(zerobits);
+                        precomp_values.push(values);
+                        precomp_diffs.push(diffs);
+
+                        // Gather frequencies with EOBRUN batching
+                        if zerobits == 0 {
+                            eobrun_gather += 1;
+                            if eobrun_gather == 0x7FFF {
+                                emit_eobrun_freq(eobrun_gather, &mut ac_freq);
+                                eobrun_gather = 0;
+                            }
+                            continue;
+                        }
+
+                        if eobrun_gather > 0 {
+                            emit_eobrun_freq(eobrun_gather, &mut ac_freq);
+                            eobrun_gather = 0;
+                        }
+
+                        let mut prev_pos: usize = 0;
+                        let mut bits: u64 = zerobits;
+                        while bits != 0 {
+                            let pos: usize = bits.trailing_zeros() as usize;
+                            bits &= bits - 1;
+
+                            let mut zero_run: usize = pos - prev_pos;
+                            while zero_run >= 16 {
+                                ac_freq[0xF0] += 1;
+                                zero_run -= 16;
+                            }
+                            let nbits: u8 = 16 - values[pos].leading_zeros() as u8;
+                            let symbol: usize = (zero_run << 4) | (nbits as usize);
+                            ac_freq[symbol] += 1;
+                            prev_pos = pos + 1;
+                        }
+
+                        if prev_pos < band_len {
+                            eobrun_gather += 1;
+                            if eobrun_gather == 0x7FFF {
+                                emit_eobrun_freq(eobrun_gather, &mut ac_freq);
+                                eobrun_gather = 0;
+                            }
+                        }
+                    }
                 }
+                if eobrun_gather > 0 {
+                    emit_eobrun_freq(eobrun_gather, &mut ac_freq);
+                }
+
+                // Generate optimal table, write DHT + SOS
+                let (ac_bits, ac_values) = crate::encode::huff_opt::gen_optimal_table(&ac_freq);
+                let table_id: u8 = if ci == 0 { 0 } else { 1 };
+                marker_writer::write_dht(&mut output, 1, table_id, &ac_bits, &ac_values);
+                marker_writer::write_sos_progressive(
+                    &mut output,
+                    sos_slice,
+                    scan.ss,
+                    scan.se,
+                    scan.ah,
+                    scan.al,
+                );
+
+                // Encode from precomputed data
+                let ac_table: HuffTable = build_huff_table(&ac_bits, &ac_values);
+                bit_writer.reset();
+                let mut eobrun: u32 = 0;
+
+                for blk_idx in 0..num_blocks {
+                    let zerobits: u64 = precomp_zerobits[blk_idx];
+
+                    if zerobits == 0 {
+                        eobrun += 1;
+                        if eobrun == 0x7FFF {
+                            emit_eobrun(&ac_table, &mut bit_writer, &mut eobrun);
+                        }
+                        continue;
+                    }
+
+                    if eobrun > 0 {
+                        emit_eobrun(&ac_table, &mut bit_writer, &mut eobrun);
+                    }
+
+                    let values = &precomp_values[blk_idx];
+                    let diffs = &precomp_diffs[blk_idx];
+
+                    // Pre-compute nbits for non-zero positions
+                    let mut nbits_arr = [0u8; 64];
+                    {
+                        let mut bits: u64 = zerobits;
+                        while bits != 0 {
+                            let pos: usize = bits.trailing_zeros() as usize;
+                            bits &= bits - 1;
+                            nbits_arr[pos] = 16 - values[pos].leading_zeros() as u8;
+                        }
+                    }
+
+                    let mut prev_pos: usize = 0;
+                    let mut bits: u64 = zerobits;
+                    while bits != 0 {
+                        let pos: usize = bits.trailing_zeros() as usize;
+                        bits &= bits - 1;
+
+                        let mut zero_run: usize = pos - prev_pos;
+                        while zero_run >= 16 {
+                            bit_writer
+                                .put_bits(ac_table.ehufco[0xF0] as u32, ac_table.ehufsi[0xF0]);
+                            zero_run -= 16;
+                        }
+
+                        let nbits: u8 = nbits_arr[pos];
+                        let symbol: usize = (zero_run << 4) | (nbits as usize);
+                        let huff_code: u32 = ac_table.ehufco[symbol] as u32;
+                        let huff_size: u8 = ac_table.ehufsi[symbol];
+                        let mag_masked: u32 = diffs[pos] as u32 & ((1u32 << nbits) - 1);
+                        let combined: u32 = (huff_code << nbits) | mag_masked;
+                        bit_writer.put_bits(combined, huff_size + nbits);
+                        prev_pos = pos + 1;
+                    }
+
+                    if prev_pos < band_len {
+                        eobrun += 1;
+                        if eobrun == 0x7FFF {
+                            emit_eobrun(&ac_table, &mut bit_writer, &mut eobrun);
+                        }
+                    }
+                }
+
                 if eobrun > 0 {
                     emit_eobrun(&ac_table, &mut bit_writer, &mut eobrun);
                 }
             } else {
+                // AC refine scan: gather frequencies + precompute per-block data
+                precomp_absvals.clear();
+                precomp_signs.clear();
+                precomp_eob.clear();
+
+                let mut eobrun_gather: u32 = 0;
+                let mut be: usize = 0;
+
+                for by in 0..hib {
+                    for bx in 0..wib {
+                        let block: &[i16; 64] = &coeff_bufs[ci][by * stride + bx];
+
+                        let mut absvals = [0u16; 64];
+                        let mut sign_bits = [0u16; 64];
+                        let mut eob_pos: usize = 0;
+
+                        prepare_ac_refine_coeffs(
+                            block,
+                            ss_enc,
+                            band_len,
+                            scan.al,
+                            &mut absvals,
+                            &mut sign_bits,
+                            &mut eob_pos,
+                        );
+
+                        precomp_absvals.push(absvals);
+                        precomp_signs.push(sign_bits);
+                        precomp_eob.push(eob_pos);
+
+                        // Gather frequencies with EOBRUN batching
+                        let mut r: usize = 0;
+                        let mut br: usize = 0;
+                        let mut idx: usize = 0;
+
+                        while idx < band_len {
+                            let temp: u16 = absvals[idx];
+
+                            if temp == 0 {
+                                r += 1;
+                                idx += 1;
+                                continue;
+                            }
+
+                            while r > 15 && idx < eob_pos {
+                                if eobrun_gather > 0 {
+                                    emit_eobrun_freq(eobrun_gather, &mut ac_freq);
+                                    eobrun_gather = 0;
+                                    be = 0;
+                                }
+                                ac_freq[0xF0] += 1;
+                                r -= 16;
+                                br = 0;
+                            }
+
+                            if temp > 1 {
+                                br += 1;
+                                idx += 1;
+                                continue;
+                            }
+
+                            if eobrun_gather > 0 {
+                                emit_eobrun_freq(eobrun_gather, &mut ac_freq);
+                                eobrun_gather = 0;
+                                be = 0;
+                            }
+                            let symbol: usize = (r << 4) | 1;
+                            ac_freq[symbol] += 1;
+                            r = 0;
+                            br = 0;
+                            idx += 1;
+                        }
+
+                        if r > 0 || br > 0 {
+                            eobrun_gather += 1;
+                            be += br;
+                            if eobrun_gather == 0x7FFF || be > (MAX_CORR_BITS - 64 + 1) {
+                                emit_eobrun_freq(eobrun_gather, &mut ac_freq);
+                                eobrun_gather = 0;
+                                be = 0;
+                            }
+                        }
+                    }
+                }
+                if eobrun_gather > 0 {
+                    emit_eobrun_freq(eobrun_gather, &mut ac_freq);
+                }
+
+                // Generate optimal table, write DHT + SOS
+                let (ac_bits, ac_values) = crate::encode::huff_opt::gen_optimal_table(&ac_freq);
+                let table_id: u8 = if ci == 0 { 0 } else { 1 };
+                marker_writer::write_dht(&mut output, 1, table_id, &ac_bits, &ac_values);
+                marker_writer::write_sos_progressive(
+                    &mut output,
+                    sos_slice,
+                    scan.ss,
+                    scan.se,
+                    scan.ah,
+                    scan.al,
+                );
+
+                // Encode from precomputed data
+                let ac_table: HuffTable = build_huff_table(&ac_bits, &ac_values);
+                bit_writer.reset();
                 let mut eobrun: u32 = 0;
                 let mut corr_buffer: Vec<u8> = Vec::with_capacity(MAX_CORR_BITS);
-                for block in actual_blocks.iter() {
-                    encode_ac_refine_block(
-                        block,
-                        ss_enc,
-                        se_enc,
-                        scan.al,
-                        &ac_table,
-                        &mut bit_writer,
-                        &mut eobrun,
-                        &mut corr_buffer,
-                    );
+
+                for blk_idx in 0..num_blocks {
+                    let absvals = &precomp_absvals[blk_idx];
+                    let sign_bits = &precomp_signs[blk_idx];
+                    let eob_pos: usize = precomp_eob[blk_idx];
+
+                    let mut r: usize = 0;
+                    let mut br_bits: [u8; 64] = [0u8; 64];
+                    let mut br: usize = 0;
+                    let mut idx: usize = 0;
+
+                    while idx < band_len {
+                        let temp: u16 = absvals[idx];
+
+                        if temp == 0 {
+                            r += 1;
+                            idx += 1;
+                            continue;
+                        }
+
+                        while r > 15 && idx < eob_pos {
+                            emit_eobrun_with_corr(
+                                &ac_table,
+                                &mut bit_writer,
+                                &mut eobrun,
+                                &mut corr_buffer,
+                            );
+                            bit_writer
+                                .put_bits(ac_table.ehufco[0xF0] as u32, ac_table.ehufsi[0xF0]);
+                            r -= 16;
+                            emit_buffered_bits(&mut bit_writer, &br_bits[..br]);
+                            br = 0;
+                        }
+
+                        if temp > 1 {
+                            br_bits[br] = (temp & 1) as u8;
+                            br += 1;
+                            idx += 1;
+                            continue;
+                        }
+
+                        // Newly nonzero (temp == 1)
+                        emit_eobrun_with_corr(
+                            &ac_table,
+                            &mut bit_writer,
+                            &mut eobrun,
+                            &mut corr_buffer,
+                        );
+
+                        let symbol: usize = (r << 4) | 1;
+                        let huff_code: u32 = ac_table.ehufco[symbol] as u32;
+                        let huff_size: u8 = ac_table.ehufsi[symbol];
+                        let combined: u32 = (huff_code << 1) | sign_bits[idx] as u32;
+                        bit_writer.put_bits(combined, huff_size + 1);
+
+                        emit_buffered_bits(&mut bit_writer, &br_bits[..br]);
+                        br = 0;
+                        r = 0;
+                        idx += 1;
+                    }
+
+                    if r > 0 || br > 0 {
+                        eobrun += 1;
+                        corr_buffer.extend_from_slice(&br_bits[..br]);
+                        if eobrun == 0x7FFF || corr_buffer.len() > (MAX_CORR_BITS - 64 + 1) {
+                            emit_eobrun_with_corr(
+                                &ac_table,
+                                &mut bit_writer,
+                                &mut eobrun,
+                                &mut corr_buffer,
+                            );
+                        }
+                    }
                 }
+
                 if eobrun > 0 {
                     emit_eobrun_with_corr(
                         &ac_table,
@@ -2496,11 +2779,216 @@ fn compress_progressive_with_scans(
     Ok(output)
 }
 
+/// Prepare AC first-scan coefficients: compute zerobits/values/diffs.
+///
+/// Dispatches to SSE2-vectorized path on x86_64, scalar fallback elsewhere.
+#[inline]
+fn prepare_ac_first_coeffs(
+    block: &[i16; 64],
+    ss: usize,
+    band_len: usize,
+    al: u8,
+    zerobits: &mut u64,
+    values: &mut [u16; 64],
+    diffs: &mut [u16; 64],
+) {
+    #[cfg(target_arch = "x86_64")]
+    unsafe {
+        prepare_ac_first_sse2(block, ss, band_len, al, zerobits, values, diffs);
+    }
+    #[cfg(not(target_arch = "x86_64"))]
+    {
+        *zerobits = 0;
+        for i in 0..band_len {
+            let coeff: i16 = block[ss + i];
+            if coeff == 0 {
+                continue;
+            }
+            let sign_mask: i16 = coeff >> 15;
+            let abs_coeff: i16 = (coeff ^ sign_mask) - sign_mask;
+            let temp: u16 = (abs_coeff >> al) as u16;
+            if temp == 0 {
+                continue;
+            }
+            values[i] = temp;
+            diffs[i] = (sign_mask ^ (abs_coeff >> al)) as u16;
+            *zerobits |= 1u64 << i;
+        }
+    }
+}
+
+/// SSE2-vectorized AC first-scan coefficient preparation.
+///
+/// Processes 8 i16 coefficients per iteration: abs via sign-mask,
+/// point-transform shift, bitmap via cmpgt+movemask.
+#[cfg(target_arch = "x86_64")]
+#[inline(always)]
+unsafe fn prepare_ac_first_sse2(
+    block: &[i16; 64],
+    ss: usize,
+    band_len: usize,
+    al: u8,
+    zerobits: &mut u64,
+    values: &mut [u16; 64],
+    diffs: &mut [u16; 64],
+) {
+    use core::arch::x86_64::*;
+
+    *zerobits = 0;
+    let shift_amt: __m128i = _mm_cvtsi64_si128(al as i64);
+    let zeros: __m128i = _mm_setzero_si128();
+
+    let mut i: usize = 0;
+    while i + 8 <= band_len {
+        let raw: __m128i = _mm_loadu_si128(block.as_ptr().add(ss + i) as *const __m128i);
+
+        // abs(coeff) via sign-mask
+        let sign: __m128i = _mm_srai_epi16(raw, 15);
+        let abs_val: __m128i = _mm_sub_epi16(_mm_xor_si128(raw, sign), sign);
+
+        // Point-transform shift: temp = abs_val >> al
+        let temp: __m128i = _mm_sra_epi16(abs_val, shift_amt);
+
+        // Store values
+        _mm_storeu_si128(values.as_mut_ptr().add(i) as *mut __m128i, temp);
+
+        // Compute diffs: sign_mask ^ (abs_coeff >> al)
+        let diff: __m128i = _mm_xor_si128(sign, temp);
+        _mm_storeu_si128(diffs.as_mut_ptr().add(i) as *mut __m128i, diff);
+
+        // Build bitmap: nonzero positions
+        let nz: __m128i = _mm_cmpgt_epi16(temp, zeros);
+        let packed: __m128i = _mm_packs_epi16(nz, zeros);
+        let mask: u32 = _mm_movemask_epi8(packed) as u32;
+        *zerobits |= (mask as u64 & 0xFF) << i;
+
+        i += 8;
+    }
+
+    // Scalar tail for remaining coefficients
+    while i < band_len {
+        let coeff: i16 = *block.get_unchecked(ss + i);
+        if coeff != 0 {
+            let sign_mask: i16 = coeff >> 15;
+            let abs_coeff: i16 = (coeff ^ sign_mask) - sign_mask;
+            let temp: u16 = (abs_coeff >> al) as u16;
+            if temp != 0 {
+                *values.get_unchecked_mut(i) = temp;
+                *diffs.get_unchecked_mut(i) = (sign_mask ^ (abs_coeff >> al)) as u16;
+                *zerobits |= 1u64 << i;
+            }
+        }
+        i += 1;
+    }
+}
+
+/// Prepare AC refine-scan coefficients: compute absvals/sign_bits/eob_pos.
+///
+/// Dispatches to SSE2-vectorized path on x86_64, scalar fallback elsewhere.
+#[inline]
+fn prepare_ac_refine_coeffs(
+    block: &[i16; 64],
+    ss: usize,
+    band_len: usize,
+    al: u8,
+    absvals: &mut [u16; 64],
+    sign_bits: &mut [u16; 64],
+    eob_pos: &mut usize,
+) {
+    #[cfg(target_arch = "x86_64")]
+    unsafe {
+        prepare_ac_refine_sse2(block, ss, band_len, al, absvals, sign_bits, eob_pos);
+    }
+    #[cfg(not(target_arch = "x86_64"))]
+    {
+        *eob_pos = 0;
+        for i in 0..band_len {
+            let coeff: i32 = block[ss + i] as i32;
+            let sign_mask: i32 = coeff >> 31;
+            let abs_coeff: i32 = (coeff ^ sign_mask) - sign_mask;
+            let temp: u16 = (abs_coeff >> al) as u16;
+            absvals[i] = temp;
+            sign_bits[i] = (sign_mask as u16).wrapping_add(1);
+            if temp == 1 {
+                *eob_pos = i + 1;
+            }
+        }
+    }
+}
+
+/// SSE2-vectorized AC refine-scan coefficient preparation.
+///
+/// Processes 8 i16 coefficients per iteration: abs via sign-mask,
+/// point-transform shift, sign extraction, eob_pos tracking.
+#[cfg(target_arch = "x86_64")]
+#[inline(always)]
+unsafe fn prepare_ac_refine_sse2(
+    block: &[i16; 64],
+    ss: usize,
+    band_len: usize,
+    al: u8,
+    absvals: &mut [u16; 64],
+    sign_bits: &mut [u16; 64],
+    eob_pos: &mut usize,
+) {
+    use core::arch::x86_64::*;
+
+    *eob_pos = 0;
+    let shift_amt: __m128i = _mm_cvtsi64_si128(al as i64);
+    let ones: __m128i = _mm_set1_epi16(1);
+
+    let mut i: usize = 0;
+    while i + 8 <= band_len {
+        let raw: __m128i = _mm_loadu_si128(block.as_ptr().add(ss + i) as *const __m128i);
+
+        // abs(coeff)
+        let sign: __m128i = _mm_srai_epi16(raw, 15);
+        let abs_val: __m128i = _mm_sub_epi16(_mm_xor_si128(raw, sign), sign);
+
+        // temp = abs_val >> al
+        let temp: __m128i = _mm_sra_epi16(abs_val, shift_amt);
+        _mm_storeu_si128(absvals.as_mut_ptr().add(i) as *mut __m128i, temp);
+
+        // sign_bits = (sign_mask as u16) + 1 = 0 for negative, 1 for positive/zero
+        let sign_out: __m128i = _mm_add_epi16(sign, ones);
+        _mm_storeu_si128(sign_bits.as_mut_ptr().add(i) as *mut __m128i, sign_out);
+
+        // Track eob_pos: find positions where temp == 1
+        let eq_one: __m128i = _mm_cmpeq_epi16(temp, ones);
+        let mask: u32 = _mm_movemask_epi8(_mm_packs_epi16(eq_one, _mm_setzero_si128())) as u32;
+        if mask != 0 {
+            // Highest set bit position in the 8-bit mask
+            let highest: u32 = 7 - (mask as u8).leading_zeros();
+            let pos: usize = i + highest as usize + 1;
+            if pos > *eob_pos {
+                *eob_pos = pos;
+            }
+        }
+
+        i += 8;
+    }
+
+    // Scalar tail
+    while i < band_len {
+        let coeff: i32 = *block.get_unchecked(ss + i) as i32;
+        let sign_mask: i32 = coeff >> 31;
+        let abs_coeff: i32 = (coeff ^ sign_mask) - sign_mask;
+        let temp: u16 = (abs_coeff >> al) as u16;
+        *absvals.get_unchecked_mut(i) = temp;
+        *sign_bits.get_unchecked_mut(i) = (sign_mask as u16).wrapping_add(1);
+        if temp == 1 {
+            *eob_pos = i + 1;
+        }
+        i += 1;
+    }
+}
+
 /// Gather AC symbol frequencies for a progressive AC scan (ah==0, first scan).
 ///
 /// Mirrors the zero-run / EOB logic from `encode_ac_first_block` to produce
 /// accurate symbol frequency counts for optimal Huffman table generation.
 /// `ss` and `se` are the spectral band limits (1..=63); `al` is the point transform.
+#[allow(dead_code)]
 fn gather_progressive_ac_freq(blocks: &[[i16; 64]], ss: u8, se: u8, al: u8, freq: &mut [u32; 257]) {
     let ss_usize: usize = ss as usize;
     let se_usize: usize = se as usize;
@@ -2589,6 +3077,7 @@ fn emit_eobrun_freq(eobrun: u32, freq: &mut [u32; 257]) {
 /// EOBRUN batching: only ZRL (0xF0), EOB (batched via EOBRUN), and `(run, 1)`
 /// symbols are counted. EOBRUN batching affects which EOB symbol (nbits << 4)
 /// is emitted, so frequencies must match the encoder exactly.
+#[allow(dead_code)]
 fn gather_progressive_ac_refine_freq(
     blocks: &[[i16; 64]],
     ss: u8,
@@ -3494,7 +3983,11 @@ fn encode_arith_ac_refine_scan(
     }
 }
 
-/// Encode a progressive DC scan.
+/// Encode a progressive DC scan directly into the output Vec.
+///
+/// Uses hoisted BitWriter state (local_put_bits) to avoid struct field
+/// store-reload overhead per block. Writes directly into the output Vec,
+/// eliminating the intermediate BitWriter allocation and final extend_from_slice.
 #[allow(clippy::too_many_arguments)]
 fn encode_progressive_dc_scan(
     coeff_bufs: &[Vec<[i16; 64]>],
@@ -3504,56 +3997,99 @@ fn encode_progressive_dc_scan(
     mcus_y: usize,
     dc_luma_table: &HuffTable,
     dc_chroma_table: &HuffTable,
-    writer: &mut BitWriter,
+    output: &mut Vec<u8>,
 ) {
-    let al = scan.al;
-    let ah = scan.ah;
-    let mut prev_dc = vec![0i16; scan.component_indices.len()];
+    let al: u8 = scan.al;
+    let ah: u8 = scan.ah;
+    let mut prev_dc: [i16; 4] = [0i16; 4];
 
-    for mcu_y in 0..mcus_y {
-        for mcu_x in 0..mcus_x {
-            for (scan_ci, &ci) in scan.component_indices.iter().enumerate() {
-                let layout = &comp_layouts[ci];
-                let dc_table = if ci == 0 {
-                    dc_luma_table
-                } else {
-                    dc_chroma_table
-                };
+    // Reserve capacity: worst-case ~32 bits per block per component
+    let total_blocks: usize = scan
+        .component_indices
+        .iter()
+        .map(|&ci| {
+            let layout = &comp_layouts[ci];
+            mcus_x * mcus_y * layout.h_blocks * layout.v_blocks
+        })
+        .sum();
+    let reserve: usize = total_blocks * 4 + 64;
+    output.reserve(reserve);
 
-                for bv in 0..layout.v_blocks {
-                    for bh in 0..layout.h_blocks {
-                        let bx = mcu_x * layout.h_blocks + bh;
-                        let by = mcu_y * layout.v_blocks + bv;
-                        let block = &coeff_bufs[ci][by * layout.blocks_x + bx];
+    unsafe {
+        let base: usize = output.len();
+        let mut pb: u64 = 0;
+        let mut fb: i32 = 64;
+        let mut buf: *mut u8 = output.as_mut_ptr().add(base);
 
-                        if ah == 0 {
-                            // DC first scan: encode (DC >> Al)
-                            let dc: i16 = block[0] >> al;
-                            let diff: i16 = dc - prev_dc[scan_ci];
-                            prev_dc[scan_ci] = dc;
+        for mcu_y in 0..mcus_y {
+            for mcu_x in 0..mcus_x {
+                for (scan_ci, &ci) in scan.component_indices.iter().enumerate() {
+                    let layout = &comp_layouts[ci];
+                    let dc_table: &HuffTable = if ci == 0 {
+                        dc_luma_table
+                    } else {
+                        dc_chroma_table
+                    };
 
-                            if diff == 0 {
-                                writer.write_bits(dc_table.ehufco[0], dc_table.ehufsi[0]);
-                            } else {
-                                // Combined Huffman code + magnitude in one put_bits call
-                                let abs_diff: u16 = diff.unsigned_abs();
-                                let category: u8 = 16 - abs_diff.leading_zeros() as u8;
-                                let magnitude: u16 = if diff > 0 { diff as u16 } else { !abs_diff };
-                                let huff_code: u32 = dc_table.ehufco[category as usize] as u32;
-                                let huff_size: u8 = dc_table.ehufsi[category as usize];
-                                let mag_masked: u32 = magnitude as u32 & ((1u32 << category) - 1);
-                                let combined: u32 = (huff_code << category) | mag_masked;
-                                writer.put_bits(combined, huff_size + category);
+                    for bv in 0..layout.v_blocks {
+                        for bh in 0..layout.h_blocks {
+                            let bx: usize = mcu_x * layout.h_blocks + bh;
+                            let by: usize = mcu_y * layout.v_blocks + bv;
+                            let block: &[i16; 64] = &coeff_bufs[ci][by * layout.blocks_x + bx];
+
+                            // Ensure capacity: 16 bytes per block worst-case
+                            let written: usize =
+                                buf.offset_from(output.as_ptr().add(base)) as usize;
+                            if written + 64 > reserve {
+                                output.set_len(base + written);
+                                output.reserve(reserve);
+                                buf = output.as_mut_ptr().add(base + written);
                             }
-                        } else {
-                            // DC refine: single bit
-                            let bit: u32 = ((block[0] >> al) & 1) as u32;
-                            writer.put_bits(bit, 1);
+
+                            if ah == 0 {
+                                let dc: i16 = block[0] >> al;
+                                let diff: i16 = dc - prev_dc[scan_ci];
+                                prev_dc[scan_ci] = dc;
+
+                                if diff == 0 {
+                                    local_put_bits(
+                                        &mut pb,
+                                        &mut fb,
+                                        &mut buf,
+                                        dc_table.ehufco[0] as u32,
+                                        dc_table.ehufsi[0],
+                                    );
+                                } else {
+                                    let abs_diff: u16 = diff.unsigned_abs();
+                                    let category: u8 = 16 - abs_diff.leading_zeros() as u8;
+                                    let magnitude: u16 =
+                                        if diff > 0 { diff as u16 } else { !abs_diff };
+                                    let huff_code: u32 = dc_table.ehufco[category as usize] as u32;
+                                    let huff_size: u8 = dc_table.ehufsi[category as usize];
+                                    let mag_masked: u32 =
+                                        magnitude as u32 & ((1u32 << category) - 1);
+                                    let combined: u32 = (huff_code << category) | mag_masked;
+                                    local_put_bits(
+                                        &mut pb,
+                                        &mut fb,
+                                        &mut buf,
+                                        combined,
+                                        huff_size + category,
+                                    );
+                                }
+                            } else {
+                                let bit: u32 = ((block[0] >> al) & 1) as u32;
+                                local_put_bits(&mut pb, &mut fb, &mut buf, bit, 1);
+                            }
                         }
                     }
                 }
             }
         }
+
+        local_drain_bits(&mut pb, &mut fb, &mut buf);
+        let final_len: usize = buf.offset_from(output.as_ptr().add(base)) as usize;
+        output.set_len(base + final_len);
     }
 }
 
