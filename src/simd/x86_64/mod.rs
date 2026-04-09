@@ -139,7 +139,7 @@ pub(crate) unsafe fn avx2_downsample_h2v2_fdct_quantize(
     use core::arch::x86_64::*;
 
     let ones: __m128i = _mm_set1_epi8(1);
-    let bias: __m128i = _mm_set1_epi16(2); // rounding for divide-by-4
+    let bias: __m128i = _mm_set_epi16(2, 1, 2, 1, 2, 1, 2, 1); // alternating rounding bias for divide-by-4
     let level_shift: __m128i = _mm_set1_epi16(128);
 
     // Downsample 8 pairs of rows → 8 output rows (each 8 i16)
@@ -200,7 +200,7 @@ pub(crate) unsafe fn avx2_downsample_h2v1_fdct_quantize(
     use core::arch::x86_64::*;
 
     let ones: __m128i = _mm_set1_epi8(1);
-    let bias: __m128i = _mm_set1_epi16(1); // rounding for divide-by-2
+    let bias: __m128i = _mm_set_epi16(1, 0, 1, 0, 1, 0, 1, 0); // alternating rounding bias for divide-by-2
     let level_shift: __m128i = _mm_set1_epi16(128);
 
     macro_rules! downsample_row {
