@@ -92,6 +92,54 @@ jobs:
       - run: cargo test "cross_encode|cross_check" --tests
         timeout-minutes: 15
 
+  test-corpus:
+    name: Corpus Test (C parity)
+    runs-on: ubuntu-latest
+    needs: [test-cross-encode]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Build libjpeg-turbo 3.1.0 from source
+        run: |
+          sudo apt-get install -y cmake nasm
+          git clone --depth 1 --branch 3.1.0 https://github.com/libjpeg-turbo/libjpeg-turbo.git /tmp/ljt
+          cmake -S /tmp/ljt -B /tmp/ljt/build -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=/usr/local
+          cmake --build /tmp/ljt/build -j$(nproc)
+          sudo cmake --install /tmp/ljt/build
+          echo "/usr/local/bin" >> $GITHUB_PATH
+      - name: Generate corpus
+        run: cargo run --release --example generate_corpus
+        timeout-minutes: 5
+      - name: Run corpus test
+        run: |
+          OUTPUT=$(cargo run --release --example corpus_test -- --corpus-dir tests/corpus/ 2>&1)
+          echo "$OUTPUT" | tail -5
+          # Parse summary line counts
+          SUMMARY=$(echo "$OUTPUT" | tail -5)
+          echo "$SUMMARY"
+          # Check for crashes (any operation)
+          CRASH=$(echo "$SUMMARY" | grep -oP '\d+ crash' | grep -oP '^\d+' | awk '{s+=$1}END{print s+0}')
+          if [ "$CRASH" -gt 0 ]; then
+            echo "::error::Corpus test has $CRASH crashes"
+            exit 1
+          fi
+          # Decode and transform must have 0 fail
+          D_FAIL=$(echo "$SUMMARY" | grep "Decode:" | grep -oP '\d+ fail' | grep -oP '^\d+')
+          T_FAIL=$(echo "$SUMMARY" | grep "Transform:" | grep -oP '\d+ fail' | grep -oP '^\d+')
+          if [ "${D_FAIL:-0}" -gt 0 ] || [ "${T_FAIL:-0}" -gt 0 ]; then
+            echo "::error::Decode (${D_FAIL:-0}) or Transform (${T_FAIL:-0}) failures"
+            exit 1
+          fi
+          # Encode failures are warnings on x86_64 (known SIMD rounding diffs vs aarch64)
+          E_FAIL=$(echo "$SUMMARY" | grep "Encode:" | grep -oP '\d+ fail' | grep -oP '^\d+')
+          if [ "${E_FAIL:-0}" -gt 0 ]; then
+            echo "::warning::Encode has ${E_FAIL} failures (x86_64 SIMD rounding diff)"
+          fi
+        timeout-minutes: 30
+
   # SIMD tests on aarch64 (if self-hosted runner available)
   # test-aarch64:
   #   name: NEON Tests
