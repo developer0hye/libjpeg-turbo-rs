@@ -12,8 +12,8 @@ use std::path::{Path, PathBuf};
 
 use libjpeg_turbo_rs::{
     decompress, decompress_cropped, decompress_to, transform_jpeg_with_options, CropRegion,
-    Encoder, Image, PixelFormat, ScalingFactor, ScanScript, Subsampling, TransformOp,
-    TransformOptions,
+    Encoder, Image, PixelFormat, ScalingFactor, ScanlineDecoder, ScanScript, Subsampling,
+    TransformOp, TransformOptions,
 };
 
 // ===========================================================================
@@ -872,18 +872,141 @@ fn c_djpeg_420m_islow_scaled_up() {
 /// CMakeLists line 1774: djpeg 420-islow-skip15_31
 /// -dct int -skip 15,31  testorig.jpg
 #[test]
-#[ignore = "not yet implemented: djpeg -skip (partial decode / skip_scanlines)"]
 fn c_djpeg_420_islow_skip15_31() {
-    // When jpeg_skip_scanlines is implemented:
-    // Decode testorig.jpg with -skip 15,31 and compare
-    todo!("Implement skip_scanlines test");
+    let djpeg = match helpers::djpeg_path() {
+        Some(p) => p,
+        None => {
+            eprintln!("SKIP: djpeg not found");
+            return;
+        }
+    };
+    let imgdir = testimages();
+    let src_jpg = imgdir.join("testorig.jpg");
+    if !src_jpg.exists() {
+        eprintln!("SKIP: testorig.jpg not found");
+        return;
+    }
+
+    let skip_start: usize = 15;
+    let skip_end: usize = 31;
+
+    // C reference: djpeg -dct int -skip 15,31 -ppm testorig.jpg
+    let c_ppm = helpers::TempFile::new("c_420_skip15_31.ppm");
+    helpers::run_c_djpeg(
+        &djpeg,
+        &["-dct", "int", "-skip", &format!("{},{}", skip_start, skip_end), "-ppm"],
+        &src_jpg,
+        c_ppm.path(),
+    );
+
+    // Rust: ScanlineDecoder with skip
+    let jpeg_data = read_file(&src_jpg);
+    let mut decoder = ScanlineDecoder::new(&jpeg_data).expect("ScanlineDecoder::new failed");
+    decoder.set_output_format(PixelFormat::Rgb);
+    let width = decoder.header().width as usize;
+    let height = decoder.header().height as usize;
+    let row_bytes = width * 3;
+    let skipped_count = skip_end - skip_start + 1;
+    let output_height = height - skipped_count;
+
+    let mut output = Vec::with_capacity(output_height * row_bytes);
+    let mut row_buf = vec![0u8; row_bytes];
+
+    // Read rows before skip
+    for _ in 0..skip_start {
+        decoder.read_scanline(&mut row_buf).expect("read_scanline failed");
+        output.extend_from_slice(&row_buf);
+    }
+
+    // Skip rows
+    let skipped = decoder.skip_scanlines(skipped_count).expect("skip_scanlines failed");
+    assert_eq!(skipped, skipped_count);
+
+    // Read remaining rows
+    for _ in (skip_end + 1)..height {
+        decoder.read_scanline(&mut row_buf).expect("read_scanline failed");
+        output.extend_from_slice(&row_buf);
+    }
+
+    let rust_ppm = helpers::TempFile::new("rust_420_skip15_31.ppm");
+    helpers::write_ppm_file(rust_ppm.path(), width, output_height, &output);
+
+    helpers::assert_files_identical(rust_ppm.path(), c_ppm.path(), "djpeg-420-islow-skip15_31");
 }
 
 /// CMakeLists line 1809: djpeg 444-islow-skip1_6
 #[test]
-#[ignore = "not yet implemented: djpeg -skip (partial decode / skip_scanlines)"]
 fn c_djpeg_444_islow_skip1_6() {
-    todo!("Implement skip_scanlines test");
+    let cjpeg = match helpers::cjpeg_path() {
+        Some(p) => p,
+        None => {
+            eprintln!("SKIP: cjpeg not found");
+            return;
+        }
+    };
+    let djpeg = match helpers::djpeg_path() {
+        Some(p) => p,
+        None => {
+            eprintln!("SKIP: djpeg not found");
+            return;
+        }
+    };
+    let imgdir = testimages();
+    let src_ppm = imgdir.join("testorig.ppm");
+    if !src_ppm.exists() {
+        eprintln!("SKIP: testorig.ppm not found");
+        return;
+    }
+
+    let skip_start: usize = 1;
+    let skip_end: usize = 6;
+
+    // Create 444 JPEG: cjpeg -dct int -sample 1x1
+    let jpeg_file = helpers::TempFile::new("444_islow.jpg");
+    helpers::run_c_cjpeg(&cjpeg, &["-dct", "int", "-sample", "1x1"], &src_ppm, jpeg_file.path());
+
+    // C reference: djpeg -dct int -skip 1,6 -ppm
+    let c_ppm = helpers::TempFile::new("c_444_skip1_6.ppm");
+    helpers::run_c_djpeg(
+        &djpeg,
+        &["-dct", "int", "-skip", &format!("{},{}", skip_start, skip_end), "-ppm"],
+        jpeg_file.path(),
+        c_ppm.path(),
+    );
+
+    // Rust: ScanlineDecoder with skip
+    let jpeg_data = read_file(jpeg_file.path());
+    let mut decoder = ScanlineDecoder::new(&jpeg_data).expect("ScanlineDecoder::new failed");
+    decoder.set_output_format(PixelFormat::Rgb);
+    let width = decoder.header().width as usize;
+    let height = decoder.header().height as usize;
+    let row_bytes = width * 3;
+    let skipped_count = skip_end - skip_start + 1;
+    let output_height = height - skipped_count;
+
+    let mut output = Vec::with_capacity(output_height * row_bytes);
+    let mut row_buf = vec![0u8; row_bytes];
+
+    // Read rows before skip
+    for _ in 0..skip_start {
+        decoder.read_scanline(&mut row_buf).expect("read_scanline failed");
+        output.extend_from_slice(&row_buf);
+    }
+
+    // Skip rows
+    let skipped = decoder.skip_scanlines(skipped_count).expect("skip_scanlines failed");
+    assert_eq!(skipped, skipped_count);
+
+    // Read remaining rows
+    for _ in (skip_end + 1)..height {
+        decoder.read_scanline(&mut row_buf).expect("read_scanline failed");
+        output.extend_from_slice(&row_buf);
+    }
+
+    let rust_ppm = helpers::TempFile::new("rust_444_skip1_6.ppm");
+    helpers::write_ppm_file(rust_ppm.path(), width, output_height, &output);
+
+    helpers::assert_files_identical(rust_ppm.path(), c_ppm.path(), "djpeg-444-islow-skip1_6");
 }
 
 // ===========================================================================

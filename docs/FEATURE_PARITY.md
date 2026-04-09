@@ -353,7 +353,7 @@
 - [x] AVX2 merged H2V1 upsample + color convert
 - [x] AVX2 merged H2V2 upsample + color convert
 - [x] Row-streaming H2V2 upsample+color pipeline (fused, no full-plane alloc)
-- [ ] AVX2 color conversion for RGBA/BGR/BGRA formats
+- [x] AVX2 color conversion for RGBA/BGR/BGRA formats (`avx2_ycbcr_to_rgba_row`, `avx2_ycbcr_to_bgr_row`, `avx2_ycbcr_to_bgra_row`)
 - [ ] SSE2 IDCT DC-only fast path + strided output
 - [x] x86_64 encoder SIMD (AVX2 FDCT, RGB→YCbCr, quantization + zigzag)
 
@@ -442,17 +442,17 @@
 | Pixel formats | 13 | 13 | 100% |
 | Chroma subsampling | 8 | 8 | 100% |
 | Color spaces | 6 | 6 | 100% |
-| Compress params | ~46 | ~65 | ~71% |
-| Decompress params | ~31 | ~55 | ~56% |
+| Compress params | 59 | 68 | 87% |
+| Decompress params | 56 | 56 | 100% |
 | Metadata | 11 | 11 | 100% |
 | Transform ops | 8 | 8 | 100% |
 | Transform options | 9 | 9 | 100% |
 | Transform misc | 6 | 6 | 100% |
 | YUV/Planar API | 12 | 12 | 100% |
-| SIMD (aarch64) | 10 | 12 | 83% |
-| SIMD (x86_64) | 11 | 13 | 85% |
-| Memory & I/O | 11 | ~20 | ~55% |
-| Error handling | 5 | ~14 | ~36% |
+| SIMD (aarch64) | 14 | 14 | 100% |
+| SIMD (x86_64) | 12 | 13 | 92% |
+| Memory & I/O | 12 | 18 | 67% |
+| Error handling | 5 | 14 | 36% |
 | Progress | 4 | 4 | 100% |
 | TJ3 Handle API | 6 | 6 | 100% |
 

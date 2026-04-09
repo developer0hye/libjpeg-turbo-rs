@@ -94,6 +94,77 @@ fn make_checkerboard(width: usize, height: usize, block: usize) -> Vec<u8> {
     pixels
 }
 
+/// Deterministic pseudo-random noise (LCG-based, no external deps)
+fn make_noise(width: usize, height: usize, seed: u64) -> Vec<u8> {
+    let mut pixels = Vec::with_capacity(width * height * 3);
+    let mut state = seed;
+    for _ in 0..(width * height * 3) {
+        state = state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        pixels.push((state >> 33) as u8);
+    }
+    pixels
+}
+
+/// High-contrast edges (vertical and horizontal bars with color transitions)
+fn make_edges(width: usize, height: usize) -> Vec<u8> {
+    let mut pixels = Vec::with_capacity(width * height * 3);
+    for y in 0..height {
+        for x in 0..width {
+            let h_edge = (x % 16 < 8) as u8 * 255;
+            let v_edge = (y % 16 < 8) as u8 * 255;
+            let diag = ((x + y) % 8 < 4) as u8 * 200;
+            pixels.push(h_edge);
+            pixels.push(v_edge);
+            pixels.push(diag);
+        }
+    }
+    pixels
+}
+
+/// Sine wave pattern (smooth gradients with varying frequency)
+fn make_sine(width: usize, height: usize) -> Vec<u8> {
+    let mut pixels = Vec::with_capacity(width * height * 3);
+    for y in 0..height {
+        for x in 0..width {
+            let fx = x as f64 / width.max(1) as f64;
+            let fy = y as f64 / height.max(1) as f64;
+            let r = ((fx * 4.0 * std::f64::consts::PI).sin() * 127.0 + 128.0) as u8;
+            let g = ((fy * 6.0 * std::f64::consts::PI).sin() * 127.0 + 128.0) as u8;
+            let b = (((fx + fy) * 3.0 * std::f64::consts::PI).sin() * 127.0 + 128.0) as u8;
+            pixels.push(r);
+            pixels.push(g);
+            pixels.push(b);
+        }
+    }
+    pixels
+}
+
+/// Mixed-frequency pattern simulating natural-looking content
+fn make_natural(width: usize, height: usize) -> Vec<u8> {
+    let mut pixels = Vec::with_capacity(width * height * 3);
+    let mut state: u64 = 42;
+    for y in 0..height {
+        for x in 0..width {
+            let fx = x as f64 / width.max(1) as f64;
+            let fy = y as f64 / height.max(1) as f64;
+            // Low-frequency base
+            let base_r = ((fx * 2.0 * std::f64::consts::PI).sin() * 60.0 + 128.0) as f64;
+            let base_g = ((fy * 1.5 * std::f64::consts::PI).cos() * 60.0 + 128.0) as f64;
+            let base_b = (((fx * fy) * 4.0 * std::f64::consts::PI).sin() * 40.0 + 128.0) as f64;
+            // High-frequency noise
+            state = state.wrapping_mul(6364136223846793005).wrapping_add(1);
+            let noise = ((state >> 33) as f64 / 255.0 - 0.5) * 30.0;
+            let r = (base_r + noise).clamp(0.0, 255.0) as u8;
+            let g = (base_g + noise * 0.7).clamp(0.0, 255.0) as u8;
+            let b = (base_b + noise * 0.5).clamp(0.0, 255.0) as u8;
+            pixels.push(r);
+            pixels.push(g);
+            pixels.push(b);
+        }
+    }
+    pixels
+}
+
 // ---------------------------------------------------------------------------
 // Source PPM descriptors
 // ---------------------------------------------------------------------------
@@ -154,6 +225,26 @@ fn prepare_sources(tmp_dir: &Path) -> Vec<SourcePpm> {
         ("odd_33x17", 33, 17, Box::new(|w, h| make_gradient(w, h))),
         ("strip_100x1", 100, 1, Box::new(|w, h| make_gradient(w, h))),
         ("strip_1x100", 1, 100, Box::new(|w, h| make_gradient(w, h))),
+        // Phase 2 additions: more resolutions, content patterns, edge cases
+        ("noise_320x240", 320, 240, Box::new(|w, h| make_noise(w, h, 12345))),
+        ("noise_17x31", 17, 31, Box::new(|w, h| make_noise(w, h, 67890))),
+        ("edges_256x256", 256, 256, Box::new(|w, h| make_edges(w, h))),
+        ("sine_800x600", 800, 600, Box::new(|w, h| make_sine(w, h))),
+        ("natural_640x480", 640, 480, Box::new(|w, h| make_natural(w, h))),
+        ("natural_1280x720", 1280, 720, Box::new(|w, h| make_natural(w, h))),
+        ("odd_127x63", 127, 63, Box::new(|w, h| make_gradient(w, h))),
+        ("odd_255x127", 255, 127, Box::new(|w, h| make_noise(w, h, 99999))),
+        ("tall_16x256", 16, 256, Box::new(|w, h| make_gradient(w, h))),
+        ("wide_256x16", 256, 16, Box::new(|w, h| make_edges(w, h))),
+        ("solid_black_8x8", 8, 8, Box::new(|w, h| make_solid(w, h, 0, 0, 0))),
+        ("solid_white_8x8", 8, 8, Box::new(|w, h| make_solid(w, h, 255, 255, 255))),
+        // Large resolutions: 4K and 8K
+        ("natural_3840x2160", 3840, 2160, Box::new(|w, h| make_natural(w, h))),
+        ("gradient_7680x4320", 7680, 4320, Box::new(|w, h| make_gradient(w, h))),
+        ("noise_7680x4320", 7680, 4320, Box::new(|w, h| make_noise(w, h, 77777))),
+        ("edges_7680x4320", 7680, 4320, Box::new(|w, h| make_edges(w, h))),
+        // Odd 8K dimensions (non-MCU-aligned)
+        ("natural_7681x4321", 7681, 4321, Box::new(|w, h| make_natural(w, h))),
     ];
 
     for (name, width, height, gen) in &synthetics {
@@ -187,6 +278,8 @@ fn all_variants() -> Vec<CjpegVariant> {
         ("420", Some("2x2")),
         ("422", Some("2x1")),
         ("444", Some("1x1")),
+        ("440", Some("1x2")),
+        ("411", Some("4x1")),
         ("gray", None), // uses -grayscale instead
     ];
     let qualities: &[u32] = &[1, 10, 25, 50, 75, 90, 95, 100];
@@ -200,6 +293,8 @@ fn all_variants() -> Vec<CjpegVariant> {
         ("arithmetic", &["-arithmetic"]),
         ("arithmetic_progressive", &["-arithmetic", "-progressive"]),
         ("restart1", &["-restart", "1"]),
+        ("restart4", &["-restart", "4"]),
+        ("smooth50", &["-smooth", "50"]),
     ];
 
     for (subsamp_label, sample_arg) in subsampling {

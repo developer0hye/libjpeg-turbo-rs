@@ -399,11 +399,9 @@ fn c_tjtrantest_quick() {
 
 /// Quick C cross-validation for S420 transforms.
 ///
-/// S420 transforms currently diverge from jpegtran for non-trivial operations
-/// (HFlip, VFlip, Rot90, Rot180, Rot270, Transpose, Transverse).
-/// This is a real bug in the Rust transform edge-block handling.
+/// S420 is non-iMCU-aligned for testorig.ppm (227x149, iMCU=16x16).
+/// All 8 transforms produce byte-identical output to C jpegtran.
 #[test]
-#[ignore = "S420 non-iMCU-aligned: C jpegtran's virt_barray modifies partial-MCU-row coefficients during access; Rust reads raw bitstream coefficients. Decoded pixels are identical (diff=0) but JPEG bitstream differs."]
 fn c_tjtrantest_quick_420() {
     let jpegtran: PathBuf = match helpers::jpegtran_path() {
         Some(p) => p,
