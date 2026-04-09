@@ -3382,11 +3382,14 @@ impl<'a> Decoder<'a> {
                 ] {
                     // C libjpeg-turbo uses box filter when:
                     // - fast_upsample requested, OR
-                    // - actual chroma width <= 2 (fancy filter needs >= 3 columns), OR
+                    // - actual chroma width <= 2 AND horizontal upsampling is needed
+                    //   (fancy horizontal filter needs >= 3 columns; vertical-only
+                    //   H1V2 works fine with any width), OR
                     // - min_DCT_scaled_size == 1 (jdsample.c line 478: jdmainct.c
                     //   doesn't support context rows at this size)
-                    let use_box_filter: bool =
-                        self.fast_upsample || actual_w <= 2 || block_size == 1;
+                    let use_box_filter: bool = self.fast_upsample
+                        || (actual_w <= 2 && comp_hf >= 2)
+                        || block_size == 1;
 
                     if comp_hf == 1 && comp_vf == 1 {
                         // No upsampling needed for this component — copy directly.
