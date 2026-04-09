@@ -117,25 +117,26 @@ jobs:
         run: |
           OUTPUT=$(cargo run --release --example corpus_test -- --corpus-dir tests/corpus/ 2>&1)
           echo "$OUTPUT" | tail -5
-          # Crashes are always fatal
-          CRASH=$(echo "$OUTPUT" | grep -c "crash" || true)
+          # Parse summary line counts
+          SUMMARY=$(echo "$OUTPUT" | tail -5)
+          echo "$SUMMARY"
+          # Check for crashes (any operation)
+          CRASH=$(echo "$SUMMARY" | grep -oP '\d+ crash' | grep -oP '^\d+' | awk '{s+=$1}END{print s+0}')
           if [ "$CRASH" -gt 0 ]; then
             echo "::error::Corpus test has $CRASH crashes"
-            echo "$OUTPUT" | grep "crash"
             exit 1
           fi
-          # Decode and transform must be 100%
-          DECODE_FAIL=$(echo "$OUTPUT" | grep "decode" | grep -c "fail" || true)
-          TRANSFORM_FAIL=$(echo "$OUTPUT" | grep "transform" | grep -c "fail" || true)
-          if [ "$DECODE_FAIL" -gt 0 ] || [ "$TRANSFORM_FAIL" -gt 0 ]; then
-            echo "::error::Decode ($DECODE_FAIL) or transform ($TRANSFORM_FAIL) failures"
-            echo "$OUTPUT" | grep -E "(decode|transform).*fail"
+          # Decode and transform must have 0 fail
+          D_FAIL=$(echo "$SUMMARY" | grep "Decode:" | grep -oP '\d+ fail' | grep -oP '^\d+')
+          T_FAIL=$(echo "$SUMMARY" | grep "Transform:" | grep -oP '\d+ fail' | grep -oP '^\d+')
+          if [ "${D_FAIL:-0}" -gt 0 ] || [ "${T_FAIL:-0}" -gt 0 ]; then
+            echo "::error::Decode (${D_FAIL:-0}) or Transform (${T_FAIL:-0}) failures"
             exit 1
           fi
-          # Encode failures are warnings on x86_64 (known SIMD rounding diffs)
-          ENCODE_FAIL=$(echo "$OUTPUT" | grep "encode" | grep -c "fail" || true)
-          if [ "$ENCODE_FAIL" -gt 0 ]; then
-            echo "::warning::Encode has $ENCODE_FAIL failures (x86_64 SIMD rounding)"
+          # Encode failures are warnings on x86_64 (known SIMD rounding diffs vs aarch64)
+          E_FAIL=$(echo "$SUMMARY" | grep "Encode:" | grep -oP '\d+ fail' | grep -oP '^\d+')
+          if [ "${E_FAIL:-0}" -gt 0 ]; then
+            echo "::warning::Encode has ${E_FAIL} failures (x86_64 SIMD rounding diff)"
           fi
         timeout-minutes: 30
 
