@@ -182,10 +182,17 @@ fn reference_all_images_decodable() {
     }
 }
 
+/// Verify that baseline and arithmetic decoders produce identical pixels
+/// for lossless transcodes.
+///
+/// testimgint.jpg (baseline, integer DCT from testorig.ppm) and
+/// testimgari.jpg (arithmetic, lossless transcode of testimgint.jpg via
+/// jpegtran -arithmetic) contain identical DCT coefficients.
+/// Decoded pixels must match exactly.
 #[test]
 fn reference_baseline_vs_arithmetic_pixel_similarity() {
     let b = decompress_to(
-        include_bytes!("../references/libjpeg-turbo/testimages/testorig.jpg"),
+        include_bytes!("../references/libjpeg-turbo/testimages/testimgint.jpg"),
         PixelFormat::Rgb,
     )
     .unwrap();
@@ -201,22 +208,41 @@ fn reference_baseline_vs_arithmetic_pixel_similarity() {
         .zip(a.data.iter())
         .map(|(&x, &y)| (x as i32 - y as i32).unsigned_abs() as u64)
         .sum();
-    let mean: f64 = total as f64 / b.data.len() as f64;
-    assert!(mean < 100.0, "baseline vs arith mean diff {:.2}", mean);
+    assert_eq!(
+        total, 0,
+        "baseline vs arith must be pixel-identical for lossless transcodes"
+    );
 }
 
+/// Verify that baseline and progressive decoders produce identical pixels
+/// for lossless transcodes.
+///
+/// Generates a progressive JPEG from testimgint.jpg via lossless transform
+/// (jpegtran -progressive equivalent), then verifies decoded pixels match
+/// the baseline decode exactly.
 #[test]
 fn reference_baseline_vs_progressive_pixel_similarity() {
-    let b = decompress_to(
-        include_bytes!("../references/libjpeg-turbo/testimages/testorig.jpg"),
-        PixelFormat::Rgb,
+    use libjpeg_turbo_rs::{
+        transform_jpeg_with_options, MarkerCopyMode, TransformOp, TransformOptions,
+    };
+
+    let baseline_jpeg: &[u8] =
+        include_bytes!("../references/libjpeg-turbo/testimages/testimgint.jpg");
+
+    // Lossless transcode to progressive (equivalent to jpegtran -progressive)
+    let progressive_jpeg: Vec<u8> = transform_jpeg_with_options(
+        baseline_jpeg,
+        &TransformOptions {
+            op: TransformOp::None,
+            progressive: true,
+            copy_markers: MarkerCopyMode::None,
+            ..Default::default()
+        },
     )
     .unwrap();
-    let p = decompress_to(
-        include_bytes!("../references/libjpeg-turbo/testimages/testimgint.jpg"),
-        PixelFormat::Rgb,
-    )
-    .unwrap();
+
+    let b = decompress_to(baseline_jpeg, PixelFormat::Rgb).unwrap();
+    let p = decompress_to(&progressive_jpeg, PixelFormat::Rgb).unwrap();
     assert_eq!((b.width, b.height), (p.width, p.height));
     let total: u64 = b
         .data
@@ -224,8 +250,10 @@ fn reference_baseline_vs_progressive_pixel_similarity() {
         .zip(p.data.iter())
         .map(|(&x, &y)| (x as i32 - y as i32).unsigned_abs() as u64)
         .sum();
-    let mean: f64 = total as f64 / b.data.len() as f64;
-    assert!(mean < 5.0, "baseline vs prog mean diff {:.2}", mean);
+    assert_eq!(
+        total, 0,
+        "baseline vs progressive must be pixel-identical for lossless transcodes"
+    );
 }
 
 // --- C djpeg cross-validation helpers ---

@@ -1324,28 +1324,20 @@ fn tjdecomptest_arithmetic_progressive_sources() {
 
     for &subsamp in &color_subsampling_modes {
         // Create arithmetic-encoded source
-        let arith_jpeg: Vec<u8> = {
-            let enc = Encoder::new(&pixels, 32, 32, PixelFormat::Rgb)
-                .quality(90)
-                .subsampling(subsamp)
-                .arithmetic(true);
-            match enc.encode() {
-                Ok(j) => j,
-                Err(_) => continue,
-            }
-        };
+        let arith_jpeg: Vec<u8> = Encoder::new(&pixels, 32, 32, PixelFormat::Rgb)
+            .quality(90)
+            .subsampling(subsamp)
+            .arithmetic(true)
+            .encode()
+            .unwrap_or_else(|e| panic!("arithmetic encode failed for {:?}: {}", subsamp, e));
 
         // Create progressive-encoded source
-        let prog_jpeg: Vec<u8> = {
-            let enc = Encoder::new(&pixels, 32, 32, PixelFormat::Rgb)
-                .quality(90)
-                .subsampling(subsamp)
-                .progressive(true);
-            match enc.encode() {
-                Ok(j) => j,
-                Err(_) => continue,
-            }
-        };
+        let prog_jpeg: Vec<u8> = Encoder::new(&pixels, 32, 32, PixelFormat::Rgb)
+            .quality(90)
+            .subsampling(subsamp)
+            .progressive(true)
+            .encode()
+            .unwrap_or_else(|e| panic!("progressive encode failed for {:?}: {}", subsamp, e));
 
         let sources: Vec<(&str, &Vec<u8>)> =
             vec![("arithmetic", &arith_jpeg), ("progressive", &prog_jpeg)];
