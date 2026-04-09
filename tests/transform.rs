@@ -411,3 +411,35 @@ fn c_jpegtran_transform_coeff_diff_zero() {
         );
     }
 }
+
+/// Regression test: transforms on a 3840×2160 progressive JPEG must not
+/// overflow the u16 mcu_count counter (total blocks = 480×270 = 129,600 > u16::MAX).
+///
+/// Before the fix, all 7 transforms panicked with "attempt to add with overflow"
+/// in decode_progressive_coefficients's non-interleaved scan loop.
+#[test]
+fn transform_large_progressive_no_overflow() {
+    let path = "tests/corpus/fixtures/photo_3840x2160_420_prog.jpg";
+    let data = match std::fs::read(path) {
+        Ok(d) => d,
+        Err(_) => {
+            eprintln!("SKIP: {} not found", path);
+            return;
+        }
+    };
+
+    let ops = [
+        TransformOp::HFlip,
+        TransformOp::VFlip,
+        TransformOp::Transpose,
+        TransformOp::Transverse,
+        TransformOp::Rot90,
+        TransformOp::Rot180,
+        TransformOp::Rot270,
+    ];
+
+    for op in ops {
+        transform(&data, op)
+            .unwrap_or_else(|e| panic!("transform {:?} panicked or failed: {}", op, e));
+    }
+}
