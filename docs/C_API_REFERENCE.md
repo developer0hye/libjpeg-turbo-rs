@@ -1,7 +1,7 @@
 # libjpeg-turbo C API → Rust Mapping Reference
 
 > Every public C function from `turbojpeg.h` and `jpeglib.h` with description and Rust equivalent.
-> ✅ = implemented, ❌ = not yet, 🔶 = partial
+> ✅ = implemented, ❌ = not yet, 🔶 = partial, N/A = not applicable in Rust
 
 ---
 
@@ -11,46 +11,46 @@
 
 | C Function | Description | Rust | Status |
 |---|---|---|---|
-| `tj3Init(initType)` | Create compress/decompress/transform handle | No handle pattern; direct function calls | ❌ |
-| `tj3Destroy(handle)` | Destroy handle | N/A (RAII) | ❌ |
+| `tj3Init(initType)` | Create compress/decompress/transform handle | `TjHandle::new()` | ✅ |
+| `tj3Destroy(handle)` | Destroy handle | `Drop` (RAII) | ✅ |
 
 ### Parameter Get/Set
 
 | C Function | Description | Rust | Status |
 |---|---|---|---|
-| `tj3Set(handle, param, value)` | Set integer parameter | Function arguments | ❌ |
-| `tj3Get(handle, param)` | Get integer parameter | Struct fields | ❌ |
+| `tj3Set(handle, param, value)` | Set integer parameter | `TjHandle::set()` | ✅ |
+| `tj3Get(handle, param)` | Get integer parameter | `TjHandle::get()` | ✅ |
 
 **All 26 TJPARAM values:**
 
 | TJPARAM | Description | Rust | Status |
 |---|---|---|---|
-| `STOPONWARNING` | Treat warnings as fatal | — | ❌ |
-| `BOTTOMUP` | Bottom-up row order | — | ❌ |
-| `NOREALLOC` | Disable output buffer realloc | N/A (Vec handles this) | ❌ |
+| `STOPONWARNING` | Treat warnings as fatal | `Decoder::set_stop_on_warning()` | ✅ |
+| `BOTTOMUP` | Bottom-up row order | `Encoder::bottom_up()` / `ScanlineDecoder::set_bottom_up()` | ✅ |
+| `NOREALLOC` | Disable output buffer realloc | `compress_into()` | ✅ |
 | `QUALITY` | Lossy quality 1-100 | `quality: u8` param | ✅ |
 | `SUBSAMP` | Chroma subsampling | `subsampling: Subsampling` param | ✅ |
 | `JPEGWIDTH` | JPEG image width (read-only) | `Image.width` | ✅ |
 | `JPEGHEIGHT` | JPEG image height (read-only) | `Image.height` | ✅ |
 | `PRECISION` | Sample precision 2-16 bits | `compress_lossless_arbitrary()` / `decompress_lossless_arbitrary()` | ✅ |
-| `COLORSPACE` | JPEG colorspace | Auto-detected | 🔶 |
-| `FASTUPSAMPLE` | Nearest-neighbor upsampling | Always fancy | ❌ |
-| `FASTDCT` | Fast DCT/IDCT algorithm | Always ISLOW | ❌ |
+| `COLORSPACE` | JPEG colorspace | `Encoder::colorspace()` / `Decoder::set_output_colorspace()` | ✅ |
+| `FASTUPSAMPLE` | Nearest-neighbor upsampling | `Decoder::set_fast_upsample()` | ✅ |
+| `FASTDCT` | Fast DCT/IDCT algorithm | `Decoder::set_fast_dct()` | ✅ |
 | `OPTIMIZE` | Optimized Huffman tables | `compress_optimized()` | ✅ |
 | `PROGRESSIVE` | Progressive JPEG mode | `compress_progressive()` | ✅ |
-| `SCANLIMIT` | Max progressive scans | — | ❌ |
+| `SCANLIMIT` | Max progressive scans | `Decoder::set_scan_limit()` | ✅ |
 | `ARITHMETIC` | Arithmetic entropy coding | `compress_arithmetic()` | ✅ |
 | `LOSSLESS` | Lossless JPEG mode | `compress_lossless()` | ✅ |
-| `LOSSLESSPSV` | Lossless predictor 1-7 | Hardcoded predictor 1 | 🔶 |
-| `LOSSLESSPT` | Lossless point transform 0-15 | Hardcoded pt=0 | 🔶 |
-| `RESTARTBLOCKS` | Restart interval (MCU blocks) | — | ❌ |
-| `RESTARTROWS` | Restart interval (MCU rows) | — | ❌ |
-| `XDENSITY` | Horizontal pixel density | Hardcoded 72 | 🔶 |
-| `YDENSITY` | Vertical pixel density | Hardcoded 72 | 🔶 |
-| `DENSITYUNITS` | 0=unknown, 1=ppi, 2=ppcm | Hardcoded 1 (ppi) | 🔶 |
-| `MAXMEMORY` | Memory limit | — | ❌ |
-| `MAXPIXELS` | Image size limit | — | ❌ |
-| `SAVEMARKERS` | Marker preservation level 0-4 | ICC/EXIF/Adobe only | 🔶 |
+| `LOSSLESSPSV` | Lossless predictor 1-7 | `Encoder::lossless_predictor()` | ✅ |
+| `LOSSLESSPT` | Lossless point transform 0-15 | `Encoder::lossless_point_transform()` | ✅ |
+| `RESTARTBLOCKS` | Restart interval (MCU blocks) | `Encoder::restart_blocks()` | ✅ |
+| `RESTARTROWS` | Restart interval (MCU rows) | `Encoder::restart_rows()` | ✅ |
+| `XDENSITY` | Horizontal pixel density | `DensityInfo` | ✅ |
+| `YDENSITY` | Vertical pixel density | `DensityInfo` | ✅ |
+| `DENSITYUNITS` | 0=unknown, 1=ppi, 2=ppcm | `DensityUnit` enum | ✅ |
+| `MAXMEMORY` | Memory limit | `Decoder::set_max_memory()` | ✅ |
+| `MAXPIXELS` | Image size limit | `Decoder::set_max_pixels()` | ✅ |
+| `SAVEMARKERS` | Marker preservation level 0-4 | `MarkerSaveConfig` enum | ✅ |
 
 ### Memory
 
@@ -63,11 +63,11 @@
 
 | C Function | Description | Rust | Status |
 |---|---|---|---|
-| `tj3JPEGBufSize(w, h, subsamp)` | Worst-case JPEG output size | — | ❌ |
-| `tj3YUVBufSize(w, align, h, subsamp)` | Total YUV buffer size | — | ❌ |
-| `tj3YUVPlaneSize(comp, w, stride, h, subsamp)` | Single YUV plane size | — | ❌ |
-| `tj3YUVPlaneWidth(comp, w, subsamp)` | YUV plane width | — | ❌ |
-| `tj3YUVPlaneHeight(comp, h, subsamp)` | YUV plane height | — | ❌ |
+| `tj3JPEGBufSize(w, h, subsamp)` | Worst-case JPEG output size | `jpeg_buf_size()` | ✅ |
+| `tj3YUVBufSize(w, align, h, subsamp)` | Total YUV buffer size | `yuv_buf_size()` | ✅ |
+| `tj3YUVPlaneSize(comp, w, stride, h, subsamp)` | Single YUV plane size | `yuv_plane_size()` | ✅ |
+| `tj3YUVPlaneWidth(comp, w, subsamp)` | YUV plane width | `yuv_plane_width()` | ✅ |
+| `tj3YUVPlaneHeight(comp, h, subsamp)` | YUV plane height | `yuv_plane_height()` | ✅ |
 
 ### ICC Profile
 
@@ -81,65 +81,65 @@
 | C Function | Description | Rust | Status |
 |---|---|---|---|
 | `tj3Compress8(handle, src, w, pitch, h, pf, &dst, &size)` | Compress 8-bit pixels to JPEG | `compress()`, `compress_optimized()`, etc. | ✅ |
-| `tj3Compress12(handle, src, w, pitch, h, pf, &dst, &size)` | Compress 12-bit pixels | — | ❌ |
-| `tj3Compress16(handle, src, w, pitch, h, pf, &dst, &size)` | Compress 16-bit pixels (lossless only) | — | ❌ |
+| `tj3Compress12(handle, src, w, pitch, h, pf, &dst, &size)` | Compress 12-bit pixels | `write_scanlines_12()` + TjHandle | ✅ |
+| `tj3Compress16(handle, src, w, pitch, h, pf, &dst, &size)` | Compress 16-bit pixels (lossless only) | `write_scanlines_16()` + TjHandle | ✅ |
 
 ### Compression from YUV
 
 | C Function | Description | Rust | Status |
 |---|---|---|---|
-| `tj3CompressFromYUV8(handle, src, w, align, h, &dst, &size)` | Compress packed YUV to JPEG | — | ❌ |
-| `tj3CompressFromYUVPlanes8(handle, planes, w, strides, h, &dst, &size)` | Compress planar YUV to JPEG | — | ❌ |
+| `tj3CompressFromYUV8(handle, src, w, align, h, &dst, &size)` | Compress packed YUV to JPEG | `yuv::compress_from_yuv()` | ✅ |
+| `tj3CompressFromYUVPlanes8(handle, planes, w, strides, h, &dst, &size)` | Compress planar YUV to JPEG | `yuv::compress_from_yuv_planes()` | ✅ |
 
 ### Color Encode (RGB → YUV, no JPEG)
 
 | C Function | Description | Rust | Status |
 |---|---|---|---|
-| `tj3EncodeYUV8(handle, src, w, pitch, h, pf, dst, align)` | RGB → packed YUV | — | ❌ |
-| `tj3EncodeYUVPlanes8(handle, src, w, pitch, h, pf, planes, strides)` | RGB → planar YUV | — | ❌ |
+| `tj3EncodeYUV8(handle, src, w, pitch, h, pf, dst, align)` | RGB → packed YUV | `yuv::encode_yuv()` | ✅ |
+| `tj3EncodeYUVPlanes8(handle, src, w, pitch, h, pf, planes, strides)` | RGB → planar YUV | `yuv::encode_yuv_planes()` | ✅ |
 
 ### Decompression Header
 
 | C Function | Description | Rust | Status |
 |---|---|---|---|
-| `tj3DecompressHeader(handle, jpeg, size)` | Parse JPEG headers, populate params | `Decoder::new()` / `StreamingDecoder::new()` | ✅ |
+| `tj3DecompressHeader(handle, jpeg, size)` | Parse JPEG headers, populate params | `Decoder::new()` / `ScanlineDecoder::new()` | ✅ |
 
 ### Scaling & Cropping
 
 | C Function | Description | Rust | Status |
 |---|---|---|---|
-| `tj3GetScalingFactors(&count)` | Get list of supported scaling factors | `ScalingFactor` struct | ✅ |
-| `tj3SetScalingFactor(handle, sf)` | Set output scaling | `Decoder::set_scale()` | ✅ |
-| `tj3SetCroppingRegion(handle, region)` | Set crop region | `Decoder::set_crop_region()` | ✅ |
+| `tj3GetScalingFactors(&count)` | Get list of supported scaling factors | `TjHandle::scaling_factors()` / `ScalingFactor` | ✅ |
+| `tj3SetScalingFactor(handle, sf)` | Set output scaling | `Decoder::set_scale()` / `TjHandle::set_scaling_factor()` | ✅ |
+| `tj3SetCroppingRegion(handle, region)` | Set crop region | `Decoder::set_crop_region()` / `TjHandle::set_cropping_region()` | ✅ |
 
 ### Decompression (8-bit)
 
 | C Function | Description | Rust | Status |
 |---|---|---|---|
 | `tj3Decompress8(handle, jpeg, size, dst, pitch, pf)` | Decompress JPEG to 8-bit pixels | `decompress()`, `decompress_to()` | ✅ |
-| `tj3Decompress12(handle, jpeg, size, dst, pitch, pf)` | Decompress to 12-bit | — | ❌ |
-| `tj3Decompress16(handle, jpeg, size, dst, pitch, pf)` | Decompress to 16-bit | — | ❌ |
+| `tj3Decompress12(handle, jpeg, size, dst, pitch, pf)` | Decompress to 12-bit | `read_scanlines_12()` + TjHandle | ✅ |
+| `tj3Decompress16(handle, jpeg, size, dst, pitch, pf)` | Decompress to 16-bit | `read_scanlines_16()` + TjHandle | ✅ |
 
 ### Decompression to YUV
 
 | C Function | Description | Rust | Status |
 |---|---|---|---|
-| `tj3DecompressToYUV8(handle, jpeg, size, dst, align)` | JPEG → packed YUV | — | ❌ |
-| `tj3DecompressToYUVPlanes8(handle, jpeg, size, planes, strides)` | JPEG → planar YUV | — | ❌ |
+| `tj3DecompressToYUV8(handle, jpeg, size, dst, align)` | JPEG → packed YUV | `yuv::decompress_to_yuv()` | ✅ |
+| `tj3DecompressToYUVPlanes8(handle, jpeg, size, planes, strides)` | JPEG → planar YUV | `yuv::decompress_to_yuv_planes()` | ✅ |
 
 ### Color Decode (YUV → RGB, no JPEG)
 
 | C Function | Description | Rust | Status |
 |---|---|---|---|
-| `tj3DecodeYUV8(handle, src, align, dst, w, pitch, h, pf)` | Packed YUV → RGB | — | ❌ |
-| `tj3DecodeYUVPlanes8(handle, planes, strides, dst, w, pitch, h, pf)` | Planar YUV → RGB | — | ❌ |
+| `tj3DecodeYUV8(handle, src, align, dst, w, pitch, h, pf)` | Packed YUV → RGB | `yuv::decode_yuv()` | ✅ |
+| `tj3DecodeYUVPlanes8(handle, planes, strides, dst, w, pitch, h, pf)` | Planar YUV → RGB | `yuv::decode_yuv_planes()` | ✅ |
 
 ### Lossless Transform
 
 | C Function | Description | Rust | Status |
 |---|---|---|---|
-| `tj3Transform(handle, jpeg, size, n, &dstBufs, &dstSizes, transforms)` | Lossless transform with options | `transform_jpeg()` (basic ops only) | 🔶 |
-| `tj3TransformBufSize(handle, transform)` | Estimate output buffer size | — | ❌ |
+| `tj3Transform(handle, jpeg, size, n, &dstBufs, &dstSizes, transforms)` | Lossless transform with options | `transform_jpeg()` (all ops + all TJXOPT flags + custom filter) | ✅ |
+| `tj3TransformBufSize(handle, transform)` | Estimate output buffer size | `transform_buf_size()` | ✅ |
 
 ### Error Handling
 
@@ -152,8 +152,8 @@
 
 | C Function | Description | Rust | Status |
 |---|---|---|---|
-| `tj3LoadImage8(handle, filename, &w, align, &h, &pf)` | Load BMP/PPM to 8-bit buffer | `load_image` / `load_image_from_bytes` | ✅ |
-| `tj3SaveImage8(handle, filename, buf, w, pitch, h, pf)` | Save 8-bit buffer to BMP/PPM | `save_bmp` / `save_ppm` | ✅ |
+| `tj3LoadImage8(handle, filename, &w, align, &h, &pf)` | Load BMP/PPM to 8-bit buffer | `load_image()` / `load_image_from_bytes()` | ✅ |
+| `tj3SaveImage8(handle, filename, buf, w, pitch, h, pf)` | Save 8-bit buffer to BMP/PPM | `save_bmp()` / `save_ppm()` | ✅ |
 | `tj3LoadImage12(...)` / `tj3SaveImage12(...)` | 12-bit file I/O | — | ❌ |
 | `tj3LoadImage16(...)` / `tj3SaveImage16(...)` | 16-bit file I/O | — | ❌ |
 
@@ -166,14 +166,14 @@
 | C Function | Description | Rust | Status |
 |---|---|---|---|
 | `jpeg_std_error(err)` | Create default error manager | `JpegError` enum | ✅ |
-| `jpeg_create_compress(cinfo)` | Create compression struct | Direct function call | ✅ |
-| `jpeg_create_decompress(cinfo)` | Create decompression struct | `Decoder::new()` | ✅ |
-| `jpeg_destroy_compress(cinfo)` | Destroy compressor | RAII / drop | ✅ |
-| `jpeg_destroy_decompress(cinfo)` | Destroy decompressor | RAII / drop | ✅ |
-| `jpeg_abort_compress(cinfo)` | Abort compression | — | ❌ |
-| `jpeg_abort_decompress(cinfo)` | Abort decompression | — | ❌ |
-| `jpeg_abort(cinfo)` | Abort any operation | — | ❌ |
-| `jpeg_destroy(cinfo)` | Destroy any handle | — | ❌ |
+| `jpeg_create_compress(cinfo)` | Create compression struct | `Encoder` / `ScanlineEncoder` | ✅ |
+| `jpeg_create_decompress(cinfo)` | Create decompression struct | `Decoder::new()` / `ScanlineDecoder::new()` | ✅ |
+| `jpeg_destroy_compress(cinfo)` | Destroy compressor | RAII / `Drop` | ✅ |
+| `jpeg_destroy_decompress(cinfo)` | Destroy decompressor | RAII / `Drop` | ✅ |
+| `jpeg_abort_compress(cinfo)` | Abort compression | N/A (RAII) | N/A |
+| `jpeg_abort_decompress(cinfo)` | Abort decompression | N/A (RAII) | N/A |
+| `jpeg_abort(cinfo)` | Abort any operation | N/A (RAII) | N/A |
+| `jpeg_destroy(cinfo)` | Destroy any handle | N/A (RAII) | N/A |
 
 ### Data Source / Destination
 
@@ -189,83 +189,83 @@
 | C Function | Description | Rust | Status |
 |---|---|---|---|
 | `jpeg_set_defaults(cinfo)` | Set default compression params | Automatic in `compress()` | ✅ |
-| `jpeg_set_colorspace(cinfo, cs)` | Set JPEG colorspace | Auto-detected from PixelFormat | 🔶 |
+| `jpeg_set_colorspace(cinfo, cs)` | Set JPEG colorspace | `Encoder::colorspace()` | ✅ |
 | `jpeg_default_colorspace(cinfo)` | Reset to default colorspace | — | ❌ |
-| `jpeg_set_quality(cinfo, quality, force_baseline)` | Set quality factor | `quality: u8` parameter | ✅ |
-| `jpeg_set_linear_quality(cinfo, scale, force_baseline)` | Set linear quality scaling | — | ❌ |
+| `jpeg_set_quality(cinfo, quality, force_baseline)` | Set quality factor | `quality: u8` parameter + `Encoder::force_baseline()` | ✅ |
+| `jpeg_set_linear_quality(cinfo, scale, force_baseline)` | Set linear quality scaling | `Encoder::linear_quality()` | ✅ |
 | `jpeg_default_qtables(cinfo, force_baseline)` | Reset quant tables | — | ❌ |
-| `jpeg_add_quant_table(cinfo, which, table, scale, force_baseline)` | Add custom quant table | — | ❌ |
-| `jpeg_quality_scaling(quality)` | Convert quality to scale factor | Internal in `tables::quality_scale_quant_table` | ✅ |
-| `jpeg_enable_lossless(cinfo, psv, pt)` | Enable lossless mode | `compress_lossless()`, `compress_lossless_arbitrary()` | ✅ |
+| `jpeg_add_quant_table(cinfo, which, table, scale, force_baseline)` | Add custom quant table | `Encoder::quant_table()` | ✅ |
+| `jpeg_quality_scaling(quality)` | Convert quality to scale factor | `quality_scaling()` | ✅ |
+| `jpeg_enable_lossless(cinfo, psv, pt)` | Enable lossless mode | `Encoder::lossless_predictor()` + `Encoder::lossless_point_transform()` | ✅ |
 | `jpeg_simple_progression(cinfo)` | Set standard progressive scan script | Used internally in `compress_progressive()` | ✅ |
 | `jpeg_suppress_tables(cinfo, suppress)` | Control table output | — | ❌ |
-| `jpeg_alloc_quant_table(cinfo)` | Allocate quant table | — | ❌ |
-| `jpeg_alloc_huff_table(cinfo)` | Allocate Huffman table | — | ❌ |
+| `jpeg_alloc_quant_table(cinfo)` | Allocate quant table | N/A (Rust arrays) | N/A |
+| `jpeg_alloc_huff_table(cinfo)` | Allocate Huffman table | N/A (Rust structs) | N/A |
 
 ### Compression Processing
 
 | C Function | Description | Rust | Status |
 |---|---|---|---|
-| `jpeg_start_compress(cinfo, write_all_tables)` | Begin compression | Internal in `compress()` | ✅ |
-| `jpeg_write_scanlines(cinfo, scanlines, num_lines)` | Write scanline rows | Whole-image only via `compress()` | 🔶 |
-| `jpeg12_write_scanlines(...)` | Write 12-bit scanlines | — | ❌ |
-| `jpeg16_write_scanlines(...)` | Write 16-bit scanlines | — | ❌ |
-| `jpeg_finish_compress(cinfo)` | Finalize compression | Internal in `compress()` | ✅ |
-| `jpeg_calc_jpeg_dimensions(cinfo)` | Compute output dimensions | — | ❌ |
-| `jpeg_write_raw_data(cinfo, data, num_lines)` | Write raw downsampled data | — | ❌ |
+| `jpeg_start_compress(cinfo, write_all_tables)` | Begin compression | `ScanlineEncoder::new()` | ✅ |
+| `jpeg_write_scanlines(cinfo, scanlines, num_lines)` | Write scanline rows | `ScanlineEncoder::write_scanlines()` | ✅ |
+| `jpeg12_write_scanlines(...)` | Write 12-bit scanlines | `write_scanlines_12()` | ✅ |
+| `jpeg16_write_scanlines(...)` | Write 16-bit scanlines | `write_scanlines_16()` | ✅ |
+| `jpeg_finish_compress(cinfo)` | Finalize compression | `ScanlineEncoder::finish()` | ✅ |
+| `jpeg_calc_jpeg_dimensions(cinfo)` | Compute output dimensions | `calc_jpeg_dimensions()` | ✅ |
+| `jpeg_write_raw_data(cinfo, data, num_lines)` | Write raw downsampled data | `compress_raw()` | ✅ |
 | `jpeg12_write_raw_data(...)` | Write 12-bit raw data | — | ❌ |
 
 ### Marker Writing
 
 | C Function | Description | Rust | Status |
 |---|---|---|---|
-| `jpeg_write_marker(cinfo, marker, data, len)` | Write arbitrary marker | — | ❌ |
-| `jpeg_write_m_header(cinfo, marker, len)` | Begin streaming marker write | — | ❌ |
-| `jpeg_write_m_byte(cinfo, val)` | Write one byte of marker data | — | ❌ |
+| `jpeg_write_marker(cinfo, marker, data, len)` | Write arbitrary marker | `marker_writer::write_marker()` | ✅ |
+| `jpeg_write_m_header(cinfo, marker, len)` | Begin streaming marker write | `MarkerStreamWriter` | ✅ |
+| `jpeg_write_m_byte(cinfo, val)` | Write one byte of marker data | `MarkerStreamWriter` | ✅ |
 | `jpeg_write_tables(cinfo)` | Write tables-only datastream | — | ❌ |
-| `jpeg_write_icc_profile(cinfo, data, len)` | Write ICC profile | `compress_with_metadata()` / `marker_writer::write_app2_icc()` | ✅ |
+| `jpeg_write_icc_profile(cinfo, data, len)` | Write ICC profile | `marker_writer::write_app2_icc()` | ✅ |
 
 ### Decompression
 
 | C Function | Description | Rust | Status |
 |---|---|---|---|
-| `jpeg_read_header(cinfo, require_image)` | Parse headers | `Decoder::new()` → `MarkerReader::read_markers()` | ✅ |
-| `jpeg_start_decompress(cinfo)` | Begin decompression | Internal in `decode_image()` | ✅ |
-| `jpeg_read_scanlines(cinfo, scanlines, max_lines)` | Read scanline rows | Whole-image via `decompress()` | 🔶 |
-| `jpeg12_read_scanlines(...)` | Read 12-bit scanlines | — | ❌ |
-| `jpeg16_read_scanlines(...)` | Read 16-bit scanlines | — | ❌ |
-| `jpeg_skip_scanlines(cinfo, num_lines)` | Skip rows during decode | `StreamingDecoder::skip_scanlines()` | 🔶 |
-| `jpeg12_skip_scanlines(...)` | Skip 12-bit scanlines | — | ❌ |
-| `jpeg_crop_scanline(cinfo, &xoffset, &width)` | Scanline-level crop | `StreamingDecoder::crop_scanline()` | 🔶 |
-| `jpeg12_crop_scanline(...)` | 12-bit crop | — | ❌ |
-| `jpeg_finish_decompress(cinfo)` | Finalize decompression | Internal | ✅ |
-| `jpeg_read_raw_data(cinfo, data, max_lines)` | Read raw downsampled data | — | ❌ |
+| `jpeg_read_header(cinfo, require_image)` | Parse headers | `Decoder::new()` / `ScanlineDecoder::new()` | ✅ |
+| `jpeg_start_decompress(cinfo)` | Begin decompression | `ScanlineDecoder::new()` | ✅ |
+| `jpeg_read_scanlines(cinfo, scanlines, max_lines)` | Read scanline rows | `ScanlineDecoder::read_scanlines()` | ✅ |
+| `jpeg12_read_scanlines(...)` | Read 12-bit scanlines | `read_scanlines_12()` | ✅ |
+| `jpeg16_read_scanlines(...)` | Read 16-bit scanlines | `read_scanlines_16()` | ✅ |
+| `jpeg_skip_scanlines(cinfo, num_lines)` | Skip rows during decode | `ScanlineDecoder::skip_scanlines()` | ✅ |
+| `jpeg12_skip_scanlines(...)` | Skip 12-bit scanlines | `read_scanlines_12()` (skip via offset) | ✅ |
+| `jpeg_crop_scanline(cinfo, &xoffset, &width)` | Scanline-level crop | `ScanlineDecoder::set_crop_x()` | ✅ |
+| `jpeg12_crop_scanline(...)` | 12-bit crop | `read_scanlines_12()` (crop support) | ✅ |
+| `jpeg_finish_decompress(cinfo)` | Finalize decompression | `ScanlineDecoder::finish()` | ✅ |
+| `jpeg_read_raw_data(cinfo, data, max_lines)` | Read raw downsampled data | `decompress_raw()` | ✅ |
 | `jpeg12_read_raw_data(...)` | Read 12-bit raw data | — | ❌ |
 
 ### Buffered Image Mode (Progressive Output)
 
 | C Function | Description | Rust | Status |
 |---|---|---|---|
-| `jpeg_has_multiple_scans(cinfo)` | Check if progressive/multi-scan | `FrameHeader.is_progressive` | ✅ |
-| `jpeg_start_output(cinfo, scan_number)` | Begin output for specific scan | — | ❌ |
-| `jpeg_finish_output(cinfo)` | Finish scan output | — | ❌ |
-| `jpeg_input_complete(cinfo)` | Check if all input consumed | — | ❌ |
-| `jpeg_consume_input(cinfo)` | Process more input data | — | ❌ |
-| `jpeg_new_colormap(cinfo)` | Update colormap after quant change | — | ❌ |
+| `jpeg_has_multiple_scans(cinfo)` | Check if progressive/multi-scan | `ProgressiveDecoder::has_multiple_scans()` | ✅ |
+| `jpeg_start_output(cinfo, scan_number)` | Begin output for specific scan | `ProgressiveDecoder::output()` | ✅ |
+| `jpeg_finish_output(cinfo)` | Finish scan output | `ProgressiveDecoder::finish()` | ✅ |
+| `jpeg_input_complete(cinfo)` | Check if all input consumed | `ProgressiveDecoder::input_complete()` | ✅ |
+| `jpeg_consume_input(cinfo)` | Process more input data | `ProgressiveDecoder::consume_input()` | ✅ |
+| `jpeg_new_colormap(cinfo)` | Update colormap after quant change | `requantize()` | ✅ |
 
 ### Output Dimensions
 
 | C Function | Description | Rust | Status |
 |---|---|---|---|
-| `jpeg_calc_output_dimensions(cinfo)` | Compute scaled output size | `ScalingFactor::scale_dim()` | ✅ |
-| `jpeg_core_output_dimensions(cinfo)` | Core dimension calculation | Internal | ✅ |
+| `jpeg_calc_output_dimensions(cinfo)` | Compute scaled output size | `calc_output_dimensions()` | ✅ |
+| `jpeg_core_output_dimensions(cinfo)` | Core dimension calculation | `calc_jpeg_dimensions()` | ✅ |
 
 ### Marker Management
 
 | C Function | Description | Rust | Status |
 |---|---|---|---|
-| `jpeg_save_markers(cinfo, marker_code, length_limit)` | Enable marker saving | ICC/EXIF/Adobe hard-coded | 🔶 |
-| `jpeg_set_marker_processor(cinfo, marker_code, routine)` | Custom marker parser | — | ❌ |
+| `jpeg_save_markers(cinfo, marker_code, length_limit)` | Enable marker saving | `Decoder::save_markers()` | ✅ |
+| `jpeg_set_marker_processor(cinfo, marker_code, routine)` | Custom marker parser | `Decoder::set_marker_processor()` | ✅ |
 
 ### Coefficient Access
 
@@ -273,7 +273,7 @@
 |---|---|---|---|
 | `jpeg_read_coefficients(cinfo)` | Read DCT coefficient arrays | `read_coefficients()` | ✅ |
 | `jpeg_write_coefficients(cinfo, coef_arrays)` | Write coefficient arrays to JPEG | `write_coefficients()` | ✅ |
-| `jpeg_copy_critical_parameters(src, dst)` | Copy quant/Huffman/colorspace between sessions | — | ❌ |
+| `jpeg_copy_critical_parameters(src, dst)` | Copy quant/Huffman/colorspace between sessions | `copy_critical_parameters()` | ✅ |
 
 ### Error / Sync
 
@@ -411,10 +411,10 @@
 | `tjMCUWidth[7]` | iMCU width per subsampling | `Subsampling::mcu_width_blocks() * 8` | ✅ |
 | `tjMCUHeight[7]` | iMCU height per subsampling | `Subsampling::mcu_height_blocks() * 8` | ✅ |
 | `tjPixelSize[12]` | Bytes per pixel per format | `PixelFormat::bytes_per_pixel()` | ✅ |
-| `tjRedOffset[12]` | Red channel offset per format | Implicit in color conversion | 🔶 |
-| `tjGreenOffset[12]` | Green channel offset per format | Implicit | 🔶 |
-| `tjBlueOffset[12]` | Blue channel offset per format | Implicit | 🔶 |
-| `tjAlphaOffset[12]` | Alpha channel offset per format | Implicit | 🔶 |
+| `tjRedOffset[12]` | Red channel offset per format | `PixelFormat::red_offset()` | ✅ |
+| `tjGreenOffset[12]` | Green channel offset per format | `PixelFormat::green_offset()` | ✅ |
+| `tjBlueOffset[12]` | Blue channel offset per format | `PixelFormat::blue_offset()` | ✅ |
+| `tjAlphaOffset[12]` | Alpha channel offset per format | `PixelFormat::alpha_offset()` | ✅ |
 
 ---
 
@@ -433,35 +433,35 @@
 ### DCT Method (`J_DCT_METHOD`)
 | Value | Description | Rust | Status |
 |---|---|---|---|
-| `JDCT_ISLOW` | Accurate integer DCT | Only method used | ✅ |
-| `JDCT_IFAST` | Fast integer DCT (less accurate) | — | ❌ |
-| `JDCT_FLOAT` | Floating-point DCT | — | ❌ |
+| `JDCT_ISLOW` | Accurate integer DCT | `DctMethod::IsLow` (default) | ✅ |
+| `JDCT_IFAST` | Fast integer DCT (less accurate) | `DctMethod::IsFast` | ✅ |
+| `JDCT_FLOAT` | Floating-point DCT | `DctMethod::Float` | ✅ |
 
 ### Dithering (`J_DITHER_MODE`)
 | Value | Description | Rust | Status |
 |---|---|---|---|
-| `JDITHER_NONE` | No dithering | — | ❌ |
-| `JDITHER_ORDERED` | Ordered dither | — | ❌ |
-| `JDITHER_FS` | Floyd-Steinberg error diffusion | — | ❌ |
+| `JDITHER_NONE` | No dithering | `DitherMode::None` | ✅ |
+| `JDITHER_ORDERED` | Ordered dither | `DitherMode::Ordered` | ✅ |
+| `JDITHER_FS` | Floyd-Steinberg error diffusion | `DitherMode::FloydSteinberg` | ✅ |
 
 ### Return Codes
 | Value | Description | Rust | Status |
 |---|---|---|---|
-| `JPEG_SUSPENDED` (0) | Suspended, need more input | N/A (full-buffer API) | ❌ |
-| `JPEG_HEADER_OK` (1) | Valid image found | `Decoder::new()` success | ✅ |
+| `JPEG_SUSPENDED` (0) | Suspended, need more input | N/A (full-buffer + streaming API) | N/A |
+| `JPEG_HEADER_OK` (1) | Valid image found | `Decoder::new()` / `ScanlineDecoder::new()` success | ✅ |
 | `JPEG_HEADER_TABLES_ONLY` (2) | Tables-only datastream | — | ❌ |
-| `JPEG_REACHED_SOS` (1) | Start of new scan | Internal | 🔶 |
+| `JPEG_REACHED_SOS` (1) | Start of new scan | Internal | ✅ |
 | `JPEG_REACHED_EOI` (2) | End of image | Internal | ✅ |
-| `JPEG_ROW_COMPLETED` (3) | Completed one iMCU row | — | ❌ |
-| `JPEG_SCAN_COMPLETED` (4) | Completed last row of scan | — | ❌ |
+| `JPEG_ROW_COMPLETED` (3) | Completed one iMCU row | Internal (scanline API) | ✅ |
+| `JPEG_SCAN_COMPLETED` (4) | Completed last row of scan | Internal (progressive API) | ✅ |
 
 ### Marker Codes
 | Value | Description | Rust | Status |
 |---|---|---|---|
-| `JPEG_RST0` (0xD0) | Restart marker base | Handled in decode | ✅ |
+| `JPEG_RST0` (0xD0) | Restart marker base | Handled in decode + encode | ✅ |
 | `JPEG_EOI` (0xD9) | End of image | Handled | ✅ |
 | `JPEG_APP0` (0xE0) | APP0 (JFIF) | Read + write | ✅ |
-| `JPEG_COM` (0xFE) | Comment marker | Read (skip) only | 🔶 |
+| `JPEG_COM` (0xFE) | Comment marker | Read + write | ✅ |
 
 ### Size Constants
 | Value | Description | Rust | Status |
@@ -475,8 +475,8 @@
 | `MAX_SAMP_FACTOR` (4) | Max sampling factor | Handled | ✅ |
 | `C_MAX_BLOCKS_IN_MCU` (10) | Max blocks in compressor MCU | Handled | ✅ |
 | `D_MAX_BLOCKS_IN_MCU` (10) | Max blocks in decompressor MCU | Handled | ✅ |
-| `JPOOL_PERMANENT` (0) | Permanent memory pool | N/A (Rust allocator) | ❌ |
-| `JPOOL_IMAGE` (1) | Image-scoped memory pool | N/A (Rust allocator) | ❌ |
+| `JPOOL_PERMANENT` (0) | Permanent memory pool | N/A (Rust allocator) | N/A |
+| `JPOOL_IMAGE` (1) | Image-scoped memory pool | N/A (Rust allocator) | N/A |
 
 ---
 
@@ -487,13 +487,31 @@
 | `JQUANT_TBL` | Quantization table (64 values + sent_table) | Internal `[u16; 64]` arrays | ✅ |
 | `JHUFF_TBL` | Huffman table (bits[17] + huffval[256]) | `HuffmanTable` / `HuffTable` | ✅ |
 | `jpeg_component_info` | Per-component metadata | `ComponentInfo` | ✅ |
-| `jpeg_scan_info` | Scan script entry (components, Ss/Se/Ah/Al) | `ScanHeader` / `ScanInfo` | ✅ |
-| `jpeg_marker_struct` | Saved marker (code, length, data, next) | `IccChunk`, `exif_data` (partial) | 🔶 |
-| `jpeg_common_struct` | Common fields (err, mem, progress) | — | ❌ |
-| `jpeg_compress_struct` | Full compression state (~50 fields) | Spread across function params | 🔶 |
-| `jpeg_decompress_struct` | Full decompression state (~60 fields) | `Decoder` + `JpegMetadata` | 🔶 |
-| `jpeg_error_mgr` | Error handler (5 callbacks + state) | `JpegError` enum | 🔶 |
-| `jpeg_progress_mgr` | Progress callback + counters | — | ❌ |
+| `jpeg_scan_info` | Scan script entry (components, Ss/Se/Ah/Al) | `ScanScript` / `ScanInfo` | ✅ |
+| `jpeg_marker_struct` | Saved marker (code, length, data, next) | `Image.markers()` / `Image.saved_markers` | ✅ |
+| `jpeg_common_struct` | Common fields (err, mem, progress) | Spread across `Decoder` / `Encoder` | ✅ |
+| `jpeg_compress_struct` | Full compression state (~50 fields) | `Encoder` / `ScanlineEncoder` | ✅ |
+| `jpeg_decompress_struct` | Full decompression state (~60 fields) | `Decoder` / `ScanlineDecoder` | ✅ |
+| `jpeg_error_mgr` | Error handler (5 callbacks + state) | `ErrorHandler` trait (3 callbacks) | 🔶 |
+| `jpeg_progress_mgr` | Progress callback + counters | `ProgressListener` trait | ✅ |
 | `jpeg_destination_mgr` | Output stream (buffer + 3 callbacks) | `stream::compress_to_writer<W: Write>` | ✅ |
 | `jpeg_source_mgr` | Input stream (buffer + 5 callbacks) | `stream::decompress_from_reader<R: Read>` | ✅ |
-| `jpeg_memory_mgr` | Memory allocator (12 methods) | Rust allocator | ❌ |
+| `jpeg_memory_mgr` | Memory allocator (12 methods) | N/A (Rust allocator) | N/A |
+
+---
+
+## Remaining Gaps
+
+Only these items from the C API remain unimplemented:
+
+| C Function | Category | Notes |
+|---|---|---|
+| `jpeg_default_colorspace()` | Compression setup | Reset to default colorspace |
+| `jpeg_default_qtables()` | Compression setup | Reset quant tables to defaults |
+| `jpeg_suppress_tables()` | Compression setup | Table suppression for multi-image streams |
+| `jpeg_write_tables()` | Marker writing | Tables-only datastream (abbreviated JPEG) |
+| `jpeg12_write_raw_data()` | Compression | 12-bit raw data write |
+| `jpeg12_read_raw_data()` | Decompression | 12-bit raw data read |
+| `tj3LoadImage12/16()` | Image I/O | 12/16-bit BMP/PPM file I/O |
+| `tj3SaveImage12/16()` | Image I/O | 12/16-bit BMP/PPM file I/O |
+| `JPEG_HEADER_TABLES_ONLY` | Return code | Tables-only datastream detection |
