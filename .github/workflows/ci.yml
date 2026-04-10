@@ -112,7 +112,7 @@ jobs:
           echo "/usr/local/bin" >> $GITHUB_PATH
       - name: Generate corpus
         run: cargo run --release --example generate_corpus
-        timeout-minutes: 5
+        timeout-minutes: 15
       - name: Run corpus test
         run: |
           OUTPUT=$(cargo run --release --example corpus_test -- --corpus-dir tests/corpus/ 2>&1)
