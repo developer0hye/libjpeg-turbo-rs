@@ -354,7 +354,7 @@
 - [x] AVX2 merged H2V2 upsample + color convert
 - [x] Row-streaming H2V2 upsample+color pipeline (fused, no full-plane alloc)
 - [x] AVX2 color conversion for RGBA/BGR/BGRA formats (`avx2_ycbcr_to_rgba_row`, `avx2_ycbcr_to_bgr_row`, `avx2_ycbcr_to_bgra_row`)
-- [ ] SSE2 IDCT DC-only fast path + strided output
+- [x] SSE2 IDCT DC-only fast path + strided output
 - [x] x86_64 encoder SIMD (AVX2 FDCT, RGB→YCbCr, quantization + zigzag)
 
 ### General
@@ -450,7 +450,7 @@
 | Transform misc | 6 | 6 | 100% |
 | YUV/Planar API | 12 | 12 | 100% |
 | SIMD (aarch64) | 14 | 14 | 100% |
-| SIMD (x86_64) | 12 | 13 | 92% |
+| SIMD (x86_64) | 13 | 13 | 100% |
 | Memory & I/O | 12 | 18 | 67% |
 | Error handling | 5 | 14 | 36% |
 | Progress | 4 | 4 | 100% |
