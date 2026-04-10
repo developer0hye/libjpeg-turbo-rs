@@ -196,7 +196,7 @@ fn prepare_sources(tmp_dir: &Path) -> Vec<SourcePpm> {
 
     // Synthetic images: (name, width, height, pixel_fn)
     type PixelFn = Box<dyn Fn(usize, usize) -> Vec<u8>>;
-    let synthetics: Vec<(&str, usize, usize, PixelFn)> = vec![
+    let mut synthetics: Vec<(&str, usize, usize, PixelFn)> = vec![
         (
             "gradient_64x64",
             64,
@@ -275,39 +275,43 @@ fn prepare_sources(tmp_dir: &Path) -> Vec<SourcePpm> {
             8,
             Box::new(|w, h| make_solid(w, h, 255, 255, 255)),
         ),
-        // Large resolutions: 4K and 8K
+        // Large resolutions: 4K (always included)
         (
             "natural_3840x2160",
             3840,
             2160,
             Box::new(|w, h| make_natural(w, h)),
         ),
-        (
+    ];
+
+    // 8K sources are opt-in via CORPUS_INCLUDE_8K=1 (too slow for CI)
+    if std::env::var("CORPUS_INCLUDE_8K").as_deref() == Ok("1") {
+        synthetics.push((
             "gradient_7680x4320",
             7680,
             4320,
             Box::new(|w, h| make_gradient(w, h)),
-        ),
-        (
+        ));
+        synthetics.push((
             "noise_7680x4320",
             7680,
             4320,
             Box::new(|w, h| make_noise(w, h, 77777)),
-        ),
-        (
+        ));
+        synthetics.push((
             "edges_7680x4320",
             7680,
             4320,
             Box::new(|w, h| make_edges(w, h)),
-        ),
+        ));
         // Odd 8K dimensions (non-MCU-aligned)
-        (
+        synthetics.push((
             "natural_7681x4321",
             7681,
             4321,
             Box::new(|w, h| make_natural(w, h)),
-        ),
-    ];
+        ));
+    }
 
     for (name, width, height, gen) in &synthetics {
         let ppm_path = tmp_dir.join(format!("{}.ppm", name));
