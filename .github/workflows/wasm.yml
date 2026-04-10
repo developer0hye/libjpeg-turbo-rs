@@ -39,7 +39,7 @@ jobs:
         run: cargo check --target wasm32-unknown-unknown
 
       - name: Check wrapper crate compiles for wasm32
-        run: cargo check --target wasm32-unknown-unknown -p libjpeg-turbo-wasm --tests
+        run: cargo check --target wasm32-unknown-unknown -p libjpeg-turbo-rs-wasm --tests
 
       - name: Run existing test suite on WASM (wasm32-wasip1 + wasmtime)
         run: cargo test --target wasm32-wasip1
