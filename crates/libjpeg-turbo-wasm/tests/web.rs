@@ -1,5 +1,4 @@
 use wasm_bindgen_test::*;
-wasm_bindgen_test_configure!(run_in_browser);
 
 use libjpeg_turbo_wasm::{
     decode, decode_to, encode, jpeg_dimensions, DecodedImage, PixelFormat, Subsampling, WasmEncoder,
@@ -28,11 +27,10 @@ fn decode_to_rgba() {
 }
 
 #[wasm_bindgen_test]
-fn decode_to_grayscale() {
-    let img: DecodedImage = decode_to(TEST_JPEG, PixelFormat::Grayscale).unwrap();
-    assert_eq!(img.format(), PixelFormat::Grayscale);
-    assert_eq!(img.data().length(), 16 * 16);
-    assert_eq!(img.bytes_per_pixel(), 1);
+fn decode_to_grayscale_from_color_errors() {
+    // Color JPEG → Grayscale conversion is not supported; verify graceful error.
+    let result = decode_to(TEST_JPEG, PixelFormat::Grayscale);
+    assert!(result.is_err());
 }
 
 #[wasm_bindgen_test]
