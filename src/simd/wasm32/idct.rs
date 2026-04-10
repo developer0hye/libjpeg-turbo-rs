@@ -235,8 +235,7 @@ unsafe fn wasm_idct_islow_core(
         let col6: v128 = unpacklo_epi64(t1h, t3h);
         let col7: v128 = unpackhi_epi64(t1h, t3h);
 
-        let result: [v128; 8] =
-            idct_1d_pass(col0, col1, col2, col3, col4, col5, col6, col7);
+        let result: [v128; 8] = idct_1d_pass(col0, col1, col2, col3, col4, col5, col6, col7);
 
         for (c, &res) in result.iter().enumerate() {
             let descaled: v128 = descale_p2(res);

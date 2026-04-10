@@ -20,8 +20,7 @@ fn mulhi_epi16(a: v128, b: v128) -> v128 {
     let hi_shifted: v128 = i32x4_shr(hi, 16);
     // Pack: take low 16 bits from each i32 lane
     i8x16_shuffle::<0, 1, 4, 5, 8, 9, 12, 13, 16, 17, 20, 21, 24, 25, 28, 29>(
-        lo_shifted,
-        hi_shifted,
+        lo_shifted, hi_shifted,
     )
 }
 
@@ -48,12 +47,9 @@ unsafe fn wasm_ycbcr_to_rgb_row_inner(
 
     while x + 8 <= width {
         // Load 8 bytes, zero-extend u8 → i16
-        let y16: v128 =
-            u16x8_extend_low_u8x16(v128_load64_zero(y.as_ptr().add(x) as *const u64));
-        let cb16: v128 =
-            u16x8_extend_low_u8x16(v128_load64_zero(cb.as_ptr().add(x) as *const u64));
-        let cr16: v128 =
-            u16x8_extend_low_u8x16(v128_load64_zero(cr.as_ptr().add(x) as *const u64));
+        let y16: v128 = u16x8_extend_low_u8x16(v128_load64_zero(y.as_ptr().add(x) as *const u64));
+        let cb16: v128 = u16x8_extend_low_u8x16(v128_load64_zero(cb.as_ptr().add(x) as *const u64));
+        let cr16: v128 = u16x8_extend_low_u8x16(v128_load64_zero(cr.as_ptr().add(x) as *const u64));
 
         let cb_c: v128 = i16x8_sub(cb16, offset_128);
         let cr_c: v128 = i16x8_sub(cr16, offset_128);
@@ -66,9 +62,7 @@ unsafe fn wasm_ycbcr_to_rgb_row_inner(
 
         // G = Y + ((dot(Cb:Cr, -22554:18734) + 32768) >> 16) - Cr
         let cb_cr_lo: v128 =
-            i8x16_shuffle::<0, 1, 16, 17, 2, 3, 18, 19, 4, 5, 20, 21, 6, 7, 22, 23>(
-                cb_c, cr_c,
-            );
+            i8x16_shuffle::<0, 1, 16, 17, 2, 3, 18, 19, 4, 5, 20, 21, 6, 7, 22, 23>(cb_c, cr_c);
         let cb_cr_hi: v128 =
             i8x16_shuffle::<8, 9, 24, 25, 10, 11, 26, 27, 12, 13, 28, 29, 14, 15, 30, 31>(
                 cb_c, cr_c,
