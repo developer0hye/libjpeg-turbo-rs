@@ -7,12 +7,16 @@ on:
       - 'src/**'
       - 'crates/libjpeg-turbo-wasm/**'
       - 'Cargo.toml'
+      - 'tests/**'
+      - '.cargo/config.toml'
       - '.github/workflows/wasm.yml'
   pull_request:
     paths:
       - 'src/**'
       - 'crates/libjpeg-turbo-wasm/**'
       - 'Cargo.toml'
+      - 'tests/**'
+      - '.cargo/config.toml'
       - '.github/workflows/wasm.yml'
 
 jobs:
@@ -24,9 +28,12 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
         with:
-          targets: wasm32-unknown-unknown
+          targets: wasm32-unknown-unknown,wasm32-wasip1
 
       - uses: Swatinem/rust-cache@v2
+
+      - name: Install wasmtime
+        run: curl https://wasmtime.dev/install.sh -sSf | bash && echo "$HOME/.wasmtime/bin" >> $GITHUB_PATH
 
       - name: Check main crate compiles for wasm32
         run: cargo check --target wasm32-unknown-unknown
@@ -34,11 +41,17 @@ jobs:
       - name: Check wrapper crate compiles for wasm32
         run: cargo check --target wasm32-unknown-unknown -p libjpeg-turbo-wasm --tests
 
+      - name: Run existing test suite on WASM (wasm32-wasip1 + wasmtime)
+        run: cargo test --target wasm32-wasip1
+
       - name: Install wasm-pack
         run: curl https://rustwasm.github.io/wasm-pack/installer/init.sh -sSf | sh
 
       - name: Build wasm-pack (web target)
         run: cd crates/libjpeg-turbo-wasm && wasm-pack build --target web
+
+      - name: Run wasm-bindgen tests
+        run: cd crates/libjpeg-turbo-wasm && wasm-pack test --node
 
       - name: Verify output artifacts
         run: |

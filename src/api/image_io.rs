@@ -5,11 +5,11 @@
 
 use crate::common::error::{JpegError, Result};
 use crate::common::types::PixelFormat;
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(any(not(target_arch = "wasm32"), target_os = "wasi"))]
 use std::fs;
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(any(not(target_arch = "wasm32"), target_os = "wasi"))]
 use std::io::{BufWriter, Write};
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(any(not(target_arch = "wasm32"), target_os = "wasi"))]
 use std::path::Path;
 
 /// Loaded image data with metadata.
@@ -27,7 +27,7 @@ pub struct LoadedImage {
 
 /// Load an image from a BMP or PPM/PGM file.
 /// Format is auto-detected from file header magic bytes.
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(any(not(target_arch = "wasm32"), target_os = "wasi"))]
 pub fn load_image<P: AsRef<Path>>(path: P) -> Result<LoadedImage> {
     let data: Vec<u8> = fs::read(path.as_ref())?;
     load_image_from_bytes(&data)
@@ -57,7 +57,7 @@ pub fn load_image_from_bytes(data: &[u8]) -> Result<LoadedImage> {
 /// Supports `Rgb`, `Bgr`, `Rgba`, `Bgra`, and `Grayscale` pixel formats.
 /// - 24-bit BMP is written for Rgb/Bgr/Grayscale inputs.
 /// - 32-bit BMP is written for Rgba/Bgra inputs.
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(any(not(target_arch = "wasm32"), target_os = "wasi"))]
 pub fn save_bmp<P: AsRef<Path>>(
     path: P,
     pixels: &[u8],
@@ -157,7 +157,7 @@ pub fn save_bmp<P: AsRef<Path>>(
 /// - `Grayscale` → PGM P5 format
 /// - `Rgb` → PPM P6 format
 /// - `Bgr` → PPM P6 format (converted to RGB)
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(any(not(target_arch = "wasm32"), target_os = "wasi"))]
 pub fn save_ppm<P: AsRef<Path>>(
     path: P,
     pixels: &[u8],
@@ -206,7 +206,7 @@ pub fn save_ppm<P: AsRef<Path>>(
 // ---------- Internal helpers ----------
 
 /// Validate that the pixel buffer has the expected size.
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(any(not(target_arch = "wasm32"), target_os = "wasi"))]
 fn validate_pixel_buffer(
     pixels: &[u8],
     width: usize,

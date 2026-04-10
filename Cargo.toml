@@ -35,8 +35,10 @@ full-c-parity = []
 thiserror = "2"
 
 [dev-dependencies]
-criterion = { version = "0.5", features = ["html_reports"] }
 zune-jpeg = "0.5"
+
+[target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
+criterion = { version = "0.5", features = ["html_reports"] }
 
 [[bench]]
 name = "decode"
