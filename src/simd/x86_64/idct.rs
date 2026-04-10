@@ -2,6 +2,7 @@
 //!
 //! Port of the libjpeg-turbo integer IDCT algorithm using SSE2 intrinsics.
 //! Combines dequantization, IDCT, level-shift (+128), and clamping.
+//! Includes DC-only sparsity fast path and strided output support.
 //!
 //! The input coefficients and quantization table are both in natural
 //! (row-major) order. We dequantize during load, perform the 2-pass IDCT
@@ -9,6 +10,8 @@
 //! +128, and clamp to [0, 255].
 //!
 //! Strategy:
+//! - DC-only fast path: if all AC coefficients are zero, fill 8x8 block
+//!   with a single value (common in flat/smooth areas and low-quality JPEGs)
 //! - Pass 1 (columns): process columns 0-3 then 4-7 as 4-wide i32 SIMD
 //! - Pass 2 (rows): process rows using the same 4-wide approach after
 //!   transposing the workspace
@@ -39,8 +42,19 @@ const F_3_072: i32 = 25172;
 pub fn sse2_idct_islow(coeffs: &[i16; 64], quant: &[u16; 64], output: &mut [u8; 64]) {
     // SAFETY: SSE2 is verified at dispatch time via `is_x86_feature_detected!`.
     unsafe {
-        sse2_idct_islow_inner(coeffs, quant, output);
+        sse2_idct_islow_core(coeffs, quant, output.as_mut_ptr(), 8);
     }
+}
+
+/// # Safety
+/// Requires SSE2. `output` must point to at least `stride * 7 + 8` writable bytes.
+pub unsafe fn sse2_idct_islow_strided(
+    coeffs: &[i16; 64],
+    quant: &[u16; 64],
+    output: *mut u8,
+    stride: usize,
+) {
+    sse2_idct_islow_core(coeffs, quant, output, stride);
 }
 
 /// SSE2 does not have `_mm_mullo_epi32` (SSE4.1). Emulate by extracting
@@ -135,11 +149,58 @@ unsafe fn descale_p2(val: __m128i) -> __m128i {
 }
 
 /// Core SSE2 IDCT: dequant + 2-pass IDCT + level-shift + clamp.
+/// Includes DC-only sparsity fast path and strided output.
 ///
 /// # Safety
-/// Requires x86_64 SSE2 support.
+/// Requires x86_64 SSE2 support. `output` must point to at least
+/// `stride * 7 + 8` writable bytes.
 #[target_feature(enable = "sse2")]
-unsafe fn sse2_idct_islow_inner(coeffs: &[i16; 64], quant: &[u16; 64], output: &mut [u8; 64]) {
+unsafe fn sse2_idct_islow_core(
+    coeffs: &[i16; 64],
+    quant: &[u16; 64],
+    output: *mut u8,
+    stride: usize,
+) {
+    let cptr: *const i16 = coeffs.as_ptr();
+
+    // --- DC-only sparsity check (SSE2-compatible) ---
+    // OR rows 1-7 together. If all zero, only row 0 may have non-zero coefficients.
+    let row1: __m128i = _mm_loadu_si128(cptr.add(8) as *const __m128i);
+    let row2: __m128i = _mm_loadu_si128(cptr.add(16) as *const __m128i);
+    let row3: __m128i = _mm_loadu_si128(cptr.add(24) as *const __m128i);
+    let row4: __m128i = _mm_loadu_si128(cptr.add(32) as *const __m128i);
+    let row5: __m128i = _mm_loadu_si128(cptr.add(40) as *const __m128i);
+    let row6: __m128i = _mm_loadu_si128(cptr.add(48) as *const __m128i);
+    let row7: __m128i = _mm_loadu_si128(cptr.add(56) as *const __m128i);
+
+    let ac_or: __m128i = _mm_or_si128(
+        _mm_or_si128(_mm_or_si128(row1, row2), _mm_or_si128(row3, row4)),
+        _mm_or_si128(_mm_or_si128(row5, row6), row7),
+    );
+
+    // SSE2 zero test: cmpeq against zero, then movemask. 0xFFFF means all zero.
+    let zero: __m128i = _mm_setzero_si128();
+    if _mm_movemask_epi8(_mm_cmpeq_epi8(ac_or, zero)) == 0xFFFF {
+        // Rows 1-7 are all zero. Check if row 0 AC coefficients are also zero.
+        let row0: __m128i = _mm_loadu_si128(cptr as *const __m128i);
+        // Mask out DC (position 0), keep AC (positions 1-7).
+        let ac_mask: __m128i = _mm_setr_epi16(0, -1, -1, -1, -1, -1, -1, -1);
+        let row0_ac: __m128i = _mm_and_si128(row0, ac_mask);
+
+        if _mm_movemask_epi8(_mm_cmpeq_epi8(row0_ac, zero)) == 0xFFFF {
+            // True DC-only: compute fill value and broadcast.
+            let dc: i32 = *cptr as i32 * *quant.as_ptr() as i32;
+            let pv: u8 = (((dc + 4) >> 3) + 128).clamp(0, 255) as u8;
+            let fill: __m128i = _mm_set1_epi8(pv as i8);
+            for r in 0..8 {
+                _mm_storel_epi64(output.add(r * stride) as *mut __m128i, fill);
+            }
+            return;
+        }
+    }
+
+    // --- Full IDCT path ---
+
     // Workspace: 8x8 i32 values in row-major order.
     let mut ws = [0i32; 64];
 
@@ -211,21 +272,20 @@ unsafe fn sse2_idct_islow_inner(coeffs: &[i16; 64], quant: &[u16; 64], output: &
 
         let result: [__m128i; 8] = idct_1d_pass(col0, col1, col2, col3, col4, col5, col6, col7);
 
-        for c in 0..8 {
-            let descaled: __m128i = descale_p2(result[c]);
+        for (c, &res) in result.iter().enumerate() {
+            let descaled: __m128i = descale_p2(res);
             let shifted: __m128i = _mm_add_epi32(descaled, center);
 
-            let zero: __m128i = _mm_setzero_si128();
             let packed_i16: __m128i = _mm_packs_epi32(shifted, zero);
             let packed_u8: __m128i = _mm_packus_epi16(packed_i16, zero);
 
             let mut bytes = [0u8; 16];
             _mm_storeu_si128(bytes.as_mut_ptr() as *mut __m128i, packed_u8);
 
-            output[(row_base) * 8 + c] = bytes[0];
-            output[(row_base + 1) * 8 + c] = bytes[1];
-            output[(row_base + 2) * 8 + c] = bytes[2];
-            output[(row_base + 3) * 8 + c] = bytes[3];
+            *output.add((row_base) * stride + c) = bytes[0];
+            *output.add((row_base + 1) * stride + c) = bytes[1];
+            *output.add((row_base + 2) * stride + c) = bytes[2];
+            *output.add((row_base + 3) * stride + c) = bytes[3];
         }
     }
 }
