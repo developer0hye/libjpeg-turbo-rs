@@ -1,5 +1,5 @@
 [package]
-name = "libjpeg-turbo-wasm"
+name = "libjpeg-turbo-rs-wasm"
 version = "0.1.0"
 edition = "2021"
 description = "WASM bindings for libjpeg-turbo-rs — fast, pure-Rust JPEG codec for the browser"
