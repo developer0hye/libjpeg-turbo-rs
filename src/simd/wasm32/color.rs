@@ -89,12 +89,21 @@ unsafe fn wasm_ycbcr_to_rgb_row_inner(
         let b_u8: v128 = u8x16_narrow_i16x8(b16, zero);
 
         // Interleave and store 24 bytes (8 RGB pixels)
+        // Store SIMD results to temp arrays, then interleave to output.
+        // (u8x16_shr is per-lane bit shift, NOT vector byte shift)
+        let mut r_bytes = [0u8; 16];
+        let mut g_bytes = [0u8; 16];
+        let mut b_bytes = [0u8; 16];
+        v128_store(r_bytes.as_mut_ptr() as *mut v128, r_u8);
+        v128_store(g_bytes.as_mut_ptr() as *mut v128, g_u8);
+        v128_store(b_bytes.as_mut_ptr() as *mut v128, b_u8);
+
         let out_base: usize = x * 3;
         let out: *mut u8 = rgb.as_mut_ptr().add(out_base);
         for i in 0..8 {
-            *out.add(i * 3) = u8x16_extract_lane::<0>(u8x16_shr(r_u8, (i * 8) as u32));
-            *out.add(i * 3 + 1) = u8x16_extract_lane::<0>(u8x16_shr(g_u8, (i * 8) as u32));
-            *out.add(i * 3 + 2) = u8x16_extract_lane::<0>(u8x16_shr(b_u8, (i * 8) as u32));
+            *out.add(i * 3) = r_bytes[i];
+            *out.add(i * 3 + 1) = g_bytes[i];
+            *out.add(i * 3 + 2) = b_bytes[i];
         }
 
         x += 8;
