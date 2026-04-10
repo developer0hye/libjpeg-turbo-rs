@@ -295,6 +295,7 @@ fn c_djpeg_cross_validation_color_quantize() {
             dither_mode: DitherMode::FloydSteinberg,
             two_pass: true,
             colormap: None,
+            c_compatible: false,
         };
         let quantized =
             quantize(rgb_pixels, width, height, &options).expect("Rust quantize must succeed");
@@ -442,6 +443,7 @@ fn c_djpeg_cross_validation_color_quantize_ordered_dither() {
         dither_mode: DitherMode::Ordered,
         two_pass: true,
         colormap: None,
+        c_compatible: false,
     };
     let quantized = quantize(rgb_pixels, width, height, &options)
         .expect("Rust quantize (ordered) must succeed");
