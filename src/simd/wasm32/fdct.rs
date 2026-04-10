@@ -30,6 +30,7 @@ const F_N2_562: i16 = -20995;
 const F_3_072: i16 = 25172;
 
 /// WASM simd128 forward DCT on one 8x8 block.
+#[inline]
 pub fn wasm_fdct(input: &[i16; 64], output: &mut [i16; 64]) {
     unsafe {
         wasm_fdct_core(input.as_ptr(), output.as_mut_ptr());

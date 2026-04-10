@@ -66,6 +66,7 @@ fn sign_epi16(val: v128, sign_vec: v128) -> v128 {
 ///
 /// Uses the AVX2 two-mulhi approach to eliminate all division:
 ///   quantized = sign(coeff) * mulhi(mulhi(abs(coeff) + correction, reciprocal), scale)
+#[inline]
 fn wasm_fdct_quantize(input: &mut [i16; 64], quant: &QuantDivisors, output: &mut [i16; 64]) {
     let mut dct_output: [i16; 64] = [0i16; 64];
     fdct::wasm_fdct(input, &mut dct_output);
