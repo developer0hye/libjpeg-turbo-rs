@@ -299,6 +299,20 @@ impl ProgressiveDecoder {
             );
         }
 
+        #[cfg(all(target_arch = "x86_64", feature = "simd"))]
+        {
+            if is_x86_feature_detected!("avx2") {
+                return crate::simd::x86_64::avx2_idct::avx2_idct_islow_strided(
+                    coeffs, quant, output, stride,
+                );
+            }
+            if is_x86_feature_detected!("sse2") {
+                return crate::simd::x86_64::idct::sse2_idct_islow_strided(
+                    coeffs, quant, output, stride,
+                );
+            }
+        }
+
         #[allow(unreachable_code)]
         {
             let mut tmp = [0u8; 64];
