@@ -1,3 +1,5 @@
+#![cfg(not(target_arch = "wasm32"))]
+
 use std::io::Cursor;
 
 use libjpeg_turbo_rs::{compress, decompress, stream, Image, PixelFormat, Subsampling};
