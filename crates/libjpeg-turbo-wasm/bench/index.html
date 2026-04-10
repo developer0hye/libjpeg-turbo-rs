@@ -98,26 +98,28 @@ let jpegData = null;
 
 function setStatus(msg) { statusEl.textContent = msg; }
 
-// Generate a synthetic JPEG test image using canvas
+// Generate a synthetic JPEG test image using an offscreen canvas
 async function generateTestJpeg(w, h) {
-  canvas.width = w;
-  canvas.height = h;
+  const offCanvas = document.createElement('canvas');
+  offCanvas.width = w;
+  offCanvas.height = h;
+  const offCtx = offCanvas.getContext('2d');
   // Draw a gradient + shapes for non-trivial content
-  const grad = ctx.createLinearGradient(0, 0, w, h);
+  const grad = offCtx.createLinearGradient(0, 0, w, h);
   grad.addColorStop(0, '#1a5276');
   grad.addColorStop(0.5, '#d4ac0d');
   grad.addColorStop(1, '#922b21');
-  ctx.fillStyle = grad;
-  ctx.fillRect(0, 0, w, h);
+  offCtx.fillStyle = grad;
+  offCtx.fillRect(0, 0, w, h);
   for (let i = 0; i < 20; i++) {
-    ctx.fillStyle = `hsl(${i * 18}, 70%, 50%)`;
-    ctx.fillRect(Math.random() * w, Math.random() * h, w * 0.1, h * 0.1);
+    offCtx.fillStyle = `hsl(${i * 18}, 70%, 50%)`;
+    offCtx.fillRect(Math.random() * w, Math.random() * h, w * 0.1, h * 0.1);
   }
-  ctx.fillStyle = '#fff';
-  ctx.font = `${Math.floor(h * 0.08)}px sans-serif`;
-  ctx.fillText(`${w}x${h} test`, w * 0.05, h * 0.15);
+  offCtx.fillStyle = '#fff';
+  offCtx.font = `${Math.floor(h * 0.08)}px sans-serif`;
+  offCtx.fillText(`${w}x${h} test`, w * 0.05, h * 0.15);
 
-  const blob = await new Promise(r => canvas.toBlob(r, 'image/jpeg', 0.90));
+  const blob = await new Promise(r => offCanvas.toBlob(r, 'image/jpeg', 0.90));
   return new Uint8Array(await blob.arrayBuffer());
 }
 
@@ -198,43 +200,51 @@ async function runBenchmark() {
       testImages = [
         { label: '256x256', data: await generateTestJpeg(256, 256) },
         { label: '1024x768', data: await generateTestJpeg(1024, 768) },
-        { label: '1920x1080', data: await generateTestJpeg(1920, 1080) },
+        { label: '1920x1080 (FHD)', data: await generateTestJpeg(1920, 1080) },
+        { label: '2560x1440 (2K)', data: await generateTestJpeg(2560, 1440) },
+        { label: '3840x2160 (4K)', data: await generateTestJpeg(3840, 2160) },
+        { label: '7680x4320 (8K)', data: await generateTestJpeg(7680, 4320) },
       ];
     }
 
     for (const { label, data } of testImages) {
+      // Get dimensions first to scale iterations for large images
+      const probe = decodeTo(data, PixelFormat.Rgba);
+      const w = probe.width;
+      const h = probe.height;
+      const megapixels = (w * h) / 1e6;
+      const dims = `${w}x${h}`;
+      const pixelData = probe.data;
+      probe.free();
+
+      // Scale down iterations for large images
+      let iters = iterations;
+      if (megapixels > 8) iters = Math.min(iters, 5);
+      else if (megapixels > 2) iters = Math.min(iters, 20);
+      else if (megapixels > 0.5) iters = Math.min(iters, 30);
+
       // --- Decode benchmark ---
-      setStatus(`Benchmarking decode ${label} (${iterations} iterations)...`);
+      setStatus(`Benchmarking decode ${label} (${iters} iterations)...`);
 
       const wasmDec = await bench(() => {
         const img = decodeTo(data, PixelFormat.Rgba);
         img.free();
-      }, iterations);
+      }, iters);
 
-      const nativeDec = await bench(() => nativeDecode(data), iterations);
-
-      // Get dimensions for throughput calculation
-      const testImg = decodeTo(data, PixelFormat.Rgba);
-      const w = testImg.width;
-      const h = testImg.height;
-      const megapixels = (w * h) / 1e6;
-      const dims = `${w}x${h}`;
+      const nativeDec = await bench(() => nativeDecode(data), iters);
 
       addRow('Decode', dims, wasmDec.median, nativeDec.median, megapixels);
 
       // --- Encode benchmark ---
-      setStatus(`Benchmarking encode ${label} (${iterations} iterations)...`);
-
-      const pixels = testImg.data;
-      testImg.free();
+      setStatus(`Benchmarking encode ${label} (${iters} iterations)...`);
 
       const wasmEnc = await bench(() => {
-        encode(pixels, w, h, PixelFormat.Rgba, quality, Subsampling.S420);
-      }, iterations);
+        encode(pixelData, w, h, PixelFormat.Rgba, quality, Subsampling.S420);
+      }, iters);
 
       // For native encode, need ImageData
-      const nativeImgData = new ImageData(new Uint8ClampedArray(pixels.buffer, pixels.byteOffset, pixels.byteLength), w, h);
-      const nativeEnc = await bench(() => nativeEncode(nativeImgData, quality), iterations);
+      const nativeImgData = new ImageData(new Uint8ClampedArray(pixelData.buffer, pixelData.byteOffset, pixelData.byteLength), w, h);
+      const nativeEnc = await bench(() => nativeEncode(nativeImgData, quality), iters);
 
       addRow('Encode', dims, wasmEnc.median, nativeEnc.median, megapixels);
     }
