@@ -405,17 +405,20 @@ fn generate_jpegs(cjpeg: &Path, sources: &[SourcePpm], out_dir: &Path) -> (usize
         .unwrap_or(4);
     let chunk_size = (work.len() + parallelism - 1) / parallelism;
 
+    let generated_ref = &generated;
+    let failed_ref = &failed;
+
     std::thread::scope(|s| {
         for chunk in work.chunks(chunk_size) {
-            s.spawn(|| {
+            s.spawn(move || {
                 for (source, variant) in chunk {
                     let filename = format!("{}_{}.jpg", source.name, variant.label);
                     let output_jpg = out_dir.join(&filename);
                     let args: Vec<&str> = variant.args.iter().map(|s| s.as_str()).collect();
                     if run_cjpeg(cjpeg, &source.path, &output_jpg, &args) {
-                        generated.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        generated_ref.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                     } else {
-                        failed.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        failed_ref.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                     }
                 }
             });
