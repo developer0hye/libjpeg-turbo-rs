@@ -129,6 +129,11 @@ pub fn detect_encoder() -> EncoderSimdRoutines {
         return x86_64::encoder_routines();
     }
 
+    #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
+    {
+        return wasm32::encoder_routines();
+    }
+
     #[allow(unreachable_code)]
     scalar::encoder_routines()
 }
