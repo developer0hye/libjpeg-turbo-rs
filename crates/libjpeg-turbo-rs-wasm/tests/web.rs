@@ -1,6 +1,6 @@
 use wasm_bindgen_test::*;
 
-use libjpeg_turbo_wasm::{
+use libjpeg_turbo_rs_wasm::{
     decode, decode_to, encode, jpeg_dimensions, DecodedImage, PixelFormat, Subsampling, WasmEncoder,
 };
 
