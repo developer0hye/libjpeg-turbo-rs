@@ -2,5 +2,5 @@
 rustflags = ["-C", "target-feature=+simd128"]
 
 [target.wasm32-wasip1]
-runner = "wasmtime --dir=. --dir=/tmp"
+runner = "wasmtime --dir=. --dir=/tmp --env TMPDIR=/tmp"
 rustflags = ["-C", "target-feature=+simd128"]
