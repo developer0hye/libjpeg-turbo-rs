@@ -75,6 +75,38 @@ fn wasm_fdct_quantize(input: &mut [i16; 64], quant: &QuantDivisors, output: &mut
     }
 }
 
+/// Fused extract (u8→i16 level-shift) + FDCT + quantize + zigzag.
+///
+/// Loads 8 rows of 8 u8 pixels directly from a plane, widens to i16,
+/// level-shifts (-128), and feeds into FDCT+quantize. Eliminates the
+/// intermediate `[i16; 64]` extract_block buffer.
+///
+/// # Safety
+/// Requires simd128. `plane_ptr` must point to valid pixel data with at least
+/// `stride * 7 + 8` accessible bytes from the start.
+#[target_feature(enable = "simd128")]
+pub(crate) unsafe fn wasm_extract_fdct_quantize(
+    plane_ptr: *const u8,
+    stride: usize,
+    quant: &QuantDivisors,
+    output: &mut [i16; 64],
+) {
+    let level_shift: v128 = i16x8_splat(128);
+    let mut block = [0i16; 64];
+
+    for row in 0..8 {
+        let src_ptr: *const u8 = plane_ptr.add(row * stride);
+        let pixels: v128 = v128_load64_zero(src_ptr as *const u64);
+        let wide: v128 = u16x8_extend_low_u8x16(pixels);
+        let shifted: v128 = i16x8_sub(wide, level_shift);
+        v128_store(block.as_mut_ptr().add(row * 8) as *mut v128, shifted);
+    }
+
+    let mut dct_output = [0i16; 64];
+    fdct::wasm_fdct(&block, &mut dct_output);
+    wasm_quantize_zigzag(&dct_output, quant, output);
+}
+
 /// SIMD quantize + zigzag reorder using reciprocal multiply.
 #[target_feature(enable = "simd128")]
 unsafe fn wasm_quantize_zigzag(coeffs: &[i16; 64], quant: &QuantDivisors, output: &mut [i16; 64]) {
