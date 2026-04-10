@@ -17,3 +17,41 @@ jobs:
       - run: cargo publish --allow-dirty
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+
+  publish-wasm:
+    name: Publish to npm
+    runs-on: ubuntu-latest
+    needs: publish
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown,wasm32-wasip1
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install wasmtime
+        run: curl https://wasmtime.dev/install.sh -sSf | bash && echo "$HOME/.wasmtime/bin" >> $GITHUB_PATH
+
+      - name: Run WASM test suite (wasm32-wasip1)
+        run: cargo test --target wasm32-wasip1
+
+      - name: Install wasm-pack
+        run: curl https://rustwasm.github.io/wasm-pack/installer/init.sh -sSf | sh
+
+      - name: Run wasm-bindgen tests
+        run: cd crates/libjpeg-turbo-rs-wasm && wasm-pack test --node
+
+      - name: Build wasm-pack (bundler target)
+        run: cd crates/libjpeg-turbo-rs-wasm && wasm-pack build --target bundler --out-dir pkg
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          registry-url: 'https://registry.npmjs.org'
+
+      - name: Publish to npm
+        run: cd crates/libjpeg-turbo-rs-wasm/pkg && npm publish --access public
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
