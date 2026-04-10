@@ -4582,6 +4582,31 @@ fn progressive_fdct_chroma_block(
         }
     }
 
+    #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
+    {
+        let src_w: usize = hf * 8;
+        let src_h: usize = vf * 8;
+        if use_simd_fdct && x0 + src_w <= plane_w && y0 + src_h <= plane_h {
+            unsafe {
+                let ptr: *const u8 = plane.as_ptr().add(y0 * plane_w + x0);
+                if hf == 2 && vf == 2 {
+                    crate::simd::wasm32::wasm_downsample_h2v2_fdct_quantize(
+                        ptr, plane_w, quant, output,
+                    );
+                } else if hf == 2 && vf == 1 {
+                    crate::simd::wasm32::wasm_downsample_h2v1_fdct_quantize(
+                        ptr, plane_w, quant, output,
+                    );
+                } else {
+                    let mut block = [0i16; 64];
+                    downsample_chroma_block(plane, plane_w, plane_h, x0, y0, hf, vf, &mut block);
+                    fdct_quantize_fn(&mut block, quant, output);
+                }
+            }
+            return;
+        }
+    }
+
     let _ = use_simd_fdct;
     let mut block = [0i16; 64];
     downsample_chroma_block(plane, plane_w, plane_h, x0, y0, hf, vf, &mut block);

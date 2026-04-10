@@ -107,6 +107,95 @@ pub(crate) unsafe fn wasm_extract_fdct_quantize(
     wasm_quantize_zigzag(&dct_output, quant, output);
 }
 
+/// Fused H2V2 chroma downsample (16x16→8x8) + FDCT + quantize + zigzag.
+///
+/// Loads 16 rows of 16 u8 pixels, averages 2x2 blocks, level-shifts,
+/// feeds into FDCT, quantizes, and zigzag reorders.
+///
+/// # Safety
+/// Requires simd128. `plane_ptr` must point to valid pixel data with at least
+/// `stride * 15 + 16` accessible bytes.
+#[target_feature(enable = "simd128")]
+pub(crate) unsafe fn wasm_downsample_h2v2_fdct_quantize(
+    plane_ptr: *const u8,
+    stride: usize,
+    quant: &QuantDivisors,
+    output: &mut [i16; 64],
+) {
+    let level_shift: v128 = i16x8_splat(128);
+    let mut block = [0i16; 64];
+
+    for dy in 0..8 {
+        let sy: usize = dy * 2;
+        // Load two rows of 16 u8
+        let r0: v128 = v128_load(plane_ptr.add(sy * stride) as *const v128);
+        let r1: v128 = v128_load(plane_ptr.add((sy + 1) * stride) as *const v128);
+        // Widen to u16 and sum vertically
+        let r0_lo: v128 = u16x8_extend_low_u8x16(r0);
+        let r0_hi: v128 = u16x8_extend_high_u8x16(r0);
+        let r1_lo: v128 = u16x8_extend_low_u8x16(r1);
+        let r1_hi: v128 = u16x8_extend_high_u8x16(r1);
+        let sum_lo: v128 = i16x8_add(r0_lo, r1_lo); // [0+0, 1+1, 2+2, 3+3, 4+4, 5+5, 6+6, 7+7]
+        let sum_hi: v128 = i16x8_add(r0_hi, r1_hi); // [8+8, 9+9, ...]
+                                                    // Sum horizontal pairs: even + odd positions
+                                                    // Deinterleave even/odd u16 lanes, then add
+        let evens: v128 = i8x16_shuffle::<0, 1, 4, 5, 8, 9, 12, 13, 16, 17, 20, 21, 24, 25, 28, 29>(
+            sum_lo, sum_hi,
+        );
+        let odds: v128 = i8x16_shuffle::<2, 3, 6, 7, 10, 11, 14, 15, 18, 19, 22, 23, 26, 27, 30, 31>(
+            sum_lo, sum_hi,
+        );
+        // Average: (sum_of_4 + 2) >> 2
+        let total: v128 = i16x8_add(i16x8_add(evens, odds), i16x8_splat(2));
+        let avg: v128 = i16x8_shr(total, 2);
+        let shifted: v128 = i16x8_sub(avg, level_shift);
+        v128_store(block.as_mut_ptr().add(dy * 8) as *mut v128, shifted);
+    }
+
+    let mut dct_output = [0i16; 64];
+    fdct::wasm_fdct(&block, &mut dct_output);
+    wasm_quantize_zigzag(&dct_output, quant, output);
+}
+
+/// Fused H2V1 chroma downsample (16x8→8x8) + FDCT + quantize + zigzag.
+///
+/// Loads 8 rows of 16 u8 pixels, averages horizontal pairs, level-shifts,
+/// feeds into FDCT, quantizes, and zigzag reorders.
+///
+/// # Safety
+/// Requires simd128. `plane_ptr` must point to valid pixel data with at least
+/// `stride * 7 + 16` accessible bytes.
+#[target_feature(enable = "simd128")]
+pub(crate) unsafe fn wasm_downsample_h2v1_fdct_quantize(
+    plane_ptr: *const u8,
+    stride: usize,
+    quant: &QuantDivisors,
+    output: &mut [i16; 64],
+) {
+    let level_shift: v128 = i16x8_splat(128);
+    let mut block = [0i16; 64];
+
+    for row in 0..8 {
+        let r: v128 = v128_load(plane_ptr.add(row * stride) as *const v128);
+        let r_lo: v128 = u16x8_extend_low_u8x16(r);
+        let r_hi: v128 = u16x8_extend_high_u8x16(r);
+        // Deinterleave even/odd to sum horizontal pairs
+        let evens: v128 =
+            i8x16_shuffle::<0, 1, 4, 5, 8, 9, 12, 13, 16, 17, 20, 21, 24, 25, 28, 29>(r_lo, r_hi);
+        let odds: v128 =
+            i8x16_shuffle::<2, 3, 6, 7, 10, 11, 14, 15, 18, 19, 22, 23, 26, 27, 30, 31>(r_lo, r_hi);
+        // Average: (pair_sum + 1) >> 1
+        let sum: v128 = i16x8_add(i16x8_add(evens, odds), i16x8_splat(1));
+        let avg: v128 = i16x8_shr(sum, 1);
+        let shifted: v128 = i16x8_sub(avg, level_shift);
+        v128_store(block.as_mut_ptr().add(row * 8) as *mut v128, shifted);
+    }
+
+    let mut dct_output = [0i16; 64];
+    fdct::wasm_fdct(&block, &mut dct_output);
+    wasm_quantize_zigzag(&dct_output, quant, output);
+}
+
 /// SIMD quantize + zigzag reorder using reciprocal multiply.
 #[target_feature(enable = "simd128")]
 unsafe fn wasm_quantize_zigzag(coeffs: &[i16; 64], quant: &QuantDivisors, output: &mut [i16; 64]) {
