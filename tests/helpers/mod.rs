@@ -61,12 +61,17 @@ static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 fn temp_path(name: &str) -> PathBuf {
     let counter: u64 = TEMP_COUNTER.fetch_add(1, Ordering::Relaxed);
-    // WASI does not support std::process::id(), use counter-only path.
+    // WASI: no std::process::id(), no guaranteed temp_dir access.
+    // Use current directory with counter-only naming.
     #[cfg(target_arch = "wasm32")]
-    let id_str: String = format!("wasm_{:04}", counter);
+    {
+        PathBuf::from(format!(".ljt_test_wasm_{:04}_{}", counter, name))
+    }
     #[cfg(not(target_arch = "wasm32"))]
-    let id_str: String = format!("{}_{:04}", std::process::id(), counter);
-    std::env::temp_dir().join(format!("ljt_test_{}_{}", id_str, name))
+    {
+        let pid: u32 = std::process::id();
+        std::env::temp_dir().join(format!("ljt_test_{}_{:04}_{}", pid, counter, name))
+    }
 }
 
 /// RAII temp file that auto-deletes on drop.
