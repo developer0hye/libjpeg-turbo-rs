@@ -103,21 +103,26 @@ unsafe fn wasm_rgb_to_ycbcr_row_inner(
 
     // Process 8 pixels per iteration
     while remaining >= 8 {
-        // Deinterleave RGB → separate R, G, B planes
-        let mut r8 = [0u8; 8];
-        let mut g8 = [0u8; 8];
-        let mut b8 = [0u8; 8];
+        // SIMD deinterleave: 2 overlapping v128 loads + 3 shuffles
+        // 8 RGB pixels = 24 bytes: load bytes[0..16] and bytes[8..24]
         let base: usize = offset * 3;
-        for j in 0..8 {
-            r8[j] = rgb[base + j * 3];
-            g8[j] = rgb[base + j * 3 + 1];
-            b8[j] = rgb[base + j * 3 + 2];
-        }
+        let v0: v128 = v128_load(rgb.as_ptr().add(base) as *const v128);
+        let v1: v128 = v128_load(rgb.as_ptr().add(base + 8) as *const v128);
 
-        // Load 8 u8, zero-extend to u16x8
-        let r: v128 = u16x8_extend_low_u8x16(v128_load64_zero(r8.as_ptr() as *const u64));
-        let g: v128 = u16x8_extend_low_u8x16(v128_load64_zero(g8.as_ptr() as *const u64));
-        let b: v128 = u16x8_extend_low_u8x16(v128_load64_zero(b8.as_ptr() as *const u64));
+        // Extract R: bytes 0,3,6,9,12,15 from v0; bytes 18,21 = v1[10,13]
+        let r_bytes: v128 =
+            i8x16_shuffle::<0, 3, 6, 9, 12, 15, 26, 29, 0, 0, 0, 0, 0, 0, 0, 0>(v0, v1);
+        // Extract G: bytes 1,4,7,10,13 from v0; bytes 16,19,22 = v1[8,11,14]
+        let g_bytes: v128 =
+            i8x16_shuffle::<1, 4, 7, 10, 13, 24, 27, 30, 0, 0, 0, 0, 0, 0, 0, 0>(v0, v1);
+        // Extract B: bytes 2,5,8,11,14 from v0; bytes 17,20,23 = v1[9,12,15]
+        let b_bytes: v128 =
+            i8x16_shuffle::<2, 5, 8, 11, 14, 25, 28, 31, 0, 0, 0, 0, 0, 0, 0, 0>(v0, v1);
+
+        // Zero-extend u8 → u16
+        let r: v128 = u16x8_extend_low_u8x16(r_bytes);
+        let g: v128 = u16x8_extend_low_u8x16(g_bytes);
+        let b: v128 = u16x8_extend_low_u8x16(b_bytes);
 
         // Y = 0.299*R + 0.587*G + 0.114*B (widening to u32, process lo+hi halves)
         let y_lo: v128 = wmul_add_lo(
