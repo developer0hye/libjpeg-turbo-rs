@@ -1,3 +1,5 @@
+#![cfg(not(target_arch = "wasm32"))]
+
 use libjpeg_turbo_rs::api::image_io::{
     load_image, load_image_from_bytes, save_bmp, save_ppm, LoadedImage,
 };
