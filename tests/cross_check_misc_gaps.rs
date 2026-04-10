@@ -605,6 +605,7 @@ fn c_xval_quantize_256_colors() {
         dither_mode: DitherMode::FloydSteinberg,
         two_pass: true,
         colormap: None,
+        c_compatible: false,
     };
     let quantized =
         quantize(rgb_pixels, width, height, &options).expect("Rust quantize must succeed");
@@ -679,6 +680,7 @@ fn c_xval_quantize_16_colors() {
         dither_mode: DitherMode::FloydSteinberg,
         two_pass: true,
         colormap: None,
+        c_compatible: false,
     };
     let quantized =
         quantize(rgb_pixels, width, height, &options).expect("Rust quantize must succeed");

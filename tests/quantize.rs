@@ -45,6 +45,7 @@ fn uniform_color_image_quantizes_to_one_entry() {
         dither_mode: DitherMode::None,
         two_pass: true,
         colormap: None,
+        c_compatible: false,
     };
 
     let result = quantize(&pixels, width, height, &options).unwrap();
@@ -69,6 +70,7 @@ fn gradient_palette_size_matches_requested() {
         dither_mode: DitherMode::None,
         two_pass: true,
         colormap: None,
+        c_compatible: false,
     };
 
     let result = quantize(&pixels, width, height, &options).unwrap();
@@ -92,18 +94,21 @@ fn dither_modes_produce_different_outputs() {
         dither_mode: DitherMode::None,
         two_pass: true,
         colormap: None,
+        c_compatible: false,
     };
     let opts_ordered = QuantizeOptions {
         num_colors: 8,
         dither_mode: DitherMode::Ordered,
         two_pass: true,
         colormap: None,
+        c_compatible: false,
     };
     let opts_fs = QuantizeOptions {
         num_colors: 8,
         dither_mode: DitherMode::FloydSteinberg,
         two_pass: true,
         colormap: None,
+        c_compatible: false,
     };
 
     let result_none = quantize(&pixels, width, height, &opts_none).unwrap();
@@ -144,6 +149,7 @@ fn dequantize_roundtrip_preserves_palette_colors() {
         dither_mode: DitherMode::None,
         two_pass: true,
         colormap: None,
+        c_compatible: false,
     };
 
     let quantized = quantize(&pixels, width, height, &options).unwrap();
@@ -166,6 +172,7 @@ fn external_colormap_is_used() {
         dither_mode: DitherMode::None,
         two_pass: false,
         colormap: Some(colormap.clone()),
+        c_compatible: false,
     };
 
     let result = quantize(&pixels, width, height, &options).unwrap();
@@ -193,12 +200,14 @@ fn floyd_steinberg_distributes_error_across_gradient() {
         dither_mode: DitherMode::None,
         two_pass: false,
         colormap: Some(palette.clone()),
+        c_compatible: false,
     };
     let opts_fs = QuantizeOptions {
         num_colors: 4,
         dither_mode: DitherMode::FloydSteinberg,
         two_pass: false,
         colormap: Some(palette),
+        c_compatible: false,
     };
 
     let result_none = quantize(&pixels, width, height, &opts_none).unwrap();
@@ -248,12 +257,14 @@ fn two_pass_vs_one_pass_quality_difference() {
         dither_mode: DitherMode::None,
         two_pass: true,
         colormap: None,
+        c_compatible: false,
     };
     let opts_one_pass = QuantizeOptions {
         num_colors: 16,
         dither_mode: DitherMode::None,
         two_pass: false,
         colormap: None,
+        c_compatible: false,
     };
 
     let result_two = quantize(&pixels, width, height, &opts_two_pass).unwrap();
@@ -290,6 +301,7 @@ fn num_colors_one() {
         dither_mode: DitherMode::None,
         two_pass: true,
         colormap: None,
+        c_compatible: false,
     };
 
     let result = quantize(&pixels, width, height, &options).unwrap();
@@ -316,6 +328,7 @@ fn num_colors_256() {
         dither_mode: DitherMode::None,
         two_pass: true,
         colormap: None,
+        c_compatible: false,
     };
 
     let result = quantize(&pixels, width, height, &options).unwrap();
@@ -341,6 +354,7 @@ fn grayscale_quantization() {
         dither_mode: DitherMode::None,
         two_pass: true,
         colormap: None,
+        c_compatible: false,
     };
 
     let result = quantize(&pixels, width, height, &options).unwrap();
@@ -380,6 +394,7 @@ fn num_colors_zero_returns_error() {
         dither_mode: DitherMode::None,
         two_pass: true,
         colormap: None,
+        c_compatible: false,
     };
     let result = quantize(&pixels, 4, 4, &options);
     assert!(result.is_err());
@@ -393,6 +408,7 @@ fn num_colors_exceeds_256_returns_error() {
         dither_mode: DitherMode::None,
         two_pass: true,
         colormap: None,
+        c_compatible: false,
     };
     let result = quantize(&pixels, 4, 4, &options);
     assert!(result.is_err());
@@ -411,6 +427,7 @@ fn ordered_dither_produces_spatial_pattern() {
         dither_mode: DitherMode::Ordered,
         two_pass: false,
         colormap: Some(vec![[0, 0, 0], [255, 255, 255]]),
+        c_compatible: false,
     };
 
     let result = quantize(&pixels, width, height, &options).unwrap();
@@ -697,6 +714,7 @@ fn c_djpeg_quantize_diff_zero() {
             dither_mode: DitherMode::FloydSteinberg,
             two_pass: true,
             colormap: None,
+            c_compatible: false,
         };
         let quantized =
             quantize(rgb_pixels, width, height, &options).expect("Rust quantize must succeed");
@@ -846,6 +864,7 @@ fn c_djpeg_quantize_ordered_dither_diff_zero() {
         dither_mode: DitherMode::Ordered,
         two_pass: true,
         colormap: None,
+        c_compatible: false,
     };
     let quantized = quantize(rgb_pixels, width, height, &options)
         .expect("Rust quantize (ordered) must succeed");
@@ -972,6 +991,7 @@ fn c_djpeg_quantize_no_dither_diff_zero() {
         dither_mode: DitherMode::None,
         two_pass: true,
         colormap: None,
+        c_compatible: false,
     };
     let quantized = quantize(rgb_pixels, width, height, &options)
         .expect("Rust quantize (no dither) must succeed");
@@ -1094,6 +1114,7 @@ fn c_djpeg_quantize_fixture_image() {
         dither_mode: DitherMode::FloydSteinberg,
         two_pass: true,
         colormap: None,
+        c_compatible: false,
     };
     let quantized =
         quantize(rgb_pixels, width, height, &options).expect("Rust quantize must succeed");

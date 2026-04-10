@@ -230,6 +230,7 @@ fn requantize_with_different_palette() {
         dither_mode: DitherMode::None,
         two_pass: true,
         colormap: None,
+        c_compatible: false,
     };
     let quantized = quantize(&pixels, width, height, &opts).expect("quantize should succeed");
 
