@@ -12,7 +12,7 @@ use std::path::{Path, PathBuf};
 
 use libjpeg_turbo_rs::{
     decompress, decompress_cropped, decompress_to, transform_jpeg_with_options, CropRegion,
-    Encoder, Image, PixelFormat, ScalingFactor, ScanlineDecoder, ScanScript, Subsampling,
+    Encoder, Image, PixelFormat, ScalingFactor, ScanScript, ScanlineDecoder, Subsampling,
     TransformOp, TransformOptions,
 };
 
@@ -894,7 +894,13 @@ fn c_djpeg_420_islow_skip15_31() {
     let c_ppm = helpers::TempFile::new("c_420_skip15_31.ppm");
     helpers::run_c_djpeg(
         &djpeg,
-        &["-dct", "int", "-skip", &format!("{},{}", skip_start, skip_end), "-ppm"],
+        &[
+            "-dct",
+            "int",
+            "-skip",
+            &format!("{},{}", skip_start, skip_end),
+            "-ppm",
+        ],
         &src_jpg,
         c_ppm.path(),
     );
@@ -914,17 +920,23 @@ fn c_djpeg_420_islow_skip15_31() {
 
     // Read rows before skip
     for _ in 0..skip_start {
-        decoder.read_scanline(&mut row_buf).expect("read_scanline failed");
+        decoder
+            .read_scanline(&mut row_buf)
+            .expect("read_scanline failed");
         output.extend_from_slice(&row_buf);
     }
 
     // Skip rows
-    let skipped = decoder.skip_scanlines(skipped_count).expect("skip_scanlines failed");
+    let skipped = decoder
+        .skip_scanlines(skipped_count)
+        .expect("skip_scanlines failed");
     assert_eq!(skipped, skipped_count);
 
     // Read remaining rows
     for _ in (skip_end + 1)..height {
-        decoder.read_scanline(&mut row_buf).expect("read_scanline failed");
+        decoder
+            .read_scanline(&mut row_buf)
+            .expect("read_scanline failed");
         output.extend_from_slice(&row_buf);
     }
 
@@ -963,13 +975,24 @@ fn c_djpeg_444_islow_skip1_6() {
 
     // Create 444 JPEG: cjpeg -dct int -sample 1x1
     let jpeg_file = helpers::TempFile::new("444_islow.jpg");
-    helpers::run_c_cjpeg(&cjpeg, &["-dct", "int", "-sample", "1x1"], &src_ppm, jpeg_file.path());
+    helpers::run_c_cjpeg(
+        &cjpeg,
+        &["-dct", "int", "-sample", "1x1"],
+        &src_ppm,
+        jpeg_file.path(),
+    );
 
     // C reference: djpeg -dct int -skip 1,6 -ppm
     let c_ppm = helpers::TempFile::new("c_444_skip1_6.ppm");
     helpers::run_c_djpeg(
         &djpeg,
-        &["-dct", "int", "-skip", &format!("{},{}", skip_start, skip_end), "-ppm"],
+        &[
+            "-dct",
+            "int",
+            "-skip",
+            &format!("{},{}", skip_start, skip_end),
+            "-ppm",
+        ],
         jpeg_file.path(),
         c_ppm.path(),
     );
@@ -989,17 +1012,23 @@ fn c_djpeg_444_islow_skip1_6() {
 
     // Read rows before skip
     for _ in 0..skip_start {
-        decoder.read_scanline(&mut row_buf).expect("read_scanline failed");
+        decoder
+            .read_scanline(&mut row_buf)
+            .expect("read_scanline failed");
         output.extend_from_slice(&row_buf);
     }
 
     // Skip rows
-    let skipped = decoder.skip_scanlines(skipped_count).expect("skip_scanlines failed");
+    let skipped = decoder
+        .skip_scanlines(skipped_count)
+        .expect("skip_scanlines failed");
     assert_eq!(skipped, skipped_count);
 
     // Read remaining rows
     for _ in (skip_end + 1)..height {
-        decoder.read_scanline(&mut row_buf).expect("read_scanline failed");
+        decoder
+            .read_scanline(&mut row_buf)
+            .expect("read_scanline failed");
         output.extend_from_slice(&row_buf);
     }
 
