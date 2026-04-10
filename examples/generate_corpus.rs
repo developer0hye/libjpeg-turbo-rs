@@ -99,7 +99,9 @@ fn make_noise(width: usize, height: usize, seed: u64) -> Vec<u8> {
     let mut pixels = Vec::with_capacity(width * height * 3);
     let mut state = seed;
     for _ in 0..(width * height * 3) {
-        state = state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        state = state
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
         pixels.push((state >> 33) as u8);
     }
     pixels
@@ -194,7 +196,7 @@ fn prepare_sources(tmp_dir: &Path) -> Vec<SourcePpm> {
 
     // Synthetic images: (name, width, height, pixel_fn)
     type PixelFn = Box<dyn Fn(usize, usize) -> Vec<u8>>;
-    let synthetics: Vec<(&str, usize, usize, PixelFn)> = vec![
+    let mut synthetics: Vec<(&str, usize, usize, PixelFn)> = vec![
         (
             "gradient_64x64",
             64,
@@ -226,26 +228,90 @@ fn prepare_sources(tmp_dir: &Path) -> Vec<SourcePpm> {
         ("strip_100x1", 100, 1, Box::new(|w, h| make_gradient(w, h))),
         ("strip_1x100", 1, 100, Box::new(|w, h| make_gradient(w, h))),
         // Phase 2 additions: more resolutions, content patterns, edge cases
-        ("noise_320x240", 320, 240, Box::new(|w, h| make_noise(w, h, 12345))),
-        ("noise_17x31", 17, 31, Box::new(|w, h| make_noise(w, h, 67890))),
+        (
+            "noise_320x240",
+            320,
+            240,
+            Box::new(|w, h| make_noise(w, h, 12345)),
+        ),
+        (
+            "noise_17x31",
+            17,
+            31,
+            Box::new(|w, h| make_noise(w, h, 67890)),
+        ),
         ("edges_256x256", 256, 256, Box::new(|w, h| make_edges(w, h))),
         ("sine_800x600", 800, 600, Box::new(|w, h| make_sine(w, h))),
-        ("natural_640x480", 640, 480, Box::new(|w, h| make_natural(w, h))),
-        ("natural_1280x720", 1280, 720, Box::new(|w, h| make_natural(w, h))),
+        (
+            "natural_640x480",
+            640,
+            480,
+            Box::new(|w, h| make_natural(w, h)),
+        ),
+        (
+            "natural_1280x720",
+            1280,
+            720,
+            Box::new(|w, h| make_natural(w, h)),
+        ),
         ("odd_127x63", 127, 63, Box::new(|w, h| make_gradient(w, h))),
-        ("odd_255x127", 255, 127, Box::new(|w, h| make_noise(w, h, 99999))),
+        (
+            "odd_255x127",
+            255,
+            127,
+            Box::new(|w, h| make_noise(w, h, 99999)),
+        ),
         ("tall_16x256", 16, 256, Box::new(|w, h| make_gradient(w, h))),
         ("wide_256x16", 256, 16, Box::new(|w, h| make_edges(w, h))),
-        ("solid_black_8x8", 8, 8, Box::new(|w, h| make_solid(w, h, 0, 0, 0))),
-        ("solid_white_8x8", 8, 8, Box::new(|w, h| make_solid(w, h, 255, 255, 255))),
-        // Large resolutions: 4K and 8K
-        ("natural_3840x2160", 3840, 2160, Box::new(|w, h| make_natural(w, h))),
-        ("gradient_7680x4320", 7680, 4320, Box::new(|w, h| make_gradient(w, h))),
-        ("noise_7680x4320", 7680, 4320, Box::new(|w, h| make_noise(w, h, 77777))),
-        ("edges_7680x4320", 7680, 4320, Box::new(|w, h| make_edges(w, h))),
-        // Odd 8K dimensions (non-MCU-aligned)
-        ("natural_7681x4321", 7681, 4321, Box::new(|w, h| make_natural(w, h))),
+        (
+            "solid_black_8x8",
+            8,
+            8,
+            Box::new(|w, h| make_solid(w, h, 0, 0, 0)),
+        ),
+        (
+            "solid_white_8x8",
+            8,
+            8,
+            Box::new(|w, h| make_solid(w, h, 255, 255, 255)),
+        ),
+        // Large resolutions: 4K (always included)
+        (
+            "natural_3840x2160",
+            3840,
+            2160,
+            Box::new(|w, h| make_natural(w, h)),
+        ),
     ];
+
+    // 8K sources are opt-in via CORPUS_INCLUDE_8K=1 (too slow for CI)
+    if std::env::var("CORPUS_INCLUDE_8K").as_deref() == Ok("1") {
+        synthetics.push((
+            "gradient_7680x4320",
+            7680,
+            4320,
+            Box::new(|w, h| make_gradient(w, h)),
+        ));
+        synthetics.push((
+            "noise_7680x4320",
+            7680,
+            4320,
+            Box::new(|w, h| make_noise(w, h, 77777)),
+        ));
+        synthetics.push((
+            "edges_7680x4320",
+            7680,
+            4320,
+            Box::new(|w, h| make_edges(w, h)),
+        ));
+        // Odd 8K dimensions (non-MCU-aligned)
+        synthetics.push((
+            "natural_7681x4321",
+            7681,
+            4321,
+            Box::new(|w, h| make_natural(w, h)),
+        ));
+    }
 
     for (name, width, height, gen) in &synthetics {
         let ppm_path = tmp_dir.join(format!("{}.ppm", name));
@@ -327,24 +393,46 @@ fn all_variants() -> Vec<CjpegVariant> {
 }
 
 fn generate_jpegs(cjpeg: &Path, sources: &[SourcePpm], out_dir: &Path) -> (usize, usize) {
-    let mut generated = 0usize;
-    let mut failed = 0usize;
     let variants = all_variants();
 
-    for source in sources {
-        for variant in &variants {
-            let filename = format!("{}_{}.jpg", source.name, variant.label);
-            let output_jpg = out_dir.join(&filename);
-            let args: Vec<&str> = variant.args.iter().map(|s| s.as_str()).collect();
-            if run_cjpeg(cjpeg, &source.path, &output_jpg, &args) {
-                generated += 1;
-            } else {
-                failed += 1;
-            }
-        }
-    }
+    // Collect all (source, variant) pairs for parallel execution
+    let work: Vec<(&SourcePpm, &CjpegVariant)> = sources
+        .iter()
+        .flat_map(|source| variants.iter().map(move |variant| (source, variant)))
+        .collect();
 
-    (generated, failed)
+    let generated = std::sync::atomic::AtomicUsize::new(0);
+    let failed = std::sync::atomic::AtomicUsize::new(0);
+
+    let parallelism = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(4);
+    let chunk_size = (work.len() + parallelism - 1) / parallelism;
+
+    let generated_ref = &generated;
+    let failed_ref = &failed;
+
+    std::thread::scope(|s| {
+        for chunk in work.chunks(chunk_size) {
+            s.spawn(move || {
+                for (source, variant) in chunk {
+                    let filename = format!("{}_{}.jpg", source.name, variant.label);
+                    let output_jpg = out_dir.join(&filename);
+                    let args: Vec<&str> = variant.args.iter().map(|s| s.as_str()).collect();
+                    if run_cjpeg(cjpeg, &source.path, &output_jpg, &args) {
+                        generated_ref.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    } else {
+                        failed_ref.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    }
+                }
+            });
+        }
+    });
+
+    (
+        generated.load(std::sync::atomic::Ordering::Relaxed),
+        failed.load(std::sync::atomic::Ordering::Relaxed),
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -406,10 +494,14 @@ fn main() {
     println!("  {} source images ready", sources.len());
 
     // Generate JPEG matrix
+    let parallelism = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(4);
     println!(
-        "Running cjpeg matrix ({} variants × {} sources)...",
+        "Running cjpeg matrix ({} variants × {} sources, {} threads)...",
         all_variants().len(),
-        sources.len()
+        sources.len(),
+        parallelism,
     );
     let (generated, failed) = generate_jpegs(&cjpeg, &sources, &generated_dir);
     println!("  generated: {}  failed: {}", generated, failed);
