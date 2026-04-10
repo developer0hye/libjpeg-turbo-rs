@@ -85,6 +85,7 @@ pub struct EncoderSimdRoutines {
 /// Checks `JSIMD_FORCENONE` env var first. If set to "1", returns scalar.
 /// Otherwise selects NEON on aarch64, scalar elsewhere.
 pub fn detect() -> SimdRoutines {
+    #[cfg(not(target_arch = "wasm32"))]
     if std::env::var("JSIMD_FORCENONE").ok().as_deref() == Some("1") {
         return scalar::routines();
     }
@@ -105,6 +106,7 @@ pub fn detect() -> SimdRoutines {
 
 /// Detect available SIMD features and return the best encoder dispatch table.
 pub fn detect_encoder() -> EncoderSimdRoutines {
+    #[cfg(not(target_arch = "wasm32"))]
     if std::env::var("JSIMD_FORCENONE").ok().as_deref() == Some("1") {
         return scalar::encoder_routines();
     }
