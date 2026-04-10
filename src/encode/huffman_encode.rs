@@ -849,7 +849,10 @@ unsafe fn encode_ac_wasm_local(
         let offset: usize = (chunk * 8) as usize;
         let row: v128 = v128_load(coeffs_zigzag.as_ptr().add(offset) as *const v128);
         let ne: v128 = i16x8_ne(row, zero);
-        let bits: u8 = i16x8_bitmask(ne);
+        // i16x8_bitmask returns lane 0 as bit 0 (LSB), but we need lane 0
+        // as bit 7 (MSB) to match the scalar bitmap layout where earlier
+        // coefficients occupy higher bit positions.
+        let bits: u8 = i16x8_bitmask(ne).reverse_bits();
         bitmap |= (bits as u64) << (56 - chunk * 8);
     }
 
