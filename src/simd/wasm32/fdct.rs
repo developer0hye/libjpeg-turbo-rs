@@ -164,36 +164,21 @@ fn fdct_pass(
     let tmp11: v128 = i16x8_add(tmp1, tmp2);
     let tmp12: v128 = i16x8_sub(tmp1, tmp2);
 
-    // data[0] and data[4]: pure add/sub, shift left by PASS1_BITS
-    let out0: v128 = if descale == DESCALE_P1 {
-        i16x8_shl(i16x8_add(tmp10, tmp11), PASS1_BITS)
-    } else {
-        // Pass 2: no shift needed for output 0 and 4 (the shift is part of descale)
-        rshrn(
-            i32x4_shl(
-                i32x4_extmul_low_i16x8(i16x8_add(tmp10, tmp11), i16x8_splat(1)),
-                CONST_BITS,
-            ),
-            i32x4_shl(
-                i32x4_extmul_high_i16x8(i16x8_add(tmp10, tmp11), i16x8_splat(1)),
-                CONST_BITS,
-            ),
-            descale,
+    // data[0] and data[4]: pure add/sub with scaling.
+    // Pass 1: left shift by PASS1_BITS.
+    // Pass 2: rounding right shift by PASS1_BITS (stays in i16, no widening needed).
+    let sum_10_11: v128 = i16x8_add(tmp10, tmp11);
+    let diff_10_11: v128 = i16x8_sub(tmp10, tmp11);
+    let (out0, out4) = if descale == DESCALE_P1 {
+        (
+            i16x8_shl(sum_10_11, PASS1_BITS),
+            i16x8_shl(diff_10_11, PASS1_BITS),
         )
-    };
-    let out4: v128 = if descale == DESCALE_P1 {
-        i16x8_shl(i16x8_sub(tmp10, tmp11), PASS1_BITS)
     } else {
-        rshrn(
-            i32x4_shl(
-                i32x4_extmul_low_i16x8(i16x8_sub(tmp10, tmp11), i16x8_splat(1)),
-                CONST_BITS,
-            ),
-            i32x4_shl(
-                i32x4_extmul_high_i16x8(i16x8_sub(tmp10, tmp11), i16x8_splat(1)),
-                CONST_BITS,
-            ),
-            descale,
+        let rnd: v128 = i16x8_splat(1 << (PASS1_BITS - 1));
+        (
+            i16x8_shr(i16x8_add(sum_10_11, rnd), PASS1_BITS),
+            i16x8_shr(i16x8_add(diff_10_11, rnd), PASS1_BITS),
         )
     };
 
