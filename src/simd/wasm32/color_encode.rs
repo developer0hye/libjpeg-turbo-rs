@@ -191,3 +191,324 @@ unsafe fn wasm_rgb_to_ycbcr_row_inner(
         );
     }
 }
+
+/// Core YCbCr computation from pre-extracted R, G, B u16x8 vectors.
+/// Shared by all format variants.
+#[inline(always)]
+unsafe fn compute_ycbcr(
+    r: v128,
+    g: v128,
+    b: v128,
+    scaled_128_5: v128,
+    f_0_299: v128,
+    f_0_587: v128,
+    f_0_114: v128,
+    f_0_169: v128,
+    f_0_331: v128,
+    f_0_500: v128,
+    f_0_419: v128,
+    f_0_081: v128,
+    y_out: &mut [u8],
+    cb_out: &mut [u8],
+    cr_out: &mut [u8],
+    offset: usize,
+) {
+    let y_lo: v128 = wmul_add_lo(
+        wmul_add_lo(i32x4_extmul_low_u16x8(r, f_0_299), g, f_0_587),
+        b,
+        f_0_114,
+    );
+    let y_hi: v128 = wmul_add_hi(
+        wmul_add_hi(i32x4_extmul_high_u16x8(r, f_0_299), g, f_0_587),
+        b,
+        f_0_114,
+    );
+    let cb_lo: v128 = wmul_add_lo(
+        wmul_sub_lo(wmul_sub_lo(scaled_128_5, r, f_0_169), g, f_0_331),
+        b,
+        f_0_500,
+    );
+    let cb_hi: v128 = wmul_add_hi(
+        wmul_sub_hi(wmul_sub_hi(scaled_128_5, r, f_0_169), g, f_0_331),
+        b,
+        f_0_500,
+    );
+    let cr_lo: v128 = wmul_sub_lo(
+        wmul_sub_lo(wmul_add_lo(scaled_128_5, r, f_0_500), g, f_0_419),
+        b,
+        f_0_081,
+    );
+    let cr_hi: v128 = wmul_sub_hi(
+        wmul_sub_hi(wmul_add_hi(scaled_128_5, r, f_0_500), g, f_0_419),
+        b,
+        f_0_081,
+    );
+
+    let y_u16: v128 = pack_u32x4_to_u16x8(rshrn_u32_16(y_lo), rshrn_u32_16(y_hi));
+    let cb_u16: v128 = pack_u32x4_to_u16x8(shrn_u32_16(cb_lo), shrn_u32_16(cb_hi));
+    let cr_u16: v128 = pack_u32x4_to_u16x8(shrn_u32_16(cr_lo), shrn_u32_16(cr_hi));
+
+    let y_u8: v128 = pack_u16x8_to_u8x8(y_u16);
+    let cb_u8: v128 = pack_u16x8_to_u8x8(cb_u16);
+    let cr_u8: v128 = pack_u16x8_to_u8x8(cr_u16);
+
+    v128_store64_lane::<0>(y_u8, y_out.as_mut_ptr().add(offset) as *mut u64);
+    v128_store64_lane::<0>(cb_u8, cb_out.as_mut_ptr().add(offset) as *mut u64);
+    v128_store64_lane::<0>(cr_u8, cr_out.as_mut_ptr().add(offset) as *mut u64);
+}
+
+/// WASM simd128 RGBA → YCbCr row conversion (4 bytes per pixel, skip alpha).
+pub fn wasm_rgba_to_ycbcr_row(
+    rgba: &[u8],
+    y: &mut [u8],
+    cb: &mut [u8],
+    cr: &mut [u8],
+    width: usize,
+) {
+    if width == 0 {
+        return;
+    }
+    unsafe {
+        wasm_rgba_to_ycbcr_row_inner(rgba, y, cb, cr, width);
+    }
+}
+
+#[target_feature(enable = "simd128")]
+unsafe fn wasm_rgba_to_ycbcr_row_inner(
+    rgba: &[u8],
+    y: &mut [u8],
+    cb: &mut [u8],
+    cr: &mut [u8],
+    width: usize,
+) {
+    let scaled_128_5: v128 = i32x4_splat((128 << 16) + 32767);
+    let f_0_299: v128 = u16x8_splat(F_0_299);
+    let f_0_587: v128 = u16x8_splat(F_0_587);
+    let f_0_114: v128 = u16x8_splat(F_0_114);
+    let f_0_169: v128 = u16x8_splat(F_0_169);
+    let f_0_331: v128 = u16x8_splat(F_0_331);
+    let f_0_500: v128 = u16x8_splat(F_0_500);
+    let f_0_419: v128 = u16x8_splat(F_0_419);
+    let f_0_081: v128 = u16x8_splat(F_0_081);
+
+    let mut offset: usize = 0;
+    let mut remaining: usize = width;
+
+    while remaining >= 8 {
+        let base: usize = offset * 4;
+        // 8 RGBA pixels = 32 bytes: two v128 loads
+        let v0: v128 = v128_load(rgba.as_ptr().add(base) as *const v128);
+        let v1: v128 = v128_load(rgba.as_ptr().add(base + 16) as *const v128);
+
+        // Extract R (offset 0,4,8,12 from v0 and 0,4,8,12 from v1)
+        let r_bytes: v128 =
+            i8x16_shuffle::<0, 4, 8, 12, 16, 20, 24, 28, 0, 0, 0, 0, 0, 0, 0, 0>(v0, v1);
+        let g_bytes: v128 =
+            i8x16_shuffle::<1, 5, 9, 13, 17, 21, 25, 29, 0, 0, 0, 0, 0, 0, 0, 0>(v0, v1);
+        let b_bytes: v128 =
+            i8x16_shuffle::<2, 6, 10, 14, 18, 22, 26, 30, 0, 0, 0, 0, 0, 0, 0, 0>(v0, v1);
+
+        let r: v128 = u16x8_extend_low_u8x16(r_bytes);
+        let g: v128 = u16x8_extend_low_u8x16(g_bytes);
+        let b: v128 = u16x8_extend_low_u8x16(b_bytes);
+
+        compute_ycbcr(
+            r,
+            g,
+            b,
+            scaled_128_5,
+            f_0_299,
+            f_0_587,
+            f_0_114,
+            f_0_169,
+            f_0_331,
+            f_0_500,
+            f_0_419,
+            f_0_081,
+            y,
+            cb,
+            cr,
+            offset,
+        );
+        offset += 8;
+        remaining -= 8;
+    }
+
+    if remaining > 0 {
+        crate::encode::color::rgba_to_ycbcr_row(
+            &rgba[offset * 4..],
+            &mut y[offset..],
+            &mut cb[offset..],
+            &mut cr[offset..],
+            remaining,
+        );
+    }
+}
+
+/// WASM simd128 BGR → YCbCr row conversion (3 bytes per pixel, B-G-R order).
+pub fn wasm_bgr_to_ycbcr_row(bgr: &[u8], y: &mut [u8], cb: &mut [u8], cr: &mut [u8], width: usize) {
+    if width == 0 {
+        return;
+    }
+    unsafe {
+        wasm_bgr_to_ycbcr_row_inner(bgr, y, cb, cr, width);
+    }
+}
+
+#[target_feature(enable = "simd128")]
+unsafe fn wasm_bgr_to_ycbcr_row_inner(
+    bgr: &[u8],
+    y: &mut [u8],
+    cb: &mut [u8],
+    cr: &mut [u8],
+    width: usize,
+) {
+    let scaled_128_5: v128 = i32x4_splat((128 << 16) + 32767);
+    let f_0_299: v128 = u16x8_splat(F_0_299);
+    let f_0_587: v128 = u16x8_splat(F_0_587);
+    let f_0_114: v128 = u16x8_splat(F_0_114);
+    let f_0_169: v128 = u16x8_splat(F_0_169);
+    let f_0_331: v128 = u16x8_splat(F_0_331);
+    let f_0_500: v128 = u16x8_splat(F_0_500);
+    let f_0_419: v128 = u16x8_splat(F_0_419);
+    let f_0_081: v128 = u16x8_splat(F_0_081);
+
+    let mut offset: usize = 0;
+    let mut remaining: usize = width;
+
+    while remaining >= 8 {
+        let base: usize = offset * 3;
+        let v0: v128 = v128_load(bgr.as_ptr().add(base) as *const v128);
+        let v1: v128 = v128_load(bgr.as_ptr().add(base + 8) as *const v128);
+
+        // BGR order: B at 0,3,6,...  G at 1,4,7,...  R at 2,5,8,...
+        let b_bytes: v128 =
+            i8x16_shuffle::<0, 3, 6, 9, 12, 15, 26, 29, 0, 0, 0, 0, 0, 0, 0, 0>(v0, v1);
+        let g_bytes: v128 =
+            i8x16_shuffle::<1, 4, 7, 10, 13, 24, 27, 30, 0, 0, 0, 0, 0, 0, 0, 0>(v0, v1);
+        let r_bytes: v128 =
+            i8x16_shuffle::<2, 5, 8, 11, 14, 25, 28, 31, 0, 0, 0, 0, 0, 0, 0, 0>(v0, v1);
+
+        let r: v128 = u16x8_extend_low_u8x16(r_bytes);
+        let g: v128 = u16x8_extend_low_u8x16(g_bytes);
+        let b: v128 = u16x8_extend_low_u8x16(b_bytes);
+
+        compute_ycbcr(
+            r,
+            g,
+            b,
+            scaled_128_5,
+            f_0_299,
+            f_0_587,
+            f_0_114,
+            f_0_169,
+            f_0_331,
+            f_0_500,
+            f_0_419,
+            f_0_081,
+            y,
+            cb,
+            cr,
+            offset,
+        );
+        offset += 8;
+        remaining -= 8;
+    }
+
+    if remaining > 0 {
+        crate::encode::color::bgr_to_ycbcr_row_scalar(
+            &bgr[offset * 3..],
+            &mut y[offset..],
+            &mut cb[offset..],
+            &mut cr[offset..],
+            remaining,
+        );
+    }
+}
+
+/// WASM simd128 BGRA → YCbCr row conversion (4 bytes per pixel, B-G-R-A order).
+pub fn wasm_bgra_to_ycbcr_row(
+    bgra: &[u8],
+    y: &mut [u8],
+    cb: &mut [u8],
+    cr: &mut [u8],
+    width: usize,
+) {
+    if width == 0 {
+        return;
+    }
+    unsafe {
+        wasm_bgra_to_ycbcr_row_inner(bgra, y, cb, cr, width);
+    }
+}
+
+#[target_feature(enable = "simd128")]
+unsafe fn wasm_bgra_to_ycbcr_row_inner(
+    bgra: &[u8],
+    y: &mut [u8],
+    cb: &mut [u8],
+    cr: &mut [u8],
+    width: usize,
+) {
+    let scaled_128_5: v128 = i32x4_splat((128 << 16) + 32767);
+    let f_0_299: v128 = u16x8_splat(F_0_299);
+    let f_0_587: v128 = u16x8_splat(F_0_587);
+    let f_0_114: v128 = u16x8_splat(F_0_114);
+    let f_0_169: v128 = u16x8_splat(F_0_169);
+    let f_0_331: v128 = u16x8_splat(F_0_331);
+    let f_0_500: v128 = u16x8_splat(F_0_500);
+    let f_0_419: v128 = u16x8_splat(F_0_419);
+    let f_0_081: v128 = u16x8_splat(F_0_081);
+
+    let mut offset: usize = 0;
+    let mut remaining: usize = width;
+
+    while remaining >= 8 {
+        let base: usize = offset * 4;
+        let v0: v128 = v128_load(bgra.as_ptr().add(base) as *const v128);
+        let v1: v128 = v128_load(bgra.as_ptr().add(base + 16) as *const v128);
+
+        // BGRA order: B at 0,4,8,12  G at 1,5,9,13  R at 2,6,10,14
+        let b_bytes: v128 =
+            i8x16_shuffle::<0, 4, 8, 12, 16, 20, 24, 28, 0, 0, 0, 0, 0, 0, 0, 0>(v0, v1);
+        let g_bytes: v128 =
+            i8x16_shuffle::<1, 5, 9, 13, 17, 21, 25, 29, 0, 0, 0, 0, 0, 0, 0, 0>(v0, v1);
+        let r_bytes: v128 =
+            i8x16_shuffle::<2, 6, 10, 14, 18, 22, 26, 30, 0, 0, 0, 0, 0, 0, 0, 0>(v0, v1);
+
+        let r: v128 = u16x8_extend_low_u8x16(r_bytes);
+        let g: v128 = u16x8_extend_low_u8x16(g_bytes);
+        let b: v128 = u16x8_extend_low_u8x16(b_bytes);
+
+        compute_ycbcr(
+            r,
+            g,
+            b,
+            scaled_128_5,
+            f_0_299,
+            f_0_587,
+            f_0_114,
+            f_0_169,
+            f_0_331,
+            f_0_500,
+            f_0_419,
+            f_0_081,
+            y,
+            cb,
+            cr,
+            offset,
+        );
+        offset += 8;
+        remaining -= 8;
+    }
+
+    if remaining > 0 {
+        crate::encode::color::bgra_to_ycbcr_row_scalar(
+            &bgra[offset * 4..],
+            &mut y[offset..],
+            &mut cb[offset..],
+            &mut cr[offset..],
+            remaining,
+        );
+    }
+}
