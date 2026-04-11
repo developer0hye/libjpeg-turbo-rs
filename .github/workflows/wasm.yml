@@ -35,7 +35,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
 
       - name: Install wasmtime
-        run: curl https://wasmtime.dev/install.sh -sSf | bash && echo "$HOME/.wasmtime/bin" >> $GITHUB_PATH
+        uses: bytecodealliance/actions/wasmtime/setup@v1
 
       - name: Check main crate compiles for wasm32
         run: cargo check --target wasm32-unknown-unknown
@@ -47,7 +47,7 @@ jobs:
         run: cargo test --target wasm32-wasip1
 
       - name: Install wasm-pack
-        run: curl https://rustwasm.github.io/wasm-pack/installer/init.sh -sSf | sh
+        run: cargo install wasm-pack
 
       - name: Build wasm-pack (web target)
         run: cd crates/libjpeg-turbo-rs-wasm && wasm-pack build --target web
