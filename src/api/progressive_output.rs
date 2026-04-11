@@ -806,6 +806,13 @@ impl ProgressiveDecoder {
             )
         }
 
+        #[cfg(all(target_arch = "wasm32", feature = "simd"))]
+        {
+            return crate::simd::wasm32::upsample::wasm_fancy_upsample_h2v2(
+                input, in_width, in_height, output, out_width,
+            );
+        }
+
         // Fused H2V2: vertical + horizontal in one pass using >> 4 arithmetic.
         #[allow(unreachable_code)]
         {
