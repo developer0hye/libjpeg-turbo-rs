@@ -57,7 +57,7 @@ jobs:
 
       - name: Verify output artifacts
         run: |
-          test -f crates/libjpeg-turbo-rs-wasm/pkg/libjpeg_turbo_wasm_bg.wasm
-          test -f crates/libjpeg-turbo-rs-wasm/pkg/libjpeg_turbo_wasm.js
-          test -f crates/libjpeg-turbo-rs-wasm/pkg/libjpeg_turbo_wasm.d.ts
-          echo "WASM size: $(wc -c < crates/libjpeg-turbo-rs-wasm/pkg/libjpeg_turbo_wasm_bg.wasm) bytes"
+          test -f crates/libjpeg-turbo-rs-wasm/pkg/libjpeg_turbo_rs_wasm_bg.wasm
+          test -f crates/libjpeg-turbo-rs-wasm/pkg/libjpeg_turbo_rs_wasm.js
+          test -f crates/libjpeg-turbo-rs-wasm/pkg/libjpeg_turbo_rs_wasm.d.ts
+          echo "WASM size: $(wc -c < crates/libjpeg-turbo-rs-wasm/pkg/libjpeg_turbo_rs_wasm_bg.wasm) bytes"
