@@ -950,6 +950,13 @@ impl<'a> Decoder<'a> {
             )
         }
 
+        #[cfg(all(target_arch = "wasm32", feature = "simd"))]
+        {
+            return crate::simd::wasm32::upsample::wasm_fancy_upsample_h2v2(
+                input, in_width, in_height, output, out_width,
+            );
+        }
+
         // Fused H2V2: vertical + horizontal in one pass using >> 4 arithmetic.
         // Matches C libjpeg-turbo h2v2_fancy_upsample exactly, avoiding
         // double-rounding from the previous two-pass approach.
