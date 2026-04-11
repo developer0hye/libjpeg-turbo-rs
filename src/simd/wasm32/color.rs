@@ -91,23 +91,101 @@ unsafe fn wasm_ycbcr_to_rgb_row_inner(
         let g_u8: v128 = u8x16_narrow_i16x8(g16, zero);
         let b_u8: v128 = u8x16_narrow_i16x8(b16, zero);
 
-        // Interleave and store 24 bytes (8 RGB pixels)
-        // Store SIMD results to temp arrays, then interleave to output.
-        // (u8x16_shr is per-lane bit shift, NOT vector byte shift)
-        let mut r_bytes = [0u8; 16];
-        let mut g_bytes = [0u8; 16];
-        let mut b_bytes = [0u8; 16];
-        v128_store(r_bytes.as_mut_ptr() as *mut v128, r_u8);
-        v128_store(g_bytes.as_mut_ptr() as *mut v128, g_u8);
-        v128_store(b_bytes.as_mut_ptr() as *mut v128, b_u8);
+        // Interleave R, G, B into packed RGB using two-step SIMD shuffles.
+        // 8 pixels × 3 bytes = 24 bytes → 16-byte v128_store + 8-byte u64 store.
+        //
+        // r_u8 = [R0 R1 R2 R3 R4 R5 R6 R7 0 ...]  (low 8 valid)
+        // g_u8 = [G0 G1 G2 G3 G4 G5 G6 G7 0 ...]
+        // b_u8 = [B0 B1 B2 B3 B4 B5 B6 B7 0 ...]
+        //
+        // Target layout (24 bytes):
+        // [R0 G0 B0 R1 G1 B1 R2 G2 B2 R3 G3 B3 R4 G4 B4 R5] [G5 B5 R6 G6 B6 R7 G7 B7]
+
+        // Step 1: Build first 16 bytes using two shuffles
+        // Merge R and G into placeholder positions, then insert B
+        let rg: v128 = i8x16_shuffle::<
+            0,
+            16,
+            0, // R0 G0 _
+            1,
+            17,
+            0, // R1 G1 _
+            2,
+            18,
+            0, // R2 G2 _
+            3,
+            19,
+            0, // R3 G3 _
+            4,
+            20,
+            0, // R4 G4 _
+            5, // R5
+        >(r_u8, g_u8);
+        // Insert B at positions 2, 5, 8, 11, 14
+        let rgb_lo: v128 = i8x16_shuffle::<
+            0,
+            1,
+            16, // R0 G0 B0
+            3,
+            4,
+            17, // R1 G1 B1
+            6,
+            7,
+            18, // R2 G2 B2
+            9,
+            10,
+            19, // R3 G3 B3
+            12,
+            13,
+            20, // R4 G4 B4
+            15, // R5
+        >(rg, b_u8);
+
+        // Step 2: Build last 8 bytes
+        let rg2: v128 = i8x16_shuffle::<
+            21,
+            0, // G5 _
+            6,
+            22,
+            0, // R6 G6 _
+            7,
+            23,
+            0, // R7 G7 _
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+        >(r_u8, g_u8);
+        let rgb_hi: v128 = i8x16_shuffle::<
+            0,
+            21, // G5 B5
+            2,
+            3,
+            22, // R6 G6 B6
+            5,
+            6,
+            23, // R7 G7 B7
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+        >(rg2, b_u8);
 
         let out_base: usize = x * 3;
         let out: *mut u8 = rgb.as_mut_ptr().add(out_base);
-        for i in 0..8 {
-            *out.add(i * 3) = r_bytes[i];
-            *out.add(i * 3 + 1) = g_bytes[i];
-            *out.add(i * 3 + 2) = b_bytes[i];
-        }
+        v128_store(out as *mut v128, rgb_lo);
+        // Store remaining 8 bytes as u64
+        let mut hi_buf = [0u8; 16];
+        v128_store(hi_buf.as_mut_ptr() as *mut v128, rgb_hi);
+        core::ptr::copy_nonoverlapping(hi_buf.as_ptr(), out.add(16), 8);
 
         x += 8;
     }
