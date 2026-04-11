@@ -864,6 +864,15 @@ impl<'a> Decoder<'a> {
             }
         }
 
+        #[cfg(all(target_arch = "aarch64", feature = "simd"))]
+        {
+            crate::simd::aarch64::merged::neon_merged_h2v1_ycbcr_to_rgb(
+                y_row, cb_row, cr_row, rgb_out, width,
+            );
+            return;
+        }
+
+        #[allow(unreachable_code)]
         crate::decode::merged_upsample::merged_h2v1_ycbcr_to_rgb(
             y_row, cb_row, cr_row, rgb_out, width,
         );
@@ -890,6 +899,15 @@ impl<'a> Decoder<'a> {
             }
         }
 
+        #[cfg(all(target_arch = "aarch64", feature = "simd"))]
+        {
+            crate::simd::aarch64::merged::neon_merged_h2v2_ycbcr_to_rgb(
+                y_row0, y_row1, cb_row, cr_row, rgb_out0, rgb_out1, width,
+            );
+            return;
+        }
+
+        #[allow(unreachable_code)]
         crate::decode::merged_upsample::merged_h2v2_ycbcr_to_rgb(
             y_row0, y_row1, cb_row, cr_row, rgb_out0, rgb_out1, width,
         );
