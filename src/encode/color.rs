@@ -83,6 +83,44 @@ pub fn rgba_to_ycbcr_row(rgba: &[u8], y: &mut [u8], cb: &mut [u8], cr: &mut [u8]
     }
 }
 
+/// Convert one row of BGR pixels to Y, Cb, Cr planes.
+pub fn bgr_to_ycbcr_row_scalar(
+    bgr: &[u8],
+    y: &mut [u8],
+    cb: &mut [u8],
+    cr: &mut [u8],
+    width: usize,
+) {
+    for i in 0..width {
+        let b = bgr[i * 3] as i32;
+        let g = bgr[i * 3 + 1] as i32;
+        let r = bgr[i * 3 + 2] as i32;
+        let (y_val, cb_val, cr_val) = rgb_to_ycbcr(r, g, b);
+        y[i] = y_val;
+        cb[i] = cb_val;
+        cr[i] = cr_val;
+    }
+}
+
+/// Convert one row of BGRA pixels to Y, Cb, Cr planes (alpha ignored).
+pub fn bgra_to_ycbcr_row_scalar(
+    bgra: &[u8],
+    y: &mut [u8],
+    cb: &mut [u8],
+    cr: &mut [u8],
+    width: usize,
+) {
+    for i in 0..width {
+        let b = bgra[i * 4] as i32;
+        let g = bgra[i * 4 + 1] as i32;
+        let r = bgra[i * 4 + 2] as i32;
+        let (y_val, cb_val, cr_val) = rgb_to_ycbcr(r, g, b);
+        y[i] = y_val;
+        cb[i] = cb_val;
+        cr[i] = cr_val;
+    }
+}
+
 /// Convert a row of pixels to Y, Cb, Cr planes using explicit channel offsets.
 ///
 /// Supports any pixel format where R, G, B channels are at known byte offsets
