@@ -4994,6 +4994,17 @@ fn convert_to_ycbcr(
                     );
                     continue;
                 }
+                #[cfg(all(target_arch = "wasm32", feature = "simd"))]
+                {
+                    crate::simd::wasm32::color_encode::wasm_rgba_to_ycbcr_row(
+                        &pixels[src_offset..src_offset + width * bpp],
+                        &mut y_plane[dst_offset..dst_offset + width],
+                        &mut cb_plane[dst_offset..dst_offset + width],
+                        &mut cr_plane[dst_offset..dst_offset + width],
+                        width,
+                    );
+                    continue;
+                }
                 #[allow(unreachable_code)]
                 color::rgba_to_ycbcr_row(
                     &pixels[src_offset..src_offset + width * bpp],
@@ -5019,6 +5030,17 @@ fn convert_to_ycbcr(
                     );
                     continue;
                 }
+                #[cfg(all(target_arch = "wasm32", feature = "simd"))]
+                {
+                    crate::simd::wasm32::color_encode::wasm_bgr_to_ycbcr_row(
+                        &pixels[src_offset..src_offset + width * bpp],
+                        &mut y_plane[dst_offset..dst_offset + width],
+                        &mut cb_plane[dst_offset..dst_offset + width],
+                        &mut cr_plane[dst_offset..dst_offset + width],
+                        width,
+                    );
+                    continue;
+                }
                 #[allow(unreachable_code)]
                 color::bgr_to_ycbcr_row_scalar(
                     &pixels[src_offset..src_offset + width * bpp],
@@ -5036,6 +5058,17 @@ fn convert_to_ycbcr(
                 #[cfg(all(target_arch = "aarch64", feature = "simd"))]
                 {
                     crate::simd::aarch64::color_encode::neon_bgra_to_ycbcr_row(
+                        &pixels[src_offset..src_offset + width * bpp],
+                        &mut y_plane[dst_offset..dst_offset + width],
+                        &mut cb_plane[dst_offset..dst_offset + width],
+                        &mut cr_plane[dst_offset..dst_offset + width],
+                        width,
+                    );
+                    continue;
+                }
+                #[cfg(all(target_arch = "wasm32", feature = "simd"))]
+                {
+                    crate::simd::wasm32::color_encode::wasm_bgra_to_ycbcr_row(
                         &pixels[src_offset..src_offset + width * bpp],
                         &mut y_plane[dst_offset..dst_offset + width],
                         &mut cb_plane[dst_offset..dst_offset + width],

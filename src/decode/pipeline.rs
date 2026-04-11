@@ -654,7 +654,7 @@ impl<'a> Decoder<'a> {
             }
         }
 
-        #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
+        #[cfg(all(target_arch = "wasm32", feature = "simd"))]
         {
             return crate::simd::wasm32::color::wasm_ycbcr_to_rgba_row(y, cb, cr, out, width);
         }
@@ -679,6 +679,11 @@ impl<'a> Decoder<'a> {
             }
         }
 
+        #[cfg(all(target_arch = "wasm32", feature = "simd"))]
+        {
+            return crate::simd::wasm32::color::wasm_ycbcr_to_bgr_row(y, cb, cr, out, width);
+        }
+
         #[allow(unreachable_code)]
         crate::decode::color::ycbcr_to_bgr_row(y, cb, cr, out, width)
     }
@@ -697,6 +702,11 @@ impl<'a> Decoder<'a> {
                     y, cb, cr, out, width,
                 );
             }
+        }
+
+        #[cfg(all(target_arch = "wasm32", feature = "simd"))]
+        {
+            return crate::simd::wasm32::color::wasm_ycbcr_to_bgra_row(y, cb, cr, out, width);
         }
 
         #[allow(unreachable_code)]
@@ -872,6 +882,13 @@ impl<'a> Decoder<'a> {
             return;
         }
 
+        #[cfg(all(target_arch = "wasm32", feature = "simd"))]
+        {
+            return crate::simd::wasm32::merged::wasm_merged_h2v1_ycbcr_to_rgb(
+                y_row, cb_row, cr_row, rgb_out, width,
+            );
+        }
+
         #[allow(unreachable_code)]
         crate::decode::merged_upsample::merged_h2v1_ycbcr_to_rgb(
             y_row, cb_row, cr_row, rgb_out, width,
@@ -905,6 +922,13 @@ impl<'a> Decoder<'a> {
                 y_row0, y_row1, cb_row, cr_row, rgb_out0, rgb_out1, width,
             );
             return;
+        }
+
+        #[cfg(all(target_arch = "wasm32", feature = "simd"))]
+        {
+            return crate::simd::wasm32::merged::wasm_merged_h2v2_ycbcr_to_rgb(
+                y_row0, y_row1, cb_row, cr_row, rgb_out0, rgb_out1, width,
+            );
         }
 
         #[allow(unreachable_code)]
@@ -948,6 +972,13 @@ impl<'a> Decoder<'a> {
             crate::simd::aarch64::upsample::neon_fancy_upsample_h2v2(
                 input, in_width, in_height, output, out_width,
             )
+        }
+
+        #[cfg(all(target_arch = "wasm32", feature = "simd"))]
+        {
+            return crate::simd::wasm32::upsample::wasm_fancy_upsample_h2v2(
+                input, in_width, in_height, output, out_width,
+            );
         }
 
         // Fused H2V2: vertical + horizontal in one pass using >> 4 arithmetic.
