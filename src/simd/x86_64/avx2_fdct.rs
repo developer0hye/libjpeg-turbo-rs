@@ -129,6 +129,9 @@ macro_rules! dofdct {
 /// # Safety contract
 /// Caller must ensure AVX2 is available.
 pub fn avx2_fdct_islow(data: &mut [i16; 64]) {
+    // SAFETY: AVX2 availability is verified at dispatch time via is_x86_feature_detected!().
+    // Input/output is a fixed-size [i16; 64], guaranteeing sufficient length for all loads
+    // and stores performed by the inner function.
     unsafe { avx2_fdct_islow_inner(data) }
 }
 

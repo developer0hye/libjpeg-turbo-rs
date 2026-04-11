@@ -130,6 +130,9 @@ macro_rules! dodct {
 }
 
 pub fn avx2_idct_islow(coeffs: &[i16; 64], quant: &[u16; 64], output: &mut [u8; 64]) {
+    // SAFETY: AVX2 availability is verified at dispatch time via is_x86_feature_detected!().
+    // Input arrays are fixed-size [i16; 64]/[u16; 64], guaranteeing sufficient length.
+    // Output buffer is [u8; 64] with stride=8, satisfying the 64-byte write requirement.
     unsafe { avx2_idct_islow_core(coeffs, quant, output.as_mut_ptr(), 8) }
 }
 

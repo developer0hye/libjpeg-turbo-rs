@@ -26,6 +26,9 @@ fn mulhi_epi16(a: v128, b: v128) -> v128 {
 
 /// WASM simd128 YCbCr to interleaved RGB row conversion.
 pub fn wasm_ycbcr_to_rgb_row(y: &[u8], cb: &[u8], cr: &[u8], rgb: &mut [u8], width: usize) {
+    // SAFETY: Caller guarantees y.len() >= width, cb.len() >= width, cr.len() >= width,
+    // out.len() >= width * BPP. The loop processes 8 pixels per iteration with a scalar
+    // tail for width % 8 != 0, preventing out-of-bounds access.
     unsafe {
         wasm_ycbcr_to_rgb_row_inner(y, cb, cr, rgb, width);
     }
@@ -123,6 +126,9 @@ unsafe fn wasm_ycbcr_to_rgb_row_inner(
 
 /// WASM simd128 YCbCr to interleaved RGBA row conversion.
 pub fn wasm_ycbcr_to_rgba_row(y: &[u8], cb: &[u8], cr: &[u8], rgba: &mut [u8], width: usize) {
+    // SAFETY: Caller guarantees y.len() >= width, cb.len() >= width, cr.len() >= width,
+    // out.len() >= width * BPP. The loop processes 8 pixels per iteration with a scalar
+    // tail for width % 8 != 0, preventing out-of-bounds access.
     unsafe {
         wasm_ycbcr_to_rgba_row_inner(y, cb, cr, rgba, width);
     }

@@ -59,8 +59,10 @@ impl From<jpeg::PixelFormat> for PixelFormat {
             jpeg::PixelFormat::Xbgr => PixelFormat::Xbgr,
             jpeg::PixelFormat::Argb => PixelFormat::Argb,
             jpeg::PixelFormat::Abgr => PixelFormat::Abgr,
-            // Formats not exposed to JS (Cmyk, Rgb565) fall back to Rgb
-            _ => PixelFormat::Rgb,
+            other => panic!(
+                "PixelFormat::{:?} is not supported in the WASM API; use decode_to() with an explicit format",
+                other
+            ),
         }
     }
 }

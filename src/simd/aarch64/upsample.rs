@@ -15,6 +15,8 @@ pub fn neon_fancy_upsample_h2v1(input: &[u8], in_width: usize, output: &mut [u8]
     if in_width == 0 {
         return;
     }
+    assert!(input.len() >= in_width, "input slice too short for in_width");
+    assert!(output.len() >= in_width * 2, "output slice too short for in_width");
     if in_width == 1 {
         output[0] = input[0];
         output[1] = input[0];

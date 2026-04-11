@@ -12,6 +12,7 @@ use crate::transform::TransformOp;
 /// `alignment` must be a power of two.
 #[inline]
 fn pad(value: usize, alignment: usize) -> usize {
+    debug_assert!(alignment.is_power_of_two(), "alignment must be a power of two");
     (value + alignment - 1) & !(alignment - 1)
 }
 
@@ -125,6 +126,7 @@ pub fn calc_output_dimensions(
     scale_num: u32,
     scale_denom: u32,
 ) -> (usize, usize) {
+    assert!(scale_denom != 0, "scale denominator must not be zero");
     let out_width: usize = (width * scale_num as usize).div_ceil(scale_denom as usize);
     let out_height: usize = (height * scale_num as usize).div_ceil(scale_denom as usize);
     (out_width, out_height)

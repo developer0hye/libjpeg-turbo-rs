@@ -87,7 +87,6 @@ pub struct BitWriter {
 // SAFETY: BitWriter owns its buffer exclusively — no aliasing, no Send/Sync
 // constraints from the raw pointer beyond what a Vec<u8> would have.
 unsafe impl Send for BitWriter {}
-unsafe impl Sync for BitWriter {}
 
 impl Drop for BitWriter {
     fn drop(&mut self) {
@@ -367,7 +366,7 @@ pub(crate) unsafe fn local_put_bits(
 /// Handle accumulator overflow with hoisted local variables.
 #[allow(dead_code)]
 #[cold]
-#[inline(always)]
+#[inline(never)]
 pub(crate) unsafe fn local_put_and_flush(
     pb: &mut u64,
     fb: &mut i32,

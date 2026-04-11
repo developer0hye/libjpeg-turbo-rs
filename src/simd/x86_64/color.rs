@@ -20,6 +20,8 @@ const PW_F0285: i16 = 18734; // FIX(0.28586) for G vpmaddwd
 
 /// SSE2-accelerated YCbCr to interleaved RGB row conversion.
 pub fn sse2_ycbcr_to_rgb_row(y: &[u8], cb: &[u8], cr: &[u8], rgb: &mut [u8], width: usize) {
+    // SAFETY: SSE2 availability is verified at dispatch time via is_x86_feature_detected!().
+    // Slice bounds are enforced by the while loop condition `x + 8 <= width`.
     unsafe {
         sse2_ycbcr_to_rgb_row_inner(y, cb, cr, rgb, width);
     }

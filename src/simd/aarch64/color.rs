@@ -71,6 +71,10 @@ macro_rules! neon_color_convert_fn {
         store8($r8:ident, $g8:ident, $b8:ident, $ptr8:ident) => $store8_body:expr
     ) => {
         pub fn $name(y: &[u8], cb: &[u8], cr: &[u8], out: &mut [u8], width: usize) {
+            assert!(y.len() >= width, "y slice too short for width");
+            assert!(cb.len() >= width, "cb slice too short for width");
+            assert!(cr.len() >= width, "cr slice too short for width");
+            assert!(out.len() >= width * $bpp, "output slice too short for width");
             // SAFETY: NEON is mandatory on aarch64.
             unsafe { $inner(y, cb, cr, out, width) }
         }

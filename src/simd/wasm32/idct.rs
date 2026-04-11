@@ -25,6 +25,9 @@ const F_3_072: i32 = 25172;
 
 /// WASM simd128 combined dequant + IDCT + level-shift + clamp.
 pub fn wasm_idct_islow(coeffs: &[i16; 64], quant: &[u16; 64], output: &mut [u8; 64]) {
+    // SAFETY: simd128 target feature is enabled on the callee via #[target_feature].
+    // Input arrays are fixed-size [i16; 64]/[u16; 64], guaranteeing correct length.
+    // Output is [u8; 64] with stride=8, satisfying the 64-byte write requirement.
     unsafe {
         wasm_idct_islow_core(coeffs, quant, output.as_mut_ptr(), 8);
     }

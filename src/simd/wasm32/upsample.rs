@@ -29,6 +29,9 @@ pub fn wasm_fancy_upsample_h2v1(input: &[u8], in_width: usize, output: &mut [u8]
         return;
     }
 
+    // SAFETY: Caller guarantees y.len() >= width, cb.len() >= width, cr.len() >= width,
+    // out.len() >= width * BPP. The loop processes 8 pixels per iteration with a scalar
+    // tail for width % 8 != 0, preventing out-of-bounds access.
     unsafe {
         wasm_fancy_h2v1_inner(input, in_width, output);
     }

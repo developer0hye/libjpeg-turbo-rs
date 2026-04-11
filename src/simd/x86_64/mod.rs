@@ -59,6 +59,9 @@ fn avx2_fdct_quantize(input: &mut [i16; 64], quant: &QuantDivisors, output: &mut
     avx2_fdct::avx2_fdct_islow(input);
 
     // Step 2: AVX2 quantize using reciprocal multiply + zigzag reorder
+    // SAFETY: AVX2 availability is verified at dispatch time via is_x86_feature_detected!().
+    // Input arrays are fixed-size [i16; 64], guaranteeing sufficient length.
+    // Output buffer is [i16; 64], satisfying the 64-element write requirement.
     unsafe { avx2_quantize_zigzag(input, quant, output) }
 }
 
@@ -259,6 +262,7 @@ unsafe fn avx2_quantize_zigzag(coeffs: &[i16; 64], quant: &QuantDivisors, output
         // Gather 16 coefficients from natural order into zigzag order
         let mut coeff_buf = [0i16; 16];
         for j in 0..16 {
+            // SAFETY: ZIGZAG_ORDER contains values in 0..64, and coeffs has exactly 64 elements.
             coeff_buf[j] = *coeffs.get_unchecked(zigzag[i + j]);
         }
         let c: __m256i = _mm256_loadu_si256(coeff_buf.as_ptr() as *const __m256i);

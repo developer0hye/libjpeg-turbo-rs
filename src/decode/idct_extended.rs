@@ -1080,7 +1080,9 @@ pub fn idct_16x16(coeffs: &[i16; 64], quant: &[u16; 64], output: &mut [u8; 256])
 
 macro_rules! strided_wrapper {
     ($name:ident, $inner:ident, $n:expr) => {
-        #[allow(clippy::missing_safety_doc)]
+        /// # Safety
+        /// `output` must point to at least `(N - 1) * stride + N` writable bytes,
+        /// where N is the block dimension for this IDCT variant.
         pub unsafe fn $name(coeffs: &[i16; 64], quant: &[u16; 64], output: *mut u8, stride: usize) {
             let mut tmp = [0u8; $n * $n];
             $inner(coeffs, quant, &mut tmp);
