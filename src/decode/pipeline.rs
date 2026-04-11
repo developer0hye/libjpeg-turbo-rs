@@ -48,6 +48,52 @@ pub(crate) fn upsample_generic_nearest(
     }
 }
 
+/// Dispatch fancy_h2v2_row to AVX2 or scalar based on CPU features.
+#[inline]
+fn fancy_h2v2_row_dispatch(cur: &[u8], neighbor: &[u8], output: &mut [u8], in_width: usize) {
+    #[cfg(all(target_arch = "x86_64", feature = "simd"))]
+    {
+        if is_x86_feature_detected!("avx2") {
+            return crate::simd::x86_64::avx2_upsample::avx2_fancy_h2v2_row(
+                cur, neighbor, output, in_width,
+            );
+        }
+    }
+
+    crate::decode::upsample::fancy_h2v2_row(cur, neighbor, output, in_width);
+}
+
+/// Dispatch fancy_h2v2_strided to AVX2 row function or scalar.
+#[inline]
+fn fancy_h2v2_strided_dispatch(
+    input: &[u8],
+    in_width: usize,
+    in_stride: usize,
+    in_height: usize,
+    output: &mut [u8],
+    out_width: usize,
+) {
+    for y in 0..in_height {
+        let cur_row: &[u8] = &input[y * in_stride..y * in_stride + in_width];
+        let above: &[u8] = if y > 0 {
+            &input[(y - 1) * in_stride..(y - 1) * in_stride + in_width]
+        } else {
+            cur_row
+        };
+        let below: &[u8] = if y + 1 < in_height {
+            &input[(y + 1) * in_stride..(y + 1) * in_stride + in_width]
+        } else {
+            cur_row
+        };
+
+        for (v, neighbor) in [(0, above), (1, below)] {
+            let out_y: usize = y * 2 + v;
+            let out_row: &mut [u8] = &mut output[out_y * out_width..];
+            fancy_h2v2_row_dispatch(cur_row, neighbor, out_row, in_width);
+        }
+    }
+}
+
 /// Per-component layout info for progressive decoding.
 struct CompInfo {
     /// Buffer width in blocks (rounded up to MCU alignment: mcus_x * h_samp).
@@ -979,6 +1025,15 @@ impl<'a> Decoder<'a> {
             return crate::simd::wasm32::upsample::wasm_fancy_upsample_h2v2(
                 input, in_width, in_height, output, out_width,
             );
+        }
+
+        #[cfg(all(target_arch = "x86_64", feature = "simd"))]
+        {
+            if is_x86_feature_detected!("avx2") {
+                return crate::simd::x86_64::avx2_upsample::avx2_fancy_upsample_h2v2(
+                    input, in_width, in_height, output, out_width,
+                );
+            }
         }
 
         // Fused H2V2: vertical + horizontal in one pass using >> 4 arithmetic.
@@ -3301,32 +3356,12 @@ impl<'a> Decoder<'a> {
                         };
 
                         // Fused vertical+horizontal upsample for top output row
-                        crate::decode::upsample::fancy_h2v2_row(
-                            cb_cur,
-                            cb_above,
-                            &mut cb_row_top,
-                            actual_cb_w,
-                        );
-                        crate::decode::upsample::fancy_h2v2_row(
-                            cr_cur,
-                            cr_above,
-                            &mut cr_row_top,
-                            actual_cb_w,
-                        );
+                        fancy_h2v2_row_dispatch(cb_cur, cb_above, &mut cb_row_top, actual_cb_w);
+                        fancy_h2v2_row_dispatch(cr_cur, cr_above, &mut cr_row_top, actual_cb_w);
 
                         // Fused vertical+horizontal upsample for bottom output row
-                        crate::decode::upsample::fancy_h2v2_row(
-                            cb_cur,
-                            cb_below,
-                            &mut cb_row_bot,
-                            actual_cb_w,
-                        );
-                        crate::decode::upsample::fancy_h2v2_row(
-                            cr_cur,
-                            cr_below,
-                            &mut cr_row_bot,
-                            actual_cb_w,
-                        );
+                        fancy_h2v2_row_dispatch(cb_cur, cb_below, &mut cb_row_bot, actual_cb_w);
+                        fancy_h2v2_row_dispatch(cr_cur, cr_below, &mut cr_row_bot, actual_cb_w);
 
                         // Color convert both output rows immediately
                         let out_y_top = cy * 2;
@@ -3459,7 +3494,7 @@ impl<'a> Decoder<'a> {
                         }
                     } else if comp_hf == 2 && comp_vf == 2 {
                         // H2V2: fused 2D triangle filter fancy upsample.
-                        crate::decode::upsample::fancy_h2v2_strided(
+                        fancy_h2v2_strided_dispatch(
                             &comp_plane[comp_off..],
                             actual_w,
                             comp_w,
