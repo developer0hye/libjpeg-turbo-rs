@@ -679,7 +679,7 @@ impl<'a> Decoder<'a> {
             }
         }
 
-        #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
+        #[cfg(all(target_arch = "wasm32", feature = "simd"))]
         {
             return crate::simd::wasm32::color::wasm_ycbcr_to_bgr_row(y, cb, cr, out, width);
         }
@@ -704,7 +704,7 @@ impl<'a> Decoder<'a> {
             }
         }
 
-        #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
+        #[cfg(all(target_arch = "wasm32", feature = "simd"))]
         {
             return crate::simd::wasm32::color::wasm_ycbcr_to_bgra_row(y, cb, cr, out, width);
         }
