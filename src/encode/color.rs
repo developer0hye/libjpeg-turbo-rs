@@ -46,6 +46,8 @@ fn rgb_to_ycbcr(r: i32, g: i32, b: i32) -> (u8, u8, u8) {
 /// `rgb` must contain at least `width * 3` bytes (R, G, B per pixel).
 /// `y`, `cb`, `cr` must each have at least `width` bytes.
 pub fn rgb_to_ycbcr_row(rgb: &[u8], y: &mut [u8], cb: &mut [u8], cr: &mut [u8], width: usize) {
+    debug_assert!(rgb.len() >= width * 3, "rgb buffer too small");
+    debug_assert!(y.len() >= width && cb.len() >= width && cr.len() >= width, "output buffer too small");
     for i in 0..width {
         let r = rgb[i * 3] as i32;
         let g = rgb[i * 3 + 1] as i32;
@@ -62,6 +64,8 @@ pub fn rgb_to_ycbcr_row(rgb: &[u8], y: &mut [u8], cb: &mut [u8], cr: &mut [u8], 
 /// `rgba` must contain at least `width * 4` bytes (R, G, B, A per pixel).
 /// `y`, `cb`, `cr` must each have at least `width` bytes.
 pub fn rgba_to_ycbcr_row(rgba: &[u8], y: &mut [u8], cb: &mut [u8], cr: &mut [u8], width: usize) {
+    debug_assert!(rgba.len() >= width * 4, "rgba buffer too small");
+    debug_assert!(y.len() >= width && cb.len() >= width && cr.len() >= width, "output buffer too small");
     for i in 0..width {
         let r = rgba[i * 4] as i32;
         let g = rgba[i * 4 + 1] as i32;

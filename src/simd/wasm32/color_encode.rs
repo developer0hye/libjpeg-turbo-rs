@@ -24,6 +24,9 @@ pub fn wasm_rgb_to_ycbcr_row(rgb: &[u8], y: &mut [u8], cb: &mut [u8], cr: &mut [
     if width == 0 {
         return;
     }
+    // SAFETY: Caller guarantees y.len() >= width, cb.len() >= width, cr.len() >= width,
+    // out.len() >= width * BPP. The loop processes 8 pixels per iteration with a scalar
+    // tail for width % 8 != 0, preventing out-of-bounds access.
     unsafe {
         wasm_rgb_to_ycbcr_row_inner(rgb, y, cb, cr, width);
     }

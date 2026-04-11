@@ -41,6 +41,12 @@ pub fn compress(
             "image dimensions must be non-zero".to_string(),
         ));
     }
+    if width > 65535 || height > 65535 {
+        return Err(JpegError::CorruptData(format!(
+            "JPEG dimensions must be <= 65535, got {}x{}",
+            width, height
+        )));
+    }
 
     let bpp = pixel_format.bytes_per_pixel();
     let expected_size = width * height * bpp;
@@ -549,6 +555,12 @@ pub fn compress_custom_huffman(
             "image dimensions must be non-zero".to_string(),
         ));
     }
+    if width > 65535 || height > 65535 {
+        return Err(JpegError::CorruptData(format!(
+            "JPEG dimensions must be <= 65535, got {}x{}",
+            width, height
+        )));
+    }
 
     let bpp = pixel_format.bytes_per_pixel();
     let expected_size = width * height * bpp;
@@ -774,6 +786,12 @@ pub fn compress_custom_quant(
             "image dimensions must be non-zero".to_string(),
         ));
     }
+    if width > 65535 || height > 65535 {
+        return Err(JpegError::CorruptData(format!(
+            "JPEG dimensions must be <= 65535, got {}x{}",
+            width, height
+        )));
+    }
 
     let bpp = pixel_format.bytes_per_pixel();
     let expected_size = width * height * bpp;
@@ -996,6 +1014,12 @@ pub fn compress_with_restart(
         return Err(JpegError::CorruptData(
             "image dimensions must be non-zero".to_string(),
         ));
+    }
+    if width > 65535 || height > 65535 {
+        return Err(JpegError::CorruptData(format!(
+            "JPEG dimensions must be <= 65535, got {}x{}",
+            width, height
+        )));
     }
 
     let bpp = pixel_format.bytes_per_pixel();
@@ -1564,6 +1588,12 @@ pub fn compress_lossless_extended(
             "image dimensions must be non-zero".to_string(),
         ));
     }
+    if width > 65535 || height > 65535 {
+        return Err(JpegError::CorruptData(format!(
+            "JPEG dimensions must be <= 65535, got {}x{}",
+            width, height
+        )));
+    }
 
     let bpp: usize = pixel_format.bytes_per_pixel();
     let expected_size: usize = width * height * bpp;
@@ -1825,6 +1855,12 @@ pub fn compress_lossless_arithmetic(
         return Err(JpegError::CorruptData(
             "image dimensions must be non-zero".to_string(),
         ));
+    }
+    if width > 65535 || height > 65535 {
+        return Err(JpegError::CorruptData(format!(
+            "JPEG dimensions must be <= 65535, got {}x{}",
+            width, height
+        )));
     }
 
     let bpp: usize = pixel_format.bytes_per_pixel();
@@ -2111,6 +2147,12 @@ fn compress_progressive_with_scans(
         return Err(JpegError::CorruptData(
             "image dimensions must be non-zero".to_string(),
         ));
+    }
+    if width > 65535 || height > 65535 {
+        return Err(JpegError::CorruptData(format!(
+            "JPEG dimensions must be <= 65535, got {}x{}",
+            width, height
+        )));
     }
 
     let bpp = pixel_format.bytes_per_pixel();
@@ -3269,6 +3311,12 @@ pub fn compress_arithmetic(
             "image dimensions must be non-zero".to_string(),
         ));
     }
+    if width > 65535 || height > 65535 {
+        return Err(JpegError::CorruptData(format!(
+            "JPEG dimensions must be <= 65535, got {}x{}",
+            width, height
+        )));
+    }
 
     let bpp = pixel_format.bytes_per_pixel();
     let expected_size = width * height * bpp;
@@ -3652,6 +3700,12 @@ pub fn compress_arithmetic_progressive(
         return Err(JpegError::CorruptData(
             "image dimensions must be non-zero".to_string(),
         ));
+    }
+    if width > 65535 || height > 65535 {
+        return Err(JpegError::CorruptData(format!(
+            "JPEG dimensions must be <= 65535, got {}x{}",
+            width, height
+        )));
     }
 
     let bpp: usize = pixel_format.bytes_per_pixel();
@@ -6958,6 +7012,12 @@ pub fn compress_optimized(
             "image dimensions must be non-zero".to_string(),
         ));
     }
+    if width > 65535 || height > 65535 {
+        return Err(JpegError::CorruptData(format!(
+            "JPEG dimensions must be <= 65535, got {}x{}",
+            width, height
+        )));
+    }
 
     let bpp = pixel_format.bytes_per_pixel();
     let expected_size = width * height * bpp;
@@ -8187,6 +8247,12 @@ pub fn compress_custom_sampling(
         return Err(JpegError::CorruptData(
             "image dimensions must be non-zero".to_string(),
         ));
+    }
+    if width > 65535 || height > 65535 {
+        return Err(JpegError::CorruptData(format!(
+            "JPEG dimensions must be <= 65535, got {}x{}",
+            width, height
+        )));
     }
 
     let bpp: usize = pixel_format.bytes_per_pixel();

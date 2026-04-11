@@ -32,6 +32,9 @@ const F_3_072: i16 = 25172;
 /// WASM simd128 forward DCT on one 8x8 block.
 #[inline]
 pub fn wasm_fdct(input: &[i16; 64], output: &mut [i16; 64]) {
+    // SAFETY: simd128 target feature is enabled on the callee via #[target_feature].
+    // Input arrays are fixed-size [i16; 64]/[i16; 64], guaranteeing correct length.
+    // Output is [i16; 64] with stride=8, satisfying the 64-element write requirement.
     unsafe {
         wasm_fdct_core(input.as_ptr(), output.as_mut_ptr());
     }
