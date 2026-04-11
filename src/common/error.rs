@@ -45,11 +45,26 @@ pub enum DecodeWarning {
 impl std::fmt::Display for DecodeWarning {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::HuffmanError { mcu_x, mcu_y, message } => {
-                write!(f, "Huffman decode error at MCU ({}, {}): {}", mcu_x, mcu_y, message)
+            Self::HuffmanError {
+                mcu_x,
+                mcu_y,
+                message,
+            } => {
+                write!(
+                    f,
+                    "Huffman decode error at MCU ({}, {}): {}",
+                    mcu_x, mcu_y, message
+                )
             }
-            Self::TruncatedData { decoded_mcus, total_mcus } => {
-                write!(f, "truncated data: decoded {}/{} MCUs", decoded_mcus, total_mcus)
+            Self::TruncatedData {
+                decoded_mcus,
+                total_mcus,
+            } => {
+                write!(
+                    f,
+                    "truncated data: decoded {}/{} MCUs",
+                    decoded_mcus, total_mcus
+                )
             }
         }
     }

@@ -21,7 +21,10 @@ pub fn neon_downsample_h2v1(input: &[u8], in_width: usize, output: &mut [u8]) {
     if in_width == 0 {
         return;
     }
-    assert!(input.len() >= in_width, "input slice too short for in_width");
+    assert!(
+        input.len() >= in_width,
+        "input slice too short for in_width"
+    );
     assert!(
         output.len() >= in_width.div_ceil(2),
         "output slice too short for in_width"
