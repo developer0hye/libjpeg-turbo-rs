@@ -10,7 +10,7 @@ pub fn dequantize_block(zigzag_coeffs: &[i16; 64], table: &QuantTable) -> [i16; 
     let mut i = 0;
     while i < 64 {
         let zz = NATURAL_ORDER[i];
-        natural[i] = zigzag_coeffs[zz] * table.values[i] as i16;
+        natural[i] = zigzag_coeffs[zz].wrapping_mul(table.values[i] as i16);
         i += 1;
     }
     natural

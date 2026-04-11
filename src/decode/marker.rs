@@ -564,6 +564,12 @@ impl<'a> MarkerReader<'a> {
                 )));
             }
             let quant_table_index = self.read_u8()?;
+            if quant_table_index > 3 {
+                return Err(JpegError::CorruptData(format!(
+                    "quantization table index {} out of range (0-3)",
+                    quant_table_index
+                )));
+            }
             components.push(ComponentInfo {
                 id,
                 horizontal_sampling: h_samp,
@@ -710,10 +716,18 @@ impl<'a> MarkerReader<'a> {
         for _ in 0..num_components {
             let component_id = self.read_u8()?;
             let tables = self.read_u8()?;
+            let dc_idx = tables >> 4;
+            let ac_idx = tables & 0x0F;
+            if dc_idx > 3 || ac_idx > 3 {
+                return Err(JpegError::CorruptData(format!(
+                    "Huffman table index out of range: dc={}, ac={}",
+                    dc_idx, ac_idx
+                )));
+            }
             components.push(ScanComponentSelector {
                 component_id,
-                dc_table_index: tables >> 4,
-                ac_table_index: tables & 0x0F,
+                dc_table_index: dc_idx,
+                ac_table_index: ac_idx,
             });
         }
 

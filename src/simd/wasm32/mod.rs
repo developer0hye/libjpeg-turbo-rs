@@ -71,6 +71,9 @@ fn wasm_fdct_quantize(input: &mut [i16; 64], quant: &QuantDivisors, output: &mut
     let mut dct_output: [i16; 64] = [0i16; 64];
     fdct::wasm_fdct(input, &mut dct_output);
 
+    // SAFETY: simd128 target feature is enabled on the callee via #[target_feature].
+    // Input arrays are fixed-size [i16; 64]/[u16; 64], guaranteeing correct length.
+    // Output is [i16; 64] with stride=8, satisfying the 64-element write requirement.
     unsafe {
         wasm_quantize_zigzag(&dct_output, quant, output);
     }

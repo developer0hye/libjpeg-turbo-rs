@@ -217,7 +217,9 @@ fn compress_12bit_grayscale(
 ) -> Result<Vec<u8>> {
     let precision: u8 = 12;
     let level_shift: i32 = 2048;
-    let luma_quant = tables::quality_scale_quant_table(&tables::STD_LUMINANCE_QUANT_TABLE, quality);
+    // 12-bit needs force_baseline=false to allow quant values > 255
+    let luma_quant =
+        tables::quality_scale_quant_table_ext(&tables::STD_LUMINANCE_QUANT_TABLE, quality, false);
     let luma_quant_12 = scale_quant_12bit(&luma_quant);
     let luma_divisors = scale_quant_for_fdct(&luma_quant_12);
     let dc_table = build_huff_table(&tables::DC_LUMINANCE_BITS, &tables::DC_LUMINANCE_VALUES);
@@ -294,9 +296,11 @@ fn compress_12bit_color(
             "12-bit color only supports 4:4:4 subsampling".to_string(),
         ));
     }
-    let luma_quant = tables::quality_scale_quant_table(&tables::STD_LUMINANCE_QUANT_TABLE, quality);
+    // 12-bit needs force_baseline=false to allow quant values > 255
+    let luma_quant =
+        tables::quality_scale_quant_table_ext(&tables::STD_LUMINANCE_QUANT_TABLE, quality, false);
     let chroma_quant =
-        tables::quality_scale_quant_table(&tables::STD_CHROMINANCE_QUANT_TABLE, quality);
+        tables::quality_scale_quant_table_ext(&tables::STD_CHROMINANCE_QUANT_TABLE, quality, false);
     let luma_quant_12 = scale_quant_12bit(&luma_quant);
     let chroma_quant_12 = scale_quant_12bit(&chroma_quant);
     let luma_divisors = scale_quant_for_fdct(&luma_quant_12);

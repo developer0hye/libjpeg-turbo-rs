@@ -21,7 +21,23 @@ pub static STD_CHROMINANCE_QUANT_TABLE: [u8; 64] = [
 /// Quality 50 uses the table as-is. Below 50, values increase (coarser quantization).
 /// Above 50, values decrease (finer quantization). Matching libjpeg-turbo's
 /// `jpeg_quality_scaling` + `jpeg_add_quant_table`.
+///
+/// When `force_baseline` is true, values are clamped to [1, 255] for baseline JPEG
+/// compatibility. When false, values are clamped to [1, 32767] to support extended
+/// (12-bit) JPEG, matching C libjpeg-turbo's `jpeg_add_quant_table`.
 pub fn quality_scale_quant_table(table: &[u8; 64], quality: u8) -> [u16; 64] {
+    quality_scale_quant_table_ext(table, quality, true)
+}
+
+/// Scale a quantization table by quality factor with explicit baseline control.
+///
+/// See [`quality_scale_quant_table`] for details. When `force_baseline` is false,
+/// quantization values up to 32767 are permitted (required for 12-bit precision).
+pub fn quality_scale_quant_table_ext(
+    table: &[u8; 64],
+    quality: u8,
+    force_baseline: bool,
+) -> [u16; 64] {
     let quality = quality.clamp(1, 100) as i32;
     let scale_factor: i32 = if quality < 50 {
         5000 / quality
@@ -29,11 +45,12 @@ pub fn quality_scale_quant_table(table: &[u8; 64], quality: u8) -> [u16; 64] {
         200 - 2 * quality
     };
 
+    let max_val: i32 = if force_baseline { 255 } else { 32767 };
+
     let mut output = [0u16; 64];
     for i in 0..64 {
         let temp = (table[i] as i32 * scale_factor + 50) / 100;
-        // Clamp to valid range: minimum 1, maximum 255 for baseline JPEG
-        output[i] = temp.clamp(1, 255) as u16;
+        output[i] = temp.clamp(1, max_val) as u16;
     }
     output
 }
@@ -147,6 +164,29 @@ mod tests {
         // scale_factor = 5000 / 25 = 200
         // First entry: (16 * 200 + 50) / 100 = 32
         assert_eq!(scaled[0], 32);
+    }
+
+    #[test]
+    fn quality_1_extended_allows_values_above_255() {
+        // With force_baseline=false, values can exceed 255 (up to 32767)
+        let scaled = quality_scale_quant_table_ext(&STD_LUMINANCE_QUANT_TABLE, 1, false);
+        // scale_factor = 5000. Entry at index 2 (value=10): 10*5000/100 = 500
+        assert_eq!(scaled[2], 500);
+        // Entry at index 7 (value=61): 61*5000/100 = 3050
+        assert_eq!(scaled[7], 3050);
+        for i in 0..64 {
+            assert!(scaled[i] >= 1 && scaled[i] <= 32767);
+        }
+    }
+
+    #[test]
+    fn quality_scale_baseline_clamps_at_255() {
+        // With force_baseline=true (default), values are clamped to 255
+        let baseline = quality_scale_quant_table(&STD_LUMINANCE_QUANT_TABLE, 1);
+        let extended = quality_scale_quant_table_ext(&STD_LUMINANCE_QUANT_TABLE, 1, false);
+        // Baseline should clamp, extended should not
+        assert_eq!(baseline[2], 255);
+        assert_eq!(extended[2], 500);
     }
 
     #[test]

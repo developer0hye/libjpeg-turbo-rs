@@ -32,8 +32,8 @@ pub fn parse_orientation(tiff: &[u8]) -> Option<u8> {
 
     // Each IFD entry is 12 bytes: tag(2) + type(2) + count(4) + value/offset(4)
     for i in 0..entry_count {
-        let entry_offset = entries_start + i * 12;
-        if entry_offset + 12 > tiff.len() {
+        let entry_offset = entries_start.checked_add(i.checked_mul(12)?)?;
+        if entry_offset.checked_add(12)? > tiff.len() {
             return None;
         }
 
@@ -56,28 +56,25 @@ pub fn parse_orientation(tiff: &[u8]) -> Option<u8> {
 }
 
 fn read_u16(data: &[u8], offset: usize, is_le: bool) -> u16 {
+    let bytes: [u8; 2] = [data[offset], data[offset.wrapping_add(1)]];
     if is_le {
-        u16::from_le_bytes([data[offset], data[offset + 1]])
+        u16::from_le_bytes(bytes)
     } else {
-        u16::from_be_bytes([data[offset], data[offset + 1]])
+        u16::from_be_bytes(bytes)
     }
 }
 
 fn read_u32(data: &[u8], offset: usize, is_le: bool) -> u32 {
+    let b = [
+        data[offset],
+        data[offset.wrapping_add(1)],
+        data[offset.wrapping_add(2)],
+        data[offset.wrapping_add(3)],
+    ];
     if is_le {
-        u32::from_le_bytes([
-            data[offset],
-            data[offset + 1],
-            data[offset + 2],
-            data[offset + 3],
-        ])
+        u32::from_le_bytes(b)
     } else {
-        u32::from_be_bytes([
-            data[offset],
-            data[offset + 1],
-            data[offset + 2],
-            data[offset + 3],
-        ])
+        u32::from_be_bytes(b)
     }
 }
 
