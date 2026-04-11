@@ -4582,6 +4582,31 @@ fn progressive_fdct_chroma_block(
         }
     }
 
+    #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
+    {
+        let src_w: usize = hf * 8;
+        let src_h: usize = vf * 8;
+        if use_simd_fdct && x0 + src_w <= plane_w && y0 + src_h <= plane_h {
+            unsafe {
+                let ptr: *const u8 = plane.as_ptr().add(y0 * plane_w + x0);
+                if hf == 2 && vf == 2 {
+                    crate::simd::wasm32::wasm_downsample_h2v2_fdct_quantize(
+                        ptr, plane_w, quant, output,
+                    );
+                } else if hf == 2 && vf == 1 {
+                    crate::simd::wasm32::wasm_downsample_h2v1_fdct_quantize(
+                        ptr, plane_w, quant, output,
+                    );
+                } else {
+                    let mut block = [0i16; 64];
+                    downsample_chroma_block(plane, plane_w, plane_h, x0, y0, hf, vf, &mut block);
+                    fdct_quantize_fn(&mut block, quant, output);
+                }
+            }
+            return;
+        }
+    }
+
     let _ = use_simd_fdct;
     let mut block = [0i16; 64];
     downsample_chroma_block(plane, plane_w, plane_h, x0, y0, hf, vf, &mut block);
@@ -5021,6 +5046,13 @@ fn extract_block(
                 return;
             }
         }
+        #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
+        {
+            unsafe {
+                extract_block_wasm(plane, plane_width, block_x, block_y, block);
+            }
+            return;
+        }
     }
 
     // Scalar fallback for border blocks
@@ -5088,6 +5120,35 @@ unsafe fn extract_block_sse2(
         // Level-shift: subtract 128
         let shifted: __m128i = _mm_sub_epi16(wide, level_shift);
         _mm_storeu_si128(block.as_mut_ptr().add(row * 8) as *mut __m128i, shifted);
+    }
+}
+
+/// WASM simd128-accelerated block extraction with level-shift for interior blocks.
+///
+/// Loads 8 bytes per row, widens to i16, subtracts 128. No bounds checking.
+///
+/// # Safety
+/// Requires simd128. Caller must ensure `block_x + 8 <= plane_width` and
+/// `block_y + 8 <= plane_height` (interior block bounds).
+#[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
+#[target_feature(enable = "simd128")]
+unsafe fn extract_block_wasm(
+    plane: &[u8],
+    plane_width: usize,
+    block_x: usize,
+    block_y: usize,
+    block: &mut [i16; 64],
+) {
+    use core::arch::wasm32::*;
+
+    let level_shift: v128 = i16x8_splat(128);
+
+    for row in 0..8 {
+        let src_ptr: *const u8 = plane.as_ptr().add((block_y + row) * plane_width + block_x);
+        let pixels: v128 = v128_load64_zero(src_ptr as *const u64);
+        let wide: v128 = u16x8_extend_low_u8x16(pixels);
+        let shifted: v128 = i16x8_sub(wide, level_shift);
+        v128_store(block.as_mut_ptr().add(row * 8) as *mut v128, shifted);
     }
 }
 
@@ -5535,6 +5596,19 @@ fn encode_single_block(
                 HuffmanEncoder::encode_block(writer, &quantized, prev_dc, dc_table, ac_table);
                 return;
             }
+        }
+        #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
+        {
+            unsafe {
+                crate::simd::wasm32::wasm_extract_fdct_quantize(
+                    plane.as_ptr().add(block_y * plane_width + block_x),
+                    plane_width,
+                    quant_table,
+                    &mut quantized,
+                );
+            }
+            HuffmanEncoder::encode_block(writer, &quantized, prev_dc, dc_table, ac_table);
+            return;
         }
     }
 

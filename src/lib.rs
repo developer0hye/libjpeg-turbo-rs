@@ -17,7 +17,9 @@ pub use api::high_level::{
     compress_optimized, compress_progressive, compress_with_metadata, decompress,
     decompress_cropped, decompress_lenient, decompress_to,
 };
-pub use api::image_io::{load_image, load_image_from_bytes, save_bmp, save_ppm, LoadedImage};
+#[cfg(any(not(target_arch = "wasm32"), target_os = "wasi"))]
+pub use api::image_io::{load_image, save_bmp, save_ppm};
+pub use api::image_io::{load_image_from_bytes, LoadedImage};
 pub use api::precision::{
     read_scanlines_12, read_scanlines_16, write_scanlines_12, write_scanlines_16,
 };

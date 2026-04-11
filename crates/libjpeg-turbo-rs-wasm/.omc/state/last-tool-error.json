@@ -1,0 +1,7 @@
+{
+  "tool_name": "Bash",
+  "tool_input_preview": "{\"command\":\"wasm-pack test --node 2>&1\",\"timeout\":180000,\"description\":\"Run wasm tests in Node.js\"}",
+  "error": "Exit code 1\n[INFO]: 🎯  Checking for the Wasm target...\n   Compiling libjpeg-turbo-wasm v0.1.0 (/Users/yhkwon/Documents/Projects/libjpeg-turbo-rs/crates/libjpeg-turbo-wasm)\n    Finished `dev` profile [unoptimized + debuginfo] target(s) in 9.92s\n[INFO]: ⬇️  Installing wasm-bindgen...\n    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.03s\n     Running unittests src/lib.rs (/Users/yhkwon/Documents/Projects/libjpeg-turbo-rs/target/wasm32-unknown-unknown/debug/deps/libjpeg_turbo_was...",
+  "timestamp": "2026-04-10T13:03:23.623Z",
+  "retry_count": 1
+}

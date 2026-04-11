@@ -12,6 +12,9 @@ pub mod aarch64;
 #[cfg(target_arch = "x86_64")]
 pub mod x86_64;
 
+#[cfg(target_arch = "wasm32")]
+pub mod wasm32;
+
 /// Function-pointer dispatch table for SIMD-accelerated decode operations.
 pub struct SimdRoutines {
     /// Combined dequant + IDCT (ISLOW) + level-shift + clamp → u8 output.
@@ -85,6 +88,7 @@ pub struct EncoderSimdRoutines {
 /// Checks `JSIMD_FORCENONE` env var first. If set to "1", returns scalar.
 /// Otherwise selects NEON on aarch64, scalar elsewhere.
 pub fn detect() -> SimdRoutines {
+    #[cfg(not(target_arch = "wasm32"))]
     if std::env::var("JSIMD_FORCENONE").ok().as_deref() == Some("1") {
         return scalar::routines();
     }
@@ -99,12 +103,18 @@ pub fn detect() -> SimdRoutines {
         return x86_64::routines();
     }
 
+    #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
+    {
+        return wasm32::routines();
+    }
+
     #[allow(unreachable_code)]
     scalar::routines()
 }
 
 /// Detect available SIMD features and return the best encoder dispatch table.
 pub fn detect_encoder() -> EncoderSimdRoutines {
+    #[cfg(not(target_arch = "wasm32"))]
     if std::env::var("JSIMD_FORCENONE").ok().as_deref() == Some("1") {
         return scalar::encoder_routines();
     }
@@ -117,6 +127,11 @@ pub fn detect_encoder() -> EncoderSimdRoutines {
     #[cfg(all(target_arch = "x86_64", feature = "simd"))]
     {
         return x86_64::encoder_routines();
+    }
+
+    #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
+    {
+        return wasm32::encoder_routines();
     }
 
     #[allow(unreachable_code)]

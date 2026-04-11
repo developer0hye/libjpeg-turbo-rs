@@ -1,0 +1,279 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>libjpeg-turbo-wasm Benchmark</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: system-ui, -apple-system, sans-serif; background: #0a0a0a; color: #e0e0e0; padding: 2rem; max-width: 900px; margin: 0 auto; }
+  h1 { font-size: 1.5rem; margin-bottom: 0.5rem; }
+  .subtitle { color: #888; margin-bottom: 2rem; font-size: 0.9rem; }
+  .controls { display: flex; gap: 1rem; align-items: center; margin-bottom: 1.5rem; flex-wrap: wrap; }
+  button { background: #2563eb; color: white; border: none; padding: 0.6rem 1.2rem; border-radius: 6px; cursor: pointer; font-size: 0.9rem; }
+  button:hover { background: #1d4ed8; }
+  button:disabled { background: #333; cursor: not-allowed; }
+  select, input[type=file] { background: #1a1a1a; color: #e0e0e0; border: 1px solid #333; padding: 0.5rem; border-radius: 6px; font-size: 0.9rem; }
+  label { font-size: 0.85rem; color: #aaa; }
+  .config { display: flex; gap: 0.5rem; flex-direction: column; }
+  #status { color: #facc15; margin: 1rem 0; font-size: 0.9rem; min-height: 1.2rem; }
+  table { width: 100%; border-collapse: collapse; margin-top: 1rem; font-size: 0.85rem; }
+  th { text-align: left; padding: 0.6rem 0.8rem; border-bottom: 2px solid #333; color: #aaa; font-weight: 600; }
+  td { padding: 0.5rem 0.8rem; border-bottom: 1px solid #1a1a1a; }
+  tr:hover td { background: #111; }
+  .num { text-align: right; font-variant-numeric: tabular-nums; }
+  .fast { color: #4ade80; }
+  .slow { color: #f87171; }
+  .tie { color: #facc15; }
+  .section { margin-top: 2rem; }
+  .section h2 { font-size: 1.1rem; margin-bottom: 0.5rem; }
+  canvas { display: none; }
+</style>
+</head>
+<body>
+
+<h1>libjpeg-turbo-wasm Benchmark</h1>
+<p class="subtitle">Compare WASM JPEG decode/encode vs browser native (createImageBitmap + Canvas)</p>
+
+<div class="controls">
+  <div class="config">
+    <label for="iterations">Iterations</label>
+    <select id="iterations">
+      <option value="10">10</option>
+      <option value="50" selected>50</option>
+      <option value="100">100</option>
+      <option value="200">200</option>
+    </select>
+  </div>
+  <div class="config">
+    <label for="quality">Encode Quality</label>
+    <select id="quality">
+      <option value="75">75</option>
+      <option value="85">85</option>
+      <option value="90" selected>90</option>
+      <option value="95">95</option>
+    </select>
+  </div>
+  <div class="config">
+    <label for="file">JPEG File</label>
+    <input type="file" id="file" accept=".jpg,.jpeg">
+  </div>
+  <button id="run">Run Benchmark</button>
+</div>
+
+<div id="status"></div>
+
+<div class="section" id="results-section" style="display:none">
+  <h2>Results</h2>
+  <table>
+    <thead>
+      <tr>
+        <th>Operation</th>
+        <th>Image</th>
+        <th class="num">WASM (ms)</th>
+        <th class="num">Native (ms)</th>
+        <th class="num">Ratio</th>
+        <th class="num">Throughput</th>
+      </tr>
+    </thead>
+    <tbody id="results"></tbody>
+  </table>
+</div>
+
+<canvas id="canvas"></canvas>
+
+<script type="module">
+import init, { decode, decodeTo, encode, PixelFormat, Subsampling } from '../pkg/libjpeg_turbo_rs_wasm.js';
+
+const statusEl = document.getElementById('status');
+const resultsEl = document.getElementById('results');
+const resultsSec = document.getElementById('results-section');
+const runBtn = document.getElementById('run');
+const fileInput = document.getElementById('file');
+const canvas = document.getElementById('canvas');
+const ctx = canvas.getContext('2d', { willReadFrequently: true });
+
+let wasmReady = false;
+let jpegData = null;
+
+function setStatus(msg) { statusEl.textContent = msg; }
+
+// Generate a synthetic JPEG test image using an offscreen canvas
+async function generateTestJpeg(w, h) {
+  const offCanvas = document.createElement('canvas');
+  offCanvas.width = w;
+  offCanvas.height = h;
+  const offCtx = offCanvas.getContext('2d');
+  // Draw a gradient + shapes for non-trivial content
+  const grad = offCtx.createLinearGradient(0, 0, w, h);
+  grad.addColorStop(0, '#1a5276');
+  grad.addColorStop(0.5, '#d4ac0d');
+  grad.addColorStop(1, '#922b21');
+  offCtx.fillStyle = grad;
+  offCtx.fillRect(0, 0, w, h);
+  for (let i = 0; i < 20; i++) {
+    offCtx.fillStyle = `hsl(${i * 18}, 70%, 50%)`;
+    offCtx.fillRect(Math.random() * w, Math.random() * h, w * 0.1, h * 0.1);
+  }
+  offCtx.fillStyle = '#fff';
+  offCtx.font = `${Math.floor(h * 0.08)}px sans-serif`;
+  offCtx.fillText(`${w}x${h} test`, w * 0.05, h * 0.15);
+
+  const blob = await new Promise(r => offCanvas.toBlob(r, 'image/jpeg', 0.90));
+  return new Uint8Array(await blob.arrayBuffer());
+}
+
+// Benchmark helper: run fn N times, return median ms
+async function bench(fn, n) {
+  // Warmup
+  for (let i = 0; i < 3; i++) await fn();
+  const times = [];
+  for (let i = 0; i < n; i++) {
+    const t0 = performance.now();
+    await fn();
+    times.push(performance.now() - t0);
+  }
+  times.sort((a, b) => a - b);
+  const median = times[Math.floor(times.length / 2)];
+  const mean = times.reduce((a, b) => a + b, 0) / times.length;
+  const stddev = Math.sqrt(times.reduce((s, t) => s + (t - mean) ** 2, 0) / times.length);
+  return { median, mean, stddev, min: times[0], max: times[times.length - 1] };
+}
+
+// Native decode: createImageBitmap -> canvas -> getImageData
+async function nativeDecode(jpegBytes) {
+  const blob = new Blob([jpegBytes], { type: 'image/jpeg' });
+  const bmp = await createImageBitmap(blob);
+  canvas.width = bmp.width;
+  canvas.height = bmp.height;
+  ctx.drawImage(bmp, 0, 0);
+  const imgData = ctx.getImageData(0, 0, bmp.width, bmp.height);
+  bmp.close();
+  return imgData;
+}
+
+// Native encode: canvas.toBlob
+async function nativeEncode(imgData, quality) {
+  canvas.width = imgData.width;
+  canvas.height = imgData.height;
+  ctx.putImageData(imgData, 0, 0);
+  const blob = await new Promise(r => canvas.toBlob(r, 'image/jpeg', quality / 100));
+  return new Uint8Array(await blob.arrayBuffer());
+}
+
+function addRow(op, dims, wasmMs, nativeMs, megapixels) {
+  const ratio = wasmMs / nativeMs;
+  let cls = 'tie';
+  let label = '';
+  if (ratio < 0.95) { cls = 'fast'; label = `${ratio.toFixed(2)}x (faster)`; }
+  else if (ratio > 1.05) { cls = 'slow'; label = `${ratio.toFixed(2)}x (slower)`; }
+  else { label = `${ratio.toFixed(2)}x (~same)`; }
+
+  const throughput = (megapixels / (wasmMs / 1000)).toFixed(1);
+
+  const tr = document.createElement('tr');
+  tr.innerHTML = `
+    <td>${op}</td>
+    <td>${dims}</td>
+    <td class="num">${wasmMs.toFixed(2)}</td>
+    <td class="num">${nativeMs.toFixed(2)}</td>
+    <td class="num ${cls}">${label}</td>
+    <td class="num">${throughput} MP/s</td>
+  `;
+  resultsEl.appendChild(tr);
+}
+
+async function runBenchmark() {
+  runBtn.disabled = true;
+  resultsEl.innerHTML = '';
+  resultsSec.style.display = 'block';
+
+  const iterations = parseInt(document.getElementById('iterations').value);
+  const quality = parseInt(document.getElementById('quality').value);
+
+  try {
+    let testImages;
+    if (jpegData) {
+      testImages = [{ label: 'User image', data: jpegData }];
+    } else {
+      setStatus('Generating test images...');
+      testImages = [
+        { label: '256x256', data: await generateTestJpeg(256, 256) },
+        { label: '1024x768', data: await generateTestJpeg(1024, 768) },
+        { label: '1920x1080 (FHD)', data: await generateTestJpeg(1920, 1080) },
+        { label: '2560x1440 (2K)', data: await generateTestJpeg(2560, 1440) },
+        { label: '3840x2160 (4K)', data: await generateTestJpeg(3840, 2160) },
+        { label: '7680x4320 (8K)', data: await generateTestJpeg(7680, 4320) },
+      ];
+    }
+
+    for (const { label, data } of testImages) {
+      // Get dimensions first to scale iterations for large images
+      const probe = decodeTo(data, PixelFormat.Rgba);
+      const w = probe.width;
+      const h = probe.height;
+      const megapixels = (w * h) / 1e6;
+      const dims = `${w}x${h}`;
+      const pixelData = probe.data;
+      probe.free();
+
+      // Scale down iterations for large images
+      let iters = iterations;
+      if (megapixels > 8) iters = Math.min(iters, 5);
+      else if (megapixels > 2) iters = Math.min(iters, 20);
+      else if (megapixels > 0.5) iters = Math.min(iters, 30);
+
+      // --- Decode benchmark ---
+      setStatus(`Benchmarking decode ${label} (${iters} iterations)...`);
+
+      const wasmDec = await bench(() => {
+        const img = decodeTo(data, PixelFormat.Rgba);
+        img.free();
+      }, iters);
+
+      const nativeDec = await bench(() => nativeDecode(data), iters);
+
+      addRow('Decode', dims, wasmDec.median, nativeDec.median, megapixels);
+
+      // --- Encode benchmark ---
+      setStatus(`Benchmarking encode ${label} (${iters} iterations)...`);
+
+      const wasmEnc = await bench(() => {
+        encode(pixelData, w, h, PixelFormat.Rgba, quality, Subsampling.S420);
+      }, iters);
+
+      // For native encode, need ImageData
+      const nativeImgData = new ImageData(new Uint8ClampedArray(pixelData.buffer, pixelData.byteOffset, pixelData.byteLength), w, h);
+      const nativeEnc = await bench(() => nativeEncode(nativeImgData, quality), iters);
+
+      addRow('Encode', dims, wasmEnc.median, nativeEnc.median, megapixels);
+    }
+
+    setStatus('Done!');
+  } catch (e) {
+    setStatus(`Error: ${e}`);
+    console.error(e);
+  } finally {
+    runBtn.disabled = false;
+  }
+}
+
+fileInput.addEventListener('change', async (e) => {
+  const file = e.target.files[0];
+  if (file) {
+    jpegData = new Uint8Array(await file.arrayBuffer());
+    setStatus(`Loaded: ${file.name} (${(file.size / 1024).toFixed(1)} KB)`);
+  }
+});
+
+runBtn.addEventListener('click', runBenchmark);
+
+// Init WASM
+setStatus('Loading WASM module...');
+await init();
+wasmReady = true;
+setStatus('Ready. Click "Run Benchmark" to start.');
+</script>
+
+</body>
+</html>

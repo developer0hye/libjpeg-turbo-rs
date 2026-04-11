@@ -84,6 +84,12 @@ Rust port of libjpeg-turbo with equivalent or better performance.
 - Mark known limitations with `TODO(reason)` or `FIXME(reason)` — always include why.
 - Delete comments when the code changes — outdated comments are worse than no comments.
 
+## Post-Implementation Review
+
+- **After completing any implementation task** (feature, optimization, bug fix), spawn a `code-reviewer` agent to review the changes before committing.
+- The reviewer should check: missed optimizations, logic defects, SIMD correctness, unnecessary overhead, and SOLID principles.
+- Apply reviewer suggestions if they are clearly beneficial, then commit.
+
 ## Performance Optimization (Experiment Tracking)
 
 When optimizing performance, follow the experiment-driven workflow in `experiments/README.md`.

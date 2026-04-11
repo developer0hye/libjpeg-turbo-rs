@@ -1,3 +1,7 @@
+// WASM has no std::thread support — this is a WebAssembly platform limitation,
+// not a library limitation. The library itself is thread-safe on native targets.
+#![cfg(not(target_arch = "wasm32"))]
+
 use libjpeg_turbo_rs::{compress, decompress, Encoder, Image, PixelFormat, Subsampling};
 use std::sync::Arc;
 use std::thread;
