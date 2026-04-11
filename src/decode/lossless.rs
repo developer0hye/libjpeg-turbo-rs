@@ -40,11 +40,12 @@ pub fn undifference_row(
         } else if is_first_row {
             output[x - 1] as i32
         } else if x == 0 {
-            prev_row.unwrap()[0] as i32
+            prev_row.expect("caller must provide prev_row for non-first rows")[0] as i32
         } else {
             let ra = output[x - 1] as i32;
-            let rb = prev_row.unwrap()[x] as i32;
-            let rc = prev_row.unwrap()[x - 1] as i32;
+            let prev = prev_row.expect("caller must provide prev_row for non-first rows");
+            let rb = prev[x] as i32;
+            let rc = prev[x - 1] as i32;
             predict(psv, ra, rb, rc)
         };
 

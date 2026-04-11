@@ -32,6 +32,10 @@ pub fn sse2_fancy_upsample_h2v1(input: &[u8], in_width: usize, output: &mut [u8]
         return;
     }
 
+    // SAFETY: SSE2 availability is verified at dispatch time via is_x86_feature_detected!().
+    // in_width >= 3 is guaranteed by the early returns above.
+    // Loop condition `i + 8 <= in_width - 1` ensures input has >=9 readable bytes
+    // and output has >=16 writable bytes at each iteration.
     unsafe {
         sse2_fancy_h2v1_inner(input, in_width, output);
     }

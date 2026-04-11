@@ -1022,7 +1022,6 @@ impl<'a> Decoder<'a> {
 
         // Allocate component planes (full MCU-aligned size, uninitialized).
         // SAFETY: The MCU decode loop + IDCT writes every pixel before reading.
-        #[allow(clippy::uninit_vec)]
         let mut component_planes: Vec<Vec<u8>> = frame
             .components
             .iter()
@@ -1031,9 +1030,7 @@ impl<'a> Decoder<'a> {
                 let comp_w = mcus_x * comp.horizontal_sampling as usize * comp_block_sizes[ci];
                 let comp_h = mcus_y * comp.vertical_sampling as usize * comp_block_sizes[ci];
                 let size: usize = comp_w * comp_h;
-                let mut v: Vec<u8> = Vec::with_capacity(size);
-                unsafe { v.set_len(size) };
-                v
+                vec![0u8; size]
             })
             .collect();
 
@@ -1392,9 +1389,7 @@ impl<'a> Decoder<'a> {
                 let comp_w = mcus_x * comp.horizontal_sampling as usize * comp_block_sizes[ci];
                 let comp_h = mcus_y * comp.vertical_sampling as usize * comp_block_sizes[ci];
                 let size = comp_w * comp_h;
-                let mut v = Vec::with_capacity(size);
-                unsafe { v.set_len(size) };
-                v
+                vec![0u8; size]
             })
             .collect();
 
@@ -1636,14 +1631,11 @@ impl<'a> Decoder<'a> {
         }
 
         // IDCT all blocks into component planes
-        #[allow(clippy::uninit_vec)]
         let mut component_planes: Vec<Vec<u8>> = comp_infos
             .iter()
             .map(|ci| {
                 let size = ci.comp_w * ci.blocks_y * ci.block_size;
-                let mut v = Vec::with_capacity(size);
-                unsafe { v.set_len(size) };
-                v
+                vec![0u8; size]
             })
             .collect();
 
@@ -1763,14 +1755,11 @@ impl<'a> Decoder<'a> {
         }
 
         // IDCT all blocks into component planes
-        #[allow(clippy::uninit_vec)]
         let mut component_planes: Vec<Vec<u8>> = comp_infos
             .iter()
             .map(|ci| {
                 let size = ci.comp_w * ci.blocks_y * ci.block_size;
-                let mut v = Vec::with_capacity(size);
-                unsafe { v.set_len(size) };
-                v
+                vec![0u8; size]
             })
             .collect();
 
@@ -2039,7 +2028,9 @@ impl<'a> Decoder<'a> {
         let stride = ci.blocks_x; // buffer stride (MCU-aligned)
 
         if is_dc && ah == 0 {
-            let dc_table = dc_table.unwrap();
+            let dc_table = dc_table.ok_or_else(|| {
+                JpegError::CorruptData("DC Huffman table required for DC-first scan".into())
+            })?;
             for by in 0..scan_blocks_y {
                 for bx in 0..scan_blocks_x {
                     restart_check_dc!(bit_reader, dc_pred, restart_countdown, restart_interval);
@@ -2062,7 +2053,9 @@ impl<'a> Decoder<'a> {
                 }
             }
         } else if ah == 0 {
-            let ac_table = ac_table.unwrap();
+            let ac_table = ac_table.ok_or_else(|| {
+                JpegError::CorruptData("AC Huffman table required for AC-first scan".into())
+            })?;
             for by in 0..scan_blocks_y {
                 for bx in 0..scan_blocks_x {
                     restart_check_ac!(bit_reader, eob_run, restart_countdown, restart_interval);
@@ -2079,7 +2072,9 @@ impl<'a> Decoder<'a> {
                 }
             }
         } else {
-            let ac_table = ac_table.unwrap();
+            let ac_table = ac_table.ok_or_else(|| {
+                JpegError::CorruptData("AC Huffman table required for AC-refine scan".into())
+            })?;
             for by in 0..scan_blocks_y {
                 for bx in 0..scan_blocks_x {
                     restart_check_ac!(bit_reader, eob_run, restart_countdown, restart_interval);
@@ -2954,11 +2949,7 @@ impl<'a> Decoder<'a> {
                 // Expand grayscale to requested color format
                 let bpp = out_format.bytes_per_pixel();
                 let data_size = out_width * out_height * bpp;
-                let mut data = Vec::with_capacity(data_size);
-                #[allow(clippy::uninit_vec)]
-                unsafe {
-                    data.set_len(data_size)
-                };
+                let mut data = vec![0u8; data_size];
                 for y in 0..out_height {
                     let row = &component_planes[0][y * comp_w + comp_x_offsets[0]
                         ..y * comp_w + comp_x_offsets[0] + out_width];
@@ -3052,11 +3043,7 @@ impl<'a> Decoder<'a> {
                     mcus_x * frame.components[2].horizontal_sampling as usize * comp_block_sizes[2];
 
                 let data_size: usize = out_width * out_height * 3;
-                let mut data: Vec<u8> = Vec::with_capacity(data_size);
-                #[allow(clippy::uninit_vec)]
-                unsafe {
-                    data.set_len(data_size)
-                };
+                let mut data: Vec<u8> = vec![0u8; data_size];
                 for y in 0..out_height {
                     let r_row: &[u8] = &r_plane[y * r_stride + comp_x_offsets[0]..];
                     let g_row: &[u8] = &g_plane[y * g_stride + comp_x_offsets[1]..];
@@ -3144,11 +3131,7 @@ impl<'a> Decoder<'a> {
                     && (v_factor == 1 || v_factor == 2)
                 {
                     let data_size: usize = out_width * out_height * bpp;
-                    let mut data: Vec<u8> = Vec::with_capacity(data_size);
-                    #[allow(clippy::uninit_vec)]
-                    unsafe {
-                        data.set_len(data_size)
-                    };
+                    let mut data: Vec<u8> = vec![0u8; data_size];
 
                     if v_factor == 1 {
                         // H2V1 (4:2:2): one chroma row per Y row
@@ -3227,11 +3210,7 @@ impl<'a> Decoder<'a> {
                     // allocating full-size cb_full/cr_full buffers (~4MB for 1080p).
                     // Process 2 output rows at a time, keeping data in L1/L2 cache.
                     let data_size = out_width * out_height * bpp;
-                    let mut data = Vec::with_capacity(data_size);
-                    #[allow(clippy::uninit_vec)]
-                    unsafe {
-                        data.set_len(data_size)
-                    };
+                    let mut data = vec![0u8; data_size];
 
                     // Small per-row upsample buffers (2 rows × full_width per component)
                     let mut cb_row_top = vec![0u8; full_width];
@@ -3345,13 +3324,8 @@ impl<'a> Decoder<'a> {
 
                 // All remaining paths need full-plane cb_full/cr_full buffers.
                 let alloc_size = full_width * full_height;
-                let mut cb_full = Vec::with_capacity(alloc_size);
-                let mut cr_full = Vec::with_capacity(alloc_size);
-                #[allow(clippy::uninit_vec)]
-                unsafe {
-                    cb_full.set_len(alloc_size);
-                    cr_full.set_len(alloc_size);
-                }
+                let mut cb_full = vec![0u8; alloc_size];
+                let mut cr_full = vec![0u8; alloc_size];
 
                 // Upsample each chroma component independently using its own factors.
                 // This handles non-uniform chroma sampling (e.g. Cb=2x1, Cr=1x1)
@@ -3481,11 +3455,7 @@ impl<'a> Decoder<'a> {
                 // then reconstruct and drop them. But simpler: just use a nested scope.
                 // Actually, let's just do the color conversion here and return.
                 let data_size = out_width * out_height * bpp;
-                let mut data = Vec::with_capacity(data_size);
-                #[allow(clippy::uninit_vec)]
-                unsafe {
-                    data.set_len(data_size)
-                };
+                let mut data = vec![0u8; data_size];
                 for y in 0..out_height {
                     self.color_convert_row(
                         out_format,
@@ -3515,11 +3485,7 @@ impl<'a> Decoder<'a> {
 
             // 4:4:4 path (no upsampling)
             let data_size = out_width * out_height * bpp;
-            let mut data = Vec::with_capacity(data_size);
-            #[allow(clippy::uninit_vec)]
-            unsafe {
-                data.set_len(data_size)
-            };
+            let mut data = vec![0u8; data_size];
             for y in 0..out_height {
                 self.color_convert_row(
                     out_format,
@@ -3760,12 +3726,8 @@ impl<'a> Decoder<'a> {
             p2_stride = comp1_w;
         } else {
             let alloc_size = full_width * full_height;
-            let mut p1_full = Vec::with_capacity(alloc_size);
-            let mut p2_full = Vec::with_capacity(alloc_size);
-            unsafe {
-                p1_full.set_len(alloc_size);
-                p2_full.set_len(alloc_size);
-            }
+            let mut p1_full = vec![0u8; alloc_size];
+            let mut p2_full = vec![0u8; alloc_size];
 
             if h_factor == 2 && v_factor == 1 {
                 for row in 0..comp1_h {
@@ -3879,11 +3841,7 @@ impl<'a> Decoder<'a> {
 
         let bpp = out_format.bytes_per_pixel();
         let data_size = width * height * bpp;
-        let mut data = Vec::with_capacity(data_size);
-        #[allow(clippy::uninit_vec)]
-        unsafe {
-            data.set_len(data_size)
-        };
+        let mut data = vec![0u8; data_size];
 
         for y in 0..height {
             let p0 = &plane0[y * p0_stride..];

@@ -75,8 +75,8 @@ unsafe fn neon_quantize_core(coeffs_ptr: *const i16, quant_ptr: *const u16, out_
         vst1q_u32(q_hi.as_mut_ptr(), quant_hi);
 
         for j in 0..4 {
-            div_lo[j] = r_lo[j] / q_lo[j];
-            div_hi[j] = r_hi[j] / q_hi[j];
+            div_lo[j] = if q_lo[j] != 0 { r_lo[j] / q_lo[j] } else { 0 };
+            div_hi[j] = if q_hi[j] != 0 { r_hi[j] / q_hi[j] } else { 0 };
         }
 
         let result_lo: uint32x4_t = vld1q_u32(div_lo.as_ptr());
