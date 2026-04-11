@@ -48,13 +48,18 @@ pub(crate) fn upsample_generic_nearest(
     }
 }
 
-/// Dispatch fancy_h2v2_row to AVX2 or scalar based on CPU features.
+/// Dispatch fancy_h2v2_row to AVX2, SSE2, or scalar based on CPU features.
 #[inline]
 fn fancy_h2v2_row_dispatch(cur: &[u8], neighbor: &[u8], output: &mut [u8], in_width: usize) {
     #[cfg(all(target_arch = "x86_64", feature = "simd"))]
     {
         if is_x86_feature_detected!("avx2") {
             return crate::simd::x86_64::avx2_upsample::avx2_fancy_h2v2_row(
+                cur, neighbor, output, in_width,
+            );
+        }
+        if is_x86_feature_detected!("sse2") {
+            return crate::simd::x86_64::upsample::sse2_fancy_h2v2_row(
                 cur, neighbor, output, in_width,
             );
         }
@@ -1031,6 +1036,11 @@ impl<'a> Decoder<'a> {
         {
             if is_x86_feature_detected!("avx2") {
                 return crate::simd::x86_64::avx2_upsample::avx2_fancy_upsample_h2v2(
+                    input, in_width, in_height, output, out_width,
+                );
+            }
+            if is_x86_feature_detected!("sse2") {
+                return crate::simd::x86_64::upsample::sse2_fancy_upsample_h2v2(
                     input, in_width, in_height, output, out_width,
                 );
             }
