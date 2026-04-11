@@ -4983,6 +4983,18 @@ fn convert_to_ycbcr(
             for row in 0..height {
                 let src_offset = row * width * bpp;
                 let dst_offset = row * width;
+                #[cfg(all(target_arch = "aarch64", feature = "simd"))]
+                {
+                    crate::simd::aarch64::color_encode::neon_rgba_to_ycbcr_row(
+                        &pixels[src_offset..src_offset + width * bpp],
+                        &mut y_plane[dst_offset..dst_offset + width],
+                        &mut cb_plane[dst_offset..dst_offset + width],
+                        &mut cr_plane[dst_offset..dst_offset + width],
+                        width,
+                    );
+                    continue;
+                }
+                #[allow(unreachable_code)]
                 color::rgba_to_ycbcr_row(
                     &pixels[src_offset..src_offset + width * bpp],
                     &mut y_plane[dst_offset..dst_offset + width],
@@ -4993,18 +5005,23 @@ fn convert_to_ycbcr(
             }
         }
         PixelFormat::Bgr => {
-            // Convert BGR to RGB row by row, then use rgb_to_ycbcr
-            let mut rgb_row = vec![0u8; width * 3];
             for row in 0..height {
                 let src_offset = row * width * bpp;
                 let dst_offset = row * width;
-                for col in 0..width {
-                    rgb_row[col * 3] = pixels[src_offset + col * 3 + 2]; // R
-                    rgb_row[col * 3 + 1] = pixels[src_offset + col * 3 + 1]; // G
-                    rgb_row[col * 3 + 2] = pixels[src_offset + col * 3]; // B
+                #[cfg(all(target_arch = "aarch64", feature = "simd"))]
+                {
+                    crate::simd::aarch64::color_encode::neon_bgr_to_ycbcr_row(
+                        &pixels[src_offset..src_offset + width * bpp],
+                        &mut y_plane[dst_offset..dst_offset + width],
+                        &mut cb_plane[dst_offset..dst_offset + width],
+                        &mut cr_plane[dst_offset..dst_offset + width],
+                        width,
+                    );
+                    continue;
                 }
-                color::rgb_to_ycbcr_row(
-                    &rgb_row,
+                #[allow(unreachable_code)]
+                color::bgr_to_ycbcr_row_scalar(
+                    &pixels[src_offset..src_offset + width * bpp],
                     &mut y_plane[dst_offset..dst_offset + width],
                     &mut cb_plane[dst_offset..dst_offset + width],
                     &mut cr_plane[dst_offset..dst_offset + width],
@@ -5013,18 +5030,23 @@ fn convert_to_ycbcr(
             }
         }
         PixelFormat::Bgra => {
-            // Convert BGRA to RGB row by row
-            let mut rgb_row = vec![0u8; width * 3];
             for row in 0..height {
                 let src_offset = row * width * bpp;
                 let dst_offset = row * width;
-                for col in 0..width {
-                    rgb_row[col * 3] = pixels[src_offset + col * 4 + 2]; // R
-                    rgb_row[col * 3 + 1] = pixels[src_offset + col * 4 + 1]; // G
-                    rgb_row[col * 3 + 2] = pixels[src_offset + col * 4]; // B
+                #[cfg(all(target_arch = "aarch64", feature = "simd"))]
+                {
+                    crate::simd::aarch64::color_encode::neon_bgra_to_ycbcr_row(
+                        &pixels[src_offset..src_offset + width * bpp],
+                        &mut y_plane[dst_offset..dst_offset + width],
+                        &mut cb_plane[dst_offset..dst_offset + width],
+                        &mut cr_plane[dst_offset..dst_offset + width],
+                        width,
+                    );
+                    continue;
                 }
-                color::rgb_to_ycbcr_row(
-                    &rgb_row,
+                #[allow(unreachable_code)]
+                color::bgra_to_ycbcr_row_scalar(
+                    &pixels[src_offset..src_offset + width * bpp],
                     &mut y_plane[dst_offset..dst_offset + width],
                     &mut cb_plane[dst_offset..dst_offset + width],
                     &mut cr_plane[dst_offset..dst_offset + width],
