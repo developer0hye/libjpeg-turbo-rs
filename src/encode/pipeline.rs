@@ -14,6 +14,69 @@ use crate::encode::progressive::ProgressiveScan;
 use crate::encode::tables;
 use crate::simd::QuantDivisors;
 
+/// Color conversion function: (pixels, y, cb, cr, width).
+type ColorConvertRowFn = fn(&[u8], &mut [u8], &mut [u8], &mut [u8], usize);
+
+/// Select the best available RGBA→YCbCr row conversion function.
+fn select_rgba_to_ycbcr_fn() -> ColorConvertRowFn {
+    #[cfg(all(target_arch = "aarch64", feature = "simd"))]
+    {
+        return crate::simd::aarch64::color_encode::neon_rgba_to_ycbcr_row;
+    }
+    #[cfg(all(target_arch = "wasm32", feature = "simd"))]
+    {
+        return crate::simd::wasm32::color_encode::wasm_rgba_to_ycbcr_row;
+    }
+    #[cfg(all(target_arch = "x86_64", feature = "simd"))]
+    {
+        if is_x86_feature_detected!("avx2") {
+            return crate::simd::x86_64::avx2_color_encode::avx2_rgba_to_ycbcr_row;
+        }
+    }
+    #[allow(unreachable_code)]
+    color::rgba_to_ycbcr_row
+}
+
+/// Select the best available BGR→YCbCr row conversion function.
+fn select_bgr_to_ycbcr_fn() -> ColorConvertRowFn {
+    #[cfg(all(target_arch = "aarch64", feature = "simd"))]
+    {
+        return crate::simd::aarch64::color_encode::neon_bgr_to_ycbcr_row;
+    }
+    #[cfg(all(target_arch = "wasm32", feature = "simd"))]
+    {
+        return crate::simd::wasm32::color_encode::wasm_bgr_to_ycbcr_row;
+    }
+    #[cfg(all(target_arch = "x86_64", feature = "simd"))]
+    {
+        if is_x86_feature_detected!("avx2") {
+            return crate::simd::x86_64::avx2_color_encode::avx2_bgr_to_ycbcr_row;
+        }
+    }
+    #[allow(unreachable_code)]
+    color::bgr_to_ycbcr_row_scalar
+}
+
+/// Select the best available BGRA→YCbCr row conversion function.
+fn select_bgra_to_ycbcr_fn() -> ColorConvertRowFn {
+    #[cfg(all(target_arch = "aarch64", feature = "simd"))]
+    {
+        return crate::simd::aarch64::color_encode::neon_bgra_to_ycbcr_row;
+    }
+    #[cfg(all(target_arch = "wasm32", feature = "simd"))]
+    {
+        return crate::simd::wasm32::color_encode::wasm_bgra_to_ycbcr_row;
+    }
+    #[cfg(all(target_arch = "x86_64", feature = "simd"))]
+    {
+        if is_x86_feature_detected!("avx2") {
+            return crate::simd::x86_64::avx2_color_encode::avx2_bgra_to_ycbcr_row;
+        }
+    }
+    #[allow(unreachable_code)]
+    color::bgra_to_ycbcr_row_scalar
+}
+
 /// Compress raw pixel data into a JPEG byte stream.
 ///
 /// # Arguments
@@ -124,11 +187,22 @@ pub fn compress(
     let mut prev_dc_cb: i16 = 0;
     let mut prev_dc_cr: i16 = 0;
 
-    // Single-pass fused approach for RGB: convert MCU rows on-the-fly instead
+    // Single-pass fused approach: convert MCU rows on-the-fly instead
     // of pre-allocating full-size planes. Keeps data in L1/L2 cache between
     // color conversion and encoding.
-    if pixel_format == PixelFormat::Rgb && !is_grayscale {
-        let rgb_to_ycbcr_fn = enc_simd.rgb_to_ycbcr_row;
+    // Select format-specific color conversion function + BPP for the fast path.
+    let fused_color_fn: Option<(ColorConvertRowFn, usize)> = if is_grayscale {
+        None
+    } else {
+        match pixel_format {
+            PixelFormat::Rgb => Some((enc_simd.rgb_to_ycbcr_row, 3)),
+            PixelFormat::Rgba => Some((select_rgba_to_ycbcr_fn(), 4)),
+            PixelFormat::Bgr => Some((select_bgr_to_ycbcr_fn(), 3)),
+            PixelFormat::Bgra => Some((select_bgra_to_ycbcr_fn(), 4)),
+            _ => None,
+        }
+    };
+    if let Some((color_convert_fn, bpp)) = fused_color_fn {
         // Pad buffer width to MCU-aligned, matching C libjpeg-turbo's behavior.
         // C allocates coefficient buffers padded to MCU boundaries and pads input
         // with expand_right_edge up to width_in_blocks * DCTSIZE per component.
@@ -144,13 +218,13 @@ pub fn compress(
             let y0: usize = mcu_row * mcu_h;
             let rows_available: usize = (height - y0).min(mcu_h);
 
-            // Convert this MCU row's RGB data to YCbCr
+            // Convert this MCU row's pixel data to YCbCr
             for row in 0..rows_available {
                 let src_row: usize = y0 + row;
-                let src_offset: usize = src_row * width * 3;
+                let src_offset: usize = src_row * width * bpp;
                 let dst_offset: usize = row * padded_w;
-                rgb_to_ycbcr_fn(
-                    &pixels[src_offset..src_offset + width * 3],
+                color_convert_fn(
+                    &pixels[src_offset..src_offset + width * bpp],
                     &mut y_buf[dst_offset..dst_offset + width],
                     &mut cb_buf[dst_offset..dst_offset + width],
                     &mut cr_buf[dst_offset..dst_offset + width],
