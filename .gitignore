@@ -5,3 +5,4 @@ fuzz/target
 fuzz/artifacts
 .DS_Store
 bench_c_decode_linux
+crates/libjpeg-turbo-rs-wasm/pkg/

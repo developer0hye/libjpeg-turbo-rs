@@ -5,8 +5,10 @@
 //! This is the Rust equivalent of libjpeg-turbo's `jpeg_source_mgr` /
 //! `jpeg_destination_mgr` custom I/O abstraction.
 
+#[cfg(any(not(target_arch = "wasm32"), target_os = "wasi"))]
 use std::fs::File;
 use std::io::{Read, Write};
+#[cfg(any(not(target_arch = "wasm32"), target_os = "wasi"))]
 use std::path::Path;
 
 use crate::common::error::Result;
@@ -55,6 +57,7 @@ pub fn decompress_from_reader<R: Read>(reader: &mut R) -> Result<Image> {
 /// Opens the file for writing, compresses the pixel data, and writes the
 /// JPEG output. Equivalent to using libjpeg-turbo's `jpeg_stdio_dest()`
 /// with `fopen()`.
+#[cfg(any(not(target_arch = "wasm32"), target_os = "wasi"))]
 pub fn compress_to_file<P: AsRef<Path>>(
     path: P,
     pixels: &[u8],
@@ -80,6 +83,7 @@ pub fn compress_to_file<P: AsRef<Path>>(
 ///
 /// Opens the file for reading, reads all JPEG data, and decompresses it.
 /// Equivalent to using libjpeg-turbo's `jpeg_stdio_src()` with `fopen()`.
+#[cfg(any(not(target_arch = "wasm32"), target_os = "wasi"))]
 pub fn decompress_from_file<P: AsRef<Path>>(path: P) -> Result<Image> {
     let mut file: File = File::open(path)?;
     decompress_from_reader(&mut file)

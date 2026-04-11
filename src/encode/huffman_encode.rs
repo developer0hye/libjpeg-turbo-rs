@@ -498,7 +498,18 @@ impl HuffmanEncoder {
                 {
                     encode_ac_x86_64(&mut pb, &mut fb, &mut buf, coeffs_zigzag, ac_table);
                 }
-                #[cfg(not(target_arch = "x86_64"))]
+                #[cfg(all(
+                    not(target_arch = "x86_64"),
+                    target_arch = "wasm32",
+                    target_feature = "simd128"
+                ))]
+                {
+                    encode_ac_wasm_local(&mut pb, &mut fb, &mut buf, coeffs_zigzag, ac_table);
+                }
+                #[cfg(not(any(
+                    target_arch = "x86_64",
+                    all(target_arch = "wasm32", target_feature = "simd128")
+                )))]
                 {
                     encode_ac_scalar_local(&mut pb, &mut fb, &mut buf, coeffs_zigzag, ac_table);
                 }
@@ -737,7 +748,11 @@ unsafe fn encode_ac_sparse_local(
 ///
 /// # Safety
 /// `pb`, `fb`, `buf` must be valid hoisted state.
-#[cfg(not(any(target_arch = "aarch64", target_arch = "x86_64")))]
+#[cfg(not(any(
+    target_arch = "aarch64",
+    target_arch = "x86_64",
+    all(target_arch = "wasm32", target_feature = "simd128")
+)))]
 unsafe fn encode_ac_scalar_local(
     pb: &mut u64,
     fb: &mut i32,
@@ -763,6 +778,99 @@ unsafe fn encode_ac_scalar_local(
         return;
     }
 
+    let mut pos: u32 = 1;
+    while bitmap != 0 {
+        let lz: u32 = bitmap.leading_zeros();
+        pos += lz;
+        bitmap <<= lz;
+
+        let ac: i16 = *coeffs_zigzag.get_unchecked(pos as usize);
+        let (magnitude_bits, nbits) = encode_ac_value(ac);
+        let mag_masked: u32 = magnitude_bits as u32 & ((1u32 << nbits) - 1);
+
+        let mut run: u32 = lz;
+        while run >= 16 {
+            local_put_bits(
+                pb,
+                fb,
+                buf,
+                ac_table.ehufco[0xF0] as u32,
+                ac_table.ehufsi[0xF0],
+            );
+            run -= 16;
+        }
+
+        let symbol: usize = ((run as usize) << 4) | (nbits as usize);
+        let huff_code: u32 = ac_table.ehufco[symbol] as u32;
+        let huff_size: u8 = ac_table.ehufsi[symbol];
+        let combined: u32 = (huff_code << nbits) | mag_masked;
+        local_put_bits(pb, fb, buf, combined, huff_size + nbits);
+
+        pos += 1;
+        bitmap <<= 1;
+    }
+
+    if pos <= 63 {
+        local_put_bits(
+            pb,
+            fb,
+            buf,
+            ac_table.ehufco[0x00] as u32,
+            ac_table.ehufsi[0x00],
+        );
+    }
+}
+
+/// WASM simd128-accelerated AC coefficient encoding using hoisted local variables.
+///
+/// Uses `i16x8_ne` + `i16x8_bitmask` to build the non-zero coefficient bitmap
+/// vectorially (8 SIMD ops instead of 63 scalar comparisons), then runs the
+/// same Huffman emit loop as the scalar path.
+///
+/// # Safety
+/// Requires simd128. `pb`, `fb`, `buf` must be valid hoisted state from
+/// `BitWriter::begin_block`.
+#[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
+#[target_feature(enable = "simd128")]
+unsafe fn encode_ac_wasm_local(
+    pb: &mut u64,
+    fb: &mut i32,
+    buf: &mut *mut u8,
+    coeffs_zigzag: &[i16; 64],
+    ac_table: &HuffTable,
+) {
+    use core::arch::wasm32::*;
+
+    let zero: v128 = i16x8_splat(0);
+    let mut bitmap: u64 = 0;
+
+    // Build non-zero bitmap: 8 chunks of 8 i16 = 64 coefficients
+    for chunk in 0..8u32 {
+        let offset: usize = (chunk * 8) as usize;
+        let row: v128 = v128_load(coeffs_zigzag.as_ptr().add(offset) as *const v128);
+        let ne: v128 = i16x8_ne(row, zero);
+        // i16x8_bitmask returns lane 0 as bit 0 (LSB), but we need lane 0
+        // as bit 7 (MSB) to match the scalar bitmap layout where earlier
+        // coefficients occupy higher bit positions.
+        let bits: u8 = i16x8_bitmask(ne).reverse_bits();
+        bitmap |= (bits as u64) << (56 - chunk * 8);
+    }
+
+    // Shift left 1 to remove DC bit (we only care about AC positions 1..63)
+    bitmap <<= 1;
+
+    if bitmap == 0 {
+        local_put_bits(
+            pb,
+            fb,
+            buf,
+            ac_table.ehufco[0x00] as u32,
+            ac_table.ehufsi[0x00],
+        );
+        return;
+    }
+
+    // Huffman emit loop (same as scalar path)
     let mut pos: u32 = 1;
     while bitmap != 0 {
         let lz: u32 = bitmap.leading_zeros();

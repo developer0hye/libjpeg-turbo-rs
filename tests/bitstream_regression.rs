@@ -50,7 +50,9 @@ fn generate_grayscale_pattern(width: usize, height: usize) -> Vec<u8> {
 fn load_reference_hashes() -> HashMap<String, Option<String>> {
     #[cfg(target_arch = "x86_64")]
     let json_str: &str = include_str!("reference_hashes_x86_64.json");
-    #[cfg(not(target_arch = "x86_64"))]
+    #[cfg(target_arch = "wasm32")]
+    let json_str: &str = include_str!("reference_hashes_wasm32.json");
+    #[cfg(not(any(target_arch = "x86_64", target_arch = "wasm32")))]
     let json_str: &str = include_str!("reference_hashes.json");
     // Minimal JSON parsing: extract key-value pairs.
     // The file has a simple flat structure: { "key": "value" | null, ... }
