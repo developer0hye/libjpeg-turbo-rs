@@ -303,6 +303,9 @@ unsafe fn wasm_ycbcr_to_rgba_row_inner(
 
 /// WASM simd128 YCbCr to interleaved BGR row conversion.
 pub fn wasm_ycbcr_to_bgr_row(y: &[u8], cb: &[u8], cr: &[u8], bgr: &mut [u8], width: usize) {
+    // SAFETY: Caller guarantees y.len() >= width, cb.len() >= width, cr.len() >= width,
+    // bgr.len() >= width * 3. The loop processes 8 pixels per iteration with a scalar
+    // tail for width % 8 != 0, preventing out-of-bounds access.
     unsafe {
         wasm_ycbcr_to_bgr_row_inner(y, cb, cr, bgr, width);
     }
@@ -394,6 +397,9 @@ unsafe fn wasm_ycbcr_to_bgr_row_inner(
 
 /// WASM simd128 YCbCr to interleaved BGRA row conversion.
 pub fn wasm_ycbcr_to_bgra_row(y: &[u8], cb: &[u8], cr: &[u8], bgra: &mut [u8], width: usize) {
+    // SAFETY: Caller guarantees y.len() >= width, cb.len() >= width, cr.len() >= width,
+    // bgra.len() >= width * 4. The loop processes 8 pixels per iteration with a scalar
+    // tail for width % 8 != 0, preventing out-of-bounds access.
     unsafe {
         wasm_ycbcr_to_bgra_row_inner(y, cb, cr, bgra, width);
     }

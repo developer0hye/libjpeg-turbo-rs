@@ -33,7 +33,7 @@ fn mulhi_epi16(a: v128, b: v128) -> v128 {
 /// Compute chroma deltas (r_delta, g_delta, b_delta) from 8 Cb/Cr samples.
 /// Returns (r_sub_y, g_sub_y, b_sub_y) as i16x8 vectors.
 #[inline(always)]
-unsafe fn compute_chroma_deltas(cb_centered: v128, cr_centered: v128) -> (v128, v128, v128) {
+fn compute_chroma_deltas(cb_centered: v128, cr_centered: v128) -> (v128, v128, v128) {
     let one: v128 = i16x8_splat(1);
 
     // R-Y = Cr + round(mulhi(2*Cr, F_0_402))
@@ -71,7 +71,7 @@ unsafe fn compute_chroma_deltas(cb_centered: v128, cr_centered: v128) -> (v128, 
 
 /// Apply chroma deltas to 8 Y samples, producing clamped u8 R, G, B vectors.
 #[inline(always)]
-unsafe fn apply_chroma_to_y(
+fn apply_chroma_to_y(
     y_u8: v128,
     r_sub_y: v128,
     g_sub_y: v128,
@@ -120,6 +120,10 @@ pub fn wasm_merged_h2v1_ycbcr_to_rgb(
     rgb_out: &mut [u8],
     width: usize,
 ) {
+    // SAFETY: Caller guarantees y_row.len() >= width, cb_row.len() >= width/2,
+    // cr_row.len() >= width/2, rgb_out.len() >= width * 3. The inner function
+    // processes 16 pixels per SIMD iteration with a scalar tail, preventing
+    // out-of-bounds access. simd128 target_feature is enabled on the callee.
     unsafe {
         wasm_merged_h2v1_inner(y_row, cb_row, cr_row, rgb_out, width);
     }
@@ -239,6 +243,9 @@ pub fn wasm_merged_h2v2_ycbcr_to_rgb(
     rgb_out1: &mut [u8],
     width: usize,
 ) {
+    // SAFETY: Caller guarantees y_row0/y_row1.len() >= width, cb_row/cr_row.len() >= width/2,
+    // rgb_out0/rgb_out1.len() >= width * 3. The inner function processes 16 pixels per SIMD
+    // iteration with a scalar tail, preventing out-of-bounds access.
     unsafe {
         wasm_merged_h2v2_inner(y_row0, y_row1, cb_row, cr_row, rgb_out0, rgb_out1, width);
     }
