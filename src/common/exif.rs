@@ -57,7 +57,11 @@ pub fn parse_orientation(tiff: &[u8]) -> Option<u8> {
 
 fn read_u16(data: &[u8], offset: usize, is_le: bool) -> u16 {
     let bytes: [u8; 2] = [data[offset], data[offset.wrapping_add(1)]];
-    if is_le { u16::from_le_bytes(bytes) } else { u16::from_be_bytes(bytes) }
+    if is_le {
+        u16::from_le_bytes(bytes)
+    } else {
+        u16::from_be_bytes(bytes)
+    }
 }
 
 fn read_u32(data: &[u8], offset: usize, is_le: bool) -> u32 {
@@ -67,7 +71,11 @@ fn read_u32(data: &[u8], offset: usize, is_le: bool) -> u32 {
         data[offset.wrapping_add(2)],
         data[offset.wrapping_add(3)],
     ];
-    if is_le { u32::from_le_bytes(b) } else { u32::from_be_bytes(b) }
+    if is_le {
+        u32::from_le_bytes(b)
+    } else {
+        u32::from_be_bytes(b)
+    }
 }
 
 #[cfg(test)]

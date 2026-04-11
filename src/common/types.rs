@@ -260,14 +260,20 @@ impl ScalingFactor {
     /// The IDCT block output size for this scaling factor.
     /// 8 for full, 4 for 1/2, 2 for 1/4, 1 for 1/8.
     pub fn block_size(self) -> usize {
-        assert!(self.denom != 0, "ScalingFactor denominator must not be zero");
+        assert!(
+            self.denom != 0,
+            "ScalingFactor denominator must not be zero"
+        );
         let ratio_x8 = (self.num * 8).div_ceil(self.denom);
         (ratio_x8 as usize).clamp(1, 16)
     }
 
     /// Compute scaled output dimension: ceil(input_dim * num / denom).
     pub fn scale_dim(self, input_dim: usize) -> usize {
-        assert!(self.denom != 0, "ScalingFactor denominator must not be zero");
+        assert!(
+            self.denom != 0,
+            "ScalingFactor denominator must not be zero"
+        );
         (input_dim * self.num as usize).div_ceil(self.denom as usize)
     }
 }

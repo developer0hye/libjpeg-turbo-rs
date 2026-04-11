@@ -12,7 +12,10 @@ use crate::transform::TransformOp;
 /// `alignment` must be a power of two.
 #[inline]
 fn pad(value: usize, alignment: usize) -> usize {
-    debug_assert!(alignment.is_power_of_two(), "alignment must be a power of two");
+    debug_assert!(
+        alignment.is_power_of_two(),
+        "alignment must be a power of two"
+    );
     (value + alignment - 1) & !(alignment - 1)
 }
 
