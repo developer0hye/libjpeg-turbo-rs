@@ -5005,6 +5005,19 @@ fn convert_to_ycbcr(
                     );
                     continue;
                 }
+                #[cfg(all(target_arch = "x86_64", feature = "simd"))]
+                {
+                    if is_x86_feature_detected!("avx2") {
+                        crate::simd::x86_64::avx2_color_encode::avx2_rgba_to_ycbcr_row(
+                            &pixels[src_offset..src_offset + width * bpp],
+                            &mut y_plane[dst_offset..dst_offset + width],
+                            &mut cb_plane[dst_offset..dst_offset + width],
+                            &mut cr_plane[dst_offset..dst_offset + width],
+                            width,
+                        );
+                        continue;
+                    }
+                }
                 #[allow(unreachable_code)]
                 color::rgba_to_ycbcr_row(
                     &pixels[src_offset..src_offset + width * bpp],
@@ -5041,6 +5054,19 @@ fn convert_to_ycbcr(
                     );
                     continue;
                 }
+                #[cfg(all(target_arch = "x86_64", feature = "simd"))]
+                {
+                    if is_x86_feature_detected!("avx2") {
+                        crate::simd::x86_64::avx2_color_encode::avx2_bgr_to_ycbcr_row(
+                            &pixels[src_offset..src_offset + width * bpp],
+                            &mut y_plane[dst_offset..dst_offset + width],
+                            &mut cb_plane[dst_offset..dst_offset + width],
+                            &mut cr_plane[dst_offset..dst_offset + width],
+                            width,
+                        );
+                        continue;
+                    }
+                }
                 #[allow(unreachable_code)]
                 color::bgr_to_ycbcr_row_scalar(
                     &pixels[src_offset..src_offset + width * bpp],
@@ -5076,6 +5102,19 @@ fn convert_to_ycbcr(
                         width,
                     );
                     continue;
+                }
+                #[cfg(all(target_arch = "x86_64", feature = "simd"))]
+                {
+                    if is_x86_feature_detected!("avx2") {
+                        crate::simd::x86_64::avx2_color_encode::avx2_bgra_to_ycbcr_row(
+                            &pixels[src_offset..src_offset + width * bpp],
+                            &mut y_plane[dst_offset..dst_offset + width],
+                            &mut cb_plane[dst_offset..dst_offset + width],
+                            &mut cr_plane[dst_offset..dst_offset + width],
+                            width,
+                        );
+                        continue;
+                    }
                 }
                 #[allow(unreachable_code)]
                 color::bgra_to_ycbcr_row_scalar(
