@@ -108,6 +108,13 @@ When optimizing performance, follow the experiment-driven workflow in `experimen
 - **One change at a time**: isolate each experiment to a single variable. If you change two things and perf improves, you don't know which one helped.
 - **Always compare against C libjpeg-turbo**: after every performance change, run `./bench_c_decode_linux` alongside `cargo bench` and report Rust/C ratio. The goal is to match or beat C libjpeg-turbo on all benchmarks. Use `examples/bench_c_decode_linux.c` (compile: `cc -O2 -o bench_c_decode_linux examples/bench_c_decode_linux.c -I$CONDA_PREFIX/include -L$CONDA_PREFIX/lib -ljpeg -Wl,-rpath,$CONDA_PREFIX/lib`).
 - **Study C SIMD before porting**: when optimizing a hot path, first download and study the corresponding libjpeg-turbo C/ASM SIMD implementation. Understand the algorithm, register allocation, and data flow before writing Rust. Port the design, not just the intrinsics.
+- **WASM benchmark**: use Playwright MCP to measure real browser performance. Steps:
+  1. Build: `cd crates/libjpeg-turbo-rs-wasm && wasm-pack build --release --target web`
+  2. Serve: `python3 -m http.server 8079 --bind 127.0.0.1` from the WASM crate directory
+  3. Open `http://127.0.0.1:8079/bench/index.html` via Playwright, click "Run Benchmark", wait for "Done!"
+  4. Capture results from the page snapshot (table rows: Operation, Image, WASM ms, Native ms, Ratio, Throughput)
+  5. C libjpeg-turbo comparison: Chrome's native JPEG codec is C libjpeg-turbo-based, so `createImageBitmap(blob)` time = C decode time, `canvas.toBlob('image/jpeg', quality)` time = C encode time. This is the real Rust WASM vs C libjpeg-turbo benchmark.
+  6. Save results to `experiments/wasm_*.md`.
 
 ## Git Configuration
 
