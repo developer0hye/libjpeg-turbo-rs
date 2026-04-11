@@ -872,6 +872,13 @@ impl<'a> Decoder<'a> {
             return;
         }
 
+        #[cfg(all(target_arch = "wasm32", feature = "simd"))]
+        {
+            return crate::simd::wasm32::merged::wasm_merged_h2v1_ycbcr_to_rgb(
+                y_row, cb_row, cr_row, rgb_out, width,
+            );
+        }
+
         #[allow(unreachable_code)]
         crate::decode::merged_upsample::merged_h2v1_ycbcr_to_rgb(
             y_row, cb_row, cr_row, rgb_out, width,
@@ -905,6 +912,13 @@ impl<'a> Decoder<'a> {
                 y_row0, y_row1, cb_row, cr_row, rgb_out0, rgb_out1, width,
             );
             return;
+        }
+
+        #[cfg(all(target_arch = "wasm32", feature = "simd"))]
+        {
+            return crate::simd::wasm32::merged::wasm_merged_h2v2_ycbcr_to_rgb(
+                y_row0, y_row1, cb_row, cr_row, rgb_out0, rgb_out1, width,
+            );
         }
 
         #[allow(unreachable_code)]
