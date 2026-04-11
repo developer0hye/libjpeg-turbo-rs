@@ -8,6 +8,7 @@ pub mod downsample;
 pub mod fdct;
 pub mod idct;
 pub mod idct_scaled;
+pub mod merged;
 pub mod quantize;
 pub mod upsample;
 
