@@ -45,10 +45,10 @@ pub fn neon_rgb_to_ycbcr_row(rgb: &[u8], y: &mut [u8], cb: &mut [u8], cr: &mut [
     if width == 0 {
         return;
     }
-    assert!(rgb.len() >= width * 3, "rgb slice too short for width");
-    assert!(y.len() >= width, "y slice too short for width");
-    assert!(cb.len() >= width, "cb slice too short for width");
-    assert!(cr.len() >= width, "cr slice too short for width");
+    assert!(rgb.len() >= width * 3);
+    assert!(y.len() >= width);
+    assert!(cb.len() >= width);
+    assert!(cr.len() >= width);
     // SAFETY: NEON is mandatory on aarch64.
     unsafe {
         neon_rgb_to_ycbcr_row_inner(rgb, y, cb, cr, width);
