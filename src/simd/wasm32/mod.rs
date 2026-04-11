@@ -9,6 +9,7 @@ pub mod color;
 pub mod color_encode;
 pub mod fdct;
 pub mod idct;
+pub mod merged;
 pub mod upsample;
 
 #[cfg(target_arch = "wasm32")]
