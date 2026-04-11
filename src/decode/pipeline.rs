@@ -654,7 +654,7 @@ impl<'a> Decoder<'a> {
             }
         }
 
-        #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
+        #[cfg(all(target_arch = "wasm32", feature = "simd"))]
         {
             return crate::simd::wasm32::color::wasm_ycbcr_to_rgba_row(y, cb, cr, out, width);
         }

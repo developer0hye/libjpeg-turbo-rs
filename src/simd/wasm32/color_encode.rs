@@ -268,6 +268,8 @@ pub fn wasm_rgba_to_ycbcr_row(
     if width == 0 {
         return;
     }
+    // SAFETY: Caller guarantees rgba.len() >= width * 4, y/cb/cr.len() >= width.
+    // The loop processes 8 pixels per iteration with a scalar tail.
     unsafe {
         wasm_rgba_to_ycbcr_row_inner(rgba, y, cb, cr, width);
     }
@@ -350,6 +352,8 @@ pub fn wasm_bgr_to_ycbcr_row(bgr: &[u8], y: &mut [u8], cb: &mut [u8], cr: &mut [
     if width == 0 {
         return;
     }
+    // SAFETY: Caller guarantees bgr.len() >= width * 3, y/cb/cr.len() >= width.
+    // The loop processes 8 pixels per iteration with a scalar tail.
     unsafe {
         wasm_bgr_to_ycbcr_row_inner(bgr, y, cb, cr, width);
     }
@@ -437,6 +441,8 @@ pub fn wasm_bgra_to_ycbcr_row(
     if width == 0 {
         return;
     }
+    // SAFETY: Caller guarantees bgra.len() >= width * 4, y/cb/cr.len() >= width.
+    // The loop processes 8 pixels per iteration with a scalar tail.
     unsafe {
         wasm_bgra_to_ycbcr_row_inner(bgra, y, cb, cr, width);
     }
