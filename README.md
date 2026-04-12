@@ -6,40 +6,40 @@ Pure Rust reimplementation of [libjpeg-turbo](https://github.com/libjpeg-turbo/l
 
 ### x86_64 (AVX2)
 
-Benchmarked against C libjpeg-turbo 3.1.0 on x86_64 (AVX2), quality 75:
+Intel Core i5-10400 @ 2.90GHz (turbo off, `performance` governor), C libjpeg-turbo 3.1.2, quality 75:
 
 #### Decoding
 
 | Image | Subsampling | Rust (us) | C (us) | Ratio |
 |-------|-------------|-----------|--------|-------|
-| 64x64 | 4:2:0 | 60 | 49 | 1.22x |
-| 320x240 | 4:2:0 | 797 | 774 | 1.03x |
-| 640x480 | 4:2:0 | 943 | 889 | 1.06x |
-| 640x480 | 4:2:2 | 3,409 | 3,393 | **1.00x** |
-| 640x480 | 4:4:4 | 4,969 | 5,165 | **0.96x** |
-| 1280x720 | 4:2:0 | 9,150 | 9,153 | **1.00x** |
-| 1920x1080 | 4:2:0 | 20,679 | 21,058 | **0.98x** |
-| 1920x1080 | 4:2:2 | 26,281 | 26,334 | **1.00x** |
-| 1920x1080 | 4:4:4 | 38,813 | 39,308 | **0.99x** |
-| 2560x1440 | 4:2:0 | 36,178 | 37,373 | **0.97x** |
-| 3840x2160 | 4:2:0 | 81,636 | 82,030 | **1.00x** |
+| 64x64 | 4:2:0 | 60 | 49 | 1.23x |
+| 320x240 | 4:2:0 | 769 | 996 | **0.77x** |
+| 640x480 | 4:2:0 | 929 | 880 | 1.05x |
+| 640x480 | 4:2:2 | 3,267 | 3,480 | **0.94x** |
+| 640x480 | 4:4:4 | 4,794 | 5,525 | **0.87x** |
+| 1280x720 | 4:2:0 | 8,707 | 9,997 | **0.87x** |
+| 1920x1080 | 4:2:0 | 19,736 | 22,031 | **0.90x** |
+| 1920x1080 | 4:2:2 | 25,382 | 26,227 | **0.97x** |
+| 1920x1080 | 4:4:4 | 37,585 | 40,026 | **0.94x** |
+| 2560x1440 | 4:2:0 | 35,137 | 37,918 | **0.93x** |
+| 3840x2160 | 4:2:0 | 78,868 | 89,325 | **0.88x** |
 
 #### Encoding
 
 | Image | Subsampling | Rust (us) | C (us) | Ratio |
 |-------|-------------|-----------|--------|-------|
-| 320x240 | 4:2:0 | 458 | 426 | 1.07x |
-| 320x240 | 4:2:2 | 593 | 545 | 1.09x |
-| 320x240 | 4:4:4 | 822 | 796 | 1.03x |
-| 640x480 | 4:2:2 | 2,009 | 1,832 | 1.10x |
-| 640x480 | 4:4:4 | 2,580 | 2,740 | **0.94x** |
-| 1920x1080 | 4:2:0 | 12,707 | 11,203 | 1.13x |
-| 1920x1080 | 4:2:2 | 15,985 | 14,210 | 1.12x |
-| 1920x1080 | 4:4:4 | 22,305 | 21,067 | 1.06x |
+| 320x240 | 4:2:0 | 436 | 401 | 1.09x |
+| 320x240 | 4:2:2 | 537 | 527 | 1.02x |
+| 320x240 | 4:4:4 | 800 | 787 | 1.02x |
+| 640x480 | 4:2:2 | 1,818 | 1,711 | 1.06x |
+| 640x480 | 4:4:4 | 2,622 | 2,524 | 1.04x |
+| 1920x1080 | 4:2:0 | 11,836 | 10,442 | 1.13x |
+| 1920x1080 | 4:2:2 | 14,573 | 13,123 | 1.11x |
+| 1920x1080 | 4:4:4 | 21,839 | 20,076 | 1.09x |
 
 ### aarch64 (NEON)
 
-Benchmarked against C libjpeg-turbo 3.1.0 on Apple Silicon (aarch64 NEON), quality 75:
+Apple M1 Pro, C libjpeg-turbo 3.1.0, quality 75:
 
 #### Decoding (1920x1080)
 
@@ -57,7 +57,7 @@ Benchmarked against C libjpeg-turbo 3.1.0 on Apple Silicon (aarch64 NEON), quali
 | 4:2:2 | 6,472 | 6,441 | 1.00x |
 | 4:4:4 | 9,633 | 9,714 | **0.99x** |
 
-Decoding matches or beats C on both platforms at larger resolutions. Encoding is near-parity on aarch64; x86_64 encoding has room for further SIMD optimization (Huffman coding). See [`docs/ENCODING_PERFORMANCE.md`](docs/ENCODING_PERFORMANCE.md) for full results.
+Decoding beats C on both platforms at most resolutions. Encoding is near-parity on aarch64; x86_64 encoding has room for further SIMD optimization (Huffman coding). See [`docs/ENCODING_PERFORMANCE.md`](docs/ENCODING_PERFORMANCE.md) for full results.
 
 ## Quick Start
 
