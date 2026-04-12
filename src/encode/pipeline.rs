@@ -352,6 +352,98 @@ pub fn compress(
                 y_mcu_height
             };
 
+            // 420 fast path: row-level hoisted bit buffer + inline FDCT+Huffman.
+            // One begin_block/end_block per MCU row (not per MCU), eliminating
+            // ~120 ensure_capacity checks per row for 1920-wide images.
+            // Only for interior MCU rows (eff_row_height == y_mcu_height).
+            #[cfg(target_arch = "x86_64")]
+            if is_420 && !cb_half.is_empty() && eff_row_height == y_mcu_height {
+                unsafe {
+                    // Reserve capacity for entire MCU row
+                    let (mut pb, mut fb, mut buf) = bit_writer.begin_block(3072 * mcus_x);
+
+                    for mcu_col in 0..mcus_x {
+                        let x0: usize = mcu_col * mcu_w;
+                        let cx0: usize = mcu_col * (mcu_w / 2);
+
+                        // FDCT + quantize 6 blocks (4Y + Cb + Cr)
+                        let mut q: [[i16; 64]; 6] = [[0i16; 64]; 6];
+                        let y_ptr: *const u8 = y_buf.as_ptr().add(x0);
+                        crate::simd::x86_64::avx2_extract_fdct_quantize(
+                            y_ptr,
+                            padded_w,
+                            &luma_divisors,
+                            &mut q[0],
+                        );
+                        crate::simd::x86_64::avx2_extract_fdct_quantize(
+                            y_ptr.add(8),
+                            padded_w,
+                            &luma_divisors,
+                            &mut q[1],
+                        );
+                        crate::simd::x86_64::avx2_extract_fdct_quantize(
+                            y_ptr.add(8 * padded_w),
+                            padded_w,
+                            &luma_divisors,
+                            &mut q[2],
+                        );
+                        crate::simd::x86_64::avx2_extract_fdct_quantize(
+                            y_ptr.add(8 * padded_w + 8),
+                            padded_w,
+                            &luma_divisors,
+                            &mut q[3],
+                        );
+                        crate::simd::x86_64::avx2_extract_fdct_quantize(
+                            cb_half.as_ptr().add(cx0),
+                            half_w,
+                            &chroma_divisors,
+                            &mut q[4],
+                        );
+                        crate::simd::x86_64::avx2_extract_fdct_quantize(
+                            cr_half.as_ptr().add(cx0),
+                            half_w,
+                            &chroma_divisors,
+                            &mut q[5],
+                        );
+
+                        // Huffman encode 6 blocks with row-hoisted state
+                        for block in q.iter().take(4) {
+                            HuffmanEncoder::encode_block_hoisted(
+                                &mut pb,
+                                &mut fb,
+                                &mut buf,
+                                block,
+                                &mut prev_dc_y,
+                                &dc_luma_table,
+                                &ac_luma_table,
+                            );
+                        }
+                        HuffmanEncoder::encode_block_hoisted(
+                            &mut pb,
+                            &mut fb,
+                            &mut buf,
+                            &q[4],
+                            &mut prev_dc_cb,
+                            &dc_chroma_table,
+                            &ac_chroma_table,
+                        );
+                        HuffmanEncoder::encode_block_hoisted(
+                            &mut pb,
+                            &mut fb,
+                            &mut buf,
+                            &q[5],
+                            &mut prev_dc_cr,
+                            &dc_chroma_table,
+                            &ac_chroma_table,
+                        );
+                    }
+
+                    bit_writer.end_block(pb, fb, buf);
+                }
+                continue; // skip generic MCU column loop below
+            }
+
+            // Generic path for non-420, edge MCU rows, or non-x86_64
             for mcu_col in 0..mcus_x {
                 let x0: usize = mcu_col * mcu_w;
                 let is_last_mcu_col: bool = mcu_col == mcus_x - 1;
@@ -388,58 +480,6 @@ pub fn compress(
                         eff_col_width,
                         eff_row_height,
                     );
-                } else if is_420 && !cb_half.is_empty() {
-                    // 420 with pre-downsampled half-res chroma: use compact buffers
-                    #[cfg(target_arch = "x86_64")]
-                    {
-                        let cx0: usize = mcu_col * (mcu_w / 2);
-                        encode_mcu_420_half_chroma(
-                            &y_buf,
-                            padded_w,
-                            &cb_half,
-                            &cr_half,
-                            half_w,
-                            x0,
-                            0,
-                            cx0,
-                            0,
-                            &luma_divisors,
-                            &chroma_divisors,
-                            &dc_luma_table,
-                            &ac_luma_table,
-                            &dc_chroma_table,
-                            &ac_chroma_table,
-                            &mut bit_writer,
-                            &mut prev_dc_y,
-                            &mut prev_dc_cb,
-                            &mut prev_dc_cr,
-                            fdct_quantize_fn,
-                        );
-                    }
-                    #[cfg(not(target_arch = "x86_64"))]
-                    {
-                        encode_color_mcu(
-                            &y_buf,
-                            &cb_buf,
-                            &cr_buf,
-                            padded_w,
-                            padded_h,
-                            x0,
-                            0,
-                            subsampling,
-                            &luma_divisors,
-                            &chroma_divisors,
-                            &dc_luma_table,
-                            &ac_luma_table,
-                            &dc_chroma_table,
-                            &ac_chroma_table,
-                            &mut bit_writer,
-                            &mut prev_dc_y,
-                            &mut prev_dc_cb,
-                            &mut prev_dc_cr,
-                            fdct_quantize_fn,
-                        );
-                    }
                 } else {
                     encode_color_mcu(
                         &y_buf,
@@ -7066,7 +7106,7 @@ fn encode_mcu_420_x86_64(
 /// Since chroma is already downsampled, we use `avx2_extract_fdct_quantize`
 /// instead of the heavier `avx2_downsample_h2v2_fdct_quantize`.
 #[cfg(target_arch = "x86_64")]
-#[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments, dead_code)]
 fn encode_mcu_420_half_chroma(
     y_plane: &[u8],
     y_stride: usize,
