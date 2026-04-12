@@ -43,21 +43,21 @@ Apple M1 Pro, C libjpeg-turbo 3.1.0, quality 75:
 
 #### Decoding (1920x1080)
 
-| Subsampling | Rust (us) | C (us) | Ratio |
+| Subsampling | Rust (µs) | C (µs) | Ratio |
 |-------------|-----------|--------|-------|
-| 4:2:0 | 2,559 | 2,592 | **0.99x** |
-| 4:2:2 | 2,916 | 3,020 | **0.97x** |
-| 4:4:4 | 3,750 | 3,833 | **0.98x** |
+| 4:2:0 | 12,159 | 11,333 | 1.07x |
+| 4:2:2 | 15,246 | 15,329 | **0.99x** |
+| 4:4:4 | 22,972 | 23,130 | **0.99x** |
 
 #### Encoding (1920x1080)
 
-| Subsampling | Rust (us) | C (us) | Ratio |
+| Subsampling | Rust (µs) | C (µs) | Ratio |
 |-------------|-----------|--------|-------|
-| 4:2:0 | 5,274 | 5,076 | 1.04x |
-| 4:2:2 | 6,472 | 6,441 | 1.00x |
-| 4:4:4 | 9,633 | 9,714 | **0.99x** |
+| 4:2:0 | 5,724 | 5,332 | 1.07x |
+| 4:2:2 | 7,148 | 6,766 | 1.06x |
+| 4:4:4 | 10,596 | 10,272 | 1.03x |
 
-Decoding beats C on both platforms at most resolutions. Encoding is near-parity on aarch64; x86_64 encoding has room for further SIMD optimization (Huffman coding). See [`docs/ENCODING_PERFORMANCE.md`](docs/ENCODING_PERFORMANCE.md) for full results.
+Decoding matches or beats C for 4:2:2 and 4:4:4 subsampling; 4:2:0 has a 7% gap. Encoding is within 3-7% of C on aarch64; x86_64 encoding has room for further SIMD optimization (Huffman coding). See [`docs/ENCODING_PERFORMANCE.md`](docs/ENCODING_PERFORMANCE.md) for full results.
 
 ## Quick Start
 
