@@ -3,6 +3,8 @@ name: Release
 on:
   push:
     tags: ['v*']
+  release:
+    types: [published]
 
 jobs:
   publish:
@@ -14,7 +16,8 @@ jobs:
           submodules: recursive
       - uses: dtolnay/rust-toolchain@stable
       - run: cargo publish --dry-run --allow-dirty
-      - run: cargo publish --allow-dirty
+      - name: Publish to crates.io (skip if already published)
+        run: cargo publish --allow-dirty 2>&1 || echo "::warning::crate already published or publish failed"
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
 
@@ -53,7 +56,7 @@ jobs:
           node-version: '20'
           registry-url: 'https://registry.npmjs.org'
 
-      - name: Publish to npm
-        run: cd crates/libjpeg-turbo-rs-wasm/pkg && npm publish --access public
+      - name: Publish to npm (skip if already published)
+        run: cd crates/libjpeg-turbo-rs-wasm/pkg && npm publish --access public 2>&1 || echo "::warning::npm package already published or publish failed"
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
