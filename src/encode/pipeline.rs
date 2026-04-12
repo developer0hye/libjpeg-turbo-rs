@@ -14,6 +14,69 @@ use crate::encode::progressive::ProgressiveScan;
 use crate::encode::tables;
 use crate::simd::QuantDivisors;
 
+/// Color conversion function: (pixels, y, cb, cr, width).
+type ColorConvertRowFn = fn(&[u8], &mut [u8], &mut [u8], &mut [u8], usize);
+
+/// Select the best available RGBA→YCbCr row conversion function.
+fn select_rgba_to_ycbcr_fn() -> ColorConvertRowFn {
+    #[cfg(all(target_arch = "aarch64", feature = "simd"))]
+    {
+        return crate::simd::aarch64::color_encode::neon_rgba_to_ycbcr_row;
+    }
+    #[cfg(all(target_arch = "wasm32", feature = "simd"))]
+    {
+        return crate::simd::wasm32::color_encode::wasm_rgba_to_ycbcr_row;
+    }
+    #[cfg(all(target_arch = "x86_64", feature = "simd"))]
+    {
+        if is_x86_feature_detected!("avx2") {
+            return crate::simd::x86_64::avx2_color_encode::avx2_rgba_to_ycbcr_row;
+        }
+    }
+    #[allow(unreachable_code)]
+    color::rgba_to_ycbcr_row
+}
+
+/// Select the best available BGR→YCbCr row conversion function.
+fn select_bgr_to_ycbcr_fn() -> ColorConvertRowFn {
+    #[cfg(all(target_arch = "aarch64", feature = "simd"))]
+    {
+        return crate::simd::aarch64::color_encode::neon_bgr_to_ycbcr_row;
+    }
+    #[cfg(all(target_arch = "wasm32", feature = "simd"))]
+    {
+        return crate::simd::wasm32::color_encode::wasm_bgr_to_ycbcr_row;
+    }
+    #[cfg(all(target_arch = "x86_64", feature = "simd"))]
+    {
+        if is_x86_feature_detected!("avx2") {
+            return crate::simd::x86_64::avx2_color_encode::avx2_bgr_to_ycbcr_row;
+        }
+    }
+    #[allow(unreachable_code)]
+    color::bgr_to_ycbcr_row_scalar
+}
+
+/// Select the best available BGRA→YCbCr row conversion function.
+fn select_bgra_to_ycbcr_fn() -> ColorConvertRowFn {
+    #[cfg(all(target_arch = "aarch64", feature = "simd"))]
+    {
+        return crate::simd::aarch64::color_encode::neon_bgra_to_ycbcr_row;
+    }
+    #[cfg(all(target_arch = "wasm32", feature = "simd"))]
+    {
+        return crate::simd::wasm32::color_encode::wasm_bgra_to_ycbcr_row;
+    }
+    #[cfg(all(target_arch = "x86_64", feature = "simd"))]
+    {
+        if is_x86_feature_detected!("avx2") {
+            return crate::simd::x86_64::avx2_color_encode::avx2_bgra_to_ycbcr_row;
+        }
+    }
+    #[allow(unreachable_code)]
+    color::bgra_to_ycbcr_row_scalar
+}
+
 /// Compress raw pixel data into a JPEG byte stream.
 ///
 /// # Arguments
@@ -124,11 +187,22 @@ pub fn compress(
     let mut prev_dc_cb: i16 = 0;
     let mut prev_dc_cr: i16 = 0;
 
-    // Single-pass fused approach for RGB: convert MCU rows on-the-fly instead
+    // Single-pass fused approach: convert MCU rows on-the-fly instead
     // of pre-allocating full-size planes. Keeps data in L1/L2 cache between
     // color conversion and encoding.
-    if pixel_format == PixelFormat::Rgb && !is_grayscale {
-        let rgb_to_ycbcr_fn = enc_simd.rgb_to_ycbcr_row;
+    // Select format-specific color conversion function + BPP for the fast path.
+    let fused_color_fn: Option<(ColorConvertRowFn, usize)> = if is_grayscale {
+        None
+    } else {
+        match pixel_format {
+            PixelFormat::Rgb => Some((enc_simd.rgb_to_ycbcr_row, 3)),
+            PixelFormat::Rgba => Some((select_rgba_to_ycbcr_fn(), 4)),
+            PixelFormat::Bgr => Some((select_bgr_to_ycbcr_fn(), 3)),
+            PixelFormat::Bgra => Some((select_bgra_to_ycbcr_fn(), 4)),
+            _ => None,
+        }
+    };
+    if let Some((color_convert_fn, bpp)) = fused_color_fn {
         // Pad buffer width to MCU-aligned, matching C libjpeg-turbo's behavior.
         // C allocates coefficient buffers padded to MCU boundaries and pads input
         // with expand_right_edge up to width_in_blocks * DCTSIZE per component.
@@ -140,17 +214,34 @@ pub fn compress(
         let mut cb_buf: Vec<u8> = vec![0u8; row_buf_size];
         let mut cr_buf: Vec<u8> = vec![0u8; row_buf_size];
 
+        // For 420: pre-allocate half-resolution chroma buffers.
+        // After color conversion, we downsample full-res Cb/Cr into these compact
+        // buffers so that FDCT reads from stride=half_w instead of stride=padded_w.
+        let is_420: bool = subsampling == Subsampling::S420;
+        let half_w: usize = padded_w / 2;
+        let half_h: usize = padded_h / 2;
+        let mut cb_half: Vec<u8> = if is_420 {
+            vec![0u8; half_w * half_h]
+        } else {
+            Vec::new()
+        };
+        let mut cr_half: Vec<u8> = if is_420 {
+            vec![0u8; half_w * half_h]
+        } else {
+            Vec::new()
+        };
+
         for mcu_row in 0..mcus_y {
             let y0: usize = mcu_row * mcu_h;
             let rows_available: usize = (height - y0).min(mcu_h);
 
-            // Convert this MCU row's RGB data to YCbCr
+            // Convert this MCU row's pixel data to YCbCr
             for row in 0..rows_available {
                 let src_row: usize = y0 + row;
-                let src_offset: usize = src_row * width * 3;
+                let src_offset: usize = src_row * width * bpp;
                 let dst_offset: usize = row * padded_w;
-                rgb_to_ycbcr_fn(
-                    &pixels[src_offset..src_offset + width * 3],
+                color_convert_fn(
+                    &pixels[src_offset..src_offset + width * bpp],
                     &mut y_buf[dst_offset..dst_offset + width],
                     &mut cb_buf[dst_offset..dst_offset + width],
                     &mut cr_buf[dst_offset..dst_offset + width],
@@ -206,6 +297,29 @@ pub fn compress(
                 }
             }
 
+            // For 420: downsample full-res Cb/Cr to compact half-res buffers.
+            // This allows FDCT to read from stride=half_w instead of fused
+            // downsample+FDCT from stride=padded_w, improving cache locality.
+            #[cfg(target_arch = "x86_64")]
+            if is_420 && is_x86_feature_detected!("avx2") {
+                unsafe {
+                    crate::simd::x86_64::avx2_downsample_h2v2_plane(
+                        &cb_buf,
+                        padded_w,
+                        padded_h,
+                        &mut cb_half,
+                        half_w,
+                    );
+                    crate::simd::x86_64::avx2_downsample_h2v2_plane(
+                        &cr_buf,
+                        padded_w,
+                        padded_h,
+                        &mut cr_half,
+                        half_w,
+                    );
+                }
+            }
+
             // Encode all MCUs in this row.
             // For the last MCU column, C libjpeg-turbo creates "dummy" blocks
             // for components that extend beyond width_in_blocks: all AC=0, DC
@@ -238,6 +352,98 @@ pub fn compress(
                 y_mcu_height
             };
 
+            // 420 fast path: row-level hoisted bit buffer + inline FDCT+Huffman.
+            // One begin_block/end_block per MCU row (not per MCU), eliminating
+            // ~120 ensure_capacity checks per row for 1920-wide images.
+            // Only for interior MCU rows (eff_row_height == y_mcu_height).
+            #[cfg(target_arch = "x86_64")]
+            if is_420 && !cb_half.is_empty() && eff_row_height == y_mcu_height {
+                unsafe {
+                    // Reserve capacity for entire MCU row
+                    let (mut pb, mut fb, mut buf) = bit_writer.begin_block(3072 * mcus_x);
+
+                    for mcu_col in 0..mcus_x {
+                        let x0: usize = mcu_col * mcu_w;
+                        let cx0: usize = mcu_col * (mcu_w / 2);
+
+                        // FDCT + quantize 6 blocks (4Y + Cb + Cr)
+                        let mut q: [[i16; 64]; 6] = [[0i16; 64]; 6];
+                        let y_ptr: *const u8 = y_buf.as_ptr().add(x0);
+                        crate::simd::x86_64::avx2_extract_fdct_quantize(
+                            y_ptr,
+                            padded_w,
+                            &luma_divisors,
+                            &mut q[0],
+                        );
+                        crate::simd::x86_64::avx2_extract_fdct_quantize(
+                            y_ptr.add(8),
+                            padded_w,
+                            &luma_divisors,
+                            &mut q[1],
+                        );
+                        crate::simd::x86_64::avx2_extract_fdct_quantize(
+                            y_ptr.add(8 * padded_w),
+                            padded_w,
+                            &luma_divisors,
+                            &mut q[2],
+                        );
+                        crate::simd::x86_64::avx2_extract_fdct_quantize(
+                            y_ptr.add(8 * padded_w + 8),
+                            padded_w,
+                            &luma_divisors,
+                            &mut q[3],
+                        );
+                        crate::simd::x86_64::avx2_extract_fdct_quantize(
+                            cb_half.as_ptr().add(cx0),
+                            half_w,
+                            &chroma_divisors,
+                            &mut q[4],
+                        );
+                        crate::simd::x86_64::avx2_extract_fdct_quantize(
+                            cr_half.as_ptr().add(cx0),
+                            half_w,
+                            &chroma_divisors,
+                            &mut q[5],
+                        );
+
+                        // Huffman encode 6 blocks with row-hoisted state
+                        for block in q.iter().take(4) {
+                            HuffmanEncoder::encode_block_hoisted(
+                                &mut pb,
+                                &mut fb,
+                                &mut buf,
+                                block,
+                                &mut prev_dc_y,
+                                &dc_luma_table,
+                                &ac_luma_table,
+                            );
+                        }
+                        HuffmanEncoder::encode_block_hoisted(
+                            &mut pb,
+                            &mut fb,
+                            &mut buf,
+                            &q[4],
+                            &mut prev_dc_cb,
+                            &dc_chroma_table,
+                            &ac_chroma_table,
+                        );
+                        HuffmanEncoder::encode_block_hoisted(
+                            &mut pb,
+                            &mut fb,
+                            &mut buf,
+                            &q[5],
+                            &mut prev_dc_cr,
+                            &dc_chroma_table,
+                            &ac_chroma_table,
+                        );
+                    }
+
+                    bit_writer.end_block(pb, fb, buf);
+                }
+                continue; // skip generic MCU column loop below
+            }
+
+            // Generic path for non-420, edge MCU rows, or non-x86_64
             for mcu_col in 0..mcus_x {
                 let x0: usize = mcu_col * mcu_w;
                 let is_last_mcu_col: bool = mcu_col == mcus_x - 1;
@@ -5005,6 +5211,19 @@ fn convert_to_ycbcr(
                     );
                     continue;
                 }
+                #[cfg(all(target_arch = "x86_64", feature = "simd"))]
+                {
+                    if is_x86_feature_detected!("avx2") {
+                        crate::simd::x86_64::avx2_color_encode::avx2_rgba_to_ycbcr_row(
+                            &pixels[src_offset..src_offset + width * bpp],
+                            &mut y_plane[dst_offset..dst_offset + width],
+                            &mut cb_plane[dst_offset..dst_offset + width],
+                            &mut cr_plane[dst_offset..dst_offset + width],
+                            width,
+                        );
+                        continue;
+                    }
+                }
                 #[allow(unreachable_code)]
                 color::rgba_to_ycbcr_row(
                     &pixels[src_offset..src_offset + width * bpp],
@@ -5041,6 +5260,19 @@ fn convert_to_ycbcr(
                     );
                     continue;
                 }
+                #[cfg(all(target_arch = "x86_64", feature = "simd"))]
+                {
+                    if is_x86_feature_detected!("avx2") {
+                        crate::simd::x86_64::avx2_color_encode::avx2_bgr_to_ycbcr_row(
+                            &pixels[src_offset..src_offset + width * bpp],
+                            &mut y_plane[dst_offset..dst_offset + width],
+                            &mut cb_plane[dst_offset..dst_offset + width],
+                            &mut cr_plane[dst_offset..dst_offset + width],
+                            width,
+                        );
+                        continue;
+                    }
+                }
                 #[allow(unreachable_code)]
                 color::bgr_to_ycbcr_row_scalar(
                     &pixels[src_offset..src_offset + width * bpp],
@@ -5076,6 +5308,19 @@ fn convert_to_ycbcr(
                         width,
                     );
                     continue;
+                }
+                #[cfg(all(target_arch = "x86_64", feature = "simd"))]
+                {
+                    if is_x86_feature_detected!("avx2") {
+                        crate::simd::x86_64::avx2_color_encode::avx2_bgra_to_ycbcr_row(
+                            &pixels[src_offset..src_offset + width * bpp],
+                            &mut y_plane[dst_offset..dst_offset + width],
+                            &mut cb_plane[dst_offset..dst_offset + width],
+                            &mut cr_plane[dst_offset..dst_offset + width],
+                            width,
+                        );
+                        continue;
+                    }
                 }
                 #[allow(unreachable_code)]
                 color::bgra_to_ycbcr_row_scalar(
@@ -6850,6 +7095,165 @@ fn encode_mcu_420_x86_64(
             ac_chroma_table,
         );
 
+        writer.end_block(pb, fb, buf);
+    }
+}
+
+/// Encode one 420 MCU using pre-downsampled half-resolution chroma buffers.
+///
+/// Y blocks are read from full-resolution `y_plane` (stride = `y_stride`).
+/// Cb/Cr blocks are read from half-resolution buffers (stride = `chroma_stride`).
+/// Since chroma is already downsampled, we use `avx2_extract_fdct_quantize`
+/// instead of the heavier `avx2_downsample_h2v2_fdct_quantize`.
+#[cfg(target_arch = "x86_64")]
+#[allow(clippy::too_many_arguments, dead_code)]
+fn encode_mcu_420_half_chroma(
+    y_plane: &[u8],
+    y_stride: usize,
+    cb_half: &[u8],
+    cr_half: &[u8],
+    chroma_stride: usize,
+    y_x0: usize,
+    y_y0: usize,
+    chroma_x0: usize,
+    chroma_y0: usize,
+    luma_quant: &QuantDivisors,
+    chroma_quant: &QuantDivisors,
+    dc_luma_table: &HuffTable,
+    ac_luma_table: &HuffTable,
+    dc_chroma_table: &HuffTable,
+    ac_chroma_table: &HuffTable,
+    writer: &mut BitWriter,
+    prev_dc_y: &mut i16,
+    prev_dc_cb: &mut i16,
+    prev_dc_cr: &mut i16,
+    fdct_quantize_fn: fn(&mut [i16; 64], &QuantDivisors, &mut [i16; 64]),
+) {
+    let mut q: [[i16; 64]; 6] = [[0i16; 64]; 6];
+    let has_avx2: bool = is_x86_feature_detected!("avx2");
+
+    // Check if all blocks are interior (common case for non-edge MCUs)
+    let y_interior: bool = y_x0 + 16 <= y_stride && y_y0 + 16 <= 16;
+    let c_interior: bool = chroma_x0 + 8 <= chroma_stride && chroma_y0 + 8 <= 8;
+
+    if y_interior && c_interior && has_avx2 {
+        unsafe {
+            // 4 Y blocks from full-res plane
+            let y_ptr: *const u8 = y_plane.as_ptr().add(y_y0 * y_stride + y_x0);
+            crate::simd::x86_64::avx2_extract_fdct_quantize(y_ptr, y_stride, luma_quant, &mut q[0]);
+            crate::simd::x86_64::avx2_extract_fdct_quantize(
+                y_ptr.add(8),
+                y_stride,
+                luma_quant,
+                &mut q[1],
+            );
+            crate::simd::x86_64::avx2_extract_fdct_quantize(
+                y_ptr.add(8 * y_stride),
+                y_stride,
+                luma_quant,
+                &mut q[2],
+            );
+            crate::simd::x86_64::avx2_extract_fdct_quantize(
+                y_ptr.add(8 * y_stride + 8),
+                y_stride,
+                luma_quant,
+                &mut q[3],
+            );
+            // Cb/Cr from half-res plane (already downsampled, just extract 8×8)
+            crate::simd::x86_64::avx2_extract_fdct_quantize(
+                cb_half.as_ptr().add(chroma_y0 * chroma_stride + chroma_x0),
+                chroma_stride,
+                chroma_quant,
+                &mut q[4],
+            );
+            crate::simd::x86_64::avx2_extract_fdct_quantize(
+                cr_half.as_ptr().add(chroma_y0 * chroma_stride + chroma_x0),
+                chroma_stride,
+                chroma_quant,
+                &mut q[5],
+            );
+        }
+    } else {
+        // Fallback: scalar extract for edge MCUs
+        let y_offsets: [(usize, usize); 4] = [
+            (y_x0, y_y0),
+            (y_x0 + 8, y_y0),
+            (y_x0, y_y0 + 8),
+            (y_x0 + 8, y_y0 + 8),
+        ];
+        for (idx, &(bx, by)) in y_offsets.iter().enumerate() {
+            if has_avx2 && bx + 8 <= y_stride && by + 8 <= 16 {
+                unsafe {
+                    crate::simd::x86_64::avx2_extract_fdct_quantize(
+                        y_plane.as_ptr().add(by * y_stride + bx),
+                        y_stride,
+                        luma_quant,
+                        &mut q[idx],
+                    );
+                }
+            } else {
+                let mut block = [0i16; 64];
+                extract_block(y_plane, y_stride, 16, bx, by, &mut block);
+                fdct_quantize_fn(&mut block, luma_quant, &mut q[idx]);
+            }
+        }
+        // Chroma from half-res
+        if has_avx2 && chroma_x0 + 8 <= chroma_stride && chroma_y0 + 8 <= 8 {
+            unsafe {
+                crate::simd::x86_64::avx2_extract_fdct_quantize(
+                    cb_half.as_ptr().add(chroma_y0 * chroma_stride + chroma_x0),
+                    chroma_stride,
+                    chroma_quant,
+                    &mut q[4],
+                );
+                crate::simd::x86_64::avx2_extract_fdct_quantize(
+                    cr_half.as_ptr().add(chroma_y0 * chroma_stride + chroma_x0),
+                    chroma_stride,
+                    chroma_quant,
+                    &mut q[5],
+                );
+            }
+        } else {
+            let mut block = [0i16; 64];
+            extract_block(cb_half, chroma_stride, 8, chroma_x0, chroma_y0, &mut block);
+            fdct_quantize_fn(&mut block, chroma_quant, &mut q[4]);
+            extract_block(cr_half, chroma_stride, 8, chroma_x0, chroma_y0, &mut block);
+            fdct_quantize_fn(&mut block, chroma_quant, &mut q[5]);
+        }
+    }
+
+    // Huffman encode all 6 blocks with MCU-level hoisted state
+    unsafe {
+        let (mut pb, mut fb, mut buf) = writer.begin_block(3072);
+        for block in q.iter().take(4) {
+            HuffmanEncoder::encode_block_hoisted(
+                &mut pb,
+                &mut fb,
+                &mut buf,
+                block,
+                prev_dc_y,
+                dc_luma_table,
+                ac_luma_table,
+            );
+        }
+        HuffmanEncoder::encode_block_hoisted(
+            &mut pb,
+            &mut fb,
+            &mut buf,
+            &q[4],
+            prev_dc_cb,
+            dc_chroma_table,
+            ac_chroma_table,
+        );
+        HuffmanEncoder::encode_block_hoisted(
+            &mut pb,
+            &mut fb,
+            &mut buf,
+            &q[5],
+            prev_dc_cr,
+            dc_chroma_table,
+            ac_chroma_table,
+        );
         writer.end_block(pb, fb, buf);
     }
 }

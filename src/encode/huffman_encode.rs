@@ -657,10 +657,9 @@ unsafe fn encode_ac_sparse_lsb(
             r -= 16;
         }
 
-        // Load coefficient, compute magnitude on demand
+        // Load coefficient, use NBITS table + branchless complement
         let ac: i16 = *coeffs.add(pos as usize);
-        let abs_val: u16 = ac.unsigned_abs();
-        let nbits: u32 = 16 - abs_val.leading_zeros();
+        let nbits: u32 = *JPEG_NBITS.as_ptr().add(ac as u16 as usize) as u32;
         let sign: i16 = ac >> 15;
         let mag: u32 = (ac.wrapping_add(sign) as u16 as u32) & ((1u32 << nbits) - 1);
 
@@ -1048,16 +1047,39 @@ unsafe fn encode_ac_dense_neon_local(
     }
 }
 
+/// JPEG NBITS lookup table: maps coefficient value to bit category.
+///
+/// 65536 entries (i16 range). Indexed by `(value as u16) as usize`.
+/// Matches C libjpeg-turbo's `jpeg_nbits_table` used in `jchuff-sse2.asm`.
+/// For value v: `JPEG_NBITS[v as u16] = ceil(log2(|v| + 1))`.
+static JPEG_NBITS: [u8; 65536] = {
+    let mut table = [0u8; 65536];
+    let mut i: i32 = 0;
+    while i < 65536 {
+        let v: i16 = i as i16;
+        let abs_v: u16 = if v < 0 {
+            (v.wrapping_neg()) as u16
+        } else {
+            v as u16
+        };
+        table[i as usize] = if abs_v == 0 {
+            0
+        } else {
+            (16 - abs_v.leading_zeros()) as u8
+        };
+        i += 1;
+    }
+    table
+};
+
 /// Compute the category and magnitude bits for a DC difference value.
 ///
 /// Returns (magnitude_bits, category) where category is 0..11.
-/// Fully branchless: uses arithmetic shift for sign and leading_zeros for category.
+/// Fully branchless: uses arithmetic shift for sign and NBITS table for category.
 #[inline(always)]
 fn encode_dc_value(diff: i16) -> (u16, u8) {
-    let abs_diff: u16 = diff.unsigned_abs();
-    let category: u8 = (16 - abs_diff.leading_zeros()) as u8;
-    // Branchless magnitude: positive → value, negative → value-1 (one's complement)
-    let sign: i16 = diff >> 15; // 0 for non-negative, -1 for negative
+    let category: u8 = JPEG_NBITS[diff as u16 as usize];
+    let sign: i16 = diff >> 15;
     let magnitude_bits: u16 = (diff.wrapping_add(sign)) as u16;
     (magnitude_bits, category)
 }

@@ -240,6 +240,76 @@ pub(crate) unsafe fn avx2_downsample_h2v1_fdct_quantize(
     avx2_quantize_zigzag(&dct_buf, quant, output);
 }
 
+/// AVX2 H2V2 chroma downsample: full-res plane → half-res plane.
+///
+/// Averages 2×2 blocks with rounding bias: `(a + b + c + d + 2) >> 2`.
+/// Matches C libjpeg-turbo's `h2v2_downsample` in jcsample.c.
+///
+/// Processes 16 output pixels (32 input) per AVX2 iteration.
+///
+/// # Safety
+/// Requires AVX2. `src` must have at least `src_stride * src_rows` bytes.
+/// `dst` must have at least `dst_stride * (src_rows / 2)` bytes.
+/// `src_rows` must be even.
+#[target_feature(enable = "avx2")]
+pub(crate) unsafe fn avx2_downsample_h2v2_plane(
+    src: &[u8],
+    src_stride: usize,
+    src_rows: usize,
+    dst: &mut [u8],
+    dst_stride: usize,
+) {
+    use core::arch::x86_64::*;
+
+    let ones: __m256i = _mm256_set1_epi8(1);
+    // Alternating rounding bias (2,1,2,1...) matching the fused
+    // avx2_downsample_h2v2_fdct_quantize dither pattern.
+    let bias: __m256i = _mm256_set_epi16(2, 1, 2, 1, 2, 1, 2, 1, 2, 1, 2, 1, 2, 1, 2, 1);
+
+    let src_ptr: *const u8 = src.as_ptr();
+    let dst_ptr: *mut u8 = dst.as_mut_ptr();
+
+    for dy in 0..src_rows / 2 {
+        let sy: usize = dy * 2;
+        let row0: *const u8 = src_ptr.add(sy * src_stride);
+        let row1: *const u8 = src_ptr.add((sy + 1) * src_stride);
+        let out: *mut u8 = dst_ptr.add(dy * dst_stride);
+
+        let mut sx: usize = 0;
+        let mut dx: usize = 0;
+
+        // AVX2 loop: 32 input pixels → 16 output pixels per iteration
+        while sx + 32 <= src_stride {
+            let r0: __m256i = _mm256_loadu_si256(row0.add(sx) as *const __m256i);
+            let r1: __m256i = _mm256_loadu_si256(row1.add(sx) as *const __m256i);
+            // Horizontal pair sums (u8×1 + u8×1 → u16)
+            let h0: __m256i = _mm256_maddubs_epi16(r0, ones);
+            let h1: __m256i = _mm256_maddubs_epi16(r1, ones);
+            // 2×2 block sum + bias + shift
+            let sum: __m256i = _mm256_add_epi16(_mm256_add_epi16(h0, h1), bias);
+            let avg: __m256i = _mm256_srli_epi16::<2>(sum);
+            // Pack u16→u8 and fix lane ordering
+            let packed: __m256i = _mm256_packus_epi16(avg, _mm256_setzero_si256());
+            let ordered: __m256i = _mm256_permute4x64_epi64::<0b_11_01_10_00>(packed);
+            _mm_storeu_si128(out.add(dx) as *mut __m128i, _mm256_castsi256_si128(ordered));
+            sx += 32;
+            dx += 16;
+        }
+
+        // Scalar tail with alternating dither bias (1 for even, 2 for odd dx)
+        while sx + 1 < src_stride {
+            let a: u16 = *row0.add(sx) as u16;
+            let b: u16 = *row0.add(sx + 1) as u16;
+            let c: u16 = *row1.add(sx) as u16;
+            let d: u16 = *row1.add(sx + 1) as u16;
+            let dither: u16 = if dx & 1 == 0 { 1 } else { 2 };
+            *out.add(dx) = ((a + b + c + d + dither) / 4) as u8;
+            sx += 2;
+            dx += 1;
+        }
+    }
+}
+
 /// AVX2 quantization: adaptive-precision reciprocal multiply matching C libjpeg-turbo.
 ///
 /// Uses three pre-computed tables per element (from `compute_reciprocal`):
