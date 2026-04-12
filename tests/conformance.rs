@@ -375,7 +375,12 @@ fn parse_ppm_p6(data: &[u8]) -> (usize, usize, Vec<u8>) {
 /// Decode a JPEG with C djpeg to PPM and return raw RGB pixels.
 fn decode_with_djpeg(djpeg: &std::path::Path, jpeg_data: &[u8]) -> Vec<u8> {
     let tmp_dir = std::env::temp_dir();
-    let input_path = tmp_dir.join("conformance_djpeg_input.jpg");
+    let unique_id = format!(
+        "conformance_djpeg_{}_{:?}.jpg",
+        std::process::id(),
+        std::thread::current().id()
+    );
+    let input_path = tmp_dir.join(unique_id);
     std::fs::write(&input_path, jpeg_data).expect("failed to write temp JPEG");
 
     let output = Command::new(djpeg)

@@ -356,6 +356,8 @@
 - [x] AVX2 color conversion for RGBA/BGR/BGRA formats (`avx2_ycbcr_to_rgba_row`, `avx2_ycbcr_to_bgr_row`, `avx2_ycbcr_to_bgra_row`)
 - [x] SSE2 IDCT DC-only fast path + strided output
 - [x] x86_64 encoder SIMD (AVX2 FDCT, RGB→YCbCr, quantization + zigzag)
+- [x] AVX2 encode color conversion for RGBA/BGR/BGRA formats
+- [x] Fused MCU-row encode pipeline for all pixel formats (RGB/RGBA/BGR/BGRA)
 
 ### General
 - [x] Scalar fallback for all operations
