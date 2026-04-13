@@ -1,0 +1,16 @@
+[package]
+name = "libjpeg-turbo-rs-image"
+version = "0.1.0"
+edition = "2021"
+description = "image crate backend powered by libjpeg-turbo-rs — fast pure-Rust JPEG codec"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/developer0hye/libjpeg-turbo-rs"
+keywords = ["jpeg", "image", "codec", "decoder", "encoder"]
+categories = ["multimedia::images", "multimedia::encoding"]
+
+[dependencies]
+libjpeg-turbo-rs = { path = "../..", default-features = false, features = ["simd"] }
+image = "0.25"
+
+[dev-dependencies]
+image = { version = "0.25", features = [] }
