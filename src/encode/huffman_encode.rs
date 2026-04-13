@@ -567,12 +567,16 @@ impl HuffmanEncoder {
     }
 }
 
-/// x86_64 AC coefficient encoding with SSE2 bitmap + sparse/dense paths.
+/// x86_64 AC coefficient encoding with SSE2 bitmap + sign pre-computation.
 ///
-/// Uses SSE2 `pcmpeqw` + `packsswb` + `pmovmskb` for vectorized non-zero
-/// detection (8 SSE2 ops vs 63 scalar comparisons), then dispatches to
-/// sparse path (<=8 non-zeros, on-demand magnitude) or dense path
-/// (pre-computed nbits/diff arrays).
+/// Matches C libjpeg-turbo's `jchuff-sse2.asm` design: interleaves sign
+/// correction (`pcmpgtw`/`paddw`) with zero detection (`pcmpeqw`/`packsswb`/
+/// `pmovmskb`) during bitmap construction. The sign-corrected values are stored
+/// in a stack-local `t[64]` array, eliminating per-coefficient scalar sign
+/// correction (shift + add) in the emit loop.
+///
+/// Cost: 3 extra SSE2 ops per chunk (24 total) during bitmap construction.
+/// Savings: 2 scalar ops per non-zero AC coefficient in the emit loop.
 ///
 /// # Safety
 /// `pb`, `fb`, `buf` must be valid hoisted state from `BitWriter::begin_block`.
@@ -588,13 +592,25 @@ unsafe fn encode_ac_x86_64(
 
     let mut bitmap: u64 = 0;
     let zeros: __m128i = _mm_setzero_si128();
+    let mut t = [0i16; 64];
 
-    // Build non-zero bitmap using SSE2: 8 chunks of 8 i16 words.
+    // Build non-zero bitmap + pre-compute sign-corrected coefficients using SSE2.
+    // Matches C libjpeg-turbo jchuff-sse2.asm: interleave pcmpgtw/paddw (sign
+    // correction) with pcmpeqw/packsswb/pmovmskb (zero detection) so the sign
+    // correction fills pipeline bubbles in the bitmap loop (nearly free).
     // LSB-first layout: bit 0 = position 0 (DC), bit 63 = position 63.
-    // Enables efficient traversal with trailing_zeros + clear-lowest-bit.
     for chunk in 0..8u32 {
         let offset: usize = (chunk * 8) as usize;
         let row: __m128i = _mm_loadu_si128(coeffs_zigzag.as_ptr().add(offset) as *const __m128i);
+
+        // Sign correction: ones' complement for negatives, identity for non-negatives.
+        // corrected[i] = row[i] + (row[i] < 0 ? -1 : 0)
+        let sign_mask: __m128i = _mm_cmpgt_epi16(zeros, row);
+        let corrected: __m128i = _mm_add_epi16(row, sign_mask);
+        _mm_storeu_si128(t.as_mut_ptr().add(offset) as *mut __m128i, corrected);
+
+        // Zero detection for bitmap (use original row — zero detection is
+        // equivalent on corrected, but matching C's ordering is cleaner)
         let eq: __m128i = _mm_cmpeq_epi16(row, zeros);
         let packed: __m128i = _mm_packs_epi16(eq, zeros);
         let mask: u8 = _mm_movemask_epi8(packed) as u8;
@@ -615,23 +631,18 @@ unsafe fn encode_ac_x86_64(
         return;
     }
 
-    // Always use sparse (on-demand) path: compute nbits/diff per non-zero
-    // coefficient using scalar leading_zeros() (single lzcnt instruction).
-    // The dense pre-compute path (float trick auto-vectorization) costs ~16%
-    // of encode time for blocks with >24 non-zeros, but the per-coefficient
-    // savings don't recoup the upfront cost for typical JPEG sparsity.
-    encode_ac_sparse_lsb(pb, fb, buf, coeffs_zigzag, bitmap, ac_table);
+    encode_ac_corrected_lsb(pb, fb, buf, &t, bitmap, ac_table);
 }
 
 /// AC emit loop with pre-loaded table pointers and minimal live variables.
 ///
-/// Compared to the previous version, this reduces register pressure by:
-/// - Pre-loading ehufco/ehufsi raw pointers (avoids ac_table struct reload)
-/// - Using u32 for huff_size to avoid byte-width arithmetic
+/// Superseded by `encode_ac_corrected_lsb` for the x86_64 path, which uses
+/// pre-computed sign-corrected coefficients. Kept for reference/fallback.
 ///
 /// # Safety
 /// `pb`, `fb`, `buf` must be valid hoisted state.
 #[cfg(target_arch = "x86_64")]
+#[allow(dead_code)]
 unsafe fn encode_ac_sparse_lsb(
     pb: &mut u64,
     fb: &mut i32,
@@ -662,6 +673,73 @@ unsafe fn encode_ac_sparse_lsb(
         let nbits: u32 = *JPEG_NBITS.as_ptr().add(ac as u16 as usize) as u32;
         let sign: i16 = ac >> 15;
         let mag: u32 = (ac.wrapping_add(sign) as u16 as u32) & ((1u32 << nbits) - 1);
+
+        // Emit combined Huffman code + magnitude
+        let symbol: u32 = (r << 4) | nbits;
+        let huff_code: u32 = *ehufco.add(symbol as usize) as u32;
+        let huff_size: u32 = *ehufsi.add(symbol as usize) as u32;
+        local_put_bits(
+            pb,
+            fb,
+            buf,
+            (huff_code << nbits) | mag,
+            (huff_size + nbits) as u8,
+        );
+
+        bitmap &= bitmap - 1;
+    }
+
+    if prev_pos < 63 {
+        local_put_bits(pb, fb, buf, *ehufco.add(0x00) as u32, *ehufsi.add(0x00));
+    }
+}
+
+/// AC emit loop using pre-computed sign-corrected coefficients.
+///
+/// Reads from the `t[64]` array (ones' complement for negatives) populated
+/// by `encode_ac_x86_64` during the SSE2 bitmap construction pass.
+/// Uses `JPEG_NBITS_CORRECTED` table which maps corrected values directly
+/// to bit categories, matching C libjpeg-turbo's negative-indexed
+/// `jpeg_nbits_table` semantics.
+///
+/// Compared to `encode_ac_sparse_lsb`, this eliminates 2 scalar ops per
+/// non-zero coefficient (arithmetic shift + wrapping_add for sign correction).
+///
+/// # Safety
+/// `pb`, `fb`, `buf` must be valid hoisted state.
+#[cfg(target_arch = "x86_64")]
+#[inline(always)]
+unsafe fn encode_ac_corrected_lsb(
+    pb: &mut u64,
+    fb: &mut i32,
+    buf: &mut *mut u8,
+    t: &[i16; 64],
+    mut bitmap: u64,
+    ac_table: &HuffTable,
+) {
+    let ehufco: *const u16 = ac_table.ehufco.as_ptr();
+    let ehufsi: *const u8 = ac_table.ehufsi.as_ptr();
+    let tp: *const i16 = t.as_ptr();
+
+    let mut prev_pos: u32 = 0;
+    while bitmap != 0 {
+        let pos: u32 = bitmap.trailing_zeros();
+        let run: u32 = pos - prev_pos - 1;
+        prev_pos = pos;
+
+        // Emit ZRL for long runs
+        let mut r: u32 = run;
+        while r >= 16 {
+            local_put_bits(pb, fb, buf, *ehufco.add(0xF0) as u32, *ehufsi.add(0xF0));
+            r -= 16;
+        }
+
+        // Load sign-corrected coefficient — no scalar sign correction needed.
+        // For negative originals: t[i] = original + (-1) = ones' complement.
+        // For non-negative: t[i] = original (unchanged).
+        let corrected: i16 = *tp.add(pos as usize);
+        let nbits: u32 = *JPEG_NBITS_CORRECTED.as_ptr().add(corrected as u16 as usize) as u32;
+        let mag: u32 = (corrected as u16 as u32) & ((1u32 << nbits) - 1);
 
         // Emit combined Huffman code + magnitude
         let symbol: u32 = (r << 4) | nbits;
@@ -1072,6 +1150,40 @@ static JPEG_NBITS: [u8; 65536] = {
     table
 };
 
+/// NBITS table for sign-corrected (ones' complement) coefficients.
+///
+/// Used by the SSE2 Huffman encoding path where sign correction is
+/// pre-computed during bitmap construction (`pcmpgtw` + `paddw`).
+///
+/// For corrected value c:
+/// - c >= 0: same as `JPEG_NBITS[c]` (identity, no correction applied)
+/// - c < 0: `JPEG_NBITS_CORRECTED[c as u16] = JPEG_NBITS[(!c) as u16]`
+///   because `!c` (bitwise NOT) recovers `abs(original) - 1` which maps
+///   to the same bit category as `abs(original)`.
+///
+/// This matches C libjpeg-turbo's `jpeg_nbits_table` negative-indexed
+/// semantics: `NBITS(-x) = NBITS(x-1)` for x >= 1.
+#[allow(dead_code)] // Used by x86_64 encode path + tests; dead on other arches
+static JPEG_NBITS_CORRECTED: [u8; 65536] = {
+    let mut table = [0u8; 65536];
+    let mut i: i32 = 0;
+    while i < 65536 {
+        let c: i16 = i as i16;
+        // For negative corrected values, recover abs(original) via bitwise NOT.
+        // corrected = original + (original < 0 ? -1 : 0)
+        // => original = corrected + 1 for negatives
+        // => abs(original) = -(corrected + 1) = !corrected (in two's complement)
+        let abs_original: u16 = if c < 0 { (!c) as u16 } else { c as u16 };
+        table[i as usize] = if abs_original == 0 {
+            0
+        } else {
+            (16 - abs_original.leading_zeros()) as u8
+        };
+        i += 1;
+    }
+    table
+};
+
 /// Compute the category and magnitude bits for a DC difference value.
 ///
 /// Returns (magnitude_bits, category) where category is 0..11.
@@ -1332,5 +1444,67 @@ mod tests {
         assert!(writer.data().len() >= 2);
         assert_eq!(writer.data()[0], 0xAB);
         assert_eq!(writer.data()[1], 0xCD);
+    }
+
+    /// Verify JPEG_NBITS_CORRECTED gives the same category as JPEG_NBITS
+    /// for all sign-corrected values.
+    ///
+    /// For every possible original i16 value v:
+    ///   corrected = v + (v < 0 ? -1 : 0)
+    ///   JPEG_NBITS_CORRECTED[corrected as u16] must == JPEG_NBITS[v as u16]
+    #[test]
+    fn nbits_corrected_table_matches_standard() {
+        for i in 0..65536u32 {
+            let v: i16 = i as i16;
+            // Skip i16::MIN: sign correction wraps (-32768 + (-1) = 32767),
+            // colliding with positive 32767. Never occurs in JPEG — max
+            // coefficient magnitude is 2047 (8-bit) or 32767 (12-bit).
+            if v == i16::MIN {
+                continue;
+            }
+            let sign: i16 = v >> 15; // -1 if negative, 0 if non-negative
+            let corrected: i16 = v.wrapping_add(sign);
+
+            let standard_nbits: u8 = JPEG_NBITS[v as u16 as usize];
+            let corrected_nbits: u8 = JPEG_NBITS_CORRECTED[corrected as u16 as usize];
+
+            assert_eq!(
+                corrected_nbits, standard_nbits,
+                "mismatch for v={v}: standard NBITS[{v} as u16 = {}] = {standard_nbits}, \
+                 corrected NBITS[{corrected} as u16 = {}] = {corrected_nbits}",
+                v as u16, corrected as u16,
+            );
+        }
+    }
+
+    /// Verify that sign-corrected magnitude extraction produces identical
+    /// results to the original scalar approach for all possible i16 values.
+    #[test]
+    fn corrected_magnitude_matches_scalar() {
+        for i in 1..65536u32 {
+            let v: i16 = i as i16;
+            // Skip 0 (never emitted as AC) and i16::MIN (wrapping edge case,
+            // never occurs in JPEG — see nbits_corrected_table_matches_standard).
+            if v == 0 || v == i16::MIN {
+                continue;
+            }
+
+            // Scalar approach (current sparse path)
+            let nbits_scalar: u32 = JPEG_NBITS[v as u16 as usize] as u32;
+            let sign: i16 = v >> 15;
+            let mag_scalar: u32 =
+                (v.wrapping_add(sign) as u16 as u32) & ((1u32 << nbits_scalar) - 1);
+
+            // Corrected approach (new path)
+            let corrected: i16 = v.wrapping_add(sign);
+            let nbits_corr: u32 = JPEG_NBITS_CORRECTED[corrected as u16 as usize] as u32;
+            let mag_corr: u32 = (corrected as u16 as u32) & ((1u32 << nbits_corr) - 1);
+
+            assert_eq!(nbits_corr, nbits_scalar, "nbits mismatch for v={v}");
+            assert_eq!(
+                mag_corr, mag_scalar,
+                "magnitude mismatch for v={v}: scalar={mag_scalar}, corrected={mag_corr}"
+            );
+        }
     }
 }
