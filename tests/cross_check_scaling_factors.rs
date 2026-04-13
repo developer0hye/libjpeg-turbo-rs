@@ -1,13 +1,10 @@
 //! Cross-validation: scaling factors for decode vs C djpeg -scale.
 //!
-//! Gaps addressed:
-//! - Scaling factors 1/1, 1/2, 1/4, 1/8 tested across ALL subsamplings
-//!   (previously only 1/2 and 1/4 with S444/S420)
+//! All 16 libjpeg-turbo scaling factors are now implemented with dedicated IDCT
+//! kernels (1×1 through 16×16). This file validates a subset against C djpeg.
+//!
 //! - Odd dimensions at all scales matching tjunittest.c
 //! - Per-subsampling factor restrictions matching C (tjunittest.c:672-681)
-//!
-//! Missing (requires 12 new IDCT kernels, ~2000 LOC feature work):
-//! - Scaling factors: 2/1, 15/8, 7/4, 13/8, 3/2, 11/8, 5/4, 9/8, 7/8, 3/4, 5/8, 3/8
 //!
 //! All tests gracefully skip if djpeg is not found.
 

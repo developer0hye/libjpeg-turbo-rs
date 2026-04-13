@@ -214,17 +214,22 @@ pub fn compress(
         let mut cb_buf: Vec<u8> = vec![0u8; row_buf_size];
         let mut cr_buf: Vec<u8> = vec![0u8; row_buf_size];
 
-        // For 420: pre-allocate half-resolution chroma buffers.
+        // For 420 on x86_64: pre-allocate half-resolution chroma buffers.
         // After color conversion, we downsample full-res Cb/Cr into these compact
         // buffers so that FDCT reads from stride=half_w instead of stride=padded_w.
+        #[cfg(target_arch = "x86_64")]
         let is_420: bool = subsampling == Subsampling::S420;
+        #[cfg(target_arch = "x86_64")]
         let half_w: usize = padded_w / 2;
+        #[cfg(target_arch = "x86_64")]
         let half_h: usize = padded_h / 2;
+        #[cfg(target_arch = "x86_64")]
         let mut cb_half: Vec<u8> = if is_420 {
             vec![0u8; half_w * half_h]
         } else {
             Vec::new()
         };
+        #[cfg(target_arch = "x86_64")]
         let mut cr_half: Vec<u8> = if is_420 {
             vec![0u8; half_w * half_h]
         } else {
