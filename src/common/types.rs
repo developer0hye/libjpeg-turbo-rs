@@ -245,7 +245,10 @@ pub struct ScanComponentSelector {
 
 /// Decompression scaling factor.
 ///
-/// Controls the output size via reduced IDCT. Supported ratios: 1/1, 1/2, 1/4, 1/8.
+/// Controls the output size via scaled IDCT. All 16 libjpeg-turbo factors are
+/// supported: 2/1, 15/8, 7/4, 13/8, 3/2, 11/8, 5/4, 9/8, 1/1, 7/8, 3/4,
+/// 5/8, 1/2, 3/8, 1/4, 1/8. Each factor maps to an IDCT block output size
+/// from 16×16 (2/1) down to 1×1 (1/8).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ScalingFactor {
     pub num: u32,
@@ -258,7 +261,7 @@ impl ScalingFactor {
     }
 
     /// The IDCT block output size for this scaling factor.
-    /// 8 for full, 4 for 1/2, 2 for 1/4, 1 for 1/8.
+    /// Ranges from 16 (for 2/1) through 8 (for 1/1) down to 1 (for 1/8).
     pub fn block_size(self) -> usize {
         assert!(
             self.denom != 0,
