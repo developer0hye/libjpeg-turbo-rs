@@ -570,7 +570,12 @@ fn transform_op_name(op: TransformOp) -> &'static str {
     }
 }
 
-fn run_transform_test(jpegtran: &Path, jpeg_data: &[u8], op: TransformOp) -> TestResult {
+fn run_transform_test(
+    jpegtran: &Path,
+    djpeg: &Path,
+    jpeg_data: &[u8],
+    op: TransformOp,
+) -> TestResult {
     // Step 1: transform with Rust
     let rust_out: Vec<u8> = match transform(jpeg_data, op) {
         Ok(d) => d,
@@ -584,7 +589,7 @@ fn run_transform_test(jpegtran: &Path, jpeg_data: &[u8], op: TransformOp) -> Tes
     // Step 2: transform with C jpegtran
     let jt_args: Vec<&str> = transform_op_to_jpegtran_args(op);
     if jt_args.is_empty() {
-        // TransformOp::None — just compare bytes directly
+        // TransformOp::None — both outputs must be byte-identical to input
         if rust_out == jpeg_data {
             return TestResult::Pass { max_diff: 0 };
         } else {
@@ -634,14 +639,69 @@ fn run_transform_test(jpegtran: &Path, jpeg_data: &[u8], op: TransformOp) -> Tes
         }
     };
 
-    // Step 3: compare output bytes
-    if rust_out == c_jpeg {
+    // Step 3: decode both outputs with djpeg and compare pixels.
+    // Raw bytes may differ (Rust and C generate different Huffman tables),
+    // but the decoded pixels must be identical for a lossless transform.
+    // Detect grayscale from the source JPEG so djpeg uses the right output format.
+    let is_gray: bool = match decompress(jpeg_data) {
+        Ok(img) => img.pixel_format == PixelFormat::Grayscale,
+        Err(_) => false,
+    };
+    let rust_decoded = match decode_with_c_djpeg(djpeg, &rust_out, is_gray) {
+        Ok(v) => v,
+        Err(e) => {
+            return TestResult::Crash {
+                notes: format!("djpeg on Rust transform output: {}", e),
+            }
+        }
+    };
+    let c_decoded = match decode_with_c_djpeg(djpeg, &c_jpeg, is_gray) {
+        Ok(v) => v,
+        Err(e) => {
+            return TestResult::Skip {
+                notes: format!("djpeg on C transform output: {}", e),
+            }
+        }
+    };
+
+    let (rw, rh, rust_pixels, _) = rust_decoded;
+    let (cw, ch, c_pixels, _) = c_decoded;
+
+    if rw != cw || rh != ch {
+        return TestResult::Fail {
+            max_diff: u32::MAX,
+            notes: format!(
+                "transform dimension mismatch: Rust {}x{} vs C {}x{}",
+                rw, rh, cw, ch
+            ),
+        };
+    }
+
+    if rust_pixels.len() != c_pixels.len() {
+        return TestResult::Fail {
+            max_diff: u32::MAX,
+            notes: format!(
+                "transform pixel buffer mismatch: Rust {} vs C {}",
+                rust_pixels.len(),
+                c_pixels.len()
+            ),
+        };
+    }
+
+    let max_diff: u32 = rust_pixels
+        .iter()
+        .zip(c_pixels.iter())
+        .map(|(&a, &b)| (a as i32 - b as i32).unsigned_abs())
+        .max()
+        .unwrap_or(0);
+
+    if max_diff == 0 {
         TestResult::Pass { max_diff: 0 }
     } else {
         TestResult::Fail {
-            max_diff: 1,
+            max_diff,
             notes: format!(
-                "byte mismatch: Rust {} bytes vs C {} bytes",
+                "pixel diff (Rust {} bytes, C {} bytes)",
                 rust_out.len(),
                 c_jpeg.len()
             ),
@@ -675,9 +735,16 @@ fn catch_encode(djpeg: &Path, cjpeg: &Path, jpeg_data: Vec<u8>) -> TestResult {
     }
 }
 
-fn catch_transform(jpegtran: &Path, jpeg_data: Vec<u8>, op: TransformOp) -> TestResult {
+fn catch_transform(
+    jpegtran: &Path,
+    djpeg: &Path,
+    jpeg_data: Vec<u8>,
+    op: TransformOp,
+) -> TestResult {
     let jt_owned: PathBuf = jpegtran.to_path_buf();
-    match std::panic::catch_unwind(move || run_transform_test(&jt_owned, &jpeg_data, op)) {
+    let dj_owned: PathBuf = djpeg.to_path_buf();
+    match std::panic::catch_unwind(move || run_transform_test(&jt_owned, &dj_owned, &jpeg_data, op))
+    {
         Ok(r) => r,
         Err(e) => TestResult::Crash {
             notes: format!("panicked: {}", panic_msg(e)),
@@ -846,10 +913,10 @@ fn main() {
         // Transform tests
         if cfg.run_transform {
             for &op in transform_ops {
-                let result: TestResult = match &jpegtran {
-                    Some(jt) => catch_transform(jt, jpeg_data.clone(), op),
-                    None => TestResult::Skip {
-                        notes: "jpegtran not found".to_string(),
+                let result: TestResult = match (&jpegtran, &djpeg) {
+                    (Some(jt), Some(dj)) => catch_transform(jt, dj, jpeg_data.clone(), op),
+                    _ => TestResult::Skip {
+                        notes: "jpegtran or djpeg not found".to_string(),
                     },
                 };
                 print_row(file_str, transform_op_name(op), &result);
