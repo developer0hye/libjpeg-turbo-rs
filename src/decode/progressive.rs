@@ -79,13 +79,17 @@ pub fn decode_ac_first(
             let run: usize = ((ac_entry >> 4) & 0x0F) as usize;
             let coeff: i16 = (ac_entry >> 8) << al;
             k += run;
-            if k > se_usize {
+            // C libjpeg-turbo (jdphuff.c) does not bounds-check against Se here —
+            // it writes the coefficient at k and lets the for-loop exit naturally
+            // when k > Se on the next iteration. We only guard against the hard
+            // array bound (64), matching C behavior exactly.
+            if k >= 64 {
                 return Err(JpegError::CorruptData(
                     "progressive AC coefficient index out of bounds".into(),
                 ));
             }
             reader.skip_bits(total_bits);
-            // SAFETY: k <= se <= 63, ZIGZAG_ORDER values are all < 64.
+            // SAFETY: k < 64, ZIGZAG_ORDER values are all < 64.
             unsafe {
                 *coeffs.get_unchecked_mut(*ZIGZAG_ORDER.get_unchecked(k)) = coeff;
             }
@@ -106,14 +110,16 @@ pub fn decode_ac_first(
 
         if bit_size != 0 {
             k += run_length;
-            if k > se_usize {
+            // Same as fast path: only check against hard array bound, not Se.
+            // C libjpeg-turbo allows k to advance past Se before the loop exits.
+            if k >= 64 {
                 return Err(JpegError::CorruptData(
                     "progressive AC coefficient index out of bounds".into(),
                 ));
             }
             let extra_bits = reader.read_bits(bit_size);
             let coeff = extend(extra_bits, bit_size);
-            // SAFETY: k <= se <= 63, ZIGZAG_ORDER values are all < 64.
+            // SAFETY: k < 64, ZIGZAG_ORDER values are all < 64.
             unsafe {
                 *coeffs.get_unchecked_mut(*ZIGZAG_ORDER.get_unchecked(k)) = coeff << al;
             }

@@ -1182,3 +1182,259 @@ fn c_jpegtran_arithmetic_reencode() {
         );
     }
 }
+
+// ===========================================================================
+// Bug regression: progressive JPEG with odd dimensions must transform without crash
+// ===========================================================================
+
+/// Regression test for "invalid Huffman code" / "AC coefficient index out of bounds"
+/// crashes on progressive JPEGs with non-MCU-aligned dimensions.
+///
+/// Generates odd-dimension progressive JPEGs via cjpeg and verifies that all
+/// 7 transform operations succeed (no crash, valid decodable output).
+/// Affected dimensions: 7x11, 33x17 (non-multiples of 8 and 16).
+#[test]
+fn progressive_odd_dimensions_transform_no_crash() {
+    let jpegtran: PathBuf = match jpegtran_path() {
+        Some(p) => p,
+        None => {
+            eprintln!("SKIP: jpegtran not found");
+            return;
+        }
+    };
+    let djpeg: PathBuf = match djpeg_path() {
+        Some(p) => p,
+        None => {
+            eprintln!("SKIP: djpeg not found");
+            return;
+        }
+    };
+
+    // cjpeg is at the same location as djpeg
+    let cjpeg_path: PathBuf = djpeg.parent().unwrap().join("cjpeg");
+    if !cjpeg_path.exists() {
+        eprintln!("SKIP: cjpeg not found at {:?}", cjpeg_path);
+        return;
+    }
+
+    // Test dimensions that previously crashed (non-MCU-aligned for 4:2:0 = must be
+    // multiples of 16; 7x11 and 33x17 are not multiples of 16 in either dimension).
+    let odd_dims: &[(usize, usize, &str)] = &[(7, 11, "7x11"), (33, 17, "33x17")];
+
+    let transforms: [TransformOp; 7] = [
+        TransformOp::HFlip,
+        TransformOp::VFlip,
+        TransformOp::Rot90,
+        TransformOp::Rot180,
+        TransformOp::Rot270,
+        TransformOp::Transpose,
+        TransformOp::Transverse,
+    ];
+
+    for &(w, h, label) in odd_dims {
+        // Create a PPM in-memory and write to temp file
+        let mut ppm: Vec<u8> = format!("P6\n{} {}\n255\n", w, h).into_bytes();
+        for y in 0..h {
+            for x in 0..w {
+                ppm.push(((x * 255) / w.max(1)) as u8);
+                ppm.push(((y * 255) / h.max(1)) as u8);
+                ppm.push((((x + y) * 255) / (w + h).max(1)) as u8);
+            }
+        }
+
+        let tmp_ppm: TempFile = TempFile::new(&format!("{}_input.ppm", label));
+        std::fs::write(tmp_ppm.path(), &ppm).expect("write ppm");
+
+        // Encode as 4:2:0 progressive JPEG via cjpeg
+        let tmp_prog_jpg: TempFile = TempFile::new(&format!("{}_420_prog.jpg", label));
+        let output = Command::new(&cjpeg_path)
+            .arg("-quality")
+            .arg("50")
+            .arg("-sample")
+            .arg("2x2")
+            .arg("-progressive")
+            .arg("-outfile")
+            .arg(tmp_prog_jpg.path())
+            .arg(tmp_ppm.path())
+            .output()
+            .expect("cjpeg exec");
+
+        if !output.status.success() {
+            eprintln!(
+                "SKIP: cjpeg failed for {}: {}",
+                label,
+                String::from_utf8_lossy(&output.stderr)
+            );
+            continue;
+        }
+
+        let prog_jpeg: Vec<u8> = std::fs::read(tmp_prog_jpg.path()).expect("read progressive jpeg");
+
+        for op in transforms {
+            let name: &str = transform_name(op);
+
+            // Must not crash — "invalid Huffman code" or "AC coefficient index out of bounds"
+            // were previously triggered by this combination.
+            let rust_out: Vec<u8> = transform(&prog_jpeg, op).unwrap_or_else(|e| {
+                panic!(
+                    "Rust transform {} of progressive {}x{} must not fail: {}",
+                    name, w, h, e
+                )
+            });
+
+            // Output must be a valid JPEG decodable by C djpeg
+            let tmp_out: TempFile = TempFile::new(&format!("{}_{}_out.jpg", label, name));
+            let tmp_ppm_out: TempFile = TempFile::new(&format!("{}_{}_out.ppm", label, name));
+            std::fs::write(tmp_out.path(), &rust_out).expect("write rust output");
+
+            let output = Command::new(&djpeg)
+                .arg("-ppm")
+                .arg("-outfile")
+                .arg(tmp_ppm_out.path())
+                .arg(tmp_out.path())
+                .output()
+                .expect("djpeg exec");
+
+            assert!(
+                output.status.success(),
+                "djpeg failed on Rust transform {} of progressive {}: {}",
+                name,
+                label,
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+    }
+}
+
+// ===========================================================================
+// Bug regression: transform byte comparison vs pixel comparison
+// ===========================================================================
+
+/// Regression test ensuring transform output, while potentially bytewise
+/// different from C jpegtran (different Huffman tables), decodes to pixel-
+/// identical results. This is Bug 3: the corpus harness used raw byte
+/// comparison which incorrectly reported valid transforms as failures.
+#[test]
+fn transform_pixel_equivalence_with_c_jpegtran() {
+    let jpegtran: PathBuf = match jpegtran_path() {
+        Some(p) => p,
+        None => {
+            eprintln!("SKIP: jpegtran not found");
+            return;
+        }
+    };
+    let djpeg: PathBuf = match djpeg_path() {
+        Some(p) => p,
+        None => {
+            eprintln!("SKIP: djpeg not found");
+            return;
+        }
+    };
+
+    // Use an image with non-MCU-aligned dimensions to expose edge-block handling
+    let (w, h): (usize, usize) = (33, 17);
+    let mut pixels: Vec<u8> = Vec::with_capacity(w * h * 3);
+    for y in 0..h {
+        for x in 0..w {
+            pixels.push(((x * 255) / w) as u8);
+            pixels.push(((y * 255) / h) as u8);
+            pixels.push((((x + y) * 255) / (w + h)) as u8);
+        }
+    }
+    let source_jpeg: Vec<u8> =
+        libjpeg_turbo_rs::compress(&pixels, w, h, PixelFormat::Rgb, 75, Subsampling::S420)
+            .expect("compress 33x17 test image");
+
+    let transforms: [TransformOp; 7] = [
+        TransformOp::HFlip,
+        TransformOp::VFlip,
+        TransformOp::Rot90,
+        TransformOp::Rot180,
+        TransformOp::Rot270,
+        TransformOp::Transpose,
+        TransformOp::Transverse,
+    ];
+
+    let tmp_in: TempFile = TempFile::new("pix_equiv_in.jpg");
+    std::fs::write(tmp_in.path(), &source_jpeg).expect("write source");
+
+    for op in transforms {
+        let name: &str = transform_name(op);
+
+        let rust_out: Vec<u8> = transform(&source_jpeg, op)
+            .unwrap_or_else(|e| panic!("Rust transform {} must succeed: {}", name, e));
+
+        let jt_args: Vec<String> = jpegtran_args_for_op(op);
+        let tmp_c: TempFile = TempFile::new(&format!("pix_equiv_{}_c.jpg", name));
+        let mut cmd = Command::new(&jpegtran);
+        for arg in &jt_args {
+            cmd.arg(arg);
+        }
+        cmd.arg("-copy").arg("none");
+        cmd.arg("-outfile").arg(tmp_c.path()).arg(tmp_in.path());
+        let out = cmd.output().expect("jpegtran exec");
+        assert!(
+            out.status.success(),
+            "jpegtran {} failed: {}",
+            name,
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let c_out: Vec<u8> = std::fs::read(tmp_c.path()).expect("read jpegtran output");
+
+        // Decode both with djpeg and compare pixels — byte mismatch is OK
+        // (Rust and C may generate different Huffman tables), but decoded
+        // pixels must be identical.
+        let tmp_rust_ppm: TempFile = TempFile::new(&format!("pix_equiv_{}_rust.ppm", name));
+        let tmp_c_ppm: TempFile = TempFile::new(&format!("pix_equiv_{}_c_ppm.ppm", name));
+
+        let tmp_rust_jpg: TempFile = TempFile::new(&format!("pix_equiv_{}_rust.jpg", name));
+        std::fs::write(tmp_rust_jpg.path(), &rust_out).expect("write rust out");
+
+        let out = Command::new(&djpeg)
+            .arg("-ppm")
+            .arg("-outfile")
+            .arg(tmp_rust_ppm.path())
+            .arg(tmp_rust_jpg.path())
+            .output()
+            .expect("djpeg exec on rust output");
+        assert!(
+            out.status.success(),
+            "djpeg failed on Rust {} output: {}",
+            name,
+            String::from_utf8_lossy(&out.stderr)
+        );
+
+        let out = Command::new(&djpeg)
+            .arg("-ppm")
+            .arg("-outfile")
+            .arg(tmp_c_ppm.path())
+            .arg(tmp_c.path())
+            .output()
+            .expect("djpeg exec on c output");
+        assert!(
+            out.status.success(),
+            "djpeg failed on C {} output: {}",
+            name,
+            String::from_utf8_lossy(&out.stderr)
+        );
+
+        let (rw, rh, rust_pixels) = parse_ppm(tmp_rust_ppm.path());
+        let (cw, ch, c_pixels) = parse_ppm(tmp_c_ppm.path());
+
+        assert_eq!(rw, cw, "{}: decoded width mismatch", name);
+        assert_eq!(rh, ch, "{}: decoded height mismatch", name);
+
+        let max_diff: u8 = pixel_max_diff(&rust_pixels, &c_pixels);
+        // Lossless transform on baseline JPEG: decoded pixels must be identical
+        // (max_diff=0). Byte-level differences are expected and acceptable.
+        assert_eq!(
+            max_diff,
+            0,
+            "{}: decoded pixels differ from C jpegtran (max_diff={}, Rust {} bytes, C {} bytes)",
+            name,
+            max_diff,
+            rust_out.len(),
+            c_out.len()
+        );
+    }
+}
