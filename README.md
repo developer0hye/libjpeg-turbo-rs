@@ -63,7 +63,7 @@ Decoding matches or beats C for 4:2:2 and 4:4:4 subsampling; 4:2:0 has a 7% gap.
 
 ```toml
 [dependencies]
-libjpeg-turbo-rs = "0.1"
+libjpeg-turbo-rs = "0.5"
 ```
 
 ### Decompress
@@ -98,15 +98,15 @@ let jpeg = Encoder::new(&pixels, width, height, PixelFormat::Rgb)
     .progressive(true)
     .optimize_huffman(true)
     .icc_profile(&icc_data)
-    .finish()?;
+    .encode()?;
 ```
 
 ### Lossless Transform
 
 ```rust
-use libjpeg_turbo_rs::{transform_jpeg, TransformOp, TransformOptions};
+use libjpeg_turbo_rs::{transform, TransformOp};
 
-let rotated = transform_jpeg(&jpeg_bytes, TransformOp::Rot90, &TransformOptions::default())?;
+let rotated = transform(&jpeg_bytes, TransformOp::Rot90)?;
 ```
 
 ### Scanline-Level I/O
@@ -115,9 +115,12 @@ let rotated = transform_jpeg(&jpeg_bytes, TransformOp::Rot90, &TransformOptions:
 use libjpeg_turbo_rs::ScanlineDecoder;
 
 let mut decoder = ScanlineDecoder::new(&jpeg_bytes)?;
-while decoder.output_scanline() < decoder.output_height() {
-    let row = decoder.read_scanlines(1)?;
-    // process row...
+let height = decoder.header().height as usize;
+let width = decoder.header().width as usize;
+let mut buf = vec![0u8; width * 3]; // RGB row buffer
+while decoder.output_scanline() < height {
+    decoder.read_scanline(&mut buf)?;
+    // process buf...
 }
 let img = decoder.finish()?;
 ```
