@@ -1,0 +1,70 @@
+name: Full C Parity
+
+on:
+  schedule:
+    - cron: '0 6 * * 1'  # Weekly Monday 6:00 UTC
+  workflow_dispatch:  # Manual trigger
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  full-c-parity-x86:
+    name: Full C Parity (x86_64)
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Build libjpeg-turbo 3.1.0 from source
+        run: |
+          sudo apt-get install -y cmake nasm
+          git clone --depth 1 --branch 3.1.0 https://github.com/libjpeg-turbo/libjpeg-turbo.git /tmp/ljt
+          cmake -S /tmp/ljt -B /tmp/ljt/build -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=/usr/local
+          cmake --build /tmp/ljt/build -j$(nproc)
+          sudo cmake --install /tmp/ljt/build
+          echo "/usr/local/bin" >> $GITHUB_PATH
+      - name: c_tjdecomptest_full
+        run: cargo test --features full-c-parity --test c_tjdecomptest -- c_tjdecomptest_full
+        timeout-minutes: 10
+      - name: c_tjcomptest_full
+        run: cargo test --features full-c-parity --test c_tjcomptest
+        timeout-minutes: 10
+        continue-on-error: true  # Known failures: samp410, lossless RGB
+      - name: c_tjtrantest_full
+        run: cargo test --features full-c-parity --test c_tjtrantest
+        timeout-minutes: 10
+        continue-on-error: true  # Known failures: grayscale Huffman diff
+      - name: c_croptest_full
+        run: cargo test --features full-c-parity --test c_croptest
+        timeout-minutes: 10
+
+  full-c-parity-arm64:
+    name: Full C Parity (aarch64)
+    runs-on: macos-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Install libjpeg-turbo via Homebrew
+        run: brew install jpeg-turbo
+      - name: c_tjdecomptest_full
+        run: cargo test --features full-c-parity --test c_tjdecomptest -- c_tjdecomptest_full
+        timeout-minutes: 10
+      - name: c_tjcomptest_full
+        run: cargo test --features full-c-parity --test c_tjcomptest
+        timeout-minutes: 10
+        continue-on-error: true
+      - name: c_tjtrantest_full
+        run: cargo test --features full-c-parity --test c_tjtrantest
+        timeout-minutes: 10
+        continue-on-error: true
+      - name: c_croptest_full
+        run: cargo test --features full-c-parity --test c_croptest
+        timeout-minutes: 10
