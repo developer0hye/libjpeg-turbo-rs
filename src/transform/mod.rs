@@ -98,6 +98,9 @@ pub struct TransformOptions {
     /// Re-encode output with optimized Huffman tables (2-pass).
     /// Corresponds to TJXOPT_OPTIMIZE (libjpeg-turbo 3.x).
     pub optimize: bool,
+    /// Restart interval in MCU rows. 0 = disabled.
+    /// Maps to jpegtran `-restart NB` (blocks) or `-restart N` (rows).
+    pub restart_interval: u16,
     /// Marker copy behavior: All (default), None (TJXOPT_COPYNONE), or IccOnly.
     /// See [`MarkerCopyMode`] for details.
     pub copy_markers: MarkerCopyMode,
@@ -121,6 +124,7 @@ impl Default for TransformOptions {
             progressive: false,
             arithmetic: false,
             optimize: false,
+            restart_interval: 0,
             copy_markers: MarkerCopyMode::All,
             custom_filter: None,
         }
@@ -139,6 +143,7 @@ impl std::fmt::Debug for TransformOptions {
             .field("progressive", &self.progressive)
             .field("arithmetic", &self.arithmetic)
             .field("optimize", &self.optimize)
+            .field("restart_interval", &self.restart_interval)
             .field("copy_markers", &self.copy_markers)
             .field(
                 "custom_filter",
