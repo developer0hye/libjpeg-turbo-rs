@@ -330,6 +330,7 @@ fn tjunittest_transform_with_crop() {
         progressive: false,
         arithmetic: false,
         optimize: false,
+        restart_interval: 0,
         copy_markers: libjpeg_turbo_rs::MarkerCopyMode::All,
         custom_filter: None,
     };
@@ -366,6 +367,7 @@ fn tjunittest_transform_crop_with_rotation() {
         progressive: false,
         arithmetic: false,
         optimize: false,
+        restart_interval: 0,
         copy_markers: libjpeg_turbo_rs::MarkerCopyMode::All,
         custom_filter: None,
     };
@@ -398,6 +400,7 @@ fn tjunittest_grayscale_transform_444() {
         progressive: false,
         arithmetic: false,
         optimize: false,
+        restart_interval: 0,
         copy_markers: libjpeg_turbo_rs::MarkerCopyMode::All,
         custom_filter: None,
     };
@@ -431,6 +434,7 @@ fn tjunittest_grayscale_transform_420() {
         progressive: false,
         arithmetic: false,
         optimize: false,
+        restart_interval: 0,
         copy_markers: libjpeg_turbo_rs::MarkerCopyMode::All,
         custom_filter: None,
     };
@@ -463,6 +467,7 @@ fn tjunittest_grayscale_transform_all_subsampling() {
             progressive: false,
             arithmetic: false,
             optimize: false,
+            restart_interval: 0,
             copy_markers: libjpeg_turbo_rs::MarkerCopyMode::All,
             custom_filter: None,
         };
@@ -500,6 +505,7 @@ fn tjunittest_transform_progressive_output() {
         progressive: true,
         arithmetic: false,
         optimize: false,
+        restart_interval: 0,
         copy_markers: libjpeg_turbo_rs::MarkerCopyMode::All,
         custom_filter: None,
     };
@@ -531,6 +537,7 @@ fn tjunittest_transform_arithmetic_output() {
         progressive: false,
         arithmetic: true,
         optimize: false,
+        restart_interval: 0,
         copy_markers: libjpeg_turbo_rs::MarkerCopyMode::All,
         custom_filter: None,
     };
