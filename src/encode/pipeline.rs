@@ -1998,20 +1998,15 @@ fn compress_lossless_rgb(
 
     marker_writer::write_soi(&mut output);
 
-    // DC Huffman table 0 (luminance) for all 3 components
-    marker_writer::write_dht(
-        &mut output,
-        0,
-        0,
-        &tables::DC_LUMINANCE_BITS,
-        &tables::DC_LUMINANCE_VALUES,
-    );
+    // Adobe APP14 with transform=0 to signal RGB colorspace (matching C cjpeg)
+    marker_writer::write_app14_adobe(&mut output, 0);
 
-    // SOF3 with 3 components: R(id=1), G(id=2), B(id=3), all 1x1, qt=0
+    // SOF3 with 3 components: R(id='R'), G(id='G'), B(id='B'), all 1x1, qt=0.
+    // C libjpeg-turbo uses ASCII component IDs for RGB colorspace lossless.
     let components: Vec<(u8, u8, u8, u8)> = vec![
-        (1, 1, 1, 0), // R: id=1, h=1, v=1, qt=0
-        (2, 1, 1, 0), // G: id=2, h=1, v=1, qt=0
-        (3, 1, 1, 0), // B: id=3, h=1, v=1, qt=0
+        (b'R', 1, 1, 0), // R: id=0x52, h=1, v=1, qt=0
+        (b'G', 1, 1, 0), // G: id=0x47, h=1, v=1, qt=0
+        (b'B', 1, 1, 0), // B: id=0x42, h=1, v=1, qt=0
     ];
     marker_writer::write_sof3(
         &mut output,
@@ -2021,11 +2016,20 @@ fn compress_lossless_rgb(
         &components,
     );
 
-    // SOS with 3 components: all use DC table 0
+    // DC Huffman table 0 (luminance) for all 3 components (after SOF3, matching C)
+    marker_writer::write_dht(
+        &mut output,
+        0,
+        0,
+        &tables::DC_LUMINANCE_BITS,
+        &tables::DC_LUMINANCE_VALUES,
+    );
+
+    // SOS with 3 components: all use DC table 0 (matching SOF3 ASCII IDs)
     let scan_components: Vec<(u8, u8)> = vec![
-        (1, 0), // R -> DC table 0
-        (2, 0), // G -> DC table 0
-        (3, 0), // B -> DC table 0
+        (b'R', 0), // R -> DC table 0
+        (b'G', 0), // G -> DC table 0
+        (b'B', 0), // B -> DC table 0
     ];
     marker_writer::write_sos_lossless(&mut output, &scan_components, predictor, point_transform);
 
@@ -6492,6 +6496,18 @@ fn is_y_dummy(block_x_px: usize, block_y_px: usize, y_wib: usize, y_hib: usize) 
     block_x_px / 8 >= y_wib || block_y_px / 8 >= y_hib
 }
 
+/// Encode a dummy block (AC=0, DC=previous block's DC) matching C jccoefct.c.
+fn encode_dummy_block(
+    dc_table: &HuffTable,
+    ac_table: &HuffTable,
+    writer: &mut BitWriter,
+    prev_dc: &mut i16,
+) {
+    let mut dummy: [i16; 64] = [0i16; 64];
+    dummy[0] = *prev_dc;
+    HuffmanEncoder::encode_block(writer, &dummy, prev_dc, dc_table, ac_table);
+}
+
 /// Encode a color MCU with dummy Y blocks for the last MCU column.
 ///
 /// C libjpeg-turbo creates "dummy" blocks beyond `width_in_blocks`: all AC=0,
@@ -8814,6 +8830,11 @@ pub fn compress_custom_sampling(
     let y_h: u8 = factors[0].0;
     let y_v: u8 = factors[0].1;
 
+    // Per-component width/height in blocks for dummy block detection.
+    // C libjpeg-turbo creates dummy blocks (DC=prev, AC=0) beyond these.
+    let y_wib: usize = width.div_ceil(8);
+    let y_hib: usize = height.div_ceil(8);
+
     for mcu_row in 0..mcus_y {
         for mcu_col in 0..mcus_x {
             let x0: usize = mcu_col * mcu_w;
@@ -8823,38 +8844,60 @@ pub fn compress_custom_sampling(
                 // Grayscale: h_i x v_i blocks of Y
                 for bv in 0..y_v as usize {
                     for bh in 0..y_h as usize {
-                        encode_single_block(
-                            &y_plane,
-                            width,
-                            height,
-                            x0 + bh * 8,
-                            y0 + bv * 8,
-                            &luma_divisors,
-                            &dc_luma_table,
-                            &ac_luma_table,
-                            &mut bit_writer,
-                            &mut prev_dc_y,
-                            fdct_quantize_fn,
-                        );
+                        let bx: usize = x0 + bh * 8;
+                        let by: usize = y0 + bv * 8;
+                        if is_y_dummy(bx, by, y_wib, y_hib) {
+                            encode_dummy_block(
+                                &dc_luma_table,
+                                &ac_luma_table,
+                                &mut bit_writer,
+                                &mut prev_dc_y,
+                            );
+                        } else {
+                            encode_single_block(
+                                &y_plane,
+                                width,
+                                height,
+                                bx,
+                                by,
+                                &luma_divisors,
+                                &dc_luma_table,
+                                &ac_luma_table,
+                                &mut bit_writer,
+                                &mut prev_dc_y,
+                                fdct_quantize_fn,
+                            );
+                        }
                     }
                 }
             } else {
                 // Y blocks: y_h x y_v blocks per MCU (row-major order)
                 for bv in 0..y_v as usize {
                     for bh in 0..y_h as usize {
-                        encode_single_block(
-                            &y_plane,
-                            width,
-                            height,
-                            x0 + bh * 8,
-                            y0 + bv * 8,
-                            &luma_divisors,
-                            &dc_luma_table,
-                            &ac_luma_table,
-                            &mut bit_writer,
-                            &mut prev_dc_y,
-                            fdct_quantize_fn,
-                        );
+                        let bx: usize = x0 + bh * 8;
+                        let by: usize = y0 + bv * 8;
+                        if is_y_dummy(bx, by, y_wib, y_hib) {
+                            encode_dummy_block(
+                                &dc_luma_table,
+                                &ac_luma_table,
+                                &mut bit_writer,
+                                &mut prev_dc_y,
+                            );
+                        } else {
+                            encode_single_block(
+                                &y_plane,
+                                width,
+                                height,
+                                bx,
+                                by,
+                                &luma_divisors,
+                                &dc_luma_table,
+                                &ac_luma_table,
+                                &mut bit_writer,
+                                &mut prev_dc_y,
+                                fdct_quantize_fn,
+                            );
+                        }
                     }
                 }
 
@@ -8863,25 +8906,38 @@ pub fn compress_custom_sampling(
                 let cb_v: u8 = factors[1].1;
                 let h_downsample: usize = max_h as usize / cb_h as usize;
                 let v_downsample: usize = max_v as usize / cb_v as usize;
+                let cb_wib: usize = width.div_ceil(h_downsample * 8);
+                let cb_hib: usize = height.div_ceil(v_downsample * 8);
 
                 // Cb blocks
                 for bv in 0..cb_v as usize {
                     for bh in 0..cb_h as usize {
-                        encode_downsampled_chroma_block(
-                            &cb_plane,
-                            width,
-                            height,
-                            x0 + bh * 8 * h_downsample,
-                            y0 + bv * 8 * v_downsample,
-                            h_downsample,
-                            v_downsample,
-                            &chroma_divisors,
-                            &dc_chroma_table,
-                            &ac_chroma_table,
-                            &mut bit_writer,
-                            &mut prev_dc_cb,
-                            fdct_quantize_fn,
-                        );
+                        let bx: usize = x0 / h_downsample + bh * 8;
+                        let by: usize = y0 / v_downsample + bv * 8;
+                        if bx / 8 >= cb_wib || by / 8 >= cb_hib {
+                            encode_dummy_block(
+                                &dc_chroma_table,
+                                &ac_chroma_table,
+                                &mut bit_writer,
+                                &mut prev_dc_cb,
+                            );
+                        } else {
+                            encode_downsampled_chroma_block(
+                                &cb_plane,
+                                width,
+                                height,
+                                x0 + bh * 8 * h_downsample,
+                                y0 + bv * 8 * v_downsample,
+                                h_downsample,
+                                v_downsample,
+                                &chroma_divisors,
+                                &dc_chroma_table,
+                                &ac_chroma_table,
+                                &mut bit_writer,
+                                &mut prev_dc_cb,
+                                fdct_quantize_fn,
+                            );
+                        }
                     }
                 }
 
@@ -8889,25 +8945,38 @@ pub fn compress_custom_sampling(
                 let cr_v: u8 = factors[2].1;
                 let h_downsample_cr: usize = max_h as usize / cr_h as usize;
                 let v_downsample_cr: usize = max_v as usize / cr_v as usize;
+                let cr_wib: usize = width.div_ceil(h_downsample_cr * 8);
+                let cr_hib: usize = height.div_ceil(v_downsample_cr * 8);
 
                 // Cr blocks
                 for bv in 0..cr_v as usize {
                     for bh in 0..cr_h as usize {
-                        encode_downsampled_chroma_block(
-                            &cr_plane,
-                            width,
-                            height,
-                            x0 + bh * 8 * h_downsample_cr,
-                            y0 + bv * 8 * v_downsample_cr,
-                            h_downsample_cr,
-                            v_downsample_cr,
-                            &chroma_divisors,
-                            &dc_chroma_table,
-                            &ac_chroma_table,
-                            &mut bit_writer,
-                            &mut prev_dc_cr,
-                            fdct_quantize_fn,
-                        );
+                        let bx: usize = x0 / h_downsample_cr + bh * 8;
+                        let by: usize = y0 / v_downsample_cr + bv * 8;
+                        if bx / 8 >= cr_wib || by / 8 >= cr_hib {
+                            encode_dummy_block(
+                                &dc_chroma_table,
+                                &ac_chroma_table,
+                                &mut bit_writer,
+                                &mut prev_dc_cr,
+                            );
+                        } else {
+                            encode_downsampled_chroma_block(
+                                &cr_plane,
+                                width,
+                                height,
+                                x0 + bh * 8 * h_downsample_cr,
+                                y0 + bv * 8 * v_downsample_cr,
+                                h_downsample_cr,
+                                v_downsample_cr,
+                                &chroma_divisors,
+                                &dc_chroma_table,
+                                &ac_chroma_table,
+                                &mut bit_writer,
+                                &mut prev_dc_cr,
+                                fdct_quantize_fn,
+                            );
+                        }
                     }
                 }
             }
