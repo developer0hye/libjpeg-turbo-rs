@@ -304,6 +304,10 @@ fn run_crop_scenario(
         for row in 0..effective_h {
             for x in 0..effective_w {
                 let src_idx: usize = (row * c_w + crop_x + x) * 3;
+                if src_idx >= c_pixels.len() {
+                    eprintln!("SKIP: [{scenario_label}] C buffer too short at row {row} x {x} (idx={src_idx}, len={})", c_pixels.len());
+                    return false;
+                }
                 extracted.push(c_pixels[src_idx]);
             }
         }
