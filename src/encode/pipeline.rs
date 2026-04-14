@@ -1883,11 +1883,10 @@ fn compress_lossless_grayscale(
     point_transform: u8,
 ) -> Result<Vec<u8>> {
     let precision: u8 = 8;
+    let num_pixels: usize = width * height;
 
-    let mut bit_writer: BitWriter = BitWriter::new(width * height);
-    let dc_table: HuffTable =
-        build_huff_table(&tables::DC_LUMINANCE_BITS, &tables::DC_LUMINANCE_VALUES);
-
+    // Collect all diffs for 2-pass optimized Huffman encoding.
+    let mut all_diffs: Vec<i16> = Vec::with_capacity(num_pixels);
     for y in 0..height {
         for x in 0..width {
             let pixel: i32 = pixels[y * width + x] as i32;
@@ -1901,24 +1900,35 @@ fn compress_lossless_grayscale(
                 point_transform,
                 precision,
             );
-            HuffmanEncoder::encode_dc_only(&mut bit_writer, signed_diff, &dc_table);
+            all_diffs.push(signed_diff);
         }
     }
 
+    // Pass 1: gather DC symbol frequencies for optimal Huffman table.
+    use crate::encode::huff_opt;
+    let mut dc_freq: [u32; 257] = [0u32; 257];
+    for &diff in &all_diffs {
+        huff_opt::gather_dc_symbol(diff, &mut dc_freq);
+    }
+    dc_freq[256] = 1;
+    let (opt_bits, opt_values) = huff_opt::gen_optimal_table(&dc_freq);
+    let dc_table: HuffTable = build_huff_table(&opt_bits, &opt_values);
+
+    // Pass 2: entropy encode with optimal table.
+    let mut bit_writer: BitWriter = BitWriter::new(num_pixels);
+    for &diff in &all_diffs {
+        HuffmanEncoder::encode_dc_only(&mut bit_writer, diff, &dc_table);
+    }
     bit_writer.flush();
 
     let mut output: Vec<u8> = Vec::with_capacity(bit_writer.data().len() + 256);
 
     marker_writer::write_soi(&mut output);
 
-    marker_writer::write_dht(
-        &mut output,
-        0,
-        0,
-        &tables::DC_LUMINANCE_BITS,
-        &tables::DC_LUMINANCE_VALUES,
-    );
+    // JFIF APP0 marker (matching C cjpeg grayscale lossless)
+    marker_writer::write_app0_jfif(&mut output);
 
+    // SOF3 with 1 component
     let components: Vec<(u8, u8, u8, u8)> = vec![(1, 1, 1, 0)];
     marker_writer::write_sof3(
         &mut output,
@@ -1927,6 +1937,9 @@ fn compress_lossless_grayscale(
         precision,
         &components,
     );
+
+    // Optimized DC Huffman table (after SOF3, matching C)
+    marker_writer::write_dht(&mut output, 0, 0, &opt_bits, &opt_values);
 
     let scan_components: Vec<(u8, u8)> = vec![(1, 0)];
     marker_writer::write_sos_lossless(&mut output, &scan_components, predictor, point_transform);
@@ -1965,33 +1978,42 @@ fn compress_lossless_rgb(
 
     let planes: [&[u8]; 3] = [&r_plane, &g_plane, &b_plane];
 
-    // Use luminance DC table for all 3 components (no chrominance table needed)
-    let dc_table_luma: HuffTable =
-        build_huff_table(&tables::DC_LUMINANCE_BITS, &tables::DC_LUMINANCE_VALUES);
-    let dc_tables: [&HuffTable; 3] = [&dc_table_luma, &dc_table_luma, &dc_table_luma];
-
-    let mut bit_writer: BitWriter = BitWriter::new(num_pixels * 3);
-
-    // Interleaved encoding: for each pixel, encode diff for Y, Cb, Cr
+    // Collect all lossless diffs first for 2-pass optimized Huffman encoding.
+    let mut all_diffs: Vec<i16> = Vec::with_capacity(num_pixels * 3);
     for y in 0..height {
         for x in 0..width {
-            for c in 0..3 {
-                let pixel: i32 = planes[c][y * width + x] as i32;
+            for plane in &planes {
+                let pixel: i32 = plane[y * width + x] as i32;
                 let signed_diff: i16 = lossless_diff(
                     pixel,
                     x,
                     y,
-                    planes[c],
+                    plane,
                     width,
                     predictor,
                     point_transform,
                     precision,
                 );
-                HuffmanEncoder::encode_dc_only(&mut bit_writer, signed_diff, dc_tables[c]);
+                all_diffs.push(signed_diff);
             }
         }
     }
 
+    // Pass 1: gather DC symbol frequencies for optimal Huffman table.
+    use crate::encode::huff_opt;
+    let mut dc_freq: [u32; 257] = [0u32; 257];
+    for &diff in &all_diffs {
+        huff_opt::gather_dc_symbol(diff, &mut dc_freq);
+    }
+    dc_freq[256] = 1; // pseudo-symbol (Annex K.2)
+    let (opt_bits, opt_values) = huff_opt::gen_optimal_table(&dc_freq);
+    let dc_table: HuffTable = build_huff_table(&opt_bits, &opt_values);
+
+    // Pass 2: entropy encode with optimal table.
+    let mut bit_writer: BitWriter = BitWriter::new(num_pixels * 3);
+    for &diff in &all_diffs {
+        HuffmanEncoder::encode_dc_only(&mut bit_writer, diff, &dc_table);
+    }
     bit_writer.flush();
 
     let mut output: Vec<u8> = Vec::with_capacity(bit_writer.data().len() + 512);
@@ -2016,14 +2038,8 @@ fn compress_lossless_rgb(
         &components,
     );
 
-    // DC Huffman table 0 (luminance) for all 3 components (after SOF3, matching C)
-    marker_writer::write_dht(
-        &mut output,
-        0,
-        0,
-        &tables::DC_LUMINANCE_BITS,
-        &tables::DC_LUMINANCE_VALUES,
-    );
+    // Optimized DC Huffman table 0 for all 3 components (after SOF3, matching C)
+    marker_writer::write_dht(&mut output, 0, 0, &opt_bits, &opt_values);
 
     // SOS with 3 components: all use DC table 0 (matching SOF3 ASCII IDs)
     let scan_components: Vec<(u8, u8)> = vec![
