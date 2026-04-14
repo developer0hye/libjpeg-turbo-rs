@@ -6,7 +6,7 @@ use crate::common::error::{JpegError, Result};
 use crate::common::quant_table::NATURAL_ORDER;
 use crate::common::types::{MarkerSaveConfig, SavedMarker};
 use crate::decode::marker::{JpegMetadata, MarkerReader};
-use crate::encode::huffman_encode::{build_huff_table, BitWriter, HuffmanEncoder};
+use crate::encode::huffman_encode::{build_huff_table, BitWriter, HuffTable, HuffmanEncoder};
 use crate::encode::marker_writer;
 use crate::encode::pipeline as encoder_pipeline;
 use crate::encode::tables;
@@ -893,8 +893,9 @@ pub fn transform_jpeg_with_options(data: &[u8], options: &TransformOptions) -> R
     coeffs.restart_interval = options.restart_interval;
 
     // Write output with the appropriate encoding.
-    // TODO: progressive write path for transforms (write_coefficients_progressive)
-    let output: Vec<u8> = if options.optimize {
+    let output: Vec<u8> = if options.progressive {
+        write_coefficients_progressive(&coeffs)?
+    } else if options.optimize {
         write_coefficients_optimized(&coeffs)?
     } else {
         write_coefficients(&coeffs)?
@@ -1163,6 +1164,298 @@ fn write_coefficients_optimized(coeffs: &JpegCoefficients) -> Result<Vec<u8>> {
     output.extend_from_slice(bit_writer.data());
     marker_writer::write_eoi(&mut output);
 
+    Ok(output)
+}
+
+/// Write DCT coefficients as progressive JPEG (SOF2, multi-scan).
+///
+/// Uses the default libjpeg-turbo scan progression (simple_progression)
+/// with optimized Huffman tables (matching C jpegtran -progressive which
+/// implies -optimize).
+fn write_coefficients_progressive(coeffs: &JpegCoefficients) -> Result<Vec<u8>> {
+    use crate::encode::huff_opt;
+    use crate::encode::progressive::{simple_progression, ProgressiveScan};
+
+    let num_components: usize = coeffs.components.len();
+    let is_grayscale: bool = num_components == 1;
+
+    let max_h: usize = coeffs
+        .components
+        .iter()
+        .map(|c| c.h_sampling as usize)
+        .max()
+        .unwrap_or(1);
+    let max_v: usize = coeffs
+        .components
+        .iter()
+        .map(|c| c.v_sampling as usize)
+        .max()
+        .unwrap_or(1);
+    let mcus_x: usize = coeffs.components[0].blocks_x / coeffs.components[0].h_sampling as usize;
+    let mcus_y: usize = coeffs.components[0].blocks_y / coeffs.components[0].v_sampling as usize;
+
+    let data_blocks_x: Vec<usize> = coeffs
+        .components
+        .iter()
+        .map(|c| (coeffs.width as usize * c.h_sampling as usize).div_ceil(max_h * 8))
+        .collect();
+    let data_blocks_y: Vec<usize> = coeffs
+        .components
+        .iter()
+        .map(|c| (coeffs.height as usize * c.v_sampling as usize).div_ceil(max_v * 8))
+        .collect();
+
+    // Gather symbol frequencies for optimized Huffman tables.
+    // C jpegtran -progressive implies -optimize.
+    let mut dc_luma_freq: [u32; 257] = [0u32; 257];
+    let mut dc_chroma_freq: [u32; 257] = [0u32; 257];
+    let mut ac_luma_freq: [u32; 257] = [0u32; 257];
+    let mut ac_chroma_freq: [u32; 257] = [0u32; 257];
+    {
+        let mut prev_dc: Vec<i16> = vec![0i16; num_components];
+        for mcu_y in 0..mcus_y {
+            for mcu_x in 0..mcus_x {
+                for (ci, comp) in coeffs.components.iter().enumerate() {
+                    let dc_freq: &mut [u32; 257] = if ci == 0 {
+                        &mut dc_luma_freq
+                    } else {
+                        &mut dc_chroma_freq
+                    };
+                    let ac_freq: &mut [u32; 257] = if ci == 0 {
+                        &mut ac_luma_freq
+                    } else {
+                        &mut ac_chroma_freq
+                    };
+                    for v in 0..comp.v_sampling as usize {
+                        for h in 0..comp.h_sampling as usize {
+                            let bx: usize = mcu_x * comp.h_sampling as usize + h;
+                            let by: usize = mcu_y * comp.v_sampling as usize + v;
+                            let is_dummy: bool = bx >= data_blocks_x[ci] || by >= data_blocks_y[ci];
+                            let block: &[i16; 64] = if is_dummy {
+                                &[0i16; 64]
+                            } else {
+                                &comp.blocks[by * comp.blocks_x + bx]
+                            };
+                            let dc_val: i16 = if is_dummy { prev_dc[ci] } else { block[0] };
+                            let diff: i16 = dc_val - prev_dc[ci];
+                            prev_dc[ci] = dc_val;
+                            huff_opt::gather_dc_symbol(diff, dc_freq);
+                            huff_opt::gather_ac_symbols(block, ac_freq);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    dc_luma_freq[256] = 1;
+    ac_luma_freq[256] = 1;
+    dc_chroma_freq[256] = 1;
+    ac_chroma_freq[256] = 1;
+
+    let (dc_luma_bits, dc_luma_values) = huff_opt::gen_optimal_table(&dc_luma_freq);
+    let (ac_luma_bits, ac_luma_values) = huff_opt::gen_optimal_table(&ac_luma_freq);
+    let (dc_chroma_bits, dc_chroma_values) = huff_opt::gen_optimal_table(&dc_chroma_freq);
+    let (ac_chroma_bits, ac_chroma_values) = huff_opt::gen_optimal_table(&ac_chroma_freq);
+
+    let dc_luma_table: HuffTable = build_huff_table(&dc_luma_bits, &dc_luma_values);
+    let ac_luma_table: HuffTable = build_huff_table(&ac_luma_bits, &ac_luma_values);
+    let dc_chroma_table: HuffTable = build_huff_table(&dc_chroma_bits, &dc_chroma_values);
+    let ac_chroma_table: HuffTable = build_huff_table(&ac_chroma_bits, &ac_chroma_values);
+
+    let scans: Vec<ProgressiveScan> = simple_progression(num_components);
+
+    // Encode each scan into separate bit streams
+    let mut scan_data: Vec<Vec<u8>> = Vec::with_capacity(scans.len());
+
+    for scan in &scans {
+        let mut bit_writer: BitWriter =
+            BitWriter::new(coeffs.width as usize * coeffs.height as usize);
+
+        if scan.ss == 0 && scan.se == 0 {
+            // DC scan (interleaved)
+            let mut prev_dc: Vec<i16> = vec![0i16; num_components];
+
+            for mcu_y in 0..mcus_y {
+                for mcu_x in 0..mcus_x {
+                    for &ci in &scan.component_indices {
+                        let comp = &coeffs.components[ci];
+                        let dc_table = if ci == 0 {
+                            &dc_luma_table
+                        } else {
+                            &dc_chroma_table
+                        };
+
+                        for v in 0..comp.v_sampling as usize {
+                            for h in 0..comp.h_sampling as usize {
+                                let bx: usize = mcu_x * comp.h_sampling as usize + h;
+                                let by: usize = mcu_y * comp.v_sampling as usize + v;
+                                let is_dummy: bool =
+                                    bx >= data_blocks_x[ci] || by >= data_blocks_y[ci];
+
+                                let dc_val: i16 = if is_dummy {
+                                    prev_dc[ci]
+                                } else {
+                                    let block_idx: usize = by * comp.blocks_x + bx;
+                                    comp.blocks[block_idx][0]
+                                };
+
+                                if scan.ah == 0 {
+                                    // DC first: encode (dc >> al) diff
+                                    let shifted: i16 = dc_val >> scan.al;
+                                    let diff: i16 = shifted - prev_dc[ci];
+                                    prev_dc[ci] = shifted;
+                                    HuffmanEncoder::encode_dc_only(&mut bit_writer, diff, dc_table);
+                                } else {
+                                    // DC refine: encode single bit
+                                    let bit: u8 = ((dc_val >> scan.al) & 1) as u8;
+                                    bit_writer.put_bits(bit as u32, 1);
+                                    // prev_dc not updated for refine
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        } else {
+            // AC scan (single component, non-interleaved)
+            let ci: usize = scan.component_indices[0];
+            let comp = &coeffs.components[ci];
+            let ac_table = if ci == 0 {
+                &ac_luma_table
+            } else {
+                &ac_chroma_table
+            };
+            let ss: usize = scan.ss as usize;
+            let se: usize = scan.se as usize;
+            let al: u8 = scan.al;
+            let ah: u8 = scan.ah;
+
+            if ah == 0 {
+                // AC first scan
+                let mut eobrun: u32 = 0;
+                for block in comp.blocks.iter() {
+                    encoder_pipeline::encode_ac_first_block(
+                        block,
+                        ss,
+                        se,
+                        al,
+                        ac_table,
+                        &mut bit_writer,
+                        &mut eobrun,
+                    );
+                }
+                if eobrun > 0 {
+                    encoder_pipeline::emit_eobrun(ac_table, &mut bit_writer, &mut eobrun);
+                }
+            } else {
+                // AC refine scan
+                let mut eobrun: u32 = 0;
+                let mut corr_buffer: Vec<u8> = Vec::with_capacity(encoder_pipeline::MAX_CORR_BITS);
+                for block in comp.blocks.iter() {
+                    encoder_pipeline::encode_ac_refine_block(
+                        block,
+                        ss,
+                        se,
+                        al,
+                        ac_table,
+                        &mut bit_writer,
+                        &mut eobrun,
+                        &mut corr_buffer,
+                    );
+                }
+                if eobrun > 0 {
+                    encoder_pipeline::emit_eobrun_with_corr(
+                        ac_table,
+                        &mut bit_writer,
+                        &mut eobrun,
+                        &mut corr_buffer,
+                    );
+                }
+            }
+        }
+
+        bit_writer.flush();
+        scan_data.push(bit_writer.data().to_vec());
+    }
+
+    // Assemble output
+    let mut output: Vec<u8> =
+        Vec::with_capacity(scan_data.iter().map(|s| s.len()).sum::<usize>() + 2048);
+
+    marker_writer::write_soi(&mut output);
+    marker_writer::write_app0_jfif_with_density(
+        &mut output,
+        coeffs.density_unit,
+        coeffs.x_density,
+        coeffs.y_density,
+    );
+
+    for (i, qt) in coeffs.quant_tables.iter().enumerate() {
+        marker_writer::write_dqt(&mut output, i as u8, qt);
+    }
+
+    // SOF2 (progressive)
+    let components: Vec<(u8, u8, u8, u8)> = coeffs
+        .components
+        .iter()
+        .map(|c| {
+            (
+                c.component_id,
+                c.h_sampling,
+                c.v_sampling,
+                c.quant_table_index,
+            )
+        })
+        .collect();
+    output.push(0xFF);
+    output.push(0xC2); // SOF2
+    let sof_len: u16 = 2 + 1 + 2 + 2 + 1 + (components.len() as u16 * 3);
+    output.extend_from_slice(&sof_len.to_be_bytes());
+    output.push(8);
+    output.extend_from_slice(&coeffs.height.to_be_bytes());
+    output.extend_from_slice(&coeffs.width.to_be_bytes());
+    output.push(components.len() as u8);
+    for &(id, h, v, qt) in &components {
+        output.push(id);
+        output.push((h << 4) | v);
+        output.push(qt);
+    }
+
+    // DHT tables (optimized)
+    marker_writer::write_dht(&mut output, 0, 0, &dc_luma_bits, &dc_luma_values);
+    marker_writer::write_dht(&mut output, 1, 0, &ac_luma_bits, &ac_luma_values);
+    if !is_grayscale {
+        marker_writer::write_dht(&mut output, 0, 1, &dc_chroma_bits, &dc_chroma_values);
+        marker_writer::write_dht(&mut output, 1, 1, &ac_chroma_bits, &ac_chroma_values);
+    }
+
+    // DRI
+    if coeffs.restart_interval > 0 {
+        marker_writer::write_dri(&mut output, coeffs.restart_interval);
+    }
+
+    // Write each scan: SOS header + entropy data
+    for (scan_idx, scan) in scans.iter().enumerate() {
+        let scan_comps: Vec<(u8, u8, u8)> = scan
+            .component_indices
+            .iter()
+            .map(|&ci| {
+                let tbl: u8 = if ci == 0 { 0 } else { 1 };
+                (coeffs.components[ci].component_id, tbl, tbl)
+            })
+            .collect();
+        marker_writer::write_sos_progressive(
+            &mut output,
+            &scan_comps,
+            scan.ss,
+            scan.se,
+            scan.ah,
+            scan.al,
+        );
+        output.extend_from_slice(&scan_data[scan_idx]);
+    }
+
+    marker_writer::write_eoi(&mut output);
     Ok(output)
 }
 
