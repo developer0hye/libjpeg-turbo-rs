@@ -78,33 +78,11 @@ pub fn decompress_cropped(data: &[u8], region: CropRegion) -> Result<Image> {
     // row-streaming H2V2 path matches C's behavior at crop boundaries.
     decoder.merged_upsample = false;
 
-    // Set crop region: the decoder produces output at MCU-aligned crop width
-    // (matching C jpeg_crop_scanline), so only y-axis extraction is needed.
+    // Set crop region: decode_image() handles both horizontal (MCU-aligned
+    // crop width matching C jpeg_crop_scanline) and vertical (exact row slice)
+    // cropping internally.
     decoder.set_crop_region(x, y, w, h);
-    let full = decoder.decode_image()?;
-    let bpp = full.pixel_format.bytes_per_pixel();
-
-    // Decoder output width is the crop width (w); extract y-axis rows only.
-    let row_bytes: usize = full.width * bpp;
-    let mut cropped_data = Vec::with_capacity(w * h * bpp);
-    for row in y..y + h {
-        let start: usize = row * row_bytes;
-        cropped_data.extend_from_slice(&full.data[start..start + row_bytes]);
-    }
-
-    Ok(Image {
-        width: w,
-        height: h,
-        pixel_format: full.pixel_format,
-        precision: 8,
-        data: cropped_data,
-        icc_profile: full.icc_profile,
-        exif_data: full.exif_data,
-        comment: full.comment,
-        density: full.density,
-        saved_markers: full.saved_markers,
-        warnings: full.warnings,
-    })
+    decoder.decode_image()
 }
 
 /// Compress raw pixel data into a JPEG byte stream.
