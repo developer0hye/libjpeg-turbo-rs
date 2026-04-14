@@ -2686,7 +2686,7 @@ impl<'a> Decoder<'a> {
     }
 
     pub fn decode_image(&self) -> Result<Image> {
-        let image: Image = self.decode_image_inner()?;
+        let mut image: Image = self.decode_image_inner()?;
         if !self.marker_processors.is_empty() {
             for marker in &image.saved_markers {
                 if let Some(processor) = self.marker_processors.get(&marker.code) {
@@ -2712,6 +2712,23 @@ impl<'a> Decoder<'a> {
                 "stop_on_warning: {}",
                 detail
             )));
+        }
+        // Apply vertical crop: slice the output to exactly the requested
+        // crop_y..crop_y+crop_height region. Horizontal crop is handled
+        // during decode; vertical crop is applied here to avoid threading
+        // the offset through every output path.
+        if let (Some(cy), Some(ch)) = (self.crop_y, self.crop_height) {
+            // Crop coordinates are in the output (post-scale) space
+            let offset: usize = cy.min(image.height);
+            let height: usize = ch.min(image.height.saturating_sub(offset));
+            if offset > 0 || height < image.height {
+                let bpp: usize = image.pixel_format.bytes_per_pixel();
+                let row_bytes: usize = image.width * bpp;
+                let start: usize = offset * row_bytes;
+                let end: usize = start + height * row_bytes;
+                image.data = image.data[start..end].to_vec();
+                image.height = height;
+            }
         }
         Ok(image)
     }
@@ -2977,11 +2994,76 @@ impl<'a> Decoder<'a> {
             )?
         };
 
-        // Handle output colorspace override
+        // Crop-aware output: when crop_x/crop_width are set, the output
+        // narrows to the crop width. Matches C jpeg_crop_scanline behavior:
+        // X is aligned down to iMCU boundary, width is expanded accordingly.
+        // Crop coordinates are in the original image space; align then scale
+        // to output space so they index correctly into scaled component planes.
+        // Crop coordinates are in the output (post-scale) space, matching C
+        // djpeg -crop behavior. Align X down to the scaled iMCU boundary and
+        // expand width to compensate.
+        let scaled_imcu_w: usize = max_h * block_size; // iMCU width in scaled output pixels
+        let (scaled_crop_x, scaled_crop_w): (Option<usize>, Option<usize>) =
+            if let (Some(cx), Some(cw)) = (self.crop_x, self.crop_width) {
+                // Align X down to scaled iMCU boundary, expand width
+                let aligned_x: usize = (cx / scaled_imcu_w) * scaled_imcu_w;
+                let expanded_w: usize = cw + (cx - aligned_x);
+                let clamped_w: usize = expanded_w.min(out_width.saturating_sub(aligned_x));
+                (Some(aligned_x), Some(clamped_w))
+            } else {
+                (None, None)
+            };
+        // Apply horizontal crop to out_width so all downstream paths use it.
+        let out_width: usize = if let Some(cw) = scaled_crop_w {
+            let cx: usize = scaled_crop_x.unwrap_or(0).min(out_width);
+            cw.min(out_width.saturating_sub(cx))
+        } else {
+            out_width
+        };
+
+        // Per-component X offsets for horizontal crop.
+        let comp_x_offsets: Vec<usize> = if let Some(cx) = scaled_crop_x {
+            let cx: usize = cx.min(out_width.saturating_sub(1));
+            frame
+                .components
+                .iter()
+                .map(|comp| cx * comp.horizontal_sampling as usize / max_h)
+                .collect()
+        } else {
+            vec![0; num_components]
+        };
+
+        // Handle output colorspace override (with crop offsets applied)
         if let Some(cs) = self.output_colorspace {
+            // Shift component planes by the crop X offset so the override
+            // function reads from the correct horizontal position.
+            let cropped_planes: Vec<Vec<u8>> = component_planes
+                .iter()
+                .enumerate()
+                .map(|(ci, plane)| {
+                    let comp_w: usize = mcus_x
+                        * frame.components[ci].horizontal_sampling as usize
+                        * comp_block_sizes[ci];
+                    let comp_h: usize = mcus_y
+                        * frame.components[ci].vertical_sampling as usize
+                        * comp_block_sizes[ci];
+                    let off: usize = comp_x_offsets[ci];
+                    if off == 0 {
+                        return plane.clone();
+                    }
+                    // Re-pack rows shifted by `off` pixels
+                    let mut shifted: Vec<u8> = Vec::with_capacity(plane.len());
+                    for row in 0..comp_h {
+                        shifted.extend_from_slice(&plane[row * comp_w + off..(row + 1) * comp_w]);
+                        // Pad to maintain stride
+                        shifted.extend(std::iter::repeat_n(0, off));
+                    }
+                    shifted
+                })
+                .collect();
             return crate::decode::toggles::decode_with_colorspace_override(
                 cs,
-                &component_planes,
+                &cropped_planes,
                 frame,
                 out_width,
                 out_height,
@@ -2995,42 +3077,9 @@ impl<'a> Decoder<'a> {
                 warnings,
             );
         }
-
-        // Crop-aware output: when crop_x/crop_width are set, the output
-        // narrows to the crop width. Per-component plane offsets ensure the
-        // upsampler sees the crop boundary as the image edge, matching C
-        // jpeg_crop_scanline behavior exactly.
-        // Crop coordinates are in the original image space; scale them to
-        // the output space so they index correctly into scaled component planes.
-        let scaled_crop_x: Option<usize> = self.crop_x.map(|cx| self.scale.scale_dim(cx));
-        let scaled_crop_w: Option<usize> = self.crop_width.map(|cw| self.scale.scale_dim(cw));
-        let comp_x_offsets: Vec<usize> = if let Some(cx) = scaled_crop_x {
-            let cx: usize = cx.min(out_width.saturating_sub(1));
-            frame
-                .components
-                .iter()
-                .map(|comp| cx * comp.horizontal_sampling as usize / max_h)
-                .collect()
-        } else {
-            vec![0; num_components]
-        };
-        let out_width: usize = if let Some(cw) = scaled_crop_w {
-            let cx: usize = scaled_crop_x.unwrap_or(0).min(out_width);
-            cw.min(out_width.saturating_sub(cx))
-        } else {
-            out_width
-        };
-        // Cap output height to the extended MCU range (crop MCU range + 1 row
-        // context on each side). IDCT is skipped outside this range, so
-        // component planes contain garbage beyond it.
-        let out_height: usize = if let (Some(cy), Some(ch)) = (self.crop_y, self.crop_height) {
-            let mcu_h: usize = max_v * block_size;
-            let mcu_end: usize = (cy + ch).div_ceil(mcu_h);
-            let extended_end: usize = (mcu_end + 1).min(mcus_y);
-            (extended_end * mcu_h).min(out_height)
-        } else {
-            out_height
-        };
+        // Vertical crop is applied as a final step in decode_image() after
+        // the full decode+upsample+color-convert, to avoid threading the row
+        // offset through every output path. See decode_image().
 
         // Upsample and color convert
         if num_components == 1 {
