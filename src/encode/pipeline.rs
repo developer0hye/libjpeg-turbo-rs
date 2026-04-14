@@ -4522,7 +4522,7 @@ fn encode_progressive_ac_scan(
 /// Pre-computes values and bitmap to skip zero runs via CTZ, matching
 /// C's jcphuff.c prepare+encode pattern. Combines Huffman code + magnitude
 /// into single put_bits calls.
-fn encode_ac_first_block(
+pub(crate) fn encode_ac_first_block(
     block: &[i16; 64],
     ss: usize,
     se: usize,
@@ -4609,7 +4609,7 @@ fn encode_ac_first_block(
 }
 
 /// Emit buffered EOBRUN to the bitstream. Matches C's emit_eobrun in jcphuff.c.
-fn emit_eobrun(ac_table: &HuffTable, writer: &mut BitWriter, eobrun: &mut u32) {
+pub(crate) fn emit_eobrun(ac_table: &HuffTable, writer: &mut BitWriter, eobrun: &mut u32) {
     if *eobrun == 0 {
         return;
     }
@@ -4628,7 +4628,7 @@ fn emit_eobrun(ac_table: &HuffTable, writer: &mut BitWriter, eobrun: &mut u32) {
 
 /// Maximum number of correction bits buffered across blocks for AC refine EOBRUN.
 /// Matches C libjpeg-turbo's MAX_CORR_BITS in jcphuff.c.
-const MAX_CORR_BITS: usize = 1000;
+pub(crate) const MAX_CORR_BITS: usize = 1000;
 
 /// Emit buffered correction bits from a byte slice.
 /// Each byte holds a single bit value (0 or 1).
@@ -4644,7 +4644,7 @@ fn emit_buffered_bits(writer: &mut BitWriter, bits: &[u8]) {
 /// Used by AC refine scans where correction bits must be associated with the
 /// EOBRUN symbol. Matches C libjpeg-turbo's emit_eobrun in jcphuff.c when
 /// combined with the correction bit buffer (entropy->bit_buffer / entropy->BE).
-fn emit_eobrun_with_corr(
+pub(crate) fn emit_eobrun_with_corr(
     ac_table: &HuffTable,
     writer: &mut BitWriter,
     eobrun: &mut u32,
@@ -4683,7 +4683,7 @@ fn emit_eobrun_with_corr(
 /// after each Huffman symbol, while cross-block bits (BE) accumulate in
 /// `corr_buffer` and are flushed only when the EOBRUN is emitted.
 #[allow(clippy::too_many_arguments)]
-fn encode_ac_refine_block(
+pub(crate) fn encode_ac_refine_block(
     block: &[i16; 64],
     ss: usize,
     se: usize,
