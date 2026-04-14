@@ -245,13 +245,27 @@ pub fn write_coefficients(coeffs: &JpegCoefficients) -> Result<Vec<u8>> {
         .map(|c| (coeffs.height as usize * c.v_sampling as usize).div_ceil(max_v * 8))
         .collect();
 
-    // Entropy encode
+    // Entropy encode with optional restart markers
     let mut bit_writer = BitWriter::new(coeffs.width as usize * coeffs.height as usize);
     let mut prev_dc = vec![0i16; num_components];
     let dummy_block: [i16; 64] = [0i16; 64];
+    let ri: u32 = coeffs.restart_interval as u32;
+    let mut mcu_count: u32 = 0;
+    let mut restart_idx: u8 = 0;
 
     for mcu_y in 0..mcus_y {
         for mcu_x in 0..mcus_x {
+            // Insert restart marker between MCUs when interval is set
+            if ri > 0 && mcu_count > 0 && mcu_count.is_multiple_of(ri) {
+                bit_writer.flush();
+                bit_writer.write_restart_marker(restart_idx);
+                restart_idx = (restart_idx + 1) & 7;
+                // Reset DC predictions after restart
+                for dc in prev_dc.iter_mut() {
+                    *dc = 0;
+                }
+            }
+
             for (ci, comp) in coeffs.components.iter().enumerate() {
                 let dc_table = if ci == 0 {
                     &dc_luma_table
@@ -271,8 +285,6 @@ pub fn write_coefficients(coeffs: &JpegCoefficients) -> Result<Vec<u8>> {
                         let is_dummy: bool = bx >= data_blocks_x[ci] || by >= data_blocks_y[ci];
 
                         if is_dummy {
-                            // Dummy block: DC = prev_dc (encodes as 0 diff), AC = 0.
-                            // Matches C jccoefct.c:184-191 behavior.
                             let mut dblock: [i16; 64] = dummy_block;
                             dblock[0] = prev_dc[ci];
                             HuffmanEncoder::encode_block(
@@ -296,6 +308,7 @@ pub fn write_coefficients(coeffs: &JpegCoefficients) -> Result<Vec<u8>> {
                     }
                 }
             }
+            mcu_count += 1;
         }
     }
 
@@ -380,6 +393,11 @@ pub fn write_coefficients(coeffs: &JpegCoefficients) -> Result<Vec<u8>> {
             &tables::AC_CHROMINANCE_BITS,
             &tables::AC_CHROMINANCE_VALUES,
         );
+    }
+
+    // DRI (restart interval) — after DHT, before SOS (matching C jpegtran order)
+    if coeffs.restart_interval > 0 {
+        marker_writer::write_dri(&mut output, coeffs.restart_interval);
     }
 
     // Scan header — preserve source component IDs
@@ -868,7 +886,13 @@ pub fn transform_jpeg_with_options(data: &[u8], options: &TransformOptions) -> R
         return Ok(Vec::new());
     }
 
+    // Apply restart interval override from transform options.
+    if options.restart_interval > 0 {
+        coeffs.restart_interval = options.restart_interval;
+    }
+
     // Write output with the appropriate encoding.
+    // TODO: progressive write path for transforms (write_coefficients_progressive)
     let output: Vec<u8> = if options.optimize {
         write_coefficients_optimized(&coeffs)?
     } else {
@@ -930,9 +954,18 @@ fn write_coefficients_optimized(coeffs: &JpegCoefficients) -> Result<Vec<u8>> {
 
     let mut prev_dc: Vec<i16> = vec![0i16; num_components];
     let opt_dummy: [i16; 64] = [0i16; 64];
+    let p1_ri: u32 = coeffs.restart_interval as u32;
+    let mut p1_mcu_count: u32 = 0;
 
     for mcu_y in 0..mcus_y {
         for mcu_x in 0..mcus_x {
+            // Reset DC predictions at restart boundaries (matching Pass 2)
+            if p1_ri > 0 && p1_mcu_count > 0 && p1_mcu_count.is_multiple_of(p1_ri) {
+                for dc in prev_dc.iter_mut() {
+                    *dc = 0;
+                }
+            }
+
             for (ci, comp) in coeffs.components.iter().enumerate() {
                 let dc_freq: &mut [u32; 257] = if ci == 0 {
                     &mut dc_luma_freq
@@ -966,6 +999,7 @@ fn write_coefficients_optimized(coeffs: &JpegCoefficients) -> Result<Vec<u8>> {
                     }
                 }
             }
+            p1_mcu_count += 1;
         }
     }
 
@@ -990,9 +1024,21 @@ fn write_coefficients_optimized(coeffs: &JpegCoefficients) -> Result<Vec<u8>> {
     // === Pass 2: entropy encode with optimal tables ===
     let mut bit_writer = BitWriter::new(coeffs.width as usize * coeffs.height as usize);
     let mut prev_dc_pass2: Vec<i16> = vec![0i16; num_components];
+    let opt_ri: u32 = coeffs.restart_interval as u32;
+    let mut opt_mcu_count: u32 = 0;
+    let mut opt_restart_idx: u8 = 0;
 
     for mcu_y in 0..mcus_y {
         for mcu_x in 0..mcus_x {
+            if opt_ri > 0 && opt_mcu_count > 0 && opt_mcu_count.is_multiple_of(opt_ri) {
+                bit_writer.flush();
+                bit_writer.write_restart_marker(opt_restart_idx);
+                opt_restart_idx = (opt_restart_idx + 1) & 7;
+                for dc in prev_dc_pass2.iter_mut() {
+                    *dc = 0;
+                }
+            }
+
             for (ci, comp) in coeffs.components.iter().enumerate() {
                 let dc_table = if ci == 0 {
                     &dc_luma_table
@@ -1035,6 +1081,7 @@ fn write_coefficients_optimized(coeffs: &JpegCoefficients) -> Result<Vec<u8>> {
                     }
                 }
             }
+            opt_mcu_count += 1;
         }
     }
 
@@ -1093,6 +1140,11 @@ fn write_coefficients_optimized(coeffs: &JpegCoefficients) -> Result<Vec<u8>> {
     if !is_grayscale {
         marker_writer::write_dht(&mut output, 0, 1, &dc_chroma_bits, &dc_chroma_values);
         marker_writer::write_dht(&mut output, 1, 1, &ac_chroma_bits, &ac_chroma_values);
+    }
+
+    // DRI (restart interval)
+    if coeffs.restart_interval > 0 {
+        marker_writer::write_dri(&mut output, coeffs.restart_interval);
     }
 
     // Scan header — preserve source component IDs.

@@ -153,7 +153,7 @@ fn try_rust_opts(
     grayscale: bool,
     optimize: bool,
     progressive: bool,
-    restart: RestartArg,
+    restart_interval_mcus: u16,
     trim: bool,
 ) -> Option<TransformOptions> {
     // API gaps: these fields exist in TransformOptions but are not yet wired
@@ -166,10 +166,7 @@ fn try_rust_opts(
         eprintln!("SKIP (API gap): progressive scan encoding not implemented in write path");
         return None;
     }
-    if restart != RestartArg::None {
-        eprintln!("SKIP (API gap): restart interval not yet in TransformOptions");
-        return None;
-    }
+    let restart_interval: u16 = restart_interval_mcus;
 
     Some(TransformOptions {
         op,
@@ -179,6 +176,7 @@ fn try_rust_opts(
         optimize,
         progressive,
         arithmetic,
+        restart_interval,
         copy_markers: copy_mode,
         ..TransformOptions::default()
     })
@@ -195,6 +193,7 @@ fn build_jpegtran_args(
     optimize: bool,
     progressive: bool,
     trim: bool,
+    restart: RestartArg,
     // Pre-formatted crop string owned by the caller so we can borrow it.
     crop_str: &str,
 ) -> Vec<String> {
@@ -234,6 +233,20 @@ fn build_jpegtran_args(
         args.push("-trim".into());
     }
 
+    match restart {
+        RestartArg::None => {}
+        #[cfg(feature = "full-c-parity")]
+        RestartArg::WithIcc => {
+            args.push("-restart".into());
+            args.push("1".into());
+        }
+        #[cfg(feature = "full-c-parity")]
+        RestartArg::Bits => {
+            args.push("-restart".into());
+            args.push("1b".into());
+        }
+    }
+
     args
 }
 
@@ -257,6 +270,25 @@ fn run_one_combo(
     trim: bool,
     label: &str,
 ) -> bool {
+    // Compute restart interval in MCUs from the RestartArg variant.
+    let restart_interval_mcus: u16 = match restart {
+        RestartArg::None => 0,
+        #[cfg(feature = "full-c-parity")]
+        RestartArg::WithIcc => {
+            // `-restart 1` = 1 MCU row = mcus_x MCUs
+            let coeffs = libjpeg_turbo_rs::read_coefficients(source_jpeg).unwrap();
+            let max_h: usize = coeffs
+                .components
+                .iter()
+                .map(|c| c.h_sampling as usize)
+                .max()
+                .unwrap_or(1);
+            (coeffs.width as usize).div_ceil(max_h * 8) as u16
+        }
+        #[cfg(feature = "full-c-parity")]
+        RestartArg::Bits => 1, // `-restart 1b` = every 1 MCU
+    };
+
     let rust_opts: TransformOptions = match try_rust_opts(
         op,
         arithmetic,
@@ -265,7 +297,7 @@ fn run_one_combo(
         grayscale,
         optimize,
         progressive,
-        restart,
+        restart_interval_mcus,
         trim,
     ) {
         Some(o) => o,
@@ -285,6 +317,7 @@ fn run_one_combo(
         optimize,
         progressive,
         trim,
+        restart,
         &crop_str,
     );
     let jtran_str_refs: Vec<&str> = jtran_args.iter().map(|s| s.as_str()).collect();
