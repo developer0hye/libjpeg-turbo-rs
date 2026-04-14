@@ -3022,12 +3022,18 @@ impl<'a> Decoder<'a> {
         };
 
         // Per-component X offsets for horizontal crop.
+        // scaled_crop_x is an offset into the full-width component planes,
+        // NOT clamped to out_width (which is the crop width).
         let comp_x_offsets: Vec<usize> = if let Some(cx) = scaled_crop_x {
-            let cx: usize = cx.min(out_width.saturating_sub(1));
             frame
                 .components
                 .iter()
-                .map(|comp| cx * comp.horizontal_sampling as usize / max_h)
+                .enumerate()
+                .map(|(ci, comp)| {
+                    let comp_w: usize =
+                        mcus_x * comp.horizontal_sampling as usize * comp_block_sizes[ci];
+                    (cx * comp.horizontal_sampling as usize / max_h).min(comp_w.saturating_sub(1))
+                })
                 .collect()
         } else {
             vec![0; num_components]
@@ -3077,9 +3083,19 @@ impl<'a> Decoder<'a> {
                 warnings,
             );
         }
-        // Vertical crop is applied as a final step in decode_image() after
-        // the full decode+upsample+color-convert, to avoid threading the row
-        // offset through every output path. See decode_image().
+        // Cap output height to the extended MCU range when vertical crop is set.
+        // IDCT is skipped outside this range, so component planes contain
+        // uninitialized data beyond it. The upsampler needs this cap to produce
+        // correct edge behavior. decode_image() then slices relative to this
+        // capped range using crop_y offset from the MCU-range start.
+        let out_height: usize = if let (Some(cy), Some(ch)) = (self.crop_y, self.crop_height) {
+            let mcu_h: usize = max_v * block_size;
+            let mcu_end: usize = (cy + ch).div_ceil(mcu_h);
+            let extended_end: usize = (mcu_end + 1).min(mcus_y);
+            (extended_end * mcu_h).min(out_height)
+        } else {
+            out_height
+        };
 
         // Upsample and color convert
         if num_components == 1 {
