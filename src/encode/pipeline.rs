@@ -1998,20 +1998,15 @@ fn compress_lossless_rgb(
 
     marker_writer::write_soi(&mut output);
 
-    // DC Huffman table 0 (luminance) for all 3 components
-    marker_writer::write_dht(
-        &mut output,
-        0,
-        0,
-        &tables::DC_LUMINANCE_BITS,
-        &tables::DC_LUMINANCE_VALUES,
-    );
+    // Adobe APP14 with transform=0 to signal RGB colorspace (matching C cjpeg)
+    marker_writer::write_app14_adobe(&mut output, 0);
 
-    // SOF3 with 3 components: R(id=1), G(id=2), B(id=3), all 1x1, qt=0
+    // SOF3 with 3 components: R(id='R'), G(id='G'), B(id='B'), all 1x1, qt=0.
+    // C libjpeg-turbo uses ASCII component IDs for RGB colorspace lossless.
     let components: Vec<(u8, u8, u8, u8)> = vec![
-        (1, 1, 1, 0), // R: id=1, h=1, v=1, qt=0
-        (2, 1, 1, 0), // G: id=2, h=1, v=1, qt=0
-        (3, 1, 1, 0), // B: id=3, h=1, v=1, qt=0
+        (b'R', 1, 1, 0), // R: id=0x52, h=1, v=1, qt=0
+        (b'G', 1, 1, 0), // G: id=0x47, h=1, v=1, qt=0
+        (b'B', 1, 1, 0), // B: id=0x42, h=1, v=1, qt=0
     ];
     marker_writer::write_sof3(
         &mut output,
@@ -2021,11 +2016,20 @@ fn compress_lossless_rgb(
         &components,
     );
 
-    // SOS with 3 components: all use DC table 0
+    // DC Huffman table 0 (luminance) for all 3 components (after SOF3, matching C)
+    marker_writer::write_dht(
+        &mut output,
+        0,
+        0,
+        &tables::DC_LUMINANCE_BITS,
+        &tables::DC_LUMINANCE_VALUES,
+    );
+
+    // SOS with 3 components: all use DC table 0 (matching SOF3 ASCII IDs)
     let scan_components: Vec<(u8, u8)> = vec![
-        (1, 0), // R -> DC table 0
-        (2, 0), // G -> DC table 0
-        (3, 0), // B -> DC table 0
+        (b'R', 0), // R -> DC table 0
+        (b'G', 0), // G -> DC table 0
+        (b'B', 0), // B -> DC table 0
     ];
     marker_writer::write_sos_lossless(&mut output, &scan_components, predictor, point_transform);
 
