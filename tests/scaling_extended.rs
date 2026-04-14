@@ -1,17 +1,12 @@
 //! Extended scaling factor tests.
 //!
-//! The C libjpeg-turbo test suite tests 15 scaling factors: 16/8, 15/8, 14/8,
-//! 13/8, 12/8, 11/8, 10/8, 9/8, 7/8, 6/8, 5/8, 4/8, 3/8, 2/8, 1/8.
-//!
-//! Our implementation supports only the standard libjpeg scaling factors via
-//! reduced IDCT: 1/1 (8/8), 1/2 (4/8), 1/4 (2/8), 1/8 (1/8).
-//! Intermediate factors (e.g., 15/8, 7/8) are NOT supported because our
-//! ScalingFactor::block_size() maps them to the nearest supported IDCT size.
+//! All 16 libjpeg-turbo scaling factors are supported via dedicated IDCT kernels
+//! (1×1 through 16×16): 2/1, 15/8, 7/4, 13/8, 3/2, 11/8, 5/4, 9/8, 1/1,
+//! 7/8, 3/4, 5/8, 1/2, 3/8, 1/4, 1/8.
 //!
 //! This test file:
-//! - Thoroughly tests all 4 supported factors across multiple subsampling modes
-//! - Documents the unsupported intermediate factors with explicit tests showing
-//!   they map to the nearest supported factor (not a separate decode path)
+//! - Tests scaling factors across multiple subsampling modes
+//! - Verifies intermediate factors produce correctly-sized output
 
 use std::path::PathBuf;
 use std::process::Command;
@@ -349,18 +344,12 @@ fn scale_2_4_same_as_1_2() {
 }
 
 // ===========================================================================
-// Intermediate (unsupported) scaling factors map to nearest supported IDCT
+// Extended scaling factor tests
 //
-// libjpeg-turbo C supports 15 factors via M/8 IDCT. Our implementation only
-// supports 4 factors via standard reduced-IDCT (block sizes 8, 4, 2, 1).
-// The ScalingFactor::block_size() maps unsupported ratios to the nearest:
-//   ratio_x8 >= 5 -> block_size 8 (full)
-//   ratio_x8 3..=4 -> block_size 4 (half)
-//   ratio_x8 == 2 -> block_size 2 (quarter)
-//   ratio_x8 0..=1 -> block_size 1 (eighth)
-//
-// These tests document that intermediate factors produce output at the
-// corresponding supported block size, NOT at the exact requested dimensions.
+// All 16 libjpeg-turbo scaling factors are now supported via dedicated IDCT
+// kernels (block sizes 1 through 16). ScalingFactor::block_size() computes
+// ceil(num * 8 / denom) clamped to [1, 16], mapping each factor to its
+// corresponding IDCT kernel size.
 // ===========================================================================
 
 #[test]

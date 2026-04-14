@@ -57,7 +57,9 @@ Apple M1 Pro, C libjpeg-turbo 3.1.0, quality 75:
 | 4:2:2 | 7,148 | 6,766 | 1.06x |
 | 4:4:4 | 10,596 | 10,272 | 1.03x |
 
-Decoding matches or beats C for 4:2:2 and 4:4:4 subsampling; 4:2:0 has a 7% gap. Encoding is within 3-7% of C on aarch64; x86_64 encoding has room for further SIMD optimization (Huffman coding). See [`docs/ENCODING_PERFORMANCE.md`](docs/ENCODING_PERFORMANCE.md) for full results.
+**aarch64**: Decoding matches or beats C for 4:2:2 and 4:4:4; 4:2:0 has a 7% gap. Encoding matches or beats C in 7 of 8 configurations (see [`docs/ENCODING_PERFORMANCE.md`](docs/ENCODING_PERFORMANCE.md)); the remaining 1080p 4:2:0 gap (~4%) is structural function-call overhead.
+
+**x86_64**: Decoding beats C across most resolutions. Encoding is 2-13% slower — the encoder has AVX2 SIMD for FDCT/quantize/color-convert but uses scalar Huffman coding (C libjpeg-turbo has SSE2 Huffman; porting is in progress).
 
 ## Quick Start
 
@@ -148,18 +150,19 @@ Grayscale, RGB, BGR, RGBA, BGRA, ARGB, ABGR, RGBX, BGRX, XRGB, XBGR, CMYK, RGB56
 
 ### SIMD
 
-| Platform | Backend | Status |
-|----------|---------|--------|
-| aarch64 | NEON | IDCT, FDCT, color convert, (de)quantize, up/downsample, zigzag, Huffman |
-| x86_64 | SSE2/AVX2 | IDCT, FDCT, color convert (all pixel formats), quantize+zigzag, upsample, merged upsample+color |
+| Platform | Backend | Decode | Encode |
+|----------|---------|--------|--------|
+| aarch64 | NEON | IDCT, color convert, upsample, dequantize | FDCT, color convert, quantize+zigzag, downsample, Huffman |
+| x86_64 | SSE2 | IDCT, color convert, upsample | scalar fallback |
+| x86_64 | AVX2 | IDCT, color convert, upsample, merged upsample+color | FDCT, color convert, quantize+zigzag, downsample |
 
-Both platforms have comprehensive SIMD coverage across the encode/decode pipeline.
+aarch64 has comprehensive SIMD across the full pipeline. x86_64 decode is fully accelerated (SSE2/AVX2); x86_64 encode has AVX2 acceleration for compute-heavy stages but scalar Huffman coding.
 
 All SIMD routines have scalar fallbacks. SIMD is enabled by default via the `simd` feature flag.
 
 ### Additional Features
 
-- Scaled IDCT (1/2, 1/4, 1/8)
+- Scaled IDCT (all 16 libjpeg factors: 2/1, 15/8, 7/4, ..., 1/2, 1/4, 1/8)
 - Lossless spatial transforms (rotate, flip, transpose)
 - DCT coefficient access (`read_coefficients` / `write_coefficients`)
 - Metadata: JFIF, EXIF, ICC profile, Adobe APP14, comments
