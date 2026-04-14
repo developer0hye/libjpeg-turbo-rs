@@ -5,7 +5,7 @@
 //! parameters are stored in a single `TjHandle` and accessed via `TjParam`.
 
 use crate::common::error::{JpegError, Result};
-use crate::common::types::{CropRegion, PixelFormat, ScalingFactor, Subsampling};
+use crate::common::types::{CropRegion, DctMethod, PixelFormat, ScalingFactor, Subsampling};
 use crate::decode::pipeline::{Decoder, Image};
 
 /// All TJPARAM parameter identifiers from libjpeg-turbo TJ3 API.
@@ -380,6 +380,14 @@ impl TjHandle {
             .lossless_predictor(self.lossless_psv as u8)
             .lossless_point_transform(self.lossless_pt as u8);
 
+        // Wire FastDct into encoder DCT method
+        if self.fast_dct != 0 {
+            encoder = encoder.dct_method(DctMethod::IsFast);
+        }
+
+        // TODO(#205): density params (x_density, y_density, density_units)
+        // not yet wired — Encoder lacks a density() builder method.
+
         if self.restart_blocks > 0 {
             encoder = encoder.restart_blocks(self.restart_blocks as u16);
         } else if self.restart_rows > 0 {
@@ -388,6 +396,37 @@ impl TjHandle {
 
         if let Some(ref icc) = self.icc_profile {
             encoder = encoder.icc_profile(icc);
+        }
+
+        // Wire BottomUp: flip rows before encoding
+        if self.bottom_up != 0 {
+            let bpp: usize = pixel_format.bytes_per_pixel();
+            let row_bytes: usize = width * bpp;
+            let mut flipped: Vec<u8> = Vec::with_capacity(pixels.len());
+            for row in (0..height).rev() {
+                flipped.extend_from_slice(&pixels[row * row_bytes..(row + 1) * row_bytes]);
+            }
+            let mut encoder = Encoder::new(&flipped, width, height, pixel_format)
+                .quality(self.quality as u8)
+                .subsampling(self.subsampling_enum())
+                .optimize_huffman(self.optimize != 0)
+                .progressive(self.progressive != 0)
+                .arithmetic(self.arithmetic != 0)
+                .lossless(self.lossless != 0)
+                .lossless_predictor(self.lossless_psv as u8)
+                .lossless_point_transform(self.lossless_pt as u8);
+            if self.fast_dct != 0 {
+                encoder = encoder.dct_method(DctMethod::IsFast);
+            }
+            if self.restart_blocks > 0 {
+                encoder = encoder.restart_blocks(self.restart_blocks as u16);
+            } else if self.restart_rows > 0 {
+                encoder = encoder.restart_rows(self.restart_rows as u16);
+            }
+            if let Some(ref icc) = self.icc_profile {
+                encoder = encoder.icc_profile(icc);
+            }
+            return encoder.encode();
         }
 
         encoder.encode()
@@ -426,17 +465,38 @@ impl TjHandle {
             decoder.set_scan_limit(self.scan_limit as u32);
         }
 
+        // Wire FastUpSample
+        if self.fast_upsample != 0 {
+            decoder.set_fast_upsample(true);
+        }
+
+        // Wire FastDct
+        if self.fast_dct != 0 {
+            decoder.set_fast_dct(true);
+        }
+
         // Apply crop region
         if let Some(crop) = self.cropping_region {
             decoder.set_crop_region(crop.x, crop.y, crop.width, crop.height);
         }
 
-        let img = decoder.decode_image()?;
+        let mut img: Image = decoder.decode_image()?;
 
         // Update read-only params from decoded image
         self.width = img.width as i32;
         self.height = img.height as i32;
         self.precision = img.precision as i32;
+
+        // Wire BottomUp: flip rows after decoding
+        if self.bottom_up != 0 {
+            let bpp: usize = img.pixel_format.bytes_per_pixel();
+            let row_bytes: usize = img.width * bpp;
+            let mut flipped: Vec<u8> = Vec::with_capacity(img.data.len());
+            for row in (0..img.height).rev() {
+                flipped.extend_from_slice(&img.data[row * row_bytes..(row + 1) * row_bytes]);
+            }
+            img.data = flipped;
+        }
 
         Ok(img)
     }
