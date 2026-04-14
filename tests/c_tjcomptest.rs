@@ -12,6 +12,7 @@
 
 mod helpers;
 
+use libjpeg_turbo_rs::common::types::ColorSpace;
 use libjpeg_turbo_rs::common::types::DctMethod;
 use libjpeg_turbo_rs::{Encoder, PixelFormat, Subsampling};
 use std::path::{Path, PathBuf};
@@ -280,18 +281,45 @@ fn run_lossy_combo(
 
     // -----------------------------------------------------------------------
     // Variant 3: RGB colorspace (-rg / cjpeg -rgb)
-    // SKIP: The Rust Encoder::colorspace(ColorSpace::Rgb) override is not
-    // threaded into the core compress functions; the encoder always produces
-    // YCbCr-based JPEG regardless of the colorspace_override field.  C cjpeg
-    // -rgb produces a genuinely different (larger, RGB-colorspace) JPEG.
-    // Until the Encoder builder wires colorspace_override into compress(), this
-    // combination cannot be byte-identical and must be skipped.
+    // Only valid for S444 (sampi=0) — RGB colorspace uses 1x1 sampling for
+    // all components, which C cjpeg -rgb also enforces.
     {
         let label = format!("{}_rgb_cs_samp{}", label_prefix, TJCOMP_SUBSAMP[sampi]);
-        eprintln!(
-            "SKIP: {} — ColorSpace::Rgb not wired into Encoder compress path",
-            label
-        );
+        if sampi != 0 {
+            eprintln!(
+                "SKIP: {} — RGB colorspace only supports S444 (1x1 sampling)",
+                label
+            );
+        } else {
+            let mut enc = Encoder::new(&rgb_pixels, rgb_w, rgb_h, PixelFormat::Rgb);
+            enc = enc.colorspace(ColorSpace::Rgb);
+            enc = enc.fancy_downsampling(false);
+            if let Some(q) = quality {
+                enc = enc.quality(q);
+            }
+            if let Some(ref icc) = icc_data {
+                enc = enc.icc_profile(icc);
+            }
+            // RGB colorspace: no arithmetic/progressive/optimize/restart (C cjpeg -rgb
+            // in the test script only uses default encoding options)
+
+            let rust_jpeg = enc.encode().expect("Rust RGB encode failed");
+            let rust_out = helpers::TempFile::new(&format!("{}_rust.jpg", label));
+            rust_out.write_bytes(&rust_jpeg);
+
+            // cjpeg -rgb always uses 1x1 sampling
+            let mut c_args: Vec<&str> = vec!["-rgb"];
+            for a in &cjpeg_qual_args {
+                c_args.push(a.as_str());
+            }
+            for a in &icc_cjpeg_args {
+                c_args.push(a.as_str());
+            }
+
+            let c_out = helpers::TempFile::new(&format!("{}_c.jpg", label));
+            helpers::run_c_cjpeg(cjpeg, &c_args, rgb_ppm_path, c_out.path());
+            helpers::assert_files_identical(rust_out.path(), c_out.path(), &label);
+        }
     }
 
     // -----------------------------------------------------------------------
