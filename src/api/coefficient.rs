@@ -886,10 +886,11 @@ pub fn transform_jpeg_with_options(data: &[u8], options: &TransformOptions) -> R
         return Ok(Vec::new());
     }
 
-    // Apply restart interval override from transform options.
-    if options.restart_interval > 0 {
-        coeffs.restart_interval = options.restart_interval;
-    }
+    // Apply restart interval from transform options.
+    // Only write restart markers when explicitly requested — don't inherit
+    // the source JPEG's restart interval since MCU layout may change after
+    // transforms (crop, trim, grayscale).
+    coeffs.restart_interval = options.restart_interval;
 
     // Write output with the appropriate encoding.
     // TODO: progressive write path for transforms (write_coefficients_progressive)
