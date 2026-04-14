@@ -559,17 +559,53 @@ pub fn transform_jpeg_with_options(data: &[u8], options: &TransformOptions) -> R
     }
 
     // GRAYSCALE: drop all non-Y components.
+    // When the original Y component had h_sampling > 1 or v_sampling > 1,
+    // the block grid was MCU-padded. Rearrange blocks to a 1x1 raster layout
+    // by stripping padding blocks at row/column edges.
     if options.grayscale && coeffs.components.len() > 1 {
+        let orig_bx: usize = coeffs.components[0].blocks_x;
+        let orig_by: usize = coeffs.components[0].blocks_y;
+
+        // Target: ceil(width/8) x ceil(height/8) blocks in simple raster order
+        let target_bx: usize = (coeffs.width as usize).div_ceil(8);
+        let target_by: usize = (coeffs.height as usize).div_ceil(8);
+
+        if orig_bx != target_bx || orig_by != target_by {
+            // Rearrange: blocks are in raster order within MCU-padded grid,
+            // just strip the extra columns/rows.
+            let mut new_blocks: Vec<[i16; 64]> = Vec::with_capacity(target_bx * target_by);
+            for by in 0..target_by {
+                for bx in 0..target_bx {
+                    new_blocks.push(coeffs.components[0].blocks[by * orig_bx + bx]);
+                }
+            }
+            coeffs.components[0].blocks = new_blocks;
+            coeffs.components[0].blocks_x = target_bx;
+            coeffs.components[0].blocks_y = target_by;
+        }
+
         coeffs.components.truncate(1);
-        // Normalize sampling factors to 1x1 for single-component.
         coeffs.components[0].h_sampling = 1;
         coeffs.components[0].v_sampling = 1;
-        // Keep only the first quant table.
         if coeffs.quant_tables.len() > 1 {
             coeffs.quant_tables.truncate(1);
         }
         coeffs.components[0].quant_table_index = 0;
     }
+
+    // Recompute max sampling factors after grayscale may have changed them.
+    let max_h: usize = coeffs
+        .components
+        .iter()
+        .map(|c| c.h_sampling as usize)
+        .max()
+        .unwrap_or(1);
+    let max_v: usize = coeffs
+        .components
+        .iter()
+        .map(|c| c.v_sampling as usize)
+        .max()
+        .unwrap_or(1);
 
     // Spatial transforms operate on natural (row-major) order coefficients.
     // Blocks are stored in zigzag order, so convert before/after transform.
