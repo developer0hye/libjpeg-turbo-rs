@@ -14,7 +14,7 @@ mod helpers;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use libjpeg_turbo_rs::{compress, decompress_cropped, CropRegion, PixelFormat, Subsampling};
+use libjpeg_turbo_rs::{compress, PixelFormat, Subsampling};
 
 // ===========================================================================
 // Constants matching C croptest.in
@@ -200,15 +200,36 @@ fn run_crop_scenario(
         return false;
     }
 
-    // Rust side
-    let region: CropRegion = CropRegion {
-        x: crop_x,
-        y: crop_y,
-        width: crop_w,
-        height: crop_h,
+    // Rust side — use Decoder directly to support nosmooth flag.
+    let mut decoder = libjpeg_turbo_rs::decode::pipeline::Decoder::new(jpeg_data)
+        .unwrap_or_else(|e| panic!("[{scenario_label}] Decoder::new failed: {e}"));
+    if nosmooth {
+        decoder.set_fast_upsample(true);
+    }
+    // Compute MCU-aligned crop (matching C jpeg_crop_scanline)
+    let header = decoder.header();
+    let img_w: usize = header.width as usize;
+    let img_h: usize = header.height as usize;
+    let max_h_samp: usize = header
+        .components
+        .iter()
+        .map(|c| c.horizontal_sampling as usize)
+        .max()
+        .unwrap_or(1);
+    let align: usize = if header.components.len() == 1 {
+        8
+    } else {
+        8 * max_h_samp
     };
-    let rust_img = decompress_cropped(jpeg_data, region)
-        .unwrap_or_else(|e| panic!("[{scenario_label}] Rust decompress_cropped failed: {e}"));
+    let input_x: usize = crop_x.min(img_w);
+    let aligned_x: usize = (input_x / align) * align;
+    let aligned_w: usize = (crop_w + input_x - aligned_x).min(img_w.saturating_sub(aligned_x));
+    let clamped_h: usize = crop_h.min(img_h.saturating_sub(crop_y.min(img_h)));
+    decoder.set_merged_upsample(false);
+    decoder.set_crop_region(aligned_x, crop_y, aligned_w, clamped_h);
+    let rust_img = decoder
+        .decode_image()
+        .unwrap_or_else(|e| panic!("[{scenario_label}] Rust decode_image failed: {e}"));
 
     if rust_img.width == 0 || rust_img.height == 0 {
         // Crop was clamped to zero — nothing to compare
