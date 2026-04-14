@@ -45,24 +45,28 @@ impl From<PixelFormat> for jpeg::PixelFormat {
     }
 }
 
-impl From<jpeg::PixelFormat> for PixelFormat {
-    fn from(f: jpeg::PixelFormat) -> Self {
+impl TryFrom<jpeg::PixelFormat> for PixelFormat {
+    type Error = JsValue;
+
+    fn try_from(f: jpeg::PixelFormat) -> Result<Self, Self::Error> {
         match f {
-            jpeg::PixelFormat::Grayscale => PixelFormat::Grayscale,
-            jpeg::PixelFormat::Rgb => PixelFormat::Rgb,
-            jpeg::PixelFormat::Rgba => PixelFormat::Rgba,
-            jpeg::PixelFormat::Bgr => PixelFormat::Bgr,
-            jpeg::PixelFormat::Bgra => PixelFormat::Bgra,
-            jpeg::PixelFormat::Rgbx => PixelFormat::Rgbx,
-            jpeg::PixelFormat::Bgrx => PixelFormat::Bgrx,
-            jpeg::PixelFormat::Xrgb => PixelFormat::Xrgb,
-            jpeg::PixelFormat::Xbgr => PixelFormat::Xbgr,
-            jpeg::PixelFormat::Argb => PixelFormat::Argb,
-            jpeg::PixelFormat::Abgr => PixelFormat::Abgr,
-            other => panic!(
-                "PixelFormat::{:?} is not supported in the WASM API; use decode_to() with an explicit format",
+            jpeg::PixelFormat::Grayscale => Ok(PixelFormat::Grayscale),
+            jpeg::PixelFormat::Rgb => Ok(PixelFormat::Rgb),
+            jpeg::PixelFormat::Rgba => Ok(PixelFormat::Rgba),
+            jpeg::PixelFormat::Bgr => Ok(PixelFormat::Bgr),
+            jpeg::PixelFormat::Bgra => Ok(PixelFormat::Bgra),
+            jpeg::PixelFormat::Rgbx => Ok(PixelFormat::Rgbx),
+            jpeg::PixelFormat::Bgrx => Ok(PixelFormat::Bgrx),
+            jpeg::PixelFormat::Xrgb => Ok(PixelFormat::Xrgb),
+            jpeg::PixelFormat::Xbgr => Ok(PixelFormat::Xbgr),
+            jpeg::PixelFormat::Argb => Ok(PixelFormat::Argb),
+            jpeg::PixelFormat::Abgr => Ok(PixelFormat::Abgr),
+            // Cmyk and Rgb565 are not exposed in the WASM API.
+            // Use decode_to() with an explicit supported format.
+            other => Err(JsValue::from_str(&format!(
+                "PixelFormat::{:?} is not supported in the WASM API; use decodeTo() with an explicit format",
                 other
-            ),
+            ))),
         }
     }
 }
@@ -141,8 +145,8 @@ impl DecodedImage {
 
     /// Pixel format of the decoded data.
     #[wasm_bindgen(getter)]
-    pub fn format(&self) -> PixelFormat {
-        self.inner.pixel_format.into()
+    pub fn format(&self) -> Result<PixelFormat, JsValue> {
+        self.inner.pixel_format.try_into()
     }
 
     /// Raw pixel data as Uint8Array.

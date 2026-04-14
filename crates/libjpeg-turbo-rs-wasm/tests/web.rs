@@ -31,7 +31,7 @@ fn decode_rgb() {
     let img: DecodedImage = decode(TEST_JPEG).unwrap();
     assert_eq!(img.width(), 16);
     assert_eq!(img.height(), 16);
-    assert_eq!(img.format(), PixelFormat::Rgb);
+    assert_eq!(img.format().unwrap(), PixelFormat::Rgb);
     assert_eq!(img.data().length(), 16 * 16 * 3);
     assert_eq!(img.bytes_per_pixel(), 3);
 }
@@ -39,7 +39,7 @@ fn decode_rgb() {
 #[wasm_bindgen_test]
 fn decode_to_rgba() {
     let img: DecodedImage = decode_to(TEST_JPEG, PixelFormat::Rgba).unwrap();
-    assert_eq!(img.format(), PixelFormat::Rgba);
+    assert_eq!(img.format().unwrap(), PixelFormat::Rgba);
     assert_eq!(img.data().length(), 16 * 16 * 4);
     assert_eq!(img.bytes_per_pixel(), 4);
 }
