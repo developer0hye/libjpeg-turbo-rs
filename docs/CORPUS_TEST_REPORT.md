@@ -1,5 +1,13 @@
 # Corpus Test Report
 
+> **Historical snapshot (2026-04-07).** This report was generated from a one-time
+> corpus run and is preserved for reference. The corpus artifacts (`tests/corpus/`,
+> `tests/corpus_results.tsv`) are not committed to the repository. Current
+> regression coverage is maintained by CI's `test-corpus` job, which regenerates
+> the corpus from scratch each run. Do not treat the numbers below as current
+> branch status — run `cargo run --release --example corpus_test` to get live
+> results.
+
 Generated: 2026-04-07
 Corpus: `tests/corpus/` (2240 JPEG files)
 Raw TSV: `tests/corpus_results.tsv`
