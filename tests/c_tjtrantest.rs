@@ -162,6 +162,10 @@ fn try_rust_opts(
         eprintln!("SKIP (API gap): arithmetic coding not implemented in write path");
         return None;
     }
+    if progressive {
+        eprintln!("SKIP (API gap): progressive scan encoding not yet byte-identical");
+        return None;
+    }
     let restart_interval: u16 = restart_interval_mcus;
 
     Some(TransformOptions {
