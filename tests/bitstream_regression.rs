@@ -252,3 +252,4 @@ fn hash_function_self_consistency() {
     let h2: String = hash_bytes(&data);
     assert_eq!(h1, h2, "hash function must be deterministic within a run");
 }
+// force rebuild

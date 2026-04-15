@@ -163,7 +163,7 @@ fn try_rust_opts(
         return None;
     }
     if progressive {
-        eprintln!("SKIP (API gap): progressive scan encoding not implemented in write path");
+        eprintln!("SKIP (API gap): progressive scan encoding not yet byte-identical");
         return None;
     }
     let restart_interval: u16 = restart_interval_mcus;
