@@ -893,9 +893,9 @@ pub fn transform_jpeg_with_options(data: &[u8], options: &TransformOptions) -> R
     coeffs.restart_interval = options.restart_interval;
 
     // Write output with the appropriate encoding.
-    let output: Vec<u8> = if options.progressive {
-        write_coefficients_progressive(&coeffs)?
-    } else if options.optimize {
+    // TODO: progressive write path produces invalid output for subsampled
+    // JPEGs; disabled until the multi-component DC scan encoding is fixed.
+    let output: Vec<u8> = if options.optimize {
         write_coefficients_optimized(&coeffs)?
     } else {
         write_coefficients(&coeffs)?
@@ -1172,8 +1172,8 @@ fn write_coefficients_optimized(coeffs: &JpegCoefficients) -> Result<Vec<u8>> {
 /// Uses the default libjpeg-turbo scan progression (simple_progression)
 /// with optimized Huffman tables (matching C jpegtran -progressive which
 /// implies -optimize).
+#[allow(dead_code)]
 fn write_coefficients_progressive(coeffs: &JpegCoefficients) -> Result<Vec<u8>> {
-    use crate::encode::huff_opt;
     use crate::encode::progressive::{simple_progression, ProgressiveScan};
 
     let num_components: usize = coeffs.components.len();
@@ -1205,62 +1205,17 @@ fn write_coefficients_progressive(coeffs: &JpegCoefficients) -> Result<Vec<u8>> 
         .map(|c| (coeffs.height as usize * c.v_sampling as usize).div_ceil(max_v * 8))
         .collect();
 
-    // Gather symbol frequencies for optimized Huffman tables.
-    // C jpegtran -progressive implies -optimize.
-    let mut dc_luma_freq: [u32; 257] = [0u32; 257];
-    let mut dc_chroma_freq: [u32; 257] = [0u32; 257];
-    let mut ac_luma_freq: [u32; 257] = [0u32; 257];
-    let mut ac_chroma_freq: [u32; 257] = [0u32; 257];
-    {
-        let mut prev_dc: Vec<i16> = vec![0i16; num_components];
-        for mcu_y in 0..mcus_y {
-            for mcu_x in 0..mcus_x {
-                for (ci, comp) in coeffs.components.iter().enumerate() {
-                    let dc_freq: &mut [u32; 257] = if ci == 0 {
-                        &mut dc_luma_freq
-                    } else {
-                        &mut dc_chroma_freq
-                    };
-                    let ac_freq: &mut [u32; 257] = if ci == 0 {
-                        &mut ac_luma_freq
-                    } else {
-                        &mut ac_chroma_freq
-                    };
-                    for v in 0..comp.v_sampling as usize {
-                        for h in 0..comp.h_sampling as usize {
-                            let bx: usize = mcu_x * comp.h_sampling as usize + h;
-                            let by: usize = mcu_y * comp.v_sampling as usize + v;
-                            let is_dummy: bool = bx >= data_blocks_x[ci] || by >= data_blocks_y[ci];
-                            let block: &[i16; 64] = if is_dummy {
-                                &[0i16; 64]
-                            } else {
-                                &comp.blocks[by * comp.blocks_x + bx]
-                            };
-                            let dc_val: i16 = if is_dummy { prev_dc[ci] } else { block[0] };
-                            let diff: i16 = dc_val - prev_dc[ci];
-                            prev_dc[ci] = dc_val;
-                            huff_opt::gather_dc_symbol(diff, dc_freq);
-                            huff_opt::gather_ac_symbols(block, ac_freq);
-                        }
-                    }
-                }
-            }
-        }
-    }
-    dc_luma_freq[256] = 1;
-    ac_luma_freq[256] = 1;
-    dc_chroma_freq[256] = 1;
-    ac_chroma_freq[256] = 1;
-
-    let (dc_luma_bits, dc_luma_values) = huff_opt::gen_optimal_table(&dc_luma_freq);
-    let (ac_luma_bits, ac_luma_values) = huff_opt::gen_optimal_table(&ac_luma_freq);
-    let (dc_chroma_bits, dc_chroma_values) = huff_opt::gen_optimal_table(&dc_chroma_freq);
-    let (ac_chroma_bits, ac_chroma_values) = huff_opt::gen_optimal_table(&ac_chroma_freq);
-
-    let dc_luma_table: HuffTable = build_huff_table(&dc_luma_bits, &dc_luma_values);
-    let ac_luma_table: HuffTable = build_huff_table(&ac_luma_bits, &ac_luma_values);
-    let dc_chroma_table: HuffTable = build_huff_table(&dc_chroma_bits, &dc_chroma_values);
-    let ac_chroma_table: HuffTable = build_huff_table(&ac_chroma_bits, &ac_chroma_values);
+    // Standard Huffman tables for progressive encoding.
+    // TODO: C jpegtran -progressive implies -optimize (scan-level frequency
+    // gathering), but this requires per-scan statistics which is complex.
+    let dc_luma_table: HuffTable =
+        build_huff_table(&tables::DC_LUMINANCE_BITS, &tables::DC_LUMINANCE_VALUES);
+    let ac_luma_table: HuffTable =
+        build_huff_table(&tables::AC_LUMINANCE_BITS, &tables::AC_LUMINANCE_VALUES);
+    let dc_chroma_table: HuffTable =
+        build_huff_table(&tables::DC_CHROMINANCE_BITS, &tables::DC_CHROMINANCE_VALUES);
+    let ac_chroma_table: HuffTable =
+        build_huff_table(&tables::AC_CHROMINANCE_BITS, &tables::AC_CHROMINANCE_VALUES);
 
     let scans: Vec<ProgressiveScan> = simple_progression(num_components);
 
@@ -1421,12 +1376,36 @@ fn write_coefficients_progressive(coeffs: &JpegCoefficients) -> Result<Vec<u8>> 
         output.push(qt);
     }
 
-    // DHT tables (optimized)
-    marker_writer::write_dht(&mut output, 0, 0, &dc_luma_bits, &dc_luma_values);
-    marker_writer::write_dht(&mut output, 1, 0, &ac_luma_bits, &ac_luma_values);
+    // DHT tables (standard)
+    marker_writer::write_dht(
+        &mut output,
+        0,
+        0,
+        &tables::DC_LUMINANCE_BITS,
+        &tables::DC_LUMINANCE_VALUES,
+    );
+    marker_writer::write_dht(
+        &mut output,
+        1,
+        0,
+        &tables::AC_LUMINANCE_BITS,
+        &tables::AC_LUMINANCE_VALUES,
+    );
     if !is_grayscale {
-        marker_writer::write_dht(&mut output, 0, 1, &dc_chroma_bits, &dc_chroma_values);
-        marker_writer::write_dht(&mut output, 1, 1, &ac_chroma_bits, &ac_chroma_values);
+        marker_writer::write_dht(
+            &mut output,
+            0,
+            1,
+            &tables::DC_CHROMINANCE_BITS,
+            &tables::DC_CHROMINANCE_VALUES,
+        );
+        marker_writer::write_dht(
+            &mut output,
+            1,
+            1,
+            &tables::AC_CHROMINANCE_BITS,
+            &tables::AC_CHROMINANCE_VALUES,
+        );
     }
 
     // DRI
