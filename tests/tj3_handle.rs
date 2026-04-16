@@ -128,9 +128,14 @@ fn handle_set_get_limits() {
 #[test]
 fn handle_set_get_save_markers() {
     let mut handle = TjHandle::new();
-    // 0 = None, 1 = All
-    handle.set(TjParam::SaveMarkers, 1).unwrap();
-    assert_eq!(handle.get(TjParam::SaveMarkers), 1);
+    // C-compatible range: 0-4
+    for level in 0..=4 {
+        handle.set(TjParam::SaveMarkers, level).unwrap();
+        assert_eq!(handle.get(TjParam::SaveMarkers), level);
+    }
+    // Out-of-range must fail
+    assert!(handle.set(TjParam::SaveMarkers, 5).is_err());
+    assert!(handle.set(TjParam::SaveMarkers, -1).is_err());
 }
 
 #[test]
@@ -386,8 +391,9 @@ fn handle_decompress_with_icc_profile() {
 
     let mut handle = TjHandle::new();
     handle.set_icc_profile(Some(vec![0xBB; 10])); // should be overwritten by decompress
-    let img = handle.decompress(&jpeg).unwrap();
-    assert_eq!(img.icc_profile(), Some(icc.as_slice()));
+    let _img = handle.decompress(&jpeg).unwrap();
+    // Verify handle ICC profile is updated from decoded image (not the old value)
+    assert_eq!(handle.icc_profile(), Some(icc.as_slice()));
 }
 
 #[test]
@@ -452,6 +458,221 @@ fn handle_decompress_with_max_pixels() {
     handle.set(TjParam::MaxPixels, 32 * 32).unwrap();
     let result = handle.decompress(&jpeg);
     assert!(result.is_err());
+}
+
+// === Behavioral tests: verify params actually affect output ===
+
+#[test]
+fn handle_quality_affects_output_size() {
+    let width: usize = 64;
+    let height: usize = 64;
+    // Use varied pixel data to make quality effect visible
+    let pixels: Vec<u8> = (0..width * height * 3).map(|i| (i % 251) as u8).collect();
+
+    let mut handle_low = TjHandle::new();
+    handle_low.set(TjParam::Quality, 10).unwrap();
+    let jpeg_low = handle_low
+        .compress(&pixels, width, height, PixelFormat::Rgb)
+        .unwrap();
+
+    let mut handle_high = TjHandle::new();
+    handle_high.set(TjParam::Quality, 95).unwrap();
+    let jpeg_high = handle_high
+        .compress(&pixels, width, height, PixelFormat::Rgb)
+        .unwrap();
+
+    // Higher quality must produce larger output
+    assert!(
+        jpeg_high.len() > jpeg_low.len(),
+        "q95 ({}) should be larger than q10 ({})",
+        jpeg_high.len(),
+        jpeg_low.len()
+    );
+}
+
+#[test]
+fn handle_subsampling_affects_output() {
+    let width: usize = 64;
+    let height: usize = 64;
+    let pixels: Vec<u8> = (0..width * height * 3).map(|i| (i % 251) as u8).collect();
+
+    let mut handle_444 = TjHandle::new();
+    handle_444.set(TjParam::Subsampling, 0).unwrap(); // S444
+    let jpeg_444 = handle_444
+        .compress(&pixels, width, height, PixelFormat::Rgb)
+        .unwrap();
+
+    let mut handle_420 = TjHandle::new();
+    handle_420.set(TjParam::Subsampling, 2).unwrap(); // S420
+    let jpeg_420 = handle_420
+        .compress(&pixels, width, height, PixelFormat::Rgb)
+        .unwrap();
+
+    // S444 (no chroma subsampling) must produce larger output than S420
+    assert!(
+        jpeg_444.len() > jpeg_420.len(),
+        "S444 ({}) should be larger than S420 ({})",
+        jpeg_444.len(),
+        jpeg_420.len()
+    );
+}
+
+#[test]
+fn handle_bottom_up_affects_pixel_order() {
+    let width: usize = 8;
+    let height: usize = 8;
+    // Create a gradient: top row = dark, bottom row = bright
+    let mut pixels = vec![0u8; width * height * 3];
+    for y in 0..height {
+        let val: u8 = (y * 255 / (height - 1)) as u8;
+        for x in 0..width {
+            let offset: usize = (y * width + x) * 3;
+            pixels[offset] = val;
+            pixels[offset + 1] = val;
+            pixels[offset + 2] = val;
+        }
+    }
+
+    // Encode without bottom-up
+    let mut handle_normal = TjHandle::new();
+    handle_normal.set(TjParam::Quality, 100).unwrap();
+    handle_normal.set(TjParam::Subsampling, 0).unwrap();
+    let jpeg_normal = handle_normal
+        .compress(&pixels, width, height, PixelFormat::Rgb)
+        .unwrap();
+
+    // Encode with bottom-up (rows are read in reverse order)
+    let mut handle_bu = TjHandle::new();
+    handle_bu.set(TjParam::Quality, 100).unwrap();
+    handle_bu.set(TjParam::Subsampling, 0).unwrap();
+    handle_bu.set(TjParam::BottomUp, 1).unwrap();
+    let jpeg_bu = handle_bu
+        .compress(&pixels, width, height, PixelFormat::Rgb)
+        .unwrap();
+
+    // The two JPEGs should differ (flipped input = different DCT coefficients)
+    assert_ne!(
+        jpeg_normal, jpeg_bu,
+        "BottomUp should produce different output"
+    );
+}
+
+#[test]
+fn handle_density_roundtrip_through_compress_decompress() {
+    let width: usize = 16;
+    let height: usize = 16;
+    let pixels = vec![128u8; width * height * 3];
+
+    let mut handle = TjHandle::new();
+    handle.set(TjParam::XDensity, 300).unwrap();
+    handle.set(TjParam::YDensity, 600).unwrap();
+    handle.set(TjParam::DensityUnits, 1).unwrap(); // DPI
+
+    let jpeg = handle
+        .compress(&pixels, width, height, PixelFormat::Rgb)
+        .unwrap();
+
+    // Verify JFIF density in raw bytes (bytes 13-17 of APP0)
+    assert_eq!(jpeg[13], 1, "density unit should be DPI (1)");
+    assert_eq!(
+        u16::from_be_bytes([jpeg[14], jpeg[15]]),
+        300,
+        "x_density should be 300"
+    );
+    assert_eq!(
+        u16::from_be_bytes([jpeg[16], jpeg[17]]),
+        600,
+        "y_density should be 600"
+    );
+
+    // Decompress and verify handle captures density from JFIF
+    let mut handle2 = TjHandle::new();
+    let _img = handle2.decompress(&jpeg).unwrap();
+    assert_eq!(handle2.get(TjParam::DensityUnits), 1);
+    assert_eq!(handle2.get(TjParam::XDensity), 300);
+    assert_eq!(handle2.get(TjParam::YDensity), 600);
+}
+
+#[test]
+fn handle_decompress_updates_colorspace_and_subsampling() {
+    let width: usize = 32;
+    let height: usize = 32;
+    let pixels = vec![128u8; width * height * 3];
+
+    // Compress with S422
+    let mut enc_handle = TjHandle::new();
+    enc_handle.set(TjParam::Subsampling, 1).unwrap(); // S422
+    let jpeg = enc_handle
+        .compress(&pixels, width, height, PixelFormat::Rgb)
+        .unwrap();
+
+    // Decompress and verify handle is updated from JPEG header
+    let mut dec_handle = TjHandle::new();
+    let _img = dec_handle.decompress(&jpeg).unwrap();
+
+    // ColorSpace should be YCbCr (1) for standard JFIF
+    assert_eq!(
+        dec_handle.get(TjParam::ColorSpace),
+        1,
+        "color space should be YCbCr (1)"
+    );
+    // Subsampling should be S422 (1)
+    assert_eq!(
+        dec_handle.get(TjParam::Subsampling),
+        1,
+        "subsampling should be S422 (1)"
+    );
+}
+
+#[test]
+fn handle_decompress_grayscale_updates_colorspace() {
+    let width: usize = 16;
+    let height: usize = 16;
+    let pixels = vec![128u8; width * height];
+
+    let enc_handle = TjHandle::new();
+    let jpeg = enc_handle
+        .compress(&pixels, width, height, PixelFormat::Grayscale)
+        .unwrap();
+
+    let mut dec_handle = TjHandle::new();
+    let _img = dec_handle.decompress(&jpeg).unwrap();
+
+    // ColorSpace should be Grayscale (2)
+    assert_eq!(
+        dec_handle.get(TjParam::ColorSpace),
+        2,
+        "color space should be Grayscale (2)"
+    );
+    // Subsampling should be TJSAMP_GRAY (3) — matches C libjpeg-turbo
+    assert_eq!(
+        dec_handle.get(TjParam::Subsampling),
+        3,
+        "subsampling should be TJSAMP_GRAY (3)"
+    );
+}
+
+#[test]
+fn handle_progressive_produces_multiple_sos_markers() {
+    let width: usize = 32;
+    let height: usize = 32;
+    let pixels: Vec<u8> = (0..width * height * 3).map(|i| (i % 251) as u8).collect();
+
+    let mut handle = TjHandle::new();
+    handle.set(TjParam::Progressive, 1).unwrap();
+    let jpeg = handle
+        .compress(&pixels, width, height, PixelFormat::Rgb)
+        .unwrap();
+
+    // Count SOS (0xFFDA) markers — progressive should have multiple scans
+    let sos_count = jpeg
+        .windows(2)
+        .filter(|w| w[0] == 0xFF && w[1] == 0xDA)
+        .count();
+    assert!(
+        sos_count > 1,
+        "progressive JPEG should have multiple SOS markers, got {sos_count}"
+    );
 }
 
 #[test]

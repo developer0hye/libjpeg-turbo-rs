@@ -48,9 +48,9 @@
 | `LOSSLESSPT` | Lossless point transform 0-15 | `Encoder::lossless_point_transform()` | ✅ |
 | `RESTARTBLOCKS` | Restart interval (MCU blocks) | `Encoder::restart_blocks()` | ✅ |
 | `RESTARTROWS` | Restart interval (MCU rows) | `Encoder::restart_rows()` | ✅ |
-| `XDENSITY` | Horizontal pixel density | `Image.density` read + `JpegCoefficients.x_density` low-level rewrite | 🔶 |
-| `YDENSITY` | Vertical pixel density | `Image.density` read + `JpegCoefficients.y_density` low-level rewrite | 🔶 |
-| `DENSITYUNITS` | 0=unknown, 1=ppi, 2=ppcm | `Image.density` read + `JpegCoefficients.density_unit` low-level rewrite | 🔶 |
+| `XDENSITY` | Horizontal pixel density | `Encoder::density()` + `TjHandle` compress/decompress wiring | ✅ |
+| `YDENSITY` | Vertical pixel density | `Encoder::density()` + `TjHandle` compress/decompress wiring | ✅ |
+| `DENSITYUNITS` | 0=unknown, 1=ppi, 2=ppcm | `Encoder::density()` + `TjHandle` compress/decompress wiring | ✅ |
 | `MAXMEMORY` | Memory limit | `Decoder::set_max_memory()` | ✅ |
 | `MAXPIXELS` | Image size limit | `Decoder::set_max_pixels()` | ✅ |
 | `SAVEMARKERS` | Marker preservation level 0-4 | `Decoder::save_markers()` / `MarkerSaveConfig` | 🔶 |
@@ -509,8 +509,8 @@ These are the highest-signal C API surfaces that still lack end-to-end public pa
 
 | C Function / Surface | Status | Notes |
 |---|---|---|
-| `TJPARAM_NOREALLOC`, `PRECISION`, `COLORSPACE`, `XDENSITY`, `YDENSITY`, `DENSITYUNITS`, `SAVEMARKERS` on `TjHandle` | 🔶 | Stored on `TjHandle`, but not all are applied end-to-end by `compress()` / `decompress()` |
-| `tj3GetICCProfile(handle)` | 🔶 | ICC can be read from `Image`, but decode does not populate the handle-level ICC buffer |
+| `TJPARAM_SAVEMARKERS` behavioral wiring on `TjHandle` | 🔶 | Range validated 0-4 matching C, but `decompress()` does not yet use the value to control marker extraction |
+| `TJPARAM_NOREALLOC` on `TjHandle` | 🔶 | N/A for Rust `Vec<u8>` — stored for API compatibility, no behavioral effect |
 | `tj3Compress12/16()` / `tj3Decompress12/16()` | 🔶 | Implemented through precision-specific Rust APIs, not through the `TjHandle` surface |
 | `tj3LoadImage8()` / `tj3SaveImage8()` full parity | 🔶 | Rust only covers BMP/PPM/PGM 8-bit helpers, not PNG or the full handle-driven semantics from C |
 | `tj3LoadImage12/16()` / `tj3SaveImage12/16()` | ❌ | Missing |
