@@ -40,8 +40,8 @@ fn handle_default_values() {
     // MaxMemory/MaxPixels defaults (0 = unlimited)
     assert_eq!(handle.get(TjParam::MaxMemory), 0);
     assert_eq!(handle.get(TjParam::MaxPixels), 0);
-    // SaveMarkers default = 0 (None)
-    assert_eq!(handle.get(TjParam::SaveMarkers), 0);
+    // SaveMarkers default = 2 (All, matching C TJSM_ALL)
+    assert_eq!(handle.get(TjParam::SaveMarkers), 2);
 }
 
 #[test]
@@ -715,4 +715,147 @@ fn handle_tj_param_enum_all_variants() {
             }
         }
     }
+}
+
+// === SaveMarkers behavioral tests ===
+
+/// Helper: create a JPEG with ICC profile and COM marker embedded.
+fn make_jpeg_with_icc_and_com() -> (Vec<u8>, Vec<u8>) {
+    use libjpeg_turbo_rs::Encoder;
+    let width: usize = 16;
+    let height: usize = 16;
+    let pixels = vec![128u8; width * height * 3];
+    let icc = vec![0xAAu8; 64];
+    let jpeg = Encoder::new(&pixels, width, height, PixelFormat::Rgb)
+        .quality(75)
+        .subsampling(Subsampling::S444)
+        .icc_profile(&icc)
+        .comment("test comment")
+        .encode()
+        .unwrap();
+    (jpeg, icc)
+}
+
+#[test]
+fn handle_save_markers_level0_no_markers_no_icc() {
+    let (jpeg, _icc) = make_jpeg_with_icc_and_com();
+
+    let mut handle = TjHandle::new();
+    handle.set(TjParam::SaveMarkers, 0).unwrap();
+    let img = handle.decompress(&jpeg).unwrap();
+
+    // Level 0: no ICC on handle
+    assert!(
+        handle.icc_profile().is_none(),
+        "level 0: handle ICC should be None"
+    );
+    // Level 0: no ICC on image
+    assert!(
+        img.icc_profile().is_none(),
+        "level 0: image ICC should be None"
+    );
+    // Level 0: no saved markers
+    assert!(
+        img.markers().is_empty(),
+        "level 0: saved markers should be empty"
+    );
+}
+
+#[test]
+fn handle_save_markers_level1_com_only() {
+    let (jpeg, _icc) = make_jpeg_with_icc_and_com();
+
+    let mut handle = TjHandle::new();
+    handle.set(TjParam::SaveMarkers, 1).unwrap();
+    let img = handle.decompress(&jpeg).unwrap();
+
+    // Level 1: no ICC
+    assert!(
+        handle.icc_profile().is_none(),
+        "level 1: handle ICC should be None"
+    );
+    // Level 1: only COM markers saved
+    assert!(
+        !img.markers().is_empty(),
+        "level 1: should have saved COM marker"
+    );
+    for m in img.markers() {
+        assert_eq!(
+            m.code, 0xFE,
+            "level 1: only COM (0xFE) markers should be saved"
+        );
+    }
+}
+
+#[test]
+fn handle_save_markers_level2_all_with_icc() {
+    let (jpeg, icc) = make_jpeg_with_icc_and_com();
+
+    let mut handle = TjHandle::new();
+    handle.set(TjParam::SaveMarkers, 2).unwrap();
+    let img = handle.decompress(&jpeg).unwrap();
+
+    // Level 2: ICC extracted to handle
+    assert_eq!(
+        handle.icc_profile(),
+        Some(icc.as_slice()),
+        "level 2: handle ICC should match embedded profile"
+    );
+    // Level 2: all markers saved (COM + APP markers)
+    assert!(
+        !img.markers().is_empty(),
+        "level 2: should have saved markers"
+    );
+    let has_com = img.markers().iter().any(|m| m.code == 0xFE);
+    assert!(has_com, "level 2: should include COM marker");
+}
+
+#[test]
+fn handle_save_markers_level3_all_except_icc() {
+    let (jpeg, _icc) = make_jpeg_with_icc_and_com();
+
+    let mut handle = TjHandle::new();
+    handle.set(TjParam::SaveMarkers, 3).unwrap();
+    let img = handle.decompress(&jpeg).unwrap();
+
+    // Level 3: no ICC
+    assert!(
+        handle.icc_profile().is_none(),
+        "level 3: handle ICC should be None"
+    );
+    assert!(
+        img.icc_profile().is_none(),
+        "level 3: image ICC should be None"
+    );
+    // Level 3: saved markers should NOT contain ICC APP2
+    for m in img.markers() {
+        if m.code == 0xE2 {
+            assert!(
+                !m.data.starts_with(b"ICC_PROFILE\0"),
+                "level 3: ICC APP2 markers should be filtered out"
+            );
+        }
+    }
+    // Level 3: COM should still be present
+    let has_com = img.markers().iter().any(|m| m.code == 0xFE);
+    assert!(has_com, "level 3: should include COM marker");
+}
+
+#[test]
+fn handle_save_markers_level4_icc_only() {
+    let (jpeg, icc) = make_jpeg_with_icc_and_com();
+
+    let mut handle = TjHandle::new();
+    handle.set(TjParam::SaveMarkers, 4).unwrap();
+    let img = handle.decompress(&jpeg).unwrap();
+
+    // Level 4: ICC extracted to handle
+    assert_eq!(
+        handle.icc_profile(),
+        Some(icc.as_slice()),
+        "level 4: handle ICC should match embedded profile"
+    );
+    // Level 4: only APP2 (ICC) markers saved, no COM
+    let has_com = img.markers().iter().any(|m| m.code == 0xFE);
+    assert!(!has_com, "level 4: should NOT include COM marker");
 }
