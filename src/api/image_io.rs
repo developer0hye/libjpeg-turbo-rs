@@ -490,3 +490,143 @@ fn parse_ppm_header(header: &str) -> Result<(usize, usize, usize, usize)> {
 
     Ok((width, height, maxval, data_start))
 }
+
+// =========================================================================
+// 12/16-bit PPM I/O (tj3LoadImage12/16, tj3SaveImage12/16)
+// =========================================================================
+
+/// Loaded 16-bit image data from a high-bit-depth PPM/PGM.
+#[derive(Debug, Clone)]
+pub struct LoadedImage16 {
+    /// Pixel samples as 16-bit values (0..maxval).
+    pub pixels: Vec<u16>,
+    /// Image width in pixels.
+    pub width: usize,
+    /// Image height in pixels.
+    pub height: usize,
+    /// Number of components (1 for grayscale, 3 for RGB).
+    pub num_components: usize,
+    /// Maximum sample value from the PPM header.
+    pub maxval: u16,
+}
+
+/// Load a high-bit-depth PPM/PGM file (maxval > 255).
+///
+/// Returns 16-bit samples. For PPM, samples are big-endian 2-byte per
+/// component per the PPM spec. Supports maxval 256..65535.
+#[cfg(any(not(target_arch = "wasm32"), target_os = "wasi"))]
+pub fn load_ppm_16bit<P: AsRef<Path>>(path: P) -> Result<LoadedImage16> {
+    let data: Vec<u8> = fs::read(path.as_ref())?;
+    load_ppm_16bit_from_bytes(&data)
+}
+
+/// Load a high-bit-depth PPM/PGM from raw bytes.
+pub fn load_ppm_16bit_from_bytes(data: &[u8]) -> Result<LoadedImage16> {
+    if data.len() < 3 {
+        return Err(JpegError::CorruptData("PPM/PGM file too small".into()));
+    }
+
+    let magic: &[u8] = &data[0..2];
+    let is_grayscale: bool = magic == b"P5";
+    let is_rgb: bool = magic == b"P6";
+
+    if !is_grayscale && !is_rgb {
+        return Err(JpegError::Unsupported(format!(
+            "unsupported PPM magic for 16-bit load: {:?}",
+            std::str::from_utf8(magic).unwrap_or("??")
+        )));
+    }
+
+    // Parse header reusing shared parser
+    let header_str: &str = {
+        let mut newline_count: usize = 0;
+        let mut header_end: usize = data.len().min(256);
+        for (i, &byte) in data.iter().enumerate() {
+            if byte == b'\n' {
+                newline_count += 1;
+                if newline_count == 3 {
+                    header_end = i + 1;
+                    break;
+                }
+            }
+        }
+        std::str::from_utf8(&data[..header_end])
+            .map_err(|_| JpegError::CorruptData("PPM header is not valid UTF-8".into()))?
+    };
+
+    let (width, height, maxval, header_len) = parse_ppm_header(header_str)?;
+
+    if !(256..=65535).contains(&maxval) {
+        return Err(JpegError::Unsupported(format!(
+            "PPM maxval {} out of 16-bit range (256-65535)",
+            maxval
+        )));
+    }
+
+    let num_components: usize = if is_grayscale { 1 } else { 3 };
+    let num_samples: usize = width * height * num_components;
+    let expected_data_len: usize = num_samples * 2; // 2 bytes per sample
+    let pixel_data: &[u8] = &data[header_len..];
+
+    if pixel_data.len() < expected_data_len {
+        return Err(JpegError::UnexpectedEof);
+    }
+
+    // PPM 16-bit stores samples as big-endian 2-byte values
+    let mut pixels: Vec<u16> = Vec::with_capacity(num_samples);
+    for chunk in pixel_data[..expected_data_len].chunks_exact(2) {
+        pixels.push(u16::from_be_bytes([chunk[0], chunk[1]]));
+    }
+
+    Ok(LoadedImage16 {
+        pixels,
+        width,
+        height,
+        num_components,
+        maxval: maxval as u16,
+    })
+}
+
+/// Save 16-bit pixel data as a PPM (P6) or PGM (P5) file.
+///
+/// Writes 2-byte big-endian samples per the PPM spec.
+#[cfg(any(not(target_arch = "wasm32"), target_os = "wasi"))]
+pub fn save_ppm_16bit<P: AsRef<Path>>(
+    path: P,
+    pixels: &[u16],
+    width: usize,
+    height: usize,
+    num_components: usize,
+    maxval: u16,
+) -> Result<()> {
+    if num_components != 1 && num_components != 3 {
+        return Err(JpegError::Unsupported(format!(
+            "PPM 16-bit save supports 1 or 3 components, got {}",
+            num_components
+        )));
+    }
+
+    let expected: usize = width * height * num_components;
+    if pixels.len() < expected {
+        return Err(JpegError::CorruptData(format!(
+            "pixel buffer too small: need {}, got {}",
+            expected,
+            pixels.len()
+        )));
+    }
+
+    let magic: &str = if num_components == 1 { "P5" } else { "P6" };
+    let file = fs::File::create(path.as_ref())?;
+    let mut writer = BufWriter::new(file);
+
+    let header: String = format!("{}\n{} {}\n{}\n", magic, width, height, maxval);
+    writer.write_all(header.as_bytes())?;
+
+    // Write 2-byte big-endian samples
+    for &sample in &pixels[..expected] {
+        writer.write_all(&sample.to_be_bytes())?;
+    }
+
+    writer.flush()?;
+    Ok(())
+}
