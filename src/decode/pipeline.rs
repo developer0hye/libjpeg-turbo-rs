@@ -2319,13 +2319,20 @@ impl<'a> Decoder<'a> {
             let dc_table = dc_tables[0];
             let mut output = vec![0u16; width * height];
             let mut prev_row: Option<Vec<u16>> = None;
+            let ri: u32 = self.metadata.restart_interval as u32;
+            let mut mcu_count: u32 = 0;
 
             for y in 0..height {
                 let row_start = y * width;
                 let mut diffs = Vec::with_capacity(width);
-                for _ in 0..width {
+                for _x in 0..width {
+                    if ri > 0 && mcu_count > 0 && mcu_count.is_multiple_of(ri) {
+                        reader.reset();
+                        prev_row = None;
+                    }
                     let diff = huffman::decode_dc_coefficient(&mut reader, dc_table)?;
                     diffs.push(diff);
+                    mcu_count += 1;
                 }
                 lossless::undifference_row(
                     &diffs,
@@ -2334,7 +2341,7 @@ impl<'a> Decoder<'a> {
                     psv,
                     precision,
                     pt,
-                    y == 0,
+                    prev_row.is_none(),
                 );
                 prev_row = Some(output[row_start..row_start + width].to_vec());
             }
@@ -2345,6 +2352,8 @@ impl<'a> Decoder<'a> {
             let mut comp_planes: Vec<Vec<u16>> =
                 (0..3).map(|_| vec![0u16; width * height]).collect();
             let mut prev_rows: Vec<Option<Vec<u16>>> = vec![None; 3];
+            let ri: u32 = self.metadata.restart_interval as u32;
+            let mut mcu_count: u32 = 0;
 
             for y in 0..height {
                 let row_start = y * width;
@@ -2353,10 +2362,17 @@ impl<'a> Decoder<'a> {
 
                 // Interleaved: for each pixel, decode diff for each component
                 for _ in 0..width {
+                    if ri > 0 && mcu_count > 0 && mcu_count.is_multiple_of(ri) {
+                        reader.reset();
+                        for pr in prev_rows.iter_mut() {
+                            *pr = None;
+                        }
+                    }
                     for c in 0..3 {
                         let diff = huffman::decode_dc_coefficient(&mut reader, dc_tables[c])?;
                         comp_diffs[c].push(diff);
                     }
+                    mcu_count += 1;
                 }
 
                 // Undifference each component
@@ -2368,7 +2384,7 @@ impl<'a> Decoder<'a> {
                         psv,
                         precision,
                         pt,
-                        y == 0,
+                        prev_rows[c].is_none(),
                     );
                     prev_rows[c] = Some(comp_planes[c][row_start..row_start + width].to_vec());
                 }

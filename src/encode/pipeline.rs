@@ -1483,13 +1483,17 @@ pub fn inject_metadata(
         return Ok(base.to_vec());
     }
 
-    // Find insertion point after APP0 JFIF marker (SOI + APP0)
-    let insert_pos = if base.len() >= 4 && base[2] == 0xFF && base[3] == 0xE0 {
-        let app0_len = u16::from_be_bytes([base[4], base[5]]) as usize;
-        2 + 2 + app0_len // SOI(2) + APP0 marker(2) + APP0 data
-    } else {
-        2 // After SOI only
-    };
+    // Find insertion point after all leading APP markers (APP0/JFIF, APP14/Adobe).
+    // ICC (APP2) and EXIF (APP1) are inserted after these application markers
+    // but before SOF/DHT/DRI/SOS.
+    let mut insert_pos: usize = 2; // After SOI
+    while insert_pos + 3 < base.len()
+        && base[insert_pos] == 0xFF
+        && (base[insert_pos + 1] & 0xF0) == 0xE0
+    {
+        let app_len = u16::from_be_bytes([base[insert_pos + 2], base[insert_pos + 3]]) as usize;
+        insert_pos += 2 + app_len;
+    }
 
     let extra_cap =
         icc_profile.map_or(0, |p| p.len() + 100) + exif_data.map_or(0, |e| e.len() + 20);
@@ -1761,7 +1765,7 @@ pub fn compress_lossless(
     height: usize,
     pixel_format: PixelFormat,
 ) -> Result<Vec<u8>> {
-    compress_lossless_extended(pixels, width, height, pixel_format, 1, 0)
+    compress_lossless_extended(pixels, width, height, pixel_format, 1, 0, 0)
 }
 
 /// Compress as lossless JPEG (SOF3) with configurable predictor and point transform.
@@ -1779,6 +1783,7 @@ pub fn compress_lossless_extended(
     pixel_format: PixelFormat,
     predictor: u8,
     point_transform: u8,
+    restart_interval: u16,
 ) -> Result<Vec<u8>> {
     if !(1..=7).contains(&predictor) {
         return Err(JpegError::Unsupported(format!(
@@ -1816,12 +1821,22 @@ pub fn compress_lossless_extended(
     }
 
     match pixel_format {
-        PixelFormat::Grayscale => {
-            compress_lossless_grayscale(pixels, width, height, predictor, point_transform)
-        }
-        PixelFormat::Rgb => {
-            compress_lossless_rgb(pixels, width, height, predictor, point_transform)
-        }
+        PixelFormat::Grayscale => compress_lossless_grayscale(
+            pixels,
+            width,
+            height,
+            predictor,
+            point_transform,
+            restart_interval,
+        ),
+        PixelFormat::Rgb => compress_lossless_rgb(
+            pixels,
+            width,
+            height,
+            predictor,
+            point_transform,
+            restart_interval,
+        ),
         _ => Err(JpegError::Unsupported(format!(
             "lossless encoding does not support {:?}, use Grayscale or Rgb",
             pixel_format
@@ -1881,27 +1896,50 @@ fn compress_lossless_grayscale(
     height: usize,
     predictor: u8,
     point_transform: u8,
+    restart_interval: u16,
 ) -> Result<Vec<u8>> {
     let precision: u8 = 8;
     let num_pixels: usize = width * height;
+    let ri: u32 = restart_interval as u32;
+    let initial_pred: i32 = 1 << (precision as i32 - point_transform as i32 - 1);
 
     // Collect all diffs for 2-pass optimized Huffman encoding.
     let mut all_diffs: Vec<i16> = Vec::with_capacity(num_pixels);
+    let mut mcu_count: u32 = 0;
+    let mut in_restart_row: bool = false;
+
     for y in 0..height {
         for x in 0..width {
+            if ri > 0 && mcu_count > 0 && mcu_count.is_multiple_of(ri) {
+                in_restart_row = true;
+            }
             let pixel: i32 = pixels[y * width + x] as i32;
-            let signed_diff: i16 = lossless_diff(
-                pixel,
-                x,
-                y,
-                pixels,
-                width,
-                predictor,
-                point_transform,
-                precision,
-            );
+            // After restart, use "first row" prediction: x=0 → initial_pred,
+            // x>0 → left neighbor (PSV=1 fallback, matching decoder behavior).
+            let signed_diff: i16 = if in_restart_row {
+                let sample: i32 = pixel >> point_transform as i32;
+                if x == 0 {
+                    (sample - initial_pred) as i16
+                } else {
+                    let left: i32 = pixels[y * width + x - 1] as i32 >> point_transform as i32;
+                    (sample - left) as i16
+                }
+            } else {
+                lossless_diff(
+                    pixel,
+                    x,
+                    y,
+                    pixels,
+                    width,
+                    predictor,
+                    point_transform,
+                    precision,
+                )
+            };
             all_diffs.push(signed_diff);
+            mcu_count += 1;
         }
+        in_restart_row = false;
     }
 
     // Pass 1: gather DC symbol frequencies for optimal Huffman table.
@@ -1914,10 +1952,19 @@ fn compress_lossless_grayscale(
     let (opt_bits, opt_values) = huff_opt::gen_optimal_table(&dc_freq);
     let dc_table: HuffTable = build_huff_table(&opt_bits, &opt_values);
 
-    // Pass 2: entropy encode with optimal table.
+    // Pass 2: entropy encode with optimal table + restart markers.
     let mut bit_writer: BitWriter = BitWriter::new(num_pixels);
+    let mut restart_idx: u8 = 0;
+    mcu_count = 0;
+
     for &diff in &all_diffs {
+        if ri > 0 && mcu_count > 0 && mcu_count.is_multiple_of(ri) {
+            bit_writer.flush();
+            bit_writer.write_restart_marker(restart_idx);
+            restart_idx = (restart_idx + 1) & 7;
+        }
         HuffmanEncoder::encode_dc_only(&mut bit_writer, diff, &dc_table);
+        mcu_count += 1;
     }
     bit_writer.flush();
 
@@ -1941,6 +1988,11 @@ fn compress_lossless_grayscale(
     // Optimized DC Huffman table (after SOF3, matching C)
     marker_writer::write_dht(&mut output, 0, 0, &opt_bits, &opt_values);
 
+    // DRI (restart interval)
+    if restart_interval > 0 {
+        marker_writer::write_dri(&mut output, restart_interval);
+    }
+
     let scan_components: Vec<(u8, u8)> = vec![(1, 0)];
     marker_writer::write_sos_lossless(&mut output, &scan_components, predictor, point_transform);
 
@@ -1961,9 +2013,12 @@ fn compress_lossless_rgb(
     height: usize,
     predictor: u8,
     point_transform: u8,
+    restart_interval: u16,
 ) -> Result<Vec<u8>> {
     let precision: u8 = 8;
     let num_pixels: usize = width * height;
+    let ri: u32 = restart_interval as u32;
+    let initial_pred: i32 = 1 << (precision as i32 - point_transform as i32 - 1);
 
     // Split interleaved RGB into separate planes (no color conversion)
     let mut r_plane: Vec<u8> = vec![0u8; num_pixels];
@@ -1979,24 +2034,45 @@ fn compress_lossless_rgb(
     let planes: [&[u8]; 3] = [&r_plane, &g_plane, &b_plane];
 
     // Collect all lossless diffs first for 2-pass optimized Huffman encoding.
+    // One MCU = one pixel (all 3 interleaved components).
     let mut all_diffs: Vec<i16> = Vec::with_capacity(num_pixels * 3);
+    let mut mcu_count: u32 = 0;
+    let mut in_restart_row: bool = false;
+
     for y in 0..height {
         for x in 0..width {
+            if ri > 0 && mcu_count > 0 && mcu_count.is_multiple_of(ri) {
+                in_restart_row = true;
+            }
             for plane in &planes {
                 let pixel: i32 = plane[y * width + x] as i32;
-                let signed_diff: i16 = lossless_diff(
-                    pixel,
-                    x,
-                    y,
-                    plane,
-                    width,
-                    predictor,
-                    point_transform,
-                    precision,
-                );
+                // After restart, use "first row" prediction: x=0 → initial_pred,
+                // x>0 → left neighbor (PSV=1 fallback, matching decoder).
+                let signed_diff: i16 = if in_restart_row {
+                    let sample: i32 = pixel >> point_transform as i32;
+                    if x == 0 {
+                        (sample - initial_pred) as i16
+                    } else {
+                        let left: i32 = plane[y * width + x - 1] as i32 >> point_transform as i32;
+                        (sample - left) as i16
+                    }
+                } else {
+                    lossless_diff(
+                        pixel,
+                        x,
+                        y,
+                        plane,
+                        width,
+                        predictor,
+                        point_transform,
+                        precision,
+                    )
+                };
                 all_diffs.push(signed_diff);
             }
+            mcu_count += 1;
         }
+        in_restart_row = false;
     }
 
     // Pass 1: gather DC symbol frequencies for optimal Huffman table.
@@ -2009,10 +2085,26 @@ fn compress_lossless_rgb(
     let (opt_bits, opt_values) = huff_opt::gen_optimal_table(&dc_freq);
     let dc_table: HuffTable = build_huff_table(&opt_bits, &opt_values);
 
-    // Pass 2: entropy encode with optimal table.
+    // Pass 2: entropy encode with optimal table + restart markers.
+    // Restart markers are emitted between MCUs (1 MCU = 3 component data units).
     let mut bit_writer: BitWriter = BitWriter::new(num_pixels * 3);
-    for &diff in &all_diffs {
-        HuffmanEncoder::encode_dc_only(&mut bit_writer, diff, &dc_table);
+    let mut restart_idx: u8 = 0;
+    let mut diff_idx: usize = 0;
+    mcu_count = 0;
+
+    for _y in 0..height {
+        for _x in 0..width {
+            if ri > 0 && mcu_count > 0 && mcu_count.is_multiple_of(ri) {
+                bit_writer.flush();
+                bit_writer.write_restart_marker(restart_idx);
+                restart_idx = (restart_idx + 1) & 7;
+            }
+            for _ in 0..3 {
+                HuffmanEncoder::encode_dc_only(&mut bit_writer, all_diffs[diff_idx], &dc_table);
+                diff_idx += 1;
+            }
+            mcu_count += 1;
+        }
     }
     bit_writer.flush();
 
@@ -2020,7 +2112,8 @@ fn compress_lossless_rgb(
 
     marker_writer::write_soi(&mut output);
 
-    // Adobe APP14 with transform=0 to signal RGB colorspace (matching C cjpeg)
+    // Adobe APP14 with transform=0 to signal RGB colorspace (matching C cjpeg).
+    // C cjpeg does NOT emit JFIF APP0 for RGB lossless — only APP14.
     marker_writer::write_app14_adobe(&mut output, 0);
 
     // SOF3 with 3 components: R(id='R'), G(id='G'), B(id='B'), all 1x1, qt=0.
@@ -2040,6 +2133,11 @@ fn compress_lossless_rgb(
 
     // Optimized DC Huffman table 0 for all 3 components (after SOF3, matching C)
     marker_writer::write_dht(&mut output, 0, 0, &opt_bits, &opt_values);
+
+    // DRI (restart interval)
+    if restart_interval > 0 {
+        marker_writer::write_dri(&mut output, restart_interval);
+    }
 
     // SOS with 3 components: all use DC table 0 (matching SOF3 ASCII IDs)
     let scan_components: Vec<(u8, u8)> = vec![
