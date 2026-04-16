@@ -27,7 +27,7 @@ pub enum TjParam {
     Height,
     /// TJPARAM_PRECISION: Sample precision in bits (read-only).
     Precision,
-    /// TJPARAM_COLORSPACE: Color space (0=RGB, 1=YCbCr, 2=Gray, 3=CMYK, 4=YCCK).
+    /// TJPARAM_COLORSPACE: Color space (-1=Default/auto, 0=RGB, 1=YCbCr, 2=Gray, 3=CMYK, 4=YCCK).
     ColorSpace,
     /// TJPARAM_FASTUPSAMPLE: Use nearest-neighbor upsampling (boolean).
     FastUpSample,
@@ -121,7 +121,7 @@ impl TjHandle {
             width: 0,
             height: 0,
             precision: 8,
-            color_space: 1, // YCbCr
+            color_space: -1, // TJCS_DEFAULT (auto-detect)
             fast_upsample: 0,
             fast_dct: 0,
             optimize: 0,
@@ -179,9 +179,9 @@ impl TjHandle {
                 self.precision = value;
             }
             TjParam::ColorSpace => {
-                if !(0..=4).contains(&value) {
+                if !(-1..=4).contains(&value) {
                     return Err(JpegError::CorruptData(format!(
-                        "color space must be 0-4, got {value}"
+                        "color space must be -1..4, got {value}"
                     )));
                 }
                 self.color_space = value;
@@ -380,6 +380,19 @@ impl TjHandle {
         }
     }
 
+    /// Convert TJ3 integer to `ColorSpace` enum. -1 (TJCS_DEFAULT) returns None.
+    fn tj_to_color_space(val: i32) -> Option<ColorSpace> {
+        match val {
+            -1 => None, // TJCS_DEFAULT: auto-detect
+            0 => Some(ColorSpace::Rgb),
+            1 => Some(ColorSpace::YCbCr),
+            2 => Some(ColorSpace::Grayscale),
+            3 => Some(ColorSpace::Cmyk),
+            4 => Some(ColorSpace::Ycck),
+            _ => None,
+        }
+    }
+
     /// Convert the subsampling integer to the `Subsampling` enum.
     fn subsampling_enum(&self) -> Subsampling {
         match self.subsampling {
@@ -392,6 +405,51 @@ impl TjHandle {
             5 => Subsampling::S411,
             _ => Subsampling::S420,
         }
+    }
+
+    /// Apply all handle parameters to an Encoder builder.
+    fn configure_encoder<'a>(
+        &'a self,
+        encoder: crate::api::encoder::Encoder<'a>,
+    ) -> crate::api::encoder::Encoder<'a> {
+        let mut enc = encoder
+            .quality(self.quality as u8)
+            .subsampling(self.subsampling_enum())
+            .optimize_huffman(self.optimize != 0)
+            .progressive(self.progressive != 0)
+            .arithmetic(self.arithmetic != 0)
+            .lossless(self.lossless != 0)
+            .lossless_predictor(self.lossless_psv as u8)
+            .lossless_point_transform(self.lossless_pt as u8);
+
+        if self.fast_dct != 0 {
+            enc = enc.dct_method(DctMethod::IsFast);
+        }
+
+        if self.x_density != 1 || self.y_density != 1 || self.density_units != 0 {
+            enc = enc.density(
+                self.density_units as u8,
+                self.x_density as u16,
+                self.y_density as u16,
+            );
+        }
+
+        if self.restart_blocks > 0 {
+            enc = enc.restart_blocks(self.restart_blocks as u16);
+        } else if self.restart_rows > 0 {
+            enc = enc.restart_rows(self.restart_rows as u16);
+        }
+
+        if let Some(ref icc) = self.icc_profile {
+            enc = enc.icc_profile(icc);
+        }
+
+        // Wire ColorSpace override (TJCS_DEFAULT=-1 means auto-detect)
+        if let Some(cs) = Self::tj_to_color_space(self.color_space) {
+            enc = enc.colorspace(cs);
+        }
+
+        enc
     }
 
     /// Compress pixels to JPEG using current handle parameters.
@@ -407,40 +465,6 @@ impl TjHandle {
     ) -> Result<Vec<u8>> {
         use crate::api::encoder::Encoder;
 
-        let mut encoder = Encoder::new(pixels, width, height, pixel_format)
-            .quality(self.quality as u8)
-            .subsampling(self.subsampling_enum())
-            .optimize_huffman(self.optimize != 0)
-            .progressive(self.progressive != 0)
-            .arithmetic(self.arithmetic != 0)
-            .lossless(self.lossless != 0)
-            .lossless_predictor(self.lossless_psv as u8)
-            .lossless_point_transform(self.lossless_pt as u8);
-
-        // Wire FastDct into encoder DCT method
-        if self.fast_dct != 0 {
-            encoder = encoder.dct_method(DctMethod::IsFast);
-        }
-
-        // Wire density into JFIF APP0 marker
-        if self.x_density != 1 || self.y_density != 1 || self.density_units != 0 {
-            encoder = encoder.density(
-                self.density_units as u8,
-                self.x_density as u16,
-                self.y_density as u16,
-            );
-        }
-
-        if self.restart_blocks > 0 {
-            encoder = encoder.restart_blocks(self.restart_blocks as u16);
-        } else if self.restart_rows > 0 {
-            encoder = encoder.restart_rows(self.restart_rows as u16);
-        }
-
-        if let Some(ref icc) = self.icc_profile {
-            encoder = encoder.icc_profile(icc);
-        }
-
         // Wire BottomUp: flip rows before encoding
         if self.bottom_up != 0 {
             let bpp: usize = pixel_format.bytes_per_pixel();
@@ -449,37 +473,53 @@ impl TjHandle {
             for row in (0..height).rev() {
                 flipped.extend_from_slice(&pixels[row * row_bytes..(row + 1) * row_bytes]);
             }
-            let mut encoder = Encoder::new(&flipped, width, height, pixel_format)
-                .quality(self.quality as u8)
-                .subsampling(self.subsampling_enum())
-                .optimize_huffman(self.optimize != 0)
-                .progressive(self.progressive != 0)
-                .arithmetic(self.arithmetic != 0)
-                .lossless(self.lossless != 0)
-                .lossless_predictor(self.lossless_psv as u8)
-                .lossless_point_transform(self.lossless_pt as u8);
-            if self.fast_dct != 0 {
-                encoder = encoder.dct_method(DctMethod::IsFast);
-            }
-            if self.x_density != 1 || self.y_density != 1 || self.density_units != 0 {
-                encoder = encoder.density(
-                    self.density_units as u8,
-                    self.x_density as u16,
-                    self.y_density as u16,
-                );
-            }
-            if self.restart_blocks > 0 {
-                encoder = encoder.restart_blocks(self.restart_blocks as u16);
-            } else if self.restart_rows > 0 {
-                encoder = encoder.restart_rows(self.restart_rows as u16);
-            }
-            if let Some(ref icc) = self.icc_profile {
-                encoder = encoder.icc_profile(icc);
-            }
-            return encoder.encode();
+            let encoder = Encoder::new(&flipped, width, height, pixel_format);
+            return self.configure_encoder(encoder).encode();
         }
 
-        encoder.encode()
+        let encoder = Encoder::new(pixels, width, height, pixel_format);
+        self.configure_encoder(encoder).encode()
+    }
+
+    /// Compress 12-bit pixels to JPEG (like `tj3Compress12`).
+    ///
+    /// Uses handle quality, subsampling, and lossless parameters.
+    pub fn compress_12bit(
+        &self,
+        pixels: &[i16],
+        width: usize,
+        height: usize,
+        num_components: usize,
+    ) -> Result<Vec<u8>> {
+        crate::api::precision::compress_12bit(
+            pixels,
+            width,
+            height,
+            num_components,
+            self.quality as u8,
+            self.subsampling_enum(),
+        )
+    }
+
+    /// Compress 16-bit pixels to lossless JPEG (like `tj3Compress16`).
+    ///
+    /// 16-bit is always lossless (SOF3). Uses handle lossless predictor
+    /// and point transform parameters.
+    pub fn compress_16bit(
+        &self,
+        pixels: &[u16],
+        width: usize,
+        height: usize,
+        num_components: usize,
+    ) -> Result<Vec<u8>> {
+        crate::api::precision::compress_16bit(
+            pixels,
+            width,
+            height,
+            num_components,
+            self.lossless_psv as u8,
+            self.lossless_pt as u8,
+        )
     }
 
     /// Decompress JPEG data using current handle parameters.
@@ -603,6 +643,30 @@ impl TjHandle {
             img.data = flipped;
         }
 
+        Ok(img)
+    }
+
+    /// Decompress JPEG to 12-bit pixels (like `tj3Decompress12`).
+    ///
+    /// Returns 12-bit sample data (0-4095). Updates handle `Width`, `Height`,
+    /// and `Precision` from the decoded image.
+    pub fn decompress_12bit(&mut self, data: &[u8]) -> Result<crate::api::precision::Image12> {
+        let img = crate::api::precision::decompress_12bit(data)?;
+        self.width = img.width as i32;
+        self.height = img.height as i32;
+        self.precision = 12;
+        Ok(img)
+    }
+
+    /// Decompress JPEG to 16-bit pixels (like `tj3Decompress16`).
+    ///
+    /// Returns 16-bit sample data. Updates handle `Width`, `Height`,
+    /// and `Precision` from the decoded image.
+    pub fn decompress_16bit(&mut self, data: &[u8]) -> Result<crate::api::precision::Image16> {
+        let img = crate::api::precision::decompress_16bit(data)?;
+        self.width = img.width as i32;
+        self.height = img.height as i32;
+        self.precision = img.precision as i32;
         Ok(img)
     }
 }
