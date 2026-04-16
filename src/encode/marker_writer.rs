@@ -245,23 +245,59 @@ pub fn write_dac(
     num_ac: usize,
     ac_params: &[u8],
 ) {
+    let mut dc_in_use = [false; 4];
+    let mut ac_in_use = [false; 4];
+    let mut full_dc_params = [(0u8, 1u8); 4];
+    let mut full_ac_params = [5u8; 4];
+
+    for i in 0..num_dc.min(4) {
+        dc_in_use[i] = true;
+        full_dc_params[i] = dc_params[i];
+    }
+    for i in 0..num_ac.min(4) {
+        ac_in_use[i] = true;
+        full_ac_params[i] = ac_params[i];
+    }
+
+    write_dac_selected(
+        buf,
+        &dc_in_use,
+        &full_dc_params,
+        &ac_in_use,
+        &full_ac_params,
+    );
+}
+
+/// Write DAC (Define Arithmetic Conditioning) marker for an arbitrary subset of
+/// DC/AC arithmetic tables.
+///
+/// Entries are emitted in libjpeg-turbo order: DC0, AC0, DC1, AC1, ...
+pub fn write_dac_selected(
+    buf: &mut Vec<u8>,
+    dc_in_use: &[bool; 4],
+    dc_params: &[(u8, u8); 4],
+    ac_in_use: &[bool; 4],
+    ac_params: &[u8; 4],
+) {
+    let num_entries: usize = dc_in_use.iter().filter(|&&used| used).count()
+        + ac_in_use.iter().filter(|&&used| used).count();
+    if num_entries == 0 {
+        return;
+    }
+
     buf.push(0xFF);
     buf.push(0xCC); // DAC
 
-    let num_entries = num_dc + num_ac;
     let length: u16 = 2 + (num_entries as u16 * 2);
     buf.extend_from_slice(&length.to_be_bytes());
 
-    // Write entries interleaved by table index (DC0, AC0, DC1, AC1, ...)
-    // matching C libjpeg-turbo's jcarith.c emit_dac output order.
-    let max_tables: usize = num_dc.max(num_ac);
-    for i in 0..max_tables {
-        if i < num_dc {
+    for i in 0..4 {
+        if dc_in_use[i] {
             let (l, u) = dc_params[i];
             buf.push(i as u8); // Tc=0 (DC), Tb=i
             buf.push((u << 4) | l);
         }
-        if i < num_ac {
+        if ac_in_use[i] {
             buf.push(0x10 | i as u8); // Tc=1 (AC), Tb=i
             buf.push(ac_params[i]);
         }
