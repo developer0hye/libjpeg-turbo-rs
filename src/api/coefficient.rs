@@ -886,11 +886,12 @@ pub fn transform_jpeg_with_options(data: &[u8], options: &TransformOptions) -> R
         return Ok(Vec::new());
     }
 
-    // Apply restart interval from transform options.
-    // Only write restart markers when explicitly requested — don't inherit
-    // the source JPEG's restart interval since MCU layout may change after
-    // transforms (crop, trim, grayscale).
-    coeffs.restart_interval = options.restart_interval;
+    // Apply restart interval: preserve source RI unless user explicitly overrides.
+    // Matches C jpegtran behavior — source restart interval flows through
+    // transforms unchanged. Only overwrite when explicitly requested.
+    if options.restart_interval > 0 {
+        coeffs.restart_interval = options.restart_interval;
+    }
 
     // Write output with the appropriate encoding.
     // C jpegtran -progressive implies -optimize (per-scan Huffman tables).

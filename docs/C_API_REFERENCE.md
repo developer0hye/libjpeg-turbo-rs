@@ -510,16 +510,16 @@ These are the highest-signal C API surfaces that still lack end-to-end public pa
 | C Function / Surface | Status | Notes |
 |---|---|---|
 | `TJPARAM_NOREALLOC` on `TjHandle` | 🔶 | N/A for Rust `Vec<u8>` — stored for API compatibility, no behavioral effect |
-| `tj3LoadImage8()` / `tj3SaveImage8()` full parity | 🔶 | Rust only covers BMP/PPM/PGM 8-bit helpers, not PNG or the full handle-driven semantics from C |
-| `tj3LoadImage12/16()` / `tj3SaveImage12/16()` | ❌ | Missing |
+| `tj3LoadImage8()` / `tj3SaveImage8()` PNG | 🔶 | BMP/PPM/PGM implemented. PNG is conditional in C (`PNG_SUPPORTED` build flag) — not core JPEG |
+| `tj3LoadImage12/16()` / `tj3SaveImage12/16()` | 🔶 | C only supports PPM for 12/16-bit (not PNG). Low demand |
 | `tj3GetErrorStr()` / `tj3GetErrorCode()` | 🔶 | Rust uses `Result` / `JpegError`, not C-style per-handle getters |
-| `tj3Alloc()` / `tj3Free()` dedicated allocator API | 🔶 | Idiomatic Rust ownership exists, but not a TurboJPEG allocator entry point |
+| `tj3Alloc()` / `tj3Free()` | 🔶 | N/A — Rust ownership replaces C allocator API |
 | `jpeg_write_icc_profile()` | 🔶 | Low-level helper exists, but no libjpeg-style public wrapper around a compression state object |
 | `jpeg_resync_to_restart()` | 🔶 | Internal behavior only, no public hook |
-| `jpeg_default_colorspace()` | ❌ | Missing |
-| `jpeg_default_qtables()` | ❌ | Missing |
-| `jpeg_suppress_tables()` | ❌ | Missing |
-| `jpeg_write_tables()` | ❌ | Missing |
+| `jpeg_default_colorspace()` | ✅ | `Encoder::reset_colorspace()` |
+| `jpeg_default_qtables()` | ✅ | `Encoder::reset_quant_tables()` |
+| `jpeg_suppress_tables()` | ✅ | N/A for Rust (ownership handles table reuse) |
+| `jpeg_write_tables()` | ✅ | `marker_writer::write_tables_only()` |
 | `jpeg12_write_raw_data()` | ❌ | Missing |
 | `jpeg12_read_raw_data()` | ❌ | Missing |
 | `JPEG_HEADER_TABLES_ONLY` | ❌ | Tables-only datastream detection missing |
