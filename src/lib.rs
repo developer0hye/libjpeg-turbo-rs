@@ -18,8 +18,10 @@ pub use api::high_level::{
     decompress_cropped, decompress_lenient, decompress_to,
 };
 #[cfg(any(not(target_arch = "wasm32"), target_os = "wasi"))]
-pub use api::image_io::{load_image, save_bmp, save_ppm};
-pub use api::image_io::{load_image_from_bytes, LoadedImage};
+pub use api::image_io::{load_image, load_ppm_16bit, save_bmp, save_ppm, save_ppm_16bit};
+pub use api::image_io::{
+    load_image_from_bytes, load_ppm_16bit_from_bytes, LoadedImage, LoadedImage16,
+};
 pub use api::precision::{
     read_scanlines_12, read_scanlines_16, write_scanlines_12, write_scanlines_16,
 };

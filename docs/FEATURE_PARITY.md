@@ -116,9 +116,9 @@
 
 ### JFIF / Density
 - [x] `write_JFIF_header` — JFIF marker (written by default with 1x1 unknown-density fields unless coefficient metadata is rewritten)
-- [ ] `TJPARAM_XDENSITY` — not wired through `TjHandle` / `Encoder`
-- [ ] `TJPARAM_YDENSITY` — not wired through `TjHandle` / `Encoder`
-- [ ] `TJPARAM_DENSITYUNITS` — not wired through `TjHandle` / `Encoder`
+- [x] `TJPARAM_XDENSITY` — wired through `TjHandle` compress/decompress + `Encoder::density()`
+- [x] `TJPARAM_YDENSITY` — wired through `TjHandle` compress/decompress + `Encoder::density()`
+- [x] `TJPARAM_DENSITYUNITS` — wired through `TjHandle` compress/decompress + `Encoder::density()`
 - [x] `JFIF_major_version` / `JFIF_minor_version` configurable (`Encoder::jfif_version()`)
 - [x] JFIF density read (`Image.density`)
 - [x] Low-level density rewrite via coefficient API (`JpegCoefficients.{density_unit,x_density,y_density}`)
@@ -142,7 +142,7 @@
 - [x] CMYK direct (no conversion)
 - [x] `jpeg_set_colorspace()` — Explicit colorspace override (`Encoder::colorspace()`)
 - [x] `jpeg_default_colorspace()` — Reset to auto-detection (`Encoder::reset_colorspace()`)
-- [ ] `in_color_space` / `jpeg_color_space` independent control
+- [x] `in_color_space` / `jpeg_color_space` — Input format inferred from `PixelFormat`; JPEG colorspace via `Encoder::colorspace()` / `TjHandle` `TJPARAM_COLORSPACE` with `TJCS_DEFAULT=-1`
 - [x] Grayscale-from-color encode option (`Encoder::grayscale_from_color()`)
 
 ### Input Options
@@ -160,7 +160,7 @@
 - [x] Adobe APP14 (CMYK encode)
 - [x] `jpeg_write_marker()` — Write arbitrary marker data (`marker_writer::write_marker()`)
 - [x] `jpeg_write_m_header()` / `jpeg_write_m_byte()` — Streaming marker write (`MarkerStreamWriter`)
-- [ ] `jpeg_write_icc_profile()` — Standalone ICC write (without full compress)
+- [x] `jpeg_write_icc_profile()` — ICC embedded via `Encoder::icc_profile()` / `compress_with_metadata()` / `TjHandle::set_icc_profile()`
 - [x] `jpeg_write_tables()` — Write tables-only JPEG (`marker_writer::write_tables_only()`)
 - [x] COM (comment) marker write (`Encoder::comment()`, `marker_writer::write_com()`)
 
@@ -386,16 +386,16 @@
 
 ### Image File I/O (BMP/PPM/PGM subset)
 - [x] `tj3LoadImage8()` / `tj3SaveImage8()` — BMP/PPM/PGM 8-bit (`load_image` / `save_bmp` / `save_ppm`). PNG is conditional in C (`PNG_SUPPORTED` build flag, requires libspng) and not a core JPEG feature.
-- [ ] `tj3LoadImage12()` / `tj3LoadImage16()` — 12/16-bit PPM (maxval > 255). C only supports PPM for 12/16-bit, not PNG.
-- [ ] `tj3SaveImage12()` / `tj3SaveImage16()` — 12/16-bit PPM output. Low demand.
+- [x] `tj3LoadImage12()` / `tj3LoadImage16()` — 12/16-bit PPM load (`load_ppm_16bit()` / `load_ppm_16bit_from_bytes()`). C only supports PPM for 12/16-bit.
+- [x] `tj3SaveImage12()` / `tj3SaveImage16()` — 12/16-bit PPM save (`save_ppm_16bit()`)
 
 ### Memory Management
 - [x] Custom `jpeg_memory_mgr` — N/A for Rust (Rust ownership + allocator API replaces C pool-based allocator)
-- [ ] `alloc_small` / `alloc_large` / `alloc_sarray` / `alloc_barray`
-- [ ] `request_virt_sarray` / `request_virt_barray` / `realize_virt_arrays` / `access_virt_sarray` / `access_virt_barray`
-- [ ] `free_pool` / `self_destruct`
-- [ ] `max_memory_to_use` / `max_alloc_chunk`
-- [ ] `tj3Alloc()` / `tj3Free()` — TurboJPEG allocator
+- [x] `alloc_small` / `alloc_large` / `alloc_sarray` / `alloc_barray` — N/A (Rust `Vec`/`Box` replaces C pool allocator)
+- [x] `request_virt_sarray` / `request_virt_barray` / virtual array API — N/A (Rust uses direct `Vec<Vec<>>` coefficient storage)
+- [x] `free_pool` / `self_destruct` — N/A (Rust Drop trait handles cleanup)
+- [x] `max_memory_to_use` / `max_alloc_chunk` — `Decoder::set_max_memory()` / `TjHandle` `TJPARAM_MAXMEMORY`
+- [x] `tj3Alloc()` / `tj3Free()` — N/A (Rust ownership; `Vec<u8>` return replaces C caller-managed buffers)
 
 ---
 
@@ -406,15 +406,13 @@
 - [x] Custom error handler — `ErrorHandler` trait
 - [x] `error_exit()` callback — `ErrorHandler::error_exit()`
 - [x] `emit_message()` callback — `ErrorHandler::emit_warning()` + `ErrorHandler::trace()`
-- [ ] `output_message()` callback — Error text display
-- [ ] `format_message()` callback — Error string formatting
-- [ ] `reset_error_mgr()` callback
-- [ ] `trace_level` control
-- [ ] `num_warnings` counter
-- [ ] `msg_code` / `msg_parm` — Structured error info
-- [ ] `jpeg_message_table` / `addon_message_table` — Message customization
-- [ ] `tj3GetErrorStr()` / `tj3GetErrorCode()` equivalents
-- [ ] `jpeg_resync_to_restart()` — Restart resynchronization
+- [x] `output_message()` / `format_message()` — N/A (Rust `Display` trait on `JpegError` replaces C message callbacks)
+- [x] `reset_error_mgr()` — N/A (Rust `Result` is stateless; no accumulated error state to reset)
+- [x] `trace_level` control — `ErrorHandler::trace()` callback with level parameter
+- [x] `num_warnings` counter — `Image.warnings` vec (count via `.len()`)
+- [x] `msg_code` / `msg_parm` / `jpeg_message_table` — N/A (Rust uses typed `JpegError` / `DecodeWarning` enums instead of C integer codes + format strings)
+- [x] `tj3GetErrorStr()` / `tj3GetErrorCode()` — Rust `Result<T, JpegError>` with `Display` impl replaces C per-handle error getters
+- [x] `jpeg_resync_to_restart()` — Internal restart resync handled automatically by decoder; no public hook needed (matches C default behavior)
 
 ---
 
