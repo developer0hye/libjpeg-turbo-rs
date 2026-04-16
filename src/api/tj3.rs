@@ -6,7 +6,8 @@
 
 use crate::common::error::{JpegError, Result};
 use crate::common::types::{
-    ColorSpace, CropRegion, DctMethod, DensityUnit, PixelFormat, ScalingFactor, Subsampling,
+    ColorSpace, CropRegion, DctMethod, DensityUnit, MarkerSaveConfig, PixelFormat, ScalingFactor,
+    Subsampling,
 };
 use crate::decode::pipeline::{Decoder, Image};
 
@@ -140,7 +141,7 @@ impl TjHandle {
             bottom_up: 0,
             no_realloc: 0,
             stop_on_warning: 0,
-            save_markers: 0,
+            save_markers: 2, // TJSM_ALL (C default)
             icc_profile: None,
             scaling_factor: ScalingFactor::default(),
             cropping_region: None,
@@ -530,6 +531,16 @@ impl TjHandle {
             decoder.set_crop_region(crop.x, crop.y, crop.width, crop.height);
         }
 
+        // Wire SaveMarkers: configure which markers to preserve
+        // Matches C TJSM_NONE(0), TJSM_COM(1), TJSM_ALL(2), TJSM_NOICC(3), TJSM_ICC(4)
+        match self.save_markers {
+            1 => decoder.save_markers(MarkerSaveConfig::Specific(vec![0xFE])),
+            2 => decoder.save_markers(MarkerSaveConfig::All),
+            3 => decoder.save_markers(MarkerSaveConfig::All), // filter ICC post-decode
+            4 => decoder.save_markers(MarkerSaveConfig::Specific(vec![0xE2])),
+            _ => {} // 0 = none (default)
+        }
+
         // Capture JPEG header metadata before decoding
         let jpeg_color_space: ColorSpace = decoder.jpeg_color_space();
         let jpeg_subsampling: Subsampling = decoder.jpeg_subsampling();
@@ -561,8 +572,25 @@ impl TjHandle {
         self.x_density = img.density.x as i32;
         self.y_density = img.density.y as i32;
 
-        // Capture ICC profile from decoded image (matches C tj3GetICCProfile after decompress)
-        self.icc_profile = img.icc_profile.take();
+        // Capture ICC profile based on SaveMarkers level (matches C tj3GetICCProfile semantics)
+        // Level 0/1: no ICC extraction; Level 2/4: extract ICC; Level 3: all except ICC
+        match self.save_markers {
+            0 | 1 => {
+                self.icc_profile = None;
+                img.icc_profile = None;
+            }
+            3 => {
+                self.icc_profile = None;
+                img.icc_profile = None;
+                // Remove ICC APP2 markers from saved_markers
+                img.saved_markers
+                    .retain(|m| !(m.code == 0xE2 && m.data.starts_with(b"ICC_PROFILE\0")));
+            }
+            _ => {
+                // Level 2 (all) and 4 (ICC only): extract ICC
+                self.icc_profile = img.icc_profile.take();
+            }
+        }
 
         // Wire BottomUp: flip rows after decoding
         if self.bottom_up != 0 {
