@@ -328,7 +328,10 @@ impl<'a> Encoder<'a> {
             None => 0,
             Some(RestartConfig::Blocks(n)) => n,
             Some(RestartConfig::Rows(n)) => {
-                let mcu_w = if self.pixel_format == PixelFormat::Grayscale {
+                // Lossless: 1 MCU = 1 pixel (no 8x8 blocks).
+                let mcu_w: usize = if self.lossless {
+                    1
+                } else if self.pixel_format == PixelFormat::Grayscale {
                     8
                 } else {
                     match self.subsampling {
@@ -340,7 +343,7 @@ impl<'a> Encoder<'a> {
                         Subsampling::S411 => 32,
                     }
                 };
-                let mcus_x = self.width.div_ceil(mcu_w) as u16;
+                let mcus_x: u16 = self.width.div_ceil(mcu_w) as u16;
                 n.saturating_mul(mcus_x)
             }
         }
@@ -711,6 +714,7 @@ impl<'a> Encoder<'a> {
                 effective_format,
                 self.lossless_predictor,
                 self.lossless_point_transform,
+                restart_interval,
             )?
         } else if self.arithmetic && self.progressive {
             encoder::compress_arithmetic_progressive(

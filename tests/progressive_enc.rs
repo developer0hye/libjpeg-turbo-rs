@@ -111,7 +111,7 @@ fn ac_refine_roundtrip_gradient_grayscale() {
 }
 
 #[test]
-fn ac_refine_produces_14_scans_rgb() {
+fn ac_refine_produces_10_scans_ycbcr() {
     let pixels = gradient_pixels(32, 32, 3);
     let jpeg =
         compress_progressive(&pixels, 32, 32, PixelFormat::Rgb, 75, Subsampling::S444).unwrap();
@@ -119,7 +119,11 @@ fn ac_refine_produces_14_scans_rgb() {
         .windows(2)
         .filter(|w| w[0] == 0xFF && w[1] == 0xDA)
         .count();
-    assert_eq!(sos_count, 14, "3-comp progressive should have 14 scans");
+    // 3-component YCbCr uses the optimized 10-scan progression (jcparam.c).
+    assert_eq!(
+        sos_count, 10,
+        "3-comp YCbCr progressive should have 10 scans"
+    );
 }
 
 #[test]

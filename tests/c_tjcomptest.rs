@@ -716,7 +716,10 @@ fn run_lossless_combo(
         .lossless_predictor(psv)
         .lossless_point_transform(pt);
     if let Some(n) = restart_blocks {
-        enc = enc.restart_blocks(n);
+        // C cjpeg `-r N` means N MCU rows. For lossless (1x1 sampling),
+        // 1 MCU = 1 pixel, so 1 MCU row = width MCUs.
+        let ri: u16 = n * width as u16;
+        enc = enc.restart_blocks(ri);
     }
     if let Some(ref icc) = icc_data {
         enc = enc.icc_profile(icc);

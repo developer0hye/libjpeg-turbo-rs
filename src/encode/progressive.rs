@@ -19,15 +19,122 @@ pub struct ProgressiveScan {
 
 /// Generate a simple progressive scan script.
 ///
-/// Follows libjpeg-turbo's default progression (jcparam.c `jpeg_simple_progression`).
-/// Uses successive approximation for both DC and AC coefficients:
+/// Follows libjpeg-turbo's default progression (jcparam.c
+/// `jpeg_simple_progression`) exactly.
 ///
-/// 1. DC first (all components interleaved), Al=1
-/// 2. AC first scans per-component for bands (1-5, 6-63), Al=2
-/// 3. AC refine scans per-component (1-63), Ah=2, Al=1
-/// 4. DC refine (all components), Ah=1, Al=0
-/// 5. AC refine scans per-component (1-63), Ah=1, Al=0
+/// For 3-component YCbCr images (the common case), uses the optimized
+/// YCbCr script (10 scans): chroma gets full band 1-63 in a single scan
+/// with Al=1, while luma gets split bands (1-5, 6-63) with Al=2.
+///
+/// For other component counts, uses the generic all-purpose script.
 pub fn simple_progression(num_components: usize) -> Vec<ProgressiveScan> {
+    if num_components == 3 {
+        ycbcr_progression()
+    } else {
+        generic_progression(num_components)
+    }
+}
+
+/// YCbCr-specific progression matching C jcparam.c (10 scans).
+///
+/// Order follows the C source exactly:
+/// 1. DC first (all 3 comps), Al=1
+/// 2. Y AC first, band 1-5, Al=2
+/// 3. Cr AC first, band 1-63, Al=1
+/// 4. Cb AC first, band 1-63, Al=1
+/// 5. Y AC first, band 6-63, Al=2
+/// 6. Y AC refine, band 1-63, Ah=2, Al=1
+/// 7. DC refine (all 3 comps), Ah=1, Al=0
+/// 8. Cr AC refine, band 1-63, Ah=1, Al=0
+/// 9. Cb AC refine, band 1-63, Ah=1, Al=0
+/// 10. Y AC refine, band 1-63, Ah=1, Al=0
+fn ycbcr_progression() -> Vec<ProgressiveScan> {
+    vec![
+        // 1. DC first: all components
+        ProgressiveScan {
+            component_indices: vec![0, 1, 2],
+            ss: 0,
+            se: 0,
+            ah: 0,
+            al: 1,
+        },
+        // 2. Y AC first: band 1-5
+        ProgressiveScan {
+            component_indices: vec![0],
+            ss: 1,
+            se: 5,
+            ah: 0,
+            al: 2,
+        },
+        // 3. Cr AC first: full band, Al=1 (chroma is small, one scan suffices)
+        ProgressiveScan {
+            component_indices: vec![2],
+            ss: 1,
+            se: 63,
+            ah: 0,
+            al: 1,
+        },
+        // 4. Cb AC first: full band, Al=1
+        ProgressiveScan {
+            component_indices: vec![1],
+            ss: 1,
+            se: 63,
+            ah: 0,
+            al: 1,
+        },
+        // 5. Y AC first: band 6-63
+        ProgressiveScan {
+            component_indices: vec![0],
+            ss: 6,
+            se: 63,
+            ah: 0,
+            al: 2,
+        },
+        // 6. Y AC refine: Ah=2, Al=1
+        ProgressiveScan {
+            component_indices: vec![0],
+            ss: 1,
+            se: 63,
+            ah: 2,
+            al: 1,
+        },
+        // 7. DC refine: all components
+        ProgressiveScan {
+            component_indices: vec![0, 1, 2],
+            ss: 0,
+            se: 0,
+            ah: 1,
+            al: 0,
+        },
+        // 8. Cr AC refine: Ah=1, Al=0
+        ProgressiveScan {
+            component_indices: vec![2],
+            ss: 1,
+            se: 63,
+            ah: 1,
+            al: 0,
+        },
+        // 9. Cb AC refine: Ah=1, Al=0
+        ProgressiveScan {
+            component_indices: vec![1],
+            ss: 1,
+            se: 63,
+            ah: 1,
+            al: 0,
+        },
+        // 10. Y AC refine: Ah=1, Al=0 (largest scan, comes last)
+        ProgressiveScan {
+            component_indices: vec![0],
+            ss: 1,
+            se: 63,
+            ah: 1,
+            al: 0,
+        },
+    ]
+}
+
+/// Generic all-purpose progression for non-YCbCr (jcparam.c else branch).
+fn generic_progression(num_components: usize) -> Vec<ProgressiveScan> {
     let mut scans = Vec::new();
     let all_comps: Vec<usize> = (0..num_components).collect();
 
@@ -101,7 +208,7 @@ mod tests {
     #[test]
     fn simple_progression_grayscale() {
         let scans = simple_progression(1);
-        // 1 DC first + 2 AC first + 1 AC refine + 1 DC refine + 1 AC refine = 6
+        // Generic: 1 DC first + 2 AC first + 1 AC refine + 1 DC refine + 1 AC refine = 6
         assert_eq!(scans.len(), 6);
         assert_eq!(scans[0].ss, 0);
         assert_eq!(scans[0].se, 0);
@@ -115,17 +222,29 @@ mod tests {
     }
 
     #[test]
-    fn simple_progression_3_components() {
+    fn simple_progression_3_components_ycbcr() {
         let scans = simple_progression(3);
-        // 1 DC first + 6 AC first + 3 AC refine + 1 DC refine + 3 AC refine = 14
-        assert_eq!(scans.len(), 14);
+        // YCbCr-specific: 10 scans matching C jcparam.c
+        assert_eq!(scans.len(), 10);
+        // 1. DC first: all 3 comps
+        assert_eq!(scans[0].component_indices, vec![0, 1, 2]);
         assert_eq!(scans[0].ss, 0);
-        assert_eq!(scans[0].se, 0);
-        assert_eq!(scans[0].component_indices.len(), 3);
         assert_eq!(scans[0].al, 1);
-        let last = &scans[13];
+        // 2. Y AC first: band 1-5
+        assert_eq!(scans[1].component_indices, vec![0]);
+        assert_eq!(scans[1].se, 5);
+        assert_eq!(scans[1].al, 2);
+        // 3. Cr AC first: full band, Al=1
+        assert_eq!(scans[2].component_indices, vec![2]);
+        assert_eq!(scans[2].se, 63);
+        assert_eq!(scans[2].al, 1);
+        // 4. Cb AC first: full band, Al=1
+        assert_eq!(scans[3].component_indices, vec![1]);
+        assert_eq!(scans[3].al, 1);
+        // 10. Y AC refine (last, largest scan)
+        let last = &scans[9];
+        assert_eq!(last.component_indices, vec![0]);
         assert_eq!(last.ah, 1);
         assert_eq!(last.al, 0);
-        assert_eq!(last.component_indices, vec![2]);
     }
 }
