@@ -39,7 +39,7 @@
 | `OPTIMIZE` | Optimized Huffman tables | `compress_optimized()` | ✅ |
 | `PROGRESSIVE` | Progressive JPEG mode | `compress_progressive()` | ✅ |
 | `SCANLIMIT` | Max progressive scans | `Decoder::set_scan_limit()` | ✅ |
-| `ARITHMETIC` | Arithmetic entropy coding | `compress_arithmetic()` | ✅ |
+| `ARITHMETIC` | Arithmetic entropy coding | `compress_arithmetic()`, `TransformOptions::arithmetic` | ✅ |
 | `LOSSLESS` | Lossless JPEG mode | `compress_lossless()` | ✅ |
 | `LOSSLESSPSV` | Lossless predictor 1-7 | `Encoder::lossless_predictor()` | ✅ |
 | `LOSSLESSPT` | Lossless point transform 0-15 | `Encoder::lossless_point_transform()` | ✅ |
@@ -138,7 +138,7 @@
 
 | C Function | Description | Rust | Status |
 |---|---|---|---|
-| `tj3Transform(handle, jpeg, size, n, &dstBufs, &dstSizes, transforms)` | Lossless transform with options | `transform_jpeg()` (all ops + all TJXOPT flags + custom filter) | ✅ |
+| `tj3Transform(handle, jpeg, size, n, &dstBufs, &dstSizes, transforms)` | Lossless transform with options | `transform_jpeg()` / `transform_jpeg_with_options()` (all ops + all TJXOPT flags, including arithmetic/progressive output, + custom filter) | ✅ |
 | `tj3TransformBufSize(handle, transform)` | Estimate output buffer size | `transform_buf_size()` | ✅ |
 
 ### Error Handling

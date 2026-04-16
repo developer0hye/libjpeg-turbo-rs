@@ -200,6 +200,7 @@ pub fn compress_lossless_extended(
         pixel_format,
         predictor,
         point_transform,
+        0, // no restart interval for high-level API
     )
 }
 
