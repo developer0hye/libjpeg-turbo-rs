@@ -248,6 +248,25 @@ impl<'a> Encoder<'a> {
         self
     }
 
+    /// Reset colorspace to auto-detection (like `jpeg_default_colorspace`).
+    ///
+    /// Clears any explicit colorspace override set by `colorspace()`.
+    /// The encoder will infer the JPEG colorspace from the pixel format.
+    pub fn reset_colorspace(mut self) -> Self {
+        self.colorspace_override = None;
+        self
+    }
+
+    /// Reset quantization tables to defaults (like `jpeg_default_qtables`).
+    ///
+    /// Clears any custom quantization tables. The encoder will generate
+    /// standard luminance/chrominance tables scaled by the quality factor.
+    pub fn reset_quant_tables(mut self) -> Self {
+        self.custom_quant_tables = [None; 4];
+        self.quality_factors = None;
+        self
+    }
+
     /// Set quality using a linear scale factor instead of the 1-100 quality rating.
     pub fn linear_quality(mut self, scale_factor: u32) -> Self {
         self.linear_scale_factor = Some(scale_factor);

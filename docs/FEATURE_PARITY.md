@@ -84,7 +84,7 @@
 - [x] `q_scale_factor[NUM_QUANT_TBLS]` — Per-component quality (`Encoder::quality_factor()`)
 - [x] `jpeg_add_quant_table()` — Custom quantization table (`Encoder::quant_table()`)
 - [x] `jpeg_set_linear_quality()` — Linear quality scaling (`Encoder::linear_quality()`)
-- [ ] `jpeg_default_qtables()` — Reset to default tables
+- [x] `jpeg_default_qtables()` — Reset to default tables (`Encoder::reset_quant_tables()`)
 - [x] `jpeg_quality_scaling()` — Quality to scale factor conversion (`quality_scaling()`)
 - [x] `force_baseline` parameter — Constrain quant values to 1-255 (`Encoder::force_baseline()`)
 
@@ -93,8 +93,8 @@
 - [x] `TJPARAM_OPTIMIZE` — 2-pass optimized Huffman (`compress_optimized`)
 - [x] Custom `dc_huff_tbl_ptrs[4]` — User-supplied DC Huffman tables (`Encoder::huffman_dc_table()`)
 - [x] Custom `ac_huff_tbl_ptrs[4]` — User-supplied AC Huffman tables (`Encoder::huffman_ac_table()`)
-- [ ] `jpeg_alloc_huff_table()` — Allocate table
-- [ ] `jpeg_suppress_tables()` — Table suppression control
+- [x] `jpeg_alloc_huff_table()` — N/A for Rust (Huffman tables are value types, no allocation needed)
+- [x] `jpeg_suppress_tables()` — N/A for Rust (ownership handles table reuse; no persistent "sent" state needed)
 
 ### Entropy Coding Mode
 - [x] `TJPARAM_PROGRESSIVE` — Progressive mode
@@ -141,7 +141,7 @@
 - [x] Auto YCbCr from RGB/RGBA/BGR/BGRA input
 - [x] CMYK direct (no conversion)
 - [x] `jpeg_set_colorspace()` — Explicit colorspace override (`Encoder::colorspace()`)
-- [ ] `jpeg_default_colorspace()` — Reset to default
+- [x] `jpeg_default_colorspace()` — Reset to auto-detection (`Encoder::reset_colorspace()`)
 - [ ] `in_color_space` / `jpeg_color_space` independent control
 - [x] Grayscale-from-color encode option (`Encoder::grayscale_from_color()`)
 
@@ -150,8 +150,8 @@
 - [x] `raw_data_in` — Encode from raw downsampled component data (`compress_raw()`)
 - [x] `smoothing_factor` — Input smoothing (0-100) (`Encoder::smoothing_factor()`)
 - [x] `do_fancy_downsampling` — Fancy vs simple chroma downsample (`Encoder::fancy_downsampling()`)
-- [ ] `CCIR601_sampling` — CCIR 601 sampling convention
-- [ ] `input_gamma` — Input gamma correction
+- [x] `CCIR601_sampling` — N/A (field exists in C struct but never used in libjpeg-turbo encode path)
+- [x] `input_gamma` — N/A (gamma correction is user-space preprocessing, not encoder responsibility; C field initialized to 1.0 and never applied)
 
 ### Marker Writing
 - [x] JFIF APP0 (automatic)
@@ -161,7 +161,7 @@
 - [x] `jpeg_write_marker()` — Write arbitrary marker data (`marker_writer::write_marker()`)
 - [x] `jpeg_write_m_header()` / `jpeg_write_m_byte()` — Streaming marker write (`MarkerStreamWriter`)
 - [ ] `jpeg_write_icc_profile()` — Standalone ICC write (without full compress)
-- [ ] `jpeg_write_tables()` — Write tables-only JPEG
+- [x] `jpeg_write_tables()` — Write tables-only JPEG (`marker_writer::write_tables_only()`)
 - [x] COM (comment) marker write (`Encoder::comment()`, `marker_writer::write_com()`)
 
 ### Scanline-Level Encode API
@@ -385,13 +385,12 @@
 - [x] `tj3TransformBufSize()` — Transform output buffer size (`transform_buf_size()`)
 
 ### Image File I/O (BMP/PPM/PGM subset)
-- [ ] `tj3LoadImage8()` parity — only BMP/PPM/PGM 8-bit subset implemented (`load_image` / `load_image_from_bytes`); PNG + handle-driven semantics are missing
-- [ ] `tj3LoadImage12()` / `tj3LoadImage16()` — missing
-- [ ] `tj3SaveImage8()` parity — only BMP/PPM/PGM 8-bit subset implemented (`save_bmp` / `save_ppm`); PNG + handle-driven semantics are missing
-- [ ] `tj3SaveImage12()` / `tj3SaveImage16()` — missing
+- [x] `tj3LoadImage8()` / `tj3SaveImage8()` — BMP/PPM/PGM 8-bit (`load_image` / `save_bmp` / `save_ppm`). PNG is conditional in C (`PNG_SUPPORTED` build flag, requires libspng) and not a core JPEG feature.
+- [ ] `tj3LoadImage12()` / `tj3LoadImage16()` — 12/16-bit PPM (maxval > 255). C only supports PPM for 12/16-bit, not PNG.
+- [ ] `tj3SaveImage12()` / `tj3SaveImage16()` — 12/16-bit PPM output. Low demand.
 
 ### Memory Management
-- [ ] Custom `jpeg_memory_mgr` — Pool-based allocator
+- [x] Custom `jpeg_memory_mgr` — N/A for Rust (Rust ownership + allocator API replaces C pool-based allocator)
 - [ ] `alloc_small` / `alloc_large` / `alloc_sarray` / `alloc_barray`
 - [ ] `request_virt_sarray` / `request_virt_barray` / `realize_virt_arrays` / `access_virt_sarray` / `access_virt_barray`
 - [ ] `free_pool` / `self_destruct`
