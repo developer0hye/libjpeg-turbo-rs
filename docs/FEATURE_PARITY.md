@@ -432,9 +432,8 @@
 
 - [x] `tj3Init()` / `tj3Destroy()` — Handle lifecycle (`TjHandle::new()` / Drop)
 - [x] `tj3Set()` / `tj3Get()` — Generic parameter get/set (`TjHandle::set()` / `TjHandle::get()`)
-- [ ] All 26 TJPARAM values as end-to-end runtime parameters (`TjParam` exists, but `Precision`, `ColorSpace`, `NoRealloc`, `SaveMarkers`, and density params are not fully applied by `TjHandle::compress()` / `decompress()`, and `SaveMarkers` semantics differ from C)
-- [x] `tj3SetICCProfile()` — encode-side ICC via handle (`TjHandle::set_icc_profile()`)
-- [ ] `tj3GetICCProfile()` parity — `TjHandle::decompress()` does not populate the handle from decoded ICC data
+- [ ] All 26 TJPARAM values as end-to-end runtime parameters (`TjParam` exists; `ColorSpace`, `Subsampling`, density, and ICC are now populated by `decompress()`; density is wired into `compress()`; `Precision` is read-only from decode; `NoRealloc` is N/A for Rust `Vec<u8>`; `SaveMarkers` range validated 0-4 but not yet behaviorally wired in decode path)
+- [x] `tj3SetICCProfile()` / `tj3GetICCProfile()` — encode-side ICC via handle + decompress populates handle ICC (`TjHandle::set_icc_profile()` / `TjHandle::icc_profile()`)
 - [x] `tj3SetScalingFactor()` / `tj3SetCroppingRegion()` — Decode options via handle (`TjHandle::set_scaling_factor()` / `TjHandle::set_cropping_region()`)
 - [x] `tj3GetScalingFactors()` — Query available scaling factors (`TjHandle::scaling_factors()`)
 

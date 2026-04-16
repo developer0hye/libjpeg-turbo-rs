@@ -5,7 +5,9 @@
 //! parameters are stored in a single `TjHandle` and accessed via `TjParam`.
 
 use crate::common::error::{JpegError, Result};
-use crate::common::types::{CropRegion, DctMethod, PixelFormat, ScalingFactor, Subsampling};
+use crate::common::types::{
+    ColorSpace, CropRegion, DctMethod, DensityUnit, PixelFormat, ScalingFactor, Subsampling,
+};
 use crate::decode::pipeline::{Decoder, Image};
 
 /// All TJPARAM parameter identifiers from libjpeg-turbo TJ3 API.
@@ -61,10 +63,14 @@ pub enum TjParam {
     /// TJPARAM_BOTTOMUP: Bottom-up row order (boolean).
     BottomUp,
     /// TJPARAM_NOREALLOC: Use pre-allocated output buffer (boolean).
+    /// N/A in Rust: `Vec<u8>` return type handles allocation automatically.
+    /// Stored for API compatibility but has no behavioral effect.
     NoRealloc,
     /// TJPARAM_STOPONWARNING: Treat warnings as fatal (boolean).
     StopOnWarning,
-    /// TJPARAM_SAVEMARKERS: Marker saving config (0=None, 1=All).
+    /// TJPARAM_SAVEMARKERS: Marker preservation level (0-4, matching C libjpeg-turbo).
+    ///
+    /// 0 = none, 1 = COM only, 2 = all (default in C), 3 = all except ICC, 4 = ICC only.
     SaveMarkers,
 }
 
@@ -128,7 +134,7 @@ impl TjHandle {
             restart_rows: 0,
             x_density: 1,
             y_density: 1,
-            density_units: 0, // DPI
+            density_units: 0, // unknown
             max_memory: 0,
             max_pixels: 0,
             bottom_up: 0,
@@ -252,6 +258,11 @@ impl TjHandle {
                 self.stop_on_warning = if value != 0 { 1 } else { 0 };
             }
             TjParam::SaveMarkers => {
+                if !(0..=4).contains(&value) {
+                    return Err(JpegError::CorruptData(format!(
+                        "save markers level must be 0-4, got {value}"
+                    )));
+                }
                 self.save_markers = value;
             }
         }
@@ -343,6 +354,31 @@ impl TjHandle {
         ]
     }
 
+    /// Convert `ColorSpace` enum to TJ3 integer (TJCS_* constants).
+    fn color_space_to_tj(cs: ColorSpace) -> i32 {
+        match cs {
+            ColorSpace::Rgb => 0,
+            ColorSpace::YCbCr => 1,
+            ColorSpace::Grayscale => 2,
+            ColorSpace::Cmyk => 3,
+            ColorSpace::Ycck => 4,
+            ColorSpace::Unknown => 1, // default to YCbCr
+        }
+    }
+
+    /// Convert `Subsampling` enum to TJ3 integer (TJSAMP_* constants).
+    fn subsampling_to_tj(ss: Subsampling) -> i32 {
+        match ss {
+            Subsampling::S444 => 0, // TJSAMP_444
+            Subsampling::S422 => 1, // TJSAMP_422
+            Subsampling::S420 => 2, // TJSAMP_420
+            Subsampling::S440 => 4, // TJSAMP_440
+            Subsampling::S411 => 5, // TJSAMP_411
+            Subsampling::S441 => 6, // TJSAMP_441
+            Subsampling::Unknown => 0,
+        }
+    }
+
     /// Convert the subsampling integer to the `Subsampling` enum.
     fn subsampling_enum(&self) -> Subsampling {
         match self.subsampling {
@@ -385,8 +421,14 @@ impl TjHandle {
             encoder = encoder.dct_method(DctMethod::IsFast);
         }
 
-        // TODO(#205): density params (x_density, y_density, density_units)
-        // not yet wired — Encoder lacks a density() builder method.
+        // Wire density into JFIF APP0 marker
+        if self.x_density != 1 || self.y_density != 1 || self.density_units != 0 {
+            encoder = encoder.density(
+                self.density_units as u8,
+                self.x_density as u16,
+                self.y_density as u16,
+            );
+        }
 
         if self.restart_blocks > 0 {
             encoder = encoder.restart_blocks(self.restart_blocks as u16);
@@ -418,6 +460,13 @@ impl TjHandle {
             if self.fast_dct != 0 {
                 encoder = encoder.dct_method(DctMethod::IsFast);
             }
+            if self.x_density != 1 || self.y_density != 1 || self.density_units != 0 {
+                encoder = encoder.density(
+                    self.density_units as u8,
+                    self.x_density as u16,
+                    self.y_density as u16,
+                );
+            }
             if self.restart_blocks > 0 {
                 encoder = encoder.restart_blocks(self.restart_blocks as u16);
             } else if self.restart_rows > 0 {
@@ -435,8 +484,9 @@ impl TjHandle {
     /// Decompress JPEG data using current handle parameters.
     ///
     /// Delegates to the existing `Decoder`, translating handle parameters.
-    /// After successful decompression, updates `Width`, `Height`, and `Precision`
-    /// to reflect the decoded image.
+    /// After successful decompression, updates handle state to reflect the
+    /// decoded image: `Width`, `Height`, `Precision`, `ColorSpace`,
+    /// `Subsampling`, density, and ICC profile.
     pub fn decompress(&mut self, data: &[u8]) -> Result<Image> {
         let mut decoder = Decoder::new(data)?;
 
@@ -480,12 +530,39 @@ impl TjHandle {
             decoder.set_crop_region(crop.x, crop.y, crop.width, crop.height);
         }
 
+        // Capture JPEG header metadata before decoding
+        let jpeg_color_space: ColorSpace = decoder.jpeg_color_space();
+        let jpeg_subsampling: Subsampling = decoder.jpeg_subsampling();
+
         let mut img: Image = decoder.decode_image()?;
 
         // Update read-only params from decoded image
         self.width = img.width as i32;
         self.height = img.height as i32;
         self.precision = img.precision as i32;
+
+        // Update color space from JPEG header (matches C tj3DecompressHeader)
+        self.color_space = Self::color_space_to_tj(jpeg_color_space);
+
+        // Update subsampling from JPEG header
+        // Grayscale has no chroma subsampling; map to TJSAMP_GRAY=3 matching C
+        self.subsampling = if jpeg_color_space == ColorSpace::Grayscale {
+            3 // TJSAMP_GRAY
+        } else {
+            Self::subsampling_to_tj(jpeg_subsampling)
+        };
+
+        // Update density from JFIF header
+        self.density_units = match img.density.unit {
+            DensityUnit::Unknown => 0,
+            DensityUnit::Dpi => 1,
+            DensityUnit::Dpcm => 2,
+        };
+        self.x_density = img.density.x as i32;
+        self.y_density = img.density.y as i32;
+
+        // Capture ICC profile from decoded image (matches C tj3GetICCProfile after decompress)
+        self.icc_profile = img.icc_profile.take();
 
         // Wire BottomUp: flip rows after decoding
         if self.bottom_up != 0 {
