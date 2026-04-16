@@ -2,6 +2,8 @@
 
 > Track implementation progress. Update checkboxes when features are completed.
 > Source of truth: `turbojpeg.h` (TJ3 API), `jpeglib.h` (libjpeg API), `jmorecfg.h`
+> Reliability rule: `[x]` means the documented public Rust surface is wired end-to-end for the claimed capability.
+> Merely storing a `TjHandle` parameter, exposing an internal helper, or supporting a nearby API surface does not count as full parity.
 
 ---
 
@@ -28,8 +30,8 @@
 ## 2. Sample Precision
 
 - [x] 8-bit (`JSAMPLE` / `u8`)
-- [x] 12-bit (`J12SAMPLE` / `i16`) — `tj3Compress12`, `tj3Decompress12`, `jpeg12_write_scanlines`, `jpeg12_read_scanlines`
-- [x] 16-bit (`J16SAMPLE` / `u16`, lossless only) — `tj3Compress16`, `tj3Decompress16`, `jpeg16_write_scanlines`, `jpeg16_read_scanlines`
+- [x] 12-bit (`J12SAMPLE` / `i16`) — `compress_12bit`, `decompress_12bit`, `jpeg12_write_scanlines`, `jpeg12_read_scanlines` (not wired through `TjHandle::compress()` / `decompress()`)
+- [x] 16-bit (`J16SAMPLE` / `u16`, lossless only) — `compress_16bit`, `decompress_16bit`, `jpeg16_write_scanlines`, `jpeg16_read_scanlines` (not wired through `TjHandle::compress()` / `decompress()`)
 
 ---
 
@@ -113,12 +115,13 @@
 - [x] `restart_in_rows` field — via Encoder builder
 
 ### JFIF / Density
-- [x] `write_JFIF_header` — JFIF marker (always written, hardcoded 72 DPI)
-- [x] `TJPARAM_XDENSITY` — Horizontal pixel density (`DensityInfo`)
-- [x] `TJPARAM_YDENSITY` — Vertical pixel density (`DensityInfo`)
-- [x] `TJPARAM_DENSITYUNITS` — Units (`DensityUnit` enum)
+- [x] `write_JFIF_header` — JFIF marker (written by default with 1x1 unknown-density fields unless coefficient metadata is rewritten)
+- [ ] `TJPARAM_XDENSITY` — not wired through `TjHandle` / `Encoder`
+- [ ] `TJPARAM_YDENSITY` — not wired through `TjHandle` / `Encoder`
+- [ ] `TJPARAM_DENSITYUNITS` — not wired through `TjHandle` / `Encoder`
 - [x] `JFIF_major_version` / `JFIF_minor_version` configurable (`Encoder::jfif_version()`)
-- [x] `density_unit` / `X_density` / `Y_density` configurable (read from JFIF, write via `DensityInfo`)
+- [x] JFIF density read (`Image.density`)
+- [x] Low-level density rewrite via coefficient API (`JpegCoefficients.{density_unit,x_density,y_density}`)
 
 ### Adobe Marker
 - [x] `write_Adobe_marker` — Adobe APP14 (for CMYK)
@@ -211,7 +214,7 @@
 - [x] EXIF extraction + orientation (APP1)
 - [x] Adobe APP14 detection (CMYK/YCCK)
 - [x] Restart marker (DRI/RST) handling
-- [x] `TJPARAM_SAVEMARKERS` — Configurable marker saving (`MarkerSaveConfig` enum: None/All/AppOnly/Specific)
+- [x] `TJPARAM_SAVEMARKERS` — Configurable marker saving via `Decoder::save_markers()` / `MarkerSaveConfig` (not yet wired through `TjHandle`)
 - [x] `jpeg_save_markers()` — Per-marker-type save control (`Decoder::save_markers()`)
 - [x] `jpeg_set_marker_processor()` — Custom marker parser callback (`Decoder::set_marker_processor()`)
 - [x] COM (comment) marker read/expose (`Image.comment`)
@@ -258,7 +261,7 @@
 - [x] COM (comment) — Read (`Image.comment`) / Write (`Encoder::comment()`)
 - [x] Arbitrary APP markers — Read (`Decoder::save_markers()` + `Image.markers()`)
 - [x] Arbitrary markers — Write (`marker_writer::write_marker()`, `Encoder::saved_marker()`)
-- [x] DPI/density — Read (`Image.density`) / Write (`DensityInfo`)
+- [x] DPI/density — Read (`Image.density`); low-level rewrite via `JpegCoefficients`, no high-level `Encoder::density()` / `TjHandle` write path
 - [x] JFIF thumbnail extraction (`extract_jfif_thumbnail()`)
 - [x] Marker preservation across transform/re-encode (`TransformOptions.copy_markers`)
 
@@ -381,9 +384,11 @@
 - [x] `tj3YUVBufSize()` — YUV buffer size (`yuv_buf_size()`)
 - [x] `tj3TransformBufSize()` — Transform output buffer size (`transform_buf_size()`)
 
-### Image File I/O (BMP/PPM)
-- [x] `tj3LoadImage8()` / `tj3LoadImage12()` / `tj3LoadImage16()` — 8-bit implemented (`load_image` / `load_image_from_bytes`)
-- [x] `tj3SaveImage8()` / `tj3SaveImage12()` / `tj3SaveImage16()` — 8-bit implemented (`save_bmp` / `save_ppm`)
+### Image File I/O (BMP/PPM/PGM subset)
+- [ ] `tj3LoadImage8()` parity — only BMP/PPM/PGM 8-bit subset implemented (`load_image` / `load_image_from_bytes`); PNG + handle-driven semantics are missing
+- [ ] `tj3LoadImage12()` / `tj3LoadImage16()` — missing
+- [ ] `tj3SaveImage8()` parity — only BMP/PPM/PGM 8-bit subset implemented (`save_bmp` / `save_ppm`); PNG + handle-driven semantics are missing
+- [ ] `tj3SaveImage12()` / `tj3SaveImage16()` — missing
 
 ### Memory Management
 - [ ] Custom `jpeg_memory_mgr` — Pool-based allocator
@@ -427,8 +432,9 @@
 
 - [x] `tj3Init()` / `tj3Destroy()` — Handle lifecycle (`TjHandle::new()` / Drop)
 - [x] `tj3Set()` / `tj3Get()` — Generic parameter get/set (`TjHandle::set()` / `TjHandle::get()`)
-- [x] All 26 TJPARAM values as runtime parameters (`TjParam` enum)
-- [x] `tj3SetICCProfile()` / `tj3GetICCProfile()` — ICC via handle (`TjHandle::set_icc_profile()` / `TjHandle::icc_profile()`)
+- [ ] All 26 TJPARAM values as end-to-end runtime parameters (`TjParam` exists, but `Precision`, `ColorSpace`, `NoRealloc`, `SaveMarkers`, and density params are not fully applied by `TjHandle::compress()` / `decompress()`, and `SaveMarkers` semantics differ from C)
+- [x] `tj3SetICCProfile()` — encode-side ICC via handle (`TjHandle::set_icc_profile()`)
+- [ ] `tj3GetICCProfile()` parity — `TjHandle::decompress()` does not populate the handle from decoded ICC data
 - [x] `tj3SetScalingFactor()` / `tj3SetCroppingRegion()` — Decode options via handle (`TjHandle::set_scaling_factor()` / `TjHandle::set_cropping_region()`)
 - [x] `tj3GetScalingFactors()` — Query available scaling factors (`TjHandle::scaling_factors()`)
 
@@ -436,91 +442,10 @@
 
 ## Summary
 
-| Category | Done | Total | % |
-|----------|------|-------|---|
-| Frame types (encode) | 6 | 6 | 100% |
-| Frame types (decode) | 6 | 6 | 100% |
-| Sample precision | 3 | 3 | 100% |
-| Pixel formats | 13 | 13 | 100% |
-| Chroma subsampling | 8 | 8 | 100% |
-| Color spaces | 6 | 6 | 100% |
-| Compress params | 59 | 68 | 87% |
-| Decompress params | 56 | 56 | 100% |
-| Metadata | 11 | 11 | 100% |
-| Transform ops | 8 | 8 | 100% |
-| Transform options | 9 | 9 | 100% |
-| Transform misc | 6 | 6 | 100% |
-| YUV/Planar API | 12 | 12 | 100% |
-| SIMD (aarch64) | 14 | 14 | 100% |
-| SIMD (x86_64) | 13 | 13 | 100% |
-| Memory & I/O | 12 | 18 | 67% |
-| Error handling | 5 | 14 | 36% |
-| Progress | 4 | 4 | 100% |
-| TJ3 Handle API | 6 | 6 | 100% |
+- Percentage rollups were removed from this document. They looked precise, but they mixed core codec support, handle parity, and adjacent Rust-only surfaces in a way that overstated completion.
+- Treat the checklist above as the source of truth. The highest-risk partial areas today are `TjHandle` parameter parity, handle-side ICC retrieval, density configuration, image file I/O parity (PNG/12/16-bit), and dedicated TurboJPEG allocator/error-getter APIs.
 
----
+## Documentation Policy
 
-## Priority Roadmap
-
-> Strategy: feature completeness first, then SIMD/performance.
-
-### Phase 4 — Core Feature Gaps ✅ COMPLETE
-| # | Feature | PR |
-|---|---------|-----|
-| 1 | ~~Restart interval encode (DRI)~~ | #18 |
-| 2 | ~~COM marker read/write + density~~ | #17 |
-| 3 | ~~Lossless encode: color + predictor + pt~~ | #20 |
-| 4 | ~~SOF10 arithmetic progressive encode~~ | #25 |
-| 5 | ~~SOF11 lossless arithmetic encode/decode~~ | #26 |
-| 6 | ~~Grayscale-from-color encode~~ | #22 |
-| 7 | ~~Configurable DPI/density~~ | #17 |
-| 8 | ~~Arbitrary marker write~~ | #17 |
-
-### Phase 5 — Extended Formats ✅ COMPLETE
-| # | Feature | Status |
-|---|---------|--------|
-| 9 | 12-bit precision | ✅ |
-| 10 | 16-bit precision (lossless) | ✅ |
-| 10a | Arbitrary 2-16 bit lossless precision | ✅ |
-| 11 | ~~Custom quantization tables~~ | ✅ #19 |
-| 12 | ~~Custom Huffman tables~~ | ✅ #23 |
-| 13 | ~~Custom progressive scan scripts~~ | ✅ #24 |
-| 14 | ~~Additional pixel formats~~ | ✅ #28 |
-| 15 | ~~Fast DCT (IsFast, Float)~~ | ✅ #27 |
-| 16 | ~~S441 subsampling~~ | ✅ #29 |
-
-### Phase 6 — Transform & Advanced ✅ COMPLETE (8/8)
-| # | Feature | Status |
-|---|---------|--------|
-| 17 | ~~All 9 TJXOPT transform flags~~ | ✅ #32 |
-| 18 | ~~Coefficient filter callback~~ | ✅ #34 |
-| 19 | ~~Marker preservation~~ | ✅ #36 |
-| 20 | ~~Scanline-level encode API~~ | ✅ #33 |
-| 21 | ~~Scanline-level decode API~~ | ✅ #33 |
-| 22 | ~~Progressive output (buffered image)~~ | ✅ |
-| 23 | ~~Per-component quality~~ | ✅ #31 |
-| 24 | ~~Raw data encode/decode~~ | ✅ #35 |
-
-### Phase 7 — YUV & I/O ✅ COMPLETE
-| # | Feature | Status |
-|---|---------|--------|
-| 25 | ~~YUV planar encode/decode~~ | ✅ #40 |
-| 26 | ~~Buffer size calculation~~ | ✅ #30 |
-| 27 | ~~Custom source/dest managers~~ | ✅ #39 |
-| 28 | ~~File I/O helpers~~ | ✅ #38 |
-
-### Phase 8 — SIMD & Performance ✅ COMPLETE
-| # | Feature | Status |
-|---|---------|--------|
-| 29 | ~~x86_64 SSE2~~ | ✅ #44 |
-| 30 | ~~x86_64 AVX2~~ | ✅ #43 |
-| 31 | ~~aarch64 NEON extensions~~ | ✅ #42 |
-
-### Phase 9 — Full API Parity ✅ COMPLETE (practical features)
-| # | Feature | Status |
-|---|---------|--------|
-| 32 | ~~TJ3 handle/parameter API~~ | ✅ #45 |
-| 33 | Custom error manager | ✅ Already done (ErrorHandler trait, PR #17) |
-| 34 | Progress monitoring | ✅ Already done (ProgressListener trait) |
-| 35 | ~~Color quantization~~ | ✅ #46 |
-| 36 | Custom memory manager | ⬜ N/A in Rust (std allocator) |
+- If a capability only exists through a different Rust API than the named C surface, describe that explicitly and do not count it as full parity for the original surface.
+- If a row depends on a feature-gated or low-level path, say so in the row instead of promoting it to a blanket `[x]`.
