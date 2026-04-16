@@ -1,7 +1,8 @@
 # Test Parity: libjpeg-turbo-rs vs libjpeg-turbo (C)
 
-> Track testing methodology parity. `[x]` = implemented, `[ ]` = missing.
+> Track testing methodology parity. `[x]` means coverage exists; read the qualifier, because some rows are partial or feature-gated.
 > Source of truth: C libjpeg-turbo's `CMakeLists.txt`, `tjunittest.c`, `tjbench.c`, test scripts in `test/`.
+> Expensive full-matrix C cross-checks run behind `--features full-c-parity` and in `.github/workflows/full-c-parity.yml`.
 
 ---
 
@@ -28,9 +29,9 @@
 - [x] Synthetic test pattern generation — `tjunittest_compat.rs` generate_test_pattern()
 
 ### tjbench (Benchmark & Tile Tests)
-- [ ] Tiled compression/decompression (8x8, 16x16, 32x32, 64x64, 128x128) — not implemented
+- [x] Tile-style compression/decompression coverage (8x8, 16x16, 32x32, 64x64 via independently compressed tiles; no dedicated tiled API / separate 128x128 case) — `cross_check_tiled_ops.rs`
 - [x] Scaled decompression (1/2, 1/4, 1/8) — `scale_decode.rs`
-- [ ] Extended scaling factors (2/1, 15/8, 7/4, 13/8, 3/2, 11/8, 5/4, 9/8, 7/8, 3/4, 5/8, 3/8) — only 1/2, 1/4, 1/8
+- [x] Extended scaling factors (2/1, 15/8, 7/4, 13/8, 3/2, 11/8, 5/4, 9/8, 7/8, 3/4, 5/8, 3/8) — `cross_check_extended_scaling.rs`, `c_cjpeg_djpeg_tests.rs`
 - [x] Partial decompression (cropping) — `crop_skip.rs`
 - [x] Transform + scale combinations — `tjunittest_transform.rs`
 - [x] Merged YUV decompression (420m, 422m) — `merged_upsample.rs`
@@ -106,7 +107,7 @@
 - [x] 4:1:0 (410) subsampling decode — `subsamp_410.rs`
 - [x] 5 crop regions (14x14+23+23, 21x21+4+4, 18x18+13+13, 21x21+0+0, 24x26+20+18) — partial (`crop_skip.rs`)
 - [ ] Crop × subsampling × scale full cross-product — only individual tests
-- [ ] 15 scaling factors (16/8 thru 1/8) — only 1/2, 1/4, 1/8 tested
+- [x] 15 scaling factors (16/8 thru 1/8) — `cross_check_extended_scaling.rs`, `c_cjpeg_djpeg_tests.rs`
 - [x] No-smooth upsampling (`-nos`) — `decode_toggles.rs`
 - [ ] No-smooth × crop × scale cross-product — not tested
 - [x] DCT methods (fast, accurate) — `decode_toggles.rs`
@@ -143,7 +144,7 @@
 
 ### croptest.in (Crop Region Validation)
 - [x] Basic crop operations — `crop_skip.rs`, `transform_options.rs`
-- [ ] Exhaustive crop window iteration (Y 0-16, H 1-16) — not implemented
+- [x] Exhaustive crop window iteration (Y 0-16, H 1-16) — `c_croptest_full` (`--features full-c-parity`)
 - [ ] ImageMagick reference comparison — not available
 - [ ] Progressive + crop — partial
 - [ ] Smooth + crop — not tested
@@ -194,9 +195,9 @@
 - [x] 1/2 — `scale_decode.rs`
 - [x] 1/4 — `scale_decode.rs`
 - [x] 1/8 — `scale_decode.rs`
-- [ ] 2/1 (upscale) — not supported
-- [ ] 15/8, 7/4, 13/8, 3/2, 11/8, 5/4, 9/8 (upscale fractions) — not supported
-- [ ] 7/8, 3/4, 5/8, 3/8 (intermediate downscale) — not supported
+- [x] 2/1 (upscale) — `cross_check_extended_scaling.rs`, `c_cjpeg_djpeg_tests.rs`
+- [x] 15/8, 7/4, 13/8, 3/2, 11/8, 5/4, 9/8 (upscale fractions) — `cross_check_extended_scaling.rs`, `c_cjpeg_djpeg_tests.rs`
+- [x] 7/8, 3/4, 5/8, 3/8 (intermediate downscale) — `cross_check_extended_scaling.rs`
 
 ### Transform Operations
 - [x] None, HFlip, VFlip, Transpose, Transverse, Rot90, Rot180, Rot270 — all 8
@@ -347,7 +348,7 @@ These are the individual cjpeg/djpeg/jpegtran tests defined via `add_bittest()` 
 - [x] `444-islow-ari-crop37x37_0_0` — arithmetic + crop — `crop_skip.rs`
 - [x] `420-islow-ari-crop53x53_4_4` — arithmetic + crop — partial
 - [x] `444-islow-skip1_6` — small skip range — `scanline_api.rs`
-- [ ] `420m-islow-{scale}` — merged upsampling with 15 scales — not tested
+- [x] `420m-islow-{scale}` — merged upsampling with C scale matrix for 420m/nosmooth — `c_cjpeg_djpeg_tests.rs`
 - [x] `rgb-islow-icc-cmp` — ICC profile extraction — `metadata_write.rs`
 
 ### jpegtran Tests (Transform)
@@ -377,7 +378,7 @@ These are the individual cjpeg/djpeg/jpegtran tests defined via `add_bittest()` 
 - [x] 420m decode (merged 2x2 upsample) — `merged_upsample.rs`
 - [x] 422m decode (merged 2x1 upsample) — `merged_upsample.rs`
 - [ ] Merged upsampling + fast DCT
-- [ ] Merged upsampling + scaled decode
+- [x] Merged upsampling + scaled decode (420m) — `c_cjpeg_djpeg_tests.rs`
 - [ ] Merged upsampling + RGB565
 
 ### Smoothing Factor in Encode
@@ -426,39 +427,6 @@ These are the individual cjpeg/djpeg/jpegtran tests defined via `add_bittest()` 
 
 ## Summary
 
-| Category | Done | Total | % |
-|----------|------|-------|---|
-| tjunittest equivalents | 14 | 17 | 82% |
-| tjbench equivalents | 4 | 8 | 50% |
-| Validation methods | 13 | 15 | 87% |
-| tjcomptest matrix | 10 | 13 | 77% |
-| tjdecomptest matrix | 7 | 11 | 64% |
-| tjtrantest matrix | 8 | 10 | 80% |
-| croptest | 1 | 5 | 20% |
-| CMakeLists bittest (cjpeg) | 10 | 12 | 83% |
-| CMakeLists bittest (djpeg) | 11 | 22 | 50% |
-| CMakeLists bittest (jpegtran) | 3 | 4 | 75% |
-| Precision coverage | 3 | 5 | 60% |
-| Subsampling coverage | 7 | 8 | 88% |
-| Scaling factors | 4 | 16 | 25% |
-| Edge case / robustness | 23 | 25 | 92% |
-| Metadata & markers | 10 | 11 | 91% |
-| Progressive | 7 | 8 | 88% |
-| YUV operations | 5 | 7 | 71% |
-| Fuzzing | 7 | 8 | 88% |
-| RGB565 specific | 0 | 6 | 0% |
-| Merged upsampling | 2 | 5 | 40% |
-| Non-standard sampling | 0 | 2 | 0% |
-| FP variance handling | 0 | 3 | 0% |
-
-### Key Gaps (Priority Order)
-1. **Merged upsampling (420m, 422m)** — Core 420m/422m implemented; remaining: progressive, scaled, RGB565 variants
-2. **RGB565 dithered/undithered** — C tests 8 RGB565 combinations; we test 0
-3. **MD5/binary comparison** — deterministic encoding + regression hashes implemented (`bitstream_stability.rs`, `bitstream_regression.rs`); cross-encoder comparison with C still missing
-4. **Extended scaling factors** — C tests 15 scales; we test 4
-5. **Non-standard sampling (3x2)** — C tests 3x2 float/ifast; we don't support arbitrary factors
-6. **Tiled operations** — C tests 5 tile sizes; we have none
-7. ~~**Per-precision lossless (2-16 bit)**~~ -- done, `precision_arbitrary.rs`
-8. **Exhaustive crop matrix** — C tests 100+ crop regions; we test ~10
-9. **DCT method cross-product** — C cross-products DCT × subsampling × quality; we test individually
-10. **FP variance handling** — C has per-platform expected values; we don't
+- Percentage rollups were removed from this document. They mixed quick checks, feature-gated full matrices, and partial emulations, so the totals looked more authoritative than they were.
+- Extended scaling and exhaustive crop-grid coverage now exist and should no longer be treated as missing.
+- Highest-signal remaining gaps are cross-encoder MD5/binary parity against C, non-standard 3x2 sampling, several RGB565 merged-upsample variants, and full tiled API parity (even though tile-style coverage exists).
