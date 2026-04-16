@@ -481,6 +481,59 @@ pub fn write_eoi(buf: &mut Vec<u8>) {
     buf.push(0xD9);
 }
 
+/// Write a tables-only JPEG stream (like `jpeg_write_tables`).
+///
+/// Produces SOI + DQT (luminance + chrominance) + DHT (standard DC/AC) + EOI.
+/// No image data — only table definitions for table-sharing workflows.
+pub fn write_tables_only(quality: u8) -> Vec<u8> {
+    use crate::api::quality;
+    use crate::encode::tables;
+
+    let scale: u32 = quality::quality_scaling(quality);
+    let luma_qt: [u16; 64] =
+        quality::scale_quant_table_linear(&tables::STD_LUMINANCE_QUANT_TABLE, scale, false);
+    let chroma_qt: [u16; 64] =
+        quality::scale_quant_table_linear(&tables::STD_CHROMINANCE_QUANT_TABLE, scale, false);
+
+    let mut buf: Vec<u8> = Vec::with_capacity(1024);
+    write_soi(&mut buf);
+    write_dqt(&mut buf, 0, &luma_qt);
+    write_dqt(&mut buf, 1, &chroma_qt);
+
+    // Standard DC/AC Huffman tables
+    write_dht(
+        &mut buf,
+        0,
+        0,
+        &tables::DC_LUMINANCE_BITS,
+        &tables::DC_LUMINANCE_VALUES,
+    );
+    write_dht(
+        &mut buf,
+        1,
+        0,
+        &tables::AC_LUMINANCE_BITS,
+        &tables::AC_LUMINANCE_VALUES,
+    );
+    write_dht(
+        &mut buf,
+        0,
+        1,
+        &tables::DC_CHROMINANCE_BITS,
+        &tables::DC_CHROMINANCE_VALUES,
+    );
+    write_dht(
+        &mut buf,
+        1,
+        1,
+        &tables::AC_CHROMINANCE_BITS,
+        &tables::AC_CHROMINANCE_VALUES,
+    );
+
+    write_eoi(&mut buf);
+    buf
+}
+
 /// Streaming marker writer for building marker segments byte-by-byte.
 pub struct MarkerStreamWriter {
     marker_type: u8,

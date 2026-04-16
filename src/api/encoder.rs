@@ -68,6 +68,8 @@ pub struct Encoder<'a> {
     fancy_downsampling: bool,
     /// Custom JFIF version override. When `Some`, replaces the default 1.01.
     jfif_version: Option<(u8, u8)>,
+    /// JFIF density override. When `Some`, patches the APP0 density fields.
+    density: Option<(u8, u16, u16)>,
     /// Adobe APP14 marker control. `None` = auto. `Some(true)` = always. `Some(false)` = never.
     write_adobe_marker: Option<bool>,
     /// Custom per-component sampling factors as (h, v) pairs.
@@ -112,6 +114,7 @@ impl<'a> Encoder<'a> {
             smoothing_factor: 0,
             fancy_downsampling: false,
             jfif_version: None,
+            density: None,
             write_adobe_marker: None,
             custom_sampling_factors: None,
         }
@@ -245,6 +248,25 @@ impl<'a> Encoder<'a> {
         self
     }
 
+    /// Reset colorspace to auto-detection (like `jpeg_default_colorspace`).
+    ///
+    /// Clears any explicit colorspace override set by `colorspace()`.
+    /// The encoder will infer the JPEG colorspace from the pixel format.
+    pub fn reset_colorspace(mut self) -> Self {
+        self.colorspace_override = None;
+        self
+    }
+
+    /// Reset quantization tables to defaults (like `jpeg_default_qtables`).
+    ///
+    /// Clears any custom quantization tables. The encoder will generate
+    /// standard luminance/chrominance tables scaled by the quality factor.
+    pub fn reset_quant_tables(mut self) -> Self {
+        self.custom_quant_tables = [None; 4];
+        self.quality_factors = None;
+        self
+    }
+
     /// Set quality using a linear scale factor instead of the 1-100 quality rating.
     pub fn linear_quality(mut self, scale_factor: u32) -> Self {
         self.linear_scale_factor = Some(scale_factor);
@@ -273,6 +295,15 @@ impl<'a> Encoder<'a> {
     /// Set the JFIF version in the APP0 marker (default: 1.01).
     pub fn jfif_version(mut self, major: u8, minor: u8) -> Self {
         self.jfif_version = Some((major, minor));
+        self
+    }
+
+    /// Set JFIF density (unit, x_density, y_density).
+    ///
+    /// Unit: 0 = unknown, 1 = DPI, 2 = DPCM. Patches the APP0 JFIF marker
+    /// after encoding. Matches C libjpeg-turbo's `density_unit`/`X_density`/`Y_density`.
+    pub fn density(mut self, unit: u8, x: u16, y: u16) -> Self {
+        self.density = Some((unit, x, y));
         self
     }
 
@@ -524,6 +555,16 @@ impl<'a> Encoder<'a> {
             }
         }
         output
+    }
+
+    fn patch_jfif_density(mut data: Vec<u8>, unit: u8, x: u16, y: u16) -> Vec<u8> {
+        // JFIF APP0 layout: SOI(2) + FF E0(2) + len(2) + "JFIF\0"(5) + ver(2) + unit(1) + xden(2) + yden(2)
+        if data.len() > 17 && data[2] == 0xFF && data[3] == 0xE0 && data[6..11] == *b"JFIF\0" {
+            data[13] = unit;
+            data[14..16].copy_from_slice(&x.to_be_bytes());
+            data[16..18].copy_from_slice(&y.to_be_bytes());
+        }
+        data
     }
 
     fn patch_jfif_version(mut data: Vec<u8>, major: u8, minor: u8) -> Vec<u8> {
@@ -841,11 +882,18 @@ impl<'a> Encoder<'a> {
             encoder::inject_saved_markers(&with_comment, &self.saved_markers)
         };
 
-        // Apply JFIF version override if configured
-        let with_jfif: Vec<u8> = if let Some((major, minor)) = self.jfif_version {
-            Self::patch_jfif_version(with_saved, major, minor)
+        // Apply JFIF density override if configured
+        let with_density: Vec<u8> = if let Some((unit, x, y)) = self.density {
+            Self::patch_jfif_density(with_saved, unit, x, y)
         } else {
             with_saved
+        };
+
+        // Apply JFIF version override if configured
+        let with_jfif: Vec<u8> = if let Some((major, minor)) = self.jfif_version {
+            Self::patch_jfif_version(with_density, major, minor)
+        } else {
+            with_density
         };
 
         // Handle Adobe APP14 marker toggle

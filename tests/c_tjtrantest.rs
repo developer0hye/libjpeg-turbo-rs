@@ -157,15 +157,6 @@ fn try_rust_opts(
     restart_interval_mcus: u16,
     trim: bool,
 ) -> Option<TransformOptions> {
-    // Restart interval in the test is computed from the source MCU width, but
-    // transforms (crop, trim, grayscale, rotation) change the post-transform
-    // MCU layout, causing restart interval mismatches with C jpegtran.
-    // Also, progressive scans do not yet handle restart markers internally.
-    // Pre-existing issue exposed after progressive cases stopped masking it.
-    if restart_interval_mcus > 0 {
-        eprintln!("SKIP (pre-existing): restart interval MCU mismatch after transform");
-        return None;
-    }
     // Progressive + crop on subsampled images: crop boundary alignment
     // differences with C jpegtran on non-iMCU-aligned crops.
     if progressive && crop.is_some() {

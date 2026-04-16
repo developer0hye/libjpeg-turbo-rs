@@ -58,7 +58,7 @@ unsafe fn avx2_fancy_h2v1_inner(input: &[u8], in_width: usize, output: &mut [u8]
     // AVX2 loop: process 16 interior samples per iteration.
     // For each interior sample i, we need input[i-1], input[i], input[i+1].
     // Load 16 consecutive bytes for each of the three offsets.
-    while i + 16 <= in_width - 1 {
+    while i + 16 < in_width {
         // Load 16 bytes from each offset
         let left = _mm_loadu_si128(inptr.add(i - 1) as *const __m128i);
         let cur = _mm_loadu_si128(inptr.add(i) as *const __m128i);

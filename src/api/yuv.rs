@@ -253,6 +253,7 @@ pub fn encode_yuv_planes(
                     }
                 }
             }
+            #[allow(unknown_lints, clippy::manual_checked_ops)]
             if count > 0 {
                 cb_out[cy * cb_w + cx] = ((sum_cb + count / 2) / count) as u8;
                 cr_out[cy * cr_w + cx] = ((sum_cr + count / 2) / count) as u8;
