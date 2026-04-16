@@ -920,7 +920,11 @@ pub fn transform_jpeg_with_options(data: &[u8], options: &TransformOptions) -> R
             dbx <= comp.blocks_x && dby <= comp.blocks_y && max_h <= 2 && max_v <= 2
         })
     };
-    let output: Vec<u8> = if progressive_safe {
+    let output: Vec<u8> = if options.arithmetic && progressive_safe {
+        write_coefficients_progressive_arithmetic(&coeffs)?
+    } else if options.arithmetic {
+        write_coefficients_arithmetic(&coeffs)?
+    } else if progressive_safe {
         write_coefficients_progressive(&coeffs)?
     } else if options.optimize {
         write_coefficients_optimized(&coeffs)?
@@ -1701,6 +1705,371 @@ fn write_coefficients_progressive(coeffs: &JpegCoefficients) -> Result<Vec<u8>> 
 
     marker_writer::write_eoi(&mut output);
     Ok(output)
+}
+
+/// Write DCT coefficients with arithmetic entropy coding (SOF9).
+///
+/// Re-encodes coefficient blocks using the JPEG arithmetic coder, matching
+/// jpegtran's arithmetic output mode for non-progressive transforms.
+fn write_coefficients_arithmetic(coeffs: &JpegCoefficients) -> Result<Vec<u8>> {
+    use crate::encode::arithmetic::ArithEncoder;
+
+    if coeffs.restart_interval > 0 {
+        return Err(JpegError::CorruptData(
+            "arithmetic coefficient writing with restart intervals is not implemented".into(),
+        ));
+    }
+
+    let num_components: usize = coeffs.components.len();
+    let is_grayscale: bool = num_components == 1;
+    let num_arith_tables: usize = if is_grayscale { 1 } else { 2 };
+
+    let max_h: usize = coeffs
+        .components
+        .iter()
+        .map(|c| c.h_sampling as usize)
+        .max()
+        .unwrap_or(1);
+    let max_v: usize = coeffs
+        .components
+        .iter()
+        .map(|c| c.v_sampling as usize)
+        .max()
+        .unwrap_or(1);
+    let mcus_x: usize = coeffs.components[0].blocks_x / coeffs.components[0].h_sampling as usize;
+    let mcus_y: usize = coeffs.components[0].blocks_y / coeffs.components[0].v_sampling as usize;
+
+    let data_blocks_x: Vec<usize> = coeffs
+        .components
+        .iter()
+        .map(|c| (coeffs.width as usize * c.h_sampling as usize).div_ceil(max_h * 8))
+        .collect();
+    let data_blocks_y: Vec<usize> = coeffs
+        .components
+        .iter()
+        .map(|c| (coeffs.height as usize * c.v_sampling as usize).div_ceil(max_v * 8))
+        .collect();
+
+    let mut arith_enc: ArithEncoder =
+        ArithEncoder::new(coeffs.width as usize * coeffs.height as usize);
+    let mut prev_dc: Vec<i16> = vec![0; num_components];
+
+    for mcu_y in 0..mcus_y {
+        for mcu_x in 0..mcus_x {
+            for (ci, comp) in coeffs.components.iter().enumerate() {
+                let dc_tbl: usize = arithmetic_table_for_component(ci);
+                let ac_tbl: usize = arithmetic_table_for_component(ci);
+
+                for v in 0..comp.v_sampling as usize {
+                    for h in 0..comp.h_sampling as usize {
+                        let bx: usize = mcu_x * comp.h_sampling as usize + h;
+                        let by: usize = mcu_y * comp.v_sampling as usize + v;
+
+                        let mut dummy = [0i16; 64];
+                        let block: &[i16; 64] =
+                            if bx >= data_blocks_x[ci] || by >= data_blocks_y[ci] {
+                                dummy[0] = prev_dc[ci];
+                                &dummy
+                            } else {
+                                let real_block: &[i16; 64] = &comp.blocks[by * comp.blocks_x + bx];
+                                prev_dc[ci] = real_block[0];
+                                real_block
+                            };
+
+                        arith_enc.encode_dc_sequential(block, ci, dc_tbl);
+                        arith_enc.encode_ac_sequential(block, ac_tbl);
+                    }
+                }
+            }
+        }
+    }
+
+    arith_enc.finish();
+
+    let mut output: Vec<u8> = Vec::with_capacity(arith_enc.data().len() + 1024);
+
+    marker_writer::write_soi(&mut output);
+    marker_writer::write_app0_jfif_with_density(
+        &mut output,
+        coeffs.density_unit,
+        coeffs.x_density,
+        coeffs.y_density,
+    );
+
+    for (i, qt) in coeffs.quant_tables.iter().enumerate() {
+        marker_writer::write_dqt(&mut output, i as u8, qt);
+    }
+
+    let components: Vec<(u8, u8, u8, u8)> = coeffs
+        .components
+        .iter()
+        .map(|c| {
+            (
+                c.component_id,
+                c.h_sampling,
+                c.v_sampling,
+                c.quant_table_index,
+            )
+        })
+        .collect();
+    marker_writer::write_sof9(&mut output, coeffs.width, coeffs.height, &components);
+
+    let dc_params = [(0u8, 1u8); 4];
+    let ac_params = [5u8; 4];
+    let mut dc_in_use = [false; 4];
+    let mut ac_in_use = [false; 4];
+    for table in 0..num_arith_tables {
+        dc_in_use[table] = true;
+        ac_in_use[table] = true;
+    }
+    marker_writer::write_dac_selected(&mut output, &dc_in_use, &dc_params, &ac_in_use, &ac_params);
+
+    let scan_components: Vec<(u8, u8, u8)> = coeffs
+        .components
+        .iter()
+        .enumerate()
+        .map(|(ci, c)| {
+            let tbl: u8 = arithmetic_table_for_component(ci) as u8;
+            (c.component_id, tbl, tbl)
+        })
+        .collect();
+    marker_writer::write_sos(&mut output, &scan_components);
+
+    output.extend_from_slice(arith_enc.data());
+    marker_writer::write_eoi(&mut output);
+
+    Ok(output)
+}
+
+/// Write DCT coefficients with arithmetic progressive entropy coding (SOF10).
+///
+/// Uses the default libjpeg-turbo progressive scan script and emits the
+/// arithmetic conditioning marker for each scan, matching libjpeg marker order.
+fn write_coefficients_progressive_arithmetic(coeffs: &JpegCoefficients) -> Result<Vec<u8>> {
+    use crate::encode::arithmetic::ArithEncoder;
+    use crate::encode::progressive::simple_progression;
+
+    if coeffs.restart_interval > 0 {
+        return Err(JpegError::CorruptData(
+            "progressive arithmetic coefficient writing with restart intervals is not implemented"
+                .into(),
+        ));
+    }
+
+    let num_components: usize = coeffs.components.len();
+
+    let max_h: usize = coeffs
+        .components
+        .iter()
+        .map(|c| c.h_sampling as usize)
+        .max()
+        .unwrap_or(1);
+    let max_v: usize = coeffs
+        .components
+        .iter()
+        .map(|c| c.v_sampling as usize)
+        .max()
+        .unwrap_or(1);
+    let mcus_x: usize = coeffs.components[0].blocks_x / coeffs.components[0].h_sampling as usize;
+    let mcus_y: usize = coeffs.components[0].blocks_y / coeffs.components[0].v_sampling as usize;
+
+    let data_blocks_x: Vec<usize> = coeffs
+        .components
+        .iter()
+        .map(|c| (coeffs.width as usize * c.h_sampling as usize).div_ceil(max_h * 8))
+        .collect();
+    let data_blocks_y: Vec<usize> = coeffs
+        .components
+        .iter()
+        .map(|c| (coeffs.height as usize * c.v_sampling as usize).div_ceil(max_v * 8))
+        .collect();
+
+    let scans = simple_progression(num_components);
+    let dc_params = [(0u8, 1u8); 4];
+    let ac_params = [5u8; 4];
+
+    let mut output: Vec<u8> = Vec::with_capacity(coeffs.width as usize * coeffs.height as usize);
+
+    marker_writer::write_soi(&mut output);
+    marker_writer::write_app0_jfif_with_density(
+        &mut output,
+        coeffs.density_unit,
+        coeffs.x_density,
+        coeffs.y_density,
+    );
+
+    for (i, qt) in coeffs.quant_tables.iter().enumerate() {
+        marker_writer::write_dqt(&mut output, i as u8, qt);
+    }
+
+    let components: Vec<(u8, u8, u8, u8)> = coeffs
+        .components
+        .iter()
+        .map(|c| {
+            (
+                c.component_id,
+                c.h_sampling,
+                c.v_sampling,
+                c.quant_table_index,
+            )
+        })
+        .collect();
+    marker_writer::write_sof10(&mut output, coeffs.width, coeffs.height, &components);
+
+    let mut arith_enc: ArithEncoder =
+        ArithEncoder::new(coeffs.width as usize * coeffs.height as usize / 4);
+
+    for scan in &scans {
+        arith_enc.reset();
+
+        let is_dc_scan: bool = scan.ss == 0 && scan.se == 0;
+        let is_first: bool = scan.ah == 0;
+
+        let scan_components: Vec<(u8, u8, u8)> = scan
+            .component_indices
+            .iter()
+            .map(|&ci| {
+                let tbl: u8 = arithmetic_table_for_component(ci) as u8;
+                let dc_tbl: u8 = if is_dc_scan && is_first { tbl } else { 0 };
+                let ac_tbl: u8 = if scan.se > 0 { tbl } else { 0 };
+                (coeffs.components[ci].component_id, dc_tbl, ac_tbl)
+            })
+            .collect();
+
+        let mut dc_in_use = [false; 4];
+        let mut ac_in_use = [false; 4];
+        if is_dc_scan && is_first {
+            for &ci in &scan.component_indices {
+                dc_in_use[arithmetic_table_for_component(ci)] = true;
+            }
+        }
+        if scan.se > 0 {
+            for &ci in &scan.component_indices {
+                ac_in_use[arithmetic_table_for_component(ci)] = true;
+            }
+        }
+
+        marker_writer::write_dac_selected(
+            &mut output,
+            &dc_in_use,
+            &dc_params,
+            &ac_in_use,
+            &ac_params,
+        );
+        marker_writer::write_sos_progressive(
+            &mut output,
+            &scan_components,
+            scan.ss,
+            scan.se,
+            scan.ah,
+            scan.al,
+        );
+
+        if is_dc_scan && is_first {
+            let mut prev_dc: Vec<i16> = vec![0; num_components];
+
+            for mcu_y in 0..mcus_y {
+                for mcu_x in 0..mcus_x {
+                    for &ci in &scan.component_indices {
+                        let comp = &coeffs.components[ci];
+                        let dc_tbl: usize = arithmetic_table_for_component(ci);
+
+                        for v in 0..comp.v_sampling as usize {
+                            for h in 0..comp.h_sampling as usize {
+                                let bx: usize = mcu_x * comp.h_sampling as usize + h;
+                                let by: usize = mcu_y * comp.v_sampling as usize + v;
+
+                                let mut dummy = [0i16; 64];
+                                let block: &[i16; 64] =
+                                    if bx >= data_blocks_x[ci] || by >= data_blocks_y[ci] {
+                                        dummy[0] = prev_dc[ci];
+                                        &dummy
+                                    } else {
+                                        let real_block: &[i16; 64] =
+                                            &comp.blocks[by * comp.blocks_x + bx];
+                                        prev_dc[ci] = real_block[0];
+                                        real_block
+                                    };
+
+                                arith_enc.encode_dc_first(block, ci, dc_tbl, scan.al);
+                            }
+                        }
+                    }
+                }
+            }
+        } else if is_dc_scan {
+            let mut prev_dc: Vec<i16> = vec![0; num_components];
+
+            for mcu_y in 0..mcus_y {
+                for mcu_x in 0..mcus_x {
+                    for &ci in &scan.component_indices {
+                        let comp = &coeffs.components[ci];
+
+                        for v in 0..comp.v_sampling as usize {
+                            for h in 0..comp.h_sampling as usize {
+                                let bx: usize = mcu_x * comp.h_sampling as usize + h;
+                                let by: usize = mcu_y * comp.v_sampling as usize + v;
+
+                                let mut dummy = [0i16; 64];
+                                let block: &[i16; 64] =
+                                    if bx >= data_blocks_x[ci] || by >= data_blocks_y[ci] {
+                                        dummy[0] = prev_dc[ci];
+                                        &dummy
+                                    } else {
+                                        let real_block: &[i16; 64] =
+                                            &comp.blocks[by * comp.blocks_x + bx];
+                                        prev_dc[ci] = real_block[0];
+                                        real_block
+                                    };
+
+                                arith_enc.encode_dc_refine(block, scan.al);
+                            }
+                        }
+                    }
+                }
+            }
+        } else if is_first {
+            let ci: usize = scan.component_indices[0];
+            let comp = &coeffs.components[ci];
+            let ac_tbl: usize = arithmetic_table_for_component(ci);
+            let wib: usize = data_blocks_x[ci].min(comp.blocks_x);
+            let hib: usize = data_blocks_y[ci].min(comp.blocks_y);
+
+            for by in 0..hib {
+                for bx in 0..wib {
+                    let block: &[i16; 64] = &comp.blocks[by * comp.blocks_x + bx];
+                    arith_enc.encode_ac_first(block, ac_tbl, scan.ss, scan.se, scan.al);
+                }
+            }
+        } else {
+            let ci: usize = scan.component_indices[0];
+            let comp = &coeffs.components[ci];
+            let ac_tbl: usize = arithmetic_table_for_component(ci);
+            let wib: usize = data_blocks_x[ci].min(comp.blocks_x);
+            let hib: usize = data_blocks_y[ci].min(comp.blocks_y);
+
+            for by in 0..hib {
+                for bx in 0..wib {
+                    let block: &[i16; 64] = &comp.blocks[by * comp.blocks_x + bx];
+                    arith_enc.encode_ac_refine(block, ac_tbl, scan.ss, scan.se, scan.al, scan.ah);
+                }
+            }
+        }
+
+        arith_enc.finish();
+        output.extend_from_slice(arith_enc.data());
+    }
+
+    marker_writer::write_eoi(&mut output);
+    Ok(output)
+}
+
+fn arithmetic_table_for_component(component_index: usize) -> usize {
+    if component_index == 0 {
+        0
+    } else {
+        1
+    }
 }
 
 /// Transpose a quantization table (8x8 matrix) in-place.

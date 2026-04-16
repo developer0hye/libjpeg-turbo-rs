@@ -3,6 +3,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use libjpeg_turbo_rs::decode::marker::MarkerReader;
 use libjpeg_turbo_rs::{
     compress, decompress, read_coefficients, transform, transform_jpeg_with_options,
     write_coefficients, MarkerCopyMode, PixelFormat, Subsampling, TransformOp, TransformOptions,
@@ -542,8 +543,56 @@ fn tjunittest_transform_arithmetic_output() {
         custom_filter: None,
     };
     let aj: Vec<u8> = transform_jpeg_with_options(&jpeg, &opts).unwrap();
-    // The transform may or may not inject SOF9; verify decodability
+    let metadata = MarkerReader::new(&aj).read_markers().unwrap();
+    assert!(
+        metadata.is_arithmetic,
+        "transform with arithmetic=true must emit arithmetic-coded JPEG"
+    );
+    assert!(
+        !metadata.frame.is_progressive,
+        "non-progressive arithmetic transform must emit SOF9, not progressive output"
+    );
     let img = decompress(&aj).unwrap();
+    assert_eq!((img.width, img.height), (s, s));
+}
+
+#[test]
+fn tjunittest_transform_progressive_arithmetic_output() {
+    let s: usize = 48;
+    let jpeg: Vec<u8> = compress(
+        &gradient_rgb(s, s),
+        s,
+        s,
+        PixelFormat::Rgb,
+        90,
+        Subsampling::S444,
+    )
+    .unwrap();
+    let opts = TransformOptions {
+        op: TransformOp::HFlip,
+        perfect: false,
+        trim: false,
+        crop: None,
+        grayscale: false,
+        no_output: false,
+        progressive: true,
+        arithmetic: true,
+        optimize: false,
+        restart_interval: 0,
+        copy_markers: libjpeg_turbo_rs::MarkerCopyMode::All,
+        custom_filter: None,
+    };
+    let paj: Vec<u8> = transform_jpeg_with_options(&jpeg, &opts).unwrap();
+    let metadata = MarkerReader::new(&paj).read_markers().unwrap();
+    assert!(
+        metadata.is_arithmetic,
+        "transform with progressive=true and arithmetic=true must emit arithmetic-coded JPEG"
+    );
+    assert!(
+        metadata.frame.is_progressive,
+        "transform with progressive=true and arithmetic=true must emit SOF10"
+    );
+    let img = decompress(&paj).unwrap();
     assert_eq!((img.width, img.height), (s, s));
 }
 

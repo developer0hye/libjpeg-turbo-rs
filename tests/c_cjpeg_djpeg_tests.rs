@@ -10,6 +10,7 @@ mod helpers;
 
 use std::path::{Path, PathBuf};
 
+use libjpeg_turbo_rs::decode::marker::MarkerReader;
 use libjpeg_turbo_rs::{
     decompress, decompress_cropped, decompress_to, transform_jpeg_with_options, CropRegion,
     Encoder, Image, PixelFormat, ScalingFactor, ScanScript, ScanlineDecoder, Subsampling,
@@ -1325,12 +1326,29 @@ fn c_jpegtran_420_islow_ari() {
     let c_out = helpers::TempFile::new("c_420_ari_tran.jpg");
     helpers::run_c_jpegtran(&jpegtran, &["-arithmetic"], &jpeg_path, c_out.path());
 
-    // Rust: transform_jpeg_with_options with arithmetic=true
-    // Note: arithmetic flag exists in TransformOptions but write path doesn't use it
-    eprintln!(
-        "NOTE: jpegtran arithmetic transcode — Rust transform write path does not emit \
-         arithmetic JPEG (always SOF0)"
+    let jpeg_data = read_file(&jpeg_path);
+    let rust_result = transform_jpeg_with_options(
+        &jpeg_data,
+        &TransformOptions {
+            op: TransformOp::None,
+            arithmetic: true,
+            ..Default::default()
+        },
+    )
+    .unwrap_or_else(|e| panic!("Rust arithmetic transform failed: {:?}", e));
+
+    let rust_out = helpers::TempFile::new("rust_420_ari_tran.jpg");
+    rust_out.write_bytes(&rust_result);
+
+    let metadata = MarkerReader::new(&rust_result)
+        .read_markers()
+        .unwrap_or_else(|e| panic!("Failed to parse Rust arithmetic transform output: {}", e));
+    assert!(
+        metadata.is_arithmetic,
+        "transform arithmetic=true must emit arithmetic-coded JPEG"
     );
+
+    helpers::assert_files_identical(rust_out.path(), c_out.path(), "jpegtran-420-islow-ari");
 }
 
 /// CMakeLists line 1698: jpegtran 420-islow (arithmetic → baseline transcode)

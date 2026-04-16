@@ -142,7 +142,8 @@ fn make_source_gray_jpeg(cjpeg: &Path) -> Vec<u8> {
 
 /// Try to build `TransformOptions` for the given combo.
 ///
-/// Returns `None` when the combination hits an API gap and the caller must skip.
+/// Returns `None` when the combination hits a known byte-parity gap and the
+/// caller must skip.
 /// Enforces the same skip conditions as tjtrantest.in.
 #[allow(clippy::too_many_arguments)]
 fn try_rust_opts(
@@ -156,12 +157,6 @@ fn try_rust_opts(
     restart_interval_mcus: u16,
     trim: bool,
 ) -> Option<TransformOptions> {
-    // API gaps: these fields exist in TransformOptions but are not yet wired
-    // through to the write path.
-    if arithmetic {
-        eprintln!("SKIP (API gap): arithmetic coding not implemented in write path");
-        return None;
-    }
     // Restart interval in the test is computed from the source MCU width, but
     // transforms (crop, trim, grayscale, rotation) change the post-transform
     // MCU layout, causing restart interval mismatches with C jpegtran.
@@ -498,9 +493,10 @@ fn c_tjtrantest_quick_420() {
 
 /// Full C cross-validation matching the complete tjtrantest.in loop.
 ///
-/// Requires `--features full-c-parity` to run.  API gaps (arithmetic,
-/// progressive, restart, ICC injection) are skipped with eprintln.  All other
-/// combinations are tested byte-for-byte against jpegtran.
+/// Requires `--features full-c-parity` to run. Known byte-parity gaps
+/// (progressive+crop, restart handling, some ICC/copy combinations) are
+/// skipped with eprintln. All other combinations are tested byte-for-byte
+/// against jpegtran.
 ///
 /// Skip conditions mirror tjtrantest.in exactly:
 /// - optimize + arithmetic → skip
