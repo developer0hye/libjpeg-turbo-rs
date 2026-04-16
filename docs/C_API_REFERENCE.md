@@ -1,7 +1,8 @@
 # libjpeg-turbo C API → Rust Mapping Reference
 
 > Every public C function from `turbojpeg.h` and `jpeglib.h` with description and Rust equivalent.
-> ✅ = implemented, ❌ = not yet, 🔶 = partial, N/A = not applicable in Rust
+> ✅ = end-to-end public equivalent, ❌ = not yet, 🔶 = partial or different surface, N/A = not applicable in Rust
+> If support only exists through a different Rust API surface, an internal helper, or a storage-only `TjHandle` field, use `🔶` rather than `✅`.
 
 ---
 
@@ -21,43 +22,45 @@
 | `tj3Set(handle, param, value)` | Set integer parameter | `TjHandle::set()` | ✅ |
 | `tj3Get(handle, param)` | Get integer parameter | `TjHandle::get()` | ✅ |
 
+`TjHandle` get/set exists, but several parameters below are only partially wired through `compress()` / `decompress()`.
+
 **All 26 TJPARAM values:**
 
 | TJPARAM | Description | Rust | Status |
 |---|---|---|---|
 | `STOPONWARNING` | Treat warnings as fatal | `Decoder::set_stop_on_warning()` | ✅ |
 | `BOTTOMUP` | Bottom-up row order | `Encoder::bottom_up()` / `ScanlineDecoder::set_bottom_up()` | ✅ |
-| `NOREALLOC` | Disable output buffer realloc | `compress_into()` | ✅ |
+| `NOREALLOC` | Disable output buffer realloc | `compress_into()` (separate API, not `TjHandle`) | 🔶 |
 | `QUALITY` | Lossy quality 1-100 | `quality: u8` param | ✅ |
 | `SUBSAMP` | Chroma subsampling | `subsampling: Subsampling` param | ✅ |
 | `JPEGWIDTH` | JPEG image width (read-only) | `Image.width` | ✅ |
 | `JPEGHEIGHT` | JPEG image height (read-only) | `Image.height` | ✅ |
-| `PRECISION` | Sample precision 2-16 bits | `compress_lossless_arbitrary()` / `decompress_lossless_arbitrary()` | ✅ |
-| `COLORSPACE` | JPEG colorspace | `Encoder::colorspace()` / `Decoder::set_output_colorspace()` | ✅ |
+| `PRECISION` | Sample precision 2-16 bits | `compress_12bit()`, `compress_16bit()`, `decompress_12bit()`, `decompress_16bit()`, `compress_lossless_arbitrary()` / `decompress_lossless_arbitrary()` | 🔶 |
+| `COLORSPACE` | JPEG colorspace | `Encoder::colorspace()` / `Decoder::set_output_colorspace()` | 🔶 |
 | `FASTUPSAMPLE` | Nearest-neighbor upsampling | `Decoder::set_fast_upsample()` | ✅ |
 | `FASTDCT` | Fast DCT/IDCT algorithm | `Decoder::set_fast_dct()` | ✅ |
 | `OPTIMIZE` | Optimized Huffman tables | `compress_optimized()` | ✅ |
 | `PROGRESSIVE` | Progressive JPEG mode | `compress_progressive()` | ✅ |
 | `SCANLIMIT` | Max progressive scans | `Decoder::set_scan_limit()` | ✅ |
-| `ARITHMETIC` | Arithmetic entropy coding | `compress_arithmetic()` | ✅ |
+| `ARITHMETIC` | Arithmetic entropy coding | `compress_arithmetic()`, `TransformOptions::arithmetic` | ✅ |
 | `LOSSLESS` | Lossless JPEG mode | `compress_lossless()` | ✅ |
 | `LOSSLESSPSV` | Lossless predictor 1-7 | `Encoder::lossless_predictor()` | ✅ |
 | `LOSSLESSPT` | Lossless point transform 0-15 | `Encoder::lossless_point_transform()` | ✅ |
 | `RESTARTBLOCKS` | Restart interval (MCU blocks) | `Encoder::restart_blocks()` | ✅ |
 | `RESTARTROWS` | Restart interval (MCU rows) | `Encoder::restart_rows()` | ✅ |
-| `XDENSITY` | Horizontal pixel density | `DensityInfo` | ✅ |
-| `YDENSITY` | Vertical pixel density | `DensityInfo` | ✅ |
-| `DENSITYUNITS` | 0=unknown, 1=ppi, 2=ppcm | `DensityUnit` enum | ✅ |
+| `XDENSITY` | Horizontal pixel density | `Image.density` read + `JpegCoefficients.x_density` low-level rewrite | 🔶 |
+| `YDENSITY` | Vertical pixel density | `Image.density` read + `JpegCoefficients.y_density` low-level rewrite | 🔶 |
+| `DENSITYUNITS` | 0=unknown, 1=ppi, 2=ppcm | `Image.density` read + `JpegCoefficients.density_unit` low-level rewrite | 🔶 |
 | `MAXMEMORY` | Memory limit | `Decoder::set_max_memory()` | ✅ |
 | `MAXPIXELS` | Image size limit | `Decoder::set_max_pixels()` | ✅ |
-| `SAVEMARKERS` | Marker preservation level 0-4 | `MarkerSaveConfig` enum | ✅ |
+| `SAVEMARKERS` | Marker preservation level 0-4 | `Decoder::save_markers()` / `MarkerSaveConfig` | 🔶 |
 
 ### Memory
 
 | C Function | Description | Rust | Status |
 |---|---|---|---|
-| `tj3Alloc(bytes)` | Allocate buffer | `Vec::with_capacity()` | ✅ |
-| `tj3Free(buffer)` | Free buffer | `drop()` / RAII | ✅ |
+| `tj3Alloc(bytes)` | Allocate buffer | `Vec::with_capacity()` / owned buffers | 🔶 |
+| `tj3Free(buffer)` | Free buffer | `drop()` / RAII | 🔶 |
 
 ### Buffer Size Calculation
 
@@ -73,16 +76,16 @@
 
 | C Function | Description | Rust | Status |
 |---|---|---|---|
-| `tj3SetICCProfile(handle, buf, size)` | Set ICC for encoding | `compress_with_metadata(icc_profile: Some(&data))` | ✅ |
-| `tj3GetICCProfile(handle, &buf, &size)` | Get ICC after decode | `Image.icc_profile()` | ✅ |
+| `tj3SetICCProfile(handle, buf, size)` | Set ICC for encoding | `TjHandle::set_icc_profile()` / `Encoder::icc_profile()` | ✅ |
+| `tj3GetICCProfile(handle, &buf, &size)` | Get ICC after decode | `Image.icc_profile()` | 🔶 |
 
 ### Compression (8-bit)
 
 | C Function | Description | Rust | Status |
 |---|---|---|---|
 | `tj3Compress8(handle, src, w, pitch, h, pf, &dst, &size)` | Compress 8-bit pixels to JPEG | `compress()`, `compress_optimized()`, etc. | ✅ |
-| `tj3Compress12(handle, src, w, pitch, h, pf, &dst, &size)` | Compress 12-bit pixels | `write_scanlines_12()` + TjHandle | ✅ |
-| `tj3Compress16(handle, src, w, pitch, h, pf, &dst, &size)` | Compress 16-bit pixels (lossless only) | `write_scanlines_16()` + TjHandle | ✅ |
+| `tj3Compress12(handle, src, w, pitch, h, pf, &dst, &size)` | Compress 12-bit pixels | `compress_12bit()` / `write_scanlines_12()` | 🔶 |
+| `tj3Compress16(handle, src, w, pitch, h, pf, &dst, &size)` | Compress 16-bit pixels (lossless only) | `compress_16bit()` / `write_scanlines_16()` | 🔶 |
 
 ### Compression from YUV
 
@@ -117,8 +120,8 @@
 | C Function | Description | Rust | Status |
 |---|---|---|---|
 | `tj3Decompress8(handle, jpeg, size, dst, pitch, pf)` | Decompress JPEG to 8-bit pixels | `decompress()`, `decompress_to()` | ✅ |
-| `tj3Decompress12(handle, jpeg, size, dst, pitch, pf)` | Decompress to 12-bit | `read_scanlines_12()` + TjHandle | ✅ |
-| `tj3Decompress16(handle, jpeg, size, dst, pitch, pf)` | Decompress to 16-bit | `read_scanlines_16()` + TjHandle | ✅ |
+| `tj3Decompress12(handle, jpeg, size, dst, pitch, pf)` | Decompress to 12-bit | `decompress_12bit()` / `read_scanlines_12()` | 🔶 |
+| `tj3Decompress16(handle, jpeg, size, dst, pitch, pf)` | Decompress to 16-bit | `decompress_16bit()` / `read_scanlines_16()` | 🔶 |
 
 ### Decompression to YUV
 
@@ -138,22 +141,22 @@
 
 | C Function | Description | Rust | Status |
 |---|---|---|---|
-| `tj3Transform(handle, jpeg, size, n, &dstBufs, &dstSizes, transforms)` | Lossless transform with options | `transform_jpeg()` (all ops + all TJXOPT flags + custom filter) | ✅ |
+| `tj3Transform(handle, jpeg, size, n, &dstBufs, &dstSizes, transforms)` | Lossless transform with options | `transform_jpeg()` / `transform_jpeg_with_options()` (all ops + all TJXOPT flags, including arithmetic/progressive output, + custom filter) | ✅ |
 | `tj3TransformBufSize(handle, transform)` | Estimate output buffer size | `transform_buf_size()` | ✅ |
 
 ### Error Handling
 
 | C Function | Description | Rust | Status |
 |---|---|---|---|
-| `tj3GetErrorStr(handle)` | Get error message string | `JpegError` Display impl | ✅ |
-| `tj3GetErrorCode(handle)` | Get TJERR_WARNING or TJERR_FATAL | `Result<T, JpegError>` | ✅ |
+| `tj3GetErrorStr(handle)` | Get error message string | `JpegError` Display impl (no per-handle getter) | 🔶 |
+| `tj3GetErrorCode(handle)` | Get TJERR_WARNING or TJERR_FATAL | `Result<T, JpegError>` / no C-style getter | 🔶 |
 
 ### Image File I/O
 
 | C Function | Description | Rust | Status |
 |---|---|---|---|
-| `tj3LoadImage8(handle, filename, &w, align, &h, &pf)` | Load BMP/PPM to 8-bit buffer | `load_image()` / `load_image_from_bytes()` | ✅ |
-| `tj3SaveImage8(handle, filename, buf, w, pitch, h, pf)` | Save 8-bit buffer to BMP/PPM | `save_bmp()` / `save_ppm()` | ✅ |
+| `tj3LoadImage8(handle, filename, &w, align, &h, &pf)` | Load 8-bit BMP/PPM/PGM subset | `load_image()` / `load_image_from_bytes()` | 🔶 |
+| `tj3SaveImage8(handle, filename, buf, w, pitch, h, pf)` | Save 8-bit BMP/PPM/PGM subset | `save_bmp()` / `save_ppm()` | 🔶 |
 | `tj3LoadImage12(...)` / `tj3SaveImage12(...)` | 12-bit file I/O | — | ❌ |
 | `tj3LoadImage16(...)` / `tj3SaveImage16(...)` | 16-bit file I/O | — | ❌ |
 
@@ -223,7 +226,7 @@
 | `jpeg_write_m_header(cinfo, marker, len)` | Begin streaming marker write | `MarkerStreamWriter` | ✅ |
 | `jpeg_write_m_byte(cinfo, val)` | Write one byte of marker data | `MarkerStreamWriter` | ✅ |
 | `jpeg_write_tables(cinfo)` | Write tables-only datastream | — | ❌ |
-| `jpeg_write_icc_profile(cinfo, data, len)` | Write ICC profile | `marker_writer::write_app2_icc()` | ✅ |
+| `jpeg_write_icc_profile(cinfo, data, len)` | Write ICC profile | `marker_writer::write_app2_icc()` | 🔶 |
 
 ### Decompression
 
@@ -279,7 +282,7 @@
 
 | C Function | Description | Rust | Status |
 |---|---|---|---|
-| `jpeg_resync_to_restart(cinfo, desired)` | Resync to restart marker after error | Internal in decoder | ✅ |
+| `jpeg_resync_to_restart(cinfo, desired)` | Resync to restart marker after error | Internal in decoder | 🔶 |
 
 ### ICC Profile
 
@@ -500,18 +503,25 @@
 
 ---
 
-## Remaining Gaps
+## Remaining Gaps / Partial Mappings
 
-Only these items from the C API remain unimplemented:
+These are the highest-signal C API surfaces that still lack end-to-end public parity, even when adjacent Rust APIs exist:
 
-| C Function | Category | Notes |
+| C Function / Surface | Status | Notes |
 |---|---|---|
-| `jpeg_default_colorspace()` | Compression setup | Reset to default colorspace |
-| `jpeg_default_qtables()` | Compression setup | Reset quant tables to defaults |
-| `jpeg_suppress_tables()` | Compression setup | Table suppression for multi-image streams |
-| `jpeg_write_tables()` | Marker writing | Tables-only datastream (abbreviated JPEG) |
-| `jpeg12_write_raw_data()` | Compression | 12-bit raw data write |
-| `jpeg12_read_raw_data()` | Decompression | 12-bit raw data read |
-| `tj3LoadImage12/16()` | Image I/O | 12/16-bit BMP/PPM file I/O |
-| `tj3SaveImage12/16()` | Image I/O | 12/16-bit BMP/PPM file I/O |
-| `JPEG_HEADER_TABLES_ONLY` | Return code | Tables-only datastream detection |
+| `TJPARAM_NOREALLOC`, `PRECISION`, `COLORSPACE`, `XDENSITY`, `YDENSITY`, `DENSITYUNITS`, `SAVEMARKERS` on `TjHandle` | 🔶 | Stored on `TjHandle`, but not all are applied end-to-end by `compress()` / `decompress()` |
+| `tj3GetICCProfile(handle)` | 🔶 | ICC can be read from `Image`, but decode does not populate the handle-level ICC buffer |
+| `tj3Compress12/16()` / `tj3Decompress12/16()` | 🔶 | Implemented through precision-specific Rust APIs, not through the `TjHandle` surface |
+| `tj3LoadImage8()` / `tj3SaveImage8()` full parity | 🔶 | Rust only covers BMP/PPM/PGM 8-bit helpers, not PNG or the full handle-driven semantics from C |
+| `tj3LoadImage12/16()` / `tj3SaveImage12/16()` | ❌ | Missing |
+| `tj3GetErrorStr()` / `tj3GetErrorCode()` | 🔶 | Rust uses `Result` / `JpegError`, not C-style per-handle getters |
+| `tj3Alloc()` / `tj3Free()` dedicated allocator API | 🔶 | Idiomatic Rust ownership exists, but not a TurboJPEG allocator entry point |
+| `jpeg_write_icc_profile()` | 🔶 | Low-level helper exists, but no libjpeg-style public wrapper around a compression state object |
+| `jpeg_resync_to_restart()` | 🔶 | Internal behavior only, no public hook |
+| `jpeg_default_colorspace()` | ❌ | Missing |
+| `jpeg_default_qtables()` | ❌ | Missing |
+| `jpeg_suppress_tables()` | ❌ | Missing |
+| `jpeg_write_tables()` | ❌ | Missing |
+| `jpeg12_write_raw_data()` | ❌ | Missing |
+| `jpeg12_read_raw_data()` | ❌ | Missing |
+| `JPEG_HEADER_TABLES_ONLY` | ❌ | Tables-only datastream detection missing |
