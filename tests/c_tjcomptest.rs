@@ -536,16 +536,75 @@ fn c_tjcomptest_lossy_full() {
 
     let img_dir: PathBuf = helpers::c_testimages_dir();
 
-    for precision in [8u8, 12u8] {
-        // Precision 12 requires a separate compress path not yet implemented.
-        if precision != 8 {
-            eprintln!(
-                "SKIP: precision={} not yet implemented, skipping",
-                precision
-            );
-            continue;
-        }
+    // --- Precision 12 subset: basic quality × subsampling via compress_12bit ---
+    {
+        let rgb_ppm = img_dir.join("testorig.ppm");
+        if rgb_ppm.exists() {
+            let (rgb_w, rgb_h, rgb_pixels) = helpers::parse_ppm_file(&rgb_ppm);
+            // Scale 8-bit to 12-bit: sample_12 = sample_8 * 4095 / 255
+            let pixels_12: Vec<i16> = rgb_pixels
+                .iter()
+                .map(|&s| (s as i16 * 4095 / 255))
+                .collect();
+            let num_components: usize = 3;
 
+            for &quality in &[90u8, 95u8] {
+                for sampi in 0..6usize {
+                    let samp = match sampi {
+                        0 => libjpeg_turbo_rs::Subsampling::S444,
+                        1 => libjpeg_turbo_rs::Subsampling::S422,
+                        2 => libjpeg_turbo_rs::Subsampling::S440,
+                        3 => libjpeg_turbo_rs::Subsampling::S420,
+                        4 => libjpeg_turbo_rs::Subsampling::S411,
+                        5 => libjpeg_turbo_rs::Subsampling::S441,
+                        _ => unreachable!(),
+                    };
+                    let label = format!("lossy12-q{}-{}", quality, TJCOMP_SUBSAMP[sampi]);
+
+                    let rust_jpeg = libjpeg_turbo_rs::compress_12bit(
+                        &pixels_12,
+                        rgb_w,
+                        rgb_h,
+                        num_components,
+                        quality,
+                        samp,
+                    );
+                    let rust_jpeg = match rust_jpeg {
+                        Ok(j) => j,
+                        Err(e) => {
+                            eprintln!("SKIP {}: Rust compress_12bit error: {}", label, e);
+                            continue;
+                        }
+                    };
+
+                    // C cjpeg -precision 12
+                    let ppm_data = helpers::build_ppm(&rgb_pixels, rgb_w, rgb_h);
+                    let c_args: Vec<&str> = vec![
+                        "-precision",
+                        "12",
+                        "-q",
+                        &quality.to_string(),
+                        "-sa",
+                        CJPEG_SAMP[sampi],
+                    ];
+                    let c_jpeg = helpers::encode_with_c_cjpeg(&cjpeg, &ppm_data, &c_args, &label);
+
+                    if rust_jpeg == c_jpeg {
+                        eprintln!("{}: BYTE-IDENTICAL", label);
+                    } else {
+                        eprintln!(
+                            "{}: byte diff (rust={}, c={})",
+                            label,
+                            rust_jpeg.len(),
+                            c_jpeg.len()
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    for precision in [8u8] {
         let rgb_ppm = img_dir.join("testorig.ppm");
         let icc_file = img_dir.join("test3.icc");
 
@@ -859,18 +918,61 @@ fn c_tjcomptest_lossless_full() {
     let img_dir: PathBuf = helpers::c_testimages_dir();
     let icc_file = img_dir.join("test3.icc");
 
-    for precision in 2u8..=16u8 {
-        // Only precision 8 uses testorig.ppm; higher precision needs 16-bit sources.
-        // Precision != 8 requires the extended lossless API (compress_lossless_arbitrary
-        // with sample size 2) which is not yet wired through the Encoder builder.
-        if precision != 8 {
-            eprintln!(
-                "SKIP: lossless precision={} not yet implemented in Encoder builder",
-                precision
-            );
-            continue;
-        }
+    // --- Non-8-bit lossless: basic psv × pt via compress_16bit ---
+    {
+        let rgb_ppm = img_dir.join("testorig.ppm");
+        if rgb_ppm.exists() {
+            let (rgb_w, rgb_h, rgb_pixels) = helpers::parse_ppm_file(&rgb_ppm);
+            for precision in [2u8, 4, 12, 16] {
+                let max_val: u16 = (1u32 << precision).saturating_sub(1).min(65535) as u16;
+                // Scale 8-bit grayscale to target precision
+                let gray_pixels: Vec<u8> = rgb_to_gray(&rgb_pixels);
+                let pixels_16: Vec<u16> = gray_pixels
+                    .iter()
+                    .map(|&s| (s as u32 * max_val as u32 / 255) as u16)
+                    .collect();
 
+                for psv in [1u8, 4, 7] {
+                    let pt: u8 = 0;
+                    let label = format!("lossless-p{}-psv{}-pt{}", precision, psv, pt);
+
+                    let rust_jpeg =
+                        libjpeg_turbo_rs::compress_16bit(&pixels_16, rgb_w, rgb_h, 1, psv, pt);
+                    let rust_jpeg = match rust_jpeg {
+                        Ok(j) => j,
+                        Err(e) => {
+                            eprintln!("SKIP {}: compress_16bit error: {}", label, e);
+                            continue;
+                        }
+                    };
+
+                    // C cjpeg -precision P -lossless psv,pt
+                    let gray_pgm_tmp =
+                        helpers::TempFile::new(&format!("lossless_p{}.pgm", precision));
+                    helpers::write_pgm_file(gray_pgm_tmp.path(), rgb_w, rgb_h, &gray_pixels);
+                    let prec_str = precision.to_string();
+                    let lossless_str = format!("{},{}", psv, pt);
+                    let c_args: Vec<&str> =
+                        vec!["-precision", &prec_str, "-lossless", &lossless_str];
+                    let pgm_data = std::fs::read(gray_pgm_tmp.path()).unwrap();
+                    let c_jpeg = helpers::encode_with_c_cjpeg(&cjpeg, &pgm_data, &c_args, &label);
+
+                    if rust_jpeg == c_jpeg {
+                        eprintln!("{}: BYTE-IDENTICAL", label);
+                    } else {
+                        eprintln!(
+                            "{}: byte diff (rust={}, c={})",
+                            label,
+                            rust_jpeg.len(),
+                            c_jpeg.len()
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    for precision in [8u8] {
         let rgb_ppm = img_dir.join("testorig.ppm");
         if !rgb_ppm.exists() {
             eprintln!("SKIP: testorig.ppm not found at {:?}", rgb_ppm);
