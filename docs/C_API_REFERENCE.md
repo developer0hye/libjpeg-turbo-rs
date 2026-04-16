@@ -84,8 +84,8 @@
 | C Function | Description | Rust | Status |
 |---|---|---|---|
 | `tj3Compress8(handle, src, w, pitch, h, pf, &dst, &size)` | Compress 8-bit pixels to JPEG | `compress()`, `compress_optimized()`, etc. | ✅ |
-| `tj3Compress12(handle, src, w, pitch, h, pf, &dst, &size)` | Compress 12-bit pixels | `compress_12bit()` / `write_scanlines_12()` | 🔶 |
-| `tj3Compress16(handle, src, w, pitch, h, pf, &dst, &size)` | Compress 16-bit pixels (lossless only) | `compress_16bit()` / `write_scanlines_16()` | 🔶 |
+| `tj3Compress12(handle, src, w, pitch, h, pf, &dst, &size)` | Compress 12-bit pixels | `TjHandle::compress_12bit()` / `compress_12bit()` | ✅ |
+| `tj3Compress16(handle, src, w, pitch, h, pf, &dst, &size)` | Compress 16-bit pixels (lossless only) | `TjHandle::compress_16bit()` / `compress_16bit()` | ✅ |
 
 ### Compression from YUV
 
@@ -120,8 +120,8 @@
 | C Function | Description | Rust | Status |
 |---|---|---|---|
 | `tj3Decompress8(handle, jpeg, size, dst, pitch, pf)` | Decompress JPEG to 8-bit pixels | `decompress()`, `decompress_to()` | ✅ |
-| `tj3Decompress12(handle, jpeg, size, dst, pitch, pf)` | Decompress to 12-bit | `decompress_12bit()` / `read_scanlines_12()` | 🔶 |
-| `tj3Decompress16(handle, jpeg, size, dst, pitch, pf)` | Decompress to 16-bit | `decompress_16bit()` / `read_scanlines_16()` | 🔶 |
+| `tj3Decompress12(handle, jpeg, size, dst, pitch, pf)` | Decompress to 12-bit | `TjHandle::decompress_12bit()` / `decompress_12bit()` | ✅ |
+| `tj3Decompress16(handle, jpeg, size, dst, pitch, pf)` | Decompress to 16-bit | `TjHandle::decompress_16bit()` / `decompress_16bit()` | ✅ |
 
 ### Decompression to YUV
 
@@ -509,9 +509,7 @@ These are the highest-signal C API surfaces that still lack end-to-end public pa
 
 | C Function / Surface | Status | Notes |
 |---|---|---|
-| `TJPARAM_SAVEMARKERS` behavioral wiring on `TjHandle` | 🔶 | Range validated 0-4 matching C, but `decompress()` does not yet use the value to control marker extraction |
 | `TJPARAM_NOREALLOC` on `TjHandle` | 🔶 | N/A for Rust `Vec<u8>` — stored for API compatibility, no behavioral effect |
-| `tj3Compress12/16()` / `tj3Decompress12/16()` | 🔶 | Implemented through precision-specific Rust APIs, not through the `TjHandle` surface |
 | `tj3LoadImage8()` / `tj3SaveImage8()` full parity | 🔶 | Rust only covers BMP/PPM/PGM 8-bit helpers, not PNG or the full handle-driven semantics from C |
 | `tj3LoadImage12/16()` / `tj3SaveImage12/16()` | ❌ | Missing |
 | `tj3GetErrorStr()` / `tj3GetErrorCode()` | 🔶 | Rust uses `Result` / `JpegError`, not C-style per-handle getters |

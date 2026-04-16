@@ -10,8 +10,8 @@ fn handle_default_values() {
     assert_eq!(handle.get(TjParam::Subsampling), 2);
     // Default precision = 8
     assert_eq!(handle.get(TjParam::Precision), 8);
-    // Default colorspace = YCbCr = 1
-    assert_eq!(handle.get(TjParam::ColorSpace), 1);
+    // Default colorspace = TJCS_DEFAULT = -1 (auto-detect)
+    assert_eq!(handle.get(TjParam::ColorSpace), -1);
     // Boolean defaults: all false (0)
     assert_eq!(handle.get(TjParam::FastUpSample), 0);
     assert_eq!(handle.get(TjParam::FastDct), 0);
@@ -858,4 +858,86 @@ fn handle_save_markers_level4_icc_only() {
     // Level 4: only APP2 (ICC) markers saved, no COM
     let has_com = img.markers().iter().any(|m| m.code == 0xFE);
     assert!(!has_com, "level 4: should NOT include COM marker");
+}
+
+// === TJCS_DEFAULT and ColorSpace wiring tests ===
+
+#[test]
+fn handle_colorspace_default_is_negative_one() {
+    let handle = TjHandle::new();
+    assert_eq!(handle.get(TjParam::ColorSpace), -1);
+    // -1 is valid (TJCS_DEFAULT)
+    let mut h = TjHandle::new();
+    h.set(TjParam::ColorSpace, -1).unwrap();
+    assert_eq!(h.get(TjParam::ColorSpace), -1);
+    // -2 is invalid
+    assert!(h.set(TjParam::ColorSpace, -2).is_err());
+}
+
+#[test]
+fn handle_colorspace_rgb_override_in_compress() {
+    let width: usize = 16;
+    let height: usize = 16;
+    let pixels: Vec<u8> = (0..width * height * 3).map(|i| (i % 200) as u8).collect();
+
+    // Default colorspace (-1 = auto = YCbCr for RGB input)
+    let handle_default = TjHandle::new();
+    let jpeg_default = handle_default
+        .compress(&pixels, width, height, PixelFormat::Rgb)
+        .unwrap();
+
+    // Explicit RGB colorspace (0) - should produce different output (no color conversion)
+    let mut handle_rgb = TjHandle::new();
+    handle_rgb.set(TjParam::ColorSpace, 0).unwrap(); // TJCS_RGB
+    let jpeg_rgb = handle_rgb
+        .compress(&pixels, width, height, PixelFormat::Rgb)
+        .unwrap();
+
+    // RGB-direct vs YCbCr should produce different JPEG data
+    assert_ne!(
+        jpeg_default, jpeg_rgb,
+        "RGB colorspace override should produce different output than auto/YCbCr"
+    );
+}
+
+// === Multi-precision via TjHandle ===
+
+#[test]
+fn handle_compress_decompress_16bit_lossless() {
+    let width: usize = 8;
+    let height: usize = 8;
+    let pixels: Vec<u16> = (0..width * height).map(|i| (i * 100) as u16).collect();
+
+    let mut handle = TjHandle::new();
+    handle.set(TjParam::LosslessPsv, 1).unwrap();
+    handle.set(TjParam::LosslessPt, 0).unwrap();
+
+    let jpeg = handle.compress_16bit(&pixels, width, height, 1).unwrap();
+    let img = handle.decompress_16bit(&jpeg).unwrap();
+
+    assert_eq!(img.width, width);
+    assert_eq!(img.height, height);
+    assert_eq!(handle.get(TjParam::Precision), img.precision as i32);
+    assert_eq!(img.data, pixels, "16-bit lossless should be pixel-exact");
+}
+
+#[test]
+fn handle_compress_decompress_12bit() {
+    let width: usize = 8;
+    let height: usize = 8;
+    let num_components: usize = 1;
+    // 12-bit grayscale pixels (0-4095)
+    let pixels: Vec<i16> = (0..width * height).map(|i| (i * 50) as i16).collect();
+
+    let mut handle = TjHandle::new();
+
+    let jpeg = handle
+        .compress_12bit(&pixels, width, height, num_components)
+        .unwrap();
+    let img = handle.decompress_12bit(&jpeg).unwrap();
+
+    assert_eq!(img.width, width);
+    assert_eq!(img.height, height);
+    assert_eq!(handle.get(TjParam::Precision), 12);
+    assert_eq!(img.num_components, num_components);
 }
