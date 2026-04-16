@@ -889,8 +889,13 @@ pub fn transform_jpeg_with_options(data: &[u8], options: &TransformOptions) -> R
     // Apply restart interval: preserve source RI unless user explicitly overrides.
     // Matches C jpegtran behavior — source restart interval flows through
     // transforms unchanged. Only overwrite when explicitly requested.
+    // Progressive output does not support restart markers in the current
+    // multi-scan writer, so clear RI for progressive to avoid corrupt output.
     if options.restart_interval > 0 {
         coeffs.restart_interval = options.restart_interval;
+    }
+    if options.progressive {
+        coeffs.restart_interval = 0;
     }
 
     // Write output with the appropriate encoding.

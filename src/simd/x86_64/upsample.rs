@@ -52,7 +52,7 @@ unsafe fn sse2_fancy_h2v1_inner(input: &[u8], in_width: usize, output: &mut [u8]
 
     let mut i: usize = 1;
 
-    while i + 8 <= in_width - 1 {
+    while i + 8 < in_width {
         let left: __m128i = load_u8x8_as_u16(inptr.add(i - 1));
         let cur: __m128i = load_u8x8_as_u16(inptr.add(i));
         let right: __m128i = load_u8x8_as_u16(inptr.add(i + 1));
