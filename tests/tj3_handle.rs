@@ -10,8 +10,8 @@ fn handle_default_values() {
     assert_eq!(handle.get(TjParam::Subsampling), 2);
     // Default precision = 8
     assert_eq!(handle.get(TjParam::Precision), 8);
-    // Default colorspace = YCbCr = 1
-    assert_eq!(handle.get(TjParam::ColorSpace), 1);
+    // Default colorspace = TJCS_DEFAULT = -1 (auto-detect)
+    assert_eq!(handle.get(TjParam::ColorSpace), -1);
     // Boolean defaults: all false (0)
     assert_eq!(handle.get(TjParam::FastUpSample), 0);
     assert_eq!(handle.get(TjParam::FastDct), 0);
@@ -40,8 +40,8 @@ fn handle_default_values() {
     // MaxMemory/MaxPixels defaults (0 = unlimited)
     assert_eq!(handle.get(TjParam::MaxMemory), 0);
     assert_eq!(handle.get(TjParam::MaxPixels), 0);
-    // SaveMarkers default = 0 (None)
-    assert_eq!(handle.get(TjParam::SaveMarkers), 0);
+    // SaveMarkers default = 2 (All, matching C TJSM_ALL)
+    assert_eq!(handle.get(TjParam::SaveMarkers), 2);
 }
 
 #[test]
@@ -128,9 +128,14 @@ fn handle_set_get_limits() {
 #[test]
 fn handle_set_get_save_markers() {
     let mut handle = TjHandle::new();
-    // 0 = None, 1 = All
-    handle.set(TjParam::SaveMarkers, 1).unwrap();
-    assert_eq!(handle.get(TjParam::SaveMarkers), 1);
+    // C-compatible range: 0-4
+    for level in 0..=4 {
+        handle.set(TjParam::SaveMarkers, level).unwrap();
+        assert_eq!(handle.get(TjParam::SaveMarkers), level);
+    }
+    // Out-of-range must fail
+    assert!(handle.set(TjParam::SaveMarkers, 5).is_err());
+    assert!(handle.set(TjParam::SaveMarkers, -1).is_err());
 }
 
 #[test]
@@ -386,8 +391,9 @@ fn handle_decompress_with_icc_profile() {
 
     let mut handle = TjHandle::new();
     handle.set_icc_profile(Some(vec![0xBB; 10])); // should be overwritten by decompress
-    let img = handle.decompress(&jpeg).unwrap();
-    assert_eq!(img.icc_profile(), Some(icc.as_slice()));
+    let _img = handle.decompress(&jpeg).unwrap();
+    // Verify handle ICC profile is updated from decoded image (not the old value)
+    assert_eq!(handle.icc_profile(), Some(icc.as_slice()));
 }
 
 #[test]
@@ -454,6 +460,221 @@ fn handle_decompress_with_max_pixels() {
     assert!(result.is_err());
 }
 
+// === Behavioral tests: verify params actually affect output ===
+
+#[test]
+fn handle_quality_affects_output_size() {
+    let width: usize = 64;
+    let height: usize = 64;
+    // Use varied pixel data to make quality effect visible
+    let pixels: Vec<u8> = (0..width * height * 3).map(|i| (i % 251) as u8).collect();
+
+    let mut handle_low = TjHandle::new();
+    handle_low.set(TjParam::Quality, 10).unwrap();
+    let jpeg_low = handle_low
+        .compress(&pixels, width, height, PixelFormat::Rgb)
+        .unwrap();
+
+    let mut handle_high = TjHandle::new();
+    handle_high.set(TjParam::Quality, 95).unwrap();
+    let jpeg_high = handle_high
+        .compress(&pixels, width, height, PixelFormat::Rgb)
+        .unwrap();
+
+    // Higher quality must produce larger output
+    assert!(
+        jpeg_high.len() > jpeg_low.len(),
+        "q95 ({}) should be larger than q10 ({})",
+        jpeg_high.len(),
+        jpeg_low.len()
+    );
+}
+
+#[test]
+fn handle_subsampling_affects_output() {
+    let width: usize = 64;
+    let height: usize = 64;
+    let pixels: Vec<u8> = (0..width * height * 3).map(|i| (i % 251) as u8).collect();
+
+    let mut handle_444 = TjHandle::new();
+    handle_444.set(TjParam::Subsampling, 0).unwrap(); // S444
+    let jpeg_444 = handle_444
+        .compress(&pixels, width, height, PixelFormat::Rgb)
+        .unwrap();
+
+    let mut handle_420 = TjHandle::new();
+    handle_420.set(TjParam::Subsampling, 2).unwrap(); // S420
+    let jpeg_420 = handle_420
+        .compress(&pixels, width, height, PixelFormat::Rgb)
+        .unwrap();
+
+    // S444 (no chroma subsampling) must produce larger output than S420
+    assert!(
+        jpeg_444.len() > jpeg_420.len(),
+        "S444 ({}) should be larger than S420 ({})",
+        jpeg_444.len(),
+        jpeg_420.len()
+    );
+}
+
+#[test]
+fn handle_bottom_up_affects_pixel_order() {
+    let width: usize = 8;
+    let height: usize = 8;
+    // Create a gradient: top row = dark, bottom row = bright
+    let mut pixels = vec![0u8; width * height * 3];
+    for y in 0..height {
+        let val: u8 = (y * 255 / (height - 1)) as u8;
+        for x in 0..width {
+            let offset: usize = (y * width + x) * 3;
+            pixels[offset] = val;
+            pixels[offset + 1] = val;
+            pixels[offset + 2] = val;
+        }
+    }
+
+    // Encode without bottom-up
+    let mut handle_normal = TjHandle::new();
+    handle_normal.set(TjParam::Quality, 100).unwrap();
+    handle_normal.set(TjParam::Subsampling, 0).unwrap();
+    let jpeg_normal = handle_normal
+        .compress(&pixels, width, height, PixelFormat::Rgb)
+        .unwrap();
+
+    // Encode with bottom-up (rows are read in reverse order)
+    let mut handle_bu = TjHandle::new();
+    handle_bu.set(TjParam::Quality, 100).unwrap();
+    handle_bu.set(TjParam::Subsampling, 0).unwrap();
+    handle_bu.set(TjParam::BottomUp, 1).unwrap();
+    let jpeg_bu = handle_bu
+        .compress(&pixels, width, height, PixelFormat::Rgb)
+        .unwrap();
+
+    // The two JPEGs should differ (flipped input = different DCT coefficients)
+    assert_ne!(
+        jpeg_normal, jpeg_bu,
+        "BottomUp should produce different output"
+    );
+}
+
+#[test]
+fn handle_density_roundtrip_through_compress_decompress() {
+    let width: usize = 16;
+    let height: usize = 16;
+    let pixels = vec![128u8; width * height * 3];
+
+    let mut handle = TjHandle::new();
+    handle.set(TjParam::XDensity, 300).unwrap();
+    handle.set(TjParam::YDensity, 600).unwrap();
+    handle.set(TjParam::DensityUnits, 1).unwrap(); // DPI
+
+    let jpeg = handle
+        .compress(&pixels, width, height, PixelFormat::Rgb)
+        .unwrap();
+
+    // Verify JFIF density in raw bytes (bytes 13-17 of APP0)
+    assert_eq!(jpeg[13], 1, "density unit should be DPI (1)");
+    assert_eq!(
+        u16::from_be_bytes([jpeg[14], jpeg[15]]),
+        300,
+        "x_density should be 300"
+    );
+    assert_eq!(
+        u16::from_be_bytes([jpeg[16], jpeg[17]]),
+        600,
+        "y_density should be 600"
+    );
+
+    // Decompress and verify handle captures density from JFIF
+    let mut handle2 = TjHandle::new();
+    let _img = handle2.decompress(&jpeg).unwrap();
+    assert_eq!(handle2.get(TjParam::DensityUnits), 1);
+    assert_eq!(handle2.get(TjParam::XDensity), 300);
+    assert_eq!(handle2.get(TjParam::YDensity), 600);
+}
+
+#[test]
+fn handle_decompress_updates_colorspace_and_subsampling() {
+    let width: usize = 32;
+    let height: usize = 32;
+    let pixels = vec![128u8; width * height * 3];
+
+    // Compress with S422
+    let mut enc_handle = TjHandle::new();
+    enc_handle.set(TjParam::Subsampling, 1).unwrap(); // S422
+    let jpeg = enc_handle
+        .compress(&pixels, width, height, PixelFormat::Rgb)
+        .unwrap();
+
+    // Decompress and verify handle is updated from JPEG header
+    let mut dec_handle = TjHandle::new();
+    let _img = dec_handle.decompress(&jpeg).unwrap();
+
+    // ColorSpace should be YCbCr (1) for standard JFIF
+    assert_eq!(
+        dec_handle.get(TjParam::ColorSpace),
+        1,
+        "color space should be YCbCr (1)"
+    );
+    // Subsampling should be S422 (1)
+    assert_eq!(
+        dec_handle.get(TjParam::Subsampling),
+        1,
+        "subsampling should be S422 (1)"
+    );
+}
+
+#[test]
+fn handle_decompress_grayscale_updates_colorspace() {
+    let width: usize = 16;
+    let height: usize = 16;
+    let pixels = vec![128u8; width * height];
+
+    let enc_handle = TjHandle::new();
+    let jpeg = enc_handle
+        .compress(&pixels, width, height, PixelFormat::Grayscale)
+        .unwrap();
+
+    let mut dec_handle = TjHandle::new();
+    let _img = dec_handle.decompress(&jpeg).unwrap();
+
+    // ColorSpace should be Grayscale (2)
+    assert_eq!(
+        dec_handle.get(TjParam::ColorSpace),
+        2,
+        "color space should be Grayscale (2)"
+    );
+    // Subsampling should be TJSAMP_GRAY (3) — matches C libjpeg-turbo
+    assert_eq!(
+        dec_handle.get(TjParam::Subsampling),
+        3,
+        "subsampling should be TJSAMP_GRAY (3)"
+    );
+}
+
+#[test]
+fn handle_progressive_produces_multiple_sos_markers() {
+    let width: usize = 32;
+    let height: usize = 32;
+    let pixels: Vec<u8> = (0..width * height * 3).map(|i| (i % 251) as u8).collect();
+
+    let mut handle = TjHandle::new();
+    handle.set(TjParam::Progressive, 1).unwrap();
+    let jpeg = handle
+        .compress(&pixels, width, height, PixelFormat::Rgb)
+        .unwrap();
+
+    // Count SOS (0xFFDA) markers — progressive should have multiple scans
+    let sos_count = jpeg
+        .windows(2)
+        .filter(|w| w[0] == 0xFF && w[1] == 0xDA)
+        .count();
+    assert!(
+        sos_count > 1,
+        "progressive JPEG should have multiple SOS markers, got {sos_count}"
+    );
+}
+
 #[test]
 fn handle_tj_param_enum_all_variants() {
     // Ensure all 26 variants exist and are distinct
@@ -494,4 +715,229 @@ fn handle_tj_param_enum_all_variants() {
             }
         }
     }
+}
+
+// === SaveMarkers behavioral tests ===
+
+/// Helper: create a JPEG with ICC profile and COM marker embedded.
+fn make_jpeg_with_icc_and_com() -> (Vec<u8>, Vec<u8>) {
+    use libjpeg_turbo_rs::Encoder;
+    let width: usize = 16;
+    let height: usize = 16;
+    let pixels = vec![128u8; width * height * 3];
+    let icc = vec![0xAAu8; 64];
+    let jpeg = Encoder::new(&pixels, width, height, PixelFormat::Rgb)
+        .quality(75)
+        .subsampling(Subsampling::S444)
+        .icc_profile(&icc)
+        .comment("test comment")
+        .encode()
+        .unwrap();
+    (jpeg, icc)
+}
+
+#[test]
+fn handle_save_markers_level0_no_markers_no_icc() {
+    let (jpeg, _icc) = make_jpeg_with_icc_and_com();
+
+    let mut handle = TjHandle::new();
+    handle.set(TjParam::SaveMarkers, 0).unwrap();
+    let img = handle.decompress(&jpeg).unwrap();
+
+    // Level 0: no ICC on handle
+    assert!(
+        handle.icc_profile().is_none(),
+        "level 0: handle ICC should be None"
+    );
+    // Level 0: no ICC on image
+    assert!(
+        img.icc_profile().is_none(),
+        "level 0: image ICC should be None"
+    );
+    // Level 0: no saved markers
+    assert!(
+        img.markers().is_empty(),
+        "level 0: saved markers should be empty"
+    );
+}
+
+#[test]
+fn handle_save_markers_level1_com_only() {
+    let (jpeg, _icc) = make_jpeg_with_icc_and_com();
+
+    let mut handle = TjHandle::new();
+    handle.set(TjParam::SaveMarkers, 1).unwrap();
+    let img = handle.decompress(&jpeg).unwrap();
+
+    // Level 1: no ICC
+    assert!(
+        handle.icc_profile().is_none(),
+        "level 1: handle ICC should be None"
+    );
+    // Level 1: only COM markers saved
+    assert!(
+        !img.markers().is_empty(),
+        "level 1: should have saved COM marker"
+    );
+    for m in img.markers() {
+        assert_eq!(
+            m.code, 0xFE,
+            "level 1: only COM (0xFE) markers should be saved"
+        );
+    }
+}
+
+#[test]
+fn handle_save_markers_level2_all_with_icc() {
+    let (jpeg, icc) = make_jpeg_with_icc_and_com();
+
+    let mut handle = TjHandle::new();
+    handle.set(TjParam::SaveMarkers, 2).unwrap();
+    let img = handle.decompress(&jpeg).unwrap();
+
+    // Level 2: ICC extracted to handle
+    assert_eq!(
+        handle.icc_profile(),
+        Some(icc.as_slice()),
+        "level 2: handle ICC should match embedded profile"
+    );
+    // Level 2: all markers saved (COM + APP markers)
+    assert!(
+        !img.markers().is_empty(),
+        "level 2: should have saved markers"
+    );
+    let has_com = img.markers().iter().any(|m| m.code == 0xFE);
+    assert!(has_com, "level 2: should include COM marker");
+}
+
+#[test]
+fn handle_save_markers_level3_all_except_icc() {
+    let (jpeg, _icc) = make_jpeg_with_icc_and_com();
+
+    let mut handle = TjHandle::new();
+    handle.set(TjParam::SaveMarkers, 3).unwrap();
+    let img = handle.decompress(&jpeg).unwrap();
+
+    // Level 3: no ICC
+    assert!(
+        handle.icc_profile().is_none(),
+        "level 3: handle ICC should be None"
+    );
+    assert!(
+        img.icc_profile().is_none(),
+        "level 3: image ICC should be None"
+    );
+    // Level 3: saved markers should NOT contain ICC APP2
+    for m in img.markers() {
+        if m.code == 0xE2 {
+            assert!(
+                !m.data.starts_with(b"ICC_PROFILE\0"),
+                "level 3: ICC APP2 markers should be filtered out"
+            );
+        }
+    }
+    // Level 3: COM should still be present
+    let has_com = img.markers().iter().any(|m| m.code == 0xFE);
+    assert!(has_com, "level 3: should include COM marker");
+}
+
+#[test]
+fn handle_save_markers_level4_icc_only() {
+    let (jpeg, icc) = make_jpeg_with_icc_and_com();
+
+    let mut handle = TjHandle::new();
+    handle.set(TjParam::SaveMarkers, 4).unwrap();
+    let img = handle.decompress(&jpeg).unwrap();
+
+    // Level 4: ICC extracted to handle
+    assert_eq!(
+        handle.icc_profile(),
+        Some(icc.as_slice()),
+        "level 4: handle ICC should match embedded profile"
+    );
+    // Level 4: only APP2 (ICC) markers saved, no COM
+    let has_com = img.markers().iter().any(|m| m.code == 0xFE);
+    assert!(!has_com, "level 4: should NOT include COM marker");
+}
+
+// === TJCS_DEFAULT and ColorSpace wiring tests ===
+
+#[test]
+fn handle_colorspace_default_is_negative_one() {
+    let handle = TjHandle::new();
+    assert_eq!(handle.get(TjParam::ColorSpace), -1);
+    // -1 is valid (TJCS_DEFAULT)
+    let mut h = TjHandle::new();
+    h.set(TjParam::ColorSpace, -1).unwrap();
+    assert_eq!(h.get(TjParam::ColorSpace), -1);
+    // -2 is invalid
+    assert!(h.set(TjParam::ColorSpace, -2).is_err());
+}
+
+#[test]
+fn handle_colorspace_rgb_override_in_compress() {
+    let width: usize = 16;
+    let height: usize = 16;
+    let pixels: Vec<u8> = (0..width * height * 3).map(|i| (i % 200) as u8).collect();
+
+    // Default colorspace (-1 = auto = YCbCr for RGB input)
+    let handle_default = TjHandle::new();
+    let jpeg_default = handle_default
+        .compress(&pixels, width, height, PixelFormat::Rgb)
+        .unwrap();
+
+    // Explicit RGB colorspace (0) - should produce different output (no color conversion)
+    let mut handle_rgb = TjHandle::new();
+    handle_rgb.set(TjParam::ColorSpace, 0).unwrap(); // TJCS_RGB
+    let jpeg_rgb = handle_rgb
+        .compress(&pixels, width, height, PixelFormat::Rgb)
+        .unwrap();
+
+    // RGB-direct vs YCbCr should produce different JPEG data
+    assert_ne!(
+        jpeg_default, jpeg_rgb,
+        "RGB colorspace override should produce different output than auto/YCbCr"
+    );
+}
+
+// === Multi-precision via TjHandle ===
+
+#[test]
+fn handle_compress_decompress_16bit_lossless() {
+    let width: usize = 8;
+    let height: usize = 8;
+    let pixels: Vec<u16> = (0..width * height).map(|i| (i * 100) as u16).collect();
+
+    let mut handle = TjHandle::new();
+    handle.set(TjParam::LosslessPsv, 1).unwrap();
+    handle.set(TjParam::LosslessPt, 0).unwrap();
+
+    let jpeg = handle.compress_16bit(&pixels, width, height, 1).unwrap();
+    let img = handle.decompress_16bit(&jpeg).unwrap();
+
+    assert_eq!(img.width, width);
+    assert_eq!(img.height, height);
+    assert_eq!(handle.get(TjParam::Precision), img.precision as i32);
+    assert_eq!(img.data, pixels, "16-bit lossless should be pixel-exact");
+}
+
+#[test]
+fn handle_compress_decompress_12bit() {
+    let width: usize = 8;
+    let height: usize = 8;
+    let num_components: usize = 1;
+    // 12-bit grayscale pixels (0-4095)
+    let pixels: Vec<i16> = (0..width * height).map(|i| (i * 50) as i16).collect();
+
+    let mut handle = TjHandle::new();
+
+    let jpeg = handle
+        .compress_12bit(&pixels, width, height, num_components)
+        .unwrap();
+    let img = handle.decompress_12bit(&jpeg).unwrap();
+
+    assert_eq!(img.width, width);
+    assert_eq!(img.height, height);
+    assert_eq!(handle.get(TjParam::Precision), 12);
+    assert_eq!(img.num_components, num_components);
 }

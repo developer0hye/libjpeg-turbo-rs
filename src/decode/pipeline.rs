@@ -431,6 +431,50 @@ impl<'a> Decoder<'a> {
         self.fast_upsample = fast;
     }
 
+    /// Get the JPEG color space detected from the file header.
+    ///
+    /// Maps component count and Adobe APP14 marker to a `ColorSpace` value,
+    /// matching libjpeg-turbo's `jpeg_color_space` behavior.
+    pub fn jpeg_color_space(&self) -> ColorSpace {
+        self.detect_color_space()
+    }
+
+    /// Get the chroma subsampling detected from the SOF component sampling factors.
+    ///
+    /// Compares luma vs chroma sampling factors to determine the standard
+    /// subsampling mode. Returns `Subsampling::Unknown` for grayscale
+    /// (caller should check component count and map to TJSAMP_GRAY=3).
+    pub fn jpeg_subsampling(&self) -> Subsampling {
+        let frame = &self.metadata.frame;
+        let num_components = frame.components.len();
+        if num_components == 1 {
+            // Grayscale: no chroma subsampling concept. Return Unknown so
+            // TjHandle can map to TJSAMP_GRAY=3 explicitly.
+            return Subsampling::Unknown;
+        }
+        if num_components < 3 {
+            return Subsampling::Unknown;
+        }
+        let luma_h: u8 = frame.components[0].horizontal_sampling;
+        let luma_v: u8 = frame.components[0].vertical_sampling;
+        let chroma_h: u8 = frame.components[1].horizontal_sampling;
+        let chroma_v: u8 = frame.components[1].vertical_sampling;
+        if chroma_h == 0 || chroma_v == 0 {
+            return Subsampling::Unknown;
+        }
+        let h_ratio: u8 = luma_h / chroma_h;
+        let v_ratio: u8 = luma_v / chroma_v;
+        match (h_ratio, v_ratio) {
+            (1, 1) => Subsampling::S444,
+            (2, 1) => Subsampling::S422,
+            (2, 2) => Subsampling::S420,
+            (1, 2) => Subsampling::S440,
+            (4, 1) => Subsampling::S411,
+            (1, 4) => Subsampling::S441,
+            _ => Subsampling::Unknown,
+        }
+    }
+
     /// Enable or disable fast DCT for decoding.
     pub fn set_fast_dct(&mut self, fast: bool) {
         self.fast_dct = fast;

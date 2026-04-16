@@ -6,8 +6,7 @@
 //!
 //! Methodology: Characterization testing — encode same pixels with both Rust
 //! and C cjpeg, compare JPEG bytes. If not byte-identical, decode both and
-//! compare pixels. Measured tolerance: max_diff ≤ 5 (due to rounding diffs
-//! in DCT/quantization/downsampling between Rust and C implementations).
+//! compare pixels. Measured max_diff=0 (byte-identical on all tested combos).
 //!
 //! All tests gracefully skip if cjpeg/djpeg are not found.
 
@@ -32,8 +31,8 @@ fn encode_with_c_cjpeg_ppm(
     helpers::encode_with_c_cjpeg(cjpeg, &ppm, args, label)
 }
 
-/// Compare two JPEGs: byte-identical check first, then pixel-level with tolerance.
-/// Measured tolerance: max_diff ≤ 5 (encoder rounding differences).
+/// Compare two JPEGs: byte-identical check first, then pixel-level fallback.
+/// Measured max_diff=0 across all quality/subsampling combos (2026-04-16).
 fn assert_encoder_output_matches(rust_jpeg: &[u8], c_jpeg: &[u8], label: &str) {
     if rust_jpeg == c_jpeg {
         eprintln!("{}: BYTE-IDENTICAL ({} bytes)", label, rust_jpeg.len());
@@ -57,14 +56,14 @@ fn assert_encoder_output_matches(rust_jpeg: &[u8], c_jpeg: &[u8], label: &str) {
     assert_eq!(rust_img.height, c_img.height, "{}: height", label);
 
     let max_diff: u8 = helpers::pixel_max_diff(&rust_img.data, &c_img.data);
-    // Measured actual max_diff=9 (Q25 S422 downsampling rounding) + 1 margin = 10
+    // Measured max_diff=0 across all tested combos. Tolerance 1 for rounding margin.
     assert!(
-        max_diff <= 10,
-        "{}: encoder pixel max_diff={}, exceeds measured tolerance of 10",
+        max_diff <= 1,
+        "{}: encoder pixel max_diff={}, exceeds measured tolerance of 1",
         label,
         max_diff
     );
-    eprintln!("{}: pixel max_diff={} (tolerance ≤10)", label, max_diff);
+    eprintln!("{}: pixel max_diff={} (tolerance ≤1)", label, max_diff);
 }
 
 // ===========================================================================

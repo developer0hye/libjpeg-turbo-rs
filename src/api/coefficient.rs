@@ -886,11 +886,26 @@ pub fn transform_jpeg_with_options(data: &[u8], options: &TransformOptions) -> R
         return Ok(Vec::new());
     }
 
-    // Apply restart interval from transform options.
-    // Only write restart markers when explicitly requested — don't inherit
-    // the source JPEG's restart interval since MCU layout may change after
-    // transforms (crop, trim, grayscale).
-    coeffs.restart_interval = options.restart_interval;
+    // Apply restart interval: preserve source RI unless user explicitly overrides.
+    // Matches C jpegtran behavior — source restart interval flows through
+    // transforms unchanged. Only overwrite when explicitly requested.
+    if options.restart_interval > 0 {
+        coeffs.restart_interval = options.restart_interval;
+    }
+    // Clear RI when the output MCU grid is incompatible with the source RI:
+    // - Progressive: multi-scan writer does not support restart markers
+    // - Dimension-swapping transforms (rot90/rot270/transpose/transverse) with
+    //   trim change the MCU grid, making the source RI invalid
+    let swaps_dimensions: bool = matches!(
+        options.op,
+        crate::transform::TransformOp::Rot90
+            | crate::transform::TransformOp::Rot270
+            | crate::transform::TransformOp::Transpose
+            | crate::transform::TransformOp::Transverse
+    );
+    if options.progressive || (swaps_dimensions && options.trim) {
+        coeffs.restart_interval = 0;
+    }
 
     // Write output with the appropriate encoding.
     // C jpegtran -progressive implies -optimize (per-scan Huffman tables).
