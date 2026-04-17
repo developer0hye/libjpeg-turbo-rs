@@ -26,6 +26,7 @@ pub mod compress;
 pub mod convert;
 pub mod decompress;
 pub mod header;
+pub mod legacy;
 pub mod tj3;
 pub mod transform;
 
@@ -38,3 +39,10 @@ pub use header::{
 };
 pub use tj3::{tj3Destroy, tj3Get, tj3GetErrorCode, tj3GetErrorStr, tj3Init, tj3Set};
 pub use transform::{tj3Transform, TjTransform};
+
+// Legacy TJ1/TJ2 aliases — thin wrappers around the TJ3 surface above.
+pub use legacy::{
+    tjBufSize, tjBufSizeYUV2, tjCompress2, tjDecodeYUV, tjDecompress2, tjDecompressHeader3,
+    tjDestroy, tjEncodeYUV3, tjGetErrorStr2, tjInitCompress, tjInitDecompress, tjInitTransform,
+    tjLoadImage, tjPlaneHeight, tjPlaneSizeYUV, tjPlaneWidth, tjSaveImage, tjTransform,
+};
