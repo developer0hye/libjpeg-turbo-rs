@@ -12,6 +12,25 @@ fn helpers_c_tool_discovery() {
 }
 
 #[test]
+fn helpers_is_ci_returns_bool() {
+    // Smoke check: `is_ci()` must not panic and must return a bool.
+    // We intentionally do not assert the value, because both CI runners
+    // and `cargo test` without `CI` set are valid environments for this
+    // suite to run in.
+    let _: bool = helpers::is_ci();
+}
+
+#[test]
+fn helpers_require_c_tool_err_for_missing() {
+    // `require_c_tool` must return a NotFound error for a non-existent
+    // binary name.  This exercises the library-style helper that the
+    // `require_c_tool!` macro delegates to.
+    let err: std::io::Error = helpers::require_c_tool("definitely_not_a_real_tool_xyz_42")
+        .expect_err("missing binary must yield Err");
+    assert_eq!(err.kind(), std::io::ErrorKind::NotFound);
+}
+
+#[test]
 fn helpers_temp_file_lifecycle() {
     let tf = helpers::TempFile::new("smoke_test.txt");
     tf.write_bytes(b"hello");
