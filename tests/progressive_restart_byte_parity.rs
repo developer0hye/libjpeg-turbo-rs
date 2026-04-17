@@ -77,20 +77,8 @@ fn compare_progressive_restart(
 /// Matrix: YCbCr sources × {identity, rotate, flip} × {row-mode, byte-mode restart}.
 #[test]
 fn progressive_restart_byte_parity_ycbcr() {
-    let jpegtran: PathBuf = match helpers::jpegtran_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: jpegtran not found");
-            return;
-        }
-    };
-    let cjpeg: PathBuf = match helpers::cjpeg_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: cjpeg not found");
-            return;
-        }
-    };
+    let jpegtran: PathBuf = require_c_tool!("jpegtran");
+    let cjpeg: PathBuf = require_c_tool!("cjpeg");
 
     // Subsamplings: covers interleaved DC scans + non-interleaved AC scans.
     let sources: &[(&str, &str)] = &[
@@ -139,20 +127,8 @@ fn progressive_restart_byte_parity_ycbcr() {
 /// Gray source: exercises single-component progressive scans with RST.
 #[test]
 fn progressive_restart_byte_parity_gray() {
-    let jpegtran: PathBuf = match helpers::jpegtran_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: jpegtran not found");
-            return;
-        }
-    };
-    let cjpeg: PathBuf = match helpers::cjpeg_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: cjpeg not found");
-            return;
-        }
-    };
+    let jpegtran: PathBuf = require_c_tool!("jpegtran");
+    let cjpeg: PathBuf = require_c_tool!("cjpeg");
 
     let src: Vec<u8> = encode_gray_source(&cjpeg);
     let restart_cases: &[(&str, bool, u16)] = &[("1", true, 1), ("5b", false, 5)];
