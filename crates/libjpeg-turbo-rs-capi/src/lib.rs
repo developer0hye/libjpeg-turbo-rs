@@ -24,9 +24,11 @@ pub use libjpeg_turbo_rs as inner;
 pub mod alloc;
 pub mod compress;
 pub mod convert;
+pub mod decompress;
 pub mod tj3;
 
 // Re-export the `extern "C"` symbols at the crate root for discoverability.
 pub use alloc::{tj3Alloc, tj3Free};
 pub use compress::tj3Compress8;
+pub use decompress::tj3Decompress8;
 pub use tj3::{tj3Destroy, tj3Get, tj3GetErrorCode, tj3GetErrorStr, tj3Init, tj3Set};
