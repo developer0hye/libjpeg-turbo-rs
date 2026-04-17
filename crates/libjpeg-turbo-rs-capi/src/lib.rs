@@ -27,6 +27,7 @@ pub mod convert;
 pub mod decompress;
 pub mod header;
 pub mod tj3;
+pub mod transform;
 
 // Re-export the `extern "C"` symbols at the crate root for discoverability.
 pub use alloc::{tj3Alloc, tj3Free};
@@ -36,3 +37,4 @@ pub use header::{
     tj3DecompressHeader, tj3SetCroppingRegion, tj3SetScalingFactor, TjRegion, TjScalingFactor,
 };
 pub use tj3::{tj3Destroy, tj3Get, tj3GetErrorCode, tj3GetErrorStr, tj3Init, tj3Set};
+pub use transform::{tj3Transform, TjTransform};
