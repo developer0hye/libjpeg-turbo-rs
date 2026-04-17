@@ -889,13 +889,30 @@ pub fn transform_jpeg_with_options(data: &[u8], options: &TransformOptions) -> R
     // Apply restart interval: preserve source RI unless user explicitly overrides.
     // Matches C jpegtran behavior — source restart interval flows through
     // transforms unchanged. Only overwrite when explicitly requested.
+    //
+    // When `restart_in_rows == true`, the user-supplied value is in MCU rows;
+    // recompute the actual DRI based on the OUTPUT MCU grid (matches C jpegtran
+    // `-restart N` which is row-based and computed against the output dimensions
+    // produced by the transform). Without this, source-derived row counts become
+    // invalid after rotation, crop, or trim that change the output dimensions.
     if options.restart_interval > 0 {
-        coeffs.restart_interval = options.restart_interval;
+        if options.restart_in_rows {
+            let max_h: usize = coeffs
+                .components
+                .iter()
+                .map(|c| c.h_sampling as usize)
+                .max()
+                .unwrap_or(1);
+            let output_mcus_per_row: usize = (coeffs.width as usize).div_ceil(max_h * 8);
+            let dri: usize = options.restart_interval as usize * output_mcus_per_row;
+            coeffs.restart_interval = dri.min(u16::MAX as usize) as u16;
+        } else {
+            coeffs.restart_interval = options.restart_interval;
+        }
     }
-    // Clear RI when the output MCU grid is incompatible with the source RI:
-    // - Progressive: multi-scan writer does not support restart markers
-    // - Dimension-swapping transforms (rot90/rot270/transpose/transverse) with
-    //   trim change the MCU grid, making the source RI invalid
+    // Source RI carried over from the input JPEG can become invalid after
+    // dimension-swapping transforms with trim, since the output MCU grid is
+    // fundamentally different. Clear to avoid producing truncated entropy data.
     let swaps_dimensions: bool = matches!(
         options.op,
         crate::transform::TransformOp::Rot90
@@ -903,7 +920,13 @@ pub fn transform_jpeg_with_options(data: &[u8], options: &TransformOptions) -> R
             | crate::transform::TransformOp::Transpose
             | crate::transform::TransformOp::Transverse
     );
-    if options.progressive || (swaps_dimensions && options.trim) {
+    if swaps_dimensions && options.trim && options.restart_interval == 0 {
+        coeffs.restart_interval = 0;
+    }
+    // Progressive output: the multi-scan writer does not yet emit RST markers,
+    // so clear the RI to avoid declaring DRI without RST in the entropy stream
+    // (which would produce undecodable output).
+    if options.progressive {
         coeffs.restart_interval = 0;
     }
 

@@ -332,6 +332,7 @@ fn tjunittest_transform_with_crop() {
         arithmetic: false,
         optimize: false,
         restart_interval: 0,
+        restart_in_rows: false,
         copy_markers: libjpeg_turbo_rs::MarkerCopyMode::All,
         custom_filter: None,
     };
@@ -369,6 +370,7 @@ fn tjunittest_transform_crop_with_rotation() {
         arithmetic: false,
         optimize: false,
         restart_interval: 0,
+        restart_in_rows: false,
         copy_markers: libjpeg_turbo_rs::MarkerCopyMode::All,
         custom_filter: None,
     };
@@ -402,6 +404,7 @@ fn tjunittest_grayscale_transform_444() {
         arithmetic: false,
         optimize: false,
         restart_interval: 0,
+        restart_in_rows: false,
         copy_markers: libjpeg_turbo_rs::MarkerCopyMode::All,
         custom_filter: None,
     };
@@ -436,6 +439,7 @@ fn tjunittest_grayscale_transform_420() {
         arithmetic: false,
         optimize: false,
         restart_interval: 0,
+        restart_in_rows: false,
         copy_markers: libjpeg_turbo_rs::MarkerCopyMode::All,
         custom_filter: None,
     };
@@ -469,6 +473,7 @@ fn tjunittest_grayscale_transform_all_subsampling() {
             arithmetic: false,
             optimize: false,
             restart_interval: 0,
+            restart_in_rows: false,
             copy_markers: libjpeg_turbo_rs::MarkerCopyMode::All,
             custom_filter: None,
         };
@@ -507,6 +512,7 @@ fn tjunittest_transform_progressive_output() {
         arithmetic: false,
         optimize: false,
         restart_interval: 0,
+        restart_in_rows: false,
         copy_markers: libjpeg_turbo_rs::MarkerCopyMode::All,
         custom_filter: None,
     };
@@ -539,6 +545,7 @@ fn tjunittest_transform_arithmetic_output() {
         arithmetic: true,
         optimize: false,
         restart_interval: 0,
+        restart_in_rows: false,
         copy_markers: libjpeg_turbo_rs::MarkerCopyMode::All,
         custom_filter: None,
     };
@@ -579,6 +586,7 @@ fn tjunittest_transform_progressive_arithmetic_output() {
         arithmetic: true,
         optimize: false,
         restart_interval: 0,
+        restart_in_rows: false,
         copy_markers: libjpeg_turbo_rs::MarkerCopyMode::All,
         custom_filter: None,
     };

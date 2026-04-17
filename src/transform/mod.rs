@@ -98,9 +98,19 @@ pub struct TransformOptions {
     /// Re-encode output with optimized Huffman tables (2-pass).
     /// Corresponds to TJXOPT_OPTIMIZE (libjpeg-turbo 3.x).
     pub optimize: bool,
-    /// Restart interval in MCU rows. 0 = disabled.
-    /// Maps to jpegtran `-restart NB` (blocks) or `-restart N` (rows).
+    /// Restart interval. 0 = disabled.
+    ///
+    /// When `restart_in_rows == false` (default): interpreted as MCU blocks (DRI value),
+    /// matching jpegtran `-restart Nb`.
+    /// When `restart_in_rows == true`: interpreted as MCU rows; the actual DRI value
+    /// is recomputed as `restart_interval * output_mcus_per_row` after applying the
+    /// spatial transform / crop / trim, matching jpegtran `-restart N`.
     pub restart_interval: u16,
+    /// Treat `restart_interval` as MCU rows (true) instead of MCU blocks (false).
+    /// When true, the implementation recomputes the actual DRI based on the output
+    /// MCU grid produced by the transform. Required for parity with jpegtran `-restart N`
+    /// when the output dimensions differ from the source (rotation, crop, trim).
+    pub restart_in_rows: bool,
     /// Marker copy behavior: All (default), None (TJXOPT_COPYNONE), or IccOnly.
     /// See [`MarkerCopyMode`] for details.
     pub copy_markers: MarkerCopyMode,
@@ -125,6 +135,7 @@ impl Default for TransformOptions {
             arithmetic: false,
             optimize: false,
             restart_interval: 0,
+            restart_in_rows: false,
             copy_markers: MarkerCopyMode::All,
             custom_filter: None,
         }
@@ -144,6 +155,7 @@ impl std::fmt::Debug for TransformOptions {
             .field("arithmetic", &self.arithmetic)
             .field("optimize", &self.optimize)
             .field("restart_interval", &self.restart_interval)
+            .field("restart_in_rows", &self.restart_in_rows)
             .field("copy_markers", &self.copy_markers)
             .field(
                 "custom_filter",
