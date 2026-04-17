@@ -308,3 +308,117 @@ fn a6_1_reset_colorspace_clears_rgb_override_for_rgb_input() {
         "reset_colorspace must undo the RGB override"
     );
 }
+
+// === A6-2: Encoder::reset_quant_tables(force_baseline) matches jpeg_default_qtables() ===
+//
+// Contract: after loading custom quantization tables and then calling
+// `reset_quant_tables(force_baseline)`, the encoder must regenerate the
+// standard luminance and chrominance tables scaled by the current quality,
+// matching `Encoder::new(...).quality(q).encode()` byte-for-byte in the
+// DQT portion of the JPEG.
+
+fn extract_dqt_tables(jpeg: &[u8]) -> Vec<(u8, Vec<u16>)> {
+    let mut out: Vec<(u8, Vec<u16>)> = Vec::new();
+    let mut i: usize = 2;
+    while i + 3 < jpeg.len() && jpeg[i] == 0xFF {
+        let code = jpeg[i + 1];
+        if code == 0xDA || code == 0xD9 {
+            break;
+        }
+        let seg_len = u16::from_be_bytes([jpeg[i + 2], jpeg[i + 3]]) as usize;
+        if code == 0xDB {
+            // DQT payload (possibly multiple tables concatenated)
+            let payload = &jpeg[i + 4..i + 2 + seg_len];
+            let mut p: usize = 0;
+            while p < payload.len() {
+                let pq_tq = payload[p];
+                p += 1;
+                let precision = pq_tq >> 4;
+                let tq = pq_tq & 0x0F;
+                let mut tbl: Vec<u16> = Vec::with_capacity(64);
+                if precision == 0 {
+                    for _ in 0..64 {
+                        tbl.push(payload[p] as u16);
+                        p += 1;
+                    }
+                } else {
+                    for _ in 0..64 {
+                        let v = u16::from_be_bytes([payload[p], payload[p + 1]]);
+                        tbl.push(v);
+                        p += 2;
+                    }
+                }
+                out.push((tq, tbl));
+            }
+        }
+        i += 2 + seg_len;
+    }
+    out
+}
+
+#[test]
+fn a6_2_reset_quant_tables_restores_standard_tables_at_quality() {
+    use libjpeg_turbo_rs::Encoder;
+    let width: usize = 32;
+    let height: usize = 32;
+    let quality: u8 = 60; // non-default so scaling is visible
+    let pixels: Vec<u8> = (0..width * height * 3).map(|i| (i % 200) as u8).collect();
+
+    // Reference: default tables at this quality.
+    let jpeg_default = Encoder::new(&pixels, width, height, PixelFormat::Rgb)
+        .quality(quality)
+        .encode()
+        .unwrap();
+
+    // Construct a wildly non-standard custom table set (all 1s for luma,
+    // all 255 for chroma) so it is impossible to confuse with the defaults.
+    let custom_luma: [u16; 64] = [1; 64];
+    let custom_chroma: [u16; 64] = [200; 64];
+
+    // Encoder with custom tables, then reset.
+    let jpeg_after_reset = Encoder::new(&pixels, width, height, PixelFormat::Rgb)
+        .quality(quality)
+        .quant_table(0, custom_luma)
+        .quant_table(1, custom_chroma)
+        .reset_quant_tables(false)
+        .encode()
+        .unwrap();
+
+    let dqt_default = extract_dqt_tables(&jpeg_default);
+    let dqt_after_reset = extract_dqt_tables(&jpeg_after_reset);
+    assert_eq!(
+        dqt_default, dqt_after_reset,
+        "reset_quant_tables must reproduce the default DQT payload at the same quality"
+    );
+}
+
+#[test]
+fn a6_2_reset_quant_tables_force_baseline_clamps_to_255() {
+    use libjpeg_turbo_rs::Encoder;
+    let width: usize = 32;
+    let height: usize = 32;
+    // Use a very low quality: at q=1 the scaled table values should exceed
+    // 255 unless force_baseline is applied.
+    let quality: u8 = 1;
+    let pixels: Vec<u8> = (0..width * height * 3).map(|i| (i % 200) as u8).collect();
+
+    let jpeg = Encoder::new(&pixels, width, height, PixelFormat::Rgb)
+        .quality(quality)
+        .quant_table(0, [1; 64])
+        .quant_table(1, [1; 64])
+        .reset_quant_tables(true)
+        .encode()
+        .unwrap();
+
+    let tables = extract_dqt_tables(&jpeg);
+    assert!(!tables.is_empty(), "DQT markers must be present");
+    for (idx, tbl) in &tables {
+        for (i, &v) in tbl.iter().enumerate() {
+            assert!(
+                v <= 255,
+                "force_baseline=true must clamp table {idx} coeff[{i}] to ≤255, got {v}"
+            );
+            assert!(v >= 1, "quant coefficients must be ≥1");
+        }
+    }
+}

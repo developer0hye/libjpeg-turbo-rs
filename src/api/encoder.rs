@@ -259,11 +259,19 @@ impl<'a> Encoder<'a> {
 
     /// Reset quantization tables to defaults (like `jpeg_default_qtables`).
     ///
-    /// Clears any custom quantization tables. The encoder will generate
-    /// standard luminance/chrominance tables scaled by the quality factor.
-    pub fn reset_quant_tables(mut self) -> Self {
+    /// Clears any custom quantization tables and per-slot quality factors,
+    /// forcing the encoder to regenerate the standard luminance and
+    /// chrominance tables scaled by the current quality factor.
+    ///
+    /// `force_baseline` mirrors libjpeg's argument: when `true`, all
+    /// quantization coefficients are clamped to 1..=255 so the output
+    /// conforms to baseline JPEG (SOF0) decoder requirements. When
+    /// `false`, the extended range (up to 32767) is allowed, which is
+    /// useful at very low qualities.
+    pub fn reset_quant_tables(mut self, force_baseline: bool) -> Self {
         self.custom_quant_tables = [None; 4];
         self.quality_factors = None;
+        self.force_baseline = force_baseline;
         self
     }
 
