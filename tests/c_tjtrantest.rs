@@ -157,10 +157,11 @@ fn try_rust_opts(
     restart_interval_mcus: u16,
     trim: bool,
 ) -> Option<TransformOptions> {
-    // Progressive + crop on subsampled images: crop boundary alignment
-    // differences with C jpegtran on non-iMCU-aligned crops.
+    // Progressive + crop: the last_row_height fix handles the non-crop case,
+    // but cropped progressive output has additional block-layout differences
+    // with C jpegtran that need deeper investigation.
     if progressive && crop.is_some() {
-        eprintln!("SKIP (API gap): progressive + crop not yet byte-identical");
+        eprintln!("SKIP: progressive + crop byte-parity requires block-layout investigation");
         return None;
     }
     let restart_interval: u16 = restart_interval_mcus;
