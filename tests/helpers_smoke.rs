@@ -31,6 +31,26 @@ fn helpers_require_c_tool_err_for_missing() {
 }
 
 #[test]
+fn helpers_require_c_tool_macro_skips_locally() {
+    // Locally (no `CI` env var set to a truthy value), the `require_c_tool!`
+    // macro must print `SKIP: ... not found` to stderr and `return` from the
+    // enclosing function rather than panic when the tool cannot be located.
+    //
+    // On CI the macro panics, which would cause this test to fail — skip
+    // this test on CI because we cannot safely exercise the skip branch
+    // there without tampering with process-global env vars (which would
+    // race with other parallel tests).
+    if helpers::is_ci() {
+        eprintln!("SKIP: macro local-skip branch cannot be exercised on CI");
+        return;
+    }
+    let _path: std::path::PathBuf = require_c_tool!("definitely_not_a_real_tool_xyz_42");
+    // The macro must have early-returned via its SKIP path; reaching this
+    // line would mean the macro did not return, which is a bug.
+    unreachable!("require_c_tool! must have returned via SKIP path");
+}
+
+#[test]
 fn helpers_temp_file_lifecycle() {
     let tf = helpers::TempFile::new("smoke_test.txt");
     tf.write_bytes(b"hello");

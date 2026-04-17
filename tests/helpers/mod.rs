@@ -56,6 +56,46 @@ pub fn rdjpgcom_path() -> Option<PathBuf> {
 pub mod c_tools;
 pub use c_tools::{is_ci, require_c_tool};
 
+/// Require a C libjpeg-turbo tool inside a `#[test]` function.
+///
+/// Behavior:
+/// * **CI** (`CI` env var set to a truthy value) — panics if the tool is
+///   missing, failing the test.  This prevents silent skips from hiding
+///   missing coverage on runners where the tool should always be
+///   installed.
+/// * **Local** (no `CI`) — prints `SKIP: <name> not found` to stderr and
+///   `return`s from the enclosing function, mirroring the previous manual
+///   pattern so developer machines without the tool continue to pass.
+///
+/// The macro expands to a `PathBuf` expression.  Use it inside a `#[test]`:
+///
+/// ```ignore
+/// mod helpers;
+///
+/// #[test]
+/// fn my_cross_check() {
+///     let djpeg: std::path::PathBuf = require_c_tool!("djpeg");
+///     // ... test body uses djpeg ...
+/// }
+/// ```
+#[macro_export]
+macro_rules! require_c_tool {
+    ($name:expr) => {{
+        let __tool_name: &str = $name;
+        match $crate::helpers::require_c_tool(__tool_name) {
+            Ok(path) => path,
+            Err(err) => {
+                if $crate::helpers::is_ci() {
+                    panic!("CI requires C tool '{}': {}", __tool_name, err);
+                } else {
+                    eprintln!("SKIP: {} not found", __tool_name);
+                    return;
+                }
+            }
+        }
+    }};
+}
+
 // ===========================================================================
 // Temp file management
 // ===========================================================================
