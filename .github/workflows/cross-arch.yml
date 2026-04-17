@@ -61,3 +61,27 @@ jobs:
       - name: Run full test suite on SSE2-only fallback
         run: cargo test --all-features
         timeout-minutes: 45
+
+  # WASM SIMD128 smoke — runs on every PR. Build-only for `wasm-pack
+  # build --release --target web` is the baseline guarantee; the
+  # `wasm-pack test --node --release` step adds runtime assertions when
+  # the WASM test harness is available.
+  wasm-simd128-smoke:
+    name: WASM SIMD128 smoke
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+      - name: Install wasm-pack
+        run: cargo install wasm-pack --locked
+      - name: Build WASM crate (web target, release)
+        run: cd crates/libjpeg-turbo-rs-wasm && wasm-pack build --release --target web
+        timeout-minutes: 20
+      - name: Run wasm-bindgen tests on Node (release)
+        run: cd crates/libjpeg-turbo-rs-wasm && wasm-pack test --node --release
+        timeout-minutes: 30
