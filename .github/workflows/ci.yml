@@ -59,6 +59,13 @@ jobs:
           submodules: recursive
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+      - name: Install libjpeg-turbo CLI tools
+        run: sudo apt-get update && sudo apt-get install -y libjpeg-turbo-progs
+      - name: Verify C tools on PATH
+        run: |
+          djpeg -version
+          cjpeg -version
+          jpegtran -version
       - run: cargo test --tests
         timeout-minutes: 30
 
