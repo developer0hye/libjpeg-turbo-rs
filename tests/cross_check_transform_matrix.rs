@@ -86,20 +86,8 @@ fn assert_transform_pixel_identical(
 
 #[test]
 fn c_xval_transform_all_ops_all_subsamplings() {
-    let jpegtran = match helpers::jpegtran_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: jpegtran not found");
-            return;
-        }
-    };
-    let djpeg = match helpers::djpeg_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: djpeg not found");
-            return;
-        }
-    };
+    let jpegtran = require_c_tool!("jpegtran");
+    let djpeg = require_c_tool!("djpeg");
 
     let w: usize = 48;
     let h: usize = 48;
@@ -129,20 +117,8 @@ fn c_xval_transform_all_ops_all_subsamplings() {
 
 #[test]
 fn c_xval_subsampling_swap_rotational() {
-    let jpegtran = match helpers::jpegtran_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: jpegtran not found");
-            return;
-        }
-    };
-    let djpeg = match helpers::djpeg_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: djpeg not found");
-            return;
-        }
-    };
+    let jpegtran = require_c_tool!("jpegtran");
+    let djpeg = require_c_tool!("djpeg");
 
     let swap_pairs: &[(Subsampling, &str)] =
         &[(Subsampling::S422, "422"), (Subsampling::S411, "411")];
@@ -182,13 +158,7 @@ fn c_xval_subsampling_swap_rotational() {
 
 #[test]
 fn c_xval_transform_grayscale_option() {
-    let jpegtran = match helpers::jpegtran_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: jpegtran not found");
-            return;
-        }
-    };
+    let jpegtran = require_c_tool!("jpegtran");
 
     let w: usize = 48;
     let h: usize = 48;
@@ -234,20 +204,8 @@ fn c_xval_transform_grayscale_option() {
 
 #[test]
 fn c_xval_transform_progressive_option() {
-    let jpegtran = match helpers::jpegtran_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: jpegtran not found");
-            return;
-        }
-    };
-    let djpeg = match helpers::djpeg_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: djpeg not found");
-            return;
-        }
-    };
+    let jpegtran = require_c_tool!("jpegtran");
+    let djpeg = require_c_tool!("djpeg");
 
     let ops_to_test: &[(TransformOp, &str)] = &[
         (TransformOp::None, "none"),
@@ -283,20 +241,8 @@ fn c_xval_transform_progressive_option() {
 
 #[test]
 fn c_xval_transform_optimize_option() {
-    let jpegtran = match helpers::jpegtran_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: jpegtran not found");
-            return;
-        }
-    };
-    let djpeg = match helpers::djpeg_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: djpeg not found");
-            return;
-        }
-    };
+    let jpegtran = require_c_tool!("jpegtran");
+    let djpeg = require_c_tool!("djpeg");
 
     let jpeg: Vec<u8> = make_test_jpeg(48, 48, Subsampling::S444);
 
@@ -328,20 +274,8 @@ fn c_xval_transform_optimize_option() {
 
 #[test]
 fn c_xval_transform_crop_regions() {
-    let jpegtran = match helpers::jpegtran_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: jpegtran not found");
-            return;
-        }
-    };
-    let djpeg = match helpers::djpeg_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: djpeg not found");
-            return;
-        }
-    };
+    let jpegtran = require_c_tool!("jpegtran");
+    let djpeg = require_c_tool!("djpeg");
 
     let w: usize = 128;
     let h: usize = 96;
@@ -390,20 +324,8 @@ fn c_xval_transform_crop_regions() {
 
 #[test]
 fn c_xval_transform_with_crop() {
-    let jpegtran = match helpers::jpegtran_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: jpegtran not found");
-            return;
-        }
-    };
-    let djpeg = match helpers::djpeg_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: djpeg not found");
-            return;
-        }
-    };
+    let jpegtran = require_c_tool!("jpegtran");
+    let djpeg = require_c_tool!("djpeg");
 
     let w: usize = 128;
     let h: usize = 96;

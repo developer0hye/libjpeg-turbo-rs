@@ -124,13 +124,7 @@ fn verify_rgb565_quantization(rgb: &[u8], rgb565: &[u8], width: usize, height: u
 
 #[test]
 fn c_xval_rgb565_decode_all_subsamplings() {
-    let djpeg = match helpers::djpeg_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: djpeg not found");
-            return;
-        }
-    };
+    let djpeg = require_c_tool!("djpeg");
 
     for &(subsamp, name) in ALL_SUBSAMPLINGS {
         let jpeg: Vec<u8> = make_test_jpeg(TEST_WIDTH, TEST_HEIGHT, subsamp);
@@ -151,13 +145,7 @@ fn c_xval_rgb565_decode_all_subsamplings() {
 
 #[test]
 fn c_xval_rgb565_odd_dimensions() {
-    let djpeg = match helpers::djpeg_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: djpeg not found");
-            return;
-        }
-    };
+    let djpeg = require_c_tool!("djpeg");
 
     // Odd dimensions matching tjunittest.c: 35x39, 39x41, 41x35
     let odd_dims: &[(usize, usize)] = &[(35, 39), (39, 41), (41, 35)];
@@ -192,13 +180,7 @@ fn c_xval_rgb565_odd_dimensions() {
 
 #[test]
 fn c_xval_rgb565_dithered_subsampled() {
-    let djpeg = match helpers::djpeg_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: djpeg not found");
-            return;
-        }
-    };
+    let djpeg = require_c_tool!("djpeg");
 
     let subsamplings: &[(Subsampling, &str)] = &[
         (Subsampling::S420, "420"),
@@ -233,13 +215,7 @@ fn c_xval_rgb565_dithered_subsampled() {
 
 #[test]
 fn c_xval_fast_upsample_all_subsamplings() {
-    let djpeg = match helpers::djpeg_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: djpeg not found");
-            return;
-        }
-    };
+    let djpeg = require_c_tool!("djpeg");
 
     for &(subsamp, name) in ALL_SUBSAMPLINGS {
         let jpeg: Vec<u8> = make_test_jpeg(TEST_WIDTH, TEST_HEIGHT, subsamp);
@@ -281,13 +257,7 @@ fn c_xval_fast_upsample_all_subsamplings() {
 
 #[test]
 fn c_xval_fast_upsample_odd_dimensions() {
-    let djpeg = match helpers::djpeg_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: djpeg not found");
-            return;
-        }
-    };
+    let djpeg = require_c_tool!("djpeg");
 
     let odd_dims: &[(usize, usize)] = &[(35, 39), (39, 41), (41, 35)];
     let subsampled: &[(Subsampling, &str)] = &[
@@ -344,13 +314,7 @@ fn c_xval_fast_upsample_odd_dimensions() {
 
 #[test]
 fn c_xval_merged_upsample_vs_c_djpeg() {
-    let djpeg = match helpers::djpeg_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: djpeg not found");
-            return;
-        }
-    };
+    let djpeg = require_c_tool!("djpeg");
 
     for &(subsamp, name) in MERGED_SUBSAMPLINGS {
         let jpeg: Vec<u8> = make_test_jpeg(TEST_WIDTH, TEST_HEIGHT, subsamp);
@@ -393,13 +357,7 @@ fn c_xval_merged_upsample_vs_c_djpeg() {
 
 #[test]
 fn c_xval_merged_upsample_odd_dimensions() {
-    let djpeg = match helpers::djpeg_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: djpeg not found");
-            return;
-        }
-    };
+    let djpeg = require_c_tool!("djpeg");
 
     let odd_dims: &[(usize, usize)] = &[(35, 39), (39, 41), (41, 35), (31, 33), (63, 127)];
 
@@ -489,13 +447,7 @@ fn merged_equals_fast_upsample_all_eligible() {
 
 #[test]
 fn c_xval_fancy_upsample_all_subsamplings() {
-    let djpeg = match helpers::djpeg_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: djpeg not found");
-            return;
-        }
-    };
+    let djpeg = require_c_tool!("djpeg");
 
     for &(subsamp, name) in ALL_SUBSAMPLINGS {
         let jpeg: Vec<u8> = make_test_jpeg(TEST_WIDTH, TEST_HEIGHT, subsamp);

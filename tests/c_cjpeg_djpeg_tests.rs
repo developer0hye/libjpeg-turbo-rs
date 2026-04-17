@@ -82,13 +82,7 @@ fn parse_scan_script(path: &Path) -> Vec<ScanScript> {
 #[test]
 // Previously ignored — fixed by dummy blocks + disabling fancy prefilter
 fn c_cjpeg_rgb_islow() {
-    let cjpeg = match helpers::cjpeg_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: cjpeg not found");
-            return;
-        }
-    };
+    let cjpeg = require_c_tool!("cjpeg");
     let imgdir = testimages();
     let src = imgdir.join("testorig.ppm");
     if !src.exists() {
@@ -135,13 +129,7 @@ fn c_cjpeg_rgb_islow() {
 /// Note: compress_optimized always uses islow DCT, so we test with -dct int.
 #[test]
 fn c_cjpeg_422_islow_opt() {
-    let cjpeg = match helpers::cjpeg_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: cjpeg not found");
-            return;
-        }
-    };
+    let cjpeg = require_c_tool!("cjpeg");
     let imgdir = testimages();
     let src = imgdir.join("testorig.ppm");
     if !src.exists() {
@@ -180,13 +168,7 @@ fn c_cjpeg_422_islow_opt() {
 #[test]
 // Previously ignored — fixed by dummy blocks + disabling fancy prefilter
 fn c_cjpeg_440_islow() {
-    let cjpeg = match helpers::cjpeg_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: cjpeg not found");
-            return;
-        }
-    };
+    let cjpeg = require_c_tool!("cjpeg");
     let imgdir = testimages();
     let src = imgdir.join("testorig.ppm");
     if !src.exists() {
@@ -224,13 +206,7 @@ fn c_cjpeg_440_islow() {
 /// -sample 2x2 -quality 100 -dct fast -scans test.scan  testorig.ppm → JPEG
 #[test]
 fn c_cjpeg_420_q100_ifast_prog() {
-    let cjpeg = match helpers::cjpeg_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: cjpeg not found");
-            return;
-        }
-    };
+    let cjpeg = require_c_tool!("cjpeg");
     let imgdir = testimages();
     let src = imgdir.join("testorig.ppm");
     let scan = imgdir.join("test.scan");
@@ -289,13 +265,7 @@ fn c_cjpeg_420_q100_ifast_prog() {
 #[test]
 // Previously ignored — fixed by skipping fancy prefilter for grayscale + SIMD Y extraction
 fn c_cjpeg_gray_islow() {
-    let cjpeg = match helpers::cjpeg_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: cjpeg not found");
-            return;
-        }
-    };
+    let cjpeg = require_c_tool!("cjpeg");
     let imgdir = testimages();
     let src = imgdir.join("testorig.ppm");
     if !src.exists() {
@@ -328,13 +298,7 @@ fn c_cjpeg_gray_islow() {
 /// -sample 2x2 -smooth 1 -dct int -opt  testorig.ppm → JPEG with smoothing
 #[test]
 fn c_cjpeg_420s_islow_opt() {
-    let cjpeg = match helpers::cjpeg_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: cjpeg not found");
-            return;
-        }
-    };
+    let cjpeg = require_c_tool!("cjpeg");
     let imgdir = testimages();
     let src = imgdir.join("testorig.ppm");
     if !src.exists() {
@@ -374,13 +338,7 @@ fn c_cjpeg_420s_islow_opt() {
 /// -lossless 4 -restart 1 ... (all non-lossless args should be ignored)
 #[test]
 fn c_cjpeg_lossless() {
-    let cjpeg = match helpers::cjpeg_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: cjpeg not found");
-            return;
-        }
-    };
+    let cjpeg = require_c_tool!("cjpeg");
     let imgdir = testimages();
     let src = imgdir.join("testorig.ppm");
     if !src.exists() {
@@ -450,20 +408,8 @@ fn c_cjpeg_lossless() {
 #[test]
 // Previously ignored — fixed by adding RGB colorspace detection in 3-component decode path
 fn c_djpeg_rgb_islow() {
-    let cjpeg = match helpers::cjpeg_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: cjpeg not found");
-            return;
-        }
-    };
-    let djpeg = match helpers::djpeg_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: djpeg not found");
-            return;
-        }
-    };
+    let cjpeg = require_c_tool!("cjpeg");
+    let djpeg = require_c_tool!("djpeg");
     let imgdir = testimages();
     let src = imgdir.join("testorig.ppm");
     if !src.exists() {
@@ -505,20 +451,8 @@ fn c_djpeg_rgb_islow() {
 #[test]
 // Previously ignored — fixed by using set_fast_dct(true) to match C djpeg -dct fast
 fn c_djpeg_422_ifast() {
-    let cjpeg = match helpers::cjpeg_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: cjpeg not found");
-            return;
-        }
-    };
-    let djpeg = match helpers::djpeg_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: djpeg not found");
-            return;
-        }
-    };
+    let cjpeg = require_c_tool!("cjpeg");
+    let djpeg = require_c_tool!("djpeg");
     let imgdir = testimages();
     let src = imgdir.join("testorig.ppm");
     if !src.exists() {
@@ -558,20 +492,8 @@ fn c_djpeg_422_ifast() {
 /// CMakeLists line 1581: djpeg 440-islow
 #[test]
 fn c_djpeg_440_islow() {
-    let cjpeg = match helpers::cjpeg_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: cjpeg not found");
-            return;
-        }
-    };
-    let djpeg = match helpers::djpeg_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: djpeg not found");
-            return;
-        }
-    };
+    let cjpeg = require_c_tool!("cjpeg");
+    let djpeg = require_c_tool!("djpeg");
     let imgdir = testimages();
     let src = imgdir.join("testorig.ppm");
     if !src.exists() {
@@ -606,20 +528,8 @@ fn c_djpeg_440_islow() {
 #[test]
 // Previously ignored — fixed by using set_fast_dct(true) to match C djpeg -dct fast -nosmooth
 fn c_djpeg_422m_ifast() {
-    let cjpeg = match helpers::cjpeg_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: cjpeg not found");
-            return;
-        }
-    };
-    let djpeg = match helpers::djpeg_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: djpeg not found");
-            return;
-        }
-    };
+    let cjpeg = require_c_tool!("cjpeg");
+    let djpeg = require_c_tool!("djpeg");
     let imgdir = testimages();
     let src = imgdir.join("testorig.ppm");
     if !src.exists() {
@@ -658,20 +568,8 @@ fn c_djpeg_422m_ifast() {
 /// CMakeLists line 1625: djpeg gray-islow
 #[test]
 fn c_djpeg_gray_islow() {
-    let cjpeg = match helpers::cjpeg_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: cjpeg not found");
-            return;
-        }
-    };
-    let djpeg = match helpers::djpeg_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: djpeg not found");
-            return;
-        }
-    };
+    let cjpeg = require_c_tool!("cjpeg");
+    let djpeg = require_c_tool!("djpeg");
     let imgdir = testimages();
     let src = imgdir.join("testorig.ppm");
     if !src.exists() {
@@ -713,20 +611,8 @@ fn c_djpeg_gray_islow() {
 /// CMakeLists line 1630: djpeg gray-islow-rgb (gray JPEG → RGB output)
 #[test]
 fn c_djpeg_gray_islow_rgb() {
-    let cjpeg = match helpers::cjpeg_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: cjpeg not found");
-            return;
-        }
-    };
-    let djpeg = match helpers::djpeg_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: djpeg not found");
-            return;
-        }
-    };
+    let cjpeg = require_c_tool!("cjpeg");
+    let djpeg = require_c_tool!("djpeg");
     let imgdir = testimages();
     let src = imgdir.join("testorig.ppm");
     if !src.exists() {
@@ -765,13 +651,7 @@ fn c_djpeg_gray_islow_rgb() {
 /// Scale factors 7/8 through 1/8 are byte-identical with C djpeg.
 #[test]
 fn c_djpeg_420m_islow_scaled_down() {
-    let djpeg = match helpers::djpeg_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: djpeg not found");
-            return;
-        }
-    };
+    let djpeg = require_c_tool!("djpeg");
     let imgdir = testimages();
     let jpeg_path = imgdir.join("testorig.jpg");
     if !jpeg_path.exists() {
@@ -817,13 +697,7 @@ fn c_djpeg_420m_islow_scaled_down() {
 #[test]
 // Previously ignored — fixed by adding set_fast_upsample(true) to match C djpeg -nosmooth
 fn c_djpeg_420m_islow_scaled_up() {
-    let djpeg = match helpers::djpeg_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: djpeg not found");
-            return;
-        }
-    };
+    let djpeg = require_c_tool!("djpeg");
     let imgdir = testimages();
     let jpeg_path = imgdir.join("testorig.jpg");
     if !jpeg_path.exists() {
@@ -874,13 +748,7 @@ fn c_djpeg_420m_islow_scaled_up() {
 /// -dct int -skip 15,31  testorig.jpg
 #[test]
 fn c_djpeg_420_islow_skip15_31() {
-    let djpeg = match helpers::djpeg_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: djpeg not found");
-            return;
-        }
-    };
+    let djpeg = require_c_tool!("djpeg");
     let imgdir = testimages();
     let src_jpg = imgdir.join("testorig.jpg");
     if !src_jpg.exists() {
@@ -950,20 +818,8 @@ fn c_djpeg_420_islow_skip15_31() {
 /// CMakeLists line 1809: djpeg 444-islow-skip1_6
 #[test]
 fn c_djpeg_444_islow_skip1_6() {
-    let cjpeg = match helpers::cjpeg_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: cjpeg not found");
-            return;
-        }
-    };
-    let djpeg = match helpers::djpeg_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: djpeg not found");
-            return;
-        }
-    };
+    let cjpeg = require_c_tool!("cjpeg");
+    let djpeg = require_c_tool!("djpeg");
     let imgdir = testimages();
     let src_ppm = imgdir.join("testorig.ppm");
     if !src_ppm.exists() {
@@ -1048,20 +904,8 @@ fn c_djpeg_444_islow_skip1_6() {
 #[test]
 // Fixed: crop-aware upsampling matches C jpeg_crop_scanline (issue #164)
 fn c_djpeg_420_islow_prog_crop() {
-    let cjpeg = match helpers::cjpeg_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: cjpeg not found");
-            return;
-        }
-    };
-    let djpeg = match helpers::djpeg_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: djpeg not found");
-            return;
-        }
-    };
+    let cjpeg = require_c_tool!("cjpeg");
+    let djpeg = require_c_tool!("djpeg");
     let imgdir = testimages();
     let src = imgdir.join("testorig.ppm");
     if !src.exists() {
@@ -1103,20 +947,8 @@ fn c_djpeg_420_islow_prog_crop() {
 #[test]
 // Previously ignored — fixed by adding DCTSIZE boundary snapping in decompress_cropped
 fn c_djpeg_444_islow_prog_crop() {
-    let cjpeg = match helpers::cjpeg_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: cjpeg not found");
-            return;
-        }
-    };
-    let djpeg = match helpers::djpeg_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: djpeg not found");
-            return;
-        }
-    };
+    let cjpeg = require_c_tool!("cjpeg");
+    let djpeg = require_c_tool!("djpeg");
     let imgdir = testimages();
     let src = imgdir.join("testorig.ppm");
     if !src.exists() {
@@ -1164,20 +996,8 @@ fn c_djpeg_444_islow_prog_crop() {
 /// -copy all -icc test3.icc  (inject ICC into existing JPEG)
 #[test]
 fn c_jpegtran_icc() {
-    let cjpeg = match helpers::cjpeg_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: cjpeg not found");
-            return;
-        }
-    };
-    let jpegtran = match helpers::jpegtran_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: jpegtran not found");
-            return;
-        }
-    };
+    let cjpeg = require_c_tool!("cjpeg");
+    let jpegtran = require_c_tool!("jpegtran");
     let imgdir = testimages();
     let src = imgdir.join("testorig.ppm");
     let icc_path = imgdir.join("test3.icc");
@@ -1215,13 +1035,7 @@ fn c_jpegtran_icc() {
 #[test]
 // Previously ignored — fixed by DAC marker interleaving + SOF height + padded planes
 fn c_cjpeg_420_islow_ari() {
-    let cjpeg = match helpers::cjpeg_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: cjpeg not found");
-            return;
-        }
-    };
+    let cjpeg = require_c_tool!("cjpeg");
     let imgdir = testimages();
     let src = imgdir.join("testorig.ppm");
     if !src.exists() {
@@ -1253,13 +1067,7 @@ fn c_cjpeg_420_islow_ari() {
 /// -crop 120x90+20+50 -transpose -perfect  testorig.jpg
 #[test]
 fn c_jpegtran_crop_transpose() {
-    let jpegtran = match helpers::jpegtran_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: jpegtran not found");
-            return;
-        }
-    };
+    let jpegtran = require_c_tool!("jpegtran");
     let imgdir = testimages();
     let jpeg_path = imgdir.join("testorig.jpg");
     if !jpeg_path.exists() {
@@ -1310,13 +1118,7 @@ fn c_jpegtran_crop_transpose() {
 /// -arithmetic  testimgint.jpg → arithmetic JPEG
 #[test]
 fn c_jpegtran_420_islow_ari() {
-    let jpegtran = match helpers::jpegtran_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: jpegtran not found");
-            return;
-        }
-    };
+    let jpegtran = require_c_tool!("jpegtran");
     let imgdir = testimages();
     let jpeg_path = imgdir.join("testimgint.jpg");
     if !jpeg_path.exists() {
@@ -1355,13 +1157,7 @@ fn c_jpegtran_420_islow_ari() {
 /// (no args)  testimgari.jpg → baseline JPEG
 #[test]
 fn c_jpegtran_420_islow_from_ari() {
-    let jpegtran = match helpers::jpegtran_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: jpegtran not found");
-            return;
-        }
-    };
+    let jpegtran = require_c_tool!("jpegtran");
     let imgdir = testimages();
     let jpeg_path = imgdir.join("testimgari.jpg");
     if !jpeg_path.exists() {

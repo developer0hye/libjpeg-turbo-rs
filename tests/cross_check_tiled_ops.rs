@@ -58,13 +58,7 @@ fn extract_tile(
 
 #[test]
 fn c_xval_tiled_encode_decode() {
-    let djpeg = match helpers::djpeg_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: djpeg not found");
-            return;
-        }
-    };
+    let djpeg = require_c_tool!("djpeg");
 
     let img_w: usize = 128;
     let img_h: usize = 128;
@@ -216,13 +210,7 @@ fn tiled_decode_consistency() {
 
 #[test]
 fn c_xval_tiled_non_mcu_aligned() {
-    let djpeg = match helpers::djpeg_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: djpeg not found");
-            return;
-        }
-    };
+    let djpeg = require_c_tool!("djpeg");
 
     // Test odd tile sizes that are NOT MCU-aligned
     let odd_sizes: &[(usize, usize)] = &[(7, 7), (9, 15), (15, 9), (17, 23), (31, 33)];

@@ -111,13 +111,7 @@ fn decode_scaled_c(
 
 #[test]
 fn c_xval_scaling_all_factors_all_subsamplings() {
-    let djpeg = match helpers::djpeg_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: djpeg not found");
-            return;
-        }
-    };
+    let djpeg = require_c_tool!("djpeg");
 
     let w: usize = 48;
     let h: usize = 48;
@@ -148,13 +142,7 @@ fn c_xval_scaling_all_factors_all_subsamplings() {
 
 #[test]
 fn c_xval_scaling_odd_dimensions() {
-    let djpeg = match helpers::djpeg_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: djpeg not found");
-            return;
-        }
-    };
+    let djpeg = require_c_tool!("djpeg");
 
     let odd_dims: &[(usize, usize)] = &[(35, 39), (39, 41), (41, 35)];
 
@@ -186,13 +174,7 @@ fn c_xval_scaling_odd_dimensions() {
 
 #[test]
 fn c_xval_scaling_fixture_images() {
-    let djpeg = match helpers::djpeg_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: djpeg not found");
-            return;
-        }
-    };
+    let djpeg = require_c_tool!("djpeg");
 
     let fixtures: &[(&str, &str)] = &[
         ("tests/fixtures/photo_320x240_420.jpg", "photo_420"),

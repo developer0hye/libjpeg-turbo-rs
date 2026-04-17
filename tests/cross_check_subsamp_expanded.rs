@@ -57,13 +57,7 @@ const FORMATS_4SAMPLE: &[(PixelFormat, &str)] = &[
 
 #[test]
 fn c_xval_440_411_441_3sample_formats() {
-    let djpeg = match helpers::djpeg_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: djpeg not found");
-            return;
-        }
-    };
+    let djpeg = require_c_tool!("djpeg");
 
     for &(subsamp, sname) in EXTENDED_SUBSAMPLINGS {
         for &(w, h) in TJUNIT_DIMS {
@@ -95,13 +89,7 @@ fn c_xval_440_411_441_3sample_formats() {
 
 #[test]
 fn c_xval_440_411_441_4sample_formats() {
-    let djpeg = match helpers::djpeg_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: djpeg not found");
-            return;
-        }
-    };
+    let djpeg = require_c_tool!("djpeg");
 
     for &(subsamp, sname) in EXTENDED_SUBSAMPLINGS {
         for &(w, h) in TJUNIT_DIMS {
@@ -133,13 +121,7 @@ fn c_xval_440_411_441_4sample_formats() {
 
 #[test]
 fn c_xval_bottom_up_all_subsamplings() {
-    let djpeg = match helpers::djpeg_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: djpeg not found");
-            return;
-        }
-    };
+    let djpeg = require_c_tool!("djpeg");
 
     for &(subsamp, sname) in ALL_COLOR_SUBSAMPLINGS {
         let w: usize = 48;
@@ -267,13 +249,7 @@ fn lossless_roundtrip_consistency() {
 
 #[test]
 fn c_xval_yuv_440_411_441() {
-    let djpeg = match helpers::djpeg_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: djpeg not found");
-            return;
-        }
-    };
+    let djpeg = require_c_tool!("djpeg");
 
     let w: usize = 48;
     let h: usize = 48;
