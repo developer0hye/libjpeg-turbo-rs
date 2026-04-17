@@ -10,6 +10,8 @@
 
 #![allow(dead_code)]
 
+pub mod measure;
+
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::Command;
