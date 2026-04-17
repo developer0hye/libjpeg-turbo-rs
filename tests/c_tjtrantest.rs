@@ -154,33 +154,21 @@ fn try_rust_opts(
     grayscale: bool,
     optimize: bool,
     progressive: bool,
-    restart_interval_mcus: u16,
+    restart_interval: u16,
+    restart_in_rows: bool,
     trim: bool,
 ) -> Option<TransformOptions> {
     // Progressive + restart: Rust does not yet emit RST markers in progressive
     // scans, so output is byte-different from C jpegtran (pixel-identical).
     // The progressive transform code clears restart_interval to avoid corrupt
     // output from declaring DRI without emitting RST markers.
-    if progressive && restart_interval_mcus > 0 {
+    if progressive && restart_interval > 0 {
         eprintln!(
             "SKIP: progressive + restart — RST emission in progressive scans not yet implemented"
         );
         return None;
     }
-    // Restart + (trim | crop | dimension-swapping transform): when the output
-    // MCU grid differs from the source MCU grid, the source-derived
-    // restart_interval no longer matches what C jpegtran emits (C recomputes
-    // -restart based on output dimensions). Decoded pixels match; only byte
-    // parity differs. Affected combos: trim, crop, rot90/rot270/transpose/transverse.
-    let swaps_dims = matches!(
-        op,
-        TransformOp::Rot90 | TransformOp::Rot270 | TransformOp::Transpose | TransformOp::Transverse
-    );
-    if restart_interval_mcus > 0 && (trim || crop.is_some() || swaps_dims) {
-        eprintln!("SKIP: restart + (trim|crop|dim-swap) — output-aware RI recomputation not yet implemented");
-        return None;
-    }
-    let restart_interval: u16 = restart_interval_mcus;
+    let _ = op;
 
     Some(TransformOptions {
         op,
@@ -191,6 +179,7 @@ fn try_rust_opts(
         progressive,
         arithmetic,
         restart_interval,
+        restart_in_rows,
         copy_markers: copy_mode,
         ..TransformOptions::default()
     })
@@ -284,23 +273,16 @@ fn run_one_combo(
     trim: bool,
     label: &str,
 ) -> bool {
-    // Compute restart interval in MCUs from the RestartArg variant.
-    let restart_interval_mcus: u16 = match restart {
-        RestartArg::None => 0,
+    // Compute restart interval and row-mode flag from the RestartArg variant.
+    // `-restart N` (rows) → restart_in_rows=true, value=N.  The implementation
+    // recomputes the actual DRI from output dimensions.
+    // `-restart Nb` (blocks) → restart_in_rows=false, value=N.  Used as DRI directly.
+    let (restart_interval_value, restart_in_rows): (u16, bool) = match restart {
+        RestartArg::None => (0, false),
         #[cfg(feature = "full-c-parity")]
-        RestartArg::WithIcc => {
-            // `-restart 1` = 1 MCU row = mcus_x MCUs
-            let coeffs = libjpeg_turbo_rs::read_coefficients(source_jpeg).unwrap();
-            let max_h: usize = coeffs
-                .components
-                .iter()
-                .map(|c| c.h_sampling as usize)
-                .max()
-                .unwrap_or(1);
-            (coeffs.width as usize).div_ceil(max_h * 8) as u16
-        }
+        RestartArg::WithIcc => (1, true), // `-restart 1`
         #[cfg(feature = "full-c-parity")]
-        RestartArg::Bits => 1, // `-restart 1b` = every 1 MCU
+        RestartArg::Bits => (1, false), // `-restart 1b`
     };
 
     let rust_opts: TransformOptions = match try_rust_opts(
@@ -311,7 +293,8 @@ fn run_one_combo(
         grayscale,
         optimize,
         progressive,
-        restart_interval_mcus,
+        restart_interval_value,
+        restart_in_rows,
         trim,
     ) {
         Some(o) => o,
