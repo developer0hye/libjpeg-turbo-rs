@@ -385,8 +385,10 @@ fn generate_seeds() {
         fan_out_write(name, &bytes, corpus_base, DECODER_TARGETS);
     }
 
-    // fuzz_transform-specific inputs: a good JPEG wrapped with junk bytes, so
-    // the marker scanner exercises its skip paths.
+    // fuzz_transform-specific inputs: JPEGs wrapped with junk bytes, JPEGs
+    // with scrambled marker segments, and JPEGs whose DHT/DQT headers have
+    // unusual but legal lengths. All exercise the marker scanner and the
+    // coefficient reader without relying on random mutation.
     if let Some(base_jpeg) = encode_seed(
         Content::SyntheticPhoto,
         SubsampLabel::S420,
@@ -410,6 +412,99 @@ fn generate_seeds() {
             corpus_base,
             &["fuzz_transform"],
         );
+
+        // Stuffed 0xFF bytes between SOI and next marker exercise the marker
+        // scanner's fill-byte skip path.
+        let mut fill_stuffed: Vec<u8> = vec![0xFF, 0xD8];
+        fill_stuffed.extend(std::iter::repeat(0xFF).take(8));
+        fill_stuffed.extend_from_slice(&base_jpeg[2..]);
+        fan_out_write(
+            "transform_fill_stuffed.bin",
+            &fill_stuffed,
+            corpus_base,
+            &["fuzz_transform"],
+        );
+
+        // Extra APP14 Adobe header prepended — covers the Adobe colorspace
+        // heuristic path.
+        let app14_adobe: [u8; 16] = [
+            0xFF, 0xEE, 0x00, 0x0E, b'A', b'd', b'o', b'b', b'e', 0x00, 0x64, 0x80, 0x00, 0x80,
+            0x00, 0x00,
+        ];
+        let mut adobe_head: Vec<u8> = vec![0xFF, 0xD8];
+        adobe_head.extend_from_slice(&app14_adobe);
+        adobe_head.extend_from_slice(&base_jpeg[2..]);
+        fan_out_write(
+            "transform_app14_adobe.bin",
+            &adobe_head,
+            corpus_base,
+            &["fuzz_transform"],
+        );
+    }
+
+    // fuzz_progressive_decoder-specific seeds: progressive JPEGs that have
+    // been truncated mid-scan so the decoder exercises its partial-input
+    // handling paths. Only available when we produced a progressive seed.
+    if let Some(prog_jpeg) = encode_seed(
+        Content::SyntheticPhoto,
+        SubsampLabel::S420,
+        75,
+        Entropy::Progressive,
+    ) {
+        // Keep only the first ~75% of bytes — typically cuts off mid-scan.
+        let cut: usize = (prog_jpeg.len() * 3) / 4;
+        let truncated_mid: Vec<u8> = prog_jpeg[..cut].to_vec();
+        fan_out_write(
+            "progressive_truncated_mid.bin",
+            &truncated_mid,
+            corpus_base,
+            &["fuzz_progressive_decoder"],
+        );
+
+        // First ~15% — should stop before any scan data.
+        let cut_early: usize = (prog_jpeg.len() / 7).max(16);
+        let truncated_early: Vec<u8> = prog_jpeg[..cut_early].to_vec();
+        fan_out_write(
+            "progressive_truncated_early.bin",
+            &truncated_early,
+            corpus_base,
+            &["fuzz_progressive_decoder"],
+        );
+
+        // Strip the trailing EOI (0xFF 0xD9) to force end-of-stream handling.
+        if prog_jpeg.len() > 2 {
+            let no_eoi: Vec<u8> = prog_jpeg[..prog_jpeg.len() - 2].to_vec();
+            fan_out_write(
+                "progressive_no_eoi.bin",
+                &no_eoi,
+                corpus_base,
+                &["fuzz_progressive_decoder"],
+            );
+        }
+    }
+
+    // fuzz_encode_roundtrip gets a small pool of raw-pixel header seeds so
+    // libFuzzer starts from structurally meaningful inputs for the encode
+    // path. Each is interpreted by the target as a 4-byte header + pixels.
+    let raw_seeds: [(&str, Vec<u8>); 3] = [
+        ("encode_tiny_gradient.bin", {
+            let mut v: Vec<u8> = vec![8, 8, 75, 0];
+            v.extend_from_slice(&Content::Gradient.pixels_rgb(8, 8));
+            v
+        }),
+        ("encode_16x16_photo.bin", {
+            let mut v: Vec<u8> = vec![16, 16, 90, 1];
+            v.extend_from_slice(&Content::SyntheticPhoto.pixels_rgb(16, 16));
+            v
+        }),
+        ("encode_16x16_checker.bin", {
+            let mut v: Vec<u8> = vec![16, 16, 50, 2];
+            v.extend_from_slice(&Content::Checker.pixels_rgb(16, 16));
+            v
+        }),
+    ];
+    for (name, bytes) in &raw_seeds {
+        fan_out_write(name, bytes, corpus_base, &["fuzz_encode_roundtrip"]);
     }
 
     eprintln!(
