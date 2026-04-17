@@ -10,12 +10,14 @@
 //! Covered scenarios:
 //!   B7-2: 1000 concurrent decodes of the same JPEG bytes from fixtures,
 //!         asserting every thread produces bit-identical pixels.
+//!   B7-3: interleaved Encoder/Decoder lifetimes across threads via channels.
 
 // WASM has no std::thread support.
 #![cfg(not(target_arch = "wasm32"))]
 
-use libjpeg_turbo_rs::{decompress, Image};
+use libjpeg_turbo_rs::{decompress, Encoder, Image, PixelFormat, Subsampling};
 use std::path::PathBuf;
+use std::sync::mpsc;
 use std::sync::Arc;
 use std::thread;
 
@@ -127,5 +129,87 @@ fn b7_2_stress_thousand_decodes_shared_source() {
 
     for handle in handles {
         handle.join().expect("worker thread panicked");
+    }
+}
+
+// --- B7-3: interleaved Encoder/Decoder across threads ----------------------
+
+/// Each worker: build an `Encoder` on thread `E`, hand the encoded bytes to a
+/// decode on thread `D` via an mpsc channel, then compare decoded pixels
+/// against the serial baseline. Exercises cross-thread handoff of the
+/// encoded byte buffer.
+#[test]
+fn b7_3_interleaved_encoder_decoder_across_threads() {
+    const NUM_WORKERS: usize = 8;
+    // Shared immutable source that every encoder will compress. Shared
+    // `&[u8]` exercises the immutable-borrow side of the encoder contract.
+    let width: usize = 32;
+    let height: usize = 32;
+    let source_pixels: Arc<Vec<u8>> = Arc::new(
+        (0..width * height * 3)
+            .map(|i| ((i as u32 * 7 + 11) % 256) as u8)
+            .collect(),
+    );
+
+    // Serial baseline: encode + decode once — this is the pixel-equivalence target.
+    let baseline_jpeg: Vec<u8> = Encoder::new(&source_pixels, width, height, PixelFormat::Rgb)
+        .quality(75)
+        .subsampling(Subsampling::S444)
+        .encode()
+        .expect("baseline encode failed");
+    let baseline_image: Image = decompress(&baseline_jpeg).expect("baseline decode failed");
+
+    // Each worker gets its own (encoder-thread, decoder-thread, channel) trio.
+    let mut worker_handles: Vec<thread::JoinHandle<()>> = Vec::with_capacity(NUM_WORKERS);
+    for worker_id in 0..NUM_WORKERS {
+        let pixels: Arc<Vec<u8>> = Arc::clone(&source_pixels);
+        let expected_data: Vec<u8> = baseline_image.data.clone();
+        let expected_w: usize = baseline_image.width;
+        let expected_h: usize = baseline_image.height;
+
+        worker_handles.push(thread::spawn(move || {
+            let (tx, rx) = mpsc::channel::<Vec<u8>>();
+
+            // Encoder thread — owns the send side.
+            let pixels_for_enc: Arc<Vec<u8>> = Arc::clone(&pixels);
+            let encoder_thread: thread::JoinHandle<()> = thread::spawn(move || {
+                let jpeg: Vec<u8> = Encoder::new(&pixels_for_enc, width, height, PixelFormat::Rgb)
+                    .quality(75)
+                    .subsampling(Subsampling::S444)
+                    .encode()
+                    .unwrap_or_else(|e| panic!("worker {worker_id} encode failed: {e:?}"));
+                tx.send(jpeg)
+                    .expect("worker encoder->decoder channel closed unexpectedly");
+            });
+
+            // Decoder thread — owns the receive side.
+            let decoder_thread: thread::JoinHandle<Image> = thread::spawn(move || {
+                let jpeg: Vec<u8> = rx
+                    .recv()
+                    .expect("decoder never received bytes from encoder thread");
+                decompress(&jpeg)
+                    .unwrap_or_else(|e| panic!("worker {worker_id} decode failed: {e:?}"))
+            });
+
+            encoder_thread.join().expect("encoder thread panicked");
+            let decoded: Image = decoder_thread.join().expect("decoder thread panicked");
+
+            assert_eq!(
+                decoded.width, expected_w,
+                "worker {worker_id} width mismatch"
+            );
+            assert_eq!(
+                decoded.height, expected_h,
+                "worker {worker_id} height mismatch"
+            );
+            assert_eq!(
+                decoded.data, expected_data,
+                "worker {worker_id} pixels diverged from serial baseline across cross-thread handoff"
+            );
+        }));
+    }
+
+    for handle in worker_handles {
+        handle.join().expect("outer worker thread panicked");
     }
 }
