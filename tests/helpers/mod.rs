@@ -53,6 +53,9 @@ pub fn rdjpgcom_path() -> Option<PathBuf> {
     c_tool_path("rdjpgcom")
 }
 
+pub mod c_tools;
+pub use c_tools::{is_ci, require_c_tool};
+
 // ===========================================================================
 // Temp file management
 // ===========================================================================
