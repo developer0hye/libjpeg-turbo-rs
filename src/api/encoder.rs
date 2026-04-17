@@ -77,6 +77,9 @@ pub struct Encoder<'a> {
     /// The first component (Y) defines the max sampling factor; subsequent
     /// components (Cb, Cr) can use any factor from 1 to max_h/max_v.
     custom_sampling_factors: Option<Vec<(u8, u8)>>,
+    /// When true, omit DQT and DHT markers from the output (abbreviated body-only stream).
+    /// The resulting JPEG body can be decoded only when a decoder has preloaded the matching tables.
+    suppress_tables: bool,
 }
 
 impl<'a> Encoder<'a> {
@@ -117,6 +120,7 @@ impl<'a> Encoder<'a> {
             density: None,
             write_adobe_marker: None,
             custom_sampling_factors: None,
+            suppress_tables: false,
         }
     }
 
@@ -331,6 +335,29 @@ impl<'a> Encoder<'a> {
     pub fn sampling_factors(mut self, factors: Vec<(u8, u8)>) -> Self {
         self.custom_sampling_factors = Some(factors);
         self
+    }
+
+    /// Suppress DQT and DHT markers in the encoded output (abbreviated body-only stream).
+    ///
+    /// When `true`, the encoded JPEG omits all quantization and Huffman table markers.
+    /// The resulting stream cannot be decoded on its own; a decoder must first load the
+    /// matching tables via `read_header()` / `Decoder::new_with_tables()`.
+    ///
+    /// Matches libjpeg-turbo's abbreviated compressed data datastream (JPEG spec F.1.2.4).
+    pub fn suppress_tables(mut self, suppress: bool) -> Self {
+        self.suppress_tables = suppress;
+        self
+    }
+
+    /// Produce a tables-only abbreviated datastream for this encoder's configuration.
+    ///
+    /// Returns `SOI + DQT(s) + DHT(s) + EOI` with no image data. The stream
+    /// can be parsed by `read_header()` to preload tables into a decoder for
+    /// subsequent decoding of body-only streams.
+    ///
+    /// Matches libjpeg-turbo's `jpeg_write_tables()` (JPEG spec F.1.2.4).
+    pub fn write_tables(&self) -> Vec<u8> {
+        crate::api::abbreviated::write_tables_for_encoder(self)
     }
 
     /// Set a custom quantization table for the given table slot (0-3).
@@ -914,7 +941,34 @@ impl<'a> Encoder<'a> {
             None => with_jfif,
         };
 
-        Ok(with_adobe)
+        let with_tables = if self.suppress_tables {
+            crate::api::abbreviated::strip_table_markers(with_adobe)
+        } else {
+            with_adobe
+        };
+
+        Ok(with_tables)
+    }
+
+    /// Expose effective quant tables for abbreviated stream generation.
+    pub(crate) fn effective_quant_tables_for_abbrev(&self) -> [Option<[u16; 64]>; 4] {
+        let quality = self.effective_quality();
+        self.build_quant_tables(quality)
+    }
+
+    /// Expose custom Huffman DC tables for abbreviated stream generation.
+    pub(crate) fn custom_huffman_dc_tables(&self) -> &[Option<HuffmanTableDef>; 4] {
+        &self.custom_huffman_dc
+    }
+
+    /// Expose custom Huffman AC tables for abbreviated stream generation.
+    pub(crate) fn custom_huffman_ac_tables(&self) -> &[Option<HuffmanTableDef>; 4] {
+        &self.custom_huffman_ac
+    }
+
+    /// Whether the encoder uses arithmetic coding.
+    pub(crate) fn is_arithmetic(&self) -> bool {
+        self.arithmetic
     }
 
     fn build_quant_tables(&self, quality: u8) -> [Option<[u16; 64]>; 4] {
