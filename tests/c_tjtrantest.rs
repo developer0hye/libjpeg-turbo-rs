@@ -158,18 +158,6 @@ fn try_rust_opts(
     restart_in_rows: bool,
     trim: bool,
 ) -> Option<TransformOptions> {
-    // Progressive + restart: Rust does not yet emit RST markers in progressive
-    // scans, so output is byte-different from C jpegtran (pixel-identical).
-    // The progressive transform code clears restart_interval to avoid corrupt
-    // output from declaring DRI without emitting RST markers.
-    if progressive && restart_interval > 0 {
-        eprintln!(
-            "SKIP: progressive + restart — RST emission in progressive scans not yet implemented"
-        );
-        return None;
-    }
-    let _ = op;
-
     Some(TransformOptions {
         op,
         trim,

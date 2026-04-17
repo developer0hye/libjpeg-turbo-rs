@@ -890,11 +890,20 @@ pub fn transform_jpeg_with_options(data: &[u8], options: &TransformOptions) -> R
     // Matches C jpegtran behavior — source restart interval flows through
     // transforms unchanged. Only overwrite when explicitly requested.
     //
-    // When `restart_in_rows == true`, the user-supplied value is in MCU rows;
-    // recompute the actual DRI based on the OUTPUT MCU grid (matches C jpegtran
-    // `-restart N` which is row-based and computed against the output dimensions
-    // produced by the transform). Without this, source-derived row counts become
-    // invalid after rotation, crop, or trim that change the output dimensions.
+    // When `restart_in_rows == true`, the user-supplied value is in MCU rows.
+    // For sequential/optimized writers the DRI is a single scan-wide value,
+    // so it is precomputed against the output interleaved MCU grid. The
+    // progressive writer recomputes per-scan DRI from `progressive_restart_rows`
+    // below (matches C `per_scan_setup` which updates `cinfo->restart_interval`
+    // based on each scan's `MCUs_per_row` — interleaved scans and
+    // non-interleaved AC scans use different row counts).
+    let progressive_restart_rows: Option<u16> =
+        if options.progressive && options.restart_interval > 0 && options.restart_in_rows {
+            Some(options.restart_interval)
+        } else {
+            None
+        };
+
     if options.restart_interval > 0 {
         if options.restart_in_rows {
             let max_h: usize = coeffs
@@ -921,12 +930,6 @@ pub fn transform_jpeg_with_options(data: &[u8], options: &TransformOptions) -> R
             | crate::transform::TransformOp::Transverse
     );
     if swaps_dimensions && options.trim && options.restart_interval == 0 {
-        coeffs.restart_interval = 0;
-    }
-    // Progressive output: the multi-scan writer does not yet emit RST markers,
-    // so clear the RI to avoid declaring DRI without RST in the entropy stream
-    // (which would produce undecodable output).
-    if options.progressive {
         coeffs.restart_interval = 0;
     }
 
@@ -963,7 +966,7 @@ pub fn transform_jpeg_with_options(data: &[u8], options: &TransformOptions) -> R
     } else if options.arithmetic {
         write_coefficients_arithmetic(&coeffs)?
     } else if progressive_safe {
-        write_coefficients_progressive(&coeffs)?
+        write_coefficients_progressive(&coeffs, progressive_restart_rows)?
     } else if options.optimize {
         write_coefficients_optimized(&coeffs)?
     } else {
@@ -1241,7 +1244,18 @@ fn write_coefficients_optimized(coeffs: &JpegCoefficients) -> Result<Vec<u8>> {
 ///
 /// Matches C `jpegtran -progressive` behavior, which implies `-optimize`.
 /// Uses the default libjpeg-turbo scan progression (simple_progression).
-fn write_coefficients_progressive(coeffs: &JpegCoefficients) -> Result<Vec<u8>> {
+///
+/// `restart_rows` selects the restart accounting mode:
+/// - `Some(rows)` — row mode (`jpegtran -restart N`): the DRI is recomputed
+///   per scan as `rows * MCUs_per_row_of_scan`, where `MCUs_per_row` is the
+///   interleaved MCU count for multi-component scans and `width_in_blocks`
+///   for non-interleaved AC scans (matches C `per_scan_setup`).
+/// - `None` — byte mode (`-restart Nb`) or source-preserved RI: `coeffs.restart_interval`
+///   is used uniformly for every scan.
+fn write_coefficients_progressive(
+    coeffs: &JpegCoefficients,
+    restart_rows: Option<u16>,
+) -> Result<Vec<u8>> {
     use crate::encode::huff_opt;
     use crate::encode::progressive::simple_progression;
 
@@ -1309,18 +1323,44 @@ fn write_coefficients_progressive(coeffs: &JpegCoefficients) -> Result<Vec<u8>> 
         .collect();
     marker_writer::write_sof2(&mut output, coeffs.width, coeffs.height, &components);
 
-    // DRI
-    if coeffs.restart_interval > 0 {
-        marker_writer::write_dri(&mut output, coeffs.restart_interval);
-    }
-
     let mut bit_writer: BitWriter =
         BitWriter::new(coeffs.width as usize * coeffs.height as usize / 4);
+
+    // DRI is emitted per-scan, after DHT and before SOS — only when the
+    // restart interval changes from the previous scan (matches C jcmarker.c
+    // `write_scan_header`). `saved_ri` starts at 0 so the first scan emits
+    // DRI whenever the image has restart markers.
+    let mut saved_ri: u16 = 0;
+
+    // Compute the per-scan DRI used for RST emission and stream markers.
+    // Row mode follows C `per_scan_setup`: interleaved (multi-component)
+    // scans use the interleaved MCU grid; non-interleaved scans use that
+    // component's `width_in_blocks`. Byte mode applies `coeffs.restart_interval`
+    // uniformly.
+    let per_scan_ri = |scan_ci: &[usize]| -> u16 {
+        match restart_rows {
+            Some(rows) => {
+                let mcus_per_row: usize = if scan_ci.len() == 1 {
+                    // Non-interleaved: MCU row count = component's width in blocks.
+                    let ci: usize = scan_ci[0];
+                    let comp = &coeffs.components[ci];
+                    (coeffs.width as usize * comp.h_sampling as usize).div_ceil(max_h * 8)
+                } else {
+                    // Interleaved: width divided by max horizontal sampling × 8.
+                    (coeffs.width as usize).div_ceil(max_h * 8)
+                };
+                let dri: usize = rows as usize * mcus_per_row;
+                dri.min(u16::MAX as usize) as u16
+            }
+            None => coeffs.restart_interval,
+        }
+    };
 
     // === Encode each scan with per-scan optimized Huffman tables ===
     for scan in &scans {
         let is_dc_scan: bool = scan.ss == 0 && scan.se == 0;
         let is_first: bool = scan.ah == 0;
+        let scan_ri: u16 = per_scan_ri(&scan.component_indices);
 
         // Build SOS component list preserving source component IDs.
         // DC refine scans (ah>0) use no Huffman table — set Td=0 to match C.
@@ -1344,9 +1384,17 @@ fn write_coefficients_progressive(coeffs: &JpegCoefficients) -> Result<Vec<u8>> 
             dc_chroma_freq[256] = 1;
 
             let mut prev_dc: Vec<i16> = vec![0i16; scan.component_indices.len()];
+            let ri: u32 = scan_ri as u32;
+            let mut restarts_to_go: u32 = ri;
 
             for mcu_y in 0..mcus_y {
                 for mcu_x in 0..mcus_x {
+                    if ri > 0 && restarts_to_go == 0 {
+                        for dc in prev_dc.iter_mut() {
+                            *dc = 0;
+                        }
+                        restarts_to_go = ri;
+                    }
                     for (scan_ci, &ci) in scan.component_indices.iter().enumerate() {
                         let comp = &coeffs.components[ci];
                         let freq: &mut [u32; 257] = if ci == 0 {
@@ -1372,6 +1420,9 @@ fn write_coefficients_progressive(coeffs: &JpegCoefficients) -> Result<Vec<u8>> 
                             }
                         }
                     }
+                    if ri > 0 {
+                        restarts_to_go -= 1;
+                    }
                 }
             }
 
@@ -1389,6 +1440,10 @@ fn write_coefficients_progressive(coeffs: &JpegCoefficients) -> Result<Vec<u8>> 
                 build_huff_table(&tables::DC_CHROMINANCE_BITS, &tables::DC_CHROMINANCE_VALUES)
             };
 
+            if scan_ri != saved_ri {
+                marker_writer::write_dri(&mut output, scan_ri);
+                saved_ri = scan_ri;
+            }
             marker_writer::write_sos_progressive(
                 &mut output,
                 &scan_comps,
@@ -1401,9 +1456,21 @@ fn write_coefficients_progressive(coeffs: &JpegCoefficients) -> Result<Vec<u8>> 
             // Pass 2: encode DC first scan.
             bit_writer.reset();
             let mut enc_prev_dc: Vec<i16> = vec![0i16; scan.component_indices.len()];
+            let ri: u32 = scan_ri as u32;
+            let mut restarts_to_go: u32 = ri;
+            let mut next_restart_num: u8 = 0;
 
             for mcu_y in 0..mcus_y {
                 for mcu_x in 0..mcus_x {
+                    if ri > 0 && restarts_to_go == 0 {
+                        bit_writer.flush_restart();
+                        bit_writer.write_restart_marker(next_restart_num);
+                        next_restart_num = (next_restart_num + 1) & 7;
+                        for dc in enc_prev_dc.iter_mut() {
+                            *dc = 0;
+                        }
+                        restarts_to_go = ri;
+                    }
                     for (scan_ci, &ci) in scan.component_indices.iter().enumerate() {
                         let comp = &coeffs.components[ci];
                         let dc_table: &HuffTable = if ci == 0 {
@@ -1429,6 +1496,9 @@ fn write_coefficients_progressive(coeffs: &JpegCoefficients) -> Result<Vec<u8>> 
                             }
                         }
                     }
+                    if ri > 0 {
+                        restarts_to_go -= 1;
+                    }
                 }
             }
 
@@ -1437,6 +1507,10 @@ fn write_coefficients_progressive(coeffs: &JpegCoefficients) -> Result<Vec<u8>> 
         } else if is_dc_scan {
             // === DC REFINE scan ===
             // No Huffman table needed — just raw bits.
+            if scan_ri != saved_ri {
+                marker_writer::write_dri(&mut output, scan_ri);
+                saved_ri = scan_ri;
+            }
             marker_writer::write_sos_progressive(
                 &mut output,
                 &scan_comps,
@@ -1449,9 +1523,18 @@ fn write_coefficients_progressive(coeffs: &JpegCoefficients) -> Result<Vec<u8>> 
             bit_writer.reset();
             // Track last real DC for dummy block refine bits.
             let mut refine_prev_dc: Vec<i16> = vec![0i16; num_components];
+            let ri: u32 = scan_ri as u32;
+            let mut restarts_to_go: u32 = ri;
+            let mut next_restart_num: u8 = 0;
 
             for mcu_y in 0..mcus_y {
                 for mcu_x in 0..mcus_x {
+                    if ri > 0 && restarts_to_go == 0 {
+                        bit_writer.flush_restart();
+                        bit_writer.write_restart_marker(next_restart_num);
+                        next_restart_num = (next_restart_num + 1) & 7;
+                        restarts_to_go = ri;
+                    }
                     for &ci in &scan.component_indices {
                         let comp = &coeffs.components[ci];
                         for v in 0..comp.v_sampling as usize {
@@ -1471,6 +1554,9 @@ fn write_coefficients_progressive(coeffs: &JpegCoefficients) -> Result<Vec<u8>> 
                                 bit_writer.put_bits(bit, 1);
                             }
                         }
+                    }
+                    if ri > 0 {
+                        restarts_to_go -= 1;
                     }
                 }
             }
@@ -1495,9 +1581,19 @@ fn write_coefficients_progressive(coeffs: &JpegCoefficients) -> Result<Vec<u8>> 
                 let mut ac_freq = [0u32; 257];
                 ac_freq[256] = 1;
                 let mut eobrun_gather: u32 = 0;
+                let ri: u32 = scan_ri as u32;
+                let mut restarts_to_go: u32 = ri;
 
                 for by in 0..hib {
                     for bx in 0..wib {
+                        if ri > 0 && restarts_to_go == 0 {
+                            if eobrun_gather > 0 {
+                                let nbits: u8 = (32 - eobrun_gather.leading_zeros()) as u8 - 1;
+                                ac_freq[(nbits as usize) << 4] += 1;
+                                eobrun_gather = 0;
+                            }
+                            restarts_to_go = ri;
+                        }
                         let block: &[i16; 64] = &comp.blocks[by * stride + bx];
 
                         let mut zerobits: u64 = 0;
@@ -1524,6 +1620,9 @@ fn write_coefficients_progressive(coeffs: &JpegCoefficients) -> Result<Vec<u8>> 
                                 let nbits: u8 = (32 - eobrun_gather.leading_zeros()) as u8 - 1;
                                 ac_freq[(nbits as usize) << 4] += 1;
                                 eobrun_gather = 0;
+                            }
+                            if ri > 0 {
+                                restarts_to_go -= 1;
                             }
                             continue;
                         }
@@ -1558,6 +1657,9 @@ fn write_coefficients_progressive(coeffs: &JpegCoefficients) -> Result<Vec<u8>> 
                                 eobrun_gather = 0;
                             }
                         }
+                        if ri > 0 {
+                            restarts_to_go -= 1;
+                        }
                     }
                 }
                 if eobrun_gather > 0 {
@@ -1569,6 +1671,10 @@ fn write_coefficients_progressive(coeffs: &JpegCoefficients) -> Result<Vec<u8>> 
                 let (ac_bits, ac_values) = huff_opt::gen_optimal_table(&ac_freq);
                 let table_id: u8 = if ci == 0 { 0 } else { 1 };
                 marker_writer::write_dht(&mut output, 1, table_id, &ac_bits, &ac_values);
+                if scan_ri != saved_ri {
+                    marker_writer::write_dri(&mut output, scan_ri);
+                    saved_ri = scan_ri;
+                }
                 marker_writer::write_sos_progressive(
                     &mut output,
                     &scan_comps,
@@ -1582,9 +1688,25 @@ fn write_coefficients_progressive(coeffs: &JpegCoefficients) -> Result<Vec<u8>> 
                 let ac_table: HuffTable = build_huff_table(&ac_bits, &ac_values);
                 bit_writer.reset();
                 let mut eobrun: u32 = 0;
+                let ri: u32 = scan_ri as u32;
+                let mut restarts_to_go: u32 = ri;
+                let mut next_restart_num: u8 = 0;
 
                 for by in 0..hib {
                     for bx in 0..wib {
+                        if ri > 0 && restarts_to_go == 0 {
+                            if eobrun > 0 {
+                                encoder_pipeline::emit_eobrun(
+                                    &ac_table,
+                                    &mut bit_writer,
+                                    &mut eobrun,
+                                );
+                            }
+                            bit_writer.flush_restart();
+                            bit_writer.write_restart_marker(next_restart_num);
+                            next_restart_num = (next_restart_num + 1) & 7;
+                            restarts_to_go = ri;
+                        }
                         let block: &[i16; 64] = &comp.blocks[by * stride + bx];
                         encoder_pipeline::encode_ac_first_block(
                             block,
@@ -1595,6 +1717,9 @@ fn write_coefficients_progressive(coeffs: &JpegCoefficients) -> Result<Vec<u8>> 
                             &mut bit_writer,
                             &mut eobrun,
                         );
+                        if ri > 0 {
+                            restarts_to_go -= 1;
+                        }
                     }
                 }
                 if eobrun > 0 {
@@ -1610,9 +1735,26 @@ fn write_coefficients_progressive(coeffs: &JpegCoefficients) -> Result<Vec<u8>> 
                 ac_freq[256] = 1;
                 let mut eobrun_gather: u32 = 0;
                 let mut be: usize = 0;
+                let ri: u32 = scan_ri as u32;
+                let mut restarts_to_go: u32 = ri;
 
                 for by in 0..hib {
                     for bx in 0..wib {
+                        if ri > 0 && restarts_to_go == 0 {
+                            if eobrun_gather > 0 {
+                                let nbits: u8 = (32 - eobrun_gather.leading_zeros()) as u8 - 1;
+                                ac_freq[(nbits as usize) << 4] += 1;
+                            }
+                            // Match C `emit_restart` (jcphuff.c:444-446): EOBRUN
+                            // and BE correction buffer are always cleared at an
+                            // RST boundary regardless of whether EOBRUN was
+                            // pending. Keeps `be` accounting robust even if the
+                            // gather/encode invariant `be>0 ⇒ eobrun>0` ever
+                            // loosens.
+                            eobrun_gather = 0;
+                            be = 0;
+                            restarts_to_go = ri;
+                        }
                         let block: &[i16; 64] = &comp.blocks[by * stride + bx];
 
                         let mut absvals = [0u16; 64];
@@ -1685,6 +1827,9 @@ fn write_coefficients_progressive(coeffs: &JpegCoefficients) -> Result<Vec<u8>> 
                                 be = 0;
                             }
                         }
+                        if ri > 0 {
+                            restarts_to_go -= 1;
+                        }
                     }
                 }
                 if eobrun_gather > 0 {
@@ -1696,6 +1841,10 @@ fn write_coefficients_progressive(coeffs: &JpegCoefficients) -> Result<Vec<u8>> 
                 let (ac_bits, ac_values) = huff_opt::gen_optimal_table(&ac_freq);
                 let table_id: u8 = if ci == 0 { 0 } else { 1 };
                 marker_writer::write_dht(&mut output, 1, table_id, &ac_bits, &ac_values);
+                if scan_ri != saved_ri {
+                    marker_writer::write_dri(&mut output, scan_ri);
+                    saved_ri = scan_ri;
+                }
                 marker_writer::write_sos_progressive(
                     &mut output,
                     &scan_comps,
@@ -1710,9 +1859,26 @@ fn write_coefficients_progressive(coeffs: &JpegCoefficients) -> Result<Vec<u8>> 
                 bit_writer.reset();
                 let mut eobrun: u32 = 0;
                 let mut corr_buffer: Vec<u8> = Vec::with_capacity(encoder_pipeline::MAX_CORR_BITS);
+                let ri: u32 = scan_ri as u32;
+                let mut restarts_to_go: u32 = ri;
+                let mut next_restart_num: u8 = 0;
 
                 for by in 0..hib {
                     for bx in 0..wib {
+                        if ri > 0 && restarts_to_go == 0 {
+                            if eobrun > 0 {
+                                encoder_pipeline::emit_eobrun_with_corr(
+                                    &ac_table,
+                                    &mut bit_writer,
+                                    &mut eobrun,
+                                    &mut corr_buffer,
+                                );
+                            }
+                            bit_writer.flush_restart();
+                            bit_writer.write_restart_marker(next_restart_num);
+                            next_restart_num = (next_restart_num + 1) & 7;
+                            restarts_to_go = ri;
+                        }
                         let block: &[i16; 64] = &comp.blocks[by * stride + bx];
                         encoder_pipeline::encode_ac_refine_block(
                             block,
@@ -1724,6 +1890,9 @@ fn write_coefficients_progressive(coeffs: &JpegCoefficients) -> Result<Vec<u8>> 
                             &mut eobrun,
                             &mut corr_buffer,
                         );
+                        if ri > 0 {
+                            restarts_to_go -= 1;
+                        }
                     }
                 }
                 if eobrun > 0 {
