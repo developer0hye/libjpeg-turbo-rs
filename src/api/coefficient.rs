@@ -2429,7 +2429,7 @@ fn decode_arithmetic_coefficients(
     let entropy_data = &data[metadata.entropy_data_offset..];
     let mut arith = ArithDecoder::new(entropy_data, 0);
 
-    for i in 0..4 {
+    for i in 0..crate::decode::arithmetic::NUM_ARITH_TBLS {
         let (l, u) = metadata.arith_dc_params[i];
         arith.set_dc_conditioning(i, l, u);
         arith.set_ac_conditioning(i, metadata.arith_ac_params[i]);
@@ -2489,8 +2489,8 @@ fn decode_arithmetic_progressive_coefficients(
         let entropy_data: &[u8] = &data[scan_info.data_offset..];
         let mut arith: ArithDecoder<'_> = ArithDecoder::new(entropy_data, 0);
 
-        // Set arithmetic conditioning parameters
-        for i in 0..4 {
+        // Set arithmetic conditioning parameters (16 slots per NUM_ARITH_TBLS).
+        for i in 0..crate::decode::arithmetic::NUM_ARITH_TBLS {
             let (l, u) = metadata.arith_dc_params[i];
             arith.set_dc_conditioning(i, l, u);
             arith.set_ac_conditioning(i, metadata.arith_ac_params[i]);
