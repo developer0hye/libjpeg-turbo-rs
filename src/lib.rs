@@ -28,6 +28,10 @@ pub use api::precision::{
 pub use api::quality::quality_scaling;
 pub use api::quantize::requantize;
 pub use api::raw_data::{compress_raw, decompress_raw, RawImage};
+/// 12-bit raw planar encode/decode (YCbCr component planes at native resolution).
+pub mod raw_data_12 {
+    pub use crate::api::raw_data_12::{compress_raw_12, decompress_raw_12, RawImage12};
+}
 pub use encode::marker_writer::MarkerStreamWriter;
 /// Color quantization for 8-bit indexed/palette output.
 pub mod quantize {
