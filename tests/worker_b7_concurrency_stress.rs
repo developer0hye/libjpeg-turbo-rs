@@ -11,6 +11,8 @@
 //!   B7-2: 1000 concurrent decodes of the same JPEG bytes from fixtures,
 //!         asserting every thread produces bit-identical pixels.
 //!   B7-3: interleaved Encoder/Decoder lifetimes across threads via channels.
+//!   B7-4: custom `[u16; 64]` quant table reused simultaneously by two
+//!         encoder threads, asserting byte-equal output vs. serial baseline.
 
 // WASM has no std::thread support.
 #![cfg(not(target_arch = "wasm32"))]
@@ -212,4 +214,81 @@ fn b7_3_interleaved_encoder_decoder_across_threads() {
     for handle in worker_handles {
         handle.join().expect("outer worker thread panicked");
     }
+}
+
+// --- B7-4: shared custom quant table across encoder threads ----------------
+
+/// Construct a custom `[u16; 64]` luma quantization table, then encode from
+/// two threads concurrently using a shared reference to it. Both outputs
+/// must be byte-equal to the serial baseline produced with the same table.
+///
+/// This proves that custom quant tables can be safely referenced from
+/// multiple `Encoder` instances running in parallel, and that the resulting
+/// JPEG bytes are deterministic (no encoder-side global state mutation).
+#[test]
+fn b7_4_shared_quant_table_across_encoders_byte_equal() {
+    // A plausible custom quant table — monotonically increasing so the
+    // output actually depends on every slot, not just DC. Values clamp to
+    // the valid 8-bit JPEG quant range (1..=255) so we don't accidentally
+    // exercise 16-bit precision code paths in this test.
+    let mut custom: [u16; 64] = [0; 64];
+    for (i, slot) in custom.iter_mut().enumerate() {
+        *slot = (8 + i as u16).min(200);
+    }
+    let shared_table: Arc<[u16; 64]> = Arc::new(custom);
+
+    // Simple deterministic 16x16 RGB source — small enough to keep the
+    // test fast, large enough to produce multiple DCT blocks per component.
+    let width: usize = 16;
+    let height: usize = 16;
+    let pixels: Vec<u8> = (0..width * height * 3)
+        .map(|i| ((i as u32 * 13 + 29) % 256) as u8)
+        .collect();
+
+    // Serial baseline: encode once with the custom table.
+    let baseline: Vec<u8> = Encoder::new(&pixels, width, height, PixelFormat::Rgb)
+        .subsampling(Subsampling::S444)
+        .quant_table(0, *shared_table)
+        .encode()
+        .expect("serial baseline encode failed");
+
+    // Two encoder threads, each encoding the same source with a borrow of
+    // the same shared quant table. `[u16; 64]` is `Copy`, so we copy it
+    // out of the `Arc` inside each thread — this is the exact pattern a
+    // user with a "template" table shared across encoder workers would use.
+    let t1_pixels: Vec<u8> = pixels.clone();
+    let t1_table: Arc<[u16; 64]> = Arc::clone(&shared_table);
+    let t1 = thread::spawn(move || {
+        Encoder::new(&t1_pixels, width, height, PixelFormat::Rgb)
+            .subsampling(Subsampling::S444)
+            .quant_table(0, *t1_table)
+            .encode()
+            .expect("t1 encode failed")
+    });
+
+    let t2_pixels: Vec<u8> = pixels.clone();
+    let t2_table: Arc<[u16; 64]> = Arc::clone(&shared_table);
+    let t2 = thread::spawn(move || {
+        Encoder::new(&t2_pixels, width, height, PixelFormat::Rgb)
+            .subsampling(Subsampling::S444)
+            .quant_table(0, *t2_table)
+            .encode()
+            .expect("t2 encode failed")
+    });
+
+    let out1: Vec<u8> = t1.join().expect("t1 panicked");
+    let out2: Vec<u8> = t2.join().expect("t2 panicked");
+
+    assert_eq!(
+        out1, baseline,
+        "t1 output must be byte-equal to serial baseline when using same custom quant table"
+    );
+    assert_eq!(
+        out2, baseline,
+        "t2 output must be byte-equal to serial baseline when using same custom quant table"
+    );
+    assert_eq!(
+        out1, out2,
+        "both concurrent encoders using the same shared quant table must produce identical bytes"
+    );
 }
