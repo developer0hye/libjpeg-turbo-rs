@@ -1,15 +1,17 @@
-//! 12-bit PPM file I/O round-trip tests.
+//! 12/16-bit PPM file I/O round-trip tests.
 //!
-//! Mirrors libjpeg-turbo's `tj3LoadImage12`/`tj3SaveImage12` behavior:
-//! binary PPM (P5 gray / P6 RGB) with big-endian 16-bit samples when
-//! `maxval > 255` (maxval=4095 for 12-bit).
+//! Mirrors libjpeg-turbo's `tj3LoadImage12`/`tj3SaveImage12`/`tj3LoadImage16`/
+//! `tj3SaveImage16` behavior: binary PPM (P5 gray / P6 RGB) with big-endian
+//! 16-bit samples for any `maxval > 255`.
 
 #![cfg(not(target_arch = "wasm32"))]
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use libjpeg_turbo_rs::api::image_io::{load_ppm_12bit, save_ppm_12bit, LoadedImage12};
+use libjpeg_turbo_rs::api::image_io::{
+    load_ppm_12bit, load_ppm_16bit, save_ppm_12bit, save_ppm_16bit, LoadedImage12, LoadedImage16,
+};
 
 // ---------------------------------------------------------------------------
 // Temp-file helpers
@@ -66,6 +68,32 @@ fn make_test_rgb_12bit(width: usize, height: usize) -> Vec<i16> {
             let r: i16 = (((x * 37 + y * 13) as u32) % 4096) as i16;
             let g: i16 = (((x * 59 + y * 7) as u32) % 4096) as i16;
             let b: i16 = (((x * 11 + y * 41) as u32) % 4096) as i16;
+            pixels.push(r);
+            pixels.push(g);
+            pixels.push(b);
+        }
+    }
+    pixels
+}
+
+fn make_test_gray_16bit(width: usize, height: usize) -> Vec<u16> {
+    let mut pixels: Vec<u16> = Vec::with_capacity(width * height);
+    for y in 0..height {
+        for x in 0..width {
+            let v: u16 = ((x * 257 + y * 131) % 65536) as u16;
+            pixels.push(v);
+        }
+    }
+    pixels
+}
+
+fn make_test_rgb_16bit(width: usize, height: usize) -> Vec<u16> {
+    let mut pixels: Vec<u16> = Vec::with_capacity(width * height * 3);
+    for y in 0..height {
+        for x in 0..width {
+            let r: u16 = ((x * 257 + y * 131) % 65536) as u16;
+            let g: u16 = ((x * 389 + y * 57) % 65536) as u16;
+            let b: u16 = ((x * 97 + y * 331) % 65536) as u16;
             pixels.push(r);
             pixels.push(g);
             pixels.push(b);
@@ -216,4 +244,82 @@ fn load_12bit_ppm_rejects_out_of_range_samples() {
         result.is_err(),
         "load_ppm_12bit must reject sample > maxval"
     );
+}
+
+// ---------------------------------------------------------------------------
+// A7-3 / A7-4: 16-bit round-trip (u16, maxval ≤ 65535), grayscale + RGB.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn save_load_16bit_pgm_gray_roundtrip() {
+    let path: TempFile = TempFile::new("gray_16bit.pgm");
+    let (w, h): (usize, usize) = (19, 23);
+    let pixels: Vec<u16> = make_test_gray_16bit(w, h);
+
+    save_ppm_16bit(path.path(), &pixels, w, h, 1, 65535)
+        .unwrap_or_else(|e| panic!("save_ppm_16bit (gray) failed: {e}"));
+
+    let loaded: LoadedImage16 =
+        load_ppm_16bit(path.path()).unwrap_or_else(|e| panic!("load_ppm_16bit (gray) failed: {e}"));
+
+    assert_eq!(loaded.width, w);
+    assert_eq!(loaded.height, h);
+    assert_eq!(loaded.num_components, 1);
+    assert_eq!(loaded.maxval, 65535);
+    assert_eq!(loaded.pixels, pixels);
+}
+
+#[test]
+fn save_load_16bit_ppm_rgb_roundtrip() {
+    let path: TempFile = TempFile::new("rgb_16bit.ppm");
+    let (w, h): (usize, usize) = (11, 9);
+    let pixels: Vec<u16> = make_test_rgb_16bit(w, h);
+
+    save_ppm_16bit(path.path(), &pixels, w, h, 3, 65535)
+        .unwrap_or_else(|e| panic!("save_ppm_16bit (rgb) failed: {e}"));
+
+    let loaded: LoadedImage16 =
+        load_ppm_16bit(path.path()).unwrap_or_else(|e| panic!("load_ppm_16bit (rgb) failed: {e}"));
+
+    assert_eq!(loaded.width, w);
+    assert_eq!(loaded.height, h);
+    assert_eq!(loaded.num_components, 3);
+    assert_eq!(loaded.maxval, 65535);
+    assert_eq!(loaded.pixels, pixels);
+}
+
+// ---------------------------------------------------------------------------
+// A7-3: 16-bit lossless JPEG encode → save → load pipeline (diff=0).
+// ---------------------------------------------------------------------------
+
+#[test]
+fn lossless_16bit_save_load_pipeline_diff_zero() {
+    use libjpeg_turbo_rs::precision::{compress_16bit, decompress_16bit, Image16};
+
+    let (w, h): (usize, usize) = (16, 16);
+    let mut source: Vec<u16> = Vec::with_capacity(w * h);
+    for i in 0..(w * h) {
+        source.push((i as u16).wrapping_mul(256));
+    }
+
+    let jpeg: Vec<u8> = compress_16bit(&source, w, h, 1, 1, 0)
+        .unwrap_or_else(|e| panic!("compress_16bit failed: {e}"));
+    let decoded: Image16 =
+        decompress_16bit(&jpeg).unwrap_or_else(|e| panic!("decompress_16bit failed: {e}"));
+    assert_eq!(decoded.width, w);
+    assert_eq!(decoded.height, h);
+    // Lossless must be bit-exact to the source.
+    assert_eq!(
+        decoded.data, source,
+        "16-bit lossless decode must match source"
+    );
+
+    let path: TempFile = TempFile::new("pipeline_16bit.pgm");
+    save_ppm_16bit(path.path(), &decoded.data, w, h, 1, 65535)
+        .unwrap_or_else(|e| panic!("save_ppm_16bit (pipeline) failed: {e}"));
+
+    let reloaded: LoadedImage16 = load_ppm_16bit(path.path())
+        .unwrap_or_else(|e| panic!("load_ppm_16bit (pipeline) failed: {e}"));
+    assert_eq!(reloaded.pixels, decoded.data);
+    assert_eq!(reloaded.maxval, 65535);
 }
