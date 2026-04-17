@@ -21,10 +21,12 @@
 
 pub use libjpeg_turbo_rs as inner;
 
+pub mod alloc;
+pub mod compress;
+pub mod convert;
 pub mod tj3;
 
-// Re-export the `extern "C"` symbols at the crate root so that tools
-// linking the staticlib pull them in directly without having to name the
-// sub-module. The `#[no_mangle]` attributes on the definitions themselves
-// keep the exported symbol names intact.
+// Re-export the `extern "C"` symbols at the crate root for discoverability.
+pub use alloc::{tj3Alloc, tj3Free};
+pub use compress::tj3Compress8;
 pub use tj3::{tj3Destroy, tj3Get, tj3GetErrorCode, tj3GetErrorStr, tj3Init, tj3Set};
