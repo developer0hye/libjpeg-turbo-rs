@@ -1,0 +1,68 @@
+name: Fuzz Smoke
+
+# Nightly libFuzzer smoke test: 10 minutes per target, uploading any new
+# crashes as artifacts. Intentionally kept as its own workflow so it does not
+# gate PR merges on libFuzzer flakes or missing nightly toolchain components.
+
+on:
+  schedule:
+    # 03:17 UTC every day — offset from the top of the hour to avoid the
+    # GitHub scheduler's congestion window.
+    - cron: "17 3 * * *"
+  workflow_dispatch:
+    inputs:
+      max_total_time:
+        description: "Seconds per target (default 600)"
+        required: false
+        default: "600"
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  fuzz:
+    name: Fuzz ${{ matrix.target }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - fuzz_decompress
+          - fuzz_decompress_lenient
+          - fuzz_roundtrip
+          - fuzz_read_coefficients
+          - fuzz_transform
+          - fuzz_progressive_decoder
+          - fuzz_encode_roundtrip
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@nightly
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            .
+            fuzz
+
+      - name: Install cargo-fuzz
+        run: cargo install cargo-fuzz --locked
+
+      - name: Regenerate seed corpus
+        run: cargo test --test generate_fuzz_seeds
+
+      - name: Run fuzzer
+        env:
+          MAX_TOTAL_TIME: ${{ github.event.inputs.max_total_time || '600' }}
+        run: |
+          cargo +nightly fuzz run "${{ matrix.target }}" \
+            -- -max_total_time="${MAX_TOTAL_TIME}" -print_final_stats=1
+
+      - name: Upload crash artifacts
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-artifacts-${{ matrix.target }}
+          path: fuzz/artifacts/${{ matrix.target }}
+          if-no-files-found: ignore
+          retention-days: 14
