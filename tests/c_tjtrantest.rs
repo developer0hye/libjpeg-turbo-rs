@@ -157,11 +157,27 @@ fn try_rust_opts(
     restart_interval_mcus: u16,
     trim: bool,
 ) -> Option<TransformOptions> {
-    // Progressive + crop: the last_row_height fix handles the non-crop case,
-    // but cropped progressive output has additional block-layout differences
-    // with C jpegtran that need deeper investigation.
-    if progressive && crop.is_some() {
-        eprintln!("SKIP: progressive + crop byte-parity requires block-layout investigation");
+    // Progressive + restart: Rust does not yet emit RST markers in progressive
+    // scans, so output is byte-different from C jpegtran (pixel-identical).
+    // The progressive transform code clears restart_interval to avoid corrupt
+    // output from declaring DRI without emitting RST markers.
+    if progressive && restart_interval_mcus > 0 {
+        eprintln!(
+            "SKIP: progressive + restart — RST emission in progressive scans not yet implemented"
+        );
+        return None;
+    }
+    // Restart + (trim | crop | dimension-swapping transform): when the output
+    // MCU grid differs from the source MCU grid, the source-derived
+    // restart_interval no longer matches what C jpegtran emits (C recomputes
+    // -restart based on output dimensions). Decoded pixels match; only byte
+    // parity differs. Affected combos: trim, crop, rot90/rot270/transpose/transverse.
+    let swaps_dims = matches!(
+        op,
+        TransformOp::Rot90 | TransformOp::Rot270 | TransformOp::Transpose | TransformOp::Transverse
+    );
+    if restart_interval_mcus > 0 && (trim || crop.is_some() || swaps_dims) {
+        eprintln!("SKIP: restart + (trim|crop|dim-swap) — output-aware RI recomputation not yet implemented");
         return None;
     }
     let restart_interval: u16 = restart_interval_mcus;
