@@ -323,3 +323,120 @@ fn lossless_16bit_save_load_pipeline_diff_zero() {
     assert_eq!(reloaded.pixels, decoded.data);
     assert_eq!(reloaded.maxval, 65535);
 }
+
+// ---------------------------------------------------------------------------
+// A7-5: Cross-validation — 12-bit PPM written by Rust is accepted by C
+// cjpeg -precision 12 (if supported). Otherwise SKIP.
+// ---------------------------------------------------------------------------
+
+fn cjpeg_path() -> Option<PathBuf> {
+    let homebrew: PathBuf = PathBuf::from("/opt/homebrew/bin/cjpeg");
+    if homebrew.exists() {
+        return Some(homebrew);
+    }
+    std::process::Command::new("which")
+        .arg("cjpeg")
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| PathBuf::from(String::from_utf8_lossy(&o.stdout).trim().to_string()))
+}
+
+fn djpeg_path() -> Option<PathBuf> {
+    let homebrew: PathBuf = PathBuf::from("/opt/homebrew/bin/djpeg");
+    if homebrew.exists() {
+        return Some(homebrew);
+    }
+    std::process::Command::new("which")
+        .arg("djpeg")
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| PathBuf::from(String::from_utf8_lossy(&o.stdout).trim().to_string()))
+}
+
+fn cjpeg_supports_precision(cjpeg: &Path) -> bool {
+    match std::process::Command::new(cjpeg).arg("-help").output() {
+        Ok(o) => {
+            let text: String = String::from_utf8_lossy(&o.stderr).to_string()
+                + &String::from_utf8_lossy(&o.stdout);
+            text.contains("precision")
+        }
+        Err(_) => false,
+    }
+}
+
+#[test]
+fn c_cjpeg_accepts_rust_12bit_ppm() {
+    let cjpeg: PathBuf = match cjpeg_path() {
+        Some(p) => p,
+        None => {
+            eprintln!("SKIP: cjpeg not found");
+            return;
+        }
+    };
+    if !cjpeg_supports_precision(&cjpeg) {
+        eprintln!("SKIP: cjpeg does not support -precision flag for 12-bit encode");
+        return;
+    }
+
+    let (w, h): (usize, usize) = (16, 16);
+    let pixels: Vec<i16> = make_test_gray_12bit(w, h);
+
+    let pgm: TempFile = TempFile::new("xval_12bit_rust.pgm");
+    save_ppm_12bit(pgm.path(), &pixels, w, h, 1)
+        .unwrap_or_else(|e| panic!("save_ppm_12bit failed: {e}"));
+
+    let jpg: TempFile = TempFile::new("xval_12bit_c.jpg");
+    let output = std::process::Command::new(&cjpeg)
+        .arg("-precision")
+        .arg("12")
+        .arg("-quality")
+        .arg("100")
+        .arg("-outfile")
+        .arg(jpg.path())
+        .arg(pgm.path())
+        .output()
+        .expect("failed to run cjpeg");
+    assert!(
+        output.status.success(),
+        "cjpeg -precision 12 failed on Rust-written 12-bit PGM: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    // Decode back with Rust to verify dimensions + 12-bit range.
+    let jpeg_bytes: Vec<u8> = std::fs::read(jpg.path()).expect("read cjpeg 12-bit output");
+    let decoded = libjpeg_turbo_rs::precision::decompress_12bit(&jpeg_bytes)
+        .unwrap_or_else(|e| panic!("Rust decompress_12bit of C-encoded 12-bit JPEG failed: {e}"));
+    assert_eq!(decoded.width, w);
+    assert_eq!(decoded.height, h);
+    assert_eq!(decoded.num_components, 1);
+    for (i, &v) in decoded.data.iter().enumerate() {
+        assert!(
+            (0..=4095).contains(&v),
+            "C→Rust 12-bit pixel {i} out of range: {v}"
+        );
+    }
+
+    // Extra: djpeg -pnm round-trips the 12-bit JPEG back to a PGM — confirm
+    // the output is a valid binary PGM. Exact equality is not guaranteed
+    // because DCT-based compression at quality=100 is near-lossless but
+    // not bit-exact, so range-check only.
+    if let Some(djpeg) = djpeg_path() {
+        let roundtrip_pgm: TempFile = TempFile::new("xval_12bit_c_dec.pgm");
+        let out = std::process::Command::new(&djpeg)
+            .arg("-pnm")
+            .arg("-outfile")
+            .arg(roundtrip_pgm.path())
+            .arg(jpg.path())
+            .output()
+            .expect("failed to run djpeg");
+        if out.status.success() {
+            let bytes: Vec<u8> = std::fs::read(roundtrip_pgm.path()).expect("read djpeg pgm");
+            assert!(
+                bytes.starts_with(b"P5"),
+                "djpeg output must be a binary PGM"
+            );
+        }
+    }
+}
