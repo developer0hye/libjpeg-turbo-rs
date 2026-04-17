@@ -2021,10 +2021,10 @@ fn write_coefficients_arithmetic(coeffs: &JpegCoefficients) -> Result<Vec<u8>> {
         .collect();
     marker_writer::write_sof9(&mut output, coeffs.width, coeffs.height, &components);
 
-    let dc_params = [(0u8, 1u8); 4];
-    let ac_params = [5u8; 4];
-    let mut dc_in_use = [false; 4];
-    let mut ac_in_use = [false; 4];
+    let dc_params = [(0u8, 1u8); crate::decode::arithmetic::NUM_ARITH_TBLS];
+    let ac_params = [5u8; crate::decode::arithmetic::NUM_ARITH_TBLS];
+    let mut dc_in_use = [false; crate::decode::arithmetic::NUM_ARITH_TBLS];
+    let mut ac_in_use = [false; crate::decode::arithmetic::NUM_ARITH_TBLS];
     for table in 0..num_arith_tables {
         dc_in_use[table] = true;
         ac_in_use[table] = true;
@@ -2092,8 +2092,8 @@ fn write_coefficients_progressive_arithmetic(coeffs: &JpegCoefficients) -> Resul
         .collect();
 
     let scans = simple_progression(num_components);
-    let dc_params = [(0u8, 1u8); 4];
-    let ac_params = [5u8; 4];
+    let dc_params = [(0u8, 1u8); crate::decode::arithmetic::NUM_ARITH_TBLS];
+    let ac_params = [5u8; crate::decode::arithmetic::NUM_ARITH_TBLS];
 
     let mut output: Vec<u8> = Vec::with_capacity(coeffs.width as usize * coeffs.height as usize);
 
@@ -2143,8 +2143,8 @@ fn write_coefficients_progressive_arithmetic(coeffs: &JpegCoefficients) -> Resul
             })
             .collect();
 
-        let mut dc_in_use = [false; 4];
-        let mut ac_in_use = [false; 4];
+        let mut dc_in_use = [false; crate::decode::arithmetic::NUM_ARITH_TBLS];
+        let mut ac_in_use = [false; crate::decode::arithmetic::NUM_ARITH_TBLS];
         if is_dc_scan && is_first {
             for &ci in &scan.component_indices {
                 dc_in_use[arithmetic_table_for_component(ci)] = true;

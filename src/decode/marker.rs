@@ -713,6 +713,18 @@ impl<'a> MarkerReader<'a> {
         Ok(())
     }
 
+    /// Crate-public shim for `read_dac`, enabling round-trip tests in
+    /// the encoder crate without exposing the internal parsing API to
+    /// downstream consumers.
+    #[cfg(test)]
+    pub(crate) fn read_dac_public(
+        &mut self,
+        dc_params: &mut [(u8, u8); crate::decode::arithmetic::NUM_ARITH_TBLS],
+        ac_params: &mut [u8; crate::decode::arithmetic::NUM_ARITH_TBLS],
+    ) -> Result<()> {
+        self.read_dac(dc_params, ac_params)
+    }
+
     fn read_sos(&mut self) -> Result<ScanHeader> {
         let _length = self.read_u16_be()?;
         let num_components = self.read_u8()? as usize;
