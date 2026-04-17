@@ -213,16 +213,21 @@ fn measure_captures_wall_clock() {
 
 #[test]
 fn measure_large_allocation_is_visible_in_peak_rss_on_supported_platforms() {
+    use std::hint::black_box;
     let (_sum, _m) = measure("alloc_16mib", || {
         let n: usize = 16 * 1024 * 1024;
-        let mut buf: Vec<u8> = vec![0u8; n];
+        // black_box() on the Vec prevents release-mode DCE from eliding the
+        // allocation entirely — without it the optimizer sees the buffer is
+        // dead and never touches physical memory, defeating the RSS probe.
+        let mut buf: Vec<u8> = black_box(vec![0u8; n]);
         let mut i: usize = 0;
         let mut acc: u64 = 0;
         while i < n {
-            buf[i] = (i & 0xFF) as u8;
+            buf[i] = black_box((i & 0xFF) as u8);
             acc = acc.wrapping_add(buf[i] as u64);
             i += 4096;
         }
+        black_box(buf);
         acc
     });
     if rss_supported() {
