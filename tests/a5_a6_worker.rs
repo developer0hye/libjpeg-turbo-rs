@@ -141,3 +141,57 @@ fn a5_2_norealloc_zero_still_errors_on_undersized_slice() {
         .expect_err("undersized slice must error even with NoRealloc=0");
     assert!(matches!(err, JpegError::BufferTooSmall { .. }));
 }
+
+// === A5-3: TJPARAM_SAVEMARKERS wires Decoder::save_markers() ===
+
+fn make_jpeg_with_app1_and_app2() -> Vec<u8> {
+    use libjpeg_turbo_rs::Encoder;
+    let width: usize = 16;
+    let height: usize = 16;
+    let pixels = vec![128u8; width * height * 3];
+    let icc = vec![0xAAu8; 48];
+    let exif = b"Exif\0\0MM\0*\0\0\0\x08\0\0\0\0".to_vec();
+    Encoder::new(&pixels, width, height, PixelFormat::Rgb)
+        .quality(75)
+        .subsampling(Subsampling::S444)
+        .icc_profile(&icc)
+        .exif_data(&exif)
+        .encode()
+        .expect("encode APP1+APP2 JPEG")
+}
+
+#[test]
+fn a5_3_save_markers_level2_populates_saved_markers() {
+    use libjpeg_turbo_rs::tj3::TjParam;
+    let jpeg = make_jpeg_with_app1_and_app2();
+    let mut handle = TjHandle::new();
+    handle.set(TjParam::SaveMarkers, 2).unwrap();
+    let img = handle.decompress(&jpeg).expect("decompress must succeed");
+    assert!(
+        !img.markers().is_empty(),
+        "SaveMarkers=2 must populate Image.saved_markers"
+    );
+    let has_app: bool = img
+        .markers()
+        .iter()
+        .any(|m| m.code == 0xE1 || m.code == 0xE2);
+    assert!(
+        has_app,
+        "expected at least one APP1 or APP2, got codes: {:?}",
+        img.markers().iter().map(|m| m.code).collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn a5_3_save_markers_level0_leaves_saved_markers_empty() {
+    use libjpeg_turbo_rs::tj3::TjParam;
+    let jpeg = make_jpeg_with_app1_and_app2();
+    let mut handle = TjHandle::new();
+    handle.set(TjParam::SaveMarkers, 0).unwrap();
+    let img = handle.decompress(&jpeg).expect("decompress must succeed");
+    assert!(
+        img.markers().is_empty(),
+        "SaveMarkers=0 must leave saved_markers empty, got {} markers",
+        img.markers().len()
+    );
+}
