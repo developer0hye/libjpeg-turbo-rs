@@ -195,3 +195,116 @@ fn a5_3_save_markers_level0_leaves_saved_markers_empty() {
         img.markers().len()
     );
 }
+
+// === A6-1: Encoder::reset_colorspace() matches jpeg_default_colorspace() ===
+//
+// `reset_colorspace()` clears any previously-set JPEG colorspace override
+// and restores inference from `PixelFormat`, mirroring C libjpeg-turbo's
+// `jpeg_default_colorspace()`. Concretely: after calling `.colorspace(Rgb)`
+// followed by `.reset_colorspace()`, a CMYK input must encode as a
+// 4-component JPEG (with the Adobe APP14 marker signaling CMYK), exactly
+// as if the override had never been applied.
+
+fn parse_sof_component_count(jpeg: &[u8]) -> Option<u8> {
+    let mut i: usize = 2;
+    while i + 3 < jpeg.len() && jpeg[i] == 0xFF {
+        let code = jpeg[i + 1];
+        if code == 0xD9 {
+            return None;
+        }
+        // Standalone markers without payload length.
+        if (0xD0..=0xD9).contains(&code) || code == 0x01 {
+            i += 2;
+            continue;
+        }
+        let seg_len = u16::from_be_bytes([jpeg[i + 2], jpeg[i + 3]]) as usize;
+        if matches!(code, 0xC0 | 0xC1 | 0xC2 | 0xC3 | 0xC9 | 0xCA | 0xCB) {
+            // SOFn payload: [P(1)][Y(2)][X(2)][Nf(1)][components...]
+            return Some(jpeg[i + 4 + 5]);
+        }
+        i += 2 + seg_len;
+    }
+    None
+}
+
+fn find_adobe_transform(jpeg: &[u8]) -> Option<u8> {
+    let mut i: usize = 2;
+    while i + 3 < jpeg.len() && jpeg[i] == 0xFF {
+        let code = jpeg[i + 1];
+        if code == 0xDA || code == 0xD9 {
+            return None;
+        }
+        let seg_len = u16::from_be_bytes([jpeg[i + 2], jpeg[i + 3]]) as usize;
+        if code == 0xEE
+            && seg_len >= 12
+            && i + 4 + 5 <= jpeg.len()
+            && &jpeg[i + 4..i + 9] == b"Adobe"
+        {
+            // Adobe APP14 layout after the len field (12 payload bytes):
+            //   "Adobe"(5) ver(2) flags0(2) flags1(2) transform(1)
+            return Some(jpeg[i + 2 + seg_len - 1]);
+        }
+        i += 2 + seg_len;
+    }
+    None
+}
+
+#[test]
+fn a6_1_reset_colorspace_auto_selects_cmyk_for_cmyk_input() {
+    use libjpeg_turbo_rs::{ColorSpace, Encoder};
+    let width: usize = 16;
+    let height: usize = 16;
+    let pixels: Vec<u8> = (0..width * height * 4).map(|i| (i % 251) as u8).collect();
+
+    // Force an incorrect override, then reset and encode.
+    let jpeg = Encoder::new(&pixels, width, height, PixelFormat::Cmyk)
+        .quality(75)
+        .colorspace(ColorSpace::Rgb)
+        .reset_colorspace()
+        .encode()
+        .expect("reset_colorspace then CMYK encode must succeed");
+
+    // SOI check.
+    assert_eq!(jpeg[0], 0xFF);
+    assert_eq!(jpeg[1], 0xD8);
+
+    assert_eq!(
+        parse_sof_component_count(&jpeg),
+        Some(4),
+        "CMYK input must encode as 4-component JPEG after reset_colorspace"
+    );
+
+    assert_eq!(
+        find_adobe_transform(&jpeg),
+        Some(0),
+        "Adobe APP14 transform must be 0 (CMYK) after reset_colorspace"
+    );
+}
+
+#[test]
+fn a6_1_reset_colorspace_clears_rgb_override_for_rgb_input() {
+    use libjpeg_turbo_rs::{ColorSpace, Encoder};
+    let width: usize = 16;
+    let height: usize = 16;
+    let pixels: Vec<u8> = (0..width * height * 3).map(|i| (i % 200) as u8).collect();
+
+    // With JCS_RGB override, encoder emits RGB-direct (no color conversion).
+    let jpeg_rgb = Encoder::new(&pixels, width, height, PixelFormat::Rgb)
+        .quality(75)
+        .colorspace(ColorSpace::Rgb)
+        .encode()
+        .unwrap();
+
+    // After reset, auto-detection picks YCbCr — different output bytes.
+    let jpeg_auto = Encoder::new(&pixels, width, height, PixelFormat::Rgb)
+        .quality(75)
+        .colorspace(ColorSpace::Rgb)
+        .reset_colorspace()
+        .encode()
+        .unwrap();
+
+    assert_ne!(
+        jpeg_rgb, jpeg_auto,
+        "reset_colorspace must undo the RGB override"
+    );
+}
