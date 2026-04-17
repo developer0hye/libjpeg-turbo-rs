@@ -627,8 +627,9 @@ impl TjHandle {
                     .retain(|m| !(m.code == 0xE2 && m.data.starts_with(b"ICC_PROFILE\0")));
             }
             _ => {
-                // Level 2 (all) and 4 (ICC only): extract ICC
-                self.icc_profile = img.icc_profile.take();
+                // Level 2 (all) and 4 (ICC only): extract ICC to handle while
+                // leaving the image copy intact (tj3GetICCProfile symmetry).
+                self.icc_profile = img.icc_profile.clone();
             }
         }
 
