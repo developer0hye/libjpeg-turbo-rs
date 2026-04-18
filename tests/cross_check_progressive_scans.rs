@@ -2,6 +2,8 @@
 //! libjpeg-turbo (djpeg). Tests verify that final-scan output is pixel-identical
 //! to C djpeg, and that intermediate scans monotonically improve quality.
 
+mod helpers;
+
 use std::io::Write;
 use std::path::PathBuf;
 use std::process::Command;
@@ -10,25 +12,6 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use libjpeg_turbo_rs::{
     compress_progressive, Encoder, PixelFormat, ProgressiveDecoder, Subsampling,
 };
-
-// ===========================================================================
-// Tool discovery
-// ===========================================================================
-
-/// Locate the djpeg binary. Checks /opt/homebrew/bin/djpeg first, then falls
-/// back to whatever `which djpeg` returns. Returns `None` when not found.
-fn djpeg_path() -> Option<PathBuf> {
-    let homebrew: PathBuf = PathBuf::from("/opt/homebrew/bin/djpeg");
-    if homebrew.exists() {
-        return Some(homebrew);
-    }
-    Command::new("which")
-        .arg("djpeg")
-        .output()
-        .ok()
-        .filter(|o| o.status.success())
-        .map(|o| PathBuf::from(String::from_utf8_lossy(&o.stdout).trim().to_string()))
-}
 
 // ===========================================================================
 // Helpers
@@ -327,13 +310,7 @@ fn compute_psnr(a: &[u8], b: &[u8]) -> f64 {
 /// consume all scans, call finish(). Compare final output vs C djpeg → diff=0.
 #[test]
 fn c_xval_progressive_final_scan_420() {
-    let djpeg: PathBuf = match djpeg_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: djpeg not found");
-            return;
-        }
-    };
+    let djpeg: PathBuf = require_c_tool!("djpeg");
 
     let width: usize = 48;
     let height: usize = 48;
@@ -390,13 +367,7 @@ fn c_xval_progressive_final_scan_420() {
 /// consume all scans, call finish(). Compare final output vs C djpeg → diff=0.
 #[test]
 fn c_xval_progressive_final_scan_444() {
-    let djpeg: PathBuf = match djpeg_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: djpeg not found");
-            return;
-        }
-    };
+    let djpeg: PathBuf = require_c_tool!("djpeg");
 
     let width: usize = 48;
     let height: usize = 48;
@@ -451,13 +422,7 @@ fn c_xval_progressive_final_scan_444() {
 /// consume all scans, call finish(). Compare final output vs C djpeg → diff=0.
 #[test]
 fn c_xval_progressive_final_scan_422() {
-    let djpeg: PathBuf = match djpeg_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: djpeg not found");
-            return;
-        }
-    };
+    let djpeg: PathBuf = require_c_tool!("djpeg");
 
     let width: usize = 48;
     let height: usize = 48;
@@ -513,13 +478,7 @@ fn c_xval_progressive_final_scan_422() {
 /// decode. Assert PSNR increases monotonically. Final scan PSNR = infinity.
 #[test]
 fn c_xval_progressive_intermediate_quality_improves() {
-    let djpeg: PathBuf = match djpeg_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: djpeg not found");
-            return;
-        }
-    };
+    let djpeg: PathBuf = require_c_tool!("djpeg");
 
     let width: usize = 64;
     let height: usize = 64;
@@ -598,13 +557,7 @@ fn c_xval_progressive_intermediate_quality_improves() {
 /// final output vs C djpeg -pnm (PGM) → diff=0.
 #[test]
 fn c_xval_progressive_grayscale() {
-    let djpeg: PathBuf = match djpeg_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: djpeg not found");
-            return;
-        }
-    };
+    let djpeg: PathBuf = require_c_tool!("djpeg");
 
     let width: usize = 48;
     let height: usize = 48;
@@ -738,13 +691,7 @@ fn c_xval_progressive_num_scans_consistency() {
 /// 320x240 progressive JPEG. Final scan output vs C djpeg → diff=0.
 #[test]
 fn c_xval_progressive_large_image() {
-    let djpeg: PathBuf = match djpeg_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: djpeg not found");
-            return;
-        }
-    };
+    let djpeg: PathBuf = require_c_tool!("djpeg");
 
     let width: usize = 320;
     let height: usize = 240;
