@@ -339,6 +339,21 @@ fn c_cjpeg_420s_islow_opt() {
 #[test]
 fn c_cjpeg_lossless() {
     let cjpeg = require_c_tool!("cjpeg");
+    // Ubuntu 24.04's default libjpeg-turbo-progs is v2.1.x (no -lossless in cjpeg).
+    // Only libjpeg-turbo 3.x+ exposes -lossless on the cjpeg CLI.
+    let help = std::process::Command::new(&cjpeg)
+        .arg("-help")
+        .output()
+        .expect("cjpeg -help");
+    let help_text = format!(
+        "{}{}",
+        String::from_utf8_lossy(&help.stderr),
+        String::from_utf8_lossy(&help.stdout)
+    );
+    if !help_text.contains("-lossless") {
+        eprintln!("SKIP: cjpeg does not support -lossless (need libjpeg-turbo 3.x)");
+        return;
+    }
     let imgdir = testimages();
     let src = imgdir.join("testorig.ppm");
     if !src.exists() {
