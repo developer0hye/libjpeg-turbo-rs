@@ -7,6 +7,8 @@ use libjpeg_turbo_rs::{
     Subsampling,
 };
 
+mod helpers;
+
 /// Helper: create synthetic pixel data with some spatial variation.
 fn make_pixels(width: usize, height: usize, bpp: usize) -> Vec<u8> {
     let mut pixels: Vec<u8> = Vec::with_capacity(width * height * bpp);
@@ -509,19 +511,6 @@ fn build_tiff_with_orientation(orientation: u16) -> Vec<u8> {
 // C djpeg cross-validation helpers
 // ============================================================
 
-fn djpeg_path() -> Option<PathBuf> {
-    let homebrew: PathBuf = PathBuf::from("/opt/homebrew/bin/djpeg");
-    if homebrew.exists() {
-        return Some(homebrew);
-    }
-    Command::new("which")
-        .arg("djpeg")
-        .output()
-        .ok()
-        .filter(|o| o.status.success())
-        .map(|o| PathBuf::from(String::from_utf8_lossy(&o.stdout).trim().to_string()))
-}
-
 static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 fn temp_path(name: &str) -> PathBuf {
@@ -666,13 +655,7 @@ fn cross_validate_progressive_jpeg(djpeg: &Path, jpeg_data: &[u8], label: &str) 
 
 #[test]
 fn c_djpeg_cross_validation_progressive_edge_cases() {
-    let djpeg: PathBuf = match djpeg_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: djpeg not found");
-            return;
-        }
-    };
+    let djpeg: PathBuf = require_c_tool!("djpeg");
 
     let pixels: Vec<u8> = make_pixels(32, 32, 3);
 

@@ -6,6 +6,8 @@ use libjpeg_turbo_rs::{
     Subsampling,
 };
 
+mod helpers;
+
 /// Helper: create a simple progressive JPEG from synthetic pixel data.
 fn make_progressive_jpeg(width: usize, height: usize) -> Vec<u8> {
     let mut pixels: Vec<u8> = Vec::with_capacity(width * height * 3);
@@ -250,23 +252,6 @@ fn pixel_diff(a: &[u8], b: &[u8]) -> u64 {
 
 // --- C djpeg cross-validation helpers ---
 
-/// Find the djpeg binary: check /opt/homebrew/bin/djpeg first, then fall back to PATH.
-fn djpeg_path() -> Option<std::path::PathBuf> {
-    let homebrew_path = std::path::PathBuf::from("/opt/homebrew/bin/djpeg");
-    if homebrew_path.exists() {
-        return Some(homebrew_path);
-    }
-    // Fall back to whichever djpeg is on PATH
-    let output = Command::new("which").arg("djpeg").output().ok()?;
-    if output.status.success() {
-        let path_str: String = String::from_utf8_lossy(&output.stdout).trim().to_string();
-        if !path_str.is_empty() {
-            return Some(std::path::PathBuf::from(path_str));
-        }
-    }
-    None
-}
-
 /// Parse a binary PPM (P6) image produced by `djpeg -ppm`.
 /// Returns (width, height, pixel_data) where pixel_data is RGB bytes.
 fn parse_ppm(data: &[u8]) -> (usize, usize, Vec<u8>) {
@@ -349,13 +334,7 @@ fn decode_with_djpeg(
 /// 3. The final progressive output is pixel-identical to C djpeg (diff=0).
 #[test]
 fn c_djpeg_progressive_intermediate_diff_zero() {
-    let djpeg = match djpeg_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: djpeg not found");
-            return;
-        }
-    };
+    let djpeg = require_c_tool!("djpeg");
 
     let progressive_fixtures: &[(&str, &[u8])] = &[
         (
@@ -513,13 +492,7 @@ fn c_djpeg_progressive_intermediate_diff_zero() {
 
 #[test]
 fn c_djpeg_progressive_output_final_diff_zero() {
-    let djpeg = match djpeg_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: djpeg not found");
-            return;
-        }
-    };
+    let djpeg = require_c_tool!("djpeg");
 
     let jpeg_data: &[u8] = include_bytes!("fixtures/photo_320x240_420_prog.jpg");
 
