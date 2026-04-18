@@ -3,6 +3,8 @@ use std::process::Command;
 
 use libjpeg_turbo_rs::{compress_lossless, compress_lossless_extended, decompress, PixelFormat};
 
+mod helpers;
+
 #[test]
 fn lossless_encode_grayscale_roundtrip() {
     let pixels: Vec<u8> = (0..=255).collect();
@@ -184,19 +186,6 @@ fn lossless_encode_invalid_point_transform() {
 // C djpeg cross-validation helpers
 // ===========================================================================
 
-fn djpeg_path() -> Option<PathBuf> {
-    let homebrew: PathBuf = PathBuf::from("/opt/homebrew/bin/djpeg");
-    if homebrew.exists() {
-        return Some(homebrew);
-    }
-    Command::new("which")
-        .arg("djpeg")
-        .output()
-        .ok()
-        .filter(|o| o.status.success())
-        .map(|o| PathBuf::from(String::from_utf8_lossy(&o.stdout).trim().to_string()))
-}
-
 /// Check if djpeg supports lossless JPEG (SOF3) decoding.
 fn djpeg_supports_lossless(djpeg: &std::path::Path) -> bool {
     // Encode a minimal lossless JPEG and try to decode it with djpeg.
@@ -263,13 +252,7 @@ fn lossless_encode_encoder_builder_lossless_point_transform() {
 #[test]
 fn c_djpeg_lossless_encode_valid() {
     // Step 1: Find djpeg, skip if not available
-    let djpeg: PathBuf = match djpeg_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: djpeg not found on PATH or /opt/homebrew/bin");
-            return;
-        }
-    };
+    let djpeg: PathBuf = require_c_tool!("djpeg");
 
     // Step 2: Check if this djpeg supports lossless (SOF3), skip if not
     if !djpeg_supports_lossless(&djpeg) {
@@ -495,13 +478,7 @@ fn parse_pgm_bytes(raw: &[u8]) -> (usize, usize, Vec<u8>) {
 /// Lossless JPEG must produce pixel-exact results (diff=0).
 #[test]
 fn c_djpeg_lossless_encode_extended_diff_zero() {
-    let djpeg: PathBuf = match djpeg_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: djpeg not found, skipping c_djpeg_lossless_encode_extended_diff_zero");
-            return;
-        }
-    };
+    let djpeg: PathBuf = require_c_tool!("djpeg");
 
     if !djpeg_supports_lossless(&djpeg) {
         eprintln!(
