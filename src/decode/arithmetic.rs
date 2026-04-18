@@ -13,6 +13,9 @@ enum StatRef {
 }
 
 /// Arithmetic entropy decoder state.
+///
+/// Arithmetic conditioning/statistics arrays use NUM_ARITH_TBLS = 16 slots
+/// per ITU-T T.81 / libjpeg-turbo jpeglib.h.
 pub struct ArithDecoder<'a> {
     data: &'a [u8],
     pos: usize,
@@ -25,15 +28,18 @@ pub struct ArithDecoder<'a> {
     pub last_dc_val: [i32; 4],
     dc_context: [usize; 4],
 
-    dc_stats: [[u8; DC_STAT_BINS]; 4],
-    ac_stats: [[u8; AC_STAT_BINS]; 4],
+    dc_stats: [[u8; DC_STAT_BINS]; NUM_ARITH_TBLS],
+    ac_stats: [[u8; AC_STAT_BINS]; NUM_ARITH_TBLS],
     fixed_bin: [u8; 4],
 
-    arith_dc_l: [u8; 4],
-    arith_dc_u: [u8; 4],
+    arith_dc_l: [u8; NUM_ARITH_TBLS],
+    arith_dc_u: [u8; NUM_ARITH_TBLS],
     #[allow(dead_code)]
-    arith_ac_k: [u8; 4],
+    arith_ac_k: [u8; NUM_ARITH_TBLS],
 }
+
+/// Number of arithmetic coding tables per ITU-T T.81 (jpeglib.h `NUM_ARITH_TBLS`).
+pub const NUM_ARITH_TBLS: usize = 16;
 
 impl<'a> ArithDecoder<'a> {
     pub fn new(data: &'a [u8], pos: usize) -> Self {
@@ -46,24 +52,24 @@ impl<'a> ArithDecoder<'a> {
             ct: -16,
             last_dc_val: [0; 4],
             dc_context: [0; 4],
-            dc_stats: [[0; DC_STAT_BINS]; 4],
-            ac_stats: [[0; AC_STAT_BINS]; 4],
+            dc_stats: [[0; DC_STAT_BINS]; NUM_ARITH_TBLS],
+            ac_stats: [[0; AC_STAT_BINS]; NUM_ARITH_TBLS],
             fixed_bin: [113, 0, 0, 0],
-            arith_dc_l: [0; 4],
-            arith_dc_u: [1; 4],
-            arith_ac_k: [5; 4],
+            arith_dc_l: [0; NUM_ARITH_TBLS],
+            arith_dc_u: [1; NUM_ARITH_TBLS],
+            arith_ac_k: [5; NUM_ARITH_TBLS],
         }
     }
 
     pub fn set_dc_conditioning(&mut self, table: usize, l: u8, u: u8) {
-        if table < 4 {
+        if table < NUM_ARITH_TBLS {
             self.arith_dc_l[table] = l;
             self.arith_dc_u[table] = u;
         }
     }
 
     pub fn set_ac_conditioning(&mut self, table: usize, kx: u8) {
-        if table < 4 {
+        if table < NUM_ARITH_TBLS {
             self.arith_ac_k[table] = kx;
         }
     }
@@ -534,5 +540,21 @@ mod tests {
         assert_eq!(decoder.a, 0);
         assert_eq!(decoder.ct, -16);
         assert_eq!(decoder.last_dc_val, [0; 4]);
+    }
+
+    /// Spec: NUM_ARITH_TBLS = 16. Accept Tb up to 15 without panicking.
+    #[test]
+    fn conditioning_accepts_high_table_indices() {
+        let data = [0u8; 16];
+        let mut decoder = ArithDecoder::new(&data, 0);
+        // All 16 slots must be settable — previously silently ignored above 3.
+        for tbl in 0..NUM_ARITH_TBLS {
+            decoder.set_dc_conditioning(tbl, (tbl as u8) & 0x0F, ((tbl as u8) & 0x0F) + 1);
+            decoder.set_ac_conditioning(tbl, ((tbl as u8) % 63) + 1);
+        }
+        // Spot-check a slot beyond the old 4-table limit.
+        assert_eq!(decoder.arith_dc_l[10], 10);
+        assert_eq!(decoder.arith_dc_u[10], 11);
+        assert_eq!(decoder.arith_ac_k[12], 13);
     }
 }
