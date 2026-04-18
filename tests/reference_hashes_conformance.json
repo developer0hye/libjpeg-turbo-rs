@@ -1,0 +1,8 @@
+{
+    "_comment": "Known-good hashes for every JPEG under references/libjpeg-turbo/testimages/. Written by tests/worker_b3_reference_image_hashes.rs. Hash algorithm: std::hash::DefaultHasher (SipHash-1-3) over the decoded pixel buffer (Rgb for 8-bit fixtures, raw i16 little-endian samples for 12-bit fixtures). To regenerate after an intentional decoder change: UPDATE_HASHES=1 cargo test --test worker_b3_reference_image_hashes -- --nocapture.",
+    "_format_version": 1,
+    "monkey12.jpg_rgb12": "dbbcec48384a4a40",
+    "testimgari.jpg_rgb8": "92bc9df9fcb659c0",
+    "testimgint.jpg_rgb8": "92bc9df9fcb659c0",
+    "testorig.jpg_rgb8": "7d5f59c7bb3b96bc"
+}
