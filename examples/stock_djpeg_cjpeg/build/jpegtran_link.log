@@ -1,0 +1,51 @@
+Undefined symbols for architecture arm64:
+  "_jcopy_block_row", referenced from:
+      transupp.o
+  "_jdiv_round_up", referenced from:
+      transupp.o
+  "_jpeg_CreateCompress", referenced from:
+      _main in jpegtran.o
+  "_jpeg_CreateDecompress", referenced from:
+      _main in jpegtran.o
+  "_jpeg_add_quant_table", referenced from:
+      rdswitch.o
+  "_jpeg_copy_critical_parameters", referenced from:
+      _main in jpegtran.o
+  "_jpeg_core_output_dimensions", referenced from:
+      transupp.o
+  "_jpeg_default_qtables", referenced from:
+      rdswitch.o
+  "_jpeg_destroy_compress", referenced from:
+      _main in jpegtran.o
+  "_jpeg_destroy_decompress", referenced from:
+      _main in jpegtran.o
+  "_jpeg_finish_compress", referenced from:
+      _main in jpegtran.o
+  "_jpeg_finish_decompress", referenced from:
+      _main in jpegtran.o
+  "_jpeg_quality_scaling", referenced from:
+      rdswitch.o
+  "_jpeg_read_coefficients", referenced from:
+      _main in jpegtran.o
+  "_jpeg_read_header", referenced from:
+      _main in jpegtran.o
+  "_jpeg_save_markers", referenced from:
+      transupp.o
+  "_jpeg_set_colorspace", referenced from:
+      transupp.o
+  "_jpeg_simple_progression", referenced from:
+      _parse_switches in jpegtran.o
+  "_jpeg_std_error", referenced from:
+      _main in jpegtran.o
+  "_jpeg_stdio_dest", referenced from:
+      _main in jpegtran.o
+  "_jpeg_stdio_src", referenced from:
+      _main in jpegtran.o
+  "_jpeg_write_coefficients", referenced from:
+      _main in jpegtran.o
+  "_jpeg_write_icc_profile", referenced from:
+      _main in jpegtran.o
+  "_jpeg_write_marker", referenced from:
+      transupp.o
+ld: symbol(s) not found for architecture arm64
+clang: error: linker command failed with exit code 1 (use -v to see invocation)
