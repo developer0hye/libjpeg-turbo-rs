@@ -1,5 +1,5 @@
 [workspace]
-members = [".", "crates/libjpeg-turbo-rs-wasm", "crates/libjpeg-turbo-rs-image"]
+members = [".", "crates/libjpeg-turbo-rs-wasm", "crates/libjpeg-turbo-rs-image", "crates/libjpeg-turbo-rs-capi"]
 
 [package]
 name = "libjpeg-turbo-rs"
