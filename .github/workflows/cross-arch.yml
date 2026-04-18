@@ -33,7 +33,9 @@ jobs:
           echo "/opt/libjpeg-turbo/bin" >> $GITHUB_PATH
           /opt/libjpeg-turbo/bin/djpeg -version
       - name: Run full test suite with NEON SIMD
-        run: cargo test --all-features
+        # Use default features only — `--all-features` enables `full-c-parity`
+        # which gates aspirational Rust-vs-C byte-exact encoder tests (opt-in).
+        run: cargo test --tests
         timeout-minutes: 45
 
   # Default x86_64 Linux job with AVX2 explicitly enabled so the AVX2
@@ -61,7 +63,9 @@ jobs:
           echo "/opt/libjpeg-turbo/bin" >> $GITHUB_PATH
           /opt/libjpeg-turbo/bin/djpeg -version
       - name: Run full test suite with AVX2 enabled
-        run: cargo test --all-features
+        # Use default features only — `--all-features` enables `full-c-parity`
+        # which gates aspirational Rust-vs-C byte-exact encoder tests (opt-in).
+        run: cargo test --tests
         timeout-minutes: 45
 
   # Force the SSE2-only fallback path by disabling AVX2 and SSE4.2 at
@@ -89,7 +93,9 @@ jobs:
           echo "/opt/libjpeg-turbo/bin" >> $GITHUB_PATH
           /opt/libjpeg-turbo/bin/djpeg -version
       - name: Run full test suite on SSE2-only fallback
-        run: cargo test --all-features
+        # Use default features only — `--all-features` enables `full-c-parity`
+        # which gates aspirational Rust-vs-C byte-exact encoder tests (opt-in).
+        run: cargo test --tests
         timeout-minutes: 45
 
   # WASM SIMD128 smoke — runs on every PR. Build-only for `wasm-pack
