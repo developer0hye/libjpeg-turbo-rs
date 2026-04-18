@@ -67,6 +67,7 @@ pub use common::sample::Sample;
 pub use common::traits::{DefaultErrorHandler, ErrorHandler, ProgressInfo, ProgressListener};
 pub use common::types::*;
 pub use decode::pipeline::{Decoder, Image};
+pub use decode::resync::{DefaultResyncStrategy, RestartResyncStrategy, ResyncAction};
 pub use transform::{MarkerCopyMode, TransformOp, TransformOptions};
 /// 12-bit and 16-bit sample precision support.
 pub mod precision {

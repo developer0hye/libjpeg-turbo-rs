@@ -12,5 +12,6 @@ pub mod marker;
 pub mod merged_upsample;
 pub mod pipeline;
 pub mod progressive;
+pub mod resync;
 pub mod toggles;
 pub mod upsample;
