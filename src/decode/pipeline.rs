@@ -202,6 +202,14 @@ pub struct Decoder<'a> {
     /// Custom marker processor callbacks, keyed by marker code.
     #[allow(clippy::type_complexity)]
     marker_processors: std::collections::HashMap<u8, Box<dyn Fn(&[u8]) -> Option<Vec<u8>>>>,
+    /// Optional RST-marker desync recovery strategy (A6-3, mirrors
+    /// `jpeg_resync_to_restart`). `None` means the historical Rust
+    /// behavior of unconditionally skipping past the RST.
+    ///
+    /// Uses `RefCell` because `decode_image(&self)` must mutate the
+    /// strategy through an immutable receiver.
+    pub(crate) resync_strategy:
+        std::cell::RefCell<Option<Box<dyn crate::decode::resync::RestartResyncStrategy>>>,
 }
 
 impl<'a> Decoder<'a> {
@@ -235,6 +243,7 @@ impl<'a> Decoder<'a> {
             dither_565: false,
             merged_upsample: false,
             marker_processors: std::collections::HashMap::new(),
+            resync_strategy: std::cell::RefCell::new(None),
         })
     }
 
@@ -554,6 +563,77 @@ impl<'a> Decoder<'a> {
         }
         self.marker_processors
             .insert(marker_type, Box::new(processor));
+    }
+
+    /// Install a custom `RestartResyncStrategy` to handle RST-marker desync
+    /// events (mirrors C libjpeg-turbo's `jpeg_resync_to_restart` hook).
+    ///
+    /// When the decoder encounters a restart marker whose RST number does
+    /// not match the expected counter — or when no RST marker is found at
+    /// the expected position — the strategy's `on_desync` method is
+    /// consulted. The returned `ResyncAction` tells the decoder whether to
+    /// continue (accept the observed marker), skip to the next RST in the
+    /// stream, or abort with a `CorruptData` error.
+    ///
+    /// If no strategy is installed, the decoder defaults to `Continue` —
+    /// the historical Rust behavior of unconditionally accepting whatever
+    /// RST marker it finds.
+    pub fn set_resync_strategy<S>(&mut self, strategy: S)
+    where
+        S: crate::decode::resync::RestartResyncStrategy + 'static,
+    {
+        *self.resync_strategy.borrow_mut() = Some(Box::new(strategy));
+    }
+
+    /// Resync logic shared between the fast-path decode loop and any
+    /// future callers. Consults the installed `RestartResyncStrategy` when
+    /// the observed RST number does not match `expected_rst`, applies the
+    /// returned `ResyncAction`, and updates `expected_rst` to reflect the
+    /// post-resync synchronization point.
+    fn apply_resync(
+        bit_reader: &mut crate::decode::bitstream::BitReader,
+        expected_rst: &mut u8,
+        strategy: &mut Option<Box<dyn crate::decode::resync::RestartResyncStrategy>>,
+    ) -> Result<()> {
+        use crate::decode::resync::ResyncAction;
+        let found: Option<u8> = bit_reader.reset_and_consume_rst();
+        let expected_val: u8 = *expected_rst & 0x07;
+        let is_match: bool = matches!(found, Some(n) if n == expected_val);
+        if is_match || strategy.is_none() {
+            // Matched (or no strategy: historical Continue behavior).
+            *expected_rst = expected_val.wrapping_add(1) & 0x07;
+            return Ok(());
+        }
+        let strategy = strategy.as_mut().expect("handled above").as_mut();
+        match strategy.on_desync(expected_val, found) {
+            ResyncAction::Continue => {
+                // Accept the observed RST (or lack thereof) as the new
+                // sync point. If we saw an RST number, realign the counter
+                // so subsequent expectations follow it.
+                if let Some(n) = found {
+                    *expected_rst = n.wrapping_add(1) & 0x07;
+                } else {
+                    *expected_rst = expected_val.wrapping_add(1) & 0x07;
+                }
+                Ok(())
+            }
+            ResyncAction::Skip => {
+                // Advance past the bad marker (if any) and scan for the
+                // next RST in the stream. Re-align the counter to that
+                // marker's number + 1.
+                if let Some(n) = bit_reader.scan_to_next_rst() {
+                    *expected_rst = n.wrapping_add(1) & 0x07;
+                    Ok(())
+                } else {
+                    Err(JpegError::CorruptData(
+                        "no further RST marker found after desync".into(),
+                    ))
+                }
+            }
+            ResyncAction::Abort => Err(JpegError::CorruptData(format!(
+                "RST marker desync: expected RST{expected_val}, found {found:?}"
+            ))),
+        }
     }
 
     pub fn decode(data: &'a [u8]) -> Result<Image> {
@@ -1229,13 +1309,19 @@ impl<'a> Decoder<'a> {
         // The lenient/crop path is below with full error recovery support.
         if !self.lenient && mcu_y_start == 0 && mcu_y_end == mcus_y {
             let restart_interval: u32 = self.metadata.restart_interval as u32;
+            let mut expected_rst: u8 = 0;
             for mcu_y in 0..mcus_y {
                 for mcu_x in 0..mcus_x {
                     if restart_interval > 0
                         && mcu_count > 0
                         && mcu_count.is_multiple_of(restart_interval)
                     {
-                        bit_reader.reset();
+                        if self.resync_strategy.borrow().is_some() {
+                            let mut strat_ref = self.resync_strategy.borrow_mut();
+                            Self::apply_resync(&mut bit_reader, &mut expected_rst, &mut strat_ref)?;
+                        } else {
+                            bit_reader.reset();
+                        }
                         mcu_decoder.reset();
                     }
 
