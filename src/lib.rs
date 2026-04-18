@@ -45,6 +45,7 @@ pub use api::raw_data::{compress_raw, decompress_raw, RawImage};
 pub mod raw_data_12 {
     pub use crate::api::raw_data_12::{compress_raw_12, decompress_raw_12, RawImage12};
 }
+pub use api::raw_thumbnail::extract_embedded_jpeg;
 pub use encode::marker_writer::MarkerStreamWriter;
 /// Color quantization for 8-bit indexed/palette output.
 pub mod quantize {
