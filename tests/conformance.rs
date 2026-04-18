@@ -1,3 +1,5 @@
+mod helpers;
+
 use std::io::BufRead;
 use std::process::Command;
 
@@ -311,23 +313,6 @@ fn progressive_photo_cross_validation() {
 
 // --- C djpeg cross-validation helpers ---
 
-/// Find the djpeg binary: check /opt/homebrew/bin/djpeg first, then fall back to PATH.
-fn djpeg_path() -> Option<std::path::PathBuf> {
-    let homebrew_path = std::path::PathBuf::from("/opt/homebrew/bin/djpeg");
-    if homebrew_path.exists() {
-        return Some(homebrew_path);
-    }
-    // Fall back to whichever djpeg is on PATH
-    let output = Command::new("which").arg("djpeg").output().ok()?;
-    if output.status.success() {
-        let path_str = String::from_utf8_lossy(&output.stdout).trim().to_string();
-        if !path_str.is_empty() {
-            return Some(std::path::PathBuf::from(path_str));
-        }
-    }
-    None
-}
-
 /// Parse a binary PPM (P6) image produced by `djpeg -ppm`.
 /// Returns (width, height, pixel_data) where pixel_data is RGB bytes.
 fn parse_ppm_p6(data: &[u8]) -> (usize, usize, Vec<u8>) {
@@ -405,13 +390,7 @@ fn decode_with_djpeg(djpeg: &std::path::Path, jpeg_data: &[u8]) -> Vec<u8> {
 
 #[test]
 fn c_djpeg_conformance_cmyk_diff_zero() {
-    let djpeg = match djpeg_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: djpeg not found");
-            return;
-        }
-    };
+    let djpeg = require_c_tool!("djpeg");
 
     // CMYK and 4-component JPEG → RGB: djpeg converts CMYK to RGB when writing PPM
     let cmyk_fixtures: &[(&str, &[u8])] = &[
@@ -534,13 +513,7 @@ fn c_djpeg_conformance_cmyk_diff_zero() {
 
 #[test]
 fn c_djpeg_fixture_decode_diff_zero() {
-    let djpeg = match djpeg_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: djpeg not found");
-            return;
-        }
-    };
+    let djpeg = require_c_tool!("djpeg");
 
     let fixtures: &[(&str, &[u8])] = &[
         (
