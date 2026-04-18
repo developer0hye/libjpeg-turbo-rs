@@ -1,0 +1,5 @@
+# Pillow venv is generated on demand by run.sh; do not commit it.
+venv/
+# Round-trip artifact (test_pillow.py unlinks it on normal exit, but a
+# crashed run may leave it behind — never commit it).
+pillow_smoke_roundtrip.jpg
