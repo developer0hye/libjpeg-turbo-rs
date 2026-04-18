@@ -9,6 +9,8 @@
 //! All tests gracefully skip if cjpeg/djpeg are not found in PATH or at
 //! /opt/homebrew/bin, so CI environments without them still pass.
 
+mod helpers;
+
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -21,34 +23,6 @@ use libjpeg_turbo_rs::{
 // ===========================================================================
 // Tool discovery
 // ===========================================================================
-
-/// Path to C djpeg binary, or `None` if not installed.
-fn djpeg_path() -> Option<PathBuf> {
-    let homebrew: PathBuf = PathBuf::from("/opt/homebrew/bin/djpeg");
-    if homebrew.exists() {
-        return Some(homebrew);
-    }
-    Command::new("which")
-        .arg("djpeg")
-        .output()
-        .ok()
-        .filter(|o| o.status.success())
-        .map(|o| PathBuf::from(String::from_utf8_lossy(&o.stdout).trim().to_string()))
-}
-
-/// Path to C cjpeg binary, or `None` if not installed.
-fn cjpeg_path() -> Option<PathBuf> {
-    let homebrew: PathBuf = PathBuf::from("/opt/homebrew/bin/cjpeg");
-    if homebrew.exists() {
-        return Some(homebrew);
-    }
-    Command::new("which")
-        .arg("cjpeg")
-        .output()
-        .ok()
-        .filter(|o| o.status.success())
-        .map(|o| PathBuf::from(String::from_utf8_lossy(&o.stdout).trim().to_string()))
-}
 
 /// Return `true` if cjpeg supports the `-arithmetic` flag.
 fn cjpeg_supports_arithmetic(cjpeg: &Path) -> bool {
@@ -262,7 +236,7 @@ fn rust_encode_c_decode(
     ) -> libjpeg_turbo_rs::Result<Vec<u8>>,
     tolerance: u8,
 ) -> bool {
-    let djpeg: PathBuf = match djpeg_path() {
+    let djpeg: PathBuf = match helpers::djpeg_path() {
         Some(p) => p,
         None => {
             eprintln!("SKIP: djpeg not found");
@@ -376,13 +350,7 @@ fn rust_encode_c_decode_baseline_422() {
 
 #[test]
 fn rust_encode_c_decode_progressive() {
-    let djpeg: PathBuf = match djpeg_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: djpeg not found");
-            return;
-        }
-    };
+    let djpeg: PathBuf = require_c_tool!("djpeg");
     let w: usize = 48;
     let h: usize = 48;
     let pixels: Vec<u8> = generate_pattern(w, h);
@@ -427,13 +395,7 @@ fn rust_encode_c_decode_progressive() {
 /// different coefficient patterns (zero-run lengths, correction bit counts).
 #[test]
 fn progressive_ac_refine_c_djpeg_compatible() {
-    let djpeg: PathBuf = match djpeg_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: djpeg not found");
-            return;
-        }
-    };
+    let djpeg: PathBuf = require_c_tool!("djpeg");
 
     // Test several configurations to cover edge cases in AC refine:
     // - Small image: few MCUs, short runs
@@ -509,13 +471,7 @@ fn rust_encode_c_decode_optimized() {
 
 #[test]
 fn rust_encode_c_decode_arithmetic() {
-    let djpeg: PathBuf = match djpeg_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: djpeg not found");
-            return;
-        }
-    };
+    let djpeg: PathBuf = require_c_tool!("djpeg");
     let w: usize = 32;
     let h: usize = 32;
     let pixels: Vec<u8> = generate_pattern(w, h);
@@ -574,13 +530,7 @@ fn rust_encode_c_decode_grayscale() {
 
 #[test]
 fn rust_encode_c_decode_quality_extremes() {
-    let djpeg: PathBuf = match djpeg_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: djpeg not found");
-            return;
-        }
-    };
+    let djpeg: PathBuf = require_c_tool!("djpeg");
     let w: usize = 32;
     let h: usize = 32;
     let pixels: Vec<u8> = generate_pattern(w, h);
@@ -616,13 +566,7 @@ fn rust_encode_c_decode_quality_extremes() {
 
 #[test]
 fn rust_encode_c_decode_all_subsampling() {
-    let djpeg: PathBuf = match djpeg_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: djpeg not found");
-            return;
-        }
-    };
+    let djpeg: PathBuf = require_c_tool!("djpeg");
     // Dimensions divisible by 4 to avoid edge-case padding issues
     let w: usize = 64;
     let h: usize = 64;
@@ -685,7 +629,7 @@ fn rust_encode_c_decode_all_subsampling() {
 /// Encode a PPM/PGM file with C cjpeg, decode with Rust, verify dimensions
 /// and pixel range.
 fn c_encode_rust_decode(input: &Path, cjpeg_args: &[&str]) -> bool {
-    let cjpeg: PathBuf = match cjpeg_path() {
+    let cjpeg: PathBuf = match helpers::cjpeg_path() {
         Some(p) => p,
         None => {
             eprintln!("SKIP: cjpeg not found");
@@ -755,13 +699,7 @@ fn c_encode_rust_decode_progressive() {
 
 #[test]
 fn c_encode_rust_decode_arithmetic() {
-    let cjpeg: PathBuf = match cjpeg_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: cjpeg not found");
-            return;
-        }
-    };
+    let cjpeg: PathBuf = require_c_tool!("cjpeg");
     if !cjpeg_supports_arithmetic(&cjpeg) {
         eprintln!("SKIP: cjpeg does not support -arithmetic");
         return;
@@ -790,13 +728,7 @@ fn c_encode_rust_decode_grayscale() {
 
 #[test]
 fn c_encode_rust_decode_various_quality() {
-    let cjpeg: PathBuf = match cjpeg_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: cjpeg not found");
-            return;
-        }
-    };
+    let cjpeg: PathBuf = require_c_tool!("cjpeg");
     let ppm: PathBuf = reference_path("testorig.ppm");
     if !ppm.exists() {
         eprintln!("SKIP: testorig.ppm not found");
@@ -863,13 +795,7 @@ fn c_encode_rust_decode_grayscale_pgm() {
         eprintln!("SKIP: testorig.pgm not found");
         return;
     }
-    let cjpeg: PathBuf = match cjpeg_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: cjpeg not found");
-            return;
-        }
-    };
+    let cjpeg: PathBuf = require_c_tool!("cjpeg");
 
     let tmp_jpg: TempFile = TempFile::new("gray_pgm.jpg");
     let output = Command::new(&cjpeg)
@@ -914,20 +840,8 @@ fn c_encode_rust_decode_grayscale_pgm() {
 
 #[test]
 fn roundtrip_rust_c_rust() {
-    let djpeg: PathBuf = match djpeg_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: djpeg not found");
-            return;
-        }
-    };
-    let cjpeg: PathBuf = match cjpeg_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: cjpeg not found");
-            return;
-        }
-    };
+    let djpeg: PathBuf = require_c_tool!("djpeg");
+    let cjpeg: PathBuf = require_c_tool!("cjpeg");
 
     let w: usize = 48;
     let h: usize = 48;
@@ -983,20 +897,8 @@ fn roundtrip_rust_c_rust() {
 
 #[test]
 fn roundtrip_c_rust_c() {
-    let djpeg: PathBuf = match djpeg_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: djpeg not found");
-            return;
-        }
-    };
-    let cjpeg: PathBuf = match cjpeg_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: cjpeg not found");
-            return;
-        }
-    };
+    let djpeg: PathBuf = require_c_tool!("djpeg");
+    let cjpeg: PathBuf = require_c_tool!("cjpeg");
 
     let ppm_path: PathBuf = reference_path("testorig.ppm");
     if !ppm_path.exists() {
@@ -1067,13 +969,7 @@ fn roundtrip_c_rust_c() {
 
 #[test]
 fn pixel_match_rust_vs_c_decode_testorig() {
-    let djpeg: PathBuf = match djpeg_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: djpeg not found");
-            return;
-        }
-    };
+    let djpeg: PathBuf = require_c_tool!("djpeg");
     let jpg_path: PathBuf = reference_path("testorig.jpg");
     if !jpg_path.exists() {
         eprintln!("SKIP: testorig.jpg not found");
@@ -1113,13 +1009,7 @@ fn pixel_match_rust_vs_c_decode_testorig() {
 
 #[test]
 fn pixel_match_rust_vs_c_decode_arithmetic() {
-    let djpeg: PathBuf = match djpeg_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: djpeg not found");
-            return;
-        }
-    };
+    let djpeg: PathBuf = require_c_tool!("djpeg");
     let jpg_path: PathBuf = reference_path("testimgari.jpg");
     if !jpg_path.exists() {
         eprintln!("SKIP: testimgari.jpg not found");
@@ -1175,13 +1065,7 @@ fn pixel_match_rust_vs_c_decode_arithmetic() {
 
 #[test]
 fn pixel_match_rust_vs_c_decode_progressive() {
-    let djpeg: PathBuf = match djpeg_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: djpeg not found");
-            return;
-        }
-    };
+    let djpeg: PathBuf = require_c_tool!("djpeg");
     let jpg_path: PathBuf = reference_path("testimgint.jpg");
     if !jpg_path.exists() {
         eprintln!("SKIP: testimgint.jpg not found");
@@ -1219,13 +1103,7 @@ fn pixel_match_rust_vs_c_decode_progressive() {
 
 #[test]
 fn pixel_match_rust_vs_c_decode_synthetic_all_subsampling() {
-    let djpeg: PathBuf = match djpeg_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: djpeg not found");
-            return;
-        }
-    };
+    let djpeg: PathBuf = require_c_tool!("djpeg");
     let w: usize = 64;
     let h: usize = 64;
     let pixels: Vec<u8> = generate_pattern(w, h);

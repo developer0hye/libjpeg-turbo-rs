@@ -5,6 +5,8 @@
 ///   optimize x progressive x restart x trim
 ///
 /// Skip conditions mirror the C reference to avoid known-invalid combinations.
+mod helpers;
+
 use libjpeg_turbo_rs::{
     compress, decompress, decompress_to, read_coefficients, transform_jpeg_with_options,
     CropRegion, Encoder, Image, MarkerCopyMode, PixelFormat, Subsampling, TransformOp,
@@ -1308,34 +1310,6 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-/// Find the jpegtran binary: check /opt/homebrew/bin/jpegtran first, then fall back to PATH.
-fn jpegtran_path() -> Option<PathBuf> {
-    let homebrew: PathBuf = PathBuf::from("/opt/homebrew/bin/jpegtran");
-    if homebrew.exists() {
-        return Some(homebrew);
-    }
-    Command::new("which")
-        .arg("jpegtran")
-        .output()
-        .ok()
-        .filter(|o| o.status.success())
-        .map(|o| PathBuf::from(String::from_utf8_lossy(&o.stdout).trim().to_string()))
-}
-
-/// Find the djpeg binary: check /opt/homebrew/bin/djpeg first, then fall back to PATH.
-fn djpeg_path() -> Option<PathBuf> {
-    let homebrew: PathBuf = PathBuf::from("/opt/homebrew/bin/djpeg");
-    if homebrew.exists() {
-        return Some(homebrew);
-    }
-    Command::new("which")
-        .arg("djpeg")
-        .output()
-        .ok()
-        .filter(|o| o.status.success())
-        .map(|o| PathBuf::from(String::from_utf8_lossy(&o.stdout).trim().to_string()))
-}
-
 // ---------------------------------------------------------------------------
 // Test 11: C jpegtran cross-validation — all ops, pixel diff = 0
 // ---------------------------------------------------------------------------
@@ -1346,13 +1320,7 @@ fn djpeg_path() -> Option<PathBuf> {
 /// Skips gracefully if jpegtran is not found.
 #[test]
 fn c_jpegtran_cross_validation_all_ops_diff_zero() {
-    let jpegtran = match jpegtran_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: jpegtran not found — skipping C cross-validation");
-            return;
-        }
-    };
+    let jpegtran = require_c_tool!("jpegtran");
 
     // Create a 48x48 S444 test JPEG using Rust compress
     let pixels: Vec<u8> = gradient_rgb(48, 48);
@@ -1597,20 +1565,8 @@ fn xval_read_number(data: &[u8], idx: usize) -> (usize, usize) {
 /// Skips gracefully if jpegtran/djpeg are not found on the system.
 #[test]
 fn c_jpegtran_cross_validation_transform_diff_zero() {
-    let jpegtran: PathBuf = match jpegtran_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: jpegtran not found — skipping C cross-validation");
-            return;
-        }
-    };
-    let djpeg: PathBuf = match djpeg_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: djpeg not found — skipping C cross-validation");
-            return;
-        }
-    };
+    let jpegtran: PathBuf = require_c_tool!("jpegtran");
+    let djpeg: PathBuf = require_c_tool!("djpeg");
 
     let mut tested: u32 = 0;
     let mut passed: u32 = 0;

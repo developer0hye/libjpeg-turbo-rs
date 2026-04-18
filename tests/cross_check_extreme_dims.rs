@@ -5,38 +5,14 @@
 //! are pixel-identical (diff=0). This catches edge-case bugs in MCU padding,
 //! partial-block handling, and chroma subsampling at boundary dimensions.
 
+mod helpers;
+
 use std::io::Write;
 use std::path::PathBuf;
 use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use libjpeg_turbo_rs::{compress, decompress, PixelFormat, Subsampling};
-
-// ===========================================================================
-// Tool discovery
-// ===========================================================================
-
-/// Locate the djpeg binary. Checks /opt/homebrew/bin/djpeg first, then falls
-/// back to whatever `which djpeg` returns. Returns `None` when not found.
-fn djpeg_path() -> Option<PathBuf> {
-    let homebrew_path: PathBuf = PathBuf::from("/opt/homebrew/bin/djpeg");
-    if homebrew_path.exists() {
-        return Some(homebrew_path);
-    }
-
-    let output = Command::new("which").arg("djpeg").output().ok()?;
-    if output.status.success() {
-        let path_str: String = String::from_utf8_lossy(&output.stdout).trim().to_string();
-        if !path_str.is_empty() {
-            let path: PathBuf = PathBuf::from(&path_str);
-            if path.exists() {
-                return Some(path);
-            }
-        }
-    }
-
-    None
-}
 
 // ===========================================================================
 // Helpers
@@ -132,13 +108,7 @@ fn read_number(data: &[u8], idx: usize) -> (usize, usize) {
 /// Encode with Rust at Q90, decode with both Rust and C djpeg, compare pixels.
 /// Asserts dimensions match and pixel diff == 0.
 fn cross_check(width: usize, height: usize, subsampling: Subsampling, label: &str) {
-    let djpeg: PathBuf = match djpeg_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: djpeg not found, skipping C cross-validation");
-            return;
-        }
-    };
+    let djpeg: PathBuf = require_c_tool!("djpeg");
 
     // --- Generate pixels and encode ---
     let pixels: Vec<u8> = generate_gradient(width, height);
@@ -496,13 +466,7 @@ fn cross_check_quality(
     subsampling: Subsampling,
     label: &str,
 ) {
-    let djpeg: PathBuf = match djpeg_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: djpeg not found, skipping C cross-validation");
-            return;
-        }
-    };
+    let djpeg: PathBuf = require_c_tool!("djpeg");
 
     let pixels: Vec<u8> = generate_gradient(width, height);
     let jpeg: Vec<u8> = compress(
@@ -636,13 +600,7 @@ fn cross_q100_11x9_s441() {
 
 /// Encode grayscale, decode with both Rust and C djpeg -grayscale, compare.
 fn cross_check_gray(width: usize, height: usize, quality: u8, label: &str) {
-    let djpeg: PathBuf = match djpeg_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: djpeg not found, skipping C cross-validation");
-            return;
-        }
-    };
+    let djpeg: PathBuf = require_c_tool!("djpeg");
 
     let pixels: Vec<u8> = (0..width * height).map(|i| (i % 251) as u8).collect();
     let jpeg: Vec<u8> = compress(

@@ -1,3 +1,5 @@
+mod helpers;
+
 use std::io::BufRead;
 use std::path::PathBuf;
 use std::process::Command;
@@ -166,20 +168,6 @@ fn custom_huffman_grayscale() {
 // C djpeg cross-validation helpers
 // ===========================================================================
 
-/// Path to C djpeg binary, or `None` if not installed.
-fn djpeg_path() -> Option<PathBuf> {
-    let homebrew: PathBuf = PathBuf::from("/opt/homebrew/bin/djpeg");
-    if homebrew.exists() {
-        return Some(homebrew);
-    }
-    Command::new("which")
-        .arg("djpeg")
-        .output()
-        .ok()
-        .filter(|o| o.status.success())
-        .map(|o| PathBuf::from(String::from_utf8_lossy(&o.stdout).trim().to_string()))
-}
-
 /// Parse a binary PPM (P6) image produced by `djpeg -ppm`.
 /// Returns (width, height, pixel_data) where pixel_data is RGB bytes.
 fn parse_ppm(data: &[u8]) -> (usize, usize, Vec<u8>) {
@@ -233,13 +221,7 @@ fn parse_ppm(data: &[u8]) -> (usize, usize, Vec<u8>) {
 /// pixel-exact match (diff == 0).
 #[test]
 fn c_djpeg_custom_huffman_diff_zero() {
-    let djpeg = match djpeg_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: djpeg not found, skipping C cross-validation");
-            return;
-        }
-    };
+    let djpeg = require_c_tool!("djpeg");
 
     // Build a 32x32 gradient image (RGB)
     let width: usize = 32;

@@ -1,3 +1,5 @@
+mod helpers;
+
 use std::path::PathBuf;
 use std::process::Command;
 
@@ -181,20 +183,6 @@ fn scanline_16bit_read_write_stubs() {
     assert_eq!(decoded.data, pixels_16);
 }
 
-/// Locate the djpeg binary, checking /opt/homebrew/bin first, then PATH.
-fn djpeg_path() -> Option<PathBuf> {
-    let homebrew: PathBuf = PathBuf::from("/opt/homebrew/bin/djpeg");
-    if homebrew.exists() {
-        return Some(homebrew);
-    }
-    Command::new("which")
-        .arg("djpeg")
-        .output()
-        .ok()
-        .filter(|o| o.status.success())
-        .map(|o| PathBuf::from(String::from_utf8_lossy(&o.stdout).trim().to_string()))
-}
-
 /// Parse a binary PNM file (P5 grayscale or P6 RGB).
 /// Returns (width, height, components, pixel_data).
 fn parse_pnm(data: &[u8]) -> (usize, usize, usize, Vec<u8>) {
@@ -260,13 +248,7 @@ fn read_pnm_number(data: &[u8], idx: &mut usize) -> usize {
 /// scale 1/2, scale 1/4, scale 1/8. All must produce diff=0.
 #[test]
 fn c_djpeg_cross_validation_decode_toggles() {
-    let djpeg: PathBuf = match djpeg_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: djpeg not found");
-            return;
-        }
-    };
+    let djpeg: PathBuf = require_c_tool!("djpeg");
 
     let jpeg_data: &[u8] = include_bytes!("fixtures/photo_640x480_420.jpg");
     let tmp_dir: PathBuf = std::env::temp_dir();
@@ -611,13 +593,7 @@ fn c_djpeg_cross_validation_decode_toggles() {
 /// so Rust with block_smoothing=true should match C djpeg output exactly (diff=0).
 #[test]
 fn c_djpeg_cross_validation_block_smoothing() {
-    let djpeg: PathBuf = match djpeg_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: djpeg not found");
-            return;
-        }
-    };
+    let djpeg: PathBuf = require_c_tool!("djpeg");
 
     // Use a progressive JPEG fixture — block smoothing is most visible on progressive.
     let jpeg_data: &[u8] = include_bytes!("fixtures/photo_320x240_420_prog.jpg");

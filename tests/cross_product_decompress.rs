@@ -14,6 +14,8 @@
 //! - nosmooth only for 422/420/440
 //! - grayscale output only when nosmooth is off
 
+mod helpers;
+
 use std::io::Write;
 use std::path::PathBuf;
 use std::process::Command;
@@ -1791,28 +1793,6 @@ fn verify_dimensions(
 // C djpeg cross-validation helpers
 // ---------------------------------------------------------------------------
 
-/// Locate the djpeg binary. Checks /opt/homebrew/bin/djpeg first, then falls
-/// back to whatever `which djpeg` returns. Returns `None` when not found.
-fn djpeg_path() -> Option<PathBuf> {
-    let homebrew_path = PathBuf::from("/opt/homebrew/bin/djpeg");
-    if homebrew_path.exists() {
-        return Some(homebrew_path);
-    }
-
-    let output = Command::new("which").arg("djpeg").output().ok()?;
-    if output.status.success() {
-        let path_str: String = String::from_utf8_lossy(&output.stdout).trim().to_string();
-        if !path_str.is_empty() {
-            let path = PathBuf::from(&path_str);
-            if path.exists() {
-                return Some(path);
-            }
-        }
-    }
-
-    None
-}
-
 /// Parse a binary PPM (P6) file into (width, height, rgb_pixels).
 /// Returns `None` if the file is not a valid P6 PPM.
 fn parse_ppm(data: &[u8]) -> Option<(usize, usize, Vec<u8>)> {
@@ -1932,13 +1912,7 @@ fn parse_ppm(data: &[u8]) -> Option<(usize, usize, Vec<u8>)> {
 /// 3. Assert the pixel data is identical (diff=0)
 #[test]
 fn c_djpeg_cross_validation_decompress_diff_zero() {
-    let djpeg: PathBuf = match djpeg_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: djpeg not found");
-            return;
-        }
-    };
+    let djpeg: PathBuf = require_c_tool!("djpeg");
 
     let subsampling_modes: Vec<Subsampling> =
         vec![Subsampling::S444, Subsampling::S422, Subsampling::S420];

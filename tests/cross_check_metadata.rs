@@ -10,6 +10,8 @@
 //!
 //! All tests gracefully skip if C tools are not found.
 
+mod helpers;
+
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -22,45 +24,6 @@ use libjpeg_turbo_rs::{
 // ===========================================================================
 // Tool discovery
 // ===========================================================================
-
-fn djpeg_path() -> Option<PathBuf> {
-    let homebrew: PathBuf = PathBuf::from("/opt/homebrew/bin/djpeg");
-    if homebrew.exists() {
-        return Some(homebrew);
-    }
-    Command::new("which")
-        .arg("djpeg")
-        .output()
-        .ok()
-        .filter(|o| o.status.success())
-        .map(|o| PathBuf::from(String::from_utf8_lossy(&o.stdout).trim().to_string()))
-}
-
-fn cjpeg_path() -> Option<PathBuf> {
-    let homebrew: PathBuf = PathBuf::from("/opt/homebrew/bin/cjpeg");
-    if homebrew.exists() {
-        return Some(homebrew);
-    }
-    Command::new("which")
-        .arg("cjpeg")
-        .output()
-        .ok()
-        .filter(|o| o.status.success())
-        .map(|o| PathBuf::from(String::from_utf8_lossy(&o.stdout).trim().to_string()))
-}
-
-fn jpegtran_path() -> Option<PathBuf> {
-    let homebrew: PathBuf = PathBuf::from("/opt/homebrew/bin/jpegtran");
-    if homebrew.exists() {
-        return Some(homebrew);
-    }
-    Command::new("which")
-        .arg("jpegtran")
-        .output()
-        .ok()
-        .filter(|o| o.status.success())
-        .map(|o| PathBuf::from(String::from_utf8_lossy(&o.stdout).trim().to_string()))
-}
 
 fn rdjpgcom_path() -> Option<PathBuf> {
     let homebrew: PathBuf = PathBuf::from("/opt/homebrew/bin/rdjpgcom");
@@ -190,13 +153,7 @@ fn minimal_exif() -> Vec<u8> {
 
 #[test]
 fn icc_profile_preserved_through_c_decode() {
-    let djpeg: PathBuf = match djpeg_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: djpeg not found");
-            return;
-        }
-    };
+    let djpeg: PathBuf = require_c_tool!("djpeg");
     if !djpeg_supports_icc_extract(&djpeg) {
         eprintln!("SKIP: djpeg does not support -icc flag");
         return;
@@ -265,13 +222,7 @@ fn icc_profile_preserved_through_c_decode() {
 
 #[test]
 fn c_icc_preserved_through_rust_decode() {
-    let cjpeg: PathBuf = match cjpeg_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: cjpeg not found");
-            return;
-        }
-    };
+    let cjpeg: PathBuf = require_c_tool!("cjpeg");
     if !cjpeg_supports_icc(&cjpeg) {
         eprintln!("SKIP: cjpeg does not support -icc flag");
         return;
@@ -327,13 +278,7 @@ fn c_icc_preserved_through_rust_decode() {
 #[test]
 fn c_icc_large_profile_rust_decode() {
     // Test with test1.icc which is larger (544K) and may span multiple APP2 chunks
-    let cjpeg: PathBuf = match cjpeg_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: cjpeg not found");
-            return;
-        }
-    };
+    let cjpeg: PathBuf = require_c_tool!("cjpeg");
     if !cjpeg_supports_icc(&cjpeg) {
         eprintln!("SKIP: cjpeg does not support -icc flag");
         return;
@@ -398,13 +343,7 @@ fn c_icc_large_profile_rust_decode() {
 
 #[test]
 fn exif_preserved_through_roundtrip() {
-    let djpeg: PathBuf = match djpeg_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: djpeg not found");
-            return;
-        }
-    };
+    let djpeg: PathBuf = require_c_tool!("djpeg");
 
     let (w, h): (usize, usize) = (16, 16);
     let pixels: Vec<u8> = generate_test_pixels(w, h);
@@ -461,13 +400,7 @@ fn exif_preserved_through_roundtrip() {
 
 #[test]
 fn comment_preserved_cross_check() {
-    let djpeg: PathBuf = match djpeg_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: djpeg not found");
-            return;
-        }
-    };
+    let djpeg: PathBuf = require_c_tool!("djpeg");
 
     let (w, h): (usize, usize) = (16, 16);
     let pixels: Vec<u8> = generate_test_pixels(w, h);
@@ -534,13 +467,7 @@ fn comment_preserved_cross_check() {
 
 #[test]
 fn icc_preserved_through_transform() {
-    let djpeg: PathBuf = match djpeg_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: djpeg not found");
-            return;
-        }
-    };
+    let djpeg: PathBuf = require_c_tool!("djpeg");
     if !djpeg_supports_icc_extract(&djpeg) {
         eprintln!("SKIP: djpeg does not support -icc flag");
         return;
@@ -633,20 +560,8 @@ fn icc_preserved_through_transform() {
 
 #[test]
 fn c_jpegtran_preserves_markers_rust_decode() {
-    let cjpeg: PathBuf = match cjpeg_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: cjpeg not found");
-            return;
-        }
-    };
-    let jpegtran: PathBuf = match jpegtran_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: jpegtran not found");
-            return;
-        }
-    };
+    let cjpeg: PathBuf = require_c_tool!("cjpeg");
+    let jpegtran: PathBuf = require_c_tool!("jpegtran");
     if !cjpeg_supports_icc(&cjpeg) {
         eprintln!("SKIP: cjpeg does not support -icc flag");
         return;
@@ -847,13 +762,7 @@ fn no_copy_mode_strips_all_markers() {
 
 #[test]
 fn custom_app_markers_preserved_through_c_decode() {
-    let djpeg: PathBuf = match djpeg_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: djpeg not found");
-            return;
-        }
-    };
+    let djpeg: PathBuf = require_c_tool!("djpeg");
 
     let (w, h): (usize, usize) = (16, 16);
     let pixels: Vec<u8> = generate_test_pixels(w, h);

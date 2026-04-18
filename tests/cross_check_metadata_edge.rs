@@ -7,6 +7,8 @@
 //! 4. Multiple COM markers — encode with 2+ COM markers via saved_marker API, verify C reads all
 //! 5. ICC survival through jpegtran rotation — encode with ICC, rotate 90 with Rust, compare with C jpegtran
 
+mod helpers;
+
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -19,32 +21,6 @@ use libjpeg_turbo_rs::{
 // ===========================================================================
 // Tool discovery (copied from cross_check_metadata.rs)
 // ===========================================================================
-
-fn djpeg_path() -> Option<PathBuf> {
-    let homebrew: PathBuf = PathBuf::from("/opt/homebrew/bin/djpeg");
-    if homebrew.exists() {
-        return Some(homebrew);
-    }
-    Command::new("which")
-        .arg("djpeg")
-        .output()
-        .ok()
-        .filter(|o| o.status.success())
-        .map(|o| PathBuf::from(String::from_utf8_lossy(&o.stdout).trim().to_string()))
-}
-
-fn jpegtran_path() -> Option<PathBuf> {
-    let homebrew: PathBuf = PathBuf::from("/opt/homebrew/bin/jpegtran");
-    if homebrew.exists() {
-        return Some(homebrew);
-    }
-    Command::new("which")
-        .arg("jpegtran")
-        .output()
-        .ok()
-        .filter(|o| o.status.success())
-        .map(|o| PathBuf::from(String::from_utf8_lossy(&o.stdout).trim().to_string()))
-}
 
 fn rdjpgcom_path() -> Option<PathBuf> {
     let homebrew: PathBuf = PathBuf::from("/opt/homebrew/bin/rdjpgcom");
@@ -159,13 +135,7 @@ fn build_tiff_with_orientation(orientation: u16) -> Vec<u8> {
 
 #[test]
 fn large_icc_100kb_extracted_by_c_djpeg() {
-    let djpeg: PathBuf = match djpeg_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: djpeg not found");
-            return;
-        }
-    };
+    let djpeg: PathBuf = require_c_tool!("djpeg");
     if !djpeg_supports_icc_extract(&djpeg) {
         eprintln!("SKIP: djpeg does not support -icc flag");
         return;
@@ -236,13 +206,7 @@ fn all_8_exif_orientations_readable_by_c_tool() {
     // We use exiftool to read orientation since djpeg does not extract EXIF fields.
     // If exiftool is not available, fall back to verifying Rust roundtrip against
     // the raw EXIF bytes that a C tool (djpeg) can decode without errors.
-    let djpeg: PathBuf = match djpeg_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: djpeg not found");
-            return;
-        }
-    };
+    let djpeg: PathBuf = require_c_tool!("djpeg");
 
     let exiftool: Option<PathBuf> = exiftool_path();
     if exiftool.is_none() {
@@ -510,24 +474,12 @@ fn multiple_com_markers_readable_by_rdjpgcom() {
 
 #[test]
 fn icc_survives_rust_rot90_matches_c_jpegtran() {
-    let djpeg: PathBuf = match djpeg_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: djpeg not found");
-            return;
-        }
-    };
+    let djpeg: PathBuf = require_c_tool!("djpeg");
     if !djpeg_supports_icc_extract(&djpeg) {
         eprintln!("SKIP: djpeg does not support -icc flag");
         return;
     }
-    let jpegtran: PathBuf = match jpegtran_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: jpegtran not found");
-            return;
-        }
-    };
+    let jpegtran: PathBuf = require_c_tool!("jpegtran");
 
     // Use a 100KB ICC to exercise multi-chunk preservation through transform
     let icc_data: Vec<u8> = (0..100_000).map(|i| (i % 256) as u8).collect();
@@ -666,13 +618,7 @@ fn icc_survives_rust_rot90_matches_c_jpegtran() {
 
 #[test]
 fn c_djpeg_icc_1_byte_profile_roundtrip() {
-    let djpeg: PathBuf = match djpeg_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: djpeg not found");
-            return;
-        }
-    };
+    let djpeg: PathBuf = require_c_tool!("djpeg");
     if !djpeg_supports_icc_extract(&djpeg) {
         eprintln!("SKIP: djpeg does not support -icc flag");
         return;
@@ -730,13 +676,7 @@ fn c_djpeg_icc_1_byte_profile_roundtrip() {
 
 #[test]
 fn c_djpeg_icc_exact_chunk_boundary_65519() {
-    let djpeg: PathBuf = match djpeg_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: djpeg not found");
-            return;
-        }
-    };
+    let djpeg: PathBuf = require_c_tool!("djpeg");
     if !djpeg_supports_icc_extract(&djpeg) {
         eprintln!("SKIP: djpeg does not support -icc flag");
         return;
@@ -814,13 +754,7 @@ fn build_minimal_tiff() -> Vec<u8> {
 
 #[test]
 fn c_djpeg_exif_near_limit_60kb_roundtrip() {
-    let djpeg: PathBuf = match djpeg_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: djpeg not found");
-            return;
-        }
-    };
+    let djpeg: PathBuf = require_c_tool!("djpeg");
 
     // ~60KB EXIF data (under the APP1 65527-byte limit)
     let near_limit_exif: Vec<u8> = {
@@ -876,13 +810,7 @@ fn c_djpeg_exif_near_limit_60kb_roundtrip() {
 
 #[test]
 fn c_djpeg_exif_minimal_tiff_header_roundtrip() {
-    let djpeg: PathBuf = match djpeg_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: djpeg not found");
-            return;
-        }
-    };
+    let djpeg: PathBuf = require_c_tool!("djpeg");
 
     let minimal_exif: Vec<u8> = build_minimal_tiff();
 
@@ -933,13 +861,7 @@ fn c_djpeg_exif_minimal_tiff_header_roundtrip() {
 
 #[test]
 fn c_djpeg_comment_near_limit_60kb_roundtrip() {
-    let djpeg: PathBuf = match djpeg_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: djpeg not found");
-            return;
-        }
-    };
+    let djpeg: PathBuf = require_c_tool!("djpeg");
 
     let large_comment: String = "X".repeat(60_000);
 
@@ -1004,13 +926,7 @@ fn c_djpeg_comment_near_limit_60kb_roundtrip() {
 
 #[test]
 fn c_djpeg_icc_two_independent_encodes() {
-    let djpeg: PathBuf = match djpeg_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: djpeg not found");
-            return;
-        }
-    };
+    let djpeg: PathBuf = require_c_tool!("djpeg");
     if !djpeg_supports_icc_extract(&djpeg) {
         eprintln!("SKIP: djpeg does not support -icc flag");
         return;

@@ -4,31 +4,14 @@
 //! `stream::compress_to_file`, and `stream::decompress_from_file` by comparing
 //! decoded output against C djpeg (pixel-identical, diff=0).
 
+mod helpers;
+
 use std::io::Cursor;
 use std::path::PathBuf;
 use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use libjpeg_turbo_rs::{decompress, stream, PixelFormat, Subsampling};
-
-// ===========================================================================
-// Tool discovery
-// ===========================================================================
-
-/// Locate the djpeg binary. Checks /opt/homebrew/bin/djpeg first, then falls
-/// back to whatever `which djpeg` returns. Returns `None` when not found.
-fn djpeg_path() -> Option<PathBuf> {
-    let homebrew: PathBuf = PathBuf::from("/opt/homebrew/bin/djpeg");
-    if homebrew.exists() {
-        return Some(homebrew);
-    }
-    Command::new("which")
-        .arg("djpeg")
-        .output()
-        .ok()
-        .filter(|o| o.status.success())
-        .map(|o| PathBuf::from(String::from_utf8_lossy(&o.stdout).trim().to_string()))
-}
 
 // ===========================================================================
 // Helpers
@@ -217,13 +200,7 @@ fn assert_pixels_identical(
 /// then decode with both Rust and C djpeg. Verify pixel-identical output (diff=0).
 #[test]
 fn c_xval_compress_to_writer_vec() {
-    let djpeg: PathBuf = match djpeg_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: djpeg not found");
-            return;
-        }
-    };
+    let djpeg: PathBuf = require_c_tool!("djpeg");
 
     let width: usize = 48;
     let height: usize = 48;
@@ -275,13 +252,7 @@ fn c_xval_compress_to_writer_vec() {
 /// decode (diff=0).
 #[test]
 fn c_xval_compress_to_writer_sizes() {
-    let djpeg: PathBuf = match djpeg_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: djpeg not found");
-            return;
-        }
-    };
+    let djpeg: PathBuf = require_c_tool!("djpeg");
 
     let sizes: [(usize, usize); 3] = [(16, 16), (64, 48), (128, 96)];
 
@@ -350,13 +321,7 @@ fn c_xval_compress_to_writer_sizes() {
 /// Compare pixel data (diff=0).
 #[test]
 fn c_xval_decompress_from_reader() {
-    let djpeg: PathBuf = match djpeg_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: djpeg not found");
-            return;
-        }
-    };
+    let djpeg: PathBuf = require_c_tool!("djpeg");
 
     let width: usize = 48;
     let height: usize = 48;
@@ -408,13 +373,7 @@ fn c_xval_decompress_from_reader() {
 /// on that file. Also read file back and decompress with Rust. Compare (diff=0).
 #[test]
 fn c_xval_compress_to_file() {
-    let djpeg: PathBuf = match djpeg_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: djpeg not found");
-            return;
-        }
-    };
+    let djpeg: PathBuf = require_c_tool!("djpeg");
 
     let width: usize = 48;
     let height: usize = 48;
@@ -487,13 +446,7 @@ fn c_xval_compress_to_file() {
 /// on that path. Also decode original bytes with C djpeg. Compare (diff=0).
 #[test]
 fn c_xval_decompress_from_file() {
-    let djpeg: PathBuf = match djpeg_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: djpeg not found");
-            return;
-        }
-    };
+    let djpeg: PathBuf = require_c_tool!("djpeg");
 
     let width: usize = 48;
     let height: usize = 48;
@@ -552,13 +505,7 @@ fn c_xval_decompress_from_file() {
 /// compare vs Rust decompress (diff=0).
 #[test]
 fn c_xval_stream_roundtrip_subsampling() {
-    let djpeg: PathBuf = match djpeg_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: djpeg not found");
-            return;
-        }
-    };
+    let djpeg: PathBuf = require_c_tool!("djpeg");
 
     let width: usize = 48;
     let height: usize = 48;
@@ -619,13 +566,7 @@ fn c_xval_stream_roundtrip_subsampling() {
 /// Verifies streaming works correctly for larger buffers.
 #[test]
 fn c_xval_stream_large_image() {
-    let djpeg: PathBuf = match djpeg_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: djpeg not found");
-            return;
-        }
-    };
+    let djpeg: PathBuf = require_c_tool!("djpeg");
 
     let width: usize = 640;
     let height: usize = 480;

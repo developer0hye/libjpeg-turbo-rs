@@ -1,3 +1,5 @@
+mod helpers;
+
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -79,20 +81,6 @@ fn custom_quant_table_both_luma_and_chroma() {
 // C djpeg cross-validation helpers
 // ===========================================================================
 
-/// Path to C djpeg binary, or `None` if not installed.
-fn djpeg_path() -> Option<PathBuf> {
-    let homebrew: PathBuf = PathBuf::from("/opt/homebrew/bin/djpeg");
-    if homebrew.exists() {
-        return Some(homebrew);
-    }
-    Command::new("which")
-        .arg("djpeg")
-        .output()
-        .ok()
-        .filter(|o| o.status.success())
-        .map(|o| PathBuf::from(String::from_utf8_lossy(&o.stdout).trim().to_string()))
-}
-
 /// Parse a binary PPM (P6) file and return `(width, height, rgb_data)`.
 fn parse_ppm(path: &Path) -> (usize, usize, Vec<u8>) {
     let raw: Vec<u8> = std::fs::read(path).expect("failed to read PPM file");
@@ -156,13 +144,7 @@ fn ppm_read_number(data: &[u8], idx: usize) -> (usize, usize) {
 /// C djpeg (`-ppm`). Assert that the decoded pixel data is identical.
 #[test]
 fn c_djpeg_custom_quant_diff_zero() {
-    let djpeg: PathBuf = match djpeg_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("skipping c_djpeg_custom_quant_diff_zero: djpeg not found");
-            return;
-        }
-    };
+    let djpeg: PathBuf = require_c_tool!("djpeg");
 
     let width: usize = 32;
     let height: usize = 32;
@@ -284,13 +266,7 @@ impl Drop for QuantTempFile {
 /// C djpeg and Rust, assert pixel-identical output (diff=0).
 #[test]
 fn c_djpeg_cross_validation_per_component_quality() {
-    let djpeg: PathBuf = match djpeg_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: djpeg not found");
-            return;
-        }
-    };
+    let djpeg: PathBuf = require_c_tool!("djpeg");
 
     let width: usize = 48;
     let height: usize = 48;
@@ -384,13 +360,7 @@ fn c_djpeg_cross_validation_per_component_quality() {
 /// both C djpeg and Rust, assert pixel-identical output (diff=0).
 #[test]
 fn c_djpeg_cross_validation_custom_quant_tables() {
-    let djpeg: PathBuf = match djpeg_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: djpeg not found");
-            return;
-        }
-    };
+    let djpeg: PathBuf = require_c_tool!("djpeg");
 
     let width: usize = 48;
     let height: usize = 48;

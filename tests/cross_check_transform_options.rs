@@ -7,6 +7,8 @@
 //!   3. `-optimize` — optimized output decodes pixel-identically to standard
 //!   4. `-crop WxH+X+Y` with non-zero offsets and combined with `-grayscale`
 
+mod helpers;
+
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -15,36 +17,6 @@ use libjpeg_turbo_rs::{
     decompress, transform_jpeg_with_options, CropRegion, MarkerCopyMode, TransformOp,
     TransformOptions,
 };
-
-// ===========================================================================
-// Tool discovery
-// ===========================================================================
-
-fn jpegtran_path() -> Option<PathBuf> {
-    let homebrew: PathBuf = PathBuf::from("/opt/homebrew/bin/jpegtran");
-    if homebrew.exists() {
-        return Some(homebrew);
-    }
-    Command::new("which")
-        .arg("jpegtran")
-        .output()
-        .ok()
-        .filter(|o| o.status.success())
-        .map(|o| PathBuf::from(String::from_utf8_lossy(&o.stdout).trim().to_string()))
-}
-
-fn djpeg_path() -> Option<PathBuf> {
-    let homebrew: PathBuf = PathBuf::from("/opt/homebrew/bin/djpeg");
-    if homebrew.exists() {
-        return Some(homebrew);
-    }
-    Command::new("which")
-        .arg("djpeg")
-        .output()
-        .ok()
-        .filter(|o| o.status.success())
-        .map(|o| PathBuf::from(String::from_utf8_lossy(&o.stdout).trim().to_string()))
-}
 
 // ===========================================================================
 // Temp file helpers
@@ -168,20 +140,8 @@ fn fixture_path(name: &str) -> PathBuf {
 /// via djpeg to ensure pixel-identical output.
 #[test]
 fn grayscale_on_real_fixture_matches_c_jpegtran() {
-    let jpegtran: PathBuf = match jpegtran_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: jpegtran not found");
-            return;
-        }
-    };
-    let djpeg: PathBuf = match djpeg_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: djpeg not found");
-            return;
-        }
-    };
+    let jpegtran: PathBuf = require_c_tool!("jpegtran");
+    let djpeg: PathBuf = require_c_tool!("djpeg");
 
     // Use a real photo fixture with 4:2:0 subsampling (320x240 is MCU-aligned
     // for all common subsampling modes).
@@ -279,13 +239,7 @@ fn grayscale_on_real_fixture_matches_c_jpegtran() {
 /// partial MCU edges on both axes.
 #[test]
 fn trim_rot180_on_non_mcu_aligned_422_matches_c_jpegtran() {
-    let jpegtran: PathBuf = match jpegtran_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: jpegtran not found");
-            return;
-        }
-    };
+    let jpegtran: PathBuf = require_c_tool!("jpegtran");
 
     // cjpeg_33x31_422.jpg is 33x31 with 4:2:2 (MCU=16x8).
     // Not MCU-aligned, so trim is needed for rot180.
@@ -357,13 +311,7 @@ fn trim_rot180_on_non_mcu_aligned_422_matches_c_jpegtran() {
 /// would trim height from 33 to 32.
 #[test]
 fn trim_vflip_on_non_mcu_aligned_444_matches_c_jpegtran() {
-    let jpegtran: PathBuf = match jpegtran_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: jpegtran not found");
-            return;
-        }
-    };
+    let jpegtran: PathBuf = require_c_tool!("jpegtran");
 
     // 31x33 with 4:4:4 (MCU=8x8). VFlip needs height aligned to 8.
     // 33 -> 32 after trim.
@@ -448,20 +396,8 @@ fn trim_vflip_on_non_mcu_aligned_444_matches_c_jpegtran() {
 /// as the original (optimize only changes Huffman tables, not DCT coefficients).
 #[test]
 fn optimize_on_real_fixture_decodes_identically() {
-    let jpegtran: PathBuf = match jpegtran_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: jpegtran not found");
-            return;
-        }
-    };
-    let djpeg: PathBuf = match djpeg_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: djpeg not found");
-            return;
-        }
-    };
+    let jpegtran: PathBuf = require_c_tool!("jpegtran");
+    let djpeg: PathBuf = require_c_tool!("djpeg");
 
     let fixture: PathBuf = fixture_path("photo_320x240_444.jpg");
     let source_jpeg: Vec<u8> =
@@ -589,13 +525,7 @@ fn optimize_on_real_fixture_decodes_identically() {
 /// only uses origin (0,0); this exercises non-trivial offset handling.
 #[test]
 fn crop_with_nonzero_offset_matches_c_jpegtran() {
-    let jpegtran: PathBuf = match jpegtran_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: jpegtran not found");
-            return;
-        }
-    };
+    let jpegtran: PathBuf = require_c_tool!("jpegtran");
 
     // 320x240 4:4:4 (MCU=8x8)
     let fixture: PathBuf = fixture_path("photo_320x240_444.jpg");
@@ -676,20 +606,8 @@ fn crop_with_nonzero_offset_matches_c_jpegtran() {
 /// together on a real 4:2:0 fixture.
 #[test]
 fn crop_plus_grayscale_matches_c_jpegtran() {
-    let jpegtran: PathBuf = match jpegtran_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: jpegtran not found");
-            return;
-        }
-    };
-    let djpeg: PathBuf = match djpeg_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: djpeg not found");
-            return;
-        }
-    };
+    let jpegtran: PathBuf = require_c_tool!("jpegtran");
+    let djpeg: PathBuf = require_c_tool!("djpeg");
 
     // 320x240 4:2:0 (MCU=16x16)
     let fixture: PathBuf = fixture_path("photo_320x240_420.jpg");

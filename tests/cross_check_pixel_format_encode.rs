@@ -4,33 +4,13 @@
 //! encode with Rust using that format, decode with both Rust (to RGB) and C djpeg
 //! (to PPM), and verify Rust RGB == C RGB (diff=0).
 
+mod helpers;
+
 use std::path::PathBuf;
 use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use libjpeg_turbo_rs::{decompress_to, Encoder, PixelFormat, Subsampling};
-
-// ===========================================================================
-// Tool discovery
-// ===========================================================================
-
-fn djpeg_path() -> Option<PathBuf> {
-    let homebrew_path: PathBuf = PathBuf::from("/opt/homebrew/bin/djpeg");
-    if homebrew_path.exists() {
-        return Some(homebrew_path);
-    }
-    let output = Command::new("which").arg("djpeg").output().ok()?;
-    if output.status.success() {
-        let path_str: String = String::from_utf8_lossy(&output.stdout).trim().to_string();
-        if !path_str.is_empty() {
-            let path: PathBuf = PathBuf::from(&path_str);
-            if path.exists() {
-                return Some(path);
-            }
-        }
-    }
-    None
-}
 
 // ===========================================================================
 // Helpers
@@ -235,13 +215,7 @@ fn cross_validate_encode_format(
 
 #[test]
 fn c_xval_encode_bgr_444() {
-    let djpeg: PathBuf = match djpeg_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: djpeg not found");
-            return;
-        }
-    };
+    let djpeg: PathBuf = require_c_tool!("djpeg");
     cross_validate_encode_format(
         &djpeg,
         PixelFormat::Bgr,
@@ -254,13 +228,7 @@ fn c_xval_encode_bgr_444() {
 
 #[test]
 fn c_xval_encode_bgr_422() {
-    let djpeg: PathBuf = match djpeg_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: djpeg not found");
-            return;
-        }
-    };
+    let djpeg: PathBuf = require_c_tool!("djpeg");
     cross_validate_encode_format(
         &djpeg,
         PixelFormat::Bgr,
@@ -273,13 +241,7 @@ fn c_xval_encode_bgr_422() {
 
 #[test]
 fn c_xval_encode_bgr_420() {
-    let djpeg: PathBuf = match djpeg_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: djpeg not found");
-            return;
-        }
-    };
+    let djpeg: PathBuf = require_c_tool!("djpeg");
     cross_validate_encode_format(
         &djpeg,
         PixelFormat::Bgr,
@@ -296,13 +258,7 @@ fn c_xval_encode_bgr_420() {
 
 #[test]
 fn c_xval_encode_rgba_444() {
-    let djpeg: PathBuf = match djpeg_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: djpeg not found");
-            return;
-        }
-    };
+    let djpeg: PathBuf = require_c_tool!("djpeg");
     cross_validate_encode_format(
         &djpeg,
         PixelFormat::Rgba,
@@ -315,13 +271,7 @@ fn c_xval_encode_rgba_444() {
 
 #[test]
 fn c_xval_encode_rgba_420() {
-    let djpeg: PathBuf = match djpeg_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: djpeg not found");
-            return;
-        }
-    };
+    let djpeg: PathBuf = require_c_tool!("djpeg");
     cross_validate_encode_format(
         &djpeg,
         PixelFormat::Rgba,
@@ -338,13 +288,7 @@ fn c_xval_encode_rgba_420() {
 
 #[test]
 fn c_xval_encode_bgra_444() {
-    let djpeg: PathBuf = match djpeg_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: djpeg not found");
-            return;
-        }
-    };
+    let djpeg: PathBuf = require_c_tool!("djpeg");
     cross_validate_encode_format(
         &djpeg,
         PixelFormat::Bgra,
@@ -357,13 +301,7 @@ fn c_xval_encode_bgra_444() {
 
 #[test]
 fn c_xval_encode_bgra_420() {
-    let djpeg: PathBuf = match djpeg_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: djpeg not found");
-            return;
-        }
-    };
+    let djpeg: PathBuf = require_c_tool!("djpeg");
     cross_validate_encode_format(
         &djpeg,
         PixelFormat::Bgra,
@@ -380,13 +318,7 @@ fn c_xval_encode_bgra_420() {
 
 #[test]
 fn c_xval_encode_all_formats_identical_jpeg() {
-    let djpeg: PathBuf = match djpeg_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: djpeg not found");
-            return;
-        }
-    };
+    let djpeg: PathBuf = require_c_tool!("djpeg");
 
     let width: usize = 48;
     let height: usize = 48;
@@ -479,13 +411,7 @@ fn c_xval_encode_all_formats_identical_jpeg() {
 
 #[test]
 fn c_xval_encode_grayscale_input() {
-    let djpeg: PathBuf = match djpeg_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: djpeg not found");
-            return;
-        }
-    };
+    let djpeg: PathBuf = require_c_tool!("djpeg");
 
     let width: usize = 64;
     let height: usize = 64;
@@ -560,13 +486,7 @@ fn c_xval_encode_grayscale_input() {
 
 #[test]
 fn c_xval_encode_format_matrix() {
-    let djpeg: PathBuf = match djpeg_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: djpeg not found");
-            return;
-        }
-    };
+    let djpeg: PathBuf = require_c_tool!("djpeg");
 
     let formats: &[(PixelFormat, &str)] = &[
         (PixelFormat::Bgr, "BGR"),
