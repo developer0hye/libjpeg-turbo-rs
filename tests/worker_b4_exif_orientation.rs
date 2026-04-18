@@ -13,6 +13,8 @@
 //! us assert that `Image.exif_orientation()` decodes the correct 1..8
 //! value and that C djpeg produces matching pixel output (diff = 0).
 
+mod helpers;
+
 use libjpeg_turbo_rs::{decompress_to, PixelFormat};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -20,19 +22,6 @@ use std::process::Command;
 
 fn fixture_dir() -> PathBuf {
     PathBuf::from("tests/fixtures/exif_orientation")
-}
-
-fn djpeg_path() -> Option<PathBuf> {
-    let homebrew: PathBuf = PathBuf::from("/opt/homebrew/bin/djpeg");
-    if homebrew.exists() {
-        return Some(homebrew);
-    }
-    Command::new("which")
-        .arg("djpeg")
-        .output()
-        .ok()
-        .filter(|o| o.status.success())
-        .map(|o| PathBuf::from(String::from_utf8_lossy(&o.stdout).trim().to_string()))
 }
 
 fn parse_ppm(data: &[u8]) -> Option<(usize, usize, Vec<u8>)> {
@@ -154,13 +143,7 @@ fn exif_orientation_pixels_match_c_djpeg() {
     // Asserting pixel-identical output across all 8 variants confirms both
     // decoders agree on the JPEG payload independent of EXIF.
     let dir: PathBuf = fixture_dir();
-    let djpeg: PathBuf = match djpeg_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: djpeg not found");
-            return;
-        }
-    };
+    let djpeg: PathBuf = require_c_tool!("djpeg");
     for orientation in 1..=8u8 {
         let path: PathBuf = dir.join(format!("orient_{}_16x8.jpg", orientation));
         let jpeg: Vec<u8> = fs::read(&path).unwrap();

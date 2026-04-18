@@ -1,3 +1,5 @@
+mod helpers;
+
 use std::io::Write;
 use std::path::PathBuf;
 use std::process::Command;
@@ -51,28 +53,6 @@ fn streaming_decoder_can_decode_multiple_times() {
 // ---------------------------------------------------------------------------
 // C djpeg cross-validation helpers
 // ---------------------------------------------------------------------------
-
-/// Locate the djpeg binary. Checks /opt/homebrew/bin/djpeg first, then falls
-/// back to whatever `which djpeg` returns. Returns `None` when not found.
-fn djpeg_path() -> Option<PathBuf> {
-    let homebrew_path: PathBuf = PathBuf::from("/opt/homebrew/bin/djpeg");
-    if homebrew_path.exists() {
-        return Some(homebrew_path);
-    }
-
-    let output = Command::new("which").arg("djpeg").output().ok()?;
-    if output.status.success() {
-        let path_str: String = String::from_utf8_lossy(&output.stdout).trim().to_string();
-        if !path_str.is_empty() {
-            let path: PathBuf = PathBuf::from(&path_str);
-            if path.exists() {
-                return Some(path);
-            }
-        }
-    }
-
-    None
-}
 
 /// Parse a binary PPM (P6) image into (width, height, rgb_pixels).
 /// Returns `None` if the data is not a valid P6 PPM.
@@ -279,13 +259,7 @@ fn assert_streaming_matches_djpeg(jpeg_data: &[u8], djpeg: &PathBuf, label: &str
 /// across multiple fixtures (4:4:4, 4:2:2, 4:2:0).
 #[test]
 fn c_djpeg_streaming_decode_matches() {
-    let djpeg: PathBuf = match djpeg_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: djpeg not found, skipping C cross-validation");
-            return;
-        }
-    };
+    let djpeg: PathBuf = require_c_tool!("djpeg");
 
     // 4:4:4 fixture
     let gradient_444: &[u8] = include_bytes!("fixtures/gradient_640x480.jpg");
@@ -304,13 +278,7 @@ fn c_djpeg_streaming_decode_matches() {
 /// for a real-world 4:2:0 photo (exercises chroma upsampling thoroughly).
 #[test]
 fn c_djpeg_streaming_420_matches() {
-    let djpeg: PathBuf = match djpeg_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: djpeg not found, skipping C cross-validation");
-            return;
-        }
-    };
+    let djpeg: PathBuf = require_c_tool!("djpeg");
 
     let photo_420: &[u8] = include_bytes!("fixtures/photo_320x240_420.jpg");
     assert_streaming_matches_djpeg(photo_420, &djpeg, "photo_320x240_420");
@@ -322,13 +290,7 @@ fn c_djpeg_streaming_420_matches() {
 /// at 4:4:4 and 4:2:2 (4:2:0 is already covered by c_djpeg_streaming_420_matches).
 #[test]
 fn c_djpeg_streaming_all_subsamplings_diff_zero() {
-    let djpeg: PathBuf = match djpeg_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: djpeg not found, skipping C cross-validation");
-            return;
-        }
-    };
+    let djpeg: PathBuf = require_c_tool!("djpeg");
 
     // 4:4:4 real-world photos (existing test only uses synthetic gradient_640x480)
     let photo_444_320: &[u8] = include_bytes!("fixtures/photo_320x240_444.jpg");

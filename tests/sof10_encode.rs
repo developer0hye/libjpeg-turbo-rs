@@ -1,41 +1,11 @@
+mod helpers;
+
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use libjpeg_turbo_rs::{
     compress_arithmetic_progressive, decompress, decompress_to, Encoder, PixelFormat, Subsampling,
 };
-
-// ===========================================================================
-// Tool discovery helpers
-// ===========================================================================
-
-/// Path to C djpeg binary, or `None` if not installed.
-fn djpeg_path() -> Option<PathBuf> {
-    let homebrew: PathBuf = PathBuf::from("/opt/homebrew/bin/djpeg");
-    if homebrew.exists() {
-        return Some(homebrew);
-    }
-    Command::new("which")
-        .arg("djpeg")
-        .output()
-        .ok()
-        .filter(|o| o.status.success())
-        .map(|o| PathBuf::from(String::from_utf8_lossy(&o.stdout).trim().to_string()))
-}
-
-/// Path to C cjpeg binary, or `None` if not installed.
-fn cjpeg_path() -> Option<PathBuf> {
-    let homebrew: PathBuf = PathBuf::from("/opt/homebrew/bin/cjpeg");
-    if homebrew.exists() {
-        return Some(homebrew);
-    }
-    Command::new("which")
-        .arg("cjpeg")
-        .output()
-        .ok()
-        .filter(|o| o.status.success())
-        .map(|o| PathBuf::from(String::from_utf8_lossy(&o.stdout).trim().to_string()))
-}
 
 /// Parse a binary PPM (P6) or PGM (P5) file and return `(width, height, data)`.
 fn parse_ppm(path: &Path) -> (usize, usize, Vec<u8>) {
@@ -156,13 +126,7 @@ fn sof10_grayscale() {
 /// Skipped gracefully if djpeg/cjpeg are not found.
 #[test]
 fn c_djpeg_sof10_encode_diff_zero() {
-    let djpeg: PathBuf = match djpeg_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: djpeg not found");
-            return;
-        }
-    };
+    let djpeg: PathBuf = require_c_tool!("djpeg");
 
     let (w, h): (usize, usize) = (48, 48);
     // Generate a deterministic RGB test pattern with gradients
@@ -206,12 +170,9 @@ fn c_djpeg_sof10_encode_diff_zero() {
         Err(_) => {
             // Rust encoder does not support SOF10 — fall back to C cjpeg
             eprintln!("Rust SOF10 encode not supported, falling back to C cjpeg");
-            let cjpeg: PathBuf = match cjpeg_path() {
-                Some(p) => p,
-                None => {
-                    eprintln!("SKIP: cjpeg not found (needed for fallback)");
-                    return;
-                }
+            let cjpeg: PathBuf = require_c_tool!("cjpeg");
+            {
+                let _ = &cjpeg;
             };
 
             // Write PPM source for cjpeg
@@ -372,13 +333,7 @@ fn parse_pgm(path: &Path) -> (usize, usize, Vec<u8>) {
 /// grayscale, and various quality levels.
 #[test]
 fn c_djpeg_sof10_encode_extended_diff_zero() {
-    let djpeg: PathBuf = match djpeg_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: djpeg not found");
-            return;
-        }
-    };
+    let djpeg: PathBuf = require_c_tool!("djpeg");
 
     let (w, h): (usize, usize) = (48, 48);
     let pid: u32 = std::process::id();

@@ -1,3 +1,5 @@
+mod helpers;
+
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -109,32 +111,6 @@ fn transform_444_roundtrip() {
 // ===========================================================================
 // C jpegtran cross-validation helpers
 // ===========================================================================
-
-fn jpegtran_path() -> Option<PathBuf> {
-    let homebrew: PathBuf = PathBuf::from("/opt/homebrew/bin/jpegtran");
-    if homebrew.exists() {
-        return Some(homebrew);
-    }
-    Command::new("which")
-        .arg("jpegtran")
-        .output()
-        .ok()
-        .filter(|o| o.status.success())
-        .map(|o| PathBuf::from(String::from_utf8_lossy(&o.stdout).trim().to_string()))
-}
-
-fn djpeg_path() -> Option<PathBuf> {
-    let homebrew: PathBuf = PathBuf::from("/opt/homebrew/bin/djpeg");
-    if homebrew.exists() {
-        return Some(homebrew);
-    }
-    Command::new("which")
-        .arg("djpeg")
-        .output()
-        .ok()
-        .filter(|o| o.status.success())
-        .map(|o| PathBuf::from(String::from_utf8_lossy(&o.stdout).trim().to_string()))
-}
 
 /// Parse a binary PPM (P6) file and return `(width, height, data)`.
 fn parse_ppm(path: &Path) -> (usize, usize, Vec<u8>) {
@@ -267,20 +243,8 @@ fn transform_name(op: TransformOp) -> &'static str {
 /// (including rot90/transpose which swap dimensions) produce exact results.
 #[test]
 fn c_jpegtran_transform_coeff_diff_zero() {
-    let jpegtran: PathBuf = match jpegtran_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: jpegtran not found, skipping C cross-validation transform test");
-            return;
-        }
-    };
-    let djpeg: PathBuf = match djpeg_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: djpeg not found, skipping C cross-validation transform test");
-            return;
-        }
-    };
+    let jpegtran: PathBuf = require_c_tool!("jpegtran");
+    let djpeg: PathBuf = require_c_tool!("djpeg");
 
     // Create an MCU-aligned 48x48 S444 test JPEG (MCU = 8x8 for S444).
     // Dimensions divisible by 8 ensure all transforms are pixel-exact.

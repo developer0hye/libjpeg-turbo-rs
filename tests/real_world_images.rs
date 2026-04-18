@@ -10,28 +10,13 @@
 //! - Images that cause Rust decoder panics (internal bugs): skipped with message
 //! - Images that cause Rust decoder errors: skipped if in known-issue list
 
+mod helpers;
+
 use libjpeg_turbo_rs::{decompress_to, PixelFormat};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
-
-// ===========================================================================
-// Tool discovery
-// ===========================================================================
-
-fn djpeg_path() -> Option<PathBuf> {
-    let homebrew: PathBuf = PathBuf::from("/opt/homebrew/bin/djpeg");
-    if homebrew.exists() {
-        return Some(homebrew);
-    }
-    Command::new("which")
-        .arg("djpeg")
-        .output()
-        .ok()
-        .filter(|o| o.status.success())
-        .map(|o| PathBuf::from(String::from_utf8_lossy(&o.stdout).trim().to_string()))
-}
 
 // ===========================================================================
 // PPM parsing
@@ -540,13 +525,7 @@ fn validate_single_image(djpeg: &Path, jpeg_path: &Path) -> TestRecord {
 
 #[test]
 fn c_djpeg_cross_validation_real_world_images() {
-    let djpeg: PathBuf = match djpeg_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: djpeg not found");
-            return;
-        }
-    };
+    let djpeg: PathBuf = require_c_tool!("djpeg");
 
     let files: Vec<PathBuf> = collect_jpeg_files();
     assert!(
@@ -599,13 +578,7 @@ fn c_djpeg_cross_validation_real_world_images() {
 
 #[test]
 fn c_djpeg_cross_validation_real_world_progressive() {
-    let djpeg: PathBuf = match djpeg_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: djpeg not found");
-            return;
-        }
-    };
+    let djpeg: PathBuf = require_c_tool!("djpeg");
 
     let all_files: Vec<PathBuf> = collect_jpeg_files();
     let progressive_files: Vec<PathBuf> = filter_files(&all_files, &["progressive"]);
@@ -645,13 +618,7 @@ fn c_djpeg_cross_validation_real_world_progressive() {
 
 #[test]
 fn c_djpeg_cross_validation_real_world_highres() {
-    let djpeg: PathBuf = match djpeg_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: djpeg not found");
-            return;
-        }
-    };
+    let djpeg: PathBuf = require_c_tool!("djpeg");
 
     let all_files: Vec<PathBuf> = collect_jpeg_files();
     let highres_files: Vec<PathBuf> = filter_files(&all_files, &["4k", "8k"]);

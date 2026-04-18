@@ -17,23 +17,12 @@
 //! decoder produces the same pixels — guarding against the unlikely
 //! case where our encoder and decoder share a deviation from C.
 
+mod helpers;
+
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use libjpeg_turbo_rs::{compress_arithmetic, decompress_to, PixelFormat, Subsampling};
-
-fn djpeg_path() -> Option<PathBuf> {
-    let homebrew: PathBuf = PathBuf::from("/opt/homebrew/bin/djpeg");
-    if homebrew.exists() {
-        return Some(homebrew);
-    }
-    Command::new("which")
-        .arg("djpeg")
-        .output()
-        .ok()
-        .filter(|o| o.status.success())
-        .map(|o| PathBuf::from(String::from_utf8_lossy(&o.stdout).trim().to_string()))
-}
 
 /// Parse a minimal P6/P5 PPM/PGM into (width, height, samples).
 fn parse_ppm(path: &Path) -> (usize, usize, Vec<u8>) {
@@ -193,13 +182,7 @@ fn dac_with_high_table_slots_roundtrips_identically() {
     // C libjpeg-turbo's djpeg must also decode it identically. If djpeg
     // is unavailable we only skip the external tool — not the Rust
     // round-trip above, which has already passed.
-    let djpeg: PathBuf = match djpeg_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: djpeg not found (C cross-check omitted)");
-            return;
-        }
-    };
+    let djpeg: PathBuf = require_c_tool!("djpeg");
 
     let tmp_jpg: String = "/tmp/ljt_a4_high_slots.jpg".to_string();
     let tmp_ppm: String = "/tmp/ljt_a4_high_slots.ppm".to_string();

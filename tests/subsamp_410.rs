@@ -4,6 +4,8 @@
 /// uses 1x1 sampling (upsampling factor 4 horizontally, 2 vertically).
 /// This test constructs a JPEG with 4:1:0 sampling factors by directly
 /// manipulating the SOF header, then verifies successful decode.
+mod helpers;
+
 use std::io::Write;
 use std::path::PathBuf;
 use std::process::Command;
@@ -121,27 +123,6 @@ fn decode_410_subsampling_with_fast_upsample() {
 // ---------------------------------------------------------------------------
 // Helpers for C djpeg cross-validation
 // ---------------------------------------------------------------------------
-
-/// Locate the djpeg binary. Check /opt/homebrew/bin first, then $PATH.
-fn djpeg_path() -> Option<PathBuf> {
-    let homebrew_path = PathBuf::from("/opt/homebrew/bin/djpeg");
-    if homebrew_path.exists() {
-        return Some(homebrew_path);
-    }
-
-    let output = Command::new("which").arg("djpeg").output().ok()?;
-    if output.status.success() {
-        let path_str: String = String::from_utf8_lossy(&output.stdout).trim().to_string();
-        if !path_str.is_empty() {
-            let path = PathBuf::from(&path_str);
-            if path.exists() {
-                return Some(path);
-            }
-        }
-    }
-
-    None
-}
 
 /// Parse a binary PPM (P6) file into (width, height, rgb_pixels).
 /// Returns `None` if the file is not a valid P6 PPM.
@@ -283,13 +264,7 @@ impl Drop for TempFile {
 /// If djpeg can decode it, we assert pixel-identical output (diff=0).
 #[test]
 fn c_djpeg_cross_validation_410() {
-    let djpeg: PathBuf = match djpeg_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: djpeg not found");
-            return;
-        }
-    };
+    let djpeg: PathBuf = require_c_tool!("djpeg");
 
     // Build the 4:1:0 JPEG using the same SOF-patching approach as other tests.
     let jpeg_data: Vec<u8> = make_jpeg_with_410_sampling();

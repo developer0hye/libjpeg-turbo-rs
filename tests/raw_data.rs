@@ -3,6 +3,8 @@
 /// Raw data mode encodes from / decodes to pre-downsampled component planes
 /// (e.g., separate Y, Cb, Cr at their native subsampled resolution),
 /// bypassing color conversion and chroma downsampling/upsampling.
+mod helpers;
+
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -351,19 +353,6 @@ fn compress_raw_plane_data_too_small_returns_error() {
 // C djpeg cross-validation helpers
 // ===========================================================================
 
-fn djpeg_path() -> Option<PathBuf> {
-    let homebrew: PathBuf = PathBuf::from("/opt/homebrew/bin/djpeg");
-    if homebrew.exists() {
-        return Some(homebrew);
-    }
-    Command::new("which")
-        .arg("djpeg")
-        .output()
-        .ok()
-        .filter(|o| o.status.success())
-        .map(|o| PathBuf::from(String::from_utf8_lossy(&o.stdout).trim().to_string()))
-}
-
 static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 fn temp_path(name: &str) -> PathBuf {
@@ -449,13 +438,7 @@ fn read_number(data: &[u8], idx: usize) -> (usize, usize) {
 
 #[test]
 fn c_djpeg_cross_validation_raw_data() {
-    let djpeg: PathBuf = match djpeg_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: djpeg not found");
-            return;
-        }
-    };
+    let djpeg: PathBuf = require_c_tool!("djpeg");
 
     // Create raw YCbCr plane data and compress with Rust compress_raw()
     let image_width: usize = 48;
