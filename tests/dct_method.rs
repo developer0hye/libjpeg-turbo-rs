@@ -1,3 +1,5 @@
+mod helpers;
+
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -123,20 +125,6 @@ fn dct_ifast_grayscale_roundtrip() {
 // C djpeg cross-validation helpers
 // ===========================================================================
 
-/// Path to C djpeg binary, or `None` if not installed.
-fn djpeg_path() -> Option<PathBuf> {
-    let homebrew: PathBuf = PathBuf::from("/opt/homebrew/bin/djpeg");
-    if homebrew.exists() {
-        return Some(homebrew);
-    }
-    Command::new("which")
-        .arg("djpeg")
-        .output()
-        .ok()
-        .filter(|o| o.status.success())
-        .map(|o| PathBuf::from(String::from_utf8_lossy(&o.stdout).trim().to_string()))
-}
-
 /// Parse a binary PPM (P6) file and return `(width, height, rgb_data)`.
 fn parse_ppm(path: &Path) -> (usize, usize, Vec<u8>) {
     let raw: Vec<u8> = std::fs::read(path).expect("failed to read PPM file");
@@ -198,13 +186,7 @@ fn parse_ppm(path: &Path) -> (usize, usize, Vec<u8>) {
 
 #[test]
 fn c_djpeg_dct_method_diff_zero() {
-    let djpeg: PathBuf = match djpeg_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("skipping c_djpeg_dct_method_diff_zero: djpeg not found");
-            return;
-        }
-    };
+    let djpeg: PathBuf = require_c_tool!("djpeg");
 
     // Generate a 32x32 gradient image
     let (w, h): (usize, usize) = (32, 32);
