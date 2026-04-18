@@ -8,6 +8,8 @@
 //!
 //! If djpeg is not available, tests skip gracefully (eprintln! + return).
 
+mod helpers;
+
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -18,19 +20,6 @@ use libjpeg_turbo_rs::quantize::{dequantize, quantize, DitherMode, QuantizeOptio
 // ---------------------------------------------------------------------------
 // Tool discovery
 // ---------------------------------------------------------------------------
-
-fn djpeg_path() -> Option<PathBuf> {
-    let homebrew: PathBuf = PathBuf::from("/opt/homebrew/bin/djpeg");
-    if homebrew.exists() {
-        return Some(homebrew);
-    }
-    Command::new("which")
-        .arg("djpeg")
-        .output()
-        .ok()
-        .filter(|o| o.status.success())
-        .map(|o| PathBuf::from(String::from_utf8_lossy(&o.stdout).trim()))
-}
 
 fn djpeg_supports_colors(djpeg: &Path) -> bool {
     Command::new(djpeg)
@@ -197,13 +186,7 @@ fn compare_quantize_rgb(
 /// Covers 128 and 256 colors with no-dither and FS-dither modes.
 #[test]
 fn c_indexedcolortest_8bit() {
-    let djpeg: PathBuf = match djpeg_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: djpeg not found");
-            return;
-        }
-    };
+    let djpeg: PathBuf = require_c_tool!("djpeg");
 
     if !djpeg_supports_colors(&djpeg) {
         eprintln!("SKIP: djpeg does not support -colors flag");
@@ -311,13 +294,7 @@ fn c_indexedcolortest_8bit() {
 /// the Rust library uses 8-bit output for quantization).
 #[test]
 fn c_indexedcolortest_12bit() {
-    let djpeg: PathBuf = match djpeg_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: djpeg not found");
-            return;
-        }
-    };
+    let djpeg: PathBuf = require_c_tool!("djpeg");
 
     if !djpeg_supports_colors(&djpeg) {
         eprintln!("SKIP: djpeg does not support -colors flag");
@@ -388,13 +365,7 @@ fn c_indexedcolortest_12bit() {
 /// Here we verify the pixel data (pre-lossless-encode step) is identical.
 #[test]
 fn c_indexedcolortest_cross_precision() {
-    let djpeg: PathBuf = match djpeg_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: djpeg not found");
-            return;
-        }
-    };
+    let djpeg: PathBuf = require_c_tool!("djpeg");
 
     if !djpeg_supports_colors(&djpeg) {
         eprintln!("SKIP: djpeg does not support -colors flag");
