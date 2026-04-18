@@ -3,6 +3,8 @@
 //! Tests encode with various Encoder options using our Rust encoder, then decode
 //! with C djpeg (and rdjpgcom where applicable), verifying correctness.
 
+mod helpers;
+
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -13,36 +15,6 @@ use libjpeg_turbo_rs::{decompress, ColorSpace, DctMethod, Encoder, PixelFormat, 
 // ===========================================================================
 // Tool discovery
 // ===========================================================================
-
-/// Locate the djpeg binary. Checks /opt/homebrew/bin/djpeg first, then falls
-/// back to whatever `which djpeg` returns. Returns `None` when not found.
-fn djpeg_path() -> Option<PathBuf> {
-    let homebrew: PathBuf = PathBuf::from("/opt/homebrew/bin/djpeg");
-    if homebrew.exists() {
-        return Some(homebrew);
-    }
-    Command::new("which")
-        .arg("djpeg")
-        .output()
-        .ok()
-        .filter(|o| o.status.success())
-        .map(|o| PathBuf::from(String::from_utf8_lossy(&o.stdout).trim().to_string()))
-}
-
-/// Locate the cjpeg binary.
-#[allow(dead_code)]
-fn cjpeg_path() -> Option<PathBuf> {
-    let homebrew: PathBuf = PathBuf::from("/opt/homebrew/bin/cjpeg");
-    if homebrew.exists() {
-        return Some(homebrew);
-    }
-    Command::new("which")
-        .arg("cjpeg")
-        .output()
-        .ok()
-        .filter(|o| o.status.success())
-        .map(|o| PathBuf::from(String::from_utf8_lossy(&o.stdout).trim().to_string()))
-}
 
 /// Locate the rdjpgcom binary.
 fn rdjpgcom_path() -> Option<PathBuf> {
@@ -292,13 +264,7 @@ fn assert_pixels_identical(buf_a: &[u8], buf_b: &[u8], width: usize, height: usi
 /// the same decoded image as encoding normal-order input without bottom_up.
 #[test]
 fn c_xval_encoder_bottom_up() {
-    let djpeg: PathBuf = match djpeg_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: djpeg not found");
-            return;
-        }
-    };
+    let djpeg: PathBuf = require_c_tool!("djpeg");
 
     let width: usize = 48;
     let height: usize = 48;
@@ -352,13 +318,7 @@ fn c_xval_encoder_bottom_up() {
 /// Decode with C djpeg (default is also islow). Expect diff=0.
 #[test]
 fn c_xval_encoder_dct_method_islow() {
-    let djpeg: PathBuf = match djpeg_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: djpeg not found");
-            return;
-        }
-    };
+    let djpeg: PathBuf = require_c_tool!("djpeg");
 
     let width: usize = 48;
     let height: usize = 48;
@@ -400,13 +360,7 @@ fn c_xval_encoder_dct_method_islow() {
 /// identically through the same decoder.
 #[test]
 fn c_xval_encoder_dct_method_ifast() {
-    let djpeg: PathBuf = match djpeg_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: djpeg not found");
-            return;
-        }
-    };
+    let djpeg: PathBuf = require_c_tool!("djpeg");
 
     let width: usize = 48;
     let height: usize = 48;
@@ -447,13 +401,7 @@ fn c_xval_encoder_dct_method_ifast() {
 /// JPEG bitstream produced by FLOAT FDCT.
 #[test]
 fn c_xval_encoder_dct_method_float() {
-    let djpeg: PathBuf = match djpeg_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: djpeg not found");
-            return;
-        }
-    };
+    let djpeg: PathBuf = require_c_tool!("djpeg");
 
     let width: usize = 48;
     let height: usize = 48;
@@ -493,13 +441,7 @@ fn c_xval_encoder_dct_method_float() {
 /// and also decode with Rust and verify `image.comment()` returns the text.
 #[test]
 fn c_xval_encoder_comment() {
-    let djpeg: PathBuf = match djpeg_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: djpeg not found");
-            return;
-        }
-    };
+    let djpeg: PathBuf = require_c_tool!("djpeg");
 
     let width: usize = 48;
     let height: usize = 48;
@@ -565,13 +507,7 @@ fn c_xval_encoder_comment() {
 /// Both should produce diff=0 decoded output.
 #[test]
 fn c_xval_encoder_sampling_factors() {
-    let djpeg: PathBuf = match djpeg_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: djpeg not found");
-            return;
-        }
-    };
+    let djpeg: PathBuf = require_c_tool!("djpeg");
 
     let width: usize = 48;
     let height: usize = 48;
@@ -618,13 +554,7 @@ fn c_xval_encoder_sampling_factors() {
 /// Should produce diff=0 vs Rust decode.
 #[test]
 fn c_xval_encoder_colorspace_ycbcr() {
-    let djpeg: PathBuf = match djpeg_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: djpeg not found");
-            return;
-        }
-    };
+    let djpeg: PathBuf = require_c_tool!("djpeg");
 
     let width: usize = 48;
     let height: usize = 48;
@@ -665,13 +595,7 @@ fn c_xval_encoder_colorspace_ycbcr() {
 /// valid images.
 #[test]
 fn c_xval_encoder_fancy_downsampling() {
-    let djpeg: PathBuf = match djpeg_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: djpeg not found");
-            return;
-        }
-    };
+    let djpeg: PathBuf = require_c_tool!("djpeg");
 
     let width: usize = 48;
     let height: usize = 48;
@@ -743,13 +667,7 @@ fn c_xval_encoder_fancy_downsampling() {
 /// Must succeed with correct dimensions.
 #[test]
 fn c_xval_encoder_linear_quality() {
-    let djpeg: PathBuf = match djpeg_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: djpeg not found");
-            return;
-        }
-    };
+    let djpeg: PathBuf = require_c_tool!("djpeg");
 
     let width: usize = 48;
     let height: usize = 48;
@@ -788,13 +706,7 @@ fn c_xval_encoder_linear_quality() {
 /// Encode with restart_blocks(4). Decode with C djpeg. Expect diff=0 vs Rust.
 #[test]
 fn c_xval_encoder_restart_blocks() {
-    let djpeg: PathBuf = match djpeg_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: djpeg not found");
-            return;
-        }
-    };
+    let djpeg: PathBuf = require_c_tool!("djpeg");
 
     let width: usize = 48;
     let height: usize = 48;
@@ -833,13 +745,7 @@ fn c_xval_encoder_restart_blocks() {
 /// Encode with restart_rows(2). Decode with C djpeg. Expect diff=0 vs Rust.
 #[test]
 fn c_xval_encoder_restart_rows() {
-    let djpeg: PathBuf = match djpeg_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: djpeg not found");
-            return;
-        }
-    };
+    let djpeg: PathBuf = require_c_tool!("djpeg");
 
     let width: usize = 48;
     let height: usize = 48;

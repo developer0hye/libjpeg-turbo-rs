@@ -4,6 +4,8 @@
 //! -dct float, comparing pixel output. ISLOW is also tested as a sanity check.
 //! IFAST/FLOAT may have non-zero tolerance since implementations can differ.
 
+mod helpers;
+
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -14,24 +16,6 @@ use libjpeg_turbo_rs::{compress, decompress_to, DctMethod, Encoder, PixelFormat,
 // ===========================================================================
 // Tool discovery
 // ===========================================================================
-
-fn djpeg_path() -> Option<PathBuf> {
-    let homebrew_path: PathBuf = PathBuf::from("/opt/homebrew/bin/djpeg");
-    if homebrew_path.exists() {
-        return Some(homebrew_path);
-    }
-    let output = Command::new("which").arg("djpeg").output().ok()?;
-    if output.status.success() {
-        let path_str: String = String::from_utf8_lossy(&output.stdout).trim().to_string();
-        if !path_str.is_empty() {
-            let path: PathBuf = PathBuf::from(&path_str);
-            if path.exists() {
-                return Some(path);
-            }
-        }
-    }
-    None
-}
 
 /// Check if djpeg supports a specific -dct flag by running it with that flag.
 fn djpeg_supports_dct_flag(djpeg: &Path, flag: &str) -> bool {
@@ -188,13 +172,7 @@ fn c_decode_with_dct(djpeg: &Path, jpeg: &[u8], dct_flag: &str, label: &str) -> 
 
 #[test]
 fn c_xval_decode_dct_islow_vs_c_int_420() {
-    let djpeg: PathBuf = match djpeg_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: djpeg not found");
-            return;
-        }
-    };
+    let djpeg: PathBuf = require_c_tool!("djpeg");
 
     let (w, h): (usize, usize) = (64, 64);
     let pixels: Vec<u8> = generate_gradient(w, h);
@@ -214,13 +192,7 @@ fn c_xval_decode_dct_islow_vs_c_int_420() {
 
 #[test]
 fn c_xval_decode_dct_islow_vs_c_int_444() {
-    let djpeg: PathBuf = match djpeg_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: djpeg not found");
-            return;
-        }
-    };
+    let djpeg: PathBuf = require_c_tool!("djpeg");
 
     let (w, h): (usize, usize) = (64, 64);
     let pixels: Vec<u8> = generate_gradient(w, h);
@@ -243,13 +215,7 @@ fn c_xval_decode_dct_islow_vs_c_int_444() {
 
 #[test]
 fn c_xval_decode_dct_ifast_vs_c_fast_420() {
-    let djpeg: PathBuf = match djpeg_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: djpeg not found");
-            return;
-        }
-    };
+    let djpeg: PathBuf = require_c_tool!("djpeg");
     if !djpeg_supports_dct_flag(&djpeg, "fast") {
         eprintln!("SKIP: djpeg does not support -dct fast");
         return;
@@ -273,13 +239,7 @@ fn c_xval_decode_dct_ifast_vs_c_fast_420() {
 
 #[test]
 fn c_xval_decode_dct_ifast_vs_c_fast_444() {
-    let djpeg: PathBuf = match djpeg_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: djpeg not found");
-            return;
-        }
-    };
+    let djpeg: PathBuf = require_c_tool!("djpeg");
     if !djpeg_supports_dct_flag(&djpeg, "fast") {
         eprintln!("SKIP: djpeg does not support -dct fast");
         return;
@@ -306,13 +266,7 @@ fn c_xval_decode_dct_ifast_vs_c_fast_444() {
 
 #[test]
 fn c_xval_decode_dct_float_vs_c_float_420() {
-    let djpeg: PathBuf = match djpeg_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: djpeg not found");
-            return;
-        }
-    };
+    let djpeg: PathBuf = require_c_tool!("djpeg");
     if !djpeg_supports_dct_flag(&djpeg, "float") {
         eprintln!("SKIP: djpeg does not support -dct float");
         return;
@@ -336,13 +290,7 @@ fn c_xval_decode_dct_float_vs_c_float_420() {
 
 #[test]
 fn c_xval_decode_dct_float_vs_c_float_444() {
-    let djpeg: PathBuf = match djpeg_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: djpeg not found");
-            return;
-        }
-    };
+    let djpeg: PathBuf = require_c_tool!("djpeg");
     if !djpeg_supports_dct_flag(&djpeg, "float") {
         eprintln!("SKIP: djpeg does not support -dct float");
         return;
@@ -369,13 +317,7 @@ fn c_xval_decode_dct_float_vs_c_float_444() {
 
 #[test]
 fn c_xval_encode_dct_ifast_c_decode() {
-    let djpeg: PathBuf = match djpeg_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: djpeg not found");
-            return;
-        }
-    };
+    let djpeg: PathBuf = require_c_tool!("djpeg");
 
     let (w, h): (usize, usize) = (64, 64);
     let pixels: Vec<u8> = generate_gradient(w, h);
@@ -402,13 +344,7 @@ fn c_xval_encode_dct_ifast_c_decode() {
 
 #[test]
 fn c_xval_encode_dct_float_c_decode() {
-    let djpeg: PathBuf = match djpeg_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: djpeg not found");
-            return;
-        }
-    };
+    let djpeg: PathBuf = require_c_tool!("djpeg");
 
     let (w, h): (usize, usize) = (64, 64);
     let pixels: Vec<u8> = generate_gradient(w, h);

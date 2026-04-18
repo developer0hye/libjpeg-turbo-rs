@@ -4,29 +4,14 @@
 //! 1. Zero all AC coefficients via custom filter, decode both with Rust and C djpeg, assert diff=0.
 //! 2. Identity filter (no-op), verify Rust decode matches C djpeg exactly (diff=0).
 
+mod helpers;
+
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use libjpeg_turbo_rs::{decompress, transform_jpeg_with_options, TransformOptions};
-
-// ===========================================================================
-// Tool discovery
-// ===========================================================================
-
-fn djpeg_path() -> Option<PathBuf> {
-    let homebrew: PathBuf = PathBuf::from("/opt/homebrew/bin/djpeg");
-    if homebrew.exists() {
-        return Some(homebrew);
-    }
-    Command::new("which")
-        .arg("djpeg")
-        .output()
-        .ok()
-        .filter(|o| o.status.success())
-        .map(|o| PathBuf::from(String::from_utf8_lossy(&o.stdout).trim().to_string()))
-}
 
 // ===========================================================================
 // Helpers
@@ -175,13 +160,7 @@ fn write_jpeg_temp(data: &[u8], name: &str) -> TempFile {
 /// the resulting JPEG.
 #[test]
 fn zero_ac_filter_rust_vs_c_djpeg() {
-    let djpeg: PathBuf = match djpeg_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: djpeg not found");
-            return;
-        }
-    };
+    let djpeg: PathBuf = require_c_tool!("djpeg");
 
     // Use a real fixture JPEG with 4:2:0 subsampling
     let jpeg_data: &[u8] = include_bytes!("fixtures/photo_320x240_420.jpg");
@@ -245,13 +224,7 @@ fn zero_ac_filter_rust_vs_c_djpeg() {
 /// coefficient read/write does not alter the JPEG.
 #[test]
 fn identity_filter_rust_vs_c_djpeg() {
-    let djpeg: PathBuf = match djpeg_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: djpeg not found");
-            return;
-        }
-    };
+    let djpeg: PathBuf = require_c_tool!("djpeg");
 
     // Use a real fixture JPEG with 4:2:0 subsampling
     let jpeg_data: &[u8] = include_bytes!("fixtures/photo_320x240_420.jpg");
@@ -312,13 +285,7 @@ fn identity_filter_rust_vs_c_djpeg() {
 /// across different subsampling modes.
 #[test]
 fn zero_ac_filter_444_rust_vs_c_djpeg() {
-    let djpeg: PathBuf = match djpeg_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: djpeg not found");
-            return;
-        }
-    };
+    let djpeg: PathBuf = require_c_tool!("djpeg");
 
     let jpeg_data: &[u8] = include_bytes!("fixtures/photo_320x240_444.jpg");
 
@@ -376,13 +343,7 @@ fn zero_ac_filter_444_rust_vs_c_djpeg() {
 /// Apply identity filter on a 4:2:2 fixture to cover another subsampling mode.
 #[test]
 fn identity_filter_422_rust_vs_c_djpeg() {
-    let djpeg: PathBuf = match djpeg_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: djpeg not found");
-            return;
-        }
-    };
+    let djpeg: PathBuf = require_c_tool!("djpeg");
 
     let jpeg_data: &[u8] = include_bytes!("fixtures/photo_320x240_422.jpg");
 
