@@ -495,6 +495,92 @@ fn parse_ppm_header(header: &str) -> Result<(usize, usize, usize, usize)> {
 // 12/16-bit PPM I/O (tj3LoadImage12/16, tj3SaveImage12/16)
 // =========================================================================
 
+/// Loaded 12-bit image data (J12SAMPLE, samples in 0..4095).
+///
+/// Mirrors libjpeg-turbo's `tj3LoadImage12()` return shape: `i16` samples
+/// in the inclusive range `0..=4095`, interpreted as PGM (1 component) or
+/// PPM (3 components).
+#[derive(Debug, Clone)]
+pub struct LoadedImage12 {
+    /// Pixel samples as 12-bit values (0..=4095).
+    pub pixels: Vec<i16>,
+    /// Image width in pixels.
+    pub width: usize,
+    /// Image height in pixels.
+    pub height: usize,
+    /// Number of components (1 for grayscale, 3 for RGB).
+    pub num_components: usize,
+    /// Maximum sample value from the PPM header (always <= 4095).
+    pub maxval: u16,
+}
+
+/// Load a 12-bit PPM/PGM file (maxval in `256..=4095`).
+///
+/// Mirrors libjpeg-turbo's `tj3LoadImage12()`. PPM samples above 255 are
+/// stored as 2-byte big-endian per the PPM spec (network byte order).
+/// Samples are validated to be `<= maxval` and returned as `i16` in
+/// `0..=4095` (no rescaling — PPM maxval is just an upper bound).
+#[cfg(any(not(target_arch = "wasm32"), target_os = "wasi"))]
+pub fn load_ppm_12bit<P: AsRef<Path>>(path: P) -> Result<LoadedImage12> {
+    let data: Vec<u8> = fs::read(path.as_ref())?;
+    load_ppm_12bit_from_bytes(&data)
+}
+
+/// Load a 12-bit PPM/PGM from raw bytes (shared core for `load_ppm_12bit`).
+pub fn load_ppm_12bit_from_bytes(data: &[u8]) -> Result<LoadedImage12> {
+    let (width, height, maxval, num_components, samples) = parse_ppm_highbit(data)?;
+    if !(256..=4095).contains(&maxval) {
+        return Err(JpegError::Unsupported(format!(
+            "PPM maxval {maxval} out of 12-bit range (256..=4095)"
+        )));
+    }
+    // Samples are already range-checked by parse_ppm_highbit().
+    let pixels: Vec<i16> = samples.into_iter().map(|s| s as i16).collect();
+    Ok(LoadedImage12 {
+        pixels,
+        width,
+        height,
+        num_components,
+        maxval: maxval as u16,
+    })
+}
+
+/// Save 12-bit pixel data as a PPM (P6) or PGM (P5) file with maxval=4095.
+///
+/// Mirrors libjpeg-turbo's `tj3SaveImage12()`. Writes 2-byte big-endian
+/// samples per the PPM spec. `num_components` must be 1 or 3. Input
+/// samples are clamped to `0..=4095` before writing.
+#[cfg(any(not(target_arch = "wasm32"), target_os = "wasi"))]
+pub fn save_ppm_12bit<P: AsRef<Path>>(
+    path: P,
+    pixels: &[i16],
+    width: usize,
+    height: usize,
+    num_components: usize,
+) -> Result<()> {
+    if num_components != 1 && num_components != 3 {
+        return Err(JpegError::Unsupported(format!(
+            "PPM 12-bit save supports 1 or 3 components, got {num_components}"
+        )));
+    }
+    let expected: usize = width * height * num_components;
+    if pixels.len() < expected {
+        return Err(JpegError::BufferTooSmall {
+            need: expected,
+            got: pixels.len(),
+        });
+    }
+    // Re-use the 16-bit writer by upcasting; clamp to valid 12-bit range
+    // (negative values -> 0, > 4095 -> 4095). This matches the C
+    // implementation, which zero-extends J12SAMPLE via `(unsigned)v`.
+    let mut buf: Vec<u16> = Vec::with_capacity(expected);
+    for &s in &pixels[..expected] {
+        let clamped: i32 = (s as i32).clamp(0, 4095);
+        buf.push(clamped as u16);
+    }
+    save_ppm_16bit(path, &buf, width, height, num_components, 4095)
+}
+
 /// Loaded 16-bit image data from a high-bit-depth PPM/PGM.
 #[derive(Debug, Clone)]
 pub struct LoadedImage16 {
@@ -522,62 +608,12 @@ pub fn load_ppm_16bit<P: AsRef<Path>>(path: P) -> Result<LoadedImage16> {
 
 /// Load a high-bit-depth PPM/PGM from raw bytes.
 pub fn load_ppm_16bit_from_bytes(data: &[u8]) -> Result<LoadedImage16> {
-    if data.len() < 3 {
-        return Err(JpegError::CorruptData("PPM/PGM file too small".into()));
-    }
-
-    let magic: &[u8] = &data[0..2];
-    let is_grayscale: bool = magic == b"P5";
-    let is_rgb: bool = magic == b"P6";
-
-    if !is_grayscale && !is_rgb {
-        return Err(JpegError::Unsupported(format!(
-            "unsupported PPM magic for 16-bit load: {:?}",
-            std::str::from_utf8(magic).unwrap_or("??")
-        )));
-    }
-
-    // Parse header reusing shared parser
-    let header_str: &str = {
-        let mut newline_count: usize = 0;
-        let mut header_end: usize = data.len().min(256);
-        for (i, &byte) in data.iter().enumerate() {
-            if byte == b'\n' {
-                newline_count += 1;
-                if newline_count == 3 {
-                    header_end = i + 1;
-                    break;
-                }
-            }
-        }
-        std::str::from_utf8(&data[..header_end])
-            .map_err(|_| JpegError::CorruptData("PPM header is not valid UTF-8".into()))?
-    };
-
-    let (width, height, maxval, header_len) = parse_ppm_header(header_str)?;
-
+    let (width, height, maxval, num_components, pixels) = parse_ppm_highbit(data)?;
     if !(256..=65535).contains(&maxval) {
         return Err(JpegError::Unsupported(format!(
-            "PPM maxval {} out of 16-bit range (256-65535)",
-            maxval
+            "PPM maxval {maxval} out of 16-bit range (256..=65535)"
         )));
     }
-
-    let num_components: usize = if is_grayscale { 1 } else { 3 };
-    let num_samples: usize = width * height * num_components;
-    let expected_data_len: usize = num_samples * 2; // 2 bytes per sample
-    let pixel_data: &[u8] = &data[header_len..];
-
-    if pixel_data.len() < expected_data_len {
-        return Err(JpegError::UnexpectedEof);
-    }
-
-    // PPM 16-bit stores samples as big-endian 2-byte values
-    let mut pixels: Vec<u16> = Vec::with_capacity(num_samples);
-    for chunk in pixel_data[..expected_data_len].chunks_exact(2) {
-        pixels.push(u16::from_be_bytes([chunk[0], chunk[1]]));
-    }
-
     Ok(LoadedImage16 {
         pixels,
         width,
@@ -585,6 +621,77 @@ pub fn load_ppm_16bit_from_bytes(data: &[u8]) -> Result<LoadedImage16> {
         num_components,
         maxval: maxval as u16,
     })
+}
+
+/// Shared parser for high-bit-depth PPM/PGM (maxval > 255). Returns
+/// `(width, height, maxval, num_components, samples_u16)`. Validates that
+/// the magic is P5/P6, maxval > 255, the sample buffer is large enough,
+/// and each sample is `<= maxval` (per `rdppm.c::get_word_*` semantics).
+fn parse_ppm_highbit(data: &[u8]) -> Result<(usize, usize, usize, usize, Vec<u16>)> {
+    if data.len() < 3 {
+        return Err(JpegError::CorruptData("PPM/PGM file too small".into()));
+    }
+
+    let magic: &[u8] = &data[0..2];
+    let is_grayscale: bool = magic == b"P5";
+    let is_rgb: bool = magic == b"P6";
+    if !is_grayscale && !is_rgb {
+        return Err(JpegError::Unsupported(format!(
+            "unsupported PPM magic for high-bit load: {:?}",
+            std::str::from_utf8(magic).unwrap_or("??")
+        )));
+    }
+
+    // Find a prefix long enough for the textual header. PPM comment lines
+    // can introduce extra newlines, so we scan up to the first valid-UTF-8
+    // prefix that contains the magic + 3 whitespace-delimited ASCII tokens
+    // (width, height, maxval), skipping `#`-prefixed comments. Capping at
+    // 64 KiB keeps worst-case effort bounded.
+    let scan_len: usize = data.len().min(65536);
+    let header_str: &str = std::str::from_utf8(&data[..scan_len])
+        .or_else(|_| {
+            // Fall back to the longest valid-UTF-8 prefix of the scan window.
+            let mut cut: usize = scan_len;
+            while cut > 0 && std::str::from_utf8(&data[..cut]).is_err() {
+                cut -= 1;
+            }
+            std::str::from_utf8(&data[..cut])
+        })
+        .map_err(|_| JpegError::CorruptData("PPM header is not valid UTF-8".into()))?;
+
+    let (width, height, maxval, header_len) = parse_ppm_header(header_str)?;
+    if !(1..=65535).contains(&maxval) {
+        return Err(JpegError::CorruptData(format!(
+            "PPM maxval {maxval} out of range (1..=65535)"
+        )));
+    }
+
+    let num_components: usize = if is_grayscale { 1 } else { 3 };
+    let num_samples: usize = width
+        .checked_mul(height)
+        .and_then(|v| v.checked_mul(num_components))
+        .ok_or_else(|| JpegError::CorruptData("PPM dimensions overflow".into()))?;
+    let expected_data_len: usize = num_samples
+        .checked_mul(2)
+        .ok_or_else(|| JpegError::CorruptData("PPM high-bit sample buffer size overflow".into()))?;
+    let pixel_data: &[u8] = &data[header_len..];
+    if pixel_data.len() < expected_data_len {
+        return Err(JpegError::UnexpectedEof);
+    }
+
+    let maxval_u16: u16 = maxval as u16;
+    let mut pixels: Vec<u16> = Vec::with_capacity(num_samples);
+    for chunk in pixel_data[..expected_data_len].chunks_exact(2) {
+        let v: u16 = u16::from_be_bytes([chunk[0], chunk[1]]);
+        if v > maxval_u16 {
+            return Err(JpegError::CorruptData(format!(
+                "PPM sample {v} exceeds declared maxval {maxval}"
+            )));
+        }
+        pixels.push(v);
+    }
+
+    Ok((width, height, maxval, num_components, pixels))
 }
 
 /// Save 16-bit pixel data as a PPM (P6) or PGM (P5) file.
