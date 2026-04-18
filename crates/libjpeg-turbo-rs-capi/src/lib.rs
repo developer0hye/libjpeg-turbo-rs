@@ -30,6 +30,7 @@ pub mod legacy;
 pub mod precision;
 pub mod tj3;
 pub mod transform;
+pub mod yuv;
 
 // Re-export the `extern "C"` symbols at the crate root for discoverability.
 pub use alloc::{tj3Alloc, tj3Free};
@@ -41,6 +42,10 @@ pub use header::{
 pub use precision::{tj3Compress12, tj3Compress16, tj3Decompress12, tj3Decompress16};
 pub use tj3::{tj3Destroy, tj3Get, tj3GetErrorCode, tj3GetErrorStr, tj3Init, tj3Set};
 pub use transform::{tj3Transform, TjTransform};
+pub use yuv::{
+    tj3CompressFromYUV8, tj3CompressFromYUVPlanes8, tj3DecodeYUV8, tj3DecodeYUVPlanes8,
+    tj3DecompressToYUV8, tj3DecompressToYUVPlanes8, tj3EncodeYUV8, tj3EncodeYUVPlanes8,
+};
 
 // Legacy TJ1/TJ2 aliases — thin wrappers around the TJ3 surface above.
 pub use legacy::{

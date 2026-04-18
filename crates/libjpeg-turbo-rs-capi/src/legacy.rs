@@ -224,54 +224,76 @@ pub extern "C" fn tjTransform(
 }
 
 // ---------------------------------------------------------------------------
-// YUV (A1-10 stubs; full family is A1-7)
+// YUV (forwards to the A1-7 family in `crate::yuv`)
 // ---------------------------------------------------------------------------
 
 /// `tjEncodeYUV3(handle, srcBuf, width, pad, height, pixelFormat,
 ///               dstBuf, align, subsamp, flags) -> int`.
 ///
-/// Stub: the YUV family is introduced in A1-7. Returning -1 lets a
-/// downstream client fall back to its own path instead of silently
-/// producing garbage. The error string documents the gap.
+/// Legacy alias: sets `TJPARAM_SUBSAMP` then forwards to
+/// `tj3EncodeYUV8`. `pad` and `align` are aliases for the row
+/// alignment in different historical signatures; whichever is
+/// positive wins, defaulting to 1. `flags` is ignored.
 #[no_mangle]
 pub extern "C" fn tjEncodeYUV3(
     handle: *mut c_void,
-    _src_buf: *const u8,
-    _width: c_int,
-    _pad: c_int,
-    _height: c_int,
-    _pixel_format: c_int,
-    _dst_buf: *mut u8,
-    _align: c_int,
-    _subsamp: c_int,
+    src_buf: *const u8,
+    width: c_int,
+    pad: c_int,
+    height: c_int,
+    pixel_format: c_int,
+    dst_buf: *mut u8,
+    align: c_int,
+    subsamp: c_int,
     _flags: c_int,
 ) -> c_int {
-    if let Some(inst) = unsafe { handle_as_mut(handle) } {
-        inst.set_error("tjEncodeYUV3: not yet implemented (A1-7)", TJERR_FATAL);
+    let effective_align: c_int = if pad > 0 { pad } else { align.max(1) };
+    if tj3Set(handle, TJPARAM_SUBSAMP, subsamp) != 0 {
+        return -1;
     }
-    -1
+    crate::yuv::tj3EncodeYUV8(
+        handle,
+        src_buf,
+        width,
+        0, /* tight-packed pitch */
+        height,
+        pixel_format,
+        dst_buf,
+        effective_align,
+    )
 }
 
 /// `tjDecodeYUV(handle, srcBuf, align, subsamp, dstBuf, width, pitch,
-///              height, pixelFormat, flags) -> int`. Stub — see
-/// `tjEncodeYUV3`.
+///              height, pixelFormat, flags) -> int`.
+///
+/// Legacy alias that forwards to `tj3DecodeYUV8` after setting
+/// `TJPARAM_SUBSAMP`.
 #[no_mangle]
 pub extern "C" fn tjDecodeYUV(
     handle: *mut c_void,
-    _src_buf: *const u8,
-    _align: c_int,
-    _subsamp: c_int,
-    _dst_buf: *mut u8,
-    _width: c_int,
-    _pitch: c_int,
-    _height: c_int,
-    _pixel_format: c_int,
+    src_buf: *const u8,
+    align: c_int,
+    subsamp: c_int,
+    dst_buf: *mut u8,
+    width: c_int,
+    pitch: c_int,
+    height: c_int,
+    pixel_format: c_int,
     _flags: c_int,
 ) -> c_int {
-    if let Some(inst) = unsafe { handle_as_mut(handle) } {
-        inst.set_error("tjDecodeYUV: not yet implemented (A1-7)", TJERR_FATAL);
+    if tj3Set(handle, TJPARAM_SUBSAMP, subsamp) != 0 {
+        return -1;
     }
-    -1
+    crate::yuv::tj3DecodeYUV8(
+        handle,
+        src_buf,
+        align.max(1),
+        dst_buf,
+        width,
+        pitch,
+        height,
+        pixel_format,
+    )
 }
 
 // ---------------------------------------------------------------------------
