@@ -8,35 +8,11 @@ use libjpeg_turbo_rs::precision::{
     decompress_lossless_arbitrary, Image12, Image16,
 };
 
+mod helpers;
+
 // ===========================================================================
 // C cross-validation tool discovery and helpers
 // ===========================================================================
-
-fn djpeg_path() -> Option<PathBuf> {
-    let homebrew: PathBuf = PathBuf::from("/opt/homebrew/bin/djpeg");
-    if homebrew.exists() {
-        return Some(homebrew);
-    }
-    Command::new("which")
-        .arg("djpeg")
-        .output()
-        .ok()
-        .filter(|o| o.status.success())
-        .map(|o| PathBuf::from(String::from_utf8_lossy(&o.stdout).trim().to_string()))
-}
-
-fn cjpeg_path() -> Option<PathBuf> {
-    let homebrew: PathBuf = PathBuf::from("/opt/homebrew/bin/cjpeg");
-    if homebrew.exists() {
-        return Some(homebrew);
-    }
-    Command::new("which")
-        .arg("cjpeg")
-        .output()
-        .ok()
-        .filter(|o| o.status.success())
-        .map(|o| PathBuf::from(String::from_utf8_lossy(&o.stdout).trim().to_string()))
-}
 
 /// Check if cjpeg supports the `-precision` flag.
 fn cjpeg_supports_precision(cjpeg: &Path) -> bool {
@@ -416,8 +392,8 @@ fn roundtrip_16bit_full_range() {
 /// Additionally tests C cjpeg encode -> Rust decode for both precisions.
 #[test]
 fn c_djpeg_precision_diff_zero() {
-    let djpeg: Option<PathBuf> = djpeg_path();
-    let cjpeg: Option<PathBuf> = cjpeg_path();
+    let djpeg: Option<PathBuf> = helpers::djpeg_path();
+    let cjpeg: Option<PathBuf> = helpers::cjpeg_path();
 
     if djpeg.is_none() && cjpeg.is_none() {
         eprintln!("SKIP: neither djpeg nor cjpeg found");

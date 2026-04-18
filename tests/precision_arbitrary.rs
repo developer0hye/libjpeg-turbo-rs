@@ -11,6 +11,8 @@ use libjpeg_turbo_rs::precision::{
     compress_lossless_arbitrary, decompress_lossless_arbitrary, Image16,
 };
 
+mod helpers;
+
 // ---------------------------------------------------------------------------
 // Helper: generate test pixels for a given precision
 // ---------------------------------------------------------------------------
@@ -511,32 +513,6 @@ fn lossless_precision_6_color_roundtrip() {
 // C cross-validation helpers
 // ---------------------------------------------------------------------------
 
-fn djpeg_path() -> Option<PathBuf> {
-    let homebrew: PathBuf = PathBuf::from("/opt/homebrew/bin/djpeg");
-    if homebrew.exists() {
-        return Some(homebrew);
-    }
-    Command::new("which")
-        .arg("djpeg")
-        .output()
-        .ok()
-        .filter(|o| o.status.success())
-        .map(|o| PathBuf::from(String::from_utf8_lossy(&o.stdout).trim().to_string()))
-}
-
-fn cjpeg_path() -> Option<PathBuf> {
-    let homebrew: PathBuf = PathBuf::from("/opt/homebrew/bin/cjpeg");
-    if homebrew.exists() {
-        return Some(homebrew);
-    }
-    Command::new("which")
-        .arg("cjpeg")
-        .output()
-        .ok()
-        .filter(|o| o.status.success())
-        .map(|o| PathBuf::from(String::from_utf8_lossy(&o.stdout).trim().to_string()))
-}
-
 /// Check if cjpeg supports the `-lossless` flag.
 fn cjpeg_supports_lossless(cjpeg: &Path) -> bool {
     let output = Command::new(cjpeg).arg("-help").output();
@@ -702,8 +678,8 @@ fn make_gray_pixels_16(width: usize, height: usize, precision: u8) -> Vec<u16> {
 /// Precisions not supported by C djpeg/cjpeg are gracefully skipped.
 #[test]
 fn c_djpeg_precision_arbitrary_diff_zero() {
-    let djpeg: Option<PathBuf> = djpeg_path();
-    let cjpeg: Option<PathBuf> = cjpeg_path();
+    let djpeg: Option<PathBuf> = helpers::djpeg_path();
+    let cjpeg: Option<PathBuf> = helpers::cjpeg_path();
 
     if djpeg.is_none() && cjpeg.is_none() {
         eprintln!("SKIP: neither djpeg nor cjpeg found");
