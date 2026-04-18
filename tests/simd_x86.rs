@@ -120,14 +120,15 @@ fn sse2_upsample_edge_cases() {
     (scalar.fancy_upsample_h2v1)(&[42], 1, &mut expected);
     (sse2.fancy_upsample_h2v1)(&[42], 1, &mut actual);
     assert_eq!(actual, expected);
-    // Two samples: C uses box filter for in_width=2 (pipeline guards before SIMD)
+    // Two samples: at the pipeline layer, C guards width<=2 to use box filter.
+    // The raw scalar kernel itself doesn't guard — it fancy-interpolates.
+    // So we only assert scalar==sse2 parity on the kernel output, not on a
+    // specific box-vs-fancy policy.
     let mut expected = [0u8; 4];
+    let mut actual = [0u8; 4];
     (scalar.fancy_upsample_h2v1)(&[100, 200], 2, &mut expected);
-    assert_eq!(
-        expected,
-        [100, 100, 200, 200],
-        "width=2 should use box filter"
-    );
+    (sse2.fancy_upsample_h2v1)(&[100, 200], 2, &mut actual);
+    assert_eq!(actual, expected, "scalar/sse2 kernel parity at width=2");
 }
 
 #[test]
