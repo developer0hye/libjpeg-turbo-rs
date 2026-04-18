@@ -1,4 +1,6 @@
 /// Synthetic pattern encode/decode matrix tests.
+mod helpers;
+
 use std::path::PathBuf;
 use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -674,28 +676,6 @@ fn bit16_3comp() {
 /// Atomic counter for unique temp filenames across threads.
 static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
-/// Find the djpeg binary path.
-///
-/// Checks `/opt/homebrew/bin/djpeg` first (macOS Homebrew), then falls back
-/// to `which djpeg` on the system PATH. Returns `None` if neither is found.
-fn djpeg_path() -> Option<PathBuf> {
-    let homebrew: PathBuf = PathBuf::from("/opt/homebrew/bin/djpeg");
-    if homebrew.exists() {
-        return Some(homebrew);
-    }
-    let output = Command::new("which").arg("djpeg").output().ok()?;
-    if output.status.success() {
-        let path_str: String = String::from_utf8_lossy(&output.stdout).trim().to_string();
-        if !path_str.is_empty() {
-            let path: PathBuf = PathBuf::from(&path_str);
-            if path.exists() {
-                return Some(path);
-            }
-        }
-    }
-    None
-}
-
 /// Parse a PPM/PGM file (P6 binary RGB or P5 binary grayscale) into raw pixel data.
 ///
 /// Returns `(width, height, data)` on success, or an error string on failure.
@@ -787,13 +767,7 @@ fn parse_ppm(bytes: &[u8]) -> Result<(usize, usize, Vec<u8>), String> {
 /// - Grayscale: baseline grayscale
 #[test]
 fn c_djpeg_cross_validation_tjunittest_diff_zero() {
-    let djpeg: PathBuf = match djpeg_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: djpeg not found");
-            return;
-        }
-    };
+    let djpeg: PathBuf = require_c_tool!("djpeg");
 
     let (w, h): (usize, usize) = (48, 48);
     let rgb_pixels: Vec<u8> = gen_rgb(w, h);

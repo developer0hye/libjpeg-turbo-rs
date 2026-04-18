@@ -1,3 +1,5 @@
+mod helpers;
+
 use libjpeg_turbo_rs::decode::upsample;
 
 use std::path::PathBuf;
@@ -6,20 +8,6 @@ use std::process::Command;
 // ===========================================================================
 // C djpeg cross-validation helpers
 // ===========================================================================
-
-/// Locate C djpeg binary: check /opt/homebrew/bin/ first, then PATH.
-fn djpeg_path() -> Option<PathBuf> {
-    let homebrew: PathBuf = PathBuf::from("/opt/homebrew/bin/djpeg");
-    if homebrew.exists() {
-        return Some(homebrew);
-    }
-    Command::new("which")
-        .arg("djpeg")
-        .output()
-        .ok()
-        .filter(|o| o.status.success())
-        .map(|o| PathBuf::from(String::from_utf8_lossy(&o.stdout).trim().to_string()))
-}
 
 /// Parse a binary PPM (P6) file and return `(width, height, rgb_pixels)`.
 fn parse_ppm(data: &[u8]) -> (usize, usize, Vec<u8>) {
@@ -90,13 +78,7 @@ fn parse_ppm_number(data: &[u8], idx: usize) -> (usize, usize) {
 /// - Asserts pixel-identical output (max_diff = 0)
 #[test]
 fn c_djpeg_upsample_diff_zero() {
-    let djpeg: PathBuf = match djpeg_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: djpeg not found");
-            return;
-        }
-    };
+    let djpeg: PathBuf = require_c_tool!("djpeg");
 
     // 4:2:0 requires H2V2 upsampling; 4:2:2 requires H2V1 upsampling.
     // Multiple resolutions test edge cases in upsampling (odd widths, etc.).

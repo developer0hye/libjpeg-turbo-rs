@@ -1,4 +1,6 @@
 /// Transform validation matrix tests.
+mod helpers;
+
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -764,32 +766,6 @@ fn tjunittest_no_dimension_swap_hflip_vflip_rot180() {
 // C jpegtran cross-validation helpers
 // ===========================================================================
 
-fn jpegtran_path() -> Option<PathBuf> {
-    let homebrew: PathBuf = PathBuf::from("/opt/homebrew/bin/jpegtran");
-    if homebrew.exists() {
-        return Some(homebrew);
-    }
-    Command::new("which")
-        .arg("jpegtran")
-        .output()
-        .ok()
-        .filter(|o| o.status.success())
-        .map(|o| PathBuf::from(String::from_utf8_lossy(&o.stdout).trim().to_string()))
-}
-
-fn djpeg_path() -> Option<PathBuf> {
-    let homebrew: PathBuf = PathBuf::from("/opt/homebrew/bin/djpeg");
-    if homebrew.exists() {
-        return Some(homebrew);
-    }
-    Command::new("which")
-        .arg("djpeg")
-        .output()
-        .ok()
-        .filter(|o| o.status.success())
-        .map(|o| PathBuf::from(String::from_utf8_lossy(&o.stdout).trim().to_string()))
-}
-
 static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 fn temp_path_xv(name: &str) -> PathBuf {
@@ -921,20 +897,8 @@ fn gen_rgb(width: usize, height: usize) -> Vec<u8> {
 
 #[test]
 fn c_jpegtran_cross_validation_tjunittest_transform() {
-    let jpegtran: PathBuf = match jpegtran_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: jpegtran not found");
-            return;
-        }
-    };
-    let djpeg: PathBuf = match djpeg_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: djpeg not found");
-            return;
-        }
-    };
+    let jpegtran: PathBuf = require_c_tool!("jpegtran");
+    let djpeg: PathBuf = require_c_tool!("djpeg");
 
     // Create source JPEG: 48x48, S444, quality 90
     let source_jpeg: Vec<u8> = compress(

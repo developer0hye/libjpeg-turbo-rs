@@ -1,4 +1,6 @@
 /// YUV conversion validation tests.
+mod helpers;
+
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -332,28 +334,6 @@ impl Drop for TempFile {
     }
 }
 
-/// Locate the djpeg binary. Checks /opt/homebrew/bin/djpeg first, then falls
-/// back to whatever `which djpeg` returns. Returns `None` when not found.
-fn djpeg_path() -> Option<PathBuf> {
-    let homebrew_path: PathBuf = PathBuf::from("/opt/homebrew/bin/djpeg");
-    if homebrew_path.exists() {
-        return Some(homebrew_path);
-    }
-
-    let output = Command::new("which").arg("djpeg").output().ok()?;
-    if output.status.success() {
-        let path_str: String = String::from_utf8_lossy(&output.stdout).trim().to_string();
-        if !path_str.is_empty() {
-            let path: PathBuf = PathBuf::from(&path_str);
-            if path.exists() {
-                return Some(path);
-            }
-        }
-    }
-
-    None
-}
-
 /// Parse a binary PPM (P6) file into (width, height, rgb_pixels).
 /// Returns `None` if the file is not a valid P6 PPM.
 fn parse_ppm(data: &[u8]) -> Option<(usize, usize, Vec<u8>)> {
@@ -463,32 +443,6 @@ fn parse_ppm(data: &[u8]) -> Option<(usize, usize, Vec<u8>)> {
 // Test: C djpeg cross-validation for YUV roundtrip
 // ---------------------------------------------------------------------------
 
-// ---------------------------------------------------------------------------
-// cjpeg helper
-// ---------------------------------------------------------------------------
-
-/// Locate the cjpeg binary. Checks /opt/homebrew/bin/cjpeg first, then falls
-/// back to whatever `which cjpeg` returns. Returns `None` when not found.
-fn cjpeg_path() -> Option<PathBuf> {
-    let homebrew_path: PathBuf = PathBuf::from("/opt/homebrew/bin/cjpeg");
-    if homebrew_path.exists() {
-        return Some(homebrew_path);
-    }
-
-    let output = Command::new("which").arg("cjpeg").output().ok()?;
-    if output.status.success() {
-        let path_str: String = String::from_utf8_lossy(&output.stdout).trim().to_string();
-        if !path_str.is_empty() {
-            let path: PathBuf = PathBuf::from(&path_str);
-            if path.exists() {
-                return Some(path);
-            }
-        }
-    }
-
-    None
-}
-
 /// Build a binary PPM (P6) file from raw RGB pixels.
 fn build_ppm(width: usize, height: usize, pixels: &[u8]) -> Vec<u8> {
     assert_eq!(pixels.len(), width * height * 3);
@@ -554,20 +508,8 @@ fn encode_with_cjpeg(cjpeg: &Path, ppm_bytes: &[u8], extra_args: &[&str]) -> Opt
 ///   `decode_yuv`) and C `djpeg -ppm`. Assert pixel-identical output (diff=0).
 #[test]
 fn c_djpeg_yuv_roundtrip_diff_zero() {
-    let djpeg: PathBuf = match djpeg_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: djpeg not found");
-            return;
-        }
-    };
-    let cjpeg: PathBuf = match cjpeg_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: cjpeg not found");
-            return;
-        }
-    };
+    let djpeg: PathBuf = require_c_tool!("djpeg");
+    let cjpeg: PathBuf = require_c_tool!("cjpeg");
 
     let (w, h): (usize, usize) = (48, 48);
     let quality: u8 = 90;
