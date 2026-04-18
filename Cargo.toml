@@ -40,6 +40,14 @@ zune-jpeg = "0.5"
 [target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
 criterion = { version = "0.5", features = ["html_reports"] }
 
+# Loom permutation testing for concurrency stress (gated behind `--cfg loom`).
+# Activate: `RUSTFLAGS="--cfg loom" cargo test --release`.
+[target.'cfg(loom)'.dev-dependencies]
+loom = "0.7"
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(loom)'] }
+
 [[bench]]
 name = "decode"
 harness = false
