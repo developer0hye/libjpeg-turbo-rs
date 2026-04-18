@@ -5,6 +5,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use libjpeg_turbo_rs::{decompress, Encoder, PixelFormat, Subsampling};
 
+mod helpers;
+
 /// Generate a test image with varied pixel values to exercise quantization.
 fn varied_pixels(width: usize, height: usize) -> Vec<u8> {
     let mut pixels: Vec<u8> = Vec::with_capacity(width * height * 3);
@@ -95,21 +97,6 @@ fn per_component_quality_defaults_to_global() {
 // ===========================================================================
 // C djpeg cross-validation helpers
 // ===========================================================================
-
-/// Locate the djpeg binary. Checks /opt/homebrew/bin/djpeg first, then falls
-/// back to whatever `which djpeg` returns. Returns `None` when not found.
-fn djpeg_path() -> Option<PathBuf> {
-    let homebrew: PathBuf = PathBuf::from("/opt/homebrew/bin/djpeg");
-    if homebrew.exists() {
-        return Some(homebrew);
-    }
-    Command::new("which")
-        .arg("djpeg")
-        .output()
-        .ok()
-        .filter(|o| o.status.success())
-        .map(|o| PathBuf::from(String::from_utf8_lossy(&o.stdout).trim().to_string()))
-}
 
 /// Global atomic counter for unique temp file names across parallel tests.
 static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -271,13 +258,7 @@ fn assert_pixels_identical(
 /// subsampling modes.
 #[test]
 fn c_djpeg_per_quality_diff_zero() {
-    let djpeg: PathBuf = match djpeg_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: djpeg not found");
-            return;
-        }
-    };
+    let djpeg: PathBuf = require_c_tool!("djpeg");
 
     let width: usize = 64;
     let height: usize = 64;
