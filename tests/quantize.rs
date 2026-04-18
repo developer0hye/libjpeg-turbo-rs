@@ -1,3 +1,5 @@
+mod helpers;
+
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -458,20 +460,6 @@ fn quantized_image_dimensions_match() {
 // C djpeg cross-validation for color quantization
 // ===========================================================================
 
-/// Locate the djpeg binary, checking /opt/homebrew/bin first, then PATH.
-fn djpeg_path() -> Option<PathBuf> {
-    let homebrew: PathBuf = PathBuf::from("/opt/homebrew/bin/djpeg");
-    if homebrew.exists() {
-        return Some(homebrew);
-    }
-    Command::new("which")
-        .arg("djpeg")
-        .output()
-        .ok()
-        .filter(|o| o.status.success())
-        .map(|o| PathBuf::from(String::from_utf8_lossy(&o.stdout).trim().to_string()))
-}
-
 /// Check if djpeg supports the `-colors` flag.
 fn djpeg_supports_colors(djpeg: &Path) -> bool {
     let output = Command::new(djpeg).arg("-help").output();
@@ -634,13 +622,7 @@ fn create_test_jpeg() -> Vec<u8> {
 /// 3. Cross-PSNR between Rust and C outputs is reasonable (> 15 dB)
 #[test]
 fn c_djpeg_quantize_diff_zero() {
-    let djpeg: PathBuf = match djpeg_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: djpeg not found");
-            return;
-        }
-    };
+    let djpeg: PathBuf = require_c_tool!("djpeg");
 
     if !djpeg_supports_colors(&djpeg) {
         eprintln!("SKIP: djpeg does not support -colors flag");
@@ -796,13 +778,7 @@ fn c_djpeg_quantize_diff_zero() {
 /// Verifies both produce valid quantized output with reasonable quality.
 #[test]
 fn c_djpeg_quantize_ordered_dither_diff_zero() {
-    let djpeg: PathBuf = match djpeg_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: djpeg not found");
-            return;
-        }
-    };
+    let djpeg: PathBuf = require_c_tool!("djpeg");
 
     if !djpeg_supports_colors(&djpeg) {
         eprintln!("SKIP: djpeg does not support -colors flag");
@@ -923,13 +899,7 @@ fn c_djpeg_quantize_ordered_dither_diff_zero() {
 /// Verifies valid output and reasonable quality.
 #[test]
 fn c_djpeg_quantize_no_dither_diff_zero() {
-    let djpeg: PathBuf = match djpeg_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: djpeg not found");
-            return;
-        }
-    };
+    let djpeg: PathBuf = require_c_tool!("djpeg");
 
     if !djpeg_supports_colors(&djpeg) {
         eprintln!("SKIP: djpeg does not support -colors flag");
@@ -1049,13 +1019,7 @@ fn c_djpeg_quantize_no_dither_diff_zero() {
 /// which has more diverse colors and realistic chroma subsampling.
 #[test]
 fn c_djpeg_quantize_fixture_image() {
-    let djpeg: PathBuf = match djpeg_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: djpeg not found");
-            return;
-        }
-    };
+    let djpeg: PathBuf = require_c_tool!("djpeg");
 
     if !djpeg_supports_colors(&djpeg) {
         eprintln!("SKIP: djpeg does not support -colors flag");

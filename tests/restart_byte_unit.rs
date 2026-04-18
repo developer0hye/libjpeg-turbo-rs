@@ -11,6 +11,8 @@
 //! - Verifies roundtrip correctness with the smallest restart interval
 //! - Tests multiple subsampling modes and image sizes
 
+mod helpers;
+
 use std::io::Write;
 use std::path::PathBuf;
 use std::process::Command;
@@ -361,28 +363,6 @@ fn decode_fixture_with_restart_markers() {
 // C djpeg cross-validation helpers
 // ===========================================================================
 
-/// Locate the djpeg binary. Checks /opt/homebrew/bin/djpeg first, then falls
-/// back to whatever `which djpeg` returns. Returns `None` when not found.
-fn djpeg_path() -> Option<PathBuf> {
-    let homebrew_path: PathBuf = PathBuf::from("/opt/homebrew/bin/djpeg");
-    if homebrew_path.exists() {
-        return Some(homebrew_path);
-    }
-
-    let output = Command::new("which").arg("djpeg").output().ok()?;
-    if output.status.success() {
-        let path_str: String = String::from_utf8_lossy(&output.stdout).trim().to_string();
-        if !path_str.is_empty() {
-            let path: PathBuf = PathBuf::from(&path_str);
-            if path.exists() {
-                return Some(path);
-            }
-        }
-    }
-
-    None
-}
-
 /// Parse a binary PPM (P6) image into (width, height, rgb_pixels).
 /// Returns `None` if the data is not a valid P6 PPM.
 fn parse_ppm(data: &[u8]) -> Option<(usize, usize, Vec<u8>)> {
@@ -484,13 +464,7 @@ fn parse_ppm(data: &[u8]) -> Option<(usize, usize, Vec<u8>)> {
 /// C djpeg, assert pixel-identical output (diff=0).
 #[test]
 fn c_djpeg_restart_blocks_1_decode_matches() {
-    let djpeg: PathBuf = match djpeg_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: djpeg not found");
-            return;
-        }
-    };
+    let djpeg: PathBuf = require_c_tool!("djpeg");
 
     let width: usize = 32;
     let height: usize = 32;
@@ -596,13 +570,7 @@ fn c_djpeg_restart_blocks_1_decode_matches() {
 /// decode with both Rust and C djpeg, assert pixel-identical output (diff=0).
 #[test]
 fn c_djpeg_restart_420_non_aligned_matches() {
-    let djpeg: PathBuf = match djpeg_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: djpeg not found");
-            return;
-        }
-    };
+    let djpeg: PathBuf = require_c_tool!("djpeg");
 
     let width: usize = 37;
     let height: usize = 29;
@@ -709,13 +677,7 @@ fn c_djpeg_restart_420_non_aligned_matches() {
 /// C djpeg, assert pixel-identical output (diff=0).
 #[test]
 fn c_djpeg_restart_blocks_2_matches() {
-    let djpeg: PathBuf = match djpeg_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: djpeg not found");
-            return;
-        }
-    };
+    let djpeg: PathBuf = require_c_tool!("djpeg");
 
     let width: usize = 32;
     let height: usize = 32;
