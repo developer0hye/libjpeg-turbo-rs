@@ -1,0 +1,13 @@
+homepage: "https://github.com/developer0hye/libjpeg-turbo-rs"
+language: rust
+primary_contact: "yhkwon@markany.com"
+auto_ccs:
+  - "yhkwon@markany.com"
+main_repo: "https://github.com/developer0hye/libjpeg-turbo-rs"
+file_github_issue: true
+sanitizers:
+  - address
+  - undefined
+  - memory
+fuzzing_engines:
+  - libfuzzer
