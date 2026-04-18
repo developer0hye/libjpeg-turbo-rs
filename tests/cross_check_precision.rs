@@ -159,13 +159,7 @@ fn generate_12bit_gray(w: usize, h: usize) -> Vec<i16> {
 
 #[test]
 fn c_xval_12bit_rgb_subsamplings() {
-    let djpeg = match helpers::djpeg_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: djpeg not found");
-            return;
-        }
-    };
+    let djpeg = require_c_tool!("djpeg");
     if !djpeg_supports_12bit(&djpeg) {
         eprintln!("SKIP: djpeg does not support 12-bit");
         return;
@@ -239,13 +233,7 @@ fn c_xval_12bit_rgb_subsamplings() {
 
 #[test]
 fn c_xval_12bit_grayscale() {
-    let djpeg = match helpers::djpeg_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: djpeg not found");
-            return;
-        }
-    };
+    let djpeg = require_c_tool!("djpeg");
     if !djpeg_supports_12bit(&djpeg) {
         eprintln!("SKIP: djpeg does not support 12-bit");
         return;

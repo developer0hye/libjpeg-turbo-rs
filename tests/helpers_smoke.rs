@@ -12,6 +12,45 @@ fn helpers_c_tool_discovery() {
 }
 
 #[test]
+fn helpers_is_ci_returns_bool() {
+    // Smoke check: `is_ci()` must not panic and must return a bool.
+    // We intentionally do not assert the value, because both CI runners
+    // and `cargo test` without `CI` set are valid environments for this
+    // suite to run in.
+    let _: bool = helpers::is_ci();
+}
+
+#[test]
+fn helpers_require_c_tool_err_for_missing() {
+    // `require_c_tool` must return a NotFound error for a non-existent
+    // binary name.  This exercises the library-style helper that the
+    // `require_c_tool!` macro delegates to.
+    let err: std::io::Error = helpers::require_c_tool("definitely_not_a_real_tool_xyz_42")
+        .expect_err("missing binary must yield Err");
+    assert_eq!(err.kind(), std::io::ErrorKind::NotFound);
+}
+
+#[test]
+fn helpers_require_c_tool_macro_skips_locally() {
+    // Locally (no `CI` env var set to a truthy value), the `require_c_tool!`
+    // macro must print `SKIP: ... not found` to stderr and `return` from the
+    // enclosing function rather than panic when the tool cannot be located.
+    //
+    // On CI the macro panics, which would cause this test to fail — skip
+    // this test on CI because we cannot safely exercise the skip branch
+    // there without tampering with process-global env vars (which would
+    // race with other parallel tests).
+    if helpers::is_ci() {
+        eprintln!("SKIP: macro local-skip branch cannot be exercised on CI");
+        return;
+    }
+    let _path: std::path::PathBuf = require_c_tool!("definitely_not_a_real_tool_xyz_42");
+    // The macro must have early-returned via its SKIP path; reaching this
+    // line would mean the macro did not return, which is a bug.
+    unreachable!("require_c_tool! must have returned via SKIP path");
+}
+
+#[test]
 fn helpers_temp_file_lifecycle() {
     let tf = helpers::TempFile::new("smoke_test.txt");
     tf.write_bytes(b"hello");

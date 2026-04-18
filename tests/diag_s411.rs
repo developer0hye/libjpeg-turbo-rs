@@ -7,20 +7,8 @@ mod helpers;
 use libjpeg_turbo_rs::{compress, transform, PixelFormat, Subsampling, TransformOp};
 
 fn assert_all_transforms_match_c(subsamp: Subsampling, sname: &str) {
-    let djpeg = match helpers::djpeg_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: djpeg not found");
-            return;
-        }
-    };
-    let jpegtran = match helpers::jpegtran_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: jpegtran not found");
-            return;
-        }
-    };
+    let djpeg = require_c_tool!("djpeg");
+    let jpegtran = require_c_tool!("jpegtran");
 
     let w: usize = 48;
     let h: usize = 48;

@@ -353,20 +353,8 @@ fn run_one_combo(
 /// common use cases without requiring the full-c-parity feature.
 #[test]
 fn c_tjtrantest_quick() {
-    let jpegtran: PathBuf = match helpers::jpegtran_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: jpegtran not found");
-            return;
-        }
-    };
-    let cjpeg: PathBuf = match helpers::cjpeg_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: cjpeg not found");
-            return;
-        }
-    };
+    let jpegtran: PathBuf = require_c_tool!("jpegtran");
+    let cjpeg: PathBuf = require_c_tool!("cjpeg");
 
     // Quick subset: S444 and S422 (byte-identical with jpegtran).
     let quick_subsamps: &[(&str, &str)] = &[("1x1", "444"), ("2x1", "422")];
@@ -421,20 +409,8 @@ fn c_tjtrantest_quick() {
 /// All 8 transforms produce byte-identical output to C jpegtran.
 #[test]
 fn c_tjtrantest_quick_420() {
-    let jpegtran: PathBuf = match helpers::jpegtran_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: jpegtran not found");
-            return;
-        }
-    };
-    let cjpeg: PathBuf = match helpers::cjpeg_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: cjpeg not found");
-            return;
-        }
-    };
+    let jpegtran: PathBuf = require_c_tool!("jpegtran");
+    let cjpeg: PathBuf = require_c_tool!("cjpeg");
 
     let source: Vec<u8> = make_source_jpeg(&cjpeg, "2x2", "420");
 
@@ -490,20 +466,8 @@ fn c_tjtrantest_quick_420() {
 #[test]
 #[cfg(feature = "full-c-parity")]
 fn c_tjtrantest_full() {
-    let jpegtran: PathBuf = match helpers::jpegtran_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: jpegtran not found");
-            return;
-        }
-    };
-    let cjpeg: PathBuf = match helpers::cjpeg_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: cjpeg not found");
-            return;
-        }
-    };
+    let jpegtran: PathBuf = require_c_tool!("jpegtran");
+    let cjpeg: PathBuf = require_c_tool!("cjpeg");
 
     let mut tested: u32 = 0;
     let mut skipped: u32 = 0;

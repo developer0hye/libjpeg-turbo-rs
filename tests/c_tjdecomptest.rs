@@ -463,20 +463,8 @@ fn run_decode_matrix(
 /// no crop, scale ∈ {none, 4/8, 2/8}, no nosmooth, no dct_fast.
 #[test]
 fn c_tjdecomptest_quick() {
-    let djpeg: PathBuf = match helpers::djpeg_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: djpeg not found");
-            return;
-        }
-    };
-    let cjpeg: PathBuf = match helpers::cjpeg_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: cjpeg not found");
-            return;
-        }
-    };
+    let djpeg: PathBuf = require_c_tool!("djpeg");
+    let cjpeg: PathBuf = require_c_tool!("cjpeg");
 
     // Verify that the reference image exists.
     let img_dir: PathBuf = helpers::c_testimages_dir();
@@ -511,20 +499,8 @@ fn c_tjdecomptest_quick() {
 #[test]
 #[cfg(feature = "full-c-parity")]
 fn c_tjdecomptest_full() {
-    let djpeg: PathBuf = match helpers::djpeg_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: djpeg not found");
-            return;
-        }
-    };
-    let cjpeg: PathBuf = match helpers::cjpeg_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: cjpeg not found");
-            return;
-        }
-    };
+    let djpeg: PathBuf = require_c_tool!("djpeg");
+    let cjpeg: PathBuf = require_c_tool!("cjpeg");
 
     let img_dir: PathBuf = helpers::c_testimages_dir();
     if !img_dir.join("testorig.ppm").exists() {

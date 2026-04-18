@@ -437,13 +437,7 @@ fn rgb_to_gray(rgb: &[u8]) -> Vec<u8> {
 /// MCUs differ because C cjpeg uses uninitialized heap for padding).
 #[test]
 fn c_tjcomptest_lossy_quick() {
-    let cjpeg: PathBuf = match helpers::cjpeg_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: cjpeg not found");
-            return;
-        }
-    };
+    let cjpeg: PathBuf = require_c_tool!("cjpeg");
 
     let img_dir: PathBuf = helpers::c_testimages_dir();
     let icc_file = img_dir.join("test3.icc");
@@ -526,13 +520,7 @@ fn c_tjcomptest_lossy_quick() {
 #[test]
 #[cfg(feature = "full-c-parity")]
 fn c_tjcomptest_lossy_full() {
-    let cjpeg: PathBuf = match helpers::cjpeg_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: cjpeg not found");
-            return;
-        }
-    };
+    let cjpeg: PathBuf = require_c_tool!("cjpeg");
 
     let img_dir: PathBuf = helpers::c_testimages_dir();
 
@@ -821,13 +809,7 @@ fn run_lossless_combo(
 /// headers matching cjpeg, this test will enforce byte-identical parity.
 #[test]
 fn c_tjcomptest_lossless_quick() {
-    let cjpeg: PathBuf = match helpers::cjpeg_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: cjpeg not found");
-            return;
-        }
-    };
+    let cjpeg: PathBuf = require_c_tool!("cjpeg");
 
     let img_dir: PathBuf = helpers::c_testimages_dir();
     let icc_file = img_dir.join("test3.icc");
@@ -907,13 +889,7 @@ fn c_tjcomptest_lossless_quick() {
 #[test]
 #[cfg(feature = "full-c-parity")]
 fn c_tjcomptest_lossless_full() {
-    let cjpeg: PathBuf = match helpers::cjpeg_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: cjpeg not found");
-            return;
-        }
-    };
+    let cjpeg: PathBuf = require_c_tool!("cjpeg");
 
     let img_dir: PathBuf = helpers::c_testimages_dir();
     let icc_file = img_dir.join("test3.icc");
