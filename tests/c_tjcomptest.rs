@@ -567,11 +567,12 @@ fn c_tjcomptest_lossy_full() {
 
                     // C cjpeg -precision 12
                     let ppm_data = helpers::build_ppm(&rgb_pixels, rgb_w, rgb_h);
+                    let quality_str = quality.to_string();
                     let c_args: Vec<&str> = vec![
                         "-precision",
                         "12",
                         "-q",
-                        &quality.to_string(),
+                        &quality_str,
                         "-sa",
                         CJPEG_SAMP[sampi],
                     ];
