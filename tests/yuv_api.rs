@@ -2,6 +2,8 @@
 ///
 /// These tests cover the full set of `encode_yuv`, `decode_yuv`,
 /// `compress_from_yuv`, `decompress_to_yuv` functions plus buffer size helpers.
+mod helpers;
+
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -538,20 +540,6 @@ fn encode_decode_yuv_non_aligned_dimensions() {
 // C djpeg cross-validation helpers
 // ──────────────────────────────────────────────
 
-/// Path to C djpeg binary, or `None` if not installed.
-fn djpeg_path() -> Option<PathBuf> {
-    let homebrew: PathBuf = PathBuf::from("/opt/homebrew/bin/djpeg");
-    if homebrew.exists() {
-        return Some(homebrew);
-    }
-    Command::new("which")
-        .arg("djpeg")
-        .output()
-        .ok()
-        .filter(|o| o.status.success())
-        .map(|o| PathBuf::from(String::from_utf8_lossy(&o.stdout).trim().to_string()))
-}
-
 /// Global atomic counter for unique temp file names across parallel tests.
 static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
@@ -649,13 +637,7 @@ fn read_ascii_number(data: &[u8], idx: usize) -> (usize, usize) {
 /// the result with diff=0 vs Rust decode.
 #[test]
 fn c_djpeg_cross_validation_yuv_compress() {
-    let djpeg: PathBuf = match djpeg_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: djpeg not found");
-            return;
-        }
-    };
+    let djpeg: PathBuf = require_c_tool!("djpeg");
 
     let width: usize = 48;
     let height: usize = 48;
@@ -747,13 +729,7 @@ fn c_djpeg_cross_validation_yuv_compress() {
 /// via C djpeg to confirm C-compatibility of the YUV decompress path.
 #[test]
 fn c_djpeg_cross_validation_yuv_decompress() {
-    let djpeg: PathBuf = match djpeg_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: djpeg not found");
-            return;
-        }
-    };
+    let djpeg: PathBuf = require_c_tool!("djpeg");
 
     let width: usize = 48;
     let height: usize = 48;
