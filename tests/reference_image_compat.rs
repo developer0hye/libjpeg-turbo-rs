@@ -1,4 +1,6 @@
 /// Cross-validation with C reference test images.
+mod helpers;
+
 use libjpeg_turbo_rs::{decompress, decompress_to, PixelFormat};
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -258,38 +260,6 @@ fn reference_baseline_vs_progressive_pixel_similarity() {
 
 // --- C djpeg cross-validation helpers ---
 
-/// Locate the `djpeg` binary. Checks PATH first, then common install locations.
-fn djpeg_path() -> Option<PathBuf> {
-    // Check if djpeg is on PATH
-    if let Ok(output) = Command::new("which").arg("djpeg").output() {
-        if output.status.success() {
-            let path_str: String = String::from_utf8_lossy(&output.stdout).trim().to_string();
-            if !path_str.is_empty() {
-                let p: PathBuf = PathBuf::from(&path_str);
-                if p.exists() {
-                    return Some(p);
-                }
-            }
-        }
-    }
-
-    // Common install locations
-    let candidates: &[&str] = &[
-        "/usr/bin/djpeg",
-        "/usr/local/bin/djpeg",
-        "/opt/homebrew/bin/djpeg",
-        "/opt/libjpeg-turbo/bin/djpeg",
-    ];
-    for &c in candidates {
-        let p: PathBuf = PathBuf::from(c);
-        if p.exists() {
-            return Some(p);
-        }
-    }
-
-    None
-}
-
 /// Parse a binary PPM (P6) file and return (width, height, pixel_data).
 /// The pixel data is raw RGB bytes.
 fn parse_ppm(data: &[u8]) -> Option<(usize, usize, Vec<u8>)> {
@@ -376,13 +346,7 @@ fn parse_ppm(data: &[u8]) -> Option<(usize, usize, Vec<u8>)> {
 
 #[test]
 fn c_djpeg_reference_images_diff_zero() {
-    let djpeg: PathBuf = match djpeg_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: djpeg binary not found, skipping C cross-validation test");
-            return;
-        }
-    };
+    let djpeg: PathBuf = require_c_tool!("djpeg");
 
     let test_dir: &Path = Path::new("references/libjpeg-turbo/testimages");
     if !test_dir.exists() {
