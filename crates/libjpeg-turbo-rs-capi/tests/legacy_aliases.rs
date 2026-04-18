@@ -206,9 +206,12 @@ fn tj_bufsize_helpers_return_non_zero_for_valid_inputs() {
         assert_eq!(y_h, 480);
         assert_eq!(cb_h, 240);
 
-        // Invalid inputs return 0 / -1.
-        assert_eq!(tj_bufsize(-1, 480, TJSAMP_420), 0);
-        assert_eq!(tj_bufsize_yuv2(640, 0, 480, TJSAMP_420), 0);
+        // Invalid inputs: C reference turbojpeg.c returns
+        // `(unsigned long)-1` (usize::MAX) for the sizing wrappers when
+        // the underlying tj3* helper returns 0. `tjPlaneWidth` retains
+        // the pre-3.0 -1 sentinel for component-out-of-range.
+        assert_eq!(tj_bufsize(-1, 480, TJSAMP_420), usize::MAX);
+        assert_eq!(tj_bufsize_yuv2(640, 0, 480, TJSAMP_420), usize::MAX);
         assert_eq!(tj_plane_w(3, 640, TJSAMP_420), -1);
     }
 }

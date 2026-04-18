@@ -22,10 +22,7 @@
 
 use std::ffi::{c_char, c_int, c_void};
 
-use libjpeg_turbo_rs::{
-    calc_jpeg_dimensions, jpeg_buf_size, yuv_buf_size, yuv_plane_height, yuv_plane_size,
-    yuv_plane_width, Subsampling,
-};
+use libjpeg_turbo_rs::{calc_jpeg_dimensions, yuv_plane_height, yuv_plane_width, Subsampling};
 
 use crate::compress::tj3Compress8;
 use crate::decompress::tj3Decompress8;
@@ -33,10 +30,10 @@ use crate::header::{tj3DecompressHeader, TjRegion};
 use crate::tj3::{handle_as_mut, tj3Destroy, tj3GetErrorStr, tj3Init, tj3Set, TJERR_FATAL};
 use crate::transform::{tj3Transform, TjTransform};
 
-// --- TJINIT flags (same as TJ3) ---
-const TJINIT_COMPRESS: c_int = 1;
-const TJINIT_DECOMPRESS: c_int = 2;
-const TJINIT_TRANSFORM: c_int = 4;
+// --- TJINIT values (matching turbojpeg.h `enum TJINIT`) ---
+const TJINIT_COMPRESS: c_int = 0;
+const TJINIT_DECOMPRESS: c_int = 1;
+const TJINIT_TRANSFORM: c_int = 2;
 
 // --- TJPARAM identifiers we drive from the legacy surface ---
 const TJPARAM_QUALITY: c_int = 3;
@@ -73,13 +70,12 @@ pub extern "C" fn tjInitDecompress() -> *mut c_void {
 
 /// `tjInitTransform()` — legacy transform initializer.
 ///
-/// Historically `tjInitTransform` returned a handle capable of BOTH
-/// decompressing the input AND transforming it; downstream clients
-/// routinely call `tjDecompressHeader3` on the same handle. Mirror
-/// that by OR-ing the two TJ3 flags.
+/// In TurboJPEG 3, `TJINIT_TRANSFORM` already grants both compress and
+/// decompress capabilities (see `tj3InitVersion` in `turbojpeg.c`), so
+/// we just forward the single enum value.
 #[no_mangle]
 pub extern "C" fn tjInitTransform() -> *mut c_void {
-    tj3Init(TJINIT_TRANSFORM | TJINIT_DECOMPRESS)
+    tj3Init(TJINIT_TRANSFORM)
 }
 
 /// `tjDestroy(handle)` — identical to `tj3Destroy`.
@@ -302,24 +298,60 @@ pub extern "C" fn tjDecodeYUV(
 
 /// `tjBufSize(width, height, jpegSubsamp) -> unsigned long`.
 ///
-/// Returns 0 on invalid input (matches historical "error = 0" convention
-/// of the pre-TJ3 sizing helpers).
+/// Mirrors the C wrapper semantics in `turbojpeg.c`: internally delegates
+/// to `tj3JPEGBufSize` and returns `(unsigned long)-1` (usize::MAX) when
+/// the TJ3 helper returns 0 (invalid input or overflow), so callers that
+/// compare against `(unsigned long)-1` — as `tjunittest.c::overflowTest`
+/// does — see a stable "error" sentinel.
 #[no_mangle]
 pub extern "C" fn tjBufSize(width: c_int, height: c_int, jpeg_subsamp: c_int) -> usize {
-    if width <= 0 || height <= 0 {
-        return 0;
+    let retval: usize = crate::bufsize::tj3JPEGBufSize(width, height, jpeg_subsamp);
+    if retval == 0 {
+        usize::MAX
+    } else {
+        retval
     }
-    let Some(ss): Option<Subsampling> = subsamp_from_c(jpeg_subsamp) else {
-        return 0;
-    };
-    jpeg_buf_size(width as usize, height as usize, ss)
+}
+
+/// `TJBUFSIZE(width, height) -> unsigned long` — TurboJPEG 1.0 legacy
+/// upper-bound sizing helper that assumes 4:4:4 and the widest worst
+/// case. Returns `(unsigned long)-1` (usize::MAX) on invalid input, per
+/// the historical contract in `turbojpeg.c`.
+#[no_mangle]
+pub extern "C" fn TJBUFSIZE(width: c_int, height: c_int) -> usize {
+    if width < 1 || height < 1 {
+        return usize::MAX;
+    }
+    // Matches turbojpeg.c: PAD(width, 16) * PAD(height, 16) * 6 + 2048.
+    let pad_w: usize = ((width as usize) + 15) & !15;
+    let pad_h: usize = ((height as usize) + 15) & !15;
+    pad_w
+        .checked_mul(pad_h)
+        .and_then(|v| v.checked_mul(6))
+        .and_then(|v| v.checked_add(2048))
+        .unwrap_or(usize::MAX)
+}
+
+/// `TJBUFSIZEYUV(width, height, subsamp) -> unsigned long` — TurboJPEG
+/// 1.1 legacy helper that delegates to `tjBufSizeYUV`.
+#[no_mangle]
+pub extern "C" fn TJBUFSIZEYUV(width: c_int, height: c_int, subsamp: c_int) -> usize {
+    tjBufSizeYUV(width, height, subsamp)
+}
+
+/// `tjBufSizeYUV(width, height, subsamp) -> unsigned long` — TurboJPEG
+/// 1.1 legacy wrapper that hard-codes `align = 4`.
+#[no_mangle]
+pub extern "C" fn tjBufSizeYUV(width: c_int, height: c_int, subsamp: c_int) -> usize {
+    tjBufSizeYUV2(width, 4, height, subsamp)
 }
 
 /// `tjBufSizeYUV2(width, align, height, subsamp) -> unsigned long`.
 ///
-/// The Rust `yuv_buf_size` helper assumes `align == 1`; larger alignments
-/// are honored by rounding each plane row-stride up to `align` per the
-/// libjpeg-turbo formula.
+/// Delegates to `tj3YUVBufSize` and returns `(unsigned long)-1`
+/// (usize::MAX) on the 0-return error path, matching the C wrapper in
+/// `turbojpeg.c`. `tjunittest.c::overflowTest` relies on this sentinel
+/// when `align` is a non-power-of-two or negative value.
 #[no_mangle]
 pub extern "C" fn tjBufSizeYUV2(
     width: c_int,
@@ -327,27 +359,18 @@ pub extern "C" fn tjBufSizeYUV2(
     height: c_int,
     subsamp: c_int,
 ) -> usize {
-    if width <= 0 || height <= 0 || align <= 0 {
-        return 0;
+    let retval: usize = crate::bufsize::tj3YUVBufSize(width, align, height, subsamp);
+    if retval == 0 {
+        usize::MAX
+    } else {
+        retval
     }
-    let Some(ss): Option<Subsampling> = subsamp_from_c(subsamp) else {
-        return 0;
-    };
-    if align == 1 {
-        return yuv_buf_size(width as usize, height as usize, ss);
-    }
-    // Custom alignment: sum up padded plane sizes.
-    let mut total: usize = 0;
-    for c in 0..3usize {
-        let pw: usize = yuv_plane_width(c, width as usize, ss);
-        let ph: usize = yuv_plane_height(c, height as usize, ss);
-        let stride: usize = pw.div_ceil(align as usize) * align as usize;
-        total += stride * ph;
-    }
-    total
 }
 
 /// `tjPlaneSizeYUV(componentID, width, stride, height, subsamp)`.
+///
+/// Delegates to `tj3YUVPlaneSize` and returns `(unsigned long)-1` on the
+/// 0-return error path, matching the C wrapper's sentinel value.
 #[no_mangle]
 pub extern "C" fn tjPlaneSizeYUV(
     component_id: c_int,
@@ -356,23 +379,12 @@ pub extern "C" fn tjPlaneSizeYUV(
     height: c_int,
     subsamp: c_int,
 ) -> usize {
-    if !(0..=2).contains(&component_id) || width <= 0 || height <= 0 || stride < 0 {
-        return 0;
-    }
-    let Some(ss): Option<Subsampling> = subsamp_from_c(subsamp) else {
-        return 0;
-    };
-    // The Rust helper takes (component, width, height, subsampling) and
-    // assumes stride == plane_width. When the caller specifies a larger
-    // stride we compute stride * (height - 1) + plane_width manually to
-    // match libjpeg-turbo semantics.
-    let pw: usize = yuv_plane_width(component_id as usize, width as usize, ss);
-    let ph: usize = yuv_plane_height(component_id as usize, height as usize, ss);
-    if stride == 0 {
-        yuv_plane_size(component_id as usize, width as usize, height as usize, ss)
+    let retval: usize =
+        crate::bufsize::tj3YUVPlaneSize(component_id, width, stride, height, subsamp);
+    if retval == 0 {
+        usize::MAX
     } else {
-        let stride_us: usize = stride as usize;
-        stride_us * ph.saturating_sub(1) + pw
+        retval
     }
 }
 
