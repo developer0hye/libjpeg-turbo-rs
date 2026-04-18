@@ -3,6 +3,8 @@
 //! Each test encodes with TjHandle, decodes with C djpeg, and verifies
 //! pixel-identical output (diff=0).
 
+mod helpers;
+
 use std::io::Write;
 use std::path::PathBuf;
 use std::process::Command;
@@ -10,30 +12,6 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use libjpeg_turbo_rs::tj3::{TjHandle, TjParam};
 use libjpeg_turbo_rs::{decompress, PixelFormat};
-
-// ===========================================================================
-// Tool discovery
-// ===========================================================================
-
-/// Locate the djpeg binary. Checks /opt/homebrew/bin/djpeg first, then falls
-/// back to whatever `which djpeg` returns. Returns `None` when not found.
-fn djpeg_path() -> Option<PathBuf> {
-    let homebrew: PathBuf = PathBuf::from("/opt/homebrew/bin/djpeg");
-    if homebrew.exists() {
-        return Some(homebrew);
-    }
-    let output: std::process::Output = Command::new("which").arg("djpeg").output().ok()?;
-    if output.status.success() {
-        let path_str: String = String::from_utf8_lossy(&output.stdout).trim().to_string();
-        if !path_str.is_empty() {
-            let path: PathBuf = PathBuf::from(&path_str);
-            if path.exists() {
-                return Some(path);
-            }
-        }
-    }
-    None
-}
 
 // ===========================================================================
 // Helpers
@@ -234,13 +212,7 @@ fn assert_pixels_identical(
 /// TjHandle::new() with default quality 75, compress 48x48 gradient, C djpeg decode -> diff=0.
 #[test]
 fn c_xval_tj3_compress_default() {
-    let djpeg: PathBuf = match djpeg_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: djpeg not found");
-            return;
-        }
-    };
+    let djpeg: PathBuf = require_c_tool!("djpeg");
 
     let width: usize = 48;
     let height: usize = 48;
@@ -271,13 +243,7 @@ fn c_xval_tj3_compress_default() {
 /// Test quality settings Q=1, Q=50, Q=100, each verified by C djpeg.
 #[test]
 fn c_xval_tj3_compress_quality_range() {
-    let djpeg: PathBuf = match djpeg_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: djpeg not found");
-            return;
-        }
-    };
+    let djpeg: PathBuf = require_c_tool!("djpeg");
 
     let width: usize = 48;
     let height: usize = 48;
@@ -321,13 +287,7 @@ fn c_xval_tj3_compress_quality_range() {
 /// Test S444, S422, S420 via TjParam::Subsampling, each verified by C djpeg.
 #[test]
 fn c_xval_tj3_compress_subsampling() {
-    let djpeg: PathBuf = match djpeg_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: djpeg not found");
-            return;
-        }
-    };
+    let djpeg: PathBuf = require_c_tool!("djpeg");
 
     let width: usize = 48;
     let height: usize = 48;
@@ -380,13 +340,7 @@ fn c_xval_tj3_compress_subsampling() {
 /// Set TjParam::Progressive=1, compress, C djpeg decode -> diff=0.
 #[test]
 fn c_xval_tj3_compress_progressive() {
-    let djpeg: PathBuf = match djpeg_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: djpeg not found");
-            return;
-        }
-    };
+    let djpeg: PathBuf = require_c_tool!("djpeg");
 
     let width: usize = 48;
     let height: usize = 48;
@@ -427,13 +381,7 @@ fn c_xval_tj3_compress_progressive() {
 /// Set TjParam::Optimize=1, compress, C djpeg decode -> diff=0.
 #[test]
 fn c_xval_tj3_compress_optimize() {
-    let djpeg: PathBuf = match djpeg_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: djpeg not found");
-            return;
-        }
-    };
+    let djpeg: PathBuf = require_c_tool!("djpeg");
 
     let width: usize = 48;
     let height: usize = 48;
@@ -467,13 +415,7 @@ fn c_xval_tj3_compress_optimize() {
 /// Set TjParam::RestartBlocks=4, compress, C djpeg decode -> diff=0.
 #[test]
 fn c_xval_tj3_compress_restart() {
-    let djpeg: PathBuf = match djpeg_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: djpeg not found");
-            return;
-        }
-    };
+    let djpeg: PathBuf = require_c_tool!("djpeg");
 
     let width: usize = 48;
     let height: usize = 48;
@@ -508,13 +450,7 @@ fn c_xval_tj3_compress_restart() {
 /// compare both RGB outputs -> diff=0.
 #[test]
 fn c_xval_tj3_decompress_vs_djpeg() {
-    let djpeg: PathBuf = match djpeg_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: djpeg not found");
-            return;
-        }
-    };
+    let djpeg: PathBuf = require_c_tool!("djpeg");
 
     let width: usize = 48;
     let height: usize = 48;
@@ -571,13 +507,7 @@ fn c_xval_tj3_decompress_vs_djpeg() {
 /// Set TjParam::Arithmetic=1, compress, C djpeg decode -> diff=0.
 #[test]
 fn c_xval_tj3_compress_arithmetic() {
-    let djpeg: PathBuf = match djpeg_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: djpeg not found");
-            return;
-        }
-    };
+    let djpeg: PathBuf = require_c_tool!("djpeg");
 
     let width: usize = 48;
     let height: usize = 48;
