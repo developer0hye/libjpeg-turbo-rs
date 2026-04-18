@@ -6,33 +6,13 @@
 //! the format's known byte offsets and compare against the C RGB reference.
 //! Target: diff=0 for all RGB-family formats.
 
+mod helpers;
+
 use std::path::PathBuf;
 use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use libjpeg_turbo_rs::{compress, decompress_to, Encoder, PixelFormat, Subsampling};
-
-// ===========================================================================
-// Tool discovery
-// ===========================================================================
-
-fn djpeg_path() -> Option<PathBuf> {
-    let homebrew_path: PathBuf = PathBuf::from("/opt/homebrew/bin/djpeg");
-    if homebrew_path.exists() {
-        return Some(homebrew_path);
-    }
-    let output = Command::new("which").arg("djpeg").output().ok()?;
-    if output.status.success() {
-        let path_str: String = String::from_utf8_lossy(&output.stdout).trim().to_string();
-        if !path_str.is_empty() {
-            let path: PathBuf = PathBuf::from(&path_str);
-            if path.exists() {
-                return Some(path);
-            }
-        }
-    }
-    None
-}
 
 // ===========================================================================
 // Helpers
@@ -265,39 +245,21 @@ fn assert_format_matches_c_rgb(
 
 #[test]
 fn c_xval_decode_bgr_444() {
-    let djpeg: PathBuf = match djpeg_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: djpeg not found");
-            return;
-        }
-    };
+    let djpeg: PathBuf = require_c_tool!("djpeg");
     let (jpeg, c_rgb) = encode_and_get_c_reference(&djpeg, 64, 64, Subsampling::S444);
     assert_format_matches_c_rgb(&jpeg, &c_rgb, PixelFormat::Bgr, 64, 64, "BGR_444");
 }
 
 #[test]
 fn c_xval_decode_bgr_422() {
-    let djpeg: PathBuf = match djpeg_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: djpeg not found");
-            return;
-        }
-    };
+    let djpeg: PathBuf = require_c_tool!("djpeg");
     let (jpeg, c_rgb) = encode_and_get_c_reference(&djpeg, 64, 64, Subsampling::S422);
     assert_format_matches_c_rgb(&jpeg, &c_rgb, PixelFormat::Bgr, 64, 64, "BGR_422");
 }
 
 #[test]
 fn c_xval_decode_bgr_420() {
-    let djpeg: PathBuf = match djpeg_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: djpeg not found");
-            return;
-        }
-    };
+    let djpeg: PathBuf = require_c_tool!("djpeg");
     let (jpeg, c_rgb) = encode_and_get_c_reference(&djpeg, 64, 64, Subsampling::S420);
     assert_format_matches_c_rgb(&jpeg, &c_rgb, PixelFormat::Bgr, 64, 64, "BGR_420");
 }
@@ -308,39 +270,21 @@ fn c_xval_decode_bgr_420() {
 
 #[test]
 fn c_xval_decode_rgba_444() {
-    let djpeg: PathBuf = match djpeg_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: djpeg not found");
-            return;
-        }
-    };
+    let djpeg: PathBuf = require_c_tool!("djpeg");
     let (jpeg, c_rgb) = encode_and_get_c_reference(&djpeg, 64, 64, Subsampling::S444);
     assert_format_matches_c_rgb(&jpeg, &c_rgb, PixelFormat::Rgba, 64, 64, "RGBA_444");
 }
 
 #[test]
 fn c_xval_decode_rgba_422() {
-    let djpeg: PathBuf = match djpeg_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: djpeg not found");
-            return;
-        }
-    };
+    let djpeg: PathBuf = require_c_tool!("djpeg");
     let (jpeg, c_rgb) = encode_and_get_c_reference(&djpeg, 64, 64, Subsampling::S422);
     assert_format_matches_c_rgb(&jpeg, &c_rgb, PixelFormat::Rgba, 64, 64, "RGBA_422");
 }
 
 #[test]
 fn c_xval_decode_rgba_420() {
-    let djpeg: PathBuf = match djpeg_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: djpeg not found");
-            return;
-        }
-    };
+    let djpeg: PathBuf = require_c_tool!("djpeg");
     let (jpeg, c_rgb) = encode_and_get_c_reference(&djpeg, 64, 64, Subsampling::S420);
     assert_format_matches_c_rgb(&jpeg, &c_rgb, PixelFormat::Rgba, 64, 64, "RGBA_420");
 }
@@ -351,26 +295,14 @@ fn c_xval_decode_rgba_420() {
 
 #[test]
 fn c_xval_decode_bgra_444() {
-    let djpeg: PathBuf = match djpeg_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: djpeg not found");
-            return;
-        }
-    };
+    let djpeg: PathBuf = require_c_tool!("djpeg");
     let (jpeg, c_rgb) = encode_and_get_c_reference(&djpeg, 64, 64, Subsampling::S444);
     assert_format_matches_c_rgb(&jpeg, &c_rgb, PixelFormat::Bgra, 64, 64, "BGRA_444");
 }
 
 #[test]
 fn c_xval_decode_bgra_420() {
-    let djpeg: PathBuf = match djpeg_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: djpeg not found");
-            return;
-        }
-    };
+    let djpeg: PathBuf = require_c_tool!("djpeg");
     let (jpeg, c_rgb) = encode_and_get_c_reference(&djpeg, 64, 64, Subsampling::S420);
     assert_format_matches_c_rgb(&jpeg, &c_rgb, PixelFormat::Bgra, 64, 64, "BGRA_420");
 }
@@ -381,13 +313,7 @@ fn c_xval_decode_bgra_420() {
 
 #[test]
 fn c_xval_decode_argb_abgr() {
-    let djpeg: PathBuf = match djpeg_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: djpeg not found");
-            return;
-        }
-    };
+    let djpeg: PathBuf = require_c_tool!("djpeg");
     let (jpeg, c_rgb) = encode_and_get_c_reference(&djpeg, 64, 64, Subsampling::S420);
     assert_format_matches_c_rgb(&jpeg, &c_rgb, PixelFormat::Argb, 64, 64, "ARGB_420");
     assert_format_matches_c_rgb(&jpeg, &c_rgb, PixelFormat::Abgr, 64, 64, "ABGR_420");
@@ -399,13 +325,7 @@ fn c_xval_decode_argb_abgr() {
 
 #[test]
 fn c_xval_decode_rgbx_bgrx_xrgb_xbgr() {
-    let djpeg: PathBuf = match djpeg_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: djpeg not found");
-            return;
-        }
-    };
+    let djpeg: PathBuf = require_c_tool!("djpeg");
     let (jpeg, c_rgb) = encode_and_get_c_reference(&djpeg, 64, 64, Subsampling::S420);
 
     let formats: &[(PixelFormat, &str)] = &[
@@ -487,13 +407,7 @@ fn c_xval_decode_rgb565_quantized() {
 
 #[test]
 fn c_xval_decode_grayscale_from_color() {
-    let djpeg: PathBuf = match djpeg_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: djpeg not found");
-            return;
-        }
-    };
+    let djpeg: PathBuf = require_c_tool!("djpeg");
 
     // Encode a grayscale JPEG (single-component) from grayscale input
     let width: usize = 64;
@@ -567,13 +481,7 @@ fn c_xval_decode_grayscale_from_color() {
 
 #[test]
 fn c_xval_decode_all_formats_cross_product() {
-    let djpeg: PathBuf = match djpeg_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: djpeg not found");
-            return;
-        }
-    };
+    let djpeg: PathBuf = require_c_tool!("djpeg");
 
     let subsampling_modes: &[(Subsampling, &str)] = &[
         (Subsampling::S444, "444"),
@@ -614,13 +522,7 @@ fn c_xval_decode_all_formats_cross_product() {
 
 #[test]
 fn c_xval_decode_cmyk() {
-    let djpeg: PathBuf = match djpeg_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: djpeg not found");
-            return;
-        }
-    };
+    let djpeg: PathBuf = require_c_tool!("djpeg");
 
     // Create a CMYK JPEG by encoding with Adobe marker and CMYK colorspace
     let width: usize = 32;
