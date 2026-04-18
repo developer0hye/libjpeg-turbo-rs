@@ -36,7 +36,8 @@ pub use api::image_io::{
     LoadedImage12, LoadedImage16,
 };
 pub use api::precision::{
-    read_scanlines_12, read_scanlines_16, write_scanlines_12, write_scanlines_16,
+    compress_12bit, compress_16bit, decompress_12bit, decompress_16bit, read_scanlines_12,
+    read_scanlines_16, write_scanlines_12, write_scanlines_16,
 };
 pub use api::quality::quality_scaling;
 pub use api::quantize::requantize;
