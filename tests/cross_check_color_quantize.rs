@@ -12,6 +12,8 @@
 //!
 //! All tests gracefully skip if djpeg is not found or does not support `-colors`.
 
+mod helpers;
+
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -23,19 +25,6 @@ use libjpeg_turbo_rs::{compress, decompress, PixelFormat, Subsampling};
 // ===========================================================================
 // Tool discovery
 // ===========================================================================
-
-fn djpeg_path() -> Option<PathBuf> {
-    let homebrew: PathBuf = PathBuf::from("/opt/homebrew/bin/djpeg");
-    if homebrew.exists() {
-        return Some(homebrew);
-    }
-    Command::new("which")
-        .arg("djpeg")
-        .output()
-        .ok()
-        .filter(|o| o.status.success())
-        .map(|o| PathBuf::from(String::from_utf8_lossy(&o.stdout).trim().to_string()))
-}
 
 /// Check if djpeg supports the `-colors` flag by inspecting its help text.
 fn djpeg_supports_colors(djpeg: &Path) -> bool {
@@ -216,13 +205,7 @@ fn count_unique_colors(pixels: &[u8]) -> usize {
 
 #[test]
 fn c_djpeg_cross_validation_color_quantize() {
-    let djpeg: PathBuf = match djpeg_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: djpeg not found");
-            return;
-        }
-    };
+    let djpeg: PathBuf = require_c_tool!("djpeg");
 
     if !djpeg_supports_colors(&djpeg) {
         eprintln!("SKIP: djpeg does not support -colors flag");
@@ -375,13 +358,7 @@ fn c_djpeg_cross_validation_color_quantize() {
 
 #[test]
 fn c_djpeg_cross_validation_color_quantize_ordered_dither() {
-    let djpeg: PathBuf = match djpeg_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: djpeg not found");
-            return;
-        }
-    };
+    let djpeg: PathBuf = require_c_tool!("djpeg");
 
     if !djpeg_supports_colors(&djpeg) {
         eprintln!("SKIP: djpeg does not support -colors flag");
