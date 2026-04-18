@@ -1765,8 +1765,8 @@ impl<'a> Decoder<'a> {
         let entropy_data = &self.raw_data[self.metadata.entropy_data_offset..];
         let mut arith = ArithDecoder::new(entropy_data, 0);
 
-        // Set conditioning parameters
-        for i in 0..4 {
+        // Set conditioning parameters (16 slots per NUM_ARITH_TBLS).
+        for i in 0..crate::decode::arithmetic::NUM_ARITH_TBLS {
             let (l, u) = self.metadata.arith_dc_params[i];
             arith.set_dc_conditioning(i, l, u);
             arith.set_ac_conditioning(i, self.metadata.arith_ac_params[i]);
@@ -1880,8 +1880,8 @@ impl<'a> Decoder<'a> {
             let entropy_data = &self.raw_data[scan_info.data_offset..];
             let mut arith = ArithDecoder::new(entropy_data, 0);
 
-            // Set conditioning parameters from DAC markers
-            for i in 0..4 {
+            // Set conditioning parameters from DAC markers (16 slots).
+            for i in 0..crate::decode::arithmetic::NUM_ARITH_TBLS {
                 let (l, u) = self.metadata.arith_dc_params[i];
                 arith.set_dc_conditioning(i, l, u);
                 arith.set_ac_conditioning(i, self.metadata.arith_ac_params[i]);
@@ -2654,8 +2654,8 @@ impl<'a> Decoder<'a> {
         let entropy_data = &self.raw_data[self.metadata.entropy_data_offset..];
         let mut arith = ArithDecoder::new(entropy_data, 0);
 
-        // Set conditioning parameters from DAC marker
-        for i in 0..4 {
+        // Set conditioning parameters from DAC marker (16 slots).
+        for i in 0..crate::decode::arithmetic::NUM_ARITH_TBLS {
             let (l, u) = self.metadata.arith_dc_params[i];
             arith.set_dc_conditioning(i, l, u);
             arith.set_ac_conditioning(i, self.metadata.arith_ac_params[i]);
