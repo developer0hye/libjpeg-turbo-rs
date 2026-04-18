@@ -26,6 +26,7 @@ pub mod compress;
 pub mod convert;
 pub mod decompress;
 pub mod header;
+pub mod jpeglib;
 pub mod legacy;
 pub mod precision;
 pub mod tj3;
@@ -45,6 +46,14 @@ pub use transform::{tj3Transform, TjTransform};
 pub use yuv::{
     tj3CompressFromYUV8, tj3CompressFromYUVPlanes8, tj3DecodeYUV8, tj3DecodeYUVPlanes8,
     tj3DecompressToYUV8, tj3DecompressToYUVPlanes8, tj3EncodeYUV8, tj3EncodeYUVPlanes8,
+};
+
+// Classic libjpeg-style `jpeg_*` decode entry points (FFI A1-11).
+pub use jpeglib::{
+    jpeg_CreateDecompress, jpeg_destroy_decompress, jpeg_finish_decompress, jpeg_mem_src,
+    jpeg_read_header, jpeg_read_scanlines, jpeg_start_decompress, jpeg_std_error, jpeg_stdio_src,
+    JpegDecompressPublic, JpegErrorMgr, JpegSourceMgr, JPEG_HEADER_OK, JPEG_HEADER_TABLES_ONLY,
+    JPEG_SUSPENDED,
 };
 
 // Legacy TJ1/TJ2 aliases — thin wrappers around the TJ3 surface above.
