@@ -4,6 +4,8 @@
 //! (reference test images), and that our encoder produces spec-compliant output
 //! that round-trips correctly.
 
+mod helpers;
+
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -726,19 +728,6 @@ fn c_testorig_rgba_matches_rgb_channels() {
 // Section 9: C djpeg cross-validation — Rust decode must match C decode exactly
 // ===========================================================================
 
-fn djpeg_path() -> Option<PathBuf> {
-    let homebrew: PathBuf = PathBuf::from("/opt/homebrew/bin/djpeg");
-    if homebrew.exists() {
-        return Some(homebrew);
-    }
-    Command::new("which")
-        .arg("djpeg")
-        .output()
-        .ok()
-        .filter(|o| o.status.success())
-        .map(|o| PathBuf::from(String::from_utf8_lossy(&o.stdout).trim().to_string()))
-}
-
 fn parse_ppm(path: &Path) -> (usize, usize, Vec<u8>) {
     let raw: Vec<u8> = std::fs::read(path).expect("failed to read PPM");
     assert!(&raw[0..2] == b"P6", "not P6 PPM");
@@ -788,13 +777,7 @@ fn read_ppm_number(data: &[u8], idx: usize) -> (usize, usize) {
 /// pixel-identical output to C djpeg. Target: max_diff=0.
 #[test]
 fn c_djpeg_cross_validation_decode_diff_zero() {
-    let djpeg: PathBuf = match djpeg_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: djpeg not found");
-            return;
-        }
-    };
+    let djpeg: PathBuf = require_c_tool!("djpeg");
 
     let reference_images: &[&str] = &["testorig.jpg", "testimgari.jpg", "testimgint.jpg"];
 
@@ -848,13 +831,7 @@ fn c_djpeg_cross_validation_decode_diff_zero() {
 /// Target: max_diff=0.
 #[test]
 fn c_djpeg_cross_validation_encode_roundtrip_diff_zero() {
-    let djpeg: PathBuf = match djpeg_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: djpeg not found");
-            return;
-        }
-    };
+    let djpeg: PathBuf = require_c_tool!("djpeg");
 
     let (w, h): (usize, usize) = (64, 48);
     let pixels: Vec<u8> = make_test_pattern(w, h);
