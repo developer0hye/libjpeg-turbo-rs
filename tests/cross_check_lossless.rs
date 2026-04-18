@@ -7,6 +7,8 @@
 //!
 //! All tests gracefully skip if cjpeg/djpeg are not found.
 
+mod helpers;
+
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -18,32 +20,6 @@ use libjpeg_turbo_rs::{
 // ===========================================================================
 // Tool discovery
 // ===========================================================================
-
-fn djpeg_path() -> Option<PathBuf> {
-    let homebrew: PathBuf = PathBuf::from("/opt/homebrew/bin/djpeg");
-    if homebrew.exists() {
-        return Some(homebrew);
-    }
-    Command::new("which")
-        .arg("djpeg")
-        .output()
-        .ok()
-        .filter(|o| o.status.success())
-        .map(|o| PathBuf::from(String::from_utf8_lossy(&o.stdout).trim().to_string()))
-}
-
-fn cjpeg_path() -> Option<PathBuf> {
-    let homebrew: PathBuf = PathBuf::from("/opt/homebrew/bin/cjpeg");
-    if homebrew.exists() {
-        return Some(homebrew);
-    }
-    Command::new("which")
-        .arg("cjpeg")
-        .output()
-        .ok()
-        .filter(|o| o.status.success())
-        .map(|o| PathBuf::from(String::from_utf8_lossy(&o.stdout).trim().to_string()))
-}
 
 /// Check if cjpeg supports the `-lossless` flag.
 fn cjpeg_supports_lossless(cjpeg: &Path) -> bool {
@@ -212,13 +188,7 @@ fn read_ascii_number(data: &[u8], idx: usize) -> (usize, usize) {
 
 #[test]
 fn rust_lossless_gray_c_decode() {
-    let djpeg: PathBuf = match djpeg_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: djpeg not found");
-            return;
-        }
-    };
+    let djpeg: PathBuf = require_c_tool!("djpeg");
     if !djpeg_supports_lossless(&djpeg) {
         eprintln!("SKIP: djpeg lacks lossless decode (need libjpeg-turbo 3.x)");
         return;
@@ -256,13 +226,7 @@ fn rust_lossless_gray_c_decode() {
 
 #[test]
 fn rust_lossless_rgb_c_decode() {
-    let djpeg: PathBuf = match djpeg_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: djpeg not found");
-            return;
-        }
-    };
+    let djpeg: PathBuf = require_c_tool!("djpeg");
     if !djpeg_supports_lossless(&djpeg) {
         eprintln!("SKIP: djpeg lacks lossless decode (need libjpeg-turbo 3.x)");
         return;
@@ -308,13 +272,7 @@ fn rust_lossless_rgb_c_decode() {
 
 #[test]
 fn rust_lossless_all_predictors_c_decode() {
-    let djpeg: PathBuf = match djpeg_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: djpeg not found");
-            return;
-        }
-    };
+    let djpeg: PathBuf = require_c_tool!("djpeg");
     if !djpeg_supports_lossless(&djpeg) {
         eprintln!("SKIP: djpeg lacks lossless decode (need libjpeg-turbo 3.x)");
         return;
@@ -360,13 +318,7 @@ fn rust_lossless_all_predictors_c_decode() {
 
 #[test]
 fn rust_lossless_with_point_transform_c_decode() {
-    let djpeg: PathBuf = match djpeg_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: djpeg not found");
-            return;
-        }
-    };
+    let djpeg: PathBuf = require_c_tool!("djpeg");
     if !djpeg_supports_lossless(&djpeg) {
         eprintln!("SKIP: djpeg lacks lossless decode (need libjpeg-turbo 3.x)");
         return;
@@ -421,13 +373,7 @@ fn rust_lossless_with_point_transform_c_decode() {
 
 #[test]
 fn c_lossless_rust_decode() {
-    let cjpeg: PathBuf = match cjpeg_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: cjpeg not found");
-            return;
-        }
-    };
+    let cjpeg: PathBuf = require_c_tool!("cjpeg");
     if !cjpeg_supports_lossless(&cjpeg) {
         eprintln!("SKIP: cjpeg does not support -lossless");
         return;
@@ -475,13 +421,7 @@ fn c_lossless_rust_decode() {
 
 #[test]
 fn c_lossless_all_predictors_rust_decode() {
-    let cjpeg: PathBuf = match cjpeg_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: cjpeg not found");
-            return;
-        }
-    };
+    let cjpeg: PathBuf = require_c_tool!("cjpeg");
     if !cjpeg_supports_lossless(&cjpeg) {
         eprintln!("SKIP: cjpeg does not support -lossless");
         return;
@@ -531,13 +471,7 @@ fn c_lossless_all_predictors_rust_decode() {
 
 #[test]
 fn c_lossless_gray_rust_decode() {
-    let cjpeg: PathBuf = match cjpeg_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: cjpeg not found");
-            return;
-        }
-    };
+    let cjpeg: PathBuf = require_c_tool!("cjpeg");
     if !cjpeg_supports_lossless(&cjpeg) {
         eprintln!("SKIP: cjpeg does not support -lossless");
         return;
@@ -586,13 +520,7 @@ fn c_lossless_gray_rust_decode() {
 
 #[test]
 fn lossless_roundtrip_rust_c_exact() {
-    let djpeg: PathBuf = match djpeg_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: djpeg not found");
-            return;
-        }
-    };
+    let djpeg: PathBuf = require_c_tool!("djpeg");
     if !djpeg_supports_lossless(&djpeg) {
         eprintln!("SKIP: djpeg lacks lossless decode (need libjpeg-turbo 3.x)");
         return;
@@ -643,13 +571,7 @@ fn lossless_roundtrip_rust_c_exact() {
 #[test]
 fn lossless_roundtrip_c_rust_exact() {
     // C encodes lossless -> Rust decodes -> compare with original PPM pixels
-    let cjpeg: PathBuf = match cjpeg_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: cjpeg not found");
-            return;
-        }
-    };
+    let cjpeg: PathBuf = require_c_tool!("cjpeg");
     if !cjpeg_supports_lossless(&cjpeg) {
         eprintln!("SKIP: cjpeg does not support -lossless");
         return;
