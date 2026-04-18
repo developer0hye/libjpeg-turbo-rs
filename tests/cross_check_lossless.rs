@@ -58,6 +58,21 @@ fn cjpeg_supports_lossless(cjpeg: &Path) -> bool {
     }
 }
 
+/// Check if djpeg supports decoding lossless JPEG (SOF3 / 0xC3). libjpeg-turbo
+/// 3.x added lossless decode; 2.x (default on Ubuntu 24.04) rejects SOF3.
+fn djpeg_supports_lossless(djpeg: &Path) -> bool {
+    let output = Command::new(djpeg).arg("-version").output();
+    match output {
+        Ok(o) => {
+            let text: String = String::from_utf8_lossy(&o.stderr).to_string()
+                + &String::from_utf8_lossy(&o.stdout);
+            // libjpeg-turbo 3.x version strings contain "version 3." or "3.0"/"3.1"/…
+            text.contains("version 3.") || text.contains("libjpeg-turbo 3.")
+        }
+        Err(_) => false,
+    }
+}
+
 // ===========================================================================
 // Helpers
 // ===========================================================================
@@ -204,6 +219,10 @@ fn rust_lossless_gray_c_decode() {
             return;
         }
     };
+    if !djpeg_supports_lossless(&djpeg) {
+        eprintln!("SKIP: djpeg lacks lossless decode (need libjpeg-turbo 3.x)");
+        return;
+    }
 
     let (w, h): (usize, usize) = (32, 32);
     let pixels: Vec<u8> = generate_grayscale_pattern(w, h);
@@ -244,6 +263,10 @@ fn rust_lossless_rgb_c_decode() {
             return;
         }
     };
+    if !djpeg_supports_lossless(&djpeg) {
+        eprintln!("SKIP: djpeg lacks lossless decode (need libjpeg-turbo 3.x)");
+        return;
+    }
 
     let (w, h): (usize, usize) = (16, 16);
     let pixels: Vec<u8> = generate_rgb_pattern(w, h);
@@ -292,6 +315,10 @@ fn rust_lossless_all_predictors_c_decode() {
             return;
         }
     };
+    if !djpeg_supports_lossless(&djpeg) {
+        eprintln!("SKIP: djpeg lacks lossless decode (need libjpeg-turbo 3.x)");
+        return;
+    }
 
     let (w, h): (usize, usize) = (24, 24);
     let pixels: Vec<u8> = generate_grayscale_pattern(w, h);
@@ -340,6 +367,10 @@ fn rust_lossless_with_point_transform_c_decode() {
             return;
         }
     };
+    if !djpeg_supports_lossless(&djpeg) {
+        eprintln!("SKIP: djpeg lacks lossless decode (need libjpeg-turbo 3.x)");
+        return;
+    }
 
     let (w, h): (usize, usize) = (16, 16);
     let pixels: Vec<u8> = generate_grayscale_pattern(w, h);
@@ -562,6 +593,10 @@ fn lossless_roundtrip_rust_c_exact() {
             return;
         }
     };
+    if !djpeg_supports_lossless(&djpeg) {
+        eprintln!("SKIP: djpeg lacks lossless decode (need libjpeg-turbo 3.x)");
+        return;
+    }
 
     let (w, h): (usize, usize) = (48, 48);
     let pixels: Vec<u8> = generate_grayscale_pattern(w, h);
