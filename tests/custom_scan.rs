@@ -1,3 +1,5 @@
+mod helpers;
+
 use std::path::PathBuf;
 use std::process::Command;
 
@@ -153,20 +155,6 @@ fn custom_scan_script_differs_from_default() {
 // C djpeg cross-validation helpers
 // ===========================================================================
 
-/// Path to C djpeg binary, or `None` if not installed.
-fn djpeg_path() -> Option<PathBuf> {
-    let homebrew: PathBuf = PathBuf::from("/opt/homebrew/bin/djpeg");
-    if homebrew.exists() {
-        return Some(homebrew);
-    }
-    Command::new("which")
-        .arg("djpeg")
-        .output()
-        .ok()
-        .filter(|o| o.status.success())
-        .map(|o| PathBuf::from(String::from_utf8_lossy(&o.stdout).trim().to_string()))
-}
-
 /// Parse a binary PPM (P6) file from raw bytes and return `(width, height, pixels)`.
 fn parse_ppm(data: &[u8]) -> (usize, usize, Vec<u8>) {
     assert!(data.len() > 3, "PPM too short");
@@ -225,13 +213,7 @@ fn ppm_read_number(data: &[u8], idx: usize) -> (usize, usize) {
 
 #[test]
 fn c_djpeg_custom_scan_diff_zero() {
-    let djpeg: PathBuf = match djpeg_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: djpeg not found, skipping c_djpeg_custom_scan_diff_zero");
-            return;
-        }
-    };
+    let djpeg: PathBuf = require_c_tool!("djpeg");
 
     // Generate a 32x32 gradient pattern
     let width: usize = 32;

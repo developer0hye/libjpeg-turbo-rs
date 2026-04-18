@@ -1,3 +1,5 @@
+mod helpers;
+
 use std::io::Write;
 use std::path::PathBuf;
 use std::process::Command;
@@ -263,28 +265,6 @@ fn requantize_with_different_palette() {
 // C djpeg cross-validation helpers
 // ---------------------------------------------------------------------------
 
-/// Locate the djpeg binary. Checks /opt/homebrew/bin/djpeg first, then falls
-/// back to whatever `which djpeg` returns. Returns `None` when not found.
-fn djpeg_path() -> Option<PathBuf> {
-    let homebrew_path: PathBuf = PathBuf::from("/opt/homebrew/bin/djpeg");
-    if homebrew_path.exists() {
-        return Some(homebrew_path);
-    }
-
-    let output = Command::new("which").arg("djpeg").output().ok()?;
-    if output.status.success() {
-        let path_str: String = String::from_utf8_lossy(&output.stdout).trim().to_string();
-        if !path_str.is_empty() {
-            let path: PathBuf = PathBuf::from(&path_str);
-            if path.exists() {
-                return Some(path);
-            }
-        }
-    }
-
-    None
-}
-
 /// Parse a binary PPM (P6) image into (width, height, rgb_pixels).
 /// Returns `None` if the data is not a valid P6 PPM.
 fn parse_ppm(data: &[u8]) -> Option<(usize, usize, Vec<u8>)> {
@@ -392,13 +372,7 @@ fn parse_ppm(data: &[u8]) -> Option<(usize, usize, Vec<u8>)> {
 /// 4. Confirm bottom-up pixels, when row-reversed, match djpeg exactly.
 #[test]
 fn c_djpeg_bottom_up_decode_matches() {
-    let djpeg: PathBuf = match djpeg_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: djpeg not found, skipping C cross-validation");
-            return;
-        }
-    };
+    let djpeg: PathBuf = require_c_tool!("djpeg");
 
     // Build a 32x24 RGB gradient image with distinct per-row content
     let width: usize = 32;
