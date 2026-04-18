@@ -1,3 +1,5 @@
+mod helpers;
+
 use std::path::PathBuf;
 use std::process::Command;
 
@@ -85,20 +87,6 @@ fn existing_compress_still_works() {
     assert_eq!(img.width, 16);
 }
 
-/// Path to C djpeg binary, or `None` if not installed.
-fn djpeg_path() -> Option<PathBuf> {
-    let homebrew: PathBuf = PathBuf::from("/opt/homebrew/bin/djpeg");
-    if homebrew.exists() {
-        return Some(homebrew);
-    }
-    Command::new("which")
-        .arg("djpeg")
-        .output()
-        .ok()
-        .filter(|o| o.status.success())
-        .map(|o| PathBuf::from(String::from_utf8_lossy(&o.stdout).trim().to_string()))
-}
-
 /// Parse a binary PPM (P6) file and return (width, height, rgb_pixels).
 fn parse_ppm(data: &[u8]) -> (usize, usize, Vec<u8>) {
     assert!(data.len() > 2, "PPM data too small");
@@ -153,13 +141,7 @@ fn read_number(data: &[u8], idx: usize) -> (usize, usize) {
 /// 2. Decodes with C djpeg and Rust, comparing output pixel-by-pixel (diff=0).
 #[test]
 fn c_djpeg_cross_validation_force_baseline() {
-    let djpeg: PathBuf = match djpeg_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: djpeg not found");
-            return;
-        }
-    };
+    let djpeg: PathBuf = require_c_tool!("djpeg");
 
     // Encode a 16x16 image with force_baseline(true) at quality 50
     let width: usize = 16;
@@ -327,13 +309,7 @@ fn c_djpeg_cross_validate_jpeg(djpeg: &PathBuf, jpeg: &[u8], label: &str, is_gra
 /// arithmetic, optimized Huffman, lossless, and metadata (ICC/EXIF).
 #[test]
 fn c_djpeg_encoder_builder_extended_diff_zero() {
-    let djpeg: PathBuf = match djpeg_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: djpeg not found");
-            return;
-        }
-    };
+    let djpeg: PathBuf = require_c_tool!("djpeg");
 
     let width: usize = 16;
     let height: usize = 16;
