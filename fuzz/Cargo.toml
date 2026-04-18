@@ -50,3 +50,8 @@ doc = false
 name = "fuzz_progressive_decoder"
 path = "fuzz_targets/fuzz_progressive_decoder.rs"
 doc = false
+
+[[bin]]
+name = "fuzz_encode_roundtrip"
+path = "fuzz_targets/fuzz_encode_roundtrip.rs"
+doc = false
