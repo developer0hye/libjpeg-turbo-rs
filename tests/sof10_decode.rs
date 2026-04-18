@@ -1,3 +1,5 @@
+mod helpers;
+
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -5,32 +7,6 @@ use libjpeg_turbo_rs::{
     compress_arithmetic, compress_arithmetic_progressive, compress_progressive, decompress,
     decompress_to, PixelFormat, Subsampling,
 };
-
-fn djpeg_path() -> Option<PathBuf> {
-    let homebrew: PathBuf = PathBuf::from("/opt/homebrew/bin/djpeg");
-    if homebrew.exists() {
-        return Some(homebrew);
-    }
-    Command::new("which")
-        .arg("djpeg")
-        .output()
-        .ok()
-        .filter(|o| o.status.success())
-        .map(|o| PathBuf::from(String::from_utf8_lossy(&o.stdout).trim().to_string()))
-}
-
-fn cjpeg_path() -> Option<PathBuf> {
-    let homebrew: PathBuf = PathBuf::from("/opt/homebrew/bin/cjpeg");
-    if homebrew.exists() {
-        return Some(homebrew);
-    }
-    Command::new("which")
-        .arg("cjpeg")
-        .output()
-        .ok()
-        .filter(|o| o.status.success())
-        .map(|o| PathBuf::from(String::from_utf8_lossy(&o.stdout).trim().to_string()))
-}
 
 fn parse_ppm(path: &Path) -> (usize, usize, Vec<u8>) {
     let raw: Vec<u8> = std::fs::read(path).expect("read PPM");
@@ -122,20 +98,8 @@ fn progressive_huffman_still_works() {
 /// Validates Rust decode matches C djpeg pixel-by-pixel.
 #[test]
 fn sof10_c_encoded_decode_pixel_validation() {
-    let cjpeg: PathBuf = match cjpeg_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: cjpeg not found");
-            return;
-        }
-    };
-    let djpeg: PathBuf = match djpeg_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: djpeg not found");
-            return;
-        }
-    };
+    let cjpeg: PathBuf = require_c_tool!("cjpeg");
+    let djpeg: PathBuf = require_c_tool!("djpeg");
 
     // Generate PPM source
     let (w, h): (usize, usize) = (32, 32);
@@ -315,20 +279,8 @@ fn build_minimal_sof10_header() -> Vec<u8> {
 /// 2. Rust-encoded SOF10 (compress_arithmetic_progressive) decoded by both
 #[test]
 fn c_djpeg_sof10_decode_diff_zero() {
-    let cjpeg: PathBuf = match cjpeg_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: cjpeg not found");
-            return;
-        }
-    };
-    let djpeg: PathBuf = match djpeg_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: djpeg not found");
-            return;
-        }
-    };
+    let cjpeg: PathBuf = require_c_tool!("cjpeg");
+    let djpeg: PathBuf = require_c_tool!("djpeg");
 
     // --- Test 1: C-encoded SOF10 fixture ---
     {

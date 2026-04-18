@@ -1,3 +1,5 @@
+mod helpers;
+
 use libjpeg_turbo_rs::{compress_lossless_arithmetic, decompress, Encoder, PixelFormat};
 
 #[test]
@@ -49,32 +51,6 @@ fn sof11_gradient_roundtrip() {
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
-
-fn djpeg_path() -> Option<PathBuf> {
-    let homebrew: PathBuf = PathBuf::from("/opt/homebrew/bin/djpeg");
-    if homebrew.exists() {
-        return Some(homebrew);
-    }
-    Command::new("which")
-        .arg("djpeg")
-        .output()
-        .ok()
-        .filter(|o| o.status.success())
-        .map(|o| PathBuf::from(String::from_utf8_lossy(&o.stdout).trim().to_string()))
-}
-
-fn cjpeg_path() -> Option<PathBuf> {
-    let homebrew: PathBuf = PathBuf::from("/opt/homebrew/bin/cjpeg");
-    if homebrew.exists() {
-        return Some(homebrew);
-    }
-    Command::new("which")
-        .arg("cjpeg")
-        .output()
-        .ok()
-        .filter(|o| o.status.success())
-        .map(|o| PathBuf::from(String::from_utf8_lossy(&o.stdout).trim().to_string()))
-}
 
 /// Check if cjpeg supports the `-arithmetic` flag.
 fn cjpeg_supports_arithmetic(cjpeg: &Path) -> bool {
@@ -205,13 +181,7 @@ fn generate_grayscale_gradient(w: usize, h: usize) -> Vec<u8> {
 
 #[test]
 fn c_cross_validation_sof11_rust_encode_c_decode() {
-    let djpeg: PathBuf = match djpeg_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: djpeg not found");
-            return;
-        }
-    };
+    let djpeg: PathBuf = require_c_tool!("djpeg");
 
     let (w, h): (usize, usize) = (16, 16);
     let pixels: Vec<u8> = generate_grayscale_gradient(w, h);
@@ -272,13 +242,7 @@ fn c_cross_validation_sof11_rust_encode_c_decode() {
 
 #[test]
 fn c_cross_validation_sof11_c_encode_rust_decode() {
-    let cjpeg: PathBuf = match cjpeg_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: cjpeg not found");
-            return;
-        }
-    };
+    let cjpeg: PathBuf = require_c_tool!("cjpeg");
 
     if !cjpeg_supports_arithmetic(&cjpeg) {
         eprintln!("SKIP: cjpeg does not support -arithmetic");
@@ -350,20 +314,8 @@ fn c_cross_validation_sof11_c_encode_rust_decode() {
 
 #[test]
 fn c_cross_validation_sof11_roundtrip_exact() {
-    let djpeg: PathBuf = match djpeg_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: djpeg not found");
-            return;
-        }
-    };
-    let cjpeg: PathBuf = match cjpeg_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: cjpeg not found");
-            return;
-        }
-    };
+    let djpeg: PathBuf = require_c_tool!("djpeg");
+    let cjpeg: PathBuf = require_c_tool!("cjpeg");
 
     if !cjpeg_supports_arithmetic(&cjpeg) {
         eprintln!("SKIP: cjpeg does not support -arithmetic");
