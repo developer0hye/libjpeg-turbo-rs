@@ -8,6 +8,8 @@
 //! - Tests scaling factors across multiple subsampling modes
 //! - Verifies intermediate factors produce correctly-sized output
 
+mod helpers;
+
 use std::path::PathBuf;
 use std::process::Command;
 
@@ -550,23 +552,6 @@ fn fixture_gray_8x8_all_scales() {
 // C djpeg cross-validation helpers
 // ===========================================================================
 
-/// Locate the djpeg binary, checking /opt/homebrew/bin first, then PATH.
-fn djpeg_path() -> Option<PathBuf> {
-    let homebrew = PathBuf::from("/opt/homebrew/bin/djpeg");
-    if homebrew.exists() {
-        return Some(homebrew);
-    }
-    // Fall back to whatever `which djpeg` finds
-    let output = Command::new("which").arg("djpeg").output().ok()?;
-    if output.status.success() {
-        let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
-        if !path.is_empty() {
-            return Some(PathBuf::from(path));
-        }
-    }
-    None
-}
-
 /// Parse a binary PPM (P6) file and return (width, height, pixel_data).
 fn parse_ppm(data: &[u8]) -> (u32, u32, Vec<u8>) {
     let header_end = find_ppm_header_end(data);
@@ -641,13 +626,7 @@ fn find_ppm_header_end(data: &[u8]) -> usize {
 
 #[test]
 fn c_djpeg_scaling_full_diff_zero() {
-    let djpeg = match djpeg_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: djpeg not found, skipping C cross-validation");
-            return;
-        }
-    };
+    let djpeg: PathBuf = require_c_tool!("djpeg");
 
     let jpeg_data = include_bytes!("fixtures/photo_320x240_420.jpg");
 
@@ -749,13 +728,7 @@ fn c_djpeg_scaling_full_diff_zero() {
 /// Per-component IDCT sizes match C libjpeg-turbo, producing diff=0.
 #[test]
 fn c_djpeg_scaling_scaled_pixel_diff_zero() {
-    let djpeg = match djpeg_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: djpeg not found, skipping C cross-validation");
-            return;
-        }
-    };
+    let djpeg: PathBuf = require_c_tool!("djpeg");
 
     let jpeg_data = include_bytes!("fixtures/photo_320x240_420.jpg");
 
@@ -807,13 +780,7 @@ fn c_djpeg_scaling_scaled_pixel_diff_zero() {
 /// Full-scale 422 decode uses standard fancy upsample and matches C exactly.
 #[test]
 fn c_djpeg_scaling_422_full_scale_diff_zero() {
-    let djpeg = match djpeg_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: djpeg not found, skipping C cross-validation");
-            return;
-        }
-    };
+    let djpeg: PathBuf = require_c_tool!("djpeg");
 
     let jpeg_data = include_bytes!("fixtures/photo_320x240_422.jpg");
     let tmp_dir = std::env::temp_dir();
@@ -860,13 +827,7 @@ fn c_djpeg_scaling_422_full_scale_diff_zero() {
 /// Pixel-exact comparison for 4:2:2 **scaled** decode (1/2, 1/4, 1/8) against C djpeg.
 #[test]
 fn c_djpeg_scaling_422_scaled_pixel_diff_zero() {
-    let djpeg = match djpeg_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: djpeg not found, skipping C cross-validation");
-            return;
-        }
-    };
+    let djpeg: PathBuf = require_c_tool!("djpeg");
 
     let jpeg_data = include_bytes!("fixtures/photo_320x240_422.jpg");
     let tmp_dir = std::env::temp_dir();
@@ -931,13 +892,7 @@ fn c_djpeg_scaling_422_scaled_pixel_diff_zero() {
 /// all components — a different code path from 4:2:0 and 4:2:2.
 #[test]
 fn c_djpeg_scaling_444_pixel_diff_zero() {
-    let djpeg = match djpeg_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: djpeg not found, skipping C cross-validation");
-            return;
-        }
-    };
+    let djpeg: PathBuf = require_c_tool!("djpeg");
 
     let jpeg_data = include_bytes!("fixtures/photo_320x240_444.jpg");
     let tmp_dir = std::env::temp_dir();

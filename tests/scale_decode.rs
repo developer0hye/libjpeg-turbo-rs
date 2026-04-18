@@ -1,25 +1,10 @@
+mod helpers;
+
 use std::path::PathBuf;
 use std::process::Command;
 
 use libjpeg_turbo_rs::api::streaming::StreamingDecoder;
 use libjpeg_turbo_rs::{Image, PixelFormat, ScalingFactor};
-
-/// Locate the djpeg binary, checking /opt/homebrew/bin first, then PATH.
-fn djpeg_path() -> Option<PathBuf> {
-    let homebrew = PathBuf::from("/opt/homebrew/bin/djpeg");
-    if homebrew.exists() {
-        return Some(homebrew);
-    }
-    // Fall back to whatever `which djpeg` finds
-    let output = Command::new("which").arg("djpeg").output().ok()?;
-    if output.status.success() {
-        let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
-        if !path.is_empty() {
-            return Some(PathBuf::from(path));
-        }
-    }
-    None
-}
 
 /// Parse a binary PPM (P6) file and return (width, height, pixel_data).
 fn parse_ppm(data: &[u8]) -> (u32, u32, Vec<u8>) {
@@ -237,13 +222,7 @@ fn scale_half_rgba_output() {
 
 #[test]
 fn c_djpeg_scaled_decode_diff_zero() {
-    let djpeg = match djpeg_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: djpeg not found");
-            return;
-        }
-    };
+    let djpeg: PathBuf = require_c_tool!("djpeg");
 
     let jpeg_data = include_bytes!("fixtures/photo_320x240_420.jpg");
 
@@ -327,13 +306,7 @@ fn c_djpeg_scaled_decode_diff_zero() {
 /// match C libjpeg-turbo's jpeg_calc_output_dimensions, producing diff=0.
 #[test]
 fn c_djpeg_scaled_decode_half_quarter_eighth_diff_zero() {
-    let djpeg = match djpeg_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: djpeg not found");
-            return;
-        }
-    };
+    let djpeg: PathBuf = require_c_tool!("djpeg");
 
     let jpeg_data = include_bytes!("fixtures/photo_320x240_420.jpg");
     let tmp_dir = std::env::temp_dir();

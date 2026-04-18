@@ -1,3 +1,5 @@
+mod helpers;
+
 use std::path::PathBuf;
 use std::process::Command;
 
@@ -154,20 +156,6 @@ fn scanline_skip_clamped_to_remaining() {
 // C djpeg cross-validation helpers
 // ===========================================================================
 
-/// Find the djpeg binary: check /opt/homebrew/bin/djpeg first, then fall back to PATH.
-fn djpeg_path() -> Option<PathBuf> {
-    let homebrew: PathBuf = PathBuf::from("/opt/homebrew/bin/djpeg");
-    if homebrew.exists() {
-        return Some(homebrew);
-    }
-    Command::new("which")
-        .arg("djpeg")
-        .output()
-        .ok()
-        .filter(|o| o.status.success())
-        .map(|o| PathBuf::from(String::from_utf8_lossy(&o.stdout).trim().to_string()))
-}
-
 /// Parse a binary PPM (P6) file from raw bytes and return `(width, height, pixels)`.
 fn parse_ppm(data: &[u8]) -> (usize, usize, Vec<u8>) {
     assert!(data.len() > 3, "PPM too short");
@@ -227,13 +215,7 @@ fn ppm_read_number(data: &[u8], idx: usize) -> (usize, usize) {
 /// Cross-validate ScanlineDecoder output against C djpeg (byte-for-byte, diff=0).
 #[test]
 fn c_djpeg_cross_validation_scanline_decode() {
-    let djpeg: PathBuf = match djpeg_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: djpeg not found");
-            return;
-        }
-    };
+    let djpeg: PathBuf = require_c_tool!("djpeg");
 
     let jpeg_path: &str = "tests/fixtures/photo_640x480_422.jpg";
     let jpeg_data: Vec<u8> =
@@ -290,13 +272,7 @@ fn c_djpeg_cross_validation_scanline_decode() {
 /// decode with both C djpeg and Rust decompress, compare byte-for-byte (diff=0).
 #[test]
 fn c_djpeg_cross_validation_scanline_encode() {
-    let djpeg: PathBuf = match djpeg_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: djpeg not found");
-            return;
-        }
-    };
+    let djpeg: PathBuf = require_c_tool!("djpeg");
 
     // Generate a 48x48 RGB gradient test image
     let width: usize = 48;

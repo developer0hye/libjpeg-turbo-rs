@@ -3,6 +3,8 @@
 /// Verifies that decoding a JPEG to RGB565 with dithering enabled produces
 /// different output than without dithering (because the ordered dither pattern
 /// adds noise to reduce quantization banding).
+mod helpers;
+
 use libjpeg_turbo_rs::{compress, PixelFormat, Subsampling};
 
 /// Helper: create a JPEG with smooth gradients (to make dithering visible).
@@ -111,20 +113,6 @@ fn rgb565_dither_values_are_valid() {
 // C djpeg cross-validation for RGB565
 // -----------------------------------------------------------------------
 
-/// Path to C djpeg binary, or `None` if not installed.
-fn djpeg_path() -> Option<std::path::PathBuf> {
-    let homebrew: std::path::PathBuf = std::path::PathBuf::from("/opt/homebrew/bin/djpeg");
-    if homebrew.exists() {
-        return Some(homebrew);
-    }
-    std::process::Command::new("which")
-        .arg("djpeg")
-        .output()
-        .ok()
-        .filter(|o| o.status.success())
-        .map(|o| std::path::PathBuf::from(String::from_utf8_lossy(&o.stdout).trim().to_string()))
-}
-
 /// Check if djpeg supports the `-rgb565` flag by inspecting its help text.
 fn djpeg_supports_rgb565(djpeg: &std::path::Path) -> bool {
     let output = std::process::Command::new(djpeg).arg("-help").output();
@@ -165,13 +153,7 @@ impl Drop for Rgb565TempFile {
 
 #[test]
 fn c_djpeg_cross_validation_rgb565() {
-    let djpeg = match djpeg_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: djpeg not found");
-            return;
-        }
-    };
+    let djpeg: std::path::PathBuf = require_c_tool!("djpeg");
 
     if !djpeg_supports_rgb565(&djpeg) {
         eprintln!("SKIP: djpeg does not support -rgb565");
