@@ -4,6 +4,8 @@
 //! the YUV back to JPEG, then verifies that C djpeg decodes it identically to
 //! Rust direct decode of the same source.
 
+mod helpers;
+
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -12,30 +14,6 @@ use libjpeg_turbo_rs::api::yuv;
 use libjpeg_turbo_rs::{
     compress, decompress_to, yuv_buf_size, yuv_plane_size, PixelFormat, Subsampling,
 };
-
-// ===========================================================================
-// Tool discovery
-// ===========================================================================
-
-/// Locate the djpeg binary. Checks /opt/homebrew/bin/djpeg first, then falls
-/// back to whatever `which djpeg` returns. Returns `None` when not found.
-fn djpeg_path() -> Option<PathBuf> {
-    let homebrew: PathBuf = PathBuf::from("/opt/homebrew/bin/djpeg");
-    if homebrew.exists() {
-        return Some(homebrew);
-    }
-    let output = Command::new("which").arg("djpeg").output().ok()?;
-    if output.status.success() {
-        let path_str: String = String::from_utf8_lossy(&output.stdout).trim().to_string();
-        if !path_str.is_empty() {
-            let path: PathBuf = PathBuf::from(&path_str);
-            if path.exists() {
-                return Some(path);
-            }
-        }
-    }
-    None
-}
 
 // ===========================================================================
 // Helpers
@@ -370,37 +348,19 @@ fn decompress_to_yuv_xval_helper(djpeg: &Path, subsamp: Subsampling) {
 
 #[test]
 fn c_xval_decompress_to_yuv_420() {
-    let djpeg: PathBuf = match djpeg_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: djpeg not found");
-            return;
-        }
-    };
+    let djpeg: PathBuf = require_c_tool!("djpeg");
     decompress_to_yuv_xval_helper(&djpeg, Subsampling::S420);
 }
 
 #[test]
 fn c_xval_decompress_to_yuv_422() {
-    let djpeg: PathBuf = match djpeg_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: djpeg not found");
-            return;
-        }
-    };
+    let djpeg: PathBuf = require_c_tool!("djpeg");
     decompress_to_yuv_xval_helper(&djpeg, Subsampling::S422);
 }
 
 #[test]
 fn c_xval_decompress_to_yuv_444() {
-    let djpeg: PathBuf = match djpeg_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: djpeg not found");
-            return;
-        }
-    };
+    let djpeg: PathBuf = require_c_tool!("djpeg");
     decompress_to_yuv_xval_helper(&djpeg, Subsampling::S444);
 }
 
@@ -507,37 +467,19 @@ fn decompress_to_yuv_planes_xval_helper(djpeg: &Path, subsamp: Subsampling) {
 
 #[test]
 fn c_xval_decompress_to_yuv_planes_420() {
-    let djpeg: PathBuf = match djpeg_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: djpeg not found");
-            return;
-        }
-    };
+    let djpeg: PathBuf = require_c_tool!("djpeg");
     decompress_to_yuv_planes_xval_helper(&djpeg, Subsampling::S420);
 }
 
 #[test]
 fn c_xval_decompress_to_yuv_planes_422() {
-    let djpeg: PathBuf = match djpeg_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: djpeg not found");
-            return;
-        }
-    };
+    let djpeg: PathBuf = require_c_tool!("djpeg");
     decompress_to_yuv_planes_xval_helper(&djpeg, Subsampling::S422);
 }
 
 #[test]
 fn c_xval_decompress_to_yuv_planes_444() {
-    let djpeg: PathBuf = match djpeg_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: djpeg not found");
-            return;
-        }
-    };
+    let djpeg: PathBuf = require_c_tool!("djpeg");
     decompress_to_yuv_planes_xval_helper(&djpeg, Subsampling::S444);
 }
 
@@ -547,13 +489,7 @@ fn c_xval_decompress_to_yuv_planes_444() {
 
 #[test]
 fn c_xval_decompress_to_yuv_grayscale() {
-    let djpeg: PathBuf = match djpeg_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: djpeg not found");
-            return;
-        }
-    };
+    let djpeg: PathBuf = require_c_tool!("djpeg");
 
     let (w, h): (usize, usize) = (48, 48);
 
@@ -636,13 +572,7 @@ fn c_xval_decompress_to_yuv_grayscale() {
 
 #[test]
 fn c_xval_yuv_roundtrip_all_subsamplings() {
-    let djpeg: PathBuf = match djpeg_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: djpeg not found");
-            return;
-        }
-    };
+    let djpeg: PathBuf = require_c_tool!("djpeg");
 
     let (w, h): (usize, usize) = (48, 48);
     let rgb: Vec<u8> = generate_gradient(w, h);

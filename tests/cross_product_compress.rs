@@ -9,6 +9,8 @@
 //! - arithmetic + progressive: SOF10 decode not yet fully supported
 //! - Huffman progressive + S440/S441: progressive scan script issue with these subsamplings
 
+mod helpers;
+
 use std::path::PathBuf;
 use std::process::Command;
 
@@ -158,29 +160,6 @@ impl TestCounters {
             self.unexpected_fail, self.tested
         );
     }
-}
-
-/// Find the djpeg binary path.
-///
-/// Checks `/opt/homebrew/bin/djpeg` first (macOS Homebrew), then falls back
-/// to `which djpeg` on the system PATH. Returns `None` if neither is found.
-fn djpeg_path() -> Option<PathBuf> {
-    let homebrew: PathBuf = PathBuf::from("/opt/homebrew/bin/djpeg");
-    if homebrew.exists() {
-        return Some(homebrew);
-    }
-    // Fall back to `which djpeg`
-    let output = Command::new("which").arg("djpeg").output().ok()?;
-    if output.status.success() {
-        let path_str: String = String::from_utf8_lossy(&output.stdout).trim().to_string();
-        if !path_str.is_empty() {
-            let path: PathBuf = PathBuf::from(&path_str);
-            if path.exists() {
-                return Some(path);
-            }
-        }
-    }
-    None
 }
 
 /// Parse a PPM (P6 binary) file into raw RGB pixel data.
@@ -1440,13 +1419,7 @@ fn tjcomptest_coverage_summary() {
 /// difference between the two decoded outputs.
 #[test]
 fn c_djpeg_cross_validation_encode_matrix_diff_zero() {
-    let djpeg: PathBuf = match djpeg_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: djpeg not found");
-            return;
-        }
-    };
+    let djpeg: PathBuf = require_c_tool!("djpeg");
 
     let (w, h): (usize, usize) = (32, 32);
     let pixels: Vec<u8> = generate_rgb_pattern(w, h);
