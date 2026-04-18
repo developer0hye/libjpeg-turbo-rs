@@ -481,6 +481,38 @@ impl TjHandle {
         self.configure_encoder(encoder).encode()
     }
 
+    /// Compress pixels into a caller-supplied output buffer (like `tj3Compress8`
+    /// with `TJPARAM_NOREALLOC`).
+    ///
+    /// Encodes with the current handle parameters and writes the resulting JPEG
+    /// bytes into `out`. Returns the number of bytes written on success.
+    ///
+    /// If the encoded stream does not fit in `out`, returns
+    /// `JpegError::BufferTooSmall { need, got }`. The `TJPARAM_NOREALLOC`
+    /// parameter is honored: because `out` is a borrowed slice it cannot be
+    /// grown, so `BufferTooSmall` is returned regardless of the parameter
+    /// value; the parameter primarily documents the caller's intent and
+    /// matches C libjpeg-turbo's API shape. Callers wanting automatic growth
+    /// should use `compress()` (returns `Vec<u8>`).
+    pub fn compress_into(
+        &self,
+        pixels: &[u8],
+        width: usize,
+        height: usize,
+        pixel_format: PixelFormat,
+        out: &mut [u8],
+    ) -> Result<usize> {
+        let jpeg: Vec<u8> = self.compress(pixels, width, height, pixel_format)?;
+        if jpeg.len() > out.len() {
+            return Err(JpegError::BufferTooSmall {
+                need: jpeg.len(),
+                got: out.len(),
+            });
+        }
+        out[..jpeg.len()].copy_from_slice(&jpeg);
+        Ok(jpeg.len())
+    }
+
     /// Compress 12-bit pixels to JPEG (like `tj3Compress12`).
     ///
     /// Uses handle quality, subsampling, and lossless parameters.
@@ -627,8 +659,9 @@ impl TjHandle {
                     .retain(|m| !(m.code == 0xE2 && m.data.starts_with(b"ICC_PROFILE\0")));
             }
             _ => {
-                // Level 2 (all) and 4 (ICC only): extract ICC
-                self.icc_profile = img.icc_profile.take();
+                // Level 2 (all) and 4 (ICC only): extract ICC to handle while
+                // leaving the image copy intact (tj3GetICCProfile symmetry).
+                self.icc_profile = img.icc_profile.clone();
             }
         }
 
