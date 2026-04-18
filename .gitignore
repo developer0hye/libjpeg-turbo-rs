@@ -6,3 +6,9 @@ fuzz/artifacts
 .DS_Store
 bench_c_decode_linux
 crates/libjpeg-turbo-rs-wasm/pkg/
+# Claude Code agent runtime artifacts (worktrees, state, playwright cache)
+.claude/worktrees/
+.claude/agents/.omc/
+.omc/
+.playwright-mcp/
+/state/
