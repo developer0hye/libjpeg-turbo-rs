@@ -3,6 +3,8 @@ use std::process::Command;
 
 use libjpeg_turbo_rs::{compress_lossless, decompress, PixelFormat};
 
+mod helpers;
+
 /// Build a minimal SOF3 (lossless) JPEG in memory for testing.
 /// Creates a tiny 4x2 grayscale image with predictor 1 (left), no point transform.
 fn make_lossless_jpeg(pixels: &[u8], width: u16, height: u16, precision: u8) -> Vec<u8> {
@@ -362,20 +364,6 @@ fn decode_lossless_3comp_gradient() {
 // C djpeg cross-validation helpers
 // ===========================================================================
 
-/// Locate the `djpeg` binary, checking Homebrew first then PATH.
-fn djpeg_path() -> Option<PathBuf> {
-    let homebrew: PathBuf = PathBuf::from("/opt/homebrew/bin/djpeg");
-    if homebrew.exists() {
-        return Some(homebrew);
-    }
-    Command::new("which")
-        .arg("djpeg")
-        .output()
-        .ok()
-        .filter(|o| o.status.success())
-        .map(|o| PathBuf::from(String::from_utf8_lossy(&o.stdout).trim().to_string()))
-}
-
 /// Check whether `djpeg` can handle SOF3 (lossless) by feeding it a lossless JPEG
 /// and seeing if it exits successfully.
 fn djpeg_supports_lossless(djpeg: &Path, lossless_jpeg: &[u8]) -> bool {
@@ -445,13 +433,7 @@ fn read_number(data: &[u8], idx: usize) -> (usize, usize) {
 #[test]
 fn c_djpeg_lossless_decode_diff_zero() {
     // Step 1: Locate djpeg, skip if not found.
-    let djpeg: PathBuf = match djpeg_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: djpeg not found on this system");
-            return;
-        }
-    };
+    let djpeg: PathBuf = require_c_tool!("djpeg");
 
     // Step 2: Encode a 16x16 grayscale lossless JPEG with Rust.
     let (w, h): (usize, usize) = (16, 16);
