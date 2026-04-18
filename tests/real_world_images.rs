@@ -202,6 +202,10 @@ fn is_arithmetic_image(filename: &str) -> bool {
     filename.contains("arithmetic")
 }
 
+fn is_12bit_image(filename: &str) -> bool {
+    filename.contains("12bit")
+}
+
 /// Known issues table: (filename_pattern, reason).
 /// Images matching these patterns are skipped with the given reason.
 /// These represent existing Rust decoder bugs tracked separately.
@@ -392,6 +396,7 @@ fn validate_single_image(djpeg: &Path, jpeg_path: &Path) -> TestRecord {
     let c_result: Option<(usize, usize, usize, Vec<u8>)> =
         decode_with_c_djpeg(djpeg, jpeg_path, &name_stem);
 
+    let is_12bit: bool = is_12bit_image(&filename);
     let (c_width, c_height, c_components, c_data) = match c_result {
         Some(result) => result,
         None => {
@@ -401,6 +406,16 @@ fn validate_single_image(djpeg: &Path, jpeg_path: &Path) -> TestRecord {
                     result: ImageResult::Skip {
                         reason: "C djpeg failed (arithmetic not supported by this build)"
                             .to_string(),
+                    },
+                };
+            }
+            if is_12bit {
+                return TestRecord {
+                    filename,
+                    result: ImageResult::Skip {
+                        reason:
+                            "C djpeg failed (12-bit precision not supported in libjpeg-turbo 2.x)"
+                                .to_string(),
                     },
                 };
             }

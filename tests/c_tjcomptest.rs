@@ -521,6 +521,21 @@ fn c_tjcomptest_lossy_quick() {
 #[cfg(feature = "full-c-parity")]
 fn c_tjcomptest_lossy_full() {
     let cjpeg: PathBuf = require_c_tool!("cjpeg");
+    // libjpeg-turbo 2.x cjpeg (Ubuntu 24.04) lacks -precision; 12-bit subset
+    // depends on it. Skip gracefully.
+    let help = std::process::Command::new(&cjpeg)
+        .arg("-help")
+        .output()
+        .expect("cjpeg -help");
+    let help_text = format!(
+        "{}{}",
+        String::from_utf8_lossy(&help.stderr),
+        String::from_utf8_lossy(&help.stdout)
+    );
+    if !help_text.contains("-precision") {
+        eprintln!("SKIP: cjpeg lacks -precision (need libjpeg-turbo 3.x)");
+        return;
+    }
 
     let img_dir: PathBuf = helpers::c_testimages_dir();
 
