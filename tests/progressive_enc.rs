@@ -3,6 +3,8 @@ use std::process::Command;
 
 use libjpeg_turbo_rs::{compress_progressive, decompress, PixelFormat, Subsampling};
 
+mod helpers;
+
 #[test]
 fn progressive_roundtrip_rgb_444() {
     let pixels = vec![128u8; 32 * 32 * 3];
@@ -160,20 +162,6 @@ fn ac_refine_roundtrip_noise_pattern() {
     assert_eq!(img.height, 48);
 }
 
-/// Path to C djpeg binary, or `None` if not installed.
-fn djpeg_path() -> Option<PathBuf> {
-    let homebrew: PathBuf = PathBuf::from("/opt/homebrew/bin/djpeg");
-    if homebrew.exists() {
-        return Some(homebrew);
-    }
-    Command::new("which")
-        .arg("djpeg")
-        .output()
-        .ok()
-        .filter(|o| o.status.success())
-        .map(|o| PathBuf::from(String::from_utf8_lossy(&o.stdout).trim().to_string()))
-}
-
 /// Parse a binary PPM (P6) file from raw bytes and return `(width, height, pixels)`.
 fn parse_ppm(data: &[u8]) -> (usize, usize, Vec<u8>) {
     assert!(data.len() > 3, "PPM too short");
@@ -274,13 +262,7 @@ fn run_djpeg(djpeg: &std::path::Path, jpeg: &[u8], flag: &str) -> std::process::
 
 #[test]
 fn c_djpeg_progressive_encode_diff_zero() {
-    let djpeg: PathBuf = match djpeg_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: djpeg not found, skipping c_djpeg_progressive_encode_diff_zero");
-            return;
-        }
-    };
+    let djpeg: PathBuf = require_c_tool!("djpeg");
 
     // Encode a 32x32 gradient pattern as progressive JPEG using Rust
     let pixels: Vec<u8> = gradient_pixels(32, 32, 3);
@@ -346,13 +328,7 @@ fn c_djpeg_progressive_encode_diff_zero() {
 /// Each scenario: Rust progressive encode -> C djpeg decode -> diff must be 0.
 #[test]
 fn c_djpeg_progressive_enc_extended_diff_zero() {
-    let djpeg: PathBuf = match djpeg_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: djpeg not found, skipping c_djpeg_progressive_enc_extended_diff_zero");
-            return;
-        }
-    };
+    let djpeg: PathBuf = require_c_tool!("djpeg");
 
     let width: usize = 64;
     let height: usize = 64;

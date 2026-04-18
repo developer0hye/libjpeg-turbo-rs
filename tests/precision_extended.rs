@@ -14,6 +14,8 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
 
+mod helpers;
+
 use libjpeg_turbo_rs::common::types::Subsampling;
 use libjpeg_turbo_rs::precision::{
     compress_12bit, compress_16bit, decompress_12bit, decompress_16bit,
@@ -485,32 +487,6 @@ fn precision_13_through_15_fit_in_16bit_api() {
 // C cross-validation helpers
 // ---------------------------------------------------------------------------
 
-fn djpeg_path() -> Option<PathBuf> {
-    let homebrew: PathBuf = PathBuf::from("/opt/homebrew/bin/djpeg");
-    if homebrew.exists() {
-        return Some(homebrew);
-    }
-    Command::new("which")
-        .arg("djpeg")
-        .output()
-        .ok()
-        .filter(|o| o.status.success())
-        .map(|o| PathBuf::from(String::from_utf8_lossy(&o.stdout).trim().to_string()))
-}
-
-fn cjpeg_path() -> Option<PathBuf> {
-    let homebrew: PathBuf = PathBuf::from("/opt/homebrew/bin/cjpeg");
-    if homebrew.exists() {
-        return Some(homebrew);
-    }
-    Command::new("which")
-        .arg("cjpeg")
-        .output()
-        .ok()
-        .filter(|o| o.status.success())
-        .map(|o| PathBuf::from(String::from_utf8_lossy(&o.stdout).trim().to_string()))
-}
-
 /// Check if cjpeg supports the `-lossless` flag.
 fn cjpeg_supports_lossless(cjpeg: &Path) -> bool {
     let output = Command::new(cjpeg).arg("-help").output();
@@ -656,8 +632,8 @@ fn read_number(data: &[u8], idx: usize) -> (usize, usize) {
 
 #[test]
 fn c_cross_validation_precision_extended() {
-    let djpeg: Option<PathBuf> = djpeg_path();
-    let cjpeg: Option<PathBuf> = cjpeg_path();
+    let djpeg: Option<PathBuf> = helpers::djpeg_path();
+    let cjpeg: Option<PathBuf> = helpers::cjpeg_path();
 
     if djpeg.is_none() && cjpeg.is_none() {
         eprintln!("SKIP: neither djpeg nor cjpeg found");

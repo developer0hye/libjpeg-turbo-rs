@@ -3,6 +3,8 @@ use std::process::Command;
 
 use libjpeg_turbo_rs::{compress, decompress, decompress_to, Encoder, PixelFormat, Subsampling};
 
+mod helpers;
+
 #[test]
 fn pixel_format_bytes_per_pixel() {
     assert_eq!(PixelFormat::Rgbx.bytes_per_pixel(), 4);
@@ -364,20 +366,6 @@ fn grayscale_from_argb() {
 // C djpeg cross-validation helpers
 // ===========================================================================
 
-/// Path to C djpeg binary, or `None` if not installed.
-fn djpeg_path() -> Option<PathBuf> {
-    let homebrew: PathBuf = PathBuf::from("/opt/homebrew/bin/djpeg");
-    if homebrew.exists() {
-        return Some(homebrew);
-    }
-    Command::new("which")
-        .arg("djpeg")
-        .output()
-        .ok()
-        .filter(|o| o.status.success())
-        .map(|o| PathBuf::from(String::from_utf8_lossy(&o.stdout).trim().to_string()))
-}
-
 /// Parse a binary PPM (P6) file and return (width, height, rgb_pixels).
 ///
 /// The returned `rgb_pixels` is a flat `Vec<u8>` with 3 bytes per pixel (R, G, B)
@@ -455,13 +443,7 @@ fn parse_ppm_number(data: &[u8], idx: usize) -> (usize, usize) {
 /// handled correctly.
 #[test]
 fn c_djpeg_pixel_formats_diff_zero() {
-    let djpeg: PathBuf = match djpeg_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("skipping c_djpeg_pixel_formats_diff_zero: djpeg not found");
-            return;
-        }
-    };
+    let djpeg: PathBuf = require_c_tool!("djpeg");
 
     let formats: &[(PixelFormat, &str)] = &[
         (PixelFormat::Rgbx, "Rgbx"),
@@ -567,13 +549,7 @@ fn c_djpeg_pixel_formats_diff_zero() {
 /// Target: diff=0.
 #[test]
 fn c_djpeg_cross_validation_bmp_bgr() {
-    let djpeg: PathBuf = match djpeg_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: djpeg not found");
-            return;
-        }
-    };
+    let djpeg: PathBuf = require_c_tool!("djpeg");
 
     // Create a 32x32 test JPEG with varied content
     let width: usize = 32;
