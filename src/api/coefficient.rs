@@ -2021,10 +2021,10 @@ fn write_coefficients_arithmetic(coeffs: &JpegCoefficients) -> Result<Vec<u8>> {
         .collect();
     marker_writer::write_sof9(&mut output, coeffs.width, coeffs.height, &components);
 
-    let dc_params = [(0u8, 1u8); crate::decode::arithmetic::NUM_ARITH_TBLS];
-    let ac_params = [5u8; crate::decode::arithmetic::NUM_ARITH_TBLS];
-    let mut dc_in_use = [false; crate::decode::arithmetic::NUM_ARITH_TBLS];
-    let mut ac_in_use = [false; crate::decode::arithmetic::NUM_ARITH_TBLS];
+    let dc_params = [(0u8, 1u8); 4];
+    let ac_params = [5u8; 4];
+    let mut dc_in_use = [false; 4];
+    let mut ac_in_use = [false; 4];
     for table in 0..num_arith_tables {
         dc_in_use[table] = true;
         ac_in_use[table] = true;
@@ -2092,8 +2092,8 @@ fn write_coefficients_progressive_arithmetic(coeffs: &JpegCoefficients) -> Resul
         .collect();
 
     let scans = simple_progression(num_components);
-    let dc_params = [(0u8, 1u8); crate::decode::arithmetic::NUM_ARITH_TBLS];
-    let ac_params = [5u8; crate::decode::arithmetic::NUM_ARITH_TBLS];
+    let dc_params = [(0u8, 1u8); 4];
+    let ac_params = [5u8; 4];
 
     let mut output: Vec<u8> = Vec::with_capacity(coeffs.width as usize * coeffs.height as usize);
 
@@ -2143,8 +2143,8 @@ fn write_coefficients_progressive_arithmetic(coeffs: &JpegCoefficients) -> Resul
             })
             .collect();
 
-        let mut dc_in_use = [false; crate::decode::arithmetic::NUM_ARITH_TBLS];
-        let mut ac_in_use = [false; crate::decode::arithmetic::NUM_ARITH_TBLS];
+        let mut dc_in_use = [false; 4];
+        let mut ac_in_use = [false; 4];
         if is_dc_scan && is_first {
             for &ci in &scan.component_indices {
                 dc_in_use[arithmetic_table_for_component(ci)] = true;
@@ -2429,7 +2429,7 @@ fn decode_arithmetic_coefficients(
     let entropy_data = &data[metadata.entropy_data_offset..];
     let mut arith = ArithDecoder::new(entropy_data, 0);
 
-    for i in 0..crate::decode::arithmetic::NUM_ARITH_TBLS {
+    for i in 0..4 {
         let (l, u) = metadata.arith_dc_params[i];
         arith.set_dc_conditioning(i, l, u);
         arith.set_ac_conditioning(i, metadata.arith_ac_params[i]);
@@ -2489,8 +2489,8 @@ fn decode_arithmetic_progressive_coefficients(
         let entropy_data: &[u8] = &data[scan_info.data_offset..];
         let mut arith: ArithDecoder<'_> = ArithDecoder::new(entropy_data, 0);
 
-        // Set arithmetic conditioning parameters (16 slots per NUM_ARITH_TBLS).
-        for i in 0..crate::decode::arithmetic::NUM_ARITH_TBLS {
+        // Set arithmetic conditioning parameters
+        for i in 0..4 {
             let (l, u) = metadata.arith_dc_params[i];
             arith.set_dc_conditioning(i, l, u);
             arith.set_ac_conditioning(i, metadata.arith_ac_params[i]);

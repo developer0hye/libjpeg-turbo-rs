@@ -69,12 +69,10 @@ pub struct JpegMetadata {
     pub density: DensityInfo,
     /// True if using arithmetic entropy coding (SOF9/SOF10).
     pub is_arithmetic: bool,
-    /// DAC conditioning: DC parameters (L, U) per table. 16 slots per
-    /// ITU-T T.81 `NUM_ARITH_TBLS`.
-    pub arith_dc_params: [(u8, u8); crate::decode::arithmetic::NUM_ARITH_TBLS],
-    /// DAC conditioning: AC parameter (Kx) per table. 16 slots per
-    /// ITU-T T.81 `NUM_ARITH_TBLS`.
-    pub arith_ac_params: [u8; crate::decode::arithmetic::NUM_ARITH_TBLS],
+    /// DAC conditioning: DC parameters (L, U) per table.
+    pub arith_dc_params: [(u8, u8); 4],
+    /// DAC conditioning: AC parameter (Kx) per table.
+    pub arith_ac_params: [u8; 4],
     /// Saved APP/COM markers according to the marker save configuration.
     pub saved_markers: Vec<SavedMarker>,
 }
@@ -139,10 +137,8 @@ impl<'a> MarkerReader<'a> {
         let mut icc_chunks: Vec<IccChunk> = Vec::new();
         let mut exif_data: Option<Vec<u8>> = None;
         let mut is_arithmetic = false;
-        let mut arith_dc_params: [(u8, u8); crate::decode::arithmetic::NUM_ARITH_TBLS] =
-            [(0, 1); crate::decode::arithmetic::NUM_ARITH_TBLS];
-        let mut arith_ac_params: [u8; crate::decode::arithmetic::NUM_ARITH_TBLS] =
-            [5; crate::decode::arithmetic::NUM_ARITH_TBLS];
+        let mut arith_dc_params: [(u8, u8); 4] = [(0, 1); 4];
+        let mut arith_ac_params: [u8; 4] = [5; 4];
         let mut comment: Option<String> = None;
         let mut density: DensityInfo = DensityInfo::default();
         let mut saved_markers: Vec<SavedMarker> = Vec::new();
@@ -678,26 +674,18 @@ impl<'a> MarkerReader<'a> {
         self.read_u16_be()
     }
 
-    /// Parse DAC (Define Arithmetic Conditioning) marker (ITU-T T.81 B.2.4.3).
-    ///
-    /// Tb (table index) is valid in 0..=15 per NUM_ARITH_TBLS.
-    fn read_dac(
-        &mut self,
-        dc_params: &mut [(u8, u8); crate::decode::arithmetic::NUM_ARITH_TBLS],
-        ac_params: &mut [u8; crate::decode::arithmetic::NUM_ARITH_TBLS],
-    ) -> Result<()> {
+    /// Parse DAC (Define Arithmetic Conditioning) marker.
+    fn read_dac(&mut self, dc_params: &mut [(u8, u8); 4], ac_params: &mut [u8; 4]) -> Result<()> {
         let length = self.read_u16_be()? as usize;
         let end = self.pos + length - 2;
 
         while self.pos < end {
             let tc_tb = self.read_u8()?;
             let tc = tc_tb >> 4; // table class: 0=DC, 1=AC
-            let tb = (tc_tb & 0x0F) as usize; // table index 0..=15
+            let tb = (tc_tb & 0x0F) as usize; // table index
             let val = self.read_u8()?;
 
-            // Spec requires Tb in 0..=15. Upper nibble of Tc/Tb byte is 0..=1
-            // (DC vs AC); defensive skip for anything else.
-            if tb >= crate::decode::arithmetic::NUM_ARITH_TBLS {
+            if tb >= 4 {
                 continue;
             }
             if tc == 0 {
@@ -705,24 +693,12 @@ impl<'a> MarkerReader<'a> {
                 let l = val & 0x0F;
                 let u = val >> 4;
                 dc_params[tb] = (l, u);
-            } else if tc == 1 {
+            } else {
                 // AC: val = Kx
                 ac_params[tb] = val;
             }
         }
         Ok(())
-    }
-
-    /// Crate-public shim for `read_dac`, enabling round-trip tests in
-    /// the encoder crate without exposing the internal parsing API to
-    /// downstream consumers.
-    #[cfg(test)]
-    pub(crate) fn read_dac_public(
-        &mut self,
-        dc_params: &mut [(u8, u8); crate::decode::arithmetic::NUM_ARITH_TBLS],
-        ac_params: &mut [u8; crate::decode::arithmetic::NUM_ARITH_TBLS],
-    ) -> Result<()> {
-        self.read_dac(dc_params, ac_params)
     }
 
     fn read_sos(&mut self) -> Result<ScanHeader> {
@@ -768,36 +744,5 @@ impl<'a> MarkerReader<'a> {
             succ_high: ah,
             succ_low: al,
         })
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::decode::arithmetic::NUM_ARITH_TBLS;
-
-    /// Synthetic DAC segment with high table indices (Tb=10 DC, Tb=12 AC) must
-    /// parse without panic and populate the corresponding 16-slot arrays.
-    /// Spec ref: ITU-T T.81 B.2.4.3, NUM_ARITH_TBLS = 16.
-    #[test]
-    fn dac_parses_high_table_indices_without_panic() {
-        // DAC segment: length(2) + 2 pairs of 2 bytes = 6 bytes
-        //   Tc/Tb = 0x0A (DC, Tb=10), val = 0x21 (U=2, L=1)
-        //   Tc/Tb = 0x1C (AC, Tb=12), val = 7 (Kx=7)
-        let segment: Vec<u8> = vec![0x00, 0x06, 0x0A, 0x21, 0x1C, 0x07];
-
-        let mut dc_params: [(u8, u8); NUM_ARITH_TBLS] = [(0, 1); NUM_ARITH_TBLS];
-        let mut ac_params: [u8; NUM_ARITH_TBLS] = [5; NUM_ARITH_TBLS];
-
-        let mut reader = MarkerReader::new(&segment);
-        reader
-            .read_dac(&mut dc_params, &mut ac_params)
-            .expect("DAC with Tb=10,12 must parse");
-
-        assert_eq!(dc_params[10], (1, 2), "DC Tb=10 L/U populated");
-        assert_eq!(ac_params[12], 7, "AC Tb=12 Kx populated");
-        // Slots 0..4 untouched by this DAC
-        assert_eq!(dc_params[0], (0, 1));
-        assert_eq!(ac_params[0], 5);
     }
 }
