@@ -372,6 +372,94 @@ impl<'a> Decoder<'a> {
         }
     }
 
+    /// Create a decoder for a body-only abbreviated stream using preloaded tables.
+    ///
+    /// The `body_data` must contain SOF and SOS markers but may omit DQT and DHT.
+    /// Tables from `tables` are injected into the decoder's internal state before decoding.
+    ///
+    /// Matches libjpeg-turbo's abbreviated compressed data datastream handling:
+    /// use `read_header()` to get a `TablesOnlyState`, then this function to decode
+    /// the body-only stream.
+    pub fn new_with_tables(
+        body_data: &'a [u8],
+        tables: &crate::api::abbreviated::TablesOnlyState,
+    ) -> Result<Self> {
+        let mut reader = MarkerReader::new(body_data);
+        let mut metadata = reader.read_markers()?;
+
+        // Inject preloaded quant tables for any slot the body didn't define
+        for i in 0..4 {
+            if metadata.quant_tables[i].is_none() {
+                if let Some(ref qt) = tables.quant_tables[i] {
+                    metadata.quant_tables[i] = Some(qt.clone());
+                }
+            }
+        }
+
+        // Inject preloaded DC Huffman tables
+        for i in 0..4 {
+            if metadata.dc_huffman_tables[i].is_none() {
+                if let Some(ref ht) = tables.dc_huffman_tables[i] {
+                    metadata.dc_huffman_tables[i] = Some(ht.clone());
+                }
+            }
+        }
+
+        // Inject preloaded AC Huffman tables
+        for i in 0..4 {
+            if metadata.ac_huffman_tables[i].is_none() {
+                if let Some(ref ht) = tables.ac_huffman_tables[i] {
+                    metadata.ac_huffman_tables[i] = Some(ht.clone());
+                }
+            }
+        }
+
+        // Propagate injected tables into scan snapshots
+        for scan in &mut metadata.scans {
+            for i in 0..4 {
+                if scan.dc_huffman_tables[i].is_none() && metadata.dc_huffman_tables[i].is_some() {
+                    scan.dc_huffman_tables[i] = metadata.dc_huffman_tables[i].clone();
+                }
+                if scan.ac_huffman_tables[i].is_none() && metadata.ac_huffman_tables[i].is_some() {
+                    scan.ac_huffman_tables[i] = metadata.ac_huffman_tables[i].clone();
+                }
+            }
+        }
+
+        // Carry arithmetic coding state from tables
+        if tables.is_arithmetic {
+            metadata.is_arithmetic = true;
+            metadata.arith_dc_params = tables.arith_dc_params;
+            metadata.arith_ac_params = tables.arith_ac_params;
+        }
+
+        let routines = simd::detect();
+        Ok(Self {
+            metadata,
+            raw_data: body_data,
+            routines,
+            output_format: None,
+            scale: ScalingFactor::default(),
+            lenient: false,
+            crop_x: None,
+            crop_width: None,
+            crop_y: None,
+            crop_height: None,
+            stop_on_warning: false,
+            max_pixels: None,
+            max_memory: None,
+            scan_limit: None,
+            fast_upsample: false,
+            fast_dct: false,
+            dct_method: DctMethod::IsLow,
+            block_smoothing: false,
+            output_colorspace: None,
+            dither_565: false,
+            merged_upsample: false,
+            marker_processors: std::collections::HashMap::new(),
+        })
+    }
+
     pub fn header(&self) -> &FrameHeader {
         &self.metadata.frame
     }
