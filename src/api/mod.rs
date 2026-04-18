@@ -7,6 +7,7 @@ pub mod progressive_output;
 pub mod quality;
 pub mod quantize;
 pub mod raw_data;
+pub mod raw_data_12;
 pub mod scanline;
 pub mod stream;
 pub mod streaming;
