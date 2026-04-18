@@ -238,6 +238,7 @@ pub fn write_sos_progressive(
 /// Write DAC (Define Arithmetic Conditioning) marker.
 ///
 /// `dc_params`: (L, U) per DC table. `ac_params`: Kx per AC table.
+/// Accepts up to 16 slots per ITU-T T.81 `NUM_ARITH_TBLS` (jpeglib.h).
 pub fn write_dac(
     buf: &mut Vec<u8>,
     num_dc: usize,
@@ -245,16 +246,18 @@ pub fn write_dac(
     num_ac: usize,
     ac_params: &[u8],
 ) {
-    let mut dc_in_use = [false; 4];
-    let mut ac_in_use = [false; 4];
-    let mut full_dc_params = [(0u8, 1u8); 4];
-    let mut full_ac_params = [5u8; 4];
+    use crate::decode::arithmetic::NUM_ARITH_TBLS;
 
-    for i in 0..num_dc.min(4) {
+    let mut dc_in_use = [false; NUM_ARITH_TBLS];
+    let mut ac_in_use = [false; NUM_ARITH_TBLS];
+    let mut full_dc_params = [(0u8, 1u8); NUM_ARITH_TBLS];
+    let mut full_ac_params = [5u8; NUM_ARITH_TBLS];
+
+    for i in 0..num_dc.min(NUM_ARITH_TBLS) {
         dc_in_use[i] = true;
         full_dc_params[i] = dc_params[i];
     }
-    for i in 0..num_ac.min(4) {
+    for i in 0..num_ac.min(NUM_ARITH_TBLS) {
         ac_in_use[i] = true;
         full_ac_params[i] = ac_params[i];
     }
@@ -271,13 +274,15 @@ pub fn write_dac(
 /// Write DAC (Define Arithmetic Conditioning) marker for an arbitrary subset of
 /// DC/AC arithmetic tables.
 ///
-/// Entries are emitted in libjpeg-turbo order: DC0, AC0, DC1, AC1, ...
+/// Entries are emitted in libjpeg-turbo order (Spec F.2.4.3, `jcmarker.c::emit_dac`):
+/// DC0, AC0, DC1, AC1, ... DC15, AC15. Tc/Tb packs Tc (0=DC,1=AC) in the
+/// high nibble and Tb (table index 0..=15) in the low nibble.
 pub fn write_dac_selected(
     buf: &mut Vec<u8>,
-    dc_in_use: &[bool; 4],
-    dc_params: &[(u8, u8); 4],
-    ac_in_use: &[bool; 4],
-    ac_params: &[u8; 4],
+    dc_in_use: &[bool; crate::decode::arithmetic::NUM_ARITH_TBLS],
+    dc_params: &[(u8, u8); crate::decode::arithmetic::NUM_ARITH_TBLS],
+    ac_in_use: &[bool; crate::decode::arithmetic::NUM_ARITH_TBLS],
+    ac_params: &[u8; crate::decode::arithmetic::NUM_ARITH_TBLS],
 ) {
     let num_entries: usize = dc_in_use.iter().filter(|&&used| used).count()
         + ac_in_use.iter().filter(|&&used| used).count();
@@ -291,14 +296,14 @@ pub fn write_dac_selected(
     let length: u16 = 2 + (num_entries as u16 * 2);
     buf.extend_from_slice(&length.to_be_bytes());
 
-    for i in 0..4 {
+    for i in 0..crate::decode::arithmetic::NUM_ARITH_TBLS {
         if dc_in_use[i] {
             let (l, u) = dc_params[i];
-            buf.push(i as u8); // Tc=0 (DC), Tb=i
+            buf.push(i as u8); // Tc=0 (DC), Tb=i (0..=15)
             buf.push((u << 4) | l);
         }
         if ac_in_use[i] {
-            buf.push(0x10 | i as u8); // Tc=1 (AC), Tb=i
+            buf.push(0x10 | i as u8); // Tc=1 (AC), Tb=i (0..=15)
             buf.push(ac_params[i]);
         }
     }
@@ -690,5 +695,60 @@ mod tests {
         // Length = 2 + 1 + 16 + 12 = 31
         let length = u16::from_be_bytes([buf[2], buf[3]]);
         assert_eq!(length, 31);
+    }
+
+    /// Round-trip a DAC segment with Tb=12 through writer + decoder.
+    ///
+    /// Spec: ITU-T T.81 B.2.4.3 / jpeglib.h NUM_ARITH_TBLS = 16 allows
+    /// Tb up to 15. Before A4-3, writer's dc_in_use/ac_in_use were
+    /// length-4, silently dropping any slot > 3.
+    #[test]
+    fn dac_round_trip_high_table_indices() {
+        use crate::decode::arithmetic::NUM_ARITH_TBLS;
+        use crate::decode::marker::MarkerReader;
+
+        // Select DC slot 5 (L=2, U=6) and AC slot 12 (Kx=9). Other
+        // slots must remain at their default conditioning.
+        let mut dc_in_use = [false; NUM_ARITH_TBLS];
+        let mut ac_in_use = [false; NUM_ARITH_TBLS];
+        let mut dc_params = [(0u8, 1u8); NUM_ARITH_TBLS];
+        let mut ac_params = [5u8; NUM_ARITH_TBLS];
+        dc_in_use[5] = true;
+        dc_params[5] = (2, 6);
+        ac_in_use[12] = true;
+        ac_params[12] = 9;
+
+        let mut buf: Vec<u8> = Vec::new();
+        write_dac_selected(&mut buf, &dc_in_use, &dc_params, &ac_in_use, &ac_params);
+
+        // DAC = FF CC, length = 2 + 2 entries * 2 bytes = 6, then entries.
+        assert_eq!(buf[0], 0xFF);
+        assert_eq!(buf[1], 0xCC);
+        let length = u16::from_be_bytes([buf[2], buf[3]]);
+        assert_eq!(length, 6, "one DC + one AC entry");
+        // Emission order (libjpeg-turbo): DC0..15 for each slot interleaved
+        // with AC. Here only DC5 and AC12 are set, so the bytes are:
+        //   Tc/Tb = 0x05 (DC, Tb=5), val = (U<<4)|L = 0x62
+        //   Tc/Tb = 0x1C (AC, Tb=12), val = 9
+        assert_eq!(buf[4], 0x05);
+        assert_eq!(buf[5], 0x62);
+        assert_eq!(buf[6], 0x1C);
+        assert_eq!(buf[7], 0x09);
+
+        // Now parse it back through the decoder's read_dac — drop the
+        // FF CC marker bytes, pass the raw segment (length + entries).
+        let segment: &[u8] = &buf[2..];
+        let mut reader = MarkerReader::new(segment);
+        let mut rt_dc: [(u8, u8); NUM_ARITH_TBLS] = [(0, 1); NUM_ARITH_TBLS];
+        let mut rt_ac: [u8; NUM_ARITH_TBLS] = [5; NUM_ARITH_TBLS];
+        reader
+            .read_dac_public(&mut rt_dc, &mut rt_ac)
+            .expect("DAC must round-trip");
+
+        assert_eq!(rt_dc[5], (2, 6), "DC Tb=5 conditioning preserved");
+        assert_eq!(rt_ac[12], 9, "AC Tb=12 Kx preserved");
+        // Untouched slots keep defaults.
+        assert_eq!(rt_dc[0], (0, 1));
+        assert_eq!(rt_ac[0], 5);
     }
 }
