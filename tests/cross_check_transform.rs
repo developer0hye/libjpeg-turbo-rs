@@ -8,6 +8,8 @@
 //!
 //! All tests gracefully skip if jpegtran/djpeg are not found.
 
+mod helpers;
+
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -16,36 +18,6 @@ use libjpeg_turbo_rs::{
     compress, decompress, decompress_to, transform, transform_jpeg_with_options, CropRegion,
     MarkerCopyMode, PixelFormat, Subsampling, TransformOp, TransformOptions,
 };
-
-// ===========================================================================
-// Tool discovery
-// ===========================================================================
-
-fn jpegtran_path() -> Option<PathBuf> {
-    let homebrew: PathBuf = PathBuf::from("/opt/homebrew/bin/jpegtran");
-    if homebrew.exists() {
-        return Some(homebrew);
-    }
-    Command::new("which")
-        .arg("jpegtran")
-        .output()
-        .ok()
-        .filter(|o| o.status.success())
-        .map(|o| PathBuf::from(String::from_utf8_lossy(&o.stdout).trim().to_string()))
-}
-
-fn djpeg_path() -> Option<PathBuf> {
-    let homebrew: PathBuf = PathBuf::from("/opt/homebrew/bin/djpeg");
-    if homebrew.exists() {
-        return Some(homebrew);
-    }
-    Command::new("which")
-        .arg("djpeg")
-        .output()
-        .ok()
-        .filter(|o| o.status.success())
-        .map(|o| PathBuf::from(String::from_utf8_lossy(&o.stdout).trim().to_string()))
-}
 
 // ===========================================================================
 // Helpers
@@ -203,13 +175,7 @@ fn transform_name(op: TransformOp) -> &'static str {
 
 #[test]
 fn rust_transform_matches_c_jpegtran() {
-    let jpegtran: PathBuf = match jpegtran_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: jpegtran not found");
-            return;
-        }
-    };
+    let jpegtran: PathBuf = require_c_tool!("jpegtran");
 
     let source_jpeg: Vec<u8> = get_test_jpeg();
 
@@ -291,13 +257,7 @@ fn rust_transform_matches_c_jpegtran() {
 
 #[test]
 fn c_jpegtran_output_rust_decode() {
-    let jpegtran: PathBuf = match jpegtran_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: jpegtran not found");
-            return;
-        }
-    };
+    let jpegtran: PathBuf = require_c_tool!("jpegtran");
 
     let source_jpeg: Vec<u8> = get_test_jpeg();
     let source_img = decompress(&source_jpeg).expect("decode source");
@@ -350,13 +310,7 @@ fn c_jpegtran_output_rust_decode() {
 
 #[test]
 fn rust_transform_output_c_djpeg() {
-    let djpeg: PathBuf = match djpeg_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: djpeg not found");
-            return;
-        }
-    };
+    let djpeg: PathBuf = require_c_tool!("djpeg");
 
     let source_jpeg: Vec<u8> = get_test_jpeg();
 
@@ -402,13 +356,7 @@ fn rust_transform_output_c_djpeg() {
 
 #[test]
 fn transform_grayscale_cross_check() {
-    let jpegtran: PathBuf = match jpegtran_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: jpegtran not found");
-            return;
-        }
-    };
+    let jpegtran: PathBuf = require_c_tool!("jpegtran");
 
     let source_jpeg: Vec<u8> = get_test_jpeg();
 
@@ -470,13 +418,7 @@ fn transform_grayscale_cross_check() {
 
 #[test]
 fn transform_crop_cross_check() {
-    let jpegtran: PathBuf = match jpegtran_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: jpegtran not found");
-            return;
-        }
-    };
+    let jpegtran: PathBuf = require_c_tool!("jpegtran");
 
     let source_jpeg: Vec<u8> = get_test_jpeg();
 
@@ -556,20 +498,8 @@ fn transform_crop_cross_check() {
 
 #[test]
 fn transform_optimize_cross_check() {
-    let jpegtran: PathBuf = match jpegtran_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: jpegtran not found");
-            return;
-        }
-    };
-    let djpeg: PathBuf = match djpeg_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: djpeg not found");
-            return;
-        }
-    };
+    let jpegtran: PathBuf = require_c_tool!("jpegtran");
+    let djpeg: PathBuf = require_c_tool!("djpeg");
 
     let source_jpeg: Vec<u8> = get_test_jpeg();
 
@@ -660,20 +590,8 @@ fn transform_optimize_cross_check() {
 
 #[test]
 fn transform_progressive_cross_check() {
-    let jpegtran: PathBuf = match jpegtran_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: jpegtran not found");
-            return;
-        }
-    };
-    let djpeg: PathBuf = match djpeg_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: djpeg not found");
-            return;
-        }
-    };
+    let jpegtran: PathBuf = require_c_tool!("jpegtran");
+    let djpeg: PathBuf = require_c_tool!("djpeg");
 
     let source_jpeg: Vec<u8> = get_test_jpeg();
 
@@ -769,13 +687,7 @@ fn transform_progressive_cross_check() {
 
 #[test]
 fn transform_rotate_grayscale_cross_check() {
-    let jpegtran: PathBuf = match jpegtran_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: jpegtran not found");
-            return;
-        }
-    };
+    let jpegtran: PathBuf = require_c_tool!("jpegtran");
 
     let source_jpeg: Vec<u8> = get_test_jpeg();
 
@@ -838,13 +750,7 @@ fn transform_rotate_grayscale_cross_check() {
 
 #[test]
 fn all_transforms_both_decoders_valid() {
-    let djpeg: PathBuf = match djpeg_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: djpeg not found");
-            return;
-        }
-    };
+    let djpeg: PathBuf = require_c_tool!("djpeg");
 
     let source_jpeg: Vec<u8> = get_test_jpeg();
 
@@ -906,20 +812,8 @@ fn all_transforms_both_decoders_valid() {
 
 #[test]
 fn c_jpegtran_progressive_reencode() {
-    let jpegtran: PathBuf = match jpegtran_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: jpegtran not found");
-            return;
-        }
-    };
-    let djpeg: PathBuf = match djpeg_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: djpeg not found");
-            return;
-        }
-    };
+    let jpegtran: PathBuf = require_c_tool!("jpegtran");
+    let djpeg: PathBuf = require_c_tool!("djpeg");
 
     let source_jpeg: Vec<u8> = get_test_jpeg();
 
@@ -1034,20 +928,8 @@ fn c_jpegtran_progressive_reencode() {
 
 #[test]
 fn c_jpegtran_arithmetic_reencode() {
-    let jpegtran: PathBuf = match jpegtran_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: jpegtran not found");
-            return;
-        }
-    };
-    let djpeg: PathBuf = match djpeg_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: djpeg not found");
-            return;
-        }
-    };
+    let jpegtran: PathBuf = require_c_tool!("jpegtran");
+    let djpeg: PathBuf = require_c_tool!("djpeg");
 
     let source_jpeg: Vec<u8> = get_test_jpeg();
 
@@ -1195,20 +1077,8 @@ fn c_jpegtran_arithmetic_reencode() {
 /// Affected dimensions: 7x11, 33x17 (non-multiples of 8 and 16).
 #[test]
 fn progressive_odd_dimensions_transform_no_crash() {
-    let jpegtran: PathBuf = match jpegtran_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: jpegtran not found");
-            return;
-        }
-    };
-    let djpeg: PathBuf = match djpeg_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: djpeg not found");
-            return;
-        }
-    };
+    let jpegtran: PathBuf = require_c_tool!("jpegtran");
+    let djpeg: PathBuf = require_c_tool!("djpeg");
 
     // cjpeg is at the same location as djpeg
     let cjpeg_path: PathBuf = djpeg.parent().unwrap().join("cjpeg");
@@ -1316,20 +1186,8 @@ fn progressive_odd_dimensions_transform_no_crash() {
 /// comparison which incorrectly reported valid transforms as failures.
 #[test]
 fn transform_pixel_equivalence_with_c_jpegtran() {
-    let jpegtran: PathBuf = match jpegtran_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: jpegtran not found");
-            return;
-        }
-    };
-    let djpeg: PathBuf = match djpeg_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: djpeg not found");
-            return;
-        }
-    };
+    let jpegtran: PathBuf = require_c_tool!("jpegtran");
+    let djpeg: PathBuf = require_c_tool!("djpeg");
 
     // Use an image with non-MCU-aligned dimensions to expose edge-block handling
     let (w, h): (usize, usize) = (33, 17);

@@ -11,6 +11,8 @@
 
 #![allow(dead_code)]
 
+mod helpers;
+
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -24,34 +26,6 @@ use libjpeg_turbo_rs::{
 // ===========================================================================
 // Tool discovery
 // ===========================================================================
-
-fn djpeg_path() -> Option<PathBuf> {
-    let homebrew: PathBuf = PathBuf::from("/opt/homebrew/bin/djpeg");
-    if homebrew.exists() {
-        return Some(homebrew);
-    }
-    Command::new("which")
-        .arg("djpeg")
-        .output()
-        .ok()
-        .filter(|o| o.status.success())
-        .map(|o| PathBuf::from(String::from_utf8_lossy(&o.stdout).trim().to_string()))
-}
-
-fn cjpeg_path() -> Option<PathBuf> {
-    let homebrew: PathBuf = PathBuf::from("/opt/homebrew/bin/cjpeg");
-    if homebrew.exists() {
-        return Some(homebrew);
-    }
-    let output = Command::new("which").arg("cjpeg").output().ok()?;
-    if output.status.success() {
-        let p: String = String::from_utf8_lossy(&output.stdout).trim().to_string();
-        if !p.is_empty() {
-            return Some(PathBuf::from(p));
-        }
-    }
-    None
-}
 
 fn cjpeg_supports_lossless(cjpeg: &Path) -> bool {
     let output = Command::new(cjpeg).arg("-help").output();
@@ -208,13 +182,7 @@ fn compute_psnr(a: &[u8], b: &[u8]) -> f64 {
 /// by default for progressive JPEGs).
 #[test]
 fn c_xval_block_smoothing_pixel_comparison() {
-    let djpeg: PathBuf = match djpeg_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: djpeg not found");
-            return;
-        }
-    };
+    let djpeg: PathBuf = require_c_tool!("djpeg");
 
     let (w, h): (usize, usize) = (64, 64);
     let pixels: Vec<u8> = generate_gradient(w, h);
@@ -310,13 +278,7 @@ fn c_xval_block_smoothing_pixel_comparison() {
 /// verify the JPEG is valid and dimensions are correct.
 #[test]
 fn c_xval_encode_s440_normal() {
-    let djpeg: PathBuf = match djpeg_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: djpeg not found");
-            return;
-        }
-    };
+    let djpeg: PathBuf = require_c_tool!("djpeg");
 
     let (w, h): (usize, usize) = (48, 48);
     let pixels: Vec<u8> = generate_gradient(w, h);
@@ -386,13 +348,7 @@ fn c_xval_encode_s440_normal() {
 /// verify the JPEG is valid and dimensions are correct.
 #[test]
 fn c_xval_encode_s441_normal() {
-    let djpeg: PathBuf = match djpeg_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: djpeg not found");
-            return;
-        }
-    };
+    let djpeg: PathBuf = require_c_tool!("djpeg");
 
     let (w, h): (usize, usize) = (48, 48);
     let pixels: Vec<u8> = generate_gradient(w, h);
@@ -463,13 +419,7 @@ fn c_xval_encode_s441_normal() {
 /// Also cross-validate the full-res RGB decode against C djpeg.
 #[test]
 fn c_xval_rgb565_pixel_values() {
-    let djpeg: PathBuf = match djpeg_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: djpeg not found");
-            return;
-        }
-    };
+    let djpeg: PathBuf = require_c_tool!("djpeg");
 
     let (w, h): (usize, usize) = (48, 48);
     let pixels: Vec<u8> = generate_gradient(w, h);
@@ -580,13 +530,7 @@ fn c_xval_rgb565_pixel_values() {
 /// Verify PSNR > 25 dB vs original decoded RGB.
 #[test]
 fn c_xval_quantize_256_colors() {
-    let djpeg: PathBuf = match djpeg_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: djpeg not found");
-            return;
-        }
-    };
+    let djpeg: PathBuf = require_c_tool!("djpeg");
 
     let (w, h): (usize, usize) = (64, 64);
     let pixels: Vec<u8> = generate_gradient(w, h);
@@ -655,13 +599,7 @@ fn c_xval_quantize_256_colors() {
 /// Verify PSNR > 15 dB vs original decoded RGB.
 #[test]
 fn c_xval_quantize_16_colors() {
-    let djpeg: PathBuf = match djpeg_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: djpeg not found");
-            return;
-        }
-    };
+    let djpeg: PathBuf = require_c_tool!("djpeg");
 
     let (w, h): (usize, usize) = (64, 64);
     let pixels: Vec<u8> = generate_gradient(w, h);
@@ -733,13 +671,7 @@ fn c_xval_quantize_16_colors() {
 /// the decoded Image.density matches what was written.
 #[test]
 fn c_xval_density_preservation() {
-    let djpeg: PathBuf = match djpeg_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: djpeg not found");
-            return;
-        }
-    };
+    let djpeg: PathBuf = require_c_tool!("djpeg");
 
     let (w, h): (usize, usize) = (32, 32);
     let pixels: Vec<u8> = generate_gradient(w, h);
@@ -883,13 +815,7 @@ fn c_xval_12bit_lossy_encode_decode() {
     );
 
     // C cross-validation: Rust decode must match C djpeg decode (diff=0).
-    let djpeg: PathBuf = match djpeg_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: djpeg not found for 12-bit C cross-validation");
-            return;
-        }
-    };
+    let djpeg: PathBuf = require_c_tool!("djpeg");
 
     let tmp_jpg: TempFile = TempFile::new("12bit_roundtrip.jpg");
     let tmp_pnm: TempFile = TempFile::new("12bit_roundtrip.pnm");

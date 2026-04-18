@@ -3,6 +3,8 @@
 //! These tests exercise corner cases in the encode/decode pipeline that
 //! are valid JPEG but stress unusual code paths.
 
+mod helpers;
+
 use std::io::Write;
 use std::path::PathBuf;
 use std::process::Command;
@@ -15,28 +17,6 @@ use libjpeg_turbo_rs::{
 // ===========================================================================
 // C djpeg cross-validation helpers
 // ===========================================================================
-
-/// Locate the djpeg binary. Checks /opt/homebrew/bin/djpeg first, then falls
-/// back to whatever `which djpeg` returns. Returns `None` when not found.
-fn djpeg_path() -> Option<PathBuf> {
-    let homebrew_path: PathBuf = PathBuf::from("/opt/homebrew/bin/djpeg");
-    if homebrew_path.exists() {
-        return Some(homebrew_path);
-    }
-
-    let output = Command::new("which").arg("djpeg").output().ok()?;
-    if output.status.success() {
-        let path_str: String = String::from_utf8_lossy(&output.stdout).trim().to_string();
-        if !path_str.is_empty() {
-            let path: PathBuf = PathBuf::from(&path_str);
-            if path.exists() {
-                return Some(path);
-            }
-        }
-    }
-
-    None
-}
 
 /// Parse a binary PPM (P6) image into (width, height, rgb_pixels).
 /// Returns `None` if the data is not a valid P6 PPM.
@@ -800,13 +780,7 @@ fn decode_to_all_pixel_formats() {
 /// Measured max_diff = 0 for flat images at Q100. Tolerance: max_diff <= 1.
 #[test]
 fn c_djpeg_flat_gray_matches() {
-    let djpeg: PathBuf = match djpeg_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: djpeg not found, skipping C cross-validation");
-            return;
-        }
-    };
+    let djpeg: PathBuf = require_c_tool!("djpeg");
 
     let (w, h) = (16, 16);
     let pixels = vec![128u8; w * h];
@@ -854,13 +828,7 @@ fn c_djpeg_flat_gray_matches() {
 /// Measured max_diff = 0 for flat black at Q100. Tolerance: max_diff <= 2.
 #[test]
 fn c_djpeg_flat_black_matches() {
-    let djpeg: PathBuf = match djpeg_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: djpeg not found, skipping C cross-validation");
-            return;
-        }
-    };
+    let djpeg: PathBuf = require_c_tool!("djpeg");
 
     let (w, h) = (16, 16);
     let pixels = vec![0u8; w * h];
@@ -908,13 +876,7 @@ fn c_djpeg_flat_black_matches() {
 /// Measured max_diff = 0 for flat white at Q100. Tolerance: max_diff <= 2.
 #[test]
 fn c_djpeg_flat_white_matches() {
-    let djpeg: PathBuf = match djpeg_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: djpeg not found, skipping C cross-validation");
-            return;
-        }
-    };
+    let djpeg: PathBuf = require_c_tool!("djpeg");
 
     let (w, h) = (16, 16);
     let pixels = vec![255u8; w * h];
@@ -962,13 +924,7 @@ fn c_djpeg_flat_white_matches() {
 /// Lossless JPEG must produce exact (diff=0) roundtrip.
 #[test]
 fn c_djpeg_lossless_exact_roundtrip() {
-    let djpeg: PathBuf = match djpeg_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: djpeg not found, skipping C cross-validation");
-            return;
-        }
-    };
+    let djpeg: PathBuf = require_c_tool!("djpeg");
     // libjpeg-turbo 2.x djpeg (Ubuntu 24.04) doesn't decode SOF3 (lossless).
     let ver = std::process::Command::new(&djpeg)
         .arg("-version")
@@ -1032,13 +988,7 @@ fn c_djpeg_lossless_exact_roundtrip() {
 /// are consistent channel reorderings of the RGB result.
 #[test]
 fn c_djpeg_all_pixel_formats_match() {
-    let djpeg: PathBuf = match djpeg_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: djpeg not found, skipping C cross-validation");
-            return;
-        }
-    };
+    let djpeg: PathBuf = require_c_tool!("djpeg");
 
     let (w, h) = (16, 16);
     // Varied RGB pattern to exercise color conversion

@@ -6,34 +6,14 @@
 //! output matches C djpeg (diff=0) and that merged vs separate paths produce
 //! identical output.
 
+mod helpers;
+
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use libjpeg_turbo_rs::decode::pipeline::Decoder;
 use libjpeg_turbo_rs::{compress, compress_progressive, Image, PixelFormat, Subsampling};
-
-// ===========================================================================
-// Tool discovery
-// ===========================================================================
-
-fn djpeg_path() -> Option<PathBuf> {
-    let homebrew_path: PathBuf = PathBuf::from("/opt/homebrew/bin/djpeg");
-    if homebrew_path.exists() {
-        return Some(homebrew_path);
-    }
-    let output = Command::new("which").arg("djpeg").output().ok()?;
-    if output.status.success() {
-        let path_str: String = String::from_utf8_lossy(&output.stdout).trim().to_string();
-        if !path_str.is_empty() {
-            let path: PathBuf = PathBuf::from(&path_str);
-            if path.exists() {
-                return Some(path);
-            }
-        }
-    }
-    None
-}
 
 // ===========================================================================
 // Helpers
@@ -223,13 +203,7 @@ fn make_test_jpeg(width: usize, height: usize, subsampling: Subsampling) -> Vec<
 /// 4:2:2 merged upsample to RGB matches C djpeg (diff=0).
 #[test]
 fn c_xval_merged_422_matches_c() {
-    let djpeg: PathBuf = match djpeg_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: djpeg not found");
-            return;
-        }
-    };
+    let djpeg: PathBuf = require_c_tool!("djpeg");
 
     let jpeg: Vec<u8> = make_test_jpeg(64, 64, Subsampling::S422);
     let rust_img: Image = rust_decode_merged_rgb(&jpeg);
@@ -252,13 +226,7 @@ fn c_xval_merged_422_matches_c() {
 /// So we compare against C djpeg default (which also uses fancy upsample).
 #[test]
 fn c_xval_merged_420_bgr_channels_match() {
-    let djpeg: PathBuf = match djpeg_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: djpeg not found");
-            return;
-        }
-    };
+    let djpeg: PathBuf = require_c_tool!("djpeg");
 
     let jpeg: Vec<u8> = make_test_jpeg(64, 64, Subsampling::S420);
     let rust_img: Image = rust_decode_merged(&jpeg, PixelFormat::Bgr);
@@ -281,13 +249,7 @@ fn c_xval_merged_420_bgr_channels_match() {
 /// 4:2:0 decode to RGBA — extract RGB channels and compare with C.
 #[test]
 fn c_xval_merged_420_rgba_channels_match() {
-    let djpeg: PathBuf = match djpeg_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: djpeg not found");
-            return;
-        }
-    };
+    let djpeg: PathBuf = require_c_tool!("djpeg");
 
     let jpeg: Vec<u8> = make_test_jpeg(64, 64, Subsampling::S420);
     let rust_img: Image = rust_decode_merged(&jpeg, PixelFormat::Rgba);
@@ -309,13 +271,7 @@ fn c_xval_merged_420_rgba_channels_match() {
 /// 4:2:2 decode to BGRA — extract RGB channels and compare with C.
 #[test]
 fn c_xval_merged_422_bgra_channels_match() {
-    let djpeg: PathBuf = match djpeg_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: djpeg not found");
-            return;
-        }
-    };
+    let djpeg: PathBuf = require_c_tool!("djpeg");
 
     let jpeg: Vec<u8> = make_test_jpeg(64, 64, Subsampling::S422);
     let rust_img: Image = rust_decode_merged(&jpeg, PixelFormat::Bgra);
@@ -369,13 +325,7 @@ fn c_xval_merged_vs_separate_identical() {
 /// Progressive JPEG with merged upsample matches C djpeg.
 #[test]
 fn c_xval_merged_progressive_matches_c() {
-    let djpeg: PathBuf = match djpeg_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: djpeg not found");
-            return;
-        }
-    };
+    let djpeg: PathBuf = require_c_tool!("djpeg");
 
     let width: usize = 64;
     let height: usize = 64;

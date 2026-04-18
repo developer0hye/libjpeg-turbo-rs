@@ -1,3 +1,5 @@
+mod helpers;
+
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -386,19 +388,6 @@ fn quality_affects_file_size() {
 
 // --- C djpeg cross-validation ---
 
-fn djpeg_path() -> Option<PathBuf> {
-    let homebrew: PathBuf = PathBuf::from("/opt/homebrew/bin/djpeg");
-    if homebrew.exists() {
-        return Some(homebrew);
-    }
-    Command::new("which")
-        .arg("djpeg")
-        .output()
-        .ok()
-        .filter(|o| o.status.success())
-        .map(|o| PathBuf::from(String::from_utf8_lossy(&o.stdout).trim().to_string()))
-}
-
 fn parse_ppm(path: &Path) -> (usize, usize, Vec<u8>) {
     let raw: Vec<u8> = std::fs::read(path).expect("failed to read PPM");
     assert!(&raw[0..2] == b"P6", "not P6 PPM");
@@ -490,13 +479,7 @@ fn c_djpeg_cross_validate_subsampling(djpeg: &Path, ss: Subsampling) {
 /// C djpeg cross-validation for S444/S422/S420 — must match exactly.
 #[test]
 fn c_djpeg_cross_validation_common_subsamplings_diff_zero() {
-    let djpeg: PathBuf = match djpeg_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: djpeg not found");
-            return;
-        }
-    };
+    let djpeg: PathBuf = require_c_tool!("djpeg");
     for &ss in &[Subsampling::S444, Subsampling::S422, Subsampling::S420] {
         c_djpeg_cross_validate_subsampling(&djpeg, ss);
     }
@@ -505,39 +488,21 @@ fn c_djpeg_cross_validation_common_subsamplings_diff_zero() {
 /// C djpeg cross-validation for S440 — diff=0.
 #[test]
 fn c_djpeg_cross_validation_s440_diff_zero() {
-    let djpeg: PathBuf = match djpeg_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: djpeg not found");
-            return;
-        }
-    };
+    let djpeg: PathBuf = require_c_tool!("djpeg");
     c_djpeg_cross_validate_subsampling(&djpeg, Subsampling::S440);
 }
 
 /// C djpeg cross-validation for S411 — diff=0.
 #[test]
 fn c_djpeg_cross_validation_s411_diff_zero() {
-    let djpeg: PathBuf = match djpeg_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: djpeg not found");
-            return;
-        }
-    };
+    let djpeg: PathBuf = require_c_tool!("djpeg");
     c_djpeg_cross_validate_subsampling(&djpeg, Subsampling::S411);
 }
 
 /// C djpeg cross-validation for S441 — diff=0.
 #[test]
 fn c_djpeg_cross_validation_s441_diff_zero() {
-    let djpeg: PathBuf = match djpeg_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: djpeg not found");
-            return;
-        }
-    };
+    let djpeg: PathBuf = require_c_tool!("djpeg");
     c_djpeg_cross_validate_subsampling(&djpeg, Subsampling::S441);
 }
 
@@ -643,13 +608,7 @@ fn c_djpeg_cross_validate_jpeg(djpeg: &Path, jpeg: &[u8], label: &str, is_graysc
 /// values, small dimensions, arithmetic coding, and CMYK encode.
 #[test]
 fn c_djpeg_encode_boundaries_extended_diff_zero() {
-    let djpeg: PathBuf = match djpeg_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: djpeg not found");
-            return;
-        }
-    };
+    let djpeg: PathBuf = require_c_tool!("djpeg");
 
     // --- Quality extremes: Q0 (clamped to Q1) and Q1 ---
     {

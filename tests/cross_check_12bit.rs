@@ -7,6 +7,8 @@
 //!
 //! All tests gracefully skip if djpeg/cjpeg are not found or don't support 12-bit.
 
+mod helpers;
+
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -17,32 +19,6 @@ use libjpeg_turbo_rs::Subsampling;
 // ===========================================================================
 // Tool discovery
 // ===========================================================================
-
-fn djpeg_path() -> Option<PathBuf> {
-    let homebrew: PathBuf = PathBuf::from("/opt/homebrew/bin/djpeg");
-    if homebrew.exists() {
-        return Some(homebrew);
-    }
-    Command::new("which")
-        .arg("djpeg")
-        .output()
-        .ok()
-        .filter(|o| o.status.success())
-        .map(|o| PathBuf::from(String::from_utf8_lossy(&o.stdout).trim().to_string()))
-}
-
-fn cjpeg_path() -> Option<PathBuf> {
-    let homebrew: PathBuf = PathBuf::from("/opt/homebrew/bin/cjpeg");
-    if homebrew.exists() {
-        return Some(homebrew);
-    }
-    Command::new("which")
-        .arg("cjpeg")
-        .output()
-        .ok()
-        .filter(|o| o.status.success())
-        .map(|o| PathBuf::from(String::from_utf8_lossy(&o.stdout).trim().to_string()))
-}
 
 /// Check if djpeg can handle 12-bit JPEG (by trying to decode testorig12.jpg).
 fn djpeg_supports_12bit(djpeg: &Path) -> bool {
@@ -190,13 +166,7 @@ fn read_number(data: &[u8], idx: usize) -> (usize, usize) {
 
 #[test]
 fn rust_12bit_c_decode() {
-    let djpeg: PathBuf = match djpeg_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: djpeg not found");
-            return;
-        }
-    };
+    let djpeg: PathBuf = require_c_tool!("djpeg");
 
     // Generate 12-bit grayscale test data (values 0-4095)
     let (w, h): (usize, usize) = (16, 16);
@@ -278,13 +248,7 @@ fn c_12bit_rust_decode_testorig12() {
 
 #[test]
 fn c_12bit_cjpeg_precision_rust_decode() {
-    let cjpeg: PathBuf = match cjpeg_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: cjpeg not found");
-            return;
-        }
-    };
+    let cjpeg: PathBuf = require_c_tool!("cjpeg");
     if !cjpeg_supports_precision(&cjpeg) {
         eprintln!("SKIP: cjpeg does not support -precision flag");
         return;
@@ -351,13 +315,7 @@ fn c_12bit_cjpeg_precision_rust_decode() {
 
 #[test]
 fn pixel_match_12bit_c_reference() {
-    let djpeg: PathBuf = match djpeg_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: djpeg not found");
-            return;
-        }
-    };
+    let djpeg: PathBuf = require_c_tool!("djpeg");
 
     let ref_path: PathBuf = reference_path("testorig12.jpg");
     if !ref_path.exists() {
@@ -525,20 +483,8 @@ fn rust_12bit_roundtrip_encode_decode() {
 /// Requires both cjpeg and djpeg with 12-bit support; skips gracefully if unavailable.
 #[test]
 fn c_cross_validation_12bit_encode_decode() {
-    let djpeg: PathBuf = match djpeg_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: djpeg not found");
-            return;
-        }
-    };
-    let cjpeg: PathBuf = match cjpeg_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: cjpeg not found");
-            return;
-        }
-    };
+    let djpeg: PathBuf = require_c_tool!("djpeg");
+    let cjpeg: PathBuf = require_c_tool!("cjpeg");
 
     if !cjpeg_supports_precision(&cjpeg) {
         eprintln!("SKIP: cjpeg does not support -precision flag");

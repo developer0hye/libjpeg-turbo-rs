@@ -3,6 +3,8 @@
 //! Verify the exact structure and ordering of markers in our encoder output.
 //! Each coding mode has a defined marker sequence that must be respected.
 
+mod helpers;
+
 use std::path::PathBuf;
 use std::process::Command;
 
@@ -570,20 +572,6 @@ fn dqt_count_matches_component_needs() {
 // C cross-validation helpers
 // ===========================================================================
 
-/// Path to C cjpeg binary, or `None` if not installed.
-fn cjpeg_path() -> Option<PathBuf> {
-    let homebrew: PathBuf = PathBuf::from("/opt/homebrew/bin/cjpeg");
-    if homebrew.exists() {
-        return Some(homebrew);
-    }
-    Command::new("which")
-        .arg("cjpeg")
-        .output()
-        .ok()
-        .filter(|o| o.status.success())
-        .map(|o| PathBuf::from(String::from_utf8_lossy(&o.stdout).trim().to_string()))
-}
-
 /// Generate a binary PPM (P6) file from 16x16 RGB pixels.
 fn generate_ppm(width: usize, height: usize, pixels: &[u8]) -> Vec<u8> {
     let mut ppm: Vec<u8> = format!("P6\n{} {}\n255\n", width, height).into_bytes();
@@ -636,13 +624,7 @@ fn encode_with_cjpeg(cjpeg: &PathBuf, ppm_bytes: &[u8], extra_args: &[&str]) -> 
 
 #[test]
 fn c_cjpeg_baseline_marker_order_matches() {
-    let cjpeg: PathBuf = match cjpeg_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: cjpeg not found");
-            return;
-        }
-    };
+    let cjpeg: PathBuf = require_c_tool!("cjpeg");
 
     let width: usize = 16;
     let height: usize = 16;
@@ -694,13 +676,7 @@ fn c_cjpeg_baseline_marker_order_matches() {
 
 #[test]
 fn c_cjpeg_progressive_has_multiple_sos() {
-    let cjpeg: PathBuf = match cjpeg_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: cjpeg not found");
-            return;
-        }
-    };
+    let cjpeg: PathBuf = require_c_tool!("cjpeg");
 
     let width: usize = 16;
     let height: usize = 16;
@@ -762,13 +738,7 @@ fn c_cjpeg_progressive_has_multiple_sos() {
 
 #[test]
 fn c_cjpeg_optimized_structure_matches() {
-    let cjpeg: PathBuf = match cjpeg_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: cjpeg not found");
-            return;
-        }
-    };
+    let cjpeg: PathBuf = require_c_tool!("cjpeg");
 
     let width: usize = 16;
     let height: usize = 16;
@@ -830,13 +800,7 @@ fn c_cjpeg_optimized_structure_matches() {
 
 #[test]
 fn c_cjpeg_grayscale_structure_matches() {
-    let cjpeg: PathBuf = match cjpeg_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: cjpeg not found");
-            return;
-        }
-    };
+    let cjpeg: PathBuf = require_c_tool!("cjpeg");
 
     let width: usize = 16;
     let height: usize = 16;

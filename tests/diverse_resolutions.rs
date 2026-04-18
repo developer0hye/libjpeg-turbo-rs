@@ -5,23 +5,12 @@
 //! All test images were encoded by C cjpeg — Rust decode must match
 //! C djpeg decode pixel-for-pixel (diff=0).
 
+mod helpers;
+
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use libjpeg_turbo_rs::{compress, decompress_to, PixelFormat, Subsampling};
-
-fn djpeg_path() -> Option<PathBuf> {
-    let homebrew: PathBuf = PathBuf::from("/opt/homebrew/bin/djpeg");
-    if homebrew.exists() {
-        return Some(homebrew);
-    }
-    Command::new("which")
-        .arg("djpeg")
-        .output()
-        .ok()
-        .filter(|o| o.status.success())
-        .map(|o| PathBuf::from(String::from_utf8_lossy(&o.stdout).trim().to_string()))
-}
 
 fn parse_ppm(path: &Path) -> (usize, usize, Vec<u8>) {
     let raw: Vec<u8> = std::fs::read(path).expect("read PPM");
@@ -141,13 +130,7 @@ macro_rules! diverse_test {
     ($name:ident, $file:literal) => {
         #[test]
         fn $name() {
-            let djpeg: PathBuf = match djpeg_path() {
-                Some(p) => p,
-                None => {
-                    eprintln!("SKIP: djpeg not found");
-                    return;
-                }
-            };
+            let djpeg: PathBuf = require_c_tool!("djpeg");
             let data: &[u8] = include_bytes!(concat!("fixtures/", $file));
             assert_decode_matches_c(&djpeg, data, $file);
         }
@@ -156,13 +139,7 @@ macro_rules! diverse_test {
         #[test]
         #[ignore = $reason]
         fn $name() {
-            let djpeg: PathBuf = match djpeg_path() {
-                Some(p) => p,
-                None => {
-                    eprintln!("SKIP: djpeg not found");
-                    return;
-                }
-            };
+            let djpeg: PathBuf = require_c_tool!("djpeg");
             let data: &[u8] = include_bytes!(concat!("fixtures/", $file));
             assert_decode_matches_c(&djpeg, data, $file);
         }
@@ -265,13 +242,7 @@ diverse_test!(
 
 #[test]
 fn c_djpeg_cross_validation_rare_subsampling() {
-    let djpeg: PathBuf = match djpeg_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: djpeg not found");
-            return;
-        }
-    };
+    let djpeg: PathBuf = require_c_tool!("djpeg");
 
     let (w, h): (usize, usize) = (48, 48);
     let mut pixels: Vec<u8> = Vec::with_capacity(w * h * 3);

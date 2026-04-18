@@ -3,6 +3,8 @@
 //! Tests raw YCbCr plane decomposition and re-encoding via compress_raw,
 //! then verifies pixel-identical output between Rust and C djpeg.
 
+mod helpers;
+
 use std::path::PathBuf;
 use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -10,30 +12,6 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use libjpeg_turbo_rs::{
     compress, compress_raw, decompress_raw, decompress_to, PixelFormat, RawImage, Subsampling,
 };
-
-// ===========================================================================
-// Tool discovery
-// ===========================================================================
-
-/// Locate the djpeg binary. Checks /opt/homebrew/bin/djpeg first, then falls
-/// back to whatever `which djpeg` returns. Returns `None` when not found.
-fn djpeg_path() -> Option<PathBuf> {
-    let homebrew: PathBuf = PathBuf::from("/opt/homebrew/bin/djpeg");
-    if homebrew.exists() {
-        return Some(homebrew);
-    }
-    let output = Command::new("which").arg("djpeg").output().ok()?;
-    if output.status.success() {
-        let path_str: String = String::from_utf8_lossy(&output.stdout).trim().to_string();
-        if !path_str.is_empty() {
-            let path: PathBuf = PathBuf::from(&path_str);
-            if path.exists() {
-                return Some(path);
-            }
-        }
-    }
-    None
-}
 
 // ===========================================================================
 // Helpers
@@ -350,49 +328,25 @@ fn raw_decompress_roundtrip(
 
 #[test]
 fn c_xval_decompress_raw_420() {
-    let djpeg: PathBuf = match djpeg_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: djpeg not found");
-            return;
-        }
-    };
+    let djpeg: PathBuf = require_c_tool!("djpeg");
     raw_decompress_roundtrip(&djpeg, Subsampling::S420, 48, 48, "raw_420");
 }
 
 #[test]
 fn c_xval_decompress_raw_444() {
-    let djpeg: PathBuf = match djpeg_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: djpeg not found");
-            return;
-        }
-    };
+    let djpeg: PathBuf = require_c_tool!("djpeg");
     raw_decompress_roundtrip(&djpeg, Subsampling::S444, 48, 48, "raw_444");
 }
 
 #[test]
 fn c_xval_decompress_raw_422() {
-    let djpeg: PathBuf = match djpeg_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: djpeg not found");
-            return;
-        }
-    };
+    let djpeg: PathBuf = require_c_tool!("djpeg");
     raw_decompress_roundtrip(&djpeg, Subsampling::S422, 48, 48, "raw_422");
 }
 
 #[test]
 fn c_xval_decompress_raw_grayscale() {
-    let djpeg: PathBuf = match djpeg_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: djpeg not found");
-            return;
-        }
-    };
+    let djpeg: PathBuf = require_c_tool!("djpeg");
 
     let width: usize = 48;
     let height: usize = 48;
@@ -467,13 +421,7 @@ fn c_xval_decompress_raw_grayscale() {
 
 #[test]
 fn c_xval_compress_raw_420_vs_djpeg() {
-    let djpeg: PathBuf = match djpeg_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: djpeg not found");
-            return;
-        }
-    };
+    let djpeg: PathBuf = require_c_tool!("djpeg");
 
     let width: usize = 48;
     let height: usize = 48;
@@ -534,13 +482,7 @@ fn c_xval_compress_raw_420_vs_djpeg() {
 
 #[test]
 fn c_xval_compress_raw_444_vs_djpeg() {
-    let djpeg: PathBuf = match djpeg_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: djpeg not found");
-            return;
-        }
-    };
+    let djpeg: PathBuf = require_c_tool!("djpeg");
 
     let width: usize = 48;
     let height: usize = 48;
@@ -596,13 +538,7 @@ fn c_xval_compress_raw_444_vs_djpeg() {
 
 #[test]
 fn c_xval_compress_raw_422_vs_djpeg() {
-    let djpeg: PathBuf = match djpeg_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: djpeg not found");
-            return;
-        }
-    };
+    let djpeg: PathBuf = require_c_tool!("djpeg");
 
     let width: usize = 48;
     let height: usize = 48;
@@ -662,13 +598,7 @@ fn c_xval_compress_raw_422_vs_djpeg() {
 
 #[test]
 fn c_xval_raw_roundtrip_consistency() {
-    let djpeg: PathBuf = match djpeg_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: djpeg not found");
-            return;
-        }
-    };
+    let djpeg: PathBuf = require_c_tool!("djpeg");
 
     let width: usize = 48;
     let height: usize = 48;

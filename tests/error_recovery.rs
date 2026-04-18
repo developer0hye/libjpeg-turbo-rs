@@ -1,3 +1,5 @@
+mod helpers;
+
 use std::path::PathBuf;
 
 use libjpeg_turbo_rs::{decompress, decompress_lenient};
@@ -102,20 +104,6 @@ fn very_short_truncation_lenient() {
 // C djpeg cross-validation for error recovery
 // -----------------------------------------------------------------------
 
-/// Path to C djpeg binary, or `None` if not installed.
-fn djpeg_path() -> Option<PathBuf> {
-    let homebrew: PathBuf = PathBuf::from("/opt/homebrew/bin/djpeg");
-    if homebrew.exists() {
-        return Some(homebrew);
-    }
-    std::process::Command::new("which")
-        .arg("djpeg")
-        .output()
-        .ok()
-        .filter(|o| o.status.success())
-        .map(|o| PathBuf::from(String::from_utf8_lossy(&o.stdout).trim().to_string()))
-}
-
 struct RecoveryTempFile {
     path: PathBuf,
 }
@@ -204,13 +192,7 @@ fn parse_ppm_or_pgm(data: &[u8]) -> (usize, usize, Vec<u8>) {
 /// (e.g., djpeg fails entirely), we document and skip.
 #[test]
 fn c_djpeg_error_recovery_diff_zero() {
-    let djpeg: PathBuf = match djpeg_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: djpeg not found");
-            return;
-        }
-    };
+    let djpeg: PathBuf = require_c_tool!("djpeg");
 
     let original_data: &[u8] = include_bytes!("fixtures/photo_320x240_420.jpg");
 

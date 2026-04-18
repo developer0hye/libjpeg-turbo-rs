@@ -6,6 +6,8 @@
 //!   C djpeg -crop, so direct comparison is not expected to match.
 //! Scale decode: Rust -scale 1/2 vs C djpeg -scale 1/2 (diff=0).
 
+mod helpers;
+
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -18,24 +20,6 @@ use libjpeg_turbo_rs::{
 // ===========================================================================
 // Tool discovery
 // ===========================================================================
-
-fn djpeg_path() -> Option<PathBuf> {
-    let homebrew_path: PathBuf = PathBuf::from("/opt/homebrew/bin/djpeg");
-    if homebrew_path.exists() {
-        return Some(homebrew_path);
-    }
-    let output = Command::new("which").arg("djpeg").output().ok()?;
-    if output.status.success() {
-        let path_str: String = String::from_utf8_lossy(&output.stdout).trim().to_string();
-        if !path_str.is_empty() {
-            let path: PathBuf = PathBuf::from(&path_str);
-            if path.exists() {
-                return Some(path);
-            }
-        }
-    }
-    None
-}
 
 fn djpeg_supports_crop(djpeg: &Path, jpeg: &[u8]) -> bool {
     let tmp_jpg = TempFile::new("crop_check.jpg");
@@ -284,13 +268,7 @@ fn cross_check_crop_444(
 
 #[test]
 fn c_xval_crop_aligned_444() {
-    let djpeg: PathBuf = match djpeg_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: djpeg not found");
-            return;
-        }
-    };
+    let djpeg: PathBuf = require_c_tool!("djpeg");
     let jpeg: Vec<u8> = make_test_jpeg(128, 128, Subsampling::S444);
     if !djpeg_supports_crop(&djpeg, &jpeg) {
         eprintln!("SKIP: djpeg does not support -crop");
@@ -303,13 +281,7 @@ fn c_xval_crop_aligned_444() {
 
 #[test]
 fn c_xval_crop_unaligned_444() {
-    let djpeg: PathBuf = match djpeg_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: djpeg not found");
-            return;
-        }
-    };
+    let djpeg: PathBuf = require_c_tool!("djpeg");
     let jpeg: Vec<u8> = make_test_jpeg(128, 128, Subsampling::S444);
     if !djpeg_supports_crop(&djpeg, &jpeg) {
         eprintln!("SKIP: djpeg does not support -crop");
@@ -322,13 +294,7 @@ fn c_xval_crop_unaligned_444() {
 
 #[test]
 fn c_xval_crop_corner_regions() {
-    let djpeg: PathBuf = match djpeg_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: djpeg not found");
-            return;
-        }
-    };
+    let djpeg: PathBuf = require_c_tool!("djpeg");
     let jpeg: Vec<u8> = make_test_jpeg(128, 128, Subsampling::S444);
     if !djpeg_supports_crop(&djpeg, &jpeg) {
         eprintln!("SKIP: djpeg does not support -crop");
@@ -346,13 +312,7 @@ fn c_xval_crop_corner_regions() {
 
 #[test]
 fn c_xval_crop_aligned_420() {
-    let djpeg: PathBuf = match djpeg_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: djpeg not found");
-            return;
-        }
-    };
+    let djpeg: PathBuf = require_c_tool!("djpeg");
     let jpeg: Vec<u8> = make_test_jpeg(128, 128, Subsampling::S420);
     verify_full_decode_matches_c(&djpeg, &jpeg, "full_420_a");
 
@@ -363,13 +323,7 @@ fn c_xval_crop_aligned_420() {
 
 #[test]
 fn c_xval_crop_aligned_422() {
-    let djpeg: PathBuf = match djpeg_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: djpeg not found");
-            return;
-        }
-    };
+    let djpeg: PathBuf = require_c_tool!("djpeg");
     let jpeg: Vec<u8> = make_test_jpeg(128, 128, Subsampling::S422);
     verify_full_decode_matches_c(&djpeg, &jpeg, "full_422_a");
 
@@ -379,13 +333,7 @@ fn c_xval_crop_aligned_422() {
 
 #[test]
 fn c_xval_crop_unaligned_420() {
-    let djpeg: PathBuf = match djpeg_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: djpeg not found");
-            return;
-        }
-    };
+    let djpeg: PathBuf = require_c_tool!("djpeg");
     // Non-MCU-aligned dimensions
     let jpeg: Vec<u8> = make_test_jpeg(100, 75, Subsampling::S420);
     verify_full_decode_matches_c(&djpeg, &jpeg, "full_420_100x75");
@@ -400,13 +348,7 @@ fn c_xval_crop_unaligned_420() {
 
 #[test]
 fn c_xval_crop_scale_half_420() {
-    let djpeg: PathBuf = match djpeg_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: djpeg not found");
-            return;
-        }
-    };
+    let djpeg: PathBuf = require_c_tool!("djpeg");
     let jpeg: Vec<u8> = make_test_jpeg(128, 128, Subsampling::S420);
 
     let mut dec = Decoder::new(&jpeg).expect("Decoder::new failed");
@@ -444,13 +386,7 @@ fn c_xval_crop_scale_half_420() {
 
 #[test]
 fn c_xval_crop_scale_half_444() {
-    let djpeg: PathBuf = match djpeg_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: djpeg not found");
-            return;
-        }
-    };
+    let djpeg: PathBuf = require_c_tool!("djpeg");
     let jpeg: Vec<u8> = make_test_jpeg(128, 128, Subsampling::S444);
 
     let mut dec = Decoder::new(&jpeg).expect("Decoder::new failed");
@@ -492,13 +428,7 @@ fn c_xval_crop_scale_half_444() {
 
 #[test]
 fn c_xval_crop_scale_matrix() {
-    let djpeg: PathBuf = match djpeg_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: djpeg not found");
-            return;
-        }
-    };
+    let djpeg: PathBuf = require_c_tool!("djpeg");
 
     // S444 crops via djpeg -crop
     let jpeg_444: Vec<u8> = make_test_jpeg(128, 128, Subsampling::S444);
