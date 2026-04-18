@@ -1,5 +1,7 @@
 #![cfg(not(target_arch = "wasm32"))]
 
+mod helpers;
+
 use std::io::Cursor;
 
 use libjpeg_turbo_rs::{compress, decompress, stream, Image, PixelFormat, Subsampling};
@@ -237,20 +239,6 @@ fn compress_to_writer_uses_write_trait() {
 // C djpeg cross-validation
 // -----------------------------------------------------------------------
 
-/// Path to C djpeg binary, or `None` if not installed.
-fn djpeg_path() -> Option<std::path::PathBuf> {
-    let homebrew: std::path::PathBuf = std::path::PathBuf::from("/opt/homebrew/bin/djpeg");
-    if homebrew.exists() {
-        return Some(homebrew);
-    }
-    std::process::Command::new("which")
-        .arg("djpeg")
-        .output()
-        .ok()
-        .filter(|o| o.status.success())
-        .map(|o| std::path::PathBuf::from(String::from_utf8_lossy(&o.stdout).trim().to_string()))
-}
-
 /// Parse a binary PPM (P6) file and return `(width, height, pixel_data)`.
 fn parse_ppm(data: &[u8]) -> (usize, usize, Vec<u8>) {
     assert!(data.len() > 3, "PPM too short");
@@ -329,13 +317,7 @@ impl Drop for TempFile {
 
 #[test]
 fn c_djpeg_cross_validation_stream_io() {
-    let djpeg = match djpeg_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: djpeg not found");
-            return;
-        }
-    };
+    let djpeg: std::path::PathBuf = require_c_tool!("djpeg");
 
     let width: usize = 48;
     let height: usize = 48;
