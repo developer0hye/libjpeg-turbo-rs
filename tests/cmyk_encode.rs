@@ -1,3 +1,5 @@
+mod helpers;
+
 use std::path::PathBuf;
 use std::process::Command;
 
@@ -67,24 +69,6 @@ fn cmyk_jpeg_contains_adobe_marker() {
 }
 
 // ===========================================================================
-// C djpeg cross-validation helpers
-// ===========================================================================
-
-/// Path to C djpeg binary, or `None` if not installed.
-fn djpeg_path() -> Option<PathBuf> {
-    let homebrew: PathBuf = PathBuf::from("/opt/homebrew/bin/djpeg");
-    if homebrew.exists() {
-        return Some(homebrew);
-    }
-    Command::new("which")
-        .arg("djpeg")
-        .output()
-        .ok()
-        .filter(|o| o.status.success())
-        .map(|o| PathBuf::from(String::from_utf8_lossy(&o.stdout).trim().to_string()))
-}
-
-// ===========================================================================
 // C djpeg cross-validation test
 // ===========================================================================
 
@@ -100,13 +84,7 @@ fn djpeg_path() -> Option<PathBuf> {
 ///    matching dimensions
 #[test]
 fn c_djpeg_cmyk_encode_valid() {
-    let djpeg: PathBuf = match djpeg_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("skipping c_djpeg_cmyk_encode_valid: djpeg not found");
-            return;
-        }
-    };
+    let djpeg: PathBuf = require_c_tool!("djpeg");
 
     // Build a 16x16 CMYK image with varying pixel values
     let width: usize = 16;

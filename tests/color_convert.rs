@@ -1,3 +1,5 @@
+mod helpers;
+
 use libjpeg_turbo_rs::decode::color;
 use libjpeg_turbo_rs::ColorSpace;
 
@@ -7,20 +9,6 @@ use std::process::Command;
 // ===========================================================================
 // C djpeg cross-validation helpers
 // ===========================================================================
-
-/// Locate C djpeg binary: check /opt/homebrew/bin/ first, then PATH.
-fn djpeg_path() -> Option<PathBuf> {
-    let homebrew: PathBuf = PathBuf::from("/opt/homebrew/bin/djpeg");
-    if homebrew.exists() {
-        return Some(homebrew);
-    }
-    Command::new("which")
-        .arg("djpeg")
-        .output()
-        .ok()
-        .filter(|o| o.status.success())
-        .map(|o| PathBuf::from(String::from_utf8_lossy(&o.stdout).trim().to_string()))
-}
 
 /// Parse a binary PPM (P6) or PGM (P5) file and return `(width, height, channels, data)`.
 fn parse_pnm(data: &[u8]) -> (usize, usize, usize, Vec<u8>) {
@@ -208,13 +196,7 @@ fn extract_rgb_from_format(data: &[u8], format: libjpeg_turbo_rs::PixelFormat) -
 /// Rust RGBA/BGRA output against the C djpeg PPM (RGB) reference.
 #[test]
 fn c_djpeg_color_convert_diff_zero() {
-    let djpeg: PathBuf = match djpeg_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: djpeg not found");
-            return;
-        }
-    };
+    let djpeg: PathBuf = require_c_tool!("djpeg");
 
     // Test with fixtures covering different subsampling modes and content.
     // 4:4:4 has no upsampling, so this isolates color conversion accuracy.
