@@ -1,4 +1,5 @@
 #![cfg(not(target_arch = "wasm32"))]
+
 //! Hand-crafted CMYK scanner JPEG round-trip (worker-b4 / B4-5).
 //!
 //! Ensures our decoder + encoder handle CMYK (YCCK) JPEGs bit-for-bit in a
@@ -15,6 +16,8 @@
 //!   * Re-encoding the decoded CMYK and decoding again yields a
 //!     pixel-exact round-trip at quality 100 / 4:4:4 (no colour-space
 //!     transform loss, only integer DCT + IDCT rounding).
+
+mod helpers;
 
 use libjpeg_turbo_rs::{compress, decompress_to, PixelFormat, Subsampling};
 use std::fs;
@@ -72,19 +75,6 @@ fn ensure_fixture() -> PathBuf {
     path
 }
 
-fn djpeg_path() -> Option<PathBuf> {
-    let homebrew: PathBuf = PathBuf::from("/opt/homebrew/bin/djpeg");
-    if homebrew.exists() {
-        return Some(homebrew);
-    }
-    Command::new("which")
-        .arg("djpeg")
-        .output()
-        .ok()
-        .filter(|o| o.status.success())
-        .map(|o| PathBuf::from(String::from_utf8_lossy(&o.stdout).trim().to_string()))
-}
-
 #[test]
 fn cmyk_scanner_round_trip_pixel_exact() {
     // 1. Load the fixture.
@@ -132,13 +122,8 @@ fn cmyk_scanner_decodes_under_c_djpeg() {
     // is deterministic but lossy so we only compare geometry, matching
     // the pattern established in tests/cmyk_encode.rs.
     let path: PathBuf = ensure_fixture();
-    let djpeg: PathBuf = match djpeg_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: djpeg not found");
-            return;
-        }
-    };
+    let djpeg: PathBuf = require_c_tool!("djpeg");
+
     let tmp: PathBuf =
         std::env::temp_dir().join(format!("ljt_cmyk_scanner_{}.pnm", std::process::id()));
     let output = Command::new(&djpeg)

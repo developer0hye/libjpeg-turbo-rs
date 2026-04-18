@@ -10,6 +10,8 @@
 //! high-frequency texture, and sky/fuselage gradients respectively — a richer
 //! spectrum than our existing synthetic fixtures.
 
+mod helpers;
+
 use libjpeg_turbo_rs::{decompress_to, PixelFormat};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -17,19 +19,6 @@ use std::process::Command;
 
 fn usc_sipi_dir() -> PathBuf {
     PathBuf::from("tests/fixtures/usc_sipi")
-}
-
-fn djpeg_path() -> Option<PathBuf> {
-    let homebrew: PathBuf = PathBuf::from("/opt/homebrew/bin/djpeg");
-    if homebrew.exists() {
-        return Some(homebrew);
-    }
-    Command::new("which")
-        .arg("djpeg")
-        .output()
-        .ok()
-        .filter(|o| o.status.success())
-        .map(|o| PathBuf::from(String::from_utf8_lossy(&o.stdout).trim().to_string()))
 }
 
 fn discover_jpegs() -> Vec<PathBuf> {
@@ -127,13 +116,7 @@ fn usc_sipi_pixel_identical_to_c_djpeg() {
         eprintln!("SKIP: no USC-SIPI fixtures under tests/fixtures/usc_sipi/");
         return;
     }
-    let djpeg: PathBuf = match djpeg_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: djpeg not found");
-            return;
-        }
-    };
+    let djpeg: PathBuf = require_c_tool!("djpeg");
 
     for path in &jpegs {
         let jpeg: Vec<u8> = fs::read(path).unwrap_or_else(|e| panic!("read {:?}: {:?}", path, e));
