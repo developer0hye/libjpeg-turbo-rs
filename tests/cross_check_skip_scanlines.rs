@@ -14,6 +14,8 @@
 //!
 //! All tests gracefully skip if djpeg is not found or does not support `-skip`.
 
+mod helpers;
+
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -23,19 +25,6 @@ use libjpeg_turbo_rs::{compress, PixelFormat, ScanlineDecoder, Subsampling};
 // ===========================================================================
 // Tool discovery
 // ===========================================================================
-
-fn djpeg_path() -> Option<PathBuf> {
-    let homebrew: PathBuf = PathBuf::from("/opt/homebrew/bin/djpeg");
-    if homebrew.exists() {
-        return Some(homebrew);
-    }
-    Command::new("which")
-        .arg("djpeg")
-        .output()
-        .ok()
-        .filter(|o| o.status.success())
-        .map(|o| PathBuf::from(String::from_utf8_lossy(&o.stdout).trim().to_string()))
-}
 
 /// Check if djpeg supports the `-skip` flag by inspecting its help text.
 fn djpeg_supports_skip(djpeg: &Path) -> bool {
@@ -211,13 +200,7 @@ fn rust_decode_nonskipped_rows(
 
 #[test]
 fn c_djpeg_cross_validation_skip_scanlines() {
-    let djpeg: PathBuf = match djpeg_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: djpeg not found");
-            return;
-        }
-    };
+    let djpeg: PathBuf = require_c_tool!("djpeg");
 
     if !djpeg_supports_skip(&djpeg) {
         eprintln!("SKIP: djpeg does not support -skip flag");

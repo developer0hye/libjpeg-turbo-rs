@@ -12,6 +12,8 @@
 //!
 //! All tests skip gracefully if djpeg is not found.
 
+mod helpers;
+
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -20,28 +22,6 @@ use libjpeg_turbo_rs::{
     compress, decompress, ColorSpace, DctMethod, PixelFormat, ScanlineDecoder, ScanlineEncoder,
     Subsampling,
 };
-
-// ===========================================================================
-// Tool discovery
-// ===========================================================================
-
-fn djpeg_path() -> Option<PathBuf> {
-    let homebrew_path: PathBuf = PathBuf::from("/opt/homebrew/bin/djpeg");
-    if homebrew_path.exists() {
-        return Some(homebrew_path);
-    }
-    let output = Command::new("which").arg("djpeg").output().ok()?;
-    if output.status.success() {
-        let path_str: String = String::from_utf8_lossy(&output.stdout).trim().to_string();
-        if !path_str.is_empty() {
-            let path: PathBuf = PathBuf::from(&path_str);
-            if path.exists() {
-                return Some(path);
-            }
-        }
-    }
-    None
-}
 
 // ===========================================================================
 // Helpers
@@ -226,13 +206,7 @@ fn pixel_max_diff(a: &[u8], b: &[u8]) -> u8 {
 
 #[test]
 fn c_xval_scanline_decode_output_format_rgba() {
-    let djpeg: PathBuf = match djpeg_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: djpeg not found");
-            return;
-        }
-    };
+    let djpeg: PathBuf = require_c_tool!("djpeg");
 
     let width: usize = 48;
     let height: usize = 48;
@@ -303,13 +277,7 @@ fn c_xval_scanline_decode_output_format_rgba() {
 
 #[test]
 fn c_xval_scanline_decode_output_format_bgr() {
-    let djpeg: PathBuf = match djpeg_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: djpeg not found");
-            return;
-        }
-    };
+    let djpeg: PathBuf = require_c_tool!("djpeg");
 
     let width: usize = 48;
     let height: usize = 48;
@@ -380,13 +348,7 @@ fn c_xval_scanline_decode_output_format_bgr() {
 
 #[test]
 fn c_xval_scanline_decode_grayscale_from_color() {
-    let djpeg: PathBuf = match djpeg_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: djpeg not found");
-            return;
-        }
-    };
+    let djpeg: PathBuf = require_c_tool!("djpeg");
 
     let width: usize = 48;
     let height: usize = 48;
@@ -448,13 +410,7 @@ fn c_xval_scanline_decode_grayscale_from_color() {
 
 #[test]
 fn c_xval_scanline_decode_fast_dct() {
-    let djpeg: PathBuf = match djpeg_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: djpeg not found");
-            return;
-        }
-    };
+    let djpeg: PathBuf = require_c_tool!("djpeg");
 
     let width: usize = 48;
     let height: usize = 48;
@@ -517,13 +473,7 @@ fn c_xval_scanline_decode_fast_dct() {
 
 #[test]
 fn c_xval_scanline_decode_dct_method_islow() {
-    let djpeg: PathBuf = match djpeg_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: djpeg not found");
-            return;
-        }
-    };
+    let djpeg: PathBuf = require_c_tool!("djpeg");
 
     let width: usize = 48;
     let height: usize = 48;
@@ -585,13 +535,7 @@ fn c_xval_scanline_decode_dct_method_islow() {
 
 #[test]
 fn c_xval_scanline_decode_skip_scanlines() {
-    let djpeg: PathBuf = match djpeg_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: djpeg not found");
-            return;
-        }
-    };
+    let djpeg: PathBuf = require_c_tool!("djpeg");
 
     let width: usize = 64;
     let height: usize = 64;
@@ -687,13 +631,7 @@ fn c_xval_scanline_decode_skip_scanlines() {
 
 #[test]
 fn c_xval_scanline_encode_subsampling() {
-    let djpeg: PathBuf = match djpeg_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: djpeg not found");
-            return;
-        }
-    };
+    let djpeg: PathBuf = require_c_tool!("djpeg");
 
     let width: usize = 48;
     let height: usize = 48;
@@ -767,13 +705,7 @@ fn c_xval_scanline_encode_subsampling() {
 
 #[test]
 fn c_xval_scanline_decode_bottom_up() {
-    let djpeg: PathBuf = match djpeg_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: djpeg not found");
-            return;
-        }
-    };
+    let djpeg: PathBuf = require_c_tool!("djpeg");
 
     let width: usize = 48;
     let height: usize = 48;
