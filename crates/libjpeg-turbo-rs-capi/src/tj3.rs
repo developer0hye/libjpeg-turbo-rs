@@ -121,16 +121,42 @@ pub(crate) unsafe fn handle_as_mut<'a>(handle: *mut c_void) -> Option<&'a mut Tj
 // Extern "C" surface
 // ---------------------------------------------------------------------------
 
+/// `TURBOJPEG_VERSION_NUMBER` — mirror of the C macro in turbojpeg.h.
+/// Kept here so `tj3InitVersion` can rubber-stamp requests that match
+/// what the compiled-against header advertised.
+pub(crate) const TURBOJPEG_VERSION_NUMBER: c_int = 3_002_000;
+
 /// `tj3Init(initType)` — allocate a TurboJPEG 3 handle.
 ///
-/// `initType` follows the C bitmask (`TJINIT_COMPRESS=1`,
-/// `TJINIT_DECOMPRESS=2`, `TJINIT_TRANSFORM=4`). A value of 0 or a value
-/// containing unknown bits returns `NULL`.
+/// `initType` is an enum value defined by `enum TJINIT` in `turbojpeg.h`:
+/// `TJINIT_COMPRESS = 0`, `TJINIT_DECOMPRESS = 1`, `TJINIT_TRANSFORM = 2`.
+/// Anything outside `[0, TJ_NUMINIT = 3)` returns `NULL`.
+///
+/// In the C header, `tj3Init` is a macro that expands to
+/// `tj3InitVersion(initType, TURBOJPEG_VERSION_NUMBER)`; we export both
+/// symbols so callers compiled against either spelling resolve.
 #[no_mangle]
 pub extern "C" fn tj3Init(init_type: c_int) -> *mut c_void {
-    // Valid mask: any combination of the three defined bits, excluding 0.
-    const VALID_MASK: c_int = 0x7;
-    if init_type == 0 || (init_type & !VALID_MASK) != 0 {
+    tj3InitVersion(init_type, TURBOJPEG_VERSION_NUMBER)
+}
+
+/// `tj3InitVersion(initType, apiVersion)` — the real init entry point.
+///
+/// We accept any `apiVersion` that is `>= 3_000_000` (TurboJPEG 3.0) so
+/// future C tools can link against us without a rebuild. Older versions
+/// would depend on the pre-TJ3 surface and are rejected.
+#[no_mangle]
+pub extern "C" fn tj3InitVersion(init_type: c_int, api_version: c_int) -> *mut c_void {
+    // `initType` is an enum (0=COMPRESS, 1=DECOMPRESS, 2=TRANSFORM);
+    // validation follows the C reference: reject < 0, >= TJ_NUMINIT (3).
+    const TJ_NUMINIT: c_int = 3;
+    if !(0..TJ_NUMINIT).contains(&init_type) {
+        return std::ptr::null_mut();
+    }
+    // turbojpeg.c::tj3InitVersion accepts any apiVersion in [1_000_000,
+    // 999_999_999]; match that so clients built against older headers
+    // still resolve.
+    if !(1_000_000..=999_999_999).contains(&api_version) {
         return std::ptr::null_mut();
     }
     let boxed: Box<TjInstance> = Box::new(TjInstance::new(init_type));
@@ -210,13 +236,20 @@ pub extern "C" fn tj3Get(handle: *mut c_void, param: c_int) -> c_int {
 
 /// `tj3GetErrorStr(handle)` — return the last error message.
 ///
-/// For NULL handles a global fallback message is returned so callers can
-/// still report *something* when `tj3Init` itself fails.
+/// For NULL handles we first check the process-global no-handle error
+/// slot (populated by `tj3JPEGBufSize`, `tj3YUVBufSize`, etc.), falling
+/// back to a canonical "No error" string. That matches the
+/// libjpeg-turbo reference so that `tjunittest`'s
+/// `bufSizeTest()` can call `tj3GetErrorStr(NULL)` after a sizing call.
 #[no_mangle]
 pub extern "C" fn tj3GetErrorStr(handle: *mut c_void) -> *const c_char {
-    static GLOBAL_NO_HANDLE: &[u8] = b"No TurboJPEG handle (allocation failed?)\0";
+    static GLOBAL_NO_ERROR: &[u8] = b"No error\0";
     if handle.is_null() {
-        return GLOBAL_NO_HANDLE.as_ptr() as *const c_char;
+        let p: *const c_char = crate::bufsize::no_handle_error_ptr();
+        if !p.is_null() {
+            return p;
+        }
+        return GLOBAL_NO_ERROR.as_ptr() as *const c_char;
     }
     let inst: &mut TjInstance = unsafe { &mut *(handle as *mut TjInstance) };
     inst.last_error.as_ptr()
