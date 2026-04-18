@@ -3,7 +3,6 @@
 /// Implements the QM-coder binary arithmetic encoder used for
 /// SOF9 (sequential arithmetic) JPEG encoding.
 use crate::common::arith_tables::*;
-use crate::decode::arithmetic::NUM_ARITH_TBLS;
 
 /// Which statistics table to read/write.
 #[derive(Clone, Copy)]
@@ -29,13 +28,13 @@ pub struct ArithEncoder {
     pub last_dc_val: [i32; 4],
     dc_context: [usize; 4],
 
-    dc_stats: [[u8; DC_STAT_BINS]; NUM_ARITH_TBLS],
-    ac_stats: [[u8; AC_STAT_BINS]; NUM_ARITH_TBLS],
+    dc_stats: [[u8; DC_STAT_BINS]; 4],
+    ac_stats: [[u8; AC_STAT_BINS]; 4],
     fixed_bin: [u8; 4],
 
-    arith_dc_l: [u8; NUM_ARITH_TBLS],
-    arith_dc_u: [u8; NUM_ARITH_TBLS],
-    arith_ac_k: [u8; NUM_ARITH_TBLS],
+    arith_dc_l: [u8; 4],
+    arith_dc_u: [u8; 4],
+    arith_ac_k: [u8; 4],
 }
 
 impl ArithEncoder {
@@ -50,30 +49,12 @@ impl ArithEncoder {
             output: Vec::with_capacity(capacity),
             last_dc_val: [0; 4],
             dc_context: [0; 4],
-            dc_stats: [[0; DC_STAT_BINS]; NUM_ARITH_TBLS],
-            ac_stats: [[0; AC_STAT_BINS]; NUM_ARITH_TBLS],
+            dc_stats: [[0; DC_STAT_BINS]; 4],
+            ac_stats: [[0; AC_STAT_BINS]; 4],
             fixed_bin: [113, 0, 0, 0],
-            arith_dc_l: [0; NUM_ARITH_TBLS],
-            arith_dc_u: [1; NUM_ARITH_TBLS],
-            arith_ac_k: [5; NUM_ARITH_TBLS],
-        }
-    }
-
-    /// Set DC arithmetic conditioning (L, U) for table index `table`
-    /// (0..=15 per ITU-T T.81 NUM_ARITH_TBLS). Out-of-range indices
-    /// are ignored, matching `ArithDecoder::set_dc_conditioning`.
-    pub fn set_dc_conditioning(&mut self, table: usize, l: u8, u: u8) {
-        if table < NUM_ARITH_TBLS {
-            self.arith_dc_l[table] = l;
-            self.arith_dc_u[table] = u;
-        }
-    }
-
-    /// Set AC arithmetic conditioning (Kx) for table index `table`
-    /// (0..=15 per ITU-T T.81 NUM_ARITH_TBLS).
-    pub fn set_ac_conditioning(&mut self, table: usize, kx: u8) {
-        if table < NUM_ARITH_TBLS {
-            self.arith_ac_k[table] = kx;
+            arith_dc_l: [0; 4],
+            arith_dc_u: [1; 4],
+            arith_ac_k: [5; 4],
         }
     }
 
@@ -448,8 +429,8 @@ impl ArithEncoder {
         self.output.clear();
         self.last_dc_val = [0; 4];
         self.dc_context = [0; 4];
-        self.dc_stats = [[0; DC_STAT_BINS]; NUM_ARITH_TBLS];
-        self.ac_stats = [[0; AC_STAT_BINS]; NUM_ARITH_TBLS];
+        self.dc_stats = [[0; DC_STAT_BINS]; 4];
+        self.ac_stats = [[0; AC_STAT_BINS]; 4];
         self.fixed_bin = [113, 0, 0, 0];
     }
 
@@ -801,20 +782,5 @@ mod tests {
         }
         enc.finish();
         assert!(enc.data().len() < 20);
-    }
-
-    /// Spec: NUM_ARITH_TBLS = 16. Encoder must allocate 16 slots for
-    /// arithmetic conditioning just like the decoder. Prior impl was 4.
-    #[test]
-    fn encoder_conditioning_accepts_high_table_indices() {
-        let mut enc = ArithEncoder::new(256);
-        for tbl in 0..NUM_ARITH_TBLS {
-            enc.set_dc_conditioning(tbl, (tbl as u8) & 0x0F, ((tbl as u8) & 0x0F) + 1);
-            enc.set_ac_conditioning(tbl, ((tbl as u8) % 63) + 1);
-        }
-        // Spot-check a slot beyond the old 4-table limit
-        assert_eq!(enc.arith_dc_l[10], 10);
-        assert_eq!(enc.arith_dc_u[10], 11);
-        assert_eq!(enc.arith_ac_k[12], 13);
     }
 }

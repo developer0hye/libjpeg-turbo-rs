@@ -104,15 +104,10 @@ pub(crate) fn write_tables_for_encoder(encoder: &crate::api::encoder::Encoder<'_
     // If arithmetic coding, write DAC marker
     if encoder.is_arithmetic() {
         // Default arithmetic conditioning parameters (matches C libjpeg-turbo defaults)
-        const N: usize = crate::decode::arithmetic::NUM_ARITH_TBLS;
-        let mut dc_in_use = [false; N];
-        let mut ac_in_use = [false; N];
-        dc_in_use[0] = true;
-        dc_in_use[1] = true;
-        ac_in_use[0] = true;
-        ac_in_use[1] = true;
-        let dc_params = [(0u8, 1u8); N];
-        let ac_params = [5u8; N];
+        let dc_in_use = [true, true, false, false];
+        let dc_params = [(0u8, 1u8), (0u8, 1u8), (0u8, 1u8), (0u8, 1u8)];
+        let ac_in_use = [true, true, false, false];
+        let ac_params = [5u8, 5u8, 5u8, 5u8];
         marker_writer::write_dac_selected(&mut buf, &dc_in_use, &dc_params, &ac_in_use, &ac_params);
     }
 
@@ -202,10 +197,10 @@ pub struct TablesOnlyState {
     pub(crate) ac_huffman_tables: [Option<HuffmanTable>; 4],
     /// Whether arithmetic coding conditioning tables were present.
     pub(crate) is_arithmetic: bool,
-    /// DAC DC conditioning parameters (L, U) per slot (16 slots per spec F.2.4.3).
-    pub(crate) arith_dc_params: [(u8, u8); crate::decode::arithmetic::NUM_ARITH_TBLS],
-    /// DAC AC conditioning parameter (Kx) per slot (16 slots per spec F.2.4.3).
-    pub(crate) arith_ac_params: [u8; crate::decode::arithmetic::NUM_ARITH_TBLS],
+    /// DAC DC conditioning parameters (L, U) per slot.
+    pub(crate) arith_dc_params: [(u8, u8); 4],
+    /// DAC AC conditioning parameter (Kx) per slot.
+    pub(crate) arith_ac_params: [u8; 4],
 }
 
 impl TablesOnlyState {
@@ -288,10 +283,8 @@ fn try_parse_tables_only(data: &[u8]) -> Result<Option<TablesOnlyState>> {
     let mut dc_huffman_tables: [Option<HuffmanTable>; 4] = [None, None, None, None];
     let mut ac_huffman_tables: [Option<HuffmanTable>; 4] = [None, None, None, None];
     let mut is_arithmetic = false;
-    let mut arith_dc_params: [(u8, u8); crate::decode::arithmetic::NUM_ARITH_TBLS] =
-        [(0, 1); crate::decode::arithmetic::NUM_ARITH_TBLS];
-    let mut arith_ac_params: [u8; crate::decode::arithmetic::NUM_ARITH_TBLS] =
-        [5; crate::decode::arithmetic::NUM_ARITH_TBLS];
+    let mut arith_dc_params: [(u8, u8); 4] = [(0, 1); 4];
+    let mut arith_ac_params: [u8; 4] = [5; 4];
     let mut saw_table = false;
 
     loop {
@@ -478,8 +471,8 @@ fn parse_dht(
 fn parse_dac(
     data: &[u8],
     pos: &mut usize,
-    dc_params: &mut [(u8, u8); crate::decode::arithmetic::NUM_ARITH_TBLS],
-    ac_params: &mut [u8; crate::decode::arithmetic::NUM_ARITH_TBLS],
+    dc_params: &mut [(u8, u8); 4],
+    ac_params: &mut [u8; 4],
 ) -> Result<()> {
     if *pos + 2 > data.len() {
         return Err(JpegError::UnexpectedEof);
@@ -504,7 +497,7 @@ fn parse_dac(
 
         let tc = tc_tb >> 4;
         let tb = (tc_tb & 0x0F) as usize;
-        if tb >= crate::decode::arithmetic::NUM_ARITH_TBLS {
+        if tb >= 4 {
             continue;
         }
         if tc == 0 {
