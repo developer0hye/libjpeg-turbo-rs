@@ -127,47 +127,61 @@ fn fdct_12bit(input: &[i16; 64], output: &mut [i32; 64]) {
         workspace[b + 3] = descale(tmp6 + z2 + z3, FDCT12_CONST_BITS - FDCT12_PASS1_BITS);
         workspace[b + 1] = descale(tmp7 + z1 + z4, FDCT12_CONST_BITS - FDCT12_PASS1_BITS);
     }
+    // Column pass: use i64 throughout to prevent i32 overflow in debug builds.
+    // Post-row-pass workspace values can produce products exceeding i32 range.
     for col in 0..8 {
-        let tmp0 = workspace[col] + workspace[col + 56];
-        let tmp7 = workspace[col] - workspace[col + 56];
-        let tmp1 = workspace[col + 8] + workspace[col + 48];
-        let tmp6 = workspace[col + 8] - workspace[col + 48];
-        let tmp2 = workspace[col + 16] + workspace[col + 40];
-        let tmp5 = workspace[col + 16] - workspace[col + 40];
-        let tmp3 = workspace[col + 24] + workspace[col + 32];
-        let tmp4 = workspace[col + 24] - workspace[col + 32];
+        let tmp0 = workspace[col] as i64 + workspace[col + 56] as i64;
+        let tmp7 = workspace[col] as i64 - workspace[col + 56] as i64;
+        let tmp1 = workspace[col + 8] as i64 + workspace[col + 48] as i64;
+        let tmp6 = workspace[col + 8] as i64 - workspace[col + 48] as i64;
+        let tmp2 = workspace[col + 16] as i64 + workspace[col + 40] as i64;
+        let tmp5 = workspace[col + 16] as i64 - workspace[col + 40] as i64;
+        let tmp3 = workspace[col + 24] as i64 + workspace[col + 32] as i64;
+        let tmp4 = workspace[col + 24] as i64 - workspace[col + 32] as i64;
         let tmp10 = tmp0 + tmp3;
         let tmp13 = tmp0 - tmp3;
         let tmp11 = tmp1 + tmp2;
         let tmp12 = tmp1 - tmp2;
-        output[col] = descale(tmp10 + tmp11, FDCT12_PASS1_BITS);
-        output[col + 32] = descale(tmp10 - tmp11, FDCT12_PASS1_BITS);
-        let z1 = (tmp12 + tmp13) * FDCT12_FIX_0_541196100;
+        output[col] = descale((tmp10 + tmp11) as i32, FDCT12_PASS1_BITS);
+        output[col + 32] = descale((tmp10 - tmp11) as i32, FDCT12_PASS1_BITS);
+        let z1 = (tmp12 + tmp13) * FDCT12_FIX_0_541196100 as i64;
         output[col + 16] = descale(
-            z1 + tmp13 * FDCT12_FIX_0_765366865,
+            (z1 + tmp13 * FDCT12_FIX_0_765366865 as i64) as i32,
             FDCT12_CONST_BITS + FDCT12_PASS1_BITS,
         );
         output[col + 48] = descale(
-            z1 + tmp12 * (-FDCT12_FIX_1_847759065),
+            (z1 - tmp12 * FDCT12_FIX_1_847759065 as i64) as i32,
             FDCT12_CONST_BITS + FDCT12_PASS1_BITS,
         );
         let z1 = tmp4 + tmp7;
         let z2 = tmp5 + tmp6;
         let z3 = tmp4 + tmp6;
         let z4 = tmp5 + tmp7;
-        let z5 = (z3 + z4) * FDCT12_FIX_1_175875602;
-        let tmp4 = tmp4 * FDCT12_FIX_0_298631336;
-        let tmp5 = tmp5 * FDCT12_FIX_2_053119869;
-        let tmp6 = tmp6 * FDCT12_FIX_3_072711026;
-        let tmp7 = tmp7 * FDCT12_FIX_1_501321110;
-        let z1 = z1 * (-FDCT12_FIX_0_899976223);
-        let z2 = z2 * (-FDCT12_FIX_2_562915447);
-        let z3 = z3 * (-FDCT12_FIX_1_961570560) + z5;
-        let z4 = z4 * (-FDCT12_FIX_0_390180644) + z5;
-        output[col + 56] = descale(tmp4 + z1 + z3, FDCT12_CONST_BITS + FDCT12_PASS1_BITS);
-        output[col + 40] = descale(tmp5 + z2 + z4, FDCT12_CONST_BITS + FDCT12_PASS1_BITS);
-        output[col + 24] = descale(tmp6 + z2 + z3, FDCT12_CONST_BITS + FDCT12_PASS1_BITS);
-        output[col + 8] = descale(tmp7 + z1 + z4, FDCT12_CONST_BITS + FDCT12_PASS1_BITS);
+        let z5 = (z3 + z4) * FDCT12_FIX_1_175875602 as i64;
+        let tmp4 = tmp4 * FDCT12_FIX_0_298631336 as i64;
+        let tmp5 = tmp5 * FDCT12_FIX_2_053119869 as i64;
+        let tmp6 = tmp6 * FDCT12_FIX_3_072711026 as i64;
+        let tmp7 = tmp7 * FDCT12_FIX_1_501321110 as i64;
+        let z1 = z1 * -(FDCT12_FIX_0_899976223 as i64);
+        let z2 = z2 * -(FDCT12_FIX_2_562915447 as i64);
+        let z3 = z3 * -(FDCT12_FIX_1_961570560 as i64) + z5;
+        let z4 = z4 * -(FDCT12_FIX_0_390180644 as i64) + z5;
+        output[col + 56] = descale(
+            (tmp4 + z1 + z3) as i32,
+            FDCT12_CONST_BITS + FDCT12_PASS1_BITS,
+        );
+        output[col + 40] = descale(
+            (tmp5 + z2 + z4) as i32,
+            FDCT12_CONST_BITS + FDCT12_PASS1_BITS,
+        );
+        output[col + 24] = descale(
+            (tmp6 + z2 + z3) as i32,
+            FDCT12_CONST_BITS + FDCT12_PASS1_BITS,
+        );
+        output[col + 8] = descale(
+            (tmp7 + z1 + z4) as i32,
+            FDCT12_CONST_BITS + FDCT12_PASS1_BITS,
+        );
     }
 }
 
