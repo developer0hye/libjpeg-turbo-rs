@@ -214,49 +214,41 @@ fn tj_bufsize_helpers_return_non_zero_for_valid_inputs() {
 }
 
 #[test]
-fn tj_encode_yuv_and_load_image_stubs_fail_loudly() {
+fn tj_load_image_stub_still_fails_until_implemented() {
+    // `tjLoadImage` is still a stub — image IO routing is deferred.
+    // The test pins that contract so future work doesn't silently
+    // drop the error path.
     let path: PathBuf = cdylib_path();
     let lib: libloading::Library =
         unsafe { libloading::Library::new(&path) }.expect("dlopen cdylib");
     unsafe {
-        let tj_init_compress: libloading::Symbol<unsafe extern "C" fn() -> *mut c_void> =
-            lib.get(b"tjInitCompress").expect("tjInitCompress");
+        let tj_init_decompress: libloading::Symbol<unsafe extern "C" fn() -> *mut c_void> =
+            lib.get(b"tjInitDecompress").expect("tjInitDecompress");
         let tj_destroy: libloading::Symbol<unsafe extern "C" fn(*mut c_void) -> c_int> =
             lib.get(b"tjDestroy").expect("tjDestroy");
-        let tj_encode_yuv3: libloading::Symbol<
+        let tj_load_image: libloading::Symbol<
             unsafe extern "C" fn(
                 *mut c_void,
-                *const u8,
+                *const c_char,
+                *mut c_int,
                 c_int,
+                *mut c_int,
+                *mut c_int,
                 c_int,
-                c_int,
-                c_int,
-                *mut u8,
-                c_int,
-                c_int,
-                c_int,
-            ) -> c_int,
-        > = lib.get(b"tjEncodeYUV3").expect("tjEncodeYUV3");
+            ) -> *mut u8,
+        > = lib.get(b"tjLoadImage").expect("tjLoadImage");
         let tj_get_err2: libloading::Symbol<unsafe extern "C" fn(*mut c_void) -> *const c_char> =
             lib.get(b"tjGetErrorStr2").expect("tjGetErrorStr2");
 
-        let h = tj_init_compress();
-        let rc = tj_encode_yuv3(
-            h,
-            std::ptr::null(),
-            0,
-            1,
-            0,
-            TJPF_RGB,
-            std::ptr::null_mut(),
-            1,
-            TJSAMP_420,
-            0,
-        );
-        assert_eq!(rc, -1, "YUV encode stub must signal failure until A1-7");
+        let h = tj_init_decompress();
+        let mut w: c_int = 0;
+        let mut hh: c_int = 0;
+        let mut pf: c_int = 0;
+        let ret = tj_load_image(h, c"/nonexistent".as_ptr(), &mut w, 1, &mut hh, &mut pf, 0);
+        assert!(ret.is_null(), "tjLoadImage stub must return NULL");
         let msg: &str = CStr::from_ptr(tj_get_err2(h)).to_str().expect("utf8");
         assert!(
-            msg.contains("tjEncodeYUV3") || msg.contains("not yet"),
+            msg.contains("tjLoadImage") || msg.contains("not yet"),
             "expected descriptive stub error, got: {msg}"
         );
         tj_destroy(h);
