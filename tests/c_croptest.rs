@@ -370,13 +370,7 @@ fn run_crop_scenario(
 #[test]
 fn c_croptest_quick() {
     let cjpeg: Option<PathBuf> = helpers::cjpeg_path();
-    let djpeg: PathBuf = match helpers::djpeg_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: djpeg not found");
-            return;
-        }
-    };
+    let djpeg: PathBuf = require_c_tool!("djpeg");
 
     // Verify djpeg supports -crop
     {
@@ -460,13 +454,7 @@ fn c_croptest_quick() {
 // Fixed: crop-aware upsampling matches C jpeg_crop_scanline (issue #164)
 fn c_croptest_quick_420() {
     let cjpeg: Option<PathBuf> = helpers::cjpeg_path();
-    let djpeg: PathBuf = match helpers::djpeg_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: djpeg not found");
-            return;
-        }
-    };
+    let djpeg: PathBuf = require_c_tool!("djpeg");
 
     let pixels: Vec<u8> = generate_test_pixels();
     let y_values: &[usize] = &[0, 8, 16];
@@ -497,13 +485,7 @@ fn c_croptest_quick_420() {
 #[test]
 fn c_croptest_quick_gray() {
     let cjpeg: Option<PathBuf> = helpers::cjpeg_path();
-    let djpeg: PathBuf = match helpers::djpeg_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: djpeg not found");
-            return;
-        }
-    };
+    let djpeg: PathBuf = require_c_tool!("djpeg");
 
     let pixels: Vec<u8> = generate_test_pixels();
     let y_values: &[usize] = &[0, 8, 16];
@@ -545,13 +527,7 @@ fn c_croptest_quick_gray() {
 #[cfg(feature = "full-c-parity")]
 fn c_croptest_full() {
     let cjpeg: Option<PathBuf> = helpers::cjpeg_path();
-    let djpeg: PathBuf = match helpers::djpeg_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: djpeg not found");
-            return;
-        }
-    };
+    let djpeg: PathBuf = require_c_tool!("djpeg");
 
     // Verify djpeg supports -crop
     {

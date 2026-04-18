@@ -72,13 +72,7 @@ fn assert_encoder_output_matches(rust_jpeg: &[u8], c_jpeg: &[u8], label: &str) {
 
 #[test]
 fn c_xval_encoder_binary_quality_subsamp() {
-    let cjpeg = match helpers::cjpeg_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: cjpeg not found");
-            return;
-        }
-    };
+    let cjpeg = require_c_tool!("cjpeg");
 
     let w: usize = 48;
     let h: usize = 48;
@@ -119,13 +113,7 @@ fn c_xval_encoder_binary_quality_subsamp() {
 
 #[test]
 fn c_xval_encoder_binary_optimize() {
-    let cjpeg = match helpers::cjpeg_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: cjpeg not found");
-            return;
-        }
-    };
+    let cjpeg = require_c_tool!("cjpeg");
 
     let w: usize = 48;
     let h: usize = 48;
@@ -160,13 +148,7 @@ fn c_xval_encoder_binary_optimize() {
 
 #[test]
 fn c_xval_encoder_binary_progressive() {
-    let cjpeg = match helpers::cjpeg_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: cjpeg not found");
-            return;
-        }
-    };
+    let cjpeg = require_c_tool!("cjpeg");
 
     let w: usize = 48;
     let h: usize = 48;
@@ -201,13 +183,7 @@ fn c_xval_encoder_binary_progressive() {
 
 #[test]
 fn c_xval_encoder_binary_grayscale() {
-    let cjpeg = match helpers::cjpeg_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: cjpeg not found");
-            return;
-        }
-    };
+    let cjpeg = require_c_tool!("cjpeg");
 
     let w: usize = 48;
     let h: usize = 48;

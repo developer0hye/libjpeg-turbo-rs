@@ -69,13 +69,7 @@ fn decode_scaled_c(
 
 #[test]
 fn c_xval_extended_scaling_444() {
-    let djpeg = match helpers::djpeg_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: djpeg not found");
-            return;
-        }
-    };
+    let djpeg = require_c_tool!("djpeg");
     let jpeg: Vec<u8> = make_test_jpeg(48, 48, Subsampling::S444);
     for &(num, denom, name) in ALL_SCALES {
         let label = format!("ext_scale_{name}_444_48x48");
@@ -89,13 +83,7 @@ fn c_xval_extended_scaling_444() {
 
 #[test]
 fn c_xval_extended_scaling_420() {
-    let djpeg = match helpers::djpeg_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: djpeg not found");
-            return;
-        }
-    };
+    let djpeg = require_c_tool!("djpeg");
     let jpeg: Vec<u8> = make_test_jpeg(48, 48, Subsampling::S420);
     for &(num, denom, name) in ALL_SCALES {
         let bs: u32 = (num * 8).div_ceil(denom);
@@ -113,13 +101,7 @@ fn c_xval_extended_scaling_420() {
 
 #[test]
 fn c_xval_extended_scaling_odd_dimensions() {
-    let djpeg = match helpers::djpeg_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: djpeg not found");
-            return;
-        }
-    };
+    let djpeg = require_c_tool!("djpeg");
     for &(w, h) in &[(35usize, 39usize), (39, 41)] {
         let jpeg: Vec<u8> = make_test_jpeg(w, h, Subsampling::S444);
         for &(num, denom, name) in ALL_SCALES {
