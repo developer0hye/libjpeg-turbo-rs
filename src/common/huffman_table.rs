@@ -86,6 +86,14 @@ impl HuffmanTable {
             if code_len <= LOOKUP_BITS {
                 let code_shifted: usize = (code_val as usize) << (LOOKUP_BITS - code_len);
                 let fill_count: usize = 1 << (LOOKUP_BITS - code_len);
+                // Malformed DHT with bits[len] > (1 << len) can overflow the
+                // fast-lookup table (found by fuzz_read_coefficients). Reject
+                // rather than panic on out-of-range index.
+                if code_shifted + fill_count > LOOKUP_SIZE {
+                    return Err(JpegError::CorruptData(
+                        "Huffman table: code range exceeds fast-lookup size (malformed DHT)".into(),
+                    ));
+                }
                 let symbol: u8 = values[i];
                 let base_entry: u32 = Self::pack_fast_entry(symbol, code_len as u8) as u32;
 
