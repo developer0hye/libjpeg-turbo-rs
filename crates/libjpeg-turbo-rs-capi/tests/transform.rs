@@ -13,9 +13,10 @@ const TJPARAM_QUALITY: c_int = 3;
 const TJPARAM_SUBSAMP: c_int = 4;
 const TJPARAM_JPEGWIDTH: c_int = 5;
 const TJPARAM_JPEGHEIGHT: c_int = 6;
-const TJINIT_COMPRESS: c_int = 1;
-const TJINIT_DECOMPRESS: c_int = 2;
-const TJINIT_TRANSFORM: c_int = 4;
+// Values mirror `enum TJINIT` in references/libjpeg-turbo/src/turbojpeg.h.
+const TJINIT_COMPRESS: c_int = 0;
+const TJINIT_DECOMPRESS: c_int = 1;
+const TJINIT_TRANSFORM: c_int = 2;
 const TJPF_RGB: c_int = 0;
 const TJSAMP_444: c_int = 0;
 
