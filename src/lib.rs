@@ -5,12 +5,22 @@ pub mod encode;
 pub mod simd;
 pub mod transform;
 
+pub use api::abbreviated::{read_header, HeaderResult, TablesOnlyState};
 pub use api::coefficient::{
     copy_critical_parameters, read_coefficients, transform_jpeg as transform,
     transform_jpeg_with_options, write_coefficients, EncoderComponentInfo, EncoderConfig,
     JpegCoefficients,
 };
 pub use api::encoder::{Encoder, HuffmanTableDef};
+
+/// Produce a tables-only abbreviated JPEG datastream for the given encoder configuration.
+///
+/// Returns `SOI + DQT(s) + DHT(s) + EOI` with no image data. Equivalent to
+/// libjpeg-turbo's `jpeg_write_tables()`. The stream can be parsed by `read_header()`
+/// to preload tables for subsequent decoding of body-only streams.
+pub fn jpeg_write_tables(encoder: &Encoder<'_>) -> Vec<u8> {
+    encoder.write_tables()
+}
 pub use api::high_level::{
     compress, compress_arithmetic, compress_arithmetic_progressive, compress_into,
     compress_lossless, compress_lossless_arithmetic, compress_lossless_extended,
@@ -55,7 +65,7 @@ pub use common::jfif::extract_jfif_thumbnail;
 pub use common::sample::Sample;
 pub use common::traits::{DefaultErrorHandler, ErrorHandler, ProgressInfo, ProgressListener};
 pub use common::types::*;
-pub use decode::pipeline::Image;
+pub use decode::pipeline::{Decoder, Image};
 pub use transform::{MarkerCopyMode, TransformOp, TransformOptions};
 /// 12-bit and 16-bit sample precision support.
 pub mod precision {
