@@ -30,7 +30,7 @@
 |---|---|---|---|
 | `STOPONWARNING` | Treat warnings as fatal | `Decoder::set_stop_on_warning()` | ✅ |
 | `BOTTOMUP` | Bottom-up row order | `Encoder::bottom_up()` / `ScanlineDecoder::set_bottom_up()` | ✅ |
-| `NOREALLOC` | Disable output buffer realloc | `compress_into()` (separate API, not `TjHandle`) | 🔶 |
+| `NOREALLOC` | Disable output buffer realloc | `TjHandle::compress_into(&buf)` honors NOREALLOC, returns `BufferTooSmall{need,got}` on overflow | ✅ |
 | `QUALITY` | Lossy quality 1-100 | `quality: u8` param | ✅ |
 | `SUBSAMP` | Chroma subsampling | `subsampling: Subsampling` param | ✅ |
 | `JPEGWIDTH` | JPEG image width (read-only) | `Image.width` | ✅ |
@@ -53,7 +53,7 @@
 | `DENSITYUNITS` | 0=unknown, 1=ppi, 2=ppcm | `Encoder::density()` + `TjHandle` compress/decompress wiring | ✅ |
 | `MAXMEMORY` | Memory limit | `Decoder::set_max_memory()` | ✅ |
 | `MAXPIXELS` | Image size limit | `Decoder::set_max_pixels()` | ✅ |
-| `SAVEMARKERS` | Marker preservation level 0-4 | `Decoder::save_markers()` / `MarkerSaveConfig` | 🔶 |
+| `SAVEMARKERS` | Marker preservation level 0-4 | `TjHandle` `TJPARAM_SAVEMARKERS` wired through `decompress()` → `Decoder::save_markers()` | ✅ |
 
 ### Memory
 
@@ -77,7 +77,7 @@
 | C Function | Description | Rust | Status |
 |---|---|---|---|
 | `tj3SetICCProfile(handle, buf, size)` | Set ICC for encoding | `TjHandle::set_icc_profile()` / `Encoder::icc_profile()` | ✅ |
-| `tj3GetICCProfile(handle, &buf, &size)` | Get ICC after decode | `Image.icc_profile()` | 🔶 |
+| `tj3GetICCProfile(handle, &buf, &size)` | Get ICC after decode | `TjHandle::icc_profile()` populated by `decompress()` + symmetric with `Image.icc_profile()` | ✅ |
 
 ### Compression (8-bit)
 
@@ -157,8 +157,8 @@
 |---|---|---|---|
 | `tj3LoadImage8(handle, filename, &w, align, &h, &pf)` | Load 8-bit BMP/PPM/PGM subset | `load_image()` / `load_image_from_bytes()` | 🔶 |
 | `tj3SaveImage8(handle, filename, buf, w, pitch, h, pf)` | Save 8-bit BMP/PPM/PGM subset | `save_bmp()` / `save_ppm()` | 🔶 |
-| `tj3LoadImage12(...)` / `tj3SaveImage12(...)` | 12-bit file I/O | — | ❌ |
-| `tj3LoadImage16(...)` / `tj3SaveImage16(...)` | 16-bit file I/O | — | ❌ |
+| `tj3LoadImage12(...)` / `tj3SaveImage12(...)` | 12-bit file I/O | `load_ppm_12bit()` / `save_ppm_12bit()` (PPM, matching C scope) | ✅ |
+| `tj3LoadImage16(...)` / `tj3SaveImage16(...)` | 16-bit file I/O | `load_ppm_16bit()` / `save_ppm_16bit()` (PPM, matching C scope) | ✅ |
 
 ---
 
@@ -193,15 +193,15 @@
 |---|---|---|---|
 | `jpeg_set_defaults(cinfo)` | Set default compression params | Automatic in `compress()` | ✅ |
 | `jpeg_set_colorspace(cinfo, cs)` | Set JPEG colorspace | `Encoder::colorspace()` | ✅ |
-| `jpeg_default_colorspace(cinfo)` | Reset to default colorspace | — | ❌ |
+| `jpeg_default_colorspace(cinfo)` | Reset to default colorspace | `Encoder::reset_colorspace()` | ✅ |
 | `jpeg_set_quality(cinfo, quality, force_baseline)` | Set quality factor | `quality: u8` parameter + `Encoder::force_baseline()` | ✅ |
 | `jpeg_set_linear_quality(cinfo, scale, force_baseline)` | Set linear quality scaling | `Encoder::linear_quality()` | ✅ |
-| `jpeg_default_qtables(cinfo, force_baseline)` | Reset quant tables | — | ❌ |
+| `jpeg_default_qtables(cinfo, force_baseline)` | Reset quant tables | `Encoder::reset_quant_tables(force_baseline)` | ✅ |
 | `jpeg_add_quant_table(cinfo, which, table, scale, force_baseline)` | Add custom quant table | `Encoder::quant_table()` | ✅ |
 | `jpeg_quality_scaling(quality)` | Convert quality to scale factor | `quality_scaling()` | ✅ |
 | `jpeg_enable_lossless(cinfo, psv, pt)` | Enable lossless mode | `Encoder::lossless_predictor()` + `Encoder::lossless_point_transform()` | ✅ |
 | `jpeg_simple_progression(cinfo)` | Set standard progressive scan script | Used internally in `compress_progressive()` | ✅ |
-| `jpeg_suppress_tables(cinfo, suppress)` | Control table output | — | ❌ |
+| `jpeg_suppress_tables(cinfo, suppress)` | Control table output | `Encoder::suppress_tables(bool)` — emits body-only JPEG (no DQT/DHT) | ✅ |
 | `jpeg_alloc_quant_table(cinfo)` | Allocate quant table | N/A (Rust arrays) | N/A |
 | `jpeg_alloc_huff_table(cinfo)` | Allocate Huffman table | N/A (Rust structs) | N/A |
 
@@ -216,7 +216,7 @@
 | `jpeg_finish_compress(cinfo)` | Finalize compression | `ScanlineEncoder::finish()` | ✅ |
 | `jpeg_calc_jpeg_dimensions(cinfo)` | Compute output dimensions | `calc_jpeg_dimensions()` | ✅ |
 | `jpeg_write_raw_data(cinfo, data, num_lines)` | Write raw downsampled data | `compress_raw()` | ✅ |
-| `jpeg12_write_raw_data(...)` | Write 12-bit raw data | — | ❌ |
+| `jpeg12_write_raw_data(...)` | Write 12-bit raw data | `compress_raw_12()` | ✅ |
 
 ### Marker Writing
 
@@ -225,7 +225,7 @@
 | `jpeg_write_marker(cinfo, marker, data, len)` | Write arbitrary marker | `marker_writer::write_marker()` | ✅ |
 | `jpeg_write_m_header(cinfo, marker, len)` | Begin streaming marker write | `MarkerStreamWriter` | ✅ |
 | `jpeg_write_m_byte(cinfo, val)` | Write one byte of marker data | `MarkerStreamWriter` | ✅ |
-| `jpeg_write_tables(cinfo)` | Write tables-only datastream | — | ❌ |
+| `jpeg_write_tables(cinfo)` | Write tables-only datastream | `api::abbreviated::jpeg_write_tables(&encoder)` — SOI + DQT + DHT + (DAC) + EOI | ✅ |
 | `jpeg_write_icc_profile(cinfo, data, len)` | Write ICC profile | `marker_writer::write_app2_icc()` | 🔶 |
 
 ### Decompression
@@ -243,7 +243,7 @@
 | `jpeg12_crop_scanline(...)` | 12-bit crop | `read_scanlines_12()` (crop support) | ✅ |
 | `jpeg_finish_decompress(cinfo)` | Finalize decompression | `ScanlineDecoder::finish()` | ✅ |
 | `jpeg_read_raw_data(cinfo, data, max_lines)` | Read raw downsampled data | `decompress_raw()` | ✅ |
-| `jpeg12_read_raw_data(...)` | Read 12-bit raw data | — | ❌ |
+| `jpeg12_read_raw_data(...)` | Read 12-bit raw data | `decompress_raw_12()` | ✅ |
 
 ### Buffered Image Mode (Progressive Output)
 
@@ -282,7 +282,7 @@
 
 | C Function | Description | Rust | Status |
 |---|---|---|---|
-| `jpeg_resync_to_restart(cinfo, desired)` | Resync to restart marker after error | Internal in decoder | 🔶 |
+| `jpeg_resync_to_restart(cinfo, desired)` | Resync to restart marker after error | `RestartResyncStrategy` trait + `Decoder::set_resync_strategy()` with `ResyncAction {Continue,Skip,Abort}` | ✅ |
 
 ### ICC Profile
 
@@ -452,7 +452,7 @@
 |---|---|---|---|
 | `JPEG_SUSPENDED` (0) | Suspended, need more input | N/A (full-buffer + streaming API) | N/A |
 | `JPEG_HEADER_OK` (1) | Valid image found | `Decoder::new()` / `ScanlineDecoder::new()` success | ✅ |
-| `JPEG_HEADER_TABLES_ONLY` (2) | Tables-only datastream | — | ❌ |
+| `JPEG_HEADER_TABLES_ONLY` (2) | Tables-only datastream | `api::abbreviated::HeaderResult::TablesOnly(Box<TablesOnlyState>)` from `read_header()` | ✅ |
 | `JPEG_REACHED_SOS` (1) | Start of new scan | Internal | ✅ |
 | `JPEG_REACHED_EOI` (2) | End of image | Internal | ✅ |
 | `JPEG_ROW_COMPLETED` (3) | Completed one iMCU row | Internal (scanline API) | ✅ |
@@ -473,7 +473,7 @@
 | `DCTSIZE2` (64) | Block size squared | Hardcoded | ✅ |
 | `NUM_QUANT_TBLS` (4) | Max quant tables | 4 in `JpegMetadata` | ✅ |
 | `NUM_HUFF_TBLS` (4) | Max Huffman tables | 4 in `JpegMetadata` | ✅ |
-| `NUM_ARITH_TBLS` (16) | Max arithmetic tables | 4 in `ArithDecoder` | 🔶 |
+| `NUM_ARITH_TBLS` (16) | Max arithmetic tables | 16 in `ArithDecoder` / `ArithEncoder` / DAC writer/parser per spec F.2.4.3 | ✅ |
 | `MAX_COMPS_IN_SCAN` (4) | Max components per scan | Handled | ✅ |
 | `MAX_SAMP_FACTOR` (4) | Max sampling factor | Handled | ✅ |
 | `C_MAX_BLOCKS_IN_MCU` (10) | Max blocks in compressor MCU | Handled | ✅ |
@@ -509,17 +509,9 @@ These are the highest-signal C API surfaces that still lack end-to-end public pa
 
 | C Function / Surface | Status | Notes |
 |---|---|---|
-| `TJPARAM_NOREALLOC` on `TjHandle` | 🔶 | N/A for Rust `Vec<u8>` — stored for API compatibility, no behavioral effect |
 | `tj3LoadImage8()` / `tj3SaveImage8()` PNG | 🔶 | BMP/PPM/PGM implemented. PNG is conditional in C (`PNG_SUPPORTED` build flag) — not core JPEG |
-| `tj3LoadImage12/16()` / `tj3SaveImage12/16()` | 🔶 | C only supports PPM for 12/16-bit (not PNG). Low demand |
-| `tj3GetErrorStr()` / `tj3GetErrorCode()` | 🔶 | Rust uses `Result` / `JpegError`, not C-style per-handle getters |
-| `tj3Alloc()` / `tj3Free()` | 🔶 | N/A — Rust ownership replaces C allocator API |
+| `tj3GetErrorStr()` / `tj3GetErrorCode()` | 🔶 | Rust uses `Result` / `JpegError`, not C-style per-handle getters (C ABI shim in `libjpeg-turbo-rs-capi` exposes both for FFI callers) |
+| `tj3Alloc()` / `tj3Free()` | 🔶 | N/A — Rust ownership replaces C allocator API (FFI-facing aliases exist in `libjpeg-turbo-rs-capi`) |
 | `jpeg_write_icc_profile()` | 🔶 | Low-level helper exists, but no libjpeg-style public wrapper around a compression state object |
-| `jpeg_resync_to_restart()` | 🔶 | Internal behavior only, no public hook |
-| `jpeg_default_colorspace()` | ✅ | `Encoder::reset_colorspace()` |
-| `jpeg_default_qtables()` | ✅ | `Encoder::reset_quant_tables()` |
-| `jpeg_suppress_tables()` | ✅ | N/A for Rust (ownership handles table reuse) |
-| `jpeg_write_tables()` | ✅ | `marker_writer::write_tables_only()` |
-| `jpeg12_write_raw_data()` | ❌ | Missing |
-| `jpeg12_read_raw_data()` | ❌ | Missing |
-| `JPEG_HEADER_TABLES_ONLY` | ❌ | Tables-only datastream detection missing |
+| `jpeg_create_(de)compress()` + full `jpeg_*` state-machine ABI | 🔶 | C ABI shim (`libjpeg-turbo-rs-capi`) covers TJ3 API + legacy TJ1/TJ2 aliases + SONAME + pkg-config; full `jpeg_decompress_struct`/`jpeg_compress_struct` jpeglib.h state machine (~200 fields) is follow-up work |
+| B9-4 / B9-5 — drop-in `libjpeg.so.62` link test against stock djpeg/cjpeg + tjunittest.c | ❌ | Deferred pending a fully-initialized `references/libjpeg-turbo/` submodule + coordinator harness |

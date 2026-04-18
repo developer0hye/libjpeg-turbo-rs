@@ -440,7 +440,32 @@
 ## Summary
 
 - Percentage rollups were removed from this document. They looked precise, but they mixed core codec support, handle parity, and adjacent Rust-only surfaces in a way that overstated completion.
-- Treat the checklist above as the source of truth. The highest-risk partial areas today are `TjHandle` parameter parity, handle-side ICC retrieval, density configuration, image file I/O parity (PNG/12/16-bit), and dedicated TurboJPEG allocator/error-getter APIs.
+- Treat the checklist above as the source of truth. Highest-risk remaining partial areas: full `jpeglib.h` state-machine ABI (`jpeg_decompress_struct` / `jpeg_compress_struct` ~200-field layout — the C ABI shim in `libjpeg-turbo-rs-capi` covers TJ3 + legacy aliases but not the full jpeglib.h decompress/compress state machines yet); PNG for `tj3LoadImage8()` / `tj3SaveImage8()`.
+
+## Recent Additions (batch reconciliation)
+
+The following gaps were closed in the latest batch of merges:
+
+- **Arithmetic table count widened 4 → 16** per spec F.2.4.3 (DAC parser/writer + `ArithDecoder`/`ArithEncoder`); spec-compliant streams with `tbl_no > 3` now decode/encode correctly.
+- **Abbreviated datastream** (JPEG spec F.1.2.4): `jpeg_write_tables()`, `HeaderResult::TablesOnly`, `Decoder::new_with_tables()` inter-session table reuse, `Encoder::suppress_tables(bool)` body-only output.
+- **12-bit raw planar I/O**: `compress_raw_12()` / `decompress_raw_12()` covering all 7 subsamplings × baseline/progressive/arithmetic.
+- **12/16-bit PPM file I/O**: `load_ppm_12bit()` / `save_ppm_12bit()` / `load_ppm_16bit()` / `save_ppm_16bit()` matching C scope (PPM only).
+- **TjHandle gaps**: `TJPARAM_NOREALLOC` (`compress_into()` returns `BufferTooSmall{need,got}`), `TJPARAM_SAVEMARKERS` behavioral wiring, `tj3GetICCProfile()` handle symmetry with `Image.icc_profile()`.
+- **Session-reset APIs**: `Encoder::reset_colorspace()` (`jpeg_default_colorspace`), `Encoder::reset_quant_tables(force_baseline)` (`jpeg_default_qtables`).
+- **Restart resync hook**: `RestartResyncStrategy` trait + `Decoder::set_resync_strategy()` with `ResyncAction {Continue, Skip, Abort}` — replaces the internal-only implementation of `jpeg_resync_to_restart`.
+- **JPEG-in-RAW thumbnail**: `extract_embedded_jpeg()` walks TIFF IFDs (LE/BE, bounds-checked) to extract embedded JPEG thumbnails from ARW/CR2-style files.
+- **C ABI shim crate** (`crates/libjpeg-turbo-rs-capi`, cdylib + staticlib): TJ3 API (TJInit/Destroy/Set/Get/Compress8/Decompress8/DecompressHeader/SetScalingFactor/SetCroppingRegion/Transform/YUV ×8/ErrorStr/ErrorCode/Alloc/Free/Compress12/Decompress12/Compress16/Decompress16) + legacy TJ1/TJ2 aliases (16 functions) + SONAME/install_name (`libjpeg.so.62`, `libturbojpeg.so.0`) + pkg-config `.pc` generation. Verified via dlopen tests + C client round-trip smoke. Full `jpeg_*` jpeglib.h state machine remains as follow-up work.
+
+## Testing Infrastructure Additions
+
+- **Fuzz corpus**: expanded from 22 → ~2,194 seeds across 7 targets (Cartesian product of subsamp × quality × content × entropy-mode); new `fuzz_encode_roundtrip` target; `scripts/fuzz_minimize.sh`; OSS-Fuzz stub at `oss-fuzz/`; nightly `.github/workflows/fuzz-smoke.yml`.
+- **Cross-arch CI matrix** (`.github/workflows/cross-arch.yml`): `ubuntu-24.04-arm` (aarch64 NEON), x86_64 AVX2 default, x86_64 SSE2-only via `-C target-feature=-avx2,-sse4.2`, macOS arm64 retained, WASM SIMD128 smoke on every PR.
+- **Per-SIMD bit-exact parity suite** (`tests/simd_parity.rs`): 20 kernel × backend combinations (NEON / AVX2 / SSE2 / WASM), 1000-iteration Mulberry32 PRNG, scalar↔SIMD bit-exact assertions.
+- **Conformance suite**: `scripts/fetch_conformance.sh` + `tests/worker_b3_conformance_t83*.rs` iterating `references/libjpeg-turbo/testimages/*.jpg` for pixel-exact djpeg comparison + decoded-pixel hash regression in `tests/reference_hashes_conformance.json`.
+- **Real-world corpus**: fetch scripts + seed fixtures for Kodak PhotoCD (PSNR round-trip), USC-SIPI Miscellaneous (djpeg byte-exact), EXIF Orientation 1..8, CMYK scanner, JPEG-in-RAW thumbnail.
+- **DoS bounds**: cross-platform peak-RSS + wall-clock measure helper, Huffman bomb (max 16-bit codes), progressive 5000-scan bomb with `SCANLIMIT` mitigation, restart-interval=1 4096×4096 bomb. Bounds documented from measured reality per CLAUDE.md tolerance rule.
+- **Concurrency stress**: rayon-substituted `std::thread` stress (1000 concurrent decodes, interleaved Encoder/Decoder handoff via mpsc, shared custom quant table), plus loom permutation skeleton gated on `#[cfg(loom)]`.
+- **CI C-tool enforcement**: `require_c_tool!` macro panics in CI when `djpeg`/`cjpeg`/`jpegtran` missing; silent skip allowed only for local dev. 15 test files migrated (follow-up: ~83 files with local `djpeg_path()/cjpeg_path()/jpegtran_path()` helpers still carry legacy silent-skip sites).
 
 ## Documentation Policy
 
