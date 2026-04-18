@@ -13,6 +13,8 @@ use libjpeg_turbo_rs::api::image_io::{
     load_ppm_12bit, load_ppm_16bit, save_ppm_12bit, save_ppm_16bit, LoadedImage12, LoadedImage16,
 };
 
+mod helpers;
+
 // ---------------------------------------------------------------------------
 // Temp-file helpers
 // ---------------------------------------------------------------------------
@@ -329,32 +331,6 @@ fn lossless_16bit_save_load_pipeline_diff_zero() {
 // cjpeg -precision 12 (if supported). Otherwise SKIP.
 // ---------------------------------------------------------------------------
 
-fn cjpeg_path() -> Option<PathBuf> {
-    let homebrew: PathBuf = PathBuf::from("/opt/homebrew/bin/cjpeg");
-    if homebrew.exists() {
-        return Some(homebrew);
-    }
-    std::process::Command::new("which")
-        .arg("cjpeg")
-        .output()
-        .ok()
-        .filter(|o| o.status.success())
-        .map(|o| PathBuf::from(String::from_utf8_lossy(&o.stdout).trim().to_string()))
-}
-
-fn djpeg_path() -> Option<PathBuf> {
-    let homebrew: PathBuf = PathBuf::from("/opt/homebrew/bin/djpeg");
-    if homebrew.exists() {
-        return Some(homebrew);
-    }
-    std::process::Command::new("which")
-        .arg("djpeg")
-        .output()
-        .ok()
-        .filter(|o| o.status.success())
-        .map(|o| PathBuf::from(String::from_utf8_lossy(&o.stdout).trim().to_string()))
-}
-
 fn cjpeg_supports_precision(cjpeg: &Path) -> bool {
     match std::process::Command::new(cjpeg).arg("-help").output() {
         Ok(o) => {
@@ -368,13 +344,7 @@ fn cjpeg_supports_precision(cjpeg: &Path) -> bool {
 
 #[test]
 fn c_cjpeg_accepts_rust_12bit_ppm() {
-    let cjpeg: PathBuf = match cjpeg_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: cjpeg not found");
-            return;
-        }
-    };
+    let cjpeg: PathBuf = require_c_tool!("cjpeg");
     if !cjpeg_supports_precision(&cjpeg) {
         eprintln!("SKIP: cjpeg does not support -precision flag for 12-bit encode");
         return;
@@ -422,7 +392,7 @@ fn c_cjpeg_accepts_rust_12bit_ppm() {
     // the output is a valid binary PGM. Exact equality is not guaranteed
     // because DCT-based compression at quality=100 is near-lossless but
     // not bit-exact, so range-check only.
-    if let Some(djpeg) = djpeg_path() {
+    if let Some(djpeg) = helpers::djpeg_path() {
         let roundtrip_pgm: TempFile = TempFile::new("xval_12bit_c_dec.pgm");
         let out = std::process::Command::new(&djpeg)
             .arg("-pnm")

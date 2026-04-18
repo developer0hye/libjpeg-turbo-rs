@@ -5,6 +5,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use libjpeg_turbo_rs::{compress, decompress, Encoder, PixelFormat, Subsampling};
 
+mod helpers;
+
 #[test]
 fn optimized_produces_valid_jpeg() {
     let data = include_bytes!("fixtures/photo_320x240_420.jpg");
@@ -95,36 +97,6 @@ fn optimized_various_subsampling() {
 // ===========================================================================
 // C djpeg cross-validation helpers
 // ===========================================================================
-
-/// Locate the djpeg binary. Checks /opt/homebrew/bin/djpeg first, then falls
-/// back to whatever `which djpeg` returns. Returns `None` when not found.
-fn djpeg_path() -> Option<PathBuf> {
-    let homebrew: PathBuf = PathBuf::from("/opt/homebrew/bin/djpeg");
-    if homebrew.exists() {
-        return Some(homebrew);
-    }
-    Command::new("which")
-        .arg("djpeg")
-        .output()
-        .ok()
-        .filter(|o| o.status.success())
-        .map(|o| PathBuf::from(String::from_utf8_lossy(&o.stdout).trim().to_string()))
-}
-
-/// Locate the cjpeg binary. Checks /opt/homebrew/bin/cjpeg first, then falls
-/// back to whatever `which cjpeg` returns. Returns `None` when not found.
-fn cjpeg_path() -> Option<PathBuf> {
-    let homebrew: PathBuf = PathBuf::from("/opt/homebrew/bin/cjpeg");
-    if homebrew.exists() {
-        return Some(homebrew);
-    }
-    Command::new("which")
-        .arg("cjpeg")
-        .output()
-        .ok()
-        .filter(|o| o.status.success())
-        .map(|o| PathBuf::from(String::from_utf8_lossy(&o.stdout).trim().to_string()))
-}
 
 /// Global atomic counter for unique temp file names across parallel tests.
 static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -310,13 +282,7 @@ fn write_ppm(path: &PathBuf, width: usize, height: usize, pixels: &[u8]) {
 /// Covers multiple subsampling modes and quality levels.
 #[test]
 fn c_djpeg_huff_opt_diff_zero() {
-    let djpeg: PathBuf = match djpeg_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: djpeg not found");
-            return;
-        }
-    };
+    let djpeg: PathBuf = require_c_tool!("djpeg");
 
     let width: usize = 64;
     let height: usize = 64;
@@ -407,20 +373,8 @@ fn c_djpeg_huff_opt_diff_zero() {
 /// on aarch64 macOS (2026-04-02). Tolerance: max_diff <= 4.
 #[test]
 fn c_djpeg_huff_opt_vs_cjpeg_optimize() {
-    let djpeg: PathBuf = match djpeg_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: djpeg not found");
-            return;
-        }
-    };
-    let cjpeg: PathBuf = match cjpeg_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: cjpeg not found");
-            return;
-        }
-    };
+    let djpeg: PathBuf = require_c_tool!("djpeg");
+    let cjpeg: PathBuf = require_c_tool!("cjpeg");
 
     let width: usize = 64;
     let height: usize = 64;

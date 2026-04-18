@@ -7,6 +7,8 @@ use libjpeg_turbo_rs::{
     TransformOp, TransformOptions,
 };
 
+mod helpers;
+
 /// Helper: create a small test JPEG with custom markers embedded.
 fn make_jpeg_with_markers() -> Vec<u8> {
     let pixels: Vec<u8> = vec![128u8; 16 * 16 * 3];
@@ -253,19 +255,6 @@ fn multiple_markers_same_type_all_preserved() {
 // C cross-validation helpers
 // ===========================================================================
 
-fn jpegtran_path() -> Option<PathBuf> {
-    let homebrew: PathBuf = PathBuf::from("/opt/homebrew/bin/jpegtran");
-    if homebrew.exists() {
-        return Some(homebrew);
-    }
-    Command::new("which")
-        .arg("jpegtran")
-        .output()
-        .ok()
-        .filter(|o| o.status.success())
-        .map(|o| PathBuf::from(String::from_utf8_lossy(&o.stdout).trim().to_string()))
-}
-
 /// Check if jpegtran supports the `-copy icc` option.
 fn jpegtran_supports_copy_icc(jpegtran: &Path) -> bool {
     let output = Command::new(jpegtran).arg("-help").output();
@@ -389,13 +378,7 @@ fn load_reference_icc(name: &str) -> Option<Vec<u8>> {
 
 #[test]
 fn c_jpegtran_copy_all_preserves_markers() {
-    let jpegtran: PathBuf = match jpegtran_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: jpegtran not found");
-            return;
-        }
-    };
+    let jpegtran: PathBuf = require_c_tool!("jpegtran");
 
     // Create input JPEG with APP3 + APP5 + COM markers
     let input_jpeg: Vec<u8> = make_jpeg_with_markers();
@@ -493,13 +476,7 @@ fn c_jpegtran_copy_all_preserves_markers() {
 
 #[test]
 fn c_jpegtran_copy_none_strips_markers() {
-    let jpegtran: PathBuf = match jpegtran_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: jpegtran not found");
-            return;
-        }
-    };
+    let jpegtran: PathBuf = require_c_tool!("jpegtran");
 
     // Create input JPEG with APP3 + APP5 + COM markers
     let input_jpeg: Vec<u8> = make_jpeg_with_markers();
@@ -571,13 +548,7 @@ fn c_jpegtran_copy_none_strips_markers() {
 
 #[test]
 fn c_jpegtran_copy_icc_preserves_icc_only() {
-    let jpegtran: PathBuf = match jpegtran_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: jpegtran not found");
-            return;
-        }
-    };
+    let jpegtran: PathBuf = require_c_tool!("jpegtran");
 
     if !jpegtran_supports_copy_icc(&jpegtran) {
         eprintln!("SKIP: jpegtran does not support -copy icc");

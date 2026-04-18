@@ -4,6 +4,8 @@ use std::process::Command;
 
 use libjpeg_turbo_rs::*;
 
+mod helpers;
+
 /// Helper: create an RGB test JPEG with 4:2:2 subsampling at given dimensions.
 fn make_test_jpeg_422(width: usize, height: usize) -> Vec<u8> {
     let mut pixels: Vec<u8> = Vec::with_capacity(width * height * 3);
@@ -242,28 +244,6 @@ fn merged_default_off() {
 // C djpeg cross-validation helpers
 // ---------------------------------------------------------------------------
 
-/// Locate the djpeg binary. Checks /opt/homebrew/bin/djpeg first, then falls
-/// back to whatever `which djpeg` returns. Returns `None` when not found.
-fn djpeg_path() -> Option<PathBuf> {
-    let homebrew_path: PathBuf = PathBuf::from("/opt/homebrew/bin/djpeg");
-    if homebrew_path.exists() {
-        return Some(homebrew_path);
-    }
-
-    let output = Command::new("which").arg("djpeg").output().ok()?;
-    if output.status.success() {
-        let path_str: String = String::from_utf8_lossy(&output.stdout).trim().to_string();
-        if !path_str.is_empty() {
-            let path: PathBuf = PathBuf::from(&path_str);
-            if path.exists() {
-                return Some(path);
-            }
-        }
-    }
-
-    None
-}
-
 /// Parse a binary PPM (P6) image into (width, height, rgb_pixels).
 /// Returns `None` if the data is not a valid P6 PPM.
 fn parse_ppm(data: &[u8]) -> Option<(usize, usize, Vec<u8>)> {
@@ -366,13 +346,7 @@ fn parse_ppm(data: &[u8]) -> Option<(usize, usize, Vec<u8>)> {
 /// This exercises the merged upsample+color conversion path matching C.
 #[test]
 fn c_djpeg_merged_upsample_diff_zero() {
-    let djpeg: PathBuf = match djpeg_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: djpeg not found, skipping C cross-validation");
-            return;
-        }
-    };
+    let djpeg: PathBuf = require_c_tool!("djpeg");
 
     let jpeg_data: &[u8] = include_bytes!("fixtures/photo_320x240_420.jpg");
 
