@@ -1,0 +1,87 @@
+name: Cross-Arch SIMD
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  # Linux aarch64 native runner — exercises the NEON backend without
+  # emulation. macOS arm64 is already covered by the default CI matrix,
+  # so this job closes the remaining Linux-aarch64 gap.
+  test-linux-aarch64-neon:
+    name: Test (linux-aarch64 NEON)
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Run full test suite with NEON SIMD
+        run: cargo test --all-features
+        timeout-minutes: 45
+
+  # Default x86_64 Linux job with AVX2 explicitly enabled so the AVX2
+  # kernels are compiled and exercised. GitHub-hosted ubuntu-24.04
+  # runners expose AVX2 in their CPU features.
+  test-linux-x86_64-avx2:
+    name: Test (linux-x86_64 AVX2)
+    runs-on: ubuntu-24.04
+    env:
+      RUSTFLAGS: "-C target-feature=+avx2"
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Run full test suite with AVX2 enabled
+        run: cargo test --all-features
+        timeout-minutes: 45
+
+  # Force the SSE2-only fallback path by disabling AVX2 and SSE4.2 at
+  # compile time. Validates the secondary tier SIMD routines and scalar
+  # tail code remain correct when AVX2 is unavailable (older CPUs).
+  test-linux-x86_64-sse2-only:
+    name: Test (linux-x86_64 SSE2-only)
+    runs-on: ubuntu-24.04
+    env:
+      RUSTFLAGS: "-C target-feature=-avx2,-sse4.2"
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Run full test suite on SSE2-only fallback
+        run: cargo test --all-features
+        timeout-minutes: 45
+
+  # WASM SIMD128 smoke — runs on every PR. Build-only for `wasm-pack
+  # build --release --target web` is the baseline guarantee; the
+  # `wasm-pack test --node --release` step adds runtime assertions when
+  # the WASM test harness is available.
+  wasm-simd128-smoke:
+    name: WASM SIMD128 smoke
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+      - name: Install wasm-pack
+        run: cargo install wasm-pack --locked
+      - name: Build WASM crate (web target, release)
+        run: cd crates/libjpeg-turbo-rs-wasm && wasm-pack build --release --target web
+        timeout-minutes: 20
+      - name: Run wasm-bindgen tests on Node (release)
+        run: cd crates/libjpeg-turbo-rs-wasm && wasm-pack test --node --release
+        timeout-minutes: 30
