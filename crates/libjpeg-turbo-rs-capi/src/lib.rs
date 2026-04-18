@@ -27,6 +27,7 @@ pub mod convert;
 pub mod decompress;
 pub mod header;
 pub mod legacy;
+pub mod precision;
 pub mod tj3;
 pub mod transform;
 
@@ -37,6 +38,7 @@ pub use decompress::tj3Decompress8;
 pub use header::{
     tj3DecompressHeader, tj3SetCroppingRegion, tj3SetScalingFactor, TjRegion, TjScalingFactor,
 };
+pub use precision::{tj3Compress12, tj3Compress16, tj3Decompress12, tj3Decompress16};
 pub use tj3::{tj3Destroy, tj3Get, tj3GetErrorCode, tj3GetErrorStr, tj3Init, tj3Set};
 pub use transform::{tj3Transform, TjTransform};
 
