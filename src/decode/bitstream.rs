@@ -160,6 +160,73 @@ impl<'a> BitReader<'a> {
         }
     }
 
+    /// Reset bit state and consume the next 0xFF 0xDn restart marker if
+    /// present, returning the RST number (0..=7). Returns `None` when no
+    /// RST marker is found at the current position (e.g., stream reached
+    /// EOI or some other non-RST marker).
+    ///
+    /// Used by the resync-strategy path (A6-3) which needs to know the
+    /// observed RST number to decide whether a desync occurred.
+    pub fn reset_and_consume_rst(&mut self) -> Option<u8> {
+        self.bit_buffer = 0;
+        self.bits_left = 0;
+
+        // Skip padding 0xFF bytes first (byte stuffing at segment boundaries).
+        while self.pos + 1 < self.data.len() && self.data[self.pos] == 0xFF {
+            let marker = self.data[self.pos + 1];
+            if (0xD0..=0xD7).contains(&marker) {
+                let rst_num: u8 = marker - 0xD0;
+                self.pos += 2;
+                return Some(rst_num);
+            }
+            if marker == 0xFF {
+                // Fill-byte padding between markers — keep scanning.
+                self.pos += 1;
+                continue;
+            }
+            // Any other non-RST marker: stop without consuming so caller
+            // can decide.
+            return None;
+        }
+        None
+    }
+
+    /// Scan forward past the current position until the next restart
+    /// marker (0xFF 0xD0..=0xD7) is located, consuming it and returning
+    /// its RST number (0..=7). Returns `None` if no further RST is found
+    /// before the end of the entropy-coded data (reached EOI or EOF).
+    ///
+    /// Bit state is reset regardless of whether a marker is found.
+    pub fn scan_to_next_rst(&mut self) -> Option<u8> {
+        self.bit_buffer = 0;
+        self.bits_left = 0;
+        while self.pos + 1 < self.data.len() {
+            if self.data[self.pos] == 0xFF {
+                let marker = self.data[self.pos + 1];
+                if (0xD0..=0xD7).contains(&marker) {
+                    let rst_num: u8 = marker - 0xD0;
+                    self.pos += 2;
+                    return Some(rst_num);
+                }
+                if marker == 0x00 {
+                    // Byte-stuffing: 0xFF 0x00 means literal 0xFF in the
+                    // entropy stream. Skip both bytes and keep scanning.
+                    self.pos += 2;
+                    continue;
+                }
+                if marker == 0xD9 {
+                    // EOI — no more RST markers ahead.
+                    return None;
+                }
+                // Unknown marker: skip it and continue searching.
+                self.pos += 2;
+                continue;
+            }
+            self.pos += 1;
+        }
+        None
+    }
+
     /// Set the byte position directly (for progressive multi-scan).
     /// Resets the bit buffer.
     pub fn set_position(&mut self, pos: usize) {
