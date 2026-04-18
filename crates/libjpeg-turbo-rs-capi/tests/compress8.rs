@@ -251,6 +251,32 @@ fn tj3_compress8_null_arguments_return_minus_one() {
 // A1-3: compile and run the C smoke client.
 // ---------------------------------------------------------------------------
 
+/// Create a subdirectory under `parent` that holds symlinks exposing
+/// the actual cdylib under both the versioned install_name/SONAME and
+/// the short `libjpeg.{dylib,so}` link-time name. Returns the subdir.
+#[cfg(unix)]
+fn setup_symlinks(lib: &Path, parent: &Path) -> PathBuf {
+    let subdir: PathBuf = parent.join("symlinks");
+    std::fs::create_dir_all(&subdir).expect("mkdir symlinks");
+    let (versioned, short): (&str, &str) = if cfg!(target_os = "macos") {
+        ("libjpeg.62.dylib", "libjpeg.dylib")
+    } else {
+        ("libjpeg.so.62", "libjpeg.so")
+    };
+    for name in [versioned, short] {
+        let link = subdir.join(name);
+        if !link.exists() {
+            std::os::unix::fs::symlink(lib, &link).expect("symlink");
+        }
+    }
+    subdir
+}
+
+#[cfg(not(unix))]
+fn setup_symlinks(_lib: &Path, parent: &Path) -> PathBuf {
+    parent.to_path_buf()
+}
+
 fn find_cc() -> Option<PathBuf> {
     for candidate in ["cc", "clang", "gcc"] {
         if let Ok(out) = Command::new("which").arg(candidate).output() {
@@ -305,24 +331,30 @@ fn c_client_compress8_smoke() {
     let tmp: tempfile::TempDir = tempfile::tempdir().expect("tempdir");
     let exe: PathBuf = tmp.path().join("compress8_smoke");
 
-    let status = Command::new(&cc)
-        .arg(&c_src)
-        .arg("-O2")
-        .arg("-o")
-        .arg(&exe)
-        .arg(format!("-L{}", lib_dir.display()))
-        .arg(format!("-l{}", lib_stem))
-        // macOS: embed an rpath so the dylib is found at runtime.
-        .arg(format!("-Wl,-rpath,{}", lib_dir.display()))
-        .status()
-        .expect("cc compile");
+    // Our cdylib's install_name / SONAME (A1-13) is `libjpeg.62.dylib`
+    // (macOS) or `libjpeg.so.62` (Linux). Create a symlink directory
+    // that exposes BOTH the versioned name (what dyld/ld.so will look
+    // up at runtime) and the short `libjpeg` name (what `-ljpeg`
+    // resolves to at link time).
+    let symlink_dir: PathBuf = setup_symlinks(&lib, tmp.path());
+
+    let mut cmd = Command::new(&cc);
+    cmd.arg(&c_src).arg("-O2").arg("-o").arg(&exe);
+    if cfg!(unix) {
+        cmd.arg(format!("-L{}", symlink_dir.display()))
+            .arg("-ljpeg")
+            .arg(format!("-Wl,-rpath,{}", symlink_dir.display()));
+    } else {
+        cmd.arg(format!("-L{}", lib_dir.display()))
+            .arg(format!("-l{}", lib_stem))
+            .arg(format!("-Wl,-rpath,{}", lib_dir.display()));
+    }
+    let status = cmd.status().expect("cc compile");
     assert!(status.success(), "C smoke client failed to compile");
 
     let run = Command::new(&exe)
-        // Belt-and-braces runtime search path for Linux loaders that
-        // ignore rpath when built without --enable-new-dtags.
-        .env("LD_LIBRARY_PATH", lib_dir)
-        .env("DYLD_LIBRARY_PATH", lib_dir)
+        .env("LD_LIBRARY_PATH", &symlink_dir)
+        .env("DYLD_LIBRARY_PATH", &symlink_dir)
         .output()
         .expect("run compress8 smoke");
     assert!(
