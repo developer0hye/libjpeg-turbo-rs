@@ -3,31 +3,14 @@
 //! Tests encode with per-component quality using our Rust encoder, then decode
 //! with both Rust and C djpeg, and verify pixel-identical results.
 
+mod helpers;
+
 use std::io::Write;
 use std::path::PathBuf;
 use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use libjpeg_turbo_rs::{decompress, Encoder, PixelFormat, Subsampling};
-
-// ===========================================================================
-// Tool discovery
-// ===========================================================================
-
-/// Locate the djpeg binary. Checks /opt/homebrew/bin/djpeg first, then falls
-/// back to whatever `which djpeg` returns. Returns `None` when not found.
-fn djpeg_path() -> Option<PathBuf> {
-    let homebrew: PathBuf = PathBuf::from("/opt/homebrew/bin/djpeg");
-    if homebrew.exists() {
-        return Some(homebrew);
-    }
-    Command::new("which")
-        .arg("djpeg")
-        .output()
-        .ok()
-        .filter(|o| o.status.success())
-        .map(|o| PathBuf::from(String::from_utf8_lossy(&o.stdout).trim().to_string()))
-}
 
 // ===========================================================================
 // Helpers
@@ -214,13 +197,7 @@ fn assert_pixels_identical(
 /// Rust and C djpeg, and verify pixel-identical output (diff=0).
 #[test]
 fn per_quality_rust_encode_c_decode_diff_zero() {
-    let djpeg: PathBuf = match djpeg_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: djpeg not found");
-            return;
-        }
-    };
+    let djpeg: PathBuf = require_c_tool!("djpeg");
 
     let width: usize = 64;
     let height: usize = 64;
@@ -268,13 +245,7 @@ fn per_quality_rust_encode_c_decode_diff_zero() {
 /// Same test with 4:2:2 subsampling.
 #[test]
 fn per_quality_422_rust_encode_c_decode_diff_zero() {
-    let djpeg: PathBuf = match djpeg_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: djpeg not found");
-            return;
-        }
-    };
+    let djpeg: PathBuf = require_c_tool!("djpeg");
 
     let width: usize = 64;
     let height: usize = 64;
@@ -312,13 +283,7 @@ fn per_quality_422_rust_encode_c_decode_diff_zero() {
 /// Same test with 4:4:4 subsampling.
 #[test]
 fn per_quality_444_rust_encode_c_decode_diff_zero() {
-    let djpeg: PathBuf = match djpeg_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: djpeg not found");
-            return;
-        }
-    };
+    let djpeg: PathBuf = require_c_tool!("djpeg");
 
     let width: usize = 64;
     let height: usize = 64;
@@ -429,13 +394,7 @@ fn uniform_per_quality_matches_standard_quality_q90_444() {
 /// djpeg must produce identical decoded pixels for each encode.
 #[test]
 fn higher_luma_quality_better_y_fidelity_cross_validated() {
-    let djpeg: PathBuf = match djpeg_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: djpeg not found");
-            return;
-        }
-    };
+    let djpeg: PathBuf = require_c_tool!("djpeg");
 
     let width: usize = 64;
     let height: usize = 64;
