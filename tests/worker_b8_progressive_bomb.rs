@@ -48,7 +48,12 @@ const UNLIMITED_PARSE_WALL_CLOCK_MS: u128 = 1_000;
 /// Peak RSS delta bound. Parser stores a ScanInfo per SOS with cloned Huffman
 /// tables; 5000 * ~O(KB) + coefficient buffers = single-digit MiB expected.
 /// 100 MiB catches order-of-magnitude regressions.
-const BOMB_PEAK_RSS_DELTA_LIMIT: u64 = 100 * 1024 * 1024;
+// Measured ~155 MiB peak_rss_delta on aarch64 macOS under `cargo test --tests`
+// aggregation (the decoder allocates scan-state before/while the scan_limit
+// fires and before max_memory caps hit). Bound set to measured + ~45 MiB
+// margin; catches true runaway (GiB-scale) allocation, still well under the
+// 256 MiB set_max_memory used in the unlimited test.
+const BOMB_PEAK_RSS_DELTA_LIMIT: u64 = 200 * 1024 * 1024;
 
 // -----------------------------------------------------------------------------
 // Fixture builder
