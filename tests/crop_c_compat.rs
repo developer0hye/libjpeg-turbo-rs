@@ -9,6 +9,8 @@
 //! - Pixel values match full decode at the same coordinates
 //! - Works with both 4:4:4 and 4:2:0 subsampling
 
+mod helpers;
+
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -323,20 +325,6 @@ fn crop_full_image_64x64() {
 // C djpeg cross-validation helpers
 // ===========================================================================
 
-/// Path to C djpeg binary, or `None` if not installed.
-fn djpeg_path() -> Option<PathBuf> {
-    let homebrew: PathBuf = PathBuf::from("/opt/homebrew/bin/djpeg");
-    if homebrew.exists() {
-        return Some(homebrew);
-    }
-    Command::new("which")
-        .arg("djpeg")
-        .output()
-        .ok()
-        .filter(|o| o.status.success())
-        .map(|o| PathBuf::from(String::from_utf8_lossy(&o.stdout).trim().to_string()))
-}
-
 /// Parse a binary PPM (P6) file and return `(width, height, data)`.
 /// `data` contains raw RGB bytes.
 fn parse_ppm(path: &Path) -> (usize, usize, Vec<u8>) {
@@ -434,13 +422,7 @@ impl Drop for CropTempFile {
 /// that the pixel output is identical (diff = 0).
 #[test]
 fn c_djpeg_crop_decode_diff_zero() {
-    let djpeg: PathBuf = match djpeg_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: djpeg not found, skipping C cross-validation crop test");
-            return;
-        }
-    };
+    let djpeg: PathBuf = require_c_tool!("djpeg");
 
     // Crop parameters
     let crop_w: usize = 32;
