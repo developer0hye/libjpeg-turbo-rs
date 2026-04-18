@@ -969,6 +969,20 @@ fn c_djpeg_lossless_exact_roundtrip() {
             return;
         }
     };
+    // libjpeg-turbo 2.x djpeg (Ubuntu 24.04) doesn't decode SOF3 (lossless).
+    let ver = std::process::Command::new(&djpeg)
+        .arg("-version")
+        .output()
+        .expect("djpeg -version");
+    let ver_text = format!(
+        "{}{}",
+        String::from_utf8_lossy(&ver.stderr),
+        String::from_utf8_lossy(&ver.stdout)
+    );
+    if !ver_text.contains("version 3.") && !ver_text.contains("libjpeg-turbo 3.") {
+        eprintln!("SKIP: djpeg lacks lossless decode (need libjpeg-turbo 3.x)");
+        return;
+    }
 
     let (w, h) = (16, 16);
     // Use a ramp pattern covering full 0-255 range for thorough validation
