@@ -6,6 +6,8 @@ use libjpeg_turbo_rs::api::image_io::{
 use libjpeg_turbo_rs::PixelFormat;
 use std::path::PathBuf;
 
+mod helpers;
+
 /// Helper: create a temp file path with a unique name.
 fn temp_path(name: &str) -> PathBuf {
     std::env::temp_dir().join(format!("ljt_test_{}", name))
@@ -310,20 +312,6 @@ fn save_ppm_invalid_pixel_count() {
 // C djpeg cross-validation for BMP output
 // -----------------------------------------------------------------------
 
-/// Path to C djpeg binary, or `None` if not installed.
-fn djpeg_path() -> Option<PathBuf> {
-    let homebrew: PathBuf = PathBuf::from("/opt/homebrew/bin/djpeg");
-    if homebrew.exists() {
-        return Some(homebrew);
-    }
-    std::process::Command::new("which")
-        .arg("djpeg")
-        .output()
-        .ok()
-        .filter(|o| o.status.success())
-        .map(|o| PathBuf::from(String::from_utf8_lossy(&o.stdout).trim().to_string()))
-}
-
 struct IoTempFile {
     path: PathBuf,
 }
@@ -388,13 +376,7 @@ fn parse_bmp_pixels(data: &[u8]) -> (usize, usize, Vec<u8>) {
 
 #[test]
 fn c_djpeg_cross_validation_bmp_output() {
-    let djpeg = match djpeg_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: djpeg not found");
-            return;
-        }
-    };
+    let djpeg = require_c_tool!("djpeg");
 
     let width: usize = 48;
     let height: usize = 32;
@@ -588,13 +570,7 @@ fn pixel_max_diff(a: &[u8], b: &[u8]) -> u8 {
 /// Tests multiple image sizes to catch row-alignment or stride issues.
 #[test]
 fn c_djpeg_image_io_ppm_diff_zero() {
-    let djpeg: PathBuf = match djpeg_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: djpeg not found");
-            return;
-        }
-    };
+    let djpeg: PathBuf = require_c_tool!("djpeg");
 
     // Test multiple sizes: normal, odd width (row padding edge case), small
     let test_cases: &[(usize, usize)] = &[(48, 32), (31, 17), (7, 5), (100, 64)];
@@ -672,13 +648,7 @@ fn c_djpeg_image_io_ppm_diff_zero() {
 /// We compare decoded pixel values rather than raw BMP bytes.
 #[test]
 fn c_djpeg_image_io_grayscale_bmp_diff_zero() {
-    let djpeg: PathBuf = match djpeg_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: djpeg not found");
-            return;
-        }
-    };
+    let djpeg: PathBuf = require_c_tool!("djpeg");
 
     // Test multiple sizes including odd widths for row padding edge cases
     let test_cases: &[(usize, usize)] = &[(32, 24), (31, 17), (7, 5)];

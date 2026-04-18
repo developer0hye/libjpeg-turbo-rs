@@ -3,6 +3,8 @@ use libjpeg_turbo_rs::{
 };
 use std::path::PathBuf;
 
+mod helpers;
+
 fn gradient_pixels(width: usize, height: usize) -> Vec<u8> {
     let mut pixels: Vec<u8> = Vec::with_capacity(width * height * 3);
     for y in 0..height {
@@ -238,20 +240,6 @@ fn custom_marker_processor_receives_data() {
 // C djpeg cross-validation for niche encoder options
 // -----------------------------------------------------------------------
 
-/// Path to C djpeg binary, or `None` if not installed.
-fn djpeg_path() -> Option<std::path::PathBuf> {
-    let homebrew: std::path::PathBuf = std::path::PathBuf::from("/opt/homebrew/bin/djpeg");
-    if homebrew.exists() {
-        return Some(homebrew);
-    }
-    std::process::Command::new("which")
-        .arg("djpeg")
-        .output()
-        .ok()
-        .filter(|o| o.status.success())
-        .map(|o| std::path::PathBuf::from(String::from_utf8_lossy(&o.stdout).trim().to_string()))
-}
-
 fn niche_parse_ppm(data: &[u8]) -> (usize, usize, Vec<u8>) {
     assert!(data.len() > 3, "PPM too short");
     assert_eq!(&data[0..2], b"P6", "not a P6 PPM");
@@ -393,13 +381,7 @@ fn assert_djpeg_matches_rust(
 
 #[test]
 fn c_djpeg_cross_validation_niche_options() {
-    let djpeg = match djpeg_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: djpeg not found");
-            return;
-        }
-    };
+    let djpeg = require_c_tool!("djpeg");
 
     let width: usize = 48;
     let height: usize = 48;
@@ -462,20 +444,6 @@ fn c_djpeg_cross_validation_niche_options() {
     }
 }
 
-/// Path to C cjpeg binary, or `None` if not installed.
-fn cjpeg_path() -> Option<PathBuf> {
-    let homebrew: PathBuf = PathBuf::from("/opt/homebrew/bin/cjpeg");
-    if homebrew.exists() {
-        return Some(homebrew);
-    }
-    std::process::Command::new("which")
-        .arg("cjpeg")
-        .output()
-        .ok()
-        .filter(|o| o.status.success())
-        .map(|o| PathBuf::from(String::from_utf8_lossy(&o.stdout).trim().to_string()))
-}
-
 /// Build a raw PPM (P6) byte vector from RGB pixel data.
 fn build_ppm(width: usize, height: usize, pixels: &[u8]) -> Vec<u8> {
     assert_eq!(pixels.len(), width * height * 3);
@@ -505,20 +473,8 @@ fn compute_psnr(a: &[u8], b: &[u8]) -> f64 {
 
 #[test]
 fn c_cjpeg_cross_validation_smoothing() {
-    let djpeg = match djpeg_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: djpeg not found");
-            return;
-        }
-    };
-    let cjpeg = match cjpeg_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: cjpeg not found");
-            return;
-        }
-    };
+    let djpeg = require_c_tool!("djpeg");
+    let cjpeg = require_c_tool!("cjpeg");
 
     // Check if cjpeg supports -smooth by running with -help and looking for it.
     let help_output = std::process::Command::new(&cjpeg).arg("-help").output();
@@ -648,13 +604,7 @@ fn c_cjpeg_cross_validation_smoothing() {
 /// Also tests fast (non-fancy) upsample against C djpeg -nosmooth for completeness.
 #[test]
 fn c_djpeg_niche_options_fancy_upsample_diff_zero() {
-    let djpeg: PathBuf = match djpeg_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: djpeg not found");
-            return;
-        }
-    };
+    let djpeg: PathBuf = require_c_tool!("djpeg");
 
     let jpeg_data: &[u8] = include_bytes!("fixtures/photo_640x480_420.jpg");
     let tmp_jpg: NicheTempFile = NicheTempFile::new("fancy_up_input.jpg");
@@ -767,20 +717,8 @@ fn c_djpeg_niche_options_fancy_upsample_diff_zero() {
 /// Also tests fancy_downsampling(false) to verify C djpeg can decode it.
 #[test]
 fn c_cjpeg_niche_options_fancy_downsampling_diff_zero() {
-    let djpeg: PathBuf = match djpeg_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: djpeg not found");
-            return;
-        }
-    };
-    let cjpeg: PathBuf = match cjpeg_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: cjpeg not found");
-            return;
-        }
-    };
+    let djpeg: PathBuf = require_c_tool!("djpeg");
+    let cjpeg: PathBuf = require_c_tool!("cjpeg");
 
     let width: usize = 48;
     let height: usize = 48;

@@ -3,6 +3,8 @@ use std::process::Command;
 
 use libjpeg_turbo_rs::{decompress, decompress_to, Encoder, PixelFormat};
 
+mod helpers;
+
 #[test]
 fn grayscale_from_rgb() {
     let pixels = vec![128u8; 32 * 32 * 3];
@@ -71,20 +73,6 @@ fn grayscale_noop_for_grayscale_input() {
 // C djpeg cross-validation helpers
 // ===========================================================================
 
-/// Path to C djpeg binary, or `None` if not installed.
-fn djpeg_path() -> Option<PathBuf> {
-    let homebrew: PathBuf = PathBuf::from("/opt/homebrew/bin/djpeg");
-    if homebrew.exists() {
-        return Some(homebrew);
-    }
-    Command::new("which")
-        .arg("djpeg")
-        .output()
-        .ok()
-        .filter(|o| o.status.success())
-        .map(|o| PathBuf::from(String::from_utf8_lossy(&o.stdout).trim().to_string()))
-}
-
 /// Parse a binary PNM file (P5 PGM or P6 PPM).
 /// Returns `(width, height, channels, pixel_data)`.
 fn parse_pnm(path: &Path) -> (usize, usize, usize, Vec<u8>) {
@@ -152,13 +140,7 @@ fn read_pnm_number(data: &[u8], idx: usize) -> (usize, usize) {
 
 #[test]
 fn c_djpeg_grayscale_encode_diff_zero() {
-    let djpeg: PathBuf = match djpeg_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("skipping c_djpeg_grayscale_encode_diff_zero: djpeg not found");
-            return;
-        }
-    };
+    let djpeg: PathBuf = require_c_tool!("djpeg");
 
     // Build a 32x32 grayscale gradient image
     let width: usize = 32;
