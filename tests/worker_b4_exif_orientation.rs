@@ -1,3 +1,4 @@
+#![cfg(not(target_arch = "wasm32"))]
 //! EXIF Orientation tag round-trip tests (worker-b4 / B4-4).
 //!
 //! Covers all 8 TIFF Orientation values (1..8) that smartphone cameras emit:

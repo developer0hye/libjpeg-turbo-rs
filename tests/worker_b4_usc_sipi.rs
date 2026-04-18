@@ -1,3 +1,4 @@
+#![cfg(not(target_arch = "wasm32"))]
 //! USC-SIPI classic test image cross-validation (worker-b4 / B4-3).
 //!
 //! For every USC-SIPI fixture under `tests/fixtures/usc_sipi/`:

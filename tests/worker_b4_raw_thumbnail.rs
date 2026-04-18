@@ -1,3 +1,4 @@
+#![cfg(not(target_arch = "wasm32"))]
 //! Integration test for `extract_embedded_jpeg` (worker-b4 / B4-6).
 //!
 //! Emulates the layout that Sony ARW, Canon CR2, Nikon NEF, and similar

@@ -1,3 +1,4 @@
+#![cfg(not(target_arch = "wasm32"))]
 //! Kodak PhotoCD round-trip PSNR tests (worker-b4 / B4-2).
 //!
 //! For every Kodak fixture present in `tests/fixtures/kodak/`:
