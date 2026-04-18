@@ -1,3 +1,4 @@
+#![cfg(not(target_arch = "wasm32"))]
 //! B3-2 / B3-4: JPEG spec conformance cross-validation.
 //!
 //! This suite has two layers:

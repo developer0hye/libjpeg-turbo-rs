@@ -1,3 +1,4 @@
+#![cfg(not(target_arch = "wasm32"))]
 //! B3-3: Hash-stability regression for every `*.jpg` under
 //! `references/libjpeg-turbo/testimages/`.
 //!

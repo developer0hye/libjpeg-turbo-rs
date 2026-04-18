@@ -1,3 +1,4 @@
+#![cfg(not(target_arch = "wasm32"))]
 //! B3-4: opt-in ITU-T T.83 / ISO 10918-2 reference-vector conformance.
 //!
 //! This file ADDS to the lightweight T.83 scanner introduced in

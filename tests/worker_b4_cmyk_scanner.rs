@@ -1,3 +1,4 @@
+#![cfg(not(target_arch = "wasm32"))]
 //! Hand-crafted CMYK scanner JPEG round-trip (worker-b4 / B4-5).
 //!
 //! Ensures our decoder + encoder handle CMYK (YCCK) JPEGs bit-for-bit in a
