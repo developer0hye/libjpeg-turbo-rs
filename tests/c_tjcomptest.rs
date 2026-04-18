@@ -530,9 +530,10 @@ fn c_tjcomptest_lossy_full() {
         if rgb_ppm.exists() {
             let (rgb_w, rgb_h, rgb_pixels) = helpers::parse_ppm_file(&rgb_ppm);
             // Scale 8-bit to 12-bit: sample_12 = sample_8 * 4095 / 255
+            // Use i32 intermediate — 255 * 4095 = 1_044_225 overflows i16 in debug.
             let pixels_12: Vec<i16> = rgb_pixels
                 .iter()
-                .map(|&s| (s as i16 * 4095 / 255))
+                .map(|&s| (s as i32 * 4095 / 255) as i16)
                 .collect();
             let num_components: usize = 3;
 
@@ -891,6 +892,20 @@ fn c_tjcomptest_lossless_quick() {
 #[cfg(feature = "full-c-parity")]
 fn c_tjcomptest_lossless_full() {
     let cjpeg: PathBuf = require_c_tool!("cjpeg");
+    // libjpeg-turbo 2.x cjpeg (Ubuntu 24.04) lacks -lossless; skip gracefully.
+    let help = std::process::Command::new(&cjpeg)
+        .arg("-help")
+        .output()
+        .expect("cjpeg -help");
+    let help_text = format!(
+        "{}{}",
+        String::from_utf8_lossy(&help.stderr),
+        String::from_utf8_lossy(&help.stdout)
+    );
+    if !help_text.contains("-lossless") {
+        eprintln!("SKIP: cjpeg does not support -lossless (need libjpeg-turbo 3.x)");
+        return;
+    }
 
     let img_dir: PathBuf = helpers::c_testimages_dir();
     let icc_file = img_dir.join("test3.icc");
