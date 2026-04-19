@@ -49,11 +49,12 @@ I/O setup:
 
 Decompress flow:
 
-- `jpeg_read_header`
-- `jpeg_start_decompress`, `jpeg_finish_decompress`
-- `jpeg_read_scanlines`, `jpeg_skip_scanlines`, `jpeg_crop_scanline`
-- `jpeg_read_icc_profile`
-- `jpeg_save_markers`, `jpeg_set_marker_processor`
+- `jpeg_read_header` ✅ (shipped in A1-11)
+- `jpeg_start_decompress`, `jpeg_finish_decompress` ✅ (shipped in A1-11)
+- `jpeg_read_scanlines` ✅ (shipped in A1-11),
+  `jpeg_skip_scanlines`, `jpeg_crop_scanline` ✅ (shipped in C1-1)
+- `jpeg_read_icc_profile` ✅ (shipped in C1-1)
+- `jpeg_save_markers`, `jpeg_set_marker_processor` ✅ (shipped in C1-1)
 
 Compress flow:
 
@@ -64,10 +65,12 @@ Compress flow:
 
 Transform-specific (jpegtran):
 
-- `jpeg_read_coefficients`, `jpeg_write_coefficients`
-- `jpeg_copy_critical_parameters`
-- `jpeg_core_output_dimensions`
-- `jpeg_write_marker`
+- `jpeg_read_coefficients` ✅ (shipped in C1-2 — opaque Rust-owned handle),
+  `jpeg_write_coefficients` (encode worker scope)
+- `jpeg_copy_critical_parameters` ✅ (shipped in C1-2 — no-op until
+  compress struct exists, but symbol is linkable)
+- `jpeg_core_output_dimensions` ✅ (shipped in C1-2)
+- `jpeg_write_marker` (encode worker scope)
 
 Quant/huff helpers (via rdswitch.c):
 
@@ -76,8 +79,10 @@ Quant/huff helpers (via rdswitch.c):
 ### 12-bit / 16-bit precision variants (djpeg/cjpeg)
 
 - `jpeg12_read_scanlines`, `jpeg12_skip_scanlines`, `jpeg12_crop_scanline`
-- `jpeg12_write_scanlines`
-- `jpeg16_read_scanlines`, `jpeg16_write_scanlines`
+  ✅ (shipped in C1-3)
+- `jpeg12_write_scanlines` (encode worker scope)
+- `jpeg16_read_scanlines` ✅ (shipped in C1-3),
+  `jpeg16_write_scanlines` (encode worker scope)
 
 Also `read_color_map_12` — a wrapper defined in the libjpeg-turbo 12-bit
 wrapper shim (`src/wrapper/rdcolmap-12.c`) that our build does not emit.
@@ -162,3 +167,23 @@ and marker preservation; realistic once classic API parity exists.
   build+run pair and asserts byte-exact pass rate. Currently
   **documents the blocker**: it runs `build.sh`, checks the return
   code, and reports the missing-symbol count as the failure reason.
+
+## FFI C1-* decode extensions — post-shipment delta
+
+FFI C1-1..C1-3 extended the A1-11 decode surface by 12 classic
+`jpeg_*`/`jpeg12_*`/`jpeg16_*` symbols (listed above with ✅ markers).
+Shipped in `crates/libjpeg-turbo-rs-capi/src/jpeglib.rs`. Tests:
+`crates/libjpeg-turbo-rs-capi/tests/capi_classic_decode_ext.rs` (8 tests,
+all passing).
+
+After this batch, the remaining decode-side gap vs stock djpeg is zero
+— every symbol djpeg needs from the decode API is resolvable against
+our cdylib. The remaining missing-symbol inventory is entirely
+encode-side (`jpeg_CreateCompress`, `jpeg_set_defaults`, …) and the
+internal helpers (`jcopy_block_row`, `jdiv_round_up`). Those are
+tracked by the encode worker and the internal-helpers mission.
+
+Symbols still required by `djpeg` that our decode scope does not
+provide — none. `cjpeg` still blocks on the compress-side symbols;
+`jpegtran` still blocks on `jpeg_write_coefficients` / `jpeg_write_marker`
+and the `jcopy_block_row` / `jdiv_round_up` internal helpers.
