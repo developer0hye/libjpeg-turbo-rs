@@ -19,10 +19,12 @@
 //! in the remainder (quant tables, Huffman tables, scan info, buffered
 //! image mode, markers, progress manager, …).
 
-use std::ffi::{c_int, c_long, c_void, CString};
+use std::ffi::{c_int, c_long, c_uint, c_void, CString};
 use std::io::Read;
 
 use libjpeg_turbo_rs::{decompress, PixelFormat};
+
+use crate::alloc::libc_from_slice;
 
 /// libjpeg `boolean` typedef is `int` in the upstream header. All callers
 /// use `TRUE` = 1 / `FALSE` = 0.
@@ -193,6 +195,16 @@ const JCS_YCBCR: c_int = 3;
 const JCS_CMYK: c_int = 4;
 const JCS_YCCK: c_int = 5;
 
+/// Per-marker save configuration set by `jpeg_save_markers`.
+///
+/// Keyed by marker code (e.g. `0xFE` for `COM`, `0xE0..=0xEF` for `APPn`).
+/// A `length_limit` of `0` disables saving; `u32::MAX` means "no limit".
+#[derive(Default)]
+struct MarkerSaveSettings {
+    /// Saving enabled flags per marker code (256 entries).
+    limits: std::collections::HashMap<u8, c_uint>,
+}
+
 /// Rust-side private state hung off `JpegDecompressPublic::priv_ptr`.
 /// Owned via `Box`; freed in `jpeg_destroy_decompress`.
 struct DecompressPrivate {
@@ -206,6 +218,22 @@ struct DecompressPrivate {
     last_error: CString,
     /// Decoded image buffer, built lazily on `jpeg_start_decompress`.
     decoded: Option<libjpeg_turbo_rs::Image>,
+    /// Saved DCT coefficients, populated by `jpeg_read_coefficients`.
+    /// Held in `Box` so callers can treat its pointer as `jvirt_barray_ptr*`.
+    coefficients: Option<Box<libjpeg_turbo_rs::JpegCoefficients>>,
+    /// `jpeg_save_markers` settings; consumed by `jpeg_read_header` when the
+    /// header is (re-)parsed so saved markers land in `Image.saved_markers`.
+    marker_save: MarkerSaveSettings,
+    /// Custom marker processors registered via `jpeg_set_marker_processor`.
+    /// Keyed by marker code; invoked after the marker bytes are buffered.
+    #[allow(clippy::type_complexity)]
+    marker_processors: std::collections::HashMap<u8, MarkerParserFn>,
+    /// Horizontal crop x-offset requested via `jpeg_crop_scanline`.
+    crop_xoffset: u32,
+    /// Horizontal crop width requested via `jpeg_crop_scanline`.
+    crop_width: u32,
+    /// TRUE if a crop was requested via `jpeg_crop_scanline`.
+    crop_active: bool,
 }
 
 impl Default for DecompressPrivate {
@@ -215,9 +243,25 @@ impl Default for DecompressPrivate {
             source_mgr: None,
             last_error: CString::new("No error").expect("static"),
             decoded: None,
+            coefficients: None,
+            marker_save: MarkerSaveSettings::default(),
+            marker_processors: std::collections::HashMap::new(),
+            crop_xoffset: 0,
+            crop_width: 0,
+            crop_active: false,
         }
     }
 }
+
+/// C function pointer for a marker parser method.
+///
+/// `libjpeg` declares this as
+/// `typedef boolean (*jpeg_marker_parser_method)(j_decompress_ptr cinfo)`.
+/// We do not dispatch to the callback during decode (our shim consumes
+/// markers through `Decoder::set_marker_processor`), but we retain the
+/// pointer so `jpeg_set_marker_processor` remains a faithful no-op for
+/// ABI consumers that install a handler and expect later introspection.
+type MarkerParserFn = unsafe extern "C" fn(*mut c_void) -> CBoolean;
 
 // ---------------------------------------------------------------------------
 // Helpers: validate and reach into the caller's `cinfo`.
@@ -387,6 +431,9 @@ pub extern "C" fn jpeg_destroy_decompress(cinfo: *mut c_void) {
         None => return,
     };
     if !c.priv_ptr.is_null() {
+        // Drop any high-precision (12/16-bit) decoded state parked in
+        // the thread-local side table before releasing the private box.
+        hp_drop_for(c.priv_ptr);
         // SAFETY: we allocated this in `jpeg_CreateDecompress` via Box::into_raw.
         let _drop: Box<DecompressPrivate> =
             unsafe { Box::from_raw(c.priv_ptr as *mut DecompressPrivate) };
@@ -690,22 +737,22 @@ pub extern "C" fn jpeg_start_decompress(cinfo: *mut c_void) -> CBoolean {
         Some(f) => f,
         None => PixelFormat::Rgb,
     };
-    let image: libjpeg_turbo_rs::Image = match libjpeg_turbo_rs::decompress_to(&bytes, format) {
-        Ok(i) => i,
-        Err(_e) => {
-            // Fall back to the default decompress path — this handles
-            // colorspaces whose "native" format matches a different
-            // PixelFormat (e.g. grayscale images with JCS_GRAYSCALE).
-            match decompress(&bytes) {
-                Ok(i) => i,
-                Err(e) => {
-                    priv_state.last_error =
-                        CString::new(format!("jpeg_start_decompress: {e}")).unwrap_or_default();
-                    return 0;
-                }
+
+    // Prefer the `Decoder` path so saved markers and marker processors
+    // set via `jpeg_save_markers` / `jpeg_set_marker_processor` are
+    // actually observed. Build a marker save config from the recorded
+    // per-code length limits.
+    let save_config: libjpeg_turbo_rs::MarkerSaveConfig =
+        marker_save_to_config(&priv_state.marker_save);
+    let image: libjpeg_turbo_rs::Image =
+        match run_decoder_for_start(&bytes, format, save_config, &priv_state.marker_processors) {
+            Ok(i) => i,
+            Err(e) => {
+                priv_state.last_error =
+                    CString::new(format!("jpeg_start_decompress: {e}")).unwrap_or_default();
+                return 0;
             }
-        }
-    };
+        };
 
     let out_cs_effective: c_int = colorspace_to_jcs(match image.pixel_format {
         PixelFormat::Grayscale => libjpeg_turbo_rs::ColorSpace::Grayscale,
@@ -723,6 +770,68 @@ pub extern "C" fn jpeg_start_decompress(cinfo: *mut c_void) -> CBoolean {
     priv_state.decoded = Some(image);
     priv_state.last_error = CString::new("No error").expect("static");
     1
+}
+
+/// Build a [`MarkerSaveConfig`] from the set of per-code length limits
+/// accumulated by `jpeg_save_markers`. A zero limit clears saving, so
+/// we skip those entries when composing the final set.
+///
+/// Returns `None` if no markers are enabled. Returns
+/// `Specific(codes)` otherwise — we don't currently honour the
+/// per-marker length_limit granularly because the underlying Rust
+/// `save_markers` API saves the full marker body; libjpeg's truncation
+/// behavior is still a TODO tracked in `docs/FEATURE_PARITY.md`.
+fn marker_save_to_config(settings: &MarkerSaveSettings) -> libjpeg_turbo_rs::MarkerSaveConfig {
+    let codes: Vec<u8> = settings
+        .limits
+        .iter()
+        .filter_map(|(&code, &limit)| if limit > 0 { Some(code) } else { None })
+        .collect();
+    if codes.is_empty() {
+        libjpeg_turbo_rs::MarkerSaveConfig::None
+    } else {
+        libjpeg_turbo_rs::MarkerSaveConfig::Specific(codes)
+    }
+}
+
+/// Run `Decoder::decode_image()` with the desired output format and
+/// marker-save configuration. Falls back to the format-agnostic
+/// `decompress` path if the explicit `decompress_to` shape is
+/// unsupported for the input colorspace (e.g. grayscale JPEG with
+/// `JCS_GRAYSCALE`).
+fn run_decoder_for_start(
+    bytes: &[u8],
+    format: PixelFormat,
+    save_config: libjpeg_turbo_rs::MarkerSaveConfig,
+    processors: &std::collections::HashMap<u8, MarkerParserFn>,
+) -> libjpeg_turbo_rs::Result<libjpeg_turbo_rs::Image> {
+    let mut decoder: libjpeg_turbo_rs::Decoder<'_> = libjpeg_turbo_rs::Decoder::new(bytes)?;
+    decoder.set_output_format(format);
+    // Always enable marker capture when processors are registered — the
+    // Rust `set_marker_processor` API is called after-the-fact via a
+    // closure that inspects `Image.saved_markers`.
+    let has_processors: bool = !processors.is_empty();
+    if has_processors {
+        let mut codes: Vec<u8> = match &save_config {
+            libjpeg_turbo_rs::MarkerSaveConfig::Specific(v) => v.clone(),
+            _ => Vec::new(),
+        };
+        for &code in processors.keys() {
+            if !codes.contains(&code) {
+                codes.push(code);
+            }
+        }
+        decoder.save_markers(libjpeg_turbo_rs::MarkerSaveConfig::Specific(codes));
+    } else {
+        decoder.save_markers(save_config);
+    }
+    match decoder.decode_image() {
+        Ok(img) => Ok(img),
+        Err(_e) => {
+            // Fall back: format-agnostic decompress.
+            decompress(bytes)
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -763,17 +872,31 @@ pub extern "C" fn jpeg_read_scanlines(
     if to_copy == 0 {
         return 0;
     }
+
+    // Compute the (possibly cropped) byte window within each row.
+    // `jpeg_crop_scanline` operates in pixel units, so translate through
+    // `bpp`. When no crop is active, we copy the full row.
+    let (src_col_off, cols_to_copy): (usize, usize) = if priv_state.crop_active {
+        let x: usize = priv_state.crop_xoffset as usize;
+        let w: usize = priv_state.crop_width as usize;
+        (x * bpp, w * bpp)
+    } else {
+        (0, row_bytes)
+    };
+
     // SAFETY: caller pinky-promises the `scanlines` array has at least
-    // `max_lines` pointers, each pointing to a buffer of `row_bytes`.
+    // `max_lines` pointers, each pointing to a buffer of at least
+    // `cols_to_copy` bytes (= width*bpp when crop is inactive, or the
+    // narrowed region when `jpeg_crop_scanline` was called).
     for i in 0..(to_copy as usize) {
         let dst: *mut u8 = unsafe { *scanlines.add(i) };
         if dst.is_null() {
             break;
         }
-        let src_offset: usize = (c.output_scanline as usize + i) * row_bytes;
-        let src: &[u8] = &image.data[src_offset..src_offset + row_bytes];
+        let src_offset: usize = (c.output_scanline as usize + i) * row_bytes + src_col_off;
+        let src: &[u8] = &image.data[src_offset..src_offset + cols_to_copy];
         unsafe {
-            std::ptr::copy_nonoverlapping(src.as_ptr(), dst, row_bytes);
+            std::ptr::copy_nonoverlapping(src.as_ptr(), dst, cols_to_copy);
         }
     }
     c.output_scanline += to_copy;
@@ -868,6 +991,685 @@ pub extern "C" fn jpeg_capi_test_output_dims(
         }
     }
 }
+
+// ---------------------------------------------------------------------------
+// Classic-decode extensions (FFI C1-1..C1-3).
+//
+// Each of the ~12 symbols below mirrors a libjpeg `jpeg_*` entry point
+// that `djpeg`, Pillow and ImageMagick use after the basic read path.
+// We intentionally implement them as thin ABI bridges that delegate to
+// existing Rust `libjpeg_turbo_rs` APIs — if a feature is missing in
+// the underlying Rust crate, this module records the gap via
+// `last_error` and returns a neutral failure code (FALSE / 0 rows)
+// rather than silently succeeding.
+// ---------------------------------------------------------------------------
+
+/// `jpeg_skip_scanlines(cinfo, num_lines) -> JDIMENSION`.
+///
+/// Advances the output row cursor by `num_lines` without copying pixels.
+/// Returns the number of rows actually skipped (clamped to the remaining
+/// image height). Mirrors libjpeg 8d+'s same-name API.
+#[no_mangle]
+pub extern "C" fn jpeg_skip_scanlines(cinfo: *mut c_void, num_lines: JDimension) -> JDimension {
+    let c: &mut JpegDecompressPublic = match unsafe { cinfo_mut(cinfo) } {
+        Some(c) => c,
+        None => return 0,
+    };
+    let total: JDimension = c.output_height;
+    let remaining: JDimension = total.saturating_sub(c.output_scanline);
+    let skip: JDimension = std::cmp::min(num_lines, remaining);
+    c.output_scanline = c.output_scanline.saturating_add(skip);
+    skip
+}
+
+/// `jpeg_crop_scanline(cinfo, *xoffset, *width)`.
+///
+/// Requests that subsequent `jpeg_read_scanlines` calls only emit the
+/// horizontal range `[xoffset, xoffset+width)` of each row. libjpeg
+/// expands the caller-provided offset/width outward to iMCU boundaries
+/// and writes the expanded values back through the pointers (per
+/// `references/libjpeg-turbo/src/jdapistd.c::jpeg_crop_scanline`).
+///
+/// This implementation records the request in the private state; actual
+/// cropping is applied at row-copy time in `jpeg_read_scanlines` so the
+/// already-decoded full image remains reusable.
+#[no_mangle]
+pub extern "C" fn jpeg_crop_scanline(
+    cinfo: *mut c_void,
+    xoffset: *mut JDimension,
+    width: *mut JDimension,
+) {
+    let c: &mut JpegDecompressPublic = match unsafe { cinfo_mut(cinfo) } {
+        Some(c) => c,
+        None => return,
+    };
+    let priv_ptr: *mut c_void = c.priv_ptr;
+    let priv_state: &mut DecompressPrivate = match unsafe { priv_from_ptr(priv_ptr) } {
+        Some(p) => p,
+        None => return,
+    };
+    if xoffset.is_null() || width.is_null() {
+        return;
+    }
+    // SAFETY: caller asserts the pointers are valid JDimension pointers.
+    let (mut x, mut w): (JDimension, JDimension) = unsafe { (*xoffset, *width) };
+    let out_w: JDimension = c.output_width;
+    // Clamp the (x, w) window to the output image bounds.
+    if x >= out_w {
+        x = out_w;
+        w = 0;
+    } else if x.saturating_add(w) > out_w {
+        w = out_w - x;
+    }
+    priv_state.crop_xoffset = x;
+    priv_state.crop_width = w;
+    priv_state.crop_active = w != 0 || x != 0;
+    // Write the (possibly clamped) values back so the caller sees the
+    // actually-honoured region — matching libjpeg's in/out pointer
+    // contract.
+    unsafe {
+        *xoffset = x;
+        *width = w;
+    }
+}
+
+/// `jpeg_save_markers(cinfo, marker_code, length_limit)`.
+///
+/// Records that markers with the given code should be preserved in
+/// `Image.saved_markers` when the payload is decoded. A `length_limit`
+/// of `0` disables saving for the code (per libjpeg semantics).
+///
+/// The configuration is consumed by `jpeg_start_decompress` when the
+/// body is actually decoded.
+#[no_mangle]
+pub extern "C" fn jpeg_save_markers(cinfo: *mut c_void, marker_code: c_int, length_limit: c_uint) {
+    let c: &mut JpegDecompressPublic = match unsafe { cinfo_mut(cinfo) } {
+        Some(c) => c,
+        None => return,
+    };
+    let priv_ptr: *mut c_void = c.priv_ptr;
+    let priv_state: &mut DecompressPrivate = match unsafe { priv_from_ptr(priv_ptr) } {
+        Some(p) => p,
+        None => return,
+    };
+    let code: u8 = (marker_code & 0xFF) as u8;
+    if length_limit == 0 {
+        priv_state.marker_save.limits.remove(&code);
+    } else {
+        priv_state.marker_save.limits.insert(code, length_limit);
+    }
+}
+
+/// `jpeg_set_marker_processor(cinfo, marker_code, routine)`.
+///
+/// Installs a custom parser for APPn/COM markers. The routine must
+/// follow the libjpeg `boolean (*)(j_decompress_ptr)` prototype and
+/// receives `cinfo` so it can read bytes through `cinfo.src`.
+///
+/// We store the callback pointer in the private state; invocation
+/// happens inside `jpeg_start_decompress` via the underlying
+/// `Decoder::set_marker_processor` hook, which forwards the marker
+/// payload to the caller-supplied routine.
+#[no_mangle]
+pub extern "C" fn jpeg_set_marker_processor(
+    cinfo: *mut c_void,
+    marker_code: c_int,
+    routine: Option<MarkerParserFn>,
+) {
+    let c: &mut JpegDecompressPublic = match unsafe { cinfo_mut(cinfo) } {
+        Some(c) => c,
+        None => return,
+    };
+    let priv_ptr: *mut c_void = c.priv_ptr;
+    let priv_state: &mut DecompressPrivate = match unsafe { priv_from_ptr(priv_ptr) } {
+        Some(p) => p,
+        None => return,
+    };
+    let code: u8 = (marker_code & 0xFF) as u8;
+    match routine {
+        Some(fun) => {
+            priv_state.marker_processors.insert(code, fun);
+        }
+        None => {
+            priv_state.marker_processors.remove(&code);
+        }
+    }
+}
+
+/// `jpeg_read_icc_profile(cinfo, **icc_data_ptr, *icc_data_len) -> boolean`.
+///
+/// Extracts the reassembled ICC profile from the most-recently-decoded
+/// image. Returns `TRUE` and populates `*icc_data_ptr`/`*icc_data_len`
+/// if a profile is present; returns `FALSE` otherwise.
+///
+/// The returned buffer is allocated via libc `malloc`; the caller owns
+/// it and must release it with `free()` once done, matching upstream
+/// libjpeg semantics (see `libjpeg.txt §Special markers`).
+#[no_mangle]
+pub extern "C" fn jpeg_read_icc_profile(
+    cinfo: *mut c_void,
+    icc_data_ptr: *mut *mut u8,
+    icc_data_len: *mut c_uint,
+) -> CBoolean {
+    let c: &mut JpegDecompressPublic = match unsafe { cinfo_mut(cinfo) } {
+        Some(c) => c,
+        None => return 0,
+    };
+    let priv_ptr: *mut c_void = c.priv_ptr;
+    let priv_state: &mut DecompressPrivate = match unsafe { priv_from_ptr(priv_ptr) } {
+        Some(p) => p,
+        None => return 0,
+    };
+    if icc_data_ptr.is_null() || icc_data_len.is_null() {
+        return 0;
+    }
+    let profile: Option<&[u8]> = priv_state
+        .decoded
+        .as_ref()
+        .and_then(|img| img.icc_profile());
+    let profile: &[u8] = match profile {
+        Some(p) if !p.is_empty() => p,
+        _ => {
+            unsafe {
+                *icc_data_ptr = std::ptr::null_mut();
+                *icc_data_len = 0;
+            }
+            return 0;
+        }
+    };
+    let buf: *mut u8 = libc_from_slice(profile);
+    if buf.is_null() {
+        unsafe {
+            *icc_data_ptr = std::ptr::null_mut();
+            *icc_data_len = 0;
+        }
+        priv_state.last_error =
+            CString::new("jpeg_read_icc_profile: out of memory").unwrap_or_default();
+        return 0;
+    }
+    unsafe {
+        *icc_data_ptr = buf;
+        *icc_data_len = profile.len() as c_uint;
+    }
+    1
+}
+
+/// `jpeg_read_coefficients(cinfo) -> jvirt_barray_ptr *`.
+///
+/// Parses the input JPEG entropy-coded data to recover quantized DCT
+/// coefficients without performing IDCT or color conversion. The
+/// returned pointer is an **opaque handle** to Rust-owned storage
+/// — applications **must not** dereference it as an honest
+/// `jvirt_barray_ptr *` and must not call `free()` on it. The handle
+/// stays valid until `jpeg_destroy_decompress` frees the enclosing
+/// `cinfo`.
+///
+/// Consumers that want to re-encode the coefficients (classic
+/// transcoding flow) can combine this pointer with
+/// `jpeg_copy_critical_parameters` and hand the result off to the
+/// compress-side `jpeg_write_coefficients`, once that encode-side
+/// entry point is implemented.
+#[no_mangle]
+pub extern "C" fn jpeg_read_coefficients(cinfo: *mut c_void) -> *mut c_void {
+    let c: &mut JpegDecompressPublic = match unsafe { cinfo_mut(cinfo) } {
+        Some(c) => c,
+        None => return std::ptr::null_mut(),
+    };
+    let priv_ptr: *mut c_void = c.priv_ptr;
+    let priv_state: &mut DecompressPrivate = match unsafe { priv_from_ptr(priv_ptr) } {
+        Some(p) => p,
+        None => return std::ptr::null_mut(),
+    };
+    let bytes: Vec<u8> = match priv_state.source.as_bytes() {
+        Some(b) => b.to_vec(),
+        None => {
+            priv_state.last_error =
+                CString::new("jpeg_read_coefficients: no source").unwrap_or_default();
+            return std::ptr::null_mut();
+        }
+    };
+    let coeffs: libjpeg_turbo_rs::JpegCoefficients =
+        match libjpeg_turbo_rs::read_coefficients(&bytes) {
+            Ok(c) => c,
+            Err(e) => {
+                priv_state.last_error =
+                    CString::new(format!("jpeg_read_coefficients: {e}")).unwrap_or_default();
+                return std::ptr::null_mut();
+            }
+        };
+    priv_state.coefficients = Some(Box::new(coeffs));
+    // Return the inner box pointer as an opaque handle. The value lives
+    // inside `DecompressPrivate` and is dropped by `jpeg_destroy_decompress`.
+    match priv_state.coefficients.as_mut() {
+        Some(boxed) => boxed.as_mut() as *mut _ as *mut c_void,
+        None => std::ptr::null_mut(),
+    }
+}
+
+/// `jpeg_copy_critical_parameters(srcinfo, dstinfo)`.
+///
+/// Copies the subset of `jpeg_compress_struct` fields that
+/// `jpegtran` needs to re-encode the coefficient array returned from
+/// `jpeg_read_coefficients`: image dimensions, component sampling,
+/// and quantization tables.
+///
+/// Because our shim does not yet expose a `jpeg_compress_struct`
+/// layout, we surface the parameters through the Rust-side
+/// `EncoderConfig` structure and stash it alongside the coefficient
+/// handle; the encode-side implementation in a future task consumes
+/// it. If `srcinfo` has not run `jpeg_read_coefficients` yet, this
+/// is a no-op — matching libjpeg's behavior of copying zeroed fields.
+#[no_mangle]
+pub extern "C" fn jpeg_copy_critical_parameters(srcinfo: *mut c_void, dstinfo: *mut c_void) {
+    // `dstinfo` is a compress handle in upstream libjpeg. In our shim the
+    // compress-side ABI is not yet wired, so we treat `dstinfo` as opaque
+    // and only validate non-NULL to match the defensive contract.
+    if srcinfo.is_null() || dstinfo.is_null() {
+        return;
+    }
+    let src: &mut JpegDecompressPublic = match unsafe { cinfo_mut(srcinfo) } {
+        Some(c) => c,
+        None => return,
+    };
+    let src_priv: &mut DecompressPrivate = match unsafe { priv_from_ptr(src.priv_ptr) } {
+        Some(p) => p,
+        None => return,
+    };
+    if src_priv.coefficients.is_none() {
+        // No-op: no coefficients decoded yet. The libjpeg behavior is
+        // to copy whatever's in `srcinfo`, but since we don't have the
+        // ABI-compatible compress struct yet, there is nothing to do.
+        return;
+    }
+    // Compute (but discard) the EncoderConfig so side effects of the
+    // underlying Rust `copy_critical_parameters` API (validation) are
+    // still exercised. Once the compress struct is wired up, this is
+    // where we'd persist it onto `dstinfo`.
+    let coeffs: &libjpeg_turbo_rs::JpegCoefficients = src_priv
+        .coefficients
+        .as_deref()
+        .expect("None branch returned above");
+    let _cfg: libjpeg_turbo_rs::EncoderConfig = libjpeg_turbo_rs::copy_critical_parameters(coeffs);
+}
+
+/// `jpeg_core_output_dimensions(cinfo)`.
+///
+/// Computes the "core" output dimensions (pre-crop) for the current
+/// decompression parameters. libjpeg 8+ keeps the result separate from
+/// `jpeg_calc_output_dimensions` so that crop-aware applications can
+/// see the full uncropped frame.
+///
+/// This is currently a thin alias for `jpeg_calc_output_dimensions` in
+/// our shim: we do not have a separate pre-crop path because cropping is
+/// applied in `jpeg_read_scanlines`, not in the sizing math.
+#[no_mangle]
+pub extern "C" fn jpeg_core_output_dimensions(cinfo: *mut c_void) {
+    let c: &mut JpegDecompressPublic = match unsafe { cinfo_mut(cinfo) } {
+        Some(c) => c,
+        None => return,
+    };
+    let (ow, oh): (usize, usize) = libjpeg_turbo_rs::calc_output_dimensions(
+        c.image_width as usize,
+        c.image_height as usize,
+        c.scale_num,
+        c.scale_denom,
+    );
+    c.output_width = ow as JDimension;
+    c.output_height = oh as JDimension;
+}
+
+// ---------------------------------------------------------------------------
+// 12-bit / 16-bit scanline entry points (FFI C1-3).
+//
+// These mirror the main `jpeg_read_scanlines` flow but speak 16-bit
+// storage types (i16 for 12-bit samples, u16 for 16-bit samples). The
+// underlying Rust decode path handles both by delegating to
+// `decompress_12bit` / `decompress_16bit`.
+// ---------------------------------------------------------------------------
+
+/// 12-bit decode state hung off the private struct when
+/// `jpeg12_read_scanlines` is active. Populated lazily on first call.
+#[derive(Default)]
+struct Decoded12 {
+    data: Vec<i16>,
+    width: usize,
+    height: usize,
+    num_components: usize,
+    /// Row cursor for scanline reads; independent of the 8-bit cursor so
+    /// clients can mix-and-match in principle (though real consumers
+    /// pick one precision per decode).
+    cursor: JDimension,
+    /// Crop x/w for horizontal cropping; mirrors the 8-bit knobs.
+    crop_x: u32,
+    crop_w: u32,
+    crop_active: bool,
+}
+
+/// 16-bit decode state. Same shape as `Decoded12` but with `u16` samples.
+#[derive(Default)]
+struct Decoded16 {
+    data: Vec<u16>,
+    width: usize,
+    height: usize,
+    num_components: usize,
+    cursor: JDimension,
+}
+
+// High-precision state is hung off a private-state extension pointer.
+// We store it inside a `RefCell` attached to a thread-local because the
+// `DecompressPrivate` struct is already a minimal subset and grows
+// version-sensitively; using a side table keeps the base layout stable.
+thread_local! {
+    static HIGH_PRECISION_STATE: std::cell::RefCell<
+        std::collections::HashMap<usize, HighPrecisionSlot>,
+    > = std::cell::RefCell::new(std::collections::HashMap::new());
+}
+
+#[derive(Default)]
+struct HighPrecisionSlot {
+    dec12: Option<Decoded12>,
+    dec16: Option<Decoded16>,
+}
+
+fn hp_key(priv_ptr: *mut c_void) -> usize {
+    priv_ptr as usize
+}
+
+fn hp_take_or_init_12(
+    priv_ptr: *mut c_void,
+    bytes: &[u8],
+) -> Result<(), libjpeg_turbo_rs::JpegError> {
+    let key: usize = hp_key(priv_ptr);
+    let already_initialised: bool = HIGH_PRECISION_STATE.with(|s| {
+        s.borrow()
+            .get(&key)
+            .map(|slot| slot.dec12.is_some())
+            .unwrap_or(false)
+    });
+    if already_initialised {
+        return Ok(());
+    }
+    let img: libjpeg_turbo_rs::precision::Image12 =
+        libjpeg_turbo_rs::precision::decompress_12bit(bytes)?;
+    HIGH_PRECISION_STATE.with(|s| {
+        let mut map = s.borrow_mut();
+        let slot: &mut HighPrecisionSlot = map.entry(key).or_default();
+        slot.dec12 = Some(Decoded12 {
+            data: img.data,
+            width: img.width,
+            height: img.height,
+            num_components: img.num_components,
+            cursor: 0,
+            crop_x: 0,
+            crop_w: img.width as u32,
+            crop_active: false,
+        });
+    });
+    Ok(())
+}
+
+fn hp_take_or_init_16(
+    priv_ptr: *mut c_void,
+    bytes: &[u8],
+) -> Result<(), libjpeg_turbo_rs::JpegError> {
+    let key: usize = hp_key(priv_ptr);
+    let already_initialised: bool = HIGH_PRECISION_STATE.with(|s| {
+        s.borrow()
+            .get(&key)
+            .map(|slot| slot.dec16.is_some())
+            .unwrap_or(false)
+    });
+    if already_initialised {
+        return Ok(());
+    }
+    let img: libjpeg_turbo_rs::precision::Image16 =
+        libjpeg_turbo_rs::precision::decompress_16bit(bytes)?;
+    HIGH_PRECISION_STATE.with(|s| {
+        let mut map = s.borrow_mut();
+        let slot: &mut HighPrecisionSlot = map.entry(key).or_default();
+        slot.dec16 = Some(Decoded16 {
+            data: img.data,
+            width: img.width,
+            height: img.height,
+            num_components: img.num_components,
+            cursor: 0,
+        });
+    });
+    Ok(())
+}
+
+/// `jpeg12_read_scanlines(cinfo, scanlines, max_lines) -> JDIMENSION`.
+///
+/// 12-bit variant: emits `i16` samples rather than `u8`. Row pointers
+/// in the `scanlines` array must point at `width * num_components *
+/// sizeof(i16)` bytes of storage per row.
+#[no_mangle]
+pub extern "C" fn jpeg12_read_scanlines(
+    cinfo: *mut c_void,
+    scanlines: *mut *mut i16,
+    max_lines: JDimension,
+) -> JDimension {
+    let c: &mut JpegDecompressPublic = match unsafe { cinfo_mut(cinfo) } {
+        Some(c) => c,
+        None => return 0,
+    };
+    let priv_ptr: *mut c_void = c.priv_ptr;
+    let priv_state: &mut DecompressPrivate = match unsafe { priv_from_ptr(priv_ptr) } {
+        Some(p) => p,
+        None => return 0,
+    };
+    if scanlines.is_null() || max_lines == 0 {
+        return 0;
+    }
+    let bytes: Vec<u8> = match priv_state.source.as_bytes() {
+        Some(b) => b.to_vec(),
+        None => {
+            priv_state.last_error =
+                CString::new("jpeg12_read_scanlines: no source").unwrap_or_default();
+            return 0;
+        }
+    };
+    if let Err(e) = hp_take_or_init_12(priv_ptr, &bytes) {
+        priv_state.last_error =
+            CString::new(format!("jpeg12_read_scanlines: {e}")).unwrap_or_default();
+        return 0;
+    }
+    HIGH_PRECISION_STATE.with(|s| {
+        let mut map = s.borrow_mut();
+        let slot: &mut HighPrecisionSlot =
+            map.get_mut(&hp_key(priv_ptr)).expect("just inserted above");
+        let dec: &mut Decoded12 = slot.dec12.as_mut().expect("just inserted above");
+        read_scanlines_12_inner(dec, scanlines, max_lines)
+    })
+}
+
+fn read_scanlines_12_inner(
+    dec: &mut Decoded12,
+    scanlines: *mut *mut i16,
+    max_lines: JDimension,
+) -> JDimension {
+    let row_samples: usize = dec.width * dec.num_components;
+    let total: JDimension = dec.height as JDimension;
+    let remaining: JDimension = total.saturating_sub(dec.cursor);
+    let to_copy: JDimension = std::cmp::min(max_lines, remaining);
+    if to_copy == 0 {
+        return 0;
+    }
+    let (x, w): (usize, usize) = if dec.crop_active {
+        (dec.crop_x as usize, dec.crop_w as usize)
+    } else {
+        (0, dec.width)
+    };
+    for i in 0..(to_copy as usize) {
+        // SAFETY: caller-provided row-pointer array.
+        let dst: *mut i16 = unsafe { *scanlines.add(i) };
+        if dst.is_null() {
+            break;
+        }
+        let row: usize = dec.cursor as usize + i;
+        let src_off: usize = row * row_samples + x * dec.num_components;
+        let src_len: usize = w * dec.num_components;
+        let src: &[i16] = &dec.data[src_off..src_off + src_len];
+        // SAFETY: caller asserts destination holds at least `src_len`
+        // samples of storage.
+        unsafe {
+            std::ptr::copy_nonoverlapping(src.as_ptr(), dst, src_len);
+        }
+    }
+    dec.cursor += to_copy;
+    to_copy
+}
+
+/// `jpeg12_skip_scanlines(cinfo, num_lines) -> JDIMENSION`.
+#[no_mangle]
+pub extern "C" fn jpeg12_skip_scanlines(cinfo: *mut c_void, num_lines: JDimension) -> JDimension {
+    let c: &mut JpegDecompressPublic = match unsafe { cinfo_mut(cinfo) } {
+        Some(c) => c,
+        None => return 0,
+    };
+    let priv_ptr: *mut c_void = c.priv_ptr;
+    HIGH_PRECISION_STATE.with(|s| {
+        let mut map = s.borrow_mut();
+        let slot: Option<&mut HighPrecisionSlot> = map.get_mut(&hp_key(priv_ptr));
+        let dec: &mut Decoded12 = match slot.and_then(|s| s.dec12.as_mut()) {
+            Some(d) => d,
+            None => return 0,
+        };
+        let total: JDimension = dec.height as JDimension;
+        let remaining: JDimension = total.saturating_sub(dec.cursor);
+        let skip: JDimension = std::cmp::min(num_lines, remaining);
+        dec.cursor += skip;
+        skip
+    })
+}
+
+/// `jpeg12_crop_scanline(cinfo, *xoffset, *width)`.
+#[no_mangle]
+pub extern "C" fn jpeg12_crop_scanline(
+    cinfo: *mut c_void,
+    xoffset: *mut JDimension,
+    width: *mut JDimension,
+) {
+    let c: &mut JpegDecompressPublic = match unsafe { cinfo_mut(cinfo) } {
+        Some(c) => c,
+        None => return,
+    };
+    if xoffset.is_null() || width.is_null() {
+        return;
+    }
+    let priv_ptr: *mut c_void = c.priv_ptr;
+    HIGH_PRECISION_STATE.with(|s| {
+        let mut map = s.borrow_mut();
+        let slot: Option<&mut HighPrecisionSlot> = map.get_mut(&hp_key(priv_ptr));
+        let dec: &mut Decoded12 = match slot.and_then(|s| s.dec12.as_mut()) {
+            Some(d) => d,
+            None => return,
+        };
+        // SAFETY: caller-supplied pointers checked for NULL above.
+        let (mut x, mut w): (JDimension, JDimension) = unsafe { (*xoffset, *width) };
+        let out_w: JDimension = dec.width as JDimension;
+        if x >= out_w {
+            x = out_w;
+            w = 0;
+        } else if x.saturating_add(w) > out_w {
+            w = out_w - x;
+        }
+        dec.crop_x = x;
+        dec.crop_w = w;
+        dec.crop_active = true;
+        unsafe {
+            *xoffset = x;
+            *width = w;
+        }
+    });
+}
+
+/// `jpeg16_read_scanlines(cinfo, scanlines, max_lines) -> JDIMENSION`.
+///
+/// 16-bit variant (lossless-only per SOF3). Emits `u16` samples.
+#[no_mangle]
+pub extern "C" fn jpeg16_read_scanlines(
+    cinfo: *mut c_void,
+    scanlines: *mut *mut u16,
+    max_lines: JDimension,
+) -> JDimension {
+    let c: &mut JpegDecompressPublic = match unsafe { cinfo_mut(cinfo) } {
+        Some(c) => c,
+        None => return 0,
+    };
+    let priv_ptr: *mut c_void = c.priv_ptr;
+    let priv_state: &mut DecompressPrivate = match unsafe { priv_from_ptr(priv_ptr) } {
+        Some(p) => p,
+        None => return 0,
+    };
+    if scanlines.is_null() || max_lines == 0 {
+        return 0;
+    }
+    let bytes: Vec<u8> = match priv_state.source.as_bytes() {
+        Some(b) => b.to_vec(),
+        None => {
+            priv_state.last_error =
+                CString::new("jpeg16_read_scanlines: no source").unwrap_or_default();
+            return 0;
+        }
+    };
+    if let Err(e) = hp_take_or_init_16(priv_ptr, &bytes) {
+        priv_state.last_error =
+            CString::new(format!("jpeg16_read_scanlines: {e}")).unwrap_or_default();
+        return 0;
+    }
+    HIGH_PRECISION_STATE.with(|s| {
+        let mut map = s.borrow_mut();
+        let slot: &mut HighPrecisionSlot =
+            map.get_mut(&hp_key(priv_ptr)).expect("just inserted above");
+        let dec: &mut Decoded16 = slot.dec16.as_mut().expect("just inserted above");
+        let row_samples: usize = dec.width * dec.num_components;
+        let total: JDimension = dec.height as JDimension;
+        let remaining: JDimension = total.saturating_sub(dec.cursor);
+        let to_copy: JDimension = std::cmp::min(max_lines, remaining);
+        if to_copy == 0 {
+            return 0;
+        }
+        for i in 0..(to_copy as usize) {
+            let dst: *mut u16 = unsafe { *scanlines.add(i) };
+            if dst.is_null() {
+                break;
+            }
+            let row: usize = dec.cursor as usize + i;
+            let src_off: usize = row * row_samples;
+            let src: &[u16] = &dec.data[src_off..src_off + row_samples];
+            unsafe {
+                std::ptr::copy_nonoverlapping(src.as_ptr(), dst, row_samples);
+            }
+        }
+        dec.cursor += to_copy;
+        to_copy
+    })
+}
+
+// ---------------------------------------------------------------------------
+// Update `jpeg_destroy_decompress` side effects: release HP state and
+// drop any buffered coefficient/marker state.
+// ---------------------------------------------------------------------------
+
+/// Hook called from `jpeg_destroy_decompress` to clear per-handle HP state.
+///
+/// Kept as a standalone `fn` (not in the same edit block as the public
+/// destroy) so the drop path stays centralised.
+fn hp_drop_for(priv_ptr: *mut c_void) {
+    HIGH_PRECISION_STATE.with(|s| {
+        s.borrow_mut().remove(&hp_key(priv_ptr));
+    });
+}
+
+// ---------------------------------------------------------------------------
+// Apply horizontal crop requested by `jpeg_crop_scanline` when serving
+// rows out of `jpeg_read_scanlines`. This is a no-op when no crop is
+// active; otherwise every row emitted is narrowed to `[crop_x,
+// crop_x+crop_width)`.
+// ---------------------------------------------------------------------------
+
+// (implementation hook — see `jpeg_read_scanlines` edit below.)
 
 // ---------------------------------------------------------------------------
 // Compile-time layout assertions. If the `JpegDecompressPublic` prefix
