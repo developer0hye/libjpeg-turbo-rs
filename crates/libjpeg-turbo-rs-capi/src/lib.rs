@@ -69,13 +69,14 @@ pub use jpeglib::{
 
 // Classic libjpeg-style `jpeg_*` encode entry points (FFI C2-*).
 pub use jpeglib::{
+    jcopy_block_row, jdiv_round_up, jpeg12_write_scanlines, jpeg16_write_scanlines,
     jpeg_CreateCompress, jpeg_add_quant_table, jpeg_create_compress, jpeg_default_colorspace,
     jpeg_default_qtables, jpeg_destroy_compress, jpeg_enable_lossless, jpeg_finish_compress,
-    jpeg_mem_dest, jpeg_quality_scaling, jpeg_set_colorspace, jpeg_set_defaults, jpeg_set_quality,
-    jpeg_simple_progression, jpeg_start_compress, jpeg_stdio_dest, jpeg_suppress_tables,
-    jpeg_write_icc_profile, jpeg_write_m_byte, jpeg_write_m_header, jpeg_write_marker,
-    jpeg_write_scanlines, jpeg_write_tables, JpegComponentInfoCompress, JpegCompressPublic,
-    JpegDestinationMgr,
+    jpeg_mem_dest, jpeg_quality_scaling, jpeg_resync_to_restart, jpeg_set_colorspace,
+    jpeg_set_defaults, jpeg_set_quality, jpeg_simple_progression, jpeg_start_compress,
+    jpeg_stdio_dest, jpeg_suppress_tables, jpeg_write_coefficients, jpeg_write_icc_profile,
+    jpeg_write_m_byte, jpeg_write_m_header, jpeg_write_marker, jpeg_write_scanlines,
+    jpeg_write_tables, JpegComponentInfoCompress, JpegCompressPublic, JpegDestinationMgr,
 };
 
 // Legacy TJ1/TJ2 aliases — thin wrappers around the TJ3 surface above.

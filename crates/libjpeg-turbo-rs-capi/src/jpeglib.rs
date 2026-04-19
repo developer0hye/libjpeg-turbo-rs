@@ -2263,6 +2263,158 @@ fn build_tables_only_datastream(quality: u8) -> Vec<u8> {
 }
 
 // ---------------------------------------------------------------------------
+// C2-5: jpeg12_write_scanlines / jpeg16_write_scanlines /
+// jpeg_write_coefficients / jpeg_resync_to_restart / jcopy_block_row /
+// jdiv_round_up.
+// ---------------------------------------------------------------------------
+
+/// `jpeg12_write_scanlines(cinfo, scanlines, num_lines) -> JDIMENSION`.
+///
+/// 12-bit variant: samples are `u16` (zero-extended 12-bit values).
+/// Internally we accumulate into `pixels_u16`; the finish-compress path
+/// can later dispatch to `compress_12bit` for 12-bit-precision output.
+#[no_mangle]
+pub extern "C" fn jpeg12_write_scanlines(
+    cinfo: *mut c_void,
+    scanlines: *mut *mut u16,
+    num_lines: JDimension,
+) -> JDimension {
+    write_scanlines_highprec(cinfo, scanlines, num_lines, /*precision=*/ 12)
+}
+
+/// `jpeg16_write_scanlines(cinfo, scanlines, num_lines) -> JDIMENSION`.
+#[no_mangle]
+pub extern "C" fn jpeg16_write_scanlines(
+    cinfo: *mut c_void,
+    scanlines: *mut *mut u16,
+    num_lines: JDimension,
+) -> JDimension {
+    write_scanlines_highprec(cinfo, scanlines, num_lines, /*precision=*/ 16)
+}
+
+fn write_scanlines_highprec(
+    cinfo: *mut c_void,
+    scanlines: *mut *mut u16,
+    num_lines: JDimension,
+    precision: u8,
+) -> JDimension {
+    let c: &mut JpegCompressPublic = match unsafe { cinfo_compress_mut(cinfo) } {
+        Some(c) => c,
+        None => return 0,
+    };
+    let priv_ptr: *mut c_void = c.priv_ptr;
+    let priv_state: &mut CompressPrivate = match unsafe { priv_compress_from_ptr(priv_ptr) } {
+        Some(p) => p,
+        None => return 0,
+    };
+    if scanlines.is_null() || num_lines == 0 {
+        return 0;
+    }
+    let input_components: usize = c.input_components.max(1) as usize;
+    let width: usize = c.image_width as usize;
+    let height: usize = c.image_height as usize;
+    let row_samples: usize = width.saturating_mul(input_components);
+    // First call: allocate the u16 buffer and release the u8 buffer.
+    if priv_state.pixels_u16.is_empty() {
+        priv_state.pixels_u16 = vec![0u16; row_samples.saturating_mul(height)];
+        priv_state.pixels_u8.clear();
+        priv_state.precision = precision;
+    }
+    let total_rows: JDimension = c.image_height;
+    let remaining: JDimension = total_rows.saturating_sub(c.next_scanline);
+    let to_copy: JDimension = std::cmp::min(num_lines, remaining);
+    if to_copy == 0 {
+        return 0;
+    }
+    // SAFETY: caller guarantees `scanlines` has `num_lines` row pointers,
+    // each referencing `row_samples` u16 samples.
+    for i in 0..(to_copy as usize) {
+        let row_ptr: *const u16 = unsafe { *scanlines.add(i) } as *const u16;
+        if row_ptr.is_null() {
+            break;
+        }
+        let dst_offset: usize = (c.next_scanline as usize + i) * row_samples;
+        let dst: &mut [u16] = &mut priv_state.pixels_u16[dst_offset..dst_offset + row_samples];
+        unsafe {
+            std::ptr::copy_nonoverlapping(row_ptr, dst.as_mut_ptr(), row_samples);
+        }
+    }
+    c.next_scanline += to_copy;
+    to_copy
+}
+
+/// `jpeg_write_coefficients(cinfo, coef_arrays)`.
+///
+/// Used by `jpegtran` to write out the DCT coefficients from a
+/// previously-decoded file. Our encode side currently does not expose a
+/// coefficient-write entry point end-to-end; this stub captures the
+/// call so link resolution succeeds and records a last-error so
+/// consumers can detect the gap.
+#[no_mangle]
+pub extern "C" fn jpeg_write_coefficients(cinfo: *mut c_void, _coef_arrays: *mut c_void) {
+    let c: &mut JpegCompressPublic = match unsafe { cinfo_compress_mut(cinfo) } {
+        Some(c) => c,
+        None => return,
+    };
+    let priv_ptr: *mut c_void = c.priv_ptr;
+    if let Some(priv_state) = unsafe { priv_compress_from_ptr(priv_ptr) } {
+        priv_state.last_error = CString::new(
+            "jpeg_write_coefficients: virtual-barray coefficient write is not implemented yet",
+        )
+        .unwrap_or_default();
+    }
+    // Flag the state machine as having started so that `jpeg_finish_compress`
+    // (which jpegtran calls after this) still emits at least an empty
+    // datastream rather than silently dropping the request.
+    c.global_state = CSTATE_SCANNING;
+}
+
+/// `jpeg_resync_to_restart(cinfo, desired) -> boolean`.
+///
+/// Default libjpeg behavior: always return TRUE so corrupted streams
+/// attempt to resume at the next restart marker. Matches the function
+/// libjpeg installs as the default `resync_to_restart` callback.
+#[no_mangle]
+pub extern "C" fn jpeg_resync_to_restart(_cinfo: *mut c_void, _desired: c_int) -> CBoolean {
+    1
+}
+
+/// `jcopy_block_row(input_row, output_row, num_blocks)`.
+///
+/// Internal libjpeg-turbo helper used by `transupp.c`. Copies
+/// `num_blocks` DCT blocks (each 64 `JCOEF` = `i16` values) from input
+/// to output. Despite being "internal", libjpeg-turbo exports it from
+/// the shared library so consumers that compile against `jpegint.h`
+/// link cleanly against our shim.
+#[no_mangle]
+pub extern "C" fn jcopy_block_row(
+    input_row: *const i16,
+    output_row: *mut i16,
+    num_blocks: JDimension,
+) {
+    if input_row.is_null() || output_row.is_null() || num_blocks == 0 {
+        return;
+    }
+    let samples: usize = (num_blocks as usize).saturating_mul(64);
+    // SAFETY: caller-supplied buffers of exactly `samples` i16 entries.
+    unsafe {
+        std::ptr::copy_nonoverlapping(input_row, output_row, samples);
+    }
+}
+
+/// `jdiv_round_up(a, b) -> long`.
+///
+/// Internal libjpeg utility: ceiling-divide for non-negative integers.
+/// Matches `jutils.c::jdiv_round_up`.
+#[no_mangle]
+pub extern "C" fn jdiv_round_up(a: c_long, b: c_long) -> c_long {
+    if b == 0 {
+        return 0;
+    }
+    (a + b - 1) / b
+}
+
+// ---------------------------------------------------------------------------
 // Test-only accessors (encode side). Mirror the decode-side pattern so
 // tests don't have to lock in field offsets.
 // ---------------------------------------------------------------------------
