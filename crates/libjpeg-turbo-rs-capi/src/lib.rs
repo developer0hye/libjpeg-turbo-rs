@@ -70,8 +70,9 @@ pub use jpeglib::{
 // Classic libjpeg-style `jpeg_*` encode entry points (FFI C2-*).
 pub use jpeglib::{
     jpeg_CreateCompress, jpeg_create_compress, jpeg_default_colorspace, jpeg_destroy_compress,
-    jpeg_mem_dest, jpeg_set_colorspace, jpeg_set_defaults, jpeg_set_quality, jpeg_stdio_dest,
-    JpegComponentInfoCompress, JpegCompressPublic, JpegDestinationMgr,
+    jpeg_finish_compress, jpeg_mem_dest, jpeg_set_colorspace, jpeg_set_defaults, jpeg_set_quality,
+    jpeg_start_compress, jpeg_stdio_dest, jpeg_write_scanlines, JpegComponentInfoCompress,
+    JpegCompressPublic, JpegDestinationMgr,
 };
 
 // Legacy TJ1/TJ2 aliases — thin wrappers around the TJ3 surface above.

@@ -1520,6 +1520,379 @@ pub extern "C" fn jpeg_set_quality(cinfo: *mut c_void, quality: c_int, _force_ba
 }
 
 // ---------------------------------------------------------------------------
+// C2-2: jpeg_start_compress / jpeg_write_scanlines / jpeg_finish_compress.
+// ---------------------------------------------------------------------------
+
+/// Derive the chroma subsampling that applies to the YCbCr luma channel,
+/// consulting `comp_info[0]` since that's what cjpeg-style callers set.
+fn subsampling_from_comp_info(
+    priv_state: &CompressPrivate,
+    num_components: c_int,
+) -> libjpeg_turbo_rs::Subsampling {
+    use libjpeg_turbo_rs::Subsampling;
+    if num_components < 2 || priv_state.comp_info.is_empty() {
+        // Grayscale has no meaningful subsampling; S444 is the default.
+        return Subsampling::S444;
+    }
+    let luma: &JpegComponentInfoCompress = &priv_state.comp_info[0];
+    match (luma.h_samp_factor, luma.v_samp_factor) {
+        (1, 1) => Subsampling::S444,
+        (2, 1) => Subsampling::S422,
+        (2, 2) => Subsampling::S420,
+        (1, 2) => Subsampling::S440,
+        (4, 1) => Subsampling::S411,
+        (1, 4) => Subsampling::S441,
+        _ => Subsampling::S444,
+    }
+}
+
+/// Resolve the input `PixelFormat` matching the caller's `in_color_space`
+/// and `input_components`. Falls back to `Rgb` when we don't recognise
+/// the space; writers handle grayscale explicitly.
+fn input_pixel_format(c: &JpegCompressPublic) -> PixelFormat {
+    if let Some(pf) = jcs_to_pixel_format_for_input(c.in_color_space) {
+        return pf;
+    }
+    match c.input_components {
+        1 => PixelFormat::Grayscale,
+        3 => PixelFormat::Rgb,
+        4 => PixelFormat::Cmyk,
+        _ => PixelFormat::Rgb,
+    }
+}
+
+/// `jpeg_start_compress(cinfo, write_all_tables)`.
+///
+/// Transitions the state machine into SCANNING and primes the staging
+/// buffer. Actual entropy coding happens inside `jpeg_finish_compress`
+/// once all scanlines are present — libjpeg lets callers stream rows
+/// either way, but our Rust-side encoder takes the entire image up
+/// front, so we accumulate.
+#[no_mangle]
+pub extern "C" fn jpeg_start_compress(cinfo: *mut c_void, _write_all_tables: CBoolean) {
+    let c: &mut JpegCompressPublic = match unsafe { cinfo_compress_mut(cinfo) } {
+        Some(c) => c,
+        None => return,
+    };
+    let priv_ptr: *mut c_void = c.priv_ptr;
+    let priv_state: &mut CompressPrivate = match unsafe { priv_compress_from_ptr(priv_ptr) } {
+        Some(p) => p,
+        None => return,
+    };
+    c.global_state = CSTATE_SCANNING;
+    c.next_scanline = 0;
+
+    let input_components: usize = c.input_components.max(1) as usize;
+    let width: usize = c.image_width as usize;
+    let height: usize = c.image_height as usize;
+    let row_bytes: usize = width.saturating_mul(input_components);
+    let total_bytes: usize = row_bytes.saturating_mul(height);
+    priv_state.pixels_u8.clear();
+    priv_state.pixels_u8.resize(total_bytes, 0);
+    priv_state.pixels_u16.clear();
+    priv_state.have_started = true;
+    priv_state.tables_only = false;
+
+    // Kick the destination manager via `init_destination` if installed so
+    // the first write_scanline has a live staging buffer waiting.
+    if !c.dest.is_null() {
+        let dest: &JpegDestinationMgr = unsafe { &*c.dest };
+        if let Some(init) = dest.init_destination {
+            unsafe { init(cinfo) };
+        }
+    }
+}
+
+/// `jpeg_write_scanlines(cinfo, scanlines, num_lines) -> JDIMENSION`.
+///
+/// Copies up to `num_lines` rows from the application's row-pointer
+/// array into our accumulation buffer. Returns the number actually
+/// stored (may be less when near the image bottom).
+#[no_mangle]
+pub extern "C" fn jpeg_write_scanlines(
+    cinfo: *mut c_void,
+    scanlines: *mut *mut u8,
+    num_lines: JDimension,
+) -> JDimension {
+    let c: &mut JpegCompressPublic = match unsafe { cinfo_compress_mut(cinfo) } {
+        Some(c) => c,
+        None => return 0,
+    };
+    let priv_ptr: *mut c_void = c.priv_ptr;
+    let priv_state: &mut CompressPrivate = match unsafe { priv_compress_from_ptr(priv_ptr) } {
+        Some(p) => p,
+        None => return 0,
+    };
+    if scanlines.is_null() || num_lines == 0 {
+        return 0;
+    }
+    let input_components: usize = c.input_components.max(1) as usize;
+    let row_bytes: usize = (c.image_width as usize).saturating_mul(input_components);
+    let total_rows: JDimension = c.image_height;
+    let remaining: JDimension = total_rows.saturating_sub(c.next_scanline);
+    let to_copy: JDimension = std::cmp::min(num_lines, remaining);
+    if to_copy == 0 {
+        return 0;
+    }
+    // SAFETY: caller guarantees `scanlines` holds `num_lines` row
+    // pointers, each referencing at least `row_bytes` bytes.
+    for i in 0..(to_copy as usize) {
+        let row_ptr: *const u8 = unsafe { *scanlines.add(i) } as *const u8;
+        if row_ptr.is_null() {
+            break;
+        }
+        let dst_offset: usize = (c.next_scanline as usize + i) * row_bytes;
+        let dst: &mut [u8] = &mut priv_state.pixels_u8[dst_offset..dst_offset + row_bytes];
+        unsafe {
+            std::ptr::copy_nonoverlapping(row_ptr, dst.as_mut_ptr(), row_bytes);
+        }
+    }
+    c.next_scanline += to_copy;
+    to_copy
+}
+
+/// Actually invoke the Rust encoder over the accumulated pixels. On
+/// success, push the resulting bytes through the installed destination
+/// manager (via `empty_output_buffer` flushes + `term_destination`).
+fn run_encoder_and_flush(c: &mut JpegCompressPublic, priv_state: &mut CompressPrivate) -> bool {
+    let width: usize = c.image_width as usize;
+    let height: usize = c.image_height as usize;
+    if width == 0 || height == 0 {
+        return false;
+    }
+    let pf: PixelFormat = input_pixel_format(c);
+    let subsamp: libjpeg_turbo_rs::Subsampling =
+        subsampling_from_comp_info(priv_state, c.num_components);
+    priv_state.subsampling = subsamp;
+
+    // Choose encode variant based on parameters captured earlier.
+    let bytes_result = if priv_state.lossless_predictor != 0 {
+        libjpeg_turbo_rs::compress_lossless_extended(
+            &priv_state.pixels_u8,
+            width,
+            height,
+            pf,
+            priv_state.lossless_predictor,
+            priv_state.lossless_point_transform,
+        )
+    } else if c.progressive_mode != 0 && c.arith_code != 0 {
+        libjpeg_turbo_rs::compress_arithmetic_progressive(
+            &priv_state.pixels_u8,
+            width,
+            height,
+            pf,
+            priv_state.quality,
+            subsamp,
+        )
+    } else if c.progressive_mode != 0 {
+        libjpeg_turbo_rs::compress_progressive(
+            &priv_state.pixels_u8,
+            width,
+            height,
+            pf,
+            priv_state.quality,
+            subsamp,
+        )
+    } else if c.arith_code != 0 {
+        libjpeg_turbo_rs::compress_arithmetic(
+            &priv_state.pixels_u8,
+            width,
+            height,
+            pf,
+            priv_state.quality,
+            subsamp,
+        )
+    } else if c.optimize_coding != 0 {
+        libjpeg_turbo_rs::compress_optimized(
+            &priv_state.pixels_u8,
+            width,
+            height,
+            pf,
+            priv_state.quality,
+            subsamp,
+        )
+    } else {
+        libjpeg_turbo_rs::compress(
+            &priv_state.pixels_u8,
+            width,
+            height,
+            pf,
+            priv_state.quality,
+            subsamp,
+        )
+    };
+
+    let encoded: Vec<u8> = match bytes_result {
+        Ok(b) => b,
+        Err(e) => {
+            priv_state.last_error =
+                CString::new(format!("jpeg_finish_compress: {e}")).unwrap_or_default();
+            return false;
+        }
+    };
+
+    // Inject application-supplied markers right after SOI (offset 2).
+    let with_markers: Vec<u8> =
+        if priv_state.pending_markers.is_empty() && priv_state.icc_profile.is_none() {
+            encoded
+        } else {
+            inject_markers_after_soi(&encoded, priv_state)
+        };
+
+    // Push the bytes through the destination manager by repeatedly
+    // filling the staging buffer and calling `empty_output_buffer`
+    // when it overflows, then `term_destination` at EOF.
+    push_bytes_through_dest_mgr(c, priv_state, &with_markers);
+    true
+}
+
+/// Emit `encoded` JPEG bytes by writing into the destination manager's
+/// `next_output_byte` buffer, invoking `empty_output_buffer` whenever
+/// the staging buffer fills.
+fn push_bytes_through_dest_mgr(
+    c: &mut JpegCompressPublic,
+    priv_state: &mut CompressPrivate,
+    encoded: &[u8],
+) {
+    if c.dest.is_null() {
+        return;
+    }
+    let mut offset: usize = 0;
+    while offset < encoded.len() {
+        // Refill staging if empty.
+        let mut need_refill: bool = false;
+        {
+            let dest: &JpegDestinationMgr = unsafe { &*c.dest };
+            if dest.free_in_buffer == 0 || dest.next_output_byte.is_null() {
+                need_refill = true;
+            }
+        }
+        if need_refill {
+            // First chunk: rely on caller's init_destination having
+            // happened earlier; subsequent chunks need empty_output.
+            let empty_fn: Option<unsafe extern "C" fn(*mut c_void) -> CBoolean> =
+                unsafe { (*c.dest).empty_output_buffer };
+            if let Some(f) = empty_fn {
+                unsafe {
+                    f(c as *mut JpegCompressPublic as *mut c_void);
+                }
+            }
+        }
+        // Copy as much as fits into the staging buffer this round.
+        let (dst_ptr, capacity): (*mut u8, usize) = {
+            let dest: &JpegDestinationMgr = unsafe { &*c.dest };
+            (dest.next_output_byte, dest.free_in_buffer)
+        };
+        if dst_ptr.is_null() || capacity == 0 {
+            break;
+        }
+        let take: usize = std::cmp::min(capacity, encoded.len() - offset);
+        unsafe {
+            std::ptr::copy_nonoverlapping(encoded.as_ptr().add(offset), dst_ptr, take);
+            let dest: &mut JpegDestinationMgr = &mut *c.dest;
+            dest.next_output_byte = dst_ptr.add(take);
+            dest.free_in_buffer -= take;
+        }
+        offset += take;
+    }
+    // Emit the terminal flush.
+    let term_fn: Option<unsafe extern "C" fn(*mut c_void)> = unsafe { (*c.dest).term_destination };
+    if let Some(f) = term_fn {
+        unsafe {
+            f(c as *mut JpegCompressPublic as *mut c_void);
+        }
+    }
+    // After term_destination the staging buffer is invalid; zero it.
+    let dest: &mut JpegDestinationMgr = unsafe { &mut *c.dest };
+    dest.next_output_byte = std::ptr::null_mut();
+    dest.free_in_buffer = 0;
+    // Prevent unused warning.
+    let _ = priv_state;
+}
+
+/// Construct a new byte buffer that starts with the encoded SOI marker,
+/// inserts any pending APPn markers and (optionally) the ICC_PROFILE
+/// chunks, then continues with the original stream.
+fn inject_markers_after_soi(encoded: &[u8], priv_state: &CompressPrivate) -> Vec<u8> {
+    if encoded.len() < 2 || encoded[0] != 0xFF || encoded[1] != 0xD8 {
+        // Not a JPEG stream — leave untouched.
+        return encoded.to_vec();
+    }
+    let mut out: Vec<u8> = Vec::with_capacity(encoded.len() + 64);
+    out.extend_from_slice(&encoded[..2]);
+
+    // Emit APPn markers the caller requested via jpeg_write_marker.
+    for (code, data) in &priv_state.pending_markers {
+        write_marker_segment(&mut out, *code, data);
+    }
+    // Emit ICC profile via the standard APP2 multi-chunk layout.
+    if let Some(icc) = &priv_state.icc_profile {
+        write_app2_icc_inline(&mut out, icc);
+    }
+    out.extend_from_slice(&encoded[2..]);
+    out
+}
+
+/// Emit APP2 "ICC_PROFILE" chunks in the standard multi-segment layout.
+/// Ported from `src/encode/marker_writer.rs::write_app2_icc` so the
+/// classic `jpeg_write_icc_profile` path doesn't have to cross a
+/// private module boundary.
+fn write_app2_icc_inline(buf: &mut Vec<u8>, profile: &[u8]) {
+    const ICC_OVERHEAD: usize = 14;
+    const MAX_DATA: usize = 65533 - ICC_OVERHEAD;
+    let num_markers: usize = profile.len().div_ceil(MAX_DATA);
+    let mut offset: usize = 0;
+    for seq in 1..=num_markers {
+        let chunk_len: usize = (profile.len() - offset).min(MAX_DATA);
+        let marker_len: u16 = (ICC_OVERHEAD + chunk_len) as u16 + 2;
+        buf.push(0xFF);
+        buf.push(0xE2);
+        buf.extend_from_slice(&marker_len.to_be_bytes());
+        buf.extend_from_slice(b"ICC_PROFILE\0");
+        buf.push(seq as u8);
+        buf.push(num_markers as u8);
+        buf.extend_from_slice(&profile[offset..offset + chunk_len]);
+        offset += chunk_len;
+    }
+}
+
+/// Write a single `marker_code` segment with `data`. The length field is
+/// `len + 2` (includes the length word itself); oversized segments are
+/// truncated to fit libjpeg's 65533-byte data limit.
+fn write_marker_segment(out: &mut Vec<u8>, marker_code: c_int, data: &[u8]) {
+    const MAX_DATA: usize = 65533;
+    let len: usize = std::cmp::min(data.len(), MAX_DATA);
+    let code: u8 = (marker_code & 0xFF) as u8;
+    out.push(0xFF);
+    out.push(code);
+    let seg_len: u16 = (len as u16).wrapping_add(2);
+    out.push((seg_len >> 8) as u8);
+    out.push((seg_len & 0xFF) as u8);
+    out.extend_from_slice(&data[..len]);
+}
+
+/// `jpeg_finish_compress(cinfo)` — close the datastream, flush to sink.
+#[no_mangle]
+pub extern "C" fn jpeg_finish_compress(cinfo: *mut c_void) {
+    let c: &mut JpegCompressPublic = match unsafe { cinfo_compress_mut(cinfo) } {
+        Some(c) => c,
+        None => return,
+    };
+    let priv_ptr: *mut c_void = c.priv_ptr;
+    let priv_state: &mut CompressPrivate = match unsafe { priv_compress_from_ptr(priv_ptr) } {
+        Some(p) => p,
+        None => return,
+    };
+    if !priv_state.have_started {
+        return;
+    }
+    priv_state.have_started = false;
+    // Run the encoder and push bytes through the destination manager.
+    let _ = run_encoder_and_flush(c, priv_state);
+    c.global_state = CSTATE_START;
+}
+
+// ---------------------------------------------------------------------------
 // Test-only accessors (encode side). Mirror the decode-side pattern so
 // tests don't have to lock in field offsets.
 // ---------------------------------------------------------------------------
