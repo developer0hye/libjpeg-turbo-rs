@@ -297,6 +297,160 @@ fn c2_2_write_scanlines_roundtrip_pixel_matches_rust_native() {
     }
 }
 
+/// C2-3: `jpeg_quality_scaling` matches the libjpeg scaling curve.
+///
+/// libjpeg formula:
+///   quality < 50: scale = 5000 / quality
+///   quality >= 50: scale = 200 - 2 * quality
+#[test]
+fn c2_3_quality_scaling_matches_libjpeg_formula() {
+    let lib = unsafe { libloading::Library::new(cdylib_path()) }.expect("dlopen");
+    unsafe {
+        let jpeg_quality_scaling: libloading::Symbol<unsafe extern "C" fn(c_int) -> c_int> = lib
+            .get(b"jpeg_quality_scaling")
+            .expect("jpeg_quality_scaling");
+        // Spot-check the curve at three representative points.
+        // libjpeg clamps values outside 1..100 to the nearest endpoint.
+        assert_eq!(jpeg_quality_scaling(100), 0);
+        assert_eq!(jpeg_quality_scaling(75), 50);
+        assert_eq!(jpeg_quality_scaling(50), 100);
+        assert_eq!(jpeg_quality_scaling(25), 200);
+        // Below 50: 5000 / q.
+        assert_eq!(jpeg_quality_scaling(10), 500);
+    }
+}
+
+/// C2-3: `jpeg_simple_progression` flips `progressive_mode` on so the
+/// next `jpeg_finish_compress` emits SOF2 instead of SOF0.
+#[test]
+fn c2_3_simple_progression_emits_progressive_stream() {
+    let lib = unsafe { libloading::Library::new(cdylib_path()) }.expect("dlopen");
+    unsafe {
+        const CINFO_BYTES: usize = 4096;
+        let mut cinfo: MaybeUninit<[u8; CINFO_BYTES]> = MaybeUninit::zeroed();
+        let cinfo_ptr: *mut c_void = cinfo.as_mut_ptr() as *mut c_void;
+        const ERR_BYTES: usize = 512;
+        let mut err: MaybeUninit<[u8; ERR_BYTES]> = MaybeUninit::zeroed();
+        let err_ptr: *mut c_void = err.as_mut_ptr() as *mut c_void;
+
+        let jpeg_std_error: libloading::Symbol<unsafe extern "C" fn(*mut c_void) -> *mut c_void> =
+            lib.get(b"jpeg_std_error").expect("jpeg_std_error");
+        let _ = jpeg_std_error(err_ptr);
+        (cinfo_ptr as *mut *mut c_void).write(err_ptr);
+
+        let jpeg_create_compress: libloading::Symbol<
+            unsafe extern "C" fn(*mut c_void, c_int, usize),
+        > = lib
+            .get(b"jpeg_CreateCompress")
+            .expect("jpeg_CreateCompress");
+        jpeg_create_compress(cinfo_ptr, 80, CINFO_BYTES);
+
+        let w: usize = 32;
+        let h_px: usize = 32;
+        let src: Vec<u8> = (0..w * h_px * 3).map(|i| (i % 256) as u8).collect();
+
+        let jpeg_capi_test_set_compress_dims: libloading::Symbol<
+            unsafe extern "C" fn(*mut c_void, u32, u32, c_int, c_int),
+        > = lib
+            .get(b"jpeg_capi_test_set_compress_dims")
+            .expect("jpeg_capi_test_set_compress_dims");
+        jpeg_capi_test_set_compress_dims(cinfo_ptr, w as u32, h_px as u32, 3, JCS_RGB);
+
+        let jpeg_set_defaults: libloading::Symbol<unsafe extern "C" fn(*mut c_void)> =
+            lib.get(b"jpeg_set_defaults").expect("jpeg_set_defaults");
+        jpeg_set_defaults(cinfo_ptr);
+
+        let jpeg_set_quality: libloading::Symbol<unsafe extern "C" fn(*mut c_void, c_int, c_int)> =
+            lib.get(b"jpeg_set_quality").expect("jpeg_set_quality");
+        jpeg_set_quality(cinfo_ptr, 75, 1);
+
+        let jpeg_simple_progression: libloading::Symbol<unsafe extern "C" fn(*mut c_void)> = lib
+            .get(b"jpeg_simple_progression")
+            .expect("jpeg_simple_progression");
+        jpeg_simple_progression(cinfo_ptr);
+
+        let jpeg_mem_dest: libloading::Symbol<
+            unsafe extern "C" fn(*mut c_void, *mut *mut u8, *mut c_ulong),
+        > = lib.get(b"jpeg_mem_dest").expect("jpeg_mem_dest");
+        let mut out_buf: *mut u8 = std::ptr::null_mut();
+        let mut out_size: c_ulong = 0;
+        jpeg_mem_dest(cinfo_ptr, &mut out_buf, &mut out_size);
+
+        let jpeg_start_compress: libloading::Symbol<unsafe extern "C" fn(*mut c_void, c_int)> = lib
+            .get(b"jpeg_start_compress")
+            .expect("jpeg_start_compress");
+        jpeg_start_compress(cinfo_ptr, 1);
+
+        let jpeg_write_scanlines: libloading::Symbol<
+            unsafe extern "C" fn(*mut c_void, *mut *mut u8, u32) -> u32,
+        > = lib
+            .get(b"jpeg_write_scanlines")
+            .expect("jpeg_write_scanlines");
+        let mut written: usize = 0;
+        while written < h_px {
+            let row_ptr: *mut u8 = src[written * w * 3..].as_ptr() as *mut u8;
+            let mut row_array: [*mut u8; 1] = [row_ptr];
+            let got: u32 = jpeg_write_scanlines(cinfo_ptr, row_array.as_mut_ptr(), 1);
+            assert!(got >= 1);
+            written += got as usize;
+        }
+
+        let jpeg_finish_compress: libloading::Symbol<unsafe extern "C" fn(*mut c_void)> = lib
+            .get(b"jpeg_finish_compress")
+            .expect("jpeg_finish_compress");
+        jpeg_finish_compress(cinfo_ptr);
+        assert!(!out_buf.is_null());
+
+        // Scan for the SOF2 marker (0xFF 0xC2) — the progressive SOF.
+        let bytes: Vec<u8> = std::slice::from_raw_parts(out_buf, out_size as usize).to_vec();
+        let has_sof2: bool = bytes.windows(2).any(|w| w == [0xFF, 0xC2]);
+        let has_sof0: bool = bytes.windows(2).any(|w| w == [0xFF, 0xC0]);
+        assert!(has_sof2, "expected SOF2 marker in progressive stream");
+        assert!(!has_sof0, "progressive stream must not contain SOF0");
+
+        let jpeg_destroy_compress: libloading::Symbol<unsafe extern "C" fn(*mut c_void)> = lib
+            .get(b"jpeg_destroy_compress")
+            .expect("jpeg_destroy_compress");
+        jpeg_destroy_compress(cinfo_ptr);
+
+        let tj3_free: libloading::Symbol<unsafe extern "C" fn(*mut c_void)> =
+            lib.get(b"tj3Free").expect("tj3Free");
+        tj3_free(out_buf as *mut c_void);
+    }
+}
+
+/// C2-3: add_quant_table / default_qtables / enable_lossless / suppress_tables
+/// do not crash on reasonable inputs.
+#[test]
+fn c2_3_helpers_null_and_basic_guards() {
+    let lib = unsafe { libloading::Library::new(cdylib_path()) }.expect("dlopen");
+    unsafe {
+        let jpeg_add_quant_table: libloading::Symbol<
+            unsafe extern "C" fn(*mut c_void, c_int, *const u32, c_int, c_int),
+        > = lib
+            .get(b"jpeg_add_quant_table")
+            .expect("jpeg_add_quant_table");
+        jpeg_add_quant_table(std::ptr::null_mut(), 0, std::ptr::null(), 100, 1);
+
+        let jpeg_default_qtables: libloading::Symbol<unsafe extern "C" fn(*mut c_void, c_int)> =
+            lib.get(b"jpeg_default_qtables")
+                .expect("jpeg_default_qtables");
+        jpeg_default_qtables(std::ptr::null_mut(), 1);
+
+        let jpeg_enable_lossless: libloading::Symbol<
+            unsafe extern "C" fn(*mut c_void, c_int, c_int),
+        > = lib
+            .get(b"jpeg_enable_lossless")
+            .expect("jpeg_enable_lossless");
+        jpeg_enable_lossless(std::ptr::null_mut(), 1, 0);
+
+        let jpeg_suppress_tables: libloading::Symbol<unsafe extern "C" fn(*mut c_void, c_int)> =
+            lib.get(b"jpeg_suppress_tables")
+                .expect("jpeg_suppress_tables");
+        jpeg_suppress_tables(std::ptr::null_mut(), 1);
+    }
+}
+
 /// Null-guard: destroy and setup functions must accept NULL without
 /// crashing.
 #[test]

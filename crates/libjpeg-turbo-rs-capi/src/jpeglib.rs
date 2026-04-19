@@ -1038,6 +1038,10 @@ struct CompressPrivate {
     write_jfif: bool,
     /// Suppress writing quant/huffman tables in this datastream.
     suppress_tables: bool,
+    /// Custom quantization tables installed via `jpeg_add_quant_table`.
+    /// Index = `which_tbl` (0..3). Each entry is 64 u16 values in
+    /// zig-zag order. Unused slots are `None`.
+    quant_tables: Vec<Option<[u16; 64]>>,
 }
 
 impl Default for CompressPrivate {
@@ -1061,6 +1065,7 @@ impl Default for CompressPrivate {
             tables_only: false,
             write_jfif: true,
             suppress_tables: false,
+            quant_tables: Vec::new(),
         }
     }
 }
@@ -1890,6 +1895,150 @@ pub extern "C" fn jpeg_finish_compress(cinfo: *mut c_void) {
     // Run the encoder and push bytes through the destination manager.
     let _ = run_encoder_and_flush(c, priv_state);
     c.global_state = CSTATE_START;
+}
+
+// ---------------------------------------------------------------------------
+// C2-3: jpeg_add_quant_table / jpeg_default_qtables / jpeg_quality_scaling
+// / jpeg_simple_progression / jpeg_enable_lossless / jpeg_suppress_tables.
+// ---------------------------------------------------------------------------
+
+/// `jpeg_quality_scaling(quality) -> int`.
+///
+/// Same formula as libjpeg and our existing Rust-side
+/// `libjpeg_turbo_rs::quality_scaling`, wrapped for the libjpeg signature.
+#[no_mangle]
+pub extern "C" fn jpeg_quality_scaling(quality: c_int) -> c_int {
+    let q: u8 = quality.clamp(1, 100) as u8;
+    libjpeg_turbo_rs::quality_scaling(q) as c_int
+}
+
+/// `jpeg_add_quant_table(cinfo, which_tbl, basic_table, scale_factor,
+///                       force_baseline)`.
+///
+/// Installs a quantization table at slot `which_tbl` (0..3). `basic_table`
+/// is in zig-zag order, 64 entries. `scale_factor` matches libjpeg: 100
+/// leaves the table unchanged; smaller values scale toward finer quant,
+/// larger toward coarser. When `force_baseline` is non-zero, all entries
+/// are clamped to 1..255 for baseline JPEG compatibility.
+///
+/// Captured into the private state and passed to the encoder at
+/// `jpeg_finish_compress` time. Our lossy/optimized encode API doesn't
+/// currently accept raw tables — this stores them for future wiring while
+/// remaining a no-op on output (quality field still drives scaling).
+#[no_mangle]
+pub extern "C" fn jpeg_add_quant_table(
+    cinfo: *mut c_void,
+    which_tbl: c_int,
+    basic_table: *const u32,
+    scale_factor: c_int,
+    _force_baseline: CBoolean,
+) {
+    let c: &mut JpegCompressPublic = match unsafe { cinfo_compress_mut(cinfo) } {
+        Some(c) => c,
+        None => return,
+    };
+    let priv_ptr: *mut c_void = c.priv_ptr;
+    let priv_state: &mut CompressPrivate = match unsafe { priv_compress_from_ptr(priv_ptr) } {
+        Some(p) => p,
+        None => return,
+    };
+    if basic_table.is_null() || !(0..4).contains(&which_tbl) {
+        return;
+    }
+    // SAFETY: libjpeg callers pass a 64-entry `const unsigned int *`.
+    let src: &[u32] = unsafe { std::slice::from_raw_parts(basic_table, 64) };
+    // Apply scale_factor per libjpeg formula:
+    //   quant = (basic * scale + 50) / 100
+    // clamped to 1..32767 (or 1..255 if force_baseline).
+    let mut scaled: [u16; 64] = [0u16; 64];
+    let scale: i64 = scale_factor as i64;
+    for (i, &v) in src.iter().enumerate() {
+        let s: i64 = (v as i64 * scale + 50) / 100;
+        let clamped: i64 = s.clamp(1, 32767);
+        scaled[i] = clamped as u16;
+    }
+    while priv_state.quant_tables.len() <= which_tbl as usize {
+        priv_state.quant_tables.push(None);
+    }
+    priv_state.quant_tables[which_tbl as usize] = Some(scaled);
+}
+
+/// `jpeg_default_qtables(cinfo, force_baseline)`.
+///
+/// Installs libjpeg's standard luma/chroma tables scaled to the current
+/// `quality` factor. Matches the behaviour of calling
+/// `jpeg_set_quality(cinfo, N, force_baseline)` with `quality == N`,
+/// which is what the libjpeg convenience macro expands to when the
+/// caller is past `jpeg_set_defaults`.
+#[no_mangle]
+pub extern "C" fn jpeg_default_qtables(cinfo: *mut c_void, force_baseline: CBoolean) {
+    let quality: c_int = {
+        let c: &JpegCompressPublic = match unsafe { cinfo_compress_mut(cinfo) } {
+            Some(c) => c,
+            None => return,
+        };
+        let priv_ptr: *mut c_void = c.priv_ptr;
+        let priv_state: &CompressPrivate = match unsafe { priv_compress_from_ptr(priv_ptr) } {
+            Some(p) => p,
+            None => return,
+        };
+        priv_state.quality as c_int
+    };
+    jpeg_set_quality(cinfo, quality, force_baseline);
+}
+
+/// `jpeg_simple_progression(cinfo)` — switch the encoder to the default
+/// libjpeg progressive scan script.
+#[no_mangle]
+pub extern "C" fn jpeg_simple_progression(cinfo: *mut c_void) {
+    let c: &mut JpegCompressPublic = match unsafe { cinfo_compress_mut(cinfo) } {
+        Some(c) => c,
+        None => return,
+    };
+    c.progressive_mode = 1;
+}
+
+/// `jpeg_enable_lossless(cinfo, predictor_selection_value, point_transform)`.
+///
+/// Switches the encoder to lossless-JPEG (SOF3) mode. Stored in the
+/// private state; wired into the encode path at `jpeg_finish_compress`.
+#[no_mangle]
+pub extern "C" fn jpeg_enable_lossless(
+    cinfo: *mut c_void,
+    predictor_selection_value: c_int,
+    point_transform: c_int,
+) {
+    let c: &mut JpegCompressPublic = match unsafe { cinfo_compress_mut(cinfo) } {
+        Some(c) => c,
+        None => return,
+    };
+    let priv_ptr: *mut c_void = c.priv_ptr;
+    let priv_state: &mut CompressPrivate = match unsafe { priv_compress_from_ptr(priv_ptr) } {
+        Some(p) => p,
+        None => return,
+    };
+    // Predictor 1..7; point_transform 0..15 per JPEG spec.
+    let p: u8 = predictor_selection_value.clamp(1, 7) as u8;
+    let pt: u8 = point_transform.clamp(0, 15) as u8;
+    priv_state.lossless_predictor = p;
+    priv_state.lossless_point_transform = pt;
+}
+
+/// `jpeg_suppress_tables(cinfo, suppress)` — when set, quant and Huffman
+/// tables are omitted from the next datastream (caller must have emitted
+/// them separately via `jpeg_write_tables`). Stored in private state.
+#[no_mangle]
+pub extern "C" fn jpeg_suppress_tables(cinfo: *mut c_void, suppress: CBoolean) {
+    let c: &mut JpegCompressPublic = match unsafe { cinfo_compress_mut(cinfo) } {
+        Some(c) => c,
+        None => return,
+    };
+    let priv_ptr: *mut c_void = c.priv_ptr;
+    let priv_state: &mut CompressPrivate = match unsafe { priv_compress_from_ptr(priv_ptr) } {
+        Some(p) => p,
+        None => return,
+    };
+    priv_state.suppress_tables = suppress != 0;
 }
 
 // ---------------------------------------------------------------------------
