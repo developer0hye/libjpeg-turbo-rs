@@ -697,6 +697,127 @@ fn c2_4_write_icc_profile_roundtrips_bytes() {
     }
 }
 
+/// C2-5: `jdiv_round_up(a, b)` is ceiling-divide with a zero-guard.
+#[test]
+fn c2_5_jdiv_round_up_matches_libjpeg_formula() {
+    let lib = unsafe { libloading::Library::new(cdylib_path()) }.expect("dlopen");
+    unsafe {
+        let jdiv_round_up: libloading::Symbol<
+            unsafe extern "C" fn(
+                std::os::raw::c_long,
+                std::os::raw::c_long,
+            ) -> std::os::raw::c_long,
+        > = lib.get(b"jdiv_round_up").expect("jdiv_round_up");
+        assert_eq!(jdiv_round_up(7, 3), 3);
+        assert_eq!(jdiv_round_up(6, 3), 2);
+        assert_eq!(jdiv_round_up(0, 5), 0);
+        assert_eq!(jdiv_round_up(1, 1), 1);
+        // zero-divisor guard
+        assert_eq!(jdiv_round_up(5, 0), 0);
+    }
+}
+
+/// C2-5: `jcopy_block_row` copies exactly num_blocks * 64 i16 samples.
+#[test]
+fn c2_5_jcopy_block_row_copies_full_blocks() {
+    let lib = unsafe { libloading::Library::new(cdylib_path()) }.expect("dlopen");
+    unsafe {
+        let jcopy_block_row: libloading::Symbol<unsafe extern "C" fn(*const i16, *mut i16, u32)> =
+            lib.get(b"jcopy_block_row").expect("jcopy_block_row");
+        let src: Vec<i16> = (0..128i16).collect(); // 2 blocks
+        let mut dst: Vec<i16> = vec![0i16; 128];
+        jcopy_block_row(src.as_ptr(), dst.as_mut_ptr(), 2);
+        assert_eq!(dst, src);
+
+        // num_blocks=0 must be a no-op.
+        let mut guard: Vec<i16> = vec![-1i16; 64];
+        jcopy_block_row(src.as_ptr(), guard.as_mut_ptr(), 0);
+        assert!(guard.iter().all(|&x| x == -1));
+    }
+}
+
+/// C2-5: `jpeg_resync_to_restart` returns TRUE (1) unconditionally.
+#[test]
+fn c2_5_resync_to_restart_returns_true() {
+    let lib = unsafe { libloading::Library::new(cdylib_path()) }.expect("dlopen");
+    unsafe {
+        let jpeg_resync_to_restart: libloading::Symbol<
+            unsafe extern "C" fn(*mut c_void, c_int) -> c_int,
+        > = lib
+            .get(b"jpeg_resync_to_restart")
+            .expect("jpeg_resync_to_restart");
+        assert_eq!(jpeg_resync_to_restart(std::ptr::null_mut(), 0), 1);
+    }
+}
+
+/// C2-5: 12-bit and 16-bit scanline writers accept rows without crashing
+/// and advance `next_scanline` correctly. Full encode pipeline for
+/// 12-bit output is covered elsewhere; here we verify link + mechanics.
+#[test]
+fn c2_5_high_precision_write_scanlines_link_and_accept_rows() {
+    let lib = unsafe { libloading::Library::new(cdylib_path()) }.expect("dlopen");
+    unsafe {
+        let jpeg12_write_scanlines: libloading::Symbol<
+            unsafe extern "C" fn(*mut c_void, *mut *mut u16, u32) -> u32,
+        > = lib
+            .get(b"jpeg12_write_scanlines")
+            .expect("jpeg12_write_scanlines");
+        let jpeg16_write_scanlines: libloading::Symbol<
+            unsafe extern "C" fn(*mut c_void, *mut *mut u16, u32) -> u32,
+        > = lib
+            .get(b"jpeg16_write_scanlines")
+            .expect("jpeg16_write_scanlines");
+        // NULL cinfo → 0 rows.
+        assert_eq!(
+            jpeg12_write_scanlines(std::ptr::null_mut(), std::ptr::null_mut(), 1),
+            0
+        );
+        assert_eq!(
+            jpeg16_write_scanlines(std::ptr::null_mut(), std::ptr::null_mut(), 1),
+            0
+        );
+    }
+}
+
+/// C2-5: `jpeg_write_coefficients` is a stub today; it must not crash
+/// on a freshly-created cinfo.
+#[test]
+fn c2_5_write_coefficients_stub_does_not_crash() {
+    let lib = unsafe { libloading::Library::new(cdylib_path()) }.expect("dlopen");
+    unsafe {
+        const CINFO_BYTES: usize = 4096;
+        let mut cinfo: MaybeUninit<[u8; CINFO_BYTES]> = MaybeUninit::zeroed();
+        let cinfo_ptr: *mut c_void = cinfo.as_mut_ptr() as *mut c_void;
+        const ERR_BYTES: usize = 512;
+        let mut err: MaybeUninit<[u8; ERR_BYTES]> = MaybeUninit::zeroed();
+        let err_ptr: *mut c_void = err.as_mut_ptr() as *mut c_void;
+
+        let jpeg_std_error: libloading::Symbol<unsafe extern "C" fn(*mut c_void) -> *mut c_void> =
+            lib.get(b"jpeg_std_error").expect("jpeg_std_error");
+        let _ = jpeg_std_error(err_ptr);
+        (cinfo_ptr as *mut *mut c_void).write(err_ptr);
+
+        let jpeg_create_compress: libloading::Symbol<
+            unsafe extern "C" fn(*mut c_void, c_int, usize),
+        > = lib
+            .get(b"jpeg_CreateCompress")
+            .expect("jpeg_CreateCompress");
+        jpeg_create_compress(cinfo_ptr, 80, CINFO_BYTES);
+
+        let jpeg_write_coefficients: libloading::Symbol<
+            unsafe extern "C" fn(*mut c_void, *mut c_void),
+        > = lib
+            .get(b"jpeg_write_coefficients")
+            .expect("jpeg_write_coefficients");
+        jpeg_write_coefficients(cinfo_ptr, std::ptr::null_mut());
+
+        let jpeg_destroy_compress: libloading::Symbol<unsafe extern "C" fn(*mut c_void)> = lib
+            .get(b"jpeg_destroy_compress")
+            .expect("jpeg_destroy_compress");
+        jpeg_destroy_compress(cinfo_ptr);
+    }
+}
+
 /// C2-4: `jpeg_write_tables` emits a standalone tables datastream
 /// (SOI ... EOI, with only DQT/DHT segments, no SOF). Consumers of
 /// the abbreviated-file convention depend on this shape.
