@@ -59,12 +59,15 @@ pub use yuv::{
     tj3DecompressToYUV8, tj3DecompressToYUVPlanes8, tj3EncodeYUV8, tj3EncodeYUVPlanes8,
 };
 
-// Classic libjpeg-style `jpeg_*` decode entry points (FFI A1-11).
+// Classic libjpeg-style `jpeg_*` decode entry points (FFI A1-11 / C1-1..3).
 pub use jpeglib::{
-    jpeg_CreateDecompress, jpeg_destroy_decompress, jpeg_finish_decompress, jpeg_mem_src,
-    jpeg_read_header, jpeg_read_scanlines, jpeg_start_decompress, jpeg_std_error, jpeg_stdio_src,
-    JpegDecompressPublic, JpegErrorMgr, JpegSourceMgr, JPEG_HEADER_OK, JPEG_HEADER_TABLES_ONLY,
-    JPEG_SUSPENDED,
+    jpeg12_crop_scanline, jpeg12_read_scanlines, jpeg12_skip_scanlines, jpeg16_read_scanlines,
+    jpeg_CreateDecompress, jpeg_copy_critical_parameters, jpeg_core_output_dimensions,
+    jpeg_crop_scanline, jpeg_destroy_decompress, jpeg_finish_decompress, jpeg_mem_src,
+    jpeg_read_coefficients, jpeg_read_header, jpeg_read_icc_profile, jpeg_read_scanlines,
+    jpeg_save_markers, jpeg_set_marker_processor, jpeg_skip_scanlines, jpeg_start_decompress,
+    jpeg_std_error, jpeg_stdio_src, JpegDecompressPublic, JpegErrorMgr, JpegSourceMgr,
+    JPEG_HEADER_OK, JPEG_HEADER_TABLES_ONLY, JPEG_SUSPENDED,
 };
 
 // Legacy TJ1/TJ2 aliases — thin wrappers around the TJ3 surface above.

@@ -113,7 +113,7 @@ pub(crate) fn no_handle_error_ptr() -> *const std::ffi::c_char {
 /// sufficient-size branch).
 #[no_mangle]
 pub extern "C" fn tj3JPEGBufSize(width: c_int, height: c_int, jpeg_subsamp: c_int) -> usize {
-    if width < 1 || height < 1 || jpeg_subsamp < -1 || jpeg_subsamp >= TJ_NUMSAMP {
+    if width < 1 || height < 1 || !(-1..TJ_NUMSAMP).contains(&jpeg_subsamp) {
         set_no_handle_error("tj3JPEGBufSize: invalid argument");
         return 0;
     }
@@ -173,7 +173,7 @@ pub extern "C" fn tj3YUVBufSize(
         set_no_handle_error("tj3YUVBufSize: align must be a power of 2");
         return 0;
     }
-    if subsamp < 0 || subsamp >= TJ_NUMSAMP {
+    if !(0..TJ_NUMSAMP).contains(&subsamp) {
         set_no_handle_error("tj3YUVBufSize: invalid subsampling");
         return 0;
     }
@@ -267,7 +267,7 @@ pub extern "C" fn tj3YUVPlaneSize(
         set_no_handle_error("tj3YUVPlaneSize: width/height must be > 0");
         return 0;
     }
-    if subsamp < 0 || subsamp >= TJ_NUMSAMP {
+    if !(0..TJ_NUMSAMP).contains(&subsamp) {
         set_no_handle_error("tj3YUVPlaneSize: invalid subsampling");
         return 0;
     }
@@ -326,7 +326,7 @@ pub extern "C" fn tj3YUVPlaneWidth(component_id: c_int, width: c_int, subsamp: c
         set_no_handle_error("tj3YUVPlaneWidth: width must be > 0");
         return 0;
     }
-    if subsamp < 0 || subsamp >= TJ_NUMSAMP {
+    if !(0..TJ_NUMSAMP).contains(&subsamp) {
         set_no_handle_error("tj3YUVPlaneWidth: invalid subsampling");
         return 0;
     }
@@ -352,7 +352,7 @@ pub extern "C" fn tj3YUVPlaneHeight(component_id: c_int, height: c_int, subsamp:
         set_no_handle_error("tj3YUVPlaneHeight: height must be > 0");
         return 0;
     }
-    if subsamp < 0 || subsamp >= TJ_NUMSAMP {
+    if !(0..TJ_NUMSAMP).contains(&subsamp) {
         set_no_handle_error("tj3YUVPlaneHeight: invalid subsampling");
         return 0;
     }
