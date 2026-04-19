@@ -1710,58 +1710,46 @@ pub struct JpegDestinationMgr {
     pub term_destination: Option<unsafe extern "C" fn(*mut c_void)>,
 }
 
-/// Public subset of `struct jpeg_compress_struct`. The field order after
-/// `jpeg_common_fields` matches libjpeg 9: `dest`, then the image-
-/// description fields that callers must populate before
-/// `jpeg_set_defaults()`, then the compression parameters, and finally a
-/// `priv_ptr` for Rust-side private state.
+// ---------------------------------------------------------------------------
+// Sub-structs referenced by pointer from `struct jpeg_compress_struct`.
+// We declare them `#[repr(C)]` with the libjpeg field order so callers that
+// dereference the table pointers see the correct layout.
+// ---------------------------------------------------------------------------
+
+/// Mirrors `typedef struct { UINT16 quantval[DCTSIZE2]; boolean sent_table; } JQUANT_TBL;`.
 #[repr(C)]
-pub struct JpegCompressPublic {
-    // --- jpeg_common_fields ------------------------------------------------
-    pub err: *mut JpegErrorMgr,
-    pub mem: *mut c_void,
-    pub progress: *mut c_void,
-    pub client_data: *mut c_void,
-    pub is_decompressor: CBoolean,
-    pub global_state: c_int,
-    // --- compressor-specific: destination manager ------------------------
-    pub dest: *mut JpegDestinationMgr,
-    // --- image description, filled in by caller --------------------------
-    pub image_width: JDimension,
-    pub image_height: JDimension,
-    pub input_components: c_int,
-    pub in_color_space: c_int,
-    // --- parameters set by jpeg_set_defaults ------------------------------
-    pub data_precision: c_int,
-    pub num_components: c_int,
-    pub jpeg_color_space: c_int,
-    pub comp_info: *mut JpegComponentInfoCompress,
-    pub restart_interval: u32,
-    pub restart_in_rows: c_int,
-    pub write_JFIF_header: CBoolean,
-    pub JFIF_major_version: u8,
-    pub JFIF_minor_version: u8,
-    pub density_unit: u8,
-    pub X_density: u16,
-    pub Y_density: u16,
-    pub write_Adobe_marker: CBoolean,
-    pub next_scanline: JDimension,
-    pub progressive_mode: CBoolean,
-    pub arith_code: CBoolean,
-    pub optimize_coding: CBoolean,
-    pub raw_data_in: CBoolean,
-    pub smoothing_factor: c_int,
-    pub dct_method: c_int,
-    // --- private Rust-side state ------------------------------------------
-    pub priv_ptr: *mut c_void,
+pub struct JQuantTblPublic {
+    pub quantval: [u16; 64],
+    pub sent_table: CBoolean,
 }
 
-/// Minimal `jpeg_component_info` surface for the encode path. cjpeg walks
-/// `comp_info[i].h_samp_factor / .v_samp_factor / .quant_tbl_no` to apply
-/// user-set subsampling. We expose just those fields and compute the rest
-/// internally at `jpeg_start_compress` time.
+/// Mirrors `typedef struct { UINT8 bits[17]; UINT8 huffval[256]; boolean sent_table; } JHUFF_TBL;`.
 #[repr(C)]
-pub struct JpegComponentInfoCompress {
+pub struct JHuffTblPublic {
+    pub bits: [u8; 17],
+    pub huffval: [u8; 256],
+    pub sent_table: CBoolean,
+}
+
+/// Mirrors `typedef struct { int comps_in_scan; int component_index[MAX_COMPS_IN_SCAN];
+/// int Ss, Se; int Ah, Al; } jpeg_scan_info;`. `MAX_COMPS_IN_SCAN == 4` per `jpeglib.h`.
+#[repr(C)]
+pub struct JpegScanInfoPublic {
+    pub comps_in_scan: c_int,
+    pub component_index: [c_int; 4],
+    pub Ss: c_int,
+    pub Se: c_int,
+    pub Ah: c_int,
+    pub Al: c_int,
+}
+
+/// Mirrors the full `jpeg_component_info` declared in `jpeglib.h`
+/// (~60 lines). Field order is load-bearing because consumers like cjpeg
+/// (via macros in `jmorecfg.h`) walk these by offset. For
+/// `JPEG_LIB_VERSION >= 70`, the single `DCT_scaled_size` field is
+/// replaced by separate `DCT_h_scaled_size` and `DCT_v_scaled_size`.
+#[repr(C)]
+pub struct JpegComponentInfoPublic {
     pub component_id: c_int,
     pub component_index: c_int,
     pub h_samp_factor: c_int,
@@ -1769,6 +1757,153 @@ pub struct JpegComponentInfoCompress {
     pub quant_tbl_no: c_int,
     pub dc_tbl_no: c_int,
     pub ac_tbl_no: c_int,
+    pub width_in_blocks: JDimension,
+    pub height_in_blocks: JDimension,
+    // JPEG_LIB_VERSION >= 70
+    pub DCT_h_scaled_size: c_int,
+    pub DCT_v_scaled_size: c_int,
+    pub downsampled_width: JDimension,
+    pub downsampled_height: JDimension,
+    pub component_needed: CBoolean,
+    pub MCU_width: c_int,
+    pub MCU_height: c_int,
+    pub MCU_blocks: c_int,
+    pub MCU_sample_width: c_int,
+    pub last_col_width: c_int,
+    pub last_row_height: c_int,
+    pub quant_table: *mut JQuantTblPublic,
+    pub dct_table: *mut c_void,
+}
+
+/// Legacy alias used by the compress pipeline internals. Kept so that
+/// existing compress helpers compile unchanged.
+pub type JpegComponentInfoCompress = JpegComponentInfoPublic;
+
+/// Byte-exact mirror of `struct jpeg_compress_struct` for
+/// `JPEG_LIB_VERSION >= 80`. Field ordering, types, and padding all
+/// match the libjpeg header verbatim so stock `cjpeg`, Pillow, and any
+/// other consumer can link against our shim and read/write every field
+/// at its real libjpeg offset.
+///
+/// We do NOT append a `priv_ptr` tail field past the libjpeg layout —
+/// callers allocate the struct at its canonical size (584 bytes on
+/// LP64) and writing beyond that would corrupt the caller's stack.
+/// The `master: *mut jpeg_comp_master` slot (documented as opaque
+/// libjpeg internal state; stock callers never dereference it) doubles
+/// as the Rust-side private-state pointer.
+#[repr(C)]
+#[allow(non_snake_case)]
+pub struct JpegCompressPublic {
+    // --- jpeg_common_fields (offset 0..40) -------------------------------
+    pub err: *mut JpegErrorMgr,
+    pub mem: *mut c_void,
+    pub progress: *mut c_void,
+    pub client_data: *mut c_void,
+    pub is_decompressor: CBoolean,
+    pub global_state: c_int,
+    // --- compressor-specific -------------------------------------------
+    pub dest: *mut JpegDestinationMgr,
+    // --- image description (offsets 48..64) ----------------------------
+    pub image_width: JDimension,
+    pub image_height: JDimension,
+    pub input_components: c_int,
+    pub in_color_space: c_int,
+    // --- `double` forces 8-byte alignment; offset 64 ---------------------
+    pub input_gamma: f64,
+    // --- JPEG_LIB_VERSION >= 70: scale + jpeg_width/height -------------
+    pub scale_num: c_uint,
+    pub scale_denom: c_uint,
+    pub jpeg_width: JDimension,
+    pub jpeg_height: JDimension,
+    // --- primary compression parameters --------------------------------
+    pub data_precision: c_int,
+    pub num_components: c_int,
+    pub jpeg_color_space: c_int,
+    pub comp_info: *mut JpegComponentInfoPublic,
+    // --- quant / huff tables -------------------------------------------
+    pub quant_tbl_ptrs: [*mut JQuantTblPublic; 4],
+    // JPEG_LIB_VERSION >= 70
+    pub q_scale_factor: [c_int; 4],
+    pub dc_huff_tbl_ptrs: [*mut JHuffTblPublic; 4],
+    pub ac_huff_tbl_ptrs: [*mut JHuffTblPublic; 4],
+    // --- arith-coding tables -------------------------------------------
+    pub arith_dc_L: [u8; 16],
+    pub arith_dc_U: [u8; 16],
+    pub arith_ac_K: [u8; 16],
+    // --- scan scripting ------------------------------------------------
+    pub num_scans: c_int,
+    pub scan_info: *const JpegScanInfoPublic,
+    // --- boolean compression options -----------------------------------
+    pub raw_data_in: CBoolean,
+    pub arith_code: CBoolean,
+    pub optimize_coding: CBoolean,
+    pub CCIR601_sampling: CBoolean,
+    // JPEG_LIB_VERSION >= 70
+    pub do_fancy_downsampling: CBoolean,
+    pub smoothing_factor: c_int,
+    pub dct_method: c_int,
+    // --- restart marker control ---------------------------------------
+    pub restart_interval: c_uint,
+    pub restart_in_rows: c_int,
+    // --- marker emission parameters -----------------------------------
+    pub write_JFIF_header: CBoolean,
+    pub JFIF_major_version: u8,
+    pub JFIF_minor_version: u8,
+    pub density_unit: u8,
+    // Rust `#[repr(C)]` auto-inserts 1 byte of padding here so UINT16
+    // `X_density` lands on its natural 2-byte boundary, matching the C
+    // layout byte-for-byte.
+    pub X_density: u16,
+    pub Y_density: u16,
+    // Rust `#[repr(C)]` auto-inserts 2 bytes of padding so
+    // `write_Adobe_marker` (c_int, 4-byte aligned) lands at offset 336,
+    // matching the C layout byte-for-byte.
+    pub write_Adobe_marker: CBoolean,
+    pub next_scanline: JDimension,
+    // --- derived fields populated by `jpeg_start_compress` ------------
+    pub progressive_mode: CBoolean,
+    pub max_h_samp_factor: c_int,
+    pub max_v_samp_factor: c_int,
+    // JPEG_LIB_VERSION >= 70
+    pub min_DCT_h_scaled_size: c_int,
+    pub min_DCT_v_scaled_size: c_int,
+    pub total_iMCU_rows: JDimension,
+    // --- per-scan state ------------------------------------------------
+    pub comps_in_scan: c_int,
+    // Rust auto-pads 4 bytes so the pointer array lands on an 8-byte
+    // boundary, matching the C layout.
+    pub cur_comp_info: [*mut JpegComponentInfoPublic; 4],
+    pub MCUs_per_row: JDimension,
+    pub MCU_rows_in_scan: JDimension,
+    pub blocks_in_MCU: c_int,
+    pub MCU_membership: [c_int; 10],
+    pub Ss: c_int,
+    pub Se: c_int,
+    pub Ah: c_int,
+    pub Al: c_int,
+    // --- JPEG_LIB_VERSION >= 80 extensions ----------------------------
+    pub block_size: c_int,
+    // Rust auto-pads 4 bytes so `natural_order` (pointer) lands on an
+    // 8-byte boundary.
+    pub natural_order: *const c_int,
+    pub lim_Se: c_int,
+    // Rust auto-pads 4 bytes so `master` (pointer) lands on an 8-byte
+    // boundary.
+    // --- opaque libjpeg-internal pointers ------------------------------
+    // We repurpose `master` to hold our Rust-side private state.
+    pub master: *mut c_void,
+    pub main_ctrl: *mut c_void,
+    pub prep: *mut c_void,
+    pub coef: *mut c_void,
+    pub marker: *mut c_void,
+    pub cconvert: *mut c_void,
+    pub downsample: *mut c_void,
+    pub fdct: *mut c_void,
+    pub entropy: *mut c_void,
+    pub script_space: *mut JpegScanInfoPublic,
+    pub script_space_size: c_int,
+    // Rust auto-inserts 4 bytes of trailing padding so the struct's
+    // total size (584 bytes) matches the canonical C layout on LP64.
 }
 
 // libjpeg compressor global_state values.
@@ -1945,9 +2080,11 @@ pub extern "C" fn jpeg_CreateCompress(cinfo: *mut c_void, _version: c_int, _stru
         Some(c) => c,
         None => return,
     };
+    // Per jcapimin.c jpeg_CreateCompress, the struct is memset to zero with
+    // `err` and `client_data` preserved, then fields are populated.
     c.mem = std::ptr::null_mut();
     c.progress = std::ptr::null_mut();
-    c.client_data = std::ptr::null_mut();
+    // err / client_data are already set by the caller; do NOT overwrite.
     c.is_decompressor = 0;
     c.global_state = CSTATE_START;
     c.dest = std::ptr::null_mut();
@@ -1955,10 +2092,31 @@ pub extern "C" fn jpeg_CreateCompress(cinfo: *mut c_void, _version: c_int, _stru
     c.image_height = 0;
     c.input_components = 0;
     c.in_color_space = JCS_UNKNOWN;
-    c.data_precision = 8;
+    c.input_gamma = 1.0;
+    c.scale_num = 1;
+    c.scale_denom = 1;
+    c.jpeg_width = 0;
+    c.jpeg_height = 0;
+    c.data_precision = 8; // BITS_IN_JSAMPLE
     c.num_components = 0;
     c.jpeg_color_space = JCS_UNKNOWN;
     c.comp_info = std::ptr::null_mut();
+    c.quant_tbl_ptrs = [std::ptr::null_mut(); 4];
+    c.q_scale_factor = [100; 4];
+    c.dc_huff_tbl_ptrs = [std::ptr::null_mut(); 4];
+    c.ac_huff_tbl_ptrs = [std::ptr::null_mut(); 4];
+    c.arith_dc_L = [0; 16];
+    c.arith_dc_U = [0; 16];
+    c.arith_ac_K = [0; 16];
+    c.num_scans = 0;
+    c.scan_info = std::ptr::null();
+    c.raw_data_in = 0;
+    c.arith_code = 0;
+    c.optimize_coding = 0;
+    c.CCIR601_sampling = 0;
+    c.do_fancy_downsampling = 0;
+    c.smoothing_factor = 0;
+    c.dct_method = 0; // JDCT_ISLOW
     c.restart_interval = 0;
     c.restart_in_rows = 0;
     c.write_JFIF_header = 1;
@@ -1970,14 +2128,39 @@ pub extern "C" fn jpeg_CreateCompress(cinfo: *mut c_void, _version: c_int, _stru
     c.write_Adobe_marker = 0;
     c.next_scanline = 0;
     c.progressive_mode = 0;
-    c.arith_code = 0;
-    c.optimize_coding = 0;
-    c.raw_data_in = 0;
-    c.smoothing_factor = 0;
-    c.dct_method = 0; // JDCT_ISLOW
+    c.max_h_samp_factor = 0;
+    c.max_v_samp_factor = 0;
+    c.min_DCT_h_scaled_size = 8; // DCTSIZE
+    c.min_DCT_v_scaled_size = 8;
+    c.total_iMCU_rows = 0;
+    c.comps_in_scan = 0;
+    c.cur_comp_info = [std::ptr::null_mut(); 4];
+    c.MCUs_per_row = 0;
+    c.MCU_rows_in_scan = 0;
+    c.blocks_in_MCU = 0;
+    c.MCU_membership = [0; 10];
+    c.Ss = 0;
+    c.Se = 0;
+    c.Ah = 0;
+    c.Al = 0;
+    c.block_size = 8; // DCTSIZE (JPEG_LIB_VERSION >= 80)
+    c.natural_order = std::ptr::null();
+    c.lim_Se = 63; // DCTSIZE2 - 1
+                   // `master` doubles as our Rust-side private-state pointer; everything
+                   // else in the tail is opaque libjpeg internal state we never populate.
+    c.main_ctrl = std::ptr::null_mut();
+    c.prep = std::ptr::null_mut();
+    c.coef = std::ptr::null_mut();
+    c.marker = std::ptr::null_mut();
+    c.cconvert = std::ptr::null_mut();
+    c.downsample = std::ptr::null_mut();
+    c.fdct = std::ptr::null_mut();
+    c.entropy = std::ptr::null_mut();
+    c.script_space = std::ptr::null_mut();
+    c.script_space_size = 0;
 
     let private: Box<CompressPrivate> = Box::default();
-    c.priv_ptr = Box::into_raw(private) as *mut c_void;
+    c.master = Box::into_raw(private) as *mut c_void;
 }
 
 /// Expansion of the `jpeg_create_compress(cinfo)` convenience macro.
@@ -1995,11 +2178,11 @@ pub extern "C" fn jpeg_destroy_compress(cinfo: *mut c_void) {
         Some(c) => c,
         None => return,
     };
-    if !c.priv_ptr.is_null() {
+    if !c.master.is_null() {
         // SAFETY: we allocated this in `jpeg_CreateCompress`.
         let _drop: Box<CompressPrivate> =
-            unsafe { Box::from_raw(c.priv_ptr as *mut CompressPrivate) };
-        c.priv_ptr = std::ptr::null_mut();
+            unsafe { Box::from_raw(c.master as *mut CompressPrivate) };
+        c.master = std::ptr::null_mut();
     }
     c.dest = std::ptr::null_mut();
     c.comp_info = std::ptr::null_mut();
@@ -2033,7 +2216,7 @@ fn install_dest_staging(cinfo: *mut c_void) {
         Some(c) => c,
         None => return,
     };
-    let priv_ptr: *mut c_void = c.priv_ptr;
+    let priv_ptr: *mut c_void = c.master;
     let priv_state: &mut CompressPrivate = match unsafe { priv_compress_from_ptr(priv_ptr) } {
         Some(p) => p,
         None => return,
@@ -2059,7 +2242,7 @@ fn drain_dest_buffer(cinfo: *mut c_void, _final_flush: bool) {
         Some(c) => c,
         None => return,
     };
-    let priv_ptr: *mut c_void = c.priv_ptr;
+    let priv_ptr: *mut c_void = c.master;
     let priv_state: &mut CompressPrivate = match unsafe { priv_compress_from_ptr(priv_ptr) } {
         Some(p) => p,
         None => return,
@@ -2126,7 +2309,7 @@ pub extern "C" fn jpeg_stdio_dest(cinfo: *mut c_void, outfile: *mut c_void) {
         Some(c) => c,
         None => return,
     };
-    let priv_ptr: *mut c_void = c.priv_ptr;
+    let priv_ptr: *mut c_void = c.master;
     let priv_state: &mut CompressPrivate = match unsafe { priv_compress_from_ptr(priv_ptr) } {
         Some(p) => p,
         None => return,
@@ -2147,7 +2330,7 @@ pub extern "C" fn jpeg_mem_dest(
         Some(c) => c,
         None => return,
     };
-    let priv_ptr: *mut c_void = c.priv_ptr;
+    let priv_ptr: *mut c_void = c.master;
     let priv_state: &mut CompressPrivate = match unsafe { priv_compress_from_ptr(priv_ptr) } {
         Some(p) => p,
         None => return,
@@ -2219,7 +2402,7 @@ fn apply_colorspace_defaults(c: &mut JpegCompressPublic, priv_state: &mut Compre
             (JCS_YCBCR, _) | (JCS_YCCK, _) => (1, 1, 1),
             _ => (0, 0, 0),
         };
-        priv_state.comp_info.push(JpegComponentInfoCompress {
+        priv_state.comp_info.push(JpegComponentInfoPublic {
             component_id: id,
             component_index: i as c_int,
             h_samp_factor: h,
@@ -2227,6 +2410,21 @@ fn apply_colorspace_defaults(c: &mut JpegCompressPublic, priv_state: &mut Compre
             quant_tbl_no: qt,
             dc_tbl_no: dc,
             ac_tbl_no: ac,
+            width_in_blocks: 0,
+            height_in_blocks: 0,
+            DCT_h_scaled_size: 8,
+            DCT_v_scaled_size: 8,
+            downsampled_width: 0,
+            downsampled_height: 0,
+            component_needed: 0,
+            MCU_width: 0,
+            MCU_height: 0,
+            MCU_blocks: 0,
+            MCU_sample_width: 0,
+            last_col_width: 0,
+            last_row_height: 0,
+            quant_table: std::ptr::null_mut(),
+            dct_table: std::ptr::null_mut(),
         });
     }
     c.comp_info = priv_state.comp_info.as_mut_ptr();
@@ -2261,7 +2459,7 @@ pub extern "C" fn jpeg_set_colorspace(cinfo: *mut c_void, colorspace: c_int) {
         Some(c) => c,
         None => return,
     };
-    let priv_ptr: *mut c_void = c.priv_ptr;
+    let priv_ptr: *mut c_void = c.master;
     let priv_state: &mut CompressPrivate = match unsafe { priv_compress_from_ptr(priv_ptr) } {
         Some(p) => p,
         None => return,
@@ -2317,7 +2515,7 @@ pub extern "C" fn jpeg_set_quality(cinfo: *mut c_void, quality: c_int, _force_ba
         Some(c) => c,
         None => return,
     };
-    let priv_ptr: *mut c_void = c.priv_ptr;
+    let priv_ptr: *mut c_void = c.master;
     let priv_state: &mut CompressPrivate = match unsafe { priv_compress_from_ptr(priv_ptr) } {
         Some(p) => p,
         None => return,
@@ -2381,7 +2579,7 @@ pub extern "C" fn jpeg_start_compress(cinfo: *mut c_void, _write_all_tables: CBo
         Some(c) => c,
         None => return,
     };
-    let priv_ptr: *mut c_void = c.priv_ptr;
+    let priv_ptr: *mut c_void = c.master;
     let priv_state: &mut CompressPrivate = match unsafe { priv_compress_from_ptr(priv_ptr) } {
         Some(p) => p,
         None => return,
@@ -2425,7 +2623,7 @@ pub extern "C" fn jpeg_write_scanlines(
         Some(c) => c,
         None => return 0,
     };
-    let priv_ptr: *mut c_void = c.priv_ptr;
+    let priv_ptr: *mut c_void = c.master;
     let priv_state: &mut CompressPrivate = match unsafe { priv_compress_from_ptr(priv_ptr) } {
         Some(p) => p,
         None => return 0,
@@ -2685,7 +2883,7 @@ pub extern "C" fn jpeg_finish_compress(cinfo: *mut c_void) {
         Some(c) => c,
         None => return,
     };
-    let priv_ptr: *mut c_void = c.priv_ptr;
+    let priv_ptr: *mut c_void = c.master;
     let priv_state: &mut CompressPrivate = match unsafe { priv_compress_from_ptr(priv_ptr) } {
         Some(p) => p,
         None => return,
@@ -2739,7 +2937,7 @@ pub extern "C" fn jpeg_add_quant_table(
         Some(c) => c,
         None => return,
     };
-    let priv_ptr: *mut c_void = c.priv_ptr;
+    let priv_ptr: *mut c_void = c.master;
     let priv_state: &mut CompressPrivate = match unsafe { priv_compress_from_ptr(priv_ptr) } {
         Some(p) => p,
         None => return,
@@ -2779,7 +2977,7 @@ pub extern "C" fn jpeg_default_qtables(cinfo: *mut c_void, force_baseline: CBool
             Some(c) => c,
             None => return,
         };
-        let priv_ptr: *mut c_void = c.priv_ptr;
+        let priv_ptr: *mut c_void = c.master;
         let priv_state: &CompressPrivate = match unsafe { priv_compress_from_ptr(priv_ptr) } {
             Some(p) => p,
             None => return,
@@ -2814,7 +3012,7 @@ pub extern "C" fn jpeg_enable_lossless(
         Some(c) => c,
         None => return,
     };
-    let priv_ptr: *mut c_void = c.priv_ptr;
+    let priv_ptr: *mut c_void = c.master;
     let priv_state: &mut CompressPrivate = match unsafe { priv_compress_from_ptr(priv_ptr) } {
         Some(p) => p,
         None => return,
@@ -2835,7 +3033,7 @@ pub extern "C" fn jpeg_suppress_tables(cinfo: *mut c_void, suppress: CBoolean) {
         Some(c) => c,
         None => return,
     };
-    let priv_ptr: *mut c_void = c.priv_ptr;
+    let priv_ptr: *mut c_void = c.master;
     let priv_state: &mut CompressPrivate = match unsafe { priv_compress_from_ptr(priv_ptr) } {
         Some(p) => p,
         None => return,
@@ -2863,7 +3061,7 @@ pub extern "C" fn jpeg_write_marker(
         Some(c) => c,
         None => return,
     };
-    let priv_ptr: *mut c_void = c.priv_ptr;
+    let priv_ptr: *mut c_void = c.master;
     let priv_state: &mut CompressPrivate = match unsafe { priv_compress_from_ptr(priv_ptr) } {
         Some(p) => p,
         None => return,
@@ -2892,7 +3090,7 @@ pub extern "C" fn jpeg_write_m_header(
         Some(c) => c,
         None => return,
     };
-    let priv_ptr: *mut c_void = c.priv_ptr;
+    let priv_ptr: *mut c_void = c.master;
     let priv_state: &mut CompressPrivate = match unsafe { priv_compress_from_ptr(priv_ptr) } {
         Some(p) => p,
         None => return,
@@ -2911,7 +3109,7 @@ pub extern "C" fn jpeg_write_m_byte(cinfo: *mut c_void, val: c_int) {
         Some(c) => c,
         None => return,
     };
-    let priv_ptr: *mut c_void = c.priv_ptr;
+    let priv_ptr: *mut c_void = c.master;
     let priv_state: &mut CompressPrivate = match unsafe { priv_compress_from_ptr(priv_ptr) } {
         Some(p) => p,
         None => return,
@@ -2934,7 +3132,7 @@ pub extern "C" fn jpeg_write_icc_profile(
         Some(c) => c,
         None => return,
     };
-    let priv_ptr: *mut c_void = c.priv_ptr;
+    let priv_ptr: *mut c_void = c.master;
     let priv_state: &mut CompressPrivate = match unsafe { priv_compress_from_ptr(priv_ptr) } {
         Some(p) => p,
         None => return,
@@ -2961,7 +3159,7 @@ pub extern "C" fn jpeg_write_tables(cinfo: *mut c_void) {
         Some(c) => c,
         None => return,
     };
-    let priv_ptr: *mut c_void = c.priv_ptr;
+    let priv_ptr: *mut c_void = c.master;
     let priv_state: &mut CompressPrivate = match unsafe { priv_compress_from_ptr(priv_ptr) } {
         Some(p) => p,
         None => return,
@@ -3104,7 +3302,7 @@ fn write_scanlines_highprec(
         Some(c) => c,
         None => return 0,
     };
-    let priv_ptr: *mut c_void = c.priv_ptr;
+    let priv_ptr: *mut c_void = c.master;
     let priv_state: &mut CompressPrivate = match unsafe { priv_compress_from_ptr(priv_ptr) } {
         Some(p) => p,
         None => return 0,
@@ -3158,7 +3356,7 @@ pub extern "C" fn jpeg_write_coefficients(cinfo: *mut c_void, _coef_arrays: *mut
         Some(c) => c,
         None => return,
     };
-    let priv_ptr: *mut c_void = c.priv_ptr;
+    let priv_ptr: *mut c_void = c.master;
     if let Some(priv_state) = unsafe { priv_compress_from_ptr(priv_ptr) } {
         priv_state.last_error = CString::new(
             "jpeg_write_coefficients: virtual-barray coefficient write is not implemented yet",
@@ -3260,8 +3458,95 @@ pub extern "C" fn jpeg_capi_test_get_compress_state(
 }
 
 // Compile-time layout assertions (encode).
+//
+// Every offset below is computed from `references/libjpeg-turbo/src/jpeglib.h`
+// for `JPEG_LIB_VERSION >= 80` on LP64. If Rust's default struct packing
+// ever diverges from the C layout, these fail at build time before a
+// broken ABI reaches the linker.
 const _: () = {
+    // --- jpeg_common_fields -------------------------------------------
     assert!(std::mem::offset_of!(JpegCompressPublic, err) == 0);
-    assert!(std::mem::offset_of!(JpegCompressPublic, is_decompressor) > 0);
-    assert!(std::mem::size_of::<JpegCompressPublic>() <= 4096);
+    assert!(std::mem::offset_of!(JpegCompressPublic, mem) == 8);
+    assert!(std::mem::offset_of!(JpegCompressPublic, progress) == 16);
+    assert!(std::mem::offset_of!(JpegCompressPublic, client_data) == 24);
+    assert!(std::mem::offset_of!(JpegCompressPublic, is_decompressor) == 32);
+    assert!(std::mem::offset_of!(JpegCompressPublic, global_state) == 36);
+    // --- destination mgr + image description ---------------------------
+    assert!(std::mem::offset_of!(JpegCompressPublic, dest) == 40);
+    assert!(std::mem::offset_of!(JpegCompressPublic, image_width) == 48);
+    assert!(std::mem::offset_of!(JpegCompressPublic, image_height) == 52);
+    assert!(std::mem::offset_of!(JpegCompressPublic, input_components) == 56);
+    assert!(std::mem::offset_of!(JpegCompressPublic, in_color_space) == 60);
+    // `double input_gamma` is 8-byte aligned — offset must land on 64.
+    assert!(std::mem::offset_of!(JpegCompressPublic, input_gamma) == 64);
+    // --- JPEG_LIB_VERSION >= 70 scale fields --------------------------
+    assert!(std::mem::offset_of!(JpegCompressPublic, scale_num) == 72);
+    assert!(std::mem::offset_of!(JpegCompressPublic, scale_denom) == 76);
+    assert!(std::mem::offset_of!(JpegCompressPublic, jpeg_width) == 80);
+    assert!(std::mem::offset_of!(JpegCompressPublic, jpeg_height) == 84);
+    // --- primary compression parameters -------------------------------
+    assert!(std::mem::offset_of!(JpegCompressPublic, data_precision) == 88);
+    assert!(std::mem::offset_of!(JpegCompressPublic, num_components) == 92);
+    assert!(std::mem::offset_of!(JpegCompressPublic, jpeg_color_space) == 96);
+    assert!(std::mem::offset_of!(JpegCompressPublic, comp_info) == 104);
+    assert!(std::mem::offset_of!(JpegCompressPublic, quant_tbl_ptrs) == 112);
+    assert!(std::mem::offset_of!(JpegCompressPublic, q_scale_factor) == 144);
+    assert!(std::mem::offset_of!(JpegCompressPublic, dc_huff_tbl_ptrs) == 160);
+    assert!(std::mem::offset_of!(JpegCompressPublic, ac_huff_tbl_ptrs) == 192);
+    assert!(std::mem::offset_of!(JpegCompressPublic, arith_dc_L) == 224);
+    assert!(std::mem::offset_of!(JpegCompressPublic, arith_dc_U) == 240);
+    assert!(std::mem::offset_of!(JpegCompressPublic, arith_ac_K) == 256);
+    assert!(std::mem::offset_of!(JpegCompressPublic, num_scans) == 272);
+    assert!(std::mem::offset_of!(JpegCompressPublic, scan_info) == 280);
+    assert!(std::mem::offset_of!(JpegCompressPublic, raw_data_in) == 288);
+    assert!(std::mem::offset_of!(JpegCompressPublic, arith_code) == 292);
+    assert!(std::mem::offset_of!(JpegCompressPublic, optimize_coding) == 296);
+    assert!(std::mem::offset_of!(JpegCompressPublic, CCIR601_sampling) == 300);
+    assert!(std::mem::offset_of!(JpegCompressPublic, do_fancy_downsampling) == 304);
+    assert!(std::mem::offset_of!(JpegCompressPublic, smoothing_factor) == 308);
+    assert!(std::mem::offset_of!(JpegCompressPublic, dct_method) == 312);
+    assert!(std::mem::offset_of!(JpegCompressPublic, restart_interval) == 316);
+    assert!(std::mem::offset_of!(JpegCompressPublic, restart_in_rows) == 320);
+    assert!(std::mem::offset_of!(JpegCompressPublic, write_JFIF_header) == 324);
+    assert!(std::mem::offset_of!(JpegCompressPublic, JFIF_major_version) == 328);
+    assert!(std::mem::offset_of!(JpegCompressPublic, JFIF_minor_version) == 329);
+    assert!(std::mem::offset_of!(JpegCompressPublic, density_unit) == 330);
+    assert!(std::mem::offset_of!(JpegCompressPublic, X_density) == 332);
+    assert!(std::mem::offset_of!(JpegCompressPublic, Y_density) == 334);
+    assert!(std::mem::offset_of!(JpegCompressPublic, write_Adobe_marker) == 336);
+    assert!(std::mem::offset_of!(JpegCompressPublic, next_scanline) == 340);
+    assert!(std::mem::offset_of!(JpegCompressPublic, progressive_mode) == 344);
+    assert!(std::mem::offset_of!(JpegCompressPublic, max_h_samp_factor) == 348);
+    assert!(std::mem::offset_of!(JpegCompressPublic, max_v_samp_factor) == 352);
+    assert!(std::mem::offset_of!(JpegCompressPublic, min_DCT_h_scaled_size) == 356);
+    assert!(std::mem::offset_of!(JpegCompressPublic, min_DCT_v_scaled_size) == 360);
+    assert!(std::mem::offset_of!(JpegCompressPublic, total_iMCU_rows) == 364);
+    assert!(std::mem::offset_of!(JpegCompressPublic, comps_in_scan) == 368);
+    assert!(std::mem::offset_of!(JpegCompressPublic, cur_comp_info) == 376);
+    assert!(std::mem::offset_of!(JpegCompressPublic, MCUs_per_row) == 408);
+    assert!(std::mem::offset_of!(JpegCompressPublic, MCU_rows_in_scan) == 412);
+    assert!(std::mem::offset_of!(JpegCompressPublic, blocks_in_MCU) == 416);
+    assert!(std::mem::offset_of!(JpegCompressPublic, MCU_membership) == 420);
+    assert!(std::mem::offset_of!(JpegCompressPublic, Ss) == 460);
+    assert!(std::mem::offset_of!(JpegCompressPublic, Se) == 464);
+    assert!(std::mem::offset_of!(JpegCompressPublic, Ah) == 468);
+    assert!(std::mem::offset_of!(JpegCompressPublic, Al) == 472);
+    // --- JPEG_LIB_VERSION >= 80 extensions ----------------------------
+    assert!(std::mem::offset_of!(JpegCompressPublic, block_size) == 476);
+    assert!(std::mem::offset_of!(JpegCompressPublic, natural_order) == 480);
+    assert!(std::mem::offset_of!(JpegCompressPublic, lim_Se) == 488);
+    // --- opaque internal pointers ------------------------------------
+    assert!(std::mem::offset_of!(JpegCompressPublic, master) == 496);
+    assert!(std::mem::offset_of!(JpegCompressPublic, main_ctrl) == 504);
+    assert!(std::mem::offset_of!(JpegCompressPublic, prep) == 512);
+    assert!(std::mem::offset_of!(JpegCompressPublic, coef) == 520);
+    assert!(std::mem::offset_of!(JpegCompressPublic, marker) == 528);
+    assert!(std::mem::offset_of!(JpegCompressPublic, cconvert) == 536);
+    assert!(std::mem::offset_of!(JpegCompressPublic, downsample) == 544);
+    assert!(std::mem::offset_of!(JpegCompressPublic, fdct) == 552);
+    assert!(std::mem::offset_of!(JpegCompressPublic, entropy) == 560);
+    assert!(std::mem::offset_of!(JpegCompressPublic, script_space) == 568);
+    assert!(std::mem::offset_of!(JpegCompressPublic, script_space_size) == 576);
+    // Total struct size matches the canonical libjpeg v80 layout (584 B).
+    assert!(std::mem::size_of::<JpegCompressPublic>() == 584);
 };
