@@ -449,6 +449,13 @@ impl TjHandle {
             enc = enc.colorspace(cs);
         }
 
+        // TJSAMP_GRAY (3): RGB/CMYK input must be converted to a grayscale
+        // JPEG. `subsampling_enum()` falls back to S444 for this case; the
+        // actual "make it grayscale" switch is `grayscale_from_color`.
+        if self.subsampling == 3 {
+            enc = enc.grayscale_from_color(true);
+        }
+
         enc
     }
 
@@ -560,6 +567,29 @@ impl TjHandle {
     /// After successful decompression, updates handle state to reflect the
     /// decoded image: `Width`, `Height`, `Precision`, `ColorSpace`,
     /// `Subsampling`, density, and ICC profile.
+    /// Header-only decompress (matches `tj3DecompressHeader` semantics).
+    ///
+    /// Unlike `decompress()`, this method:
+    /// - Ignores `scaling_factor` (`JPEGWIDTH`/`JPEGHEIGHT` must reflect the
+    ///   ORIGINAL JPEG dimensions per the libjpeg-turbo spec, not the
+    ///   scaled output).
+    /// - Populates `width`, `height`, `precision`, `color_space`,
+    ///   `subsampling`, density, and ICC exactly as `decompress()` would,
+    ///   but without producing pixel data.
+    ///
+    /// Implementation: temporarily reset the scaling factor to 1:1, call
+    /// `decompress()`, then restore. The scaled output from a subsequent
+    /// `decompress()` call is still governed by the original scaling
+    /// factor — this method does NOT clobber user-visible state beyond the
+    /// read-only header params.
+    pub fn decompress_header(&mut self, data: &[u8]) -> Result<()> {
+        let saved: ScalingFactor = self.scaling_factor;
+        self.scaling_factor = ScalingFactor::default();
+        let result: Result<Image> = self.decompress(data);
+        self.scaling_factor = saved;
+        result.map(|_| ())
+    }
+
     pub fn decompress(&mut self, data: &[u8]) -> Result<Image> {
         let mut decoder = Decoder::new(data)?;
 

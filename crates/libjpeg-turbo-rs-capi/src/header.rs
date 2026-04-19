@@ -46,19 +46,14 @@ pub extern "C" fn tj3DecompressHeader(
     // SAFETY: caller guarantees `jpeg_buf` is valid for `jpeg_size` bytes.
     let jpeg: &[u8] = unsafe { std::slice::from_raw_parts(jpeg_buf, jpeg_size) };
 
-    // We perform a full decompress then discard the pixel data. A future
-    // optimization can parse just SOF markers, but the current Rust API
-    // does not expose a standalone header parser; `decompress()` already
-    // updates all the parameters `tj3DecompressHeader` is contracted to
-    // populate, so the correctness win outweighs the extra decode cost
-    // for small images — which is exactly the header-first path.
-    //
-    // We call into the Rust handle's `decompress`, which internally
-    // updates the handle's Width/Height/Precision/ColorSpace/Subsampling
-    // and ICC state. Matches the C semantics that after tj3DecompressHeader
-    // all header-derived TJPARAM_* values are queryable via tj3Get.
-    match inst.inner.decompress(jpeg) {
-        Ok(_img) => {
+    // Header-only path: must report ORIGINAL dimensions (ignoring any
+    // `tj3SetScalingFactor`), per the libjpeg-turbo contract that
+    // `TJPARAM_JPEGWIDTH`/`TJPARAM_JPEGHEIGHT` reflect the raw JPEG
+    // frame size. `decompress_header` applies scaling factor 1:1
+    // internally, restoring the caller's scaling factor for subsequent
+    // `tj3Decompress*` calls.
+    match inst.inner.decompress_header(jpeg) {
+        Ok(()) => {
             inst.clear_error();
             0
         }
