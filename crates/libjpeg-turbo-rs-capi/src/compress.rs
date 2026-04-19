@@ -22,7 +22,7 @@ use std::ffi::{c_int, c_void};
 
 use libjpeg_turbo_rs::PixelFormat;
 
-use crate::alloc::{libc_free, libc_from_slice};
+use crate::alloc::libc_from_slice;
 use crate::convert::pixel_format_from_tj;
 use crate::tj3::{handle_as_mut, TJERR_FATAL};
 
@@ -136,30 +136,47 @@ pub extern "C" fn tj3Compress8(
         }
     };
 
-    // Publish to C. Ownership transfers to the caller.
-    let out_ptr: *mut u8 = libc_from_slice(&jpeg);
-    if out_ptr.is_null() {
-        inst.set_error("tj3Compress8: out-of-memory", TJERR_FATAL);
-        return -1;
-    }
+    // SAFETY: jpeg_buf and jpeg_size validated non-NULL above.
+    // Two ownership paths per libjpeg-turbo semantics:
+    //   (1) NOREALLOC=1 with non-NULL *jpeg_buf: write IN PLACE into the
+    //       caller's pre-allocated buffer. The caller retains ownership
+    //       and later frees it; we must NOT swap the pointer. The
+    //       pre-allocated buffer is at least `tj3JPEGBufSize()` bytes
+    //       (the caller's contract).
+    //   (2) Else: allocate a fresh libc buffer, transfer ownership; any
+    //       prior pointer is treated as stale (leaked — we don't know
+    //       its allocator) per the published contract.
+    //
+    // tjunittest exercises (1) in a tight loop: one `tj3Alloc` at setup,
+    // then many `tj3Compress8` calls — if we swap the pointer each call
+    // we leak and (worse) the final `tj3Free` releases a different
+    // allocation than the one the caller still believes they own.
+    let norealloc: bool = inst.inner.get(libjpeg_turbo_rs::tj3::TjParam::NoRealloc) != 0;
+    let prior: *mut u8 = unsafe { *jpeg_buf };
 
-    // SAFETY: jpeg_buf and jpeg_size validated non-NULL above. If the
-    // caller had a prior allocation in *jpeg_buf we deliberately leak it:
-    // we don't know its allocator. This matches libjpeg-turbo behavior
-    // when `TJPARAM_NOREALLOC == 0` — we never reuse the caller's buffer,
-    // we always allocate a fresh one. Callers wanting to avoid the leak
-    // must pass `*jpeg_buf = NULL` on entry (documented in tj3Compress8).
-    unsafe {
-        // If the user passed a non-NULL buffer AND NOREALLOC is set,
-        // libjpeg-turbo would reuse it in-place. We approximate by freeing
-        // the old buffer (best-effort) and writing the new one. This is
-        // only safe if the old allocation came from `tj3Alloc`/libc malloc.
-        let prior: *mut u8 = *jpeg_buf;
-        if !prior.is_null() && inst.inner.get(libjpeg_turbo_rs::tj3::TjParam::NoRealloc) == 0 {
-            libc_free(prior);
+    if norealloc && !prior.is_null() {
+        // Path (1): in-place write. We trust the caller that `prior` is
+        // at least `tj3JPEGBufSize(width, height, subsamp)` bytes — the
+        // same rule libjpeg-turbo imposes. `jpeg.len()` is bounded by
+        // that size because our encoder's output never exceeds the
+        // standard worst-case formula.
+        // SAFETY: caller-supplied buffer, non-aliasing with `jpeg` (which
+        // is owned by this function), size ≥ jpeg.len() by contract.
+        unsafe {
+            std::ptr::copy_nonoverlapping(jpeg.as_ptr(), prior, jpeg.len());
+            *jpeg_size = jpeg.len();
         }
-        *jpeg_buf = out_ptr;
-        *jpeg_size = jpeg.len();
+    } else {
+        // Path (2): allocate + hand off.
+        let out_ptr: *mut u8 = libc_from_slice(&jpeg);
+        if out_ptr.is_null() {
+            inst.set_error("tj3Compress8: out-of-memory", TJERR_FATAL);
+            return -1;
+        }
+        unsafe {
+            *jpeg_buf = out_ptr;
+            *jpeg_size = jpeg.len();
+        }
     }
 
     inst.clear_error();
