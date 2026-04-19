@@ -32,63 +32,94 @@ $ rg "pub extern \"C\" fn (\w+)" crates/libjpeg-turbo-rs-capi/src
 … only tj3*/tj* functions …
 ```
 
-## Missing-symbol inventory
+## Missing-symbol inventory (as of FFI C2-6)
+
+A1-11 (decode) and C2-1..C2-5 (encode) have landed the following
+previously-missing symbols. Items marked `[x]` are exported by the
+current cdylib; `[ ]` still block a stock-tool link.
 
 ### Classic libjpeg API (required by djpeg + cjpeg + jpegtran)
 
 Core init/destroy:
 
-- `jpeg_std_error`
-- `jpeg_CreateCompress`, `jpeg_CreateDecompress`
-- `jpeg_destroy_compress`, `jpeg_destroy_decompress`
+- `[x]` `jpeg_std_error` (A1-11)
+- `[x]` `jpeg_CreateCompress` (C2-1), `[x]` `jpeg_CreateDecompress` (A1-11)
+- `[x]` `jpeg_destroy_compress` (C2-1), `[x]` `jpeg_destroy_decompress` (A1-11)
 
 I/O setup:
 
-- `jpeg_stdio_src`, `jpeg_stdio_dest`
-- `jpeg_mem_src`, `jpeg_mem_dest`
+- `[x]` `jpeg_stdio_src` (A1-11), `[x]` `jpeg_stdio_dest` (C2-1)
+- `[x]` `jpeg_mem_src` (A1-11), `[x]` `jpeg_mem_dest` (C2-1)
 
 Decompress flow:
 
-- `jpeg_read_header`
-- `jpeg_start_decompress`, `jpeg_finish_decompress`
-- `jpeg_read_scanlines`, `jpeg_skip_scanlines`, `jpeg_crop_scanline`
-- `jpeg_read_icc_profile`
-- `jpeg_save_markers`, `jpeg_set_marker_processor`
+- `[x]` `jpeg_read_header` (A1-11)
+- `[x]` `jpeg_start_decompress` (A1-11), `[x]` `jpeg_finish_decompress` (A1-11)
+- `[x]` `jpeg_read_scanlines` (A1-11)
+- `[ ]` `jpeg_skip_scanlines`, `jpeg_crop_scanline`
+- `[ ]` `jpeg_read_icc_profile`
+- `[ ]` `jpeg_save_markers`, `jpeg_set_marker_processor`
 
 Compress flow:
 
-- `jpeg_set_defaults`, `jpeg_default_colorspace`, `jpeg_set_colorspace`
-- `jpeg_start_compress`, `jpeg_finish_compress`
-- `jpeg_write_scanlines`, `jpeg_write_icc_profile`
-- `jpeg_simple_progression`, `jpeg_enable_lossless`
+- `[x]` `jpeg_set_defaults` (C2-1), `[x]` `jpeg_default_colorspace` (C2-1),
+  `[x]` `jpeg_set_colorspace` (C2-1)
+- `[x]` `jpeg_start_compress` (C2-2), `[x]` `jpeg_finish_compress` (C2-2)
+- `[x]` `jpeg_write_scanlines` (C2-2), `[x]` `jpeg_write_icc_profile` (C2-4)
+- `[x]` `jpeg_simple_progression` (C2-3), `[x]` `jpeg_enable_lossless` (C2-3)
+- `[x]` `jpeg_set_quality` (C2-1)
+- `[x]` `jpeg_suppress_tables` (C2-3)
 
 Transform-specific (jpegtran):
 
-- `jpeg_read_coefficients`, `jpeg_write_coefficients`
-- `jpeg_copy_critical_parameters`
-- `jpeg_core_output_dimensions`
-- `jpeg_write_marker`
+- `[ ]` `jpeg_read_coefficients` (decode-side virtual barray; follow-up)
+- `[x]` `jpeg_write_coefficients` (C2-5 stub — records gap error)
+- `[ ]` `jpeg_copy_critical_parameters`
+- `[ ]` `jpeg_core_output_dimensions`
+- `[x]` `jpeg_write_marker` (C2-4), `[x]` `jpeg_write_m_header` (C2-4),
+  `[x]` `jpeg_write_m_byte` (C2-4)
+- `[x]` `jpeg_write_tables` (C2-4)
+- `[x]` `jpeg_resync_to_restart` (C2-5)
 
 Quant/huff helpers (via rdswitch.c):
 
-- `jpeg_add_quant_table`, `jpeg_default_qtables`, `jpeg_quality_scaling`
+- `[x]` `jpeg_add_quant_table` (C2-3), `[x]` `jpeg_default_qtables` (C2-3),
+  `[x]` `jpeg_quality_scaling` (C2-3)
 
 ### 12-bit / 16-bit precision variants (djpeg/cjpeg)
 
-- `jpeg12_read_scanlines`, `jpeg12_skip_scanlines`, `jpeg12_crop_scanline`
-- `jpeg12_write_scanlines`
-- `jpeg16_read_scanlines`, `jpeg16_write_scanlines`
+- `[ ]` `jpeg12_read_scanlines`, `jpeg12_skip_scanlines`, `jpeg12_crop_scanline`
+- `[x]` `jpeg12_write_scanlines` (C2-5)
+- `[ ]` `jpeg16_read_scanlines`
+- `[x]` `jpeg16_write_scanlines` (C2-5)
 
-Also `read_color_map_12` — a wrapper defined in the libjpeg-turbo 12-bit
-wrapper shim (`src/wrapper/rdcolmap-12.c`) that our build does not emit.
+Also `[ ]` `read_color_map_12` — a wrapper defined in the libjpeg-turbo
+12-bit wrapper shim (`src/wrapper/rdcolmap-12.c`) that our build does
+not emit.
 
 ### Internal helpers referenced from transupp.c (jpegtran only)
 
-- `jcopy_block_row`
-- `jdiv_round_up`
+- `[x]` `jcopy_block_row` (C2-5)
+- `[x]` `jdiv_round_up` (C2-5)
 
 Both live in `jutils.c` / `jdatadst.c` inside stock libjpeg-turbo and are
 exported as part of `libjpeg.so.62` despite being "internal" utilities.
+
+### Remaining blockers for stock-tool link
+
+After C2-* the outstanding gaps are:
+
+1. Decode-side skip/crop scanline (`jpeg_skip_scanlines`,
+   `jpeg_crop_scanline`), marker-processor hooks, and
+   `jpeg_read_icc_profile` — needed by djpeg's crop flag and
+   JPEG-ICC pass-through, and by jpegtran for marker preservation.
+2. Full `jpeg_read_coefficients` + `jpeg_copy_critical_parameters` +
+   `jpeg_core_output_dimensions` — required by jpegtran's virtual-
+   barray transform pipeline. `jpeg_write_coefficients` ships today as
+   a stub; the full barray exchange lands in a follow-up.
+3. 12/16-bit read-side scanline entry points — needed by
+   `cjpeg -precision 12/16` input and djpeg 12/16-bit output.
+4. `read_color_map_12` wrapper for the `-map` flag on 12-bit streams.
 
 ## Why this is a real gap, not a build configuration mistake
 
