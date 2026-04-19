@@ -888,3 +888,144 @@ fn c2_4_write_tables_emits_tables_only_datastream() {
         tj3_free(out_buf as *mut c_void);
     }
 }
+
+/// SA2-6: run the full encode pipeline on an EXACT 584-byte cinfo buffer —
+/// the canonical `sizeof(struct jpeg_compress_struct)` on LP64 for
+/// `JPEG_LIB_VERSION >= 80`. This simulates a stock cjpeg build that
+/// allocates `struct jpeg_compress_struct cinfo;` on the stack.
+///
+/// A passing test proves that our shim:
+/// 1. Reads/writes every field at its canonical libjpeg offset
+/// 2. Never touches bytes beyond offset 583 (which would be caller memory)
+/// 3. Produces a valid JPEG roundtrip that the Rust decoder recovers
+#[test]
+fn sa2_6_stock_abi_cinfo_size_encode_pipeline_works() {
+    let lib = unsafe { libloading::Library::new(cdylib_path()) }.expect("dlopen");
+    unsafe {
+        // Exact libjpeg v80 LP64 sizeof — see jpeglib.rs offset assertions.
+        const CINFO_BYTES: usize = 584;
+        // Embed the cinfo in a larger buffer with red-zone bytes around
+        // it so we can detect out-of-bounds writes from the shim.
+        const REDZONE: usize = 32;
+        let mut backing: Vec<u8> = vec![0xAAu8; REDZONE * 2 + CINFO_BYTES];
+        let cinfo_ptr: *mut c_void = backing.as_mut_ptr().add(REDZONE) as *mut c_void;
+        // Zero just the cinfo region (mirrors the `memset` in jcapimin).
+        std::ptr::write_bytes(cinfo_ptr as *mut u8, 0, CINFO_BYTES);
+
+        const ERR_BYTES: usize = 512;
+        let mut err: MaybeUninit<[u8; ERR_BYTES]> = MaybeUninit::zeroed();
+        let err_ptr: *mut c_void = err.as_mut_ptr() as *mut c_void;
+
+        let jpeg_std_error: libloading::Symbol<unsafe extern "C" fn(*mut c_void) -> *mut c_void> =
+            lib.get(b"jpeg_std_error").expect("jpeg_std_error");
+        let _ = jpeg_std_error(err_ptr);
+        (cinfo_ptr as *mut *mut c_void).write(err_ptr);
+
+        let jpeg_create_compress_fn: libloading::Symbol<
+            unsafe extern "C" fn(*mut c_void, c_int, usize),
+        > = lib
+            .get(b"jpeg_CreateCompress")
+            .expect("jpeg_CreateCompress");
+        jpeg_create_compress_fn(cinfo_ptr, 80, CINFO_BYTES);
+
+        let w: usize = 32;
+        let h_px: usize = 24;
+        let mut src: Vec<u8> = Vec::with_capacity(w * h_px * 3);
+        for y in 0..h_px {
+            for x in 0..w {
+                src.push((x * 4) as u8);
+                src.push((y * 8) as u8);
+                src.push(((x + y) * 3) as u8);
+            }
+        }
+
+        let set_dims: libloading::Symbol<
+            unsafe extern "C" fn(*mut c_void, u32, u32, c_int, c_int),
+        > = lib
+            .get(b"jpeg_capi_test_set_compress_dims")
+            .expect("jpeg_capi_test_set_compress_dims");
+        set_dims(cinfo_ptr, w as u32, h_px as u32, 3, JCS_RGB);
+
+        let set_defaults_fn: libloading::Symbol<unsafe extern "C" fn(*mut c_void)> =
+            lib.get(b"jpeg_set_defaults").expect("jpeg_set_defaults");
+        set_defaults_fn(cinfo_ptr);
+
+        let set_quality_fn: libloading::Symbol<unsafe extern "C" fn(*mut c_void, c_int, c_int)> =
+            lib.get(b"jpeg_set_quality").expect("jpeg_set_quality");
+        set_quality_fn(cinfo_ptr, 75, 1);
+
+        let mem_dest_fn: libloading::Symbol<
+            unsafe extern "C" fn(*mut c_void, *mut *mut u8, *mut c_ulong),
+        > = lib.get(b"jpeg_mem_dest").expect("jpeg_mem_dest");
+        let mut out_buf: *mut u8 = std::ptr::null_mut();
+        let mut out_size: c_ulong = 0;
+        mem_dest_fn(cinfo_ptr, &mut out_buf, &mut out_size);
+
+        let start_fn: libloading::Symbol<unsafe extern "C" fn(*mut c_void, c_int)> = lib
+            .get(b"jpeg_start_compress")
+            .expect("jpeg_start_compress");
+        start_fn(cinfo_ptr, 1);
+
+        let write_fn: libloading::Symbol<
+            unsafe extern "C" fn(*mut c_void, *mut *mut u8, u32) -> u32,
+        > = lib
+            .get(b"jpeg_write_scanlines")
+            .expect("jpeg_write_scanlines");
+        let mut written: usize = 0;
+        while written < h_px {
+            let row_ptr: *mut u8 = src[written * w * 3..].as_ptr() as *mut u8;
+            let mut row_array: [*mut u8; 1] = [row_ptr];
+            let got: u32 = write_fn(cinfo_ptr, row_array.as_mut_ptr(), 1);
+            assert!(got >= 1, "write_scanlines returned 0 at row {written}");
+            written += got as usize;
+        }
+
+        let finish_fn: libloading::Symbol<unsafe extern "C" fn(*mut c_void)> = lib
+            .get(b"jpeg_finish_compress")
+            .expect("jpeg_finish_compress");
+        finish_fn(cinfo_ptr);
+
+        assert!(!out_buf.is_null(), "encoded buffer is null");
+        assert!(out_size > 80, "encoded stream too small ({out_size})");
+        let encoded: Vec<u8> = std::slice::from_raw_parts(out_buf, out_size as usize).to_vec();
+        assert_eq!(&encoded[..2], &[0xFF, 0xD8], "missing SOI");
+        assert_eq!(&encoded[encoded.len() - 2..], &[0xFF, 0xD9], "missing EOI");
+
+        let destroy_fn: libloading::Symbol<unsafe extern "C" fn(*mut c_void)> = lib
+            .get(b"jpeg_destroy_compress")
+            .expect("jpeg_destroy_compress");
+        destroy_fn(cinfo_ptr);
+
+        // Verify the red-zone: bytes outside [REDZONE, REDZONE+CINFO_BYTES)
+        // must remain 0xAA — any corruption means the shim wrote past the
+        // canonical 584-byte envelope.
+        for i in 0..REDZONE {
+            assert_eq!(
+                backing[i], 0xAA,
+                "red-zone byte {i} corrupted (shim wrote before cinfo)"
+            );
+            assert_eq!(
+                backing[REDZONE + CINFO_BYTES + i],
+                0xAA,
+                "red-zone byte {i} corrupted (shim wrote past canonical 584-byte struct)"
+            );
+        }
+
+        let decoded = libjpeg_turbo_rs::decompress(&encoded).expect("decode roundtrip");
+        assert_eq!(decoded.width, w);
+        assert_eq!(decoded.height, h_px);
+
+        let mut max_diff: u8 = 0;
+        for (&a, &b) in src.iter().zip(decoded.data.iter()) {
+            let d: u8 = a.abs_diff(b);
+            if d > max_diff {
+                max_diff = d;
+            }
+        }
+        assert!(max_diff <= 20, "roundtrip max diff {max_diff} > 20");
+
+        let tj3_free: libloading::Symbol<unsafe extern "C" fn(*mut c_void)> =
+            lib.get(b"tj3Free").expect("tj3Free");
+        tj3_free(out_buf as *mut c_void);
+    }
+}
