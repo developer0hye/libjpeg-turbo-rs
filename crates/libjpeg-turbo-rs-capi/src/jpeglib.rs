@@ -2478,28 +2478,44 @@ pub extern "C" fn jpeg_set_colorspace(cinfo: *mut c_void, colorspace: c_int) {
     apply_colorspace_defaults(c, priv_state);
 }
 
-/// `jpeg_set_defaults(cinfo)` — populate default compression parameters.
-/// Requires the caller to have already set `in_color_space`.
+/// `jpeg_set_defaults(cinfo)` — populate default compression parameters,
+/// mirroring libjpeg `jcparam.c::jpeg_set_defaults`. Requires the caller to
+/// have already set `in_color_space`.
 #[no_mangle]
 pub extern "C" fn jpeg_set_defaults(cinfo: *mut c_void) {
     let c: &mut JpegCompressPublic = match unsafe { cinfo_compress_mut(cinfo) } {
         Some(c) => c,
         None => return,
     };
-    c.data_precision = 8;
-    c.dct_method = 0;
+    // JPEG_LIB_VERSION >= 70: 1:1 scaling by default.
+    c.scale_num = 1;
+    c.scale_denom = 1;
+    // Default arithmetic-coding conditioning: L=0, U=1, K=5 per spec.
+    c.arith_dc_L = [0; 16];
+    c.arith_dc_U = [1; 16];
+    c.arith_ac_K = [5; 16];
+    c.num_scans = 0;
+    c.scan_info = std::ptr::null();
+    c.raw_data_in = 0;
+    c.arith_code = 0;
+    // 12-bit precision forces optimize_coding so valid tables get computed
+    // (libjpeg's builtin standard tables are only valid for 8-bit).
+    c.optimize_coding = if c.data_precision == 12 { 1 } else { 0 };
+    c.CCIR601_sampling = 0;
+    // JPEG_LIB_VERSION >= 70: apply fancy downsampling by default.
+    c.do_fancy_downsampling = 1;
+    c.smoothing_factor = 0;
+    c.dct_method = 0; // JDCT_ISLOW (JDCT_DEFAULT)
     c.restart_interval = 0;
     c.restart_in_rows = 0;
+    // Default JFIF 1.01 marker parameters; actual emission decided by
+    // jpeg_set_colorspace based on the selected JPEG color space.
+    c.JFIF_major_version = 1;
+    c.JFIF_minor_version = 1;
     c.density_unit = 0;
     c.X_density = 1;
     c.Y_density = 1;
-    c.JFIF_major_version = 1;
-    c.JFIF_minor_version = 1;
-    c.smoothing_factor = 0;
     c.progressive_mode = 0;
-    c.arith_code = 0;
-    c.optimize_coding = 0;
-    c.raw_data_in = 0;
     // Apply the defaults that flow from `in_color_space` → `jpeg_color_space`.
     jpeg_default_colorspace(cinfo);
     // Default quality = 75 with baseline restriction per libjpeg.
@@ -2509,6 +2525,10 @@ pub extern "C" fn jpeg_set_defaults(cinfo: *mut c_void) {
 /// `jpeg_set_quality(cinfo, quality, force_baseline)` — install the
 /// scaled luma and chroma quant tables for the requested quality
 /// factor. The scaling curve matches libjpeg `jpeg_quality_scaling`.
+///
+/// Also updates `q_scale_factor[]` per libjpeg `jcparam.c::jpeg_set_quality`,
+/// which calls `jpeg_quality_scaling(quality)` and stores the result in
+/// slots 0 and 1.
 #[no_mangle]
 pub extern "C" fn jpeg_set_quality(cinfo: *mut c_void, quality: c_int, _force_baseline: CBoolean) {
     let c: &mut JpegCompressPublic = match unsafe { cinfo_compress_mut(cinfo) } {
@@ -2522,6 +2542,11 @@ pub extern "C" fn jpeg_set_quality(cinfo: *mut c_void, quality: c_int, _force_ba
     };
     let clamped: u8 = quality.clamp(1, 100) as u8;
     priv_state.quality = clamped;
+    // JPEG_LIB_VERSION >= 70: record the scaled factor so downstream
+    // table emission can re-scale at start-compress time.
+    let scale: c_int = libjpeg_turbo_rs::quality_scaling(clamped) as c_int;
+    c.q_scale_factor[0] = scale;
+    c.q_scale_factor[1] = scale;
 }
 
 // ---------------------------------------------------------------------------
