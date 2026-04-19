@@ -471,3 +471,299 @@ fn c2_1_null_arguments_return_safely() {
         jpeg_set_quality(std::ptr::null_mut(), 75, 1);
     }
 }
+
+/// C2-4: a custom COM marker written via `jpeg_write_marker` shows up
+/// in the output stream immediately after the SOI. Mirrors how cjpeg's
+/// `-comment` flag plumbs text through the classic API.
+#[test]
+fn c2_4_write_marker_inserts_custom_segment_after_soi() {
+    let lib = unsafe { libloading::Library::new(cdylib_path()) }.expect("dlopen");
+    unsafe {
+        const CINFO_BYTES: usize = 4096;
+        let mut cinfo: MaybeUninit<[u8; CINFO_BYTES]> = MaybeUninit::zeroed();
+        let cinfo_ptr: *mut c_void = cinfo.as_mut_ptr() as *mut c_void;
+        const ERR_BYTES: usize = 512;
+        let mut err: MaybeUninit<[u8; ERR_BYTES]> = MaybeUninit::zeroed();
+        let err_ptr: *mut c_void = err.as_mut_ptr() as *mut c_void;
+
+        let jpeg_std_error: libloading::Symbol<unsafe extern "C" fn(*mut c_void) -> *mut c_void> =
+            lib.get(b"jpeg_std_error").expect("jpeg_std_error");
+        let _ = jpeg_std_error(err_ptr);
+        (cinfo_ptr as *mut *mut c_void).write(err_ptr);
+
+        let jpeg_create_compress: libloading::Symbol<
+            unsafe extern "C" fn(*mut c_void, c_int, usize),
+        > = lib
+            .get(b"jpeg_CreateCompress")
+            .expect("jpeg_CreateCompress");
+        jpeg_create_compress(cinfo_ptr, 80, CINFO_BYTES);
+
+        let w: usize = 16;
+        let h_px: usize = 16;
+        let src: Vec<u8> = vec![128u8; w * h_px * 3];
+
+        let jpeg_capi_test_set_compress_dims: libloading::Symbol<
+            unsafe extern "C" fn(*mut c_void, u32, u32, c_int, c_int),
+        > = lib
+            .get(b"jpeg_capi_test_set_compress_dims")
+            .expect("jpeg_capi_test_set_compress_dims");
+        jpeg_capi_test_set_compress_dims(cinfo_ptr, w as u32, h_px as u32, 3, JCS_RGB);
+
+        let jpeg_set_defaults: libloading::Symbol<unsafe extern "C" fn(*mut c_void)> =
+            lib.get(b"jpeg_set_defaults").expect("jpeg_set_defaults");
+        jpeg_set_defaults(cinfo_ptr);
+
+        let jpeg_mem_dest: libloading::Symbol<
+            unsafe extern "C" fn(*mut c_void, *mut *mut u8, *mut c_ulong),
+        > = lib.get(b"jpeg_mem_dest").expect("jpeg_mem_dest");
+        let mut out_buf: *mut u8 = std::ptr::null_mut();
+        let mut out_size: c_ulong = 0;
+        jpeg_mem_dest(cinfo_ptr, &mut out_buf, &mut out_size);
+
+        let jpeg_start_compress: libloading::Symbol<unsafe extern "C" fn(*mut c_void, c_int)> = lib
+            .get(b"jpeg_start_compress")
+            .expect("jpeg_start_compress");
+        jpeg_start_compress(cinfo_ptr, 1);
+
+        // Write a COM (0xFE) marker containing ASCII text.
+        let marker_payload: &[u8] = b"hello-from-jpeg-write-marker";
+        let jpeg_write_marker: libloading::Symbol<
+            unsafe extern "C" fn(*mut c_void, c_int, *const u8, std::os::raw::c_uint),
+        > = lib.get(b"jpeg_write_marker").expect("jpeg_write_marker");
+        jpeg_write_marker(
+            cinfo_ptr,
+            0xFE,
+            marker_payload.as_ptr(),
+            marker_payload.len() as std::os::raw::c_uint,
+        );
+
+        // Also exercise the piecemeal writers: write_m_header + write_m_byte.
+        let jpeg_write_m_header: libloading::Symbol<
+            unsafe extern "C" fn(*mut c_void, c_int, std::os::raw::c_uint),
+        > = lib
+            .get(b"jpeg_write_m_header")
+            .expect("jpeg_write_m_header");
+        jpeg_write_m_header(cinfo_ptr, 0xE1, 4);
+        let jpeg_write_m_byte: libloading::Symbol<unsafe extern "C" fn(*mut c_void, c_int)> =
+            lib.get(b"jpeg_write_m_byte").expect("jpeg_write_m_byte");
+        for b in b"TEST" {
+            jpeg_write_m_byte(cinfo_ptr, *b as c_int);
+        }
+
+        // Fill scanlines.
+        let jpeg_write_scanlines: libloading::Symbol<
+            unsafe extern "C" fn(*mut c_void, *mut *mut u8, u32) -> u32,
+        > = lib
+            .get(b"jpeg_write_scanlines")
+            .expect("jpeg_write_scanlines");
+        let mut written: usize = 0;
+        while written < h_px {
+            let row_ptr: *mut u8 = src[written * w * 3..].as_ptr() as *mut u8;
+            let mut row_array: [*mut u8; 1] = [row_ptr];
+            let got: u32 = jpeg_write_scanlines(cinfo_ptr, row_array.as_mut_ptr(), 1);
+            assert!(got >= 1);
+            written += got as usize;
+        }
+
+        let jpeg_finish_compress: libloading::Symbol<unsafe extern "C" fn(*mut c_void)> = lib
+            .get(b"jpeg_finish_compress")
+            .expect("jpeg_finish_compress");
+        jpeg_finish_compress(cinfo_ptr);
+
+        let bytes: Vec<u8> = std::slice::from_raw_parts(out_buf, out_size as usize).to_vec();
+        // Expect our payload in the stream.
+        let needle: &[u8] = marker_payload;
+        let found: bool = bytes.windows(needle.len()).any(|w| w == needle);
+        assert!(found, "jpeg_write_marker payload missing from output");
+        let app1_payload: &[u8] = b"TEST";
+        let found_app1: bool = bytes.windows(app1_payload.len()).any(|w| w == app1_payload);
+        assert!(found_app1, "jpeg_write_m_byte payload missing from output");
+
+        let jpeg_destroy_compress: libloading::Symbol<unsafe extern "C" fn(*mut c_void)> = lib
+            .get(b"jpeg_destroy_compress")
+            .expect("jpeg_destroy_compress");
+        jpeg_destroy_compress(cinfo_ptr);
+
+        let tj3_free: libloading::Symbol<unsafe extern "C" fn(*mut c_void)> =
+            lib.get(b"tj3Free").expect("tj3Free");
+        tj3_free(out_buf as *mut c_void);
+    }
+}
+
+/// C2-4: `jpeg_write_icc_profile` results in an APP2 `ICC_PROFILE\0`
+/// segment on the stream and the decoded `Image` surfaces the same
+/// profile bytes via the Rust-native decoder.
+#[test]
+fn c2_4_write_icc_profile_roundtrips_bytes() {
+    let lib = unsafe { libloading::Library::new(cdylib_path()) }.expect("dlopen");
+    unsafe {
+        const CINFO_BYTES: usize = 4096;
+        let mut cinfo: MaybeUninit<[u8; CINFO_BYTES]> = MaybeUninit::zeroed();
+        let cinfo_ptr: *mut c_void = cinfo.as_mut_ptr() as *mut c_void;
+        const ERR_BYTES: usize = 512;
+        let mut err: MaybeUninit<[u8; ERR_BYTES]> = MaybeUninit::zeroed();
+        let err_ptr: *mut c_void = err.as_mut_ptr() as *mut c_void;
+
+        let jpeg_std_error: libloading::Symbol<unsafe extern "C" fn(*mut c_void) -> *mut c_void> =
+            lib.get(b"jpeg_std_error").expect("jpeg_std_error");
+        let _ = jpeg_std_error(err_ptr);
+        (cinfo_ptr as *mut *mut c_void).write(err_ptr);
+
+        let jpeg_create_compress: libloading::Symbol<
+            unsafe extern "C" fn(*mut c_void, c_int, usize),
+        > = lib
+            .get(b"jpeg_CreateCompress")
+            .expect("jpeg_CreateCompress");
+        jpeg_create_compress(cinfo_ptr, 80, CINFO_BYTES);
+
+        let w: usize = 16;
+        let h_px: usize = 16;
+        let src: Vec<u8> = vec![64u8; w * h_px * 3];
+
+        let jpeg_capi_test_set_compress_dims: libloading::Symbol<
+            unsafe extern "C" fn(*mut c_void, u32, u32, c_int, c_int),
+        > = lib
+            .get(b"jpeg_capi_test_set_compress_dims")
+            .expect("jpeg_capi_test_set_compress_dims");
+        jpeg_capi_test_set_compress_dims(cinfo_ptr, w as u32, h_px as u32, 3, JCS_RGB);
+
+        let jpeg_set_defaults: libloading::Symbol<unsafe extern "C" fn(*mut c_void)> =
+            lib.get(b"jpeg_set_defaults").expect("jpeg_set_defaults");
+        jpeg_set_defaults(cinfo_ptr);
+
+        let jpeg_mem_dest: libloading::Symbol<
+            unsafe extern "C" fn(*mut c_void, *mut *mut u8, *mut c_ulong),
+        > = lib.get(b"jpeg_mem_dest").expect("jpeg_mem_dest");
+        let mut out_buf: *mut u8 = std::ptr::null_mut();
+        let mut out_size: c_ulong = 0;
+        jpeg_mem_dest(cinfo_ptr, &mut out_buf, &mut out_size);
+
+        let jpeg_start_compress: libloading::Symbol<unsafe extern "C" fn(*mut c_void, c_int)> = lib
+            .get(b"jpeg_start_compress")
+            .expect("jpeg_start_compress");
+        jpeg_start_compress(cinfo_ptr, 1);
+
+        // Synthetic ICC profile (just arbitrary bytes — the shim doesn't
+        // validate ICC content, only that it surfaces through APP2).
+        let icc: Vec<u8> = (0..256u32).map(|i| (i & 0xFF) as u8).collect();
+        let jpeg_write_icc_profile: libloading::Symbol<
+            unsafe extern "C" fn(*mut c_void, *const u8, std::os::raw::c_uint),
+        > = lib
+            .get(b"jpeg_write_icc_profile")
+            .expect("jpeg_write_icc_profile");
+        jpeg_write_icc_profile(cinfo_ptr, icc.as_ptr(), icc.len() as std::os::raw::c_uint);
+
+        let jpeg_write_scanlines: libloading::Symbol<
+            unsafe extern "C" fn(*mut c_void, *mut *mut u8, u32) -> u32,
+        > = lib
+            .get(b"jpeg_write_scanlines")
+            .expect("jpeg_write_scanlines");
+        let mut written: usize = 0;
+        while written < h_px {
+            let row_ptr: *mut u8 = src[written * w * 3..].as_ptr() as *mut u8;
+            let mut row_array: [*mut u8; 1] = [row_ptr];
+            let got: u32 = jpeg_write_scanlines(cinfo_ptr, row_array.as_mut_ptr(), 1);
+            assert!(got >= 1);
+            written += got as usize;
+        }
+
+        let jpeg_finish_compress: libloading::Symbol<unsafe extern "C" fn(*mut c_void)> = lib
+            .get(b"jpeg_finish_compress")
+            .expect("jpeg_finish_compress");
+        jpeg_finish_compress(cinfo_ptr);
+
+        let bytes: Vec<u8> = std::slice::from_raw_parts(out_buf, out_size as usize).to_vec();
+        // Look for the ICC_PROFILE signature within an APP2 segment.
+        let sig: &[u8] = b"ICC_PROFILE\0";
+        let found_sig: bool = bytes.windows(sig.len()).any(|w| w == sig);
+        assert!(found_sig, "ICC_PROFILE signature missing from output");
+
+        // Decode and ensure the ICC bytes round-trip.
+        let img = libjpeg_turbo_rs::decompress(&bytes).expect("decompress");
+        assert_eq!(
+            img.icc_profile.as_deref(),
+            Some(icc.as_slice()),
+            "ICC profile did not round-trip through decode"
+        );
+
+        let jpeg_destroy_compress: libloading::Symbol<unsafe extern "C" fn(*mut c_void)> = lib
+            .get(b"jpeg_destroy_compress")
+            .expect("jpeg_destroy_compress");
+        jpeg_destroy_compress(cinfo_ptr);
+
+        let tj3_free: libloading::Symbol<unsafe extern "C" fn(*mut c_void)> =
+            lib.get(b"tj3Free").expect("tj3Free");
+        tj3_free(out_buf as *mut c_void);
+    }
+}
+
+/// C2-4: `jpeg_write_tables` emits a standalone tables datastream
+/// (SOI ... EOI, with only DQT/DHT segments, no SOF). Consumers of
+/// the abbreviated-file convention depend on this shape.
+#[test]
+fn c2_4_write_tables_emits_tables_only_datastream() {
+    let lib = unsafe { libloading::Library::new(cdylib_path()) }.expect("dlopen");
+    unsafe {
+        const CINFO_BYTES: usize = 4096;
+        let mut cinfo: MaybeUninit<[u8; CINFO_BYTES]> = MaybeUninit::zeroed();
+        let cinfo_ptr: *mut c_void = cinfo.as_mut_ptr() as *mut c_void;
+        const ERR_BYTES: usize = 512;
+        let mut err: MaybeUninit<[u8; ERR_BYTES]> = MaybeUninit::zeroed();
+        let err_ptr: *mut c_void = err.as_mut_ptr() as *mut c_void;
+
+        let jpeg_std_error: libloading::Symbol<unsafe extern "C" fn(*mut c_void) -> *mut c_void> =
+            lib.get(b"jpeg_std_error").expect("jpeg_std_error");
+        let _ = jpeg_std_error(err_ptr);
+        (cinfo_ptr as *mut *mut c_void).write(err_ptr);
+
+        let jpeg_create_compress: libloading::Symbol<
+            unsafe extern "C" fn(*mut c_void, c_int, usize),
+        > = lib
+            .get(b"jpeg_CreateCompress")
+            .expect("jpeg_CreateCompress");
+        jpeg_create_compress(cinfo_ptr, 80, CINFO_BYTES);
+        // Minimum setup so set_quality has a valid struct.
+        let jpeg_capi_test_set_compress_dims: libloading::Symbol<
+            unsafe extern "C" fn(*mut c_void, u32, u32, c_int, c_int),
+        > = lib
+            .get(b"jpeg_capi_test_set_compress_dims")
+            .expect("jpeg_capi_test_set_compress_dims");
+        jpeg_capi_test_set_compress_dims(cinfo_ptr, 8, 8, 1, 1 /* JCS_GRAYSCALE */);
+        let jpeg_set_defaults: libloading::Symbol<unsafe extern "C" fn(*mut c_void)> =
+            lib.get(b"jpeg_set_defaults").expect("jpeg_set_defaults");
+        jpeg_set_defaults(cinfo_ptr);
+
+        let jpeg_mem_dest: libloading::Symbol<
+            unsafe extern "C" fn(*mut c_void, *mut *mut u8, *mut c_ulong),
+        > = lib.get(b"jpeg_mem_dest").expect("jpeg_mem_dest");
+        let mut out_buf: *mut u8 = std::ptr::null_mut();
+        let mut out_size: c_ulong = 0;
+        jpeg_mem_dest(cinfo_ptr, &mut out_buf, &mut out_size);
+
+        let jpeg_write_tables: libloading::Symbol<unsafe extern "C" fn(*mut c_void)> =
+            lib.get(b"jpeg_write_tables").expect("jpeg_write_tables");
+        jpeg_write_tables(cinfo_ptr);
+
+        let bytes: Vec<u8> = std::slice::from_raw_parts(out_buf, out_size as usize).to_vec();
+        assert_eq!(&bytes[..2], &[0xFF, 0xD8], "tables stream must start SOI");
+        assert_eq!(
+            &bytes[bytes.len() - 2..],
+            &[0xFF, 0xD9],
+            "tables stream must end EOI"
+        );
+        // No SOF0/SOF2 must appear inside a tables-only datastream.
+        let has_sof0: bool = bytes.windows(2).any(|w| w == [0xFF, 0xC0]);
+        let has_sof2: bool = bytes.windows(2).any(|w| w == [0xFF, 0xC2]);
+        assert!(!has_sof0, "tables-only stream must not contain SOF0");
+        assert!(!has_sof2, "tables-only stream must not contain SOF2");
+
+        let jpeg_destroy_compress: libloading::Symbol<unsafe extern "C" fn(*mut c_void)> = lib
+            .get(b"jpeg_destroy_compress")
+            .expect("jpeg_destroy_compress");
+        jpeg_destroy_compress(cinfo_ptr);
+
+        let tj3_free: libloading::Symbol<unsafe extern "C" fn(*mut c_void)> =
+            lib.get(b"tj3Free").expect("tj3Free");
+        tj3_free(out_buf as *mut c_void);
+    }
+}
