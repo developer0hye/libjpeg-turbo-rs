@@ -30,6 +30,7 @@ pub mod header;
 pub mod imageio;
 pub mod jpeglib;
 pub mod legacy;
+pub mod memmgr;
 pub mod precision;
 pub mod tj3;
 pub mod transform;

@@ -27,6 +27,7 @@ use std::io::Read;
 use libjpeg_turbo_rs::{decompress, PixelFormat};
 
 use crate::alloc::libc_from_slice;
+use crate::memmgr;
 
 /// libjpeg `boolean` typedef is `int` in the upstream header. All callers
 /// use `TRUE` = 1 / `FALSE` = 0.
@@ -669,7 +670,11 @@ pub extern "C" fn jpeg_CreateDecompress(cinfo: *mut c_void, _version: c_int, _st
     };
     // Do NOT zero `err` — the caller sets that up before calling us
     // (per the `cinfo.err = jpeg_std_error(&err);` idiom).
-    c.mem = std::ptr::null_mut();
+    //
+    // Wire up the memory-manager vtable so libjpeg callers can invoke
+    // `(*cinfo->mem->alloc_small)(...)` from the very first line of
+    // their main loops (e.g. wrppm.c output init).
+    c.mem = memmgr::create_memory_mgr() as *mut c_void;
     c.progress = std::ptr::null_mut();
     c.client_data = std::ptr::null_mut();
     c.is_decompressor = 1;
@@ -812,6 +817,16 @@ pub extern "C" fn jpeg_destroy_decompress(cinfo: *mut c_void) {
     }
     let _dropped: Option<Box<DecompressPrivate>> = decompress_private_remove(cinfo);
     if let Some(c) = unsafe { cinfo_mut(cinfo) } {
+        // Release the memory manager and every pool it owns before
+        // nulling the slot; this mirrors `self_destruct` in jmemmgr.c.
+        if !c.mem.is_null() {
+            // SAFETY: `c.mem` was produced by `memmgr::create_memory_mgr`
+            // in `jpeg_CreateDecompress` and has not been freed.
+            unsafe {
+                memmgr::destroy_memory_mgr(c.mem as *mut memmgr::JpegMemoryMgr);
+            }
+            c.mem = std::ptr::null_mut();
+        }
         c.src = std::ptr::null_mut();
         c.global_state = 0;
     }
@@ -2254,23 +2269,12 @@ pub struct JpegDestinationMgr {
 // dereference the table pointers see the correct layout.
 // ---------------------------------------------------------------------------
 
-/// Mirrors `typedef struct { UINT16 quantval[DCTSIZE2]; boolean sent_table; } JQUANT_TBL;`.
-#[repr(C)]
-pub struct JQuantTblPublic {
-    pub quantval: [u16; 64],
-    pub sent_table: CBoolean,
-}
-
-/// Mirrors `typedef struct { UINT8 bits[17]; UINT8 huffval[256]; boolean sent_table; } JHUFF_TBL;`.
-#[repr(C)]
-pub struct JHuffTblPublic {
-    pub bits: [u8; 17],
-    pub huffval: [u8; 256],
-    pub sent_table: CBoolean,
-}
-
 /// Mirrors `typedef struct { int comps_in_scan; int component_index[MAX_COMPS_IN_SCAN];
 /// int Ss, Se; int Ah, Al; } jpeg_scan_info;`. `MAX_COMPS_IN_SCAN == 4` per `jpeglib.h`.
+///
+/// `JQuantTblPublic`, `JHuffTblPublic`, and `JpegComponentInfoPublic`
+/// are defined once near the top of this file; the compress-side code
+/// below references those canonical definitions.
 #[repr(C)]
 pub struct JpegScanInfoPublic {
     pub comps_in_scan: c_int,
@@ -2279,38 +2283,6 @@ pub struct JpegScanInfoPublic {
     pub Se: c_int,
     pub Ah: c_int,
     pub Al: c_int,
-}
-
-/// Mirrors the full `jpeg_component_info` declared in `jpeglib.h`
-/// (~60 lines). Field order is load-bearing because consumers like cjpeg
-/// (via macros in `jmorecfg.h`) walk these by offset. For
-/// `JPEG_LIB_VERSION >= 70`, the single `DCT_scaled_size` field is
-/// replaced by separate `DCT_h_scaled_size` and `DCT_v_scaled_size`.
-#[repr(C)]
-pub struct JpegComponentInfoPublic {
-    pub component_id: c_int,
-    pub component_index: c_int,
-    pub h_samp_factor: c_int,
-    pub v_samp_factor: c_int,
-    pub quant_tbl_no: c_int,
-    pub dc_tbl_no: c_int,
-    pub ac_tbl_no: c_int,
-    pub width_in_blocks: JDimension,
-    pub height_in_blocks: JDimension,
-    // JPEG_LIB_VERSION >= 70
-    pub DCT_h_scaled_size: c_int,
-    pub DCT_v_scaled_size: c_int,
-    pub downsampled_width: JDimension,
-    pub downsampled_height: JDimension,
-    pub component_needed: CBoolean,
-    pub MCU_width: c_int,
-    pub MCU_height: c_int,
-    pub MCU_blocks: c_int,
-    pub MCU_sample_width: c_int,
-    pub last_col_width: c_int,
-    pub last_row_height: c_int,
-    pub quant_table: *mut JQuantTblPublic,
-    pub dct_table: *mut c_void,
 }
 
 /// Legacy alias used by the compress pipeline internals. Kept so that
@@ -2620,7 +2592,10 @@ pub extern "C" fn jpeg_CreateCompress(cinfo: *mut c_void, _version: c_int, _stru
     };
     // Per jcapimin.c jpeg_CreateCompress, the struct is memset to zero with
     // `err` and `client_data` preserved, then fields are populated.
-    c.mem = std::ptr::null_mut();
+    //
+    // Wire up the memory-manager vtable so stock cjpeg / jpegtran can
+    // invoke `cinfo->mem->alloc_*` from their init paths.
+    c.mem = memmgr::create_memory_mgr() as *mut c_void;
     c.progress = std::ptr::null_mut();
     // err / client_data are already set by the caller; do NOT overwrite.
     c.is_decompressor = 0;
@@ -2721,6 +2696,16 @@ pub extern "C" fn jpeg_destroy_compress(cinfo: *mut c_void) {
         let _drop: Box<CompressPrivate> =
             unsafe { Box::from_raw(c.master as *mut CompressPrivate) };
         c.master = std::ptr::null_mut();
+    }
+    // Release the memory manager and every pool it owns; mirrors
+    // `self_destruct` in jmemmgr.c.
+    if !c.mem.is_null() {
+        // SAFETY: `c.mem` was produced by `memmgr::create_memory_mgr`
+        // in `jpeg_CreateCompress` and has not been freed.
+        unsafe {
+            memmgr::destroy_memory_mgr(c.mem as *mut memmgr::JpegMemoryMgr);
+        }
+        c.mem = std::ptr::null_mut();
     }
     c.dest = std::ptr::null_mut();
     c.comp_info = std::ptr::null_mut();
@@ -2950,15 +2935,15 @@ fn apply_colorspace_defaults(c: &mut JpegCompressPublic, priv_state: &mut Compre
             ac_tbl_no: ac,
             width_in_blocks: 0,
             height_in_blocks: 0,
-            DCT_h_scaled_size: 8,
-            DCT_v_scaled_size: 8,
+            dct_h_scaled_size: 8,
+            dct_v_scaled_size: 8,
             downsampled_width: 0,
             downsampled_height: 0,
             component_needed: 0,
-            MCU_width: 0,
-            MCU_height: 0,
-            MCU_blocks: 0,
-            MCU_sample_width: 0,
+            mcu_width: 0,
+            mcu_height: 0,
+            mcu_blocks: 0,
+            mcu_sample_width: 0,
             last_col_width: 0,
             last_row_height: 0,
             quant_table: std::ptr::null_mut(),
