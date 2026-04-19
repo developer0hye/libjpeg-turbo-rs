@@ -73,7 +73,9 @@ pub use jpeglib::{
     jpeg_default_qtables, jpeg_destroy_compress, jpeg_enable_lossless, jpeg_finish_compress,
     jpeg_mem_dest, jpeg_quality_scaling, jpeg_set_colorspace, jpeg_set_defaults, jpeg_set_quality,
     jpeg_simple_progression, jpeg_start_compress, jpeg_stdio_dest, jpeg_suppress_tables,
-    jpeg_write_scanlines, JpegComponentInfoCompress, JpegCompressPublic, JpegDestinationMgr,
+    jpeg_write_icc_profile, jpeg_write_m_byte, jpeg_write_m_header, jpeg_write_marker,
+    jpeg_write_scanlines, jpeg_write_tables, JpegComponentInfoCompress, JpegCompressPublic,
+    JpegDestinationMgr,
 };
 
 // Legacy TJ1/TJ2 aliases — thin wrappers around the TJ3 surface above.
