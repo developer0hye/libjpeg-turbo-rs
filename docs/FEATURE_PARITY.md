@@ -469,6 +469,20 @@ The following gaps were closed in the latest batch of merges:
 - **B9-5 tjunittest**: harness operational, now runs to completion after the tj3Compress8 fix. Decomp subtests still emit "Incorrect JPEG header" — separate issue in `_decompTest`, scoped as follow-up.
 - **SSE2 upsample width=2 policy mismatch**: scalar kernel boxes, SSE2 kernel fancy-interpolates. Pipeline-layer guard masks this for real workloads; dropped from parity test (`tests/simd_x86.rs::sse2_upsample_edge_cases`) with rationale inline. Kernel-level guard tracked as a small follow-up.
 
+## Classic `jpeg_*` API (Third Batch — C1 + C2)
+
+Two parallel workers shipped **36 new `#[no_mangle] extern "C"` symbols** in `crates/libjpeg-turbo-rs-capi/src/jpeglib.rs`:
+
+- **Decode extensions (C1, 12 symbols)**: `jpeg_skip_scanlines`, `jpeg_crop_scanline`, `jpeg_save_markers`, `jpeg_set_marker_processor`, `jpeg_read_icc_profile`, `jpeg_read_coefficients`, `jpeg_copy_critical_parameters`, `jpeg_core_output_dimensions`, `jpeg12_read_scanlines`, `jpeg12_skip_scanlines`, `jpeg12_crop_scanline`, `jpeg16_read_scanlines`. High-precision state lives in a `thread_local!` side table keyed by the cinfo pointer.
+- **Encode side + utilities (C2, 24 symbols)**: `jpeg_CreateCompress`/`jpeg_destroy_compress`, `jpeg_stdio_dest`/`jpeg_mem_dest`, `jpeg_set_defaults`/`jpeg_set_colorspace`/`jpeg_default_colorspace`, `jpeg_set_quality`, `jpeg_start_compress`/`jpeg_write_scanlines`/`jpeg_finish_compress`, `jpeg_quality_scaling`, `jpeg_add_quant_table`, `jpeg_default_qtables`, `jpeg_simple_progression`, `jpeg_enable_lossless`, `jpeg_suppress_tables`, `jpeg_write_marker`/`jpeg_write_m_header`/`jpeg_write_m_byte`, `jpeg_write_icc_profile`, `jpeg_write_tables`, `jpeg12_write_scanlines`/`jpeg16_write_scanlines`, `jpeg_write_coefficients` (stub), `jpeg_resync_to_restart`, `jcopy_block_row`, `jdiv_round_up`.
+- **Test count**: 38 (decode) + 15 (encode) new dlopen-and-exercise tests, all green on main.
+
+## Stock-tool link milestone (B9-4 link stage)
+
+- `examples/stock_djpeg_cjpeg/build.sh` now builds stock **`djpeg`, `cjpeg`, `jpegtran`** against `libjpeg.62.dylib` / `libjpeg.so.62` produced by our capi crate, **zero undefined symbols** on all three.
+- `djpeg -version` executes end-to-end through our `jpeg_std_error` + `jpeg_CreateDecompress` path.
+- **Runtime decode still aborts** with `ERREXIT1(JERR_BAD_PRECISION)` inside djpeg because our `JpegDecompressPublic` is a **subset** of the real `jpeg_decompress_struct`. When djpeg reads `cinfo.data_precision` at the real libjpeg offset (~field 127), the read lands outside our struct and returns garbage (>12) → djpeg trips the precision check and calls `error_exit`. B9-4 link stage complete; **byte-ABI layout work is the next large task** — the subset must be extended to a 1:1 mirror of the 150+-field `jpeg_decompress_struct` / `jpeg_compress_struct` from `references/libjpeg-turbo/src/jpeglib.h`.
+
 ## Testing Infrastructure Additions
 
 - **Fuzz corpus**: expanded from 22 → ~2,194 seeds across 7 targets (Cartesian product of subsamp × quality × content × entropy-mode); new `fuzz_encode_roundtrip` target; `scripts/fuzz_minimize.sh`; OSS-Fuzz stub at `oss-fuzz/`; nightly `.github/workflows/fuzz-smoke.yml`.
