@@ -15,8 +15,8 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" &> /dev/null && pwd)"
-REPO_ROOT="$(cd -- "$SCRIPT_DIR/../.." &> /dev/null && pwd)"
-REF_SRC="$REPO_ROOT/references/libjpeg-turbo/src"
+REPO_ROOT="${REPO_ROOT:-$(cd -- "$SCRIPT_DIR/../.." &> /dev/null && pwd)}"
+REF_SRC="${REF_SRC:-$REPO_ROOT/references/libjpeg-turbo/src}"
 OUT_DIR="${OUT_DIR:-$SCRIPT_DIR/build}"
 CAPI_TARGET_DIR="${CAPI_TARGET_DIR:-$REPO_ROOT/target/release}"
 
