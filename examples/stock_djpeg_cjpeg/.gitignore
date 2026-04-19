@@ -7,3 +7,6 @@ build/cjpeg
 build/jpegtran
 build/link_errors.txt
 build/*_build.log
+# Generated jconfig headers rebuilt by build.sh
+build/jconfig.h
+build/jconfigint.h
