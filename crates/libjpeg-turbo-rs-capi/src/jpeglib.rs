@@ -2612,6 +2612,27 @@ pub extern "C" fn jpeg_start_compress(cinfo: *mut c_void, _write_all_tables: CBo
     c.global_state = CSTATE_SCANNING;
     c.next_scanline = 0;
 
+    // --- Populate derived fields (libjpeg `jcmaster.c::initial_setup`). ---
+    // jpeg_width / jpeg_height: with 1:1 scaling, these equal image_*.
+    c.jpeg_width = c.image_width;
+    c.jpeg_height = c.image_height;
+    // max_h/v_samp_factor = max of comp_info[i].h/v_samp_factor.
+    let mut max_h: c_int = 1;
+    let mut max_v: c_int = 1;
+    for comp in &priv_state.comp_info {
+        if comp.h_samp_factor > max_h {
+            max_h = comp.h_samp_factor;
+        }
+        if comp.v_samp_factor > max_v {
+            max_v = comp.v_samp_factor;
+        }
+    }
+    c.max_h_samp_factor = max_h;
+    c.max_v_samp_factor = max_v;
+    // total_iMCU_rows = ceil(image_height / (max_v_samp_factor * DCTSIZE)).
+    let imcu_row_height: u32 = (max_v as u32).saturating_mul(8).max(1);
+    c.total_iMCU_rows = c.image_height.div_ceil(imcu_row_height);
+
     let input_components: usize = c.input_components.max(1) as usize;
     let width: usize = c.image_width as usize;
     let height: usize = c.image_height as usize;
