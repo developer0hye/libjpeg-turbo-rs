@@ -61,7 +61,9 @@ else
 #define JPEG_LIB_VERSION 80
 #define LIBJPEG_TURBO_VERSION 3.1.2
 #define LIBJPEG_TURBO_VERSION_NUMBER 3001002
+#ifndef BITS_IN_JSAMPLE
 #define BITS_IN_JSAMPLE 8
+#endif
 #define HAVE_STDLIB_H 1
 #define HAVE_STDDEF_H 1
 #define HAVE_UNSIGNED_CHAR 1
@@ -94,7 +96,6 @@ CFLAGS_COMMON="-O2 -Wno-unused -Wno-deprecated-declarations $CONFIG_INC -I$REF_S
 CDJPEG_SRCS=(
     "$REF_SRC/cdjpeg.c"
     "$REF_SRC/rdswitch.c"
-    "$REF_SRC/rdjpgcom.c"
 )
 
 DJPEG_SRCS=(
@@ -103,9 +104,19 @@ DJPEG_SRCS=(
     "$REF_SRC/wrbmp.c"
     "$REF_SRC/wrtarga.c"
     "$REF_SRC/wrgif.c"
-    "$REF_SRC/rdcolmap.c"
     "${CDJPEG_SRCS[@]}"
 )
+# Per-precision rdcolmap wrappers. CMake compiles each wrapper with
+# -DBITS_IN_JSAMPLE=N at the command line so the include-order rewrite in
+# jsamplecomp.h picks up the right symbol suffix (plain `read_color_map`
+# for 8-bit, `read_color_map_12` for 12-bit). Replicate that here by
+# compiling the 12-bit variant to an object file separately.
+RDCOLMAP12_OBJ="$OUT_DIR/rdcolmap_12.o"
+if [[ ! -f "$RDCOLMAP12_OBJ" || "$REF_SRC/wrapper/rdcolmap-12.c" -nt "$RDCOLMAP12_OBJ" ]]; then
+    "${CC:-cc}" $CFLAGS_COMMON -DBITS_IN_JSAMPLE=12 \
+        -c "$REF_SRC/wrapper/rdcolmap-12.c" -o "$RDCOLMAP12_OBJ"
+fi
+DJPEG_SRCS+=("$REF_SRC/wrapper/rdcolmap-8.c" "$RDCOLMAP12_OBJ")
 
 CJPEG_SRCS=(
     "$REF_SRC/cjpeg.c"
