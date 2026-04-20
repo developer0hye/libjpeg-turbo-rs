@@ -576,10 +576,27 @@ unsafe fn priv_from_ptr<'a>(priv_ptr: *mut c_void) -> Option<&'a mut DecompressP
 /// must not return; we implement that via `std::process::abort`. Apps
 /// that want graceful error handling override the callback with a
 /// `longjmp`-style jump.
-unsafe extern "C" fn default_error_exit(_cinfo: *mut c_void) {
+unsafe extern "C" fn default_error_exit(cinfo: *mut c_void) {
     // Emit to stderr then abort. Upstream libjpeg prints the formatted
-    // message; we keep parity at the coarse level.
-    eprintln!("libjpeg-turbo-rs: fatal JPEG error (default_error_exit)");
+    // message; we surface the msg_code + parm to aid debugging.
+    let mut code: c_int = -1;
+    let mut parm0: c_int = 0;
+    if let Some(c) = unsafe { cinfo_mut(cinfo) } {
+        if !c.err.is_null() {
+            let err: &JpegErrorMgr = unsafe { &*c.err };
+            code = err.msg_code;
+            parm0 = i32::from_le_bytes([
+                err.msg_parm[0],
+                err.msg_parm[1],
+                err.msg_parm[2],
+                err.msg_parm[3],
+            ]);
+        }
+    }
+    eprintln!(
+        "libjpeg-turbo-rs: fatal JPEG error (msg_code={}, parm0={})",
+        code, parm0
+    );
     std::process::abort();
 }
 
@@ -1174,6 +1191,22 @@ pub extern "C" fn jpeg_start_decompress(cinfo: *mut c_void) -> CBoolean {
         }
     };
 
+    // Fast path for high-precision streams (12/16 bit). The 8-bit
+    // `Decoder` would silently succeed and then overwrite
+    // `data_precision`, `output_components`, etc. with 8-bit values,
+    // which misroutes djpeg's precision-dispatched decode loop. Let
+    // `jpeg_calc_output_dimensions` (already invoked from
+    // `j12init_write_ppm` / `j16init_write_ppm` before we get here)
+    // own the output dims and leave precision intact; the actual
+    // decode happens lazily in `jpeg12_read_scanlines` /
+    // `jpeg16_read_scanlines`.
+    if c.data_precision > 8 {
+        c.output_scanline = 0;
+        c.global_state = DSTATE_SCANNING;
+        priv_state.last_error = CString::new("No error").expect("static");
+        return 1;
+    }
+
     let format: PixelFormat = match jcs_to_pixel_format(c.out_color_space) {
         Some(f) => f,
         None => PixelFormat::Rgb,
@@ -1370,6 +1403,89 @@ pub extern "C" fn jpeg_read_scanlines(
 // ---------------------------------------------------------------------------
 // `jpeg_finish_decompress` — subtask #8.
 // ---------------------------------------------------------------------------
+
+/// `jpeg_calc_output_dimensions(cinfo)`.
+///
+/// Mirrors `jdmaster.c`'s same-name routine: derives output width/height,
+/// `out_color_components`, `output_components`, `rec_outbuf_height`, and
+/// per-component downsampled / scaled-DCT sizes from the header values
+/// already filled by `jpeg_read_header`.
+///
+/// Stock `wrppm.c`/`wrbmp.c`/`wrtarga.c` call this from
+/// `jinit_write_*` *before* `jpeg_start_decompress`, so the output buffer
+/// can be sized from `output_width * output_components`. We must not
+/// require start_decompress to have run.
+#[no_mangle]
+pub extern "C" fn jpeg_calc_output_dimensions(cinfo: *mut c_void) {
+    let c: &mut JpegDecompressPublic = match unsafe { cinfo_mut(cinfo) } {
+        Some(c) => c,
+        None => return,
+    };
+
+    // No IDCT scaling: output dims = image dims after applying the
+    // scale_num/scale_denom fraction (most callers leave 1/1).
+    let scale_num: u64 = c.scale_num.max(1) as u64;
+    let scale_denom: u64 = c.scale_denom.max(1) as u64;
+    c.output_width =
+        (((c.image_width as u64 * scale_num) + scale_denom - 1) / scale_denom) as JDimension;
+    c.output_height =
+        (((c.image_height as u64 * scale_num) + scale_denom - 1) / scale_denom) as JDimension;
+
+    // Compute max sampling factors and per-component downsampled sizes
+    // from the comp_info array populated by jpeg_read_header. wrppm /
+    // wrbmp don't read these but jpeg_start_decompress callers do.
+    if !c.comp_info.is_null() && c.num_components > 0 {
+        let n: usize = c.num_components as usize;
+        let comps: &mut [JpegComponentInfoPublic] =
+            unsafe { std::slice::from_raw_parts_mut(c.comp_info, n) };
+        let mut max_h: c_int = 1;
+        let mut max_v: c_int = 1;
+        for comp in comps.iter() {
+            max_h = max_h.max(comp.h_samp_factor);
+            max_v = max_v.max(comp.v_samp_factor);
+        }
+        c.max_h_samp_factor = max_h;
+        c.max_v_samp_factor = max_v;
+        c.min_DCT_h_scaled_size = 8;
+        c.min_DCT_v_scaled_size = 8;
+        for comp in comps.iter_mut() {
+            comp.dct_h_scaled_size = 8;
+            comp.dct_v_scaled_size = 8;
+            // downsampled = ceil(image_width * h_samp / (max_h * 8)) * 8
+            // (DCT block boundary). Kept block-aligned because our wrppm /
+            // wrbmp writer path reads this field as the row stride and
+            // relies on the 8-multiple; the strict C formula
+            // `ceil(image_width * h_samp / max_h)` triggers row-size
+            // mismatches in the downstream put_pixel_rows.
+            let denom_w: u64 = (max_h as u64) * 8;
+            let denom_h: u64 = (max_v as u64) * 8;
+            comp.downsampled_width =
+                (((c.image_width as u64 * comp.h_samp_factor as u64) + denom_w - 1) / denom_w * 8)
+                    as JDimension;
+            comp.downsampled_height =
+                (((c.image_height as u64 * comp.v_samp_factor as u64) + denom_h - 1) / denom_h * 8)
+                    as JDimension;
+        }
+    }
+
+    // out_color_components count per the J_COLOR_SPACE selected. Mirror
+    // the rgb_pixelsize table used by jdmaster.c:341-365 so extended
+    // color spaces (JCS_EXT_*) land on the correct channel count.
+    c.out_color_components = match c.out_color_space {
+        JCS_GRAYSCALE => 1,
+        JCS_RGB | JCS_YCBCR => 3,
+        JCS_CMYK | JCS_YCCK => 4,
+        13 | 15 => 3,                               // JCS_EXT_RGB / JCS_EXT_BGR
+        14 | 16 | 17 | 18 | 19 | 20 | 21 | 22 => 4, // JCS_EXT_*X / X* / *A / A*
+        _ => c.num_components,
+    };
+    c.output_components = if c.quantize_colors != 0 {
+        1
+    } else {
+        c.out_color_components
+    };
+    c.rec_outbuf_height = 1;
+}
 
 /// Close out the decode pass. Returns TRUE unless suspended (which we
 /// never do — the entire stream is present in memory).
@@ -1915,7 +2031,7 @@ pub extern "C" fn jpeg12_read_scanlines(
     scanlines: *mut *mut i16,
     max_lines: JDimension,
 ) -> JDimension {
-    let _c: &mut JpegDecompressPublic = match unsafe { cinfo_mut(cinfo) } {
+    let c: &mut JpegDecompressPublic = match unsafe { cinfo_mut(cinfo) } {
         Some(c) => c,
         None => return 0,
     };
@@ -1940,13 +2056,18 @@ pub extern "C" fn jpeg12_read_scanlines(
             CString::new(format!("jpeg12_read_scanlines: {e}")).unwrap_or_default();
         return 0;
     }
-    HIGH_PRECISION_STATE.with(|s| {
+    let produced: JDimension = HIGH_PRECISION_STATE.with(|s| {
         let mut map = s.borrow_mut();
         let slot: &mut HighPrecisionSlot =
             map.get_mut(&hp_key(priv_ptr)).expect("just inserted above");
         let dec: &mut Decoded12 = slot.dec12.as_mut().expect("just inserted above");
         read_scanlines_12_inner(dec, scanlines, max_lines)
-    })
+    });
+    // Mirror jdapistd.c: the public scanline counter drives wrppm's main
+    // loop (`while output_scanline < output_height`). Not advancing it
+    // here causes the caller to spin forever.
+    c.output_scanline = c.output_scanline.saturating_add(produced);
+    produced
 }
 
 fn read_scanlines_12_inner(
@@ -1989,12 +2110,12 @@ fn read_scanlines_12_inner(
 /// `jpeg12_skip_scanlines(cinfo, num_lines) -> JDIMENSION`.
 #[no_mangle]
 pub extern "C" fn jpeg12_skip_scanlines(cinfo: *mut c_void, num_lines: JDimension) -> JDimension {
-    let _c: &mut JpegDecompressPublic = match unsafe { cinfo_mut(cinfo) } {
+    let c: &mut JpegDecompressPublic = match unsafe { cinfo_mut(cinfo) } {
         Some(c) => c,
         None => return 0,
     };
     let priv_ptr: *mut c_void = decompress_private_raw(cinfo);
-    HIGH_PRECISION_STATE.with(|s| {
+    let skipped: JDimension = HIGH_PRECISION_STATE.with(|s| {
         let mut map = s.borrow_mut();
         let slot: Option<&mut HighPrecisionSlot> = map.get_mut(&hp_key(priv_ptr));
         let dec: &mut Decoded12 = match slot.and_then(|s| s.dec12.as_mut()) {
@@ -2006,7 +2127,9 @@ pub extern "C" fn jpeg12_skip_scanlines(cinfo: *mut c_void, num_lines: JDimensio
         let skip: JDimension = std::cmp::min(num_lines, remaining);
         dec.cursor += skip;
         skip
-    })
+    });
+    c.output_scanline = c.output_scanline.saturating_add(skipped);
+    skipped
 }
 
 /// `jpeg12_crop_scanline(cinfo, *xoffset, *width)`.
@@ -2059,7 +2182,7 @@ pub extern "C" fn jpeg16_read_scanlines(
     scanlines: *mut *mut u16,
     max_lines: JDimension,
 ) -> JDimension {
-    let _c: &mut JpegDecompressPublic = match unsafe { cinfo_mut(cinfo) } {
+    let c: &mut JpegDecompressPublic = match unsafe { cinfo_mut(cinfo) } {
         Some(c) => c,
         None => return 0,
     };
@@ -2084,7 +2207,7 @@ pub extern "C" fn jpeg16_read_scanlines(
             CString::new(format!("jpeg16_read_scanlines: {e}")).unwrap_or_default();
         return 0;
     }
-    HIGH_PRECISION_STATE.with(|s| {
+    let produced: JDimension = HIGH_PRECISION_STATE.with(|s| {
         let mut map = s.borrow_mut();
         let slot: &mut HighPrecisionSlot =
             map.get_mut(&hp_key(priv_ptr)).expect("just inserted above");
@@ -2110,7 +2233,9 @@ pub extern "C" fn jpeg16_read_scanlines(
         }
         dec.cursor += to_copy;
         to_copy
-    })
+    });
+    c.output_scanline = c.output_scanline.saturating_add(produced);
+    produced
 }
 
 // ---------------------------------------------------------------------------
