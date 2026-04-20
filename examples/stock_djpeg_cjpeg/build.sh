@@ -71,6 +71,10 @@ else
 #define MEM_SRCDST_SUPPORTED 1
 #define C_ARITH_CODING_SUPPORTED 1
 #define D_ARITH_CODING_SUPPORTED 1
+#define BMP_SUPPORTED 1
+#define GIF_SUPPORTED 1
+#define PPM_SUPPORTED 1
+#define TARGA_SUPPORTED 1
 #define WITH_SIMD 0
 EOF
     cat > "$OUT_DIR/jconfigint.h" <<'EOF'
@@ -100,32 +104,55 @@ CDJPEG_SRCS=(
 
 DJPEG_SRCS=(
     "$REF_SRC/djpeg.c"
-    "$REF_SRC/wrppm.c"
     "$REF_SRC/wrbmp.c"
     "$REF_SRC/wrtarga.c"
-    "$REF_SRC/wrgif.c"
     "${CDJPEG_SRCS[@]}"
 )
-# Per-precision rdcolmap wrappers. CMake compiles each wrapper with
-# -DBITS_IN_JSAMPLE=N at the command line so the include-order rewrite in
-# jsamplecomp.h picks up the right symbol suffix (plain `read_color_map`
-# for 8-bit, `read_color_map_12` for 12-bit). Replicate that here by
-# compiling the 12-bit variant to an object file separately.
-RDCOLMAP12_OBJ="$OUT_DIR/rdcolmap_12.o"
-if [[ ! -f "$RDCOLMAP12_OBJ" || "$REF_SRC/wrapper/rdcolmap-12.c" -nt "$RDCOLMAP12_OBJ" ]]; then
-    "${CC:-cc}" $CFLAGS_COMMON -DBITS_IN_JSAMPLE=12 \
-        -c "$REF_SRC/wrapper/rdcolmap-12.c" -o "$RDCOLMAP12_OBJ"
-fi
-DJPEG_SRCS+=("$REF_SRC/wrapper/rdcolmap-8.c" "$RDCOLMAP12_OBJ")
+# Per-precision wrapper objects. CMake builds each wrapper as its own
+# translation unit with the right `BITS_IN_JSAMPLE` so symbol-suffix
+# macros in jsamplecomp.h (`jpeg_read_scanlines` -> `jpeg12_read_scanlines`,
+# etc.) name the precision-specific entry points. We replicate that here:
+# compile each wrapper.c to an .o file once, then link the .o files into
+# every binary that needs them.
+build_wrapper_obj() {
+    local wrapper_src="$1"  # path to wrapper/foo-N.c
+    local bits="$2"          # 8 / 12 / 16
+    local obj="$OUT_DIR/$(basename "$wrapper_src" .c).o"
+    if [[ ! -f "$obj" || "$wrapper_src" -nt "$obj" ]]; then
+        "${CC:-cc}" $CFLAGS_COMMON -DBITS_IN_JSAMPLE="$bits" \
+            -c "$wrapper_src" -o "$obj"
+    fi
+    echo "$obj"
+}
+
+# rdcolmap (used by djpeg only; reads -map color-map files).
+RDCOLMAP_8_OBJ="$(build_wrapper_obj "$REF_SRC/wrapper/rdcolmap-8.c" 8)"
+RDCOLMAP_12_OBJ="$(build_wrapper_obj "$REF_SRC/wrapper/rdcolmap-12.c" 12)"
+DJPEG_SRCS+=("$RDCOLMAP_8_OBJ" "$RDCOLMAP_12_OBJ")
+
+# wrppm (PPM/PGM writer): 8-bit, 12-bit, 16-bit precision variants.
+WRPPM_8_OBJ="$(build_wrapper_obj "$REF_SRC/wrapper/wrppm-8.c" 8)"
+WRPPM_12_OBJ="$(build_wrapper_obj "$REF_SRC/wrapper/wrppm-12.c" 12)"
+WRPPM_16_OBJ="$(build_wrapper_obj "$REF_SRC/wrapper/wrppm-16.c" 16)"
+DJPEG_SRCS+=("$WRPPM_8_OBJ" "$WRPPM_12_OBJ" "$WRPPM_16_OBJ")
+
+# wrgif (GIF writer): 8-bit and 12-bit (no 16-bit variant exists).
+WRGIF_8_OBJ="$(build_wrapper_obj "$REF_SRC/wrapper/wrgif-8.c" 8)"
+WRGIF_12_OBJ="$(build_wrapper_obj "$REF_SRC/wrapper/wrgif-12.c" 12)"
+DJPEG_SRCS+=("$WRGIF_8_OBJ" "$WRGIF_12_OBJ")
 
 CJPEG_SRCS=(
     "$REF_SRC/cjpeg.c"
-    "$REF_SRC/rdppm.c"
     "$REF_SRC/rdbmp.c"
     "$REF_SRC/rdtarga.c"
     "$REF_SRC/rdgif.c"
     "${CDJPEG_SRCS[@]}"
 )
+# rdppm (PPM/PGM reader): 8-bit, 12-bit, 16-bit precision variants.
+RDPPM_8_OBJ="$(build_wrapper_obj "$REF_SRC/wrapper/rdppm-8.c" 8)"
+RDPPM_12_OBJ="$(build_wrapper_obj "$REF_SRC/wrapper/rdppm-12.c" 12)"
+RDPPM_16_OBJ="$(build_wrapper_obj "$REF_SRC/wrapper/rdppm-16.c" 16)"
+CJPEG_SRCS+=("$RDPPM_8_OBJ" "$RDPPM_12_OBJ" "$RDPPM_16_OBJ")
 
 JPEGTRAN_SRCS=(
     "$REF_SRC/jpegtran.c"
