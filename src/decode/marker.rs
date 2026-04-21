@@ -538,6 +538,12 @@ impl<'a> MarkerReader<'a> {
 
     fn read_sof(&mut self, is_progressive: bool, is_lossless: bool) -> Result<FrameHeader> {
         let length = self.read_u16_be()? as usize;
+        if length < 2 {
+            return Err(JpegError::CorruptData(format!(
+                "SOF segment length {} < 2",
+                length
+            )));
+        }
         let start = self.pos;
 
         let precision = self.read_u8()?;

@@ -104,7 +104,11 @@ impl McuDecoder {
 
         let dc_diff = huffman::decode_dc_coefficient(reader, dc_table)?;
         let dc_pred = &mut self.dc_pred[component_index];
-        *dc_pred += dc_diff;
+        // libjpeg-turbo's jdhuff.c treats DC prediction as modular 16-bit
+        // arithmetic (the result is masked by quantization anyway); use
+        // `wrapping_add` so malformed streams that push the accumulator
+        // outside i16 don't abort the decode.
+        *dc_pred = dc_pred.wrapping_add(dc_diff);
         coeffs[0] = *dc_pred;
 
         huffman::decode_ac_coefficients(reader, ac_table, coeffs)?;

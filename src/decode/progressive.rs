@@ -13,12 +13,28 @@ use crate::decode::bitstream::BitReader;
 use crate::decode::huffman;
 
 /// Extend a raw bit value to a signed coefficient.
+///
+/// JPEG Huffman categories are 1..=15; size=0 is category-0 (zero
+/// coefficient) and is handled by the caller. Malformed AC symbols can
+/// still reach here with size=0 or size>15, which would panic the
+/// `1 << (size-1)` and `1 << size` shifts — clamp defensively and pass
+/// the raw value through, matching the handling in `huffman::extend`.
 #[inline(always)]
 fn extend(value: u16, size: u8) -> i16 {
+    if !(1..=15).contains(&size) {
+        // Covers size=0 (caller should have short-circuited) and
+        // size>=16 (malformed AC symbols). Pass the raw value through
+        // so the shifts below can't overflow `u16` / `i16`.
+        return value as i16;
+    }
+    // Compute offset in i32 to avoid `1i16 << 15 = i16::MIN` followed by
+    // `i16::MIN - 1` underflow on category 15 (legal for 12-bit JPEG).
+    // Also use wrapping arithmetic on the final subtraction since a
+    // malformed input can feed any u16 in `value`.
     let half = 1u16 << (size - 1);
-    let mask = (0u16.wrapping_sub((value < half) as u16)) as i16;
-    let offset = ((1i16 << size) - 1) & mask;
-    value as i16 - offset
+    let mask = if value < half { 0i32 } else { -1i32 };
+    let offset = (((1i32 << size).wrapping_sub(1)) & mask) as i16;
+    (value as i16).wrapping_sub(offset)
 }
 
 /// Decode DC coefficient for first scan (Ah=0).
@@ -261,10 +277,14 @@ pub fn decode_ac_refine(
 fn apply_correction_bit(reader: &mut BitReader, coeff: &mut i16, p1: i16) {
     let bit = reader.read_bits(1);
     if bit != 0 && (*coeff & p1) == 0 {
+        // Use wrapping arithmetic: malformed progressive streams can push
+        // an already-large coefficient past i16::MAX / below i16::MIN,
+        // which is UB in debug (overflow trap) but harmless in release
+        // since later quantization + IDCT already work in modular i16.
         if *coeff > 0 {
-            *coeff += p1;
+            *coeff = coeff.wrapping_add(p1);
         } else {
-            *coeff -= p1;
+            *coeff = coeff.wrapping_sub(p1);
         }
     }
 }
