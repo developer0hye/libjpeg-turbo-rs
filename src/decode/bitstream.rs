@@ -129,11 +129,24 @@ impl<'a> BitReader<'a> {
 
     #[inline(always)]
     pub fn read_bits(&mut self, count: u8) -> u16 {
+        // JPEG entropy codes never exceed 16 bits. Larger counts can only
+        // arrive from malformed Huffman tables / scan headers; cap at the
+        // 64-bit buffer capacity so the shift below stays defined, and
+        // saturating_sub the cursor so the panic path in libFuzzer
+        // corpora (e.g. count > bits_left after fill_buffer couldn't top
+        // up past the 56-bit high-water mark) becomes a clean zero-read.
+        let count = count.min(64);
         if self.bits_left < count {
             self.fill_buffer(count);
         }
-        self.bits_left -= count;
-        ((self.bit_buffer >> self.bits_left) & ((1u64 << count) - 1)) as u16
+        let take = count.min(self.bits_left);
+        self.bits_left -= take;
+        let mask = if count == 64 {
+            u64::MAX
+        } else {
+            (1u64 << count) - 1
+        };
+        ((self.bit_buffer >> self.bits_left) & mask) as u16
     }
 
     #[inline(always)]

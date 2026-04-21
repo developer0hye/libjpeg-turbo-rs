@@ -9,8 +9,14 @@ use crate::decode::bitstream::BitReader;
 /// This correctly handles all category sizes 1-15 without overflow,
 /// which is needed for 12-bit JPEG where DC categories reach 15.
 /// Category 16 (lossless 16-bit) is handled separately in decode_dc_coefficient.
+/// Callers must ensure `size` is in `1..=15` (the category-0 / category-16
+/// paths are handled before reaching here); we still clamp defensively so a
+/// malformed Huffman table can't panic the shifts.
 #[inline(always)]
 fn extend(value: u16, size: u8) -> i16 {
+    if !(1..=15).contains(&size) {
+        return value as i16;
+    }
     let x = value as i32;
     let s = size as i32;
     let threshold = 1i32 << (s - 1);
