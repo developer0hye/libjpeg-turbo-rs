@@ -31,8 +31,19 @@ pub fn undifference_row(
     point_transform: u8,
     is_first_row: bool,
 ) {
-    let mask = ((1u32 << precision) - 1) as i32;
-    let initial = 1i32 << (precision as i32 - point_transform as i32 - 1);
+    // JPEG T.81 F.1.1: lossless precision is 2..=16, and point_transform
+    // must satisfy `point_transform < precision` so the initial prediction
+    // `2^(precision - point_transform - 1)` is well-defined. Malformed
+    // frame headers can violate either constraint; clamp the shift widths
+    // so we don't panic and so a downstream bit-exactness comparison will
+    // still catch the bad input rather than aborting the whole decode.
+    let prec_shift: u32 = (precision as u32).min(31);
+    let mask: i32 = ((1u32 << prec_shift).saturating_sub(1)) as i32;
+    let init_shift: i32 = (precision as i32)
+        .saturating_sub(point_transform as i32)
+        .saturating_sub(1)
+        .clamp(0, 31);
+    let initial: i32 = 1i32 << init_shift;
 
     for x in 0..diffs.len() {
         let prediction = if is_first_row && x == 0 {

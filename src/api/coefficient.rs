@@ -2350,6 +2350,18 @@ fn decode_baseline_coefficients(
         &metadata.ac_huffman_tables,
     )?;
 
+    // Baseline single-scan JPEG must reference every frame component in
+    // its SOS — otherwise the per-component indexing below would walk off
+    // the plan. Malformed streams surface a clean CorruptData error
+    // rather than panicking on `mcu_plan[comp_idx]`.
+    if mcu_plan.len() != comp_data.len() {
+        return Err(crate::common::error::JpegError::CorruptData(format!(
+            "baseline SOS covers {} components but frame has {}",
+            mcu_plan.len(),
+            comp_data.len()
+        )));
+    }
+
     let entropy_data = &data[metadata.entropy_data_offset..];
     let mut bit_reader = BitReader::new(entropy_data);
     let mut mcu_decoder = entropy::McuDecoder::new(frame.components.len());

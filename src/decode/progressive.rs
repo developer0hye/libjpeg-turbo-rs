@@ -61,6 +61,16 @@ pub fn decode_ac_first(
     al: u8,
     eob_run: &mut u16,
 ) -> Result<()> {
+    // JPEG T.81 G.1.1.1.1: AC scan requires 1 <= ss <= se <= 63. The
+    // entropy loop below indexes `ZIGZAG_ORDER` via `get_unchecked`, so
+    // out-of-range values from a malformed SOS are UB rather than a
+    // clean panic — reject up front.
+    if ss < 1 || se < ss || se > 63 {
+        return Err(JpegError::CorruptData(format!(
+            "progressive AC-first scan bounds: ss={} se={}",
+            ss, se
+        )));
+    }
     if *eob_run > 0 {
         *eob_run -= 1;
         return Ok(());
@@ -155,6 +165,12 @@ pub fn decode_ac_refine(
     al: u8,
     eob_run: &mut u16,
 ) -> Result<()> {
+    if ss < 1 || se < ss || se > 63 {
+        return Err(JpegError::CorruptData(format!(
+            "progressive AC-refine scan bounds: ss={} se={}",
+            ss, se
+        )));
+    }
     let p1: i16 = 1i16 << al;
     let m1: i16 = (-1i16) << al;
     let se = se as usize;

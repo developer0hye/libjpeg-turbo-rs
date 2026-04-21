@@ -1,66 +1,85 @@
-//! Regression tests for fuzzer-discovered crashes. Each byte pattern was
-//! captured from the nightly `fuzz-smoke.yml` workflow and copied into
-//! `fuzz/corpus/<target>/` so libFuzzer also exercises it on every run.
-//! Every API listed here must return `Err` (or a panic-safe result) on the
-//! malformed inputs — never panic or abort.
+//! Regression tests for fuzzer-discovered crashes.
+//!
+//! Every `crash-*` file under `fuzz/corpus/<target>/` is re-fed into the
+//! same API the matching fuzz target exercises. A malformed JPEG must
+//! never panic or abort — it must return `Err` (or at minimum not crash
+//! the process). libFuzzer runs the same seeds nightly; this harness
+//! catches regressions fast between nightly runs.
+//!
+//! Gated off `wasm` because the corpus is loaded via `std::fs`.
+
+#![cfg(not(target_family = "wasm"))]
 
 use libjpeg_turbo_rs::{decompress, decompress_lenient, read_coefficients};
+use std::path::PathBuf;
 
-fn load(target: &str, crash_name: &str) -> Vec<u8> {
-    let path = format!(
-        "{}/fuzz/corpus/{}/{}",
-        env!("CARGO_MANIFEST_DIR"),
-        target,
-        crash_name
+fn crash_seeds(target: &str) -> Vec<PathBuf> {
+    let dir: PathBuf = [env!("CARGO_MANIFEST_DIR"), "fuzz", "corpus", target]
+        .iter()
+        .collect();
+    let read_dir = match std::fs::read_dir(&dir) {
+        Ok(rd) => rd,
+        Err(_) => return Vec::new(),
+    };
+    let mut seeds: Vec<PathBuf> = read_dir
+        .filter_map(|e| e.ok())
+        .map(|e| e.path())
+        .filter(|p| {
+            p.file_name()
+                .and_then(|n| n.to_str())
+                .is_some_and(|n| n.starts_with("crash-"))
+        })
+        .collect();
+    seeds.sort();
+    seeds
+}
+
+fn run<F: Fn(&[u8])>(target: &str, call: F) {
+    let seeds = crash_seeds(target);
+    assert!(
+        !seeds.is_empty(),
+        "no crash-* seeds under fuzz/corpus/{}",
+        target
     );
-    std::fs::read(&path).unwrap_or_else(|e| panic!("read {}: {}", path, e))
+    for seed in seeds {
+        let data = std::fs::read(&seed).unwrap_or_else(|e| panic!("read {:?}: {}", seed, e));
+        call(&data);
+    }
 }
 
 #[test]
-fn fuzz_decompress_crash_9aa915ab() {
-    let data = load(
-        "fuzz_decompress",
-        "crash-9aa915ab4e164bb3511a0505a62cd5b0ea954c0d",
-    );
-    let _ = decompress(&data);
+fn fuzz_decompress_crashes_are_panic_safe() {
+    run("fuzz_decompress", |d| {
+        let _ = decompress(d);
+    });
 }
 
 #[test]
-fn fuzz_decompress_lenient_crash_8eecc401() {
-    let data = load(
-        "fuzz_decompress_lenient",
-        "crash-8eecc40117a9bc076a870df7006dbc10a630befc",
-    );
-    let _ = decompress_lenient(&data);
+fn fuzz_decompress_lenient_crashes_are_panic_safe() {
+    run("fuzz_decompress_lenient", |d| {
+        let _ = decompress_lenient(d);
+    });
 }
 
 #[test]
-fn fuzz_progressive_decoder_crash_25ad884d() {
-    let data = load(
-        "fuzz_progressive_decoder",
-        "crash-25ad884d739ff12dee3ce88fc4234e46b04d9c02",
-    );
-    let _ = decompress(&data);
+fn fuzz_progressive_decoder_crashes_are_panic_safe() {
+    run("fuzz_progressive_decoder", |d| {
+        let _ = decompress(d);
+    });
 }
 
 #[test]
-fn fuzz_read_coefficients_crash_c60edf95() {
-    let data = load(
-        "fuzz_read_coefficients",
-        "crash-c60edf9531733501d6735509f5f8ee006cb74f82",
-    );
-    let _ = read_coefficients(&data);
+fn fuzz_read_coefficients_crashes_are_panic_safe() {
+    run("fuzz_read_coefficients", |d| {
+        let _ = read_coefficients(d);
+    });
 }
 
 #[test]
-fn fuzz_transform_crash_5e275748() {
-    let data = load(
-        "fuzz_transform",
-        "crash-5e275748109e1a5d3ee55b804ab7daab0b74afbe",
-    );
+fn fuzz_transform_crashes_are_panic_safe() {
     // Transform goes through the same entropy-decode entry points as
-    // `read_coefficients`; the fuzz_transform target itself calls the
-    // high-level transform API, but coefficient read is the common panic
-    // surface captured here.
-    let _ = read_coefficients(&data);
+    // `read_coefficients`; we exercise that path here.
+    run("fuzz_transform", |d| {
+        let _ = read_coefficients(d);
+    });
 }
