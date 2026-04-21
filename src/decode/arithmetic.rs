@@ -413,6 +413,15 @@ impl<'a> ArithDecoder<'a> {
         se: u8,
         al: u8,
     ) -> Result<()> {
+        // JPEG T.81 G.1.1.1.1: AC scan requires 1 <= ss <= se <= 63. Malformed
+        // input can violate either bound; rejecting here keeps the `k - 1`
+        // decrement and `ZIGZAG_ORDER[k]` lookup below in range.
+        if ss < 1 || se < ss || se > 63 {
+            return Err(JpegError::CorruptData(format!(
+                "arithmetic AC-first scan bounds: ss={} se={}",
+                ss, se
+            )));
+        }
         let mut k = ss as usize;
         while k <= se as usize {
             let mut st = 3 * (k - 1);
@@ -472,6 +481,15 @@ impl<'a> ArithDecoder<'a> {
         se: u8,
         al: u8,
     ) -> Result<()> {
+        // JPEG T.81 G.1.1.1.1: AC scan requires 1 <= ss <= se <= 63. Bounds
+        // must hold so the `ZIGZAG_ORDER[kex]` / `[k]` indexing stays in the
+        // 64-entry zigzag table.
+        if ss < 1 || se < ss || se > 63 {
+            return Err(JpegError::CorruptData(format!(
+                "arithmetic AC-refine scan bounds: ss={} se={}",
+                ss, se
+            )));
+        }
         let p1 = 1i16 << al;
         let m1 = (-1i16) << al;
 
