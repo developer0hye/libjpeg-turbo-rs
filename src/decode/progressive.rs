@@ -32,7 +32,10 @@ fn extend(value: u16, size: u8) -> i16 {
     // Also use wrapping arithmetic on the final subtraction since a
     // malformed input can feed any u16 in `value`.
     let half = 1u16 << (size - 1);
-    let mask = if value < half { 0i32 } else { -1i32 };
+    // HUFF_EXTEND: when `value < half`, subtract `(1<<size)-1` so the raw
+    // bits form a signed negative value; otherwise pass the raw bits as
+    // positive. Mask is all-ones in the "subtract" case.
+    let mask: i32 = if value < half { -1i32 } else { 0i32 };
     let offset = (((1i32 << size).wrapping_sub(1)) & mask) as i16;
     (value as i16).wrapping_sub(offset)
 }
