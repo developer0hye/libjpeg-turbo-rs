@@ -3456,6 +3456,27 @@ impl<'a> Decoder<'a> {
                 let b_stride: usize =
                     mcus_x * frame.components[2].horizontal_sampling as usize * comp_block_sizes[2];
 
+                // For a well-formed JPEG every RGB plane has at least
+                // `y*stride + out_width` bytes past each row's x-offset.
+                // Malformed scan tables with inconsistent sampling can
+                // leave planes short — reject rather than OOB-panicking
+                // inside the interleave loop.
+                if out_height > 0 {
+                    let last_y = out_height - 1;
+                    let min_r = last_y * r_stride + comp_x_offsets[0] + out_width;
+                    let min_g = last_y * g_stride + comp_x_offsets[1] + out_width;
+                    let min_b = last_y * b_stride + comp_x_offsets[2] + out_width;
+                    if r_plane.len() < min_r
+                        || g_plane.len() < min_g
+                        || b_plane.len() < min_b
+                    {
+                        return Err(JpegError::CorruptData(format!(
+                            "RGB component plane too short: r={}/{} g={}/{} b={}/{}",
+                            r_plane.len(), min_r, g_plane.len(), min_g, b_plane.len(), min_b
+                        )));
+                    }
+                }
+
                 let data_size: usize = out_width * out_height * 3;
                 let mut data: Vec<u8> = vec![0u8; data_size];
                 for y in 0..out_height {

@@ -373,13 +373,13 @@ impl ProgressiveDecoder {
         if num_scan_components > 1 {
             // Interleaved scan (DC only in progressive)
             let mut dc_preds = [0i16; 4];
-            let mut mcu_count: u16 = 0;
+            let mut mcu_count: u32 = 0;
 
             for mcu_y in 0..self.mcus_y {
                 for mcu_x in 0..self.mcus_x {
                     if restart_interval > 0
                         && mcu_count > 0
-                        && mcu_count.is_multiple_of(restart_interval)
+                        && mcu_count.is_multiple_of(restart_interval as u32)
                     {
                         bit_reader.reset();
                         dc_preds = [0i16; 4];
@@ -438,7 +438,7 @@ impl ProgressiveDecoder {
             let blocks_y: usize = self.comp_infos[comp_idx].blocks_y;
             let mut dc_pred: i16 = 0;
             let mut eob_run: u16 = 0;
-            let mut mcu_count: u16 = 0;
+            let mut mcu_count: u32 = 0;
 
             let dc_table_ref = if is_dc {
                 Some(
@@ -474,7 +474,7 @@ impl ProgressiveDecoder {
                 for bx in 0..blocks_x {
                     if restart_interval > 0
                         && mcu_count > 0
-                        && mcu_count.is_multiple_of(restart_interval)
+                        && mcu_count.is_multiple_of(restart_interval as u32)
                     {
                         bit_reader.reset();
                         dc_pred = 0;
