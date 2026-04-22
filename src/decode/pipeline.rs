@@ -1367,6 +1367,16 @@ impl<'a> Decoder<'a> {
             &self.metadata.dc_huffman_tables,
             &self.metadata.ac_huffman_tables,
         )?;
+        // Malformed single-scan JPEG where SOS omits some frame components
+        // would leave `mcu_plan` shorter than frame.components; reject so
+        // the per-component indexing below can't OOB-panic.
+        if mcu_plan.len() < frame.components.len() {
+            return Err(JpegError::CorruptData(format!(
+                "SOS references {} components but frame has {}",
+                mcu_plan.len(),
+                frame.components.len()
+            )));
+        }
 
         struct CompLayout {
             comp_w: usize,
@@ -2650,6 +2660,16 @@ impl<'a> Decoder<'a> {
             .take(num_components)
             .map(|sc| sc.dc_table_index as usize)
             .collect();
+        // Lossless multi-component decode below indexes `dc_tbl_indices[c]`
+        // for every frame component; malformed SOS with fewer scan
+        // components than frame.components would trip an OOB panic.
+        if dc_tbl_indices.len() < num_components {
+            return Err(JpegError::CorruptData(format!(
+                "lossless SOS has {} components but frame has {}",
+                dc_tbl_indices.len(),
+                num_components
+            )));
+        }
 
         let entropy_data = &self.raw_data[self.metadata.entropy_data_offset..];
         let mut arith = ArithDecoder::new(entropy_data, 0);
@@ -3466,13 +3486,15 @@ impl<'a> Decoder<'a> {
                     let min_r = last_y * r_stride + comp_x_offsets[0] + out_width;
                     let min_g = last_y * g_stride + comp_x_offsets[1] + out_width;
                     let min_b = last_y * b_stride + comp_x_offsets[2] + out_width;
-                    if r_plane.len() < min_r
-                        || g_plane.len() < min_g
-                        || b_plane.len() < min_b
-                    {
+                    if r_plane.len() < min_r || g_plane.len() < min_g || b_plane.len() < min_b {
                         return Err(JpegError::CorruptData(format!(
                             "RGB component plane too short: r={}/{} g={}/{} b={}/{}",
-                            r_plane.len(), min_r, g_plane.len(), min_g, b_plane.len(), min_b
+                            r_plane.len(),
+                            min_r,
+                            g_plane.len(),
+                            min_g,
+                            b_plane.len(),
+                            min_b
                         )));
                     }
                 }
