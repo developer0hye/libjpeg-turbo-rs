@@ -200,6 +200,37 @@ fn repack_into_pitched(
         return Ok(());
     }
 
+    // Grayscale source -> RGB-family destination: replicate the gray sample
+    // into R, G, and B channels. Matches libjpeg-turbo's automatic
+    // grayscale-to-RGB expansion (`jdcolor.c` `gray_rgb_convert`) and is the
+    // path tjunittest exercises when decoding a gray JPEG into TJPF_RGB et al.
+    if src_fmt == PixelFormat::Grayscale {
+        if let (Some(dst_r), Some(dst_g), Some(dst_b)) = (
+            dst_fmt.red_offset(),
+            dst_fmt.green_offset(),
+            dst_fmt.blue_offset(),
+        ) {
+            for row in 0..h {
+                let s_row: &[u8] = &src[row * w..(row + 1) * w];
+                let d_row_start: usize = row * dst_pitch;
+                for x in 0..w {
+                    let dp: usize = d_row_start + x * dst_bpp;
+                    // Initialize all destination bytes to 0xFF so any X/A
+                    // padding byte defaults to opaque, matching the
+                    // RGB->RGB-family path below.
+                    for k in 0..dst_bpp {
+                        dst[dp + k] = 0xFF;
+                    }
+                    let g_val: u8 = s_row[x];
+                    dst[dp + dst_r] = g_val;
+                    dst[dp + dst_g] = g_val;
+                    dst[dp + dst_b] = g_val;
+                }
+            }
+            return Ok(());
+        }
+    }
+
     // Extract RGB from the source pixel using its channel offsets, then
     // write to the destination in the requested order. This handles every
     // RGB/BGR/alpha/padding permutation in `PixelFormat`.
@@ -246,4 +277,137 @@ fn repack_into_pitched(
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn gray_src(samples: &[u8]) -> Vec<u8> {
+        samples.to_vec()
+    }
+
+    #[test]
+    fn gray_to_rgb_replicates_luma_into_three_channels() {
+        // 4x1 gray ramp; each pixel must land in R,G,B.
+        let src: Vec<u8> = gray_src(&[10, 80, 150, 220]);
+        let mut dst: Vec<u8> = vec![0; 4 * 3];
+        repack_into_pitched(
+            &src,
+            PixelFormat::Grayscale,
+            4,
+            1,
+            PixelFormat::Rgb,
+            &mut dst,
+            12,
+        )
+        .expect("gray->rgb must succeed");
+        // Each gray sample replicated into all three RGB bytes.
+        assert_eq!(
+            dst,
+            vec![10, 10, 10, 80, 80, 80, 150, 150, 150, 220, 220, 220]
+        );
+    }
+
+    #[test]
+    fn gray_to_bgr_replicates_luma_into_three_channels() {
+        // BGR has the same layout for monochrome input — order doesn't matter
+        // when R==G==B. Confirms the branch fires for both color orderings.
+        let src: Vec<u8> = gray_src(&[5, 250]);
+        let mut dst: Vec<u8> = vec![0; 2 * 3];
+        repack_into_pitched(
+            &src,
+            PixelFormat::Grayscale,
+            2,
+            1,
+            PixelFormat::Bgr,
+            &mut dst,
+            6,
+        )
+        .expect("gray->bgr must succeed");
+        assert_eq!(dst, vec![5, 5, 5, 250, 250, 250]);
+    }
+
+    #[test]
+    fn gray_to_rgba_sets_alpha_opaque() {
+        // 4-bpp destinations get 0xFF in the unused (X/A) lane to match the
+        // RGB->RGB-family path's "alpha defaults to fully opaque" convention.
+        let src: Vec<u8> = gray_src(&[42]);
+        let mut dst: Vec<u8> = vec![0; 4];
+        repack_into_pitched(
+            &src,
+            PixelFormat::Grayscale,
+            1,
+            1,
+            PixelFormat::Rgba,
+            &mut dst,
+            4,
+        )
+        .expect("gray->rgba must succeed");
+        // R, G, B = 42, A = 0xFF.
+        assert_eq!(dst, vec![42, 42, 42, 0xFF]);
+    }
+
+    #[test]
+    fn gray_to_xrgb_sets_padding_byte_opaque() {
+        // X is the leading byte for XRGB; verify our 0xFF init covers it.
+        let src: Vec<u8> = gray_src(&[99]);
+        let mut dst: Vec<u8> = vec![0; 4];
+        repack_into_pitched(
+            &src,
+            PixelFormat::Grayscale,
+            1,
+            1,
+            PixelFormat::Xrgb,
+            &mut dst,
+            4,
+        )
+        .expect("gray->xrgb must succeed");
+        // X = 0xFF, then R, G, B = 99.
+        assert_eq!(dst, vec![0xFF, 99, 99, 99]);
+    }
+
+    #[test]
+    fn gray_to_abgr_handles_alpha_first_layout() {
+        let src: Vec<u8> = gray_src(&[7, 200]);
+        let mut dst: Vec<u8> = vec![0; 2 * 4];
+        repack_into_pitched(
+            &src,
+            PixelFormat::Grayscale,
+            2,
+            1,
+            PixelFormat::Abgr,
+            &mut dst,
+            8,
+        )
+        .expect("gray->abgr must succeed");
+        // ABGR layout: A, B, G, R.
+        assert_eq!(dst, vec![0xFF, 7, 7, 7, 0xFF, 200, 200, 200]);
+    }
+
+    #[test]
+    fn gray_to_rgb_with_padded_pitch_writes_only_within_row_bytes() {
+        // Pitch larger than w*bpp: the trailing pad bytes must remain whatever
+        // was there before (we never touch them). Initialize dst with a known
+        // sentinel and verify only the active row region got rewritten.
+        // 2x2 gray source: row0=[1,2], row1=[3,4].
+        let src: Vec<u8> = gray_src(&[1, 2, 3, 4]);
+        let mut dst: Vec<u8> = vec![0xAA; 2 * 8]; // pitch=8, row only needs 6
+        repack_into_pitched(
+            &src,
+            PixelFormat::Grayscale,
+            2,
+            2,
+            PixelFormat::Rgb,
+            &mut dst,
+            8,
+        )
+        .expect("gray->rgb with padded pitch must succeed");
+        // First row: pixels 1,2 -> offsets 0..6, padding bytes 6..8 stay 0xAA.
+        // Second row: pixels 3,4 -> offsets 8..14, padding 14..16 stay 0xAA.
+        assert_eq!(&dst[0..6], &[1, 1, 1, 2, 2, 2]);
+        assert_eq!(&dst[6..8], &[0xAA, 0xAA]);
+        assert_eq!(&dst[8..14], &[3, 3, 3, 4, 4, 4]);
+        assert_eq!(&dst[14..16], &[0xAA, 0xAA]);
+    }
 }
