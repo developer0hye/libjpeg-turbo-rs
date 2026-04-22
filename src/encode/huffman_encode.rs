@@ -452,8 +452,13 @@ impl HuffmanEncoder {
                 let (mut pb, mut fb, mut buf) = writer.begin_block(512);
 
                 // --- DC coefficient (differential coding) ---
+                // Valid 8-bit JPEG restricts DC to ±1024 so the diff fits
+                // in i16. For 12-bit and malformed inputs the diff can
+                // overflow; `encode_dc_value` already handles the modular
+                // result the same way the C encoder does, so use
+                // wrapping_sub to keep the subtraction panic-free.
                 let dc: i16 = coeffs_zigzag[0];
-                let diff: i16 = dc - *prev_dc;
+                let diff: i16 = dc.wrapping_sub(*prev_dc);
                 *prev_dc = dc;
 
                 let (magnitude_bits, category) = encode_dc_value(diff);
@@ -481,8 +486,13 @@ impl HuffmanEncoder {
                 let (mut pb, mut fb, mut buf) = writer.begin_block(512);
 
                 // --- DC coefficient (differential coding) ---
+                // Valid 8-bit JPEG restricts DC to ±1024 so the diff fits
+                // in i16. For 12-bit and malformed inputs the diff can
+                // overflow; `encode_dc_value` already handles the modular
+                // result the same way the C encoder does, so use
+                // wrapping_sub to keep the subtraction panic-free.
                 let dc: i16 = coeffs_zigzag[0];
-                let diff: i16 = dc - *prev_dc;
+                let diff: i16 = dc.wrapping_sub(*prev_dc);
                 *prev_dc = dc;
 
                 let (magnitude_bits, category) = encode_dc_value(diff);

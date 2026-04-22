@@ -3501,6 +3501,17 @@ impl<'a> Decoder<'a> {
             let y_height =
                 mcus_y * frame.components[0].vertical_sampling as usize * comp_block_sizes[0];
 
+            // Reject degenerate chroma dimensions. Valid SOF guarantees each
+            // sampling factor is 1..=4 and mcus_* >= 1, so cb_w / cb_h etc.
+            // are always positive for a well-formed JPEG — zero here means
+            // the header's component table is inconsistent with the scan.
+            if cb_w == 0 || cb_h == 0 || cr_w == 0 || cr_h == 0 {
+                return Err(JpegError::CorruptData(format!(
+                    "zero chroma plane dimensions: cb={}x{} cr={}x{}",
+                    cb_w, cb_h, cr_w, cr_h
+                )));
+            }
+
             // Per-component effective upsample factors.
             // For scaled decode, chroma may use a larger IDCT that absorbs subsampling,
             // making the effective factor 1 (no upsample needed).
@@ -3508,6 +3519,17 @@ impl<'a> Decoder<'a> {
             let cb_v_factor: usize = y_height / cb_h;
             let cr_h_factor: usize = y_width / cr_w;
             let cr_v_factor: usize = y_height / cr_h;
+            // Valid JPEG has chroma <= luma, so every factor >= 1. A zero
+            // here means the luma plane is smaller than its chroma plane
+            // (e.g. a crafted scan with inverted sampling factors), which
+            // would feed a div-by-zero into the `out_*.div_ceil(*_factor)`
+            // calls below and into downstream upsample math.
+            if cb_h_factor == 0 || cb_v_factor == 0 || cr_h_factor == 0 || cr_v_factor == 0 {
+                return Err(JpegError::CorruptData(format!(
+                    "chroma upsample factor zero: cb={}x{} cr={}x{}",
+                    cb_h_factor, cb_v_factor, cr_h_factor, cr_v_factor
+                )));
+            }
 
             // When both chroma components have the same factors, use the shared
             // factor variables that the existing optimized paths expect.
