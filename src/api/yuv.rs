@@ -273,6 +273,8 @@ fn subsampling_factors(subsampling: Subsampling) -> (usize, usize) {
         Subsampling::S440 => (1, 2),
         Subsampling::S411 => (4, 1),
         Subsampling::S441 => (1, 4),
+        Subsampling::S410 => (4, 2),
+        Subsampling::S24 => (2, 4),
     }
 }
 
@@ -500,6 +502,8 @@ fn detect_subsampling(raw: &crate::api::raw_data::RawImage) -> Result<Subsamplin
         (1, 2) => Ok(Subsampling::S440),
         (4, 1) => Ok(Subsampling::S411),
         (1, 4) => Ok(Subsampling::S441),
+        (4, 2) => Ok(Subsampling::S410),
+        (2, 4) => Ok(Subsampling::S24),
         _ => Err(JpegError::CorruptData(format!(
             "unrecognized chroma subsampling ratio {}:{} (Y={}x{}, Cb={}x{})",
             h_ratio, v_ratio, y_w, y_h, cb_w, cb_h

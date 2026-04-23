@@ -569,6 +569,8 @@ impl<'a> Decoder<'a> {
             (1, 2) => Subsampling::S440,
             (4, 1) => Subsampling::S411,
             (1, 4) => Subsampling::S441,
+            (4, 2) => Subsampling::S410,
+            (2, 4) => Subsampling::S24,
             _ => Subsampling::Unknown,
         }
     }

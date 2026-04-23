@@ -529,6 +529,8 @@ pub fn compress_raw_12(
             Subsampling::S440 => (8, 16),
             Subsampling::S411 => (32, 8),
             Subsampling::S441 => (8, 32),
+            Subsampling::S410 => (32, 16),
+            Subsampling::S24 => (16, 32),
         }
     };
 
