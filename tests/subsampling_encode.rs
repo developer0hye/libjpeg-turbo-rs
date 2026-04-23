@@ -238,45 +238,170 @@ fn encode_s24_roundtrip_dimensions() {
     assert_eq!(img.data.len(), w * h * 3);
 }
 
-#[test]
-fn encode_s410_uniform_color_decodes_within_bound() {
-    // Uniform color round-trip: tolerate small chroma drift from box-filter
-    // upsample fallback (we don't ship a fancy h4v2/h2v4 kernel yet). Measured
-    // worst case at quality=90 is well under 8/255.
-    let (w, h) = (32, 16);
-    let pixels: Vec<u8> = vec![100u8; w * h * 3];
-    let jpeg: Vec<u8> = compress(&pixels, w, h, PixelFormat::Rgb, 90, Subsampling::S410).unwrap();
-    let img = decompress(&jpeg).unwrap();
-    let max_diff: u8 = pixels
+/// 16x64 (S441) / 64x32 (S410) / 32x64 (S24) RGB gradient — exercises every
+/// luma block in the MCU plus the (1,4)/(4,2)/(2,4) chroma downsamples.
+fn gen_gradient(w: usize, h: usize) -> Vec<u8> {
+    let mut p: Vec<u8> = vec![0u8; w * h * 3];
+    for y in 0..h {
+        for x in 0..w {
+            let i: usize = (y * w + x) * 3;
+            p[i] = (x * 4) as u8;
+            p[i + 1] = (y * 4) as u8;
+            p[i + 2] = ((x + y) * 2) as u8;
+        }
+    }
+    p
+}
+
+fn measured_diffs(orig: &[u8], decoded: &[u8]) -> (u8, f64) {
+    let max_diff: u8 = orig
         .iter()
-        .zip(img.data.iter())
+        .zip(decoded.iter())
         .map(|(&a, &b)| (a as i16 - b as i16).unsigned_abs() as u8)
         .max()
         .unwrap_or(0);
+    let sum: u32 = orig
+        .iter()
+        .zip(decoded.iter())
+        .map(|(&a, &b)| (a as i16 - b as i16).unsigned_abs() as u32)
+        .sum();
+    (max_diff, sum as f64 / orig.len() as f64)
+}
+
+// Bounds set per CLAUDE.md "tolerance must reflect measured reality + small
+// margin". Probed with the gradient above at q=95 (release build):
+//   S441 max=7  mean=1.62
+//   S410 max=8  mean=1.76
+//   S24  max=9  mean=1.76
+// Bumped by +1 on max to absorb optimizer/SIMD jitter; mean cap is ~25% above
+// measured so genuine quality regressions still trip it.
+
+#[test]
+fn encode_s441_gradient_roundtrip_within_measured_bound() {
+    let (w, h) = (16, 64);
+    let pixels: Vec<u8> = gen_gradient(w, h);
+    let jpeg: Vec<u8> = compress(&pixels, w, h, PixelFormat::Rgb, 95, Subsampling::S441).unwrap();
+    let img = decompress(&jpeg).unwrap();
+    let (max_diff, mean_diff) = measured_diffs(&pixels, &img.data);
     assert!(
-        max_diff < 8,
-        "S410 uniform-color round-trip max_diff={} exceeds 8/255 bound",
+        max_diff <= 8,
+        "S441 gradient max_diff={} exceeds bound 8 (measured 7)",
         max_diff
+    );
+    assert!(
+        mean_diff < 2.0,
+        "S441 gradient mean_diff={:.2} exceeds bound 2.0 (measured 1.62)",
+        mean_diff
     );
 }
 
 #[test]
-fn encode_s24_uniform_color_decodes_within_bound() {
-    let (w, h) = (16, 32);
-    let pixels: Vec<u8> = vec![100u8; w * h * 3];
-    let jpeg: Vec<u8> = compress(&pixels, w, h, PixelFormat::Rgb, 90, Subsampling::S24).unwrap();
+fn encode_s410_gradient_roundtrip_within_measured_bound() {
+    let (w, h) = (64, 32);
+    let pixels: Vec<u8> = gen_gradient(w, h);
+    let jpeg: Vec<u8> = compress(&pixels, w, h, PixelFormat::Rgb, 95, Subsampling::S410).unwrap();
     let img = decompress(&jpeg).unwrap();
-    let max_diff: u8 = pixels
-        .iter()
-        .zip(img.data.iter())
-        .map(|(&a, &b)| (a as i16 - b as i16).unsigned_abs() as u8)
-        .max()
-        .unwrap_or(0);
+    let (max_diff, mean_diff) = measured_diffs(&pixels, &img.data);
     assert!(
-        max_diff < 8,
-        "S24 uniform-color round-trip max_diff={} exceeds 8/255 bound",
+        max_diff <= 9,
+        "S410 gradient max_diff={} exceeds bound 9 (measured 8)",
         max_diff
     );
+    assert!(
+        mean_diff < 2.2,
+        "S410 gradient mean_diff={:.2} exceeds bound 2.2 (measured 1.76)",
+        mean_diff
+    );
+}
+
+#[test]
+fn encode_s24_gradient_roundtrip_within_measured_bound() {
+    let (w, h) = (32, 64);
+    let pixels: Vec<u8> = gen_gradient(w, h);
+    let jpeg: Vec<u8> = compress(&pixels, w, h, PixelFormat::Rgb, 95, Subsampling::S24).unwrap();
+    let img = decompress(&jpeg).unwrap();
+    let (max_diff, mean_diff) = measured_diffs(&pixels, &img.data);
+    assert!(
+        max_diff <= 10,
+        "S24 gradient max_diff={} exceeds bound 10 (measured 9)",
+        max_diff
+    );
+    assert!(
+        mean_diff < 2.2,
+        "S24 gradient mean_diff={:.2} exceeds bound 2.2 (measured 1.76)",
+        mean_diff
+    );
+}
+
+/// C djpeg cross-validation: Rust encode of S441/S410/S24 gradient, decoded
+/// by both Rust and C djpeg, must produce pixel-identical output (diff=0).
+/// This is the strongest possible check: it pins our SOF + Huffman + DQT
+/// emission to the canonical libjpeg-turbo decoder's interpretation.
+#[test]
+fn c_djpeg_new_subsamp_encode_diff_zero() {
+    let djpeg: PathBuf = require_c_tool!("djpeg");
+
+    let cases: &[(Subsampling, &str, usize, usize)] = &[
+        (Subsampling::S441, "S441", 16, 64),
+        (Subsampling::S410, "S410", 64, 32),
+        (Subsampling::S24, "S24", 32, 64),
+    ];
+
+    for &(ss, label, w, h) in cases {
+        let pixels: Vec<u8> = gen_gradient(w, h);
+        let jpeg: Vec<u8> = compress(&pixels, w, h, PixelFormat::Rgb, 95, ss)
+            .unwrap_or_else(|e| panic!("{}: Rust encode failed: {}", label, e));
+
+        let rust_img = decompress_to(&jpeg, PixelFormat::Rgb)
+            .unwrap_or_else(|e| panic!("{}: Rust decode failed: {}", label, e));
+
+        let tmp_jpg: PathBuf = std::env::temp_dir().join(format!(
+            "ljt_subsamp_{}_{}.jpg",
+            label,
+            std::process::id()
+        ));
+        let tmp_ppm: PathBuf = std::env::temp_dir().join(format!(
+            "ljt_subsamp_{}_{}.ppm",
+            label,
+            std::process::id()
+        ));
+        std::fs::write(&tmp_jpg, &jpeg).expect("write tmp jpg");
+
+        let output = Command::new(&djpeg)
+            .arg("-ppm")
+            .arg("-outfile")
+            .arg(&tmp_ppm)
+            .arg(&tmp_jpg)
+            .output()
+            .expect("failed to run djpeg");
+        assert!(
+            output.status.success(),
+            "{}: djpeg failed (exit {:?}): {}",
+            label,
+            output.status.code(),
+            String::from_utf8_lossy(&output.stderr),
+        );
+
+        let (cw, ch, c_pixels) = parse_ppm(&tmp_ppm);
+        std::fs::remove_file(&tmp_jpg).ok();
+        std::fs::remove_file(&tmp_ppm).ok();
+
+        assert_eq!(cw, rust_img.width, "{}: width mismatch", label);
+        assert_eq!(ch, rust_img.height, "{}: height mismatch", label);
+        assert_eq!(c_pixels.len(), rust_img.data.len(), "{}: length mismatch", label);
+
+        let max_diff: u8 = c_pixels
+            .iter()
+            .zip(rust_img.data.iter())
+            .map(|(&a, &b)| (a as i16 - b as i16).unsigned_abs() as u8)
+            .max()
+            .unwrap_or(0);
+        assert_eq!(
+            max_diff, 0,
+            "{}: Rust-encode + C-djpeg-decode vs Rust-decode max_diff={} (must be 0)",
+            label, max_diff,
+        );
+    }
 }
 
 #[test]
