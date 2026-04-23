@@ -141,6 +141,8 @@ fn subsamp_label(s: Subsampling) -> &'static str {
         Subsampling::S420 => "420",
         Subsampling::S411 => "411",
         Subsampling::S441 => "441",
+        Subsampling::S410 => "410",
+        Subsampling::S24 => "24",
         Subsampling::Unknown => "unk",
     }
 }
