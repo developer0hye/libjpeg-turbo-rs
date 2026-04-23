@@ -149,9 +149,9 @@ fn handle_invalid_quality_returns_error() {
 #[test]
 fn handle_invalid_subsampling_returns_error() {
     let mut handle = TjHandle::new();
-    // Valid subsampling indices: 0-5
+    // Valid subsampling indices (libjpeg-turbo 3.x): 0-8.
     assert!(handle.set(TjParam::Subsampling, -1).is_err());
-    assert!(handle.set(TjParam::Subsampling, 7).is_err());
+    assert!(handle.set(TjParam::Subsampling, 9).is_err());
 }
 
 #[test]
