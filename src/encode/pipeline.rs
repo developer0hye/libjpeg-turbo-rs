@@ -168,6 +168,8 @@ pub fn compress(
             Subsampling::S440 => (8, 16),
             Subsampling::S411 => (32, 8),
             Subsampling::S441 => (8, 32),
+            Subsampling::S410 => (32, 16),
+            Subsampling::S24 => (16, 32),
         }
     };
 
@@ -863,6 +865,8 @@ pub fn compress_custom_huffman(
             Subsampling::S440 => (8, 16),
             Subsampling::S411 => (32, 8),
             Subsampling::S441 => (8, 32),
+            Subsampling::S410 => (32, 16),
+            Subsampling::S24 => (16, 32),
         }
     };
 
@@ -1068,6 +1072,8 @@ pub fn compress_custom_quant(
             Subsampling::S440 => (8, 16),
             Subsampling::S411 => (32, 8),
             Subsampling::S441 => (8, 32),
+            Subsampling::S410 => (32, 16),
+            Subsampling::S24 => (16, 32),
         }
     };
 
@@ -1288,6 +1294,8 @@ pub fn compress_with_restart(
             Subsampling::S440 => (8, 16),
             Subsampling::S411 => (32, 8),
             Subsampling::S441 => (8, 32),
+            Subsampling::S410 => (32, 16),
+            Subsampling::S24 => (16, 32),
         }
     };
 
@@ -2535,6 +2543,8 @@ fn compress_progressive_with_scans(
             Subsampling::S440 => (8, 16),
             Subsampling::S411 => (32, 8),
             Subsampling::S441 => (8, 32),
+            Subsampling::S410 => (32, 16),
+            Subsampling::S24 => (16, 32),
         }
     };
 
@@ -3678,6 +3688,8 @@ pub fn compress_arithmetic(
             Subsampling::S440 => (8, 16),
             Subsampling::S411 => (32, 8),
             Subsampling::S441 => (8, 32),
+            Subsampling::S410 => (32, 16),
+            Subsampling::S24 => (16, 32),
         }
     };
 
@@ -3911,6 +3923,92 @@ pub fn compress_arithmetic(
                             all_blocks.push(q);
                         }
                     }
+                    Subsampling::S410 => {
+                        // 4 Y horizontal × 2 vertical = 8 luma blocks per MCU
+                        for dy in [0usize, 8] {
+                            for dx in [0usize, 8, 16, 24] {
+                                if is_y_dummy(
+                                    x0 + dx,
+                                    y0 + dy,
+                                    y_width_in_blocks,
+                                    y_height_in_blocks,
+                                ) {
+                                    let mut dummy = [0i16; 64];
+                                    dummy[0] = prev_dc_y_gather;
+                                    all_blocks.push(dummy);
+                                } else {
+                                    let q = gather_block(
+                                        &y_plane,
+                                        width,
+                                        height,
+                                        x0 + dx,
+                                        y0 + dy,
+                                        &luma_divisors,
+                                        fdct_quantize_fn,
+                                    );
+                                    prev_dc_y_gather = q[0];
+                                    all_blocks.push(q);
+                                }
+                            }
+                        }
+                        for plane in [&cb_plane, &cr_plane] {
+                            let q = gather_downsampled_block(
+                                plane,
+                                width,
+                                height,
+                                x0,
+                                y0,
+                                4,
+                                2,
+                                &chroma_divisors,
+                                fdct_quantize_fn,
+                            );
+                            all_blocks.push(q);
+                        }
+                    }
+                    Subsampling::S24 => {
+                        // 2 Y horizontal × 4 vertical = 8 luma blocks per MCU
+                        for dy in [0usize, 8, 16, 24] {
+                            for dx in [0usize, 8] {
+                                if is_y_dummy(
+                                    x0 + dx,
+                                    y0 + dy,
+                                    y_width_in_blocks,
+                                    y_height_in_blocks,
+                                ) {
+                                    let mut dummy = [0i16; 64];
+                                    dummy[0] = prev_dc_y_gather;
+                                    all_blocks.push(dummy);
+                                } else {
+                                    let q = gather_block(
+                                        &y_plane,
+                                        width,
+                                        height,
+                                        x0 + dx,
+                                        y0 + dy,
+                                        &luma_divisors,
+                                        fdct_quantize_fn,
+                                    );
+                                    prev_dc_y_gather = q[0];
+                                    all_blocks.push(q);
+                                }
+                            }
+                        }
+                        for plane in [&cb_plane, &cr_plane] {
+                            let q = gather_downsampled_block(
+                                plane,
+                                width,
+                                height,
+                                x0,
+                                y0,
+                                2,
+                                4,
+                                &chroma_divisors,
+                                fdct_quantize_fn,
+                            );
+                            all_blocks.push(q);
+                        }
+                    }
                 }
             }
         }
@@ -3933,6 +4031,7 @@ pub fn compress_arithmetic(
                     Subsampling::S420 => 4,
                     Subsampling::S440 => 2,
                     Subsampling::S411 | Subsampling::S441 => 4,
+                    Subsampling::S410 | Subsampling::S24 => 8,
                 };
                 for _ in 0..y_blocks {
                     arith_enc.encode_dc_sequential(&all_blocks[block_idx], 0, 0);
@@ -4076,6 +4175,8 @@ pub fn compress_arithmetic_progressive(
             Subsampling::S440 => (8, 16),
             Subsampling::S411 => (32, 8),
             Subsampling::S441 => (8, 32),
+            Subsampling::S410 => (32, 16),
+            Subsampling::S24 => (16, 32),
         }
     };
 
@@ -6600,6 +6701,82 @@ fn encode_color_mcu(
                 fdct_quantize_fn,
             );
         }
+        Subsampling::S410 => {
+            // 4 Y horizontal × 2 vertical = 8 luma blocks per MCU
+            for dy in [0usize, 8] {
+                for dx in [0usize, 8, 16, 24] {
+                    encode_single_block(
+                        y_plane,
+                        width,
+                        height,
+                        x0 + dx,
+                        y0 + dy,
+                        luma_quant,
+                        dc_luma_table,
+                        ac_luma_table,
+                        writer,
+                        prev_dc_y,
+                        fdct_quantize_fn,
+                    );
+                }
+            }
+            // Cb/Cr downsampled 4x2
+            for (plane, prev_dc) in [(cb_plane, &mut *prev_dc_cb), (cr_plane, &mut *prev_dc_cr)] {
+                encode_downsampled_chroma_block(
+                    plane,
+                    width,
+                    height,
+                    x0,
+                    y0,
+                    4,
+                    2,
+                    chroma_quant,
+                    dc_chroma_table,
+                    ac_chroma_table,
+                    writer,
+                    prev_dc,
+                    fdct_quantize_fn,
+                );
+            }
+        }
+        Subsampling::S24 => {
+            // 2 Y horizontal × 4 vertical = 8 luma blocks per MCU
+            for dy in [0usize, 8, 16, 24] {
+                for dx in [0usize, 8] {
+                    encode_single_block(
+                        y_plane,
+                        width,
+                        height,
+                        x0 + dx,
+                        y0 + dy,
+                        luma_quant,
+                        dc_luma_table,
+                        ac_luma_table,
+                        writer,
+                        prev_dc_y,
+                        fdct_quantize_fn,
+                    );
+                }
+            }
+            // Cb/Cr downsampled 2x4
+            for (plane, prev_dc) in [(cb_plane, &mut *prev_dc_cb), (cr_plane, &mut *prev_dc_cr)] {
+                encode_downsampled_chroma_block(
+                    plane,
+                    width,
+                    height,
+                    x0,
+                    y0,
+                    2,
+                    4,
+                    chroma_quant,
+                    dc_chroma_table,
+                    ac_chroma_table,
+                    writer,
+                    prev_dc,
+                    fdct_quantize_fn,
+                );
+            }
+        }
     }
 }
 
@@ -7645,6 +7822,8 @@ pub fn compress_optimized(
             Subsampling::S440 => (8, 16),
             Subsampling::S411 => (32, 8),
             Subsampling::S441 => (8, 32),
+            Subsampling::S410 => (32, 16),
+            Subsampling::S24 => (16, 32),
         }
     };
 
@@ -8084,6 +8263,114 @@ pub fn compress_optimized(
                         huff_opt::gather_ac_symbols(&crq, &mut ac_chroma_freq);
                         all_blocks.push(crq);
                     }
+                    Subsampling::S410 => {
+                        // 4 Y horizontal × 2 vertical = 8 luma blocks per MCU
+                        for dy in [0usize, 8] {
+                            for dx in [0usize, 8, 16, 24] {
+                                let yq = gather_block(
+                                    &y_plane,
+                                    width,
+                                    height,
+                                    x0 + dx,
+                                    y0 + dy,
+                                    &luma_divisors,
+                                    enc_simd.fdct_quantize,
+                                );
+                                let diff = yq[0] - prev_dc_y;
+                                prev_dc_y = yq[0];
+                                huff_opt::gather_dc_symbol(diff, &mut dc_luma_freq);
+                                huff_opt::gather_ac_symbols(&yq, &mut ac_luma_freq);
+                                all_blocks.push(yq);
+                            }
+                        }
+                        let cbq = gather_downsampled_block(
+                            &cb_plane,
+                            width,
+                            height,
+                            x0,
+                            y0,
+                            4,
+                            2,
+                            &chroma_divisors,
+                            enc_simd.fdct_quantize,
+                        );
+                        let diff = cbq[0] - prev_dc_cb;
+                        prev_dc_cb = cbq[0];
+                        huff_opt::gather_dc_symbol(diff, &mut dc_chroma_freq);
+                        huff_opt::gather_ac_symbols(&cbq, &mut ac_chroma_freq);
+                        all_blocks.push(cbq);
+
+                        let crq = gather_downsampled_block(
+                            &cr_plane,
+                            width,
+                            height,
+                            x0,
+                            y0,
+                            4,
+                            2,
+                            &chroma_divisors,
+                            enc_simd.fdct_quantize,
+                        );
+                        let diff = crq[0] - prev_dc_cr;
+                        prev_dc_cr = crq[0];
+                        huff_opt::gather_dc_symbol(diff, &mut dc_chroma_freq);
+                        huff_opt::gather_ac_symbols(&crq, &mut ac_chroma_freq);
+                        all_blocks.push(crq);
+                    }
+                    Subsampling::S24 => {
+                        // 2 Y horizontal × 4 vertical = 8 luma blocks per MCU
+                        for dy in [0usize, 8, 16, 24] {
+                            for dx in [0usize, 8] {
+                                let yq = gather_block(
+                                    &y_plane,
+                                    width,
+                                    height,
+                                    x0 + dx,
+                                    y0 + dy,
+                                    &luma_divisors,
+                                    enc_simd.fdct_quantize,
+                                );
+                                let diff = yq[0] - prev_dc_y;
+                                prev_dc_y = yq[0];
+                                huff_opt::gather_dc_symbol(diff, &mut dc_luma_freq);
+                                huff_opt::gather_ac_symbols(&yq, &mut ac_luma_freq);
+                                all_blocks.push(yq);
+                            }
+                        }
+                        let cbq = gather_downsampled_block(
+                            &cb_plane,
+                            width,
+                            height,
+                            x0,
+                            y0,
+                            2,
+                            4,
+                            &chroma_divisors,
+                            enc_simd.fdct_quantize,
+                        );
+                        let diff = cbq[0] - prev_dc_cb;
+                        prev_dc_cb = cbq[0];
+                        huff_opt::gather_dc_symbol(diff, &mut dc_chroma_freq);
+                        huff_opt::gather_ac_symbols(&cbq, &mut ac_chroma_freq);
+                        all_blocks.push(cbq);
+
+                        let crq = gather_downsampled_block(
+                            &cr_plane,
+                            width,
+                            height,
+                            x0,
+                            y0,
+                            2,
+                            4,
+                            &chroma_divisors,
+                            enc_simd.fdct_quantize,
+                        );
+                        let diff = crq[0] - prev_dc_cr;
+                        prev_dc_cr = crq[0];
+                        huff_opt::gather_dc_symbol(diff, &mut dc_chroma_freq);
+                        huff_opt::gather_ac_symbols(&crq, &mut ac_chroma_freq);
+                        all_blocks.push(crq);
+                    }
                 }
             }
         }
@@ -8239,6 +8526,35 @@ pub fn compress_optimized(
                     }
                     Subsampling::S411 | Subsampling::S441 => {
                         for _ in 0..4 {
+                            HuffmanEncoder::encode_block(
+                                &mut bit_writer,
+                                &all_blocks[block_idx],
+                                &mut prev_dc_y,
+                                &dc_luma_table,
+                                &ac_luma_table,
+                            );
+                            block_idx += 1;
+                        }
+                        HuffmanEncoder::encode_block(
+                            &mut bit_writer,
+                            &all_blocks[block_idx],
+                            &mut prev_dc_cb,
+                            &dc_chroma_table,
+                            &ac_chroma_table,
+                        );
+                        block_idx += 1;
+                        HuffmanEncoder::encode_block(
+                            &mut bit_writer,
+                            &all_blocks[block_idx],
+                            &mut prev_dc_cr,
+                            &dc_chroma_table,
+                            &ac_chroma_table,
+                        );
+                        block_idx += 1;
+                    }
+                    Subsampling::S410 | Subsampling::S24 => {
+                        // 8 Y blocks + 1 Cb + 1 Cr per MCU (h*v = 4*2 or 2*4)
+                        for _ in 0..8 {
                             HuffmanEncoder::encode_block(
                                 &mut bit_writer,
                                 &all_blocks[block_idx],
@@ -8667,6 +8983,8 @@ pub fn compress_raw(
             Subsampling::S440 => (8, 16),
             Subsampling::S411 => (32, 8),
             Subsampling::S441 => (8, 32),
+            Subsampling::S410 => (32, 16),
+            Subsampling::S24 => (16, 32),
         }
     };
     let mcus_x: usize = image_width.div_ceil(mcu_w);

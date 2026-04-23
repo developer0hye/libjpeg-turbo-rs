@@ -405,8 +405,8 @@ impl<'a> Encoder<'a> {
                         | Subsampling::S440
                         | Subsampling::S441
                         | Subsampling::Unknown => 8,
-                        Subsampling::S422 | Subsampling::S420 => 16,
-                        Subsampling::S411 => 32,
+                        Subsampling::S422 | Subsampling::S420 | Subsampling::S24 => 16,
+                        Subsampling::S411 | Subsampling::S410 => 32,
                     }
                 };
                 let mcus_x: u16 = self.width.div_ceil(mcu_w) as u16;

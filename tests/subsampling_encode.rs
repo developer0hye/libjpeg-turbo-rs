@@ -197,3 +197,107 @@ fn c_djpeg_subsampling_encode_diff_zero() {
         );
     }
 }
+
+// ===========================================================================
+// libjpeg-turbo 3.x widened TJSAMP range (TJSAMP_441/410/24).
+// These tests exercise the encoder paths at h*v = 4 (S441) and h*v = 8
+// (S410, S24) per MCU and confirm the SOF sampling factors round-trip back
+// through our own decoder.
+// ===========================================================================
+
+#[test]
+fn encode_s441_roundtrip_dimensions() {
+    let (w, h) = (16, 64);
+    let pixels: Vec<u8> = vec![128u8; w * h * 3];
+    let jpeg: Vec<u8> = compress(&pixels, w, h, PixelFormat::Rgb, 75, Subsampling::S441).unwrap();
+    let img = decompress(&jpeg).unwrap();
+    assert_eq!(img.width, w);
+    assert_eq!(img.height, h);
+    assert_eq!(img.data.len(), w * h * 3);
+}
+
+#[test]
+fn encode_s410_roundtrip_dimensions() {
+    let (w, h) = (64, 32);
+    let pixels: Vec<u8> = vec![128u8; w * h * 3];
+    let jpeg: Vec<u8> = compress(&pixels, w, h, PixelFormat::Rgb, 75, Subsampling::S410).unwrap();
+    let img = decompress(&jpeg).unwrap();
+    assert_eq!(img.width, w);
+    assert_eq!(img.height, h);
+    assert_eq!(img.data.len(), w * h * 3);
+}
+
+#[test]
+fn encode_s24_roundtrip_dimensions() {
+    let (w, h) = (32, 64);
+    let pixels: Vec<u8> = vec![128u8; w * h * 3];
+    let jpeg: Vec<u8> = compress(&pixels, w, h, PixelFormat::Rgb, 75, Subsampling::S24).unwrap();
+    let img = decompress(&jpeg).unwrap();
+    assert_eq!(img.width, w);
+    assert_eq!(img.height, h);
+    assert_eq!(img.data.len(), w * h * 3);
+}
+
+#[test]
+fn encode_s410_uniform_color_decodes_within_bound() {
+    // Uniform color round-trip: tolerate small chroma drift from box-filter
+    // upsample fallback (we don't ship a fancy h4v2/h2v4 kernel yet). Measured
+    // worst case at quality=90 is well under 8/255.
+    let (w, h) = (32, 16);
+    let pixels: Vec<u8> = vec![100u8; w * h * 3];
+    let jpeg: Vec<u8> = compress(&pixels, w, h, PixelFormat::Rgb, 90, Subsampling::S410).unwrap();
+    let img = decompress(&jpeg).unwrap();
+    let max_diff: u8 = pixels
+        .iter()
+        .zip(img.data.iter())
+        .map(|(&a, &b)| (a as i16 - b as i16).unsigned_abs() as u8)
+        .max()
+        .unwrap_or(0);
+    assert!(
+        max_diff < 8,
+        "S410 uniform-color round-trip max_diff={} exceeds 8/255 bound",
+        max_diff
+    );
+}
+
+#[test]
+fn encode_s24_uniform_color_decodes_within_bound() {
+    let (w, h) = (16, 32);
+    let pixels: Vec<u8> = vec![100u8; w * h * 3];
+    let jpeg: Vec<u8> = compress(&pixels, w, h, PixelFormat::Rgb, 90, Subsampling::S24).unwrap();
+    let img = decompress(&jpeg).unwrap();
+    let max_diff: u8 = pixels
+        .iter()
+        .zip(img.data.iter())
+        .map(|(&a, &b)| (a as i16 - b as i16).unsigned_abs() as u8)
+        .max()
+        .unwrap_or(0);
+    assert!(
+        max_diff < 8,
+        "S24 uniform-color round-trip max_diff={} exceeds 8/255 bound",
+        max_diff
+    );
+}
+
+#[test]
+fn jpeg_subsampling_inferred_from_sof_for_new_modes() {
+    // Independently verify decoder's SOF-based subsampling inference recognizes
+    // the (4,2) and (2,4) ratios introduced for S410 and S24.
+    use libjpeg_turbo_rs::Decoder;
+
+    for (subsamp, w, h) in [
+        (Subsampling::S441, 16usize, 64usize),
+        (Subsampling::S410, 64, 32),
+        (Subsampling::S24, 32, 64),
+    ] {
+        let pixels: Vec<u8> = vec![128u8; w * h * 3];
+        let jpeg: Vec<u8> = compress(&pixels, w, h, PixelFormat::Rgb, 75, subsamp).unwrap();
+        let decoder: Decoder<'_> = Decoder::new(&jpeg).unwrap();
+        let detected: Subsampling = decoder.jpeg_subsampling();
+        assert_eq!(
+            detected, subsamp,
+            "decoder.jpeg_subsampling() should round-trip {:?} via SOF; got {:?}",
+            subsamp, detected,
+        );
+    }
+}

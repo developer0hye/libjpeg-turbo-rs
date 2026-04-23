@@ -162,9 +162,11 @@ impl TjHandle {
                 self.quality = value;
             }
             TjParam::Subsampling => {
-                if !(0..=5).contains(&value) {
+                // 0=444, 1=422, 2=420, 3=GRAY, 4=440, 5=411,
+                // 6=441, 7=410, 8=24 (libjpeg-turbo 3.x widened range).
+                if !(0..=8).contains(&value) {
                     return Err(JpegError::CorruptData(format!(
-                        "subsampling must be 0-5, got {value}"
+                        "subsampling must be 0-8, got {value}"
                     )));
                 }
                 self.subsampling = value;
@@ -376,6 +378,8 @@ impl TjHandle {
             Subsampling::S440 => 4, // TJSAMP_440
             Subsampling::S411 => 5, // TJSAMP_411
             Subsampling::S441 => 6, // TJSAMP_441
+            Subsampling::S410 => 7, // TJSAMP_410
+            Subsampling::S24 => 8,  // TJSAMP_24
             Subsampling::Unknown => 0,
         }
     }
@@ -403,6 +407,9 @@ impl TjHandle {
             3 => Subsampling::S444,
             4 => Subsampling::S440,
             5 => Subsampling::S411,
+            6 => Subsampling::S441,
+            7 => Subsampling::S410,
+            8 => Subsampling::S24,
             _ => Subsampling::S420,
         }
     }

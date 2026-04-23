@@ -39,6 +39,10 @@ pub enum Subsampling {
     S411,
     /// 4:4:1 — horizontal 1x, vertical 4x
     S441,
+    /// 4:1:0 — horizontal 4x, vertical 2x (TJSAMP_410, libjpeg-turbo 3.x).
+    S410,
+    /// 2:4 — horizontal 2x, vertical 4x (TJSAMP_24, libjpeg-turbo 3.x).
+    S24,
     /// Unknown / non-standard subsampling factors.
     /// Matches libjpeg's `TJSAMP_UNKNOWN`.
     Unknown,
@@ -49,8 +53,8 @@ impl Subsampling {
     pub fn mcu_width_blocks(self) -> usize {
         match self {
             Self::S444 | Self::S440 | Self::S441 | Self::Unknown => 1,
-            Self::S422 | Self::S420 => 2,
-            Self::S411 => 4,
+            Self::S422 | Self::S420 | Self::S24 => 2,
+            Self::S411 | Self::S410 => 4,
         }
     }
 
@@ -58,8 +62,8 @@ impl Subsampling {
     pub fn mcu_height_blocks(self) -> usize {
         match self {
             Self::S444 | Self::S422 | Self::S411 | Self::Unknown => 1,
-            Self::S420 | Self::S440 => 2,
-            Self::S441 => 4,
+            Self::S420 | Self::S440 | Self::S410 => 2,
+            Self::S441 | Self::S24 => 4,
         }
     }
 
@@ -72,6 +76,8 @@ impl Subsampling {
             Self::S440 => (1, 2),
             Self::S411 => (4, 1),
             Self::S441 => (1, 4),
+            Self::S410 => (4, 2),
+            Self::S24 => (2, 4),
         }
     }
 }
