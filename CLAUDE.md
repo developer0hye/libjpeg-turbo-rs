@@ -89,6 +89,7 @@ Rust port of libjpeg-turbo with equivalent or better performance.
 - **After completing any implementation task** (feature, optimization, bug fix), spawn a `code-reviewer` agent to review the changes before committing.
 - The reviewer should check: missed optimizations, logic defects, SIMD correctness, unnecessary overhead, and SOLID principles.
 - Apply reviewer suggestions if they are clearly beneficial, then commit.
+- **For non-trivial commits** (≥ ~50 changed lines, OR touching `decode/`, `encode/`, `simd/`, public API, or fuzz harness) also run `/codex:review` before pushing — independent second opinion. Trivial fixes (typos, comments, single-line tweaks) are exempt. The codex stop-review-gate hook also fires automatically at end-of-turn as a safety net, but proactively running it before push surfaces issues earlier.
 
 ## Performance Optimization (Experiment Tracking)
 
