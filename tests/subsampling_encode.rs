@@ -404,6 +404,47 @@ fn c_djpeg_new_subsamp_encode_diff_zero() {
 }
 
 #[test]
+fn cmyk_with_excessive_subsampling_returns_error() {
+    // CMYK applies luma sampling to comp 0 AND comp 3, so S410 (h*v=8) /
+    // S24 (h*v=8) push per-MCU block count to 18 — past JPEG spec § B.2.3's
+    // 10-block cap. Caught by codex review on commit 74f42ed; without this
+    // guard we'd emit invalid JPEGs that conforming decoders reject.
+    for ss in [Subsampling::S410, Subsampling::S24] {
+        let pixels: Vec<u8> = vec![128u8; 32 * 32 * 4];
+        let result = compress(&pixels, 32, 32, PixelFormat::Cmyk, 75, ss);
+        assert!(
+            result.is_err(),
+            "compress(CMYK, {:?}) must reject — would produce 18-block MCUs",
+            ss
+        );
+        let err_msg = format!("{}", result.unwrap_err());
+        assert!(
+            err_msg.contains("blocks per MCU"),
+            "error should mention block-count limit, got: {}",
+            err_msg
+        );
+    }
+}
+
+#[test]
+fn cmyk_with_supported_subsampling_at_block_cap_succeeds() {
+    // S411 (h=4, v=1) and S441 (h=1, v=4) both yield h*v=4 -> 10 blocks per
+    // MCU exactly. Confirm we accept (don't over-reject by mistake).
+    for (ss, w, h) in [
+        (Subsampling::S411, 64usize, 16usize),
+        (Subsampling::S441, 16, 64),
+    ] {
+        let pixels: Vec<u8> = vec![128u8; w * h * 4];
+        let result = compress(&pixels, w, h, PixelFormat::Cmyk, 75, ss);
+        assert!(
+            result.is_ok(),
+            "compress(CMYK, {:?}) should succeed at the 10-block boundary",
+            ss
+        );
+    }
+}
+
+#[test]
 fn jpeg_subsampling_inferred_from_sof_for_new_modes() {
     // Independently verify decoder's SOF-based subsampling inference recognizes
     // the (4,2) and (2,4) ratios introduced for S410 and S24.
