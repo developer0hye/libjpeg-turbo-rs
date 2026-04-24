@@ -4201,7 +4201,34 @@ impl<'a> Decoder<'a> {
             let mut p1_full = vec![0u8; alloc_size];
             let mut p2_full = vec![0u8; alloc_size];
 
-            if h_factor == 2 && v_factor == 1 {
+            // Honor TJPARAM_FASTUPSAMPLE: when set, use the box-filter
+            // (nearest-neighbor) upsample instead of the fancy triangle
+            // filter. The 3-component path already checks self.fast_upsample;
+            // the 4-component (CMYK/YCCK) path was not, so tjunittest CMYK
+            // 4:2:2/4:2:0/4:4:0 subtests at scaled output saw the fancy
+            // filter blend chroma values across checker boundaries (191
+            // instead of 255 / 64 instead of 0), failing the per-pixel
+            // CHECKVAL with tolerance=1.
+            if self.fast_upsample {
+                upsample_generic_nearest(
+                    &component_planes[1],
+                    comp1_w,
+                    comp1_h,
+                    &mut p1_full,
+                    full_width,
+                    h_factor,
+                    v_factor,
+                );
+                upsample_generic_nearest(
+                    &component_planes[2],
+                    comp1_w,
+                    comp1_h,
+                    &mut p2_full,
+                    full_width,
+                    h_factor,
+                    v_factor,
+                );
+            } else if h_factor == 2 && v_factor == 1 {
                 for row in 0..comp1_h {
                     self.fancy_upsample_h2v1(
                         &component_planes[1][row * comp1_w..],
