@@ -2579,7 +2579,18 @@ impl<'a> Decoder<'a> {
 
             self.lossless_output_grayscale(&output, width, height, pt, icc_profile, exif_data)
         } else if num_components == 3 {
-            // Multi-component (color) lossless decode — interleaved scan
+            // Multi-component (color) lossless decode — interleaved scan.
+            // The interleaved loop indexes `dc_tables[0..3]`, so a malformed
+            // SOS that lists fewer than 3 components (or omits any DC table
+            // entry) must be rejected up front instead of panicking on the
+            // first MCU. Discovered via fuzz_decompress_lenient on a 3-comp
+            // SOF3 with a 1-component SOS.
+            if dc_tables.len() < 3 {
+                return Err(JpegError::CorruptData(format!(
+                    "lossless 3-component SOS lists {} DC table(s); 3 required",
+                    dc_tables.len()
+                )));
+            }
             let mut comp_planes: Vec<Vec<u16>> =
                 (0..3).map(|_| vec![0u16; width * height]).collect();
             let mut prev_rows: Vec<Option<Vec<u16>>> = vec![None; 3];

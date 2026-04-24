@@ -835,14 +835,27 @@ impl ProgressiveDecoder {
         output: &mut [u8],
         out_width: usize,
     ) {
-        for y in 0..in_height {
+        // Defensive bounds: malformed progressive JPEGs can produce a chroma
+        // plane shorter than `in_height * in_width` if blocks_y was clobbered
+        // mid-stream. Clamp every per-row slice to the actual buffer length so
+        // the upsample falls back to repeating the current row at boundaries
+        // instead of panicking. Discovered via fuzz_progressive_decoder on a
+        // double-SOF input that left coeff_bufs sized to the first SOF and
+        // in_height/in_width sized to the second.
+        let actual_rows: usize = if in_width == 0 {
+            0
+        } else {
+            input.len() / in_width
+        };
+        let safe_height: usize = in_height.min(actual_rows);
+        for y in 0..safe_height {
             let cur_row = &input[y * in_width..(y + 1) * in_width];
             let above = if y > 0 {
                 &input[(y - 1) * in_width..y * in_width]
             } else {
                 cur_row
             };
-            let below = if y + 1 < in_height {
+            let below = if y + 1 < safe_height {
                 &input[(y + 1) * in_width..(y + 2) * in_width]
             } else {
                 cur_row
@@ -858,6 +871,14 @@ impl ProgressiveDecoder {
                 output[out_y_bot * out_width + i] =
                     ((3 * cur_row[i] as u16 + below[i] as u16 + 2) >> 2) as u8;
             }
+        }
+        // The caller allocates `output` with `set_len` (uninitialized). When
+        // safe_height < in_height we skipped writing the tail rows; zero them
+        // explicitly so downstream color-conversion never reads uninit bytes.
+        let written: usize = safe_height * 2 * out_width;
+        let cap: usize = in_height * 2 * out_width;
+        if written < cap && cap <= output.len() {
+            output[written..cap].fill(0);
         }
     }
 }
