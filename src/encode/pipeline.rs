@@ -1582,6 +1582,21 @@ fn compress_cmyk(
     let h_samp: usize = h_samp_u8 as usize;
     let v_samp: usize = v_samp_u8 as usize;
 
+    // JPEG spec § B.2.3 caps an MCU at 10 blocks. CMYK applies the luma
+    // sampling factors to comp 0 AND comp 3, so per-MCU block count is
+    // `2 * h_samp * v_samp + 2`. S410 / S24 (h*v = 8) blow that to 18 and
+    // produce streams that conforming decoders reject. tjunittest skips
+    // these combinations (line 727) so it never tripped, but our public
+    // `compress()` API would silently emit invalid JPEGs.
+    let blocks_per_mcu: usize = 2 * h_samp * v_samp + 2;
+    if blocks_per_mcu > 10 {
+        return Err(JpegError::Unsupported(format!(
+            "CMYK with subsampling {:?} would emit {} blocks per MCU; JPEG spec § B.2.3 caps at 10. \
+             Use a less aggressive subsampling for CMYK input.",
+            subsampling, blocks_per_mcu
+        )));
+    }
+
     let quant_table =
         tables::quality_scale_quant_table(&tables::STD_LUMINANCE_QUANT_TABLE, quality);
     let divisors = scale_quant_for_fdct(&quant_table);
