@@ -355,16 +355,10 @@ fn c_djpeg_new_subsamp_encode_diff_zero() {
         let rust_img = decompress_to(&jpeg, PixelFormat::Rgb)
             .unwrap_or_else(|e| panic!("{}: Rust decode failed: {}", label, e));
 
-        let tmp_jpg: PathBuf = std::env::temp_dir().join(format!(
-            "ljt_subsamp_{}_{}.jpg",
-            label,
-            std::process::id()
-        ));
-        let tmp_ppm: PathBuf = std::env::temp_dir().join(format!(
-            "ljt_subsamp_{}_{}.ppm",
-            label,
-            std::process::id()
-        ));
+        let tmp_jpg: PathBuf =
+            std::env::temp_dir().join(format!("ljt_subsamp_{}_{}.jpg", label, std::process::id()));
+        let tmp_ppm: PathBuf =
+            std::env::temp_dir().join(format!("ljt_subsamp_{}_{}.ppm", label, std::process::id()));
         std::fs::write(&tmp_jpg, &jpeg).expect("write tmp jpg");
 
         let output = Command::new(&djpeg)
@@ -388,7 +382,12 @@ fn c_djpeg_new_subsamp_encode_diff_zero() {
 
         assert_eq!(cw, rust_img.width, "{}: width mismatch", label);
         assert_eq!(ch, rust_img.height, "{}: height mismatch", label);
-        assert_eq!(c_pixels.len(), rust_img.data.len(), "{}: length mismatch", label);
+        assert_eq!(
+            c_pixels.len(),
+            rust_img.data.len(),
+            "{}: length mismatch",
+            label
+        );
 
         let max_diff: u8 = c_pixels
             .iter()
