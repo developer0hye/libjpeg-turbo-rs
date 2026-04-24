@@ -842,11 +842,7 @@ impl ProgressiveDecoder {
         // instead of panicking. Discovered via fuzz_progressive_decoder on a
         // double-SOF input that left coeff_bufs sized to the first SOF and
         // in_height/in_width sized to the second.
-        let actual_rows: usize = if in_width == 0 {
-            0
-        } else {
-            input.len() / in_width
-        };
+        let actual_rows: usize = input.len().checked_div(in_width).unwrap_or(0);
         let safe_height: usize = in_height.min(actual_rows);
         for y in 0..safe_height {
             let cur_row = &input[y * in_width..(y + 1) * in_width];
