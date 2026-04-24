@@ -147,32 +147,54 @@ impl<'a> MarkerReader<'a> {
         let mut density: DensityInfo = DensityInfo::default();
         let mut saved_markers: Vec<SavedMarker> = Vec::new();
 
+        // Per JPEG spec § B.2.4.2 a stream contains exactly one SOF marker.
+        // Accepting a second SOF leaves coefficient buffers / sampling
+        // factors sized to the first dimensions while later code uses the
+        // second, which produced a slice-OOB panic in fancy_h1v2 and a
+        // length-mismatch panic in the NEON YCbCr->RGB row helper. Reject
+        // duplicates up front. Discovered via fuzz_progressive_decoder on a
+        // double-SOF input.
+        let reject_duplicate_sof = |frame: &Option<FrameHeader>| -> Result<()> {
+            if frame.is_some() {
+                Err(JpegError::CorruptData(
+                    "multiple SOF markers in stream (JPEG spec § B.2.4.2)".into(),
+                ))
+            } else {
+                Ok(())
+            }
+        };
         loop {
             let marker = self.read_marker()?;
             match marker {
                 SOF0 | SOF1 => {
                     // SOF0 = baseline, SOF1 = extended sequential (e.g., 16-bit DQT)
                     // Both are sequential DCT with Huffman coding, decoded identically.
+                    reject_duplicate_sof(&frame)?;
                     frame = Some(self.read_sof(false, false)?);
                 }
                 SOF2 => {
+                    reject_duplicate_sof(&frame)?;
                     frame = Some(self.read_sof(true, false)?);
                 }
                 SOF3 => {
+                    reject_duplicate_sof(&frame)?;
                     frame = Some(self.read_sof(false, true)?);
                 }
                 SOF9 => {
                     // Arithmetic sequential
+                    reject_duplicate_sof(&frame)?;
                     frame = Some(self.read_sof(false, false)?);
                     is_arithmetic = true;
                 }
                 SOF10 => {
                     // Arithmetic progressive
+                    reject_duplicate_sof(&frame)?;
                     frame = Some(self.read_sof(true, false)?);
                     is_arithmetic = true;
                 }
                 SOF11 => {
                     // Lossless, arithmetic-coded
+                    reject_duplicate_sof(&frame)?;
                     frame = Some(self.read_sof(false, true)?);
                     is_arithmetic = true;
                 }
