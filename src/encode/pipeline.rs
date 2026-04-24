@@ -122,7 +122,7 @@ pub fn compress(
 
     // CMYK: 4-component path, no color conversion (ignores dct_method for now)
     if pixel_format == PixelFormat::Cmyk {
-        return compress_cmyk(pixels, width, height, quality);
+        return compress_cmyk(pixels, width, height, quality, subsampling);
     }
 
     let is_grayscale = pixel_format == PixelFormat::Grayscale;
@@ -786,7 +786,7 @@ pub fn compress_custom_huffman(
 
     // CMYK: 4-component path, no color conversion
     if pixel_format == PixelFormat::Cmyk {
-        return compress_cmyk(pixels, width, height, quality);
+        return compress_cmyk(pixels, width, height, quality, subsampling);
     }
 
     let is_grayscale = pixel_format == PixelFormat::Grayscale;
@@ -1019,7 +1019,7 @@ pub fn compress_custom_quant(
 
     // CMYK: 4-component path, no color conversion
     if pixel_format == PixelFormat::Cmyk {
-        return compress_cmyk(pixels, width, height, quality);
+        return compress_cmyk(pixels, width, height, quality, subsampling);
     }
 
     let is_grayscale = pixel_format == PixelFormat::Grayscale;
@@ -1250,7 +1250,7 @@ pub fn compress_with_restart(
 
     // CMYK not supported with restart (fall through to normal compress)
     if pixel_format == PixelFormat::Cmyk {
-        return compress_cmyk(pixels, width, height, quality);
+        return compress_cmyk(pixels, width, height, quality, subsampling);
     }
 
     let is_grayscale = pixel_format == PixelFormat::Grayscale;
@@ -1563,9 +1563,25 @@ pub fn inject_saved_markers(base: &[u8], markers: &[SavedMarker]) -> Vec<u8> {
 
 /// Compress CMYK pixel data as a 4-component JPEG with Adobe APP14 marker.
 ///
-/// All 4 components use 1x1 sampling and the same quantization table.
-/// No color conversion — CMYK values are encoded directly.
-fn compress_cmyk(pixels: &[u8], width: usize, height: usize, quality: u8) -> Result<Vec<u8>> {
+/// Honors `subsampling` by writing the SOF sampling factors that
+/// libjpeg-turbo's `tj3Compress8` uses for CMYK: components 0 and 3
+/// (C and K) get the luma sampling factors, components 1 and 2 (M and Y)
+/// stay at (1, 1). Per-MCU layout therefore emits `h_samp * v_samp` C
+/// blocks, 1 M block (downsampled), 1 Y block (downsampled), then
+/// `h_samp * v_samp` K blocks. No color conversion — CMYK samples are
+/// encoded directly. Matches the SOF subsamp inference path so
+/// `tj3DecompressHeader` reports the requested `TJSAMP_*` value back.
+fn compress_cmyk(
+    pixels: &[u8],
+    width: usize,
+    height: usize,
+    quality: u8,
+    subsampling: Subsampling,
+) -> Result<Vec<u8>> {
+    let (h_samp_u8, v_samp_u8) = subsampling.sampling_factors();
+    let h_samp: usize = h_samp_u8 as usize;
+    let v_samp: usize = v_samp_u8 as usize;
+
     let quant_table =
         tables::quality_scale_quant_table(&tables::STD_LUMINANCE_QUANT_TABLE, quality);
     let divisors = scale_quant_for_fdct(&quant_table);
@@ -1573,6 +1589,9 @@ fn compress_cmyk(pixels: &[u8], width: usize, height: usize, quality: u8) -> Res
     let dc_table = build_huff_table(&tables::DC_LUMINANCE_BITS, &tables::DC_LUMINANCE_VALUES);
     let ac_table = build_huff_table(&tables::AC_LUMINANCE_BITS, &tables::AC_LUMINANCE_VALUES);
 
+    // De-interleave CMYK -> 4 planar buffers at full resolution. We do not
+    // pre-downsample the M and Y planes; the per-MCU `encode_downsampled_chroma_block`
+    // call handles that on the fly so the SIMD downsample helpers run.
     let num_pixels = width * height;
     let mut planes: [Vec<u8>; 4] = [
         vec![0u8; num_pixels],
@@ -1587,8 +1606,11 @@ fn compress_cmyk(pixels: &[u8], width: usize, height: usize, quality: u8) -> Res
         planes[3][i] = pixels[i * 4 + 3];
     }
 
-    let mcus_x = width.div_ceil(8);
-    let mcus_y = height.div_ceil(8);
+    // MCU dimensions in pixels: luma sampling factors * 8.
+    let mcu_w: usize = h_samp * 8;
+    let mcu_h: usize = v_samp * 8;
+    let mcus_x = width.div_ceil(mcu_w);
+    let mcus_y = height.div_ceil(mcu_h);
 
     let enc_simd = crate::simd::detect_encoder();
     let mut bit_writer = BitWriter::new(width * height);
@@ -1596,22 +1618,78 @@ fn compress_cmyk(pixels: &[u8], width: usize, height: usize, quality: u8) -> Res
 
     for mcu_row in 0..mcus_y {
         for mcu_col in 0..mcus_x {
-            let x0 = mcu_col * 8;
-            let y0 = mcu_row * 8;
-            for c in 0..4 {
-                encode_single_block(
-                    &planes[c],
-                    width,
-                    height,
-                    x0,
-                    y0,
-                    &divisors,
-                    &dc_table,
-                    &ac_table,
-                    &mut bit_writer,
-                    &mut prev_dc[c],
-                    enc_simd.fdct_quantize,
-                );
+            let x0 = mcu_col * mcu_w;
+            let y0 = mcu_row * mcu_h;
+            // Component 0 (C): h_samp * v_samp blocks at full resolution.
+            for dy in 0..v_samp {
+                for dx in 0..h_samp {
+                    encode_single_block(
+                        &planes[0],
+                        width,
+                        height,
+                        x0 + dx * 8,
+                        y0 + dy * 8,
+                        &divisors,
+                        &dc_table,
+                        &ac_table,
+                        &mut bit_writer,
+                        &mut prev_dc[0],
+                        enc_simd.fdct_quantize,
+                    );
+                }
+            }
+            // Components 1 and 2 (M, Y): one downsampled block each per MCU.
+            for c in [1usize, 2] {
+                if h_samp == 1 && v_samp == 1 {
+                    encode_single_block(
+                        &planes[c],
+                        width,
+                        height,
+                        x0,
+                        y0,
+                        &divisors,
+                        &dc_table,
+                        &ac_table,
+                        &mut bit_writer,
+                        &mut prev_dc[c],
+                        enc_simd.fdct_quantize,
+                    );
+                } else {
+                    encode_downsampled_chroma_block(
+                        &planes[c],
+                        width,
+                        height,
+                        x0,
+                        y0,
+                        h_samp,
+                        v_samp,
+                        &divisors,
+                        &dc_table,
+                        &ac_table,
+                        &mut bit_writer,
+                        &mut prev_dc[c],
+                        enc_simd.fdct_quantize,
+                    );
+                }
+            }
+            // Component 3 (K): h_samp * v_samp blocks at full resolution,
+            // mirroring component 0 (matches libjpeg-turbo turbojpeg.c:418-427).
+            for dy in 0..v_samp {
+                for dx in 0..h_samp {
+                    encode_single_block(
+                        &planes[3],
+                        width,
+                        height,
+                        x0 + dx * 8,
+                        y0 + dy * 8,
+                        &divisors,
+                        &dc_table,
+                        &ac_table,
+                        &mut bit_writer,
+                        &mut prev_dc[3],
+                        enc_simd.fdct_quantize,
+                    );
+                }
             }
         }
     }
@@ -1626,7 +1704,14 @@ fn compress_cmyk(pixels: &[u8], width: usize, height: usize, quality: u8) -> Res
 
     marker_writer::write_dqt(&mut output, 0, &quant_table);
 
-    let components = vec![(1, 1, 1, 0), (2, 1, 1, 0), (3, 1, 1, 0), (4, 1, 1, 0)];
+    // Sampling pattern matches turbojpeg.c:418-427: comp 0 and comp 3 take
+    // the luma sampling factors; comp 1 and comp 2 stay at (1, 1).
+    let components = vec![
+        (1, h_samp_u8, v_samp_u8, 0),
+        (2, 1, 1, 0),
+        (3, 1, 1, 0),
+        (4, h_samp_u8, v_samp_u8, 0),
+    ];
     marker_writer::write_sof0(&mut output, width as u16, height as u16, &components);
 
     marker_writer::write_dht(
