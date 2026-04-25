@@ -25,54 +25,58 @@ node /Users/yhkwon/.claude/plugins/cache/openai-codex/codex/1.0.2/scripts/codex-
 
 ---
 
-## 작업 1 (추천 1순위): `jpeg_write_coefficients` 실구현
+## 작업 1 (✅ 완료, 2026-04-27): `jpeg_write_coefficients` 실구현
+
+`crates/libjpeg-turbo-rs-capi/src/jpeglib.rs::jpeg_write_coefficients`가 stub에서 deferred-emit 본 구현으로 교체됨. 핸들 검증(magic), coding-mode 분기(progressive/arithmetic/optimize), 마커 placement(JFIF/APP14 후), 4-component CMYK/YCCK Adobe APP14, restart override 모두 적용. 통합 테스트 5개 (`capi_jpeglib_write_coefficients.rs`) 모두 그린.
+
+⚠️ **남은 한계 — 작업 1.5 (transform path)에서 처리해야 함**.
+
+---
+
+## 작업 1.5: jpegtran transform path (`-rotate`/`-flip`/`-crop`)
 
 ### Goal
-jpegtran lossless transform이 의존하는 마지막 stub 함수를 실제로 동작하게.
+stock jpegtran의 -rotate/-flip/-transpose/-crop 옵션이 우리 cdylib에 link됐을 때 동작하도록 만든다. 작업 1은 read_coefficients → write_coefficients 단순 transcoding (`-copy all`, `-progressive`, `-arithmetic`, `-restart N`)까지 지원. transform path는 별개의 dependency.
 
 ### 현재 상태
-- 위치: `crates/libjpeg-turbo-rs-capi/src/jpeglib.rs:4040-4060`
-- 동작: `last_error`에 "not implemented" 메시지 세팅 후 `global_state = CSTATE_SCANNING`만 표시
-- 결과: jpegtran lossless transform 호출 시 stub 응답으로 빈 datastream 반환
+우리 shim에 다음 함수가 없음 → jpegtran transupp.c가 호출하면 unresolved symbol:
+- libjpeg memory manager: `jpeg_alloc_huff_table`, `alloc_barray`, `request_virt_barray`, `realize_virt_arrays`, `access_virt_barray` 등
+- transupp helpers는 위 함수를 통해 destination cinfo에 virtual coefficient array를 alloc & 채움
+- 그 결과 `jpeg_write_coefficients`로 전달되는 `coef_arrays`는 우리가 read_coefficients에서 stash한 `Box<CoefHandle>`이 아니라 stock libjpeg memory manager 결과 — 우리 magic 검증에서 reject됨 (의도적 안전 장치)
 
 ### 작업 분해
-1. **시그니처 이해** (1h)
-   - C 시그니처: `void jpeg_write_coefficients(j_compress_ptr cinfo, jvirt_barray_ptr *coef_arrays)`
-   - `coef_arrays`는 컴포넌트당 하나씩 있는 virtual block array의 배열
-   - `read_coefficients`가 만든 `JpegCoefficients`를 `coef_arrays`로 노출하는 방법 결정
-   - 참조: `references/libjpeg-turbo/src/jcapimin.c:jpeg_write_coefficients`
+1. **memory manager API 구현** (~6-10h)
+   - `j_common_ptr->mem` table (`jpeg_memory_mgr` struct) 채우기
+   - `alloc_small`, `alloc_large`, `alloc_sarray`, `alloc_barray`, `request_virt_sarray`, `request_virt_barray`, `realize_virt_arrays`, `access_virt_sarray`, `access_virt_barray`, `free_pool`, `self_destruct`
+   - 가상 array는 우리 사이드에서 simple in-RAM model로 충분 (libjpeg는 disk-backed temp file 옵션 있지만 jpegtran의 일반 케이스는 in-RAM)
 
-2. **데이터 구조 매핑** (2h)
-   - `crates/libjpeg-turbo-rs-capi/src/jpeglib.rs:480-490` 근처 `JpegCompressPublic`에 coef_arrays 필드 추가 (또는 `master`의 priv 상태에)
-   - `read_coefficients` 반환값(`*mut c_void`)을 `write_coefficients`가 dereference 가능하도록
-   - C ABI: `jvirt_barray_ptr` 자체는 opaque pointer — Rust 측에서 `Box<JpegCoefficients>`로 비공개 보관해도 됨
+2. **transupp.c가 의존하는 추가 entry points** (~2-4h)
+   - `jpeg_get_small`/`jpeg_get_large`/`jpeg_open_backing_store`/`jpeg_open_backing_store_callback` 등
+   - 우리 shim에서 stub 또는 in-RAM 구현
 
-3. **본 구현** (3-4h)
-   - `libjpeg_turbo_rs::write_coefficients(&JpegCoefficients) -> Vec<u8>` 이미 존재 (`src/api/coefficient.rs:207`)
-   - C dest manager에 결과 바이트 stream 출력
-   - dest manager 인터페이스: `cinfo->dest->next_output_byte` / `free_in_buffer` / `empty_output_buffer()` / `term_destination()`
-   - 참조 패턴: `jpeg_finish_compress` 구현 (capi crate에 이미 있음)
+3. **`jpeg_write_coefficients` 측 수정** (~2-3h)
+   - 현재: magic 매치 안 되면 reject
+   - 추가: 우리 memory manager가 만든 virtual barray 핸들도 인식 (magic 별도 prefix or pointer table lookup)
+   - virtual barray에서 coefficients 읽어 `JpegCoefficients` 형태로 materialize
 
-4. **테스트** (2h)
-   - 새 dlopen 통합 테스트 `crates/libjpeg-turbo-rs-capi/tests/capi_jpeglib_write_coefficients.rs`
-   - 시나리오: encode → read_coefficients → write_coefficients → decode → byte-exact 또는 pixel-exact 비교
-   - 추가: jpegtran lossless transform 시나리오 (jpegtran 빌드 후 `examples/stock_djpeg_cjpeg/build.sh` 변형)
+4. **테스트** (~2h)
+   - `examples/stock_djpeg_cjpeg/build.sh`에 jpegtran 추가
+   - `cmp jpegtran -rotate 90 input.jpg vs upstream jpegtran -rotate 90 input.jpg` 픽셀(또는 byte) 비교
 
 ### Validation
 ```bash
-cargo test -p libjpeg-turbo-rs-capi --tests
-# 또한 stock-tool harness에서 jpegtran -trim/-flip/-rot90 동작 확인
 bash examples/stock_djpeg_cjpeg/build.sh   # jpegtran 포함 빌드
-$OUT_DIR/jpegtran -rotate 90 input.jpg > rotated.jpg
-cmp rotated.jpg expected_from_upstream_jpegtran.jpg
+$OUT_DIR/jpegtran -rotate 90 testimages/testorig.jpg > /tmp/our.jpg
+upstream-jpegtran -rotate 90 testimages/testorig.jpg > /tmp/upstream.jpg
+cmp /tmp/our.jpg /tmp/upstream.jpg   # byte-exact 목표
 ```
 
 ### 예상 크기
-~300-500 lines (Rust + C ABI 결합 + tests). 6-9 시간.
+~12-19 시간 작업. memory manager가 가장 큰 부분.
 
 ### Risk / Pitfalls
-- C ABI에서 `jvirt_barray_ptr` 라이프사이클 — caller가 free 안 함을 가정
-- destination manager 콜백 호출 순서 (init/empty/term)
+- libjpeg memory manager는 pool 기반 — 우리 in-RAM 구현이 ABI-correct 해야 함
+- virtual array의 access_*는 row offset 기반 lazy fetch — write/read 패턴 정확 매치 필요
 - 12-bit, 16-bit precision 분기 (`jpeg12_write_coefficients`도 있음 — 같은 패턴)
 
 ---

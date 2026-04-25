@@ -988,7 +988,7 @@ pub fn transform_jpeg_with_options(data: &[u8], options: &TransformOptions) -> R
 ///
 /// Pass 1 gathers symbol frequencies from the coefficient data, then
 /// generates optimal Huffman tables. Pass 2 encodes with those tables.
-fn write_coefficients_optimized(coeffs: &JpegCoefficients) -> Result<Vec<u8>> {
+pub fn write_coefficients_optimized(coeffs: &JpegCoefficients) -> Result<Vec<u8>> {
     use crate::encode::huff_opt;
 
     let num_components: usize = coeffs.components.len();
@@ -1252,7 +1252,7 @@ fn write_coefficients_optimized(coeffs: &JpegCoefficients) -> Result<Vec<u8>> {
 ///   for non-interleaved AC scans (matches C `per_scan_setup`).
 /// - `None` — byte mode (`-restart Nb`) or source-preserved RI: `coeffs.restart_interval`
 ///   is used uniformly for every scan.
-fn write_coefficients_progressive(
+pub fn write_coefficients_progressive(
     coeffs: &JpegCoefficients,
     restart_rows: Option<u16>,
 ) -> Result<Vec<u8>> {
@@ -1918,7 +1918,7 @@ fn write_coefficients_progressive(
 ///
 /// Re-encodes coefficient blocks using the JPEG arithmetic coder, matching
 /// jpegtran's arithmetic output mode for non-progressive transforms.
-fn write_coefficients_arithmetic(coeffs: &JpegCoefficients) -> Result<Vec<u8>> {
+pub fn write_coefficients_arithmetic(coeffs: &JpegCoefficients) -> Result<Vec<u8>> {
     use crate::encode::arithmetic::ArithEncoder;
 
     if coeffs.restart_interval > 0 {
@@ -2052,7 +2052,7 @@ fn write_coefficients_arithmetic(coeffs: &JpegCoefficients) -> Result<Vec<u8>> {
 ///
 /// Uses the default libjpeg-turbo progressive scan script and emits the
 /// arithmetic conditioning marker for each scan, matching libjpeg marker order.
-fn write_coefficients_progressive_arithmetic(coeffs: &JpegCoefficients) -> Result<Vec<u8>> {
+pub fn write_coefficients_progressive_arithmetic(coeffs: &JpegCoefficients) -> Result<Vec<u8>> {
     use crate::encode::arithmetic::ArithEncoder;
     use crate::encode::progressive::simple_progression;
 
