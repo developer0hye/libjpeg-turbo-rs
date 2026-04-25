@@ -179,9 +179,10 @@ fn random_plane_u8(rng: &mut Mulberry32, len: usize) -> Vec<u8> {
 /// deliberate divergence we do not need to cross-validate.
 const ROW_WIDTHS: &[usize] = &[1, 2, 3, 7, 8, 15, 16, 17, 31, 33, 64, 65, 128, 255];
 
-/// Widths for upsample parity — excludes widths <3 where scalar and
-/// SIMD deliberately differ (edge replication vs interpolation).
-const UPSAMPLE_WIDTHS: &[usize] = &[3, 4, 7, 8, 15, 16, 17, 31, 33, 64, 65, 128, 255];
+/// Widths for upsample parity — all SIMD backends match scalar across every
+/// width. Widths 1 (edge replication) and 2 (box filter) exercise kernel guards
+/// that must agree with scalar fancy_h2v1's small-width behavior.
+const UPSAMPLE_WIDTHS: &[usize] = &[1, 2, 3, 4, 7, 8, 15, 16, 17, 31, 33, 64, 65, 128, 255];
 
 // =====================================================================
 // IDCT parity — 8x8 full (scalar_idct_islow vs SIMD)

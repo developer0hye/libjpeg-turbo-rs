@@ -366,18 +366,25 @@ mod tests {
             return;
         }
         // For in_width=2, C uses box filter (no interpolation).
-        // The pipeline guards this case before reaching AVX2/NEON.
-        let input = vec![50u8, 200u8];
-        let in_width = 2;
+        // Both scalar and AVX2 kernels must emit [i0, i0, i1, i1].
+        for input in [vec![50u8, 200u8], vec![0, 255], vec![7, 13], vec![128, 64]] {
+            let in_width = 2;
 
-        let mut expected = vec![0u8; 4];
-        upsample::fancy_h2v1(&input, in_width, &mut expected, 4);
-        // Box filter: [50, 50, 200, 200]
-        assert_eq!(
-            expected,
-            vec![50, 50, 200, 200],
-            "Width=2 should use box filter"
-        );
+            let mut expected = vec![0u8; 4];
+            upsample::fancy_h2v1(&input, in_width, &mut expected, 4);
+            assert_eq!(
+                expected,
+                vec![input[0], input[0], input[1], input[1]],
+                "Scalar width=2 should be box filter for input={input:?}"
+            );
+
+            let mut actual = vec![0u8; 4];
+            avx2_upsample::avx2_fancy_upsample_h2v1(&input, in_width, &mut actual);
+            assert_eq!(
+                actual, expected,
+                "AVX2 width=2 mismatch for input={input:?}"
+            );
+        }
     }
 
     #[test]
