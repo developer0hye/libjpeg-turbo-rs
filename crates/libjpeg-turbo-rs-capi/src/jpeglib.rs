@@ -463,6 +463,28 @@ struct MarkerSaveSettings {
     limits: std::collections::HashMap<u8, c_uint>,
 }
 
+/// Tagged wrapper around `JpegCoefficients` exposed as the opaque
+/// handle that `jpeg_read_coefficients` returns to callers.
+///
+/// The leading `magic` field lets `jpeg_write_coefficients` validate
+/// that the pointer it received actually came from this shim — a
+/// foreign `jvirt_barray_ptr` produced by some other memory manager
+/// (for example a stock libjpeg `jtransform_adjust_parameters`)
+/// would not have this magic value, so we can reject it cleanly
+/// instead of silently dereferencing arbitrary memory.
+#[repr(C)]
+struct CoefHandle {
+    magic: u64,
+    inner: libjpeg_turbo_rs::JpegCoefficients,
+}
+
+impl CoefHandle {
+    /// Random-looking constant; chosen as the ASCII bytes of "RsCoefH"
+    /// in little-endian followed by `'!'` to avoid colliding with any
+    /// realistic struct prefix from a foreign library.
+    const MAGIC: u64 = u64::from_le_bytes(*b"RsCoefH!");
+}
+
 /// Rust-side private state reached via the thread-local side table
 /// keyed by the `cinfo` pointer. Owned via `Box`; freed in
 /// `jpeg_destroy_decompress`.
@@ -478,8 +500,12 @@ struct DecompressPrivate {
     /// Decoded image buffer, built lazily on `jpeg_start_decompress`.
     decoded: Option<libjpeg_turbo_rs::Image>,
     /// Saved DCT coefficients, populated by `jpeg_read_coefficients`.
-    /// Held in `Box` so callers can treat its pointer as `jvirt_barray_ptr*`.
-    coefficients: Option<Box<libjpeg_turbo_rs::JpegCoefficients>>,
+    /// Held in `Box<CoefHandle>` so callers can treat its pointer as
+    /// `jvirt_barray_ptr*`. The `CoefHandle::MAGIC` field is checked by
+    /// `jpeg_write_coefficients` before deref to reject foreign pointers
+    /// (for example virtual coefficient arrays from a real libjpeg
+    /// memory manager).
+    coefficients: Option<Box<CoefHandle>>,
     /// `jpeg_save_markers` settings; consumed by `jpeg_read_header` when the
     /// header is (re-)parsed so saved markers land in `Image.saved_markers`.
     marker_save: MarkerSaveSettings,
@@ -1817,7 +1843,10 @@ pub extern "C" fn jpeg_read_coefficients(cinfo: *mut c_void) -> *mut c_void {
                 return std::ptr::null_mut();
             }
         };
-    priv_state.coefficients = Some(Box::new(coeffs));
+    priv_state.coefficients = Some(Box::new(CoefHandle {
+        magic: CoefHandle::MAGIC,
+        inner: coeffs,
+    }));
     // Return the inner box pointer as an opaque handle. The value lives
     // inside `DecompressPrivate` and is dropped by `jpeg_destroy_decompress`.
     match priv_state.coefficients.as_mut() {
@@ -1867,11 +1896,12 @@ pub extern "C" fn jpeg_copy_critical_parameters(srcinfo: *mut c_void, dstinfo: *
     // underlying Rust `copy_critical_parameters` API (validation) are
     // still exercised. Once the compress struct is wired up, this is
     // where we'd persist it onto `dstinfo`.
-    let coeffs: &libjpeg_turbo_rs::JpegCoefficients = src_priv
+    let handle: &CoefHandle = src_priv
         .coefficients
         .as_deref()
         .expect("None branch returned above");
-    let _cfg: libjpeg_turbo_rs::EncoderConfig = libjpeg_turbo_rs::copy_critical_parameters(coeffs);
+    let _cfg: libjpeg_turbo_rs::EncoderConfig =
+        libjpeg_turbo_rs::copy_critical_parameters(&handle.inner);
 }
 
 /// `jpeg_core_output_dimensions(cinfo)`.
@@ -2614,6 +2644,12 @@ struct CompressPrivate {
     /// Index = `which_tbl` (0..3). Each entry is 64 u16 values in
     /// zig-zag order. Unused slots are `None`.
     quant_tables: Vec<Option<[u16; 64]>>,
+    /// Coefficient handle stashed by `jpeg_write_coefficients`. The
+    /// pointer is interpreted as `*const libjpeg_turbo_rs::JpegCoefficients`
+    /// at finish time. Owned by the source `j_decompress_ptr`'s private
+    /// state (see `jpeg_read_coefficients`); caller must keep that cinfo
+    /// alive across the matching `jpeg_finish_compress` call.
+    pending_coef_arrays: *const c_void,
 }
 
 impl Default for CompressPrivate {
@@ -2638,6 +2674,7 @@ impl Default for CompressPrivate {
             write_jfif: true,
             suppress_tables: false,
             quant_tables: Vec::new(),
+            pending_coef_arrays: std::ptr::null(),
         }
     }
 }
@@ -3509,16 +3546,22 @@ fn push_bytes_through_dest_mgr(
     let _ = priv_state;
 }
 
-/// Construct a new byte buffer that starts with the encoded SOI marker,
-/// inserts any pending APPn markers and (optionally) the ICC_PROFILE
-/// chunks, then continues with the original stream.
+/// Construct a new byte buffer that inserts pending APPn markers and
+/// (optionally) the ICC_PROFILE chunks at libjpeg's standard insertion
+/// point: immediately after SOI plus any automatic JFIF (APP0) or Adobe
+/// (APP14) header that the encoder already emitted. Caller-supplied
+/// markers must land *after* those identifying segments to preserve the
+/// JFIF expected ordering and to match libjpeg's `write_marker` flow.
 fn inject_markers_after_soi(encoded: &[u8], priv_state: &CompressPrivate) -> Vec<u8> {
     if encoded.len() < 2 || encoded[0] != 0xFF || encoded[1] != 0xD8 {
         // Not a JPEG stream — leave untouched.
         return encoded.to_vec();
     }
+    // Walk past SOI and any leading JFIF/APP14 segments so injected
+    // markers slot in *after* the encoder's automatic header.
+    let split: usize = scan_past_jfif_app14(encoded);
     let mut out: Vec<u8> = Vec::with_capacity(encoded.len() + 64);
-    out.extend_from_slice(&encoded[..2]);
+    out.extend_from_slice(&encoded[..split]);
 
     // Emit APPn markers the caller requested via jpeg_write_marker.
     for (code, data) in &priv_state.pending_markers {
@@ -3528,8 +3571,91 @@ fn inject_markers_after_soi(encoded: &[u8], priv_state: &CompressPrivate) -> Vec
     if let Some(icc) = &priv_state.icc_profile {
         write_app2_icc_inline(&mut out, icc);
     }
-    out.extend_from_slice(&encoded[2..]);
+    out.extend_from_slice(&encoded[split..]);
     out
+}
+
+/// Replace any leading JFIF APP0 segment in `encoded` with an Adobe
+/// APP14 marker whose `color_transform` byte matches `jpeg_color_space`
+/// (`JCS_YCCK` → 2, `JCS_CMYK`/`JCS_RGB`/other → 0). The other rules:
+/// JPEG forbids JFIF on 4-component images, and writing a stray JFIF
+/// causes downstream decoders to mis-detect the colorspace.
+fn swap_jfif_for_adobe_app14(encoded: &[u8], jpeg_color_space: c_int) -> Vec<u8> {
+    let transform: u8 = if jpeg_color_space == JCS_YCCK { 2 } else { 0 };
+    if encoded.len() < 4 || encoded[0] != 0xFF || encoded[1] != 0xD8 {
+        return encoded.to_vec();
+    }
+    let mut out: Vec<u8> = Vec::with_capacity(encoded.len() + 16);
+    out.extend_from_slice(&encoded[..2]);
+    write_adobe_app14_segment(&mut out, transform);
+    let mut p: usize = 2;
+    while p + 4 <= encoded.len() {
+        if encoded[p] != 0xFF {
+            break;
+        }
+        let marker: u8 = encoded[p + 1];
+        let seg_len: usize = ((encoded[p + 2] as usize) << 8) | encoded[p + 3] as usize;
+        if seg_len < 2 || p + 2 + seg_len > encoded.len() {
+            break;
+        }
+        let payload: &[u8] = &encoded[p + 4..p + 2 + seg_len];
+        // Drop only the JFIF APP0; preserve everything else (including
+        // any Adobe APP14 the writer might have emitted, though our
+        // writers do not currently emit one).
+        if marker == 0xE0 && payload.starts_with(b"JFIF\0") {
+            p += 2 + seg_len;
+            continue;
+        }
+        break;
+    }
+    out.extend_from_slice(&encoded[p..]);
+    out
+}
+
+/// Emit an Adobe APP14 segment with the given color-transform byte.
+/// Layout matches libjpeg `write_adobe_marker`: identifier `"Adobe"`,
+/// version=100, flags0=0, flags1=0, transform=color_transform.
+fn write_adobe_app14_segment(buf: &mut Vec<u8>, color_transform: u8) {
+    buf.push(0xFF);
+    buf.push(0xEE);
+    let seg_len: u16 = 14;
+    buf.extend_from_slice(&seg_len.to_be_bytes());
+    buf.extend_from_slice(b"Adobe");
+    buf.extend_from_slice(&[0u8, 100u8, 0u8, 0u8, 0u8, 0u8]);
+    buf.push(color_transform);
+}
+
+/// Return the byte offset just past SOI plus any leading JFIF (APP0 with
+/// "JFIF\0" identifier) and Adobe (APP14 with "Adobe" identifier) marker
+/// segments. Falls back to byte 2 (just past SOI) for non-JPEG inputs or
+/// when no JFIF/APP14 is present.
+fn scan_past_jfif_app14(encoded: &[u8]) -> usize {
+    if encoded.len() < 4 || encoded[0] != 0xFF || encoded[1] != 0xD8 {
+        return encoded.len().min(2);
+    }
+    let mut p: usize = 2;
+    loop {
+        if p + 4 > encoded.len() {
+            break;
+        }
+        if encoded[p] != 0xFF {
+            break;
+        }
+        let marker: u8 = encoded[p + 1];
+        let seg_len: usize = ((encoded[p + 2] as usize) << 8) | encoded[p + 3] as usize;
+        if seg_len < 2 || p + 2 + seg_len > encoded.len() {
+            break;
+        }
+        let payload: &[u8] = &encoded[p + 4..p + 2 + seg_len];
+        let is_jfif: bool = marker == 0xE0 && payload.starts_with(b"JFIF\0");
+        let is_adobe: bool = marker == 0xEE && payload.starts_with(b"Adobe");
+        if is_jfif || is_adobe {
+            p += 2 + seg_len;
+            continue;
+        }
+        break;
+    }
+    p
 }
 
 /// Emit APP2 "ICC_PROFILE" chunks in the standard multi-segment layout.
@@ -3586,8 +3712,15 @@ pub extern "C" fn jpeg_finish_compress(cinfo: *mut c_void) {
         return;
     }
     priv_state.have_started = false;
-    // Run the encoder and push bytes through the destination manager.
-    let _ = run_encoder_and_flush(c, priv_state);
+    // CSTATE_WRCOEFS branch: jpegtran-style lossless transcode flow.
+    // Emit the bytes from the coefficient handle stashed by the matching
+    // `jpeg_write_coefficients` call. Otherwise fall through to the
+    // pixel-encoding path.
+    if c.global_state == CSTATE_WRCOEFS {
+        let _ = run_coefficient_writer_and_flush(c, priv_state);
+    } else {
+        let _ = run_encoder_and_flush(c, priv_state);
+    }
     c.global_state = CSTATE_START;
 }
 
@@ -4039,28 +4172,145 @@ fn write_scanlines_highprec(
 
 /// `jpeg_write_coefficients(cinfo, coef_arrays)`.
 ///
-/// Used by `jpegtran` to write out the DCT coefficients from a
-/// previously-decoded file. Our encode side currently does not expose a
-/// coefficient-write entry point end-to-end; this stub captures the
-/// call so link resolution succeeds and records a last-error so
-/// consumers can detect the gap.
+/// Stashes `coef_arrays` (the opaque handle returned from
+/// `jpeg_read_coefficients` on the source cinfo) onto this compress
+/// state and transitions to `CSTATE_WRCOEFS`. The actual JPEG datastream
+/// is emitted by the matching `jpeg_finish_compress` call so that
+/// callers can still inject markers (`jpeg_write_marker`,
+/// `jpeg_write_icc_profile`) between the two — matching the libjpeg
+/// jpegtran flow.
+///
+/// # Safety contract
+///
+/// `coef_arrays` must be the value returned by a prior
+/// `jpeg_read_coefficients` call against this shim. The pointer is owned
+/// by the source `j_decompress_ptr`'s private state and stays valid
+/// until that decompress cinfo is destroyed — callers must keep the
+/// source alive across the matching `jpeg_finish_compress`.
 #[no_mangle]
-pub extern "C" fn jpeg_write_coefficients(cinfo: *mut c_void, _coef_arrays: *mut c_void) {
+pub extern "C" fn jpeg_write_coefficients(cinfo: *mut c_void, coef_arrays: *mut c_void) {
     let c: &mut JpegCompressPublic = match unsafe { cinfo_compress_mut(cinfo) } {
         Some(c) => c,
         None => return,
     };
-    let priv_ptr: *mut c_void = c.master;
-    if let Some(priv_state) = unsafe { priv_compress_from_ptr(priv_ptr) } {
+    let priv_state: &mut CompressPrivate = match unsafe { priv_compress_from_ptr(c.master) } {
+        Some(p) => p,
+        None => return,
+    };
+    if coef_arrays.is_null() {
+        priv_state.last_error =
+            CString::new("jpeg_write_coefficients: coef_arrays is NULL").unwrap_or_default();
+        return;
+    }
+    priv_state.pending_coef_arrays = coef_arrays as *const c_void;
+    priv_state.have_started = true;
+    c.global_state = CSTATE_WRCOEFS;
+
+    // Kick init_destination once so the staging buffer is live by the
+    // time finish_compress streams bytes through it. Matches the libjpeg
+    // pattern where `jpeg_write_coefficients` finishes the destination
+    // setup that `jpeg_start_compress` would otherwise do.
+    if !c.dest.is_null() {
+        let init_fn: Option<unsafe extern "C" fn(*mut c_void)> =
+            unsafe { (*c.dest).init_destination };
+        if let Some(f) = init_fn {
+            unsafe { f(cinfo) };
+        }
+    }
+}
+
+/// Encode the previously-stashed coefficient handle and stream the bytes
+/// through the destination manager. Called from `jpeg_finish_compress`
+/// when `global_state == CSTATE_WRCOEFS`. Markers and the ICC profile
+/// recorded between `jpeg_write_coefficients` and now are injected after
+/// SOI, so calls like `jpeg_write_marker(...)` interleave correctly.
+fn run_coefficient_writer_and_flush(
+    c: &mut JpegCompressPublic,
+    priv_state: &mut CompressPrivate,
+) -> bool {
+    let handle: *const c_void = priv_state.pending_coef_arrays;
+    if handle.is_null() {
+        priv_state.last_error =
+            CString::new("jpeg_finish_compress: no stashed coefficient handle").unwrap_or_default();
+        return false;
+    }
+    // SAFETY: stashed by `jpeg_write_coefficients` from a prior
+    // `jpeg_read_coefficients` return value, owned by the source
+    // decompress cinfo (see contract on `jpeg_write_coefficients`).
+    // The magic prefix lets us reject foreign jvirt_barray_ptr handles
+    // (for example destination arrays returned by a real libjpeg
+    // memory manager via jtransform_adjust_parameters) before the
+    // dereference reads invalid memory.
+    let raw: *const CoefHandle = handle as *const CoefHandle;
+    let magic: u64 = unsafe { std::ptr::read_unaligned(raw as *const u64) };
+    if magic != CoefHandle::MAGIC {
         priv_state.last_error = CString::new(
-            "jpeg_write_coefficients: virtual-barray coefficient write is not implemented yet",
+            "jpeg_finish_compress: coef_arrays did not come from jpeg_read_coefficients on this shim — \
+             foreign virtual coefficient arrays (e.g. from jtransform_adjust_parameters) are not yet supported",
         )
         .unwrap_or_default();
+        return false;
     }
-    // Flag the state machine as having started so that `jpeg_finish_compress`
-    // (which jpegtran calls after this) still emits at least an empty
-    // datastream rather than silently dropping the request.
-    c.global_state = CSTATE_SCANNING;
+    // Clone so we can apply destination overrides (notably the restart
+    // interval set via `jpegtran -restart N`) without mutating storage
+    // owned by the source decompress cinfo. Only override when the
+    // destination explicitly set a non-zero value — the libjpeg default
+    // (0 / no restart) preserves the source restart_interval the way
+    // upstream jpegtran does when no `-restart` flag is given.
+    let mut adjusted: libjpeg_turbo_rs::JpegCoefficients = unsafe { (*raw).inner.clone() };
+    if c.restart_interval != 0 {
+        adjusted.restart_interval = c.restart_interval as u16;
+    }
+
+    // Match the requested output coding mode — the same compress
+    // parameters that drive `run_encoder_and_flush` for the pixel-encode
+    // path also gate the coefficient-encode path, so jpegtran flags like
+    // `-progressive`, `-arithmetic`, and `-optimize` produce the right
+    // SOF / entropy variant. Pass `restart_in_rows` through to the
+    // progressive writer so `-restart Nb` produces row-mode markers.
+    let restart_rows: Option<u16> = if c.restart_in_rows > 0 {
+        Some(c.restart_in_rows as u16)
+    } else {
+        None
+    };
+    let bytes_result: libjpeg_turbo_rs::Result<Vec<u8>> =
+        if c.progressive_mode != 0 && c.arith_code != 0 {
+            libjpeg_turbo_rs::write_coefficients_progressive_arithmetic(&adjusted)
+        } else if c.progressive_mode != 0 {
+            libjpeg_turbo_rs::write_coefficients_progressive(&adjusted, restart_rows)
+        } else if c.arith_code != 0 {
+            libjpeg_turbo_rs::write_coefficients_arithmetic(&adjusted)
+        } else if c.optimize_coding != 0 {
+            libjpeg_turbo_rs::write_coefficients_optimized(&adjusted)
+        } else {
+            libjpeg_turbo_rs::write_coefficients(&adjusted)
+        };
+    let encoded: Vec<u8> = match bytes_result {
+        Ok(b) => b,
+        Err(e) => {
+            priv_state.last_error =
+                CString::new(format!("jpeg_finish_compress: {e}")).unwrap_or_default();
+            return false;
+        }
+    };
+    // 4-component JPEGs (CMYK / YCCK) cannot legally carry a JFIF APP0
+    // marker. The coefficient writers always emit JFIF, so we strip it
+    // and prepend an Adobe APP14 segment whose color-transform byte
+    // matches the destination jpeg_color_space (YCCK → 2, CMYK → 0).
+    let encoded: Vec<u8> = if adjusted.components.len() == 4 {
+        swap_jfif_for_adobe_app14(&encoded, c.jpeg_color_space)
+    } else {
+        encoded
+    };
+    let with_markers: Vec<u8> =
+        if priv_state.pending_markers.is_empty() && priv_state.icc_profile.is_none() {
+            encoded
+        } else {
+            inject_markers_after_soi(&encoded, priv_state)
+        };
+    push_bytes_through_dest_mgr(c, priv_state, &with_markers);
+    priv_state.pending_coef_arrays = std::ptr::null();
+    true
 }
 
 /// `jpeg_resync_to_restart(cinfo, desired) -> boolean`.
@@ -4126,6 +4376,17 @@ pub extern "C" fn jpeg_capi_test_set_compress_dims(
         c.image_height = height;
         c.input_components = input_components;
         c.in_color_space = in_color_space;
+    }
+}
+
+/// Test helper: flip the `progressive_mode` field of a compress cinfo
+/// without going through the full `jpeg_simple_progression` path. Used to
+/// verify the `jpeg_write_coefficients` → `jpeg_finish_compress` flow
+/// honors progressive output between the two calls.
+#[no_mangle]
+pub extern "C" fn jpeg_capi_test_set_progressive(cinfo: *mut c_void, progressive: c_int) {
+    if let Some(c) = unsafe { cinfo_compress_mut(cinfo) } {
+        c.progressive_mode = progressive;
     }
 }
 
