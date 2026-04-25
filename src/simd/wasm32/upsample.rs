@@ -17,6 +17,15 @@ pub fn wasm_fancy_upsample_h2v1(input: &[u8], in_width: usize, output: &mut [u8]
         output[1] = input[0];
         return;
     }
+    if in_width == 2 {
+        // Match scalar fancy_h2v1: C merged path uses box filter (no interpolation)
+        // when downsampled_width=2.
+        output[0] = input[0];
+        output[1] = input[0];
+        output[2] = input[1];
+        output[3] = input[1];
+        return;
+    }
 
     output[0] = input[0];
     output[1] = ((3 * input[0] as u16 + input[1] as u16 + 2) >> 2) as u8;
@@ -24,10 +33,6 @@ pub fn wasm_fancy_upsample_h2v1(input: &[u8], in_width: usize, output: &mut [u8]
     let last: usize = in_width - 1;
     output[last * 2] = ((3 * input[last] as u16 + input[last - 1] as u16 + 1) >> 2) as u8;
     output[last * 2 + 1] = input[last];
-
-    if in_width <= 2 {
-        return;
-    }
 
     // SAFETY: Caller guarantees y.len() >= width, cb.len() >= width, cr.len() >= width,
     // out.len() >= width * BPP. The loop processes 8 pixels per iteration with a scalar

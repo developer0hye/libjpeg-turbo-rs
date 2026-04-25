@@ -22,6 +22,15 @@ pub fn neon_fancy_upsample_h2v1(input: &[u8], in_width: usize, output: &mut [u8]
         output[1] = input[0];
         return;
     }
+    if in_width == 2 {
+        // Match scalar fancy_h2v1: C merged path uses box filter (no interpolation)
+        // when downsampled_width=2.
+        output[0] = input[0];
+        output[1] = input[0];
+        output[2] = input[1];
+        output[3] = input[1];
+        return;
+    }
 
     // Edge pixels (scalar)
     output[0] = input[0];
@@ -30,10 +39,6 @@ pub fn neon_fancy_upsample_h2v1(input: &[u8], in_width: usize, output: &mut [u8]
     let last = in_width - 1;
     output[last * 2] = ((3 * input[last] as u16 + input[last - 1] as u16 + 1) >> 2) as u8;
     output[last * 2 + 1] = input[last];
-
-    if in_width <= 2 {
-        return;
-    }
 
     // SAFETY: NEON is mandatory on aarch64.
     unsafe {

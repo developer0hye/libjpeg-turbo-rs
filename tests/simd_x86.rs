@@ -120,11 +120,17 @@ fn sse2_upsample_edge_cases() {
     (scalar.fancy_upsample_h2v1)(&[42], 1, &mut expected);
     (sse2.fancy_upsample_h2v1)(&[42], 1, &mut actual);
     assert_eq!(actual, expected);
-    // Two-sample case (width=2) is handled by the pipeline layer with a
-    // box-filter guard before invoking either kernel. At the raw-kernel
-    // level scalar and SSE2 currently diverge (scalar boxes, SSE2 fancies)
-    // — tracked as a follow-up SSE2 guard. Intermediate widths 3..=100 are
-    // covered by `sse2_upsample_various_widths` below.
+    // Two-sample case (width=2): both scalar and SSE2 emit box filter
+    // [i0, i0, i1, i1] (matches C merged path when downsampled_width=2).
+    for input in [[0u8, 0], [50, 200], [255, 128], [7, 13]] {
+        let (mut expected, mut actual) = ([0u8; 4], [0u8; 4]);
+        (scalar.fancy_upsample_h2v1)(&input, 2, &mut expected);
+        (sse2.fancy_upsample_h2v1)(&input, 2, &mut actual);
+        assert_eq!(
+            actual, expected,
+            "SSE2 width=2 mismatch for input={input:?}"
+        );
+    }
 }
 
 #[test]
