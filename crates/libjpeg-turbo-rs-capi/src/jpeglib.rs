@@ -4326,12 +4326,16 @@ fn run_coefficient_writer_and_flush(
         let interval: u32 = (c.restart_in_rows as u32).saturating_mul(mcus_per_row);
         adjusted.restart_interval = interval.min(65535) as u16;
     }
-    // Progressive arithmetic + restart is not yet implemented in the
-    // Rust-side `write_coefficients_progressive_arithmetic` (baseline
-    // arithmetic now supports it). Drop restart explicitly with a
+    // Progressive arithmetic + restart (byte-mode or row-mode) is not
+    // yet implemented in the Rust-side
+    // `write_coefficients_progressive_arithmetic` (baseline arithmetic
+    // now supports it). Drop both restart channels explicitly with a
     // meaningful `last_error` so the caller knows the markers were not
     // emitted, instead of failing finish_compress with an empty output.
-    if c.arith_code != 0 && c.progressive_mode != 0 && adjusted.restart_interval > 0 {
+    let progressive_arith_restart_dropped: bool = c.arith_code != 0
+        && c.progressive_mode != 0
+        && (adjusted.restart_interval > 0 || c.restart_in_rows > 0);
+    if progressive_arith_restart_dropped {
         priv_state.last_error = CString::new(
             "jpeg_finish_compress: progressive arithmetic + restart is not yet supported; restart markers dropped",
         )
@@ -4345,7 +4349,7 @@ fn run_coefficient_writer_and_flush(
     // `-progressive`, `-arithmetic`, and `-optimize` produce the right
     // SOF / entropy variant. Pass `restart_in_rows` through to the
     // progressive writer so `-restart Nb` produces row-mode markers.
-    let restart_rows: Option<u16> = if c.restart_in_rows > 0 {
+    let restart_rows: Option<u16> = if c.restart_in_rows > 0 && !progressive_arith_restart_dropped {
         Some(c.restart_in_rows as u16)
     } else {
         None
