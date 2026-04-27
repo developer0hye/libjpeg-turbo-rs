@@ -33,51 +33,48 @@ node /Users/yhkwon/.claude/plugins/cache/openai-codex/codex/1.0.2/scripts/codex-
 
 ---
 
-## 작업 1.5: jpegtran transform path (`-rotate`/`-flip`/`-crop`)
+## 작업 1.5: stock jpegtran 호환성 갭 (transform path + helper symbols)
 
 ### Goal
-stock jpegtran의 -rotate/-flip/-transpose/-crop 옵션이 우리 cdylib에 link됐을 때 동작하도록 만든다. 작업 1은 read_coefficients → write_coefficients 단순 transcoding (`-copy all`, `-progressive`, `-arithmetic`, `-restart N`)까지 지원. transform path는 별개의 dependency.
+stock jpegtran의 -rotate/-flip/-transpose/-crop 옵션과 -copy all 류 marker-copy 흐름이 우리 cdylib에 link됐을 때 동작하도록 만든다. 작업 1은 read_coefficients → write_coefficients 단순 transcoding (`-progressive`, `-arithmetic`, `-restart N`, marker injection-after-write)까지 지원. transform path와 jcopy helpers는 별개의 dependency.
 
-### 현재 상태
-우리 shim에 다음 함수가 없음 → jpegtran transupp.c가 호출하면 unresolved symbol:
-- libjpeg memory manager: `jpeg_alloc_huff_table`, `alloc_barray`, `request_virt_barray`, `realize_virt_arrays`, `access_virt_barray` 등
-- transupp helpers는 위 함수를 통해 destination cinfo에 virtual coefficient array를 alloc & 채움
-- 그 결과 `jpeg_write_coefficients`로 전달되는 `coef_arrays`는 우리가 read_coefficients에서 stash한 `Box<CoefHandle>`이 아니라 stock libjpeg memory manager 결과 — 우리 magic 검증에서 reject됨 (의도적 안전 장치)
+### 누락된 entry point — codex stop-time review 누적
+1. **libjpeg memory manager**: `jpeg_alloc_huff_table`, `alloc_barray`, `request_virt_barray`, `realize_virt_arrays`, `access_virt_barray`, `alloc_sarray`, `request_virt_sarray`, `access_virt_sarray`, `alloc_small`, `alloc_large`, `free_pool`, `self_destruct` — `j_common_ptr->mem` 테이블 전체. `transupp.c`가 destination cinfo에 virtual coefficient array를 alloc/realize/access할 때 의존.
+2. **backing store hooks**: `jpeg_get_small`/`jpeg_get_large`/`jpeg_open_backing_store`/`jpeg_open_backing_store_callback`. 일반적으로 in-RAM 구현으로 충분.
+3. **transupp marker helpers**: `jcopy_markers_setup(srcinfo, JCOPY_OPTION)`, `jcopy_markers_execute(srcinfo, dstinfo, JCOPY_OPTION)`. setup은 `jpeg_save_markers` wrapper, execute은 src의 saved_markers를 walk하면서 dst의 `jpeg_write_marker` 호출. 우리 shim에 두 함수 자체가 부재 → unresolved symbol.
+4. **`jpeg_write_coefficients` 핸들 인식 확장**: 우리는 현재 `CoefHandle::MAGIC`이 안 매치되면 reject. transupp가 만든 virtual barray 핸들도 인식해야 (magic을 별도 prefix로 prepend or pointer table lookup).
+
+### 결과
+이들이 다 채워지면:
+- `jpegtran -rotate 90` / `-flip horizontal` / `-transpose` / `-transverse` / `-crop WxH+X+Y`
+- `jpegtran -copy all` (EXIF/ICC/photoshop markers 보존)
+- `jpegtran -copy comments`, `-copy none`, `-copy icc`, `-copy all-except-icc`
 
 ### 작업 분해
-1. **memory manager API 구현** (~6-10h)
-   - `j_common_ptr->mem` table (`jpeg_memory_mgr` struct) 채우기
-   - `alloc_small`, `alloc_large`, `alloc_sarray`, `alloc_barray`, `request_virt_sarray`, `request_virt_barray`, `realize_virt_arrays`, `access_virt_sarray`, `access_virt_barray`, `free_pool`, `self_destruct`
-   - 가상 array는 우리 사이드에서 simple in-RAM model로 충분 (libjpeg는 disk-backed temp file 옵션 있지만 jpegtran의 일반 케이스는 in-RAM)
-
-2. **transupp.c가 의존하는 추가 entry points** (~2-4h)
-   - `jpeg_get_small`/`jpeg_get_large`/`jpeg_open_backing_store`/`jpeg_open_backing_store_callback` 등
-   - 우리 shim에서 stub 또는 in-RAM 구현
-
-3. **`jpeg_write_coefficients` 측 수정** (~2-3h)
-   - 현재: magic 매치 안 되면 reject
-   - 추가: 우리 memory manager가 만든 virtual barray 핸들도 인식 (magic 별도 prefix or pointer table lookup)
-   - virtual barray에서 coefficients 읽어 `JpegCoefficients` 형태로 materialize
-
-4. **테스트** (~2h)
-   - `examples/stock_djpeg_cjpeg/build.sh`에 jpegtran 추가
-   - `cmp jpegtran -rotate 90 input.jpg vs upstream jpegtran -rotate 90 input.jpg` 픽셀(또는 byte) 비교
+1. **memory manager API 구현** (~6–10h) — `jpeg_memory_mgr` struct 채우기, in-RAM virtual array model.
+2. **backing store + 잡 entry points** (~2–4h).
+3. **`jcopy_markers_setup` / `jcopy_markers_execute`** (~1–2h) — saved_markers 누적 + walk + write_marker.
+4. **`jpeg_write_coefficients` 핸들 인식 확장** (~2–3h) — virtual barray → JpegCoefficients materialize.
+5. **테스트** (~3h) — `examples/stock_djpeg_cjpeg/build.sh`에 jpegtran 추가, upstream과 픽셀(또는 byte) 비교.
 
 ### Validation
 ```bash
-bash examples/stock_djpeg_cjpeg/build.sh   # jpegtran 포함 빌드
+bash examples/stock_djpeg_cjpeg/build.sh
 $OUT_DIR/jpegtran -rotate 90 testimages/testorig.jpg > /tmp/our.jpg
 upstream-jpegtran -rotate 90 testimages/testorig.jpg > /tmp/upstream.jpg
-cmp /tmp/our.jpg /tmp/upstream.jpg   # byte-exact 목표
+cmp /tmp/our.jpg /tmp/upstream.jpg
+$OUT_DIR/jpegtran -copy all input_with_exif.jpg > /tmp/copied.jpg
+exiftool /tmp/copied.jpg | grep EXIF      # markers 보존 확인
 ```
 
 ### 예상 크기
-~12-19 시간 작업. memory manager가 가장 큰 부분.
+~14–22 시간. memory manager가 가장 큰 부분.
 
 ### Risk / Pitfalls
 - libjpeg memory manager는 pool 기반 — 우리 in-RAM 구현이 ABI-correct 해야 함
 - virtual array의 access_*는 row offset 기반 lazy fetch — write/read 패턴 정확 매치 필요
 - 12-bit, 16-bit precision 분기 (`jpeg12_write_coefficients`도 있음 — 같은 패턴)
+- `jcopy_markers_execute`는 dest cinfo의 jpeg_write_marker_chunks (large segment용)도 우회 — 65k+ 바이트 marker는 multi-chunk 처리 필요
 
 ---
 
