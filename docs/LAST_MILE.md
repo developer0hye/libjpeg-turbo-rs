@@ -266,20 +266,30 @@ cargo bench --bench encode
 # Compile and run the matching C baseline (C source ships in
 # examples/, no pre-built binary is checked in).
 #
+# Source-file selection is platform-specific because the timing
+# primitives differ:
+#   * macOS → `examples/bench_c_encode_matrix.c` (mach_absolute_time)
+#   * Linux → `examples/bench_c_encode_linux.c` (clock_gettime)
+#
 # Prerequisites: a libjpeg-turbo install that exposes headers and
-# `libjpeg`. If you have pkg-config available (`brew install pkgconf`
-# on macOS, `apt-get install pkg-config` on Debian/Ubuntu), the
+# `libjpeg`. If pkg-config is available (`brew install pkgconf` on
+# macOS, `apt-get install pkg-config` on Debian/Ubuntu), the
 # pkg-config form below works on both Homebrew and Conda. Without
 # pkg-config, fall back to the explicit -I/-L flags pinned to your
 # install prefix.
+case "$(uname)" in
+  Darwin) BENCH_SRC=examples/bench_c_encode_matrix.c ;;
+  Linux)  BENCH_SRC=examples/bench_c_encode_linux.c ;;
+  *)      echo "unsupported platform $(uname)"; exit 1 ;;
+esac
 if command -v pkg-config >/dev/null && pkg-config --exists libjpeg; then
-  cc -O2 examples/bench_c_encode_matrix.c -o /tmp/bench_c_encode_matrix \
+  cc -O2 "$BENCH_SRC" -o /tmp/bench_c_encode_matrix \
      $(pkg-config --cflags --libs libjpeg) \
      -Wl,-rpath,$(pkg-config --variable=libdir libjpeg)
 else
   # Fallback: point at your install prefix explicitly.
   PREFIX=${LIBJPEG_PREFIX:-${CONDA_PREFIX:-/opt/homebrew/opt/jpeg-turbo}}
-  cc -O2 examples/bench_c_encode_matrix.c -o /tmp/bench_c_encode_matrix \
+  cc -O2 "$BENCH_SRC" -o /tmp/bench_c_encode_matrix \
      -I"$PREFIX/include" -L"$PREFIX/lib" -ljpeg \
      -Wl,-rpath,"$PREFIX/lib"
 fi
@@ -592,20 +602,30 @@ cargo bench --bench encode
 # Compile and run the matching C baseline (C source ships in
 # examples/, no pre-built binary is checked in).
 #
+# Source-file selection is platform-specific because the timing
+# primitives differ:
+#   * macOS → `examples/bench_c_encode_matrix.c` (mach_absolute_time)
+#   * Linux → `examples/bench_c_encode_linux.c` (clock_gettime)
+#
 # Prerequisites: a libjpeg-turbo install that exposes headers and
-# `libjpeg`. If you have pkg-config available (`brew install pkgconf`
-# on macOS, `apt-get install pkg-config` on Debian/Ubuntu), the
+# `libjpeg`. If pkg-config is available (`brew install pkgconf` on
+# macOS, `apt-get install pkg-config` on Debian/Ubuntu), the
 # pkg-config form below works on both Homebrew and Conda. Without
 # pkg-config, fall back to the explicit -I/-L flags pinned to your
 # install prefix.
+case "$(uname)" in
+  Darwin) BENCH_SRC=examples/bench_c_encode_matrix.c ;;
+  Linux)  BENCH_SRC=examples/bench_c_encode_linux.c ;;
+  *)      echo "unsupported platform $(uname)"; exit 1 ;;
+esac
 if command -v pkg-config >/dev/null && pkg-config --exists libjpeg; then
-  cc -O2 examples/bench_c_encode_matrix.c -o /tmp/bench_c_encode_matrix \
+  cc -O2 "$BENCH_SRC" -o /tmp/bench_c_encode_matrix \
      $(pkg-config --cflags --libs libjpeg) \
      -Wl,-rpath,$(pkg-config --variable=libdir libjpeg)
 else
   # Fallback: point at your install prefix explicitly.
   PREFIX=${LIBJPEG_PREFIX:-${CONDA_PREFIX:-/opt/homebrew/opt/jpeg-turbo}}
-  cc -O2 examples/bench_c_encode_matrix.c -o /tmp/bench_c_encode_matrix \
+  cc -O2 "$BENCH_SRC" -o /tmp/bench_c_encode_matrix \
      -I"$PREFIX/include" -L"$PREFIX/lib" -ljpeg \
      -Wl,-rpath,"$PREFIX/lib"
 fi
