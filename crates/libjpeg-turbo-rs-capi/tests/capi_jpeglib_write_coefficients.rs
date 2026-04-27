@@ -941,13 +941,12 @@ fn write_coefficients_baseline_honors_restart_in_rows() {
     );
 }
 
-/// `jpegtran -arithmetic` together with `-restart N`/`-restart Nrows`
-/// must NOT crash or produce a blank output. Our arithmetic coefficient
-/// writer does not support restart markers, so the shim must drop the
-/// restart settings (with a `last_error` warning) instead of returning
-/// an empty datastream from `finish_compress`.
+/// `jpegtran -arithmetic -restart Nrows` (baseline arithmetic + restart)
+/// must produce a valid arithmetic JPEG with RST markers in the entropy
+/// stream. The Rust-side `write_coefficients_arithmetic` now supports
+/// restart, mirroring libjpeg-turbo `jcarith.c::emit_restart`.
 #[test]
-fn write_coefficients_arithmetic_with_restart_does_not_fail() {
+fn write_coefficients_arithmetic_with_restart_emits_rst_markers() {
     let lib = unsafe { libloading::Library::new(cdylib_path()) }.expect("dlopen");
     let (jpeg_in, _src, _w, _h_px) = build_fixture_jpeg(&lib);
 
@@ -1065,15 +1064,29 @@ fn write_coefficients_arithmetic_with_restart_does_not_fail() {
     let has_sof9: bool = transcoded.windows(2).any(|w| w[0] == 0xFF && w[1] == 0xC9);
     assert!(has_sof9, "arithmetic output must contain SOF9 (FF C9)");
 
-    // No DRI segment or DRI with interval=0 (restart was dropped).
-    let dri_pos: Option<usize> = transcoded
+    // DRI segment must be emitted with a non-zero interval — restart_in_rows
+    // folds into byte-mode the same way as the baseline path.
+    let dri_pos: usize = transcoded
         .windows(2)
-        .position(|w| w[0] == 0xFF && w[1] == 0xDD);
-    if let Some(pos) = dri_pos {
-        let interval: u16 = u16::from_be_bytes([transcoded[pos + 4], transcoded[pos + 5]]);
-        assert_eq!(
-            interval, 0,
-            "arithmetic + restart must drop restart, not propagate it"
-        );
-    }
+        .position(|w| w[0] == 0xFF && w[1] == 0xDD)
+        .expect("arithmetic + restart must emit DRI segment");
+    let interval: u16 = u16::from_be_bytes([transcoded[dri_pos + 4], transcoded[dri_pos + 5]]);
+    assert!(
+        interval > 0,
+        "DRI interval must be non-zero in arithmetic restart mode (got {interval})"
+    );
+
+    // Entropy stream (after SOS) must contain at least one RST marker (FF D0..D7).
+    let sos_pos: usize = transcoded
+        .windows(2)
+        .position(|w| w[0] == 0xFF && w[1] == 0xDA)
+        .expect("SOS segment expected");
+    let entropy: &[u8] = &transcoded[sos_pos..];
+    let has_rst: bool = entropy
+        .windows(2)
+        .any(|w| w[0] == 0xFF && (0xD0..=0xD7).contains(&w[1]));
+    assert!(
+        has_rst,
+        "arithmetic entropy stream must contain RST markers when restart is set"
+    );
 }

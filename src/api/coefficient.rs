@@ -1931,12 +1931,6 @@ pub fn write_coefficients_progressive(
 pub fn write_coefficients_arithmetic(coeffs: &JpegCoefficients) -> Result<Vec<u8>> {
     use crate::encode::arithmetic::ArithEncoder;
 
-    if coeffs.restart_interval > 0 {
-        return Err(JpegError::CorruptData(
-            "arithmetic coefficient writing with restart intervals is not implemented".into(),
-        ));
-    }
-
     let num_components: usize = coeffs.components.len();
     let is_grayscale: bool = num_components == 1;
     let num_arith_tables: usize = if is_grayscale { 1 } else { 2 };
@@ -1970,9 +1964,21 @@ pub fn write_coefficients_arithmetic(coeffs: &JpegCoefficients) -> Result<Vec<u8
     let mut arith_enc: ArithEncoder =
         ArithEncoder::new(coeffs.width as usize * coeffs.height as usize);
     let mut prev_dc: Vec<i16> = vec![0; num_components];
+    let ri: u32 = coeffs.restart_interval as u32;
+    let mut mcu_count: u32 = 0;
+    let mut restart_idx: u8 = 0;
 
     for mcu_y in 0..mcus_y {
         for mcu_x in 0..mcus_x {
+            // Insert RST marker between MCU groups when restart_interval is set.
+            // Mirrors libjpeg-turbo `jcarith.c` arithmetic restart: flush the
+            // current entropy state byte-aligned, push `FF Dn`, reset coder
+            // and DC predictors, then continue with the next group.
+            if ri > 0 && mcu_count > 0 && mcu_count.is_multiple_of(ri) {
+                arith_enc.emit_restart(restart_idx);
+                restart_idx = restart_idx.wrapping_add(1) & 7;
+                prev_dc.iter_mut().for_each(|v| *v = 0);
+            }
             for (ci, comp) in coeffs.components.iter().enumerate() {
                 let dc_tbl: usize = arithmetic_table_for_component(ci);
                 let ac_tbl: usize = arithmetic_table_for_component(ci);
@@ -1998,6 +2004,7 @@ pub fn write_coefficients_arithmetic(coeffs: &JpegCoefficients) -> Result<Vec<u8
                     }
                 }
             }
+            mcu_count += 1;
         }
     }
 
@@ -2040,6 +2047,10 @@ pub fn write_coefficients_arithmetic(coeffs: &JpegCoefficients) -> Result<Vec<u8
         ac_in_use[table] = true;
     }
     marker_writer::write_dac_selected(&mut output, &dc_in_use, &dc_params, &ac_in_use, &ac_params);
+
+    if coeffs.restart_interval > 0 {
+        marker_writer::write_dri(&mut output, coeffs.restart_interval);
+    }
 
     let scan_components: Vec<(u8, u8, u8)> = coeffs
         .components

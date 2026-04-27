@@ -4310,25 +4310,11 @@ fn run_coefficient_writer_and_flush(
     // directly via the `restart_rows` argument, so they don't need this
     // conversion.
     let mut adjusted: libjpeg_turbo_rs::JpegCoefficients = unsafe { (*raw).inner.clone() };
-    if c.arith_code != 0 {
-        // The arithmetic coefficient writers reject restart intervals
-        // (`write_coefficients_arithmetic*` returns an error if
-        // `restart_interval > 0`). Drop both source and destination
-        // restart settings here — arithmetic streams without restart
-        // markers are still valid JPEG and survive a roundtrip; the
-        // alternative is a hard failure at finish_compress, which is
-        // worse for callers exercising `jpegtran -arithmetic` on
-        // restart-coded inputs.
-        adjusted.restart_interval = 0;
-        if c.restart_interval != 0 || c.restart_in_rows > 0 {
-            priv_state.last_error = CString::new(
-                "jpeg_finish_compress: arithmetic + restart is not supported; restart markers dropped",
-            )
-            .unwrap_or_default();
-        }
-    } else if c.restart_interval != 0 {
+    if c.restart_interval != 0 {
         adjusted.restart_interval = c.restart_interval as u16;
     } else if c.restart_in_rows > 0 && c.progressive_mode == 0 {
+        // Fold row-mode (`-restart Nrows`) into byte-mode the way
+        // `jcomaster.c::initial_setup` does for non-progressive output.
         let max_h: u8 = adjusted
             .components
             .iter()
@@ -4339,6 +4325,18 @@ fn run_coefficient_writer_and_flush(
         let mcus_per_row: u32 = (adjusted.width as u32).div_ceil(stride);
         let interval: u32 = (c.restart_in_rows as u32).saturating_mul(mcus_per_row);
         adjusted.restart_interval = interval.min(65535) as u16;
+    }
+    // Progressive arithmetic + restart is not yet implemented in the
+    // Rust-side `write_coefficients_progressive_arithmetic` (baseline
+    // arithmetic now supports it). Drop restart explicitly with a
+    // meaningful `last_error` so the caller knows the markers were not
+    // emitted, instead of failing finish_compress with an empty output.
+    if c.arith_code != 0 && c.progressive_mode != 0 && adjusted.restart_interval > 0 {
+        priv_state.last_error = CString::new(
+            "jpeg_finish_compress: progressive arithmetic + restart is not yet supported; restart markers dropped",
+        )
+        .unwrap_or_default();
+        adjusted.restart_interval = 0;
     }
 
     // Match the requested output coding mode — the same compress
