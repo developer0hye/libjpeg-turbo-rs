@@ -213,7 +213,7 @@ fn repack_into_pitched(
             for row in 0..h {
                 let s_row: &[u8] = &src[row * w..(row + 1) * w];
                 let d_row_start: usize = row * dst_pitch;
-                for x in 0..w {
+                for (x, &g_val) in s_row.iter().enumerate() {
                     let dp: usize = d_row_start + x * dst_bpp;
                     // Initialize all destination bytes to 0xFF so any X/A
                     // padding byte defaults to opaque, matching the
@@ -221,7 +221,6 @@ fn repack_into_pitched(
                     for k in 0..dst_bpp {
                         dst[dp + k] = 0xFF;
                     }
-                    let g_val: u8 = s_row[x];
                     dst[dp + dst_r] = g_val;
                     dst[dp + dst_g] = g_val;
                     dst[dp + dst_b] = g_val;
