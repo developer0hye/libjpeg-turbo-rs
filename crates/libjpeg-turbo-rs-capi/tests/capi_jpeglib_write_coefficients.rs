@@ -940,3 +940,140 @@ fn write_coefficients_baseline_honors_restart_in_rows() {
         "entropy stream must contain RST markers when row-mode restart is set"
     );
 }
+
+/// `jpegtran -arithmetic` together with `-restart N`/`-restart Nrows`
+/// must NOT crash or produce a blank output. Our arithmetic coefficient
+/// writer does not support restart markers, so the shim must drop the
+/// restart settings (with a `last_error` warning) instead of returning
+/// an empty datastream from `finish_compress`.
+#[test]
+fn write_coefficients_arithmetic_with_restart_does_not_fail() {
+    let lib = unsafe { libloading::Library::new(cdylib_path()) }.expect("dlopen");
+    let (jpeg_in, _src, _w, _h_px) = build_fixture_jpeg(&lib);
+
+    let transcoded: Vec<u8> = unsafe {
+        const CINFO_BYTES: usize = 4096;
+        let mut dec_cinfo: MaybeUninit<[u8; CINFO_BYTES]> = MaybeUninit::zeroed();
+        let dec_cinfo_ptr: *mut c_void = dec_cinfo.as_mut_ptr() as *mut c_void;
+        const ERR_BYTES: usize = 512;
+        let mut dec_err: MaybeUninit<[u8; ERR_BYTES]> = MaybeUninit::zeroed();
+        let dec_err_ptr: *mut c_void = dec_err.as_mut_ptr() as *mut c_void;
+        let jpeg_std_error: libloading::Symbol<unsafe extern "C" fn(*mut c_void) -> *mut c_void> =
+            lib.get(b"jpeg_std_error").expect("jpeg_std_error");
+        let _ = jpeg_std_error(dec_err_ptr);
+        (dec_cinfo_ptr as *mut *mut c_void).write(dec_err_ptr);
+        let jpeg_create_decompress: libloading::Symbol<
+            unsafe extern "C" fn(*mut c_void, c_int, usize),
+        > = lib
+            .get(b"jpeg_CreateDecompress")
+            .expect("jpeg_CreateDecompress");
+        jpeg_create_decompress(dec_cinfo_ptr, 80, CINFO_BYTES);
+        let jpeg_mem_src: libloading::Symbol<
+            unsafe extern "C" fn(*mut c_void, *const u8, c_ulong),
+        > = lib.get(b"jpeg_mem_src").expect("jpeg_mem_src");
+        jpeg_mem_src(dec_cinfo_ptr, jpeg_in.as_ptr(), jpeg_in.len() as c_ulong);
+        let jpeg_read_header: libloading::Symbol<
+            unsafe extern "C" fn(*mut c_void, c_int) -> c_int,
+        > = lib.get(b"jpeg_read_header").expect("jpeg_read_header");
+        assert_eq!(jpeg_read_header(dec_cinfo_ptr, 1), JPEG_HEADER_OK);
+        let jpeg_read_coefficients: libloading::Symbol<
+            unsafe extern "C" fn(*mut c_void) -> *mut c_void,
+        > = lib
+            .get(b"jpeg_read_coefficients")
+            .expect("jpeg_read_coefficients");
+        let coef_arrays: *mut c_void = jpeg_read_coefficients(dec_cinfo_ptr);
+        assert!(!coef_arrays.is_null());
+
+        let mut enc_cinfo: MaybeUninit<[u8; CINFO_BYTES]> = MaybeUninit::zeroed();
+        let enc_cinfo_ptr: *mut c_void = enc_cinfo.as_mut_ptr() as *mut c_void;
+        let mut enc_err: MaybeUninit<[u8; ERR_BYTES]> = MaybeUninit::zeroed();
+        let enc_err_ptr: *mut c_void = enc_err.as_mut_ptr() as *mut c_void;
+        let _ = jpeg_std_error(enc_err_ptr);
+        (enc_cinfo_ptr as *mut *mut c_void).write(enc_err_ptr);
+        let jpeg_create_compress: libloading::Symbol<
+            unsafe extern "C" fn(*mut c_void, c_int, usize),
+        > = lib
+            .get(b"jpeg_CreateCompress")
+            .expect("jpeg_CreateCompress");
+        jpeg_create_compress(enc_cinfo_ptr, 80, CINFO_BYTES);
+
+        let mut out_buf: *mut u8 = std::ptr::null_mut();
+        let mut out_size: c_ulong = 0;
+        let jpeg_mem_dest: libloading::Symbol<
+            unsafe extern "C" fn(*mut c_void, *mut *mut u8, *mut c_ulong),
+        > = lib.get(b"jpeg_mem_dest").expect("jpeg_mem_dest");
+        jpeg_mem_dest(enc_cinfo_ptr, &mut out_buf, &mut out_size);
+
+        let jpeg_write_coefficients: libloading::Symbol<
+            unsafe extern "C" fn(*mut c_void, *mut c_void),
+        > = lib
+            .get(b"jpeg_write_coefficients")
+            .expect("jpeg_write_coefficients");
+        jpeg_write_coefficients(enc_cinfo_ptr, coef_arrays);
+
+        // Combine -arithmetic with -restart Nrows on the destination.
+        let jpeg_capi_test_set_arith_code: libloading::Symbol<
+            unsafe extern "C" fn(*mut c_void, c_int),
+        > = lib
+            .get(b"jpeg_capi_test_set_arith_code")
+            .expect("jpeg_capi_test_set_arith_code");
+        jpeg_capi_test_set_arith_code(enc_cinfo_ptr, 1);
+        let jpeg_capi_test_set_restart_in_rows: libloading::Symbol<
+            unsafe extern "C" fn(*mut c_void, c_int),
+        > = lib
+            .get(b"jpeg_capi_test_set_restart_in_rows")
+            .expect("jpeg_capi_test_set_restart_in_rows");
+        jpeg_capi_test_set_restart_in_rows(enc_cinfo_ptr, 2);
+
+        let jpeg_finish_compress: libloading::Symbol<unsafe extern "C" fn(*mut c_void)> = lib
+            .get(b"jpeg_finish_compress")
+            .expect("jpeg_finish_compress");
+        jpeg_finish_compress(enc_cinfo_ptr);
+
+        let bytes: Vec<u8> = if !out_buf.is_null() && out_size > 0 {
+            std::slice::from_raw_parts(out_buf, out_size as usize).to_vec()
+        } else {
+            Vec::new()
+        };
+        if !out_buf.is_null() {
+            let tj3_free: libloading::Symbol<unsafe extern "C" fn(*mut c_void)> =
+                lib.get(b"tj3Free").expect("tj3Free");
+            tj3_free(out_buf as *mut c_void);
+        }
+        let jpeg_destroy_compress: libloading::Symbol<unsafe extern "C" fn(*mut c_void)> = lib
+            .get(b"jpeg_destroy_compress")
+            .expect("jpeg_destroy_compress");
+        jpeg_destroy_compress(enc_cinfo_ptr);
+        let jpeg_destroy_decompress: libloading::Symbol<unsafe extern "C" fn(*mut c_void)> = lib
+            .get(b"jpeg_destroy_decompress")
+            .expect("jpeg_destroy_decompress");
+        jpeg_destroy_decompress(dec_cinfo_ptr);
+        bytes
+    };
+
+    // Output must be a complete arithmetic JPEG (SOF9 = FF C9, SOI/EOI bracketing).
+    assert!(
+        !transcoded.is_empty(),
+        "arithmetic + restart must not produce empty output"
+    );
+    assert_eq!(&transcoded[..2], &[0xFF, 0xD8], "missing SOI");
+    assert_eq!(
+        &transcoded[transcoded.len() - 2..],
+        &[0xFF, 0xD9],
+        "missing EOI"
+    );
+    let has_sof9: bool = transcoded.windows(2).any(|w| w[0] == 0xFF && w[1] == 0xC9);
+    assert!(has_sof9, "arithmetic output must contain SOF9 (FF C9)");
+
+    // No DRI segment or DRI with interval=0 (restart was dropped).
+    let dri_pos: Option<usize> = transcoded
+        .windows(2)
+        .position(|w| w[0] == 0xFF && w[1] == 0xDD);
+    if let Some(pos) = dri_pos {
+        let interval: u16 = u16::from_be_bytes([transcoded[pos + 4], transcoded[pos + 5]]);
+        assert_eq!(
+            interval, 0,
+            "arithmetic + restart must drop restart, not propagate it"
+        );
+    }
+}
