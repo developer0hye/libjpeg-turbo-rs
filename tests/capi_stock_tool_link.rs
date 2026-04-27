@@ -197,10 +197,18 @@ fn drive_pipeline() -> Result<(), String> {
     }
 
     // Build succeeded — proceed to byte-diff comparison.
+    // Propagate the resolved target directory to run.sh so the canonical-
+    // soname symlinks it stages in $WORK/loader point at the same cdylib
+    // build.sh just linked against. Without this, run.sh defaults to
+    // `$REPO_ROOT/target/release` and a `CARGO_TARGET_DIR` redirected
+    // run would either fail (missing artifact) or quietly load a stale
+    // cdylib instead of the freshly rebuilt one from
+    // `shim_lib_path_or_build`.
     let run_sh: PathBuf = script_dir().join("run.sh");
     let output: std::process::Output = Command::new("bash")
         .arg(&run_sh)
         .env("OUT_DIR", build_dir())
+        .env("SHIM_DIR", shim.parent().unwrap())
         .output()
         .map_err(|e: std::io::Error| format!("failed to spawn run.sh: {e}"))?;
 
@@ -325,8 +333,10 @@ fn shim_exports_classic_jpeg_api() {
 
     let text: String = String::from_utf8_lossy(&nm_out.stdout).into_owned();
     // Count defined (T/D/S/B/R) symbols that start with `jpeg_`,
-    // ignoring the shim-private `jpeg_capi_test_*` helpers and the
-    // platform-specific leading underscore. Example line:
+    // `jpeg12_`, or `jpeg16_` (the high-precision family that real
+    // libjpeg-turbo also ships), ignoring the shim-private
+    // `jpeg_capi_test_*` helpers and the platform-specific leading
+    // underscore. Example line:
     //   0000000000012abc T _jpeg_std_error
     let exported_jpeg_syms: Vec<&str> = text
         .lines()
@@ -337,9 +347,11 @@ fn shim_exports_classic_jpeg_api() {
             let name: &str = parts.next()?;
             let is_exported: bool = matches!(ty, "T" | "D" | "S" | "B" | "R");
             let bare: &str = name.strip_prefix('_').unwrap_or(name);
-            let is_classic: bool =
-                bare.starts_with("jpeg_") && !bare.starts_with("jpeg_capi_test_");
-            (is_exported && is_classic).then_some(name)
+            let is_classic_family: bool = (bare.starts_with("jpeg_")
+                || bare.starts_with("jpeg12_")
+                || bare.starts_with("jpeg16_"))
+                && !bare.starts_with("jpeg_capi_test_");
+            (is_exported && is_classic_family).then_some(name)
         })
         .collect();
 
@@ -365,5 +377,52 @@ fn shim_exports_classic_jpeg_api() {
         has_std_error,
         "shim must export jpeg_std_error (the canonical libjpeg entry point); \
          got {exported_jpeg_syms:?}"
+    );
+
+    // P0-3: explicit symbol-presence guard for the names Pillow, libtiff,
+    // and other downstream wrappers resolve via dlsym at load time.
+    // Without this, a future refactor that drops a symbol could pass the
+    // ≥30 floor while silently re-introducing the loader blocker that
+    // motivated `LAST_MILE.md`'s P0-3 ticket. We assert presence (each
+    // bound exists in the export table) — behavior tests live in
+    // `tests/capi_pillow_compat.rs`.
+    let required_p0_3: &[&str] = &[
+        // Raw-data entry points (the original libtiff blocker).
+        "jpeg_read_raw_data",
+        "jpeg12_read_raw_data",
+        "jpeg_write_raw_data",
+        "jpeg12_write_raw_data",
+        // Buffered-image / streaming entry points.
+        "jpeg_consume_input",
+        "jpeg_input_complete",
+        "jpeg_has_multiple_scans",
+        "jpeg_start_output",
+        "jpeg_finish_output",
+        "jpeg_new_colormap",
+        // Abort / generic destroy entry points.
+        "jpeg_abort",
+        "jpeg_abort_compress",
+        "jpeg_abort_decompress",
+        "jpeg_destroy",
+        // Allocation helpers.
+        "jpeg_alloc_huff_table",
+        "jpeg_alloc_quant_table",
+        // Linear-quality compress entry point used by `cjpeg -baseline`.
+        "jpeg_set_linear_quality",
+    ];
+    let missing: Vec<&str> = required_p0_3
+        .iter()
+        .copied()
+        .filter(|want: &&str| {
+            !exported_jpeg_syms
+                .iter()
+                .any(|got: &&str| got.strip_prefix('_').unwrap_or(got) == *want)
+        })
+        .collect();
+    assert!(
+        missing.is_empty(),
+        "Shim is missing P0-3 classic-API symbols required by \
+         downstream wrappers (Pillow / libtiff / etc.): {missing:?}. \
+         See docs/LAST_MILE.md → P0-3 for the rationale."
     );
 }

@@ -106,29 +106,35 @@ cargo test --test capi_stock_tool_link -- --include-ignored
 
 Then remove the stale ignored regression guard or invert it into "classic symbols are present and stock tools run."
 
-### P0-3. Pillow Cannot Load Because High-Precision Raw Symbols Are Missing
+### P0-3. Pillow Cannot Load Because Classic-API Symbols Are Missing
 
-**Symptom:** `tests/capi_pillow_compat.rs` currently treats blocker code 3 as a skip. The live blocker is:
+**Symptom (loader half — closed):** the original blocker was
 
 ```text
 Symbol not found: _jpeg12_read_raw_data
 Referenced from: .../PIL/.dylibs/libtiff.6.dylib
 ```
 
-**Why this matters:** A drop-in library cannot pass by letting a downstream wrapper fail to load.
+This is now resolved. `tests/capi_stock_tool_link.rs::shim_exports_classic_jpeg_api` hard-asserts presence of every required name and runs by default; the loader-half regression guard is wired.
 
-**Missing or suspect symbols (this loader blocker):**
+**Symptom (decode-behavior half — open):** with the symbols in place, `tests/capi_pillow_compat.rs` now reaches phase B and Pillow's `Image.open(...).load()` fails with
 
-- `jpeg_read_raw_data`
-- `jpeg12_read_raw_data`
-- `jpeg16_read_raw_data`
-- `jpeg_write_raw_data`
-- `jpeg12_write_raw_data`
-- `jpeg16_write_raw_data`
+```text
+OSError: image file is truncated (9046 bytes not processed)
+```
 
-**Likely follow-on Pillow blockers** — Pillow will hit more missing symbols as soon as the raw-data loader unblocks. Two classes; both verified absent today via `nm -gU target/release/libjpeg.62.dylib`:
+That is a real classic-API decode behavior gap, not a missing symbol — Pillow's `_imaging` resolver expects the source manager to drain to EOI before `jpeg_finish_decompress`. The shim currently decodes the full image upfront in `jpeg_start_decompress` and never advances the public `cinfo->src->bytes_in_buffer`, so Pillow concludes the source was truncated.
 
-*Class A — canonical `[x]` / ✅, but no C ABI export.* `docs/FEATURE_PARITY.md` and `docs/C_API_REFERENCE.md` mark these implemented because the Rust public API is wired; the C ABI shim simply hasn't exported them yet:
+**Why this matters:** A drop-in library cannot pass by silently leaving a downstream wrapper to misinterpret the source state.
+
+**Symbol inventory.** Upstream `jpeglib.h` defines the high-precision raw-data family as **8-bit + 12-bit only** — there is no `jpeg16_read_raw_data` / `jpeg16_write_raw_data` in the public header (verified at `references/libjpeg-turbo/src/jpeglib.h:1039–1100`). The shim now exports:
+
+*Raw-data entry points (the original libtiff loader blocker):*
+
+- `jpeg_read_raw_data`, `jpeg12_read_raw_data`
+- `jpeg_write_raw_data`, `jpeg12_write_raw_data`
+
+*Buffered-image / streaming entry points (Class A — Rust public API was already wired, just no C export):*
 
 - `jpeg_consume_input`, `jpeg_input_complete` — streaming / draft mode (`docs/C_API_REFERENCE.md:255-256`).
 - `jpeg_has_multiple_scans` — buffered-image enable (`:252`).
@@ -136,18 +142,18 @@ Referenced from: .../PIL/.dylibs/libtiff.6.dylib
 - `jpeg_new_colormap` — quantize-mode colormap update (`:257`).
 - `jpeg_set_linear_quality` — `cjpeg -baseline` linear-quality scale path (`:198`).
 
-*Class B — canonical mapping says N/A, but drop-in still needs the symbol.* `docs/C_API_REFERENCE.md:176-179` and `:205-206` say "RAII / Rust value types, no allocation needed" — true for the Rust public API, false for a C drop-in because callers resolve and call these names through `dlsym`:
+*Abort / generic destroy (Class B — drop-in needs the symbol even where the Rust API uses RAII):*
 
 - `jpeg_abort_compress`, `jpeg_abort_decompress`, `jpeg_abort`, `jpeg_destroy` — error-path teardown.
 - `jpeg_alloc_huff_table`, `jpeg_alloc_quant_table` — also covered under P0-4 since stock `jpegtran` paths exercise the same code.
 
-Add focused dlopen tests for each before declaring P0-3 closed; otherwise this gap silently decays into a long tail of one-symbol-at-a-time Pillow re-runs. When Class B symbols become real exports, also flip the matching N/A rows in `docs/C_API_REFERENCE.md` to "exported as no-op / thin wrapper" so the canonical doc stops contradicting the shim.
+Each is asserted by name in `shim_exports_classic_jpeg_api`, so a future refactor that drops one fails CI immediately. When Class B symbols become real exports (today they are zero-initialised stubs), flip the matching N/A rows in `docs/C_API_REFERENCE.md` to "exported as no-op / thin wrapper" so the canonical doc stops contradicting the shim.
 
-**Likely area:**
+**Likely area for the decode-behavior half:**
 
-- `crates/libjpeg-turbo-rs-capi/src/jpeglib.rs`
-- `tests/capi_pillow_compat.rs`
-- `examples/pillow_smoke/test_pillow.py`
+- `crates/libjpeg-turbo-rs-capi/src/jpeglib.rs` (advance `cinfo->src->bytes_in_buffer` from `jpeg_finish_decompress`).
+- `tests/capi_pillow_compat.rs` (flip blocker code 3 from skip to hard fail once decode-behavior closes).
+- `examples/pillow_smoke/test_pillow.py`.
 
 **Acceptance:**
 
@@ -155,7 +161,7 @@ Add focused dlopen tests for each before declaring P0-3 closed; otherwise this g
 cargo test --test capi_pillow_compat -- --nocapture
 ```
 
-The test must fail on blocker code 3 until the symbols and behavior are implemented, then pass through actual Pillow decode, encode, and re-decode.
+`Image.open(...).load()` must complete without `OSError`, then encode and re-decode without `OSError`, and the round-trip PSNR @ q=90 must clear the script's 30 dB floor.
 
 ### P0-4. Foreign Virtual Coefficient Arrays Are Rejected
 
@@ -466,7 +472,7 @@ At minimum, `djpeg` must stop aborting and match upstream output on `testorig`, 
 
 - [ ] **Step 1: Add dlopen symbol tests**
 
-Assert the shim exports `jpeg_read_raw_data`, `jpeg12_read_raw_data`, `jpeg16_read_raw_data`, `jpeg_write_raw_data`, `jpeg12_write_raw_data`, and `jpeg16_write_raw_data`.
+Assert the shim exports `jpeg_read_raw_data`, `jpeg12_read_raw_data`, `jpeg_write_raw_data`, and `jpeg12_write_raw_data` (upstream `jpeglib.h` does not declare 16-bit raw-data entry points). Already in place via `tests/capi_stock_tool_link.rs::shim_exports_classic_jpeg_api`'s `required_p0_3` array — extend it whenever a new drop-in caller surfaces another required symbol.
 
 - [ ] **Step 2: Implement minimal behavior**
 
