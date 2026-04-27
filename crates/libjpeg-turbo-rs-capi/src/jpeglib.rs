@@ -4341,6 +4341,23 @@ fn run_coefficient_writer_and_flush(
         )
         .unwrap_or_default();
         adjusted.restart_interval = 0;
+        // Surface the drop to C callers via the standard libjpeg
+        // warning channel: bump `cinfo->err->num_warnings` and invoke
+        // the installed `emit_message` hook with msg_level=-1 (libjpeg
+        // convention for "warning emitted at trace level"). Callers
+        // checking `num_warnings` or hooking `emit_message` will see
+        // the event without having to fish through Rust-private
+        // `last_error` state.
+        if !c.err.is_null() {
+            unsafe {
+                let err: &mut JpegErrorMgr = &mut *c.err;
+                err.num_warnings = err.num_warnings.saturating_add(1);
+                if let Some(f) = err.emit_message {
+                    let cinfo_ptr: *mut c_void = c as *mut JpegCompressPublic as *mut c_void;
+                    f(cinfo_ptr, -1);
+                }
+            }
+        }
     }
 
     // Match the requested output coding mode — the same compress
