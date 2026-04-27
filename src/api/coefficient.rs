@@ -972,7 +972,7 @@ pub fn transform_jpeg_with_options(data: &[u8], options: &TransformOptions) -> R
         })
     };
     let output: Vec<u8> = if options.arithmetic && progressive_safe {
-        write_coefficients_progressive_arithmetic(&coeffs)?
+        write_coefficients_progressive_arithmetic(&coeffs, progressive_restart_rows)?
     } else if options.arithmetic {
         write_coefficients_arithmetic(&coeffs)?
     } else if progressive_safe {
@@ -2073,16 +2073,21 @@ pub fn write_coefficients_arithmetic(coeffs: &JpegCoefficients) -> Result<Vec<u8
 ///
 /// Uses the default libjpeg-turbo progressive scan script and emits the
 /// arithmetic conditioning marker for each scan, matching libjpeg marker order.
-pub fn write_coefficients_progressive_arithmetic(coeffs: &JpegCoefficients) -> Result<Vec<u8>> {
+///
+/// `restart_rows` selects the restart accounting mode (mirrors
+/// `write_coefficients_progressive`):
+/// - `Some(rows)` — row mode (`jpegtran -restart N`): the DRI is recomputed
+///   per scan as `rows * MCUs_per_row_of_scan`. Multi-component scans use
+///   the interleaved MCU grid; non-interleaved AC scans use that
+///   component's `width_in_blocks`.
+/// - `None` — byte mode (`-restart Nb`) or source-preserved RI:
+///   `coeffs.restart_interval` applies uniformly across all scans.
+pub fn write_coefficients_progressive_arithmetic(
+    coeffs: &JpegCoefficients,
+    restart_rows: Option<u16>,
+) -> Result<Vec<u8>> {
     use crate::encode::arithmetic::ArithEncoder;
     use crate::encode::progressive::simple_progression;
-
-    if coeffs.restart_interval > 0 {
-        return Err(JpegError::CorruptData(
-            "progressive arithmetic coefficient writing with restart intervals is not implemented"
-                .into(),
-        ));
-    }
 
     let num_components: usize = coeffs.components.len();
 
@@ -2147,11 +2152,39 @@ pub fn write_coefficients_progressive_arithmetic(coeffs: &JpegCoefficients) -> R
     let mut arith_enc: ArithEncoder =
         ArithEncoder::new(coeffs.width as usize * coeffs.height as usize / 4);
 
+    // Per-scan DRI tracking. Mirrors the Huffman progressive writer
+    // (`write_coefficients_progressive`): row mode recomputes the
+    // restart interval per scan as `rows * MCUs_per_row_of_scan` where
+    // multi-component scans use the interleaved MCU grid and
+    // non-interleaved AC scans use that component's width in blocks.
+    // Byte mode applies `coeffs.restart_interval` uniformly.
+    let per_scan_ri = |scan_ci: &[usize]| -> u16 {
+        match restart_rows {
+            Some(rows) => {
+                let mcus_per_row: usize = if scan_ci.len() == 1 {
+                    let ci: usize = scan_ci[0];
+                    let comp = &coeffs.components[ci];
+                    (coeffs.width as usize * comp.h_sampling as usize).div_ceil(max_h * 8)
+                } else {
+                    (coeffs.width as usize).div_ceil(max_h * 8)
+                };
+                let dri: usize = rows as usize * mcus_per_row;
+                dri.min(u16::MAX as usize) as u16
+            }
+            None => coeffs.restart_interval,
+        }
+    };
+
+    // Track the last-emitted DRI so we only re-emit the marker when the
+    // value changes between scans (matches C `jcmarker.c::write_scan_header`).
+    let mut saved_ri: u16 = 0;
+
     for scan in &scans {
         arith_enc.reset();
 
         let is_dc_scan: bool = scan.ss == 0 && scan.se == 0;
         let is_first: bool = scan.ah == 0;
+        let scan_ri: u16 = per_scan_ri(&scan.component_indices);
 
         let scan_components: Vec<(u8, u8, u8)> = scan
             .component_indices
@@ -2184,6 +2217,13 @@ pub fn write_coefficients_progressive_arithmetic(coeffs: &JpegCoefficients) -> R
             &ac_in_use,
             &ac_params,
         );
+        // DRI is emitted only when the per-scan restart interval changes
+        // from what the previous scan installed. `saved_ri == 0` initially,
+        // so the first scan with restart markers re-emits DRI.
+        if scan_ri != saved_ri {
+            marker_writer::write_dri(&mut output, scan_ri);
+            saved_ri = scan_ri;
+        }
         marker_writer::write_sos_progressive(
             &mut output,
             &scan_components,
@@ -2193,11 +2233,25 @@ pub fn write_coefficients_progressive_arithmetic(coeffs: &JpegCoefficients) -> R
             scan.al,
         );
 
+        let ri: u32 = scan_ri as u32;
+        let mut restarts_to_go: u32 = ri;
+        let mut next_restart_num: u8 = 0;
+
         if is_dc_scan && is_first {
             let mut prev_dc: Vec<i16> = vec![0; num_components];
 
             for mcu_y in 0..mcus_y {
                 for mcu_x in 0..mcus_x {
+                    // Mirrors libjpeg-turbo `jcarith.c::encode_mcu_DC_first`:
+                    // when the per-scan restart counter reaches zero,
+                    // flush byte-aligned, push FF Dn, reset coder state
+                    // and DC predictors, then continue the next group.
+                    if ri > 0 && restarts_to_go == 0 {
+                        arith_enc.emit_restart(next_restart_num);
+                        next_restart_num = (next_restart_num + 1) & 7;
+                        prev_dc.iter_mut().for_each(|v| *v = 0);
+                        restarts_to_go = ri;
+                    }
                     for &ci in &scan.component_indices {
                         let comp = &coeffs.components[ci];
                         let dc_tbl: usize = arithmetic_table_for_component(ci);
@@ -2223,6 +2277,9 @@ pub fn write_coefficients_progressive_arithmetic(coeffs: &JpegCoefficients) -> R
                             }
                         }
                     }
+                    if ri > 0 {
+                        restarts_to_go -= 1;
+                    }
                 }
             }
         } else if is_dc_scan {
@@ -2230,6 +2287,12 @@ pub fn write_coefficients_progressive_arithmetic(coeffs: &JpegCoefficients) -> R
 
             for mcu_y in 0..mcus_y {
                 for mcu_x in 0..mcus_x {
+                    if ri > 0 && restarts_to_go == 0 {
+                        arith_enc.emit_restart(next_restart_num);
+                        next_restart_num = (next_restart_num + 1) & 7;
+                        prev_dc.iter_mut().for_each(|v| *v = 0);
+                        restarts_to_go = ri;
+                    }
                     for &ci in &scan.component_indices {
                         let comp = &coeffs.components[ci];
 
@@ -2254,6 +2317,9 @@ pub fn write_coefficients_progressive_arithmetic(coeffs: &JpegCoefficients) -> R
                             }
                         }
                     }
+                    if ri > 0 {
+                        restarts_to_go -= 1;
+                    }
                 }
             }
         } else if is_first {
@@ -2263,10 +2329,20 @@ pub fn write_coefficients_progressive_arithmetic(coeffs: &JpegCoefficients) -> R
             let wib: usize = data_blocks_x[ci].min(comp.blocks_x);
             let hib: usize = data_blocks_y[ci].min(comp.blocks_y);
 
+            // Non-interleaved AC scan: each block is one MCU per the
+            // JPEG spec, so the restart counter applies per block.
             for by in 0..hib {
                 for bx in 0..wib {
+                    if ri > 0 && restarts_to_go == 0 {
+                        arith_enc.emit_restart(next_restart_num);
+                        next_restart_num = (next_restart_num + 1) & 7;
+                        restarts_to_go = ri;
+                    }
                     let block: &[i16; 64] = &comp.blocks[by * comp.blocks_x + bx];
                     arith_enc.encode_ac_first(block, ac_tbl, scan.ss, scan.se, scan.al);
+                    if ri > 0 {
+                        restarts_to_go -= 1;
+                    }
                 }
             }
         } else {
@@ -2278,8 +2354,16 @@ pub fn write_coefficients_progressive_arithmetic(coeffs: &JpegCoefficients) -> R
 
             for by in 0..hib {
                 for bx in 0..wib {
+                    if ri > 0 && restarts_to_go == 0 {
+                        arith_enc.emit_restart(next_restart_num);
+                        next_restart_num = (next_restart_num + 1) & 7;
+                        restarts_to_go = ri;
+                    }
                     let block: &[i16; 64] = &comp.blocks[by * comp.blocks_x + bx];
                     arith_enc.encode_ac_refine(block, ac_tbl, scan.ss, scan.se, scan.al, scan.ah);
+                    if ri > 0 {
+                        restarts_to_go -= 1;
+                    }
                 }
             }
         }

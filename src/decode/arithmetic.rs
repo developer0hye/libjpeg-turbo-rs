@@ -542,6 +542,35 @@ impl<'a> ArithDecoder<'a> {
         Ok(())
     }
 
+    /// Skip past an FF Dn restart marker (already consumed by
+    /// `get_byte`) and reset coder state for the next MCU group.
+    ///
+    /// Mirrors `jdarith.c::process_restart`:
+    /// * arithmetic registers `c`, `a` reset to zero;
+    /// * `ct = -16` so the next `arith_decode` refills `c` with two
+    ///   fresh bytes after the marker;
+    /// * statistics areas (DC, AC, fixed-bin) zeroed and `fixed_bin[0]`
+    ///   re-initialized to 113;
+    /// * DC predictors and contexts cleared for the components in the
+    ///   current scan;
+    /// * `unread_marker` cleared so subsequent `get_byte` calls read
+    ///   real entropy bytes from the byte after the FF Dn pair.
+    ///
+    /// `get_byte` already advances `pos` past the marker bytes when it
+    /// encounters them, so this routine does not need to skip bytes
+    /// itself.
+    pub fn process_restart(&mut self) {
+        self.unread_marker = false;
+        self.c = 0;
+        self.a = 0;
+        self.ct = -16;
+        self.last_dc_val = [0; 4];
+        self.dc_context = [0; 4];
+        self.dc_stats = [[0; DC_STAT_BINS]; NUM_ARITH_TBLS];
+        self.ac_stats = [[0; AC_STAT_BINS]; NUM_ARITH_TBLS];
+        self.fixed_bin = [113, 0, 0, 0];
+    }
+
     pub fn position(&self) -> usize {
         self.pos
     }
