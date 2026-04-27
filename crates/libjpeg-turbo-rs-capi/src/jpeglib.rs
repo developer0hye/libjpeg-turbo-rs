@@ -523,6 +523,16 @@ struct DecompressPrivate {
     /// `jpeg_read_header`; the public struct exposes a raw pointer into
     /// this vector so real libjpeg callers can iterate components.
     comp_info_storage: Vec<JpegComponentInfoPublic>,
+    /// Partial buffer accumulated by `drain_caller_source_mgr` across
+    /// suspending retries. Empty when no bridge is active or when the
+    /// previous bridge run committed to `JpegSource::Owned`. Held
+    /// separately from `source` so a caller's `fill_input_buffer`
+    /// returning `FALSE` (suspend) doesn't lose the bytes already
+    /// drained via `next_input_byte` advances; the next retry resumes
+    /// from the partial accumulator instead of asking the caller for
+    /// the same bytes again (which the caller's source manager has
+    /// already considered "consumed").
+    bridge_partial: Vec<u8>,
 }
 
 impl Default for DecompressPrivate {
@@ -539,6 +549,7 @@ impl Default for DecompressPrivate {
             crop_width: 0,
             crop_active: false,
             comp_info_storage: Vec::new(),
+            bridge_partial: Vec::new(),
         }
     }
 }
@@ -1159,7 +1170,10 @@ fn install_source_mgr(
 /// to own across this call. `c.src` (if non-NULL) must point to a
 /// `jpeg_source_mgr` that follows the libjpeg ABI, including ABI-
 /// compatible callback pointers.
-unsafe fn drain_caller_source_mgr(c: &mut JpegDecompressPublic) -> Option<Vec<u8>> {
+unsafe fn drain_caller_source_mgr(
+    c: &mut JpegDecompressPublic,
+    priv_state: &mut DecompressPrivate,
+) -> Option<Vec<u8>> {
     let src_ptr: *mut JpegSourceMgr = c.src;
     if src_ptr.is_null() {
         return None;
@@ -1168,18 +1182,23 @@ unsafe fn drain_caller_source_mgr(c: &mut JpegDecompressPublic) -> Option<Vec<u8
     // SAFETY: caller asserts `c.src` points at a live JpegSourceMgr.
     let src: &mut JpegSourceMgr = unsafe { &mut *src_ptr };
 
-    // Step 1: init_source. PIL's `jpeg_buffer_src.init_source` resets
-    // its internal "skip_next" counter and is otherwise a no-op for
-    // our purposes; calling it is harmless and keeps the C contract.
-    if let Some(init) = src.init_source {
-        // SAFETY: caller-provided callback honoring the libjpeg
-        // `void (*init_source)(j_decompress_ptr)` prototype.
-        unsafe {
-            init(cinfo_ptr);
+    // Step 1: init_source. Only invoke once per bridge cycle —
+    // otherwise a non-blocking caller's init_source might reset its
+    // internal stream cursor on every retry. We detect "first call"
+    // by `bridge_partial.is_empty()` (no prior partial drain in flight).
+    let is_first_call: bool = priv_state.bridge_partial.is_empty();
+    if is_first_call {
+        if let Some(init) = src.init_source {
+            // SAFETY: caller-provided callback honoring the libjpeg
+            // `void (*init_source)(j_decompress_ptr)` prototype.
+            unsafe {
+                init(cinfo_ptr);
+            }
         }
     }
 
-    let mut accumulator: Vec<u8> = Vec::new();
+    // Resume from a prior suspended drain if there was one.
+    let mut accumulator: Vec<u8> = std::mem::take(&mut priv_state.bridge_partial);
     // Cap accumulation at 256 MiB. A misbehaving callback that keeps
     // returning TRUE without setting `bytes_in_buffer = 0` would
     // otherwise loop forever; the cap forces a clean abort instead.
@@ -1202,11 +1221,11 @@ unsafe fn drain_caller_source_mgr(c: &mut JpegDecompressPublic) -> Option<Vec<u8
         // libjpeg's contract guarantees a JPEG stream always ends with
         // EOI; once we've captured it, the decoder doesn't need more
         // bytes regardless of what the source manager has buffered.
-        if accumulator.len() >= 2
+        let saw_eoi: bool = accumulator.len() >= 2
             && accumulator[accumulator.len() - 2] == 0xFF
-            && accumulator[accumulator.len() - 1] == 0xD9
-        {
-            break;
+            && accumulator[accumulator.len() - 1] == 0xD9;
+        if saw_eoi {
+            return Some(accumulator);
         }
 
         if accumulator.len() > MAX_BYTES {
@@ -1216,28 +1235,25 @@ unsafe fn drain_caller_source_mgr(c: &mut JpegDecompressPublic) -> Option<Vec<u8
         // Step 3: fetch more bytes from the caller.
         let fill: unsafe extern "C" fn(*mut c_void) -> CBoolean = match src.fill_input_buffer {
             Some(f) => f,
-            None => break,
+            // No callback and no EOI yet → end of stream from a
+            // pre-loaded buffer (typical static-source case).
+            None => return Some(accumulator),
         };
         // SAFETY: caller-supplied callback. A FALSE return means
-        // "suspended; come back later"; we honour that by returning
-        // whatever we have so far. PIL's `jpeg_buffer_src` returns
-        // TRUE with a synthetic FF D9 EOI when its stream is fully
-        // drained, so this branch is the normal end-of-stream path.
+        // "suspended; come back later". Park the partial accumulator
+        // in `priv_state.bridge_partial` so the next retry resumes
+        // from the same prefix instead of dropping the bytes whose
+        // `next_input_byte` advance the caller's source manager has
+        // already counted as consumed.
         let ok: CBoolean = unsafe { fill(cinfo_ptr) };
         if ok == 0 {
-            break;
+            priv_state.bridge_partial = accumulator;
+            return None;
         }
         if src.bytes_in_buffer == 0 {
-            // Successful fill but no bytes — defensive break to avoid
-            // an infinite loop on a misbehaving callback.
-            break;
+            // Successful fill but no bytes — treat as end of stream.
+            return Some(accumulator);
         }
-    }
-
-    if accumulator.is_empty() {
-        None
-    } else {
-        Some(accumulator)
     }
 }
 
@@ -1278,11 +1294,15 @@ pub extern "C" fn jpeg_read_header(cinfo: *mut c_void, _require_image: CBoolean)
     // and libtiff's libjpeg consumer, both of which install their own
     // `jpeg_source_mgr` directly — drain the caller-installed source
     // through its `fill_input_buffer` callback into an `Owned` buffer
-    // so the rest of the decode path proceeds normally.
+    // so the rest of the decode path proceeds normally. The bridge
+    // resumes across suspending retries via
+    // `priv_state.bridge_partial`, so a non-blocking source feeding
+    // bytes one chunk at a time eventually succeeds without losing
+    // already-drained input.
     if priv_state.source.as_bytes().is_none() {
         // SAFETY: c is a live JpegDecompressPublic; if c.src is non-NULL,
         // the caller asserts it points at a libjpeg-ABI source manager.
-        if let Some(drained) = unsafe { drain_caller_source_mgr(c) } {
+        if let Some(drained) = unsafe { drain_caller_source_mgr(c, priv_state) } {
             priv_state.source = JpegSource::Owned(drained);
         }
     }
@@ -1733,11 +1753,18 @@ pub extern "C" fn jpeg_finish_decompress(cinfo: *mut c_void) -> CBoolean {
         None => return 0,
     };
     c.global_state = DSTATE_STOPPING;
-    // Drop the decoded image eagerly so the next jpeg_read_header on the
-    // same handle starts from a clean slate.
+    // Drop the decoded image and any source bytes bridged from a
+    // caller-installed `cinfo->src` so the next `jpeg_read_header` on
+    // this handle re-runs the bridge against whatever new source the
+    // caller installs. Without dropping `source`, a libjpeg-style
+    // caller that reuses the same decompressor with a *different*
+    // direct source manager would silently re-decode the previous
+    // image's bytes.
     let priv_ptr: *mut c_void = decompress_private_raw(cinfo);
     if let Some(priv_state) = unsafe { priv_from_ptr(priv_ptr) } {
         priv_state.decoded = None;
+        priv_state.source = JpegSource::None;
+        priv_state.bridge_partial.clear();
     }
     1
 }
@@ -2589,14 +2616,22 @@ const JPEG_REACHED_EOI: c_int = 2;
 ///
 /// Stock libjpeg drives the input state machine here: callers may loop
 /// until it returns `JPEG_REACHED_EOI`, expecting that headers get
-/// parsed and `cinfo->global_state` advances. Returning `JPEG_REACHED_EOI`
-/// unconditionally would let buffered/progressive callers skip
-/// `jpeg_read_header` entirely and then read uninitialised public
-/// fields. We therefore drive the state machine: in `DSTATE_START` we
-/// trigger `jpeg_read_header` (which transitions to
-/// `DSTATE_SCANNING`), in `DSTATE_INHEADER` we report
-/// `JPEG_REACHED_SOS`, and only when the decoded image is buffered (=
-/// past header) do we surface `JPEG_REACHED_EOI`.
+/// parsed and `cinfo->global_state` advances. Returning
+/// `JPEG_REACHED_EOI` unconditionally would let buffered/progressive
+/// callers skip `jpeg_read_header` entirely and then read
+/// uninitialised public fields. We therefore drive the state machine:
+///
+///   * `DSTATE_START` → invoke `jpeg_read_header` (returns
+///     `JPEG_HEADER_OK` and leaves state at `DSTATE_INHEADER` on
+///     success, or stays at `DSTATE_INHEADER` + returns `JPEG_SUSPENDED`
+///     on a partial source). On success we advance state past
+///     `DSTATE_INHEADER` so the next call surfaces `JPEG_REACHED_EOI`
+///     instead of looping.
+///   * `DSTATE_INHEADER` → retry `jpeg_read_header` to resume from a
+///     prior suspension; on success advance state.
+///   * Anything past `DSTATE_INHEADER` (post header-parse) → return
+///     `JPEG_REACHED_EOI` because our shim buffers the entire stream
+///     up front.
 #[no_mangle]
 pub extern "C" fn jpeg_consume_input(cinfo: *mut c_void) -> c_int {
     let c: &mut JpegDecompressPublic = match unsafe { cinfo_mut(cinfo) } {
@@ -2604,21 +2639,31 @@ pub extern "C" fn jpeg_consume_input(cinfo: *mut c_void) -> c_int {
         None => return JPEG_SUSPENDED,
     };
     match c.global_state {
-        DSTATE_START => {
-            // Header not yet parsed — drive the parser. `jpeg_read_header`
-            // sets `global_state = DSTATE_SCANNING` on success and leaves
-            // it unchanged on suspend.
+        DSTATE_START | DSTATE_INHEADER => {
             let result: c_int = jpeg_read_header(cinfo, /*require_image=*/ 1);
+            // Re-read the state because `jpeg_read_header` mutated it.
+            let c2: &mut JpegDecompressPublic = match unsafe { cinfo_mut(cinfo) } {
+                Some(c) => c,
+                None => return JPEG_SUSPENDED,
+            };
             match result {
-                JPEG_HEADER_OK => JPEG_REACHED_SOS,
+                JPEG_HEADER_OK => {
+                    // Our `jpeg_read_header` leaves state at
+                    // `DSTATE_INHEADER` on success (upstream uses
+                    // `DSTATE_READY`, which we don't model
+                    // separately). Advance past the header-parse
+                    // arm so subsequent `consume_input` polls report
+                    // `JPEG_REACHED_EOI` instead of looping forever
+                    // on `JPEG_REACHED_SOS`. `jpeg_start_decompress`
+                    // re-asserts `DSTATE_SCANNING` regardless, so
+                    // skipping ahead is safe.
+                    c2.global_state = DSTATE_SCANNING;
+                    JPEG_REACHED_SOS
+                }
                 JPEG_HEADER_TABLES_ONLY => JPEG_REACHED_EOI,
                 _ => JPEG_SUSPENDED,
             }
         }
-        DSTATE_INHEADER => JPEG_REACHED_SOS,
-        // Past header parse — the image is fully buffered (we decode
-        // upfront in `jpeg_start_decompress`), so EOI is the truthful
-        // answer.
         _ => JPEG_REACHED_EOI,
     }
 }
@@ -2692,7 +2737,9 @@ pub extern "C" fn jpeg_new_colormap(_cinfo: *mut c_void) {}
 /// pending coefficient handles so the same `cinfo` can be reused for
 /// a new image. Without this, error-recovery flows that abort a
 /// partial encode and re-issue `jpeg_start_compress` would observe
-/// stale `next_scanline` / pixel buffers from the failed run.
+/// stale `next_scanline` / pixel buffers from the failed run, and a
+/// reuse without `jpeg_write_icc_profile` would still emit the
+/// aborted run's APP2 ICC chunks.
 #[no_mangle]
 pub extern "C" fn jpeg_abort_compress(cinfo: *mut c_void) {
     let c: &mut JpegCompressPublic = match unsafe { cinfo_compress_mut(cinfo) } {
@@ -2706,6 +2753,10 @@ pub extern "C" fn jpeg_abort_compress(cinfo: *mut c_void) {
         p.pixels_u8.clear();
         p.pixels_u16.clear();
         p.pending_markers.clear();
+        // Drop the pending ICC profile too — otherwise a reuse path
+        // that re-runs encode without `jpeg_write_icc_profile` would
+        // still inject the aborted image's APP2 ICC chunks.
+        p.icc_profile = None;
         p.pending_coef_arrays = std::ptr::null();
     }
     c.global_state = CSTATE_START;
@@ -2713,6 +2764,12 @@ pub extern "C" fn jpeg_abort_compress(cinfo: *mut c_void) {
 }
 
 /// `jpeg_abort_decompress(cinfo)` — reset decompress state for reuse.
+///
+/// Drops the cached decode + coefficient arrays, clears any source
+/// bridged from a caller-installed `cinfo->src`, and returns
+/// `global_state` to `DSTATE_START` so a follow-up
+/// `jpeg_read_header` re-runs the source bridge against whatever
+/// new source the caller has installed.
 #[no_mangle]
 pub extern "C" fn jpeg_abort_decompress(cinfo: *mut c_void) {
     let c: &mut JpegDecompressPublic = match unsafe { cinfo_mut(cinfo) } {
@@ -2726,6 +2783,13 @@ pub extern "C" fn jpeg_abort_decompress(cinfo: *mut c_void) {
         p.crop_active = false;
         p.crop_xoffset = 0;
         p.crop_width = 0;
+        // Drop any source bytes bridged from the previous run so
+        // `jpeg_read_header` re-bridges from the (possibly new)
+        // `cinfo->src` next time. Also clear the bridge resume buffer
+        // so a non-blocking source from a future image doesn't
+        // accidentally resume in the middle of an unrelated stream.
+        p.source = JpegSource::None;
+        p.bridge_partial.clear();
     }
     c.global_state = DSTATE_START;
     c.output_scanline = 0;
@@ -4088,16 +4152,23 @@ fn push_bytes_through_dest_mgr(
         offset += take;
     }
     // Emit the terminal flush.
+    //
+    // IMPORTANT: do NOT zero `next_output_byte` / `free_in_buffer`
+    // after `term_destination` returns. Pillow's `_imaging.so`
+    // `ImagingJpegEncode` computes `bytes_written = state->bytes -
+    // free_in_buffer` by reading `cinfo->dest->free_in_buffer`
+    // *after* this function returns; clobbering it to 0 made Pillow
+    // see a phantom write equal to its full buffer size (or, when
+    // its outer wrapper validated the count, fall through to "0
+    // bytes" and write an empty file). Leave the destination state
+    // exactly as `term_destination` left it so the caller can
+    // compute its own byte count.
     let term_fn: Option<unsafe extern "C" fn(*mut c_void)> = unsafe { (*c.dest).term_destination };
     if let Some(f) = term_fn {
         unsafe {
             f(c as *mut JpegCompressPublic as *mut c_void);
         }
     }
-    // After term_destination the staging buffer is invalid; zero it.
-    let dest: &mut JpegDestinationMgr = unsafe { &mut *c.dest };
-    dest.next_output_byte = std::ptr::null_mut();
-    dest.free_in_buffer = 0;
     // Prevent unused warning.
     let _ = priv_state;
 }
