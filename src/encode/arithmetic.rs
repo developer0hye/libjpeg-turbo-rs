@@ -434,6 +434,36 @@ impl ArithEncoder {
         }
     }
 
+    /// Flush any in-flight bits and emit a `FF Dn` restart marker.
+    ///
+    /// Mirrors libjpeg-turbo `jcarith.c::emit_restart`: byte-aligns the
+    /// entropy stream by finalizing the current arithmetic coder state,
+    /// pushes the marker bytes directly to the output buffer, then
+    /// re-initializes coder state and statistics so the next MCU group
+    /// starts fresh. The output buffer (containing all entropy bytes
+    /// emitted so far) is preserved.
+    pub fn emit_restart(&mut self, restart_idx: u8) {
+        self.finish();
+        self.output.push(0xFF);
+        self.output.push(0xD0 + (restart_idx & 7));
+        // Re-initialize coder state for the next MCU group, mirroring
+        // the post-`finish_pass` reset that `jcarith.c::emit_restart`
+        // performs. We deliberately do NOT clear `self.output` here —
+        // that's what differentiates this from the scan-boundary
+        // `reset()` below.
+        self.c = 0;
+        self.a = 0x10000;
+        self.ct = 11;
+        self.sc = 0;
+        self.zc = 0;
+        self.buffer = -1;
+        self.last_dc_val = [0; 4];
+        self.dc_context = [0; 4];
+        self.dc_stats = [[0; DC_STAT_BINS]; NUM_ARITH_TBLS];
+        self.ac_stats = [[0; AC_STAT_BINS]; NUM_ARITH_TBLS];
+        self.fixed_bin = [113, 0, 0, 0];
+    }
+
     /// Reset encoder state for a new scan, keeping output buffer.
     ///
     /// Clears arithmetic coding state, DC prediction, and statistics
