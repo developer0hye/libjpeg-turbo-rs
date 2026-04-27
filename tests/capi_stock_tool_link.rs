@@ -230,13 +230,13 @@ fn drive_pipeline() -> Result<(), String> {
 /// success across djpeg, cjpeg, AND jpegtran on the
 /// `references/libjpeg-turbo/testimages/` corpus.
 ///
-/// djpeg/cjpeg are byte-exact today against stock libjpeg-turbo. The
-/// jpegtran arm still fails because `-rotate 90` (the transform op
-/// run.sh exercises) needs the libjpeg memory-manager API + virtual
-/// barray materialization that the shim has not yet shipped (LAST_MILE.md
-/// P0-4). Until that lands, the test stays `#[ignore]` to keep the
-/// default `cargo test` run green; remove the attribute once P0-4 is
-/// closed.
+/// All three arms — djpeg, cjpeg, and jpegtran (`-copy all -rotate 90`)
+/// — are byte-exact against stock libjpeg-turbo for the 8-bit
+/// fixtures (`testimgari.jpg`, `testimgint.jpg`, `testorig.jpg`). The
+/// 12-bit fixture (`monkey12.jpg`) is `skip`ped on the jpegtran arm
+/// because our `write_coefficients` is currently 8-bit-only; the
+/// follow-up to land 12-bit transcoding is tracked under
+/// LAST_MILE.md → P0-4 (12-bit transcode).
 ///
 /// Skip behavior:
 /// * Non-macOS/Linux host → skip (build.sh is POSIX-only for now).
@@ -244,7 +244,6 @@ fn drive_pipeline() -> Result<(), String> {
 /// * Submodule unpopulated → skip (no stock tool sources to compile).
 /// * Shim cdylib missing → skip (run `cargo build --release` first).
 #[test]
-#[ignore = "LAST_MILE P0-4: jpegtran -rotate transform path needs libjpeg memory-manager + transupp virtual barrays. djpeg/cjpeg arms pass byte-exact today; flip this back on once the transform path lands."]
 fn stock_tools_link_against_our_shim() {
     // Platform gate.
     if !(cfg!(target_os = "macos") || cfg!(target_os = "linux")) {

@@ -22,7 +22,7 @@ Live checks on 2026-04-27 (refresh whenever the gap inventory changes — failur
 | --- | --- | --- |
 | `cargo test --workspace --no-fail-fast` | Fails `-p libjpeg-turbo-rs --test cross_product_transform` | Native transform correctness is still red. |
 | `cargo test -p libjpeg-turbo-rs --test cross_product_transform tjtrantest_full_cross_product -- --exact` | 14,112 tested; `arithmetic DC overflow` decode failures | Arithmetic transform output can be corrupt in a real option cross-product. Clean `main` showed 9 failures; an in-progress progressive arithmetic restart patch changed the shape to 12 failures, so fix the class, not the count. |
-| `cargo test --test capi_stock_tool_link -- --include-ignored` | Stock tools link, then our-linked `djpeg` aborts on `testorig`, `testimgari`, `testimgint`, `monkey12` | The shim is not a drop-in `libjpeg.so.62` for stock tools yet. |
+| `cargo test --test capi_stock_tool_link` | **Passes** for djpeg / cjpeg / jpegtran (`-copy all -rotate 90`) on the 8-bit fixtures (`testimgari`, `testimgint`, `testorig`); `monkey12` is `skip`ped on the jpegtran arm pending 12-bit `write_coefficients`. The previous `#[ignore]` is removed. | Drop-in for stock 8-bit `jpegtran -rotate 90` is closed; 12-bit transcode remains. |
 | `cargo test --test capi_pillow_compat -- --nocapture` | **Passes**: phase-A dlopen ok, phase-B Pillow round-trip @ q=90 PSNR 49.49 dB (≥ 30 dB floor). Blocker-code-3 is now a hard panic, not a skip. | P0-3 closed. |
 | `cargo test -p libjpeg-turbo-rs-capi --test tjunittest_link -- --include-ignored --exact tjunittest_default_suite_passes` | Passes | The ignore on this test is stale and should be removed. |
 
@@ -165,7 +165,9 @@ cargo test --test capi_pillow_compat -- --nocapture
 
 ### P0-4. Foreign Virtual Coefficient Arrays Are Rejected
 
-**Symptom:** `jpeg_write_coefficients` accepts handles returned by this shim's `jpeg_read_coefficients`, but rejects foreign virtual barray handles:
+**Status (2026-04-28): partially closed.** Stock `jpegtran -copy all -rotate 90` is byte-exact against upstream on the 8-bit fixtures (`testimgari.jpg`, `testimgint.jpg`, `testorig.jpg`); `monkey12.jpg` (12-bit precision) is `skip`ped because our `write_coefficients` writer hard-codes `data_precision=8`. The remaining work is implementing the 12-bit precision path in the coefficient writer plus surfacing `data_precision` through `JpegCoefficients`. The full TJXOP cross-product (rotate {180,270} × flip × transpose × transverse × crop) and marker-copy modes (`comments`/`icc`/`none`) still need verification.
+
+**Symptom (historical):** `jpeg_write_coefficients` accepts handles returned by this shim's `jpeg_read_coefficients`, but rejects foreign virtual barray handles:
 
 ```text
 foreign virtual coefficient arrays ... are not yet supported
