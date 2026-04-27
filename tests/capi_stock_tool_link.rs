@@ -159,12 +159,17 @@ fn drive_pipeline() -> Result<(), String> {
 // Tests
 // ---------------------------------------------------------------------------
 
-/// Top-level harness: exercises build + run, asserts byte-exact success.
+/// Top-level harness: exercises build + run, asserts byte-exact
+/// success across djpeg, cjpeg, AND jpegtran on the
+/// `references/libjpeg-turbo/testimages/` corpus.
 ///
-/// Today this test FAILS (by assertion, not by panic) because the shim
-/// lacks the classic libjpeg API. The assertion message includes the
-/// missing-symbol count so coordinators see the exact gap size without
-/// opening the log files.
+/// djpeg/cjpeg are byte-exact today against stock libjpeg-turbo. The
+/// jpegtran arm still fails because `-rotate 90` (the transform op
+/// run.sh exercises) needs the libjpeg memory-manager API + virtual
+/// barray materialization that the shim has not yet shipped (LAST_MILE.md
+/// P0-4). Until that lands, the test stays `#[ignore]` to keep the
+/// default `cargo test` run green; remove the attribute once P0-4 is
+/// closed.
 ///
 /// Skip behavior:
 /// * Non-macOS/Linux host → skip (build.sh is POSIX-only for now).
@@ -172,7 +177,7 @@ fn drive_pipeline() -> Result<(), String> {
 /// * Submodule unpopulated → skip (no stock tool sources to compile).
 /// * Shim cdylib missing → skip (run `cargo build --release` first).
 #[test]
-#[ignore = "FFI B9-4: requires ~33 classic jpeg_* symbols not yet in shim (A1-11 partial, A1-12 follow-up). See examples/stock_djpeg_cjpeg/COORDINATOR_NOTES.md."]
+#[ignore = "LAST_MILE P0-4: jpegtran -rotate transform path needs libjpeg memory-manager + transupp virtual barrays. djpeg/cjpeg arms pass byte-exact today; flip this back on once the transform path lands."]
 fn stock_tools_link_against_our_shim() {
     // Platform gate.
     if !(cfg!(target_os = "macos") || cfg!(target_os = "linux")) {
@@ -221,16 +226,18 @@ fn stock_tools_link_against_our_shim() {
     }
 }
 
-/// Secondary test: assert that our shim, as currently built, does **not**
-/// yet export the classic libjpeg API. This is a regression guard that
-/// pins today's observed state so any future work that adds `jpeg_*`
-/// exports has to affirmatively flip this test.
+/// Hard gate: the shim cdylib must export a meaningful set of classic
+/// `jpeg_*` symbols. Originally this test pinned the opposite state
+/// (zero exported `jpeg_*`) as a regression guard while the shim was
+/// being built up; now those symbols exist (decode side A1-11 + encode
+/// side C2 batch) and the gate flipped to a positive assertion so any
+/// regression that strips them out fails CI immediately.
 ///
-/// It uses `nm` (available on both Linux and macOS) to list exported
-/// symbols of the shim cdylib and greps for `jpeg_`-prefixed entries.
+/// Uses `nm` (available on macOS and Linux) and counts defined,
+/// exported `jpeg_*` symbols (excluding shim-private `jpeg_capi_test_*`
+/// helpers, which are testing affordances rather than the classic API).
 #[test]
-#[ignore = "FFI B9-4: companion to stock_tools_link_against_our_shim, same blocker"]
-fn shim_currently_lacks_classic_jpeg_api() {
+fn shim_exports_classic_jpeg_api() {
     let Some(shim) = shim_lib_path() else {
         eprintln!("SKIP: shim cdylib missing");
         return;
@@ -249,9 +256,9 @@ fn shim_currently_lacks_classic_jpeg_api() {
     }
 
     let text: String = String::from_utf8_lossy(&nm_out.stdout).into_owned();
-    // Count defined (T/D/S = text/data/rodata) symbols that start with
-    // `jpeg_` (ignoring macOS underscore prefix). `nm` column 2 is the
-    // type letter; uppercase = exported, lowercase = local. Example line:
+    // Count defined (T/D/S/B/R) symbols that start with `jpeg_`,
+    // ignoring the shim-private `jpeg_capi_test_*` helpers and the
+    // platform-specific leading underscore. Example line:
     //   0000000000012abc T _jpeg_std_error
     let exported_jpeg_syms: Vec<&str> = text
         .lines()
@@ -262,18 +269,33 @@ fn shim_currently_lacks_classic_jpeg_api() {
             let name: &str = parts.next()?;
             let is_exported: bool = matches!(ty, "T" | "D" | "S" | "B" | "R");
             let bare: &str = name.strip_prefix('_').unwrap_or(name);
-            (is_exported && bare.starts_with("jpeg_")).then_some(name)
+            let is_classic: bool =
+                bare.starts_with("jpeg_") && !bare.starts_with("jpeg_capi_test_");
+            (is_exported && is_classic).then_some(name)
         })
         .collect();
 
-    // Today we expect zero. If this ever becomes non-zero, the other
-    // test in this file will simultaneously start passing on its own.
-    assert_eq!(
+    // The decode-side A1-11 batch (9 symbols) + encode-side C2 batch
+    // (24 symbols) + decode extensions C1 batch (12 symbols) gives 45
+    // classic entry points today. 30 is a generous floor that catches
+    // a regression which strips a meaningful chunk without being
+    // brittle against tiny renames.
+    assert!(
+        exported_jpeg_syms.len() >= 30,
+        "Shim is missing classic libjpeg API surface: only {} jpeg_* \
+         symbols are exported, expected ≥30. Stock djpeg/cjpeg/jpegtran \
+         link will break. Symbols seen: {:?}",
         exported_jpeg_syms.len(),
-        0,
-        "Shim has started exporting classic libjpeg symbols: {:?}. \
-         Update `stock_tools_link_against_our_shim` to require a \
-         passing end-to-end link now that the API surface exists.",
         exported_jpeg_syms,
+    );
+    // jpeg_std_error is the canonical entry point any classic libjpeg
+    // caller hits first — call it out by name for fast diagnosis.
+    let has_std_error: bool = exported_jpeg_syms
+        .iter()
+        .any(|s| s.strip_prefix('_').unwrap_or(s) == "jpeg_std_error");
+    assert!(
+        has_std_error,
+        "shim must export jpeg_std_error (the canonical libjpeg entry point); \
+         got {exported_jpeg_syms:?}"
     );
 }

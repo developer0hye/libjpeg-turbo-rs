@@ -24,6 +24,22 @@ fi
 OUR_DJPEG="$OUR_BUILD/djpeg"
 OUR_CJPEG="$OUR_BUILD/cjpeg"
 OUR_JPEGTRAN="$OUR_BUILD/jpegtran"
+
+# Locate the shim's directory so the dynamic loader can find
+# libjpeg.62.dylib / libjpeg.so.62. build.sh tries to bake this in via
+# install_name_tool / -Wl,-rpath, but in sandboxed CI/build envs
+# install_name_tool can be blocked, leaving binaries that reference
+# `@rpath/libjpeg.62.dylib` with no LC_RPATH. Setting DYLD_LIBRARY_PATH
+# (macOS) and LD_LIBRARY_PATH (Linux) makes the test robust to that
+# failure mode.
+SHIM_DIR="${SHIM_DIR:-$REPO_ROOT/target/release}"
+if [[ ! -f "$SHIM_DIR/liblibjpeg_turbo_rs_capi.dylib" \
+   && ! -f "$SHIM_DIR/liblibjpeg_turbo_rs_capi.so" ]]; then
+    echo "ERROR: shim cdylib not found under $SHIM_DIR; run cargo build -p libjpeg-turbo-rs-capi --release" >&2
+    exit 5
+fi
+export DYLD_LIBRARY_PATH="$SHIM_DIR${DYLD_LIBRARY_PATH:+:$DYLD_LIBRARY_PATH}"
+export LD_LIBRARY_PATH="$SHIM_DIR${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
 STOCK_DJPEG="${STOCK_DJPEG:-$STOCK_BIN/djpeg}"
 STOCK_CJPEG="${STOCK_CJPEG:-$STOCK_BIN/cjpeg}"
 STOCK_JPEGTRAN="${STOCK_JPEGTRAN:-$STOCK_BIN/jpegtran}"
