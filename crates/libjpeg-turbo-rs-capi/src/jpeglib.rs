@@ -4302,9 +4302,27 @@ fn run_coefficient_writer_and_flush(
     // destination explicitly set a non-zero value — the libjpeg default
     // (0 / no restart) preserves the source restart_interval the way
     // upstream jpegtran does when no `-restart` flag is given.
+    //
+    // For non-progressive output, also fold `restart_in_rows` (row mode)
+    // into `restart_interval` (byte mode) the same way libjpeg's
+    // `jcomaster.c::initial_setup` does: `interval = rows * MCUs_per_row`,
+    // clamped to 65535. The progressive writers consume `restart_in_rows`
+    // directly via the `restart_rows` argument, so they don't need this
+    // conversion.
     let mut adjusted: libjpeg_turbo_rs::JpegCoefficients = unsafe { (*raw).inner.clone() };
     if c.restart_interval != 0 {
         adjusted.restart_interval = c.restart_interval as u16;
+    } else if c.restart_in_rows > 0 && c.progressive_mode == 0 {
+        let max_h: u8 = adjusted
+            .components
+            .iter()
+            .map(|cc| cc.h_sampling)
+            .max()
+            .unwrap_or(1);
+        let stride: u32 = (max_h as u32).saturating_mul(8).max(1);
+        let mcus_per_row: u32 = (adjusted.width as u32).div_ceil(stride);
+        let interval: u32 = (c.restart_in_rows as u32).saturating_mul(mcus_per_row);
+        adjusted.restart_interval = interval.min(65535) as u16;
     }
 
     // Match the requested output coding mode — the same compress
@@ -4447,6 +4465,16 @@ pub extern "C" fn jpeg_capi_test_set_compress_dims(
 pub extern "C" fn jpeg_capi_test_set_progressive(cinfo: *mut c_void, progressive: c_int) {
     if let Some(c) = unsafe { cinfo_compress_mut(cinfo) } {
         c.progressive_mode = progressive;
+    }
+}
+
+/// Test helper: set `restart_in_rows` directly. Mirrors `jpegtran
+/// -restart Nrows` so the coefficient writer's row-mode → byte-mode
+/// conversion can be exercised without a full simple_progression call.
+#[no_mangle]
+pub extern "C" fn jpeg_capi_test_set_restart_in_rows(cinfo: *mut c_void, rows: c_int) {
+    if let Some(c) = unsafe { cinfo_compress_mut(cinfo) } {
+        c.restart_in_rows = rows;
     }
 }
 
