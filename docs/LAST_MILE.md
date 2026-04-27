@@ -264,10 +264,11 @@ The current "stub still fails" test must be replaced with end-to-end load/save t
 # After correctness gates above are green
 cargo bench --bench encode
 # Compile and run the matching C baseline (C source ships in
-# examples/, no pre-built binary is checked in):
-cc -O2 -o /tmp/bench_c_encode_matrix examples/bench_c_encode_matrix.c \
-   -I$CONDA_PREFIX/include -L$CONDA_PREFIX/lib -ljpeg \
-   -Wl,-rpath,$CONDA_PREFIX/lib
+# examples/, no pre-built binary is checked in). Use pkg-config so
+# both Homebrew (`brew install jpeg-turbo`) and Conda
+# (`$CONDA_PREFIX/lib`) installs of libjpeg-turbo work:
+cc -O2 examples/bench_c_encode_matrix.c -o /tmp/bench_c_encode_matrix \
+   $(pkg-config --cflags --libs libjpeg)
 /tmp/bench_c_encode_matrix
 ```
 
@@ -575,9 +576,10 @@ bash examples/stock_djpeg_cjpeg/run.sh
 # Encode performance baseline (post-correctness):
 cargo bench --bench encode
 # Compile and run the matching C baseline (C source ships in
-# examples/, no pre-built binary is checked in):
-cc -O2 -o /tmp/bench_c_encode_matrix examples/bench_c_encode_matrix.c \
-   -I$CONDA_PREFIX/include -L$CONDA_PREFIX/lib -ljpeg \
-   -Wl,-rpath,$CONDA_PREFIX/lib
+# examples/, no pre-built binary is checked in). Use pkg-config so
+# both Homebrew (`brew install jpeg-turbo`) and Conda
+# (`$CONDA_PREFIX/lib`) installs of libjpeg-turbo work:
+cc -O2 examples/bench_c_encode_matrix.c -o /tmp/bench_c_encode_matrix \
+   $(pkg-config --cflags --libs libjpeg)
 /tmp/bench_c_encode_matrix
 ```
