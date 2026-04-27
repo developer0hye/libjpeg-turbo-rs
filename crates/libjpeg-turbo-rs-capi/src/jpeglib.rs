@@ -647,13 +647,16 @@ unsafe extern "C" fn default_emit_message(cinfo: *mut c_void, msg_level: c_int) 
         }
         let err: &mut JpegErrorMgr = &mut *err_ptr;
         if msg_level < 0 {
-            let first: bool = err.num_warnings == 0;
-            err.num_warnings = err.num_warnings.saturating_add(1);
-            if first || err.trace_level >= 3 {
+            // Match libjpeg-turbo's jerror.c::emit_message order: route
+            // to `output_message` first (so a custom output hook still
+            // sees `num_warnings == 0` on the first warning, the way
+            // libjpeg's example callers expect), then increment.
+            if err.num_warnings == 0 || err.trace_level >= 3 {
                 if let Some(out) = err.output_message {
                     out(cinfo);
                 }
             }
+            err.num_warnings = err.num_warnings.saturating_add(1);
         } else if msg_level <= err.trace_level {
             if let Some(out) = err.output_message {
                 out(cinfo);
