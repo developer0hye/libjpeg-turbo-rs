@@ -89,6 +89,60 @@ pub struct JpegErrorMgr {
 }
 
 // ---------------------------------------------------------------------------
+// Addon message table for warnings emitted by this shim that have no
+// matching standard `JWRN_*` code (e.g. "progressive arithmetic +
+// restart dropped"). Mirrors the libjpeg-turbo `addon_message_table`
+// mechanism used by application code that ships custom error codes.
+//
+// The contract WARNMS expands to is:
+//   1) cinfo->err->msg_code = <code>
+//   2) (optionally) cinfo->err->msg_parm.* = <args>
+//   3) (*cinfo->err->emit_message)(cinfo, -1)
+//
+// `format_message` then looks up `msg_code` first in
+// `jpeg_message_table` (the standard JMSG_* table) and, on miss, in
+// `addon_message_table` indexed by `msg_code - first_addon_message`.
+//
+// `RS_FIRST_ADDON_MSG` is chosen well above `JMSG_LASTMSGCODE` (~89 in
+// libjpeg-turbo today, with room to grow) so it cannot collide with a
+// future standard code.
+pub const RS_FIRST_ADDON_MSG: c_int = 1024;
+pub const RS_JWRN_PROG_ARITH_RESTART_DROPPED: c_int = RS_FIRST_ADDON_MSG;
+
+// Wrapper to make a static array of C-string pointers `Sync`. Each
+// entry points to an immutable `'static` byte literal so concurrent
+// reads are sound; the wrapper just carries the unsafe Sync impl.
+#[repr(transparent)]
+struct RsAddonTable([*const u8; 1]);
+// SAFETY: contents are pointers to `'static` immutable byte literals.
+unsafe impl Sync for RsAddonTable {}
+
+static RS_ADDON_MESSAGES: RsAddonTable = RsAddonTable([
+    b"Progressive arithmetic + restart is not yet supported; restart markers dropped\0".as_ptr(),
+]);
+
+/// Lazily install the shim's addon message table on a libjpeg
+/// `JpegErrorMgr` so a caller's `format_message` hook produces a
+/// meaningful string for shim-emitted warnings. Never clobber a
+/// caller-installed addon table — that would silently break wrappers
+/// that registered their own custom codes.
+unsafe fn ensure_rs_addon_table_installed(err: &mut JpegErrorMgr) -> bool {
+    let our_table_ptr: *const *const u8 = RS_ADDON_MESSAGES.0.as_ptr();
+    if err.addon_message_table.is_null() {
+        err.addon_message_table = our_table_ptr;
+        err.first_addon_message = RS_FIRST_ADDON_MSG;
+        err.last_addon_message = RS_FIRST_ADDON_MSG + (RS_ADDON_MESSAGES.0.len() as c_int) - 1;
+        true
+    } else {
+        // A caller-installed table already exists. Don't overwrite —
+        // but report `false` so the emit site can still set msg_code
+        // (the caller may inspect it via emit_message even though
+        // `format_message` will fall through to "Bogus message code").
+        std::ptr::eq(err.addon_message_table, our_table_ptr)
+    }
+}
+
+// ---------------------------------------------------------------------------
 // `struct jpeg_source_mgr` — verbatim layout.
 // ---------------------------------------------------------------------------
 
@@ -669,14 +723,64 @@ unsafe extern "C" fn default_output_message(_cinfo: *mut c_void) {
     // No-op by default — real libjpeg routes through stderr.
 }
 
-unsafe extern "C" fn default_format_message(_cinfo: *mut c_void, buffer: *mut u8) {
+unsafe extern "C" fn default_format_message(cinfo: *mut c_void, buffer: *mut u8) {
     if buffer.is_null() {
         return;
     }
-    // Minimal default: write a sentinel so clients don't read uninit memory.
-    let msg: &[u8] = b"libjpeg-turbo-rs error\0";
+    // Mirror libjpeg-turbo's jerror.c::format_message lookup so a
+    // wrapper calling `(*err->format_message)(cinfo, buf)` after an
+    // emit_message warning gets the message string we registered via
+    // the addon table. We do NOT implement the printf-style %d/%c/%s
+    // expansion of `msg_parm` here (none of our shim-emitted warnings
+    // need parameters yet); if a future warning carries args, expand
+    // this routine to walk the format string the way jerror.c does.
+    let mut msgtext: *const u8 = std::ptr::null();
+    if !cinfo.is_null() {
+        unsafe {
+            let err_pp: *const *mut JpegErrorMgr = cinfo as *const *mut JpegErrorMgr;
+            let err_ptr: *mut JpegErrorMgr = err_pp.read();
+            if !err_ptr.is_null() {
+                let err: &JpegErrorMgr = &*err_ptr;
+                let code: c_int = err.msg_code;
+                if code > 0 && !err.jpeg_message_table.is_null() && code <= err.last_jpeg_message {
+                    msgtext = err.jpeg_message_table.add(code as usize).read();
+                } else if !err.addon_message_table.is_null()
+                    && code >= err.first_addon_message
+                    && code <= err.last_addon_message
+                {
+                    let idx: c_int = code - err.first_addon_message;
+                    msgtext = err.addon_message_table.add(idx as usize).read();
+                }
+            }
+        }
+    }
+    let chosen: &[u8] = if !msgtext.is_null() {
+        // SAFETY: msgtext came from one of the message tables, both of
+        // which contain `'static` NUL-terminated byte strings.
+        unsafe {
+            let mut len: usize = 0;
+            while *msgtext.add(len) != 0 {
+                len += 1;
+            }
+            std::slice::from_raw_parts(msgtext, len + 1)
+        }
+    } else {
+        // Fallback for unknown codes — matches libjpeg's "Bogus
+        // message code N" placeholder, just without the printf format
+        // expansion (we don't ship the standard table).
+        b"libjpeg-turbo-rs: bogus message code\0"
+    };
+    // Cap at JMSG_LENGTH_MAX (200) to honor the libjpeg buffer size
+    // contract documented on `format_message`.
+    let copy_len: usize = chosen.len().min(JMSG_LENGTH_MAX);
     unsafe {
-        std::ptr::copy_nonoverlapping(msg.as_ptr(), buffer, msg.len());
+        std::ptr::copy_nonoverlapping(chosen.as_ptr(), buffer, copy_len);
+        if copy_len == JMSG_LENGTH_MAX && chosen[copy_len - 1] != 0 {
+            // Caller's buffer is exactly JMSG_LENGTH_MAX bytes; ensure
+            // the last byte is NUL so callers reading as a C string
+            // don't run past the end.
+            *buffer.add(copy_len - 1) = 0;
+        }
     }
 }
 
@@ -4376,16 +4480,20 @@ fn run_coefficient_writer_and_flush(
         )
         .unwrap_or_default();
         adjusted.restart_interval = 0;
-        // Surface the drop to C callers via the standard libjpeg
-        // warning channel: invoke the installed `emit_message` hook
-        // with msg_level=-1 (libjpeg's WARNMS convention). The hook
-        // owns `num_warnings` accounting per the contract documented
-        // in jerror.c — pre-incrementing here would either suppress
-        // the "first warning" print path or double-count under a
-        // well-behaved custom hook.
+        // Surface the drop to C callers via the libjpeg WARNMS
+        // contract: set `cinfo->err->msg_code` (so `format_message`
+        // can produce a string), make sure our addon message table is
+        // installed (so the lookup succeeds), then call the installed
+        // `emit_message` hook with msg_level=-1. The hook owns
+        // `num_warnings` accounting per the jerror.c contract —
+        // pre-incrementing here would either suppress the "first
+        // warning" print path or double-count under a well-behaved
+        // custom hook.
         if !c.err.is_null() {
             unsafe {
-                let err: &JpegErrorMgr = &*c.err;
+                let err: &mut JpegErrorMgr = &mut *c.err;
+                let _owns_table: bool = ensure_rs_addon_table_installed(err);
+                err.msg_code = RS_JWRN_PROG_ARITH_RESTART_DROPPED;
                 if let Some(f) = err.emit_message {
                     let cinfo_ptr: *mut c_void = c as *mut JpegCompressPublic as *mut c_void;
                     f(cinfo_ptr, -1);
