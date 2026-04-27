@@ -10,8 +10,8 @@ pub use api::coefficient::{
     copy_critical_parameters, read_coefficients, transform_jpeg as transform,
     transform_jpeg_with_options, write_coefficients, write_coefficients_arithmetic,
     write_coefficients_optimized, write_coefficients_progressive,
-    write_coefficients_progressive_arithmetic, EncoderComponentInfo, EncoderConfig,
-    JpegCoefficients,
+    write_coefficients_progressive_arithmetic, ComponentCoefficients, EncoderComponentInfo,
+    EncoderConfig, JpegCoefficients,
 };
 pub use api::encoder::{Encoder, HuffmanTableDef};
 
