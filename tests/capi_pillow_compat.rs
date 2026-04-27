@@ -57,16 +57,20 @@ fn pillow_links_against_rust_shim_and_roundtrips_jpeg() {
             );
         }
         Some(3) => {
-            // Known blocker: our shim does not export the classic libjpeg API
-            // (`jpeg_CreateCompress`, `jpeg_read_header`, ...). See
-            // `COORDINATOR_NOTES.md` → `## FFI_B9_2_PILLOW` for the full
-            // symbol-surface analysis. Treat as SKIP here so the test suite
-            // stays green while the coordinator triages the follow-up crate.
-            eprintln!(
-                "SKIP: Pillow cannot load the Rust shim because the classic \
-                 libjpeg API surface (jpeg_CreateCompress / jpeg_read_header / \
-                 ...) is not yet exported by libjpeg-turbo-rs-capi. See \
-                 COORDINATOR_NOTES.md → FFI_B9_2_PILLOW for details."
+            // BLOCKER. Pillow loaded the shim but its decode/encode
+            // round-trip surfaced a real C-API bug (missing classic
+            // symbol, wrong colorspace mapping, broken source/dest
+            // bridge, etc.). LAST_MILE.md → P0-3 explicitly requires
+            // this to be a hard failure once the loader-half closes
+            // and Pillow can call into the shim — silent SKIPs hide
+            // exactly the kind of round-trip regression we need to
+            // catch. The original SKIP existed back when Pillow
+            // couldn't even dlopen us; that's no longer the case.
+            panic!(
+                "pillow_smoke/run.sh reported BLOCKER (exit 3): Pillow loaded \
+                 the shim but decode / encode / round-trip failed. This is a \
+                 real C-API correctness bug — fix the shim, not the test. See \
+                 docs/LAST_MILE.md → P0-3 for triage."
             );
         }
         Some(code) => {

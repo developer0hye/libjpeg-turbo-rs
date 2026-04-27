@@ -1415,11 +1415,31 @@ pub extern "C" fn jpeg_read_header(cinfo: *mut c_void, _require_image: CBoolean)
 /// Map a `J_COLOR_SPACE` int to the `PixelFormat` the Rust decoder
 /// should emit. Returns `None` for spaces we don't currently surface.
 fn jcs_to_pixel_format(cs: c_int) -> Option<PixelFormat> {
+    // J_COLOR_SPACE values per libjpeg-turbo's `jmorecfg.h`:
+    // `JCS_EXT_RGB = 6` … `JCS_EXT_ARGB = 15`. Pillow's `_imaging.so`
+    // sets `out_color_space = JCS_EXT_RGBX` (= 7) on decode so the
+    // decoder writes 4-byte-stride RGB+padding straight into PIL's
+    // RGBA-shaped frame buffer. Without these arms we'd map
+    // `JCS_EXT_RGBX` to the fallback `PixelFormat::Rgb` (3
+    // bytes/pixel) and copy 3-byte rows into PIL's 4-byte rows,
+    // shifting every pixel by one channel and producing severely
+    // distorted round-trip output.
     match cs {
         JCS_GRAYSCALE => Some(PixelFormat::Grayscale),
         JCS_RGB => Some(PixelFormat::Rgb),
         JCS_YCBCR => Some(PixelFormat::Rgb), // decoder converts YCbCr->RGB
         JCS_CMYK => Some(PixelFormat::Cmyk),
+        // Extended color spaces (libjpeg-turbo only).
+        6 /* JCS_EXT_RGB */ => Some(PixelFormat::Rgb),
+        7 /* JCS_EXT_RGBX */ => Some(PixelFormat::Rgbx),
+        8 /* JCS_EXT_BGR */ => Some(PixelFormat::Bgr),
+        9 /* JCS_EXT_BGRX */ => Some(PixelFormat::Bgrx),
+        10 /* JCS_EXT_XBGR */ => Some(PixelFormat::Xbgr),
+        11 /* JCS_EXT_XRGB */ => Some(PixelFormat::Xrgb),
+        12 /* JCS_EXT_RGBA */ => Some(PixelFormat::Rgba),
+        13 /* JCS_EXT_BGRA */ => Some(PixelFormat::Bgra),
+        14 /* JCS_EXT_ABGR */ => Some(PixelFormat::Bgra),
+        15 /* JCS_EXT_ARGB */ => Some(PixelFormat::Rgba),
         _ => None,
     }
 }
@@ -1728,12 +1748,14 @@ pub extern "C" fn jpeg_calc_output_dimensions(cinfo: *mut c_void) {
     // out_color_components count per the J_COLOR_SPACE selected. Mirror
     // the rgb_pixelsize table used by jdmaster.c:341-365 so extended
     // color spaces (JCS_EXT_*) land on the correct channel count.
+    // JCS_EXT_RGB=6, JCS_EXT_RGBX=7, … JCS_EXT_ARGB=15 per
+    // libjpeg-turbo's `jmorecfg.h` enum order.
     c.out_color_components = match c.out_color_space {
         JCS_GRAYSCALE => 1,
         JCS_RGB | JCS_YCBCR => 3,
         JCS_CMYK | JCS_YCCK => 4,
-        13 | 15 => 3,                               // JCS_EXT_RGB / JCS_EXT_BGR
-        14 | 16 | 17 | 18 | 19 | 20 | 21 | 22 => 4, // JCS_EXT_*X / X* / *A / A*
+        6 | 8 => 3,                               // JCS_EXT_RGB / JCS_EXT_BGR
+        7 | 9 | 10 | 11 | 12 | 13 | 14 | 15 => 4, // *X / X* / *A / A*
         _ => c.num_components,
     };
     c.output_components = if c.quantize_colors != 0 {
@@ -3326,33 +3348,42 @@ unsafe fn priv_compress_from_ptr<'a>(priv_ptr: *mut c_void) -> Option<&'a mut Co
 
 #[allow(dead_code)] // used in C2-2 (start_compress / write_scanlines)
 fn jcs_to_pixel_format_for_input(cs: c_int) -> Option<PixelFormat> {
+    // J_COLOR_SPACE values from libjpeg-turbo's `jmorecfg.h`. The
+    // extended (`JCS_EXT_*`) family starts at 6 — Pillow's
+    // `_imaging.so` resolves these names by enum, so honouring 6..15
+    // is required for any classic-API caller built against
+    // libjpeg-turbo. (An older mapping pinned them to 13..22 which
+    // broke RGB encode for Pillow — see commit log.)
     match cs {
         JCS_GRAYSCALE => Some(PixelFormat::Grayscale),
         JCS_RGB => Some(PixelFormat::Rgb),
         JCS_YCBCR => Some(PixelFormat::Rgb), // treated as RGB during encode
         JCS_CMYK => Some(PixelFormat::Cmyk),
         // Extended color spaces (libjpeg-turbo only).
-        13 /* JCS_EXT_RGB */ => Some(PixelFormat::Rgb),
-        14 /* JCS_EXT_RGBX */ => Some(PixelFormat::Rgbx),
-        15 /* JCS_EXT_BGR */ => Some(PixelFormat::Bgr),
-        16 /* JCS_EXT_BGRX */ => Some(PixelFormat::Bgrx),
-        17 /* JCS_EXT_XBGR */ => Some(PixelFormat::Xbgr),
-        18 /* JCS_EXT_XRGB */ => Some(PixelFormat::Xrgb),
-        19 /* JCS_EXT_RGBA */ => Some(PixelFormat::Rgba),
-        20 /* JCS_EXT_BGRA */ => Some(PixelFormat::Bgra),
-        21 /* JCS_EXT_ABGR */ => Some(PixelFormat::Bgra), // no direct ABGR match
-        22 /* JCS_EXT_ARGB */ => Some(PixelFormat::Rgba), // no direct ARGB match
+        6 /* JCS_EXT_RGB */ => Some(PixelFormat::Rgb),
+        7 /* JCS_EXT_RGBX */ => Some(PixelFormat::Rgbx),
+        8 /* JCS_EXT_BGR */ => Some(PixelFormat::Bgr),
+        9 /* JCS_EXT_BGRX */ => Some(PixelFormat::Bgrx),
+        10 /* JCS_EXT_XBGR */ => Some(PixelFormat::Xbgr),
+        11 /* JCS_EXT_XRGB */ => Some(PixelFormat::Xrgb),
+        12 /* JCS_EXT_RGBA */ => Some(PixelFormat::Rgba),
+        13 /* JCS_EXT_BGRA */ => Some(PixelFormat::Bgra),
+        14 /* JCS_EXT_ABGR */ => Some(PixelFormat::Bgra), // no direct ABGR match
+        15 /* JCS_EXT_ARGB */ => Some(PixelFormat::Rgba), // no direct ARGB match
         _ => None,
     }
 }
 
 fn default_num_components_for(cs: c_int) -> c_int {
+    // Mirrors `jcs_to_pixel_format_for_input`; when the JCS_EXT
+    // numbering moved to its canonical 6..15 range, this table moved
+    // too.
     match cs {
         JCS_GRAYSCALE => 1,
         JCS_RGB | JCS_YCBCR => 3,
         JCS_CMYK | JCS_YCCK => 4,
-        13 | 15 => 3,                               // JCS_EXT_RGB / JCS_EXT_BGR
-        14 | 16 | 17 | 18 | 19 | 20 | 21 | 22 => 4, // _RGBX/BGRX/XBGR/XRGB/RGBA/BGRA/ABGR/ARGB
+        6 | 8 => 3,                               // JCS_EXT_RGB / JCS_EXT_BGR
+        7 | 9 | 10 | 11 | 12 | 13 | 14 | 15 => 4, // _RGBX/BGRX/XBGR/XRGB/RGBA/BGRA/ABGR/ARGB
         _ => 3,
     }
 }
@@ -3743,14 +3774,16 @@ pub extern "C" fn jpeg_default_colorspace(cinfo: *mut c_void) {
         Some(c) => c,
         None => return,
     };
+    // JCS_EXT_* values follow libjpeg-turbo `jmorecfg.h` enum order
+    // (`JCS_EXT_RGB = 6` … `JCS_EXT_ARGB = 15`). All RGB-family
+    // packed inputs map to a YCbCr-encoded JPEG datastream.
     let jcs: c_int = match c.in_color_space {
         JCS_GRAYSCALE => JCS_GRAYSCALE,
         JCS_RGB => JCS_YCBCR,
         JCS_YCBCR => JCS_YCBCR,
         JCS_CMYK => JCS_CMYK,
         JCS_YCCK => JCS_YCCK,
-        13 | 15 => JCS_YCBCR, // JCS_EXT_RGB / _BGR — YCbCr output
-        14 | 16 | 17 | 18 | 19 | 20 | 21 | 22 => JCS_YCBCR,
+        6 | 7 | 8 | 9 | 10 | 11 | 12 | 13 | 14 | 15 => JCS_YCBCR,
         _ => JCS_UNKNOWN,
     };
     jpeg_set_colorspace(cinfo, jcs);
