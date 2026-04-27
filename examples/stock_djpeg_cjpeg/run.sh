@@ -45,6 +45,14 @@ else
     echo "       run \`cargo build -p libjpeg-turbo-rs-capi --release\` first" >&2
     exit 5
 fi
+# Absolutize SHIM_LIB_PATH before we use it as a symlink target. A
+# relative `SHIM_DIR=target/release` would record a target that is
+# resolved relative to the symlink's own directory ($WORK/loader),
+# not to the caller's CWD — so the loader would dereference it to a
+# nonexistent path. Use `cd "$(dirname …)" && pwd` instead of
+# `realpath`/`readlink -f` because both are unavailable on stock
+# macOS.
+SHIM_LIB_PATH="$(cd "$(dirname "$SHIM_LIB_PATH")" && pwd)/$(basename "$SHIM_LIB_PATH")"
 
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
