@@ -115,16 +115,43 @@ Pillow's `_imagingjpeg` and ImageMagick's `coders/jpeg.c` use symbols beyond wha
 - **Effort**: ~8–12 h, partitioned across the two halves; mostly thin shims over our existing `Decoder` / `Encoder` trait surfaces.
 - **Validation**: Pillow `_imagingjpeg` smoke (`examples/pillow_smoke/`) currently `#[ignore]`d in `tests/capi_pillow_compat.rs` — un-ignore and pass.
 
-### 2.4 Items previously listed here that are NOT gaps
+### 2.4 P1 — `tj3CompressN` does not honor `TJPARAM_PRECISION` for arbitrary-precision lossless
 
-The following were initially flagged but verified already present on `main`. Listed for the audit trail so they don't get re-opened:
+#### G6. Arbitrary-precision lossless dispatch from `tj3Compress8` / `tj3Compress12` / `tj3Compress16`
+
+- **Symptom**: caller does `tj3Set(handle, TJPARAM_LOSSLESS, 1)` + `tj3Set(handle, TJPARAM_PRECISION, 4)` + `tj3Compress8(...)`. Upstream produces a 4-bit lossless JPEG. Our shim ignores `TJPARAM_PRECISION` in the `tj3Compress8` entry point and emits an 8-bit stream.
+- **Upstream contract** (`references/libjpeg-turbo/src/turbojpeg-mp.c:108-113`):
+  ```c
+  cinfo->data_precision = BITS_IN_JSAMPLE;
+  #if BITS_IN_JSAMPLE == 8
+    if (this->lossless && this->precision >= 2 && this->precision <= 8)
+  #else
+    if (this->lossless && this->precision >= BITS_IN_JSAMPLE - 3 &&
+        this->precision <= BITS_IN_JSAMPLE)
+  #endif
+      cinfo->data_precision = this->precision;
+  ```
+  So `tj3Compress8` honors precision 2..8, `tj3Compress12` honors 9..12, `tj3Compress16` honors 13..16 — when `lossless` is also set.
+- **What we already have**: `compress_lossless_arbitrary` at `src/api/precision.rs:1392`, re-exported at `src/lib.rs:78`. The capability is shipped on the Rust public side; only the C ABI dispatch is missing.
+- **What's missing**: in `crates/libjpeg-turbo-rs-capi/src/compress.rs::tj3Compress8` (and the matching `tj3Compress12` / `tj3Compress16` entry points), read `inst.lossless` + `inst.precision` and route to `compress_lossless_arbitrary` (or the precision-typed equivalent) when the upstream conditional triggers. Stay on the regular `compress` path otherwise.
+- **Effort**: ~3–4 h. Mostly plumbing — the lib API exists; we just need to fan out the dispatch and add three round-trip dlopen tests (one per `BITS_IN_JSAMPLE` family) hitting an unusual precision (e.g. precision=4, 10, 14).
+- **Validation**:
+  ```bash
+  # Cross-check a 4-bit lossless stream byte-for-byte vs upstream cjpeg
+  upstream-cjpeg -lossless 1 -precision 4 -greyscale sample.pgm > /tmp/upstream.jpg
+  # ours via tj3Compress8 + TJPARAM_LOSSLESS=1 + TJPARAM_PRECISION=4
+  cmp /tmp/our.jpg /tmp/upstream.jpg
+  ```
+
+### 2.5 Items previously listed here that are NOT gaps
+
+The following were initially flagged in this doc but verified already present on `main`. Kept for the audit trail so they don't get re-opened:
 
 - **`Encoder::icc_profile`** — already public at `src/api/encoder.rs:208`. The 🔶 in `docs/C_API_REFERENCE.md` row for `jpeg_write_icc_profile` refers to the *legacy `j_compress_ptr` shape* not being a public Rust idiom; the equivalent capability is shipped.
 - **`Encoder::density(unit, x, y)`** — already public at `src/api/encoder.rs:317`. The 🔶 in `docs/FEATURE_PARITY.md` (DPI/density row) was about JFIF density write semantics, which the encoder already covers.
-- **`TJPARAM_SAVEMARKERS` through `TjHandle`** — wired end-to-end at `src/api/tj3.rs:269` (set), `:303` (get), `:645-648` (decode behavior dispatch). The 🔶 on this row in `docs/FEATURE_PARITY.md` reflects the historical name; the value is now honored.
-- **`TJPARAM_PRECISION` encode dispatch** — upstream `tj3.h` documents this param as read-only; encode precision is selected by which `tj3CompressN` entry point the caller invokes (`tj3Compress8` / `tj3Compress12` / `tj3Compress16`). Our shim mirrors that contract. The 🔶 marker is strictly about the TJ3 ↔ Rust public-API surface mismatch (`compress_8bit()` vs `compress_12bit()` separate functions), not a missing capability.
+- **`TJPARAM_SAVEMARKERS` through `TjHandle`** — wired end-to-end at `src/api/tj3.rs:269` (set), `:303` (get), `:645-648` (decode behavior dispatch).
 
-The 🔶 markers in `docs/FEATURE_PARITY.md` / `docs/C_API_REFERENCE.md` for these rows could be promoted to ✅ in a separate doc-only commit; they are not last-mile blockers.
+The 🔶 markers for these rows could be promoted to ✅ in a separate doc-only commit; they are not last-mile blockers.
 
 ---
 
@@ -150,6 +177,7 @@ When closing each gap, confirm against this matrix:
 | stock `jpegtran -rotate/-flip/-transpose/-crop` | ❌ link error | ✅ byte-exact | new test in `examples/stock_djpeg_cjpeg/` |
 | stock `jpegtran -copy all/comments/icc/none` | ❌ link error | ✅ markers preserved | exiftool diff |
 | `jpegtran -arithmetic -progressive -restart N` | ⚠ restart dropped, warning surfaced | ✅ byte-exact | new arith-progressive-restart test |
+| `tj3Compress8` w/ `TJPARAM_LOSSLESS=1` + `TJPARAM_PRECISION=4` | ❌ emits 8-bit | ✅ emits 4-bit lossless | new dlopen test in `tests/capi_*` |
 | Pillow `_imagingjpeg` import + decode | partial | ✅ green | `tests/capi_pillow_compat.rs` (un-ignore) |
 | ImageMagick `coders/jpeg.c` import + decode | partial | ✅ green | `tests/capi_imagemagick_compat.rs` (un-ignore) |
 | `tjunittest` | ✅ 1012/1012 | unchanged | `tests/tjunittest_link.rs` |
@@ -163,13 +191,14 @@ Ordered by ratio of impact / effort. Each step ends with a green commit + codex 
 
 1. **G2 — progressive arithmetic + restart** (3–5 h): unblocks one full upstream feature, removes the warning suppression scaffold, mostly mechanical.
 2. **G3 — `tjLoadImage` / `tjSaveImage` legacy shim** (2–3 h): closes a stub that legacy wrappers actually call.
-3. **G5 — classic decode-side `jpeg_consume_input` family + `jpeg_abort_*` + raw-data API** (8–12 h): unlocks Pillow / ImageMagick smoke-test green.
-4. **G1 — `jpegtran` transform path** (14–22 h): the single biggest remaining gap. Memory manager + transupp + handle-recognition + tests.
-5. **G4 — PNG support** (6–8 h, gated behind a feature): truly optional given upstream parity stance.
+3. **G6 — `tj3CompressN` arbitrary-precision lossless dispatch** (3–4 h): wire `TJPARAM_PRECISION` + `TJPARAM_LOSSLESS` through the C ABI compress entry points — Rust capability already exists.
+4. **G5 — classic decode-side `jpeg_consume_input` family + `jpeg_abort_*` + raw-data API** (8–12 h): unlocks Pillow / ImageMagick smoke-test green.
+5. **G1 — `jpegtran` transform path** (14–22 h): the single biggest remaining gap. Memory manager + transupp + handle-recognition + tests.
+6. **G4 — PNG support** (6–8 h, gated behind a feature): truly optional given upstream parity stance.
 
-**Total last-mile budget**: ~33–50 hours of focused work. The first three steps (~13–20 h) make our cdylib a drop-in for everything except `jpegtran` transform options.
+**Total last-mile budget**: ~36–54 hours of focused work. The first three steps (~8–12 h) close the small/medium plumbing gaps; the heavy lift is G1.
 
-A separate small doc-only commit can promote the 🔶 markers covered in §2.4 to ✅ in `docs/FEATURE_PARITY.md` / `docs/C_API_REFERENCE.md` (no code change needed).
+A separate small doc-only commit can promote the truly-already-shipped 🔶 markers covered in §2.5 to ✅ in `docs/FEATURE_PARITY.md` / `docs/C_API_REFERENCE.md` (no code change needed).
 
 ---
 
