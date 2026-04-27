@@ -626,8 +626,40 @@ unsafe extern "C" fn default_error_exit(cinfo: *mut c_void) {
     std::process::abort();
 }
 
-unsafe extern "C" fn default_emit_message(_cinfo: *mut c_void, _msg_level: c_int) {
-    // No-op by default; real libjpeg prints warnings above trace_level.
+unsafe extern "C" fn default_emit_message(cinfo: *mut c_void, msg_level: c_int) {
+    // Mirror libjpeg's `emit_message` contract from jerror.c so callers
+    // that follow the documented protocol (counting warnings via
+    // `num_warnings`, gating "first warning" printing on
+    // `num_warnings == 0`) interoperate correctly:
+    //   * msg_level < 0 → warning. Bump `num_warnings`; route to
+    //     `output_message` only when this is the first warning OR
+    //     trace_level >= 3.
+    //   * msg_level >= 0 → trace. Route to `output_message` only when
+    //     `msg_level <= trace_level`.
+    if cinfo.is_null() {
+        return;
+    }
+    unsafe {
+        let err_pp: *const *mut JpegErrorMgr = cinfo as *const *mut JpegErrorMgr;
+        let err_ptr: *mut JpegErrorMgr = err_pp.read();
+        if err_ptr.is_null() {
+            return;
+        }
+        let err: &mut JpegErrorMgr = &mut *err_ptr;
+        if msg_level < 0 {
+            let first: bool = err.num_warnings == 0;
+            err.num_warnings = err.num_warnings.saturating_add(1);
+            if first || err.trace_level >= 3 {
+                if let Some(out) = err.output_message {
+                    out(cinfo);
+                }
+            }
+        } else if msg_level <= err.trace_level {
+            if let Some(out) = err.output_message {
+                out(cinfo);
+            }
+        }
+    }
 }
 
 unsafe extern "C" fn default_output_message(_cinfo: *mut c_void) {
@@ -4342,16 +4374,15 @@ fn run_coefficient_writer_and_flush(
         .unwrap_or_default();
         adjusted.restart_interval = 0;
         // Surface the drop to C callers via the standard libjpeg
-        // warning channel: bump `cinfo->err->num_warnings` and invoke
-        // the installed `emit_message` hook with msg_level=-1 (libjpeg
-        // convention for "warning emitted at trace level"). Callers
-        // checking `num_warnings` or hooking `emit_message` will see
-        // the event without having to fish through Rust-private
-        // `last_error` state.
+        // warning channel: invoke the installed `emit_message` hook
+        // with msg_level=-1 (libjpeg's WARNMS convention). The hook
+        // owns `num_warnings` accounting per the contract documented
+        // in jerror.c — pre-incrementing here would either suppress
+        // the "first warning" print path or double-count under a
+        // well-behaved custom hook.
         if !c.err.is_null() {
             unsafe {
-                let err: &mut JpegErrorMgr = &mut *c.err;
-                err.num_warnings = err.num_warnings.saturating_add(1);
+                let err: &JpegErrorMgr = &*c.err;
                 if let Some(f) = err.emit_message {
                     let cinfo_ptr: *mut c_void = c as *mut JpegCompressPublic as *mut c_void;
                     f(cinfo_ptr, -1);

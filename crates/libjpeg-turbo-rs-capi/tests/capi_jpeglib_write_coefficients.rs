@@ -1239,9 +1239,24 @@ fn write_coefficients_progressive_arithmetic_drops_restart_explicitly() {
 static EMIT_COUNT: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(0);
 static LAST_LEVEL: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(i32::MIN);
 
-unsafe extern "C" fn capture_emit_message(_cinfo: *mut c_void, msg_level: c_int) {
+unsafe extern "C" fn capture_emit_message(cinfo: *mut c_void, msg_level: c_int) {
     EMIT_COUNT.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
     LAST_LEVEL.store(msg_level, std::sync::atomic::Ordering::SeqCst);
+    // Mirror libjpeg's documented `emit_message` contract from jerror.c:
+    // when msg_level < 0, the hook owns the `num_warnings` increment.
+    // A real wrapper (jpegtran, GraphicsMagick, …) would do this; the
+    // shim relies on the hook to count, rather than pre-incrementing.
+    if msg_level < 0 && !cinfo.is_null() {
+        // err is the first pointer-sized field in the cinfo struct.
+        let err_pp: *const *mut u8 = cinfo as *const *mut u8;
+        let err_ptr: *mut u8 = err_pp.read();
+        if !err_ptr.is_null() {
+            // num_warnings sits at byte offset 128 (5 callbacks × 8 +
+            // msg_code 4 + msg_parm 80 + trace_level 4).
+            let nw_ptr: *mut std::os::raw::c_long = err_ptr.add(128) as *mut _;
+            nw_ptr.write(nw_ptr.read().saturating_add(1));
+        }
+    }
 }
 
 #[test]
@@ -1393,5 +1408,127 @@ fn write_coefficients_progressive_arithmetic_drop_emits_warning() {
     assert_eq!(
         last_level, -1,
         "warning emit must use msg_level=-1 (libjpeg trace convention), got {last_level}"
+    );
+}
+
+#[test]
+fn write_coefficients_progressive_arithmetic_drop_default_hook_counts_warning() {
+    // Mirrors the previous test, but does NOT install a custom
+    // emit_message hook — exercising the default hook path. A wrapper
+    // that simply polls `cinfo->err->num_warnings` (the documented
+    // libjpeg way to detect whether warnings were emitted during
+    // compression) must see a non-zero count, because the shim's
+    // `default_emit_message` follows the jerror.c contract and bumps
+    // the counter on msg_level=-1.
+    let lib = unsafe { libloading::Library::new(cdylib_path()) }.expect("dlopen");
+    let (jpeg_in, _src, _w, _h_px) = build_fixture_jpeg(&lib);
+
+    let num_warnings: std::os::raw::c_long = unsafe {
+        const CINFO_BYTES: usize = 4096;
+        let mut dec_cinfo: MaybeUninit<[u8; CINFO_BYTES]> = MaybeUninit::zeroed();
+        let dec_cinfo_ptr: *mut c_void = dec_cinfo.as_mut_ptr() as *mut c_void;
+        const ERR_BYTES: usize = 512;
+        let mut dec_err: MaybeUninit<[u8; ERR_BYTES]> = MaybeUninit::zeroed();
+        let dec_err_ptr: *mut c_void = dec_err.as_mut_ptr() as *mut c_void;
+        let jpeg_std_error: libloading::Symbol<unsafe extern "C" fn(*mut c_void) -> *mut c_void> =
+            lib.get(b"jpeg_std_error").expect("jpeg_std_error");
+        let _ = jpeg_std_error(dec_err_ptr);
+        (dec_cinfo_ptr as *mut *mut c_void).write(dec_err_ptr);
+        let jpeg_create_decompress: libloading::Symbol<
+            unsafe extern "C" fn(*mut c_void, c_int, usize),
+        > = lib
+            .get(b"jpeg_CreateDecompress")
+            .expect("jpeg_CreateDecompress");
+        jpeg_create_decompress(dec_cinfo_ptr, 80, CINFO_BYTES);
+        let jpeg_mem_src: libloading::Symbol<
+            unsafe extern "C" fn(*mut c_void, *const u8, c_ulong),
+        > = lib.get(b"jpeg_mem_src").expect("jpeg_mem_src");
+        jpeg_mem_src(dec_cinfo_ptr, jpeg_in.as_ptr(), jpeg_in.len() as c_ulong);
+        let jpeg_read_header: libloading::Symbol<
+            unsafe extern "C" fn(*mut c_void, c_int) -> c_int,
+        > = lib.get(b"jpeg_read_header").expect("jpeg_read_header");
+        assert_eq!(jpeg_read_header(dec_cinfo_ptr, 1), JPEG_HEADER_OK);
+        let jpeg_read_coefficients: libloading::Symbol<
+            unsafe extern "C" fn(*mut c_void) -> *mut c_void,
+        > = lib
+            .get(b"jpeg_read_coefficients")
+            .expect("jpeg_read_coefficients");
+        let coef_arrays: *mut c_void = jpeg_read_coefficients(dec_cinfo_ptr);
+        assert!(!coef_arrays.is_null());
+
+        let mut enc_cinfo: MaybeUninit<[u8; CINFO_BYTES]> = MaybeUninit::zeroed();
+        let enc_cinfo_ptr: *mut c_void = enc_cinfo.as_mut_ptr() as *mut c_void;
+        let mut enc_err: MaybeUninit<[u8; ERR_BYTES]> = MaybeUninit::zeroed();
+        let enc_err_ptr: *mut c_void = enc_err.as_mut_ptr() as *mut c_void;
+        let _ = jpeg_std_error(enc_err_ptr);
+        // Intentionally NO emit_message override here — testing default path.
+        (enc_cinfo_ptr as *mut *mut c_void).write(enc_err_ptr);
+        let jpeg_create_compress: libloading::Symbol<
+            unsafe extern "C" fn(*mut c_void, c_int, usize),
+        > = lib
+            .get(b"jpeg_CreateCompress")
+            .expect("jpeg_CreateCompress");
+        jpeg_create_compress(enc_cinfo_ptr, 80, CINFO_BYTES);
+
+        let mut out_buf: *mut u8 = std::ptr::null_mut();
+        let mut out_size: c_ulong = 0;
+        let jpeg_mem_dest: libloading::Symbol<
+            unsafe extern "C" fn(*mut c_void, *mut *mut u8, *mut c_ulong),
+        > = lib.get(b"jpeg_mem_dest").expect("jpeg_mem_dest");
+        jpeg_mem_dest(enc_cinfo_ptr, &mut out_buf, &mut out_size);
+
+        let jpeg_write_coefficients: libloading::Symbol<
+            unsafe extern "C" fn(*mut c_void, *mut c_void),
+        > = lib
+            .get(b"jpeg_write_coefficients")
+            .expect("jpeg_write_coefficients");
+        jpeg_write_coefficients(enc_cinfo_ptr, coef_arrays);
+
+        let jpeg_capi_test_set_arith_code: libloading::Symbol<
+            unsafe extern "C" fn(*mut c_void, c_int),
+        > = lib
+            .get(b"jpeg_capi_test_set_arith_code")
+            .expect("jpeg_capi_test_set_arith_code");
+        jpeg_capi_test_set_arith_code(enc_cinfo_ptr, 1);
+        let jpeg_capi_test_set_progressive: libloading::Symbol<
+            unsafe extern "C" fn(*mut c_void, c_int),
+        > = lib
+            .get(b"jpeg_capi_test_set_progressive")
+            .expect("jpeg_capi_test_set_progressive");
+        jpeg_capi_test_set_progressive(enc_cinfo_ptr, 1);
+        let jpeg_capi_test_set_restart_in_rows: libloading::Symbol<
+            unsafe extern "C" fn(*mut c_void, c_int),
+        > = lib
+            .get(b"jpeg_capi_test_set_restart_in_rows")
+            .expect("jpeg_capi_test_set_restart_in_rows");
+        jpeg_capi_test_set_restart_in_rows(enc_cinfo_ptr, 2);
+
+        let jpeg_finish_compress: libloading::Symbol<unsafe extern "C" fn(*mut c_void)> = lib
+            .get(b"jpeg_finish_compress")
+            .expect("jpeg_finish_compress");
+        jpeg_finish_compress(enc_cinfo_ptr);
+
+        let nw_ptr: *const std::os::raw::c_long = (enc_err_ptr as *const u8).add(128) as *const _;
+        let nw: std::os::raw::c_long = nw_ptr.read();
+
+        if !out_buf.is_null() {
+            let tj3_free: libloading::Symbol<unsafe extern "C" fn(*mut c_void)> =
+                lib.get(b"tj3Free").expect("tj3Free");
+            tj3_free(out_buf as *mut c_void);
+        }
+        let jpeg_destroy_compress: libloading::Symbol<unsafe extern "C" fn(*mut c_void)> = lib
+            .get(b"jpeg_destroy_compress")
+            .expect("jpeg_destroy_compress");
+        jpeg_destroy_compress(enc_cinfo_ptr);
+        let jpeg_destroy_decompress: libloading::Symbol<unsafe extern "C" fn(*mut c_void)> = lib
+            .get(b"jpeg_destroy_decompress")
+            .expect("jpeg_destroy_decompress");
+        jpeg_destroy_decompress(dec_cinfo_ptr);
+        nw
+    };
+
+    assert!(
+        num_warnings >= 1,
+        "default emit_message must increment num_warnings on msg_level<0 (got {num_warnings})"
     );
 }
