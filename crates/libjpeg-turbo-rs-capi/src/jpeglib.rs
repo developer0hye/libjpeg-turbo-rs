@@ -1720,10 +1720,8 @@ pub extern "C" fn jpeg_calc_output_dimensions(cinfo: *mut c_void) {
     // scale_num/scale_denom fraction (most callers leave 1/1).
     let scale_num: u64 = c.scale_num.max(1) as u64;
     let scale_denom: u64 = c.scale_denom.max(1) as u64;
-    c.output_width =
-        (((c.image_width as u64 * scale_num) + scale_denom - 1) / scale_denom) as JDimension;
-    c.output_height =
-        (((c.image_height as u64 * scale_num) + scale_denom - 1) / scale_denom) as JDimension;
+    c.output_width = (c.image_width as u64 * scale_num).div_ceil(scale_denom) as JDimension;
+    c.output_height = (c.image_height as u64 * scale_num).div_ceil(scale_denom) as JDimension;
 
     // Compute max sampling factors and per-component downsampled sizes
     // from the comp_info array populated by jpeg_read_header. wrppm /
@@ -1753,12 +1751,12 @@ pub extern "C" fn jpeg_calc_output_dimensions(cinfo: *mut c_void) {
             // mismatches in the downstream put_pixel_rows.
             let denom_w: u64 = (max_h as u64) * 8;
             let denom_h: u64 = (max_v as u64) * 8;
-            comp.downsampled_width =
-                (((c.image_width as u64 * comp.h_samp_factor as u64) + denom_w - 1) / denom_w * 8)
-                    as JDimension;
-            comp.downsampled_height =
-                (((c.image_height as u64 * comp.v_samp_factor as u64) + denom_h - 1) / denom_h * 8)
-                    as JDimension;
+            comp.downsampled_width = ((c.image_width as u64 * comp.h_samp_factor as u64)
+                .div_ceil(denom_w)
+                * 8) as JDimension;
+            comp.downsampled_height = ((c.image_height as u64 * comp.v_samp_factor as u64)
+                .div_ceil(denom_h)
+                * 8) as JDimension;
         }
     }
 
@@ -2686,12 +2684,22 @@ pub extern "C" fn jpeg_consume_input(cinfo: *mut c_void) -> c_int {
     // tweaks (out_color_space, comp_info, quantize_colors, …). For our
     // fully-buffered shim, EOI is the truthful answer the moment a
     // header is in hand.
+    //
+    // We must also advance `global_state` to `DSTATE_SCANNING` here so
+    // that `jpeg_input_complete()` (which gates on
+    // `global_state >= DSTATE_SCANNING`) reports TRUE. Otherwise a
+    // caller polling `while (!jpeg_input_complete()) jpeg_consume_input()`
+    // — the buffered/progressive idiom — would loop forever even
+    // though we keep returning `JPEG_REACHED_EOI`.
     let priv_ptr: *mut c_void = decompress_private_raw(cinfo);
     let header_done: bool = match unsafe { priv_from_ptr(priv_ptr) } {
         Some(p) => p.header_parsed_ok,
         None => false,
     };
     if header_done {
+        if c.global_state < DSTATE_SCANNING {
+            c.global_state = DSTATE_SCANNING;
+        }
         return JPEG_REACHED_EOI;
     }
     match c.global_state {
@@ -3819,7 +3827,7 @@ pub extern "C" fn jpeg_default_colorspace(cinfo: *mut c_void) {
         JCS_YCBCR => JCS_YCBCR,
         JCS_CMYK => JCS_CMYK,
         JCS_YCCK => JCS_YCCK,
-        6 | 7 | 8 | 9 | 10 | 11 | 12 | 13 | 14 | 15 => JCS_YCBCR,
+        6..=15 => JCS_YCBCR,
         _ => JCS_UNKNOWN,
     };
     jpeg_set_colorspace(cinfo, jcs);
@@ -5162,7 +5170,7 @@ fn run_coefficient_writer_and_flush(
     //    images and downstream decoders rely on each independently
     //    (JFIF for density, APP14 for color transform classification).
     let encoded: Vec<u8> = if adjusted.components.len() == 4 {
-        let transform: u8 = adjusted.adobe_transform.unwrap_or_else(|| {
+        let transform: u8 = adjusted.adobe_transform.unwrap_or({
             if c.jpeg_color_space == JCS_YCCK {
                 2
             } else {

@@ -296,6 +296,84 @@ fn jpeg_lib_decode_roundtrip_matches_rust_native() {
     let _: c_char = 0;
 }
 
+/// Regression: the buffered/progressive idiom
+///   `while (!jpeg_input_complete(cinfo)) jpeg_consume_input(cinfo);`
+/// must terminate. Earlier we returned `JPEG_REACHED_EOI` from
+/// `jpeg_consume_input` once the header was parsed but left
+/// `global_state` at `DSTATE_INHEADER`, so `jpeg_input_complete`
+/// (which keys off `global_state >= DSTATE_SCANNING`) reported FALSE
+/// forever.
+#[test]
+fn jpeg_consume_input_loop_terminates_after_header_parsed() {
+    let path: PathBuf = cdylib_path();
+    let lib: libloading::Library =
+        unsafe { libloading::Library::new(&path) }.expect("dlopen cdylib");
+    let (jpeg, _src, _w, _h_px): (Vec<u8>, Vec<u8>, usize, usize) = build_fixture_jpeg(&lib);
+
+    unsafe {
+        const CINFO_BYTES: usize = 4096;
+        let mut cinfo: MaybeUninit<[u8; CINFO_BYTES]> = MaybeUninit::zeroed();
+        let cinfo_ptr: *mut c_void = cinfo.as_mut_ptr() as *mut c_void;
+
+        const ERR_BYTES: usize = 512;
+        let mut err: MaybeUninit<[u8; ERR_BYTES]> = MaybeUninit::zeroed();
+        let err_ptr: *mut c_void = err.as_mut_ptr() as *mut c_void;
+
+        let jpeg_std_error: libloading::Symbol<unsafe extern "C" fn(*mut c_void) -> *mut c_void> =
+            lib.get(b"jpeg_std_error").expect("jpeg_std_error");
+        jpeg_std_error(err_ptr);
+        (cinfo_ptr as *mut *mut c_void).write(err_ptr);
+
+        let jpeg_create_decompress: libloading::Symbol<
+            unsafe extern "C" fn(*mut c_void, c_int, usize),
+        > = lib
+            .get(b"jpeg_CreateDecompress")
+            .expect("jpeg_CreateDecompress");
+        jpeg_create_decompress(cinfo_ptr, 80, CINFO_BYTES);
+
+        let jpeg_mem_src: libloading::Symbol<
+            unsafe extern "C" fn(*mut c_void, *const u8, c_ulong),
+        > = lib.get(b"jpeg_mem_src").expect("jpeg_mem_src");
+        jpeg_mem_src(cinfo_ptr, jpeg.as_ptr(), jpeg.len() as c_ulong);
+
+        let jpeg_read_header: libloading::Symbol<
+            unsafe extern "C" fn(*mut c_void, c_int) -> c_int,
+        > = lib.get(b"jpeg_read_header").expect("jpeg_read_header");
+        assert_eq!(jpeg_read_header(cinfo_ptr, 1), JPEG_HEADER_OK);
+
+        let jpeg_input_complete: libloading::Symbol<unsafe extern "C" fn(*mut c_void) -> c_int> =
+            lib.get(b"jpeg_input_complete")
+                .expect("jpeg_input_complete");
+        let jpeg_consume_input: libloading::Symbol<unsafe extern "C" fn(*mut c_void) -> c_int> =
+            lib.get(b"jpeg_consume_input").expect("jpeg_consume_input");
+
+        // Drive the buffered/progressive polling loop. Cap iterations
+        // so a regression manifests as a deterministic test failure
+        // instead of a hang.
+        let mut iterations: u32 = 0;
+        while jpeg_input_complete(cinfo_ptr) == 0 {
+            let _ = jpeg_consume_input(cinfo_ptr);
+            iterations += 1;
+            assert!(
+                iterations < 16,
+                "jpeg_input_complete never reported TRUE after {iterations} \
+                 jpeg_consume_input calls — buffered/progressive loop would hang"
+            );
+        }
+
+        // Once the loop exits, a follow-up consume_input must keep
+        // reporting `JPEG_REACHED_EOI` (=2) since our shim buffers the
+        // entire datastream.
+        const JPEG_REACHED_EOI: c_int = 2;
+        assert_eq!(jpeg_consume_input(cinfo_ptr), JPEG_REACHED_EOI);
+
+        let jpeg_destroy_decompress: libloading::Symbol<unsafe extern "C" fn(*mut c_void)> = lib
+            .get(b"jpeg_destroy_decompress")
+            .expect("jpeg_destroy_decompress");
+        jpeg_destroy_decompress(cinfo_ptr);
+    }
+}
+
 #[test]
 fn jpeg_lib_decode_null_arguments_return_safely() {
     let path: PathBuf = cdylib_path();
