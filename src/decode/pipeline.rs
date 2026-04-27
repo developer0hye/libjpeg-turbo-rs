@@ -1940,7 +1940,13 @@ impl<'a> Decoder<'a> {
             // MCU/block boundary inside the scan (interleaved DC scans
             // count MCUs; non-interleaved AC scans count blocks per
             // the JPEG spec — non-interleaved MCU = 1 block).
-            let restart_interval: u32 = self.metadata.restart_interval as u32;
+            //
+            // The restart interval is read from the per-scan record
+            // because a DRI marker may appear before any individual
+            // SOS, changing the restart cadence between scans (matches
+            // the way the Huffman progressive decoder uses
+            // `scan_info.restart_interval` in `decode_progressive_scan`).
+            let restart_interval: u32 = scan_info.restart_interval as u32;
             let mut restarts_to_go: u32 = restart_interval;
 
             if scan_header.components.len() > 1 {
