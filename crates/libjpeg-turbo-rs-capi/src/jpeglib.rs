@@ -1129,6 +1129,118 @@ fn install_source_mgr(
         .unwrap_or(std::ptr::null_mut());
 }
 
+/// Drain a caller-installed source manager (`cinfo.src`) into a
+/// contiguous owned buffer.
+///
+/// Pillow's `_imaging.so` (and similarly libtiff's libjpeg consumer)
+/// installs its own `jpeg_source_mgr` directly without going through
+/// our `jpeg_mem_src`/`jpeg_stdio_src`. Without bridging that
+/// installation, our decoder sees `JpegSource::None` and can't make
+/// progress.
+///
+/// Protocol per `references/libjpeg-turbo/src/jdatasrc.c`:
+///   1. `init_source(cinfo)` if non-NULL — gives the caller a chance
+///      to pre-load `next_input_byte` / `bytes_in_buffer`.
+///   2. Drain the current public buffer (PIL's `jpeg_buffer_src` already
+///      pre-loads it before our `jpeg_read_header` runs, so this step
+///      typically captures the whole image).
+///   3. If we haven't seen `FF D9` (EOI), call `fill_input_buffer` and
+///      drain again — repeat until EOI or `fill_input_buffer` returns
+///      FALSE (suspension) or the safety cap (256 MiB) is reached.
+///
+/// Returns `None` when no source manager is present, when `init_source`
+/// is missing AND `bytes_in_buffer` is 0, or when the safety cap is
+/// hit. Callers should fall through to the existing
+/// `JpegSource::None` "no JPEG source attached" error path in that
+/// case.
+///
+/// # Safety
+/// `c` must be a live `JpegDecompressPublic` that the caller continues
+/// to own across this call. `c.src` (if non-NULL) must point to a
+/// `jpeg_source_mgr` that follows the libjpeg ABI, including ABI-
+/// compatible callback pointers.
+unsafe fn drain_caller_source_mgr(c: &mut JpegDecompressPublic) -> Option<Vec<u8>> {
+    let src_ptr: *mut JpegSourceMgr = c.src;
+    if src_ptr.is_null() {
+        return None;
+    }
+    let cinfo_ptr: *mut c_void = c as *mut JpegDecompressPublic as *mut c_void;
+    // SAFETY: caller asserts `c.src` points at a live JpegSourceMgr.
+    let src: &mut JpegSourceMgr = unsafe { &mut *src_ptr };
+
+    // Step 1: init_source. PIL's `jpeg_buffer_src.init_source` resets
+    // its internal "skip_next" counter and is otherwise a no-op for
+    // our purposes; calling it is harmless and keeps the C contract.
+    if let Some(init) = src.init_source {
+        // SAFETY: caller-provided callback honoring the libjpeg
+        // `void (*init_source)(j_decompress_ptr)` prototype.
+        unsafe {
+            init(cinfo_ptr);
+        }
+    }
+
+    let mut accumulator: Vec<u8> = Vec::new();
+    // Cap accumulation at 256 MiB. A misbehaving callback that keeps
+    // returning TRUE without setting `bytes_in_buffer = 0` would
+    // otherwise loop forever; the cap forces a clean abort instead.
+    const MAX_BYTES: usize = 256 * 1024 * 1024;
+
+    loop {
+        // Step 2a: drain whatever is currently in the public buffer.
+        if src.bytes_in_buffer > 0 && !src.next_input_byte.is_null() {
+            // SAFETY: caller's ABI promises `next_input_byte` is valid
+            // for `bytes_in_buffer` reads.
+            let chunk: &[u8] =
+                unsafe { std::slice::from_raw_parts(src.next_input_byte, src.bytes_in_buffer) };
+            accumulator.extend_from_slice(chunk);
+            // SAFETY: advancing within the asserted-valid window.
+            src.next_input_byte = unsafe { src.next_input_byte.add(src.bytes_in_buffer) };
+            src.bytes_in_buffer = 0;
+        }
+
+        // Step 2b: stop if we've seen the End-Of-Image marker (FF D9).
+        // libjpeg's contract guarantees a JPEG stream always ends with
+        // EOI; once we've captured it, the decoder doesn't need more
+        // bytes regardless of what the source manager has buffered.
+        if accumulator.len() >= 2
+            && accumulator[accumulator.len() - 2] == 0xFF
+            && accumulator[accumulator.len() - 1] == 0xD9
+        {
+            break;
+        }
+
+        if accumulator.len() > MAX_BYTES {
+            return None;
+        }
+
+        // Step 3: fetch more bytes from the caller.
+        let fill: unsafe extern "C" fn(*mut c_void) -> CBoolean = match src.fill_input_buffer {
+            Some(f) => f,
+            None => break,
+        };
+        // SAFETY: caller-supplied callback. A FALSE return means
+        // "suspended; come back later"; we honour that by returning
+        // whatever we have so far. PIL's `jpeg_buffer_src` returns
+        // TRUE with a synthetic FF D9 EOI when its stream is fully
+        // drained, so this branch is the normal end-of-stream path.
+        let ok: CBoolean = unsafe { fill(cinfo_ptr) };
+        if ok == 0 {
+            break;
+        }
+        if src.bytes_in_buffer == 0 {
+            // Successful fill but no bytes — defensive break to avoid
+            // an infinite loop on a misbehaving callback.
+            break;
+        }
+    }
+
+    if accumulator.is_empty() {
+        None
+    } else {
+        Some(accumulator)
+    }
+}
+
 // ---------------------------------------------------------------------------
 // `jpeg_read_header` — subtask #5.
 // ---------------------------------------------------------------------------
@@ -1160,6 +1272,20 @@ pub extern "C" fn jpeg_read_header(cinfo: *mut c_void, _require_image: CBoolean)
         Some(p) => p,
         None => return JPEG_SUSPENDED,
     };
+
+    // If `jpeg_mem_src` / `jpeg_stdio_src` were called, `priv_state.source`
+    // is already populated. Otherwise — typical of Pillow's `_imaging.so`
+    // and libtiff's libjpeg consumer, both of which install their own
+    // `jpeg_source_mgr` directly — drain the caller-installed source
+    // through its `fill_input_buffer` callback into an `Owned` buffer
+    // so the rest of the decode path proceeds normally.
+    if priv_state.source.as_bytes().is_none() {
+        // SAFETY: c is a live JpegDecompressPublic; if c.src is non-NULL,
+        // the caller asserts it points at a libjpeg-ABI source manager.
+        if let Some(drained) = unsafe { drain_caller_source_mgr(c) } {
+            priv_state.source = JpegSource::Owned(drained);
+        }
+    }
 
     let bytes: &[u8] = match priv_state.source.as_bytes() {
         Some(b) if b.len() >= 2 => b,
@@ -2453,18 +2579,67 @@ pub extern "C" fn jpeg12_read_raw_data(
 //     library).
 // ---------------------------------------------------------------------------
 
+// `JPEG_SUSPENDED` already defined above (it shares the SUSPENDED=0
+// code with `jpeg_read_header`); the SOS/EOI codes only exist on the
+// `jpeg_consume_input` return path.
+const JPEG_REACHED_SOS: c_int = 1;
 const JPEG_REACHED_EOI: c_int = 2;
 
 /// `jpeg_consume_input(cinfo) -> int` — see `jpeglib.h:1108`.
+///
+/// Stock libjpeg drives the input state machine here: callers may loop
+/// until it returns `JPEG_REACHED_EOI`, expecting that headers get
+/// parsed and `cinfo->global_state` advances. Returning `JPEG_REACHED_EOI`
+/// unconditionally would let buffered/progressive callers skip
+/// `jpeg_read_header` entirely and then read uninitialised public
+/// fields. We therefore drive the state machine: in `DSTATE_START` we
+/// trigger `jpeg_read_header` (which transitions to
+/// `DSTATE_SCANNING`), in `DSTATE_INHEADER` we report
+/// `JPEG_REACHED_SOS`, and only when the decoded image is buffered (=
+/// past header) do we surface `JPEG_REACHED_EOI`.
 #[no_mangle]
-pub extern "C" fn jpeg_consume_input(_cinfo: *mut c_void) -> c_int {
-    JPEG_REACHED_EOI
+pub extern "C" fn jpeg_consume_input(cinfo: *mut c_void) -> c_int {
+    let c: &mut JpegDecompressPublic = match unsafe { cinfo_mut(cinfo) } {
+        Some(c) => c,
+        None => return JPEG_SUSPENDED,
+    };
+    match c.global_state {
+        DSTATE_START => {
+            // Header not yet parsed — drive the parser. `jpeg_read_header`
+            // sets `global_state = DSTATE_SCANNING` on success and leaves
+            // it unchanged on suspend.
+            let result: c_int = jpeg_read_header(cinfo, /*require_image=*/ 1);
+            match result {
+                JPEG_HEADER_OK => JPEG_REACHED_SOS,
+                JPEG_HEADER_TABLES_ONLY => JPEG_REACHED_EOI,
+                _ => JPEG_SUSPENDED,
+            }
+        }
+        DSTATE_INHEADER => JPEG_REACHED_SOS,
+        // Past header parse — the image is fully buffered (we decode
+        // upfront in `jpeg_start_decompress`), so EOI is the truthful
+        // answer.
+        _ => JPEG_REACHED_EOI,
+    }
 }
 
 /// `jpeg_input_complete(cinfo) -> boolean` — see `jpeglib.h:1106`.
+///
+/// TRUE only once the header has been parsed (state ≥ `DSTATE_SCANNING`).
+/// Earlier states would mislead a caller polling for "input ready"
+/// after just installing a source.
 #[no_mangle]
-pub extern "C" fn jpeg_input_complete(_cinfo: *mut c_void) -> CBoolean {
-    1
+pub extern "C" fn jpeg_input_complete(cinfo: *mut c_void) -> CBoolean {
+    match unsafe { cinfo_mut(cinfo) } {
+        Some(c) => {
+            if c.global_state >= DSTATE_SCANNING {
+                1
+            } else {
+                0
+            }
+        }
+        None => 0,
+    }
 }
 
 /// `jpeg_has_multiple_scans(cinfo) -> boolean`.
@@ -2510,17 +2685,51 @@ pub extern "C" fn jpeg_new_colormap(_cinfo: *mut c_void) {}
 // `cinfo->is_decompressor`.
 // ---------------------------------------------------------------------------
 
-/// `jpeg_abort_compress(cinfo)` — reset compress state.
+/// `jpeg_abort_compress(cinfo)` — reset compress state for reuse.
 ///
-/// Upstream resets `global_state` and frees per-pass memory pools.
-/// Our shim is non-pool and `jpeg_destroy_compress` already drops the
-/// private state, so the practical contract here is "reset cursors".
+/// Upstream `jpeg_abort_compress` returns the compressor to
+/// `CSTATE_START`, drops any per-pass scratch state, and clears
+/// pending coefficient handles so the same `cinfo` can be reused for
+/// a new image. Without this, error-recovery flows that abort a
+/// partial encode and re-issue `jpeg_start_compress` would observe
+/// stale `next_scanline` / pixel buffers from the failed run.
 #[no_mangle]
-pub extern "C" fn jpeg_abort_compress(_cinfo: *mut c_void) {}
+pub extern "C" fn jpeg_abort_compress(cinfo: *mut c_void) {
+    let c: &mut JpegCompressPublic = match unsafe { cinfo_compress_mut(cinfo) } {
+        Some(c) => c,
+        None => return,
+    };
+    let priv_ptr: *mut c_void = c.master;
+    if let Some(p) = unsafe { priv_compress_from_ptr(priv_ptr) } {
+        p.have_started = false;
+        p.tables_only = false;
+        p.pixels_u8.clear();
+        p.pixels_u16.clear();
+        p.pending_markers.clear();
+        p.pending_coef_arrays = std::ptr::null();
+    }
+    c.global_state = CSTATE_START;
+    c.next_scanline = 0;
+}
 
-/// `jpeg_abort_decompress(cinfo)` — reset decompress state.
+/// `jpeg_abort_decompress(cinfo)` — reset decompress state for reuse.
 #[no_mangle]
-pub extern "C" fn jpeg_abort_decompress(_cinfo: *mut c_void) {}
+pub extern "C" fn jpeg_abort_decompress(cinfo: *mut c_void) {
+    let c: &mut JpegDecompressPublic = match unsafe { cinfo_mut(cinfo) } {
+        Some(c) => c,
+        None => return,
+    };
+    let priv_ptr: *mut c_void = decompress_private_raw(cinfo);
+    if let Some(p) = unsafe { priv_from_ptr(priv_ptr) } {
+        p.decoded = None;
+        p.coefficients = None;
+        p.crop_active = false;
+        p.crop_xoffset = 0;
+        p.crop_width = 0;
+    }
+    c.global_state = DSTATE_START;
+    c.output_scanline = 0;
+}
 
 /// `jpeg_abort(cinfo)` — common-struct abort. Dispatches via the
 /// `is_decompressor` flag at offset 32 of the common prefix.
@@ -2566,22 +2775,76 @@ pub extern "C" fn jpeg_destroy(cinfo: *mut c_void) {
 // manager (`jpeg_destroy_*` will clean up if registered).
 // ---------------------------------------------------------------------------
 
+/// Allocate `size` zero-initialised bytes through `cinfo->mem->alloc_small`
+/// in the permanent pool, so `jpeg_destroy_*` can free the storage by
+/// releasing the pool. Falls back to the global allocator only when
+/// `cinfo` is NULL or the memory manager isn't installed (pre-create
+/// callers); the leak there is documented.
+///
+/// Both `j_compress_ptr` and `j_decompress_ptr` carry `mem` at offset
+/// `1 * sizeof(*void)` of the common prefix, so this function works
+/// for either side.
+unsafe fn alloc_through_memmgr_or_heap(cinfo: *mut c_void, size: usize) -> *mut u8 {
+    if !cinfo.is_null() {
+        // SAFETY: caller asserts `cinfo` points to a libjpeg cinfo
+        // whose common prefix matches our `JpegDecompressPublic` /
+        // `JpegCompressPublic` mirrors. `mem` lives at offset
+        // `1 * sizeof(*void)` (immediately after `err`).
+        let mem_field: *const *mut c_void =
+            unsafe { (cinfo as *const u8).add(8).cast::<*mut c_void>() };
+        let mem_ptr: *mut c_void = unsafe { *mem_field };
+        if !mem_ptr.is_null() {
+            // SAFETY: mem_ptr is a `JpegMemoryMgr` per our
+            // create_memory_mgr contract.
+            let mem: &memmgr::JpegMemoryMgr =
+                unsafe { &*(mem_ptr as *const memmgr::JpegMemoryMgr) };
+            if let Some(alloc_small) = mem.alloc_small {
+                // SAFETY: caller-provided alloc_small honoring the
+                // libjpeg `void *(j_common_ptr, int, size_t)` proto.
+                let raw: *mut c_void = unsafe { alloc_small(cinfo, memmgr::JPOOL_PERMANENT, size) };
+                if !raw.is_null() {
+                    // libjpeg's alloc_small does not zero-fill; do it here.
+                    unsafe {
+                        std::ptr::write_bytes(raw as *mut u8, 0, size);
+                    }
+                    return raw as *mut u8;
+                }
+            }
+        }
+    }
+    // Fallback: global allocator (the destroy path won't free this,
+    // which is acceptable for the rare pre-create / no-mem case
+    // libjpeg itself does not formally support).
+    let layout: std::alloc::Layout =
+        std::alloc::Layout::from_size_align(size, std::mem::align_of::<u64>())
+            .unwrap_or_else(|_| std::alloc::Layout::from_size_align(size, 8).unwrap());
+    // SAFETY: layout has size>0 (struct sizes used here are >0).
+    unsafe { std::alloc::alloc_zeroed(layout) }
+}
+
 /// `jpeg_alloc_quant_table(cinfo) -> JQUANT_TBL*`. The returned table
 /// is zero-initialised per upstream contract (`sent_table = FALSE`).
+/// Allocated through `cinfo->mem->alloc_small(JPOOL_PERMANENT, …)` so
+/// the table is released by `jpeg_destroy_*` along with the rest of
+/// the permanent pool; this matches upstream `jpeg_alloc_quant_table`
+/// at `references/libjpeg-turbo/src/jcomapi.c`.
 #[no_mangle]
-pub extern "C" fn jpeg_alloc_quant_table(_cinfo: *mut c_void) -> *mut JQuantTblPublic {
-    let layout: std::alloc::Layout = std::alloc::Layout::new::<JQuantTblPublic>();
-    // SAFETY: layout is static and well-formed.
-    let raw: *mut u8 = unsafe { std::alloc::alloc_zeroed(layout) };
+pub extern "C" fn jpeg_alloc_quant_table(cinfo: *mut c_void) -> *mut JQuantTblPublic {
+    // SAFETY: passing through to the memory manager owned by the
+    // caller's `cinfo`.
+    let raw: *mut u8 =
+        unsafe { alloc_through_memmgr_or_heap(cinfo, std::mem::size_of::<JQuantTblPublic>()) };
     raw.cast::<JQuantTblPublic>()
 }
 
 /// `jpeg_alloc_huff_table(cinfo) -> JHUFF_TBL*`. Zero-initialised.
+/// Allocated via the memory manager — see `jpeg_alloc_quant_table`.
 #[no_mangle]
-pub extern "C" fn jpeg_alloc_huff_table(_cinfo: *mut c_void) -> *mut JHuffTblPublic {
-    let layout: std::alloc::Layout = std::alloc::Layout::new::<JHuffTblPublic>();
-    // SAFETY: layout is static and well-formed.
-    let raw: *mut u8 = unsafe { std::alloc::alloc_zeroed(layout) };
+pub extern "C" fn jpeg_alloc_huff_table(cinfo: *mut c_void) -> *mut JHuffTblPublic {
+    // SAFETY: passing through to the memory manager owned by the
+    // caller's `cinfo`.
+    let raw: *mut u8 =
+        unsafe { alloc_through_memmgr_or_heap(cinfo, std::mem::size_of::<JHuffTblPublic>()) };
     raw.cast::<JHuffTblPublic>()
 }
 
@@ -4509,39 +4772,49 @@ pub extern "C" fn jpeg12_write_raw_data(
 
 /// `jpeg_set_linear_quality(cinfo, scale_factor, force_baseline)`.
 ///
-/// Applies a *linear* quality scaling factor to the default quant
-/// tables, where `scale_factor=100` is "1.0×" (use defaults exactly).
-/// Used by `cjpeg -baseline` to install canonical 50-quality tables on
-/// top of the v100 defaults.
+/// Applies a linear quality scale factor to the default quant tables,
+/// where `scale_factor=100` is "1.0×". Upstream applies the factor
+/// directly — `q = (basic_table[i] * scale_factor + 50) / 100`,
+/// clamped — so two consecutive scale factors (e.g. 99 vs 100)
+/// produce slightly different quant tables.
 ///
-/// We delegate to `jpeg_set_quality` after converting the linear scale
-/// factor back to a 1..100 quality value via the inverse of upstream
-/// `jpeg_quality_scaling`. This keeps the high-level Rust quality
-/// dispatch path single-source-of-truth.
+/// Our high-level Rust encoder API takes `quality: u8` (1..100) and
+/// applies the same standard nonlinear UI scaling that
+/// `jpeg_quality_scaling` produces. Going through a quality round-trip
+/// quantises the input scale factor to whichever UI step it lands
+/// nearest, which is detectably wrong for callers that pass arbitrary
+/// integers. So instead we drive `jpeg_add_quant_table` directly with
+/// the standard tables (matching the layout `jpeg_default_qtables`
+/// installs upstream) so the registered factor is preserved exactly,
+/// and only fall back to `jpeg_set_quality(50)` semantics when the
+/// caller asks for `scale_factor == 100` (the "use defaults
+/// unscaled" case where both paths agree).
 #[no_mangle]
 pub extern "C" fn jpeg_set_linear_quality(
     cinfo: *mut c_void,
     scale_factor: c_int,
     force_baseline: CBoolean,
 ) {
-    // Inverse of upstream `jpeg_quality_scaling`:
-    //   if quality < 50: scale = 5000 / quality;
-    //   else:            scale = 200 - quality * 2;
-    // Solve for quality given scale_factor:
-    let quality: c_int = if scale_factor <= 0 {
-        100
-    } else if scale_factor >= 5000 {
-        // Equivalent to quality=1 (scale=5000); clamp anything noisier
-        // to the same floor.
-        1
-    } else if scale_factor > 100 {
-        // High-loss branch: quality = 5000 / scale_factor (rounded).
-        ((5000 + scale_factor / 2) / scale_factor).max(1)
-    } else {
-        // Low-loss branch: quality = (200 - scale_factor) / 2.
-        ((200 - scale_factor) / 2).clamp(50, 100)
-    };
-    jpeg_set_quality(cinfo, quality, force_baseline);
+    // Standard luminance and chrominance quant tables, in zig-zag order
+    // (matches `references/libjpeg-turbo/src/jcparam.c`'s
+    // `std_luminance_quant_tbl[]` and `std_chrominance_quant_tbl[]`,
+    // re-shuffled into zig-zag order via `jpeg_zigzag_order`).
+    const STD_LUM: [u32; 64] = [
+        16, 11, 12, 14, 12, 10, 16, 14, 13, 14, 18, 17, 16, 19, 24, 40, 26, 24, 22, 22, 24, 49, 35,
+        37, 29, 40, 58, 51, 61, 60, 57, 51, 56, 55, 64, 72, 92, 78, 64, 68, 87, 69, 55, 56, 80,
+        109, 81, 87, 95, 98, 103, 104, 103, 62, 77, 113, 121, 112, 100, 120, 92, 101, 103, 99,
+    ];
+    const STD_CHROM: [u32; 64] = [
+        17, 18, 18, 24, 21, 24, 47, 26, 26, 47, 99, 66, 56, 66, 99, 99, 99, 99, 99, 99, 99, 99, 99,
+        99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99,
+        99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99,
+    ];
+
+    let scale: c_int = scale_factor.max(1);
+    // Slot 0 = luminance, slot 1 = chrominance (matches upstream
+    // `jpeg_default_qtables`).
+    jpeg_add_quant_table(cinfo, 0, STD_LUM.as_ptr(), scale, force_baseline);
+    jpeg_add_quant_table(cinfo, 1, STD_CHROM.as_ptr(), scale, force_baseline);
 }
 
 fn write_scanlines_highprec(
