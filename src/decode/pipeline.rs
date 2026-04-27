@@ -1786,8 +1786,21 @@ impl<'a> Decoder<'a> {
 
         let mut coeffs: [i16; 64];
 
+        // Restart accounting for the arithmetic entropy stream.
+        // Mirrors libjpeg-turbo's `jdarith.c::decode_mcu`: when
+        // `restart_interval > 0`, every `restart_interval`-th MCU
+        // boundary triggers `process_restart` (reset coder state +
+        // statistics + DC predictors, swallow the FF Dn marker that
+        // `get_byte` already consumed).
+        let restart_interval: u32 = self.metadata.restart_interval as u32;
+        let mut restarts_to_go: u32 = restart_interval;
+
         for mcu_y in 0..mcus_y {
             for mcu_x in 0..mcus_x {
+                if restart_interval > 0 && restarts_to_go == 0 {
+                    arith.process_restart();
+                    restarts_to_go = restart_interval;
+                }
                 for &(comp_idx, dc_tbl, ac_tbl) in &scan_comps {
                     let layout = &comp_layouts[comp_idx];
                     let qt_values = &quant_tables[comp_idx].values;
@@ -1816,6 +1829,9 @@ impl<'a> Decoder<'a> {
                             }
                         }
                     }
+                }
+                if restart_interval > 0 {
+                    restarts_to_go -= 1;
                 }
             }
         }
@@ -1917,10 +1933,24 @@ impl<'a> Decoder<'a> {
                 })
                 .collect::<Result<Vec<_>>>()?;
 
+            // Per-scan restart accounting for the arithmetic stream.
+            // Mirrors `jdarith.c::decode_mcu_*` for progressive scans:
+            // each scan starts with a fresh `restarts_to_go = restart_interval`
+            // counter and `process_restart` is invoked at every Nth
+            // MCU/block boundary inside the scan (interleaved DC scans
+            // count MCUs; non-interleaved AC scans count blocks per
+            // the JPEG spec — non-interleaved MCU = 1 block).
+            let restart_interval: u32 = self.metadata.restart_interval as u32;
+            let mut restarts_to_go: u32 = restart_interval;
+
             if scan_header.components.len() > 1 {
                 // Interleaved scan (DC only in progressive)
                 for mcu_y in 0..mcus_y {
                     for mcu_x in 0..mcus_x {
+                        if restart_interval > 0 && restarts_to_go == 0 {
+                            arith.process_restart();
+                            restarts_to_go = restart_interval;
+                        }
                         for (si, &comp_idx) in scan_comp_indices.iter().enumerate() {
                             let ci = &comp_infos[comp_idx];
                             let scan_comp = &scan_header.components[si];
@@ -1943,6 +1973,9 @@ impl<'a> Decoder<'a> {
                                 }
                             }
                         }
+                        if restart_interval > 0 {
+                            restarts_to_go -= 1;
+                        }
                     }
                 }
             } else {
@@ -1958,6 +1991,10 @@ impl<'a> Decoder<'a> {
 
                 for by in 0..scan_by {
                     for bx in 0..scan_bx {
+                        if restart_interval > 0 && restarts_to_go == 0 {
+                            arith.process_restart();
+                            restarts_to_go = restart_interval;
+                        }
                         let block_idx = by * stride + bx;
                         let coeffs = &mut coeff_bufs[comp_idx][block_idx];
 
@@ -1969,6 +2006,9 @@ impl<'a> Decoder<'a> {
                             arith.decode_ac_first_progressive(coeffs, ac_tbl, ss, se, al)?;
                         } else {
                             arith.decode_ac_refine_progressive(coeffs, ac_tbl, ss, se, al)?;
+                        }
+                        if restart_interval > 0 {
+                            restarts_to_go -= 1;
                         }
                     }
                 }

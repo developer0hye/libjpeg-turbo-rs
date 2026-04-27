@@ -89,64 +89,6 @@ pub struct JpegErrorMgr {
 }
 
 // ---------------------------------------------------------------------------
-// Addon message table for warnings emitted by this shim that have no
-// matching standard `JWRN_*` code (e.g. "progressive arithmetic +
-// restart dropped"). Mirrors the libjpeg-turbo `addon_message_table`
-// mechanism used by application code that ships custom error codes.
-//
-// The contract WARNMS expands to is:
-//   1) cinfo->err->msg_code = <code>
-//   2) (optionally) cinfo->err->msg_parm.* = <args>
-//   3) (*cinfo->err->emit_message)(cinfo, -1)
-//
-// `format_message` then looks up `msg_code` first in
-// `jpeg_message_table` (the standard JMSG_* table) and, on miss, in
-// `addon_message_table` indexed by `msg_code - first_addon_message`.
-//
-// `RS_FIRST_ADDON_MSG` must lie well above `JMSG_LASTMSGCODE` (~89 in
-// libjpeg-turbo today) AND above the conventional caller addon range
-// rooted at `JMSG_FIRSTADDONCODE = 1000` in `cdjpeg.h` (which the
-// stock djpeg/cjpeg/jpegtran tools install via `cdjpeg_message_table`,
-// covering codes up through the JWRN_GIF_* and JERR_PPM_* families).
-// 60000 is comfortably outside both ranges while remaining well within
-// the i32 space that `msg_code` can hold.
-pub const RS_FIRST_ADDON_MSG: c_int = 60000;
-pub const RS_JWRN_PROG_ARITH_RESTART_DROPPED: c_int = RS_FIRST_ADDON_MSG;
-
-// Wrapper to make a static array of C-string pointers `Sync`. Each
-// entry points to an immutable `'static` byte literal so concurrent
-// reads are sound; the wrapper just carries the unsafe Sync impl.
-#[repr(transparent)]
-struct RsAddonTable([*const u8; 1]);
-// SAFETY: contents are pointers to `'static` immutable byte literals.
-unsafe impl Sync for RsAddonTable {}
-
-static RS_ADDON_MESSAGES: RsAddonTable = RsAddonTable([
-    b"Progressive arithmetic + restart is not yet supported; restart markers dropped\0".as_ptr(),
-]);
-
-/// Lazily install the shim's addon message table on a libjpeg
-/// `JpegErrorMgr` so a caller's `format_message` hook produces a
-/// meaningful string for shim-emitted warnings. Never clobber a
-/// caller-installed addon table — that would silently break wrappers
-/// that registered their own custom codes.
-unsafe fn ensure_rs_addon_table_installed(err: &mut JpegErrorMgr) -> bool {
-    let our_table_ptr: *const *const u8 = RS_ADDON_MESSAGES.0.as_ptr();
-    if err.addon_message_table.is_null() {
-        err.addon_message_table = our_table_ptr;
-        err.first_addon_message = RS_FIRST_ADDON_MSG;
-        err.last_addon_message = RS_FIRST_ADDON_MSG + (RS_ADDON_MESSAGES.0.len() as c_int) - 1;
-        true
-    } else {
-        // A caller-installed table already exists. Don't overwrite —
-        // but report `false` so the emit site can still set msg_code
-        // (the caller may inspect it via emit_message even though
-        // `format_message` will fall through to "Bogus message code").
-        std::ptr::eq(err.addon_message_table, our_table_ptr)
-    }
-}
-
-// ---------------------------------------------------------------------------
 // `struct jpeg_source_mgr` — verbatim layout.
 // ---------------------------------------------------------------------------
 
@@ -4469,71 +4411,21 @@ fn run_coefficient_writer_and_flush(
         let interval: u32 = (c.restart_in_rows as u32).saturating_mul(mcus_per_row);
         adjusted.restart_interval = interval.min(65535) as u16;
     }
-    // Progressive arithmetic + restart (byte-mode or row-mode) is not
-    // yet implemented in the Rust-side
-    // `write_coefficients_progressive_arithmetic` (baseline arithmetic
-    // now supports it). Drop both restart channels explicitly with a
-    // meaningful `last_error` so the caller knows the markers were not
-    // emitted, instead of failing finish_compress with an empty output.
-    let progressive_arith_restart_dropped: bool = c.arith_code != 0
-        && c.progressive_mode != 0
-        && (adjusted.restart_interval > 0 || c.restart_in_rows > 0);
-    if progressive_arith_restart_dropped {
-        priv_state.last_error = CString::new(
-            "jpeg_finish_compress: progressive arithmetic + restart is not yet supported; restart markers dropped",
-        )
-        .unwrap_or_default();
-        adjusted.restart_interval = 0;
-        // Surface the drop to C callers via the libjpeg WARNMS
-        // contract: set `cinfo->err->msg_code` (so `format_message`
-        // can produce a string), make sure our addon message table is
-        // installed (so the lookup succeeds), then call the installed
-        // `emit_message` hook with msg_level=-1. The hook owns
-        // `num_warnings` accounting per the jerror.c contract —
-        // pre-incrementing here would either suppress the "first
-        // warning" print path or double-count under a well-behaved
-        // custom hook.
-        if !c.err.is_null() {
-            unsafe {
-                let err: &mut JpegErrorMgr = &mut *c.err;
-                // Always set msg_code to our public addon constant so
-                // a caller's `emit_message` hook can identify the
-                // warning by code (the recommended libjpeg pattern for
-                // discriminating warnings). The constant lives at
-                // RS_FIRST_ADDON_MSG (60000), which is far outside the
-                // conventional caller addon range rooted at
-                // JMSG_FIRSTADDONCODE = 1000 in cdjpeg.h, so this code
-                // cannot be confused with a caller-installed addon
-                // entry. When our table is the active one,
-                // format_message resolves the code to the meaningful
-                // string; under a caller-installed table it falls
-                // through to the "Bogus message code" placeholder
-                // (caller's format_message contract), but emit_message
-                // hooks still see the discriminating code.
-                let _owns_table: bool = ensure_rs_addon_table_installed(err);
-                err.msg_code = RS_JWRN_PROG_ARITH_RESTART_DROPPED;
-                if let Some(f) = err.emit_message {
-                    let cinfo_ptr: *mut c_void = c as *mut JpegCompressPublic as *mut c_void;
-                    f(cinfo_ptr, -1);
-                }
-            }
-        }
-    }
-
     // Match the requested output coding mode — the same compress
     // parameters that drive `run_encoder_and_flush` for the pixel-encode
     // path also gate the coefficient-encode path, so jpegtran flags like
     // `-progressive`, `-arithmetic`, and `-optimize` produce the right
     // SOF / entropy variant. Pass `restart_in_rows` through to the
-    // progressive writer so `-restart Nb` produces row-mode markers.
-    let restart_rows: Option<u16> = if c.restart_in_rows > 0 && !progressive_arith_restart_dropped {
+    // progressive writers (Huffman + arithmetic both honor it) so
+    // `-restart Nb` produces row-mode markers.
+    let restart_rows: Option<u16> = if c.restart_in_rows > 0 {
         Some(c.restart_in_rows as u16)
     } else {
         None
     };
     let bytes_result: libjpeg_turbo_rs::Result<Vec<u8>> =
         if c.progressive_mode != 0 && c.arith_code != 0 {
-            libjpeg_turbo_rs::write_coefficients_progressive_arithmetic(&adjusted)
+            libjpeg_turbo_rs::write_coefficients_progressive_arithmetic(&adjusted, restart_rows)
         } else if c.progressive_mode != 0 {
             libjpeg_turbo_rs::write_coefficients_progressive(&adjusted, restart_rows)
         } else if c.arith_code != 0 {
