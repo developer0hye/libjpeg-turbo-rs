@@ -34,38 +34,62 @@ fn build_dir() -> PathBuf {
     script_dir().join("build")
 }
 
+/// Resolve the cargo target directory. Honors `CARGO_TARGET_DIR`
+/// (relative paths are resolved against `repo_root()`) and falls back
+/// to `<repo>/target` otherwise. This matches what `cargo build`
+/// itself does, so a nested `cargo build` invoked from
+/// `shim_lib_path_or_build` writes its artifact to the same place we
+/// then look for it.
+fn cargo_target_dir() -> PathBuf {
+    match std::env::var_os("CARGO_TARGET_DIR") {
+        Some(v) => {
+            let p: PathBuf = PathBuf::from(v);
+            if p.is_absolute() {
+                p
+            } else {
+                repo_root().join(p)
+            }
+        }
+        None => repo_root().join("target"),
+    }
+}
+
+/// Platform-specific filename for the release cdylib emitted by
+/// `cargo build -p libjpeg-turbo-rs-capi --release`. Returns `None`
+/// for hosts we don't ship a cdylib for, which lets callers skip
+/// rather than panic.
+fn shim_release_filename() -> Option<&'static str> {
+    if cfg!(target_os = "macos") {
+        Some("liblibjpeg_turbo_rs_capi.dylib")
+    } else if cfg!(target_os = "linux") {
+        Some("liblibjpeg_turbo_rs_capi.so")
+    } else {
+        None
+    }
+}
+
 /// Guarantee the shim cdylib exists. Running the test harness in release
 /// is the supported mode because `build.sh` reads from `target/release`.
+/// Honors `CARGO_TARGET_DIR` so a redirected target tree is found.
 fn shim_lib_path() -> Option<PathBuf> {
-    let release: PathBuf = repo_root()
-        .join("target/release")
-        .join(if cfg!(target_os = "macos") {
-            "liblibjpeg_turbo_rs_capi.dylib"
-        } else if cfg!(target_os = "linux") {
-            "liblibjpeg_turbo_rs_capi.so"
-        } else {
-            return None;
-        });
+    let release: PathBuf = cargo_target_dir()
+        .join("release")
+        .join(shim_release_filename()?);
     release.exists().then_some(release)
 }
 
-/// Like `shim_lib_path`, but if the release cdylib is missing, build it
-/// synchronously via `cargo build -p libjpeg-turbo-rs-capi --release`
-/// so the export-guard test validates the *current* source. Without
-/// this, a clean `cargo test --tests` run would skip the guard
-/// silently because cargo only builds the dev-profile artifacts under
-/// `target/debug` and a stale or missing `target/release` cdylib
-/// could let a regression that strips classic `jpeg_*` symbols pass
-/// CI.
+/// Like `shim_lib_path`, but **always** runs `cargo build -p
+/// libjpeg-turbo-rs-capi --release` first so the export-guard test
+/// validates the *current* source. Without the unconditional rebuild,
+/// a stale or restored `target/release/liblibjpeg_turbo_rs_capi.*`
+/// (e.g. from a CI cache) could satisfy the existence check and let
+/// `nm` inspect bits that no longer reflect the working tree.
 fn shim_lib_path_or_build() -> Option<PathBuf> {
-    if let Some(p) = shim_lib_path() {
-        return Some(p);
-    }
     if !cfg!(any(target_os = "macos", target_os = "linux")) {
         return None;
     }
     eprintln!(
-        "INFO: shim cdylib missing under target/release; running `cargo build -p libjpeg-turbo-rs-capi --release` to refresh it"
+        "INFO: rebuilding shim cdylib via `cargo build -p libjpeg-turbo-rs-capi --release` so the export guard inspects current source"
     );
     let status: std::process::ExitStatus = Command::new(env!("CARGO"))
         .args([
