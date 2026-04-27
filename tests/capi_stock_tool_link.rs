@@ -49,6 +49,41 @@ fn shim_lib_path() -> Option<PathBuf> {
     release.exists().then_some(release)
 }
 
+/// Like `shim_lib_path`, but if the release cdylib is missing, build it
+/// synchronously via `cargo build -p libjpeg-turbo-rs-capi --release`
+/// so the export-guard test validates the *current* source. Without
+/// this, a clean `cargo test --tests` run would skip the guard
+/// silently because cargo only builds the dev-profile artifacts under
+/// `target/debug` and a stale or missing `target/release` cdylib
+/// could let a regression that strips classic `jpeg_*` symbols pass
+/// CI.
+fn shim_lib_path_or_build() -> Option<PathBuf> {
+    if let Some(p) = shim_lib_path() {
+        return Some(p);
+    }
+    if !cfg!(any(target_os = "macos", target_os = "linux")) {
+        return None;
+    }
+    eprintln!(
+        "INFO: shim cdylib missing under target/release; running `cargo build -p libjpeg-turbo-rs-capi --release` to refresh it"
+    );
+    let status: std::process::ExitStatus = Command::new(env!("CARGO"))
+        .args([
+            "build",
+            "-p",
+            "libjpeg-turbo-rs-capi",
+            "--release",
+            "--quiet",
+        ])
+        .current_dir(repo_root())
+        .status()
+        .ok()?;
+    if !status.success() {
+        return None;
+    }
+    shim_lib_path()
+}
+
 /// Does the host have the C tool chain required to drive `build.sh`?
 fn host_has_cc() -> bool {
     Command::new("cc")
@@ -238,10 +273,18 @@ fn stock_tools_link_against_our_shim() {
 /// helpers, which are testing affordances rather than the classic API).
 #[test]
 fn shim_exports_classic_jpeg_api() {
-    let Some(shim) = shim_lib_path() else {
-        eprintln!("SKIP: shim cdylib missing");
+    // Skip on platforms we don't ship a cdylib for; on Linux/macOS,
+    // build the shim if missing so the guard always inspects current
+    // source. Anything else is a hard failure (we don't allow
+    // soft-skipping a regression that strips the classic API).
+    if !cfg!(any(target_os = "macos", target_os = "linux")) {
+        eprintln!("SKIP: classic-jpeg-api guard supports macOS/Linux only");
         return;
-    };
+    }
+    let shim: PathBuf = shim_lib_path_or_build().expect(
+        "shim cdylib could not be built — run \
+             `cargo build -p libjpeg-turbo-rs-capi --release` and re-run this test",
+    );
 
     let nm_out: std::process::Output = match Command::new("nm").arg(&shim).output() {
         Ok(o) => o,
@@ -250,10 +293,11 @@ fn shim_exports_classic_jpeg_api() {
             return;
         }
     };
-    if !nm_out.status.success() {
-        eprintln!("SKIP: `nm {}` failed", shim.display());
-        return;
-    }
+    assert!(
+        nm_out.status.success(),
+        "`nm {}` failed — cannot inspect classic API exports",
+        shim.display()
+    );
 
     let text: String = String::from_utf8_lossy(&nm_out.stdout).into_owned();
     // Count defined (T/D/S/B/R) symbols that start with `jpeg_`,
