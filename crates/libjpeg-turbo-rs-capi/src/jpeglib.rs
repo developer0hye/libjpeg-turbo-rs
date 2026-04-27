@@ -4310,7 +4310,23 @@ fn run_coefficient_writer_and_flush(
     // directly via the `restart_rows` argument, so they don't need this
     // conversion.
     let mut adjusted: libjpeg_turbo_rs::JpegCoefficients = unsafe { (*raw).inner.clone() };
-    if c.restart_interval != 0 {
+    if c.arith_code != 0 {
+        // The arithmetic coefficient writers reject restart intervals
+        // (`write_coefficients_arithmetic*` returns an error if
+        // `restart_interval > 0`). Drop both source and destination
+        // restart settings here — arithmetic streams without restart
+        // markers are still valid JPEG and survive a roundtrip; the
+        // alternative is a hard failure at finish_compress, which is
+        // worse for callers exercising `jpegtran -arithmetic` on
+        // restart-coded inputs.
+        adjusted.restart_interval = 0;
+        if c.restart_interval != 0 || c.restart_in_rows > 0 {
+            priv_state.last_error = CString::new(
+                "jpeg_finish_compress: arithmetic + restart is not supported; restart markers dropped",
+            )
+            .unwrap_or_default();
+        }
+    } else if c.restart_interval != 0 {
         adjusted.restart_interval = c.restart_interval as u16;
     } else if c.restart_in_rows > 0 && c.progressive_mode == 0 {
         let max_h: u8 = adjusted
@@ -4475,6 +4491,16 @@ pub extern "C" fn jpeg_capi_test_set_progressive(cinfo: *mut c_void, progressive
 pub extern "C" fn jpeg_capi_test_set_restart_in_rows(cinfo: *mut c_void, rows: c_int) {
     if let Some(c) = unsafe { cinfo_compress_mut(cinfo) } {
         c.restart_in_rows = rows;
+    }
+}
+
+/// Test helper: toggle `arith_code` directly. Mirrors `jpegtran
+/// -arithmetic` so the coefficient transcode path's arithmetic dispatch
+/// can be exercised in tests.
+#[no_mangle]
+pub extern "C" fn jpeg_capi_test_set_arith_code(cinfo: *mut c_void, arith: c_int) {
+    if let Some(c) = unsafe { cinfo_compress_mut(cinfo) } {
+        c.arith_code = arith as CBoolean;
     }
 }
 
