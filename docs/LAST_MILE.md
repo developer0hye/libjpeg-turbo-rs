@@ -115,38 +115,16 @@ Pillow's `_imagingjpeg` and ImageMagick's `coders/jpeg.c` use symbols beyond wha
 - **Effort**: ~8–12 h, partitioned across the two halves; mostly thin shims over our existing `Decoder` / `Encoder` trait surfaces.
 - **Validation**: Pillow `_imagingjpeg` smoke (`examples/pillow_smoke/`) currently `#[ignore]`d in `tests/capi_pillow_compat.rs` — un-ignore and pass.
 
-### 2.4 P2 — Surface ergonomics (caller-visible 🔶)
+### 2.4 Items previously listed here that are NOT gaps
 
-These have working *capabilities* but the surface differs from C in a way some callers feel:
+The following were initially flagged but verified already present on `main`. Listed for the audit trail so they don't get re-opened:
 
-#### G6. `TJPARAM_PRECISION` / `TJPARAM_COLORSPACE` are read-shaped only
+- **`Encoder::icc_profile`** — already public at `src/api/encoder.rs:208`. The 🔶 in `docs/C_API_REFERENCE.md` row for `jpeg_write_icc_profile` refers to the *legacy `j_compress_ptr` shape* not being a public Rust idiom; the equivalent capability is shipped.
+- **`Encoder::density(unit, x, y)`** — already public at `src/api/encoder.rs:317`. The 🔶 in `docs/FEATURE_PARITY.md` (DPI/density row) was about JFIF density write semantics, which the encoder already covers.
+- **`TJPARAM_SAVEMARKERS` through `TjHandle`** — wired end-to-end at `src/api/tj3.rs:269` (set), `:303` (get), `:645-648` (decode behavior dispatch). The 🔶 on this row in `docs/FEATURE_PARITY.md` reflects the historical name; the value is now honored.
+- **`TJPARAM_PRECISION` encode dispatch** — upstream `tj3.h` documents this param as read-only; encode precision is selected by which `tj3CompressN` entry point the caller invokes (`tj3Compress8` / `tj3Compress12` / `tj3Compress16`). Our shim mirrors that contract. The 🔶 marker is strictly about the TJ3 ↔ Rust public-API surface mismatch (`compress_8bit()` vs `compress_12bit()` separate functions), not a missing capability.
 
-- **Status**: marked 🔶 in `docs/C_API_REFERENCE.md:38-39`, `docs/FEATURE_PARITY.md:38-39`.
-- **Fact**: the routing works (precision=12/16 streams encode/decode correctly), but the TJ3 generic `tj3Set(handle, TJPARAM_PRECISION, …)` does not let the caller force a precision at encode time the way upstream does — encode precision is selected by which of `compress_8bit` / `compress_12bit` / `compress_16bit` you call.
-- **Fix shape**: wire `TJPARAM_PRECISION` into the encode dispatcher so a single `tj3Compress8` call with `precision=12` set picks the 12-bit pipeline.
-- **Effort**: ~3–4 h.
-
-#### G7. `TJPARAM_SAVEMARKERS` not wired through `TjHandle`
-
-- **Status**: behavioral wiring exists in decode (`docs/FEATURE_PARITY.md:217`), but the TJ3 setter doesn't accept the param at the handle level.
-- **Effort**: ~1–2 h.
-
-#### G8. `jpeg_write_icc_profile` is a low-level helper
-
-- **Status**: `marker_writer::write_app2_icc()` exists. There's no libjpeg-style `(j_compress_ptr cinfo, const unsigned char *icc, unsigned int len)` wrapper at the public Rust API level (the C ABI shim does have it).
-- **Effort**: ~30 min — promote to `Encoder::write_icc_profile()`.
-
-#### G9. `Encoder::density()` write path
-
-- **Status**: only low-level rewrite is currently exposed on the Rust public API; high-level `Encoder::density(x, y, units)` setter not yet shipped (`docs/FEATURE_PARITY.md:264`).
-- **Effort**: ~30 min.
-
-### 2.5 P2 — Internal correctness items already surfaced
-
-Tracked here so we close them deliberately, not just notice them in stop-hook telemetry:
-
-- **`crates/libjpeg-turbo-rs-capi/src/jpeglib.rs:125`** — duplicate `"Progressive arithmetic + restart not yet supported"` constant string (one inside `RS_ADDON_MESSAGES`, one inside `last_error`). After G2 lands, remove both.
-- **`crates/libjpeg-turbo-rs-capi/src/jpeglib.rs:2008,2017`** — compress-side ABI comments noting "not yet wired" — audit whether they're stale post-C2 batch.
+The 🔶 markers in `docs/FEATURE_PARITY.md` / `docs/C_API_REFERENCE.md` for these rows could be promoted to ✅ in a separate doc-only commit; they are not last-mile blockers.
 
 ---
 
@@ -184,14 +162,14 @@ When closing each gap, confirm against this matrix:
 Ordered by ratio of impact / effort. Each step ends with a green commit + codex review pass + push.
 
 1. **G2 — progressive arithmetic + restart** (3–5 h): unblocks one full upstream feature, removes the warning suppression scaffold, mostly mechanical.
-2. **G3 — `tjLoadImage` / `tjSaveImage` shim** (2–3 h): closes a stub that legacy wrappers actually call.
-3. **G6 — `TJPARAM_PRECISION` encode dispatch** (3–4 h): makes `tj3Compress8(handle)` honor `tj3Set(handle, TJPARAM_PRECISION, 12)` the way upstream does.
-4. **G5 — classic decode-side `jpeg_consume_input` family** (5–7 h): unlocks Pillow/ImageMagick smoke-test green.
-5. **G1 — `jpegtran` transform path** (14–22 h): the single biggest remaining gap. Memory manager + transupp + handle-recognition + tests.
-6. **G7 / G8 / G9** (≤ 4 h combined): tiny ergonomics lifts.
-7. **G4 — PNG support** (6–8 h, gated behind a feature): truly optional given upstream parity stance.
+2. **G3 — `tjLoadImage` / `tjSaveImage` legacy shim** (2–3 h): closes a stub that legacy wrappers actually call.
+3. **G5 — classic decode-side `jpeg_consume_input` family + `jpeg_abort_*` + raw-data API** (8–12 h): unlocks Pillow / ImageMagick smoke-test green.
+4. **G1 — `jpegtran` transform path** (14–22 h): the single biggest remaining gap. Memory manager + transupp + handle-recognition + tests.
+5. **G4 — PNG support** (6–8 h, gated behind a feature): truly optional given upstream parity stance.
 
-**Total last-mile budget**: ~37–55 hours of focused work. The first four steps (~13–19 h) get us a fully drop-in cdylib for everything except `jpegtran` transform options.
+**Total last-mile budget**: ~33–50 hours of focused work. The first three steps (~13–20 h) make our cdylib a drop-in for everything except `jpegtran` transform options.
+
+A separate small doc-only commit can promote the 🔶 markers covered in §2.4 to ✅ in `docs/FEATURE_PARITY.md` / `docs/C_API_REFERENCE.md` (no code change needed).
 
 ---
 
