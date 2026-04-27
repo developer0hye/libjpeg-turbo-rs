@@ -813,3 +813,130 @@ fn write_coefficients_preserves_source_adobe_app14() {
         }
     }
 }
+
+/// `cinfo->restart_in_rows` (row-mode restart, what `jpegtran -restart Nrows`
+/// produces) must fold into byte-mode `restart_interval` for baseline
+/// output and emit RST markers in the entropy stream. Without this the
+/// row-mode flag is silently dropped.
+#[test]
+fn write_coefficients_baseline_honors_restart_in_rows() {
+    let lib = unsafe { libloading::Library::new(cdylib_path()) }.expect("dlopen");
+    let (jpeg_in, _src, _w, _h_px) = build_fixture_jpeg(&lib);
+
+    let transcoded: Vec<u8> = unsafe {
+        const CINFO_BYTES: usize = 4096;
+        let mut dec_cinfo: MaybeUninit<[u8; CINFO_BYTES]> = MaybeUninit::zeroed();
+        let dec_cinfo_ptr: *mut c_void = dec_cinfo.as_mut_ptr() as *mut c_void;
+        const ERR_BYTES: usize = 512;
+        let mut dec_err: MaybeUninit<[u8; ERR_BYTES]> = MaybeUninit::zeroed();
+        let dec_err_ptr: *mut c_void = dec_err.as_mut_ptr() as *mut c_void;
+        let jpeg_std_error: libloading::Symbol<unsafe extern "C" fn(*mut c_void) -> *mut c_void> =
+            lib.get(b"jpeg_std_error").expect("jpeg_std_error");
+        let _ = jpeg_std_error(dec_err_ptr);
+        (dec_cinfo_ptr as *mut *mut c_void).write(dec_err_ptr);
+        let jpeg_create_decompress: libloading::Symbol<
+            unsafe extern "C" fn(*mut c_void, c_int, usize),
+        > = lib
+            .get(b"jpeg_CreateDecompress")
+            .expect("jpeg_CreateDecompress");
+        jpeg_create_decompress(dec_cinfo_ptr, 80, CINFO_BYTES);
+        let jpeg_mem_src: libloading::Symbol<
+            unsafe extern "C" fn(*mut c_void, *const u8, c_ulong),
+        > = lib.get(b"jpeg_mem_src").expect("jpeg_mem_src");
+        jpeg_mem_src(dec_cinfo_ptr, jpeg_in.as_ptr(), jpeg_in.len() as c_ulong);
+        let jpeg_read_header: libloading::Symbol<
+            unsafe extern "C" fn(*mut c_void, c_int) -> c_int,
+        > = lib.get(b"jpeg_read_header").expect("jpeg_read_header");
+        assert_eq!(jpeg_read_header(dec_cinfo_ptr, 1), JPEG_HEADER_OK);
+        let jpeg_read_coefficients: libloading::Symbol<
+            unsafe extern "C" fn(*mut c_void) -> *mut c_void,
+        > = lib
+            .get(b"jpeg_read_coefficients")
+            .expect("jpeg_read_coefficients");
+        let coef_arrays: *mut c_void = jpeg_read_coefficients(dec_cinfo_ptr);
+        assert!(!coef_arrays.is_null());
+
+        let mut enc_cinfo: MaybeUninit<[u8; CINFO_BYTES]> = MaybeUninit::zeroed();
+        let enc_cinfo_ptr: *mut c_void = enc_cinfo.as_mut_ptr() as *mut c_void;
+        let mut enc_err: MaybeUninit<[u8; ERR_BYTES]> = MaybeUninit::zeroed();
+        let enc_err_ptr: *mut c_void = enc_err.as_mut_ptr() as *mut c_void;
+        let _ = jpeg_std_error(enc_err_ptr);
+        (enc_cinfo_ptr as *mut *mut c_void).write(enc_err_ptr);
+        let jpeg_create_compress: libloading::Symbol<
+            unsafe extern "C" fn(*mut c_void, c_int, usize),
+        > = lib
+            .get(b"jpeg_CreateCompress")
+            .expect("jpeg_CreateCompress");
+        jpeg_create_compress(enc_cinfo_ptr, 80, CINFO_BYTES);
+
+        let mut out_buf: *mut u8 = std::ptr::null_mut();
+        let mut out_size: c_ulong = 0;
+        let jpeg_mem_dest: libloading::Symbol<
+            unsafe extern "C" fn(*mut c_void, *mut *mut u8, *mut c_ulong),
+        > = lib.get(b"jpeg_mem_dest").expect("jpeg_mem_dest");
+        jpeg_mem_dest(enc_cinfo_ptr, &mut out_buf, &mut out_size);
+
+        let jpeg_write_coefficients: libloading::Symbol<
+            unsafe extern "C" fn(*mut c_void, *mut c_void),
+        > = lib
+            .get(b"jpeg_write_coefficients")
+            .expect("jpeg_write_coefficients");
+        jpeg_write_coefficients(enc_cinfo_ptr, coef_arrays);
+
+        // Set row-mode restart between write_coefficients and finish_compress.
+        // 64x64 RGB 4:4:4 baseline: 8 MCUs/row at 8x8 blocks, 8 rows total.
+        // restart_in_rows=2 → restart_interval = 16 MCUs (every 2 rows).
+        let jpeg_capi_test_set_restart_in_rows: libloading::Symbol<
+            unsafe extern "C" fn(*mut c_void, c_int),
+        > = lib
+            .get(b"jpeg_capi_test_set_restart_in_rows")
+            .expect("jpeg_capi_test_set_restart_in_rows");
+        jpeg_capi_test_set_restart_in_rows(enc_cinfo_ptr, 2);
+
+        let jpeg_finish_compress: libloading::Symbol<unsafe extern "C" fn(*mut c_void)> = lib
+            .get(b"jpeg_finish_compress")
+            .expect("jpeg_finish_compress");
+        jpeg_finish_compress(enc_cinfo_ptr);
+
+        assert!(!out_buf.is_null());
+        assert!(out_size > 0);
+        let bytes: Vec<u8> = std::slice::from_raw_parts(out_buf, out_size as usize).to_vec();
+        let tj3_free: libloading::Symbol<unsafe extern "C" fn(*mut c_void)> =
+            lib.get(b"tj3Free").expect("tj3Free");
+        tj3_free(out_buf as *mut c_void);
+        let jpeg_destroy_compress: libloading::Symbol<unsafe extern "C" fn(*mut c_void)> = lib
+            .get(b"jpeg_destroy_compress")
+            .expect("jpeg_destroy_compress");
+        jpeg_destroy_compress(enc_cinfo_ptr);
+        let jpeg_destroy_decompress: libloading::Symbol<unsafe extern "C" fn(*mut c_void)> = lib
+            .get(b"jpeg_destroy_decompress")
+            .expect("jpeg_destroy_decompress");
+        jpeg_destroy_decompress(dec_cinfo_ptr);
+        bytes
+    };
+
+    // The DRI segment (FF DD) must declare a non-zero restart interval.
+    let dri_pos: usize = transcoded
+        .windows(2)
+        .position(|w| w[0] == 0xFF && w[1] == 0xDD)
+        .expect("DRI segment must be emitted when restart_in_rows is set");
+    let interval: u16 = u16::from_be_bytes([transcoded[dri_pos + 4], transcoded[dri_pos + 5]]);
+    assert!(
+        interval > 0,
+        "DRI interval must be non-zero in row-mode (got {interval})"
+    );
+
+    // Entropy stream must contain at least one RST marker (FF D0..FF D7).
+    let sos_pos: usize = transcoded
+        .windows(2)
+        .position(|w| w[0] == 0xFF && w[1] == 0xDA)
+        .expect("SOS segment expected");
+    let entropy: &[u8] = &transcoded[sos_pos..];
+    let has_rst: bool = entropy
+        .windows(2)
+        .any(|w| w[0] == 0xFF && (0xD0..=0xD7).contains(&w[1]));
+    assert!(
+        has_rst,
+        "entropy stream must contain RST markers when row-mode restart is set"
+    );
+}
