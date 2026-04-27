@@ -51,6 +51,11 @@ pub struct JpegCoefficients {
     pub x_density: u16,
     /// JFIF Y density from source.
     pub y_density: u16,
+    /// Adobe APP14 color-transform byte from the source JPEG, if an
+    /// Adobe marker was present. `None` means no APP14 was seen.
+    /// Re-emitting the same value on transcode preserves the original
+    /// colorspace classification (RGB vs YCbCr vs YCCK vs CMYK).
+    pub adobe_transform: Option<u8>,
 }
 
 /// Per-component info extracted for re-encoding.
@@ -197,6 +202,11 @@ pub fn read_coefficients(data: &[u8]) -> Result<JpegCoefficients> {
         density_unit,
         x_density: density.x,
         y_density: density.y,
+        adobe_transform: if metadata.saw_adobe_marker {
+            Some(metadata.adobe_transform)
+        } else {
+            None
+        },
     })
 }
 

@@ -3576,12 +3576,13 @@ fn inject_markers_after_soi(encoded: &[u8], priv_state: &CompressPrivate) -> Vec
 }
 
 /// Replace any leading JFIF APP0 segment in `encoded` with an Adobe
-/// APP14 marker whose `color_transform` byte matches `jpeg_color_space`
-/// (`JCS_YCCK` → 2, `JCS_CMYK`/`JCS_RGB`/other → 0). The other rules:
-/// JPEG forbids JFIF on 4-component images, and writing a stray JFIF
-/// causes downstream decoders to mis-detect the colorspace.
-fn swap_jfif_for_adobe_app14(encoded: &[u8], jpeg_color_space: c_int) -> Vec<u8> {
-    let transform: u8 = if jpeg_color_space == JCS_YCCK { 2 } else { 0 };
+/// APP14 marker whose `color_transform` byte equals `transform`. JPEG
+/// forbids JFIF on 4-component images, and a stray JFIF (or a missing
+/// Adobe APP14 when the source had one) makes downstream decoders
+/// mis-detect the colorspace, so the caller decides the transform byte
+/// from `JpegCoefficients::adobe_transform` first and the destination
+/// `jpeg_color_space` only as a fallback.
+fn swap_jfif_for_adobe_app14(encoded: &[u8], transform: u8) -> Vec<u8> {
     if encoded.len() < 4 || encoded[0] != 0xFF || encoded[1] != 0xD8 {
         return encoded.to_vec();
     }
@@ -3610,6 +3611,50 @@ fn swap_jfif_for_adobe_app14(encoded: &[u8], jpeg_color_space: c_int) -> Vec<u8>
     }
     out.extend_from_slice(&encoded[p..]);
     out
+}
+
+/// Insert an Adobe APP14 segment immediately after SOI plus any
+/// leading JFIF APP0, preserving both. Used when the source had Adobe
+/// APP14 metadata that must survive the transcode but the writer's
+/// auto-emitted JFIF is still legal (3-component output).
+fn inject_adobe_app14_after_jfif(encoded: &[u8], transform: u8) -> Vec<u8> {
+    if encoded.len() < 2 || encoded[0] != 0xFF || encoded[1] != 0xD8 {
+        return encoded.to_vec();
+    }
+    let split: usize = scan_past_jfif_app14(encoded);
+    // If the encoder already emitted an Adobe APP14 (current writers
+    // do not, but be defensive) leave the stream untouched rather than
+    // double-emit.
+    if has_adobe_marker(&encoded[2..split]) {
+        return encoded.to_vec();
+    }
+    let mut out: Vec<u8> = Vec::with_capacity(encoded.len() + 16);
+    out.extend_from_slice(&encoded[..split]);
+    write_adobe_app14_segment(&mut out, transform);
+    out.extend_from_slice(&encoded[split..]);
+    out
+}
+
+/// Return true if `region` contains an APP14 segment whose identifier
+/// is "Adobe". Used to avoid double-emitting an Adobe APP14 when the
+/// writer already produced one.
+fn has_adobe_marker(region: &[u8]) -> bool {
+    let mut p: usize = 0;
+    while p + 9 <= region.len() {
+        if region[p] != 0xFF {
+            break;
+        }
+        let marker: u8 = region[p + 1];
+        let seg_len: usize = ((region[p + 2] as usize) << 8) | region[p + 3] as usize;
+        if seg_len < 2 || p + 2 + seg_len > region.len() {
+            break;
+        }
+        if marker == 0xEE && &region[p + 4..p + 9] == b"Adobe" {
+            return true;
+        }
+        p += 2 + seg_len;
+    }
+    false
 }
 
 /// Emit an Adobe APP14 segment with the given color-transform byte.
@@ -4293,12 +4338,27 @@ fn run_coefficient_writer_and_flush(
             return false;
         }
     };
-    // 4-component JPEGs (CMYK / YCCK) cannot legally carry a JFIF APP0
-    // marker. The coefficient writers always emit JFIF, so we strip it
-    // and prepend an Adobe APP14 segment whose color-transform byte
-    // matches the destination jpeg_color_space (YCCK → 2, CMYK → 0).
+    // Adobe APP14 handling. Two cases:
+    //  * 4-component output (CMYK / YCCK): JPEG forbids JFIF APP0 on
+    //    4-component images. Strip JFIF and replace it with an Adobe
+    //    APP14. Transform byte: source `adobe_transform` first, then
+    //    destination `jpeg_color_space` (YCCK → 2 else 0).
+    //  * 3-component source with Adobe APP14: preserve the source
+    //    JFIF (if the writer emitted one) and inject the Adobe APP14
+    //    right after it. Both markers can legally co-exist on 3-comp
+    //    images and downstream decoders rely on each independently
+    //    (JFIF for density, APP14 for color transform classification).
     let encoded: Vec<u8> = if adjusted.components.len() == 4 {
-        swap_jfif_for_adobe_app14(&encoded, c.jpeg_color_space)
+        let transform: u8 = adjusted.adobe_transform.unwrap_or_else(|| {
+            if c.jpeg_color_space == JCS_YCCK {
+                2
+            } else {
+                0
+            }
+        });
+        swap_jfif_for_adobe_app14(&encoded, transform)
+    } else if let Some(transform) = adjusted.adobe_transform {
+        inject_adobe_app14_after_jfif(&encoded, transform)
     } else {
         encoded
     };
