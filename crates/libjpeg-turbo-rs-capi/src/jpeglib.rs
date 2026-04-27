@@ -103,10 +103,14 @@ pub struct JpegErrorMgr {
 // `jpeg_message_table` (the standard JMSG_* table) and, on miss, in
 // `addon_message_table` indexed by `msg_code - first_addon_message`.
 //
-// `RS_FIRST_ADDON_MSG` is chosen well above `JMSG_LASTMSGCODE` (~89 in
-// libjpeg-turbo today, with room to grow) so it cannot collide with a
-// future standard code.
-pub const RS_FIRST_ADDON_MSG: c_int = 1024;
+// `RS_FIRST_ADDON_MSG` must lie well above `JMSG_LASTMSGCODE` (~89 in
+// libjpeg-turbo today) AND above the conventional caller addon range
+// rooted at `JMSG_FIRSTADDONCODE = 1000` in `cdjpeg.h` (which the
+// stock djpeg/cjpeg/jpegtran tools install via `cdjpeg_message_table`,
+// covering codes up through the JWRN_GIF_* and JERR_PPM_* families).
+// 60000 is comfortably outside both ranges while remaining well within
+// the i32 space that `msg_code` can hold.
+pub const RS_FIRST_ADDON_MSG: c_int = 60000;
 pub const RS_JWRN_PROG_ARITH_RESTART_DROPPED: c_int = RS_FIRST_ADDON_MSG;
 
 // Wrapper to make a static array of C-string pointers `Sync`. Each
@@ -4492,6 +4496,20 @@ fn run_coefficient_writer_and_flush(
         if !c.err.is_null() {
             unsafe {
                 let err: &mut JpegErrorMgr = &mut *c.err;
+                // Always set msg_code to our public addon constant so
+                // a caller's `emit_message` hook can identify the
+                // warning by code (the recommended libjpeg pattern for
+                // discriminating warnings). The constant lives at
+                // RS_FIRST_ADDON_MSG (60000), which is far outside the
+                // conventional caller addon range rooted at
+                // JMSG_FIRSTADDONCODE = 1000 in cdjpeg.h, so this code
+                // cannot be confused with a caller-installed addon
+                // entry. When our table is the active one,
+                // format_message resolves the code to the meaningful
+                // string; under a caller-installed table it falls
+                // through to the "Bogus message code" placeholder
+                // (caller's format_message contract), but emit_message
+                // hooks still see the discriminating code.
                 let _owns_table: bool = ensure_rs_addon_table_installed(err);
                 err.msg_code = RS_JWRN_PROG_ARITH_RESTART_DROPPED;
                 if let Some(f) = err.emit_message {

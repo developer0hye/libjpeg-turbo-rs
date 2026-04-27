@@ -1821,3 +1821,214 @@ fn write_coefficients_warning_emits_meaningful_format_message() {
         "warning must not fall through to the 'Bogus message code' path (got {formatted:?})"
     );
 }
+
+// Mirrors libjpeg-turbo's cdjpeg.c: a static addon table that lives
+// alongside the caller, registered from JMSG_FIRSTADDONCODE = 1000
+// onward. The shim's warning emit must NOT clobber this table AND
+// must not pick a msg_code inside its range — otherwise format_message
+// would resolve to the caller's unrelated message text.
+const CALLER_FIRST_ADDON: c_int = 1000;
+#[repr(transparent)]
+struct CallerAddonTable([*const u8; 4]);
+// SAFETY: contents are pointers to `'static` immutable byte literals;
+// the array itself is read-only.
+unsafe impl Sync for CallerAddonTable {}
+static CALLER_ADDON_MESSAGES: CallerAddonTable = CallerAddonTable([
+    b"Caller addon code 1000\0".as_ptr(),
+    b"Caller addon code 1001\0".as_ptr(),
+    b"Caller addon code 1002\0".as_ptr(),
+    b"Caller addon code 1003\0".as_ptr(),
+]);
+
+// Public constant from src/jpeglib.rs — must match
+// `RS_JWRN_PROG_ARITH_RESTART_DROPPED` exactly. Hard-coded here
+// because dlopen-loaded tests cannot pull a Rust `pub const` from
+// the cdylib. Update this if the constant ever moves.
+const SHIM_JWRN_PROG_ARITH_RESTART_DROPPED: c_int = 60000;
+
+#[test]
+fn write_coefficients_warning_preserves_identity_under_caller_addon_table() {
+    // When a caller has installed their own addon_message_table (e.g.
+    // the cdjpeg_message_table from stock djpeg/cjpeg/jpegtran tools,
+    // rooted at JMSG_FIRSTADDONCODE = 1000), the shim's warning emit
+    // must:
+    //   1) NOT overwrite the caller-installed table.
+    //   2) NOT set a msg_code inside the caller's range (otherwise
+    //      format_message would resolve to the caller's unrelated
+    //      message — for example cdjpeg maps 1024 → JWRN_GIF_BADDATA).
+    //   3) Still set msg_code to the shim's stable identifying code so
+    //      a wrapper that hooks emit_message can recognize the warning
+    //      by code (the libjpeg-recommended discrimination pattern).
+    //   4) Allow format_message to fall through to the caller's
+    //      "Bogus message code" path rather than misleading text.
+    let lib = unsafe { libloading::Library::new(cdylib_path()) }.expect("dlopen");
+    let (jpeg_in, _src, _w, _h_px) = build_fixture_jpeg(&lib);
+
+    let (caller_table_intact, observed_code, formatted): (bool, c_int, String) = unsafe {
+        const CINFO_BYTES: usize = 4096;
+        let mut dec_cinfo: MaybeUninit<[u8; CINFO_BYTES]> = MaybeUninit::zeroed();
+        let dec_cinfo_ptr: *mut c_void = dec_cinfo.as_mut_ptr() as *mut c_void;
+        const ERR_BYTES: usize = 512;
+        let mut dec_err: MaybeUninit<[u8; ERR_BYTES]> = MaybeUninit::zeroed();
+        let dec_err_ptr: *mut c_void = dec_err.as_mut_ptr() as *mut c_void;
+        let jpeg_std_error: libloading::Symbol<unsafe extern "C" fn(*mut c_void) -> *mut c_void> =
+            lib.get(b"jpeg_std_error").expect("jpeg_std_error");
+        let _ = jpeg_std_error(dec_err_ptr);
+        (dec_cinfo_ptr as *mut *mut c_void).write(dec_err_ptr);
+        let jpeg_create_decompress: libloading::Symbol<
+            unsafe extern "C" fn(*mut c_void, c_int, usize),
+        > = lib
+            .get(b"jpeg_CreateDecompress")
+            .expect("jpeg_CreateDecompress");
+        jpeg_create_decompress(dec_cinfo_ptr, 80, CINFO_BYTES);
+        let jpeg_mem_src: libloading::Symbol<
+            unsafe extern "C" fn(*mut c_void, *const u8, c_ulong),
+        > = lib.get(b"jpeg_mem_src").expect("jpeg_mem_src");
+        jpeg_mem_src(dec_cinfo_ptr, jpeg_in.as_ptr(), jpeg_in.len() as c_ulong);
+        let jpeg_read_header: libloading::Symbol<
+            unsafe extern "C" fn(*mut c_void, c_int) -> c_int,
+        > = lib.get(b"jpeg_read_header").expect("jpeg_read_header");
+        assert_eq!(jpeg_read_header(dec_cinfo_ptr, 1), JPEG_HEADER_OK);
+        let jpeg_read_coefficients: libloading::Symbol<
+            unsafe extern "C" fn(*mut c_void) -> *mut c_void,
+        > = lib
+            .get(b"jpeg_read_coefficients")
+            .expect("jpeg_read_coefficients");
+        let coef_arrays: *mut c_void = jpeg_read_coefficients(dec_cinfo_ptr);
+        assert!(!coef_arrays.is_null());
+
+        let mut enc_cinfo: MaybeUninit<[u8; CINFO_BYTES]> = MaybeUninit::zeroed();
+        let enc_cinfo_ptr: *mut c_void = enc_cinfo.as_mut_ptr() as *mut c_void;
+        let mut enc_err: MaybeUninit<[u8; ERR_BYTES]> = MaybeUninit::zeroed();
+        let enc_err_ptr: *mut c_void = enc_err.as_mut_ptr() as *mut c_void;
+        let _ = jpeg_std_error(enc_err_ptr);
+
+        // Install caller's addon table (mimicking cdjpeg.c). Field
+        // offsets in JpegErrorMgr (see src/jpeglib.rs):
+        //   addon_message_table  @ 144 (callbacks 0..40 + msg_code 4
+        //     + msg_parm 80 + trace_level 4 + num_warnings 8
+        //     + jpeg_message_table 8 + last_jpeg_message 4 = 144,
+        //     and Rust adds 4 bytes of padding so the next pointer
+        //     aligns to 8). The actual offset is 144 + 4 padding =
+        //     148? — re-derive from concrete struct dump.
+        // Use offsetof-equivalent dynamic probe: write a sentinel
+        // pattern then scan for it.
+        let err_bytes_base: *mut u8 = enc_err_ptr as *mut u8;
+        // Per the JpegErrorMgr definition in src/jpeglib.rs (which is
+        // #[repr(C)]), fields after num_warnings (offset 128, 8 bytes)
+        // are: jpeg_message_table (ptr, 8 bytes, offset 136) →
+        // last_jpeg_message (c_int, 4 bytes, offset 144) → padding
+        // (4 bytes) → addon_message_table (ptr, 8 bytes, offset 152)
+        // → first_addon_message (c_int, 4 bytes, offset 160) →
+        // last_addon_message (c_int, 4 bytes, offset 164).
+        let addon_tbl_slot: *mut *const *const u8 = err_bytes_base.add(152) as *mut _;
+        addon_tbl_slot.write(CALLER_ADDON_MESSAGES.0.as_ptr());
+        let first_slot: *mut c_int = err_bytes_base.add(160) as *mut _;
+        first_slot.write(CALLER_FIRST_ADDON);
+        let last_slot: *mut c_int = err_bytes_base.add(164) as *mut _;
+        last_slot.write(CALLER_FIRST_ADDON + (CALLER_ADDON_MESSAGES.0.len() as c_int) - 1);
+
+        (enc_cinfo_ptr as *mut *mut c_void).write(enc_err_ptr);
+        let jpeg_create_compress: libloading::Symbol<
+            unsafe extern "C" fn(*mut c_void, c_int, usize),
+        > = lib
+            .get(b"jpeg_CreateCompress")
+            .expect("jpeg_CreateCompress");
+        jpeg_create_compress(enc_cinfo_ptr, 80, CINFO_BYTES);
+
+        let mut out_buf: *mut u8 = std::ptr::null_mut();
+        let mut out_size: c_ulong = 0;
+        let jpeg_mem_dest: libloading::Symbol<
+            unsafe extern "C" fn(*mut c_void, *mut *mut u8, *mut c_ulong),
+        > = lib.get(b"jpeg_mem_dest").expect("jpeg_mem_dest");
+        jpeg_mem_dest(enc_cinfo_ptr, &mut out_buf, &mut out_size);
+
+        let jpeg_write_coefficients: libloading::Symbol<
+            unsafe extern "C" fn(*mut c_void, *mut c_void),
+        > = lib
+            .get(b"jpeg_write_coefficients")
+            .expect("jpeg_write_coefficients");
+        jpeg_write_coefficients(enc_cinfo_ptr, coef_arrays);
+
+        let jpeg_capi_test_set_arith_code: libloading::Symbol<
+            unsafe extern "C" fn(*mut c_void, c_int),
+        > = lib
+            .get(b"jpeg_capi_test_set_arith_code")
+            .expect("jpeg_capi_test_set_arith_code");
+        jpeg_capi_test_set_arith_code(enc_cinfo_ptr, 1);
+        let jpeg_capi_test_set_progressive: libloading::Symbol<
+            unsafe extern "C" fn(*mut c_void, c_int),
+        > = lib
+            .get(b"jpeg_capi_test_set_progressive")
+            .expect("jpeg_capi_test_set_progressive");
+        jpeg_capi_test_set_progressive(enc_cinfo_ptr, 1);
+        let jpeg_capi_test_set_restart_in_rows: libloading::Symbol<
+            unsafe extern "C" fn(*mut c_void, c_int),
+        > = lib
+            .get(b"jpeg_capi_test_set_restart_in_rows")
+            .expect("jpeg_capi_test_set_restart_in_rows");
+        jpeg_capi_test_set_restart_in_rows(enc_cinfo_ptr, 2);
+
+        let jpeg_finish_compress: libloading::Symbol<unsafe extern "C" fn(*mut c_void)> = lib
+            .get(b"jpeg_finish_compress")
+            .expect("jpeg_finish_compress");
+        jpeg_finish_compress(enc_cinfo_ptr);
+
+        // Verify caller's table pointer is intact AND msg_code is the
+        // shim's stable identifier (NOT inside caller's range).
+        let post_table: *const *const u8 = addon_tbl_slot.read();
+        let intact: bool = std::ptr::eq(post_table, CALLER_ADDON_MESSAGES.0.as_ptr());
+        // msg_code @ offset 40 (after 5 callbacks × 8 bytes).
+        let msg_code_slot: *const c_int = err_bytes_base.add(40) as *const _;
+        let observed: c_int = msg_code_slot.read();
+
+        // format_message @ offset 24
+        let fmt_slot: *const Option<unsafe extern "C" fn(*mut c_void, *mut u8)> =
+            err_bytes_base.add(24) as *const _;
+        let format_message_fn: unsafe extern "C" fn(*mut c_void, *mut u8) = fmt_slot
+            .read()
+            .expect("format_message slot must be populated");
+        let mut buf: [u8; 256] = [0; 256];
+        format_message_fn(enc_cinfo_ptr, buf.as_mut_ptr());
+        let nul: usize = buf.iter().position(|&b| b == 0).unwrap_or(buf.len());
+        let s: String = String::from_utf8_lossy(&buf[..nul]).into_owned();
+
+        if !out_buf.is_null() {
+            let tj3_free: libloading::Symbol<unsafe extern "C" fn(*mut c_void)> =
+                lib.get(b"tj3Free").expect("tj3Free");
+            tj3_free(out_buf as *mut c_void);
+        }
+        let jpeg_destroy_compress: libloading::Symbol<unsafe extern "C" fn(*mut c_void)> = lib
+            .get(b"jpeg_destroy_compress")
+            .expect("jpeg_destroy_compress");
+        jpeg_destroy_compress(enc_cinfo_ptr);
+        let jpeg_destroy_decompress: libloading::Symbol<unsafe extern "C" fn(*mut c_void)> = lib
+            .get(b"jpeg_destroy_decompress")
+            .expect("jpeg_destroy_decompress");
+        jpeg_destroy_decompress(dec_cinfo_ptr);
+
+        (intact, observed, s)
+    };
+
+    assert!(
+        caller_table_intact,
+        "shim must not overwrite a caller-installed addon_message_table"
+    );
+    assert_eq!(
+        observed_code, SHIM_JWRN_PROG_ARITH_RESTART_DROPPED,
+        "shim must always set msg_code to its stable warning identifier so wrappers can \
+         discriminate by code (got {observed_code})"
+    );
+    assert!(
+        observed_code < CALLER_FIRST_ADDON
+            || observed_code > CALLER_FIRST_ADDON + (CALLER_ADDON_MESSAGES.0.len() as c_int) - 1,
+        "shim msg_code must not collide with caller's addon range \
+         [{CALLER_FIRST_ADDON}..={}] (got {observed_code})",
+        CALLER_FIRST_ADDON + (CALLER_ADDON_MESSAGES.0.len() as c_int) - 1
+    );
+    assert!(
+        !formatted.starts_with("Caller addon code"),
+        "format_message must not resolve to caller's unrelated message text \
+         (got {formatted:?})"
+    );
+}
