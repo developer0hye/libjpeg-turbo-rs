@@ -533,6 +533,17 @@ struct DecompressPrivate {
     /// the same bytes again (which the caller's source manager has
     /// already considered "consumed").
     bridge_partial: Vec<u8>,
+    /// `TRUE` once `jpeg_read_header` has completed successfully.
+    /// `jpeg_consume_input` consults it so a buffered/progressive
+    /// caller polling input after the header is already parsed
+    /// doesn't re-trigger header parsing — that would reset
+    /// header-derived defaults (`out_color_space`, `comp_info`,
+    /// quantize_colors, etc.) and clobber any post-header tweaks the
+    /// caller made between `jpeg_read_header` and the next
+    /// `consume_input` poll. Cleared in `jpeg_finish_decompress` /
+    /// `jpeg_abort_decompress` so a reuse of the same handle re-parses
+    /// the new image.
+    header_parsed_ok: bool,
 }
 
 impl Default for DecompressPrivate {
@@ -550,6 +561,7 @@ impl Default for DecompressPrivate {
             crop_active: false,
             comp_info_storage: Vec::new(),
             bridge_partial: Vec::new(),
+            header_parsed_ok: false,
         }
     }
 }
@@ -1405,6 +1417,11 @@ pub extern "C" fn jpeg_read_header(cinfo: *mut c_void, _require_image: CBoolean)
 
     c.global_state = DSTATE_INHEADER;
     priv_state.last_error = CString::new("No error").expect("static");
+    // Record that header parse completed so `jpeg_consume_input`
+    // doesn't re-run the parser on subsequent polls and clobber
+    // caller-set fields like `out_color_space` / `comp_info` /
+    // `quantize_colors`.
+    priv_state.header_parsed_ok = true;
     JPEG_HEADER_OK
 }
 
@@ -1438,8 +1455,8 @@ fn jcs_to_pixel_format(cs: c_int) -> Option<PixelFormat> {
         11 /* JCS_EXT_XRGB */ => Some(PixelFormat::Xrgb),
         12 /* JCS_EXT_RGBA */ => Some(PixelFormat::Rgba),
         13 /* JCS_EXT_BGRA */ => Some(PixelFormat::Bgra),
-        14 /* JCS_EXT_ABGR */ => Some(PixelFormat::Bgra),
-        15 /* JCS_EXT_ARGB */ => Some(PixelFormat::Rgba),
+        14 /* JCS_EXT_ABGR */ => Some(PixelFormat::Abgr),
+        15 /* JCS_EXT_ARGB */ => Some(PixelFormat::Argb),
         _ => None,
     }
 }
@@ -1787,6 +1804,10 @@ pub extern "C" fn jpeg_finish_decompress(cinfo: *mut c_void) -> CBoolean {
         priv_state.decoded = None;
         priv_state.source = JpegSource::None;
         priv_state.bridge_partial.clear();
+        // A reuse path will re-call `jpeg_read_header` for the new
+        // image; clear the flag so `jpeg_consume_input` doesn't
+        // short-circuit.
+        priv_state.header_parsed_ok = false;
     }
     1
 }
@@ -2660,6 +2681,19 @@ pub extern "C" fn jpeg_consume_input(cinfo: *mut c_void) -> c_int {
         Some(c) => c,
         None => return JPEG_SUSPENDED,
     };
+    // Short-circuit if the header has already been parsed: rerunning
+    // `jpeg_read_header` would clobber the caller's post-header
+    // tweaks (out_color_space, comp_info, quantize_colors, …). For our
+    // fully-buffered shim, EOI is the truthful answer the moment a
+    // header is in hand.
+    let priv_ptr: *mut c_void = decompress_private_raw(cinfo);
+    let header_done: bool = match unsafe { priv_from_ptr(priv_ptr) } {
+        Some(p) => p.header_parsed_ok,
+        None => false,
+    };
+    if header_done {
+        return JPEG_REACHED_EOI;
+    }
     match c.global_state {
         DSTATE_START | DSTATE_INHEADER => {
             let result: c_int = jpeg_read_header(cinfo, /*require_image=*/ 1);
@@ -2812,6 +2846,8 @@ pub extern "C" fn jpeg_abort_decompress(cinfo: *mut c_void) {
         // accidentally resume in the middle of an unrelated stream.
         p.source = JpegSource::None;
         p.bridge_partial.clear();
+        // Force a re-parse of the next image's header.
+        p.header_parsed_ok = false;
     }
     c.global_state = DSTATE_START;
     c.output_scanline = 0;
@@ -3368,8 +3404,8 @@ fn jcs_to_pixel_format_for_input(cs: c_int) -> Option<PixelFormat> {
         11 /* JCS_EXT_XRGB */ => Some(PixelFormat::Xrgb),
         12 /* JCS_EXT_RGBA */ => Some(PixelFormat::Rgba),
         13 /* JCS_EXT_BGRA */ => Some(PixelFormat::Bgra),
-        14 /* JCS_EXT_ABGR */ => Some(PixelFormat::Bgra), // no direct ABGR match
-        15 /* JCS_EXT_ARGB */ => Some(PixelFormat::Rgba), // no direct ARGB match
+        14 /* JCS_EXT_ABGR */ => Some(PixelFormat::Abgr),
+        15 /* JCS_EXT_ARGB */ => Some(PixelFormat::Argb),
         _ => None,
     }
 }
