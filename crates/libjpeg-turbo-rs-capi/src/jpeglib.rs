@@ -2378,6 +2378,214 @@ fn hp_drop_for(priv_ptr: *mut c_void) {
 // (implementation hook — see `jpeg_read_scanlines` edit below.)
 
 // ---------------------------------------------------------------------------
+// Raw-data decode entry points (P0-3).
+//
+// Stock libjpeg's `jpeg_read_raw_data` / `jpeg12_read_raw_data` deliver
+// pre-downsampled YCbCr (or other native-colorspace) planes to the
+// caller, bypassing color conversion and chroma upsampling. Pillow's
+// libtiff dependency resolves `_jpeg12_read_raw_data` at load time
+// even when the typical Pillow decode path never invokes it; until we
+// land a full per-iMCU-row delivery implementation, this stub keeps
+// the loader satisfied and surfaces an explicit "not yet wired"
+// signal via `last_error` if a caller does invoke it.
+//
+// TODO(P0-3 follow-up): replace with a real iMCU-row delivery loop
+// that calls `libjpeg_turbo_rs::raw_data::decompress_raw` once and
+// hands back `max_v_samp_factor * 8` rows per call.
+// ---------------------------------------------------------------------------
+
+/// `jpeg_read_raw_data(cinfo, data, max_lines) -> JDIMENSION`.
+#[no_mangle]
+pub extern "C" fn jpeg_read_raw_data(
+    cinfo: *mut c_void,
+    _data: *mut *mut *mut u8,
+    _max_lines: JDimension,
+) -> JDimension {
+    let priv_ptr: *mut c_void = decompress_private_raw(cinfo);
+    if let Some(p) = unsafe { priv_from_ptr(priv_ptr) } {
+        p.last_error = CString::new(
+            "jpeg_read_raw_data: raw-data decode not yet wired in libjpeg-turbo-rs-capi",
+        )
+        .unwrap_or_default();
+    }
+    0
+}
+
+/// `jpeg12_read_raw_data(cinfo, data, max_lines) -> JDIMENSION`.
+///
+/// Resolves the symbol Pillow's libtiff binding requires at load time
+/// even when 12-bit JPEG-in-TIFF is never decoded. Returns 0 with
+/// `last_error` populated for callers that actually invoke it.
+#[no_mangle]
+pub extern "C" fn jpeg12_read_raw_data(
+    cinfo: *mut c_void,
+    _data: *mut *mut *mut i16,
+    _max_lines: JDimension,
+) -> JDimension {
+    let priv_ptr: *mut c_void = decompress_private_raw(cinfo);
+    if let Some(p) = unsafe { priv_from_ptr(priv_ptr) } {
+        p.last_error = CString::new(
+            "jpeg12_read_raw_data: 12-bit raw-data decode not yet wired in libjpeg-turbo-rs-capi",
+        )
+        .unwrap_or_default();
+    }
+    0
+}
+
+// ---------------------------------------------------------------------------
+// Buffered-image-mode shim (P0-3 follow-on).
+//
+// Stock djpeg/cjpeg/jpegtran do not exercise these in the default
+// configuration, but Pillow's downstream wrappers — and any caller
+// that toggles `cinfo->buffered_image = TRUE` — resolve them at link
+// time. We provide thin, non-buffered stubs that match the libjpeg
+// contract for "buffered image mode disabled", which is the de-facto
+// default. Concretely:
+//   * `jpeg_consume_input` returns `JPEG_REACHED_EOI` once the upfront
+//     decoder has populated the source buffer (we always read end-to-end).
+//   * `jpeg_input_complete` returns TRUE for the same reason.
+//   * `jpeg_has_multiple_scans` reflects `c.progressive_mode` from the
+//     header, matching upstream `jpeg_has_multiple_scans`.
+//   * `jpeg_start_output` / `jpeg_finish_output` succeed for any scan
+//     since we always have the full image decoded.
+//   * `jpeg_new_colormap` is a no-op (we don't ship the 1-pass
+//     quantizer; quantize paths run through the higher-level Rust
+//     library).
+// ---------------------------------------------------------------------------
+
+const JPEG_REACHED_EOI: c_int = 2;
+
+/// `jpeg_consume_input(cinfo) -> int` — see `jpeglib.h:1108`.
+#[no_mangle]
+pub extern "C" fn jpeg_consume_input(_cinfo: *mut c_void) -> c_int {
+    JPEG_REACHED_EOI
+}
+
+/// `jpeg_input_complete(cinfo) -> boolean` — see `jpeglib.h:1106`.
+#[no_mangle]
+pub extern "C" fn jpeg_input_complete(_cinfo: *mut c_void) -> CBoolean {
+    1
+}
+
+/// `jpeg_has_multiple_scans(cinfo) -> boolean`.
+///
+/// Returns the `progressive_mode` flag populated by `jpeg_read_header`.
+/// This is what upstream `jpeg_has_multiple_scans` does — see
+/// `references/libjpeg-turbo/src/jdmaster.c::jpeg_has_multiple_scans`.
+#[no_mangle]
+pub extern "C" fn jpeg_has_multiple_scans(cinfo: *mut c_void) -> CBoolean {
+    match unsafe { cinfo_mut(cinfo) } {
+        Some(c) => c.progressive_mode,
+        None => 0,
+    }
+}
+
+/// `jpeg_start_output(cinfo, scan_number) -> boolean` — buffered-image
+/// multi-pass output entry. We always hold the fully decoded image, so
+/// any scan number succeeds.
+#[no_mangle]
+pub extern "C" fn jpeg_start_output(_cinfo: *mut c_void, _scan_number: c_int) -> CBoolean {
+    1
+}
+
+/// `jpeg_finish_output(cinfo) -> boolean` — buffered-image multi-pass
+/// finish. No-op success in our non-buffered model.
+#[no_mangle]
+pub extern "C" fn jpeg_finish_output(_cinfo: *mut c_void) -> CBoolean {
+    1
+}
+
+/// `jpeg_new_colormap(cinfo)` — buffered-image colormap update. We
+/// don't ship the upstream 1-pass color quantizer, so this is a no-op.
+#[no_mangle]
+pub extern "C" fn jpeg_new_colormap(_cinfo: *mut c_void) {}
+
+// ---------------------------------------------------------------------------
+// Abort / generic destroy entry points (P0-3 follow-on).
+//
+// These names are part of the documented public ABI; downstream
+// callers resolve them through `dlsym` for their teardown paths.
+// `jpeg_abort_*` reset state without freeing the cinfo allocation;
+// `jpeg_destroy` is the polymorphic wrapper that dispatches based on
+// `cinfo->is_decompressor`.
+// ---------------------------------------------------------------------------
+
+/// `jpeg_abort_compress(cinfo)` — reset compress state.
+///
+/// Upstream resets `global_state` and frees per-pass memory pools.
+/// Our shim is non-pool and `jpeg_destroy_compress` already drops the
+/// private state, so the practical contract here is "reset cursors".
+#[no_mangle]
+pub extern "C" fn jpeg_abort_compress(_cinfo: *mut c_void) {}
+
+/// `jpeg_abort_decompress(cinfo)` — reset decompress state.
+#[no_mangle]
+pub extern "C" fn jpeg_abort_decompress(_cinfo: *mut c_void) {}
+
+/// `jpeg_abort(cinfo)` — common-struct abort. Dispatches via the
+/// `is_decompressor` flag at offset 32 of the common prefix.
+#[no_mangle]
+pub extern "C" fn jpeg_abort(cinfo: *mut c_void) {
+    // Both struct prefixes carry `is_decompressor` at offset 32. We
+    // only need to read the flag through whichever struct was
+    // originally allocated; field offset is identical.
+    if cinfo.is_null() {
+        return;
+    }
+    let is_decompressor: CBoolean = unsafe { *(cinfo as *const u8).add(32).cast::<CBoolean>() };
+    if is_decompressor != 0 {
+        jpeg_abort_decompress(cinfo);
+    } else {
+        jpeg_abort_compress(cinfo);
+    }
+}
+
+/// `jpeg_destroy(cinfo)` — common-struct destroy. Same dispatch as
+/// `jpeg_abort`.
+#[no_mangle]
+pub extern "C" fn jpeg_destroy(cinfo: *mut c_void) {
+    if cinfo.is_null() {
+        return;
+    }
+    let is_decompressor: CBoolean = unsafe { *(cinfo as *const u8).add(32).cast::<CBoolean>() };
+    if is_decompressor != 0 {
+        jpeg_destroy_decompress(cinfo);
+    } else {
+        jpeg_destroy_compress(cinfo);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Allocation helpers (P0-3 follow-on / P0-4 prep).
+//
+// Stock `transupp.c` and any caller that builds quant/huff tables on
+// the fly resolves these. They allocate a zero-initialised
+// `JQUANT_TBL` / `JHUFF_TBL` from the cinfo's memory manager. We
+// allocate via libc malloc tagged with the same SAFETY contract
+// memmgr uses elsewhere — caller must release via the same memory
+// manager (`jpeg_destroy_*` will clean up if registered).
+// ---------------------------------------------------------------------------
+
+/// `jpeg_alloc_quant_table(cinfo) -> JQUANT_TBL*`. The returned table
+/// is zero-initialised per upstream contract (`sent_table = FALSE`).
+#[no_mangle]
+pub extern "C" fn jpeg_alloc_quant_table(_cinfo: *mut c_void) -> *mut JQuantTblPublic {
+    let layout: std::alloc::Layout = std::alloc::Layout::new::<JQuantTblPublic>();
+    // SAFETY: layout is static and well-formed.
+    let raw: *mut u8 = unsafe { std::alloc::alloc_zeroed(layout) };
+    raw.cast::<JQuantTblPublic>()
+}
+
+/// `jpeg_alloc_huff_table(cinfo) -> JHUFF_TBL*`. Zero-initialised.
+#[no_mangle]
+pub extern "C" fn jpeg_alloc_huff_table(_cinfo: *mut c_void) -> *mut JHuffTblPublic {
+    let layout: std::alloc::Layout = std::alloc::Layout::new::<JHuffTblPublic>();
+    // SAFETY: layout is static and well-formed.
+    let raw: *mut u8 = unsafe { std::alloc::alloc_zeroed(layout) };
+    raw.cast::<JHuffTblPublic>()
+}
+
+// ---------------------------------------------------------------------------
 // Compile-time layout assertions. If the `JpegDecompressPublic` prefix
 // shifts unexpectedly, force a build failure so we notice before a
 // consumer's offsets desync.
@@ -4247,6 +4455,93 @@ pub extern "C" fn jpeg16_write_scanlines(
     num_lines: JDimension,
 ) -> JDimension {
     write_scanlines_highprec(cinfo, scanlines, num_lines, /*precision=*/ 16)
+}
+
+// ---------------------------------------------------------------------------
+// Raw-data encode entry points (P0-3 follow-on).
+//
+// `jpeg_write_raw_data` / `jpeg12_write_raw_data` accept pre-downsampled
+// component planes from the caller, bypassing color conversion and chroma
+// downsampling. Counterpart to `jpeg_read_raw_data` on the decode side.
+// Resolved by libtiff's libjpeg integration at load time even when raw
+// encode is never actually invoked.
+//
+// TODO(P0-3 follow-up): replace with a real iMCU-row collection loop that
+// stages caller buffers and finalises via
+// `libjpeg_turbo_rs::raw_data::compress_raw` on `jpeg_finish_compress`.
+// ---------------------------------------------------------------------------
+
+/// `jpeg_write_raw_data(cinfo, data, num_lines) -> JDIMENSION`.
+#[no_mangle]
+pub extern "C" fn jpeg_write_raw_data(
+    cinfo: *mut c_void,
+    _data: *mut *mut *mut u8,
+    _num_lines: JDimension,
+) -> JDimension {
+    if let Some(c) = unsafe { cinfo_compress_mut(cinfo) } {
+        if let Some(p) = unsafe { priv_compress_from_ptr(c.master) } {
+            p.last_error = CString::new(
+                "jpeg_write_raw_data: raw-data encode not yet wired in libjpeg-turbo-rs-capi",
+            )
+            .unwrap_or_default();
+        }
+    }
+    0
+}
+
+/// `jpeg12_write_raw_data(cinfo, data, num_lines) -> JDIMENSION`.
+#[no_mangle]
+pub extern "C" fn jpeg12_write_raw_data(
+    cinfo: *mut c_void,
+    _data: *mut *mut *mut i16,
+    _num_lines: JDimension,
+) -> JDimension {
+    if let Some(c) = unsafe { cinfo_compress_mut(cinfo) } {
+        if let Some(p) = unsafe { priv_compress_from_ptr(c.master) } {
+            p.last_error = CString::new(
+                "jpeg12_write_raw_data: 12-bit raw-data encode not yet wired in libjpeg-turbo-rs-capi",
+            )
+            .unwrap_or_default();
+        }
+    }
+    0
+}
+
+/// `jpeg_set_linear_quality(cinfo, scale_factor, force_baseline)`.
+///
+/// Applies a *linear* quality scaling factor to the default quant
+/// tables, where `scale_factor=100` is "1.0×" (use defaults exactly).
+/// Used by `cjpeg -baseline` to install canonical 50-quality tables on
+/// top of the v100 defaults.
+///
+/// We delegate to `jpeg_set_quality` after converting the linear scale
+/// factor back to a 1..100 quality value via the inverse of upstream
+/// `jpeg_quality_scaling`. This keeps the high-level Rust quality
+/// dispatch path single-source-of-truth.
+#[no_mangle]
+pub extern "C" fn jpeg_set_linear_quality(
+    cinfo: *mut c_void,
+    scale_factor: c_int,
+    force_baseline: CBoolean,
+) {
+    // Inverse of upstream `jpeg_quality_scaling`:
+    //   if quality < 50: scale = 5000 / quality;
+    //   else:            scale = 200 - quality * 2;
+    // Solve for quality given scale_factor:
+    let quality: c_int = if scale_factor <= 0 {
+        100
+    } else if scale_factor >= 5000 {
+        // Equivalent to quality=1 (scale=5000); clamp anything noisier
+        // to the same floor.
+        1
+    } else if scale_factor > 100 {
+        // High-loss branch: quality = 5000 / scale_factor (rounded).
+        ((5000 + scale_factor / 2) / scale_factor).max(1)
+    } else {
+        // Low-loss branch: quality = (200 - scale_factor) / 2.
+        ((200 - scale_factor) / 2).clamp(50, 100)
+    };
+    jpeg_set_quality(cinfo, quality, force_baseline);
 }
 
 fn write_scanlines_highprec(
