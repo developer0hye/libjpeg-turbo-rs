@@ -264,11 +264,25 @@ The current "stub still fails" test must be replaced with end-to-end load/save t
 # After correctness gates above are green
 cargo bench --bench encode
 # Compile and run the matching C baseline (C source ships in
-# examples/, no pre-built binary is checked in). Use pkg-config so
-# both Homebrew (`brew install jpeg-turbo`) and Conda
-# (`$CONDA_PREFIX/lib`) installs of libjpeg-turbo work:
-cc -O2 examples/bench_c_encode_matrix.c -o /tmp/bench_c_encode_matrix \
-   $(pkg-config --cflags --libs libjpeg)
+# examples/, no pre-built binary is checked in).
+#
+# Prerequisites: a libjpeg-turbo install that exposes headers and
+# `libjpeg`. If you have pkg-config available (`brew install pkgconf`
+# on macOS, `apt-get install pkg-config` on Debian/Ubuntu), the
+# pkg-config form below works on both Homebrew and Conda. Without
+# pkg-config, fall back to the explicit -I/-L flags pinned to your
+# install prefix.
+if command -v pkg-config >/dev/null && pkg-config --exists libjpeg; then
+  cc -O2 examples/bench_c_encode_matrix.c -o /tmp/bench_c_encode_matrix \
+     $(pkg-config --cflags --libs libjpeg) \
+     -Wl,-rpath,$(pkg-config --variable=libdir libjpeg)
+else
+  # Fallback: point at your install prefix explicitly.
+  PREFIX=${LIBJPEG_PREFIX:-${CONDA_PREFIX:-/opt/homebrew/opt/jpeg-turbo}}
+  cc -O2 examples/bench_c_encode_matrix.c -o /tmp/bench_c_encode_matrix \
+     -I"$PREFIX/include" -L"$PREFIX/lib" -ljpeg \
+     -Wl,-rpath,"$PREFIX/lib"
+fi
 /tmp/bench_c_encode_matrix
 ```
 
@@ -576,10 +590,24 @@ bash examples/stock_djpeg_cjpeg/run.sh
 # Encode performance baseline (post-correctness):
 cargo bench --bench encode
 # Compile and run the matching C baseline (C source ships in
-# examples/, no pre-built binary is checked in). Use pkg-config so
-# both Homebrew (`brew install jpeg-turbo`) and Conda
-# (`$CONDA_PREFIX/lib`) installs of libjpeg-turbo work:
-cc -O2 examples/bench_c_encode_matrix.c -o /tmp/bench_c_encode_matrix \
-   $(pkg-config --cflags --libs libjpeg)
+# examples/, no pre-built binary is checked in).
+#
+# Prerequisites: a libjpeg-turbo install that exposes headers and
+# `libjpeg`. If you have pkg-config available (`brew install pkgconf`
+# on macOS, `apt-get install pkg-config` on Debian/Ubuntu), the
+# pkg-config form below works on both Homebrew and Conda. Without
+# pkg-config, fall back to the explicit -I/-L flags pinned to your
+# install prefix.
+if command -v pkg-config >/dev/null && pkg-config --exists libjpeg; then
+  cc -O2 examples/bench_c_encode_matrix.c -o /tmp/bench_c_encode_matrix \
+     $(pkg-config --cflags --libs libjpeg) \
+     -Wl,-rpath,$(pkg-config --variable=libdir libjpeg)
+else
+  # Fallback: point at your install prefix explicitly.
+  PREFIX=${LIBJPEG_PREFIX:-${CONDA_PREFIX:-/opt/homebrew/opt/jpeg-turbo}}
+  cc -O2 examples/bench_c_encode_matrix.c -o /tmp/bench_c_encode_matrix \
+     -I"$PREFIX/include" -L"$PREFIX/lib" -ljpeg \
+     -Wl,-rpath,"$PREFIX/lib"
+fi
 /tmp/bench_c_encode_matrix
 ```
