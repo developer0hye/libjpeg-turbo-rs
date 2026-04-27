@@ -23,7 +23,7 @@ Live checks on 2026-04-27 (refresh whenever the gap inventory changes — failur
 | `cargo test --workspace --no-fail-fast` | Fails `-p libjpeg-turbo-rs --test cross_product_transform` | Native transform correctness is still red. |
 | `cargo test -p libjpeg-turbo-rs --test cross_product_transform tjtrantest_full_cross_product -- --exact` | 14,112 tested; `arithmetic DC overflow` decode failures | Arithmetic transform output can be corrupt in a real option cross-product. Clean `main` showed 9 failures; an in-progress progressive arithmetic restart patch changed the shape to 12 failures, so fix the class, not the count. |
 | `cargo test --test capi_stock_tool_link -- --include-ignored` | Stock tools link, then our-linked `djpeg` aborts on `testorig`, `testimgari`, `testimgint`, `monkey12` | The shim is not a drop-in `libjpeg.so.62` for stock tools yet. |
-| `cargo test --test capi_pillow_compat -- --nocapture` | Test reports `ok` but Pillow load returns blocker code 3: missing `_jpeg12_read_raw_data` | A blocker is being treated as a skip. That is unacceptable for replacement-readiness. |
+| `cargo test --test capi_pillow_compat -- --nocapture` | **Passes**: phase-A dlopen ok, phase-B Pillow round-trip @ q=90 PSNR 49.49 dB (≥ 30 dB floor). Blocker-code-3 is now a hard panic, not a skip. | P0-3 closed. |
 | `cargo test -p libjpeg-turbo-rs-capi --test tjunittest_link -- --include-ignored --exact tjunittest_default_suite_passes` | Passes | The ignore on this test is stale and should be removed. |
 
 The current `docs/FEATURE_PARITY.md` and `docs/C_API_REFERENCE.md` are valuable, but they are too optimistic for replacement-readiness. Keep them as API mapping documents; use this document as the release gate for "can replace C libjpeg-turbo."
@@ -106,24 +106,24 @@ cargo test --test capi_stock_tool_link -- --include-ignored
 
 Then remove the stale ignored regression guard or invert it into "classic symbols are present and stock tools run."
 
-### P0-3. Pillow Cannot Load Because Classic-API Symbols Are Missing
+### P0-3. Pillow Cannot Load Because Classic-API Symbols Are Missing — **CLOSED**
 
-**Symptom (loader half — closed):** the original blocker was
+Verified `2026-04-28` against Pillow 12.2.0 + Python 3.14 on macOS (arm64): `cargo test --test capi_pillow_compat` passes phase A (dlopen + classic-symbol probe) **and** phase B (Pillow `Image.open → load → save → re-open` round-trip on `tests/fixtures/cjpeg_240x320_portrait_444.jpg`). Round-trip PSNR @ q=90 = **49.49 dB** (well above the 30 dB acceptance floor), encoded output 5821 bytes. `tests/capi_pillow_compat.rs` blocker-code-3 is a hard failure (no SKIP), and `shim_exports_classic_jpeg_api` hard-asserts presence of every required name.
+
+**Original symptom (loader half):**
 
 ```text
 Symbol not found: _jpeg12_read_raw_data
 Referenced from: .../PIL/.dylibs/libtiff.6.dylib
 ```
 
-This is now resolved. `tests/capi_stock_tool_link.rs::shim_exports_classic_jpeg_api` hard-asserts presence of every required name and runs by default; the loader-half regression guard is wired.
-
-**Symptom (decode-behavior half — open):** with the symbols in place, `tests/capi_pillow_compat.rs` now reaches phase B and Pillow's `Image.open(...).load()` fails with
+**Original symptom (decode-behavior half):**
 
 ```text
 OSError: image file is truncated (9046 bytes not processed)
 ```
 
-That is a real classic-API decode behavior gap, not a missing symbol — Pillow's `_imaging` resolver expects the source manager to drain to EOI before `jpeg_finish_decompress`. The shim currently decodes the full image upfront in `jpeg_start_decompress` and never advances the public `cinfo->src->bytes_in_buffer`, so Pillow concludes the source was truncated.
+That second symptom traced to two distinct gaps: (1) the shim ignored the `jpeg_source_mgr` Pillow installs directly and saw `JpegSource::None` from `jpeg_read_header`; and (2) the JCS_EXT_* enum table was numbered at 13..22 instead of upstream's 6..15, so PIL's `JCS_EXT_RGBX` request fell through to `Cmyk`/`Rgb` defaults and the shim emitted a 4-component CMYK JPEG (or, on decode, copied 3-byte rows into PIL's 4-byte allocation) — round-trip PSNR ≈ 9–12 dB.
 
 **Why this matters:** A drop-in library cannot pass by silently leaving a downstream wrapper to misinterpret the source state.
 
