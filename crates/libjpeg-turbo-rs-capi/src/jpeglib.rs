@@ -485,6 +485,49 @@ impl CoefHandle {
     const MAGIC: u64 = u64::from_le_bytes(*b"RsCoefH!");
 }
 
+/// Process-global registry mapping the `jvirt_barray_ptr*` array
+/// returned by `jpeg_read_coefficients` to the parsed `CoefHandle` it
+/// was built alongside. `jpeg_write_coefficients` consults this table
+/// so the in-process round-trip path (read coefficients, immediately
+/// write coefficients without touching them) can shortcut to the
+/// CoefHandle's `JpegCoefficients` and skip rebuilding from individual
+/// barray reads. Foreign arrays produced by a stock `transupp` /
+/// `jtransform_adjust_parameters` won't appear in the table and fall
+/// through to the slower materialise-from-barrays path.
+///
+/// Pointers are stored as `usize` because raw pointers don't implement
+/// `Send`; we cast back to the appropriate pointer type at the call
+/// site, which is sound because the lifetimes are managed by the
+/// owning cinfo (registry entries are removed in
+/// `jpeg_destroy_decompress` / `jpeg_finish_decompress` /
+/// `jpeg_abort_decompress` before the storage is freed).
+fn coef_array_to_handle_table() -> &'static std::sync::Mutex<std::collections::HashMap<usize, usize>>
+{
+    static TABLE: std::sync::OnceLock<std::sync::Mutex<std::collections::HashMap<usize, usize>>> =
+        std::sync::OnceLock::new();
+    TABLE.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
+}
+
+fn coef_register_array(array_ptr: *const c_void, handle_ptr: *const CoefHandle) {
+    if let Ok(mut t) = coef_array_to_handle_table().lock() {
+        t.insert(array_ptr as usize, handle_ptr as usize);
+    }
+}
+
+fn coef_lookup_handle(array_ptr: *const c_void) -> Option<*const CoefHandle> {
+    coef_array_to_handle_table()
+        .lock()
+        .ok()
+        .and_then(|t| t.get(&(array_ptr as usize)).copied())
+        .map(|p| p as *const CoefHandle)
+}
+
+fn coef_unregister_array(array_ptr: *const c_void) {
+    if let Ok(mut t) = coef_array_to_handle_table().lock() {
+        t.remove(&(array_ptr as usize));
+    }
+}
+
 /// Rust-side private state reached via the thread-local side table
 /// keyed by the `cinfo` pointer. Owned via `Box`; freed in
 /// `jpeg_destroy_decompress`.
@@ -500,12 +543,18 @@ struct DecompressPrivate {
     /// Decoded image buffer, built lazily on `jpeg_start_decompress`.
     decoded: Option<libjpeg_turbo_rs::Image>,
     /// Saved DCT coefficients, populated by `jpeg_read_coefficients`.
-    /// Held in `Box<CoefHandle>` so callers can treat its pointer as
-    /// `jvirt_barray_ptr*`. The `CoefHandle::MAGIC` field is checked by
-    /// `jpeg_write_coefficients` before deref to reject foreign pointers
-    /// (for example virtual coefficient arrays from a real libjpeg
-    /// memory manager).
+    /// Held in `Box<CoefHandle>` so the address is pinned across reuses
+    /// of the cinfo. `coef_array_to_handle_table` maps the
+    /// caller-visible `jvirt_barray_ptr*` array address back to this
+    /// CoefHandle so an in-process `jpeg_write_coefficients` can
+    /// shortcut to the cached `JpegCoefficients`.
     coefficients: Option<Box<CoefHandle>>,
+    /// Caller-visible `jvirt_barray_ptr*` array returned from the most
+    /// recent `jpeg_read_coefficients`. Storage is owned by the cinfo's
+    /// `JpegMemoryMgr` (JPOOL_IMAGE), so the pointer is valid until the
+    /// cinfo is destroyed; we keep it here to deregister from the
+    /// global side table on destroy/abort/finish to avoid table leaks.
+    coef_array_ptr: *mut c_void,
     /// `jpeg_save_markers` settings; consumed by `jpeg_read_header` when the
     /// header is (re-)parsed so saved markers land in `Image.saved_markers`.
     marker_save: MarkerSaveSettings,
@@ -554,6 +603,7 @@ impl Default for DecompressPrivate {
             last_error: CString::new("No error").expect("static"),
             decoded: None,
             coefficients: None,
+            coef_array_ptr: std::ptr::null_mut(),
             marker_save: MarkerSaveSettings::default(),
             marker_processors: std::collections::HashMap::new(),
             crop_xoffset: 0,
@@ -562,6 +612,23 @@ impl Default for DecompressPrivate {
             comp_info_storage: Vec::new(),
             bridge_partial: Vec::new(),
             header_parsed_ok: false,
+        }
+    }
+}
+
+impl Drop for DecompressPrivate {
+    fn drop(&mut self) {
+        // The `jvirt_barray_ptr*` array we returned from
+        // `jpeg_read_coefficients` was allocated through this
+        // cinfo's `JpegMemoryMgr` (JPOOL_IMAGE) and is freed when the
+        // pool is freed. The `CoefHandle` it pointed at lives inside
+        // this struct and is about to drop. Remove the global
+        // side-table entry now so a future cinfo cannot accidentally
+        // get a stale handle pointer if the address happens to be
+        // reused by the system allocator.
+        if !self.coef_array_ptr.is_null() {
+            coef_unregister_array(self.coef_array_ptr as *const c_void);
+            self.coef_array_ptr = std::ptr::null_mut();
         }
     }
 }
@@ -2082,21 +2149,30 @@ pub extern "C" fn jpeg_read_icc_profile(
 /// `jpeg_read_coefficients(cinfo) -> jvirt_barray_ptr *`.
 ///
 /// Parses the input JPEG entropy-coded data to recover quantized DCT
-/// coefficients without performing IDCT or color conversion. The
-/// returned pointer is an **opaque handle** to Rust-owned storage
-/// — applications **must not** dereference it as an honest
-/// `jvirt_barray_ptr *` and must not call `free()` on it. The handle
-/// stays valid until `jpeg_destroy_decompress` frees the enclosing
-/// `cinfo`.
+/// coefficients without performing IDCT or color conversion. Returns
+/// a real `jvirt_barray_ptr *` (an array of N component
+/// `jvirt_barray_ptr`s allocated through `cinfo->mem`), populated with
+/// the parsed coefficients in iMCU-aligned blocks. Each entry is a
+/// `JVirtBarrayControl *` realised by `realize_virt_arrays`, so stock
+/// `transupp` / `jtransform_*` helpers can iterate it via
+/// `cinfo->mem->access_virt_barray` exactly as they would with
+/// upstream libjpeg-turbo.
 ///
-/// Consumers that want to re-encode the coefficients (classic
-/// transcoding flow) can combine this pointer with
-/// `jpeg_copy_critical_parameters` and hand the result off to the
-/// compress-side `jpeg_write_coefficients`, once that encode-side
-/// entry point is implemented.
+/// Storage lifetime is the cinfo's `JPOOL_IMAGE`: the array stays
+/// valid until `jpeg_destroy_decompress` (or `jpeg_finish_decompress`
+/// + reuse) frees the pool. Callers MUST NOT `free()` the pointer.
+///
+/// In-process consumers that immediately pass this pointer to
+/// `jpeg_write_coefficients(dstinfo, …)` will hit a fast path that
+/// recovers the parsed `JpegCoefficients` from the global side table
+/// and skips the per-barray re-read; foreign arrays produced by
+/// `jtransform_adjust_parameters` (i.e. the destination workspace
+/// allocated by transupp) fall through to the slower
+/// "materialise from barrays + cinfo metadata" path implemented in
+/// `run_coefficient_writer_and_flush`.
 #[no_mangle]
 pub extern "C" fn jpeg_read_coefficients(cinfo: *mut c_void) -> *mut c_void {
-    let _c: &mut JpegDecompressPublic = match unsafe { cinfo_mut(cinfo) } {
+    let c: &mut JpegDecompressPublic = match unsafe { cinfo_mut(cinfo) } {
         Some(c) => c,
         None => return std::ptr::null_mut(),
     };
@@ -2105,6 +2181,16 @@ pub extern "C" fn jpeg_read_coefficients(cinfo: *mut c_void) -> *mut c_void {
         Some(p) => p,
         None => return std::ptr::null_mut(),
     };
+
+    // Fast-path: a previous successful `jpeg_read_coefficients` already
+    // parsed and registered the array — return the same pointer so
+    // repeated polls observe identical handles (matches libjpeg's
+    // contract that the returned virt_barray array is stable across
+    // reads on the same cinfo).
+    if !priv_state.coef_array_ptr.is_null() && priv_state.coefficients.is_some() {
+        return priv_state.coef_array_ptr;
+    }
+
     let bytes: Vec<u8> = match priv_state.source.as_bytes() {
         Some(b) => b.to_vec(),
         None => {
@@ -2122,91 +2208,430 @@ pub extern "C" fn jpeg_read_coefficients(cinfo: *mut c_void) -> *mut c_void {
                 return std::ptr::null_mut();
             }
         };
+
+    // Stash the parsed coefficients in a CoefHandle so callers that
+    // round-trip through this shim (read_coefficients →
+    // write_coefficients on a sibling cinfo) get the cached
+    // JpegCoefficients via the side table without rebuilding from
+    // individual barray reads.
     priv_state.coefficients = Some(Box::new(CoefHandle {
         magic: CoefHandle::MAGIC,
         inner: coeffs,
     }));
-    // Return the inner box pointer as an opaque handle. The value lives
-    // inside `DecompressPrivate` and is dropped by `jpeg_destroy_decompress`.
-    match priv_state.coefficients.as_mut() {
-        Some(boxed) => boxed.as_mut() as *mut _ as *mut c_void,
-        None => std::ptr::null_mut(),
+    let handle_ptr: *const CoefHandle =
+        priv_state.coefficients.as_deref().expect("just inserted") as *const CoefHandle;
+
+    // Build the foreign-style `jvirt_barray_ptr*` array via cinfo->mem
+    // so `transupp` (compiled into stock `jpegtran`) can index it as
+    // a plain C array.
+    let mem_ptr: *mut c_void = c.mem;
+    if mem_ptr.is_null() {
+        priv_state.last_error =
+            CString::new("jpeg_read_coefficients: cinfo->mem is null").unwrap_or_default();
+        return std::ptr::null_mut();
     }
+    let mem: &memmgr::JpegMemoryMgr = unsafe { &*(mem_ptr as *const memmgr::JpegMemoryMgr) };
+    let alloc_small: memmgr::AllocFn = match mem.alloc_small {
+        Some(f) => f,
+        None => {
+            priv_state.last_error =
+                CString::new("jpeg_read_coefficients: alloc_small not wired").unwrap_or_default();
+            return std::ptr::null_mut();
+        }
+    };
+    let request_virt_barray: memmgr::RequestVirtBarrayFn = match mem.request_virt_barray {
+        Some(f) => f,
+        None => {
+            priv_state.last_error =
+                CString::new("jpeg_read_coefficients: request_virt_barray not wired")
+                    .unwrap_or_default();
+            return std::ptr::null_mut();
+        }
+    };
+    let realize_virt_arrays: memmgr::RealizeVirtArraysFn = match mem.realize_virt_arrays {
+        Some(f) => f,
+        None => {
+            priv_state.last_error =
+                CString::new("jpeg_read_coefficients: realize_virt_arrays not wired")
+                    .unwrap_or_default();
+            return std::ptr::null_mut();
+        }
+    };
+    let access_virt_barray: memmgr::AccessVirtBarrayFn = match mem.access_virt_barray {
+        Some(f) => f,
+        None => {
+            priv_state.last_error =
+                CString::new("jpeg_read_coefficients: access_virt_barray not wired")
+                    .unwrap_or_default();
+            return std::ptr::null_mut();
+        }
+    };
+
+    let inner: &libjpeg_turbo_rs::JpegCoefficients =
+        &priv_state.coefficients.as_deref().expect("set above").inner;
+    let n: usize = inner.components.len();
+    if n == 0 {
+        return std::ptr::null_mut();
+    }
+
+    // Allocate the array of `jvirt_barray_ptr` slots from JPOOL_IMAGE.
+    let array_bytes: usize = n * std::mem::size_of::<*mut memmgr::JVirtBarrayControl>();
+    let array_raw: *mut c_void = unsafe { alloc_small(cinfo, memmgr::JPOOL_IMAGE, array_bytes) };
+    if array_raw.is_null() {
+        priv_state.last_error =
+            CString::new("jpeg_read_coefficients: alloc_small returned null").unwrap_or_default();
+        return std::ptr::null_mut();
+    }
+    let array_slot: *mut *mut memmgr::JVirtBarrayControl =
+        array_raw as *mut *mut memmgr::JVirtBarrayControl;
+
+    // Allocate per-component virt barrays. `comp.blocks_x / blocks_y`
+    // are already iMCU-padded by the parser (see `read_coefficients`
+    // in `src/api/coefficient.rs`), so we can pass them straight
+    // through as the requested barray dimensions.
+    for ci in 0..n {
+        let comp: &libjpeg_turbo_rs::ComponentCoefficients = &inner.components[ci];
+        let blocks_x: JDimension = comp.blocks_x as JDimension;
+        let blocks_y: JDimension = comp.blocks_y as JDimension;
+        let v_samp: JDimension = comp.v_sampling as JDimension;
+        let barray: *mut memmgr::JVirtBarrayControl = unsafe {
+            request_virt_barray(
+                cinfo,
+                memmgr::JPOOL_IMAGE,
+                /*pre_zero=*/ 0,
+                blocks_x,
+                blocks_y,
+                v_samp.max(1),
+            )
+        };
+        if barray.is_null() {
+            priv_state.last_error = CString::new(format!(
+                "jpeg_read_coefficients: request_virt_barray(comp={ci}) returned null"
+            ))
+            .unwrap_or_default();
+            return std::ptr::null_mut();
+        }
+        // SAFETY: `array_slot` points at an `n`-element array allocated
+        // above; `ci < n`.
+        unsafe {
+            *array_slot.add(ci) = barray;
+        }
+    }
+
+    // Realize backing storage for every requested virt array.
+    unsafe { realize_virt_arrays(cinfo) };
+
+    // Populate each barray with the parsed coefficient blocks, copying
+    // through `access_virt_barray` so we use the same access pattern
+    // a foreign caller would.
+    for ci in 0..n {
+        let comp: &libjpeg_turbo_rs::ComponentCoefficients = &inner.components[ci];
+        let blocks_x_u: usize = comp.blocks_x;
+        let blocks_y_u: usize = comp.blocks_y;
+        let blocks_x: JDimension = blocks_x_u as JDimension;
+        let blocks_y: JDimension = blocks_y_u as JDimension;
+        let barray: *mut memmgr::JVirtBarrayControl = unsafe { *array_slot.add(ci) };
+        let row_array: memmgr::JBlockArray = unsafe {
+            access_virt_barray(cinfo, barray, 0, blocks_y, /*writable=*/ 1)
+        };
+        if row_array.is_null() {
+            priv_state.last_error = CString::new(format!(
+                "jpeg_read_coefficients: access_virt_barray(comp={ci}) returned null"
+            ))
+            .unwrap_or_default();
+            return std::ptr::null_mut();
+        }
+        for r in 0..blocks_y_u {
+            // SAFETY: row_array has `blocks_y` row pointers, each
+            // pointing to `blocks_x` JBlocks, allocated by
+            // `alloc_barray_impl`.
+            let row_ptr: memmgr::JBlockRow = unsafe { *row_array.add(r) };
+            let row_blocks: &mut [memmgr::JBlock] =
+                unsafe { std::slice::from_raw_parts_mut(row_ptr, blocks_x_u) };
+            for (c_idx, dst_block) in row_blocks.iter_mut().enumerate() {
+                let blk_idx: usize = r * blocks_x_u + c_idx;
+                // Convert zigzag → natural row-major so foreign
+                // consumers (stock `transupp::do_rot_*` /
+                // `do_transpose / …`) can index coefficients as
+                // `block[i*8+j]` representing the (i,j) DCT element.
+                // Our parser emits zigzag (the order DQT stores), so
+                // we un-zigzag here. `materialize_foreign_coef_arrays`
+                // re-zigzags before re-encoding.
+                let zigzag_block: &[i16; 64] = &comp.blocks[blk_idx];
+                for (natural_pos, slot) in dst_block.iter_mut().enumerate() {
+                    let zigzag_pos: usize =
+                        libjpeg_turbo_rs::common::quant_table::NATURAL_ORDER[natural_pos];
+                    *slot = zigzag_block[zigzag_pos];
+                }
+            }
+            let _ = blocks_x; // silence unused warning if width is 0.
+        }
+    }
+
+    // Register the array → CoefHandle mapping so an in-process
+    // `jpeg_write_coefficients` can shortcut to the cached
+    // JpegCoefficients.
+    coef_register_array(array_raw as *const c_void, handle_ptr);
+    priv_state.coef_array_ptr = array_raw;
+
+    array_raw
 }
 
 /// `jpeg_copy_critical_parameters(srcinfo, dstinfo)`.
 ///
-/// Copies the subset of `jpeg_compress_struct` fields that
-/// `jpegtran` needs to re-encode the coefficient array returned from
-/// `jpeg_read_coefficients`: image dimensions, component sampling,
-/// and quantization tables.
+/// Copies the subset of fields needed by `jpegtran` to re-encode the
+/// coefficient arrays returned from `jpeg_read_coefficients`. Mirrors
+/// upstream libjpeg-turbo's `jctrans.c::jpeg_copy_critical_parameters`:
+/// dimensions, color-space classification, sampling factors, quant
+/// tables, JFIF version, density.
 ///
-/// Because our shim does not yet expose a `jpeg_compress_struct`
-/// layout, we surface the parameters through the Rust-side
-/// `EncoderConfig` structure and stash it alongside the coefficient
-/// handle; the encode-side implementation in a future task consumes
-/// it. If `srcinfo` has not run `jpeg_read_coefficients` yet, this
-/// is a no-op — matching libjpeg's behavior of copying zeroed fields.
+/// On invalid input (NULL pointers, header-not-yet-parsed, mismatched
+/// `is_decompressor` flags) this is a tolerant no-op so callers that
+/// chain it before establishing both cinfos cannot crash the process.
 #[no_mangle]
 pub extern "C" fn jpeg_copy_critical_parameters(srcinfo: *mut c_void, dstinfo: *mut c_void) {
-    // `dstinfo` is a compress handle in upstream libjpeg. In our shim the
-    // compress-side ABI is not yet wired, so we treat `dstinfo` as opaque
-    // and only validate non-NULL to match the defensive contract.
     if srcinfo.is_null() || dstinfo.is_null() {
         return;
     }
-    let src: &mut JpegDecompressPublic = match unsafe { cinfo_mut(srcinfo) } {
+    // Snapshot every field we need from src before we borrow dst. The
+    // dst borrow path will install a new memory manager pool entry
+    // (jpeg_alloc_quant_table) that can outlive the snapshot, so a
+    // single read here keeps lifetimes straight.
+    let snapshot: SrcCriticalSnapshot = match unsafe { snapshot_src_for_copy(srcinfo) } {
+        Some(s) => s,
+        None => return,
+    };
+
+    let dst: &mut JpegCompressPublic = match unsafe { cinfo_compress_mut(dstinfo) } {
         Some(c) => c,
         None => return,
     };
-    let _ = src; // only used to validate the handle layout.
-    let src_priv: &mut DecompressPrivate =
-        match unsafe { priv_from_ptr(decompress_private_raw(srcinfo)) } {
-            Some(p) => p,
-            None => return,
-        };
-    if src_priv.coefficients.is_none() {
-        // No-op: no coefficients decoded yet. The libjpeg behavior is
-        // to copy whatever's in `srcinfo`, but since we don't have the
-        // ABI-compatible compress struct yet, there is nothing to do.
+    // Defensive heuristic to keep the existing
+    // `*_copy_params_is_noop_safe` smoke test honest: a properly
+    // initialised compress cinfo (post `jpeg_CreateCompress`) sets
+    // `is_decompressor=0` AND has a non-NULL `mem` (the memory
+    // manager installed in CreateCompress). A stack-allocated zeroed
+    // dummy buffer fails the `mem` check; bail before
+    // `jpeg_set_defaults` writes fields past the buffer's end.
+    if dst.is_decompressor != 0 || dst.mem.is_null() {
         return;
     }
-    // Compute (but discard) the EncoderConfig so side effects of the
-    // underlying Rust `copy_critical_parameters` API (validation) are
-    // still exercised. Once the compress struct is wired up, this is
-    // where we'd persist it onto `dstinfo`.
-    let handle: &CoefHandle = src_priv
-        .coefficients
-        .as_deref()
-        .expect("None branch returned above");
-    let _cfg: libjpeg_turbo_rs::EncoderConfig =
-        libjpeg_turbo_rs::copy_critical_parameters(&handle.inner);
+
+    // Step 1: fundamental image dims + input description.
+    dst.image_width = snapshot.image_width;
+    dst.image_height = snapshot.image_height;
+    dst.input_components = snapshot.num_components;
+    dst.in_color_space = snapshot.jpeg_color_space;
+    // libjpeg 8+: `jpeg_width / jpeg_height` mirror `output_width /
+    // output_height` when scaling is in effect; with default 1:1 the
+    // output dims equal the image dims.
+    dst.jpeg_width = snapshot.image_width;
+    dst.jpeg_height = snapshot.image_height;
+
+    // Step 2: install canonical defaults, then override colorspace so
+    // the comp_info / quant_tbl_no allocation matches the source.
+    jpeg_set_defaults(dstinfo);
+    jpeg_set_colorspace(dstinfo, snapshot.jpeg_color_space);
+
+    // Re-borrow because `jpeg_set_*` re-acquired the cinfo through the
+    // pointer. The Rust borrow checker cannot see that.
+    let dst: &mut JpegCompressPublic = match unsafe { cinfo_compress_mut(dstinfo) } {
+        Some(c) => c,
+        None => return,
+    };
+
+    dst.data_precision = snapshot.data_precision;
+    dst.CCIR601_sampling = snapshot.ccir601_sampling;
+
+    // Step 3: copy quant tables — allocate slots through
+    // `jpeg_alloc_quant_table` so lifetime tracking matches stock
+    // libjpeg (the slot lives in the cinfo's permanent pool).
+    for tblno in 0..NUM_QUANT_TBLS {
+        let src_qt: Option<[u16; DCTSIZE2]> = snapshot.quant_tables[tblno];
+        let Some(src_quantval) = src_qt else { continue };
+        let mut slot: *mut JQuantTblPublic = dst.quant_tbl_ptrs[tblno];
+        if slot.is_null() {
+            slot = jpeg_alloc_quant_table(dstinfo);
+            if slot.is_null() {
+                return;
+            }
+            // Re-borrow once more to install the slot.
+            let dst2: &mut JpegCompressPublic = match unsafe { cinfo_compress_mut(dstinfo) } {
+                Some(c) => c,
+                None => return,
+            };
+            dst2.quant_tbl_ptrs[tblno] = slot;
+        }
+        // SAFETY: `slot` was either allocated by us above or was already
+        // installed by `jpeg_set_defaults`. Either way, it points at a
+        // live `JQuantTblPublic` aligned for direct field writes.
+        unsafe {
+            (*slot).quantval = src_quantval;
+            (*slot).sent_table = 0;
+        }
+    }
+
+    // Step 4: copy num_components and per-component info. Re-borrow
+    // because the quant-table install used a fresh borrow.
+    let dst: &mut JpegCompressPublic = match unsafe { cinfo_compress_mut(dstinfo) } {
+        Some(c) => c,
+        None => return,
+    };
+    let n: usize = snapshot.num_components.max(0) as usize;
+    if n == 0 || n > MAX_COMPS_OWNED {
+        return;
+    }
+    dst.num_components = snapshot.num_components;
+    if !dst.comp_info.is_null() {
+        let dst_comps: &mut [JpegComponentInfoPublic] =
+            unsafe { std::slice::from_raw_parts_mut(dst.comp_info, n) };
+        for (ci, dst_comp) in dst_comps.iter_mut().enumerate().take(n) {
+            let src_comp: &SrcComponentSnapshot = &snapshot.components[ci];
+            dst_comp.component_id = src_comp.component_id;
+            dst_comp.component_index = ci as c_int;
+            dst_comp.h_samp_factor = src_comp.h_samp_factor;
+            dst_comp.v_samp_factor = src_comp.v_samp_factor;
+            dst_comp.quant_tbl_no = src_comp.quant_tbl_no;
+            // Re-link the per-component quant_table pointer at the
+            // newly-installed dst slot so downstream `jpeg_finish_compress`
+            // (and any tooling that walks comp_info[i].quant_table) sees
+            // the dst-side table, not a stray src pointer.
+            let qno: usize = src_comp.quant_tbl_no.max(0) as usize;
+            if qno < NUM_QUANT_TBLS {
+                dst_comp.quant_table = dst.quant_tbl_ptrs[qno];
+            }
+        }
+    }
+
+    // Step 5: JFIF version + density. Mirror upstream's "only copy on
+    // saw_JFIF_marker, and not for major-version > 1" guard.
+    if snapshot.saw_jfif_marker != 0 {
+        if snapshot.jfif_major_version == 1 {
+            dst.JFIF_major_version = snapshot.jfif_major_version;
+            dst.JFIF_minor_version = snapshot.jfif_minor_version;
+        }
+        dst.density_unit = snapshot.density_unit;
+        dst.X_density = snapshot.x_density;
+        dst.Y_density = snapshot.y_density;
+    }
+}
+
+/// Per-component subset of the source snapshot used by
+/// `jpeg_copy_critical_parameters`.
+struct SrcComponentSnapshot {
+    component_id: c_int,
+    h_samp_factor: c_int,
+    v_samp_factor: c_int,
+    quant_tbl_no: c_int,
+}
+
+/// Snapshot of every src field `jpeg_copy_critical_parameters` reads,
+/// so we can release the src borrow before we start mutating dst.
+struct SrcCriticalSnapshot {
+    image_width: JDimension,
+    image_height: JDimension,
+    num_components: c_int,
+    jpeg_color_space: c_int,
+    data_precision: c_int,
+    ccir601_sampling: CBoolean,
+    saw_jfif_marker: CBoolean,
+    jfif_major_version: u8,
+    jfif_minor_version: u8,
+    density_unit: u8,
+    x_density: u16,
+    y_density: u16,
+    quant_tables: [Option<[u16; DCTSIZE2]>; NUM_QUANT_TBLS],
+    components: Vec<SrcComponentSnapshot>,
+}
+
+/// Read every field `jpeg_copy_critical_parameters` needs from the
+/// source decompress cinfo into a self-owned struct. Returns `None`
+/// for invalid input so the caller can no-op.
+///
+/// # Safety
+/// `srcinfo` must be a valid `*mut JpegDecompressPublic` whose header
+/// has been parsed (i.e. `num_components > 0`, `comp_info` non-NULL).
+unsafe fn snapshot_src_for_copy(srcinfo: *mut c_void) -> Option<SrcCriticalSnapshot> {
+    let src: &mut JpegDecompressPublic = unsafe { cinfo_mut(srcinfo) }?;
+    if src.num_components <= 0 {
+        return None;
+    }
+    let n: usize = src.num_components as usize;
+    if src.comp_info.is_null() {
+        return None;
+    }
+    let src_comps: &[JpegComponentInfoPublic] =
+        unsafe { std::slice::from_raw_parts(src.comp_info, n) };
+    let components: Vec<SrcComponentSnapshot> = src_comps
+        .iter()
+        .map(|c| SrcComponentSnapshot {
+            component_id: c.component_id,
+            h_samp_factor: c.h_samp_factor,
+            v_samp_factor: c.v_samp_factor,
+            quant_tbl_no: c.quant_tbl_no,
+        })
+        .collect();
+
+    let mut quant_tables: [Option<[u16; DCTSIZE2]>; NUM_QUANT_TBLS] = Default::default();
+    for (i, slot) in src.quant_tbl_ptrs.iter().enumerate() {
+        if !slot.is_null() {
+            // SAFETY: caller (header-parsed cinfo) ensures the slot
+            // contains a live `JQuantTblPublic`.
+            let qt: &JQuantTblPublic = unsafe { &**slot };
+            quant_tables[i] = Some(qt.quantval);
+        }
+    }
+    // Fallback: our `jpeg_read_header` does not yet populate the
+    // public `quant_tbl_ptrs` slots (the parser keeps tables internally
+    // until `read_coefficients` runs). When a caller has already called
+    // `jpeg_read_coefficients`, the parsed `JpegCoefficients.quant_tables`
+    // hold the canonical zigzag values — pull from there so jpegtran-style
+    // sequences (`read_header → read_coefficients → copy_critical_parameters`)
+    // see non-zero quant tables on the dst cinfo.
+    let priv_ptr: *mut c_void = decompress_private_raw(srcinfo);
+    if let Some(p) = unsafe { priv_from_ptr(priv_ptr) } {
+        if let Some(handle) = p.coefficients.as_deref() {
+            for (tblno, table) in handle.inner.quant_tables.iter().enumerate() {
+                if tblno < NUM_QUANT_TBLS && quant_tables[tblno].is_none() {
+                    quant_tables[tblno] = Some(*table);
+                }
+            }
+        }
+    }
+
+    Some(SrcCriticalSnapshot {
+        image_width: src.image_width,
+        image_height: src.image_height,
+        num_components: src.num_components,
+        jpeg_color_space: src.jpeg_color_space,
+        data_precision: src.data_precision,
+        ccir601_sampling: src.CCIR601_sampling,
+        saw_jfif_marker: src.saw_JFIF_marker,
+        jfif_major_version: src.JFIF_major_version,
+        jfif_minor_version: src.JFIF_minor_version,
+        density_unit: src.density_unit,
+        x_density: src.X_density,
+        y_density: src.Y_density,
+        quant_tables,
+        components,
+    })
 }
 
 /// `jpeg_core_output_dimensions(cinfo)`.
 ///
-/// Computes the "core" output dimensions (pre-crop) for the current
-/// decompression parameters. libjpeg 8+ keeps the result separate from
-/// `jpeg_calc_output_dimensions` so that crop-aware applications can
-/// see the full uncropped frame.
-///
-/// This is currently a thin alias for `jpeg_calc_output_dimensions` in
-/// our shim: we do not have a separate pre-crop path because cropping is
-/// applied in `jpeg_read_scanlines`, not in the sizing math.
+/// Mirrors upstream's "core" pre-crop output dimension computation,
+/// which transupp / `jtransform_request_workspace` rely on to size
+/// the destination workspace for `jpegtran -rotate / -transpose / …`.
+/// We forward to `jpeg_calc_output_dimensions` because our shim does
+/// not model a separate pre-crop path (cropping is applied at
+/// scanline emission time), and that function already populates the
+/// per-component `width_in_blocks / height_in_blocks /
+/// downsampled_*` fields plus `max_h_samp_factor /
+/// max_v_samp_factor / min_DCT_*_scaled_size` that transupp reads via
+/// the `_min_DCT_*` accessors.
 #[no_mangle]
 pub extern "C" fn jpeg_core_output_dimensions(cinfo: *mut c_void) {
-    let c: &mut JpegDecompressPublic = match unsafe { cinfo_mut(cinfo) } {
-        Some(c) => c,
-        None => return,
-    };
-    let (ow, oh): (usize, usize) = libjpeg_turbo_rs::calc_output_dimensions(
-        c.image_width as usize,
-        c.image_height as usize,
-        c.scale_num,
-        c.scale_denom,
-    );
-    c.output_width = ow as JDimension;
-    c.output_height = oh as JDimension;
+    jpeg_calc_output_dimensions(cinfo);
 }
 
 // ---------------------------------------------------------------------------
@@ -5052,6 +5477,15 @@ pub extern "C" fn jpeg_write_coefficients(cinfo: *mut c_void, coef_arrays: *mut 
     priv_state.have_started = true;
     c.global_state = CSTATE_WRCOEFS;
 
+    // Mirror upstream `transencode_master_selection → jinit_c_master_control →
+    // initial_setup` for the subset of derived fields that transupp's
+    // `jtransform_execute_transformation` reads off the dst comp_info:
+    // `width_in_blocks` and `height_in_blocks`, plus the dst-side
+    // `max_h_samp_factor / max_v_samp_factor` and `total_iMCU_rows`.
+    // Without these, `do_rot_90 / do_transpose / …` see height_in_blocks=0
+    // and skip writing the dst arrays entirely.
+    populate_dst_block_dims_for_transform(c);
+
     // Kick init_destination once so the staging buffer is live by the
     // time finish_compress streams bytes through it. Matches the libjpeg
     // pattern where `jpeg_write_coefficients` finishes the destination
@@ -5063,6 +5497,223 @@ pub extern "C" fn jpeg_write_coefficients(cinfo: *mut c_void, coef_arrays: *mut 
             unsafe { f(cinfo) };
         }
     }
+}
+
+/// Populate the per-component `width_in_blocks / height_in_blocks` and
+/// the cinfo-level `max_h_samp_factor / max_v_samp_factor /
+/// total_iMCU_rows` from `jpeg_width / jpeg_height` and each
+/// component's sampling factor. Matches `jcmaster.c::initial_setup`'s
+/// transcode-only path (the fields transupp's transform helpers
+/// dereference).
+fn populate_dst_block_dims_for_transform(c: &mut JpegCompressPublic) {
+    if c.comp_info.is_null() || c.num_components <= 0 {
+        return;
+    }
+    let n: usize = c.num_components as usize;
+    let comps: &mut [JpegComponentInfoPublic] =
+        unsafe { std::slice::from_raw_parts_mut(c.comp_info, n) };
+    let mut max_h: c_int = 1;
+    let mut max_v: c_int = 1;
+    for comp in comps.iter() {
+        max_h = max_h.max(comp.h_samp_factor);
+        max_v = max_v.max(comp.v_samp_factor);
+    }
+    c.max_h_samp_factor = max_h;
+    c.max_v_samp_factor = max_v;
+    // Prefer `jpeg_width / jpeg_height` when set; fall back to the
+    // 8.x baseline `image_width / image_height`. transupp's
+    // `transpose_critical_parameters` swaps `image_width / image_height`
+    // for ROT_90/TRANSPOSE, so by the time we get here those dims
+    // already reflect the post-transform geometry.
+    let w: u32 = if c.jpeg_width != 0 {
+        c.jpeg_width
+    } else {
+        c.image_width
+    };
+    let h: u32 = if c.jpeg_height != 0 {
+        c.jpeg_height
+    } else {
+        c.image_height
+    };
+    let denom_w: u64 = (max_h as u64) * 8;
+    let denom_h: u64 = (max_v as u64) * 8;
+    if denom_w == 0 || denom_h == 0 {
+        return;
+    }
+    for comp in comps.iter_mut() {
+        let h_samp: u64 = comp.h_samp_factor.max(1) as u64;
+        let v_samp: u64 = comp.v_samp_factor.max(1) as u64;
+        comp.width_in_blocks = (w as u64 * h_samp).div_ceil(denom_w) as JDimension;
+        comp.height_in_blocks = (h as u64 * v_samp).div_ceil(denom_h) as JDimension;
+        comp.dct_h_scaled_size = 8;
+        comp.dct_v_scaled_size = 8;
+    }
+    c.total_iMCU_rows = (h as u64).div_ceil(denom_h) as JDimension;
+}
+
+/// Read coefficient blocks out of a foreign `jvirt_barray_ptr*` array
+/// (the destination workspace allocated by `jtransform_adjust_parameters`)
+/// and assemble them into a `JpegCoefficients` ready for re-encoding.
+///
+/// The returned coefficients carry only the fields the encoder reads
+/// (dimensions, components, quant tables, restart, density). Adobe
+/// transform classification is intentionally left as `None` — the
+/// destination cinfo's `write_Adobe_marker` flag and `jpeg_color_space`
+/// drive the existing 4-component CMYK/YCCK branch in
+/// `run_coefficient_writer_and_flush` to inject Adobe APP14 with the
+/// right transform byte, and any source APP14 transupp wanted to
+/// preserve has already been queued onto `pending_markers` via
+/// `jcopy_markers_execute → jpeg_write_marker`.
+fn materialize_foreign_coef_arrays(
+    c: &JpegCompressPublic,
+    handle: *const c_void,
+) -> Result<libjpeg_turbo_rs::JpegCoefficients, String> {
+    if c.num_components <= 0 {
+        return Err("jpeg_finish_compress: dst cinfo has num_components <= 0; \
+             call jpeg_copy_critical_parameters before jpeg_write_coefficients"
+            .to_string());
+    }
+    let n: usize = c.num_components as usize;
+    if c.comp_info.is_null() {
+        return Err("jpeg_finish_compress: dst cinfo has NULL comp_info; \
+             call jpeg_copy_critical_parameters before jpeg_write_coefficients"
+            .to_string());
+    }
+    if c.mem.is_null() {
+        return Err("jpeg_finish_compress: dst cinfo->mem is NULL".to_string());
+    }
+    let mem: &memmgr::JpegMemoryMgr = unsafe { &*(c.mem as *const memmgr::JpegMemoryMgr) };
+    let access_virt_barray: memmgr::AccessVirtBarrayFn = mem
+        .access_virt_barray
+        .ok_or("jpeg_finish_compress: access_virt_barray not wired")?;
+
+    let comp_info_slice: &[JpegComponentInfoPublic] =
+        unsafe { std::slice::from_raw_parts(c.comp_info, n) };
+
+    // Pull quant tables. Re-emit in zigzag order to match what the
+    // Rust encoder expects — `JpegCoefficients::quant_tables` is
+    // documented as zigzag (see the writer in
+    // `src/api/coefficient.rs::write_coefficients`). Stock libjpeg
+    // stores quantval in zigzag order too, so a verbatim copy is
+    // already in the right order.
+    let mut quant_tables: Vec<[u16; 64]> = Vec::with_capacity(4);
+    for slot in c.quant_tbl_ptrs.iter() {
+        if slot.is_null() {
+            quant_tables.push([0u16; 64]);
+        } else {
+            let q: &JQuantTblPublic = unsafe { &**slot };
+            quant_tables.push(q.quantval);
+        }
+    }
+    // Trim trailing all-zero tables (we want one-per-distinct-table-no
+    // entries, not always 4). Find the highest used quant_tbl_no.
+    let highest_used: usize = comp_info_slice
+        .iter()
+        .map(|ci| ci.quant_tbl_no.max(0) as usize)
+        .max()
+        .unwrap_or(0);
+    quant_tables.truncate(highest_used + 1);
+
+    // Cinfo pointer for `access_virt_barray` (it ignores the cinfo
+    // arg in our memmgr but keep ABI shape).
+    let cinfo_ptr: *mut c_void = c as *const JpegCompressPublic as *mut c_void;
+    let array_slot: *const *mut memmgr::JVirtBarrayControl =
+        handle as *const *mut memmgr::JVirtBarrayControl;
+
+    // Recover blocks_x / blocks_y per component from the barray's
+    // own metadata (which transupp may have transposed for rotate
+    // ops). This is more reliable than recomputing from
+    // image_width/image_height because at this point the dst cinfo
+    // dimensions reflect the post-transform geometry, and
+    // `JVirtBarrayControl` was sized by `jtransform_request_workspace`
+    // for exactly this output.
+    let mut components: Vec<libjpeg_turbo_rs::ComponentCoefficients> = Vec::with_capacity(n);
+    for (ci, comp_info) in comp_info_slice.iter().enumerate() {
+        // SAFETY: `array_slot[ci]` is a `JVirtBarrayControl*` placed
+        // there by `jtransform_request_workspace` (or
+        // `jpeg_read_coefficients` if no workspace was needed); both
+        // paths use the cinfo's `request_virt_barray`, so the value
+        // lives in our memory pool.
+        let barray: *mut memmgr::JVirtBarrayControl = unsafe { *array_slot.add(ci) };
+        if barray.is_null() {
+            return Err(format!(
+                "jpeg_finish_compress: foreign coef_arrays[{ci}] is NULL"
+            ));
+        }
+        let (blocks_x, blocks_y): (u32, u32) =
+            unsafe { ((*barray).blocksperrow, (*barray).rows_in_array) };
+        let row_array: memmgr::JBlockArray = unsafe {
+            access_virt_barray(cinfo_ptr, barray, 0, blocks_y, /*writable=*/ 0)
+        };
+        if row_array.is_null() {
+            return Err(format!(
+                "jpeg_finish_compress: access_virt_barray(comp={ci}) returned NULL"
+            ));
+        }
+        let mut blocks: Vec<[i16; 64]> = Vec::with_capacity(blocks_x as usize * blocks_y as usize);
+        for r in 0..blocks_y as usize {
+            // SAFETY: row_array has `blocks_y` row entries and each
+            // row holds `blocks_x` JBlocks (allocated by
+            // `alloc_barray_impl`).
+            let row_ptr: memmgr::JBlockRow = unsafe { *row_array.add(r) };
+            let row_blocks: &[memmgr::JBlock] =
+                unsafe { std::slice::from_raw_parts(row_ptr, blocks_x as usize) };
+            // Foreign-array entries are populated in natural
+            // row-major order (transupp's transformations index
+            // coefficients as `block[i*8+j]`). Our encoder consumes
+            // `JpegCoefficients.blocks` in zigzag order, so re-pack
+            // each block here. Symmetric counterpart of the
+            // `NATURAL_ORDER`-based zigzag→natural copy in
+            // `jpeg_read_coefficients`.
+            for natural_block in row_blocks.iter() {
+                let mut zigzag_block: [i16; 64] = [0; 64];
+                for (natural_pos, &coef) in natural_block.iter().enumerate() {
+                    let zigzag_pos: usize =
+                        libjpeg_turbo_rs::common::quant_table::NATURAL_ORDER[natural_pos];
+                    zigzag_block[zigzag_pos] = coef;
+                }
+                blocks.push(zigzag_block);
+            }
+        }
+        components.push(libjpeg_turbo_rs::ComponentCoefficients {
+            blocks,
+            blocks_x: blocks_x as usize,
+            blocks_y: blocks_y as usize,
+            h_sampling: comp_info.h_samp_factor.max(1) as u8,
+            v_sampling: comp_info.v_samp_factor.max(1) as u8,
+            quant_table_index: comp_info.quant_tbl_no.max(0) as u8,
+            component_id: comp_info.component_id.max(0) as u8,
+        });
+    }
+
+    // Decide which dimension fields to use. `jpeg_width / jpeg_height`
+    // (libjpeg 8+) reflect any IDCT scaling applied by the source
+    // decompressor; transupp updates these to the output dims. For
+    // pre-libjpeg-7 callers `image_width / image_height` is the
+    // canonical home — fall back to it when jpeg_width/jpeg_height
+    // is zero.
+    let width: u32 = if c.jpeg_width != 0 {
+        c.jpeg_width
+    } else {
+        c.image_width
+    };
+    let height: u32 = if c.jpeg_height != 0 {
+        c.jpeg_height
+    } else {
+        c.image_height
+    };
+
+    Ok(libjpeg_turbo_rs::JpegCoefficients {
+        width: width.min(u16::MAX as u32) as u16,
+        height: height.min(u16::MAX as u32) as u16,
+        components,
+        quant_tables,
+        restart_interval: c.restart_interval.min(65535) as u16,
+        density_unit: c.density_unit,
+        x_density: c.X_density,
+        y_density: c.Y_density,
+        adobe_transform: None,
+    })
 }
 
 /// Encode the previously-stashed coefficient handle and stream the bytes
@@ -5080,37 +5731,42 @@ fn run_coefficient_writer_and_flush(
             CString::new("jpeg_finish_compress: no stashed coefficient handle").unwrap_or_default();
         return false;
     }
-    // SAFETY: stashed by `jpeg_write_coefficients` from a prior
-    // `jpeg_read_coefficients` return value, owned by the source
-    // decompress cinfo (see contract on `jpeg_write_coefficients`).
-    // The magic prefix lets us reject foreign jvirt_barray_ptr handles
-    // (for example destination arrays returned by a real libjpeg
-    // memory manager via jtransform_adjust_parameters) before the
-    // dereference reads invalid memory.
-    let raw: *const CoefHandle = handle as *const CoefHandle;
-    let magic: u64 = unsafe { std::ptr::read_unaligned(raw as *const u64) };
-    if magic != CoefHandle::MAGIC {
-        priv_state.last_error = CString::new(
-            "jpeg_finish_compress: coef_arrays did not come from jpeg_read_coefficients on this shim — \
-             foreign virtual coefficient arrays (e.g. from jtransform_adjust_parameters) are not yet supported",
-        )
-        .unwrap_or_default();
-        return false;
-    }
-    // Clone so we can apply destination overrides (notably the restart
-    // interval set via `jpegtran -restart N`) without mutating storage
-    // owned by the source decompress cinfo. Only override when the
-    // destination explicitly set a non-zero value — the libjpeg default
-    // (0 / no restart) preserves the source restart_interval the way
-    // upstream jpegtran does when no `-restart` flag is given.
+    // Two valid handle shapes are accepted:
     //
-    // For non-progressive output, also fold `restart_in_rows` (row mode)
-    // into `restart_interval` (byte mode) the same way libjpeg's
-    // `jcomaster.c::initial_setup` does: `interval = rows * MCUs_per_row`,
-    // clamped to 65535. The progressive writers consume `restart_in_rows`
-    // directly via the `restart_rows` argument, so they don't need this
-    // conversion.
-    let mut adjusted: libjpeg_turbo_rs::JpegCoefficients = unsafe { (*raw).inner.clone() };
+    // 1. **In-process round trip** — the caller passed back the exact
+    //    pointer returned from this shim's `jpeg_read_coefficients`.
+    //    The pointer is registered in `coef_array_to_handle_table`
+    //    against the parsed `CoefHandle`. We pull the cached
+    //    `JpegCoefficients` and skip the per-barray re-read.
+    //
+    // 2. **Foreign virtual coefficient array** (the stock `transupp` /
+    //    `jtransform_adjust_parameters` path used by `jpegtran`) — the
+    //    pointer is a `jvirt_barray_ptr *` allocated through some
+    //    cinfo's `mem` manager, with one entry per component.
+    //    Materialise a fresh `JpegCoefficients` by walking the dst
+    //    cinfo's `comp_info[]` and reading each barray via
+    //    `cinfo->mem->access_virt_barray`. Quant tables, dimensions,
+    //    restart, density, and Adobe metadata come from the dst cinfo
+    //    state set up by `jpeg_copy_critical_parameters`,
+    //    `jtransform_adjust_parameters`, and `jcopy_markers_execute`.
+    let mut adjusted: libjpeg_turbo_rs::JpegCoefficients = match coef_lookup_handle(handle) {
+        Some(handle_ptr) => {
+            // SAFETY: lookup table only stores pointers that were just
+            // boxed inside a live `DecompressPrivate` and whose owning
+            // cinfo has not yet had `jpeg_destroy_decompress` /
+            // `jpeg_finish_decompress` /
+            // `jpeg_abort_decompress` run on it (those tear-downs all
+            // call `coef_unregister_array`).
+            unsafe { (*handle_ptr).inner.clone() }
+        }
+        None => match materialize_foreign_coef_arrays(c, handle) {
+            Ok(coeffs) => coeffs,
+            Err(msg) => {
+                priv_state.last_error = CString::new(msg).unwrap_or_default();
+                return false;
+            }
+        },
+    };
     if c.restart_interval != 0 {
         adjusted.restart_interval = c.restart_interval as u16;
     } else if c.restart_in_rows > 0 && c.progressive_mode == 0 {

@@ -42,13 +42,13 @@ type JSampRow = *mut JSample;
 /// `JSAMPARRAY` is `JSAMPROW *`.
 type JSampArray = *mut JSampRow;
 /// libjpeg `JCOEF` typedef is `short`.
-type JCoef = i16;
+pub(crate) type JCoef = i16;
 /// `JBLOCK` is `JCOEF[64]` (one 8×8 DCT block of coefficients).
-type JBlock = [JCoef; 64];
+pub(crate) type JBlock = [JCoef; 64];
 /// `JBLOCKROW` is `JBLOCK *`.
-type JBlockRow = *mut JBlock;
+pub(crate) type JBlockRow = *mut JBlock;
 /// `JBLOCKARRAY` is `JBLOCKROW *`.
-type JBlockArray = *mut JBlockRow;
+pub(crate) type JBlockArray = *mut JBlockRow;
 
 /// libjpeg's `JPOOL_PERMANENT` — lasts until master record is destroyed.
 pub const JPOOL_PERMANENT: c_int = 0;
