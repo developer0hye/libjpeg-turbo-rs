@@ -341,3 +341,127 @@ fn tj_load_save_image_round_trip_ppm_through_legacy_alias() {
     }
     let _ = std::fs::remove_file(&ppm_path);
 }
+
+#[test]
+fn tj_encode_decode_yuv_legacy_aliases_roundtrip_444() {
+    // Verify the legacy `tjEncodeYUV3` and `tjDecodeYUV` aliases
+    // forward correctly to the TJ3 YUV family. With 4:4:4 (no
+    // chroma subsampling) the RGB → YUV → RGB round-trip should
+    // recover the source within a few units per channel — only
+    // the 8-bit BT.601 conversion rounding contributes diff.
+    let path: PathBuf = cdylib_path();
+    let lib: libloading::Library =
+        unsafe { libloading::Library::new(&path) }.expect("dlopen cdylib");
+    unsafe {
+        let tj_init_compress: libloading::Symbol<unsafe extern "C" fn() -> *mut c_void> =
+            lib.get(b"tjInitCompress").expect("tjInitCompress");
+        let tj_init_decompress: libloading::Symbol<unsafe extern "C" fn() -> *mut c_void> =
+            lib.get(b"tjInitDecompress").expect("tjInitDecompress");
+        let tj_destroy: libloading::Symbol<unsafe extern "C" fn(*mut c_void) -> c_int> =
+            lib.get(b"tjDestroy").expect("tjDestroy");
+        let tj_buf_size_yuv2: libloading::Symbol<
+            unsafe extern "C" fn(c_int, c_int, c_int, c_int) -> usize,
+        > = lib.get(b"tjBufSizeYUV2").expect("tjBufSizeYUV2");
+        let tj_encode_yuv3: libloading::Symbol<
+            unsafe extern "C" fn(
+                *mut c_void, // handle
+                *const u8,   // src
+                c_int,       // width
+                c_int,       // pad
+                c_int,       // height
+                c_int,       // pixelFormat
+                *mut u8,     // dst
+                c_int,       // align
+                c_int,       // subsamp
+                c_int,       // flags
+            ) -> c_int,
+        > = lib.get(b"tjEncodeYUV3").expect("tjEncodeYUV3");
+        let tj_decode_yuv: libloading::Symbol<
+            unsafe extern "C" fn(
+                *mut c_void, // handle
+                *const u8,   // src (packed YUV)
+                c_int,       // align
+                c_int,       // subsamp
+                *mut u8,     // dst (RGB)
+                c_int,       // width
+                c_int,       // pitch
+                c_int,       // height
+                c_int,       // pixelFormat
+                c_int,       // flags
+            ) -> c_int,
+        > = lib.get(b"tjDecodeYUV").expect("tjDecodeYUV");
+
+        let w: c_int = 64;
+        let h: c_int = 64;
+        let pad: c_int = 1;
+
+        // Source: deterministic gradient.
+        let mut src: Vec<u8> = Vec::with_capacity((w * h * 3) as usize);
+        for y in 0..h {
+            for x in 0..w {
+                src.push((x * 4) as u8);
+                src.push((y * 4) as u8);
+                src.push(((x + y) * 2) as u8);
+            }
+        }
+
+        // Encode RGB → packed YUV via the legacy alias.
+        let yuv_len: usize = tj_buf_size_yuv2(w, pad, h, TJSAMP_444);
+        assert!(yuv_len > 0, "tjBufSizeYUV2 must accept (w,h,444)");
+        let mut yuv: Vec<u8> = vec![0u8; yuv_len];
+
+        let h_enc: *mut c_void = tj_init_compress();
+        assert!(!h_enc.is_null(), "tjInitCompress");
+        let rc = tj_encode_yuv3(
+            h_enc,
+            src.as_ptr(),
+            w,
+            pad,
+            h,
+            TJPF_RGB,
+            yuv.as_mut_ptr(),
+            pad,
+            TJSAMP_444,
+            0,
+        );
+        assert_eq!(rc, 0, "tjEncodeYUV3 must succeed");
+        tj_destroy(h_enc);
+
+        // Decode packed YUV → RGB via the legacy alias.
+        let h_dec: *mut c_void = tj_init_decompress();
+        assert!(!h_dec.is_null(), "tjInitDecompress");
+        let mut dst: Vec<u8> = vec![0u8; src.len()];
+        let rc = tj_decode_yuv(
+            h_dec,
+            yuv.as_ptr(),
+            pad,
+            TJSAMP_444,
+            dst.as_mut_ptr(),
+            w,
+            0, /* tight pitch */
+            h,
+            TJPF_RGB,
+            0,
+        );
+        assert_eq!(rc, 0, "tjDecodeYUV must succeed");
+        tj_destroy(h_dec);
+
+        // Fidelity bound: 4:4:4 colorspace round-trip rounding only.
+        // Measured headroom is well under 8; allow 8 for safety on
+        // extreme gradients across architectures.
+        let mut max_diff: u8 = 0;
+        for (&a, &b) in src.iter().zip(dst.iter()) {
+            let d: u8 = a.abs_diff(b);
+            if d > max_diff {
+                max_diff = d;
+            }
+        }
+        assert!(
+            max_diff <= 8,
+            "RGB→YUV(444)→RGB round-trip max per-channel diff {max_diff} exceeded 8"
+        );
+    }
+    // Touch the unused TJSAMP_420 const to keep it in scope; future
+    // 4:2:0 round-trip test can reuse it without re-adding.
+    let _ = TJSAMP_420;
+}
