@@ -39,6 +39,14 @@ pub struct JpegCoefficients {
     pub width: u16,
     /// Image height in pixels.
     pub height: u16,
+    /// Sample data precision in bits per component (8 for baseline,
+    /// 12 for extended sequential / `monkey12`-style sources).
+    /// Re-emitted as the SOF byte at offset 4 of the SOF segment so
+    /// transcoded output preserves the source precision instead of
+    /// silently downgrading to 8-bit. `0` is treated as 8 for
+    /// backward compatibility with callers constructed before this
+    /// field existed.
+    pub data_precision: u8,
     /// Per-component coefficient data.
     pub components: Vec<ComponentCoefficients>,
     /// Quantization tables (up to 4, in zigzag order).
@@ -56,6 +64,20 @@ pub struct JpegCoefficients {
     /// Re-emitting the same value on transcode preserves the original
     /// colorspace classification (RGB vs YCbCr vs YCCK vs CMYK).
     pub adobe_transform: Option<u8>,
+}
+
+impl JpegCoefficients {
+    /// Effective sample precision (bits per component): the stored
+    /// `data_precision`, or 8 when the field was left zeroed by an
+    /// older caller that pre-dates the precision plumb.
+    #[inline]
+    pub fn effective_precision(&self) -> u8 {
+        if self.data_precision == 0 {
+            8
+        } else {
+            self.data_precision
+        }
+    }
 }
 
 /// Per-component info extracted for re-encoding.
@@ -196,6 +218,7 @@ pub fn read_coefficients(data: &[u8]) -> Result<JpegCoefficients> {
     Ok(JpegCoefficients {
         width: frame.width,
         height: frame.height,
+        data_precision: frame.precision,
         components: comp_data,
         quant_tables,
         restart_interval: metadata.restart_interval,
@@ -217,6 +240,23 @@ pub fn read_coefficients(data: &[u8]) -> Result<JpegCoefficients> {
 pub fn write_coefficients(coeffs: &JpegCoefficients) -> Result<Vec<u8>> {
     let num_components = coeffs.components.len();
     let is_grayscale = num_components == 1;
+
+    // Standard ITU-T T.81 Annex K Huffman tables only define DC
+    // categories 0..=11; for `data_precision > 8` the source can produce
+    // DC categories 12..=15 that would silently encode as 0-bit codes
+    // and corrupt the stream. The optimised path
+    // (`write_coefficients_optimized`) is the supported route for
+    // 12-bit transcode (FFI sets `optimize_coding=1` automatically when
+    // `data_precision == 12`); refusing here keeps the failure loud.
+    // Tracked under `docs/LAST_MILE.md` → P0-4 (12-bit transcode).
+    let precision: u8 = coeffs.effective_precision();
+    if precision > 8 {
+        return Err(JpegError::Unsupported(format!(
+            "write_coefficients: 12-bit (precision={precision}) transcode not yet \
+             supported on the non-optimized path; route through \
+             write_coefficients_optimized (set optimize_coding=1)"
+        )));
+    }
 
     // Build Huffman tables
     let dc_luma_table = build_huff_table(&tables::DC_LUMINANCE_BITS, &tables::DC_LUMINANCE_VALUES);
@@ -342,7 +382,10 @@ pub fn write_coefficients(coeffs: &JpegCoefficients) -> Result<Vec<u8>> {
     }
 
     // Frame header — use SOF1 (extended sequential) when quant tables need 16-bit
-    // precision (values > 255), matching C jpegtran behavior. Otherwise SOF0 (baseline).
+    // precision (values > 255). The 12-bit precision case is rejected
+    // earlier in the guard at the top of this function, so `precision`
+    // here is always ≤ 8 and only quant-table magnitude matters.
+    // Matching C jpegtran behavior in `references/libjpeg-turbo/src/jcparam.c`.
     let needs_extended: bool = coeffs
         .quant_tables
         .iter()
@@ -363,7 +406,7 @@ pub fn write_coefficients(coeffs: &JpegCoefficients) -> Result<Vec<u8>> {
     output.push(if needs_extended { 0xC1 } else { 0xC0 });
     let sof_len: u16 = 2 + 1 + 2 + 2 + 1 + (components.len() as u16 * 3);
     output.extend_from_slice(&sof_len.to_be_bytes());
-    output.push(8); // sample precision
+    output.push(precision); // sample precision (8 default; >8 forces SOF1)
     output.extend_from_slice(&coeffs.height.to_be_bytes());
     output.extend_from_slice(&coeffs.width.to_be_bytes());
     output.push(components.len() as u8);
@@ -971,13 +1014,20 @@ pub fn transform_jpeg_with_options(data: &[u8], options: &TransformOptions) -> R
             dbx <= comp.blocks_x && dby <= comp.blocks_y && max_h <= 2 && max_v <= 2
         })
     };
+    // 12-bit precision (e.g. `monkey12.jpg` transcode) MUST go through
+    // the optimised Huffman writer — the non-optimised baseline path
+    // uses the standard 8-bit Annex K tables, which only define DC
+    // categories 0..=11 and would silently encode 12..=15 as zero-bit
+    // codes. Mirror the FFI dispatcher in
+    // `crates/libjpeg-turbo-rs-capi/src/jpeglib.rs::run_coefficient_writer_and_flush`.
+    let force_optimize: bool = coeffs.effective_precision() > 8;
     let output: Vec<u8> = if options.arithmetic && progressive_safe {
         write_coefficients_progressive_arithmetic(&coeffs, progressive_restart_rows)?
     } else if options.arithmetic {
         write_coefficients_arithmetic(&coeffs)?
     } else if progressive_safe {
         write_coefficients_progressive(&coeffs, progressive_restart_rows)?
-    } else if options.optimize {
+    } else if options.optimize || force_optimize {
         write_coefficients_optimized(&coeffs)?
     } else {
         write_coefficients(&coeffs)?
@@ -1187,11 +1237,14 @@ pub fn write_coefficients_optimized(coeffs: &JpegCoefficients) -> Result<Vec<u8>
         marker_writer::write_dqt(&mut output, i as u8, qt);
     }
 
-    // Frame header — SOF1 for 16-bit quant tables, SOF0 otherwise
-    let opt_needs_ext: bool = coeffs
-        .quant_tables
-        .iter()
-        .any(|qt| qt.iter().any(|&v| v > 255));
+    // Frame header — SOF1 for 16-bit quant tables OR sample precision > 8
+    // (e.g. 12-bit `monkey12.jpg` transcode), SOF0 otherwise.
+    let opt_precision: u8 = coeffs.effective_precision();
+    let opt_needs_ext: bool = opt_precision > 8
+        || coeffs
+            .quant_tables
+            .iter()
+            .any(|qt| qt.iter().any(|&v| v > 255));
     let opt_comps: Vec<(u8, u8, u8, u8)> = coeffs
         .components
         .iter()
@@ -1208,7 +1261,7 @@ pub fn write_coefficients_optimized(coeffs: &JpegCoefficients) -> Result<Vec<u8>
     output.push(if opt_needs_ext { 0xC1 } else { 0xC0 });
     let opt_sof_len: u16 = 2 + 1 + 2 + 2 + 1 + (opt_comps.len() as u16 * 3);
     output.extend_from_slice(&opt_sof_len.to_be_bytes());
-    output.push(8);
+    output.push(opt_precision);
     output.extend_from_slice(&coeffs.height.to_be_bytes());
     output.extend_from_slice(&coeffs.width.to_be_bytes());
     output.push(opt_comps.len() as u8);
@@ -1331,7 +1384,13 @@ pub fn write_coefficients_progressive(
             )
         })
         .collect();
-    marker_writer::write_sof2(&mut output, coeffs.width, coeffs.height, &components);
+    marker_writer::write_sof2_with_precision(
+        &mut output,
+        coeffs.width,
+        coeffs.height,
+        &components,
+        coeffs.effective_precision(),
+    );
 
     let mut bit_writer: BitWriter =
         BitWriter::new(coeffs.width as usize * coeffs.height as usize / 4);
@@ -2036,7 +2095,13 @@ pub fn write_coefficients_arithmetic(coeffs: &JpegCoefficients) -> Result<Vec<u8
             )
         })
         .collect();
-    marker_writer::write_sof9(&mut output, coeffs.width, coeffs.height, &components);
+    marker_writer::write_sof9_with_precision(
+        &mut output,
+        coeffs.width,
+        coeffs.height,
+        &components,
+        coeffs.effective_precision(),
+    );
 
     let dc_params = [(0u8, 1u8); crate::decode::arithmetic::NUM_ARITH_TBLS];
     let ac_params = [5u8; crate::decode::arithmetic::NUM_ARITH_TBLS];
@@ -2147,7 +2212,13 @@ pub fn write_coefficients_progressive_arithmetic(
             )
         })
         .collect();
-    marker_writer::write_sof10(&mut output, coeffs.width, coeffs.height, &components);
+    marker_writer::write_sof10_with_precision(
+        &mut output,
+        coeffs.width,
+        coeffs.height,
+        &components,
+        coeffs.effective_precision(),
+    );
 
     let mut arith_enc: ArithEncoder =
         ArithEncoder::new(coeffs.width as usize * coeffs.height as usize / 4);
