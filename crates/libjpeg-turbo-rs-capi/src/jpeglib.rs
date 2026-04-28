@@ -1581,14 +1581,30 @@ pub extern "C" fn jpeg_read_header(cinfo: *mut c_void, _require_image: CBoolean)
     priv_state.marker_list_storage.clear();
     let saved: Vec<libjpeg_turbo_rs::SavedMarker> = decoder.saved_markers().to_vec();
     for marker in saved {
-        let payload: Box<[u8]> = marker.data.into_boxed_slice();
-        let len: c_uint = payload.len() as c_uint;
+        // Honor stock libjpeg's `jpeg_save_markers(cinfo, code, length_limit)`
+        // contract: `original_length` is the full marker body, but
+        // `data_length` and `data` are truncated to
+        // `min(original_length, length_limit)` so consumers (and
+        // `jcopy_markers_execute`'s downstream `jpeg_write_marker`)
+        // never see more bytes than the caller requested.
+        let original_len: usize = marker.data.len();
+        let limit: usize = priv_state
+            .marker_save
+            .limits
+            .get(&marker.code)
+            .copied()
+            .map(|l| l as usize)
+            .unwrap_or(usize::MAX);
+        let truncated_len: usize = original_len.min(limit);
+        let mut full: Vec<u8> = marker.data;
+        full.truncate(truncated_len);
+        let payload: Box<[u8]> = full.into_boxed_slice();
         priv_state.marker_list_storage.push(Box::new(OwnedMarker {
             public: JpegMarkerStructPublic {
                 next: std::ptr::null_mut(),
                 marker: marker.code,
-                original_length: len,
-                data_length: len,
+                original_length: original_len as c_uint,
+                data_length: truncated_len as c_uint,
                 data: std::ptr::null_mut(),
             },
             payload,
