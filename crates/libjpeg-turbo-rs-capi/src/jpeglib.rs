@@ -1438,12 +1438,11 @@ pub extern "C" fn jpeg_read_header(cinfo: *mut c_void, _require_image: CBoolean)
     if saw_jfif {
         c.JFIF_major_version = jfif_major;
         c.JFIF_minor_version = jfif_minor;
-    } else {
-        // No JFIF APP0 in the stream — leave version at the
-        // libjpeg defaults set by `jpeg_create_decompress`.
-        c.JFIF_major_version = 0;
-        c.JFIF_minor_version = 0;
     }
+    // No-APP0 case: leave `JFIF_{major,minor}_version` at the
+    // `(1, 1)` default that `jpeg_CreateDecompress` installed.
+    // Stock libjpeg also leaves the default in place when no APP0
+    // was observed (codex round-14 review).
     // libjpeg's `is_baseline` flag: TRUE if SOF0 was encountered. We
     // approximate by clearing it for progressive/lossless streams.
     c.is_baseline = if !frame.is_progressive && !frame.is_lossless {
