@@ -729,3 +729,72 @@ fn tj_yuv_legacy_aliases_actually_flip_rows_under_bottomup() {
         }
     }
 }
+
+#[test]
+fn tj_encode_yuv3_does_not_over_read_padded_input_buffer() {
+    // Regression test: when the caller passes `pitch > width * bpp`
+    // (i.e. the input has trailing per-row padding), the wrapper
+    // must NOT read past the last row's `width * bpp` valid bytes.
+    // libjpeg-turbo's contract is `srcBuf` size =
+    // `(height - 1) * pitch + width * bpp`, leaving the trailing
+    // padding of the last row unreadable. Earlier this crate's
+    // `densify_pitched_bytes` constructed a `&[u8]` of length
+    // `pitch * height`, which is undefined behavior under Rust's
+    // aliasing rules even if the post-padding bytes were never
+    // dereferenced.
+    //
+    // The fix reads each row as a separate `&[u8]` of length
+    // `width * bpp`. This test exercises the boundary by
+    // allocating exactly `(h-1) * pitch + w * 3` bytes and asking
+    // tjEncodeYUV3 to encode it. Under Miri / address sanitizer
+    // the old over-read would trip; under release builds it would
+    // be silent UB.
+    let path: PathBuf = cdylib_path();
+    let lib: libloading::Library =
+        unsafe { libloading::Library::new(&path) }.expect("dlopen cdylib");
+    unsafe {
+        let tj_init_compress: libloading::Symbol<unsafe extern "C" fn() -> *mut c_void> =
+            lib.get(b"tjInitCompress").expect("tjInitCompress");
+        let tj_destroy: libloading::Symbol<unsafe extern "C" fn(*mut c_void) -> c_int> =
+            lib.get(b"tjDestroy").expect("tjDestroy");
+        let tj_buf_size_yuv2: libloading::Symbol<
+            unsafe extern "C" fn(c_int, c_int, c_int, c_int) -> usize,
+        > = lib.get(b"tjBufSizeYUV2").expect("tjBufSizeYUV2");
+        let tj_encode_yuv3: libloading::Symbol<TjEncodeYUV3> =
+            lib.get(b"tjEncodeYUV3").expect("tjEncodeYUV3");
+
+        let w: c_int = 32;
+        let h: c_int = 32;
+        let row_bytes: usize = (w * 3) as usize;
+        let pitch: c_int = (row_bytes as c_int) + 7; // arbitrary trailing pad
+        let total: usize = (h as usize - 1) * pitch as usize + row_bytes;
+        // Allocate EXACTLY `total` bytes. Reading byte
+        // `pitch * h - 1` (the old over-read) would walk past this
+        // allocation.
+        let src: Vec<u8> = (0..total).map(|i| (i & 0xff) as u8).collect();
+
+        let yuv_align: c_int = 1;
+        let yuv_len: usize = tj_buf_size_yuv2(w, yuv_align, h, TJSAMP_444);
+        let mut yuv: Vec<u8> = vec![0u8; yuv_len];
+
+        let h_enc: *mut c_void = tj_init_compress();
+        assert!(!h_enc.is_null());
+        let rc = tj_encode_yuv3(
+            h_enc,
+            src.as_ptr(),
+            w,
+            pitch,
+            h,
+            TJPF_RGB,
+            yuv.as_mut_ptr(),
+            yuv_align,
+            TJSAMP_444,
+            0,
+        );
+        assert_eq!(
+            rc, 0,
+            "tjEncodeYUV3 with pitch > w*bpp must succeed without over-reading"
+        );
+        tj_destroy(h_enc);
+    }
+}

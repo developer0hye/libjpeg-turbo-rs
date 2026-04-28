@@ -91,6 +91,15 @@ fn flip_rows_in_place(bytes: &mut [u8], row_bytes: usize) {
 
 /// Densify a pitched RGB source into a contiguous `width * bpp * height`
 /// buffer, validating `pitch` along the way.
+///
+/// Reads each row separately so we never construct a `&[u8]` that
+/// extends past the caller's actual allocation. Upstream callers
+/// (`tj3EncodeYUV8`, `tj3EncodeYUVPlanes8`, and through them
+/// `tjEncodeYUV3`) accept `pitch > width * bpp`. With the per-row
+/// access pattern, the maximum byte the caller must own is
+/// `(height - 1) * pitch + width * bpp - 1` (the trailing pad of
+/// the last row is never touched), matching libjpeg-turbo's
+/// `srcBuf` size contract.
 fn densify_pitched_bytes(
     src: *const u8,
     width: usize,
@@ -108,16 +117,16 @@ fn densify_pitched_bytes(
     if line < width * bpp {
         return None;
     }
-    let total: usize = line * height;
-    // SAFETY: caller guarantees `src` is valid for `total` bytes.
-    let raw: &[u8] = unsafe { std::slice::from_raw_parts(src, total) };
-    if line == width * bpp {
-        return Some(raw.to_vec());
-    }
-    let mut out: Vec<u8> = Vec::with_capacity(width * bpp * height);
+    let row_bytes: usize = width * bpp;
+    let mut out: Vec<u8> = Vec::with_capacity(row_bytes * height);
     for row in 0..height {
-        let start: usize = row * line;
-        out.extend_from_slice(&raw[start..start + width * bpp]);
+        // SAFETY: caller guarantees `src + row * line` is valid for
+        // `row_bytes` bytes (libjpeg-turbo's contract: each row's
+        // first `width * bpp` bytes are valid; the trailing pitch
+        // padding may not be allocated and must not be read).
+        let row_slice: &[u8] =
+            unsafe { std::slice::from_raw_parts(src.add(row * line), row_bytes) };
+        out.extend_from_slice(row_slice);
     }
     Some(out)
 }
