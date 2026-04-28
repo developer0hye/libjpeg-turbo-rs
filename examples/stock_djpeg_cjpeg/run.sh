@@ -173,20 +173,16 @@ for img in "$TESTIMAGES"/*.jpg; do
     fi
 
     # ------- transform: jpegtran (our-linked) vs jpegtran (stock) -------
+    # Every fixture — 8-bit *and* 12-bit (`monkey12.jpg`) — must be
+    # byte-identical to upstream `jpegtran -copy all -rotate 90`.
+    # The 12-bit byte-exact gate landed when `jpeg_read_header`
+    # started populating `cinfo->marker_list` so
+    # `transupp::jcopy_markers_execute` can forward the source's
+    # APP2/ICC chunks to dstinfo verbatim — without that the ICC
+    # profile silently disappeared in our output, producing the
+    # historical `pixel_equal_dht_differs` divergence.
     ours_trn="$WORK/${name}.ours.trn.jpg"
     stock_trn="$WORK/${name}.stock.trn.jpg"
-    # 12-bit precision fixtures (`monkey12.jpg`) currently produce
-    # functionally correct output that decodes byte-for-byte through
-    # stock djpeg, but **not** byte-exact JPEGs against upstream
-    # `jpegtran -copy all -rotate 90`: our optimised-Huffman writer
-    # always rebuilds DHT from the rotated coefficient distribution,
-    # whereas upstream preserves the source's DHT verbatim. The DHT
-    # bytes therefore always differ (and the entropy stream that
-    # follows differs as a consequence). Until we wire DHT
-    # preservation through `JpegCoefficients`, validate the 12-bit
-    # path by decoding both outputs through stock djpeg and
-    # asserting **pixel-identical** instead of byte-identical.
-    # Tracked under docs/LAST_MILE.md → P0-4 (12-bit DHT preservation).
     if ! run_ours "$OUR_JPEGTRAN" -copy all -rotate 90 -outfile "$ours_trn" "$img" 2>"$WORK/trn_err_ours.log"; then
         echo -e "jpegtran\t${name}\tfail\tours_crashed"
         FAIL=$((FAIL + 1))
@@ -198,21 +194,6 @@ for img in "$TESTIMAGES"/*.jpg; do
     fi
     if cmp -s "$ours_trn" "$stock_trn"; then
         echo -e "jpegtran\t${name}\tpass\t"
-    elif [[ "$name" == "monkey12" ]]; then
-        # 12-bit pixel-equivalence fallback. Stock `djpeg` decodes
-        # both 8-bit and 12-bit fixtures into 8-bit PPM, so a
-        # byte-equal PPM is a real pixel-equality check.
-        ours_ppm12="$WORK/${name}.ours.trn.ppm"
-        stock_ppm12="$WORK/${name}.stock.trn.ppm"
-        if "$STOCK_DJPEG" -outfile "$ours_ppm12" "$ours_trn" 2>"$WORK/trn_djpeg_ours.log" \
-            && "$STOCK_DJPEG" -outfile "$stock_ppm12" "$stock_trn" 2>"$WORK/trn_djpeg_stock.log" \
-            && cmp -s "$ours_ppm12" "$stock_ppm12"; then
-            echo -e "jpegtran\t${name}\tpass\tpixel_equal_dht_differs"
-        else
-            sz_o=$(wc -c < "$ours_trn"); sz_s=$(wc -c < "$stock_trn")
-            echo -e "jpegtran\t${name}\tfail\tpixel_differ_ours=${sz_o}_stock=${sz_s}"
-            FAIL=$((FAIL + 1))
-        fi
     else
         sz_o=$(wc -c < "$ours_trn"); sz_s=$(wc -c < "$stock_trn")
         echo -e "jpegtran\t${name}\tfail\tbytes_differ_ours=${sz_o}_stock=${sz_s}"

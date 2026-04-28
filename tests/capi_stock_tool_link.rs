@@ -231,12 +231,12 @@ fn drive_pipeline() -> Result<(), String> {
 /// `references/libjpeg-turbo/testimages/` corpus.
 ///
 /// All three arms — djpeg, cjpeg, and jpegtran (`-copy all -rotate 90`)
-/// — are byte-exact against stock libjpeg-turbo for the 8-bit
-/// fixtures (`testimgari.jpg`, `testimgint.jpg`, `testorig.jpg`). The
-/// 12-bit fixture (`monkey12.jpg`) is `skip`ped on the jpegtran arm
-/// because our `write_coefficients` is currently 8-bit-only; the
-/// follow-up to land 12-bit transcoding is tracked under
-/// LAST_MILE.md → P0-4 (12-bit transcode).
+/// — are byte-exact against stock libjpeg-turbo for every fixture in
+/// `references/libjpeg-turbo/testimages/`, including the 12-bit
+/// `monkey12.jpg`. The 12-bit transcode byte-exactness gate landed
+/// once `jpeg_read_header` started populating `cinfo->marker_list`
+/// so `transupp::jcopy_markers_execute` could forward the source
+/// APP2/ICC chunks verbatim (LAST_MILE.md → Suggested Order item 5b).
 ///
 /// Skip behavior:
 /// * Non-macOS/Linux host → skip (build.sh is POSIX-only for now).
