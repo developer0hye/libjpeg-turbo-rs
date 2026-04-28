@@ -67,6 +67,28 @@ fn tjpf_from_handle(inst: &TjInstance) -> Option<PixelFormat> {
     pixel_format_from_tj(inst.inner.get(libjpeg_turbo_rs::tj3::TjParam::ColorSpace))
 }
 
+/// Reverse the row order of a buffer in-place. `row_bytes` is the
+/// stride in bytes; trailing bytes (if `bytes.len() % row_bytes !=
+/// 0`) are left alone. Used to honour `TJPARAM_BOTTOMUP` in the
+/// YUV entry points — mirrors upstream's `bottomUp` handling.
+fn flip_rows_in_place(bytes: &mut [u8], row_bytes: usize) {
+    if row_bytes == 0 {
+        return;
+    }
+    let rows: usize = bytes.len() / row_bytes;
+    if rows < 2 {
+        return;
+    }
+    let mut top: usize = 0;
+    let mut bot: usize = rows - 1;
+    while top < bot {
+        let (lo, hi) = bytes.split_at_mut(bot * row_bytes);
+        lo[top * row_bytes..top * row_bytes + row_bytes].swap_with_slice(&mut hi[..row_bytes]);
+        top += 1;
+        bot -= 1;
+    }
+}
+
 /// Densify a pitched RGB source into a contiguous `width * bpp * height`
 /// buffer, validating `pitch` along the way.
 fn densify_pitched_bytes(
@@ -212,13 +234,21 @@ pub extern "C" fn tj3EncodeYUV8(
     let w: usize = width as usize;
     let h: usize = height as usize;
     let bpp: usize = pf.bytes_per_pixel();
-    let dense: Vec<u8> = match densify_pitched_bytes(src_buf, w, h, bpp, pitch) {
+    let mut dense: Vec<u8> = match densify_pitched_bytes(src_buf, w, h, bpp, pitch) {
         Some(v) => v,
         None => {
             inst.set_error("tj3EncodeYUV8: bad pitch", TJERR_FATAL);
             return -1;
         }
     };
+
+    // Bottom-up: caller's buffer is rows bottom-to-top. Flip rows in
+    // place so the encoder reads them in canonical top-to-bottom
+    // order. Mirrors upstream `turbojpeg.c::tjEncodeYUV3` which
+    // honours `bottomUp` via `cinfo->next_scanline` ordering.
+    if inst.bottom_up_flag() {
+        flip_rows_in_place(&mut dense, w * bpp);
+    }
 
     let planes: Vec<Vec<u8>> = match encode_yuv_planes(&dense, w, h, pf, ss) {
         Ok(p) => p,
@@ -695,11 +725,16 @@ pub extern "C" fn tj3DecodeYUV8(
         inst.set_error("tj3DecodeYUV8: pitch too small", TJERR_FATAL);
         return -1;
     }
+    let bottom_up: bool = inst.bottom_up_flag();
     // SAFETY: caller guarantees dst is `dst_stride * h` bytes.
     unsafe {
         for row in 0..h {
             let src_row = pixels[row * w * bpp..row * w * bpp + w * bpp].as_ptr();
-            let dst_row = dst_buf.add(row * dst_stride);
+            // Bottom-up: row `i` of the decoded image goes to
+            // `height - i - 1` in the caller's buffer, mirroring
+            // upstream's `bottomUp` write loop.
+            let dst_row_index: usize = if bottom_up { h - 1 - row } else { row };
+            let dst_row = dst_buf.add(dst_row_index * dst_stride);
             std::ptr::copy_nonoverlapping(src_row, dst_row, w * bpp);
         }
     }
