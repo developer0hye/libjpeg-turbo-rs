@@ -48,3 +48,25 @@ pub fn pixel_format_from_tj(fmt: c_int) -> Option<PixelFormat> {
 pub fn tj_bytes_per_pixel(fmt: c_int) -> Option<usize> {
     pixel_format_from_tj(fmt).map(|pf| pf.bytes_per_pixel())
 }
+
+/// Convert a Rust `PixelFormat` back to its TJPF_* integer code.
+/// Inverse of `pixel_format_from_tj`. Returns `-1` (TJPF_UNKNOWN) for
+/// formats that don't have a 1:1 TurboJPEG mapping (e.g. `Rgb565`,
+/// which is decode-only output).
+pub fn pixel_format_to_tj(pf: PixelFormat) -> c_int {
+    match pf {
+        PixelFormat::Rgb => TJPF_RGB,
+        PixelFormat::Bgr => TJPF_BGR,
+        PixelFormat::Rgbx => TJPF_RGBX,
+        PixelFormat::Bgrx => TJPF_BGRX,
+        PixelFormat::Xbgr => TJPF_XBGR,
+        PixelFormat::Xrgb => TJPF_XRGB,
+        PixelFormat::Grayscale => TJPF_GRAY,
+        PixelFormat::Rgba => TJPF_RGBA,
+        PixelFormat::Bgra => TJPF_BGRA,
+        PixelFormat::Abgr => TJPF_ABGR,
+        PixelFormat::Argb => TJPF_ARGB,
+        PixelFormat::Cmyk => TJPF_CMYK,
+        PixelFormat::Rgb565 => -1,
+    }
+}

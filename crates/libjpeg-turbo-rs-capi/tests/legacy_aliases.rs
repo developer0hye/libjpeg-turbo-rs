@@ -217,10 +217,11 @@ fn tj_bufsize_helpers_return_non_zero_for_valid_inputs() {
 }
 
 #[test]
-fn tj_load_image_stub_still_fails_until_implemented() {
-    // `tjLoadImage` is still a stub — image IO routing is deferred.
-    // The test pins that contract so future work doesn't silently
-    // drop the error path.
+fn tj_load_image_reports_error_for_missing_file() {
+    // `tjLoadImage` now delegates to `tj3LoadImage8`, which uses the
+    // Rust BMP/PPM reader. Loading a non-existent path must still
+    // return NULL with a descriptive error so callers detect the
+    // failure rather than dereferencing garbage.
     let path: PathBuf = cdylib_path();
     let lib: libloading::Library =
         unsafe { libloading::Library::new(&path) }.expect("dlopen cdylib");
@@ -246,14 +247,110 @@ fn tj_load_image_stub_still_fails_until_implemented() {
         let h = tj_init_decompress();
         let mut w: c_int = 0;
         let mut hh: c_int = 0;
-        let mut pf: c_int = 0;
+        let mut pf: c_int = -1; // TJPF_UNKNOWN — accept native format
         let ret = tj_load_image(h, c"/nonexistent".as_ptr(), &mut w, 1, &mut hh, &mut pf, 0);
-        assert!(ret.is_null(), "tjLoadImage stub must return NULL");
+        assert!(
+            ret.is_null(),
+            "tjLoadImage must return NULL for missing file"
+        );
         let msg: &str = CStr::from_ptr(tj_get_err2(h)).to_str().expect("utf8");
         assert!(
-            msg.contains("tjLoadImage") || msg.contains("not yet"),
-            "expected descriptive stub error, got: {msg}"
+            msg.contains("/nonexistent") || msg.contains("cannot read"),
+            "expected file-not-found error, got: {msg}"
         );
         tj_destroy(h);
     }
+}
+
+#[test]
+fn tj_load_save_image_round_trip_ppm_through_legacy_alias() {
+    // End-to-end: write a tiny PPM via `tjSaveImage`, load it back
+    // via `tjLoadImage`, verify pixels round-trip exactly. Exercises
+    // both legacy aliases through their tj3 delegates and through
+    // the underlying Rust image IO helpers.
+    let path: PathBuf = cdylib_path();
+    let lib: libloading::Library =
+        unsafe { libloading::Library::new(&path) }.expect("dlopen cdylib");
+
+    let tmp_dir: std::path::PathBuf = std::env::temp_dir();
+    let ppm_path: std::path::PathBuf =
+        tmp_dir.join(format!("tj_load_save_test_{}.ppm", std::process::id()));
+    let _ = std::fs::remove_file(&ppm_path);
+    let ppm_path_c: std::ffi::CString =
+        std::ffi::CString::new(ppm_path.to_str().expect("utf8")).expect("nul");
+
+    // 4x3 RGB gradient — small enough to read back trivially.
+    let w: c_int = 4;
+    let h: c_int = 3;
+    let pf: c_int = 0; // TJPF_RGB
+    let pixels: Vec<u8> = (0..w as usize * h as usize)
+        .flat_map(|i| [(i * 11) as u8, (i * 23) as u8, (i * 47) as u8])
+        .collect();
+
+    unsafe {
+        let tj_init_compress: libloading::Symbol<unsafe extern "C" fn() -> *mut c_void> =
+            lib.get(b"tjInitCompress").expect("tjInitCompress");
+        let tj_init_decompress: libloading::Symbol<unsafe extern "C" fn() -> *mut c_void> =
+            lib.get(b"tjInitDecompress").expect("tjInitDecompress");
+        let tj_destroy: libloading::Symbol<unsafe extern "C" fn(*mut c_void) -> c_int> =
+            lib.get(b"tjDestroy").expect("tjDestroy");
+        let tj_save_image: libloading::Symbol<
+            unsafe extern "C" fn(
+                *mut c_void,
+                *const c_char,
+                *const u8,
+                c_int,
+                c_int,
+                c_int,
+                c_int,
+                c_int,
+            ) -> c_int,
+        > = lib.get(b"tjSaveImage").expect("tjSaveImage");
+        let tj_load_image: libloading::Symbol<
+            unsafe extern "C" fn(
+                *mut c_void,
+                *const c_char,
+                *mut c_int,
+                c_int,
+                *mut c_int,
+                *mut c_int,
+                c_int,
+            ) -> *mut u8,
+        > = lib.get(b"tjLoadImage").expect("tjLoadImage");
+        let tj3_free: libloading::Symbol<unsafe extern "C" fn(*mut c_void)> =
+            lib.get(b"tj3Free").expect("tj3Free");
+
+        let h_save = tj_init_compress();
+        assert!(!h_save.is_null());
+        let rc = tj_save_image(h_save, ppm_path_c.as_ptr(), pixels.as_ptr(), w, 0, h, pf, 0);
+        assert_eq!(rc, 0, "tjSaveImage must succeed for a writable path");
+        tj_destroy(h_save);
+
+        let h_load = tj_init_decompress();
+        assert!(!h_load.is_null());
+        let mut got_w: c_int = 0;
+        let mut got_h: c_int = 0;
+        let mut got_pf: c_int = -1;
+        let buf = tj_load_image(
+            h_load,
+            ppm_path_c.as_ptr(),
+            &mut got_w,
+            1,
+            &mut got_h,
+            &mut got_pf,
+            0,
+        );
+        assert!(
+            !buf.is_null(),
+            "tjLoadImage must succeed for the file we just wrote"
+        );
+        assert_eq!(got_w, w);
+        assert_eq!(got_h, h);
+        assert_eq!(got_pf, 0, "PPM should round-trip as TJPF_RGB");
+        let got: &[u8] = std::slice::from_raw_parts(buf, pixels.len());
+        assert_eq!(got, pixels.as_slice(), "round-trip pixels must match");
+        tj3_free(buf as *mut c_void);
+        tj_destroy(h_load);
+    }
+    let _ = std::fs::remove_file(&ppm_path);
 }

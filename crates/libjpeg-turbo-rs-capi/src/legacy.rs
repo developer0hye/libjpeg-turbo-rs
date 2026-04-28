@@ -27,7 +27,7 @@ use libjpeg_turbo_rs::{calc_jpeg_dimensions, yuv_plane_height, yuv_plane_width, 
 use crate::compress::tj3Compress8;
 use crate::decompress::tj3Decompress8;
 use crate::header::{tj3DecompressHeader, TjRegion};
-use crate::tj3::{handle_as_mut, tj3Destroy, tj3GetErrorStr, tj3Init, tj3Set, TJERR_FATAL};
+use crate::tj3::{handle_as_mut, tj3Destroy, tj3GetErrorStr, tj3Init, tj3Set};
 use crate::transform::{tj3Transform, TjTransform};
 
 // --- TJINIT values (matching turbojpeg.h `enum TJINIT`) ---
@@ -417,41 +417,41 @@ pub extern "C" fn tjPlaneHeight(component_id: c_int, height: c_int, subsamp: c_i
 // ---------------------------------------------------------------------------
 
 /// `tjLoadImage(handle, filename, width, align, height, pixelFormat, flags)`.
-/// Stub — file IO routing is tracked separately. Returns NULL with an
-/// error set.
+///
+/// Legacy wrapper: delegates to `tj3LoadImage8`. The trailing
+/// `flags` argument is intentionally dropped — upstream's TJFLAG_*
+/// codes don't apply to image loading (they gate JPEG decode
+/// behaviours). On failure, the underlying tj3 form installs the
+/// error string on the handle, so we just propagate its NULL.
 #[no_mangle]
 pub extern "C" fn tjLoadImage(
     handle: *mut c_void,
-    _filename: *const c_char,
-    _width: *mut c_int,
-    _align: c_int,
-    _height: *mut c_int,
-    _pixel_format: *mut c_int,
+    filename: *const c_char,
+    width: *mut c_int,
+    align: c_int,
+    height: *mut c_int,
+    pixel_format: *mut c_int,
     _flags: c_int,
 ) -> *mut u8 {
-    if let Some(inst) = unsafe { handle_as_mut(handle) } {
-        inst.set_error("tjLoadImage: not yet implemented", TJERR_FATAL);
-    }
-    std::ptr::null_mut()
+    crate::imageio::tj3LoadImage8(handle, filename, width, align, height, pixel_format)
 }
 
 /// `tjSaveImage(handle, filename, buffer, width, pitch, height, pixelFormat, flags)`.
-/// Stub — see `tjLoadImage`.
+///
+/// Legacy wrapper: delegates to `tj3SaveImage8`. See `tjLoadImage`
+/// for the rationale on dropping `flags`.
 #[no_mangle]
 pub extern "C" fn tjSaveImage(
     handle: *mut c_void,
-    _filename: *const c_char,
-    _buffer: *const u8,
-    _width: c_int,
-    _pitch: c_int,
-    _height: c_int,
-    _pixel_format: c_int,
+    filename: *const c_char,
+    buffer: *const u8,
+    width: c_int,
+    pitch: c_int,
+    height: c_int,
+    pixel_format: c_int,
     _flags: c_int,
 ) -> c_int {
-    if let Some(inst) = unsafe { handle_as_mut(handle) } {
-        inst.set_error("tjSaveImage: not yet implemented", TJERR_FATAL);
-    }
-    -1
+    crate::imageio::tj3SaveImage8(handle, filename, buffer, width, pitch, height, pixel_format)
 }
 
 // ---------------------------------------------------------------------------
