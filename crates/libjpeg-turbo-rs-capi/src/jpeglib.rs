@@ -5742,34 +5742,74 @@ fn materialize_foreign_coef_arrays(
             unsafe { ((*barray).blocksperrow, (*barray).rows_in_array) };
         let h_samp: u32 = (comp_info.h_samp_factor.max(1)) as u32;
         let v_samp: u32 = (comp_info.v_samp_factor.max(1)) as u32;
-        let mcu_x: u32 = imcu_w * h_samp;
-        let mcu_y: u32 = imcu_h * v_samp;
-        let blocks_x: u32 = if mcu_x != 0 {
-            mcu_x.min(full_x)
+
+        // Logical extent — what transupp's `do_*` helpers actually
+        // wrote into the workspace. For workspace transforms
+        // (`-rotate`, `-transpose`, etc.) this is `comp_info[ci]
+        // .{width,height}_in_blocks` as set by
+        // `populate_dst_block_dims_for_transform`. For the
+        // no-workspace case where dst aliases the source's full
+        // barray, the logical extent reflects the cropped/transformed
+        // dst geometry, smaller than `full_x / full_y`. We must NOT
+        // read past this — `jtransform_request_workspace` allocates
+        // the workspace with `pre_zero=FALSE`, so positions beyond
+        // the logical extent contain whatever `pool.push_block`
+        // returned (uninit Rust allocator memory) — codex round-11
+        // flagged this as UB.
+        let log_x: u32 = if comp_info.width_in_blocks != 0 {
+            comp_info.width_in_blocks.min(full_x)
         } else {
             full_x
         };
-        let blocks_y: u32 = if mcu_y != 0 {
-            mcu_y.min(full_y)
+        let log_y: u32 = if comp_info.height_in_blocks != 0 {
+            comp_info.height_in_blocks.min(full_y)
         } else {
             full_y
         };
+
+        // MCU-padded extent — what stock libjpeg's encoder iterates.
+        // For non-MCU-aligned image dimensions, this exceeds the
+        // logical extent by up to one column/row of dummy blocks
+        // per component. The encoder consumes
+        // `JpegCoefficients::blocks` indexed as
+        // `[by * blocks_x + bx]`, so we ship MCU-padded dims and
+        // zero-pad the trailing region in the materialised Vec.
+        let mcu_x_raw: u32 = imcu_w * h_samp;
+        let mcu_y_raw: u32 = imcu_h * v_samp;
+        let blocks_x: u32 = if mcu_x_raw != 0 {
+            mcu_x_raw.max(log_x)
+        } else {
+            log_x
+        };
+        let blocks_y: u32 = if mcu_y_raw != 0 {
+            mcu_y_raw.max(log_y)
+        } else {
+            log_y
+        };
+
         let row_array: memmgr::JBlockArray = unsafe {
-            access_virt_barray(cinfo_ptr, barray, 0, blocks_y, /*writable=*/ 0)
+            access_virt_barray(cinfo_ptr, barray, 0, log_y, /*writable=*/ 0)
         };
         if row_array.is_null() {
             return Err(format!(
                 "jpeg_finish_compress: access_virt_barray(comp={ci}) returned NULL"
             ));
         }
-        let mut blocks: Vec<[i16; 64]> = Vec::with_capacity(blocks_x as usize * blocks_y as usize);
-        for r in 0..blocks_y as usize {
-            // SAFETY: row_array has `blocks_y` row entries and each
-            // row holds `blocks_x` JBlocks (allocated by
-            // `alloc_barray_impl`).
+
+        // Initialise to zeros so the MCU-padded trailing column /
+        // row is dummy (DC=0; the encoder's
+        // `is_dummy → DC=prev_dc[ci]` branch then takes over).
+        let total: usize = blocks_x as usize * blocks_y as usize;
+        let mut blocks: Vec<[i16; 64]> = vec![[0i16; 64]; total];
+        for r in 0..log_y as usize {
+            // SAFETY: `access_virt_barray(start_row=0, num_rows=log_y)`
+            // returned a contiguous run of `log_y` row pointers; each
+            // row points at `full_x >= log_x` `JBlock`s (allocated by
+            // `alloc_barray_impl`). We only read the first `log_x`
+            // columns to stay inside what transupp initialised.
             let row_ptr: memmgr::JBlockRow = unsafe { *row_array.add(r) };
             let row_blocks: &[memmgr::JBlock] =
-                unsafe { std::slice::from_raw_parts(row_ptr, blocks_x as usize) };
+                unsafe { std::slice::from_raw_parts(row_ptr, log_x as usize) };
             // Foreign-array entries are populated in natural
             // row-major order (transupp's transformations index
             // coefficients as `block[i*8+j]`). Our encoder consumes
@@ -5777,14 +5817,14 @@ fn materialize_foreign_coef_arrays(
             // each block here. Symmetric counterpart of the
             // `NATURAL_ORDER`-based zigzag→natural copy in
             // `jpeg_read_coefficients`.
-            for natural_block in row_blocks.iter() {
+            for (col, natural_block) in row_blocks.iter().enumerate() {
                 let mut zigzag_block: [i16; 64] = [0; 64];
                 for (natural_pos, &coef) in natural_block.iter().enumerate() {
                     let zigzag_pos: usize =
                         libjpeg_turbo_rs::common::quant_table::NATURAL_ORDER[natural_pos];
                     zigzag_block[zigzag_pos] = coef;
                 }
-                blocks.push(zigzag_block);
+                blocks[r * blocks_x as usize + col] = zigzag_block;
             }
         }
         components.push(libjpeg_turbo_rs::ComponentCoefficients {
