@@ -416,43 +416,72 @@ pub extern "C" fn tjPlaneHeight(component_id: c_int, height: c_int, subsamp: c_i
 // Load / Save (stubs until image IO is routed through the shim)
 // ---------------------------------------------------------------------------
 
-/// `tjLoadImage(handle, filename, width, align, height, pixelFormat, flags)`.
+/// `tjLoadImage(filename, width, align, height, pixelFormat, flags)`.
 ///
-/// Legacy wrapper: delegates to `tj3LoadImage8`. The trailing
-/// `flags` argument is intentionally dropped — upstream's TJFLAG_*
-/// codes don't apply to image loading (they gate JPEG decode
-/// behaviours). On failure, the underlying tj3 form installs the
-/// error string on the handle, so we just propagate its NULL.
+/// Legacy 2.x signature is **handle-less** — upstream `turbojpeg.c`
+/// allocates a temporary `tjhandle`, sets `TJPARAM_BOTTOMUP` from
+/// `flags & TJFLAG_BOTTOMUP`, calls `tj3LoadImage8`, then frees the
+/// handle. We mirror that exactly.
 #[no_mangle]
 pub extern "C" fn tjLoadImage(
-    handle: *mut c_void,
     filename: *const c_char,
     width: *mut c_int,
     align: c_int,
     height: *mut c_int,
     pixel_format: *mut c_int,
-    _flags: c_int,
+    flags: c_int,
 ) -> *mut u8 {
-    crate::imageio::tj3LoadImage8(handle, filename, width, align, height, pixel_format)
+    // Create a temporary decompress handle so the underlying TJ3
+    // form has somewhere to record errors. `TJINIT_DECOMPRESS = 2`
+    // matches `tj3.rs` and `turbojpeg.h`.
+    let h: *mut c_void = crate::tj3::tj3Init(2);
+    if h.is_null() {
+        return std::ptr::null_mut();
+    }
+    if (flags & TJFLAG_BOTTOMUP) != 0 {
+        // TJPARAM_BOTTOMUP = 0 in turbojpeg.h, but use the
+        // tj3-published constant via tj3Set to stay layout-independent.
+        let _ = crate::tj3::tj3Set(h, TJPARAM_BOTTOMUP, 1);
+    }
+    let buf: *mut u8 =
+        crate::imageio::tj3LoadImage8(h, filename, width, align, height, pixel_format);
+    crate::tj3::tj3Destroy(h);
+    buf
 }
 
-/// `tjSaveImage(handle, filename, buffer, width, pitch, height, pixelFormat, flags)`.
+/// `tjSaveImage(filename, buffer, width, pitch, height, pixelFormat, flags)`.
 ///
-/// Legacy wrapper: delegates to `tj3SaveImage8`. See `tjLoadImage`
-/// for the rationale on dropping `flags`.
+/// Legacy 2.x signature: also handle-less. Same handle lifecycle as
+/// `tjLoadImage` (temp `tjhandle`, propagate `TJFLAG_BOTTOMUP`,
+/// delegate, free).
 #[no_mangle]
 pub extern "C" fn tjSaveImage(
-    handle: *mut c_void,
     filename: *const c_char,
     buffer: *const u8,
     width: c_int,
     pitch: c_int,
     height: c_int,
     pixel_format: c_int,
-    _flags: c_int,
+    flags: c_int,
 ) -> c_int {
-    crate::imageio::tj3SaveImage8(handle, filename, buffer, width, pitch, height, pixel_format)
+    let h: *mut c_void = crate::tj3::tj3Init(1); // TJINIT_COMPRESS
+    if h.is_null() {
+        return -1;
+    }
+    if (flags & TJFLAG_BOTTOMUP) != 0 {
+        let _ = crate::tj3::tj3Set(h, TJPARAM_BOTTOMUP, 1);
+    }
+    let rc: c_int =
+        crate::imageio::tj3SaveImage8(h, filename, buffer, width, pitch, height, pixel_format);
+    crate::tj3::tj3Destroy(h);
+    rc
 }
+
+/// Legacy `TJFLAG_BOTTOMUP` bit and `TJPARAM_BOTTOMUP` index per
+/// upstream `turbojpeg.h`. Kept module-local so legacy translation
+/// doesn't pull in additional constant exports.
+const TJFLAG_BOTTOMUP: c_int = 2;
+const TJPARAM_BOTTOMUP: c_int = 1;
 
 // ---------------------------------------------------------------------------
 // Error reporting

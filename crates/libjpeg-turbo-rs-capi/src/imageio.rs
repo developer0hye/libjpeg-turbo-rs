@@ -15,8 +15,75 @@ use std::ffi::{c_char, c_int, c_void, CStr};
 use libjpeg_turbo_rs::PixelFormat;
 
 use crate::alloc::{libc_free, libc_from_slice};
-use crate::convert::{pixel_format_from_tj, pixel_format_to_tj};
+use crate::convert::{pixel_format_from_tj, pixel_format_to_tj, TJPF_BGR, TJPF_RGB};
 use crate::tj3::{handle_as_mut, TJERR_FATAL};
+
+/// Read `TJPARAM_BOTTOMUP` from a tjhandle. Returns `false` for NULL
+/// or unset. Mirrors `tj3Get(handle, TJPARAM_BOTTOMUP) != 0` without
+/// going through the public `tj3Get` (which we'd have to call via
+/// FFI from inside the same shim).
+fn handle_bottom_up(handle: *mut c_void) -> bool {
+    match unsafe { handle_as_mut(handle) } {
+        Some(inst) => inst.bottom_up_flag(),
+        None => false,
+    }
+}
+
+/// In-place R↔B swap on RGB or BGR row data. `bytes` must be a
+/// 3-byte-per-pixel buffer; trailing bytes (e.g. partial last
+/// pixel) are ignored. Used to flip between TJPF_RGB and TJPF_BGR.
+fn rb_swap_3bpp(bytes: &mut [u8]) {
+    for px in bytes.chunks_exact_mut(3) {
+        px.swap(0, 2);
+    }
+}
+
+/// Reverse the row order of a buffer in-place. `row_bytes` is the
+/// stride in bytes; the trailing bytes (if `bytes.len() % row_bytes
+/// != 0`) are left alone. Used to honour `TJPARAM_BOTTOMUP`.
+fn flip_rows_in_place(bytes: &mut [u8], row_bytes: usize) {
+    if row_bytes == 0 {
+        return;
+    }
+    let rows: usize = bytes.len() / row_bytes;
+    let mut top: usize = 0;
+    let mut bot: usize = rows.saturating_sub(1);
+    while top < bot {
+        let (lo, hi) = bytes.split_at_mut(bot * row_bytes);
+        lo[top * row_bytes..top * row_bytes + row_bytes].swap_with_slice(&mut hi[..row_bytes]);
+        top += 1;
+        bot -= 1;
+    }
+}
+
+/// Strip alpha / padding bytes from a 4-bpp packed-pixel buffer to
+/// produce dense 3-bpp RGB or BGR. `pf` chooses which 3 channels to
+/// keep:
+/// - `TJPF_RGBX` / `TJPF_RGBA` → keep bytes 0..3 (R, G, B), drop 3
+/// - `TJPF_BGRX` / `TJPF_BGRA` → same as above, but pixels are BGR
+/// - `TJPF_XRGB` / `TJPF_ARGB` → keep bytes 1..4 (skip alpha at 0)
+/// - `TJPF_XBGR` / `TJPF_ABGR` → keep bytes 1..4 (skip alpha at 0,
+///   pixels are BGR)
+///
+/// Returns the dense buffer plus its 3-bpp format (TJPF_RGB or
+/// TJPF_BGR).
+fn strip_alpha_to_3bpp(src: &[u8], width: usize, height: usize, src_tj: c_int) -> (Vec<u8>, c_int) {
+    let bytes: usize = width * height * 3;
+    let mut dst: Vec<u8> = Vec::with_capacity(bytes);
+    let (b0, b1, b2, dst_tj): (usize, usize, usize, c_int) = match src_tj {
+        crate::convert::TJPF_RGBX | crate::convert::TJPF_RGBA => (0, 1, 2, TJPF_RGB),
+        crate::convert::TJPF_BGRX | crate::convert::TJPF_BGRA => (0, 1, 2, TJPF_BGR),
+        crate::convert::TJPF_XRGB | crate::convert::TJPF_ARGB => (1, 2, 3, TJPF_RGB),
+        crate::convert::TJPF_XBGR | crate::convert::TJPF_ABGR => (1, 2, 3, TJPF_BGR),
+        _ => (0, 1, 2, src_tj),
+    };
+    for px in src.chunks_exact(4) {
+        dst.push(px[b0]);
+        dst.push(px[b1]);
+        dst.push(px[b2]);
+    }
+    (dst, dst_tj)
+}
 
 // ---------------------------------------------------------------------------
 // Shared helpers
@@ -95,23 +162,29 @@ pub extern "C" fn tj3LoadImage8(
         Ok(b) => b,
         Err(e) => {
             inst.set_error(
-                &format!("tj3LoadImage8: cannot read {path}: {e}"),
+                format!("tj3LoadImage8: cannot read {path}: {e}"),
                 TJERR_FATAL,
             );
             return std::ptr::null_mut();
         }
     };
-    let img: libjpeg_turbo_rs::LoadedImage = match libjpeg_turbo_rs::load_image_from_bytes(&bytes) {
-        Ok(i) => i,
-        Err(e) => {
-            inst.set_error(
-                &format!("tj3LoadImage8: parse failed for {path}: {e}"),
-                TJERR_FATAL,
-            );
-            return std::ptr::null_mut();
-        }
-    };
-    let native_tj: c_int = pixel_format_to_tj(img.pixel_format);
+    // Detect BMP magic before delegating to the parser; upstream
+    // TurboJPEG returns BMP pixels in TJPF_BGR even though the
+    // Rust loader normalises 24-bit BMP to PixelFormat::Rgb. We
+    // swap R↔B post-load so the visible default matches stock.
+    let is_bmp: bool = bytes.len() >= 2 && bytes[0] == b'B' && bytes[1] == b'M';
+    let mut img: libjpeg_turbo_rs::LoadedImage =
+        match libjpeg_turbo_rs::load_image_from_bytes(&bytes) {
+            Ok(i) => i,
+            Err(e) => {
+                inst.set_error(
+                    format!("tj3LoadImage8: parse failed for {path}: {e}"),
+                    TJERR_FATAL,
+                );
+                return std::ptr::null_mut();
+            }
+        };
+    let mut native_tj: c_int = pixel_format_to_tj(img.pixel_format);
     if native_tj < 0 {
         inst.set_error(
             "tj3LoadImage8: file pixel format has no TJPF mapping",
@@ -119,22 +192,45 @@ pub extern "C" fn tj3LoadImage8(
         );
         return std::ptr::null_mut();
     }
+    // Convert RGB→BGR for BMP sources so upstream TurboJPEG
+    // semantics hold. PPM/PGM stay in their native format.
+    if is_bmp && native_tj == TJPF_RGB {
+        rb_swap_3bpp(&mut img.pixels);
+        native_tj = TJPF_BGR;
+    }
 
     // Honour caller-requested pixel format when possible. A negative
-    // value means "use file's native format".
+    // value means "use file's native format". Today we support the
+    // identity match plus the RGB↔BGR swap (both directions) for
+    // 3-bpp source data; other conversions return an error.
+    let mut effective_tj: c_int = native_tj;
     if !pixel_format.is_null() {
         let req: c_int = unsafe { *pixel_format };
         if req >= 0 && req != native_tj {
-            // Future work: pixel-format conversion when the request
-            // disagrees with the file's native format.
-            inst.set_error(
-                &format!(
-                    "tj3LoadImage8: pixel-format conversion not yet supported (file is TJPF={native_tj}, requested TJPF={req})"
-                ),
-                TJERR_FATAL,
-            );
-            return std::ptr::null_mut();
+            if (native_tj == TJPF_RGB && req == TJPF_BGR)
+                || (native_tj == TJPF_BGR && req == TJPF_RGB)
+            {
+                rb_swap_3bpp(&mut img.pixels);
+                effective_tj = req;
+            } else {
+                inst.set_error(
+                    format!(
+                        "tj3LoadImage8: pixel-format conversion not yet supported (file is TJPF={native_tj}, requested TJPF={req})"
+                    ),
+                    TJERR_FATAL,
+                );
+                return std::ptr::null_mut();
+            }
         }
+    }
+    let native_tj: c_int = effective_tj;
+
+    // Bottom-up row order: stock TurboJPEG returns rows top-to-bottom
+    // by default. When the caller set TJPARAM_BOTTOMUP / TJFLAG_BOTTOMUP,
+    // flip the row order in-place before we copy out.
+    if handle_bottom_up(handle) {
+        let bpp_for_flip: usize = img.pixel_format.bytes_per_pixel();
+        flip_rows_in_place(&mut img.pixels, img.width * bpp_for_flip);
     }
 
     // Pad rows out to `align` bytes if requested.
@@ -265,7 +361,7 @@ pub extern "C" fn tj3SaveImage8(
         Some(p) => p,
         None => {
             inst.set_error(
-                &format!("tj3SaveImage8: unsupported TJPF code {pixel_format}"),
+                format!("tj3SaveImage8: unsupported TJPF code {pixel_format}"),
                 TJERR_FATAL,
             );
             return -1;
@@ -291,7 +387,7 @@ pub extern "C" fn tj3SaveImage8(
 
     // Repack into a dense buffer if pitch != width*bpp; the Rust
     // saver expects dense rows.
-    let dense_bytes: Vec<u8> = if stride == row_dense {
+    let mut dense_bytes: Vec<u8> = if stride == row_dense {
         // SAFETY: caller asserts buffer holds at least
         // `stride * h = row_dense * h` valid bytes.
         unsafe { std::slice::from_raw_parts(buffer, row_dense * h).to_vec() }
@@ -307,20 +403,43 @@ pub extern "C" fn tj3SaveImage8(
         v
     };
 
+    // Bottom-up row order: when the caller set TJPARAM_BOTTOMUP /
+    // TJFLAG_BOTTOMUP, the supplied buffer is in bottom-to-top order;
+    // flip it before handing to the Rust savers (which expect
+    // top-to-bottom).
+    if handle_bottom_up(handle) {
+        flip_rows_in_place(&mut dense_bytes, row_dense);
+    }
+
+    // Choose effective format & buffer for downstream save. For BMP
+    // outputs, upstream TurboJPEG's tj3SaveImage8 strips alpha /
+    // padding from 4-bpp formats so the on-disk BMP is 24-bit. We
+    // mirror that: convert RGBA/BGRA/RGBX/BGRX/ARGB/ABGR/XRGB/XBGR
+    // down to 3-bpp RGB or BGR before invoking save_bmp. PPM/PGM
+    // accept the original format.
+    let lower: String = path.to_ascii_lowercase();
+    let is_bmp_out: bool = lower.ends_with(".bmp");
+    let (effective_bytes, effective_pf): (Vec<u8>, PixelFormat) = if is_bmp_out && bpp == 4 {
+        let (stripped, dst_tj) = strip_alpha_to_3bpp(&dense_bytes, w, h, pixel_format);
+        let pf3: PixelFormat = pixel_format_from_tj(dst_tj).unwrap_or(PixelFormat::Rgb);
+        (stripped, pf3)
+    } else {
+        (dense_bytes, pf)
+    };
+
     // Dispatch on extension. BMP for `.bmp`; otherwise PPM (matches
     // upstream tj3SaveImage8's behaviour where unrecognised
     // extensions fall through to PPM/PGM).
-    let lower: String = path.to_ascii_lowercase();
-    let res: libjpeg_turbo_rs::Result<()> = if lower.ends_with(".bmp") {
-        libjpeg_turbo_rs::save_bmp(path, &dense_bytes, w, h, pf)
+    let res: libjpeg_turbo_rs::Result<()> = if is_bmp_out {
+        libjpeg_turbo_rs::save_bmp(path, &effective_bytes, w, h, effective_pf)
     } else {
-        libjpeg_turbo_rs::save_ppm(path, &dense_bytes, w, h, pf)
+        libjpeg_turbo_rs::save_ppm(path, &effective_bytes, w, h, effective_pf)
     };
     match res {
         Ok(()) => 0,
         Err(e) => {
             inst.set_error(
-                &format!("tj3SaveImage8: write failed for {path}: {e}"),
+                format!("tj3SaveImage8: write failed for {path}: {e}"),
                 TJERR_FATAL,
             );
             -1
