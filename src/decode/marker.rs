@@ -65,6 +65,14 @@ pub struct JpegMetadata {
     pub exif_data: Option<Vec<u8>>,
     /// COM marker text, if present.
     pub comment: Option<String>,
+    /// True if a JFIF APP0 marker was observed (regardless of its
+    /// density values). Mirrors libjpeg's `cinfo.saw_JFIF_marker`.
+    pub saw_jfif_marker: bool,
+    /// JFIF major version byte from the APP0 marker (only meaningful
+    /// when `saw_jfif_marker` is true).
+    pub jfif_major_version: u8,
+    /// JFIF minor version byte from the APP0 marker.
+    pub jfif_minor_version: u8,
     /// Pixel density from JFIF header.
     pub density: DensityInfo,
     /// True if using arithmetic entropy coding (SOF9/SOF10).
@@ -145,6 +153,9 @@ impl<'a> MarkerReader<'a> {
             [5; crate::decode::arithmetic::NUM_ARITH_TBLS];
         let mut comment: Option<String> = None;
         let mut density: DensityInfo = DensityInfo::default();
+        let mut saw_jfif_marker: bool = false;
+        let mut jfif_major_version: u8 = 0;
+        let mut jfif_minor_version: u8 = 0;
         let mut saved_markers: Vec<SavedMarker> = Vec::new();
 
         // Per JPEG spec § B.2.4.2 a stream contains exactly one SOF marker.
@@ -287,7 +298,12 @@ impl<'a> MarkerReader<'a> {
                             });
                         }
                     }
-                    self.read_app0(&mut density)?;
+                    self.read_app0(
+                        &mut density,
+                        &mut saw_jfif_marker,
+                        &mut jfif_major_version,
+                        &mut jfif_minor_version,
+                    )?;
                 }
                 // COM marker — parse comment text
                 COM => {
@@ -342,6 +358,9 @@ impl<'a> MarkerReader<'a> {
             icc_chunks,
             exif_data,
             comment,
+            saw_jfif_marker,
+            jfif_major_version,
+            jfif_minor_version,
             density,
             is_arithmetic,
             arith_dc_params,
@@ -435,8 +454,16 @@ impl<'a> MarkerReader<'a> {
         Ok(())
     }
 
-    /// Parse APP0 (JFIF) marker to extract pixel density info.
-    fn read_app0(&mut self, density: &mut DensityInfo) -> Result<()> {
+    /// Parse APP0 (JFIF) marker to extract pixel density info,
+    /// version bytes, and surface presence so callers don't have to
+    /// infer it from density values.
+    fn read_app0(
+        &mut self,
+        density: &mut DensityInfo,
+        saw_jfif: &mut bool,
+        jfif_major: &mut u8,
+        jfif_minor: &mut u8,
+    ) -> Result<()> {
         let length = self.read_u16_be()? as usize;
         if length < 2 {
             return Err(JpegError::CorruptData("APP0 segment length < 2".into()));
@@ -448,6 +475,9 @@ impl<'a> MarkerReader<'a> {
             && self.pos + 12 <= self.data.len()
             && &self.data[self.pos..self.pos + 5] == b"JFIF\0"
         {
+            *saw_jfif = true;
+            *jfif_major = self.data[self.pos + 5];
+            *jfif_minor = self.data[self.pos + 6];
             let unit_byte = self.data[self.pos + 7];
             let x_density = u16::from_be_bytes([self.data[self.pos + 8], self.data[self.pos + 9]]);
             let y_density =

@@ -1411,14 +1411,18 @@ pub extern "C" fn jpeg_read_header(cinfo: *mut c_void, _require_image: CBoolean)
     c.data_precision = frame.precision as c_int;
     c.progressive_mode = if frame.is_progressive { 1 } else { 0 };
 
-    // Populate JFIF density from the parsed APP0 marker. Stock
-    // libjpeg-turbo sets `cinfo.density_unit / X_density / Y_density`
-    // during `jpeg_read_header`; without this, `jpegtran -copy all
-    // <op>` paths that go through
+    // Populate JFIF presence + density from the parsed APP0 marker.
+    // Stock libjpeg-turbo sets `cinfo.saw_JFIF_marker`,
+    // `JFIF_{major,minor}_version`, and
+    // `density_unit / X_density / Y_density` during
+    // `jpeg_read_header`; without this, `jpegtran -copy all <op>`
+    // paths that go through
     // `jpeg_copy_critical_parameters → materialize_foreign_coef_arrays`
     // (no `jpeg_start_decompress` call) miss the source's JFIF
-    // density and emit defaults `(unit=0, x=1, y=1)` — flagged at
-    // session-stop after 2f6683b.
+    // metadata and emit defaults — flagged at session-stop after
+    // 2f6683b. The follow-up codex review (round-13) tightened the
+    // requirement to use the actual APP0 presence and version,
+    // not a density-based heuristic, so the parser surfaces both.
     let density: &libjpeg_turbo_rs::DensityInfo = decoder.density();
     let density_unit_raw: u8 = match density.unit {
         libjpeg_turbo_rs::DensityUnit::Unknown => 0,
@@ -1428,11 +1432,18 @@ pub extern "C" fn jpeg_read_header(cinfo: *mut c_void, _require_image: CBoolean)
     c.density_unit = density_unit_raw;
     c.X_density = density.x;
     c.Y_density = density.y;
-    c.JFIF_major_version = 1;
-    c.JFIF_minor_version = 1;
-    // Heuristic: any non-default density implies a JFIF marker was
-    // present. (Same logic as `jpeg_start_decompress`.)
-    c.saw_JFIF_marker = (density_unit_raw != 0 || density.x != 1 || density.y != 1) as CBoolean;
+    let saw_jfif: bool = decoder.saw_jfif_marker();
+    let (jfif_major, jfif_minor): (u8, u8) = decoder.jfif_version();
+    c.saw_JFIF_marker = if saw_jfif { 1 } else { 0 };
+    if saw_jfif {
+        c.JFIF_major_version = jfif_major;
+        c.JFIF_minor_version = jfif_minor;
+    } else {
+        // No JFIF APP0 in the stream — leave version at the
+        // libjpeg defaults set by `jpeg_create_decompress`.
+        c.JFIF_major_version = 0;
+        c.JFIF_minor_version = 0;
+    }
     // libjpeg's `is_baseline` flag: TRUE if SOF0 was encountered. We
     // approximate by clearing it for progressive/lossless streams.
     c.is_baseline = if !frame.is_progressive && !frame.is_lossless {
@@ -1630,10 +1641,14 @@ pub extern "C" fn jpeg_start_decompress(cinfo: *mut c_void) -> CBoolean {
     c.rec_outbuf_height = 1;
     c.data_precision = image.precision as c_int;
 
-    // Populate density fields from the JFIF marker (if present). libjpeg
-    // sets `saw_JFIF_marker` true when a JFIF APP0 segment was observed;
-    // our Rust decoder always surfaces a `DensityInfo`, so we infer the
-    // flag from a non-default unit/density pair.
+    // `jpeg_read_header` already populated `saw_JFIF_marker`,
+    // `JFIF_{major,minor}_version`, and `density_unit / X_density /
+    // Y_density` from the parsed APP0 marker (round-13 fix at
+    // b435574+ codex follow-up). Re-asserting density from `image`
+    // keeps a single source of truth in case a caller bypassed
+    // `jpeg_read_header` and went straight to start_decompress —
+    // an unusual path, but harmless here since `image.density` came
+    // out of the same parser.
     let density: libjpeg_turbo_rs::DensityInfo = image.density;
     let density_unit_raw: u8 = match density.unit {
         libjpeg_turbo_rs::DensityUnit::Unknown => 0,
@@ -1643,10 +1658,6 @@ pub extern "C" fn jpeg_start_decompress(cinfo: *mut c_void) -> CBoolean {
     c.density_unit = density_unit_raw;
     c.X_density = density.x;
     c.Y_density = density.y;
-    c.JFIF_major_version = 1;
-    c.JFIF_minor_version = 1;
-    // Heuristic: any non-default density implies a JFIF marker was present.
-    c.saw_JFIF_marker = (density_unit_raw != 0 || density.x != 1 || density.y != 1) as CBoolean;
 
     priv_state.decoded = Some(image);
     priv_state.last_error = CString::new("No error").expect("static");
