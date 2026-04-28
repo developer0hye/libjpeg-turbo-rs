@@ -165,7 +165,13 @@ cargo test --test capi_pillow_compat -- --nocapture
 
 ### P0-4. Foreign Virtual Coefficient Arrays Are Rejected
 
-**Status (2026-04-28): partially closed.** Stock `jpegtran -copy all -rotate 90` is byte-exact against upstream on the 8-bit fixtures (`testimgari.jpg`, `testimgint.jpg`, `testorig.jpg`); `monkey12.jpg` (12-bit precision) is `skip`ped because our `write_coefficients` writer hard-codes `data_precision=8`. The remaining work is implementing the 12-bit precision path in the coefficient writer plus surfacing `data_precision` through `JpegCoefficients`. The full TJXOP cross-product (rotate {180,270} × flip × transpose × transverse × crop) and marker-copy modes (`comments`/`icc`/`none`) still need verification.
+**Status (2026-04-28): mostly closed.** Stock `jpegtran -copy all <op>` is byte-exact against upstream on the 8-bit fixtures (`testimgari.jpg`, `testimgint.jpg`, `testorig.jpg`) for the **full TJXOP cross-product**: `-flip horizontal`, `-flip vertical`, `-rotate 90`, `-rotate 180`, `-rotate 270`, `-transpose`, `-transverse`. All four `-copy` modes (`none`, `comments`, `icc`, `all`) are byte-exact. `-grayscale` matches stock's marker stream exactly (no spurious APP14 after codex round-8 fix at c0e9399); a residual ≈35-byte difference in the entropy stream is a separate pre-existing encoder discrepancy unrelated to the foreign-array protocol.
+
+Remaining gaps:
+
+1. **12-bit transcode (`monkey12.jpg`).** `write_coefficients` writer hard-codes `data_precision=8`; surfacing `data_precision` through `JpegCoefficients` and adding a 12-bit Huffman writer is the dominant work.
+2. **`-crop` with non-MCU-aligned origin.** `-crop 32x32+16+16` (MCU-aligned) is byte-exact, but `-crop 16x16+0+0` and `-crop 32x32+0+0` emit ≈2x the bytes of stock — likely emitting full source dimensions in SOF instead of the cropped geometry, or skipping the `jtransform_request_workspace` re-quantisation path for left/top edge crops.
+3. **Adobe APP14 grayscale entropy diff.** The marker stream matches stock byte-for-byte after the round-8 fix, but the entropy bytes differ by ≈35 bytes. Pre-existing minor encoder behaviour, not introduced by the foreign-array work.
 
 **Symptom (historical):** `jpeg_write_coefficients` accepts handles returned by this shim's `jpeg_read_coefficients`, but rejects foreign virtual barray handles:
 
