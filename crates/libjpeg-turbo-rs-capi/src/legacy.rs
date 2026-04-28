@@ -13,9 +13,15 @@
 //! - `tjDecompressHeader3`
 //! - `tjTransform`
 //! - `tjEncodeYUV3`, `tjDecodeYUV` — forward to `tj3EncodeYUV8` /
-//!   `tj3DecodeYUV8` after setting `TJPARAM_SUBSAMP`. The legacy
-//!   `pad` and `align` arguments are folded into the TJ3 form's
-//!   single `align`. `flags` is ignored.
+//!   `tj3DecodeYUV8` after setting `TJPARAM_SUBSAMP` from `subsamp`
+//!   and propagating legacy `flags` (`TJFLAG_BOTTOMUP`,
+//!   `TJFLAG_FASTUPSAMPLE` (decode only), `TJFLAG_FASTDCT`,
+//!   `TJFLAG_PROGRESSIVE` (encode only)) onto their `TJPARAM_*`
+//!   counterparts via `process_legacy_*_flags`, mirroring upstream
+//!   `turbojpeg.c::processFlags`. The 4th arg of `tjEncodeYUV3` is
+//!   `pitch` (input row stride; `0` = tight `width * bpp`), per
+//!   the upstream ABI — it is **not** YUV alignment. The dedicated
+//!   `align` argument controls YUV plane row alignment.
 //! - `tjBufSize`, `tjBufSizeYUV2`, `tjPlaneSizeYUV`, `tjPlaneWidth`,
 //!   `tjPlaneHeight`
 //! - `tjLoadImage`, `tjSaveImage` — handle-less (per upstream
@@ -229,39 +235,44 @@ pub extern "C" fn tjTransform(
 // YUV (forwards to the A1-7 family in `crate::yuv`)
 // ---------------------------------------------------------------------------
 
-/// `tjEncodeYUV3(handle, srcBuf, width, pad, height, pixelFormat,
+/// `tjEncodeYUV3(handle, srcBuf, width, pitch, height, pixelFormat,
 ///               dstBuf, align, subsamp, flags) -> int`.
 ///
-/// Legacy alias: sets `TJPARAM_SUBSAMP` then forwards to
-/// `tj3EncodeYUV8`. `pad` and `align` are aliases for the row
-/// alignment in different historical signatures; whichever is
-/// positive wins, defaulting to 1. `flags` is ignored.
+/// Legacy alias matching the **upstream** `turbojpeg.h` signature:
+/// the 4th argument is `pitch` (input RGB row stride in bytes — 0
+/// means tight `width * bytes_per_pixel`), **not** YUV alignment.
+/// The 8th argument `align` is the YUV plane row-stride alignment.
+/// Sets `TJPARAM_SUBSAMP` from `subsamp`, propagates legacy
+/// `flags` (`TJFLAG_BOTTOMUP`, `TJFLAG_FASTDCT`) to their
+/// `TJPARAM_*` counterparts via `process_legacy_compress_flags`,
+/// then forwards to `tj3EncodeYUV8` with the caller's pitch and
+/// align preserved.
 #[no_mangle]
 pub extern "C" fn tjEncodeYUV3(
     handle: *mut c_void,
     src_buf: *const u8,
     width: c_int,
-    pad: c_int,
+    pitch: c_int,
     height: c_int,
     pixel_format: c_int,
     dst_buf: *mut u8,
     align: c_int,
     subsamp: c_int,
-    _flags: c_int,
+    flags: c_int,
 ) -> c_int {
-    let effective_align: c_int = if pad > 0 { pad } else { align.max(1) };
     if tj3Set(handle, TJPARAM_SUBSAMP, subsamp) != 0 {
         return -1;
     }
+    process_legacy_compress_flags(handle, flags);
     crate::yuv::tj3EncodeYUV8(
         handle,
         src_buf,
         width,
-        0, /* tight-packed pitch */
+        pitch,
         height,
         pixel_format,
         dst_buf,
-        effective_align,
+        align.max(1),
     )
 }
 
@@ -269,7 +280,10 @@ pub extern "C" fn tjEncodeYUV3(
 ///              height, pixelFormat, flags) -> int`.
 ///
 /// Legacy alias that forwards to `tj3DecodeYUV8` after setting
-/// `TJPARAM_SUBSAMP`.
+/// `TJPARAM_SUBSAMP` and propagating legacy `flags`
+/// (`TJFLAG_BOTTOMUP`, `TJFLAG_FASTUPSAMPLE`, `TJFLAG_FASTDCT`) to
+/// their `TJPARAM_*` counterparts on the caller's handle, mirroring
+/// upstream `turbojpeg.c::processFlags(DECOMPRESS)`.
 #[no_mangle]
 pub extern "C" fn tjDecodeYUV(
     handle: *mut c_void,
@@ -281,11 +295,12 @@ pub extern "C" fn tjDecodeYUV(
     pitch: c_int,
     height: c_int,
     pixel_format: c_int,
-    _flags: c_int,
+    flags: c_int,
 ) -> c_int {
     if tj3Set(handle, TJPARAM_SUBSAMP, subsamp) != 0 {
         return -1;
     }
+    process_legacy_decompress_flags(handle, flags);
     crate::yuv::tj3DecodeYUV8(
         handle,
         src_buf,
@@ -296,6 +311,59 @@ pub extern "C" fn tjDecodeYUV(
         height,
         pixel_format,
     )
+}
+
+// Legacy `flags` bits per upstream `turbojpeg.h`. We translate the
+// subset we know about; unknown bits are silently ignored to stay
+// permissive with older headers (matching upstream's behaviour).
+const TJFLAG_FASTUPSAMPLE: c_int = 256;
+const TJFLAG_FASTDCT: c_int = 2048;
+const TJFLAG_PROGRESSIVE: c_int = 16384;
+// `TJFLAG_BOTTOMUP` is also defined module-locally near the
+// load/save wrappers; keep that single canonical declaration.
+const TJPARAM_PROGRESSIVE: c_int = 12;
+const TJPARAM_FASTUPSAMPLE: c_int = 9;
+const TJPARAM_FASTDCT: c_int = 10;
+
+/// Mirror of upstream `turbojpeg.c::processFlags(handle, flags,
+/// COMPRESS)`. Sets the `TJPARAM_*` counterparts of legacy
+/// compress-side flag bits on the caller's handle.
+fn process_legacy_compress_flags(handle: *mut c_void, flags: c_int) {
+    let _ = tj3Set(
+        handle,
+        TJPARAM_BOTTOMUP,
+        (flags & TJFLAG_BOTTOMUP != 0) as c_int,
+    );
+    let _ = tj3Set(
+        handle,
+        TJPARAM_PROGRESSIVE,
+        (flags & TJFLAG_PROGRESSIVE != 0) as c_int,
+    );
+    let _ = tj3Set(
+        handle,
+        TJPARAM_FASTDCT,
+        (flags & TJFLAG_FASTDCT != 0) as c_int,
+    );
+}
+
+/// Mirror of upstream `turbojpeg.c::processFlags(handle, flags,
+/// DECOMPRESS)`.
+fn process_legacy_decompress_flags(handle: *mut c_void, flags: c_int) {
+    let _ = tj3Set(
+        handle,
+        TJPARAM_BOTTOMUP,
+        (flags & TJFLAG_BOTTOMUP != 0) as c_int,
+    );
+    let _ = tj3Set(
+        handle,
+        TJPARAM_FASTUPSAMPLE,
+        (flags & TJFLAG_FASTUPSAMPLE != 0) as c_int,
+    );
+    let _ = tj3Set(
+        handle,
+        TJPARAM_FASTDCT,
+        (flags & TJFLAG_FASTDCT != 0) as c_int,
+    );
 }
 
 // ---------------------------------------------------------------------------

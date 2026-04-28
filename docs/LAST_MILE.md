@@ -303,7 +303,17 @@ Every encode benchmark `Rust/C ≤ 1.05×`. Record before/after in `experiments/
 
 ### P1. Legacy `tjEncodeYUV3` / `tjDecodeYUV` Are Still Stubs — **CLOSED**
 
-**Status (2026-04-28): closed.** The "stub returns -1" annotation in `crates/libjpeg-turbo-rs-capi/src/legacy.rs` was stale — both wrappers already forward to the TJ3 family (`tj3EncodeYUV8` / `tj3DecodeYUV8`) after setting `TJPARAM_SUBSAMP` from the legacy `subsamp` argument and folding `pad`/`align` into the TJ3 form's single `align`. End-to-end coverage added: `cargo test -p libjpeg-turbo-rs-capi --release --test legacy_aliases` exercises a 64×64 RGB → packed YUV (4:4:4) → RGB round-trip through `tjEncodeYUV3` + `tjDecodeYUV` and asserts max per-channel diff ≤ 8 (BT.601 colorspace conversion rounding only). The module-level doc comment in `legacy.rs` was updated to match the actual behavior.
+**Status (2026-04-28): closed.** Both wrappers now forward to the TJ3 family (`tj3EncodeYUV8` / `tj3DecodeYUV8`) with the **upstream-correct** ABI:
+
+- 4th argument of `tjEncodeYUV3` is `pitch` (RGB row stride, `0` = tight `width * bpp`), not YUV alignment. Earlier rounds had this swapped — fixed in round-19 codex review.
+- Legacy `flags` are mapped to the corresponding `TJPARAM_*` on the caller's handle via `process_legacy_compress_flags` / `process_legacy_decompress_flags`, mirroring upstream `turbojpeg.c::processFlags`. Compress side propagates `TJFLAG_BOTTOMUP`, `TJFLAG_PROGRESSIVE`, `TJFLAG_FASTDCT`; decompress side propagates `TJFLAG_BOTTOMUP`, `TJFLAG_FASTUPSAMPLE`, `TJFLAG_FASTDCT`.
+
+End-to-end coverage in `cargo test -p libjpeg-turbo-rs-capi --release --test legacy_aliases`:
+
+- `tj_encode_decode_yuv_legacy_aliases_roundtrip_444` — RGB → packed YUV (4:4:4) → RGB round-trip with `pitch = 0` and `align = 1`. Max per-channel diff ≤ 8 (BT.601 conversion rounding only).
+- `tj_yuv_legacy_aliases_propagate_bottomup_flag` — explicitly verifies `TJFLAG_BOTTOMUP` lands on `TJPARAM_BOTTOMUP=1` after both `tjEncodeYUV3` and `tjDecodeYUV`.
+
+The module-level doc comment in `legacy.rs` was updated to match the actual behavior.
 
 ### P2. Upstream `tjbench` / `rdjpgcom` / `wrjpgcom` Harness Not Yet Linked
 

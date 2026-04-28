@@ -342,13 +342,50 @@ fn tj_load_save_image_round_trip_ppm_through_legacy_alias() {
     let _ = std::fs::remove_file(&ppm_path);
 }
 
+// Type alias matching upstream `tjEncodeYUV3` ABI:
+//   int tjEncodeYUV3(tjhandle, const unsigned char *srcBuf,
+//                    int width, int pitch, int height,
+//                    int pixelFormat, unsigned char *dstBuf,
+//                    int align, int subsamp, int flags);
+type TjEncodeYUV3 = unsafe extern "C" fn(
+    *mut c_void, // handle
+    *const u8,   // srcBuf
+    c_int,       // width
+    c_int,       // pitch (input RGB row stride; 0 = tight w*bpp)
+    c_int,       // height
+    c_int,       // pixelFormat
+    *mut u8,     // dstBuf
+    c_int,       // align (YUV plane row alignment)
+    c_int,       // subsamp
+    c_int,       // flags
+) -> c_int;
+
+// Type alias matching upstream `tjDecodeYUV` ABI:
+//   int tjDecodeYUV(tjhandle, const unsigned char *srcBuf, int align,
+//                   int subsamp, unsigned char *dstBuf, int width,
+//                   int pitch, int height, int pixelFormat, int flags);
+type TjDecodeYUV = unsafe extern "C" fn(
+    *mut c_void, // handle
+    *const u8,   // srcBuf (packed YUV)
+    c_int,       // align (YUV plane row alignment)
+    c_int,       // subsamp
+    *mut u8,     // dstBuf (output)
+    c_int,       // width
+    c_int,       // pitch (output row stride; 0 = tight w*bpp)
+    c_int,       // height
+    c_int,       // pixelFormat
+    c_int,       // flags
+) -> c_int;
+
 #[test]
 fn tj_encode_decode_yuv_legacy_aliases_roundtrip_444() {
     // Verify the legacy `tjEncodeYUV3` and `tjDecodeYUV` aliases
-    // forward correctly to the TJ3 YUV family. With 4:4:4 (no
-    // chroma subsampling) the RGB → YUV → RGB round-trip should
-    // recover the source within a few units per channel — only
-    // the 8-bit BT.601 conversion rounding contributes diff.
+    // forward correctly to the TJ3 YUV family with the **upstream**
+    // ABI: 4th arg is `pitch` (RGB row stride in bytes; `0` = tight
+    // `width * bpp`), 8th arg is YUV `align`. With 4:4:4 (no chroma
+    // subsampling) the RGB → YUV → RGB round-trip should recover
+    // the source within a few units per channel — only the 8-bit
+    // BT.601 conversion rounding contributes diff.
     let path: PathBuf = cdylib_path();
     let lib: libloading::Library =
         unsafe { libloading::Library::new(&path) }.expect("dlopen cdylib");
@@ -362,40 +399,17 @@ fn tj_encode_decode_yuv_legacy_aliases_roundtrip_444() {
         let tj_buf_size_yuv2: libloading::Symbol<
             unsafe extern "C" fn(c_int, c_int, c_int, c_int) -> usize,
         > = lib.get(b"tjBufSizeYUV2").expect("tjBufSizeYUV2");
-        let tj_encode_yuv3: libloading::Symbol<
-            unsafe extern "C" fn(
-                *mut c_void, // handle
-                *const u8,   // src
-                c_int,       // width
-                c_int,       // pad
-                c_int,       // height
-                c_int,       // pixelFormat
-                *mut u8,     // dst
-                c_int,       // align
-                c_int,       // subsamp
-                c_int,       // flags
-            ) -> c_int,
-        > = lib.get(b"tjEncodeYUV3").expect("tjEncodeYUV3");
-        let tj_decode_yuv: libloading::Symbol<
-            unsafe extern "C" fn(
-                *mut c_void, // handle
-                *const u8,   // src (packed YUV)
-                c_int,       // align
-                c_int,       // subsamp
-                *mut u8,     // dst (RGB)
-                c_int,       // width
-                c_int,       // pitch
-                c_int,       // height
-                c_int,       // pixelFormat
-                c_int,       // flags
-            ) -> c_int,
-        > = lib.get(b"tjDecodeYUV").expect("tjDecodeYUV");
+        let tj_encode_yuv3: libloading::Symbol<TjEncodeYUV3> =
+            lib.get(b"tjEncodeYUV3").expect("tjEncodeYUV3");
+        let tj_decode_yuv: libloading::Symbol<TjDecodeYUV> =
+            lib.get(b"tjDecodeYUV").expect("tjDecodeYUV");
 
         let w: c_int = 64;
         let h: c_int = 64;
-        let pad: c_int = 1;
+        let yuv_align: c_int = 1;
 
-        // Source: deterministic gradient.
+        // Source: deterministic gradient. Tight pitch (= 0 to the
+        // ABI; the wrapper interprets that as `w * bpp`).
         let mut src: Vec<u8> = Vec::with_capacity((w * h * 3) as usize);
         for y in 0..h {
             for x in 0..w {
@@ -406,7 +420,7 @@ fn tj_encode_decode_yuv_legacy_aliases_roundtrip_444() {
         }
 
         // Encode RGB → packed YUV via the legacy alias.
-        let yuv_len: usize = tj_buf_size_yuv2(w, pad, h, TJSAMP_444);
+        let yuv_len: usize = tj_buf_size_yuv2(w, yuv_align, h, TJSAMP_444);
         assert!(yuv_len > 0, "tjBufSizeYUV2 must accept (w,h,444)");
         let mut yuv: Vec<u8> = vec![0u8; yuv_len];
 
@@ -416,11 +430,11 @@ fn tj_encode_decode_yuv_legacy_aliases_roundtrip_444() {
             h_enc,
             src.as_ptr(),
             w,
-            pad,
+            0, /* pitch = 0 → tight w * 3 */
             h,
             TJPF_RGB,
             yuv.as_mut_ptr(),
-            pad,
+            yuv_align,
             TJSAMP_444,
             0,
         );
@@ -434,11 +448,11 @@ fn tj_encode_decode_yuv_legacy_aliases_roundtrip_444() {
         let rc = tj_decode_yuv(
             h_dec,
             yuv.as_ptr(),
-            pad,
+            yuv_align,
             TJSAMP_444,
             dst.as_mut_ptr(),
             w,
-            0, /* tight pitch */
+            0, /* tight output pitch */
             h,
             TJPF_RGB,
             0,
@@ -464,4 +478,100 @@ fn tj_encode_decode_yuv_legacy_aliases_roundtrip_444() {
     // Touch the unused TJSAMP_420 const to keep it in scope; future
     // 4:2:0 round-trip test can reuse it without re-adding.
     let _ = TJSAMP_420;
+}
+
+#[test]
+fn tj_yuv_legacy_aliases_propagate_bottomup_flag() {
+    // Upstream `tjEncodeYUV3` / `tjDecodeYUV` map legacy
+    // `TJFLAG_BOTTOMUP` (= 2) onto `TJPARAM_BOTTOMUP` on the
+    // caller's handle before delegating. This test verifies the
+    // propagation via tj3Get(handle, TJPARAM_BOTTOMUP) after each
+    // call returns.
+    const TJFLAG_BOTTOMUP: c_int = 2;
+    const TJPARAM_BOTTOMUP: c_int = 1;
+
+    let path: PathBuf = cdylib_path();
+    let lib: libloading::Library =
+        unsafe { libloading::Library::new(&path) }.expect("dlopen cdylib");
+    unsafe {
+        let tj_init_compress: libloading::Symbol<unsafe extern "C" fn() -> *mut c_void> =
+            lib.get(b"tjInitCompress").expect("tjInitCompress");
+        let tj_init_decompress: libloading::Symbol<unsafe extern "C" fn() -> *mut c_void> =
+            lib.get(b"tjInitDecompress").expect("tjInitDecompress");
+        let tj_destroy: libloading::Symbol<unsafe extern "C" fn(*mut c_void) -> c_int> =
+            lib.get(b"tjDestroy").expect("tjDestroy");
+        let tj3_get: libloading::Symbol<unsafe extern "C" fn(*mut c_void, c_int) -> c_int> =
+            lib.get(b"tj3Get").expect("tj3Get");
+        let tj_buf_size_yuv2: libloading::Symbol<
+            unsafe extern "C" fn(c_int, c_int, c_int, c_int) -> usize,
+        > = lib.get(b"tjBufSizeYUV2").expect("tjBufSizeYUV2");
+        let tj_encode_yuv3: libloading::Symbol<TjEncodeYUV3> =
+            lib.get(b"tjEncodeYUV3").expect("tjEncodeYUV3");
+        let tj_decode_yuv: libloading::Symbol<TjDecodeYUV> =
+            lib.get(b"tjDecodeYUV").expect("tjDecodeYUV");
+
+        let w: c_int = 16;
+        let h: c_int = 16;
+        let yuv_align: c_int = 1;
+        let yuv_len: usize = tj_buf_size_yuv2(w, yuv_align, h, TJSAMP_444);
+        let mut yuv: Vec<u8> = vec![0u8; yuv_len];
+        let src: Vec<u8> = vec![0x80u8; (w * h * 3) as usize];
+
+        // Compress side: TJFLAG_BOTTOMUP must set TJPARAM_BOTTOMUP=1.
+        let h_enc: *mut c_void = tj_init_compress();
+        assert!(!h_enc.is_null());
+        assert_eq!(
+            tj3_get(h_enc, TJPARAM_BOTTOMUP),
+            0,
+            "TJPARAM_BOTTOMUP must default to 0"
+        );
+        let rc = tj_encode_yuv3(
+            h_enc,
+            src.as_ptr(),
+            w,
+            0,
+            h,
+            TJPF_RGB,
+            yuv.as_mut_ptr(),
+            yuv_align,
+            TJSAMP_444,
+            TJFLAG_BOTTOMUP,
+        );
+        assert_eq!(rc, 0, "tjEncodeYUV3 with TJFLAG_BOTTOMUP must succeed");
+        assert_eq!(
+            tj3_get(h_enc, TJPARAM_BOTTOMUP),
+            1,
+            "tjEncodeYUV3 must propagate TJFLAG_BOTTOMUP → TJPARAM_BOTTOMUP=1"
+        );
+        tj_destroy(h_enc);
+
+        // Decompress side: same propagation requirement.
+        let h_dec: *mut c_void = tj_init_decompress();
+        assert!(!h_dec.is_null());
+        assert_eq!(
+            tj3_get(h_dec, TJPARAM_BOTTOMUP),
+            0,
+            "TJPARAM_BOTTOMUP must default to 0"
+        );
+        let mut dst: Vec<u8> = vec![0u8; src.len()];
+        let rc = tj_decode_yuv(
+            h_dec,
+            yuv.as_ptr(),
+            yuv_align,
+            TJSAMP_444,
+            dst.as_mut_ptr(),
+            w,
+            0,
+            h,
+            TJPF_RGB,
+            TJFLAG_BOTTOMUP,
+        );
+        assert_eq!(rc, 0, "tjDecodeYUV with TJFLAG_BOTTOMUP must succeed");
+        assert_eq!(
+            tj3_get(h_dec, TJPARAM_BOTTOMUP),
+            1,
+            "tjDecodeYUV must propagate TJFLAG_BOTTOMUP → TJPARAM_BOTTOMUP=1"
+        );
+        tj_destroy(h_dec);
+    }
 }
