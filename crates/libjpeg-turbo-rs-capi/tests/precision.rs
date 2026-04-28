@@ -515,3 +515,129 @@ fn tj3_compress16_lossless_precision14_writes_sof_byte_14() {
         tj3_destroy(h_enc);
     }
 }
+
+/// ITU-T T.81 Annex H requires the lossless point transform Pt to be
+/// strictly less than the sample precision P (Pt shifts the lower Pt
+/// bits off each sample, so Pt == P would zero every sample). Mirror
+/// upstream `references/libjpeg-turbo/src/jclossls.c::start_pass_lossls`.
+///
+/// This guards against a regression where the precision-override path
+/// silently accepted an inconsistent Pt and emitted a SOF3 stream that
+/// upstream would reject. The 8-bit / 12-bit / 16-bit entry points
+/// each get an arm so any future entry-point that forgets the check
+/// fails this test.
+#[test]
+fn tj3_compress_rejects_lossless_pt_ge_precision() {
+    let path: PathBuf = cdylib_path();
+    let lib: libloading::Library =
+        unsafe { libloading::Library::new(&path) }.expect("dlopen cdylib");
+    unsafe {
+        let tj3_init: libloading::Symbol<unsafe extern "C" fn(c_int) -> TjHandle> =
+            lib.get(b"tj3Init").unwrap();
+        let tj3_destroy: libloading::Symbol<unsafe extern "C" fn(TjHandle)> =
+            lib.get(b"tj3Destroy").unwrap();
+        let tj3_set: libloading::Symbol<unsafe extern "C" fn(TjHandle, c_int, c_int) -> c_int> =
+            lib.get(b"tj3Set").unwrap();
+        let tj3_compress8: libloading::Symbol<
+            unsafe extern "C" fn(
+                TjHandle,
+                *const u8,
+                c_int,
+                c_int,
+                c_int,
+                c_int,
+                *mut *mut u8,
+                *mut usize,
+            ) -> c_int,
+        > = lib.get(b"tj3Compress8").unwrap();
+        let tj3_compress12: libloading::Symbol<
+            unsafe extern "C" fn(
+                TjHandle,
+                *const i16,
+                c_int,
+                c_int,
+                c_int,
+                c_int,
+                *mut *mut u8,
+                *mut usize,
+            ) -> c_int,
+        > = lib.get(b"tj3Compress12").unwrap();
+        let tj3_compress16: libloading::Symbol<
+            unsafe extern "C" fn(
+                TjHandle,
+                *const u16,
+                c_int,
+                c_int,
+                c_int,
+                c_int,
+                *mut *mut u8,
+                *mut usize,
+            ) -> c_int,
+        > = lib.get(b"tj3Compress16").unwrap();
+
+        // 8-bit arm: precision=4, Pt=4 (==P) must reject.
+        let h: TjHandle = tj3_init(TJINIT_COMPRESS);
+        assert!(!h.is_null());
+        assert_eq!(tj3_set(h, TJPARAM_LOSSLESS, 1), 0);
+        assert_eq!(tj3_set(h, TJPARAM_PRECISION, 4), 0);
+        assert_eq!(tj3_set(h, TJPARAM_LOSSLESSPSV, 1), 0);
+        assert_eq!(tj3_set(h, TJPARAM_LOSSLESSPT, 4), 0);
+        let src8: Vec<u8> = vec![0u8; 16 * 16 * 3];
+        let mut buf: *mut u8 = std::ptr::null_mut();
+        let mut size: usize = 0;
+        let rc8: c_int = tj3_compress8(h, src8.as_ptr(), 16, 0, 16, TJPF_RGB, &mut buf, &mut size);
+        assert_eq!(
+            rc8, -1,
+            "tj3Compress8 must reject TJPARAM_LOSSLESSPT >= TJPARAM_PRECISION"
+        );
+        assert!(
+            buf.is_null(),
+            "no output buffer should be allocated on Pt-vs-P rejection"
+        );
+        tj3_destroy(h);
+
+        // 12-bit arm: precision=10, Pt=10 (==P) must reject.
+        let h: TjHandle = tj3_init(TJINIT_COMPRESS);
+        assert!(!h.is_null());
+        assert_eq!(tj3_set(h, TJPARAM_LOSSLESS, 1), 0);
+        assert_eq!(tj3_set(h, TJPARAM_PRECISION, 10), 0);
+        assert_eq!(tj3_set(h, TJPARAM_LOSSLESSPSV, 1), 0);
+        assert_eq!(tj3_set(h, TJPARAM_LOSSLESSPT, 10), 0);
+        let src12: Vec<i16> = vec![0i16; 16 * 16 * 3];
+        let mut buf: *mut u8 = std::ptr::null_mut();
+        let mut size: usize = 0;
+        let rc12: c_int =
+            tj3_compress12(h, src12.as_ptr(), 16, 0, 16, TJPF_RGB, &mut buf, &mut size);
+        assert_eq!(
+            rc12, -1,
+            "tj3Compress12 must reject TJPARAM_LOSSLESSPT >= TJPARAM_PRECISION"
+        );
+        assert!(
+            buf.is_null(),
+            "no output buffer should be allocated on Pt-vs-P rejection"
+        );
+        tj3_destroy(h);
+
+        // 16-bit arm: precision=14, Pt=14 (==P) must reject.
+        let h: TjHandle = tj3_init(TJINIT_COMPRESS);
+        assert!(!h.is_null());
+        assert_eq!(tj3_set(h, TJPARAM_LOSSLESS, 1), 0);
+        assert_eq!(tj3_set(h, TJPARAM_PRECISION, 14), 0);
+        assert_eq!(tj3_set(h, TJPARAM_LOSSLESSPSV, 1), 0);
+        assert_eq!(tj3_set(h, TJPARAM_LOSSLESSPT, 14), 0);
+        let src16: Vec<u16> = vec![0u16; 16 * 16 * 3];
+        let mut buf: *mut u8 = std::ptr::null_mut();
+        let mut size: usize = 0;
+        let rc16: c_int =
+            tj3_compress16(h, src16.as_ptr(), 16, 0, 16, TJPF_RGB, &mut buf, &mut size);
+        assert_eq!(
+            rc16, -1,
+            "tj3Compress16 must reject TJPARAM_LOSSLESSPT >= TJPARAM_PRECISION"
+        );
+        assert!(
+            buf.is_null(),
+            "no output buffer should be allocated on Pt-vs-P rejection"
+        );
+        tj3_destroy(h);
+    }
+}

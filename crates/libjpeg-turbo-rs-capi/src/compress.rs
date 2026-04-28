@@ -152,6 +152,19 @@ pub extern "C" fn tj3Compress8(
         use libjpeg_turbo_rs::encode::pipeline::compress_lossless_extended_precision;
         let predictor: u8 = inst.inner.get(TjParam::LosslessPsv) as u8;
         let point_transform: u8 = inst.inner.get(TjParam::LosslessPt) as u8;
+        // ITU-T T.81 / Annex H: point transform Pt must be strictly less
+        // than the sample precision P (Pt shifts away the lower Pt bits;
+        // Pt == P would zero every sample). Mirror upstream
+        // `references/libjpeg-turbo/src/jclossls.c::start_pass_lossls`.
+        if (point_transform as i32) >= stored_precision {
+            inst.set_error(
+                format!(
+                    "tj3Compress8: TJPARAM_LOSSLESSPT {point_transform} must be < TJPARAM_PRECISION {stored_precision}"
+                ),
+                TJERR_FATAL,
+            );
+            return -1;
+        }
         let restart_interval: u16 = {
             let rb: i32 = inst.inner.get(TjParam::RestartBlocks);
             let rr: i32 = inst.inner.get(TjParam::RestartRows);
