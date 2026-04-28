@@ -129,37 +129,38 @@ pub extern "C" fn tj3Compress8(
         packed
     };
 
-    // When lossless is requested, validate TJPARAM_PRECISION against the
-    // 8-bit entry-point range (2..=8) and pass it to the lossless encoder.
-    // Upstream libjpeg-turbo rejects values outside 2..=8 for tj3Compress8.
+    // Mirror `references/libjpeg-turbo/src/turbojpeg-mp.c::tj3Compress*`
+    // (the macro-generated body at lines 109-117 of that file): the
+    // entry-point's natural precision (8 here) is the default; only
+    // honour an explicit `TJPARAM_PRECISION` when lossless is active
+    // and the value falls inside the entry-point's range. Out-of-range
+    // values silently fall back to the default rather than erroring —
+    // the libjpeg layer is the canonical source of "bad precision"
+    // diagnostics, not the TJ ABI.
     let is_lossless: bool = inst.inner.get(TjParam::Lossless) != 0;
-    let stored_precision: i32 = inst.inner.get(TjParam::Precision);
-    // Precision 8 (default) is always valid; only non-default values need
-    // checking when lossless is active.
-    if is_lossless && !(2..=8).contains(&stored_precision) {
-        inst.set_error(
-            format!(
-                "tj3Compress8: TJPARAM_PRECISION {stored_precision} is out of range 2..=8 for lossless 8-bit"
-            ),
-            TJERR_FATAL,
-        );
-        return -1;
-    }
+    let raw_precision: i32 = inst.inner.get(TjParam::Precision);
+    let effective_precision: i32 = if is_lossless && (2..=8).contains(&raw_precision) {
+        raw_precision
+    } else {
+        8
+    };
 
     // For lossless mode with non-default precision, bypass the regular
     // encoder and call the precision-aware lossless path directly.
-    let jpeg: Vec<u8> = if is_lossless && stored_precision != 8 {
+    let jpeg: Vec<u8> = if is_lossless && effective_precision != 8 {
         use libjpeg_turbo_rs::encode::pipeline::compress_lossless_extended_precision;
         let predictor: u8 = inst.inner.get(TjParam::LosslessPsv) as u8;
         let point_transform: u8 = inst.inner.get(TjParam::LosslessPt) as u8;
         // ITU-T T.81 / Annex H: point transform Pt must be strictly less
         // than the sample precision P (Pt shifts away the lower Pt bits;
         // Pt == P would zero every sample). Mirror upstream
-        // `references/libjpeg-turbo/src/jclossls.c::start_pass_lossls`.
-        if (point_transform as i32) >= stored_precision {
+        // `references/libjpeg-turbo/src/jclossls.c::start_pass_lossls` —
+        // upstream throws this from libjpeg; we throw from the TJ layer
+        // because the precision-aware path here doesn't reach libjpeg.
+        if (point_transform as i32) >= effective_precision {
             inst.set_error(
                 format!(
-                    "tj3Compress8: TJPARAM_LOSSLESSPT {point_transform} must be < TJPARAM_PRECISION {stored_precision}"
+                    "tj3Compress8: TJPARAM_LOSSLESSPT {point_transform} must be < TJPARAM_PRECISION {effective_precision}"
                 ),
                 TJERR_FATAL,
             );
@@ -184,7 +185,7 @@ pub extern "C" fn tj3Compress8(
             predictor,
             point_transform,
             restart_interval,
-            stored_precision as u8,
+            effective_precision as u8,
         ) {
             Ok(b) => b,
             Err(e) => {
