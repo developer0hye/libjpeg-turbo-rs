@@ -642,8 +642,71 @@ fn tj3_compress_rejects_lossless_pt_ge_precision() {
     }
 }
 
-/// Out-of-range `TJPARAM_PRECISION` must silently fall back to the
-/// entry-point's natural precision (BITS_IN_JSAMPLE), matching upstream
+/// `tj3Set(handle, TJPARAM_PRECISION, value)` must reject globally
+/// invalid values (outside 2..=16) immediately, mirroring upstream
+/// `references/libjpeg-turbo/src/turbojpeg.c:769` (`SET_PARAM(precision,
+/// 2, 16)`). Otherwise an absurd value like 0 or 100 would survive in
+/// the param store and silently encode at the entry-point default,
+/// hiding caller bugs.
+#[test]
+fn tj3_set_rejects_globally_invalid_precision() {
+    let path: PathBuf = cdylib_path();
+    let lib: libloading::Library =
+        unsafe { libloading::Library::new(&path) }.expect("dlopen cdylib");
+    unsafe {
+        let tj3_init: libloading::Symbol<unsafe extern "C" fn(c_int) -> TjHandle> =
+            lib.get(b"tj3Init").unwrap();
+        let tj3_destroy: libloading::Symbol<unsafe extern "C" fn(TjHandle)> =
+            lib.get(b"tj3Destroy").unwrap();
+        let tj3_set: libloading::Symbol<unsafe extern "C" fn(TjHandle, c_int, c_int) -> c_int> =
+            lib.get(b"tj3Set").unwrap();
+
+        let h: TjHandle = tj3_init(TJINIT_COMPRESS);
+        assert!(!h.is_null());
+
+        // Below the global lower bound (2): 0, 1, -1 must reject.
+        assert_eq!(
+            tj3_set(h, TJPARAM_PRECISION, 0),
+            -1,
+            "TJPARAM_PRECISION=0 must reject (outside 2..=16)"
+        );
+        assert_eq!(
+            tj3_set(h, TJPARAM_PRECISION, 1),
+            -1,
+            "TJPARAM_PRECISION=1 must reject (outside 2..=16)"
+        );
+        assert_eq!(
+            tj3_set(h, TJPARAM_PRECISION, -1),
+            -1,
+            "TJPARAM_PRECISION=-1 must reject (outside 2..=16)"
+        );
+        // Above the global upper bound (16): 17, 100 must reject.
+        assert_eq!(
+            tj3_set(h, TJPARAM_PRECISION, 17),
+            -1,
+            "TJPARAM_PRECISION=17 must reject (outside 2..=16)"
+        );
+        assert_eq!(
+            tj3_set(h, TJPARAM_PRECISION, 100),
+            -1,
+            "TJPARAM_PRECISION=100 must reject (outside 2..=16)"
+        );
+        // Inside the global range: must accept (per-entry-point
+        // narrowing happens at encode time, not at set time).
+        for legal in [2, 8, 12, 16] {
+            assert_eq!(
+                tj3_set(h, TJPARAM_PRECISION, legal),
+                0,
+                "TJPARAM_PRECISION={legal} must succeed (inside 2..=16)"
+            );
+        }
+        tj3_destroy(h);
+    }
+}
+
+/// Out-of-entry-point-range `TJPARAM_PRECISION` (still inside 2..=16)
+/// must silently fall back to the entry-point's natural precision
+/// (BITS_IN_JSAMPLE), matching upstream
 /// `references/libjpeg-turbo/src/turbojpeg-mp.c::tj3Compress*` lines
 /// 109-117. The previous implementation raised `TJERR_FATAL` on
 /// out-of-range precision; this regression guards against that

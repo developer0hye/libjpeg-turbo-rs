@@ -178,6 +178,17 @@ impl TjHandle {
                 self.height = value;
             }
             TjParam::Precision => {
+                // Mirror upstream
+                // `references/libjpeg-turbo/src/turbojpeg.c:769`:
+                //   `SET_PARAM(precision, 2, 16);`
+                // Reject globally-invalid values at set time so
+                // out-of-spec writes surface as -1 from `tj3Set` rather
+                // than silently encoding at the entry-point default.
+                if !(2..=16).contains(&value) {
+                    return Err(JpegError::CorruptData(format!(
+                        "precision must be 2-16, got {value}"
+                    )));
+                }
                 self.precision = value;
             }
             TjParam::ColorSpace => {
