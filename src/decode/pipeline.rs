@@ -482,6 +482,22 @@ impl<'a> Decoder<'a> {
         &self.metadata.density
     }
 
+    /// Whether the source carried a JFIF APP0 marker (regardless of
+    /// the density values it contained). Mirrors stock libjpeg's
+    /// `cinfo.saw_JFIF_marker`.
+    pub fn saw_jfif_marker(&self) -> bool {
+        self.metadata.saw_jfif_marker
+    }
+
+    /// JFIF version bytes from the APP0 marker. Returns `(0, 0)` if
+    /// `saw_jfif_marker()` is false.
+    pub fn jfif_version(&self) -> (u8, u8) {
+        (
+            self.metadata.jfif_major_version,
+            self.metadata.jfif_minor_version,
+        )
+    }
+
     /// Set the desired output pixel format.
     pub fn set_output_format(&mut self, format: PixelFormat) {
         self.output_format = Some(format);
