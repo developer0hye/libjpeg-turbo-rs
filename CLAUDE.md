@@ -18,9 +18,10 @@ Rust port of libjpeg-turbo with equivalent or better performance.
 # Feature Parity Tracking
 
 - **Read `docs/FEATURE_PARITY.md` before starting any feature work.** It is the checklist of every feature with `[x]`/`[ ]` status.
+- **Read `docs/LAST_MILE.md` for the replacement-readiness gate** — open P0/P1 blockers + Suggested Order. Update the relevant entry to **CLOSED** when a gap is finished.
 - **Use `docs/C_API_REFERENCE.md` as the definitive mapping** of every C function → Rust equivalent (✅/❌/🔶).
-- After implementing a feature, update **both** docs: checkbox in FEATURE_PARITY.md and status in C_API_REFERENCE.md.
-- Follow the priority roadmap at the bottom of FEATURE_PARITY.md when choosing what to work on next.
+- After implementing a feature, update **all three** docs: checkbox in FEATURE_PARITY.md, status entry in LAST_MILE.md when it closes a tracked gap, and status in C_API_REFERENCE.md.
+- Follow the Suggested Order at the bottom of LAST_MILE.md (release gate) over FEATURE_PARITY.md (feature checklist) when choosing what to work on next.
 
 # Project Rules
 
