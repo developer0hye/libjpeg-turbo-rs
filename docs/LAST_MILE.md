@@ -209,25 +209,16 @@ bash examples/stock_djpeg_cjpeg/run.sh
 
 **Acceptance:** Product-path compatibility failures must be real failures in CI. Only slow stress tests may stay ignored by default, and the ignore reason must say how CI exercises them elsewhere.
 
-### P1. Legacy `tjLoadImage` / `tjSaveImage` Are Still Stubs
+### P1. Legacy `tjLoadImage` / `tjSaveImage` Are Still Stubs — **CLOSED**
 
-**Symptom:** `tjLoadImage` and `tjSaveImage` return errors from `crates/libjpeg-turbo-rs-capi/src/legacy.rs`.
+**Status (2026-04-28): closed.** `crates/libjpeg-turbo-rs-capi/src/legacy.rs` now exports `tjLoadImage` / `tjSaveImage` with the **handle-less** ABI that upstream `turbojpeg.h` actually publishes (no `tjhandle` argument; `flags & TJFLAG_BOTTOMUP` propagates to `TJPARAM_BOTTOMUP` on a temporary handle that wraps the call). The TJ3 forms in `crates/libjpeg-turbo-rs-capi/src/imageio.rs::tj3LoadImage8` and `tj3SaveImage8` route through `libjpeg_turbo_rs::load_image_from_bytes` / `save_bmp` / `save_ppm` and honour:
 
-**Why this matters:** Legacy TurboJPEG callers still use these APIs. The TJ3 forms exist; the old aliases should delegate instead of failing.
+- BMP `TJPF_BGR` convention on load (R↔B swap when the file's native is `PixelFormat::Rgb`).
+- BMP alpha-strip on save (RGBX/BGRX/RGBA/BGRA/XRGB/XBGR/ARGB/ABGR → 3-bpp before `save_bmp`).
+- `TJPARAM_BOTTOMUP` on both load (post-decode flip) and save (pre-encode flip).
+- TJPF format negotiation (identity match plus RGB↔BGR swap; non-trivial conversions still return a descriptive error).
 
-**Likely area:**
-
-- `crates/libjpeg-turbo-rs-capi/src/legacy.rs`
-- `crates/libjpeg-turbo-rs-capi/tests/legacy_aliases.rs`
-- `crates/libjpeg-turbo-rs-capi/src/imageio.rs`
-
-**Acceptance:**
-
-```bash
-cargo test -p libjpeg-turbo-rs-capi --test legacy_aliases
-```
-
-The current "stub still fails" test must be replaced with end-to-end load/save tests.
+`cargo test -p libjpeg-turbo-rs-capi --test legacy_aliases` passes 4/4 against the cdylib (`tj_load_image_reports_error_for_missing_file`, `tj_load_save_image_round_trip_ppm_through_legacy_alias`, plus `tjBufSize` and the init/destroy aliases).
 
 ### P1. `TJPARAM_PRECISION` Is Not Fully Honored Through TJ3 Compress Entry Points
 
@@ -584,7 +575,7 @@ A task is done only when:
 3. ~~Fix stock `djpeg` aborts (P0-2).~~ **CLOSED 2026-04-28** — `examples/stock_djpeg_cjpeg/run.sh` reports `OK all_byte_exact`.
 4. ~~Add high-precision raw-data symbols and make Pillow load (P0-3).~~ **CLOSED 2026-04-28** — Pillow round-trip @ q=90 PSNR 49.49 dB.
 5. Implement virtual coefficient-array materialization (and any libjpeg API symbol stock `jpegtran` resolves at runtime that the shim hasn't exported yet) for the stock `jpegtran` transform path (P0-4). **MOSTLY CLOSED 2026-04-28** — full TJXOP + crop + `-copy` cross-product byte-exact for 8-bit fixtures; 12-bit transcode (`monkey12`) remains.
-6. Fill legacy `tjLoadImage` / `tjSaveImage` and `tjEncodeYUV3` / `tjDecodeYUV`.
+6. ~~Fill legacy `tjLoadImage` / `tjSaveImage`~~ **CLOSED 2026-04-28** — handle-less ABI in place, BMP TJPF_BGR + alpha-strip + bottom-up wired. Remaining: `tjEncodeYUV3` / `tjDecodeYUV`.
 7. Wire arbitrary precision lossless through TJ3 compress.
 8. Wire upstream `tjbench` / `rdjpgcom` / `wrjpgcom` against our shim (P2) — the apples-to-apples gate for step 9.
 9. Close the x86_64 encode SIMD gap (P1 Encode) until every encode benchmark `Rust/C ≤ 1.05×`. Run only after correctness and compatibility are green.

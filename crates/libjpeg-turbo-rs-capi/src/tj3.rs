@@ -55,6 +55,13 @@ impl TjInstance {
         self.last_error = CString::new("No error").expect("static string");
         self.last_error_code = 0;
     }
+
+    /// True if `TJPARAM_BOTTOMUP` is set on this handle. Used by the
+    /// image-I/O wrappers (`tj3LoadImage8` / `tj3SaveImage8`) to
+    /// flip row order on load/save.
+    pub(crate) fn bottom_up_flag(&self) -> bool {
+        self.inner.get(TjParam::BottomUp) != 0
+    }
 }
 
 // TJ_NUMERR matches libjpeg-turbo: 0 = warning (non-fatal), 1 = fatal.
