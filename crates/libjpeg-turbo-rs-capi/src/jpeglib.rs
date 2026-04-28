@@ -1410,6 +1410,29 @@ pub extern "C" fn jpeg_read_header(cinfo: *mut c_void, _require_image: CBoolean)
     c.num_components = frame.components.len() as c_int;
     c.data_precision = frame.precision as c_int;
     c.progressive_mode = if frame.is_progressive { 1 } else { 0 };
+
+    // Populate JFIF density from the parsed APP0 marker. Stock
+    // libjpeg-turbo sets `cinfo.density_unit / X_density / Y_density`
+    // during `jpeg_read_header`; without this, `jpegtran -copy all
+    // <op>` paths that go through
+    // `jpeg_copy_critical_parameters → materialize_foreign_coef_arrays`
+    // (no `jpeg_start_decompress` call) miss the source's JFIF
+    // density and emit defaults `(unit=0, x=1, y=1)` — flagged at
+    // session-stop after 2f6683b.
+    let density: &libjpeg_turbo_rs::DensityInfo = decoder.density();
+    let density_unit_raw: u8 = match density.unit {
+        libjpeg_turbo_rs::DensityUnit::Unknown => 0,
+        libjpeg_turbo_rs::DensityUnit::Dpi => 1,
+        libjpeg_turbo_rs::DensityUnit::Dpcm => 2,
+    };
+    c.density_unit = density_unit_raw;
+    c.X_density = density.x;
+    c.Y_density = density.y;
+    c.JFIF_major_version = 1;
+    c.JFIF_minor_version = 1;
+    // Heuristic: any non-default density implies a JFIF marker was
+    // present. (Same logic as `jpeg_start_decompress`.)
+    c.saw_JFIF_marker = (density_unit_raw != 0 || density.x != 1 || density.y != 1) as CBoolean;
     // libjpeg's `is_baseline` flag: TRUE if SOF0 was encountered. We
     // approximate by clearing it for progressive/lossless streams.
     c.is_baseline = if !frame.is_progressive && !frame.is_lossless {
@@ -1959,6 +1982,30 @@ pub extern "C" fn jpeg_capi_test_dimensions(
 pub extern "C" fn jpeg_capi_test_set_out_cs(cinfo: *mut c_void, cs: c_int) {
     if let Some(c) = unsafe { cinfo_mut(cinfo) } {
         c.out_color_space = cs;
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn jpeg_capi_test_density_unit(cinfo: *mut c_void) -> c_int {
+    match unsafe { cinfo_mut(cinfo) } {
+        Some(c) => c.density_unit as c_int,
+        None => -1,
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn jpeg_capi_test_x_density(cinfo: *mut c_void) -> c_int {
+    match unsafe { cinfo_mut(cinfo) } {
+        Some(c) => c.X_density as c_int,
+        None => -1,
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn jpeg_capi_test_y_density(cinfo: *mut c_void) -> c_int {
+    match unsafe { cinfo_mut(cinfo) } {
+        Some(c) => c.Y_density as c_int,
+        None => -1,
     }
 }
 
