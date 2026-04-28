@@ -474,6 +474,14 @@ impl<'a> Decoder<'a> {
         &self.metadata.frame
     }
 
+    /// Pixel density parsed from the JFIF APP0 marker (or
+    /// `DensityInfo::default()` if no JFIF was present).
+    /// Mirrors stock libjpeg's `cinfo.density_unit / X_density /
+    /// Y_density` exposed after `jpeg_read_header`.
+    pub fn density(&self) -> &DensityInfo {
+        &self.metadata.density
+    }
+
     /// Set the desired output pixel format.
     pub fn set_output_format(&mut self, format: PixelFormat) {
         self.output_format = Some(format);

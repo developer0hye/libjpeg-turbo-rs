@@ -600,3 +600,102 @@ fn finish_decompress_clears_coef_cache_for_reuse() {
         jpeg_destroy_decompress(cinfo_ptr);
     }
 }
+
+// ---------------------------------------------------------------------------
+// Regression: stop-hook review after 2f6683b flagged that the
+// `materialize_foreign_coef_arrays` path was emitting JFIF density
+// `(unit=0, x=1, y=1)` instead of the source's actual JFIF values
+// because `jpeg_read_header` populated the public density fields only
+// inside `jpeg_start_decompress` — and stock `jpegtran` never calls
+// that. Verify a non-default JFIF density round-trips through
+// `jpeg_read_header`.
+// ---------------------------------------------------------------------------
+#[test]
+fn jpeg_read_header_populates_jfif_density() {
+    let lib = unsafe { libloading::Library::new(cdylib_path()) }.expect("dlopen");
+
+    // Build a JPEG, then patch its JFIF APP0 to carry non-default
+    // density (unit=DPI, x=72, y=96). Stock libjpeg's parser sets
+    // `cinfo.density_unit / X_density / Y_density` to these values
+    // during `jpeg_read_header`.
+    let (jpeg_in, _src, _w, _h) = build_fixture_jpeg(&lib);
+    let mut jpeg_buf: Vec<u8> = jpeg_in;
+    let mut i: usize = 0;
+    while i + 1 < jpeg_buf.len() {
+        if jpeg_buf[i] == 0xff && jpeg_buf[i + 1] == 0xe0 {
+            // APP0; check JFIF identifier at offset i+4..i+9
+            if i + 9 < jpeg_buf.len() && &jpeg_buf[i + 4..i + 9] == b"JFIF\0" {
+                jpeg_buf[i + 11] = 1; // unit = DPI
+                jpeg_buf[i + 12] = 0;
+                jpeg_buf[i + 13] = 72; // x_density = 72
+                jpeg_buf[i + 14] = 0;
+                jpeg_buf[i + 15] = 96; // y_density = 96
+                break;
+            }
+        }
+        i += 1;
+    }
+
+    unsafe {
+        const CINFO_BYTES: usize = 4096;
+        const ERR_BYTES: usize = 512;
+        let mut cinfo_buf: MaybeUninit<[u8; CINFO_BYTES]> = MaybeUninit::zeroed();
+        let cinfo_ptr: *mut c_void = cinfo_buf.as_mut_ptr() as *mut c_void;
+        let mut err_buf: MaybeUninit<[u8; ERR_BYTES]> = MaybeUninit::zeroed();
+        let err_ptr: *mut c_void = err_buf.as_mut_ptr() as *mut c_void;
+
+        let jpeg_std_error: libloading::Symbol<unsafe extern "C" fn(*mut c_void) -> *mut c_void> =
+            lib.get(b"jpeg_std_error").expect("jpeg_std_error");
+        let _ = jpeg_std_error(err_ptr);
+        (cinfo_ptr as *mut *mut c_void).write(err_ptr);
+
+        let jpeg_create_decompress: libloading::Symbol<
+            unsafe extern "C" fn(*mut c_void, c_int, usize),
+        > = lib
+            .get(b"jpeg_CreateDecompress")
+            .expect("jpeg_CreateDecompress");
+        jpeg_create_decompress(cinfo_ptr, 80, CINFO_BYTES);
+
+        let jpeg_mem_src: libloading::Symbol<
+            unsafe extern "C" fn(*mut c_void, *const u8, c_ulong),
+        > = lib.get(b"jpeg_mem_src").expect("jpeg_mem_src");
+        jpeg_mem_src(cinfo_ptr, jpeg_buf.as_ptr(), jpeg_buf.len() as c_ulong);
+
+        let jpeg_read_header: libloading::Symbol<
+            unsafe extern "C" fn(*mut c_void, c_int) -> c_int,
+        > = lib.get(b"jpeg_read_header").expect("jpeg_read_header");
+        assert_eq!(jpeg_read_header(cinfo_ptr, 1), JPEG_HEADER_OK);
+
+        // Read density fields directly through the public cinfo.
+        // density_unit (u8), X_density (u16), Y_density (u16) live
+        // at offsets 332/334/336 on a 64-bit jpeg_decompress_struct
+        // — but rather than hard-coding offsets, read via the
+        // dedicated test accessors we already export.
+        let jpeg_capi_test_density_unit: libloading::Symbol<
+            unsafe extern "C" fn(*mut c_void) -> c_int,
+        > = lib
+            .get(b"jpeg_capi_test_density_unit")
+            .expect("jpeg_capi_test_density_unit accessor");
+        let jpeg_capi_test_x_density: libloading::Symbol<
+            unsafe extern "C" fn(*mut c_void) -> c_int,
+        > = lib
+            .get(b"jpeg_capi_test_x_density")
+            .expect("jpeg_capi_test_x_density accessor");
+        let jpeg_capi_test_y_density: libloading::Symbol<
+            unsafe extern "C" fn(*mut c_void) -> c_int,
+        > = lib
+            .get(b"jpeg_capi_test_y_density")
+            .expect("jpeg_capi_test_y_density accessor");
+        let unit: c_int = jpeg_capi_test_density_unit(cinfo_ptr);
+        let xd: c_int = jpeg_capi_test_x_density(cinfo_ptr);
+        let yd: c_int = jpeg_capi_test_y_density(cinfo_ptr);
+        assert_eq!(unit, 1, "density_unit must reflect JFIF APP0 unit byte");
+        assert_eq!(xd, 72, "X_density must reflect JFIF APP0 x_density");
+        assert_eq!(yd, 96, "Y_density must reflect JFIF APP0 y_density");
+
+        let jpeg_destroy_decompress: libloading::Symbol<unsafe extern "C" fn(*mut c_void)> = lib
+            .get(b"jpeg_destroy_decompress")
+            .expect("jpeg_destroy_decompress");
+        jpeg_destroy_decompress(cinfo_ptr);
+    }
+}
