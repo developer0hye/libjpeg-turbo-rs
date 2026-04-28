@@ -46,9 +46,11 @@ Do not call the project a libjpeg-turbo C replacement until all of these are tru
 
 ## Gap Inventory
 
-### P0-1. Native Transform Cross-Product Corrupts Arithmetic Output
+### P0-1. Native Transform Cross-Product Corrupts Arithmetic Output — **CLOSED**
 
-**Symptom:** `tjtrantest_full_cross_product` fails with arithmetic decode-overflow outputs. Clean `main` showed 9 failures; the current dirty worktree with an in-progress progressive arithmetic restart patch shows 12. Treat that as evidence that this is a state-machine class bug, not one missing tuple.
+**Status (2026-04-28): closed.** `cargo test -p libjpeg-turbo-rs --release --test cross_product_transform` passes all 12 cases including `tjtrantest_full_cross_product`, `tjtrantest_arithmetic_cross_product`, `tjtrantest_restart_cross_product`, and `c_jpegtran_cross_validation_*`. The arithmetic-DC-overflow regression listed below is no longer reproducible.
+
+**Original symptom (historical):** `tjtrantest_full_cross_product` failed with arithmetic decode-overflow outputs. Clean `main` showed 9 failures; the dirty worktree with an in-progress progressive arithmetic restart patch showed 12. Treat that as evidence that this was a state-machine class bug, not one missing tuple.
 
 - `gray-rows-hflip`, arithmetic output, all copy modes, trim false/true variants.
 - `gray-rows-rot90`, arithmetic output, all copy modes.
@@ -74,16 +76,11 @@ cargo test --workspace --no-fail-fast
 
 All must pass. No new skip is acceptable.
 
-### P0-2. Stock Tools Link But Our-Linked `djpeg` Aborts
+### P0-2. Stock Tools Link But Our-Linked `djpeg` Aborts — **CLOSED**
 
-**Symptom:** `cargo test --test capi_stock_tool_link -- --include-ignored` now proves the stock tools can link, but `run.sh` reports:
+**Status (2026-04-28): closed.** `examples/stock_djpeg_cjpeg/run.sh` reports `OK all_byte_exact` — every fixture (`monkey12`, `testimgari`, `testimgint`, `testorig`) passes for `djpeg`, `cjpeg`, and `jpegtran` (with `monkey12` jpegtran the documented 12-bit-transcode skip tracked under P0-4). The companion `shim_exports_classic_jpeg_api` gate hard-asserts the classic API surface.
 
-- `djpeg monkey12 fail ours_crashed`
-- `djpeg testimgari fail ours_crashed`
-- `djpeg testimgint fail ours_crashed`
-- `djpeg testorig fail ours_crashed`
-
-The companion test `shim_currently_lacks_classic_jpeg_api` is stale: it fails because the shim now exports many classic `jpeg_*` symbols.
+**Original symptom (historical):** `cargo test --test capi_stock_tool_link -- --include-ignored` proved the stock tools could link, but `run.sh` reported `djpeg <fixture> fail ours_crashed` across all four 8-bit fixtures.
 
 **Why this matters:** If stock `djpeg` aborts, downstream tools that use classic `jpeglib.h` are not safe. Linking is not enough.
 
