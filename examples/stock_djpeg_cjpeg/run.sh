@@ -13,7 +13,31 @@ set -euo pipefail
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" &> /dev/null && pwd)"
 REPO_ROOT="$(cd -- "$SCRIPT_DIR/../.." &> /dev/null && pwd)"
 OUR_BUILD="${OUT_DIR:-$SCRIPT_DIR/build}"
-STOCK_BIN="${STOCK_BIN:-/opt/homebrew/bin}"
+# Pick a stock libjpeg-turbo install dir. If `STOCK_BIN` is set
+# explicitly, respect it; otherwise probe well-known locations
+# across macOS Homebrew, Linux's libjpeg-turbo official .deb
+# (`/opt/libjpeg-turbo/bin`, used by our CI), source-from-/usr/local,
+# and the system path. Falling back to a PATH lookup keeps the
+# script working when none of these match.
+if [[ -z "${STOCK_BIN:-}" ]]; then
+    for cand in /opt/homebrew/bin /opt/libjpeg-turbo/bin /usr/local/bin /usr/bin; do
+        if [[ -x "$cand/djpeg" ]]; then
+            STOCK_BIN="$cand"
+            break
+        fi
+    done
+    # Last resort: rely on PATH. `command -v djpeg` resolves to the
+    # binary's actual directory if djpeg is anywhere on PATH (the
+    # CI workflow `echo "/opt/libjpeg-turbo/bin" >> $GITHUB_PATH`
+    # path matches this branch when probing fails for some reason).
+    if [[ -z "${STOCK_BIN:-}" ]]; then
+        if pathres="$(command -v djpeg 2>/dev/null)"; then
+            STOCK_BIN="$(dirname "$pathres")"
+        else
+            STOCK_BIN="/opt/homebrew/bin"  # preserve historical default error message
+        fi
+    fi
+fi
 TESTIMAGES="$REPO_ROOT/references/libjpeg-turbo/testimages"
 
 if [[ ! -x "$OUR_BUILD/djpeg" ]]; then
