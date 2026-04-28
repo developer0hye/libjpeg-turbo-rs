@@ -1435,14 +1435,18 @@ pub extern "C" fn jpeg_read_header(cinfo: *mut c_void, _require_image: CBoolean)
     let saw_jfif: bool = decoder.saw_jfif_marker();
     let (jfif_major, jfif_minor): (u8, u8) = decoder.jfif_version();
     c.saw_JFIF_marker = if saw_jfif { 1 } else { 0 };
+    // Reset to libjpeg's per-datastream JFIF version default `(1, 1)`
+    // before optionally overwriting with the parsed APP0 values.
+    // Stock libjpeg installs this default at every SOI, so a
+    // decompressor reused across a JFIF 1.02 image followed by a
+    // no-APP0 image must observe `(1, 1)` on the second pass —
+    // codex round-15 review caught this stale-state hazard.
+    c.JFIF_major_version = 1;
+    c.JFIF_minor_version = 1;
     if saw_jfif {
         c.JFIF_major_version = jfif_major;
         c.JFIF_minor_version = jfif_minor;
     }
-    // No-APP0 case: leave `JFIF_{major,minor}_version` at the
-    // `(1, 1)` default that `jpeg_CreateDecompress` installed.
-    // Stock libjpeg also leaves the default in place when no APP0
-    // was observed (codex round-14 review).
     // libjpeg's `is_baseline` flag: TRUE if SOF0 was encountered. We
     // approximate by clearing it for progressive/lossless streams.
     c.is_baseline = if !frame.is_progressive && !frame.is_lossless {
