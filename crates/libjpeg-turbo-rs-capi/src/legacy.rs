@@ -12,12 +12,18 @@
 //! - `tjCompress2`, `tjDecompress2`
 //! - `tjDecompressHeader3`
 //! - `tjTransform`
-//! - `tjEncodeYUV3`, `tjDecodeYUV` (stubs — return -1 until A1-7 fills
-//!   in the full YUV family).
+//! - `tjEncodeYUV3`, `tjDecodeYUV` — forward to `tj3EncodeYUV8` /
+//!   `tj3DecodeYUV8` after setting `TJPARAM_SUBSAMP`. The legacy
+//!   `pad` and `align` arguments are folded into the TJ3 form's
+//!   single `align`. `flags` is ignored.
 //! - `tjBufSize`, `tjBufSizeYUV2`, `tjPlaneSizeYUV`, `tjPlaneWidth`,
 //!   `tjPlaneHeight`
-//! - `tjLoadImage`, `tjSaveImage` (stubs — return -1 until image IO
-//!   routing is finalized).
+//! - `tjLoadImage`, `tjSaveImage` — handle-less (per upstream
+//!   `turbojpeg.h` legacy 2.x ABI). Allocate a temporary `tjhandle`,
+//!   set `TJPARAM_BOTTOMUP` from `flags & TJFLAG_BOTTOMUP`, delegate
+//!   to `tj3LoadImage8` / `tj3SaveImage8`, and copy the temp
+//!   handle's last error into the global no-handle slot before
+//!   destroying it (so `tjGetErrorStr2(NULL)` works).
 //! - `tjGetErrorStr2`
 
 use std::ffi::{c_char, c_int, c_void};

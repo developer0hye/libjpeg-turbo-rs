@@ -301,24 +301,9 @@ Every encode benchmark `Rust/C ≤ 1.05×`. Record before/after in `experiments/
 
 **Why P1 not P0:** the release-gate doctrine in this doc puts correctness before performance. The four P0s above are the actual blockers. Encode perf is real, tracked, and the data is in hand — but it is not what currently keeps stock tools and Pillow from loading.
 
-### P1. Legacy `tjEncodeYUV3` / `tjDecodeYUV` Are Still Stubs
+### P1. Legacy `tjEncodeYUV3` / `tjDecodeYUV` Are Still Stubs — **CLOSED**
 
-**Symptom:** per the comment at `crates/libjpeg-turbo-rs-capi/src/legacy.rs:15-16`, these are listed as "stubs — return -1 until A1-7 fills in the full YUV family". Wrappers expecting the legacy YUV ABI fail.
-
-**Why this matters:** legacy TurboJPEG callers (older Pillow, GraphicsMagick) still resolve these aliases. The TJ3 forms (`tj3EncodeYUV8`, `tj3DecodeYUV8`) exist and are tested.
-
-**Likely area:**
-
-- `crates/libjpeg-turbo-rs-capi/src/legacy.rs`
-- `crates/libjpeg-turbo-rs-capi/tests/legacy_aliases.rs`
-
-**Acceptance:**
-
-```bash
-cargo test -p libjpeg-turbo-rs-capi --test legacy_aliases
-```
-
-Add end-to-end YUV encode + decode tests through the legacy aliases; map legacy `flags` to TJ3 parameters per `references/libjpeg-turbo/src/turbojpeg.c::tj1{Encode,Decode}YUV*`.
+**Status (2026-04-28): closed.** The "stub returns -1" annotation in `crates/libjpeg-turbo-rs-capi/src/legacy.rs` was stale — both wrappers already forward to the TJ3 family (`tj3EncodeYUV8` / `tj3DecodeYUV8`) after setting `TJPARAM_SUBSAMP` from the legacy `subsamp` argument and folding `pad`/`align` into the TJ3 form's single `align`. End-to-end coverage added: `cargo test -p libjpeg-turbo-rs-capi --release --test legacy_aliases` exercises a 64×64 RGB → packed YUV (4:4:4) → RGB round-trip through `tjEncodeYUV3` + `tjDecodeYUV` and asserts max per-channel diff ≤ 8 (BT.601 colorspace conversion rounding only). The module-level doc comment in `legacy.rs` was updated to match the actual behavior.
 
 ### P2. Upstream `tjbench` / `rdjpgcom` / `wrjpgcom` Harness Not Yet Linked
 
@@ -575,7 +560,7 @@ A task is done only when:
 3. ~~Fix stock `djpeg` aborts (P0-2).~~ **CLOSED 2026-04-28** — `examples/stock_djpeg_cjpeg/run.sh` reports `OK all_byte_exact`.
 4. ~~Add high-precision raw-data symbols and make Pillow load (P0-3).~~ **CLOSED 2026-04-28** — Pillow round-trip @ q=90 PSNR 49.49 dB.
 5. Implement virtual coefficient-array materialization (and any libjpeg API symbol stock `jpegtran` resolves at runtime that the shim hasn't exported yet) for the stock `jpegtran` transform path (P0-4). **MOSTLY CLOSED 2026-04-28** — full TJXOP + crop + `-copy` cross-product byte-exact for 8-bit fixtures; 12-bit transcode (`monkey12`) remains.
-6. ~~Fill legacy `tjLoadImage` / `tjSaveImage`~~ **CLOSED 2026-04-28** — handle-less ABI in place, BMP TJPF_BGR + alpha-strip + bottom-up wired. Remaining: `tjEncodeYUV3` / `tjDecodeYUV`.
+6. ~~Fill legacy `tjLoadImage` / `tjSaveImage` and `tjEncodeYUV3` / `tjDecodeYUV`.~~ **CLOSED 2026-04-28** — handle-less load/save ABI with BMP TJPF_BGR + alpha-strip + bottom-up; YUV aliases forward through `tj3EncodeYUV8` / `tj3DecodeYUV8` with end-to-end 4:4:4 round-trip coverage in `legacy_aliases.rs`.
 7. Wire arbitrary precision lossless through TJ3 compress.
 8. Wire upstream `tjbench` / `rdjpgcom` / `wrjpgcom` against our shim (P2) — the apples-to-apples gate for step 9.
 9. Close the x86_64 encode SIMD gap (P1 Encode) until every encode benchmark `Rust/C ≤ 1.05×`. Run only after correctness and compatibility are green.
