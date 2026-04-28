@@ -5600,15 +5600,29 @@ fn populate_dst_block_dims_for_transform(c: &mut JpegCompressPublic) {
     if denom_w == 0 || denom_h == 0 {
         return;
     }
+    // Width/height in MCU rows/columns. Each MCU spans `max_h * 8`
+    // pixels horizontally, `max_v * 8` vertically. Per-component
+    // block extent within an MCU is `h_samp` × `v_samp`, so the
+    // MCU-aligned per-component block count is
+    // `iMCU_count * samp_factor`. This matches the formula
+    // `transupp.c::jtransform_request_workspace` uses to size its
+    // workspace barrays — codex round-9 verification of `-transpose`
+    // showed the previous logical formula
+    // `ceil(w * h_samp / denom_w)` undercounts the trailing partial
+    // MCU column for sources whose dimensions aren't a multiple of
+    // (max_h * 8), which led the encoder to drop the last block per
+    // row.
+    let imcu_w: u64 = (w as u64).div_ceil(denom_w);
+    let imcu_h: u64 = (h as u64).div_ceil(denom_h);
     for comp in comps.iter_mut() {
         let h_samp: u64 = comp.h_samp_factor.max(1) as u64;
         let v_samp: u64 = comp.v_samp_factor.max(1) as u64;
-        comp.width_in_blocks = (w as u64 * h_samp).div_ceil(denom_w) as JDimension;
-        comp.height_in_blocks = (h as u64 * v_samp).div_ceil(denom_h) as JDimension;
+        comp.width_in_blocks = (imcu_w * h_samp) as JDimension;
+        comp.height_in_blocks = (imcu_h * v_samp) as JDimension;
         comp.dct_h_scaled_size = 8;
         comp.dct_v_scaled_size = 8;
     }
-    c.total_iMCU_rows = (h as u64).div_ceil(denom_h) as JDimension;
+    c.total_iMCU_rows = imcu_h as JDimension;
 }
 
 /// Read coefficient blocks out of a foreign `jvirt_barray_ptr*` array
@@ -5680,13 +5694,22 @@ fn materialize_foreign_coef_arrays(
     let array_slot: *const *mut memmgr::JVirtBarrayControl =
         handle as *const *mut memmgr::JVirtBarrayControl;
 
-    // Recover blocks_x / blocks_y per component from the barray's
-    // own metadata (which transupp may have transposed for rotate
-    // ops). This is more reliable than recomputing from
-    // image_width/image_height because at this point the dst cinfo
-    // dimensions reflect the post-transform geometry, and
-    // `JVirtBarrayControl` was sized by `jtransform_request_workspace`
-    // for exactly this output.
+    // Recover blocks_x / blocks_y per component. Prefer the dst
+    // `comp_info[ci].width_in_blocks / height_in_blocks` because
+    // `jtransform_adjust_parameters` updates those to the
+    // post-transform output geometry (e.g. crop dims, swapped axes
+    // for rotate 90/270, halved width for `-grayscale`-derived
+    // outputs). For ops where `jtransform_request_workspace`
+    // allocated a fresh barray, the workspace was sized to that
+    // exact geometry, so reading from comp_info or barray gives
+    // the same value. For no-workspace ops where the dst pointer
+    // aliases the source's full barray (`-flip horizontal`,
+    // `-crop +0+0`, etc.), the barray's `blocksperrow` /
+    // `rows_in_array` overshoot the cropped geometry — caught by
+    // round-9 verification of `-crop 16x16+0+0`. Falling back to
+    // the barray's own metadata when comp_info is unset preserves
+    // round-trip behaviour for callers that hand us a foreign
+    // array without populating dst comp_info first.
     let mut components: Vec<libjpeg_turbo_rs::ComponentCoefficients> = Vec::with_capacity(n);
     for (ci, comp_info) in comp_info_slice.iter().enumerate() {
         // SAFETY: `array_slot[ci]` is a `JVirtBarrayControl*` placed
@@ -5700,8 +5723,18 @@ fn materialize_foreign_coef_arrays(
                 "jpeg_finish_compress: foreign coef_arrays[{ci}] is NULL"
             ));
         }
-        let (blocks_x, blocks_y): (u32, u32) =
+        let (full_x, full_y): (u32, u32) =
             unsafe { ((*barray).blocksperrow, (*barray).rows_in_array) };
+        let blocks_x: u32 = if comp_info.width_in_blocks != 0 {
+            comp_info.width_in_blocks.min(full_x)
+        } else {
+            full_x
+        };
+        let blocks_y: u32 = if comp_info.height_in_blocks != 0 {
+            comp_info.height_in_blocks.min(full_y)
+        } else {
+            full_y
+        };
         let row_array: memmgr::JBlockArray = unsafe {
             access_virt_barray(cinfo_ptr, barray, 0, blocks_y, /*writable=*/ 0)
         };
