@@ -373,17 +373,16 @@ pub extern "C" fn tj3SetICCProfile(
         Some(i) => i,
         None => return -1,
     };
-    if icc_size > 0 && icc_buf.is_null() {
-        inst.set_error(
-            "tj3SetICCProfile: iccBuf is NULL but iccSize > 0",
-            TJERR_FATAL,
-        );
-        return -1;
-    }
+    // Upstream `tj3SetICCProfile` clears the stored profile whenever
+    // `iccBuf == NULL` regardless of `iccSize`. The earlier "iccBuf is
+    // NULL but iccSize > 0 → reject" path was over-strict and meant a
+    // caller passing NULL to remove a previously set profile would
+    // continue to see the stale profile embedded in subsequent
+    // compressions (codex review of d4c28b1).
     if icc_buf.is_null() || icc_size == 0 {
         inst.inner.set_icc_profile(None);
     } else {
-        // SAFETY: caller validated above to be non-NULL with iccSize > 0.
+        // SAFETY: non-NULL pointer with positive length, validated above.
         let bytes: &[u8] = unsafe { std::slice::from_raw_parts(icc_buf, icc_size) };
         inst.inner.set_icc_profile(Some(bytes.to_vec()));
     }
