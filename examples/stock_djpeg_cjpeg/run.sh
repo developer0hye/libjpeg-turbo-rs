@@ -48,6 +48,9 @@ fi
 OUR_DJPEG="$OUR_BUILD/djpeg"
 OUR_CJPEG="$OUR_BUILD/cjpeg"
 OUR_JPEGTRAN="$OUR_BUILD/jpegtran"
+OUR_TJBENCH="$OUR_BUILD/tjbench"
+OUR_RDJPGCOM="$OUR_BUILD/rdjpgcom"
+OUR_WRJPGCOM="$OUR_BUILD/wrjpgcom"
 
 # Locate the shim cdylib. build.sh tries to bake the install path
 # into each tool via install_name_tool / -Wl,-rpath, but in sandboxed
@@ -197,6 +200,41 @@ for img in "$TESTIMAGES"/*.jpg; do
     else
         sz_o=$(wc -c < "$ours_trn"); sz_s=$(wc -c < "$stock_trn")
         echo -e "jpegtran\t${name}\tfail\tbytes_differ_ours=${sz_o}_stock=${sz_s}"
+        FAIL=$((FAIL + 1))
+    fi
+
+    # ------- comment round-trip: wrjpgcom + rdjpgcom (standalone tools) -------
+    # Both tools parse JPEG markers directly without linking against
+    # libjpeg/libturbojpeg, so they exercise our JPEG marker layout
+    # rather than the shim's `jpeg_*` ABI. Round-trip: insert a COM
+    # marker via wrjpgcom on `our` output, then read it back via
+    # rdjpgcom and assert the text survived. We run both upstream and
+    # our-built variants and compare stdout.
+    if [[ -f "$ours_jpg" ]]; then
+        ours_with_com="$WORK/${name}.ours.com.jpg"
+        if "$OUR_WRJPGCOM" -comment "ljt-test-${name}" "$ours_jpg" > "$ours_with_com" 2>/dev/null; then
+            ours_com_text="$("$OUR_RDJPGCOM" "$ours_with_com" 2>/dev/null | tr -d '\n')"
+            if [[ "$ours_com_text" == "ljt-test-${name}" ]]; then
+                echo -e "comtools\t${name}\tpass\troundtrip"
+            else
+                echo -e "comtools\t${name}\tfail\troundtrip_text='${ours_com_text}'"
+                FAIL=$((FAIL + 1))
+            fi
+        else
+            echo -e "comtools\t${name}\tfail\twrjpgcom_failed"
+            FAIL=$((FAIL + 1))
+        fi
+    fi
+
+    # ------- tjbench short decompress benchmark -------
+    # Smoke-test only: verify tjbench runs end-to-end against our shim
+    # for a JPG input. Output exit code is the gate; we don't compare
+    # numbers (that's the bench harness's job, separately).
+    if run_ours "$OUR_TJBENCH" "$img" -benchtime 0.1 -warmup 0 >"$WORK/${name}.tjbench.log" 2>&1; then
+        echo -e "tjbench\t${name}\tpass\t"
+    else
+        echo -e "tjbench\t${name}\tfail\texit_$?"
+        cat "$WORK/${name}.tjbench.log" >&2 || true
         FAIL=$((FAIL + 1))
     fi
 done

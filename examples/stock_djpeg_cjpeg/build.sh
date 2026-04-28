@@ -160,6 +160,26 @@ JPEGTRAN_SRCS=(
     "${CDJPEG_SRCS[@]}"
 )
 
+# tjbench links against the TurboJPEG (TJ3) ABI; our cdylib exports both
+# `libjpeg.62` and `libturbojpeg.0` aliases, so the same SHIM_LIB
+# satisfies the tj3 entry points it needs. See LAST_MILE.md → P2
+# "Wire upstream tjbench / rdjpgcom / wrjpgcom against our shim".
+TJBENCH_SRCS=(
+    "$REF_SRC/tjbench.c"
+    "$REF_SRC/tjutil.c"
+    "${CDJPEG_SRCS[@]}"
+    "$RDPPM_8_OBJ" "$RDPPM_12_OBJ" "$RDPPM_16_OBJ"
+    "$WRPPM_8_OBJ" "$WRPPM_12_OBJ" "$WRPPM_16_OBJ"
+)
+
+# rdjpgcom / wrjpgcom are standalone — they parse JPEG marker headers
+# directly and do not link against libjpeg or libturbojpeg. Wire them
+# in as a header-only smoke test so the upstream-tool build matrix
+# stays exhaustive (they're typically shipped alongside djpeg/cjpeg in
+# distro packages).
+RDJPGCOM_SRCS=("$REF_SRC/rdjpgcom.c")
+WRJPGCOM_SRCS=("$REF_SRC/wrjpgcom.c")
+
 # Link args: point at our shim. On macOS we must strip the "liblib"
 # prefix artifact by using the full path + -Wl,-install_name fix-up at
 # the binary level (done later via install_name_tool).
@@ -183,10 +203,31 @@ build_one() {
     return 0
 }
 
+# Build a tool that does NOT link against libjpeg/libturbojpeg.
+# `rdjpgcom` and `wrjpgcom` parse markers directly and just need the
+# staged headers (`jconfig.h`, `jconfigint.h`, `jinclude.h`).
+build_standalone() {
+    local name="$1"; shift
+    local srcs=("$@")
+    local out="$OUT_DIR/$name"
+    local log="$OUT_DIR/${name}_build.log"
+    echo "==> Building $name -> $out" >&2
+    if ! "$CC" $CFLAGS_COMMON -o "$out" "${srcs[@]}" 2> "$log"; then
+        echo "LINK FAILED: $name" | tee -a "$OUT_DIR/link_errors.txt"
+        cat "$log" | tee -a "$OUT_DIR/link_errors.txt"
+        echo "----" >> "$OUT_DIR/link_errors.txt"
+        return 1
+    fi
+    return 0
+}
+
 FAILED=0
 build_one djpeg    "${DJPEG_SRCS[@]}"    || FAILED=1
 build_one cjpeg    "${CJPEG_SRCS[@]}"    || FAILED=1
 build_one jpegtran "${JPEGTRAN_SRCS[@]}" || FAILED=1
+build_one tjbench  "${TJBENCH_SRCS[@]}"  || FAILED=1
+build_standalone rdjpgcom "${RDJPGCOM_SRCS[@]}" || FAILED=1
+build_standalone wrjpgcom "${WRJPGCOM_SRCS[@]}" || FAILED=1
 
 if (( FAILED )); then
     echo "One or more stock tool links failed. See $OUT_DIR/link_errors.txt" >&2
@@ -194,9 +235,11 @@ if (( FAILED )); then
 fi
 
 # macOS: fix the install_name so the tool finds our .dylib at runtime.
+# rdjpgcom/wrjpgcom are standalone and do not need this fix-up.
 if [[ "$LIB_EXT" == "dylib" ]]; then
-    for t in djpeg cjpeg jpegtran; do
+    for t in djpeg cjpeg jpegtran tjbench; do
         install_name_tool -change "@rpath/libjpeg.62.dylib" "$SHIM_LIB" "$OUT_DIR/$t" 2>/dev/null || true
+        install_name_tool -change "@rpath/libturbojpeg.0.dylib" "$SHIM_LIB" "$OUT_DIR/$t" 2>/dev/null || true
     done
 fi
 

@@ -283,3 +283,92 @@ pub extern "C" fn tj3GetErrorCode(handle: *mut c_void) -> c_int {
     let inst: &mut TjInstance = unsafe { &mut *(handle as *mut TjInstance) };
     inst.last_error_code
 }
+
+/// `tj3GetICCProfile(handle, **iccBuf, *iccSize) -> int`.
+///
+/// Returns the ICC profile (if any) associated with the TurboJPEG instance.
+/// The handle accumulates an ICC profile in two ways:
+///   * `tj3SetICCProfile` writes one in for subsequent encodes/transforms.
+///   * `tj3DecompressHeader` extracts one from the source JPEG when
+///     `TJPARAM_SAVEMARKERS` is set (or when ICC capture is implicit).
+///
+/// Contract (mirrors `references/libjpeg-turbo/src/turbojpeg.h:1995`):
+/// `iccSize` is required (NULL → -1). When `iccBuf == NULL` the call is
+/// query-only and only `*iccSize` is populated; otherwise `*iccBuf` is
+/// set to a fresh `tj3Alloc`-style libc allocation that the caller must
+/// free with `tj3Free`, and `*iccSize` reflects the byte count. When no
+/// ICC is available the stub writes `*iccSize = 0` (and `*iccBuf = NULL`
+/// when the buffer pointer is non-NULL) and returns 0.
+///
+/// Stub note (2026-04-29): the ICC-capture path through
+/// `tj3DecompressHeader` is not yet wired, so this currently always
+/// reports "no ICC available". `tjbench` only queries via the NULL
+/// `iccBuf` form to decide whether to embed an ICC during transform,
+/// so a clean "no ICC" answer keeps the benchmark functional. Wiring
+/// real ICC capture is tracked separately.
+///
+/// **DIVERGENCE from upstream:** stock `tj3GetICCProfile` returns -1
+/// with `TJERR_WARNING` (not `TJERR_FATAL`) when called on a decompress
+/// instance that has no captured ICC; this stub returns 0 instead.
+/// Acceptable today because (a) `TJERR_WARNING` requires a soft-error
+/// path that the shim doesn't implement yet (see `tj3.rs::TJERR_WARNING`),
+/// and (b) every documented caller (incl. `tjbench`) only checks for
+/// `== -1` and treats either result as "no ICC", so flipping the
+/// sentinel does not change behaviour. Wire the warning-return form
+/// once the soft-error path lands.
+#[no_mangle]
+pub extern "C" fn tj3GetICCProfile(
+    handle: *mut c_void,
+    icc_buf: *mut *mut u8,
+    icc_size: *mut usize,
+) -> c_int {
+    let inst: &mut TjInstance = match unsafe { handle_as_mut(handle) } {
+        Some(i) => i,
+        None => return -1,
+    };
+    if icc_size.is_null() {
+        inst.set_error("tj3GetICCProfile: iccSize is NULL", TJERR_FATAL);
+        return -1;
+    }
+    // SAFETY: caller guarantees the out-pointers are valid for write.
+    unsafe {
+        *icc_size = 0;
+        if !icc_buf.is_null() {
+            *icc_buf = std::ptr::null_mut();
+        }
+    }
+    inst.clear_error();
+    0
+}
+
+/// `tj3SetICCProfile(handle, *iccBuf, iccSize) -> int`.
+///
+/// Associates an ICC profile with the TurboJPEG instance so subsequent
+/// encode/transform calls embed it as APP2 chunks. `iccBuf == NULL`
+/// AND `iccSize == 0` clears the stored profile.
+///
+/// Stub note (2026-04-29): storage is accepted but the encode path
+/// does not yet emit the embedded profile. `tjbench` exercises this
+/// only when `tj3GetICCProfile` first reports a non-zero size, which
+/// our stub never does, so this stays as a link-only stub until the
+/// follow-up ICC plumb.
+#[no_mangle]
+pub extern "C" fn tj3SetICCProfile(
+    handle: *mut c_void,
+    icc_buf: *mut u8,
+    icc_size: usize,
+) -> c_int {
+    let inst: &mut TjInstance = match unsafe { handle_as_mut(handle) } {
+        Some(i) => i,
+        None => return -1,
+    };
+    if icc_size > 0 && icc_buf.is_null() {
+        inst.set_error(
+            "tj3SetICCProfile: iccBuf is NULL but iccSize > 0",
+            TJERR_FATAL,
+        );
+        return -1;
+    }
+    inst.clear_error();
+    0
+}

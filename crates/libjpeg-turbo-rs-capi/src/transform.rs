@@ -46,6 +46,15 @@ pub const TJXOP_ROT90: c_int = 5;
 pub const TJXOP_ROT180: c_int = 6;
 pub const TJXOP_ROT270: c_int = 7;
 
+// --- TJSAMP_* (subset used for transpose-aware buf-size estimation) ---
+const TJSAMP_422: c_int = 1;
+const TJSAMP_GRAY: c_int = 3;
+const TJSAMP_440: c_int = 4;
+const TJSAMP_411: c_int = 5;
+const TJSAMP_441: c_int = 6;
+const TJSAMP_410: c_int = 7;
+const TJSAMP_24: c_int = 8;
+
 // --- TJXOPT_* (bit flags) ---
 pub const TJXOPT_PERFECT: c_int = 1;
 pub const TJXOPT_TRIM: c_int = 2;
@@ -227,4 +236,94 @@ pub extern "C" fn tj3Transform(
 
     inst.clear_error();
     0
+}
+
+/// `tj3TransformBufSize(handle, *transform) -> size_t`.
+///
+/// Returns an upper bound on the bytes needed to hold the JPEG produced
+/// by applying `transform` to the source image whose header was last
+/// parsed via `tj3DecompressHeader`. Mirrors
+/// `references/libjpeg-turbo/src/turbojpeg.h:2358`. Returns `0` on
+/// error (NULL handle, NULL transform, or unread header), and stashes
+/// a descriptive message reachable via `tj3GetErrorStr`.
+///
+/// The bound is computed by:
+///   1. Pulling cached source dimensions and subsampling out of the
+///      handle's TJPARAM_* state (populated by `tj3DecompressHeader`).
+///   2. Swapping width/height for the transpose-class ops
+///      (`TJXOP_TRANSPOSE`, `TJXOP_TRANSVERSE`, `TJXOP_ROT90`,
+///      `TJXOP_ROT270`).
+///   3. Honoring the crop region in `transform.r` when set.
+///   4. Delegating to `tj3JPEGBufSize` on the resulting (W,H,S).
+#[no_mangle]
+pub extern "C" fn tj3TransformBufSize(handle: *mut c_void, transform: *const TjTransform) -> usize {
+    use libjpeg_turbo_rs::tj3::TjParam;
+
+    let inst = match unsafe { handle_as_mut(handle) } {
+        Some(i) => i,
+        None => return 0,
+    };
+    if transform.is_null() {
+        inst.set_error("tj3TransformBufSize: transform is NULL", TJERR_FATAL);
+        return 0;
+    }
+    // SAFETY: caller-supplied; non-NULL verified above. The struct is
+    // POD-like (raw layout matches `tjtransform`), so reading it is safe.
+    let xform: &TjTransform = unsafe { &*transform };
+
+    let mut w: c_int = inst.inner.get(TjParam::Width);
+    let mut h: c_int = inst.inner.get(TjParam::Height);
+    if w <= 0 || h <= 0 {
+        inst.set_error(
+            "tj3TransformBufSize: dimensions not set; call tj3DecompressHeader first",
+            TJERR_FATAL,
+        );
+        return 0;
+    }
+    let mut subsamp: c_int = inst.inner.get(TjParam::Subsampling);
+    // `TJXOPT_GRAY` forces grayscale output regardless of source subsampling
+    // (mirrors `references/libjpeg-turbo/src/turbojpeg.c::getDstSubsamp`).
+    if (xform.options & TJXOPT_GRAY) != 0 {
+        subsamp = TJSAMP_GRAY;
+    }
+    // Transpose-class ops swap the H and V chroma factors, so e.g. 4:2:2 →
+    // 4:4:0 and 4:1:1 → 4:4:1. Without this swap the post-transform buffer
+    // estimate underflows for non-square chroma layouts and `tj3Transform`
+    // can overrun. Mirrors upstream `turbojpeg.c::getTransformedSpecs`.
+    if matches!(
+        xform.op,
+        TJXOP_TRANSPOSE | TJXOP_TRANSVERSE | TJXOP_ROT90 | TJXOP_ROT270
+    ) {
+        std::mem::swap(&mut w, &mut h);
+        subsamp = match subsamp {
+            TJSAMP_422 => TJSAMP_440,
+            TJSAMP_440 => TJSAMP_422,
+            TJSAMP_411 => TJSAMP_441,
+            TJSAMP_441 => TJSAMP_411,
+            TJSAMP_410 => TJSAMP_24,
+            TJSAMP_24 => TJSAMP_410,
+            other => other,
+        };
+    }
+    // Crop detection: upstream gates on `TJXOPT_CROP` and treats `r.w == 0`
+    // as "remainder of width post-x". `tjbench` only takes the
+    // `IS_CROPPED` path when at least one of x/y/w/h is non-zero, so the
+    // simpler "any of r.{w,h} positive" heuristic matches its usage; a
+    // stricter caller that wants the remainder-mode behaviour can pass an
+    // explicit `r.w` / `r.h`.
+    if (xform.options & TJXOPT_CROP) != 0 {
+        if xform.r.w > 0 {
+            w = xform.r.w;
+        }
+        if xform.r.h > 0 {
+            h = xform.r.h;
+        }
+    }
+    inst.clear_error();
+    // TODO(icc-plumb): upstream `turbojpeg.c::tj3TransformBufSize` adds the
+    // stored ICC size (`this->iccSize` / `this->decompICCSize`) to the
+    // bound. Our `tj3GetICCProfile` / `tj3SetICCProfile` are stubs that
+    // never store an ICC, so the unsigned bound is exact today; revisit
+    // when the ICC-capture/save path lands.
+    crate::bufsize::tj3JPEGBufSize(w, h, subsamp)
 }
