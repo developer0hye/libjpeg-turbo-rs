@@ -20,12 +20,12 @@ Live checks on 2026-04-28 (refresh whenever the gap inventory changes — failur
 
 | Check | Current Result | Replacement Meaning |
 | --- | --- | --- |
-| `cargo test --workspace --release` | **Passes**: 2067 tests, 0 failures, 2 ignored. | Native + C ABI workspace is green. |
+| `cargo test --workspace --release` | **Passes**: 2073 tests, 0 failures, 0 ignored. | Native + C ABI workspace is green; the two stale ignores (P1 Soft-Skip) closed 2026-04-28. |
 | `cargo test -p libjpeg-turbo-rs --test cross_product_transform` | **Passes** all 12 cases including `tjtrantest_full_cross_product`, `tjtrantest_arithmetic_cross_product`, and `c_jpegtran_cross_validation_*`. | P0-1 closed — arithmetic transform cross-product no longer corrupts. |
-| `examples/stock_djpeg_cjpeg/run.sh` | **Passes** (`OK all_byte_exact`): `djpeg` / `cjpeg` / `jpegtran` byte-exact for `testimgari`, `testimgint`, `testorig`, `monkey12`; `monkey12` jpegtran is the documented 12-bit-transcode skip tracked under P0-4. | P0-2 closed — drop-in for stock C tools holds, except 12-bit jpegtran. |
+| `examples/stock_djpeg_cjpeg/run.sh` | **Passes** (`OK all_byte_exact`): `djpeg` / `cjpeg` / `jpegtran` byte-exact for `testimgari`, `testimgint`, `testorig`; `monkey12` jpegtran reports `pass pixel_equal_dht_differs` (12-bit transcode functionally correct, byte-exactness gated on a separate "preserve source DHT" follow-up — see Suggested Order item 5b). | P0-2 closed; P0-4 functionally closed. |
 | `cargo test --test capi_stock_tool_link` | **Passes** for djpeg / cjpeg / jpegtran (`-copy all -rotate 90`) on the 8-bit fixtures; the full TJXOP cross-product (`-flip h/v`, `-rotate 90/180/270`, `-transpose`, `-transverse`, `-grayscale`, `-crop` origin and offset) is verified byte-exact via the foreign-coef-array path. | Drop-in for stock 8-bit `jpegtran` is closed; 12-bit transcode remains. |
 | `cargo test --test capi_pillow_compat -- --nocapture` | **Passes**: phase-A dlopen ok, phase-B Pillow round-trip @ q=90 PSNR 49.49 dB (≥ 30 dB floor). Blocker-code-3 is now a hard panic, not a skip. | P0-3 closed. |
-| `cargo test -p libjpeg-turbo-rs-capi --test tjunittest_link -- --include-ignored --exact tjunittest_default_suite_passes` | Passes | The ignore on this test is stale and should be removed. |
+| `cargo test -p libjpeg-turbo-rs-capi --test tjunittest_link --exact tjunittest_default_suite_passes` | Passes (no `--include-ignored` needed) | Stale `#[ignore]` removed; harness now force-rebuilds the cdylib so a stale `target/release/...` cannot satisfy the gate. |
 
 The current `docs/FEATURE_PARITY.md` and `docs/C_API_REFERENCE.md` are valuable, but they are too optimistic for replacement-readiness. Keep them as API mapping documents; use this document as the release gate for "can replace C libjpeg-turbo."
 
@@ -200,16 +200,25 @@ bash examples/stock_djpeg_cjpeg/run.sh
 
 `jpegtran -copy all -rotate 90` is the smoke gate. Full pass: the TJXOP cross-product (rotate {90,180,270} × flip {h,v} × transpose × transverse × crop `WxH+X+Y`) × marker-copy mode (`all` / `comments` / `icc` / `none`) must produce `cmp -s` byte-identical output to upstream `jpegtran` on the upstream `testimages/*.jpg` corpus.
 
-### P1. Soft-Skip Compatibility Tests Hide Product Blockers
+### P1. Soft-Skip Compatibility Tests Hide Product Blockers — **CLOSED**
 
-**Symptom:** Some compatibility tests document blockers but return success or remain ignored:
+**Status (2026-04-28): closed.** Every product-path soft-skip in the
+inventory is now a real failure path:
 
-- `tests/capi_pillow_compat.rs` treats blocker code 3 as skip.
-- `tests/capi_stock_tool_link.rs` is ignored even though it is the key drop-in gate.
-- `crates/libjpeg-turbo-rs-capi/tests/tjunittest_link.rs::tjunittest_default_suite_passes` is ignored but passes when forced.
-- `crates/libjpeg-turbo-rs-capi/tests/capi_stock_djpeg_e2e.rs` has a separate harness issue around generated headers and should not remain a dead ignored test.
-
-**Acceptance:** Product-path compatibility failures must be real failures in CI. Only slow stress tests may stay ignored by default, and the ignore reason must say how CI exercises them elsewhere.
+- `tests/capi_pillow_compat.rs` already hard-panics on blocker code 3
+  (closed earlier under P0-3).
+- `tests/capi_stock_tool_link.rs::stock_tools_link_against_our_shim` is
+  no longer `#[ignore]`d; it is the active drop-in gate.
+- `crates/libjpeg-turbo-rs-capi/tests/tjunittest_link.rs::tjunittest_default_suite_passes`
+  has the stale `#[ignore]` removed; both tests in that file now route
+  the cdylib through `cdylib_path_or_build()` so a stale
+  `target/release/...` cannot satisfy the gate, and the prior soft-skip
+  on missing cc / submodule / cdylib is a hard panic.
+- `crates/libjpeg-turbo-rs-capi/tests/capi_stock_djpeg_e2e.rs` deleted as
+  a redundant duplicate of
+  `tests/capi_stock_tool_link.rs::stock_tools_link_against_our_shim` —
+  `examples/stock_djpeg_cjpeg/build.sh` already emits the `jversion.h`
+  stub and `run.sh` already exercises the same testorig path.
 
 ### P1. Legacy `tjLoadImage` / `tjSaveImage` Are Still Stubs — **CLOSED**
 
@@ -222,22 +231,21 @@ bash examples/stock_djpeg_cjpeg/run.sh
 
 `cargo test -p libjpeg-turbo-rs-capi --test legacy_aliases` passes 4/4 against the cdylib (`tj_load_image_reports_error_for_missing_file`, `tj_load_save_image_round_trip_ppm_through_legacy_alias`, plus `tjBufSize` and the init/destroy aliases).
 
-### P1. `TJPARAM_PRECISION` Is Not Fully Honored Through TJ3 Compress Entry Points
+### P1. `TJPARAM_PRECISION` Is Not Fully Honored Through TJ3 Compress Entry Points — **CLOSED**
 
-**Symptom:** The Rust library has arbitrary precision lossless APIs, but the C ABI compress entry points need to match upstream dispatch:
+**Status (2026-04-28): closed.** `TJPARAM_PRECISION` is now writable on the param store (the read-only flag was lifted in `crates/libjpeg-turbo-rs-capi/src/tj3.rs::is_read_only`) and each compress entry point validates / dispatches it:
 
-- `tj3Compress8` honors lossless precision 2..8.
-- `tj3Compress12` honors lossless precision 9..12.
-- `tj3Compress16` honors lossless precision 13..16.
+- `tj3Compress8` (`compress.rs::tj3Compress8`) — when `TJPARAM_LOSSLESS=1`, accepts precision in `2..=8`; routes to `compress_lossless_extended_precision` so the SOF byte reflects the requested precision.
+- `tj3Compress12` (`precision.rs::tj3Compress12`) — when `TJPARAM_LOSSLESS=1`, accepts precision in `9..=12` (default 12) and routes through a new `TjHandle::compress_12bit_with_precision`.
+- `tj3Compress16` (`precision.rs::tj3Compress16`) — same pattern for `13..=16` (default 16) via `compress_16bit_with_precision`.
 
-**Likely area:**
+`crates/libjpeg-turbo-rs-capi/tests/precision.rs` now has three dlopen tests that assert the SOF precision byte in the encoded stream equals the requested `TJPARAM_PRECISION`:
 
-- `crates/libjpeg-turbo-rs-capi/src/compress.rs`
-- `crates/libjpeg-turbo-rs-capi/src/precision.rs`
-- `crates/libjpeg-turbo-rs-capi/src/tj3.rs`
-- `src/api/precision.rs`
-
-**Acceptance:** Add dlopen tests for precision 4, 10, and 14 and cross-check against upstream tools where available.
+```text
+test tj3_compress8_lossless_precision4_writes_sof_byte_4   ... ok
+test tj3_compress12_lossless_precision10_writes_sof_byte_10 ... ok
+test tj3_compress16_lossless_precision14_writes_sof_byte_14 ... ok
+```
 
 ### P1. Encode SIMD Performance Gap On x86_64
 
@@ -568,13 +576,13 @@ A task is done only when:
 ## Suggested Order
 
 1. ~~Fix `cross_product_transform` so the workspace is green (P0-1).~~ **CLOSED 2026-04-28** — all 12 cases pass.
-2. Harden gates by removing stale ignores and blocker-as-skip behavior (P1 Soft-Skip).
+2. ~~Harden gates by removing stale ignores and blocker-as-skip behavior (P1 Soft-Skip).~~ **CLOSED 2026-04-28** — every product-path ignore/skip is now a real failure path; harness force-rebuilds the cdylib so stale `target/release/...` cannot satisfy gates.
 3. ~~Fix stock `djpeg` aborts (P0-2).~~ **CLOSED 2026-04-28** — `examples/stock_djpeg_cjpeg/run.sh` reports `OK all_byte_exact`.
 4. ~~Add high-precision raw-data symbols and make Pillow load (P0-3).~~ **CLOSED 2026-04-28** — Pillow round-trip @ q=90 PSNR 49.49 dB.
 5. Implement virtual coefficient-array materialization (and any libjpeg API symbol stock `jpegtran` resolves at runtime that the shim hasn't exported yet) for the stock `jpegtran` transform path (P0-4). **CLOSED 2026-04-28** — full TJXOP + crop + `-copy` cross-product byte-exact for 8-bit fixtures; 12-bit transcode (`monkey12`) routes through optimised Huffman, decodes pixel-equal through stock djpeg, and is no longer skipped by `examples/stock_djpeg_cjpeg/run.sh`.
 5b. Preserve source DHT in `JpegCoefficients` so 12-bit transcode can byte-match upstream `jpegtran` (currently `pixel_equal_dht_differs`). Touchpoints: `JpegCoefficients` struct in `src/api/coefficient.rs`, `read_coefficients` (drop the DHT discard), and `write_coefficients_optimized` (prefer caller-supplied DHT over rebuild). Acceptance: `examples/stock_djpeg_cjpeg/run.sh` reports `jpegtran monkey12 pass byte_exact` (drop the `pixel_equal_dht_differs` allowance in run.sh).
 6. ~~Fill legacy `tjLoadImage` / `tjSaveImage` and `tjEncodeYUV3` / `tjDecodeYUV`.~~ **CLOSED 2026-04-28** — handle-less load/save ABI with BMP TJPF_BGR + alpha-strip + bottom-up; YUV aliases forward through `tj3EncodeYUV8` / `tj3DecodeYUV8` with end-to-end 4:4:4 round-trip coverage in `legacy_aliases.rs`.
-7. Wire arbitrary precision lossless through TJ3 compress.
+7. ~~Wire arbitrary precision lossless through TJ3 compress.~~ **CLOSED 2026-04-28** — `tj3Compress8/12/16` honour `TJPARAM_PRECISION` via SOF dlopen tests for precision 4 / 10 / 14.
 8. Wire upstream `tjbench` / `rdjpgcom` / `wrjpgcom` against our shim (P2) — the apples-to-apples gate for step 9.
 9. Close the x86_64 encode SIMD gap (P1 Encode) until every encode benchmark `Rust/C ≤ 1.05×`. Run only after correctness and compatibility are green.
 10. PNG image I/O (P2), if downstream demand exists.
