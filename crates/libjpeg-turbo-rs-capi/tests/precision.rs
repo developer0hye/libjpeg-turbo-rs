@@ -641,3 +641,74 @@ fn tj3_compress_rejects_lossless_pt_ge_precision() {
         tj3_destroy(h);
     }
 }
+
+/// Out-of-range `TJPARAM_PRECISION` must silently fall back to the
+/// entry-point's natural precision (BITS_IN_JSAMPLE), matching upstream
+/// `references/libjpeg-turbo/src/turbojpeg-mp.c::tj3Compress*` lines
+/// 109-117. The previous implementation raised `TJERR_FATAL` on
+/// out-of-range precision; this regression guards against that
+/// divergence by setting precision values that fall outside each
+/// entry-point's lossless range and asserting the encode succeeds with
+/// the SOF byte at the entry-point default (8 / 12 / 16).
+#[test]
+fn tj3_compress_silently_falls_back_on_out_of_range_precision() {
+    let path: PathBuf = cdylib_path();
+    let lib: libloading::Library =
+        unsafe { libloading::Library::new(&path) }.expect("dlopen cdylib");
+    unsafe {
+        let tj3_init: libloading::Symbol<unsafe extern "C" fn(c_int) -> TjHandle> =
+            lib.get(b"tj3Init").unwrap();
+        let tj3_destroy: libloading::Symbol<unsafe extern "C" fn(TjHandle)> =
+            lib.get(b"tj3Destroy").unwrap();
+        let tj3_set: libloading::Symbol<unsafe extern "C" fn(TjHandle, c_int, c_int) -> c_int> =
+            lib.get(b"tj3Set").unwrap();
+        let tj3_free: libloading::Symbol<unsafe extern "C" fn(*mut c_void)> =
+            lib.get(b"tj3Free").unwrap();
+        let tj3_compress8: libloading::Symbol<
+            unsafe extern "C" fn(
+                TjHandle,
+                *const u8,
+                c_int,
+                c_int,
+                c_int,
+                c_int,
+                *mut *mut u8,
+                *mut usize,
+            ) -> c_int,
+        > = lib.get(b"tj3Compress8").unwrap();
+
+        // Set TJPARAM_PRECISION=15 (way outside tj3Compress8's lossless
+        // range of 2..=8). Upstream falls back silently to BITS_IN_JSAMPLE
+        // = 8 and emits a regular 8-bit SOF stream.
+        let h: TjHandle = tj3_init(TJINIT_COMPRESS);
+        assert!(!h.is_null());
+        assert_eq!(tj3_set(h, TJPARAM_LOSSLESS, 1), 0);
+        assert_eq!(tj3_set(h, TJPARAM_PRECISION, 15), 0);
+        assert_eq!(tj3_set(h, TJPARAM_LOSSLESSPSV, 1), 0);
+
+        let w: c_int = 16;
+        let h_px: c_int = 16;
+        let src: Vec<u8> = vec![0u8; (w * h_px * 3) as usize];
+        let mut buf: *mut u8 = std::ptr::null_mut();
+        let mut size: usize = 0;
+        let rc: c_int = tj3_compress8(h, src.as_ptr(), w, 0, h_px, TJPF_RGB, &mut buf, &mut size);
+        assert_eq!(
+            rc, 0,
+            "tj3Compress8 must silently fall back when TJPARAM_PRECISION is out of range \
+             (matches upstream turbojpeg-mp.c lines 109-117); got rc={rc}"
+        );
+        assert!(!buf.is_null() && size > 4);
+
+        let jpeg: &[u8] = std::slice::from_raw_parts(buf, size);
+        // Upstream falls back to BITS_IN_JSAMPLE = 8 → SOF3 byte should be 8.
+        let p: u8 =
+            sof_precision_byte(jpeg, 0xC3).expect("SOF3 marker must be present in lossless output");
+        assert_eq!(
+            p, 8,
+            "out-of-range TJPARAM_PRECISION=15 on tj3Compress8 must fall back to 8, got {p}"
+        );
+
+        tj3_free(buf as *mut c_void);
+        tj3_destroy(h);
+    }
+}
