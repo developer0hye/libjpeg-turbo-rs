@@ -1848,6 +1848,26 @@ pub extern "C" fn jpeg_calc_output_dimensions(cinfo: *mut c_void) {
     c.rec_outbuf_height = 1;
 }
 
+/// Free everything the cinfo's memory manager allocated under
+/// `JPOOL_IMAGE`, i.e. the `jvirt_barray_ptr*` array slot, the
+/// per-component `JVirtBarrayControl`s, and the populated block rows
+/// that `jpeg_read_coefficients` (or transupp's
+/// `jtransform_request_workspace`) requested.
+///
+/// Mirrors what stock libjpeg's `jpeg_abort` does for the decompress
+/// side: walk the lifetime classes that aren't `JPOOL_PERMANENT` and
+/// release them. We only release `JPOOL_IMAGE` here because that's
+/// the only pool the decompress side touches in our shim today.
+fn release_decompress_image_pool(cinfo: *mut c_void, mem_ptr: *mut c_void) {
+    if mem_ptr.is_null() {
+        return;
+    }
+    let mem: &memmgr::JpegMemoryMgr = unsafe { &*(mem_ptr as *const memmgr::JpegMemoryMgr) };
+    if let Some(free_pool) = mem.free_pool {
+        unsafe { free_pool(cinfo, memmgr::JPOOL_IMAGE) };
+    }
+}
+
 /// Close out the decode pass. Returns TRUE unless suspended (which we
 /// never do — the entire stream is present in memory).
 #[no_mangle]
@@ -1880,9 +1900,21 @@ pub extern "C" fn jpeg_finish_decompress(cinfo: *mut c_void) -> CBoolean {
         // would short-circuit on the stale `coef_array_ptr` and
         // hand the second JPEG's caller the *first* JPEG's barrays
         // — caught by codex review of 809f52a.
+        //
+        // Also release the JPOOL_IMAGE allocations that backed the
+        // old barray array (the `*mut JVirtBarrayControl` slots,
+        // the per-component `JVirtBarrayControl`s, and the
+        // populated block rows). Upstream `jpeg_finish_decompress`
+        // reaches the same end state via `jpeg_abort` →
+        // `free_pool(JPOOL_IMAGE)`; without this the next
+        // `read_coefficients` on the same handle would re-allocate
+        // a parallel set without ever freeing the first one,
+        // ballooning memory across finish/reuse cycles — codex
+        // round-8 review of b7f690d.
         if !priv_state.coef_array_ptr.is_null() {
             coef_unregister_array(priv_state.coef_array_ptr as *const c_void);
             priv_state.coef_array_ptr = std::ptr::null_mut();
+            release_decompress_image_pool(cinfo, c.mem);
         }
         priv_state.coefficients = None;
     }
@@ -3285,9 +3317,16 @@ pub extern "C" fn jpeg_abort_decompress(cinfo: *mut c_void) {
         // dropped the handle first, a follow-up
         // `jpeg_write_coefficients(other_dst, our_array_ptr)` could
         // hit the side table and dereference freed memory.
+        //
+        // Then release the JPOOL_IMAGE allocations that backed the
+        // foreign barray array. See the matching comment in
+        // `jpeg_finish_decompress` for the rationale (codex round-8
+        // review of b7f690d — without this the abort path leaks the
+        // previous image's virtual arrays).
         if !p.coef_array_ptr.is_null() {
             coef_unregister_array(p.coef_array_ptr as *const c_void);
             p.coef_array_ptr = std::ptr::null_mut();
+            release_decompress_image_pool(cinfo, c.mem);
         }
         p.coefficients = None;
         p.crop_active = false;
@@ -5725,21 +5764,37 @@ fn materialize_foreign_coef_arrays(
     };
 
     // Preserve the source's Adobe APP14 transform classification when
-    // we can recover it. The encoder's 4-component CMYK/YCCK branch
-    // injects an Adobe APP14 with the right transform byte regardless,
-    // but for 3-component sources that DID carry an Adobe APP14 (e.g.
-    // an RGB-encoded JPEG that wants to be re-emitted with
+    // we can recover it AND when the destination output keeps a
+    // colourspace where APP14 is meaningful (3 or 4 components).
+    //
+    // The encoder's 4-component CMYK/YCCK branch injects an Adobe
+    // APP14 with the right transform byte regardless, but for
+    // 3-component sources that DID carry an Adobe APP14 (e.g. an
+    // RGB-encoded JPEG that wants to be re-emitted with
     // `transform=0` to keep the RGB classification) the field is
-    // load-bearing because `inject_adobe_app14_after_jfif` only fires
-    // when `adobe_transform.is_some()`. Pull from the side-table
-    // CoefHandle when the array we just received was registered by
-    // *this* shim's `jpeg_read_coefficients`. Foreign workspace
-    // arrays from transupp's `-rotate` etc. preserve Adobe via
-    // `jcopy_markers_execute → jpeg_write_marker` instead, so falling
-    // through to `None` in that case is correct.
-    let adobe_transform: Option<u8> = match coef_lookup_handle(handle) {
-        Some(handle_ptr) => unsafe { (*handle_ptr).inner.adobe_transform },
-        None => None,
+    // load-bearing because `inject_adobe_app14_after_jfif` only
+    // fires when `adobe_transform.is_some()`.
+    //
+    // For 1-component grayscale outputs (e.g. transupp's
+    // `-grayscale` no-workspace path leaves the dst cinfo at
+    // `num_components = 1` while still handing us the registered
+    // 3-component source array), copying the source's transform
+    // would emit a stale APP14 marker that libjpeg's parser would
+    // suppress on read — flagged in codex round-8 review of b7f690d.
+    //
+    // Pull from the side-table CoefHandle when the array was
+    // registered by *this* shim's `jpeg_read_coefficients`. Foreign
+    // workspace arrays from transupp's `-rotate` etc. preserve
+    // Adobe via `jcopy_markers_execute → jpeg_write_marker`
+    // instead, so falling through to `None` in that case is
+    // correct.
+    let adobe_transform: Option<u8> = if n == 3 || n == 4 {
+        match coef_lookup_handle(handle) {
+            Some(handle_ptr) => unsafe { (*handle_ptr).inner.adobe_transform },
+            None => None,
+        }
+    } else {
+        None
     };
 
     Ok(libjpeg_turbo_rs::JpegCoefficients {
