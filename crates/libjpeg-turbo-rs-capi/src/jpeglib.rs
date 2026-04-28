@@ -5953,6 +5953,7 @@ fn materialize_foreign_coef_arrays(
     Ok(libjpeg_turbo_rs::JpegCoefficients {
         width: width.min(u16::MAX as u32) as u16,
         height: height.min(u16::MAX as u32) as u16,
+        data_precision: c.data_precision.clamp(0, 16) as u8,
         components,
         quant_tables,
         restart_interval: c.restart_interval.min(65535) as u16,
@@ -6071,6 +6072,17 @@ fn run_coefficient_writer_and_flush(
     } else {
         None
     };
+    // 12-bit transcode (e.g. `monkey12.jpg`) MUST go through the
+    // optimised Huffman writer: the non-optimised path uses standard
+    // Annex K tables that only define DC categories 0..=11, so any
+    // 12-bit DC diff that lands in category 12..=15 would silently
+    // encode as a zero-bit code. Forcing the optimised path here means
+    // a caller that copies critical parameters from a 12-bit source
+    // (which sets `data_precision = 12` after `jpeg_set_defaults`
+    // already left `optimize_coding = 0`) still produces a valid
+    // stream. Mirrors the auto-promote in `jpeg_set_defaults` at the
+    // top of this file.
+    let force_optimize: bool = c.data_precision > 8;
     let bytes_result: libjpeg_turbo_rs::Result<Vec<u8>> =
         if c.progressive_mode != 0 && c.arith_code != 0 {
             libjpeg_turbo_rs::write_coefficients_progressive_arithmetic(&adjusted, restart_rows)
@@ -6078,7 +6090,7 @@ fn run_coefficient_writer_and_flush(
             libjpeg_turbo_rs::write_coefficients_progressive(&adjusted, restart_rows)
         } else if c.arith_code != 0 {
             libjpeg_turbo_rs::write_coefficients_arithmetic(&adjusted)
-        } else if c.optimize_coding != 0 {
+        } else if c.optimize_coding != 0 || force_optimize {
             libjpeg_turbo_rs::write_coefficients_optimized(&adjusted)
         } else {
             libjpeg_turbo_rs::write_coefficients(&adjusted)

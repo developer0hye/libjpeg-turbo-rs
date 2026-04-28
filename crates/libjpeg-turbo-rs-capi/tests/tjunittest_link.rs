@@ -72,6 +72,30 @@ fn cdylib_path() -> Option<PathBuf> {
     None
 }
 
+/// Like `cdylib_path`, but **always** runs `cargo build -p
+/// libjpeg-turbo-rs-capi --release` first so the test exercises the
+/// *current* source. Without the unconditional rebuild, a stale
+/// `target/release/liblibjpeg_turbo_rs_capi.*` (CI cache, prior run,
+/// etc.) could satisfy the existence check and let `tjunittest` link
+/// against bits that no longer reflect the working tree.
+fn cdylib_path_or_build() -> Option<PathBuf> {
+    let status: std::process::ExitStatus = Command::new(env!("CARGO"))
+        .args([
+            "build",
+            "-p",
+            "libjpeg-turbo-rs-capi",
+            "--release",
+            "--quiet",
+        ])
+        .current_dir(repo_root())
+        .status()
+        .ok()?;
+    if !status.success() {
+        return None;
+    }
+    cdylib_path()
+}
+
 fn find_cc() -> Option<PathBuf> {
     for candidate in ["cc", "clang", "gcc"] {
         if let Ok(out) = Command::new("which").arg(candidate).output() {
@@ -112,6 +136,9 @@ fn install_aliases(cdylib: &Path, link_dir: &Path) -> Result<(), String> {
 
 /// Build the tjunittest binary, returning the path to it and the link
 /// directory that must be on the runtime library search path.
+///
+/// Forces a fresh `cargo build -p libjpeg-turbo-rs-capi --release` so the
+/// linker resolves against the current source — no stale-cdylib pass.
 fn build_tjunittest() -> Result<(PathBuf, PathBuf), String> {
     let root: PathBuf = repo_root();
     let ref_src: PathBuf = root.join("references/libjpeg-turbo/src");
@@ -128,11 +155,12 @@ fn build_tjunittest() -> Result<(PathBuf, PathBuf), String> {
         None => return Err("no C compiler (cc/clang/gcc) on PATH".to_string()),
     };
 
-    let cdylib: PathBuf = match cdylib_path() {
+    let cdylib: PathBuf = match cdylib_path_or_build() {
         Some(p) => p,
         None => {
             return Err(
-                "cdylib not built. Run: cargo build -p libjpeg-turbo-rs-capi --release".to_string(),
+                "cdylib build failed. Run: cargo build -p libjpeg-turbo-rs-capi --release"
+                    .to_string(),
             )
         }
     };
@@ -241,13 +269,16 @@ fn tjunittest_link_symbols_resolve() {
             return;
         }
     };
-    let cdylib: PathBuf = match cdylib_path() {
+    // Force a fresh build so we exercise the *current* shim source,
+    // not whatever stale `target/release/...` happened to be left from a
+    // prior run or CI cache.
+    let cdylib: PathBuf = match cdylib_path_or_build() {
         Some(p) => p,
         None => {
-            eprintln!(
-                "SKIP tjunittest_link_symbols_resolve: cdylib missing — run cargo build --release"
+            panic!(
+                "tjunittest_link_symbols_resolve: cdylib build failed — `cargo build -p \
+                 libjpeg-turbo-rs-capi --release` reported failure"
             );
-            return;
         }
     };
 
@@ -356,34 +387,28 @@ int main(void) {
     );
 }
 
-/// FFI B9-5 full-suite assertion. **Currently expected to fail on
-/// macOS**: the linker resolves every TJ3 symbol (see
-/// `tjunittest_link_symbols_resolve`) and `overflowTest()` passes
-/// cleanly, but the first `doTest()` call exercises our Rust encoder
-/// via a small 35×39 RGB input and the encoder traps / aborts, which
-/// macOS surfaces as SIGKILL to the outer process. That is a pure
-/// encoder-side regression, not an FFI / shim problem — `tj3Compress8`
-/// with the same sizes works fine through our in-process tests but
-/// crashes when invoked from a freshly-linked C binary. Tracking as a
-/// separate bug so B9-5 is not blocked indefinitely.
+/// FFI B9-5 full-suite assertion. Compiles and runs the unmodified
+/// upstream `tjunittest` binary against our cdylib and asserts every
+/// subtest reports `Done.`. The historic SIGKILL on the first
+/// `doTest()` call is closed (`docs/LAST_MILE.md` → P1 Soft-Skip
+/// 2026-04-28: forced run goes 1 passed; 0 failed in ~6 s).
 ///
-/// The assertion is kept `#[ignore]`d so CI does not mask the B9-5
-/// symbol-coverage win; remove the `#[ignore]` once the encoder crash
-/// is fixed and every subtest emits `Done.`.
+/// All error paths panic — the original soft-skip on missing
+/// submodule / cc / cdylib was the soft-skip pattern called out in
+/// `docs/LAST_MILE.md` → P1 (a green test that doesn't actually
+/// exercise the gate). `build_tjunittest` always rebuilds the cdylib
+/// before linking so a stale `target/release/...` cannot let this pass
+/// against bits that no longer reflect the working tree.
 #[cfg(unix)]
 #[test]
-#[ignore = "BLOCKER: first doTest() crashes the encoder with SIGKILL on macOS; tracked separately"]
 fn tjunittest_default_suite_passes() {
-    let (bin, _link_dir): (PathBuf, PathBuf) = match build_tjunittest() {
-        Ok(v) => v,
-        Err(e) => {
-            if e.contains("cc compile of tjunittest exited") {
-                panic!("tjunittest link failed — missing TJ3 symbol in capi shim?\n{e}");
-            }
-            eprintln!("SKIP tjunittest_default_suite_passes: {e}");
-            return;
-        }
-    };
+    let (bin, _link_dir): (PathBuf, PathBuf) = build_tjunittest().unwrap_or_else(|e| {
+        panic!(
+            "tjunittest harness setup failed: {e}\n\
+             This gate is no longer soft-skipped — set up the prerequisites \
+             (submodule, C compiler) so the suite can exercise the cdylib."
+        )
+    });
 
     let (status, stdout_raw, stderr_raw) = run_binary(&bin, &[]);
     let stdout: String = String::from_utf8_lossy(&stdout_raw).into_owned();

@@ -10,6 +10,8 @@
 
 use std::ffi::{c_int, c_short, c_void};
 
+use libjpeg_turbo_rs::tj3::TjParam;
+
 use crate::alloc::{libc_free, libc_from_slice};
 use crate::convert::pixel_format_from_tj;
 use crate::tj3::{handle_as_mut, TJERR_FATAL};
@@ -111,11 +113,71 @@ pub extern "C" fn tj3Compress12(
         out
     };
 
-    let jpeg: Vec<u8> = match inst.inner.compress_12bit(&dense, w, h, components) {
-        Ok(b) => b,
-        Err(e) => {
-            inst.set_error(format!("tj3Compress12: {e}"), TJERR_FATAL);
+    // Mirror `references/libjpeg-turbo/src/turbojpeg-mp.c::tj3Compress*`
+    // (lines 109-117): the entry-point's natural precision (12 here) is
+    // the default; only honour an explicit `TJPARAM_PRECISION` when
+    // lossless is active and the value falls inside the entry-point's
+    // range (BITS_IN_JSAMPLE - 3 .. BITS_IN_JSAMPLE → 9..=12 here).
+    // Out-of-range values silently fall back to the default rather
+    // than erroring — upstream relies on the libjpeg layer for the
+    // canonical "bad precision" diagnostic.
+    let is_lossless: bool = inst.inner.get(TjParam::Lossless) != 0;
+    let raw_precision: i32 = inst.inner.get(TjParam::Precision);
+    let effective_precision: i32 = if is_lossless && (9..=12).contains(&raw_precision) {
+        raw_precision
+    } else {
+        12
+    };
+
+    // ITU-T T.81 / Annex H: in lossless mode the point transform Pt
+    // shifts the lower Pt bits off each sample, so Pt must be strictly
+    // less than the sample precision (Pt == P would zero every
+    // sample). Mirror
+    // `references/libjpeg-turbo/src/jclossls.c::start_pass_lossls`.
+    if is_lossless {
+        let point_transform: i32 = inst.inner.get(TjParam::LosslessPt);
+        if point_transform >= effective_precision {
+            inst.set_error(
+                format!(
+                    "tj3Compress12: TJPARAM_LOSSLESSPT {point_transform} must be < TJPARAM_PRECISION {effective_precision}"
+                ),
+                TJERR_FATAL,
+            );
             return -1;
+        }
+    }
+
+    let jpeg: Vec<u8> = if is_lossless {
+        // Widen i16 → u16. `dense` is filled with non-negative samples
+        // bounded by `2^effective_precision - 1`, so the cast preserves
+        // the numeric value.
+        let widened: Vec<u16> = dense.iter().map(|&v| v as u16).collect();
+        match inst.inner.compress_16bit_with_precision(
+            &widened,
+            w,
+            h,
+            components,
+            effective_precision as u8,
+        ) {
+            Ok(b) => b,
+            Err(e) => {
+                inst.set_error(format!("tj3Compress12: {e}"), TJERR_FATAL);
+                return -1;
+            }
+        }
+    } else {
+        match inst.inner.compress_12bit_with_precision(
+            &dense,
+            w,
+            h,
+            components,
+            effective_precision as u8,
+        ) {
+            Ok(b) => b,
+            Err(e) => {
+                inst.set_error(format!("tj3Compress12: {e}"), TJERR_FATAL);
+                return -1;
+            }
         }
     };
 
@@ -294,7 +356,41 @@ pub extern "C" fn tj3Compress16(
         out
     };
 
-    let jpeg: Vec<u8> = match inst.inner.compress_16bit(&dense, w, h, components) {
+    // 16-bit is always lossless (SOF3) — upstream
+    // `references/libjpeg-turbo/src/turbojpeg-mp.c::tj3Compress16`
+    // gates `TJPARAM_PRECISION` on the lossless flag and silently
+    // ignores out-of-range values, falling back to BITS_IN_JSAMPLE.
+    // We mirror that behaviour so a caller that only ever called
+    // `tj3Set(handle, TJPARAM_LOSSLESSPSV, 1)` continues to encode
+    // a 16-bit lossless stream.
+    let is_lossless: bool = inst.inner.get(TjParam::Lossless) != 0;
+    let raw_precision: i32 = inst.inner.get(TjParam::Precision);
+    let effective_precision: i32 = if is_lossless && (13..=16).contains(&raw_precision) {
+        raw_precision
+    } else {
+        16
+    };
+    // ITU-T T.81 / Annex H: in lossless mode the point transform Pt
+    // shifts the lower Pt bits off each sample, so Pt must be strictly
+    // less than the sample precision. Mirror
+    // `references/libjpeg-turbo/src/jclossls.c::start_pass_lossls`.
+    let point_transform: i32 = inst.inner.get(TjParam::LosslessPt);
+    if point_transform >= effective_precision {
+        inst.set_error(
+            format!(
+                "tj3Compress16: TJPARAM_LOSSLESSPT {point_transform} must be < TJPARAM_PRECISION {effective_precision}"
+            ),
+            TJERR_FATAL,
+        );
+        return -1;
+    }
+    let jpeg: Vec<u8> = match inst.inner.compress_16bit_with_precision(
+        &dense,
+        w,
+        h,
+        components,
+        effective_precision as u8,
+    ) {
         Ok(b) => b,
         Err(e) => {
             inst.set_error(format!("tj3Compress16: {e}"), TJERR_FATAL);
