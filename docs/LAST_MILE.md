@@ -16,13 +16,14 @@ This project is not replacement-ready today.
 
 It is close as a Rust-native JPEG library, but the last mile for replacing the C implementation is stricter than feature parity. A real replacement must survive unmodified C binaries, unmodified wrapper libraries, and obscure option cross-products without treating loader failures or aborts as skips.
 
-Live checks on 2026-04-27 (refresh whenever the gap inventory changes — failure counts and blocker codes drift as patches land):
+Live checks on 2026-04-28 (refresh whenever the gap inventory changes — failure counts and blocker codes drift as patches land):
 
 | Check | Current Result | Replacement Meaning |
 | --- | --- | --- |
-| `cargo test --workspace --no-fail-fast` | Fails `-p libjpeg-turbo-rs --test cross_product_transform` | Native transform correctness is still red. |
-| `cargo test -p libjpeg-turbo-rs --test cross_product_transform tjtrantest_full_cross_product -- --exact` | 14,112 tested; `arithmetic DC overflow` decode failures | Arithmetic transform output can be corrupt in a real option cross-product. Clean `main` showed 9 failures; an in-progress progressive arithmetic restart patch changed the shape to 12 failures, so fix the class, not the count. |
-| `cargo test --test capi_stock_tool_link` | **Passes** for djpeg / cjpeg / jpegtran (`-copy all -rotate 90`) on the 8-bit fixtures (`testimgari`, `testimgint`, `testorig`); `monkey12` is `skip`ped on the jpegtran arm pending 12-bit `write_coefficients`. The previous `#[ignore]` is removed. | Drop-in for stock 8-bit `jpegtran -rotate 90` is closed; 12-bit transcode remains. |
+| `cargo test --workspace --release` | **Passes**: 2067 tests, 0 failures, 2 ignored. | Native + C ABI workspace is green. |
+| `cargo test -p libjpeg-turbo-rs --test cross_product_transform` | **Passes** all 12 cases including `tjtrantest_full_cross_product`, `tjtrantest_arithmetic_cross_product`, and `c_jpegtran_cross_validation_*`. | P0-1 closed — arithmetic transform cross-product no longer corrupts. |
+| `examples/stock_djpeg_cjpeg/run.sh` | **Passes** (`OK all_byte_exact`): `djpeg` / `cjpeg` / `jpegtran` byte-exact for `testimgari`, `testimgint`, `testorig`, `monkey12`; `monkey12` jpegtran is the documented 12-bit-transcode skip tracked under P0-4. | P0-2 closed — drop-in for stock C tools holds, except 12-bit jpegtran. |
+| `cargo test --test capi_stock_tool_link` | **Passes** for djpeg / cjpeg / jpegtran (`-copy all -rotate 90`) on the 8-bit fixtures; the full TJXOP cross-product (`-flip h/v`, `-rotate 90/180/270`, `-transpose`, `-transverse`, `-grayscale`, `-crop` origin and offset) is verified byte-exact via the foreign-coef-array path. | Drop-in for stock 8-bit `jpegtran` is closed; 12-bit transcode remains. |
 | `cargo test --test capi_pillow_compat -- --nocapture` | **Passes**: phase-A dlopen ok, phase-B Pillow round-trip @ q=90 PSNR 49.49 dB (≥ 30 dB floor). Blocker-code-3 is now a hard panic, not a skip. | P0-3 closed. |
 | `cargo test -p libjpeg-turbo-rs-capi --test tjunittest_link -- --include-ignored --exact tjunittest_default_suite_passes` | Passes | The ignore on this test is stale and should be removed. |
 
@@ -578,11 +579,11 @@ A task is done only when:
 
 ## Suggested Order
 
-1. Fix `cross_product_transform` so the workspace is green (P0-1).
+1. ~~Fix `cross_product_transform` so the workspace is green (P0-1).~~ **CLOSED 2026-04-28** — all 12 cases pass.
 2. Harden gates by removing stale ignores and blocker-as-skip behavior (P1 Soft-Skip).
-3. Fix stock `djpeg` aborts (P0-2).
-4. Add high-precision raw-data symbols and make Pillow load (P0-3 — and queue follow-on dlopen tests for the listed buffered-image / abort / linear-quality / alloc-helper symbols so the next Pillow blocker doesn't catch us by surprise one symbol at a time).
-5. Implement virtual coefficient-array materialization (and any libjpeg API symbol stock `jpegtran` resolves at runtime that the shim hasn't exported yet) for the stock `jpegtran` transform path (P0-4). `transupp.c` itself is compiled into the `jpegtran` binary, not into our cdylib — do not add it as a shim export.
+3. ~~Fix stock `djpeg` aborts (P0-2).~~ **CLOSED 2026-04-28** — `examples/stock_djpeg_cjpeg/run.sh` reports `OK all_byte_exact`.
+4. ~~Add high-precision raw-data symbols and make Pillow load (P0-3).~~ **CLOSED 2026-04-28** — Pillow round-trip @ q=90 PSNR 49.49 dB.
+5. Implement virtual coefficient-array materialization (and any libjpeg API symbol stock `jpegtran` resolves at runtime that the shim hasn't exported yet) for the stock `jpegtran` transform path (P0-4). **MOSTLY CLOSED 2026-04-28** — full TJXOP + crop + `-copy` cross-product byte-exact for 8-bit fixtures; 12-bit transcode (`monkey12`) remains.
 6. Fill legacy `tjLoadImage` / `tjSaveImage` and `tjEncodeYUV3` / `tjDecodeYUV`.
 7. Wire arbitrary precision lossless through TJ3 compress.
 8. Wire upstream `tjbench` / `rdjpgcom` / `wrjpgcom` against our shim (P2) — the apples-to-apples gate for step 9.
