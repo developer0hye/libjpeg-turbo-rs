@@ -186,6 +186,10 @@ WRJPGCOM_SRCS=("$REF_SRC/wrjpgcom.c")
 LINK_ARGS=("$SHIM_LIB")
 if [[ "$LIB_EXT" == "so" ]]; then
     LINK_ARGS+=("-Wl,-rpath,$CAPI_TARGET_DIR")
+    # tjbench.c calls ceil/log10/fabs; on Linux libm is a separate library.
+    # macOS libSystem already covers these so the flag is harmless when
+    # passed through to clang on darwin (no-op).
+    LINK_ARGS+=("-lm")
 fi
 
 build_one() {

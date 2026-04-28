@@ -330,11 +330,27 @@ pub extern "C" fn tj3GetICCProfile(
         inst.set_error("tj3GetICCProfile: iccSize is NULL", TJERR_FATAL);
         return -1;
     }
+    let icc: Option<&[u8]> = inst.inner.icc_profile();
     // SAFETY: caller guarantees the out-pointers are valid for write.
     unsafe {
-        *icc_size = 0;
-        if !icc_buf.is_null() {
-            *icc_buf = std::ptr::null_mut();
+        match icc {
+            Some(bytes) => {
+                *icc_size = bytes.len();
+                if !icc_buf.is_null() {
+                    let out: *mut u8 = crate::alloc::libc_from_slice(bytes);
+                    if out.is_null() && !bytes.is_empty() {
+                        inst.set_error("tj3GetICCProfile: out-of-memory", TJERR_FATAL);
+                        return -1;
+                    }
+                    *icc_buf = out;
+                }
+            }
+            None => {
+                *icc_size = 0;
+                if !icc_buf.is_null() {
+                    *icc_buf = std::ptr::null_mut();
+                }
+            }
         }
     }
     inst.clear_error();
@@ -345,13 +361,8 @@ pub extern "C" fn tj3GetICCProfile(
 ///
 /// Associates an ICC profile with the TurboJPEG instance so subsequent
 /// encode/transform calls embed it as APP2 chunks. `iccBuf == NULL`
-/// AND `iccSize == 0` clears the stored profile.
-///
-/// Stub note (2026-04-29): storage is accepted but the encode path
-/// does not yet emit the embedded profile. `tjbench` exercises this
-/// only when `tj3GetICCProfile` first reports a non-zero size, which
-/// our stub never does, so this stays as a link-only stub until the
-/// follow-up ICC plumb.
+/// AND `iccSize == 0` clears the stored profile (mirrors upstream
+/// `references/libjpeg-turbo/src/turbojpeg.h:1511`).
 #[no_mangle]
 pub extern "C" fn tj3SetICCProfile(
     handle: *mut c_void,
@@ -368,6 +379,13 @@ pub extern "C" fn tj3SetICCProfile(
             TJERR_FATAL,
         );
         return -1;
+    }
+    if icc_buf.is_null() || icc_size == 0 {
+        inst.inner.set_icc_profile(None);
+    } else {
+        // SAFETY: caller validated above to be non-NULL with iccSize > 0.
+        let bytes: &[u8] = unsafe { std::slice::from_raw_parts(icc_buf, icc_size) };
+        inst.inner.set_icc_profile(Some(bytes.to_vec()));
     }
     inst.clear_error();
     0
