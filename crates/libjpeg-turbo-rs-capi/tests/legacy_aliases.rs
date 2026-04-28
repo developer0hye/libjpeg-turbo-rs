@@ -575,3 +575,157 @@ fn tj_yuv_legacy_aliases_propagate_bottomup_flag() {
         tj_destroy(h_dec);
     }
 }
+
+#[test]
+fn tj_yuv_legacy_aliases_actually_flip_rows_under_bottomup() {
+    // Beyond just propagating the flag onto `TJPARAM_BOTTOMUP`, the
+    // YUV pipeline must actually honour bottom-up row order:
+    //
+    // - Encoding a row-asymmetric RGB buffer with `TJFLAG_BOTTOMUP`
+    //   must yield the same YUV as encoding the row-reversed
+    //   buffer without the flag (because flag flips input rows).
+    // - Decoding the same YUV with `TJFLAG_BOTTOMUP` must yield the
+    //   row-reversed pixels of decoding without the flag.
+    //
+    // This regression-tests the actual flip behaviour in
+    // `tj3EncodeYUV8` / `tj3DecodeYUV8`, not just the parameter
+    // propagation.
+    const TJFLAG_BOTTOMUP: c_int = 2;
+
+    let path: PathBuf = cdylib_path();
+    let lib: libloading::Library =
+        unsafe { libloading::Library::new(&path) }.expect("dlopen cdylib");
+    unsafe {
+        let tj_init_compress: libloading::Symbol<unsafe extern "C" fn() -> *mut c_void> =
+            lib.get(b"tjInitCompress").expect("tjInitCompress");
+        let tj_init_decompress: libloading::Symbol<unsafe extern "C" fn() -> *mut c_void> =
+            lib.get(b"tjInitDecompress").expect("tjInitDecompress");
+        let tj_destroy: libloading::Symbol<unsafe extern "C" fn(*mut c_void) -> c_int> =
+            lib.get(b"tjDestroy").expect("tjDestroy");
+        let tj_buf_size_yuv2: libloading::Symbol<
+            unsafe extern "C" fn(c_int, c_int, c_int, c_int) -> usize,
+        > = lib.get(b"tjBufSizeYUV2").expect("tjBufSizeYUV2");
+        let tj_encode_yuv3: libloading::Symbol<TjEncodeYUV3> =
+            lib.get(b"tjEncodeYUV3").expect("tjEncodeYUV3");
+        let tj_decode_yuv: libloading::Symbol<TjDecodeYUV> =
+            lib.get(b"tjDecodeYUV").expect("tjDecodeYUV");
+
+        let w: c_int = 16;
+        let h: c_int = 16;
+        let row_bytes: usize = (w * 3) as usize;
+        let yuv_align: c_int = 1;
+        let yuv_len: usize = tj_buf_size_yuv2(w, yuv_align, h, TJSAMP_444);
+
+        // Row-asymmetric source: row index 0 is dark, row index
+        // h-1 is bright. Without bottom-up, encode reads dark
+        // first; with bottom-up, encode reads bright first.
+        let mut src_top_down: Vec<u8> = Vec::with_capacity((w * h * 3) as usize);
+        for y in 0..h {
+            let v: u8 = (y * 16) as u8;
+            for _x in 0..w {
+                src_top_down.push(v);
+                src_top_down.push(v);
+                src_top_down.push(v);
+            }
+        }
+
+        // Reverse row order to produce a buffer that, when read
+        // bottom-up, equals `src_top_down` read top-down.
+        let mut src_row_reversed: Vec<u8> = vec![0u8; src_top_down.len()];
+        for y in 0..(h as usize) {
+            let src_off = (h as usize - 1 - y) * row_bytes;
+            let dst_off = y * row_bytes;
+            src_row_reversed[dst_off..dst_off + row_bytes]
+                .copy_from_slice(&src_top_down[src_off..src_off + row_bytes]);
+        }
+
+        // Encode top-down without bottom-up flag → reference YUV.
+        let mut yuv_ref: Vec<u8> = vec![0u8; yuv_len];
+        let h_enc1 = tj_init_compress();
+        let rc = tj_encode_yuv3(
+            h_enc1,
+            src_top_down.as_ptr(),
+            w,
+            0,
+            h,
+            TJPF_RGB,
+            yuv_ref.as_mut_ptr(),
+            yuv_align,
+            TJSAMP_444,
+            0,
+        );
+        assert_eq!(rc, 0);
+        tj_destroy(h_enc1);
+
+        // Encode the row-reversed buffer WITH bottom-up flag → must
+        // equal the reference YUV byte-for-byte.
+        let mut yuv_bup: Vec<u8> = vec![0u8; yuv_len];
+        let h_enc2 = tj_init_compress();
+        let rc = tj_encode_yuv3(
+            h_enc2,
+            src_row_reversed.as_ptr(),
+            w,
+            0,
+            h,
+            TJPF_RGB,
+            yuv_bup.as_mut_ptr(),
+            yuv_align,
+            TJSAMP_444,
+            TJFLAG_BOTTOMUP,
+        );
+        assert_eq!(rc, 0);
+        tj_destroy(h_enc2);
+
+        assert_eq!(
+            yuv_bup, yuv_ref,
+            "tjEncodeYUV3 must read rows bottom-up under TJFLAG_BOTTOMUP"
+        );
+
+        // Decode top-down → reference RGB.
+        let mut dst_ref: Vec<u8> = vec![0u8; src_top_down.len()];
+        let h_dec1 = tj_init_decompress();
+        let rc = tj_decode_yuv(
+            h_dec1,
+            yuv_ref.as_ptr(),
+            yuv_align,
+            TJSAMP_444,
+            dst_ref.as_mut_ptr(),
+            w,
+            0,
+            h,
+            TJPF_RGB,
+            0,
+        );
+        assert_eq!(rc, 0);
+        tj_destroy(h_dec1);
+
+        // Decode WITH bottom-up flag → output rows must be the
+        // row-reversed `dst_ref` (decode wrote bottom-up).
+        let mut dst_bup: Vec<u8> = vec![0u8; src_top_down.len()];
+        let h_dec2 = tj_init_decompress();
+        let rc = tj_decode_yuv(
+            h_dec2,
+            yuv_ref.as_ptr(),
+            yuv_align,
+            TJSAMP_444,
+            dst_bup.as_mut_ptr(),
+            w,
+            0,
+            h,
+            TJPF_RGB,
+            TJFLAG_BOTTOMUP,
+        );
+        assert_eq!(rc, 0);
+        tj_destroy(h_dec2);
+
+        for y in 0..(h as usize) {
+            let bup_row = &dst_bup[y * row_bytes..(y + 1) * row_bytes];
+            let mirrored = &dst_ref
+                [(h as usize - 1 - y) * row_bytes..(h as usize - 1 - y) * row_bytes + row_bytes];
+            assert_eq!(
+                bup_row, mirrored,
+                "tjDecodeYUV must write rows bottom-up under TJFLAG_BOTTOMUP at y={y}"
+            );
+        }
+    }
+}

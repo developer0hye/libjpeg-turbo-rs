@@ -314,10 +314,12 @@ pub extern "C" fn tjDecodeYUV(
 }
 
 // Legacy `flags` bits per upstream `turbojpeg.h`. We translate the
-// subset we know about; unknown bits are silently ignored to stay
-// permissive with older headers (matching upstream's behaviour).
+// subset that round-trips through `TJPARAM_*`; unknown bits are
+// silently ignored (matching upstream's behaviour for the
+// remaining `TJFLAG_FORCE*` SIMD-dispatch hints).
 const TJFLAG_FASTUPSAMPLE: c_int = 256;
 const TJFLAG_FASTDCT: c_int = 2048;
+const TJFLAG_ACCURATEDCT: c_int = 4096;
 const TJFLAG_PROGRESSIVE: c_int = 16384;
 // `TJFLAG_BOTTOMUP` is also defined module-locally near the
 // load/save wrappers; keep that single canonical declaration.
@@ -328,6 +330,15 @@ const TJPARAM_FASTDCT: c_int = 10;
 /// Mirror of upstream `turbojpeg.c::processFlags(handle, flags,
 /// COMPRESS)`. Sets the `TJPARAM_*` counterparts of legacy
 /// compress-side flag bits on the caller's handle.
+///
+/// **FastDCT semantics**: upstream does NOT use `TJFLAG_FASTDCT`
+/// directly on COMPRESS. It computes
+/// `fastDCT = (quality < 96) && !(flags & TJFLAG_ACCURATEDCT)`.
+/// We read the current quality back via
+/// `tj3Get(handle, TJPARAM_QUALITY)` and apply the same rule, so
+/// `tjEncodeYUV3(..., flags=0)` at quality 75 ends up with
+/// `TJPARAM_FASTDCT=1` (matching libjpeg-turbo's default), while
+/// quality ≥ 96 or `TJFLAG_ACCURATEDCT` clears it.
 fn process_legacy_compress_flags(handle: *mut c_void, flags: c_int) {
     let _ = tj3Set(
         handle,
@@ -339,15 +350,17 @@ fn process_legacy_compress_flags(handle: *mut c_void, flags: c_int) {
         TJPARAM_PROGRESSIVE,
         (flags & TJFLAG_PROGRESSIVE != 0) as c_int,
     );
-    let _ = tj3Set(
-        handle,
-        TJPARAM_FASTDCT,
-        (flags & TJFLAG_FASTDCT != 0) as c_int,
-    );
+    let quality: c_int = crate::tj3::tj3Get(handle, TJPARAM_QUALITY);
+    let accurate_dct: bool = (flags & TJFLAG_ACCURATEDCT) != 0;
+    let fast_dct: bool = quality < 96 && !accurate_dct;
+    let _ = tj3Set(handle, TJPARAM_FASTDCT, fast_dct as c_int);
 }
 
 /// Mirror of upstream `turbojpeg.c::processFlags(handle, flags,
-/// DECOMPRESS)`.
+/// DECOMPRESS)`. On the decompress side, `fastDCT` is driven
+/// directly by `TJFLAG_FASTDCT` (no quality/ACCURATEDCT interplay
+/// applies — there is no compression quality knob to balance
+/// against).
 fn process_legacy_decompress_flags(handle: *mut c_void, flags: c_int) {
     let _ = tj3Set(
         handle,
