@@ -10,6 +10,8 @@
 
 use std::ffi::{c_int, c_short, c_void};
 
+use libjpeg_turbo_rs::tj3::TjParam;
+
 use crate::alloc::{libc_free, libc_from_slice};
 use crate::convert::pixel_format_from_tj;
 use crate::tj3::{handle_as_mut, TJERR_FATAL};
@@ -111,11 +113,64 @@ pub extern "C" fn tj3Compress12(
         out
     };
 
-    let jpeg: Vec<u8> = match inst.inner.compress_12bit(&dense, w, h, components) {
-        Ok(b) => b,
-        Err(e) => {
-            inst.set_error(format!("tj3Compress12: {e}"), TJERR_FATAL);
-            return -1;
+    // Read encoder parameters from the handle. The 12-bit entry-point
+    // accepts `TJPARAM_PRECISION` in 9..=12 *when explicitly set*; when
+    // the param is left at the handle default (8) we fall back to the
+    // entry-point's natural precision (12) so legacy callers that never
+    // touch `TJPARAM_PRECISION` keep working.
+    //
+    // When lossless is active we delegate to the SOF3 lossless encoder
+    // (which natively supports an arbitrary precision in 2..=16) by
+    // widening the i16 samples to u16 — the bit pattern is preserved
+    // because all values sit in the non-negative `precision`-bit range.
+    let is_lossless: bool = inst.inner.get(TjParam::Lossless) != 0;
+    let raw_precision: i32 = inst.inner.get(TjParam::Precision);
+    let stored_precision: i32 = if raw_precision == 8 {
+        12
+    } else {
+        raw_precision
+    };
+    if !(9..=12).contains(&stored_precision) {
+        inst.set_error(
+            format!(
+                "tj3Compress12: TJPARAM_PRECISION {raw_precision} is out of range 9..=12 for the 12-bit entry point"
+            ),
+            TJERR_FATAL,
+        );
+        return -1;
+    }
+
+    let jpeg: Vec<u8> = if is_lossless {
+        // Widen i16 → u16. `dense` is filled with non-negative samples
+        // bounded by `2^stored_precision - 1`, so the cast preserves the
+        // numeric value.
+        let widened: Vec<u16> = dense.iter().map(|&v| v as u16).collect();
+        match inst.inner.compress_16bit_with_precision(
+            &widened,
+            w,
+            h,
+            components,
+            stored_precision as u8,
+        ) {
+            Ok(b) => b,
+            Err(e) => {
+                inst.set_error(format!("tj3Compress12: {e}"), TJERR_FATAL);
+                return -1;
+            }
+        }
+    } else {
+        match inst.inner.compress_12bit_with_precision(
+            &dense,
+            w,
+            h,
+            components,
+            stored_precision as u8,
+        ) {
+            Ok(b) => b,
+            Err(e) => {
+                inst.set_error(format!("tj3Compress12: {e}"), TJERR_FATAL);
+                return -1;
+            }
         }
     };
 
@@ -294,7 +349,34 @@ pub extern "C" fn tj3Compress16(
         out
     };
 
-    let jpeg: Vec<u8> = match inst.inner.compress_16bit(&dense, w, h, components) {
+    // 16-bit is always lossless (SOF3). Honour `TJPARAM_PRECISION` for the
+    // 16-bit entry-point range (13..=16) so callers can request narrower
+    // precision (e.g. 14-bit medical images). When the param is left at
+    // the handle default (8) we fall back to the entry-point's natural
+    // precision (16) so legacy callers that never touch
+    // `TJPARAM_PRECISION` keep working.
+    let raw_precision: i32 = inst.inner.get(TjParam::Precision);
+    let stored_precision: i32 = if raw_precision == 8 {
+        16
+    } else {
+        raw_precision
+    };
+    if !(13..=16).contains(&stored_precision) {
+        inst.set_error(
+            format!(
+                "tj3Compress16: TJPARAM_PRECISION {raw_precision} is out of range 13..=16 for the 16-bit entry point"
+            ),
+            TJERR_FATAL,
+        );
+        return -1;
+    }
+    let jpeg: Vec<u8> = match inst.inner.compress_16bit_with_precision(
+        &dense,
+        w,
+        h,
+        components,
+        stored_precision as u8,
+    ) {
         Ok(b) => b,
         Err(e) => {
             inst.set_error(format!("tj3Compress16: {e}"), TJERR_FATAL);

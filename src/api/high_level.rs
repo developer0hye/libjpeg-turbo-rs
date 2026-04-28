@@ -204,6 +204,32 @@ pub fn compress_lossless_extended(
     )
 }
 
+/// Like `compress_lossless_extended` but with an explicit sample precision
+/// (2..=8). The precision field controls the SOF3 marker and the lossless
+/// predictor arithmetic; source samples remain `u8`.
+#[allow(clippy::too_many_arguments)]
+pub fn compress_lossless_extended_precision(
+    pixels: &[u8],
+    width: usize,
+    height: usize,
+    pixel_format: PixelFormat,
+    predictor: u8,
+    point_transform: u8,
+    restart_interval: u16,
+    precision: u8,
+) -> Result<Vec<u8>> {
+    encoder::compress_lossless_extended_precision(
+        pixels,
+        width,
+        height,
+        pixel_format,
+        predictor,
+        point_transform,
+        restart_interval,
+        precision,
+    )
+}
+
 /// Compress with arithmetic progressive encoding (SOF10).
 ///
 /// Combines progressive multi-scan encoding with arithmetic entropy coding.

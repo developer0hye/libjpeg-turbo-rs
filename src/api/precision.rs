@@ -190,6 +190,11 @@ fn fdct_12bit(input: &[i16; 64], output: &mut [i32; 64]) {
 // ============================================================
 
 /// Compress 12-bit sample data to JPEG.
+///
+/// `precision_override` specifies the SOF sample precision (9..=12).
+/// When `None` the default of 12 is used. Only honoured in lossless mode
+/// (the caller is responsible for setting the appropriate encode path); for
+/// lossy 12-bit the SOF0/SOF1 precision stays at 12.
 pub fn compress_12bit(
     pixels: &[i16],
     width: usize,
@@ -197,6 +202,28 @@ pub fn compress_12bit(
     num_components: usize,
     quality: u8,
     subsampling: Subsampling,
+) -> Result<Vec<u8>> {
+    compress_12bit_with_precision(
+        pixels,
+        width,
+        height,
+        num_components,
+        quality,
+        subsampling,
+        None,
+    )
+}
+
+/// Like `compress_12bit` but with an explicit lossless precision override
+/// (9..=12). Ignored for lossy paths (SOF1 always uses precision=12).
+pub fn compress_12bit_with_precision(
+    pixels: &[i16],
+    width: usize,
+    height: usize,
+    num_components: usize,
+    quality: u8,
+    subsampling: Subsampling,
+    precision_override: Option<u8>,
 ) -> Result<Vec<u8>> {
     if width == 0 || height == 0 {
         return Err(JpegError::CorruptData(
@@ -216,10 +243,11 @@ pub fn compress_12bit(
             got: pixels.len(),
         });
     }
+    let precision: u8 = precision_override.unwrap_or(12);
     if num_components == 1 {
-        compress_12bit_grayscale(pixels, width, height, quality)
+        compress_12bit_grayscale(pixels, width, height, quality, precision)
     } else {
-        compress_12bit_color(pixels, width, height, quality, subsampling)
+        compress_12bit_color(pixels, width, height, quality, subsampling, precision)
     }
 }
 
@@ -228,8 +256,8 @@ fn compress_12bit_grayscale(
     width: usize,
     height: usize,
     quality: u8,
+    precision: u8,
 ) -> Result<Vec<u8>> {
-    let precision: u8 = 12;
     let level_shift: i32 = 2048;
     // 12-bit needs force_baseline=false to allow quant values > 255
     let luma_quant =
@@ -302,8 +330,8 @@ fn compress_12bit_color(
     height: usize,
     quality: u8,
     subsampling: Subsampling,
+    precision: u8,
 ) -> Result<Vec<u8>> {
-    let precision: u8 = 12;
     let level_shift: i32 = 2048;
     if subsampling != Subsampling::S444 {
         return Err(JpegError::Unsupported(
@@ -898,6 +926,28 @@ pub fn compress_16bit(
     predictor: u8,
     point_transform: u8,
 ) -> Result<Vec<u8>> {
+    compress_16bit_with_precision(
+        pixels,
+        width,
+        height,
+        num_components,
+        predictor,
+        point_transform,
+        None,
+    )
+}
+
+/// Like `compress_16bit` but with an explicit lossless precision override
+/// (13..=16). When `None` the default of 16 is used.
+pub fn compress_16bit_with_precision(
+    pixels: &[u16],
+    width: usize,
+    height: usize,
+    num_components: usize,
+    predictor: u8,
+    point_transform: u8,
+    precision_override: Option<u8>,
+) -> Result<Vec<u8>> {
     if !(1..=7).contains(&predictor) {
         return Err(JpegError::Unsupported(format!(
             "lossless predictor must be 1-7, got {}",
@@ -928,8 +978,9 @@ pub fn compress_16bit(
             got: pixels.len(),
         });
     }
+    let precision: u8 = precision_override.unwrap_or(16);
     if num_components == 1 {
-        compress_16bit_gray(pixels, width, height, predictor, point_transform)
+        compress_16bit_gray(pixels, width, height, predictor, point_transform, precision)
     } else {
         compress_16bit_multi(
             pixels,
@@ -938,6 +989,7 @@ pub fn compress_16bit(
             num_components,
             predictor,
             point_transform,
+            precision,
         )
     }
 }
@@ -948,8 +1000,8 @@ fn compress_16bit_gray(
     height: usize,
     predictor: u8,
     pt: u8,
+    precision: u8,
 ) -> Result<Vec<u8>> {
-    let precision: u8 = 16;
     let dc_table = build_huff_table(&DC_LUMA_EXT_BITS, &DC_LUMA_EXT_VALUES);
     let mut bw = BitWriter::new(width * height * 2);
     for y in 0..height {
@@ -991,8 +1043,8 @@ fn compress_16bit_multi(
     nc: usize,
     predictor: u8,
     pt: u8,
+    precision: u8,
 ) -> Result<Vec<u8>> {
-    let precision: u8 = 16;
     let np = width * height;
     let planes: Vec<Vec<u16>> = (0..nc)
         .map(|c| (0..np).map(|i| pixels[i * nc + c]).collect())

@@ -11,12 +11,32 @@ use std::path::PathBuf;
 type TjHandle = *mut c_void;
 
 const TJPARAM_QUALITY: c_int = 3;
+const TJPARAM_PRECISION: c_int = 7;
+const TJPARAM_LOSSLESS: c_int = 15;
 const TJPARAM_LOSSLESSPSV: c_int = 16;
 const TJPARAM_LOSSLESSPT: c_int = 17;
 const TJINIT_COMPRESS: c_int = 1;
 const TJINIT_DECOMPRESS: c_int = 2;
 const TJPF_RGB: c_int = 0;
 const TJPF_GRAY: c_int = 6;
+
+/// Locate the `0xFF 0xC3` (SOF3 — lossless Huffman) marker in `jpeg` and
+/// return the precision byte stored at offset 4 of the marker payload.
+///
+/// SOF marker layout (after the `0xFF Cn` start bytes):
+/// `[Lf_hi, Lf_lo, P, Y_hi, Y_lo, X_hi, X_lo, Nf, ...]`
+/// — so `P` (the sample precision) sits 2 bytes after `0xFFC3`.
+fn sof_precision_byte(jpeg: &[u8], marker_lo: u8) -> Option<u8> {
+    let mut i: usize = 0;
+    while i + 4 < jpeg.len() {
+        if jpeg[i] == 0xFF && jpeg[i + 1] == marker_lo {
+            // jpeg[i+2..i+4] is the segment length (Lf), then jpeg[i+4] is P.
+            return Some(jpeg[i + 4]);
+        }
+        i += 1;
+    }
+    None
+}
 
 fn dlext() -> &'static str {
     if cfg!(target_os = "windows") {
@@ -266,5 +286,232 @@ fn precision_fns_reject_null_and_unsupported_tjpf() {
         );
 
         tj3_destroy(h);
+    }
+}
+
+/// `tj3Compress8` with `TJPARAM_LOSSLESS=1` and `TJPARAM_PRECISION=4` must
+/// emit a SOF3 marker whose sample-precision byte equals 4. This validates
+/// that the C-API wires the handle's `TJPARAM_PRECISION` through to the
+/// precision-aware lossless encoder path.
+#[test]
+fn tj3_compress8_lossless_precision4_writes_sof_byte_4() {
+    let path: PathBuf = cdylib_path();
+    let lib: libloading::Library =
+        unsafe { libloading::Library::new(&path) }.expect("dlopen cdylib");
+    unsafe {
+        let tj3_init: libloading::Symbol<unsafe extern "C" fn(c_int) -> TjHandle> =
+            lib.get(b"tj3Init").unwrap();
+        let tj3_destroy: libloading::Symbol<unsafe extern "C" fn(TjHandle)> =
+            lib.get(b"tj3Destroy").unwrap();
+        let tj3_set: libloading::Symbol<unsafe extern "C" fn(TjHandle, c_int, c_int) -> c_int> =
+            lib.get(b"tj3Set").unwrap();
+        let tj3_free: libloading::Symbol<unsafe extern "C" fn(*mut c_void)> =
+            lib.get(b"tj3Free").unwrap();
+        let tj3_compress8: libloading::Symbol<
+            unsafe extern "C" fn(
+                TjHandle,
+                *const u8,
+                c_int,
+                c_int,
+                c_int,
+                c_int,
+                *mut *mut u8,
+                *mut usize,
+            ) -> c_int,
+        > = lib.get(b"tj3Compress8").unwrap();
+
+        let h_enc = tj3_init(TJINIT_COMPRESS);
+        assert!(!h_enc.is_null());
+        assert_eq!(tj3_set(h_enc, TJPARAM_LOSSLESS, 1), 0);
+        assert_eq!(tj3_set(h_enc, TJPARAM_PRECISION, 4), 0);
+        assert_eq!(tj3_set(h_enc, TJPARAM_LOSSLESSPSV, 1), 0);
+
+        // 16x16 RGB image; samples must fit in 4 bits (0..=15).
+        let w: c_int = 16;
+        let h_px: c_int = 16;
+        let mut src: Vec<u8> = Vec::with_capacity((w * h_px * 3) as usize);
+        for y in 0..h_px {
+            for x in 0..w {
+                src.push(((x as u32 + y as u32) & 0x0F) as u8);
+                src.push(((x as u32 * 3 + y as u32) & 0x0F) as u8);
+                src.push(((x as u32 + y as u32 * 5) & 0x0F) as u8);
+            }
+        }
+
+        let mut buf: *mut u8 = std::ptr::null_mut();
+        let mut size: usize = 0;
+        let rc = tj3_compress8(
+            h_enc,
+            src.as_ptr(),
+            w,
+            0,
+            h_px,
+            TJPF_RGB,
+            &mut buf,
+            &mut size,
+        );
+        assert_eq!(rc, 0, "tj3Compress8 with precision=4 must succeed");
+        assert!(!buf.is_null() && size > 4);
+
+        let jpeg: &[u8] = std::slice::from_raw_parts(buf, size);
+        let p: u8 = sof_precision_byte(jpeg, 0xC3)
+            .expect("SOF3 (FFC3) marker must be present in lossless output");
+        assert_eq!(
+            p, 4,
+            "SOF3 sample-precision byte must reflect TJPARAM_PRECISION=4"
+        );
+
+        tj3_free(buf as *mut c_void);
+        tj3_destroy(h_enc);
+    }
+}
+
+/// `tj3Compress12` with `TJPARAM_LOSSLESS=1` and `TJPARAM_PRECISION=10`
+/// must emit a SOF3 marker whose sample-precision byte equals 10.
+#[test]
+fn tj3_compress12_lossless_precision10_writes_sof_byte_10() {
+    let path: PathBuf = cdylib_path();
+    let lib: libloading::Library =
+        unsafe { libloading::Library::new(&path) }.expect("dlopen cdylib");
+    unsafe {
+        let tj3_init: libloading::Symbol<unsafe extern "C" fn(c_int) -> TjHandle> =
+            lib.get(b"tj3Init").unwrap();
+        let tj3_destroy: libloading::Symbol<unsafe extern "C" fn(TjHandle)> =
+            lib.get(b"tj3Destroy").unwrap();
+        let tj3_set: libloading::Symbol<unsafe extern "C" fn(TjHandle, c_int, c_int) -> c_int> =
+            lib.get(b"tj3Set").unwrap();
+        let tj3_free: libloading::Symbol<unsafe extern "C" fn(*mut c_void)> =
+            lib.get(b"tj3Free").unwrap();
+        let tj3_compress12: libloading::Symbol<
+            unsafe extern "C" fn(
+                TjHandle,
+                *const c_short,
+                c_int,
+                c_int,
+                c_int,
+                c_int,
+                *mut *mut u8,
+                *mut usize,
+            ) -> c_int,
+        > = lib.get(b"tj3Compress12").unwrap();
+
+        let h_enc = tj3_init(TJINIT_COMPRESS);
+        assert!(!h_enc.is_null());
+        assert_eq!(tj3_set(h_enc, TJPARAM_LOSSLESS, 1), 0);
+        assert_eq!(tj3_set(h_enc, TJPARAM_PRECISION, 10), 0);
+        assert_eq!(tj3_set(h_enc, TJPARAM_LOSSLESSPSV, 1), 0);
+
+        // 32x32 RGB image; samples must fit in 10 bits (0..=1023).
+        let w: c_int = 32;
+        let h_px: c_int = 32;
+        let mut src: Vec<i16> = Vec::with_capacity((w * h_px * 3) as usize);
+        for y in 0..h_px {
+            for x in 0..w {
+                src.push(((x as i32 * 17 + y as i32 * 31) & 0x03FF) as i16);
+                src.push(((x as i32 * 23 + y as i32 * 11) & 0x03FF) as i16);
+                src.push(((x as i32 * 41 + y as i32 * 7) & 0x03FF) as i16);
+            }
+        }
+
+        let mut buf: *mut u8 = std::ptr::null_mut();
+        let mut size: usize = 0;
+        let rc = tj3_compress12(
+            h_enc,
+            src.as_ptr(),
+            w,
+            0,
+            h_px,
+            TJPF_RGB,
+            &mut buf,
+            &mut size,
+        );
+        assert_eq!(rc, 0, "tj3Compress12 with precision=10 must succeed");
+        assert!(!buf.is_null() && size > 4);
+
+        let jpeg: &[u8] = std::slice::from_raw_parts(buf, size);
+        let p: u8 = sof_precision_byte(jpeg, 0xC3)
+            .expect("SOF3 (FFC3) marker must be present in lossless output");
+        assert_eq!(
+            p, 10,
+            "SOF3 sample-precision byte must reflect TJPARAM_PRECISION=10"
+        );
+
+        tj3_free(buf as *mut c_void);
+        tj3_destroy(h_enc);
+    }
+}
+
+/// `tj3Compress16` with `TJPARAM_LOSSLESS=1` and `TJPARAM_PRECISION=14`
+/// must emit a SOF3 marker whose sample-precision byte equals 14.
+#[test]
+fn tj3_compress16_lossless_precision14_writes_sof_byte_14() {
+    let path: PathBuf = cdylib_path();
+    let lib: libloading::Library =
+        unsafe { libloading::Library::new(&path) }.expect("dlopen cdylib");
+    unsafe {
+        let tj3_init: libloading::Symbol<unsafe extern "C" fn(c_int) -> TjHandle> =
+            lib.get(b"tj3Init").unwrap();
+        let tj3_destroy: libloading::Symbol<unsafe extern "C" fn(TjHandle)> =
+            lib.get(b"tj3Destroy").unwrap();
+        let tj3_set: libloading::Symbol<unsafe extern "C" fn(TjHandle, c_int, c_int) -> c_int> =
+            lib.get(b"tj3Set").unwrap();
+        let tj3_free: libloading::Symbol<unsafe extern "C" fn(*mut c_void)> =
+            lib.get(b"tj3Free").unwrap();
+        let tj3_compress16: libloading::Symbol<
+            unsafe extern "C" fn(
+                TjHandle,
+                *const u16,
+                c_int,
+                c_int,
+                c_int,
+                c_int,
+                *mut *mut u8,
+                *mut usize,
+            ) -> c_int,
+        > = lib.get(b"tj3Compress16").unwrap();
+
+        let h_enc = tj3_init(TJINIT_COMPRESS);
+        assert!(!h_enc.is_null());
+        assert_eq!(tj3_set(h_enc, TJPARAM_LOSSLESS, 1), 0);
+        assert_eq!(tj3_set(h_enc, TJPARAM_PRECISION, 14), 0);
+        assert_eq!(tj3_set(h_enc, TJPARAM_LOSSLESSPSV, 1), 0);
+
+        // 32x32 RGB image; samples must fit in 14 bits (0..=16383).
+        let w: c_int = 32;
+        let h_px: c_int = 32;
+        let mut src: Vec<u16> = Vec::with_capacity((w * h_px * 3) as usize);
+        for y in 0..h_px {
+            for x in 0..w {
+                src.push(((x as u32 * 113 + y as u32 * 257) & 0x3FFF) as u16);
+                src.push(((x as u32 * 199 + y as u32 * 89) & 0x3FFF) as u16);
+                src.push(((x as u32 * 311 + y as u32 * 53) & 0x3FFF) as u16);
+            }
+        }
+
+        let mut buf: *mut u8 = std::ptr::null_mut();
+        let mut size: usize = 0;
+        let rc = tj3_compress16(
+            h_enc,
+            src.as_ptr(),
+            w,
+            0,
+            h_px,
+            TJPF_RGB,
+            &mut buf,
+            &mut size,
+        );
+        assert_eq!(rc, 0, "tj3Compress16 with precision=14 must succeed");
+        assert!(!buf.is_null() && size > 4);
+
+        let jpeg: &[u8] = std::slice::from_raw_parts(buf, size);
+        let p: u8 = sof_precision_byte(jpeg, 0xC3)
+            .expect("SOF3 (FFC3) marker must be present in lossless output");
+        assert_eq!(
+            p, 14,
+            "SOF3 sample-precision byte must reflect TJPARAM_PRECISION=14"
+        );
+
+        tj3_free(buf as *mut c_void);
+        tj3_destroy(h_enc);
     }
 }
