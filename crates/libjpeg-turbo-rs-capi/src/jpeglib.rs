@@ -2279,7 +2279,24 @@ pub extern "C" fn jpeg_save_markers(cinfo: *mut c_void, marker_code: c_int, leng
     if length_limit == 0 {
         priv_state.marker_save.limits.remove(&code);
     } else {
-        priv_state.marker_save.limits.insert(code, length_limit);
+        // Stock libjpeg-turbo's `jpeg_save_markers` (jdmarker.c) raises
+        // a non-zero `length_limit` to the minimum needed to identify
+        // JFIF APP0 (14 bytes) or Adobe APP14 (12 bytes) — the markers
+        // libjpeg's own machinery relies on for colorspace
+        // classification. Apply the same floor so a caller that
+        // requested e.g. `jpeg_save_markers(cinfo, JPEG_APP0, 1)` sees
+        // the canonical 14-byte minimum (matches the C contract; codex
+        // review of the marker-list landing flagged the divergence).
+        const APP0_DATA_LEN: c_uint = 14;
+        const APP14_DATA_LEN: c_uint = 12;
+        let effective: c_uint = if code == 0xE0 {
+            length_limit.max(APP0_DATA_LEN)
+        } else if code == 0xEE {
+            length_limit.max(APP14_DATA_LEN)
+        } else {
+            length_limit
+        };
+        priv_state.marker_save.limits.insert(code, effective);
     }
 }
 
