@@ -5600,29 +5600,28 @@ fn populate_dst_block_dims_for_transform(c: &mut JpegCompressPublic) {
     if denom_w == 0 || denom_h == 0 {
         return;
     }
-    // Width/height in MCU rows/columns. Each MCU spans `max_h * 8`
-    // pixels horizontally, `max_v * 8` vertically. Per-component
-    // block extent within an MCU is `h_samp` × `v_samp`, so the
-    // MCU-aligned per-component block count is
-    // `iMCU_count * samp_factor`. This matches the formula
-    // `transupp.c::jtransform_request_workspace` uses to size its
-    // workspace barrays — codex round-9 verification of `-transpose`
-    // showed the previous logical formula
-    // `ceil(w * h_samp / denom_w)` undercounts the trailing partial
-    // MCU column for sources whose dimensions aren't a multiple of
-    // (max_h * 8), which led the encoder to drop the last block per
-    // row.
-    let imcu_w: u64 = (w as u64).div_ceil(denom_w);
-    let imcu_h: u64 = (h as u64).div_ceil(denom_h);
+    // Logical block count (matches stock libjpeg's
+    // `jcmaster.c::initial_setup`): the public `comp_info` fields
+    // report the number of *real* blocks of coefficient data, NOT
+    // the MCU-padded virtual-array extent. C callers reading
+    // `dstinfo->comp_info` after `jpeg_write_coefficients` rely on
+    // this to know how many real coefficients are present (vs
+    // dummy edge blocks the encoder pads on emit).
+    //
+    // The encoder iterates MCU-aligned bounds internally — the
+    // foreign-array materialise path in
+    // `materialize_foreign_coef_arrays` derives that padded extent
+    // from `iMCU_count * samp_factor` separately so we don't have
+    // to lie in `comp_info`.
     for comp in comps.iter_mut() {
         let h_samp: u64 = comp.h_samp_factor.max(1) as u64;
         let v_samp: u64 = comp.v_samp_factor.max(1) as u64;
-        comp.width_in_blocks = (imcu_w * h_samp) as JDimension;
-        comp.height_in_blocks = (imcu_h * v_samp) as JDimension;
+        comp.width_in_blocks = (w as u64 * h_samp).div_ceil(denom_w) as JDimension;
+        comp.height_in_blocks = (h as u64 * v_samp).div_ceil(denom_h) as JDimension;
         comp.dct_h_scaled_size = 8;
         comp.dct_v_scaled_size = 8;
     }
-    c.total_iMCU_rows = imcu_h as JDimension;
+    c.total_iMCU_rows = (h as u64).div_ceil(denom_h) as JDimension;
 }
 
 /// Read coefficient blocks out of a foreign `jvirt_barray_ptr*` array
@@ -5694,22 +5693,38 @@ fn materialize_foreign_coef_arrays(
     let array_slot: *const *mut memmgr::JVirtBarrayControl =
         handle as *const *mut memmgr::JVirtBarrayControl;
 
-    // Recover blocks_x / blocks_y per component. Prefer the dst
-    // `comp_info[ci].width_in_blocks / height_in_blocks` because
-    // `jtransform_adjust_parameters` updates those to the
-    // post-transform output geometry (e.g. crop dims, swapped axes
-    // for rotate 90/270, halved width for `-grayscale`-derived
-    // outputs). For ops where `jtransform_request_workspace`
-    // allocated a fresh barray, the workspace was sized to that
-    // exact geometry, so reading from comp_info or barray gives
-    // the same value. For no-workspace ops where the dst pointer
-    // aliases the source's full barray (`-flip horizontal`,
-    // `-crop +0+0`, etc.), the barray's `blocksperrow` /
-    // `rows_in_array` overshoot the cropped geometry — caught by
-    // round-9 verification of `-crop 16x16+0+0`. Falling back to
-    // the barray's own metadata when comp_info is unset preserves
-    // round-trip behaviour for callers that hand us a foreign
-    // array without populating dst comp_info first.
+    // Recover blocks_x / blocks_y per component. The encoder
+    // iterates MCU-aligned bounds, NOT the logical
+    // `comp_info[ci].width_in_blocks` (which is intentionally
+    // logical — see `populate_dst_block_dims_for_transform`).
+    // Compute MCU-aligned per-component block counts inline:
+    //
+    //   blocks_x = ceil(image_width  / (max_h * 8)) * h_samp
+    //   blocks_y = ceil(image_height / (max_v * 8)) * v_samp
+    //
+    // This matches `transupp.c::jtransform_request_workspace`,
+    // so for ops that allocated a fresh workspace barray the
+    // computed value equals `barray.blocksperrow`. For no-workspace
+    // ops where dst aliases the source's full barray
+    // (`-flip horizontal`, `-crop +0+0`, etc.), the source
+    // barray's extent overshoots the cropped/transformed dst
+    // geometry — capping at the MCU-aligned dst count emits only
+    // the cropped subset (caught by round-9 verification of
+    // `-crop 16x16+0+0`).
+    let max_h: u32 = (c.max_h_samp_factor.max(1)) as u32;
+    let max_v: u32 = (c.max_v_samp_factor.max(1)) as u32;
+    let img_w: u32 = if c.jpeg_width != 0 {
+        c.jpeg_width
+    } else {
+        c.image_width
+    };
+    let img_h: u32 = if c.jpeg_height != 0 {
+        c.jpeg_height
+    } else {
+        c.image_height
+    };
+    let imcu_w: u32 = img_w.div_ceil(max_h * 8);
+    let imcu_h: u32 = img_h.div_ceil(max_v * 8);
     let mut components: Vec<libjpeg_turbo_rs::ComponentCoefficients> = Vec::with_capacity(n);
     for (ci, comp_info) in comp_info_slice.iter().enumerate() {
         // SAFETY: `array_slot[ci]` is a `JVirtBarrayControl*` placed
@@ -5725,13 +5740,17 @@ fn materialize_foreign_coef_arrays(
         }
         let (full_x, full_y): (u32, u32) =
             unsafe { ((*barray).blocksperrow, (*barray).rows_in_array) };
-        let blocks_x: u32 = if comp_info.width_in_blocks != 0 {
-            comp_info.width_in_blocks.min(full_x)
+        let h_samp: u32 = (comp_info.h_samp_factor.max(1)) as u32;
+        let v_samp: u32 = (comp_info.v_samp_factor.max(1)) as u32;
+        let mcu_x: u32 = imcu_w * h_samp;
+        let mcu_y: u32 = imcu_h * v_samp;
+        let blocks_x: u32 = if mcu_x != 0 {
+            mcu_x.min(full_x)
         } else {
             full_x
         };
-        let blocks_y: u32 = if comp_info.height_in_blocks != 0 {
-            comp_info.height_in_blocks.min(full_y)
+        let blocks_y: u32 = if mcu_y != 0 {
+            mcu_y.min(full_y)
         } else {
             full_y
         };
