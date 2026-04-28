@@ -1893,6 +1893,32 @@ pub fn compress_lossless_extended(
     point_transform: u8,
     restart_interval: u16,
 ) -> Result<Vec<u8>> {
+    compress_lossless_extended_precision(
+        pixels,
+        width,
+        height,
+        pixel_format,
+        predictor,
+        point_transform,
+        restart_interval,
+        8,
+    )
+}
+
+/// Like `compress_lossless_extended` but with an explicit sample precision
+/// (2..=8). The precision field controls the SOF3 marker and the lossless
+/// predictor arithmetic; the source samples are still `u8` (8-bit values).
+#[allow(clippy::too_many_arguments)]
+pub fn compress_lossless_extended_precision(
+    pixels: &[u8],
+    width: usize,
+    height: usize,
+    pixel_format: PixelFormat,
+    predictor: u8,
+    point_transform: u8,
+    restart_interval: u16,
+    precision: u8,
+) -> Result<Vec<u8>> {
     if !(1..=7).contains(&predictor) {
         return Err(JpegError::Unsupported(format!(
             "lossless predictor must be 1-7, got {}",
@@ -1900,9 +1926,18 @@ pub fn compress_lossless_extended(
         )));
     }
 
-    if point_transform >= 8 {
+    if !(2..=8).contains(&precision) {
         return Err(JpegError::Unsupported(format!(
-            "point transform must be 0-7 for 8-bit precision, got {}",
+            "lossless precision must be 2-8 for 8-bit samples, got {}",
+            precision
+        )));
+    }
+
+    if point_transform >= precision {
+        return Err(JpegError::Unsupported(format!(
+            "point transform must be 0-{} for {}-bit precision, got {}",
+            precision - 1,
+            precision,
             point_transform
         )));
     }
@@ -1936,6 +1971,7 @@ pub fn compress_lossless_extended(
             predictor,
             point_transform,
             restart_interval,
+            precision,
         ),
         PixelFormat::Rgb => compress_lossless_rgb(
             pixels,
@@ -1944,6 +1980,7 @@ pub fn compress_lossless_extended(
             predictor,
             point_transform,
             restart_interval,
+            precision,
         ),
         _ => Err(JpegError::Unsupported(format!(
             "lossless encoding does not support {:?}, use Grayscale or Rgb",
@@ -2005,8 +2042,8 @@ fn compress_lossless_grayscale(
     predictor: u8,
     point_transform: u8,
     restart_interval: u16,
+    precision: u8,
 ) -> Result<Vec<u8>> {
-    let precision: u8 = 8;
     let num_pixels: usize = width * height;
     let ri: u32 = restart_interval as u32;
     let initial_pred: i32 = 1 << (precision as i32 - point_transform as i32 - 1);
@@ -2122,8 +2159,8 @@ fn compress_lossless_rgb(
     predictor: u8,
     point_transform: u8,
     restart_interval: u16,
+    precision: u8,
 ) -> Result<Vec<u8>> {
-    let precision: u8 = 8;
     let num_pixels: usize = width * height;
     let ri: u32 = restart_interval as u32;
     let initial_pred: i32 = 1 << (precision as i32 - point_transform as i32 - 1);
