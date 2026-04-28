@@ -313,13 +313,21 @@ pub extern "C" fn tj3EncodeYUVPlanes8(
     let w: usize = width as usize;
     let h: usize = height as usize;
     let bpp: usize = pf.bytes_per_pixel();
-    let dense: Vec<u8> = match densify_pitched_bytes(src_buf, w, h, bpp, pitch) {
+    let mut dense: Vec<u8> = match densify_pitched_bytes(src_buf, w, h, bpp, pitch) {
         Some(v) => v,
         None => {
             inst.set_error("tj3EncodeYUVPlanes8: bad pitch", TJERR_FATAL);
             return -1;
         }
     };
+
+    // Bottom-up: caller's buffer is rows bottom-to-top. Flip in
+    // place so the encoder reads canonical top-to-bottom order.
+    // Mirrors upstream's `bottomUp` handling in `tj3EncodeYUVPlanes8`.
+    if inst.bottom_up_flag() {
+        flip_rows_in_place(&mut dense, w * bpp);
+    }
+
     let planes: Vec<Vec<u8>> = match encode_yuv_planes(&dense, w, h, pf, ss) {
         Ok(p) => p,
         Err(e) => {
@@ -830,10 +838,16 @@ pub extern "C" fn tj3DecodeYUVPlanes8(
         inst.set_error("tj3DecodeYUVPlanes8: pitch too small", TJERR_FATAL);
         return -1;
     }
+    let bottom_up: bool = inst.bottom_up_flag();
     unsafe {
         for row in 0..h {
             let src_row = pixels[row * w * bpp..row * w * bpp + w * bpp].as_ptr();
-            let dst_row = dst_buf.add(row * dst_stride);
+            // Bottom-up: row `i` of the decoded image goes to
+            // `height - i - 1` in the caller's buffer, mirroring
+            // upstream's `bottomUp` write loop in
+            // `tj3DecodeYUVPlanes8`.
+            let dst_row_index: usize = if bottom_up { h - 1 - row } else { row };
+            let dst_row = dst_buf.add(dst_row_index * dst_stride);
             std::ptr::copy_nonoverlapping(src_row, dst_row, w * bpp);
         }
     }
