@@ -18,17 +18,6 @@ use crate::alloc::{libc_free, libc_from_slice};
 use crate::convert::{pixel_format_from_tj, pixel_format_to_tj, TJPF_BGR, TJPF_RGB};
 use crate::tj3::{handle_as_mut, TJERR_FATAL};
 
-/// Read `TJPARAM_BOTTOMUP` from a tjhandle. Returns `false` for NULL
-/// or unset. Mirrors `tj3Get(handle, TJPARAM_BOTTOMUP) != 0` without
-/// going through the public `tj3Get` (which we'd have to call via
-/// FFI from inside the same shim).
-fn handle_bottom_up(handle: *mut c_void) -> bool {
-    match unsafe { handle_as_mut(handle) } {
-        Some(inst) => inst.bottom_up_flag(),
-        None => false,
-    }
-}
-
 /// In-place R↔B swap on RGB or BGR row data. `bytes` must be a
 /// 3-byte-per-pixel buffer; trailing bytes (e.g. partial last
 /// pixel) are ignored. Used to flip between TJPF_RGB and TJPF_BGR.
@@ -227,8 +216,10 @@ pub extern "C" fn tj3LoadImage8(
 
     // Bottom-up row order: stock TurboJPEG returns rows top-to-bottom
     // by default. When the caller set TJPARAM_BOTTOMUP / TJFLAG_BOTTOMUP,
-    // flip the row order in-place before we copy out.
-    if handle_bottom_up(handle) {
+    // flip the row order in-place before we copy out. Use the live
+    // `inst` borrow rather than re-dereferencing `handle` to avoid
+    // aliasing two `&mut TjInstance` to the same allocation.
+    if inst.bottom_up_flag() {
         let bpp_for_flip: usize = img.pixel_format.bytes_per_pixel();
         flip_rows_in_place(&mut img.pixels, img.width * bpp_for_flip);
     }
@@ -406,8 +397,11 @@ pub extern "C" fn tj3SaveImage8(
     // Bottom-up row order: when the caller set TJPARAM_BOTTOMUP /
     // TJFLAG_BOTTOMUP, the supplied buffer is in bottom-to-top order;
     // flip it before handing to the Rust savers (which expect
-    // top-to-bottom).
-    if handle_bottom_up(handle) {
+    // top-to-bottom). Use the live `inst` borrow rather than
+    // re-dereferencing `handle`, which would alias two
+    // `&mut TjInstance` to the same allocation (UB under the
+    // aliasing rules).
+    if inst.bottom_up_flag() {
         flip_rows_in_place(&mut dense_bytes, row_dense);
     }
 

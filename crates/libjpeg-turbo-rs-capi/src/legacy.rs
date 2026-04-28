@@ -413,15 +413,36 @@ pub extern "C" fn tjPlaneHeight(component_id: c_int, height: c_int, subsamp: c_i
 }
 
 // ---------------------------------------------------------------------------
-// Load / Save (stubs until image IO is routed through the shim)
+// Load / Save — handle-less legacy ABI delegating to tj3LoadImage8 / tj3SaveImage8
 // ---------------------------------------------------------------------------
+
+/// Snapshot the temporary handle's last-error message into the
+/// process-global no-handle error slot, so that
+/// `tj3GetErrorStr(NULL)` / `tjGetErrorStr2(NULL)` return a
+/// meaningful diagnostic after the temp handle is destroyed. Mirrors
+/// upstream `turbojpeg.c::tjLoadImage` / `tjSaveImage`, which surface
+/// the inner error through the global slot for the legacy
+/// handle-less ABI.
+fn copy_handle_error_to_no_handle_slot(handle: *mut c_void) {
+    if handle.is_null() {
+        return;
+    }
+    // SAFETY: handle is non-NULL and was returned by tj3Init above.
+    let inst: &crate::tj3::TjInstance = unsafe { &*(handle as *const crate::tj3::TjInstance) };
+    if let Ok(s) = inst.last_error.to_str() {
+        crate::bufsize::set_no_handle_error(s);
+    }
+}
 
 /// `tjLoadImage(filename, width, align, height, pixelFormat, flags)`.
 ///
 /// Legacy 2.x signature is **handle-less** — upstream `turbojpeg.c`
 /// allocates a temporary `tjhandle`, sets `TJPARAM_BOTTOMUP` from
 /// `flags & TJFLAG_BOTTOMUP`, calls `tj3LoadImage8`, then frees the
-/// handle. We mirror that exactly.
+/// handle. We mirror that exactly, including snapshotting the
+/// temp handle's last-error into the no-handle global slot before
+/// destroying so callers can recover the diagnostic via
+/// `tjGetErrorStr2(NULL)`.
 #[no_mangle]
 pub extern "C" fn tjLoadImage(
     filename: *const c_char,
@@ -436,6 +457,7 @@ pub extern "C" fn tjLoadImage(
     // matches `tj3.rs` and `turbojpeg.h`.
     let h: *mut c_void = crate::tj3::tj3Init(2);
     if h.is_null() {
+        crate::bufsize::set_no_handle_error("tjLoadImage: tj3Init(TJINIT_DECOMPRESS) failed");
         return std::ptr::null_mut();
     }
     if (flags & TJFLAG_BOTTOMUP) != 0 {
@@ -445,6 +467,9 @@ pub extern "C" fn tjLoadImage(
     }
     let buf: *mut u8 =
         crate::imageio::tj3LoadImage8(h, filename, width, align, height, pixel_format);
+    if buf.is_null() {
+        copy_handle_error_to_no_handle_slot(h);
+    }
     crate::tj3::tj3Destroy(h);
     buf
 }
@@ -453,7 +478,7 @@ pub extern "C" fn tjLoadImage(
 ///
 /// Legacy 2.x signature: also handle-less. Same handle lifecycle as
 /// `tjLoadImage` (temp `tjhandle`, propagate `TJFLAG_BOTTOMUP`,
-/// delegate, free).
+/// delegate, free, copy error before destroy).
 #[no_mangle]
 pub extern "C" fn tjSaveImage(
     filename: *const c_char,
@@ -466,6 +491,7 @@ pub extern "C" fn tjSaveImage(
 ) -> c_int {
     let h: *mut c_void = crate::tj3::tj3Init(1); // TJINIT_COMPRESS
     if h.is_null() {
+        crate::bufsize::set_no_handle_error("tjSaveImage: tj3Init(TJINIT_COMPRESS) failed");
         return -1;
     }
     if (flags & TJFLAG_BOTTOMUP) != 0 {
@@ -473,6 +499,9 @@ pub extern "C" fn tjSaveImage(
     }
     let rc: c_int =
         crate::imageio::tj3SaveImage8(h, filename, buffer, width, pitch, height, pixel_format);
+    if rc != 0 {
+        copy_handle_error_to_no_handle_slot(h);
+    }
     crate::tj3::tj3Destroy(h);
     rc
 }

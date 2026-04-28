@@ -7,6 +7,8 @@
 #![allow(clippy::type_complexity)]
 
 use std::ffi::{c_char, c_int, c_void};
+// CStr is referenced via fully-qualified `std::ffi::CStr` in the
+// no-handle error-recovery test; no top-level import needed.
 use std::path::PathBuf;
 
 const TJPF_RGB: c_int = 0;
@@ -220,7 +222,9 @@ fn tj_bufsize_helpers_return_non_zero_for_valid_inputs() {
 fn tj_load_image_reports_error_for_missing_file() {
     // `tjLoadImage` is handle-less per upstream `turbojpeg.h` —
     // first arg is `filename`, no `tjhandle`. Loading a
-    // non-existent path returns NULL.
+    // non-existent path returns NULL **and** the diagnostic must be
+    // recoverable via `tjGetErrorStr2(NULL)` (the legacy
+    // handle-less ABI uses the global no-handle error slot).
     let path: PathBuf = cdylib_path();
     let lib: libloading::Library =
         unsafe { libloading::Library::new(&path) }.expect("dlopen cdylib");
@@ -235,6 +239,8 @@ fn tj_load_image_reports_error_for_missing_file() {
                 c_int,
             ) -> *mut u8,
         > = lib.get(b"tjLoadImage").expect("tjLoadImage");
+        let tj_get_err2: libloading::Symbol<unsafe extern "C" fn(*mut c_void) -> *const c_char> =
+            lib.get(b"tjGetErrorStr2").expect("tjGetErrorStr2");
 
         let mut w: c_int = 0;
         let mut hh: c_int = 0;
@@ -243,6 +249,16 @@ fn tj_load_image_reports_error_for_missing_file() {
         assert!(
             ret.is_null(),
             "tjLoadImage must return NULL for missing file"
+        );
+
+        // The handle-less ABI must surface the failure through the
+        // global no-handle error slot so callers can diagnose it.
+        let msg_ptr: *const c_char = tj_get_err2(std::ptr::null_mut());
+        assert!(!msg_ptr.is_null(), "tjGetErrorStr2(NULL) must not be NULL");
+        let msg: &str = std::ffi::CStr::from_ptr(msg_ptr).to_str().expect("utf8");
+        assert!(
+            msg.contains("/nonexistent") || msg.contains("cannot read"),
+            "expected file-not-found error from tjGetErrorStr2(NULL), got: {msg}"
         );
     }
 }
