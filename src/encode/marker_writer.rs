@@ -69,6 +69,8 @@ pub fn write_dqt(buf: &mut Vec<u8>, table_id: u8, table: &[u16; 64]) {
 /// Write SOF0 (Start Of Frame, Baseline DCT) marker.
 ///
 /// `components` is a slice of (component_id, h_sampling_factor, v_sampling_factor, quant_table_id).
+/// Always 8-bit precision — SOF0 is by definition baseline 8-bit; if the
+/// caller has 12-bit data it must select SOF1 (extended sequential) instead.
 pub fn write_sof0(buf: &mut Vec<u8>, width: u16, height: u16, components: &[(u8, u8, u8, u8)]) {
     buf.push(0xFF);
     buf.push(0xC0); // SOF0
@@ -76,7 +78,7 @@ pub fn write_sof0(buf: &mut Vec<u8>, width: u16, height: u16, components: &[(u8,
     let length: u16 = 2 + 1 + 2 + 2 + 1 + (components.len() as u16 * 3);
     buf.extend_from_slice(&length.to_be_bytes());
 
-    // Sample precision: 8 bits
+    // Sample precision: 8 bits (SOF0 is baseline only)
     buf.push(8);
 
     // Image dimensions
@@ -142,70 +144,97 @@ pub fn write_sos(buf: &mut Vec<u8>, components: &[(u8, u8, u8)]) {
     buf.push(0); // Ah << 4 | Al
 }
 
-/// Write SOF2 (Start Of Frame, Progressive DCT) marker.
+/// Write a generic SOF marker with explicit marker code and sample
+/// precision. Used by the SOF1/SOF2/SOF9/SOF10 helpers below to share a
+/// single body, since the 12-bit transcode path needs to inject a
+/// precision other than the 8-bit default.
+fn write_sof_generic(
+    buf: &mut Vec<u8>,
+    marker_code: u8,
+    width: u16,
+    height: u16,
+    components: &[(u8, u8, u8, u8)],
+    precision: u8,
+) {
+    buf.push(0xFF);
+    buf.push(marker_code);
+
+    let length: u16 = 2 + 1 + 2 + 2 + 1 + (components.len() as u16 * 3);
+    buf.extend_from_slice(&length.to_be_bytes());
+
+    buf.push(precision);
+    buf.extend_from_slice(&height.to_be_bytes());
+    buf.extend_from_slice(&width.to_be_bytes());
+    buf.push(components.len() as u8);
+
+    for &(id, h_samp, v_samp, quant_tbl_id) in components {
+        buf.push(id);
+        buf.push((h_samp << 4) | v_samp);
+        buf.push(quant_tbl_id);
+    }
+}
+
+/// Write SOF2 (Start Of Frame, Progressive DCT) marker, 8-bit precision.
 ///
 /// Same structure as SOF0 but uses marker code 0xC2.
 pub fn write_sof2(buf: &mut Vec<u8>, width: u16, height: u16, components: &[(u8, u8, u8, u8)]) {
-    buf.push(0xFF);
-    buf.push(0xC2); // SOF2
-
-    let length: u16 = 2 + 1 + 2 + 2 + 1 + (components.len() as u16 * 3);
-    buf.extend_from_slice(&length.to_be_bytes());
-
-    buf.push(8); // 8-bit precision
-    buf.extend_from_slice(&height.to_be_bytes());
-    buf.extend_from_slice(&width.to_be_bytes());
-    buf.push(components.len() as u8);
-
-    for &(id, h_samp, v_samp, quant_tbl_id) in components {
-        buf.push(id);
-        buf.push((h_samp << 4) | v_samp);
-        buf.push(quant_tbl_id);
-    }
+    write_sof_generic(buf, 0xC2, width, height, components, 8);
 }
 
-/// Write SOF9 (Start Of Frame, Arithmetic Sequential) marker.
+/// Write SOF2 with caller-supplied sample precision (8 or 12).
+///
+/// Used by 12-bit progressive transcode in
+/// `api::coefficient::write_coefficients_progressive`.
+pub fn write_sof2_with_precision(
+    buf: &mut Vec<u8>,
+    width: u16,
+    height: u16,
+    components: &[(u8, u8, u8, u8)],
+    precision: u8,
+) {
+    write_sof_generic(buf, 0xC2, width, height, components, precision);
+}
+
+/// Write SOF9 (Start Of Frame, Arithmetic Sequential) marker, 8-bit precision.
 ///
 /// Same structure as SOF0 but uses marker code 0xC9.
 pub fn write_sof9(buf: &mut Vec<u8>, width: u16, height: u16, components: &[(u8, u8, u8, u8)]) {
-    buf.push(0xFF);
-    buf.push(0xC9); // SOF9
-
-    let length: u16 = 2 + 1 + 2 + 2 + 1 + (components.len() as u16 * 3);
-    buf.extend_from_slice(&length.to_be_bytes());
-
-    buf.push(8); // 8-bit precision
-    buf.extend_from_slice(&height.to_be_bytes());
-    buf.extend_from_slice(&width.to_be_bytes());
-    buf.push(components.len() as u8);
-
-    for &(id, h_samp, v_samp, quant_tbl_id) in components {
-        buf.push(id);
-        buf.push((h_samp << 4) | v_samp);
-        buf.push(quant_tbl_id);
-    }
+    write_sof_generic(buf, 0xC9, width, height, components, 8);
 }
 
-/// Write SOF10 (Start Of Frame, Arithmetic Progressive DCT) marker.
+/// Write SOF9 with caller-supplied sample precision (8 or 12).
+///
+/// Used by 12-bit arithmetic transcode in
+/// `api::coefficient::write_coefficients_arithmetic`.
+pub fn write_sof9_with_precision(
+    buf: &mut Vec<u8>,
+    width: u16,
+    height: u16,
+    components: &[(u8, u8, u8, u8)],
+    precision: u8,
+) {
+    write_sof_generic(buf, 0xC9, width, height, components, precision);
+}
+
+/// Write SOF10 (Start Of Frame, Arithmetic Progressive DCT) marker, 8-bit precision.
 ///
 /// Same structure as SOF2 but uses marker code 0xCA for arithmetic coding.
 pub fn write_sof10(buf: &mut Vec<u8>, width: u16, height: u16, components: &[(u8, u8, u8, u8)]) {
-    buf.push(0xFF);
-    buf.push(0xCA); // SOF10
+    write_sof_generic(buf, 0xCA, width, height, components, 8);
+}
 
-    let length: u16 = 2 + 1 + 2 + 2 + 1 + (components.len() as u16 * 3);
-    buf.extend_from_slice(&length.to_be_bytes());
-
-    buf.push(8); // 8-bit precision
-    buf.extend_from_slice(&height.to_be_bytes());
-    buf.extend_from_slice(&width.to_be_bytes());
-    buf.push(components.len() as u8);
-
-    for &(id, h_samp, v_samp, quant_tbl_id) in components {
-        buf.push(id);
-        buf.push((h_samp << 4) | v_samp);
-        buf.push(quant_tbl_id);
-    }
+/// Write SOF10 with caller-supplied sample precision (8 or 12).
+///
+/// Used by 12-bit arithmetic-progressive transcode in
+/// `api::coefficient::write_coefficients_progressive_arithmetic`.
+pub fn write_sof10_with_precision(
+    buf: &mut Vec<u8>,
+    width: u16,
+    height: u16,
+    components: &[(u8, u8, u8, u8)],
+    precision: u8,
+) {
+    write_sof_generic(buf, 0xCA, width, height, components, precision);
 }
 
 /// Write SOS marker for progressive scan with spectral selection and successive approximation.
