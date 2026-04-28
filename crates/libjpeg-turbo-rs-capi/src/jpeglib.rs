@@ -1873,6 +1873,18 @@ pub extern "C" fn jpeg_finish_decompress(cinfo: *mut c_void) -> CBoolean {
         // image; clear the flag so `jpeg_consume_input` doesn't
         // short-circuit.
         priv_state.header_parsed_ok = false;
+        // Drop the previous-image's parsed coefficients and unhook
+        // the foreign `jvirt_barray_ptr*` from the global side
+        // table. Without this, a `finish_decompress` → new
+        // `mem_src` → new `read_header` → `read_coefficients` reuse
+        // would short-circuit on the stale `coef_array_ptr` and
+        // hand the second JPEG's caller the *first* JPEG's barrays
+        // — caught by codex review of 809f52a.
+        if !priv_state.coef_array_ptr.is_null() {
+            coef_unregister_array(priv_state.coef_array_ptr as *const c_void);
+            priv_state.coef_array_ptr = std::ptr::null_mut();
+        }
+        priv_state.coefficients = None;
     }
     1
 }
@@ -3268,6 +3280,15 @@ pub extern "C" fn jpeg_abort_decompress(cinfo: *mut c_void) {
     let priv_ptr: *mut c_void = decompress_private_raw(cinfo);
     if let Some(p) = unsafe { priv_from_ptr(priv_ptr) } {
         p.decoded = None;
+        // Unhook the foreign array from the global side table BEFORE
+        // dropping the `CoefHandle` it was registered against; if we
+        // dropped the handle first, a follow-up
+        // `jpeg_write_coefficients(other_dst, our_array_ptr)` could
+        // hit the side table and dereference freed memory.
+        if !p.coef_array_ptr.is_null() {
+            coef_unregister_array(p.coef_array_ptr as *const c_void);
+            p.coef_array_ptr = std::ptr::null_mut();
+        }
         p.coefficients = None;
         p.crop_active = false;
         p.crop_xoffset = 0;
@@ -5703,6 +5724,24 @@ fn materialize_foreign_coef_arrays(
         c.image_height
     };
 
+    // Preserve the source's Adobe APP14 transform classification when
+    // we can recover it. The encoder's 4-component CMYK/YCCK branch
+    // injects an Adobe APP14 with the right transform byte regardless,
+    // but for 3-component sources that DID carry an Adobe APP14 (e.g.
+    // an RGB-encoded JPEG that wants to be re-emitted with
+    // `transform=0` to keep the RGB classification) the field is
+    // load-bearing because `inject_adobe_app14_after_jfif` only fires
+    // when `adobe_transform.is_some()`. Pull from the side-table
+    // CoefHandle when the array we just received was registered by
+    // *this* shim's `jpeg_read_coefficients`. Foreign workspace
+    // arrays from transupp's `-rotate` etc. preserve Adobe via
+    // `jcopy_markers_execute → jpeg_write_marker` instead, so falling
+    // through to `None` in that case is correct.
+    let adobe_transform: Option<u8> = match coef_lookup_handle(handle) {
+        Some(handle_ptr) => unsafe { (*handle_ptr).inner.adobe_transform },
+        None => None,
+    };
+
     Ok(libjpeg_turbo_rs::JpegCoefficients {
         width: width.min(u16::MAX as u32) as u16,
         height: height.min(u16::MAX as u32) as u16,
@@ -5712,7 +5751,7 @@ fn materialize_foreign_coef_arrays(
         density_unit: c.density_unit,
         x_density: c.X_density,
         y_density: c.Y_density,
-        adobe_transform: None,
+        adobe_transform,
     })
 }
 
@@ -5749,23 +5788,52 @@ fn run_coefficient_writer_and_flush(
     //    restart, density, and Adobe metadata come from the dst cinfo
     //    state set up by `jpeg_copy_critical_parameters`,
     //    `jtransform_adjust_parameters`, and `jcopy_markers_execute`.
-    let mut adjusted: libjpeg_turbo_rs::JpegCoefficients = match coef_lookup_handle(handle) {
-        Some(handle_ptr) => {
-            // SAFETY: lookup table only stores pointers that were just
-            // boxed inside a live `DecompressPrivate` and whose owning
-            // cinfo has not yet had `jpeg_destroy_decompress` /
-            // `jpeg_finish_decompress` /
-            // `jpeg_abort_decompress` run on it (those tear-downs all
-            // call `coef_unregister_array`).
-            unsafe { (*handle_ptr).inner.clone() }
-        }
-        None => match materialize_foreign_coef_arrays(c, handle) {
+    // Decide which path materialises the JpegCoefficients:
+    //
+    // * If dst cinfo already has its compress-side metadata wired up
+    //   (`num_components > 0` and non-NULL `comp_info`), prefer the
+    //   foreign-array materialise path — even when the handle
+    //   pointer happens to be in our side table. transupp's
+    //   no-workspace transforms (`-flip h`, `-grayscale`) hand
+    //   `jpeg_write_coefficients` the **same** pointer that came
+    //   out of `jpeg_read_coefficients` and then mutate those
+    //   arrays in place during `jtransform_execute_transformation`.
+    //   Cloning the cached `CoefHandle` would emit the original
+    //   (unmodified) source — caught by codex review of 809f52a.
+    //
+    // * Otherwise (the in-process round trip without a metadata
+    //   copy, e.g. `write_coefficients_roundtrip_pixel_exact`), the
+    //   side-table shortcut returns the cached `JpegCoefficients`
+    //   and skips the per-barray re-read.
+    let dst_has_metadata: bool = c.num_components > 0 && !c.comp_info.is_null() && !c.mem.is_null();
+    let mut adjusted: libjpeg_turbo_rs::JpegCoefficients = if dst_has_metadata {
+        match materialize_foreign_coef_arrays(c, handle) {
             Ok(coeffs) => coeffs,
             Err(msg) => {
                 priv_state.last_error = CString::new(msg).unwrap_or_default();
                 return false;
             }
-        },
+        }
+    } else {
+        match coef_lookup_handle(handle) {
+            Some(handle_ptr) => {
+                // SAFETY: lookup table only stores pointers that
+                // were just boxed inside a live `DecompressPrivate`
+                // and whose owning cinfo has not yet had
+                // `jpeg_destroy_decompress` /
+                // `jpeg_finish_decompress` /
+                // `jpeg_abort_decompress` run on it (those
+                // tear-downs all call `coef_unregister_array`).
+                unsafe { (*handle_ptr).inner.clone() }
+            }
+            None => match materialize_foreign_coef_arrays(c, handle) {
+                Ok(coeffs) => coeffs,
+                Err(msg) => {
+                    priv_state.last_error = CString::new(msg).unwrap_or_default();
+                    return false;
+                }
+            },
+        }
     };
     if c.restart_interval != 0 {
         adjusted.restart_interval = c.restart_interval as u16;
