@@ -659,6 +659,16 @@ impl<'a> Decoder<'a> {
         }
     }
 
+    /// Saved APP/COM markers from the source JPEG, populated by the most
+    /// recent header parse. Empty unless `save_markers()` has been called
+    /// with a non-`None` config (or the underlying parser was constructed
+    /// with one). Used by C-ABI consumers (`crates/libjpeg-turbo-rs-capi`)
+    /// that need to re-emit source markers verbatim during transcode.
+    #[inline]
+    pub fn saved_markers(&self) -> &[SavedMarker] {
+        &self.metadata.saved_markers
+    }
+
     /// Register a custom marker processor callback for a specific marker type.
     pub fn set_marker_processor<F>(&mut self, marker_type: u8, processor: F)
     where
