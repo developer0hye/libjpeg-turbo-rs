@@ -71,7 +71,7 @@ fn pad_up(value: usize, alignment: usize) -> usize {
 // ---------------------------------------------------------------------------
 static LAST_NO_HANDLE_ERROR: Mutex<Option<std::ffi::CString>> = Mutex::new(None);
 
-fn set_no_handle_error(msg: &str) {
+pub(crate) fn set_no_handle_error(msg: &str) {
     let sanitized: String = msg.replace('\0', "?");
     if let Ok(cs) = std::ffi::CString::new(sanitized) {
         if let Ok(mut guard) = LAST_NO_HANDLE_ERROR.lock() {
