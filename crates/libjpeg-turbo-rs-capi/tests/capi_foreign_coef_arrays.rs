@@ -445,3 +445,158 @@ fn foreign_coef_arrays_full_round_trip_pixel_exact() {
         "foreign-array transcode must be pixel-exact vs reference decode"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Regression: codex review of 809f52a flagged that
+// `jpeg_finish_decompress` left `coef_array_ptr` and `coefficients`
+// set on `DecompressPrivate`. A subsequent `mem_src` + `read_header`
+// on the same handle would then short-circuit the next
+// `read_coefficients` call and hand the caller back the *previous*
+// JPEG's barray pointer. This test wires up two distinct fixtures
+// (different image dimensions) and verifies the second
+// `read_coefficients` reflects the second image's geometry.
+// ---------------------------------------------------------------------------
+fn build_fixture_jpeg_with_size(lib: &libloading::Library, w: usize, h_px: usize) -> Vec<u8> {
+    unsafe {
+        let tj3_init: libloading::Symbol<unsafe extern "C" fn(c_int) -> TjHandle> =
+            lib.get(b"tj3Init").expect("tj3Init");
+        let tj3_destroy: libloading::Symbol<unsafe extern "C" fn(TjHandle)> =
+            lib.get(b"tj3Destroy").expect("tj3Destroy");
+        let tj3_set: libloading::Symbol<unsafe extern "C" fn(TjHandle, c_int, c_int) -> c_int> =
+            lib.get(b"tj3Set").expect("tj3Set");
+        let tj3_compress: libloading::Symbol<
+            unsafe extern "C" fn(
+                TjHandle,
+                *const u8,
+                c_int,
+                c_int,
+                c_int,
+                c_int,
+                *mut *mut u8,
+                *mut usize,
+            ) -> c_int,
+        > = lib.get(b"tj3Compress8").expect("tj3Compress8");
+        let tj3_free: libloading::Symbol<unsafe extern "C" fn(*mut c_void)> =
+            lib.get(b"tj3Free").expect("tj3Free");
+
+        let h_enc: TjHandle = tj3_init(TJINIT_COMPRESS);
+        assert!(!h_enc.is_null());
+        assert_eq!(tj3_set(h_enc, TJPARAM_QUALITY, 80), 0);
+        assert_eq!(tj3_set(h_enc, TJPARAM_SUBSAMP, TJSAMP_444), 0);
+
+        let mut src: Vec<u8> = Vec::with_capacity(w * h_px * 3);
+        for y in 0..h_px {
+            for x in 0..w {
+                src.push((x.wrapping_mul(3)) as u8);
+                src.push((y.wrapping_mul(5)) as u8);
+                src.push(((x ^ y) as u8).wrapping_mul(7));
+            }
+        }
+        let mut jpeg_buf: *mut u8 = std::ptr::null_mut();
+        let mut jpeg_size: usize = 0;
+        let rc: c_int = tj3_compress(
+            h_enc,
+            src.as_ptr(),
+            w as c_int,
+            0,
+            h_px as c_int,
+            TJPF_RGB,
+            &mut jpeg_buf,
+            &mut jpeg_size,
+        );
+        assert_eq!(rc, 0);
+        let jpeg: Vec<u8> = std::slice::from_raw_parts(jpeg_buf, jpeg_size).to_vec();
+        tj3_free(jpeg_buf as *mut c_void);
+        tj3_destroy(h_enc);
+        jpeg
+    }
+}
+
+#[test]
+fn finish_decompress_clears_coef_cache_for_reuse() {
+    let lib = unsafe { libloading::Library::new(cdylib_path()) }.expect("dlopen");
+
+    // Two fixtures with deliberately different dimensions so the bug
+    // — returning the cached `jvirt_barray_ptr*` from the first
+    // image — is observable as a `rows_in_array` mismatch on the
+    // first component (Y).
+    let (jpeg_a, _, w_a, h_a) = build_fixture_jpeg(&lib);
+    let jpeg_b: Vec<u8> = build_fixture_jpeg_with_size(&lib, 32, 48);
+    assert_ne!((w_a, h_a), (32usize, 48usize), "fixtures must differ");
+
+    unsafe {
+        const CINFO_BYTES: usize = 4096;
+        const ERR_BYTES: usize = 512;
+        let mut cinfo_buf: MaybeUninit<[u8; CINFO_BYTES]> = MaybeUninit::zeroed();
+        let cinfo_ptr: *mut c_void = cinfo_buf.as_mut_ptr() as *mut c_void;
+        let mut err_buf: MaybeUninit<[u8; ERR_BYTES]> = MaybeUninit::zeroed();
+        let err_ptr: *mut c_void = err_buf.as_mut_ptr() as *mut c_void;
+
+        let jpeg_std_error: libloading::Symbol<unsafe extern "C" fn(*mut c_void) -> *mut c_void> =
+            lib.get(b"jpeg_std_error").expect("jpeg_std_error");
+        let _ = jpeg_std_error(err_ptr);
+        (cinfo_ptr as *mut *mut c_void).write(err_ptr);
+
+        let jpeg_create_decompress: libloading::Symbol<
+            unsafe extern "C" fn(*mut c_void, c_int, usize),
+        > = lib
+            .get(b"jpeg_CreateDecompress")
+            .expect("jpeg_CreateDecompress");
+        jpeg_create_decompress(cinfo_ptr, 80, CINFO_BYTES);
+
+        let jpeg_mem_src: libloading::Symbol<
+            unsafe extern "C" fn(*mut c_void, *const u8, c_ulong),
+        > = lib.get(b"jpeg_mem_src").expect("jpeg_mem_src");
+        let jpeg_read_header: libloading::Symbol<
+            unsafe extern "C" fn(*mut c_void, c_int) -> c_int,
+        > = lib.get(b"jpeg_read_header").expect("jpeg_read_header");
+        let jpeg_read_coefficients: libloading::Symbol<
+            unsafe extern "C" fn(*mut c_void) -> *mut c_void,
+        > = lib
+            .get(b"jpeg_read_coefficients")
+            .expect("jpeg_read_coefficients");
+        let jpeg_finish_decompress: libloading::Symbol<unsafe extern "C" fn(*mut c_void) -> c_int> =
+            lib.get(b"jpeg_finish_decompress")
+                .expect("jpeg_finish_decompress");
+
+        // First image
+        jpeg_mem_src(cinfo_ptr, jpeg_a.as_ptr(), jpeg_a.len() as c_ulong);
+        assert_eq!(jpeg_read_header(cinfo_ptr, 1), JPEG_HEADER_OK);
+        let coef_a: *mut c_void = jpeg_read_coefficients(cinfo_ptr);
+        assert!(!coef_a.is_null(), "first read_coefficients returned NULL");
+        let arr_a: *const *mut JVirtBarrayControl = coef_a as *const *mut JVirtBarrayControl;
+        let bctl_a: *mut JVirtBarrayControl = *arr_a;
+        assert!(!bctl_a.is_null());
+        let rows_a: JDimension = (*bctl_a).rows_in_array;
+        let cols_a: JDimension = (*bctl_a).blocksperrow;
+
+        let _ = jpeg_finish_decompress(cinfo_ptr);
+
+        // Reuse the same handle for a different image.
+        jpeg_mem_src(cinfo_ptr, jpeg_b.as_ptr(), jpeg_b.len() as c_ulong);
+        assert_eq!(jpeg_read_header(cinfo_ptr, 1), JPEG_HEADER_OK);
+        let coef_b: *mut c_void = jpeg_read_coefficients(cinfo_ptr);
+        assert!(!coef_b.is_null(), "second read_coefficients returned NULL");
+        let arr_b: *const *mut JVirtBarrayControl = coef_b as *const *mut JVirtBarrayControl;
+        let bctl_b: *mut JVirtBarrayControl = *arr_b;
+        assert!(!bctl_b.is_null());
+        let rows_b: JDimension = (*bctl_b).rows_in_array;
+        let cols_b: JDimension = (*bctl_b).blocksperrow;
+
+        // 64×64 fixture → 8×8 luma blocks; 32×48 fixture → 4×6 luma blocks.
+        // Without the cache-clear in `jpeg_finish_decompress`, `coef_b`
+        // would alias the first image's barray and `(rows_b, cols_b)`
+        // would equal `(rows_a, cols_a)`.
+        assert_eq!((rows_a, cols_a), (8, 8), "fixture A geometry");
+        assert_eq!(
+            (rows_b, cols_b),
+            (6, 4),
+            "fixture B geometry — finish_decompress must clear cached barrays"
+        );
+
+        let jpeg_destroy_decompress: libloading::Symbol<unsafe extern "C" fn(*mut c_void)> = lib
+            .get(b"jpeg_destroy_decompress")
+            .expect("jpeg_destroy_decompress");
+        jpeg_destroy_decompress(cinfo_ptr);
+    }
+}
