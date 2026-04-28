@@ -528,6 +528,18 @@ fn coef_unregister_array(array_ptr: *const c_void) {
     }
 }
 
+/// Owned-marker node backing `JpegDecompressPublic::marker_list`. The
+/// caller (stock `transupp::jcopy_markers_execute`, etc.) iterates the
+/// linked list through the `public` field and reads `data` for the
+/// payload — both must stay valid until the cinfo is destroyed. We
+/// keep `payload` here so the byte buffer outlives `public.data`.
+struct OwnedMarker {
+    public: JpegMarkerStructPublic,
+    /// Backing storage for `public.data`. Held in a Box so its address
+    /// is stable across `marker_list_storage` Vec resizes.
+    payload: Box<[u8]>,
+}
+
 /// Rust-side private state reached via the thread-local side table
 /// keyed by the `cinfo` pointer. Owned via `Box`; freed in
 /// `jpeg_destroy_decompress`.
@@ -572,6 +584,22 @@ struct DecompressPrivate {
     /// `jpeg_read_header`; the public struct exposes a raw pointer into
     /// this vector so real libjpeg callers can iterate components.
     comp_info_storage: Vec<JpegComponentInfoPublic>,
+    /// Owned backing for `JpegDecompressPublic::marker_list`. Each
+    /// `OwnedMarker` holds both the public C-ABI struct (visible to
+    /// callers like stock `transupp::jcopy_markers_execute`) and the
+    /// payload bytes the `data` field points into. Populated by
+    /// `jpeg_read_header` after parsing the source markers. The list
+    /// stays alive until the cinfo is destroyed / `jpeg_abort` is
+    /// called (matches stock libjpeg-turbo's marker_list lifetime).
+    ///
+    /// `Box<OwnedMarker>` (rather than the smaller `OwnedMarker`) is
+    /// deliberate: the cinfo's `marker_list` raw pointer points
+    /// directly at `OwnedMarker::public`, so each node's address must
+    /// stay stable across any future resize / clear / push pattern.
+    /// `Box` puts each node in its own pinned heap allocation, which
+    /// `Vec<OwnedMarker>` would not.
+    #[allow(clippy::vec_box)]
+    marker_list_storage: Vec<Box<OwnedMarker>>,
     /// Partial buffer accumulated by `drain_caller_source_mgr` across
     /// suspending retries. Empty when no bridge is active or when the
     /// previous bridge run committed to `JpegSource::Owned`. Held
@@ -610,6 +638,7 @@ impl Default for DecompressPrivate {
             crop_width: 0,
             crop_active: false,
             comp_info_storage: Vec::new(),
+            marker_list_storage: Vec::new(),
             bridge_partial: Vec::new(),
             header_parsed_ok: false,
         }
@@ -1395,7 +1424,7 @@ pub extern "C" fn jpeg_read_header(cinfo: *mut c_void, _require_image: CBoolean)
         }
     };
 
-    let decoder: libjpeg_turbo_rs::Decoder<'_> = match libjpeg_turbo_rs::Decoder::new(bytes) {
+    let mut decoder: libjpeg_turbo_rs::Decoder<'_> = match libjpeg_turbo_rs::Decoder::new(bytes) {
         Ok(d) => d,
         Err(e) => {
             priv_state.last_error =
@@ -1403,6 +1432,22 @@ pub extern "C" fn jpeg_read_header(cinfo: *mut c_void, _require_image: CBoolean)
             return JPEG_SUSPENDED;
         }
     };
+    // Re-parse with the per-cinfo marker save list so APP/COM markers
+    // the caller asked for via `jpeg_save_markers` land in
+    // `decoder.saved_markers()`. Stock libjpeg-turbo populates
+    // `cinfo->marker_list` during `jpeg_read_header` before
+    // `jpeg_read_coefficients` runs; downstream `transupp` callers
+    // (stock `jpegtran -copy all <op>`) iterate that list to copy
+    // ICC profiles and other APP markers across to dstinfo via
+    // `jpeg_write_marker`. Without this re-parse the list stays empty
+    // and `jcopy_markers_execute` finds nothing to forward, so the
+    // ICC chunk on `monkey12.jpg` (and any APP/COM marker on other
+    // fixtures) silently disappears in transcode output.
+    let save_config: libjpeg_turbo_rs::MarkerSaveConfig =
+        marker_save_to_config(&priv_state.marker_save);
+    if !matches!(save_config, libjpeg_turbo_rs::MarkerSaveConfig::None) {
+        decoder.save_markers(save_config);
+    }
 
     let frame: &libjpeg_turbo_rs::FrameHeader = decoder.header();
     c.image_width = frame.width as JDimension;
@@ -1518,6 +1563,80 @@ pub extern "C" fn jpeg_read_header(cinfo: *mut c_void, _require_image: CBoolean)
     } else {
         priv_state.comp_info_storage.as_mut_ptr()
     };
+
+    // Build `c.marker_list` from the saved APP/COM markers so stock
+    // C consumers (the most important being `transupp::jcopy_markers_execute`
+    // invoked by `jpegtran -copy all`) can iterate the source's
+    // markers exactly as upstream libjpeg-turbo allows. The byte
+    // payload is moved out of `decoder.saved_markers()` and stashed
+    // in `marker_list_storage` so the cinfo's `marker_list` pointer
+    // remains valid until `jpeg_destroy_decompress` runs.
+    //
+    // Null `c.marker_list` *before* clearing the backing storage so
+    // there is never an instant where the cinfo exposes a pointer to
+    // freed memory — even though only this thread can observe the
+    // window, defensive ordering keeps the invariant local and
+    // obvious to a future reader.
+    c.marker_list = std::ptr::null_mut();
+    priv_state.marker_list_storage.clear();
+    let saved: Vec<libjpeg_turbo_rs::SavedMarker> = decoder.saved_markers().to_vec();
+    for marker in saved {
+        // Honor stock libjpeg's `jpeg_save_markers(cinfo, code, length_limit)`
+        // contract: `original_length` is the full marker body, but
+        // `data_length` and `data` are truncated to
+        // `min(original_length, length_limit)` so consumers (and
+        // `jcopy_markers_execute`'s downstream `jpeg_write_marker`)
+        // never see more bytes than the caller requested.
+        let original_len: usize = marker.data.len();
+        let limit: usize = priv_state
+            .marker_save
+            .limits
+            .get(&marker.code)
+            .copied()
+            .map(|l| l as usize)
+            .unwrap_or(usize::MAX);
+        let truncated_len: usize = original_len.min(limit);
+        let mut full: Vec<u8> = marker.data;
+        full.truncate(truncated_len);
+        let payload: Box<[u8]> = full.into_boxed_slice();
+        priv_state.marker_list_storage.push(Box::new(OwnedMarker {
+            public: JpegMarkerStructPublic {
+                next: std::ptr::null_mut(),
+                marker: marker.code,
+                original_length: original_len as c_uint,
+                data_length: truncated_len as c_uint,
+                data: std::ptr::null_mut(),
+            },
+            payload,
+        }));
+    }
+    // Fix up `data` to point into the boxed payload (stable: `Box`
+    // pins the heap allocation), then thread `next` pointers across
+    // adjacent nodes.
+    for node in priv_state.marker_list_storage.iter_mut() {
+        node.public.data = node.payload.as_mut_ptr();
+    }
+    let len: usize = priv_state.marker_list_storage.len();
+    if len > 1 {
+        // Collect raw pointers up-front to avoid simultaneous mutable
+        // borrows during the next-pointer fix-up.
+        let next_ptrs: Vec<*mut JpegMarkerStructPublic> = priv_state
+            .marker_list_storage
+            .iter_mut()
+            .skip(1)
+            .map(|n| &mut n.public as *mut _)
+            .collect();
+        for (i, node) in priv_state.marker_list_storage.iter_mut().enumerate() {
+            if i < next_ptrs.len() {
+                node.public.next = next_ptrs[i];
+            }
+        }
+    }
+    c.marker_list = priv_state
+        .marker_list_storage
+        .first_mut()
+        .map(|n| &mut n.public as *mut _)
+        .unwrap_or(std::ptr::null_mut());
 
     c.global_state = DSTATE_INHEADER;
     priv_state.last_error = CString::new("No error").expect("static");
@@ -1954,6 +2073,13 @@ pub extern "C" fn jpeg_finish_decompress(cinfo: *mut c_void) -> CBoolean {
             release_decompress_image_pool(cinfo, c.mem);
         }
         priv_state.coefficients = None;
+        // Drop the previous-image saved-marker list so a reuse of
+        // this cinfo for a different image cannot expose the old
+        // image's APP/COM markers via `c.marker_list`. Stock
+        // libjpeg-turbo reaches the same end state through `jpeg_abort
+        // → free_pool(JPOOL_IMAGE)` in its finish path.
+        c.marker_list = std::ptr::null_mut();
+        priv_state.marker_list_storage.clear();
     }
     1
 }
@@ -2153,7 +2279,24 @@ pub extern "C" fn jpeg_save_markers(cinfo: *mut c_void, marker_code: c_int, leng
     if length_limit == 0 {
         priv_state.marker_save.limits.remove(&code);
     } else {
-        priv_state.marker_save.limits.insert(code, length_limit);
+        // Stock libjpeg-turbo's `jpeg_save_markers` (jdmarker.c) raises
+        // a non-zero `length_limit` to the minimum needed to identify
+        // JFIF APP0 (14 bytes) or Adobe APP14 (12 bytes) — the markers
+        // libjpeg's own machinery relies on for colorspace
+        // classification. Apply the same floor so a caller that
+        // requested e.g. `jpeg_save_markers(cinfo, JPEG_APP0, 1)` sees
+        // the canonical 14-byte minimum (matches the C contract; codex
+        // review of the marker-list landing flagged the divergence).
+        const APP0_DATA_LEN: c_uint = 14;
+        const APP14_DATA_LEN: c_uint = 12;
+        let effective: c_uint = if code == 0xE0 {
+            length_limit.max(APP0_DATA_LEN)
+        } else if code == 0xEE {
+            length_limit.max(APP14_DATA_LEN)
+        } else {
+            length_limit
+        };
+        priv_state.marker_save.limits.insert(code, effective);
     }
 }
 
@@ -3402,6 +3545,16 @@ pub extern "C" fn jpeg_abort_decompress(cinfo: *mut c_void) {
         p.bridge_partial.clear();
         // Force a re-parse of the next image's header.
         p.header_parsed_ok = false;
+        // Drop the previous image's saved-marker linked list. Stock
+        // libjpeg-turbo's `jpeg_abort` releases `JPOOL_IMAGE` (which
+        // backs `marker_list`) and the next `jpeg_read_header` starts
+        // with a clean slate. We mirror that here so a follow-up
+        // `jpeg_read_header` that fails early (returns
+        // `JPEG_SUSPENDED` before reaching the marker builder) cannot
+        // leave `cinfo->marker_list` pointing at the previous image's
+        // markers — caught by the post-implementation review.
+        c.marker_list = std::ptr::null_mut();
+        p.marker_list_storage.clear();
     }
     c.global_state = DSTATE_START;
     c.output_scanline = 0;
