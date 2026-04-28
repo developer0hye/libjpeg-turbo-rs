@@ -20,6 +20,7 @@
 
 use std::ffi::{c_int, c_void};
 
+use libjpeg_turbo_rs::tj3::TjParam;
 use libjpeg_turbo_rs::PixelFormat;
 
 use crate::alloc::libc_from_slice;
@@ -128,11 +129,63 @@ pub extern "C" fn tj3Compress8(
         packed
     };
 
-    let jpeg: Vec<u8> = match inst.inner.compress(&dense, w, h, pf) {
-        Ok(b) => b,
-        Err(e) => {
-            inst.set_error(format!("tj3Compress8: {e}"), TJERR_FATAL);
-            return -1;
+    // When lossless is requested, validate TJPARAM_PRECISION against the
+    // 8-bit entry-point range (2..=8) and pass it to the lossless encoder.
+    // Upstream libjpeg-turbo rejects values outside 2..=8 for tj3Compress8.
+    let is_lossless: bool = inst.inner.get(TjParam::Lossless) != 0;
+    let stored_precision: i32 = inst.inner.get(TjParam::Precision);
+    // Precision 8 (default) is always valid; only non-default values need
+    // checking when lossless is active.
+    if is_lossless && !(2..=8).contains(&stored_precision) {
+        inst.set_error(
+            format!(
+                "tj3Compress8: TJPARAM_PRECISION {stored_precision} is out of range 2..=8 for lossless 8-bit"
+            ),
+            TJERR_FATAL,
+        );
+        return -1;
+    }
+
+    // For lossless mode with non-default precision, bypass the regular
+    // encoder and call the precision-aware lossless path directly.
+    let jpeg: Vec<u8> = if is_lossless && stored_precision != 8 {
+        use libjpeg_turbo_rs::encode::pipeline::compress_lossless_extended_precision;
+        let predictor: u8 = inst.inner.get(TjParam::LosslessPsv) as u8;
+        let point_transform: u8 = inst.inner.get(TjParam::LosslessPt) as u8;
+        let restart_interval: u16 = {
+            let rb: i32 = inst.inner.get(TjParam::RestartBlocks);
+            let rr: i32 = inst.inner.get(TjParam::RestartRows);
+            if rb > 0 {
+                rb as u16
+            } else if rr > 0 {
+                rr as u16
+            } else {
+                0
+            }
+        };
+        match compress_lossless_extended_precision(
+            &dense,
+            w,
+            h,
+            pf,
+            predictor,
+            point_transform,
+            restart_interval,
+            stored_precision as u8,
+        ) {
+            Ok(b) => b,
+            Err(e) => {
+                inst.set_error(format!("tj3Compress8: {e}"), TJERR_FATAL);
+                return -1;
+            }
+        }
+    } else {
+        match inst.inner.compress(&dense, w, h, pf) {
+            Ok(b) => b,
+            Err(e) => {
+                inst.set_error(format!("tj3Compress8: {e}"), TJERR_FATAL);
+                return -1;
+            }
         }
     };
 

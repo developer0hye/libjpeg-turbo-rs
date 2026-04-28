@@ -530,6 +530,8 @@ impl TjHandle {
     /// Compress 12-bit pixels to JPEG (like `tj3Compress12`).
     ///
     /// Uses handle quality, subsampling, and lossless parameters.
+    /// When `TJPARAM_LOSSLESS` is set and `TJPARAM_PRECISION` is in 9..=12,
+    /// the SOF marker precision field reflects the stored precision value.
     pub fn compress_12bit(
         &self,
         pixels: &[i16],
@@ -537,13 +539,38 @@ impl TjHandle {
         height: usize,
         num_components: usize,
     ) -> Result<Vec<u8>> {
-        crate::api::precision::compress_12bit(
+        crate::api::precision::compress_12bit_with_precision(
             pixels,
             width,
             height,
             num_components,
             self.quality as u8,
             self.subsampling_enum(),
+            None,
+        )
+    }
+
+    /// Compress 12-bit pixels to JPEG with an explicit SOF precision override.
+    ///
+    /// `precision` must be in 9..=12 when lossless is active. For lossy encode
+    /// the precision is still set in the SOF1 marker but quantisation tables
+    /// remain 12-bit scaled.
+    pub fn compress_12bit_with_precision(
+        &self,
+        pixels: &[i16],
+        width: usize,
+        height: usize,
+        num_components: usize,
+        precision: u8,
+    ) -> Result<Vec<u8>> {
+        crate::api::precision::compress_12bit_with_precision(
+            pixels,
+            width,
+            height,
+            num_components,
+            self.quality as u8,
+            self.subsampling_enum(),
+            Some(precision),
         )
     }
 
@@ -558,13 +585,36 @@ impl TjHandle {
         height: usize,
         num_components: usize,
     ) -> Result<Vec<u8>> {
-        crate::api::precision::compress_16bit(
+        crate::api::precision::compress_16bit_with_precision(
             pixels,
             width,
             height,
             num_components,
             self.lossless_psv as u8,
             self.lossless_pt as u8,
+            None,
+        )
+    }
+
+    /// Compress 16-bit pixels with an explicit SOF precision override.
+    ///
+    /// `precision` must be in 13..=16 (lossless-only path).
+    pub fn compress_16bit_with_precision(
+        &self,
+        pixels: &[u16],
+        width: usize,
+        height: usize,
+        num_components: usize,
+        precision: u8,
+    ) -> Result<Vec<u8>> {
+        crate::api::precision::compress_16bit_with_precision(
+            pixels,
+            width,
+            height,
+            num_components,
+            self.lossless_psv as u8,
+            self.lossless_pt as u8,
+            Some(precision),
         )
     }
 

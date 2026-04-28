@@ -106,8 +106,16 @@ fn param_from_c(param: c_int) -> Option<TjParam> {
 }
 
 /// Read-only parameters: `tj3Set` must reject attempts to write them.
+///
+/// `TJPARAM_PRECISION` is writable for encode: callers use `tj3Set(h,
+/// TJPARAM_PRECISION, value)` before calling `tj3Compress8/12/16` with
+/// lossless mode to request a specific sample precision (e.g. 4-bit for
+/// 8-bit-depth sources). After `tj3DecompressHeader` / `tj3Decompress` the
+/// field reflects the precision stored in the JPEG stream (effectively
+/// read-only until the next encode call), but the *param store* must accept
+/// writes so encode callers can override it.
 fn is_read_only(param: TjParam) -> bool {
-    matches!(param, TjParam::Width | TjParam::Height | TjParam::Precision)
+    matches!(param, TjParam::Width | TjParam::Height)
 }
 
 /// Dereference an opaque handle pointer into a mutable `TjInstance`
