@@ -498,6 +498,15 @@ impl<'a> Decoder<'a> {
         )
     }
 
+    /// Whether the source uses arithmetic entropy coding (SOF9 / SOF10 / SOF11).
+    ///
+    /// Returns `true` for arithmetic-coded streams and `false` for
+    /// Huffman-coded streams (SOF0 / SOF1 / SOF2 / SOF3).  Mirrors stock
+    /// libjpeg's `cinfo.arith_code` populated by `jpeg_read_header`.
+    pub fn is_arithmetic(&self) -> bool {
+        self.metadata.is_arithmetic
+    }
+
     /// Set the desired output pixel format.
     pub fn set_output_format(&mut self, format: PixelFormat) {
         self.output_format = Some(format);
