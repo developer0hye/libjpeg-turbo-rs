@@ -247,9 +247,21 @@ test tj3_compress12_lossless_precision10_writes_sof_byte_10 ... ok
 test tj3_compress16_lossless_precision14_writes_sof_byte_14 ... ok
 ```
 
-### P1. Encode SIMD Performance Gap On x86_64
+### P1. Encode SIMD Performance Gap On x86_64 — Verification Pending
 
-**Symptom:** `experiments/x86_64_avx2_final_report.md` shows x86_64 AVX2 encode at `Rust/C` ratios:
+**Status (2026-04-29):** the original 1.36× regression at 1080p_420 has been substantively closed by post-final-report commits (`1d2641c`, `c313fd9` PR #109, `9df31d4`, `ea0154b`, `1e7b8fa`). Hotspots #1 (Huffman SIMD) and #2 (H2V2 fused) are in `main`; hotspots #3 (256-bit color load) and #4 (progressive SIMD) remain open. Closure waits on a fresh x86_64 benchmark on current `main` to confirm every entry meets the `Rust/C ≤ 1.05×` gate.
+
+**Post-final-report progress (commits already in `main`):**
+
+| Commit | Date | Effect (per commit msg / `experiments/encode.tsv`) |
+|--------|------|----------------------------------------------------|
+| `1d2641c` | 2026-03-29 | Truly fused H2V2 downsample+FDCT+quantize (`avx2_downsample_h2v2_fdct_quantize`); closes hotspot #2. |
+| `c313fd9` (PR #109) | 2026-04-03 | MCU-level BitWriter hoisting + fused H2V1 (`avx2_downsample_h2v1_fdct_quantize`) + interior MCU fast-path. TSV iterations claim 1080p ratios drop to 1.03×–1.04× and 640x480 to 0.89×–0.99×. |
+| `9df31d4` | 2026-04-03 | Remove dense AC precompute path; sparse on-demand `lzcnt` is faster on x86_64. TSV: 1080p_444 → 1.03×. |
+| `ea0154b` | 2026-04-12 | Pre-downsample chroma for 420 encode; commit msg: 1080p_420 11,576 → 9,731 us (1.36× → 1.14× vs C). |
+| `1e7b8fa` | 2026-04-13 | SSE2 sign pre-computation matching upstream `jchuff-sse2.asm` design (interleaves `pcmpgtw + paddw` with bitmap construction); closes hotspot #1. |
+
+**Original symptom (historical baseline, `experiments/x86_64_avx2_final_report.md`, 2026-04-12, Intel i5-10400; predates `ea0154b` and `1e7b8fa`):**
 
 | Benchmark | Rust (us) | C (us) | Rust/C |
 |-----------|-----------|--------|--------|
@@ -260,12 +272,12 @@ test tj3_compress16_lossless_precision14_writes_sof_byte_14 ... ok
 
 **Why this matters:** the README + CLAUDE.md commit to "equivalent or better performance". A drop-in replacement that regresses encode latency by 36 % at 1080p_420 is not a credible drop-in for any caller that profiles encode time (server JPEG pipelines, transcoding services, mobile capture). NEON encode is already 0.89–0.93× C — the gap is x86_64-specific.
 
-**Identified hotspots:**
+**Identified hotspots — current state:**
 
-1. **Huffman encode SIMD** (~15–25 % of encode time) — C ships `simd/x86_64/jchuff-sse2.asm`. We have no Rust SIMD port. Estimated to bring 1080p_420 from 1.36× → ~1.10× (highest impact).
-2. **H2V2 fused downsample+FDCT+quantize** — current AVX2 fused path covers H2V1 only.
-3. **256-bit input-color load** — encode color path drops to 128-bit SSSE3 deinterleave.
-4. **Progressive encode SIMD** — no Rust analogue of `jcphuff-sse2.asm`.
+1. ~~**Huffman encode SIMD** (~15–25 % of encode time) — C ships `simd/x86_64/jchuff-sse2.asm`. We have no Rust SIMD port. Estimated to bring 1080p_420 from 1.36× → ~1.10× (highest impact).~~ **CLOSED** by `1e7b8fa` (SSE2 sign pre-computation, SSE2 bitmap via `pcmpeqw + packsswb + pmovmskb`, sparse-AC `lzcnt`, MCU-level BitWriter hoisting).
+2. ~~**H2V2 fused downsample+FDCT+quantize** — current AVX2 fused path covers H2V1 only.~~ **CLOSED** by `1d2641c` (`avx2_downsample_h2v2_fdct_quantize`) plus `c313fd9` (`avx2_downsample_h2v1_fdct_quantize` companion for 4:2:2).
+3. **256-bit input-color load** — open. Encode color path still drops to 128-bit SSSE3 deinterleave for RGBA/BGR/BGRA.
+4. **Progressive encode SIMD** — open. No Rust analogue of `jcphuff-sse2.asm`. Not counted in baseline `encode_*` benchmarks.
 
 **Acceptance:**
 
@@ -305,7 +317,7 @@ fi
 /tmp/bench_c_encode_matrix
 ```
 
-Every encode benchmark `Rust/C ≤ 1.05×`. Record before/after in `experiments/encode.tsv` per the keep/discard/crash protocol in `experiments/README.md`.
+Every encode benchmark `Rust/C ≤ 1.05×`. Record the run in `experiments/encode.tsv` per the keep/discard/crash protocol in `experiments/README.md`. If any benchmark exceeds the gate, attack hotspot #3 or #4 above; otherwise mark this gap **CLOSED**.
 
 **Likely area:** `src/simd/x86_64/encode/`, `src/encode/huffman.rs`, `src/encode/pipeline.rs`. Reference SIMD: `references/libjpeg-turbo/simd/x86_64/jchuff-sse2.asm`, `jcsample-sse2.asm`, `jcsample-avx2.asm`, `jcphuff-sse2.asm`.
 
@@ -584,7 +596,7 @@ A task is done only when:
 6. ~~Fill legacy `tjLoadImage` / `tjSaveImage` and `tjEncodeYUV3` / `tjDecodeYUV`.~~ **CLOSED 2026-04-28** — handle-less load/save ABI with BMP TJPF_BGR + alpha-strip + bottom-up; YUV aliases forward through `tj3EncodeYUV8` / `tj3DecodeYUV8` with end-to-end 4:4:4 round-trip coverage in `legacy_aliases.rs`.
 7. ~~Wire arbitrary precision lossless through TJ3 compress.~~ **CLOSED 2026-04-28** — `tj3Compress8/12/16` honour `TJPARAM_PRECISION` via SOF dlopen tests for precision 4 / 10 / 14.
 8. ~~Wire upstream `tjbench` / `rdjpgcom` / `wrjpgcom` against our shim (P2).~~ **CLOSED 2026-04-29** — `examples/stock_djpeg_cjpeg/build.sh` now compiles all six upstream tools (djpeg / cjpeg / jpegtran / **tjbench** / **rdjpgcom** / **wrjpgcom**) against our cdylib (tjbench links the `libturbojpeg.0` alias; rdjpgcom/wrjpgcom are standalone). Closing the missing TJ symbols required adding `tj3GetICCProfile`, `tj3SetICCProfile`, and `tj3TransformBufSize`. `run.sh` now reports per-fixture `tjbench pass` (decompress benchmark runs end-to-end) and `comtools pass roundtrip` (wrjpgcom-inserted COM marker survives rdjpgcom read-back). Apples-to-apples perf gate (step 9) is now unblocked.
-9. Close the x86_64 encode SIMD gap (P1 Encode) until every encode benchmark `Rust/C ≤ 1.05×`. Run only after correctness and compatibility are green.
+9. Close the x86_64 encode SIMD gap (P1 Encode) until every encode benchmark `Rust/C ≤ 1.05×`. **Verification pending 2026-04-29** — `1d2641c`/`c313fd9`/`9df31d4`/`ea0154b`/`1e7b8fa` substantively closed hotspots #1 (Huffman SIMD) and #2 (H2V2 fused); a fresh x86_64 bench against current `main` is the closure gate. Run only after correctness and compatibility are green.
 10. PNG image I/O (P2), if downstream demand exists.
 
 This order is intentionally strict. A replacement project should not optimize the encoder or add optional PNG support while stock tools abort and compatibility blockers are silently skipped. Encode perf stays tracked but deferred; PNG stays optional.
