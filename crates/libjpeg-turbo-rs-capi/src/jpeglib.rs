@@ -1589,11 +1589,11 @@ pub extern "C" fn jpeg_read_header(cinfo: *mut c_void, _require_image: CBoolean)
     let saved: Vec<libjpeg_turbo_rs::SavedMarker> = decoder.saved_markers().to_vec();
     for marker in saved {
         // Honor stock libjpeg's `jpeg_save_markers(cinfo, code, length_limit)`
-        // contract: `original_length` is the full marker body, but
-        // `data_length` and `data` are truncated to
-        // `min(original_length, length_limit)` so consumers (and
-        // `jcopy_markers_execute`'s downstream `jpeg_write_marker`)
-        // never see more bytes than the caller requested.
+        // contract: `original_length` is the full marker body length from the
+        // stream, while `data_length` and `data` are truncated to
+        // `min(original_length, length_limit)` so consumers (e.g.
+        // `jcopy_markers_execute` → `jpeg_write_marker`) never see more bytes
+        // than the caller requested.
         let original_len: usize = marker.data.len();
         let limit: usize = priv_state
             .marker_save
@@ -1797,11 +1797,10 @@ pub extern "C" fn jpeg_start_decompress(cinfo: *mut c_void) -> CBoolean {
 /// accumulated by `jpeg_save_markers`. A zero limit clears saving, so
 /// we skip those entries when composing the final set.
 ///
-/// Returns `None` if no markers are enabled. Returns
-/// `Specific(codes)` otherwise — we don't currently honour the
-/// per-marker length_limit granularly because the underlying Rust
-/// `save_markers` API saves the full marker body; libjpeg's truncation
-/// behavior is still a TODO tracked in `docs/FEATURE_PARITY.md`.
+/// Returns `None` if no markers are enabled. Returns `Specific(codes)`
+/// otherwise. Per-marker body truncation is applied separately when building
+/// `cinfo->marker_list` from `Image.saved_markers`, so the Rust library saves
+/// the full marker body and the shim truncates to the requested `length_limit`.
 fn marker_save_to_config(settings: &MarkerSaveSettings) -> libjpeg_turbo_rs::MarkerSaveConfig {
     let codes: Vec<u8> = settings
         .limits
@@ -2163,6 +2162,17 @@ pub extern "C" fn jpeg_capi_test_arith_code(cinfo: *mut c_void) -> c_int {
     match unsafe { cinfo_mut(cinfo) } {
         Some(c) => c.arith_code as c_int,
         None => -1,
+    }
+}
+
+/// Return `cinfo->marker_list` — the head of the saved-marker linked list
+/// populated by `jpeg_read_header`. Tests use this to inspect the saved
+/// bodies without hard-coding struct offsets.
+#[no_mangle]
+pub extern "C" fn jpeg_capi_test_marker_list(cinfo: *mut c_void) -> *mut JpegMarkerStructPublic {
+    match unsafe { cinfo_mut(cinfo) } {
+        Some(c) => c.marker_list,
+        None => std::ptr::null_mut(),
     }
 }
 

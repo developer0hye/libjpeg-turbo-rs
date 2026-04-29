@@ -215,7 +215,7 @@
 - [x] Adobe APP14 detection (CMYK/YCCK)
 - [x] Restart marker (DRI/RST) handling
 - [x] `TJPARAM_SAVEMARKERS` — Configurable marker saving via `Decoder::save_markers()` / `MarkerSaveConfig` (not yet wired through `TjHandle`)
-- [x] `jpeg_save_markers()` — Per-marker-type save control (`Decoder::save_markers()`)
+- [x] `jpeg_save_markers()` — Per-marker-type save control with per-code `length_limit` truncation (`Decoder::save_markers()` / `MarkerSaveConfig::WithLimits`; C ABI shim truncates `cinfo->marker_list` entries to the requested limit)
 - [x] `jpeg_set_marker_processor()` — Custom marker parser callback (`Decoder::set_marker_processor()`)
 - [x] COM (comment) marker read/expose (`Image.comment`)
 - [x] Arbitrary marker access via `marker_list` linked list (`Image.markers()` / `Image.saved_markers`)
