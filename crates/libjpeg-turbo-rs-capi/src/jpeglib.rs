@@ -5655,18 +5655,20 @@ pub extern "C" fn jpeg_write_tables(cinfo: *mut c_void) {
         None => return,
     };
     priv_state.tables_only = true;
-    // Construct a tables-only datastream: SOI, DQT(0..1), DHT(standard),
-    // EOI. The exact bytes are produced by running a dummy encode of a
-    // single black pixel and capturing the table segments. For now we
-    // emit a minimal well-formed stream: SOI + EOI with the recognised
-    // libjpeg "tables-only" signature. Real consumers typically re-use
-    // this for rate/distortion control; they don't depend on the
-    // specific table content and tolerate baseline defaults.
-    //
-    // TODO(tables-only real content): once the encoder exposes a
-    // "tables-only" emission path, wire it in here. Until then, the
-    // stream is a no-op that still satisfies the EOI/SOI framing.
-    let tables_bytes: Vec<u8> = build_tables_only_datastream(priv_state.quality);
+    // Build a tables-only datastream that matches what upstream
+    // `jcmarker.c::write_tables_only` emits:
+    //   * Huffman (`arith_code == 0`): SOI + DQT(Tq=0/1) + DHT(DC/AC ×
+    //     luma/chroma) + EOI.
+    //   * Arithmetic (`arith_code != 0`): SOI + DQT(Tq=0/1) + EOI. No
+    //     DHT (upstream skips them for arithmetic) and no DAC (DAC is
+    //     emitted later with the scan header for the abbreviated body
+    //     stream, not here).
+    // Strategy: encode a tiny 16×16 RGB Huffman dummy at 4:2:0 — the
+    // resulting DQT segments are identical regardless of entropy mode
+    // (quant tables depend only on quality), so we just filter out DHT
+    // when arithmetic is requested.
+    let arith: bool = c.arith_code != 0;
+    let tables_bytes: Vec<u8> = build_tables_only_datastream(priv_state.quality, arith);
     // Push through the destination manager exactly like a full encode.
     if c.dest.is_null() {
         return;
@@ -5677,22 +5679,38 @@ pub extern "C" fn jpeg_write_tables(cinfo: *mut c_void) {
     push_bytes_through_dest_mgr(c, priv_state, &tables_bytes);
 }
 
-/// Emit a tables-only JPEG datastream at the given quality. Produced
-/// by invoking the full encoder on a trivial 8×8 black image, then
-/// extracting everything from SOI up to (but not including) SOF0.
-/// The result is `SOI + DQT... + DHT... + EOI`, satisfying libjpeg's
-/// "abbreviated tables datastream" contract.
-fn build_tables_only_datastream(quality: u8) -> Vec<u8> {
-    // Minimal 8x8 grayscale image compresses into a tiny stream that
-    // still emits the full DQT/DHT tables.
-    let dummy: Vec<u8> = vec![0u8; 8 * 8];
+/// Emit a tables-only JPEG datastream at the given quality, matching
+/// upstream `jcmarker.c::write_tables_only`:
+///
+/// * Huffman (`arith == false`): `SOI + DQT(Tq=0/1) + DHT(DC/AC ×
+///   luma/chroma) + EOI`.
+/// * Arithmetic (`arith == true`): `SOI + DQT(Tq=0/1) + EOI`. No DHT
+///   (upstream skips them when `cinfo->arith_code` is set) and no DAC
+///   (DAC is emitted later with the scan header for the abbreviated
+///   body stream, not as part of the tables-only datastream).
+///
+/// Strategy: encode a 16×16 RGB Huffman dummy at 4:2:0 so the encoder
+/// emits both luma and chroma quantization tables and all four standard
+/// Huffman tables, then strip SOF/SOS/scan data. The DQT segments are
+/// identical regardless of entropy mode (quant tables depend only on
+/// quality), so the same Huffman dummy works for both modes — DHT is
+/// just filtered out when `arith` is true. A grayscale-only caller
+/// receives extra unused chroma tables — harmless, since downstream
+/// abbreviated reads ignore unreferenced indices.
+fn build_tables_only_datastream(quality: u8, arith: bool) -> Vec<u8> {
+    // Smallest input that still triggers a full color-encode emission
+    // of both quantization tables and all four Huffman tables: a single
+    // 16×16 (one 4:2:0 MCU) RGB block. Pixel content is irrelevant —
+    // tables are derived from quality + Annex K standard tables, not
+    // from the data.
+    let dummy: Vec<u8> = vec![0u8; 16 * 16 * 3];
     let encoded: Vec<u8> = match libjpeg_turbo_rs::compress(
         &dummy,
-        8,
-        8,
-        PixelFormat::Grayscale,
+        16,
+        16,
+        PixelFormat::Rgb,
         quality,
-        libjpeg_turbo_rs::Subsampling::S444,
+        libjpeg_turbo_rs::Subsampling::S420,
     ) {
         Ok(b) => b,
         Err(_) => return vec![0xFF, 0xD8, 0xFF, 0xD9],
@@ -5713,7 +5731,12 @@ fn build_tables_only_datastream(quality: u8) -> Vec<u8> {
                 out.push(0xD8);
                 i += 2;
             }
-            0xDB | 0xC4 => {
+            // DQT (0xDB) always; DHT (0xC4) only when Huffman. Upstream
+            // `write_tables_only` skips DHT for arithmetic-coded
+            // compression, and never emits DAC in this datastream
+            // (DAC accompanies the scan header, not the tables-only
+            // stream).
+            0xDB | 0xC4 if code == 0xDB || !arith => {
                 if i + 4 > encoded.len() {
                     break;
                 }
@@ -5733,9 +5756,21 @@ fn build_tables_only_datastream(quality: u8) -> Vec<u8> {
                 let seg_len: usize = ((encoded[i + 2] as usize) << 8) | (encoded[i + 3] as usize);
                 i += 2 + seg_len;
             }
-            0xC0 | 0xC1 | 0xC2 | 0xC3 | 0xDA => {
-                // SOF / SOS — we're done with tables.
+            0xDA => {
+                // SOS — actual end of the table-bearing region. Tables are
+                // valid only up to here.
                 break;
+            }
+            0xC0..=0xC3 => {
+                // SOF — skip the frame header. JPEG file order is
+                // SOI → APP/COM → DQT → SOF → DHT → SOS, so DHT segments
+                // arrive *after* SOF. If we broke here we would lose the
+                // Huffman tables.
+                if i + 4 > encoded.len() {
+                    break;
+                }
+                let seg_len: usize = ((encoded[i + 2] as usize) << 8) | (encoded[i + 3] as usize);
+                i += 2 + seg_len;
             }
             _ => {
                 // Unknown marker: skip length-prefixed bytes.
@@ -6994,3 +7029,186 @@ const _: () = {
     // Total struct size matches the canonical libjpeg v80 layout (584 B).
     assert!(std::mem::size_of::<JpegCompressPublic>() == 584);
 };
+
+#[cfg(test)]
+mod tables_only_tests {
+    use super::build_tables_only_datastream;
+
+    /// Walk JPEG markers in `bytes`, returning `(tq_indices, dc_th_indices, ac_th_indices)`
+    /// — the set of `Tq` numbers seen across all DQT segments, plus the `Th` numbers
+    /// seen across DHT entries split by class (`Tc=0` DC, `Tc=1` AC).
+    fn collect_table_indices(bytes: &[u8]) -> (Vec<u8>, Vec<u8>, Vec<u8>) {
+        let mut tq: Vec<u8> = Vec::new();
+        let mut dc_th: Vec<u8> = Vec::new();
+        let mut ac_th: Vec<u8> = Vec::new();
+        let mut i: usize = 0;
+        while i + 1 < bytes.len() {
+            assert_eq!(bytes[i], 0xFF, "expected marker prefix at {i}");
+            let code: u8 = bytes[i + 1];
+            if code == 0xD8 || code == 0xD9 {
+                i += 2;
+                continue;
+            }
+            assert!(i + 4 <= bytes.len(), "truncated marker length at {i}");
+            let seg_len: usize = ((bytes[i + 2] as usize) << 8) | (bytes[i + 3] as usize);
+            assert!(seg_len >= 2 && i + 2 + seg_len <= bytes.len());
+            let body: &[u8] = &bytes[i + 4..i + 2 + seg_len];
+            match code {
+                0xDB => {
+                    // DQT: each entry is `Pq:4 | Tq:4`, then 64 (or 128 if Pq=1) bytes.
+                    let mut p: usize = 0;
+                    while p < body.len() {
+                        let pq_tq: u8 = body[p];
+                        let pq: u8 = pq_tq >> 4;
+                        let tq_idx: u8 = pq_tq & 0x0F;
+                        tq.push(tq_idx);
+                        let entry_len: usize = if pq == 0 { 65 } else { 129 };
+                        p += entry_len;
+                    }
+                }
+                0xC4 => {
+                    // DHT: each entry is `Tc:4 | Th:4`, 16 length bytes, then ∑ length values.
+                    let mut p: usize = 0;
+                    while p < body.len() {
+                        let tc_th: u8 = body[p];
+                        let tc: u8 = tc_th >> 4;
+                        let th_idx: u8 = tc_th & 0x0F;
+                        if tc == 0 {
+                            dc_th.push(th_idx);
+                        } else {
+                            ac_th.push(th_idx);
+                        }
+                        let total_codes: usize =
+                            body[p + 1..p + 17].iter().map(|&b| b as usize).sum();
+                        p += 17 + total_codes;
+                    }
+                }
+                _ => {}
+            }
+            i += 2 + seg_len;
+        }
+        (tq, dc_th, ac_th)
+    }
+
+    /// Walks markers and returns whether any DAC (0xCC) marker is present.
+    fn has_dac(bytes: &[u8]) -> bool {
+        let mut i: usize = 0;
+        while i + 1 < bytes.len() {
+            if bytes[i] != 0xFF {
+                return false;
+            }
+            let code: u8 = bytes[i + 1];
+            if code == 0xD8 || code == 0xD9 {
+                i += 2;
+                continue;
+            }
+            if i + 4 > bytes.len() {
+                return false;
+            }
+            if code == 0xCC {
+                return true;
+            }
+            let seg_len: usize = ((bytes[i + 2] as usize) << 8) | (bytes[i + 3] as usize);
+            i += 2 + seg_len;
+        }
+        false
+    }
+
+    /// Walks markers and returns whether any DHT (0xC4) marker is present.
+    fn has_dht(bytes: &[u8]) -> bool {
+        let mut i: usize = 0;
+        while i + 1 < bytes.len() {
+            if bytes[i] != 0xFF {
+                return false;
+            }
+            let code: u8 = bytes[i + 1];
+            if code == 0xD8 || code == 0xD9 {
+                i += 2;
+                continue;
+            }
+            if i + 4 > bytes.len() {
+                return false;
+            }
+            if code == 0xC4 {
+                return true;
+            }
+            let seg_len: usize = ((bytes[i + 2] as usize) << 8) | (bytes[i + 3] as usize);
+            i += 2 + seg_len;
+        }
+        false
+    }
+
+    #[test]
+    fn huffman_datastream_emits_both_quant_and_all_huffman_tables() {
+        let bytes: Vec<u8> = build_tables_only_datastream(75, /*arith=*/ false);
+        assert_eq!(&bytes[..2], &[0xFF, 0xD8], "stream must begin with SOI");
+        assert_eq!(
+            &bytes[bytes.len() - 2..],
+            &[0xFF, 0xD9],
+            "stream must end with EOI"
+        );
+        let (tq, dc_th, ac_th) = collect_table_indices(&bytes);
+        assert!(tq.contains(&0), "DQT[Tq=0] (luma) missing: {tq:?}");
+        assert!(tq.contains(&1), "DQT[Tq=1] (chroma) missing: {tq:?}");
+        assert!(dc_th.contains(&0), "DHT[Tc=0,Th=0] (DC luma) missing");
+        assert!(dc_th.contains(&1), "DHT[Tc=0,Th=1] (DC chroma) missing");
+        assert!(ac_th.contains(&0), "DHT[Tc=1,Th=0] (AC luma) missing");
+        assert!(ac_th.contains(&1), "DHT[Tc=1,Th=1] (AC chroma) missing");
+        assert!(
+            !has_dac(&bytes),
+            "Huffman tables-only stream must not contain DAC"
+        );
+    }
+
+    #[test]
+    fn arithmetic_datastream_omits_dht_and_dac() {
+        // Upstream `jcmarker.c::write_tables_only` for arithmetic mode
+        // emits SOI + DQT + EOI only. DHT is skipped (not the entropy
+        // mode) and DAC is *not* emitted here either — DAC accompanies
+        // the scan header in the abbreviated body stream, not this
+        // tables-only datastream.
+        let bytes: Vec<u8> = build_tables_only_datastream(75, /*arith=*/ true);
+        assert_eq!(&bytes[..2], &[0xFF, 0xD8], "stream must begin with SOI");
+        assert_eq!(
+            &bytes[bytes.len() - 2..],
+            &[0xFF, 0xD9],
+            "stream must end with EOI"
+        );
+        let (tq, _, _) = collect_table_indices(&bytes);
+        assert!(tq.contains(&0), "DQT[Tq=0] (luma) missing: {tq:?}");
+        assert!(tq.contains(&1), "DQT[Tq=1] (chroma) missing: {tq:?}");
+        assert!(
+            !has_dht(&bytes),
+            "arithmetic tables-only stream must not contain DHT"
+        );
+        assert!(
+            !has_dac(&bytes),
+            "arithmetic tables-only stream must not contain DAC \
+             (DAC is emitted later with the scan header, not here)"
+        );
+    }
+
+    #[test]
+    fn datastream_well_formed_at_quality_extremes() {
+        for q in [1u8, 50, 100] {
+            for arith in [false, true] {
+                let bytes: Vec<u8> = build_tables_only_datastream(q, arith);
+                assert_eq!(
+                    &bytes[..2],
+                    &[0xFF, 0xD8],
+                    "SOI missing at quality {q}, arith={arith}"
+                );
+                assert_eq!(
+                    &bytes[bytes.len() - 2..],
+                    &[0xFF, 0xD9],
+                    "EOI missing at quality {q}, arith={arith}"
+                );
+                let (tq, _, _) = collect_table_indices(&bytes);
+                assert!(
+                    tq.contains(&0) && tq.contains(&1),
+                    "missing quant tables at quality {q}, arith={arith}: {tq:?}"
+                );
+            }
+        }
+    }
+}
