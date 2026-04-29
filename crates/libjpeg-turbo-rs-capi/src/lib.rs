@@ -52,9 +52,10 @@ pub use imageio::{
 };
 pub use precision::{tj3Compress12, tj3Compress16, tj3Decompress12, tj3Decompress16};
 pub use tj3::{
-    tj3Destroy, tj3Get, tj3GetErrorCode, tj3GetErrorStr, tj3Init, tj3InitVersion, tj3Set,
+    tj3Destroy, tj3Get, tj3GetErrorCode, tj3GetErrorStr, tj3GetICCProfile, tj3Init, tj3InitVersion,
+    tj3Set, tj3SetICCProfile,
 };
-pub use transform::{tj3Transform, TjTransform};
+pub use transform::{tj3Transform, tj3TransformBufSize, TjTransform};
 pub use yuv::{
     tj3CompressFromYUV8, tj3CompressFromYUVPlanes8, tj3DecodeYUV8, tj3DecodeYUVPlanes8,
     tj3DecompressToYUV8, tj3DecompressToYUVPlanes8, tj3EncodeYUV8, tj3EncodeYUVPlanes8,
