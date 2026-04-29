@@ -24,18 +24,18 @@ Intel Core i5-10400 @ 2.90GHz (turbo off, `performance` governor), C libjpeg-tur
 | 2560x1440 | 4:2:0 | 35,137 | 37,918 | **0.93x** |
 | 3840x2160 | 4:2:0 | 78,868 | 89,325 | **0.88x** |
 
-#### Encoding
+#### Encoding (built with `RUSTFLAGS="-C target-cpu=native"`)
 
-| Image | Subsampling | Rust (us) | C (us) | Ratio |
+| Image | Subsampling | Rust (µs) | C (µs) | Ratio |
 |-------|-------------|-----------|--------|-------|
-| 320x240 | 4:2:0 | 436 | 401 | 1.09x |
-| 320x240 | 4:2:2 | 537 | 527 | 1.02x |
-| 320x240 | 4:4:4 | 800 | 787 | 1.02x |
-| 640x480 | 4:2:2 | 1,818 | 1,711 | 1.06x |
-| 640x480 | 4:4:4 | 2,622 | 2,524 | 1.04x |
-| 1920x1080 | 4:2:0 | 11,836 | 10,442 | 1.13x |
-| 1920x1080 | 4:2:2 | 14,573 | 13,123 | 1.11x |
-| 1920x1080 | 4:4:4 | 21,839 | 20,076 | 1.09x |
+| 320x240 | 4:2:0 | 381 | 403 | **0.94x** |
+| 320x240 | 4:2:2 | 474 | 508 | **0.93x** |
+| 320x240 | 4:4:4 | 709 | 764 | **0.93x** |
+| 640x480 | 4:2:2 | 1,653 | 1,731 | **0.96x** |
+| 640x480 | 4:4:4 | 2,397 | 2,558 | **0.94x** |
+| 1920x1080 | 4:2:0 | 10,273 | 10,474 | **0.98x** |
+| 1920x1080 | 4:2:2 | 12,783 | 13,082 | **0.98x** |
+| 1920x1080 | 4:4:4 | 19,057 | 19,873 | **0.96x** |
 
 ### aarch64 (NEON)
 
@@ -59,7 +59,7 @@ Apple M1 Pro, C libjpeg-turbo 3.1.0, quality 75:
 
 **aarch64**: Decoding matches or beats C for 4:2:2 and 4:4:4; 4:2:0 has a 7% gap. Encoding matches or beats C in 7 of 8 configurations (see [`docs/ENCODING_PERFORMANCE.md`](docs/ENCODING_PERFORMANCE.md)); the remaining 1080p 4:2:0 gap (~4%) is structural function-call overhead.
 
-**x86_64**: Decoding beats C across most resolutions. Encoding is 2-13% slower — the encoder has AVX2 SIMD for FDCT/quantize/color-convert but uses scalar Huffman coding (C libjpeg-turbo has SSE2 Huffman; porting is in progress).
+**x86_64**: Decoding beats C across most resolutions. Encoding (with `target-cpu=native`) beats C in every benchmark above by 2–7 %; the encoder runs SSE2 Huffman + AVX2 FDCT/quantize/color/downsample. Without `target-cpu=native` (i.e. SSE2-only baseline), the same encode matrix trails C by 5–10 pp at 1080p because LLVM cannot emit `TZCNT`/`LZCNT`/BMI2 for the scalar bitmap-iteration code without an explicit target feature; the C reference's NASM-authored hot paths embed those instructions directly into `libjpeg.so` regardless of consumer build flags. Recommendation: production builds set `RUSTFLAGS="-C target-cpu=native"` (best) or at minimum `-C target-feature=+bmi1,+lzcnt,+bmi2,+fma`.
 
 ## Quick Start
 
@@ -156,10 +156,10 @@ Grayscale, RGB, BGR, RGBA, BGRA, ARGB, ABGR, RGBX, BGRX, XRGB, XBGR, CMYK, RGB56
 | Platform | Backend | Decode | Encode |
 |----------|---------|--------|--------|
 | aarch64 | NEON | IDCT, color convert, upsample, dequantize | FDCT, color convert, quantize+zigzag, downsample, Huffman |
-| x86_64 | SSE2 | IDCT, color convert, upsample | scalar fallback |
-| x86_64 | AVX2 | IDCT, color convert, upsample, merged upsample+color | FDCT, color convert, quantize+zigzag, downsample |
+| x86_64 | SSE2 | IDCT, color convert, upsample | Huffman bitmap+sign-correction |
+| x86_64 | AVX2 | IDCT, color convert, upsample, merged upsample+color | FDCT, color convert, quantize+zigzag, downsample (fused H2V1/H2V2) |
 
-aarch64 has comprehensive SIMD across the full pipeline. x86_64 decode is fully accelerated (SSE2/AVX2); x86_64 encode has AVX2 acceleration for compute-heavy stages but scalar Huffman coding.
+aarch64 has comprehensive SIMD across the full pipeline. x86_64 decode and encode are both fully accelerated; encode pairs SSE2 Huffman bitmap construction with AVX2 fused FDCT/quantize/color/downsample.
 
 All SIMD routines have scalar fallbacks. SIMD is enabled by default via the `simd` feature flag.
 
