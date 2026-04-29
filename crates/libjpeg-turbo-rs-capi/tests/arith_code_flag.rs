@@ -2,9 +2,15 @@
 //!
 //! Classic-API callers that branch on `cinfo.arith_code` (e.g. to pick a
 //! codec path or to print stream metadata) must see `1` for arithmetic-coded
-//! JPEGs (SOF9/SOF10/SOF11) and `0` for Huffman-coded JPEGs (SOF0/SOF1/…).
+//! JPEGs and `0` for Huffman-coded JPEGs.
+//!
+//! Per ISO 10918-1 Table B.1, the entropy-coding family is determined by bit 3
+//! of `(SOF_marker & 0x0F)`: arithmetic markers are SOF9/SOF10/SOF11
+//! (0xC9–0xCB) and the differential variants SOF13/SOF14/SOF15 (0xCD–0xCF).
+//! All others (SOF0–SOF3, SOF5–SOF7) are Huffman-coded.
+//!
 //! The shim previously hardcoded `arith_code = 0` regardless of the actual
-//! SOF marker; this test pins the correct behaviour.
+//! SOF marker; these tests pin the correct behaviour.
 
 use std::ffi::{c_int, c_void};
 use std::mem::MaybeUninit;
@@ -165,5 +171,34 @@ fn arith_code_is_0_for_huffman_coded_jpeg() {
     assert_eq!(
         arith_code, 0,
         "arith_code must be 0 for Huffman-coded JPEG (got {arith_code})"
+    );
+}
+
+/// `testorig.jpg` is a baseline Huffman-coded JPEG (SOF0). After
+/// `jpeg_read_header`, `cinfo.arith_code` must be 0.  This pins the baseline
+/// (SOF0) case explicitly, separate from the progressive (SOF2) case above.
+#[test]
+fn arith_code_is_0_for_baseline_sof0() {
+    let path: PathBuf = cdylib_path();
+    let lib: libloading::Library =
+        unsafe { libloading::Library::new(&path) }.expect("dlopen cdylib");
+
+    let manifest_dir: PathBuf = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let fixture: PathBuf =
+        manifest_dir.join("../../references/libjpeg-turbo/testimages/testorig.jpg");
+    if !fixture.exists() {
+        eprintln!(
+            "SKIP: testorig.jpg not found at {} — submodule not initialised",
+            fixture.display()
+        );
+        return;
+    }
+    let jpeg_bytes: Vec<u8> = std::fs::read(&fixture)
+        .unwrap_or_else(|e| panic!("could not read {}: {e}", fixture.display()));
+
+    let arith_code: c_int = read_arith_code_flag(&lib, &jpeg_bytes);
+    assert_eq!(
+        arith_code, 0,
+        "arith_code must be 0 for baseline SOF0 JPEG (got {arith_code})"
     );
 }
