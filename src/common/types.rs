@@ -342,6 +342,14 @@ pub enum MarkerSaveConfig {
     AppOnly,
     /// Save only the specified marker codes.
     Specific(Vec<u8>),
+    /// Save only the specified marker codes, truncating each marker's body
+    /// to at most the associated byte limit.
+    ///
+    /// This matches libjpeg's `jpeg_save_markers(cinfo, code, length_limit)`
+    /// per-code truncation: the saved `data` slice is `min(full_len, limit)`
+    /// bytes long.  A missing entry for a code is treated as "no limit"
+    /// (`usize::MAX`).
+    WithLimits(std::collections::HashMap<u8, usize>),
 }
 
 /// Progressive scan script entry.
