@@ -30,9 +30,13 @@ exclude = [
 default = ["simd"]
 simd = []
 full-c-parity = []
+# Optional PNG support for tj3LoadImage8 / tj3SaveImage8. Off by default so
+# the codec crate stays small. Enable with --features png.
+png = ["dep:png"]
 
 [dependencies]
 thiserror = "2"
+png = { version = "0.17", optional = true }
 
 [dev-dependencies]
 zune-jpeg = "0.5"

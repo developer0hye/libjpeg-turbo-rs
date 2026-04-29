@@ -29,6 +29,10 @@ pub use api::high_level::{
     compress_optimized, compress_progressive, compress_with_metadata, decompress,
     decompress_cropped, decompress_lenient, decompress_to,
 };
+#[cfg(feature = "png")]
+pub use api::image_io::load_png_from_bytes;
+#[cfg(all(feature = "png", any(not(target_arch = "wasm32"), target_os = "wasi")))]
+pub use api::image_io::save_png;
 #[cfg(any(not(target_arch = "wasm32"), target_os = "wasi"))]
 pub use api::image_io::{
     load_image, load_ppm_12bit, load_ppm_16bit, save_bmp, save_ppm, save_ppm_12bit, save_ppm_16bit,
