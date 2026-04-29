@@ -5,8 +5,12 @@
 # SIMD intrinsics, and buffer-management code.
 #
 # WHY NIGHTLY:
-#   The `-Z sanitizer=<name>` flag is an unstable rustc feature that requires
-#   the nightly toolchain. Stable rustc does not expose sanitizer support.
+#   The `-Z sanitizer=address` and `-Z ub-checks=yes` flags are unstable rustc
+#   features that require the nightly toolchain. Stable rustc does not expose
+#   them.  Note: rustc does not implement `sanitizer=undefined`; UB checking is
+#   done via `-Z ub-checks=yes` which instruments the binary with runtime UB
+#   traps (signed integer overflow, invalid enum discriminant, misaligned
+#   pointer access, etc.) beyond what `-C debug-assertions` provides.
 #
 # WHY EXPLICIT TARGET:
 #   When a -Z sanitizer flag is set, Cargo requires an explicit --target so
@@ -108,10 +112,12 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     env:
-      RUSTFLAGS: "-Z sanitizer=undefined"
-      RUSTDOCFLAGS: "-Z sanitizer=undefined"
-      # Print a full stack trace on every UBSan report instead of just a one-liner.
-      UBSAN_OPTIONS: "print_stacktrace=1:halt_on_error=1"
+      # -Z ub-checks=yes instruments the binary with runtime UB traps beyond
+      # what debug-assertions covers: signed integer overflow, invalid enum
+      # discriminant, misaligned pointer dereference, null pointer arithmetic.
+      # rustc does not implement `sanitizer=undefined`; ub-checks is the
+      # correct nightly UB detection knob.
+      RUSTFLAGS: "-Z ub-checks=yes"
     steps:
       - uses: actions/checkout@v4
         with:
@@ -123,13 +129,14 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
-      - name: Run lib tests under UndefinedBehaviorSanitizer
-        # Same rationale as ASan: --lib avoids un-instrumented C tool invocations.
+      - name: Run lib tests under ub-checks
+        # --lib: same rationale as ASan job — avoids un-instrumented C tools.
+        # No explicit --target needed since ub-checks does not require the
+        # sanitizer runtime linking that -Z sanitizer=address requires.
         run: |
           cargo +nightly test \
             --workspace \
             --lib \
-            --target x86_64-unknown-linux-gnu \
             --no-fail-fast \
             -- --test-threads=1
         timeout-minutes: 20

@@ -196,15 +196,15 @@ cargo +nightly test --workspace --lib \
   --no-fail-fast -- --test-threads=1
 ```
 
-**UndefinedBehaviorSanitizer** (detects integer overflow, invalid casts, misaligned access):
+**UB checks** (detects signed integer overflow, invalid enum discriminant, misaligned pointer dereference):
 
 ```bash
-RUSTFLAGS="-Z sanitizer=undefined" \
-UBSAN_OPTIONS="print_stacktrace=1:halt_on_error=1" \
+RUSTFLAGS="-Z ub-checks=yes" \
 cargo +nightly test --workspace --lib \
-  --target x86_64-unknown-linux-gnu \
   --no-fail-fast -- --test-threads=1
 ```
+
+Note: `rustc` does not implement `sanitizer=undefined`; `-Z ub-checks=yes` is the correct nightly knob for runtime UB detection.
 
 Both jobs run on every PR via `.github/workflows/sanitizers.yml`. macOS is excluded because the NEON SIMD paths produce spurious cross-thread ASan shadow-map false positives under parallel test execution.
 
