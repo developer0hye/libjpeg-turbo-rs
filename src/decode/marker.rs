@@ -88,11 +88,11 @@ pub struct JpegMetadata {
     /// True if using arithmetic entropy coding.
     ///
     /// Per ISO 10918-1 Table B.1, bit 3 of `(SOF_marker & 0x0F)` selects the
-    /// entropy-coding family: 0 = Huffman, 1 = arithmetic.  The arithmetic
-    /// markers are SOF9 (0xC9), SOF10 (0xCA), SOF11 (0xCB), SOF13 (0xCD),
-    /// SOF14 (0xCE), and SOF15 (0xCF).  All others (SOF0–SOF3, SOF5–SOF7) are
-    /// Huffman.  0xC4 (DHT), 0xC8 (JPG reserved), and 0xCC (DAC) are not SOF
-    /// markers and are excluded.
+    /// entropy-coding family: 0 = Huffman, 1 = arithmetic.  This decoder
+    /// supports SOF9 (0xC9), SOF10 (0xCA), and SOF11 (0xCB) as arithmetic; and
+    /// SOF0–SOF3 (0xC0–0xC3) as Huffman.  Differential variants SOF5–SOF7 and
+    /// SOF13–SOF15 are rejected with `JpegError::Unsupported`, matching C
+    /// libjpeg-turbo behaviour.
     pub is_arithmetic: bool,
     /// DAC conditioning: DC parameters (L, U) per table. 16 slots per
     /// ITU-T T.81 `NUM_ARITH_TBLS`.
@@ -209,21 +209,12 @@ impl<'a> MarkerReader<'a> {
                     frame = Some(self.read_sof(false, true)?);
                 }
                 // Differential Huffman-coded variants (ISO 10918-1 Table B.1,
-                // markers 0xC5–0xC7).  Bit 3 of (marker & 0x0F) is 0 → Huffman.
-                // Full decode of the differential extension is not yet supported,
-                // but the SOF header must be consumed to advance the stream and
-                // is_arithmetic must stay false.
-                SOF5 => {
-                    reject_duplicate_sof(&frame)?;
-                    frame = Some(self.read_sof(false, false)?);
-                }
-                SOF6 => {
-                    reject_duplicate_sof(&frame)?;
-                    frame = Some(self.read_sof(true, false)?);
-                }
-                SOF7 => {
-                    reject_duplicate_sof(&frame)?;
-                    frame = Some(self.read_sof(false, true)?);
+                // markers 0xC5–0xC7).  C libjpeg-turbo rejects these with
+                // "Unsupported JPEG process: SOF type 0xCN"; match that behaviour.
+                SOF5 | SOF6 | SOF7 => {
+                    return Err(JpegError::Unsupported(format!(
+                        "unsupported JPEG process: SOF type 0x{marker:02X}"
+                    )));
                 }
                 SOF9 => {
                     // Arithmetic sequential
@@ -244,24 +235,12 @@ impl<'a> MarkerReader<'a> {
                     is_arithmetic = true;
                 }
                 // Differential arithmetic-coded variants (ISO 10918-1 Table B.1,
-                // markers 0xCD–0xCF).  Bit 3 of (marker & 0x0F) is 1 → arithmetic.
-                // Full decode of the differential extension is not yet supported,
-                // but the SOF header must be consumed to advance the stream and
-                // is_arithmetic must be set to true.
-                SOF13 => {
-                    reject_duplicate_sof(&frame)?;
-                    frame = Some(self.read_sof(false, false)?);
-                    is_arithmetic = true;
-                }
-                SOF14 => {
-                    reject_duplicate_sof(&frame)?;
-                    frame = Some(self.read_sof(true, false)?);
-                    is_arithmetic = true;
-                }
-                SOF15 => {
-                    reject_duplicate_sof(&frame)?;
-                    frame = Some(self.read_sof(false, true)?);
-                    is_arithmetic = true;
+                // markers 0xCD–0xCF).  C libjpeg-turbo rejects these with
+                // "Unsupported JPEG process: SOF type 0xCN"; match that behaviour.
+                SOF13 | SOF14 | SOF15 => {
+                    return Err(JpegError::Unsupported(format!(
+                        "unsupported JPEG process: SOF type 0x{marker:02X}"
+                    )));
                 }
                 DAC => {
                     self.read_dac(&mut arith_dc_params, &mut arith_ac_params)?;
@@ -934,26 +913,24 @@ mod tests {
         v
     }
 
-    /// ISO 10918-1 Table B.1: entropy-coding family is determined by bit 3 of
-    /// `(SOF_marker & 0x0F)`.  Verify that all 12 SOF variants set
-    /// `is_arithmetic` correctly (0xC4=DHT, 0xC8=JPG, 0xCC=DAC excluded).
+    /// Supported SOF variants (SOF0–SOF3, SOF9–SOF11) must parse and report
+    /// `is_arithmetic` correctly.  The classification rule per ISO 10918-1
+    /// Table B.1: bit 3 of `(SOF_marker & 0x0F)` selects the entropy-coding
+    /// family — 0 = Huffman, 1 = arithmetic.
+    ///
+    /// C libjpeg-turbo supports the same set; validated by running the C
+    /// reference against synthetic JPEG headers.
     #[test]
-    fn is_arithmetic_covers_all_sof_variants() {
+    fn is_arithmetic_supported_sof_variants() {
         // (sof_marker, expected_is_arithmetic)
         let cases: &[(u8, bool)] = &[
             (0xC0, false), // SOF0  baseline DCT, Huffman
             (0xC1, false), // SOF1  extended sequential DCT, Huffman
             (0xC2, false), // SOF2  progressive DCT, Huffman
             (0xC3, false), // SOF3  lossless, Huffman
-            (0xC5, false), // SOF5  differential sequential DCT, Huffman
-            (0xC6, false), // SOF6  differential progressive DCT, Huffman
-            (0xC7, false), // SOF7  differential lossless, Huffman
             (0xC9, true),  // SOF9  extended sequential DCT, arithmetic
             (0xCA, true),  // SOF10 progressive DCT, arithmetic
             (0xCB, true),  // SOF11 lossless, arithmetic
-            (0xCD, true),  // SOF13 differential sequential DCT, arithmetic
-            (0xCE, true),  // SOF14 differential progressive DCT, arithmetic
-            (0xCF, true),  // SOF15 differential lossless, arithmetic
         ];
 
         for &(sof_byte, expected) in cases {
@@ -967,6 +944,41 @@ mod tests {
                 "SOF 0x{sof_byte:02X}: expected is_arithmetic={expected}, got {}",
                 meta.is_arithmetic,
             );
+        }
+    }
+
+    /// Differential SOF variants (SOF5/SOF6/SOF7 Huffman and SOF13/SOF14/SOF15
+    /// arithmetic) are rejected with `JpegError::Unsupported`, matching C
+    /// libjpeg-turbo's "Unsupported JPEG process: SOF type 0xCN" behaviour.
+    #[test]
+    fn unsupported_differential_sof_variants_return_error() {
+        let unsupported: &[u8] = &[
+            0xC5, // SOF5  differential sequential DCT, Huffman
+            0xC6, // SOF6  differential progressive DCT, Huffman
+            0xC7, // SOF7  differential lossless, Huffman
+            0xCD, // SOF13 differential sequential DCT, arithmetic
+            0xCE, // SOF14 differential progressive DCT, arithmetic
+            0xCF, // SOF15 differential lossless, arithmetic
+        ];
+
+        for &sof_byte in unsupported {
+            let jpeg: Vec<u8> = make_minimal_jpeg(sof_byte);
+            let mut reader: MarkerReader = MarkerReader::new(&jpeg);
+            let result: Result<JpegMetadata> = reader.read_markers();
+            match result {
+                Err(JpegError::Unsupported(msg)) => {
+                    assert!(
+                        msg.contains(&format!("0x{sof_byte:02X}")),
+                        "SOF 0x{sof_byte:02X}: error message should contain marker code, got: {msg}"
+                    );
+                }
+                Err(other) => {
+                    panic!("SOF 0x{sof_byte:02X}: expected Unsupported error, got {other:?}")
+                }
+                Ok(_) => {
+                    panic!("SOF 0x{sof_byte:02X}: expected Unsupported error, but parse succeeded")
+                }
+            }
         }
     }
 
