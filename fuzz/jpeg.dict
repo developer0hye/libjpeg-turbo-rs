@@ -1,0 +1,110 @@
+# JPEG marker dictionary for libFuzzer structure-aware mutation.
+#
+# Each entry is a byte sequence that appears at valid positions in a JPEG
+# bitstream. libFuzzer uses these as mutation building blocks.
+#
+# Rules: lines starting with '#' are comments (ignored by libFuzzer).
+# All string literals must be on their own line with no trailing comments.
+# Hex escapes use \xNN notation.
+
+# Start / End
+"\xff\xd8"
+"\xff\xd9"
+
+# Frame headers (SOF markers)
+"\xff\xc0"
+"\xff\xc1"
+"\xff\xc2"
+"\xff\xc3"
+"\xff\xc5"
+"\xff\xc6"
+"\xff\xc7"
+"\xff\xc9"
+"\xff\xca"
+"\xff\xcb"
+"\xff\xcd"
+"\xff\xce"
+"\xff\xcf"
+
+# Huffman / arithmetic table markers
+"\xff\xc4"
+"\xff\xcc"
+
+# Quantization / restart
+"\xff\xdb"
+"\xff\xdd"
+
+# Restart markers RST0..RST7
+"\xff\xd0"
+"\xff\xd1"
+"\xff\xd2"
+"\xff\xd3"
+"\xff\xd4"
+"\xff\xd5"
+"\xff\xd6"
+"\xff\xd7"
+
+# Scan / image data
+"\xff\xda"
+
+# APP markers APP0..APP15
+"\xff\xe0"
+"\xff\xe1"
+"\xff\xe2"
+"\xff\xe3"
+"\xff\xe4"
+"\xff\xe5"
+"\xff\xe6"
+"\xff\xe7"
+"\xff\xe8"
+"\xff\xe9"
+"\xff\xea"
+"\xff\xeb"
+"\xff\xec"
+"\xff\xed"
+"\xff\xee"
+"\xff\xef"
+
+# Comment
+"\xff\xfe"
+
+# DNL (define number of lines)
+"\xff\xdc"
+
+# DHP / EXP (hierarchical)
+"\xff\xde"
+"\xff\xdf"
+
+# Common JFIF APP0 identifier
+"JFIF\x00"
+
+# Common Exif APP1 identifier
+"Exif\x00\x00"
+
+# Adobe APP14 transform marker
+"Adobe\x00"
+
+# Common segment length prefixes (big-endian u16)
+"\x00\x02"
+"\x00\x04"
+"\x00\x08"
+"\x00\x0b"
+"\x00\x0e"
+"\x00\x11"
+"\x00\x14"
+"\x00\x10"
+"\x00\x1f"
+
+# Common precision / component count bytes
+"\x08"
+"\x0c"
+"\x10"
+"\x01"
+"\x03"
+"\x04"
+
+# Byte stuffing
+"\xff\x00"
+
+# SOI + minimal SOF0 skeleton for 8x8 grayscale
+"\xff\xd8\xff\xc0\x00\x0b\x08\x00\x08\x00\x08\x01\x01\x11\x00"

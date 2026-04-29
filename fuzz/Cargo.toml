@@ -55,3 +55,8 @@ doc = false
 name = "fuzz_encode_roundtrip"
 path = "fuzz_targets/fuzz_encode_roundtrip.rs"
 doc = false
+
+[[bin]]
+name = "fuzz_transform_options"
+path = "fuzz_targets/fuzz_transform_options.rs"
+doc = false

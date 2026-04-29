@@ -14,21 +14,46 @@ rustup toolchain install nightly
 Before running the fuzzer for the first time, generate seed JPEG files from existing test fixtures:
 
 ```bash
-cargo test generate_seeds -- --ignored
+cargo test --test generate_fuzz_seeds
 ```
 
-This populates `fuzz/corpus/<target>/` with small valid JPEGs so the fuzzer starts from structurally meaningful inputs.
+This populates `fuzz/corpus/<target>/` with a large variety of structurally valid JPEG files
+so libFuzzer starts from meaningful inputs. The generator covers:
+
+- Full matrix: 3 content types × 7 subsampling modes × 3 quality levels × 6 entropy modes
+  (~320 seeds per decoder target)
+- Real-world fixtures from `tests/fixtures/` (7 files)
+- Wide-aspect (8×64) and tall-aspect (64×8) images exercising dimension-extreme paths
+- Restart-marker JPEGs (DRI segment injected after SOI, interval=2)
+- 16 structural edge-case byte sequences (bare SOI, truncated SOF0, multi-COM, APP1/APP2/APP14,
+  zero-dimension SOF0, all-0xFF, non-JPEG bytes, etc.)
+- `fuzz_transform_options`-specific seeds: 6 source JPEGs × 15 option combos + edge cases
+  (117 seeds total for that target)
+
+## JPEG marker dictionary
+
+`fuzz/jpeg.dict` is a libFuzzer dictionary covering all standard JPEG markers (SOI/EOI, SOF0–SOF15,
+DHT, DAC, DQT, DRI, RST0–RST7, SOS, APP0–APP15, COM, DNL, DHP, EXP), common segment-length
+prefixes, precision/component-count bytes, JFIF/Exif/Adobe APP identifiers, and byte-stuffing.
+
+Use it with `-dict=fuzz/jpeg.dict` to bias mutation towards structurally valid JPEG sequences:
+
+```bash
+cargo +nightly fuzz run fuzz_decompress -- -dict=fuzz/jpeg.dict -max_total_time=3600
+```
 
 ## Fuzz targets
 
-| Target | Description |
-|--------|-------------|
-| `fuzz_decompress` | Main decoder — highest priority target |
-| `fuzz_decompress_lenient` | Lenient-mode decoder (tolerates partial corruption) |
-| `fuzz_roundtrip` | Compress then decompress — checks encoder/decoder consistency |
-| `fuzz_read_coefficients` | DCT coefficient reader |
-| `fuzz_transform` | Read coefficients then write them back |
-| `fuzz_progressive_decoder` | Progressive scan-by-scan decoder |
+| Target | Description | Corpus seeds |
+|--------|-------------|-------------|
+| `fuzz_decompress` | Main decoder — highest priority target | ~347 |
+| `fuzz_decompress_lenient` | Lenient-mode decoder (tolerates partial corruption) | ~347 |
+| `fuzz_roundtrip` | Compress then decompress — checks encoder/decoder consistency | ~320 |
+| `fuzz_read_coefficients` | DCT coefficient reader | ~347 |
+| `fuzz_transform` | Read coefficients then write them back | ~331 |
+| `fuzz_progressive_decoder` | Progressive scan-by-scan decoder | ~350 |
+| `fuzz_encode_roundtrip` | Structured header + raw pixels → encode → decode assertion | ~294 |
+| `fuzz_transform_options` | `transform_jpeg_with_options` with all TransformOp × option combos | ~117 |
 
 ## Run
 
@@ -38,11 +63,14 @@ Requires nightly Rust. Each command runs until interrupted or the time limit is 
 # Run a single target (60-second quick smoke test)
 cargo +nightly fuzz run fuzz_decompress -- -max_total_time=60
 
-# Run with longer duration for thorough testing
-cargo +nightly fuzz run fuzz_decompress -- -max_total_time=3600
+# Run with dictionary for structure-aware mutation
+cargo +nightly fuzz run fuzz_decompress -- -dict=fuzz/jpeg.dict -max_total_time=3600
+
+# Run the new transform-options target
+cargo +nightly fuzz run fuzz_transform_options -- -dict=fuzz/jpeg.dict -max_total_time=1800
 
 # Run all targets sequentially (60 seconds each)
-for target in $(cargo fuzz list); do
+for target in $(cargo +nightly fuzz list); do
     echo "=== Fuzzing $target ==="
     cargo +nightly fuzz run "$target" -- -max_total_time=60
 done
@@ -51,7 +79,7 @@ done
 ## List targets
 
 ```bash
-cargo fuzz list
+cargo +nightly fuzz list
 ```
 
 ## Reproduce a crash
@@ -71,7 +99,8 @@ cargo +nightly fuzz coverage fuzz_decompress
 ```
 fuzz/
   Cargo.toml              # Fuzz crate manifest
-  fuzz_targets/            # One .rs file per fuzz target
-  corpus/<target>/         # Seed corpus per target (populated by generate_seeds test)
-  artifacts/<target>/      # Crash-reproducing inputs (gitignored, created by fuzzer)
+  jpeg.dict               # JPEG marker dictionary for structure-aware mutation
+  fuzz_targets/           # One .rs file per fuzz target
+  corpus/<target>/        # Seed corpus per target (populated by generate_fuzz_seeds test)
+  artifacts/<target>/     # Crash-reproducing inputs (gitignored, created by fuzzer)
 ```
