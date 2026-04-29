@@ -283,3 +283,109 @@ pub extern "C" fn tj3GetErrorCode(handle: *mut c_void) -> c_int {
     let inst: &mut TjInstance = unsafe { &mut *(handle as *mut TjInstance) };
     inst.last_error_code
 }
+
+/// `tj3GetICCProfile(handle, **iccBuf, *iccSize) -> int`.
+///
+/// Returns the ICC profile (if any) associated with the TurboJPEG instance.
+/// The handle accumulates an ICC profile in two ways:
+///   * `tj3SetICCProfile` writes one in for subsequent encodes/transforms.
+///   * `tj3DecompressHeader` extracts one from the source JPEG when
+///     `TJPARAM_SAVEMARKERS` is set (or when ICC capture is implicit).
+///
+/// Contract (mirrors `references/libjpeg-turbo/src/turbojpeg.h:1995`):
+/// `iccSize` is required (NULL → -1). When `iccBuf == NULL` the call is
+/// query-only and only `*iccSize` is populated; otherwise `*iccBuf` is
+/// set to a fresh `tj3Alloc`-style libc allocation that the caller must
+/// free with `tj3Free`, and `*iccSize` reflects the byte count. When no
+/// ICC is available the stub writes `*iccSize = 0` (and `*iccBuf = NULL`
+/// when the buffer pointer is non-NULL) and returns 0.
+///
+/// Stub note (2026-04-29): the ICC-capture path through
+/// `tj3DecompressHeader` is not yet wired, so this currently always
+/// reports "no ICC available". `tjbench` only queries via the NULL
+/// `iccBuf` form to decide whether to embed an ICC during transform,
+/// so a clean "no ICC" answer keeps the benchmark functional. Wiring
+/// real ICC capture is tracked separately.
+///
+/// **DIVERGENCE from upstream:** stock `tj3GetICCProfile` returns -1
+/// with `TJERR_WARNING` (not `TJERR_FATAL`) when called on a decompress
+/// instance that has no captured ICC; this stub returns 0 instead.
+/// Acceptable today because (a) `TJERR_WARNING` requires a soft-error
+/// path that the shim doesn't implement yet (see `tj3.rs::TJERR_WARNING`),
+/// and (b) every documented caller (incl. `tjbench`) only checks for
+/// `== -1` and treats either result as "no ICC", so flipping the
+/// sentinel does not change behaviour. Wire the warning-return form
+/// once the soft-error path lands.
+#[no_mangle]
+pub extern "C" fn tj3GetICCProfile(
+    handle: *mut c_void,
+    icc_buf: *mut *mut u8,
+    icc_size: *mut usize,
+) -> c_int {
+    let inst: &mut TjInstance = match unsafe { handle_as_mut(handle) } {
+        Some(i) => i,
+        None => return -1,
+    };
+    if icc_size.is_null() {
+        inst.set_error("tj3GetICCProfile: iccSize is NULL", TJERR_FATAL);
+        return -1;
+    }
+    let icc: Option<&[u8]> = inst.inner.icc_profile();
+    // SAFETY: caller guarantees the out-pointers are valid for write.
+    unsafe {
+        match icc {
+            Some(bytes) => {
+                *icc_size = bytes.len();
+                if !icc_buf.is_null() {
+                    let out: *mut u8 = crate::alloc::libc_from_slice(bytes);
+                    if out.is_null() && !bytes.is_empty() {
+                        inst.set_error("tj3GetICCProfile: out-of-memory", TJERR_FATAL);
+                        return -1;
+                    }
+                    *icc_buf = out;
+                }
+            }
+            None => {
+                *icc_size = 0;
+                if !icc_buf.is_null() {
+                    *icc_buf = std::ptr::null_mut();
+                }
+            }
+        }
+    }
+    inst.clear_error();
+    0
+}
+
+/// `tj3SetICCProfile(handle, *iccBuf, iccSize) -> int`.
+///
+/// Associates an ICC profile with the TurboJPEG instance so subsequent
+/// encode/transform calls embed it as APP2 chunks. `iccBuf == NULL`
+/// AND `iccSize == 0` clears the stored profile (mirrors upstream
+/// `references/libjpeg-turbo/src/turbojpeg.h:1511`).
+#[no_mangle]
+pub extern "C" fn tj3SetICCProfile(
+    handle: *mut c_void,
+    icc_buf: *mut u8,
+    icc_size: usize,
+) -> c_int {
+    let inst: &mut TjInstance = match unsafe { handle_as_mut(handle) } {
+        Some(i) => i,
+        None => return -1,
+    };
+    // Upstream `tj3SetICCProfile` clears the stored profile whenever
+    // `iccBuf == NULL` regardless of `iccSize`. The earlier "iccBuf is
+    // NULL but iccSize > 0 → reject" path was over-strict and meant a
+    // caller passing NULL to remove a previously set profile would
+    // continue to see the stale profile embedded in subsequent
+    // compressions (codex review of d4c28b1).
+    if icc_buf.is_null() || icc_size == 0 {
+        inst.inner.set_icc_profile(None);
+    } else {
+        // SAFETY: non-NULL pointer with positive length, validated above.
+        let bytes: &[u8] = unsafe { std::slice::from_raw_parts(icc_buf, icc_size) };
+        inst.inner.set_icc_profile(Some(bytes.to_vec()));
+    }
+    inst.clear_error();
+    0
+}

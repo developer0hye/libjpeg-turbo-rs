@@ -5,6 +5,9 @@ build/*.o
 build/djpeg
 build/cjpeg
 build/jpegtran
+build/tjbench
+build/rdjpgcom
+build/wrjpgcom
 build/link_errors.txt
 build/*_build.log
 # Generated jconfig headers rebuilt by build.sh
