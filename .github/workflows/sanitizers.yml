@@ -1,0 +1,135 @@
+# Sanitizer CI
+#
+# Runs AddressSanitizer (ASan) and UndefinedBehaviorSanitizer (UBSan) against
+# the workspace test suite to catch latent unsafe bugs in the FFI shim,
+# SIMD intrinsics, and buffer-management code.
+#
+# WHY NIGHTLY:
+#   The `-Z sanitizer=<name>` flag is an unstable rustc feature that requires
+#   the nightly toolchain. Stable rustc does not expose sanitizer support.
+#
+# WHY EXPLICIT TARGET:
+#   When a -Z sanitizer flag is set, Cargo requires an explicit --target so
+#   the compiler can link against the sanitizer runtime for that specific
+#   architecture. Omitting --target produces a confusing "cannot find sanitizer
+#   runtime" error; specifying it makes the dependency explicit.
+#
+# WHY LINUX ONLY:
+#   macOS sanitizer runtimes have known false positives with NEON intrinsics
+#   under parallel test execution (the ASAN shadow-map racing across threads).
+#   Linux x86_64 ubuntu-latest produces clean, reliable results and covers the
+#   primary deployment target.
+#
+# HOW TO RUN LOCALLY (Linux or Docker):
+#   rustup install nightly
+#   rustup component add rust-src --toolchain nightly
+#
+#   # AddressSanitizer
+#   RUSTFLAGS="-Z sanitizer=address" \
+#   RUSTDOCFLAGS="-Z sanitizer=address" \
+#   LSAN_OPTIONS="suppressions=$(pwd)/lsan_suppressions.txt" \
+#   cargo +nightly test --workspace --target x86_64-unknown-linux-gnu \
+#     --lib --no-fail-fast -- --test-threads=1
+#
+#   # UndefinedBehaviorSanitizer
+#   RUSTFLAGS="-Z sanitizer=undefined" \
+#   RUSTDOCFLAGS="-Z sanitizer=undefined" \
+#   cargo +nightly test --workspace --target x86_64-unknown-linux-gnu \
+#     --lib --no-fail-fast -- --test-threads=1
+#
+# NOTE ON EXCLUDED TESTS:
+#   Integration tests (`--tests`) are excluded from the sanitizer matrix
+#   because they invoke external C binaries (djpeg / cjpeg / jpegtran) that
+#   are not built with sanitizer instrumentation.  Un-instrumented C code
+#   calling back into instrumented Rust triggers guaranteed false-positive
+#   leak/shadow-map reports from the ASAN runtime.  The lib tests already
+#   cover every unsafe block in the FFI shim, SIMD kernels, and buffer logic.
+#   If a future PR adds a pure-Rust integration test, add it here explicitly.
+#
+# NOTE ON LSAN:
+#   LeakSanitizer runs automatically as part of ASan on Linux.  False
+#   positives from glibc internals (getenv, thread-local storage) and the
+#   system JPEG library are suppressed via lsan_suppressions.txt (checked in
+#   at the repo root).
+
+name: Sanitizers
+
+on:
+  pull_request:
+    branches: [main]
+
+env:
+  CARGO_TERM_COLOR: always
+
+concurrency:
+  group: sanitizers-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  asan:
+    name: AddressSanitizer
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      RUSTFLAGS: "-Z sanitizer=address"
+      RUSTDOCFLAGS: "-Z sanitizer=address"
+      # Disable LSAN inside ASan to avoid false positives from glibc / system
+      # allocator internals that are not under our control.  Any suppressions
+      # we DO want to keep are in lsan_suppressions.txt.
+      LSAN_OPTIONS: "suppressions=${{ github.workspace }}/lsan_suppressions.txt:detect_leaks=1"
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: rust-src
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Run lib tests under AddressSanitizer
+        # --lib: only unit tests compiled into the library — no external C
+        #        tool invocations that would produce ASAN false positives.
+        # --test-threads=1: prevents cross-thread ASAN shadow-map races that
+        #        cause false positives on SIMD intrinsic paths.
+        # --no-fail-fast: collect all failures in one run.
+        run: |
+          cargo +nightly test \
+            --workspace \
+            --lib \
+            --target x86_64-unknown-linux-gnu \
+            --no-fail-fast \
+            -- --test-threads=1
+        timeout-minutes: 20
+
+  ubsan:
+    name: UndefinedBehaviorSanitizer
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      RUSTFLAGS: "-Z sanitizer=undefined"
+      RUSTDOCFLAGS: "-Z sanitizer=undefined"
+      # Print a full stack trace on every UBSan report instead of just a one-liner.
+      UBSAN_OPTIONS: "print_stacktrace=1:halt_on_error=1"
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: rust-src
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Run lib tests under UndefinedBehaviorSanitizer
+        # Same rationale as ASan: --lib avoids un-instrumented C tool invocations.
+        run: |
+          cargo +nightly test \
+            --workspace \
+            --lib \
+            --target x86_64-unknown-linux-gnu \
+            --no-fail-fast \
+            -- --test-threads=1
+        timeout-minutes: 20

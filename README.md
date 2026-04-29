@@ -178,6 +178,36 @@ All SIMD routines have scalar fallbacks. SIMD is enabled by default via the `sim
 - Restart markers (DRI)
 - Progress callbacks
 
+## Running sanitizers locally
+
+Requires a nightly toolchain (`rustup install nightly`) and the `rust-src` component:
+
+```bash
+rustup component add rust-src --toolchain nightly
+```
+
+**AddressSanitizer** (detects heap overflows, use-after-free, stack overflows):
+
+```bash
+RUSTFLAGS="-Z sanitizer=address" \
+LSAN_OPTIONS="suppressions=$(pwd)/lsan_suppressions.txt:detect_leaks=1" \
+cargo +nightly test --workspace --lib \
+  --target x86_64-unknown-linux-gnu \
+  --no-fail-fast -- --test-threads=1
+```
+
+**UndefinedBehaviorSanitizer** (detects integer overflow, invalid casts, misaligned access):
+
+```bash
+RUSTFLAGS="-Z sanitizer=undefined" \
+UBSAN_OPTIONS="print_stacktrace=1:halt_on_error=1" \
+cargo +nightly test --workspace --lib \
+  --target x86_64-unknown-linux-gnu \
+  --no-fail-fast -- --test-threads=1
+```
+
+Both jobs run on every PR via `.github/workflows/sanitizers.yml`. macOS is excluded because the NEON SIMD paths produce spurious cross-thread ASan shadow-map false positives under parallel test execution.
+
 ## License
 
 Licensed under either of
