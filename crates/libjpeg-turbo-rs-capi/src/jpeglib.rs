@@ -1499,11 +1499,9 @@ pub extern "C" fn jpeg_read_header(cinfo: *mut c_void, _require_image: CBoolean)
     } else {
         0
     };
-    // `arith_code` is not exposed by `Decoder::header()`; stock baseline
-    // files use Huffman, so the default of 0 matches the common case.
-    // TODO(C2-follow-up): surface `JpegMetadata::is_arithmetic` through
-    // the public API so we can populate this field faithfully.
-    c.arith_code = 0;
+    // Populate `arith_code` from the parsed SOF marker type.
+    // SOF9/SOF10/SOF11 → arithmetic (1); SOF0/SOF1/SOF2/SOF3 → Huffman (0).
+    c.arith_code = if decoder.is_arithmetic() { 1 } else { 0 };
 
     // Heuristic for jpeg_color_space matching libjpeg jdmarker:
     //   1 component     -> JCS_GRAYSCALE
@@ -2145,6 +2143,16 @@ pub extern "C" fn jpeg_capi_test_x_density(cinfo: *mut c_void) -> c_int {
 pub extern "C" fn jpeg_capi_test_y_density(cinfo: *mut c_void) -> c_int {
     match unsafe { cinfo_mut(cinfo) } {
         Some(c) => c.Y_density as c_int,
+        None => -1,
+    }
+}
+
+/// Read `cinfo->arith_code` after `jpeg_read_header`. Returns 1 for
+/// arithmetic-coded streams, 0 for Huffman, -1 if `cinfo` is null.
+#[no_mangle]
+pub extern "C" fn jpeg_capi_test_arith_code(cinfo: *mut c_void) -> c_int {
+    match unsafe { cinfo_mut(cinfo) } {
+        Some(c) => c.arith_code as c_int,
         None => -1,
     }
 }
