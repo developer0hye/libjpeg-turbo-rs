@@ -16,9 +16,19 @@ const SOF0: u8 = 0xC0;
 const SOF1: u8 = 0xC1; // Extended sequential, Huffman-coded
 const SOF2: u8 = 0xC2;
 const SOF3: u8 = 0xC3; // Lossless, Huffman-coded
+                       // SOF5–SOF7: differential Huffman-coded variants (ISO 10918-1 Table B.1).
+                       // Bit 3 of (marker & 0x0F) is 0 → Huffman family.
+const SOF5: u8 = 0xC5; // Differential sequential, Huffman-coded
+const SOF6: u8 = 0xC6; // Differential progressive, Huffman-coded
+const SOF7: u8 = 0xC7; // Differential lossless, Huffman-coded
 const SOF9: u8 = 0xC9; // Arithmetic sequential
 const SOF10: u8 = 0xCA; // Arithmetic progressive
 const SOF11: u8 = 0xCB; // Lossless, arithmetic-coded
+                        // SOF13–SOF15: differential arithmetic-coded variants (ISO 10918-1 Table B.1).
+                        // Bit 3 of (marker & 0x0F) is 1 → arithmetic family.
+const SOF13: u8 = 0xCD; // Differential sequential, arithmetic-coded
+const SOF14: u8 = 0xCE; // Differential progressive, arithmetic-coded
+const SOF15: u8 = 0xCF; // Differential lossless, arithmetic-coded
 const DHT: u8 = 0xC4;
 const DAC: u8 = 0xCC; // Define arithmetic conditioning
 const DQT: u8 = 0xDB;
@@ -75,7 +85,14 @@ pub struct JpegMetadata {
     pub jfif_minor_version: u8,
     /// Pixel density from JFIF header.
     pub density: DensityInfo,
-    /// True if using arithmetic entropy coding (SOF9/SOF10).
+    /// True if using arithmetic entropy coding.
+    ///
+    /// Per ISO 10918-1 Table B.1, bit 3 of `(SOF_marker & 0x0F)` selects the
+    /// entropy-coding family: 0 = Huffman, 1 = arithmetic.  The arithmetic
+    /// markers are SOF9 (0xC9), SOF10 (0xCA), SOF11 (0xCB), SOF13 (0xCD),
+    /// SOF14 (0xCE), and SOF15 (0xCF).  All others (SOF0–SOF3, SOF5–SOF7) are
+    /// Huffman.  0xC4 (DHT), 0xC8 (JPG reserved), and 0xCC (DAC) are not SOF
+    /// markers and are excluded.
     pub is_arithmetic: bool,
     /// DAC conditioning: DC parameters (L, U) per table. 16 slots per
     /// ITU-T T.81 `NUM_ARITH_TBLS`.
@@ -191,6 +208,23 @@ impl<'a> MarkerReader<'a> {
                     reject_duplicate_sof(&frame)?;
                     frame = Some(self.read_sof(false, true)?);
                 }
+                // Differential Huffman-coded variants (ISO 10918-1 Table B.1,
+                // markers 0xC5–0xC7).  Bit 3 of (marker & 0x0F) is 0 → Huffman.
+                // Full decode of the differential extension is not yet supported,
+                // but the SOF header must be consumed to advance the stream and
+                // is_arithmetic must stay false.
+                SOF5 => {
+                    reject_duplicate_sof(&frame)?;
+                    frame = Some(self.read_sof(false, false)?);
+                }
+                SOF6 => {
+                    reject_duplicate_sof(&frame)?;
+                    frame = Some(self.read_sof(true, false)?);
+                }
+                SOF7 => {
+                    reject_duplicate_sof(&frame)?;
+                    frame = Some(self.read_sof(false, true)?);
+                }
                 SOF9 => {
                     // Arithmetic sequential
                     reject_duplicate_sof(&frame)?;
@@ -205,6 +239,26 @@ impl<'a> MarkerReader<'a> {
                 }
                 SOF11 => {
                     // Lossless, arithmetic-coded
+                    reject_duplicate_sof(&frame)?;
+                    frame = Some(self.read_sof(false, true)?);
+                    is_arithmetic = true;
+                }
+                // Differential arithmetic-coded variants (ISO 10918-1 Table B.1,
+                // markers 0xCD–0xCF).  Bit 3 of (marker & 0x0F) is 1 → arithmetic.
+                // Full decode of the differential extension is not yet supported,
+                // but the SOF header must be consumed to advance the stream and
+                // is_arithmetic must be set to true.
+                SOF13 => {
+                    reject_duplicate_sof(&frame)?;
+                    frame = Some(self.read_sof(false, false)?);
+                    is_arithmetic = true;
+                }
+                SOF14 => {
+                    reject_duplicate_sof(&frame)?;
+                    frame = Some(self.read_sof(true, false)?);
+                    is_arithmetic = true;
+                }
+                SOF15 => {
                     reject_duplicate_sof(&frame)?;
                     frame = Some(self.read_sof(false, true)?);
                     is_arithmetic = true;
@@ -833,6 +887,137 @@ impl<'a> MarkerReader<'a> {
 mod tests {
     use super::*;
     use crate::decode::arithmetic::NUM_ARITH_TBLS;
+
+    /// Build a minimal JPEG byte stream containing only the given SOF marker
+    /// followed by the simplest possible 1-component SOF segment and a
+    /// 1-component SOS segment.  The result is accepted by `read_markers` and
+    /// exercises the `is_arithmetic` classification without needing a complete
+    /// entropy-coded bitstream.
+    ///
+    /// SOF segment (1 component, 8-bit, 8×8 image):
+    ///   FF marker | len=0x000B | P=8 | H=0x0008 | W=0x0008 | Nf=1 |
+    ///   C1=1, H1V1=0x11, Tq=0
+    ///
+    /// SOS segment (1 component):
+    ///   FF DA | len=0x0008 | Ns=1 | C1=1, Td0/Ta0=0x00 | Ss=0 | Se=63 | Ah/Al=0x00
+    fn make_minimal_jpeg(sof_marker: u8) -> Vec<u8> {
+        let mut v: Vec<u8> = Vec::with_capacity(40);
+        // SOI
+        v.extend_from_slice(&[0xFF, 0xD8]);
+        // SOF
+        v.extend_from_slice(&[0xFF, sof_marker]);
+        v.extend_from_slice(&[
+            0x00, 0x0B, // length = 11 (covers P + H + W + Nf + 1×3 bytes)
+            0x08, // precision = 8
+            0x00, 0x08, // height = 8
+            0x00, 0x08, // width = 8
+            0x01, // Nf = 1 component
+            0x01, 0x11, 0x00, // comp 1: id=1, H=1 V=1, Tq=0
+        ]);
+        // SOS — Ah/Al values indicate the spectral band for progressive scans.
+        // For a complete (non-progressive) scan: Ss=0, Se=63, Ah/Al=0.
+        // For a progressive scan the parser calls skip_entropy_data() and
+        // loops looking for more SOS or EOI; supplying EOI immediately
+        // after the SOS header satisfies that loop without any entropy data.
+        v.extend_from_slice(&[0xFF, 0xDA]);
+        v.extend_from_slice(&[
+            0x00, 0x08, // length = 8
+            0x01, // Ns = 1 component
+            0x01, 0x00, // comp 1: Cs=1, Td=0 Ta=0
+            0x00, // Ss = 0
+            0x3F, // Se = 63
+            0x00, // Ah=0, Al=0
+        ]);
+        // EOI — terminates the progressive marker loop (and is harmless for
+        // baseline, where the loop already exited after the SOS header).
+        v.extend_from_slice(&[0xFF, 0xD9]);
+        v
+    }
+
+    /// ISO 10918-1 Table B.1: entropy-coding family is determined by bit 3 of
+    /// `(SOF_marker & 0x0F)`.  Verify that all 12 SOF variants set
+    /// `is_arithmetic` correctly (0xC4=DHT, 0xC8=JPG, 0xCC=DAC excluded).
+    #[test]
+    fn is_arithmetic_covers_all_sof_variants() {
+        // (sof_marker, expected_is_arithmetic)
+        let cases: &[(u8, bool)] = &[
+            (0xC0, false), // SOF0  baseline DCT, Huffman
+            (0xC1, false), // SOF1  extended sequential DCT, Huffman
+            (0xC2, false), // SOF2  progressive DCT, Huffman
+            (0xC3, false), // SOF3  lossless, Huffman
+            (0xC5, false), // SOF5  differential sequential DCT, Huffman
+            (0xC6, false), // SOF6  differential progressive DCT, Huffman
+            (0xC7, false), // SOF7  differential lossless, Huffman
+            (0xC9, true),  // SOF9  extended sequential DCT, arithmetic
+            (0xCA, true),  // SOF10 progressive DCT, arithmetic
+            (0xCB, true),  // SOF11 lossless, arithmetic
+            (0xCD, true),  // SOF13 differential sequential DCT, arithmetic
+            (0xCE, true),  // SOF14 differential progressive DCT, arithmetic
+            (0xCF, true),  // SOF15 differential lossless, arithmetic
+        ];
+
+        for &(sof_byte, expected) in cases {
+            let jpeg: Vec<u8> = make_minimal_jpeg(sof_byte);
+            let mut reader: MarkerReader = MarkerReader::new(&jpeg);
+            let meta: JpegMetadata = reader
+                .read_markers()
+                .unwrap_or_else(|e| panic!("SOF 0x{sof_byte:02X} parse failed: {e:?}"));
+            assert_eq!(
+                meta.is_arithmetic, expected,
+                "SOF 0x{sof_byte:02X}: expected is_arithmetic={expected}, got {}",
+                meta.is_arithmetic,
+            );
+        }
+    }
+
+    /// `testimgari.jpg` (SOF9) — arithmetic sequential.  Exercises the real-file
+    /// path through `read_markers` to confirm `is_arithmetic = true`.
+    #[test]
+    fn is_arithmetic_true_for_testimgari() {
+        let manifest: std::path::PathBuf = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        // libjpeg-turbo-rs/src  → up two levels → repo root → references/
+        let path: std::path::PathBuf =
+            manifest.join("../../references/libjpeg-turbo/testimages/testimgari.jpg");
+        if !path.exists() {
+            eprintln!(
+                "SKIP: testimgari.jpg not found at {} — submodule not initialised",
+                path.display()
+            );
+            return;
+        }
+        let data: Vec<u8> = std::fs::read(&path)
+            .unwrap_or_else(|e| panic!("could not read {}: {e}", path.display()));
+        let mut reader: MarkerReader = MarkerReader::new(&data);
+        let meta: JpegMetadata = reader.read_markers().expect("testimgari.jpg must parse");
+        assert!(
+            meta.is_arithmetic,
+            "testimgari.jpg (SOF9) must report is_arithmetic=true"
+        );
+    }
+
+    /// `testimgint.jpg` (SOF2, progressive Huffman).  Confirms `is_arithmetic =
+    /// false` for a real progressive Huffman file.
+    #[test]
+    fn is_arithmetic_false_for_progressive_huffman() {
+        let manifest: std::path::PathBuf = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let path: std::path::PathBuf =
+            manifest.join("../../references/libjpeg-turbo/testimages/testimgint.jpg");
+        if !path.exists() {
+            eprintln!(
+                "SKIP: testimgint.jpg not found at {} — submodule not initialised",
+                path.display()
+            );
+            return;
+        }
+        let data: Vec<u8> = std::fs::read(&path)
+            .unwrap_or_else(|e| panic!("could not read {}: {e}", path.display()));
+        let mut reader: MarkerReader = MarkerReader::new(&data);
+        let meta: JpegMetadata = reader.read_markers().expect("testimgint.jpg must parse");
+        assert!(
+            !meta.is_arithmetic,
+            "testimgint.jpg (SOF2) must report is_arithmetic=false"
+        );
+    }
 
     /// Synthetic DAC segment with high table indices (Tb=10 DC, Tb=12 AC) must
     /// parse without panic and populate the corresponding 16-slot arrays.
