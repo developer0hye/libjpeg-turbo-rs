@@ -66,6 +66,9 @@ Apple M1 Pro, C libjpeg-turbo 3.1.0, quality 75:
 ```toml
 [dependencies]
 libjpeg-turbo-rs = "0.5"
+
+# Optional: enable PNG support for tj3LoadImage8 / tj3SaveImage8
+# libjpeg-turbo-rs = { version = "0.5", features = ["png"] }
 ```
 
 ### Decompress

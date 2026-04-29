@@ -33,6 +33,14 @@ pub fn load_image<P: AsRef<Path>>(path: P) -> Result<LoadedImage> {
     load_image_from_bytes(&data)
 }
 
+/// PNG file signature (first 8 bytes).
+const PNG_SIGNATURE: [u8; 8] = [0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A];
+
+/// Return true when `data` begins with the PNG 8-byte signature.
+fn is_png(data: &[u8]) -> bool {
+    data.len() >= 8 && data[..8] == PNG_SIGNATURE
+}
+
 /// Load image from raw file bytes (auto-detect format from header).
 pub fn load_image_from_bytes(data: &[u8]) -> Result<LoadedImage> {
     if data.len() < 2 {
@@ -45,6 +53,17 @@ pub fn load_image_from_bytes(data: &[u8]) -> Result<LoadedImage> {
         load_bmp_from_bytes(data)
     } else if data[0] == b'P' && (data[1] == b'5' || data[1] == b'6') {
         load_ppm_from_bytes(data)
+    } else if is_png(data) {
+        #[cfg(feature = "png")]
+        {
+            load_png_from_bytes(data)
+        }
+        #[cfg(not(feature = "png"))]
+        {
+            Err(JpegError::Unsupported(
+                "PNG support not enabled in this build (rebuild with --features png)".into(),
+            ))
+        }
     } else {
         Err(JpegError::Unsupported(
             "unsupported image format (expected BMP or PPM/PGM)".into(),
@@ -735,5 +754,140 @@ pub fn save_ppm_16bit<P: AsRef<Path>>(
     }
 
     writer.flush()?;
+    Ok(())
+}
+
+// =========================================================================
+// PNG I/O (feature-gated; only available when the `png` feature is enabled)
+// =========================================================================
+
+/// Load an 8-bit PNG file and return a `LoadedImage`.
+///
+/// Supported colour types:
+/// - Grayscale (8-bit) → `PixelFormat::Grayscale`
+/// - GrayscaleAlpha (8-bit, alpha dropped) → `PixelFormat::Grayscale`
+/// - RGB (8-bit) → `PixelFormat::Rgb`
+/// - RGBA (8-bit) → `PixelFormat::Rgba`
+/// - Indexed-colour PNG → returns `Unsupported`
+///
+/// 16-bit PNG returns `Unsupported` (out of scope for this PR).
+#[cfg(feature = "png")]
+pub fn load_png_from_bytes(data: &[u8]) -> Result<LoadedImage> {
+    use std::io::Cursor;
+
+    let decoder: png::Decoder<Cursor<&[u8]>> = png::Decoder::new(Cursor::new(data));
+    let mut reader: png::Reader<Cursor<&[u8]>> = decoder
+        .read_info()
+        .map_err(|e| JpegError::CorruptData(format!("PNG decode error: {e}")))?;
+
+    let info: &png::Info = reader.info();
+    let width: usize = info.width as usize;
+    let height: usize = info.height as usize;
+
+    // Reject 16-bit PNG — out of scope for the 8-bit image I/O path.
+    if info.bit_depth != png::BitDepth::Eight {
+        return Err(JpegError::Unsupported(format!(
+            "PNG bit depth {:?} not supported (only 8-bit PNG is supported; \
+             use tj3LoadImage16 for 16-bit precision)",
+            info.bit_depth
+        )));
+    }
+
+    // Indexed-colour PNG requires palette expansion before we can emit a
+    // flat pixel buffer; bail out rather than expanding silently.
+    if info.color_type == png::ColorType::Indexed {
+        return Err(JpegError::Unsupported(
+            "indexed-colour PNG is not supported".into(),
+        ));
+    }
+
+    let (pixel_format, bytes_per_pixel): (PixelFormat, usize) = match info.color_type {
+        png::ColorType::Grayscale => (PixelFormat::Grayscale, 1),
+        // GrayscaleAlpha: drop the alpha channel to match libjpeg-turbo's
+        // behaviour when the caller does not request an alpha output format.
+        png::ColorType::GrayscaleAlpha => (PixelFormat::Grayscale, 2),
+        png::ColorType::Rgb => (PixelFormat::Rgb, 3),
+        png::ColorType::Rgba => (PixelFormat::Rgba, 4),
+        other => {
+            return Err(JpegError::Unsupported(format!(
+                "PNG colour type {other:?} is not supported"
+            )));
+        }
+    };
+
+    let mut frame_buf: Vec<u8> = vec![0u8; reader.output_buffer_size()];
+    let frame_info: png::OutputInfo = reader
+        .next_frame(&mut frame_buf)
+        .map_err(|e| JpegError::CorruptData(format!("PNG frame decode error: {e}")))?;
+    // Trim to the number of bytes actually written.
+    frame_buf.truncate(frame_info.buffer_size());
+
+    // When the PNG is GrayscaleAlpha, drop every second byte (the alpha
+    // channel) so we return a dense 1-bpp Grayscale buffer.
+    let pixels: Vec<u8> = if pixel_format == PixelFormat::Grayscale && bytes_per_pixel == 2 {
+        frame_buf.chunks_exact(2).map(|px| px[0]).collect()
+    } else {
+        frame_buf
+    };
+
+    Ok(LoadedImage {
+        pixels,
+        width,
+        height,
+        pixel_format,
+    })
+}
+
+/// Save a `LoadedImage` as an 8-bit PNG file.
+///
+/// Supported pixel formats:
+/// - `Grayscale` → PNG colour type Grayscale
+/// - `Rgb` → PNG colour type RGB
+/// - `Rgba` → PNG colour type RGBA
+///
+/// BGR/BGRA/RGBX/etc. are not handled here; callers in `tj3SaveImage8`
+/// should either reject them or convert before calling this function.
+#[cfg(all(feature = "png", any(not(target_arch = "wasm32"), target_os = "wasi")))]
+pub fn save_png<P: AsRef<Path>>(
+    path: P,
+    pixels: &[u8],
+    width: usize,
+    height: usize,
+    pixel_format: PixelFormat,
+) -> Result<()> {
+    validate_pixel_buffer(pixels, width, height, pixel_format)?;
+
+    let (color_type, bytes_per_pixel): (png::ColorType, usize) = match pixel_format {
+        PixelFormat::Grayscale => (png::ColorType::Grayscale, 1),
+        PixelFormat::Rgb => (png::ColorType::Rgb, 3),
+        PixelFormat::Rgba => (png::ColorType::Rgba, 4),
+        other => {
+            return Err(JpegError::Unsupported(format!(
+                "PNG save does not support pixel format {other:?}"
+            )));
+        }
+    };
+
+    let file: fs::File = fs::File::create(path.as_ref())?;
+    let buf_writer: std::io::BufWriter<fs::File> = std::io::BufWriter::new(file);
+    let mut encoder: png::Encoder<std::io::BufWriter<fs::File>> =
+        png::Encoder::new(buf_writer, width as u32, height as u32);
+    encoder.set_color(color_type);
+    encoder.set_depth(png::BitDepth::Eight);
+
+    let mut png_writer: png::Writer<std::io::BufWriter<fs::File>> = encoder
+        .write_header()
+        .map_err(|e| JpegError::Unsupported(format!("PNG header write error: {e}")))?;
+
+    // `write_image_data` expects the full interleaved pixel buffer at once.
+    let expected_len: usize = width * height * bytes_per_pixel;
+    png_writer
+        .write_image_data(&pixels[..expected_len])
+        .map_err(|e| JpegError::Unsupported(format!("PNG data write error: {e}")))?;
+
+    png_writer
+        .finish()
+        .map_err(|e| JpegError::Unsupported(format!("PNG finalize error: {e}")))?;
+
     Ok(())
 }

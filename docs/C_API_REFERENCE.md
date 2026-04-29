@@ -509,7 +509,7 @@ These are the highest-signal C API surfaces that still lack end-to-end public pa
 
 | C Function / Surface | Status | Notes |
 |---|---|---|
-| `tj3LoadImage8()` / `tj3SaveImage8()` PNG | 🔶 | BMP/PPM/PGM implemented. PNG is conditional in C (`PNG_SUPPORTED` build flag) — not core JPEG |
+| `tj3LoadImage8()` / `tj3SaveImage8()` PNG | ✅ | BMP/PPM/PGM implemented; PNG added behind `--features png` (default off). Dispatch by 8-byte magic on load, by `.png` extension on save. 8-bit RGB/RGBA/Grayscale only; 16-bit and indexed-colour return `Unsupported`. |
 | `tj3GetErrorStr()` / `tj3GetErrorCode()` | 🔶 | Rust uses `Result` / `JpegError`, not C-style per-handle getters (C ABI shim in `libjpeg-turbo-rs-capi` exposes both for FFI callers) |
 | `tj3Alloc()` / `tj3Free()` | 🔶 | N/A — Rust ownership replaces C allocator API (FFI-facing aliases exist in `libjpeg-turbo-rs-capi`) |
 | `jpeg_write_icc_profile()` | 🔶 | Low-level helper exists, but no libjpeg-style public wrapper around a compression state object |
