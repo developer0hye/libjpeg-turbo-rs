@@ -5655,13 +5655,18 @@ pub extern "C" fn jpeg_write_tables(cinfo: *mut c_void) {
         None => return,
     };
     priv_state.tables_only = true;
-    // Build a tables-only datastream containing both luma and chroma
-    // quantization tables (Tq=0/1) and the standard Huffman tables
-    // (DC/AC × luma/chroma). Implementation strategy in
-    // `build_tables_only_datastream`: encode a tiny 16×16 RGB dummy at
-    // 4:2:0 so the encoder emits the full set of tables, then strip
-    // SOF/SOS and pixel data, leaving SOI + DQT(...) + DHT(...) + EOI.
-    let tables_bytes: Vec<u8> = build_tables_only_datastream(priv_state.quality);
+    // Build a tables-only datastream that matches the entropy mode
+    // selected on `cinfo`:
+    //   * Huffman (`arith_code == 0`): SOI + DQT(Tq=0/1) + DHT(DC/AC ×
+    //     luma/chroma) + EOI.
+    //   * Arithmetic (`arith_code != 0`): SOI + DQT(Tq=0/1) + DAC(...)
+    //     + EOI (no DHT — upstream `write_tables_only` skips Huffman
+    //     tables for arithmetic-coded compression).
+    // Strategy: encode a tiny 16×16 RGB dummy at 4:2:0 with the matching
+    // entropy coder so the encoder emits the full set of tables, then
+    // strip SOF/SOS and pixel data.
+    let arith: bool = c.arith_code != 0;
+    let tables_bytes: Vec<u8> = build_tables_only_datastream(priv_state.quality, arith);
     // Push through the destination manager exactly like a full encode.
     if c.dest.is_null() {
         return;
@@ -5672,32 +5677,46 @@ pub extern "C" fn jpeg_write_tables(cinfo: *mut c_void) {
     push_bytes_through_dest_mgr(c, priv_state, &tables_bytes);
 }
 
-/// Emit a tables-only JPEG datastream at the given quality.
+/// Emit a tables-only JPEG datastream at the given quality and entropy mode.
 ///
-/// Strategy: encode a 16×16 RGB dummy at 4:2:0 so the encoder emits
-/// the full set of color-encode tables (luma + chroma quantization
-/// for `Tq=0`/`Tq=1`, plus standard Huffman tables for DC/AC × luma/chroma),
-/// then strip SOF/SOS and the scan data so only `SOI + DQT… + DHT… + EOI`
-/// remains. This satisfies libjpeg's "abbreviated tables datastream"
-/// contract for the typical color-encode reuse case (rate-distortion
-/// control across multiple subsequent frames). A grayscale-only caller
-/// receives extra unused chroma tables — harmless, since downstream
-/// abbreviated reads ignore unreferenced indices.
-fn build_tables_only_datastream(quality: u8) -> Vec<u8> {
+/// Strategy: encode a 16×16 RGB dummy at 4:2:0 with the requested entropy
+/// coder so the encoder emits the full set of color-encode tables, then
+/// strip SOF/SOS and the scan data. A grayscale-only caller receives extra
+/// unused chroma tables — harmless, since downstream abbreviated reads
+/// ignore unreferenced indices.
+///
+/// Output shape:
+/// * Huffman (`arith == false`): `SOI + DQT(Tq=0/1) + DHT(DC/AC × luma/chroma) + EOI`.
+/// * Arithmetic (`arith == true`): `SOI + DQT(Tq=0/1) + DAC(...) + EOI`. DHT
+///   is intentionally absent — upstream's `jcmaster.c::write_tables_only`
+///   only emits the entropy-table family that matches `cinfo->arith_code`.
+fn build_tables_only_datastream(quality: u8, arith: bool) -> Vec<u8> {
     // Smallest input that still triggers a full color-encode emission
-    // of both quantization tables and all four Huffman tables: a single
+    // of both quantization tables and all four entropy tables: a single
     // 16×16 (one 4:2:0 MCU) RGB block. Pixel content is irrelevant —
     // tables are derived from quality + Annex K standard tables, not
     // from the data.
     let dummy: Vec<u8> = vec![0u8; 16 * 16 * 3];
-    let encoded: Vec<u8> = match libjpeg_turbo_rs::compress(
-        &dummy,
-        16,
-        16,
-        PixelFormat::Rgb,
-        quality,
-        libjpeg_turbo_rs::Subsampling::S420,
-    ) {
+    let result: Result<Vec<u8>, _> = if arith {
+        libjpeg_turbo_rs::compress_arithmetic(
+            &dummy,
+            16,
+            16,
+            PixelFormat::Rgb,
+            quality,
+            libjpeg_turbo_rs::Subsampling::S420,
+        )
+    } else {
+        libjpeg_turbo_rs::compress(
+            &dummy,
+            16,
+            16,
+            PixelFormat::Rgb,
+            quality,
+            libjpeg_turbo_rs::Subsampling::S420,
+        )
+    };
+    let encoded: Vec<u8> = match result {
         Ok(b) => b,
         Err(_) => return vec![0xFF, 0xD8, 0xFF, 0xD9],
     };
@@ -5717,7 +5736,23 @@ fn build_tables_only_datastream(quality: u8) -> Vec<u8> {
                 out.push(0xD8);
                 i += 2;
             }
-            0xDB | 0xC4 => {
+            // DQT (0xDB) always; entropy tables match the requested mode:
+            // DHT (0xC4) for Huffman, DAC (0xCC) for arithmetic. Keeping
+            // the wrong-mode entropy tables would produce a stream that
+            // does not match `cinfo->arith_code`.
+            0xDB | 0xC4 if !arith || code == 0xDB => {
+                if i + 4 > encoded.len() {
+                    break;
+                }
+                let seg_len: usize = ((encoded[i + 2] as usize) << 8) | (encoded[i + 3] as usize);
+                let total: usize = 2 + seg_len;
+                if i + total > encoded.len() {
+                    break;
+                }
+                out.extend_from_slice(&encoded[i..i + total]);
+                i += total;
+            }
+            0xCC if arith => {
                 if i + 4 > encoded.len() {
                     break;
                 }
@@ -7071,9 +7106,57 @@ mod tables_only_tests {
         (tq, dc_th, ac_th)
     }
 
+    /// Walks markers and returns whether any DAC (0xCC) marker is present.
+    fn has_dac(bytes: &[u8]) -> bool {
+        let mut i: usize = 0;
+        while i + 1 < bytes.len() {
+            if bytes[i] != 0xFF {
+                return false;
+            }
+            let code: u8 = bytes[i + 1];
+            if code == 0xD8 || code == 0xD9 {
+                i += 2;
+                continue;
+            }
+            if i + 4 > bytes.len() {
+                return false;
+            }
+            if code == 0xCC {
+                return true;
+            }
+            let seg_len: usize = ((bytes[i + 2] as usize) << 8) | (bytes[i + 3] as usize);
+            i += 2 + seg_len;
+        }
+        false
+    }
+
+    /// Walks markers and returns whether any DHT (0xC4) marker is present.
+    fn has_dht(bytes: &[u8]) -> bool {
+        let mut i: usize = 0;
+        while i + 1 < bytes.len() {
+            if bytes[i] != 0xFF {
+                return false;
+            }
+            let code: u8 = bytes[i + 1];
+            if code == 0xD8 || code == 0xD9 {
+                i += 2;
+                continue;
+            }
+            if i + 4 > bytes.len() {
+                return false;
+            }
+            if code == 0xC4 {
+                return true;
+            }
+            let seg_len: usize = ((bytes[i + 2] as usize) << 8) | (bytes[i + 3] as usize);
+            i += 2 + seg_len;
+        }
+        false
+    }
+
     #[test]
-    fn datastream_emits_both_quant_and_all_huffman_tables() {
-        let bytes: Vec<u8> = build_tables_only_datastream(75);
+    fn huffman_datastream_emits_both_quant_and_all_huffman_tables() {
+        let bytes: Vec<u8> = build_tables_only_datastream(75, /*arith=*/ false);
         assert_eq!(&bytes[..2], &[0xFF, 0xD8], "stream must begin with SOI");
         assert_eq!(
             &bytes[bytes.len() - 2..],
@@ -7087,23 +7170,56 @@ mod tables_only_tests {
         assert!(dc_th.contains(&1), "DHT[Tc=0,Th=1] (DC chroma) missing");
         assert!(ac_th.contains(&0), "DHT[Tc=1,Th=0] (AC luma) missing");
         assert!(ac_th.contains(&1), "DHT[Tc=1,Th=1] (AC chroma) missing");
+        assert!(
+            !has_dac(&bytes),
+            "Huffman tables-only stream must not contain DAC"
+        );
+    }
+
+    #[test]
+    fn arithmetic_datastream_emits_dac_not_dht() {
+        let bytes: Vec<u8> = build_tables_only_datastream(75, /*arith=*/ true);
+        assert_eq!(&bytes[..2], &[0xFF, 0xD8], "stream must begin with SOI");
+        assert_eq!(
+            &bytes[bytes.len() - 2..],
+            &[0xFF, 0xD9],
+            "stream must end with EOI"
+        );
+        let (tq, _, _) = collect_table_indices(&bytes);
+        assert!(tq.contains(&0), "DQT[Tq=0] (luma) missing: {tq:?}");
+        assert!(tq.contains(&1), "DQT[Tq=1] (chroma) missing: {tq:?}");
+        assert!(
+            !has_dht(&bytes),
+            "arithmetic tables-only stream must not contain DHT \
+             (upstream `write_tables_only` skips Huffman tables for arithmetic mode)"
+        );
+        assert!(
+            has_dac(&bytes),
+            "arithmetic tables-only stream must contain DAC"
+        );
     }
 
     #[test]
     fn datastream_well_formed_at_quality_extremes() {
         for q in [1u8, 50, 100] {
-            let bytes: Vec<u8> = build_tables_only_datastream(q);
-            assert_eq!(&bytes[..2], &[0xFF, 0xD8], "SOI missing at quality {q}");
-            assert_eq!(
-                &bytes[bytes.len() - 2..],
-                &[0xFF, 0xD9],
-                "EOI missing at quality {q}"
-            );
-            let (tq, _, _) = collect_table_indices(&bytes);
-            assert!(
-                tq.contains(&0) && tq.contains(&1),
-                "missing quant tables at quality {q}: {tq:?}"
-            );
+            for arith in [false, true] {
+                let bytes: Vec<u8> = build_tables_only_datastream(q, arith);
+                assert_eq!(
+                    &bytes[..2],
+                    &[0xFF, 0xD8],
+                    "SOI missing at quality {q}, arith={arith}"
+                );
+                assert_eq!(
+                    &bytes[bytes.len() - 2..],
+                    &[0xFF, 0xD9],
+                    "EOI missing at quality {q}, arith={arith}"
+                );
+                let (tq, _, _) = collect_table_indices(&bytes);
+                assert!(
+                    tq.contains(&0) && tq.contains(&1),
+                    "missing quant tables at quality {q}, arith={arith}: {tq:?}"
+                );
+            }
         }
     }
 }
