@@ -1,0 +1,30 @@
+# LeakSanitizer suppressions for libjpeg-turbo-rs
+#
+# These suppressions cover false-positive leak reports from system libraries
+# (glibc, libpthread, ld-linux) and the libjpeg-turbo C shared library that
+# are not under our control.  LSan runs automatically as part of ASan on
+# Linux; add entries here only for well-understood external allocations.
+#
+# Format: "leak:<substring-of-stack-frame>"
+# See: https://github.com/google/sanitizers/wiki/AddressSanitizerLeakSanitizer
+
+# glibc one-time initialisation (dl_open_worker, __nptl_deallocate_tsd, etc.)
+leak:_dl_open
+leak:_dl_allocate_tls
+leak:__nptl_deallocate_tsd
+leak:_dl_catch_exception
+leak:_dl_lookup_symbol_x
+leak:allocate_dtv
+
+# glibc getenv / environ one-time copy made by libc start
+leak:__libc_start_main
+
+# Rust std thread-local storage allocations that LSan sees as "leaked" because
+# the TLS destructors run after the leak check.
+leak:__rust_alloc
+
+# System JPEG / PNG libraries (present on Ubuntu runners, not built with
+# sanitizer instrumentation; their one-time init allocations are benign).
+leak:libjpeg
+leak:jpeg_create
+leak:png_create_read_struct
