@@ -115,6 +115,18 @@ impl<'a> MarkerReader<'a> {
             MarkerSaveConfig::All => (0xE0..=0xEF).contains(&code) || code == COM,
             MarkerSaveConfig::AppOnly => (0xE0..=0xEF).contains(&code),
             MarkerSaveConfig::Specific(codes) => codes.contains(&code),
+            MarkerSaveConfig::WithLimits(limits) => limits.contains_key(&code),
+        }
+    }
+
+    /// Return the per-marker body limit for `code`. Returns `usize::MAX`
+    /// when the config imposes no per-code limit (save full body).
+    fn marker_limit(&self, code: u8) -> usize {
+        match &self.marker_save_config {
+            MarkerSaveConfig::WithLimits(limits) => {
+                limits.get(&code).copied().unwrap_or(usize::MAX)
+            }
+            _ => usize::MAX,
         }
     }
 
@@ -255,7 +267,8 @@ impl<'a> MarkerReader<'a> {
                 // APP1 (EXIF) — parse for EXIF metadata
                 0xE1 => {
                     if self.should_save_marker(0xE1) {
-                        if let Some(raw) = self.peek_marker_data() {
+                        if let Some(mut raw) = self.peek_marker_data() {
+                            raw.truncate(self.marker_limit(0xE1));
                             saved_markers.push(SavedMarker {
                                 code: 0xE1,
                                 data: raw,
@@ -267,7 +280,8 @@ impl<'a> MarkerReader<'a> {
                 // APP2 (ICC profile) — parse for ICC profile chunks
                 0xE2 => {
                     if self.should_save_marker(0xE2) {
-                        if let Some(raw) = self.peek_marker_data() {
+                        if let Some(mut raw) = self.peek_marker_data() {
+                            raw.truncate(self.marker_limit(0xE2));
                             saved_markers.push(SavedMarker {
                                 code: 0xE2,
                                 data: raw,
@@ -279,7 +293,8 @@ impl<'a> MarkerReader<'a> {
                 // APP14 (Adobe marker) — parse for color transform info
                 0xEE => {
                     if self.should_save_marker(0xEE) {
-                        if let Some(raw) = self.peek_marker_data() {
+                        if let Some(mut raw) = self.peek_marker_data() {
+                            raw.truncate(self.marker_limit(0xEE));
                             saved_markers.push(SavedMarker {
                                 code: 0xEE,
                                 data: raw,
@@ -291,7 +306,8 @@ impl<'a> MarkerReader<'a> {
                 // APP0 (JFIF) — parse for density info
                 0xE0 => {
                     if self.should_save_marker(0xE0) {
-                        if let Some(raw) = self.peek_marker_data() {
+                        if let Some(mut raw) = self.peek_marker_data() {
+                            raw.truncate(self.marker_limit(0xE0));
                             saved_markers.push(SavedMarker {
                                 code: 0xE0,
                                 data: raw,
@@ -308,7 +324,8 @@ impl<'a> MarkerReader<'a> {
                 // COM marker — parse comment text
                 COM => {
                     if self.should_save_marker(COM) {
-                        if let Some(raw) = self.peek_marker_data() {
+                        if let Some(mut raw) = self.peek_marker_data() {
+                            raw.truncate(self.marker_limit(COM));
                             saved_markers.push(SavedMarker {
                                 code: COM,
                                 data: raw,
@@ -320,7 +337,8 @@ impl<'a> MarkerReader<'a> {
                 // Other APPn markers — save if configured, then skip
                 m if (0xE3..=0xEF).contains(&m) => {
                     if self.should_save_marker(m) {
-                        if let Some(raw) = self.peek_marker_data() {
+                        if let Some(mut raw) = self.peek_marker_data() {
+                            raw.truncate(self.marker_limit(m));
                             saved_markers.push(SavedMarker { code: m, data: raw });
                         }
                     }
