@@ -621,6 +621,13 @@ struct DecompressPrivate {
     /// `jpeg_abort_decompress` so a reuse of the same handle re-parses
     /// the new image.
     header_parsed_ok: bool,
+    /// Lazily materialised raw-plane cache populated on the first
+    /// `jpeg_read_raw_data` call (8-bit baseline/progressive only).
+    /// Subsequent calls deliver further iMCU rows from this cache.
+    raw_image_cache: Option<libjpeg_turbo_rs::RawImage>,
+    /// Per-component row cursor into `raw_image_cache`. Entry `i` is
+    /// the number of rows already delivered for component `i`.
+    raw_rows_consumed: Vec<usize>,
 }
 
 impl Default for DecompressPrivate {
@@ -641,6 +648,8 @@ impl Default for DecompressPrivate {
             marker_list_storage: Vec::new(),
             bridge_partial: Vec::new(),
             header_parsed_ok: false,
+            raw_image_cache: None,
+            raw_rows_consumed: Vec::new(),
         }
     }
 }
@@ -3253,44 +3262,206 @@ fn hp_drop_for(priv_ptr: *mut c_void) {
 // (implementation hook — see `jpeg_read_scanlines` edit below.)
 
 // ---------------------------------------------------------------------------
-// Raw-data decode entry points (P0-3).
+// Raw-data decode entry points.
 //
-// Stock libjpeg's `jpeg_read_raw_data` / `jpeg12_read_raw_data` deliver
-// pre-downsampled YCbCr (or other native-colorspace) planes to the
-// caller, bypassing color conversion and chroma upsampling. Pillow's
-// libtiff dependency resolves `_jpeg12_read_raw_data` at load time
-// even when the typical Pillow decode path never invokes it; until we
-// land a full per-iMCU-row delivery implementation, this stub keeps
-// the loader satisfied and surfaces an explicit "not yet wired"
-// signal via `last_error` if a caller does invoke it.
+// Stock libjpeg's `jpeg_read_raw_data` delivers one iMCU row of
+// pre-downsampled component planes per call, bypassing colour
+// conversion and chroma upsampling.  The caller allocates a JSAMPIMAGE
+// (pointer-to-pointer-to-pointer) with one entry per component; each
+// component entry is an array of row pointers sized to hold
+// `comp_v_samp_factor * DCTSIZE` rows of `plane_width` samples.
 //
-// TODO(P0-3 follow-up): replace with a real iMCU-row delivery loop
-// that calls `libjpeg_turbo_rs::raw_data::decompress_raw` once and
-// hands back `max_v_samp_factor * 8` rows per call.
+// Upstream contract (jdapistd.c `_jpeg_read_raw_data`):
+//   - Returns `max_v_samp_factor * DCTSIZE` rows on success.
+//   - Returns 0 with `JWRN_TOO_MUCH_DATA` if output_scanline >=
+//     output_height (caller has already consumed all data).
+//   - Errors: JERR_BUFFER_SIZE if max_lines is too small.
+//
+// Implementation — lazy materialisation:
+//   On the first call, `decompress_raw` is invoked once on the stored
+//   source bytes and the result is cached in `raw_image_cache`. Each
+//   subsequent call copies the next block of rows from the cache into
+//   the caller's row-pointer array and advances `output_scanline`.
+//
+// Scope limitations (8-bit baseline/progressive only):
+//   - 12-bit raw-data is not implemented; `jpeg12_read_raw_data`
+//     returns an error. Callers that only resolve the symbol at load
+//     time (e.g. Pillow's libtiff dependency) are unaffected.
+//   - Lossless (SOF3/SOF11) is not implemented; those streams do not
+//     use iMCU rows in the DCT sense. Bail out with an error.
 // ---------------------------------------------------------------------------
 
+const DCTSIZE: usize = 8;
+
 /// `jpeg_read_raw_data(cinfo, data, max_lines) -> JDIMENSION`.
+///
+/// Delivers one iMCU row of raw component-plane data per call.
+/// Supports 8-bit baseline and progressive JPEGs only. Returns 0 and
+/// sets `last_error` for 12-bit streams, lossless streams, or when
+/// `max_lines` is too small for one full iMCU row.
 #[no_mangle]
 pub extern "C" fn jpeg_read_raw_data(
     cinfo: *mut c_void,
-    _data: *mut *mut *mut u8,
-    _max_lines: JDimension,
+    data: *mut *mut *mut u8,
+    max_lines: JDimension,
 ) -> JDimension {
+    let c: &mut JpegDecompressPublic = match unsafe { cinfo_mut(cinfo) } {
+        Some(c) => c,
+        None => return 0,
+    };
     let priv_ptr: *mut c_void = decompress_private_raw(cinfo);
-    if let Some(p) = unsafe { priv_from_ptr(priv_ptr) } {
-        p.last_error = CString::new(
-            "jpeg_read_raw_data: raw-data decode not yet wired in libjpeg-turbo-rs-capi",
-        )
-        .unwrap_or_default();
+    let priv_state: &mut DecompressPrivate = match unsafe { priv_from_ptr(priv_ptr) } {
+        Some(p) => p,
+        None => return 0,
+    };
+
+    // Reject unsupported precision (12-bit, 16-bit).
+    if c.data_precision > 8 {
+        priv_state.last_error = CString::new(
+            "jpeg_read_raw_data: only 8-bit precision is supported; use jpeg12_read_raw_data for 12-bit"
+        ).unwrap_or_default();
+        return 0;
     }
-    0
+
+    // EOF sentinel: output_scanline >= output_height → return 0 (no error,
+    // matches libjpeg's JWRN_TOO_MUCH_DATA path).
+    if c.output_scanline >= c.output_height {
+        return 0;
+    }
+
+    // Validate caller supplied a non-null array pointer.
+    if data.is_null() {
+        priv_state.last_error =
+            CString::new("jpeg_read_raw_data: data pointer is NULL").unwrap_or_default();
+        return 0;
+    }
+
+    // `max_v_samp_factor` and per-component `v_samp_factor` are set by
+    // `jpeg_read_header` / `jpeg_calc_output_dimensions`.
+    let max_vsf: usize = c.max_v_samp_factor as usize;
+    // For typical DCT-based streams, DCTSIZE = 8.  The public struct
+    // exposes `min_DCT_v_scaled_size` (set to 8 in jpeg_calc_output_dimensions);
+    // use it when positive, fall back to DCTSIZE otherwise.
+    let dct_size: usize = if c.min_DCT_v_scaled_size > 0 {
+        c.min_DCT_v_scaled_size as usize
+    } else {
+        DCTSIZE
+    };
+    let rows_per_imcu: usize = max_vsf * dct_size;
+
+    // Validate buffer size: caller must supply at least `rows_per_imcu` rows.
+    if (max_lines as usize) < rows_per_imcu {
+        priv_state.last_error = CString::new(format!(
+            "jpeg_read_raw_data: JERR_BUFFER_SIZE — max_lines ({max_lines}) < rows_per_iMCU ({rows_per_imcu})"
+        )).unwrap_or_default();
+        return 0;
+    }
+
+    // Lazy materialisation: decode the whole stream on the first call.
+    if priv_state.raw_image_cache.is_none() {
+        let bytes: &[u8] = match priv_state.source.as_bytes() {
+            Some(b) => b,
+            None => {
+                priv_state.last_error =
+                    CString::new("jpeg_read_raw_data: no source").unwrap_or_default();
+                return 0;
+            }
+        };
+        match libjpeg_turbo_rs::decompress_raw(bytes) {
+            Ok(raw) => {
+                let ncomp: usize = raw.num_components;
+                priv_state.raw_rows_consumed = vec![0usize; ncomp];
+                priv_state.raw_image_cache = Some(raw);
+            }
+            Err(e) => {
+                priv_state.last_error =
+                    CString::new(format!("jpeg_read_raw_data: decompress_raw failed: {e}"))
+                        .unwrap_or_default();
+                return 0;
+            }
+        }
+    }
+
+    let raw: &libjpeg_turbo_rs::RawImage = priv_state.raw_image_cache.as_ref().expect("just set");
+    let num_components: usize = raw.num_components;
+
+    // Build a local snapshot of plane sizes before the mutable borrow.
+    let plane_widths: Vec<usize> = raw.plane_widths.clone();
+    let plane_heights: Vec<usize> = raw.plane_heights.clone();
+
+    // Number of `v_samp_factor` values comes from the public `comp_info` array
+    // populated by `jpeg_read_header`.
+    let comp_info_slice: &[JpegComponentInfoPublic] =
+        if c.comp_info.is_null() || c.num_components as usize != num_components {
+            // Fallback: derive v_samp_factor from plane height ratios when
+            // comp_info is unavailable (unusual but defensive).
+            &[]
+        } else {
+            unsafe { std::slice::from_raw_parts(c.comp_info, num_components) }
+        };
+
+    // For each component, copy `comp_v_samp_factor * dct_size` rows of
+    // `plane_width` samples into the caller's row pointers.
+    for comp_idx in 0..num_components {
+        // Derive v_samp_factor for this component.
+        let vsf: usize = if comp_idx < comp_info_slice.len() {
+            comp_info_slice[comp_idx].v_samp_factor.max(1) as usize
+        } else {
+            // Fallback: use plane height proportional to luma.
+            // For 4:2:0 luma=max_vsf, chroma=max_vsf/2.
+            let luma_h: usize = plane_heights.first().copied().unwrap_or(1);
+            let this_h: usize = plane_heights.get(comp_idx).copied().unwrap_or(1);
+            // v_samp_factor ≈ max_vsf * this_h / luma_h, clamped ≥ 1.
+            ((max_vsf * this_h + luma_h / 2) / luma_h).max(1)
+        };
+        let rows_this_call: usize = vsf * dct_size;
+        let plane_width: usize = plane_widths.get(comp_idx).copied().unwrap_or(0);
+        let plane_height: usize = plane_heights.get(comp_idx).copied().unwrap_or(0);
+        let rows_already: usize = priv_state
+            .raw_rows_consumed
+            .get(comp_idx)
+            .copied()
+            .unwrap_or(0);
+
+        // Get the outer pointer for this component: data[comp_idx].
+        let comp_outer_ptr: *mut *mut u8 = unsafe { *data.add(comp_idx) };
+        if comp_outer_ptr.is_null() {
+            continue;
+        }
+
+        for row_in_imcu in 0..rows_this_call {
+            let src_row: usize = rows_already + row_in_imcu;
+            if src_row >= plane_height {
+                break;
+            }
+            let dst_row_ptr: *mut u8 = unsafe { *comp_outer_ptr.add(row_in_imcu) };
+            if dst_row_ptr.is_null() {
+                continue;
+            }
+            let src_plane: &[u8] = &raw.planes[comp_idx];
+            let src_offset: usize = src_row * plane_width;
+            let src_slice: &[u8] = &src_plane[src_offset..src_offset + plane_width];
+            unsafe {
+                std::ptr::copy_nonoverlapping(src_slice.as_ptr(), dst_row_ptr, plane_width);
+            }
+        }
+
+        if let Some(consumed) = priv_state.raw_rows_consumed.get_mut(comp_idx) {
+            *consumed += rows_this_call;
+        }
+    }
+
+    let delivered: JDimension = rows_per_imcu as JDimension;
+    c.output_scanline = c.output_scanline.saturating_add(delivered);
+    priv_state.last_error = CString::new("No error").expect("static");
+    delivered
 }
 
 /// `jpeg12_read_raw_data(cinfo, data, max_lines) -> JDIMENSION`.
 ///
-/// Resolves the symbol Pillow's libtiff binding requires at load time
-/// even when 12-bit JPEG-in-TIFF is never decoded. Returns 0 with
-/// `last_error` populated for callers that actually invoke it.
+/// 12-bit raw-data decode is not implemented in this shim. Returns 0
+/// and populates `last_error`. Callers that only resolve the symbol at
+/// dynamic-link time (e.g. Pillow's libtiff dependency) are unaffected.
 #[no_mangle]
 pub extern "C" fn jpeg12_read_raw_data(
     cinfo: *mut c_void,
@@ -3300,7 +3471,7 @@ pub extern "C" fn jpeg12_read_raw_data(
     let priv_ptr: *mut c_void = decompress_private_raw(cinfo);
     if let Some(p) = unsafe { priv_from_ptr(priv_ptr) } {
         p.last_error = CString::new(
-            "jpeg12_read_raw_data: 12-bit raw-data decode not yet wired in libjpeg-turbo-rs-capi",
+            "jpeg12_read_raw_data: JERR_NOTIMPL — 12-bit raw-data decode is not supported in libjpeg-turbo-rs-capi",
         )
         .unwrap_or_default();
     }
