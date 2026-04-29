@@ -320,10 +320,13 @@ pub extern "C" fn tj3TransformBufSize(handle: *mut c_void, transform: *const TjT
         }
     }
     inst.clear_error();
-    // TODO(icc-plumb): upstream `turbojpeg.c::tj3TransformBufSize` adds the
-    // stored ICC size (`this->iccSize` / `this->decompICCSize`) to the
-    // bound. Our `tj3GetICCProfile` / `tj3SetICCProfile` are stubs that
-    // never store an ICC, so the unsigned bound is exact today; revisit
-    // when the ICC-capture/save path lands.
-    crate::bufsize::tj3JPEGBufSize(w, h, subsamp)
+    let base: usize = crate::bufsize::tj3JPEGBufSize(w, h, subsamp);
+    // Mirrors upstream `turbojpeg.c::tj3TransformBufSize`: add the stored ICC
+    // byte count to the worst-case buffer bound. A caller that set an ICC via
+    // `tj3SetICCProfile` must allocate enough space for the ICC APP2 chunks;
+    // without this addition the bound would underflow and a downstream
+    // tjbench-style consumer could silently undersize its destination buffer.
+    // Saturate on overflow: never return less than the bare `tj3JPEGBufSize`.
+    let icc_bytes: usize = inst.inner.icc_profile().map_or(0, |b| b.len());
+    base.checked_add(icc_bytes).unwrap_or(base)
 }

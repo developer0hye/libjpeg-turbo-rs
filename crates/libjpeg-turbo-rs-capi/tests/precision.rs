@@ -704,6 +704,146 @@ fn tj3_set_rejects_globally_invalid_precision() {
     }
 }
 
+/// `tj3TransformBufSize` must account for any ICC profile stored on the
+/// handle via `tj3SetICCProfile`.  Upstream
+/// `turbojpeg.c::tj3TransformBufSize` adds `this->iccSize` /
+/// `this->decompICCSize` to the bare `tj3JPEGBufSize` bound before
+/// returning. Without this addition a tjbench-style caller that sets an
+/// ICC before a transform would silently undersize its destination buffer.
+///
+/// We compress a small JPEG, call `tj3DecompressHeader` to populate the
+/// handle's Width/Height/Subsampling params, inject a synthetic N-byte
+/// ICC blob via `tj3SetICCProfile`, call `tj3TransformBufSize` with
+/// `TJXOP_NONE`, and assert the returned bound is at least
+/// `tj3JPEGBufSize(w, h, subsamp) + N`.
+#[test]
+fn tj3_transform_buf_size_includes_icc_size() {
+    let path: PathBuf = cdylib_path();
+    let lib: libloading::Library =
+        unsafe { libloading::Library::new(&path) }.expect("dlopen cdylib");
+    unsafe {
+        let tj3_init: libloading::Symbol<unsafe extern "C" fn(c_int) -> TjHandle> =
+            lib.get(b"tj3Init").unwrap();
+        let tj3_destroy: libloading::Symbol<unsafe extern "C" fn(TjHandle)> =
+            lib.get(b"tj3Destroy").unwrap();
+        let tj3_set: libloading::Symbol<unsafe extern "C" fn(TjHandle, c_int, c_int) -> c_int> =
+            lib.get(b"tj3Set").unwrap();
+        let tj3_free: libloading::Symbol<unsafe extern "C" fn(*mut c_void)> =
+            lib.get(b"tj3Free").unwrap();
+        let tj3_compress8: libloading::Symbol<
+            unsafe extern "C" fn(
+                TjHandle,
+                *const u8,
+                c_int,
+                c_int,
+                c_int,
+                c_int,
+                *mut *mut u8,
+                *mut usize,
+            ) -> c_int,
+        > = lib.get(b"tj3Compress8").unwrap();
+        let tj3_decompress_header: libloading::Symbol<
+            unsafe extern "C" fn(TjHandle, *const u8, usize) -> c_int,
+        > = lib.get(b"tj3DecompressHeader").unwrap();
+        let tj3_get: libloading::Symbol<unsafe extern "C" fn(TjHandle, c_int) -> c_int> =
+            lib.get(b"tj3Get").unwrap();
+        let tj3_set_icc_profile: libloading::Symbol<
+            unsafe extern "C" fn(TjHandle, *mut u8, usize) -> c_int,
+        > = lib.get(b"tj3SetICCProfile").unwrap();
+        let tj3_jpeg_buf_size: libloading::Symbol<
+            unsafe extern "C" fn(c_int, c_int, c_int) -> usize,
+        > = lib.get(b"tj3JPEGBufSize").unwrap();
+        let tj3_transform_buf_size: libloading::Symbol<
+            unsafe extern "C" fn(TjHandle, *const c_void) -> usize,
+        > = lib.get(b"tj3TransformBufSize").unwrap();
+
+        // TJPARAM_* numeric IDs (match turbojpeg.h / tj3.rs).
+        const TJPARAM_SUBSAMPLING: c_int = 4;
+        const TJPARAM_WIDTH: c_int = 5;
+        const TJPARAM_HEIGHT: c_int = 6;
+        // TJSAMP_420 = 0.
+        const TJSAMP_420: c_int = 0;
+
+        // Step 1: compress a small 16×16 4:2:0 gray ramp so we have a real
+        // JPEG to feed to `tj3DecompressHeader`.
+        let w: c_int = 16;
+        let h_px: c_int = 16;
+        let src: Vec<u8> = (0u8..=255u8).collect();
+
+        let h_enc: TjHandle = tj3_init(1 /* TJINIT_COMPRESS */);
+        assert!(!h_enc.is_null());
+        assert_eq!(tj3_set(h_enc, TJPARAM_SUBSAMPLING, TJSAMP_420), 0);
+        let mut jpeg_buf: *mut u8 = std::ptr::null_mut();
+        let mut jpeg_size: usize = 0;
+        let rc: c_int = tj3_compress8(
+            h_enc,
+            src.as_ptr(),
+            w,
+            0,
+            h_px,
+            TJPF_GRAY,
+            &mut jpeg_buf,
+            &mut jpeg_size,
+        );
+        assert_eq!(rc, 0, "compression must succeed");
+        assert!(!jpeg_buf.is_null() && jpeg_size > 0);
+        tj3_destroy(h_enc);
+
+        // Step 2: parse the header to populate Width/Height/Subsampling on a
+        // fresh decompressor handle (these params are read-only in `tj3Set`
+        // and only writable by `tj3DecompressHeader`).
+        let h: TjHandle = tj3_init(2 /* TJINIT_DECOMPRESS */);
+        assert!(!h.is_null());
+        let jpeg_slice: &[u8] = std::slice::from_raw_parts(jpeg_buf, jpeg_size);
+        let rc: c_int = tj3_decompress_header(h, jpeg_slice.as_ptr(), jpeg_size);
+        assert_eq!(rc, 0, "tj3DecompressHeader must succeed");
+
+        // Read back what the parser wrote so we can compute the expected base.
+        let parsed_w: c_int = tj3_get(h, TJPARAM_WIDTH);
+        let parsed_h: c_int = tj3_get(h, TJPARAM_HEIGHT);
+        let parsed_s: c_int = tj3_get(h, TJPARAM_SUBSAMPLING);
+        assert_eq!(parsed_w, w, "parsed width must match compressed width");
+        assert_eq!(parsed_h, h_px, "parsed height must match compressed height");
+
+        // Build a raw `tjtransform` struct: all-zero = TJXOP_NONE, no flags,
+        // NULL data, NULL customFilter.
+        //   layout: [tjregion(4×i32), op(i32), options(i32), data(*), fn(*)]
+        let ptr_size: usize = std::mem::size_of::<*const c_void>();
+        let xform_len: usize = 6 * 4 + 2 * ptr_size;
+        let xform_bytes: Vec<u8> = vec![0u8; xform_len];
+
+        // Base bound (no ICC on handle yet).
+        let base_size: usize = tj3_jpeg_buf_size(parsed_w, parsed_h, parsed_s);
+        assert!(base_size > 0, "tj3JPEGBufSize must return a positive bound");
+
+        let no_icc_size: usize = tj3_transform_buf_size(h, xform_bytes.as_ptr() as *const c_void);
+        assert_eq!(
+            no_icc_size, base_size,
+            "tj3TransformBufSize without ICC must equal tj3JPEGBufSize"
+        );
+
+        // Step 3: set an ICC blob of a known size on the handle.
+        const ICC_LEN: usize = 512;
+        let mut icc_blob: Vec<u8> = vec![0xABu8; ICC_LEN];
+        assert_eq!(
+            tj3_set_icc_profile(h, icc_blob.as_mut_ptr(), ICC_LEN),
+            0,
+            "tj3SetICCProfile must succeed"
+        );
+
+        // Step 4: the buffer bound must now be at least base + ICC_LEN.
+        let with_icc_size: usize = tj3_transform_buf_size(h, xform_bytes.as_ptr() as *const c_void);
+        assert!(
+            with_icc_size >= base_size + ICC_LEN,
+            "tj3TransformBufSize with {ICC_LEN}-byte ICC must be >= base ({base_size}) \
+             + ICC_LEN ({ICC_LEN}), got {with_icc_size}"
+        );
+
+        tj3_free(jpeg_buf as *mut c_void);
+        tj3_destroy(h);
+    }
+}
+
 /// Out-of-entry-point-range `TJPARAM_PRECISION` (still inside 2..=16)
 /// must silently fall back to the entry-point's natural precision
 /// (BITS_IN_JSAMPLE), matching upstream
