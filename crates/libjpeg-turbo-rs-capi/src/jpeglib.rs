@@ -5655,16 +5655,18 @@ pub extern "C" fn jpeg_write_tables(cinfo: *mut c_void) {
         None => return,
     };
     priv_state.tables_only = true;
-    // Build a tables-only datastream that matches the entropy mode
-    // selected on `cinfo`:
+    // Build a tables-only datastream that matches what upstream
+    // `jcmarker.c::write_tables_only` emits:
     //   * Huffman (`arith_code == 0`): SOI + DQT(Tq=0/1) + DHT(DC/AC ×
     //     luma/chroma) + EOI.
-    //   * Arithmetic (`arith_code != 0`): SOI + DQT(Tq=0/1) + DAC(...)
-    //     + EOI (no DHT — upstream `write_tables_only` skips Huffman
-    //     tables for arithmetic-coded compression).
-    // Strategy: encode a tiny 16×16 RGB dummy at 4:2:0 with the matching
-    // entropy coder so the encoder emits the full set of tables, then
-    // strip SOF/SOS and pixel data.
+    //   * Arithmetic (`arith_code != 0`): SOI + DQT(Tq=0/1) + EOI. No
+    //     DHT (upstream skips them for arithmetic) and no DAC (DAC is
+    //     emitted later with the scan header for the abbreviated body
+    //     stream, not here).
+    // Strategy: encode a tiny 16×16 RGB Huffman dummy at 4:2:0 — the
+    // resulting DQT segments are identical regardless of entropy mode
+    // (quant tables depend only on quality), so we just filter out DHT
+    // when arithmetic is requested.
     let arith: bool = c.arith_code != 0;
     let tables_bytes: Vec<u8> = build_tables_only_datastream(priv_state.quality, arith);
     // Push through the destination manager exactly like a full encode.
@@ -5677,46 +5679,39 @@ pub extern "C" fn jpeg_write_tables(cinfo: *mut c_void) {
     push_bytes_through_dest_mgr(c, priv_state, &tables_bytes);
 }
 
-/// Emit a tables-only JPEG datastream at the given quality and entropy mode.
+/// Emit a tables-only JPEG datastream at the given quality, matching
+/// upstream `jcmarker.c::write_tables_only`:
 ///
-/// Strategy: encode a 16×16 RGB dummy at 4:2:0 with the requested entropy
-/// coder so the encoder emits the full set of color-encode tables, then
-/// strip SOF/SOS and the scan data. A grayscale-only caller receives extra
-/// unused chroma tables — harmless, since downstream abbreviated reads
-/// ignore unreferenced indices.
+/// * Huffman (`arith == false`): `SOI + DQT(Tq=0/1) + DHT(DC/AC ×
+///   luma/chroma) + EOI`.
+/// * Arithmetic (`arith == true`): `SOI + DQT(Tq=0/1) + EOI`. No DHT
+///   (upstream skips them when `cinfo->arith_code` is set) and no DAC
+///   (DAC is emitted later with the scan header for the abbreviated
+///   body stream, not as part of the tables-only datastream).
 ///
-/// Output shape:
-/// * Huffman (`arith == false`): `SOI + DQT(Tq=0/1) + DHT(DC/AC × luma/chroma) + EOI`.
-/// * Arithmetic (`arith == true`): `SOI + DQT(Tq=0/1) + DAC(...) + EOI`. DHT
-///   is intentionally absent — upstream's `jcmaster.c::write_tables_only`
-///   only emits the entropy-table family that matches `cinfo->arith_code`.
+/// Strategy: encode a 16×16 RGB Huffman dummy at 4:2:0 so the encoder
+/// emits both luma and chroma quantization tables and all four standard
+/// Huffman tables, then strip SOF/SOS/scan data. The DQT segments are
+/// identical regardless of entropy mode (quant tables depend only on
+/// quality), so the same Huffman dummy works for both modes — DHT is
+/// just filtered out when `arith` is true. A grayscale-only caller
+/// receives extra unused chroma tables — harmless, since downstream
+/// abbreviated reads ignore unreferenced indices.
 fn build_tables_only_datastream(quality: u8, arith: bool) -> Vec<u8> {
     // Smallest input that still triggers a full color-encode emission
-    // of both quantization tables and all four entropy tables: a single
+    // of both quantization tables and all four Huffman tables: a single
     // 16×16 (one 4:2:0 MCU) RGB block. Pixel content is irrelevant —
     // tables are derived from quality + Annex K standard tables, not
     // from the data.
     let dummy: Vec<u8> = vec![0u8; 16 * 16 * 3];
-    let result: Result<Vec<u8>, _> = if arith {
-        libjpeg_turbo_rs::compress_arithmetic(
-            &dummy,
-            16,
-            16,
-            PixelFormat::Rgb,
-            quality,
-            libjpeg_turbo_rs::Subsampling::S420,
-        )
-    } else {
-        libjpeg_turbo_rs::compress(
-            &dummy,
-            16,
-            16,
-            PixelFormat::Rgb,
-            quality,
-            libjpeg_turbo_rs::Subsampling::S420,
-        )
-    };
-    let encoded: Vec<u8> = match result {
+    let encoded: Vec<u8> = match libjpeg_turbo_rs::compress(
+        &dummy,
+        16,
+        16,
+        PixelFormat::Rgb,
+        quality,
+        libjpeg_turbo_rs::Subsampling::S420,
+    ) {
         Ok(b) => b,
         Err(_) => return vec![0xFF, 0xD8, 0xFF, 0xD9],
     };
@@ -5736,23 +5731,12 @@ fn build_tables_only_datastream(quality: u8, arith: bool) -> Vec<u8> {
                 out.push(0xD8);
                 i += 2;
             }
-            // DQT (0xDB) always; entropy tables match the requested mode:
-            // DHT (0xC4) for Huffman, DAC (0xCC) for arithmetic. Keeping
-            // the wrong-mode entropy tables would produce a stream that
-            // does not match `cinfo->arith_code`.
-            0xDB | 0xC4 if !arith || code == 0xDB => {
-                if i + 4 > encoded.len() {
-                    break;
-                }
-                let seg_len: usize = ((encoded[i + 2] as usize) << 8) | (encoded[i + 3] as usize);
-                let total: usize = 2 + seg_len;
-                if i + total > encoded.len() {
-                    break;
-                }
-                out.extend_from_slice(&encoded[i..i + total]);
-                i += total;
-            }
-            0xCC if arith => {
+            // DQT (0xDB) always; DHT (0xC4) only when Huffman. Upstream
+            // `write_tables_only` skips DHT for arithmetic-coded
+            // compression, and never emits DAC in this datastream
+            // (DAC accompanies the scan header, not the tables-only
+            // stream).
+            0xDB | 0xC4 if code == 0xDB || !arith => {
                 if i + 4 > encoded.len() {
                     break;
                 }
@@ -7177,7 +7161,12 @@ mod tables_only_tests {
     }
 
     #[test]
-    fn arithmetic_datastream_emits_dac_not_dht() {
+    fn arithmetic_datastream_omits_dht_and_dac() {
+        // Upstream `jcmarker.c::write_tables_only` for arithmetic mode
+        // emits SOI + DQT + EOI only. DHT is skipped (not the entropy
+        // mode) and DAC is *not* emitted here either — DAC accompanies
+        // the scan header in the abbreviated body stream, not this
+        // tables-only datastream.
         let bytes: Vec<u8> = build_tables_only_datastream(75, /*arith=*/ true);
         assert_eq!(&bytes[..2], &[0xFF, 0xD8], "stream must begin with SOI");
         assert_eq!(
@@ -7190,12 +7179,12 @@ mod tables_only_tests {
         assert!(tq.contains(&1), "DQT[Tq=1] (chroma) missing: {tq:?}");
         assert!(
             !has_dht(&bytes),
-            "arithmetic tables-only stream must not contain DHT \
-             (upstream `write_tables_only` skips Huffman tables for arithmetic mode)"
+            "arithmetic tables-only stream must not contain DHT"
         );
         assert!(
-            has_dac(&bytes),
-            "arithmetic tables-only stream must contain DAC"
+            !has_dac(&bytes),
+            "arithmetic tables-only stream must not contain DAC \
+             (DAC is emitted later with the scan header, not here)"
         );
     }
 
