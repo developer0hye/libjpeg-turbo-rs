@@ -34,6 +34,7 @@ jobs:
           - fuzz_transform
           - fuzz_progressive_decoder
           - fuzz_encode_roundtrip
+          - fuzz_transform_options
     steps:
       - uses: actions/checkout@v4
 
