@@ -385,7 +385,7 @@
 - [x] `tj3TransformBufSize()` — Transform output buffer size (`transform_buf_size()`)
 
 ### Image File I/O (BMP/PPM/PGM subset)
-- [x] `tj3LoadImage8()` / `tj3SaveImage8()` — BMP/PPM/PGM 8-bit (`load_image` / `save_bmp` / `save_ppm`). PNG is conditional in C (`PNG_SUPPORTED` build flag, requires libspng) and not a core JPEG feature.
+- [x] `tj3LoadImage8()` / `tj3SaveImage8()` — BMP/PPM/PGM 8-bit (`load_image` / `save_bmp` / `save_ppm`). PNG is conditional in C (`PNG_SUPPORTED` build flag, requires libspng) — mirrored as `--features png` (default off); supports 8-bit RGB/RGBA/Grayscale PNG via `png` crate.
 - [x] `tj3LoadImage12()` / `tj3LoadImage16()` — 12/16-bit PPM load (`load_ppm_16bit()` / `load_ppm_16bit_from_bytes()`). C only supports PPM for 12/16-bit.
 - [x] `tj3SaveImage12()` / `tj3SaveImage16()` — 12/16-bit PPM save (`save_ppm_16bit()`)
 

@@ -157,6 +157,21 @@ pub extern "C" fn tj3LoadImage8(
             return std::ptr::null_mut();
         }
     };
+    // Probe the first 8 bytes for the PNG signature before dispatching.
+    // When PNG is detected but the `png` feature is not compiled in, return
+    // a clear diagnostic so the caller knows what to do.
+    let is_png: bool =
+        bytes.len() >= 8 && bytes[..8] == [0x89u8, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A];
+    if is_png {
+        #[cfg(not(feature = "png"))]
+        {
+            inst.set_error(
+                "tj3LoadImage8: PNG support not enabled in this build (rebuild with --features png)",
+                TJERR_FATAL,
+            );
+            return std::ptr::null_mut();
+        }
+    }
     // Detect BMP magic before delegating to the parser; upstream
     // TurboJPEG returns BMP pixels in TJPF_BGR even though the
     // Rust loader normalises 24-bit BMP to PixelFormat::Rgb. We
@@ -409,10 +424,25 @@ pub extern "C" fn tj3SaveImage8(
     // outputs, upstream TurboJPEG's tj3SaveImage8 strips alpha /
     // padding from 4-bpp formats so the on-disk BMP is 24-bit. We
     // mirror that: convert RGBA/BGRA/RGBX/BGRX/ARGB/ABGR/XRGB/XBGR
-    // down to 3-bpp RGB or BGR before invoking save_bmp. PPM/PGM
-    // accept the original format.
+    // down to 3-bpp RGB or BGR before invoking save_bmp. PPM/PGM and
+    // PNG accept the original format.
     let lower: String = path.to_ascii_lowercase();
     let is_bmp_out: bool = lower.ends_with(".bmp");
+    let is_png_out: bool = lower.ends_with(".png");
+
+    // When the caller requested PNG output but the feature is compiled out,
+    // return a descriptive error immediately — before any data shuffling.
+    if is_png_out {
+        #[cfg(not(feature = "png"))]
+        {
+            inst.set_error(
+                "tj3SaveImage8: PNG support not enabled in this build (rebuild with --features png)",
+                TJERR_FATAL,
+            );
+            return -1;
+        }
+    }
+
     let (effective_bytes, effective_pf): (Vec<u8>, PixelFormat) = if is_bmp_out && bpp == 4 {
         let (stripped, dst_tj) = strip_alpha_to_3bpp(&dense_bytes, w, h, pixel_format);
         let pf3: PixelFormat = pixel_format_from_tj(dst_tj).unwrap_or(PixelFormat::Rgb);
@@ -421,11 +451,24 @@ pub extern "C" fn tj3SaveImage8(
         (dense_bytes, pf)
     };
 
-    // Dispatch on extension. BMP for `.bmp`; otherwise PPM (matches
-    // upstream tj3SaveImage8's behaviour where unrecognised
-    // extensions fall through to PPM/PGM).
+    // Dispatch on extension. BMP for `.bmp`; PNG for `.png` (feature-gated);
+    // otherwise PPM (matches upstream tj3SaveImage8's behaviour where
+    // unrecognised extensions fall through to PPM/PGM).
     let res: libjpeg_turbo_rs::Result<()> = if is_bmp_out {
         libjpeg_turbo_rs::save_bmp(path, &effective_bytes, w, h, effective_pf)
+    } else if is_png_out {
+        #[cfg(feature = "png")]
+        {
+            libjpeg_turbo_rs::save_png(path, &effective_bytes, w, h, effective_pf)
+        }
+        #[cfg(not(feature = "png"))]
+        {
+            // Unreachable: the early-return above fires first. Keep the
+            // branch for exhaustiveness under all feature combinations.
+            Err(libjpeg_turbo_rs::JpegError::Unsupported(
+                "PNG support not enabled".into(),
+            ))
+        }
     } else {
         libjpeg_turbo_rs::save_ppm(path, &effective_bytes, w, h, effective_pf)
     };

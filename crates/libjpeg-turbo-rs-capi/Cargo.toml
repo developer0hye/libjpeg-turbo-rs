@@ -13,6 +13,12 @@ build = "build.rs"
 name = "libjpeg_turbo_rs_capi"
 crate-type = ["rlib", "cdylib", "staticlib"]
 
+[features]
+# Pass-through: enables PNG support in the underlying libjpeg-turbo-rs crate,
+# which makes tj3LoadImage8 / tj3SaveImage8 dispatch to the png codec for
+# .png files. Off by default — callers opt in with --features png.
+png = ["libjpeg-turbo-rs/png"]
+
 [dependencies]
 libjpeg-turbo-rs = { path = "../.." }
 
