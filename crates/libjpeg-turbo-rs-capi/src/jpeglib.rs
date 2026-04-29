@@ -5983,21 +5983,83 @@ fn run_raw_encoder_and_flush(c: &mut JpegCompressPublic, priv_state: &mut Compre
     }
 
     let num_components: usize = priv_state.raw_plane_buffers.len();
-    let planes: Vec<&[u8]> = priv_state
-        .raw_plane_buffers
-        .iter()
-        .map(|v| v.as_slice())
-        .collect();
-    let plane_widths: Vec<usize> = priv_state.raw_plane_widths.clone();
-    let plane_heights: Vec<usize> = priv_state.raw_plane_heights.clone();
-
     let subsampling: libjpeg_turbo_rs::Subsampling =
         subsampling_from_comp_info(priv_state, num_components as c_int);
 
+    // `compress_raw` requires exact logical plane dimensions, not the
+    // MCU-aligned buffer dimensions stored in `raw_plane_widths/heights`.
+    // Derive logical dimensions the same way `compress_raw` validates them:
+    //   luma  = image_width × image_height
+    //   chroma = ceil(image_width / h_samp) × ceil(image_height / v_samp)
+    // The plane buffers are wider/taller but contain the correct pixel data
+    // in the top-left logical region; `compress_raw` only reads within the
+    // declared dimensions, so passing a buffer with stride == raw_plane_width
+    // and logical_width <= raw_plane_width is safe (extra columns are never
+    // accessed for the row range 0..logical_height).
+    let (h_samp_u8, v_samp_u8): (u8, u8) = subsampling.sampling_factors();
+    let (h_samp_factor, v_samp_factor): (usize, usize) = (h_samp_u8 as usize, v_samp_u8 as usize);
+    let logical_plane_widths: Vec<usize> = (0..num_components)
+        .map(|i| {
+            if i == 0 || num_components == 1 {
+                image_width
+            } else {
+                image_width.div_ceil(h_samp_factor)
+            }
+        })
+        .collect();
+    let logical_plane_heights: Vec<usize> = (0..num_components)
+        .map(|i| {
+            if i == 0 || num_components == 1 {
+                image_height
+            } else {
+                image_height.div_ceil(v_samp_factor)
+            }
+        })
+        .collect();
+
+    // `compress_raw` requires stride == logical_width for each plane.
+    // For non-MCU-aligned images the buffer stride (`raw_plane_width`) is
+    // wider than the logical width, so compact each plane into a tightly-
+    // packed `logical_width × logical_height` copy before calling.
+    // When stride already matches logical width the copy is avoided.
+    let compact_planes: Vec<Vec<u8>> = (0..num_components)
+        .map(|comp_idx| {
+            let raw_w: usize = priv_state.raw_plane_widths[comp_idx];
+            let logical_w: usize = logical_plane_widths[comp_idx];
+            let logical_h: usize = logical_plane_heights[comp_idx];
+            let buf: &[u8] = &priv_state.raw_plane_buffers[comp_idx];
+
+            if raw_w == logical_w {
+                // Zero-copy path: first `logical_w * logical_h` bytes are
+                // already densely packed.
+                let needed: usize = logical_w * logical_h;
+                buf[..needed.min(buf.len())].to_vec()
+            } else {
+                // Compact: extract the logical sub-region row by row.
+                let mut compact: Vec<u8> = Vec::with_capacity(logical_w * logical_h);
+                for row in 0..logical_h {
+                    let row_start: usize = row * raw_w;
+                    let row_end: usize = row_start + logical_w;
+                    if row_end <= buf.len() {
+                        compact.extend_from_slice(&buf[row_start..row_end]);
+                    } else {
+                        // Partial / missing row — zero-pad.
+                        let avail: usize = buf.len().saturating_sub(row_start);
+                        compact.extend_from_slice(&buf[row_start..row_start + avail]);
+                        compact.resize(compact.len() + (logical_w - avail), 0);
+                    }
+                }
+                compact
+            }
+        })
+        .collect();
+
+    let planes: Vec<&[u8]> = compact_planes.iter().map(|v| v.as_slice()).collect();
+
     let result: Result<Vec<u8>, _> = libjpeg_turbo_rs::compress_raw(
         &planes,
-        &plane_widths,
-        &plane_heights,
+        &logical_plane_widths,
+        &logical_plane_heights,
         image_width,
         image_height,
         priv_state.quality,

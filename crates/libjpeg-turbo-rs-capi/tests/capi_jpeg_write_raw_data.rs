@@ -544,3 +544,110 @@ fn raw_data_encode_grayscale_round_trip() {
         "grayscale: C-API decoded vs Rust-API decoded max_diff={max_diff_cross}, expected 0"
     );
 }
+
+/// **`raw_data_encode_non_aligned_4_2_0`**
+///
+/// Encode a 30×30 image (not a multiple of 16, the 4:2:0 iMCU row size) via
+/// `jpeg_write_raw_data`. This is the triangulating test for the P1 codex
+/// finding: MCU-padded buffer dimensions must not be passed directly to
+/// `compress_raw`, which expects exact logical dimensions.
+///
+/// If the fix is absent `jpeg_finish_compress` returns an error and the encoded
+/// JPEG is empty, causing `decompress_raw` to fail with a hard panic.
+#[test]
+fn raw_data_encode_non_aligned_4_2_0() {
+    // 30×30 is deliberately non-MCU-aligned: 4:2:0 iMCU height is 16, and
+    // ceil(30/16) = 2 iMCU rows. The chroma planes are 15×15 (logical), which
+    // is also not a multiple of 8, exercising the compact-copy path in
+    // run_raw_encoder_and_flush.
+    let image_width: usize = 30;
+    let image_height: usize = 30;
+    let quality: c_int = 85;
+
+    // Y plane: 30×30 ramp.
+    let y_plane: Vec<u8> = (0..image_height)
+        .flat_map(|row| (0..image_width).map(move |col| ((row * 5 + col * 3) & 0xFF) as u8))
+        .collect();
+
+    // Cb/Cr: 15×15 (ceil(30/2) × ceil(30/2)).
+    let c_width: usize = (image_width + 1) / 2;
+    let c_height: usize = (image_height + 1) / 2;
+    let cb_plane: Vec<u8> = vec![128u8; c_width * c_height];
+    let cr_plane: Vec<u8> = vec![128u8; c_width * c_height];
+
+    let planes: Vec<Vec<u8>> = vec![y_plane.clone(), cb_plane, cr_plane];
+    let plane_widths: Vec<usize> = vec![image_width, c_width, c_width];
+    let plane_heights: Vec<usize> = vec![image_height, c_height, c_height];
+    let v_samp_factors: Vec<usize> = vec![2, 1, 1];
+    let max_v_samp: usize = 2;
+
+    let path: PathBuf = cdylib_path();
+    let lib: libloading::Library =
+        unsafe { libloading::Library::new(&path) }.expect("dlopen cdylib");
+
+    let jpeg_bytes: Vec<u8> = unsafe {
+        encode_raw_planes_via_capi(
+            &lib,
+            &planes,
+            &plane_widths,
+            &plane_heights,
+            &v_samp_factors,
+            max_v_samp,
+            image_width,
+            image_height,
+            quality,
+            JCS_YCBCR,
+            JCS_YCBCR,
+            3,
+        )
+    };
+
+    assert!(
+        !jpeg_bytes.is_empty(),
+        "non-aligned 30×30 4:2:0 encode must produce a non-empty JPEG"
+    );
+    assert!(
+        jpeg_bytes.len() > 10,
+        "non-aligned encoded JPEG too short: {} bytes",
+        jpeg_bytes.len()
+    );
+
+    // Decode and validate Y plane within tolerance.
+    let decoded: libjpeg_turbo_rs::RawImage = libjpeg_turbo_rs::decompress_raw(&jpeg_bytes)
+        .unwrap_or_else(|e| panic!("decompress_raw after non-aligned C-API encode failed: {e}"));
+
+    assert_eq!(
+        decoded.num_components, 3,
+        "non-aligned 4:2:0: expected 3 components"
+    );
+    assert!(
+        decoded.plane_widths[0] >= image_width,
+        "decoded Y width {} < {image_width}",
+        decoded.plane_widths[0]
+    );
+    assert!(
+        decoded.plane_heights[0] >= image_height,
+        "decoded Y height {} < {image_height}",
+        decoded.plane_heights[0]
+    );
+
+    let dec_y: &[u8] = &decoded.planes[0];
+    let dec_y_w: usize = decoded.plane_widths[0];
+    let mut max_diff: u32 = 0;
+    for row in 0..image_height {
+        for col in 0..image_width {
+            let ref_val: u8 = y_plane[row * image_width + col];
+            let dec_val: u8 = dec_y[row * dec_y_w + col];
+            let diff: u32 = (ref_val as i32 - dec_val as i32).unsigned_abs();
+            if diff > max_diff {
+                max_diff = diff;
+            }
+        }
+    }
+    // Tolerance: Q=85 DCT round-trip on a non-uniform ramp. Measured actual ≤ 4.
+    // Gate set at 5.
+    assert!(
+        max_diff <= 5,
+        "non-aligned 30×30 4:2:0 Y-plane max_diff={max_diff} exceeds tolerance of 5"
+    );
+}
