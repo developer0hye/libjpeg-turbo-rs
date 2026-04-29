@@ -283,20 +283,12 @@ unsafe fn collect_raw_planes_via_capi(
         );
 
         // Harvest rows: for each component, read `comp_vsf[i] * dct_size`
-        // rows. Discard rows that would exceed the true plane height
-        // (padding rows from MCU alignment).
+        // rows. Keep all rows including MCU padding — this matches what
+        // the C API actually delivers and what `decompress_raw` returns
+        // (both are MCU-aligned per upstream's raw-data contract).
         for comp_idx in 0..num_components {
             let rows_this_imcu: usize = comp_vsf[comp_idx] * dct_size;
-            // Plane height in rows for this component ≈
-            // ceil(output_height * comp_vsf[i] / max_vsf).
-            let plane_height_approx: usize =
-                ((output_height as usize * comp_vsf[comp_idx]) + max_vsf as usize - 1)
-                    / max_vsf as usize;
-            let already: usize = planes[comp_idx].len() / max_plane_width;
             for row_in_imcu in 0..rows_this_imcu {
-                if already + row_in_imcu >= plane_height_approx {
-                    break;
-                }
                 let src: &[u8] = &row_bufs[comp_idx][row_in_imcu][..max_plane_width];
                 planes[comp_idx].extend_from_slice(src);
             }
