@@ -570,10 +570,43 @@ impl ProgressiveDecoder {
         let out_format: PixelFormat = PixelFormat::Rgb;
         let bpp: usize = out_format.bytes_per_pixel();
 
+        // The progressive YCbCr assembly paths below assume the standard
+        // JPEG sampling layout: Y at the frame's max sampling, Cb/Cr at
+        // sampling factors ≤ max with matching ratios. Adversarial /
+        // malformed streams can pick e.g. Y=h1v2, Cb=h4v1, Cr=h1v1 — all
+        // legal per ITU-T T.81 §B.2.2 syntax — which yields component
+        // planes whose row strides and counts disagree, and the SIMD
+        // upsamplers (`fancy_h1v2`, …) read past the chroma plane. ASan
+        // caught this as a heap-buffer-overflow READ of size 16 in
+        // fuzz_progressive_decoder (CI run 25215431132). C `libjpeg`
+        // accepts only the standard layouts; reject the rest as
+        // Unsupported up front rather than tripping unsafe SIMD loads.
+        let y_comp = &frame.components[0];
+        let cb_comp = &frame.components[1];
+        let cr_comp = &frame.components[2];
+        if y_comp.horizontal_sampling as usize != self.max_h
+            || y_comp.vertical_sampling as usize != self.max_v
+            || cb_comp.horizontal_sampling != cr_comp.horizontal_sampling
+            || cb_comp.vertical_sampling != cr_comp.vertical_sampling
+        {
+            return Err(JpegError::Unsupported(format!(
+                "non-standard YCbCr sampling Y={}x{}, Cb={}x{}, Cr={}x{} \
+                 (max={}x{}); progressive assembly requires Y at full \
+                 sampling and Cb/Cr matching",
+                y_comp.horizontal_sampling,
+                y_comp.vertical_sampling,
+                cb_comp.horizontal_sampling,
+                cb_comp.vertical_sampling,
+                cr_comp.horizontal_sampling,
+                cr_comp.vertical_sampling,
+                self.max_h,
+                self.max_v
+            )));
+        }
+
         let y_plane: &[u8] = &component_planes[0];
         let y_width: usize = self.comp_infos[0].comp_w;
 
-        let cb_comp = &frame.components[1];
         let cb_w: usize = self.comp_infos[1].comp_w;
         let cb_h: usize = self.comp_infos[1].blocks_y * 8;
 
