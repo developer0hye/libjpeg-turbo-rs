@@ -641,6 +641,21 @@ pub fn transform_jpeg_with_options(data: &[u8], options: &TransformOptions) -> R
         let target_bx: usize = (coeffs.width as usize).div_ceil(8);
         let target_by: usize = (coeffs.height as usize).div_ceil(8);
 
+        // Strip-padding rebuild assumes the source grid covers at least as
+        // many blocks as the target raster. With degenerate sampling factors
+        // (e.g. Y=h2v1 alongside Cb=h2v3), max_v is dominated by a non-Y
+        // component, so the Y MCU grid can be smaller than ceil(H/8)×ceil(W/8)
+        // and the strip loop would read past `comp.blocks`. C jpegtran rejects
+        // the same input with "Unsupported color conversion request"; match
+        // that rather than fabricating zero blocks.
+        if orig_bx < target_bx || orig_by < target_by {
+            return Err(JpegError::Unsupported(format!(
+                "grayscale conversion requires Y component grid {}x{} \
+                 to cover image raster {}x{}; sampling factors are incompatible",
+                orig_bx, orig_by, target_bx, target_by
+            )));
+        }
+
         if orig_bx != target_bx || orig_by != target_by {
             // Rearrange: blocks are in raster order within MCU-padded grid,
             // just strip the extra columns/rows.
