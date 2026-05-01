@@ -580,7 +580,28 @@ impl ProgressiveDecoder {
         let h_factor: usize = self.max_h / cb_comp.horizontal_sampling as usize;
         let v_factor: usize = self.max_v / cb_comp.vertical_sampling as usize;
 
-        if h_factor == 1 && v_factor == 1 {
+        // The 4:4:4 fast path below assumes all three components share the
+        // same row stride and have at least `out_height` rows of decoded
+        // data. h_factor / v_factor are derived from Cb only, so a stream
+        // with Cb at max sampling but Y or Cr undersampled (e.g.
+        // Y=h1v1, Cb=h1v3, Cr=h1v1 — max_v=3 dominated by Cb) would
+        // satisfy `h_factor == 1 && v_factor == 1` while the Y plane is
+        // shorter than the image raster. The previous code then
+        // panicked at the slice index in `y_plane[y * y_width..]` when
+        // `y` exceeded the actual Y plane height. Found via
+        // fuzz_progressive_decoder on a 16x16 SOF2 stream with these
+        // factors (Fuzz Smoke run 25213799463). Demand all three
+        // components be at full sampling for the fast path.
+        let y_comp = &frame.components[0];
+        let cr_comp = &frame.components[2];
+        let all_full_sampling = y_comp.horizontal_sampling as usize == self.max_h
+            && y_comp.vertical_sampling as usize == self.max_v
+            && cb_comp.horizontal_sampling as usize == self.max_h
+            && cb_comp.vertical_sampling as usize == self.max_v
+            && cr_comp.horizontal_sampling as usize == self.max_h
+            && cr_comp.vertical_sampling as usize == self.max_v;
+
+        if h_factor == 1 && v_factor == 1 && all_full_sampling {
             // 4:4:4: no upsampling needed
             let data_size: usize = out_width * out_height * bpp;
             let mut data: Vec<u8> = Vec::with_capacity(data_size);
