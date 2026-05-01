@@ -267,3 +267,35 @@ fn transform_with_default_options_matches_original() {
     assert_eq!(original.height, transformed.height);
     assert_eq!(original.data, transformed.data);
 }
+
+// --- Regression: degenerate sampling factors must not panic in grayscale rebuild ---
+
+/// Reproduces the fuzz_transform_options 2026-05-01 crash: a 16x16 SOF9
+/// (arithmetic) JPEG with sampling factors Y=h2v1, Cb=h2v3, Cr=h1v1 has
+/// `max_v = 3`, which makes the Y MCU grid (1x1 MCU * v_samp 1 = 1 block-row)
+/// smaller than the ceil(H/8)=2 raster row count. The grayscale-strip path
+/// in coefficient.rs then read past `comp.blocks` and panicked with
+/// "len is 2 but the index is 2". C jpegtran rejects the same input with
+/// "Unsupported color conversion request"; we return JpegError::Unsupported
+/// and must not panic. Seed file shared with fuzz_transform_options corpus
+/// (`regression_rot90_gray_coef_oob.bin`).
+#[test]
+fn grayscale_with_degenerate_sampling_returns_error_not_panic() {
+    // The corpus file is a full fuzz_transform_options input: 10-byte fuzzer
+    // header (op_idx, flags, ...) followed by the JPEG. transform_jpeg_with_options
+    // expects raw JPEG bytes, so skip the header.
+    const RAW_INPUT: &[u8] =
+        include_bytes!("../fuzz/corpus/fuzz_transform_options/regression_rot90_gray_coef_oob.bin");
+    const FUZZ_HEADER_LEN: usize = 10;
+    let jpeg: &[u8] = &RAW_INPUT[FUZZ_HEADER_LEN..];
+    let opts = TransformOptions {
+        op: TransformOp::Rot90,
+        grayscale: true,
+        ..TransformOptions::default()
+    };
+    let result = libjpeg_turbo_rs::transform_jpeg_with_options(jpeg, &opts);
+    assert!(
+        result.is_err(),
+        "transform must reject degenerate sampling factors with an error"
+    );
+}
