@@ -892,6 +892,24 @@ pub fn transform_jpeg_with_options(data: &[u8], options: &TransformOptions) -> R
             .unwrap_or(1);
         let imcu_w: usize = post_max_h * 8;
         let imcu_h: usize = post_max_v * 8;
+
+        // Crop coordinates are in *post-transform* image space (see comment
+        // above). A swap-dim spatial op (Rot90 / Rot270 / Transpose /
+        // Transverse) can leave the requested crop origin past the
+        // post-transform width or height — e.g. a 2048x16 source rotated 90°
+        // becomes 16x2048, so a crop with x=2032 from the original frame is
+        // outside the new width=16. The downstream `coeffs.width - (crop.x -
+        // remainder_x)` then underflows. Found via fuzz_transform_options
+        // round-5 (CI run 25218344069) at coefficient.rs:907. Reject up
+        // front rather than wrap silently.
+        if crop.x >= coeffs.width as usize || crop.y >= coeffs.height as usize {
+            return Err(JpegError::Unsupported(format!(
+                "crop origin (x={}, y={}) lies outside post-transform image \
+                 ({}x{}); crop coordinates must be in output space",
+                crop.x, crop.y, coeffs.width, coeffs.height,
+            )));
+        }
+
         let remainder_x: usize = crop.x % imcu_w;
         let remainder_y: usize = crop.y % imcu_h;
 
