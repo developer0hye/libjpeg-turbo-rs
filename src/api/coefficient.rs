@@ -1141,7 +1141,11 @@ pub fn write_coefficients_optimized(coeffs: &JpegCoefficients) -> Result<Vec<u8>
                         };
 
                         let dc_val: i16 = if is_dummy { prev_dc[ci] } else { block[0] };
-                        let diff: i16 = dc_val - prev_dc[ci];
+                        // wrapping_sub: corrupt/adversarial input can pair DCs
+                        // whose difference exceeds i16; wrap matches the
+                        // baseline-encoder convention (huffman_encode.rs:461/495)
+                        // and gather_dc_symbol's leading-zeros classification.
+                        let diff: i16 = dc_val.wrapping_sub(prev_dc[ci]);
                         prev_dc[ci] = dc_val;
                         huff_opt::gather_dc_symbol(diff, dc_freq);
                         huff_opt::gather_ac_symbols(block, ac_freq);
@@ -1498,7 +1502,7 @@ pub fn write_coefficients_progressive(
                                     let block: &[i16; 64] = &comp.blocks[by * comp.blocks_x + bx];
                                     block[0] >> scan.al
                                 };
-                                let diff: i16 = dc - prev_dc[scan_ci];
+                                let diff: i16 = dc.wrapping_sub(prev_dc[scan_ci]);
                                 prev_dc[scan_ci] = dc;
                                 huff_opt::gather_dc_symbol(diff, freq);
                             }
@@ -1574,7 +1578,7 @@ pub fn write_coefficients_progressive(
                                     let block: &[i16; 64] = &comp.blocks[by * comp.blocks_x + bx];
                                     block[0] >> scan.al
                                 };
-                                let diff: i16 = dc - enc_prev_dc[scan_ci];
+                                let diff: i16 = dc.wrapping_sub(enc_prev_dc[scan_ci]);
                                 enc_prev_dc[scan_ci] = dc;
                                 HuffmanEncoder::encode_dc_only(&mut bit_writer, diff, dc_table);
                             }
