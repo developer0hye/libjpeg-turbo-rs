@@ -62,8 +62,17 @@ pub fn do_rot_180(src: &[i16; 64], dst: &mut [i16; 64]) {
     for row in 0..8 {
         for col in 0..8 {
             let idx = row * 8 + col;
-            let sign = if (row + col) % 2 == 1 { -1 } else { 1 };
-            dst[idx] = src[idx] * sign;
+            // Use wrapping_neg: adversarial inputs can carry quantized
+            // coefficients of i16::MIN, and `i16::MIN * -1` panics under
+            // overflow checks (cargo-fuzz default). The wrap is safe — a
+            // single quantized coefficient at the extreme is malformed
+            // and will be reclassified by Huffman categorisation anyway.
+            // Found via fuzz_transform_options round-3 (CI run 25215431132).
+            dst[idx] = if (row + col) % 2 == 1 {
+                src[idx].wrapping_neg()
+            } else {
+                src[idx]
+            };
         }
     }
 }

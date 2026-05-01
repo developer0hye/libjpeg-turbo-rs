@@ -1692,8 +1692,14 @@ pub fn write_coefficients_progressive(
                             if coeff == 0 {
                                 continue;
                             }
-                            let sign_mask: i16 = coeff >> 15;
-                            let abs_coeff: i16 = (coeff ^ sign_mask) - sign_mask;
+                            // i32 widen to handle adversarial coeff = i16::MIN:
+                            // |i16::MIN| = 32768 doesn't fit in i16 (the
+                            // branchless abs `(c ^ -1) - -1 = ~c + 1`
+                            // overflowed). Found via fuzz_transform_options
+                            // round-3 (CI run 25215431132) at coefficient.rs:1696.
+                            let coeff: i32 = coeff as i32;
+                            let sign_mask: i32 = coeff >> 31;
+                            let abs_coeff: i32 = (coeff ^ sign_mask) - sign_mask;
                             let temp: u16 = (abs_coeff >> al) as u16;
                             if temp == 0 {
                                 continue;

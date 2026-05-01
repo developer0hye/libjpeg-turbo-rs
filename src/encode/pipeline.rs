@@ -3403,8 +3403,10 @@ fn prepare_ac_first_coeffs(
             if coeff == 0 {
                 continue;
             }
-            let sign_mask: i16 = coeff >> 15;
-            let abs_coeff: i16 = (coeff ^ sign_mask) - sign_mask;
+            // i32 widen: see api/coefficient.rs note (i16::MIN abs overflow).
+            let coeff: i32 = coeff as i32;
+            let sign_mask: i32 = coeff >> 31;
+            let abs_coeff: i32 = (coeff ^ sign_mask) - sign_mask;
             let temp: u16 = (abs_coeff >> al) as u16;
             if temp == 0 {
                 continue;
@@ -3468,8 +3470,10 @@ unsafe fn prepare_ac_first_sse2(
     while i < band_len {
         let coeff: i16 = *block.get_unchecked(ss + i);
         if coeff != 0 {
-            let sign_mask: i16 = coeff >> 15;
-            let abs_coeff: i16 = (coeff ^ sign_mask) - sign_mask;
+            // i32 widen: see api/coefficient.rs note (i16::MIN abs overflow).
+            let coeff: i32 = coeff as i32;
+            let sign_mask: i32 = coeff >> 31;
+            let abs_coeff: i32 = (coeff ^ sign_mask) - sign_mask;
             let temp: u16 = (abs_coeff >> al) as u16;
             if temp != 0 {
                 *values.get_unchecked_mut(i) = temp;
@@ -3603,8 +3607,10 @@ fn gather_progressive_ac_freq(blocks: &[[i16; 64]], ss: u8, se: u8, al: u8, freq
             if coeff == 0 {
                 continue;
             }
-            let sign_mask: i16 = coeff >> 15;
-            let abs_coeff: i16 = (coeff ^ sign_mask) - sign_mask;
+            // i32 widen: see api/coefficient.rs note (i16::MIN abs overflow).
+            let coeff: i32 = coeff as i32;
+            let sign_mask: i32 = coeff >> 31;
+            let abs_coeff: i32 = (coeff ^ sign_mask) - sign_mask;
             let temp: u16 = (abs_coeff >> al) as u16;
             if temp == 0 {
                 continue;
@@ -4878,8 +4884,10 @@ pub(crate) fn encode_ac_first_block(
         if coeff == 0 {
             continue;
         }
-        let sign_mask: i16 = coeff >> 15;
-        let abs_coeff: i16 = (coeff ^ sign_mask) - sign_mask;
+        // i32 widen: see api/coefficient.rs note (i16::MIN abs overflow).
+        let coeff: i32 = coeff as i32;
+        let sign_mask: i32 = coeff >> 31;
+        let abs_coeff: i32 = (coeff ^ sign_mask) - sign_mask;
         let temp: u16 = (abs_coeff >> al) as u16;
         if temp == 0 {
             continue;
