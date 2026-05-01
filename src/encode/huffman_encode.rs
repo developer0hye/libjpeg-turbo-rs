@@ -547,7 +547,12 @@ impl HuffmanEncoder {
         ac_table: &HuffTable,
     ) {
         let dc: i16 = coeffs_zigzag[0];
-        let diff: i16 = dc - *prev_dc;
+        // Adversarial / corrupt input can produce a quantized DC pair whose
+        // difference exceeds i16 range. Use wrapping_sub to match the bit
+        // pattern Huffman category encoding expects (and the existing
+        // baseline-encoder convention at lines 461 / 495); silent overflow
+        // in release stayed silent only by luck and panicked under fuzz.
+        let diff: i16 = dc.wrapping_sub(*prev_dc);
         *prev_dc = dc;
 
         let (magnitude_bits, category) = encode_dc_value(diff);
@@ -1234,7 +1239,9 @@ mod tests {
         let mut writer = BitWriter::new(256);
 
         let dc: i16 = coeffs[0];
-        let diff: i16 = dc - *prev_dc;
+        // wrapping_sub: see lines 461/495 for rationale (adversarial DC pairs
+        // can exceed i16 range; wrap matches the baseline-encoder convention).
+        let diff: i16 = dc.wrapping_sub(*prev_dc);
         *prev_dc = dc;
 
         let (magnitude_bits, category) = encode_dc_value(diff);
