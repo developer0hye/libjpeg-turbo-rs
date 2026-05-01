@@ -601,7 +601,12 @@ impl<'a> MarkerReader<'a> {
             && &self.data[self.pos..self.pos + 6] == EXIF_HEADER
         {
             let data_start = self.pos + 6;
-            let data_len = end.saturating_sub(data_start);
+            // Clamp the body upper bound to the buffer size: a truncated stream
+            // can declare a segment length that runs past EOF, and unguarded
+            // slicing would panic. `self.pos = end` past EOF is fine — the
+            // outer marker loop hits EOF on the next read.
+            let data_end = end.min(self.data.len());
+            let data_len = data_end.saturating_sub(data_start);
             *exif_data = Some(self.data[data_start..data_start + data_len].to_vec());
         }
 
@@ -626,7 +631,10 @@ impl<'a> MarkerReader<'a> {
             let seq_no = self.data[self.pos + 12];
             let num_markers = self.data[self.pos + 13];
             let data_start = self.pos + 14;
-            let data_len = end.saturating_sub(data_start);
+            // Same truncation guard as APP1: a malformed segment length can
+            // place `end` past the buffer; clamp before the slice copy.
+            let data_end = end.min(self.data.len());
+            let data_len = data_end.saturating_sub(data_start);
             let data = self.data[data_start..data_start + data_len].to_vec();
             icc_chunks.push(IccChunk {
                 seq_no,
@@ -1072,5 +1080,53 @@ mod tests {
         // Slots 0..4 untouched by this DAC
         assert_eq!(dc_params[0], (0, 1));
         assert_eq!(ac_params[0], 5);
+    }
+
+    /// Regression: a truncated APP1/APP2 segment must not panic, even when the
+    /// declared `length` field runs past the end of the buffer.
+    ///
+    /// Found by `fuzz_read_coefficients` / `fuzz_decompress_lenient` (Fuzz Smoke
+    /// CI run 25147432663): with `length = 0xFFFF` and the EXIF or ICC_PROFILE
+    /// signature present but the body chopped, the previous slice copy
+    /// `self.data[data_start..data_start + data_len]` indexed past EOF.
+    #[test]
+    fn app1_app2_truncated_segments_do_not_panic() {
+        // EXIF APP1 advertising body length 0xFFFF but only providing the 6-byte
+        // signature and a single byte beyond.
+        let mut exif_seg: Vec<u8> = vec![0xFF, 0xFF]; // length = 65535
+        exif_seg.extend_from_slice(b"Exif\0\0"); // EXIF_HEADER (6 bytes)
+        exif_seg.push(0x42); // one byte of body
+        let mut reader = MarkerReader::new(&exif_seg);
+        let mut exif: Option<Vec<u8>> = None;
+        // The parse may report end-of-data later (since pos = end overshoots),
+        // but it must not panic during the slice copy.
+        let _ = reader.read_app1(&mut exif);
+        // If the EXIF header was recognised, we must have grabbed only the
+        // bytes that actually exist (no out-of-bounds slice).
+        if let Some(body) = exif {
+            assert!(
+                body.len() <= exif_seg.len(),
+                "EXIF body must not exceed buffer size, got {}",
+                body.len()
+            );
+        }
+
+        // ICC APP2 advertising body length 0x100 but only providing the 14-byte
+        // header (`ICC_PROFILE\0` + seq + num_markers).
+        let mut icc_seg: Vec<u8> = vec![0x01, 0x00]; // length = 256
+        icc_seg.extend_from_slice(b"ICC_PROFILE\0"); // ICC_PROFILE_HEADER (12 bytes)
+        icc_seg.push(0x01); // seq_no
+        icc_seg.push(0x01); // num_markers
+                            // No body bytes follow — declared length lies.
+        let mut reader = MarkerReader::new(&icc_seg);
+        let mut icc_chunks: Vec<IccChunk> = Vec::new();
+        let _ = reader.read_app2(&mut icc_chunks);
+        for chunk in &icc_chunks {
+            assert!(
+                chunk.data.len() <= icc_seg.len(),
+                "ICC chunk body must not exceed buffer size, got {}",
+                chunk.data.len()
+            );
+        }
     }
 }
