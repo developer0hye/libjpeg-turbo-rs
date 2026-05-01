@@ -2918,7 +2918,7 @@ fn compress_progressive_with_scans(
                                 let by: usize = mcu_y * layout.v_blocks + bv;
                                 let block: &[i16; 64] = &coeff_bufs[ci][by * layout.blocks_x + bx];
                                 let dc: i16 = block[0] >> scan.al;
-                                let diff: i16 = dc - prev_dc[scan_ci];
+                                let diff: i16 = dc.wrapping_sub(prev_dc[scan_ci]);
                                 prev_dc[scan_ci] = dc;
                                 crate::encode::huff_opt::gather_dc_symbol(diff, freq);
                             }
@@ -4751,7 +4751,7 @@ fn encode_progressive_dc_scan(
 
                             if ah == 0 {
                                 let dc: i16 = block[0] >> al;
-                                let diff: i16 = dc - prev_dc[scan_ci];
+                                let diff: i16 = dc.wrapping_sub(prev_dc[scan_ci]);
                                 prev_dc[scan_ci] = dc;
 
                                 if diff == 0 {
