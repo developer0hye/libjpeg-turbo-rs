@@ -15,7 +15,12 @@ pub fn do_flip_h(src: &[i16; 64], dst: &mut [i16; 64]) {
     for row in 0..8 {
         for col in 0..8 {
             let idx = row * 8 + col;
-            dst[idx] = if col % 2 == 1 { -src[idx] } else { src[idx] };
+            // wrapping_neg: see do_rot_180 for the i16::MIN rationale.
+            dst[idx] = if col % 2 == 1 {
+                src[idx].wrapping_neg()
+            } else {
+                src[idx]
+            };
         }
     }
 }
@@ -25,7 +30,12 @@ pub fn do_flip_v(src: &[i16; 64], dst: &mut [i16; 64]) {
     for row in 0..8 {
         for col in 0..8 {
             let idx = row * 8 + col;
-            dst[idx] = if row % 2 == 1 { -src[idx] } else { src[idx] };
+            // wrapping_neg: see do_rot_180 for the i16::MIN rationale.
+            dst[idx] = if row % 2 == 1 {
+                src[idx].wrapping_neg()
+            } else {
+                src[idx]
+            };
         }
     }
 }
@@ -44,8 +54,13 @@ pub fn do_transpose(src: &[i16; 64], dst: &mut [i16; 64]) {
 pub fn do_transverse(src: &[i16; 64], dst: &mut [i16; 64]) {
     for row in 0..8 {
         for col in 0..8 {
-            let sign = if (row + col) % 2 == 1 { -1 } else { 1 };
-            dst[col * 8 + row] = src[row * 8 + col] * sign;
+            // wrapping_neg: see do_rot_180 for the i16::MIN rationale.
+            let v = src[row * 8 + col];
+            dst[col * 8 + row] = if (row + col) % 2 == 1 {
+                v.wrapping_neg()
+            } else {
+                v
+            };
         }
     }
 }
