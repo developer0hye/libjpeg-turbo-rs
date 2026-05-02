@@ -1145,10 +1145,19 @@ pub fn compress_custom_quant(
         marker_writer::write_dqt(&mut output, 1, &chroma_quant);
     }
 
-    // Frame header
+    // Frame header — SOF0 (baseline) when all quant values fit in 8 bits,
+    // SOF1 (extended sequential) when any quant value exceeds 255. Matches
+    // C cjpeg behaviour: with default `force_baseline=FALSE`, low quality
+    // produces 16-bit DQT entries which require SOF1.
+    let needs_sof1 = luma_quant.iter().any(|&v| v > 255)
+        || (!is_grayscale && chroma_quant.iter().any(|&v| v > 255));
     if is_grayscale {
         let components = vec![(1, 1, 1, 0)];
-        marker_writer::write_sof0(&mut output, width as u16, height as u16, &components);
+        if needs_sof1 {
+            marker_writer::write_sof1(&mut output, width as u16, height as u16, &components);
+        } else {
+            marker_writer::write_sof0(&mut output, width as u16, height as u16, &components);
+        }
     } else {
         let (h_samp, v_samp) = subsampling.sampling_factors();
         let components = vec![
@@ -1156,7 +1165,11 @@ pub fn compress_custom_quant(
             (2, 1, 1, 1),           // Cb
             (3, 1, 1, 1),           // Cr
         ];
-        marker_writer::write_sof0(&mut output, width as u16, height as u16, &components);
+        if needs_sof1 {
+            marker_writer::write_sof1(&mut output, width as u16, height as u16, &components);
+        } else {
+            marker_writer::write_sof0(&mut output, width as u16, height as u16, &components);
+        }
     }
 
     // Huffman tables
@@ -1991,8 +2004,18 @@ pub fn compress_lossless_extended_precision(
 
 /// Compute the lossless difference for a single sample.
 ///
-/// Uses the `predict` function from the decoder's lossless module to
-/// compute the predicted value, then returns the signed difference.
+/// Returns the **raw signed difference** `(sample >> Pt) - prediction`,
+/// matching libjpeg-turbo `jclossls.c` (`*diff_buf++ = samp - PREDICTOR;`).
+/// The lossless JPEG bitstream (ITU-T T.81 Annex H.1.2.2) classifies the
+/// diff by its raw 16-bit signed magnitude, NOT by the P-bit modular value.
+/// Folding to the P-bit modular range produces a bitstream that decodes to
+/// the same pixels (the decoder reconstructs modulo 2^P) but is NOT
+/// byte-identical to C cjpeg, because the magnitude category (and thus
+/// the optimised Huffman table) differs.
+///
+/// For 8-bit (P=8) samples the diff is in [-255, +255]; for higher
+/// precision it is in [-(2^P - 1), +(2^P - 1)]. Both fit in i16 for
+/// P <= 15. The 16-bit precision path lives in `src/api/precision.rs`.
 #[allow(clippy::too_many_arguments)]
 fn lossless_diff(
     pixel: i32,
@@ -2004,7 +2027,6 @@ fn lossless_diff(
     point_transform: u8,
     precision: u8,
 ) -> i16 {
-    let mask: i32 = (1i32 << precision) - 1;
     let initial_pred: i32 = 1 << (precision as i32 - point_transform as i32 - 1);
 
     // Apply point transform: shift right before encoding
@@ -2025,13 +2047,8 @@ fn lossless_diff(
         crate::decode::lossless::predict(predictor, ra, rb, rc)
     };
 
-    let diff: i32 = (sample - prediction) & mask;
-    // Convert to signed: values >= 2^(p-1) represent negative differences
-    if diff >= (1 << (precision - 1)) {
-        (diff - (1 << precision)) as i16
-    } else {
-        diff as i16
-    }
+    // Raw signed difference (no modular fold). See doc comment.
+    (sample - prediction) as i16
 }
 
 /// Encode a single-component (grayscale) lossless JPEG.

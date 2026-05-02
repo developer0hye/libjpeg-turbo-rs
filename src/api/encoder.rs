@@ -760,9 +760,28 @@ impl<'a> Encoder<'a> {
             return Ok(base);
         }
 
+        // Route through compress_custom_quant whenever the builder may need
+        // non-baseline (16-bit) quantization values. C cjpeg defaults to
+        // `force_baseline = FALSE`, allowing scaled quant values up to 32767
+        // at low quality (e.g. q=1 produces 16*5000/100 = 800 for the luma DC
+        // entry). The default `compress(...)` path uses
+        // `quality_scale_quant_table` which clamps to 255, breaking parity
+        // with cjpeg at low quality. Routing through `compress_custom_quant`
+        // with the builder-resolved tables (which honour `force_baseline`)
+        // keeps high-quality output bit-identical (no clamp triggers) and
+        // produces 16-bit DQT markers at low quality just like cjpeg.
+        let scaled_quant_could_exceed_255 = !self.force_baseline && {
+            let q = self.quality_factors.map(|f| f[0]).unwrap_or(self.quality);
+            // 5000/q > 255 iff q <= 19 (since 5000/19 = 263, 5000/20 = 250).
+            // Smallest base entry is 8 (luma AC[3,3]); largest is 121 (chroma).
+            // 121 * (5000/q)/100 > 255 iff 5000/q > 211 iff q <= 23.
+            // Use a generous threshold to be safe.
+            q < 50
+        };
         let needs_custom_quant: bool = self.force_baseline
             || self.linear_scale_factor.is_some()
-            || self.has_custom_quant_tables();
+            || self.has_custom_quant_tables()
+            || scaled_quant_could_exceed_255;
 
         let base = if let Some(ref factors) = self.custom_sampling_factors {
             encoder::compress_custom_sampling(

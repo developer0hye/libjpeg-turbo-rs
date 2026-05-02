@@ -174,6 +174,15 @@ fn write_sof_generic(
     }
 }
 
+/// Write SOF1 (Start Of Frame, Extended Sequential DCT) marker, 8-bit precision.
+///
+/// Same structure as SOF0 but uses marker code 0xC1. C cjpeg emits SOF1
+/// instead of SOF0 when any quantization table value exceeds 255 (16-bit
+/// quantization), since baseline (SOF0) requires 8-bit quant tables.
+pub fn write_sof1(buf: &mut Vec<u8>, width: u16, height: u16, components: &[(u8, u8, u8, u8)]) {
+    write_sof_generic(buf, 0xC1, width, height, components, 8);
+}
+
 /// Write SOF2 (Start Of Frame, Progressive DCT) marker, 8-bit precision.
 ///
 /// Same structure as SOF0 but uses marker code 0xC2.
