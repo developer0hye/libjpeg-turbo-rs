@@ -247,6 +247,19 @@ pub fn write_sof10_with_precision(
 }
 
 /// Write SOS marker for progressive scan with spectral selection and successive approximation.
+///
+/// Mirrors C `jcmarker.c::write_scan_header` table-hiding logic: zeroes
+/// `Td` / `Ta` in the per-component byte for scans that do not use the
+/// corresponding tables. Specifically:
+///
+/// - `Td = 0` when `ss != 0` (no DC table needed for AC-only scans)
+/// - `Td = 0` when `ah != 0` (refinement scans don't reference Huffman tables)
+/// - `Ta = 0` when `se != 63` (no AC table needed for DC-only scans)
+/// - `Ta = 0` when `ah != 0 && ss == 0` (DC refinement)
+///
+/// Without this normalisation, our progressive SOS bytes diverge from cjpeg
+/// in the bytes where the upstream encoder hides table indices that the
+/// decoder will never use.
 pub fn write_sos_progressive(
     buf: &mut Vec<u8>,
     components: &[(u8, u8, u8)],
@@ -263,9 +276,14 @@ pub fn write_sos_progressive(
 
     buf.push(components.len() as u8);
 
+    let hide_dc: bool = ss != 0 || ah != 0;
+    let hide_ac: bool = se != 63 || (ah != 0 && ss == 0);
+
     for &(id, dc_tbl, ac_tbl) in components {
+        let td: u8 = if hide_dc { 0 } else { dc_tbl };
+        let ta: u8 = if hide_ac { 0 } else { ac_tbl };
         buf.push(id);
-        buf.push((dc_tbl << 4) | ac_tbl);
+        buf.push((td << 4) | ta);
     }
 
     buf.push(ss);
