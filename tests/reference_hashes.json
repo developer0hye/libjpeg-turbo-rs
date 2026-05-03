@@ -4,10 +4,10 @@
     "baseline_64x64_q75_444": "6e87a2dc49a4d734",
     "baseline_64x64_q50_420": "8ed9505bff068343",
     "baseline_64x64_q100_420": "98be41b0ad4fb9b7",
-    "progressive_64x64_q75_444": "20ac3a4d6d7994e3",
+    "progressive_64x64_q75_444": "6fc23719bb3e3d2f",
     "arithmetic_64x64_q75_420": "357056affabbb463",
-    "arithmetic_progressive_64x64_q75_444": "d53f13e8260df301",
-    "lossless_64x64_gray": "0a00d21540789f1b",
+    "arithmetic_progressive_64x64_q75_444": "5c2b7b0f08951e8d",
+    "lossless_64x64_gray": "545ac12ce780ed90",
     "optimized_64x64_q75_420": "35de3c0008354b10",
     "grayscale_64x64_q75": "d323d028765d182a",
     "metadata_icc_exif_64x64_q75_444": "b08c66cf278bd5a2"

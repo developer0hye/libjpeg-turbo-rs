@@ -180,7 +180,7 @@ pub fn compress(
     let fdct_quantize_fn: fn(&mut [i16; 64], &QuantDivisors, &mut [i16; 64]) = match dct_method {
         DctMethod::IsLow => enc_simd.fdct_quantize,
         DctMethod::IsFast => crate::simd::scalar::scalar_fdct_ifast_quantize,
-        DctMethod::Float => crate::simd::scalar::scalar_fdct_quantize,
+        DctMethod::Float => crate::simd::scalar::scalar_fdct_float_quantize,
     };
 
     // Entropy encode all MCUs
@@ -1145,10 +1145,19 @@ pub fn compress_custom_quant(
         marker_writer::write_dqt(&mut output, 1, &chroma_quant);
     }
 
-    // Frame header
+    // Frame header — SOF0 (baseline) when all quant values fit in 8 bits,
+    // SOF1 (extended sequential) when any quant value exceeds 255. Matches
+    // C cjpeg behaviour: with default `force_baseline=FALSE`, low quality
+    // produces 16-bit DQT entries which require SOF1.
+    let needs_sof1 = luma_quant.iter().any(|&v| v > 255)
+        || (!is_grayscale && chroma_quant.iter().any(|&v| v > 255));
     if is_grayscale {
         let components = vec![(1, 1, 1, 0)];
-        marker_writer::write_sof0(&mut output, width as u16, height as u16, &components);
+        if needs_sof1 {
+            marker_writer::write_sof1(&mut output, width as u16, height as u16, &components);
+        } else {
+            marker_writer::write_sof0(&mut output, width as u16, height as u16, &components);
+        }
     } else {
         let (h_samp, v_samp) = subsampling.sampling_factors();
         let components = vec![
@@ -1156,7 +1165,11 @@ pub fn compress_custom_quant(
             (2, 1, 1, 1),           // Cb
             (3, 1, 1, 1),           // Cr
         ];
-        marker_writer::write_sof0(&mut output, width as u16, height as u16, &components);
+        if needs_sof1 {
+            marker_writer::write_sof1(&mut output, width as u16, height as u16, &components);
+        } else {
+            marker_writer::write_sof0(&mut output, width as u16, height as u16, &components);
+        }
     }
 
     // Huffman tables
@@ -1217,6 +1230,7 @@ pub fn compress_custom_quant(
 /// `restart_interval` is the number of MCU blocks between restart markers.
 /// When non-zero, a DRI marker is written in the header and RST markers
 /// are inserted into the entropy-coded data at the specified interval.
+#[allow(clippy::too_many_arguments)]
 pub fn compress_with_restart(
     pixels: &[u8],
     width: usize,
@@ -1225,6 +1239,7 @@ pub fn compress_with_restart(
     quality: u8,
     subsampling: Subsampling,
     restart_interval: u16,
+    dct_method: DctMethod,
 ) -> Result<Vec<u8>> {
     // Validate inputs
     if width == 0 || height == 0 {
@@ -1260,8 +1275,16 @@ pub fn compress_with_restart(
     let chroma_quant =
         tables::quality_scale_quant_table(&tables::STD_CHROMINANCE_QUANT_TABLE, quality);
 
-    let luma_divisors = scale_quant_for_fdct(&luma_quant);
-    let chroma_divisors = scale_quant_for_fdct(&chroma_quant);
+    let luma_divisors = if dct_method == DctMethod::IsFast {
+        scale_quant_for_ifast(&luma_quant)
+    } else {
+        scale_quant_for_fdct(&luma_quant)
+    };
+    let chroma_divisors = if dct_method == DctMethod::IsFast {
+        scale_quant_for_ifast(&chroma_quant)
+    } else {
+        scale_quant_for_fdct(&chroma_quant)
+    };
 
     // Build Huffman tables
     let dc_luma_table = build_huff_table(&tables::DC_LUMINANCE_BITS, &tables::DC_LUMINANCE_VALUES);
@@ -1273,6 +1296,11 @@ pub fn compress_with_restart(
 
     // SIMD dispatch — used for both color conversion and FDCT+quantize
     let enc_simd = crate::simd::detect_encoder();
+    let fdct_quantize_fn: fn(&mut [i16; 64], &QuantDivisors, &mut [i16; 64]) = match dct_method {
+        DctMethod::IsLow => enc_simd.fdct_quantize,
+        DctMethod::IsFast => crate::simd::scalar::scalar_fdct_ifast_quantize,
+        DctMethod::Float => crate::simd::scalar::scalar_fdct_float_quantize,
+    };
 
     // Color convert to YCbCr planes (or just Y for grayscale)
     let (y_plane, cb_plane, cr_plane) = convert_to_ycbcr(
@@ -1339,7 +1367,7 @@ pub fn compress_with_restart(
                     &ac_luma_table,
                     &mut bit_writer,
                     &mut prev_dc_y,
-                    enc_simd.fdct_quantize,
+                    fdct_quantize_fn,
                 );
             } else {
                 encode_color_mcu(
@@ -1361,7 +1389,7 @@ pub fn compress_with_restart(
                     &mut prev_dc_y,
                     &mut prev_dc_cb,
                     &mut prev_dc_cr,
-                    enc_simd.fdct_quantize,
+                    fdct_quantize_fn,
                 );
             }
 
@@ -1376,11 +1404,6 @@ pub fn compress_with_restart(
 
     marker_writer::write_soi(&mut output);
     marker_writer::write_app0_jfif(&mut output);
-
-    // DRI marker
-    if restart_interval > 0 {
-        marker_writer::write_dri(&mut output, restart_interval);
-    }
 
     // Quantization tables
     marker_writer::write_dqt(&mut output, 0, &luma_quant);
@@ -1432,6 +1455,14 @@ pub fn compress_with_restart(
             &tables::AC_CHROMINANCE_BITS,
             &tables::AC_CHROMINANCE_VALUES,
         );
+    }
+
+    // DRI marker — emitted from `write_scan_header` in C (jcmarker.c::emit_dri),
+    // i.e. right before the SOS marker, NOT in the frame header. Some viewers
+    // tolerate the earlier placement, but byte-parity with cjpeg requires the
+    // C ordering.
+    if restart_interval > 0 {
+        marker_writer::write_dri(&mut output, restart_interval);
     }
 
     // Scan header
@@ -1991,8 +2022,18 @@ pub fn compress_lossless_extended_precision(
 
 /// Compute the lossless difference for a single sample.
 ///
-/// Uses the `predict` function from the decoder's lossless module to
-/// compute the predicted value, then returns the signed difference.
+/// Returns the **raw signed difference** `(sample >> Pt) - prediction`,
+/// matching libjpeg-turbo `jclossls.c` (`*diff_buf++ = samp - PREDICTOR;`).
+/// The lossless JPEG bitstream (ITU-T T.81 Annex H.1.2.2) classifies the
+/// diff by its raw 16-bit signed magnitude, NOT by the P-bit modular value.
+/// Folding to the P-bit modular range produces a bitstream that decodes to
+/// the same pixels (the decoder reconstructs modulo 2^P) but is NOT
+/// byte-identical to C cjpeg, because the magnitude category (and thus
+/// the optimised Huffman table) differs.
+///
+/// For 8-bit (P=8) samples the diff is in [-255, +255]; for higher
+/// precision it is in [-(2^P - 1), +(2^P - 1)]. Both fit in i16 for
+/// P <= 15. The 16-bit precision path lives in `src/api/precision.rs`.
 #[allow(clippy::too_many_arguments)]
 fn lossless_diff(
     pixel: i32,
@@ -2004,7 +2045,6 @@ fn lossless_diff(
     point_transform: u8,
     precision: u8,
 ) -> i16 {
-    let mask: i32 = (1i32 << precision) - 1;
     let initial_pred: i32 = 1 << (precision as i32 - point_transform as i32 - 1);
 
     // Apply point transform: shift right before encoding
@@ -2025,13 +2065,8 @@ fn lossless_diff(
         crate::decode::lossless::predict(predictor, ra, rb, rc)
     };
 
-    let diff: i32 = (sample - prediction) & mask;
-    // Convert to signed: values >= 2^(p-1) represent negative differences
-    if diff >= (1 << (precision - 1)) {
-        (diff - (1 << precision)) as i16
-    } else {
-        diff as i16
-    }
+    // Raw signed difference (no modular fold). See doc comment.
+    (sample - prediction) as i16
 }
 
 /// Encode a single-component (grayscale) lossless JPEG.
@@ -2548,6 +2583,42 @@ pub fn compress_progressive(
     subsampling: Subsampling,
     dct_method: DctMethod,
 ) -> Result<Vec<u8>> {
+    compress_progressive_with_restart(
+        pixels,
+        width,
+        height,
+        pixel_format,
+        quality,
+        subsampling,
+        dct_method,
+        0,
+        0,
+    )
+}
+
+/// Compress as progressive JPEG (SOF2) with an explicit restart interval.
+///
+/// `restart_interval` is the number of MCUs between restart markers
+/// (0 disables restart marker insertion). `restart_in_rows` is the
+/// per-row restart hint that, when non-zero, takes precedence: every
+/// scan recomputes its restart_interval as `restart_in_rows * MCUs_per_row`
+/// based on whether that scan is interleaved or non-interleaved. This
+/// mirrors `jcmaster.c`, where DC interleaved scans use the iMCU width and
+/// non-interleaved AC scans use the per-component `width_in_blocks` to
+/// derive the per-scan restart distance — required for byte-parity with
+/// `cjpeg -r N -p`.
+#[allow(clippy::too_many_arguments)]
+pub fn compress_progressive_with_restart(
+    pixels: &[u8],
+    width: usize,
+    height: usize,
+    pixel_format: PixelFormat,
+    quality: u8,
+    subsampling: Subsampling,
+    dct_method: DctMethod,
+    restart_interval: u16,
+    restart_in_rows: u16,
+) -> Result<Vec<u8>> {
     use crate::encode::progressive::simple_progression;
 
     let is_grayscale = pixel_format == PixelFormat::Grayscale;
@@ -2563,6 +2634,8 @@ pub fn compress_progressive(
         subsampling,
         &scans,
         dct_method,
+        restart_interval,
+        restart_in_rows,
     )
 }
 
@@ -2581,7 +2654,34 @@ pub fn compress_progressive_custom(
     script: &[ScanScript],
     dct_method: DctMethod,
 ) -> Result<Vec<u8>> {
-    // Convert user-facing ScanScript to internal ProgressiveScan representation
+    compress_progressive_custom_with_restart(
+        pixels,
+        width,
+        height,
+        pixel_format,
+        quality,
+        subsampling,
+        script,
+        dct_method,
+        0,
+        0,
+    )
+}
+
+/// Same as `compress_progressive_custom` but with an explicit restart interval.
+#[allow(clippy::too_many_arguments)]
+pub fn compress_progressive_custom_with_restart(
+    pixels: &[u8],
+    width: usize,
+    height: usize,
+    pixel_format: PixelFormat,
+    quality: u8,
+    subsampling: Subsampling,
+    script: &[ScanScript],
+    dct_method: DctMethod,
+    restart_interval: u16,
+    restart_in_rows: u16,
+) -> Result<Vec<u8>> {
     let scans: Vec<ProgressiveScan> = script
         .iter()
         .map(|s| ProgressiveScan {
@@ -2602,6 +2702,8 @@ pub fn compress_progressive_custom(
         subsampling,
         &scans,
         dct_method,
+        restart_interval,
+        restart_in_rows,
     )
 }
 
@@ -2616,6 +2718,8 @@ fn compress_progressive_with_scans(
     subsampling: Subsampling,
     scans: &[ProgressiveScan],
     dct_method: DctMethod,
+    restart_interval: u16,
+    restart_in_rows: u16,
 ) -> Result<Vec<u8>> {
     if width == 0 || height == 0 {
         return Err(JpegError::CorruptData(
@@ -2644,7 +2748,7 @@ fn compress_progressive_with_scans(
     let fdct_quantize_fn: fn(&mut [i16; 64], &QuantDivisors, &mut [i16; 64]) = match dct_method {
         DctMethod::IsLow => enc_simd.fdct_quantize,
         DctMethod::IsFast => crate::simd::scalar::scalar_fdct_ifast_quantize,
-        DctMethod::Float => crate::simd::scalar::scalar_fdct_quantize,
+        DctMethod::Float => crate::simd::scalar::scalar_fdct_float_quantize,
     };
     let use_simd_fdct: bool = dct_method == DctMethod::IsLow;
 
@@ -2877,7 +2981,29 @@ fn compress_progressive_with_scans(
     // DC first scans (ss=0, se=0, ah=0): gather DC frequencies, generate optimal
     // table, write DHT, encode. DC refine scans (ah>0): no DHT, just encode.
     // AC scans (ss>0): gather AC frequencies, generate optimal table, write DHT, encode.
+    //
+    // Track the last-emitted DRI value across scans. C `jcmarker.c::write_scan_header`
+    // only emits DRI when `restart_interval` differs from the previous scan's value
+    // (initial 0); we mirror that to avoid duplicate DRI markers.
+    let mut last_ri: u16 = 0;
     for scan in scans {
+        // Per-scan restart_interval: when `restart_in_rows` is set, derive
+        // it from the scan's MCUs_per_row. Interleaved DC scans use the iMCU
+        // width (mcus_x); non-interleaved AC scans (single component) use
+        // that component's width_in_blocks. Otherwise inherit the
+        // user-provided MCU count unchanged.
+        let restart_interval: u16 = if restart_in_rows > 0 {
+            let mcus_per_row: usize = if scan.component_indices.len() > 1 {
+                mcus_x
+            } else {
+                comp_wib[scan.component_indices[0]]
+            };
+            (restart_in_rows as usize)
+                .saturating_mul(mcus_per_row)
+                .min(65535) as u16
+        } else {
+            restart_interval
+        };
         let is_dc_scan: bool = scan.ss == 0 && scan.se == 0;
         let is_first_scan: bool = scan.ah == 0;
 
@@ -2903,8 +3029,20 @@ fn compress_progressive_with_scans(
             dc_chroma_freq[256] = 1;
 
             let mut prev_dc: [i16; 4] = [0i16; 4];
+            let ri_dc_gather: u32 = restart_interval as u32;
+            let mut mcu_idx_gather: u32 = 0;
             for mcu_y in 0..mcus_y {
                 for mcu_x in 0..mcus_x {
+                    if ri_dc_gather > 0
+                        && mcu_idx_gather > 0
+                        && mcu_idx_gather.is_multiple_of(ri_dc_gather)
+                    {
+                        // DC predictor reset at the restart boundary —
+                        // mirror the encode loop so the diff symbol
+                        // category histogram matches what's actually
+                        // emitted under restart.
+                        prev_dc = [0i16; 4];
+                    }
                     for (scan_ci, &ci) in scan.component_indices.iter().enumerate() {
                         let layout = &comp_layouts[ci];
                         let freq = if ci == 0 {
@@ -2924,6 +3062,7 @@ fn compress_progressive_with_scans(
                             }
                         }
                     }
+                    mcu_idx_gather = mcu_idx_gather.wrapping_add(1);
                 }
             }
 
@@ -2936,6 +3075,12 @@ fn compress_progressive_with_scans(
                     crate::encode::huff_opt::gen_optimal_table(&dc_chroma_freq);
                 marker_writer::write_dht(&mut output, 0, 1, &dc_chroma_bits, &dc_chroma_values);
 
+                if restart_interval != last_ri {
+                    if restart_interval > 0 {
+                        marker_writer::write_dri(&mut output, restart_interval);
+                    }
+                    last_ri = restart_interval;
+                }
                 marker_writer::write_sos_progressive(
                     &mut output,
                     sos_slice,
@@ -2957,8 +3102,15 @@ fn compress_progressive_with_scans(
                     &dc_luma_table,
                     &dc_chroma_table,
                     &mut output,
+                    restart_interval,
                 );
             } else {
+                if restart_interval != last_ri {
+                    if restart_interval > 0 {
+                        marker_writer::write_dri(&mut output, restart_interval);
+                    }
+                    last_ri = restart_interval;
+                }
                 marker_writer::write_sos_progressive(
                     &mut output,
                     sos_slice,
@@ -2980,6 +3132,7 @@ fn compress_progressive_with_scans(
                     &dc_luma_table,
                     &dc_chroma_table,
                     &mut output,
+                    restart_interval,
                 );
             }
         } else if is_dc_scan {
@@ -2988,6 +3141,12 @@ fn compress_progressive_with_scans(
                 build_huff_table(&tables::DC_LUMINANCE_BITS, &tables::DC_LUMINANCE_VALUES);
             let dc_chroma_table: HuffTable =
                 build_huff_table(&tables::DC_CHROMINANCE_BITS, &tables::DC_CHROMINANCE_VALUES);
+            if restart_interval != last_ri {
+                if restart_interval > 0 {
+                    marker_writer::write_dri(&mut output, restart_interval);
+                }
+                last_ri = restart_interval;
+            }
             marker_writer::write_sos_progressive(
                 &mut output,
                 sos_slice,
@@ -3005,6 +3164,7 @@ fn compress_progressive_with_scans(
                 &dc_luma_table,
                 &dc_chroma_table,
                 &mut output,
+                restart_interval,
             );
         } else {
             // AC scan (ss > 0): fused gather+encode with precomputed block data.
@@ -3028,9 +3188,25 @@ fn compress_progressive_with_scans(
                 precomp_diffs.clear();
 
                 let mut eobrun_gather: u32 = 0;
+                let ri_gather: u32 = restart_interval as u32;
 
                 for by in 0..hib {
                     for bx in 0..wib {
+                        // Restart boundary forces a flush of any pending
+                        // EOBRUN — the encode loop emits EOBRUN before the
+                        // RST marker, so the frequency gather must do the
+                        // same or the optimised Huffman tables won't match
+                        // the actual encoded stream.
+                        let blk_idx: usize = by * wib + bx;
+                        if ri_gather > 0
+                            && blk_idx > 0
+                            && (blk_idx as u32).is_multiple_of(ri_gather)
+                            && eobrun_gather > 0
+                        {
+                            emit_eobrun_freq(eobrun_gather, &mut ac_freq);
+                            eobrun_gather = 0;
+                        }
+
                         let block: &[i16; 64] = &coeff_bufs[ci][by * stride + bx];
 
                         let mut zerobits: u64 = 0;
@@ -3096,10 +3272,16 @@ fn compress_progressive_with_scans(
                     emit_eobrun_freq(eobrun_gather, &mut ac_freq);
                 }
 
-                // Generate optimal table, write DHT + SOS
+                // Generate optimal table, write DHT + (DRI) + SOS
                 let (ac_bits, ac_values) = crate::encode::huff_opt::gen_optimal_table(&ac_freq);
                 let table_id: u8 = if ci == 0 { 0 } else { 1 };
                 marker_writer::write_dht(&mut output, 1, table_id, &ac_bits, &ac_values);
+                if restart_interval != last_ri {
+                    if restart_interval > 0 {
+                        marker_writer::write_dri(&mut output, restart_interval);
+                    }
+                    last_ri = restart_interval;
+                }
                 marker_writer::write_sos_progressive(
                     &mut output,
                     sos_slice,
@@ -3113,8 +3295,21 @@ fn compress_progressive_with_scans(
                 let ac_table: HuffTable = build_huff_table(&ac_bits, &ac_values);
                 bit_writer.reset();
                 let mut eobrun: u32 = 0;
+                let ri_ac: u32 = restart_interval as u32;
+                let mut rst_count: u8 = 0;
 
                 for blk_idx in 0..num_blocks {
+                    if ri_ac > 0 && blk_idx > 0 && (blk_idx as u32).is_multiple_of(ri_ac) {
+                        // Flush pending EOBRUN, byte-pad bits, emit RST marker,
+                        // reset EOBRUN per C jcphuff.c::emit_restart.
+                        if eobrun > 0 {
+                            emit_eobrun(&ac_table, &mut bit_writer, &mut eobrun);
+                        }
+                        bit_writer.flush_restart();
+                        bit_writer.write_restart_marker(rst_count);
+                        rst_count = (rst_count + 1) & 7;
+                    }
+
                     let zerobits: u64 = precomp_zerobits[blk_idx];
 
                     if zerobits == 0 {
@@ -3185,9 +3380,24 @@ fn compress_progressive_with_scans(
 
                 let mut eobrun_gather: u32 = 0;
                 let mut be: usize = 0;
+                let ri_gather: u32 = restart_interval as u32;
 
                 for by in 0..hib {
                     for bx in 0..wib {
+                        // Restart boundary: flush any pending EOBRUN/BE so
+                        // the gathered frequencies match what the encode
+                        // loop will actually emit.
+                        let blk_idx: usize = by * wib + bx;
+                        if ri_gather > 0
+                            && blk_idx > 0
+                            && (blk_idx as u32).is_multiple_of(ri_gather)
+                            && eobrun_gather > 0
+                        {
+                            emit_eobrun_freq(eobrun_gather, &mut ac_freq);
+                            eobrun_gather = 0;
+                            be = 0;
+                        }
+
                         let block: &[i16; 64] = &coeff_bufs[ci][by * stride + bx];
 
                         let mut absvals = [0u16; 64];
@@ -3266,10 +3476,16 @@ fn compress_progressive_with_scans(
                     emit_eobrun_freq(eobrun_gather, &mut ac_freq);
                 }
 
-                // Generate optimal table, write DHT + SOS
+                // Generate optimal table, write DHT + (DRI) + SOS
                 let (ac_bits, ac_values) = crate::encode::huff_opt::gen_optimal_table(&ac_freq);
                 let table_id: u8 = if ci == 0 { 0 } else { 1 };
                 marker_writer::write_dht(&mut output, 1, table_id, &ac_bits, &ac_values);
+                if restart_interval != last_ri {
+                    if restart_interval > 0 {
+                        marker_writer::write_dri(&mut output, restart_interval);
+                    }
+                    last_ri = restart_interval;
+                }
                 marker_writer::write_sos_progressive(
                     &mut output,
                     sos_slice,
@@ -3284,8 +3500,28 @@ fn compress_progressive_with_scans(
                 bit_writer.reset();
                 let mut eobrun: u32 = 0;
                 let mut corr_buffer: Vec<u8> = Vec::with_capacity(MAX_CORR_BITS);
+                let ri_ac: u32 = restart_interval as u32;
+                let mut rst_count: u8 = 0;
 
                 for blk_idx in 0..num_blocks {
+                    if ri_ac > 0 && blk_idx > 0 && (blk_idx as u32).is_multiple_of(ri_ac) {
+                        // Flush pending EOBRUN+corr, byte-pad bits, emit RST.
+                        // Per C jcphuff.c::emit_restart: clear EOBRUN AND BE
+                        // (correction-bit count) on every restart.
+                        if eobrun > 0 {
+                            emit_eobrun_with_corr(
+                                &ac_table,
+                                &mut bit_writer,
+                                &mut eobrun,
+                                &mut corr_buffer,
+                            );
+                        }
+                        bit_writer.flush_restart();
+                        bit_writer.write_restart_marker(rst_count);
+                        rst_count = (rst_count + 1) & 7;
+                        corr_buffer.clear();
+                    }
+
                     let absvals = &precomp_absvals[blk_idx];
                     let sign_bits = &precomp_signs[blk_idx];
                     let eob_pos: usize = precomp_eob[blk_idx];
@@ -3777,6 +4013,7 @@ fn gather_progressive_ac_refine_freq(
 /// Compress with arithmetic entropy coding (SOF9).
 ///
 /// Uses the QM-coder binary arithmetic encoder instead of Huffman coding.
+#[allow(clippy::too_many_arguments)]
 pub fn compress_arithmetic(
     pixels: &[u8],
     width: usize,
@@ -3784,6 +4021,8 @@ pub fn compress_arithmetic(
     pixel_format: PixelFormat,
     quality: u8,
     subsampling: Subsampling,
+    dct_method: DctMethod,
+    restart_interval: u16,
 ) -> Result<Vec<u8>> {
     use crate::encode::arithmetic::ArithEncoder;
 
@@ -3813,12 +4052,24 @@ pub fn compress_arithmetic(
 
     let enc_simd = crate::simd::detect_encoder();
 
-    // Generate quantization tables
+    // Generate quantization tables. ifast pre-applies AA&N scaling so its
+    // divisors fold the AA&N constants in (paired with `fdct_ifast_raw`);
+    // islow/float keep the simple `quant * 8` divisors. Float routes the
+    // per-coefficient `1 / (q · aan_row · aan_col · 8)` value through
+    // `QuantDivisors::float_divisors`.
     let luma_quant = tables::quality_scale_quant_table(&tables::STD_LUMINANCE_QUANT_TABLE, quality);
     let chroma_quant =
         tables::quality_scale_quant_table(&tables::STD_CHROMINANCE_QUANT_TABLE, quality);
-    let luma_divisors = scale_quant_for_fdct(&luma_quant);
-    let chroma_divisors = scale_quant_for_fdct(&chroma_quant);
+    let luma_divisors = if dct_method == DctMethod::IsFast {
+        scale_quant_for_ifast(&luma_quant)
+    } else {
+        scale_quant_for_fdct(&luma_quant)
+    };
+    let chroma_divisors = if dct_method == DctMethod::IsFast {
+        scale_quant_for_ifast(&chroma_quant)
+    } else {
+        scale_quant_for_fdct(&chroma_quant)
+    };
 
     // MCU dimensions
     let (mcu_w, mcu_h) = if is_grayscale {
@@ -3862,8 +4113,15 @@ pub fn compress_arithmetic(
     let y_width_in_blocks: usize = original_width.div_ceil(8);
     let y_height_in_blocks: usize = original_height.div_ceil(8);
 
-    // FDCT + quantize all blocks
-    let fdct_quantize_fn = crate::simd::detect_encoder().fdct_quantize;
+    // FDCT + quantize all blocks. Dispatch on dct_method so `gather_block`
+    // routes through the matching scalar routine instead of always running
+    // the SIMD islow kernel internally — see the `is_ifast`/`is_float`
+    // pointer-compare bypass at the top of `gather_block`.
+    let fdct_quantize_fn: fn(&mut [i16; 64], &QuantDivisors, &mut [i16; 64]) = match dct_method {
+        DctMethod::IsLow => enc_simd.fdct_quantize,
+        DctMethod::IsFast => crate::simd::scalar::scalar_fdct_ifast_quantize,
+        DctMethod::Float => crate::simd::scalar::scalar_fdct_float_quantize,
+    };
     let mut all_blocks: Vec<[i16; 64]> = Vec::new();
     let mut prev_dc_y_gather: i16 = 0;
 
@@ -4056,6 +4314,7 @@ pub fn compress_arithmetic(
                             extract_block(&y_plane, width, height, x0, y0 + dy, &mut block);
                             let mut q = [0i16; 64];
                             fdct_quantize_fn(&mut block, &luma_divisors, &mut q);
+                            prev_dc_y_gather = q[0];
                             all_blocks.push(q);
                         }
                         for plane in [&cb_plane, &cr_plane] {
@@ -4160,9 +4419,19 @@ pub fn compress_arithmetic(
     // Arithmetic encode all blocks
     let mut arith_enc = ArithEncoder::new(width * height);
     let mut block_idx = 0;
+    let ri_arith: u32 = restart_interval as u32;
+    let mut mcu_count_arith: u32 = 0;
+    let mut rst_count_arith: u8 = 0;
 
     for _mcu_row in 0..mcus_y {
         for _mcu_col in 0..mcus_x {
+            if ri_arith > 0 && mcu_count_arith > 0 && mcu_count_arith.is_multiple_of(ri_arith) {
+                // ArithEncoder::emit_restart finishes the coder, writes
+                // FF/RST0+n, then re-inits coder + DC/AC stats per
+                // jcarith.c::emit_restart.
+                arith_enc.emit_restart(rst_count_arith);
+                rst_count_arith = (rst_count_arith + 1) & 7;
+            }
             if is_grayscale {
                 arith_enc.encode_dc_sequential(&all_blocks[block_idx], 0, 0);
                 arith_enc.encode_ac_sequential(&all_blocks[block_idx], 0);
@@ -4190,6 +4459,7 @@ pub fn compress_arithmetic(
                 arith_enc.encode_ac_sequential(&all_blocks[block_idx], 1);
                 block_idx += 1;
             }
+            mcu_count_arith = mcu_count_arith.wrapping_add(1);
         }
     }
 
@@ -4234,6 +4504,12 @@ pub fn compress_arithmetic(
     let num_ac = if is_grayscale { 1 } else { 2 };
     marker_writer::write_dac(&mut output, num_dc, &dc_params, num_ac, &ac_params);
 
+    // DRI marker — emitted from `write_scan_header` in C
+    // (jcmarker.c::emit_dri), i.e. between DAC and SOS.
+    if restart_interval > 0 {
+        marker_writer::write_dri(&mut output, restart_interval);
+    }
+
     // SOS
     if is_grayscale {
         let scan_components = vec![(1, 0, 0)];
@@ -4256,6 +4532,7 @@ pub fn compress_arithmetic(
 /// Combines progressive multi-scan encoding with arithmetic entropy coding.
 /// Buffers all DCT coefficients, then encodes across multiple scans using
 /// a standard scan progression script with ArithEncoder.
+#[allow(clippy::too_many_arguments)]
 pub fn compress_arithmetic_progressive(
     pixels: &[u8],
     width: usize,
@@ -4263,6 +4540,9 @@ pub fn compress_arithmetic_progressive(
     pixel_format: PixelFormat,
     quality: u8,
     subsampling: Subsampling,
+    dct_method: DctMethod,
+    restart_interval: u16,
+    restart_in_rows: u16,
 ) -> Result<Vec<u8>> {
     use crate::encode::arithmetic::ArithEncoder;
     use crate::encode::progressive::simple_progression;
@@ -4297,8 +4577,16 @@ pub fn compress_arithmetic_progressive(
         tables::quality_scale_quant_table(&tables::STD_LUMINANCE_QUANT_TABLE, quality);
     let chroma_quant: [u16; 64] =
         tables::quality_scale_quant_table(&tables::STD_CHROMINANCE_QUANT_TABLE, quality);
-    let luma_divisors: QuantDivisors = scale_quant_for_fdct(&luma_quant);
-    let chroma_divisors: QuantDivisors = scale_quant_for_fdct(&chroma_quant);
+    let luma_divisors: QuantDivisors = if dct_method == DctMethod::IsFast {
+        scale_quant_for_ifast(&luma_quant)
+    } else {
+        scale_quant_for_fdct(&luma_quant)
+    };
+    let chroma_divisors: QuantDivisors = if dct_method == DctMethod::IsFast {
+        scale_quant_for_ifast(&chroma_quant)
+    } else {
+        scale_quant_for_fdct(&chroma_quant)
+    };
 
     let (y_plane, cb_plane, cr_plane) = convert_to_ycbcr(
         pixels,
@@ -4370,8 +4658,51 @@ pub fn compress_arithmetic_progressive(
         .map(|cl| vec![[0i16; 64]; cl.blocks_x * cl.blocks_y])
         .collect();
 
-    // FDCT + quantize all blocks into coefficient buffers
-    let fdct_quantize_fn = crate::simd::detect_encoder().fdct_quantize;
+    // FDCT + quantize all blocks into coefficient buffers.
+    // Track per-component prev_dc to honor the C `jccoefct.c:178-199` dummy
+    // block rule: Y blocks whose 8×8 origin sits outside the original image
+    // must encode as DC=prev_dc, AC=0 (so the DC diff is zero) instead of
+    // the replicated-edge content `extract_block` would otherwise produce.
+    // Failing to do this drops a coefficient on the wrong side of every
+    // arithmetic conditioning bucket and breaks byte-parity with cjpeg for
+    // any subsampled MCU (samp422/420/440/411/441/410/24) on images whose
+    // dimensions don't divide evenly by the MCU stride.
+    // Dispatch on dct_method so the in-place FDCT routes through the matching
+    // scalar routine for IFAST/Float (instead of always running the SIMD islow
+    // kernel). Same pattern as compress_arithmetic / compress_optimized.
+    let fdct_quantize_fn: fn(&mut [i16; 64], &QuantDivisors, &mut [i16; 64]) = match dct_method {
+        DctMethod::IsLow => enc_simd.fdct_quantize,
+        DctMethod::IsFast => crate::simd::scalar::scalar_fdct_ifast_quantize,
+        DctMethod::Float => crate::simd::scalar::scalar_fdct_float_quantize,
+    };
+    let y_width_in_blocks: usize = width.div_ceil(8);
+    let y_height_in_blocks: usize = height.div_ceil(8);
+    // Per-component actual block counts (`width_in_blocks * height_in_blocks`
+    // in the libjpeg-turbo sense). Non-interleaved AC scans iterate this
+    // count, NOT the MCU-padded `comp_layouts[*].blocks_x * blocks_y`.
+    // Including the right/bottom dummy blocks in a single-component scan
+    // makes the encoder run extra "EOB at start" emissions that cjpeg never
+    // emits, so the entropy stream length and any downstream adaptive bin
+    // state diverge from C output.
+    let comp_wib: Vec<usize> = if is_grayscale {
+        vec![width.div_ceil(8)]
+    } else {
+        vec![
+            width.div_ceil(8),
+            width.div_ceil(h_samp * 8),
+            width.div_ceil(h_samp * 8),
+        ]
+    };
+    let comp_hib: Vec<usize> = if is_grayscale {
+        vec![height.div_ceil(8)]
+    } else {
+        vec![
+            height.div_ceil(8),
+            height.div_ceil(v_samp * 8),
+            height.div_ceil(v_samp * 8),
+        ]
+    };
+    let mut prev_dc_y_gather: i16 = 0;
     for mcu_y in 0..mcus_y {
         for mcu_x in 0..mcus_x {
             let x0: usize = mcu_x * mcu_w;
@@ -4393,6 +4724,18 @@ pub fn compress_arithmetic_progressive(
                     for bh in 0..h_samp {
                         let bx: usize = mcu_x * h_samp + bh;
                         let by: usize = mcu_y * v_samp + bv;
+                        let blocks_x: usize = comp_layouts[0].blocks_x;
+                        if is_y_dummy(
+                            x0 + bh * 8,
+                            y0 + bv * 8,
+                            y_width_in_blocks,
+                            y_height_in_blocks,
+                        ) {
+                            let mut dummy = [0i16; 64];
+                            dummy[0] = prev_dc_y_gather;
+                            coeff_bufs[0][by * blocks_x + bx] = dummy;
+                            continue;
+                        }
                         let mut block = [0i16; 64];
                         extract_block(
                             &y_plane,
@@ -4402,12 +4745,12 @@ pub fn compress_arithmetic_progressive(
                             y0 + bv * 8,
                             &mut block,
                         );
-                        let blocks_x: usize = comp_layouts[0].blocks_x;
                         fdct_quantize_fn(
                             &mut block,
                             &luma_divisors,
                             &mut coeff_bufs[0][by * blocks_x + bx],
                         );
+                        prev_dc_y_gather = coeff_bufs[0][by * blocks_x + bx][0];
                     }
                 }
                 // Cb block
@@ -4482,19 +4825,41 @@ pub fn compress_arithmetic_progressive(
         marker_writer::write_sof10(&mut output, width as u16, height as u16, &components);
     }
 
-    // DAC marker for arithmetic conditioning parameters
-    let dc_params: [(u8, u8); 2] = [(0u8, 1u8), (0, 1)];
-    let ac_params: [u8; 2] = [5u8, 5];
-    let num_dc: usize = if is_grayscale { 1 } else { 2 };
-    let num_ac: usize = if is_grayscale { 1 } else { 2 };
-    marker_writer::write_dac(&mut output, num_dc, &dc_params, num_ac, &ac_params);
+    // Default arithmetic conditioning parameters (C `jcparam.c`):
+    //   DC: L=0 U=1 → packed byte 0x10
+    //   AC: Kx=5
+    use crate::decode::arithmetic::NUM_ARITH_TBLS;
+    let mut dc_params_full: [(u8, u8); NUM_ARITH_TBLS] = [(0u8, 1u8); NUM_ARITH_TBLS];
+    let mut ac_params_full: [u8; NUM_ARITH_TBLS] = [5u8; NUM_ARITH_TBLS];
+    let _ = (&mut dc_params_full, &mut ac_params_full);
 
     // Encode each scan with arithmetic coding
     let mut arith_enc: ArithEncoder = ArithEncoder::new(width * height / 4);
+    // Track last-emitted DRI to suppress redundant markers when the per-scan
+    // restart_interval doesn't change — matches `jcmarker.c::write_scan_header`.
+    let mut last_ri: u16 = 0;
 
     for scan in &scans {
         // Reset encoder state for each scan
         arith_enc.reset();
+
+        // Per-scan restart_interval: when `restart_in_rows` is set, derive
+        // it from this scan's MCUs_per_row. Interleaved DC scans use the
+        // iMCU width (mcus_x); non-interleaved AC scans (single component)
+        // use that component's width_in_blocks. Otherwise inherit the
+        // user-provided MCU count unchanged.
+        let scan_ri: u16 = if restart_in_rows > 0 {
+            let mcus_per_row: usize = if scan.component_indices.len() > 1 {
+                mcus_x
+            } else {
+                comp_wib[scan.component_indices[0]]
+            };
+            (restart_in_rows as usize)
+                .saturating_mul(mcus_per_row)
+                .min(65535) as u16
+        } else {
+            restart_interval
+        };
 
         // Build SOS component list.
         // Per JPEG spec: DC-only scans (Ss=0) set Ta=0, AC-only scans (Ss>0) set Td=0.
@@ -4510,6 +4875,41 @@ pub fn compress_arithmetic_progressive(
                 (comp_id, dc_tbl, ac_tbl)
             })
             .collect();
+
+        // C jcmarker.c::emit_dac (called from write_scan_header) — emit a
+        // DAC per scan with only the conditioning entries used by THIS scan:
+        // DC tables when the scan starts at Ss=0 with Ah=0 (initial DC), AC
+        // tables when Se>0. We replicate that here so each progressive scan
+        // header carries the minimal-and-correct DAC, matching cjpeg byte
+        // for byte even though "duplicate DAC for repeated tables" is per-
+        // spec wasted bytes.
+        let mut dc_in_use: [bool; NUM_ARITH_TBLS] = [false; NUM_ARITH_TBLS];
+        let mut ac_in_use: [bool; NUM_ARITH_TBLS] = [false; NUM_ARITH_TBLS];
+        let need_dc: bool = scan.ss == 0 && scan.ah == 0;
+        let need_ac: bool = scan.se > 0;
+        for (comp_id, dc_tbl, ac_tbl) in &sos_comps {
+            let _ = comp_id;
+            if need_dc {
+                dc_in_use[(*dc_tbl as usize).min(NUM_ARITH_TBLS - 1)] = true;
+            }
+            if need_ac {
+                ac_in_use[(*ac_tbl as usize).min(NUM_ARITH_TBLS - 1)] = true;
+            }
+        }
+        marker_writer::write_dac_selected(
+            &mut output,
+            &dc_in_use,
+            &dc_params_full,
+            &ac_in_use,
+            &ac_params_full,
+        );
+
+        if scan_ri != last_ri {
+            if scan_ri > 0 {
+                marker_writer::write_dri(&mut output, scan_ri);
+            }
+            last_ri = scan_ri;
+        }
 
         marker_writer::write_sos_progressive(
             &mut output,
@@ -4532,6 +4932,7 @@ pub fn compress_arithmetic_progressive(
                     mcus_x,
                     mcus_y,
                     &mut arith_enc,
+                    scan_ri,
                 );
             } else {
                 // DC refine scan
@@ -4542,6 +4943,7 @@ pub fn compress_arithmetic_progressive(
                     mcus_x,
                     mcus_y,
                     &mut arith_enc,
+                    scan_ri,
                 );
             }
         } else if scan.ah == 0 {
@@ -4549,20 +4951,22 @@ pub fn compress_arithmetic_progressive(
             encode_arith_ac_first_scan(
                 &coeff_bufs,
                 &comp_layouts,
+                &comp_wib,
+                &comp_hib,
                 scan,
-                mcus_x,
-                mcus_y,
                 &mut arith_enc,
+                scan_ri,
             );
         } else {
             // AC refine scan
             encode_arith_ac_refine_scan(
                 &coeff_bufs,
                 &comp_layouts,
+                &comp_wib,
+                &comp_hib,
                 scan,
-                mcus_x,
-                mcus_y,
                 &mut arith_enc,
+                scan_ri,
             );
         }
 
@@ -4576,6 +4980,7 @@ pub fn compress_arithmetic_progressive(
 }
 
 /// Encode arithmetic DC first scan (Ah=0) across all MCUs.
+#[allow(clippy::too_many_arguments)]
 fn encode_arith_dc_first_scan(
     coeff_bufs: &[Vec<[i16; 64]>],
     comp_layouts: &[CompLayout],
@@ -4583,11 +4988,19 @@ fn encode_arith_dc_first_scan(
     mcus_x: usize,
     mcus_y: usize,
     arith_enc: &mut crate::encode::arithmetic::ArithEncoder,
+    restart_interval: u16,
 ) {
     let al: u8 = scan.al;
+    let ri: u32 = restart_interval as u32;
+    let mut mcu_count: u32 = 0;
+    let mut rst_count: u8 = 0;
 
     for mcu_y in 0..mcus_y {
         for mcu_x in 0..mcus_x {
+            if ri > 0 && mcu_count > 0 && mcu_count.is_multiple_of(ri) {
+                arith_enc.emit_restart(rst_count);
+                rst_count = (rst_count + 1) & 7;
+            }
             for &ci in &scan.component_indices {
                 let layout: &CompLayout = &comp_layouts[ci];
                 let dc_tbl: usize = if ci == 0 { 0 } else { 1 };
@@ -4602,11 +5015,13 @@ fn encode_arith_dc_first_scan(
                     }
                 }
             }
+            mcu_count = mcu_count.wrapping_add(1);
         }
     }
 }
 
 /// Encode arithmetic DC refine scan (Ah!=0) across all MCUs.
+#[allow(clippy::too_many_arguments)]
 fn encode_arith_dc_refine_scan(
     coeff_bufs: &[Vec<[i16; 64]>],
     comp_layouts: &[CompLayout],
@@ -4614,11 +5029,19 @@ fn encode_arith_dc_refine_scan(
     mcus_x: usize,
     mcus_y: usize,
     arith_enc: &mut crate::encode::arithmetic::ArithEncoder,
+    restart_interval: u16,
 ) {
     let al: u8 = scan.al;
+    let ri: u32 = restart_interval as u32;
+    let mut mcu_count: u32 = 0;
+    let mut rst_count: u8 = 0;
 
     for mcu_y in 0..mcus_y {
         for mcu_x in 0..mcus_x {
+            if ri > 0 && mcu_count > 0 && mcu_count.is_multiple_of(ri) {
+                arith_enc.emit_restart(rst_count);
+                rst_count = (rst_count + 1) & 7;
+            }
             for &ci in &scan.component_indices {
                 let layout: &CompLayout = &comp_layouts[ci];
 
@@ -4632,62 +5055,86 @@ fn encode_arith_dc_refine_scan(
                     }
                 }
             }
+            mcu_count = mcu_count.wrapping_add(1);
         }
     }
 }
 
 /// Encode arithmetic AC first scan (Ah=0, single component).
+///
+/// Iterates the component's raster blocks (`width_in_blocks * height_in_blocks`)
+/// rather than MCU-padded `blocks_x * blocks_y`. C `jccoefct.c::start_iMCU_row`
+/// drops MCU-multi-block layout for non-interleaved scans (`comps_in_scan == 1`)
+/// — each "MCU" is a single block, and `MCUs_per_row` equals the component's
+/// `width_in_blocks` rather than `MCUs_per_row(image)`. Iterating the padded
+/// `blocks_x` would re-encode the right-edge dummy fillers (which have AC=0)
+/// as extra "EOB at start" emissions cjpeg never produces, drifting the
+/// arithmetic coder state and breaking byte-parity.
+#[allow(clippy::too_many_arguments)]
 fn encode_arith_ac_first_scan(
     coeff_bufs: &[Vec<[i16; 64]>],
     comp_layouts: &[CompLayout],
+    comp_wib: &[usize],
+    comp_hib: &[usize],
     scan: &crate::encode::progressive::ProgressiveScan,
-    mcus_x: usize,
-    mcus_y: usize,
     arith_enc: &mut crate::encode::arithmetic::ArithEncoder,
+    restart_interval: u16,
 ) {
     let ci: usize = scan.component_indices[0]; // AC scans are single-component
     let layout: &CompLayout = &comp_layouts[ci];
     let ac_tbl: usize = if ci == 0 { 0 } else { 1 };
+    let wib: usize = comp_wib[ci];
+    let hib: usize = comp_hib[ci];
+    let stride: usize = layout.blocks_x;
+    let ri: u32 = restart_interval as u32;
+    let mut mcu_count: u32 = 0;
+    let mut rst_count: u8 = 0;
 
-    for mcu_y in 0..mcus_y {
-        for mcu_x in 0..mcus_x {
-            for bv in 0..layout.v_blocks {
-                for bh in 0..layout.h_blocks {
-                    let bx: usize = mcu_x * layout.h_blocks + bh;
-                    let by: usize = mcu_y * layout.v_blocks + bv;
-                    let block: &[i16; 64] = &coeff_bufs[ci][by * layout.blocks_x + bx];
-
-                    arith_enc.encode_ac_first(block, ac_tbl, scan.ss, scan.se, scan.al);
-                }
+    for by in 0..hib {
+        for bx in 0..wib {
+            if ri > 0 && mcu_count > 0 && mcu_count.is_multiple_of(ri) {
+                arith_enc.emit_restart(rst_count);
+                rst_count = (rst_count + 1) & 7;
             }
+            let block: &[i16; 64] = &coeff_bufs[ci][by * stride + bx];
+            arith_enc.encode_ac_first(block, ac_tbl, scan.ss, scan.se, scan.al);
+            mcu_count = mcu_count.wrapping_add(1);
         }
     }
 }
 
 /// Encode arithmetic AC refine scan (Ah!=0, single component).
+///
+/// Same raster iteration as `encode_arith_ac_first_scan` — see that comment.
+#[allow(clippy::too_many_arguments)]
 fn encode_arith_ac_refine_scan(
     coeff_bufs: &[Vec<[i16; 64]>],
     comp_layouts: &[CompLayout],
+    comp_wib: &[usize],
+    comp_hib: &[usize],
     scan: &crate::encode::progressive::ProgressiveScan,
-    mcus_x: usize,
-    mcus_y: usize,
     arith_enc: &mut crate::encode::arithmetic::ArithEncoder,
+    restart_interval: u16,
 ) {
     let ci: usize = scan.component_indices[0]; // AC scans are single-component
     let layout: &CompLayout = &comp_layouts[ci];
     let ac_tbl: usize = if ci == 0 { 0 } else { 1 };
+    let wib: usize = comp_wib[ci];
+    let hib: usize = comp_hib[ci];
+    let stride: usize = layout.blocks_x;
+    let ri: u32 = restart_interval as u32;
+    let mut mcu_count: u32 = 0;
+    let mut rst_count: u8 = 0;
 
-    for mcu_y in 0..mcus_y {
-        for mcu_x in 0..mcus_x {
-            for bv in 0..layout.v_blocks {
-                for bh in 0..layout.h_blocks {
-                    let bx: usize = mcu_x * layout.h_blocks + bh;
-                    let by: usize = mcu_y * layout.v_blocks + bv;
-                    let block: &[i16; 64] = &coeff_bufs[ci][by * layout.blocks_x + bx];
-
-                    arith_enc.encode_ac_refine(block, ac_tbl, scan.ss, scan.se, scan.al, scan.ah);
-                }
+    for by in 0..hib {
+        for bx in 0..wib {
+            if ri > 0 && mcu_count > 0 && mcu_count.is_multiple_of(ri) {
+                arith_enc.emit_restart(rst_count);
+                rst_count = (rst_count + 1) & 7;
             }
+            let block: &[i16; 64] = &coeff_bufs[ci][by * stride + bx];
+            arith_enc.encode_ac_refine(block, ac_tbl, scan.ss, scan.se, scan.al, scan.ah);
+            mcu_count = mcu_count.wrapping_add(1);
         }
     }
 }
@@ -4707,12 +5154,15 @@ fn encode_progressive_dc_scan(
     dc_luma_table: &HuffTable,
     dc_chroma_table: &HuffTable,
     output: &mut Vec<u8>,
+    restart_interval: u16,
 ) {
     let al: u8 = scan.al;
     let ah: u8 = scan.ah;
     let mut prev_dc: [i16; 4] = [0i16; 4];
 
-    // Reserve capacity: worst-case ~32 bits per block per component
+    // Reserve capacity: worst-case ~32 bits per block per component, plus a
+    // small per-MCU cushion that absorbs the worst-case 8-byte bit drain and
+    // 2-byte RST marker every restart_interval MCUs.
     let total_blocks: usize = scan
         .component_indices
         .iter()
@@ -4721,17 +5171,46 @@ fn encode_progressive_dc_scan(
             mcus_x * mcus_y * layout.h_blocks * layout.v_blocks
         })
         .sum();
-    let reserve: usize = total_blocks * 4 + 64;
+    let total_mcus: usize = mcus_x * mcus_y;
+    let restart_overhead: usize = if restart_interval > 0 {
+        total_mcus.div_ceil(restart_interval as usize) * 16
+    } else {
+        0
+    };
+    let reserve: usize = total_blocks * 4 + restart_overhead + 64;
     output.reserve(reserve);
+
+    let ri: u32 = restart_interval as u32;
 
     unsafe {
         let base: usize = output.len();
         let mut pb: u64 = 0;
         let mut fb: i32 = 64;
         let mut buf: *mut u8 = output.as_mut_ptr().add(base);
+        let mut mcu_count: u32 = 0;
+        let mut rst_count: u8 = 0;
 
         for mcu_y in 0..mcus_y {
             for mcu_x in 0..mcus_x {
+                if ri > 0 && mcu_count > 0 && mcu_count.is_multiple_of(ri) {
+                    // Drain partial bits with 1-padding, write RST marker.
+                    local_drain_bits(&mut pb, &mut fb, &mut buf);
+                    // Reserve room for the 2-byte marker plus next-MCU worst case.
+                    let written: usize = buf.offset_from(output.as_ptr().add(base)) as usize;
+                    if written + 80 > reserve {
+                        output.set_len(base + written);
+                        output.reserve(reserve);
+                        buf = output.as_mut_ptr().add(base + written);
+                    }
+                    *buf = 0xFF;
+                    *buf.add(1) = 0xD0 + (rst_count & 7);
+                    buf = buf.add(2);
+                    pb = 0;
+                    fb = 64;
+                    prev_dc = [0i16; 4];
+                    rst_count = (rst_count + 1) & 7;
+                }
+
                 for (scan_ci, &ci) in scan.component_indices.iter().enumerate() {
                     let layout = &comp_layouts[ci];
                     let dc_table: &HuffTable = if ci == 0 {
@@ -4793,6 +5272,7 @@ fn encode_progressive_dc_scan(
                         }
                     }
                 }
+                mcu_count = mcu_count.wrapping_add(1);
             }
         }
 
@@ -5316,18 +5796,21 @@ fn scale_quant_for_ifast(quant_table: &[u16; 64]) -> QuantDivisors {
         scales[i] = scale;
         shifts[i] = shift;
     }
+    let float_divisors = compute_float_divisors(quant_table);
     let zigzag = &crate::encode::tables::ZIGZAG_ORDER;
     let mut divisors_zigzag = [0u16; 64];
     let mut reciprocals_zigzag = [0u16; 64];
     let mut corrections_zigzag = [0u16; 64];
     let mut shifts_zigzag = [0i16; 64];
     let mut scales_zigzag = [0u16; 64];
+    let mut float_divisors_zigzag = [0.0f32; 64];
     for zz in 0..64 {
         divisors_zigzag[zz] = divisors[zigzag[zz]];
         reciprocals_zigzag[zz] = reciprocals[zigzag[zz]];
         corrections_zigzag[zz] = corrections[zigzag[zz]];
         shifts_zigzag[zz] = shifts[zigzag[zz]];
         scales_zigzag[zz] = scales[zigzag[zz]];
+        float_divisors_zigzag[zz] = float_divisors[zigzag[zz]];
     }
     QuantDivisors {
         divisors,
@@ -5340,7 +5823,35 @@ fn scale_quant_for_ifast(quant_table: &[u16; 64]) -> QuantDivisors {
         corrections_zigzag,
         shifts_zigzag,
         scales_zigzag,
+        float_divisors,
+        float_divisors_zigzag,
     }
+}
+
+/// C `jcdctmgr.c` lines 346–365: float divisor =
+/// `1 / (quant[i] * aanscalefactor[row] * aanscalefactor[col] * 8)`.
+fn compute_float_divisors(quant_table: &[u16; 64]) -> [f32; 64] {
+    const AANSCALEFACTOR: [f64; 8] = [
+        1.0,
+        1.387039845,
+        1.306562965,
+        1.175875602,
+        1.0,
+        0.785694958,
+        0.541196100,
+        0.275899379,
+    ];
+    let mut out = [0.0f32; 64];
+    #[allow(clippy::needless_range_loop)]
+    for row in 0..8 {
+        for col in 0..8 {
+            let i: usize = row * 8 + col;
+            let denom: f64 =
+                quant_table[i] as f64 * AANSCALEFACTOR[row] * AANSCALEFACTOR[col] * 8.0;
+            out[i] = (1.0 / denom) as f32;
+        }
+    }
+    out
 }
 
 /// Scale quantization table values by 8 to create divisor table for the islow FDCT.
@@ -5362,18 +5873,21 @@ fn scale_quant_for_fdct(quant_table: &[u16; 64]) -> QuantDivisors {
         scales[i] = scale;
         shifts[i] = shift;
     }
+    let float_divisors = compute_float_divisors(quant_table);
     let zigzag = &crate::encode::tables::ZIGZAG_ORDER;
     let mut divisors_zigzag = [0u16; 64];
     let mut reciprocals_zigzag = [0u16; 64];
     let mut corrections_zigzag = [0u16; 64];
     let mut shifts_zigzag = [0i16; 64];
     let mut scales_zigzag = [0u16; 64];
+    let mut float_divisors_zigzag = [0.0f32; 64];
     for zz in 0..64 {
         divisors_zigzag[zz] = divisors[zigzag[zz]];
         reciprocals_zigzag[zz] = reciprocals[zigzag[zz]];
         corrections_zigzag[zz] = corrections[zigzag[zz]];
         shifts_zigzag[zz] = shifts[zigzag[zz]];
         scales_zigzag[zz] = scales[zigzag[zz]];
+        float_divisors_zigzag[zz] = float_divisors[zigzag[zz]];
     }
     QuantDivisors {
         divisors,
@@ -5386,6 +5900,8 @@ fn scale_quant_for_fdct(quant_table: &[u16; 64]) -> QuantDivisors {
         corrections_zigzag,
         shifts_zigzag,
         scales_zigzag,
+        float_divisors,
+        float_divisors_zigzag,
     }
 }
 
@@ -6275,6 +6791,20 @@ fn encode_single_block(
     prev_dc: &mut i16,
     fdct_quantize_fn: fn(&mut [i16; 64], &QuantDivisors, &mut [i16; 64]),
 ) {
+    // C jccoefct.c:178-199 — when a block is entirely outside the image
+    // (subsampled MCU stride exceeds image dimensions), emit a dummy block:
+    // DC = previous block's DC (so DC diff = 0), AC all zero. This matches
+    // upstream's "Create a row of dummy blocks at the bottom of the image"
+    // path and keeps the DC frequency distribution byte-identical to cjpeg
+    // for non-444 subsamplings whose MCU height/width does not divide the
+    // image dimensions evenly.
+    if block_x >= plane_width || block_y >= plane_height {
+        let mut dummy = [0i16; 64];
+        dummy[0] = *prev_dc;
+        HuffmanEncoder::encode_block(writer, &dummy, prev_dc, dc_table, ac_table);
+        return;
+    }
+
     let mut quantized = [0i16; 64];
 
     // The fused SIMD path uses islow FDCT internally. Skip it for ifast/float
@@ -6285,7 +6815,7 @@ fn encode_single_block(
     );
     let is_float: bool = std::ptr::eq(
         fdct_quantize_fn as *const (),
-        crate::simd::scalar::scalar_fdct_quantize as *const (),
+        crate::simd::scalar::scalar_fdct_float_quantize as *const (),
     );
     let use_fused_simd: bool = !is_ifast && !is_float;
 
@@ -7739,7 +8269,7 @@ fn encode_downsampled_chroma_block(
     );
     let is_float: bool = std::ptr::eq(
         fdct_quantize_fn as *const (),
-        crate::simd::scalar::scalar_fdct_quantize as *const (),
+        crate::simd::scalar::scalar_fdct_float_quantize as *const (),
     );
     let use_fused_simd: bool = !is_ifast && !is_float;
 
@@ -7921,6 +8451,8 @@ pub fn compress_optimized(
     quality: u8,
     subsampling: Subsampling,
     smoothing_factor: u8,
+    dct_method: DctMethod,
+    restart_interval: u16,
 ) -> Result<Vec<u8>> {
     // Validate inputs
     if width == 0 || height == 0 {
@@ -7946,15 +8478,37 @@ pub fn compress_optimized(
 
     let is_grayscale = pixel_format == PixelFormat::Grayscale;
 
-    // Generate quantization tables
+    // Generate quantization tables. The divisor table layout depends on the
+    // chosen FDCT — ifast pre-applies AA&N scaling so its divisors fold the
+    // AA&N constants in (paired with `fdct_ifast_raw`); islow/float keep
+    // the simple `quant * 8` divisors, with the float path routing through
+    // the embedded `float_divisors` field via `scalar_fdct_float_quantize`.
     let luma_quant = tables::quality_scale_quant_table(&tables::STD_LUMINANCE_QUANT_TABLE, quality);
     let chroma_quant =
         tables::quality_scale_quant_table(&tables::STD_CHROMINANCE_QUANT_TABLE, quality);
-    let luma_divisors = scale_quant_for_fdct(&luma_quant);
-    let chroma_divisors = scale_quant_for_fdct(&chroma_quant);
+    let luma_divisors = if dct_method == DctMethod::IsFast {
+        scale_quant_for_ifast(&luma_quant)
+    } else {
+        scale_quant_for_fdct(&luma_quant)
+    };
+    let chroma_divisors = if dct_method == DctMethod::IsFast {
+        scale_quant_for_ifast(&chroma_quant)
+    } else {
+        scale_quant_for_fdct(&chroma_quant)
+    };
 
     // SIMD dispatch — used for both color conversion and FDCT+quantize
     let enc_simd = crate::simd::detect_encoder();
+
+    // FDCT dispatch: SIMD fused islow for the default path, scalar ifast/float
+    // for the legacy paths. Only the islow scalar form is byte-equivalent to
+    // the NEON/AVX2 fused kernels, so the per-block SIMD shortcuts inside
+    // `gather_block` must be skipped when `dct_method != IsLow`.
+    let fdct_quantize_fn: fn(&mut [i16; 64], &QuantDivisors, &mut [i16; 64]) = match dct_method {
+        DctMethod::IsLow => enc_simd.fdct_quantize,
+        DctMethod::IsFast => crate::simd::scalar::scalar_fdct_ifast_quantize,
+        DctMethod::Float => crate::simd::scalar::scalar_fdct_float_quantize,
+    };
 
     // Determine MCU dimensions
     let (mcu_w, mcu_h) = if is_grayscale {
@@ -8034,9 +8588,20 @@ pub fn compress_optimized(
     let mut prev_dc_y: i16 = 0;
     let mut prev_dc_cb: i16 = 0;
     let mut prev_dc_cr: i16 = 0;
+    let ri_gather: u32 = restart_interval as u32;
+    let mut mcu_count_gather: u32 = 0;
 
     for mcu_row in 0..mcus_y {
         for mcu_col in 0..mcus_x {
+            // Reset DC predictors at restart boundary so the gathered DC
+            // diff symbol categories match what pass 2 will actually emit.
+            // Without this the optimised Huffman tables would diverge from
+            // cjpeg whenever `-r N` is set.
+            if ri_gather > 0 && mcu_count_gather > 0 && mcu_count_gather.is_multiple_of(ri_gather) {
+                prev_dc_y = 0;
+                prev_dc_cb = 0;
+                prev_dc_cr = 0;
+            }
             let x0 = mcu_col * mcu_w;
             let y0 = mcu_row * mcu_h;
 
@@ -8048,7 +8613,7 @@ pub fn compress_optimized(
                     x0,
                     y0,
                     &luma_divisors,
-                    enc_simd.fdct_quantize,
+                    fdct_quantize_fn,
                 );
                 let diff = q[0] - prev_dc_y;
                 prev_dc_y = q[0];
@@ -8066,7 +8631,7 @@ pub fn compress_optimized(
                             x0,
                             y0,
                             &luma_divisors,
-                            enc_simd.fdct_quantize,
+                            fdct_quantize_fn,
                         );
                         let diff = yq[0] - prev_dc_y;
                         prev_dc_y = yq[0];
@@ -8081,7 +8646,7 @@ pub fn compress_optimized(
                             x0,
                             y0,
                             &chroma_divisors,
-                            enc_simd.fdct_quantize,
+                            fdct_quantize_fn,
                         );
                         let diff = cbq[0] - prev_dc_cb;
                         prev_dc_cb = cbq[0];
@@ -8096,7 +8661,7 @@ pub fn compress_optimized(
                             x0,
                             y0,
                             &chroma_divisors,
-                            enc_simd.fdct_quantize,
+                            fdct_quantize_fn,
                         );
                         let diff = crq[0] - prev_dc_cr;
                         prev_dc_cr = crq[0];
@@ -8123,7 +8688,7 @@ pub fn compress_optimized(
                                     x0 + dx,
                                     y0,
                                     &luma_divisors,
-                                    enc_simd.fdct_quantize,
+                                    fdct_quantize_fn,
                                 )
                             };
                             let diff = yq[0] - prev_dc_y;
@@ -8141,7 +8706,7 @@ pub fn compress_optimized(
                             2,
                             1,
                             &chroma_divisors,
-                            enc_simd.fdct_quantize,
+                            fdct_quantize_fn,
                         );
                         let diff = cbq[0] - prev_dc_cb;
                         prev_dc_cb = cbq[0];
@@ -8158,7 +8723,7 @@ pub fn compress_optimized(
                             2,
                             1,
                             &chroma_divisors,
-                            enc_simd.fdct_quantize,
+                            fdct_quantize_fn,
                         );
                         let diff = crq[0] - prev_dc_cr;
                         prev_dc_cr = crq[0];
@@ -8185,7 +8750,7 @@ pub fn compress_optimized(
                                     x0 + dx,
                                     y0 + dy,
                                     &luma_divisors,
-                                    enc_simd.fdct_quantize,
+                                    fdct_quantize_fn,
                                 )
                             };
                             let diff = yq[0] - prev_dc_y;
@@ -8202,7 +8767,7 @@ pub fn compress_optimized(
                                 x0 / 2,
                                 y0 / 2,
                                 &chroma_divisors,
-                                enc_simd.fdct_quantize,
+                                fdct_quantize_fn,
                             )
                         } else {
                             gather_downsampled_block(
@@ -8214,7 +8779,7 @@ pub fn compress_optimized(
                                 2,
                                 2,
                                 &chroma_divisors,
-                                enc_simd.fdct_quantize,
+                                fdct_quantize_fn,
                             )
                         };
                         let diff = cbq[0] - prev_dc_cb;
@@ -8231,7 +8796,7 @@ pub fn compress_optimized(
                                 x0 / 2,
                                 y0 / 2,
                                 &chroma_divisors,
-                                enc_simd.fdct_quantize,
+                                fdct_quantize_fn,
                             )
                         } else {
                             gather_downsampled_block(
@@ -8243,7 +8808,7 @@ pub fn compress_optimized(
                                 2,
                                 2,
                                 &chroma_divisors,
-                                enc_simd.fdct_quantize,
+                                fdct_quantize_fn,
                             )
                         };
                         let diff = crq[0] - prev_dc_cr;
@@ -8253,16 +8818,18 @@ pub fn compress_optimized(
                         all_blocks.push(crq);
                     }
                     Subsampling::S440 => {
-                        // 2 Y blocks vertically
                         for dy in [0usize, 8] {
-                            let yq = gather_block(
+                            let yq = gather_block_or_dummy(
                                 &y_plane,
                                 width,
                                 height,
                                 x0,
                                 y0 + dy,
+                                original_width,
+                                original_height,
+                                prev_dc_y,
                                 &luma_divisors,
-                                enc_simd.fdct_quantize,
+                                fdct_quantize_fn,
                             );
                             let diff = yq[0] - prev_dc_y;
                             prev_dc_y = yq[0];
@@ -8279,7 +8846,7 @@ pub fn compress_optimized(
                             1,
                             2,
                             &chroma_divisors,
-                            enc_simd.fdct_quantize,
+                            fdct_quantize_fn,
                         );
                         let diff = cbq[0] - prev_dc_cb;
                         prev_dc_cb = cbq[0];
@@ -8296,7 +8863,7 @@ pub fn compress_optimized(
                             1,
                             2,
                             &chroma_divisors,
-                            enc_simd.fdct_quantize,
+                            fdct_quantize_fn,
                         );
                         let diff = crq[0] - prev_dc_cr;
                         prev_dc_cr = crq[0];
@@ -8307,14 +8874,17 @@ pub fn compress_optimized(
                     Subsampling::S411 => {
                         // 4 Y blocks horizontally
                         for dx in [0usize, 8, 16, 24] {
-                            let yq = gather_block(
+                            let yq = gather_block_or_dummy(
                                 &y_plane,
                                 width,
                                 height,
                                 x0 + dx,
                                 y0,
+                                original_width,
+                                original_height,
+                                prev_dc_y,
                                 &luma_divisors,
-                                enc_simd.fdct_quantize,
+                                fdct_quantize_fn,
                             );
                             let diff = yq[0] - prev_dc_y;
                             prev_dc_y = yq[0];
@@ -8331,7 +8901,7 @@ pub fn compress_optimized(
                             4,
                             1,
                             &chroma_divisors,
-                            enc_simd.fdct_quantize,
+                            fdct_quantize_fn,
                         );
                         let diff = cbq[0] - prev_dc_cb;
                         prev_dc_cb = cbq[0];
@@ -8348,7 +8918,7 @@ pub fn compress_optimized(
                             4,
                             1,
                             &chroma_divisors,
-                            enc_simd.fdct_quantize,
+                            fdct_quantize_fn,
                         );
                         let diff = crq[0] - prev_dc_cr;
                         prev_dc_cr = crq[0];
@@ -8359,14 +8929,17 @@ pub fn compress_optimized(
                     Subsampling::S441 => {
                         // 4 Y blocks vertically
                         for dy in [0usize, 8, 16, 24] {
-                            let yq = gather_block(
+                            let yq = gather_block_or_dummy(
                                 &y_plane,
                                 width,
                                 height,
                                 x0,
                                 y0 + dy,
+                                original_width,
+                                original_height,
+                                prev_dc_y,
                                 &luma_divisors,
-                                enc_simd.fdct_quantize,
+                                fdct_quantize_fn,
                             );
                             let diff = yq[0] - prev_dc_y;
                             prev_dc_y = yq[0];
@@ -8383,7 +8956,7 @@ pub fn compress_optimized(
                             1,
                             4,
                             &chroma_divisors,
-                            enc_simd.fdct_quantize,
+                            fdct_quantize_fn,
                         );
                         let diff = cbq[0] - prev_dc_cb;
                         prev_dc_cb = cbq[0];
@@ -8400,7 +8973,7 @@ pub fn compress_optimized(
                             1,
                             4,
                             &chroma_divisors,
-                            enc_simd.fdct_quantize,
+                            fdct_quantize_fn,
                         );
                         let diff = crq[0] - prev_dc_cr;
                         prev_dc_cr = crq[0];
@@ -8412,14 +8985,17 @@ pub fn compress_optimized(
                         // 4 Y horizontal × 2 vertical = 8 luma blocks per MCU
                         for dy in [0usize, 8] {
                             for dx in [0usize, 8, 16, 24] {
-                                let yq = gather_block(
+                                let yq = gather_block_or_dummy(
                                     &y_plane,
                                     width,
                                     height,
                                     x0 + dx,
                                     y0 + dy,
+                                    original_width,
+                                    original_height,
+                                    prev_dc_y,
                                     &luma_divisors,
-                                    enc_simd.fdct_quantize,
+                                    fdct_quantize_fn,
                                 );
                                 let diff = yq[0] - prev_dc_y;
                                 prev_dc_y = yq[0];
@@ -8437,7 +9013,7 @@ pub fn compress_optimized(
                             4,
                             2,
                             &chroma_divisors,
-                            enc_simd.fdct_quantize,
+                            fdct_quantize_fn,
                         );
                         let diff = cbq[0] - prev_dc_cb;
                         prev_dc_cb = cbq[0];
@@ -8454,7 +9030,7 @@ pub fn compress_optimized(
                             4,
                             2,
                             &chroma_divisors,
-                            enc_simd.fdct_quantize,
+                            fdct_quantize_fn,
                         );
                         let diff = crq[0] - prev_dc_cr;
                         prev_dc_cr = crq[0];
@@ -8466,14 +9042,17 @@ pub fn compress_optimized(
                         // 2 Y horizontal × 4 vertical = 8 luma blocks per MCU
                         for dy in [0usize, 8, 16, 24] {
                             for dx in [0usize, 8] {
-                                let yq = gather_block(
+                                let yq = gather_block_or_dummy(
                                     &y_plane,
                                     width,
                                     height,
                                     x0 + dx,
                                     y0 + dy,
+                                    original_width,
+                                    original_height,
+                                    prev_dc_y,
                                     &luma_divisors,
-                                    enc_simd.fdct_quantize,
+                                    fdct_quantize_fn,
                                 );
                                 let diff = yq[0] - prev_dc_y;
                                 prev_dc_y = yq[0];
@@ -8491,7 +9070,7 @@ pub fn compress_optimized(
                             2,
                             4,
                             &chroma_divisors,
-                            enc_simd.fdct_quantize,
+                            fdct_quantize_fn,
                         );
                         let diff = cbq[0] - prev_dc_cb;
                         prev_dc_cb = cbq[0];
@@ -8508,7 +9087,7 @@ pub fn compress_optimized(
                             2,
                             4,
                             &chroma_divisors,
-                            enc_simd.fdct_quantize,
+                            fdct_quantize_fn,
                         );
                         let diff = crq[0] - prev_dc_cr;
                         prev_dc_cr = crq[0];
@@ -8518,6 +9097,7 @@ pub fn compress_optimized(
                     }
                 }
             }
+            mcu_count_gather = mcu_count_gather.wrapping_add(1);
         }
     }
 
@@ -8545,9 +9125,22 @@ pub fn compress_optimized(
     let mut prev_dc_cb: i16 = 0;
     let mut prev_dc_cr: i16 = 0;
     let mut block_idx = 0;
+    let ri_enc: u32 = restart_interval as u32;
+    let mut mcu_count_enc: u32 = 0;
+    let mut rst_count_enc: u8 = 0;
 
     for _mcu_row in 0..mcus_y {
         for _mcu_col in 0..mcus_x {
+            if ri_enc > 0 && mcu_count_enc > 0 && mcu_count_enc.is_multiple_of(ri_enc) {
+                // Insert RST marker, reset DC predictors per
+                // C jchuff.c::flush_packet.
+                bit_writer.flush_restart();
+                bit_writer.write_restart_marker(rst_count_enc);
+                rst_count_enc = (rst_count_enc + 1) & 7;
+                prev_dc_y = 0;
+                prev_dc_cb = 0;
+                prev_dc_cr = 0;
+            }
             if is_grayscale {
                 HuffmanEncoder::encode_block(
                     &mut bit_writer,
@@ -8728,6 +9321,7 @@ pub fn compress_optimized(
                     }
                 }
             }
+            mcu_count_enc = mcu_count_enc.wrapping_add(1);
         }
     }
 
@@ -8773,6 +9367,12 @@ pub fn compress_optimized(
         marker_writer::write_dht(&mut output, 1, 1, &ac_chroma_bits, &ac_chroma_values);
     }
 
+    // DRI marker — emitted from `write_scan_header` in C
+    // (jcmarker.c::emit_dri), i.e. right before SOS in the only scan.
+    if restart_interval > 0 {
+        marker_writer::write_dri(&mut output, restart_interval);
+    }
+
     // Scan header
     if is_grayscale {
         let scan_components = vec![(1, 0, 0)];
@@ -8790,6 +9390,45 @@ pub fn compress_optimized(
 }
 
 /// FDCT + quantize a single block, return the quantized coefficients.
+/// Like `gather_block` but emits a dummy block (DC = prev_dc, AC = 0) when
+/// the block is entirely outside the original (un-padded) image dimensions.
+///
+/// Mirrors C `jccoefct.c` lines 178-199: for the right- and bottom-edge MCUs
+/// of subsampled formats (samp422, 420, 440, 411, 441, 410, 24), some Y
+/// blocks may sit fully outside the image. C handles these by zeroing the AC
+/// coefficients and copying the previous block's DC into [0][0], producing a
+/// DC-diff of zero. Replicating this is essential for byte-parity with cjpeg
+/// since the dummy DC=0 entries change the optimised Huffman frequency
+/// distribution (and thus the resulting per-image DHT).
+#[allow(clippy::too_many_arguments)]
+fn gather_block_or_dummy(
+    plane: &[u8],
+    plane_width: usize,
+    plane_height: usize,
+    block_x: usize,
+    block_y: usize,
+    orig_width: usize,
+    orig_height: usize,
+    prev_dc: i16,
+    quant_table: &QuantDivisors,
+    fdct_quantize_fn: fn(&mut [i16; 64], &QuantDivisors, &mut [i16; 64]),
+) -> [i16; 64] {
+    if block_x >= orig_width || block_y >= orig_height {
+        let mut dummy = [0i16; 64];
+        dummy[0] = prev_dc;
+        return dummy;
+    }
+    gather_block(
+        plane,
+        plane_width,
+        plane_height,
+        block_x,
+        block_y,
+        quant_table,
+        fdct_quantize_fn,
+    )
+}
+
 fn gather_block(
     plane: &[u8],
     plane_width: usize,
@@ -8801,8 +9440,22 @@ fn gather_block(
 ) -> [i16; 64] {
     let mut quantized = [0i16; 64];
 
+    // The fused NEON/AVX2 kernels here always run the islow FDCT internally.
+    // For ifast / float methods the caller supplies a scalar `fdct_quantize_fn`
+    // that pairs the matching FDCT with its method-specific divisors, so the
+    // SIMD shortcuts must be bypassed to avoid silently downgrading to islow.
+    let is_ifast: bool = std::ptr::eq(
+        fdct_quantize_fn as *const (),
+        crate::simd::scalar::scalar_fdct_ifast_quantize as *const (),
+    );
+    let is_float: bool = std::ptr::eq(
+        fdct_quantize_fn as *const (),
+        crate::simd::scalar::scalar_fdct_float_quantize as *const (),
+    );
+    let use_fused_simd: bool = !is_ifast && !is_float;
+
     // NEON/AVX2 fused path for interior blocks
-    if block_x + 8 <= plane_width && block_y + 8 <= plane_height {
+    if use_fused_simd && block_x + 8 <= plane_width && block_y + 8 <= plane_height {
         #[cfg(target_arch = "aarch64")]
         {
             unsafe {
@@ -8833,7 +9486,7 @@ fn gather_block(
 
     // Edge blocks: pad to 8×8 then use NEON/AVX2
     let is_edge: bool = block_x + 8 > plane_width || block_y + 8 > plane_height;
-    if is_edge {
+    if use_fused_simd && is_edge {
         let mut local_buf = [0u8; 64];
         for row in 0..8usize {
             let src_y = (block_y + row).min(plane_height - 1);
@@ -8900,8 +9553,21 @@ fn gather_downsampled_block(
     let src_w: usize = 8 * h_factor;
     let src_h: usize = 8 * v_factor;
 
+    // The fused downsample+FDCT NEON/AVX2 kernels here use islow internally;
+    // bypass them when the caller asked for ifast/float so the supplied
+    // `fdct_quantize_fn` (with method-matching divisors) is used instead.
+    let is_ifast: bool = std::ptr::eq(
+        fdct_quantize_fn as *const (),
+        crate::simd::scalar::scalar_fdct_ifast_quantize as *const (),
+    );
+    let is_float: bool = std::ptr::eq(
+        fdct_quantize_fn as *const (),
+        crate::simd::scalar::scalar_fdct_float_quantize as *const (),
+    );
+    let use_fused_simd: bool = !is_ifast && !is_float;
+
     // NEON/AVX2 fused downsample+FDCT+quantize for interior blocks
-    if block_x + src_w <= plane_width && block_y + src_h <= plane_height {
+    if use_fused_simd && block_x + src_w <= plane_width && block_y + src_h <= plane_height {
         #[cfg(target_arch = "aarch64")]
         {
             let mut quantized = [0i16; 64];
@@ -8967,39 +9633,13 @@ fn gather_downsampled_block(
             local_buf[row * src_w + col] = plane[src_y * plane_width + src_x];
         }
     }
-    #[cfg(target_arch = "aarch64")]
-    {
-        let mut quantized = [0i16; 64];
-        if h_factor == 2 && v_factor == 2 {
-            unsafe {
-                crate::simd::aarch64::neon_downsample_h2v2_fdct_quantize(
-                    local_buf.as_ptr(),
-                    src_w,
-                    quant_table,
-                    &mut quantized,
-                );
-            }
-            return quantized;
-        }
-        if h_factor == 2 && v_factor == 1 {
-            unsafe {
-                crate::simd::aarch64::neon_downsample_h2v1_fdct_quantize(
-                    local_buf.as_ptr(),
-                    src_w,
-                    quant_table,
-                    &mut quantized,
-                );
-            }
-            return quantized;
-        }
-    }
-    #[cfg(target_arch = "x86_64")]
-    {
-        if is_x86_feature_detected!("avx2") {
+    if use_fused_simd {
+        #[cfg(target_arch = "aarch64")]
+        {
             let mut quantized = [0i16; 64];
             if h_factor == 2 && v_factor == 2 {
                 unsafe {
-                    crate::simd::x86_64::avx2_downsample_h2v2_fdct_quantize(
+                    crate::simd::aarch64::neon_downsample_h2v2_fdct_quantize(
                         local_buf.as_ptr(),
                         src_w,
                         quant_table,
@@ -9010,7 +9650,7 @@ fn gather_downsampled_block(
             }
             if h_factor == 2 && v_factor == 1 {
                 unsafe {
-                    crate::simd::x86_64::avx2_downsample_h2v1_fdct_quantize(
+                    crate::simd::aarch64::neon_downsample_h2v1_fdct_quantize(
                         local_buf.as_ptr(),
                         src_w,
                         quant_table,
@@ -9018,6 +9658,34 @@ fn gather_downsampled_block(
                     );
                 }
                 return quantized;
+            }
+        }
+        #[cfg(target_arch = "x86_64")]
+        {
+            if is_x86_feature_detected!("avx2") {
+                let mut quantized = [0i16; 64];
+                if h_factor == 2 && v_factor == 2 {
+                    unsafe {
+                        crate::simd::x86_64::avx2_downsample_h2v2_fdct_quantize(
+                            local_buf.as_ptr(),
+                            src_w,
+                            quant_table,
+                            &mut quantized,
+                        );
+                    }
+                    return quantized;
+                }
+                if h_factor == 2 && v_factor == 1 {
+                    unsafe {
+                        crate::simd::x86_64::avx2_downsample_h2v1_fdct_quantize(
+                            local_buf.as_ptr(),
+                            src_w,
+                            quant_table,
+                            &mut quantized,
+                        );
+                    }
+                    return quantized;
+                }
             }
         }
     }
