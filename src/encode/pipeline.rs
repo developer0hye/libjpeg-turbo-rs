@@ -5145,7 +5145,6 @@ fn encode_arith_ac_refine_scan(
 /// store-reload overhead per block. Writes directly into the output Vec,
 /// eliminating the intermediate BitWriter allocation and final extend_from_slice.
 #[allow(clippy::too_many_arguments)]
-#[allow(clippy::too_many_arguments)]
 fn encode_progressive_dc_scan(
     coeff_bufs: &[Vec<[i16; 64]>],
     comp_layouts: &[CompLayout],
@@ -5843,6 +5842,7 @@ fn compute_float_divisors(quant_table: &[u16; 64]) -> [f32; 64] {
         0.275899379,
     ];
     let mut out = [0.0f32; 64];
+    #[allow(clippy::needless_range_loop)]
     for row in 0..8 {
         for col in 0..8 {
             let i: usize = row * 8 + col;
@@ -9400,6 +9400,7 @@ pub fn compress_optimized(
 /// DC-diff of zero. Replicating this is essential for byte-parity with cjpeg
 /// since the dummy DC=0 entries change the optimised Huffman frequency
 /// distribution (and thus the resulting per-image DHT).
+#[allow(clippy::too_many_arguments)]
 fn gather_block_or_dummy(
     plane: &[u8],
     plane_width: usize,

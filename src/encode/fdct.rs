@@ -532,7 +532,12 @@ pub fn fdct_float(input: &[i16; 64], output: &mut [i32; 64]) {
 /// nudge the occasional quantized coefficient onto the wrong side of the
 /// `(int)(temp + 16384.5)` rounding boundary, breaking byte-parity with
 /// `cjpeg -dc fa`.
+#[allow(clippy::approx_constant)]
 pub fn fdct_float_workspace(data: &mut [f32; 64]) {
+    // Cosine constants taken verbatim from libjpeg-turbo `jfdctflt.c` so that
+    // `0.707106781_f64 as f32` matches `(FAST_FLOAT)0.707106781` exactly.
+    // Using `f64::consts::FRAC_1_SQRT_2` would round identically here, but
+    // keeping the literal preserves direct line-for-line parity with C.
     const C4: f32 = 0.707106781_f64 as f32;
     const C6: f32 = 0.382683433_f64 as f32;
     const C2_MINUS_C6: f32 = 0.541196100_f64 as f32;
