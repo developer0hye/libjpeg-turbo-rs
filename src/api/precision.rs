@@ -1097,7 +1097,6 @@ fn lossless_diff_16(
     pt: u8,
     precision: u8,
 ) -> i32 {
-    let mask: i64 = (1i64 << precision as i64) - 1;
     let initial = 1i32 << (precision as i32 - pt as i32 - 1);
     let sample = pixel >> pt as i32;
     let prediction = if y == 0 && x == 0 {
@@ -1112,13 +1111,16 @@ fn lossless_diff_16(
         let rc = (plane[(y - 1) * width + x - 1] as i32) >> pt as i32;
         lossless::predict(predictor, ra, rb, rc)
     };
-    let diff = (sample as i64 - prediction as i64) & mask;
-    let half = 1i64 << (precision - 1);
-    if diff >= half {
-        (diff - (1i64 << precision)) as i32
-    } else {
-        diff as i32
-    }
+    // Match libjpeg-turbo `jclossls.c` / `jclhuff.c`: the C path stores the
+    // residual via `JDIFFROW` (= `JCOEF *` = `int16_t *`), which wraps to a
+    // 16-bit signed value. For precision <= 14 the residual already fits, so
+    // the wrap is a no-op; for precision = 16 the wrap is significant — e.g.
+    // sample=65535, predicted=0 → raw diff = +65535, stored as int16 = -1.
+    // The decoder reconstructs (predicted + diff) & ((1 << precision) - 1),
+    // so the wrap decodes correctly. Mirror exactly via `as i16` so the
+    // category histogram (and therefore the resulting Huffman table) matches
+    // C cjpeg.
+    (sample - prediction) as i16 as i32
 }
 
 fn encode_dc_only_wide(
@@ -1726,5 +1728,55 @@ pub fn decompress_lossless_arbitrary(data: &[u8]) -> Result<Image16> {
             num_components: nc,
             precision,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::lossless_diff_16;
+
+    /// `lossless_diff_16` must mirror libjpeg-turbo `jclossls.c` exactly:
+    /// store the raw signed `samp - PREDICTOR` and let `JCOEF` (= `int16_t`)
+    /// wrap. The earlier modulo-2^P fold collapsed high-magnitude residuals
+    /// into a smaller signed range, which decoded to the same pixels but
+    /// shifted symbol categories and broke byte-parity with cjpeg's
+    /// optimised DC table. These cases are the inputs where the two
+    /// behaviours diverge — they pin down the C semantics so a future
+    /// refactor can't silently regress.
+    #[test]
+    fn lossless_diff_16_matches_c_int16_storage() {
+        // For y=0, x=1 the function uses the left neighbour (`plane[0]`) as
+        // prediction regardless of `predictor`. Each case below pins a
+        // (sample, prediction) pair where the C `JCOEF` cast and the old
+        // modulo-2^P fold disagree.
+
+        // precision=16, sample=65535, prediction=0: C casts to int16 → -1.
+        // The fold also returns -1 for this case (no observable change),
+        // but pinning it guards the boundary where both implementations
+        // happen to agree.
+        let plane = [0u16, 0];
+        let d = lossless_diff_16(65535, 1, 0, &plane, 2, 1, 0, 16);
+        assert_eq!(d, -1);
+
+        // precision=12, sample=4000, prediction=0: C keeps +4000 (category
+        // 12). The old fold mapped 4000 → -96 (category 7). Different
+        // category, different optimised Huffman code.
+        let plane = [0u16, 0];
+        let d = lossless_diff_16(4000, 1, 0, &plane, 2, 1, 0, 12);
+        assert_eq!(d, 4000);
+
+        // precision=4, sample=15, prediction=0: C keeps +15 (category 4,
+        // magnitude bits 0b1111). The old fold mapped 15 → -1 (category 1,
+        // magnitude bit 0b0). Same decoded pixel, different bitstream.
+        let plane = [0u16, 0];
+        let d = lossless_diff_16(15, 1, 0, &plane, 2, 1, 0, 4);
+        assert_eq!(d, 15);
+
+        // Boundary at the int16 minimum: sample=0, prediction=32768 wraps
+        // to -32768 (the category-16 special case in `jclhuff.c`, encoded
+        // with no extra magnitude bits).
+        let plane = [32768u16, 0];
+        let d = lossless_diff_16(0, 1, 0, &plane, 2, 1, 0, 16);
+        assert_eq!(d, -32768);
     }
 }
