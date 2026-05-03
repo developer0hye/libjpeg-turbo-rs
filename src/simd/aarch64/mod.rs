@@ -518,6 +518,8 @@ mod tests {
             corrections_zigzag,
             shifts_zigzag,
             scales_zigzag,
+            float_divisors: [0.0f32; 64],
+            float_divisors_zigzag: [0.0f32; 64],
         }
     }
 

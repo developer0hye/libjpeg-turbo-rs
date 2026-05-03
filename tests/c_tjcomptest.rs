@@ -72,7 +72,7 @@ fn run_lossy_combo(
     restart_rows: Option<u16>,
     icc_path: Option<&Path>,
     arithmetic: bool,
-    dct_float: bool,
+    dct_fast: bool,
     optimize: bool,
     progressive: bool,
     label_prefix: &str,
@@ -115,7 +115,7 @@ fn run_lossy_combo(
     if arithmetic {
         cjpeg_misc.push("-a".to_string());
     }
-    if dct_float {
+    if dct_fast {
         cjpeg_misc.push("-dc".to_string());
         cjpeg_misc.push("fa".to_string());
     }
@@ -164,8 +164,8 @@ fn run_lossy_combo(
         if arithmetic {
             enc = enc.arithmetic(true);
         }
-        if dct_float {
-            enc = enc.dct_method(DctMethod::Float);
+        if dct_fast {
+            enc = enc.dct_method(DctMethod::IsFast);
         }
         if optimize {
             enc = enc.optimize_huffman(true);
@@ -242,8 +242,8 @@ fn run_lossy_combo(
             if arithmetic {
                 enc = enc.arithmetic(true);
             }
-            if dct_float {
-                enc = enc.dct_method(DctMethod::Float);
+            if dct_fast {
+                enc = enc.dct_method(DctMethod::IsFast);
             }
             if optimize {
                 enc = enc.optimize_huffman(true);
@@ -366,8 +366,8 @@ fn run_lossy_combo(
             if arithmetic {
                 enc = enc.arithmetic(true);
             }
-            if dct_float {
-                enc = enc.dct_method(DctMethod::Float);
+            if dct_fast {
+                enc = enc.dct_method(DctMethod::IsFast);
             }
             if optimize {
                 enc = enc.optimize_huffman(true);
@@ -491,7 +491,7 @@ fn c_tjcomptest_lossy_quick() {
                 None,  // restart_rows
                 None,  // icc
                 false, // arithmetic
-                false, // dct_float
+                false, // dct_fast
                 false, // optimize
                 false, // progressive
                 &label,
@@ -662,7 +662,7 @@ fn c_tjcomptest_lossy_full() {
             // for ariarg in "" "-a"
             for arithmetic in [false, true] {
                 // for dctarg in "" "-dc fa"
-                for dct_float in [false, true] {
+                for dct_fast in [false, true] {
                     // for optarg in "" "-o"
                     for optimize in [false, true] {
                         // SKIP: optarg==-o && ariarg=="-a" (C script rule)
@@ -732,7 +732,7 @@ fn c_tjcomptest_lossy_full() {
                                         rc.tag,
                                         qtag,
                                         arithmetic as u8,
-                                        dct_float as u8,
+                                        dct_fast as u8,
                                         optimize as u8,
                                         progressive as u8,
                                         TJCOMP_SUBSAMP[sampi]
@@ -749,7 +749,7 @@ fn c_tjcomptest_lossy_full() {
                                         rc.restart_rows,
                                         rc.icc,
                                         arithmetic,
-                                        dct_float,
+                                        dct_fast,
                                         optimize,
                                         progressive,
                                         &label,

@@ -180,7 +180,7 @@ pub fn compress(
     let fdct_quantize_fn: fn(&mut [i16; 64], &QuantDivisors, &mut [i16; 64]) = match dct_method {
         DctMethod::IsLow => enc_simd.fdct_quantize,
         DctMethod::IsFast => crate::simd::scalar::scalar_fdct_ifast_quantize,
-        DctMethod::Float => crate::simd::scalar::scalar_fdct_quantize,
+        DctMethod::Float => crate::simd::scalar::scalar_fdct_float_quantize,
     };
 
     // Entropy encode all MCUs
@@ -2661,7 +2661,7 @@ fn compress_progressive_with_scans(
     let fdct_quantize_fn: fn(&mut [i16; 64], &QuantDivisors, &mut [i16; 64]) = match dct_method {
         DctMethod::IsLow => enc_simd.fdct_quantize,
         DctMethod::IsFast => crate::simd::scalar::scalar_fdct_ifast_quantize,
-        DctMethod::Float => crate::simd::scalar::scalar_fdct_quantize,
+        DctMethod::Float => crate::simd::scalar::scalar_fdct_float_quantize,
     };
     let use_simd_fdct: bool = dct_method == DctMethod::IsLow;
 
@@ -4073,6 +4073,7 @@ pub fn compress_arithmetic(
                             extract_block(&y_plane, width, height, x0, y0 + dy, &mut block);
                             let mut q = [0i16; 64];
                             fdct_quantize_fn(&mut block, &luma_divisors, &mut q);
+                            prev_dc_y_gather = q[0];
                             all_blocks.push(q);
                         }
                         for plane in [&cb_plane, &cr_plane] {
@@ -4387,8 +4388,19 @@ pub fn compress_arithmetic_progressive(
         .map(|cl| vec![[0i16; 64]; cl.blocks_x * cl.blocks_y])
         .collect();
 
-    // FDCT + quantize all blocks into coefficient buffers
+    // FDCT + quantize all blocks into coefficient buffers.
+    // Track per-component prev_dc to honor the C `jccoefct.c:178-199` dummy
+    // block rule: Y blocks whose 8×8 origin sits outside the original image
+    // must encode as DC=prev_dc, AC=0 (so the DC diff is zero) instead of
+    // the replicated-edge content `extract_block` would otherwise produce.
+    // Failing to do this drops a coefficient on the wrong side of every
+    // arithmetic conditioning bucket and breaks byte-parity with cjpeg for
+    // any subsampled MCU (samp422/420/440/411/441/410/24) on images whose
+    // dimensions don't divide evenly by the MCU stride.
     let fdct_quantize_fn = crate::simd::detect_encoder().fdct_quantize;
+    let y_width_in_blocks: usize = width.div_ceil(8);
+    let y_height_in_blocks: usize = height.div_ceil(8);
+    let mut prev_dc_y_gather: i16 = 0;
     for mcu_y in 0..mcus_y {
         for mcu_x in 0..mcus_x {
             let x0: usize = mcu_x * mcu_w;
@@ -4410,6 +4422,18 @@ pub fn compress_arithmetic_progressive(
                     for bh in 0..h_samp {
                         let bx: usize = mcu_x * h_samp + bh;
                         let by: usize = mcu_y * v_samp + bv;
+                        let blocks_x: usize = comp_layouts[0].blocks_x;
+                        if is_y_dummy(
+                            x0 + bh * 8,
+                            y0 + bv * 8,
+                            y_width_in_blocks,
+                            y_height_in_blocks,
+                        ) {
+                            let mut dummy = [0i16; 64];
+                            dummy[0] = prev_dc_y_gather;
+                            coeff_bufs[0][by * blocks_x + bx] = dummy;
+                            continue;
+                        }
                         let mut block = [0i16; 64];
                         extract_block(
                             &y_plane,
@@ -4419,12 +4443,12 @@ pub fn compress_arithmetic_progressive(
                             y0 + bv * 8,
                             &mut block,
                         );
-                        let blocks_x: usize = comp_layouts[0].blocks_x;
                         fdct_quantize_fn(
                             &mut block,
                             &luma_divisors,
                             &mut coeff_bufs[0][by * blocks_x + bx],
                         );
+                        prev_dc_y_gather = coeff_bufs[0][by * blocks_x + bx][0];
                     }
                 }
                 // Cb block
@@ -4499,12 +4523,13 @@ pub fn compress_arithmetic_progressive(
         marker_writer::write_sof10(&mut output, width as u16, height as u16, &components);
     }
 
-    // DAC marker for arithmetic conditioning parameters
-    let dc_params: [(u8, u8); 2] = [(0u8, 1u8), (0, 1)];
-    let ac_params: [u8; 2] = [5u8, 5];
-    let num_dc: usize = if is_grayscale { 1 } else { 2 };
-    let num_ac: usize = if is_grayscale { 1 } else { 2 };
-    marker_writer::write_dac(&mut output, num_dc, &dc_params, num_ac, &ac_params);
+    // Default arithmetic conditioning parameters (C `jcparam.c`):
+    //   DC: L=0 U=1 → packed byte 0x10
+    //   AC: Kx=5
+    use crate::decode::arithmetic::NUM_ARITH_TBLS;
+    let mut dc_params_full: [(u8, u8); NUM_ARITH_TBLS] = [(0u8, 1u8); NUM_ARITH_TBLS];
+    let mut ac_params_full: [u8; NUM_ARITH_TBLS] = [5u8; NUM_ARITH_TBLS];
+    let _ = (&mut dc_params_full, &mut ac_params_full);
 
     // Encode each scan with arithmetic coding
     let mut arith_enc: ArithEncoder = ArithEncoder::new(width * height / 4);
@@ -4527,6 +4552,34 @@ pub fn compress_arithmetic_progressive(
                 (comp_id, dc_tbl, ac_tbl)
             })
             .collect();
+
+        // C jcmarker.c::emit_dac (called from write_scan_header) — emit a
+        // DAC per scan with only the conditioning entries used by THIS scan:
+        // DC tables when the scan starts at Ss=0 with Ah=0 (initial DC), AC
+        // tables when Se>0. We replicate that here so each progressive scan
+        // header carries the minimal-and-correct DAC, matching cjpeg byte
+        // for byte even though "duplicate DAC for repeated tables" is per-
+        // spec wasted bytes.
+        let mut dc_in_use: [bool; NUM_ARITH_TBLS] = [false; NUM_ARITH_TBLS];
+        let mut ac_in_use: [bool; NUM_ARITH_TBLS] = [false; NUM_ARITH_TBLS];
+        let need_dc: bool = scan.ss == 0 && scan.ah == 0;
+        let need_ac: bool = scan.se > 0;
+        for (comp_id, dc_tbl, ac_tbl) in &sos_comps {
+            let _ = comp_id;
+            if need_dc {
+                dc_in_use[(*dc_tbl as usize).min(NUM_ARITH_TBLS - 1)] = true;
+            }
+            if need_ac {
+                ac_in_use[(*ac_tbl as usize).min(NUM_ARITH_TBLS - 1)] = true;
+            }
+        }
+        marker_writer::write_dac_selected(
+            &mut output,
+            &dc_in_use,
+            &dc_params_full,
+            &ac_in_use,
+            &ac_params_full,
+        );
 
         marker_writer::write_sos_progressive(
             &mut output,
@@ -5333,18 +5386,21 @@ fn scale_quant_for_ifast(quant_table: &[u16; 64]) -> QuantDivisors {
         scales[i] = scale;
         shifts[i] = shift;
     }
+    let float_divisors = compute_float_divisors(quant_table);
     let zigzag = &crate::encode::tables::ZIGZAG_ORDER;
     let mut divisors_zigzag = [0u16; 64];
     let mut reciprocals_zigzag = [0u16; 64];
     let mut corrections_zigzag = [0u16; 64];
     let mut shifts_zigzag = [0i16; 64];
     let mut scales_zigzag = [0u16; 64];
+    let mut float_divisors_zigzag = [0.0f32; 64];
     for zz in 0..64 {
         divisors_zigzag[zz] = divisors[zigzag[zz]];
         reciprocals_zigzag[zz] = reciprocals[zigzag[zz]];
         corrections_zigzag[zz] = corrections[zigzag[zz]];
         shifts_zigzag[zz] = shifts[zigzag[zz]];
         scales_zigzag[zz] = scales[zigzag[zz]];
+        float_divisors_zigzag[zz] = float_divisors[zigzag[zz]];
     }
     QuantDivisors {
         divisors,
@@ -5357,7 +5413,33 @@ fn scale_quant_for_ifast(quant_table: &[u16; 64]) -> QuantDivisors {
         corrections_zigzag,
         shifts_zigzag,
         scales_zigzag,
+        float_divisors,
+        float_divisors_zigzag,
     }
+}
+
+/// C `jcdctmgr.c` lines 346–365: float divisor =
+/// `1 / (quant[i] * aanscalefactor[row] * aanscalefactor[col] * 8)`.
+fn compute_float_divisors(quant_table: &[u16; 64]) -> [f32; 64] {
+    const AANSCALEFACTOR: [f64; 8] = [
+        1.0,
+        1.387039845,
+        1.306562965,
+        1.175875602,
+        1.0,
+        0.785694958,
+        0.541196100,
+        0.275899379,
+    ];
+    let mut out = [0.0f32; 64];
+    for row in 0..8 {
+        for col in 0..8 {
+            let i: usize = row * 8 + col;
+            let denom: f64 = quant_table[i] as f64 * AANSCALEFACTOR[row] * AANSCALEFACTOR[col] * 8.0;
+            out[i] = (1.0 / denom) as f32;
+        }
+    }
+    out
 }
 
 /// Scale quantization table values by 8 to create divisor table for the islow FDCT.
@@ -5379,18 +5461,21 @@ fn scale_quant_for_fdct(quant_table: &[u16; 64]) -> QuantDivisors {
         scales[i] = scale;
         shifts[i] = shift;
     }
+    let float_divisors = compute_float_divisors(quant_table);
     let zigzag = &crate::encode::tables::ZIGZAG_ORDER;
     let mut divisors_zigzag = [0u16; 64];
     let mut reciprocals_zigzag = [0u16; 64];
     let mut corrections_zigzag = [0u16; 64];
     let mut shifts_zigzag = [0i16; 64];
     let mut scales_zigzag = [0u16; 64];
+    let mut float_divisors_zigzag = [0.0f32; 64];
     for zz in 0..64 {
         divisors_zigzag[zz] = divisors[zigzag[zz]];
         reciprocals_zigzag[zz] = reciprocals[zigzag[zz]];
         corrections_zigzag[zz] = corrections[zigzag[zz]];
         shifts_zigzag[zz] = shifts[zigzag[zz]];
         scales_zigzag[zz] = scales[zigzag[zz]];
+        float_divisors_zigzag[zz] = float_divisors[zigzag[zz]];
     }
     QuantDivisors {
         divisors,
@@ -5403,6 +5488,8 @@ fn scale_quant_for_fdct(quant_table: &[u16; 64]) -> QuantDivisors {
         corrections_zigzag,
         shifts_zigzag,
         scales_zigzag,
+        float_divisors,
+        float_divisors_zigzag,
     }
 }
 
@@ -6292,6 +6379,20 @@ fn encode_single_block(
     prev_dc: &mut i16,
     fdct_quantize_fn: fn(&mut [i16; 64], &QuantDivisors, &mut [i16; 64]),
 ) {
+    // C jccoefct.c:178-199 — when a block is entirely outside the image
+    // (subsampled MCU stride exceeds image dimensions), emit a dummy block:
+    // DC = previous block's DC (so DC diff = 0), AC all zero. This matches
+    // upstream's "Create a row of dummy blocks at the bottom of the image"
+    // path and keeps the DC frequency distribution byte-identical to cjpeg
+    // for non-444 subsamplings whose MCU height/width does not divide the
+    // image dimensions evenly.
+    if block_x >= plane_width || block_y >= plane_height {
+        let mut dummy = [0i16; 64];
+        dummy[0] = *prev_dc;
+        HuffmanEncoder::encode_block(writer, &dummy, prev_dc, dc_table, ac_table);
+        return;
+    }
+
     let mut quantized = [0i16; 64];
 
     // The fused SIMD path uses islow FDCT internally. Skip it for ifast/float
@@ -6302,7 +6403,7 @@ fn encode_single_block(
     );
     let is_float: bool = std::ptr::eq(
         fdct_quantize_fn as *const (),
-        crate::simd::scalar::scalar_fdct_quantize as *const (),
+        crate::simd::scalar::scalar_fdct_float_quantize as *const (),
     );
     let use_fused_simd: bool = !is_ifast && !is_float;
 
@@ -7756,7 +7857,7 @@ fn encode_downsampled_chroma_block(
     );
     let is_float: bool = std::ptr::eq(
         fdct_quantize_fn as *const (),
-        crate::simd::scalar::scalar_fdct_quantize as *const (),
+        crate::simd::scalar::scalar_fdct_float_quantize as *const (),
     );
     let use_fused_simd: bool = !is_ifast && !is_float;
 
@@ -7938,6 +8039,7 @@ pub fn compress_optimized(
     quality: u8,
     subsampling: Subsampling,
     smoothing_factor: u8,
+    dct_method: DctMethod,
 ) -> Result<Vec<u8>> {
     // Validate inputs
     if width == 0 || height == 0 {
@@ -7963,15 +8065,37 @@ pub fn compress_optimized(
 
     let is_grayscale = pixel_format == PixelFormat::Grayscale;
 
-    // Generate quantization tables
+    // Generate quantization tables. The divisor table layout depends on the
+    // chosen FDCT — ifast pre-applies AA&N scaling so its divisors fold the
+    // AA&N constants in (paired with `fdct_ifast_raw`); islow/float keep
+    // the simple `quant * 8` divisors, with the float path routing through
+    // the embedded `float_divisors` field via `scalar_fdct_float_quantize`.
     let luma_quant = tables::quality_scale_quant_table(&tables::STD_LUMINANCE_QUANT_TABLE, quality);
     let chroma_quant =
         tables::quality_scale_quant_table(&tables::STD_CHROMINANCE_QUANT_TABLE, quality);
-    let luma_divisors = scale_quant_for_fdct(&luma_quant);
-    let chroma_divisors = scale_quant_for_fdct(&chroma_quant);
+    let luma_divisors = if dct_method == DctMethod::IsFast {
+        scale_quant_for_ifast(&luma_quant)
+    } else {
+        scale_quant_for_fdct(&luma_quant)
+    };
+    let chroma_divisors = if dct_method == DctMethod::IsFast {
+        scale_quant_for_ifast(&chroma_quant)
+    } else {
+        scale_quant_for_fdct(&chroma_quant)
+    };
 
     // SIMD dispatch — used for both color conversion and FDCT+quantize
     let enc_simd = crate::simd::detect_encoder();
+
+    // FDCT dispatch: SIMD fused islow for the default path, scalar ifast/float
+    // for the legacy paths. Only the islow scalar form is byte-equivalent to
+    // the NEON/AVX2 fused kernels, so the per-block SIMD shortcuts inside
+    // `gather_block` must be skipped when `dct_method != IsLow`.
+    let fdct_quantize_fn: fn(&mut [i16; 64], &QuantDivisors, &mut [i16; 64]) = match dct_method {
+        DctMethod::IsLow => enc_simd.fdct_quantize,
+        DctMethod::IsFast => crate::simd::scalar::scalar_fdct_ifast_quantize,
+        DctMethod::Float => crate::simd::scalar::scalar_fdct_float_quantize,
+    };
 
     // Determine MCU dimensions
     let (mcu_w, mcu_h) = if is_grayscale {
@@ -8065,7 +8189,7 @@ pub fn compress_optimized(
                     x0,
                     y0,
                     &luma_divisors,
-                    enc_simd.fdct_quantize,
+                    fdct_quantize_fn,
                 );
                 let diff = q[0] - prev_dc_y;
                 prev_dc_y = q[0];
@@ -8083,7 +8207,7 @@ pub fn compress_optimized(
                             x0,
                             y0,
                             &luma_divisors,
-                            enc_simd.fdct_quantize,
+                            fdct_quantize_fn,
                         );
                         let diff = yq[0] - prev_dc_y;
                         prev_dc_y = yq[0];
@@ -8098,7 +8222,7 @@ pub fn compress_optimized(
                             x0,
                             y0,
                             &chroma_divisors,
-                            enc_simd.fdct_quantize,
+                            fdct_quantize_fn,
                         );
                         let diff = cbq[0] - prev_dc_cb;
                         prev_dc_cb = cbq[0];
@@ -8113,7 +8237,7 @@ pub fn compress_optimized(
                             x0,
                             y0,
                             &chroma_divisors,
-                            enc_simd.fdct_quantize,
+                            fdct_quantize_fn,
                         );
                         let diff = crq[0] - prev_dc_cr;
                         prev_dc_cr = crq[0];
@@ -8140,7 +8264,7 @@ pub fn compress_optimized(
                                     x0 + dx,
                                     y0,
                                     &luma_divisors,
-                                    enc_simd.fdct_quantize,
+                                    fdct_quantize_fn,
                                 )
                             };
                             let diff = yq[0] - prev_dc_y;
@@ -8158,7 +8282,7 @@ pub fn compress_optimized(
                             2,
                             1,
                             &chroma_divisors,
-                            enc_simd.fdct_quantize,
+                            fdct_quantize_fn,
                         );
                         let diff = cbq[0] - prev_dc_cb;
                         prev_dc_cb = cbq[0];
@@ -8175,7 +8299,7 @@ pub fn compress_optimized(
                             2,
                             1,
                             &chroma_divisors,
-                            enc_simd.fdct_quantize,
+                            fdct_quantize_fn,
                         );
                         let diff = crq[0] - prev_dc_cr;
                         prev_dc_cr = crq[0];
@@ -8202,7 +8326,7 @@ pub fn compress_optimized(
                                     x0 + dx,
                                     y0 + dy,
                                     &luma_divisors,
-                                    enc_simd.fdct_quantize,
+                                    fdct_quantize_fn,
                                 )
                             };
                             let diff = yq[0] - prev_dc_y;
@@ -8219,7 +8343,7 @@ pub fn compress_optimized(
                                 x0 / 2,
                                 y0 / 2,
                                 &chroma_divisors,
-                                enc_simd.fdct_quantize,
+                                fdct_quantize_fn,
                             )
                         } else {
                             gather_downsampled_block(
@@ -8231,7 +8355,7 @@ pub fn compress_optimized(
                                 2,
                                 2,
                                 &chroma_divisors,
-                                enc_simd.fdct_quantize,
+                                fdct_quantize_fn,
                             )
                         };
                         let diff = cbq[0] - prev_dc_cb;
@@ -8248,7 +8372,7 @@ pub fn compress_optimized(
                                 x0 / 2,
                                 y0 / 2,
                                 &chroma_divisors,
-                                enc_simd.fdct_quantize,
+                                fdct_quantize_fn,
                             )
                         } else {
                             gather_downsampled_block(
@@ -8260,7 +8384,7 @@ pub fn compress_optimized(
                                 2,
                                 2,
                                 &chroma_divisors,
-                                enc_simd.fdct_quantize,
+                                fdct_quantize_fn,
                             )
                         };
                         let diff = crq[0] - prev_dc_cr;
@@ -8270,16 +8394,18 @@ pub fn compress_optimized(
                         all_blocks.push(crq);
                     }
                     Subsampling::S440 => {
-                        // 2 Y blocks vertically
                         for dy in [0usize, 8] {
-                            let yq = gather_block(
+                            let yq = gather_block_or_dummy(
                                 &y_plane,
                                 width,
                                 height,
                                 x0,
                                 y0 + dy,
+                                original_width,
+                                original_height,
+                                prev_dc_y,
                                 &luma_divisors,
-                                enc_simd.fdct_quantize,
+                                fdct_quantize_fn,
                             );
                             let diff = yq[0] - prev_dc_y;
                             prev_dc_y = yq[0];
@@ -8296,7 +8422,7 @@ pub fn compress_optimized(
                             1,
                             2,
                             &chroma_divisors,
-                            enc_simd.fdct_quantize,
+                            fdct_quantize_fn,
                         );
                         let diff = cbq[0] - prev_dc_cb;
                         prev_dc_cb = cbq[0];
@@ -8313,7 +8439,7 @@ pub fn compress_optimized(
                             1,
                             2,
                             &chroma_divisors,
-                            enc_simd.fdct_quantize,
+                            fdct_quantize_fn,
                         );
                         let diff = crq[0] - prev_dc_cr;
                         prev_dc_cr = crq[0];
@@ -8324,14 +8450,17 @@ pub fn compress_optimized(
                     Subsampling::S411 => {
                         // 4 Y blocks horizontally
                         for dx in [0usize, 8, 16, 24] {
-                            let yq = gather_block(
+                            let yq = gather_block_or_dummy(
                                 &y_plane,
                                 width,
                                 height,
                                 x0 + dx,
                                 y0,
+                                original_width,
+                                original_height,
+                                prev_dc_y,
                                 &luma_divisors,
-                                enc_simd.fdct_quantize,
+                                fdct_quantize_fn,
                             );
                             let diff = yq[0] - prev_dc_y;
                             prev_dc_y = yq[0];
@@ -8348,7 +8477,7 @@ pub fn compress_optimized(
                             4,
                             1,
                             &chroma_divisors,
-                            enc_simd.fdct_quantize,
+                            fdct_quantize_fn,
                         );
                         let diff = cbq[0] - prev_dc_cb;
                         prev_dc_cb = cbq[0];
@@ -8365,7 +8494,7 @@ pub fn compress_optimized(
                             4,
                             1,
                             &chroma_divisors,
-                            enc_simd.fdct_quantize,
+                            fdct_quantize_fn,
                         );
                         let diff = crq[0] - prev_dc_cr;
                         prev_dc_cr = crq[0];
@@ -8376,14 +8505,17 @@ pub fn compress_optimized(
                     Subsampling::S441 => {
                         // 4 Y blocks vertically
                         for dy in [0usize, 8, 16, 24] {
-                            let yq = gather_block(
+                            let yq = gather_block_or_dummy(
                                 &y_plane,
                                 width,
                                 height,
                                 x0,
                                 y0 + dy,
+                                original_width,
+                                original_height,
+                                prev_dc_y,
                                 &luma_divisors,
-                                enc_simd.fdct_quantize,
+                                fdct_quantize_fn,
                             );
                             let diff = yq[0] - prev_dc_y;
                             prev_dc_y = yq[0];
@@ -8400,7 +8532,7 @@ pub fn compress_optimized(
                             1,
                             4,
                             &chroma_divisors,
-                            enc_simd.fdct_quantize,
+                            fdct_quantize_fn,
                         );
                         let diff = cbq[0] - prev_dc_cb;
                         prev_dc_cb = cbq[0];
@@ -8417,7 +8549,7 @@ pub fn compress_optimized(
                             1,
                             4,
                             &chroma_divisors,
-                            enc_simd.fdct_quantize,
+                            fdct_quantize_fn,
                         );
                         let diff = crq[0] - prev_dc_cr;
                         prev_dc_cr = crq[0];
@@ -8429,14 +8561,17 @@ pub fn compress_optimized(
                         // 4 Y horizontal × 2 vertical = 8 luma blocks per MCU
                         for dy in [0usize, 8] {
                             for dx in [0usize, 8, 16, 24] {
-                                let yq = gather_block(
+                                let yq = gather_block_or_dummy(
                                     &y_plane,
                                     width,
                                     height,
                                     x0 + dx,
                                     y0 + dy,
+                                    original_width,
+                                    original_height,
+                                    prev_dc_y,
                                     &luma_divisors,
-                                    enc_simd.fdct_quantize,
+                                    fdct_quantize_fn,
                                 );
                                 let diff = yq[0] - prev_dc_y;
                                 prev_dc_y = yq[0];
@@ -8454,7 +8589,7 @@ pub fn compress_optimized(
                             4,
                             2,
                             &chroma_divisors,
-                            enc_simd.fdct_quantize,
+                            fdct_quantize_fn,
                         );
                         let diff = cbq[0] - prev_dc_cb;
                         prev_dc_cb = cbq[0];
@@ -8471,7 +8606,7 @@ pub fn compress_optimized(
                             4,
                             2,
                             &chroma_divisors,
-                            enc_simd.fdct_quantize,
+                            fdct_quantize_fn,
                         );
                         let diff = crq[0] - prev_dc_cr;
                         prev_dc_cr = crq[0];
@@ -8483,14 +8618,17 @@ pub fn compress_optimized(
                         // 2 Y horizontal × 4 vertical = 8 luma blocks per MCU
                         for dy in [0usize, 8, 16, 24] {
                             for dx in [0usize, 8] {
-                                let yq = gather_block(
+                                let yq = gather_block_or_dummy(
                                     &y_plane,
                                     width,
                                     height,
                                     x0 + dx,
                                     y0 + dy,
+                                    original_width,
+                                    original_height,
+                                    prev_dc_y,
                                     &luma_divisors,
-                                    enc_simd.fdct_quantize,
+                                    fdct_quantize_fn,
                                 );
                                 let diff = yq[0] - prev_dc_y;
                                 prev_dc_y = yq[0];
@@ -8508,7 +8646,7 @@ pub fn compress_optimized(
                             2,
                             4,
                             &chroma_divisors,
-                            enc_simd.fdct_quantize,
+                            fdct_quantize_fn,
                         );
                         let diff = cbq[0] - prev_dc_cb;
                         prev_dc_cb = cbq[0];
@@ -8525,7 +8663,7 @@ pub fn compress_optimized(
                             2,
                             4,
                             &chroma_divisors,
-                            enc_simd.fdct_quantize,
+                            fdct_quantize_fn,
                         );
                         let diff = crq[0] - prev_dc_cr;
                         prev_dc_cr = crq[0];
@@ -8807,6 +8945,44 @@ pub fn compress_optimized(
 }
 
 /// FDCT + quantize a single block, return the quantized coefficients.
+/// Like `gather_block` but emits a dummy block (DC = prev_dc, AC = 0) when
+/// the block is entirely outside the original (un-padded) image dimensions.
+///
+/// Mirrors C `jccoefct.c` lines 178-199: for the right- and bottom-edge MCUs
+/// of subsampled formats (samp422, 420, 440, 411, 441, 410, 24), some Y
+/// blocks may sit fully outside the image. C handles these by zeroing the AC
+/// coefficients and copying the previous block's DC into [0][0], producing a
+/// DC-diff of zero. Replicating this is essential for byte-parity with cjpeg
+/// since the dummy DC=0 entries change the optimised Huffman frequency
+/// distribution (and thus the resulting per-image DHT).
+fn gather_block_or_dummy(
+    plane: &[u8],
+    plane_width: usize,
+    plane_height: usize,
+    block_x: usize,
+    block_y: usize,
+    orig_width: usize,
+    orig_height: usize,
+    prev_dc: i16,
+    quant_table: &QuantDivisors,
+    fdct_quantize_fn: fn(&mut [i16; 64], &QuantDivisors, &mut [i16; 64]),
+) -> [i16; 64] {
+    if block_x >= orig_width || block_y >= orig_height {
+        let mut dummy = [0i16; 64];
+        dummy[0] = prev_dc;
+        return dummy;
+    }
+    gather_block(
+        plane,
+        plane_width,
+        plane_height,
+        block_x,
+        block_y,
+        quant_table,
+        fdct_quantize_fn,
+    )
+}
+
 fn gather_block(
     plane: &[u8],
     plane_width: usize,
@@ -8818,8 +8994,22 @@ fn gather_block(
 ) -> [i16; 64] {
     let mut quantized = [0i16; 64];
 
+    // The fused NEON/AVX2 kernels here always run the islow FDCT internally.
+    // For ifast / float methods the caller supplies a scalar `fdct_quantize_fn`
+    // that pairs the matching FDCT with its method-specific divisors, so the
+    // SIMD shortcuts must be bypassed to avoid silently downgrading to islow.
+    let is_ifast: bool = std::ptr::eq(
+        fdct_quantize_fn as *const (),
+        crate::simd::scalar::scalar_fdct_ifast_quantize as *const (),
+    );
+    let is_float: bool = std::ptr::eq(
+        fdct_quantize_fn as *const (),
+        crate::simd::scalar::scalar_fdct_float_quantize as *const (),
+    );
+    let use_fused_simd: bool = !is_ifast && !is_float;
+
     // NEON/AVX2 fused path for interior blocks
-    if block_x + 8 <= plane_width && block_y + 8 <= plane_height {
+    if use_fused_simd && block_x + 8 <= plane_width && block_y + 8 <= plane_height {
         #[cfg(target_arch = "aarch64")]
         {
             unsafe {
@@ -8850,7 +9040,7 @@ fn gather_block(
 
     // Edge blocks: pad to 8×8 then use NEON/AVX2
     let is_edge: bool = block_x + 8 > plane_width || block_y + 8 > plane_height;
-    if is_edge {
+    if use_fused_simd && is_edge {
         let mut local_buf = [0u8; 64];
         for row in 0..8usize {
             let src_y = (block_y + row).min(plane_height - 1);
@@ -8917,8 +9107,21 @@ fn gather_downsampled_block(
     let src_w: usize = 8 * h_factor;
     let src_h: usize = 8 * v_factor;
 
+    // The fused downsample+FDCT NEON/AVX2 kernels here use islow internally;
+    // bypass them when the caller asked for ifast/float so the supplied
+    // `fdct_quantize_fn` (with method-matching divisors) is used instead.
+    let is_ifast: bool = std::ptr::eq(
+        fdct_quantize_fn as *const (),
+        crate::simd::scalar::scalar_fdct_ifast_quantize as *const (),
+    );
+    let is_float: bool = std::ptr::eq(
+        fdct_quantize_fn as *const (),
+        crate::simd::scalar::scalar_fdct_float_quantize as *const (),
+    );
+    let use_fused_simd: bool = !is_ifast && !is_float;
+
     // NEON/AVX2 fused downsample+FDCT+quantize for interior blocks
-    if block_x + src_w <= plane_width && block_y + src_h <= plane_height {
+    if use_fused_simd && block_x + src_w <= plane_width && block_y + src_h <= plane_height {
         #[cfg(target_arch = "aarch64")]
         {
             let mut quantized = [0i16; 64];
@@ -8984,39 +9187,13 @@ fn gather_downsampled_block(
             local_buf[row * src_w + col] = plane[src_y * plane_width + src_x];
         }
     }
-    #[cfg(target_arch = "aarch64")]
-    {
-        let mut quantized = [0i16; 64];
-        if h_factor == 2 && v_factor == 2 {
-            unsafe {
-                crate::simd::aarch64::neon_downsample_h2v2_fdct_quantize(
-                    local_buf.as_ptr(),
-                    src_w,
-                    quant_table,
-                    &mut quantized,
-                );
-            }
-            return quantized;
-        }
-        if h_factor == 2 && v_factor == 1 {
-            unsafe {
-                crate::simd::aarch64::neon_downsample_h2v1_fdct_quantize(
-                    local_buf.as_ptr(),
-                    src_w,
-                    quant_table,
-                    &mut quantized,
-                );
-            }
-            return quantized;
-        }
-    }
-    #[cfg(target_arch = "x86_64")]
-    {
-        if is_x86_feature_detected!("avx2") {
+    if use_fused_simd {
+        #[cfg(target_arch = "aarch64")]
+        {
             let mut quantized = [0i16; 64];
             if h_factor == 2 && v_factor == 2 {
                 unsafe {
-                    crate::simd::x86_64::avx2_downsample_h2v2_fdct_quantize(
+                    crate::simd::aarch64::neon_downsample_h2v2_fdct_quantize(
                         local_buf.as_ptr(),
                         src_w,
                         quant_table,
@@ -9027,7 +9204,7 @@ fn gather_downsampled_block(
             }
             if h_factor == 2 && v_factor == 1 {
                 unsafe {
-                    crate::simd::x86_64::avx2_downsample_h2v1_fdct_quantize(
+                    crate::simd::aarch64::neon_downsample_h2v1_fdct_quantize(
                         local_buf.as_ptr(),
                         src_w,
                         quant_table,
@@ -9035,6 +9212,34 @@ fn gather_downsampled_block(
                     );
                 }
                 return quantized;
+            }
+        }
+        #[cfg(target_arch = "x86_64")]
+        {
+            if is_x86_feature_detected!("avx2") {
+                let mut quantized = [0i16; 64];
+                if h_factor == 2 && v_factor == 2 {
+                    unsafe {
+                        crate::simd::x86_64::avx2_downsample_h2v2_fdct_quantize(
+                            local_buf.as_ptr(),
+                            src_w,
+                            quant_table,
+                            &mut quantized,
+                        );
+                    }
+                    return quantized;
+                }
+                if h_factor == 2 && v_factor == 1 {
+                    unsafe {
+                        crate::simd::x86_64::avx2_downsample_h2v1_fdct_quantize(
+                            local_buf.as_ptr(),
+                            src_w,
+                            quant_table,
+                            &mut quantized,
+                        );
+                    }
+                    return quantized;
+                }
             }
         }
     }
