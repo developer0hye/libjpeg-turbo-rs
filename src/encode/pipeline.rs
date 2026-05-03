@@ -2568,6 +2568,42 @@ pub fn compress_progressive(
     subsampling: Subsampling,
     dct_method: DctMethod,
 ) -> Result<Vec<u8>> {
+    compress_progressive_with_restart(
+        pixels,
+        width,
+        height,
+        pixel_format,
+        quality,
+        subsampling,
+        dct_method,
+        0,
+        0,
+    )
+}
+
+/// Compress as progressive JPEG (SOF2) with an explicit restart interval.
+///
+/// `restart_interval` is the number of MCUs between restart markers
+/// (0 disables restart marker insertion). `restart_in_rows` is the
+/// per-row restart hint that, when non-zero, takes precedence: every
+/// scan recomputes its restart_interval as `restart_in_rows * MCUs_per_row`
+/// based on whether that scan is interleaved or non-interleaved. This
+/// mirrors `jcmaster.c`, where DC interleaved scans use the iMCU width and
+/// non-interleaved AC scans use the per-component `width_in_blocks` to
+/// derive the per-scan restart distance — required for byte-parity with
+/// `cjpeg -r N -p`.
+#[allow(clippy::too_many_arguments)]
+pub fn compress_progressive_with_restart(
+    pixels: &[u8],
+    width: usize,
+    height: usize,
+    pixel_format: PixelFormat,
+    quality: u8,
+    subsampling: Subsampling,
+    dct_method: DctMethod,
+    restart_interval: u16,
+    restart_in_rows: u16,
+) -> Result<Vec<u8>> {
     use crate::encode::progressive::simple_progression;
 
     let is_grayscale = pixel_format == PixelFormat::Grayscale;
@@ -2583,6 +2619,8 @@ pub fn compress_progressive(
         subsampling,
         &scans,
         dct_method,
+        restart_interval,
+        restart_in_rows,
     )
 }
 
@@ -2601,7 +2639,34 @@ pub fn compress_progressive_custom(
     script: &[ScanScript],
     dct_method: DctMethod,
 ) -> Result<Vec<u8>> {
-    // Convert user-facing ScanScript to internal ProgressiveScan representation
+    compress_progressive_custom_with_restart(
+        pixels,
+        width,
+        height,
+        pixel_format,
+        quality,
+        subsampling,
+        script,
+        dct_method,
+        0,
+        0,
+    )
+}
+
+/// Same as `compress_progressive_custom` but with an explicit restart interval.
+#[allow(clippy::too_many_arguments)]
+pub fn compress_progressive_custom_with_restart(
+    pixels: &[u8],
+    width: usize,
+    height: usize,
+    pixel_format: PixelFormat,
+    quality: u8,
+    subsampling: Subsampling,
+    script: &[ScanScript],
+    dct_method: DctMethod,
+    restart_interval: u16,
+    restart_in_rows: u16,
+) -> Result<Vec<u8>> {
     let scans: Vec<ProgressiveScan> = script
         .iter()
         .map(|s| ProgressiveScan {
@@ -2622,6 +2687,8 @@ pub fn compress_progressive_custom(
         subsampling,
         &scans,
         dct_method,
+        restart_interval,
+        restart_in_rows,
     )
 }
 
@@ -2636,6 +2703,8 @@ fn compress_progressive_with_scans(
     subsampling: Subsampling,
     scans: &[ProgressiveScan],
     dct_method: DctMethod,
+    restart_interval: u16,
+    restart_in_rows: u16,
 ) -> Result<Vec<u8>> {
     if width == 0 || height == 0 {
         return Err(JpegError::CorruptData(
@@ -2897,7 +2966,29 @@ fn compress_progressive_with_scans(
     // DC first scans (ss=0, se=0, ah=0): gather DC frequencies, generate optimal
     // table, write DHT, encode. DC refine scans (ah>0): no DHT, just encode.
     // AC scans (ss>0): gather AC frequencies, generate optimal table, write DHT, encode.
+    //
+    // Track the last-emitted DRI value across scans. C `jcmarker.c::write_scan_header`
+    // only emits DRI when `restart_interval` differs from the previous scan's value
+    // (initial 0); we mirror that to avoid duplicate DRI markers.
+    let mut last_ri: u16 = 0;
     for scan in scans {
+        // Per-scan restart_interval: when `restart_in_rows` is set, derive
+        // it from the scan's MCUs_per_row. Interleaved DC scans use the iMCU
+        // width (mcus_x); non-interleaved AC scans (single component) use
+        // that component's width_in_blocks. Otherwise inherit the
+        // user-provided MCU count unchanged.
+        let restart_interval: u16 = if restart_in_rows > 0 {
+            let mcus_per_row: usize = if scan.component_indices.len() > 1 {
+                mcus_x
+            } else {
+                comp_wib[scan.component_indices[0]]
+            };
+            (restart_in_rows as usize)
+                .saturating_mul(mcus_per_row)
+                .min(65535) as u16
+        } else {
+            restart_interval
+        };
         let is_dc_scan: bool = scan.ss == 0 && scan.se == 0;
         let is_first_scan: bool = scan.ah == 0;
 
@@ -2923,8 +3014,20 @@ fn compress_progressive_with_scans(
             dc_chroma_freq[256] = 1;
 
             let mut prev_dc: [i16; 4] = [0i16; 4];
+            let ri_dc_gather: u32 = restart_interval as u32;
+            let mut mcu_idx_gather: u32 = 0;
             for mcu_y in 0..mcus_y {
                 for mcu_x in 0..mcus_x {
+                    if ri_dc_gather > 0
+                        && mcu_idx_gather > 0
+                        && mcu_idx_gather.is_multiple_of(ri_dc_gather)
+                    {
+                        // DC predictor reset at the restart boundary —
+                        // mirror the encode loop so the diff symbol
+                        // category histogram matches what's actually
+                        // emitted under restart.
+                        prev_dc = [0i16; 4];
+                    }
                     for (scan_ci, &ci) in scan.component_indices.iter().enumerate() {
                         let layout = &comp_layouts[ci];
                         let freq = if ci == 0 {
@@ -2944,6 +3047,7 @@ fn compress_progressive_with_scans(
                             }
                         }
                     }
+                    mcu_idx_gather = mcu_idx_gather.wrapping_add(1);
                 }
             }
 
@@ -2956,6 +3060,12 @@ fn compress_progressive_with_scans(
                     crate::encode::huff_opt::gen_optimal_table(&dc_chroma_freq);
                 marker_writer::write_dht(&mut output, 0, 1, &dc_chroma_bits, &dc_chroma_values);
 
+                if restart_interval != last_ri {
+                    if restart_interval > 0 {
+                        marker_writer::write_dri(&mut output, restart_interval);
+                    }
+                    last_ri = restart_interval;
+                }
                 marker_writer::write_sos_progressive(
                     &mut output,
                     sos_slice,
@@ -2977,8 +3087,15 @@ fn compress_progressive_with_scans(
                     &dc_luma_table,
                     &dc_chroma_table,
                     &mut output,
+                    restart_interval,
                 );
             } else {
+                if restart_interval != last_ri {
+                    if restart_interval > 0 {
+                        marker_writer::write_dri(&mut output, restart_interval);
+                    }
+                    last_ri = restart_interval;
+                }
                 marker_writer::write_sos_progressive(
                     &mut output,
                     sos_slice,
@@ -3000,6 +3117,7 @@ fn compress_progressive_with_scans(
                     &dc_luma_table,
                     &dc_chroma_table,
                     &mut output,
+                    restart_interval,
                 );
             }
         } else if is_dc_scan {
@@ -3008,6 +3126,12 @@ fn compress_progressive_with_scans(
                 build_huff_table(&tables::DC_LUMINANCE_BITS, &tables::DC_LUMINANCE_VALUES);
             let dc_chroma_table: HuffTable =
                 build_huff_table(&tables::DC_CHROMINANCE_BITS, &tables::DC_CHROMINANCE_VALUES);
+            if restart_interval != last_ri {
+                if restart_interval > 0 {
+                    marker_writer::write_dri(&mut output, restart_interval);
+                }
+                last_ri = restart_interval;
+            }
             marker_writer::write_sos_progressive(
                 &mut output,
                 sos_slice,
@@ -3025,6 +3149,7 @@ fn compress_progressive_with_scans(
                 &dc_luma_table,
                 &dc_chroma_table,
                 &mut output,
+                restart_interval,
             );
         } else {
             // AC scan (ss > 0): fused gather+encode with precomputed block data.
@@ -3048,9 +3173,25 @@ fn compress_progressive_with_scans(
                 precomp_diffs.clear();
 
                 let mut eobrun_gather: u32 = 0;
+                let ri_gather: u32 = restart_interval as u32;
 
                 for by in 0..hib {
                     for bx in 0..wib {
+                        // Restart boundary forces a flush of any pending
+                        // EOBRUN — the encode loop emits EOBRUN before the
+                        // RST marker, so the frequency gather must do the
+                        // same or the optimised Huffman tables won't match
+                        // the actual encoded stream.
+                        let blk_idx: usize = by * wib + bx;
+                        if ri_gather > 0
+                            && blk_idx > 0
+                            && (blk_idx as u32).is_multiple_of(ri_gather)
+                            && eobrun_gather > 0
+                        {
+                            emit_eobrun_freq(eobrun_gather, &mut ac_freq);
+                            eobrun_gather = 0;
+                        }
+
                         let block: &[i16; 64] = &coeff_bufs[ci][by * stride + bx];
 
                         let mut zerobits: u64 = 0;
@@ -3116,10 +3257,16 @@ fn compress_progressive_with_scans(
                     emit_eobrun_freq(eobrun_gather, &mut ac_freq);
                 }
 
-                // Generate optimal table, write DHT + SOS
+                // Generate optimal table, write DHT + (DRI) + SOS
                 let (ac_bits, ac_values) = crate::encode::huff_opt::gen_optimal_table(&ac_freq);
                 let table_id: u8 = if ci == 0 { 0 } else { 1 };
                 marker_writer::write_dht(&mut output, 1, table_id, &ac_bits, &ac_values);
+                if restart_interval != last_ri {
+                    if restart_interval > 0 {
+                        marker_writer::write_dri(&mut output, restart_interval);
+                    }
+                    last_ri = restart_interval;
+                }
                 marker_writer::write_sos_progressive(
                     &mut output,
                     sos_slice,
@@ -3133,8 +3280,21 @@ fn compress_progressive_with_scans(
                 let ac_table: HuffTable = build_huff_table(&ac_bits, &ac_values);
                 bit_writer.reset();
                 let mut eobrun: u32 = 0;
+                let ri_ac: u32 = restart_interval as u32;
+                let mut rst_count: u8 = 0;
 
                 for blk_idx in 0..num_blocks {
+                    if ri_ac > 0 && blk_idx > 0 && (blk_idx as u32).is_multiple_of(ri_ac) {
+                        // Flush pending EOBRUN, byte-pad bits, emit RST marker,
+                        // reset EOBRUN per C jcphuff.c::emit_restart.
+                        if eobrun > 0 {
+                            emit_eobrun(&ac_table, &mut bit_writer, &mut eobrun);
+                        }
+                        bit_writer.flush_restart();
+                        bit_writer.write_restart_marker(rst_count);
+                        rst_count = (rst_count + 1) & 7;
+                    }
+
                     let zerobits: u64 = precomp_zerobits[blk_idx];
 
                     if zerobits == 0 {
@@ -3205,9 +3365,24 @@ fn compress_progressive_with_scans(
 
                 let mut eobrun_gather: u32 = 0;
                 let mut be: usize = 0;
+                let ri_gather: u32 = restart_interval as u32;
 
                 for by in 0..hib {
                     for bx in 0..wib {
+                        // Restart boundary: flush any pending EOBRUN/BE so
+                        // the gathered frequencies match what the encode
+                        // loop will actually emit.
+                        let blk_idx: usize = by * wib + bx;
+                        if ri_gather > 0
+                            && blk_idx > 0
+                            && (blk_idx as u32).is_multiple_of(ri_gather)
+                            && eobrun_gather > 0
+                        {
+                            emit_eobrun_freq(eobrun_gather, &mut ac_freq);
+                            eobrun_gather = 0;
+                            be = 0;
+                        }
+
                         let block: &[i16; 64] = &coeff_bufs[ci][by * stride + bx];
 
                         let mut absvals = [0u16; 64];
@@ -3286,10 +3461,16 @@ fn compress_progressive_with_scans(
                     emit_eobrun_freq(eobrun_gather, &mut ac_freq);
                 }
 
-                // Generate optimal table, write DHT + SOS
+                // Generate optimal table, write DHT + (DRI) + SOS
                 let (ac_bits, ac_values) = crate::encode::huff_opt::gen_optimal_table(&ac_freq);
                 let table_id: u8 = if ci == 0 { 0 } else { 1 };
                 marker_writer::write_dht(&mut output, 1, table_id, &ac_bits, &ac_values);
+                if restart_interval != last_ri {
+                    if restart_interval > 0 {
+                        marker_writer::write_dri(&mut output, restart_interval);
+                    }
+                    last_ri = restart_interval;
+                }
                 marker_writer::write_sos_progressive(
                     &mut output,
                     sos_slice,
@@ -3304,8 +3485,28 @@ fn compress_progressive_with_scans(
                 bit_writer.reset();
                 let mut eobrun: u32 = 0;
                 let mut corr_buffer: Vec<u8> = Vec::with_capacity(MAX_CORR_BITS);
+                let ri_ac: u32 = restart_interval as u32;
+                let mut rst_count: u8 = 0;
 
                 for blk_idx in 0..num_blocks {
+                    if ri_ac > 0 && blk_idx > 0 && (blk_idx as u32).is_multiple_of(ri_ac) {
+                        // Flush pending EOBRUN+corr, byte-pad bits, emit RST.
+                        // Per C jcphuff.c::emit_restart: clear EOBRUN AND BE
+                        // (correction-bit count) on every restart.
+                        if eobrun > 0 {
+                            emit_eobrun_with_corr(
+                                &ac_table,
+                                &mut bit_writer,
+                                &mut eobrun,
+                                &mut corr_buffer,
+                            );
+                        }
+                        bit_writer.flush_restart();
+                        bit_writer.write_restart_marker(rst_count);
+                        rst_count = (rst_count + 1) & 7;
+                        corr_buffer.clear();
+                    }
+
                     let absvals = &precomp_absvals[blk_idx];
                     let sign_bits = &precomp_signs[blk_idx];
                     let eob_pos: usize = precomp_eob[blk_idx];
@@ -4835,6 +5036,7 @@ fn encode_arith_ac_refine_scan(
 /// store-reload overhead per block. Writes directly into the output Vec,
 /// eliminating the intermediate BitWriter allocation and final extend_from_slice.
 #[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments)]
 fn encode_progressive_dc_scan(
     coeff_bufs: &[Vec<[i16; 64]>],
     comp_layouts: &[CompLayout],
@@ -4844,12 +5046,15 @@ fn encode_progressive_dc_scan(
     dc_luma_table: &HuffTable,
     dc_chroma_table: &HuffTable,
     output: &mut Vec<u8>,
+    restart_interval: u16,
 ) {
     let al: u8 = scan.al;
     let ah: u8 = scan.ah;
     let mut prev_dc: [i16; 4] = [0i16; 4];
 
-    // Reserve capacity: worst-case ~32 bits per block per component
+    // Reserve capacity: worst-case ~32 bits per block per component, plus a
+    // small per-MCU cushion that absorbs the worst-case 8-byte bit drain and
+    // 2-byte RST marker every restart_interval MCUs.
     let total_blocks: usize = scan
         .component_indices
         .iter()
@@ -4858,17 +5063,46 @@ fn encode_progressive_dc_scan(
             mcus_x * mcus_y * layout.h_blocks * layout.v_blocks
         })
         .sum();
-    let reserve: usize = total_blocks * 4 + 64;
+    let total_mcus: usize = mcus_x * mcus_y;
+    let restart_overhead: usize = if restart_interval > 0 {
+        total_mcus.div_ceil(restart_interval as usize) * 16
+    } else {
+        0
+    };
+    let reserve: usize = total_blocks * 4 + restart_overhead + 64;
     output.reserve(reserve);
+
+    let ri: u32 = restart_interval as u32;
 
     unsafe {
         let base: usize = output.len();
         let mut pb: u64 = 0;
         let mut fb: i32 = 64;
         let mut buf: *mut u8 = output.as_mut_ptr().add(base);
+        let mut mcu_count: u32 = 0;
+        let mut rst_count: u8 = 0;
 
         for mcu_y in 0..mcus_y {
             for mcu_x in 0..mcus_x {
+                if ri > 0 && mcu_count > 0 && mcu_count.is_multiple_of(ri) {
+                    // Drain partial bits with 1-padding, write RST marker.
+                    local_drain_bits(&mut pb, &mut fb, &mut buf);
+                    // Reserve room for the 2-byte marker plus next-MCU worst case.
+                    let written: usize = buf.offset_from(output.as_ptr().add(base)) as usize;
+                    if written + 80 > reserve {
+                        output.set_len(base + written);
+                        output.reserve(reserve);
+                        buf = output.as_mut_ptr().add(base + written);
+                    }
+                    *buf = 0xFF;
+                    *buf.add(1) = 0xD0 + (rst_count & 7);
+                    buf = buf.add(2);
+                    pb = 0;
+                    fb = 64;
+                    prev_dc = [0i16; 4];
+                    rst_count = (rst_count + 1) & 7;
+                }
+
                 for (scan_ci, &ci) in scan.component_indices.iter().enumerate() {
                     let layout = &comp_layouts[ci];
                     let dc_table: &HuffTable = if ci == 0 {
@@ -4930,6 +5164,7 @@ fn encode_progressive_dc_scan(
                         }
                     }
                 }
+                mcu_count = mcu_count.wrapping_add(1);
             }
         }
 
