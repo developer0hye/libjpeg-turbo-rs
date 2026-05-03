@@ -1390,11 +1390,6 @@ pub fn compress_with_restart(
     marker_writer::write_soi(&mut output);
     marker_writer::write_app0_jfif(&mut output);
 
-    // DRI marker
-    if restart_interval > 0 {
-        marker_writer::write_dri(&mut output, restart_interval);
-    }
-
     // Quantization tables
     marker_writer::write_dqt(&mut output, 0, &luma_quant);
     if !is_grayscale {
@@ -1445,6 +1440,14 @@ pub fn compress_with_restart(
             &tables::AC_CHROMINANCE_BITS,
             &tables::AC_CHROMINANCE_VALUES,
         );
+    }
+
+    // DRI marker — emitted from `write_scan_header` in C (jcmarker.c::emit_dri),
+    // i.e. right before the SOS marker, NOT in the frame header. Some viewers
+    // tolerate the earlier placement, but byte-parity with cjpeg requires the
+    // C ordering.
+    if restart_interval > 0 {
+        marker_writer::write_dri(&mut output, restart_interval);
     }
 
     // Scan header
@@ -3801,6 +3804,7 @@ pub fn compress_arithmetic(
     pixel_format: PixelFormat,
     quality: u8,
     subsampling: Subsampling,
+    dct_method: DctMethod,
 ) -> Result<Vec<u8>> {
     use crate::encode::arithmetic::ArithEncoder;
 
@@ -3830,12 +3834,24 @@ pub fn compress_arithmetic(
 
     let enc_simd = crate::simd::detect_encoder();
 
-    // Generate quantization tables
+    // Generate quantization tables. ifast pre-applies AA&N scaling so its
+    // divisors fold the AA&N constants in (paired with `fdct_ifast_raw`);
+    // islow/float keep the simple `quant * 8` divisors. Float routes the
+    // per-coefficient `1 / (q · aan_row · aan_col · 8)` value through
+    // `QuantDivisors::float_divisors`.
     let luma_quant = tables::quality_scale_quant_table(&tables::STD_LUMINANCE_QUANT_TABLE, quality);
     let chroma_quant =
         tables::quality_scale_quant_table(&tables::STD_CHROMINANCE_QUANT_TABLE, quality);
-    let luma_divisors = scale_quant_for_fdct(&luma_quant);
-    let chroma_divisors = scale_quant_for_fdct(&chroma_quant);
+    let luma_divisors = if dct_method == DctMethod::IsFast {
+        scale_quant_for_ifast(&luma_quant)
+    } else {
+        scale_quant_for_fdct(&luma_quant)
+    };
+    let chroma_divisors = if dct_method == DctMethod::IsFast {
+        scale_quant_for_ifast(&chroma_quant)
+    } else {
+        scale_quant_for_fdct(&chroma_quant)
+    };
 
     // MCU dimensions
     let (mcu_w, mcu_h) = if is_grayscale {
@@ -3879,8 +3895,15 @@ pub fn compress_arithmetic(
     let y_width_in_blocks: usize = original_width.div_ceil(8);
     let y_height_in_blocks: usize = original_height.div_ceil(8);
 
-    // FDCT + quantize all blocks
-    let fdct_quantize_fn = crate::simd::detect_encoder().fdct_quantize;
+    // FDCT + quantize all blocks. Dispatch on dct_method so `gather_block`
+    // routes through the matching scalar routine instead of always running
+    // the SIMD islow kernel internally — see the `is_ifast`/`is_float`
+    // pointer-compare bypass at the top of `gather_block`.
+    let fdct_quantize_fn: fn(&mut [i16; 64], &QuantDivisors, &mut [i16; 64]) = match dct_method {
+        DctMethod::IsLow => enc_simd.fdct_quantize,
+        DctMethod::IsFast => crate::simd::scalar::scalar_fdct_ifast_quantize,
+        DctMethod::Float => crate::simd::scalar::scalar_fdct_float_quantize,
+    };
     let mut all_blocks: Vec<[i16; 64]> = Vec::new();
     let mut prev_dc_y_gather: i16 = 0;
 
@@ -4281,6 +4304,7 @@ pub fn compress_arithmetic_progressive(
     pixel_format: PixelFormat,
     quality: u8,
     subsampling: Subsampling,
+    dct_method: DctMethod,
 ) -> Result<Vec<u8>> {
     use crate::encode::arithmetic::ArithEncoder;
     use crate::encode::progressive::simple_progression;
@@ -4315,8 +4339,16 @@ pub fn compress_arithmetic_progressive(
         tables::quality_scale_quant_table(&tables::STD_LUMINANCE_QUANT_TABLE, quality);
     let chroma_quant: [u16; 64] =
         tables::quality_scale_quant_table(&tables::STD_CHROMINANCE_QUANT_TABLE, quality);
-    let luma_divisors: QuantDivisors = scale_quant_for_fdct(&luma_quant);
-    let chroma_divisors: QuantDivisors = scale_quant_for_fdct(&chroma_quant);
+    let luma_divisors: QuantDivisors = if dct_method == DctMethod::IsFast {
+        scale_quant_for_ifast(&luma_quant)
+    } else {
+        scale_quant_for_fdct(&luma_quant)
+    };
+    let chroma_divisors: QuantDivisors = if dct_method == DctMethod::IsFast {
+        scale_quant_for_ifast(&chroma_quant)
+    } else {
+        scale_quant_for_fdct(&chroma_quant)
+    };
 
     let (y_plane, cb_plane, cr_plane) = convert_to_ycbcr(
         pixels,
@@ -4397,9 +4429,41 @@ pub fn compress_arithmetic_progressive(
     // arithmetic conditioning bucket and breaks byte-parity with cjpeg for
     // any subsampled MCU (samp422/420/440/411/441/410/24) on images whose
     // dimensions don't divide evenly by the MCU stride.
-    let fdct_quantize_fn = crate::simd::detect_encoder().fdct_quantize;
+    // Dispatch on dct_method so the in-place FDCT routes through the matching
+    // scalar routine for IFAST/Float (instead of always running the SIMD islow
+    // kernel). Same pattern as compress_arithmetic / compress_optimized.
+    let fdct_quantize_fn: fn(&mut [i16; 64], &QuantDivisors, &mut [i16; 64]) = match dct_method {
+        DctMethod::IsLow => enc_simd.fdct_quantize,
+        DctMethod::IsFast => crate::simd::scalar::scalar_fdct_ifast_quantize,
+        DctMethod::Float => crate::simd::scalar::scalar_fdct_float_quantize,
+    };
     let y_width_in_blocks: usize = width.div_ceil(8);
     let y_height_in_blocks: usize = height.div_ceil(8);
+    // Per-component actual block counts (`width_in_blocks * height_in_blocks`
+    // in the libjpeg-turbo sense). Non-interleaved AC scans iterate this
+    // count, NOT the MCU-padded `comp_layouts[*].blocks_x * blocks_y`.
+    // Including the right/bottom dummy blocks in a single-component scan
+    // makes the encoder run extra "EOB at start" emissions that cjpeg never
+    // emits, so the entropy stream length and any downstream adaptive bin
+    // state diverge from C output.
+    let comp_wib: Vec<usize> = if is_grayscale {
+        vec![width.div_ceil(8)]
+    } else {
+        vec![
+            width.div_ceil(8),
+            width.div_ceil(h_samp * 8),
+            width.div_ceil(h_samp * 8),
+        ]
+    };
+    let comp_hib: Vec<usize> = if is_grayscale {
+        vec![height.div_ceil(8)]
+    } else {
+        vec![
+            height.div_ceil(8),
+            height.div_ceil(v_samp * 8),
+            height.div_ceil(v_samp * 8),
+        ]
+    };
     let mut prev_dc_y_gather: i16 = 0;
     for mcu_y in 0..mcus_y {
         for mcu_x in 0..mcus_x {
@@ -4619,9 +4683,9 @@ pub fn compress_arithmetic_progressive(
             encode_arith_ac_first_scan(
                 &coeff_bufs,
                 &comp_layouts,
+                &comp_wib,
+                &comp_hib,
                 scan,
-                mcus_x,
-                mcus_y,
                 &mut arith_enc,
             );
         } else {
@@ -4629,9 +4693,9 @@ pub fn compress_arithmetic_progressive(
             encode_arith_ac_refine_scan(
                 &coeff_bufs,
                 &comp_layouts,
+                &comp_wib,
+                &comp_hib,
                 scan,
-                mcus_x,
-                mcus_y,
                 &mut arith_enc,
             );
         }
@@ -4707,57 +4771,60 @@ fn encode_arith_dc_refine_scan(
 }
 
 /// Encode arithmetic AC first scan (Ah=0, single component).
+///
+/// Iterates the component's raster blocks (`width_in_blocks * height_in_blocks`)
+/// rather than MCU-padded `blocks_x * blocks_y`. C `jccoefct.c::start_iMCU_row`
+/// drops MCU-multi-block layout for non-interleaved scans (`comps_in_scan == 1`)
+/// — each "MCU" is a single block, and `MCUs_per_row` equals the component's
+/// `width_in_blocks` rather than `MCUs_per_row(image)`. Iterating the padded
+/// `blocks_x` would re-encode the right-edge dummy fillers (which have AC=0)
+/// as extra "EOB at start" emissions cjpeg never produces, drifting the
+/// arithmetic coder state and breaking byte-parity.
 fn encode_arith_ac_first_scan(
     coeff_bufs: &[Vec<[i16; 64]>],
     comp_layouts: &[CompLayout],
+    comp_wib: &[usize],
+    comp_hib: &[usize],
     scan: &crate::encode::progressive::ProgressiveScan,
-    mcus_x: usize,
-    mcus_y: usize,
     arith_enc: &mut crate::encode::arithmetic::ArithEncoder,
 ) {
     let ci: usize = scan.component_indices[0]; // AC scans are single-component
     let layout: &CompLayout = &comp_layouts[ci];
     let ac_tbl: usize = if ci == 0 { 0 } else { 1 };
+    let wib: usize = comp_wib[ci];
+    let hib: usize = comp_hib[ci];
+    let stride: usize = layout.blocks_x;
 
-    for mcu_y in 0..mcus_y {
-        for mcu_x in 0..mcus_x {
-            for bv in 0..layout.v_blocks {
-                for bh in 0..layout.h_blocks {
-                    let bx: usize = mcu_x * layout.h_blocks + bh;
-                    let by: usize = mcu_y * layout.v_blocks + bv;
-                    let block: &[i16; 64] = &coeff_bufs[ci][by * layout.blocks_x + bx];
-
-                    arith_enc.encode_ac_first(block, ac_tbl, scan.ss, scan.se, scan.al);
-                }
-            }
+    for by in 0..hib {
+        for bx in 0..wib {
+            let block: &[i16; 64] = &coeff_bufs[ci][by * stride + bx];
+            arith_enc.encode_ac_first(block, ac_tbl, scan.ss, scan.se, scan.al);
         }
     }
 }
 
 /// Encode arithmetic AC refine scan (Ah!=0, single component).
+///
+/// Same raster iteration as `encode_arith_ac_first_scan` — see that comment.
 fn encode_arith_ac_refine_scan(
     coeff_bufs: &[Vec<[i16; 64]>],
     comp_layouts: &[CompLayout],
+    comp_wib: &[usize],
+    comp_hib: &[usize],
     scan: &crate::encode::progressive::ProgressiveScan,
-    mcus_x: usize,
-    mcus_y: usize,
     arith_enc: &mut crate::encode::arithmetic::ArithEncoder,
 ) {
     let ci: usize = scan.component_indices[0]; // AC scans are single-component
     let layout: &CompLayout = &comp_layouts[ci];
     let ac_tbl: usize = if ci == 0 { 0 } else { 1 };
+    let wib: usize = comp_wib[ci];
+    let hib: usize = comp_hib[ci];
+    let stride: usize = layout.blocks_x;
 
-    for mcu_y in 0..mcus_y {
-        for mcu_x in 0..mcus_x {
-            for bv in 0..layout.v_blocks {
-                for bh in 0..layout.h_blocks {
-                    let bx: usize = mcu_x * layout.h_blocks + bh;
-                    let by: usize = mcu_y * layout.v_blocks + bv;
-                    let block: &[i16; 64] = &coeff_bufs[ci][by * layout.blocks_x + bx];
-
-                    arith_enc.encode_ac_refine(block, ac_tbl, scan.ss, scan.se, scan.al, scan.ah);
-                }
-            }
+    for by in 0..hib {
+        for bx in 0..wib {
+            let block: &[i16; 64] = &coeff_bufs[ci][by * stride + bx];
+            arith_enc.encode_ac_refine(block, ac_tbl, scan.ss, scan.se, scan.al, scan.ah);
         }
     }
 }
@@ -5435,7 +5502,8 @@ fn compute_float_divisors(quant_table: &[u16; 64]) -> [f32; 64] {
     for row in 0..8 {
         for col in 0..8 {
             let i: usize = row * 8 + col;
-            let denom: f64 = quant_table[i] as f64 * AANSCALEFACTOR[row] * AANSCALEFACTOR[col] * 8.0;
+            let denom: f64 =
+                quant_table[i] as f64 * AANSCALEFACTOR[row] * AANSCALEFACTOR[col] * 8.0;
             out[i] = (1.0 / denom) as f32;
         }
     }

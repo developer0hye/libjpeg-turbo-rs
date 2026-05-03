@@ -461,13 +461,30 @@ impl ArithEncoder {
         self.dc_context = [0; 4];
         self.dc_stats = [[0; DC_STAT_BINS]; NUM_ARITH_TBLS];
         self.ac_stats = [[0; AC_STAT_BINS]; NUM_ARITH_TBLS];
-        self.fixed_bin = [113, 0, 0, 0];
+        // C `jcarith.c::emit_restart` does not re-init `fixed_bin`; the
+        // sign-bit adaptive bin survives the restart marker.
     }
 
     /// Reset encoder state for a new scan, keeping output buffer.
     ///
     /// Clears arithmetic coding state, DC prediction, and statistics
     /// so the encoder is ready for a fresh progressive scan.
+    ///
+    /// Mirrors C `jcarith.c::start_pass`: arithmetic coder vars (c, a,
+    /// ct, sc, zc, buffer) reset; per-component dc_stats / last_dc_val /
+    /// dc_context reset only on DC initial scan; ac_stats reset only on
+    /// AC scans. Sequential or non-progressive callers should reset
+    /// everything (which we do here for simplicity — the test matrix
+    /// doesn't exercise the per-scan-conditional partial reset since we
+    /// always allocate one fresh `ArithEncoder` per image).
+    ///
+    /// Note: `fixed_bin` is **not** reset here. C `jinit_arith_encoder`
+    /// sets `fixed_bin[0] = 113` once per image and never re-initializes
+    /// it in `start_pass` / `emit_restart`, so the bin's adaptation
+    /// state carries across scans. Resetting it would re-randomize the
+    /// sign-bit predictor at every scan boundary and break byte-parity
+    /// with `cjpeg -arithmetic -progressive` for any image whose AC
+    /// scans land in the second progressive scan or later.
     pub fn reset(&mut self) {
         self.c = 0;
         self.a = 0x10000;
@@ -480,7 +497,7 @@ impl ArithEncoder {
         self.dc_context = [0; 4];
         self.dc_stats = [[0; DC_STAT_BINS]; NUM_ARITH_TBLS];
         self.ac_stats = [[0; AC_STAT_BINS]; NUM_ARITH_TBLS];
-        self.fixed_bin = [113, 0, 0, 0];
+        // Deliberately NOT touching self.fixed_bin — see doc above.
     }
 
     /// Encode DC coefficient for first progressive scan (DC first, Ah=0).
