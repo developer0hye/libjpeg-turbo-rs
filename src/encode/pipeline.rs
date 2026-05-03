@@ -4013,6 +4013,7 @@ fn gather_progressive_ac_refine_freq(
 /// Compress with arithmetic entropy coding (SOF9).
 ///
 /// Uses the QM-coder binary arithmetic encoder instead of Huffman coding.
+#[allow(clippy::too_many_arguments)]
 pub fn compress_arithmetic(
     pixels: &[u8],
     width: usize,
@@ -4021,6 +4022,7 @@ pub fn compress_arithmetic(
     quality: u8,
     subsampling: Subsampling,
     dct_method: DctMethod,
+    restart_interval: u16,
 ) -> Result<Vec<u8>> {
     use crate::encode::arithmetic::ArithEncoder;
 
@@ -4417,9 +4419,19 @@ pub fn compress_arithmetic(
     // Arithmetic encode all blocks
     let mut arith_enc = ArithEncoder::new(width * height);
     let mut block_idx = 0;
+    let ri_arith: u32 = restart_interval as u32;
+    let mut mcu_count_arith: u32 = 0;
+    let mut rst_count_arith: u8 = 0;
 
     for _mcu_row in 0..mcus_y {
         for _mcu_col in 0..mcus_x {
+            if ri_arith > 0 && mcu_count_arith > 0 && mcu_count_arith.is_multiple_of(ri_arith) {
+                // ArithEncoder::emit_restart finishes the coder, writes
+                // FF/RST0+n, then re-inits coder + DC/AC stats per
+                // jcarith.c::emit_restart.
+                arith_enc.emit_restart(rst_count_arith);
+                rst_count_arith = (rst_count_arith + 1) & 7;
+            }
             if is_grayscale {
                 arith_enc.encode_dc_sequential(&all_blocks[block_idx], 0, 0);
                 arith_enc.encode_ac_sequential(&all_blocks[block_idx], 0);
@@ -4447,6 +4459,7 @@ pub fn compress_arithmetic(
                 arith_enc.encode_ac_sequential(&all_blocks[block_idx], 1);
                 block_idx += 1;
             }
+            mcu_count_arith = mcu_count_arith.wrapping_add(1);
         }
     }
 
@@ -4490,6 +4503,12 @@ pub fn compress_arithmetic(
     let num_dc = if is_grayscale { 1 } else { 2 };
     let num_ac = if is_grayscale { 1 } else { 2 };
     marker_writer::write_dac(&mut output, num_dc, &dc_params, num_ac, &ac_params);
+
+    // DRI marker — emitted from `write_scan_header` in C
+    // (jcmarker.c::emit_dri), i.e. between DAC and SOS.
+    if restart_interval > 0 {
+        marker_writer::write_dri(&mut output, restart_interval);
+    }
 
     // SOS
     if is_grayscale {
