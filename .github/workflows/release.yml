@@ -2,7 +2,12 @@ name: Release
 
 on:
   push:
-    tags: ['v*']
+    # `v*`     — bumps the root crate; runs both crates.io and npm jobs.
+    # `wasm-v*` — bumps only the WASM crate; the crates.io job is skipped
+    #            and only the npm publish runs. This lets the WASM
+    #            bindings ship fresh fixes without forcing a no-op patch
+    #            release of the root crate when no Rust code changed.
+    tags: ['v*', 'wasm-v*']
   release:
     types: [published]
 
@@ -10,6 +15,10 @@ jobs:
   publish:
     name: Publish to crates.io
     runs-on: ubuntu-latest
+    # Skip the crates.io publish on WASM-only tag releases. The root
+    # crate version hasn't changed in those, so `cargo publish` would
+    # only emit the "already published" warning and add CI noise.
+    if: ${{ !startsWith(github.ref, 'refs/tags/wasm-v') }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -25,6 +34,10 @@ jobs:
     name: Publish to npm
     runs-on: ubuntu-latest
     needs: publish
+    # `needs: publish` would block this job when the publish job is
+    # skipped (WASM-only tag release). Override to run as long as
+    # publish either succeeded or was deliberately skipped via its `if`.
+    if: ${{ always() && (needs.publish.result == 'success' || needs.publish.result == 'skipped') }}
     steps:
       - uses: actions/checkout@v4
         with:
