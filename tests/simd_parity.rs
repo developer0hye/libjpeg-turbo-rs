@@ -164,6 +164,11 @@ fn build_quant_divisors(natural_quant: [u16; 64]) -> QuantDivisors {
         corrections_zigzag,
         shifts_zigzag,
         scales_zigzag,
+        // Float-DCT divisors are unused on the islow paths exercised here;
+        // leave as zero so the struct is well-formed without changing
+        // observed behaviour.
+        float_divisors: [0.0; 64],
+        float_divisors_zigzag: [0.0; 64],
     }
 }
 
