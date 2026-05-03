@@ -921,6 +921,7 @@ impl<'a> Encoder<'a> {
                 effective_subsampling,
                 self.smoothing_factor,
                 self.dct_method,
+                restart_interval,
             )?
         } else if self.has_custom_huffman_tables() {
             encoder::compress_custom_huffman(
@@ -953,6 +954,7 @@ impl<'a> Encoder<'a> {
                 quality,
                 effective_subsampling,
                 restart_interval,
+                self.dct_method,
             )?
         } else if self.smoothing_factor > 0 {
             // Smoothing requires full-plane buffering, only available in the
@@ -966,6 +968,7 @@ impl<'a> Encoder<'a> {
                 effective_subsampling,
                 self.smoothing_factor,
                 self.dct_method,
+                restart_interval,
             )?
         } else {
             encoder::compress(

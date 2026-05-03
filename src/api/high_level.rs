@@ -125,6 +125,7 @@ pub fn compress_optimized(
         subsampling,
         0,
         crate::common::types::DctMethod::IsLow,
+        0,
     )
 }
 
