@@ -261,6 +261,8 @@ pub fn compress_arithmetic_progressive(
         quality,
         subsampling,
         DctMethod::IsLow,
+        0,
+        0,
     )
 }
 
