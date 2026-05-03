@@ -259,6 +259,7 @@ pub fn compress_arithmetic_progressive(
         pixel_format,
         quality,
         subsampling,
+        DctMethod::IsLow,
     )
 }
 
@@ -328,5 +329,13 @@ pub fn compress_arithmetic(
     quality: u8,
     subsampling: Subsampling,
 ) -> Result<Vec<u8>> {
-    encoder::compress_arithmetic(pixels, width, height, pixel_format, quality, subsampling)
+    encoder::compress_arithmetic(
+        pixels,
+        width,
+        height,
+        pixel_format,
+        quality,
+        subsampling,
+        DctMethod::IsLow,
+    )
 }

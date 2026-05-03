@@ -83,14 +83,22 @@ fn run_lossy_combo(
 
     let icc_data: Option<Vec<u8>> = icc_path.map(|p| helpers::read_icc_profile(p));
 
-    // cjpeg restart arg fragment
+    // cjpeg restart arg fragment.
+    //
+    // cjpeg semantics (see references/libjpeg-turbo/src/cjpeg.c "restart"):
+    //   -r N    → restart_in_rows = N      (every N MCU rows)
+    //   -r Nb   → restart_interval = N     (every N MCUs / blocks)
+    // Mirror that mapping here so a `restart_blocks: Some(n)` argument means
+    // "restart every n MCUs" on BOTH the C and Rust side. The previous
+    // mapping was flipped, which silently passed for the no-restart cases
+    // and broke once the r1icc/r1b matrix entries were exercised.
     let mut cjpeg_restart_args: Vec<String> = Vec::new();
     if let Some(n) = restart_blocks {
         cjpeg_restart_args.push("-r".to_string());
-        cjpeg_restart_args.push(n.to_string());
+        cjpeg_restart_args.push(format!("{}b", n));
     } else if let Some(n) = restart_rows {
         cjpeg_restart_args.push("-r".to_string());
-        cjpeg_restart_args.push(format!("{}b", n));
+        cjpeg_restart_args.push(n.to_string());
     }
 
     // cjpeg ICC arg
@@ -639,15 +647,18 @@ fn c_tjcomptest_lossy_full() {
                 icc: None,
                 tag: "r0",
             },
+            // tjcomptest.in restartarg matrix: "" "-r 1 -icc <path>" "-r 1b".
+            //   -r 1   = restart every 1 MCU row     → restart_rows: Some(1)
+            //   -r 1b  = restart every 1 MCU (block) → restart_blocks: Some(1)
             RestartCase {
-                restart_blocks: Some(1),
-                restart_rows: None,
+                restart_blocks: None,
+                restart_rows: Some(1),
                 icc: Some(icc_path_ref),
                 tag: "r1icc",
             },
             RestartCase {
-                restart_blocks: None,
-                restart_rows: Some(1),
+                restart_blocks: Some(1),
+                restart_rows: None,
                 icc: None,
                 tag: "r1b",
             },

@@ -389,7 +389,16 @@ impl<'a> Encoder<'a> {
         self
     }
 
-    fn compute_restart_interval(&self) -> u16 {
+    /// Compute the restart interval in MCUs.
+    ///
+    /// `effective_subsampling` is the subsampling actually used by the
+    /// encode pipeline — typically `self.subsampling`, but when the caller
+    /// provided `sampling_factors([(h,v),(1,1),(1,1)])` instead it is the
+    /// `Subsampling` variant the factors map to (see `mapped_subsampling`).
+    /// `restart_rows(n)` translates to `n * MCUs_per_row`, and the number
+    /// of MCUs per row depends on the MCU width — which depends on the
+    /// effective subsampling, NOT on the field default.
+    fn compute_restart_interval(&self, effective_subsampling: Subsampling) -> u16 {
         match self.restart_interval {
             None => 0,
             Some(RestartConfig::Blocks(n)) => n,
@@ -400,7 +409,7 @@ impl<'a> Encoder<'a> {
                 } else if self.pixel_format == PixelFormat::Grayscale {
                     8
                 } else {
-                    match self.subsampling {
+                    match effective_subsampling {
                         Subsampling::S444
                         | Subsampling::S440
                         | Subsampling::S441
@@ -662,8 +671,6 @@ impl<'a> Encoder<'a> {
 
     /// Encode and return the JPEG byte stream.
     pub fn encode(&self) -> Result<Vec<u8>> {
-        let restart_interval = self.compute_restart_interval();
-
         let flipped_buf: Vec<u8>;
         let input_pixels: &[u8] = if self.bottom_up {
             flipped_buf = Self::flip_rows(
@@ -791,10 +798,8 @@ impl<'a> Encoder<'a> {
         // c_tjcomptest_lossy_full byte-parity at samp410 / samp24 (the only
         // standard JPEG subsamplings without dedicated `subsampling()` API
         // sugar).
-        let mapped_subsampling: Option<Subsampling> = self
-            .custom_sampling_factors
-            .as_deref()
-            .and_then(|f| {
+        let mapped_subsampling: Option<Subsampling> =
+            self.custom_sampling_factors.as_deref().and_then(|f| {
                 if f.len() != 3 || f[1] != (1, 1) || f[2] != (1, 1) {
                     return None;
                 }
@@ -812,8 +817,13 @@ impl<'a> Encoder<'a> {
             });
         let use_custom_sampling: bool =
             self.custom_sampling_factors.is_some() && mapped_subsampling.is_none();
-        let effective_subsampling: Subsampling =
-            mapped_subsampling.unwrap_or(self.subsampling);
+        let effective_subsampling: Subsampling = mapped_subsampling.unwrap_or(self.subsampling);
+        // restart_interval depends on the *effective* MCU width, which can
+        // differ from `self.subsampling` when the caller used
+        // `sampling_factors([(h,v),(1,1),(1,1)])` instead of `subsampling()`.
+        // Compute it after the mapping so e.g. samp410 (4x2) lands on
+        // mcu_w=32, not the default S420 mcu_w=16.
+        let restart_interval: u16 = self.compute_restart_interval(effective_subsampling);
 
         let base = if use_custom_sampling {
             let factors: &Vec<(u8, u8)> = self.custom_sampling_factors.as_ref().unwrap();
@@ -852,6 +862,7 @@ impl<'a> Encoder<'a> {
                 effective_format,
                 quality,
                 effective_subsampling,
+                self.dct_method,
             )?
         } else if self.arithmetic {
             encoder::compress_arithmetic(
@@ -861,6 +872,7 @@ impl<'a> Encoder<'a> {
                 effective_format,
                 quality,
                 effective_subsampling,
+                self.dct_method,
             )?
         } else if self.progressive {
             if let Some(ref script) = self.scan_script {
