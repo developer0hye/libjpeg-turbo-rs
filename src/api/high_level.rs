@@ -338,5 +338,6 @@ pub fn compress_arithmetic(
         quality,
         subsampling,
         DctMethod::IsLow,
+        0,
     )
 }

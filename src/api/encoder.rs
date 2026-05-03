@@ -883,6 +883,7 @@ impl<'a> Encoder<'a> {
                 quality,
                 effective_subsampling,
                 self.dct_method,
+                restart_interval,
             )?
         } else if self.progressive {
             if let Some(ref script) = self.scan_script {
