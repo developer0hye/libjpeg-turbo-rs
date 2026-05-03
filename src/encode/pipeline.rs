@@ -4532,6 +4532,7 @@ pub fn compress_arithmetic(
 /// Combines progressive multi-scan encoding with arithmetic entropy coding.
 /// Buffers all DCT coefficients, then encodes across multiple scans using
 /// a standard scan progression script with ArithEncoder.
+#[allow(clippy::too_many_arguments)]
 pub fn compress_arithmetic_progressive(
     pixels: &[u8],
     width: usize,
@@ -4540,6 +4541,8 @@ pub fn compress_arithmetic_progressive(
     quality: u8,
     subsampling: Subsampling,
     dct_method: DctMethod,
+    restart_interval: u16,
+    restart_in_rows: u16,
 ) -> Result<Vec<u8>> {
     use crate::encode::arithmetic::ArithEncoder;
     use crate::encode::progressive::simple_progression;
@@ -4832,10 +4835,31 @@ pub fn compress_arithmetic_progressive(
 
     // Encode each scan with arithmetic coding
     let mut arith_enc: ArithEncoder = ArithEncoder::new(width * height / 4);
+    // Track last-emitted DRI to suppress redundant markers when the per-scan
+    // restart_interval doesn't change — matches `jcmarker.c::write_scan_header`.
+    let mut last_ri: u16 = 0;
 
     for scan in &scans {
         // Reset encoder state for each scan
         arith_enc.reset();
+
+        // Per-scan restart_interval: when `restart_in_rows` is set, derive
+        // it from this scan's MCUs_per_row. Interleaved DC scans use the
+        // iMCU width (mcus_x); non-interleaved AC scans (single component)
+        // use that component's width_in_blocks. Otherwise inherit the
+        // user-provided MCU count unchanged.
+        let scan_ri: u16 = if restart_in_rows > 0 {
+            let mcus_per_row: usize = if scan.component_indices.len() > 1 {
+                mcus_x
+            } else {
+                comp_wib[scan.component_indices[0]]
+            };
+            (restart_in_rows as usize)
+                .saturating_mul(mcus_per_row)
+                .min(65535) as u16
+        } else {
+            restart_interval
+        };
 
         // Build SOS component list.
         // Per JPEG spec: DC-only scans (Ss=0) set Ta=0, AC-only scans (Ss>0) set Td=0.
@@ -4880,6 +4904,13 @@ pub fn compress_arithmetic_progressive(
             &ac_params_full,
         );
 
+        if scan_ri != last_ri {
+            if scan_ri > 0 {
+                marker_writer::write_dri(&mut output, scan_ri);
+            }
+            last_ri = scan_ri;
+        }
+
         marker_writer::write_sos_progressive(
             &mut output,
             &sos_comps,
@@ -4901,6 +4932,7 @@ pub fn compress_arithmetic_progressive(
                     mcus_x,
                     mcus_y,
                     &mut arith_enc,
+                    scan_ri,
                 );
             } else {
                 // DC refine scan
@@ -4911,6 +4943,7 @@ pub fn compress_arithmetic_progressive(
                     mcus_x,
                     mcus_y,
                     &mut arith_enc,
+                    scan_ri,
                 );
             }
         } else if scan.ah == 0 {
@@ -4922,6 +4955,7 @@ pub fn compress_arithmetic_progressive(
                 &comp_hib,
                 scan,
                 &mut arith_enc,
+                scan_ri,
             );
         } else {
             // AC refine scan
@@ -4932,6 +4966,7 @@ pub fn compress_arithmetic_progressive(
                 &comp_hib,
                 scan,
                 &mut arith_enc,
+                scan_ri,
             );
         }
 
@@ -4945,6 +4980,7 @@ pub fn compress_arithmetic_progressive(
 }
 
 /// Encode arithmetic DC first scan (Ah=0) across all MCUs.
+#[allow(clippy::too_many_arguments)]
 fn encode_arith_dc_first_scan(
     coeff_bufs: &[Vec<[i16; 64]>],
     comp_layouts: &[CompLayout],
@@ -4952,11 +4988,19 @@ fn encode_arith_dc_first_scan(
     mcus_x: usize,
     mcus_y: usize,
     arith_enc: &mut crate::encode::arithmetic::ArithEncoder,
+    restart_interval: u16,
 ) {
     let al: u8 = scan.al;
+    let ri: u32 = restart_interval as u32;
+    let mut mcu_count: u32 = 0;
+    let mut rst_count: u8 = 0;
 
     for mcu_y in 0..mcus_y {
         for mcu_x in 0..mcus_x {
+            if ri > 0 && mcu_count > 0 && mcu_count.is_multiple_of(ri) {
+                arith_enc.emit_restart(rst_count);
+                rst_count = (rst_count + 1) & 7;
+            }
             for &ci in &scan.component_indices {
                 let layout: &CompLayout = &comp_layouts[ci];
                 let dc_tbl: usize = if ci == 0 { 0 } else { 1 };
@@ -4971,11 +5015,13 @@ fn encode_arith_dc_first_scan(
                     }
                 }
             }
+            mcu_count = mcu_count.wrapping_add(1);
         }
     }
 }
 
 /// Encode arithmetic DC refine scan (Ah!=0) across all MCUs.
+#[allow(clippy::too_many_arguments)]
 fn encode_arith_dc_refine_scan(
     coeff_bufs: &[Vec<[i16; 64]>],
     comp_layouts: &[CompLayout],
@@ -4983,11 +5029,19 @@ fn encode_arith_dc_refine_scan(
     mcus_x: usize,
     mcus_y: usize,
     arith_enc: &mut crate::encode::arithmetic::ArithEncoder,
+    restart_interval: u16,
 ) {
     let al: u8 = scan.al;
+    let ri: u32 = restart_interval as u32;
+    let mut mcu_count: u32 = 0;
+    let mut rst_count: u8 = 0;
 
     for mcu_y in 0..mcus_y {
         for mcu_x in 0..mcus_x {
+            if ri > 0 && mcu_count > 0 && mcu_count.is_multiple_of(ri) {
+                arith_enc.emit_restart(rst_count);
+                rst_count = (rst_count + 1) & 7;
+            }
             for &ci in &scan.component_indices {
                 let layout: &CompLayout = &comp_layouts[ci];
 
@@ -5001,6 +5055,7 @@ fn encode_arith_dc_refine_scan(
                     }
                 }
             }
+            mcu_count = mcu_count.wrapping_add(1);
         }
     }
 }
@@ -5015,6 +5070,7 @@ fn encode_arith_dc_refine_scan(
 /// `blocks_x` would re-encode the right-edge dummy fillers (which have AC=0)
 /// as extra "EOB at start" emissions cjpeg never produces, drifting the
 /// arithmetic coder state and breaking byte-parity.
+#[allow(clippy::too_many_arguments)]
 fn encode_arith_ac_first_scan(
     coeff_bufs: &[Vec<[i16; 64]>],
     comp_layouts: &[CompLayout],
@@ -5022,6 +5078,7 @@ fn encode_arith_ac_first_scan(
     comp_hib: &[usize],
     scan: &crate::encode::progressive::ProgressiveScan,
     arith_enc: &mut crate::encode::arithmetic::ArithEncoder,
+    restart_interval: u16,
 ) {
     let ci: usize = scan.component_indices[0]; // AC scans are single-component
     let layout: &CompLayout = &comp_layouts[ci];
@@ -5029,11 +5086,19 @@ fn encode_arith_ac_first_scan(
     let wib: usize = comp_wib[ci];
     let hib: usize = comp_hib[ci];
     let stride: usize = layout.blocks_x;
+    let ri: u32 = restart_interval as u32;
+    let mut mcu_count: u32 = 0;
+    let mut rst_count: u8 = 0;
 
     for by in 0..hib {
         for bx in 0..wib {
+            if ri > 0 && mcu_count > 0 && mcu_count.is_multiple_of(ri) {
+                arith_enc.emit_restart(rst_count);
+                rst_count = (rst_count + 1) & 7;
+            }
             let block: &[i16; 64] = &coeff_bufs[ci][by * stride + bx];
             arith_enc.encode_ac_first(block, ac_tbl, scan.ss, scan.se, scan.al);
+            mcu_count = mcu_count.wrapping_add(1);
         }
     }
 }
@@ -5041,6 +5106,7 @@ fn encode_arith_ac_first_scan(
 /// Encode arithmetic AC refine scan (Ah!=0, single component).
 ///
 /// Same raster iteration as `encode_arith_ac_first_scan` — see that comment.
+#[allow(clippy::too_many_arguments)]
 fn encode_arith_ac_refine_scan(
     coeff_bufs: &[Vec<[i16; 64]>],
     comp_layouts: &[CompLayout],
@@ -5048,6 +5114,7 @@ fn encode_arith_ac_refine_scan(
     comp_hib: &[usize],
     scan: &crate::encode::progressive::ProgressiveScan,
     arith_enc: &mut crate::encode::arithmetic::ArithEncoder,
+    restart_interval: u16,
 ) {
     let ci: usize = scan.component_indices[0]; // AC scans are single-component
     let layout: &CompLayout = &comp_layouts[ci];
@@ -5055,11 +5122,19 @@ fn encode_arith_ac_refine_scan(
     let wib: usize = comp_wib[ci];
     let hib: usize = comp_hib[ci];
     let stride: usize = layout.blocks_x;
+    let ri: u32 = restart_interval as u32;
+    let mut mcu_count: u32 = 0;
+    let mut rst_count: u8 = 0;
 
     for by in 0..hib {
         for bx in 0..wib {
+            if ri > 0 && mcu_count > 0 && mcu_count.is_multiple_of(ri) {
+                arith_enc.emit_restart(rst_count);
+                rst_count = (rst_count + 1) & 7;
+            }
             let block: &[i16; 64] = &coeff_bufs[ci][by * stride + bx];
             arith_enc.encode_ac_refine(block, ac_tbl, scan.ss, scan.se, scan.al, scan.ah);
+            mcu_count = mcu_count.wrapping_add(1);
         }
     }
 }

@@ -873,6 +873,8 @@ impl<'a> Encoder<'a> {
                 quality,
                 effective_subsampling,
                 self.dct_method,
+                restart_interval,
+                restart_in_rows,
             )?
         } else if self.arithmetic {
             encoder::compress_arithmetic(
