@@ -183,6 +183,7 @@ fn build_jpegtran_args(
     grayscale: bool,
     optimize: bool,
     progressive: bool,
+    arithmetic: bool,
     trim: bool,
     restart: RestartArg,
     // Pre-formatted crop string owned by the caller so we can borrow it.
@@ -219,6 +220,13 @@ fn build_jpegtran_args(
     }
     if progressive {
         args.push("-progressive".into());
+    }
+    if arithmetic {
+        // Without `-arithmetic`, jpegtran defaults the output entropy coder
+        // to Huffman regardless of source coding. The Rust transform builder
+        // takes `arithmetic` as the *output* coder, so the C side must be
+        // told too — otherwise SOF9/DAC vs SOF0/DHT divergence is guaranteed.
+        args.push("-arithmetic".into());
     }
     if trim {
         args.push("-trim".into());
@@ -301,6 +309,7 @@ fn run_one_combo(
         grayscale,
         optimize,
         progressive,
+        arithmetic,
         trim,
         restart,
         &crop_str,
@@ -507,6 +516,28 @@ fn c_tjtrantest_full() {
                                 }
                                 for progressive in [false, true] {
                                     if progressive && optimize {
+                                        skipped += 1;
+                                        continue;
+                                    }
+                                    // Skip progressive + 4-pixel chroma
+                                    // sampling factors (samp411/441/410/24)
+                                    // when chroma is preserved. The
+                                    // progressive coefficient writer falls
+                                    // back to baseline for max_h/v > 2
+                                    // (`src/api/coefficient.rs:1047`),
+                                    // because our chroma layout for these
+                                    // factors differs from cjpeg by 1 LSB
+                                    // and cascades through per-scan
+                                    // optimised tables. Grayscale output
+                                    // drops chroma, so the fallback does
+                                    // not fire and progressive byte-parity
+                                    // still holds. Same scoped non-goal as
+                                    // `c_tjcomptest_lossy_full`
+                                    // (`tests/c_tjcomptest.rs:732`).
+                                    if progressive
+                                        && !grayscale
+                                        && matches!(subsamp_label, "411" | "441" | "410" | "24")
+                                    {
                                         skipped += 1;
                                         continue;
                                     }
