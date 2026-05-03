@@ -1230,6 +1230,7 @@ pub fn compress_custom_quant(
 /// `restart_interval` is the number of MCU blocks between restart markers.
 /// When non-zero, a DRI marker is written in the header and RST markers
 /// are inserted into the entropy-coded data at the specified interval.
+#[allow(clippy::too_many_arguments)]
 pub fn compress_with_restart(
     pixels: &[u8],
     width: usize,
@@ -1238,6 +1239,7 @@ pub fn compress_with_restart(
     quality: u8,
     subsampling: Subsampling,
     restart_interval: u16,
+    dct_method: DctMethod,
 ) -> Result<Vec<u8>> {
     // Validate inputs
     if width == 0 || height == 0 {
@@ -1273,8 +1275,16 @@ pub fn compress_with_restart(
     let chroma_quant =
         tables::quality_scale_quant_table(&tables::STD_CHROMINANCE_QUANT_TABLE, quality);
 
-    let luma_divisors = scale_quant_for_fdct(&luma_quant);
-    let chroma_divisors = scale_quant_for_fdct(&chroma_quant);
+    let luma_divisors = if dct_method == DctMethod::IsFast {
+        scale_quant_for_ifast(&luma_quant)
+    } else {
+        scale_quant_for_fdct(&luma_quant)
+    };
+    let chroma_divisors = if dct_method == DctMethod::IsFast {
+        scale_quant_for_ifast(&chroma_quant)
+    } else {
+        scale_quant_for_fdct(&chroma_quant)
+    };
 
     // Build Huffman tables
     let dc_luma_table = build_huff_table(&tables::DC_LUMINANCE_BITS, &tables::DC_LUMINANCE_VALUES);
@@ -1286,6 +1296,11 @@ pub fn compress_with_restart(
 
     // SIMD dispatch — used for both color conversion and FDCT+quantize
     let enc_simd = crate::simd::detect_encoder();
+    let fdct_quantize_fn: fn(&mut [i16; 64], &QuantDivisors, &mut [i16; 64]) = match dct_method {
+        DctMethod::IsLow => enc_simd.fdct_quantize,
+        DctMethod::IsFast => crate::simd::scalar::scalar_fdct_ifast_quantize,
+        DctMethod::Float => crate::simd::scalar::scalar_fdct_float_quantize,
+    };
 
     // Color convert to YCbCr planes (or just Y for grayscale)
     let (y_plane, cb_plane, cr_plane) = convert_to_ycbcr(
@@ -1352,7 +1367,7 @@ pub fn compress_with_restart(
                     &ac_luma_table,
                     &mut bit_writer,
                     &mut prev_dc_y,
-                    enc_simd.fdct_quantize,
+                    fdct_quantize_fn,
                 );
             } else {
                 encode_color_mcu(
@@ -1374,7 +1389,7 @@ pub fn compress_with_restart(
                     &mut prev_dc_y,
                     &mut prev_dc_cb,
                     &mut prev_dc_cr,
-                    enc_simd.fdct_quantize,
+                    fdct_quantize_fn,
                 );
             }
 
@@ -8343,6 +8358,7 @@ pub fn compress_optimized(
     subsampling: Subsampling,
     smoothing_factor: u8,
     dct_method: DctMethod,
+    restart_interval: u16,
 ) -> Result<Vec<u8>> {
     // Validate inputs
     if width == 0 || height == 0 {
@@ -8478,9 +8494,20 @@ pub fn compress_optimized(
     let mut prev_dc_y: i16 = 0;
     let mut prev_dc_cb: i16 = 0;
     let mut prev_dc_cr: i16 = 0;
+    let ri_gather: u32 = restart_interval as u32;
+    let mut mcu_count_gather: u32 = 0;
 
     for mcu_row in 0..mcus_y {
         for mcu_col in 0..mcus_x {
+            // Reset DC predictors at restart boundary so the gathered DC
+            // diff symbol categories match what pass 2 will actually emit.
+            // Without this the optimised Huffman tables would diverge from
+            // cjpeg whenever `-r N` is set.
+            if ri_gather > 0 && mcu_count_gather > 0 && mcu_count_gather.is_multiple_of(ri_gather) {
+                prev_dc_y = 0;
+                prev_dc_cb = 0;
+                prev_dc_cr = 0;
+            }
             let x0 = mcu_col * mcu_w;
             let y0 = mcu_row * mcu_h;
 
@@ -8976,6 +9003,7 @@ pub fn compress_optimized(
                     }
                 }
             }
+            mcu_count_gather = mcu_count_gather.wrapping_add(1);
         }
     }
 
@@ -9003,9 +9031,22 @@ pub fn compress_optimized(
     let mut prev_dc_cb: i16 = 0;
     let mut prev_dc_cr: i16 = 0;
     let mut block_idx = 0;
+    let ri_enc: u32 = restart_interval as u32;
+    let mut mcu_count_enc: u32 = 0;
+    let mut rst_count_enc: u8 = 0;
 
     for _mcu_row in 0..mcus_y {
         for _mcu_col in 0..mcus_x {
+            if ri_enc > 0 && mcu_count_enc > 0 && mcu_count_enc.is_multiple_of(ri_enc) {
+                // Insert RST marker, reset DC predictors per
+                // C jchuff.c::flush_packet.
+                bit_writer.flush_restart();
+                bit_writer.write_restart_marker(rst_count_enc);
+                rst_count_enc = (rst_count_enc + 1) & 7;
+                prev_dc_y = 0;
+                prev_dc_cb = 0;
+                prev_dc_cr = 0;
+            }
             if is_grayscale {
                 HuffmanEncoder::encode_block(
                     &mut bit_writer,
@@ -9186,6 +9227,7 @@ pub fn compress_optimized(
                     }
                 }
             }
+            mcu_count_enc = mcu_count_enc.wrapping_add(1);
         }
     }
 
@@ -9229,6 +9271,12 @@ pub fn compress_optimized(
     if !is_grayscale {
         marker_writer::write_dht(&mut output, 0, 1, &dc_chroma_bits, &dc_chroma_values);
         marker_writer::write_dht(&mut output, 1, 1, &ac_chroma_bits, &ac_chroma_values);
+    }
+
+    // DRI marker — emitted from `write_scan_header` in C
+    // (jcmarker.c::emit_dri), i.e. right before SOS in the only scan.
+    if restart_interval > 0 {
+        marker_writer::write_dri(&mut output, restart_interval);
     }
 
     // Scan header
