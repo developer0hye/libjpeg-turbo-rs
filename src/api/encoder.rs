@@ -389,7 +389,16 @@ impl<'a> Encoder<'a> {
         self
     }
 
-    fn compute_restart_interval(&self) -> u16 {
+    /// Compute the restart interval in MCUs.
+    ///
+    /// `effective_subsampling` is the subsampling actually used by the
+    /// encode pipeline — typically `self.subsampling`, but when the caller
+    /// provided `sampling_factors([(h,v),(1,1),(1,1)])` instead it is the
+    /// `Subsampling` variant the factors map to (see `mapped_subsampling`).
+    /// `restart_rows(n)` translates to `n * MCUs_per_row`, and the number
+    /// of MCUs per row depends on the MCU width — which depends on the
+    /// effective subsampling, NOT on the field default.
+    fn compute_restart_interval(&self, effective_subsampling: Subsampling) -> u16 {
         match self.restart_interval {
             None => 0,
             Some(RestartConfig::Blocks(n)) => n,
@@ -400,7 +409,7 @@ impl<'a> Encoder<'a> {
                 } else if self.pixel_format == PixelFormat::Grayscale {
                     8
                 } else {
-                    match self.subsampling {
+                    match effective_subsampling {
                         Subsampling::S444
                         | Subsampling::S440
                         | Subsampling::S441
@@ -662,8 +671,6 @@ impl<'a> Encoder<'a> {
 
     /// Encode and return the JPEG byte stream.
     pub fn encode(&self) -> Result<Vec<u8>> {
-        let restart_interval = self.compute_restart_interval();
-
         let flipped_buf: Vec<u8>;
         let input_pixels: &[u8] = if self.bottom_up {
             flipped_buf = Self::flip_rows(
@@ -760,11 +767,76 @@ impl<'a> Encoder<'a> {
             return Ok(base);
         }
 
+        // Route through compress_custom_quant whenever the builder may need
+        // non-baseline (16-bit) quantization values. C cjpeg defaults to
+        // `force_baseline = FALSE`, allowing scaled quant values up to 32767
+        // at low quality (e.g. q=1 produces 16*5000/100 = 800 for the luma DC
+        // entry). The default `compress(...)` path uses
+        // `quality_scale_quant_table` which clamps to 255, breaking parity
+        // with cjpeg at low quality. Routing through `compress_custom_quant`
+        // with the builder-resolved tables (which honour `force_baseline`)
+        // keeps high-quality output bit-identical (no clamp triggers) and
+        // produces 16-bit DQT markers at low quality just like cjpeg.
+        let scaled_quant_could_exceed_255 = !self.force_baseline && {
+            let q = self.quality_factors.map(|f| f[0]).unwrap_or(self.quality);
+            // 5000/q > 255 iff q <= 19 (since 5000/19 = 263, 5000/20 = 250).
+            // Smallest base entry is 8 (luma AC[3,3]); largest is 121 (chroma).
+            // 121 * (5000/q)/100 > 255 iff 5000/q > 211 iff q <= 23.
+            // Use a generous threshold to be safe.
+            q < 50
+        };
         let needs_custom_quant: bool = self.force_baseline
             || self.linear_scale_factor.is_some()
-            || self.has_custom_quant_tables();
+            || self.has_custom_quant_tables()
+            || scaled_quant_could_exceed_255;
 
-        let base = if let Some(ref factors) = self.custom_sampling_factors {
+        // Map a 3-component custom sampling factor list to a standard
+        // YCbCr `Subsampling` variant when one matches. This lets
+        // `Encoder::sampling_factors([(h,v),(1,1),(1,1)])` route through the
+        // optimised / progressive / arithmetic / SOF1 paths instead of the
+        // baseline-only `compress_custom_sampling` path. Required for
+        // c_tjcomptest_lossy_full byte-parity at samp410 / samp24 (the only
+        // standard JPEG subsamplings without dedicated `subsampling()` API
+        // sugar).
+        let mapped_subsampling: Option<Subsampling> =
+            self.custom_sampling_factors.as_deref().and_then(|f| {
+                if f.len() != 3 || f[1] != (1, 1) || f[2] != (1, 1) {
+                    return None;
+                }
+                Some(match f[0] {
+                    (1, 1) => Subsampling::S444,
+                    (2, 1) => Subsampling::S422,
+                    (1, 2) => Subsampling::S440,
+                    (2, 2) => Subsampling::S420,
+                    (4, 1) => Subsampling::S411,
+                    (1, 4) => Subsampling::S441,
+                    (4, 2) => Subsampling::S410,
+                    (2, 4) => Subsampling::S24,
+                    _ => return None,
+                })
+            });
+        let use_custom_sampling: bool =
+            self.custom_sampling_factors.is_some() && mapped_subsampling.is_none();
+        let effective_subsampling: Subsampling = mapped_subsampling.unwrap_or(self.subsampling);
+        // restart_interval depends on the *effective* MCU width, which can
+        // differ from `self.subsampling` when the caller used
+        // `sampling_factors([(h,v),(1,1),(1,1)])` instead of `subsampling()`.
+        // Compute it after the mapping so e.g. samp410 (4x2) lands on
+        // mcu_w=32, not the default S420 mcu_w=16.
+        let restart_interval: u16 = self.compute_restart_interval(effective_subsampling);
+        // For progressive: each scan recomputes restart_interval from
+        // `restart_in_rows * MCUs_per_row(scan)` — interleaved DC scans use
+        // the iMCU width while non-interleaved AC scans use the per-component
+        // width_in_blocks. Pass the rows hint so the progressive encoder can
+        // re-derive per-scan; non-row restart specs leave this at 0 and the
+        // pre-computed `restart_interval` is used as-is for every scan.
+        let restart_in_rows: u16 = match self.restart_interval {
+            Some(RestartConfig::Rows(n)) => n,
+            _ => 0,
+        };
+
+        let base = if use_custom_sampling {
+            let factors: &Vec<(u8, u8)> = self.custom_sampling_factors.as_ref().unwrap();
             encoder::compress_custom_sampling(
                 effective_pixels,
                 self.width,
@@ -799,7 +871,10 @@ impl<'a> Encoder<'a> {
                 self.height,
                 effective_format,
                 quality,
-                self.subsampling,
+                effective_subsampling,
+                self.dct_method,
+                restart_interval,
+                restart_in_rows,
             )?
         } else if self.arithmetic {
             encoder::compress_arithmetic(
@@ -808,29 +883,35 @@ impl<'a> Encoder<'a> {
                 self.height,
                 effective_format,
                 quality,
-                self.subsampling,
+                effective_subsampling,
+                self.dct_method,
+                restart_interval,
             )?
         } else if self.progressive {
             if let Some(ref script) = self.scan_script {
-                encoder::compress_progressive_custom(
+                encoder::compress_progressive_custom_with_restart(
                     effective_pixels,
                     self.width,
                     self.height,
                     effective_format,
                     quality,
-                    self.subsampling,
+                    effective_subsampling,
                     script,
                     self.dct_method,
+                    restart_interval,
+                    restart_in_rows,
                 )?
             } else {
-                encoder::compress_progressive(
+                encoder::compress_progressive_with_restart(
                     effective_pixels,
                     self.width,
                     self.height,
                     effective_format,
                     quality,
-                    self.subsampling,
+                    effective_subsampling,
                     self.dct_method,
+                    restart_interval,
+                    restart_in_rows,
                 )?
             }
         } else if self.optimize_huffman {
@@ -840,8 +921,10 @@ impl<'a> Encoder<'a> {
                 self.height,
                 effective_format,
                 quality,
-                self.subsampling,
+                effective_subsampling,
                 self.smoothing_factor,
+                self.dct_method,
+                restart_interval,
             )?
         } else if self.has_custom_huffman_tables() {
             encoder::compress_custom_huffman(
@@ -850,7 +933,7 @@ impl<'a> Encoder<'a> {
                 self.height,
                 effective_format,
                 quality,
-                self.subsampling,
+                effective_subsampling,
                 &self.custom_huffman_dc,
                 &self.custom_huffman_ac,
             )?
@@ -862,7 +945,7 @@ impl<'a> Encoder<'a> {
                 self.height,
                 effective_format,
                 quality,
-                self.subsampling,
+                effective_subsampling,
                 &effective_tables,
             )?
         } else if restart_interval > 0 {
@@ -872,8 +955,9 @@ impl<'a> Encoder<'a> {
                 self.height,
                 effective_format,
                 quality,
-                self.subsampling,
+                effective_subsampling,
                 restart_interval,
+                self.dct_method,
             )?
         } else if self.smoothing_factor > 0 {
             // Smoothing requires full-plane buffering, only available in the
@@ -884,8 +968,10 @@ impl<'a> Encoder<'a> {
                 self.height,
                 effective_format,
                 quality,
-                self.subsampling,
+                effective_subsampling,
                 self.smoothing_factor,
+                self.dct_method,
+                restart_interval,
             )?
         } else {
             encoder::compress(
@@ -894,7 +980,7 @@ impl<'a> Encoder<'a> {
                 self.height,
                 effective_format,
                 quality,
-                self.subsampling,
+                effective_subsampling,
                 self.dct_method,
             )?
         };
