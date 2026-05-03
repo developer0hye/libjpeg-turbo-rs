@@ -783,7 +783,40 @@ impl<'a> Encoder<'a> {
             || self.has_custom_quant_tables()
             || scaled_quant_could_exceed_255;
 
-        let base = if let Some(ref factors) = self.custom_sampling_factors {
+        // Map a 3-component custom sampling factor list to a standard
+        // YCbCr `Subsampling` variant when one matches. This lets
+        // `Encoder::sampling_factors([(h,v),(1,1),(1,1)])` route through the
+        // optimised / progressive / arithmetic / SOF1 paths instead of the
+        // baseline-only `compress_custom_sampling` path. Required for
+        // c_tjcomptest_lossy_full byte-parity at samp410 / samp24 (the only
+        // standard JPEG subsamplings without dedicated `subsampling()` API
+        // sugar).
+        let mapped_subsampling: Option<Subsampling> = self
+            .custom_sampling_factors
+            .as_deref()
+            .and_then(|f| {
+                if f.len() != 3 || f[1] != (1, 1) || f[2] != (1, 1) {
+                    return None;
+                }
+                Some(match f[0] {
+                    (1, 1) => Subsampling::S444,
+                    (2, 1) => Subsampling::S422,
+                    (1, 2) => Subsampling::S440,
+                    (2, 2) => Subsampling::S420,
+                    (4, 1) => Subsampling::S411,
+                    (1, 4) => Subsampling::S441,
+                    (4, 2) => Subsampling::S410,
+                    (2, 4) => Subsampling::S24,
+                    _ => return None,
+                })
+            });
+        let use_custom_sampling: bool =
+            self.custom_sampling_factors.is_some() && mapped_subsampling.is_none();
+        let effective_subsampling: Subsampling =
+            mapped_subsampling.unwrap_or(self.subsampling);
+
+        let base = if use_custom_sampling {
+            let factors: &Vec<(u8, u8)> = self.custom_sampling_factors.as_ref().unwrap();
             encoder::compress_custom_sampling(
                 effective_pixels,
                 self.width,
@@ -818,7 +851,7 @@ impl<'a> Encoder<'a> {
                 self.height,
                 effective_format,
                 quality,
-                self.subsampling,
+                effective_subsampling,
             )?
         } else if self.arithmetic {
             encoder::compress_arithmetic(
@@ -827,7 +860,7 @@ impl<'a> Encoder<'a> {
                 self.height,
                 effective_format,
                 quality,
-                self.subsampling,
+                effective_subsampling,
             )?
         } else if self.progressive {
             if let Some(ref script) = self.scan_script {
@@ -837,7 +870,7 @@ impl<'a> Encoder<'a> {
                     self.height,
                     effective_format,
                     quality,
-                    self.subsampling,
+                    effective_subsampling,
                     script,
                     self.dct_method,
                 )?
@@ -848,7 +881,7 @@ impl<'a> Encoder<'a> {
                     self.height,
                     effective_format,
                     quality,
-                    self.subsampling,
+                    effective_subsampling,
                     self.dct_method,
                 )?
             }
@@ -859,8 +892,9 @@ impl<'a> Encoder<'a> {
                 self.height,
                 effective_format,
                 quality,
-                self.subsampling,
+                effective_subsampling,
                 self.smoothing_factor,
+                self.dct_method,
             )?
         } else if self.has_custom_huffman_tables() {
             encoder::compress_custom_huffman(
@@ -869,7 +903,7 @@ impl<'a> Encoder<'a> {
                 self.height,
                 effective_format,
                 quality,
-                self.subsampling,
+                effective_subsampling,
                 &self.custom_huffman_dc,
                 &self.custom_huffman_ac,
             )?
@@ -881,7 +915,7 @@ impl<'a> Encoder<'a> {
                 self.height,
                 effective_format,
                 quality,
-                self.subsampling,
+                effective_subsampling,
                 &effective_tables,
             )?
         } else if restart_interval > 0 {
@@ -891,7 +925,7 @@ impl<'a> Encoder<'a> {
                 self.height,
                 effective_format,
                 quality,
-                self.subsampling,
+                effective_subsampling,
                 restart_interval,
             )?
         } else if self.smoothing_factor > 0 {
@@ -903,8 +937,9 @@ impl<'a> Encoder<'a> {
                 self.height,
                 effective_format,
                 quality,
-                self.subsampling,
+                effective_subsampling,
                 self.smoothing_factor,
+                self.dct_method,
             )?
         } else {
             encoder::compress(
@@ -913,7 +948,7 @@ impl<'a> Encoder<'a> {
                 self.height,
                 effective_format,
                 quality,
-                self.subsampling,
+                effective_subsampling,
                 self.dct_method,
             )?
         };

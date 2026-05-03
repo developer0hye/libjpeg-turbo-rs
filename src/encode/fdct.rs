@@ -509,6 +509,118 @@ pub fn fdct_float(input: &[i16; 64], output: &mut [i32; 64]) {
     }
 }
 
+/// Forward DCT (floating-point, f32) — AA&N algorithm.
+///
+/// Bit-exact port of libjpeg-turbo's `jfdctflt.c` (`jpeg_fdct_float`).
+/// Operates in-place on an `f32` workspace and does **not** apply the AA&N
+/// rescaling — the caller's quantization step must use `float_divisors`
+/// produced by `compute_float_divisors` (which folds the AA&N factors into
+/// the per-element divisor exactly like `jcdctmgr.c` lines 346–365).
+///
+/// Single-precision throughout — matches C `FAST_FLOAT = float` so the
+/// per-element rounding via `(int)(temp + 16384.5) - 16384` produces the
+/// same `JCOEF` values as `cjpeg -dc fa`.
+///
+/// Constants are written as `(<f64 literal>) as f32` to mirror C's
+/// `(FAST_FLOAT)<literal>` semantics: parse the literal as `double`, then
+/// downcast to `float`.
+///
+/// Use `f32::mul_add` for the `c*x + y` rotator forms because clang on
+/// Darwin defaults to `-ffp-contract=on`, which fuses `c * x + y` into a
+/// single FMA and produces a single rounding. Rust never auto-contracts,
+/// so without the explicit `mul_add` we drift by a few ULP per block and
+/// nudge the occasional quantized coefficient onto the wrong side of the
+/// `(int)(temp + 16384.5)` rounding boundary, breaking byte-parity with
+/// `cjpeg -dc fa`.
+pub fn fdct_float_workspace(data: &mut [f32; 64]) {
+    const C4: f32 = 0.707106781_f64 as f32;
+    const C6: f32 = 0.382683433_f64 as f32;
+    const C2_MINUS_C6: f32 = 0.541196100_f64 as f32;
+    const C2_PLUS_C6: f32 = 1.306562965_f64 as f32;
+
+    // Pass 1: rows
+    for row in 0..8 {
+        let base: usize = row * 8;
+        let tmp0: f32 = data[base] + data[base + 7];
+        let tmp7: f32 = data[base] - data[base + 7];
+        let tmp1: f32 = data[base + 1] + data[base + 6];
+        let tmp6: f32 = data[base + 1] - data[base + 6];
+        let tmp2: f32 = data[base + 2] + data[base + 5];
+        let tmp5: f32 = data[base + 2] - data[base + 5];
+        let tmp3: f32 = data[base + 3] + data[base + 4];
+        let tmp4: f32 = data[base + 3] - data[base + 4];
+
+        let tmp10: f32 = tmp0 + tmp3;
+        let tmp13: f32 = tmp0 - tmp3;
+        let tmp11: f32 = tmp1 + tmp2;
+        let tmp12: f32 = tmp1 - tmp2;
+
+        data[base] = tmp10 + tmp11;
+        data[base + 4] = tmp10 - tmp11;
+
+        let z1: f32 = (tmp12 + tmp13) * C4;
+        data[base + 2] = tmp13 + z1;
+        data[base + 6] = tmp13 - z1;
+
+        let tmp10b: f32 = tmp4 + tmp5;
+        let tmp11b: f32 = tmp5 + tmp6;
+        let tmp12b: f32 = tmp6 + tmp7;
+
+        let z5: f32 = (tmp10b - tmp12b) * C6;
+        let z2: f32 = C2_MINUS_C6.mul_add(tmp10b, z5);
+        let z4: f32 = C2_PLUS_C6.mul_add(tmp12b, z5);
+        let z3: f32 = tmp11b * C4;
+
+        let z11: f32 = tmp7 + z3;
+        let z13: f32 = tmp7 - z3;
+
+        data[base + 5] = z13 + z2;
+        data[base + 3] = z13 - z2;
+        data[base + 1] = z11 + z4;
+        data[base + 7] = z11 - z4;
+    }
+    // Pass 2: columns
+    for col in 0..8 {
+        let tmp0: f32 = data[col] + data[col + 56];
+        let tmp7: f32 = data[col] - data[col + 56];
+        let tmp1: f32 = data[col + 8] + data[col + 48];
+        let tmp6: f32 = data[col + 8] - data[col + 48];
+        let tmp2: f32 = data[col + 16] + data[col + 40];
+        let tmp5: f32 = data[col + 16] - data[col + 40];
+        let tmp3: f32 = data[col + 24] + data[col + 32];
+        let tmp4: f32 = data[col + 24] - data[col + 32];
+
+        let tmp10: f32 = tmp0 + tmp3;
+        let tmp13: f32 = tmp0 - tmp3;
+        let tmp11: f32 = tmp1 + tmp2;
+        let tmp12: f32 = tmp1 - tmp2;
+
+        data[col] = tmp10 + tmp11;
+        data[col + 32] = tmp10 - tmp11;
+
+        let z1: f32 = (tmp12 + tmp13) * C4;
+        data[col + 16] = tmp13 + z1;
+        data[col + 48] = tmp13 - z1;
+
+        let tmp10b: f32 = tmp4 + tmp5;
+        let tmp11b: f32 = tmp5 + tmp6;
+        let tmp12b: f32 = tmp6 + tmp7;
+
+        let z5: f32 = (tmp10b - tmp12b) * C6;
+        let z2: f32 = C2_MINUS_C6.mul_add(tmp10b, z5);
+        let z4: f32 = C2_PLUS_C6.mul_add(tmp12b, z5);
+        let z3: f32 = tmp11b * C4;
+
+        let z11: f32 = tmp7 + z3;
+        let z13: f32 = tmp7 - z3;
+
+        data[col + 40] = z13 + z2;
+        data[col + 24] = z13 - z2;
+        data[col + 8] = z11 + z4;
+        data[col + 56] = z11 - z4;
+    }
+}
+
 /// AA&N (Arai, Agui, Nakajima) scale factors for the ifast FDCT, pre-computed
 /// as 14-bit fixed-point values. Each entry is `scalefactor[row] * scalefactor[col]`
 /// where `scalefactor[0] = 1` and `scalefactor[k] = cos(k*PI/16) * sqrt(2)` for k=1..7.

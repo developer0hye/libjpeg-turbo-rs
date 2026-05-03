@@ -6,7 +6,7 @@
     "baseline_64x64_q100_420": "98be41b0ad4fb9b7",
     "progressive_64x64_q75_444": "6fc23719bb3e3d2f",
     "arithmetic_64x64_q75_420": "357056affabbb463",
-    "arithmetic_progressive_64x64_q75_444": "5278fadd003bfe74",
+    "arithmetic_progressive_64x64_q75_444": "5c2b7b0f08951e8d",
     "lossless_64x64_gray": "545ac12ce780ed90",
     "optimized_64x64_q75_420": "35de3c0008354b10",
     "grayscale_64x64_q75": "d323d028765d182a",

@@ -67,6 +67,14 @@ pub struct QuantDivisors {
     pub shifts_zigzag: [i16; 64],
     /// Scales re-arranged in zigzag scan order.
     pub scales_zigzag: [u16; 64],
+    /// Float divisors matching C `jcdctmgr.c` `forward_DCT_float`:
+    /// `1 / (quant[i] * aanscale[row] * aanscale[col] * 8)`. Paired with the
+    /// raw float FDCT (no AA&N rescale) and `quantize_float` to reproduce
+    /// `cjpeg -dc fa` byte-for-byte.
+    pub float_divisors: [f32; 64],
+    /// Float divisors re-arranged in zigzag scan order so the float quant
+    /// step can fuse zigzag reorder.
+    pub float_divisors_zigzag: [f32; 64],
 }
 
 /// Function-pointer dispatch table for SIMD-accelerated encode operations.

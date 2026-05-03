@@ -110,6 +110,34 @@ pub fn scalar_fdct_ifast_quantize(
     quantize_reciprocal(&dct_output, quant, output);
 }
 
+/// Scalar fused FDCT (float) + quantize + zigzag reorder.
+///
+/// Bit-exact mirror of C `jcdctmgr.c` `forward_DCT_float` + `quantize_float`:
+///   workspace = jpeg_fdct_float(input - 128)
+///   coef[i]   = (int)(workspace[i] * float_divisors[i] + 16384.5) - 16384
+/// The float divisors fold the AA&N scale and the per-coefficient quantizer
+/// into a single multiplication, so this routine reproduces `cjpeg -dc fa`
+/// byte-for-byte.
+pub fn scalar_fdct_float_quantize(
+    input: &mut [i16; 64],
+    quant: &QuantDivisors,
+    output: &mut [i16; 64],
+) {
+    let mut workspace: [f32; 64] = [0.0f32; 64];
+    for i in 0..64 {
+        workspace[i] = input[i] as f32;
+    }
+    fdct::fdct_float_workspace(&mut workspace);
+    let zigzag = &crate::encode::tables::ZIGZAG_ORDER;
+    for zz in 0..64 {
+        let natural_idx: usize = zigzag[zz];
+        let temp: f32 = workspace[natural_idx] * quant.float_divisors[natural_idx];
+        // C uses biased rounding to avoid implementation-defined negative
+        // rounding: (int)(temp + 16384.5) - 16384.
+        output[zz] = ((temp + 16384.5_f32) as i32 - 16384) as i16;
+    }
+}
+
 /// Scalar reciprocal-based quantization matching C libjpeg-turbo's `quantize()`.
 ///
 /// Uses pre-computed reciprocal, correction, and shift from `compute_reciprocal`
