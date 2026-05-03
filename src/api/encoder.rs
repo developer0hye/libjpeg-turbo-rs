@@ -824,6 +824,16 @@ impl<'a> Encoder<'a> {
         // Compute it after the mapping so e.g. samp410 (4x2) lands on
         // mcu_w=32, not the default S420 mcu_w=16.
         let restart_interval: u16 = self.compute_restart_interval(effective_subsampling);
+        // For progressive: each scan recomputes restart_interval from
+        // `restart_in_rows * MCUs_per_row(scan)` — interleaved DC scans use
+        // the iMCU width while non-interleaved AC scans use the per-component
+        // width_in_blocks. Pass the rows hint so the progressive encoder can
+        // re-derive per-scan; non-row restart specs leave this at 0 and the
+        // pre-computed `restart_interval` is used as-is for every scan.
+        let restart_in_rows: u16 = match self.restart_interval {
+            Some(RestartConfig::Rows(n)) => n,
+            _ => 0,
+        };
 
         let base = if use_custom_sampling {
             let factors: &Vec<(u8, u8)> = self.custom_sampling_factors.as_ref().unwrap();
@@ -876,7 +886,7 @@ impl<'a> Encoder<'a> {
             )?
         } else if self.progressive {
             if let Some(ref script) = self.scan_script {
-                encoder::compress_progressive_custom(
+                encoder::compress_progressive_custom_with_restart(
                     effective_pixels,
                     self.width,
                     self.height,
@@ -885,9 +895,11 @@ impl<'a> Encoder<'a> {
                     effective_subsampling,
                     script,
                     self.dct_method,
+                    restart_interval,
+                    restart_in_rows,
                 )?
             } else {
-                encoder::compress_progressive(
+                encoder::compress_progressive_with_restart(
                     effective_pixels,
                     self.width,
                     self.height,
@@ -895,6 +907,8 @@ impl<'a> Encoder<'a> {
                     quality,
                     effective_subsampling,
                     self.dct_method,
+                    restart_interval,
+                    restart_in_rows,
                 )?
             }
         } else if self.optimize_huffman {
