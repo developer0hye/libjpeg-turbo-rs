@@ -646,33 +646,24 @@ cargo test --features full-c-parity --test c_tjtrantest
 
 Must pass without `continue-on-error`. If a divergence is genuinely a non-goal, document it in `docs/COMPATIBILITY_MATRIX.md` (new) with measured PSNR / pixel-diff numbers and remove the `continue-on-error` flag.
 
-### P2-2. `default_format_message` Does Not Implement libjpeg's `%d`/`%c`/`%s` Expansion
+### P2-2. `default_format_message` Printf Expansion — **CLOSED**
 
-**Symptom:** `crates/libjpeg-turbo-rs-capi/src/jpeglib.rs:807-810` explicitly states:
+**Status (2026-05-04): closed.** `crates/libjpeg-turbo-rs-capi/src/jpeglib.rs::default_format_message` now walks the format string and substitutes `msg_parm.i[..8]` / `msg_parm.s[]` according to the upstream contract in `references/libjpeg-turbo/src/jerror.c:153-197`. The new helper `snprintf_jpeg` covers every printf specifier `references/libjpeg-turbo/src/jerror.h` actually uses: `%s %d %u %x %X %c %02d %3d %4u %02x %04x %%` (zero-padded width, ignored flags `-`/`+`/`#`/space). Mode selection (string vs integer args) follows jerror.c — the FIRST `%X` decides; mixing is unsupported.
 
-```rust
-// We do NOT implement the printf-style %d/%c/%s expansion of `msg_parm`
-// here (none of our shim-emitted warnings need parameters yet); if a
-// future warning carries args, expand this routine to walk the format
-// string the way jerror.c does.
+**Verification (`crates/libjpeg-turbo-rs-capi/tests/format_message.rs`):** 8 tests dlopen the cdylib, install a synthetic addon table, set `msg_parm`, invoke `format_message` through the standard `jpeg_error_mgr` vtable, and assert the formatted output equals what `libc::snprintf` produces with the same format and args:
+
+```text
+test format_message_d_specifier_matches_snprintf            ... ok
+test format_message_u_specifier_matches_snprintf            ... ok
+test format_message_x_specifier_matches_snprintf            ... ok
+test format_message_c_specifier_matches_snprintf            ... ok
+test format_message_zero_padded_d_matches_snprintf          ... ok
+test format_message_percent_literal_matches_snprintf        ... ok
+test format_message_s_specifier_matches_snprintf            ... ok
+test format_message_no_specifier_matches_msgtext_verbatim   ... ok
 ```
 
-Upstream `references/libjpeg-turbo/src/jerror.c::format_message` walks the format string and substitutes `msg_parm.i[]` / `msg_parm.s[]`. C consumers that call `(*err->format_message)(cinfo, buf)` after a parameterised warning currently get the raw format string with `%d` placeholders.
-
-**Why this matters:** Custom error managers, `libtiff`'s JPEG-in-TIFF path, and ImageMagick's coder error reporting all expect formatted output. Truncated / unformatted messages corrupt logs and confuse downstream error handling.
-
-**Likely area:**
-
-- `crates/libjpeg-turbo-rs-capi/src/jpeglib.rs::default_format_message`
-- New shim-internal `error_table.rs` mirroring `references/libjpeg-turbo/src/jerror.c` constants.
-
-**Acceptance:**
-
-```bash
-cargo test -p libjpeg-turbo-rs-capi --test capi_format_message
-```
-
-New test must trigger a parameterised warning (e.g. `JWRN_HIT_MARKER`, which uses `%2c%2c`) and assert the formatted output matches stock libjpeg's output byte-for-byte.
+**TDD-verified:** reverting `default_format_message` to the prior verbatim-copy implementation makes 7 of those 8 tests RED-fail (only the no-specifier test still passes, because verbatim copy is correct when the message has no `%X`). Restoring the fix returns to GREEN.
 
 ### P2-3. ABI Offset Assertions Cover Only LP64 / Non-Windows
 
@@ -920,7 +911,7 @@ The earlier skip-comment claimed "1 LSB downsample diff, decoded pixels match" �
 1. ~~**P2-11** — Close the TJSAMP_411/441/410/24 progressive-encode byte-parity gap.~~ **CLOSED 2026-05-04** — root cause was a chroma-sampling-factor clamp in `progressive_fdct_chroma_block`; fix landed in `src/encode/pipeline.rs`, source-level test skip deleted, regression test in `tests/regression_progressive_4pixel_chroma.rs`.
 2. ~~**P2-1** (`c_tjcomptest_full` portion) — Remove `continue-on-error` flag for the encode parity test.~~ **CLOSED 2026-05-04** — flag removed in `.github/workflows/full-c-parity.yml` once P2-11 fix landed. Remaining `c_tjtrantest_full` flag (grayscale Huffman) is still open as a transform-path divergence.
 3. ~~**P2-9** — Decide and document the `JPEG_LIB_VERSION` policy.~~ **CLOSED 2026-05-04** — `docs/ABI_COMPATIBILITY.md` documents the v8-only policy with v6b-SONAME risk explicitly called out; `build.rs` emits a loud `cargo:warning` on the default-risk pairing.
-4. **P2-2** — Implement `format_message` printf expansion. Small, self-contained, unblocks downstream error reporting.
+4. ~~**P2-2** — Implement `format_message` printf expansion.~~ **CLOSED 2026-05-04** — `snprintf_jpeg` helper added in `crates/libjpeg-turbo-rs-capi/src/jpeglib.rs`; `tests/format_message.rs` exercises every specifier `jerror.h` uses against `libc::snprintf` as the reference oracle. TDD red-then-green confirmed.
 5. **P2-1** (remaining `c_tjtrantest_full` portion) — Investigate and fix or formally document the grayscale-Huffman transform divergence; remove the last `continue-on-error` flag.
 6. **P2-4** — Generated C-side ABI cross-check. Cheap insurance against future field-order drift.
 7. **P2-3** — Per-platform offset assertions + CI matrix. Catches Windows / 32-bit drift before consumers do.
