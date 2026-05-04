@@ -68,6 +68,13 @@ fn jpegtran_path() -> Option<PathBuf> {
 /// Stdin → stdout subprocess wrapper. Returns Some(stdout) on exit 0,
 /// None otherwise. We deliberately discard stderr to avoid drowning
 /// the fuzzer log in libjpeg "Premature EOF" warnings.
+///
+/// Codex round-1 P2: a naive `write_all` then `wait_with_output`
+/// deadlocks for valid inputs whose decoded PNM exceeds the pipe
+/// buffer (~64 KB) — the child blocks writing stdout while the
+/// parent is still in `write_all`. We spawn a writer thread so
+/// stdout drains concurrently with the stdin write, eliminating the
+/// hang regardless of input size.
 fn pipe_subprocess(bin: &PathBuf, args: &[&str], stdin_bytes: &[u8]) -> Option<Vec<u8>> {
     let mut child = Command::new(bin)
         .args(args)
@@ -76,8 +83,14 @@ fn pipe_subprocess(bin: &PathBuf, args: &[&str], stdin_bytes: &[u8]) -> Option<V
         .stderr(Stdio::null())
         .spawn()
         .ok()?;
-    child.stdin.as_mut()?.write_all(stdin_bytes).ok()?;
+    let mut stdin = child.stdin.take()?;
+    let payload: Vec<u8> = stdin_bytes.to_vec();
+    let writer = std::thread::spawn(move || {
+        let _ = stdin.write_all(&payload);
+        // dropping stdin closes the pipe so the child sees EOF.
+    });
     let out = child.wait_with_output().ok()?;
+    let _ = writer.join();
     if !out.status.success() {
         return None;
     }
@@ -162,7 +175,16 @@ fuzz_target!(|data: &[u8]| {
     // C jpegtran first — if it rejects, the input is not a valid JPEG
     // (or hits one of jpegtran's stricter validation paths) and we
     // skip the differential rather than panic on Rust accepting more.
-    let c_args: Vec<&str> = c_flag.split(' ').collect();
+    //
+    // Codex round-1 P2: `jpegtran` defaults to `-copy comments`, which
+    // drops Adobe APP14 (and every other application marker). Inputs
+    // produced by `cjpeg -rgb` carry an APP14 marker the decoder
+    // needs to interpret colorspace correctly; without `-copy all`,
+    // the C side decodes those as YCbCr while the Rust side keeps
+    // APP14 → decoded pixels diverge by hundreds even though the
+    // transform itself is correct.
+    let mut c_args: Vec<&str> = vec!["-copy", "all"];
+    c_args.extend(c_flag.split(' '));
     let c_transformed = pipe_subprocess(&jpegtran, &c_args, jpeg);
     let Some(c_transformed) = c_transformed else {
         return;
