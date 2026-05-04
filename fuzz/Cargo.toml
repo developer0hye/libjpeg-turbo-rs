@@ -67,3 +67,19 @@ doc = false
 name = "fuzz_decode_diff_c"
 path = "fuzz_targets/fuzz_decode_diff_c.rs"
 doc = false
+
+# P2-7 follow-up: differential encode-roundtrip-vs-C fuzzer. Encodes
+# fuzzed pixels via Rust then compares Rust-decode and C-djpeg-decode
+# of the encoded JPEG, panicking on divergence.
+[[bin]]
+name = "fuzz_encode_diff_c"
+path = "fuzz_targets/fuzz_encode_diff_c.rs"
+doc = false
+
+# P2-7 follow-up: differential transform-vs-jpegtran fuzzer. Applies
+# the same lossless transform via Rust and via subprocessed jpegtran,
+# decodes both via djpeg, asserts pixel agreement.
+[[bin]]
+name = "fuzz_transform_diff_c"
+path = "fuzz_targets/fuzz_transform_diff_c.rs"
+doc = false
