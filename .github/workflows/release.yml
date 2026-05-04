@@ -35,9 +35,15 @@ jobs:
         # "already uploaded" case; everything else must keep the job
         # failing so the release tag does not look successful.
         run: |
-          set -o pipefail
+          # GitHub Actions runs Bash steps with `-eo pipefail`, so a
+          # naked `output=$(cmd)` exits the step on any non-zero status
+          # before our `status=$?` capture can run. Disable errexit
+          # only for the publish itself; restore immediately so any
+          # subsequent shell error still fails the step.
+          set +e
           output=$(cargo publish --allow-dirty 2>&1)
           status=$?
+          set -e
           echo "$output"
           if [ "$status" -eq 0 ]; then
             exit 0
@@ -82,9 +88,13 @@ jobs:
         # cargo publish failure (token, permissions, network, build error)
         # as a real job failure so the release tag does not appear green.
         run: |
-          set -o pipefail
+          # Disable errexit only around the publish so the assignment
+          # captures cargo's exit status instead of failing the step
+          # immediately on a non-zero return (GHA's default `set -e`).
+          set +e
           output=$(cargo publish -p libjpeg-turbo-rs-capi --allow-dirty 2>&1)
           status=$?
+          set -e
           echo "$output"
           if [ "$status" -eq 0 ]; then
             exit 0
@@ -145,10 +155,14 @@ jobs:
         # release tag does not look successful when nothing actually
         # uploaded.
         run: |
-          set -o pipefail
           cd crates/libjpeg-turbo-rs-wasm/pkg
+          # Disable errexit around the publish so we can inspect npm's
+          # exit code instead of failing the step immediately on the
+          # documented duplicate-version response.
+          set +e
           output=$(npm publish --access public 2>&1)
           status=$?
+          set -e
           echo "$output"
           if [ "$status" -eq 0 ]; then
             exit 0
