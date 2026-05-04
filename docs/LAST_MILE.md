@@ -782,6 +782,16 @@ Header bytes (SOI through SOS) are byte-identical between Rust and jpegtran outp
 
 **Acceptance:** delete the self-decode soft-skip in `fuzz_transform_diff_c.rs` and have the nightly run survive 10 min on the original 805-byte crash artifact (`fuzz/artifacts/fuzz_transform_diff_c/crash-75b99921a272dcc0768e856892a0c6fcfe0dd8f2`).
 
+#### Follow-up: progressive small-entropy decoder pixel divergence — **OPEN**
+
+`fuzz_decode_diff_c` (post-AC-bounds-soft-landing in commit ce14bbe) surfaced a 544-byte 16×16 SOF2 fixture with 10 progressive scans of which 8 carry only 1 byte of entropy each. djpeg accepts and decodes; Rust accepts and decodes (so this is *not* a drop-in regression in the acceptance dimension), but the resulting pixels diverge: max abs diff = 61, mean ≈ 4.34, with 72 bytes of the 768-byte buffer differing by > 16. The first 16 pixels are byte-identical; the divergence concentrates around the second MCU row (y=9, 10, 13, 14, …). All differing pixels are achromatic (R=G=B), suggesting the divergence is in the EOBn / AC refinement state machine rather than colour conversion.
+
+This was previously masked by Rust rejecting these inputs at the AC index bounds check; the soft-landing fix in ce14bbe lets them complete decode, exposing the underlying state-machine divergence.
+
+**Likely surface:** progressive AC initial-band EOBn run accumulation when the entropy stream is short enough that the EOBn count carries across multiple MCUs, OR AC refinement scan correction-bit interpretation when applied after a partial-band initial scan. Curated arithmetic+progressive corpus (`examples/corpus_test.rs`, `c_tjtrantest_full-arith-and-progressive-skip`) keeps the byte-exact gate for real-world inputs; this fuzz finding is on a synthetic adversarial input only.
+
+**Acceptance:** the nightly `fuzz_decode_diff_c` survives 10 min on `fuzz/artifacts/fuzz_decode_diff_c/crash-954048583d527bd9a3463e0dddaa5023c54f608a` without any *new* skip logic in the fuzz target — the bug is fixed in the decoder, not papered over.
+
 ### P2-8. Install-Staging, Symlink Chain, and CMake Config — **CLOSED**
 
 **Status (2026-05-04): closed.** `scripts/install_capi.sh` stages the full distro-replacement layout into `${DESTDIR}${PREFIX}`:
