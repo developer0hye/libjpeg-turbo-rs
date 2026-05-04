@@ -36,7 +36,6 @@ jobs:
       - name: c_tjtrantest_full
         run: cargo test --features full-c-parity --test c_tjtrantest
         timeout-minutes: 10
-        continue-on-error: true  # Known failures: grayscale Huffman diff
       - name: c_croptest_full
         run: cargo test --features full-c-parity --test c_croptest
         timeout-minutes: 10
@@ -62,7 +61,6 @@ jobs:
       - name: c_tjtrantest_full
         run: cargo test --features full-c-parity --test c_tjtrantest
         timeout-minutes: 10
-        continue-on-error: true
       - name: c_croptest_full
         run: cargo test --features full-c-parity --test c_croptest
         timeout-minutes: 10

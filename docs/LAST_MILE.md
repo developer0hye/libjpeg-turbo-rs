@@ -626,25 +626,16 @@ The Phase 1 gates above (P0-1 through P0-4, P1-Soft-Skip, P1-Encode, P1-Legacy, 
 
 External cross-check on 2026-05-04: the analysis "Rust app library = ready; system-library replacement = not yet" is consistent with the live state of this repo. The blockers below are the verifiable ones (each cites the file/line that proves the gap is open). Items the external review flagged that are *already closed* (`tj3GetICCProfile` / `tj3TransformBufSize` exports, `jpeg_set_marker_processor` wiring, `JpegSourceMgr` suspension semantics, `capi_imagemagick_compat` / `capi_pillow_compat` harnesses) are intentionally not in this list.
 
-### P2-1. Full C Parity Workflow Soft-Skips — **PARTIAL: c_tjcomptest_full closed; c_tjtrantest_full open**
+### P2-1. Full C Parity Workflow Soft-Skips — **CLOSED**
 
-**Status (2026-05-04):** `c_tjcomptest_full` no longer has `continue-on-error: true` — samp411/441/410/24 closed under P2-11 (and the lossless-RGB row was already passing on the matrix). Source-level skip in `tests/c_tjcomptest.rs:717-739` deleted.
+**Status (2026-05-04): closed.** Both `continue-on-error: true` flags in `.github/workflows/full-c-parity.yml` are gone:
 
-**Still open:** `c_tjtrantest_full` retains `continue-on-error: true` for the "grayscale Huffman diff" — a transform-side divergence in `src/api/coefficient.rs::write_coefficients_progressive` (different code path from the encoder, not affected by the P2-11 fix).
+- `c_tjcomptest_full` — flag removed when P2-11 closed (samp411/441/410/24 progressive parity).
+- `c_tjtrantest_full` — flag removed in this commit. Local run on aarch64 macOS reports `11190 tested, 17538 skipped, 0 failed` for the full transform matrix (grayscale and non-grayscale combos). The "Known failures: grayscale Huffman diff" annotation that the flag carried was stale — earlier work that fixed the underlying divergence never updated the CI flag.
 
-**Why this matters:** A library that calls itself a libjpeg-turbo replacement cannot ship CI that has `continue-on-error` on byte-parity tests. Either the bytes match, the gap is documented as a permanent non-goal with the divergence quantified, or the test is fixed.
+The `tests/c_tjtrantest.rs:537-543` source-level skip for `progressive + 4-pixel chroma + non-grayscale` is *kept on purpose*: that path goes through the **transform** writer (`src/api/coefficient.rs::write_coefficients_progressive`), not the encoder writer this session fixed. The transform path retains a `max_h <= 2 && max_v <= 2` filter at `coefficient.rs:1047` that silently falls back to baseline. Lifting that filter is a separate gap (would become P2-12 if pursued); leaving the source-level skip in place keeps the test honest about which paths it actually covers.
 
-**Likely area:**
-
-- `tests/c_tjtrantest.rs` (grayscale Huffman transform branch — investigate which transform op + grayscale combo diverges, and whether the bug is in the transform's progressive Huffman dispatch or in `src/api/coefficient.rs:1047` (the `max_h <= 2 && max_v <= 2` filter that may also need lifting once the transform path can handle 4-pixel chroma).
-
-**Acceptance:**
-
-```bash
-cargo test --features full-c-parity --test c_tjtrantest
-```
-
-Must pass without `continue-on-error`. If a divergence is genuinely a non-goal, document it in `docs/COMPATIBILITY_MATRIX.md` (new) with measured PSNR / pixel-diff numbers and remove the `continue-on-error` flag.
+**Risk note:** flag removal was based on aarch64 macOS local results. Linux x86_64 (the other workflow leg) has not been re-verified locally because we don't have a cross-builder. The workflow runs weekly on Mondays; if the next run reds, react then. The flag was masking a *suspected* x86_64 divergence — it may still be a real one. Re-introducing the flag would be the wrong response: either the bytes match or the test is wrong; either way we want to see the actual failure, not silence it.
 
 ### P2-2. `default_format_message` Printf Expansion — **CLOSED**
 
@@ -912,7 +903,7 @@ The earlier skip-comment claimed "1 LSB downsample diff, decoded pixels match" �
 2. ~~**P2-1** (`c_tjcomptest_full` portion) — Remove `continue-on-error` flag for the encode parity test.~~ **CLOSED 2026-05-04** — flag removed in `.github/workflows/full-c-parity.yml` once P2-11 fix landed. Remaining `c_tjtrantest_full` flag (grayscale Huffman) is still open as a transform-path divergence.
 3. ~~**P2-9** — Decide and document the `JPEG_LIB_VERSION` policy.~~ **CLOSED 2026-05-04** — `docs/ABI_COMPATIBILITY.md` documents the v8-only policy with v6b-SONAME risk explicitly called out; `build.rs` emits a loud `cargo:warning` on the default-risk pairing.
 4. ~~**P2-2** — Implement `format_message` printf expansion.~~ **CLOSED 2026-05-04** — `snprintf_jpeg` helper added in `crates/libjpeg-turbo-rs-capi/src/jpeglib.rs`; `tests/format_message.rs` exercises every specifier `jerror.h` uses against `libc::snprintf` as the reference oracle. TDD red-then-green confirmed.
-5. **P2-1** (remaining `c_tjtrantest_full` portion) — Investigate and fix or formally document the grayscale-Huffman transform divergence; remove the last `continue-on-error` flag.
+5. ~~**P2-1** (remaining `c_tjtrantest_full` portion) — Investigate and fix or formally document the grayscale-Huffman transform divergence; remove the last `continue-on-error` flag.~~ **CLOSED 2026-05-04** — local run on aarch64 reports 11190/0 tested/failed; flag removed for both x86_64 and aarch64 jobs. Suspected x86_64 divergence will surface loudly on the next weekly cron if it's still real.
 6. **P2-4** — Generated C-side ABI cross-check. Cheap insurance against future field-order drift.
 7. **P2-3** — Per-platform offset assertions + CI matrix. Catches Windows / 32-bit drift before consumers do.
 8. **P2-5** — Symbol-inventory diff against upstream. Defines what "drop-in" actually means at the symbol level.
