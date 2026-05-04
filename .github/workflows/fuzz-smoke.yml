@@ -50,7 +50,12 @@ jobs:
             fuzz
 
       - name: Install cargo-fuzz
-        run: cargo install cargo-fuzz --locked
+        # Drop --locked: cargo-fuzz 0.13.1's lockfile pins rustix 0.36.5,
+        # whose `#[cfg_attr(rustc_attrs, ...)]` blocks fail on current
+        # nightly rustc with "cannot find attribute rustc_layout_scalar_*".
+        # Without --locked cargo resolves to a newer rustix that compiles
+        # cleanly on nightly. Reproduced in run 25301178952 (2026-05-04).
+        run: cargo install cargo-fuzz
 
       - name: Install libjpeg-turbo-progs (djpeg + cjpeg + jpegtran) for differential targets
         if: matrix.target == 'fuzz_decode_diff_c' || matrix.target == 'fuzz_encode_diff_c' || matrix.target == 'fuzz_transform_diff_c'
