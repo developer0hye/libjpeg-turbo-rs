@@ -65,9 +65,12 @@ fn jpegtran_path() -> Option<PathBuf> {
     CACHE.get_or_init(|| tool_path(&["jpegtran"])).clone()
 }
 
-/// Stdin → stdout subprocess wrapper. Returns Some(stdout) on exit 0,
-/// None otherwise. We deliberately discard stderr to avoid drowning
-/// the fuzzer log in libjpeg "Premature EOF" warnings.
+/// Stdin → stdout subprocess wrapper. Returns
+/// Some((stdout, c_lenient_recovery)) on exit 0, None otherwise.
+///
+/// `c_lenient_recovery` is true when the C tool emitted any non-empty
+/// stderr — its warning channel for "Premature end of JPEG file",
+/// "Corrupt JPEG data", "Bogus marker length", etc. (codex stop-hook).
 ///
 /// Codex round-1 P2: a naive `write_all` then `wait_with_output`
 /// deadlocks for valid inputs whose decoded PNM exceeds the pipe
@@ -75,12 +78,12 @@ fn jpegtran_path() -> Option<PathBuf> {
 /// parent is still in `write_all`. We spawn a writer thread so
 /// stdout drains concurrently with the stdin write, eliminating the
 /// hang regardless of input size.
-fn pipe_subprocess(bin: &PathBuf, args: &[&str], stdin_bytes: &[u8]) -> Option<Vec<u8>> {
+fn pipe_subprocess(bin: &PathBuf, args: &[&str], stdin_bytes: &[u8]) -> Option<(Vec<u8>, bool)> {
     let mut child = Command::new(bin)
         .args(args)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .stderr(Stdio::null())
+        .stderr(Stdio::piped())
         .spawn()
         .ok()?;
     let mut stdin = child.stdin.take()?;
@@ -94,7 +97,8 @@ fn pipe_subprocess(bin: &PathBuf, args: &[&str], stdin_bytes: &[u8]) -> Option<V
     if !out.status.success() {
         return None;
     }
-    Some(out.stdout)
+    let c_lenient_recovery: bool = !out.stderr.is_empty();
+    Some((out.stdout, c_lenient_recovery))
 }
 
 fn parse_pnm(bytes: &[u8]) -> Option<(usize, usize, usize, Vec<u8>)> {
@@ -133,8 +137,15 @@ fn parse_pnm(bytes: &[u8]) -> Option<(usize, usize, usize, Vec<u8>)> {
     Some((w, h, channels, bytes[i..i + needed].to_vec()))
 }
 
-fn decode_via_djpeg(djpeg: &PathBuf, jpeg: &[u8]) -> Option<(usize, usize, usize, Vec<u8>)> {
-    parse_pnm(&pipe_subprocess(djpeg, &["-pnm"], jpeg)?)
+/// Returns (width, height, channels, raw_pixels, c_lenient_recovery).
+/// `c_lenient_recovery` is true when djpeg emitted any non-empty
+/// stderr while decoding the transformed JPEG — its lenient recovery
+/// signal. Used as the C-side oracle for the bilateral pixel-skip
+/// decision (codex stop-hook).
+fn decode_via_djpeg(djpeg: &PathBuf, jpeg: &[u8]) -> Option<(usize, usize, usize, Vec<u8>, bool)> {
+    let (stdout, c_lenient) = pipe_subprocess(djpeg, &["-pnm"], jpeg)?;
+    let (w, h, c, px) = parse_pnm(&stdout)?;
+    Some((w, h, c, px, c_lenient))
 }
 
 /// Maps fuzz byte → safe op (HFlip / VFlip / Rot180). Other ops are
@@ -172,31 +183,6 @@ fuzz_target!(|data: &[u8]| {
         return;
     }
 
-    // Lenient pre-decode of the source JPEG. If lenient decoding emits
-    // any DecodeWarning (truncated scan, Huffman recovery), the source
-    // bitstream has corrupt blocks that both Rust and C will recover
-    // *differently* (Rust gray-fills, jpegtran often last-block-fills).
-    // Both outputs are valid lenient outputs but they will diverge by
-    // hundreds at the pixel level even though the *transform itself*
-    // is correct. Skip the differential entirely on corrupt sources;
-    // dimension agreement alone is too weak a signal once we're not
-    // running the pixel check, and acceptance agreement is already
-    // covered by the early-return paths above.
-    let source_is_corrupt = {
-        let mut probe2 = match Decoder::new(jpeg) {
-            Ok(d) => d,
-            Err(_) => return,
-        };
-        probe2.set_lenient(true);
-        match probe2.decode_image() {
-            Ok(img) => !img.warnings.is_empty(),
-            Err(_) => return, // even lenient mode rejected — not a fair source.
-        }
-    };
-    if source_is_corrupt {
-        return;
-    }
-
     // C jpegtran first — if it rejects, the input is not a valid JPEG
     // (or hits one of jpegtran's stricter validation paths) and we
     // skip the differential rather than panic on Rust accepting more.
@@ -210,8 +196,10 @@ fuzz_target!(|data: &[u8]| {
     // transform itself is correct.
     let mut c_args: Vec<&str> = vec!["-copy", "all"];
     c_args.extend(c_flag.split(' '));
-    let c_transformed = pipe_subprocess(&jpegtran, &c_args, jpeg);
-    let Some(c_transformed) = c_transformed else {
+    // The jpegtran stderr signal here would tell us "the source was
+    // corrupt" but we already get that from the bilateral decode-stage
+    // signal below — keep this call simple and discard the bool.
+    let Some((c_transformed, _)) = pipe_subprocess(&jpegtran, &c_args, jpeg) else {
         return;
     };
 
@@ -264,13 +252,25 @@ fuzz_target!(|data: &[u8]| {
     let r_decoded = decode_via_djpeg(&djpeg, &r_transformed);
 
     match (c_decoded, r_decoded) {
-        (Some((cw, ch, cc, c_px)), Some((rw, rh, rc, r_px))) => {
+        (
+            Some((cw, ch, cc, c_px, c_lenient)),
+            Some((rw, rh, rc, r_px, r_lenient)),
+        ) => {
             if cw != rw || ch != rh || cc != rc {
                 panic!(
                     "transform-diff {:?}: decoded dims diverge: \
                      C={}x{}x{}, Rust={}x{}x{}",
                     op, cw, ch, cc, rw, rh, rc
                 );
+            }
+            // Codex stop-hook: skip pixel-diff only when *both* djpeg
+            // decodes report lenient recovery on the transformed
+            // outputs. Bilateral agreement prevents either side from
+            // unilaterally suppressing the oracle. If only one side's
+            // decode ran clean, the pixel comparison still fires and
+            // any genuine transform divergence surfaces as a panic.
+            if c_lenient && r_lenient {
+                return;
             }
             let mut max_d: i32 = 0;
             for (a, b) in c_px.iter().zip(r_px.iter()) {
