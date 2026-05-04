@@ -29,7 +29,25 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - run: cargo publish --dry-run --allow-dirty
       - name: Publish to crates.io (skip if already published)
-        run: cargo publish --allow-dirty 2>&1 || echo "::warning::crate already published or publish failed"
+        # Codex P2: a blanket `|| echo` swallowed real upload failures
+        # (bad token, permissions, network) and reported a green release
+        # workflow with no actual publish. Only swallow the documented
+        # "already uploaded" case; everything else must keep the job
+        # failing so the release tag does not look successful.
+        run: |
+          set -o pipefail
+          output=$(cargo publish --allow-dirty 2>&1)
+          status=$?
+          echo "$output"
+          if [ "$status" -eq 0 ]; then
+            exit 0
+          fi
+          if echo "$output" | grep -qiE "already (uploaded|exists)"; then
+            echo "::warning::libjpeg-turbo-rs already at this version on crates.io; skipping"
+            exit 0
+          fi
+          echo "::error::cargo publish failed for libjpeg-turbo-rs (not an already-published case)"
+          exit "$status"
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
 
@@ -59,7 +77,24 @@ jobs:
         run: sleep 90
       - run: cargo publish -p libjpeg-turbo-rs-capi --dry-run --allow-dirty
       - name: Publish to crates.io (skip if already published)
-        run: cargo publish -p libjpeg-turbo-rs-capi --allow-dirty 2>&1 || echo "::warning::capi crate already published or publish failed"
+        # Codex P2: same precise-failure handling as the root publish step
+        # — only swallow "already uploaded" responses; surface every other
+        # cargo publish failure (token, permissions, network, build error)
+        # as a real job failure so the release tag does not appear green.
+        run: |
+          set -o pipefail
+          output=$(cargo publish -p libjpeg-turbo-rs-capi --allow-dirty 2>&1)
+          status=$?
+          echo "$output"
+          if [ "$status" -eq 0 ]; then
+            exit 0
+          fi
+          if echo "$output" | grep -qiE "already (uploaded|exists)"; then
+            echo "::warning::libjpeg-turbo-rs-capi already at this version on crates.io; skipping"
+            exit 0
+          fi
+          echo "::error::cargo publish failed for libjpeg-turbo-rs-capi (not an already-published case)"
+          exit "$status"
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
 
@@ -103,6 +138,26 @@ jobs:
           registry-url: 'https://registry.npmjs.org'
 
       - name: Publish to npm (skip if already published)
-        run: cd crates/libjpeg-turbo-rs-wasm/pkg && npm publish --access public 2>&1 || echo "::warning::npm package already published or publish failed"
+        # Same precise-failure handling as the cargo publish steps:
+        # only swallow npm's "you cannot publish over the previously
+        # published versions" response (EPUBLISHCONFLICT). Token /
+        # network / build failures must keep the job red so the
+        # release tag does not look successful when nothing actually
+        # uploaded.
+        run: |
+          set -o pipefail
+          cd crates/libjpeg-turbo-rs-wasm/pkg
+          output=$(npm publish --access public 2>&1)
+          status=$?
+          echo "$output"
+          if [ "$status" -eq 0 ]; then
+            exit 0
+          fi
+          if echo "$output" | grep -qiE "EPUBLISHCONFLICT|cannot publish over|already published"; then
+            echo "::warning::libjpeg-turbo-rs-wasm already at this version on npm; skipping"
+            exit 0
+          fi
+          echo "::error::npm publish failed for libjpeg-turbo-rs-wasm (not an already-published case)"
+          exit "$status"
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
