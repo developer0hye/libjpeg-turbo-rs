@@ -31,6 +31,7 @@ pub mod imageio;
 pub mod jpeglib;
 pub mod legacy;
 pub mod memmgr;
+pub mod mozjpeg_compat;
 pub mod precision;
 pub mod tj3;
 pub mod transform;
@@ -82,6 +83,16 @@ pub use jpeglib::{
     jpeg_stdio_dest, jpeg_suppress_tables, jpeg_write_coefficients, jpeg_write_icc_profile,
     jpeg_write_m_byte, jpeg_write_m_header, jpeg_write_marker, jpeg_write_scanlines,
     jpeg_write_tables, JpegComponentInfoCompress, JpegCompressPublic, JpegDestinationMgr,
+};
+
+// mozjpeg parameter-API stubs — let consumers linked against mozjpeg
+// (Homebrew libvips, Pillow-mozjpeg, several Linux distros) dyld-resolve
+// against our cdylib. All probes return FALSE so the consumer falls
+// through to the standard libjpeg encode path we implement.
+pub use mozjpeg_compat::{
+    jpeg_c_bool_param_supported, jpeg_c_float_param_supported, jpeg_c_get_bool_param,
+    jpeg_c_get_float_param, jpeg_c_get_int_param, jpeg_c_int_param_supported,
+    jpeg_c_set_bool_param, jpeg_c_set_float_param, jpeg_c_set_int_param,
 };
 
 // Legacy TJ1/TJ2 aliases — thin wrappers around the TJ3 surface above.
