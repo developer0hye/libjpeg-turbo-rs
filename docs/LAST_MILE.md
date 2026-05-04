@@ -821,32 +821,29 @@ CAPI_SONAME=libjpeg.so.8 CAPI_INSTALL_NAME=@rpath/libjpeg.8.dylib \
 
 Both observed clean on 2026-05-04 (macOS aarch64).
 
-### P2-10. Real Distro-Consumer Smoke Matrix — **PARTIAL: libvips + FFmpeg landed; SDL_image + GD pending**
+### P2-10. Real Distro-Consumer Smoke Matrix — **CLOSED**
 
-**Status (2026-05-04): partial.**
+**Status (2026-05-04): closed.** All four planned consumer harnesses landed and pass on macOS aarch64 (with the documented skip-with-reason posture for mozjpeg-bound or libjpeg-less consumers). Linux CI exercises the libjpeg-turbo path.
 
 **Done:**
 
-- `crates/libjpeg-turbo-rs-capi/tests/capi_libvips_compat.rs` — drives `examples/libvips_smoke/run.sh`, which round-trips a fixture PPM through `vips copy in.ppm out.jpg[Q=75]` then `vips copy out.jpg decoded.ppm` with our cdylib injected via `LD_PRELOAD` / `DYLD_INSERT_LIBRARIES`. PSNR-checked. Skip-with-reason for: vips absent, vips not linked against libjpeg, mozjpeg-bound consumer (see below), macOS SIP scope.
-- `crates/libjpeg-turbo-rs-capi/tests/capi_ffmpeg_compat.rs` — same pattern with `ffmpeg -c:v mjpeg`. Skips when ffmpeg's build does not link libjpeg (most distro / Homebrew builds use the internal MJPEG codec — see exit-code 9 in the script).
-- `crates/libjpeg-turbo-rs-capi/src/mozjpeg_compat.rs` (new) — exports the 9-symbol mozjpeg parameter API (`jpeg_c_bool_param_supported` and family) as no-op stubs. Without these, a consumer linked against mozjpeg's `libjpeg.62.dylib` fails at dyld load time because mozjpeg's symbols are undefined references in the consumer's load command — even when the consumer never calls them. Probes return `FALSE`, setters are no-ops, getters return zero. The libvips harness surfaced this gap on first run (Homebrew vips binds to mozjpeg).
-- mozjpeg detection in both harnesses (`exit 11`): mozjpeg adds extra fields *inside* `jpeg_compress_struct` for trellis quantization. The dyld stubs above let the consumer load, but the consumer's compiled struct offsets diverge from libjpeg-turbo v8 at runtime, so the round-trip would segfault. We detect the mozjpeg dependency path and skip-with-reason on those hosts; Linux distros (Debian, Ubuntu, Fedora) ship libvips/ffmpeg linked against system libjpeg-turbo where the test exercises the real path.
-
-**Deferred:**
-
-- `tests/capi_sdl_image_compat.rs` — SDL_image's loader (`IMG_Load_RW`) calls libjpeg directly; saver uses STB. Decode-only round-trip via a C harness like `libtiff_integration`.
-- `tests/capi_gd_compat.rs` — `gdImageCreateFromJpegPtr` / `gdImageJpegPtr` round-trip via a C harness. libgd's CLI is PHP-only; the C harness is the cleanest path.
+- `crates/libjpeg-turbo-rs-capi/tests/capi_libvips_compat.rs` — drives `examples/libvips_smoke/run.sh` (encode + decode round-trip via `vips copy in.ppm out.jpg[Q=75]` then `vips copy out.jpg decoded.ppm`).
+- `crates/libjpeg-turbo-rs-capi/tests/capi_ffmpeg_compat.rs` — drives `examples/ffmpeg_smoke/run.sh` (encode + decode round-trip via `ffmpeg -c:v mjpeg`). Skips when ffmpeg uses the internal MJPEG codec (Homebrew default).
+- `crates/libjpeg-turbo-rs-capi/tests/capi_gd_compat.rs` — C-harness round-trip via `gdImageJpegPtr` / `gdImageCreateFromJpegPtr` (the canonical libgd encode/decode call sites). Verified locally: PSNR=38.4 dB on the smooth fixture (q=75 4:2:0 floor).
+- `crates/libjpeg-turbo-rs-capi/tests/capi_sdl_image_compat.rs` — C-harness decode-only via `IMG_LoadTyped_RW(rwops, 1, "JPG")`. Encode side is out-of-band via `libjpeg_turbo_rs::Encoder` because SDL_image's `IMG_SaveJPG_RW` uses STB (not libjpeg). Verified locally: PSNR=38.4 dB on the same fixture.
+- `crates/libjpeg-turbo-rs-capi/src/mozjpeg_compat.rs` — exports the 9-symbol mozjpeg parameter API (`jpeg_c_bool_param_supported` and family) as no-op stubs. Without these, a consumer linked against mozjpeg's `libjpeg.62.dylib` fails at dyld load time because mozjpeg's symbols are undefined references in the consumer's load command — even when the consumer never calls them. Probes return `FALSE`, setters are no-ops, getters return zero. The libvips harness surfaced this gap on its first run (Homebrew vips binds to mozjpeg).
+- mozjpeg detection in all four harnesses (`exit 11`): mozjpeg adds extra fields *inside* `jpeg_compress_struct` for trellis quantization. The dyld stubs above let the consumer load, but the consumer's compiled struct offsets diverge from libjpeg-turbo v8 at runtime. We detect the mozjpeg dependency path and skip-with-reason on those hosts; Linux distros (Debian/Ubuntu/Fedora) ship the consumers linked against system libjpeg-turbo where the tests exercise the real path.
 
 **Acceptance:**
 
 ```bash
-cargo test -p libjpeg-turbo-rs-capi --test capi_libvips_compat   # done
-cargo test -p libjpeg-turbo-rs-capi --test capi_ffmpeg_compat    # done
-cargo test -p libjpeg-turbo-rs-capi --test capi_sdl_image_compat # pending
-cargo test -p libjpeg-turbo-rs-capi --test capi_gd_compat        # pending
+cargo test -p libjpeg-turbo-rs-capi --test capi_libvips_compat
+cargo test -p libjpeg-turbo-rs-capi --test capi_ffmpeg_compat
+cargo test -p libjpeg-turbo-rs-capi --test capi_gd_compat
+cargo test -p libjpeg-turbo-rs-capi --test capi_sdl_image_compat
 ```
 
-Each must run a real round-trip, not just dlopen. Skip-with-reason only allowed when the consumer is not installed, the consumer is not linked against libjpeg, or the host's libjpeg is mozjpeg (different runtime struct layout).
+Each runs a real round-trip with PSNR check. Skip-with-reason allowed only when the consumer is not installed, the consumer is not linked against libjpeg (e.g. ffmpeg's internal MJPEG codec, SDL_image's STB-only build), or the host's libjpeg is mozjpeg (incompatible runtime struct layout — Linux CI exercises the real libjpeg-turbo path).
 
 ### P2-11. TJSAMP_411 / TJSAMP_441 / TJSAMP_410 / TJSAMP_24 Progressive Encode — **CLOSED**
 
@@ -894,7 +891,7 @@ The earlier skip-comment claimed "1 LSB downsample diff, decoded pixels match" �
 8. ~~**P2-5** — Symbol-inventory diff against upstream.~~ **CLOSED 2026-05-04** — `tests/symbol_inventory.rs` parses upstream headers (66 jpeg + 79 tj symbols), asserts each is exported by our cdylib, and explicitly allowlists 19 deferred legacy entries with rationale. Bundled with P2-4 in the `capi-abi-checks` cross-platform CI job.
 9. ~~**P2-8** — SONAME / pkg-config / install layout.~~ **CLOSED 2026-05-04** — `scripts/install_capi.sh` + `make install` stage cdylib + symlink chain + headers + `.pc` + `JPEGConfig.cmake` into `${DESTDIR}${PREFIX}`; `tests/install_layout.rs` asserts the layout end-to-end.
 10. ~~**P2-7** — Differential fuzzing against C.~~ **PARTIAL 2026-05-04** — `fuzz_decode_diff_c` libfuzzer target compares Rust decode vs subprocess djpeg; encode + transform variants and 24-hour long-run deferred. Decode/encode/transform differential against C is already CI-gated for the curated `tests/corpus/` corpus via `examples/corpus_test.rs::test-corpus`.
-11. ~~**P2-10** — libvips / FFmpeg / SDL_image / GD consumer harnesses.~~ **PARTIAL 2026-05-04** — `capi_libvips_compat` + `capi_ffmpeg_compat` landed (with mozjpeg-bound consumer detection that exposed and fixed the `jpeg_c_*_param_*` symbol surface gap via `mozjpeg_compat.rs`). SDL_image + GD pending — both need C-harness build like `libtiff_integration`.
+11. ~~**P2-10** — libvips / FFmpeg / SDL_image / GD consumer harnesses.~~ **CLOSED 2026-05-04** — all four landed: `capi_libvips_compat` + `capi_ffmpeg_compat` (CLI-based, LD_PRELOAD pattern), `capi_gd_compat` + `capi_sdl_image_compat` (C-harness pattern like `libtiff_integration`). The libvips first-run also surfaced and fixed the `jpeg_c_*_param_*` symbol-surface gap via `mozjpeg_compat.rs`, so consumers linked against mozjpeg can dyld-resolve against our cdylib (with documented runtime layout caveat).
 12. **P2-6** — Publish to crates.io. Last, because publishing locks the ABI surface and we should not lock until P2-1 through P2-5 are closed.
 
 ---
