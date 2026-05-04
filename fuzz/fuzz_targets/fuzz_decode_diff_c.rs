@@ -117,7 +117,18 @@ fn parse_pnm(bytes: &[u8]) -> Option<(usize, usize, usize, Vec<u8>)> {
 }
 
 fn rust_decode(jpeg: &[u8]) -> Option<(usize, usize, usize, Vec<u8>)> {
-    let img = Decoder::decode(jpeg).ok()?;
+    // Use lenient mode to mirror djpeg's default best-effort behaviour.
+    // djpeg treats CorruptData (truncated scans, invalid AC run/size,
+    // out-of-bounds coefficient indices, etc.) as warnings and fills
+    // unrecoverable blocks with gray. Strict mode would reject inputs
+    // djpeg silently recovers from, producing false-positive
+    // "drop-in regression" panics on fuzzed inputs that are not
+    // actually drop-in regressions. The strict path is exercised by
+    // `fuzz_decompress`; this differential target compares Rust's
+    // *drop-in* behaviour against djpeg's *drop-in* behaviour.
+    let mut decoder = Decoder::new(jpeg).ok()?;
+    decoder.set_lenient(true);
+    let img = decoder.decode_image().ok()?;
     let channels: usize = match img.pixel_format {
         libjpeg_turbo_rs::PixelFormat::Grayscale => 1,
         libjpeg_turbo_rs::PixelFormat::Rgb => 3,
