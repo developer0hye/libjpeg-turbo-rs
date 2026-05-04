@@ -825,22 +825,29 @@ LD_LIBRARY_PATH=/tmp/install/usr/lib python3 -c "from PIL import Image; Image.op
 
 Each command must succeed against the staged tree (resolving to our cdylib, not the system's upstream copy). `tests/install_layout.rs` should automate this in CI.
 
-### P2-9. v6b / v7 / v8 ABI Compatibility Matrix Is Undocumented
+### P2-9. v6b / v7 / v8 ABI Compatibility Matrix — **CLOSED**
 
-**Symptom:** `crates/libjpeg-turbo-rs-capi/src/jpeglib.rs:11` says we target `JPEG_LIB_VERSION = 80`. Upstream libjpeg-turbo supports `WITH_JPEG7` and `WITH_JPEG8` CMake options at build time and ships separate SONAMEs (`libjpeg.so.62` ≈ v6b ABI, `libjpeg.so.7`, `libjpeg.so.8`) for each.
+**Status (2026-05-04): closed via the documentation acceptance gate.** `docs/ABI_COMPATIBILITY.md` lands with the explicit decision: **v8-only struct layout; v6b SONAME is the documented-risk default; `CAPI_SONAME=libjpeg.so.8` + `CAPI_INSTALL_NAME=@rpath/libjpeg.8.dylib` is the production-safe override.** Per-version cdylib variants are explicitly deferred as a Phase 3 ask.
 
-We currently expose v8 fields (`scale_num`/`scale_denom`/`do_fancy_upsampling`/`is_baseline`) on a struct labelled `libjpeg.so.62`. The mismatch is silent: a consumer compiled against system `jpeglib.h` with `JPEG_LIB_VERSION = 62` will see different field positions than our shim assumes.
+The companion build.rs change (`crates/libjpeg-turbo-rs-capi/build.rs:30-44,57-78`) emits a loud `cargo:warning=…` whenever the default `libjpeg.so.62` SONAME / `libjpeg.62.dylib` install_name pairing is used in a v8 build. The warning explains the risk, points at `docs/ABI_COMPATIBILITY.md`, names the safe override, and offers `CAPI_ACK_V6B_SONAME=1` for callers that have evaluated the risk and accept it. Setting either env var to a non-default value (or the ack flag) silences the warning, so the noise scales with how aware the operator is.
 
-**Why this matters:** Most distros ship `libjpeg.so.62` (v6b ABI). Pillow's `_imaging.so` is typically compiled against the headers that match whichever SONAME the distro ships. Targeting v8 layout while exposing the v6b SONAME causes offset shifts on real consumers.
+**What this *does not* close:**
 
-**Likely area:**
+- Real binary v6b drop-in (per-version layouts and per-version cdylibs) — explicitly out of scope per the doc's roadmap.
+- The case where a downstream packaging script bypasses cargo and the build.rs warning never reaches the operator. That's mitigated by the doc, not the warning.
 
-- `docs/ABI_COMPATIBILITY.md` (new): which `JPEG_LIB_VERSION` we target, which SONAMEs we are willing to expose, and the policy for v6b consumers.
-- `crates/libjpeg-turbo-rs-capi/src/jpeglib.rs`: introduce per-version layout types behind a `lib_version` cfg, mirroring upstream's `WITH_JPEG7` / `WITH_JPEG8` conditionals.
+**Verification:**
 
-**Acceptance:**
+```bash
+# Default → loud cargo:warning lands on the build line.
+cargo build -p libjpeg-turbo-rs-capi --release 2>&1 | grep -F "v6b"
 
-`docs/ABI_COMPATIBILITY.md` lands with an explicit decision (e.g. "v8 only; refuse to expose `libjpeg.so.62` SONAME"), or the crate ships per-version layouts and the build matrix tests each. Either is acceptable; ambiguity is not.
+# Production-safe build → silent.
+CAPI_SONAME=libjpeg.so.8 CAPI_INSTALL_NAME=@rpath/libjpeg.8.dylib \
+  cargo build -p libjpeg-turbo-rs-capi --release 2>&1 | grep -F "v6b" || echo "silent ok"
+```
+
+Both observed clean on 2026-05-04 (macOS aarch64).
 
 ### P2-10. Real Distro-Consumer Smoke Matrix Is Limited to Two Programs
 
@@ -912,7 +919,7 @@ The earlier skip-comment claimed "1 LSB downsample diff, decoded pixels match" �
 
 1. ~~**P2-11** — Close the TJSAMP_411/441/410/24 progressive-encode byte-parity gap.~~ **CLOSED 2026-05-04** — root cause was a chroma-sampling-factor clamp in `progressive_fdct_chroma_block`; fix landed in `src/encode/pipeline.rs`, source-level test skip deleted, regression test in `tests/regression_progressive_4pixel_chroma.rs`.
 2. ~~**P2-1** (`c_tjcomptest_full` portion) — Remove `continue-on-error` flag for the encode parity test.~~ **CLOSED 2026-05-04** — flag removed in `.github/workflows/full-c-parity.yml` once P2-11 fix landed. Remaining `c_tjtrantest_full` flag (grayscale Huffman) is still open as a transform-path divergence.
-3. **P2-9** — Decide and document the `JPEG_LIB_VERSION` policy. Without this, P2-3 / P2-5 / P2-8 do not have a target to test against.
+3. ~~**P2-9** — Decide and document the `JPEG_LIB_VERSION` policy.~~ **CLOSED 2026-05-04** — `docs/ABI_COMPATIBILITY.md` documents the v8-only policy with v6b-SONAME risk explicitly called out; `build.rs` emits a loud `cargo:warning` on the default-risk pairing.
 4. **P2-2** — Implement `format_message` printf expansion. Small, self-contained, unblocks downstream error reporting.
 5. **P2-1** (remaining `c_tjtrantest_full` portion) — Investigate and fix or formally document the grayscale-Huffman transform divergence; remove the last `continue-on-error` flag.
 6. **P2-4** — Generated C-side ABI cross-check. Cheap insurance against future field-order drift.
