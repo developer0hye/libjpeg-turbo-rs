@@ -110,13 +110,22 @@ BINARY_REAL="$(/usr/bin/readlink -f "$BINARY" 2>/dev/null || readlink -f "$BINAR
 
 case "$(uname -s)" in
   Linux)
+    # Stage BOTH SONAMEs so SDL_image's LOAD_JPG_DYNAMIC finds our
+    # cdylib whether the build was compiled with `libjpeg.so.62` (v6b
+    # SONAME, libjpeg-turbo default) or `libjpeg.so.8` (v8 SONAME, the
+    # newer mainstream choice) as the dlopen target. Without both, a
+    # dynamic-load SDL_image whose name string mismatches our SONAME
+    # would silently fall through to the system libjpeg or its STB
+    # fallback — yielding a passing PSNR with no real coverage.
     ln -sf "$LIB" "$SYMLINK_DIR/libjpeg.so.62"
+    ln -sf "$LIB" "$SYMLINK_DIR/libjpeg.so.8"
     ln -sf "libjpeg.so.62" "$SYMLINK_DIR/libjpeg.so"
     export LD_PRELOAD="$SYMLINK_DIR/libjpeg.so.62${LD_PRELOAD:+:$LD_PRELOAD}"
     export LD_LIBRARY_PATH="$SYMLINK_DIR${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
     ;;
   Darwin)
     ln -sf "$LIB" "$SYMLINK_DIR/libjpeg.62.dylib"
+    ln -sf "$LIB" "$SYMLINK_DIR/libjpeg.8.dylib"
     ln -sf "libjpeg.62.dylib" "$SYMLINK_DIR/libjpeg.dylib"
     case "$BINARY_REAL" in
       /usr/*|/bin/*|/sbin/*|/System/*|/Applications/*)
