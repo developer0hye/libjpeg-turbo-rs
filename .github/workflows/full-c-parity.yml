@@ -33,7 +33,6 @@ jobs:
       - name: c_tjcomptest_full
         run: cargo test --features full-c-parity --test c_tjcomptest
         timeout-minutes: 10
-        continue-on-error: true  # Known failures: samp410, lossless RGB
       - name: c_tjtrantest_full
         run: cargo test --features full-c-parity --test c_tjtrantest
         timeout-minutes: 10
@@ -60,7 +59,6 @@ jobs:
       - name: c_tjcomptest_full
         run: cargo test --features full-c-parity --test c_tjcomptest
         timeout-minutes: 10
-        continue-on-error: true
       - name: c_tjtrantest_full
         run: cargo test --features full-c-parity --test c_tjtrantest
         timeout-minutes: 10
