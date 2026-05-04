@@ -156,8 +156,7 @@ fuzz_target!(|data: &[u8]| {
         // Gate dimensions again on the transformed output.
         if let Ok(out_dec) = Decoder::new(&transformed) {
             let out_hdr = out_dec.header();
-            let out_pixels: u64 =
-                (out_hdr.width as u64).saturating_mul(out_hdr.height as u64);
+            let out_pixels: u64 = (out_hdr.width as u64).saturating_mul(out_hdr.height as u64);
             if out_hdr.width > 0 && out_hdr.height > 0 && out_pixels <= MAX_FUZZ_PIXELS {
                 drop(out_dec);
                 // The transformed JPEG must survive read_coefficients.

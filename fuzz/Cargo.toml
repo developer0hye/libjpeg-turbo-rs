@@ -60,3 +60,10 @@ doc = false
 name = "fuzz_transform_options"
 path = "fuzz_targets/fuzz_transform_options.rs"
 doc = false
+
+# P2-7: differential decode fuzzer. Compares Rust decode output to
+# subprocessed `djpeg` for each fuzzed input and panics on divergence.
+[[bin]]
+name = "fuzz_decode_diff_c"
+path = "fuzz_targets/fuzz_decode_diff_c.rs"
+doc = false

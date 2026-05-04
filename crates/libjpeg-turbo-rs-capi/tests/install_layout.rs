@@ -245,9 +245,7 @@ fn install_capi_sh_honors_soname_override() {
         String::from_utf8_lossy(&status.stderr)
     );
 
-    let lib: PathBuf = destdir
-        .join(prefix.trim_start_matches('/'))
-        .join("lib");
+    let lib: PathBuf = destdir.join(prefix.trim_start_matches('/')).join("lib");
 
     let major: PathBuf = lib.join(expected_major);
     let dev: PathBuf = lib.join(expected_dev);
