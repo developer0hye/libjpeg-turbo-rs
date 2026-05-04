@@ -200,3 +200,75 @@ fn install_capi_sh_produces_complete_layout() {
         eprintln!("NOTE: pkg-config not on PATH; skipping the optional --libs check");
     }
 }
+
+/// Codex round-1: passing `--soname libjpeg.8.dylib` (the
+/// production-safe SONAME from docs/ABI_COMPATIBILITY.md) must change
+/// the symlink chain accordingly. Prior to the fix, `--soname` was
+/// declared but silently ignored.
+#[test]
+fn install_capi_sh_honors_soname_override() {
+    if cfg!(windows) {
+        eprintln!("SKIP: install_capi.sh is bash; Windows packagers use their own conventions");
+        return;
+    }
+    if Command::new("bash").arg("--version").output().is_err() {
+        eprintln!("SKIP: bash not on PATH");
+        return;
+    }
+
+    let root: PathBuf = workspace_root();
+    ensure_cdylib(&root);
+
+    let tmp: tempfile::TempDir = tempfile::tempdir().expect("mkdir tempdir");
+    let prefix: &str = "/usr";
+    let destdir: &Path = tmp.path();
+
+    // Use the v8 SONAMEs the policy doc names.
+    let (override_soname, expected_major, expected_dev) = if cfg!(target_os = "macos") {
+        ("libjpeg.8.dylib", "libjpeg.8.dylib", "libjpeg.dylib")
+    } else {
+        ("libjpeg.so.8", "libjpeg.so.8", "libjpeg.so")
+    };
+
+    let status = Command::new("bash")
+        .arg(root.join("scripts/install_capi.sh"))
+        .args(["--destdir", &destdir.to_string_lossy()])
+        .args(["--prefix", prefix])
+        .args(["--root", &root.to_string_lossy()])
+        .args(["--soname", override_soname])
+        .output()
+        .expect("invoke install_capi.sh");
+    assert!(
+        status.status.success(),
+        "install_capi.sh --soname failed:\n--- stdout ---\n{}\n--- stderr ---\n{}",
+        String::from_utf8_lossy(&status.stdout),
+        String::from_utf8_lossy(&status.stderr)
+    );
+
+    let lib: PathBuf = destdir
+        .join(prefix.trim_start_matches('/'))
+        .join("lib");
+
+    let major: PathBuf = lib.join(expected_major);
+    let dev: PathBuf = lib.join(expected_dev);
+    assert!(
+        major.is_symlink(),
+        "{:?} not a symlink — `--soname {}` was ignored",
+        major,
+        override_soname
+    );
+    assert!(dev.is_symlink(), "{:?} dev symlink missing", dev);
+
+    // The default v6b symlink must NOT be staged when an override is
+    // active — that would silently double-install both ABIs.
+    let v6b: PathBuf = lib.join(if cfg!(target_os = "macos") {
+        "libjpeg.62.dylib"
+    } else {
+        "libjpeg.so.62"
+    });
+    assert!(
+        !v6b.exists(),
+        "{:?} should not be installed when --soname overrides the default",
+        v6b
+    );
+}
