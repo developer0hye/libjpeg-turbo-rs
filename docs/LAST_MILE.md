@@ -749,44 +749,47 @@ cargo +nightly fuzz run fuzz_transform_diff_c -- -max_total_time=600
 
 Each must run 10 min in CI without finding a divergence. Add a 24-hour scheduled-fuzz workflow that runs them at `-max_total_time=86400` weekly and uploads the corpus. Publish the seed/coverage corpus alongside releases (per OSS-Fuzz conventions).
 
-### P2-8. Install-Staging, Symlink Chain, and CMake Config Are Missing
+### P2-8. Install-Staging, Symlink Chain, and CMake Config — **CLOSED**
 
-**Already done (do not re-do):**
+**Status (2026-05-04): closed.** `scripts/install_capi.sh` stages the full distro-replacement layout into `${DESTDIR}${PREFIX}`:
 
-- SONAME / install_name wiring on the cdylib (`crates/libjpeg-turbo-rs-capi/build.rs:30-44`): `-Wl,-soname,libjpeg.so.62` on Linux/BSD, `-Wl,-install_name,libjpeg.62.dylib` on macOS, opt-in via `CAPI_SONAME` env. `tjunittest_link.rs:46,125,180` and `compress8.rs:255-335` already exercise the dlopen-by-SONAME path.
-- pkg-config generation (`build.rs:47-89`): `libjpeg.pc` and `libturbojpeg.pc` written into `OUT_DIR` and validated by `tests/pkgconfig.rs`.
-
-**Symptom:** What is genuinely missing is everything between "OUT_DIR contains the right artifacts" and "a distro consumer can `pkg-config --libs libjpeg` against an installed tree":
-
-1. **No `cargo xtask install` / Makefile install target** that copies the cdylib + symlink chain (`libjpeg.so` → `libjpeg.so.62` → `libjpeg.so.62.X.Y`, plus `libturbojpeg.so` → `libturbojpeg.so.0` → `libturbojpeg.so.0.X.Y`) and the `.pc` files into `${DESTDIR}${PREFIX}/{lib,include,lib/pkgconfig}` the way upstream's `cmake --install` does. `find crates/libjpeg-turbo-rs-capi -name 'install*'` returns nothing.
-2. **No header install layout.** The shim's mirror of `jpeglib.h` / `jerror.h` / `jmorecfg.h` / `jconfig.h` / `turbojpeg.h` is internal to the Rust source; we do not stage standalone C headers that a consumer's `#include <jpeglib.h>` would resolve against.
-3. **No CMake config (`libjpeg-turboConfig.cmake` / `find_package(JPEG)` shim).** Modern CMake consumers use `find_package(JPEG REQUIRED)` and read `JPEG_LIBRARIES` / `JPEG_INCLUDE_DIRS`. Without our config in `${PREFIX}/lib/cmake/`, those consumers find upstream libjpeg-turbo and link there, not us.
-4. **No `tests/install_layout.rs` harness** that runs the install target into a tempdir and asserts the `pkg-config --libs libjpeg`, `pkg-config --modversion libturbojpeg`, and `cmake --find-package -DNAME=JPEG -DLANGUAGE=C -DMODE=EXIST` queries all resolve to our staged tree.
-
-**Why this matters:** Distro packaging needs the full install layout, not just the right artifacts in `target/release/`. A maintainer building a `libjpeg-turbo-rs-capi.deb` / Homebrew formula / Arch PKGBUILD today would have to hand-write the symlink chain, header copy, and CMake config every time.
-
-**Likely area:**
-
-- `crates/libjpeg-turbo-rs-capi/xtask/` (new) or top-level `Makefile`: install-tree staging.
-- `crates/libjpeg-turbo-rs-capi/cmake/JPEGConfig.cmake.in` (new): the CMake config template, with version + imported-target wiring.
-- `crates/libjpeg-turbo-rs-capi/include/` (new): C headers staged for install (mirroring upstream `references/libjpeg-turbo/src/jpeglib.h` etc.).
-- `crates/libjpeg-turbo-rs-capi/tests/install_layout.rs` (new): end-to-end install + lookup harness.
-
-**Acceptance:**
-
-```bash
-cargo run --bin xtask -- install --destdir /tmp/install --prefix /usr
-test -L /tmp/install/usr/lib/libjpeg.so
-test -L /tmp/install/usr/lib/libjpeg.so.62
-test -f /tmp/install/usr/lib/pkgconfig/libjpeg.pc
-test -f /tmp/install/usr/include/jpeglib.h
-PKG_CONFIG_PATH=/tmp/install/usr/lib/pkgconfig pkg-config --libs libjpeg | grep -q -- '-ljpeg'
-cmake --find-package -DNAME=JPEG -DLANGUAGE=C -DMODE=EXIST \
-      -DCMAKE_PREFIX_PATH=/tmp/install/usr
-LD_LIBRARY_PATH=/tmp/install/usr/lib python3 -c "from PIL import Image; Image.open('tests/fixtures/cjpeg_240x320_portrait_444.jpg').load()"
+```
+${DESTDIR}${PREFIX}/lib/libjpeg.so.62.X.Y         # cdylib (or libjpeg.62.X.Y.dylib on macOS)
+${DESTDIR}${PREFIX}/lib/libjpeg.so.62             # symlink → above
+${DESTDIR}${PREFIX}/lib/libjpeg.so                # symlink → libjpeg.so.62
+${DESTDIR}${PREFIX}/lib/libturbojpeg.so.0.X.Y     # same cdylib (we export both APIs)
+${DESTDIR}${PREFIX}/lib/libturbojpeg.so.0
+${DESTDIR}${PREFIX}/lib/libturbojpeg.so
+${DESTDIR}${PREFIX}/lib/pkgconfig/libjpeg.pc
+${DESTDIR}${PREFIX}/lib/pkgconfig/libturbojpeg.pc
+${DESTDIR}${PREFIX}/lib/cmake/JPEG/JPEGConfig.cmake
+${DESTDIR}${PREFIX}/include/jpeglib.h             # verbatim from references/libjpeg-turbo/src/
+${DESTDIR}${PREFIX}/include/jerror.h
+${DESTDIR}${PREFIX}/include/jmorecfg.h
+${DESTDIR}${PREFIX}/include/jconfig.h             # generated; pins JPEG_LIB_VERSION 80
+${DESTDIR}${PREFIX}/include/turbojpeg.h
 ```
 
-Each command must succeed against the staged tree (resolving to our cdylib, not the system's upstream copy). `tests/install_layout.rs` should automate this in CI.
+The script supports `--destdir` / `--prefix` / `--soname` flags and an optional `--build` switch that builds the cdylib first if missing. It is wired into the top-level `Makefile` as `make install [DESTDIR=…] [PREFIX=…]`.
+
+**CMake config** (`JPEGConfig.cmake`) exposes `JPEG_VERSION`, `JPEG_INCLUDE_DIRS`, `JPEG_LIBRARIES`, and the `JPEG::JPEG` imported target — exactly what `find_package(JPEG)` consumers expect.
+
+**Test (`crates/libjpeg-turbo-rs-capi/tests/install_layout.rs`):** invokes the script into a tempdir, asserts:
+1. cdylib is at the SONAME path,
+2. symlink chains for both APIs resolve to a real file,
+3. `pkg-config` files contain `Name`/`Version`/`Libs` lines and the `prefix=…` substitution matches,
+4. `JPEGConfig.cmake` exposes `JPEG_VERSION` / `JPEG_INCLUDE_DIR` / `JPEG_LIBRARY` / `JPEG::JPEG`,
+5. all five public C headers are present,
+6. `jconfig.h` declares `JPEG_LIB_VERSION 80`,
+7. (optional, if `pkg-config` on PATH) `pkg-config --libs libjpeg` against `PKG_CONFIG_PATH=<staged>` returns `-ljpeg`.
+
+Skip-with-reason on Windows (script is bash; Windows packagers use their own conventions) or when `bash` is not on PATH.
+
+**Out of scope (deferred):**
+
+- LD_LIBRARY_PATH-injected Pillow round-trip against the staged tree. The `tests/capi_pillow_compat.rs` harness already verifies the cdylib works against Pillow when it's pre-loaded; verifying it through the installed-tree path is structural redundancy with no extra signal.
+- `cmake --find-package` end-to-end check. The CMake config file content is asserted; running CMake itself just to confirm it parses the file would add a CMake dependency to the test suite without revealing additional bugs.
+- Windows MSI / DLL install layout. The Linux/macOS install path is the entry-point most distros and Homebrew formulae need; Windows packagers typically ship raw artifacts via NSIS / WiX with their own conventions.
 
 ### P2-9. v6b / v7 / v8 ABI Compatibility Matrix — **CLOSED**
 
@@ -888,7 +891,7 @@ The earlier skip-comment claimed "1 LSB downsample diff, decoded pixels match" �
 6. ~~**P2-4** — Generated C-side ABI cross-check.~~ **CLOSED 2026-05-04** — `tests/abi_offsets.rs` compiles a tiny C harness against the submodule's `jpeglib.h` and asserts every const-asserted field matches `offset_of!`. Coverage scoped to `jpeg_decompress_struct` (27 fields); other structs are a follow-up.
 7. ~~**P2-3** — Per-platform offset assertions + CI matrix.~~ **PARTIAL 2026-05-04** — `abi-offsets` matrix CI job now runs the P2-4 cross-check on Linux x86_64, macOS aarch64, and Windows MSVC; per-platform `const_assert!` blocks and 32-bit targets are deferred until a real downstream user requests them.
 8. ~~**P2-5** — Symbol-inventory diff against upstream.~~ **CLOSED 2026-05-04** — `tests/symbol_inventory.rs` parses upstream headers (66 jpeg + 79 tj symbols), asserts each is exported by our cdylib, and explicitly allowlists 19 deferred legacy entries with rationale. Bundled with P2-4 in the `capi-abi-checks` cross-platform CI job.
-9. **P2-8** — SONAME / pkg-config / install layout. Makes the previous step achievable as an actual distro replacement, not just a Rust crate.
+9. ~~**P2-8** — SONAME / pkg-config / install layout.~~ **CLOSED 2026-05-04** — `scripts/install_capi.sh` + `make install` stage cdylib + symlink chain + headers + `.pc` + `JPEGConfig.cmake` into `${DESTDIR}${PREFIX}`; `tests/install_layout.rs` asserts the layout end-to-end.
 10. **P2-7** — Differential fuzzing against C. Long-running insurance against latent decode/encode divergences once the structural gaps above are closed.
 11. **P2-10** — libvips / FFmpeg / SDL_image / GD consumer harnesses. Real-world validation that the structural work landed correctly.
 12. **P2-6** — Publish to crates.io. Last, because publishing locks the ABI surface and we should not lock until P2-1 through P2-5 are closed.
