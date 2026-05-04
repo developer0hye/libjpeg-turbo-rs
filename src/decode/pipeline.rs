@@ -247,22 +247,16 @@ impl<'a> Decoder<'a> {
         })
     }
 
-    /// Fill in standard JPEG Huffman tables when no DHT markers were present.
+    /// Fill in standard JPEG Huffman tables (K.3) for any unset table slot.
     ///
-    /// MJPEG frames typically omit DHT markers entirely, relying on the decoder
-    /// to provide the standard tables from JPEG spec section K.3.
-    /// Only fills when ALL table slots are `None` (no DHT was parsed at all).
+    /// Mirrors libjpeg-turbo's `jinit_huff_decoder` → `std_huff_tables`: every
+    /// DC/AC slot left NULL after marker parsing gets the standard table. This
+    /// covers MJPEG frames (no DHT at all), partially-defined streams that
+    /// reference a never-emitted slot in SOS (real-world C-decodable inputs
+    /// found by `fuzz_decode_diff_c`), and standard JFIF inputs (a no-op
+    /// because the per-slot fill below only writes `None` slots).
     fn fill_default_huffman_tables(metadata: &mut JpegMetadata) {
         use crate::common::huffman_table::HuffmanTable;
-
-        // Only fill defaults if no DHT markers were present at all.
-        // If any table was defined (even if some slots are empty), respect the
-        // original DHT data and do not override.
-        let any_dc = metadata.dc_huffman_tables.iter().any(|t| t.is_some());
-        let any_ac = metadata.ac_huffman_tables.iter().any(|t| t.is_some());
-        if any_dc || any_ac {
-            return;
-        }
 
         // Standard DC luminance (table 0)
         #[rustfmt::skip]
