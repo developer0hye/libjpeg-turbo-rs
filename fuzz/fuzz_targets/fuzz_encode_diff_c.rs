@@ -42,6 +42,15 @@ const MAX_DIM: usize = 96;
 const PIXEL_TOLERANCE: i32 = 2;
 const HEADER_LEN: usize = 4;
 
+/// One-shot SIGPIPE masking — see fuzz_decode_diff_c::ensure_sigpipe_ignored
+/// for rationale.
+fn ensure_sigpipe_ignored() {
+    static ONCE: OnceLock<()> = OnceLock::new();
+    ONCE.get_or_init(|| unsafe {
+        libc::signal(libc::SIGPIPE, libc::SIG_IGN);
+    });
+}
+
 fn djpeg_path() -> Option<PathBuf> {
     static CACHE: OnceLock<Option<PathBuf>> = OnceLock::new();
     CACHE
@@ -142,6 +151,7 @@ fn subsampling_for(idx: u8) -> Subsampling {
 }
 
 fuzz_target!(|data: &[u8]| {
+    ensure_sigpipe_ignored();
     let Some(djpeg) = djpeg_path() else {
         return;
     };

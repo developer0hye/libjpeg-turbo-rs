@@ -35,6 +35,17 @@ use libjpeg_turbo_rs::Decoder;
 const MAX_FUZZ_PIXELS: u64 = 1_048_576;
 const PIXEL_TOLERANCE: i32 = 2;
 
+/// One-shot SIGPIPE masking. With `#![no_main]` libfuzzer skips std's
+/// default SIG_IGN setup; a pipe write to a closed peer would otherwise
+/// kill the fuzz process with signal 13 instead of returning
+/// Err(BrokenPipe). Subprocess writers below rely on the latter.
+fn ensure_sigpipe_ignored() {
+    static ONCE: OnceLock<()> = OnceLock::new();
+    ONCE.get_or_init(|| unsafe {
+        libc::signal(libc::SIGPIPE, libc::SIG_IGN);
+    });
+}
+
 fn djpeg_path() -> Option<PathBuf> {
     static CACHE: OnceLock<Option<PathBuf>> = OnceLock::new();
     CACHE
@@ -161,6 +172,7 @@ fn rust_decode(jpeg: &[u8]) -> Option<(usize, usize, usize, Vec<u8>, bool)> {
 }
 
 fuzz_target!(|data: &[u8]| {
+    ensure_sigpipe_ignored();
     let Some(djpeg) = djpeg_path() else {
         return;
     };

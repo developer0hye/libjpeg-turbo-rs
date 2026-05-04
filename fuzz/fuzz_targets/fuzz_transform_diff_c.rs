@@ -38,6 +38,16 @@ const MAX_FUZZ_PIXELS: u64 = 1_048_576;
 const PIXEL_TOLERANCE: i32 = 2;
 const HEADER_LEN: usize = 1;
 
+/// One-shot SIGPIPE masking — see fuzz_decode_diff_c::ensure_sigpipe_ignored
+/// for rationale. With `#![no_main]` libfuzzer skips std's default
+/// SIG_IGN setup so subprocess pipe writes can kill the fuzz process.
+fn ensure_sigpipe_ignored() {
+    static ONCE: OnceLock<()> = OnceLock::new();
+    ONCE.get_or_init(|| unsafe {
+        libc::signal(libc::SIGPIPE, libc::SIG_IGN);
+    });
+}
+
 fn tool_path(names: &[&str]) -> Option<PathBuf> {
     for name in names {
         for prefix in [
@@ -159,6 +169,7 @@ fn op_for(idx: u8) -> (TransformOp, &'static str) {
 }
 
 fuzz_target!(|data: &[u8]| {
+    ensure_sigpipe_ignored();
     let Some(djpeg) = djpeg_path() else {
         return;
     };
