@@ -766,6 +766,15 @@ impl<'a> MarkerReader<'a> {
                     table_id
                 )));
             }
+            // Match libjpeg-turbo's `JERR_DHT_INDEX` rejection: only Tc=0
+            // (DC) and Tc=1 (AC) are valid. Without this check, malformed
+            // DHTs (e.g. Tc=2) silently fall into the AC branch below
+            // and corrupt unrelated tables, while libjpeg-turbo aborts
+            // with "Bogus DHT index". jdmarker.c folds the same check
+            // into its `index & 0x10` / index-range test.
+            if table_class > 1 {
+                return Err(JpegError::CorruptData(format!("Bogus DHT index {}", info)));
+            }
 
             let mut bits = [0u8; 17];
             for b in &mut bits[1..=16] {
