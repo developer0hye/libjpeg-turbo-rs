@@ -12,13 +12,21 @@
 #   scripts/install_capi.sh --destdir /tmp/install --prefix /usr
 #
 # Required env vs CLI flags (CLI wins):
-#   --destdir DIR    Stage root (defaults to "")
-#   --prefix DIR     Install prefix (defaults to "/usr/local")
-#   --soname NAME    cdylib SONAME (defaults to "libjpeg.so.62" on Linux,
-#                    "libjpeg.62.dylib" on macOS)
-#   --build          Build the cdylib first (default: skip; assumes
-#                    `target/release/liblibjpeg_turbo_rs_capi.{dylib,so}`
-#                    already exists)
+#   --destdir DIR     Stage root (defaults to "")
+#   --prefix DIR      Install prefix (defaults to "/usr/local")
+#   --soname NAME     libjpeg "major" SONAME on Linux (default
+#                     "libjpeg.so.62"; pass "libjpeg.so.8" for the v8
+#                     SONAME the docs/ABI_COMPATIBILITY.md flags as the
+#                     production-safe choice). On macOS, accepts the
+#                     compat dylib name (default "libjpeg.62.dylib").
+#                     The real cdylib filename is derived as
+#                     "${soname}.${version}" (Linux) or
+#                     "${soname%.dylib}.${version}.dylib" (macOS).
+#   --soname-tj NAME  libturbojpeg "major" SONAME (default
+#                     "libturbojpeg.so.0" / "libturbojpeg.0.dylib").
+#   --build           Build the cdylib first (default: skip; assumes
+#                     `target/release/liblibjpeg_turbo_rs_capi.{dylib,so}`
+#                     already exists)
 #
 # Layout produced under ${DESTDIR}${PREFIX}:
 #   lib/libjpeg.so.62.X.Y          actual cdylib
@@ -41,16 +49,18 @@ set -euo pipefail
 DESTDIR=""
 PREFIX="/usr/local"
 SONAME=""
+SONAME_TJ=""
 DO_BUILD=0
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
-        --destdir) DESTDIR="$2"; shift 2 ;;
-        --prefix)  PREFIX="$2"; shift 2 ;;
-        --soname)  SONAME="$2"; shift 2 ;;
-        --build)   DO_BUILD=1; shift ;;
-        --root)    ROOT="$2"; shift 2 ;;
+        --destdir)    DESTDIR="$2"; shift 2 ;;
+        --prefix)     PREFIX="$2"; shift 2 ;;
+        --soname)     SONAME="$2"; shift 2 ;;
+        --soname-tj)  SONAME_TJ="$2"; shift 2 ;;
+        --build)      DO_BUILD=1; shift ;;
+        --root)       ROOT="$2"; shift 2 ;;
         -h|--help)
             sed -n '2,/^set -euo/p' "$0" | sed 's/^# *//'
             exit 0
@@ -71,23 +81,58 @@ CDYLIB_VERSION="$(grep '^version' "$ROOT/crates/libjpeg-turbo-rs-capi/Cargo.toml
 case "$PLATFORM" in
     linux)
         CDYLIB_FILE="$ROOT/target/release/liblibjpeg_turbo_rs_capi.so"
-        DEFAULT_LIBJPEG_REAL="libjpeg.so.62.${CDYLIB_VERSION}"
         DEFAULT_LIBJPEG_MAJOR="libjpeg.so.62"
         DEFAULT_LIBJPEG_DEV="libjpeg.so"
-        DEFAULT_LIBTJ_REAL="libturbojpeg.so.0.${CDYLIB_VERSION}"
         DEFAULT_LIBTJ_MAJOR="libturbojpeg.so.0"
         DEFAULT_LIBTJ_DEV="libturbojpeg.so"
         ;;
     macos)
         CDYLIB_FILE="$ROOT/target/release/liblibjpeg_turbo_rs_capi.dylib"
-        DEFAULT_LIBJPEG_REAL="libjpeg.62.${CDYLIB_VERSION}.dylib"
         DEFAULT_LIBJPEG_MAJOR="libjpeg.62.dylib"
         DEFAULT_LIBJPEG_DEV="libjpeg.dylib"
-        DEFAULT_LIBTJ_REAL="libturbojpeg.0.${CDYLIB_VERSION}.dylib"
         DEFAULT_LIBTJ_MAJOR="libturbojpeg.0.dylib"
         DEFAULT_LIBTJ_DEV="libturbojpeg.dylib"
         ;;
 esac
+
+# Honor --soname / --soname-tj overrides.
+LIBJPEG_MAJOR="${SONAME:-$DEFAULT_LIBJPEG_MAJOR}"
+LIBTJ_MAJOR="${SONAME_TJ:-$DEFAULT_LIBTJ_MAJOR}"
+
+# Derive the real (versioned) cdylib filename from the major SONAME.
+# Linux: append .${VERSION} (e.g. libjpeg.so.8 → libjpeg.so.8.X.Y).
+# macOS: insert ${VERSION} before the .dylib suffix (e.g. libjpeg.8.dylib
+#        → libjpeg.8.X.Y.dylib).
+# Derive the bare dev-link filename: drop everything from the SONAME
+# digit onward (Linux) or the major digit before .dylib (macOS) so
+# packagers passing a non-default --soname still get a sensible
+# `libjpeg.{so,dylib}` symlink at the top of the chain.
+case "$PLATFORM" in
+    linux)
+        LIBJPEG_REAL="${LIBJPEG_MAJOR}.${CDYLIB_VERSION}"
+        LIBTJ_REAL="${LIBTJ_MAJOR}.${CDYLIB_VERSION}"
+        # Strip everything after `.so` to get the dev link.
+        LIBJPEG_DEV="${LIBJPEG_MAJOR%%.so*}.so"
+        LIBTJ_DEV="${LIBTJ_MAJOR%%.so*}.so"
+        ;;
+    macos)
+        LIBJPEG_REAL="${LIBJPEG_MAJOR%.dylib}.${CDYLIB_VERSION}.dylib"
+        LIBTJ_REAL="${LIBTJ_MAJOR%.dylib}.${CDYLIB_VERSION}.dylib"
+        # Strip the version digits before .dylib to get the dev link.
+        # `libjpeg.62.dylib` → `libjpeg.dylib`.
+        LIBJPEG_DEV="$(echo "$LIBJPEG_MAJOR" | sed 's/\.[0-9][0-9]*\.dylib$/.dylib/')"
+        LIBTJ_DEV="$(echo "$LIBTJ_MAJOR" | sed 's/\.[0-9][0-9]*\.dylib$/.dylib/')"
+        ;;
+esac
+
+# Replace the now-unused defaults with the resolved names so the
+# install/symlink steps below pick them up.
+DEFAULT_LIBJPEG_REAL="$LIBJPEG_REAL"
+DEFAULT_LIBJPEG_MAJOR="$LIBJPEG_MAJOR"
+DEFAULT_LIBJPEG_DEV="$LIBJPEG_DEV"
+DEFAULT_LIBTJ_REAL="$LIBTJ_REAL"
+DEFAULT_LIBTJ_MAJOR="$LIBTJ_MAJOR"
+DEFAULT_LIBTJ_DEV="$LIBTJ_DEV"
 
 if [[ "$DO_BUILD" -eq 1 || ! -f "$CDYLIB_FILE" ]]; then
     (cd "$ROOT" && cargo build -p libjpeg-turbo-rs-capi --release)
