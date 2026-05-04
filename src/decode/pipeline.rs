@@ -2337,12 +2337,25 @@ impl<'a> Decoder<'a> {
         let scan = &scan_info.header;
         let mut dc_preds = [0i16; 4];
 
-        // Pre-resolve Huffman tables outside the MCU loop
-        let dc_tables: Vec<&HuffmanTable> = scan
-            .components
-            .iter()
-            .map(|sc| Self::resolve_table(&scan_info.dc_huffman_tables, sc.dc_table_index, "DC"))
-            .collect::<Result<Vec<_>>>()?;
+        // Pre-resolve Huffman tables outside the MCU loop. Skip DC table
+        // resolution for DC refinement scans (Ah > 0): libjpeg-turbo's
+        // `start_pass_phuff_decoder` explicitly comments "DC refinement
+        // needs no table" — `decode_dc_refine` only reads one bit per
+        // block and never decodes a Huffman symbol, so the SOS Td
+        // selector is unused. Forcing resolution here was rejecting
+        // C-decodable inputs that name an undefined slot in a
+        // refinement scan (codex P2 follow-up to 258354c).
+        let dc_tables: Vec<Option<&HuffmanTable>> = if ah == 0 {
+            scan.components
+                .iter()
+                .map(|sc| {
+                    Self::resolve_table(&scan_info.dc_huffman_tables, sc.dc_table_index, "DC")
+                        .map(Some)
+                })
+                .collect::<Result<Vec<_>>>()?
+        } else {
+            vec![None; scan.components.len()]
+        };
 
         // Use countdown for restart interval to avoid modulo in hot loop
         let restart_interval = scan_info.restart_interval as u32;
@@ -2363,7 +2376,6 @@ impl<'a> Decoder<'a> {
 
                 for (si, &comp_idx) in scan_comp_indices.iter().enumerate() {
                     let ci = &comp_infos[comp_idx];
-                    let dc_table = dc_tables[si];
 
                     for v in 0..ci.v_samp {
                         for h in 0..ci.h_samp {
@@ -2374,6 +2386,10 @@ impl<'a> Decoder<'a> {
 
                             if is_dc {
                                 if ah == 0 {
+                                    let dc_table = dc_tables[si].expect(
+                                        "DC initial scan must have resolved DC table (ah==0 \
+                                         path of pre-resolution above)",
+                                    );
                                     progressive::decode_dc_first(
                                         bit_reader,
                                         dc_table,
@@ -2421,8 +2437,12 @@ impl<'a> Decoder<'a> {
         let restart_interval = scan_info.restart_interval as u32;
         let mut restart_countdown: u32 = restart_interval;
 
-        // Pre-resolve tables once before the block loop
-        let dc_table = if is_dc {
+        // Pre-resolve tables once before the block loop. DC refinement
+        // (Ah > 0) needs no DC table — see libjpeg-turbo's
+        // `start_pass_phuff_decoder` ("DC refinement needs no table").
+        // AC scans always need an AC table; AC refinement reuses the
+        // AC Huffman to decode EOBn / ZRL run-length codes.
+        let dc_table = if is_dc && ah == 0 {
             Some(Self::resolve_table(
                 &scan_info.dc_huffman_tables,
                 scan_comp.dc_table_index,
