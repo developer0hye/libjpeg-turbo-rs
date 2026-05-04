@@ -338,38 +338,58 @@ impl<'a> Decoder<'a> {
             0xf9, 0xfa,
         ];
 
-        // Fill missing DC tables
+        // libjpeg-turbo only auto-fills standard tables for the
+        // baseline (sequential Huffman) decoder via `jinit_huff_decoder`
+        // → `std_huff_tables`. The progressive entropy decoder
+        // (`jinit_phuff_decoder`) does **not** auto-fill — a progressive
+        // SOS that references an unset table slot must keep returning a
+        // "missing Huffman table" error to match djpeg's behaviour
+        // (codex P2: removing this gate would have Rust accept inputs
+        // djpeg rejects, the opposite of the drop-in regression we just
+        // fixed).
+        if metadata.frame.is_progressive {
+            return;
+        }
+
+        // Build the four standard tables once. Use them to fill missing
+        // slots in the *final metadata snapshot* (baseline single-scan
+        // path reads `metadata.dc_huffman_tables` directly) AND in each
+        // per-scan snapshot. The per-scan fill must use the standard
+        // table — never the final-metadata table — because a later DHT
+        // can redefine the same slot mid-stream (non-interleaved
+        // baseline emits one DHT per scan); copying a late definition
+        // back into an earlier scan silently alters the bytes that
+        // scan was supposed to decode against.
+        let std_dc_lum = HuffmanTable::build(&BITS_DC_LUM, &VALS_DC_LUM).ok();
+        let std_dc_chr = HuffmanTable::build(&BITS_DC_CHR, &VALS_DC_CHR).ok();
+        let std_ac_lum = HuffmanTable::build(&BITS_AC_LUM, &VALS_AC_LUM).ok();
+        let std_ac_chr = HuffmanTable::build(&BITS_AC_CHR, &VALS_AC_CHR).ok();
+
+        let std_dc = [std_dc_lum.as_ref(), std_dc_chr.as_ref()];
+        let std_ac = [std_ac_lum.as_ref(), std_ac_chr.as_ref()];
+
         if metadata.dc_huffman_tables[0].is_none() {
-            if let Ok(tbl) = HuffmanTable::build(&BITS_DC_LUM, &VALS_DC_LUM) {
-                metadata.dc_huffman_tables[0] = Some(tbl);
-            }
+            metadata.dc_huffman_tables[0] = std_dc[0].cloned();
         }
         if metadata.dc_huffman_tables[1].is_none() {
-            if let Ok(tbl) = HuffmanTable::build(&BITS_DC_CHR, &VALS_DC_CHR) {
-                metadata.dc_huffman_tables[1] = Some(tbl);
-            }
+            metadata.dc_huffman_tables[1] = std_dc[1].cloned();
         }
-
-        // Fill missing AC tables
         if metadata.ac_huffman_tables[0].is_none() {
-            if let Ok(tbl) = HuffmanTable::build(&BITS_AC_LUM, &VALS_AC_LUM) {
-                metadata.ac_huffman_tables[0] = Some(tbl);
-            }
+            metadata.ac_huffman_tables[0] = std_ac[0].cloned();
         }
         if metadata.ac_huffman_tables[1].is_none() {
-            if let Ok(tbl) = HuffmanTable::build(&BITS_AC_CHR, &VALS_AC_CHR) {
-                metadata.ac_huffman_tables[1] = Some(tbl);
-            }
+            metadata.ac_huffman_tables[1] = std_ac[1].cloned();
         }
 
-        // Also fill in ScanInfo Huffman tables for the first scan if needed
         for scan in &mut metadata.scans {
-            for i in 0..4 {
-                if scan.dc_huffman_tables[i].is_none() && metadata.dc_huffman_tables[i].is_some() {
-                    scan.dc_huffman_tables[i] = metadata.dc_huffman_tables[i].clone();
+            for (i, std_tbl) in std_dc.iter().enumerate() {
+                if scan.dc_huffman_tables[i].is_none() {
+                    scan.dc_huffman_tables[i] = std_tbl.cloned();
                 }
-                if scan.ac_huffman_tables[i].is_none() && metadata.ac_huffman_tables[i].is_some() {
-                    scan.ac_huffman_tables[i] = metadata.ac_huffman_tables[i].clone();
+            }
+            for (i, std_tbl) in std_ac.iter().enumerate() {
+                if scan.ac_huffman_tables[i].is_none() {
+                    scan.ac_huffman_tables[i] = std_tbl.cloned();
                 }
             }
         }
