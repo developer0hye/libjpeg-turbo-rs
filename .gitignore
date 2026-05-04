@@ -9,6 +9,8 @@ crates/libjpeg-turbo-rs-wasm/pkg/
 # Claude Code agent runtime artifacts (worktrees, state, playwright cache)
 .claude/worktrees/
 .claude/agents/.omc/
+.claude/scheduled_tasks.lock
+.claude/settings.local.json
 .omc/
 .playwright-mcp/
 /state/
