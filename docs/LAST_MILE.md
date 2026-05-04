@@ -620,6 +620,311 @@ This order is intentionally strict. A replacement project should not optimize th
 
 ---
 
+## Phase 2 — System-Library Drop-In Hardening
+
+The Phase 1 gates above (P0-1 through P0-4, P1-Soft-Skip, P1-Encode, P1-Legacy, etc.) close the *Rust-application replacement* and *stock-tool drop-in* stories. Phase 2 closes the remaining gap to **system-library** replacement: shipping a `libjpeg.so.62` / `libturbojpeg.so.0` SONAME-compatible binary that arbitrary distro packages (Pillow, ImageMagick, libvips, SDL_image, FFmpeg, GraphicsMagick, GD, …) can link against without source changes, on every platform upstream libjpeg-turbo officially supports.
+
+External cross-check on 2026-05-04: the analysis "Rust app library = ready; system-library replacement = not yet" is consistent with the live state of this repo. The blockers below are the verifiable ones (each cites the file/line that proves the gap is open). Items the external review flagged that are *already closed* (`tj3GetICCProfile` / `tj3TransformBufSize` exports, `jpeg_set_marker_processor` wiring, `JpegSourceMgr` suspension semantics, `capi_imagemagick_compat` / `capi_pillow_compat` harnesses) are intentionally not in this list.
+
+### P2-1. Full C Parity Workflow Soft-Skips — **PARTIAL: c_tjcomptest_full closed; c_tjtrantest_full open**
+
+**Status (2026-05-04):** `c_tjcomptest_full` no longer has `continue-on-error: true` — samp411/441/410/24 closed under P2-11 (and the lossless-RGB row was already passing on the matrix). Source-level skip in `tests/c_tjcomptest.rs:717-739` deleted.
+
+**Still open:** `c_tjtrantest_full` retains `continue-on-error: true` for the "grayscale Huffman diff" — a transform-side divergence in `src/api/coefficient.rs::write_coefficients_progressive` (different code path from the encoder, not affected by the P2-11 fix).
+
+**Why this matters:** A library that calls itself a libjpeg-turbo replacement cannot ship CI that has `continue-on-error` on byte-parity tests. Either the bytes match, the gap is documented as a permanent non-goal with the divergence quantified, or the test is fixed.
+
+**Likely area:**
+
+- `tests/c_tjtrantest.rs` (grayscale Huffman transform branch — investigate which transform op + grayscale combo diverges, and whether the bug is in the transform's progressive Huffman dispatch or in `src/api/coefficient.rs:1047` (the `max_h <= 2 && max_v <= 2` filter that may also need lifting once the transform path can handle 4-pixel chroma).
+
+**Acceptance:**
+
+```bash
+cargo test --features full-c-parity --test c_tjtrantest
+```
+
+Must pass without `continue-on-error`. If a divergence is genuinely a non-goal, document it in `docs/COMPATIBILITY_MATRIX.md` (new) with measured PSNR / pixel-diff numbers and remove the `continue-on-error` flag.
+
+### P2-2. `default_format_message` Does Not Implement libjpeg's `%d`/`%c`/`%s` Expansion
+
+**Symptom:** `crates/libjpeg-turbo-rs-capi/src/jpeglib.rs:807-810` explicitly states:
+
+```rust
+// We do NOT implement the printf-style %d/%c/%s expansion of `msg_parm`
+// here (none of our shim-emitted warnings need parameters yet); if a
+// future warning carries args, expand this routine to walk the format
+// string the way jerror.c does.
+```
+
+Upstream `references/libjpeg-turbo/src/jerror.c::format_message` walks the format string and substitutes `msg_parm.i[]` / `msg_parm.s[]`. C consumers that call `(*err->format_message)(cinfo, buf)` after a parameterised warning currently get the raw format string with `%d` placeholders.
+
+**Why this matters:** Custom error managers, `libtiff`'s JPEG-in-TIFF path, and ImageMagick's coder error reporting all expect formatted output. Truncated / unformatted messages corrupt logs and confuse downstream error handling.
+
+**Likely area:**
+
+- `crates/libjpeg-turbo-rs-capi/src/jpeglib.rs::default_format_message`
+- New shim-internal `error_table.rs` mirroring `references/libjpeg-turbo/src/jerror.c` constants.
+
+**Acceptance:**
+
+```bash
+cargo test -p libjpeg-turbo-rs-capi --test capi_format_message
+```
+
+New test must trigger a parameterised warning (e.g. `JWRN_HIT_MARKER`, which uses `%2c%2c`) and assert the formatted output matches stock libjpeg's output byte-for-byte.
+
+### P2-3. ABI Offset Assertions Cover Only LP64 / Non-Windows
+
+**Symptom:** `crates/libjpeg-turbo-rs-capi/src/jpeglib.rs:3900` gates the full offset assertion block behind `#[cfg(all(target_pointer_width = "64", not(windows)))]`. The comment at `:3879-3882` is explicit: "On 32-bit or ILP32 targets these exact offsets would differ due to pointer-size changes, so we only assert on 64-bit hosts."
+
+Upstream libjpeg-turbo officially supports Windows MSVC (LLP64), Windows MinGW, Linux i686, armv7-linux-gnueabihf, and others. Our struct layout is unchecked on every one of those.
+
+**Why this matters:** A drop-in shim that only verifies LP64 layouts will silently produce field-offset corruption on the first Windows / 32-bit consumer.
+
+**Likely area:**
+
+- `crates/libjpeg-turbo-rs-capi/src/jpeglib.rs` — extend the assertion block with platform-specific arms.
+- New CI matrix in `.github/workflows/ci.yml` for `i686-pc-windows-msvc`, `x86_64-pc-windows-msvc`, `i686-unknown-linux-gnu`, `armv7-unknown-linux-gnueabihf`.
+
+**Acceptance:**
+
+```bash
+# At minimum, add cross-compile build + size_of/offset_of assertion runs for:
+cargo build --target x86_64-pc-windows-msvc -p libjpeg-turbo-rs-capi
+cargo build --target i686-pc-windows-msvc   -p libjpeg-turbo-rs-capi
+cargo build --target i686-unknown-linux-gnu -p libjpeg-turbo-rs-capi
+```
+
+Each build must succeed and CI must run a small `tjunittest`-style harness on at least one 32-bit target. The compile-time `assert!(offset_of!(...) == N)` block must be expanded with per-target expected offsets generated from a one-off C `offsetof` print on the matching upstream build.
+
+### P2-4. Generated C-Side ABI Cross-Check Is Missing
+
+**Symptom:** Today every `offsetof` / `sizeof` value in `jpeglib.rs:3900-3970` is a hand-typed constant from a one-time C measurement. There is no automated test that compiles a tiny C program against *both* upstream `jpeglib.h` and our shim's exported header, then asserts every public offset matches.
+
+**Why this matters:** Field-order drift, padding changes, or an upstream `jpeglib.h` extension between libjpeg-turbo 3.1.x → 3.2.x could silently desynchronise our shim from the canonical C ABI without any test failing locally.
+
+**Likely area:**
+
+- New `crates/libjpeg-turbo-rs-capi/build.rs` step that, when an upstream `jpeglib.h` is reachable (e.g. `pkg-config --variable=includedir libjpeg`), generates a `tests/abi_offsets.c` that prints `offsetof` for every public field of `jpeg_decompress_struct`, `jpeg_compress_struct`, `jpeg_error_mgr`, `jpeg_source_mgr`, `jpeg_destination_mgr`, `jvirt_barray_control`, `jvirt_sarray_control`, and `jpeg_marker_struct`.
+- New `tests/abi_offsets.rs` harness that builds and runs the generated C, parses its output, and compares each value against `offset_of!(...)` from the Rust side.
+
+**Acceptance:**
+
+```bash
+cargo test -p libjpeg-turbo-rs-capi --test abi_offsets
+```
+
+Test must enumerate every public field, print expected vs actual, and fail loud on the first mismatch. Skip-with-reason only when no upstream header is reachable on the host.
+
+### P2-5. Symbol-Export Inventory Is Not Diffed Against Upstream
+
+**Symptom:** We assert presence of a *curated* list of classic API symbols (`tests/capi_stock_tool_link.rs::shim_exports_classic_jpeg_api::required_p0_3`), but we do not diff our complete cdylib symbol table against the upstream `libjpeg.so.62` / `libturbojpeg.so.0` symbol table.
+
+A full inventory diff would catch:
+
+- Symbols present upstream that we silently omit (causes link failure for a future consumer).
+- Symbol-version tags upstream uses (`@@LIBJPEGTURBO_3.0`, etc.) that we do not.
+- SONAME (`DT_SONAME` on ELF, `LC_ID_DYLIB` on Mach-O, `dumpbin /exports` on PE) — for true drop-in we need to *be named* `libjpeg.so.62` / `libturbojpeg.so.0`, not `liblibjpeg_turbo_rs_capi.so`.
+
+**Why this matters:** Distros ship `libjpeg.so.62` with a specific SONAME and a specific exported-symbol set with versioned symbols. Replacing the file requires an exact match of both, otherwise `ldd` resolution and runtime symbol binding will diverge from upstream behaviour.
+
+**Likely area:**
+
+- New `crates/libjpeg-turbo-rs-capi/tests/symbol_inventory.rs` that:
+  - Locates upstream `libjpeg.so.62` and `libturbojpeg.so.0` (via `pkg-config` or `LIBJPEG_PREFIX`).
+  - Runs `nm -D --defined-only` (Linux) / `nm -gU` (macOS) / `dumpbin /exports` (Windows) on both and asserts our symbol set is a superset.
+- New `crates/libjpeg-turbo-rs-capi/build.rs` knob that emits `cargo:rustc-cdylib-link-arg=-Wl,-soname,libjpeg.so.62` (Linux) / `-install_name @rpath/libjpeg.62.dylib` (macOS) under a `--cfg system_drop_in` build flag.
+
+**Acceptance:**
+
+```bash
+cargo test -p libjpeg-turbo-rs-capi --test symbol_inventory
+```
+
+Must enumerate every upstream symbol and report any we omit. Symbols upstream marks as private (`@@GLIBC_PRIVATE`-style) are exempt; everything else is required.
+
+### P2-6. Crate Is `publish = false`
+
+**Symptom:** `crates/libjpeg-turbo-rs-capi/Cargo.toml:9` is `publish = false` and the version is still `0.1.0`. There is no path for downstream Rust consumers to `cargo add libjpeg-turbo-rs-capi`.
+
+**Why this matters:** A "drop-in replacement" library that cannot be installed through the language's standard package manager is not actually drop-in for the Rust ecosystem.
+
+**Likely area:**
+
+- `crates/libjpeg-turbo-rs-capi/Cargo.toml` (flip `publish`, bump version, add `description`, `license`, `repository`, `keywords`, `categories`).
+- `crates/libjpeg-turbo-rs-capi/README.md` (new).
+- `.github/workflows/release.yml` (already supports `wasm-v*` tags; extend for `capi-v*`).
+
+**Acceptance:**
+
+```bash
+cargo publish -p libjpeg-turbo-rs-capi --dry-run
+```
+
+Must succeed. Then publish a `0.1.0` (or `1.0.0-rc.1`) candidate. Hold actual `1.0.0` until P2-1 through P2-5 are closed.
+
+### P2-7. Differential / Roundtrip Fuzzing Against C Is Not Run
+
+**Symptom:** `.github/workflows/fuzz-smoke.yml:11` runs each fuzz target for 600 s nightly (10 minutes), and none of the targets compare results against C libjpeg-turbo. They check Rust-internal correctness only (no panic, no UB, roundtrip pixel equality within Rust).
+
+**Why this matters:** A drop-in replacement must not silently produce output that diverges from the reference for any input. The current fuzz harness will not catch a Rust decoder that returns "valid but wrong" pixels for inputs the C decoder accepts, nor a Rust encoder that produces a bitstream the C decoder rejects.
+
+**Likely area:**
+
+- New `fuzz/fuzz_targets/fuzz_decode_diff_c.rs`: decode the same fuzzed bytes through Rust and through `libjpeg.so.62`, assert exit-status agreement and (when both succeed) pixel diff ≤ documented IDCT tolerance.
+- New `fuzz/fuzz_targets/fuzz_encode_roundtrip_c.rs`: encode through Rust, decode through C, decode through Rust, assert all three pixel maps agree.
+- New `fuzz/fuzz_targets/fuzz_transform_diff_c.rs`: same pattern for `jpegtran` ops.
+
+**Acceptance:**
+
+```bash
+cargo +nightly fuzz run fuzz_decode_diff_c -- -max_total_time=600
+cargo +nightly fuzz run fuzz_encode_roundtrip_c -- -max_total_time=600
+cargo +nightly fuzz run fuzz_transform_diff_c -- -max_total_time=600
+```
+
+Each must run 10 min in CI without finding a divergence. Add a 24-hour scheduled-fuzz workflow that runs them at `-max_total_time=86400` weekly and uploads the corpus. Publish the seed/coverage corpus alongside releases (per OSS-Fuzz conventions).
+
+### P2-8. Install-Staging, Symlink Chain, and CMake Config Are Missing
+
+**Already done (do not re-do):**
+
+- SONAME / install_name wiring on the cdylib (`crates/libjpeg-turbo-rs-capi/build.rs:30-44`): `-Wl,-soname,libjpeg.so.62` on Linux/BSD, `-Wl,-install_name,libjpeg.62.dylib` on macOS, opt-in via `CAPI_SONAME` env. `tjunittest_link.rs:46,125,180` and `compress8.rs:255-335` already exercise the dlopen-by-SONAME path.
+- pkg-config generation (`build.rs:47-89`): `libjpeg.pc` and `libturbojpeg.pc` written into `OUT_DIR` and validated by `tests/pkgconfig.rs`.
+
+**Symptom:** What is genuinely missing is everything between "OUT_DIR contains the right artifacts" and "a distro consumer can `pkg-config --libs libjpeg` against an installed tree":
+
+1. **No `cargo xtask install` / Makefile install target** that copies the cdylib + symlink chain (`libjpeg.so` → `libjpeg.so.62` → `libjpeg.so.62.X.Y`, plus `libturbojpeg.so` → `libturbojpeg.so.0` → `libturbojpeg.so.0.X.Y`) and the `.pc` files into `${DESTDIR}${PREFIX}/{lib,include,lib/pkgconfig}` the way upstream's `cmake --install` does. `find crates/libjpeg-turbo-rs-capi -name 'install*'` returns nothing.
+2. **No header install layout.** The shim's mirror of `jpeglib.h` / `jerror.h` / `jmorecfg.h` / `jconfig.h` / `turbojpeg.h` is internal to the Rust source; we do not stage standalone C headers that a consumer's `#include <jpeglib.h>` would resolve against.
+3. **No CMake config (`libjpeg-turboConfig.cmake` / `find_package(JPEG)` shim).** Modern CMake consumers use `find_package(JPEG REQUIRED)` and read `JPEG_LIBRARIES` / `JPEG_INCLUDE_DIRS`. Without our config in `${PREFIX}/lib/cmake/`, those consumers find upstream libjpeg-turbo and link there, not us.
+4. **No `tests/install_layout.rs` harness** that runs the install target into a tempdir and asserts the `pkg-config --libs libjpeg`, `pkg-config --modversion libturbojpeg`, and `cmake --find-package -DNAME=JPEG -DLANGUAGE=C -DMODE=EXIST` queries all resolve to our staged tree.
+
+**Why this matters:** Distro packaging needs the full install layout, not just the right artifacts in `target/release/`. A maintainer building a `libjpeg-turbo-rs-capi.deb` / Homebrew formula / Arch PKGBUILD today would have to hand-write the symlink chain, header copy, and CMake config every time.
+
+**Likely area:**
+
+- `crates/libjpeg-turbo-rs-capi/xtask/` (new) or top-level `Makefile`: install-tree staging.
+- `crates/libjpeg-turbo-rs-capi/cmake/JPEGConfig.cmake.in` (new): the CMake config template, with version + imported-target wiring.
+- `crates/libjpeg-turbo-rs-capi/include/` (new): C headers staged for install (mirroring upstream `references/libjpeg-turbo/src/jpeglib.h` etc.).
+- `crates/libjpeg-turbo-rs-capi/tests/install_layout.rs` (new): end-to-end install + lookup harness.
+
+**Acceptance:**
+
+```bash
+cargo run --bin xtask -- install --destdir /tmp/install --prefix /usr
+test -L /tmp/install/usr/lib/libjpeg.so
+test -L /tmp/install/usr/lib/libjpeg.so.62
+test -f /tmp/install/usr/lib/pkgconfig/libjpeg.pc
+test -f /tmp/install/usr/include/jpeglib.h
+PKG_CONFIG_PATH=/tmp/install/usr/lib/pkgconfig pkg-config --libs libjpeg | grep -q -- '-ljpeg'
+cmake --find-package -DNAME=JPEG -DLANGUAGE=C -DMODE=EXIST \
+      -DCMAKE_PREFIX_PATH=/tmp/install/usr
+LD_LIBRARY_PATH=/tmp/install/usr/lib python3 -c "from PIL import Image; Image.open('tests/fixtures/cjpeg_240x320_portrait_444.jpg').load()"
+```
+
+Each command must succeed against the staged tree (resolving to our cdylib, not the system's upstream copy). `tests/install_layout.rs` should automate this in CI.
+
+### P2-9. v6b / v7 / v8 ABI Compatibility Matrix Is Undocumented
+
+**Symptom:** `crates/libjpeg-turbo-rs-capi/src/jpeglib.rs:11` says we target `JPEG_LIB_VERSION = 80`. Upstream libjpeg-turbo supports `WITH_JPEG7` and `WITH_JPEG8` CMake options at build time and ships separate SONAMEs (`libjpeg.so.62` ≈ v6b ABI, `libjpeg.so.7`, `libjpeg.so.8`) for each.
+
+We currently expose v8 fields (`scale_num`/`scale_denom`/`do_fancy_upsampling`/`is_baseline`) on a struct labelled `libjpeg.so.62`. The mismatch is silent: a consumer compiled against system `jpeglib.h` with `JPEG_LIB_VERSION = 62` will see different field positions than our shim assumes.
+
+**Why this matters:** Most distros ship `libjpeg.so.62` (v6b ABI). Pillow's `_imaging.so` is typically compiled against the headers that match whichever SONAME the distro ships. Targeting v8 layout while exposing the v6b SONAME causes offset shifts on real consumers.
+
+**Likely area:**
+
+- `docs/ABI_COMPATIBILITY.md` (new): which `JPEG_LIB_VERSION` we target, which SONAMEs we are willing to expose, and the policy for v6b consumers.
+- `crates/libjpeg-turbo-rs-capi/src/jpeglib.rs`: introduce per-version layout types behind a `lib_version` cfg, mirroring upstream's `WITH_JPEG7` / `WITH_JPEG8` conditionals.
+
+**Acceptance:**
+
+`docs/ABI_COMPATIBILITY.md` lands with an explicit decision (e.g. "v8 only; refuse to expose `libjpeg.so.62` SONAME"), or the crate ships per-version layouts and the build matrix tests each. Either is acceptable; ambiguity is not.
+
+### P2-10. Real Distro-Consumer Smoke Matrix Is Limited to Two Programs
+
+**Symptom:** We have two real-consumer harnesses (`tests/capi_pillow_compat.rs`, `crates/libjpeg-turbo-rs-capi/tests/capi_imagemagick_compat.rs`). Upstream libjpeg-turbo's reverse-dependency surface in Debian alone is hundreds of packages. The headline ones beyond Pillow / ImageMagick:
+
+- libvips (image processing pipeline, `vips jpegload` / `jpegsave`).
+- SDL_image (game engines).
+- FFmpeg (`-c:v mjpeg`).
+- GraphicsMagick (`gm convert ... -format jpeg`).
+- GD (`gdImageCreateFromJpegPtr`, used by PHP-GD).
+- libheif (for HEIF→JPEG transcode).
+
+**Why this matters:** Each of these touches a different subset of the libjpeg API. ImageMagick exercises classic decode/encode + ICC + EXIF; libvips exercises the buffered-image pass with raw-data; FFmpeg exercises memory I/O at high throughput; GD exercises the legacy `jpeg_mem_src` path.
+
+**Likely area:**
+
+- `crates/libjpeg-turbo-rs-capi/tests/capi_libvips_compat.rs` (new).
+- `crates/libjpeg-turbo-rs-capi/tests/capi_ffmpeg_compat.rs` (new).
+- `crates/libjpeg-turbo-rs-capi/tests/capi_sdl_image_compat.rs` (new).
+- `crates/libjpeg-turbo-rs-capi/tests/capi_gd_compat.rs` (new).
+- Each follows the existing Pillow/ImageMagick pattern: dlopen-inject, do a real round-trip, hard-fail on regression, skip-with-reason only if the consumer is genuinely absent.
+
+**Acceptance:**
+
+```bash
+cargo test -p libjpeg-turbo-rs-capi --test capi_libvips_compat
+cargo test -p libjpeg-turbo-rs-capi --test capi_ffmpeg_compat
+cargo test -p libjpeg-turbo-rs-capi --test capi_sdl_image_compat
+cargo test -p libjpeg-turbo-rs-capi --test capi_gd_compat
+```
+
+Each must run a real round-trip, not just dlopen. Skip-with-reason only allowed when the consumer is not installed.
+
+### P2-11. TJSAMP_411 / TJSAMP_441 / TJSAMP_410 / TJSAMP_24 Progressive Encode — **CLOSED**
+
+**Status (2026-05-04): closed.** `cargo test --release --features full-c-parity --test c_tjcomptest` is **green for the full lossy + lossless matrix** including progressive + samp411/441/410/24 on the 227×149 testorig fixture. The source-level skip in `tests/c_tjcomptest.rs:717-739` is gone, the new C-tool-free guard `tests/regression_progressive_4pixel_chroma.rs` exercises all four 4-pixel factors, and the `continue-on-error: true` flag for `c_tjcomptest_full` in `.github/workflows/full-c-parity.yml` is removed.
+
+**Root cause (2026-05-04):** `src/encode/pipeline.rs::progressive_fdct_chroma_block` (and the matching arithmetic-progressive Cb/Cr branches at `pipeline.rs:4761` / `:4781`) clamped the chroma sampling factors with:
+
+```rust
+let hf: usize = if h_samp > 1 { 2 } else { 1 };
+let vf: usize = if v_samp > 1 { 2 } else { 1 };
+```
+
+For S411 (`h_samp=4`) this collapsed `hf` to `2`, so the encoder downsampled chroma to 1/2 resolution while the SOF marker still advertised 1/4 resolution. The decoder unpacked half-resolution coefficients into the quarter-resolution chroma grid → garbled chroma plane.
+
+**Diagnostic (`examples/diag_4pixel_chroma_diff.rs`)** — kept as the institutional reproducer:
+
+| samp | mode | match | rust_bytes | c_bytes | first_d | px_max | px_mean |
+|------|------|-------|------------|---------|---------|--------|---------|
+| S411 | baseline    | Y | 5750 | 5750 | -     | 0   | 0.0000 |
+| S411 | progressive | **N→Y** | 5642 | 5642 | -     | **140→0** | **8.97→0** |
+| S441 | baseline    | Y | 5648 | 5648 | -     | 0   | 0.0000 |
+| S441 | progressive | **N→Y** | 5556 | 5556 | -     | **161→0** | **8.80→0** |
+| S410 | baseline    | Y | 5333 | 5333 | -     | 0   | 0.0000 |
+| S410 | progressive | **N→Y** | 5207 | 5207 | -     | **161→0** | **9.12→0** |
+| S24  | baseline    | Y | 5283 | 5283 | -     | 0   | 0.0000 |
+| S24  | progressive | **N→Y** | 5165 | 5165 | -     | **161→0** | **8.95→0** |
+
+The earlier skip-comment claimed "1 LSB downsample diff, decoded pixels match" — both halves were false. Pixel diff was max ≈140-161 (out of 255), mean ≈9. The bug was a real chroma-plane corruption, not a cosmetic byte difference.
+
+**Fix:** drop the clamp, use `h_samp` / `v_samp` directly. The existing SIMD fast paths for `hf==2 && vf==1|2` still fire for 2-pixel factors; 4-pixel factors fall through to the scalar `downsample_chroma_block` which correctly mirrors C's `int_downsample` (`references/libjpeg-turbo/src/jcsample.c:153-191`).
+
+**Out of scope (separate gap):** the same `max_h <= 2 && max_v <= 2` gate in `src/api/coefficient.rs:1047` rejects 4-pixel factors from the **transform / jpegtran** progressive writer (different code path: `write_coefficients_progressive`, with extra dimension-swap interactions). Tracked as P2-12 if a reviewer wants to push for transform parity too.
+
+---
+
+## Phase 2 Suggested Order
+
+1. ~~**P2-11** — Close the TJSAMP_411/441/410/24 progressive-encode byte-parity gap.~~ **CLOSED 2026-05-04** — root cause was a chroma-sampling-factor clamp in `progressive_fdct_chroma_block`; fix landed in `src/encode/pipeline.rs`, source-level test skip deleted, regression test in `tests/regression_progressive_4pixel_chroma.rs`.
+2. ~~**P2-1** (`c_tjcomptest_full` portion) — Remove `continue-on-error` flag for the encode parity test.~~ **CLOSED 2026-05-04** — flag removed in `.github/workflows/full-c-parity.yml` once P2-11 fix landed. Remaining `c_tjtrantest_full` flag (grayscale Huffman) is still open as a transform-path divergence.
+3. **P2-9** — Decide and document the `JPEG_LIB_VERSION` policy. Without this, P2-3 / P2-5 / P2-8 do not have a target to test against.
+4. **P2-2** — Implement `format_message` printf expansion. Small, self-contained, unblocks downstream error reporting.
+5. **P2-1** (remaining `c_tjtrantest_full` portion) — Investigate and fix or formally document the grayscale-Huffman transform divergence; remove the last `continue-on-error` flag.
+6. **P2-4** — Generated C-side ABI cross-check. Cheap insurance against future field-order drift.
+7. **P2-3** — Per-platform offset assertions + CI matrix. Catches Windows / 32-bit drift before consumers do.
+8. **P2-5** — Symbol-inventory diff against upstream. Defines what "drop-in" actually means at the symbol level.
+9. **P2-8** — SONAME / pkg-config / install layout. Makes the previous step achievable as an actual distro replacement, not just a Rust crate.
+10. **P2-7** — Differential fuzzing against C. Long-running insurance against latent decode/encode divergences once the structural gaps above are closed.
+11. **P2-10** — libvips / FFmpeg / SDL_image / GD consumer harnesses. Real-world validation that the structural work landed correctly.
+12. **P2-6** — Publish to crates.io. Last, because publishing locks the ABI surface and we should not lock until P2-1 through P2-5 are closed.
+
+---
+
 ## Reference Commands
 
 ```bash

@@ -715,28 +715,20 @@ fn c_tjcomptest_lossy_full() {
                                 };
 
                                 for sampi in 0..8usize {
-                                    // Skip progressive + sampling factor > 2
-                                    // (samp411, samp441, samp410, samp24).
-                                    // Our chroma downsampling for 4-pixel
-                                    // factors differs from cjpeg's by 1 LSB
-                                    // in some output samples, which cascades
-                                    // through the per-scan optimised Huffman
-                                    // tables to produce different bitstreams.
-                                    // Both decoders read identical pixels.
-                                    // Tracked as a scoped non-goal: 4-pixel
-                                    // chroma factors are rare in practice and
-                                    // our progressive code path's silent
-                                    // baseline fallback (see
-                                    // src/api/coefficient.rs:1047) already
-                                    // documents the same limit.
-                                    if progressive
-                                        && matches!(
-                                            TJCOMP_SUBSAMP[sampi],
-                                            "411" | "441" | "410" | "24"
-                                        )
-                                    {
-                                        continue;
-                                    }
+                                    // P2-11 closed: progressive + 4-pixel
+                                    // chroma factors (samp411/441/410/24) are
+                                    // now byte-identical to cjpeg. The earlier
+                                    // skip claimed "1 LSB downsample diff,
+                                    // pixels match" but the diagnostic at
+                                    // examples/diag_4pixel_chroma_diff.rs
+                                    // proved the divergence was max=140-161
+                                    // per pixel — the progressive chroma path
+                                    // was clamping h_samp/v_samp to {1,2},
+                                    // emitting half-resolution chroma against
+                                    // an SOF that promised quarter-resolution.
+                                    // Fix landed in src/encode/pipeline.rs
+                                    // (progressive_fdct_chroma_block + the
+                                    // arithmetic-progressive Cb/Cr branches).
                                     let label = format!(
                                         "lossy_full_p{}_{}_{}_a{}_dc{}_o{}_p{}_samp{}",
                                         precision,
