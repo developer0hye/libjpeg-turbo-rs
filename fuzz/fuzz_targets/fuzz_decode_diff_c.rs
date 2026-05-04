@@ -63,8 +63,16 @@ fn decode_with_djpeg(djpeg: &PathBuf, jpeg: &[u8]) -> Option<(usize, usize, usiz
         .stderr(Stdio::null())
         .spawn()
         .ok()?;
-    child.stdin.as_mut()?.write_all(jpeg).ok()?;
+    // Codex P2: drain stdout concurrently with the stdin write to avoid
+    // a pipe-buffer deadlock when the decoded PNM exceeds the OS pipe
+    // capacity (~64 KB on Linux/macOS).
+    let mut stdin = child.stdin.take()?;
+    let payload: Vec<u8> = jpeg.to_vec();
+    let writer = std::thread::spawn(move || {
+        let _ = stdin.write_all(&payload);
+    });
     let out = child.wait_with_output().ok()?;
+    let _ = writer.join();
     if !out.status.success() {
         return None;
     }
