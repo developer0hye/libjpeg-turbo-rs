@@ -172,6 +172,31 @@ fuzz_target!(|data: &[u8]| {
         return;
     }
 
+    // Lenient pre-decode of the source JPEG. If lenient decoding emits
+    // any DecodeWarning (truncated scan, Huffman recovery), the source
+    // bitstream has corrupt blocks that both Rust and C will recover
+    // *differently* (Rust gray-fills, jpegtran often last-block-fills).
+    // Both outputs are valid lenient outputs but they will diverge by
+    // hundreds at the pixel level even though the *transform itself*
+    // is correct. Skip the differential entirely on corrupt sources;
+    // dimension agreement alone is too weak a signal once we're not
+    // running the pixel check, and acceptance agreement is already
+    // covered by the early-return paths above.
+    let source_is_corrupt = {
+        let mut probe2 = match Decoder::new(jpeg) {
+            Ok(d) => d,
+            Err(_) => return,
+        };
+        probe2.set_lenient(true);
+        match probe2.decode_image() {
+            Ok(img) => !img.warnings.is_empty(),
+            Err(_) => return, // even lenient mode rejected — not a fair source.
+        }
+    };
+    if source_is_corrupt {
+        return;
+    }
+
     // C jpegtran first — if it rejects, the input is not a valid JPEG
     // (or hits one of jpegtran's stricter validation paths) and we
     // skip the differential rather than panic on Rust accepting more.
