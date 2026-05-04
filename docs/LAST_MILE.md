@@ -656,29 +656,18 @@ test format_message_no_specifier_matches_msgtext_verbatim   ... ok
 
 **TDD-verified:** reverting `default_format_message` to the prior verbatim-copy implementation makes 7 of those 8 tests RED-fail (only the no-specifier test still passes, because verbatim copy is correct when the message has no `%X`). Restoring the fix returns to GREEN.
 
-### P2-3. ABI Offset Assertions Cover Only LP64 / Non-Windows
+### P2-3. Per-Platform ABI Validation — **PARTIAL: 64-bit cross-platform via P2-4 test; 32-bit / per-platform `const_assert` blocks deferred**
 
-**Symptom:** `crates/libjpeg-turbo-rs-capi/src/jpeglib.rs:3900` gates the full offset assertion block behind `#[cfg(all(target_pointer_width = "64", not(windows)))]`. The comment at `:3879-3882` is explicit: "On 32-bit or ILP32 targets these exact offsets would differ due to pointer-size changes, so we only assert on 64-bit hosts."
+**Status (2026-05-04): partially closed.** The P2-4 ABI cross-check test (`crates/libjpeg-turbo-rs-capi/tests/abi_offsets.rs`) now runs in a dedicated `abi-offsets` matrix CI job (`.github/workflows/ci.yml`) on `ubuntu-latest` (Linux x86_64, LP64), `macos-latest` (aarch64, LP64), and `windows-latest` (x86_64 MSVC, LLP64). Each host probes its own ABI by reading `offset_of!` against the host's compiled struct and comparing to a C harness compiled on the same host.
 
-Upstream libjpeg-turbo officially supports Windows MSVC (LLP64), Windows MinGW, Linux i686, armv7-linux-gnueabihf, and others. Our struct layout is unchecked on every one of those.
+The Windows skip in the test was lifted: `cfg!(windows)` no longer short-circuits, so any per-platform Rust↔C struct divergence on Windows MSVC will surface loudly on the first PR. The 64-bit gate remains because the hand-typed `assert!(offset_of!(...) == N)` constants in `jpeglib.rs:4096+` only apply to LP64; on 32-bit hosts the offsets shift proportionally.
 
-**Why this matters:** A drop-in shim that only verifies LP64 layouts will silently produce field-offset corruption on the first Windows / 32-bit consumer.
+**Still open (deferred, not blocking):**
 
-**Likely area:**
+1. **Per-platform `const_assert!` blocks for Windows LLP64.** Today the const-assert block in `jpeglib.rs` is gated on `not(windows)`, so a Windows-specific layout drift passes the *compile* gate. The runtime `abi_offsets` test catches it instead. Filling in Windows LLP64 offsets would catch drift at compile time too — only worth doing once we have a real Windows MSVC consumer to validate against.
+2. **32-bit targets** (`i686-pc-windows-msvc`, `i686-unknown-linux-gnu`, `armv7-unknown-linux-gnueabihf`). Same posture: deferred until a downstream user requests the platform. Adding cross-compile *build* checks would surface compile errors on 32-bit but not layout drift; layout drift would require either a hand-pinned const block or a matching cross-compiled C harness, neither of which is cheap to maintain.
 
-- `crates/libjpeg-turbo-rs-capi/src/jpeglib.rs` — extend the assertion block with platform-specific arms.
-- New CI matrix in `.github/workflows/ci.yml` for `i686-pc-windows-msvc`, `x86_64-pc-windows-msvc`, `i686-unknown-linux-gnu`, `armv7-unknown-linux-gnueabihf`.
-
-**Acceptance:**
-
-```bash
-# At minimum, add cross-compile build + size_of/offset_of assertion runs for:
-cargo build --target x86_64-pc-windows-msvc -p libjpeg-turbo-rs-capi
-cargo build --target i686-pc-windows-msvc   -p libjpeg-turbo-rs-capi
-cargo build --target i686-unknown-linux-gnu -p libjpeg-turbo-rs-capi
-```
-
-Each build must succeed and CI must run a small `tjunittest`-style harness on at least one 32-bit target. The compile-time `assert!(offset_of!(...) == N)` block must be expanded with per-target expected offsets generated from a one-off C `offsetof` print on the matching upstream build.
+The P2-9 doc explicitly carves these out as "Phase 3 ask" work — keeping P2-3 *fully* open would double-track the same backlog.
 
 ### P2-4. Generated C-Side ABI Cross-Check — **CLOSED (jpeg_decompress_struct)**
 
@@ -902,7 +891,7 @@ The earlier skip-comment claimed "1 LSB downsample diff, decoded pixels match" �
 4. ~~**P2-2** — Implement `format_message` printf expansion.~~ **CLOSED 2026-05-04** — `snprintf_jpeg` helper added in `crates/libjpeg-turbo-rs-capi/src/jpeglib.rs`; `tests/format_message.rs` exercises every specifier `jerror.h` uses against `libc::snprintf` as the reference oracle. TDD red-then-green confirmed.
 5. ~~**P2-1** (remaining `c_tjtrantest_full` portion) — Investigate and fix or formally document the grayscale-Huffman transform divergence; remove the last `continue-on-error` flag.~~ **CLOSED 2026-05-04** — local run on aarch64 reports 11190/0 tested/failed; flag removed for both x86_64 and aarch64 jobs. Suspected x86_64 divergence will surface loudly on the next weekly cron if it's still real.
 6. ~~**P2-4** — Generated C-side ABI cross-check.~~ **CLOSED 2026-05-04** — `tests/abi_offsets.rs` compiles a tiny C harness against the submodule's `jpeglib.h` and asserts every const-asserted field matches `offset_of!`. Coverage scoped to `jpeg_decompress_struct` (27 fields); other structs are a follow-up.
-7. **P2-3** — Per-platform offset assertions + CI matrix. Catches Windows / 32-bit drift before consumers do.
+7. ~~**P2-3** — Per-platform offset assertions + CI matrix.~~ **PARTIAL 2026-05-04** — `abi-offsets` matrix CI job now runs the P2-4 cross-check on Linux x86_64, macOS aarch64, and Windows MSVC; per-platform `const_assert!` blocks and 32-bit targets are deferred until a real downstream user requests them.
 8. **P2-5** — Symbol-inventory diff against upstream. Defines what "drop-in" actually means at the symbol level.
 9. **P2-8** — SONAME / pkg-config / install layout. Makes the previous step achievable as an actual distro replacement, not just a Rust crate.
 10. **P2-7** — Differential fuzzing against C. Long-running insurance against latent decode/encode divergences once the structural gaps above are closed.
