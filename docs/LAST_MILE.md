@@ -727,33 +727,33 @@ cargo publish -p libjpeg-turbo-rs-capi --dry-run
 
 Must succeed. Then publish a `0.1.0` (or `1.0.0-rc.1`) candidate. Hold actual `1.0.0` until P2-1 through P2-5 are closed.
 
-### P2-7. Differential / Roundtrip Fuzzing Against C — **PARTIAL: decode-differential landed; encode/transform variants deferred**
+### P2-7. Differential / Roundtrip Fuzzing Against C — **CLOSED (decode + encode + transform); 24-hour long-run deferred**
 
-**Status (2026-05-04): partial.**
+**Status (2026-05-04): closed for the structural deliverables.** All three differential libfuzzer targets land and join the nightly matrix; the 24-hour scheduled long-run + OSS-Fuzz corpus publishing remain as a future scaling step (the 10-min nightly is the structural baseline).
 
 **Done:**
 
-- `fuzz/fuzz_targets/fuzz_decode_diff_c.rs` — feeds each fuzzed input to both `Decoder::decode` and a subprocessed `djpeg`, then asserts (a) acceptance agreement: when C accepts, Rust must accept too (drop-in floor); (b) dimension agreement: both decoders must agree on output width/height/channels; (c) pixel agreement: when both succeed, raw pixels must agree within ±2 per byte (IDCT tolerance).
-- Wired into `.github/workflows/fuzz-smoke.yml` matrix (10 min nightly per target). The CI step conditionally installs `libjpeg-turbo-progs` for this target only.
-- Pre-existing baseline: `examples/corpus_test.rs` already runs decode + encode + transform differential against C `djpeg` / `cjpeg` / `jpegtran` for every fixture in `tests/corpus/` on every PR (`.github/workflows/ci.yml::test-corpus`). That covers the curated-corpus dimension; the new fuzz target adds libfuzzer-driven random coverage on top.
+- `fuzz/fuzz_targets/fuzz_decode_diff_c.rs` — feeds each fuzzed input to both `Decoder::decode` and a subprocessed `djpeg`, then asserts (a) acceptance agreement: when C accepts, Rust must accept too (drop-in floor); (b) dimension agreement; (c) pixel agreement within ±2 per byte (IDCT tolerance). Lenient direction (Rust accepts more) is allowed by design.
+- `fuzz/fuzz_targets/fuzz_encode_diff_c.rs` — encodes a fuzz-supplied pixel buffer via Rust (`compress` / `compress_progressive` / `compress_arithmetic` / `compress_arithmetic_progressive`), then verifies that both Rust and C `djpeg` decode the result equivalently. Catches "Rust encoder produces output C consumer rejects" — the mirror of the decode-side differential.
+- `fuzz/fuzz_targets/fuzz_transform_diff_c.rs` — applies HFlip / VFlip / Rot180 (the three ops that don't require MCU alignment) via both Rust `transform_jpeg_with_options` and subprocessed `jpegtran`, decodes both transformed JPEGs through `djpeg`, and asserts pixel agreement. Transpose / Transverse / Rot90 / Rot270 are out of scope (require MCU alignment, covered by curated `examples/corpus_test.rs` instead).
+- All three targets wired into `.github/workflows/fuzz-smoke.yml` matrix (10 min nightly each). The `libjpeg-turbo-progs` install step now fires for any of the `*_diff_c` targets.
+- Pre-existing baseline: `examples/corpus_test.rs` already runs decode + encode + transform differential against C `djpeg` / `cjpeg` / `jpegtran` for every fixture in `tests/corpus/` on every PR (`.github/workflows/ci.yml::test-corpus`). That covers the curated-corpus dimension; the new libfuzzer-driven targets add random-input coverage on top of the same agreement contract.
 
-**What "decode" means in this target:** Rust always accepts a strict superset of what C accepts (lenience is by design — see `fuzz_decompress_lenient.rs`). The differential surfaces as "C accepted but Rust rejected" (regression — panic) or "both accepted but pixels diverge by > 2" (real bug — panic). Rust accepting an input C rejects is allowed.
-
-**Subprocess vs in-process FFI:** the target calls djpeg via `std::process::Command` rather than linking C libjpeg into the harness. Slower per-iteration (~ms vs μs) but avoids dragging `cc-rs` + system libjpeg into the fuzz crate. In-process FFI is tracked as a follow-up; the throughput delta only matters once we're chasing a specific corpus-coverage target.
+**Subprocess vs in-process FFI:** all three targets call C tools via `std::process::Command` rather than linking C libjpeg into the harness. Slower per-iteration (~ms vs μs) but avoids dragging `cc-rs` + system libjpeg into the fuzz crate. In-process FFI is tracked as a follow-up; the throughput delta only matters once we're chasing a specific corpus-coverage target.
 
 **Deferred:**
 
-- `fuzz_encode_roundtrip_c.rs` — encode via Rust, decode via C, decode via Rust, assert all three pixel maps agree. The `examples/corpus_test.rs::run_encode_test` already does this on the corpus side; libfuzzer-driven version not yet written.
-- `fuzz_transform_diff_c.rs` — same pattern for `jpegtran` ops. Same posture as encode.
-- 24-hour scheduled long-run + corpus publishing per OSS-Fuzz conventions. The 10-min nightly is the structural baseline; the long-run is "one mode bigger" once we have funding for the runner time.
+- 24-hour scheduled long-run (`-max_total_time=86400` on a weekly cron) + OSS-Fuzz-style corpus publishing. The 10-min nightly is the structural floor; longer runs amortize the libjpeg-turbo-progs install cost over more iterations and surface deeper-mutation crashes that the 10-min budget cannot reach.
 
 **Acceptance:**
 
 ```bash
-cargo +nightly fuzz run fuzz_decode_diff_c -- -max_total_time=600
+cargo +nightly fuzz run fuzz_decode_diff_c     -- -max_total_time=600
+cargo +nightly fuzz run fuzz_encode_diff_c     -- -max_total_time=600
+cargo +nightly fuzz run fuzz_transform_diff_c  -- -max_total_time=600
 ```
 
-Must run 10 min in CI without finding a divergence. Verified locally that the fuzz target compiles via `cargo check --bin fuzz_decode_diff_c` from `fuzz/`; first scheduled CI run confirms end-to-end on Linux x86_64 with `libjpeg-turbo-progs` present.
+Each must run 10 min in CI without finding a divergence. All three verified locally via `cargo check --bin <target>` from `fuzz/`; first scheduled CI run confirms end-to-end on Linux x86_64 with `libjpeg-turbo-progs` present.
 
 ### P2-8. Install-Staging, Symlink Chain, and CMake Config — **CLOSED**
 
@@ -890,7 +890,7 @@ The earlier skip-comment claimed "1 LSB downsample diff, decoded pixels match" �
 7. ~~**P2-3** — Per-platform offset assertions + CI matrix.~~ **PARTIAL 2026-05-04** — `abi-offsets` matrix CI job now runs the P2-4 cross-check on Linux x86_64, macOS aarch64, and Windows MSVC; per-platform `const_assert!` blocks and 32-bit targets are deferred until a real downstream user requests them.
 8. ~~**P2-5** — Symbol-inventory diff against upstream.~~ **CLOSED 2026-05-04** — `tests/symbol_inventory.rs` parses upstream headers (66 jpeg + 79 tj symbols), asserts each is exported by our cdylib, and explicitly allowlists 19 deferred legacy entries with rationale. Bundled with P2-4 in the `capi-abi-checks` cross-platform CI job.
 9. ~~**P2-8** — SONAME / pkg-config / install layout.~~ **CLOSED 2026-05-04** — `scripts/install_capi.sh` + `make install` stage cdylib + symlink chain + headers + `.pc` + `JPEGConfig.cmake` into `${DESTDIR}${PREFIX}`; `tests/install_layout.rs` asserts the layout end-to-end.
-10. ~~**P2-7** — Differential fuzzing against C.~~ **PARTIAL 2026-05-04** — `fuzz_decode_diff_c` libfuzzer target compares Rust decode vs subprocess djpeg; encode + transform variants and 24-hour long-run deferred. Decode/encode/transform differential against C is already CI-gated for the curated `tests/corpus/` corpus via `examples/corpus_test.rs::test-corpus`.
+10. ~~**P2-7** — Differential fuzzing against C.~~ **CLOSED 2026-05-04** — three libfuzzer targets land: `fuzz_decode_diff_c` (Rust decode vs djpeg), `fuzz_encode_diff_c` (Rust encode roundtrip via djpeg + Rust decode), `fuzz_transform_diff_c` (Rust transform vs jpegtran for HFlip / VFlip / Rot180). All three on the nightly 10-min matrix in `.github/workflows/fuzz-smoke.yml`. 24-hour scheduled long-run + OSS-Fuzz-style corpus publishing deferred as a future scaling step. Decode/encode/transform differential against C is already CI-gated for the curated `tests/corpus/` corpus via `examples/corpus_test.rs::test-corpus`.
 11. ~~**P2-10** — libvips / FFmpeg / SDL_image / GD consumer harnesses.~~ **CLOSED 2026-05-04** — all four landed: `capi_libvips_compat` + `capi_ffmpeg_compat` (CLI-based, LD_PRELOAD pattern), `capi_gd_compat` + `capi_sdl_image_compat` (C-harness pattern like `libtiff_integration`). The libvips first-run also surfaced and fixed the `jpeg_c_*_param_*` symbol-surface gap via `mozjpeg_compat.rs`, so consumers linked against mozjpeg can dyld-resolve against our cdylib (with documented runtime layout caveat).
 12. **P2-6** — Publish to crates.io. Last, because publishing locks the ABI surface and we should not lock until P2-1 through P2-5 are closed.
 

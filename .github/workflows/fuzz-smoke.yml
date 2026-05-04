@@ -35,7 +35,9 @@ jobs:
           - fuzz_progressive_decoder
           - fuzz_encode_roundtrip
           - fuzz_transform_options
-          - fuzz_decode_diff_c  # P2-7 differential vs subprocess djpeg
+          - fuzz_decode_diff_c     # P2-7 differential decode vs subprocess djpeg
+          - fuzz_encode_diff_c     # P2-7 differential encode-roundtrip vs subprocess djpeg
+          - fuzz_transform_diff_c  # P2-7 differential transform vs subprocess jpegtran
     steps:
       - uses: actions/checkout@v4
 
@@ -50,8 +52,8 @@ jobs:
       - name: Install cargo-fuzz
         run: cargo install cargo-fuzz --locked
 
-      - name: Install libjpeg-turbo-progs (djpeg) for differential targets
-        if: matrix.target == 'fuzz_decode_diff_c'
+      - name: Install libjpeg-turbo-progs (djpeg + cjpeg + jpegtran) for differential targets
+        if: matrix.target == 'fuzz_decode_diff_c' || matrix.target == 'fuzz_encode_diff_c' || matrix.target == 'fuzz_transform_diff_c'
         run: sudo apt-get install -y libjpeg-turbo-progs
 
       - name: Regenerate seed corpus
