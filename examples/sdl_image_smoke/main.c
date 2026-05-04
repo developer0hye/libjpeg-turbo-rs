@@ -103,9 +103,16 @@ int main(int argc, char **argv) {
     return 2;
   }
 
-  /* SDL needs to initialise to even let IMG_Load_RW work for raster
-   * formats — SDL_INIT_VIDEO is the lightest subsystem that satisfies
-   * IMG's runtime requirements without spawning a window. */
+  /* SDL_image's JPEG decode path needs surfaces (SDL_CreateRGBSurface)
+   * but does *not* need a display — SDL_INIT_VIDEO would fail on
+   * headless CI runners ("video driver did not add any displays"),
+   * which is exactly where this test must run. Force the dummy video
+   * driver so SDL_Init(SDL_INIT_VIDEO) reports success without an
+   * attached display, and allow the env to be overridden by users who
+   * actually have a display. */
+  if (!getenv("SDL_VIDEODRIVER")) {
+    setenv("SDL_VIDEODRIVER", "dummy", 0);
+  }
   if (SDL_Init(SDL_INIT_VIDEO) != 0) {
     fprintf(stderr, "SDL_Init failed: %s\n", SDL_GetError());
     free(jpeg);

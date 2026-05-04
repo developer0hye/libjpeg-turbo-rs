@@ -89,6 +89,18 @@ if [[ -n "$LINKED" ]] && echo "$LINKED" | grep -qi "mozjpeg"; then
   exit 11
 fi
 
+# Codex review (P2): the dependency probe must find a libjpeg edge,
+# otherwise this SDL_image build does not link libjpeg at all
+# (STB-only build) and there is nothing for our cdylib to interpose.
+# Running the harness anyway would let the test report a passing PSNR
+# while no jpeg_* call ever reached our cdylib — false coverage.
+if [[ -z "$LINKED" ]]; then
+  echo "SKIP: SDL_image on this host has no libjpeg link edge (likely STB-only" >&2
+  echo "      build). There is no symbol surface for our cdylib to override," >&2
+  echo "      so the round-trip would not actually exercise the drop-in path." >&2
+  exit 4
+fi
+
 # ---- Per-OS loader setup --------------------------------------------
 SYMLINK_DIR="$WORKDIR/symlinks"
 mkdir -p "$SYMLINK_DIR"
