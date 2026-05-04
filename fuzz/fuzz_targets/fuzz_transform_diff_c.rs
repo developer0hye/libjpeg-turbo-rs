@@ -192,6 +192,8 @@ fuzz_target!(|data: &[u8]| {
     if h.width == 0 || h.height == 0 || pixels > MAX_FUZZ_PIXELS {
         return;
     }
+    let input_w: u16 = h.width;
+    let input_h: u16 = h.height;
 
     // C jpegtran first — if it rejects, the input is not a valid JPEG
     // (or hits one of jpegtran's stricter validation paths) and we
@@ -291,40 +293,41 @@ fuzz_target!(|data: &[u8]| {
             let _ = (c_px, r_px, c_lenient, r_lenient, cw, ch, cc);
         }
         (Some(_), None) => {
-            // djpeg rejected our transformed JPEG. There are two
-            // possibilities:
+            // djpeg rejected our transformed JPEG. The known
+            // follow-up bug ("P2-7 follow-up: transform encoder
+            // Rot180 small-image divergence", LAST_MILE.md) covers
+            // exactly one shape: Rot180 on a small input (16×16 was
+            // the original fixture; 4:4:4 RGB; Rust output decodes
+            // through Rust but produces all-gray pixels and djpeg
+            // rejects with "premature end of data segment"). Skip
+            // *only* that narrow class; everything else — HFlip,
+            // VFlip, larger Rot180 inputs, or any case where Rust's
+            // own decoder can't read the output — panics so libfuzzer
+            // still surfaces fresh transform encoder bugs.
             //
-            // (a) Rust transform output is genuinely malformed — a
-            //     real transform encoder bug. Surface as a panic.
-            // (b) The output is a self-consistent JPEG that Rust's
-            //     own decoder can read but uses Huffman code lengths
-            //     / coefficient layouts that diverge from jpegtran's
-            //     reference encoder. `fuzz_transform_diff_c` surfaced
-            //     a 805-byte 16×16 4:4:4 RGB Rot180 case where Rust's
-            //     transform produces 99 entropy bytes vs jpegtran's 94,
-            //     all gray pixels vs jpegtran's varied output —
-            //     symptom of a deeper transform-coefficient-mapping
-            //     bug, tracked as the "P2-7 follow-up: transform
-            //     encoder Rot180 small-image divergence" entry in
-            //     LAST_MILE.md.
-            //
-            // Discriminate by self-decoding the Rust output. If
-            // Rust's own `Decoder::decode_image` accepts it, route to
-            // the known-follow-up bucket and skip; otherwise panic so
-            // a genuinely malformed bitstream still trips libfuzzer.
-            let rust_self_ok = Decoder::new(&r_transformed)
-                .and_then(|mut d| {
-                    d.set_lenient(true);
-                    d.decode_image()
-                })
-                .is_ok();
-            if rust_self_ok {
-                return;
+            // The Rust-self-decode check guards against accidentally
+            // skipping a future Rot180 small-image regression that
+            // produces a structurally broken bitstream rather than
+            // the documented "valid-but-wrong-coefficients" symptom.
+            let is_known_rot180_small =
+                matches!(op, TransformOp::Rot180) && input_w <= 32 && input_h <= 32;
+            if is_known_rot180_small {
+                let rust_self_ok = Decoder::new(&r_transformed)
+                    .and_then(|mut d| {
+                        d.set_lenient(true);
+                        d.decode_image()
+                    })
+                    .is_ok();
+                if rust_self_ok {
+                    return;
+                }
             }
             panic!(
                 "transform-diff {:?}: djpeg rejected our transformed JPEG \
-                 and Rust decoder also rejects it (rust_len={}, c_len={})",
+                 (input={}x{}, rust_len={}, c_len={})",
                 op,
+                input_w,
+                input_h,
                 r_transformed.len(),
                 c_transformed.len(),
             );

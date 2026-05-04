@@ -778,7 +778,7 @@ Most likely failure surface: arithmetic bit-stuffing recovery (0xFF / 0x00) at t
 
 Header bytes (SOI through SOS) are byte-identical between Rust and jpegtran outputs; the divergence is entirely in the entropy-coded segment (Rust = 99 bytes, jpegtran = 94 bytes, completely different content). Symptom set rules out a marker-handling bug and points at the coefficient-mapping / DC-predictor reset path inside the Rot180 transformer when applied to a single-MCU-row input.
 
-`fuzz_transform_diff_c` now downgrades "djpeg rejects our Rot180 output" to `return` when the same Rust output round-trips through `Decoder::decode_image` — the panic still fires when the bitstream is genuinely malformed (Rust's own decoder rejects it), preserving real-bug detection while routing this known case to the follow-up bucket.
+`fuzz_transform_diff_c` narrows the soft-skip to **Rot180 on inputs with both dimensions ≤ 32 px**, gated additionally on Rust's own decoder accepting the output (so a future Rot180 small-image regression that produces a structurally broken bitstream still trips libfuzzer). Every other shape — HFlip, VFlip, Rot180 on larger inputs, or any case where Rust's decoder rejects the output — keeps panicking. Match the documented bug exactly; do not broaden.
 
 **Acceptance:** delete the self-decode soft-skip in `fuzz_transform_diff_c.rs` and have the nightly run survive 10 min on the original 805-byte crash artifact (`fuzz/artifacts/fuzz_transform_diff_c/crash-75b99921a272dcc0768e856892a0c6fcfe0dd8f2`).
 
