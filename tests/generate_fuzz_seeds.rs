@@ -672,11 +672,24 @@ fn generate_seeds() {
     //   bits 0..1: subsampling idx (0=420, 1=422, 2=444, 3=440)
     //   bits 2..3: entropy        (0=baseline, 1=progressive, 2=arith, 3=arith+prog)
     //   bit  7   : grayscale (1=Grayscale, 0=Rgb)
+    // Cover every (sub_idx 0..=3) × (entropy 0..=3) branch the target
+    // exercises so libfuzzer hits every code path from iteration 0
+    // (codex round-3 P3). The grayscale entries cover the bpp=1 size
+    // accounting separately from the RGB entries.
     let encdiff_configs: &[(u8, u8, u8, u8, &str)] = &[
         (32, 32, 75, 0b0000_0000, "rgb_baseline_32x32_q75_s420"),
+        (32, 32, 75, 0b0000_0001, "rgb_baseline_32x32_q75_s422"),
         (32, 32, 75, 0b0000_0010, "rgb_baseline_32x32_q75_s444"),
+        (32, 32, 75, 0b0000_0011, "rgb_baseline_32x32_q75_s440"),
         (32, 32, 90, 0b0000_0100, "rgb_progressive_32x32_q90_s420"),
         (32, 32, 50, 0b0000_1000, "rgb_arith_32x32_q50_s420"),
+        (
+            32,
+            32,
+            75,
+            0b0000_1100,
+            "rgb_arith_progressive_32x32_q75_s420",
+        ),
         (16, 16, 75, 0b1000_0000, "gray_baseline_16x16_q75"),
         (24, 24, 90, 0b1000_0100, "gray_progressive_24x24_q90"),
     ];
