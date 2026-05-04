@@ -108,14 +108,22 @@ fn rust_offsets() -> Vec<(&'static str, usize)> {
 
 #[test]
 fn rust_offsets_match_upstream_jpeglib_h_at_lib_version_80() {
-    // Gate: only relevant on LP64 / non-Windows hosts (matches the
-    // jpeglib.rs assertion block).
-    if std::mem::size_of::<usize>() != 8 || cfg!(windows) {
+    // Gate: 64-bit hosts only. The Rust assertion block in
+    // `jpeglib.rs` only pins LP64 offsets, but `offset_of!` reads the
+    // actual struct layout on the running host — so this test probes
+    // whatever ABI the target uses (LP64 on Linux/macOS, LLP64 on
+    // Windows MSVC). Any per-platform divergence between our Rust
+    // mirror and upstream `jpeglib.h` shows up here as a per-platform
+    // mismatch.
+    //
+    // On 32-bit hosts the struct shrinks proportionally and the
+    // hand-typed offsets in jpeglib.rs do not apply; skip with a
+    // descriptive reason rather than fail.
+    if std::mem::size_of::<usize>() != 8 {
         eprintln!(
-            "SKIP: ABI offsets only pinned for LP64 non-Windows; \
-             host is size_of(usize)={} cfg!(windows)={}",
+            "SKIP: ABI cross-check only runs on 64-bit hosts; \
+             host has size_of(usize)={}",
             std::mem::size_of::<usize>(),
-            cfg!(windows),
         );
         return;
     }

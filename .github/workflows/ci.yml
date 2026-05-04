@@ -90,6 +90,36 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo test --lib
 
+  abi-offsets:
+    # P2-3 / P2-4: per-platform ABI cross-check.
+    #
+    # `tests/abi_offsets.rs` compiles a tiny C program against the
+    # submodule's `jpeglib.h` and asserts every const-asserted Rust
+    # offset equals the C-side `offsetof` on the host. Running it on
+    # ubuntu-latest (Linux x86_64), macos-latest (aarch64), and
+    # windows-latest (MSVC LLP64) covers the three ABI flavours
+    # downstream consumers care about. Each host probes its own ABI.
+    #
+    # Skip-with-reason on hosts where the test gate trips (e.g. no cc
+    # on PATH, non-LP64 layouts that the Rust assertion block doesn't
+    # pin yet) — the test exits 0 with an `eprintln!("SKIP: ...")`.
+    name: ABI Offsets (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    needs: [check]
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Run ABI offsets cross-check
+        run: cargo test -p libjpeg-turbo-rs-capi --release --test abi_offsets -- --nocapture
+        timeout-minutes: 10
+
   test-cross-encode:
     name: C Interop (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
