@@ -10,6 +10,11 @@ cargo-fuzz = true
 [dependencies]
 libfuzzer-sys = "0.4"
 arbitrary = { version = "1", features = ["derive"] }
+# libc is used by the *_diff_c targets to mask SIGPIPE before writing
+# to subprocess stdin. With `#![no_main]` libfuzzer skips std's default
+# SIGPIPE → SIG_IGN setup, so a pipe-write to a closed peer would kill
+# the fuzz process with signal 13 instead of returning Err(BrokenPipe).
+libc = "0.2"
 
 [dependencies.libjpeg-turbo-rs]
 path = ".."
