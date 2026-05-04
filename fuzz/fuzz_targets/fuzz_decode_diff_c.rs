@@ -55,12 +55,26 @@ fn djpeg_path() -> Option<PathBuf> {
         .clone()
 }
 
-fn decode_with_djpeg(djpeg: &PathBuf, jpeg: &[u8]) -> Option<(usize, usize, usize, Vec<u8>)> {
+/// Returns (width, height, channels, raw_pixels, c_lenient_recovery).
+///
+/// `c_lenient_recovery` is true when djpeg emitted any non-empty
+/// stderr — its warning channel for "Premature end of JPEG file",
+/// "Corrupt JPEG data", "Bogus marker length", and other lenient
+/// recovery notifications. Combined with Rust's `Image.warnings`
+/// flag this gives the fuzz target a *bilateral* recovery signal:
+/// pixel-diff is only skipped when both sides agree the input is
+/// corrupt, so Rust cannot unilaterally suppress the C oracle.
+fn decode_with_djpeg(
+    djpeg: &PathBuf,
+    jpeg: &[u8],
+) -> Option<(usize, usize, usize, Vec<u8>, bool)> {
     let mut child = Command::new(djpeg)
         .arg("-pnm")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .stderr(Stdio::null())
+        // Capture stderr so we can detect djpeg's lenient-recovery
+        // warnings (codex stop-hook). Drained concurrently below.
+        .stderr(Stdio::piped())
         .spawn()
         .ok()?;
     // Codex P2: drain stdout concurrently with the stdin write to avoid
@@ -76,7 +90,9 @@ fn decode_with_djpeg(djpeg: &PathBuf, jpeg: &[u8]) -> Option<(usize, usize, usiz
     if !out.status.success() {
         return None;
     }
-    parse_pnm(&out.stdout)
+    let c_lenient_recovery: bool = !out.stderr.is_empty();
+    let (w, h, c, px) = parse_pnm(&out.stdout)?;
+    Some((w, h, c, px, c_lenient_recovery))
 }
 
 /// Returns (width, height, channels, raw_pixels).
@@ -167,7 +183,10 @@ fuzz_target!(|data: &[u8]| {
     let r_result = rust_decode(data);
 
     match (c_result, r_result) {
-        (Some((cw, ch, cc, c_px)), Some((rw, rh, rc, r_px, lenient_recovery))) => {
+        (
+            Some((cw, ch, cc, c_px, c_lenient)),
+            Some((rw, rh, rc, r_px, r_lenient)),
+        ) => {
             // (1) Acceptance agreement: when C succeeds, Rust succeeded
             // (we're inside Some(...) on both arms — pass).
             // (2) Dimension agreement.
@@ -181,17 +200,21 @@ fuzz_target!(|data: &[u8]| {
                 );
             }
             // (3) Pixel agreement within ±IDCT tolerance — only when
-            // both sides did a *clean* decode. When Rust's lenient
-            // recovery activated (warnings non-empty), djpeg also did
-            // best-effort recovery on the same input but the two
-            // recovery strategies (ours = gray-fill, djpeg's = often
-            // last-valid-block) produce divergent but equally-valid
-            // outputs. Skip pixel comparison in that case; the
-            // dimension agreement above is still meaningful drop-in
-            // evidence. The strict-decode path is what enforces
-            // pixel-exact behaviour, and `fuzz_decompress` already
-            // covers it on the Rust-only side.
-            if lenient_recovery {
+            // *both* sides did a clean decode. When either side did
+            // lenient recovery, the two recovery strategies (ours =
+            // gray-fill, djpeg's = often last-valid-block) produce
+            // divergent but equally-valid outputs.
+            //
+            // Codex stop-hook: requiring *bilateral* agreement on
+            // "input was corrupt" means Rust cannot unilaterally
+            // suppress the C oracle by spuriously emitting a warning.
+            // If only Rust thinks recovery happened but djpeg's
+            // stderr is clean, the pixel check still runs and any
+            // genuine divergence will surface; if only djpeg shows
+            // recovery but Rust didn't notice, same — Rust's silence
+            // is still tested against C's actual output. Skipping
+            // requires both sides to confirm corruption.
+            if c_lenient && r_lenient {
                 return;
             }
             let mut max_d: i32 = 0;
