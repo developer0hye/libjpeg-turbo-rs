@@ -657,6 +657,44 @@ fn generate_seeds() {
     // Seeds for the new fuzz_transform_options target (structured header + JPEG).
     transform_options_seeds(corpus_base);
 
+    // P2-7: structured seeds for fuzz_encode_diff_c. Codex round-2 P2:
+    // fan-out of JPEG bytes alone left this target effectively unseeded
+    // — the 4-byte header derives e.g. width=63 height=24 grayscale,
+    // requiring 1516 bytes total, but the JPEG seeds are mostly < 600
+    // bytes so the target returns before exercising the encoder. We
+    // generate explicit [header][pixel-buffer] seeds covering the
+    // entropy × subsampling × pixel-format axes the target actually
+    // exercises, so libfuzzer starts from inputs that already trigger
+    // the differential.
+    let encdiff_target: &[&str] = &["fuzz_encode_diff_c"];
+    // (width, height, quality, flags_byte, label)
+    // flags layout (matches fuzz_encode_diff_c::fuzz_target):
+    //   bits 0..1: subsampling idx (0=420, 1=422, 2=444, 3=440)
+    //   bits 2..3: entropy        (0=baseline, 1=progressive, 2=arith, 3=arith+prog)
+    //   bit  7   : grayscale (1=Grayscale, 0=Rgb)
+    let encdiff_configs: &[(u8, u8, u8, u8, &str)] = &[
+        (32, 32, 75, 0b0000_0000, "rgb_baseline_32x32_q75_s420"),
+        (32, 32, 75, 0b0000_0010, "rgb_baseline_32x32_q75_s444"),
+        (32, 32, 90, 0b0000_0100, "rgb_progressive_32x32_q90_s420"),
+        (32, 32, 50, 0b0000_1000, "rgb_arith_32x32_q50_s420"),
+        (16, 16, 75, 0b1000_0000, "gray_baseline_16x16_q75"),
+        (24, 24, 90, 0b1000_0100, "gray_progressive_24x24_q90"),
+    ];
+    for (w, h, q, flags, label) in encdiff_configs {
+        let bpp: usize = if (flags & 0b1000_0000) != 0 { 1 } else { 3 };
+        let pixel_buf_len: usize = (*w as usize) * (*h as usize) * bpp;
+        // Smooth gradient: gives the encoder real signal without
+        // worst-case quantization noise.
+        let pixel_buf: Vec<u8> = (0..pixel_buf_len)
+            .map(|i| ((i * 251) % 256) as u8)
+            .collect();
+        let mut bytes: Vec<u8> = Vec::with_capacity(4 + pixel_buf_len);
+        bytes.extend_from_slice(&[*w, *h, *q, *flags]);
+        bytes.extend_from_slice(&pixel_buf);
+        let name: String = format!("encdiff_{label}.bin");
+        fan_out_write(&name, &bytes, corpus_base, encdiff_target);
+    }
+
     // P2-7: seeds for fuzz_transform_diff_c. Header is a single op byte
     // (0=HFlip, 1=VFlip, 2=Rot180; the target wraps op_idx % 3) followed
     // by valid JPEG bytes. Without explicit seeds the target spends its
