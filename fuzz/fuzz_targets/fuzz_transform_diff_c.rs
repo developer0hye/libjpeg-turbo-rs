@@ -31,7 +31,7 @@ use std::sync::OnceLock;
 
 use libfuzzer_sys::fuzz_target;
 use libjpeg_turbo_rs::{
-    transform_jpeg_with_options, Decoder, MarkerCopyMode, TransformOp, TransformOptions,
+    transform_jpeg_with_options, Decoder, JpegError, MarkerCopyMode, TransformOp, TransformOptions,
 };
 
 const MAX_FUZZ_PIXELS: u64 = 1_048_576;
@@ -199,21 +199,36 @@ fuzz_target!(|data: &[u8]| {
     };
     let r_transformed: Vec<u8> = match transform_jpeg_with_options(jpeg, &opts) {
         Ok(v) => v,
-        Err(_) => {
-            // Rust's `read_coefficients` is currently the strict path —
-            // a "lenient transform" mode does not exist. jpegtran's
-            // coefficient reader masks several CorruptData conditions
-            // (e.g. "AC coefficient index out of bounds" on a malformed
-            // scan) that we surface as errors. Treating that asymmetry
-            // as a panic-worthy "drop-in regression" turns the fuzz
-            // harness into a noise generator on every fuzzed input
-            // that exercises the strict path. Skip the differential
-            // here — the *strict-side* coverage is provided by
-            // `fuzz_transform` on the Rust-only path. When we add a
-            // lenient transform mode this branch should switch to
-            // calling it and the early return removed.
+        // Discriminate by error kind so we don't paper over real bugs
+        // (codex stop-hook):
+        //
+        //  * Bitstream-shape errors (CorruptData / UnexpectedEof /
+        //    InvalidMarker / UnexpectedMarker) are exactly the cases
+        //    where jpegtran issues a warning and continues with
+        //    best-effort output. Rust's `read_coefficients` is the
+        //    strict path; until a lenient transform mode exists,
+        //    treat these as inconclusive (early return) — strict-side
+        //    coverage is already provided by `fuzz_transform` on the
+        //    Rust-only path. Remove this branch when a lenient
+        //    transform mode lands.
+        //
+        //  * Every other variant (Unsupported, BufferTooSmall, Io)
+        //    is a real Rust-side defect: a capability gap, an internal
+        //    API misuse, or a host-IO failure that should never reach
+        //    a fuzz iteration. Surface them as panics so libfuzzer
+        //    flags the crash.
+        Err(e @ (JpegError::CorruptData(_)
+        | JpegError::UnexpectedEof
+        | JpegError::InvalidMarker(_)
+        | JpegError::UnexpectedMarker(_))) => {
+            let _ = e;
             return;
         }
+        Err(e) => panic!(
+            "transform-diff: jpegtran accepted input but Rust transform {:?} failed with \
+             non-bitstream error: {:?}",
+            op, e
+        ),
     };
 
     // Decode both transformed JPEGs through djpeg so byte-level
