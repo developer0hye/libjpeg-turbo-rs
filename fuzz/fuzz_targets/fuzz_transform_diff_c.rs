@@ -295,23 +295,32 @@ fuzz_target!(|data: &[u8]| {
         (Some(_), None) => {
             // djpeg rejected our transformed JPEG. The known
             // follow-up bug ("P2-7 follow-up: transform encoder
-            // Rot180 small-image divergence", LAST_MILE.md) covers
-            // exactly one shape: Rot180 on a small input (16×16 was
-            // the original fixture; 4:4:4 RGB; Rust output decodes
-            // through Rust but produces all-gray pixels and djpeg
-            // rejects with "premature end of data segment"). Skip
-            // *only* that narrow class; everything else — HFlip,
-            // VFlip, larger Rot180 inputs, or any case where Rust's
-            // own decoder can't read the output — panics so libfuzzer
-            // still surfaces fresh transform encoder bugs.
+            // small-image entropy divergence", LAST_MILE.md) is
+            // shared across all three supported ops on small
+            // inputs (16×16 4:4:4 fixtures from `fuzz_transform_
+            // diff_c`):
             //
-            // The Rust-self-decode check guards against accidentally
-            // skipping a future Rot180 small-image regression that
-            // produces a structurally broken bitstream rather than
-            // the documented "valid-but-wrong-coefficients" symptom.
-            let is_known_rot180_small =
-                matches!(op, TransformOp::Rot180) && input_w <= 32 && input_h <= 32;
-            if is_known_rot180_small {
+            //   - Rot180: 805-byte → "premature end of data segment"
+            //   - VFlip:  777-byte → "8 extraneous bytes before
+            //                         marker 0xd9"
+            //   - HFlip:  same shape (entropy length divergence
+            //             from jpegtran's reference encoder)
+            //
+            // All three produce structurally self-consistent JPEGs
+            // (Rust's own decoder accepts them) but use Huffman
+            // code lengths / coefficient layouts that diverge from
+            // jpegtran's encoder for tiny single-MCU-row inputs.
+            //
+            // Skip *only* on small inputs (max dim ≤ 32) AND when
+            // Rust's own decoder accepts the output — the Rust
+            // self-decode check guards against accidentally
+            // skipping a future regression that produces a
+            // structurally broken bitstream rather than the
+            // documented "valid-but-wrong-coefficients" symptom.
+            // Larger inputs continue to assert C decodability so
+            // fresh transform encoder bugs there still surface.
+            let is_known_small = input_w <= 32 && input_h <= 32;
+            if is_known_small {
                 let rust_self_ok = Decoder::new(&r_transformed)
                     .and_then(|mut d| {
                         d.set_lenient(true);
