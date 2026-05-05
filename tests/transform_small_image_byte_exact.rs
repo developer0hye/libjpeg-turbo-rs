@@ -24,7 +24,10 @@ use libjpeg_turbo_rs::{
     transform_jpeg_with_options, MarkerCopyMode, TransformOp, TransformOptions,
 };
 use std::io::Write;
+use std::path::PathBuf;
 use std::process::{Command, Stdio};
+
+mod helpers;
 
 /// Rot180-origin fixture (806 bytes). Byte 0 is the original fuzz op
 /// selector — strip before feeding to the decoder. Used to reproduce
@@ -171,22 +174,7 @@ const VFLIP_ORIGIN: &[u8] = &[
     199, 149, 239, 156, 246, 199, 32, 31, 255, 217,
 ];
 
-fn jpegtran_path() -> Option<&'static str> {
-    for p in [
-        "/opt/homebrew/bin/jpegtran",
-        "/usr/local/bin/jpegtran",
-        "/usr/bin/jpegtran",
-        "/opt/libjpeg-turbo/bin/jpegtran",
-    ] {
-        if std::path::Path::new(p).exists() {
-            return Some(p);
-        }
-    }
-    None
-}
-
-fn jpegtran_transform(jpeg: &[u8], op_args: &[&str]) -> Option<Vec<u8>> {
-    let bin = jpegtran_path()?;
+fn jpegtran_transform(bin: &PathBuf, jpeg: &[u8], op_args: &[&str]) -> Option<Vec<u8>> {
     let mut args: Vec<&str> = vec!["-copy", "all"];
     args.extend(op_args.iter().copied());
     let mut child = Command::new(bin)
@@ -210,10 +198,11 @@ fn jpegtran_transform(jpeg: &[u8], op_args: &[&str]) -> Option<Vec<u8>> {
 }
 
 fn assert_byte_exact(name: &str, jpeg: &[u8]) {
-    let Some(_) = jpegtran_path() else {
-        eprintln!("SKIP: jpegtran not on PATH");
-        return;
-    };
+    // Locate jpegtran via the shared helpers' `c_tool_path` (homebrew →
+    // PATH lookup) and let `require_c_tool!` panic in CI when missing
+    // so the regression cannot be hidden by a CI image without
+    // libjpeg-turbo-progs installed.
+    let bin: PathBuf = require_c_tool!("jpegtran");
 
     for (op, label, op_args) in [
         (TransformOp::HFlip, "HFlip", &["-flip", "horizontal"][..]),
@@ -227,7 +216,7 @@ fn assert_byte_exact(name: &str, jpeg: &[u8]) {
         };
         let r_out = transform_jpeg_with_options(jpeg, &opts)
             .unwrap_or_else(|e| panic!("{name} {label}: Rust transform err: {e:?}"));
-        let c_out = jpegtran_transform(jpeg, op_args)
+        let c_out = jpegtran_transform(&bin, jpeg, op_args)
             .unwrap_or_else(|| panic!("{name} {label}: jpegtran rejected the source"));
         assert_eq!(
             r_out,
