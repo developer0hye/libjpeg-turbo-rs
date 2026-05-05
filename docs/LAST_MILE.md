@@ -769,24 +769,18 @@ Most likely failure surface: arithmetic bit-stuffing recovery (0xFF / 0x00) at t
 
 **Acceptance:** restore the `if probe.is_arithmetic() { return; }` skip in `fuzz_decode_diff_c.rs` and have the nightly run survive 10 min on the same fixture (re-add it to `tests/generate_fuzz_seeds.rs::DECODER_TARGETS` for `fuzz_decode_diff_c` once fixed).
 
-#### Follow-up: transform encoder small-image entropy divergence — **OPEN**
+#### Follow-up: transform encoder small-image entropy divergence — **CLOSED 2026-05-06**
 
-`fuzz_transform_diff_c` surfaced two 16×16 4:4:4 RGB fixtures (one Rot180, one VFlip). Local cross-check applied **all three supported ops** to both fixtures and confirmed the bug class is shared across HFlip / VFlip / Rot180:
+`fuzz_transform_diff_c` originally surfaced two 16×16 4:4:4 RGB fixtures (one Rot180-origin, one VFlip-origin). All three supported ops on both fixtures looked like a transform-writer bug class — Rust's outputs round-tripped through Rust's own decoder but jpegtran's djpeg rejected them with "premature end of data segment" / "extraneous bytes before marker 0xd9".
 
-| Source fixture | Op | rust_len | djpeg exit | rust self-decode | djpeg stderr |
-|---|---|---|---|---|---|
-| `crash-75b99921...` (Rot180 origin, 805B) | HFlip | 723 | 2 | OK | premature end of data segment |
-| | VFlip | 724 | 2 | OK | premature end of data segment |
-| | Rot180 | 724 | 2 | OK | premature end of data segment |
-| `crash-de852cc2...` (VFlip origin, 778B) | HFlip | 810 | 2 | OK | premature end of data segment |
-| | VFlip | 811 | 2 | OK | 8 extraneous bytes before marker 0xd9 |
-| | Rot180 | 811 | 2 | OK | premature end of data segment |
+**Root cause:** *not* in the transform writer. The bug was in the read-side `BitReader`, which stalled on multi-`0xFF` runs (see the achromatic-output follow-up below). The transform path reads the source coefficients through the same `BitReader`, so the stall delivered corrupted (but Rust-self-consistent) coefficients to the rewriter, which then emitted self-consistent but jpegtran-divergent entropy. With the BitReader fix in commit 1e9c1bb in place, every op on every fixture is byte-exact identical to jpegtran's `-copy all` output:
 
-Every op fails djpeg's decoder on both fixtures, and every Rust output round-trips through Rust's own decoder — the bug class is uniformly "valid-but-wrong-coefficients" across all three ops. Pattern: the input has 6 bytes of entropy for 12 expected blocks (severely truncated); each side pads missing coefficients differently, producing entropy-length divergence. Headers (SOI through SOS) are byte-identical to jpegtran's; the divergence is entirely in the entropy-coded segment. Symptom set rules out a marker-handling bug and points at the **coefficient-mapping / DC-predictor reset path** inside the transformer when reading from a truncated-entropy input — shared across all three ops, so one underlying bug in the transform writer's small-input handling, not three.
+| Source fixture | HFlip | VFlip | Rot180 |
+|---|---|---|---|
+| `crash-75b99921...` (Rot180 origin, 806B incl. op-byte) | 719 == 719 ✅ | 723 == 723 ✅ | 719 == 719 ✅ |
+| `crash-de852cc2...` (VFlip origin, 778B incl. op-byte) | 722 == 722 ✅ | 721 == 721 ✅ | 717 == 717 ✅ |
 
-`fuzz_transform_diff_c` narrows the soft-skip to **inputs with both dimensions ≤ 32 px** (any of HFlip/VFlip/Rot180), gated additionally on Rust's own decoder accepting the output (so a future small-image regression that produces a structurally broken bitstream still trips libfuzzer). Larger inputs continue to assert C decodability so fresh transform encoder bugs there still surface.
-
-**Acceptance:** delete the self-decode soft-skip in `fuzz_transform_diff_c.rs` and have the nightly run survive 10 min on both pinned crash artifacts (`crash-75b99921...` and `crash-de852cc2...`).
+**Verification:** `tests/transform_small_image_byte_exact.rs` pins both fixtures and asserts byte-exact equality across HFlip / VFlip / Rot180 vs jpegtran. The soft-skip in `fuzz_transform_diff_c.rs` (the `is_known_small` + Rust-self-decode escape hatch) is removed — any future divergence will now panic the differential as a real regression.
 
 #### Follow-up: baseline 16×16 RGB achromatic-output divergence — **CLOSED 2026-05-04**
 
