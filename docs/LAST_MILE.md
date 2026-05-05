@@ -788,6 +788,16 @@ Every op fails djpeg's decoder on both fixtures, and every Rust output round-tri
 
 **Acceptance:** delete the self-decode soft-skip in `fuzz_transform_diff_c.rs` and have the nightly run survive 10 min on both pinned crash artifacts (`crash-75b99921...` and `crash-de852cc2...`).
 
+#### Follow-up: baseline 16×16 RGB achromatic-output divergence — **OPEN**
+
+`fuzz_decode_diff_c` (post-tolerance-bump in cba4674) surfaced a 682-byte baseline (SOF0) 16×16 RGB fixture (`crash-3c70bc73...`) where Rust decodes successfully (no warnings emitted) but produces achromatic output (R=G=B in every triplet) while djpeg produces colored output: max abs diff = 142 / mean ≈ 32.80. Reproduces identically on parent commits — not introduced by the baseline AC EOB-on-r!=15 + soft-landing changes in f9bf6fa.
+
+The achromatic pattern is diagnostic: Rust's decoded Cb/Cr channels are zero-valued throughout (in zero-centered representation, Cb=Cr=0 → R=G=B=Y after color conversion). Most likely surface: chroma-component scan dispatch incorrectly resolves Cb/Cr Huffman tables (the SOS for Cs2/Cs3 references DC1/AC1 with Td/Ta=0x11; all four DHTs are present in the input), OR the lenient-mode error-recovery silently zero-fills a chroma block without emitting a `DecodeWarning`.
+
+Bumping `PIXEL_TOLERANCE` further to swallow this case would mask a real codec divergence; the fuzz target stays red until the underlying chroma-decode issue is found.
+
+**Acceptance:** the nightly `fuzz_decode_diff_c` survives 10 min on `fuzz/artifacts/fuzz_decode_diff_c/crash-3c70bc73423ba0cb3faa9747fa277941d5f72193` without raising `PIXEL_TOLERANCE` above 24 — i.e. the chroma-decode bug is fixed in the decoder.
+
 #### Follow-up: progressive small-entropy decoder pixel divergence — **CLOSED 2026-05-05**
 
 `fuzz_decode_diff_c` (post-AC-bounds-soft-landing in commit ce14bbe) surfaced a 544-byte 16×16 SOF2 fixture with 10 progressive scans of which 8 carry only 1 byte of entropy each. djpeg accepts and decodes; Rust accepts and decodes, but the resulting pixels diverged: max abs diff = 61, mean ≈ 4.34, with 72 bytes of the 768-byte buffer differing by > 16. First 16 pixels byte-identical; divergence concentrated in the second MCU row.
