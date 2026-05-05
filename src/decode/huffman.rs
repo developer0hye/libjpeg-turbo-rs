@@ -1,4 +1,4 @@
-use crate::common::error::{JpegError, Result};
+use crate::common::error::Result;
 use crate::common::huffman_table::HuffmanTable;
 use crate::common::quant_table::ZIGZAG_ORDER;
 use crate::decode::bitstream::BitReader;
@@ -66,13 +66,22 @@ pub fn decode_ac_coefficients(
             let coeff: i16 = ac_entry >> 8;
 
             index += run;
-            if index >= 64 {
-                return Err(JpegError::CorruptData(
-                    "AC coefficient index out of bounds".into(),
-                ));
-            }
             reader.skip_bits(total_bits);
-
+            // libjpeg-turbo's `jpeg_natural_order` is declared as
+            // `[DCTSIZE2 + 16]` with the trailing 16 entries all set to
+            // 63 (jutils.c "extra entries for safety in decoder"). When
+            // a malformed AC stream advances past index 63 via a
+            // run-length skip, libjpeg writes to coeff[63] (via the
+            // natural-order padding) and the for-loop guard `k <= Se`
+            // exits on the next iteration. Mirror that here so a 16×16
+            // baseline RGB fixture from `fuzz_decode_diff_c` (which
+            // previously decoded with achromatic output because the
+            // hard bounds check fired mid-Cb/Cr block and the lenient
+            // path zero-filled the rest) now matches djpeg's output.
+            if index >= 64 {
+                coeffs[63] = coeff;
+                return Ok(());
+            }
             // SAFETY: index < 64 (checked above), ZIGZAG_ORDER values are all < 64.
             unsafe {
                 let natural: usize = *ZIGZAG_ORDER.get_unchecked(index);
@@ -90,28 +99,28 @@ pub fn decode_ac_coefficients(
 
             if bit_size == 0 {
                 reader.skip_bits(l);
-                if run_length == 0 {
-                    return Ok(());
-                }
                 if run_length == 15 {
                     index += 16;
                     continue;
                 }
-                return Err(JpegError::CorruptData(
-                    "invalid AC run/size combination".into(),
-                ));
+                // libjpeg-turbo's `decode_mcu_slow` (jdhuff.c) treats
+                // any (s=0, r!=15) symbol as end-of-block, not just
+                // r=0. Symbols 0x10..0xE0 (run=1..14, size=0) are
+                // undefined in the JPEG spec, but libjpeg silently
+                // EOBs out of the band rather than erroring. Match that
+                // — required for drop-in agreement on adversarial
+                // baseline AC streams from `fuzz_decode_diff_c`.
+                return Ok(());
             }
 
             index += run_length;
-            if index >= 64 {
-                return Err(JpegError::CorruptData(
-                    "AC coefficient index out of bounds".into(),
-                ));
-            }
-
             reader.skip_bits(l);
             let extra_bits: u16 = reader.read_bits(bit_size);
-
+            // Same libjpeg soft-landing as the fast AC path above.
+            if index >= 64 {
+                coeffs[63] = extend(extra_bits, bit_size);
+                return Ok(());
+            }
             // SAFETY: index < 64 (checked above), ZIGZAG_ORDER values are all < 64.
             unsafe {
                 let natural: usize = *ZIGZAG_ORDER.get_unchecked(index);
@@ -127,26 +136,23 @@ pub fn decode_ac_coefficients(
             let bit_size: u8 = symbol & 0x0F;
 
             if bit_size == 0 {
-                if run_length == 0 {
-                    return Ok(());
-                }
                 if run_length == 15 {
                     index += 16;
                     continue;
                 }
-                return Err(JpegError::CorruptData(
-                    "invalid AC run/size combination".into(),
-                ));
+                // Treat any (s=0, r!=15) as EOB — see fast-path comment
+                // above. Mirrors libjpeg-turbo's `decode_mcu_slow` for
+                // the slow Huffman path.
+                return Ok(());
             }
 
             index += run_length;
-            if index >= 64 {
-                return Err(JpegError::CorruptData(
-                    "AC coefficient index out of bounds".into(),
-                ));
-            }
-
             let extra_bits: u16 = reader.read_bits(bit_size);
+            // Same libjpeg soft-landing as the fast AC paths above.
+            if index >= 64 {
+                coeffs[63] = extend(extra_bits, bit_size);
+                return Ok(());
+            }
             coeffs[ZIGZAG_ORDER[index]] = extend(extra_bits, bit_size);
             index += 1;
         }
