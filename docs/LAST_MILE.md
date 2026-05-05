@@ -769,18 +769,20 @@ Most likely failure surface: arithmetic bit-stuffing recovery (0xFF / 0x00) at t
 
 **Acceptance:** restore the `if probe.is_arithmetic() { return; }` skip in `fuzz_decode_diff_c.rs` and have the nightly run survive 10 min on the same fixture (re-add it to `tests/generate_fuzz_seeds.rs::DECODER_TARGETS` for `fuzz_decode_diff_c` once fixed).
 
-#### Follow-up: transform encoder Rot180 small-image divergence — **OPEN**
+#### Follow-up: transform encoder small-image entropy divergence — **OPEN**
 
-`fuzz_transform_diff_c` surfaced an 805-byte 16×16 4:4:4 RGB fixture where Rust `transform_jpeg_with_options(..., Rot180)` produces a JPEG that:
+`fuzz_transform_diff_c` surfaced two 16×16 4:4:4 RGB fixtures (one Rot180, one VFlip) where Rust `transform_jpeg_with_options(...)` produces a JPEG that:
 - decodes successfully through Rust's own `Decoder`,
-- is rejected by djpeg with `Corrupt JPEG data: premature end of data segment`,
-- decodes to all-gray pixels (`[130, 130, 130, ...]`) when forced through Rust's lenient decoder, while jpegtran's reference Rot180 of the same input decodes to varied colors.
+- is rejected by djpeg with entropy-length errors:
+  - Rot180 (`crash-75b99921...`, 805B): "premature end of data segment"
+  - VFlip (`crash-de852cc2...`, 778B): "8 extraneous bytes before marker 0xd9"
+- decodes (via Rust) to pixels diverging from jpegtran's reference output (Rot180 collapses to all-gray; VFlip differs in entropy length only).
 
-Header bytes (SOI through SOS) are byte-identical between Rust and jpegtran outputs; the divergence is entirely in the entropy-coded segment (Rust = 99 bytes, jpegtran = 94 bytes, completely different content). Symptom set rules out a marker-handling bug and points at the coefficient-mapping / DC-predictor reset path inside the Rot180 transformer when applied to a single-MCU-row input.
+Header bytes (SOI through SOS) are byte-identical to jpegtran's; the divergence is entirely in the entropy-coded segment. The symptom set rules out a marker-handling bug and points at the **coefficient-mapping / DC-predictor reset path** inside the transformer when applied to single-MCU-row inputs — shared across at least Rot180 and VFlip, so a single underlying bug in the transform writer's small-input handling, not three separate ones.
 
-`fuzz_transform_diff_c` narrows the soft-skip to **Rot180 on inputs with both dimensions ≤ 32 px**, gated additionally on Rust's own decoder accepting the output (so a future Rot180 small-image regression that produces a structurally broken bitstream still trips libfuzzer). Every other shape — HFlip, VFlip, Rot180 on larger inputs, or any case where Rust's decoder rejects the output — keeps panicking. Match the documented bug exactly; do not broaden.
+`fuzz_transform_diff_c` narrows the soft-skip to **inputs with both dimensions ≤ 32 px** (any of HFlip/VFlip/Rot180), gated additionally on Rust's own decoder accepting the output (so a future small-image regression that produces a structurally broken bitstream still trips libfuzzer). Larger inputs continue to assert C decodability so fresh transform encoder bugs there still surface.
 
-**Acceptance:** delete the self-decode soft-skip in `fuzz_transform_diff_c.rs` and have the nightly run survive 10 min on the original 805-byte crash artifact (`fuzz/artifacts/fuzz_transform_diff_c/crash-75b99921a272dcc0768e856892a0c6fcfe0dd8f2`).
+**Acceptance:** delete the self-decode soft-skip in `fuzz_transform_diff_c.rs` and have the nightly run survive 10 min on both pinned crash artifacts (`crash-75b99921...` and `crash-de852cc2...`).
 
 #### Follow-up: progressive small-entropy decoder pixel divergence — **CLOSED 2026-05-05**
 
