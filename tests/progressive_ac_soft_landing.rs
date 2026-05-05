@@ -28,7 +28,10 @@
 
 use libjpeg_turbo_rs::{Decoder, PixelFormat};
 use std::io::Write;
+use std::path::PathBuf;
 use std::process::{Command, Stdio};
+
+mod helpers;
 
 /// 544-byte progressive 16×16 RGB fixture from `fuzz_decode_diff_c`'s
 /// 2026-05-04 crash, exercising the AC refinement soft-landing.
@@ -82,22 +85,7 @@ const PROG_AC_REFINE_SOFT_LANDING_FIXTURE: &[u8] = &[
     212, 106, 255, 217,
 ];
 
-fn djpeg_path() -> Option<&'static str> {
-    for p in [
-        "/opt/homebrew/bin/djpeg",
-        "/usr/local/bin/djpeg",
-        "/usr/bin/djpeg",
-        "/opt/libjpeg-turbo/bin/djpeg",
-    ] {
-        if std::path::Path::new(p).exists() {
-            return Some(p);
-        }
-    }
-    None
-}
-
-fn decode_via_djpeg(jpeg: &[u8]) -> Option<(usize, usize, usize, Vec<u8>)> {
-    let djpeg = djpeg_path()?;
+fn decode_via_djpeg(djpeg: &PathBuf, jpeg: &[u8]) -> Option<(usize, usize, usize, Vec<u8>)> {
     let mut child = Command::new(djpeg)
         .arg("-pnm")
         .stdin(Stdio::piped())
@@ -162,11 +150,15 @@ fn ac_refine_soft_landing_matches_djpeg_byte_exact() {
     assert_eq!(img.height, 16);
     assert_eq!(img.pixel_format, PixelFormat::Rgb);
 
-    let Some((cw, ch, cc, c_px)) = decode_via_djpeg(PROG_AC_REFINE_SOFT_LANDING_FIXTURE) else {
-        // No djpeg on this host — keep the structural assertions above
-        // and return; CI installs libjpeg-turbo-progs for the diff suites.
-        eprintln!("SKIP: djpeg not on PATH; structural assertions still ran");
-        return;
+    // Locate djpeg via the shared helpers' homebrew → PATH lookup.
+    // `require_c_tool!` panics in CI when missing so the byte-exact
+    // gate cannot be silently skipped on a CI image without
+    // libjpeg-turbo-progs installed; locally it falls back to a
+    // logged skip so dev machines without djpeg still pass.
+    let djpeg: PathBuf = require_c_tool!("djpeg");
+    let Some((cw, ch, cc, c_px)) = decode_via_djpeg(&djpeg, PROG_AC_REFINE_SOFT_LANDING_FIXTURE)
+    else {
+        panic!("djpeg unexpectedly failed on the pinned soft-landing fixture");
     };
     assert_eq!(cw, 16);
     assert_eq!(ch, 16);
