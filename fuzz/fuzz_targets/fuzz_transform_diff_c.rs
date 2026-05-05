@@ -293,44 +293,18 @@ fuzz_target!(|data: &[u8]| {
             let _ = (c_px, r_px, c_lenient, r_lenient, cw, ch, cc);
         }
         (Some(_), None) => {
-            // djpeg rejected our transformed JPEG. The known
-            // follow-up bug ("P2-7 follow-up: transform encoder
-            // small-image entropy divergence", LAST_MILE.md) is
-            // shared across all three supported ops on small
-            // inputs (16×16 4:4:4 fixtures from `fuzz_transform_
-            // diff_c`):
+            // djpeg accepted C's transform but rejected ours. With the
+            // BitReader multi-FF run fix in place (see
+            // `tests/transform_small_image_byte_exact.rs`), the
+            // historical "transform encoder small-image entropy
+            // divergence" follow-up is closed and Rust's transform
+            // output is byte-exact identical to jpegtran's on the
+            // pinned fixtures. Any rejection here is a genuine
+            // regression — surface it as a panic.
             //
-            //   - Rot180: 805-byte → "premature end of data segment"
-            //   - VFlip:  777-byte → "8 extraneous bytes before
-            //                         marker 0xd9"
-            //   - HFlip:  same shape (entropy length divergence
-            //             from jpegtran's reference encoder)
-            //
-            // All three produce structurally self-consistent JPEGs
-            // (Rust's own decoder accepts them) but use Huffman
-            // code lengths / coefficient layouts that diverge from
-            // jpegtran's encoder for tiny single-MCU-row inputs.
-            //
-            // Skip *only* on small inputs (max dim ≤ 32) AND when
-            // Rust's own decoder accepts the output — the Rust
-            // self-decode check guards against accidentally
-            // skipping a future regression that produces a
-            // structurally broken bitstream rather than the
-            // documented "valid-but-wrong-coefficients" symptom.
-            // Larger inputs continue to assert C decodability so
-            // fresh transform encoder bugs there still surface.
-            let is_known_small = input_w <= 32 && input_h <= 32;
-            if is_known_small {
-                let rust_self_ok = Decoder::new(&r_transformed)
-                    .and_then(|mut d| {
-                        d.set_lenient(true);
-                        d.decode_image()
-                    })
-                    .is_ok();
-                if rust_self_ok {
-                    return;
-                }
-            }
+            // The `input_w` / `input_h` are still captured above so a
+            // future regression report can read the dimensions out of
+            // the panic message without a manual re-decode.
             panic!(
                 "transform-diff {:?}: djpeg rejected our transformed JPEG \
                  (input={}x{}, rust_len={}, c_len={})",
