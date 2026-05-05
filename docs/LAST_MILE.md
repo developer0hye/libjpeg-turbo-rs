@@ -788,15 +788,15 @@ Every op fails djpeg's decoder on both fixtures, and every Rust output round-tri
 
 **Acceptance:** delete the self-decode soft-skip in `fuzz_transform_diff_c.rs` and have the nightly run survive 10 min on both pinned crash artifacts (`crash-75b99921...` and `crash-de852cc2...`).
 
-#### Follow-up: baseline 16×16 RGB achromatic-output divergence — **OPEN**
+#### Follow-up: baseline 16×16 RGB achromatic-output divergence — **CLOSED 2026-05-04**
 
-`fuzz_decode_diff_c` (post-tolerance-bump in cba4674) surfaced a 682-byte baseline (SOF0) 16×16 RGB fixture (`crash-3c70bc73...`) where Rust decodes successfully (no warnings emitted) but produces achromatic output (R=G=B in every triplet) while djpeg produces colored output: max abs diff = 142 / mean ≈ 32.80. Reproduces identically on parent commits — not introduced by the baseline AC EOB-on-r!=15 + soft-landing changes in f9bf6fa.
+`fuzz_decode_diff_c` (post-tolerance-bump in cba4674) surfaced a 682-byte baseline (SOF0) 16×16 RGB fixture (`crash-3c70bc73...`) where Rust decoded successfully (no warnings emitted) but produced achromatic output (R=G=B in every triplet) while djpeg produced colored output: max abs diff = 142 / mean ≈ 32.80.
 
-The achromatic pattern is diagnostic: Rust's decoded Cb/Cr channels are zero-valued throughout (in zero-centered representation, Cb=Cr=0 → R=G=B=Y after color conversion). Most likely surface: chroma-component scan dispatch incorrectly resolves Cb/Cr Huffman tables (the SOS for Cs2/Cs3 references DC1/AC1 with Td/Ta=0x11; all four DHTs are present in the input), OR the lenient-mode error-recovery silently zero-fills a chroma block without emitting a `DecodeWarning`.
+**Root cause** (`src/decode/bitstream.rs::get_byte` + `fill_buffer_slow`): the entropy stream contained `FF 00 FF FF FF 00` and `FF FF FF FF` runs. libjpeg-turbo's `jpeg_fill_bit_buffer` (jdhuff.c:316–331) walks past *any* number of consecutive `0xFF` bytes before classifying the next byte as either a stuffed `0x00` (→ literal `0xFF` data) or a marker. Our `BitReader` only handled the `FF 00` form: on the first `FF FF` the fast path bailed to the "marker — push zero, don't advance" branch, which then looped forever pushing zero bits at the same byte position. Those phantom zero bits over-consumed Y plane bandwidth (Y[3] decoded with nz=60 instead of nz=9 for the diagnostic fixture), then starved Cb/Cr to immediate-EOB (`dc=0, AC=EOB` from the leading 4 zero bits) — producing fully achromatic output.
 
-Bumping `PIXEL_TOLERANCE` further to swallow this case would mask a real codec divergence; the fuzz target stays red until the underlying chroma-decode issue is found.
+**Fix:** `get_byte` returns the sentinel `usize::MAX` on `FF FF` so the fast path bails to `fill_buffer_slow`, which now walks past the entire FF run before deciding stuffed-byte vs marker. Pre-fix: 256 of 256 pixels achromatic; post-fix: byte-exact agreement with djpeg on the pinned fixture.
 
-**Acceptance:** the nightly `fuzz_decode_diff_c` survives 10 min on `fuzz/artifacts/fuzz_decode_diff_c/crash-3c70bc73423ba0cb3faa9747fa277941d5f72193` without raising `PIXEL_TOLERANCE` above 24 — i.e. the chroma-decode bug is fixed in the decoder.
+**Verification:** `tests/bitstream_multi_ff_run.rs::multi_ff_run_decodes_chroma_byte_exact_vs_djpeg` pins the 682-byte fixture and asserts both (a) chroma is non-zero and (b) max diff = 0 vs djpeg.
 
 #### Follow-up: progressive small-entropy decoder pixel divergence — **CLOSED 2026-05-05**
 
