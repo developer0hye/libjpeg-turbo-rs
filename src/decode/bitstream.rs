@@ -21,7 +21,12 @@ impl<'a> BitReader<'a> {
     }
 
     /// Appends one byte from `window` at `off` into the bit buffer.
-    /// Returns the updated offset (advances by 1, or 2 for byte-stuffed 0xFF 0x00).
+    /// Returns the updated offset (advances by 1, or 2 for byte-stuffed
+    /// `0xFF 0x00`). Returns `usize::MAX` as a sentinel meaning "abort fast
+    /// path; let `fill_buffer_slow` walk the multi-FF run" — `0xFF 0xFF…`
+    /// can be either fill bytes before a marker or fill bytes before a
+    /// stuffed `0xFF` data byte (libjpeg-turbo's `jpeg_fill_bit_buffer`
+    /// at jdhuff.c:316–331 accepts both).
     /// `off` must be < 15 and `window.len()` must be 16.
     #[inline(always)]
     fn get_byte(window: &[u8], off: usize, bit_buffer: &mut u64, bits_left: &mut u8) -> usize {
@@ -35,6 +40,9 @@ impl<'a> BitReader<'a> {
             *bit_buffer = (*bit_buffer << 8) | 0xFF_u64;
             *bits_left += 8;
             next_off + 1
+        } else if window[next_off] == 0xFF {
+            // Multi-FF run — fall back to slow path.
+            usize::MAX
         } else {
             // Marker — push zero, don't advance.
             *bit_buffer <<= 8;
@@ -55,27 +63,28 @@ impl<'a> BitReader<'a> {
             let buf: &mut u64 = &mut self.bit_buffer;
             let bl: &mut u8 = &mut self.bits_left;
             let mut off: usize = 0;
-            if *bl < needed.max(56) && off < 15 {
-                off = Self::get_byte(window, off, buf, bl);
+            // Each call returns usize::MAX on a multi-FF run that the
+            // fast path can't classify; bail to slow path in that case.
+            macro_rules! step {
+                () => {
+                    if *bl < needed.max(56) && off < 15 {
+                        let next = Self::get_byte(window, off, buf, bl);
+                        if next == usize::MAX {
+                            self.pos = start + off;
+                            self.fill_buffer_slow(needed);
+                            return;
+                        }
+                        off = next;
+                    }
+                };
             }
-            if *bl < needed.max(56) && off < 15 {
-                off = Self::get_byte(window, off, buf, bl);
-            }
-            if *bl < needed.max(56) && off < 15 {
-                off = Self::get_byte(window, off, buf, bl);
-            }
-            if *bl < needed.max(56) && off < 15 {
-                off = Self::get_byte(window, off, buf, bl);
-            }
-            if *bl < needed.max(56) && off < 15 {
-                off = Self::get_byte(window, off, buf, bl);
-            }
-            if *bl < needed.max(56) && off < 15 {
-                off = Self::get_byte(window, off, buf, bl);
-            }
-            if *bl < needed.max(56) && off < 15 {
-                off = Self::get_byte(window, off, buf, bl);
-            }
+            step!();
+            step!();
+            step!();
+            step!();
+            step!();
+            step!();
+            step!();
             self.pos = start + off;
         } else {
             self.fill_buffer_slow(needed);
@@ -97,19 +106,31 @@ impl<'a> BitReader<'a> {
                     continue;
                 }
             };
-            self.pos = pos + 1;
             if byte != 0xFF {
+                self.pos = pos + 1;
                 self.bit_buffer = (self.bit_buffer << 8) | byte as u64;
                 self.bits_left += 8;
                 continue;
             }
-            match self.data.get(pos + 1) {
+            // Walk past any run of 0xFF (libjpeg-turbo treats consecutive
+            // FFs as fill bytes — see jdhuff.c:316–331). The terminating
+            // byte after the run decides interpretation:
+            //   FF...FF 00  -> stuffed 0xFF data byte
+            //   FF...FF XX  -> marker XX; leave FF run + marker in stream
+            //                  for the marker scanner and stuff zeros.
+            let mut scan = pos + 1;
+            while let Some(&0xFF) = self.data.get(scan) {
+                scan += 1;
+            }
+            match self.data.get(scan) {
                 Some(&0x00) => {
-                    self.pos = pos + 2;
+                    self.pos = scan + 1;
                     self.bit_buffer = (self.bit_buffer << 8) | 0xFF_u64;
                     self.bits_left += 8;
                 }
                 _ => {
+                    // Marker (or EOF). Leave pos at the first FF so the
+                    // marker scanner sees it; emit zero bits.
                     self.pos = pos;
                     self.bit_buffer <<= 8;
                     self.bits_left += 8;
