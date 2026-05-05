@@ -116,8 +116,14 @@ impl<'a> BitReader<'a> {
             // FFs as fill bytes — see jdhuff.c:316–331). The terminating
             // byte after the run decides interpretation:
             //   FF...FF 00  -> stuffed 0xFF data byte
-            //   FF...FF XX  -> marker XX; leave FF run + marker in stream
-            //                  for the marker scanner and stuff zeros.
+            //   FF...FF XX  -> marker XX; leave one FF + marker in the
+            //                  stream for the marker scanner and stuff
+            //                  zeros for any further reads.
+            //   FF...FF EOF -> jump pos to data.len() so subsequent
+            //                  refills short-circuit.
+            // Without the marker/EOF advances below, a malformed image
+            // with a long FF padding run would re-walk the entire run on
+            // every refill (codex P2: O(fill_run × refills)).
             let mut scan = pos + 1;
             while let Some(&0xFF) = self.data.get(scan) {
                 scan += 1;
@@ -128,10 +134,22 @@ impl<'a> BitReader<'a> {
                     self.bit_buffer = (self.bit_buffer << 8) | 0xFF_u64;
                     self.bits_left += 8;
                 }
-                _ => {
-                    // Marker (or EOF). Leave pos at the first FF so the
-                    // marker scanner sees it; emit zero bits.
-                    self.pos = pos;
+                Some(_) => {
+                    // Marker found at `scan`. Park pos at the FF
+                    // immediately before it so the marker scanner sees a
+                    // single `FF <marker>` pair and the next refill
+                    // classifies it in O(1) instead of re-walking the
+                    // fill run.
+                    self.pos = scan - 1;
+                    self.bit_buffer <<= 8;
+                    self.bits_left += 8;
+                }
+                None => {
+                    // True EOF in the middle of (or right after) the FF
+                    // run — no marker will ever materialize. Skip the
+                    // entire run so subsequent calls hit the
+                    // `data.get(pos) == None` short-circuit at the top.
+                    self.pos = self.data.len();
                     self.bit_buffer <<= 8;
                     self.bits_left += 8;
                 }
