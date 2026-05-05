@@ -25,7 +25,10 @@
 
 use libjpeg_turbo_rs::{Decoder, PixelFormat};
 use std::io::Write;
+use std::path::PathBuf;
 use std::process::{Command, Stdio};
+
+mod helpers;
 
 /// 682-byte baseline 16×16 RGB (Y 4:2:0, Cb/Cr 1×1) fixture exercising
 /// `FF FF` and `FF FF FF` runs inside the SOS payload.
@@ -90,22 +93,7 @@ const MULTI_FF_RUN_FIXTURE: &[u8] = &[
     109, 67, 195, 207, 16, 254, 15, 124, 255, 217,
 ];
 
-fn djpeg_path() -> Option<&'static str> {
-    for p in [
-        "/opt/homebrew/bin/djpeg",
-        "/usr/local/bin/djpeg",
-        "/usr/bin/djpeg",
-        "/opt/libjpeg-turbo/bin/djpeg",
-    ] {
-        if std::path::Path::new(p).exists() {
-            return Some(p);
-        }
-    }
-    None
-}
-
-fn decode_via_djpeg(jpeg: &[u8]) -> Option<(usize, usize, usize, Vec<u8>)> {
-    let djpeg = djpeg_path()?;
+fn decode_via_djpeg(djpeg: &PathBuf, jpeg: &[u8]) -> Option<(usize, usize, usize, Vec<u8>)> {
     let mut child = Command::new(djpeg)
         .arg("-pnm")
         .stdin(Stdio::piped())
@@ -187,9 +175,14 @@ fn multi_ff_run_decodes_chroma_byte_exact_vs_djpeg() {
         img.data.len() / 3
     );
 
-    let Some((cw, ch, cc, c_px)) = decode_via_djpeg(MULTI_FF_RUN_FIXTURE) else {
-        eprintln!("SKIP: djpeg not on PATH; structural assertions still ran");
-        return;
+    // Locate djpeg via the shared helpers' homebrew → PATH lookup.
+    // `require_c_tool!` panics in CI when missing so the byte-exact
+    // gate cannot be silently skipped on a CI image without
+    // libjpeg-turbo-progs installed; locally it falls back to a
+    // logged skip so dev machines without djpeg still pass.
+    let djpeg: PathBuf = require_c_tool!("djpeg");
+    let Some((cw, ch, cc, c_px)) = decode_via_djpeg(&djpeg, MULTI_FF_RUN_FIXTURE) else {
+        panic!("djpeg unexpectedly failed on the pinned multi-FF fixture");
     };
     assert_eq!(cw, 16);
     assert_eq!(ch, 16);
