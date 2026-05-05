@@ -771,14 +771,18 @@ Most likely failure surface: arithmetic bit-stuffing recovery (0xFF / 0x00) at t
 
 #### Follow-up: transform encoder small-image entropy divergence — **OPEN**
 
-`fuzz_transform_diff_c` surfaced two 16×16 4:4:4 RGB fixtures (one Rot180, one VFlip) where Rust `transform_jpeg_with_options(...)` produces a JPEG that:
-- decodes successfully through Rust's own `Decoder`,
-- is rejected by djpeg with entropy-length errors:
-  - Rot180 (`crash-75b99921...`, 805B): "premature end of data segment"
-  - VFlip (`crash-de852cc2...`, 778B): "8 extraneous bytes before marker 0xd9"
-- decodes (via Rust) to pixels diverging from jpegtran's reference output (Rot180 collapses to all-gray; VFlip differs in entropy length only).
+`fuzz_transform_diff_c` surfaced two 16×16 4:4:4 RGB fixtures (one Rot180, one VFlip). Local cross-check applied **all three supported ops** to both fixtures and confirmed the bug class is shared across HFlip / VFlip / Rot180:
 
-Header bytes (SOI through SOS) are byte-identical to jpegtran's; the divergence is entirely in the entropy-coded segment. The symptom set rules out a marker-handling bug and points at the **coefficient-mapping / DC-predictor reset path** inside the transformer when applied to single-MCU-row inputs — shared across at least Rot180 and VFlip, so a single underlying bug in the transform writer's small-input handling, not three separate ones.
+| Source fixture | Op | rust_len | djpeg exit | rust self-decode | djpeg stderr |
+|---|---|---|---|---|---|
+| `crash-75b99921...` (Rot180 origin, 805B) | HFlip | 723 | 2 | OK | premature end of data segment |
+| | VFlip | 724 | 2 | OK | premature end of data segment |
+| | Rot180 | 724 | 2 | OK | premature end of data segment |
+| `crash-de852cc2...` (VFlip origin, 778B) | HFlip | 810 | 2 | OK | premature end of data segment |
+| | VFlip | 811 | 2 | OK | 8 extraneous bytes before marker 0xd9 |
+| | Rot180 | 811 | 2 | OK | premature end of data segment |
+
+Every op fails djpeg's decoder on both fixtures, and every Rust output round-trips through Rust's own decoder — the bug class is uniformly "valid-but-wrong-coefficients" across all three ops. Pattern: the input has 6 bytes of entropy for 12 expected blocks (severely truncated); each side pads missing coefficients differently, producing entropy-length divergence. Headers (SOI through SOS) are byte-identical to jpegtran's; the divergence is entirely in the entropy-coded segment. Symptom set rules out a marker-handling bug and points at the **coefficient-mapping / DC-predictor reset path** inside the transformer when reading from a truncated-entropy input — shared across all three ops, so one underlying bug in the transform writer's small-input handling, not three.
 
 `fuzz_transform_diff_c` narrows the soft-skip to **inputs with both dimensions ≤ 32 px** (any of HFlip/VFlip/Rot180), gated additionally on Rust's own decoder accepting the output (so a future small-image regression that produces a structurally broken bitstream still trips libfuzzer). Larger inputs continue to assert C decodability so fresh transform encoder bugs there still surface.
 
