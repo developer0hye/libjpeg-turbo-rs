@@ -959,9 +959,184 @@ fn pattern_5_jpeg_abort_decompress_then_reuse() {}
 #[ignore = "P3-5 follow-up: jpeg_abort_compress + reuse"]
 fn pattern_6_jpeg_abort_compress_then_reuse() {}
 
+// ---------- pattern #7: buffered-image multi-pass progressive ----------
+
+const PATTERN_7_BUFFERED_IMAGE: &str = r#"
+#define TJPARAM_PROGRESSIVE 12
+
+/* Build a progressive JPEG fixture via TJ3 by setting
+ * TJPARAM_PROGRESSIVE=1, mirroring make_fixture's pattern. */
+static unsigned char *make_progressive_fixture(size_t *out_size, unsigned char **out_src) {
+    int w = FIX_W, h = FIX_H, bpp = FIX_BPP;
+    unsigned char *src = (unsigned char *)malloc((size_t)w * h * bpp);
+    if (!src) return NULL;
+    for (int y = 0; y < h; ++y) {
+        for (int x = 0; x < w; ++x) {
+            unsigned char *p = src + ((size_t)y * w + x) * bpp;
+            p[0] = (unsigned char)((x * 255) / (w - 1));
+            p[1] = (unsigned char)((y * 255) / (h - 1));
+            p[2] = (unsigned char)(((x + y) * 255) / (w + h - 2));
+        }
+    }
+    tjhandle enc = tj3Init(TJINIT_COMPRESS);
+    if (!enc) { free(src); return NULL; }
+    tj3Set(enc, TJPARAM_QUALITY, 90);
+    tj3Set(enc, TJPARAM_SUBSAMP, TJSAMP_444);
+    tj3Set(enc, TJPARAM_PROGRESSIVE, 1);
+    unsigned char *jpeg = NULL;
+    size_t jpeg_size = 0;
+    int rc = tj3Compress8(enc, src, w, 0, h, TJPF_RGB, &jpeg, &jpeg_size);
+    tj3Destroy(enc);
+    if (rc != 0) { free(src); return NULL; }
+    *out_size = jpeg_size;
+    *out_src = src;
+    return jpeg;
+}
+
+/* Buffered-image-mode decode per libjpeg.txt §11. Drains all scans via
+ * jpeg_consume_input + jpeg_start_output / jpeg_finish_output, then
+ * returns the final fully-refined RGB output. */
+static unsigned char *decode_via_buffered_image(const unsigned char *jpeg, size_t jpeg_size,
+                                                int *out_passes) {
+    struct jpeg_decompress_struct cinfo;
+    struct jpeg_error_mgr jerr;
+    cinfo.err = jpeg_std_error(&jerr);
+    jpeg_create_decompress(&cinfo);
+    jpeg_mem_src(&cinfo, jpeg, jpeg_size);
+    if (jpeg_read_header(&cinfo, TRUE) != JPEG_HEADER_OK) {
+        jpeg_destroy_decompress(&cinfo);
+        return NULL;
+    }
+    cinfo.out_color_space = JCS_RGB;
+    cinfo.buffered_image = TRUE;
+    if (!jpeg_start_decompress(&cinfo)) {
+        jpeg_destroy_decompress(&cinfo);
+        return NULL;
+    }
+    int row_stride = cinfo.output_width * cinfo.output_components;
+    unsigned char *dst = (unsigned char *)malloc((size_t)cinfo.output_height * row_stride);
+    if (!dst) { jpeg_destroy_decompress(&cinfo); return NULL; }
+
+    /* Multi-pass loop, per libjpeg.txt §11:
+     *   while (!jpeg_input_complete) {
+     *     drain jpeg_consume_input until SCAN_COMPLETED / EOI;
+     *     jpeg_start_output(input_scan_number);
+     *     read scanlines;
+     *     jpeg_finish_output;
+     *   }
+     *   final pass: same body, then jpeg_finish_decompress.
+     *
+     * Implementations that pre-buffer the entire stream are allowed to
+     * return JPEG_REACHED_EOI from the first jpeg_consume_input call;
+     * in that case the loop runs exactly once and the consumer sees
+     * only the final-quality output. That is the libjpeg-turbo-rs
+     * shim's current posture (`jpeg_consume_input` at jpeglib.rs:3730
+     * documents this — "for our fully-buffered shim, EOI is the
+     * truthful answer the moment a header is in hand"). Either
+     * implementation must produce identical final pixels — that's
+     * what this test asserts. */
+    int passes = 0;
+    int max_passes = 32;  /* safety cap — a 64x64 progressive should not exceed 10 scans */
+    for (passes = 0; passes < max_passes; ++passes) {
+        int rc;
+        for (;;) {
+            rc = jpeg_consume_input(&cinfo);
+            if (rc == JPEG_REACHED_EOI || rc == JPEG_SCAN_COMPLETED) break;
+            if (rc == JPEG_SUSPENDED) {
+                fprintf(stderr,
+                        "unexpected JPEG_SUSPENDED from jpeg_consume_input on full mem_src\n");
+                free(dst); jpeg_destroy_decompress(&cinfo); return NULL;
+            }
+            /* JPEG_REACHED_SOS / JPEG_ROW_COMPLETED — keep consuming. */
+        }
+
+        if (!jpeg_start_output(&cinfo, cinfo.input_scan_number)) {
+            fprintf(stderr, "jpeg_start_output failed at scan %d\n", cinfo.input_scan_number);
+            free(dst); jpeg_destroy_decompress(&cinfo); return NULL;
+        }
+        while (cinfo.output_scanline < cinfo.output_height) {
+            unsigned char *row_ptr = dst + (size_t)cinfo.output_scanline * row_stride;
+            if (jpeg_read_scanlines(&cinfo, &row_ptr, 1) != 1) {
+                fprintf(stderr, "scanline read returned 0 in buffered-image pass %d\n", passes);
+                free(dst); jpeg_destroy_decompress(&cinfo); return NULL;
+            }
+        }
+        if (!jpeg_finish_output(&cinfo)) {
+            fprintf(stderr, "jpeg_finish_output failed at pass %d\n", passes);
+            free(dst); jpeg_destroy_decompress(&cinfo); return NULL;
+        }
+
+        if (jpeg_input_complete(&cinfo) &&
+            cinfo.input_scan_number == cinfo.output_scan_number) {
+            passes += 1;
+            break;
+        }
+    }
+    jpeg_finish_decompress(&cinfo);
+    jpeg_destroy_decompress(&cinfo);
+    *out_passes = passes;
+    return dst;
+}
+
+int main(void) {
+    unsigned char *src = NULL;
+    size_t jpeg_size = 0;
+    unsigned char *jpeg = make_progressive_fixture(&jpeg_size, &src);
+    if (!jpeg) {
+        fprintf(stderr, "make_progressive_fixture failed\n");
+        return 2;
+    }
+
+    unsigned char *baseline = decode_via_mem_src(jpeg, jpeg_size);
+    if (!baseline) {
+        fprintf(stderr, "baseline progressive decode failed\n");
+        tj3Free(jpeg); free(src); return 3;
+    }
+
+    int passes = 0;
+    unsigned char *via_buffered = decode_via_buffered_image(jpeg, jpeg_size, &passes);
+    if (!via_buffered) {
+        fprintf(stderr, "buffered-image decode failed\n");
+        free(baseline); tj3Free(jpeg); free(src); return 4;
+    }
+
+    /* Sanity: at minimum, the loop must fire ≥ 1 pass (the final one).
+     * A truly progressive implementation would expose ≥ 2 passes —
+     * we don't assert that here because the libjpeg-turbo-rs shim is
+     * fully-buffered (jpeglib.rs::jpeg_consume_input documents this
+     * intentional collapse). The pixel-equality check below is the
+     * real correctness gate. */
+    if (passes < 1) {
+        fprintf(stderr, "buffered-image loop never executed — passes=%d\n", passes);
+        free(via_buffered); free(baseline); tj3Free(jpeg); free(src); return 5;
+    }
+
+    /* Final pass must produce the same pixels as the single-pass decode. */
+    size_t pixel_bytes = (size_t)FIX_W * FIX_H * FIX_BPP;
+    if (memcmp(baseline, via_buffered, pixel_bytes) != 0) {
+        size_t first_d = 0;
+        while (first_d < pixel_bytes && baseline[first_d] == via_buffered[first_d]) {
+            first_d += 1;
+        }
+        fprintf(stderr,
+                "buffered-image final pass differs from single-pass at pixel-byte %zu\n",
+                first_d);
+        free(via_buffered); free(baseline); tj3Free(jpeg); free(src); return 6;
+    }
+
+    fprintf(stderr,
+            "OK buffered_image: %zu-byte progressive JPEG, passes=%d, final pixels match\n",
+            jpeg_size, passes);
+    free(via_buffered); free(baseline); tj3Free(jpeg); free(src);
+    return 0;
+}
+"#;
+
 #[test]
-#[ignore = "P3-5 follow-up: buffered-image multi-pass progressive (jpeg_consume_input + jpeg_start_output + jpeg_finish_output)"]
-fn pattern_7_buffered_image_multi_pass_progressive() {}
+fn pattern_7_buffered_image_multi_pass_progressive() {
+    let c_src = format!("{C_PREAMBLE}\n{PATTERN_7_BUFFERED_IMAGE}");
+    run_or_skip("lifecycle_buffered_image", &c_src);
+}
 
 // ---------- pattern #8: setjmp/longjmp error cleanup with custom error_exit ----------
 
