@@ -74,8 +74,18 @@ jobs:
       - name: Run fuzzer
         env:
           MAX_TOTAL_TIME: ${{ github.event.inputs.max_total_time || '600' }}
+        # `--target x86_64-unknown-linux-gnu` is mandatory: the prebuilt
+        # cargo-fuzz binary we install above is musl-linked, so without
+        # an explicit target it defaults to its host triple
+        # (x86_64-unknown-linux-musl) and the build fails with
+        # "sanitizer is incompatible with statically linked libc" plus
+        # "can't find crate for `core`" because the rust-musl target
+        # isn't installed on ubuntu-latest. Explicitly building for gnu
+        # picks up the host toolchain that dtolnay/rust-toolchain set up.
         run: |
-          cargo +nightly fuzz run "${{ matrix.target }}" \
+          cargo +nightly fuzz run \
+            --target x86_64-unknown-linux-gnu \
+            "${{ matrix.target }}" \
             -- -max_total_time="${MAX_TOTAL_TIME}" -print_final_stats=1
 
       - name: Upload crash artifacts
