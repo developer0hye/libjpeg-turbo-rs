@@ -18,10 +18,27 @@ Rust port of libjpeg-turbo with equivalent or better performance.
 # Feature Parity Tracking
 
 - **Read `docs/FEATURE_PARITY.md` before starting any feature work.** It is the checklist of every feature with `[x]`/`[ ]` status.
-- **Read `docs/LAST_MILE.md` for the replacement-readiness gate** — open P0/P1 blockers + Suggested Order. Update the relevant entry to **CLOSED** when a gap is finished.
+- **Read `docs/LAST_MILE.md` for the replacement-readiness gate** — slim index with current status, OPEN items, and the active Suggested Order. Phase detail lives in `docs/last_mile/phase{1,2,3}.md`; open the phase file only for the gap you are working on.
 - **Use `docs/C_API_REFERENCE.md` as the definitive mapping** of every C function → Rust equivalent (✅/❌/🔶).
-- After implementing a feature, update **all three** docs: checkbox in FEATURE_PARITY.md, status entry in LAST_MILE.md when it closes a tracked gap, and status in C_API_REFERENCE.md.
-- Follow the Suggested Order at the bottom of LAST_MILE.md (release gate) over FEATURE_PARITY.md (feature checklist) when choosing what to work on next.
+- After implementing a feature, update **all three** docs: checkbox in FEATURE_PARITY.md, status entry in the relevant `docs/last_mile/phaseN.md` when it closes a tracked gap (and the index in `docs/LAST_MILE.md` if the OPEN list changes), and status in C_API_REFERENCE.md.
+- Follow the Suggested Order in the relevant phase file (release gate) over FEATURE_PARITY.md (feature checklist) when choosing what to work on next. Phase 3 has the live OPEN items and its order lives in the index.
+
+## LAST_MILE Management
+
+- **File layout:**
+  - `docs/LAST_MILE.md` — slim index (~100 lines): Cold Assessment, 7-item Replacement Gate, OPEN items table, Phase Map, Phase 3 Suggested Order. Always read first.
+  - `docs/last_mile/phase1.md` — historical P0-1..4, P1, Phase-1 P2, Tasks 1-7, Definition of Done. All CLOSED.
+  - `docs/last_mile/phase2.md` — system-library hardening P2-1..11. All CLOSED.
+  - `docs/last_mile/phase3.md` — long-tail C compatibility P3-1..6. Has live OPEN items.
+  - `docs/last_mile/reference_commands.md` — common verification commands.
+- **Read rule:** open the index first; open exactly one phase file for the gap you are touching. Do not load all phases by default.
+- **Adding a new gap:** append the entry to the appropriate phase file (existing phase if it fits the theme; new phase only if scope is genuinely different). Then add a row to the OPEN Items table in `docs/LAST_MILE.md` with a deep link to the new section anchor. Use kebab-case anchors GitHub generates from the heading.
+- **Closing a gap:**
+  1. In the phase file: change the heading suffix to `— **CLOSED YYYY-MM-DD**` (or `**PARTIAL: …**` when scope shrank but didn't fully close). Add a `**Status (YYYY-MM-DD): closed.**` line citing the test/command that proves it. Strike-through the matching Suggested Order entry with `~~…~~` and append the same date.
+  2. In `docs/LAST_MILE.md`: remove the row from OPEN Items if fully closed; refresh the live-checks table if the gate output changed.
+  3. Update `docs/FEATURE_PARITY.md` checkbox and `docs/C_API_REFERENCE.md` status if a canonical mapping changed.
+- **No archive churn:** CLOSED entries stay in their phase file as institutional memory (root cause + fix + verification). Don't move them to a separate archive — searching `git log` for the SHA that closed an entry is more useful than a flat archive.
+- **Index discipline:** the slim index must stay under ~150 lines. If it grows, that's a signal to push detail back into the phase files, not to expand the index.
 
 # Project Rules
 
