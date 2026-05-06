@@ -562,15 +562,390 @@ fn pattern_1_custom_jpeg_source_mgr_drives_fill_input_buffer() {
     run_or_skip("lifecycle_custom_src", &c_src);
 }
 
-// ---------- patterns #2-#8: tracked, deferred to follow-up commits ----------
+// ---------- pattern #2: custom jpeg_destination_mgr (callback-driven) ----------
+
+const PATTERN_2_CUSTOM_DST_MGR: &str = r#"
+/* Custom destination manager that flushes through a deliberately small
+ * output buffer, so empty_output_buffer fires many times during a
+ * single encode. The flushed bytes are appended into a growing
+ * collector buffer the test then compares to a jpeg_mem_dest baseline. */
+typedef struct {
+    struct jpeg_destination_mgr pub;  /* public part — must come first */
+    JOCTET window[64];                /* small bounded output window */
+    unsigned char *collected;         /* growing byte collector */
+    size_t collected_len;
+    size_t collected_cap;
+    int empty_calls;                  /* diagnostic counter */
+    int term_calls;
+} chunk_dst_mgr;
+
+static void chunk_collect(chunk_dst_mgr *d, const JOCTET *src, size_t n) {
+    if (d->collected_len + n > d->collected_cap) {
+        size_t new_cap = d->collected_cap == 0 ? 1024 : d->collected_cap * 2;
+        while (new_cap < d->collected_len + n) new_cap *= 2;
+        unsigned char *grown = (unsigned char *)realloc(d->collected, new_cap);
+        if (!grown) { abort(); }
+        d->collected = grown;
+        d->collected_cap = new_cap;
+    }
+    memcpy(d->collected + d->collected_len, src, n);
+    d->collected_len += n;
+}
+
+static void chunk_init_destination(j_compress_ptr cinfo) {
+    chunk_dst_mgr *d = (chunk_dst_mgr *)cinfo->dest;
+    d->pub.next_output_byte = d->window;
+    d->pub.free_in_buffer = sizeof(d->window);
+}
+
+static boolean chunk_empty_output_buffer(j_compress_ptr cinfo) {
+    chunk_dst_mgr *d = (chunk_dst_mgr *)cinfo->dest;
+    /* The full window is now valid output — collect all of it, reset
+     * pointers per the upstream jdatadst.c::empty_output_buffer
+     * contract. */
+    chunk_collect(d, d->window, sizeof(d->window));
+    d->pub.next_output_byte = d->window;
+    d->pub.free_in_buffer = sizeof(d->window);
+    d->empty_calls += 1;
+    return TRUE;
+}
+
+static void chunk_term_destination(j_compress_ptr cinfo) {
+    chunk_dst_mgr *d = (chunk_dst_mgr *)cinfo->dest;
+    /* Flush the partially-filled remainder of the window. */
+    size_t used = sizeof(d->window) - d->pub.free_in_buffer;
+    if (used > 0) chunk_collect(d, d->window, used);
+    d->term_calls += 1;
+}
+
+static void install_chunk_dst(j_compress_ptr cinfo, chunk_dst_mgr *d) {
+    d->pub.init_destination = chunk_init_destination;
+    d->pub.empty_output_buffer = chunk_empty_output_buffer;
+    d->pub.term_destination = chunk_term_destination;
+    d->collected = NULL;
+    d->collected_len = 0;
+    d->collected_cap = 0;
+    d->empty_calls = 0;
+    d->term_calls = 0;
+    cinfo->dest = (struct jpeg_destination_mgr *)d;
+}
+
+/* Encode the gradient via classic API. The destination manager is
+ * supplied by the caller (either jpeg_mem_dest or our custom one). */
+static int encode_gradient(struct jpeg_compress_struct *cinfo,
+                           const unsigned char *src) {
+    cinfo->image_width = FIX_W;
+    cinfo->image_height = FIX_H;
+    cinfo->input_components = FIX_BPP;
+    cinfo->in_color_space = JCS_RGB;
+    jpeg_set_defaults(cinfo);
+    jpeg_set_quality(cinfo, 90, TRUE);
+    jpeg_start_compress(cinfo, TRUE);
+    int row_stride = FIX_W * FIX_BPP;
+    while (cinfo->next_scanline < cinfo->image_height) {
+        JSAMPROW row = (JSAMPROW)(src + (size_t)cinfo->next_scanline * row_stride);
+        if (jpeg_write_scanlines(cinfo, &row, 1) != 1) return -1;
+    }
+    jpeg_finish_compress(cinfo);
+    return 0;
+}
+
+int main(void) {
+    /* Build the same gradient pattern used by make_fixture, but encode
+     * directly via the classic API rather than TJ3 — this test is
+     * specifically about the classic encode path's destination_mgr
+     * dispatch. */
+    int w = FIX_W, h = FIX_H, bpp = FIX_BPP;
+    unsigned char *src = (unsigned char *)malloc((size_t)w * h * bpp);
+    if (!src) return 2;
+    for (int y = 0; y < h; ++y) {
+        for (int x = 0; x < w; ++x) {
+            unsigned char *p = src + ((size_t)y * w + x) * bpp;
+            p[0] = (unsigned char)((x * 255) / (w - 1));
+            p[1] = (unsigned char)((y * 255) / (h - 1));
+            p[2] = (unsigned char)(((x + y) * 255) / (w + h - 2));
+        }
+    }
+
+    /* Encode #1: baseline via jpeg_mem_dest. */
+    struct jpeg_compress_struct cinfo_a;
+    struct jpeg_error_mgr jerr_a;
+    cinfo_a.err = jpeg_std_error(&jerr_a);
+    jpeg_create_compress(&cinfo_a);
+    unsigned char *baseline_jpeg = NULL;
+    unsigned long baseline_size = 0;
+    jpeg_mem_dest(&cinfo_a, &baseline_jpeg, &baseline_size);
+    if (encode_gradient(&cinfo_a, src) != 0) {
+        fprintf(stderr, "baseline encode failed\n");
+        free(src); return 3;
+    }
+    jpeg_destroy_compress(&cinfo_a);
+
+    /* Encode #2: variant via custom destination mgr (small window). */
+    struct jpeg_compress_struct cinfo_b;
+    struct jpeg_error_mgr jerr_b;
+    chunk_dst_mgr dst_mgr;
+    cinfo_b.err = jpeg_std_error(&jerr_b);
+    jpeg_create_compress(&cinfo_b);
+    install_chunk_dst(&cinfo_b, &dst_mgr);
+    if (encode_gradient(&cinfo_b, src) != 0) {
+        fprintf(stderr, "variant encode failed\n");
+        free(dst_mgr.collected); free(baseline_jpeg); free(src); return 4;
+    }
+    jpeg_destroy_compress(&cinfo_b);
+
+    /* Sanity: a 64-byte window over a >>64-byte JPEG must fire
+     * empty_output_buffer many times. If empty_calls is 0 the shim is
+     * silently routing output somewhere else and this test isn't
+     * exercising the callback path. */
+    if (dst_mgr.empty_calls < 2) {
+        fprintf(stderr,
+                "empty_output_buffer fired only %d time(s) for %lu-byte JPEG "
+                "with window=64 — custom destination mgr is not being driven\n",
+                dst_mgr.empty_calls, baseline_size);
+        free(dst_mgr.collected); free(baseline_jpeg); free(src); return 5;
+    }
+    if (dst_mgr.term_calls != 1) {
+        fprintf(stderr,
+                "term_destination fired %d times — should fire exactly once\n",
+                dst_mgr.term_calls);
+        free(dst_mgr.collected); free(baseline_jpeg); free(src); return 6;
+    }
+
+    /* The variant must collect exactly the same bytes as the baseline. */
+    if (dst_mgr.collected_len != (size_t)baseline_size) {
+        fprintf(stderr,
+                "size mismatch: baseline=%lu variant=%zu\n",
+                baseline_size, dst_mgr.collected_len);
+        free(dst_mgr.collected); free(baseline_jpeg); free(src); return 7;
+    }
+    if (memcmp(baseline_jpeg, dst_mgr.collected, dst_mgr.collected_len) != 0) {
+        size_t first_d = 0;
+        while (first_d < dst_mgr.collected_len &&
+               baseline_jpeg[first_d] == dst_mgr.collected[first_d]) {
+            first_d += 1;
+        }
+        fprintf(stderr, "byte mismatch at offset %zu\n", first_d);
+        free(dst_mgr.collected); free(baseline_jpeg); free(src); return 8;
+    }
+
+    fprintf(stderr,
+            "OK custom_dst_mgr: %lu-byte JPEG, window=64, empty_calls=%d, term_calls=%d, bytes match\n",
+            baseline_size, dst_mgr.empty_calls, dst_mgr.term_calls);
+    free(dst_mgr.collected); free(baseline_jpeg); free(src);
+    return 0;
+}
+"#;
 
 #[test]
-#[ignore = "P3-5 follow-up: custom jpeg_destination_mgr with empty_output_buffer flush"]
-fn pattern_2_custom_jpeg_destination_mgr_drives_empty_output_buffer() {}
+fn pattern_2_custom_jpeg_destination_mgr_drives_empty_output_buffer() {
+    let c_src = format!("{C_PREAMBLE}\n{PATTERN_2_CUSTOM_DST_MGR}");
+    run_or_skip("lifecycle_custom_dst", &c_src);
+}
+
+// ---------- pattern #3: source suspension (fill_input_buffer returns FALSE) ----------
+
+const PATTERN_3_SOURCE_SUSPENSION: &str = r#"
+/* Source manager that artificially suspends after `suspend_after` bytes
+ * have been served, mimicking a network consumer that doesn't yet have
+ * the rest of the JPEG. The test then "resumes" by lifting the cap and
+ * asserts the resumed decode matches the baseline. */
+typedef struct {
+    struct jpeg_source_mgr pub;
+    const JOCTET *full_data;
+    size_t full_len;
+    size_t served;            /* total bytes already promised to libjpeg */
+    size_t suspend_after;     /* if served >= this, fill_input_buffer suspends */
+    int fill_calls;
+    int suspend_returns;      /* count of times we returned FALSE */
+} suspend_src_mgr;
+
+static void suspend_init_source(j_decompress_ptr cinfo) {
+    suspend_src_mgr *s = (suspend_src_mgr *)cinfo->src;
+    s->served = 0;
+    s->fill_calls = 0;
+    s->suspend_returns = 0;
+}
+
+static boolean suspend_fill_input_buffer(j_decompress_ptr cinfo) {
+    suspend_src_mgr *s = (suspend_src_mgr *)cinfo->src;
+    s->fill_calls += 1;
+    /* Already at the cap → suspension. Per jdatasrc.c contract,
+     * returning FALSE without altering bytes_in_buffer / next_input_byte
+     * tells libjpeg "no progress possible right now." */
+    if (s->served >= s->suspend_after) {
+        s->suspend_returns += 1;
+        return FALSE;
+    }
+    size_t can_serve = s->suspend_after - s->served;
+    size_t remaining = s->full_len - s->served;
+    size_t to_serve = can_serve < remaining ? can_serve : remaining;
+    if (to_serve == 0) {
+        /* End of input under the cap — emit fake EOI per upstream
+         * fallback, so libjpeg's marker scanner doesn't loop. */
+        static JOCTET fake_eoi[2] = { (JOCTET)0xFF, (JOCTET)JPEG_EOI };
+        s->pub.next_input_byte = fake_eoi;
+        s->pub.bytes_in_buffer = 2;
+        WARNMS(cinfo, JWRN_JPEG_EOF);
+        return TRUE;
+    }
+    s->pub.next_input_byte = s->full_data + s->served;
+    s->pub.bytes_in_buffer = to_serve;
+    s->served += to_serve;
+    return TRUE;
+}
+
+static void suspend_skip_input_data(j_decompress_ptr cinfo, long num_bytes) {
+    suspend_src_mgr *s = (suspend_src_mgr *)cinfo->src;
+    if (num_bytes <= 0) return;
+    size_t n = (size_t)num_bytes;
+    if (n < s->pub.bytes_in_buffer) {
+        s->pub.next_input_byte += n;
+        s->pub.bytes_in_buffer -= n;
+        return;
+    }
+    n -= s->pub.bytes_in_buffer;
+    s->pub.bytes_in_buffer = 0;
+    /* Note: in a real suspending consumer skip might also need to
+     * suspend if it would advance past the served boundary. For this
+     * test we conservatively fold past-cap skips into served, then
+     * the next fill_input_buffer call will suspend on the cap. */
+    if (n > s->full_len - s->served) {
+        s->served = s->full_len;
+    } else {
+        s->served += n;
+    }
+}
+
+static void suspend_term_source(j_decompress_ptr cinfo) {
+    (void)cinfo;
+}
+
+static void install_suspend_src(j_decompress_ptr cinfo, suspend_src_mgr *s,
+                                const JOCTET *buf, size_t len, size_t cap) {
+    s->pub.init_source = suspend_init_source;
+    s->pub.fill_input_buffer = suspend_fill_input_buffer;
+    s->pub.skip_input_data = suspend_skip_input_data;
+    s->pub.resync_to_restart = jpeg_resync_to_restart;
+    s->pub.term_source = suspend_term_source;
+    s->pub.bytes_in_buffer = 0;
+    s->pub.next_input_byte = NULL;
+    s->full_data = buf;
+    s->full_len = len;
+    s->served = 0;
+    s->suspend_after = cap;
+    s->fill_calls = 0;
+    s->suspend_returns = 0;
+    cinfo->src = (struct jpeg_source_mgr *)s;
+}
+
+int main(void) {
+    unsigned char *src = NULL;
+    size_t jpeg_size = 0;
+    unsigned char *jpeg = make_fixture(&jpeg_size, &src);
+    if (!jpeg) {
+        fprintf(stderr, "make_fixture failed\n");
+        return 2;
+    }
+
+    unsigned char *baseline = decode_via_mem_src(jpeg, jpeg_size);
+    if (!baseline) {
+        fprintf(stderr, "baseline mem_src decode failed\n");
+        tj3Free(jpeg); free(src);
+        return 3;
+    }
+
+    /* Suspend after 30 bytes — definitely before the SOF marker for any
+     * non-trivial JPEG. jpeg_read_header(FALSE) must return
+     * JPEG_SUSPENDED, not loop, not abort. */
+    struct jpeg_decompress_struct cinfo;
+    struct jpeg_error_mgr jerr;
+    suspend_src_mgr src_mgr;
+    cinfo.err = jpeg_std_error(&jerr);
+    jpeg_create_decompress(&cinfo);
+    install_suspend_src(&cinfo, &src_mgr, jpeg, jpeg_size, /*cap=*/30);
+
+    /* The KEY assertion of this whole test: jpeg_read_header(FALSE)
+     * must return JPEG_SUSPENDED when the input is incomplete. The
+     * historical regression this guards against (per LAST_MILE
+     * phase3.md P3-5) was that JpegSource::None handling could
+     * "swallow" suspension and either loop forever or return
+     * JPEG_HEADER_OK on truncated input. */
+    int rc = jpeg_read_header(&cinfo, FALSE);
+    if (rc != JPEG_SUSPENDED) {
+        fprintf(stderr,
+                "jpeg_read_header on truncated input returned %d, expected JPEG_SUSPENDED (%d) — "
+                "shim is swallowing suspension\n",
+                rc, JPEG_SUSPENDED);
+        jpeg_destroy_decompress(&cinfo);
+        free(baseline); tj3Free(jpeg); free(src); return 4;
+    }
+    /* The shim should have called fill_input_buffer at least once and
+     * gotten FALSE back. */
+    if (src_mgr.suspend_returns < 1) {
+        fprintf(stderr,
+                "suspend_returns=%d after first jpeg_read_header — shim never asked for more data\n",
+                src_mgr.suspend_returns);
+        jpeg_destroy_decompress(&cinfo);
+        free(baseline); tj3Free(jpeg); free(src); return 5;
+    }
+
+    /* "More data has arrived" — lift the cap to the full size, retry. */
+    src_mgr.suspend_after = jpeg_size;
+    rc = jpeg_read_header(&cinfo, TRUE);
+    if (rc != JPEG_HEADER_OK) {
+        fprintf(stderr,
+                "jpeg_read_header after resume returned %d, expected JPEG_HEADER_OK (%d)\n",
+                rc, JPEG_HEADER_OK);
+        jpeg_destroy_decompress(&cinfo);
+        free(baseline); tj3Free(jpeg); free(src); return 6;
+    }
+
+    cinfo.out_color_space = JCS_RGB;
+    if (!jpeg_start_decompress(&cinfo)) {
+        fprintf(stderr, "jpeg_start_decompress failed after resume\n");
+        jpeg_destroy_decompress(&cinfo);
+        free(baseline); tj3Free(jpeg); free(src); return 7;
+    }
+
+    int row_stride = cinfo.output_width * cinfo.output_components;
+    unsigned char *resumed = (unsigned char *)malloc((size_t)cinfo.output_height * row_stride);
+    if (!resumed) {
+        jpeg_destroy_decompress(&cinfo);
+        free(baseline); tj3Free(jpeg); free(src); return 8;
+    }
+    while (cinfo.output_scanline < cinfo.output_height) {
+        unsigned char *row_ptr = resumed + (size_t)cinfo.output_scanline * row_stride;
+        if (jpeg_read_scanlines(&cinfo, &row_ptr, 1) != 1) {
+            fprintf(stderr, "scanline read returned 0 — unexpected suspension during decode\n");
+            free(resumed); jpeg_destroy_decompress(&cinfo);
+            free(baseline); tj3Free(jpeg); free(src); return 9;
+        }
+    }
+    jpeg_finish_decompress(&cinfo);
+    jpeg_destroy_decompress(&cinfo);
+
+    size_t pixel_bytes = (size_t)FIX_W * FIX_H * FIX_BPP;
+    if (memcmp(baseline, resumed, pixel_bytes) != 0) {
+        fprintf(stderr, "resumed decode pixels differ from baseline\n");
+        free(resumed); free(baseline); tj3Free(jpeg); free(src); return 10;
+    }
+
+    fprintf(stderr,
+            "OK source_suspension: %zu-byte JPEG, suspend_returns=%d, fill_calls=%d, resumed pixels match\n",
+            jpeg_size, src_mgr.suspend_returns, src_mgr.fill_calls);
+    free(resumed); free(baseline); tj3Free(jpeg); free(src);
+    return 0;
+}
+"#;
 
 #[test]
-#[ignore = "P3-5 follow-up: source suspension (fill_input_buffer returns FALSE)"]
-fn pattern_3_source_suspension_returns_control_to_consumer() {}
+fn pattern_3_source_suspension_returns_control_to_consumer() {
+    let c_src = format!("{C_PREAMBLE}\n{PATTERN_3_SOURCE_SUSPENSION}");
+    run_or_skip("lifecycle_source_suspension", &c_src);
+}
+
+// ---------- patterns #4-#8: tracked, deferred to follow-up commits ----------
 
 #[test]
 #[ignore = "P3-5 follow-up: destination suspension / partial flush"]
