@@ -6,7 +6,9 @@ rust-version = "1.87"
 description = "C ABI shim for libjpeg-turbo-rs: drop-in replacement for libjpeg.so.62 and libturbojpeg.so.0"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/developer0hye/libjpeg-turbo-rs"
-publish = false
+# `publish = true` (default) — released to crates.io via
+# .github/workflows/release.yml on `v*` tags. The capi crate ships
+# alongside the root crate and tracks the same version stream.
 build = "build.rs"
 
 [lib]
@@ -20,7 +22,10 @@ crate-type = ["rlib", "cdylib", "staticlib"]
 png = ["libjpeg-turbo-rs/png"]
 
 [dependencies]
-libjpeg-turbo-rs = { path = "../.." }
+# `path` is used for local workspace builds; `version` is what crates.io
+# resolves to when this crate is depended on as a published artifact.
+# Both must be present — path-only deps are rejected by `cargo publish`.
+libjpeg-turbo-rs = { path = "../..", version = "0.6" }
 
 [dev-dependencies]
 libloading = "0.8"

@@ -27,9 +27,36 @@ fn main() {
     // soname typically ship a symlink (libturbojpeg.so.0 ->
     // libjpeg.so.62) alongside the library itself; users who need that
     // layout can opt in via the `CAPI_SONAME` env var at build time.
+    //
+    // CAVEAT (P2-9, see docs/ABI_COMPATIBILITY.md): the default SONAME
+    // `libjpeg.so.62` advertises the v6b ABI, but our struct layout is
+    // JPEG_LIB_VERSION = 80 (v8). A consumer compiled against v6b
+    // headers may silently corrupt v8-only fields (e.g. `is_baseline`).
+    // Production deployments should override:
+    //   CAPI_SONAME=libjpeg.so.8
+    //   CAPI_INSTALL_NAME=@rpath/libjpeg.8.dylib
     let soname: String = env::var("CAPI_SONAME").unwrap_or_else(|_| "libjpeg.so.62".to_string());
     let install_name_mac: String =
         env::var("CAPI_INSTALL_NAME").unwrap_or_else(|_| "@rpath/libjpeg.62.dylib".to_string());
+
+    // Loud warning when the v6b SONAME is paired with v8 struct layout
+    // (the documented-risk path). Suppress by setting either CAPI_SONAME
+    // explicitly to anything (including the v6b SONAME if you really want
+    // it) or CAPI_ACK_V6B_SONAME=1.
+    let soname_was_default: bool = env::var("CAPI_SONAME").is_err();
+    let install_name_was_default: bool = env::var("CAPI_INSTALL_NAME").is_err();
+    let v6b_soname_acknowledged: bool = env::var("CAPI_ACK_V6B_SONAME")
+        .map(|v| v != "0" && !v.is_empty())
+        .unwrap_or(false);
+    if (soname_was_default || install_name_was_default) && !v6b_soname_acknowledged {
+        println!(
+            "cargo:warning=libjpeg-turbo-rs-capi: defaulting SONAME to v6b (`libjpeg.so.62`) \
+             but struct layout is JPEG_LIB_VERSION=80 (v8). Consumers compiled against v6b \
+             headers may silently corrupt v8-only fields. See docs/ABI_COMPATIBILITY.md. \
+             Set CAPI_SONAME=libjpeg.so.8 + CAPI_INSTALL_NAME=@rpath/libjpeg.8.dylib for the \
+             safe default, or CAPI_ACK_V6B_SONAME=1 to silence this warning."
+        );
+    }
 
     match target_os.as_str() {
         "linux" | "android" | "freebsd" | "netbsd" | "openbsd" | "dragonfly" => {
@@ -96,6 +123,7 @@ fn main() {
     // Re-run when any of the pkg-config-affecting inputs change.
     println!("cargo:rerun-if-env-changed=CAPI_SONAME");
     println!("cargo:rerun-if-env-changed=CAPI_INSTALL_NAME");
+    println!("cargo:rerun-if-env-changed=CAPI_ACK_V6B_SONAME");
     println!("cargo:rerun-if-env-changed=CAPI_PKG_PREFIX");
     println!("cargo:rerun-if-env-changed=CAPI_PKG_LIBDIR");
     println!("cargo:rerun-if-env-changed=CAPI_PKG_INCLUDEDIR");

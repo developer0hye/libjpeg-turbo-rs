@@ -801,20 +801,27 @@ unsafe extern "C" fn default_format_message(cinfo: *mut c_void, buffer: *mut u8)
     if buffer.is_null() {
         return;
     }
-    // Mirror libjpeg-turbo's jerror.c::format_message lookup so a
-    // wrapper calling `(*err->format_message)(cinfo, buf)` after an
-    // emit_message warning gets the message string we registered via
-    // the addon table. We do NOT implement the printf-style %d/%c/%s
-    // expansion of `msg_parm` here (none of our shim-emitted warnings
-    // need parameters yet); if a future warning carries args, expand
-    // this routine to walk the format string the way jerror.c does.
+    // Mirror libjpeg-turbo's jerror.c::format_message: look up the
+    // message text by `msg_code` in the per-cinfo `jpeg_message_table`
+    // or `addon_message_table`, then substitute parameters from
+    // `msg_parm` using printf-style format specifiers.
+    //
+    // Upstream contract (jerror.c:178-196): if the first `%X` in the
+    // message is `%s`, the *only* parameter is `err->msg_parm.s`
+    // (the string union arm). Otherwise, parameters come from
+    // `err->msg_parm.i[0..7]` (eight ints). Mixing the two in one
+    // message is not supported by upstream and we follow suit.
     let mut msgtext: *const u8 = std::ptr::null();
+    let mut msg_parm_bytes: [u8; JMSG_STR_PARM_MAX] = [0u8; JMSG_STR_PARM_MAX];
+    let mut have_err: bool = false;
     if !cinfo.is_null() {
         unsafe {
             let err_pp: *const *mut JpegErrorMgr = cinfo as *const *mut JpegErrorMgr;
             let err_ptr: *mut JpegErrorMgr = err_pp.read();
             if !err_ptr.is_null() {
                 let err: &JpegErrorMgr = &*err_ptr;
+                have_err = true;
+                msg_parm_bytes = err.msg_parm;
                 let code: c_int = err.msg_code;
                 if code > 0 && !err.jpeg_message_table.is_null() && code <= err.last_jpeg_message {
                     msgtext = err.jpeg_message_table.add(code as usize).read();
@@ -828,7 +835,9 @@ unsafe extern "C" fn default_format_message(cinfo: *mut c_void, buffer: *mut u8)
             }
         }
     }
-    let chosen: &[u8] = if !msgtext.is_null() {
+
+    // Resolve msgtext to a byte slice WITHOUT the trailing NUL.
+    let format_bytes: &[u8] = if !msgtext.is_null() {
         // SAFETY: msgtext came from one of the message tables, both of
         // which contain `'static` NUL-terminated byte strings.
         unsafe {
@@ -836,26 +845,208 @@ unsafe extern "C" fn default_format_message(cinfo: *mut c_void, buffer: *mut u8)
             while *msgtext.add(len) != 0 {
                 len += 1;
             }
-            std::slice::from_raw_parts(msgtext, len + 1)
+            std::slice::from_raw_parts(msgtext, len)
         }
     } else {
-        // Fallback for unknown codes — matches libjpeg's "Bogus
-        // message code N" placeholder, just without the printf format
-        // expansion (we don't ship the standard table).
-        b"libjpeg-turbo-rs: bogus message code\0"
+        b"libjpeg-turbo-rs: bogus message code"
     };
-    // Cap at JMSG_LENGTH_MAX (200) to honor the libjpeg buffer size
-    // contract documented on `format_message`.
-    let copy_len: usize = chosen.len().min(JMSG_LENGTH_MAX);
+
+    // Reinterpret the msg_parm bytes as the C union view.
+    // Note: the `i` arm is `c_int[8]` = 32 bytes (LP64) / 32 bytes (LLP64).
+    // Reading as native-endian via byte copy is correct for both alignments
+    // because we made a stack copy (msg_parm_bytes) to a 4-byte-aligned
+    // location; if a future caller proves otherwise, switch to byte-wise
+    // assembly.
+    let int_args: [c_int; 8] = if have_err {
+        let mut ints: [c_int; 8] = [0; 8];
+        for (i, slot) in ints.iter_mut().enumerate() {
+            let off = i * std::mem::size_of::<c_int>();
+            if off + std::mem::size_of::<c_int>() <= JMSG_STR_PARM_MAX {
+                let mut b: [u8; 4] = [0; 4];
+                b.copy_from_slice(&msg_parm_bytes[off..off + 4]);
+                *slot = c_int::from_ne_bytes(b);
+            }
+        }
+        ints
+    } else {
+        [0; 8]
+    };
+    let string_arg: &[u8] = {
+        // The `s` arm is a NUL-terminated char[JMSG_STR_PARM_MAX].
+        let nul: usize = msg_parm_bytes
+            .iter()
+            .position(|&b| b == 0)
+            .unwrap_or(JMSG_STR_PARM_MAX);
+        // SAFETY-equivalent: stack copy is local, slice is in-bounds.
+        // We have to allocate to escape the stack-local — caller of this
+        // helper consumes a slice with no lifetime tied to msg_parm_bytes.
+        // We'll route through a shared buffer via the caller's stack.
+        unsafe { std::slice::from_raw_parts(msg_parm_bytes.as_ptr(), nul) }
+    };
+
+    // Decide string-mode vs int-mode by scanning for the first `%X` in
+    // the message, matching jerror.c:181-186.
+    let mut is_string: bool = false;
+    let mut i: usize = 0;
+    while i < format_bytes.len() {
+        if format_bytes[i] == b'%' && i + 1 < format_bytes.len() {
+            if format_bytes[i + 1] == b's' {
+                is_string = true;
+            }
+            break;
+        }
+        i += 1;
+    }
+
+    // Format into a stack buffer sized to JMSG_LENGTH_MAX (matches the
+    // C contract: caller passes a buffer of at least JMSG_LENGTH_MAX
+    // bytes, and snprintf truncates to fit).
+    let mut out: [u8; JMSG_LENGTH_MAX] = [0u8; JMSG_LENGTH_MAX];
+    let written: usize = if is_string {
+        // String-mode: msg_parm.s is the only argument. Bind a single-
+        // element slice so the parser walks args by index just like
+        // int-mode.
+        snprintf_jpeg(&mut out, format_bytes, Some(string_arg), &[])
+    } else {
+        snprintf_jpeg(&mut out, format_bytes, None, &int_args)
+    };
+
+    // Copy to caller's buffer (caller-allocated, must be ≥ JMSG_LENGTH_MAX).
+    // Always NUL-terminate.
+    let copy_len: usize = (written + 1).min(JMSG_LENGTH_MAX);
     unsafe {
-        std::ptr::copy_nonoverlapping(chosen.as_ptr(), buffer, copy_len);
-        if copy_len == JMSG_LENGTH_MAX && chosen[copy_len - 1] != 0 {
-            // Caller's buffer is exactly JMSG_LENGTH_MAX bytes; ensure
-            // the last byte is NUL so callers reading as a C string
-            // don't run past the end.
+        std::ptr::copy_nonoverlapping(out.as_ptr(), buffer, copy_len);
+        // Belt-and-braces NUL terminator at the end.
+        if copy_len > 0 {
             *buffer.add(copy_len - 1) = 0;
         }
     }
+}
+
+/// Minimal printf-style formatter covering the specifiers libjpeg-turbo's
+/// jerror.h actually uses (`%s %d %u %x %X %c %02d %3d %4u %02x %04x %%`).
+///
+/// Returns the number of bytes written to `out` (not including any
+/// trailing NUL). The output is truncated at `out.len() - 1` to leave
+/// room for a NUL the caller will write.
+///
+/// `string_arg` is the single string parameter when format contains
+/// `%s`; `int_args` are consumed positionally for non-string specifiers.
+/// Mixing `%s` with integer specifiers is not supported (matches the
+/// jerror.c contract).
+fn snprintf_jpeg(
+    out: &mut [u8],
+    format: &[u8],
+    string_arg: Option<&[u8]>,
+    int_args: &[c_int],
+) -> usize {
+    let cap_excl_nul: usize = out.len().saturating_sub(1);
+    let mut written: usize = 0;
+    let mut int_idx: usize = 0;
+    let mut i: usize = 0;
+
+    let push = |out: &mut [u8], written: &mut usize, b: u8| {
+        if *written < cap_excl_nul {
+            out[*written] = b;
+            *written += 1;
+        }
+    };
+    let push_bytes = |out: &mut [u8], written: &mut usize, bytes: &[u8]| {
+        for &b in bytes {
+            push(out, written, b);
+        }
+    };
+
+    while i < format.len() {
+        let b: u8 = format[i];
+        if b != b'%' {
+            push(out, &mut written, b);
+            i += 1;
+            continue;
+        }
+        i += 1;
+        if i >= format.len() {
+            // Trailing `%` — emit literally.
+            push(out, &mut written, b'%');
+            break;
+        }
+        if format[i] == b'%' {
+            push(out, &mut written, b'%');
+            i += 1;
+            continue;
+        }
+        // Optional flag chars. We honour `0` (zero-pad); silently
+        // accept-and-ignore the rest because jerror.h doesn't use them.
+        let mut flag_zero: bool = false;
+        while i < format.len() {
+            match format[i] {
+                b'0' => {
+                    flag_zero = true;
+                    i += 1;
+                }
+                b'-' | b'+' | b' ' | b'#' => {
+                    i += 1;
+                }
+                _ => break,
+            }
+        }
+        // Optional width.
+        let mut width: usize = 0;
+        while i < format.len() && format[i].is_ascii_digit() {
+            width = width * 10 + (format[i] - b'0') as usize;
+            i += 1;
+        }
+        if i >= format.len() {
+            break;
+        }
+        let spec: u8 = format[i];
+        i += 1;
+        let formatted: Vec<u8> = match spec {
+            b's' => string_arg.unwrap_or(&[]).to_vec(),
+            b'd' | b'i' => {
+                let v: c_int = int_args.get(int_idx).copied().unwrap_or(0);
+                int_idx += 1;
+                v.to_string().into_bytes()
+            }
+            b'u' => {
+                let v: c_int = int_args.get(int_idx).copied().unwrap_or(0);
+                int_idx += 1;
+                (v as c_uint).to_string().into_bytes()
+            }
+            b'x' => {
+                let v: c_int = int_args.get(int_idx).copied().unwrap_or(0);
+                int_idx += 1;
+                format!("{:x}", v as c_uint).into_bytes()
+            }
+            b'X' => {
+                let v: c_int = int_args.get(int_idx).copied().unwrap_or(0);
+                int_idx += 1;
+                format!("{:X}", v as c_uint).into_bytes()
+            }
+            b'c' => {
+                let v: c_int = int_args.get(int_idx).copied().unwrap_or(0);
+                int_idx += 1;
+                vec![(v & 0xFF) as u8]
+            }
+            other => {
+                // Unrecognised specifier — emit raw `%X` so the caller
+                // can spot the mismatch.
+                push(out, &mut written, b'%');
+                push(out, &mut written, other);
+                continue;
+            }
+        };
+        // Apply width / zero-padding (right-justified only — `-` flag
+        // is parsed but ignored; jerror.h never uses it).
+        if formatted.len() < width {
+            let pad: u8 = if flag_zero { b'0' } else { b' ' };
+            for _ in 0..(width - formatted.len()) {
+                push(out, &mut written, pad);
+            }
+        }
+        push_bytes(out, &mut written, &formatted);
+    }
+    written
 }
 
 unsafe extern "C" fn default_reset_error_mgr(cinfo: *mut c_void) {

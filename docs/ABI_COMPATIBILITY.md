@@ -1,0 +1,133 @@
+# ABI Compatibility Policy
+
+> **Audience.** Distro packagers, downstream Rust consumers, anyone shipping a binary that links against `libjpeg-turbo-rs-capi`'s cdylib in place of upstream `libjpeg.so.62` / `libjpeg.so.8` / `libturbojpeg.so.0`. If you are only consuming the Rust API (`use libjpeg_turbo_rs::*;`), this document does not apply — Rust's normal type system gives you binary stability.
+>
+> **TL;DR.** We target **JPEG_LIB_VERSION = 80** (the v8 ABI). The canonical SONAME for that ABI is `libjpeg.so.8` / `libjpeg.8.dylib`. We *historically* default the SONAME to `libjpeg.so.62` for ease of distro replacement, but consumers compiled against v6b headers will silently read garbage from later v8 fields. Production deployments should override with `CAPI_SONAME=libjpeg.so.8 CAPI_INSTALL_NAME=@rpath/libjpeg.8.dylib`.
+
+## Why this document exists
+
+Upstream libjpeg-turbo's CMake build supports three `JPEG_LIB_VERSION` settings (`references/libjpeg-turbo/CMakeLists.txt:264-384`):
+
+| `WITH_JPEG7` | `WITH_JPEG8` | `JPEG_LIB_VERSION` | Default SONAME (Linux) | Notes                             |
+|--------------|--------------|--------------------|------------------------|-----------------------------------|
+| (off)        | (off)        | 62                 | `libjpeg.so.62`        | Default — most distros            |
+| ON           | (off)        | 70                 | `libjpeg.so.7`         | Adds scale_num/scale_denom etc.   |
+| (any)        | ON           | 80                 | `libjpeg.so.8`         | Adds is_baseline, block_size etc. |
+
+Each version adds new fields to `struct jpeg_decompress_struct` and `struct jpeg_compress_struct`. A consumer compiled against v6b (`#include <jpeglib.h>` with `JPEG_LIB_VERSION = 62`) sees a *smaller* struct than a consumer compiled against v8. Field offsets for fields that exist in both versions are usually compatible, but only because v8 *appends* new fields to the end — the appended fields don't exist in the v6b consumer's view.
+
+The danger: a library that *advertises* the v6b SONAME (`libjpeg.so.62`) but *exposes* the v8 layout silently passes a wider struct to a narrower consumer. The consumer reads only the v6b prefix correctly. Any v8-only field the consumer doesn't know about is fine. But if the *library* writes to an appended v8 field (e.g. `is_baseline` at offset 312) and a v6b consumer's struct only has `308` bytes, the library is writing past the consumer's allocation. **This is undefined behavior.**
+
+## Our policy
+
+### What we target
+
+- **Struct layout: JPEG_LIB_VERSION = 80** (v8). All offsets in `crates/libjpeg-turbo-rs-capi/src/jpeglib.rs` are computed against the v8 LP64 layout. The compile-time assertion block at `jpeglib.rs:3900-3970` pins these.
+- **Public symbol surface: TurboJPEG 3.x + classic libjpeg API at v8 level.** Includes `tj3*` (TurboJPEG 3), the `tj*` legacy aliases, and the `jpeg_*` classic API.
+- **Default precision: 8-bit/12-bit/16-bit/lossless** as supported through both the TJ3 and classic APIs.
+
+### What we deliberately do *not* target
+
+- **v6b binary compatibility.** A binary compiled against `JPEG_LIB_VERSION = 62` headers cannot safely link against our cdylib unless its struct layout happens to coincide with ours up to the field it touches. We make no guarantee of that.
+- **v7 binary compatibility.** Same as v6b — we do not ship per-version cdylib variants.
+- **Multi-precision libjpeg `jpeg16_*` / `jpeg12_*` symbols beyond what upstream `jpeglib.h` declares.** Upstream's high-precision raw-data entry points are 8/12 only; we mirror that.
+
+### How to consume us safely
+
+The matrix below shows which `CAPI_SONAME` / `CAPI_INSTALL_NAME` settings are safe for which kind of consumer. Set both via env at `cargo build` time; they are honored by `crates/libjpeg-turbo-rs-capi/build.rs:30-44`.
+
+| Consumer compiled against     | Safe `CAPI_SONAME`            | Safe `CAPI_INSTALL_NAME`         | Notes                                                  |
+|-------------------------------|-------------------------------|----------------------------------|--------------------------------------------------------|
+| v8 headers (`libjpeg.so.8`)   | `libjpeg.so.8`                | `@rpath/libjpeg.8.dylib`         | **Recommended.** No silent UB.                         |
+| TurboJPEG (`libturbojpeg.so.0`) | `libturbojpeg.so.0`         | `@rpath/libturbojpeg.0.dylib`    | Safe — TurboJPEG API is opaque-handle, no struct ABI.  |
+| v7 headers (`libjpeg.so.7`)   | (unsupported)                 | (unsupported)                    | Recompile against v8 or use upstream v7.               |
+| v6b headers (`libjpeg.so.62`) | `libjpeg.so.62` *with caveat* | `@rpath/libjpeg.62.dylib` *with caveat* | **Risky.** Works iff the consumer never touches v7+ fields. See below. |
+
+### The `libjpeg.so.62` caveat
+
+Our build.rs default is `CAPI_SONAME=libjpeg.so.62` *(historical, kept to ease distro replacement of the most-shipped SONAME)*. This works for the **majority** of v6b consumers (Pillow 10.x, ImageMagick 7, libtiff 4.x, GD 2.x, FFmpeg 6.x with the JPEG codec) because they only read fields that exist in both v6b and v8 at compatible offsets. But there is a non-empty set of cases where it silently breaks:
+
+1. **A v6b consumer reads `cinfo.scale_num` / `cinfo.scale_denom` / `cinfo.do_fancy_upsampling`** — these are at v8 offsets (68, 72, 96 etc.) but a v6b struct does not have them. Our shim writes there. Result: depending on what the v6b consumer has at *those* byte offsets in *its* struct, we silently corrupt a v6b-only field.
+2. **A v6b consumer reads `cinfo.is_baseline` (offset 312, v8-only)** — does not exist in v6b struct. Reading is undefined.
+3. **A v6b consumer with a custom `jpeg_error_mgr` whose `format_message` walks an addon table** — works either way; format_message is at offset 0 of the error manager and is ABI-stable since libjpeg v6.
+
+To opt into the safe SONAME at build time:
+
+```bash
+CAPI_SONAME=libjpeg.so.8 \
+CAPI_INSTALL_NAME=@rpath/libjpeg.8.dylib \
+cargo build -p libjpeg-turbo-rs-capi --release
+```
+
+Build.rs emits a warning when the default `libjpeg.so.62` SONAME is used in a v8-layout build (P2-9 follow-up).
+
+## Field-presence reference
+
+The list below is the contract we mirror from `references/libjpeg-turbo/src/jpeglib.h`. Field names that appear under "v6b layout" are present in the v6b ABI; everything below them is appended in later versions.
+
+### `struct jpeg_decompress_struct` (v8 layout, LP64)
+
+```
+common (all versions):
+  err               offset   0  (jpeg_error_mgr*)
+  mem               offset   8  (jpeg_memory_mgr*)
+  progress          offset  16  (jpeg_progress_mgr*)
+  client_data       offset  24  (void*)
+  is_decompressor   offset  32  (boolean)
+  global_state      offset  36  (int)
+
+v6b layout (also present in v8):
+  src               offset  40  (jpeg_source_mgr*)
+  image_width       offset  48
+  image_height      offset  52
+  num_components    offset  56
+  jpeg_color_space  offset  60
+  out_color_space   offset  64
+
+v7+ extensions (NOT in v6b):
+  scale_num         offset  68
+  scale_denom       offset  72
+  output_gamma      offset  80
+  buffered_image    offset  88
+  raw_data_out      offset  92
+  ... (continued — see jpeglib.rs:3900-3970)
+
+v8+ extensions (NOT in v6b or v7):
+  is_baseline       offset 312   (boolean, JPEG_LIB_VERSION >= 80)
+  ... (block_size etc. — see jpeglib.rs:3946+)
+```
+
+For the full enumeration of v6b → v7 → v8 differences, see the `#if JPEG_LIB_VERSION >= 70` and `>= 80` blocks in `references/libjpeg-turbo/src/jpeglib.h:191,371,393,419,465,498,654,697,742,1003`.
+
+### `struct jpeg_compress_struct`
+
+Symmetric to the decompress side — refer to `crates/libjpeg-turbo-rs-capi/src/jpeglib.rs` and `references/libjpeg-turbo/src/jpeglib.h:300+` for the per-version field list.
+
+## Roadmap (not blocking P2-9 closure)
+
+If a Phase 3 demands real v6b drop-in, the path is:
+
+1. Add a `CAPI_LIB_VERSION = 62 | 70 | 80` cfg gate.
+2. Generate per-version `JpegDecompressPublic` / `JpegCompressPublic` types with conditional fields.
+3. Pin per-version offset assertions for each.
+4. Build per-version cdylibs (`libjpeg.so.62.cdylib`, `libjpeg.so.7.cdylib`, `libjpeg.so.8.cdylib`).
+5. Add a CI matrix entry per version.
+
+This is genuinely large work and is *out of scope* for the current "v8-targeted with documented v6b risk" policy. The decision to take it on should be evidence-driven: at least one named real consumer that we want to support, and an explicit user requirement that opt-in `CAPI_SONAME=libjpeg.so.8` is not acceptable.
+
+## Verification commands
+
+```bash
+# Default build (libjpeg.so.62 SONAME, v8 layout — the documented-risk path).
+cargo build -p libjpeg-turbo-rs-capi --release
+otool -D target/release/liblibjpeg_turbo_rs_capi.dylib  # macOS
+readelf -d target/release/liblibjpeg_turbo_rs_capi.so | grep SONAME  # Linux
+
+# Production-safe v8 build.
+CAPI_SONAME=libjpeg.so.8 \
+CAPI_INSTALL_NAME=@rpath/libjpeg.8.dylib \
+cargo build -p libjpeg-turbo-rs-capi --release
+
+# Verify the offset assertions catch any future struct-shape drift.
+cargo build -p libjpeg-turbo-rs-capi --release  # const-eval asserts run at compile time
+```

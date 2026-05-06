@@ -35,6 +35,9 @@ jobs:
           - fuzz_progressive_decoder
           - fuzz_encode_roundtrip
           - fuzz_transform_options
+          - fuzz_decode_diff_c     # P2-7 differential decode vs subprocess djpeg
+          - fuzz_encode_diff_c     # P2-7 differential encode-roundtrip vs subprocess djpeg
+          - fuzz_transform_diff_c  # P2-7 differential transform vs subprocess jpegtran
     steps:
       - uses: actions/checkout@v4
 
@@ -47,7 +50,23 @@ jobs:
             fuzz
 
       - name: Install cargo-fuzz
-        run: cargo install cargo-fuzz --locked
+        # Use the prebuilt cargo-fuzz binary from GitHub Releases via
+        # taiki-e/install-action. `cargo install cargo-fuzz` (locked OR
+        # unlocked) is broken under current nightly rustc as of 2026-05:
+        # the resolver picks rustix 0.36.5 which uses the
+        # `rustc_layout_scalar_valid_range_end` attribute that current
+        # nightly rustc no longer accepts → "cannot find attribute".
+        # Reproduced in runs 25301178952 (2026-05-04) and 25416520113
+        # (2026-05-06) under both `--locked` and unlocked installs.
+        # The prebuilt binary sidesteps the dep-resolution problem and
+        # is also ~5× faster than building from source.
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-fuzz
+
+      - name: Install libjpeg-turbo-progs (djpeg + cjpeg + jpegtran) for differential targets
+        if: matrix.target == 'fuzz_decode_diff_c' || matrix.target == 'fuzz_encode_diff_c' || matrix.target == 'fuzz_transform_diff_c'
+        run: sudo apt-get install -y libjpeg-turbo-progs
 
       - name: Regenerate seed corpus
         run: cargo test --test generate_fuzz_seeds
@@ -55,8 +74,18 @@ jobs:
       - name: Run fuzzer
         env:
           MAX_TOTAL_TIME: ${{ github.event.inputs.max_total_time || '600' }}
+        # `--target x86_64-unknown-linux-gnu` is mandatory: the prebuilt
+        # cargo-fuzz binary we install above is musl-linked, so without
+        # an explicit target it defaults to its host triple
+        # (x86_64-unknown-linux-musl) and the build fails with
+        # "sanitizer is incompatible with statically linked libc" plus
+        # "can't find crate for `core`" because the rust-musl target
+        # isn't installed on ubuntu-latest. Explicitly building for gnu
+        # picks up the host toolchain that dtolnay/rust-toolchain set up.
         run: |
-          cargo +nightly fuzz run "${{ matrix.target }}" \
+          cargo +nightly fuzz run \
+            --target x86_64-unknown-linux-gnu \
+            "${{ matrix.target }}" \
             -- -max_total_time="${MAX_TOTAL_TIME}" -print_final_stats=1
 
       - name: Upload crash artifacts

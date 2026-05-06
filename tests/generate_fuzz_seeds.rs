@@ -39,6 +39,10 @@ const DECODER_TARGETS: &[&str] = &[
     "fuzz_read_coefficients",
     "fuzz_transform",
     "fuzz_progressive_decoder",
+    // P2-7: differential decode-vs-djpeg target. Same input shape as
+    // the other decoder targets (raw JPEG bytes, no header), so it
+    // benefits from the same seed corpus.
+    "fuzz_decode_diff_c",
 ];
 
 #[derive(Clone, Copy)]
@@ -526,6 +530,15 @@ fn generate_seeds() {
     all_targets.push("fuzz_roundtrip");
     all_targets.push("fuzz_encode_roundtrip");
     all_targets.push("fuzz_transform_options");
+    // P2-7 follow-ups: structured-input differential targets need their
+    // own corpus directories so cargo-fuzz finds the seeds we plant
+    // below. Same input shapes as the unprefixed targets:
+    //   fuzz_encode_diff_c    — 4-byte header + raw pixels (mirrors
+    //                           fuzz_encode_roundtrip)
+    //   fuzz_transform_diff_c — 1-byte op + JPEG (subset of
+    //                           fuzz_transform_options' header)
+    all_targets.push("fuzz_encode_diff_c");
+    all_targets.push("fuzz_transform_diff_c");
     for t in &all_targets {
         fs::create_dir_all(corpus_base.join(t)).expect("failed to create corpus directory");
     }
@@ -578,6 +591,12 @@ fn generate_seeds() {
                     fan_out_write(&name, &jpeg, corpus_base, DECODER_TARGETS);
                     fan_out_write(&name, &jpeg, corpus_base, &["fuzz_roundtrip"]);
                     fan_out_write(&name, &jpeg, corpus_base, &["fuzz_encode_roundtrip"]);
+                    // P2-7: same trick as fuzz_encode_roundtrip — the JPEG
+                    // bytes are interpreted as `[4-byte header][pixel bytes]`
+                    // by the differential target. This gives libfuzzer a
+                    // realistic byte distribution to mutate from instead
+                    // of starting from a blank corpus.
+                    fan_out_write(&name, &jpeg, corpus_base, &["fuzz_encode_diff_c"]);
                     generated += 1;
                 }
             }
@@ -637,6 +656,104 @@ fn generate_seeds() {
 
     // Seeds for the new fuzz_transform_options target (structured header + JPEG).
     transform_options_seeds(corpus_base);
+
+    // P2-7: structured seeds for fuzz_encode_diff_c. Codex round-2 P2:
+    // fan-out of JPEG bytes alone left this target effectively unseeded
+    // — the 4-byte header derives e.g. width=63 height=24 grayscale,
+    // requiring 1516 bytes total, but the JPEG seeds are mostly < 600
+    // bytes so the target returns before exercising the encoder. We
+    // generate explicit [header][pixel-buffer] seeds covering the
+    // entropy × subsampling × pixel-format axes the target actually
+    // exercises, so libfuzzer starts from inputs that already trigger
+    // the differential.
+    let encdiff_target: &[&str] = &["fuzz_encode_diff_c"];
+    // (width, height, quality, flags_byte, label)
+    // flags layout (matches fuzz_encode_diff_c::fuzz_target):
+    //   bits 0..1: subsampling idx (0=420, 1=422, 2=444, 3=440)
+    //   bits 2..3: entropy        (0=baseline, 1=progressive, 2=arith, 3=arith+prog)
+    //   bit  7   : grayscale (1=Grayscale, 0=Rgb)
+    // Cover every (sub_idx 0..=3) × (entropy 0..=3) branch the target
+    // exercises so libfuzzer hits every code path from iteration 0
+    // (codex round-3 P3). The grayscale entries cover the bpp=1 size
+    // accounting separately from the RGB entries.
+    let encdiff_configs: &[(u8, u8, u8, u8, &str)] = &[
+        (32, 32, 75, 0b0000_0000, "rgb_baseline_32x32_q75_s420"),
+        (32, 32, 75, 0b0000_0001, "rgb_baseline_32x32_q75_s422"),
+        (32, 32, 75, 0b0000_0010, "rgb_baseline_32x32_q75_s444"),
+        (32, 32, 75, 0b0000_0011, "rgb_baseline_32x32_q75_s440"),
+        (32, 32, 90, 0b0000_0100, "rgb_progressive_32x32_q90_s420"),
+        (32, 32, 50, 0b0000_1000, "rgb_arith_32x32_q50_s420"),
+        (
+            32,
+            32,
+            75,
+            0b0000_1100,
+            "rgb_arith_progressive_32x32_q75_s420",
+        ),
+        (16, 16, 75, 0b1000_0000, "gray_baseline_16x16_q75"),
+        (24, 24, 90, 0b1000_0100, "gray_progressive_24x24_q90"),
+    ];
+    for (w, h, q, flags, label) in encdiff_configs {
+        let bpp: usize = if (flags & 0b1000_0000) != 0 { 1 } else { 3 };
+        let pixel_buf_len: usize = (*w as usize) * (*h as usize) * bpp;
+        // Smooth gradient: gives the encoder real signal without
+        // worst-case quantization noise.
+        let pixel_buf: Vec<u8> = (0..pixel_buf_len)
+            .map(|i| ((i * 251) % 256) as u8)
+            .collect();
+        let mut bytes: Vec<u8> = Vec::with_capacity(4 + pixel_buf_len);
+        bytes.extend_from_slice(&[*w, *h, *q, *flags]);
+        bytes.extend_from_slice(&pixel_buf);
+        let name: String = format!("encdiff_{label}.bin");
+        fan_out_write(&name, &bytes, corpus_base, encdiff_target);
+    }
+
+    // P2-7: seeds for fuzz_transform_diff_c. Header is a single op byte
+    // (0=HFlip, 1=VFlip, 2=Rot180; the target wraps op_idx % 3) followed
+    // by valid JPEG bytes. Without explicit seeds the target spends its
+    // 10-min budget on inputs whose byte 1 onward is rarely a valid JPEG
+    // — codex P2 finding.
+    let diff_c_target: &[&str] = &["fuzz_transform_diff_c"];
+    let diff_c_sources: &[(Content, SubsampLabel, u8, Entropy, &str)] = &[
+        (
+            Content::Gradient,
+            SubsampLabel::S420,
+            75,
+            Entropy::Baseline,
+            "grad_420_q75_baseline",
+        ),
+        (
+            Content::Checker,
+            SubsampLabel::S444,
+            75,
+            Entropy::Baseline,
+            "chk_444_q75_baseline",
+        ),
+        (
+            Content::SyntheticPhoto,
+            SubsampLabel::S420,
+            90,
+            Entropy::Progressive,
+            "photo_420_q90_progressive",
+        ),
+    ];
+    for (content, sub, q, entropy, label) in diff_c_sources {
+        let Some(jpeg) = encode_seed(*content, *sub, *q, *entropy) else {
+            continue;
+        };
+        for op_byte in [0u8, 1, 2] {
+            let mut bytes: Vec<u8> = Vec::with_capacity(1 + jpeg.len());
+            bytes.push(op_byte);
+            bytes.extend_from_slice(&jpeg);
+            let op_label: &str = match op_byte {
+                0 => "hflip",
+                1 => "vflip",
+                _ => "rot180",
+            };
+            let name: String = format!("xform_{label}_{op_label}.bin");
+            fan_out_write(&name, &bytes, corpus_base, diff_c_target);
+        }
+    }
 
     // fuzz_transform-specific inputs: JPEGs wrapped with junk bytes, JPEGs
     // with scrambled marker segments, and JPEGs whose DHT/DQT headers have

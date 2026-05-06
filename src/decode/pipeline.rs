@@ -247,22 +247,16 @@ impl<'a> Decoder<'a> {
         })
     }
 
-    /// Fill in standard JPEG Huffman tables when no DHT markers were present.
+    /// Fill in standard JPEG Huffman tables (K.3) for any unset table slot.
     ///
-    /// MJPEG frames typically omit DHT markers entirely, relying on the decoder
-    /// to provide the standard tables from JPEG spec section K.3.
-    /// Only fills when ALL table slots are `None` (no DHT was parsed at all).
+    /// Mirrors libjpeg-turbo's `jinit_huff_decoder` → `std_huff_tables`: every
+    /// DC/AC slot left NULL after marker parsing gets the standard table. This
+    /// covers MJPEG frames (no DHT at all), partially-defined streams that
+    /// reference a never-emitted slot in SOS (real-world C-decodable inputs
+    /// found by `fuzz_decode_diff_c`), and standard JFIF inputs (a no-op
+    /// because the per-slot fill below only writes `None` slots).
     fn fill_default_huffman_tables(metadata: &mut JpegMetadata) {
         use crate::common::huffman_table::HuffmanTable;
-
-        // Only fill defaults if no DHT markers were present at all.
-        // If any table was defined (even if some slots are empty), respect the
-        // original DHT data and do not override.
-        let any_dc = metadata.dc_huffman_tables.iter().any(|t| t.is_some());
-        let any_ac = metadata.ac_huffman_tables.iter().any(|t| t.is_some());
-        if any_dc || any_ac {
-            return;
-        }
 
         // Standard DC luminance (table 0)
         #[rustfmt::skip]
@@ -344,38 +338,58 @@ impl<'a> Decoder<'a> {
             0xf9, 0xfa,
         ];
 
-        // Fill missing DC tables
+        // libjpeg-turbo only auto-fills standard tables for the
+        // baseline (sequential Huffman) decoder via `jinit_huff_decoder`
+        // → `std_huff_tables`. The progressive entropy decoder
+        // (`jinit_phuff_decoder`) does **not** auto-fill — a progressive
+        // SOS that references an unset table slot must keep returning a
+        // "missing Huffman table" error to match djpeg's behaviour
+        // (codex P2: removing this gate would have Rust accept inputs
+        // djpeg rejects, the opposite of the drop-in regression we just
+        // fixed).
+        if metadata.frame.is_progressive {
+            return;
+        }
+
+        // Build the four standard tables once. Use them to fill missing
+        // slots in the *final metadata snapshot* (baseline single-scan
+        // path reads `metadata.dc_huffman_tables` directly) AND in each
+        // per-scan snapshot. The per-scan fill must use the standard
+        // table — never the final-metadata table — because a later DHT
+        // can redefine the same slot mid-stream (non-interleaved
+        // baseline emits one DHT per scan); copying a late definition
+        // back into an earlier scan silently alters the bytes that
+        // scan was supposed to decode against.
+        let std_dc_lum = HuffmanTable::build(&BITS_DC_LUM, &VALS_DC_LUM).ok();
+        let std_dc_chr = HuffmanTable::build(&BITS_DC_CHR, &VALS_DC_CHR).ok();
+        let std_ac_lum = HuffmanTable::build(&BITS_AC_LUM, &VALS_AC_LUM).ok();
+        let std_ac_chr = HuffmanTable::build(&BITS_AC_CHR, &VALS_AC_CHR).ok();
+
+        let std_dc = [std_dc_lum.as_ref(), std_dc_chr.as_ref()];
+        let std_ac = [std_ac_lum.as_ref(), std_ac_chr.as_ref()];
+
         if metadata.dc_huffman_tables[0].is_none() {
-            if let Ok(tbl) = HuffmanTable::build(&BITS_DC_LUM, &VALS_DC_LUM) {
-                metadata.dc_huffman_tables[0] = Some(tbl);
-            }
+            metadata.dc_huffman_tables[0] = std_dc[0].cloned();
         }
         if metadata.dc_huffman_tables[1].is_none() {
-            if let Ok(tbl) = HuffmanTable::build(&BITS_DC_CHR, &VALS_DC_CHR) {
-                metadata.dc_huffman_tables[1] = Some(tbl);
-            }
+            metadata.dc_huffman_tables[1] = std_dc[1].cloned();
         }
-
-        // Fill missing AC tables
         if metadata.ac_huffman_tables[0].is_none() {
-            if let Ok(tbl) = HuffmanTable::build(&BITS_AC_LUM, &VALS_AC_LUM) {
-                metadata.ac_huffman_tables[0] = Some(tbl);
-            }
+            metadata.ac_huffman_tables[0] = std_ac[0].cloned();
         }
         if metadata.ac_huffman_tables[1].is_none() {
-            if let Ok(tbl) = HuffmanTable::build(&BITS_AC_CHR, &VALS_AC_CHR) {
-                metadata.ac_huffman_tables[1] = Some(tbl);
-            }
+            metadata.ac_huffman_tables[1] = std_ac[1].cloned();
         }
 
-        // Also fill in ScanInfo Huffman tables for the first scan if needed
         for scan in &mut metadata.scans {
-            for i in 0..4 {
-                if scan.dc_huffman_tables[i].is_none() && metadata.dc_huffman_tables[i].is_some() {
-                    scan.dc_huffman_tables[i] = metadata.dc_huffman_tables[i].clone();
+            for (i, std_tbl) in std_dc.iter().enumerate() {
+                if scan.dc_huffman_tables[i].is_none() {
+                    scan.dc_huffman_tables[i] = std_tbl.cloned();
                 }
-                if scan.ac_huffman_tables[i].is_none() && metadata.ac_huffman_tables[i].is_some() {
-                    scan.ac_huffman_tables[i] = metadata.ac_huffman_tables[i].clone();
+            }
+            for (i, std_tbl) in std_ac.iter().enumerate() {
+                if scan.ac_huffman_tables[i].is_none() {
+                    scan.ac_huffman_tables[i] = std_tbl.cloned();
                 }
             }
         }
@@ -2323,12 +2337,25 @@ impl<'a> Decoder<'a> {
         let scan = &scan_info.header;
         let mut dc_preds = [0i16; 4];
 
-        // Pre-resolve Huffman tables outside the MCU loop
-        let dc_tables: Vec<&HuffmanTable> = scan
-            .components
-            .iter()
-            .map(|sc| Self::resolve_table(&scan_info.dc_huffman_tables, sc.dc_table_index, "DC"))
-            .collect::<Result<Vec<_>>>()?;
+        // Pre-resolve Huffman tables outside the MCU loop. Skip DC table
+        // resolution for DC refinement scans (Ah > 0): libjpeg-turbo's
+        // `start_pass_phuff_decoder` explicitly comments "DC refinement
+        // needs no table" — `decode_dc_refine` only reads one bit per
+        // block and never decodes a Huffman symbol, so the SOS Td
+        // selector is unused. Forcing resolution here was rejecting
+        // C-decodable inputs that name an undefined slot in a
+        // refinement scan (codex P2 follow-up to 258354c).
+        let dc_tables: Vec<Option<&HuffmanTable>> = if ah == 0 {
+            scan.components
+                .iter()
+                .map(|sc| {
+                    Self::resolve_table(&scan_info.dc_huffman_tables, sc.dc_table_index, "DC")
+                        .map(Some)
+                })
+                .collect::<Result<Vec<_>>>()?
+        } else {
+            vec![None; scan.components.len()]
+        };
 
         // Use countdown for restart interval to avoid modulo in hot loop
         let restart_interval = scan_info.restart_interval as u32;
@@ -2349,7 +2376,6 @@ impl<'a> Decoder<'a> {
 
                 for (si, &comp_idx) in scan_comp_indices.iter().enumerate() {
                     let ci = &comp_infos[comp_idx];
-                    let dc_table = dc_tables[si];
 
                     for v in 0..ci.v_samp {
                         for h in 0..ci.h_samp {
@@ -2360,6 +2386,10 @@ impl<'a> Decoder<'a> {
 
                             if is_dc {
                                 if ah == 0 {
+                                    let dc_table = dc_tables[si].expect(
+                                        "DC initial scan must have resolved DC table (ah==0 \
+                                         path of pre-resolution above)",
+                                    );
                                     progressive::decode_dc_first(
                                         bit_reader,
                                         dc_table,
@@ -2407,8 +2437,12 @@ impl<'a> Decoder<'a> {
         let restart_interval = scan_info.restart_interval as u32;
         let mut restart_countdown: u32 = restart_interval;
 
-        // Pre-resolve tables once before the block loop
-        let dc_table = if is_dc {
+        // Pre-resolve tables once before the block loop. DC refinement
+        // (Ah > 0) needs no DC table — see libjpeg-turbo's
+        // `start_pass_phuff_decoder` ("DC refinement needs no table").
+        // AC scans always need an AC table; AC refinement reuses the
+        // AC Huffman to decode EOBn / ZRL run-length codes.
+        let dc_table = if is_dc && ah == 0 {
             Some(Self::resolve_table(
                 &scan_info.dc_huffman_tables,
                 scan_comp.dc_table_index,
