@@ -50,12 +50,19 @@ jobs:
             fuzz
 
       - name: Install cargo-fuzz
-        # Drop --locked: cargo-fuzz 0.13.1's lockfile pins rustix 0.36.5,
-        # whose `#[cfg_attr(rustc_attrs, ...)]` blocks fail on current
-        # nightly rustc with "cannot find attribute rustc_layout_scalar_*".
-        # Without --locked cargo resolves to a newer rustix that compiles
-        # cleanly on nightly. Reproduced in run 25301178952 (2026-05-04).
-        run: cargo install cargo-fuzz
+        # Use the prebuilt cargo-fuzz binary from GitHub Releases via
+        # taiki-e/install-action. `cargo install cargo-fuzz` (locked OR
+        # unlocked) is broken under current nightly rustc as of 2026-05:
+        # the resolver picks rustix 0.36.5 which uses the
+        # `rustc_layout_scalar_valid_range_end` attribute that current
+        # nightly rustc no longer accepts → "cannot find attribute".
+        # Reproduced in runs 25301178952 (2026-05-04) and 25416520113
+        # (2026-05-06) under both `--locked` and unlocked installs.
+        # The prebuilt binary sidesteps the dep-resolution problem and
+        # is also ~5× faster than building from source.
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-fuzz
 
       - name: Install libjpeg-turbo-progs (djpeg + cjpeg + jpegtran) for differential targets
         if: matrix.target == 'fuzz_decode_diff_c' || matrix.target == 'fuzz_encode_diff_c' || matrix.target == 'fuzz_transform_diff_c'
