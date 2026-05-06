@@ -4753,18 +4753,18 @@ pub fn compress_arithmetic_progressive(
                         prev_dc_y_gather = coeff_bufs[0][by * blocks_x + bx][0];
                     }
                 }
-                // Cb block
+                // Cb block — use real h_samp/v_samp; clamping to {1,2}
+                // would mismatch the SOF's 1/4-chroma claim for S411/S441/
+                // S410/S24 and corrupt the decoded image (P2-11).
                 {
                     let bx: usize = mcu_x;
                     let by: usize = mcu_y;
                     let mut block = [0i16; 64];
-                    let hf: usize = if h_samp > 1 { 2 } else { 1 };
-                    let vf: usize = if v_samp > 1 { 2 } else { 1 };
-                    if hf == 1 && vf == 1 {
+                    if h_samp == 1 && v_samp == 1 {
                         extract_block(&cb_plane, width, height, x0, y0, &mut block);
                     } else {
                         downsample_chroma_block(
-                            &cb_plane, width, height, x0, y0, hf, vf, &mut block,
+                            &cb_plane, width, height, x0, y0, h_samp, v_samp, &mut block,
                         );
                     }
                     fdct_quantize_fn(
@@ -4773,18 +4773,16 @@ pub fn compress_arithmetic_progressive(
                         &mut coeff_bufs[1][by * mcus_x + bx],
                     );
                 }
-                // Cr block
+                // Cr block — same fix as Cb above.
                 {
                     let bx: usize = mcu_x;
                     let by: usize = mcu_y;
                     let mut block = [0i16; 64];
-                    let hf: usize = if h_samp > 1 { 2 } else { 1 };
-                    let vf: usize = if v_samp > 1 { 2 } else { 1 };
-                    if hf == 1 && vf == 1 {
+                    if h_samp == 1 && v_samp == 1 {
                         extract_block(&cr_plane, width, height, x0, y0, &mut block);
                     } else {
                         downsample_chroma_block(
-                            &cr_plane, width, height, x0, y0, hf, vf, &mut block,
+                            &cr_plane, width, height, x0, y0, h_samp, v_samp, &mut block,
                         );
                     }
                     fdct_quantize_fn(
@@ -5648,8 +5646,13 @@ fn progressive_fdct_chroma_block(
     output: &mut [i16; 64],
     use_simd_fdct: bool,
 ) {
-    let hf: usize = if h_samp > 1 { 2 } else { 1 };
-    let vf: usize = if v_samp > 1 { 2 } else { 1 };
+    // Use the real sampling ratios from the caller. Clamping to {1,2} would
+    // silently corrupt 4-pixel chroma factors (S411/S441/S410/S24): the
+    // emitted SOF says "1/4 chroma resolution" but the buffer would carry
+    // 1/2-resolution coefficients packed at the wrong positions, producing
+    // ~max-150 pixel divergence in the decoded image (P2-11).
+    let hf: usize = h_samp;
+    let vf: usize = v_samp;
 
     if hf == 1 && vf == 1 {
         progressive_fdct_y_block(

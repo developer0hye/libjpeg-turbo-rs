@@ -90,6 +90,49 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo test --lib
 
+  capi-abi-checks:
+    # P2-3 / P2-4 / P2-5: per-platform C-ABI structural validation.
+    #
+    # Two structural cross-checks against the libjpeg-turbo submodule:
+    #
+    # 1. `abi_offsets` — compiles a C harness against the submodule's
+    #    `jpeglib.h` and asserts every const-asserted Rust offset
+    #    equals the C-side `offsetof` on the host (catches struct
+    #    layout drift in either direction).
+    # 2. `symbol_inventory` — parses upstream `jpeglib.h` and
+    #    `turbojpeg.h` for `EXTERN(...)` / `DLLEXPORT` declarations,
+    #    dlopens our cdylib, and asserts every declared symbol is
+    #    resolvable (catches drop-in surface drift). An explicit
+    #    allowlist enumerates intentionally-deferred legacy symbols.
+    #
+    # Running both on ubuntu-latest (Linux x86_64 LP64),
+    # macos-latest (aarch64 LP64), and windows-latest (x86_64 MSVC
+    # LLP64) covers the three ABI flavours downstream consumers
+    # care about. Each host probes its own ABI.
+    #
+    # Skip-with-reason on hosts where the gate trips (no cc on PATH,
+    # 32-bit host that the Rust assertion block doesn't pin yet) —
+    # those tests exit 0 with an `eprintln!("SKIP: ...")`.
+    name: CAPI ABI Checks (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    needs: [check]
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: ABI offset cross-check (P2-4)
+        run: cargo test -p libjpeg-turbo-rs-capi --release --test abi_offsets -- --nocapture
+        timeout-minutes: 10
+      - name: Symbol inventory diff (P2-5)
+        run: cargo test -p libjpeg-turbo-rs-capi --release --test symbol_inventory -- --nocapture
+        timeout-minutes: 10
+
   test-cross-encode:
     name: C Interop (${{ matrix.os }})
     runs-on: ${{ matrix.os }}

@@ -10,6 +10,11 @@ cargo-fuzz = true
 [dependencies]
 libfuzzer-sys = "0.4"
 arbitrary = { version = "1", features = ["derive"] }
+# libc is used by the *_diff_c targets to mask SIGPIPE before writing
+# to subprocess stdin. With `#![no_main]` libfuzzer skips std's default
+# SIGPIPE → SIG_IGN setup, so a pipe-write to a closed peer would kill
+# the fuzz process with signal 13 instead of returning Err(BrokenPipe).
+libc = "0.2"
 
 [dependencies.libjpeg-turbo-rs]
 path = ".."
@@ -59,4 +64,27 @@ doc = false
 [[bin]]
 name = "fuzz_transform_options"
 path = "fuzz_targets/fuzz_transform_options.rs"
+doc = false
+
+# P2-7: differential decode fuzzer. Compares Rust decode output to
+# subprocessed `djpeg` for each fuzzed input and panics on divergence.
+[[bin]]
+name = "fuzz_decode_diff_c"
+path = "fuzz_targets/fuzz_decode_diff_c.rs"
+doc = false
+
+# P2-7 follow-up: differential encode-roundtrip-vs-C fuzzer. Encodes
+# fuzzed pixels via Rust then compares Rust-decode and C-djpeg-decode
+# of the encoded JPEG, panicking on divergence.
+[[bin]]
+name = "fuzz_encode_diff_c"
+path = "fuzz_targets/fuzz_encode_diff_c.rs"
+doc = false
+
+# P2-7 follow-up: differential transform-vs-jpegtran fuzzer. Applies
+# the same lossless transform via Rust and via subprocessed jpegtran,
+# decodes both via djpeg, asserts pixel agreement.
+[[bin]]
+name = "fuzz_transform_diff_c"
+path = "fuzz_targets/fuzz_transform_diff_c.rs"
 doc = false
