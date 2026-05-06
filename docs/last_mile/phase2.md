@@ -65,7 +65,7 @@ The P2-9 doc explicitly carves these out as "Phase 3 ask" work — keeping P2-3 
 - submodule not initialised (`references/libjpeg-turbo/src/jpeglib.h` missing),
 - environmental cc failure (missing system headers, broken cross-compile setup).
 
-**Out of scope (not blocking closure):** extending the cross-check to `jpeg_compress_struct`, `jpeg_error_mgr`, `jpeg_source_mgr`, `jpeg_destination_mgr`, `jvirt_barray_control`, `jvirt_sarray_control`, `jpeg_marker_struct`. The infrastructure is in place — adding more types is repeating the existing pattern with a different `struct foo` name in the C harness and a different Rust type in `rust_offsets()`. Tracked as a follow-up in [P3-1](phase3.md#p3-1-abi-offset-cross-check-was-decompress-only--partial-4-structs-closed--marker--virt_barray-deferred) rather than a blocker because field-order drift in `jpeg_decompress_struct` is by far the highest-risk surface.
+**Out of scope (not blocking closure):** extending the cross-check to `jpeg_compress_struct`, `jpeg_error_mgr`, `jpeg_source_mgr`, `jpeg_destination_mgr`, `jvirt_barray_control`, `jvirt_sarray_control`, `jpeg_marker_struct`. The infrastructure is in place — adding more types is repeating the existing pattern with a different `struct foo` name in the C harness and a different Rust type in `rust_offsets()`. Tracked as a follow-up in [P3-1](phase3.md#p3-1-abi-offset-cross-check-was-decompress-only--partial-4-structs-closed-marker--virt_barray-deferred) rather than a blocker because field-order drift in `jpeg_decompress_struct` is by far the highest-risk surface.
 
 ## P2-5. Symbol-Export Inventory Diff — **CLOSED**
 
