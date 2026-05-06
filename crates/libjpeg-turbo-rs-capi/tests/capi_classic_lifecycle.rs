@@ -963,6 +963,100 @@ fn pattern_6_jpeg_abort_compress_then_reuse() {}
 #[ignore = "P3-5 follow-up: buffered-image multi-pass progressive (jpeg_consume_input + jpeg_start_output + jpeg_finish_output)"]
 fn pattern_7_buffered_image_multi_pass_progressive() {}
 
+// ---------- pattern #8: setjmp/longjmp error cleanup with custom error_exit ----------
+
+// NOTE: pattern_8 is currently #[ignore]'d below — running it surfaces a
+// real shim bug (`jpeg_read_header` returns `JPEG_SUSPENDED` on
+// EOI-terminated malformed input instead of invoking `error_exit`,
+// breaking the canonical setjmp/longjmp pattern in libjpeg.txt §3).
+// The C harness below is preserved verbatim so the follow-up PR that
+// fixes the shim only needs to flip the `#[ignore]` attribute, not
+// re-author the test. Until that fix lands, the harness is dead code
+// — kept under `#[allow(dead_code)]` so clippy doesn't flag it.
+#[allow(dead_code)]
+const PATTERN_8_SETJMP_LONGJMP: &str = r#"
+#include <setjmp.h>
+
+/* Extended error mgr that longjmps on error_exit, mirroring the canonical
+ * pattern from libjpeg.txt §3 ("Error handling"). */
+typedef struct {
+    struct jpeg_error_mgr pub;
+    jmp_buf setjmp_buffer;
+    int error_exit_calls;
+    int last_msg_code;
+} setjmp_err_mgr;
+
+static void my_error_exit(j_common_ptr cinfo) {
+    setjmp_err_mgr *err = (setjmp_err_mgr *)cinfo->err;
+    err->error_exit_calls += 1;
+    err->last_msg_code = cinfo->err->msg_code;
+    longjmp(err->setjmp_buffer, 1);
+}
+
+int main(void) {
+    /* Deliberately corrupt input: SOI + SOF0 with a length field that is
+     * smaller than the minimum legal SOF length (11 bytes for an 8-bit
+     * single-component frame). The marker scanner accepts the marker
+     * but the SOF parser must reject it via error_exit (upstream
+     * `JERR_BAD_LENGTH` from `jdmarker.c::get_sof`). Random bytes alone
+     * would just be skipped by the lenient marker scanner. */
+    unsigned char garbage[] = {
+        0xFF, 0xD8,                   /* SOI */
+        0xFF, 0xC0,                   /* SOF0 marker */
+        0x00, 0x02,                   /* length = 2 (way below minimum 11) */
+        0xFF, 0xD9,                   /* EOI */
+    };
+
+    struct jpeg_decompress_struct cinfo;
+    setjmp_err_mgr jerr;
+    /* jpeg_std_error initialises the public part; we then override
+     * error_exit and add our own setjmp_buffer / counters. */
+    cinfo.err = jpeg_std_error(&jerr.pub);
+    jerr.pub.error_exit = my_error_exit;
+    jerr.error_exit_calls = 0;
+    jerr.last_msg_code = 0;
+
+    if (setjmp(jerr.setjmp_buffer)) {
+        /* longjmp landed here: error_exit must have fired exactly once,
+         * and jpeg_destroy_decompress must clean up without crashing. */
+        if (jerr.error_exit_calls != 1) {
+            fprintf(stderr,
+                    "error_exit_calls=%d after longjmp, expected 1\n",
+                    jerr.error_exit_calls);
+            return 2;
+        }
+        if (jerr.last_msg_code <= 0) {
+            fprintf(stderr,
+                    "last_msg_code=%d, expected positive (real JERR_*)\n",
+                    jerr.last_msg_code);
+            return 3;
+        }
+        jpeg_destroy_decompress(&cinfo);
+        fprintf(stderr,
+                "OK setjmp_longjmp: error_exit fired (msg_code=%d), longjmp + destroy clean\n",
+                jerr.last_msg_code);
+        return 0;
+    }
+
+    jpeg_create_decompress(&cinfo);
+    jpeg_mem_src(&cinfo, garbage, sizeof(garbage));
+    /* This must invoke error_exit which longjmps. If it returns
+     * normally the shim is silently accepting corrupt input, which is
+     * a real consumer-surprise regression. */
+    int rc = jpeg_read_header(&cinfo, TRUE);
+
+    /* Reached only if error_exit did NOT fire — that's a failure. */
+    fprintf(stderr,
+            "jpeg_read_header on corrupt input returned %d without invoking error_exit\n",
+            rc);
+    jpeg_destroy_decompress(&cinfo);
+    return 4;
+}
+"#;
+
 #[test]
-#[ignore = "P3-5 follow-up: setjmp/longjmp error cleanup with custom error_exit"]
-fn pattern_8_setjmp_longjmp_error_cleanup() {}
+#[ignore = "P3-5 follow-up: jpeg_read_header must invoke cinfo->err->error_exit on Decoder::new errors for EOI-terminated input — currently returns JPEG_SUSPENDED for both truncated and corrupt input, breaking the libjpeg.txt §3 setjmp/longjmp contract. Fix in a separate PR; harness is ready (PATTERN_8_SETJMP_LONGJMP) — flip this attribute when shim fix lands."]
+fn pattern_8_setjmp_longjmp_error_cleanup() {
+    let c_src = format!("{C_PREAMBLE}\n{PATTERN_8_SETJMP_LONGJMP}");
+    run_or_skip("lifecycle_setjmp_longjmp", &c_src);
+}
