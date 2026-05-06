@@ -707,25 +707,14 @@ The P2-9 doc explicitly carves these out as "Phase 3 ask" work — keeping P2-3 
 - Comparing against an *installed* upstream `libjpeg.so.62` / `libturbojpeg.so.0` via `nm -D` — would catch symbol-version tags and platform-specific export differences, but requires upstream installed at test time. The header-based check is the cheaper baseline and runs everywhere.
 - SONAME match (`libjpeg.so.62` ↔ `libjpeg.so.8`) — owned by P2-9 (build.rs SONAME wiring + warning) and `docs/ABI_COMPATIBILITY.md`.
 
-### P2-6. Crate Is `publish = false`
+### P2-6. Crate Is `publish = false` — **CLOSED 2026-05-06**
 
-**Symptom:** `crates/libjpeg-turbo-rs-capi/Cargo.toml:9` is `publish = false` and the version is still `0.1.0`. There is no path for downstream Rust consumers to `cargo add libjpeg-turbo-rs-capi`.
+**Status (2026-05-06): closed.** Both `libjpeg-turbo-rs` (root) and `libjpeg-turbo-rs-capi` are live on crates.io:
 
-**Why this matters:** A "drop-in replacement" library that cannot be installed through the language's standard package manager is not actually drop-in for the Rust ecosystem.
+- `cargo add libjpeg-turbo-rs` → 0.6.1 (latest, published with v0.6.1 tag)
+- `cargo add libjpeg-turbo-rs-capi` → 0.1.0 (published alongside v0.6.1)
 
-**Likely area:**
-
-- `crates/libjpeg-turbo-rs-capi/Cargo.toml` (flip `publish`, bump version, add `description`, `license`, `repository`, `keywords`, `categories`).
-- `crates/libjpeg-turbo-rs-capi/README.md` (new).
-- `.github/workflows/release.yml` (already supports `wasm-v*` tags; extend for `capi-v*`).
-
-**Acceptance:**
-
-```bash
-cargo publish -p libjpeg-turbo-rs-capi --dry-run
-```
-
-Must succeed. Then publish a `0.1.0` (or `1.0.0-rc.1`) candidate. Hold actual `1.0.0` until P2-1 through P2-5 are closed.
+The release workflow at `.github/workflows/release.yml` covers `v*` (root + npm + capi), `wasm-v*` (npm only), and `capi-v*` (capi only) tag patterns; v0.6.1 publish job ran successfully on 2026-05-06 across all three publish steps (root crate, npm, capi crate).
 
 ### P2-7. Differential / Roundtrip Fuzzing Against C — **CLOSED (decode + encode + transform); 24-hour long-run deferred**
 
@@ -939,7 +928,7 @@ The earlier skip-comment claimed "1 LSB downsample diff, decoded pixels match" �
 9. ~~**P2-8** — SONAME / pkg-config / install layout.~~ **CLOSED 2026-05-04** — `scripts/install_capi.sh` + `make install` stage cdylib + symlink chain + headers + `.pc` + `JPEGConfig.cmake` into `${DESTDIR}${PREFIX}`; `tests/install_layout.rs` asserts the layout end-to-end.
 10. ~~**P2-7** — Differential fuzzing against C.~~ **CLOSED 2026-05-04** — three libfuzzer targets land: `fuzz_decode_diff_c` (Rust decode vs djpeg), `fuzz_encode_diff_c` (Rust encode roundtrip via djpeg + Rust decode), `fuzz_transform_diff_c` (Rust transform vs jpegtran for HFlip / VFlip / Rot180). All three on the nightly 10-min matrix in `.github/workflows/fuzz-smoke.yml`. 24-hour scheduled long-run + OSS-Fuzz-style corpus publishing deferred as a future scaling step. Decode/encode/transform differential against C is already CI-gated for the curated `tests/corpus/` corpus via `examples/corpus_test.rs::test-corpus`.
 11. ~~**P2-10** — libvips / FFmpeg / SDL_image / GD consumer harnesses.~~ **CLOSED 2026-05-04** — all four landed: `capi_libvips_compat` + `capi_ffmpeg_compat` (CLI-based, LD_PRELOAD pattern), `capi_gd_compat` + `capi_sdl_image_compat` (C-harness pattern like `libtiff_integration`). The libvips first-run also surfaced and fixed the `jpeg_c_*_param_*` symbol-surface gap via `mozjpeg_compat.rs`, so consumers linked against mozjpeg can dyld-resolve against our cdylib (with documented runtime layout caveat).
-12. **P2-6** — Publish to crates.io. Last, because publishing locks the ABI surface and we should not lock until P2-1 through P2-5 are closed.
+12. ~~**P2-6** — Publish to crates.io.~~ **CLOSED 2026-05-06** — both root crate (`libjpeg-turbo-rs` 0.6.1) and CAPI crate (`libjpeg-turbo-rs-capi` 0.1.0) are live; release workflow covers `v*`, `wasm-v*`, `capi-v*` tag patterns; v0.6.1 release job published all three (crates.io root + npm + crates.io capi) successfully.
 
 ---
 
