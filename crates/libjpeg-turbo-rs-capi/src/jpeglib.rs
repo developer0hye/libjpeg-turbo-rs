@@ -5350,8 +5350,17 @@ fn run_encoder_and_flush(c: &mut JpegCompressPublic, priv_state: &mut CompressPr
 
     // Push the bytes through the destination manager by repeatedly
     // filling the staging buffer and calling `empty_output_buffer`
-    // when it overflows, then `term_destination` at EOF.
-    push_bytes_through_dest_mgr(c, priv_state, &with_markers);
+    // when it overflows, then `term_destination` at EOF. If the
+    // consumer signals suspension via FALSE return, drop the local
+    // encoded `Vec` BEFORE invoking `raise_cant_suspend` — the
+    // `error_exit` callback may `longjmp` and skip Rust destructors,
+    // which would leak this allocation.
+    let completed: bool = push_bytes_through_dest_mgr(c, priv_state, &with_markers);
+    drop(with_markers);
+    if !completed {
+        raise_cant_suspend(c, priv_state);
+        return false;
+    }
     true
 }
 
@@ -5359,29 +5368,36 @@ fn run_encoder_and_flush(c: &mut JpegCompressPublic, priv_state: &mut CompressPr
 /// `next_output_byte` buffer, invoking `empty_output_buffer` whenever
 /// the staging buffer fills.
 ///
+/// Returns `true` on completion (`term_destination` invoked). Returns
+/// `false` when the destination manager returned `FALSE` from
+/// `empty_output_buffer`; in that case `term_destination` is *not*
+/// called and the caller is responsible for dropping any local heap
+/// state and then invoking `cinfo->err->error_exit` (per the
+/// `JERR_CANT_SUSPEND` contract documented at the call sites). Doing
+/// the `error_exit` here directly would `longjmp` past live Rust `Vec`
+/// allocations on the caller's stack, leaking them — so the contract
+/// is split: this function reports the status, the caller signals it.
+///
 /// libjpeg.txt §5.5 defines suspension at the `jpeg_write_scanlines`
 /// boundary: the entropy coder's `empty_output_buffer` FALSE return
 /// propagates up through `process_data` so `jpeg_write_scanlines` can
 /// return a row count short of the requested rows. The shim's
-/// deferred-encode architecture (`jpeg_write_scanlines` only buffers
-/// pixels; the encoder runs entirely inside `jpeg_finish_compress`)
-/// cannot honor that contract — by the time we reach this function the
-/// entire byte stream is already encoded. If a custom destination
-/// manager nevertheless returns `FALSE` here, the only honest response
-/// is to fail loudly via `error_exit` with `JERR_CANT_SUSPEND`
-/// ("Suspension not allowed here"); the alternative — silently calling
-/// `term_destination` while dropping the post-suspension bytes — is the
-/// pre-fix shim defect that pattern #4 originally surfaced.
+/// deferred-encode architecture cannot honor that contract — by the
+/// time the bytes reach this function the entire stream is already
+/// encoded. The honest response is `JERR_CANT_SUSPEND` (upstream code
+/// 25 at `JPEG_LIB_VERSION = 80`, exact message "Suspension not
+/// allowed here") — anything else either silently drops bytes (the
+/// pre-fix defect) or invents a non-upstream resume contract.
+#[must_use = "callers must handle FALSE-return suspension by dropping local state and then invoking error_exit"]
 fn push_bytes_through_dest_mgr(
     c: &mut JpegCompressPublic,
-    priv_state: &mut CompressPrivate,
+    _priv_state: &mut CompressPrivate,
     encoded: &[u8],
-) {
+) -> bool {
     if c.dest.is_null() {
-        return;
+        return true;
     }
     let mut offset: usize = 0;
-    let mut suspension_signalled: bool = false;
     while offset < encoded.len() {
         let need_refill: bool = {
             let dest: &JpegDestinationMgr = unsafe { &*c.dest };
@@ -5393,8 +5409,12 @@ fn push_bytes_through_dest_mgr(
             if let Some(f) = empty_fn {
                 let rc: CBoolean = unsafe { f(c as *mut JpegCompressPublic as *mut c_void) };
                 if rc == 0 {
-                    suspension_signalled = true;
-                    break;
+                    // Consumer signalled suspension. Skip `term_destination`
+                    // and propagate the status to the caller without
+                    // calling `error_exit` here (that would `longjmp`
+                    // past live Rust `Vec` allocations on the caller's
+                    // stack, leaking them).
+                    return false;
                 }
             } else {
                 // No callback installed and no room — nothing more we can do.
@@ -5417,21 +5437,6 @@ fn push_bytes_through_dest_mgr(
         }
         offset += take;
     }
-    if suspension_signalled {
-        // Stash a diagnostic and invoke `error_exit` so a setjmp/longjmp
-        // consumer can recover. Skip `term_destination` — the stream is
-        // not finalised. `JERR_CANT_SUSPEND` (upstream code 25 at
-        // `JPEG_LIB_VERSION = 80`) is the semantically exact upstream
-        // message ("Suspension not allowed here").
-        priv_state.last_error = CString::new(
-            "destination manager returned FALSE from empty_output_buffer; \
-             upstream-style suspension is not supported at the flush boundary \
-             — see push_bytes_through_dest_mgr in jpeglib.rs",
-        )
-        .unwrap_or_default();
-        invoke_error_exit(c as *mut JpegCompressPublic as *mut c_void, 25);
-        return;
-    }
     // IMPORTANT: do NOT zero `next_output_byte` / `free_in_buffer`
     // after `term_destination` returns. Pillow's `_imaging.so`
     // `ImagingJpegEncode` computes `bytes_written = state->bytes -
@@ -5448,6 +5453,22 @@ fn push_bytes_through_dest_mgr(
             f(c as *mut JpegCompressPublic as *mut c_void);
         }
     }
+    true
+}
+
+/// Stash the `JERR_CANT_SUSPEND` diagnostic in `priv_state.last_error`
+/// and signal the caller via `cinfo->err->error_exit`. Must be called
+/// only AFTER any caller-stack `Vec` allocations have been dropped /
+/// moved out of scope, because `error_exit` may `longjmp` and skip
+/// Rust destructors.
+fn raise_cant_suspend(c: &mut JpegCompressPublic, priv_state: &mut CompressPrivate) {
+    priv_state.last_error = CString::new(
+        "destination manager returned FALSE from empty_output_buffer; \
+         upstream-style suspension is not supported at the flush boundary \
+         — see push_bytes_through_dest_mgr in jpeglib.rs",
+    )
+    .unwrap_or_default();
+    invoke_error_exit(c as *mut JpegCompressPublic as *mut c_void, 25);
 }
 
 /// Construct a new byte buffer that inserts pending APPn markers and
@@ -5966,7 +5987,11 @@ pub extern "C" fn jpeg_write_tables(cinfo: *mut c_void) {
     if let Some(init) = unsafe { (*c.dest).init_destination } {
         unsafe { init(cinfo) };
     }
-    push_bytes_through_dest_mgr(c, priv_state, &tables_bytes);
+    let completed: bool = push_bytes_through_dest_mgr(c, priv_state, &tables_bytes);
+    drop(tables_bytes);
+    if !completed {
+        raise_cant_suspend(c, priv_state);
+    }
 }
 
 /// Emit a tables-only JPEG datastream at the given quality, matching
@@ -6408,7 +6433,12 @@ fn run_raw_encoder_and_flush(c: &mut JpegCompressPublic, priv_state: &mut Compre
             inject_markers_after_soi(&encoded, priv_state)
         };
 
-    push_bytes_through_dest_mgr(c, priv_state, &with_markers);
+    let completed: bool = push_bytes_through_dest_mgr(c, priv_state, &with_markers);
+    drop(with_markers);
+    if !completed {
+        raise_cant_suspend(c, priv_state);
+        return false;
+    }
     true
 }
 
@@ -7102,8 +7132,13 @@ fn run_coefficient_writer_and_flush(
         } else {
             inject_markers_after_soi(&encoded, priv_state)
         };
-    push_bytes_through_dest_mgr(c, priv_state, &with_markers);
+    let completed: bool = push_bytes_through_dest_mgr(c, priv_state, &with_markers);
+    drop(with_markers);
     priv_state.pending_coef_arrays = std::ptr::null();
+    if !completed {
+        raise_cant_suspend(c, priv_state);
+        return false;
+    }
     true
 }
 
