@@ -1,0 +1,395 @@
+# Phase 1 — Original Release Gate (Historical, All CLOSED)
+
+> **Index:** [docs/LAST_MILE.md](../LAST_MILE.md). Open this file only when reading P0-* / P1-* / Phase-1 P2 history or the original Execution Plan.
+
+This phase covered the four P0 correctness gaps that originally blocked replacement-readiness, plus the P1 follow-ons (soft-skip cleanup, encode SIMD perf, legacy TJ stubs, precision plumbing) and the Phase-1 P2 items (tjbench/COM-tools harness, PNG image I/O). All entries here are **CLOSED**; kept for institutional memory and so future regressions can cite the original symptom + fix.
+
+---
+
+## Gap Inventory
+
+### P0-1. Native Transform Cross-Product Corrupts Arithmetic Output — **CLOSED**
+
+**Status (2026-04-28): closed.** `cargo test -p libjpeg-turbo-rs --release --test cross_product_transform` passes all 12 cases including `tjtrantest_full_cross_product`, `tjtrantest_arithmetic_cross_product`, `tjtrantest_restart_cross_product`, and `c_jpegtran_cross_validation_*`. The arithmetic-DC-overflow regression listed below is no longer reproducible.
+
+**Original symptom (historical):** `tjtrantest_full_cross_product` failed with arithmetic decode-overflow outputs. Clean `main` showed 9 failures; the dirty worktree with an in-progress progressive arithmetic restart patch showed 12. Treat that as evidence that this was a state-machine class bug, not one missing tuple.
+
+- `gray-rows-hflip`, arithmetic output, all copy modes, trim false/true variants.
+- `gray-rows-rot90`, arithmetic output, all copy modes.
+- `444-blocks-vflip` / `444-blocks-rot90`, arithmetic + progressive output, restart-blocks source, copy-all.
+- Decoder error: `corrupt data: arithmetic DC overflow`.
+
+**Why this matters:** This is not a C ABI problem. It is a Rust-native transform correctness bug in a real `jpegtran`-style option cross-product.
+
+**Likely area:**
+
+- `tests/cross_product_transform.rs`
+- `src/api/coefficient.rs`
+- `src/encode/arithmetic.rs`
+- restart handling around arithmetic coefficient writing and spatial transforms.
+
+**Acceptance:**
+
+```bash
+cargo test -p libjpeg-turbo-rs --test cross_product_transform tjtrantest_full_cross_product -- --exact
+cargo test -p libjpeg-turbo-rs --test cross_product_transform
+cargo test --workspace --no-fail-fast
+```
+
+All must pass. No new skip is acceptable.
+
+### P0-2. Stock Tools Link But Our-Linked `djpeg` Aborts — **CLOSED**
+
+**Status (2026-04-28): closed.** `examples/stock_djpeg_cjpeg/run.sh` reports `OK all_byte_exact` — every fixture (`monkey12`, `testimgari`, `testimgint`, `testorig`) passes for `djpeg`, `cjpeg`, and `jpegtran` (with `monkey12` jpegtran the documented 12-bit-transcode skip tracked under P0-4). The companion `shim_exports_classic_jpeg_api` gate hard-asserts the classic API surface.
+
+**Original symptom (historical):** `cargo test --test capi_stock_tool_link -- --include-ignored` proved the stock tools could link, but `run.sh` reported `djpeg <fixture> fail ours_crashed` across all four 8-bit fixtures.
+
+**Why this matters:** If stock `djpeg` aborts, downstream tools that use classic `jpeglib.h` are not safe. Linking is not enough.
+
+**Possible relation to P0-4:** the abort may live in the memmgr / virtual-array lifecycle path that P0-4 also touches (`jpeg_read_coefficients` allocates virt_barrays via `cinfo->mem` and djpeg/cjpeg consume them through the same vtable). Triage P0-2 first; if the root cause overlaps, fold the fix.
+
+**Likely area:**
+
+- `crates/libjpeg-turbo-rs-capi/src/jpeglib.rs`
+- `crates/libjpeg-turbo-rs-capi/src/memmgr.rs`
+- `examples/stock_djpeg_cjpeg/build.sh`
+- `examples/stock_djpeg_cjpeg/run.sh`
+- `tests/capi_stock_tool_link.rs`
+
+**Acceptance:**
+
+```bash
+cargo build -p libjpeg-turbo-rs-capi --release
+cargo test --test capi_stock_tool_link -- --include-ignored
+```
+
+Then remove the stale ignored regression guard or invert it into "classic symbols are present and stock tools run."
+
+### P0-3. Pillow Cannot Load Because Classic-API Symbols Are Missing — **CLOSED**
+
+Verified `2026-04-28` against Pillow 12.2.0 + Python 3.14 on macOS (arm64): `cargo test --test capi_pillow_compat` passes phase A (dlopen + classic-symbol probe) **and** phase B (Pillow `Image.open → load → save → re-open` round-trip on `tests/fixtures/cjpeg_240x320_portrait_444.jpg`). Round-trip PSNR @ q=90 = **49.49 dB** (well above the 30 dB acceptance floor), encoded output 5821 bytes. `tests/capi_pillow_compat.rs` blocker-code-3 is a hard failure (no SKIP), and `shim_exports_classic_jpeg_api` hard-asserts presence of every required name.
+
+**Original symptom (loader half):**
+
+```text
+Symbol not found: _jpeg12_read_raw_data
+Referenced from: .../PIL/.dylibs/libtiff.6.dylib
+```
+
+**Original symptom (decode-behavior half):**
+
+```text
+OSError: image file is truncated (9046 bytes not processed)
+```
+
+That second symptom traced to two distinct gaps: (1) the shim ignored the `jpeg_source_mgr` Pillow installs directly and saw `JpegSource::None` from `jpeg_read_header`; and (2) the JCS_EXT_* enum table was numbered at 13..22 instead of upstream's 6..15, so PIL's `JCS_EXT_RGBX` request fell through to `Cmyk`/`Rgb` defaults and the shim emitted a 4-component CMYK JPEG (or, on decode, copied 3-byte rows into PIL's 4-byte allocation) — round-trip PSNR ≈ 9–12 dB.
+
+**Why this matters:** A drop-in library cannot pass by silently leaving a downstream wrapper to misinterpret the source state.
+
+**Symbol inventory.** Upstream `jpeglib.h` defines the high-precision raw-data family as **8-bit + 12-bit only** — there is no `jpeg16_read_raw_data` / `jpeg16_write_raw_data` in the public header (verified at `references/libjpeg-turbo/src/jpeglib.h:1039–1100`). The shim now exports:
+
+*Raw-data entry points (the original libtiff loader blocker):*
+
+- `jpeg_read_raw_data`, `jpeg12_read_raw_data`
+- `jpeg_write_raw_data`, `jpeg12_write_raw_data`
+
+*Buffered-image / streaming entry points (Class A — Rust public API was already wired, just no C export):*
+
+- `jpeg_consume_input`, `jpeg_input_complete` — streaming / draft mode (`docs/C_API_REFERENCE.md:255-256`).
+- `jpeg_has_multiple_scans` — buffered-image enable (`:252`).
+- `jpeg_start_output`, `jpeg_finish_output` — buffered-image multi-pass output (`:253-254`).
+- `jpeg_new_colormap` — quantize-mode colormap update (`:257`).
+- `jpeg_set_linear_quality` — `cjpeg -baseline` linear-quality scale path (`:198`).
+
+*Abort / generic destroy (Class B — drop-in needs the symbol even where the Rust API uses RAII):*
+
+- `jpeg_abort_compress`, `jpeg_abort_decompress`, `jpeg_abort`, `jpeg_destroy` — error-path teardown.
+- `jpeg_alloc_huff_table`, `jpeg_alloc_quant_table` — also covered under P0-4 since stock `jpegtran` paths exercise the same code.
+
+Each is asserted by name in `shim_exports_classic_jpeg_api`, so a future refactor that drops one fails CI immediately. When Class B symbols become real exports (today they are zero-initialised stubs), flip the matching N/A rows in `docs/C_API_REFERENCE.md` to "exported as no-op / thin wrapper" so the canonical doc stops contradicting the shim.
+
+**Likely area for the decode-behavior half:**
+
+- `crates/libjpeg-turbo-rs-capi/src/jpeglib.rs` (advance `cinfo->src->bytes_in_buffer` from `jpeg_finish_decompress`).
+- `tests/capi_pillow_compat.rs` (flip blocker code 3 from skip to hard fail once decode-behavior closes).
+- `examples/pillow_smoke/test_pillow.py`.
+
+**Acceptance:**
+
+```bash
+cargo test --test capi_pillow_compat -- --nocapture
+```
+
+`Image.open(...).load()` must complete without `OSError`, then encode and re-decode without `OSError`, and the round-trip PSNR @ q=90 must clear the script's 30 dB floor.
+
+### P0-4. Foreign Virtual Coefficient Arrays Are Rejected — **CLOSED**
+
+**Status (2026-04-28): closed for the functional path.** Stock `jpegtran -copy all <op>` is byte-exact against upstream on the 8-bit fixtures (`testimgari.jpg`, `testimgint.jpg`, `testorig.jpg`) for the **full transform/crop cross-product**: `-flip horizontal`, `-flip vertical`, `-rotate 90`, `-rotate 180`, `-rotate 270`, `-transpose`, `-transverse`, `-grayscale`, and `-crop` (origin and offset variants). All four `-copy` modes (`none`, `comments`, `icc`, `all`) are byte-exact too. The 12-bit fixture (`monkey12.jpg`) round-trips functionally: `examples/stock_djpeg_cjpeg/run.sh` reports `jpegtran monkey12 pass pixel_equal_dht_differs`.
+
+**12-bit close-out.** Surfaced `data_precision` through `JpegCoefficients` (`src/api/coefficient.rs`), made `read_coefficients` propagate `frame.precision`, and routed every encode-side SOF emission (inline in `write_coefficients` / `write_coefficients_optimized`, plus new `write_sof2_with_precision` / `write_sof9_with_precision` / `write_sof10_with_precision` helpers in `src/encode/marker_writer.rs`) through `JpegCoefficients::effective_precision()`. The non-optimised `write_coefficients` rejects `precision > 8` cleanly, and both the FFI dispatcher in `crates/libjpeg-turbo-rs-capi/src/jpeglib.rs::run_coefficient_writer_and_flush` *and* the Rust-API dispatcher in `transform_jpeg_with_options` force the optimised Huffman writer when `data_precision > 8`. The optimised writer's `gen_optimal_table` already supports the full 0..15 DC category range via `[u32; 257]` frequency tables, so 12-bit DC categories 12..15 encode correctly even though the legacy Annex K standard tables only cover 0..11.
+
+**Remaining gap closed (2026-04-28):** byte-exact 12-bit transcode against upstream `jpegtran -copy all <op>`. Initial diagnosis suspected DHT preservation, but the actual divergence was an empty `cinfo->marker_list` after `jpeg_read_header` — stock `transupp::jcopy_markers_execute` therefore had no source markers to forward, so the APP2/ICC chunk on `monkey12.jpg` silently disappeared. Fix: `jpeg_read_header` in the FFI shim now re-parses with the configured marker save list and threads a linked list of `JpegMarkerStructPublic` nodes (owned by `DecompressPrivate::marker_list_storage`) so stock `transupp` callers see the source's APP/COM markers exactly as upstream libjpeg-turbo allows.
+
+**Symptom (historical):** `jpeg_write_coefficients` accepts handles returned by this shim's `jpeg_read_coefficients`, but rejects foreign virtual barray handles:
+
+```text
+foreign virtual coefficient arrays ... are not yet supported
+```
+
+**Why this matters:** Stock `jpegtran` compiles `transupp.c` into the tool. It uses the destination `cinfo->mem` virtual-array API and passes the resulting arrays into `jpeg_write_coefficients`. A replacement shim must understand that pattern.
+
+**Important correction:** The memory manager is no longer absent. `jpeg_CreateDecompress` and `jpeg_CreateCompress` install `memmgr::create_memory_mgr()`. The `jcopy_markers_*` and `jtransform_*` helpers from `transupp.c` are *not* shim exports — `examples/stock_djpeg_cjpeg/build.sh:157-160` puts `transupp.c` directly into `JPEGTRAN_SRCS` so it is compiled into the `jpegtran` binary alongside `jpegtran.c`, the same way upstream does. `jpegtran` links cleanly today; the failure is at runtime when transupp's destination virt_barray reaches our `jpeg_write_coefficients`.
+
+The remaining gap is:
+
+1. **Foreign-handle materialization** — convert `jvirt_barray_ptr *` / `jvirt_sarray_ptr *` data (produced by transupp on the destination cinfo via `cinfo->mem->request_virt_barray` + `realize_virt_arrays`) into `JpegCoefficients`. `crates/libjpeg-turbo-rs-capi/src/jpeglib.rs:4376` (`if magic != CoefHandle::MAGIC { … "foreign virtual coefficient arrays … are not yet supported" }`) is the foreign-handle rejection point.
+2. **Any libjpeg API call from transupp.c not yet exported by the shim** — link succeeds today, but a transform-time `jpeg_*` call into the shim that hits an internal `unimplemented!` would surface as a runtime abort. Most likely candidates are `jpeg_alloc_huff_table` / `jpeg_alloc_quant_table` from `jcomapi.c`, which `docs/C_API_REFERENCE.md:205-206` currently classifies as *N/A (Rust value types)*. The N/A is correct for the Rust public API but wrong for a drop-in shim — fix the canonical doc when adding the export.
+
+**Likely area:**
+
+- `crates/libjpeg-turbo-rs-capi/src/jpeglib.rs`
+- `crates/libjpeg-turbo-rs-capi/src/memmgr.rs`
+- `examples/stock_djpeg_cjpeg/run.sh`
+
+**Acceptance:**
+
+```bash
+cargo build -p libjpeg-turbo-rs-capi --release
+bash examples/stock_djpeg_cjpeg/build.sh
+bash examples/stock_djpeg_cjpeg/run.sh
+```
+
+`jpegtran -copy all -rotate 90` is the smoke gate. Full pass: the TJXOP cross-product (rotate {90,180,270} × flip {h,v} × transpose × transverse × crop `WxH+X+Y`) × marker-copy mode (`all` / `comments` / `icc` / `none`) must produce `cmp -s` byte-identical output to upstream `jpegtran` on the upstream `testimages/*.jpg` corpus.
+
+### P1. Soft-Skip Compatibility Tests Hide Product Blockers — **CLOSED**
+
+**Status (2026-04-28): closed.** Every product-path soft-skip in the inventory is now a real failure path:
+
+- `tests/capi_pillow_compat.rs` already hard-panics on blocker code 3 (closed earlier under P0-3).
+- `tests/capi_stock_tool_link.rs::stock_tools_link_against_our_shim` is no longer `#[ignore]`d; it is the active drop-in gate.
+- `crates/libjpeg-turbo-rs-capi/tests/tjunittest_link.rs::tjunittest_default_suite_passes` has the stale `#[ignore]` removed; both tests in that file now route the cdylib through `cdylib_path_or_build()` so a stale `target/release/...` cannot satisfy the gate, and the prior soft-skip on missing cc / submodule / cdylib is a hard panic.
+- `crates/libjpeg-turbo-rs-capi/tests/capi_stock_djpeg_e2e.rs` deleted as a redundant duplicate of `tests/capi_stock_tool_link.rs::stock_tools_link_against_our_shim` — `examples/stock_djpeg_cjpeg/build.sh` already emits the `jversion.h` stub and `run.sh` already exercises the same testorig path.
+
+### P1. Legacy `tjLoadImage` / `tjSaveImage` Are Still Stubs — **CLOSED**
+
+**Status (2026-04-28): closed.** `crates/libjpeg-turbo-rs-capi/src/legacy.rs` now exports `tjLoadImage` / `tjSaveImage` with the **handle-less** ABI that upstream `turbojpeg.h` actually publishes (no `tjhandle` argument; `flags & TJFLAG_BOTTOMUP` propagates to `TJPARAM_BOTTOMUP` on a temporary handle that wraps the call). The TJ3 forms in `crates/libjpeg-turbo-rs-capi/src/imageio.rs::tj3LoadImage8` and `tj3SaveImage8` route through `libjpeg_turbo_rs::load_image_from_bytes` / `save_bmp` / `save_ppm` and honour:
+
+- BMP `TJPF_BGR` convention on load (R↔B swap when the file's native is `PixelFormat::Rgb`).
+- BMP alpha-strip on save (RGBX/BGRX/RGBA/BGRA/XRGB/XBGR/ARGB/ABGR → 3-bpp before `save_bmp`).
+- `TJPARAM_BOTTOMUP` on both load (post-decode flip) and save (pre-encode flip).
+- TJPF format negotiation (identity match plus RGB↔BGR swap; non-trivial conversions still return a descriptive error).
+
+`cargo test -p libjpeg-turbo-rs-capi --test legacy_aliases` passes 4/4 against the cdylib (`tj_load_image_reports_error_for_missing_file`, `tj_load_save_image_round_trip_ppm_through_legacy_alias`, plus `tjBufSize` and the init/destroy aliases).
+
+### P1. `TJPARAM_PRECISION` Is Not Fully Honored Through TJ3 Compress Entry Points — **CLOSED**
+
+**Status (2026-04-28): closed.** `TJPARAM_PRECISION` is now writable on the param store (the read-only flag was lifted in `crates/libjpeg-turbo-rs-capi/src/tj3.rs::is_read_only`) and each compress entry point validates / dispatches it:
+
+- `tj3Compress8` (`compress.rs::tj3Compress8`) — when `TJPARAM_LOSSLESS=1`, accepts precision in `2..=8`; routes to `compress_lossless_extended_precision` so the SOF byte reflects the requested precision.
+- `tj3Compress12` (`precision.rs::tj3Compress12`) — when `TJPARAM_LOSSLESS=1`, accepts precision in `9..=12` (default 12) and routes through a new `TjHandle::compress_12bit_with_precision`.
+- `tj3Compress16` (`precision.rs::tj3Compress16`) — same pattern for `13..=16` (default 16) via `compress_16bit_with_precision`.
+
+`crates/libjpeg-turbo-rs-capi/tests/precision.rs` now has three dlopen tests that assert the SOF precision byte in the encoded stream equals the requested `TJPARAM_PRECISION`:
+
+```text
+test tj3_compress8_lossless_precision4_writes_sof_byte_4   ... ok
+test tj3_compress12_lossless_precision10_writes_sof_byte_10 ... ok
+test tj3_compress16_lossless_precision14_writes_sof_byte_14 ... ok
+```
+
+### P1. Encode SIMD Performance Gap On x86_64 — **CLOSED**
+
+**Status (2026-04-30): closed.** Fresh x86_64 verification on i5-10400 (Intel Comet Lake, 6c/12t) shows every encode benchmark at or below the `Rust/C ≤ 1.05×` gate when the Rust crate is built with `RUSTFLAGS="-C target-cpu=native"` (or equivalent target-feature flags for `x86_64-v3`). Rust is in fact **faster than C libjpeg-turbo** on every case in the matrix:
+
+| Benchmark | Rust native (µs) | C native (µs) | Rust/C |
+|-----------|------------------|---------------|--------|
+| encode_320x240_420 | 380.9 | 403.0 | **0.94×** |
+| encode_320x240_422 | 473.8 | 508.3 | **0.93×** |
+| encode_320x240_444 | 708.9 | 764.1 | **0.93×** |
+| encode_640x480_422 | 1653.1 | 1730.5 | **0.96×** |
+| encode_640x480_444 | 2397.1 | 2558.1 | **0.94×** |
+| encode_1920x1080_420 | 10273 | 10474 | **0.98×** |
+| encode_1920x1080_422 | 12783 | 13082 | **0.98×** |
+| encode_1920x1080_444 | 19057 | 19873 | **0.96×** |
+
+Recorded in `experiments/encode.tsv` as the `main(target-cpu=native)` keep entry.
+
+**Default-x86_64 caveat (documented, not a blocker):** without `target-cpu=native` (i.e. SSE2-only baseline), the same matrix runs 5–10 pp slower than C at 1080p (e.g. 1080p_420 = 1.10×). The gap is *not* an algorithmic regression — both implementations execute the same SIMD strategy. The cause is purely build-time: LLVM cannot emit `TZCNT` / `LZCNT` / `BMI2` instructions for our scalar bitmap-iteration code without an explicit target feature, so it falls back to longer `BSF` / `BSR + correction` dependency chains in `encode_ac_x86_64`. The C reference's hot loops are hand-written NASM (`jchuff-sse2.asm`, `jdcolext-avx2.asm`, etc.), which embed those instructions directly into the shipped `libjpeg.so` regardless of how the consumer's C bench driver was compiled. Production Rust callers that want C-parity should set `RUSTFLAGS="-C target-cpu=native"` (best) or at minimum `target-feature=+bmi1,+lzcnt,+bmi2,+fma`. Two attempted source-level workarounds (32-pixel AVX2 deinterleave on `feat/encode-color-avx2-32pixel`; `lzcnt` bit-twiddle replacing the 64 KiB `JPEG_NBITS_CORRECTED` table on `feat/encode-ac-nbits-bittwiddle`) both regressed measurably and were discarded — see the corresponding `discard` entries in `experiments/encode.tsv` for full reasoning.
+
+Hotspots #3 (256-bit color load) and #4 (progressive Huffman SIMD) are documented below as still-open opportunities, but neither is required to close this gate.
+
+**Post-final-report progress (commits already in `main`):**
+
+| Commit | Date | Effect (per commit msg / `experiments/encode.tsv`) |
+|--------|------|----------------------------------------------------|
+| `1d2641c` | 2026-03-29 | Truly fused H2V2 downsample+FDCT+quantize (`avx2_downsample_h2v2_fdct_quantize`); closes hotspot #2. |
+| `c313fd9` (PR #109) | 2026-04-03 | MCU-level BitWriter hoisting + fused H2V1 (`avx2_downsample_h2v1_fdct_quantize`) + interior MCU fast-path. TSV iterations claim 1080p ratios drop to 1.03×–1.04× and 640x480 to 0.89×–0.99×. |
+| `9df31d4` | 2026-04-03 | Remove dense AC precompute path; sparse on-demand `lzcnt` is faster on x86_64. TSV: 1080p_444 → 1.03×. |
+| `ea0154b` | 2026-04-12 | Pre-downsample chroma for 420 encode; commit msg: 1080p_420 11,576 → 9,731 us (1.36× → 1.14× vs C). |
+| `1e7b8fa` | 2026-04-13 | SSE2 sign pre-computation matching upstream `jchuff-sse2.asm` design (interleaves `pcmpgtw + paddw` with bitmap construction); closes hotspot #1. |
+
+**Original symptom (historical baseline, `experiments/x86_64_avx2_final_report.md`, 2026-04-12, Intel i5-10400; predates `ea0154b` and `1e7b8fa`):**
+
+| Benchmark | Rust (us) | C (us) | Rust/C |
+|-----------|-----------|--------|--------|
+| encode_320x240_420 | 370.8 | 306.0 | 1.21× |
+| encode_640x480_422 | 1505.7 | 1293.9 | 1.16× |
+| encode_1920x1080_420 | 11575.6 | 8502.9 | **1.36×** |
+| encode_1920x1080_444 | 18033.8 | 15505.1 | 1.16× |
+
+**Why this matters:** the README + CLAUDE.md commit to "equivalent or better performance". A drop-in replacement that regresses encode latency by 36 % at 1080p_420 is not a credible drop-in for any caller that profiles encode time (server JPEG pipelines, transcoding services, mobile capture). NEON encode is already 0.89–0.93× C — the gap is x86_64-specific.
+
+**Identified hotspots — current state:**
+
+1. ~~**Huffman encode SIMD** (~15–25 % of encode time) — C ships `simd/x86_64/jchuff-sse2.asm`. We have no Rust SIMD port. Estimated to bring 1080p_420 from 1.36× → ~1.10× (highest impact).~~ **CLOSED** by `1e7b8fa` (SSE2 sign pre-computation, SSE2 bitmap via `pcmpeqw + packsswb + pmovmskb`, sparse-AC `lzcnt`, MCU-level BitWriter hoisting).
+2. ~~**H2V2 fused downsample+FDCT+quantize** — current AVX2 fused path covers H2V1 only.~~ **CLOSED** by `1d2641c` (`avx2_downsample_h2v2_fdct_quantize`) plus `c313fd9` (`avx2_downsample_h2v1_fdct_quantize` companion for 4:2:2).
+3. **256-bit input-color load** — open. Encode color path still drops to 128-bit SSSE3 deinterleave for RGBA/BGR/BGRA.
+4. **Progressive encode SIMD** — open. No Rust analogue of `jcphuff-sse2.asm`. Not counted in baseline `encode_*` benchmarks.
+
+**Acceptance:** every encode benchmark `Rust/C ≤ 1.05×`. Record the run in `experiments/encode.tsv` per the keep/discard/crash protocol in `experiments/README.md`. If any benchmark exceeds the gate, attack hotspot #3 or #4 above; otherwise mark this gap **CLOSED**. (Bench command in [reference_commands.md](reference_commands.md).)
+
+**Likely area:** `src/simd/x86_64/encode/`, `src/encode/huffman.rs`, `src/encode/pipeline.rs`. Reference SIMD: `references/libjpeg-turbo/simd/x86_64/jchuff-sse2.asm`, `jcsample-sse2.asm`, `jcsample-avx2.asm`, `jcphuff-sse2.asm`.
+
+**Why P1 not P0:** the release-gate doctrine puts correctness before performance. The four P0s above are the actual blockers. Encode perf is real, tracked, and the data is in hand — but it is not what currently keeps stock tools and Pillow from loading.
+
+### P1. Legacy `tjEncodeYUV3` / `tjDecodeYUV` Are Still Stubs — **CLOSED**
+
+**Status (2026-04-28): closed.** Both wrappers now forward to the TJ3 family (`tj3EncodeYUV8` / `tj3DecodeYUV8`) with the **upstream-correct** ABI:
+
+- 4th argument of `tjEncodeYUV3` is `pitch` (RGB row stride, `0` = tight `width * bpp`), not YUV alignment. Earlier rounds had this swapped — fixed in round-19 codex review.
+- Legacy `flags` are mapped to the corresponding `TJPARAM_*` on the caller's handle via `process_legacy_compress_flags` / `process_legacy_decompress_flags`, mirroring upstream `turbojpeg.c::processFlags`. Compress side propagates `TJFLAG_BOTTOMUP`, `TJFLAG_PROGRESSIVE`, `TJFLAG_FASTDCT`; decompress side propagates `TJFLAG_BOTTOMUP`, `TJFLAG_FASTUPSAMPLE`, `TJFLAG_FASTDCT`.
+
+End-to-end coverage in `cargo test -p libjpeg-turbo-rs-capi --release --test legacy_aliases`:
+
+- `tj_encode_decode_yuv_legacy_aliases_roundtrip_444` — RGB → packed YUV (4:4:4) → RGB round-trip with `pitch = 0` and `align = 1`. Max per-channel diff ≤ 8 (BT.601 conversion rounding only).
+- `tj_yuv_legacy_aliases_propagate_bottomup_flag` — explicitly verifies `TJFLAG_BOTTOMUP` lands on `TJPARAM_BOTTOMUP=1` after both `tjEncodeYUV3` and `tjDecodeYUV`.
+
+The module-level doc comment in `legacy.rs` was updated to match the actual behavior.
+
+### P2. Upstream `tjbench` / `rdjpgcom` / `wrjpgcom` Harness — **CLOSED**
+
+**Status (2026-04-29): closed.** `examples/stock_djpeg_cjpeg/build.sh` now compiles all six upstream tools (djpeg / cjpeg / jpegtran / **tjbench** / **rdjpgcom** / **wrjpgcom**) against our cdylib (tjbench links the `libturbojpeg.0` alias; rdjpgcom/wrjpgcom are standalone). Closing the missing TJ symbols required adding `tj3GetICCProfile`, `tj3SetICCProfile`, and `tj3TransformBufSize`. `run.sh` reports per-fixture `tjbench pass` (decompress benchmark runs end-to-end) and `comtools pass roundtrip` (wrjpgcom-inserted COM marker survives rdjpgcom read-back).
+
+**Acceptance:**
+
+```bash
+$OUT/tjbench testimages/testorig.jpg 95
+```
+
+Numbers within ±10 % of upstream `tjbench` on the same hardware.
+
+### P2. PNG Image I/O — **CLOSED**
+
+**Status (2026-04-29):** PNG support in `tj3LoadImage8` / `tj3SaveImage8` lands behind a `png` Cargo feature (off by default) on both root crate and `libjpeg-turbo-rs-capi`. `tj3LoadImage8` dispatches via 8-byte PNG signature; `tj3SaveImage8` dispatches by `.png` extension. Supports 8-bit RGB/RGBA/Grayscale; 16-bit and indexed-colour return `Unsupported`. When feature is off both functions return `"PNG support not enabled in this build"`. Five dlopen tests cover round-trips, PSNR, and the feature-gate error.
+
+---
+
+## Execution Plan (Original)
+
+The seven-task implementation plan that originally drove Phase 1 to closure. All tasks are complete; kept as a reference for the kind of step-by-step plan future phase work should produce.
+
+### Task 1: Make the Native Transform Matrix Green
+
+**Files:**
+
+- Modify: `tests/cross_product_transform.rs`
+- Modify: `src/api/coefficient.rs`
+- Modify as needed: `src/encode/arithmetic.rs`
+
+- [x] **Step 1: Reproduce the exact failure**
+
+```bash
+cargo test -p libjpeg-turbo-rs --test cross_product_transform tjtrantest_full_cross_product -- --exact
+```
+
+Expected: failure with `arithmetic DC overflow` decode failures.
+
+- [x] **Step 2: Add a narrow regression test** — `gray-rows-hflip`, arithmetic, no crop/optimize/progressive; `444-blocks-vflip`, arithmetic + progressive, restart-blocks, copy-all. Each calls `transform_jpeg_with_options`, then `decompress`, and asserts success.
+
+- [x] **Step 3: Compare with upstream** — generate the equivalent JPEG via upstream `jpegtran`, decode pixels with `djpeg`, assert byte equality where realistic else pixel equality.
+
+- [x] **Step 4: Fix the arithmetic/restart state bug.** Fix the general state transition. Do not special-case the failing test tuple.
+
+- [x] **Step 5–6: Run the full matrix and the workspace.**
+
+### Task 2: Convert Compatibility Blockers Into Hard Gates
+
+**Files:** `tests/capi_pillow_compat.rs`, `tests/capi_stock_tool_link.rs`, `crates/libjpeg-turbo-rs-capi/tests/tjunittest_link.rs`, optionally `capi_stock_djpeg_e2e.rs`.
+
+- [x] Unignore passing `tjunittest_default_suite_passes`.
+- [x] Make Pillow blocker code 3 a panic; keep code 2 as local-environment skip.
+- [x] Update stock-tool tests — assert build/run, drop "shim lacks classic jpeg API" expectation.
+- [x] Fix or retire duplicate broken harnesses (`capi_stock_djpeg_e2e.rs` deleted).
+
+### Task 3: Fix Stock `djpeg` Runtime Abort
+
+**Files:** `crates/libjpeg-turbo-rs-capi/src/jpeglib.rs`, `memmgr.rs`, `examples/stock_djpeg_cjpeg/run.sh`, `tests/capi_stock_tool_link.rs`.
+
+- [x] Preserve crash logs (`run.sh` now prints `djpeg_err_ours.log`).
+- [x] Reproduce with one image (`djpeg testorig.jpg`).
+- [x] Fix the C ABI state / memory-manager mismatch (general contract, not test-tuple patching).
+- [x] Pass the stock decode corpus.
+
+### Task 4: Implement High-Precision Raw-Data C ABI Symbols
+
+**Files:** `crates/libjpeg-turbo-rs-capi/src/jpeglib.rs`, `tests/capi_classic_decode_ext.rs`, `tests/capi_classic_raw_data.rs`, `tests/capi_pillow_compat.rs`.
+
+- [x] dlopen symbol tests (via `tests/capi_stock_tool_link.rs::shim_exports_classic_jpeg_api::required_p0_3`). Note: upstream `jpeglib.h` does not declare 16-bit raw-data entry points — only 8-bit and 12-bit.
+- [x] Implement minimal behavior; delegate to existing Rust raw-data APIs; fail through libjpeg error path on unsupported states.
+- [x] Re-run Pillow.
+
+### Task 5: Support Foreign Virtual Coefficient Arrays For `jpegtran`
+
+**Files:** `crates/libjpeg-turbo-rs-capi/src/jpeglib.rs`, `memmgr.rs`, `tests/capi_stock_tool_link.rs`, `examples/stock_djpeg_cjpeg/run.sh`.
+
+- [x] Failing stock `jpegtran` test (`-copy all -rotate 90` on testorig.jpg).
+- [x] Detect virtual barray handles vs `CoefHandle`.
+- [x] Materialize virtual arrays into `JpegCoefficients`; preserve dimensions, components, quant tables, colorspace, density, Adobe marker, restart interval, saved markers.
+- [x] Run stock `jpegtran` parity.
+
+### Task 6: Fill Legacy TurboJPEG Load/Save Aliases
+
+**Files:** `crates/libjpeg-turbo-rs-capi/src/legacy.rs`, `tests/legacy_aliases.rs`.
+
+- [x] Replace stub tests with real PPM/PGM/BMP load+save through the legacy ABI.
+- [x] Delegate to TJ3 implementations and map legacy flags to TJ3 parameters.
+- [x] Run C ABI tests.
+
+### Task 7: Wire `TJPARAM_PRECISION` Through TJ3 Compress
+
+**Files:** `crates/libjpeg-turbo-rs-capi/src/compress.rs`, `precision.rs`, `tests/precision.rs`.
+
+- [x] Failing dlopen tests for `tj3Compress8 + lossless + precision 4`, `tj3Compress12 + lossless + precision 10`, `tj3Compress16 + lossless + precision 14`.
+- [x] Implement upstream dispatch (only inside the allowed precision family, only when lossless).
+- [x] Cross-check by asserting the SOF precision byte.
+
+---
+
+## Definition Of Done
+
+A task is done only when:
+
+1. It has a focused regression test that would have failed before the change.
+2. It cross-validates against upstream C tools where a C tool path exists.
+3. It removes, rather than adds, skip/ignore behavior for product paths.
+4. It updates `docs/FEATURE_PARITY.md` and `docs/C_API_REFERENCE.md` if a canonical mapping changed.
+5. It leaves `cargo fmt --all`, `cargo clippy --lib -- -D warnings`, and the relevant `cargo test` command green.
+6. For non-trivial code changes, it passes the repository's required post-implementation review flow.
+
+---
+
+## Phase 1 Suggested Order (Historical)
+
+1. ~~Fix `cross_product_transform` so the workspace is green (P0-1).~~ **CLOSED 2026-04-28** — all 12 cases pass.
+2. ~~Harden gates by removing stale ignores and blocker-as-skip behavior (P1 Soft-Skip).~~ **CLOSED 2026-04-28** — every product-path ignore/skip is now a real failure path.
+3. ~~Fix stock `djpeg` aborts (P0-2).~~ **CLOSED 2026-04-28** — `run.sh` reports `OK all_byte_exact`.
+4. ~~Add high-precision raw-data symbols and make Pillow load (P0-3).~~ **CLOSED 2026-04-28** — Pillow round-trip @ q=90 PSNR 49.49 dB.
+5. ~~Implement virtual coefficient-array materialization (P0-4).~~ **CLOSED 2026-04-28** — full TJXOP + crop + `-copy` cross-product byte-exact for 8-bit fixtures; 12-bit transcode pixel-equal.
+5b. ~~Preserve source DHT in `JpegCoefficients` so 12-bit transcode can byte-match upstream `jpegtran`.~~ **CLOSED 2026-04-28** — root cause was *not* DHT regeneration. Actual divergence: `jpeg_read_header` in the FFI shim never populated `cinfo->marker_list`, so stock `transupp::jcopy_markers_execute` (used by `jpegtran -copy all`) found no source markers to forward and silently dropped the 3040-byte APP2/ICC chunk. Closure: `jpeg_read_header` now re-parses with the per-cinfo marker save list and threads `JpegMarkerStructPublic` nodes into `cinfo->marker_list`. `tests/transcode_12bit_byte_exact.rs` asserts byte-equality across `-rotate 90/180`, `-flip horizontal`, `-transpose`.
+6. ~~Fill legacy `tjLoadImage` / `tjSaveImage` and `tjEncodeYUV3` / `tjDecodeYUV`.~~ **CLOSED 2026-04-28**.
+7. ~~Wire arbitrary precision lossless through TJ3 compress.~~ **CLOSED 2026-04-28**.
+8. ~~Wire upstream `tjbench` / `rdjpgcom` / `wrjpgcom` against our shim.~~ **CLOSED 2026-04-29**.
+9. ~~Close the x86_64 encode SIMD gap until every encode benchmark `Rust/C ≤ 1.05×`.~~ **CLOSED 2026-04-30** — verified with `target-cpu=native`. Default-x86_64 builds (SSE2-only) trail by 5–10 pp at 1080p; build-flag recommendation, not a code defect.
+10. ~~PNG image I/O.~~ **CLOSED 2026-04-29** — `png` feature, off by default.
+
+The order was intentionally strict: replacement readiness should not optimise the encoder or add optional PNG support while stock tools abort and compatibility blockers are silently skipped. Encode perf stayed tracked but deferred; PNG stayed optional.
