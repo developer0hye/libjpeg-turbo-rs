@@ -948,7 +948,7 @@ fn pattern_3_source_suspension_returns_control_to_consumer() {
 // ---------- patterns #4-#8: tracked, deferred to follow-up commits ----------
 
 #[test]
-#[ignore = "P3-5 follow-up: destination suspension / partial flush"]
+#[ignore = "P3-5 follow-up: destination suspension (empty_output_buffer returns FALSE) — upstream supports this via partial-row return from jpeg_write_scanlines (jcapistd.c), but the standard mem/file destination mgrs never exercise it. Validating the shim's compress state-machine on FALSE return needs a focused investigation: where the resume point lives in the shim's encode pipeline, whether next_scanline rolls back correctly, and whether the consumer can re-call write_scanlines without losing rows. Defer to a separate PR."]
 fn pattern_4_destination_suspension_partial_flush() {}
 
 // ---------- pattern #5: jpeg_abort_decompress + reuse ----------
