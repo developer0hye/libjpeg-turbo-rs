@@ -1414,15 +1414,6 @@ fn pattern_7_buffered_image_multi_pass_progressive() {
 
 // ---------- pattern #8: setjmp/longjmp error cleanup with custom error_exit ----------
 
-// NOTE: pattern_8 is currently #[ignore]'d below — running it surfaces a
-// real shim bug (`jpeg_read_header` returns `JPEG_SUSPENDED` on
-// EOI-terminated malformed input instead of invoking `error_exit`,
-// breaking the canonical setjmp/longjmp pattern in libjpeg.txt §3).
-// The C harness below is preserved verbatim so the follow-up PR that
-// fixes the shim only needs to flip the `#[ignore]` attribute, not
-// re-author the test. Until that fix lands, the harness is dead code
-// — kept under `#[allow(dead_code)]` so clippy doesn't flag it.
-#[allow(dead_code)]
 const PATTERN_8_SETJMP_LONGJMP: &str = r#"
 #include <setjmp.h>
 
@@ -1504,7 +1495,6 @@ int main(void) {
 "#;
 
 #[test]
-#[ignore = "P3-5 follow-up: jpeg_read_header must invoke cinfo->err->error_exit on Decoder::new errors for EOI-terminated input — currently returns JPEG_SUSPENDED for both truncated and corrupt input, breaking the libjpeg.txt §3 setjmp/longjmp contract. Fix in a separate PR; harness is ready (PATTERN_8_SETJMP_LONGJMP) — flip this attribute when shim fix lands."]
 fn pattern_8_setjmp_longjmp_error_cleanup() {
     let c_src = format!("{C_PREAMBLE}\n{PATTERN_8_SETJMP_LONGJMP}");
     run_or_skip("lifecycle_setjmp_longjmp", &c_src);
