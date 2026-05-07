@@ -951,13 +951,287 @@ fn pattern_3_source_suspension_returns_control_to_consumer() {
 #[ignore = "P3-5 follow-up: destination suspension / partial flush"]
 fn pattern_4_destination_suspension_partial_flush() {}
 
-#[test]
-#[ignore = "P3-5 follow-up: jpeg_abort_decompress + reuse of same struct"]
-fn pattern_5_jpeg_abort_decompress_then_reuse() {}
+// ---------- pattern #5: jpeg_abort_decompress + reuse ----------
+
+const PATTERN_5_ABORT_DECOMPRESS_REUSE: &str = r#"
+extern void jpeg_abort_decompress(j_decompress_ptr cinfo);
+
+int main(void) {
+    /* Build two distinct JPEG fixtures so a stale state leak from
+     * decode #1 to decode #2 would surface as a pixel mismatch. */
+    unsigned char *src1 = NULL;
+    size_t jpeg1_size = 0;
+    unsigned char *jpeg1 = make_fixture(&jpeg1_size, &src1);
+    if (!jpeg1) { return 2; }
+
+    /* Make fixture #2 differ from #1 (invert R channel). */
+    unsigned char *src2 = (unsigned char *)malloc((size_t)FIX_W * FIX_H * FIX_BPP);
+    if (!src2) { tj3Free(jpeg1); free(src1); return 2; }
+    for (int i = 0; i < FIX_W * FIX_H; ++i) {
+        src2[i * FIX_BPP + 0] = (unsigned char)(255 - src1[i * FIX_BPP + 0]);
+        src2[i * FIX_BPP + 1] = src1[i * FIX_BPP + 1];
+        src2[i * FIX_BPP + 2] = src1[i * FIX_BPP + 2];
+    }
+    tjhandle enc = tj3Init(TJINIT_COMPRESS);
+    if (!enc) { free(src2); tj3Free(jpeg1); free(src1); return 2; }
+    tj3Set(enc, TJPARAM_QUALITY, 90);
+    tj3Set(enc, TJPARAM_SUBSAMP, TJSAMP_444);
+    unsigned char *jpeg2 = NULL;
+    size_t jpeg2_size = 0;
+    if (tj3Compress8(enc, src2, FIX_W, 0, FIX_H, TJPF_RGB, &jpeg2, &jpeg2_size) != 0) {
+        tj3Destroy(enc); free(src2); tj3Free(jpeg1); free(src1); return 2;
+    }
+    tj3Destroy(enc);
+
+    /* Reference decodes via fresh structs (known-good). */
+    unsigned char *ref1 = decode_via_mem_src(jpeg1, jpeg1_size);
+    unsigned char *ref2 = decode_via_mem_src(jpeg2, jpeg2_size);
+    if (!ref1 || !ref2) {
+        fprintf(stderr, "reference decode failed\n");
+        free(ref1); free(ref2); free(src2); tj3Free(jpeg2); tj3Free(jpeg1); free(src1);
+        return 3;
+    }
+
+    /* The classic-API reuse pattern: one cinfo struct decodes JPEG #1
+     * partially, gets aborted mid-decode, then is reused (without
+     * destroy + recreate) to decode JPEG #2 fully. The abort entry
+     * point is responsible for resetting any per-decode state so the
+     * next jpeg_read_header / jpeg_start_decompress sees a clean
+     * slate — that's the libjpeg.txt §3.3 contract. */
+    struct jpeg_decompress_struct cinfo;
+    struct jpeg_error_mgr jerr;
+    cinfo.err = jpeg_std_error(&jerr);
+    jpeg_create_decompress(&cinfo);
+
+    /* Decode #1 partially: read header + start + 1 scanline, then abort. */
+    jpeg_mem_src(&cinfo, jpeg1, jpeg1_size);
+    if (jpeg_read_header(&cinfo, TRUE) != JPEG_HEADER_OK) {
+        fprintf(stderr, "decode #1: jpeg_read_header failed\n");
+        free(ref1); free(ref2); free(src2); tj3Free(jpeg2); tj3Free(jpeg1); free(src1);
+        jpeg_destroy_decompress(&cinfo); return 4;
+    }
+    cinfo.out_color_space = JCS_RGB;
+    if (!jpeg_start_decompress(&cinfo)) {
+        fprintf(stderr, "decode #1: jpeg_start_decompress failed\n");
+        free(ref1); free(ref2); free(src2); tj3Free(jpeg2); tj3Free(jpeg1); free(src1);
+        jpeg_destroy_decompress(&cinfo); return 5;
+    }
+    int row_stride = cinfo.output_width * cinfo.output_components;
+    unsigned char throwaway[FIX_W * 3];
+    JSAMPROW throwaway_ptr = throwaway;
+    if (jpeg_read_scanlines(&cinfo, &throwaway_ptr, 1) != 1) {
+        fprintf(stderr, "decode #1: jpeg_read_scanlines failed\n");
+        free(ref1); free(ref2); free(src2); tj3Free(jpeg2); tj3Free(jpeg1); free(src1);
+        jpeg_destroy_decompress(&cinfo); return 6;
+    }
+    /* Abort mid-decode (without finishing). */
+    jpeg_abort_decompress(&cinfo);
+
+    /* Decode #2 fully via the reused struct. */
+    jpeg_mem_src(&cinfo, jpeg2, jpeg2_size);
+    if (jpeg_read_header(&cinfo, TRUE) != JPEG_HEADER_OK) {
+        fprintf(stderr, "decode #2: jpeg_read_header on reused struct failed\n");
+        free(ref1); free(ref2); free(src2); tj3Free(jpeg2); tj3Free(jpeg1); free(src1);
+        jpeg_destroy_decompress(&cinfo); return 7;
+    }
+    cinfo.out_color_space = JCS_RGB;
+    if (!jpeg_start_decompress(&cinfo)) {
+        fprintf(stderr, "decode #2: jpeg_start_decompress on reused struct failed\n");
+        free(ref1); free(ref2); free(src2); tj3Free(jpeg2); tj3Free(jpeg1); free(src1);
+        jpeg_destroy_decompress(&cinfo); return 8;
+    }
+    row_stride = cinfo.output_width * cinfo.output_components;
+    unsigned char *result2 = (unsigned char *)malloc((size_t)cinfo.output_height * row_stride);
+    if (!result2) {
+        free(ref1); free(ref2); free(src2); tj3Free(jpeg2); tj3Free(jpeg1); free(src1);
+        jpeg_destroy_decompress(&cinfo); return 9;
+    }
+    while (cinfo.output_scanline < cinfo.output_height) {
+        unsigned char *row_ptr = result2 + (size_t)cinfo.output_scanline * row_stride;
+        if (jpeg_read_scanlines(&cinfo, &row_ptr, 1) != 1) {
+            fprintf(stderr, "decode #2: jpeg_read_scanlines failed at row %u\n",
+                    (unsigned)cinfo.output_scanline);
+            free(result2); free(ref1); free(ref2); free(src2);
+            tj3Free(jpeg2); tj3Free(jpeg1); free(src1);
+            jpeg_destroy_decompress(&cinfo); return 10;
+        }
+    }
+    jpeg_finish_decompress(&cinfo);
+    jpeg_destroy_decompress(&cinfo);
+
+    /* Assert decode #2 produces the same pixels as a fresh-struct decode
+     * of jpeg2 — proves the abort cleared all state from decode #1. */
+    size_t pixel_bytes = (size_t)FIX_W * FIX_H * FIX_BPP;
+    if (memcmp(ref2, result2, pixel_bytes) != 0) {
+        size_t first_d = 0;
+        while (first_d < pixel_bytes && ref2[first_d] == result2[first_d]) first_d += 1;
+        fprintf(stderr,
+                "reused struct decode of jpeg2 differs from fresh-struct decode at byte %zu\n",
+                first_d);
+        free(result2); free(ref1); free(ref2); free(src2);
+        tj3Free(jpeg2); tj3Free(jpeg1); free(src1); return 11;
+    }
+
+    fprintf(stderr,
+            "OK abort_decompress_reuse: jpeg1=%zu B, jpeg2=%zu B, reused decode pixels match\n",
+            jpeg1_size, jpeg2_size);
+    free(result2); free(ref1); free(ref2); free(src2);
+    tj3Free(jpeg2); tj3Free(jpeg1); free(src1);
+    return 0;
+}
+"#;
 
 #[test]
-#[ignore = "P3-5 follow-up: jpeg_abort_compress + reuse"]
-fn pattern_6_jpeg_abort_compress_then_reuse() {}
+fn pattern_5_jpeg_abort_decompress_then_reuse() {
+    let c_src = format!("{C_PREAMBLE}\n{PATTERN_5_ABORT_DECOMPRESS_REUSE}");
+    run_or_skip("lifecycle_abort_decompress_reuse", &c_src);
+}
+
+// ---------- pattern #6: jpeg_abort_compress + reuse ----------
+
+const PATTERN_6_ABORT_COMPRESS_REUSE: &str = r#"
+extern void jpeg_abort_compress(j_compress_ptr cinfo);
+
+/* Encode the gradient via classic API into a freshly-allocated buffer.
+ * Caller must free the returned buffer. Returns NULL on failure. */
+static unsigned char *encode_via_classic(const unsigned char *src,
+                                          unsigned long *out_size) {
+    struct jpeg_compress_struct cinfo;
+    struct jpeg_error_mgr jerr;
+    cinfo.err = jpeg_std_error(&jerr);
+    jpeg_create_compress(&cinfo);
+    unsigned char *jpeg = NULL;
+    unsigned long jpeg_size = 0;
+    jpeg_mem_dest(&cinfo, &jpeg, &jpeg_size);
+    cinfo.image_width = FIX_W;
+    cinfo.image_height = FIX_H;
+    cinfo.input_components = FIX_BPP;
+    cinfo.in_color_space = JCS_RGB;
+    jpeg_set_defaults(&cinfo);
+    jpeg_set_quality(&cinfo, 90, TRUE);
+    jpeg_start_compress(&cinfo, TRUE);
+    int row_stride = FIX_W * FIX_BPP;
+    while (cinfo.next_scanline < cinfo.image_height) {
+        JSAMPROW row = (JSAMPROW)(src + (size_t)cinfo.next_scanline * row_stride);
+        if (jpeg_write_scanlines(&cinfo, &row, 1) != 1) {
+            jpeg_destroy_compress(&cinfo);
+            free(jpeg);
+            return NULL;
+        }
+    }
+    jpeg_finish_compress(&cinfo);
+    jpeg_destroy_compress(&cinfo);
+    *out_size = jpeg_size;
+    return jpeg;
+}
+
+int main(void) {
+    /* Build two distinct gradient sources. */
+    unsigned char *src1 = (unsigned char *)malloc((size_t)FIX_W * FIX_H * FIX_BPP);
+    unsigned char *src2 = (unsigned char *)malloc((size_t)FIX_W * FIX_H * FIX_BPP);
+    if (!src1 || !src2) { free(src1); free(src2); return 2; }
+    for (int y = 0; y < FIX_H; ++y) {
+        for (int x = 0; x < FIX_W; ++x) {
+            unsigned char *p1 = src1 + ((size_t)y * FIX_W + x) * FIX_BPP;
+            p1[0] = (unsigned char)((x * 255) / (FIX_W - 1));
+            p1[1] = (unsigned char)((y * 255) / (FIX_H - 1));
+            p1[2] = (unsigned char)(((x + y) * 255) / (FIX_W + FIX_H - 2));
+            unsigned char *p2 = src2 + ((size_t)y * FIX_W + x) * FIX_BPP;
+            p2[0] = (unsigned char)(255 - p1[0]);  /* differs from src1 */
+            p2[1] = p1[1];
+            p2[2] = p1[2];
+        }
+    }
+
+    /* Reference encode of src2 via fresh struct. */
+    unsigned long ref2_size = 0;
+    unsigned char *ref2 = encode_via_classic(src2, &ref2_size);
+    if (!ref2) {
+        fprintf(stderr, "reference encode failed\n");
+        free(src1); free(src2); return 3;
+    }
+
+    /* Reuse pattern: one cinfo struct encodes src1 partially, gets
+     * aborted, then is reused (without destroy + recreate) to encode
+     * src2 fully. The abort entry point is responsible for resetting
+     * per-encode state so the next jpeg_start_compress sees a clean
+     * slate (libjpeg.txt §3.3). */
+    struct jpeg_compress_struct cinfo;
+    struct jpeg_error_mgr jerr;
+    cinfo.err = jpeg_std_error(&jerr);
+    jpeg_create_compress(&cinfo);
+
+    /* Encode #1 partially: header + 1 scanline, then abort. */
+    unsigned char *partial_jpeg = NULL;
+    unsigned long partial_size = 0;
+    jpeg_mem_dest(&cinfo, &partial_jpeg, &partial_size);
+    cinfo.image_width = FIX_W;
+    cinfo.image_height = FIX_H;
+    cinfo.input_components = FIX_BPP;
+    cinfo.in_color_space = JCS_RGB;
+    jpeg_set_defaults(&cinfo);
+    jpeg_set_quality(&cinfo, 90, TRUE);
+    jpeg_start_compress(&cinfo, TRUE);
+    JSAMPROW row1 = (JSAMPROW)src1;
+    if (jpeg_write_scanlines(&cinfo, &row1, 1) != 1) {
+        fprintf(stderr, "encode #1: jpeg_write_scanlines failed\n");
+        free(partial_jpeg); free(ref2); free(src1); free(src2);
+        jpeg_destroy_compress(&cinfo); return 4;
+    }
+    /* Abort mid-encode (without finishing). */
+    jpeg_abort_compress(&cinfo);
+    free(partial_jpeg);  /* whatever the partial encode produced is discarded */
+
+    /* Encode src2 fully via the reused struct. */
+    unsigned char *result2 = NULL;
+    unsigned long result2_size = 0;
+    jpeg_mem_dest(&cinfo, &result2, &result2_size);
+    cinfo.image_width = FIX_W;
+    cinfo.image_height = FIX_H;
+    cinfo.input_components = FIX_BPP;
+    cinfo.in_color_space = JCS_RGB;
+    jpeg_set_defaults(&cinfo);
+    jpeg_set_quality(&cinfo, 90, TRUE);
+    jpeg_start_compress(&cinfo, TRUE);
+    int row_stride = FIX_W * FIX_BPP;
+    while (cinfo.next_scanline < cinfo.image_height) {
+        JSAMPROW row = (JSAMPROW)(src2 + (size_t)cinfo.next_scanline * row_stride);
+        if (jpeg_write_scanlines(&cinfo, &row, 1) != 1) {
+            fprintf(stderr, "encode #2 (reused struct): write_scanlines failed at row %u\n",
+                    (unsigned)cinfo.next_scanline);
+            free(result2); free(ref2); free(src1); free(src2);
+            jpeg_destroy_compress(&cinfo); return 5;
+        }
+    }
+    jpeg_finish_compress(&cinfo);
+    jpeg_destroy_compress(&cinfo);
+
+    /* Reused-struct encode of src2 must produce the same bytes as the
+     * fresh-struct encode — proves the abort cleared per-encode state. */
+    if (result2_size != ref2_size) {
+        fprintf(stderr, "size mismatch: ref2=%lu reused=%lu\n", ref2_size, result2_size);
+        free(result2); free(ref2); free(src1); free(src2); return 6;
+    }
+    if (memcmp(ref2, result2, ref2_size) != 0) {
+        size_t first_d = 0;
+        while (first_d < ref2_size && ref2[first_d] == result2[first_d]) first_d += 1;
+        fprintf(stderr, "byte mismatch at offset %zu\n", first_d);
+        free(result2); free(ref2); free(src1); free(src2); return 7;
+    }
+
+    fprintf(stderr,
+            "OK abort_compress_reuse: ref=%lu B, reused=%lu B, bytes match\n",
+            ref2_size, result2_size);
+    free(result2); free(ref2); free(src1); free(src2);
+    return 0;
+}
+"#;
+
+#[test]
+fn pattern_6_jpeg_abort_compress_then_reuse() {
+    let c_src = format!("{C_PREAMBLE}\n{PATTERN_6_ABORT_COMPRESS_REUSE}");
+    run_or_skip("lifecycle_abort_compress_reuse", &c_src);
+}
 
 // ---------- pattern #7: buffered-image multi-pass progressive ----------
 
