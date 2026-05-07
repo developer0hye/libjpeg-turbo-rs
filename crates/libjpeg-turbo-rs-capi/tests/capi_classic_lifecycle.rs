@@ -945,11 +945,276 @@ fn pattern_3_source_suspension_returns_control_to_consumer() {
     run_or_skip("lifecycle_source_suspension", &c_src);
 }
 
-// ---------- patterns #4-#8: tracked, deferred to follow-up commits ----------
+// ---------- pattern #4: destination suspension (empty_output_buffer returns FALSE) ----------
+
+const PATTERN_4_DESTINATION_SUSPENSION: &str = r#"
+/* libjpeg.txt §5.5 destination suspension: a custom dst mgr returns
+ * FALSE from empty_output_buffer to tell the encoder "I cannot accept
+ * more output right now." Upstream's contract honors that at the
+ * jpeg_write_scanlines boundary — the entropy coder's FALSE return
+ * unwinds up so the application sees a row count short of the
+ * requested rows and can retry after making room.
+ *
+ * The shim's deferred-encode architecture buffers all pixels in
+ * jpeg_write_scanlines and runs the entire encoder synchronously inside
+ * jpeg_finish_compress. By the time empty_output_buffer is invoked the
+ * full byte stream is already encoded, so there's nothing to "rewind"
+ * back to a row boundary; upstream-style streaming suspension cannot
+ * fire at the right place no matter what we do here.
+ *
+ * This test pins the architecturally-honest contract for the shim:
+ * when empty_output_buffer returns FALSE, the shim must (a) NOT
+ * silently drop the post-suspension bytes and call term_destination
+ * (the pre-fix defect this test originally surfaced), (b) NOT loop
+ * forever, (c) signal an unrecoverable error via cinfo->err->error_exit
+ * with msg_code = JERR_CANT_SUSPEND (upstream code 25 at
+ * JPEG_LIB_VERSION=80, exact message "Suspension not allowed here").
+ *
+ * A consumer using the documented setjmp/longjmp pattern can then
+ * recover and abort the cinfo cleanly — the same recovery flow tested
+ * for the decode side in pattern #8. */
+#include <setjmp.h>
+/* Custom destination manager that returns FALSE from
+ * empty_output_buffer on the (suspend_after+1)th call. The full window
+ * is collected on each successful flush, but on FALSE the shim must NOT
+ * call term_destination — it must invoke error_exit instead. */
+typedef struct {
+    struct jpeg_destination_mgr pub;
+    JOCTET window[64];
+    unsigned char *collected;
+    size_t collected_len;
+    size_t collected_cap;
+    int empty_calls;
+    int term_calls;
+    int suspend_after;        /* return FALSE on the (suspend_after+1)th call */
+    int suspend_returns;
+} suspend_dst_mgr;
+
+static void suspend_collect(suspend_dst_mgr *d, const JOCTET *src, size_t n) {
+    if (d->collected_len + n > d->collected_cap) {
+        size_t new_cap = d->collected_cap == 0 ? 1024 : d->collected_cap * 2;
+        while (new_cap < d->collected_len + n) new_cap *= 2;
+        unsigned char *grown = (unsigned char *)realloc(d->collected, new_cap);
+        if (!grown) { abort(); }
+        d->collected = grown;
+        d->collected_cap = new_cap;
+    }
+    memcpy(d->collected + d->collected_len, src, n);
+    d->collected_len += n;
+}
+
+static void suspend_init_destination(j_compress_ptr cinfo) {
+    suspend_dst_mgr *d = (suspend_dst_mgr *)cinfo->dest;
+    d->pub.next_output_byte = d->window;
+    d->pub.free_in_buffer = sizeof(d->window);
+}
+
+static boolean suspend_empty_output_buffer(j_compress_ptr cinfo) {
+    suspend_dst_mgr *d = (suspend_dst_mgr *)cinfo->dest;
+    d->empty_calls += 1;
+    if (d->empty_calls > d->suspend_after) {
+        d->suspend_returns += 1;
+        /* Per libjpeg.txt §5.5: when returning FALSE, do not modify
+         * next_output_byte or free_in_buffer. The bytes already in the
+         * window represent successful output; they're valid prefix. */
+        return FALSE;
+    }
+    suspend_collect(d, d->window, sizeof(d->window));
+    d->pub.next_output_byte = d->window;
+    d->pub.free_in_buffer = sizeof(d->window);
+    return TRUE;
+}
+
+static void suspend_term_destination(j_compress_ptr cinfo) {
+    suspend_dst_mgr *d = (suspend_dst_mgr *)cinfo->dest;
+    size_t used = sizeof(d->window) - d->pub.free_in_buffer;
+    if (used > 0) suspend_collect(d, d->window, used);
+    d->term_calls += 1;
+}
+
+static void install_suspend_dst(j_compress_ptr cinfo, suspend_dst_mgr *d, int suspend_after) {
+    d->pub.init_destination = suspend_init_destination;
+    d->pub.empty_output_buffer = suspend_empty_output_buffer;
+    d->pub.term_destination = suspend_term_destination;
+    d->collected = NULL;
+    d->collected_len = 0;
+    d->collected_cap = 0;
+    d->empty_calls = 0;
+    d->term_calls = 0;
+    d->suspend_after = suspend_after;
+    d->suspend_returns = 0;
+    cinfo->dest = (struct jpeg_destination_mgr *)d;
+}
+
+/* Setjmp-aware error manager: error_exit longjmps out so the consumer
+ * can recover from JERR_CANT_SUSPEND without aborting the process. */
+typedef struct {
+    struct jpeg_error_mgr pub;
+    jmp_buf jmp;
+    int error_calls;
+    int last_msg_code;
+} setjmp_err_mgr;
+
+static void setjmp_error_exit(j_common_ptr cinfo) {
+    setjmp_err_mgr *e = (setjmp_err_mgr *)cinfo->err;
+    e->error_calls += 1;
+    e->last_msg_code = cinfo->err->msg_code;
+    longjmp(e->jmp, 1);
+}
+
+/* Drive the encode using a setjmp-armed cinfo. Returns:
+ *   0  if encoding completed normally,
+ *   1  if error_exit longjmped out (the suspending case),
+ *  -1  on an unexpected encode failure that wasn't an error_exit. */
+static int encode_gradient_with_setjmp(struct jpeg_compress_struct *cinfo,
+                                        setjmp_err_mgr *e,
+                                        const unsigned char *src) {
+    if (setjmp(e->jmp) != 0) {
+        return 1;  /* longjmped out of error_exit */
+    }
+    cinfo->image_width = FIX_W;
+    cinfo->image_height = FIX_H;
+    cinfo->input_components = FIX_BPP;
+    cinfo->in_color_space = JCS_RGB;
+    jpeg_set_defaults(cinfo);
+    jpeg_set_quality(cinfo, 90, TRUE);
+    jpeg_start_compress(cinfo, TRUE);
+    int row_stride = FIX_W * FIX_BPP;
+    while (cinfo->next_scanline < cinfo->image_height) {
+        JSAMPROW row = (JSAMPROW)(src + (size_t)cinfo->next_scanline * row_stride);
+        if (jpeg_write_scanlines(cinfo, &row, 1) != 1) return -1;
+    }
+    jpeg_finish_compress(cinfo);
+    return 0;
+}
+
+int main(void) {
+    int w = FIX_W, h = FIX_H, bpp = FIX_BPP;
+    unsigned char *src = (unsigned char *)malloc((size_t)w * h * bpp);
+    if (!src) return 2;
+    for (int y = 0; y < h; ++y) {
+        for (int x = 0; x < w; ++x) {
+            unsigned char *p = src + ((size_t)y * w + x) * bpp;
+            p[0] = (unsigned char)((x * 255) / (w - 1));
+            p[1] = (unsigned char)((y * 255) / (h - 1));
+            p[2] = (unsigned char)(((x + y) * 255) / (w + h - 2));
+        }
+    }
+
+    /* Encode #1: baseline via jpeg_mem_dest. Used to confirm the
+     * partially-collected bytes from the suspended encode are a real
+     * prefix of an in-spec JPEG, not garbage. */
+    struct jpeg_compress_struct cinfo_a;
+    struct jpeg_error_mgr jerr_a;
+    cinfo_a.err = jpeg_std_error(&jerr_a);
+    jpeg_create_compress(&cinfo_a);
+    unsigned char *baseline_jpeg = NULL;
+    unsigned long baseline_size = 0;
+    jpeg_mem_dest(&cinfo_a, &baseline_jpeg, &baseline_size);
+    cinfo_a.image_width = FIX_W;
+    cinfo_a.image_height = FIX_H;
+    cinfo_a.input_components = FIX_BPP;
+    cinfo_a.in_color_space = JCS_RGB;
+    jpeg_set_defaults(&cinfo_a);
+    jpeg_set_quality(&cinfo_a, 90, TRUE);
+    jpeg_start_compress(&cinfo_a, TRUE);
+    int row_stride = FIX_W * FIX_BPP;
+    while (cinfo_a.next_scanline < cinfo_a.image_height) {
+        JSAMPROW row = (JSAMPROW)(src + (size_t)cinfo_a.next_scanline * row_stride);
+        if (jpeg_write_scanlines(&cinfo_a, &row, 1) != 1) {
+            fprintf(stderr, "baseline encode: write_scanlines failed\n");
+            free(src); return 3;
+        }
+    }
+    jpeg_finish_compress(&cinfo_a);
+    jpeg_destroy_compress(&cinfo_a);
+
+    /* Encode #2: variant via the suspending destination mgr + setjmp
+     * error mgr. The shim must invoke error_exit with msg_code =
+     * JERR_CANT_SUSPEND (= 25 at JPEG_LIB_VERSION=80). */
+    struct jpeg_compress_struct cinfo_b;
+    setjmp_err_mgr err_mgr;
+    suspend_dst_mgr dst_mgr;
+    cinfo_b.err = jpeg_std_error(&err_mgr.pub);
+    err_mgr.pub.error_exit = setjmp_error_exit;
+    err_mgr.error_calls = 0;
+    err_mgr.last_msg_code = -1;
+    jpeg_create_compress(&cinfo_b);
+    install_suspend_dst(&cinfo_b, &dst_mgr, /*suspend_after=*/2);
+
+    int rc = encode_gradient_with_setjmp(&cinfo_b, &err_mgr, src);
+    if (rc != 1) {
+        fprintf(stderr,
+                "expected error_exit longjmp (rc=1), got rc=%d — shim is silently "
+                "swallowing FALSE return from empty_output_buffer\n",
+                rc);
+        jpeg_destroy_compress(&cinfo_b);
+        free(dst_mgr.collected); free(baseline_jpeg); free(src); return 4;
+    }
+    if (err_mgr.error_calls != 1) {
+        fprintf(stderr,
+                "expected exactly 1 error_exit invocation, got %d\n",
+                err_mgr.error_calls);
+        jpeg_destroy_compress(&cinfo_b);
+        free(dst_mgr.collected); free(baseline_jpeg); free(src); return 5;
+    }
+    /* JERR_CANT_SUSPEND is the upstream code 25 at JPEG_LIB_VERSION=80
+     * (the version this shim mirrors). */
+    if (err_mgr.last_msg_code != 25) {
+        fprintf(stderr,
+                "expected msg_code = JERR_CANT_SUSPEND (= 25), got %d\n",
+                err_mgr.last_msg_code);
+        jpeg_destroy_compress(&cinfo_b);
+        free(dst_mgr.collected); free(baseline_jpeg); free(src); return 6;
+    }
+    if (dst_mgr.suspend_returns != 1) {
+        fprintf(stderr, "expected exactly 1 FALSE return, got %d\n",
+                dst_mgr.suspend_returns);
+        jpeg_destroy_compress(&cinfo_b);
+        free(dst_mgr.collected); free(baseline_jpeg); free(src); return 7;
+    }
+    if (dst_mgr.term_calls != 0) {
+        fprintf(stderr,
+                "term_destination fired %d time(s) on a suspended flush — "
+                "shim is finalising the stream prematurely\n",
+                dst_mgr.term_calls);
+        jpeg_destroy_compress(&cinfo_b);
+        free(dst_mgr.collected); free(baseline_jpeg); free(src); return 8;
+    }
+    /* The bytes already collected (from the empty_output_buffer calls
+     * that returned TRUE) must form a real prefix of the baseline. */
+    if (dst_mgr.collected_len > (size_t)baseline_size ||
+        (dst_mgr.collected_len > 0 &&
+         memcmp(baseline_jpeg, dst_mgr.collected, dst_mgr.collected_len) != 0)) {
+        fprintf(stderr,
+                "post-error_exit collected (%zu bytes) is not a prefix of baseline (%lu bytes)\n",
+                dst_mgr.collected_len, baseline_size);
+        jpeg_destroy_compress(&cinfo_b);
+        free(dst_mgr.collected); free(baseline_jpeg); free(src); return 9;
+    }
+
+    /* Recovery: a consumer that has handled the longjmp can call
+     * jpeg_abort_compress + jpeg_destroy_compress and reuse a fresh
+     * cinfo. We don't drive a full reuse path here because the reuse-
+     * after-abort cycle is already covered by pattern #6; this test's
+     * scope is the FALSE-return contract specifically. */
+    jpeg_destroy_compress(&cinfo_b);
+
+    fprintf(stderr,
+            "OK destination_suspension: error_exit fired with msg_code=%d, "
+            "empty_calls=%d, suspend_returns=%d, term_calls=%d, prefix matches baseline\n",
+            err_mgr.last_msg_code, dst_mgr.empty_calls, dst_mgr.suspend_returns,
+            dst_mgr.term_calls);
+    free(dst_mgr.collected); free(baseline_jpeg); free(src);
+    return 0;
+}
+"#;
 
 #[test]
-#[ignore = "P3-5 follow-up: destination suspension (empty_output_buffer returns FALSE) — upstream supports this via partial-row return from jpeg_write_scanlines (jcapistd.c), but the standard mem/file destination mgrs never exercise it. Validating the shim's compress state-machine on FALSE return needs a focused investigation: where the resume point lives in the shim's encode pipeline, whether next_scanline rolls back correctly, and whether the consumer can re-call write_scanlines without losing rows. Defer to a separate PR."]
-fn pattern_4_destination_suspension_partial_flush() {}
+fn pattern_4_destination_suspension_partial_flush() {
+    let c_src = format!("{C_PREAMBLE}\n{PATTERN_4_DESTINATION_SUSPENSION}");
+    run_or_skip("lifecycle_destination_suspension", &c_src);
+}
 
 // ---------- pattern #5: jpeg_abort_decompress + reuse ----------
 
