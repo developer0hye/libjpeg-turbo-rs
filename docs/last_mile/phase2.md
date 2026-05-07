@@ -15,7 +15,7 @@ External cross-check on 2026-05-04: the analysis "Rust app library = ready; syst
 - `c_tjcomptest_full` — flag removed when P2-11 closed (samp411/441/410/24 progressive parity).
 - `c_tjtrantest_full` — flag removed in this commit. Local run on aarch64 macOS reports `11190 tested, 17538 skipped, 0 failed` for the full transform matrix (grayscale and non-grayscale combos). The "Known failures: grayscale Huffman diff" annotation that the flag carried was stale — earlier work that fixed the underlying divergence never updated the CI flag.
 
-The `tests/c_tjtrantest.rs:537-543` source-level skip for `progressive + 4-pixel chroma + non-grayscale` is *kept on purpose*: that path goes through the **transform** writer (`src/api/coefficient.rs::write_coefficients_progressive`), not the encoder writer this session fixed. The transform path retains a `max_h <= 2 && max_v <= 2` filter at `coefficient.rs:1047` that silently falls back to baseline. Lifting that filter is tracked under [P3-4](phase3.md#p3-4-4-pixel-chroma-progressive-transform-writer-gate--open-root-cause-scoped-2026-05-07-full-fix-deferred).
+The `tests/c_tjtrantest.rs` source-level skip for `progressive + 4-pixel chroma + non-grayscale` was kept here as a Phase 2 follow-up. **Closed 2026-05-07** under [P3-4](phase3.md#p3-4-4-pixel-chroma-progressive-transform-writer-gate--closed-2026-05-07): the gate in `transform_jpeg_with_options::progressive_safe` was widened from `max_h ≤ 2 && max_v ≤ 2` to `max_{h,v} ∈ {1,2,4}` (the eight standard TJSAMP factors), and the source-level skip was deleted; full `c_tjtrantest_full` now runs 12,230 cases without divergence. Non-standard 3x sampling stays gated to baseline pending P3-6.
 
 **Risk note:** flag removal was based on aarch64 macOS local results. Linux x86_64 (the other workflow leg) has not been re-verified locally because we don't have a cross-builder. The workflow runs weekly on Mondays; if the next run reds, react then. Re-introducing the flag would be the wrong response: either the bytes match or the test is wrong; either way we want to see the actual failure, not silence it.
 
@@ -283,7 +283,7 @@ The earlier skip-comment claimed "1 LSB downsample diff, decoded pixels match" �
 
 **Fix:** drop the clamp, use `h_samp` / `v_samp` directly. The existing SIMD fast paths for `hf==2 && vf==1|2` still fire for 2-pixel factors; 4-pixel factors fall through to the scalar `downsample_chroma_block` which correctly mirrors C's `int_downsample` (`references/libjpeg-turbo/src/jcsample.c:153-191`).
 
-**Out of scope (separate gap):** the same `max_h <= 2 && max_v <= 2` gate in `src/api/coefficient.rs:1047` rejects 4-pixel factors from the **transform / jpegtran** progressive writer (different code path: `write_coefficients_progressive`, with extra dimension-swap interactions). Tracked under [P3-4](phase3.md#p3-4-4-pixel-chroma-progressive-transform-writer-gate--open-root-cause-scoped-2026-05-07-full-fix-deferred).
+**Out of scope (separate gap, since closed):** the same `max_h <= 2 && max_v <= 2` gate in `transform_jpeg_with_options::progressive_safe` previously rejected 4-pixel factors from the **transform / jpegtran** progressive writer. Closed 2026-05-07 under [P3-4](phase3.md#p3-4-4-pixel-chroma-progressive-transform-writer-gate--closed-2026-05-07) — gate widened to `max_{h,v} ∈ {1,2,4}` (the eight standard TJSAMP factors), regression pinned in `tests/regression_progressive_4pixel_chroma_transform.rs`.
 
 ---
 
