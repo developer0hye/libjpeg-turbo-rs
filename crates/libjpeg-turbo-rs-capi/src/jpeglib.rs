@@ -5331,37 +5331,46 @@ fn run_encoder_and_flush(c: &mut JpegCompressPublic, priv_state: &mut CompressPr
         )
     };
 
-    let encoded: Vec<u8> = match bytes_result {
-        Ok(b) => b,
-        Err(e) => {
-            priv_state.last_error =
-                CString::new(format!("jpeg_finish_compress: {e}")).unwrap_or_default();
-            return false;
-        }
-    };
-
-    // Inject application-supplied markers right after SOI (offset 2).
-    let with_markers: Vec<u8> =
-        if priv_state.pending_markers.is_empty() && priv_state.icc_profile.is_none() {
-            encoded
-        } else {
-            inject_markers_after_soi(&encoded, priv_state)
+    // Encode + marker injection + push live entirely inside this scope
+    // so the encoded `Vec`(s) drop on block exit. `raise_cant_suspend`
+    // (called below if the destination signalled suspension via
+    // `empty_output_buffer` returning `FALSE`) may `longjmp` past Rust
+    // destructors; if any heap-owning local is still alive at that
+    // call site, longjmp leaks it. Capture only the boolean status.
+    let push_status: Option<bool> = (|| -> Option<bool> {
+        let encoded: Vec<u8> = match bytes_result {
+            Ok(b) => b,
+            Err(e) => {
+                priv_state.last_error =
+                    CString::new(format!("jpeg_finish_compress: {e}")).unwrap_or_default();
+                return None;
+            }
         };
+        // Inject application-supplied markers right after SOI. The
+        // no-marker branch *moves* `encoded` into `with_markers`; the
+        // with-marker branch borrows `encoded`, so we explicitly drop
+        // it after the borrow ends.
+        let with_markers: Vec<u8> =
+            if priv_state.pending_markers.is_empty() && priv_state.icc_profile.is_none() {
+                encoded
+            } else {
+                let injected = inject_markers_after_soi(&encoded, priv_state);
+                drop(encoded);
+                injected
+            };
+        let ok = push_bytes_through_dest_mgr(c, priv_state, &with_markers);
+        drop(with_markers);
+        Some(ok)
+    })();
 
-    // Push the bytes through the destination manager by repeatedly
-    // filling the staging buffer and calling `empty_output_buffer`
-    // when it overflows, then `term_destination` at EOF. If the
-    // consumer signals suspension via FALSE return, drop the local
-    // encoded `Vec` BEFORE invoking `raise_cant_suspend` — the
-    // `error_exit` callback may `longjmp` and skip Rust destructors,
-    // which would leak this allocation.
-    let completed: bool = push_bytes_through_dest_mgr(c, priv_state, &with_markers);
-    drop(with_markers);
-    if !completed {
-        raise_cant_suspend(c, priv_state);
-        return false;
+    match push_status {
+        None => false,
+        Some(true) => true,
+        Some(false) => {
+            raise_cant_suspend(c, priv_state);
+            false
+        }
     }
-    true
 }
 
 /// Emit `encoded` JPEG bytes by writing into the destination manager's
@@ -6406,40 +6415,55 @@ fn run_raw_encoder_and_flush(c: &mut JpegCompressPublic, priv_state: &mut Compre
 
     let planes: Vec<&[u8]> = compact_planes.iter().map(|v| v.as_slice()).collect();
 
-    let result: Result<Vec<u8>, _> = libjpeg_turbo_rs::compress_raw(
-        &planes,
-        &logical_plane_widths,
-        &logical_plane_heights,
-        image_width,
-        image_height,
-        priv_state.quality,
-        subsampling,
-    );
+    // Encode + push live in this scope so all heap-owning locals
+    // (`compact_planes`, `planes`, `encoded`, `with_markers`) are
+    // dropped before any `raise_cant_suspend` that may `longjmp`.
+    let push_status: Option<bool> = (|| -> Option<bool> {
+        let result: Result<Vec<u8>, _> = libjpeg_turbo_rs::compress_raw(
+            &planes,
+            &logical_plane_widths,
+            &logical_plane_heights,
+            image_width,
+            image_height,
+            priv_state.quality,
+            subsampling,
+        );
 
-    let encoded: Vec<u8> = match result {
-        Ok(b) => b,
-        Err(e) => {
-            priv_state.last_error =
-                CString::new(format!("jpeg_finish_compress (raw): {e}")).unwrap_or_default();
-            return false;
-        }
-    };
-
-    // Inject any pending APPn / ICC markers.
-    let with_markers: Vec<u8> =
-        if priv_state.pending_markers.is_empty() && priv_state.icc_profile.is_none() {
-            encoded
-        } else {
-            inject_markers_after_soi(&encoded, priv_state)
+        let encoded: Vec<u8> = match result {
+            Ok(b) => b,
+            Err(e) => {
+                priv_state.last_error =
+                    CString::new(format!("jpeg_finish_compress (raw): {e}")).unwrap_or_default();
+                return None;
+            }
         };
 
-    let completed: bool = push_bytes_through_dest_mgr(c, priv_state, &with_markers);
-    drop(with_markers);
-    if !completed {
-        raise_cant_suspend(c, priv_state);
-        return false;
+        let with_markers: Vec<u8> =
+            if priv_state.pending_markers.is_empty() && priv_state.icc_profile.is_none() {
+                encoded
+            } else {
+                let injected = inject_markers_after_soi(&encoded, priv_state);
+                drop(encoded);
+                injected
+            };
+
+        let ok = push_bytes_through_dest_mgr(c, priv_state, &with_markers);
+        drop(with_markers);
+        Some(ok)
+    })();
+    drop(planes);
+    drop(compact_planes);
+    drop(logical_plane_heights);
+    drop(logical_plane_widths);
+
+    match push_status {
+        None => false,
+        Some(true) => true,
+        Some(false) => {
+            raise_cant_suspend(c, priv_state);
+            false
+        }
     }
-    true
 }
 
 /// `jpeg12_write_raw_data(cinfo, data, num_lines) -> JDIMENSION`.
@@ -7082,64 +7106,74 @@ fn run_coefficient_writer_and_flush(
     // stream. Mirrors the auto-promote in `jpeg_set_defaults` at the
     // top of this file.
     let force_optimize: bool = c.data_precision > 8;
-    let bytes_result: libjpeg_turbo_rs::Result<Vec<u8>> =
-        if c.progressive_mode != 0 && c.arith_code != 0 {
-            libjpeg_turbo_rs::write_coefficients_progressive_arithmetic(&adjusted, restart_rows)
-        } else if c.progressive_mode != 0 {
-            libjpeg_turbo_rs::write_coefficients_progressive(&adjusted, restart_rows)
-        } else if c.arith_code != 0 {
-            libjpeg_turbo_rs::write_coefficients_arithmetic(&adjusted)
-        } else if c.optimize_coding != 0 || force_optimize {
-            libjpeg_turbo_rs::write_coefficients_optimized(&adjusted)
-        } else {
-            libjpeg_turbo_rs::write_coefficients(&adjusted)
-        };
-    let encoded: Vec<u8> = match bytes_result {
-        Ok(b) => b,
-        Err(e) => {
-            priv_state.last_error =
-                CString::new(format!("jpeg_finish_compress: {e}")).unwrap_or_default();
-            return false;
-        }
-    };
-    // Adobe APP14 handling. Two cases:
-    //  * 4-component output (CMYK / YCCK): JPEG forbids JFIF APP0 on
-    //    4-component images. Strip JFIF and replace it with an Adobe
-    //    APP14. Transform byte: source `adobe_transform` first, then
-    //    destination `jpeg_color_space` (YCCK → 2 else 0).
-    //  * 3-component source with Adobe APP14: preserve the source
-    //    JFIF (if the writer emitted one) and inject the Adobe APP14
-    //    right after it. Both markers can legally co-exist on 3-comp
-    //    images and downstream decoders rely on each independently
-    //    (JFIF for density, APP14 for color transform classification).
-    let encoded: Vec<u8> = if adjusted.components.len() == 4 {
-        let transform: u8 = adjusted.adobe_transform.unwrap_or({
-            if c.jpeg_color_space == JCS_YCCK {
-                2
+    // Encode + push live in this scope so all heap-owning locals
+    // (`adjusted`, `encoded`, `with_markers`) are dropped before any
+    // `raise_cant_suspend` that may `longjmp` past Rust destructors.
+    let push_status: Option<bool> = (|| -> Option<bool> {
+        let bytes_result: libjpeg_turbo_rs::Result<Vec<u8>> =
+            if c.progressive_mode != 0 && c.arith_code != 0 {
+                libjpeg_turbo_rs::write_coefficients_progressive_arithmetic(&adjusted, restart_rows)
+            } else if c.progressive_mode != 0 {
+                libjpeg_turbo_rs::write_coefficients_progressive(&adjusted, restart_rows)
+            } else if c.arith_code != 0 {
+                libjpeg_turbo_rs::write_coefficients_arithmetic(&adjusted)
+            } else if c.optimize_coding != 0 || force_optimize {
+                libjpeg_turbo_rs::write_coefficients_optimized(&adjusted)
             } else {
-                0
+                libjpeg_turbo_rs::write_coefficients(&adjusted)
+            };
+        let raw_encoded: Vec<u8> = match bytes_result {
+            Ok(b) => b,
+            Err(e) => {
+                priv_state.last_error =
+                    CString::new(format!("jpeg_finish_compress: {e}")).unwrap_or_default();
+                return None;
             }
-        });
-        swap_jfif_for_adobe_app14(&encoded, transform)
-    } else if let Some(transform) = adjusted.adobe_transform {
-        inject_adobe_app14_after_jfif(&encoded, transform)
-    } else {
-        encoded
-    };
-    let with_markers: Vec<u8> =
-        if priv_state.pending_markers.is_empty() && priv_state.icc_profile.is_none() {
-            encoded
-        } else {
-            inject_markers_after_soi(&encoded, priv_state)
         };
-    let completed: bool = push_bytes_through_dest_mgr(c, priv_state, &with_markers);
-    drop(with_markers);
+        // Adobe APP14 handling — see the original comment block above
+        // the function: 4-component output strips JFIF and substitutes
+        // Adobe APP14; 3-component source with Adobe APP14 keeps both.
+        let with_app14: Vec<u8> = if adjusted.components.len() == 4 {
+            let transform: u8 = adjusted.adobe_transform.unwrap_or({
+                if c.jpeg_color_space == JCS_YCCK {
+                    2
+                } else {
+                    0
+                }
+            });
+            let r = swap_jfif_for_adobe_app14(&raw_encoded, transform);
+            drop(raw_encoded);
+            r
+        } else if let Some(transform) = adjusted.adobe_transform {
+            let r = inject_adobe_app14_after_jfif(&raw_encoded, transform);
+            drop(raw_encoded);
+            r
+        } else {
+            raw_encoded
+        };
+        let with_markers: Vec<u8> =
+            if priv_state.pending_markers.is_empty() && priv_state.icc_profile.is_none() {
+                with_app14
+            } else {
+                let r = inject_markers_after_soi(&with_app14, priv_state);
+                drop(with_app14);
+                r
+            };
+        let ok = push_bytes_through_dest_mgr(c, priv_state, &with_markers);
+        drop(with_markers);
+        Some(ok)
+    })();
+    drop(adjusted);
     priv_state.pending_coef_arrays = std::ptr::null();
-    if !completed {
-        raise_cant_suspend(c, priv_state);
-        return false;
+
+    match push_status {
+        None => false,
+        Some(true) => true,
+        Some(false) => {
+            raise_cant_suspend(c, priv_state);
+            false
+        }
     }
-    true
 }
 
 /// `jpeg_resync_to_restart(cinfo, desired) -> boolean`.
