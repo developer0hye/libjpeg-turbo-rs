@@ -1019,11 +1019,21 @@ pub fn transform_jpeg_with_options(data: &[u8], options: &TransformOptions) -> R
         coeffs.restart_interval = 0;
     }
 
-    // Write output with the appropriate encoding.
-    // C jpegtran -progressive implies -optimize (per-scan Huffman tables).
-    // Fall back to optimized baseline if data dimensions exceed MCU-padded
-    // block counts (can happen with unusual subsampling + dimension-swapping
-    // transforms).
+    // Write output with the appropriate encoding. C jpegtran -progressive
+    // implies -optimize (per-scan Huffman tables).
+    //
+    // The sampling-factor gate `max_{h,v} ∈ {1,2,4}` matches the eight standard
+    // TJSAMP factors (444/422/440/420/411/441/410/24) — the set verified by
+    // `tests/regression_progressive_4pixel_chroma_transform.rs` (P3-4 closure)
+    // and the full `c_tjtrantest_full` matrix. Non-standard 3x sampling
+    // (max_h or max_v = 3) is unverified against `jpegtran -progressive` and
+    // is tracked under P3-6; it falls back to optimized baseline until that
+    // entry closes.
+    //
+    // The `data_blocks_{x,y} ≤ comp.blocks_{x,y}` check guards malformed
+    // coefficient buffers where the stored block grid is smaller than the
+    // image dimensions imply — well-formed coefficients from
+    // `read_coefficients` always satisfy it.
     let progressive_safe: bool = options.progressive && {
         let max_h: usize = coeffs
             .components
@@ -1037,15 +1047,16 @@ pub fn transform_jpeg_with_options(data: &[u8], options: &TransformOptions) -> R
             .map(|c| c.v_sampling as usize)
             .max()
             .unwrap_or(1);
-        coeffs.components.iter().all(|comp| {
-            let dbx: usize = (coeffs.width as usize * comp.h_sampling as usize).div_ceil(max_h * 8);
-            let dby: usize =
-                (coeffs.height as usize * comp.v_sampling as usize).div_ceil(max_v * 8);
-            // Reject if data blocks exceed MCU-padded layout, or if unusual
-            // sampling factors (>2) create non-standard MCU patterns that the
-            // progressive writer doesn't handle after trim+rotation.
-            dbx <= comp.blocks_x && dby <= comp.blocks_y && max_h <= 2 && max_v <= 2
-        })
+        let standard_factors: bool =
+            max_h.is_power_of_two() && max_v.is_power_of_two() && max_h <= 4 && max_v <= 4;
+        standard_factors
+            && coeffs.components.iter().all(|comp| {
+                let dbx: usize =
+                    (coeffs.width as usize * comp.h_sampling as usize).div_ceil(max_h * 8);
+                let dby: usize =
+                    (coeffs.height as usize * comp.v_sampling as usize).div_ceil(max_v * 8);
+                dbx <= comp.blocks_x && dby <= comp.blocks_y
+            })
     };
     // 12-bit precision (e.g. `monkey12.jpg` transcode) MUST go through
     // the optimised Huffman writer — the non-optimised baseline path

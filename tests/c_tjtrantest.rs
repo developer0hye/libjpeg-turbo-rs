@@ -519,28 +519,6 @@ fn c_tjtrantest_full() {
                                         skipped += 1;
                                         continue;
                                     }
-                                    // Skip progressive + 4-pixel chroma
-                                    // sampling factors (samp411/441/410/24)
-                                    // when chroma is preserved. The
-                                    // progressive coefficient writer falls
-                                    // back to baseline for max_h/v > 2
-                                    // (`src/api/coefficient.rs:1047`),
-                                    // because our chroma layout for these
-                                    // factors differs from cjpeg by 1 LSB
-                                    // and cascades through per-scan
-                                    // optimised tables. Grayscale output
-                                    // drops chroma, so the fallback does
-                                    // not fire and progressive byte-parity
-                                    // still holds. Same scoped non-goal as
-                                    // `c_tjcomptest_lossy_full`
-                                    // (`tests/c_tjcomptest.rs:732`).
-                                    if progressive
-                                        && !grayscale
-                                        && matches!(subsamp_label, "411" | "441" | "410" | "24")
-                                    {
-                                        skipped += 1;
-                                        continue;
-                                    }
                                     for restart in
                                         [RestartArg::None, RestartArg::WithIcc, RestartArg::Bits]
                                     {
