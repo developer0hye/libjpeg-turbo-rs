@@ -14,7 +14,7 @@ For each item below, the **agreement** line states whether the gap is reproducib
 | P3-2 | PARTIAL (silent-zero stub eliminated; full backend deferred) |
 | P3-3 | CLOSED 2026-05-06 |
 | **P3-4** | **OPEN** (root cause scoped 2026-05-07; full fix deferred) |
-| **P3-5** | **OPEN** |
+| **P3-5** | **PARTIAL** (7/8 patterns landed; #4 destination suspension deferred) |
 | **P3-6** | **OPEN** (P2 priority — narrow consumer impact) |
 
 ---
@@ -170,9 +170,13 @@ The closure title reflects the actual delta: stub *semantics* moved from "silent
 
 ---
 
-## P3-5. Classic `jpeglib.h` Lifecycle / Custom-I/O / Suspension C Harness — **OPEN**
+## P3-5. Classic `jpeglib.h` Lifecycle / Custom-I/O / Suspension C Harness — **PARTIAL: 7/8 patterns landed; #4 destination suspension deferred**
 
-**Agreement:** verified open. The harnesses in `crates/libjpeg-turbo-rs-capi/tests/` cover Pillow / ImageMagick / libvips / FFmpeg / GD / SDL_image consumers and the raw-data symbol exports, but not the *classic state-machine* edge cases an arbitrary C consumer can construct. Specifically missing:
+**Status (2026-05-07): 7 of 8 patterns landed.** `crates/libjpeg-turbo-rs-capi/tests/capi_classic_lifecycle.rs` exercises patterns #1, #2, #3, #5, #6, #7, #8 against the cdylib via real C harnesses; `cargo test --release -p libjpeg-turbo-rs-capi --test capi_classic_lifecycle` reports `7 passed, 1 ignored, 0 failed`. The single deferred pattern (#4 destination suspension via `empty_output_buffer` returning `FALSE`) is annotated with the next-investigator scope-tracking note in the test file's `#[ignore]` reason.
+
+**Shim fix landed alongside pattern #8.** Pattern #8 surfaced a real shim defect: `jpeg_read_header` in `crates/libjpeg-turbo-rs-capi/src/jpeglib.rs` returned `JPEG_SUSPENDED` (= 0) on every `Decoder::new` rejection, conflating "input is incomplete (need more data)" with "input is syntactically complete but corrupt." The libjpeg.txt §3 contract is to invoke `cinfo->err->error_exit` for the second case so a `setjmp`/`longjmp` consumer can recover. Fix: a new `invoke_error_exit` helper that walks `cinfo->err` and dispatches `error_exit`, plus a guarded call site in `jpeg_read_header` that fires it only when the input bytes terminate in `FF D9` (a heuristic for "syntactically complete"). Truncated input still returns `JPEG_SUSPENDED`, preserving pattern #3's suspension semantics.
+
+**Agreement (historical, original gap):** verified open. The harnesses in `crates/libjpeg-turbo-rs-capi/tests/` cover Pillow / ImageMagick / libvips / FFmpeg / GD / SDL_image consumers and the raw-data symbol exports, but not the *classic state-machine* edge cases an arbitrary C consumer can construct. Specifically missing:
 
 1. Custom `jpeg_source_mgr` (callback-driven, small buffers).
 2. Custom `jpeg_destination_mgr` with `empty_output_buffer` flush stress.
@@ -210,7 +214,7 @@ The closure title reflects the actual delta: stub *semantics* moved from "silent
 1. ~~**P3-1** — Extend `tests/abi_offsets.rs` to `jpeg_compress_struct`, `jpeg_error_mgr`, `jpeg_source_mgr`, `jpeg_destination_mgr`.~~ **PARTIAL 2026-05-06** — five struct cross-checks now pass (`jpeg_decompress_struct` + four new ones); marker / virt_barray are deferred per their consumer-impact rationale.
 2. ~~**P3-3** — Implement the 19 legacy TurboJPEG aliases as forwarding wrappers and delete them from the allowlist.~~ **CLOSED 2026-05-06** — `crates/libjpeg-turbo-rs-capi/tests/symbol_inventory.rs::allowlisted_missing_symbols()` returns an empty `HashSet`; both `cdylib_exports_every_upstream_*` tests pass without exemptions. The wrappers live in `crates/libjpeg-turbo-rs-capi/src/legacy.rs` (~390 lines for the new section).
 3. ~~**P3-2** — Either implement `jpeg12_write_raw_data` / `jpeg12_read_raw_data` against the existing 12-bit encode/decode backend, or downgrade them to feature-gated absence. The "stub returning 0" middle ground must end.~~ **PARTIAL 2026-05-06** — middle ground eliminated: stubs now invoke `cinfo->err->error_exit(cinfo)` with `msg_code = JERR_NOTIMPL`, so callers either longjmp out cleanly or hit a default abort. Full 12-bit raw-data backend deferred to Phase 4 (gated on downstream demand).
-4. **P3-5** — Classic `jpeglib.h` lifecycle / custom-I/O / suspension C harness (≥ 8 tests). The most expensive item; defer until 1–3 are clean.
+4. ~~**P3-5** — Classic `jpeglib.h` lifecycle / custom-I/O / suspension C harness (≥ 8 tests).~~ **PARTIAL 2026-05-07** — 7/8 patterns landed in `crates/libjpeg-turbo-rs-capi/tests/capi_classic_lifecycle.rs` (custom src/dst mgr, source suspension, abort+reuse for both decompress/compress, buffered-image multi-pass, setjmp/longjmp). Pattern #4 destination suspension stays `#[ignore]`'d as a tracked follow-up (annotated with the next-investigator scope-tracking note). The setjmp/longjmp pattern also surfaced + fixed a real shim defect: `jpeg_read_header` now invokes `error_exit` on EOI-terminated malformed input (previously returned `JPEG_SUSPENDED` for both truncated AND corrupt input, breaking the libjpeg.txt §3 contract).
 5. **P3-4** — Lift the 4-pixel chroma transform writer gate; close the P2-12 follow-up. **Open (root cause scoped 2026-05-07)** — `tests/c_tjtrantest.rs:529-543` confirms the gate is masking a 1-LSB chroma layout drift in the transform path, not a redundant guard. The gate stays in place until the underlying drift in `src/transform/*` (block-reorder math) or `src/api/coefficient.rs::write_coefficients_progressive` (per-scan iMCU traversal) is fixed; the entry above documents next-session investigation start points.
 6. **P3-6** — Non-standard sampling / RGB565 merged-upsample minimum fixture set. P2 priority; do only if a downstream consumer requests it or after 1–5 are clean.
 
