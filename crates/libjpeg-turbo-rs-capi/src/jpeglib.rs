@@ -797,6 +797,40 @@ unsafe extern "C" fn default_output_message(_cinfo: *mut c_void) {
     // No-op by default — real libjpeg routes through stderr.
 }
 
+/// Invoke `cinfo->err->error_exit(cinfo)` with the given `msg_code`,
+/// mirroring upstream's `ERREXIT` macro family in `jerror.h`.
+///
+/// libjpeg's contract (libjpeg.txt §3) is that whenever the library
+/// detects an unrecoverable error during a public-API call (corrupt
+/// stream, bogus marker length, out-of-range parameter, …), it must
+/// route through `cinfo->err->error_exit(cinfo)`. Consumers override
+/// `error_exit` with a `setjmp`/`longjmp` handler so the call returns
+/// control to user code rather than aborting the process.
+///
+/// Most consumer overrides longjmp out and never return; this helper
+/// still returns cleanly if a custom handler does return (which
+/// violates the libjpeg contract, but defensive code is cheap), so the
+/// caller can fall through to its own error-return path.
+fn invoke_error_exit(cinfo: *mut c_void, msg_code: c_int) {
+    if cinfo.is_null() {
+        return;
+    }
+    // SAFETY: caller guarantees `cinfo` is a valid `j_common_ptr`-shaped
+    // struct whose first pointer-sized field is the `err` slot.
+    unsafe {
+        let err_pp: *const *mut JpegErrorMgr = cinfo as *const *mut JpegErrorMgr;
+        let err_ptr: *mut JpegErrorMgr = err_pp.read();
+        if err_ptr.is_null() {
+            return;
+        }
+        let err: &mut JpegErrorMgr = &mut *err_ptr;
+        err.msg_code = msg_code;
+        if let Some(exit) = err.error_exit {
+            exit(cinfo);
+        }
+    }
+}
+
 unsafe extern "C" fn default_format_message(cinfo: *mut c_void, buffer: *mut u8) {
     if buffer.is_null() {
         return;
@@ -1629,6 +1663,37 @@ pub extern "C" fn jpeg_read_header(cinfo: *mut c_void, _require_image: CBoolean)
         Err(e) => {
             priv_state.last_error =
                 CString::new(format!("jpeg_read_header: {e}")).unwrap_or_default();
+            // Distinguish "input is incomplete (need more data)" from
+            // "input is syntactically complete but corrupt." Bytes ending
+            // in EOI (FF D9) are syntactically complete, so a decoder
+            // error means real corruption — invoke the consumer's
+            // `error_exit` per the libjpeg.txt §3 contract so a
+            // setjmp/longjmp handler can recover. Bytes without EOI may
+            // still be truncated, so leave the existing JPEG_SUSPENDED
+            // semantics intact and let the consumer feed more.
+            //
+            // The `bytes.len() >= 4` guard avoids a false positive on
+            // tiny inputs whose entire content happens to look like
+            // `FF D9` — a real JPEG always has SOI (FF D8) before EOI.
+            let appears_complete: bool = bytes.len() >= 4
+                && bytes[bytes.len() - 2] == 0xFF
+                && bytes[bytes.len() - 1] == 0xD9;
+            if appears_complete {
+                // Code 12 maps to JERR_BAD_LENGTH in the upstream v8
+                // alphabetical enum (jerror.h, with JPEG_LIB_VERSION=80
+                // excluding JERR_ARITH_NOTIMPL). It's the closest fit
+                // for the most common decoder rejection cause (bogus
+                // marker length); other causes still land here with the
+                // same code, and the consumer's `format_message` looks
+                // up the description in the message table. Consumers
+                // that care about the specific cause read
+                // `priv_state.last_error` (already populated above).
+                invoke_error_exit(cinfo, 12);
+                // If a custom handler returns instead of longjmping
+                // (which violates the libjpeg contract), fall through
+                // to JPEG_SUSPENDED so the caller still sees a
+                // non-success return.
+            }
             return JPEG_SUSPENDED;
         }
     };
