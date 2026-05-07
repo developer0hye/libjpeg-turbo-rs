@@ -945,11 +945,313 @@ fn pattern_3_source_suspension_returns_control_to_consumer() {
     run_or_skip("lifecycle_source_suspension", &c_src);
 }
 
-// ---------- patterns #4-#8: tracked, deferred to follow-up commits ----------
+// ---------- pattern #4: destination suspension (empty_output_buffer returns FALSE) ----------
+
+const PATTERN_4_DESTINATION_SUSPENSION: &str = r#"
+/* Destination manager that returns FALSE from empty_output_buffer on
+ * the (suspend_after+1)th call, simulating "consumer's downstream sink
+ * is full — please pause." When the consumer later "makes room" (lifts
+ * the trigger and resets next_output_byte/free_in_buffer), a second
+ * jpeg_finish_compress call must drain the remaining encoded bytes
+ * exactly, with the total collected matching the jpeg_mem_dest baseline.
+ *
+ * Architectural note: the shim's jpeg_write_scanlines just buffers
+ * pixels; encoding + dest-mgr flushing happen entirely inside
+ * jpeg_finish_compress. So suspension can only fire during finish, not
+ * during write_scanlines as upstream's per-MCU streaming would. This
+ * test pins the resume contract for the boundary that is actually
+ * meaningful in the shim: empty_output_buffer FALSE during the
+ * post-encode flush. */
+typedef struct {
+    struct jpeg_destination_mgr pub;
+    JOCTET window[64];
+    unsigned char *collected;
+    size_t collected_len;
+    size_t collected_cap;
+    int empty_calls;
+    int term_calls;
+    int suspend_after;        /* return FALSE on the (suspend_after+1)th call */
+    int suspend_returns;      /* count of times we returned FALSE */
+} suspend_dst_mgr;
+
+static void suspend_collect(suspend_dst_mgr *d, const JOCTET *src, size_t n) {
+    if (d->collected_len + n > d->collected_cap) {
+        size_t new_cap = d->collected_cap == 0 ? 1024 : d->collected_cap * 2;
+        while (new_cap < d->collected_len + n) new_cap *= 2;
+        unsigned char *grown = (unsigned char *)realloc(d->collected, new_cap);
+        if (!grown) { abort(); }
+        d->collected = grown;
+        d->collected_cap = new_cap;
+    }
+    memcpy(d->collected + d->collected_len, src, n);
+    d->collected_len += n;
+}
+
+static void suspend_init_destination(j_compress_ptr cinfo) {
+    suspend_dst_mgr *d = (suspend_dst_mgr *)cinfo->dest;
+    d->pub.next_output_byte = d->window;
+    d->pub.free_in_buffer = sizeof(d->window);
+}
+
+static boolean suspend_empty_output_buffer(j_compress_ptr cinfo) {
+    suspend_dst_mgr *d = (suspend_dst_mgr *)cinfo->dest;
+    d->empty_calls += 1;
+    if (d->empty_calls > d->suspend_after) {
+        d->suspend_returns += 1;
+        /* Spec: when returning FALSE, leave next_output_byte /
+         * free_in_buffer at their current values so the data already
+         * placed in the window stays accessible to the consumer. The
+         * window holds genuine bytes (the fill loop has been writing
+         * into it); a real consumer would flush whatever bytes it has
+         * and reset before resuming. We DON'T flush here — that
+         * happens in main() after the suspend_after counter is lifted
+         * and we drive a second finish_compress call. */
+        return FALSE;
+    }
+    /* Normal flush: collect the full window and reset pointers per the
+     * upstream jdatadst.c::empty_output_buffer contract. */
+    suspend_collect(d, d->window, sizeof(d->window));
+    d->pub.next_output_byte = d->window;
+    d->pub.free_in_buffer = sizeof(d->window);
+    return TRUE;
+}
+
+static void suspend_term_destination(j_compress_ptr cinfo) {
+    suspend_dst_mgr *d = (suspend_dst_mgr *)cinfo->dest;
+    /* Flush the partially-filled remainder of the window. */
+    size_t used = sizeof(d->window) - d->pub.free_in_buffer;
+    if (used > 0) suspend_collect(d, d->window, used);
+    d->term_calls += 1;
+}
+
+static void install_suspend_dst(j_compress_ptr cinfo, suspend_dst_mgr *d, int suspend_after) {
+    d->pub.init_destination = suspend_init_destination;
+    d->pub.empty_output_buffer = suspend_empty_output_buffer;
+    d->pub.term_destination = suspend_term_destination;
+    d->collected = NULL;
+    d->collected_len = 0;
+    d->collected_cap = 0;
+    d->empty_calls = 0;
+    d->term_calls = 0;
+    d->suspend_after = suspend_after;
+    d->suspend_returns = 0;
+    cinfo->dest = (struct jpeg_destination_mgr *)d;
+}
+
+/* Drive the encode side using the same parameters as pattern #2. */
+static int encode_gradient(struct jpeg_compress_struct *cinfo,
+                           const unsigned char *src) {
+    cinfo->image_width = FIX_W;
+    cinfo->image_height = FIX_H;
+    cinfo->input_components = FIX_BPP;
+    cinfo->in_color_space = JCS_RGB;
+    jpeg_set_defaults(cinfo);
+    jpeg_set_quality(cinfo, 90, TRUE);
+    jpeg_start_compress(cinfo, TRUE);
+    int row_stride = FIX_W * FIX_BPP;
+    while (cinfo->next_scanline < cinfo->image_height) {
+        JSAMPROW row = (JSAMPROW)(src + (size_t)cinfo->next_scanline * row_stride);
+        if (jpeg_write_scanlines(cinfo, &row, 1) != 1) return -1;
+    }
+    jpeg_finish_compress(cinfo);
+    return 0;
+}
+
+int main(void) {
+    int w = FIX_W, h = FIX_H, bpp = FIX_BPP;
+    unsigned char *src = (unsigned char *)malloc((size_t)w * h * bpp);
+    if (!src) return 2;
+    for (int y = 0; y < h; ++y) {
+        for (int x = 0; x < w; ++x) {
+            unsigned char *p = src + ((size_t)y * w + x) * bpp;
+            p[0] = (unsigned char)((x * 255) / (w - 1));
+            p[1] = (unsigned char)((y * 255) / (h - 1));
+            p[2] = (unsigned char)(((x + y) * 255) / (w + h - 2));
+        }
+    }
+
+    /* Encode #1: baseline via jpeg_mem_dest. */
+    struct jpeg_compress_struct cinfo_a;
+    struct jpeg_error_mgr jerr_a;
+    cinfo_a.err = jpeg_std_error(&jerr_a);
+    jpeg_create_compress(&cinfo_a);
+    unsigned char *baseline_jpeg = NULL;
+    unsigned long baseline_size = 0;
+    jpeg_mem_dest(&cinfo_a, &baseline_jpeg, &baseline_size);
+    if (encode_gradient(&cinfo_a, src) != 0) {
+        fprintf(stderr, "baseline encode failed\n");
+        free(src); return 3;
+    }
+    jpeg_destroy_compress(&cinfo_a);
+
+    /* Encode #2: variant via the suspending destination mgr. We
+     * configure it to suspend after 2 successful empty_output_buffer
+     * flushes so the test exercises:
+     *   - at least 2 normal empty_output_buffer roundtrips, and
+     *   - exactly 1 FALSE return that the shim must honor.
+     * For a 64-byte window over a >>192-byte JPEG this leaves a
+     * non-trivial unwritten tail to drain on resume. */
+    struct jpeg_compress_struct cinfo_b;
+    struct jpeg_error_mgr jerr_b;
+    suspend_dst_mgr dst_mgr;
+    cinfo_b.err = jpeg_std_error(&jerr_b);
+    jpeg_create_compress(&cinfo_b);
+    install_suspend_dst(&cinfo_b, &dst_mgr, /*suspend_after=*/2);
+
+    /* Run the encode. The first finish_compress call should suspend
+     * mid-flush (return cleanly without invoking term_destination). */
+    if (encode_gradient(&cinfo_b, src) != 0) {
+        fprintf(stderr, "variant encode failed\n");
+        free(dst_mgr.collected); free(baseline_jpeg); free(src); return 4;
+    }
+
+    /* Post-suspension state assertions. */
+    if (dst_mgr.empty_calls != dst_mgr.suspend_after + 1) {
+        fprintf(stderr,
+                "expected empty_calls = suspend_after + 1 (= %d), got %d\n",
+                dst_mgr.suspend_after + 1, dst_mgr.empty_calls);
+        jpeg_destroy_compress(&cinfo_b);
+        free(dst_mgr.collected); free(baseline_jpeg); free(src); return 5;
+    }
+    if (dst_mgr.suspend_returns != 1) {
+        fprintf(stderr, "expected exactly 1 FALSE return, got %d\n",
+                dst_mgr.suspend_returns);
+        jpeg_destroy_compress(&cinfo_b);
+        free(dst_mgr.collected); free(baseline_jpeg); free(src); return 6;
+    }
+    if (dst_mgr.term_calls != 0) {
+        fprintf(stderr,
+                "term_destination fired %d time(s) during a suspended flush — "
+                "shim is finalising the stream prematurely\n",
+                dst_mgr.term_calls);
+        jpeg_destroy_compress(&cinfo_b);
+        free(dst_mgr.collected); free(baseline_jpeg); free(src); return 7;
+    }
+    /* The bytes already collected so far must form a prefix of the
+     * baseline output — anything else means the suspension corrupted
+     * the partial state. */
+    if (dst_mgr.collected_len > (size_t)baseline_size ||
+        memcmp(baseline_jpeg, dst_mgr.collected, dst_mgr.collected_len) != 0) {
+        fprintf(stderr,
+                "post-suspend collected (%zu bytes) is not a prefix of baseline (%lu bytes)\n",
+                dst_mgr.collected_len, baseline_size);
+        jpeg_destroy_compress(&cinfo_b);
+        free(dst_mgr.collected); free(baseline_jpeg); free(src); return 8;
+    }
+
+    /* "Consumer makes room": flush whatever the window currently holds
+     * (it's full from the empty_output_buffer call that returned
+     * FALSE), reset pointers, lift the suspend trigger so subsequent
+     * empty_output_buffer calls return TRUE and resume normal flushing. */
+    suspend_collect(&dst_mgr, dst_mgr.window, sizeof(dst_mgr.window));
+    dst_mgr.pub.next_output_byte = dst_mgr.window;
+    dst_mgr.pub.free_in_buffer = sizeof(dst_mgr.window);
+    /* Lift the trigger so future empty_output_buffer calls return TRUE. */
+    dst_mgr.suspend_after = 1 << 30;
+
+    /* Resume: a second jpeg_finish_compress call must drain the
+     * stashed tail and call term_destination exactly once. */
+    jpeg_finish_compress(&cinfo_b);
+    jpeg_destroy_compress(&cinfo_b);
+
+    if (dst_mgr.term_calls != 1) {
+        fprintf(stderr,
+                "after resume, term_destination fired %d time(s); expected exactly 1\n",
+                dst_mgr.term_calls);
+        free(dst_mgr.collected); free(baseline_jpeg); free(src); return 9;
+    }
+    if (dst_mgr.suspend_returns != 1) {
+        fprintf(stderr,
+                "suspend_returns drifted to %d during resume — drain is re-suspending\n",
+                dst_mgr.suspend_returns);
+        free(dst_mgr.collected); free(baseline_jpeg); free(src); return 10;
+    }
+    if (dst_mgr.collected_len != (size_t)baseline_size) {
+        fprintf(stderr,
+                "size mismatch after resume: baseline=%lu collected=%zu\n",
+                baseline_size, dst_mgr.collected_len);
+        free(dst_mgr.collected); free(baseline_jpeg); free(src); return 11;
+    }
+    if (memcmp(baseline_jpeg, dst_mgr.collected, dst_mgr.collected_len) != 0) {
+        size_t first_d = 0;
+        while (first_d < dst_mgr.collected_len &&
+               baseline_jpeg[first_d] == dst_mgr.collected[first_d]) {
+            first_d += 1;
+        }
+        fprintf(stderr, "byte mismatch at offset %zu after resume\n", first_d);
+        free(dst_mgr.collected); free(baseline_jpeg); free(src); return 12;
+    }
+
+    /* Reuse-after-suspend hazard: a consumer that suspends then aborts
+     * the cinfo and reuses it for a fresh image must NOT see the prior
+     * image's stashed tail flushed into the new destination. Drive this
+     * path with a second compress that starts from a clean slate. */
+    struct jpeg_compress_struct cinfo_c;
+    struct jpeg_error_mgr jerr_c;
+    suspend_dst_mgr dst_mgr_c;
+    cinfo_c.err = jpeg_std_error(&jerr_c);
+    jpeg_create_compress(&cinfo_c);
+    /* Drive a fresh suspension then abort BEFORE resuming. */
+    install_suspend_dst(&cinfo_c, &dst_mgr_c, /*suspend_after=*/1);
+    if (encode_gradient(&cinfo_c, src) != 0) {
+        fprintf(stderr, "reuse-hazard: first encode failed\n");
+        jpeg_destroy_compress(&cinfo_c);
+        free(dst_mgr_c.collected); free(dst_mgr.collected); free(baseline_jpeg);
+        free(src); return 13;
+    }
+    if (dst_mgr_c.suspend_returns != 1 || dst_mgr_c.term_calls != 0) {
+        fprintf(stderr,
+                "reuse-hazard: setup pre-condition mismatch (suspend_returns=%d term_calls=%d)\n",
+                dst_mgr_c.suspend_returns, dst_mgr_c.term_calls);
+        jpeg_destroy_compress(&cinfo_c);
+        free(dst_mgr_c.collected); free(dst_mgr.collected); free(baseline_jpeg);
+        free(src); return 14;
+    }
+    /* Abort + reuse: install a brand-new destination mgr that NEVER
+     * suspends. If the shim's previous tail is still pending, the new
+     * encode's first finish_compress would route the previous image's
+     * bytes here. */
+    jpeg_abort_compress(&cinfo_c);
+    suspend_dst_mgr dst_mgr_d;
+    install_suspend_dst(&cinfo_c, &dst_mgr_d, /*suspend_after=*/1 << 30);
+    if (encode_gradient(&cinfo_c, src) != 0) {
+        fprintf(stderr, "reuse-hazard: second encode failed\n");
+        jpeg_destroy_compress(&cinfo_c);
+        free(dst_mgr_d.collected); free(dst_mgr_c.collected);
+        free(dst_mgr.collected); free(baseline_jpeg); free(src);
+        return 15;
+    }
+    /* The reused encode must produce the same byte stream as the
+     * baseline (independent of the prior aborted run). */
+    if (dst_mgr_d.collected_len != (size_t)baseline_size ||
+        memcmp(baseline_jpeg, dst_mgr_d.collected, dst_mgr_d.collected_len) != 0) {
+        fprintf(stderr,
+                "reuse-hazard: post-abort encode bytes diverge from baseline "
+                "(len=%zu vs %lu) — stale pending_flush_tail leaked across reuse\n",
+                dst_mgr_d.collected_len, baseline_size);
+        jpeg_destroy_compress(&cinfo_c);
+        free(dst_mgr_d.collected); free(dst_mgr_c.collected);
+        free(dst_mgr.collected); free(baseline_jpeg); free(src);
+        return 16;
+    }
+    jpeg_destroy_compress(&cinfo_c);
+
+    fprintf(stderr,
+            "OK destination_suspension: %lu-byte JPEG, empty_calls=%d, "
+            "suspend_returns=%d, term_calls=%d, reuse-hazard clean, bytes match\n",
+            baseline_size, dst_mgr.empty_calls, dst_mgr.suspend_returns,
+            dst_mgr.term_calls);
+    free(dst_mgr_d.collected); free(dst_mgr_c.collected);
+    free(dst_mgr.collected); free(baseline_jpeg); free(src);
+    return 0;
+}
+"#;
 
 #[test]
-#[ignore = "P3-5 follow-up: destination suspension (empty_output_buffer returns FALSE) — upstream supports this via partial-row return from jpeg_write_scanlines (jcapistd.c), but the standard mem/file destination mgrs never exercise it. Validating the shim's compress state-machine on FALSE return needs a focused investigation: where the resume point lives in the shim's encode pipeline, whether next_scanline rolls back correctly, and whether the consumer can re-call write_scanlines without losing rows. Defer to a separate PR."]
-fn pattern_4_destination_suspension_partial_flush() {}
+fn pattern_4_destination_suspension_partial_flush() {
+    let c_src = format!("{C_PREAMBLE}\n{PATTERN_4_DESTINATION_SUSPENSION}");
+    run_or_skip("lifecycle_destination_suspension", &c_src);
+}
 
 // ---------- pattern #5: jpeg_abort_decompress + reuse ----------
 

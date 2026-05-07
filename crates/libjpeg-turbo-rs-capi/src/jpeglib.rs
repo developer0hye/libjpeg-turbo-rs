@@ -3940,6 +3940,12 @@ pub extern "C" fn jpeg_abort_compress(cinfo: *mut c_void) {
         // still inject the aborted image's APP2 ICC chunks.
         p.icc_profile = None;
         p.pending_coef_arrays = std::ptr::null();
+        // Drop any encoded tail left over from a destination-suspended
+        // `jpeg_finish_compress`. Without this clear, an aborted-then-
+        // reused cinfo would resume by flushing the previous image's
+        // bytes to the new image's destination manager — caught by the
+        // reuse-hazard branch in `pattern_4_destination_suspension_partial_flush`.
+        p.pending_flush_tail.clear();
     }
     c.global_state = CSTATE_START;
     c.next_scanline = 0;
@@ -4493,6 +4499,12 @@ struct CompressPrivate {
     raw_plane_widths: Vec<usize>,
     /// MCU-aligned height of each raw plane (total rows in buffer).
     raw_plane_heights: Vec<usize>,
+    /// Encoded bytes that haven't yet been pushed to the destination manager,
+    /// retained when `empty_output_buffer` returned `FALSE` (destination
+    /// suspension per libjpeg.txt §5.5). A subsequent call to
+    /// `jpeg_finish_compress` resumes by draining this buffer instead of
+    /// re-running the encoder. Empty in steady state.
+    pending_flush_tail: Vec<u8>,
 }
 
 impl Default for CompressPrivate {
@@ -4522,6 +4534,7 @@ impl Default for CompressPrivate {
             raw_rows_filled: Vec::new(),
             raw_plane_widths: Vec::new(),
             raw_plane_heights: Vec::new(),
+            pending_flush_tail: Vec::new(),
         }
     }
 }
@@ -5199,6 +5212,12 @@ pub extern "C" fn jpeg_start_compress(cinfo: *mut c_void, _write_all_tables: CBo
     priv_state.raw_rows_filled.clear();
     priv_state.raw_plane_widths.clear();
     priv_state.raw_plane_heights.clear();
+    // Drop any encoded tail left over from a previous destination-suspended
+    // run that the consumer never resumed (and that wasn't routed through
+    // `jpeg_abort_compress`). Without this clear, the new image's
+    // `jpeg_finish_compress` would short-circuit into the resume branch
+    // and flush the previous image's bytes to the new destination.
+    priv_state.pending_flush_tail.clear();
     priv_state.have_started = true;
     priv_state.tables_only = false;
 
@@ -5358,33 +5377,50 @@ fn run_encoder_and_flush(c: &mut JpegCompressPublic, priv_state: &mut CompressPr
 /// Emit `encoded` JPEG bytes by writing into the destination manager's
 /// `next_output_byte` buffer, invoking `empty_output_buffer` whenever
 /// the staging buffer fills.
+///
+/// Returns `true` on completion (`term_destination` invoked). Returns
+/// `false` when the destination manager returned `FALSE` from
+/// `empty_output_buffer` (libjpeg.txt §5.5 destination suspension): the
+/// remaining bytes are stashed in `priv_state.pending_flush_tail` and
+/// `term_destination` is *not* called, so the consumer can make room
+/// and resume by re-entering `jpeg_finish_compress`.
 fn push_bytes_through_dest_mgr(
     c: &mut JpegCompressPublic,
     priv_state: &mut CompressPrivate,
     encoded: &[u8],
-) {
+) -> bool {
     if c.dest.is_null() {
-        return;
+        priv_state.pending_flush_tail.clear();
+        return true;
     }
     let mut offset: usize = 0;
     while offset < encoded.len() {
-        // Refill staging if empty.
-        let mut need_refill: bool = false;
-        {
+        // Refill staging if empty. The first chunk relies on the caller's
+        // earlier `init_destination`; subsequent chunks need
+        // `empty_output_buffer`. If that callback returns FALSE the
+        // consumer is signalling I/O suspension — bail out cleanly.
+        let need_refill: bool = {
             let dest: &JpegDestinationMgr = unsafe { &*c.dest };
-            if dest.free_in_buffer == 0 || dest.next_output_byte.is_null() {
-                need_refill = true;
-            }
-        }
+            dest.free_in_buffer == 0 || dest.next_output_byte.is_null()
+        };
         if need_refill {
-            // First chunk: rely on caller's init_destination having
-            // happened earlier; subsequent chunks need empty_output.
             let empty_fn: Option<unsafe extern "C" fn(*mut c_void) -> CBoolean> =
                 unsafe { (*c.dest).empty_output_buffer };
             if let Some(f) = empty_fn {
-                unsafe {
-                    f(c as *mut JpegCompressPublic as *mut c_void);
+                let rc: CBoolean = unsafe { f(c as *mut JpegCompressPublic as *mut c_void) };
+                if rc == 0 {
+                    // Suspension: stash everything still unwritten so a
+                    // subsequent finish_compress retry can drain it.
+                    priv_state.pending_flush_tail.clear();
+                    priv_state
+                        .pending_flush_tail
+                        .extend_from_slice(&encoded[offset..]);
+                    return false;
                 }
+            } else {
+                // No callback installed and no room — nothing more we can
+                // do. Treat as completed-with-truncation rather than loop.
+                break;
             }
         }
         // Copy as much as fits into the staging buffer this round.
@@ -5404,8 +5440,8 @@ fn push_bytes_through_dest_mgr(
         }
         offset += take;
     }
-    // Emit the terminal flush.
-    //
+    // Completed: clear any stale pending tail and emit the terminal flush.
+    priv_state.pending_flush_tail.clear();
     // IMPORTANT: do NOT zero `next_output_byte` / `free_in_buffer`
     // after `term_destination` returns. Pillow's `_imaging.so`
     // `ImagingJpegEncode` computes `bytes_written = state->bytes -
@@ -5422,8 +5458,7 @@ fn push_bytes_through_dest_mgr(
             f(c as *mut JpegCompressPublic as *mut c_void);
         }
     }
-    // Prevent unused warning.
-    let _ = priv_state;
+    true
 }
 
 /// Construct a new byte buffer that inserts pending APPn markers and
@@ -5622,6 +5657,15 @@ fn write_marker_segment(out: &mut Vec<u8>, marker_code: c_int, data: &[u8]) {
 }
 
 /// `jpeg_finish_compress(cinfo)` — close the datastream, flush to sink.
+///
+/// Honors libjpeg.txt §5.5 destination suspension. If the previous call
+/// suspended (a custom destination manager returned `FALSE` from
+/// `empty_output_buffer`), `priv_state.pending_flush_tail` holds the
+/// unwritten encoded bytes and a re-entry drains them rather than
+/// re-running the encoder. The shim's deferred-encode architecture
+/// means suspension can only fire at the flush boundary; it cannot fire
+/// during `jpeg_write_scanlines` (which only buffers pixels) — that is
+/// a documented divergence from upstream's per-MCU streaming model.
 #[no_mangle]
 pub extern "C" fn jpeg_finish_compress(cinfo: *mut c_void) {
     let c: &mut JpegCompressPublic = match unsafe { cinfo_compress_mut(cinfo) } {
@@ -5636,12 +5680,17 @@ pub extern "C" fn jpeg_finish_compress(cinfo: *mut c_void) {
     if !priv_state.have_started {
         return;
     }
-    priv_state.have_started = false;
-    // CSTATE_WRCOEFS branch: jpegtran-style lossless transcode flow.
-    // Emit the bytes from the coefficient handle stashed by the matching
-    // `jpeg_write_coefficients` call. Otherwise fall through to the
-    // pixel-encoding path.
-    if c.global_state == CSTATE_WRCOEFS {
+    if !priv_state.pending_flush_tail.is_empty() {
+        // Resume path: drain the stashed tail without re-running the
+        // encoder. If the consumer still cannot accept output, the tail
+        // is repopulated and have_started stays true so a further retry
+        // can drain again.
+        let tail: Vec<u8> = std::mem::take(&mut priv_state.pending_flush_tail);
+        let _ = push_bytes_through_dest_mgr(c, priv_state, &tail);
+    } else if c.global_state == CSTATE_WRCOEFS {
+        // jpegtran-style lossless transcode flow: emit the bytes from
+        // the coefficient handle stashed by the matching
+        // `jpeg_write_coefficients` call.
         let _ = run_coefficient_writer_and_flush(c, priv_state);
     } else if c.raw_data_in != 0 {
         // Raw-data encode path: flush accumulated per-component planes
@@ -5650,7 +5699,12 @@ pub extern "C" fn jpeg_finish_compress(cinfo: *mut c_void) {
     } else {
         let _ = run_encoder_and_flush(c, priv_state);
     }
-    c.global_state = CSTATE_START;
+    if priv_state.pending_flush_tail.is_empty() {
+        priv_state.have_started = false;
+        c.global_state = CSTATE_START;
+    }
+    // else: still suspended — keep have_started=true so the next call
+    // re-enters the resume branch above.
 }
 
 // ---------------------------------------------------------------------------
