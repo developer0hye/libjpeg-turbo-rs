@@ -80,7 +80,7 @@ The four cross-checked structs are the ones classic C consumers (cjpeg / Pillow 
 
 ## P3-2. `jpeg12_write_raw_data` / `jpeg12_read_raw_data` Stub Semantics — **PARTIAL: error-exit semantics fixed; full 12-bit raw-data backend deferred**
 
-**Status (2026-05-08): partial closure — silent-zero-return stub eliminated.** Both symbols still acknowledge that 12-bit raw-data is not implemented, but they no longer return `0` silently (which mimicked "no rows ready, retry later" and could spin a caller forever). They now invoke `cinfo->err->error_exit(cinfo)` with `msg_code = JERR_NOTIMPL` (upstream code 47 at `JPEG_LIB_VERSION=80`, verified empirically by compiling a `printf("%d", JERR_NOTIMPL)` harness against `references/libjpeg-turbo/src/jerror.h`), so:
+**Status (2026-05-08): partial closure — silent-zero-return stub eliminated.** Both symbols still acknowledge that 12-bit raw-data is not implemented, but they no longer return `0` silently (which mimicked "no rows ready, retry later" and could spin a caller forever). They now invoke `cinfo->err->error_exit(cinfo)` with `msg_code = JERR_NOTIMPL` (upstream code 48 at `JPEG_LIB_VERSION=80`, verified empirically with `cc -DJPEG_LIB_VERSION=80 -I references/libjpeg-turbo/src probe.c` where `probe.c` is a `printf("%d", JERR_NOTIMPL)` harness around `#define JMESSAGE(code, string) code,` + `#include "jerror.h"`; omitting the version define yields 47 because the v8 jerror.h has one extra entry earlier in the enum — this matters because the shim's installed `jconfig.h` pins `JPEG_LIB_VERSION=80`), so:
 
 - A caller with a `setjmp`-installed handler longjmps out of the call cleanly.
 - A caller relying on the default `error_exit` aborts the process with a diagnostic on stderr.
@@ -96,7 +96,7 @@ let priv_ptr: *mut c_void = decompress_private_raw(cinfo);
 if let Some(p) = unsafe { priv_from_ptr(priv_ptr) } {
     p.last_error = CString::new("jpeg12_read_raw_data: JERR_NOTIMPL …").unwrap_or_default();
 }
-invoke_error_exit(cinfo, 47);   // upstream JERR_NOTIMPL = 47 (jerror.h, JPEG_LIB_VERSION=80)
+invoke_error_exit(cinfo, 48);   // upstream JERR_NOTIMPL = 48 (jerror.h, JPEG_LIB_VERSION=80)
 0  // defensive fall-through if a non-conforming handler returns
 ```
 
@@ -106,7 +106,7 @@ invoke_error_exit(cinfo, 47);   // upstream JERR_NOTIMPL = 47 (jerror.h, JPEG_LI
 
 **Verification:**
 - `cargo test -p libjpeg-turbo-rs-capi --test capi_jpeg12_raw_data_error_exit --release` → 2 passed (one per direction). Each test dlopens the cdylib, installs a custom `error_exit` on a synthesised `JpegErrorMgr`, calls `jpeg12_*_raw_data`, and asserts the handler fired exactly once with `msg_code = 19`.
-- TDD-verified: deleting the `invoke_error_exit(cinfo, 47)` line in either function makes the corresponding test red-fail with `error_exit fired 0 times, expected 1`. Restoring returns to GREEN.
+- TDD-verified: deleting the `invoke_error_exit(cinfo, 48)` line in either function makes the corresponding test red-fail with `error_exit fired 0 times, expected 1`. Restoring returns to GREEN.
 - `cargo test -p libjpeg-turbo-rs-capi --test capi_jpeg_read_raw_data --test capi_jpeg_write_raw_data --release` → `2 passed` + `3 passed` (the existing 8-bit raw-data tests are unaffected).
 - `cargo test --workspace --release --no-fail-fast` → exit 0.
 - `cargo build -p libjpeg-turbo-rs-capi --release` clean.
