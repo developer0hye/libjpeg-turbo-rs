@@ -16,7 +16,7 @@ Project is **replacement-ready** for the Rust-application + stock-tool drop-in s
 
 | Check | Result |
 | --- | --- |
-| `cargo test --workspace --release` | **Passes** — 2150 tests, 0 failures, 1 ignored (one slow release-only stress test). |
+| `cargo test --workspace --release` | **Passes** — 2151 tests, 0 failures, 1 ignored (one slow release-only stress test). |
 | `cargo test -p libjpeg-turbo-rs --test cross_product_transform` | **Passes** all 12 cases. P0-1 closed. |
 | `cargo test -p libjpeg-turbo-rs --test regression_progressive_4pixel_chroma_transform` | **Passes** 256 cases byte-exact vs `jpegtran -progressive -copy all <op>`. P3-4 closed. |
 | `cargo test --test cross_check_p3_6_nonstandard_rgb565` | **Passes** 4 fixtures: 3x2 decode (vs `djpeg`), 3x2 encode (vs `cjpeg -sample 3x2,1x1,1x1` + `djpeg`), 3x1 decode, RGB565 merged-upsample (vs `djpeg -nosmooth` + 5-6-5 truncate chain). P3-6 closed. |
@@ -48,7 +48,7 @@ No fully-OPEN items left in Phase 3. The PARTIAL closures are:
 
 | ID | Status | Deferred work | Trigger |
 | --- | --- | --- | --- |
-| P3-1 | PARTIAL | `jpeg_marker_struct` + `jvirt_*_control` ABI offset cross-checks | Downstream consumer pinning offsets in those structs |
+| P3-1 | PARTIAL | `jpeg_compress_struct` + `jpeg_error_mgr` + `jpeg_source_mgr` + `jpeg_destination_mgr` ABI offset cross-checks (decompress + marker active; helper ready, callsite wiring pending) | Downstream consumer pinning offsets in those structs, or v9 upstream bump prep |
 | P3-2 | PARTIAL | Full 12-bit raw-data backend (silent-zero stub eliminated; `JERR_NOTIMPL` `error_exit` semantics in place) | Downstream consumer needing 12-bit `jpeg_*_raw_data` |
 
 **Next up**: nothing scheduled. The release gate is satisfied for the standard-sampling / classic-lifecycle / lossless-transform / non-standard-sampling consumer surfaces. Future phases live in `docs/last_mile/phase4.md` or later if downstream surfaces a gap.
