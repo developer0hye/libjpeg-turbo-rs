@@ -3739,9 +3739,18 @@ impl<'a> Decoder<'a> {
                 // Merged upsample path: combine upsample + color convert in one pass
                 // for H2V1 (4:2:2) and H2V2 (4:2:0), avoiding intermediate chroma buffers.
                 // Only available when both chroma components have the same sampling factors.
+                // RGB565 routes through this merged branch only when
+                // dithering is OFF — upstream has a separate `*_565D`
+                // merged path for ordered-dither RGB565, which the shim
+                // doesn't yet implement; falling through to the slow
+                // path preserves the pre-fix behavior for that combo
+                // (ordered dither honored via the non-merged dithered
+                // RGB565 writer). Dither + merged is tracked as a
+                // Phase 4 perf follow-up.
+                let merged_rgb565_ok: bool = out_format == PixelFormat::Rgb565 && !self.dither_565;
                 if self.merged_upsample
                     && uniform_chroma
-                    && (out_format == PixelFormat::Rgb || out_format == PixelFormat::Rgb565)
+                    && (out_format == PixelFormat::Rgb || merged_rgb565_ok)
                     && h_factor == 2
                     && (v_factor == 1 || v_factor == 2)
                 {
@@ -3749,11 +3758,10 @@ impl<'a> Decoder<'a> {
                     // routes through an intermediate RGB buffer + 5-6-5
                     // truncation; this preserves the merged-upsample SIMD
                     // hot path and matches upstream's `_565` jdmerge.c
-                    // semantics (truncation, no dither — dither lives in
-                    // the non-merged dithered path). P3-6 acceptance asks
-                    // for a minimum fixture, not a full sweep, so the
-                    // dedicated `_565` SIMD kernels (jdmrgext-*-565) are
-                    // deferred to a Phase 4 perf task.
+                    // semantics (truncation only, no dither). The
+                    // dedicated `_565` and `_565D` SIMD kernels
+                    // (jdmrgext-*-565*) are deferred to a Phase 4 perf
+                    // task.
                     let merged_bpp: usize = 3;
                     let merged_size: usize = out_width * out_height * merged_bpp;
                     let mut merged_rgb: Vec<u8> = vec![0u8; merged_size];
