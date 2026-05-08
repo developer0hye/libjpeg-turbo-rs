@@ -3725,9 +3725,21 @@ pub extern "C" fn jpeg_read_raw_data(
 
 /// `jpeg12_read_raw_data(cinfo, data, max_lines) -> JDIMENSION`.
 ///
-/// 12-bit raw-data decode is not implemented in this shim. Returns 0
-/// and populates `last_error`. Callers that only resolve the symbol at
-/// dynamic-link time (e.g. Pillow's libtiff dependency) are unaffected.
+/// 12-bit raw-data decode is not implemented in this shim. Per
+/// libjpeg.txt §3 the failure routes through
+/// `cinfo->err->error_exit(cinfo)` with `msg_code = JERR_NOTIMPL`
+/// (upstream code 48 at JPEG_LIB_VERSION=80) so a caller that
+/// installed a `setjmp`/`longjmp`
+/// handler recovers cleanly, and a caller without one falls through
+/// to the default `error_exit` (which aborts the process with a
+/// diagnostic on stderr — exactly what stock libjpeg would do for
+/// any other unimplemented codepath). Callers that only resolve the
+/// symbol at dynamic-link time (e.g. Pillow's libtiff dependency)
+/// are unaffected — symbol presence is preserved.
+///
+/// Returns 0 only on the *unreachable* fall-through where a custom
+/// handler returns from `error_exit` without longjmp-ing out, which
+/// violates the libjpeg contract; defensive code is cheap.
 #[no_mangle]
 pub extern "C" fn jpeg12_read_raw_data(
     cinfo: *mut c_void,
@@ -3741,6 +3753,23 @@ pub extern "C" fn jpeg12_read_raw_data(
         )
         .unwrap_or_default();
     }
+    // upstream `JERR_NOTIMPL = 48` at `JPEG_LIB_VERSION=80` — verified
+    // empirically by compiling
+    //   `cc -DJPEG_LIB_VERSION=80 -I references/libjpeg-turbo/src
+    //    /tmp/probe.c`
+    // where `/tmp/probe.c` is a `printf("%d", JERR_NOTIMPL)` harness
+    // built around `#define JMESSAGE(code, string) code,` +
+    // `#include "jerror.h"`. The version define matters: leaving
+    // `JPEG_LIB_VERSION` undefined (or pinning it to v6) shifts the
+    // enum by one to 47 because v8 added one entry earlier in the
+    // file. The shim's installed `jconfig.h` pins
+    // `#define JPEG_LIB_VERSION 80`, so v8 is the authoritative
+    // surface a downstream consumer compiles against.
+    //
+    // Most consumer-installed `error_exit` handlers longjmp out and
+    // never return; the `0` below only fires for non-conforming
+    // handlers that return.
+    invoke_error_exit(cinfo, 48);
     0
 }
 
@@ -6469,7 +6498,19 @@ fn run_raw_encoder_and_flush(c: &mut JpegCompressPublic, priv_state: &mut Compre
 /// `jpeg12_write_raw_data(cinfo, data, num_lines) -> JDIMENSION`.
 ///
 /// 12-bit raw-data encode is out of scope for this implementation.
-/// Returns 0 and sets a JERR_NOTIMPL-style error message.
+/// Per libjpeg.txt §3 the failure routes through
+/// `cinfo->err->error_exit(cinfo)` with `msg_code = JERR_NOTIMPL`
+/// (upstream code 48 at JPEG_LIB_VERSION=80) so a caller that
+/// installed a `setjmp`/`longjmp`
+/// handler recovers cleanly, and a caller without one falls through
+/// to the default `error_exit` (which aborts the process with a
+/// diagnostic on stderr — exactly what stock libjpeg would do for
+/// any other unimplemented codepath). Symbol presence is preserved
+/// for dyld-load-time resolvers.
+///
+/// Returns 0 only on the *unreachable* fall-through where a custom
+/// handler returns from `error_exit` without longjmp-ing out, which
+/// violates the libjpeg contract; defensive code is cheap.
 #[no_mangle]
 pub extern "C" fn jpeg12_write_raw_data(
     cinfo: *mut c_void,
@@ -6484,6 +6525,16 @@ pub extern "C" fn jpeg12_write_raw_data(
             .unwrap_or_default();
         }
     }
+    // upstream `JERR_NOTIMPL = 48` at `JPEG_LIB_VERSION=80` — see
+    // companion comment on `jpeg12_read_raw_data` above for the
+    // empirical-verification recipe and the `JPEG_LIB_VERSION`
+    // sensitivity (omitting the define yields 47, which is wrong for
+    // the v8 surface the shim's `jconfig.h` pins).
+    //
+    // Most consumer-installed `error_exit` handlers longjmp out and
+    // never return; the `0` below only fires for non-conforming
+    // handlers that return.
+    invoke_error_exit(cinfo, 48);
     0
 }
 
