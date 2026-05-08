@@ -3725,9 +3725,20 @@ pub extern "C" fn jpeg_read_raw_data(
 
 /// `jpeg12_read_raw_data(cinfo, data, max_lines) -> JDIMENSION`.
 ///
-/// 12-bit raw-data decode is not implemented in this shim. Returns 0
-/// and populates `last_error`. Callers that only resolve the symbol at
-/// dynamic-link time (e.g. Pillow's libtiff dependency) are unaffected.
+/// 12-bit raw-data decode is not implemented in this shim. Per
+/// libjpeg.txt §3 the failure routes through
+/// `cinfo->err->error_exit(cinfo)` with `msg_code = JERR_NOTIMPL`
+/// (upstream code 19) so a caller that installed a `setjmp`/`longjmp`
+/// handler recovers cleanly, and a caller without one falls through
+/// to the default `error_exit` (which aborts the process with a
+/// diagnostic on stderr — exactly what stock libjpeg would do for
+/// any other unimplemented codepath). Callers that only resolve the
+/// symbol at dynamic-link time (e.g. Pillow's libtiff dependency)
+/// are unaffected — symbol presence is preserved.
+///
+/// Returns 0 only on the *unreachable* fall-through where a custom
+/// handler returns from `error_exit` without longjmp-ing out, which
+/// violates the libjpeg contract; defensive code is cheap.
 #[no_mangle]
 pub extern "C" fn jpeg12_read_raw_data(
     cinfo: *mut c_void,
@@ -3741,6 +3752,10 @@ pub extern "C" fn jpeg12_read_raw_data(
         )
         .unwrap_or_default();
     }
+    // upstream `JERR_NOTIMPL = 19` (jerror.h v8). Most consumer-installed
+    // `error_exit` handlers longjmp out and never return; the `0` below
+    // only fires for non-conforming handlers that return.
+    invoke_error_exit(cinfo, 19);
     0
 }
 
@@ -6469,7 +6484,18 @@ fn run_raw_encoder_and_flush(c: &mut JpegCompressPublic, priv_state: &mut Compre
 /// `jpeg12_write_raw_data(cinfo, data, num_lines) -> JDIMENSION`.
 ///
 /// 12-bit raw-data encode is out of scope for this implementation.
-/// Returns 0 and sets a JERR_NOTIMPL-style error message.
+/// Per libjpeg.txt §3 the failure routes through
+/// `cinfo->err->error_exit(cinfo)` with `msg_code = JERR_NOTIMPL`
+/// (upstream code 19) so a caller that installed a `setjmp`/`longjmp`
+/// handler recovers cleanly, and a caller without one falls through
+/// to the default `error_exit` (which aborts the process with a
+/// diagnostic on stderr — exactly what stock libjpeg would do for
+/// any other unimplemented codepath). Symbol presence is preserved
+/// for dyld-load-time resolvers.
+///
+/// Returns 0 only on the *unreachable* fall-through where a custom
+/// handler returns from `error_exit` without longjmp-ing out, which
+/// violates the libjpeg contract; defensive code is cheap.
 #[no_mangle]
 pub extern "C" fn jpeg12_write_raw_data(
     cinfo: *mut c_void,
@@ -6484,6 +6510,10 @@ pub extern "C" fn jpeg12_write_raw_data(
             .unwrap_or_default();
         }
     }
+    // upstream `JERR_NOTIMPL = 19` (jerror.h v8). Most consumer-installed
+    // `error_exit` handlers longjmp out and never return; the `0` below
+    // only fires for non-conforming handlers that return.
+    invoke_error_exit(cinfo, 19);
     0
 }
 

@@ -80,35 +80,35 @@ The four cross-checked structs are the ones classic C consumers (cjpeg / Pillow 
 
 ## P3-2. `jpeg12_write_raw_data` / `jpeg12_read_raw_data` Stub Semantics — **PARTIAL: error-exit semantics fixed; full 12-bit raw-data backend deferred**
 
-**Status (2026-05-06): partial closure — silent-zero-return stub eliminated.** Both symbols still acknowledge that 12-bit raw-data is not implemented, but they no longer return `0` silently (which mimicked "no rows ready, retry later" and could spin a caller forever). Instead they invoke `cinfo->err->error_exit(cinfo)` with `msg_code = JERR_NOTIMPL` (upstream code 19), so:
+**Status (2026-05-08): partial closure — silent-zero-return stub eliminated.** Both symbols still acknowledge that 12-bit raw-data is not implemented, but they no longer return `0` silently (which mimicked "no rows ready, retry later" and could spin a caller forever). They now invoke `cinfo->err->error_exit(cinfo)` with `msg_code = JERR_NOTIMPL` (upstream code 19), so:
 
 - A caller with a `setjmp`-installed handler longjmps out of the call cleanly.
 - A caller relying on the default `error_exit` aborts the process with a diagnostic on stderr.
 - A caller that resolves the symbol only at dyld-load time (e.g. Pillow's libtiff dependency) is unaffected — symbol presence is preserved.
 
-**Implementation** (`crates/libjpeg-turbo-rs-capi/src/jpeglib.rs::trigger_error_exit_notimpl`):
+> **Doc-vs-code reconciliation note (2026-05-08).** A previous iteration of this section (dated 2026-05-06) documented a `trigger_error_exit_notimpl` helper as if the `error_exit` wiring had landed. It hadn't — both stubs continued to return 0 silently after setting `last_error` until this PR. The actual wiring uses the existing `invoke_error_exit(cinfo, msg_code)` helper (already used at `jpeg_read_header` for `JERR_BAD_LENGTH=12` and at `push_bytes_through_dest_mgr` for `JERR_CANT_SUSPEND=25`); no new helper was needed.
+
+**Implementation** (`crates/libjpeg-turbo-rs-capi/src/jpeglib.rs`):
 
 ```rust
-fn trigger_error_exit_notimpl(cinfo: *mut c_void, _api_name: &str) {
-    if cinfo.is_null() { return; }
-    unsafe {
-        let err_pp: *mut *mut JpegErrorMgr = cinfo as *mut *mut JpegErrorMgr;
-        let err_ptr: *mut JpegErrorMgr = err_pp.read();
-        if err_ptr.is_null() { return; }
-        let err: &mut JpegErrorMgr = &mut *err_ptr;
-        err.msg_code = JERR_NOTIMPL_CODE;  // upstream `JERR_NOTIMPL` = 19
-        if let Some(exit) = err.error_exit { exit(cinfo); }
-    }
+// jpeg12_read_raw_data
+let priv_ptr: *mut c_void = decompress_private_raw(cinfo);
+if let Some(p) = unsafe { priv_from_ptr(priv_ptr) } {
+    p.last_error = CString::new("jpeg12_read_raw_data: JERR_NOTIMPL …").unwrap_or_default();
 }
+invoke_error_exit(cinfo, 19);   // upstream JERR_NOTIMPL = 19 (jerror.h v8)
+0  // defensive fall-through if a non-conforming handler returns
 ```
 
-Both `jpeg12_read_raw_data` and `jpeg12_write_raw_data` call this helper after populating `priv_state.last_error` (preserved for diagnostics), then return `0` only on the *unreachable* fall-through where a custom handler returns from `error_exit` (which violates the libjpeg contract — but defensive code is cheap).
+`jpeg12_write_raw_data` mirrors the same pattern through `cinfo_compress_mut` + `priv_compress_from_ptr` instead of the decompress side. Both walk the `cinfo->err` slot at offset 0 (the `jpeg_common_fields` prefix is shared between `jpeg_decompress_struct` and `jpeg_compress_struct`), so the same `invoke_error_exit` helper works on either lifecycle.
 
-**Why "partial" not "closed":** the symbols still don't *do* 12-bit raw-data. A consumer that wants real 12-bit raw-data encode/decode now gets a clean error path (good) but no working implementation (acceptable, but not the full P3-2 acceptance bar). The full bar — wire `cinfo.raw_data_in = TRUE` through the existing 12-bit encode backend (`compress_12bit_with_precision`), and mirror for decode — is deferred to Phase 4 work and gated on a downstream consumer surfacing demand.
+**Why "partial" not "closed":** the symbols still don't *do* 12-bit raw-data. A consumer that wants real 12-bit raw-data encode/decode now gets a clean error path (good) but no working implementation (acceptable, but not the full P3-2 acceptance bar). The full bar — wire `cinfo.raw_data_in = TRUE` through the existing 12-bit encode backend (`compress_12bit_with_precision`), and mirror for decode — is deferred to Phase 4 work and gated on a downstream consumer surfacing demand. The current `compress_12bit_with_precision` does its own RGB→YCbCr+downsample internally, so a raw-data-in path needs a new entry point that accepts pre-downsampled per-component i16 planes (similar in shape to the 8-bit `jpeg_write_raw_data` plumbing in `compress_with_raw_planes`); decode needs a 12-bit per-component plane reader.
 
 **Verification:**
-- `cargo test -p libjpeg-turbo-rs-capi --release --tests --no-fail-fast` → 35+ test binaries green; the only failure is the pre-existing `imagemagick_roundtrips_through_our_cdylib` (PSNR=22.6 dB, confirmed via `git stash` to be a pre-existing regression on `docs/fix-arith-contradiction`, not caused by P3-2).
+- `cargo test -p libjpeg-turbo-rs-capi --test capi_jpeg12_raw_data_error_exit --release` → 2 passed (one per direction). Each test dlopens the cdylib, installs a custom `error_exit` on a synthesised `JpegErrorMgr`, calls `jpeg12_*_raw_data`, and asserts the handler fired exactly once with `msg_code = 19`.
+- TDD-verified: deleting the `invoke_error_exit(cinfo, 19)` line in either function makes the corresponding test red-fail with `error_exit fired 0 times, expected 1`. Restoring returns to GREEN.
 - `cargo test -p libjpeg-turbo-rs-capi --test capi_jpeg_read_raw_data --test capi_jpeg_write_raw_data --release` → `2 passed` + `3 passed` (the existing 8-bit raw-data tests are unaffected).
+- `cargo test --workspace --release --no-fail-fast` → exit 0.
 - `cargo build -p libjpeg-turbo-rs-capi --release` clean.
 
 The closure title reflects the actual delta: stub *semantics* moved from "silent zero return" to "loud `error_exit`-driven failure." Symbol-presence and dyld-load compatibility are preserved.
