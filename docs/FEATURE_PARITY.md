@@ -195,7 +195,7 @@
 - [x] `do_block_smoothing` toggle (`Decoder::set_block_smoothing()`)
 - [x] `dct_method` selection (ISLOW/IFAST/FLOAT) (`Decoder::set_dct_method()`)
 - [x] RGB565 ordered dithering (`Decoder::set_dither_565()`)
-- [x] Merged upsampling (combined upsample + color convert for 422m/420m) (`Decoder::set_merged_upsample()`)
+- [x] Merged upsampling (combined upsample + color convert for 422m/420m) (`Decoder::set_merged_upsample()`). RGB and RGB565 output both wired through the SIMD merged kernels (NEON / AVX2 / WASM SIMD128 / scalar). Cross-validated against `djpeg -nosmooth` for S420/S422 in `tests/cross_check_p3_6_nonstandard_rgb565.rs`. Dedicated `_565` SIMD kernels (upstream `jdmrgext-*-565`) are deferred as a Phase 4 perf task — current path packs after the merged conversion.
 - [x] 4:1:0 (H=4,V=2) subsampling decode — arbitrary factor upsampling
 
 ### Error Handling
