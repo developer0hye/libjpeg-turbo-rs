@@ -16,7 +16,7 @@ Project is **replacement-ready** for the Rust-application + stock-tool drop-in s
 
 | Check | Result |
 | --- | --- |
-| `cargo test --workspace --release` | **Passes** — 2150 tests, 0 failures, 1 ignored (one slow release-only stress test). |
+| `cargo test --workspace --release` | **Passes** — 2151 tests, 0 failures, 1 ignored (one slow release-only stress test). |
 | `cargo test -p libjpeg-turbo-rs --test cross_product_transform` | **Passes** all 12 cases. P0-1 closed. |
 | `cargo test -p libjpeg-turbo-rs --test regression_progressive_4pixel_chroma_transform` | **Passes** 256 cases byte-exact vs `jpegtran -progressive -copy all <op>`. P3-4 closed. |
 | `cargo test --test cross_check_p3_6_nonstandard_rgb565` | **Passes** 4 fixtures: 3x2 decode (vs `djpeg`), 3x2 encode (vs `cjpeg -sample 3x2,1x1,1x1` + `djpeg`), 3x1 decode, RGB565 merged-upsample (vs `djpeg -nosmooth` + 5-6-5 truncate chain). P3-6 closed. |
@@ -48,7 +48,7 @@ No fully-OPEN items left in Phase 3. The PARTIAL closures are:
 
 | ID | Status | Deferred work | Trigger |
 | --- | --- | --- | --- |
-| P3-1 | PARTIAL | `jpeg_marker_struct` + `jvirt_*_control` ABI offset cross-checks | Downstream consumer pinning offsets in those structs |
+| P3-1 | PARTIAL | `jpeg_compress_struct` + `jpeg_error_mgr` + `jpeg_source_mgr` + `jpeg_destination_mgr` ABI offset cross-checks (decompress + marker active; helper ready, callsite wiring pending) | Downstream consumer pinning offsets in those structs, or v9 upstream bump prep |
 | P3-2 | PARTIAL | Full 12-bit raw-data backend (silent-zero stub eliminated; `JERR_NOTIMPL` `error_exit` semantics in place) | Downstream consumer needing 12-bit `jpeg_*_raw_data` |
 
 **Next up**: nothing scheduled. The release gate is satisfied for the standard-sampling / classic-lifecycle / lossless-transform / non-standard-sampling consumer surfaces. Future phases live in `docs/last_mile/phase4.md` or later if downstream surfaces a gap.
@@ -72,7 +72,7 @@ Each phase file is self-contained. Read only the one you need.
 
 (Phase 1 + Phase 2 suggested orders are inside the respective phase files.)
 
-1. ~~**P3-1** — extend `tests/abi_offsets.rs` to compress / error_mgr / source_mgr / destination_mgr.~~ **PARTIAL 2026-05-06** — 5 struct cross-checks pass; marker / virt_barray deferred.
+1. ~~**P3-1** — extend `tests/abi_offsets.rs` to compress / error_mgr / source_mgr / destination_mgr / marker.~~ **PARTIAL 2026-05-08** — 2 of 6 planned struct cross-checks active (`jpeg_decompress_struct` from P2-4; `jpeg_marker_struct` 2026-05-08). The 4 large structs (`jpeg_compress_struct`, `jpeg_error_mgr`, `jpeg_source_mgr`, `jpeg_destination_mgr`) and the Windows MSVC matrix leg remain deferred — Rust mirrors exist and the shared `cc_offsetof_for_struct` helper supports them, so the remaining work is callsite wiring + CI plumbing. `jvirt_*_control` are opaque upstream and need no cross-check.
 2. ~~**P3-3** — implement the 19 legacy TurboJPEG aliases as forwarding wrappers; remove from allowlist.~~ **CLOSED 2026-05-06**.
 3. ~~**P3-2** — `jpeg12_*_raw_data` stub semantics.~~ **PARTIAL 2026-05-06** — silent-zero return replaced by `JERR_NOTIMPL` `error_exit`; full backend deferred.
 4. ~~**P3-5** — classic `jpeglib.h` lifecycle / custom-I/O / suspension C harness (≥ 8 tests).~~ **CLOSED 2026-05-08** — all 8 patterns active (custom src/dst mgr, source suspension, destination-suspension `JERR_CANT_SUSPEND` contract, abort+reuse for both, buffered-image multi-pass, setjmp/longjmp). Two shim defects uncovered + fixed: pattern #8 (2026-05-07) made `jpeg_read_header` invoke `error_exit` on EOI-terminated malformed input; pattern #4 (2026-05-08) made `push_bytes_through_dest_mgr` invoke `error_exit` with `JERR_CANT_SUSPEND` instead of silently dropping bytes when a custom dst mgr returns `FALSE` (the deferred-encode shim cannot honor upstream's per-MCU suspension at `jpeg_write_scanlines`).

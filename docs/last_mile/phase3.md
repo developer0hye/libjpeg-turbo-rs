@@ -10,7 +10,7 @@ For each item below, the **agreement** line states whether the gap is reproducib
 
 | ID | Status |
 | --- | --- |
-| P3-1 | PARTIAL (4 structs cross-checked; marker / virt_barray deferred) |
+| P3-1 | PARTIAL (decompress + marker cross-checked; 4 large structs deferred) |
 | P3-2 | PARTIAL (silent-zero stub eliminated; full backend deferred) |
 | P3-3 | CLOSED 2026-05-06 |
 | P3-4 | CLOSED 2026-05-07 |
@@ -19,62 +19,28 @@ For each item below, the **agreement** line states whether the gap is reproducib
 
 ---
 
-## P3-1. ABI Offset Cross-Check Was Decompress-Only — **PARTIAL: 4 structs closed; marker / virt_barray deferred**
+## P3-1. ABI Offset Cross-Check Was Decompress-Only — **PARTIAL: decompress + marker cross-checked; 4 large structs deferred**
 
-**Status (2026-05-06): partially closed.** `crates/libjpeg-turbo-rs-capi/tests/abi_offsets.rs` now cross-checks four structs against upstream `jpeglib.h` at `JPEG_LIB_VERSION=80`. The five tests in the file (one per struct) all pass on macOS aarch64 (LP64) and run in CI on Linux x86_64 (LP64) + Windows MSVC (LLP64) via the `abi-offsets` matrix job:
+**Status (2026-05-08): partially closed — 2 of 6 planned cross-checks active.** `crates/libjpeg-turbo-rs-capi/tests/abi_offsets.rs` cross-checks two structs against upstream `jpeglib.h` at `JPEG_LIB_VERSION=80`. Both tests pass on macOS aarch64 (LP64) under `cargo test -p libjpeg-turbo-rs-capi --test abi_offsets --release` and run in CI on Linux x86_64 + macOS aarch64 via the `abi-offsets` matrix job:
 
-- `rust_offsets_match_upstream_jpeglib_h_at_lib_version_80` — `jpeg_decompress_struct` (27 fields, P2-4 baseline).
-- `rust_offsets_match_jpeg_compress_struct_at_lib_version_80` — **NEW**, 75 fields covering jpeg_common_fields, image description, JPEG_LIB_VERSION ≥ 70 scale fields, primary compression parameters, marker emission, scan-state derived fields, JPEG_LIB_VERSION ≥ 80 extensions, *and* the trailing 11 opaque libjpeg-internal pointers (`master`, `main` ↔ Rust's `main_ctrl`, `prep`, `coef`, `marker`, `cconvert`, `downsample`, `fdct`, `entropy`, `script_space`, `script_space_size`).
-- `rust_offsets_match_jpeg_error_mgr_at_lib_version_80` — **NEW**, 14 fields (`error_exit`/`emit_message`/`output_message`/`format_message`/`reset_error_mgr` callbacks, `msg_code`, `msg_parm` union slot, `trace_level`, `num_warnings`, message-table pointers + last-message indices).
-- `rust_offsets_match_jpeg_source_mgr_at_lib_version_80` — **NEW**, 7 fields (`next_input_byte`, `bytes_in_buffer`, `init_source`, `fill_input_buffer`, `skip_input_data`, `resync_to_restart`, `term_source`).
-- `rust_offsets_match_jpeg_destination_mgr_at_lib_version_80` — **NEW**, 5 fields (`next_output_byte`, `free_in_buffer`, `init_destination`, `empty_output_buffer`, `term_destination`).
+- `rust_offsets_match_upstream_jpeglib_h_at_lib_version_80` — `jpeg_decompress_struct` (27 fields + sizeof, P2-4 baseline).
+- `rust_offsets_match_jpeg_marker_struct_at_lib_version_80` — `jpeg_marker_struct` (5 fields + sizeof, **NEW 2026-05-08**).
 
-**`sizeof` cross-check (every struct).** Each test additionally probes `sizeof(struct …)` via the same C harness and asserts it equals `mem::size_of::<MirrorStruct>()`. This closes the *false-coverage* gap a prior iteration of this work briefly opened: a per-field check alone would still pass if the Rust mirror truncated the struct's tail (so trailing fields drift silently); the size delta catches that. The error message reads `sizeof: Rust mirror is N bytes, C 'sizeof(struct X)' is M bytes — trailing field(s) are unmirrored or padding diverges`.
+**`sizeof` cross-check.** Both tests additionally probe `sizeof(struct …)` via the same C harness and assert it equals `mem::size_of::<MirrorStruct>()`. This closes the *false-coverage* gap a per-field check alone leaves open: a per-field check still passes if the Rust mirror truncates the struct's tail (so trailing fields drift silently); the size delta catches that. The error message reads `sizeof: Rust mirror is N bytes, C 'sizeof(struct X)' is M bytes — trailing field(s) are unmirrored or padding diverges`.
 
-**Windows runs the test, not just LP64 hosts.** The platform gate is `host_is_64bit()` — *not* `64-bit AND non-Windows`. An earlier iteration mistakenly excluded Windows, which would have made the LAST_MILE.md "Windows MSVC (LLP64)" claim a false-coverage paper trail. The fix: `offset_of!` reads whatever struct layout the Rust compiler chose for the running host (LP64 on Linux/macOS, LLP64 on Windows MSVC) and the C harness compiled on the same host reports the same ABI, so per-platform divergence between our Rust mirror and upstream `jpeglib.h` shows up as a real test failure on Windows even though the *compile-time* `const_assert!` block in `jpeglib.rs` is gated on `not(windows)`. The runtime cross-check is the only gate that catches a Windows-specific layout drift; it must actually run there.
+**Shared helper.** `cc_offsetof_for_struct(struct_name, &field_names)` in `tests/abi_offsets.rs` builds a one-shot C harness (`#include <setjmp.h>` + `<jpeglib.h>`), prints `field=offset` lines for each requested field plus a `__sizeof__=N` line, runs it through the host `cc`, and parses the output into a `CcProbeResult { offsets, sizeof }`. The harness pulls in `setjmp.h` so callbacks that take a `j_common_ptr` (which contains a `jmp_buf` field via `error_exit`) compile cleanly. Per-struct callsites only have to assemble the field-name list; the build/run/parse plumbing is shared.
 
-**CI cannot green-skip.** The `cc_offsetof_for_struct` helper has legitimate skip-with-reason paths for "no `cc` on PATH", "submodule not initialized", and "compile failed for missing-headers reasons". On a developer's local box those paths print a `SKIP: …` line and the test reports "ok". In CI (`CI=true` or `GITHUB_ACTIONS=true` set in env) the same paths route through `handle_environmental_skip(...)` and **panic** with a message that names the LAST_MILE.md coverage claim:
+**Platform gate.** `cc_offsetof_for_struct` returns `Skip(reason)` when `size_of::<usize>() != 8`, when the upstream submodule is not initialised, or when the host has no runnable `cc`. The 64-bit gate is *not* further restricted to non-Windows: `offset_of!` reads whatever struct layout the Rust compiler chose for the running host (LP64 on Linux/macOS, LLP64 on Windows MSVC) and the C harness compiled on the same host reports the same ABI, so a future Windows-MSVC matrix leg surfaces per-platform Rust↔C drift directly. Adding that leg requires wiring MSVC-style flags (`/I` instead of `-I`, `/Fe:` instead of `-o`, `cl --version` → `cl /?`) into the helper plus an `ilammy/msvc-dev-cmd@v1` step in the workflow; both are tracked as Phase 4 work below.
 
-```text
-ABI cross-check for `jpeg_compress_struct` cannot run in CI: <reason>
-A green skip here would falsify the LAST_MILE.md claim that the
-abi-offsets matrix gates Linux x86_64 / macOS aarch64 / Windows MSVC.
-Either install the missing C compiler / submodule on the runner, or
-remove that platform from the CI matrix and the LAST_MILE.md claim
-simultaneously.
-```
+**Still open (deferred):**
 
-**MSVC support on Windows CI.** The first iteration of the CI hard-fail would have guaranteed-red the Windows-MSVC matrix leg because stock GitHub Actions `windows-latest` does not expose `cl.exe` (or any `cc`) on PATH until `vcvars*.bat` has run. Two changes close that loop:
+- `jpeg_compress_struct`, `jpeg_error_mgr`, `jpeg_source_mgr`, `jpeg_destination_mgr` — Rust mirrors exist (`JpegCompressPublic`, `JpegErrorMgr`, `JpegSourceMgr`, `JpegDestinationMgr` in `jpeglib.rs`) and the helper already supports them; the work is "wire each struct's field list through `cc_offsetof_for_struct`". Approximate field counts from upstream `jpeglib.h`: compress (~75 fields covering common, image description, JPEG_LIB_VERSION ≥ 70/80 extensions, scan state, marker emission, opaque internals), error_mgr (~14, mostly callback pointers + msg state), source_mgr (~7), destination_mgr (~5). Stock `cjpeg`/`jpegtran` already byte-match upstream (P0-2/P0-4 closures) so the runtime layout is implicitly verified for the working path; a compile-time per-field check would catch silent drift before a downstream rebuild surfaces it.
+  - **Trigger:** downstream consumer pinning offsets in those structs, or prep work for a v9 upstream bump.
+- Windows MSVC leg of the `abi-offsets` matrix — helper currently emits gcc/clang flags only; adding MSVC dispatch and the `ilammy/msvc-dev-cmd@v1` workflow step is mechanical but un-landed.
+  - **Trigger:** Windows MSVC consumer, or a measurable LLP64-vs-LP64 layout concern.
+- `jvirt_barray_control` / `jvirt_sarray_control` — these are opaque types in upstream `jpeglib.h` (forward-declared, definition in `jmemmgr.c` only). Consumers don't pin field offsets; they treat the `jvirt_*_ptr` as an opaque handle. **No cross-check needed**, kept here as a tracking note for the original P3-1 scope.
 
-1. `cc_offsetof_for_struct` detects MSVC by binary name (`cl` / `clang-cl`) and dispatches MSVC-style flags (`/I<dir>`, `/Fe:<path>`, `/Fo:<path>.obj`, `/nologo`, `/?` for the liveness probe instead of `--version`). Default compiler on Windows is `cl`; on Linux/macOS it stays `cc`. The `bin_path` includes `.exe` on Windows so the post-compile run finds the actual file MSVC produced.
-2. `.github/workflows/ci.yml` adds an `ilammy/msvc-dev-cmd@v1` step on the `windows-latest` leg of `capi-abi-checks`. That action sets up the MSVC environment (PATH, INCLUDE, LIB) so `cl.exe` is reachable, exactly the way Visual Studio's own developer prompt would.
-
-The MSVC error patterns recognised as environmental (vs hard-failure) are extended too: `Cannot open include file` and `fatal error C1083` route to skip-with-reason on local dev machines without MSVC, while panic-in-CI is preserved for actually unconfigured runners.
-
-**TDD-verified on macOS aarch64 (2026-05-06):**
-
-- `cargo test … abi_offsets` (default) — green, exercises the gcc/clang path with the host's `cc`.
-- `CI=true CC=/nonexistent/cc-binary cargo test … rust_offsets_match_jpeg_compress_struct_at_lib_version_80` — hard-fail with the panic message above (gcc-style probe).
-- `CI=true CC=/nonexistent/cl-binary cargo test …` — hard-fail with the same message but the MSVC code path (binary name ends in `cl`).
-- `env -u CI -u GITHUB_ACTIONS CC=cl cargo test …` — soft `SKIP: C compiler cl not found or not runnable`, test reports green (legitimate dev skip when MSVC isn't installed locally).
-
-The asymmetry forces the Windows-MSVC matrix runner to actually have MSVC reachable; otherwise the gate becomes a real CI failure instead of paper documentation. With the `ilammy/msvc-dev-cmd@v1` step in place, MSVC *is* reachable, so the test runs for real and surfaces any per-platform Rust↔C drift on Windows LLP64.
-
-The shared helper `cc_offsetof_for_struct` builds a one-shot C harness against the submodule's `jpeglib.h` per struct, runs it, and parses `name=offset` lines back into a `CcProbeResult { offsets, sizeof }`. Failure messages name the field, the Rust offset, and the C offset side-by-side. The harness pulls in `setjmp.h` so callbacks that take a `j_common_ptr` (which contains a `jmp_buf` field via `error_exit`) compile cleanly.
-
-**TDD verification (2026-05-06):** two mutation tests confirm the gate has real teeth, not just structural appearance.
-
-1. Field-offset drift: temporarily rewrote `("main", offset_of!(JpegCompressPublic, main_ctrl))` to add `+ 8` to the Rust offset. Result: `field 'main': Rust says offset 512, C says 504`. Reverted.
-2. Tail truncation: temporarily rewrote `let rust_sizeof = …;` to subtract 8 bytes. Result: `sizeof: Rust mirror is 576 bytes, C 'sizeof(struct jpeg_compress_struct)' is 584 bytes — trailing field(s) are unmirrored or padding diverges`. Reverted.
-
-**Closure verification:** `cargo test -p libjpeg-turbo-rs-capi --test abi_offsets --release` reports `5 passed; 0 failed; 0 ignored` on the host (macOS aarch64).
-
-**Still open (deferred — narrower consumer impact than the four above):**
-
-- `jpeg_marker_struct` — `JpegMarkerStructPublic` mirrors it (`jpeglib.rs:177-183`) but is not yet covered by the cross-check. Stock `jpegtran` with `-copy all` already byte-matches upstream (P0-4 closure), which exercises this struct at runtime, so the layout is implicitly verified for the working path.
-- `jvirt_barray_control` / `jvirt_sarray_control` — these are opaque types in upstream `jpeglib.h` (forward-declared, definition in `jmemmgr.c` only). Consumers don't pin field offsets; they treat the `jvirt_*_ptr` as an opaque handle. No cross-check needed.
-
-The four cross-checked structs are the ones classic C consumers (cjpeg / Pillow / ImageMagick / libgd) read by field name, so the closure scope matches the analysis-document acceptance bar.
+The two cross-checked structs cover the field-by-field accesses classic C consumers (stock `djpeg`/`jpegtran -copy all`) make against `jpeg_decompress_struct` and `jpeg_marker_struct`. Encoder-side and error/source/destination manager checks remain on the deferred list above.
 
 ---
 
@@ -222,7 +188,7 @@ The closure title reflects the actual delta: stub *semantics* moved from "silent
 
 ## Phase 3 Suggested Order
 
-1. ~~**P3-1** — Extend `tests/abi_offsets.rs` to `jpeg_compress_struct`, `jpeg_error_mgr`, `jpeg_source_mgr`, `jpeg_destination_mgr`.~~ **PARTIAL 2026-05-06** — five struct cross-checks now pass (`jpeg_decompress_struct` + four new ones); marker / virt_barray are deferred per their consumer-impact rationale.
+1. ~~**P3-1** — Extend `tests/abi_offsets.rs` to `jpeg_compress_struct`, `jpeg_error_mgr`, `jpeg_source_mgr`, `jpeg_destination_mgr`, `jpeg_marker_struct`.~~ **PARTIAL 2026-05-08** — 2 of 6 planned struct cross-checks active: `jpeg_decompress_struct` (P2-4 baseline) and `jpeg_marker_struct` (2026-05-08). The 4 large structs (`jpeg_compress_struct`, `jpeg_error_mgr`, `jpeg_source_mgr`, `jpeg_destination_mgr`) and the Windows MSVC matrix leg remain deferred — Rust mirrors exist and the shared `cc_offsetof_for_struct` helper supports them, so the remaining work is wiring + CI plumbing. `jvirt_*_control` are opaque upstream and need no cross-check.
 2. ~~**P3-3** — Implement the 19 legacy TurboJPEG aliases as forwarding wrappers and delete them from the allowlist.~~ **CLOSED 2026-05-06** — `crates/libjpeg-turbo-rs-capi/tests/symbol_inventory.rs::allowlisted_missing_symbols()` returns an empty `HashSet`; both `cdylib_exports_every_upstream_*` tests pass without exemptions. The wrappers live in `crates/libjpeg-turbo-rs-capi/src/legacy.rs` (~390 lines for the new section).
 3. ~~**P3-2** — Either implement `jpeg12_write_raw_data` / `jpeg12_read_raw_data` against the existing 12-bit encode/decode backend, or downgrade them to feature-gated absence. The "stub returning 0" middle ground must end.~~ **PARTIAL 2026-05-06** — middle ground eliminated: stubs now invoke `cinfo->err->error_exit(cinfo)` with `msg_code = JERR_NOTIMPL`, so callers either longjmp out cleanly or hit a default abort. Full 12-bit raw-data backend deferred to Phase 4 (gated on downstream demand).
 4. ~~**P3-5** — Classic `jpeglib.h` lifecycle / custom-I/O / suspension C harness (≥ 8 tests).~~ **CLOSED 2026-05-08** — all 8 patterns active in `crates/libjpeg-turbo-rs-capi/tests/capi_classic_lifecycle.rs` (custom src/dst mgr, source suspension, destination-suspension `JERR_CANT_SUSPEND` contract, abort+reuse for both decompress/compress, buffered-image multi-pass, setjmp/longjmp). Pattern #4 surfaced + fixed a real shim defect: `push_bytes_through_dest_mgr` previously ignored `empty_output_buffer`'s `FALSE` return and called `term_destination` anyway, silently dropping the post-suspension bytes. Architectural reality is that the deferred-encode shim cannot honor upstream's per-MCU streaming-suspension contract at `jpeg_write_scanlines` (no encoding happens there), so the closure invokes `cinfo->err->error_exit` with `JERR_CANT_SUSPEND` (upstream code 25, "Suspension not allowed here") rather than inventing a non-upstream resume contract; a `setjmp`/`longjmp` consumer recovers cleanly. The earlier P3-5 pattern #8 fix (2026-05-07) wired `jpeg_read_header` to invoke `error_exit` on EOI-terminated malformed input.
