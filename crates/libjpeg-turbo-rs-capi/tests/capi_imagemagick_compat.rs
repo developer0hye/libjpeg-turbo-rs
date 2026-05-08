@@ -83,6 +83,23 @@ fn imagemagick_binary() -> Option<(&'static str, PathBuf)> {
 /// Synthesise a deterministic PPM that covers smooth gradients + high
 /// frequency checker. Big enough (160x120) that quality-75 DCT loss is
 /// measurable but still well above the 30 dB PSNR floor.
+///
+/// **Luma-shared checker.** The previous fixture put an 8-pixel checker
+/// directly on the B channel (values 32 / 224, ±96 amplitude). That
+/// signal sits at the chroma Nyquist limit, so 4:2:0 subsampling — the
+/// ImageMagick default at quality=75 — could not recover it: stock
+/// `cjpeg -quality 75` + `djpeg` themselves got PSNR=22.47 dB on that
+/// fixture, below the 30 dB threshold this test asserts. The fixture
+/// was inherently incompatible with the threshold.
+///
+/// Fix: route the high-frequency modulation through luma instead of
+/// chroma. Adding the same `±32` offset to all three channels shifts
+/// `Y = 0.299·R + 0.587·G + 0.114·B` by `±32` while leaving Cb / Cr
+/// unchanged (the BT.601 chroma matrix coefficients sum to zero across
+/// `R,G,B`). Luma keeps its full bandwidth at 4:2:0, so the 8-pixel
+/// checker is a real mid-frequency Huffman / DCT stressor on the Y
+/// plane without aliasing through chroma. Stock cjpeg + djpeg now
+/// reaches ~41.7 dB on this fixture; cdylib parity targets the same.
 fn write_fixture_ppm(path: &Path) {
     const W: usize = 160;
     const H: usize = 120;
@@ -92,16 +109,21 @@ fn write_fixture_ppm(path: &Path) {
         for x in 0..W {
             // Smooth horizontal/vertical gradients on R/G so chroma
             // subsampling has real signal to lose and recover.
-            let r: u8 = ((x * 255) / (W - 1)) as u8;
-            let g: u8 = ((y * 255) / (H - 1)) as u8;
-            // Checker on B forces the encoder to keep some mid-frequency
-            // energy — if our Huffman tables are wrong we'll see blocks
-            // here and PSNR will crater.
-            let b: u8 = if ((x / 8) + (y / 8)) % 2 == 0 {
-                32
+            let r_grad: i16 = ((x * 255) / (W - 1)) as i16;
+            let g_grad: i16 = ((y * 255) / (H - 1)) as i16;
+            // Luma-shared checker: ±32 offset applied uniformly to
+            // R/G/B → ±32 modulation on Y, zero on Cb/Cr (the BT.601
+            // chroma coefficients sum to zero). Forces the encoder to
+            // keep mid-frequency luma energy without aliasing the
+            // 4:2:0 chroma planes.
+            let checker: i16 = if ((x / 8) + (y / 8)) % 2 == 0 {
+                -32
             } else {
-                224
+                32
             };
+            let r: u8 = (r_grad + checker).clamp(0, 255) as u8;
+            let g: u8 = (g_grad + checker).clamp(0, 255) as u8;
+            let b: u8 = (128 + checker).clamp(0, 255) as u8;
             buf.extend_from_slice(&[r, g, b]);
         }
     }
