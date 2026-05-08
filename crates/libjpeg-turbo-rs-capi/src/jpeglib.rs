@@ -3728,7 +3728,8 @@ pub extern "C" fn jpeg_read_raw_data(
 /// 12-bit raw-data decode is not implemented in this shim. Per
 /// libjpeg.txt §3 the failure routes through
 /// `cinfo->err->error_exit(cinfo)` with `msg_code = JERR_NOTIMPL`
-/// (upstream code 19) so a caller that installed a `setjmp`/`longjmp`
+/// (upstream code 48 at JPEG_LIB_VERSION=80) so a caller that
+/// installed a `setjmp`/`longjmp`
 /// handler recovers cleanly, and a caller without one falls through
 /// to the default `error_exit` (which aborts the process with a
 /// diagnostic on stderr — exactly what stock libjpeg would do for
@@ -6499,7 +6500,8 @@ fn run_raw_encoder_and_flush(c: &mut JpegCompressPublic, priv_state: &mut Compre
 /// 12-bit raw-data encode is out of scope for this implementation.
 /// Per libjpeg.txt §3 the failure routes through
 /// `cinfo->err->error_exit(cinfo)` with `msg_code = JERR_NOTIMPL`
-/// (upstream code 19) so a caller that installed a `setjmp`/`longjmp`
+/// (upstream code 48 at JPEG_LIB_VERSION=80) so a caller that
+/// installed a `setjmp`/`longjmp`
 /// handler recovers cleanly, and a caller without one falls through
 /// to the default `error_exit` (which aborts the process with a
 /// diagnostic on stderr — exactly what stock libjpeg would do for
