@@ -284,5 +284,34 @@ fn p3_6_rgb565_merged_decode_matches_djpeg_rgb_chain() {
             "{}: Rust merged+RGB565 != pack(djpeg -nosmooth RGB) — pixel divergence vs C",
             name,
         );
+
+        // Regression guard: enabling dither_565 alongside merged_upsample
+        // must NOT take the truncation-only merged branch. The shim
+        // doesn't ship a `*_565D` merged path yet; the gate must fall
+        // through to the slow dithered path so the dither setting is
+        // honored. Caught originally by codex review on the P3-6 commit.
+        let mut dec_dither =
+            libjpeg_turbo_rs::Decoder::new(&jpeg).expect("Decoder::new for dither path");
+        dec_dither.set_merged_upsample(true);
+        dec_dither.set_dither_565(true);
+        dec_dither.set_output_format(PixelFormat::Rgb565);
+        let dithered = dec_dither
+            .decode_image()
+            .expect("merged + dither_565 + RGB565 decode");
+        assert_eq!(
+            dithered.data.len(),
+            TEST_W * TEST_H * 2,
+            "{}: dither len",
+            name
+        );
+        // The dithered output must differ from the plain-truncation
+        // output for at least some pixels of a non-trivial gradient.
+        // (If they match, the dither pass was silently skipped.)
+        assert_ne!(
+            dithered.data, rust_565.data,
+            "{}: dither_565 + merged produced identical bytes to plain merged — \
+             dither setting was silently dropped (regression of P3-6 codex review)",
+            name,
+        );
     }
 }
