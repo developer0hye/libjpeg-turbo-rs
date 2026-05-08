@@ -3752,10 +3752,13 @@ pub extern "C" fn jpeg12_read_raw_data(
         )
         .unwrap_or_default();
     }
-    // upstream `JERR_NOTIMPL = 19` (jerror.h v8). Most consumer-installed
-    // `error_exit` handlers longjmp out and never return; the `0` below
-    // only fires for non-conforming handlers that return.
-    invoke_error_exit(cinfo, 19);
+    // upstream `JERR_NOTIMPL = 47` (jerror.h, JPEG_LIB_VERSION=80) —
+    // verified empirically by compiling a `printf("%d", JERR_NOTIMPL)`
+    // harness against `references/libjpeg-turbo/src/jerror.h`. Most
+    // consumer-installed `error_exit` handlers longjmp out and never
+    // return; the `0` below only fires for non-conforming handlers
+    // that return.
+    invoke_error_exit(cinfo, 47);
     0
 }
 
@@ -6510,10 +6513,13 @@ pub extern "C" fn jpeg12_write_raw_data(
             .unwrap_or_default();
         }
     }
-    // upstream `JERR_NOTIMPL = 19` (jerror.h v8). Most consumer-installed
-    // `error_exit` handlers longjmp out and never return; the `0` below
-    // only fires for non-conforming handlers that return.
-    invoke_error_exit(cinfo, 19);
+    // upstream `JERR_NOTIMPL = 47` (jerror.h, JPEG_LIB_VERSION=80) —
+    // verified empirically by compiling a `printf("%d", JERR_NOTIMPL)`
+    // harness against `references/libjpeg-turbo/src/jerror.h`. Most
+    // consumer-installed `error_exit` handlers longjmp out and never
+    // return; the `0` below only fires for non-conforming handlers
+    // that return.
+    invoke_error_exit(cinfo, 47);
     0
 }
 
