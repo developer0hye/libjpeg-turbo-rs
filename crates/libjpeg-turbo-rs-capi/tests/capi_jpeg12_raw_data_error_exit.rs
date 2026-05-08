@@ -1,7 +1,15 @@
 //! P3-2 regression: `jpeg12_read_raw_data` and `jpeg12_write_raw_data`
 //! must invoke `cinfo->err->error_exit(cinfo)` with
-//! `msg_code = JERR_NOTIMPL` (upstream code 19) instead of silently
-//! returning 0.
+//! `msg_code = JERR_NOTIMPL` (upstream code 47 at JPEG_LIB_VERSION=80)
+//! instead of silently returning 0.
+//!
+//! The exact value `47` is verified empirically by compiling a
+//! `printf("%d", JERR_NOTIMPL)` harness against
+//! `references/libjpeg-turbo/src/jerror.h`. The macro expansion order
+//! over `JMESSAGE(code, string) code,` is what the upstream message
+//! table indexes into via `format_message`, so a consumer comparing
+//! `msg_code` against the canonical `JERR_NOTIMPL` constant relies on
+//! this exact integer.
 //!
 //! Pre-fix history. Both stubs set `priv_state.last_error` and
 //! returned 0. The 0-return mimicked "no rows ready, retry later"
@@ -15,10 +23,10 @@
 //! calls the function under test with NULL data + 0 lines. The
 //! custom handler increments a per-test atomic and records
 //! `msg_code`; the test then asserts the handler fired exactly once
-//! with code 19 and the function fell through to `0` (the
+//! with code 47 and the function fell through to `0` (the
 //! defensive return-when-handler-returns path).
 //!
-//! TDD-verified. Removing the `invoke_error_exit(cinfo, 19)` line
+//! TDD-verified. Removing the `invoke_error_exit(cinfo, 47)` line
 //! in either `jpeg12_*_raw_data` makes the corresponding test
 //! red-fail with `error_exit fired 0 times, expected 1`. Restoring
 //! the line returns to GREEN.
@@ -143,7 +151,7 @@ fn jpeg12_read_raw_data_invokes_error_exit_with_jerr_notimpl() {
     // test never reads further into the struct because:
     //   * `decompress_private_raw` returns NULL (no thread-local entry).
     //   * `priv_from_ptr(NULL)` returns None — the if-let is skipped.
-    //   * Control flows directly to `invoke_error_exit(cinfo, 19)`.
+    //   * Control flows directly to `invoke_error_exit(cinfo, 47)`.
     // 1024 bytes is comfortably larger than `JpegDecompressPublic`.
     let mut cinfo_buf: [u8; 1024] = [0u8; 1024];
     unsafe {
@@ -163,8 +171,8 @@ fn jpeg12_read_raw_data_invokes_error_exit_with_jerr_notimpl() {
     );
     assert_eq!(
         GOT_READ_MSG_CODE.load(Ordering::SeqCst),
-        19,
-        "msg_code = {}, expected upstream JERR_NOTIMPL (19)",
+        47,
+        "msg_code = {}, expected upstream JERR_NOTIMPL (47)",
         GOT_READ_MSG_CODE.load(Ordering::SeqCst),
     );
     assert_eq!(
@@ -217,8 +225,8 @@ fn jpeg12_write_raw_data_invokes_error_exit_with_jerr_notimpl() {
     );
     assert_eq!(
         GOT_WRITE_MSG_CODE.load(Ordering::SeqCst),
-        19,
-        "msg_code = {}, expected upstream JERR_NOTIMPL (19)",
+        47,
+        "msg_code = {}, expected upstream JERR_NOTIMPL (47)",
         GOT_WRITE_MSG_CODE.load(Ordering::SeqCst),
     );
     assert_eq!(
