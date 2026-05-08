@@ -3752,13 +3752,23 @@ pub extern "C" fn jpeg12_read_raw_data(
         )
         .unwrap_or_default();
     }
-    // upstream `JERR_NOTIMPL = 47` (jerror.h, JPEG_LIB_VERSION=80) —
-    // verified empirically by compiling a `printf("%d", JERR_NOTIMPL)`
-    // harness against `references/libjpeg-turbo/src/jerror.h`. Most
-    // consumer-installed `error_exit` handlers longjmp out and never
-    // return; the `0` below only fires for non-conforming handlers
-    // that return.
-    invoke_error_exit(cinfo, 47);
+    // upstream `JERR_NOTIMPL = 48` at `JPEG_LIB_VERSION=80` — verified
+    // empirically by compiling
+    //   `cc -DJPEG_LIB_VERSION=80 -I references/libjpeg-turbo/src
+    //    /tmp/probe.c`
+    // where `/tmp/probe.c` is a `printf("%d", JERR_NOTIMPL)` harness
+    // built around `#define JMESSAGE(code, string) code,` +
+    // `#include "jerror.h"`. The version define matters: leaving
+    // `JPEG_LIB_VERSION` undefined (or pinning it to v6) shifts the
+    // enum by one to 47 because v8 added one entry earlier in the
+    // file. The shim's installed `jconfig.h` pins
+    // `#define JPEG_LIB_VERSION 80`, so v8 is the authoritative
+    // surface a downstream consumer compiles against.
+    //
+    // Most consumer-installed `error_exit` handlers longjmp out and
+    // never return; the `0` below only fires for non-conforming
+    // handlers that return.
+    invoke_error_exit(cinfo, 48);
     0
 }
 
@@ -6513,13 +6523,16 @@ pub extern "C" fn jpeg12_write_raw_data(
             .unwrap_or_default();
         }
     }
-    // upstream `JERR_NOTIMPL = 47` (jerror.h, JPEG_LIB_VERSION=80) —
-    // verified empirically by compiling a `printf("%d", JERR_NOTIMPL)`
-    // harness against `references/libjpeg-turbo/src/jerror.h`. Most
-    // consumer-installed `error_exit` handlers longjmp out and never
-    // return; the `0` below only fires for non-conforming handlers
-    // that return.
-    invoke_error_exit(cinfo, 47);
+    // upstream `JERR_NOTIMPL = 48` at `JPEG_LIB_VERSION=80` — see
+    // companion comment on `jpeg12_read_raw_data` above for the
+    // empirical-verification recipe and the `JPEG_LIB_VERSION`
+    // sensitivity (omitting the define yields 47, which is wrong for
+    // the v8 surface the shim's `jconfig.h` pins).
+    //
+    // Most consumer-installed `error_exit` handlers longjmp out and
+    // never return; the `0` below only fires for non-conforming
+    // handlers that return.
+    invoke_error_exit(cinfo, 48);
     0
 }
 
