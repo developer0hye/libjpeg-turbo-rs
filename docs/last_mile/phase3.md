@@ -1,6 +1,6 @@
-# Phase 3 — Long-Tail C Compatibility (3 OPEN items)
+# Phase 3 — Long-Tail C Compatibility (0 OPEN items; P3-1/P3-2 PARTIAL)
 
-> **Index:** [docs/LAST_MILE.md](../LAST_MILE.md). This phase has open work — keep this file in mind when planning new gaps.
+> **Index:** [docs/LAST_MILE.md](../LAST_MILE.md). This phase has no fully-OPEN items left — P3-1 and P3-2 retain narrow PARTIAL scope-tracking notes for follow-ups gated on downstream demand.
 
 External review on 2026-05-06 (`libjpeg_turbo_rs_replacement_analysis.md`) graded the project's *Rust-application replacement* and *stock-tool drop-in* posture as ready, but flagged a long-tail of C-compatibility gaps that block the stronger claim "**any existing C binary linked against `libjpeg.so` / `libturbojpeg.so` runs unchanged**." Six of the seven gaps reproduce in this repository today. The seventh — `libjpeg.so.62` SONAME policy — is already closed under [P2-9](phase2.md#p2-9-v6b--v7--v8-abi-compatibility-matrix--closed) and is not re-listed here.
 
@@ -15,7 +15,7 @@ For each item below, the **agreement** line states whether the gap is reproducib
 | P3-3 | CLOSED 2026-05-06 |
 | P3-4 | CLOSED 2026-05-07 |
 | P3-5 | CLOSED 2026-05-08 |
-| **P3-6** | **OPEN** (P2 priority — narrow consumer impact) |
+| P3-6 | CLOSED 2026-05-08 |
 
 ---
 
@@ -195,16 +195,28 @@ The closure title reflects the actual delta: stub *semantics* moved from "silent
 
 ---
 
-## P3-6. Non-Standard Sampling / RGB565 Merged-Upsample — **OPEN (P2 priority)**
+## P3-6. Non-Standard Sampling / RGB565 Merged-Upsample — **CLOSED 2026-05-08**
 
-**Agreement:** verified partially open. `src/encode/pipeline.rs:9952` claims support for "non-standard sampling configurations such as 3x2, 3x1, 1x3"; `src/decode/pipeline.rs:18` and `src/decode/color.rs:98+98` cover RGB565 + dithered RGB565 *output*, but the **merged-upsample** SIMD path (`jdmrgext-sse2.asm` / `jdmrgext-avx2.asm` in upstream) is not wired against the RGB565 output type, and there is no fixture matrix verifying 3x2 sampling decode/encode round-trip against C.
+**Status (2026-05-08): closed.** All four minimum-coverage fixtures land in `tests/cross_check_p3_6_nonstandard_rgb565.rs`:
 
-**Why this matters:** lower priority than P3-1..P3-5 because the consumer demand is narrower (classic `jpeglib.h` callers that override `comp_info[i].h_samp_factor` / `v_samp_factor` to non-power-of-two values, plus embedded-display callers using RGB565). Still a real parity gap if "anything `cjpeg` / `djpeg` accepts must round-trip through us" is the goal.
+- **3x2 decode** — `cjpeg -sample 3x2,1x1,1x1` produces a JPEG; Rust decode pixel-identical to `djpeg`.
+- **3x2 encode** — Rust encodes at `(3,2)/(1,1)/(1,1)`; `djpeg` decode of Rust's output is within `max_diff ≤ 8` of the `cjpeg`+`djpeg` reference pipeline (lossy-encode quantization tolerance).
+- **3x1 decode** — `cjpeg -sample 3x1,1x1,1x1` produces a JPEG; Rust decode pixel-identical to `djpeg`.
+- **RGB565 merged-upsample** — Rust `merged_upsample=true + RGB565` for S420/S422 byte-identical to `djpeg -nosmooth RGB → 5-6-5 truncate` chain.
 
-**Acceptance (minimum, not a full sweep):**
-- One fixture per: `3x2` decode, `3x2` encode, `3x1` decode, RGB565 merged-upsample (encode → decode through merged path).
-- Cross-validate against upstream `cjpeg -sample 3x2,1x1,1x1` and `djpeg -rgb565`.
-- If gaps remain after that minimum is in, document them in `docs/FEATURE_PARITY.md` rather than silently passing.
+**Shim fix landed alongside the RGB565 fixture (2026-05-08).** The merged-upsample gate at `src/decode/pipeline.rs::Decoder::decode` previously bound `out_format == PixelFormat::Rgb`, so `set_merged_upsample(true) + Rgb565` silently fell through to the slow path. Fix: lift the gate to also accept `Rgb565` and route the merged kernel's RGB output through a 5-6-5 truncation pass (matches upstream's `jdmrgext-*-565` semantics for the no-dither case). The dedicated SIMD `_565` kernels remain a Phase 4 perf task — the current path keeps the SIMD merged conversion to RGB and packs to RGB565 in scalar; pixel-correctness is unaffected.
+
+**`cjpeg -sample 3x2,1x1,1x1` baseline.** The non-standard sampling factor matrix at the C cross-check now covers (3,2)/(1,1)/(1,1) and (3,1)/(1,1)/(1,1) — the two configurations the upstream documentation explicitly calls out as "non-standard" while still being valid per ITU-T T.81 Annex B (max sampling factor ≤ 4, sum of products ≤ 10).
+
+**Closure delta:**
+- `src/decode/pipeline.rs::Decoder::decode` — widen the merged-upsample gate from `out_format == PixelFormat::Rgb` to `Rgb || Rgb565`; pack RGB → RGB565 LE after the merged kernel runs.
+- `tests/cross_check_p3_6_nonstandard_rgb565.rs` — new file with 4 fixtures matching the acceptance bar.
+- `docs/FEATURE_PARITY.md` — update the "Merged upsampling" entry to reflect RGB + RGB565 wiring and call out the deferred SIMD `_565` kernels.
+
+**Acceptance (historical):**
+- ~~One fixture per: `3x2` decode, `3x2` encode, `3x1` decode, RGB565 merged-upsample (encode → decode through merged path).~~ **Done** — see test file above.
+- ~~Cross-validate against upstream `cjpeg -sample 3x2,1x1,1x1` and `djpeg -rgb565`.~~ **Done** — `cjpeg -sample` for the 3x cases; `djpeg -nosmooth` for the merged-RGB565 chain (djpeg's `-rgb565` flag emits 24-bpp BMP, not a comparable raw 16-bpp file, so the chain via RGB → 5-6-5 truncation is the byte-comparable form).
+- ~~If gaps remain after that minimum is in, document them in `docs/FEATURE_PARITY.md`.~~ **Done** — the deferred dedicated `_565` SIMD kernels are recorded there as a Phase 4 perf task.
 
 ---
 
@@ -215,6 +227,6 @@ The closure title reflects the actual delta: stub *semantics* moved from "silent
 3. ~~**P3-2** — Either implement `jpeg12_write_raw_data` / `jpeg12_read_raw_data` against the existing 12-bit encode/decode backend, or downgrade them to feature-gated absence. The "stub returning 0" middle ground must end.~~ **PARTIAL 2026-05-06** — middle ground eliminated: stubs now invoke `cinfo->err->error_exit(cinfo)` with `msg_code = JERR_NOTIMPL`, so callers either longjmp out cleanly or hit a default abort. Full 12-bit raw-data backend deferred to Phase 4 (gated on downstream demand).
 4. ~~**P3-5** — Classic `jpeglib.h` lifecycle / custom-I/O / suspension C harness (≥ 8 tests).~~ **CLOSED 2026-05-08** — all 8 patterns active in `crates/libjpeg-turbo-rs-capi/tests/capi_classic_lifecycle.rs` (custom src/dst mgr, source suspension, destination-suspension `JERR_CANT_SUSPEND` contract, abort+reuse for both decompress/compress, buffered-image multi-pass, setjmp/longjmp). Pattern #4 surfaced + fixed a real shim defect: `push_bytes_through_dest_mgr` previously ignored `empty_output_buffer`'s `FALSE` return and called `term_destination` anyway, silently dropping the post-suspension bytes. Architectural reality is that the deferred-encode shim cannot honor upstream's per-MCU streaming-suspension contract at `jpeg_write_scanlines` (no encoding happens there), so the closure invokes `cinfo->err->error_exit` with `JERR_CANT_SUSPEND` (upstream code 25, "Suspension not allowed here") rather than inventing a non-upstream resume contract; a `setjmp`/`longjmp` consumer recovers cleanly. The earlier P3-5 pattern #8 fix (2026-05-07) wired `jpeg_read_header` to invoke `error_exit` on EOI-terminated malformed input.
 5. ~~**P3-4** — Lift the 4-pixel chroma transform writer gate; close the P2-12 follow-up.~~ **CLOSED 2026-05-07** — gate at `transform_jpeg_with_options::progressive_safe` widened from `max_{h,v} ≤ 2` to `max_{h,v} ∈ {1,2,4}` (the eight standard TJSAMP factors verified by `c_tjtrantest_full`); `tests/c_tjtrantest.rs` skip removed; regression pinned in `tests/regression_progressive_4pixel_chroma_transform.rs` (256 cases). Full matrix runs 12,230 cases without divergence. The 2026-05-07 "1-LSB drift" hypothesis turned out to be an artefact of the encoder-side clamp that P2-11 had already removed; the transform writer inherits the corrected chroma layout via `read_coefficients`. Non-standard 3x sampling stays gated to baseline pending P3-6.
-6. **P3-6** — Non-standard sampling / RGB565 merged-upsample minimum fixture set. P2 priority; do only if a downstream consumer requests it or after 1–5 are clean.
+6. ~~**P3-6** — Non-standard sampling / RGB565 merged-upsample minimum fixture set.~~ **CLOSED 2026-05-08** — 4 fixtures (3x2 decode, 3x2 encode, 3x1 decode, RGB565 merged-upsample) all green in `tests/cross_check_p3_6_nonstandard_rgb565.rs`. Shim fix: merged-upsample gate widened from `Rgb` to `Rgb || Rgb565` with a 5-6-5 truncation pass after the merged kernel; dedicated `_565` SIMD kernels deferred as a Phase 4 perf task.
 
 The order is intentional: P3-1 is the cheapest blast-radius reduction (one test file expansion catches a whole class of encode-side ABI drift); P3-3 is the most valuable gate-removal (19 symbols disappear from "trust me" status); P3-2 fixes a specific stub; P3-5 is structural but expensive; P3-4 / P3-6 are correctness gaps with narrower consumer impact.

@@ -3741,12 +3741,22 @@ impl<'a> Decoder<'a> {
                 // Only available when both chroma components have the same sampling factors.
                 if self.merged_upsample
                     && uniform_chroma
-                    && out_format == PixelFormat::Rgb
+                    && (out_format == PixelFormat::Rgb || out_format == PixelFormat::Rgb565)
                     && h_factor == 2
                     && (v_factor == 1 || v_factor == 2)
                 {
-                    let data_size: usize = out_width * out_height * bpp;
-                    let mut data: Vec<u8> = vec![0u8; data_size];
+                    // The merged kernels produce RGB at bpp=3. RGB565 output
+                    // routes through an intermediate RGB buffer + 5-6-5
+                    // truncation; this preserves the merged-upsample SIMD
+                    // hot path and matches upstream's `_565` jdmerge.c
+                    // semantics (truncation, no dither — dither lives in
+                    // the non-merged dithered path). P3-6 acceptance asks
+                    // for a minimum fixture, not a full sweep, so the
+                    // dedicated `_565` SIMD kernels (jdmrgext-*-565) are
+                    // deferred to a Phase 4 perf task.
+                    let merged_bpp: usize = 3;
+                    let merged_size: usize = out_width * out_height * merged_bpp;
+                    let mut merged_rgb: Vec<u8> = vec![0u8; merged_size];
 
                     if v_factor == 1 {
                         // H2V1 (4:2:2): one chroma row per Y row
@@ -3755,7 +3765,7 @@ impl<'a> Decoder<'a> {
                                 &y_plane[y * y_width + comp_x_offsets[0]..],
                                 &component_planes[1][y * cb_w + comp_x_offsets[1]..],
                                 &component_planes[2][y * cb_w + comp_x_offsets[2]..],
-                                &mut data[y * out_width * bpp..],
+                                &mut merged_rgb[y * out_width * merged_bpp..],
                                 out_width,
                             );
                         }
@@ -3766,10 +3776,9 @@ impl<'a> Decoder<'a> {
                             let y0: usize = pair * 2;
                             let y1: usize = pair * 2 + 1;
                             let chroma_row: usize = pair;
-                            let out0_start: usize = y0 * out_width * bpp;
-                            let out1_start: usize = y1 * out_width * bpp;
-                            // Split data into two non-overlapping mutable slices
-                            let (top, bottom) = data.split_at_mut(out1_start);
+                            let out0_start: usize = y0 * out_width * merged_bpp;
+                            let out1_start: usize = y1 * out_width * merged_bpp;
+                            let (top, bottom) = merged_rgb.split_at_mut(out1_start);
                             Self::merged_h2v2(
                                 &y_plane[y0 * y_width + comp_x_offsets[0]..],
                                 &y_plane[y1 * y_width + comp_x_offsets[0]..],
@@ -3780,7 +3789,6 @@ impl<'a> Decoder<'a> {
                                 out_width,
                             );
                         }
-                        // Handle odd height: last row uses H2V1 with last chroma row
                         if out_height & 1 != 0 {
                             let last_y: usize = out_height - 1;
                             let chroma_row: usize = last_y / 2;
@@ -3788,11 +3796,29 @@ impl<'a> Decoder<'a> {
                                 &y_plane[last_y * y_width + comp_x_offsets[0]..],
                                 &component_planes[1][chroma_row * cb_w + comp_x_offsets[1]..],
                                 &component_planes[2][chroma_row * cb_w + comp_x_offsets[2]..],
-                                &mut data[last_y * out_width * bpp..],
+                                &mut merged_rgb[last_y * out_width * merged_bpp..],
                                 out_width,
                             );
                         }
                     }
+
+                    let data: Vec<u8> = if out_format == PixelFormat::Rgb {
+                        merged_rgb
+                    } else {
+                        // RGB565 little-endian: word = (R5 << 11) | (G6 << 5) | B5,
+                        // with 5-6-5 truncation matching upstream.
+                        let mut packed: Vec<u8> = vec![0u8; out_width * out_height * bpp];
+                        for i in 0..(out_width * out_height) {
+                            let r: u16 = merged_rgb[i * 3] as u16;
+                            let g: u16 = merged_rgb[i * 3 + 1] as u16;
+                            let b: u16 = merged_rgb[i * 3 + 2] as u16;
+                            let word: u16 = ((r >> 3) << 11) | ((g >> 2) << 5) | (b >> 3);
+                            let bytes = word.to_le_bytes();
+                            packed[i * 2] = bytes[0];
+                            packed[i * 2 + 1] = bytes[1];
+                        }
+                        packed
+                    };
 
                     return Ok(Image {
                         width: out_width,
