@@ -16,7 +16,7 @@ Project is **replacement-ready** for the Rust-application + stock-tool drop-in s
 
 | Check | Result |
 | --- | --- |
-| `cargo test --workspace --release` | **Passes** product-path — 2149 tests, 0 product failures, 1 ignored (one pre-existing capi `imagemagick_roundtrips_through_our_cdylib` PSNR regression tracked under `docs/fix-arith-contradiction`). |
+| `cargo test --workspace --release` | **Passes** — 2150 tests, 0 failures, 1 ignored (one slow release-only stress test). |
 | `cargo test -p libjpeg-turbo-rs --test cross_product_transform` | **Passes** all 12 cases. P0-1 closed. |
 | `cargo test -p libjpeg-turbo-rs --test regression_progressive_4pixel_chroma_transform` | **Passes** 256 cases byte-exact vs `jpegtran -progressive -copy all <op>`. P3-4 closed. |
 | `cargo test --test cross_check_p3_6_nonstandard_rgb565` | **Passes** 4 fixtures: 3x2 decode (vs `djpeg`), 3x2 encode (vs `cjpeg -sample 3x2,1x1,1x1` + `djpeg`), 3x1 decode, RGB565 merged-upsample (vs `djpeg -nosmooth` + 5-6-5 truncate chain). P3-6 closed. |
