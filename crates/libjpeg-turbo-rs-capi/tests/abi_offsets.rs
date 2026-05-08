@@ -378,3 +378,427 @@ fn rust_offsets_match_jpeg_marker_struct_at_lib_version_80() {
     let rust_sizeof: usize = std::mem::size_of::<JpegMarkerStructPublic>();
     assert_no_drift("jpeg_marker_struct", &rust_fields, rust_sizeof, &probe);
 }
+
+// ---------------------------------------------------------------------------
+// `struct jpeg_destination_mgr` cross-check (P3-1 deferred work).
+// ---------------------------------------------------------------------------
+//
+// Mirrors `JpegDestinationMgr` in `jpeglib.rs`. C consumers that build a
+// custom destination manager (e.g. an in-memory ring buffer) write
+// `next_output_byte` and `free_in_buffer` at offsets 0 and 8 (LP64), so a
+// layout drift here surfaces as garbled output rather than an obvious
+// crash.
+
+fn rust_offsets_destination_mgr() -> Vec<(&'static str, usize)> {
+    use libjpeg_turbo_rs_capi::jpeglib::JpegDestinationMgr;
+    use std::mem::offset_of;
+
+    vec![
+        (
+            "next_output_byte",
+            offset_of!(JpegDestinationMgr, next_output_byte),
+        ),
+        (
+            "free_in_buffer",
+            offset_of!(JpegDestinationMgr, free_in_buffer),
+        ),
+        (
+            "init_destination",
+            offset_of!(JpegDestinationMgr, init_destination),
+        ),
+        (
+            "empty_output_buffer",
+            offset_of!(JpegDestinationMgr, empty_output_buffer),
+        ),
+        (
+            "term_destination",
+            offset_of!(JpegDestinationMgr, term_destination),
+        ),
+    ]
+}
+
+#[test]
+fn rust_offsets_match_jpeg_destination_mgr_at_lib_version_80() {
+    use libjpeg_turbo_rs_capi::jpeglib::JpegDestinationMgr;
+
+    let rust_fields: Vec<(&'static str, usize)> = rust_offsets_destination_mgr();
+    let names: Vec<&str> = rust_fields.iter().map(|(n, _)| *n).collect();
+    let probe: CcProbeResult = match cc_offsetof_for_struct("jpeg_destination_mgr", &names) {
+        CcProbeOutcome::Ok(r) => r,
+        CcProbeOutcome::Skip(why) => {
+            eprintln!("SKIP: {why}");
+            return;
+        }
+    };
+    let rust_sizeof: usize = std::mem::size_of::<JpegDestinationMgr>();
+    assert_no_drift("jpeg_destination_mgr", &rust_fields, rust_sizeof, &probe);
+}
+
+// ---------------------------------------------------------------------------
+// `struct jpeg_source_mgr` cross-check (P3-1 deferred work).
+// ---------------------------------------------------------------------------
+//
+// Mirrors `JpegSourceMgr` in `jpeglib.rs`. The classic streaming-decode
+// pattern (`fill_input_buffer` returning `FALSE` for I/O suspension) reads
+// `bytes_in_buffer` and `next_input_byte` at well-known offsets; the
+// `resync_to_restart` callback at offset ~40 is what `jpeg_resync_to_restart`
+// dispatches into. Layout drift here breaks every consumer that ships its
+// own source manager.
+
+fn rust_offsets_source_mgr() -> Vec<(&'static str, usize)> {
+    use libjpeg_turbo_rs_capi::jpeglib::JpegSourceMgr;
+    use std::mem::offset_of;
+
+    vec![
+        (
+            "next_input_byte",
+            offset_of!(JpegSourceMgr, next_input_byte),
+        ),
+        (
+            "bytes_in_buffer",
+            offset_of!(JpegSourceMgr, bytes_in_buffer),
+        ),
+        ("init_source", offset_of!(JpegSourceMgr, init_source)),
+        (
+            "fill_input_buffer",
+            offset_of!(JpegSourceMgr, fill_input_buffer),
+        ),
+        (
+            "skip_input_data",
+            offset_of!(JpegSourceMgr, skip_input_data),
+        ),
+        (
+            "resync_to_restart",
+            offset_of!(JpegSourceMgr, resync_to_restart),
+        ),
+        ("term_source", offset_of!(JpegSourceMgr, term_source)),
+    ]
+}
+
+#[test]
+fn rust_offsets_match_jpeg_source_mgr_at_lib_version_80() {
+    use libjpeg_turbo_rs_capi::jpeglib::JpegSourceMgr;
+
+    let rust_fields: Vec<(&'static str, usize)> = rust_offsets_source_mgr();
+    let names: Vec<&str> = rust_fields.iter().map(|(n, _)| *n).collect();
+    let probe: CcProbeResult = match cc_offsetof_for_struct("jpeg_source_mgr", &names) {
+        CcProbeOutcome::Ok(r) => r,
+        CcProbeOutcome::Skip(why) => {
+            eprintln!("SKIP: {why}");
+            return;
+        }
+    };
+    let rust_sizeof: usize = std::mem::size_of::<JpegSourceMgr>();
+    assert_no_drift("jpeg_source_mgr", &rust_fields, rust_sizeof, &probe);
+}
+
+// ---------------------------------------------------------------------------
+// `struct jpeg_error_mgr` cross-check (P3-1 deferred work).
+// ---------------------------------------------------------------------------
+//
+// Mirrors `JpegErrorMgr` in `jpeglib.rs`. The classic libjpeg consumer
+// pattern is to override `error_exit` (offset 0) with a `setjmp`/`longjmp`
+// handler and inspect `msg_code` (offset 40 LP64) plus `msg_parm` (offset 44)
+// for diagnostics. Layout drift here turns recoverable errors into
+// process-aborting bugs in any consumer that walks these fields by name.
+//
+// `msg_parm` is a `union { int i[8]; char s[80]; }` upstream; the Rust
+// mirror reserves the larger arm (`[u8; 80]`) so `mem::size_of` matches
+// the union's storage.
+
+fn rust_offsets_error_mgr() -> Vec<(&'static str, usize)> {
+    use libjpeg_turbo_rs_capi::jpeglib::JpegErrorMgr;
+    use std::mem::offset_of;
+
+    vec![
+        ("error_exit", offset_of!(JpegErrorMgr, error_exit)),
+        ("emit_message", offset_of!(JpegErrorMgr, emit_message)),
+        ("output_message", offset_of!(JpegErrorMgr, output_message)),
+        ("format_message", offset_of!(JpegErrorMgr, format_message)),
+        ("reset_error_mgr", offset_of!(JpegErrorMgr, reset_error_mgr)),
+        ("msg_code", offset_of!(JpegErrorMgr, msg_code)),
+        ("msg_parm", offset_of!(JpegErrorMgr, msg_parm)),
+        ("trace_level", offset_of!(JpegErrorMgr, trace_level)),
+        ("num_warnings", offset_of!(JpegErrorMgr, num_warnings)),
+        (
+            "jpeg_message_table",
+            offset_of!(JpegErrorMgr, jpeg_message_table),
+        ),
+        (
+            "last_jpeg_message",
+            offset_of!(JpegErrorMgr, last_jpeg_message),
+        ),
+        (
+            "addon_message_table",
+            offset_of!(JpegErrorMgr, addon_message_table),
+        ),
+        (
+            "first_addon_message",
+            offset_of!(JpegErrorMgr, first_addon_message),
+        ),
+        (
+            "last_addon_message",
+            offset_of!(JpegErrorMgr, last_addon_message),
+        ),
+    ]
+}
+
+#[test]
+fn rust_offsets_match_jpeg_error_mgr_at_lib_version_80() {
+    use libjpeg_turbo_rs_capi::jpeglib::JpegErrorMgr;
+
+    let rust_fields: Vec<(&'static str, usize)> = rust_offsets_error_mgr();
+    let names: Vec<&str> = rust_fields.iter().map(|(n, _)| *n).collect();
+    let probe: CcProbeResult = match cc_offsetof_for_struct("jpeg_error_mgr", &names) {
+        CcProbeOutcome::Ok(r) => r,
+        CcProbeOutcome::Skip(why) => {
+            eprintln!("SKIP: {why}");
+            return;
+        }
+    };
+    let rust_sizeof: usize = std::mem::size_of::<JpegErrorMgr>();
+    assert_no_drift("jpeg_error_mgr", &rust_fields, rust_sizeof, &probe);
+}
+
+// ---------------------------------------------------------------------------
+// `struct jpeg_compress_struct` cross-check (P3-1 deferred work).
+// ---------------------------------------------------------------------------
+//
+// Mirrors `JpegCompressPublic` in `jpeglib.rs`. This is the encoder-side
+// counterpart to the `jpeg_decompress_struct` cross-check at the top of
+// this file; cjpeg, GIMP's plugin, and a long tail of distro consumers
+// read fields like `image_width` / `data_precision` / `comp_info` /
+// `optimize_coding` directly through this struct, so any field-order or
+// `JPEG_LIB_VERSION ≥ 70`/`≥ 80` drift surfaces as silently corrupted
+// encode parameters rather than a clean error.
+//
+// Field-name mapping note. The Rust mirror calls the
+// `struct jpeg_c_main_controller *` slot `main_ctrl` (the C-side name
+// `main` collides with Rust's `main` identifier in some scopes); the
+// cross-check maps the upstream `main` field to the Rust `main_ctrl` mirror
+// via the `(c_field_name, rust_offset)` tuple — same pattern the existing
+// `cc_offsetof_for_struct` helper uses, so the harness can keep reading
+// `offsetof(struct jpeg_compress_struct, main)` against the upstream
+// header while comparing to `offset_of!(JpegCompressPublic, main_ctrl)`.
+
+#[allow(non_snake_case)]
+fn rust_offsets_compress() -> Vec<(&'static str, usize)> {
+    use libjpeg_turbo_rs_capi::jpeglib::JpegCompressPublic;
+    use std::mem::offset_of;
+
+    vec![
+        // jpeg_common_fields prefix (offset 0..40 LP64).
+        ("err", offset_of!(JpegCompressPublic, err)),
+        ("mem", offset_of!(JpegCompressPublic, mem)),
+        ("progress", offset_of!(JpegCompressPublic, progress)),
+        ("client_data", offset_of!(JpegCompressPublic, client_data)),
+        (
+            "is_decompressor",
+            offset_of!(JpegCompressPublic, is_decompressor),
+        ),
+        ("global_state", offset_of!(JpegCompressPublic, global_state)),
+        // Compressor-specific.
+        ("dest", offset_of!(JpegCompressPublic, dest)),
+        ("image_width", offset_of!(JpegCompressPublic, image_width)),
+        ("image_height", offset_of!(JpegCompressPublic, image_height)),
+        (
+            "input_components",
+            offset_of!(JpegCompressPublic, input_components),
+        ),
+        (
+            "in_color_space",
+            offset_of!(JpegCompressPublic, in_color_space),
+        ),
+        ("input_gamma", offset_of!(JpegCompressPublic, input_gamma)),
+        // JPEG_LIB_VERSION ≥ 70.
+        ("scale_num", offset_of!(JpegCompressPublic, scale_num)),
+        ("scale_denom", offset_of!(JpegCompressPublic, scale_denom)),
+        ("jpeg_width", offset_of!(JpegCompressPublic, jpeg_width)),
+        ("jpeg_height", offset_of!(JpegCompressPublic, jpeg_height)),
+        // Primary compression parameters.
+        (
+            "data_precision",
+            offset_of!(JpegCompressPublic, data_precision),
+        ),
+        (
+            "num_components",
+            offset_of!(JpegCompressPublic, num_components),
+        ),
+        (
+            "jpeg_color_space",
+            offset_of!(JpegCompressPublic, jpeg_color_space),
+        ),
+        ("comp_info", offset_of!(JpegCompressPublic, comp_info)),
+        // Quantization / Huffman tables.
+        (
+            "quant_tbl_ptrs",
+            offset_of!(JpegCompressPublic, quant_tbl_ptrs),
+        ),
+        (
+            "q_scale_factor",
+            offset_of!(JpegCompressPublic, q_scale_factor),
+        ),
+        (
+            "dc_huff_tbl_ptrs",
+            offset_of!(JpegCompressPublic, dc_huff_tbl_ptrs),
+        ),
+        (
+            "ac_huff_tbl_ptrs",
+            offset_of!(JpegCompressPublic, ac_huff_tbl_ptrs),
+        ),
+        // Arithmetic-coding tables.
+        ("arith_dc_L", offset_of!(JpegCompressPublic, arith_dc_L)),
+        ("arith_dc_U", offset_of!(JpegCompressPublic, arith_dc_U)),
+        ("arith_ac_K", offset_of!(JpegCompressPublic, arith_ac_K)),
+        // Scan scripting.
+        ("num_scans", offset_of!(JpegCompressPublic, num_scans)),
+        ("scan_info", offset_of!(JpegCompressPublic, scan_info)),
+        // Boolean compression options.
+        ("raw_data_in", offset_of!(JpegCompressPublic, raw_data_in)),
+        ("arith_code", offset_of!(JpegCompressPublic, arith_code)),
+        (
+            "optimize_coding",
+            offset_of!(JpegCompressPublic, optimize_coding),
+        ),
+        (
+            "CCIR601_sampling",
+            offset_of!(JpegCompressPublic, CCIR601_sampling),
+        ),
+        (
+            "do_fancy_downsampling",
+            offset_of!(JpegCompressPublic, do_fancy_downsampling),
+        ),
+        (
+            "smoothing_factor",
+            offset_of!(JpegCompressPublic, smoothing_factor),
+        ),
+        ("dct_method", offset_of!(JpegCompressPublic, dct_method)),
+        // Restart marker control.
+        (
+            "restart_interval",
+            offset_of!(JpegCompressPublic, restart_interval),
+        ),
+        (
+            "restart_in_rows",
+            offset_of!(JpegCompressPublic, restart_in_rows),
+        ),
+        // JFIF / Adobe marker emission parameters.
+        (
+            "write_JFIF_header",
+            offset_of!(JpegCompressPublic, write_JFIF_header),
+        ),
+        (
+            "JFIF_major_version",
+            offset_of!(JpegCompressPublic, JFIF_major_version),
+        ),
+        (
+            "JFIF_minor_version",
+            offset_of!(JpegCompressPublic, JFIF_minor_version),
+        ),
+        ("density_unit", offset_of!(JpegCompressPublic, density_unit)),
+        ("X_density", offset_of!(JpegCompressPublic, X_density)),
+        ("Y_density", offset_of!(JpegCompressPublic, Y_density)),
+        (
+            "write_Adobe_marker",
+            offset_of!(JpegCompressPublic, write_Adobe_marker),
+        ),
+        // State variable.
+        (
+            "next_scanline",
+            offset_of!(JpegCompressPublic, next_scanline),
+        ),
+        // Computed at startup.
+        (
+            "progressive_mode",
+            offset_of!(JpegCompressPublic, progressive_mode),
+        ),
+        (
+            "max_h_samp_factor",
+            offset_of!(JpegCompressPublic, max_h_samp_factor),
+        ),
+        (
+            "max_v_samp_factor",
+            offset_of!(JpegCompressPublic, max_v_samp_factor),
+        ),
+        (
+            "min_DCT_h_scaled_size",
+            offset_of!(JpegCompressPublic, min_DCT_h_scaled_size),
+        ),
+        (
+            "min_DCT_v_scaled_size",
+            offset_of!(JpegCompressPublic, min_DCT_v_scaled_size),
+        ),
+        (
+            "total_iMCU_rows",
+            offset_of!(JpegCompressPublic, total_iMCU_rows),
+        ),
+        // Per-scan state.
+        (
+            "comps_in_scan",
+            offset_of!(JpegCompressPublic, comps_in_scan),
+        ),
+        (
+            "cur_comp_info",
+            offset_of!(JpegCompressPublic, cur_comp_info),
+        ),
+        ("MCUs_per_row", offset_of!(JpegCompressPublic, MCUs_per_row)),
+        (
+            "MCU_rows_in_scan",
+            offset_of!(JpegCompressPublic, MCU_rows_in_scan),
+        ),
+        (
+            "blocks_in_MCU",
+            offset_of!(JpegCompressPublic, blocks_in_MCU),
+        ),
+        (
+            "MCU_membership",
+            offset_of!(JpegCompressPublic, MCU_membership),
+        ),
+        ("Ss", offset_of!(JpegCompressPublic, Ss)),
+        ("Se", offset_of!(JpegCompressPublic, Se)),
+        ("Ah", offset_of!(JpegCompressPublic, Ah)),
+        ("Al", offset_of!(JpegCompressPublic, Al)),
+        // JPEG_LIB_VERSION ≥ 80 extensions.
+        ("block_size", offset_of!(JpegCompressPublic, block_size)),
+        (
+            "natural_order",
+            offset_of!(JpegCompressPublic, natural_order),
+        ),
+        ("lim_Se", offset_of!(JpegCompressPublic, lim_Se)),
+        // Opaque libjpeg-internal pointers. The C-side `main` field is
+        // mirrored by Rust as `main_ctrl` (the trailing `_ctrl` keeps
+        // grep'ability and avoids identifier collisions in some scopes
+        // — see the file-level note above).
+        ("master", offset_of!(JpegCompressPublic, master)),
+        ("main", offset_of!(JpegCompressPublic, main_ctrl)),
+        ("prep", offset_of!(JpegCompressPublic, prep)),
+        ("coef", offset_of!(JpegCompressPublic, coef)),
+        ("marker", offset_of!(JpegCompressPublic, marker)),
+        ("cconvert", offset_of!(JpegCompressPublic, cconvert)),
+        ("downsample", offset_of!(JpegCompressPublic, downsample)),
+        ("fdct", offset_of!(JpegCompressPublic, fdct)),
+        ("entropy", offset_of!(JpegCompressPublic, entropy)),
+        ("script_space", offset_of!(JpegCompressPublic, script_space)),
+        (
+            "script_space_size",
+            offset_of!(JpegCompressPublic, script_space_size),
+        ),
+    ]
+}
+
+#[test]
+fn rust_offsets_match_jpeg_compress_struct_at_lib_version_80() {
+    use libjpeg_turbo_rs_capi::jpeglib::JpegCompressPublic;
+
+    let rust_fields: Vec<(&'static str, usize)> = rust_offsets_compress();
+    let names: Vec<&str> = rust_fields.iter().map(|(n, _)| *n).collect();
+    let probe: CcProbeResult = match cc_offsetof_for_struct("jpeg_compress_struct", &names) {
+        CcProbeOutcome::Ok(r) => r,
+        CcProbeOutcome::Skip(why) => {
+            eprintln!("SKIP: {why}");
+            return;
+        }
+    };
+    let rust_sizeof: usize = std::mem::size_of::<JpegCompressPublic>();
+    assert_no_drift("jpeg_compress_struct", &rust_fields, rust_sizeof, &probe);
+}
