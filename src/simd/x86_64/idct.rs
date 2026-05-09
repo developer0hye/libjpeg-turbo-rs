@@ -173,6 +173,7 @@ unsafe fn sse2_idct_islow_core(
     // every input now flows through the full pass1 + pass2
     // pipeline below, whose i16 lane width matches what
     // libjpeg-turbo's SSE2 ISLOW does.
+    let zero: __m128i = _mm_setzero_si128();
 
     // --- Full IDCT path ---
 
