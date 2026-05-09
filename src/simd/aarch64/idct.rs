@@ -102,7 +102,6 @@ unsafe fn neon_idct_islow_core(cptr: *const i16, qptr: *const i16, output: *mut 
 
     // --- Pass 1: columns, left 4×8 half ---
     // Fused load+dequant: vmul_s16(coeff, quant) during load
-    let mut left_dc_only = false;
     let mut ws_l = [0i16; 32];
     let mut ws_r = [0i16; 32];
 
@@ -125,13 +124,6 @@ unsafe fn neon_idct_islow_core(cptr: *const i16, qptr: *const i16, output: *mut 
             let ac_bitmap: i64 = vget_lane_s64(vreinterpret_s64_s16(bitmap_ac), 0);
 
             if ac_bitmap == 0 {
-                // Check if positions 1-3 of row0 are also zero (true DC-only).
-                // row0 = [pos0(DC), pos1, pos2, pos3] — mask out DC.
-                let row0_ac_mask = vcreate_s16(0xFFFF_FFFF_FFFF_0000u64);
-                let row0_ac = vand_s16(row0, row0_ac_mask);
-                let row0_ac_bits: i64 = vget_lane_s64(vreinterpret_s64_s16(row0_ac), 0);
-                left_dc_only = row0_ac_bits == 0;
-
                 let dcval = vshl_n_s16::<PASS1_BITS>(row0);
                 let quad: int16x4x4_t = int16x4x4_t(dcval, dcval, dcval, dcval);
                 vst4_s16(ws_l.as_mut_ptr(), quad);
@@ -191,34 +183,20 @@ unsafe fn neon_idct_islow_core(cptr: *const i16, qptr: *const i16, output: *mut 
             let right_all_bitmap: i64 = vget_lane_s64(vreinterpret_s64_s16(bitmap_all), 0);
 
             if right_all_bitmap == 0 {
-                if left_dc_only {
-                    // Pure DC block: entire right half zero + left DC-only.
-                    // Skip pass2 — fill output with the DC pixel value directly.
-                    //
-                    // Mirror the full pipeline's i16 wrap exactly: pass 1
-                    // dequant uses `vmul_s16` (i16 truncating multiply), pass
-                    // 1 column-shortcut uses `vshl_n_s16::<PASS1_BITS>` (i16
-                    // truncating left shift), pass 2 row-shortcut descales
-                    // the resulting i16 by PASS1_BITS + 3 = 5 with rounding,
-                    // and the final stage applies a level-shift + saturating
-                    // clamp to u8. An adversarial DC like 2032 * 85 = 172720
-                    // wraps in i16 to -23888, and the rest of the pipeline
-                    // produces a saturated-low sample — using the un-wrapped
-                    // i32 product here returned a saturated-high sample,
-                    // diverging from the full pipeline + libjpeg-turbo on
-                    // such inputs (fuzz_decode_diff_c finding 2026-05-09).
-                    let dq_i16: i16 = (*cptr).wrapping_mul(*qptr);
-                    let pass1_i32: i32 = (dq_i16 as i32) << PASS1_BITS;
-                    let pass2_i32: i32 =
-                        (pass1_i32 + (1 << (PASS1_BITS + 3 - 1))) >> (PASS1_BITS + 3);
-                    let pixel_val: u8 = (pass2_i32 + 128).clamp(0, 255) as u8;
-                    let fill: uint8x8_t = vdup_n_u8(pixel_val);
-                    for row in 0..8 {
-                        vst1_u8(output.add(row * stride), fill);
-                    }
-                    return;
-                }
-                // Entire right half is zero — skip, use sparse pass 2
+                // Entire right half is zero — skip, use sparse pass 2.
+                //
+                // Note: an earlier attempt added a `left_dc_only` pure-DC
+                // pixel-fill shortcut here, but it diverged from the full
+                // pipeline on adversarial inputs where `coeff * quant`
+                // overflows the i16 lane width that `vmul_s16` /
+                // `vshl_n_s16::<PASS1_BITS>` use throughout the rest of
+                // pass 1 + pass 2. Reproducing the wrap semantics in a
+                // scalar shortcut is fragile (codex review of d75924f
+                // caught the PASS1-shift wrap missed by the first round
+                // of fixes), so the shortcut was removed in favour of
+                // letting the full pipeline produce the canonical sample
+                // — its `vqrshrn_n_s16` + wrapping `vadd_u8` final stage
+                // is what libjpeg-turbo's NEON ISLOW does too.
                 right_all_zero = true;
             } else {
                 // DC-only in right half

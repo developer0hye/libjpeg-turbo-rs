@@ -140,50 +140,9 @@ unsafe fn wasm_idct_islow_core(
 ) {
     let cptr: *const i16 = coeffs.as_ptr();
 
-    // --- DC-only sparsity check ---
-    let row1: v128 = v128_load(cptr.add(8) as *const v128);
-    let row2: v128 = v128_load(cptr.add(16) as *const v128);
-    let row3: v128 = v128_load(cptr.add(24) as *const v128);
-    let row4: v128 = v128_load(cptr.add(32) as *const v128);
-    let row5: v128 = v128_load(cptr.add(40) as *const v128);
-    let row6: v128 = v128_load(cptr.add(48) as *const v128);
-    let row7: v128 = v128_load(cptr.add(56) as *const v128);
-
-    let ac_or: v128 = v128_or(
-        v128_or(v128_or(row1, row2), v128_or(row3, row4)),
-        v128_or(v128_or(row5, row6), row7),
-    );
-
-    let zero: v128 = i32x4_splat(0);
-    if u8x16_bitmask(u8x16_eq(ac_or, zero)) == 0xFFFF {
-        let row0: v128 = v128_load(cptr as *const v128);
-        let ac_mask: v128 = i16x8(0, -1, -1, -1, -1, -1, -1, -1);
-        let row0_ac: v128 = v128_and(row0, ac_mask);
-
-        if u8x16_bitmask(u8x16_eq(row0_ac, zero)) == 0xFFFF {
-            // Pure-DC shortcut: route through the same i16-wrap math the
-            // non-shortcut full pipeline uses. WASM full pipeline uses
-            // i32 dequant (different from NEON/SSE2/AVX2 which use i16
-            // truncating multiply), but this shortcut still aligns with
-            // the cross-implementation reference (libjpeg-turbo NEON / SSE2
-            // / AVX2 ISLOW + scalar Rust) which all wrap in i16. The
-            // alignment matters for adversarial inputs where DC * quant
-            // overflows i16 — see the matching comment in the SSE2 / NEON
-            // ISLOW IDCTs.
-            let dq_i16: i16 = (*cptr).wrapping_mul(*(quant.as_ptr() as *const i16));
-            let pass1_i32: i32 = (dq_i16 as i32) << PASS1_BITS as i32;
-            let pass2_i32: i32 =
-                (pass1_i32 + (1 << (PASS1_BITS as i32 + 3 - 1))) >> (PASS1_BITS as i32 + 3);
-            let pv: u8 = (pass2_i32 + 128).clamp(0, 255) as u8;
-            for r in 0..8 {
-                let row_ptr: *mut u8 = output.add(r * stride);
-                for c in 0..8 {
-                    *row_ptr.add(c) = pv;
-                }
-            }
-            return;
-        }
-    }
+    // The pure-DC pixel-fill shortcut was intentionally removed —
+    // see `simd/aarch64/idct.rs` for the rationale: every input now
+    // flows through the full pass1 + pass2 pipeline below.
 
     // --- Full IDCT path ---
     let mut ws = [0i32; 64];
