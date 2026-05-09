@@ -1710,60 +1710,22 @@ fn detect_tables_only(bytes: &[u8]) -> Option<Vec<u8>> {
     Some(bytes[..i - 2].to_vec())
 }
 
-/// Walk markers from the SOI and answer whether `bytes` carries its own
-/// DQT or DHT table before the SOF/SOS — i.e. is a self-contained JPEG
-/// rather than a tables-omitting abbreviated image (libjpeg.txt §6).
-/// Used by the splice logic in `jpeg_read_header` to suppress prefixing
-/// when the caller is decoding a fresh standard JPEG on a cinfo that
-/// happens to have a stale `tables_only_prefix` from a prior libtiff
-/// session.
-///
-/// Returns `true` if a DQT (`FF DB`) or DHT (`FF C4`) appears before any
-/// SOF/SOS marker. Returns `false` for tables-omitting streams (libtiff
-/// strip data) — splice should run. Also returns `false` for malformed
-/// inputs; `Decoder::new` then handles the rejection through its normal
-/// error path.
-fn input_has_own_tables(bytes: &[u8]) -> bool {
-    if bytes.len() < 4 || bytes[0] != 0xFF || bytes[1] != 0xD8 {
-        return false;
-    }
-    let mut i: usize = 2;
-    while i + 1 < bytes.len() {
-        while i < bytes.len() && bytes[i] == 0xFF && bytes.get(i + 1) == Some(&0xFF) {
-            i += 1;
-        }
-        if i + 1 >= bytes.len() || bytes[i] != 0xFF {
-            return false;
-        }
-        let marker: u8 = bytes[i + 1];
-        i += 2;
-        match marker {
-            0xDB | 0xC4 => return true, // DQT or DHT — input has own tables
-            0xDA => return false,       // SOS — past header without seeing tables
-            // SOF range: bracketed by C0..CF minus C4 (DHT), C8 (reserved JPG), CC (DAC).
-            0xC0..=0xCF if marker != 0xC4 && marker != 0xC8 && marker != 0xCC => return false,
-            0xD9 => return false, // EOI without tables (degenerate but bounded)
-            0xD0..=0xD7 | 0x01 => continue, // no payload (RST0..RST7, TEM)
-            _ => {
-                if i + 2 > bytes.len() {
-                    return false;
-                }
-                let len: usize = ((bytes[i] as usize) << 8) | (bytes[i + 1] as usize);
-                if len < 2 || i + len > bytes.len() {
-                    return false;
-                }
-                i += len;
-            }
-        }
-    }
-    false
-}
-
 /// Peek at the JPEG header to populate `cinfo.image_width` etc. without
 /// triggering a full decode. Uses the Rust-side `Decoder::new` which
 /// only parses markers up to (but not including) entropy-coded data.
+///
+/// `require_image` mirrors libjpeg's `jpeg_read_header(cinfo, require_image)`
+/// flag (libjpeg.txt §6, jdapimin.c::jpeg_read_header). When the input is
+/// a tables-only abbreviated datastream:
+///   * `require_image == TRUE`  — invoke `error_exit` with `JERR_NO_IMAGE`
+///     so a `setjmp`/`longjmp` consumer recovers cleanly. The classic
+///     contract for callers that don't care about tables: "I asked for
+///     a real image header; you didn't give me one; fail loudly."
+///   * `require_image == FALSE` — return `JPEG_HEADER_TABLES_ONLY` so
+///     the caller can read the tables and use them on a subsequent
+///     image-only datastream (the libtiff `JPEGTables` flow).
 #[no_mangle]
-pub extern "C" fn jpeg_read_header(cinfo: *mut c_void, _require_image: CBoolean) -> c_int {
+pub extern "C" fn jpeg_read_header(cinfo: *mut c_void, require_image: CBoolean) -> c_int {
     let c: &mut JpegDecompressPublic = match unsafe { cinfo_mut(cinfo) } {
         Some(c) => c,
         None => return JPEG_SUSPENDED,
@@ -1813,42 +1775,61 @@ pub extern "C" fn jpeg_read_header(cinfo: *mut c_void, _require_image: CBoolean)
     // the next strip's body so `Decoder::new` sees a single self-contained
     // JPEG.
     //
-    // Detection runs on the freshly-drained bytes *before* any splice
-    // pass to avoid a tables-only stream being re-detected after a
-    // splice (which would loop). After detection we reset
-    // `priv_state.source` to `None` so the next `jpeg_read_header` call
-    // re-drains the caller's source manager and picks up the strip
-    // bytes libtiff has now installed.
-    if priv_state.tables_only_prefix.is_none() {
-        if let Some(prefix) = detect_tables_only(raw_bytes) {
-            priv_state.tables_only_prefix = Some(prefix);
-            priv_state.source = JpegSource::None;
-            priv_state.last_error = CString::new("No error").unwrap_or_default();
-            return JPEG_HEADER_TABLES_ONLY;
+    // Detection runs on every fresh drain (not gated on
+    // `tables_only_prefix.is_none()`) so a cinfo reused across multiple
+    // images can refresh the cached tables on each new tables-only
+    // datastream — stock libjpeg's `jpeg_read_header` accepts repeated
+    // tables-only reads and updates the cached tables in place. After
+    // detection we reset `priv_state.source` to `None` so the next
+    // `jpeg_read_header` call re-drains the caller's source manager and
+    // picks up the strip bytes libtiff has now installed.
+    if let Some(prefix) = detect_tables_only(raw_bytes) {
+        // libjpeg.txt §6 / jdapimin.c::jpeg_read_header: when the
+        // caller passed `require_image = TRUE`, a tables-only blob is
+        // *not* a valid response — invoke `error_exit` with
+        // `JERR_NO_IMAGE` (upstream code 53 at `JPEG_LIB_VERSION=80`,
+        // verified empirically against the submodule's `jerror.h`).
+        // A `setjmp`/`longjmp` consumer recovers; a default handler
+        // aborts. The cached prefix is *not* updated in this branch
+        // because the consumer asked for an image and we're delivering
+        // the documented error.
+        if require_image != 0 {
+            priv_state.last_error = CString::new(
+                "jpeg_read_header: JERR_NO_IMAGE — caller passed require_image=TRUE \
+                 but the input is a tables-only abbreviated datastream",
+            )
+            .unwrap_or_default();
+            invoke_error_exit(cinfo, 53);
+            // Defensive return if a non-conforming handler returns
+            // without longjmp-ing (violates the libjpeg contract).
+            return JPEG_SUSPENDED;
         }
+        priv_state.tables_only_prefix = Some(prefix);
+        priv_state.source = JpegSource::None;
+        priv_state.last_error = CString::new("No error").unwrap_or_default();
+        return JPEG_HEADER_TABLES_ONLY;
     }
 
     // If we have a stashed tables-only prefix and the new input starts
-    // with SOI (the strip data libtiff feeds for each
-    // TIFFReadEncodedStrip), splice them so `Decoder::new` sees the
-    // tables + strip image as one stream. We persist the spliced
+    // with SOI, splice them so `Decoder::new` sees the tables + image
+    // as one stream. The splice is unconditional on prefix presence —
+    // libjpeg's table-replacement contract is "the most recent table
+    // in source order wins for each `(class, destination)` slot", so
+    // an image carrying its own DQT/DHT (a "partial abbreviated"
+    // image, or even a fully self-contained JPEG run on a cinfo with
+    // a stale prefix) simply overrides whatever the cached prefix
+    // installed — no incorrect-decode risk. We persist the spliced
     // bytes back into `priv_state.source` so the rest of the decode
     // path (`jpeg_start_decompress`, `jpeg_read_raw_data`, …) reads
     // from the unified stream.
     let needs_splice: bool = priv_state.tables_only_prefix.is_some()
         && raw_bytes.len() >= 2
         && raw_bytes[0] == 0xFF
-        && raw_bytes[1] == 0xD8
-        // Defensive: a cinfo can be reused for a fresh self-contained
-        // JPEG whose own DQT/DHT make a stale prefix splice incorrect.
-        // Skip the splice when the input already carries its own tables
-        // — `Decoder::new` parses it normally.
-        && !input_has_own_tables(raw_bytes);
+        && raw_bytes[1] == 0xD8;
     if needs_splice {
-        // SAFETY (logical, not unsafe): `raw_bytes` borrows from
-        // `priv_state.source.as_bytes()`. We're about to replace that
-        // backing buffer, so build the combined Vec first via owned
-        // copies; then assign.
+        // `raw_bytes` borrows from `priv_state.source.as_bytes()`. We're
+        // about to replace that backing buffer, so build the combined
+        // Vec first via owned copies; then assign.
         let prefix_clone: Vec<u8> = priv_state.tables_only_prefix.as_deref().unwrap().to_vec();
         let strip_body: Vec<u8> = raw_bytes[2..].to_vec();
         let mut combined: Vec<u8> = Vec::with_capacity(prefix_clone.len() + strip_body.len());
