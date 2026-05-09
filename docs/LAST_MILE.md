@@ -16,7 +16,7 @@ Project is **replacement-ready** for the Rust-application + stock-tool drop-in s
 
 | Check | Result |
 | --- | --- |
-| `cargo test --workspace --release` | **Passes** — 2157 tests, 0 failures, 1 ignored (one slow release-only stress test). |
+| `cargo test --workspace --release` | **Passes** — 2161 tests, 0 failures, 0 ignored. |
 | `cargo test -p libjpeg-turbo-rs --test cross_product_transform` | **Passes** all 12 cases. P0-1 closed. |
 | `cargo test -p libjpeg-turbo-rs --test regression_progressive_4pixel_chroma_transform` | **Passes** 256 cases byte-exact vs `jpegtran -progressive -copy all <op>`. P3-4 closed. |
 | `cargo test --test cross_check_p3_6_nonstandard_rgb565` | **Passes** 4 fixtures: 3x2 decode (vs `djpeg`), 3x2 encode (vs `cjpeg -sample 3x2,1x1,1x1` + `djpeg`), 3x1 decode, RGB565 merged-upsample (vs `djpeg -nosmooth` + 5-6-5 truncate chain). P3-6 closed. |
@@ -26,6 +26,7 @@ Project is **replacement-ready** for the Rust-application + stock-tool drop-in s
 | `cargo test --test capi_pillow_compat` | **Passes** — Pillow round-trip @ q=90 PSNR 49.49 dB. P0-3 closed. |
 | `cargo test -p libjpeg-turbo-rs-capi --test tjunittest_link` | **Passes** without `--include-ignored`. |
 | `cargo test -p libjpeg-turbo-rs-capi --test abi_offsets --release` | **Passes** all 6 cross-checks: `jpeg_decompress_struct` (P2-4) + `jpeg_marker_struct` + `jpeg_compress_struct` + `jpeg_error_mgr` + `jpeg_source_mgr` + `jpeg_destination_mgr` against upstream `jpeglib.h` at `JPEG_LIB_VERSION=80`. P3-1 closed. |
+| `cargo test -p libjpeg-turbo-rs-capi --test libtiff_integration --release` | **Passes** end-to-end libtiff COMPRESSION_JPEG round-trip via the cdylib (skips with reason if libtiff/cc are absent). The shim's `jpeg_read_header` walks markers manually to detect tables-only abbreviated datastreams (libjpeg.txt §6) and splices the cached prefix in front of each strip's body so `Decoder::new` parses the unified stream. Previously `#[ignore]`d as a known shim gap; un-ignored 2026-05-09. |
 
 ---
 

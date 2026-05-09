@@ -636,6 +636,18 @@ struct DecompressPrivate {
     /// `raw_image_cache_12`. Entry `i` is the number of rows already
     /// delivered for component `i`.
     raw_rows_consumed: Vec<usize>,
+    /// Bytes from a previously-parsed tables-only abbreviated datastream
+    /// (libjpeg.txt §6: SOI + DQT/DHT/DAC + EOI, no SOF/SOS), with the
+    /// trailing `FF D9` (EOI) already stripped so a subsequent strip
+    /// stream can be spliced after these bytes to form a single
+    /// self-contained JPEG. Set by `jpeg_read_header` when it detects a
+    /// tables-only input and returns `JPEG_HEADER_TABLES_ONLY`. Consumed
+    /// (read; never cleared) by subsequent `jpeg_read_header` calls so
+    /// `Decoder::new` sees a complete tables+image stream. The libtiff
+    /// `JPEGTables` field flow needs this — libtiff calls
+    /// `jpeg_read_header` first on the bare tables blob, then on each
+    /// strip's image-without-tables payload.
+    tables_only_prefix: Option<Vec<u8>>,
 }
 
 impl Default for DecompressPrivate {
@@ -659,6 +671,7 @@ impl Default for DecompressPrivate {
             raw_image_cache: None,
             raw_image_cache_12: None,
             raw_rows_consumed: Vec::new(),
+            tables_only_prefix: None,
         }
     }
 }
@@ -1625,11 +1638,103 @@ fn colorspace_to_jcs(cs: libjpeg_turbo_rs::ColorSpace) -> c_int {
     }
 }
 
+/// If `bytes` is a tables-only abbreviated JPEG datastream per
+/// libjpeg.txt §6 (SOI + zero or more DQT/DHT/DAC/COM/APPn/DRI markers
+/// + EOI, with no SOF or SOS), return `Some(prefix)` where `prefix` is
+/// the byte run from the SOI through the last marker before EOI — i.e.
+/// the input with the trailing `FF D9` (EOI) stripped. The caller can
+/// splice this prefix in front of a strip stream that starts with `FF D8`
+/// (after dropping its own SOI) to form a single self-contained JPEG
+/// that `Decoder::new` parses normally.
+///
+/// Returns `None` if the input isn't a clean tables-only datastream
+/// (e.g. it has an SOF marker, or it's truncated, or it has a malformed
+/// marker length). The caller falls back to the existing decode path.
+///
+/// JPEG marker bytes recognised here:
+///   * `FF D8` — SOI (start)
+///   * `FF D9` — EOI (end)
+///   * `FF DA` — SOS (rejects: not tables-only)
+///   * `FF C0..FF CF` minus `{C4, C8, CC}` — SOF variants (rejects)
+///   * `FF C4` (DHT), `FF CC` (DAC), `FF DB` (DQT), `FF DD` (DRI),
+///     `FF FE` (COM), `FF E0..FF EF` (APPn) — all valid in tables-only
+///   * `FF D0..FF D7` (RST0..RST7), `FF 01` (TEM) — no length payload,
+///     valid in tables-only (though unusual)
+fn detect_tables_only(bytes: &[u8]) -> Option<Vec<u8>> {
+    if bytes.len() < 4 {
+        return None;
+    }
+    if bytes[0] != 0xFF || bytes[1] != 0xD8 {
+        return None;
+    }
+
+    let mut i: usize = 2;
+    let mut saw_eoi: bool = false;
+    while i + 1 < bytes.len() {
+        // Skip any FF padding the encoder may have inserted between
+        // markers (some libjpeg-turbo encoders write FF FF as filler).
+        while i < bytes.len() && bytes[i] == 0xFF && bytes.get(i + 1) == Some(&0xFF) {
+            i += 1;
+        }
+        if i + 1 >= bytes.len() || bytes[i] != 0xFF {
+            return None;
+        }
+        let marker: u8 = bytes[i + 1];
+        i += 2;
+
+        match marker {
+            0xD9 => {
+                saw_eoi = true;
+                break;
+            }
+            0xD8 => return None, // unexpected duplicate SOI
+            0xDA => return None, // SOS: not tables-only
+            // SOF range: C0..CF minus C4 (DHT), C8 (reserved JPG), CC (DAC).
+            0xC0..=0xCF if marker != 0xC4 && marker != 0xC8 && marker != 0xCC => {
+                return None;
+            }
+            // No-payload markers (RST0..RST7, TEM).
+            0xD0..=0xD7 | 0x01 => {}
+            // Marker with 2-byte big-endian length (covers DQT/DHT/DAC,
+            // DRI, COM, APPn, and any other length-bearing marker).
+            _ => {
+                if i + 2 > bytes.len() {
+                    return None;
+                }
+                let len: usize = ((bytes[i] as usize) << 8) | (bytes[i + 1] as usize);
+                if len < 2 || i + len > bytes.len() {
+                    return None;
+                }
+                i += len;
+            }
+        }
+    }
+
+    if !saw_eoi {
+        return None;
+    }
+    // i now points just past the EOI bytes (FF D9). Strip them so the
+    // returned prefix can be spliced in front of a strip stream's body
+    // (after the strip's leading FF D8) to form a complete JPEG.
+    Some(bytes[..i - 2].to_vec())
+}
+
 /// Peek at the JPEG header to populate `cinfo.image_width` etc. without
 /// triggering a full decode. Uses the Rust-side `Decoder::new` which
 /// only parses markers up to (but not including) entropy-coded data.
+///
+/// `require_image` mirrors libjpeg's `jpeg_read_header(cinfo, require_image)`
+/// flag (libjpeg.txt §6, jdapimin.c::jpeg_read_header). When the input is
+/// a tables-only abbreviated datastream:
+///   * `require_image == TRUE`  — invoke `error_exit` with `JERR_NO_IMAGE`
+///     so a `setjmp`/`longjmp` consumer recovers cleanly. The classic
+///     contract for callers that don't care about tables: "I asked for
+///     a real image header; you didn't give me one; fail loudly."
+///   * `require_image == FALSE` — return `JPEG_HEADER_TABLES_ONLY` so
+///     the caller can read the tables and use them on a subsequent
+///     image-only datastream (the libtiff `JPEGTables` flow).
 #[no_mangle]
-pub extern "C" fn jpeg_read_header(cinfo: *mut c_void, _require_image: CBoolean) -> c_int {
+pub extern "C" fn jpeg_read_header(cinfo: *mut c_void, require_image: CBoolean) -> c_int {
     let c: &mut JpegDecompressPublic = match unsafe { cinfo_mut(cinfo) } {
         Some(c) => c,
         None => return JPEG_SUSPENDED,
@@ -1658,11 +1763,94 @@ pub extern "C" fn jpeg_read_header(cinfo: *mut c_void, _require_image: CBoolean)
         }
     }
 
-    let bytes: &[u8] = match priv_state.source.as_bytes() {
+    let raw_bytes: &[u8] = match priv_state.source.as_bytes() {
         Some(b) if b.len() >= 2 => b,
         _ => {
             priv_state.last_error =
                 CString::new("jpeg_read_header: no JPEG source attached").unwrap_or_default();
+            return JPEG_SUSPENDED;
+        }
+    };
+
+    // Tables-only abbreviated datastream (libjpeg.txt §6) detection.
+    // libtiff's COMPRESSION_JPEG path calls `jpeg_read_header` on its
+    // `JPEGTables` blob first (SOI + DQT/DHT + EOI, no SOF/SOS), expects
+    // `JPEG_HEADER_TABLES_ONLY` (= 2), and *then* re-points the source
+    // manager at strip data and calls `jpeg_read_header` again to parse
+    // the actual image header — which is missing tables that the strip
+    // data inherits from the cached `JPEGTables`. The shim emulates this
+    // contract by stashing the tables-only bytes (minus the trailing EOI)
+    // in `priv_state.tables_only_prefix` and splicing them in front of
+    // the next strip's body so `Decoder::new` sees a single self-contained
+    // JPEG.
+    //
+    // Detection runs on every fresh drain (not gated on
+    // `tables_only_prefix.is_none()`) so a cinfo reused across multiple
+    // images can refresh the cached tables on each new tables-only
+    // datastream — stock libjpeg's `jpeg_read_header` accepts repeated
+    // tables-only reads and updates the cached tables in place. After
+    // detection we reset `priv_state.source` to `None` so the next
+    // `jpeg_read_header` call re-drains the caller's source manager and
+    // picks up the strip bytes libtiff has now installed.
+    if let Some(prefix) = detect_tables_only(raw_bytes) {
+        // libjpeg.txt §6 / jdapimin.c::jpeg_read_header: when the
+        // caller passed `require_image = TRUE`, a tables-only blob is
+        // *not* a valid response — invoke `error_exit` with
+        // `JERR_NO_IMAGE` (upstream code 53 at `JPEG_LIB_VERSION=80`,
+        // verified empirically against the submodule's `jerror.h`).
+        // A `setjmp`/`longjmp` consumer recovers; a default handler
+        // aborts. The cached prefix is *not* updated in this branch
+        // because the consumer asked for an image and we're delivering
+        // the documented error.
+        if require_image != 0 {
+            priv_state.last_error = CString::new(
+                "jpeg_read_header: JERR_NO_IMAGE — caller passed require_image=TRUE \
+                 but the input is a tables-only abbreviated datastream",
+            )
+            .unwrap_or_default();
+            invoke_error_exit(cinfo, 53);
+            // Defensive return if a non-conforming handler returns
+            // without longjmp-ing (violates the libjpeg contract).
+            return JPEG_SUSPENDED;
+        }
+        priv_state.tables_only_prefix = Some(prefix);
+        priv_state.source = JpegSource::None;
+        priv_state.last_error = CString::new("No error").unwrap_or_default();
+        return JPEG_HEADER_TABLES_ONLY;
+    }
+
+    // If we have a stashed tables-only prefix and the new input starts
+    // with SOI, splice them so `Decoder::new` sees the tables + image
+    // as one stream. The splice is unconditional on prefix presence —
+    // libjpeg's table-replacement contract is "the most recent table
+    // in source order wins for each `(class, destination)` slot", so
+    // an image carrying its own DQT/DHT (a "partial abbreviated"
+    // image, or even a fully self-contained JPEG run on a cinfo with
+    // a stale prefix) simply overrides whatever the cached prefix
+    // installed — no incorrect-decode risk. We persist the spliced
+    // bytes back into `priv_state.source` so the rest of the decode
+    // path (`jpeg_start_decompress`, `jpeg_read_raw_data`, …) reads
+    // from the unified stream.
+    let needs_splice: bool = priv_state.tables_only_prefix.is_some()
+        && raw_bytes.len() >= 2
+        && raw_bytes[0] == 0xFF
+        && raw_bytes[1] == 0xD8;
+    if needs_splice {
+        // `raw_bytes` borrows from `priv_state.source.as_bytes()`. We're
+        // about to replace that backing buffer, so build the combined
+        // Vec first via owned copies; then assign.
+        let prefix_clone: Vec<u8> = priv_state.tables_only_prefix.as_deref().unwrap().to_vec();
+        let strip_body: Vec<u8> = raw_bytes[2..].to_vec();
+        let mut combined: Vec<u8> = Vec::with_capacity(prefix_clone.len() + strip_body.len());
+        combined.extend_from_slice(&prefix_clone);
+        combined.extend_from_slice(&strip_body);
+        priv_state.source = JpegSource::Owned(combined);
+    }
+    let bytes: &[u8] = match priv_state.source.as_bytes() {
+        Some(b) if b.len() >= 2 => b,
+        _ => {
+            priv_state.last_error =
+                CString::new("jpeg_read_header: no JPEG source after splice").unwrap_or_default();
             return JPEG_SUSPENDED;
         }
     };
@@ -3995,7 +4183,14 @@ pub extern "C" fn jpeg_consume_input(cinfo: *mut c_void) -> c_int {
     }
     match c.global_state {
         DSTATE_START | DSTATE_INHEADER => {
-            let result: c_int = jpeg_read_header(cinfo, /*require_image=*/ 1);
+            // `require_image=FALSE`: stock libjpeg's `jpeg_consume_input`
+            // accepts a tables-only abbreviated datastream as a valid
+            // input — it returns `JPEG_REACHED_EOI` rather than raising
+            // `JERR_NO_IMAGE` (which is the public `jpeg_read_header(…,
+            // require_image=TRUE)` contract). Passing `0` here lets the
+            // tables-only branch return `JPEG_HEADER_TABLES_ONLY`, which
+            // the match arm below maps to `JPEG_REACHED_EOI`.
+            let result: c_int = jpeg_read_header(cinfo, /*require_image=*/ 0);
             // Re-read the state because `jpeg_read_header` mutated it.
             let c2: &mut JpegDecompressPublic = match unsafe { cinfo_mut(cinfo) } {
                 Some(c) => c,
@@ -4015,7 +4210,27 @@ pub extern "C" fn jpeg_consume_input(cinfo: *mut c_void) -> c_int {
                     c2.global_state = DSTATE_SCANNING;
                     JPEG_REACHED_SOS
                 }
-                JPEG_HEADER_TABLES_ONLY => JPEG_REACHED_EOI,
+                JPEG_HEADER_TABLES_ONLY => {
+                    // Mirror stock libjpeg's `inputctl->eoi_reached = TRUE`
+                    // for tables-only inputs by advancing past
+                    // `DSTATE_SCANNING` so `jpeg_input_complete` returns
+                    // `TRUE`. Without this, a documented buffered-image
+                    // polling loop —
+                    //
+                    //     while (!jpeg_input_complete(&cinfo))
+                    //         (void) jpeg_consume_input(&cinfo);
+                    //
+                    // — never terminates on a tables-only datastream
+                    // because the EOI return below isn't observed by
+                    // `jpeg_input_complete`'s `global_state >=
+                    // DSTATE_SCANNING` gate. `jpeg_start_decompress`
+                    // re-asserts `DSTATE_SCANNING` regardless, so
+                    // skipping ahead does not stomp on a real image
+                    // header that arrives later (it can't — we just
+                    // returned EOI).
+                    c2.global_state = DSTATE_SCANNING;
+                    JPEG_REACHED_EOI
+                }
                 _ => JPEG_SUSPENDED,
             }
         }
