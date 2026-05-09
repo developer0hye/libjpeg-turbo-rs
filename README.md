@@ -71,6 +71,23 @@ libjpeg-turbo-rs = "0.6"
 # libjpeg-turbo-rs = { version = "0.6", features = ["png"] }
 ```
 
+### Build flags (x86_64 only)
+
+For x86_64 production builds, set:
+
+```sh
+RUSTFLAGS="-C target-cpu=native" cargo build --release
+# or, for a portable v3 baseline:
+RUSTFLAGS="-C target-feature=+bmi1,+lzcnt,+bmi2,+fma" cargo build --release
+```
+
+This unlocks BMI1 / LZCNT / BMI2 / FMA in the encoder's scalar
+bitmap-iteration hot path, which the C reference's NASM SIMD already
+embeds. Without these flags `cargo build --release` defaults to the
+SSE2-only `x86_64-v1` baseline and the encoder trails C by 5–10 pp at
+1080p; with them, Rust beats C in every encode benchmark in the
+Performance section above. aarch64 / NEON builds are unaffected.
+
 ### Decompress
 
 ```rust
