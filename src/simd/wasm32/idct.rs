@@ -161,8 +161,20 @@ unsafe fn wasm_idct_islow_core(
         let row0_ac: v128 = v128_and(row0, ac_mask);
 
         if u8x16_bitmask(u8x16_eq(row0_ac, zero)) == 0xFFFF {
-            let dc: i32 = *cptr as i32 * *quant.as_ptr() as i32;
-            let pv: u8 = (((dc + 4) >> 3) + 128).clamp(0, 255) as u8;
+            // Pure-DC shortcut: route through the same i16-wrap math the
+            // non-shortcut full pipeline uses. WASM full pipeline uses
+            // i32 dequant (different from NEON/SSE2/AVX2 which use i16
+            // truncating multiply), but this shortcut still aligns with
+            // the cross-implementation reference (libjpeg-turbo NEON / SSE2
+            // / AVX2 ISLOW + scalar Rust) which all wrap in i16. The
+            // alignment matters for adversarial inputs where DC * quant
+            // overflows i16 — see the matching comment in the SSE2 / NEON
+            // ISLOW IDCTs.
+            let dq_i16: i16 = (*cptr).wrapping_mul(*(quant.as_ptr() as *const i16));
+            let pass1_i32: i32 = (dq_i16 as i32) << PASS1_BITS as i32;
+            let pass2_i32: i32 =
+                (pass1_i32 + (1 << (PASS1_BITS as i32 + 3 - 1))) >> (PASS1_BITS as i32 + 3);
+            let pv: u8 = (pass2_i32 + 128).clamp(0, 255) as u8;
             for r in 0..8 {
                 let row_ptr: *mut u8 = output.add(r * stride);
                 for c in 0..8 {

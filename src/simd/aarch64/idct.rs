@@ -209,8 +209,8 @@ unsafe fn neon_idct_islow_core(cptr: *const i16, qptr: *const i16, output: *mut 
                     // such inputs (fuzz_decode_diff_c finding 2026-05-09).
                     let dq_i16: i16 = (*cptr).wrapping_mul(*qptr);
                     let pass1_i32: i32 = (dq_i16 as i32) << PASS1_BITS;
-                    let pass2_i32: i32 = (pass1_i32 + (1 << (PASS1_BITS + 3 - 1)))
-                        >> (PASS1_BITS + 3);
+                    let pass2_i32: i32 =
+                        (pass1_i32 + (1 << (PASS1_BITS + 3 - 1))) >> (PASS1_BITS + 3);
                     let pixel_val: u8 = (pass2_i32 + 128).clamp(0, 255) as u8;
                     let fill: uint8x8_t = vdup_n_u8(pixel_val);
                     for row in 0..8 {

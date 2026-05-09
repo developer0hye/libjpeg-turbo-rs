@@ -7,7 +7,8 @@
 #[cfg(target_arch = "x86_64")]
 use core::arch::x86_64::*;
 
-// IDCT constants (CONST_BITS=13)
+// IDCT constants (CONST_BITS=13, PASS1_BITS=2)
+const PASS1_BITS: i32 = 2;
 const F_0_298: i16 = 2446;
 const F_0_390: i16 = 3196;
 const F_0_541: i16 = 4433;
@@ -176,8 +177,14 @@ unsafe fn avx2_idct_islow_core(
         let row0_ac = _mm_and_si128(row0, ac_mask);
 
         if _mm_testz_si128(row0_ac, row0_ac) != 0 {
-            let dc = *cptr as i32 * *quant.as_ptr() as i32;
-            let pv = (((dc + 4) >> 3) + 128).clamp(0, 255) as u8;
+            // Pure-DC shortcut: route through the same i16-wrap math the
+            // non-shortcut full pipeline uses, so the two paths agree on
+            // adversarial inputs where DC * quant overflows i16. See the
+            // matching comment in the SSE2 / NEON ISLOW IDCTs.
+            let dq_i16: i16 = (*cptr).wrapping_mul(*(quant.as_ptr() as *const i16));
+            let pass1_i32: i32 = (dq_i16 as i32) << PASS1_BITS;
+            let pass2_i32: i32 = (pass1_i32 + (1 << (PASS1_BITS + 3 - 1))) >> (PASS1_BITS + 3);
+            let pv: u8 = (pass2_i32 + 128).clamp(0, 255) as u8;
             let fill = _mm_set1_epi8(pv as i8);
             for r in 0..8 {
                 _mm_storel_epi64(output.add(r * stride) as *mut __m128i, fill);
