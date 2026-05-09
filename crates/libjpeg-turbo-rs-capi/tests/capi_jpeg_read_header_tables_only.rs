@@ -108,11 +108,12 @@ fn build_tables_only_blob() -> Vec<u8> {
 }
 
 // Per-test atomics + per-test callbacks so cargo test's parallel runner
-// cannot race the two test paths through a shared callback.
+// cannot race the test paths through a shared callback.
 static GOT_FALSE_ERROR_EXIT: AtomicUsize = AtomicUsize::new(0);
 static GOT_FALSE_MSG_CODE: AtomicI32 = AtomicI32::new(0);
 static GOT_TRUE_ERROR_EXIT: AtomicUsize = AtomicUsize::new(0);
 static GOT_TRUE_MSG_CODE: AtomicI32 = AtomicI32::new(0);
+static GOT_CONSUME_ERROR_EXIT: AtomicUsize = AtomicUsize::new(0);
 
 unsafe extern "C" fn track_false_error_exit(cinfo: *mut c_void) {
     GOT_FALSE_ERROR_EXIT.fetch_add(1, Ordering::SeqCst);
@@ -134,6 +135,10 @@ unsafe extern "C" fn track_true_error_exit(cinfo: *mut c_void) {
             GOT_TRUE_MSG_CODE.store((*err_ptr).msg_code, Ordering::SeqCst);
         }
     }
+}
+
+unsafe extern "C" fn track_consume_error_exit(_cinfo: *mut c_void) {
+    GOT_CONSUME_ERROR_EXIT.fetch_add(1, Ordering::SeqCst);
 }
 
 #[test]
@@ -253,6 +258,79 @@ fn tables_only_with_require_image_true_invokes_jerr_no_image() {
         "msg_code = {}, expected upstream JERR_NO_IMAGE (= 53 at JPEG_LIB_VERSION=80, \
          verified empirically via cc -DJPEG_LIB_VERSION=80 against jerror.h)",
         GOT_TRUE_MSG_CODE.load(Ordering::SeqCst),
+    );
+
+    unsafe { destroy(cinfo_ptr) };
+}
+
+/// Direct `jpeg_consume_input` on a tables-only stream must return
+/// `JPEG_REACHED_EOI` (= 2), NOT invoke `error_exit` with `JERR_NO_IMAGE`.
+/// Stock libjpeg's `jpeg_consume_input` (jdapimin.c) accepts a tables-only
+/// abbreviated datastream as a valid input — the `require_image` semantics
+/// only apply when the *public* `jpeg_read_header` is called by the
+/// consumer. The shim's internal call from `jpeg_consume_input` to
+/// `jpeg_read_header` must therefore pass `require_image=FALSE` so the
+/// tables-only branch returns `JPEG_HEADER_TABLES_ONLY`, which the
+/// `jpeg_consume_input` match arm maps to `JPEG_REACHED_EOI`.
+///
+/// Pre-fix history: codex stop-time review on the initial public-API
+/// `require_image=TRUE` wiring caught this regression because the
+/// internal call had been hard-coded to `require_image=1`. The fix
+/// rewrites that call to pass `0`.
+#[test]
+fn jpeg_consume_input_on_tables_only_returns_reached_eoi() {
+    let lib: Library = unsafe { Library::new(cdylib_path()).expect("dlopen cdylib") };
+
+    type CreateFn = unsafe extern "C" fn(*mut c_void, c_int, usize);
+    type DestroyFn = unsafe extern "C" fn(*mut c_void);
+    type StdErrorFn = unsafe extern "C" fn(*mut JpegErrorMgrLayout) -> *mut JpegErrorMgrLayout;
+    type MemSrcFn = unsafe extern "C" fn(*mut c_void, *const u8, usize);
+    type ConsumeFn = unsafe extern "C" fn(*mut c_void) -> c_int;
+
+    let create: libloading::Symbol<CreateFn> =
+        unsafe { lib.get(b"jpeg_CreateDecompress").unwrap() };
+    let destroy: libloading::Symbol<DestroyFn> =
+        unsafe { lib.get(b"jpeg_destroy_decompress").unwrap() };
+    let std_error: libloading::Symbol<StdErrorFn> = unsafe { lib.get(b"jpeg_std_error").unwrap() };
+    let mem_src: libloading::Symbol<MemSrcFn> = unsafe { lib.get(b"jpeg_mem_src").unwrap() };
+    let consume_input: libloading::Symbol<ConsumeFn> =
+        unsafe { lib.get(b"jpeg_consume_input").unwrap() };
+
+    GOT_CONSUME_ERROR_EXIT.store(0, Ordering::SeqCst);
+
+    let mut err: JpegErrorMgrLayout = unsafe { std::mem::zeroed() };
+    unsafe { std_error(&mut err as *mut _) };
+    err.error_exit = Some(track_consume_error_exit);
+
+    let mut cinfo_buf: [u8; 4096] = [0u8; 4096];
+    unsafe {
+        let err_slot: *mut *mut JpegErrorMgrLayout =
+            cinfo_buf.as_mut_ptr() as *mut *mut JpegErrorMgrLayout;
+        err_slot.write(&mut err as *mut _);
+    }
+    let cinfo_ptr: *mut c_void = cinfo_buf.as_mut_ptr() as *mut c_void;
+
+    unsafe { create(cinfo_ptr, 80, 4096) };
+
+    let blob: Vec<u8> = build_tables_only_blob();
+    unsafe { mem_src(cinfo_ptr, blob.as_ptr(), blob.len()) };
+
+    let ret: c_int = unsafe { consume_input(cinfo_ptr) };
+
+    // JPEG_REACHED_EOI = 2.
+    assert_eq!(
+        ret, 2,
+        "expected JPEG_REACHED_EOI (= 2), got {} — the internal jpeg_read_header \
+         call from jpeg_consume_input must pass require_image=FALSE so a \
+         tables-only blob does not trigger JERR_NO_IMAGE",
+        ret,
+    );
+    assert_eq!(
+        GOT_CONSUME_ERROR_EXIT.load(Ordering::SeqCst),
+        0,
+        "error_exit must NOT fire from jpeg_consume_input on a tables-only \
+         input — got {} invocations",
+        GOT_CONSUME_ERROR_EXIT.load(Ordering::SeqCst),
     );
 
     unsafe { destroy(cinfo_ptr) };

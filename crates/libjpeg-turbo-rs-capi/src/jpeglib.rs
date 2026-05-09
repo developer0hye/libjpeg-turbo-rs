@@ -4039,7 +4039,14 @@ pub extern "C" fn jpeg_consume_input(cinfo: *mut c_void) -> c_int {
     }
     match c.global_state {
         DSTATE_START | DSTATE_INHEADER => {
-            let result: c_int = jpeg_read_header(cinfo, /*require_image=*/ 1);
+            // `require_image=FALSE`: stock libjpeg's `jpeg_consume_input`
+            // accepts a tables-only abbreviated datastream as a valid
+            // input — it returns `JPEG_REACHED_EOI` rather than raising
+            // `JERR_NO_IMAGE` (which is the public `jpeg_read_header(…,
+            // require_image=TRUE)` contract). Passing `0` here lets the
+            // tables-only branch return `JPEG_HEADER_TABLES_ONLY`, which
+            // the match arm below maps to `JPEG_REACHED_EOI`.
+            let result: c_int = jpeg_read_header(cinfo, /*require_image=*/ 0);
             // Re-read the state because `jpeg_read_header` mutated it.
             let c2: &mut JpegDecompressPublic = match unsafe { cinfo_mut(cinfo) } {
                 Some(c) => c,
