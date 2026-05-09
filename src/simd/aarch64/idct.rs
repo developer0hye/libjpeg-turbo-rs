@@ -102,6 +102,7 @@ unsafe fn neon_idct_islow_core(cptr: *const i16, qptr: *const i16, output: *mut 
 
     // --- Pass 1: columns, left 4×8 half ---
     // Fused load+dequant: vmul_s16(coeff, quant) during load
+    let mut left_dc_only = false;
     let mut ws_l = [0i16; 32];
     let mut ws_r = [0i16; 32];
 
@@ -124,6 +125,15 @@ unsafe fn neon_idct_islow_core(cptr: *const i16, qptr: *const i16, output: *mut 
             let ac_bitmap: i64 = vget_lane_s64(vreinterpret_s64_s16(bitmap_ac), 0);
 
             if ac_bitmap == 0 {
+                // Check if positions 1-3 of row0 are also zero (true DC-only
+                // in left half — only DC coefficient is non-zero). The flag
+                // is consumed by the right-half all-zero branch below to
+                // trigger a pixel-fill shortcut over the whole 8×8 block.
+                let row0_ac_mask = vcreate_s16(0xFFFF_FFFF_FFFF_0000u64);
+                let row0_ac = vand_s16(row0, row0_ac_mask);
+                let row0_ac_bits: i64 = vget_lane_s64(vreinterpret_s64_s16(row0_ac), 0);
+                left_dc_only = row0_ac_bits == 0;
+
                 let dcval = vshl_n_s16::<PASS1_BITS>(row0);
                 let quad: int16x4x4_t = int16x4x4_t(dcval, dcval, dcval, dcval);
                 vst4_s16(ws_l.as_mut_ptr(), quad);
@@ -183,20 +193,30 @@ unsafe fn neon_idct_islow_core(cptr: *const i16, qptr: *const i16, output: *mut 
             let right_all_bitmap: i64 = vget_lane_s64(vreinterpret_s64_s16(bitmap_all), 0);
 
             if right_all_bitmap == 0 {
-                // Entire right half is zero — skip, use sparse pass 2.
-                //
-                // Note: an earlier attempt added a `left_dc_only` pure-DC
-                // pixel-fill shortcut here, but it diverged from the full
-                // pipeline on adversarial inputs where `coeff * quant`
-                // overflows the i16 lane width that `vmul_s16` /
-                // `vshl_n_s16::<PASS1_BITS>` use throughout the rest of
-                // pass 1 + pass 2. Reproducing the wrap semantics in a
-                // scalar shortcut is fragile (codex review of d75924f
-                // caught the PASS1-shift wrap missed by the first round
-                // of fixes), so the shortcut was removed in favour of
-                // letting the full pipeline produce the canonical sample
-                // — its `vqrshrn_n_s16` + wrapping `vadd_u8` final stage
-                // is what libjpeg-turbo's NEON ISLOW does too.
+                if left_dc_only {
+                    // Pure-DC block: entire right half zero + left half
+                    // is DC-only. Skip pass 2 — fill output with the
+                    // single pixel value directly.
+                    //
+                    // i16 wrap throughout pass-1 (mirrors `vmul_s16` +
+                    // `vshl_n_s16::<PASS1_BITS>`), i32 from pass-2 onward.
+                    // The `wrapping_shl(2)` is what PR #278 deleted —
+                    // an earlier `(dq_i16 as i32) << 2` formulation
+                    // diverged from the i16-lane pipeline whenever
+                    // `|dq_i16| > 8191` (e.g. coeff=-2047, quant=17).
+                    let dq_i16: i16 = (*cptr).wrapping_mul(*qptr);
+                    let dq_shifted_i16: i16 = dq_i16.wrapping_shl(PASS1_BITS as u32);
+                    let pass1_i32: i32 = dq_shifted_i16 as i32;
+                    let pass2_i32: i32 =
+                        (pass1_i32 + (1 << (PASS1_BITS + 3 - 1))) >> (PASS1_BITS + 3);
+                    let pixel_val: u8 = (pass2_i32 + 128).clamp(0, 255) as u8;
+                    let fill: uint8x8_t = vdup_n_u8(pixel_val);
+                    for row in 0..8 {
+                        vst1_u8(output.add(row * stride), fill);
+                    }
+                    return;
+                }
+                // Entire right half is zero — skip, use sparse pass 2
                 right_all_zero = true;
             } else {
                 // DC-only in right half
