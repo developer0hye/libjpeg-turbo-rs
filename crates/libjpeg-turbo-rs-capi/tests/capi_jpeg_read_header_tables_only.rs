@@ -286,6 +286,7 @@ fn jpeg_consume_input_on_tables_only_returns_reached_eoi() {
     type StdErrorFn = unsafe extern "C" fn(*mut JpegErrorMgrLayout) -> *mut JpegErrorMgrLayout;
     type MemSrcFn = unsafe extern "C" fn(*mut c_void, *const u8, usize);
     type ConsumeFn = unsafe extern "C" fn(*mut c_void) -> c_int;
+    type InputCompleteFn = unsafe extern "C" fn(*mut c_void) -> c_int;
 
     let create: libloading::Symbol<CreateFn> =
         unsafe { lib.get(b"jpeg_CreateDecompress").unwrap() };
@@ -295,6 +296,8 @@ fn jpeg_consume_input_on_tables_only_returns_reached_eoi() {
     let mem_src: libloading::Symbol<MemSrcFn> = unsafe { lib.get(b"jpeg_mem_src").unwrap() };
     let consume_input: libloading::Symbol<ConsumeFn> =
         unsafe { lib.get(b"jpeg_consume_input").unwrap() };
+    let input_complete: libloading::Symbol<InputCompleteFn> =
+        unsafe { lib.get(b"jpeg_input_complete").unwrap() };
 
     GOT_CONSUME_ERROR_EXIT.store(0, Ordering::SeqCst);
 
@@ -331,6 +334,24 @@ fn jpeg_consume_input_on_tables_only_returns_reached_eoi() {
         "error_exit must NOT fire from jpeg_consume_input on a tables-only \
          input — got {} invocations",
         GOT_CONSUME_ERROR_EXIT.load(Ordering::SeqCst),
+    );
+
+    // The documented buffered-image polling loop is
+    //     while (!jpeg_input_complete(&cinfo))
+    //         (void) jpeg_consume_input(&cinfo);
+    // After consume_input returns JPEG_REACHED_EOI on a tables-only
+    // stream, the next jpeg_input_complete must return TRUE so the
+    // loop terminates. The shim mirrors stock libjpeg's
+    // `inputctl->eoi_reached = TRUE` by advancing
+    // `cinfo.global_state` past `DSTATE_SCANNING` in the
+    // `JPEG_HEADER_TABLES_ONLY` arm of `jpeg_consume_input`.
+    let complete: c_int = unsafe { input_complete(cinfo_ptr) };
+    assert_ne!(
+        complete, 0,
+        "jpeg_input_complete must return TRUE after a tables-only EOI return \
+         from jpeg_consume_input; otherwise the documented `while \
+         (!jpeg_input_complete) jpeg_consume_input(...)` polling loop \
+         spins forever"
     );
 
     unsafe { destroy(cinfo_ptr) };
