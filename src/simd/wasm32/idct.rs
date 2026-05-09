@@ -138,13 +138,13 @@ unsafe fn wasm_idct_islow_core(
     output: *mut u8,
     stride: usize,
 ) {
-    let cptr: *const i16 = coeffs.as_ptr();
-
     // The pure-DC pixel-fill shortcut was intentionally removed —
     // see `simd/aarch64/idct.rs` for the rationale: every input now
     // flows through the full pass1 + pass2 pipeline below.
 
     // --- Full IDCT path ---
+    let zero: v128 = i32x4_splat(0);
+
     let mut ws = [0i32; 64];
 
     // ========== Pass 1: columns ==========
