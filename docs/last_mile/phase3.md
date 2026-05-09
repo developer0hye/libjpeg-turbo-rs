@@ -1,6 +1,6 @@
-# Phase 3 — Long-Tail C Compatibility (0 OPEN items; P3-2 PARTIAL)
+# Phase 3 — Long-Tail C Compatibility (0 OPEN items; all CLOSED)
 
-> **Index:** [docs/LAST_MILE.md](../LAST_MILE.md). This phase has no fully-OPEN items left — only P3-2 retains a narrow PARTIAL scope-tracking note (full 12-bit raw-data backend) gated on downstream demand. P3-1 closed 2026-05-08 once all six originally-planned struct cross-checks landed.
+> **Index:** [docs/LAST_MILE.md](../LAST_MILE.md). All six originally-tracked Phase 3 items are CLOSED. P3-2 closed 2026-05-09 when the 12-bit raw-data backend was wired through `libjpeg_turbo_rs::raw_data_12::{compress,decompress}_raw_12`.
 
 External review on 2026-05-06 (`libjpeg_turbo_rs_replacement_analysis.md`) graded the project's *Rust-application replacement* and *stock-tool drop-in* posture as ready, but flagged a long-tail of C-compatibility gaps that block the stronger claim "**any existing C binary linked against `libjpeg.so` / `libturbojpeg.so` runs unchanged**." Six of the seven gaps reproduce in this repository today. The seventh — `libjpeg.so.62` SONAME policy — is already closed under [P2-9](phase2.md#p2-9-v6b--v7--v8-abi-compatibility-matrix--closed) and is not re-listed here.
 
@@ -11,7 +11,7 @@ For each item below, the **agreement** line states whether the gap is reproducib
 | ID | Status |
 | --- | --- |
 | P3-1 | CLOSED 2026-05-08 (6 of 6 struct cross-checks active; Windows MSVC matrix leg as Phase 4 hardening) |
-| P3-2 | PARTIAL (silent-zero stub eliminated; full backend deferred) |
+| P3-2 | CLOSED 2026-05-09 (full 12-bit raw-data encode + decode backend wired) |
 | P3-3 | CLOSED 2026-05-06 |
 | P3-4 | CLOSED 2026-05-07 |
 | P3-5 | CLOSED 2026-05-08 |
@@ -55,38 +55,34 @@ The six cross-checked structs cover every classic-API field surface that consume
 
 ---
 
-## P3-2. `jpeg12_write_raw_data` / `jpeg12_read_raw_data` Stub Semantics — **PARTIAL: error-exit semantics fixed; full 12-bit raw-data backend deferred**
+## P3-2. `jpeg12_write_raw_data` / `jpeg12_read_raw_data` Backend — **CLOSED 2026-05-09**
 
-**Status (2026-05-08): partial closure — silent-zero-return stub eliminated.** Both symbols still acknowledge that 12-bit raw-data is not implemented, but they no longer return `0` silently (which mimicked "no rows ready, retry later" and could spin a caller forever). They now invoke `cinfo->err->error_exit(cinfo)` with `msg_code = JERR_NOTIMPL` (upstream code 48 at `JPEG_LIB_VERSION=80`, verified empirically with `cc -DJPEG_LIB_VERSION=80 -I references/libjpeg-turbo/src probe.c` where `probe.c` is a `printf("%d", JERR_NOTIMPL)` harness around `#define JMESSAGE(code, string) code,` + `#include "jerror.h"`; omitting the version define yields 47 because the v8 jerror.h has one extra entry earlier in the enum — this matters because the shim's installed `jconfig.h` pins `JPEG_LIB_VERSION=80`), so:
+**Status (2026-05-09): closed — full 12-bit raw-data backend wired.** Both shim entry points now do real work instead of routing to `error_exit`:
 
-- A caller with a `setjmp`-installed handler longjmps out of the call cleanly.
-- A caller relying on the default `error_exit` aborts the process with a diagnostic on stderr.
-- A caller that resolves the symbol only at dyld-load time (e.g. Pillow's libtiff dependency) is unaffected — symbol presence is preserved.
+- **Encode side** (`jpeg12_write_raw_data` → `run_raw_encoder_12_and_flush`): accumulates per-iMCU-row i16 planes into `CompressPrivate::raw_plane_buffers_12`, then on `jpeg_finish_compress` calls `libjpeg_turbo_rs::raw_data_12::compress_raw_12` with the shim-derived subsampling (`subsampling_from_comp_info`) and the same `quality` the caller installed via `jpeg_set_quality`. The encoded bytes flow through `push_bytes_through_dest_mgr` so caller-installed destination managers (mem-dest, stdio-dest, custom) work uniformly. The dispatch fork lives in `jpeg_finish_compress`: `c.data_precision == 12 && c.raw_data_in != 0` selects the 12-bit path.
+- **Decode side** (`jpeg12_read_raw_data`): mirrors the 8-bit `jpeg_read_raw_data` lazily-materialised cache pattern but on i16 planes via `libjpeg_turbo_rs::raw_data_12::decompress_raw_12`. The first call materialises the whole stream into `DecompressPrivate::raw_image_cache_12`; subsequent calls deliver `max_v_samp_factor * DCT_v_scaled_size` rows per call into the caller's JSAMPIMAGE16 (`*mut *mut *mut i16`) array. Returns 0 with `priv_state.last_error` populated on precondition failures (wrong precision, NULL data, undersized `max_lines`); returns rows-per-iMCU on success.
 
-> **Doc-vs-code reconciliation note (2026-05-08).** A previous iteration of this section (dated 2026-05-06) documented a `trigger_error_exit_notimpl` helper as if the `error_exit` wiring had landed. It hadn't — both stubs continued to return 0 silently after setting `last_error` until this PR. The actual wiring uses the existing `invoke_error_exit(cinfo, msg_code)` helper (already used at `jpeg_read_header` for `JERR_BAD_LENGTH=12` and at `push_bytes_through_dest_mgr` for `JERR_CANT_SUSPEND=25`); no new helper was needed.
+The two error-exit stubs that previously gated this entry point under `JERR_NOTIMPL` are gone. The libjpeg.txt §3 contract — "an unimplemented codepath must routes through `error_exit`" — no longer applies because the codepath is now implemented.
 
 **Implementation** (`crates/libjpeg-turbo-rs-capi/src/jpeglib.rs`):
 
-```rust
-// jpeg12_read_raw_data
-let priv_ptr: *mut c_void = decompress_private_raw(cinfo);
-if let Some(p) = unsafe { priv_from_ptr(priv_ptr) } {
-    p.last_error = CString::new("jpeg12_read_raw_data: JERR_NOTIMPL …").unwrap_or_default();
-}
-invoke_error_exit(cinfo, 48);   // upstream JERR_NOTIMPL = 48 (jerror.h, JPEG_LIB_VERSION=80)
-0  // defensive fall-through if a non-conforming handler returns
-```
-
-`jpeg12_write_raw_data` mirrors the same pattern through `cinfo_compress_mut` + `priv_compress_from_ptr` instead of the decompress side. Both walk the `cinfo->err` slot at offset 0 (the `jpeg_common_fields` prefix is shared between `jpeg_decompress_struct` and `jpeg_compress_struct`), so the same `invoke_error_exit` helper works on either lifecycle.
-
-**Why "partial" not "closed":** the symbols still don't *do* 12-bit raw-data. A consumer that wants real 12-bit raw-data encode/decode now gets a clean error path (good) but no working implementation (acceptable, but not the full P3-2 acceptance bar). The full bar — wire `cinfo.raw_data_in = TRUE` through the existing 12-bit encode backend (`compress_12bit_with_precision`), and mirror for decode — is deferred to Phase 4 work and gated on a downstream consumer surfacing demand. The current `compress_12bit_with_precision` does its own RGB→YCbCr+downsample internally, so a raw-data-in path needs a new entry point that accepts pre-downsampled per-component i16 planes (similar in shape to the 8-bit `jpeg_write_raw_data` plumbing in `compress_with_raw_planes`); decode needs a 12-bit per-component plane reader.
+- `CompressPrivate::raw_plane_buffers_12: Vec<Vec<i16>>` — per-component i16 plane accumulator (analog of the existing 8-bit `raw_plane_buffers`).
+- `DecompressPrivate::raw_image_cache_12: Option<libjpeg_turbo_rs::raw_data_12::RawImage12>` — lazily-populated decode cache (analog of `raw_image_cache`).
+- `run_raw_encoder_12_and_flush(c, priv_state) -> bool` — encoder helper symmetric to `run_raw_encoder_and_flush`, dispatched from `jpeg_finish_compress` when `c.data_precision == 12 && c.raw_data_in != 0`.
+- `jpeg12_write_raw_data` — full body validates precision/state, computes per-component plane geometry from `comp_info` + `image_width/height` + `max_h_samp_factor/max_v_samp_factor`, copies caller's iMCU rows into the i16 buffer, advances `c.next_scanline`.
+- `jpeg12_read_raw_data` — full body validates precision, lazily materialises `decompress_raw_12`, copies cached i16 rows into the caller's JSAMPIMAGE16 with the same MCU-aligned width contract the 8-bit path uses.
 
 **Verification:**
-- `cargo test -p libjpeg-turbo-rs-capi --test capi_jpeg12_raw_data_error_exit --release` → 2 passed (one per direction). Each test dlopens the cdylib, installs a custom `error_exit` on a synthesised `JpegErrorMgr`, calls `jpeg12_*_raw_data`, and asserts the handler fired exactly once with `msg_code = 48`.
-- TDD-verified: deleting the `invoke_error_exit(cinfo, 48)` line in either function makes the corresponding test red-fail with `error_exit fired 0 times, expected 1`. Restoring returns to GREEN.
-- `cargo test -p libjpeg-turbo-rs-capi --test capi_jpeg_read_raw_data --test capi_jpeg_write_raw_data --release` → `2 passed` + `3 passed` (the existing 8-bit raw-data tests are unaffected).
-- `cargo test --workspace --release --no-fail-fast` → exit 0.
+
+- `cargo test -p libjpeg-turbo-rs-capi --release --test capi_jpeg12_raw_data_round_trip` → 1 passed. Three independent gates exercise the new code:
+  1. Shim encode → native decode: Y-plane DCT round-trip max_diff ≤ 96 (out of 12-bit full scale 4095, ~2.3% — driven by 4:2:0 chroma smoothing + Q=90 quantisation; measured max_diff ≤ 64).
+  2. Native encode → shim decode: shim's recovered Y plane is byte-identical to native `decompress_raw_12` output (same JPEG bytes, both backends route through the same code).
+  3. Shim encode → shim decode: end-to-end Y max_diff ≤ 96 (proves both new paths compose).
+- `cargo test --workspace --release` → 2156 passed / 0 failed / 1 ignored (the 1 ignored is the libtiff `JPEG_HEADER_TABLES_ONLY` shim gap tracked separately).
 - `cargo build -p libjpeg-turbo-rs-capi --release` clean.
+- `cargo clippy --lib --release -- -D warnings` clean.
+
+**Test deletion (replaces obsolete contract).** `tests/capi_jpeg12_raw_data_error_exit.rs` previously pinned both stubs at "fires `error_exit` with `msg_code = JERR_NOTIMPL` (48)". With both stubs replaced by working backends that no longer route normal calls through `error_exit`, the contract is gone and the file is deleted. The new contract — "round-trip through both entry points produces correct samples within DCT tolerance" — is pinned by `tests/capi_jpeg12_raw_data_round_trip.rs`.
 
 The closure title reflects the actual delta: stub *semantics* moved from "silent zero return" to "loud `error_exit`-driven failure." Symbol-presence and dyld-load compatibility are preserved.
 
@@ -201,7 +197,7 @@ The closure title reflects the actual delta: stub *semantics* moved from "silent
 
 1. ~~**P3-1** — Extend `tests/abi_offsets.rs` to `jpeg_compress_struct`, `jpeg_error_mgr`, `jpeg_source_mgr`, `jpeg_destination_mgr`, `jpeg_marker_struct`.~~ **CLOSED 2026-05-08** — all six originally-planned struct cross-checks active in `tests/abi_offsets.rs` (decompress + marker + compress + error_mgr + source_mgr + destination_mgr; 133 fields + 6 sizeof probes). C-side `main` field maps to Rust mirror `main_ctrl` via `(c_field_name, rust_offset)` tuple (only field-name divergence). `jvirt_*_control` opaque upstream → no cross-check needed. Windows MSVC matrix leg deferred as Phase 4 hardening (helper currently emits gcc/clang flags only); `cargo test -p libjpeg-turbo-rs-capi --test abi_offsets --release` reports `6 passed; 0 failed; 0 ignored` on macOS aarch64 + the `abi-offsets` CI matrix.
 2. ~~**P3-3** — Implement the 19 legacy TurboJPEG aliases as forwarding wrappers and delete them from the allowlist.~~ **CLOSED 2026-05-06** — `crates/libjpeg-turbo-rs-capi/tests/symbol_inventory.rs::allowlisted_missing_symbols()` returns an empty `HashSet`; both `cdylib_exports_every_upstream_*` tests pass without exemptions. The wrappers live in `crates/libjpeg-turbo-rs-capi/src/legacy.rs` (~390 lines for the new section).
-3. ~~**P3-2** — Either implement `jpeg12_write_raw_data` / `jpeg12_read_raw_data` against the existing 12-bit encode/decode backend, or downgrade them to feature-gated absence. The "stub returning 0" middle ground must end.~~ **PARTIAL 2026-05-06** — middle ground eliminated: stubs now invoke `cinfo->err->error_exit(cinfo)` with `msg_code = JERR_NOTIMPL`, so callers either longjmp out cleanly or hit a default abort. Full 12-bit raw-data backend deferred to Phase 4 (gated on downstream demand).
+3. ~~**P3-2** — Either implement `jpeg12_write_raw_data` / `jpeg12_read_raw_data` against the existing 12-bit encode/decode backend, or downgrade them to feature-gated absence. The "stub returning 0" middle ground must end.~~ **CLOSED 2026-05-09** — both entry points wired through `libjpeg_turbo_rs::raw_data_12::{compress,decompress}_raw_12`. Round-trip pinned by `tests/capi_jpeg12_raw_data_round_trip.rs` (3 gates, GREEN).
 4. ~~**P3-5** — Classic `jpeglib.h` lifecycle / custom-I/O / suspension C harness (≥ 8 tests).~~ **CLOSED 2026-05-08** — all 8 patterns active in `crates/libjpeg-turbo-rs-capi/tests/capi_classic_lifecycle.rs` (custom src/dst mgr, source suspension, destination-suspension `JERR_CANT_SUSPEND` contract, abort+reuse for both decompress/compress, buffered-image multi-pass, setjmp/longjmp). Pattern #4 surfaced + fixed a real shim defect: `push_bytes_through_dest_mgr` previously ignored `empty_output_buffer`'s `FALSE` return and called `term_destination` anyway, silently dropping the post-suspension bytes. Architectural reality is that the deferred-encode shim cannot honor upstream's per-MCU streaming-suspension contract at `jpeg_write_scanlines` (no encoding happens there), so the closure invokes `cinfo->err->error_exit` with `JERR_CANT_SUSPEND` (upstream code 25, "Suspension not allowed here") rather than inventing a non-upstream resume contract; a `setjmp`/`longjmp` consumer recovers cleanly. The earlier P3-5 pattern #8 fix (2026-05-07) wired `jpeg_read_header` to invoke `error_exit` on EOI-terminated malformed input.
 5. ~~**P3-4** — Lift the 4-pixel chroma transform writer gate; close the P2-12 follow-up.~~ **CLOSED 2026-05-07** — gate at `transform_jpeg_with_options::progressive_safe` widened from `max_{h,v} ≤ 2` to `max_{h,v} ∈ {1,2,4}` (the eight standard TJSAMP factors verified by `c_tjtrantest_full`); `tests/c_tjtrantest.rs` skip removed; regression pinned in `tests/regression_progressive_4pixel_chroma_transform.rs` (256 cases). Full matrix runs 12,230 cases without divergence. The 2026-05-07 "1-LSB drift" hypothesis turned out to be an artefact of the encoder-side clamp that P2-11 had already removed; the transform writer inherits the corrected chroma layout via `read_coefficients`. Non-standard 3x sampling stays gated to baseline pending P3-6.
 6. ~~**P3-6** — Non-standard sampling / RGB565 merged-upsample minimum fixture set.~~ **CLOSED 2026-05-08** — 4 fixtures (3x2 decode, 3x2 encode, 3x1 decode, RGB565 merged-upsample) all green in `tests/cross_check_p3_6_nonstandard_rgb565.rs`. Shim fix: merged-upsample gate widened from `Rgb` to `Rgb || Rgb565` with a 5-6-5 truncation pass after the merged kernel; dedicated `_565` SIMD kernels deferred as a Phase 4 perf task.
