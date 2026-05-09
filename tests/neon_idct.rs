@@ -199,3 +199,60 @@ fn neon_idct_full_block() {
     let neon = neon_idct(&coeffs, &quant);
     assert_eq!(neon, scalar, "full block mismatch");
 }
+
+/// Adversarial DC-only block where `coeff[0] * quant[0]` overflows i16.
+///
+/// `2032 * 85 = 172720` — wraps to `-23888` under `vmul_s16`. The full
+/// i16-lane NEON pipeline (and the matching pixel-fill shortcut after
+/// PR #279) produces pixel value `0`. C libjpeg-turbo's NEON ISLOW
+/// agrees because it also operates on i16 lanes.
+///
+/// PR #278's deleted shortcut used `(dq_i16 as i32) << PASS1_BITS`,
+/// which preserves the i16-wrapped multiply result but skips the
+/// pass-1 `<< 2` lane-wrap. For this specific input the bugged
+/// shortcut and the canonical pipeline happened to converge, so the
+/// case here exists to pin the i16-wrap *multiply* leg of the fix.
+/// The companion test below pins the pass-1 *shift* wrap leg.
+///
+/// We compare against a hand-derived expected value (0) rather than
+/// `scalar_idct`, because the scalar fallback uses i32 throughout
+/// and would diverge on this exact input.
+#[test]
+fn neon_idct_dc_only_i16_wrap_multiply() {
+    let mut coeffs = [0i16; 64];
+    coeffs[0] = 2032;
+    let mut quant = [1u16; 64];
+    quant[0] = 85;
+    let neon = neon_idct(&coeffs, &quant);
+    for (i, &val) in neon.iter().enumerate() {
+        assert_eq!(
+            val, 0,
+            "i16-wrap pipeline must produce 0 for coeff=2032 quant=85 (px {i})"
+        );
+    }
+}
+
+/// Adversarial DC-only block where `(coeff[0] * quant[0]) << PASS1_BITS`
+/// overflows i16 even though the multiply fits.
+///
+/// `-2047 * 17 = -34799` wraps to `30737` (positive in i16). Then
+/// `30737 << 2` overflows i16, wrapping to `-8124`. Pipeline pixel: 0.
+///
+/// Codex review of d75924f flagged this exact overflow leg — the
+/// previous round-2 shortcut still wrote `(dq_i16 as i32) << 2`,
+/// which would have produced `255` here. The shortcut after PR #279
+/// uses `dq_i16.wrapping_shl(2)` so it agrees with the pipeline.
+#[test]
+fn neon_idct_dc_only_i16_wrap_pass1_shift() {
+    let mut coeffs = [0i16; 64];
+    coeffs[0] = -2047;
+    let mut quant = [1u16; 64];
+    quant[0] = 17;
+    let neon = neon_idct(&coeffs, &quant);
+    for (i, &val) in neon.iter().enumerate() {
+        assert_eq!(
+            val, 0,
+            "i16-shift wrap must produce 0 for coeff=-2047 quant=17 (px {i})"
+        );
+    }
+}
