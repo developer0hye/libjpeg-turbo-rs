@@ -625,8 +625,16 @@ struct DecompressPrivate {
     /// `jpeg_read_raw_data` call (8-bit baseline/progressive only).
     /// Subsequent calls deliver further iMCU rows from this cache.
     raw_image_cache: Option<libjpeg_turbo_rs::RawImage>,
-    /// Per-component row cursor into `raw_image_cache`. Entry `i` is
-    /// the number of rows already delivered for component `i`.
+    /// 12-bit counterpart to `raw_image_cache`. Populated on the first
+    /// `jpeg12_read_raw_data` call from
+    /// `libjpeg_turbo_rs::raw_data_12::decompress_raw_12`. The 8-bit and
+    /// 12-bit caches are mutually exclusive on a single cinfo
+    /// (selected by `data_precision`); `raw_rows_consumed` is shared
+    /// since its row-count semantics don't depend on element type.
+    raw_image_cache_12: Option<libjpeg_turbo_rs::raw_data_12::RawImage12>,
+    /// Per-component row cursor into `raw_image_cache` /
+    /// `raw_image_cache_12`. Entry `i` is the number of rows already
+    /// delivered for component `i`.
     raw_rows_consumed: Vec<usize>,
 }
 
@@ -649,6 +657,7 @@ impl Default for DecompressPrivate {
             bridge_partial: Vec::new(),
             header_parsed_ok: false,
             raw_image_cache: None,
+            raw_image_cache_12: None,
             raw_rows_consumed: Vec::new(),
         }
     }
@@ -1974,15 +1983,31 @@ pub extern "C" fn jpeg_start_decompress(cinfo: *mut c_void) -> CBoolean {
     // Fast path for high-precision streams (12/16 bit). The 8-bit
     // `Decoder` would silently succeed and then overwrite
     // `data_precision`, `output_components`, etc. with 8-bit values,
-    // which misroutes djpeg's precision-dispatched decode loop. Let
-    // `jpeg_calc_output_dimensions` (already invoked from
-    // `j12init_write_ppm` / `j16init_write_ppm` before we get here)
-    // own the output dims and leave precision intact; the actual
-    // decode happens lazily in `jpeg12_read_scanlines` /
-    // `jpeg16_read_scanlines`.
+    // which misroutes djpeg's precision-dispatched decode loop. The
+    // actual decode happens lazily in `jpeg12_read_scanlines` /
+    // `jpeg16_read_scanlines` / `jpeg12_read_raw_data`.
+    //
+    // Populate output dimensions inline so the 12-bit raw-data path
+    // doesn't depend on the caller having invoked the optional
+    // `jpeg_calc_output_dimensions` helper. The standard libjpeg
+    // sequence — `jpeg_read_header`; tweak params; `jpeg_start_decompress`;
+    // `jpeg12_read_raw_data` — leaves `output_width / output_height /
+    // max_v_samp_factor / min_DCT_v_scaled_size` at zero unless we
+    // populate them here, which would short-circuit the EOF check at
+    // the top of `jpeg12_read_raw_data` (codex review of f0dc137).
     if c.data_precision > 8 {
         c.output_scanline = 0;
         c.global_state = DSTATE_SCANNING;
+        // The `c: &mut JpegDecompressPublic` borrow is released
+        // when this scope returns. `jpeg_calc_output_dimensions`
+        // re-borrows `cinfo` via its own `cinfo_mut` call;
+        // returning immediately after means the two mutable
+        // borrows never overlap. Re-borrows through raw pointers
+        // are safe because the public struct lives behind the
+        // caller's allocation (not Rust-owned), so aliasing is the
+        // unsafe-FFI contract, not a Rust UB.
+        let _ = c;
+        jpeg_calc_output_dimensions(cinfo);
         priv_state.last_error = CString::new("No error").expect("static");
         return 1;
     }
@@ -2342,6 +2367,17 @@ pub extern "C" fn jpeg_finish_decompress(cinfo: *mut c_void) -> CBoolean {
         // → free_pool(JPOOL_IMAGE)` in its finish path.
         c.marker_list = std::ptr::null_mut();
         priv_state.marker_list_storage.clear();
+        // Drop the lazy raw-data caches so a reuse of this cinfo for
+        // a different JPEG re-runs `decompress_raw` /
+        // `decompress_raw_12` against the new source. Without these,
+        // the `is_none()` guards at the top of `jpeg_read_raw_data` /
+        // `jpeg12_read_raw_data` would short-circuit on the previous
+        // image's planes and copy stale rows — codex review of f0dc137
+        // flagged the 12-bit half; the 8-bit cache had the same latent
+        // bug, so both are cleared here.
+        priv_state.raw_image_cache = None;
+        priv_state.raw_image_cache_12 = None;
+        priv_state.raw_rows_consumed.clear();
     }
     1
 }
@@ -3725,52 +3761,160 @@ pub extern "C" fn jpeg_read_raw_data(
 
 /// `jpeg12_read_raw_data(cinfo, data, max_lines) -> JDIMENSION`.
 ///
-/// 12-bit raw-data decode is not implemented in this shim. Per
-/// libjpeg.txt §3 the failure routes through
-/// `cinfo->err->error_exit(cinfo)` with `msg_code = JERR_NOTIMPL`
-/// (upstream code 48 at JPEG_LIB_VERSION=80) so a caller that
-/// installed a `setjmp`/`longjmp`
-/// handler recovers cleanly, and a caller without one falls through
-/// to the default `error_exit` (which aborts the process with a
-/// diagnostic on stderr — exactly what stock libjpeg would do for
-/// any other unimplemented codepath). Callers that only resolve the
-/// symbol at dynamic-link time (e.g. Pillow's libtiff dependency)
-/// are unaffected — symbol presence is preserved.
+/// 12-bit counterpart to `jpeg_read_raw_data`. Delivers one iMCU row
+/// of 12-bit samples per component into a JSAMPIMAGE16
+/// (`*mut *mut *mut i16`) array. Lazily materialises the whole
+/// stream through `libjpeg_turbo_rs::raw_data_12::decompress_raw_12`
+/// on the first call and copies subsequent iMCU rows out of the
+/// cached planes.
 ///
-/// Returns 0 only on the *unreachable* fall-through where a custom
-/// handler returns from `error_exit` without longjmp-ing out, which
-/// violates the libjpeg contract; defensive code is cheap.
+/// Returns 0 (and populates `priv_state.last_error`) on precondition
+/// failures: wrong precision, missing data pointer, `max_lines`
+/// smaller than one iMCU row, or a Rust-side decode error. Returns
+/// `max_v_samp_factor * DCT_v_scaled_size` rows on success.
 #[no_mangle]
 pub extern "C" fn jpeg12_read_raw_data(
     cinfo: *mut c_void,
-    _data: *mut *mut *mut i16,
-    _max_lines: JDimension,
+    data: *mut *mut *mut i16,
+    max_lines: JDimension,
 ) -> JDimension {
+    let c: &mut JpegDecompressPublic = match unsafe { cinfo_mut(cinfo) } {
+        Some(c) => c,
+        None => return 0,
+    };
     let priv_ptr: *mut c_void = decompress_private_raw(cinfo);
-    if let Some(p) = unsafe { priv_from_ptr(priv_ptr) } {
-        p.last_error = CString::new(
-            "jpeg12_read_raw_data: JERR_NOTIMPL — 12-bit raw-data decode is not supported in libjpeg-turbo-rs-capi",
-        )
+    let priv_state: &mut DecompressPrivate = match unsafe { priv_from_ptr(priv_ptr) } {
+        Some(p) => p,
+        None => return 0,
+    };
+
+    // 12-bit gate: only `data_precision == 12` reaches this entry
+    // point; 8-bit callers should use `jpeg_read_raw_data`.
+    if c.data_precision != 12 {
+        priv_state.last_error = CString::new(format!(
+            "jpeg12_read_raw_data: JERR_BAD_PRECISION (data_precision={} not 12)",
+            c.data_precision
+        ))
         .unwrap_or_default();
+        return 0;
     }
-    // upstream `JERR_NOTIMPL = 48` at `JPEG_LIB_VERSION=80` — verified
-    // empirically by compiling
-    //   `cc -DJPEG_LIB_VERSION=80 -I references/libjpeg-turbo/src
-    //    /tmp/probe.c`
-    // where `/tmp/probe.c` is a `printf("%d", JERR_NOTIMPL)` harness
-    // built around `#define JMESSAGE(code, string) code,` +
-    // `#include "jerror.h"`. The version define matters: leaving
-    // `JPEG_LIB_VERSION` undefined (or pinning it to v6) shifts the
-    // enum by one to 47 because v8 added one entry earlier in the
-    // file. The shim's installed `jconfig.h` pins
-    // `#define JPEG_LIB_VERSION 80`, so v8 is the authoritative
-    // surface a downstream consumer compiles against.
-    //
-    // Most consumer-installed `error_exit` handlers longjmp out and
-    // never return; the `0` below only fires for non-conforming
-    // handlers that return.
-    invoke_error_exit(cinfo, 48);
-    0
+
+    // EOF sentinel: output_scanline >= output_height → return 0
+    // (matches libjpeg's JWRN_TOO_MUCH_DATA path).
+    if c.output_scanline >= c.output_height {
+        return 0;
+    }
+
+    if data.is_null() {
+        priv_state.last_error =
+            CString::new("jpeg12_read_raw_data: data pointer is NULL").unwrap_or_default();
+        return 0;
+    }
+
+    let max_vsf: usize = c.max_v_samp_factor as usize;
+    let dct_size: usize = if c.min_DCT_v_scaled_size > 0 {
+        c.min_DCT_v_scaled_size as usize
+    } else {
+        DCTSIZE
+    };
+    let rows_per_imcu: usize = max_vsf * dct_size;
+
+    if (max_lines as usize) < rows_per_imcu {
+        priv_state.last_error = CString::new(format!(
+            "jpeg12_read_raw_data: JERR_BUFFER_SIZE — max_lines ({max_lines}) < rows_per_iMCU ({rows_per_imcu})"
+        )).unwrap_or_default();
+        return 0;
+    }
+
+    if priv_state.raw_image_cache_12.is_none() {
+        let bytes: &[u8] = match priv_state.source.as_bytes() {
+            Some(b) => b,
+            None => {
+                priv_state.last_error =
+                    CString::new("jpeg12_read_raw_data: no source").unwrap_or_default();
+                return 0;
+            }
+        };
+        match libjpeg_turbo_rs::raw_data_12::decompress_raw_12(bytes) {
+            Ok(raw) => {
+                let ncomp: usize = raw.num_components;
+                priv_state.raw_rows_consumed = vec![0usize; ncomp];
+                priv_state.raw_image_cache_12 = Some(raw);
+            }
+            Err(e) => {
+                priv_state.last_error = CString::new(format!(
+                    "jpeg12_read_raw_data: decompress_raw_12 failed: {e}"
+                ))
+                .unwrap_or_default();
+                return 0;
+            }
+        }
+    }
+
+    let raw: &libjpeg_turbo_rs::raw_data_12::RawImage12 =
+        priv_state.raw_image_cache_12.as_ref().expect("just set");
+    let num_components: usize = raw.num_components;
+
+    let plane_widths: Vec<usize> = raw.plane_widths.clone();
+    let plane_heights: Vec<usize> = raw.plane_heights.clone();
+
+    let comp_info_slice: &[JpegComponentInfoPublic] =
+        if c.comp_info.is_null() || c.num_components as usize != num_components {
+            &[]
+        } else {
+            unsafe { std::slice::from_raw_parts(c.comp_info, num_components) }
+        };
+
+    for comp_idx in 0..num_components {
+        let vsf: usize = if comp_idx < comp_info_slice.len() {
+            comp_info_slice[comp_idx].v_samp_factor.max(1) as usize
+        } else {
+            let luma_h: usize = plane_heights.first().copied().unwrap_or(1);
+            let this_h: usize = plane_heights.get(comp_idx).copied().unwrap_or(1);
+            ((max_vsf * this_h + luma_h / 2) / luma_h).max(1)
+        };
+        let rows_this_call: usize = vsf * dct_size;
+        let plane_width: usize = plane_widths.get(comp_idx).copied().unwrap_or(0);
+        let plane_height: usize = plane_heights.get(comp_idx).copied().unwrap_or(0);
+        let rows_already: usize = priv_state
+            .raw_rows_consumed
+            .get(comp_idx)
+            .copied()
+            .unwrap_or(0);
+
+        let comp_outer_ptr: *mut *mut i16 = unsafe { *data.add(comp_idx) };
+        if comp_outer_ptr.is_null() {
+            continue;
+        }
+
+        for row_in_imcu in 0..rows_this_call {
+            let src_row: usize = rows_already + row_in_imcu;
+            if src_row >= plane_height {
+                break;
+            }
+            let dst_row_ptr: *mut i16 = unsafe { *comp_outer_ptr.add(row_in_imcu) };
+            if dst_row_ptr.is_null() {
+                continue;
+            }
+            let src_plane: &[i16] = &raw.planes[comp_idx];
+            let src_offset: usize = src_row * plane_width;
+            let src_slice: &[i16] = &src_plane[src_offset..src_offset + plane_width];
+            // SAFETY: src/dst point to `plane_width` valid i16
+            // samples each; copy_nonoverlapping count is in *items*.
+            unsafe {
+                std::ptr::copy_nonoverlapping(src_slice.as_ptr(), dst_row_ptr, plane_width);
+            }
+        }
+
+        if let Some(consumed) = priv_state.raw_rows_consumed.get_mut(comp_idx) {
+            *consumed += rows_this_call;
+        }
+    }
+
+    let delivered: JDimension = rows_per_imcu as JDimension;
+    c.output_scanline = c.output_scanline.saturating_add(delivered);
+    priv_state.last_error = CString::new("No error").expect("static");
+    delivered
 }
 
 // ---------------------------------------------------------------------------
@@ -4029,6 +4173,12 @@ pub extern "C" fn jpeg_abort_decompress(cinfo: *mut c_void) {
         // markers — caught by the post-implementation review.
         c.marker_list = std::ptr::null_mut();
         p.marker_list_storage.clear();
+        // Drop the lazy raw-data caches; reuse on a new JPEG must
+        // re-materialise. Same rationale as the matching block in
+        // `jpeg_finish_decompress`.
+        p.raw_image_cache = None;
+        p.raw_image_cache_12 = None;
+        p.raw_rows_consumed.clear();
     }
     c.global_state = DSTATE_START;
     c.output_scanline = 0;
@@ -4515,13 +4665,25 @@ struct CompressPrivate {
     /// Populated by `jpeg_write_raw_data` calls; consumed by
     /// `jpeg_finish_compress` via `libjpeg_turbo_rs::compress_raw`.
     raw_plane_buffers: Vec<Vec<u8>>,
-    /// Number of rows already written into `raw_plane_buffers[i]`.
-    /// Mirrors `raw_rows_consumed` on the decode side.
+    /// Number of rows already written into `raw_plane_buffers[i]` /
+    /// `raw_plane_buffers_12[i]`. Reused across both 8-bit and 12-bit
+    /// raw-data accumulators since the row-count semantics are
+    /// identical (it counts logical rows, not bytes).
     raw_rows_filled: Vec<usize>,
-    /// MCU-aligned width of each raw plane (bytes per row).
+    /// MCU-aligned width of each raw plane (samples per row).
     raw_plane_widths: Vec<usize>,
     /// MCU-aligned height of each raw plane (total rows in buffer).
     raw_plane_heights: Vec<usize>,
+    /// 12-bit counterpart to `raw_plane_buffers`. Populated by
+    /// `jpeg12_write_raw_data` (each i16 holds a 12-bit sample
+    /// 0..4095); consumed by `jpeg_finish_compress` when
+    /// `data_precision == 12` via `libjpeg_turbo_rs::compress_raw_12`.
+    /// Empty when the 8-bit path is in use; non-empty otherwise.
+    /// `raw_rows_filled` / `raw_plane_widths` / `raw_plane_heights` are
+    /// shared with the 8-bit path — the 8-bit and 12-bit accumulators
+    /// are mutually exclusive on a single cinfo (selected by
+    /// `data_precision`).
+    raw_plane_buffers_12: Vec<Vec<i16>>,
 }
 
 impl Default for CompressPrivate {
@@ -4551,6 +4713,7 @@ impl Default for CompressPrivate {
             raw_rows_filled: Vec::new(),
             raw_plane_widths: Vec::new(),
             raw_plane_heights: Vec::new(),
+            raw_plane_buffers_12: Vec::new(),
         }
     }
 }
@@ -5223,8 +5386,9 @@ pub extern "C" fn jpeg_start_compress(cinfo: *mut c_void, _write_all_tables: CBo
     if c.raw_data_in == 0 {
         priv_state.pixels_u8.resize(total_bytes, 0);
     }
-    // Reset raw-data accumulation buffers.
+    // Reset raw-data accumulation buffers (both 8-bit and 12-bit).
     priv_state.raw_plane_buffers.clear();
+    priv_state.raw_plane_buffers_12.clear();
     priv_state.raw_rows_filled.clear();
     priv_state.raw_plane_widths.clear();
     priv_state.raw_plane_heights.clear();
@@ -5728,8 +5892,15 @@ pub extern "C" fn jpeg_finish_compress(cinfo: *mut c_void) {
         let _ = run_coefficient_writer_and_flush(c, priv_state);
     } else if c.raw_data_in != 0 {
         // Raw-data encode path: flush accumulated per-component planes
-        // collected by jpeg_write_raw_data.
-        let _ = run_raw_encoder_and_flush(c, priv_state);
+        // collected by jpeg_write_raw_data / jpeg12_write_raw_data.
+        // Dispatch on `data_precision`: 12-bit goes through the
+        // `compress_raw_12` backend (i16 planes), every other precision
+        // through the 8-bit `compress_raw` backend (u8 planes).
+        if c.data_precision == 12 {
+            let _ = run_raw_encoder_12_and_flush(c, priv_state);
+        } else {
+            let _ = run_raw_encoder_and_flush(c, priv_state);
+        }
     } else {
         let _ = run_encoder_and_flush(c, priv_state);
     }
@@ -6495,47 +6666,311 @@ fn run_raw_encoder_and_flush(c: &mut JpegCompressPublic, priv_state: &mut Compre
     }
 }
 
+/// 12-bit counterpart to `run_raw_encoder_and_flush`. Invokes
+/// `libjpeg_turbo_rs::compress_raw_12` over the i16 planes accumulated
+/// by `jpeg12_write_raw_data` calls and pushes the resulting JPEG bytes
+/// through the destination manager. Called from `jpeg_finish_compress`
+/// when `c.data_precision == 12` and `c.raw_data_in != 0`.
+fn run_raw_encoder_12_and_flush(
+    c: &mut JpegCompressPublic,
+    priv_state: &mut CompressPrivate,
+) -> bool {
+    let image_width: usize = c.image_width as usize;
+    let image_height: usize = c.image_height as usize;
+    if image_width == 0 || image_height == 0 {
+        return false;
+    }
+    if priv_state.raw_plane_buffers_12.is_empty() {
+        priv_state.last_error = CString::new(
+            "jpeg_finish_compress: no raw planes accumulated (jpeg12_write_raw_data was not called)",
+        )
+        .unwrap_or_default();
+        return false;
+    }
+
+    let num_components: usize = priv_state.raw_plane_buffers_12.len();
+    let subsampling: libjpeg_turbo_rs::Subsampling =
+        subsampling_from_comp_info(priv_state, num_components as c_int);
+
+    // Logical (image-content) plane dimensions per the same rules
+    // `compress_raw_12` validates: luma at full image size, chroma
+    // ceil-divided by sampling factors. Plane buffers are MCU-aligned
+    // (wider/taller); the logical region is a top-left subrectangle.
+    let (h_samp_u8, v_samp_u8): (u8, u8) = subsampling.sampling_factors();
+    let (h_samp_factor, v_samp_factor): (usize, usize) = (h_samp_u8 as usize, v_samp_u8 as usize);
+    let logical_plane_widths: Vec<usize> = (0..num_components)
+        .map(|i| {
+            if i == 0 || num_components == 1 {
+                image_width
+            } else {
+                image_width.div_ceil(h_samp_factor)
+            }
+        })
+        .collect();
+    let logical_plane_heights: Vec<usize> = (0..num_components)
+        .map(|i| {
+            if i == 0 || num_components == 1 {
+                image_height
+            } else {
+                image_height.div_ceil(v_samp_factor)
+            }
+        })
+        .collect();
+
+    // `compress_raw_12` requires stride == logical_width per plane.
+    // Compact each MCU-aligned i16 plane into a tightly-packed
+    // `logical_width × logical_height` copy when needed.
+    let compact_planes: Vec<Vec<i16>> = (0..num_components)
+        .map(|comp_idx| {
+            let raw_w: usize = priv_state.raw_plane_widths[comp_idx];
+            let logical_w: usize = logical_plane_widths[comp_idx];
+            let logical_h: usize = logical_plane_heights[comp_idx];
+            let buf: &[i16] = &priv_state.raw_plane_buffers_12[comp_idx];
+
+            if raw_w == logical_w {
+                let needed: usize = logical_w * logical_h;
+                buf[..needed.min(buf.len())].to_vec()
+            } else {
+                let mut compact: Vec<i16> = Vec::with_capacity(logical_w * logical_h);
+                for row in 0..logical_h {
+                    let row_start: usize = row * raw_w;
+                    let row_end: usize = row_start + logical_w;
+                    if row_end <= buf.len() {
+                        compact.extend_from_slice(&buf[row_start..row_end]);
+                    } else {
+                        let avail: usize = buf.len().saturating_sub(row_start);
+                        compact.extend_from_slice(&buf[row_start..row_start + avail]);
+                        compact.resize(compact.len() + (logical_w - avail), 0);
+                    }
+                }
+                compact
+            }
+        })
+        .collect();
+
+    let planes: Vec<&[i16]> = compact_planes.iter().map(|v| v.as_slice()).collect();
+
+    // Encode + push live in this scope so all heap-owning locals are
+    // dropped before any `raise_cant_suspend` that may longjmp.
+    let push_status: Option<bool> = (|| -> Option<bool> {
+        let result: Result<Vec<u8>, _> = libjpeg_turbo_rs::raw_data_12::compress_raw_12(
+            &planes,
+            &logical_plane_widths,
+            &logical_plane_heights,
+            image_width,
+            image_height,
+            priv_state.quality,
+            subsampling,
+        );
+
+        let encoded: Vec<u8> = match result {
+            Ok(b) => b,
+            Err(e) => {
+                priv_state.last_error =
+                    CString::new(format!("jpeg_finish_compress (raw 12-bit): {e}"))
+                        .unwrap_or_default();
+                return None;
+            }
+        };
+
+        let with_markers: Vec<u8> =
+            if priv_state.pending_markers.is_empty() && priv_state.icc_profile.is_none() {
+                encoded
+            } else {
+                let injected = inject_markers_after_soi(&encoded, priv_state);
+                drop(encoded);
+                injected
+            };
+
+        let ok = push_bytes_through_dest_mgr(c, priv_state, &with_markers);
+        drop(with_markers);
+        Some(ok)
+    })();
+    drop(planes);
+    drop(compact_planes);
+    drop(logical_plane_heights);
+    drop(logical_plane_widths);
+
+    match push_status {
+        None => false,
+        Some(true) => true,
+        Some(false) => {
+            raise_cant_suspend(c, priv_state);
+            false
+        }
+    }
+}
+
 /// `jpeg12_write_raw_data(cinfo, data, num_lines) -> JDIMENSION`.
 ///
-/// 12-bit raw-data encode is out of scope for this implementation.
-/// Per libjpeg.txt §3 the failure routes through
-/// `cinfo->err->error_exit(cinfo)` with `msg_code = JERR_NOTIMPL`
-/// (upstream code 48 at JPEG_LIB_VERSION=80) so a caller that
-/// installed a `setjmp`/`longjmp`
-/// handler recovers cleanly, and a caller without one falls through
-/// to the default `error_exit` (which aborts the process with a
-/// diagnostic on stderr — exactly what stock libjpeg would do for
-/// any other unimplemented codepath). Symbol presence is preserved
-/// for dyld-load-time resolvers.
+/// 12-bit counterpart to `jpeg_write_raw_data` (libjpeg.txt §15). The
+/// caller supplies one iMCU row of 12-bit samples per component as a
+/// `*mut *mut *mut i16` (`JSAMPIMAGE16` analogue): outer pointer indexes
+/// `num_components` entries; each entry is an array of row pointers
+/// (`v_samp_factor * DCTSIZE` rows for that component); each row is a
+/// stride of i16 samples in the range 0..4095. The shim copies the
+/// rows into per-component plane buffers held in
+/// `CompressPrivate::raw_plane_buffers_12`; on `jpeg_finish_compress`
+/// the buffers are flushed through `libjpeg_turbo_rs::compress_raw_12`.
 ///
-/// Returns 0 only on the *unreachable* fall-through where a custom
-/// handler returns from `error_exit` without longjmp-ing out, which
-/// violates the libjpeg contract; defensive code is cheap.
+/// State precondition: `c.global_state == CSTATE_RAW_OK` (set by
+/// `jpeg_start_compress` when `c.raw_data_in == TRUE`) and
+/// `c.data_precision == 12`. Returns 0 on a precondition or buffer-size
+/// mismatch (after populating `priv_state.last_error`); returns
+/// `lines_per_iMCU` on success.
 #[no_mangle]
 pub extern "C" fn jpeg12_write_raw_data(
     cinfo: *mut c_void,
-    _data: *mut *mut *mut i16,
-    _num_lines: JDimension,
+    data: *mut *mut *mut i16,
+    num_lines: JDimension,
 ) -> JDimension {
-    if let Some(c) = unsafe { cinfo_compress_mut(cinfo) } {
-        if let Some(p) = unsafe { priv_compress_from_ptr(c.master) } {
-            p.last_error = CString::new(
-                "jpeg12_write_raw_data: JERR_NOTIMPL (12-bit raw-data encode is out of scope; use 8-bit jpeg_write_raw_data)",
-            )
-            .unwrap_or_default();
+    let c: &mut JpegCompressPublic = match unsafe { cinfo_compress_mut(cinfo) } {
+        Some(c) => c,
+        None => return 0,
+    };
+    let priv_ptr: *mut c_void = c.master;
+    let priv_state: &mut CompressPrivate = match unsafe { priv_compress_from_ptr(priv_ptr) } {
+        Some(p) => p,
+        None => return 0,
+    };
+
+    // 12-bit gate: only `data_precision == 12` reaches this entry point;
+    // 8/16-bit callers should use `jpeg_write_raw_data` /
+    // `jpeg16_write_raw_data` (the latter is not implemented here).
+    if c.data_precision != 12 {
+        priv_state.last_error = CString::new(format!(
+            "jpeg12_write_raw_data: JERR_BAD_PRECISION (data_precision={} not 12)",
+            c.data_precision
+        ))
+        .unwrap_or_default();
+        return 0;
+    }
+
+    // Must be in RAW_OK state (set by jpeg_start_compress when raw_data_in=1).
+    if c.global_state != CSTATE_RAW_OK {
+        priv_state.last_error =
+            CString::new("jpeg12_write_raw_data: JERR_BAD_STATE (call jpeg_start_compress first with raw_data_in=TRUE)")
+                .unwrap_or_default();
+        return 0;
+    }
+
+    let max_vsf: usize = c.max_v_samp_factor.max(1) as usize;
+    let dct_size: usize = c.min_DCT_v_scaled_size.max(8) as usize;
+    let lines_per_imcu: JDimension = (max_vsf * dct_size) as JDimension;
+
+    if num_lines < lines_per_imcu {
+        priv_state.last_error = CString::new(format!(
+            "jpeg12_write_raw_data: JERR_BUFFER_SIZE (num_lines={num_lines} < lines_per_iMCU={lines_per_imcu})"
+        ))
+        .unwrap_or_default();
+        return 0;
+    }
+
+    let num_components: usize = c.num_components.max(0) as usize;
+    if num_components == 0 || data.is_null() {
+        return 0;
+    }
+
+    // On first call, allocate the per-component plane buffers (i16
+    // storage). `raw_rows_filled` / `raw_plane_widths` /
+    // `raw_plane_heights` are shared with the 8-bit accumulator, so
+    // populate them on the same allocation step.
+    if priv_state.raw_plane_buffers_12.is_empty() {
+        let image_width: usize = c.image_width as usize;
+        let image_height: usize = c.image_height as usize;
+        let max_hsf: usize = c.max_h_samp_factor.max(1) as usize;
+
+        priv_state.raw_plane_buffers_12 = Vec::with_capacity(num_components);
+        priv_state.raw_rows_filled = Vec::with_capacity(num_components);
+        priv_state.raw_plane_widths = Vec::with_capacity(num_components);
+        priv_state.raw_plane_heights = Vec::with_capacity(num_components);
+
+        for comp_idx in 0..num_components {
+            let (h_samp, v_samp): (usize, usize) = if comp_idx < priv_state.comp_info.len() {
+                let ci: &JpegComponentInfoCompress = &priv_state.comp_info[comp_idx];
+                (
+                    ci.h_samp_factor.max(1) as usize,
+                    ci.v_samp_factor.max(1) as usize,
+                )
+            } else {
+                (1, 1)
+            };
+
+            let dct_h: usize = c.min_DCT_h_scaled_size.max(8) as usize;
+            let raw_w: usize = (image_width * h_samp).div_ceil(max_hsf).div_ceil(dct_h) * dct_h;
+            let raw_h: usize =
+                (image_height * v_samp).div_ceil(max_vsf).div_ceil(dct_size) * dct_size;
+
+            priv_state
+                .raw_plane_buffers_12
+                .push(vec![0i16; raw_w * raw_h]);
+            priv_state.raw_rows_filled.push(0);
+            priv_state.raw_plane_widths.push(raw_w);
+            priv_state.raw_plane_heights.push(raw_h);
         }
     }
-    // upstream `JERR_NOTIMPL = 48` at `JPEG_LIB_VERSION=80` — see
-    // companion comment on `jpeg12_read_raw_data` above for the
-    // empirical-verification recipe and the `JPEG_LIB_VERSION`
-    // sensitivity (omitting the define yields 47, which is wrong for
-    // the v8 surface the shim's `jconfig.h` pins).
-    //
-    // Most consumer-installed `error_exit` handlers longjmp out and
-    // never return; the `0` below only fires for non-conforming
-    // handlers that return.
-    invoke_error_exit(cinfo, 48);
-    0
+
+    // Copy `v_samp * dct_size` rows per component from caller's
+    // `*mut *mut *mut i16` into the i16 plane buffer.
+    for comp_idx in 0..num_components {
+        let (v_samp, h_samp): (usize, usize) = if comp_idx < priv_state.comp_info.len() {
+            let ci: &JpegComponentInfoCompress = &priv_state.comp_info[comp_idx];
+            (
+                ci.v_samp_factor.max(1) as usize,
+                ci.h_samp_factor.max(1) as usize,
+            )
+        } else {
+            (1, 1)
+        };
+        let max_hsf: usize = c.max_h_samp_factor.max(1) as usize;
+        let rows_this_imcu: usize = v_samp * dct_size;
+        let plane_width: usize = priv_state.raw_plane_widths[comp_idx];
+        let plane_height: usize = priv_state.raw_plane_heights[comp_idx];
+        let already_filled: usize = priv_state.raw_rows_filled[comp_idx];
+
+        let image_width: usize = c.image_width as usize;
+        let comp_width: usize = (image_width * h_samp).div_ceil(max_hsf);
+
+        // SAFETY: `data` is a JSAMPIMAGE16 — pointer to `num_components`
+        // entries, each entry is an array of row pointers for that
+        // component. Caller asserts the per-component array carries at
+        // least `rows_this_imcu` row pointers and each row carries at
+        // least `comp_width` valid i16 samples.
+        let comp_array: *mut *mut i16 = unsafe { *data.add(comp_idx) };
+        if comp_array.is_null() {
+            continue;
+        }
+
+        for row_in_imcu in 0..rows_this_imcu {
+            let dest_row: usize = already_filled + row_in_imcu;
+            if dest_row >= plane_height {
+                break;
+            }
+            let src_row_ptr: *const i16 = unsafe { *comp_array.add(row_in_imcu) as *const i16 };
+            if src_row_ptr.is_null() {
+                continue;
+            }
+            let dst_offset: usize = dest_row * plane_width;
+            let copy_samples: usize = comp_width.min(plane_width);
+            // SAFETY: src_row_ptr points to `comp_width` valid i16s;
+            // dst slice is within our allocation. `copy_nonoverlapping`
+            // takes a count in *items*, not bytes.
+            unsafe {
+                std::ptr::copy_nonoverlapping(
+                    src_row_ptr,
+                    priv_state.raw_plane_buffers_12[comp_idx]
+                        .as_mut_ptr()
+                        .add(dst_offset),
+                    copy_samples,
+                );
+            }
+        }
+
+        priv_state.raw_rows_filled[comp_idx] += rows_this_imcu;
+    }
+
+    c.next_scanline = (c.next_scanline + lines_per_imcu).min(c.image_height);
+    lines_per_imcu
 }
 
 /// `jpeg_set_linear_quality(cinfo, scale_factor, force_baseline)`.
