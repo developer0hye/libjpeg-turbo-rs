@@ -161,8 +161,6 @@ unsafe fn sse2_idct_islow_core(
     output: *mut u8,
     stride: usize,
 ) {
-    let cptr: *const i16 = coeffs.as_ptr();
-
     // The pure-DC pixel-fill shortcut was intentionally removed —
     // see `simd/aarch64/idct.rs` for the rationale: the i32 dequant
     // formula it used diverged from the full pipeline's i16 lane
