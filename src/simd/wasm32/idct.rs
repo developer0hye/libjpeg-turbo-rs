@@ -168,9 +168,20 @@ unsafe fn wasm_idct_islow_core(
         let row0_ac = v128_and(row0, ac_mask);
 
         if !v128_any_true(row0_ac) {
+            // Mirror the i32-lane pipeline exactly. WASM uses `i32x4_shl`
+            // for `<< CONST_BITS` in each IDCT pass — this **wraps in i32**
+            // when the input is large enough that `pass1 << 13` exceeds
+            // `i32::MAX`. The simple `dq << PASS1_BITS` collapse would skip
+            // pass-2's wrap. Use `wrapping_shl` + `wrapping_add` to match
+            // `i32x4_shl` + `i32x4_add` semantics. See SSE2 idct.rs for
+            // the same fix and the worked example (coeff=512, quant=255).
             let dq_i32: i32 = (coeffs[0] as i32) * (quant[0] as i32);
-            let pass1_i32: i32 = dq_i32 << PASS1_BITS;
-            let pass2_i32: i32 = (pass1_i32 + (1 << (PASS1_BITS + 3 - 1))) >> (PASS1_BITS + 3);
+            let pass1_pre: i32 = dq_i32.wrapping_shl(CONST_BITS);
+            let pass1_i32: i32 = pass1_pre.wrapping_add(1 << (CONST_BITS - PASS1_BITS - 1))
+                >> (CONST_BITS - PASS1_BITS);
+            let pass2_pre: i32 = pass1_i32.wrapping_shl(CONST_BITS);
+            let pass2_i32: i32 = pass2_pre.wrapping_add(1 << (CONST_BITS + PASS1_BITS + 3 - 1))
+                >> (CONST_BITS + PASS1_BITS + 3);
             let pv: u8 = (pass2_i32 + 128).clamp(0, 255) as u8;
             for r in 0..8 {
                 let row_ptr = output.add(r * stride);
