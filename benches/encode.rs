@@ -33,6 +33,11 @@ fn bench_fdct_quantize_8x8(c: &mut Criterion) {
         shifts_zigzag[i] = shifts[i];
         scales_zigzag[i] = scales[i];
     }
+    // Float divisors mirror `1 / (quant * 8)` — irrelevant for the
+    // integer `fdct_quantize` benchmarked here, but the struct is
+    // shared with the float-FDCT path so all fields must be filled.
+    let float_divisors = [1.0f32 / 128.0f32; 64];
+    let float_divisors_zigzag = float_divisors;
     let quant = QuantDivisors {
         divisors,
         reciprocals,
@@ -44,6 +49,8 @@ fn bench_fdct_quantize_8x8(c: &mut Criterion) {
         corrections_zigzag,
         shifts_zigzag,
         scales_zigzag,
+        float_divisors,
+        float_divisors_zigzag,
     };
     let mut output = [0i16; 64];
 
