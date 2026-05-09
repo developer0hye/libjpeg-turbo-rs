@@ -8,7 +8,6 @@
 use core::arch::x86_64::*;
 
 // IDCT constants (CONST_BITS=13, PASS1_BITS=2)
-const PASS1_BITS: i32 = 2;
 const F_0_298: i16 = 2446;
 const F_0_390: i16 = 3196;
 const F_0_541: i16 = 4433;
