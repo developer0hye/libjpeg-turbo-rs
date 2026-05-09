@@ -161,43 +161,17 @@ unsafe fn sse2_idct_islow_core(
     output: *mut u8,
     stride: usize,
 ) {
-    let cptr: *const i16 = coeffs.as_ptr();
-
-    // --- DC-only sparsity check (SSE2-compatible) ---
-    // OR rows 1-7 together. If all zero, only row 0 may have non-zero coefficients.
-    let row1: __m128i = _mm_loadu_si128(cptr.add(8) as *const __m128i);
-    let row2: __m128i = _mm_loadu_si128(cptr.add(16) as *const __m128i);
-    let row3: __m128i = _mm_loadu_si128(cptr.add(24) as *const __m128i);
-    let row4: __m128i = _mm_loadu_si128(cptr.add(32) as *const __m128i);
-    let row5: __m128i = _mm_loadu_si128(cptr.add(40) as *const __m128i);
-    let row6: __m128i = _mm_loadu_si128(cptr.add(48) as *const __m128i);
-    let row7: __m128i = _mm_loadu_si128(cptr.add(56) as *const __m128i);
-
-    let ac_or: __m128i = _mm_or_si128(
-        _mm_or_si128(_mm_or_si128(row1, row2), _mm_or_si128(row3, row4)),
-        _mm_or_si128(_mm_or_si128(row5, row6), row7),
-    );
-
-    // SSE2 zero test: cmpeq against zero, then movemask. 0xFFFF means all zero.
+    // The pure-DC pixel-fill shortcut was intentionally removed —
+    // see `simd/aarch64/idct.rs` for the rationale: the i32 dequant
+    // formula it used diverged from the full pipeline's i16 lane
+    // arithmetic on adversarial inputs where `coeff * quant`
+    // overflows i16. Reproducing the wrap semantics in scalar
+    // shortcut form is fragile (codex review of d75924f flagged a
+    // PASS1-shift wrap missed by the first round of fixes), so
+    // every input now flows through the full pass1 + pass2
+    // pipeline below, whose i16 lane width matches what
+    // libjpeg-turbo's SSE2 ISLOW does.
     let zero: __m128i = _mm_setzero_si128();
-    if _mm_movemask_epi8(_mm_cmpeq_epi8(ac_or, zero)) == 0xFFFF {
-        // Rows 1-7 are all zero. Check if row 0 AC coefficients are also zero.
-        let row0: __m128i = _mm_loadu_si128(cptr as *const __m128i);
-        // Mask out DC (position 0), keep AC (positions 1-7).
-        let ac_mask: __m128i = _mm_setr_epi16(0, -1, -1, -1, -1, -1, -1, -1);
-        let row0_ac: __m128i = _mm_and_si128(row0, ac_mask);
-
-        if _mm_movemask_epi8(_mm_cmpeq_epi8(row0_ac, zero)) == 0xFFFF {
-            // True DC-only: compute fill value and broadcast.
-            let dc: i32 = *cptr as i32 * *quant.as_ptr() as i32;
-            let pv: u8 = (((dc + 4) >> 3) + 128).clamp(0, 255) as u8;
-            let fill: __m128i = _mm_set1_epi8(pv as i8);
-            for r in 0..8 {
-                _mm_storel_epi64(output.add(r * stride) as *mut __m128i, fill);
-            }
-            return;
-        }
-    }
 
     // --- Full IDCT path ---
 

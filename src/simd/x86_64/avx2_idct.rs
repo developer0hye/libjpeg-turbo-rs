@@ -7,7 +7,7 @@
 #[cfg(target_arch = "x86_64")]
 use core::arch::x86_64::*;
 
-// IDCT constants (CONST_BITS=13)
+// IDCT constants (CONST_BITS=13, PASS1_BITS=2)
 const F_0_298: i16 = 2446;
 const F_0_390: i16 = 3196;
 const F_0_541: i16 = 4433;
@@ -156,35 +156,10 @@ unsafe fn avx2_idct_islow_core(
 ) {
     let cptr = coeffs.as_ptr();
 
-    // --- DC-only sparsity check ---
-    let row1 = _mm_loadu_si128(cptr.add(8) as *const __m128i);
-    let row2 = _mm_loadu_si128(cptr.add(16) as *const __m128i);
-    let row3 = _mm_loadu_si128(cptr.add(24) as *const __m128i);
-    let row4 = _mm_loadu_si128(cptr.add(32) as *const __m128i);
-    let row5 = _mm_loadu_si128(cptr.add(40) as *const __m128i);
-    let row6 = _mm_loadu_si128(cptr.add(48) as *const __m128i);
-    let row7 = _mm_loadu_si128(cptr.add(56) as *const __m128i);
-
-    let ac_or = _mm_or_si128(
-        _mm_or_si128(_mm_or_si128(row1, row2), _mm_or_si128(row3, row4)),
-        _mm_or_si128(_mm_or_si128(row5, row6), row7),
-    );
-
-    if _mm_testz_si128(ac_or, ac_or) != 0 {
-        let row0 = _mm_loadu_si128(cptr as *const __m128i);
-        let ac_mask = _mm_setr_epi16(0, -1, -1, -1, -1, -1, -1, -1);
-        let row0_ac = _mm_and_si128(row0, ac_mask);
-
-        if _mm_testz_si128(row0_ac, row0_ac) != 0 {
-            let dc = *cptr as i32 * *quant.as_ptr() as i32;
-            let pv = (((dc + 4) >> 3) + 128).clamp(0, 255) as u8;
-            let fill = _mm_set1_epi8(pv as i8);
-            for r in 0..8 {
-                _mm_storel_epi64(output.add(r * stride) as *mut __m128i, fill);
-            }
-            return;
-        }
-    }
+    // The pure-DC pixel-fill shortcut was intentionally removed —
+    // see `simd/aarch64/idct.rs` for the rationale: every input now
+    // flows through the full pass1 + pass2 pipeline below, whose
+    // i16 lane semantics match libjpeg-turbo's AVX2 ISLOW.
 
     // --- Load & dequantize: 2 rows per ymm ---
     let qptr = quant.as_ptr() as *const __m256i;

@@ -138,42 +138,13 @@ unsafe fn wasm_idct_islow_core(
     output: *mut u8,
     stride: usize,
 ) {
-    let cptr: *const i16 = coeffs.as_ptr();
-
-    // --- DC-only sparsity check ---
-    let row1: v128 = v128_load(cptr.add(8) as *const v128);
-    let row2: v128 = v128_load(cptr.add(16) as *const v128);
-    let row3: v128 = v128_load(cptr.add(24) as *const v128);
-    let row4: v128 = v128_load(cptr.add(32) as *const v128);
-    let row5: v128 = v128_load(cptr.add(40) as *const v128);
-    let row6: v128 = v128_load(cptr.add(48) as *const v128);
-    let row7: v128 = v128_load(cptr.add(56) as *const v128);
-
-    let ac_or: v128 = v128_or(
-        v128_or(v128_or(row1, row2), v128_or(row3, row4)),
-        v128_or(v128_or(row5, row6), row7),
-    );
-
-    let zero: v128 = i32x4_splat(0);
-    if u8x16_bitmask(u8x16_eq(ac_or, zero)) == 0xFFFF {
-        let row0: v128 = v128_load(cptr as *const v128);
-        let ac_mask: v128 = i16x8(0, -1, -1, -1, -1, -1, -1, -1);
-        let row0_ac: v128 = v128_and(row0, ac_mask);
-
-        if u8x16_bitmask(u8x16_eq(row0_ac, zero)) == 0xFFFF {
-            let dc: i32 = *cptr as i32 * *quant.as_ptr() as i32;
-            let pv: u8 = (((dc + 4) >> 3) + 128).clamp(0, 255) as u8;
-            for r in 0..8 {
-                let row_ptr: *mut u8 = output.add(r * stride);
-                for c in 0..8 {
-                    *row_ptr.add(c) = pv;
-                }
-            }
-            return;
-        }
-    }
+    // The pure-DC pixel-fill shortcut was intentionally removed —
+    // see `simd/aarch64/idct.rs` for the rationale: every input now
+    // flows through the full pass1 + pass2 pipeline below.
 
     // --- Full IDCT path ---
+    let zero: v128 = i32x4_splat(0);
+
     let mut ws = [0i32; 64];
 
     // ========== Pass 1: columns ==========
