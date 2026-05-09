@@ -191,9 +191,23 @@ unsafe fn sse2_idct_islow_core(
         let row0_ac = _mm_and_si128(row0, ac_mask);
 
         if _mm_movemask_epi8(_mm_cmpeq_epi8(row0_ac, zero)) == 0xFFFF {
+            // Mirror the i32-lane pipeline exactly. Pass-1 IDCT of
+            // [dq, 0, ..., 0] computes `dq << CONST_BITS` then descales
+            // by `CONST_BITS - PASS1_BITS = 11` with rounding. Pass-2
+            // does the same `<< CONST_BITS` on the pass-1 result —
+            // **this can wrap i32** when the pass-1 value is large
+            // (e.g. `coeff[0]=512, quant[0]=255` → pass1=522240, then
+            // `522240 << 13 = 4278190080` overflows i32 to -16777216,
+            // and the final clamped pixel is 64, not the un-wrapped 255).
+            // Use `wrapping_shl` + `wrapping_add` to match `_mm_slli_epi32`
+            // + `_mm_add_epi32` semantics.
             let dq_i32: i32 = (coeffs[0] as i32) * (quant[0] as i32);
-            let pass1_i32: i32 = dq_i32 << PASS1_BITS;
-            let pass2_i32: i32 = (pass1_i32 + (1 << (PASS1_BITS + 3 - 1))) >> (PASS1_BITS + 3);
+            let pass1_pre: i32 = dq_i32.wrapping_shl(CONST_BITS as u32);
+            let pass1_i32: i32 = pass1_pre.wrapping_add(1 << (CONST_BITS - PASS1_BITS - 1))
+                >> (CONST_BITS - PASS1_BITS);
+            let pass2_pre: i32 = pass1_i32.wrapping_shl(CONST_BITS as u32);
+            let pass2_i32: i32 = pass2_pre.wrapping_add(1 << (CONST_BITS + PASS1_BITS + 3 - 1))
+                >> (CONST_BITS + PASS1_BITS + 3);
             let pv: u8 = (pass2_i32 + 128).clamp(0, 255) as u8;
             let fill = _mm_set1_epi8(pv as i8);
             for r in 0..8 {
