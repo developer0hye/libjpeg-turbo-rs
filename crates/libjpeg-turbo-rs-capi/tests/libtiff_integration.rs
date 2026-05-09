@@ -78,28 +78,21 @@ fn cdylib_path() -> PathBuf {
 /// Builds `examples/libtiff_integration/main.c`, runs it with our cdylib
 /// as the JPEG provider, and asserts exit 0.
 ///
-/// # Known failure (tracked)
-///
-/// When libtiff reads a COMPRESSION_JPEG TIFF it first calls
-/// `jpeg_read_header` on the `JPEGTables` tag (an abbreviated tables-only
-/// datastream: SOI + DQT + DHT + EOI, no SOF/SOS).  Our shim's
-/// `jpeg_read_header` passes this blob to `libjpeg_turbo_rs::Decoder::new`,
-/// which fails with "no SOF marker" because it requires a full image header.
-/// libtiff then reports "Bogus JPEGTables field" and aborts the decode.
-///
-/// The fix requires `jpeg_read_header` to detect a tables-only abbreviated
-/// datastream and return `JPEG_HEADER_TABLES_ONLY` (2) while stashing the
-/// parsed DQT/DHT tables in the decompressor's private state for later reuse.
-/// This is tracked as a follow-up bug; it is NOT a `jpeg_write_raw_data` /
-/// `jpeg_read_raw_data` correctness issue — both iMCU-row entry points are
-/// exercised correctly once libtiff reaches the actual strip data.
-///
-/// Run with `--include-ignored` to see the current failure output.
+/// libtiff's COMPRESSION_JPEG read path calls `jpeg_read_header` first on
+/// the TIFF `JPEGTables` tag (an abbreviated tables-only datastream:
+/// SOI + DQT + DHT + EOI, no SOF/SOS) and expects
+/// `JPEG_HEADER_TABLES_ONLY` (= 2). The shim's `jpeg_read_header` walks
+/// markers manually to detect the absence of SOF/SOS, stashes the
+/// (EOI-stripped) bytes in `priv_state.tables_only_prefix`, resets the
+/// drained source so the next call re-reads from the caller's source
+/// manager, and returns `JPEG_HEADER_TABLES_ONLY`. On the subsequent
+/// per-strip `jpeg_read_header` call the prefix is spliced in front of
+/// the strip body (after dropping the strip's own SOI) so
+/// `Decoder::new` sees a complete tables+image stream — see the
+/// implementation in `crates/libjpeg-turbo-rs-capi/src/jpeglib.rs`'s
+/// `detect_tables_only` helper plus the splice block in
+/// `jpeg_read_header`.
 #[test]
-#[ignore = "known shim gap: jpeg_read_header does not handle JPEG_HEADER_TABLES_ONLY \
-            (abbreviated tables-only datastream); libtiff JPEG decode fails with \
-            'Bogus JPEGTables field' — tracked as follow-up; \
-            run with --include-ignored to verify the failure mode"]
 fn libtiff_jpeg_roundtrip_via_shim() {
     // Skip on Windows — the SONAME / loader-path scheme is POSIX-only.
     if cfg!(target_os = "windows") {
