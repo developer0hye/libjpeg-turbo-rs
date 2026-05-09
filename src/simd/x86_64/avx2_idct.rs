@@ -156,10 +156,51 @@ unsafe fn avx2_idct_islow_core(
 ) {
     let cptr = coeffs.as_ptr();
 
-    // The pure-DC pixel-fill shortcut was intentionally removed —
-    // see `simd/aarch64/idct.rs` for the rationale: every input now
-    // flows through the full pass1 + pass2 pipeline below, whose
-    // i16 lane semantics match libjpeg-turbo's AVX2 ISLOW.
+    // --- Pure-DC pixel-fill shortcut ---
+    //
+    // When every AC coefficient is zero, the entire 8×8 output is a
+    // single constant pixel value derivable in scalar form. PR #278
+    // deleted an earlier version of this shortcut whose pass-1 shift
+    // used i32 arithmetic; for inputs where the dequantized DC times
+    // 4 exceeded i16 range, that diverged from the full pipeline's
+    // `_mm256_slli_epi16(..., 2)` (which wraps in i16). The fix below
+    // is to mirror **both** the i16 dequant multiply and the i16
+    // pass-1 left shift via `wrapping_mul` + `wrapping_shl(2)`, so
+    // the shortcut is bit-exact equivalent to the pipeline on every
+    // input — no runtime guard needed.
+    let row1 = _mm_loadu_si128(cptr.add(8) as *const __m128i);
+    let row2 = _mm_loadu_si128(cptr.add(16) as *const __m128i);
+    let row3 = _mm_loadu_si128(cptr.add(24) as *const __m128i);
+    let row4 = _mm_loadu_si128(cptr.add(32) as *const __m128i);
+    let row5 = _mm_loadu_si128(cptr.add(40) as *const __m128i);
+    let row6 = _mm_loadu_si128(cptr.add(48) as *const __m128i);
+    let row7 = _mm_loadu_si128(cptr.add(56) as *const __m128i);
+
+    let ac_or = _mm_or_si128(
+        _mm_or_si128(_mm_or_si128(row1, row2), _mm_or_si128(row3, row4)),
+        _mm_or_si128(_mm_or_si128(row5, row6), row7),
+    );
+
+    if _mm_testz_si128(ac_or, ac_or) != 0 {
+        let row0 = _mm_loadu_si128(cptr as *const __m128i);
+        let ac_mask = _mm_setr_epi16(0, -1, -1, -1, -1, -1, -1, -1);
+        let row0_ac = _mm_and_si128(row0, ac_mask);
+
+        if _mm_testz_si128(row0_ac, row0_ac) != 0 {
+            // i16 wrap throughout pass-1 (mirrors `_mm256_mullo_epi16`
+            // + `_mm256_slli_epi16(_, 2)`), i32 from pass-2 onward.
+            let dq_i16: i16 = (*cptr).wrapping_mul(*(quant.as_ptr() as *const i16));
+            let dq_shifted_i16: i16 = dq_i16.wrapping_shl(2);
+            let pass1_i32: i32 = dq_shifted_i16 as i32;
+            let pass2_i32: i32 = (pass1_i32 + (1 << 4)) >> 5;
+            let pv: u8 = (pass2_i32 + 128).clamp(0, 255) as u8;
+            let fill = _mm_set1_epi8(pv as i8);
+            for r in 0..8 {
+                _mm_storel_epi64(output.add(r * stride) as *mut __m128i, fill);
+            }
+            return;
+        }
+    }
 
     // --- Load & dequantize: 2 rows per ymm ---
     let qptr = quant.as_ptr() as *const __m256i;

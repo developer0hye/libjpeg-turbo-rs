@@ -138,13 +138,62 @@ unsafe fn wasm_idct_islow_core(
     output: *mut u8,
     stride: usize,
 ) {
-    // The pure-DC pixel-fill shortcut was intentionally removed —
-    // see `simd/aarch64/idct.rs` for the rationale: every input now
-    // flows through the full pass1 + pass2 pipeline below.
-
-    // --- Full IDCT path ---
     let zero: v128 = i32x4_splat(0);
 
+    // --- Pure-DC pixel-fill shortcut ---
+    //
+    // WASM's full pipeline computes pass-1 in i32 throughout
+    // (`i32x4_mul`, see below), so the scalar shortcut also stays in
+    // i32 to match its own pipeline. AVX2 / NEON instead use i16-lane
+    // multiply + shift and require `wrapping_mul` + `wrapping_shl(2)`
+    // in their shortcut.
+    let cptr_v = coeffs.as_ptr();
+    let row1 = v128_load(cptr_v.add(8) as *const v128);
+    let row2 = v128_load(cptr_v.add(16) as *const v128);
+    let row3 = v128_load(cptr_v.add(24) as *const v128);
+    let row4 = v128_load(cptr_v.add(32) as *const v128);
+    let row5 = v128_load(cptr_v.add(40) as *const v128);
+    let row6 = v128_load(cptr_v.add(48) as *const v128);
+    let row7 = v128_load(cptr_v.add(56) as *const v128);
+
+    let ac_or = v128_or(
+        v128_or(v128_or(row1, row2), v128_or(row3, row4)),
+        v128_or(v128_or(row5, row6), row7),
+    );
+
+    if !v128_any_true(ac_or) {
+        let row0 = v128_load(cptr_v as *const v128);
+        // Mask out lane 0 (DC) using i16x8 mask: [0, -1, -1, -1, -1, -1, -1, -1]
+        let ac_mask = i16x8(0, -1, -1, -1, -1, -1, -1, -1);
+        let row0_ac = v128_and(row0, ac_mask);
+
+        if !v128_any_true(row0_ac) {
+            // Mirror the i32-lane pipeline exactly. WASM uses `i32x4_shl`
+            // for `<< CONST_BITS` in each IDCT pass — this **wraps in i32**
+            // when the input is large enough that `pass1 << 13` exceeds
+            // `i32::MAX`. The simple `dq << PASS1_BITS` collapse would skip
+            // pass-2's wrap. Use `wrapping_shl` + `wrapping_add` to match
+            // `i32x4_shl` + `i32x4_add` semantics. See SSE2 idct.rs for
+            // the same fix and the worked example (coeff=512, quant=255).
+            let dq_i32: i32 = (coeffs[0] as i32) * (quant[0] as i32);
+            let pass1_pre: i32 = dq_i32.wrapping_shl(CONST_BITS);
+            let pass1_i32: i32 = pass1_pre.wrapping_add(1 << (CONST_BITS - PASS1_BITS - 1))
+                >> (CONST_BITS - PASS1_BITS);
+            let pass2_pre: i32 = pass1_i32.wrapping_shl(CONST_BITS);
+            let pass2_i32: i32 = pass2_pre.wrapping_add(1 << (CONST_BITS + PASS1_BITS + 3 - 1))
+                >> (CONST_BITS + PASS1_BITS + 3);
+            let pv: u8 = (pass2_i32 + 128).clamp(0, 255) as u8;
+            for r in 0..8 {
+                let row_ptr = output.add(r * stride);
+                for c in 0..8 {
+                    *row_ptr.add(c) = pv;
+                }
+            }
+            return;
+        }
+    }
+
+    // --- Full IDCT path ---
     let mut ws = [0i32; 64];
 
     // ========== Pass 1: columns ==========
