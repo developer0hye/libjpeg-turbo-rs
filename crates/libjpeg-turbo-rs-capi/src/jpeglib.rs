@@ -4066,7 +4066,27 @@ pub extern "C" fn jpeg_consume_input(cinfo: *mut c_void) -> c_int {
                     c2.global_state = DSTATE_SCANNING;
                     JPEG_REACHED_SOS
                 }
-                JPEG_HEADER_TABLES_ONLY => JPEG_REACHED_EOI,
+                JPEG_HEADER_TABLES_ONLY => {
+                    // Mirror stock libjpeg's `inputctl->eoi_reached = TRUE`
+                    // for tables-only inputs by advancing past
+                    // `DSTATE_SCANNING` so `jpeg_input_complete` returns
+                    // `TRUE`. Without this, a documented buffered-image
+                    // polling loop —
+                    //
+                    //     while (!jpeg_input_complete(&cinfo))
+                    //         (void) jpeg_consume_input(&cinfo);
+                    //
+                    // — never terminates on a tables-only datastream
+                    // because the EOI return below isn't observed by
+                    // `jpeg_input_complete`'s `global_state >=
+                    // DSTATE_SCANNING` gate. `jpeg_start_decompress`
+                    // re-asserts `DSTATE_SCANNING` regardless, so
+                    // skipping ahead does not stomp on a real image
+                    // header that arrives later (it can't — we just
+                    // returned EOI).
+                    c2.global_state = DSTATE_SCANNING;
+                    JPEG_REACHED_EOI
+                }
                 _ => JPEG_SUSPENDED,
             }
         }
