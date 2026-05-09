@@ -1983,15 +1983,31 @@ pub extern "C" fn jpeg_start_decompress(cinfo: *mut c_void) -> CBoolean {
     // Fast path for high-precision streams (12/16 bit). The 8-bit
     // `Decoder` would silently succeed and then overwrite
     // `data_precision`, `output_components`, etc. with 8-bit values,
-    // which misroutes djpeg's precision-dispatched decode loop. Let
-    // `jpeg_calc_output_dimensions` (already invoked from
-    // `j12init_write_ppm` / `j16init_write_ppm` before we get here)
-    // own the output dims and leave precision intact; the actual
-    // decode happens lazily in `jpeg12_read_scanlines` /
-    // `jpeg16_read_scanlines`.
+    // which misroutes djpeg's precision-dispatched decode loop. The
+    // actual decode happens lazily in `jpeg12_read_scanlines` /
+    // `jpeg16_read_scanlines` / `jpeg12_read_raw_data`.
+    //
+    // Populate output dimensions inline so the 12-bit raw-data path
+    // doesn't depend on the caller having invoked the optional
+    // `jpeg_calc_output_dimensions` helper. The standard libjpeg
+    // sequence — `jpeg_read_header`; tweak params; `jpeg_start_decompress`;
+    // `jpeg12_read_raw_data` — leaves `output_width / output_height /
+    // max_v_samp_factor / min_DCT_v_scaled_size` at zero unless we
+    // populate them here, which would short-circuit the EOF check at
+    // the top of `jpeg12_read_raw_data` (codex review of f0dc137).
     if c.data_precision > 8 {
         c.output_scanline = 0;
         c.global_state = DSTATE_SCANNING;
+        // The `c: &mut JpegDecompressPublic` borrow is released
+        // when this scope returns. `jpeg_calc_output_dimensions`
+        // re-borrows `cinfo` via its own `cinfo_mut` call;
+        // returning immediately after means the two mutable
+        // borrows never overlap. Re-borrows through raw pointers
+        // are safe because the public struct lives behind the
+        // caller's allocation (not Rust-owned), so aliasing is the
+        // unsafe-FFI contract, not a Rust UB.
+        let _ = c;
+        jpeg_calc_output_dimensions(cinfo);
         priv_state.last_error = CString::new("No error").expect("static");
         return 1;
     }
@@ -2351,6 +2367,17 @@ pub extern "C" fn jpeg_finish_decompress(cinfo: *mut c_void) -> CBoolean {
         // → free_pool(JPOOL_IMAGE)` in its finish path.
         c.marker_list = std::ptr::null_mut();
         priv_state.marker_list_storage.clear();
+        // Drop the lazy raw-data caches so a reuse of this cinfo for
+        // a different JPEG re-runs `decompress_raw` /
+        // `decompress_raw_12` against the new source. Without these,
+        // the `is_none()` guards at the top of `jpeg_read_raw_data` /
+        // `jpeg12_read_raw_data` would short-circuit on the previous
+        // image's planes and copy stale rows — codex review of f0dc137
+        // flagged the 12-bit half; the 8-bit cache had the same latent
+        // bug, so both are cleared here.
+        priv_state.raw_image_cache = None;
+        priv_state.raw_image_cache_12 = None;
+        priv_state.raw_rows_consumed.clear();
     }
     1
 }
@@ -4146,6 +4173,12 @@ pub extern "C" fn jpeg_abort_decompress(cinfo: *mut c_void) {
         // markers — caught by the post-implementation review.
         c.marker_list = std::ptr::null_mut();
         p.marker_list_storage.clear();
+        // Drop the lazy raw-data caches; reuse on a new JPEG must
+        // re-materialise. Same rationale as the matching block in
+        // `jpeg_finish_decompress`.
+        p.raw_image_cache = None;
+        p.raw_image_cache_12 = None;
+        p.raw_rows_consumed.clear();
     }
     c.global_state = DSTATE_START;
     c.output_scanline = 0;

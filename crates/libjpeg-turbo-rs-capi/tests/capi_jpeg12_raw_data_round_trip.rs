@@ -278,9 +278,6 @@ unsafe fn decode_12bit_via_capi(
         lib.get(b"jpeg_mem_src").expect("jpeg_mem_src");
     let jpeg_read_header: libloading::Symbol<unsafe extern "C" fn(*mut c_void, c_int) -> c_int> =
         lib.get(b"jpeg_read_header").expect("jpeg_read_header");
-    let jpeg_calc_output_dimensions: libloading::Symbol<unsafe extern "C" fn(*mut c_void)> = lib
-        .get(b"jpeg_calc_output_dimensions")
-        .expect("jpeg_calc_output_dimensions");
     let jpeg_start_decompress: libloading::Symbol<unsafe extern "C" fn(*mut c_void) -> c_int> = lib
         .get(b"jpeg_start_decompress")
         .expect("jpeg_start_decompress");
@@ -323,7 +320,14 @@ unsafe fn decode_12bit_via_capi(
         "expected data_precision=12 after jpeg_read_header on 12-bit stream, got {prec}"
     );
 
-    jpeg_calc_output_dimensions(cinfo_ptr);
+    // Deliberately skip the optional `jpeg_calc_output_dimensions`
+    // helper. The standard libjpeg sequence is
+    // `jpeg_read_header → jpeg_start_decompress → jpeg12_read_raw_data`;
+    // `jpeg_start_decompress` itself must populate `output_height` /
+    // `max_v_samp_factor` / `min_DCT_v_scaled_size` for the 12-bit
+    // raw-data EOF guard to fire correctly. This test exercises that
+    // contract — codex review of f0dc137 caught the missing
+    // population that previously made `output_height` stay at zero.
     let rc: c_int = jpeg_start_decompress(cinfo_ptr);
     assert_eq!(rc, 1, "jpeg_start_decompress must succeed");
 
@@ -553,4 +557,223 @@ fn jpeg12_raw_data_round_trip_4_2_0() {
         max_diff_e2e <= 96,
         "shim encode + shim decode: Y max_diff={max_diff_e2e} exceeds tolerance 96"
     );
+}
+
+/// Decompressor reuse: feed one cinfo two different 12-bit JPEGs in
+/// sequence and confirm the second decode reflects the *second*
+/// JPEG's content, not stale rows from the first decode's lazy
+/// `raw_image_cache_12`.
+///
+/// Pre-fix history. The first version of `jpeg12_read_raw_data`
+/// populated `priv_state.raw_image_cache_12` lazily and never
+/// invalidated it on `jpeg_finish_decompress` / `jpeg_abort_decompress`,
+/// so a libjpeg-style consumer reusing the same decompressor handle
+/// across multiple images would see the first image's planes echoed
+/// for every subsequent decode (codex review of f0dc137 P2).
+#[test]
+fn jpeg12_read_raw_data_reuse_clears_cache() {
+    use libjpeg_turbo_rs::Subsampling;
+
+    let image_width: usize = 16;
+    let image_height: usize = 16;
+    let quality: u8 = 90;
+
+    // Image A: Y constant near the bottom of the 12-bit range.
+    // Image B: Y constant near the top of the 12-bit range.
+    // The two constants are ~3500 apart, well outside the
+    // round-trip tolerance, so a stale-cache leak from A→B (or
+    // vice versa) shows up as a Y plane filled with the *wrong*
+    // constant.
+    let y_a: Vec<i16> = vec![200i16; image_width * image_height];
+    let y_b: Vec<i16> = vec![3700i16; image_width * image_height];
+
+    let c_w: usize = image_width.div_ceil(2);
+    let c_h: usize = image_height.div_ceil(2);
+    let cb: Vec<i16> = vec![2048i16; c_w * c_h];
+    let cr: Vec<i16> = vec![2048i16; c_w * c_h];
+
+    let plane_widths: Vec<usize> = vec![image_width, c_w, c_w];
+    let plane_heights: Vec<usize> = vec![image_height, c_h, c_h];
+
+    let encode = |y: &[i16]| -> Vec<u8> {
+        let planes_ref: Vec<&[i16]> = vec![y, cb.as_slice(), cr.as_slice()];
+        libjpeg_turbo_rs::raw_data_12::compress_raw_12(
+            &planes_ref,
+            &plane_widths,
+            &plane_heights,
+            image_width,
+            image_height,
+            quality,
+            Subsampling::S420,
+        )
+        .unwrap_or_else(|e| panic!("compress_raw_12 failed: {e}"))
+    };
+    let jpeg_a: Vec<u8> = encode(&y_a);
+    let jpeg_b: Vec<u8> = encode(&y_b);
+
+    let path: PathBuf = cdylib_path();
+    let lib: libloading::Library =
+        unsafe { libloading::Library::new(&path) }.expect("dlopen cdylib");
+
+    unsafe {
+        let jpeg_std_error: libloading::Symbol<unsafe extern "C" fn(*mut c_void) -> *mut c_void> =
+            lib.get(b"jpeg_std_error").expect("jpeg_std_error");
+        let jpeg_create_decompress: libloading::Symbol<
+            unsafe extern "C" fn(*mut c_void, c_int, usize),
+        > = lib
+            .get(b"jpeg_CreateDecompress")
+            .expect("jpeg_CreateDecompress");
+        let jpeg_mem_src: libloading::Symbol<
+            unsafe extern "C" fn(*mut c_void, *const u8, c_ulong),
+        > = lib.get(b"jpeg_mem_src").expect("jpeg_mem_src");
+        let jpeg_read_header: libloading::Symbol<
+            unsafe extern "C" fn(*mut c_void, c_int) -> c_int,
+        > = lib.get(b"jpeg_read_header").expect("jpeg_read_header");
+        let jpeg_start_decompress: libloading::Symbol<unsafe extern "C" fn(*mut c_void) -> c_int> =
+            lib.get(b"jpeg_start_decompress")
+                .expect("jpeg_start_decompress");
+        let jpeg12_read_raw_data: libloading::Symbol<
+            unsafe extern "C" fn(*mut c_void, *mut *mut *mut i16, u32) -> u32,
+        > = lib
+            .get(b"jpeg12_read_raw_data")
+            .expect("jpeg12_read_raw_data");
+        let jpeg_finish_decompress: libloading::Symbol<unsafe extern "C" fn(*mut c_void) -> c_int> =
+            lib.get(b"jpeg_finish_decompress")
+                .expect("jpeg_finish_decompress");
+        let jpeg_destroy_decompress: libloading::Symbol<unsafe extern "C" fn(*mut c_void)> = lib
+            .get(b"jpeg_destroy_decompress")
+            .expect("jpeg_destroy_decompress");
+
+        const CINFO_BYTES: usize = 4096;
+        let mut cinfo_buf: MaybeUninit<[u8; CINFO_BYTES]> = MaybeUninit::zeroed();
+        let cinfo_ptr: *mut c_void = cinfo_buf.as_mut_ptr() as *mut c_void;
+
+        const ERR_BYTES: usize = 512;
+        let mut err_buf: MaybeUninit<[u8; ERR_BYTES]> = MaybeUninit::zeroed();
+        let err_ptr: *mut c_void = err_buf.as_mut_ptr() as *mut c_void;
+        jpeg_std_error(err_ptr);
+        (cinfo_ptr as *mut *mut c_void).write(err_ptr);
+
+        // Single create — both decodes share this cinfo.
+        jpeg_create_decompress(cinfo_ptr, 80, CINFO_BYTES);
+
+        let decode_into_y_plane = |jpeg: &[u8]| -> Vec<i16> {
+            jpeg_mem_src(cinfo_ptr, jpeg.as_ptr(), jpeg.len() as c_ulong);
+            assert_eq!(jpeg_read_header(cinfo_ptr, 1), JPEG_HEADER_OK);
+
+            let cinfo_bytes: *mut u8 = cinfo_ptr as *mut u8;
+            write_cint_at(cinfo_bytes, D_RAW_DATA_OUT, TRUE);
+            assert_eq!(jpeg_start_decompress(cinfo_ptr), 1);
+
+            let output_height: u32 = read_u32_at(cinfo_bytes, D_OUTPUT_HEIGHT);
+            let output_width: u32 = read_u32_at(cinfo_bytes, D_OUTPUT_WIDTH);
+            let max_vsf: c_int = read_cint_at(cinfo_bytes, D_MAX_V_SAMP_FACTOR);
+            let num_components: usize = read_cint_at(cinfo_bytes, D_NUM_COMPONENTS) as usize;
+            let comp_info_raw: *mut u8 = read_ptr_at(cinfo_bytes, D_COMP_INFO);
+
+            let mut comp_vsf: Vec<usize> = Vec::with_capacity(num_components);
+            for i in 0..num_components {
+                let vsf: c_int = if comp_info_raw.is_null() {
+                    max_vsf
+                } else {
+                    let cb_ptr: *const u8 = comp_info_raw.add(i * D_COMP_INFO_STRUCT_SIZE);
+                    read_cint_at(cb_ptr, D_COMP_VSF_FIELD)
+                };
+                comp_vsf.push(vsf.max(1) as usize);
+            }
+
+            let dct_size: usize = 8;
+            let rows_per_imcu: usize = max_vsf as usize * dct_size;
+            let max_plane_w: usize = (output_width as usize).max(1) + 16;
+
+            let mut row_bufs: Vec<Vec<Vec<i16>>> = (0..num_components)
+                .map(|i| {
+                    let rows: usize = comp_vsf[i] * dct_size;
+                    (0..rows).map(|_| vec![0i16; max_plane_w]).collect()
+                })
+                .collect();
+            let mut row_ptrs: Vec<Vec<*mut i16>> = (0..num_components)
+                .map(|i| row_bufs[i].iter_mut().map(|r| r.as_mut_ptr()).collect())
+                .collect();
+            let mut outer: Vec<*mut *mut i16> =
+                row_ptrs.iter_mut().map(|v| v.as_mut_ptr()).collect();
+
+            let mut y_out: Vec<i16> = Vec::new();
+            loop {
+                let scan: u32 = read_u32_at(cinfo_bytes, D_OUTPUT_SCANLINE);
+                if scan >= output_height {
+                    break;
+                }
+                let lines: u32 =
+                    jpeg12_read_raw_data(cinfo_ptr, outer.as_mut_ptr(), rows_per_imcu as u32);
+                assert_eq!(lines, rows_per_imcu as u32);
+                for ri in 0..rows_per_imcu {
+                    y_out.extend_from_slice(&row_bufs[0][ri][..image_width]);
+                }
+            }
+
+            jpeg_finish_decompress(cinfo_ptr);
+            y_out
+        };
+
+        // First decode: image A.
+        let y_a_out: Vec<i16> = decode_into_y_plane(&jpeg_a);
+        let mut max_diff_a: i32 = 0;
+        for row in 0..image_height {
+            for col in 0..image_width {
+                let d: i32 = (y_a[row * image_width + col] as i32
+                    - y_a_out[row * image_width + col] as i32)
+                    .abs();
+                if d > max_diff_a {
+                    max_diff_a = d;
+                }
+            }
+        }
+        assert!(
+            max_diff_a <= 96,
+            "first decode (image A): max_diff={max_diff_a} exceeds tolerance 96"
+        );
+
+        // Second decode on the SAME cinfo: image B.
+        let y_b_out: Vec<i16> = decode_into_y_plane(&jpeg_b);
+        let mut max_diff_b: i32 = 0;
+        for row in 0..image_height {
+            for col in 0..image_width {
+                let d: i32 = (y_b[row * image_width + col] as i32
+                    - y_b_out[row * image_width + col] as i32)
+                    .abs();
+                if d > max_diff_b {
+                    max_diff_b = d;
+                }
+            }
+        }
+        assert!(
+            max_diff_b <= 96,
+            "second decode (image B) reused cinfo: max_diff={max_diff_b} exceeds tolerance 96 \
+             — cache may not have been invalidated on jpeg_finish_decompress"
+        );
+
+        // Sanity: image B's recovered Y must NOT match image A's
+        // pattern. The constant-1024 Y plane is far from any of A's
+        // ramp values, so a small diff between A's source and B's
+        // output would mean stale-cache data was returned.
+        let mut min_diff_b_vs_a: i32 = i32::MAX;
+        for row in 0..image_height {
+            for col in 0..image_width {
+                let d: i32 = (y_a[row * image_width + col] as i32
+                    - y_b_out[row * image_width + col] as i32)
+                    .abs();
+                if d < min_diff_b_vs_a {
+                    min_diff_b_vs_a = d;
+                }
+            }
+        }
+        assert!(
+            min_diff_b_vs_a > 96,
+            "second decode appears to be returning image A's stale planes — \
+             min_diff(B_decoded, A_source) = {min_diff_b_vs_a}"
+        );
+
+        jpeg_destroy_decompress(cinfo_ptr);
+    }
 }
