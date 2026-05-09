@@ -189,8 +189,22 @@ unsafe fn sse2_idct_islow_core(
 
         if _mm_movemask_epi8(_mm_cmpeq_epi8(row0_ac, zero)) == 0xFFFF {
             // True DC-only: compute fill value and broadcast.
-            let dc: i32 = *cptr as i32 * *quant.as_ptr() as i32;
-            let pv: u8 = (((dc + 4) >> 3) + 128).clamp(0, 255) as u8;
+            //
+            // Mirror the full-pipeline i16 wrap exactly. The non-shortcut
+            // path uses `_mm_mullo_epi16` (i16 truncating multiply) for
+            // dequant, then a column shortcut at line 1487 etc. of
+            // `pipeline.rs` propagates an i16 dcval through pass 2's i16
+            // arithmetic and final i16→i8 saturating narrow + center add.
+            // An adversarial DC like 2032 * 85 = 172720 wraps in i16 to
+            // -23888, and the rest of the pipeline produces a saturated-low
+            // sample. Using the un-wrapped i32 product here returned a
+            // saturated-high sample, diverging from the full pipeline +
+            // libjpeg-turbo on such inputs (fuzz_decode_diff_c finding
+            // 2026-05-09).
+            let dq_i16: i16 = (*cptr).wrapping_mul(*(quant.as_ptr() as *const i16));
+            let pass1_i32: i32 = (dq_i16 as i32) << PASS1_BITS;
+            let pass2_i32: i32 = (pass1_i32 + (1 << (PASS1_BITS + 3 - 1))) >> (PASS1_BITS + 3);
+            let pv: u8 = (pass2_i32 + 128).clamp(0, 255) as u8;
             let fill: __m128i = _mm_set1_epi8(pv as i8);
             for r in 0..8 {
                 _mm_storel_epi64(output.add(r * stride) as *mut __m128i, fill);
