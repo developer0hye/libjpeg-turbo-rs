@@ -194,8 +194,24 @@ unsafe fn neon_idct_islow_core(cptr: *const i16, qptr: *const i16, output: *mut 
                 if left_dc_only {
                     // Pure DC block: entire right half zero + left DC-only.
                     // Skip pass2 — fill output with the DC pixel value directly.
-                    let dc_dequant = (*cptr as i32) * (*qptr as i32);
-                    let pixel_val = (((dc_dequant + 4) >> 3) + 128).clamp(0, 255) as u8;
+                    //
+                    // Mirror the full pipeline's i16 wrap exactly: pass 1
+                    // dequant uses `vmul_s16` (i16 truncating multiply), pass
+                    // 1 column-shortcut uses `vshl_n_s16::<PASS1_BITS>` (i16
+                    // truncating left shift), pass 2 row-shortcut descales
+                    // the resulting i16 by PASS1_BITS + 3 = 5 with rounding,
+                    // and the final stage applies a level-shift + saturating
+                    // clamp to u8. An adversarial DC like 2032 * 85 = 172720
+                    // wraps in i16 to -23888, and the rest of the pipeline
+                    // produces a saturated-low sample — using the un-wrapped
+                    // i32 product here returned a saturated-high sample,
+                    // diverging from the full pipeline + libjpeg-turbo on
+                    // such inputs (fuzz_decode_diff_c finding 2026-05-09).
+                    let dq_i16: i16 = (*cptr).wrapping_mul(*qptr);
+                    let pass1_i32: i32 = (dq_i16 as i32) << PASS1_BITS;
+                    let pass2_i32: i32 = (pass1_i32 + (1 << (PASS1_BITS + 3 - 1)))
+                        >> (PASS1_BITS + 3);
+                    let pixel_val: u8 = (pass2_i32 + 128).clamp(0, 255) as u8;
                     let fill: uint8x8_t = vdup_n_u8(pixel_val);
                     for row in 0..8 {
                         vst1_u8(output.add(row * stride), fill);
