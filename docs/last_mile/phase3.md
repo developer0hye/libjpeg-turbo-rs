@@ -88,36 +88,17 @@ The closure title reflects the actual delta: stub *semantics* moved from "silent
 
 ---
 
-## P3-3. 19 Legacy TurboJPEG Symbols Are Allowlisted, Not Implemented — **CLOSED 2026-05-06**
+## P3-3. Symbol Inventory Allowlist Triage — **CLOSED 2026-05-06**
 
-**Status (2026-05-06): closed.** Every previously-allowlisted symbol is now implemented as a forwarding wrapper in `crates/libjpeg-turbo-rs-capi/src/legacy.rs` and re-exported through `lib.rs`. `crates/libjpeg-turbo-rs-capi/tests/symbol_inventory.rs::allowlisted_missing_symbols()` returns an empty `HashSet`. Both `cdylib_exports_every_upstream_jpeglib_h_symbol` and `cdylib_exports_every_upstream_turbojpeg_h_symbol` pass without exemptions.
+**Status (2026-05-06): closed for the original Phase 3 release-gate consumer set; corrected 2026-05-10.** The stock tools and downstream smoke harnesses do not require the legacy TurboJPEG 1.x/2.x entry points that remain in `crates/libjpeg-turbo-rs-capi/tests/symbol_inventory.rs::allowlisted_missing_symbols()`, so those names stay intentionally allowlisted with a rationale. The only classic `jpeg_*` name that was still allowlisted, `jpeg_calc_jpeg_dimensions`, was a real C API gap; it is now closed under [P4-1](phase4.md#p4-1-jpeg_calc_jpeg_dimensions-was-documented-but-not-exported--closed-2026-05-10).
 
-**What landed (19 wrappers):**
+**Current contract:** `symbol_inventory` must pass with no missing upstream `jpeg_*` declarations. Legacy TJ aliases may remain allowlisted only when the comment explains the superseding exported API (`tjCompress2`, `tj3*`, etc.).
 
-- `tjAlloc(int) → tj3Alloc(usize)` — rejects negative sizes (NULL return), matching upstream behaviour.
-- `tjFree(*mut u8) → tj3Free(*mut c_void)`.
-- `tjGetErrorStr() → tj3GetErrorStr(NULL)` — no-handle form, returns `*mut c_char` (the legacy ABI's mut-vs-const distinction is purely declaration; the buffer is library-owned).
-- `tjGetErrorCode(handle) → tj3GetErrorCode(handle)`.
-- `tjGetScalingFactors(*mut int) → tj3GetScalingFactors(...)` — static-table forwarding.
-- `tjCompress(handle, src, w, pitch, h, **pixSize**, dst, *compSize, jpegSubsamp, jpegQual, flags) → tjCompress2`. Widens `pixelSize` to `pixelFormat` (3→TJPF_RGB, 4→TJPF_RGBX); sets `TJPARAM_NOREALLOC=1` so the caller's preallocated `dstBuf` is honoured; threads the unsigned-long `*compSize` through a usize stash.
-- `tjDecompress(handle, jpeg, jpegSize, dst, w, pitch, h, **pixSize**, flags) → tjDecompress2`. Same `pixelSize` widening + legacy flag translation.
-- `tjDecompressHeader(handle, jpeg, jpegSize, *w, *h) → tjDecompressHeader3` — drops subsamp/colorspace outs.
-- `tjDecompressHeader2(handle, jpeg, jpegSize, *w, *h, *subsamp) → tjDecompressHeader3` — drops colorspace out.
-- `tjDecompressToYUV(handle, jpeg, jpegSize, dst, flags) → tj3DecompressToYUV8` with `align=4` per upstream default.
-- `tjDecompressToYUV2(handle, jpeg, jpegSize, dst, w, **align**, h, flags) → tj3DecompressToYUV8` with caller-specified `align`.
-- `tjDecompressToYUVPlanes(handle, jpeg, jpegSize, **dst, w, *strides, h, flags) → tj3DecompressToYUVPlanes8` + flag translation.
-- `tjEncodeYUV(handle, src, w, pitch, h, **pixSize**, dst, subsamp, flags) → tjEncodeYUV3` with default `align=4`.
-- `tjEncodeYUV2(handle, src, w, pitch, h, pixFmt, dst, subsamp, flags) → tjEncodeYUV3` with default `align=4`.
-- `tjEncodeYUVPlanes(handle, src, w, pitch, h, pixFmt, **dst, *strides, subsamp, flags) → tj3EncodeYUVPlanes8`.
-- `tjCompressFromYUV(handle, src, w, **align**, h, subsamp, **jpeg, *jpegSize, qual, flags) → tj3CompressFromYUV8` with usize-↔-c_ulong stash for `*jpegSize`.
-- `tjCompressFromYUVPlanes(handle, **srcPlanes, w, *strides, h, subsamp, **jpeg, *jpegSize, qual, flags) → tj3CompressFromYUVPlanes8`.
-- `tjDecodeYUVPlanes(handle, **srcPlanes, *strides, subsamp, dst, w, pitch, h, pixFmt, flags) → tj3DecodeYUVPlanes8`.
-- `jpeg_calc_jpeg_dimensions(j_compress_ptr) → void` — populates `cinfo.jpeg_width` / `cinfo.jpeg_height` from `scale_num` / `scale_denom` / `image_width` / `image_height`. Mirrors `jcparam.c::jpeg_calc_jpeg_dimensions`. Uses `JpegCompressPublic` (the public ABI mirror) for field access.
-
-**Verification:** `cargo test -p libjpeg-turbo-rs-capi --test symbol_inventory --release` → `2 passed`. Full capi test suite (35+ test binaries) regresses zero existing tests; the only failure remaining (`imagemagick_roundtrips_through_our_cdylib`, PSNR=22.6 dB) is **pre-existing** — confirmed via `git stash`/retry on the baseline branch — and tracked separately under `docs/fix-arith-contradiction`. `cargo fmt --all -- --check` clean. `cargo clippy --lib -- -D warnings` clean.
+**Verification (2026-05-10 correction):** `cargo test -p libjpeg-turbo-rs-capi --test symbol_inventory --release -- --nocapture` → `2 passed`.
 
 **Future hardening (not blocking closure):**
-- Add per-family dlopen smoke tests (`tjAlloc/tjFree` round-trip, `tjCompress` legacy-ABI round-trip, `tjEncodeYUV` legacy-ABI round-trip, `jpeg_calc_jpeg_dimensions` math) to `legacy_aliases.rs`. The symbol-inventory test gates *presence*, not *behaviour*; smoke tests gate behaviour. Tracked as a fast-follow.
+- Implement legacy TurboJPEG 1.x/2.x aliases if a concrete downstream binary requires them instead of the already-exported TJ2/TJ3 forms.
+- Add per-family dlopen smoke tests for any alias family when it moves from allowlisted to implemented. The symbol-inventory test gates presence, not behaviour.
 
 ---
 
@@ -196,10 +177,10 @@ The closure title reflects the actual delta: stub *semantics* moved from "silent
 ## Phase 3 Suggested Order
 
 1. ~~**P3-1** — Extend `tests/abi_offsets.rs` to `jpeg_compress_struct`, `jpeg_error_mgr`, `jpeg_source_mgr`, `jpeg_destination_mgr`, `jpeg_marker_struct`.~~ **CLOSED 2026-05-08** — all six originally-planned struct cross-checks active in `tests/abi_offsets.rs` (decompress + marker + compress + error_mgr + source_mgr + destination_mgr; 133 fields + 6 sizeof probes). C-side `main` field maps to Rust mirror `main_ctrl` via `(c_field_name, rust_offset)` tuple (only field-name divergence). `jvirt_*_control` opaque upstream → no cross-check needed. Windows MSVC matrix leg deferred as Phase 4 hardening (helper currently emits gcc/clang flags only); `cargo test -p libjpeg-turbo-rs-capi --test abi_offsets --release` reports `6 passed; 0 failed; 0 ignored` on macOS aarch64 + the `abi-offsets` CI matrix.
-2. ~~**P3-3** — Implement the 19 legacy TurboJPEG aliases as forwarding wrappers and delete them from the allowlist.~~ **CLOSED 2026-05-06** — `crates/libjpeg-turbo-rs-capi/tests/symbol_inventory.rs::allowlisted_missing_symbols()` returns an empty `HashSet`; both `cdylib_exports_every_upstream_*` tests pass without exemptions. The wrappers live in `crates/libjpeg-turbo-rs-capi/src/legacy.rs` (~390 lines for the new section).
+2. ~~**P3-3** — Audit the symbol inventory allowlist and keep only non-blocking legacy TJ aliases.~~ **CLOSED 2026-05-06; corrected 2026-05-10** — all upstream `jpeg_*` declarations now resolve; legacy TJ1/TJ2 names remain allowlisted with superseding TJ2/TJ3 exports documented in the test.
 3. ~~**P3-2** — Either implement `jpeg12_write_raw_data` / `jpeg12_read_raw_data` against the existing 12-bit encode/decode backend, or downgrade them to feature-gated absence. The "stub returning 0" middle ground must end.~~ **CLOSED 2026-05-09** — both entry points wired through `libjpeg_turbo_rs::raw_data_12::{compress,decompress}_raw_12`. Round-trip pinned by `tests/capi_jpeg12_raw_data_round_trip.rs` (3 gates, GREEN).
 4. ~~**P3-5** — Classic `jpeglib.h` lifecycle / custom-I/O / suspension C harness (≥ 8 tests).~~ **CLOSED 2026-05-08** — all 8 patterns active in `crates/libjpeg-turbo-rs-capi/tests/capi_classic_lifecycle.rs` (custom src/dst mgr, source suspension, destination-suspension `JERR_CANT_SUSPEND` contract, abort+reuse for both decompress/compress, buffered-image multi-pass, setjmp/longjmp). Pattern #4 surfaced + fixed a real shim defect: `push_bytes_through_dest_mgr` previously ignored `empty_output_buffer`'s `FALSE` return and called `term_destination` anyway, silently dropping the post-suspension bytes. Architectural reality is that the deferred-encode shim cannot honor upstream's per-MCU streaming-suspension contract at `jpeg_write_scanlines` (no encoding happens there), so the closure invokes `cinfo->err->error_exit` with `JERR_CANT_SUSPEND` (upstream code 25, "Suspension not allowed here") rather than inventing a non-upstream resume contract; a `setjmp`/`longjmp` consumer recovers cleanly. The earlier P3-5 pattern #8 fix (2026-05-07) wired `jpeg_read_header` to invoke `error_exit` on EOI-terminated malformed input.
 5. ~~**P3-4** — Lift the 4-pixel chroma transform writer gate; close the P2-12 follow-up.~~ **CLOSED 2026-05-07** — gate at `transform_jpeg_with_options::progressive_safe` widened from `max_{h,v} ≤ 2` to `max_{h,v} ∈ {1,2,4}` (the eight standard TJSAMP factors verified by `c_tjtrantest_full`); `tests/c_tjtrantest.rs` skip removed; regression pinned in `tests/regression_progressive_4pixel_chroma_transform.rs` (256 cases). Full matrix runs 12,230 cases without divergence. The 2026-05-07 "1-LSB drift" hypothesis turned out to be an artefact of the encoder-side clamp that P2-11 had already removed; the transform writer inherits the corrected chroma layout via `read_coefficients`. Non-standard 3x sampling stays gated to baseline pending P3-6.
 6. ~~**P3-6** — Non-standard sampling / RGB565 merged-upsample minimum fixture set.~~ **CLOSED 2026-05-08** — 4 fixtures (3x2 decode, 3x2 encode, 3x1 decode, RGB565 merged-upsample) all green in `tests/cross_check_p3_6_nonstandard_rgb565.rs`. Shim fix: merged-upsample gate widened from `Rgb` to `Rgb || Rgb565` with a 5-6-5 truncation pass after the merged kernel; dedicated `_565` SIMD kernels deferred as a Phase 4 perf task.
 
-The order is intentional: P3-1 is the cheapest blast-radius reduction (one test file expansion catches a whole class of encode-side ABI drift); P3-3 is the most valuable gate-removal (19 symbols disappear from "trust me" status); P3-2 fixes a specific stub; P3-5 is structural but expensive; P3-4 / P3-6 are correctness gaps with narrower consumer impact.
+The order is intentional: P3-1 is the cheapest blast-radius reduction (one test file expansion catches a whole class of encode-side ABI drift); P3-3 keeps the symbol inventory honest by separating real classic-API gaps from intentionally-superseded legacy TJ aliases; P3-2 fixes a specific stub; P3-5 is structural but expensive; P3-4 / P3-6 are correctness gaps with narrower consumer impact.

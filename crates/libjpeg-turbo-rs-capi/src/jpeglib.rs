@@ -5109,6 +5109,32 @@ pub extern "C" fn jpeg_create_compress(cinfo: *mut c_void) {
     jpeg_CreateCompress(cinfo, 80, std::mem::size_of::<JpegCompressPublic>());
 }
 
+fn calc_compress_jpeg_dimensions(c: &mut JpegCompressPublic, lossless: bool) {
+    c.jpeg_width = c.image_width;
+    c.jpeg_height = c.image_height;
+    let data_unit: c_int = if lossless { 1 } else { DCTSIZE as c_int };
+    c.min_DCT_h_scaled_size = data_unit;
+    c.min_DCT_v_scaled_size = data_unit;
+}
+
+/// `jpeg_calc_jpeg_dimensions(cinfo)`.
+///
+/// Mirrors libjpeg-turbo's no-compression-scaling build: JPEG image
+/// dimensions are hardwired to the input image dimensions, and the scaled
+/// DCT unit is 8 for lossy JPEG or 1 for lossless JPEG.
+#[no_mangle]
+pub extern "C" fn jpeg_calc_jpeg_dimensions(cinfo: *mut c_void) {
+    let c: &mut JpegCompressPublic = match unsafe { cinfo_compress_mut(cinfo) } {
+        Some(c) => c,
+        None => return,
+    };
+    let lossless: bool = match unsafe { priv_compress_from_ptr(c.master) } {
+        Some(p) => p.lossless_predictor != 0,
+        None => false,
+    };
+    calc_compress_jpeg_dimensions(c, lossless);
+}
+
 /// `jpeg_destroy_compress(cinfo)`.
 #[no_mangle]
 pub extern "C" fn jpeg_destroy_compress(cinfo: *mut c_void) {
@@ -5569,9 +5595,7 @@ pub extern "C" fn jpeg_start_compress(cinfo: *mut c_void, _write_all_tables: CBo
     c.next_scanline = 0;
 
     // --- Populate derived fields (libjpeg `jcmaster.c::initial_setup`). ---
-    // jpeg_width / jpeg_height: with 1:1 scaling, these equal image_*.
-    c.jpeg_width = c.image_width;
-    c.jpeg_height = c.image_height;
+    calc_compress_jpeg_dimensions(c, priv_state.lossless_predictor != 0);
     // max_h/v_samp_factor = max of comp_info[i].h/v_samp_factor.
     let mut max_h: c_int = 1;
     let mut max_v: c_int = 1;
@@ -5585,8 +5609,10 @@ pub extern "C" fn jpeg_start_compress(cinfo: *mut c_void, _write_all_tables: CBo
     }
     c.max_h_samp_factor = max_h;
     c.max_v_samp_factor = max_v;
-    // total_iMCU_rows = ceil(image_height / (max_v_samp_factor * DCTSIZE)).
-    let imcu_row_height: u32 = (max_v as u32).saturating_mul(8).max(1);
+    // total_iMCU_rows = ceil(image_height / (max_v_samp_factor * data_unit)).
+    // `data_unit` is 8 for lossy JPEG and 1 for lossless JPEG.
+    let data_unit: u32 = c.min_DCT_v_scaled_size.max(1) as u32;
+    let imcu_row_height: u32 = (max_v as u32).saturating_mul(data_unit).max(1);
     c.total_iMCU_rows = c.image_height.div_ceil(imcu_row_height);
 
     let input_components: usize = c.input_components.max(1) as usize;

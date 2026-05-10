@@ -5,12 +5,32 @@
 //! `dlopen`, then decodes the result via the decode-side entry points
 //! and cross-checks pixels.
 
-use std::ffi::{c_int, c_void};
+use std::ffi::{c_int, c_uint, c_void};
 use std::mem::MaybeUninit;
 use std::os::raw::c_ulong;
 use std::path::PathBuf;
 
 const JCS_RGB: c_int = 2;
+
+#[repr(C)]
+struct JpegCompressPrefix {
+    err: *mut c_void,
+    mem: *mut c_void,
+    progress: *mut c_void,
+    client_data: *mut c_void,
+    is_decompressor: c_int,
+    global_state: c_int,
+    dest: *mut c_void,
+    image_width: u32,
+    image_height: u32,
+    input_components: c_int,
+    in_color_space: c_int,
+    input_gamma: f64,
+    scale_num: c_uint,
+    scale_denom: c_uint,
+    jpeg_width: u32,
+    jpeg_height: u32,
+}
 
 fn dlext() -> &'static str {
     if cfg!(target_os = "windows") {
@@ -101,6 +121,62 @@ fn c2_1_compress_create_setup_destroy() {
         assert_eq!(in_cs, JCS_RGB);
         // jpeg_set_defaults -> jpeg_default_colorspace: RGB input → YCbCr JPEG.
         assert_eq!(jpeg_cs, 3 /* JCS_YCbCr */);
+
+        let jpeg_destroy_compress: libloading::Symbol<unsafe extern "C" fn(*mut c_void)> = lib
+            .get(b"jpeg_destroy_compress")
+            .expect("jpeg_destroy_compress");
+        jpeg_destroy_compress(cinfo_ptr);
+    }
+}
+
+/// `jpeg_calc_jpeg_dimensions` is an exported libjpeg 7+ helper that lets
+/// callers compute `jpeg_width` / `jpeg_height` before `jpeg_start_compress`.
+#[test]
+fn c2_1_calc_jpeg_dimensions_sets_public_compress_fields() {
+    let lib = unsafe { libloading::Library::new(cdylib_path()) }.expect("dlopen");
+    unsafe {
+        const CINFO_BYTES: usize = 4096;
+        let mut cinfo: MaybeUninit<[u8; CINFO_BYTES]> = MaybeUninit::zeroed();
+        let cinfo_ptr: *mut c_void = cinfo.as_mut_ptr() as *mut c_void;
+
+        const ERR_BYTES: usize = 512;
+        let mut err: MaybeUninit<[u8; ERR_BYTES]> = MaybeUninit::zeroed();
+        let err_ptr: *mut c_void = err.as_mut_ptr() as *mut c_void;
+
+        let jpeg_std_error: libloading::Symbol<unsafe extern "C" fn(*mut c_void) -> *mut c_void> =
+            lib.get(b"jpeg_std_error").expect("jpeg_std_error");
+        let _ = jpeg_std_error(err_ptr);
+        (cinfo_ptr as *mut *mut c_void).write(err_ptr);
+
+        let jpeg_create_compress: libloading::Symbol<
+            unsafe extern "C" fn(*mut c_void, c_int, usize),
+        > = lib
+            .get(b"jpeg_CreateCompress")
+            .expect("jpeg_CreateCompress");
+        jpeg_create_compress(cinfo_ptr, 80, CINFO_BYTES);
+
+        let jpeg_capi_test_set_compress_dims: libloading::Symbol<
+            unsafe extern "C" fn(*mut c_void, u32, u32, c_int, c_int),
+        > = lib
+            .get(b"jpeg_capi_test_set_compress_dims")
+            .expect("jpeg_capi_test_set_compress_dims");
+        jpeg_capi_test_set_compress_dims(cinfo_ptr, 641, 479, 3, JCS_RGB);
+
+        let jpeg_set_defaults: libloading::Symbol<unsafe extern "C" fn(*mut c_void)> =
+            lib.get(b"jpeg_set_defaults").expect("jpeg_set_defaults");
+        jpeg_set_defaults(cinfo_ptr);
+
+        let state: &mut JpegCompressPrefix = &mut *(cinfo_ptr as *mut JpegCompressPrefix);
+        state.jpeg_width = 0;
+        state.jpeg_height = 0;
+
+        let jpeg_calc_jpeg_dimensions: libloading::Symbol<unsafe extern "C" fn(*mut c_void)> = lib
+            .get(b"jpeg_calc_jpeg_dimensions")
+            .expect("jpeg_calc_jpeg_dimensions");
+        jpeg_calc_jpeg_dimensions(cinfo_ptr);
+
+        assert_eq!(state.jpeg_width, 641);
+        assert_eq!(state.jpeg_height, 479);
 
         let jpeg_destroy_compress: libloading::Symbol<unsafe extern "C" fn(*mut c_void)> = lib
             .get(b"jpeg_destroy_compress")
