@@ -214,7 +214,7 @@
 | `jpeg12_write_scanlines(...)` | Write 12-bit scanlines | `write_scanlines_12()` | ✅ |
 | `jpeg16_write_scanlines(...)` | Write 16-bit scanlines | `write_scanlines_16()` | ✅ |
 | `jpeg_finish_compress(cinfo)` | Finalize compression | `ScanlineEncoder::finish()` | ✅ |
-| `jpeg_calc_jpeg_dimensions(cinfo)` | Compute output dimensions | `calc_jpeg_dimensions()` | ✅ |
+| `jpeg_calc_jpeg_dimensions(cinfo)` | Compute compression-side JPEG dimensions; no compression scaling | `calc_jpeg_dimensions()` | ✅ |
 | `jpeg_write_raw_data(cinfo, data, num_lines)` | Write raw downsampled data | `compress_raw()` | ✅ |
 | `jpeg12_write_raw_data(...)` | Write 12-bit raw data | `compress_raw_12()` | ✅ |
 

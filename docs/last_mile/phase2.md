@@ -38,18 +38,16 @@ test format_message_no_specifier_matches_msgtext_verbatim   ... ok
 
 **TDD-verified:** reverting `default_format_message` to the prior verbatim-copy implementation makes 7 of those 8 tests RED-fail (only the no-specifier test still passes, because verbatim copy is correct when the message has no `%X`). Restoring the fix returns to GREEN.
 
-## P2-3. Per-Platform ABI Validation — **PARTIAL: 64-bit cross-platform via P2-4 test; 32-bit / per-platform `const_assert` blocks deferred**
+## P2-3. Per-Platform ABI Validation — **CLOSED 2026-05-10**
 
-**Status (2026-05-04): partially closed.** The P2-4 ABI cross-check test (`crates/libjpeg-turbo-rs-capi/tests/abi_offsets.rs`) now runs in a dedicated `abi-offsets` matrix CI job (`.github/workflows/ci.yml`) on `ubuntu-latest` (Linux x86_64, LP64), `macos-latest` (aarch64, LP64), and `windows-latest` (x86_64 MSVC, LLP64). Each host probes its own ABI by reading `offset_of!` against the host's compiled struct and comparing to a C harness compiled on the same host.
+**Status (2026-05-10): closed.** The release-blocking P2-3 scope is now covered by the runtime ABI cross-check in `crates/libjpeg-turbo-rs-capi/tests/abi_offsets.rs` plus the dedicated `capi-abi-checks` CI matrix in `.github/workflows/ci.yml`. P3-1 expanded that gate from the original decompressor-only probe to all six public classic-API structs (`jpeg_decompress_struct`, `jpeg_marker_struct`, `jpeg_compress_struct`, `jpeg_error_mgr`, `jpeg_source_mgr`, `jpeg_destination_mgr`) with per-field `offsetof` checks and `sizeof(struct ...)` checks against upstream `jpeglib.h` at `JPEG_LIB_VERSION=80`.
 
-The Windows skip in the test was lifted: `cfg!(windows)` no longer short-circuits, so any per-platform Rust↔C struct divergence on Windows MSVC will surface loudly on the first PR. The 64-bit gate remains because the hand-typed `assert!(offset_of!(...) == N)` constants in `jpeglib.rs:4096+` only apply to LP64; on 32-bit hosts the offsets shift proportionally.
+The remaining platform ideas are future hardening, not OPEN/PARTIAL release-gate work:
 
-**Still open (deferred, not blocking):**
+1. **Windows/MSVC compile-time `const_assert!` blocks.** The runtime `abi_offsets` gate is platform-aware and compares Rust's host layout to a C harness compiled on the same host. Dedicated Windows compile-time constants would be additive.
+2. **32-bit ABI targets** (`i686-pc-windows-msvc`, `i686-unknown-linux-gnu`, `armv7-unknown-linux-gnueabihf`). Add these only when a downstream consumer requests that platform; a useful gate needs a matching target C harness, not just a cross-compile build.
 
-1. **Per-platform `const_assert!` blocks for Windows LLP64.** Today the const-assert block in `jpeglib.rs` is gated on `not(windows)`, so a Windows-specific layout drift passes the *compile* gate. The runtime `abi_offsets` test catches it instead. Filling in Windows LLP64 offsets would catch drift at compile time too — only worth doing once we have a real Windows MSVC consumer to validate against.
-2. **32-bit targets** (`i686-pc-windows-msvc`, `i686-unknown-linux-gnu`, `armv7-unknown-linux-gnueabihf`). Same posture: deferred until a downstream user requests the platform. Adding cross-compile *build* checks would surface compile errors on 32-bit but not layout drift; layout drift would require either a hand-pinned const block or a matching cross-compiled C harness, neither of which is cheap to maintain.
-
-The P2-9 doc explicitly carves these out as "Phase 3 ask" work — keeping P2-3 *fully* open would double-track the same backlog.
+If either future-hardening trigger becomes concrete, open a Phase 4 item instead of reopening this Phase 2 release gate.
 
 ## P2-4. Generated C-Side ABI Cross-Check — **CLOSED (jpeg_decompress_struct)**
 
@@ -71,9 +69,9 @@ The P2-9 doc explicitly carves these out as "Phase 3 ask" work — keeping P2-3 
 
 **Status (2026-05-04): closed.** `crates/libjpeg-turbo-rs-capi/tests/symbol_inventory.rs` now parses the submodule's `references/libjpeg-turbo/src/jpeglib.h` for `EXTERN(...)` declarations (66 found) and `references/libjpeg-turbo/src/turbojpeg.h` for `DLLEXPORT` declarations (79 found), then dlopens our cdylib and asserts every parsed symbol is resolvable.
 
-**Allowlist of intentionally-deferred symbols** (originally 19 entries; all now implemented and removed from the allowlist — see [P3-3](phase3.md#p3-3-19-legacy-turbojpeg-symbols-are-allowlisted-not-implemented--closed-2026-05-06)). Historical list:
+**Allowlist of intentionally-deferred symbols** (corrected 2026-05-10 — see [P3-3](phase3.md#p3-3-symbol-inventory-allowlist-triage--closed-2026-05-06) and [P4-1](phase4.md#p4-1-jpeg_calc_jpeg_dimensions-was-documented-but-not-exported--closed-2026-05-10)). `jpeg_calc_jpeg_dimensions` is now implemented and removed from the allowlist. The legacy TurboJPEG 1.x/2.x names below remain allowlisted unless a concrete downstream binary requires the pre-TJ2 ABI. Historical list:
 
-- `jpeg_calc_jpeg_dimensions` — companion to `jpeg_calc_output_dimensions`; not exercised by stock cjpeg / Pillow / ImageMagick.
+- `jpeg_calc_jpeg_dimensions` — companion to `jpeg_calc_output_dimensions`; **implemented 2026-05-10 under P4-1**.
 - `tjAlloc` / `tjFree` — superseded by `tj3Alloc` / `tj3Free`.
 - `tjCompress` / `tjCompressFromYUV` / `tjCompressFromYUVPlanes` — superseded by `tjCompress2` (already exported) and the TJ3 forms.
 - `tjDecompress` / `tjDecompressHeader` / `tjDecompressHeader2` / `tjDecompressToYUV` / `tjDecompressToYUV2` / `tjDecompressToYUVPlanes` — superseded by `tjDecompress2` / `tjDecompressHeader3` and the TJ3 forms.
@@ -295,7 +293,7 @@ The earlier skip-comment claimed "1 LSB downsample diff, decoded pixels match" �
 4. ~~**P2-2** — Implement `format_message` printf expansion.~~ **CLOSED 2026-05-04** — `snprintf_jpeg` helper added in `crates/libjpeg-turbo-rs-capi/src/jpeglib.rs`; `tests/format_message.rs` exercises every specifier `jerror.h` uses against `libc::snprintf` as the reference oracle.
 5. ~~**P2-1** (remaining `c_tjtrantest_full` portion) — Investigate and fix or formally document the grayscale-Huffman transform divergence; remove the last `continue-on-error` flag.~~ **CLOSED 2026-05-04** — local run on aarch64 reports 11190/0 tested/failed; flag removed for both x86_64 and aarch64 jobs.
 6. ~~**P2-4** — Generated C-side ABI cross-check.~~ **CLOSED 2026-05-04** — `tests/abi_offsets.rs` compiles a tiny C harness against the submodule's `jpeglib.h` and asserts every const-asserted field matches `offset_of!`. Coverage scoped to `jpeg_decompress_struct` (27 fields).
-7. ~~**P2-3** — Per-platform offset assertions + CI matrix.~~ **PARTIAL 2026-05-04** — `abi-offsets` matrix CI job now runs the P2-4 cross-check on Linux x86_64, macOS aarch64, and Windows MSVC; per-platform `const_assert!` blocks and 32-bit targets deferred until a real downstream user requests them.
+7. ~~**P2-3** — Per-platform offset assertions + CI matrix.~~ **CLOSED 2026-05-10** — release-blocking ABI validation is covered by the P3-1-expanded `abi_offsets` runtime gate (six public structs, per-field offsets + `sizeof`) in the `capi-abi-checks` CI matrix; Windows compile-time constants and 32-bit ABI targets are future hardening triggers, not OPEN/PARTIAL last-mile work.
 8. ~~**P2-5** — Symbol-inventory diff against upstream.~~ **CLOSED 2026-05-04** — `tests/symbol_inventory.rs` parses upstream headers (66 jpeg + 79 tj symbols), asserts each is exported by our cdylib, allowlists 19 deferred legacy entries with rationale.
 9. ~~**P2-8** — SONAME / pkg-config / install layout.~~ **CLOSED 2026-05-04** — `scripts/install_capi.sh` + `make install` stage cdylib + symlink chain + headers + `.pc` + `JPEGConfig.cmake`; `tests/install_layout.rs` asserts the layout end-to-end.
 10. ~~**P2-7** — Differential fuzzing against C.~~ **CLOSED 2026-05-04** — three libfuzzer targets land. 24-hour scheduled long-run + OSS-Fuzz-style corpus publishing deferred as a future scaling step.
