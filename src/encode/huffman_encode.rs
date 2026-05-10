@@ -505,7 +505,17 @@ impl HuffmanEncoder {
                 // --- AC coefficients ---
                 #[cfg(target_arch = "x86_64")]
                 {
-                    encode_ac_x86_64(&mut pb, &mut fb, &mut buf, coeffs_zigzag, ac_table);
+                    if is_x86_feature_detected!("bmi1") && is_x86_feature_detected!("lzcnt") {
+                        encode_ac_x86_64_bmi1_lzcnt(
+                            &mut pb,
+                            &mut fb,
+                            &mut buf,
+                            coeffs_zigzag,
+                            ac_table,
+                        );
+                    } else {
+                        encode_ac_x86_64(&mut pb, &mut fb, &mut buf, coeffs_zigzag, ac_table);
+                    }
                 }
                 #[cfg(all(
                     not(target_arch = "x86_64"),
@@ -562,7 +572,16 @@ impl HuffmanEncoder {
         let combined: u32 = (huff_code << category) | mag_masked;
         local_put_bits(pb, fb, buf, combined, huff_size + category);
 
-        encode_ac_x86_64(pb, fb, buf, coeffs_zigzag, ac_table);
+        // BMI1+LZCNT runtime dispatch (one branch per block; the cached
+        // `is_x86_feature_detected!` macro is essentially free after first
+        // call). The elevated path skips the inner indirect call that
+        // wrapping `encode_ac_corrected_lsb` would otherwise impose, so the
+        // TZCNT + BLSR savings flow through without offsetting overhead.
+        if is_x86_feature_detected!("bmi1") && is_x86_feature_detected!("lzcnt") {
+            encode_ac_x86_64_bmi1_lzcnt(pb, fb, buf, coeffs_zigzag, ac_table);
+        } else {
+            encode_ac_x86_64(pb, fb, buf, coeffs_zigzag, ac_table);
+        }
     }
 
     /// Encode a single DC difference value (for lossless JPEG).
@@ -596,7 +615,8 @@ impl HuffmanEncoder {
 /// # Safety
 /// `pb`, `fb`, `buf` must be valid hoisted state from `BitWriter::begin_block`.
 #[cfg(target_arch = "x86_64")]
-unsafe fn encode_ac_x86_64(
+#[inline(always)]
+unsafe fn encode_ac_x86_64_body(
     pb: &mut u64,
     fb: &mut i32,
     buf: &mut *mut u8,
@@ -647,6 +667,48 @@ unsafe fn encode_ac_x86_64(
     }
 
     encode_ac_corrected_lsb(pb, fb, buf, &t, bitmap, ac_table);
+}
+
+/// Default x86_64 entry point — SSE2 baseline (no BMI1/LZCNT).
+///
+/// Wraps the `#[inline(always)]` body so callers always have one stable
+/// indirect symbol regardless of whether the elevated `_bmi1_lzcnt` variant
+/// is dispatched.
+#[cfg(target_arch = "x86_64")]
+unsafe fn encode_ac_x86_64(
+    pb: &mut u64,
+    fb: &mut i32,
+    buf: &mut *mut u8,
+    coeffs_zigzag: &[i16; 64],
+    ac_table: &HuffTable,
+) {
+    encode_ac_x86_64_body(pb, fb, buf, coeffs_zigzag, ac_table)
+}
+
+/// BMI1 + LZCNT-elevated entry point. Re-compiles the same body under those
+/// target features so the inlined `bitmap.trailing_zeros()` and
+/// `bitmap & (bitmap - 1)` inside `encode_ac_corrected_lsb` emit TZCNT + BLSR
+/// instead of BSF + MOV/SUB/AND.
+///
+/// `encode_ac_x86_64_body` is `#[inline(always)]`, so its full call tree
+/// (including the `#[inline(always)]` `encode_ac_corrected_lsb`) is inlined
+/// here under the `bmi1,lzcnt` context. The dispatcher in
+/// `encode_block_hoisted` selects between this function and the default one
+/// once per block based on `is_x86_feature_detected!`, with no inner indirect
+/// call inside the hot loop.
+///
+/// # Safety
+/// CPU must support BMI1 + LZCNT (caller checks via `is_x86_feature_detected!`).
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "bmi1,lzcnt")]
+unsafe fn encode_ac_x86_64_bmi1_lzcnt(
+    pb: &mut u64,
+    fb: &mut i32,
+    buf: &mut *mut u8,
+    coeffs_zigzag: &[i16; 64],
+    ac_table: &HuffTable,
+) {
+    encode_ac_x86_64_body(pb, fb, buf, coeffs_zigzag, ac_table)
 }
 
 /// AC emit loop with pre-loaded table pointers and minimal live variables.
