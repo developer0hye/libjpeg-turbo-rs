@@ -1,5 +1,7 @@
 # Next Session Plan — libjpeg-turbo-rs
 
+> Status update (2026-05-10): this file is historical. Use `docs/LAST_MILE.md` as the live release-gate source of truth before choosing work. The `jpeg_calc_jpeg_dimensions` export gap found while reconciling the C API checklist is closed under `docs/last_mile/phase4.md#p4-1`; several Task 1.5 / Task 2 / Task 3 notes below are stale where they conflict with LAST_MILE.
+
 작성일: 2026-04-25  |  상태: main HEAD `dad30be`, 모든 워크플로우 green
 
 ## 0. 매 세션 Pre-flight (필수)

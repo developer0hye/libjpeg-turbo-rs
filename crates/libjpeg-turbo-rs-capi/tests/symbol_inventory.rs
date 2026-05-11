@@ -28,27 +28,53 @@ fn workspace_root() -> PathBuf {
         .to_path_buf()
 }
 
+fn dylib_ext() -> &'static str {
+    if cfg!(target_os = "windows") {
+        "dll"
+    } else if cfg!(target_os = "macos") {
+        "dylib"
+    } else {
+        "so"
+    }
+}
+
+fn lib_prefix() -> &'static str {
+    if cfg!(target_os = "windows") {
+        ""
+    } else {
+        "lib"
+    }
+}
+
+fn cdylib_filename() -> String {
+    format!("{}libjpeg_turbo_rs_capi.{}", lib_prefix(), dylib_ext())
+}
+
 fn cdylib_path() -> PathBuf {
-    let workspace = workspace_root();
-    let candidates = [
-        workspace.join("target/release/liblibjpeg_turbo_rs_capi.dylib"),
-        workspace.join("target/release/liblibjpeg_turbo_rs_capi.so"),
-        workspace.join("target/release/libjpeg_turbo_rs_capi.dll"),
-    ];
-    for c in &candidates {
-        if c.exists() {
-            return c.clone();
+    if let Ok(p) = std::env::var("CARGO_CDYLIB_FILE_LIBJPEG_TURBO_RS_CAPI") {
+        return PathBuf::from(p);
+    }
+    let exe: PathBuf = std::env::current_exe().expect("current_exe");
+    let filename: String = cdylib_filename();
+    let mut dir: PathBuf = exe;
+    while dir.pop() {
+        let candidate: PathBuf = dir.join(&filename);
+        if candidate.exists() {
+            return candidate;
         }
     }
+
+    let workspace = workspace_root();
     let status = std::process::Command::new(env!("CARGO"))
         .args(["build", "-p", "libjpeg-turbo-rs-capi", "--release"])
         .current_dir(&workspace)
         .status()
         .expect("cargo build");
     assert!(status.success(), "cargo build failed");
-    for c in &candidates {
-        if c.exists() {
-            return c.clone();
+    for rel_dir in ["target/release/deps", "target/release"] {
+        let candidate: PathBuf = workspace.join(rel_dir).join(&filename);
+        if candidate.exists() {
+            return candidate;
         }
     }
     panic!("cdylib not found after build");
@@ -157,15 +183,8 @@ fn extract_tj_symbols(turbojpeg_h: &str) -> HashSet<String> {
 fn allowlisted_missing_symbols() -> HashSet<&'static str> {
     [
         // Classic libjpeg API:
+        // (none currently allowlisted)
         //
-        // `jpeg_calc_jpeg_dimensions` — companion to
-        // `jpeg_calc_output_dimensions` for the compress side.
-        // Used by callers that pre-compute output dimensions from
-        // scaling factors before `jpeg_start_compress`. Not exercised
-        // by stock cjpeg / Pillow / ImageMagick (the dimension
-        // calculation happens inside the library), so missing it is
-        // not a current drop-in blocker.
-        "jpeg_calc_jpeg_dimensions",
         // Legacy TurboJPEG 1.x/2.x ABI — superseded by the TJ3 forms
         // and the `*2` / `*3` variants we already export.
         "tjAlloc",                 // → tj3Alloc
