@@ -58,8 +58,8 @@ fn djpeg_path() -> Option<PathBuf> {
             for p in [
                 "/opt/homebrew/bin/djpeg",
                 "/usr/local/bin/djpeg",
-                "/usr/bin/djpeg",
                 "/opt/libjpeg-turbo/bin/djpeg",
+                "/usr/bin/djpeg",
             ] {
                 let pb = PathBuf::from(p);
                 if pb.exists() {
