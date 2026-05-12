@@ -8,6 +8,7 @@
 | --- | --- |
 | P4-1 | CLOSED 2026-05-10 |
 | P4-2 | CLOSED 2026-05-12 |
+| P4-3 | CLOSED 2026-05-12 |
 
 ---
 
@@ -39,7 +40,21 @@
 - `cargo +nightly fuzz run fuzz_decode_diff_c fuzz/corpus/fuzz_decode_diff_c/prog_dc_smoothing_eoi_after_first_scan.jpg -- -runs=1` → passed.
 - `cargo +nightly fuzz run fuzz_decode_diff_c -- -max_total_time=10 -print_final_stats=1` → passed.
 
+## P4-3. Fuzz Smoke C Oracle Toolchain Drift — **CLOSED 2026-05-12**
+
+**Status (2026-05-12): closed.** The post-merge scheduled `Fuzz Smoke` run at `611aea2` failed on `fuzz_decode_diff_c` because the workflow used Ubuntu's packaged libjpeg-turbo tools while the parity gates and local reference path use libjpeg-turbo 3.x.
+
+**Root cause:** `fuzz-smoke.yml` installed `libjpeg-turbo-progs` from apt, which can lag the official release and produce different progressive block-smoothing output for malformed/truncated progressive streams. The fuzz target tool lookup also preferred `/usr/bin` over `/opt/libjpeg-turbo/bin`, so adding the official tools without changing lookup order would still risk selecting the older system oracle.
+
+**Implementation:** `Fuzz Smoke` now installs the official libjpeg-turbo 3.1.x Debian package for differential C targets. The fuzz target tool search order now prefers `/opt/libjpeg-turbo/bin` over `/usr/bin` for `djpeg` and `jpegtran` so CI and local oracle selection follow the intended 3.x toolchain when both are present.
+
+**Verification:**
+
+- `cargo +nightly fuzz run fuzz_decode_diff_c fuzz/corpus/fuzz_decode_diff_c/prog_dc_smoothing_eoi_after_first_scan.jpg -- -runs=1` → passed locally with libjpeg-turbo 3.1.4.1.
+- Scheduled workflow verification to run on branch `fix/fuzz-smoke-progressive-smoothing` before merge.
+
 ## Phase 4 Suggested Order
 
 1. ~~**P4-1** — export `jpeg_calc_jpeg_dimensions` and delete its missing-symbol allowlist entry.~~ **CLOSED 2026-05-10**.
 2. ~~**P4-2** — fix scheduled decode parity regressions from full C parity and fuzz smoke.~~ **CLOSED 2026-05-12**.
+3. ~~**P4-3** — pin Fuzz Smoke's differential C oracle to libjpeg-turbo 3.x.~~ **CLOSED 2026-05-12**.
