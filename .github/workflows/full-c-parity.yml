@@ -19,10 +19,10 @@ jobs:
           submodules: recursive
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - name: Build libjpeg-turbo 3.1.0 from source
+      - name: Build libjpeg-turbo 3.1.4.1 from source
         run: |
           sudo apt-get install -y cmake nasm
-          git clone --depth 1 --branch 3.1.0 https://github.com/libjpeg-turbo/libjpeg-turbo.git /tmp/ljt
+          git clone --depth 1 --branch 3.1.4.1 https://github.com/libjpeg-turbo/libjpeg-turbo.git /tmp/ljt
           cmake -S /tmp/ljt -B /tmp/ljt/build -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=/usr/local
           cmake --build /tmp/ljt/build -j$(nproc)
           sudo cmake --install /tmp/ljt/build
