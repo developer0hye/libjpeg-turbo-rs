@@ -3423,7 +3423,10 @@ impl<'a> Decoder<'a> {
                 .map(|(ci, comp)| {
                     let comp_w: usize =
                         mcus_x * comp.horizontal_sampling as usize * comp_block_sizes[ci];
-                    (cx * comp.horizontal_sampling as usize / max_h).min(comp_w.saturating_sub(1))
+                    // Scaled IDCT can absorb subsampling by using a larger block
+                    // size for chroma components, so derive the crop offset from
+                    // the decoded plane width rather than sampling factors alone.
+                    (cx * comp_w / full_width).min(comp_w.saturating_sub(1))
                 })
                 .collect()
         } else {
