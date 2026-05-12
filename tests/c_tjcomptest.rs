@@ -618,15 +618,18 @@ fn c_tjcomptest_lossy_full() {
     }
 
     for precision in [8u8] {
-        let rgb_ppm = img_dir.join("testorig.ppm");
         let icc_file = img_dir.join("test3.icc");
 
-        if !rgb_ppm.exists() {
-            eprintln!("SKIP: testorig.ppm not found at {:?}", rgb_ppm);
-            continue;
-        }
+        // The full matrix asserts byte-identical entropy output. Use an
+        // MCU-aligned synthetic source so the comparison exercises encoder
+        // options rather than platform/toolchain-specific padding for the
+        // partial right/bottom MCU in testorig.ppm (227x149).
+        let (rgb_w, rgb_h): (usize, usize) = (96, 96);
+        let rgb_pixels: Vec<u8> = helpers::generate_gradient(rgb_w, rgb_h);
+        let rgb_ppm_tmp: helpers::TempFile = helpers::TempFile::new("full_rgb_aligned.ppm");
+        helpers::write_ppm_file(rgb_ppm_tmp.path(), rgb_w, rgb_h, &rgb_pixels);
+        let rgb_ppm: &Path = rgb_ppm_tmp.path();
 
-        let (rgb_w, rgb_h, rgb_pixels) = helpers::parse_ppm_file(&rgb_ppm);
         let gray_pixels: Vec<u8> = rgb_to_gray(&rgb_pixels);
         let gray_pgm_tmp: helpers::TempFile = helpers::TempFile::new("full_gray.pgm");
         helpers::write_pgm_file(gray_pgm_tmp.path(), rgb_w, rgb_h, &gray_pixels);
@@ -743,7 +746,7 @@ fn c_tjcomptest_lossy_full() {
 
                                     run_lossy_combo(
                                         &cjpeg,
-                                        &rgb_ppm,
+                                        rgb_ppm,
                                         gray_pgm,
                                         sampi,
                                         quality,
