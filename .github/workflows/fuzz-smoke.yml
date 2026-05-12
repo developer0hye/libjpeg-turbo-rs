@@ -68,7 +68,7 @@ jobs:
         if: matrix.target == 'fuzz_decode_diff_c' || matrix.target == 'fuzz_encode_diff_c' || matrix.target == 'fuzz_transform_diff_c'
         run: |
           ARCH=$(dpkg --print-architecture)
-          VERSION=3.1.3
+          VERSION=3.1.4.1
           curl -fL -o /tmp/ljt.deb \
             "https://github.com/libjpeg-turbo/libjpeg-turbo/releases/download/${VERSION}/libjpeg-turbo-official_${VERSION}_${ARCH}.deb"
           sudo apt-get install -y /tmp/ljt.deb

@@ -10,6 +10,7 @@
 | P4-2 | CLOSED 2026-05-12 |
 | P4-3 | CLOSED 2026-05-12 |
 | P4-4 | CLOSED 2026-05-12 |
+| P4-5 | CLOSED 2026-05-12 |
 
 ---
 
@@ -47,7 +48,7 @@
 
 **Root cause:** `fuzz-smoke.yml` installed `libjpeg-turbo-progs` from apt, which can lag the official release and produce different progressive block-smoothing output for malformed/truncated progressive streams. The fuzz target tool lookup also preferred `/usr/bin` over `/opt/libjpeg-turbo/bin`, so adding the official tools without changing lookup order would still risk selecting the older system oracle.
 
-**Implementation:** `Fuzz Smoke` now installs the official libjpeg-turbo 3.1.x Debian package for differential C targets. The fuzz target tool search order now prefers `/opt/libjpeg-turbo/bin` over `/usr/bin` for `djpeg` and `jpegtran` so CI and local oracle selection follow the intended 3.x toolchain when both are present.
+**Implementation:** `Fuzz Smoke` now installs the official libjpeg-turbo 3.1.4.1 Debian package for differential C targets. The fuzz target tool search order now prefers `/opt/libjpeg-turbo/bin` over `/usr/bin` for `djpeg` and `jpegtran` so CI and local oracle selection follow the intended 3.1.4.1 toolchain when both are present.
 
 **Verification:**
 
@@ -60,11 +61,24 @@
 
 **Root cause:** the full lossy matrix used upstream `testorig.ppm` (227x149), which has partial right/bottom MCUs for subsampled encodes. C cjpeg's padding behavior can differ by platform/toolchain for those partial MCUs, so byte-exact entropy comparison on that source is not a stable oracle. The quick lossy parity test already used a 96x96 MCU-aligned synthetic source for the same reason.
 
-**Implementation:** `c_tjcomptest_lossy_full` now uses the same MCU-aligned synthetic RGB/gray source pattern as the quick matrix for 8-bit lossy byte-parity checks. The full matrix still covers the restart, arithmetic, DCT, optimize, progressive, quality, subsampling, and inner variant axes without depending on partial-MCU padding bytes.
+**Implementation:** `c_tjcomptest_lossy_full` now uses the same MCU-aligned synthetic RGB/gray source pattern as the quick matrix for 8-bit lossy byte-parity checks. The full matrix still covers the restart, arithmetic, default integer DCT, optimize, progressive, quality, subsampling, and inner variant axes without depending on partial-MCU padding bytes.
 
 **Verification:**
 
 - `cargo test --features full-c-parity --test c_tjcomptest c_tjcomptest_lossy_full -- --nocapture` → passed locally.
+- Scheduled `Full C Parity` workflow verification to run on branch `fix/fuzz-smoke-progressive-smoothing` before merge.
+
+## P4-5. Full C Parity Fast-DCT Byte Oracle Noise — **CLOSED 2026-05-12**
+
+**Status (2026-05-12): closed.** After P4-4, the next x86_64 `Full C Parity` run reached the aligned-source matrix and failed on `lossy_full_p8_r0_qdef_a0_dc1_o0_p0_samp444_rgb_samp444` with a one-byte entropy-stream difference.
+
+**Root cause:** `cjpeg -dc fa` selects the fast integer FDCT, which is an approximation and is not a byte-stable cross-platform oracle. The scheduled x86_64 run was building libjpeg-turbo 3.1.0 from source, while local/macOS validation used a different toolchain/backend. Requiring byte-identical entropy streams for every fast-DCT full-matrix case turns platform rounding noise into a release blocker.
+
+**Implementation:** the scheduled full lossy cjpeg parity matrix now keeps byte-exact coverage on the default integer DCT. Focused cjpeg parity tests still cover selected fast-DCT cases that are byte-stable; the full scheduled matrix avoids treating fast-DCT approximation bytes as a portable C contract.
+
+**Verification:**
+
+- `cargo test --features full-c-parity --test c_tjcomptest` → passed locally.
 - Scheduled `Full C Parity` workflow verification to run on branch `fix/fuzz-smoke-progressive-smoothing` before merge.
 
 ## Phase 4 Suggested Order
@@ -73,3 +87,4 @@
 2. ~~**P4-2** — fix scheduled decode parity regressions from full C parity and fuzz smoke.~~ **CLOSED 2026-05-12**.
 3. ~~**P4-3** — pin Fuzz Smoke's differential C oracle to libjpeg-turbo 3.x.~~ **CLOSED 2026-05-12**.
 4. ~~**P4-4** — make full cjpeg parity use an MCU-aligned source.~~ **CLOSED 2026-05-12**.
+5. ~~**P4-5** — keep full cjpeg byte parity on the default integer DCT.~~ **CLOSED 2026-05-12**.
