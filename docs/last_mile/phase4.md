@@ -7,6 +7,7 @@
 | ID | Status |
 | --- | --- |
 | P4-1 | CLOSED 2026-05-10 |
+| P4-2 | CLOSED 2026-05-12 |
 
 ---
 
@@ -23,6 +24,22 @@
 - `cargo test -p libjpeg-turbo-rs-capi --test capi_jpeglib_encode c2_1_calc_jpeg_dimensions_sets_public_compress_fields -- --nocapture` → passed.
 - `cargo test -p libjpeg-turbo-rs-capi --test symbol_inventory --release -- --nocapture` → passed; both upstream `jpeglib.h` and `turbojpeg.h` symbol inventories resolve.
 
+## P4-2. Scheduled Decode Parity Regressions — **CLOSED 2026-05-12**
+
+**Status (2026-05-12): closed.** The scheduled `Full C Parity` and `Fuzz Smoke` failures at `28954f6` are pinned by a focused `c_tjdecomptest` regression and a `fuzz_decode_diff_c` corpus seed.
+
+**Root cause:** scaled 4:2:0 crop output computed chroma X offsets from raw sampling factors even when scaled IDCT had expanded chroma planes to full output width. Separately, `fuzz_decode_diff_c` compared Rust without progressive block smoothing against `djpeg`, whose default enables block smoothing for truncated progressive DC-only streams.
+
+**Implementation:** crop offsets now scale from each decoded component plane width relative to the full scaled output width. The differential decode fuzzer enables block smoothing to match `djpeg` defaults and keeps the offending progressive fixture in the `fuzz_decode_diff_c` corpus.
+
+**Verification:**
+
+- `cargo test --test c_tjdecomptest -- --nocapture` → passed.
+- `cargo test --features full-c-parity --test c_tjdecomptest c_tjdecomptest_full -- --nocapture` → passed.
+- `cargo +nightly fuzz run fuzz_decode_diff_c fuzz/corpus/fuzz_decode_diff_c/prog_dc_smoothing_eoi_after_first_scan.jpg -- -runs=1` → passed.
+- `cargo +nightly fuzz run fuzz_decode_diff_c -- -max_total_time=10 -print_final_stats=1` → passed.
+
 ## Phase 4 Suggested Order
 
 1. ~~**P4-1** — export `jpeg_calc_jpeg_dimensions` and delete its missing-symbol allowlist entry.~~ **CLOSED 2026-05-10**.
+2. ~~**P4-2** — fix scheduled decode parity regressions from full C parity and fuzz smoke.~~ **CLOSED 2026-05-12**.
