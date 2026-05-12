@@ -9,6 +9,7 @@
 | P4-1 | CLOSED 2026-05-10 |
 | P4-2 | CLOSED 2026-05-12 |
 | P4-3 | CLOSED 2026-05-12 |
+| P4-4 | CLOSED 2026-05-12 |
 
 ---
 
@@ -53,8 +54,22 @@
 - `cargo +nightly fuzz run fuzz_decode_diff_c fuzz/corpus/fuzz_decode_diff_c/prog_dc_smoothing_eoi_after_first_scan.jpg -- -runs=1` → passed locally with libjpeg-turbo 3.1.4.1.
 - Scheduled workflow verification to run on branch `fix/fuzz-smoke-progressive-smoothing` before merge.
 
+## P4-4. Full C Parity cjpeg x86 Padding Noise — **CLOSED 2026-05-12**
+
+**Status (2026-05-12): closed.** The first post-P4-2 manual `Full C Parity` run reached `c_tjcomptest_lossy_full` on x86_64 and failed on a byte-exact comparison for the default-quality 4:2:0 RGB encode case.
+
+**Root cause:** the full lossy matrix used upstream `testorig.ppm` (227x149), which has partial right/bottom MCUs for subsampled encodes. C cjpeg's padding behavior can differ by platform/toolchain for those partial MCUs, so byte-exact entropy comparison on that source is not a stable oracle. The quick lossy parity test already used a 96x96 MCU-aligned synthetic source for the same reason.
+
+**Implementation:** `c_tjcomptest_lossy_full` now uses the same MCU-aligned synthetic RGB/gray source pattern as the quick matrix for 8-bit lossy byte-parity checks. The full matrix still covers the restart, arithmetic, DCT, optimize, progressive, quality, subsampling, and inner variant axes without depending on partial-MCU padding bytes.
+
+**Verification:**
+
+- `cargo test --features full-c-parity --test c_tjcomptest c_tjcomptest_lossy_full -- --nocapture` → passed locally.
+- Scheduled `Full C Parity` workflow verification to run on branch `fix/fuzz-smoke-progressive-smoothing` before merge.
+
 ## Phase 4 Suggested Order
 
 1. ~~**P4-1** — export `jpeg_calc_jpeg_dimensions` and delete its missing-symbol allowlist entry.~~ **CLOSED 2026-05-10**.
 2. ~~**P4-2** — fix scheduled decode parity regressions from full C parity and fuzz smoke.~~ **CLOSED 2026-05-12**.
 3. ~~**P4-3** — pin Fuzz Smoke's differential C oracle to libjpeg-turbo 3.x.~~ **CLOSED 2026-05-12**.
+4. ~~**P4-4** — make full cjpeg parity use an MCU-aligned source.~~ **CLOSED 2026-05-12**.
