@@ -492,6 +492,42 @@ fn c_tjdecomptest_quick() {
     );
 }
 
+/// Regression for scaled 4:2:0 crop offsets. At 7/8 scale, chroma components
+/// use larger IDCT blocks and are already full output width, so their crop X
+/// offset must be derived from the decoded plane width rather than the raw
+/// sampling factor.
+#[test]
+fn c_tjdecomptest_scaled_420_crop_chroma_offset_regression() {
+    let djpeg: PathBuf = require_c_tool!("djpeg");
+    let cjpeg: PathBuf = require_c_tool!("cjpeg");
+
+    let img_dir: PathBuf = helpers::c_testimages_dir();
+    if !img_dir.join("testorig.ppm").exists() {
+        eprintln!("SKIP: testorig.ppm not found in {:?}", img_dir);
+        return;
+    }
+
+    let entry = SUBSAMP_TABLE
+        .iter()
+        .find(|entry| entry.label == "420")
+        .expect("420 subsampling entry");
+    let jpeg_tmp: helpers::TempFile = helpers::TempFile::new("tjdecomp_420_crop_scale.jpg");
+    generate_test_jpeg(&cjpeg, entry, jpeg_tmp.path());
+
+    let comparisons = run_combo(
+        &djpeg,
+        jpeg_tmp.path(),
+        entry,
+        "7/8",
+        "14x14+23+23",
+        false,
+        false,
+        "regression",
+    );
+
+    assert_eq!(comparisons, 2);
+}
+
 // ===========================================================================
 // Full test — complete matrix, gated on `full-c-parity` feature
 // ===========================================================================

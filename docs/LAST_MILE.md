@@ -10,7 +10,7 @@
 
 ## Current Status (2026-05-09)
 
-Project is **replacement-ready** for the Rust-application + stock-tool drop-in story. System-library drop-in (Phase 2) is closed. Long-tail C-compatibility (Phase 3) is fully closed: P3-1 / P3-2 / P3-3 / P3-4 / P3-5 / P3-6 are all CLOSED. P3-2 closed 2026-05-09 with the full 12-bit `jpeg_*_raw_data` backend wired through `libjpeg_turbo_rs::raw_data_12::{compress,decompress}_raw_12`. Phase 4 currently has one closed post-gate correction: P4-1 exported `jpeg_calc_jpeg_dimensions` and removed it from the symbol allowlist.
+Project is **replacement-ready** for the Rust-application + stock-tool drop-in story. System-library drop-in (Phase 2) is closed. Long-tail C-compatibility (Phase 3) is fully closed: P3-1 / P3-2 / P3-3 / P3-4 / P3-5 / P3-6 are all CLOSED. P3-2 closed 2026-05-09 with the full 12-bit `jpeg_*_raw_data` backend wired through `libjpeg_turbo_rs::raw_data_12::{compress,decompress}_raw_12`. Phase 4 currently has two closed post-gate corrections: P4-1 exported `jpeg_calc_jpeg_dimensions`; P4-2 fixed scheduled full-parity and fuzz-smoke decode regressions.
 
 **Live gate** (refresh whenever the inventory changes):
 

@@ -175,6 +175,10 @@ fn rust_decode(jpeg: &[u8]) -> Option<(usize, usize, usize, Vec<u8>, bool)> {
     // behaviour against djpeg's *drop-in* behaviour.
     let mut decoder = Decoder::new(jpeg).ok()?;
     decoder.set_lenient(true);
+    // djpeg enables block smoothing by default for progressive images.
+    // Keep the differential oracle aligned, especially for truncated
+    // progressive streams that only contain early DC scans.
+    decoder.set_block_smoothing(true);
     let img = decoder.decode_image().ok()?;
     let channels: usize = match img.pixel_format {
         libjpeg_turbo_rs::PixelFormat::Grayscale => 1,
