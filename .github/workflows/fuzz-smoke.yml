@@ -23,6 +23,9 @@ jobs:
   fuzz:
     name: Fuzz ${{ matrix.target }}
     runs-on: ubuntu-latest
+    env:
+      FUZZ_TARGET: ${{ matrix.target }}
+      MAX_TOTAL_TIME: ${{ github.event.inputs.max_total_time || '600' }}
     strategy:
       fail-fast: false
       matrix:
@@ -81,8 +84,6 @@ jobs:
         run: cargo test --test generate_fuzz_seeds
 
       - name: Run fuzzer
-        env:
-          MAX_TOTAL_TIME: ${{ github.event.inputs.max_total_time || '600' }}
         # `--target x86_64-unknown-linux-gnu` is mandatory: the prebuilt
         # cargo-fuzz binary we install above is musl-linked, so without
         # an explicit target it defaults to its host triple
@@ -94,8 +95,83 @@ jobs:
         run: |
           cargo +nightly fuzz run \
             --target x86_64-unknown-linux-gnu \
-            "${{ matrix.target }}" \
+            "${FUZZ_TARGET}" \
             -- -max_total_time="${MAX_TOTAL_TIME}" -print_final_stats=1
+
+      - name: Write repro metadata
+        if: failure()
+        run: |
+          mkdir -p "fuzz/repro/${FUZZ_TARGET}"
+
+          {
+            echo "Fuzz Smoke repro"
+            echo
+            echo "target: ${FUZZ_TARGET}"
+            echo "workflow: ${GITHUB_WORKFLOW}"
+            echo "run: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}/attempts/${GITHUB_RUN_ATTEMPT}"
+            echo "commit: ${GITHUB_SHA}"
+            echo "runner: ${RUNNER_OS} ${RUNNER_ARCH}"
+            echo "max_total_time: ${MAX_TOTAL_TIME}"
+            echo
+            echo "Rebuild the seed corpus first:"
+            echo "  cargo test --test generate_fuzz_seeds"
+            echo
+            echo "Re-run the same smoke budget:"
+            echo "  cargo +nightly fuzz run --target x86_64-unknown-linux-gnu ${FUZZ_TARGET} -- -max_total_time=${MAX_TOTAL_TIME} -print_final_stats=1"
+            echo
+            echo "Download crash artifacts from this run:"
+            echo "  gh run download ${GITHUB_RUN_ID} -n fuzz-artifacts-${FUZZ_TARGET} -D fuzz/artifacts/${FUZZ_TARGET}"
+            echo
+            echo "Reproduce a downloaded crash artifact:"
+            echo "  cargo +nightly fuzz run --target x86_64-unknown-linux-gnu ${FUZZ_TARGET} fuzz/artifacts/${FUZZ_TARGET}/<crash-file> -- -runs=1"
+            echo
+            echo "Differential target note:"
+            case "${FUZZ_TARGET}" in
+              fuzz_decode_diff_c|fuzz_encode_diff_c|fuzz_transform_diff_c)
+                echo "  Install libjpeg-turbo 3.1.4.1 C tools and put /opt/libjpeg-turbo/bin first on PATH."
+                echo "  ARCH=\$(dpkg --print-architecture)"
+                echo "  VERSION=3.1.4.1"
+                echo "  curl -fL -o /tmp/ljt.deb \"https://github.com/libjpeg-turbo/libjpeg-turbo/releases/download/\${VERSION}/libjpeg-turbo-official_\${VERSION}_\${ARCH}.deb\""
+                echo "  sudo apt-get install -y /tmp/ljt.deb"
+                echo "  export PATH=/opt/libjpeg-turbo/bin:\${PATH}"
+                ;;
+              *)
+                echo "  No C tool dependency for this target."
+                ;;
+            esac
+          } > "fuzz/repro/${FUZZ_TARGET}/repro.txt"
+
+          {
+            echo "rustc"
+            rustc -Vv || true
+            echo
+            echo "cargo"
+            cargo -V || true
+            echo
+            echo "cargo-fuzz"
+            cargo fuzz --version || true
+            echo
+            echo "C tools"
+            for tool in djpeg cjpeg jpegtran; do
+              echo "${tool}"
+              if command -v "${tool}" >/dev/null 2>&1; then
+                command -v "${tool}"
+                "${tool}" -version || true
+              else
+                echo "not found"
+              fi
+              echo
+            done
+          } > "fuzz/repro/${FUZZ_TARGET}/versions.txt" 2>&1
+
+      - name: Upload repro metadata
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-repro-${{ matrix.target }}
+          path: fuzz/repro/${{ matrix.target }}
+          if-no-files-found: error
+          retention-days: 14
 
       - name: Upload crash artifacts
         if: failure()

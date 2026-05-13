@@ -3,6 +3,7 @@
 # /references
 fuzz/target
 fuzz/artifacts
+fuzz/repro
 .DS_Store
 bench_c_decode_linux
 crates/libjpeg-turbo-rs-wasm/pkg/

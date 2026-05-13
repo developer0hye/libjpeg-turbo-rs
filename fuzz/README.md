@@ -88,6 +88,14 @@ cargo +nightly fuzz list
 cargo +nightly fuzz run fuzz_decompress fuzz/artifacts/fuzz_decompress/<crash-file>
 ```
 
+## CI smoke failure artifacts
+
+The Fuzz Smoke workflow uploads two artifact groups when a target fails:
+
+- `fuzz-artifacts-<target>`: libFuzzer crash inputs from `fuzz/artifacts/<target>/`.
+- `fuzz-repro-<target>`: `repro.txt` with the exact rerun commands and `versions.txt` with
+  Rust, cargo-fuzz, and C tool versions from the failing runner.
+
 ## Coverage
 
 ```bash
@@ -103,4 +111,5 @@ fuzz/
   fuzz_targets/           # One .rs file per fuzz target
   corpus/<target>/        # Seed corpus per target (populated by generate_fuzz_seeds test)
   artifacts/<target>/     # Crash-reproducing inputs (gitignored, created by fuzzer)
+  repro/<target>/         # CI-only repro metadata artifacts (gitignored, created on failure)
 ```

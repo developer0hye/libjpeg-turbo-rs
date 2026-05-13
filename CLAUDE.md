@@ -60,6 +60,7 @@ Rust port of libjpeg-turbo with equivalent or better performance.
 - After completing each planned task, run `cargo test` and commit before moving to the next task. **Skip tests if the change has no impact on runtime behavior** (e.g., docs, comments, CI config). Changes to runtime config files (YAML, JSON, etc. read by code) must still trigger tests.
 - **A task is not "done" until CI/CD is green.** Local `cargo test` / `cargo clippy` / `cargo fmt --check` are necessary but not sufficient — they only cover the host platform (typically aarch64-darwin) while CI runs on `ubuntu-latest`, `macos-latest`, and `windows-latest`. Push the commits, then verify all jobs in `.github/workflows/*.yml` pass with `gh pr checks --watch <PR#>` (or `gh run watch <run-id>` for a direct push). Only after every required job is green may you tell the user the task is complete. If CI fails, fix the failure and re-verify; do **not** report completion based on local results alone.
 - **After any code change (feature addition, bug fix, refactoring, PR merge), check if `README.md` needs updating.** If project description, usage, setup, architecture, or API changed, update `README.md` with clear, concise language. Keep it minimal — only document what users need to know.
+- When debugging Fuzz Smoke failures, inspect `fuzz-repro-<target>` (`repro.txt`, `versions.txt`) alongside `fuzz-artifacts-<target>` before local reproduction or fixes.
 
 ## Testing (TDD)
 
