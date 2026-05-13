@@ -515,6 +515,11 @@ pub fn transform_jpeg_with_options(data: &[u8], options: &TransformOptions) -> R
         crate::transform::MarkerCopyMode::None => Vec::new(),
     };
 
+    let source_is_progressive: bool = {
+        let mut reader = MarkerReader::new(data);
+        reader.read_markers()?.frame.is_progressive
+    };
+
     let mut coeffs = read_coefficients(data)?;
     let op: TransformOp = options.op;
 
@@ -1058,13 +1063,14 @@ pub fn transform_jpeg_with_options(data: &[u8], options: &TransformOptions) -> R
                 dbx <= comp.blocks_x && dby <= comp.blocks_y
             })
     };
-    // 12-bit precision (e.g. `monkey12.jpg` transcode) MUST go through
-    // the optimised Huffman writer — the non-optimised baseline path
-    // uses the standard 8-bit Annex K tables, which only define DC
-    // categories 0..=11 and would silently encode 12..=15 as zero-bit
-    // codes. Mirror the FFI dispatcher in
-    // `crates/libjpeg-turbo-rs-capi/src/jpeglib.rs::run_coefficient_writer_and_flush`.
-    let force_optimize: bool = coeffs.effective_precision() > 8;
+    // 12-bit precision (e.g. `monkey12.jpg` transcode) and adversarial
+    // progressive coefficient buffers with out-of-range baseline symbols MUST
+    // go through the optimized Huffman writer. The non-optimized path uses the
+    // standard Annex K tables, which do not define every possible DC/AC
+    // category; using it anyway would encode zero-bit Huffman symbols and
+    // produce a JPEG that downstream C tools reject.
+    let force_optimize: bool = coeffs.effective_precision() > 8
+        || (source_is_progressive && needs_optimized_baseline_huffman(&coeffs));
     let output: Vec<u8> = if options.arithmetic && progressive_safe {
         write_coefficients_progressive_arithmetic(&coeffs, progressive_restart_rows)?
     } else if options.arithmetic {
@@ -1086,6 +1092,91 @@ pub fn transform_jpeg_with_options(data: &[u8], options: &TransformOptions) -> R
     } else {
         Ok(output)
     }
+}
+
+fn huffman_category(value: i16) -> u8 {
+    let magnitude: u16 = value.unsigned_abs();
+    if magnitude == 0 {
+        0
+    } else {
+        (16 - magnitude.leading_zeros()) as u8
+    }
+}
+
+fn needs_optimized_baseline_huffman(coeffs: &JpegCoefficients) -> bool {
+    if coeffs.components.is_empty() {
+        return false;
+    }
+
+    let max_h: usize = coeffs
+        .components
+        .iter()
+        .map(|c| c.h_sampling as usize)
+        .max()
+        .unwrap_or(1);
+    let max_v: usize = coeffs
+        .components
+        .iter()
+        .map(|c| c.v_sampling as usize)
+        .max()
+        .unwrap_or(1);
+    let mcus_x: usize = coeffs.components[0].blocks_x / coeffs.components[0].h_sampling as usize;
+    let mcus_y: usize = coeffs.components[0].blocks_y / coeffs.components[0].v_sampling as usize;
+
+    let data_blocks_x: Vec<usize> = coeffs
+        .components
+        .iter()
+        .map(|c| (coeffs.width as usize * c.h_sampling as usize).div_ceil(max_h * 8))
+        .collect();
+    let data_blocks_y: Vec<usize> = coeffs
+        .components
+        .iter()
+        .map(|c| (coeffs.height as usize * c.v_sampling as usize).div_ceil(max_v * 8))
+        .collect();
+
+    let mut prev_dc: Vec<i16> = vec![0; coeffs.components.len()];
+    let ri: u32 = coeffs.restart_interval as u32;
+    let mut mcu_count: u32 = 0;
+
+    for mcu_y in 0..mcus_y {
+        for mcu_x in 0..mcus_x {
+            if ri > 0 && mcu_count > 0 && mcu_count.is_multiple_of(ri) {
+                prev_dc.fill(0);
+            }
+
+            for (ci, comp) in coeffs.components.iter().enumerate() {
+                for v in 0..comp.v_sampling as usize {
+                    for h in 0..comp.h_sampling as usize {
+                        let bx: usize = mcu_x * comp.h_sampling as usize + h;
+                        let by: usize = mcu_y * comp.v_sampling as usize + v;
+                        let is_dummy: bool = bx >= data_blocks_x[ci] || by >= data_blocks_y[ci];
+
+                        if is_dummy {
+                            continue;
+                        }
+
+                        let block: &[i16; 64] = &comp.blocks[by * comp.blocks_x + bx];
+                        let dc_diff: i16 = block[0].wrapping_sub(prev_dc[ci]);
+                        prev_dc[ci] = block[0];
+
+                        if huffman_category(dc_diff) > 11 {
+                            return true;
+                        }
+
+                        if block[1..]
+                            .iter()
+                            .any(|&coef| coef != 0 && huffman_category(coef) > 10)
+                        {
+                            return true;
+                        }
+                    }
+                }
+            }
+            mcu_count += 1;
+        }
+    }
+
+    false
 }
 
 /// Write DCT coefficients with optimized Huffman tables (2-pass encoding).

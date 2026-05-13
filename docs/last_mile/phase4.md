@@ -11,6 +11,7 @@
 | P4-3 | CLOSED 2026-05-12 |
 | P4-4 | CLOSED 2026-05-12 |
 | P4-5 | CLOSED 2026-05-12 |
+| P4-6 | CLOSED 2026-05-13 |
 
 ---
 
@@ -81,6 +82,20 @@
 - `cargo test --features full-c-parity --test c_tjcomptest` → passed locally.
 - Scheduled `Full C Parity` workflow verification to run on branch `fix/fuzz-smoke-progressive-smoothing` before merge.
 
+## P4-6. Transform Optimized-Huffman Fallback for Fuzzed Progressive Coefficients — **CLOSED 2026-05-13**
+
+**Status (2026-05-13): closed.** Branch-level `Fuzz Smoke` run `25768874016` found `fuzz_transform_diff_c/crash-94087f99ddf1d878d1e3ae0cdbe0a5c98515111c`: a 16x16 progressive HFlip case where `jpegtran` produced a decodable transformed JPEG but Rust's non-optimized coefficient writer emitted entropy bytes that `djpeg` rejected with extraneous bytes before EOI.
+
+**Root cause:** adversarial progressive inputs can decode into coefficient buffers whose baseline sequential entropy symbols exceed the standard Annex K Huffman table coverage. The non-optimized coefficient writer silently emitted zero-bit Huffman symbols for those out-of-range DC/AC categories, yielding an invalid JPEG. The optimized writer builds per-image Huffman tables and can encode the same coefficient buffer correctly.
+
+**Implementation:** `transform_jpeg_with_options` now detects when the baseline standard Huffman tables cannot encode a transformed progressive-source coefficient buffer and routes that case through `write_coefficients_optimized`, including restart-marker DC predictor resets, matching the existing 12-bit precision forced-optimization path while preserving byte-exact default output for existing baseline fixtures.
+
+**Verification:**
+
+- `cargo test --test regression_transform_fuzz_progressive` → passed locally.
+- `cargo test --test transform_small_image_byte_exact` → passed locally.
+- `cargo +nightly fuzz run fuzz_transform_diff_c /private/tmp/libjpeg-fuzz-transform-artifact/crash-94087f99ddf1d878d1e3ae0cdbe0a5c98515111c -- -runs=1` → passed locally.
+
 ## Phase 4 Suggested Order
 
 1. ~~**P4-1** — export `jpeg_calc_jpeg_dimensions` and delete its missing-symbol allowlist entry.~~ **CLOSED 2026-05-10**.
@@ -88,3 +103,4 @@
 3. ~~**P4-3** — pin Fuzz Smoke's differential C oracle to libjpeg-turbo 3.x.~~ **CLOSED 2026-05-12**.
 4. ~~**P4-4** — make full cjpeg parity use an MCU-aligned source.~~ **CLOSED 2026-05-12**.
 5. ~~**P4-5** — keep full cjpeg byte parity on the default integer DCT.~~ **CLOSED 2026-05-12**.
+6. ~~**P4-6** — route transform coefficient buffers beyond standard Huffman table coverage through optimized coding.~~ **CLOSED 2026-05-13**.

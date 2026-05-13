@@ -10,7 +10,7 @@
 
 ## Current Status (2026-05-09)
 
-Project is **replacement-ready** for the Rust-application + stock-tool drop-in story. System-library drop-in (Phase 2) is closed. Long-tail C-compatibility (Phase 3) is fully closed: P3-1 / P3-2 / P3-3 / P3-4 / P3-5 / P3-6 are all CLOSED. P3-2 closed 2026-05-09 with the full 12-bit `jpeg_*_raw_data` backend wired through `libjpeg_turbo_rs::raw_data_12::{compress,decompress}_raw_12`. Phase 4 currently has five closed post-gate corrections: P4-1 exported `jpeg_calc_jpeg_dimensions`; P4-2 fixed scheduled full-parity and fuzz-smoke decode regressions; P4-3 pinned Fuzz Smoke's C oracle to libjpeg-turbo 3.x; P4-4 removed platform-specific padding noise from full cjpeg parity; P4-5 removed fast-DCT byte-oracle noise from scheduled full cjpeg parity.
+Project is **replacement-ready** for the Rust-application + stock-tool drop-in story. System-library drop-in (Phase 2) is closed. Long-tail C-compatibility (Phase 3) is fully closed: P3-1 / P3-2 / P3-3 / P3-4 / P3-5 / P3-6 are all CLOSED. P3-2 closed 2026-05-09 with the full 12-bit `jpeg_*_raw_data` backend wired through `libjpeg_turbo_rs::raw_data_12::{compress,decompress}_raw_12`. Phase 4 currently has six closed post-gate corrections: P4-1 exported `jpeg_calc_jpeg_dimensions`; P4-2 fixed scheduled full-parity and fuzz-smoke decode regressions; P4-3 pinned Fuzz Smoke's C oracle to libjpeg-turbo 3.x; P4-4 removed platform-specific padding noise from full cjpeg parity; P4-5 removed fast-DCT byte-oracle noise from scheduled full cjpeg parity; P4-6 fixed transform re-encoding of fuzzed progressive coefficients that require optimized Huffman tables.
 
 **Live gate** (refresh whenever the inventory changes):
 
@@ -61,7 +61,7 @@ Each phase file is self-contained. Read only the one you need.
 | **Phase 1** | [last_mile/phase1.md](last_mile/phase1.md) | Original release gate: P0-1..4, P1 (Soft-Skip / Encode SIMD / Legacy / Precision / YUV), Phase-1 P2 (tjbench / PNG), Execution Plan (Tasks 1-7), Definition of Done. | All CLOSED — historical reference. |
 | **Phase 2** | [last_mile/phase2.md](last_mile/phase2.md) | System-library drop-in hardening: P2-1..11 (workflow flags, printf expansion, ABI cross-check, symbol inventory, install layout, fuzzing, distro consumers, progressive-encode samp411, crates.io publish). | All CLOSED. |
 | **Phase 3** | [last_mile/phase3.md](last_mile/phase3.md) | Long-tail C compatibility: P3-1 (ABI offset cross-check), P3-2 (12-bit raw-data backend), P3-3 (symbol-inventory allowlist triage), P3-4 (4-pixel chroma transform gate), P3-5 (classic lifecycle harness), P3-6 (non-standard sampling / RGB565). | All CLOSED. |
-| **Phase 4** | [last_mile/phase4.md](last_mile/phase4.md) | Post-gate corrections surfaced after Phase 3: P4-1..P4-5. | All CLOSED. |
+| **Phase 4** | [last_mile/phase4.md](last_mile/phase4.md) | Post-gate corrections surfaced after Phase 3: P4-1..P4-6. | All CLOSED. |
 | **Reference** | [last_mile/reference_commands.md](last_mile/reference_commands.md) | Common verification commands (workspace test, stock-tool build, encode bench matrix, etc.). | — |
 
 ---
