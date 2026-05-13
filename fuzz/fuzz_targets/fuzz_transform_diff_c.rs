@@ -52,8 +52,8 @@ fn tool_path(names: &[&str]) -> Option<PathBuf> {
         for prefix in [
             "/opt/homebrew/bin/",
             "/usr/local/bin/",
-            "/usr/bin/",
             "/opt/libjpeg-turbo/bin/",
+            "/usr/bin/",
         ] {
             let pb = PathBuf::from(format!("{}{}", prefix, name));
             if pb.exists() {
