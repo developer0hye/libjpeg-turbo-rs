@@ -708,4 +708,48 @@ mod tests {
             assert_eq!(cr_neon, cr_scalar, "Cr mismatch for rgb=({r},{g},{b})");
         }
     }
+
+    /// Regression for the `vld3q_u8` memcpy-lowered overread observed by
+    /// `fuzz_encode_diff_c` crash artifact
+    /// `crash-41d1713b64753937436c8e5a9c4b65cbf4016245` (2026-05-16):
+    /// the compiler may lower the 48-byte LD3 to a memcpy(64) into a stack
+    /// temp, and at the tail end of a width-aligned input slice that
+    /// memcpy reads up to 16 bytes past the slice end (heap-buffer-overflow
+    /// under AddressSanitizer). Test exact width boundaries where this
+    /// would trip: 16, 24, 32, 48, 64, 80 pixels (each = exact multiple
+    /// of an LD3 chunk size). The input slice is sized to `width * bpp`
+    /// exactly, with no trailing padding — same shape as the encode
+    /// pipeline's per-row slice.
+    #[test]
+    fn neon_rgb_to_ycbcr_no_tail_overread_at_boundary_widths() {
+        for width in [16usize, 24, 32, 48, 64, 80, 96, 112, 128] {
+            let rgb: Vec<u8> = (0..width * 3).map(|i| (i % 256) as u8).collect();
+            assert_eq!(rgb.len(), width * 3);
+            let mut y_neon: Vec<u8> = vec![0u8; width];
+            let mut cb_neon: Vec<u8> = vec![0u8; width];
+            let mut cr_neon: Vec<u8> = vec![0u8; width];
+            let mut y_scalar: Vec<u8> = vec![0u8; width];
+            let mut cb_scalar: Vec<u8> = vec![0u8; width];
+            let mut cr_scalar: Vec<u8> = vec![0u8; width];
+
+            color_encode::neon_rgb_to_ycbcr_row(
+                &rgb,
+                &mut y_neon,
+                &mut cb_neon,
+                &mut cr_neon,
+                width,
+            );
+            crate::encode::color::rgb_to_ycbcr_row(
+                &rgb,
+                &mut y_scalar,
+                &mut cb_scalar,
+                &mut cr_scalar,
+                width,
+            );
+
+            assert_eq!(y_neon, y_scalar, "Y mismatch at width={width}");
+            assert_eq!(cb_neon, cb_scalar, "Cb mismatch at width={width}");
+            assert_eq!(cr_neon, cr_scalar, "Cr mismatch at width={width}");
+        }
+    }
 }
