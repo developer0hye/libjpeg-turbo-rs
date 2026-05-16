@@ -12,6 +12,7 @@
 | P4-4 | CLOSED 2026-05-12 |
 | P4-5 | CLOSED 2026-05-12 |
 | P4-6 | CLOSED 2026-05-13 |
+| P4-7 | CLOSED 2026-05-16 |
 
 ---
 
@@ -96,6 +97,21 @@
 - `cargo test --test transform_small_image_byte_exact` → passed locally.
 - `cargo +nightly fuzz run fuzz_transform_diff_c /private/tmp/libjpeg-fuzz-transform-artifact/crash-94087f99ddf1d878d1e3ae0cdbe0a5c98515111c -- -runs=1` → passed locally.
 
+## P4-7. Block Smoothing All-or-Nothing Component Gate — **CLOSED 2026-05-16**
+
+**Status (2026-05-16): closed.** Scheduled `Fuzz Smoke` run [25900537973](https://github.com/developer0hye/libjpeg-turbo-rs/actions/runs/25900537973) (commit `1a33459a`) failed in `fuzz_decode_diff_c` on a 16x16 progressive 4:4:4 fixture (`crash-3eb4d5af274a456162b42f9a41700a07e57e0b46`, 488 bytes) with `max abs diff = 40` against the 24-byte tolerance. C `djpeg` produced uniform `[177, 133, 148]` while Rust produced a monotonically decreasing AC[1] gradient — Rust silently applied block smoothing where C disabled it.
+
+**Root cause:** `src/decode/pipeline.rs::decode_progressive_planes` evaluated `smoothing_ok_for_component` per component and dispatched `apply_block_smoothing_coeffs` only for components that passed. C `decompress_smooth_data` (jdcoefct.c) treats `smoothing_ok` as an image-wide predicate — `start_output_pass` picks a single dispatch function for the whole image, so if any component's smoothing quant prerequisites fail (`qtable->quantval[Q02_POS]` etc. zero), C disables smoothing across all components and falls back to plain `decompress_data`. The crash fixture's Cb chroma table had `Q02 = Q03 = Q12 = Q21 = Q30 = 0`; C disabled smoothing on every plane, Rust only on Cb. Y and Cr therefore picked up phantom AC[1]/AC[10]/etc. predictions from neighbor DC values, yielding the gradient.
+
+**Implementation:** rewrote the smoothing dispatch loop in `src/decode/pipeline.rs::decode_progressive_planes` to fold the per-component `smoothing_ok_for_component` results into a single `all_components_ok` predicate before any call to `apply_block_smoothing_coeffs`. Smoothing now runs on every component or none, matching `start_output_pass` semantics. Trace built from `references/libjpeg-turbo` (later restored) confirmed C's `smoothing_ok` returned 0 specifically because of the Cb zero-quant pattern.
+
+**Verification:**
+
+- `cargo test --test cross_check_fuzz_decode_diff_c_progressive_16x16 -- --nocapture` → `max_diff=0` byte-exact vs djpeg (pre-fix `max_diff=40`).
+- `cargo test --test cross_check_progressive_scans` → 7 passed, 0 failed.
+- `cargo test --lib` → 185 passed, 0 failed.
+- Persisted seed at `fuzz/corpus/fuzz_decode_diff_c/regression-ci-25900537973-progressive-16x16-444` so `tests/generate_fuzz_seeds.rs` preserves the fixture across regenerations.
+
 ## Phase 4 Suggested Order
 
 1. ~~**P4-1** — export `jpeg_calc_jpeg_dimensions` and delete its missing-symbol allowlist entry.~~ **CLOSED 2026-05-10**.
@@ -104,3 +120,4 @@
 4. ~~**P4-4** — make full cjpeg parity use an MCU-aligned source.~~ **CLOSED 2026-05-12**.
 5. ~~**P4-5** — keep full cjpeg byte parity on the default integer DCT.~~ **CLOSED 2026-05-12**.
 6. ~~**P4-6** — route transform coefficient buffers beyond standard Huffman table coverage through optimized coding.~~ **CLOSED 2026-05-13**.
+7. ~~**P4-7** — gate block smoothing on every component passing `smoothing_ok_for_component`, mirroring C's all-or-nothing `start_output_pass` dispatch.~~ **CLOSED 2026-05-16**.
