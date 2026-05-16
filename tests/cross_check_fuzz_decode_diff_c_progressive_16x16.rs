@@ -149,8 +149,12 @@ fn fuzz_decode_diff_c_progressive_16x16_4_4_4_matches_djpeg() {
         return;
     };
 
+    // Match the fuzz harness exactly: lenient mode + block_smoothing(true).
+    // The harness enables block_smoothing to mirror djpeg's default behavior
+    // for truncated progressive DC-only streams (PR #284, commit 24f8069).
     let mut decoder = Decoder::new(FUZZ_CRASH_BYTES).expect("rust decoder rejected fuzz input");
     decoder.set_lenient(true);
+    decoder.set_block_smoothing(true);
     let img = decoder.decode_image().expect("rust decode_image failed");
 
     assert_eq!(

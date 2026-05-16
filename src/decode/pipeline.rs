@@ -2185,17 +2185,29 @@ impl<'a> Decoder<'a> {
         // Apply coefficient-level block smoothing before IDCT (if requested).
         // This matches C libjpeg-turbo's decompress_smooth_data() approach:
         // smooth the DCT coefficients, then run IDCT on the smoothed coefficients.
+        //
+        // C's `smoothing_ok` (jdcoefct.c) is an image-wide decision: if any
+        // component fails the "DC seen + first 10 quants nonzero" predicate,
+        // smoothing is disabled for *all* components. A fuzz fixture from
+        // CI run 25900537973 (P4-2) embedded a chroma quant table whose
+        // Q02/Q03/Q12/Q21/Q30 entries were zero — C disabled smoothing
+        // across all three components, but a per-component dispatch would
+        // still smooth Y and Cr, producing a phantom AC[1] gradient that
+        // diverges from djpeg by up to ±40 per byte. Mirror the C
+        // semantics: check every component, smooth only if *all* pass.
         if block_smoothing {
             let coef_bits_all: Vec<[i32; 10]> =
                 crate::decode::toggles::compute_coef_bits(&self.metadata.scans, frame);
-            for (comp_idx, ci) in comp_infos.iter().enumerate() {
-                let cb: &[i32; 10] = &coef_bits_all[comp_idx];
-                if crate::decode::toggles::smoothing_ok_for_component(cb, quant_tables[comp_idx]) {
+            let all_components_ok = coef_bits_all.iter().enumerate().all(|(comp_idx, cb)| {
+                crate::decode::toggles::smoothing_ok_for_component(cb, quant_tables[comp_idx])
+            });
+            if all_components_ok {
+                for (comp_idx, ci) in comp_infos.iter().enumerate() {
                     crate::decode::toggles::apply_block_smoothing_coeffs(
                         &mut coeff_bufs[comp_idx],
                         ci.blocks_x,
                         ci.blocks_y,
-                        cb,
+                        &coef_bits_all[comp_idx],
                         quant_tables[comp_idx],
                     );
                 }
