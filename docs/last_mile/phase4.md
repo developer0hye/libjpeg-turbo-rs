@@ -13,6 +13,7 @@
 | P4-5 | CLOSED 2026-05-12 |
 | P4-6 | CLOSED 2026-05-13 |
 | P4-7 | CLOSED 2026-05-16 |
+| P4-8 | CLOSED 2026-05-16 |
 
 ---
 
@@ -112,6 +113,20 @@
 - `cargo test --lib` → 185 passed, 0 failed.
 - Persisted seed at `fuzz/corpus/fuzz_decode_diff_c/regression-ci-25900537973-progressive-16x16-444` so `tests/generate_fuzz_seeds.rs` preserves the fixture across regenerations.
 
+## P4-8. NEON Encode LD3 Memcpy Overread on Tight Tails — **CLOSED 2026-05-16**
+
+**Status (2026-05-16): closed.** Local Fuzz Smoke (2026-05-16) on `fuzz_encode_diff_c` aborted under AddressSanitizer with a `heap-buffer-overflow` of size 64 bytes inside `__asan_memcpy` invoked from `crate::simd::aarch64::color_encode::neon_rgb_to_ycbcr_row`. Crash artifact: `crash-41d1713b64753937436c8e5a9c4b65cbf4016245` (3076 bytes, 32x32 RGB encoded at quality 75, S444). Stack: `compress` → `neon_rgb_to_ycbcr_row+0x1c8` → `__asan_memcpy+0x330`.
+
+**Root cause:** the Apple aarch64 backend lowers `vld3q_u8(ptr)` to `memcpy(stack_tmp, ptr, 64)` followed by an aligned LD3 from the stack temporary, even though the LD3 instruction itself reads 48 bytes. When the iteration's `ptr` sits at the very tail of a tightly-sized `pixels.len() == width * bpp` slice, the wider memcpy reads up to 16 bytes past the slice end. The 8-pixel half-width path has the same shape (`vld3_u8` 24 bytes → memcpy(32)). Non-ASan builds discard the over-read after the LD3, but the sanitizer redzone correctly flags it.
+
+**Implementation:** added per-chunk source-length guards in `src/simd/aarch64/color_encode.rs`'s `neon_pixel_to_ycbcr_fn!` macro: the 16-pixel SIMD chunk now requires `offset * bpp + 64 <= pixels.len()`, the 8-pixel chunk requires `offset * bpp + 32 <= pixels.len()`. Anything either loop leaves behind falls through to the existing scalar tail. All four NEON variants (`rgb`, `rgba`, `bgr`, `bgra`) inherit the fix automatically through the macro. Pinned by `simd::aarch64::tests::neon_rgb_to_ycbcr_no_tail_overread_at_boundary_widths` (widths 16/24/32/48/64/80/96/112/128) and persisted in the fuzz corpus at `fuzz/corpus/fuzz_encode_diff_c/regression-encode-asan-neon-vld3-overread-2026-05-16`.
+
+**Verification:**
+
+- `cargo test --lib simd::aarch64::tests::neon_rgb_to_ycbcr_no_tail_overread_at_boundary_widths` → passed.
+- `cargo +nightly fuzz run fuzz_encode_diff_c fuzz/artifacts/fuzz_encode_diff_c/crash-41d1713b64753937436c8e5a9c4b65cbf4016245 -- -runs=1` → clean (pre-fix: SIGABRT from `__asan_memcpy`).
+- `cargo +nightly fuzz run fuzz_encode_diff_c -- -max_total_time=120` → 73 397 executions, 0 crashes.
+
 ## Phase 4 Suggested Order
 
 1. ~~**P4-1** — export `jpeg_calc_jpeg_dimensions` and delete its missing-symbol allowlist entry.~~ **CLOSED 2026-05-10**.
@@ -121,3 +136,4 @@
 5. ~~**P4-5** — keep full cjpeg byte parity on the default integer DCT.~~ **CLOSED 2026-05-12**.
 6. ~~**P4-6** — route transform coefficient buffers beyond standard Huffman table coverage through optimized coding.~~ **CLOSED 2026-05-13**.
 7. ~~**P4-7** — split block smoothing's gate into per-component prerequisites (AND-folded) and image-wide usefulness (OR-folded) to match C's `smoothing_ok` semantics.~~ **CLOSED 2026-05-16**.
+8. ~~**P4-8** — bound NEON encode LD3/LD3-half chunks to leave the compiler's wider implicit memcpy lowering inside the source slice, fixing the ASan over-read on tightly-sized rows.~~ **CLOSED 2026-05-16**.
