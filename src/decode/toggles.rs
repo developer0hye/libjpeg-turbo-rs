@@ -106,18 +106,29 @@ pub fn compute_coef_bits(
     result
 }
 
-/// Check if block smoothing should be applied for a given component.
+/// Check the per-component prerequisites C's `smoothing_ok()` requires before
+/// any plane is smoothed.
 ///
-/// Returns `true` if smoothing is useful (some AC coefficients are imprecise)
-/// and the required quantization table entries are nonzero.
-/// Matches C's `smoothing_ok()` logic.
-pub fn smoothing_ok_for_component(coef_bits: &[i32; SAVED_COEFS], quant: &QuantTable) -> bool {
-    // DC values must be at least partly known
+/// C iterates over every component and returns `FALSE` for the entire image
+/// as soon as one fails these checks:
+///   - quantization table is allocated (we assume non-null in Rust);
+///   - first 10 zigzag quant entries are nonzero (avoids `(Q << 7) / (Q << 8)`
+///     dividing by zero in the prediction formula);
+///   - DC has been seen at least once (`coef_bits[0] >= 0`).
+///
+/// Note that C's `smoothing_useful` flag (any `coef_bits[1..9] != 0`) is
+/// **OR-folded across all components**, not per-component, so it is evaluated
+/// at the call site rather than here.
+pub fn smoothing_prerequisites_ok_for_component(
+    coef_bits: &[i32; SAVED_COEFS],
+    quant: &QuantTable,
+) -> bool {
+    // DC values must be at least partly known.
     if coef_bits[0] < 0 {
         return false;
     }
 
-    // Verify DC & first 9 AC quantizers are nonzero to avoid zero-divide
+    // Verify DC & first 9 AC quantizers are nonzero to avoid zero-divide.
     if quant.values[Q00_POS] == 0
         || quant.values[Q01_POS] == 0
         || quant.values[Q10_POS] == 0
@@ -132,7 +143,17 @@ pub fn smoothing_ok_for_component(coef_bits: &[i32; SAVED_COEFS], quant: &QuantT
         return false;
     }
 
-    // Block smoothing is useful if some AC coefficients remain inaccurate
+    true
+}
+
+/// Returns true if smoothing has anything to predict for this component,
+/// i.e. at least one of `coef_bits[1..SAVED_COEFS]` is nonzero (either
+/// `-1` for "never seen" or a positive Al for "partially refined").
+///
+/// C OR-folds this across all components into a single image-wide
+/// `smoothing_useful` flag — see the call site in
+/// `decode_progressive_planes`.
+pub fn smoothing_useful_for_component(coef_bits: &[i32; SAVED_COEFS]) -> bool {
     coef_bits
         .iter()
         .skip(1)
