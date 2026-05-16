@@ -115,8 +115,25 @@ macro_rules! neon_pixel_to_ycbcr_fn {
             let mut offset: usize = 0;
             let mut remaining: usize = width;
 
+            // The compiler lowers `vld3q_u8(ptr)` to a memcpy(64) of the
+            // backing source bytes into a stack temp followed by LD3 from
+            // that temp (`vld3_u8(ptr)` similarly lowers to memcpy(32) +
+            // LD3 of size 24). When the iteration's `ptr` sits at the
+            // tail of the input slice, the wider memcpy reads up to 16
+            // bytes (or 8 for the half-width variant) past the slice end
+            // and AddressSanitizer flags it as a heap-buffer-overflow —
+            // observed on the `fuzz_encode_diff_c` crash artifact
+            // `crash-41d1713b64753937436c8e5a9c4b65cbf4016245` (32x32 RGB
+            // S444, captured by 2026-05-16 local Fuzz Smoke).
+            //
+            // Gate every SIMD lane on having the full 64-byte (or 32-byte)
+            // trailing window available in `pixels`. Whatever the loops
+            // leave behind falls through to the scalar tail, which uses
+            // ordinary byte reads and is bounds-safe.
+            let len_bytes: usize = pixels.len();
+
             // Main loop: 16 pixels
-            while remaining >= 16 {
+            while remaining >= 16 && offset * $bpp + 64 <= len_bytes {
                 let ($r16, $g16, $b16) = {
                     let $src_ptr = src_ptr;
                     let $off = offset;
@@ -164,8 +181,11 @@ macro_rules! neon_pixel_to_ycbcr_fn {
                 remaining -= 16;
             }
 
-            // 8-pixel chunk
-            if remaining >= 8 {
+            // 8-pixel chunk (same memcpy-vs-LD3 size gap concern as the
+            // 16-pixel loop above — vld3_u8 reads 24 bytes but the
+            // compiler may lower it to memcpy(32) + LD3, so reserve a
+            // trailing 32-byte window in `pixels`).
+            if remaining >= 8 && offset * $bpp + 32 <= len_bytes {
                 let ($r8, $g8, $b8) = {
                     let $src_ptr8 = src_ptr;
                     let $off8 = offset;

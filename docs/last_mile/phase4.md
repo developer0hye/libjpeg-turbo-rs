@@ -12,6 +12,8 @@
 | P4-4 | CLOSED 2026-05-12 |
 | P4-5 | CLOSED 2026-05-12 |
 | P4-6 | CLOSED 2026-05-13 |
+| P4-7 | CLOSED 2026-05-16 |
+| P4-8 | CLOSED 2026-05-16 |
 
 ---
 
@@ -96,6 +98,35 @@
 - `cargo test --test transform_small_image_byte_exact` → passed locally.
 - `cargo +nightly fuzz run fuzz_transform_diff_c /private/tmp/libjpeg-fuzz-transform-artifact/crash-94087f99ddf1d878d1e3ae0cdbe0a5c98515111c -- -runs=1` → passed locally.
 
+## P4-7. Block Smoothing All-or-Nothing Component Gate — **CLOSED 2026-05-16**
+
+**Status (2026-05-16): closed.** Scheduled `Fuzz Smoke` run [25900537973](https://github.com/developer0hye/libjpeg-turbo-rs/actions/runs/25900537973) (commit `1a33459a`) failed in `fuzz_decode_diff_c` on a 16x16 progressive 4:4:4 fixture (`crash-3eb4d5af274a456162b42f9a41700a07e57e0b46`, 488 bytes) with `max abs diff = 40` against the 24-byte tolerance. C `djpeg` produced uniform `[177, 133, 148]` while Rust produced a monotonically decreasing AC[1] gradient — Rust silently applied block smoothing where C disabled it.
+
+**Root cause:** `src/decode/pipeline.rs::decode_progressive_planes` evaluated a single bundled `smoothing_ok_for_component` predicate per component and dispatched `apply_block_smoothing_coeffs` only for the ones that passed. C `decompress_smooth_data` (jdcoefct.c) treats `smoothing_ok` as image-wide and folds **two distinct conditions**: (1) every component must pass per-component prerequisites — `qtable->quantval[Q00..Q30]` all nonzero, `coef_bits[0] >= 0` — and (2) at least one component must have an unresolved low-frequency AC bit (`coef_bits[1..9] != 0`). Failure on (1) for ANY component disables smoothing image-wide; usefulness (2) is OR-folded across components. The crash fixture's Cb chroma table had `Q02 = Q03 = Q12 = Q21 = Q30 = 0`; C disabled smoothing on every plane, Rust only on Cb. Y and Cr therefore picked up phantom AC[1]/AC[10]/etc. predictions from neighbor DC values, yielding the gradient.
+
+**Implementation:** split the bundled `smoothing_ok_for_component` into `smoothing_prerequisites_ok_for_component` (per-component DC + quant nonzero) and `smoothing_useful_for_component` (`coef_bits[1..9] != 0`). The dispatch loop in `decode_progressive_planes` now ANDs prerequisites across all components and ORs usefulness across all components before calling `apply_block_smoothing_coeffs`, matching C's `smoothing_ok` semantics exactly. Trace built from `references/libjpeg-turbo` (later restored) confirmed C's `smoothing_ok` returned 0 specifically because of the Cb zero-quant pattern.
+
+**Verification:**
+
+- `cargo test --test cross_check_fuzz_decode_diff_c_progressive_16x16 -- --nocapture` → `max_diff=0` byte-exact vs djpeg (pre-fix `max_diff=40`).
+- `cargo test --test cross_check_progressive_scans` → 7 passed, 0 failed.
+- `cargo test --lib` → 185 passed, 0 failed.
+- Persisted seed at `fuzz/corpus/fuzz_decode_diff_c/regression-ci-25900537973-progressive-16x16-444` so `tests/generate_fuzz_seeds.rs` preserves the fixture across regenerations.
+
+## P4-8. NEON Encode LD3 Memcpy Overread on Tight Tails — **CLOSED 2026-05-16**
+
+**Status (2026-05-16): closed.** Local Fuzz Smoke (2026-05-16) on `fuzz_encode_diff_c` aborted under AddressSanitizer with a `heap-buffer-overflow` of size 64 bytes inside `__asan_memcpy` invoked from `crate::simd::aarch64::color_encode::neon_rgb_to_ycbcr_row`. Crash artifact: `crash-41d1713b64753937436c8e5a9c4b65cbf4016245` (3076 bytes, 32x32 RGB encoded at quality 75, S444). Stack: `compress` → `neon_rgb_to_ycbcr_row+0x1c8` → `__asan_memcpy+0x330`.
+
+**Root cause:** the Apple aarch64 backend lowers `vld3q_u8(ptr)` to `memcpy(stack_tmp, ptr, 64)` followed by an aligned LD3 from the stack temporary, even though the LD3 instruction itself reads 48 bytes. When the iteration's `ptr` sits at the very tail of a tightly-sized `pixels.len() == width * bpp` slice, the wider memcpy reads up to 16 bytes past the slice end. The 8-pixel half-width path has the same shape (`vld3_u8` 24 bytes → memcpy(32)). Non-ASan builds discard the over-read after the LD3, but the sanitizer redzone correctly flags it.
+
+**Implementation:** added per-chunk source-length guards in `src/simd/aarch64/color_encode.rs`'s `neon_pixel_to_ycbcr_fn!` macro: the 16-pixel SIMD chunk now requires `offset * bpp + 64 <= pixels.len()`, the 8-pixel chunk requires `offset * bpp + 32 <= pixels.len()`. Anything either loop leaves behind falls through to the existing scalar tail. All four NEON variants (`rgb`, `rgba`, `bgr`, `bgra`) inherit the fix automatically through the macro. Pinned by `simd::aarch64::tests::neon_rgb_to_ycbcr_no_tail_overread_at_boundary_widths` (widths 16/24/32/48/64/80/96/112/128) and persisted in the fuzz corpus at `fuzz/corpus/fuzz_encode_diff_c/regression-encode-asan-neon-vld3-overread-2026-05-16`.
+
+**Verification:**
+
+- `cargo test --lib simd::aarch64::tests::neon_rgb_to_ycbcr_no_tail_overread_at_boundary_widths` → passed.
+- `cargo +nightly fuzz run fuzz_encode_diff_c fuzz/artifacts/fuzz_encode_diff_c/crash-41d1713b64753937436c8e5a9c4b65cbf4016245 -- -runs=1` → clean (pre-fix: SIGABRT from `__asan_memcpy`).
+- `cargo +nightly fuzz run fuzz_encode_diff_c -- -max_total_time=120` → 73 397 executions, 0 crashes.
+
 ## Phase 4 Suggested Order
 
 1. ~~**P4-1** — export `jpeg_calc_jpeg_dimensions` and delete its missing-symbol allowlist entry.~~ **CLOSED 2026-05-10**.
@@ -104,3 +135,5 @@
 4. ~~**P4-4** — make full cjpeg parity use an MCU-aligned source.~~ **CLOSED 2026-05-12**.
 5. ~~**P4-5** — keep full cjpeg byte parity on the default integer DCT.~~ **CLOSED 2026-05-12**.
 6. ~~**P4-6** — route transform coefficient buffers beyond standard Huffman table coverage through optimized coding.~~ **CLOSED 2026-05-13**.
+7. ~~**P4-7** — split block smoothing's gate into per-component prerequisites (AND-folded) and image-wide usefulness (OR-folded) to match C's `smoothing_ok` semantics.~~ **CLOSED 2026-05-16**.
+8. ~~**P4-8** — bound NEON encode LD3/LD3-half chunks to leave the compiler's wider implicit memcpy lowering inside the source slice, fixing the ASan over-read on tightly-sized rows.~~ **CLOSED 2026-05-16**.
