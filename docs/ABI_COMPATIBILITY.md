@@ -105,12 +105,16 @@ For the full enumeration of v6b → v7 → v8 differences, see the `#if JPEG_LIB
 
 Symmetric to the decompress side — refer to `crates/libjpeg-turbo-rs-capi/src/jpeglib.rs` and `references/libjpeg-turbo/src/jpeglib.h:300+` for the per-version field list.
 
-## Roadmap (not blocking P2-9 closure)
+## Roadmap — T4 (v6b/v7 drop-in) is tracked as P2-A
 
-If a Phase 3 demands real v6b drop-in, the path is:
+T4 ("System v6b/v7 drop-in") is an explicit non-goal under the current
+default. The only honest path to closing it is the per-ABI cdylib
+matrix tracked as **P2-A** in the master plan
+(`/Users/yhkwon/.claude/plans/dreamy-moseying-swing.md`). When triggered
+the work is:
 
 1. Add a `CAPI_LIB_VERSION = 62 | 70 | 80` cfg gate.
-2. Generate per-version `JpegDecompressPublic` / `JpegCompressPublic` types with conditional fields.
+2. Generate per-version `JpegDecompressPublic` / `JpegCompressPublic` types with conditional fields (likely via `bindgen` or a small build-time code-gen step — hand-maintaining three ~200-field mirrors is known-fragile).
 3. Pin per-version offset assertions for each.
 4. Build per-version cdylibs (`libjpeg.so.62.cdylib`, `libjpeg.so.7.cdylib`, `libjpeg.so.8.cdylib`).
 5. Add a CI matrix entry per version.
