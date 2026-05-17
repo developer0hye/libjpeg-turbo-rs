@@ -64,13 +64,15 @@ pub(crate) fn libc_from_slice(data: &[u8]) -> *mut u8 {
 /// buffer that can be released with `tj3Free` or `free`.
 #[no_mangle]
 pub extern "C" fn tj3Alloc(bytes: usize) -> *mut c_void {
-    libc_malloc(bytes) as *mut c_void
+    crate::unwind_guard!(std::ptr::null_mut(), { libc_malloc(bytes) as *mut c_void })
 }
 
 /// `tj3Free(ptr)` — libjpeg-turbo-compatible deallocator. NULL is a no-op.
 #[no_mangle]
 pub extern "C" fn tj3Free(ptr: *mut c_void) {
-    libc_free(ptr as *mut u8);
+    crate::unwind_guard!((), {
+        libc_free(ptr as *mut u8);
+    })
 }
 
 /// Silence "unused" warnings on `c_int` without forcing a re-export.

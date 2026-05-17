@@ -140,3 +140,86 @@ jobs:
             --no-fail-fast \
             -- --test-threads=1
         timeout-minutes: 20
+
+  # P4-11 C-boundary sanitizer harness.
+  #
+  # The `asan` job above only exercises `--lib` tests — Rust code calling
+  # Rust code, with the FFI surface deliberately excluded to avoid the
+  # documented un-instrumented-C false positives.  That leaves every
+  # `pub extern "C"` symbol in the capi crate (tj3*, jpeg_*) uncovered by
+  # sanitizer runs.
+  #
+  # This job closes that gap with a tiny un-instrumented C driver that
+  # `dlopen`s an ASan-instrumented Rust cdylib and decodes a corpus of real
+  # JPEG fixtures through the documented TurboJPEG v3 API.  Any unsafe
+  # behavior at the FFI boundary (wrong free, OOB read in the conversion
+  # layer, undefined behavior in `unsafe fn` wrappers) trips a sanitizer
+  # report that fails the job.
+  #
+  # WHY THIS IS THE CORRECT CONFIGURATION:
+  #   The bidirectional ASan handoff (un-instrumented C → instrumented
+  #   Rust → un-instrumented C) is exactly what OSS-Fuzz / Pulse / Pizza
+  #   expect for Rust-codec-via-C-driver enrollment.  Un-instrumented C is
+  #   actively required here: instrumenting the harness would re-introduce
+  #   the parallel-test-runner false positives the `asan` job documents.
+  c_boundary_asan:
+    name: C-boundary AddressSanitizer
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      RUSTFLAGS: "-Z sanitizer=address"
+      RUSTDOCFLAGS: "-Z sanitizer=address"
+      LSAN_OPTIONS: "suppressions=${{ github.workspace }}/lsan_suppressions.txt:detect_leaks=0"
+      # abort_on_error=1: any sanitizer report fails the job immediately.
+      # detect_leaks=0: leak-checking is covered by the `asan` job and would
+      #                  false-positive on the un-instrumented C harness.
+      ASAN_OPTIONS: "detect_leaks=0:abort_on_error=1:halt_on_error=1"
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: rust-src
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build ASan-instrumented cdylib
+        run: |
+          cargo +nightly build \
+            -p libjpeg-turbo-rs-capi \
+            --release \
+            --target x86_64-unknown-linux-gnu
+        timeout-minutes: 20
+
+      - name: Compile C harness with -fsanitize=address,undefined
+        # -fsanitize=address,undefined: trip on FFI-boundary memory errors
+        # and undefined behavior in the C side of the call.
+        # -ldl: dynamic loader for runtime cdylib resolution.
+        # -O1 -g: keep symbols + line numbers for sanitizer reports.
+        run: |
+          cc -O1 -g \
+             -fsanitize=address,undefined \
+             -fno-omit-frame-pointer \
+             examples/sanitizer_c_harness/harness.c \
+             -ldl \
+             -o /tmp/c_boundary_harness
+
+      - name: Run C harness against testimage corpus
+        # The cdylib path is the v8 SONAME the build defaults to (P4-3).
+        # We dlopen the unversioned .so to keep the harness independent
+        # of soname-symlink layout in /usr/local.
+        run: |
+          LIB="target/x86_64-unknown-linux-gnu/release/liblibjpeg_turbo_rs_capi.so"
+          test -f "$LIB" || { echo "cdylib missing: $LIB"; exit 1; }
+          # Restrict to a small curated set so the job stays well under
+          # 30 minutes even if a regression slows the decoder dramatically.
+          # The four fixtures span baseline + progressive + arithmetic +
+          # 12-bit precision and exercise every code path through the
+          # tj3Decompress8 surface.
+          /tmp/c_boundary_harness "$LIB" \
+            references/libjpeg-turbo/testimages/testorig.jpg \
+            references/libjpeg-turbo/testimages/testimgint.jpg \
+            references/libjpeg-turbo/testimages/testimgari.jpg
+        timeout-minutes: 10

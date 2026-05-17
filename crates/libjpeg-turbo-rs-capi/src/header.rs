@@ -30,38 +30,40 @@ pub extern "C" fn tj3DecompressHeader(
     jpeg_buf: *const u8,
     jpeg_size: usize,
 ) -> c_int {
-    let inst = match unsafe { handle_as_mut(handle) } {
-        Some(i) => i,
-        None => return -1,
-    };
+    crate::unwind_guard!(-1, {
+        let inst = match unsafe { handle_as_mut(handle) } {
+            Some(i) => i,
+            None => return -1,
+        };
 
-    if jpeg_buf.is_null() || jpeg_size < 2 {
-        inst.set_error(
-            "tj3DecompressHeader: NULL jpegBuf or jpegSize < 2",
-            TJERR_FATAL,
-        );
-        return -1;
-    }
-
-    // SAFETY: caller guarantees `jpeg_buf` is valid for `jpeg_size` bytes.
-    let jpeg: &[u8] = unsafe { std::slice::from_raw_parts(jpeg_buf, jpeg_size) };
-
-    // Header-only path: must report ORIGINAL dimensions (ignoring any
-    // `tj3SetScalingFactor`), per the libjpeg-turbo contract that
-    // `TJPARAM_JPEGWIDTH`/`TJPARAM_JPEGHEIGHT` reflect the raw JPEG
-    // frame size. `decompress_header` applies scaling factor 1:1
-    // internally, restoring the caller's scaling factor for subsequent
-    // `tj3Decompress*` calls.
-    match inst.inner.decompress_header(jpeg) {
-        Ok(()) => {
-            inst.clear_error();
-            0
+        if jpeg_buf.is_null() || jpeg_size < 2 {
+            inst.set_error(
+                "tj3DecompressHeader: NULL jpegBuf or jpegSize < 2",
+                TJERR_FATAL,
+            );
+            return -1;
         }
-        Err(e) => {
-            inst.set_error(format!("tj3DecompressHeader: {e}"), TJERR_FATAL);
-            -1
+
+        // SAFETY: caller guarantees `jpeg_buf` is valid for `jpeg_size` bytes.
+        let jpeg: &[u8] = unsafe { std::slice::from_raw_parts(jpeg_buf, jpeg_size) };
+
+        // Header-only path: must report ORIGINAL dimensions (ignoring any
+        // `tj3SetScalingFactor`), per the libjpeg-turbo contract that
+        // `TJPARAM_JPEGWIDTH`/`TJPARAM_JPEGHEIGHT` reflect the raw JPEG
+        // frame size. `decompress_header` applies scaling factor 1:1
+        // internally, restoring the caller's scaling factor for subsequent
+        // `tj3Decompress*` calls.
+        match inst.inner.decompress_header(jpeg) {
+            Ok(()) => {
+                inst.clear_error();
+                0
+            }
+            Err(e) => {
+                inst.set_error(format!("tj3DecompressHeader: {e}"), TJERR_FATAL);
+                -1
+            }
         }
-    }
+    })
 }
 
 /// C-layout mirror of `tjscalingfactor` for passing by value from C.
@@ -85,72 +87,76 @@ pub struct TjRegion {
 /// `tj3SetScalingFactor(handle, factor) -> int`.
 #[no_mangle]
 pub extern "C" fn tj3SetScalingFactor(handle: *mut c_void, factor: TjScalingFactor) -> c_int {
-    let inst = match unsafe { handle_as_mut(handle) } {
-        Some(i) => i,
-        None => return -1,
-    };
+    crate::unwind_guard!(-1, {
+        let inst = match unsafe { handle_as_mut(handle) } {
+            Some(i) => i,
+            None => return -1,
+        };
 
-    if factor.num <= 0 || factor.denom <= 0 {
-        inst.set_error(
-            format!(
-                "tj3SetScalingFactor: non-positive ratio {}/{}",
-                factor.num, factor.denom
-            ),
-            TJERR_FATAL,
-        );
-        return -1;
-    }
+        if factor.num <= 0 || factor.denom <= 0 {
+            inst.set_error(
+                format!(
+                    "tj3SetScalingFactor: non-positive ratio {}/{}",
+                    factor.num, factor.denom
+                ),
+                TJERR_FATAL,
+            );
+            return -1;
+        }
 
-    match inst
-        .inner
-        .set_scaling_factor(factor.num as u32, factor.denom as u32)
-    {
-        Ok(()) => {
-            inst.clear_error();
-            0
+        match inst
+            .inner
+            .set_scaling_factor(factor.num as u32, factor.denom as u32)
+        {
+            Ok(()) => {
+                inst.clear_error();
+                0
+            }
+            Err(e) => {
+                inst.set_error(format!("tj3SetScalingFactor: {e}"), TJERR_FATAL);
+                -1
+            }
         }
-        Err(e) => {
-            inst.set_error(format!("tj3SetScalingFactor: {e}"), TJERR_FATAL);
-            -1
-        }
-    }
+    })
 }
 
 /// `tj3SetCroppingRegion(handle, region) -> int`.
 #[no_mangle]
 pub extern "C" fn tj3SetCroppingRegion(handle: *mut c_void, region: TjRegion) -> c_int {
-    let inst = match unsafe { handle_as_mut(handle) } {
-        Some(i) => i,
-        None => return -1,
-    };
+    crate::unwind_guard!(-1, {
+        let inst = match unsafe { handle_as_mut(handle) } {
+            Some(i) => i,
+            None => return -1,
+        };
 
-    // The canonical C contract treats {0,0,0,0} as "clear the region".
-    if region.x == 0 && region.y == 0 && region.w == 0 && region.h == 0 {
-        inst.inner.set_cropping_region(None);
+        // The canonical C contract treats {0,0,0,0} as "clear the region".
+        if region.x == 0 && region.y == 0 && region.w == 0 && region.h == 0 {
+            inst.inner.set_cropping_region(None);
+            inst.clear_error();
+            return 0;
+        }
+
+        if region.x < 0 || region.y < 0 || region.w <= 0 || region.h <= 0 {
+            inst.set_error(
+                format!(
+                    "tj3SetCroppingRegion: invalid {{x={},y={},w={},h={}}}",
+                    region.x, region.y, region.w, region.h
+                ),
+                TJERR_FATAL,
+            );
+            return -1;
+        }
+
+        inst.inner
+            .set_cropping_region(Some(libjpeg_turbo_rs::CropRegion {
+                x: region.x as usize,
+                y: region.y as usize,
+                width: region.w as usize,
+                height: region.h as usize,
+            }));
         inst.clear_error();
-        return 0;
-    }
-
-    if region.x < 0 || region.y < 0 || region.w <= 0 || region.h <= 0 {
-        inst.set_error(
-            format!(
-                "tj3SetCroppingRegion: invalid {{x={},y={},w={},h={}}}",
-                region.x, region.y, region.w, region.h
-            ),
-            TJERR_FATAL,
-        );
-        return -1;
-    }
-
-    inst.inner
-        .set_cropping_region(Some(libjpeg_turbo_rs::CropRegion {
-            x: region.x as usize,
-            y: region.y as usize,
-            width: region.w as usize,
-            height: region.h as usize,
-        }));
-    inst.clear_error();
-    0
+        0
+    })
 }
 
 // Re-export the `TjParam` import so the module remains self-contained

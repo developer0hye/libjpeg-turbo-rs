@@ -59,9 +59,12 @@ fn cdylib_advertises_libjpeg_compatible_install_name_on_macos() {
         String::from_utf8_lossy(&out.stderr)
     );
     let stdout: String = String::from_utf8_lossy(&out.stdout).into_owned();
+    // P4-3 (2026-05-17): default install_name flipped to the v8 ABI
+    // canonical `libjpeg.8.dylib`. v6b is still available via
+    // CAPI_SONAME / CAPI_INSTALL_NAME + CAPI_ACK_V6B_SONAME=1.
     assert!(
-        stdout.contains("libjpeg.62.dylib"),
-        "otool -D did not show libjpeg.62.dylib install_name, got:\n{stdout}"
+        stdout.contains("libjpeg.8.dylib"),
+        "otool -D did not show libjpeg.8.dylib install_name, got:\n{stdout}"
     );
 }
 
@@ -90,8 +93,11 @@ fn cdylib_advertises_libjpeg_compatible_soname_on_linux() {
         String::from_utf8_lossy(&out.stderr)
     );
     let stdout: String = String::from_utf8_lossy(&out.stdout).into_owned();
+    // P4-3 (2026-05-17): default SONAME flipped to the v8 ABI
+    // canonical `libjpeg.so.8`. v6b is still available via
+    // CAPI_SONAME=libjpeg.so.62 + CAPI_ACK_V6B_SONAME=1.
     assert!(
-        stdout.contains("libjpeg.so.62"),
-        "readelf -d did not show libjpeg.so.62 SONAME, got:\n{stdout}"
+        stdout.contains("libjpeg.so.8"),
+        "readelf -d did not show libjpeg.so.8 SONAME, got:\n{stdout}"
     );
 }

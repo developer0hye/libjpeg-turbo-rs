@@ -17,44 +17,76 @@ fn main() {
     let target_os: String = env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
 
     // The cdylib we produce is meant to be binary-compatible with both
-    // `libjpeg.so.62` (libjpeg API) and `libturbojpeg.so.0` (TurboJPEG
-    // API). We pick `libjpeg.so.62` as the SONAME because that's what
-    // distro packages name-pin to — a downstream binary that links
-    // against stock libjpeg will search for this soname first.
+    // the libjpeg API and `libturbojpeg.so.0` (TurboJPEG API). Our struct
+    // layout is JPEG_LIB_VERSION=80 (v8), so the canonical SONAME is
+    // `libjpeg.so.8` — that matches what a consumer compiled against v8
+    // headers expects. The default install_name on macOS is
+    // `@rpath/libjpeg.8.dylib`.
     //
     // Selecting a single soname is intentional: a cdylib target emits
-    // exactly one binary on disk. Distributions that want the second
-    // soname typically ship a symlink (libturbojpeg.so.0 ->
-    // libjpeg.so.62) alongside the library itself; users who need that
-    // layout can opt in via the `CAPI_SONAME` env var at build time.
+    // exactly one binary on disk. Distributions that want a second
+    // soname typically ship a symlink (`libturbojpeg.so.0 ->
+    // libjpeg.so.8`) alongside the library itself; users who need a
+    // different layout can opt in via the `CAPI_SONAME` env var at
+    // build time.
     //
-    // CAVEAT (P2-9, see docs/ABI_COMPATIBILITY.md): the default SONAME
-    // `libjpeg.so.62` advertises the v6b ABI, but our struct layout is
-    // JPEG_LIB_VERSION = 80 (v8). A consumer compiled against v6b
-    // headers may silently corrupt v8-only fields (e.g. `is_baseline`).
-    // Production deployments should override:
-    //   CAPI_SONAME=libjpeg.so.8
-    //   CAPI_INSTALL_NAME=@rpath/libjpeg.8.dylib
-    let soname: String = env::var("CAPI_SONAME").unwrap_or_else(|_| "libjpeg.so.62".to_string());
-    let install_name_mac: String =
-        env::var("CAPI_INSTALL_NAME").unwrap_or_else(|_| "@rpath/libjpeg.62.dylib".to_string());
-
-    // Loud warning when the v6b SONAME is paired with v8 struct layout
-    // (the documented-risk path). Suppress by setting either CAPI_SONAME
-    // explicitly to anything (including the v6b SONAME if you really want
-    // it) or CAPI_ACK_V6B_SONAME=1.
-    let soname_was_default: bool = env::var("CAPI_SONAME").is_err();
-    let install_name_was_default: bool = env::var("CAPI_INSTALL_NAME").is_err();
+    // V6B OPT-IN (see docs/ABI_COMPATIBILITY.md, P4-3): historically
+    // this build defaulted to `libjpeg.so.62` for ease of distro
+    // replacement, but a consumer compiled against v6b headers can
+    // silently corrupt v8-only fields (e.g. `is_baseline`). The v6b
+    // SONAME is still available; the simplest opt-in is:
+    //
+    //   CAPI_ACK_V6B_SONAME=1 cargo build -p libjpeg-turbo-rs-capi --release
+    //
+    // which auto-implies `CAPI_SONAME=libjpeg.so.62` and
+    // `CAPI_INSTALL_NAME=@rpath/libjpeg.62.dylib` so the SONAME and
+    // macOS install_name stay in lockstep. Explicit overrides still
+    // win if a packager needs a different combination.
     let v6b_soname_acknowledged: bool = env::var("CAPI_ACK_V6B_SONAME")
         .map(|v| v != "0" && !v.is_empty())
         .unwrap_or(false);
-    if (soname_was_default || install_name_was_default) && !v6b_soname_acknowledged {
+    let soname: String = env::var("CAPI_SONAME").unwrap_or_else(|_| {
+        if v6b_soname_acknowledged {
+            "libjpeg.so.62".to_string()
+        } else {
+            "libjpeg.so.8".to_string()
+        }
+    });
+    let install_name_mac: String = env::var("CAPI_INSTALL_NAME").unwrap_or_else(|_| {
+        if v6b_soname_acknowledged {
+            "@rpath/libjpeg.62.dylib".to_string()
+        } else {
+            "@rpath/libjpeg.8.dylib".to_string()
+        }
+    });
+
+    // Loud warning when v6b SONAME is requested without the
+    // acknowledgement env. This is the documented-risk path now; v8
+    // is the safe default.
+    let v6b_soname_chosen: bool =
+        soname.contains(".so.62") || install_name_mac.contains(".62.dylib");
+    if v6b_soname_chosen && !v6b_soname_acknowledged {
         println!(
-            "cargo:warning=libjpeg-turbo-rs-capi: defaulting SONAME to v6b (`libjpeg.so.62`) \
-             but struct layout is JPEG_LIB_VERSION=80 (v8). Consumers compiled against v6b \
-             headers may silently corrupt v8-only fields. See docs/ABI_COMPATIBILITY.md. \
-             Set CAPI_SONAME=libjpeg.so.8 + CAPI_INSTALL_NAME=@rpath/libjpeg.8.dylib for the \
-             safe default, or CAPI_ACK_V6B_SONAME=1 to silence this warning."
+            "cargo:warning=libjpeg-turbo-rs-capi: CAPI_SONAME requests v6b \
+             (`libjpeg.so.62`) while struct layout is JPEG_LIB_VERSION=80 (v8). \
+             Consumers compiled against v6b headers may silently corrupt v8-only \
+             fields. See docs/ABI_COMPATIBILITY.md. Set CAPI_ACK_V6B_SONAME=1 to \
+             acknowledge the risk and silence this warning."
+        );
+    }
+    // Sanity check the SONAME / install_name pair so packagers can't
+    // accidentally ship one v8 ABI surface and one v6b surface from
+    // the same build (a mismatch is silently UB at load time on
+    // macOS, where install_name resolution is strict).
+    let soname_is_v6b: bool = soname.contains(".so.62");
+    let install_name_is_v6b: bool = install_name_mac.contains(".62.dylib");
+    if soname_is_v6b != install_name_is_v6b {
+        println!(
+            "cargo:warning=libjpeg-turbo-rs-capi: CAPI_SONAME ({soname}) and \
+             CAPI_INSTALL_NAME ({install_name_mac}) disagree on v6b vs v8 ABI. \
+             A v6b SONAME paired with a v8 install_name (or vice versa) will \
+             break load-time resolution on macOS. Set CAPI_ACK_V6B_SONAME=1 to \
+             pick v6b for both, leave both unset for v8, or set both explicitly."
         );
     }
 
