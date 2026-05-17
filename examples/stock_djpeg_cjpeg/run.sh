@@ -87,13 +87,19 @@ trap 'rm -rf "$WORK"' EXIT
 # Stage canonical-soname symlinks so the loader can resolve the names
 # baked into the our-linked binaries. `cargo build` only emits
 # `liblibjpeg_turbo_rs_capi.{dylib,so}`, but stock djpeg/cjpeg/jpegtran
-# look for `libjpeg.62.dylib` (macOS) or `libjpeg.so.62` (Linux).
+# look up the SONAME that was baked into their DT_NEEDED at link time.
+# Post-P4-3 the cdylib's SONAME defaults to `libjpeg.so.8` /
+# `libjpeg.8.dylib`; we stage both v8 (current default) and v6b
+# (legacy `CAPI_ACK_V6B_SONAME=1` opt-in) so the harness works whether
+# the cdylib was built before or after the SONAME flip.
 LOADER_DIR="$WORK/loader"
 mkdir -p "$LOADER_DIR"
 if [[ "$DYLIB_EXT" == "dylib" ]]; then
+    ln -sf "$SHIM_LIB_PATH" "$LOADER_DIR/libjpeg.8.dylib"
     ln -sf "$SHIM_LIB_PATH" "$LOADER_DIR/libjpeg.62.dylib"
     ln -sf "$SHIM_LIB_PATH" "$LOADER_DIR/libturbojpeg.0.dylib"
 else
+    ln -sf "$SHIM_LIB_PATH" "$LOADER_DIR/libjpeg.so.8"
     ln -sf "$SHIM_LIB_PATH" "$LOADER_DIR/libjpeg.so.62"
     ln -sf "$SHIM_LIB_PATH" "$LOADER_DIR/libturbojpeg.so.0"
 fi

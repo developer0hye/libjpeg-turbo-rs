@@ -71,13 +71,13 @@ fn subsamp_from_c(tjsamp: c_int) -> Option<Subsampling> {
 /// `tjInitCompress()` — legacy compress-only initializer.
 #[no_mangle]
 pub extern "C" fn tjInitCompress() -> *mut c_void {
-    tj3Init(TJINIT_COMPRESS)
+    crate::unwind_guard!(std::ptr::null_mut(), { tj3Init(TJINIT_COMPRESS) })
 }
 
 /// `tjInitDecompress()` — legacy decompress-only initializer.
 #[no_mangle]
 pub extern "C" fn tjInitDecompress() -> *mut c_void {
-    tj3Init(TJINIT_DECOMPRESS)
+    crate::unwind_guard!(std::ptr::null_mut(), { tj3Init(TJINIT_DECOMPRESS) })
 }
 
 /// `tjInitTransform()` — legacy transform initializer.
@@ -87,14 +87,16 @@ pub extern "C" fn tjInitDecompress() -> *mut c_void {
 /// we just forward the single enum value.
 #[no_mangle]
 pub extern "C" fn tjInitTransform() -> *mut c_void {
-    tj3Init(TJINIT_TRANSFORM)
+    crate::unwind_guard!(std::ptr::null_mut(), { tj3Init(TJINIT_TRANSFORM) })
 }
 
 /// `tjDestroy(handle)` — identical to `tj3Destroy`.
 #[no_mangle]
 pub extern "C" fn tjDestroy(handle: *mut c_void) -> c_int {
-    tj3Destroy(handle);
-    0
+    crate::unwind_guard!(-1, {
+        tj3Destroy(handle);
+        0
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -121,24 +123,26 @@ pub extern "C" fn tjCompress2(
     jpeg_qual: c_int,
     _flags: c_int,
 ) -> c_int {
-    // Subsampling and quality are set via TJ3 parameters before the
-    // actual compress call.
-    if tj3Set(handle, TJPARAM_QUALITY, jpeg_qual) != 0 {
-        return -1;
-    }
-    if tj3Set(handle, TJPARAM_SUBSAMP, jpeg_subsamp) != 0 {
-        return -1;
-    }
-    tj3Compress8(
-        handle,
-        src_buf,
-        width,
-        pitch,
-        height,
-        pixel_format,
-        jpeg_buf,
-        jpeg_size,
-    )
+    crate::unwind_guard!(-1, {
+        // Subsampling and quality are set via TJ3 parameters before the
+        // actual compress call.
+        if tj3Set(handle, TJPARAM_QUALITY, jpeg_qual) != 0 {
+            return -1;
+        }
+        if tj3Set(handle, TJPARAM_SUBSAMP, jpeg_subsamp) != 0 {
+            return -1;
+        }
+        tj3Compress8(
+            handle,
+            src_buf,
+            width,
+            pitch,
+            height,
+            pixel_format,
+            jpeg_buf,
+            jpeg_size,
+        )
+    })
 }
 
 /// `tjDecompress2(handle, jpegBuf, jpegSize, dstBuf, width, pitch,
@@ -159,7 +163,9 @@ pub extern "C" fn tjDecompress2(
     pixel_format: c_int,
     _flags: c_int,
 ) -> c_int {
-    tj3Decompress8(handle, jpeg_buf, jpeg_size, dst_buf, pitch, pixel_format)
+    crate::unwind_guard!(-1, {
+        tj3Decompress8(handle, jpeg_buf, jpeg_size, dst_buf, pitch, pixel_format)
+    })
 }
 
 /// `tjDecompressHeader3(handle, jpegBuf, jpegSize, width, height,
@@ -177,33 +183,35 @@ pub extern "C" fn tjDecompressHeader3(
     jpeg_subsamp: *mut c_int,
     jpeg_colorspace: *mut c_int,
 ) -> c_int {
-    let rc: c_int = tj3DecompressHeader(handle, jpeg_buf, jpeg_size);
-    if rc != 0 {
-        return -1;
-    }
+    crate::unwind_guard!(-1, {
+        let rc: c_int = tj3DecompressHeader(handle, jpeg_buf, jpeg_size);
+        if rc != 0 {
+            return -1;
+        }
 
-    let inst = match unsafe { handle_as_mut(handle) } {
-        Some(i) => i,
-        None => return -1,
-    };
+        let inst = match unsafe { handle_as_mut(handle) } {
+            Some(i) => i,
+            None => return -1,
+        };
 
-    // SAFETY: out-pointers are optional per the C contract — skip if NULL.
-    unsafe {
-        use libjpeg_turbo_rs::tj3::TjParam;
-        if !width.is_null() {
-            *width = inst.inner.get(TjParam::Width);
+        // SAFETY: out-pointers are optional per the C contract — skip if NULL.
+        unsafe {
+            use libjpeg_turbo_rs::tj3::TjParam;
+            if !width.is_null() {
+                *width = inst.inner.get(TjParam::Width);
+            }
+            if !height.is_null() {
+                *height = inst.inner.get(TjParam::Height);
+            }
+            if !jpeg_subsamp.is_null() {
+                *jpeg_subsamp = inst.inner.get(TjParam::Subsampling);
+            }
+            if !jpeg_colorspace.is_null() {
+                *jpeg_colorspace = inst.inner.get(TjParam::ColorSpace);
+            }
         }
-        if !height.is_null() {
-            *height = inst.inner.get(TjParam::Height);
-        }
-        if !jpeg_subsamp.is_null() {
-            *jpeg_subsamp = inst.inner.get(TjParam::Subsampling);
-        }
-        if !jpeg_colorspace.is_null() {
-            *jpeg_colorspace = inst.inner.get(TjParam::ColorSpace);
-        }
-    }
-    0
+        0
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -226,9 +234,11 @@ pub extern "C" fn tjTransform(
     transforms: *const TjTransform,
     _flags: c_int,
 ) -> c_int {
-    tj3Transform(
-        handle, jpeg_buf, jpeg_size, n, dst_bufs, dst_sizes, transforms,
-    )
+    crate::unwind_guard!(-1, {
+        tj3Transform(
+            handle, jpeg_buf, jpeg_size, n, dst_bufs, dst_sizes, transforms,
+        )
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -260,20 +270,22 @@ pub extern "C" fn tjEncodeYUV3(
     subsamp: c_int,
     flags: c_int,
 ) -> c_int {
-    if tj3Set(handle, TJPARAM_SUBSAMP, subsamp) != 0 {
-        return -1;
-    }
-    process_legacy_compress_flags(handle, flags);
-    crate::yuv::tj3EncodeYUV8(
-        handle,
-        src_buf,
-        width,
-        pitch,
-        height,
-        pixel_format,
-        dst_buf,
-        align.max(1),
-    )
+    crate::unwind_guard!(-1, {
+        if tj3Set(handle, TJPARAM_SUBSAMP, subsamp) != 0 {
+            return -1;
+        }
+        process_legacy_compress_flags(handle, flags);
+        crate::yuv::tj3EncodeYUV8(
+            handle,
+            src_buf,
+            width,
+            pitch,
+            height,
+            pixel_format,
+            dst_buf,
+            align.max(1),
+        )
+    })
 }
 
 /// `tjDecodeYUV(handle, srcBuf, align, subsamp, dstBuf, width, pitch,
@@ -297,20 +309,22 @@ pub extern "C" fn tjDecodeYUV(
     pixel_format: c_int,
     flags: c_int,
 ) -> c_int {
-    if tj3Set(handle, TJPARAM_SUBSAMP, subsamp) != 0 {
-        return -1;
-    }
-    process_legacy_decompress_flags(handle, flags);
-    crate::yuv::tj3DecodeYUV8(
-        handle,
-        src_buf,
-        align.max(1),
-        dst_buf,
-        width,
-        pitch,
-        height,
-        pixel_format,
-    )
+    crate::unwind_guard!(-1, {
+        if tj3Set(handle, TJPARAM_SUBSAMP, subsamp) != 0 {
+            return -1;
+        }
+        process_legacy_decompress_flags(handle, flags);
+        crate::yuv::tj3DecodeYUV8(
+            handle,
+            src_buf,
+            align.max(1),
+            dst_buf,
+            width,
+            pitch,
+            height,
+            pixel_format,
+        )
+    })
 }
 
 // Legacy `flags` bits per upstream `turbojpeg.h`. We translate the
@@ -392,12 +406,14 @@ fn process_legacy_decompress_flags(handle: *mut c_void, flags: c_int) {
 /// does — see a stable "error" sentinel.
 #[no_mangle]
 pub extern "C" fn tjBufSize(width: c_int, height: c_int, jpeg_subsamp: c_int) -> usize {
-    let retval: usize = crate::bufsize::tj3JPEGBufSize(width, height, jpeg_subsamp);
-    if retval == 0 {
-        usize::MAX
-    } else {
-        retval
-    }
+    crate::unwind_guard!(usize::MAX, {
+        let retval: usize = crate::bufsize::tj3JPEGBufSize(width, height, jpeg_subsamp);
+        if retval == 0 {
+            usize::MAX
+        } else {
+            retval
+        }
+    })
 }
 
 /// `TJBUFSIZE(width, height) -> unsigned long` — TurboJPEG 1.0 legacy
@@ -406,31 +422,33 @@ pub extern "C" fn tjBufSize(width: c_int, height: c_int, jpeg_subsamp: c_int) ->
 /// the historical contract in `turbojpeg.c`.
 #[no_mangle]
 pub extern "C" fn TJBUFSIZE(width: c_int, height: c_int) -> usize {
-    if width < 1 || height < 1 {
-        return usize::MAX;
-    }
-    // Matches turbojpeg.c: PAD(width, 16) * PAD(height, 16) * 6 + 2048.
-    let pad_w: usize = ((width as usize) + 15) & !15;
-    let pad_h: usize = ((height as usize) + 15) & !15;
-    pad_w
-        .checked_mul(pad_h)
-        .and_then(|v| v.checked_mul(6))
-        .and_then(|v| v.checked_add(2048))
-        .unwrap_or(usize::MAX)
+    crate::unwind_guard!(usize::MAX, {
+        if width < 1 || height < 1 {
+            return usize::MAX;
+        }
+        // Matches turbojpeg.c: PAD(width, 16) * PAD(height, 16) * 6 + 2048.
+        let pad_w: usize = ((width as usize) + 15) & !15;
+        let pad_h: usize = ((height as usize) + 15) & !15;
+        pad_w
+            .checked_mul(pad_h)
+            .and_then(|v| v.checked_mul(6))
+            .and_then(|v| v.checked_add(2048))
+            .unwrap_or(usize::MAX)
+    })
 }
 
 /// `TJBUFSIZEYUV(width, height, subsamp) -> unsigned long` — TurboJPEG
 /// 1.1 legacy helper that delegates to `tjBufSizeYUV`.
 #[no_mangle]
 pub extern "C" fn TJBUFSIZEYUV(width: c_int, height: c_int, subsamp: c_int) -> usize {
-    tjBufSizeYUV(width, height, subsamp)
+    crate::unwind_guard!(usize::MAX, { tjBufSizeYUV(width, height, subsamp) })
 }
 
 /// `tjBufSizeYUV(width, height, subsamp) -> unsigned long` — TurboJPEG
 /// 1.1 legacy wrapper that hard-codes `align = 4`.
 #[no_mangle]
 pub extern "C" fn tjBufSizeYUV(width: c_int, height: c_int, subsamp: c_int) -> usize {
-    tjBufSizeYUV2(width, 4, height, subsamp)
+    crate::unwind_guard!(usize::MAX, { tjBufSizeYUV2(width, 4, height, subsamp) })
 }
 
 /// `tjBufSizeYUV2(width, align, height, subsamp) -> unsigned long`.
@@ -446,12 +464,14 @@ pub extern "C" fn tjBufSizeYUV2(
     height: c_int,
     subsamp: c_int,
 ) -> usize {
-    let retval: usize = crate::bufsize::tj3YUVBufSize(width, align, height, subsamp);
-    if retval == 0 {
-        usize::MAX
-    } else {
-        retval
-    }
+    crate::unwind_guard!(usize::MAX, {
+        let retval: usize = crate::bufsize::tj3YUVBufSize(width, align, height, subsamp);
+        if retval == 0 {
+            usize::MAX
+        } else {
+            retval
+        }
+    })
 }
 
 /// `tjPlaneSizeYUV(componentID, width, stride, height, subsamp)`.
@@ -466,37 +486,43 @@ pub extern "C" fn tjPlaneSizeYUV(
     height: c_int,
     subsamp: c_int,
 ) -> usize {
-    let retval: usize =
-        crate::bufsize::tj3YUVPlaneSize(component_id, width, stride, height, subsamp);
-    if retval == 0 {
-        usize::MAX
-    } else {
-        retval
-    }
+    crate::unwind_guard!(usize::MAX, {
+        let retval: usize =
+            crate::bufsize::tj3YUVPlaneSize(component_id, width, stride, height, subsamp);
+        if retval == 0 {
+            usize::MAX
+        } else {
+            retval
+        }
+    })
 }
 
 /// `tjPlaneWidth(componentID, width, subsamp)`.
 #[no_mangle]
 pub extern "C" fn tjPlaneWidth(component_id: c_int, width: c_int, subsamp: c_int) -> c_int {
-    if !(0..=2).contains(&component_id) || width <= 0 {
-        return -1;
-    }
-    let Some(ss): Option<Subsampling> = subsamp_from_c(subsamp) else {
-        return -1;
-    };
-    yuv_plane_width(component_id as usize, width as usize, ss) as c_int
+    crate::unwind_guard!(-1, {
+        if !(0..=2).contains(&component_id) || width <= 0 {
+            return -1;
+        }
+        let Some(ss): Option<Subsampling> = subsamp_from_c(subsamp) else {
+            return -1;
+        };
+        yuv_plane_width(component_id as usize, width as usize, ss) as c_int
+    })
 }
 
 /// `tjPlaneHeight(componentID, height, subsamp)`.
 #[no_mangle]
 pub extern "C" fn tjPlaneHeight(component_id: c_int, height: c_int, subsamp: c_int) -> c_int {
-    if !(0..=2).contains(&component_id) || height <= 0 {
-        return -1;
-    }
-    let Some(ss): Option<Subsampling> = subsamp_from_c(subsamp) else {
-        return -1;
-    };
-    yuv_plane_height(component_id as usize, height as usize, ss) as c_int
+    crate::unwind_guard!(-1, {
+        if !(0..=2).contains(&component_id) || height <= 0 {
+            return -1;
+        }
+        let Some(ss): Option<Subsampling> = subsamp_from_c(subsamp) else {
+            return -1;
+        };
+        yuv_plane_height(component_id as usize, height as usize, ss) as c_int
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -539,26 +565,28 @@ pub extern "C" fn tjLoadImage(
     pixel_format: *mut c_int,
     flags: c_int,
 ) -> *mut u8 {
-    // Create a temporary decompress handle so the underlying TJ3
-    // form has somewhere to record errors. `TJINIT_DECOMPRESS = 2`
-    // matches `tj3.rs` and `turbojpeg.h`.
-    let h: *mut c_void = crate::tj3::tj3Init(2);
-    if h.is_null() {
-        crate::bufsize::set_no_handle_error("tjLoadImage: tj3Init(TJINIT_DECOMPRESS) failed");
-        return std::ptr::null_mut();
-    }
-    if (flags & TJFLAG_BOTTOMUP) != 0 {
-        // TJPARAM_BOTTOMUP = 0 in turbojpeg.h, but use the
-        // tj3-published constant via tj3Set to stay layout-independent.
-        let _ = crate::tj3::tj3Set(h, TJPARAM_BOTTOMUP, 1);
-    }
-    let buf: *mut u8 =
-        crate::imageio::tj3LoadImage8(h, filename, width, align, height, pixel_format);
-    if buf.is_null() {
-        copy_handle_error_to_no_handle_slot(h);
-    }
-    crate::tj3::tj3Destroy(h);
-    buf
+    crate::unwind_guard!(std::ptr::null_mut(), {
+        // Create a temporary decompress handle so the underlying TJ3
+        // form has somewhere to record errors. `TJINIT_DECOMPRESS = 2`
+        // matches `tj3.rs` and `turbojpeg.h`.
+        let h: *mut c_void = crate::tj3::tj3Init(2);
+        if h.is_null() {
+            crate::bufsize::set_no_handle_error("tjLoadImage: tj3Init(TJINIT_DECOMPRESS) failed");
+            return std::ptr::null_mut();
+        }
+        if (flags & TJFLAG_BOTTOMUP) != 0 {
+            // TJPARAM_BOTTOMUP = 0 in turbojpeg.h, but use the
+            // tj3-published constant via tj3Set to stay layout-independent.
+            let _ = crate::tj3::tj3Set(h, TJPARAM_BOTTOMUP, 1);
+        }
+        let buf: *mut u8 =
+            crate::imageio::tj3LoadImage8(h, filename, width, align, height, pixel_format);
+        if buf.is_null() {
+            copy_handle_error_to_no_handle_slot(h);
+        }
+        crate::tj3::tj3Destroy(h);
+        buf
+    })
 }
 
 /// `tjSaveImage(filename, buffer, width, pitch, height, pixelFormat, flags)`.
@@ -576,21 +604,23 @@ pub extern "C" fn tjSaveImage(
     pixel_format: c_int,
     flags: c_int,
 ) -> c_int {
-    let h: *mut c_void = crate::tj3::tj3Init(1); // TJINIT_COMPRESS
-    if h.is_null() {
-        crate::bufsize::set_no_handle_error("tjSaveImage: tj3Init(TJINIT_COMPRESS) failed");
-        return -1;
-    }
-    if (flags & TJFLAG_BOTTOMUP) != 0 {
-        let _ = crate::tj3::tj3Set(h, TJPARAM_BOTTOMUP, 1);
-    }
-    let rc: c_int =
-        crate::imageio::tj3SaveImage8(h, filename, buffer, width, pitch, height, pixel_format);
-    if rc != 0 {
-        copy_handle_error_to_no_handle_slot(h);
-    }
-    crate::tj3::tj3Destroy(h);
-    rc
+    crate::unwind_guard!(-1, {
+        let h: *mut c_void = crate::tj3::tj3Init(1); // TJINIT_COMPRESS
+        if h.is_null() {
+            crate::bufsize::set_no_handle_error("tjSaveImage: tj3Init(TJINIT_COMPRESS) failed");
+            return -1;
+        }
+        if (flags & TJFLAG_BOTTOMUP) != 0 {
+            let _ = crate::tj3::tj3Set(h, TJPARAM_BOTTOMUP, 1);
+        }
+        let rc: c_int =
+            crate::imageio::tj3SaveImage8(h, filename, buffer, width, pitch, height, pixel_format);
+        if rc != 0 {
+            copy_handle_error_to_no_handle_slot(h);
+        }
+        crate::tj3::tj3Destroy(h);
+        rc
+    })
 }
 
 /// Legacy `TJFLAG_BOTTOMUP` bit and `TJPARAM_BOTTOMUP` index per
@@ -607,7 +637,7 @@ const TJPARAM_BOTTOMUP: c_int = 1;
 /// `tj3GetErrorStr` with a handle-aware NULL fallback.
 #[no_mangle]
 pub extern "C" fn tjGetErrorStr2(handle: *mut c_void) -> *const c_char {
-    tj3GetErrorStr(handle)
+    crate::unwind_guard!(std::ptr::null(), { tj3GetErrorStr(handle) })
 }
 
 // ---------------------------------------------------------------------------

@@ -114,14 +114,18 @@ fn find_cc() -> Option<PathBuf> {
 /// link-time and load-time:
 /// * `libturbojpeg.{0.dylib|so.0}` / `libturbojpeg.{dylib|so}` so
 ///   `-lturbojpeg` resolves.
-/// * `libjpeg.{62.dylib|so.62}` / `libjpeg.{dylib|so}` so `dyld`/`ld.so`
-///   resolve the SONAME/install_name embedded in the cdylib.
+/// * `libjpeg.{8.dylib|so.8}` (the v8 install_name/SONAME the cdylib
+///   advertises since P4-3, 2026-05-17), `libjpeg.{62.dylib|so.62}`
+///   (kept for any prebuilt v6b consumer), and `libjpeg.{dylib|so}`
+///   so `dyld`/`ld.so` can resolve under either name.
 fn install_aliases(cdylib: &Path, link_dir: &Path) -> Result<(), String> {
     let mut names: Vec<&str> = vec![turbojpeg_versioned_name(), turbojpeg_short_name()];
     if cfg!(target_os = "macos") {
+        names.push("libjpeg.8.dylib");
         names.push("libjpeg.62.dylib");
         names.push("libjpeg.dylib");
     } else {
+        names.push("libjpeg.so.8");
         names.push("libjpeg.so.62");
         names.push("libjpeg.so");
     }
@@ -177,9 +181,10 @@ fn build_tjunittest() -> Result<(PathBuf, PathBuf), String> {
     let jconfigint_dir: PathBuf = root.join("examples/tjunittest_link");
 
     // We link against `-ljpeg` (not `-lturbojpeg`) because our cdylib's
-    // install_name is `@rpath/libjpeg.62.dylib`. Using the same library
-    // name both at link-time and at load-time avoids macOS AMFI
-    // mismatches between the codesign record and the resolved path.
+    // install_name is `@rpath/libjpeg.8.dylib` (P4-3, v8 default).
+    // The link_dir holds both `libjpeg.8.dylib` and `libjpeg.62.dylib`
+    // symlinks to the same cdylib, so the link-time -l resolution and
+    // the load-time install_name lookup land on the same file.
     let status = Command::new(&cc)
         .arg("-O2")
         .arg("-I")

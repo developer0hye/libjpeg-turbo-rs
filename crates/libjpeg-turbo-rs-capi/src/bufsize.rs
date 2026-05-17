@@ -113,40 +113,42 @@ pub(crate) fn no_handle_error_ptr() -> *const std::ffi::c_char {
 /// sufficient-size branch).
 #[no_mangle]
 pub extern "C" fn tj3JPEGBufSize(width: c_int, height: c_int, jpeg_subsamp: c_int) -> usize {
-    if width < 1 || height < 1 || !(-1..TJ_NUMSAMP).contains(&jpeg_subsamp) {
-        set_no_handle_error("tj3JPEGBufSize: invalid argument");
-        return 0;
-    }
+    crate::unwind_guard!(0, {
+        if width < 1 || height < 1 || !(-1..TJ_NUMSAMP).contains(&jpeg_subsamp) {
+            set_no_handle_error("tj3JPEGBufSize: invalid argument");
+            return 0;
+        }
 
-    // TJSAMP_UNKNOWN (-1) is treated as TJSAMP_444 for sizing, per the
-    // turbojpeg.h contract: "a buffer large enough for no-subsampling is
-    // also large enough for anything else".
-    let effective_subsamp: c_int = if jpeg_subsamp == -1 { 0 } else { jpeg_subsamp };
-    let Some((mcuw, mcuh)): Option<(usize, usize)> = mcu_for_tj(effective_subsamp) else {
-        set_no_handle_error("tj3JPEGBufSize: invalid subsampling");
-        return 0;
-    };
+        // TJSAMP_UNKNOWN (-1) is treated as TJSAMP_444 for sizing, per the
+        // turbojpeg.h contract: "a buffer large enough for no-subsampling is
+        // also large enough for anything else".
+        let effective_subsamp: c_int = if jpeg_subsamp == -1 { 0 } else { jpeg_subsamp };
+        let Some((mcuw, mcuh)): Option<(usize, usize)> = mcu_for_tj(effective_subsamp) else {
+            set_no_handle_error("tj3JPEGBufSize: invalid subsampling");
+            return 0;
+        };
 
-    // GRAY has no chroma; every other subsampling counts 4 chroma samples per
-    // `mcuw * mcuh` MCU (matching `4 * 64 / (mcuw * mcuh)` where samples are
-    // 8×8 blocks).
-    let chromasf: usize = if is_gray(effective_subsamp) {
-        0
-    } else {
-        (4 * 64) / (mcuw * mcuh)
-    };
-
-    let padded_w: usize = pad_up(width as usize, mcuw);
-    let padded_h: usize = pad_up(height as usize, mcuh);
-
-    padded_w
-        .checked_mul(padded_h)
-        .and_then(|v| v.checked_mul(2 + chromasf))
-        .and_then(|v| v.checked_add(2048))
-        .unwrap_or_else(|| {
-            set_no_handle_error("tj3JPEGBufSize: image is too large");
+        // GRAY has no chroma; every other subsampling counts 4 chroma samples per
+        // `mcuw * mcuh` MCU (matching `4 * 64 / (mcuw * mcuh)` where samples are
+        // 8×8 blocks).
+        let chromasf: usize = if is_gray(effective_subsamp) {
             0
-        })
+        } else {
+            (4 * 64) / (mcuw * mcuh)
+        };
+
+        let padded_w: usize = pad_up(width as usize, mcuw);
+        let padded_h: usize = pad_up(height as usize, mcuh);
+
+        padded_w
+            .checked_mul(padded_h)
+            .and_then(|v| v.checked_mul(2 + chromasf))
+            .and_then(|v| v.checked_add(2048))
+            .unwrap_or_else(|| {
+                set_no_handle_error("tj3JPEGBufSize: image is too large");
+                0
+            })
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -165,46 +167,48 @@ pub extern "C" fn tj3YUVBufSize(
     height: c_int,
     subsamp: c_int,
 ) -> usize {
-    if width < 1 || height < 1 {
-        set_no_handle_error("tj3YUVBufSize: width/height must be > 0");
-        return 0;
-    }
-    if align < 1 || (align as u32).count_ones() != 1 {
-        set_no_handle_error("tj3YUVBufSize: align must be a power of 2");
-        return 0;
-    }
-    if !(0..TJ_NUMSAMP).contains(&subsamp) {
-        set_no_handle_error("tj3YUVBufSize: invalid subsampling");
-        return 0;
-    }
-
-    let n_planes: usize = if is_gray(subsamp) { 1 } else { 3 };
-    let mut total: usize = 0;
-    for c in 0..n_planes {
-        let pw: usize = plane_width(c as c_int, width, subsamp);
-        let ph: usize = plane_height(c as c_int, height, subsamp);
-        if pw == 0 || ph == 0 {
-            set_no_handle_error("tj3YUVBufSize: zero plane dimension");
+    crate::unwind_guard!(0, {
+        if width < 1 || height < 1 {
+            set_no_handle_error("tj3YUVBufSize: width/height must be > 0");
             return 0;
         }
-        let stride: usize = pad_up(pw, align as usize);
-        let plane: Option<usize> = stride.checked_mul(ph);
-        let plane: usize = match plane {
-            Some(v) => v,
-            None => {
-                set_no_handle_error("tj3YUVBufSize: image is too large");
+        if align < 1 || (align as u32).count_ones() != 1 {
+            set_no_handle_error("tj3YUVBufSize: align must be a power of 2");
+            return 0;
+        }
+        if !(0..TJ_NUMSAMP).contains(&subsamp) {
+            set_no_handle_error("tj3YUVBufSize: invalid subsampling");
+            return 0;
+        }
+
+        let n_planes: usize = if is_gray(subsamp) { 1 } else { 3 };
+        let mut total: usize = 0;
+        for c in 0..n_planes {
+            let pw: usize = plane_width(c as c_int, width, subsamp);
+            let ph: usize = plane_height(c as c_int, height, subsamp);
+            if pw == 0 || ph == 0 {
+                set_no_handle_error("tj3YUVBufSize: zero plane dimension");
                 return 0;
             }
-        };
-        total = match total.checked_add(plane) {
-            Some(v) => v,
-            None => {
-                set_no_handle_error("tj3YUVBufSize: image is too large");
-                return 0;
-            }
-        };
-    }
-    total
+            let stride: usize = pad_up(pw, align as usize);
+            let plane: Option<usize> = stride.checked_mul(ph);
+            let plane: usize = match plane {
+                Some(v) => v,
+                None => {
+                    set_no_handle_error("tj3YUVBufSize: image is too large");
+                    return 0;
+                }
+            };
+            total = match total.checked_add(plane) {
+                Some(v) => v,
+                None => {
+                    set_no_handle_error("tj3YUVBufSize: image is too large");
+                    return 0;
+                }
+            };
+        }
+        total
+    })
 }
 
 /// Internal plane-width helper (shared by tj3YUVBufSize / tj3YUVPlaneSize /
@@ -259,52 +263,54 @@ pub extern "C" fn tj3YUVPlaneSize(
     height: c_int,
     subsamp: c_int,
 ) -> usize {
-    if !(0..=2).contains(&component_id) {
-        set_no_handle_error("tj3YUVPlaneSize: componentID out of range");
-        return 0;
-    }
-    if width < 1 || height < 1 {
-        set_no_handle_error("tj3YUVPlaneSize: width/height must be > 0");
-        return 0;
-    }
-    if !(0..TJ_NUMSAMP).contains(&subsamp) {
-        set_no_handle_error("tj3YUVPlaneSize: invalid subsampling");
-        return 0;
-    }
+    crate::unwind_guard!(0, {
+        if !(0..=2).contains(&component_id) {
+            set_no_handle_error("tj3YUVPlaneSize: componentID out of range");
+            return 0;
+        }
+        if width < 1 || height < 1 {
+            set_no_handle_error("tj3YUVPlaneSize: width/height must be > 0");
+            return 0;
+        }
+        if !(0..TJ_NUMSAMP).contains(&subsamp) {
+            set_no_handle_error("tj3YUVPlaneSize: invalid subsampling");
+            return 0;
+        }
 
-    // Gray: only the Y plane is valid; Cb/Cr return 0 (no error).
-    if is_gray(subsamp) && component_id != 0 {
-        return 0;
-    }
+        // Gray: only the Y plane is valid; Cb/Cr return 0 (no error).
+        if is_gray(subsamp) && component_id != 0 {
+            return 0;
+        }
 
-    let pw: usize = plane_width(component_id, width, subsamp);
-    let ph: usize = plane_height(component_id, height, subsamp);
-    if pw == 0 || ph == 0 {
-        set_no_handle_error("tj3YUVPlaneSize: zero plane dimension");
-        return 0;
-    }
+        let pw: usize = plane_width(component_id, width, subsamp);
+        let ph: usize = plane_height(component_id, height, subsamp);
+        if pw == 0 || ph == 0 {
+            set_no_handle_error("tj3YUVPlaneSize: zero plane dimension");
+            return 0;
+        }
 
-    // Use `stride = pw` when the caller passes 0.
-    let effective_stride: usize = if stride == 0 {
-        pw
-    } else if stride < 0 {
-        set_no_handle_error("tj3YUVPlaneSize: stride must be >= 0");
-        return 0;
-    } else {
-        stride as usize
-    };
-    if effective_stride < pw {
-        set_no_handle_error("tj3YUVPlaneSize: stride smaller than plane width");
-        return 0;
-    }
+        // Use `stride = pw` when the caller passes 0.
+        let effective_stride: usize = if stride == 0 {
+            pw
+        } else if stride < 0 {
+            set_no_handle_error("tj3YUVPlaneSize: stride must be >= 0");
+            return 0;
+        } else {
+            stride as usize
+        };
+        if effective_stride < pw {
+            set_no_handle_error("tj3YUVPlaneSize: stride smaller than plane width");
+            return 0;
+        }
 
-    effective_stride
-        .checked_mul(ph - 1)
-        .and_then(|v| v.checked_add(pw))
-        .unwrap_or_else(|| {
-            set_no_handle_error("tj3YUVPlaneSize: image is too large");
-            0
-        })
+        effective_stride
+            .checked_mul(ph - 1)
+            .and_then(|v| v.checked_add(pw))
+            .unwrap_or_else(|| {
+                set_no_handle_error("tj3YUVPlaneSize: image is too large");
+                0
+            })
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -318,53 +324,57 @@ pub extern "C" fn tj3YUVPlaneSize(
 /// error.
 #[no_mangle]
 pub extern "C" fn tj3YUVPlaneWidth(component_id: c_int, width: c_int, subsamp: c_int) -> c_int {
-    if !(0..=2).contains(&component_id) {
-        set_no_handle_error("tj3YUVPlaneWidth: componentID out of range");
-        return 0;
-    }
-    if width < 1 {
-        set_no_handle_error("tj3YUVPlaneWidth: width must be > 0");
-        return 0;
-    }
-    if !(0..TJ_NUMSAMP).contains(&subsamp) {
-        set_no_handle_error("tj3YUVPlaneWidth: invalid subsampling");
-        return 0;
-    }
-    if is_gray(subsamp) && component_id != 0 {
-        return 0;
-    }
-    let pw: usize = plane_width(component_id, width, subsamp);
-    if pw == 0 || pw > c_int::MAX as usize {
-        set_no_handle_error("tj3YUVPlaneWidth: plane width overflows int");
-        return 0;
-    }
-    pw as c_int
+    crate::unwind_guard!(0, {
+        if !(0..=2).contains(&component_id) {
+            set_no_handle_error("tj3YUVPlaneWidth: componentID out of range");
+            return 0;
+        }
+        if width < 1 {
+            set_no_handle_error("tj3YUVPlaneWidth: width must be > 0");
+            return 0;
+        }
+        if !(0..TJ_NUMSAMP).contains(&subsamp) {
+            set_no_handle_error("tj3YUVPlaneWidth: invalid subsampling");
+            return 0;
+        }
+        if is_gray(subsamp) && component_id != 0 {
+            return 0;
+        }
+        let pw: usize = plane_width(component_id, width, subsamp);
+        if pw == 0 || pw > c_int::MAX as usize {
+            set_no_handle_error("tj3YUVPlaneWidth: plane width overflows int");
+            return 0;
+        }
+        pw as c_int
+    })
 }
 
 /// `tj3YUVPlaneHeight(componentID, height, subsamp) -> int`.
 #[no_mangle]
 pub extern "C" fn tj3YUVPlaneHeight(component_id: c_int, height: c_int, subsamp: c_int) -> c_int {
-    if !(0..=2).contains(&component_id) {
-        set_no_handle_error("tj3YUVPlaneHeight: componentID out of range");
-        return 0;
-    }
-    if height < 1 {
-        set_no_handle_error("tj3YUVPlaneHeight: height must be > 0");
-        return 0;
-    }
-    if !(0..TJ_NUMSAMP).contains(&subsamp) {
-        set_no_handle_error("tj3YUVPlaneHeight: invalid subsampling");
-        return 0;
-    }
-    if is_gray(subsamp) && component_id != 0 {
-        return 0;
-    }
-    let ph: usize = plane_height(component_id, height, subsamp);
-    if ph == 0 || ph > c_int::MAX as usize {
-        set_no_handle_error("tj3YUVPlaneHeight: plane height overflows int");
-        return 0;
-    }
-    ph as c_int
+    crate::unwind_guard!(0, {
+        if !(0..=2).contains(&component_id) {
+            set_no_handle_error("tj3YUVPlaneHeight: componentID out of range");
+            return 0;
+        }
+        if height < 1 {
+            set_no_handle_error("tj3YUVPlaneHeight: height must be > 0");
+            return 0;
+        }
+        if !(0..TJ_NUMSAMP).contains(&subsamp) {
+            set_no_handle_error("tj3YUVPlaneHeight: invalid subsampling");
+            return 0;
+        }
+        if is_gray(subsamp) && component_id != 0 {
+            return 0;
+        }
+        let ph: usize = plane_height(component_id, height, subsamp);
+        if ph == 0 || ph > c_int::MAX as usize {
+            set_no_handle_error("tj3YUVPlaneHeight: plane height overflows int");
+            return 0;
+        }
+        ph as c_int
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -396,16 +406,18 @@ fn scaling_factor_table() -> &'static [TjScalingFactor] {
 /// with the count.
 #[no_mangle]
 pub extern "C" fn tj3GetScalingFactors(num_scaling_factors: *mut c_int) -> *mut TjScalingFactor {
-    let table: &[TjScalingFactor] = scaling_factor_table();
-    if !num_scaling_factors.is_null() {
-        // SAFETY: caller-provided; NULL was rejected above.
-        unsafe {
-            *num_scaling_factors = table.len() as c_int;
+    crate::unwind_guard!(std::ptr::null_mut(), {
+        let table: &[TjScalingFactor] = scaling_factor_table();
+        if !num_scaling_factors.is_null() {
+            // SAFETY: caller-provided; NULL was rejected above.
+            unsafe {
+                *num_scaling_factors = table.len() as c_int;
+            }
         }
-    }
-    // Casting away const is sound because the table never mutates; the C
-    // ABI uses a mutable pointer for historical reasons only.
-    table.as_ptr() as *mut TjScalingFactor
+        // Casting away const is sound because the table never mutates; the C
+        // ABI uses a mutable pointer for historical reasons only.
+        table.as_ptr() as *mut TjScalingFactor
+    })
 }
 
 // Silence unused c_void import (used transitively by submodules when

@@ -21,6 +21,66 @@
 
 pub use libjpeg_turbo_rs as inner;
 
+// ---------------------------------------------------------------------------
+// P4-4: panic guard for every `pub extern "C"` entry point.
+//
+// A Rust `panic!` that crosses an `extern "C"` boundary is undefined
+// behaviour on every target we ship. This macro funnels any panic
+// caught in an FFI body into a documented C-style sentinel return
+// value (and a one-line stderr message). Every `pub extern "C" fn` in
+// the capi crate should wrap its body with `crate::unwind_guard!`.
+//
+// Usage:
+//
+//     #[no_mangle]
+//     pub extern "C" fn foo(...) -> c_int {
+//         crate::unwind_guard!(-1, {
+//             // original body, may panic
+//         })
+//     }
+//
+// For `()` return:
+//
+//     pub extern "C" fn bar(...) {
+//         crate::unwind_guard!((), { ... })
+//     }
+//
+// We do NOT set `[profile.release] panic = "abort"`: profile-`panic`
+// can only be customised at workspace root in stable Cargo, and the
+// main Rust crate (`libjpeg_turbo_rs`) keeps the default unwind
+// strategy so its `Result<…, JpegError>` callers can recover normally.
+// The `catch_unwind` guard below is sufficient to keep panics on the
+// Rust side of the FFI boundary.
+//
+// `#[macro_export]` is the only way to publish a `macro_rules!` macro
+// across submodules without `#[macro_use]`; it is intentionally hidden
+// from rustdoc because this is a crate-internal helper.
+#[macro_export]
+#[doc(hidden)]
+macro_rules! unwind_guard {
+    ($sentinel:expr, $body:block) => {{
+        match ::std::panic::catch_unwind(::std::panic::AssertUnwindSafe(|| $body)) {
+            Ok(__value) => __value,
+            Err(__payload) => {
+                let __msg: ::std::string::String =
+                    if let Some(s) = __payload.downcast_ref::<&'static str>() {
+                        (*s).to_string()
+                    } else if let Some(s) = __payload.downcast_ref::<::std::string::String>() {
+                        s.clone()
+                    } else {
+                        ::std::string::String::from("<non-string panic payload>")
+                    };
+                eprintln!(
+                    "libjpeg-turbo-rs-capi: panic caught at FFI boundary in `{}`: {}",
+                    ::std::module_path!(),
+                    __msg
+                );
+                $sentinel
+            }
+        }
+    }};
+}
+
 pub mod alloc;
 pub mod bufsize;
 pub mod compress;
