@@ -8,9 +8,16 @@
 
 ---
 
-## Current Status (2026-05-16)
+## Current Status (2026-05-17)
 
-Project is **replacement-ready** for the Rust-application + stock-tool drop-in story. System-library drop-in (Phase 2) is closed. Long-tail C-compatibility (Phase 3) is fully closed: P3-1 / P3-2 / P3-3 / P3-4 / P3-5 / P3-6 are all CLOSED. P3-2 closed 2026-05-09 with the full 12-bit `jpeg_*_raw_data` backend wired through `libjpeg_turbo_rs::raw_data_12::{compress,decompress}_raw_12`. Phase 4 currently has seven closed post-gate corrections: P4-1 exported `jpeg_calc_jpeg_dimensions`; P4-2 fixed scheduled full-parity and fuzz-smoke decode regressions; P4-3 pinned Fuzz Smoke's C oracle to libjpeg-turbo 3.x; P4-4 removed platform-specific padding noise from full cjpeg parity; P4-5 removed fast-DCT byte-oracle noise from scheduled full cjpeg parity; P4-6 fixed transform re-encoding of fuzzed progressive coefficients that require optimized Huffman tables; P4-7 split progressive block smoothing's gate into per-component prerequisites (AND-folded across components) and image-wide usefulness (OR-folded across components), matching C's `smoothing_ok` semantics exactly; P4-8 bounded the NEON encode LD3 chunks to keep the compiler's wider implicit memcpy lowering inside the source slice, fixing the AddressSanitizer over-read on tightly-sized rows.
+Project replacement readiness is tiered (see [README.md](../README.md) Replacement tiers):
+
+- **T1.** Rust crate (`use libjpeg_turbo_rs::*;`) — **ready** today.
+- **T2.** TurboJPEG cdylib (`libturbojpeg.so.0`) — **ready** today (opaque-handle API, no struct ABI risk).
+- **T3.** Classic libjpeg v8 cdylib (`libjpeg.so.8`) — **ready** for v8 consumers. The C ABI shim now defaults to `libjpeg.so.8` / `@rpath/libjpeg.8.dylib` (P4-3, 2026-05-17). System-library drop-in (Phase 2) closed; long-tail C-compatibility (Phase 3) fully closed; classic state-machine pathological coverage tracked under P4-5.
+- **T4.** System v6b/v7 drop-in (`libjpeg.so.62` / `libjpeg.so.7`) — **explicit non-goal** until per-ABI cdylib matrix ships. v6b is available only behind explicit `CAPI_SONAME=libjpeg.so.62 + CAPI_ACK_V6B_SONAME=1` opt-in.
+
+Phase 3 history: P3-1 / P3-2 / P3-3 / P3-4 / P3-5 / P3-6 all CLOSED. P3-2 closed 2026-05-09 with the full 12-bit `jpeg_*_raw_data` backend wired through `libjpeg_turbo_rs::raw_data_12::{compress,decompress}_raw_12`. Phase 4 post-gate corrections: P4-1 exported `jpeg_calc_jpeg_dimensions` (closed 2026-05-10); P4-2 introduced the T1–T4 replacement-tier framing (closed 2026-05-17); P4-3 flipped the default C-ABI SONAME from `libjpeg.so.62` to `libjpeg.so.8` (closed 2026-05-17).
 
 **Live gate** (refresh whenever the inventory changes):
 
@@ -46,9 +53,11 @@ Do not call the project a libjpeg-turbo C replacement until all are true:
 
 ## Open Items
 
-No OPEN or PARTIAL items left in Phase 3 or Phase 4. P3-2 closed 2026-05-09 — `jpeg12_write_raw_data` / `jpeg12_read_raw_data` are wired through the real 12-bit backend, pinned by `tests/capi_jpeg12_raw_data_round_trip.rs` (3 gates: shim-encode→native-decode, native-encode→shim-decode, shim-encode→shim-decode). P4-1 closed 2026-05-10 — `jpeg_calc_jpeg_dimensions` is now exported and covered by `capi_jpeglib_encode` + `symbol_inventory`.
+No OPEN or PARTIAL items in Phase 4. All P4-1..P4-12 closed as of 2026-05-17.
 
-**Next up**: nothing scheduled. The release gate is satisfied for the standard-sampling / classic-lifecycle / lossless-transform / non-standard-sampling / 12-bit-raw-data consumer surfaces. Future phases live in `docs/last_mile/phase5.md` or later if downstream surfaces another gap.
+History: P3-2 closed 2026-05-09 — `jpeg12_write_raw_data` / `jpeg12_read_raw_data` wired through the real 12-bit backend, pinned by `tests/capi_jpeg12_raw_data_round_trip.rs`. P4-1 closed 2026-05-10 — `jpeg_calc_jpeg_dimensions` exported. P4-2..P4-12 closed 2026-05-17 — T1–T4 tier framing, default SONAME flip to `libjpeg.so.8`, panic guard on all 145 C-ABI entry points, classic state-machine pathological harness infrastructure + first pattern, FEATURE_PARITY wording reconciliation, stale-stub sweep, runtime x86_64 BMI1+LZCNT dispatch audit + README correction, strided/zero-copy architectural filing, downstream compatibility lab filing, OSS-Fuzz project files prepared for upstream submission, hard-case q∈{98,99,100} parity tests.
+
+**Next up**: long-term backlog items live as P2-F (strided zero-copy refactor), P2-G (downstream lab uplift Qt+OpenCV), P2-H (OSS-Fuzz upstream PR + C-harness sanitizer), P2-I (remaining hard-case parity classes), and the per-ABI cdylib matrix / production packaging / no_std subset / security ops policy / cost-of-feature benchmarks — all tracked in the master plan at `/Users/yhkwon/.claude/plans/dreamy-moseying-swing.md`. None block the current Phase-4 release gate.
 
 ---
 
@@ -61,7 +70,7 @@ Each phase file is self-contained. Read only the one you need.
 | **Phase 1** | [last_mile/phase1.md](last_mile/phase1.md) | Original release gate: P0-1..4, P1 (Soft-Skip / Encode SIMD / Legacy / Precision / YUV), Phase-1 P2 (tjbench / PNG), Execution Plan (Tasks 1-7), Definition of Done. | All CLOSED — historical reference. |
 | **Phase 2** | [last_mile/phase2.md](last_mile/phase2.md) | System-library drop-in hardening: P2-1..11 (workflow flags, printf expansion, ABI cross-check, symbol inventory, install layout, fuzzing, distro consumers, progressive-encode samp411, crates.io publish). | All CLOSED. |
 | **Phase 3** | [last_mile/phase3.md](last_mile/phase3.md) | Long-tail C compatibility: P3-1 (ABI offset cross-check), P3-2 (12-bit raw-data backend), P3-3 (symbol-inventory allowlist triage), P3-4 (4-pixel chroma transform gate), P3-5 (classic lifecycle harness), P3-6 (non-standard sampling / RGB565). | All CLOSED. |
-| **Phase 4** | [last_mile/phase4.md](last_mile/phase4.md) | Post-gate corrections surfaced after Phase 3: P4-1..P4-8. | All CLOSED. |
+| **Phase 4** | [last_mile/phase4.md](last_mile/phase4.md) | Post-gate corrections surfaced after Phase 3: P4-1..P4-12 (jpeg_calc_jpeg_dimensions export, T1–T4 tier framing, SONAME flip to `libjpeg.so.8`, panic guard on all 145 entry points, pathological-lifecycle harness, FEATURE_PARITY wording, stub/divergence sweep, x86_64 BMI1+LZCNT dispatch audit, strided/zero-copy filing, downstream-lab filing, OSS-Fuzz project ready, hard-case q∈{98,99,100} parity). | All CLOSED 2026-05-17. |
 | **Reference** | [last_mile/reference_commands.md](last_mile/reference_commands.md) | Common verification commands (workspace test, stock-tool build, encode bench matrix, etc.). | — |
 
 ---

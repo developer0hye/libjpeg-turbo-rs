@@ -252,18 +252,21 @@ fn tj3_compress8_null_arguments_return_minus_one() {
 // ---------------------------------------------------------------------------
 
 /// Create a subdirectory under `parent` that holds symlinks exposing
-/// the actual cdylib under both the versioned install_name/SONAME and
-/// the short `libjpeg.{dylib,so}` link-time name. Returns the subdir.
+/// the actual cdylib under (a) the v8 install_name/SONAME the cdylib
+/// now advertises by default (P4-3, 2026-05-17), (b) the v6b name kept
+/// for prebuilt downstream consumers (Pillow / ImageMagick / libvips
+/// linked against the historical libjpeg.so.62), and (c) the short
+/// `libjpeg.{dylib,so}` link-time name. Returns the subdir.
 #[cfg(unix)]
 fn setup_symlinks(lib: &Path, parent: &Path) -> PathBuf {
     let subdir: PathBuf = parent.join("symlinks");
     std::fs::create_dir_all(&subdir).expect("mkdir symlinks");
-    let (versioned, short): (&str, &str) = if cfg!(target_os = "macos") {
-        ("libjpeg.62.dylib", "libjpeg.dylib")
+    let names: &[&str] = if cfg!(target_os = "macos") {
+        &["libjpeg.8.dylib", "libjpeg.62.dylib", "libjpeg.dylib"]
     } else {
-        ("libjpeg.so.62", "libjpeg.so")
+        &["libjpeg.so.8", "libjpeg.so.62", "libjpeg.so"]
     };
-    for name in [versioned, short] {
+    for name in names {
         let link = subdir.join(name);
         if !link.exists() {
             std::os::unix::fs::symlink(lib, &link).expect("symlink");
@@ -331,11 +334,13 @@ fn c_client_compress8_smoke() {
     let tmp: tempfile::TempDir = tempfile::tempdir().expect("tempdir");
     let exe: PathBuf = tmp.path().join("compress8_smoke");
 
-    // Our cdylib's install_name / SONAME (A1-13) is `libjpeg.62.dylib`
-    // (macOS) or `libjpeg.so.62` (Linux). Create a symlink directory
-    // that exposes BOTH the versioned name (what dyld/ld.so will look
-    // up at runtime) and the short `libjpeg` name (what `-ljpeg`
-    // resolves to at link time).
+    // Our cdylib's install_name / SONAME (P4-3, 2026-05-17) is now
+    // `libjpeg.8.dylib` (macOS) or `libjpeg.so.8` (Linux). Create a
+    // symlink directory that exposes the v8 versioned name (what
+    // dyld/ld.so will look up at runtime when this test links against
+    // -ljpeg), the v6b versioned name (kept for any prebuilt v6b
+    // consumer the test might also drive), and the short `libjpeg`
+    // name (what `-ljpeg` resolves to at link time).
     let symlink_dir: PathBuf = setup_symlinks(&lib, tmp.path());
 
     let mut cmd = Command::new(&cc);

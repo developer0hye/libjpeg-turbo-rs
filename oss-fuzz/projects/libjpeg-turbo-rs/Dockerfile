@@ -1,8 +1,8 @@
 # OSS-Fuzz container for libjpeg-turbo-rs.
 #
-# This is a draft intended for future upstream submission to
-# github.com/google/oss-fuzz. It is not committed to that repo yet; the file
-# lives in this repository so the project owns the canonical build spec.
+# Canonical build spec for `google/oss-fuzz/projects/libjpeg-turbo-rs/`.
+# This repository owns the source-of-truth; the OSS-Fuzz checkout consumes
+# a copy via the upstream PR workflow documented in `oss-fuzz/README.md`.
 #
 # Build locally (from an OSS-Fuzz checkout):
 #   python infra/helper.py build_image libjpeg-turbo-rs

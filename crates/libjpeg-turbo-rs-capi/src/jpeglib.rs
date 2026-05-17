@@ -1124,28 +1124,30 @@ unsafe extern "C" fn default_reset_error_mgr(cinfo: *mut c_void) {
 /// `cinfo.err = jpeg_std_error(&err);` works as expected.
 #[no_mangle]
 pub extern "C" fn jpeg_std_error(err: *mut JpegErrorMgr) -> *mut JpegErrorMgr {
-    if err.is_null() {
-        return std::ptr::null_mut();
-    }
-    // SAFETY: caller must ensure `err` points to a writable JpegErrorMgr.
-    unsafe {
-        let e: &mut JpegErrorMgr = &mut *err;
-        e.error_exit = Some(default_error_exit);
-        e.emit_message = Some(default_emit_message);
-        e.output_message = Some(default_output_message);
-        e.format_message = Some(default_format_message);
-        e.reset_error_mgr = Some(default_reset_error_mgr);
-        e.msg_code = 0;
-        e.msg_parm = [0u8; JMSG_STR_PARM_MAX];
-        e.trace_level = 0;
-        e.num_warnings = 0;
-        e.jpeg_message_table = std::ptr::null();
-        e.last_jpeg_message = 0;
-        e.addon_message_table = std::ptr::null();
-        e.first_addon_message = 0;
-        e.last_addon_message = 0;
-    }
-    err
+    crate::unwind_guard!(std::ptr::null_mut(), {
+        if err.is_null() {
+            return std::ptr::null_mut();
+        }
+        // SAFETY: caller must ensure `err` points to a writable JpegErrorMgr.
+        unsafe {
+            let e: &mut JpegErrorMgr = &mut *err;
+            e.error_exit = Some(default_error_exit);
+            e.emit_message = Some(default_emit_message);
+            e.output_message = Some(default_output_message);
+            e.format_message = Some(default_format_message);
+            e.reset_error_mgr = Some(default_reset_error_mgr);
+            e.msg_code = 0;
+            e.msg_parm = [0u8; JMSG_STR_PARM_MAX];
+            e.trace_level = 0;
+            e.num_warnings = 0;
+            e.jpeg_message_table = std::ptr::null();
+            e.last_jpeg_message = 0;
+            e.addon_message_table = std::ptr::null();
+            e.first_addon_message = 0;
+            e.last_addon_message = 0;
+        }
+        err
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -1163,176 +1165,180 @@ pub extern "C" fn jpeg_std_error(err: *mut JpegErrorMgr) -> *mut JpegErrorMgr {
 /// Rust-side state in the thread-local side table.
 #[no_mangle]
 pub extern "C" fn jpeg_CreateDecompress(cinfo: *mut c_void, _version: c_int, _struct_size: usize) {
-    // SAFETY: `cinfo` is caller-allocated; we only touch the bytes that
-    // fit the `JpegDecompressPublic` layout. If the buffer is smaller
-    // than that, the caller violated libjpeg's `sizeof(*cinfo)` contract
-    // and crashes are acceptable (matching upstream).
-    let c: &mut JpegDecompressPublic = match unsafe { cinfo_mut(cinfo) } {
-        Some(c) => c,
-        None => return,
-    };
-    // Do NOT zero `err` — the caller sets that up before calling us
-    // (per the `cinfo.err = jpeg_std_error(&err);` idiom).
-    //
-    // Wire up the memory-manager vtable so libjpeg callers can invoke
-    // `(*cinfo->mem->alloc_small)(...)` from the very first line of
-    // their main loops (e.g. wrppm.c output init).
-    c.mem = memmgr::create_memory_mgr() as *mut c_void;
-    c.progress = std::ptr::null_mut();
-    c.client_data = std::ptr::null_mut();
-    c.is_decompressor = 1;
-    c.global_state = DSTATE_START;
+    crate::unwind_guard!((), {
+        // SAFETY: `cinfo` is caller-allocated; we only touch the bytes that
+        // fit the `JpegDecompressPublic` layout. If the buffer is smaller
+        // than that, the caller violated libjpeg's `sizeof(*cinfo)` contract
+        // and crashes are acceptable (matching upstream).
+        let c: &mut JpegDecompressPublic = match unsafe { cinfo_mut(cinfo) } {
+            Some(c) => c,
+            None => return,
+        };
+        // Do NOT zero `err` — the caller sets that up before calling us
+        // (per the `cinfo.err = jpeg_std_error(&err);` idiom).
+        //
+        // Wire up the memory-manager vtable so libjpeg callers can invoke
+        // `(*cinfo->mem->alloc_small)(...)` from the very first line of
+        // their main loops (e.g. wrppm.c output init).
+        c.mem = memmgr::create_memory_mgr() as *mut c_void;
+        c.progress = std::ptr::null_mut();
+        c.client_data = std::ptr::null_mut();
+        c.is_decompressor = 1;
+        c.global_state = DSTATE_START;
 
-    c.src = std::ptr::null_mut();
+        c.src = std::ptr::null_mut();
 
-    c.image_width = 0;
-    c.image_height = 0;
-    c.num_components = 0;
-    c.jpeg_color_space = JCS_UNKNOWN;
+        c.image_width = 0;
+        c.image_height = 0;
+        c.num_components = 0;
+        c.jpeg_color_space = JCS_UNKNOWN;
 
-    // Output-side decompression defaults (match `jinit_decompress_master`).
-    c.out_color_space = JCS_UNKNOWN;
-    c.scale_num = 1;
-    c.scale_denom = 1;
-    c.output_gamma = 1.0;
-    c.buffered_image = 0;
-    c.raw_data_out = 0;
-    c.dct_method = 0; // JDCT_ISLOW
-    c.do_fancy_upsampling = 1;
-    c.do_block_smoothing = 1;
-    c.quantize_colors = 0;
-    c.dither_mode = 2; // JDITHER_FS
-    c.two_pass_quantize = 1;
-    c.desired_number_of_colors = 256;
-    c.enable_1pass_quant = 0;
-    c.enable_external_quant = 0;
-    c.enable_2pass_quant = 0;
+        // Output-side decompression defaults (match `jinit_decompress_master`).
+        c.out_color_space = JCS_UNKNOWN;
+        c.scale_num = 1;
+        c.scale_denom = 1;
+        c.output_gamma = 1.0;
+        c.buffered_image = 0;
+        c.raw_data_out = 0;
+        c.dct_method = 0; // JDCT_ISLOW
+        c.do_fancy_upsampling = 1;
+        c.do_block_smoothing = 1;
+        c.quantize_colors = 0;
+        c.dither_mode = 2; // JDITHER_FS
+        c.two_pass_quantize = 1;
+        c.desired_number_of_colors = 256;
+        c.enable_1pass_quant = 0;
+        c.enable_external_quant = 0;
+        c.enable_2pass_quant = 0;
 
-    c.output_width = 0;
-    c.output_height = 0;
-    c.out_color_components = 0;
-    c.output_components = 0;
-    c.rec_outbuf_height = 1;
+        c.output_width = 0;
+        c.output_height = 0;
+        c.out_color_components = 0;
+        c.output_components = 0;
+        c.rec_outbuf_height = 1;
 
-    c.actual_number_of_colors = 0;
-    c.colormap = std::ptr::null_mut();
+        c.actual_number_of_colors = 0;
+        c.colormap = std::ptr::null_mut();
 
-    c.output_scanline = 0;
-    c.input_scan_number = 0;
-    c.input_iMCU_row = 0;
-    c.output_scan_number = 0;
-    c.output_iMCU_row = 0;
+        c.output_scanline = 0;
+        c.input_scan_number = 0;
+        c.input_iMCU_row = 0;
+        c.output_scan_number = 0;
+        c.output_iMCU_row = 0;
 
-    c.coef_bits = std::ptr::null_mut();
+        c.coef_bits = std::ptr::null_mut();
 
-    for slot in c.quant_tbl_ptrs.iter_mut() {
-        *slot = std::ptr::null_mut();
-    }
-    for slot in c.dc_huff_tbl_ptrs.iter_mut() {
-        *slot = std::ptr::null_mut();
-    }
-    for slot in c.ac_huff_tbl_ptrs.iter_mut() {
-        *slot = std::ptr::null_mut();
-    }
+        for slot in c.quant_tbl_ptrs.iter_mut() {
+            *slot = std::ptr::null_mut();
+        }
+        for slot in c.dc_huff_tbl_ptrs.iter_mut() {
+            *slot = std::ptr::null_mut();
+        }
+        for slot in c.ac_huff_tbl_ptrs.iter_mut() {
+            *slot = std::ptr::null_mut();
+        }
 
-    c.data_precision = 8;
-    c.comp_info = std::ptr::null_mut();
-    c.is_baseline = 0;
-    c.progressive_mode = 0;
-    c.arith_code = 0;
+        c.data_precision = 8;
+        c.comp_info = std::ptr::null_mut();
+        c.is_baseline = 0;
+        c.progressive_mode = 0;
+        c.arith_code = 0;
 
-    c.arith_dc_L = [0u8; NUM_ARITH_TBLS];
-    c.arith_dc_U = [1u8; NUM_ARITH_TBLS];
-    c.arith_ac_K = [5u8; NUM_ARITH_TBLS];
+        c.arith_dc_L = [0u8; NUM_ARITH_TBLS];
+        c.arith_dc_U = [1u8; NUM_ARITH_TBLS];
+        c.arith_ac_K = [5u8; NUM_ARITH_TBLS];
 
-    c.restart_interval = 0;
+        c.restart_interval = 0;
 
-    c.saw_JFIF_marker = 0;
-    c.JFIF_major_version = 1;
-    c.JFIF_minor_version = 1;
-    c.density_unit = 0;
-    c.X_density = 1;
-    c.Y_density = 1;
-    c.saw_Adobe_marker = 0;
-    c.Adobe_transform = 0;
+        c.saw_JFIF_marker = 0;
+        c.JFIF_major_version = 1;
+        c.JFIF_minor_version = 1;
+        c.density_unit = 0;
+        c.X_density = 1;
+        c.Y_density = 1;
+        c.saw_Adobe_marker = 0;
+        c.Adobe_transform = 0;
 
-    c.CCIR601_sampling = 0;
+        c.CCIR601_sampling = 0;
 
-    c.marker_list = std::ptr::null_mut();
+        c.marker_list = std::ptr::null_mut();
 
-    c.max_h_samp_factor = 0;
-    c.max_v_samp_factor = 0;
-    c.min_DCT_h_scaled_size = 0;
-    c.min_DCT_v_scaled_size = 0;
-    c.total_iMCU_rows = 0;
+        c.max_h_samp_factor = 0;
+        c.max_v_samp_factor = 0;
+        c.min_DCT_h_scaled_size = 0;
+        c.min_DCT_v_scaled_size = 0;
+        c.total_iMCU_rows = 0;
 
-    c.sample_range_limit = std::ptr::null_mut();
+        c.sample_range_limit = std::ptr::null_mut();
 
-    c.comps_in_scan = 0;
-    for slot in c.cur_comp_info.iter_mut() {
-        *slot = std::ptr::null_mut();
-    }
-    c.MCUs_per_row = 0;
-    c.MCU_rows_in_scan = 0;
-    c.blocks_in_MCU = 0;
-    c.MCU_membership = [0; D_MAX_BLOCKS_IN_MCU];
+        c.comps_in_scan = 0;
+        for slot in c.cur_comp_info.iter_mut() {
+            *slot = std::ptr::null_mut();
+        }
+        c.MCUs_per_row = 0;
+        c.MCU_rows_in_scan = 0;
+        c.blocks_in_MCU = 0;
+        c.MCU_membership = [0; D_MAX_BLOCKS_IN_MCU];
 
-    c.Ss = 0;
-    c.Se = 0;
-    c.Ah = 0;
-    c.Al = 0;
+        c.Ss = 0;
+        c.Se = 0;
+        c.Ah = 0;
+        c.Al = 0;
 
-    c.block_size = 8; // DCTSIZE for lossy mode
-    c.natural_order = std::ptr::null();
-    c.lim_Se = 63; // DCTSIZE2 - 1
+        c.block_size = 8; // DCTSIZE for lossy mode
+        c.natural_order = std::ptr::null();
+        c.lim_Se = 63; // DCTSIZE2 - 1
 
-    c.unread_marker = 0;
+        c.unread_marker = 0;
 
-    c.master = std::ptr::null_mut();
-    c.main_controller = std::ptr::null_mut();
-    c.coef = std::ptr::null_mut();
-    c.post = std::ptr::null_mut();
-    c.inputctl = std::ptr::null_mut();
-    c.marker = std::ptr::null_mut();
-    c.entropy = std::ptr::null_mut();
-    c.idct = std::ptr::null_mut();
-    c.upsample = std::ptr::null_mut();
-    c.cconvert = std::ptr::null_mut();
-    c.cquantize = std::ptr::null_mut();
+        c.master = std::ptr::null_mut();
+        c.main_controller = std::ptr::null_mut();
+        c.coef = std::ptr::null_mut();
+        c.post = std::ptr::null_mut();
+        c.inputctl = std::ptr::null_mut();
+        c.marker = std::ptr::null_mut();
+        c.entropy = std::ptr::null_mut();
+        c.idct = std::ptr::null_mut();
+        c.upsample = std::ptr::null_mut();
+        c.cconvert = std::ptr::null_mut();
+        c.cquantize = std::ptr::null_mut();
 
-    // Register Rust-side private state in the thread-local side table.
-    decompress_private_insert(cinfo, Box::default());
+        // Register Rust-side private state in the thread-local side table.
+        decompress_private_insert(cinfo, Box::default());
+    })
 }
 
 /// `jpeg_destroy_decompress(cinfo)` — free the Rust-side private state.
 #[no_mangle]
 pub extern "C" fn jpeg_destroy_decompress(cinfo: *mut c_void) {
-    if cinfo.is_null() {
-        return;
-    }
-    // Release the private state from the side table. Drop any
-    // high-precision (12/16-bit) decoded state parked in the thread-local
-    // `HIGH_PRECISION_STATE` map, keyed by the private pointer, before the
-    // box itself goes out of scope.
-    let priv_raw: *mut c_void = decompress_private_raw(cinfo);
-    if !priv_raw.is_null() {
-        hp_drop_for(priv_raw);
-    }
-    let _dropped: Option<Box<DecompressPrivate>> = decompress_private_remove(cinfo);
-    if let Some(c) = unsafe { cinfo_mut(cinfo) } {
-        // Release the memory manager and every pool it owns before
-        // nulling the slot; this mirrors `self_destruct` in jmemmgr.c.
-        if !c.mem.is_null() {
-            // SAFETY: `c.mem` was produced by `memmgr::create_memory_mgr`
-            // in `jpeg_CreateDecompress` and has not been freed.
-            unsafe {
-                memmgr::destroy_memory_mgr(c.mem as *mut memmgr::JpegMemoryMgr);
-            }
-            c.mem = std::ptr::null_mut();
+    crate::unwind_guard!((), {
+        if cinfo.is_null() {
+            return;
         }
-        c.src = std::ptr::null_mut();
-        c.global_state = 0;
-    }
+        // Release the private state from the side table. Drop any
+        // high-precision (12/16-bit) decoded state parked in the thread-local
+        // `HIGH_PRECISION_STATE` map, keyed by the private pointer, before the
+        // box itself goes out of scope.
+        let priv_raw: *mut c_void = decompress_private_raw(cinfo);
+        if !priv_raw.is_null() {
+            hp_drop_for(priv_raw);
+        }
+        let _dropped: Option<Box<DecompressPrivate>> = decompress_private_remove(cinfo);
+        if let Some(c) = unsafe { cinfo_mut(cinfo) } {
+            // Release the memory manager and every pool it owns before
+            // nulling the slot; this mirrors `self_destruct` in jmemmgr.c.
+            if !c.mem.is_null() {
+                // SAFETY: `c.mem` was produced by `memmgr::create_memory_mgr`
+                // in `jpeg_CreateDecompress` and has not been freed.
+                unsafe {
+                    memmgr::destroy_memory_mgr(c.mem as *mut memmgr::JpegMemoryMgr);
+                }
+                c.mem = std::ptr::null_mut();
+            }
+            c.src = std::ptr::null_mut();
+            c.global_state = 0;
+        }
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -1379,19 +1385,21 @@ unsafe extern "C" fn noop_term_source(_cinfo: *mut c_void) {}
 /// slice. Matches libjpeg `jpeg_mem_src(cinfo, buf, size)`.
 #[no_mangle]
 pub extern "C" fn jpeg_mem_src(cinfo: *mut c_void, buf: *const u8, size: std::os::raw::c_ulong) {
-    let c: &mut JpegDecompressPublic = match unsafe { cinfo_mut(cinfo) } {
-        Some(c) => c,
-        None => return,
-    };
-    let priv_ptr: *mut c_void = decompress_private_raw(cinfo);
-    let priv_state: &mut DecompressPrivate = match unsafe { priv_from_ptr(priv_ptr) } {
-        Some(p) => p,
-        None => return,
-    };
+    crate::unwind_guard!((), {
+        let c: &mut JpegDecompressPublic = match unsafe { cinfo_mut(cinfo) } {
+            Some(c) => c,
+            None => return,
+        };
+        let priv_ptr: *mut c_void = decompress_private_raw(cinfo);
+        let priv_state: &mut DecompressPrivate = match unsafe { priv_from_ptr(priv_ptr) } {
+            Some(p) => p,
+            None => return,
+        };
 
-    let len: usize = size as usize;
-    priv_state.source = JpegSource::Memory { ptr: buf, len };
-    install_source_mgr(c, priv_state, buf, len);
+        let len: usize = size as usize;
+        priv_state.source = JpegSource::Memory { ptr: buf, len };
+        install_source_mgr(c, priv_state, buf, len);
+    })
 }
 
 /// Attach a source manager that reads from a `FILE *`. libjpeg's signature
@@ -1406,36 +1414,38 @@ pub extern "C" fn jpeg_mem_src(cinfo: *mut c_void, buf: *const u8, size: std::os
 /// semantics applications rely on in practice.
 #[no_mangle]
 pub extern "C" fn jpeg_stdio_src(cinfo: *mut c_void, infile: *mut c_void) {
-    let c: &mut JpegDecompressPublic = match unsafe { cinfo_mut(cinfo) } {
-        Some(c) => c,
-        None => return,
-    };
-    let priv_ptr: *mut c_void = decompress_private_raw(cinfo);
-    let priv_state: &mut DecompressPrivate = match unsafe { priv_from_ptr(priv_ptr) } {
-        Some(p) => p,
-        None => return,
-    };
-    if infile.is_null() {
-        priv_state.source = JpegSource::None;
-        return;
-    }
-    let bytes: Vec<u8> = match read_c_file(infile) {
-        Ok(b) => b,
-        Err(msg) => {
-            priv_state.last_error =
-                CString::new(format!("jpeg_stdio_src: {msg}")).unwrap_or_default();
+    crate::unwind_guard!((), {
+        let c: &mut JpegDecompressPublic = match unsafe { cinfo_mut(cinfo) } {
+            Some(c) => c,
+            None => return,
+        };
+        let priv_ptr: *mut c_void = decompress_private_raw(cinfo);
+        let priv_state: &mut DecompressPrivate = match unsafe { priv_from_ptr(priv_ptr) } {
+            Some(p) => p,
+            None => return,
+        };
+        if infile.is_null() {
+            priv_state.source = JpegSource::None;
             return;
         }
-    };
-    let buf_ptr: *const u8 = bytes.as_ptr();
-    let buf_len: usize = bytes.len();
-    priv_state.source = JpegSource::Owned(bytes);
-    // Re-resolve the pointer from the stored buffer to avoid pointing at
-    // the stack-local `bytes` variable whose lifetime ended above.
-    if let JpegSource::Owned(ref v) = priv_state.source {
-        install_source_mgr(c, priv_state, v.as_ptr(), v.len());
-        let _ = (buf_ptr, buf_len); // silence unused on the borrow path
-    }
+        let bytes: Vec<u8> = match read_c_file(infile) {
+            Ok(b) => b,
+            Err(msg) => {
+                priv_state.last_error =
+                    CString::new(format!("jpeg_stdio_src: {msg}")).unwrap_or_default();
+                return;
+            }
+        };
+        let buf_ptr: *const u8 = bytes.as_ptr();
+        let buf_len: usize = bytes.len();
+        priv_state.source = JpegSource::Owned(bytes);
+        // Re-resolve the pointer from the stored buffer to avoid pointing at
+        // the stack-local `bytes` variable whose lifetime ended above.
+        if let JpegSource::Owned(ref v) = priv_state.source {
+            install_source_mgr(c, priv_state, v.as_ptr(), v.len());
+            let _ = (buf_ptr, buf_len); // silence unused on the borrow path
+        }
+    })
 }
 
 /// Slurp a `FILE *` by converting it to a POSIX fd via `fileno` and
@@ -1639,13 +1649,14 @@ fn colorspace_to_jcs(cs: libjpeg_turbo_rs::ColorSpace) -> c_int {
 }
 
 /// If `bytes` is a tables-only abbreviated JPEG datastream per
-/// libjpeg.txt §6 (SOI + zero or more DQT/DHT/DAC/COM/APPn/DRI markers
-/// + EOI, with no SOF or SOS), return `Some(prefix)` where `prefix` is
-/// the byte run from the SOI through the last marker before EOI — i.e.
-/// the input with the trailing `FF D9` (EOI) stripped. The caller can
-/// splice this prefix in front of a strip stream that starts with `FF D8`
-/// (after dropping its own SOI) to form a single self-contained JPEG
-/// that `Decoder::new` parses normally.
+/// libjpeg.txt §6 (SOI, then zero or more DQT/DHT/DAC/COM/APPn/DRI
+/// markers, then EOI, with no SOF or SOS), return `Some(prefix)` where
+/// `prefix` is the byte run from the SOI through the last marker
+/// before EOI — i.e. the input with the trailing `FF D9` (EOI)
+/// stripped. The caller can splice this prefix in front of a strip
+/// stream that starts with `FF D8` (after dropping its own SOI) to
+/// form a single self-contained JPEG that `Decoder::new` parses
+/// normally.
 ///
 /// Returns `None` if the input isn't a clean tables-only datastream
 /// (e.g. it has an SOF marker, or it's truncated, or it has a malformed
@@ -1735,377 +1746,381 @@ fn detect_tables_only(bytes: &[u8]) -> Option<Vec<u8>> {
 ///     image-only datastream (the libtiff `JPEGTables` flow).
 #[no_mangle]
 pub extern "C" fn jpeg_read_header(cinfo: *mut c_void, require_image: CBoolean) -> c_int {
-    let c: &mut JpegDecompressPublic = match unsafe { cinfo_mut(cinfo) } {
-        Some(c) => c,
-        None => return JPEG_SUSPENDED,
-    };
-    let priv_ptr: *mut c_void = decompress_private_raw(cinfo);
-    let priv_state: &mut DecompressPrivate = match unsafe { priv_from_ptr(priv_ptr) } {
-        Some(p) => p,
-        None => return JPEG_SUSPENDED,
-    };
+    crate::unwind_guard!(JPEG_SUSPENDED, {
+        let c: &mut JpegDecompressPublic = match unsafe { cinfo_mut(cinfo) } {
+            Some(c) => c,
+            None => return JPEG_SUSPENDED,
+        };
+        let priv_ptr: *mut c_void = decompress_private_raw(cinfo);
+        let priv_state: &mut DecompressPrivate = match unsafe { priv_from_ptr(priv_ptr) } {
+            Some(p) => p,
+            None => return JPEG_SUSPENDED,
+        };
 
-    // If `jpeg_mem_src` / `jpeg_stdio_src` were called, `priv_state.source`
-    // is already populated. Otherwise — typical of Pillow's `_imaging.so`
-    // and libtiff's libjpeg consumer, both of which install their own
-    // `jpeg_source_mgr` directly — drain the caller-installed source
-    // through its `fill_input_buffer` callback into an `Owned` buffer
-    // so the rest of the decode path proceeds normally. The bridge
-    // resumes across suspending retries via
-    // `priv_state.bridge_partial`, so a non-blocking source feeding
-    // bytes one chunk at a time eventually succeeds without losing
-    // already-drained input.
-    if priv_state.source.as_bytes().is_none() {
-        // SAFETY: c is a live JpegDecompressPublic; if c.src is non-NULL,
-        // the caller asserts it points at a libjpeg-ABI source manager.
-        if let Some(drained) = unsafe { drain_caller_source_mgr(c, priv_state) } {
-            priv_state.source = JpegSource::Owned(drained);
+        // If `jpeg_mem_src` / `jpeg_stdio_src` were called, `priv_state.source`
+        // is already populated. Otherwise — typical of Pillow's `_imaging.so`
+        // and libtiff's libjpeg consumer, both of which install their own
+        // `jpeg_source_mgr` directly — drain the caller-installed source
+        // through its `fill_input_buffer` callback into an `Owned` buffer
+        // so the rest of the decode path proceeds normally. The bridge
+        // resumes across suspending retries via
+        // `priv_state.bridge_partial`, so a non-blocking source feeding
+        // bytes one chunk at a time eventually succeeds without losing
+        // already-drained input.
+        if priv_state.source.as_bytes().is_none() {
+            // SAFETY: c is a live JpegDecompressPublic; if c.src is non-NULL,
+            // the caller asserts it points at a libjpeg-ABI source manager.
+            if let Some(drained) = unsafe { drain_caller_source_mgr(c, priv_state) } {
+                priv_state.source = JpegSource::Owned(drained);
+            }
         }
-    }
 
-    let raw_bytes: &[u8] = match priv_state.source.as_bytes() {
-        Some(b) if b.len() >= 2 => b,
-        _ => {
-            priv_state.last_error =
-                CString::new("jpeg_read_header: no JPEG source attached").unwrap_or_default();
-            return JPEG_SUSPENDED;
-        }
-    };
+        let raw_bytes: &[u8] = match priv_state.source.as_bytes() {
+            Some(b) if b.len() >= 2 => b,
+            _ => {
+                priv_state.last_error =
+                    CString::new("jpeg_read_header: no JPEG source attached").unwrap_or_default();
+                return JPEG_SUSPENDED;
+            }
+        };
 
-    // Tables-only abbreviated datastream (libjpeg.txt §6) detection.
-    // libtiff's COMPRESSION_JPEG path calls `jpeg_read_header` on its
-    // `JPEGTables` blob first (SOI + DQT/DHT + EOI, no SOF/SOS), expects
-    // `JPEG_HEADER_TABLES_ONLY` (= 2), and *then* re-points the source
-    // manager at strip data and calls `jpeg_read_header` again to parse
-    // the actual image header — which is missing tables that the strip
-    // data inherits from the cached `JPEGTables`. The shim emulates this
-    // contract by stashing the tables-only bytes (minus the trailing EOI)
-    // in `priv_state.tables_only_prefix` and splicing them in front of
-    // the next strip's body so `Decoder::new` sees a single self-contained
-    // JPEG.
-    //
-    // Detection runs on every fresh drain (not gated on
-    // `tables_only_prefix.is_none()`) so a cinfo reused across multiple
-    // images can refresh the cached tables on each new tables-only
-    // datastream — stock libjpeg's `jpeg_read_header` accepts repeated
-    // tables-only reads and updates the cached tables in place. After
-    // detection we reset `priv_state.source` to `None` so the next
-    // `jpeg_read_header` call re-drains the caller's source manager and
-    // picks up the strip bytes libtiff has now installed.
-    if let Some(prefix) = detect_tables_only(raw_bytes) {
-        // libjpeg.txt §6 / jdapimin.c::jpeg_read_header: when the
-        // caller passed `require_image = TRUE`, a tables-only blob is
-        // *not* a valid response — invoke `error_exit` with
-        // `JERR_NO_IMAGE` (upstream code 53 at `JPEG_LIB_VERSION=80`,
-        // verified empirically against the submodule's `jerror.h`).
-        // A `setjmp`/`longjmp` consumer recovers; a default handler
-        // aborts. The cached prefix is *not* updated in this branch
-        // because the consumer asked for an image and we're delivering
-        // the documented error.
-        if require_image != 0 {
-            priv_state.last_error = CString::new(
-                "jpeg_read_header: JERR_NO_IMAGE — caller passed require_image=TRUE \
+        // Tables-only abbreviated datastream (libjpeg.txt §6) detection.
+        // libtiff's COMPRESSION_JPEG path calls `jpeg_read_header` on its
+        // `JPEGTables` blob first (SOI + DQT/DHT + EOI, no SOF/SOS), expects
+        // `JPEG_HEADER_TABLES_ONLY` (= 2), and *then* re-points the source
+        // manager at strip data and calls `jpeg_read_header` again to parse
+        // the actual image header — which is missing tables that the strip
+        // data inherits from the cached `JPEGTables`. The shim emulates this
+        // contract by stashing the tables-only bytes (minus the trailing EOI)
+        // in `priv_state.tables_only_prefix` and splicing them in front of
+        // the next strip's body so `Decoder::new` sees a single self-contained
+        // JPEG.
+        //
+        // Detection runs on every fresh drain (not gated on
+        // `tables_only_prefix.is_none()`) so a cinfo reused across multiple
+        // images can refresh the cached tables on each new tables-only
+        // datastream — stock libjpeg's `jpeg_read_header` accepts repeated
+        // tables-only reads and updates the cached tables in place. After
+        // detection we reset `priv_state.source` to `None` so the next
+        // `jpeg_read_header` call re-drains the caller's source manager and
+        // picks up the strip bytes libtiff has now installed.
+        if let Some(prefix) = detect_tables_only(raw_bytes) {
+            // libjpeg.txt §6 / jdapimin.c::jpeg_read_header: when the
+            // caller passed `require_image = TRUE`, a tables-only blob is
+            // *not* a valid response — invoke `error_exit` with
+            // `JERR_NO_IMAGE` (upstream code 53 at `JPEG_LIB_VERSION=80`,
+            // verified empirically against the submodule's `jerror.h`).
+            // A `setjmp`/`longjmp` consumer recovers; a default handler
+            // aborts. The cached prefix is *not* updated in this branch
+            // because the consumer asked for an image and we're delivering
+            // the documented error.
+            if require_image != 0 {
+                priv_state.last_error = CString::new(
+                    "jpeg_read_header: JERR_NO_IMAGE — caller passed require_image=TRUE \
                  but the input is a tables-only abbreviated datastream",
-            )
-            .unwrap_or_default();
-            invoke_error_exit(cinfo, 53);
-            // Defensive return if a non-conforming handler returns
-            // without longjmp-ing (violates the libjpeg contract).
-            return JPEG_SUSPENDED;
-        }
-        priv_state.tables_only_prefix = Some(prefix);
-        priv_state.source = JpegSource::None;
-        priv_state.last_error = CString::new("No error").unwrap_or_default();
-        return JPEG_HEADER_TABLES_ONLY;
-    }
-
-    // If we have a stashed tables-only prefix and the new input starts
-    // with SOI, splice them so `Decoder::new` sees the tables + image
-    // as one stream. The splice is unconditional on prefix presence —
-    // libjpeg's table-replacement contract is "the most recent table
-    // in source order wins for each `(class, destination)` slot", so
-    // an image carrying its own DQT/DHT (a "partial abbreviated"
-    // image, or even a fully self-contained JPEG run on a cinfo with
-    // a stale prefix) simply overrides whatever the cached prefix
-    // installed — no incorrect-decode risk. We persist the spliced
-    // bytes back into `priv_state.source` so the rest of the decode
-    // path (`jpeg_start_decompress`, `jpeg_read_raw_data`, …) reads
-    // from the unified stream.
-    let needs_splice: bool = priv_state.tables_only_prefix.is_some()
-        && raw_bytes.len() >= 2
-        && raw_bytes[0] == 0xFF
-        && raw_bytes[1] == 0xD8;
-    if needs_splice {
-        // `raw_bytes` borrows from `priv_state.source.as_bytes()`. We're
-        // about to replace that backing buffer, so build the combined
-        // Vec first via owned copies; then assign.
-        let prefix_clone: Vec<u8> = priv_state.tables_only_prefix.as_deref().unwrap().to_vec();
-        let strip_body: Vec<u8> = raw_bytes[2..].to_vec();
-        let mut combined: Vec<u8> = Vec::with_capacity(prefix_clone.len() + strip_body.len());
-        combined.extend_from_slice(&prefix_clone);
-        combined.extend_from_slice(&strip_body);
-        priv_state.source = JpegSource::Owned(combined);
-    }
-    let bytes: &[u8] = match priv_state.source.as_bytes() {
-        Some(b) if b.len() >= 2 => b,
-        _ => {
-            priv_state.last_error =
-                CString::new("jpeg_read_header: no JPEG source after splice").unwrap_or_default();
-            return JPEG_SUSPENDED;
-        }
-    };
-
-    let mut decoder: libjpeg_turbo_rs::Decoder<'_> = match libjpeg_turbo_rs::Decoder::new(bytes) {
-        Ok(d) => d,
-        Err(e) => {
-            priv_state.last_error =
-                CString::new(format!("jpeg_read_header: {e}")).unwrap_or_default();
-            // Distinguish "input is incomplete (need more data)" from
-            // "input is syntactically complete but corrupt." Bytes ending
-            // in EOI (FF D9) are syntactically complete, so a decoder
-            // error means real corruption — invoke the consumer's
-            // `error_exit` per the libjpeg.txt §3 contract so a
-            // setjmp/longjmp handler can recover. Bytes without EOI may
-            // still be truncated, so leave the existing JPEG_SUSPENDED
-            // semantics intact and let the consumer feed more.
-            //
-            // The `bytes.len() >= 4` guard avoids a false positive on
-            // tiny inputs whose entire content happens to look like
-            // `FF D9` — a real JPEG always has SOI (FF D8) before EOI.
-            let appears_complete: bool = bytes.len() >= 4
-                && bytes[bytes.len() - 2] == 0xFF
-                && bytes[bytes.len() - 1] == 0xD9;
-            if appears_complete {
-                // Code 12 maps to JERR_BAD_LENGTH in the upstream v8
-                // alphabetical enum (jerror.h, with JPEG_LIB_VERSION=80
-                // excluding JERR_ARITH_NOTIMPL). It's the closest fit
-                // for the most common decoder rejection cause (bogus
-                // marker length); other causes still land here with the
-                // same code, and the consumer's `format_message` looks
-                // up the description in the message table. Consumers
-                // that care about the specific cause read
-                // `priv_state.last_error` (already populated above).
-                invoke_error_exit(cinfo, 12);
-                // If a custom handler returns instead of longjmping
-                // (which violates the libjpeg contract), fall through
-                // to JPEG_SUSPENDED so the caller still sees a
-                // non-success return.
+                )
+                .unwrap_or_default();
+                invoke_error_exit(cinfo, 53);
+                // Defensive return if a non-conforming handler returns
+                // without longjmp-ing (violates the libjpeg contract).
+                return JPEG_SUSPENDED;
             }
-            return JPEG_SUSPENDED;
+            priv_state.tables_only_prefix = Some(prefix);
+            priv_state.source = JpegSource::None;
+            priv_state.last_error = CString::new("No error").unwrap_or_default();
+            return JPEG_HEADER_TABLES_ONLY;
         }
-    };
-    // Re-parse with the per-cinfo marker save list so APP/COM markers
-    // the caller asked for via `jpeg_save_markers` land in
-    // `decoder.saved_markers()`. Stock libjpeg-turbo populates
-    // `cinfo->marker_list` during `jpeg_read_header` before
-    // `jpeg_read_coefficients` runs; downstream `transupp` callers
-    // (stock `jpegtran -copy all <op>`) iterate that list to copy
-    // ICC profiles and other APP markers across to dstinfo via
-    // `jpeg_write_marker`. Without this re-parse the list stays empty
-    // and `jcopy_markers_execute` finds nothing to forward, so the
-    // ICC chunk on `monkey12.jpg` (and any APP/COM marker on other
-    // fixtures) silently disappears in transcode output.
-    let save_config: libjpeg_turbo_rs::MarkerSaveConfig =
-        marker_save_to_config(&priv_state.marker_save);
-    if !matches!(save_config, libjpeg_turbo_rs::MarkerSaveConfig::None) {
-        decoder.save_markers(save_config);
-    }
 
-    let frame: &libjpeg_turbo_rs::FrameHeader = decoder.header();
-    c.image_width = frame.width as JDimension;
-    c.image_height = frame.height as JDimension;
-    c.num_components = frame.components.len() as c_int;
-    c.data_precision = frame.precision as c_int;
-    c.progressive_mode = if frame.is_progressive { 1 } else { 0 };
+        // If we have a stashed tables-only prefix and the new input starts
+        // with SOI, splice them so `Decoder::new` sees the tables + image
+        // as one stream. The splice is unconditional on prefix presence —
+        // libjpeg's table-replacement contract is "the most recent table
+        // in source order wins for each `(class, destination)` slot", so
+        // an image carrying its own DQT/DHT (a "partial abbreviated"
+        // image, or even a fully self-contained JPEG run on a cinfo with
+        // a stale prefix) simply overrides whatever the cached prefix
+        // installed — no incorrect-decode risk. We persist the spliced
+        // bytes back into `priv_state.source` so the rest of the decode
+        // path (`jpeg_start_decompress`, `jpeg_read_raw_data`, …) reads
+        // from the unified stream.
+        let needs_splice: bool = priv_state.tables_only_prefix.is_some()
+            && raw_bytes.len() >= 2
+            && raw_bytes[0] == 0xFF
+            && raw_bytes[1] == 0xD8;
+        if needs_splice {
+            // `raw_bytes` borrows from `priv_state.source.as_bytes()`. We're
+            // about to replace that backing buffer, so build the combined
+            // Vec first via owned copies; then assign.
+            let prefix_clone: Vec<u8> = priv_state.tables_only_prefix.as_deref().unwrap().to_vec();
+            let strip_body: Vec<u8> = raw_bytes[2..].to_vec();
+            let mut combined: Vec<u8> = Vec::with_capacity(prefix_clone.len() + strip_body.len());
+            combined.extend_from_slice(&prefix_clone);
+            combined.extend_from_slice(&strip_body);
+            priv_state.source = JpegSource::Owned(combined);
+        }
+        let bytes: &[u8] = match priv_state.source.as_bytes() {
+            Some(b) if b.len() >= 2 => b,
+            _ => {
+                priv_state.last_error =
+                    CString::new("jpeg_read_header: no JPEG source after splice")
+                        .unwrap_or_default();
+                return JPEG_SUSPENDED;
+            }
+        };
 
-    // Populate JFIF presence + density from the parsed APP0 marker.
-    // Stock libjpeg-turbo sets `cinfo.saw_JFIF_marker`,
-    // `JFIF_{major,minor}_version`, and
-    // `density_unit / X_density / Y_density` during
-    // `jpeg_read_header`; without this, `jpegtran -copy all <op>`
-    // paths that go through
-    // `jpeg_copy_critical_parameters → materialize_foreign_coef_arrays`
-    // (no `jpeg_start_decompress` call) miss the source's JFIF
-    // metadata and emit defaults — flagged at session-stop after
-    // 2f6683b. The follow-up codex review (round-13) tightened the
-    // requirement to use the actual APP0 presence and version,
-    // not a density-based heuristic, so the parser surfaces both.
-    let density: &libjpeg_turbo_rs::DensityInfo = decoder.density();
-    let density_unit_raw: u8 = match density.unit {
-        libjpeg_turbo_rs::DensityUnit::Unknown => 0,
-        libjpeg_turbo_rs::DensityUnit::Dpi => 1,
-        libjpeg_turbo_rs::DensityUnit::Dpcm => 2,
-    };
-    c.density_unit = density_unit_raw;
-    c.X_density = density.x;
-    c.Y_density = density.y;
-    let saw_jfif: bool = decoder.saw_jfif_marker();
-    let (jfif_major, jfif_minor): (u8, u8) = decoder.jfif_version();
-    c.saw_JFIF_marker = if saw_jfif { 1 } else { 0 };
-    // Reset to libjpeg's per-datastream JFIF version default `(1, 1)`
-    // before optionally overwriting with the parsed APP0 values.
-    // Stock libjpeg installs this default at every SOI, so a
-    // decompressor reused across a JFIF 1.02 image followed by a
-    // no-APP0 image must observe `(1, 1)` on the second pass —
-    // codex round-15 review caught this stale-state hazard.
-    c.JFIF_major_version = 1;
-    c.JFIF_minor_version = 1;
-    if saw_jfif {
-        c.JFIF_major_version = jfif_major;
-        c.JFIF_minor_version = jfif_minor;
-    }
-    // libjpeg's `is_baseline` flag: TRUE if SOF0 was encountered. We
-    // approximate by clearing it for progressive/lossless streams.
-    c.is_baseline = if !frame.is_progressive && !frame.is_lossless {
-        1
-    } else {
-        0
-    };
-    // Populate `arith_code` from the parsed SOF marker type.
-    // SOF9/SOF10/SOF11 → arithmetic (1); SOF0/SOF1/SOF2/SOF3 → Huffman (0).
-    c.arith_code = if decoder.is_arithmetic() { 1 } else { 0 };
+        let mut decoder: libjpeg_turbo_rs::Decoder<'_> = match libjpeg_turbo_rs::Decoder::new(bytes)
+        {
+            Ok(d) => d,
+            Err(e) => {
+                priv_state.last_error =
+                    CString::new(format!("jpeg_read_header: {e}")).unwrap_or_default();
+                // Distinguish "input is incomplete (need more data)" from
+                // "input is syntactically complete but corrupt." Bytes ending
+                // in EOI (FF D9) are syntactically complete, so a decoder
+                // error means real corruption — invoke the consumer's
+                // `error_exit` per the libjpeg.txt §3 contract so a
+                // setjmp/longjmp handler can recover. Bytes without EOI may
+                // still be truncated, so leave the existing JPEG_SUSPENDED
+                // semantics intact and let the consumer feed more.
+                //
+                // The `bytes.len() >= 4` guard avoids a false positive on
+                // tiny inputs whose entire content happens to look like
+                // `FF D9` — a real JPEG always has SOI (FF D8) before EOI.
+                let appears_complete: bool = bytes.len() >= 4
+                    && bytes[bytes.len() - 2] == 0xFF
+                    && bytes[bytes.len() - 1] == 0xD9;
+                if appears_complete {
+                    // Code 12 maps to JERR_BAD_LENGTH in the upstream v8
+                    // alphabetical enum (jerror.h, with JPEG_LIB_VERSION=80
+                    // excluding JERR_ARITH_NOTIMPL). It's the closest fit
+                    // for the most common decoder rejection cause (bogus
+                    // marker length); other causes still land here with the
+                    // same code, and the consumer's `format_message` looks
+                    // up the description in the message table. Consumers
+                    // that care about the specific cause read
+                    // `priv_state.last_error` (already populated above).
+                    invoke_error_exit(cinfo, 12);
+                    // If a custom handler returns instead of longjmping
+                    // (which violates the libjpeg contract), fall through
+                    // to JPEG_SUSPENDED so the caller still sees a
+                    // non-success return.
+                }
+                return JPEG_SUSPENDED;
+            }
+        };
+        // Re-parse with the per-cinfo marker save list so APP/COM markers
+        // the caller asked for via `jpeg_save_markers` land in
+        // `decoder.saved_markers()`. Stock libjpeg-turbo populates
+        // `cinfo->marker_list` during `jpeg_read_header` before
+        // `jpeg_read_coefficients` runs; downstream `transupp` callers
+        // (stock `jpegtran -copy all <op>`) iterate that list to copy
+        // ICC profiles and other APP markers across to dstinfo via
+        // `jpeg_write_marker`. Without this re-parse the list stays empty
+        // and `jcopy_markers_execute` finds nothing to forward, so the
+        // ICC chunk on `monkey12.jpg` (and any APP/COM marker on other
+        // fixtures) silently disappears in transcode output.
+        let save_config: libjpeg_turbo_rs::MarkerSaveConfig =
+            marker_save_to_config(&priv_state.marker_save);
+        if !matches!(save_config, libjpeg_turbo_rs::MarkerSaveConfig::None) {
+            decoder.save_markers(save_config);
+        }
 
-    // Heuristic for jpeg_color_space matching libjpeg jdmarker:
-    //   1 component     -> JCS_GRAYSCALE
-    //   3 components    -> JCS_YCbCr (or JCS_RGB if Adobe APP14 says so)
-    //   4 components    -> JCS_CMYK (or JCS_YCCK if Adobe APP14 says so)
-    // We don't have an Adobe-marker getter in the thin header path, so
-    // conservatively pick the common case; out_color_space below is the
-    // effective one anyway.
-    c.jpeg_color_space = match frame.components.len() {
-        1 => JCS_GRAYSCALE,
-        3 => JCS_YCBCR,
-        4 => JCS_CMYK,
-        _ => JCS_UNKNOWN,
-    };
-    // Default out_color_space: matches libjpeg's defaults in jdmaster.
-    c.out_color_space = match c.jpeg_color_space {
-        JCS_GRAYSCALE => JCS_GRAYSCALE,
-        JCS_YCBCR => JCS_RGB,
-        JCS_CMYK => JCS_CMYK,
-        JCS_YCCK => JCS_CMYK,
-        other => other,
-    };
+        let frame: &libjpeg_turbo_rs::FrameHeader = decoder.header();
+        c.image_width = frame.width as JDimension;
+        c.image_height = frame.height as JDimension;
+        c.num_components = frame.components.len() as c_int;
+        c.data_precision = frame.precision as c_int;
+        c.progressive_mode = if frame.is_progressive { 1 } else { 0 };
 
-    // Populate `comp_info[]` from FrameHeader components. The storage is
-    // owned by `priv_state.comp_info_storage`; we hand out a raw pointer
-    // to the vector's first element so real libjpeg callers can iterate.
-    priv_state.comp_info_storage.clear();
-    priv_state.comp_info_storage.reserve(frame.components.len());
-    for (idx, comp) in frame.components.iter().enumerate() {
-        priv_state.comp_info_storage.push(JpegComponentInfoPublic {
-            component_id: comp.id as c_int,
-            component_index: idx as c_int,
-            h_samp_factor: comp.horizontal_sampling as c_int,
-            v_samp_factor: comp.vertical_sampling as c_int,
-            quant_tbl_no: comp.quant_table_index as c_int,
-            dc_tbl_no: 0,
-            ac_tbl_no: 0,
-            width_in_blocks: 0,
-            height_in_blocks: 0,
-            dct_h_scaled_size: 8,
-            dct_v_scaled_size: 8,
-            downsampled_width: 0,
-            downsampled_height: 0,
-            component_needed: 1,
-            mcu_width: 0,
-            mcu_height: 0,
-            mcu_blocks: 0,
-            mcu_sample_width: 0,
-            last_col_width: 0,
-            last_row_height: 0,
-            quant_table: std::ptr::null_mut(),
-            dct_table: std::ptr::null_mut(),
-        });
-    }
-    c.comp_info = if priv_state.comp_info_storage.is_empty() {
-        std::ptr::null_mut()
-    } else {
-        priv_state.comp_info_storage.as_mut_ptr()
-    };
+        // Populate JFIF presence + density from the parsed APP0 marker.
+        // Stock libjpeg-turbo sets `cinfo.saw_JFIF_marker`,
+        // `JFIF_{major,minor}_version`, and
+        // `density_unit / X_density / Y_density` during
+        // `jpeg_read_header`; without this, `jpegtran -copy all <op>`
+        // paths that go through
+        // `jpeg_copy_critical_parameters → materialize_foreign_coef_arrays`
+        // (no `jpeg_start_decompress` call) miss the source's JFIF
+        // metadata and emit defaults — flagged at session-stop after
+        // 2f6683b. The follow-up codex review (round-13) tightened the
+        // requirement to use the actual APP0 presence and version,
+        // not a density-based heuristic, so the parser surfaces both.
+        let density: &libjpeg_turbo_rs::DensityInfo = decoder.density();
+        let density_unit_raw: u8 = match density.unit {
+            libjpeg_turbo_rs::DensityUnit::Unknown => 0,
+            libjpeg_turbo_rs::DensityUnit::Dpi => 1,
+            libjpeg_turbo_rs::DensityUnit::Dpcm => 2,
+        };
+        c.density_unit = density_unit_raw;
+        c.X_density = density.x;
+        c.Y_density = density.y;
+        let saw_jfif: bool = decoder.saw_jfif_marker();
+        let (jfif_major, jfif_minor): (u8, u8) = decoder.jfif_version();
+        c.saw_JFIF_marker = if saw_jfif { 1 } else { 0 };
+        // Reset to libjpeg's per-datastream JFIF version default `(1, 1)`
+        // before optionally overwriting with the parsed APP0 values.
+        // Stock libjpeg installs this default at every SOI, so a
+        // decompressor reused across a JFIF 1.02 image followed by a
+        // no-APP0 image must observe `(1, 1)` on the second pass —
+        // codex round-15 review caught this stale-state hazard.
+        c.JFIF_major_version = 1;
+        c.JFIF_minor_version = 1;
+        if saw_jfif {
+            c.JFIF_major_version = jfif_major;
+            c.JFIF_minor_version = jfif_minor;
+        }
+        // libjpeg's `is_baseline` flag: TRUE if SOF0 was encountered. We
+        // approximate by clearing it for progressive/lossless streams.
+        c.is_baseline = if !frame.is_progressive && !frame.is_lossless {
+            1
+        } else {
+            0
+        };
+        // Populate `arith_code` from the parsed SOF marker type.
+        // SOF9/SOF10/SOF11 → arithmetic (1); SOF0/SOF1/SOF2/SOF3 → Huffman (0).
+        c.arith_code = if decoder.is_arithmetic() { 1 } else { 0 };
 
-    // Build `c.marker_list` from the saved APP/COM markers so stock
-    // C consumers (the most important being `transupp::jcopy_markers_execute`
-    // invoked by `jpegtran -copy all`) can iterate the source's
-    // markers exactly as upstream libjpeg-turbo allows. The byte
-    // payload is moved out of `decoder.saved_markers()` and stashed
-    // in `marker_list_storage` so the cinfo's `marker_list` pointer
-    // remains valid until `jpeg_destroy_decompress` runs.
-    //
-    // Null `c.marker_list` *before* clearing the backing storage so
-    // there is never an instant where the cinfo exposes a pointer to
-    // freed memory — even though only this thread can observe the
-    // window, defensive ordering keeps the invariant local and
-    // obvious to a future reader.
-    c.marker_list = std::ptr::null_mut();
-    priv_state.marker_list_storage.clear();
-    let saved: Vec<libjpeg_turbo_rs::SavedMarker> = decoder.saved_markers().to_vec();
-    for marker in saved {
-        // Honor stock libjpeg's `jpeg_save_markers(cinfo, code, length_limit)`
-        // contract: `original_length` is the full marker body length from the
-        // stream, while `data_length` and `data` are truncated to
-        // `min(original_length, length_limit)` so consumers (e.g.
-        // `jcopy_markers_execute` → `jpeg_write_marker`) never see more bytes
-        // than the caller requested.
-        let original_len: usize = marker.data.len();
-        let limit: usize = priv_state
-            .marker_save
-            .limits
-            .get(&marker.code)
-            .copied()
-            .map(|l| l as usize)
-            .unwrap_or(usize::MAX);
-        let truncated_len: usize = original_len.min(limit);
-        let mut full: Vec<u8> = marker.data;
-        full.truncate(truncated_len);
-        let payload: Box<[u8]> = full.into_boxed_slice();
-        priv_state.marker_list_storage.push(Box::new(OwnedMarker {
-            public: JpegMarkerStructPublic {
-                next: std::ptr::null_mut(),
-                marker: marker.code,
-                original_length: original_len as c_uint,
-                data_length: truncated_len as c_uint,
-                data: std::ptr::null_mut(),
-            },
-            payload,
-        }));
-    }
-    // Fix up `data` to point into the boxed payload (stable: `Box`
-    // pins the heap allocation), then thread `next` pointers across
-    // adjacent nodes.
-    for node in priv_state.marker_list_storage.iter_mut() {
-        node.public.data = node.payload.as_mut_ptr();
-    }
-    let len: usize = priv_state.marker_list_storage.len();
-    if len > 1 {
-        // Collect raw pointers up-front to avoid simultaneous mutable
-        // borrows during the next-pointer fix-up.
-        let next_ptrs: Vec<*mut JpegMarkerStructPublic> = priv_state
+        // Heuristic for jpeg_color_space matching libjpeg jdmarker:
+        //   1 component     -> JCS_GRAYSCALE
+        //   3 components    -> JCS_YCbCr (or JCS_RGB if Adobe APP14 says so)
+        //   4 components    -> JCS_CMYK (or JCS_YCCK if Adobe APP14 says so)
+        // We don't have an Adobe-marker getter in the thin header path, so
+        // conservatively pick the common case; out_color_space below is the
+        // effective one anyway.
+        c.jpeg_color_space = match frame.components.len() {
+            1 => JCS_GRAYSCALE,
+            3 => JCS_YCBCR,
+            4 => JCS_CMYK,
+            _ => JCS_UNKNOWN,
+        };
+        // Default out_color_space: matches libjpeg's defaults in jdmaster.
+        c.out_color_space = match c.jpeg_color_space {
+            JCS_GRAYSCALE => JCS_GRAYSCALE,
+            JCS_YCBCR => JCS_RGB,
+            JCS_CMYK => JCS_CMYK,
+            JCS_YCCK => JCS_CMYK,
+            other => other,
+        };
+
+        // Populate `comp_info[]` from FrameHeader components. The storage is
+        // owned by `priv_state.comp_info_storage`; we hand out a raw pointer
+        // to the vector's first element so real libjpeg callers can iterate.
+        priv_state.comp_info_storage.clear();
+        priv_state.comp_info_storage.reserve(frame.components.len());
+        for (idx, comp) in frame.components.iter().enumerate() {
+            priv_state.comp_info_storage.push(JpegComponentInfoPublic {
+                component_id: comp.id as c_int,
+                component_index: idx as c_int,
+                h_samp_factor: comp.horizontal_sampling as c_int,
+                v_samp_factor: comp.vertical_sampling as c_int,
+                quant_tbl_no: comp.quant_table_index as c_int,
+                dc_tbl_no: 0,
+                ac_tbl_no: 0,
+                width_in_blocks: 0,
+                height_in_blocks: 0,
+                dct_h_scaled_size: 8,
+                dct_v_scaled_size: 8,
+                downsampled_width: 0,
+                downsampled_height: 0,
+                component_needed: 1,
+                mcu_width: 0,
+                mcu_height: 0,
+                mcu_blocks: 0,
+                mcu_sample_width: 0,
+                last_col_width: 0,
+                last_row_height: 0,
+                quant_table: std::ptr::null_mut(),
+                dct_table: std::ptr::null_mut(),
+            });
+        }
+        c.comp_info = if priv_state.comp_info_storage.is_empty() {
+            std::ptr::null_mut()
+        } else {
+            priv_state.comp_info_storage.as_mut_ptr()
+        };
+
+        // Build `c.marker_list` from the saved APP/COM markers so stock
+        // C consumers (the most important being `transupp::jcopy_markers_execute`
+        // invoked by `jpegtran -copy all`) can iterate the source's
+        // markers exactly as upstream libjpeg-turbo allows. The byte
+        // payload is moved out of `decoder.saved_markers()` and stashed
+        // in `marker_list_storage` so the cinfo's `marker_list` pointer
+        // remains valid until `jpeg_destroy_decompress` runs.
+        //
+        // Null `c.marker_list` *before* clearing the backing storage so
+        // there is never an instant where the cinfo exposes a pointer to
+        // freed memory — even though only this thread can observe the
+        // window, defensive ordering keeps the invariant local and
+        // obvious to a future reader.
+        c.marker_list = std::ptr::null_mut();
+        priv_state.marker_list_storage.clear();
+        let saved: Vec<libjpeg_turbo_rs::SavedMarker> = decoder.saved_markers().to_vec();
+        for marker in saved {
+            // Honor stock libjpeg's `jpeg_save_markers(cinfo, code, length_limit)`
+            // contract: `original_length` is the full marker body length from the
+            // stream, while `data_length` and `data` are truncated to
+            // `min(original_length, length_limit)` so consumers (e.g.
+            // `jcopy_markers_execute` → `jpeg_write_marker`) never see more bytes
+            // than the caller requested.
+            let original_len: usize = marker.data.len();
+            let limit: usize = priv_state
+                .marker_save
+                .limits
+                .get(&marker.code)
+                .copied()
+                .map(|l| l as usize)
+                .unwrap_or(usize::MAX);
+            let truncated_len: usize = original_len.min(limit);
+            let mut full: Vec<u8> = marker.data;
+            full.truncate(truncated_len);
+            let payload: Box<[u8]> = full.into_boxed_slice();
+            priv_state.marker_list_storage.push(Box::new(OwnedMarker {
+                public: JpegMarkerStructPublic {
+                    next: std::ptr::null_mut(),
+                    marker: marker.code,
+                    original_length: original_len as c_uint,
+                    data_length: truncated_len as c_uint,
+                    data: std::ptr::null_mut(),
+                },
+                payload,
+            }));
+        }
+        // Fix up `data` to point into the boxed payload (stable: `Box`
+        // pins the heap allocation), then thread `next` pointers across
+        // adjacent nodes.
+        for node in priv_state.marker_list_storage.iter_mut() {
+            node.public.data = node.payload.as_mut_ptr();
+        }
+        let len: usize = priv_state.marker_list_storage.len();
+        if len > 1 {
+            // Collect raw pointers up-front to avoid simultaneous mutable
+            // borrows during the next-pointer fix-up.
+            let next_ptrs: Vec<*mut JpegMarkerStructPublic> = priv_state
+                .marker_list_storage
+                .iter_mut()
+                .skip(1)
+                .map(|n| &mut n.public as *mut _)
+                .collect();
+            for (i, node) in priv_state.marker_list_storage.iter_mut().enumerate() {
+                if i < next_ptrs.len() {
+                    node.public.next = next_ptrs[i];
+                }
+            }
+        }
+        c.marker_list = priv_state
             .marker_list_storage
-            .iter_mut()
-            .skip(1)
+            .first_mut()
             .map(|n| &mut n.public as *mut _)
-            .collect();
-        for (i, node) in priv_state.marker_list_storage.iter_mut().enumerate() {
-            if i < next_ptrs.len() {
-                node.public.next = next_ptrs[i];
-            }
-        }
-    }
-    c.marker_list = priv_state
-        .marker_list_storage
-        .first_mut()
-        .map(|n| &mut n.public as *mut _)
-        .unwrap_or(std::ptr::null_mut());
+            .unwrap_or(std::ptr::null_mut());
 
-    c.global_state = DSTATE_INHEADER;
-    priv_state.last_error = CString::new("No error").expect("static");
-    // Record that header parse completed so `jpeg_consume_input`
-    // doesn't re-run the parser on subsequent polls and clobber
-    // caller-set fields like `out_color_space` / `comp_info` /
-    // `quantize_colors`.
-    priv_state.header_parsed_ok = true;
-    JPEG_HEADER_OK
+        c.global_state = DSTATE_INHEADER;
+        priv_state.last_error = CString::new("No error").expect("static");
+        // Record that header parse completed so `jpeg_consume_input`
+        // doesn't re-run the parser on subsequent polls and clobber
+        // caller-set fields like `out_color_space` / `comp_info` /
+        // `quantize_colors`.
+        priv_state.header_parsed_ok = true;
+        JPEG_HEADER_OK
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -2149,117 +2164,120 @@ fn jcs_to_pixel_format(cs: c_int) -> Option<PixelFormat> {
 /// returns FALSE except when suspending via a nonblocking source).
 #[no_mangle]
 pub extern "C" fn jpeg_start_decompress(cinfo: *mut c_void) -> CBoolean {
-    let c: &mut JpegDecompressPublic = match unsafe { cinfo_mut(cinfo) } {
-        Some(c) => c,
-        None => return 0,
-    };
-    let priv_ptr: *mut c_void = decompress_private_raw(cinfo);
-    let priv_state: &mut DecompressPrivate = match unsafe { priv_from_ptr(priv_ptr) } {
-        Some(p) => p,
-        None => return 0,
-    };
+    crate::unwind_guard!(0, {
+        let c: &mut JpegDecompressPublic = match unsafe { cinfo_mut(cinfo) } {
+            Some(c) => c,
+            None => return 0,
+        };
+        let priv_ptr: *mut c_void = decompress_private_raw(cinfo);
+        let priv_state: &mut DecompressPrivate = match unsafe { priv_from_ptr(priv_ptr) } {
+            Some(p) => p,
+            None => return 0,
+        };
 
-    let bytes: Vec<u8> = match priv_state.source.as_bytes() {
-        Some(b) => b.to_vec(),
-        None => {
-            priv_state.last_error =
-                CString::new("jpeg_start_decompress: no source").unwrap_or_default();
-            return 0;
-        }
-    };
-
-    // Fast path for high-precision streams (12/16 bit). The 8-bit
-    // `Decoder` would silently succeed and then overwrite
-    // `data_precision`, `output_components`, etc. with 8-bit values,
-    // which misroutes djpeg's precision-dispatched decode loop. The
-    // actual decode happens lazily in `jpeg12_read_scanlines` /
-    // `jpeg16_read_scanlines` / `jpeg12_read_raw_data`.
-    //
-    // Populate output dimensions inline so the 12-bit raw-data path
-    // doesn't depend on the caller having invoked the optional
-    // `jpeg_calc_output_dimensions` helper. The standard libjpeg
-    // sequence — `jpeg_read_header`; tweak params; `jpeg_start_decompress`;
-    // `jpeg12_read_raw_data` — leaves `output_width / output_height /
-    // max_v_samp_factor / min_DCT_v_scaled_size` at zero unless we
-    // populate them here, which would short-circuit the EOF check at
-    // the top of `jpeg12_read_raw_data` (codex review of f0dc137).
-    if c.data_precision > 8 {
-        c.output_scanline = 0;
-        c.global_state = DSTATE_SCANNING;
-        // The `c: &mut JpegDecompressPublic` borrow is released
-        // when this scope returns. `jpeg_calc_output_dimensions`
-        // re-borrows `cinfo` via its own `cinfo_mut` call;
-        // returning immediately after means the two mutable
-        // borrows never overlap. Re-borrows through raw pointers
-        // are safe because the public struct lives behind the
-        // caller's allocation (not Rust-owned), so aliasing is the
-        // unsafe-FFI contract, not a Rust UB.
-        let _ = c;
-        jpeg_calc_output_dimensions(cinfo);
-        priv_state.last_error = CString::new("No error").expect("static");
-        return 1;
-    }
-
-    let format: PixelFormat = match jcs_to_pixel_format(c.out_color_space) {
-        Some(f) => f,
-        None => PixelFormat::Rgb,
-    };
-
-    // Prefer the `Decoder` path so saved markers and marker processors
-    // set via `jpeg_save_markers` / `jpeg_set_marker_processor` are
-    // actually observed. Build a marker save config from the recorded
-    // per-code length limits.
-    let save_config: libjpeg_turbo_rs::MarkerSaveConfig =
-        marker_save_to_config(&priv_state.marker_save);
-    let image: libjpeg_turbo_rs::Image =
-        match run_decoder_for_start(&bytes, format, save_config, &priv_state.marker_processors) {
-            Ok(i) => i,
-            Err(e) => {
+        let bytes: Vec<u8> = match priv_state.source.as_bytes() {
+            Some(b) => b.to_vec(),
+            None => {
                 priv_state.last_error =
-                    CString::new(format!("jpeg_start_decompress: {e}")).unwrap_or_default();
+                    CString::new("jpeg_start_decompress: no source").unwrap_or_default();
                 return 0;
             }
         };
 
-    let out_cs_effective: c_int = colorspace_to_jcs(match image.pixel_format {
-        PixelFormat::Grayscale => libjpeg_turbo_rs::ColorSpace::Grayscale,
-        PixelFormat::Cmyk => libjpeg_turbo_rs::ColorSpace::Cmyk,
-        _ => libjpeg_turbo_rs::ColorSpace::Rgb,
-    });
-    c.output_width = image.width as JDimension;
-    c.output_height = image.height as JDimension;
-    c.out_color_components = image.pixel_format.bytes_per_pixel() as c_int;
-    c.output_components = c.out_color_components;
-    c.out_color_space = out_cs_effective;
-    c.output_scanline = 0;
-    c.global_state = DSTATE_SCANNING;
-    // libjpeg's `rec_outbuf_height` is typically 1..4; 2 matches the
-    // commonly-observed value for H2V2-subsampled YCbCr streams (the
-    // decoder processes 2 rows per iMCU), and 1 is a safe fallback.
-    c.rec_outbuf_height = 1;
-    c.data_precision = image.precision as c_int;
+        // Fast path for high-precision streams (12/16 bit). The 8-bit
+        // `Decoder` would silently succeed and then overwrite
+        // `data_precision`, `output_components`, etc. with 8-bit values,
+        // which misroutes djpeg's precision-dispatched decode loop. The
+        // actual decode happens lazily in `jpeg12_read_scanlines` /
+        // `jpeg16_read_scanlines` / `jpeg12_read_raw_data`.
+        //
+        // Populate output dimensions inline so the 12-bit raw-data path
+        // doesn't depend on the caller having invoked the optional
+        // `jpeg_calc_output_dimensions` helper. The standard libjpeg
+        // sequence — `jpeg_read_header`; tweak params; `jpeg_start_decompress`;
+        // `jpeg12_read_raw_data` — leaves `output_width / output_height /
+        // max_v_samp_factor / min_DCT_v_scaled_size` at zero unless we
+        // populate them here, which would short-circuit the EOF check at
+        // the top of `jpeg12_read_raw_data` (codex review of f0dc137).
+        if c.data_precision > 8 {
+            c.output_scanline = 0;
+            c.global_state = DSTATE_SCANNING;
+            // The `c: &mut JpegDecompressPublic` borrow is released
+            // when this scope returns. `jpeg_calc_output_dimensions`
+            // re-borrows `cinfo` via its own `cinfo_mut` call;
+            // returning immediately after means the two mutable
+            // borrows never overlap. Re-borrows through raw pointers
+            // are safe because the public struct lives behind the
+            // caller's allocation (not Rust-owned), so aliasing is the
+            // unsafe-FFI contract, not a Rust UB.
+            let _ = c;
+            jpeg_calc_output_dimensions(cinfo);
+            priv_state.last_error = CString::new("No error").expect("static");
+            return 1;
+        }
 
-    // `jpeg_read_header` already populated `saw_JFIF_marker`,
-    // `JFIF_{major,minor}_version`, and `density_unit / X_density /
-    // Y_density` from the parsed APP0 marker (round-13 fix at
-    // b435574+ codex follow-up). Re-asserting density from `image`
-    // keeps a single source of truth in case a caller bypassed
-    // `jpeg_read_header` and went straight to start_decompress —
-    // an unusual path, but harmless here since `image.density` came
-    // out of the same parser.
-    let density: libjpeg_turbo_rs::DensityInfo = image.density;
-    let density_unit_raw: u8 = match density.unit {
-        libjpeg_turbo_rs::DensityUnit::Unknown => 0,
-        libjpeg_turbo_rs::DensityUnit::Dpi => 1,
-        libjpeg_turbo_rs::DensityUnit::Dpcm => 2,
-    };
-    c.density_unit = density_unit_raw;
-    c.X_density = density.x;
-    c.Y_density = density.y;
+        let format: PixelFormat = match jcs_to_pixel_format(c.out_color_space) {
+            Some(f) => f,
+            None => PixelFormat::Rgb,
+        };
 
-    priv_state.decoded = Some(image);
-    priv_state.last_error = CString::new("No error").expect("static");
-    1
+        // Prefer the `Decoder` path so saved markers and marker processors
+        // set via `jpeg_save_markers` / `jpeg_set_marker_processor` are
+        // actually observed. Build a marker save config from the recorded
+        // per-code length limits.
+        let save_config: libjpeg_turbo_rs::MarkerSaveConfig =
+            marker_save_to_config(&priv_state.marker_save);
+        let image: libjpeg_turbo_rs::Image =
+            match run_decoder_for_start(&bytes, format, save_config, &priv_state.marker_processors)
+            {
+                Ok(i) => i,
+                Err(e) => {
+                    priv_state.last_error =
+                        CString::new(format!("jpeg_start_decompress: {e}")).unwrap_or_default();
+                    return 0;
+                }
+            };
+
+        let out_cs_effective: c_int = colorspace_to_jcs(match image.pixel_format {
+            PixelFormat::Grayscale => libjpeg_turbo_rs::ColorSpace::Grayscale,
+            PixelFormat::Cmyk => libjpeg_turbo_rs::ColorSpace::Cmyk,
+            _ => libjpeg_turbo_rs::ColorSpace::Rgb,
+        });
+        c.output_width = image.width as JDimension;
+        c.output_height = image.height as JDimension;
+        c.out_color_components = image.pixel_format.bytes_per_pixel() as c_int;
+        c.output_components = c.out_color_components;
+        c.out_color_space = out_cs_effective;
+        c.output_scanline = 0;
+        c.global_state = DSTATE_SCANNING;
+        // libjpeg's `rec_outbuf_height` is typically 1..4; 2 matches the
+        // commonly-observed value for H2V2-subsampled YCbCr streams (the
+        // decoder processes 2 rows per iMCU), and 1 is a safe fallback.
+        c.rec_outbuf_height = 1;
+        c.data_precision = image.precision as c_int;
+
+        // `jpeg_read_header` already populated `saw_JFIF_marker`,
+        // `JFIF_{major,minor}_version`, and `density_unit / X_density /
+        // Y_density` from the parsed APP0 marker (round-13 fix at
+        // b435574+ codex follow-up). Re-asserting density from `image`
+        // keeps a single source of truth in case a caller bypassed
+        // `jpeg_read_header` and went straight to start_decompress —
+        // an unusual path, but harmless here since `image.density` came
+        // out of the same parser.
+        let density: libjpeg_turbo_rs::DensityInfo = image.density;
+        let density_unit_raw: u8 = match density.unit {
+            libjpeg_turbo_rs::DensityUnit::Unknown => 0,
+            libjpeg_turbo_rs::DensityUnit::Dpi => 1,
+            libjpeg_turbo_rs::DensityUnit::Dpcm => 2,
+        };
+        c.density_unit = density_unit_raw;
+        c.X_density = density.x;
+        c.Y_density = density.y;
+
+        priv_state.decoded = Some(image);
+        priv_state.last_error = CString::new("No error").expect("static");
+        1
+    })
 }
 
 /// Build a [`MarkerSaveConfig`] from the set of per-code length limits
@@ -2337,59 +2355,61 @@ pub extern "C" fn jpeg_read_scanlines(
     scanlines: *mut *mut u8,
     max_lines: JDimension,
 ) -> JDimension {
-    let c: &mut JpegDecompressPublic = match unsafe { cinfo_mut(cinfo) } {
-        Some(c) => c,
-        None => return 0,
-    };
-    let priv_ptr: *mut c_void = decompress_private_raw(cinfo);
-    let priv_state: &mut DecompressPrivate = match unsafe { priv_from_ptr(priv_ptr) } {
-        Some(p) => p,
-        None => return 0,
-    };
-    if scanlines.is_null() || max_lines == 0 {
-        return 0;
-    }
-    let image: &libjpeg_turbo_rs::Image = match priv_state.decoded.as_ref() {
-        Some(img) => img,
-        None => return 0,
-    };
-    let bpp: usize = image.pixel_format.bytes_per_pixel();
-    let row_bytes: usize = image.width * bpp;
-    let total_rows: JDimension = image.height as JDimension;
-    let remaining: JDimension = total_rows.saturating_sub(c.output_scanline);
-    let to_copy: JDimension = std::cmp::min(max_lines, remaining);
-    if to_copy == 0 {
-        return 0;
-    }
-
-    // Compute the (possibly cropped) byte window within each row.
-    // `jpeg_crop_scanline` operates in pixel units, so translate through
-    // `bpp`. When no crop is active, we copy the full row.
-    let (src_col_off, cols_to_copy): (usize, usize) = if priv_state.crop_active {
-        let x: usize = priv_state.crop_xoffset as usize;
-        let w: usize = priv_state.crop_width as usize;
-        (x * bpp, w * bpp)
-    } else {
-        (0, row_bytes)
-    };
-
-    // SAFETY: caller pinky-promises the `scanlines` array has at least
-    // `max_lines` pointers, each pointing to a buffer of at least
-    // `cols_to_copy` bytes (= width*bpp when crop is inactive, or the
-    // narrowed region when `jpeg_crop_scanline` was called).
-    for i in 0..(to_copy as usize) {
-        let dst: *mut u8 = unsafe { *scanlines.add(i) };
-        if dst.is_null() {
-            break;
+    crate::unwind_guard!(0, {
+        let c: &mut JpegDecompressPublic = match unsafe { cinfo_mut(cinfo) } {
+            Some(c) => c,
+            None => return 0,
+        };
+        let priv_ptr: *mut c_void = decompress_private_raw(cinfo);
+        let priv_state: &mut DecompressPrivate = match unsafe { priv_from_ptr(priv_ptr) } {
+            Some(p) => p,
+            None => return 0,
+        };
+        if scanlines.is_null() || max_lines == 0 {
+            return 0;
         }
-        let src_offset: usize = (c.output_scanline as usize + i) * row_bytes + src_col_off;
-        let src: &[u8] = &image.data[src_offset..src_offset + cols_to_copy];
-        unsafe {
-            std::ptr::copy_nonoverlapping(src.as_ptr(), dst, cols_to_copy);
+        let image: &libjpeg_turbo_rs::Image = match priv_state.decoded.as_ref() {
+            Some(img) => img,
+            None => return 0,
+        };
+        let bpp: usize = image.pixel_format.bytes_per_pixel();
+        let row_bytes: usize = image.width * bpp;
+        let total_rows: JDimension = image.height as JDimension;
+        let remaining: JDimension = total_rows.saturating_sub(c.output_scanline);
+        let to_copy: JDimension = std::cmp::min(max_lines, remaining);
+        if to_copy == 0 {
+            return 0;
         }
-    }
-    c.output_scanline += to_copy;
-    to_copy
+
+        // Compute the (possibly cropped) byte window within each row.
+        // `jpeg_crop_scanline` operates in pixel units, so translate through
+        // `bpp`. When no crop is active, we copy the full row.
+        let (src_col_off, cols_to_copy): (usize, usize) = if priv_state.crop_active {
+            let x: usize = priv_state.crop_xoffset as usize;
+            let w: usize = priv_state.crop_width as usize;
+            (x * bpp, w * bpp)
+        } else {
+            (0, row_bytes)
+        };
+
+        // SAFETY: caller pinky-promises the `scanlines` array has at least
+        // `max_lines` pointers, each pointing to a buffer of at least
+        // `cols_to_copy` bytes (= width*bpp when crop is inactive, or the
+        // narrowed region when `jpeg_crop_scanline` was called).
+        for i in 0..(to_copy as usize) {
+            let dst: *mut u8 = unsafe { *scanlines.add(i) };
+            if dst.is_null() {
+                break;
+            }
+            let src_offset: usize = (c.output_scanline as usize + i) * row_bytes + src_col_off;
+            let src: &[u8] = &image.data[src_offset..src_offset + cols_to_copy];
+            unsafe {
+                std::ptr::copy_nonoverlapping(src.as_ptr(), dst, cols_to_copy);
+            }
+        }
+        c.output_scanline += to_copy;
+        to_copy
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -2409,74 +2429,76 @@ pub extern "C" fn jpeg_read_scanlines(
 /// require start_decompress to have run.
 #[no_mangle]
 pub extern "C" fn jpeg_calc_output_dimensions(cinfo: *mut c_void) {
-    let c: &mut JpegDecompressPublic = match unsafe { cinfo_mut(cinfo) } {
-        Some(c) => c,
-        None => return,
-    };
+    crate::unwind_guard!((), {
+        let c: &mut JpegDecompressPublic = match unsafe { cinfo_mut(cinfo) } {
+            Some(c) => c,
+            None => return,
+        };
 
-    // No IDCT scaling: output dims = image dims after applying the
-    // scale_num/scale_denom fraction (most callers leave 1/1).
-    let scale_num: u64 = c.scale_num.max(1) as u64;
-    let scale_denom: u64 = c.scale_denom.max(1) as u64;
-    c.output_width = (c.image_width as u64 * scale_num).div_ceil(scale_denom) as JDimension;
-    c.output_height = (c.image_height as u64 * scale_num).div_ceil(scale_denom) as JDimension;
+        // No IDCT scaling: output dims = image dims after applying the
+        // scale_num/scale_denom fraction (most callers leave 1/1).
+        let scale_num: u64 = c.scale_num.max(1) as u64;
+        let scale_denom: u64 = c.scale_denom.max(1) as u64;
+        c.output_width = (c.image_width as u64 * scale_num).div_ceil(scale_denom) as JDimension;
+        c.output_height = (c.image_height as u64 * scale_num).div_ceil(scale_denom) as JDimension;
 
-    // Compute max sampling factors and per-component downsampled sizes
-    // from the comp_info array populated by jpeg_read_header. wrppm /
-    // wrbmp don't read these but jpeg_start_decompress callers do.
-    if !c.comp_info.is_null() && c.num_components > 0 {
-        let n: usize = c.num_components as usize;
-        let comps: &mut [JpegComponentInfoPublic] =
-            unsafe { std::slice::from_raw_parts_mut(c.comp_info, n) };
-        let mut max_h: c_int = 1;
-        let mut max_v: c_int = 1;
-        for comp in comps.iter() {
-            max_h = max_h.max(comp.h_samp_factor);
-            max_v = max_v.max(comp.v_samp_factor);
+        // Compute max sampling factors and per-component downsampled sizes
+        // from the comp_info array populated by jpeg_read_header. wrppm /
+        // wrbmp don't read these but jpeg_start_decompress callers do.
+        if !c.comp_info.is_null() && c.num_components > 0 {
+            let n: usize = c.num_components as usize;
+            let comps: &mut [JpegComponentInfoPublic] =
+                unsafe { std::slice::from_raw_parts_mut(c.comp_info, n) };
+            let mut max_h: c_int = 1;
+            let mut max_v: c_int = 1;
+            for comp in comps.iter() {
+                max_h = max_h.max(comp.h_samp_factor);
+                max_v = max_v.max(comp.v_samp_factor);
+            }
+            c.max_h_samp_factor = max_h;
+            c.max_v_samp_factor = max_v;
+            c.min_DCT_h_scaled_size = 8;
+            c.min_DCT_v_scaled_size = 8;
+            for comp in comps.iter_mut() {
+                comp.dct_h_scaled_size = 8;
+                comp.dct_v_scaled_size = 8;
+                // downsampled = ceil(image_width * h_samp / (max_h * 8)) * 8
+                // (DCT block boundary). Kept block-aligned because our wrppm /
+                // wrbmp writer path reads this field as the row stride and
+                // relies on the 8-multiple; the strict C formula
+                // `ceil(image_width * h_samp / max_h)` triggers row-size
+                // mismatches in the downstream put_pixel_rows.
+                let denom_w: u64 = (max_h as u64) * 8;
+                let denom_h: u64 = (max_v as u64) * 8;
+                comp.downsampled_width = ((c.image_width as u64 * comp.h_samp_factor as u64)
+                    .div_ceil(denom_w)
+                    * 8) as JDimension;
+                comp.downsampled_height = ((c.image_height as u64 * comp.v_samp_factor as u64)
+                    .div_ceil(denom_h)
+                    * 8) as JDimension;
+            }
         }
-        c.max_h_samp_factor = max_h;
-        c.max_v_samp_factor = max_v;
-        c.min_DCT_h_scaled_size = 8;
-        c.min_DCT_v_scaled_size = 8;
-        for comp in comps.iter_mut() {
-            comp.dct_h_scaled_size = 8;
-            comp.dct_v_scaled_size = 8;
-            // downsampled = ceil(image_width * h_samp / (max_h * 8)) * 8
-            // (DCT block boundary). Kept block-aligned because our wrppm /
-            // wrbmp writer path reads this field as the row stride and
-            // relies on the 8-multiple; the strict C formula
-            // `ceil(image_width * h_samp / max_h)` triggers row-size
-            // mismatches in the downstream put_pixel_rows.
-            let denom_w: u64 = (max_h as u64) * 8;
-            let denom_h: u64 = (max_v as u64) * 8;
-            comp.downsampled_width = ((c.image_width as u64 * comp.h_samp_factor as u64)
-                .div_ceil(denom_w)
-                * 8) as JDimension;
-            comp.downsampled_height = ((c.image_height as u64 * comp.v_samp_factor as u64)
-                .div_ceil(denom_h)
-                * 8) as JDimension;
-        }
-    }
 
-    // out_color_components count per the J_COLOR_SPACE selected. Mirror
-    // the rgb_pixelsize table used by jdmaster.c:341-365 so extended
-    // color spaces (JCS_EXT_*) land on the correct channel count.
-    // JCS_EXT_RGB=6, JCS_EXT_RGBX=7, … JCS_EXT_ARGB=15 per
-    // libjpeg-turbo's `jmorecfg.h` enum order.
-    c.out_color_components = match c.out_color_space {
-        JCS_GRAYSCALE => 1,
-        JCS_RGB | JCS_YCBCR => 3,
-        JCS_CMYK | JCS_YCCK => 4,
-        6 | 8 => 3,                               // JCS_EXT_RGB / JCS_EXT_BGR
-        7 | 9 | 10 | 11 | 12 | 13 | 14 | 15 => 4, // *X / X* / *A / A*
-        _ => c.num_components,
-    };
-    c.output_components = if c.quantize_colors != 0 {
-        1
-    } else {
-        c.out_color_components
-    };
-    c.rec_outbuf_height = 1;
+        // out_color_components count per the J_COLOR_SPACE selected. Mirror
+        // the rgb_pixelsize table used by jdmaster.c:341-365 so extended
+        // color spaces (JCS_EXT_*) land on the correct channel count.
+        // JCS_EXT_RGB=6, JCS_EXT_RGBX=7, … JCS_EXT_ARGB=15 per
+        // libjpeg-turbo's `jmorecfg.h` enum order.
+        c.out_color_components = match c.out_color_space {
+            JCS_GRAYSCALE => 1,
+            JCS_RGB | JCS_YCBCR => 3,
+            JCS_CMYK | JCS_YCCK => 4,
+            6 | 8 => 3,                               // JCS_EXT_RGB / JCS_EXT_BGR
+            7 | 9 | 10 | 11 | 12 | 13 | 14 | 15 => 4, // *X / X* / *A / A*
+            _ => c.num_components,
+        };
+        c.output_components = if c.quantize_colors != 0 {
+            1
+        } else {
+            c.out_color_components
+        };
+        c.rec_outbuf_height = 1;
+    })
 }
 
 /// Free everything the cinfo's memory manager allocated under
@@ -2503,71 +2525,73 @@ fn release_decompress_image_pool(cinfo: *mut c_void, mem_ptr: *mut c_void) {
 /// never do — the entire stream is present in memory).
 #[no_mangle]
 pub extern "C" fn jpeg_finish_decompress(cinfo: *mut c_void) -> CBoolean {
-    let c: &mut JpegDecompressPublic = match unsafe { cinfo_mut(cinfo) } {
-        Some(c) => c,
-        None => return 0,
-    };
-    c.global_state = DSTATE_STOPPING;
-    // Drop the decoded image and any source bytes bridged from a
-    // caller-installed `cinfo->src` so the next `jpeg_read_header` on
-    // this handle re-runs the bridge against whatever new source the
-    // caller installs. Without dropping `source`, a libjpeg-style
-    // caller that reuses the same decompressor with a *different*
-    // direct source manager would silently re-decode the previous
-    // image's bytes.
-    let priv_ptr: *mut c_void = decompress_private_raw(cinfo);
-    if let Some(priv_state) = unsafe { priv_from_ptr(priv_ptr) } {
-        priv_state.decoded = None;
-        priv_state.source = JpegSource::None;
-        priv_state.bridge_partial.clear();
-        // A reuse path will re-call `jpeg_read_header` for the new
-        // image; clear the flag so `jpeg_consume_input` doesn't
-        // short-circuit.
-        priv_state.header_parsed_ok = false;
-        // Drop the previous-image's parsed coefficients and unhook
-        // the foreign `jvirt_barray_ptr*` from the global side
-        // table. Without this, a `finish_decompress` → new
-        // `mem_src` → new `read_header` → `read_coefficients` reuse
-        // would short-circuit on the stale `coef_array_ptr` and
-        // hand the second JPEG's caller the *first* JPEG's barrays
-        // — caught by codex review of 809f52a.
-        //
-        // Also release the JPOOL_IMAGE allocations that backed the
-        // old barray array (the `*mut JVirtBarrayControl` slots,
-        // the per-component `JVirtBarrayControl`s, and the
-        // populated block rows). Upstream `jpeg_finish_decompress`
-        // reaches the same end state via `jpeg_abort` →
-        // `free_pool(JPOOL_IMAGE)`; without this the next
-        // `read_coefficients` on the same handle would re-allocate
-        // a parallel set without ever freeing the first one,
-        // ballooning memory across finish/reuse cycles — codex
-        // round-8 review of b7f690d.
-        if !priv_state.coef_array_ptr.is_null() {
-            coef_unregister_array(priv_state.coef_array_ptr as *const c_void);
-            priv_state.coef_array_ptr = std::ptr::null_mut();
-            release_decompress_image_pool(cinfo, c.mem);
+    crate::unwind_guard!(0, {
+        let c: &mut JpegDecompressPublic = match unsafe { cinfo_mut(cinfo) } {
+            Some(c) => c,
+            None => return 0,
+        };
+        c.global_state = DSTATE_STOPPING;
+        // Drop the decoded image and any source bytes bridged from a
+        // caller-installed `cinfo->src` so the next `jpeg_read_header` on
+        // this handle re-runs the bridge against whatever new source the
+        // caller installs. Without dropping `source`, a libjpeg-style
+        // caller that reuses the same decompressor with a *different*
+        // direct source manager would silently re-decode the previous
+        // image's bytes.
+        let priv_ptr: *mut c_void = decompress_private_raw(cinfo);
+        if let Some(priv_state) = unsafe { priv_from_ptr(priv_ptr) } {
+            priv_state.decoded = None;
+            priv_state.source = JpegSource::None;
+            priv_state.bridge_partial.clear();
+            // A reuse path will re-call `jpeg_read_header` for the new
+            // image; clear the flag so `jpeg_consume_input` doesn't
+            // short-circuit.
+            priv_state.header_parsed_ok = false;
+            // Drop the previous-image's parsed coefficients and unhook
+            // the foreign `jvirt_barray_ptr*` from the global side
+            // table. Without this, a `finish_decompress` → new
+            // `mem_src` → new `read_header` → `read_coefficients` reuse
+            // would short-circuit on the stale `coef_array_ptr` and
+            // hand the second JPEG's caller the *first* JPEG's barrays
+            // — caught by codex review of 809f52a.
+            //
+            // Also release the JPOOL_IMAGE allocations that backed the
+            // old barray array (the `*mut JVirtBarrayControl` slots,
+            // the per-component `JVirtBarrayControl`s, and the
+            // populated block rows). Upstream `jpeg_finish_decompress`
+            // reaches the same end state via `jpeg_abort` →
+            // `free_pool(JPOOL_IMAGE)`; without this the next
+            // `read_coefficients` on the same handle would re-allocate
+            // a parallel set without ever freeing the first one,
+            // ballooning memory across finish/reuse cycles — codex
+            // round-8 review of b7f690d.
+            if !priv_state.coef_array_ptr.is_null() {
+                coef_unregister_array(priv_state.coef_array_ptr as *const c_void);
+                priv_state.coef_array_ptr = std::ptr::null_mut();
+                release_decompress_image_pool(cinfo, c.mem);
+            }
+            priv_state.coefficients = None;
+            // Drop the previous-image saved-marker list so a reuse of
+            // this cinfo for a different image cannot expose the old
+            // image's APP/COM markers via `c.marker_list`. Stock
+            // libjpeg-turbo reaches the same end state through `jpeg_abort
+            // → free_pool(JPOOL_IMAGE)` in its finish path.
+            c.marker_list = std::ptr::null_mut();
+            priv_state.marker_list_storage.clear();
+            // Drop the lazy raw-data caches so a reuse of this cinfo for
+            // a different JPEG re-runs `decompress_raw` /
+            // `decompress_raw_12` against the new source. Without these,
+            // the `is_none()` guards at the top of `jpeg_read_raw_data` /
+            // `jpeg12_read_raw_data` would short-circuit on the previous
+            // image's planes and copy stale rows — codex review of f0dc137
+            // flagged the 12-bit half; the 8-bit cache had the same latent
+            // bug, so both are cleared here.
+            priv_state.raw_image_cache = None;
+            priv_state.raw_image_cache_12 = None;
+            priv_state.raw_rows_consumed.clear();
         }
-        priv_state.coefficients = None;
-        // Drop the previous-image saved-marker list so a reuse of
-        // this cinfo for a different image cannot expose the old
-        // image's APP/COM markers via `c.marker_list`. Stock
-        // libjpeg-turbo reaches the same end state through `jpeg_abort
-        // → free_pool(JPOOL_IMAGE)` in its finish path.
-        c.marker_list = std::ptr::null_mut();
-        priv_state.marker_list_storage.clear();
-        // Drop the lazy raw-data caches so a reuse of this cinfo for
-        // a different JPEG re-runs `decompress_raw` /
-        // `decompress_raw_12` against the new source. Without these,
-        // the `is_none()` guards at the top of `jpeg_read_raw_data` /
-        // `jpeg12_read_raw_data` would short-circuit on the previous
-        // image's planes and copy stale rows — codex review of f0dc137
-        // flagged the 12-bit half; the 8-bit cache had the same latent
-        // bug, so both are cleared here.
-        priv_state.raw_image_cache = None;
-        priv_state.raw_image_cache_12 = None;
-        priv_state.raw_rows_consumed.clear();
-    }
-    1
+        1
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -2585,64 +2609,76 @@ pub extern "C" fn jpeg_capi_test_dimensions(
     out_nc: *mut c_int,
     out_cs: *mut c_int,
 ) {
-    if let Some(c) = unsafe { cinfo_mut(cinfo) } {
-        // SAFETY: caller checked pointers.
-        unsafe {
-            if !out_w.is_null() {
-                *out_w = c.image_width;
-            }
-            if !out_h.is_null() {
-                *out_h = c.image_height;
-            }
-            if !out_nc.is_null() {
-                *out_nc = c.num_components;
-            }
-            if !out_cs.is_null() {
-                *out_cs = c.jpeg_color_space;
+    crate::unwind_guard!((), {
+        if let Some(c) = unsafe { cinfo_mut(cinfo) } {
+            // SAFETY: caller checked pointers.
+            unsafe {
+                if !out_w.is_null() {
+                    *out_w = c.image_width;
+                }
+                if !out_h.is_null() {
+                    *out_h = c.image_height;
+                }
+                if !out_nc.is_null() {
+                    *out_nc = c.num_components;
+                }
+                if !out_cs.is_null() {
+                    *out_cs = c.jpeg_color_space;
+                }
             }
         }
-    }
+    })
 }
 
 #[no_mangle]
 pub extern "C" fn jpeg_capi_test_set_out_cs(cinfo: *mut c_void, cs: c_int) {
-    if let Some(c) = unsafe { cinfo_mut(cinfo) } {
-        c.out_color_space = cs;
-    }
+    crate::unwind_guard!((), {
+        if let Some(c) = unsafe { cinfo_mut(cinfo) } {
+            c.out_color_space = cs;
+        }
+    })
 }
 
 #[no_mangle]
 pub extern "C" fn jpeg_capi_test_density_unit(cinfo: *mut c_void) -> c_int {
-    match unsafe { cinfo_mut(cinfo) } {
-        Some(c) => c.density_unit as c_int,
-        None => -1,
-    }
+    crate::unwind_guard!(-1, {
+        match unsafe { cinfo_mut(cinfo) } {
+            Some(c) => c.density_unit as c_int,
+            None => -1,
+        }
+    })
 }
 
 #[no_mangle]
 pub extern "C" fn jpeg_capi_test_x_density(cinfo: *mut c_void) -> c_int {
-    match unsafe { cinfo_mut(cinfo) } {
-        Some(c) => c.X_density as c_int,
-        None => -1,
-    }
+    crate::unwind_guard!(-1, {
+        match unsafe { cinfo_mut(cinfo) } {
+            Some(c) => c.X_density as c_int,
+            None => -1,
+        }
+    })
 }
 
 #[no_mangle]
 pub extern "C" fn jpeg_capi_test_y_density(cinfo: *mut c_void) -> c_int {
-    match unsafe { cinfo_mut(cinfo) } {
-        Some(c) => c.Y_density as c_int,
-        None => -1,
-    }
+    crate::unwind_guard!(-1, {
+        match unsafe { cinfo_mut(cinfo) } {
+            Some(c) => c.Y_density as c_int,
+            None => -1,
+        }
+    })
 }
 
 /// Read `cinfo->arith_code` after `jpeg_read_header`. Returns 1 for
 /// arithmetic-coded streams, 0 for Huffman, -1 if `cinfo` is null.
 #[no_mangle]
 pub extern "C" fn jpeg_capi_test_arith_code(cinfo: *mut c_void) -> c_int {
-    match unsafe { cinfo_mut(cinfo) } {
-        Some(c) => c.arith_code as c_int,
-        None => -1,
-    }
+    crate::unwind_guard!(-1, {
+        match unsafe { cinfo_mut(cinfo) } {
+            Some(c) => c.arith_code as c_int,
+            None => -1,
+        }
+    })
 }
 
 /// Return `cinfo->marker_list` — the head of the saved-marker linked list
@@ -2650,10 +2686,12 @@ pub extern "C" fn jpeg_capi_test_arith_code(cinfo: *mut c_void) -> c_int {
 /// bodies without hard-coding struct offsets.
 #[no_mangle]
 pub extern "C" fn jpeg_capi_test_marker_list(cinfo: *mut c_void) -> *mut JpegMarkerStructPublic {
-    match unsafe { cinfo_mut(cinfo) } {
-        Some(c) => c.marker_list,
-        None => std::ptr::null_mut(),
-    }
+    crate::unwind_guard!(std::ptr::null_mut(), {
+        match unsafe { cinfo_mut(cinfo) } {
+            Some(c) => c.marker_list,
+            None => std::ptr::null_mut(),
+        }
+    })
 }
 
 #[no_mangle]
@@ -2664,22 +2702,24 @@ pub extern "C" fn jpeg_capi_test_output_dims(
     out_components: *mut c_int,
     out_cs: *mut c_int,
 ) {
-    if let Some(c) = unsafe { cinfo_mut(cinfo) } {
-        unsafe {
-            if !out_w.is_null() {
-                *out_w = c.output_width;
-            }
-            if !out_h.is_null() {
-                *out_h = c.output_height;
-            }
-            if !out_components.is_null() {
-                *out_components = c.output_components;
-            }
-            if !out_cs.is_null() {
-                *out_cs = c.out_color_space;
+    crate::unwind_guard!((), {
+        if let Some(c) = unsafe { cinfo_mut(cinfo) } {
+            unsafe {
+                if !out_w.is_null() {
+                    *out_w = c.output_width;
+                }
+                if !out_h.is_null() {
+                    *out_h = c.output_height;
+                }
+                if !out_components.is_null() {
+                    *out_components = c.output_components;
+                }
+                if !out_cs.is_null() {
+                    *out_cs = c.out_color_space;
+                }
             }
         }
-    }
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -2701,15 +2741,17 @@ pub extern "C" fn jpeg_capi_test_output_dims(
 /// image height). Mirrors libjpeg 8d+'s same-name API.
 #[no_mangle]
 pub extern "C" fn jpeg_skip_scanlines(cinfo: *mut c_void, num_lines: JDimension) -> JDimension {
-    let c: &mut JpegDecompressPublic = match unsafe { cinfo_mut(cinfo) } {
-        Some(c) => c,
-        None => return 0,
-    };
-    let total: JDimension = c.output_height;
-    let remaining: JDimension = total.saturating_sub(c.output_scanline);
-    let skip: JDimension = std::cmp::min(num_lines, remaining);
-    c.output_scanline = c.output_scanline.saturating_add(skip);
-    skip
+    crate::unwind_guard!(0, {
+        let c: &mut JpegDecompressPublic = match unsafe { cinfo_mut(cinfo) } {
+            Some(c) => c,
+            None => return 0,
+        };
+        let total: JDimension = c.output_height;
+        let remaining: JDimension = total.saturating_sub(c.output_scanline);
+        let skip: JDimension = std::cmp::min(num_lines, remaining);
+        c.output_scanline = c.output_scanline.saturating_add(skip);
+        skip
+    })
 }
 
 /// `jpeg_crop_scanline(cinfo, *xoffset, *width)`.
@@ -2729,38 +2771,40 @@ pub extern "C" fn jpeg_crop_scanline(
     xoffset: *mut JDimension,
     width: *mut JDimension,
 ) {
-    let c: &mut JpegDecompressPublic = match unsafe { cinfo_mut(cinfo) } {
-        Some(c) => c,
-        None => return,
-    };
-    let priv_ptr: *mut c_void = decompress_private_raw(cinfo);
-    let priv_state: &mut DecompressPrivate = match unsafe { priv_from_ptr(priv_ptr) } {
-        Some(p) => p,
-        None => return,
-    };
-    if xoffset.is_null() || width.is_null() {
-        return;
-    }
-    // SAFETY: caller asserts the pointers are valid JDimension pointers.
-    let (mut x, mut w): (JDimension, JDimension) = unsafe { (*xoffset, *width) };
-    let out_w: JDimension = c.output_width;
-    // Clamp the (x, w) window to the output image bounds.
-    if x >= out_w {
-        x = out_w;
-        w = 0;
-    } else if x.saturating_add(w) > out_w {
-        w = out_w - x;
-    }
-    priv_state.crop_xoffset = x;
-    priv_state.crop_width = w;
-    priv_state.crop_active = w != 0 || x != 0;
-    // Write the (possibly clamped) values back so the caller sees the
-    // actually-honoured region — matching libjpeg's in/out pointer
-    // contract.
-    unsafe {
-        *xoffset = x;
-        *width = w;
-    }
+    crate::unwind_guard!((), {
+        let c: &mut JpegDecompressPublic = match unsafe { cinfo_mut(cinfo) } {
+            Some(c) => c,
+            None => return,
+        };
+        let priv_ptr: *mut c_void = decompress_private_raw(cinfo);
+        let priv_state: &mut DecompressPrivate = match unsafe { priv_from_ptr(priv_ptr) } {
+            Some(p) => p,
+            None => return,
+        };
+        if xoffset.is_null() || width.is_null() {
+            return;
+        }
+        // SAFETY: caller asserts the pointers are valid JDimension pointers.
+        let (mut x, mut w): (JDimension, JDimension) = unsafe { (*xoffset, *width) };
+        let out_w: JDimension = c.output_width;
+        // Clamp the (x, w) window to the output image bounds.
+        if x >= out_w {
+            x = out_w;
+            w = 0;
+        } else if x.saturating_add(w) > out_w {
+            w = out_w - x;
+        }
+        priv_state.crop_xoffset = x;
+        priv_state.crop_width = w;
+        priv_state.crop_active = w != 0 || x != 0;
+        // Write the (possibly clamped) values back so the caller sees the
+        // actually-honoured region — matching libjpeg's in/out pointer
+        // contract.
+        unsafe {
+            *xoffset = x;
+            *width = w;
+        }
+    })
 }
 
 /// `jpeg_save_markers(cinfo, marker_code, length_limit)`.
@@ -2773,38 +2817,40 @@ pub extern "C" fn jpeg_crop_scanline(
 /// body is actually decoded.
 #[no_mangle]
 pub extern "C" fn jpeg_save_markers(cinfo: *mut c_void, marker_code: c_int, length_limit: c_uint) {
-    let _c: &mut JpegDecompressPublic = match unsafe { cinfo_mut(cinfo) } {
-        Some(c) => c,
-        None => return,
-    };
-    let priv_ptr: *mut c_void = decompress_private_raw(cinfo);
-    let priv_state: &mut DecompressPrivate = match unsafe { priv_from_ptr(priv_ptr) } {
-        Some(p) => p,
-        None => return,
-    };
-    let code: u8 = (marker_code & 0xFF) as u8;
-    if length_limit == 0 {
-        priv_state.marker_save.limits.remove(&code);
-    } else {
-        // Stock libjpeg-turbo's `jpeg_save_markers` (jdmarker.c) raises
-        // a non-zero `length_limit` to the minimum needed to identify
-        // JFIF APP0 (14 bytes) or Adobe APP14 (12 bytes) — the markers
-        // libjpeg's own machinery relies on for colorspace
-        // classification. Apply the same floor so a caller that
-        // requested e.g. `jpeg_save_markers(cinfo, JPEG_APP0, 1)` sees
-        // the canonical 14-byte minimum (matches the C contract; codex
-        // review of the marker-list landing flagged the divergence).
-        const APP0_DATA_LEN: c_uint = 14;
-        const APP14_DATA_LEN: c_uint = 12;
-        let effective: c_uint = if code == 0xE0 {
-            length_limit.max(APP0_DATA_LEN)
-        } else if code == 0xEE {
-            length_limit.max(APP14_DATA_LEN)
-        } else {
-            length_limit
+    crate::unwind_guard!((), {
+        let _c: &mut JpegDecompressPublic = match unsafe { cinfo_mut(cinfo) } {
+            Some(c) => c,
+            None => return,
         };
-        priv_state.marker_save.limits.insert(code, effective);
-    }
+        let priv_ptr: *mut c_void = decompress_private_raw(cinfo);
+        let priv_state: &mut DecompressPrivate = match unsafe { priv_from_ptr(priv_ptr) } {
+            Some(p) => p,
+            None => return,
+        };
+        let code: u8 = (marker_code & 0xFF) as u8;
+        if length_limit == 0 {
+            priv_state.marker_save.limits.remove(&code);
+        } else {
+            // Stock libjpeg-turbo's `jpeg_save_markers` (jdmarker.c) raises
+            // a non-zero `length_limit` to the minimum needed to identify
+            // JFIF APP0 (14 bytes) or Adobe APP14 (12 bytes) — the markers
+            // libjpeg's own machinery relies on for colorspace
+            // classification. Apply the same floor so a caller that
+            // requested e.g. `jpeg_save_markers(cinfo, JPEG_APP0, 1)` sees
+            // the canonical 14-byte minimum (matches the C contract; codex
+            // review of the marker-list landing flagged the divergence).
+            const APP0_DATA_LEN: c_uint = 14;
+            const APP14_DATA_LEN: c_uint = 12;
+            let effective: c_uint = if code == 0xE0 {
+                length_limit.max(APP0_DATA_LEN)
+            } else if code == 0xEE {
+                length_limit.max(APP14_DATA_LEN)
+            } else {
+                length_limit
+            };
+            priv_state.marker_save.limits.insert(code, effective);
+        }
+    })
 }
 
 /// `jpeg_set_marker_processor(cinfo, marker_code, routine)`.
@@ -2823,24 +2869,26 @@ pub extern "C" fn jpeg_set_marker_processor(
     marker_code: c_int,
     routine: Option<MarkerParserFn>,
 ) {
-    let _c: &mut JpegDecompressPublic = match unsafe { cinfo_mut(cinfo) } {
-        Some(c) => c,
-        None => return,
-    };
-    let priv_ptr: *mut c_void = decompress_private_raw(cinfo);
-    let priv_state: &mut DecompressPrivate = match unsafe { priv_from_ptr(priv_ptr) } {
-        Some(p) => p,
-        None => return,
-    };
-    let code: u8 = (marker_code & 0xFF) as u8;
-    match routine {
-        Some(fun) => {
-            priv_state.marker_processors.insert(code, fun);
+    crate::unwind_guard!((), {
+        let _c: &mut JpegDecompressPublic = match unsafe { cinfo_mut(cinfo) } {
+            Some(c) => c,
+            None => return,
+        };
+        let priv_ptr: *mut c_void = decompress_private_raw(cinfo);
+        let priv_state: &mut DecompressPrivate = match unsafe { priv_from_ptr(priv_ptr) } {
+            Some(p) => p,
+            None => return,
+        };
+        let code: u8 = (marker_code & 0xFF) as u8;
+        match routine {
+            Some(fun) => {
+                priv_state.marker_processors.insert(code, fun);
+            }
+            None => {
+                priv_state.marker_processors.remove(&code);
+            }
         }
-        None => {
-            priv_state.marker_processors.remove(&code);
-        }
-    }
+    })
 }
 
 /// `jpeg_read_icc_profile(cinfo, **icc_data_ptr, *icc_data_len) -> boolean`.
@@ -2858,47 +2906,49 @@ pub extern "C" fn jpeg_read_icc_profile(
     icc_data_ptr: *mut *mut u8,
     icc_data_len: *mut c_uint,
 ) -> CBoolean {
-    let _c: &mut JpegDecompressPublic = match unsafe { cinfo_mut(cinfo) } {
-        Some(c) => c,
-        None => return 0,
-    };
-    let priv_ptr: *mut c_void = decompress_private_raw(cinfo);
-    let priv_state: &mut DecompressPrivate = match unsafe { priv_from_ptr(priv_ptr) } {
-        Some(p) => p,
-        None => return 0,
-    };
-    if icc_data_ptr.is_null() || icc_data_len.is_null() {
-        return 0;
-    }
-    let profile: Option<&[u8]> = priv_state
-        .decoded
-        .as_ref()
-        .and_then(|img| img.icc_profile());
-    let profile: &[u8] = match profile {
-        Some(p) if !p.is_empty() => p,
-        _ => {
+    crate::unwind_guard!(0, {
+        let _c: &mut JpegDecompressPublic = match unsafe { cinfo_mut(cinfo) } {
+            Some(c) => c,
+            None => return 0,
+        };
+        let priv_ptr: *mut c_void = decompress_private_raw(cinfo);
+        let priv_state: &mut DecompressPrivate = match unsafe { priv_from_ptr(priv_ptr) } {
+            Some(p) => p,
+            None => return 0,
+        };
+        if icc_data_ptr.is_null() || icc_data_len.is_null() {
+            return 0;
+        }
+        let profile: Option<&[u8]> = priv_state
+            .decoded
+            .as_ref()
+            .and_then(|img| img.icc_profile());
+        let profile: &[u8] = match profile {
+            Some(p) if !p.is_empty() => p,
+            _ => {
+                unsafe {
+                    *icc_data_ptr = std::ptr::null_mut();
+                    *icc_data_len = 0;
+                }
+                return 0;
+            }
+        };
+        let buf: *mut u8 = libc_from_slice(profile);
+        if buf.is_null() {
             unsafe {
                 *icc_data_ptr = std::ptr::null_mut();
                 *icc_data_len = 0;
             }
+            priv_state.last_error =
+                CString::new("jpeg_read_icc_profile: out of memory").unwrap_or_default();
             return 0;
         }
-    };
-    let buf: *mut u8 = libc_from_slice(profile);
-    if buf.is_null() {
         unsafe {
-            *icc_data_ptr = std::ptr::null_mut();
-            *icc_data_len = 0;
+            *icc_data_ptr = buf;
+            *icc_data_len = profile.len() as c_uint;
         }
-        priv_state.last_error =
-            CString::new("jpeg_read_icc_profile: out of memory").unwrap_or_default();
-        return 0;
-    }
-    unsafe {
-        *icc_data_ptr = buf;
-        *icc_data_len = profile.len() as c_uint;
-    }
-    1
+        1
+    })
 }
 
 /// `jpeg_read_coefficients(cinfo) -> jvirt_barray_ptr *`.
@@ -2927,209 +2977,214 @@ pub extern "C" fn jpeg_read_icc_profile(
 /// `run_coefficient_writer_and_flush`.
 #[no_mangle]
 pub extern "C" fn jpeg_read_coefficients(cinfo: *mut c_void) -> *mut c_void {
-    let c: &mut JpegDecompressPublic = match unsafe { cinfo_mut(cinfo) } {
-        Some(c) => c,
-        None => return std::ptr::null_mut(),
-    };
-    let priv_ptr: *mut c_void = decompress_private_raw(cinfo);
-    let priv_state: &mut DecompressPrivate = match unsafe { priv_from_ptr(priv_ptr) } {
-        Some(p) => p,
-        None => return std::ptr::null_mut(),
-    };
+    crate::unwind_guard!(std::ptr::null_mut(), {
+        let c: &mut JpegDecompressPublic = match unsafe { cinfo_mut(cinfo) } {
+            Some(c) => c,
+            None => return std::ptr::null_mut(),
+        };
+        let priv_ptr: *mut c_void = decompress_private_raw(cinfo);
+        let priv_state: &mut DecompressPrivate = match unsafe { priv_from_ptr(priv_ptr) } {
+            Some(p) => p,
+            None => return std::ptr::null_mut(),
+        };
 
-    // Fast-path: a previous successful `jpeg_read_coefficients` already
-    // parsed and registered the array — return the same pointer so
-    // repeated polls observe identical handles (matches libjpeg's
-    // contract that the returned virt_barray array is stable across
-    // reads on the same cinfo).
-    if !priv_state.coef_array_ptr.is_null() && priv_state.coefficients.is_some() {
-        return priv_state.coef_array_ptr;
-    }
+        // Fast-path: a previous successful `jpeg_read_coefficients` already
+        // parsed and registered the array — return the same pointer so
+        // repeated polls observe identical handles (matches libjpeg's
+        // contract that the returned virt_barray array is stable across
+        // reads on the same cinfo).
+        if !priv_state.coef_array_ptr.is_null() && priv_state.coefficients.is_some() {
+            return priv_state.coef_array_ptr;
+        }
 
-    let bytes: Vec<u8> = match priv_state.source.as_bytes() {
-        Some(b) => b.to_vec(),
-        None => {
+        let bytes: Vec<u8> = match priv_state.source.as_bytes() {
+            Some(b) => b.to_vec(),
+            None => {
+                priv_state.last_error =
+                    CString::new("jpeg_read_coefficients: no source").unwrap_or_default();
+                return std::ptr::null_mut();
+            }
+        };
+        let coeffs: libjpeg_turbo_rs::JpegCoefficients =
+            match libjpeg_turbo_rs::read_coefficients(&bytes) {
+                Ok(c) => c,
+                Err(e) => {
+                    priv_state.last_error =
+                        CString::new(format!("jpeg_read_coefficients: {e}")).unwrap_or_default();
+                    return std::ptr::null_mut();
+                }
+            };
+
+        // Stash the parsed coefficients in a CoefHandle so callers that
+        // round-trip through this shim (read_coefficients →
+        // write_coefficients on a sibling cinfo) get the cached
+        // JpegCoefficients via the side table without rebuilding from
+        // individual barray reads.
+        priv_state.coefficients = Some(Box::new(CoefHandle {
+            magic: CoefHandle::MAGIC,
+            inner: coeffs,
+        }));
+        let handle_ptr: *const CoefHandle =
+            priv_state.coefficients.as_deref().expect("just inserted") as *const CoefHandle;
+
+        // Build the foreign-style `jvirt_barray_ptr*` array via cinfo->mem
+        // so `transupp` (compiled into stock `jpegtran`) can index it as
+        // a plain C array.
+        let mem_ptr: *mut c_void = c.mem;
+        if mem_ptr.is_null() {
             priv_state.last_error =
-                CString::new("jpeg_read_coefficients: no source").unwrap_or_default();
+                CString::new("jpeg_read_coefficients: cinfo->mem is null").unwrap_or_default();
             return std::ptr::null_mut();
         }
-    };
-    let coeffs: libjpeg_turbo_rs::JpegCoefficients =
-        match libjpeg_turbo_rs::read_coefficients(&bytes) {
-            Ok(c) => c,
-            Err(e) => {
+        let mem: &memmgr::JpegMemoryMgr = unsafe { &*(mem_ptr as *const memmgr::JpegMemoryMgr) };
+        let alloc_small: memmgr::AllocFn = match mem.alloc_small {
+            Some(f) => f,
+            None => {
                 priv_state.last_error =
-                    CString::new(format!("jpeg_read_coefficients: {e}")).unwrap_or_default();
+                    CString::new("jpeg_read_coefficients: alloc_small not wired")
+                        .unwrap_or_default();
+                return std::ptr::null_mut();
+            }
+        };
+        let request_virt_barray: memmgr::RequestVirtBarrayFn = match mem.request_virt_barray {
+            Some(f) => f,
+            None => {
+                priv_state.last_error =
+                    CString::new("jpeg_read_coefficients: request_virt_barray not wired")
+                        .unwrap_or_default();
+                return std::ptr::null_mut();
+            }
+        };
+        let realize_virt_arrays: memmgr::RealizeVirtArraysFn = match mem.realize_virt_arrays {
+            Some(f) => f,
+            None => {
+                priv_state.last_error =
+                    CString::new("jpeg_read_coefficients: realize_virt_arrays not wired")
+                        .unwrap_or_default();
+                return std::ptr::null_mut();
+            }
+        };
+        let access_virt_barray: memmgr::AccessVirtBarrayFn = match mem.access_virt_barray {
+            Some(f) => f,
+            None => {
+                priv_state.last_error =
+                    CString::new("jpeg_read_coefficients: access_virt_barray not wired")
+                        .unwrap_or_default();
                 return std::ptr::null_mut();
             }
         };
 
-    // Stash the parsed coefficients in a CoefHandle so callers that
-    // round-trip through this shim (read_coefficients →
-    // write_coefficients on a sibling cinfo) get the cached
-    // JpegCoefficients via the side table without rebuilding from
-    // individual barray reads.
-    priv_state.coefficients = Some(Box::new(CoefHandle {
-        magic: CoefHandle::MAGIC,
-        inner: coeffs,
-    }));
-    let handle_ptr: *const CoefHandle =
-        priv_state.coefficients.as_deref().expect("just inserted") as *const CoefHandle;
-
-    // Build the foreign-style `jvirt_barray_ptr*` array via cinfo->mem
-    // so `transupp` (compiled into stock `jpegtran`) can index it as
-    // a plain C array.
-    let mem_ptr: *mut c_void = c.mem;
-    if mem_ptr.is_null() {
-        priv_state.last_error =
-            CString::new("jpeg_read_coefficients: cinfo->mem is null").unwrap_or_default();
-        return std::ptr::null_mut();
-    }
-    let mem: &memmgr::JpegMemoryMgr = unsafe { &*(mem_ptr as *const memmgr::JpegMemoryMgr) };
-    let alloc_small: memmgr::AllocFn = match mem.alloc_small {
-        Some(f) => f,
-        None => {
-            priv_state.last_error =
-                CString::new("jpeg_read_coefficients: alloc_small not wired").unwrap_or_default();
+        let inner: &libjpeg_turbo_rs::JpegCoefficients =
+            &priv_state.coefficients.as_deref().expect("set above").inner;
+        let n: usize = inner.components.len();
+        if n == 0 {
             return std::ptr::null_mut();
         }
-    };
-    let request_virt_barray: memmgr::RequestVirtBarrayFn = match mem.request_virt_barray {
-        Some(f) => f,
-        None => {
+
+        // Allocate the array of `jvirt_barray_ptr` slots from JPOOL_IMAGE.
+        let array_bytes: usize = n * std::mem::size_of::<*mut memmgr::JVirtBarrayControl>();
+        let array_raw: *mut c_void =
+            unsafe { alloc_small(cinfo, memmgr::JPOOL_IMAGE, array_bytes) };
+        if array_raw.is_null() {
             priv_state.last_error =
-                CString::new("jpeg_read_coefficients: request_virt_barray not wired")
+                CString::new("jpeg_read_coefficients: alloc_small returned null")
                     .unwrap_or_default();
             return std::ptr::null_mut();
         }
-    };
-    let realize_virt_arrays: memmgr::RealizeVirtArraysFn = match mem.realize_virt_arrays {
-        Some(f) => f,
-        None => {
-            priv_state.last_error =
-                CString::new("jpeg_read_coefficients: realize_virt_arrays not wired")
-                    .unwrap_or_default();
-            return std::ptr::null_mut();
-        }
-    };
-    let access_virt_barray: memmgr::AccessVirtBarrayFn = match mem.access_virt_barray {
-        Some(f) => f,
-        None => {
-            priv_state.last_error =
-                CString::new("jpeg_read_coefficients: access_virt_barray not wired")
-                    .unwrap_or_default();
-            return std::ptr::null_mut();
-        }
-    };
+        let array_slot: *mut *mut memmgr::JVirtBarrayControl =
+            array_raw as *mut *mut memmgr::JVirtBarrayControl;
 
-    let inner: &libjpeg_turbo_rs::JpegCoefficients =
-        &priv_state.coefficients.as_deref().expect("set above").inner;
-    let n: usize = inner.components.len();
-    if n == 0 {
-        return std::ptr::null_mut();
-    }
-
-    // Allocate the array of `jvirt_barray_ptr` slots from JPOOL_IMAGE.
-    let array_bytes: usize = n * std::mem::size_of::<*mut memmgr::JVirtBarrayControl>();
-    let array_raw: *mut c_void = unsafe { alloc_small(cinfo, memmgr::JPOOL_IMAGE, array_bytes) };
-    if array_raw.is_null() {
-        priv_state.last_error =
-            CString::new("jpeg_read_coefficients: alloc_small returned null").unwrap_or_default();
-        return std::ptr::null_mut();
-    }
-    let array_slot: *mut *mut memmgr::JVirtBarrayControl =
-        array_raw as *mut *mut memmgr::JVirtBarrayControl;
-
-    // Allocate per-component virt barrays. `comp.blocks_x / blocks_y`
-    // are already iMCU-padded by the parser (see `read_coefficients`
-    // in `src/api/coefficient.rs`), so we can pass them straight
-    // through as the requested barray dimensions.
-    for ci in 0..n {
-        let comp: &libjpeg_turbo_rs::ComponentCoefficients = &inner.components[ci];
-        let blocks_x: JDimension = comp.blocks_x as JDimension;
-        let blocks_y: JDimension = comp.blocks_y as JDimension;
-        let v_samp: JDimension = comp.v_sampling as JDimension;
-        let barray: *mut memmgr::JVirtBarrayControl = unsafe {
-            request_virt_barray(
-                cinfo,
-                memmgr::JPOOL_IMAGE,
-                /*pre_zero=*/ 0,
-                blocks_x,
-                blocks_y,
-                v_samp.max(1),
-            )
-        };
-        if barray.is_null() {
-            priv_state.last_error = CString::new(format!(
-                "jpeg_read_coefficients: request_virt_barray(comp={ci}) returned null"
-            ))
-            .unwrap_or_default();
-            return std::ptr::null_mut();
-        }
-        // SAFETY: `array_slot` points at an `n`-element array allocated
-        // above; `ci < n`.
-        unsafe {
-            *array_slot.add(ci) = barray;
-        }
-    }
-
-    // Realize backing storage for every requested virt array.
-    unsafe { realize_virt_arrays(cinfo) };
-
-    // Populate each barray with the parsed coefficient blocks, copying
-    // through `access_virt_barray` so we use the same access pattern
-    // a foreign caller would.
-    for ci in 0..n {
-        let comp: &libjpeg_turbo_rs::ComponentCoefficients = &inner.components[ci];
-        let blocks_x_u: usize = comp.blocks_x;
-        let blocks_y_u: usize = comp.blocks_y;
-        let blocks_x: JDimension = blocks_x_u as JDimension;
-        let blocks_y: JDimension = blocks_y_u as JDimension;
-        let barray: *mut memmgr::JVirtBarrayControl = unsafe { *array_slot.add(ci) };
-        let row_array: memmgr::JBlockArray = unsafe {
-            access_virt_barray(cinfo, barray, 0, blocks_y, /*writable=*/ 1)
-        };
-        if row_array.is_null() {
-            priv_state.last_error = CString::new(format!(
-                "jpeg_read_coefficients: access_virt_barray(comp={ci}) returned null"
-            ))
-            .unwrap_or_default();
-            return std::ptr::null_mut();
-        }
-        for r in 0..blocks_y_u {
-            // SAFETY: row_array has `blocks_y` row pointers, each
-            // pointing to `blocks_x` JBlocks, allocated by
-            // `alloc_barray_impl`.
-            let row_ptr: memmgr::JBlockRow = unsafe { *row_array.add(r) };
-            let row_blocks: &mut [memmgr::JBlock] =
-                unsafe { std::slice::from_raw_parts_mut(row_ptr, blocks_x_u) };
-            for (c_idx, dst_block) in row_blocks.iter_mut().enumerate() {
-                let blk_idx: usize = r * blocks_x_u + c_idx;
-                // Convert zigzag → natural row-major so foreign
-                // consumers (stock `transupp::do_rot_*` /
-                // `do_transpose / …`) can index coefficients as
-                // `block[i*8+j]` representing the (i,j) DCT element.
-                // Our parser emits zigzag (the order DQT stores), so
-                // we un-zigzag here. `materialize_foreign_coef_arrays`
-                // re-zigzags before re-encoding.
-                let zigzag_block: &[i16; 64] = &comp.blocks[blk_idx];
-                for (natural_pos, slot) in dst_block.iter_mut().enumerate() {
-                    let zigzag_pos: usize =
-                        libjpeg_turbo_rs::common::quant_table::NATURAL_ORDER[natural_pos];
-                    *slot = zigzag_block[zigzag_pos];
-                }
+        // Allocate per-component virt barrays. `comp.blocks_x / blocks_y`
+        // are already iMCU-padded by the parser (see `read_coefficients`
+        // in `src/api/coefficient.rs`), so we can pass them straight
+        // through as the requested barray dimensions.
+        for ci in 0..n {
+            let comp: &libjpeg_turbo_rs::ComponentCoefficients = &inner.components[ci];
+            let blocks_x: JDimension = comp.blocks_x as JDimension;
+            let blocks_y: JDimension = comp.blocks_y as JDimension;
+            let v_samp: JDimension = comp.v_sampling as JDimension;
+            let barray: *mut memmgr::JVirtBarrayControl = unsafe {
+                request_virt_barray(
+                    cinfo,
+                    memmgr::JPOOL_IMAGE,
+                    /*pre_zero=*/ 0,
+                    blocks_x,
+                    blocks_y,
+                    v_samp.max(1),
+                )
+            };
+            if barray.is_null() {
+                priv_state.last_error = CString::new(format!(
+                    "jpeg_read_coefficients: request_virt_barray(comp={ci}) returned null"
+                ))
+                .unwrap_or_default();
+                return std::ptr::null_mut();
             }
-            let _ = blocks_x; // silence unused warning if width is 0.
+            // SAFETY: `array_slot` points at an `n`-element array allocated
+            // above; `ci < n`.
+            unsafe {
+                *array_slot.add(ci) = barray;
+            }
         }
-    }
 
-    // Register the array → CoefHandle mapping so an in-process
-    // `jpeg_write_coefficients` can shortcut to the cached
-    // JpegCoefficients.
-    coef_register_array(array_raw as *const c_void, handle_ptr);
-    priv_state.coef_array_ptr = array_raw;
+        // Realize backing storage for every requested virt array.
+        unsafe { realize_virt_arrays(cinfo) };
 
-    array_raw
+        // Populate each barray with the parsed coefficient blocks, copying
+        // through `access_virt_barray` so we use the same access pattern
+        // a foreign caller would.
+        for ci in 0..n {
+            let comp: &libjpeg_turbo_rs::ComponentCoefficients = &inner.components[ci];
+            let blocks_x_u: usize = comp.blocks_x;
+            let blocks_y_u: usize = comp.blocks_y;
+            let blocks_x: JDimension = blocks_x_u as JDimension;
+            let blocks_y: JDimension = blocks_y_u as JDimension;
+            let barray: *mut memmgr::JVirtBarrayControl = unsafe { *array_slot.add(ci) };
+            let row_array: memmgr::JBlockArray = unsafe {
+                access_virt_barray(cinfo, barray, 0, blocks_y, /*writable=*/ 1)
+            };
+            if row_array.is_null() {
+                priv_state.last_error = CString::new(format!(
+                    "jpeg_read_coefficients: access_virt_barray(comp={ci}) returned null"
+                ))
+                .unwrap_or_default();
+                return std::ptr::null_mut();
+            }
+            for r in 0..blocks_y_u {
+                // SAFETY: row_array has `blocks_y` row pointers, each
+                // pointing to `blocks_x` JBlocks, allocated by
+                // `alloc_barray_impl`.
+                let row_ptr: memmgr::JBlockRow = unsafe { *row_array.add(r) };
+                let row_blocks: &mut [memmgr::JBlock] =
+                    unsafe { std::slice::from_raw_parts_mut(row_ptr, blocks_x_u) };
+                for (c_idx, dst_block) in row_blocks.iter_mut().enumerate() {
+                    let blk_idx: usize = r * blocks_x_u + c_idx;
+                    // Convert zigzag → natural row-major so foreign
+                    // consumers (stock `transupp::do_rot_*` /
+                    // `do_transpose / …`) can index coefficients as
+                    // `block[i*8+j]` representing the (i,j) DCT element.
+                    // Our parser emits zigzag (the order DQT stores), so
+                    // we un-zigzag here. `materialize_foreign_coef_arrays`
+                    // re-zigzags before re-encoding.
+                    let zigzag_block: &[i16; 64] = &comp.blocks[blk_idx];
+                    for (natural_pos, slot) in dst_block.iter_mut().enumerate() {
+                        let zigzag_pos: usize =
+                            libjpeg_turbo_rs::common::quant_table::NATURAL_ORDER[natural_pos];
+                        *slot = zigzag_block[zigzag_pos];
+                    }
+                }
+                let _ = blocks_x; // silence unused warning if width is 0.
+            }
+        }
+
+        // Register the array → CoefHandle mapping so an in-process
+        // `jpeg_write_coefficients` can shortcut to the cached
+        // JpegCoefficients.
+        coef_register_array(array_raw as *const c_void, handle_ptr);
+        priv_state.coef_array_ptr = array_raw;
+
+        array_raw
+    })
 }
 
 /// `jpeg_copy_critical_parameters(srcinfo, dstinfo)`.
@@ -3145,130 +3200,132 @@ pub extern "C" fn jpeg_read_coefficients(cinfo: *mut c_void) -> *mut c_void {
 /// chain it before establishing both cinfos cannot crash the process.
 #[no_mangle]
 pub extern "C" fn jpeg_copy_critical_parameters(srcinfo: *mut c_void, dstinfo: *mut c_void) {
-    if srcinfo.is_null() || dstinfo.is_null() {
-        return;
-    }
-    // Snapshot every field we need from src before we borrow dst. The
-    // dst borrow path will install a new memory manager pool entry
-    // (jpeg_alloc_quant_table) that can outlive the snapshot, so a
-    // single read here keeps lifetimes straight.
-    let snapshot: SrcCriticalSnapshot = match unsafe { snapshot_src_for_copy(srcinfo) } {
-        Some(s) => s,
-        None => return,
-    };
+    crate::unwind_guard!((), {
+        if srcinfo.is_null() || dstinfo.is_null() {
+            return;
+        }
+        // Snapshot every field we need from src before we borrow dst. The
+        // dst borrow path will install a new memory manager pool entry
+        // (jpeg_alloc_quant_table) that can outlive the snapshot, so a
+        // single read here keeps lifetimes straight.
+        let snapshot: SrcCriticalSnapshot = match unsafe { snapshot_src_for_copy(srcinfo) } {
+            Some(s) => s,
+            None => return,
+        };
 
-    let dst: &mut JpegCompressPublic = match unsafe { cinfo_compress_mut(dstinfo) } {
-        Some(c) => c,
-        None => return,
-    };
-    // Defensive heuristic to keep the existing
-    // `*_copy_params_is_noop_safe` smoke test honest: a properly
-    // initialised compress cinfo (post `jpeg_CreateCompress`) sets
-    // `is_decompressor=0` AND has a non-NULL `mem` (the memory
-    // manager installed in CreateCompress). A stack-allocated zeroed
-    // dummy buffer fails the `mem` check; bail before
-    // `jpeg_set_defaults` writes fields past the buffer's end.
-    if dst.is_decompressor != 0 || dst.mem.is_null() {
-        return;
-    }
+        let dst: &mut JpegCompressPublic = match unsafe { cinfo_compress_mut(dstinfo) } {
+            Some(c) => c,
+            None => return,
+        };
+        // Defensive heuristic to keep the existing
+        // `*_copy_params_is_noop_safe` smoke test honest: a properly
+        // initialised compress cinfo (post `jpeg_CreateCompress`) sets
+        // `is_decompressor=0` AND has a non-NULL `mem` (the memory
+        // manager installed in CreateCompress). A stack-allocated zeroed
+        // dummy buffer fails the `mem` check; bail before
+        // `jpeg_set_defaults` writes fields past the buffer's end.
+        if dst.is_decompressor != 0 || dst.mem.is_null() {
+            return;
+        }
 
-    // Step 1: fundamental image dims + input description.
-    dst.image_width = snapshot.image_width;
-    dst.image_height = snapshot.image_height;
-    dst.input_components = snapshot.num_components;
-    dst.in_color_space = snapshot.jpeg_color_space;
-    // libjpeg 8+: `jpeg_width / jpeg_height` mirror `output_width /
-    // output_height` when scaling is in effect; with default 1:1 the
-    // output dims equal the image dims.
-    dst.jpeg_width = snapshot.image_width;
-    dst.jpeg_height = snapshot.image_height;
+        // Step 1: fundamental image dims + input description.
+        dst.image_width = snapshot.image_width;
+        dst.image_height = snapshot.image_height;
+        dst.input_components = snapshot.num_components;
+        dst.in_color_space = snapshot.jpeg_color_space;
+        // libjpeg 8+: `jpeg_width / jpeg_height` mirror `output_width /
+        // output_height` when scaling is in effect; with default 1:1 the
+        // output dims equal the image dims.
+        dst.jpeg_width = snapshot.image_width;
+        dst.jpeg_height = snapshot.image_height;
 
-    // Step 2: install canonical defaults, then override colorspace so
-    // the comp_info / quant_tbl_no allocation matches the source.
-    jpeg_set_defaults(dstinfo);
-    jpeg_set_colorspace(dstinfo, snapshot.jpeg_color_space);
+        // Step 2: install canonical defaults, then override colorspace so
+        // the comp_info / quant_tbl_no allocation matches the source.
+        jpeg_set_defaults(dstinfo);
+        jpeg_set_colorspace(dstinfo, snapshot.jpeg_color_space);
 
-    // Re-borrow because `jpeg_set_*` re-acquired the cinfo through the
-    // pointer. The Rust borrow checker cannot see that.
-    let dst: &mut JpegCompressPublic = match unsafe { cinfo_compress_mut(dstinfo) } {
-        Some(c) => c,
-        None => return,
-    };
+        // Re-borrow because `jpeg_set_*` re-acquired the cinfo through the
+        // pointer. The Rust borrow checker cannot see that.
+        let dst: &mut JpegCompressPublic = match unsafe { cinfo_compress_mut(dstinfo) } {
+            Some(c) => c,
+            None => return,
+        };
 
-    dst.data_precision = snapshot.data_precision;
-    dst.CCIR601_sampling = snapshot.ccir601_sampling;
+        dst.data_precision = snapshot.data_precision;
+        dst.CCIR601_sampling = snapshot.ccir601_sampling;
 
-    // Step 3: copy quant tables — allocate slots through
-    // `jpeg_alloc_quant_table` so lifetime tracking matches stock
-    // libjpeg (the slot lives in the cinfo's permanent pool).
-    for tblno in 0..NUM_QUANT_TBLS {
-        let src_qt: Option<[u16; DCTSIZE2]> = snapshot.quant_tables[tblno];
-        let Some(src_quantval) = src_qt else { continue };
-        let mut slot: *mut JQuantTblPublic = dst.quant_tbl_ptrs[tblno];
-        if slot.is_null() {
-            slot = jpeg_alloc_quant_table(dstinfo);
+        // Step 3: copy quant tables — allocate slots through
+        // `jpeg_alloc_quant_table` so lifetime tracking matches stock
+        // libjpeg (the slot lives in the cinfo's permanent pool).
+        for tblno in 0..NUM_QUANT_TBLS {
+            let src_qt: Option<[u16; DCTSIZE2]> = snapshot.quant_tables[tblno];
+            let Some(src_quantval) = src_qt else { continue };
+            let mut slot: *mut JQuantTblPublic = dst.quant_tbl_ptrs[tblno];
             if slot.is_null() {
-                return;
+                slot = jpeg_alloc_quant_table(dstinfo);
+                if slot.is_null() {
+                    return;
+                }
+                // Re-borrow once more to install the slot.
+                let dst2: &mut JpegCompressPublic = match unsafe { cinfo_compress_mut(dstinfo) } {
+                    Some(c) => c,
+                    None => return,
+                };
+                dst2.quant_tbl_ptrs[tblno] = slot;
             }
-            // Re-borrow once more to install the slot.
-            let dst2: &mut JpegCompressPublic = match unsafe { cinfo_compress_mut(dstinfo) } {
-                Some(c) => c,
-                None => return,
-            };
-            dst2.quant_tbl_ptrs[tblno] = slot;
-        }
-        // SAFETY: `slot` was either allocated by us above or was already
-        // installed by `jpeg_set_defaults`. Either way, it points at a
-        // live `JQuantTblPublic` aligned for direct field writes.
-        unsafe {
-            (*slot).quantval = src_quantval;
-            (*slot).sent_table = 0;
-        }
-    }
-
-    // Step 4: copy num_components and per-component info. Re-borrow
-    // because the quant-table install used a fresh borrow.
-    let dst: &mut JpegCompressPublic = match unsafe { cinfo_compress_mut(dstinfo) } {
-        Some(c) => c,
-        None => return,
-    };
-    let n: usize = snapshot.num_components.max(0) as usize;
-    if n == 0 || n > MAX_COMPS_OWNED {
-        return;
-    }
-    dst.num_components = snapshot.num_components;
-    if !dst.comp_info.is_null() {
-        let dst_comps: &mut [JpegComponentInfoPublic] =
-            unsafe { std::slice::from_raw_parts_mut(dst.comp_info, n) };
-        for (ci, dst_comp) in dst_comps.iter_mut().enumerate().take(n) {
-            let src_comp: &SrcComponentSnapshot = &snapshot.components[ci];
-            dst_comp.component_id = src_comp.component_id;
-            dst_comp.component_index = ci as c_int;
-            dst_comp.h_samp_factor = src_comp.h_samp_factor;
-            dst_comp.v_samp_factor = src_comp.v_samp_factor;
-            dst_comp.quant_tbl_no = src_comp.quant_tbl_no;
-            // Re-link the per-component quant_table pointer at the
-            // newly-installed dst slot so downstream `jpeg_finish_compress`
-            // (and any tooling that walks comp_info[i].quant_table) sees
-            // the dst-side table, not a stray src pointer.
-            let qno: usize = src_comp.quant_tbl_no.max(0) as usize;
-            if qno < NUM_QUANT_TBLS {
-                dst_comp.quant_table = dst.quant_tbl_ptrs[qno];
+            // SAFETY: `slot` was either allocated by us above or was already
+            // installed by `jpeg_set_defaults`. Either way, it points at a
+            // live `JQuantTblPublic` aligned for direct field writes.
+            unsafe {
+                (*slot).quantval = src_quantval;
+                (*slot).sent_table = 0;
             }
         }
-    }
 
-    // Step 5: JFIF version + density. Mirror upstream's "only copy on
-    // saw_JFIF_marker, and not for major-version > 1" guard.
-    if snapshot.saw_jfif_marker != 0 {
-        if snapshot.jfif_major_version == 1 {
-            dst.JFIF_major_version = snapshot.jfif_major_version;
-            dst.JFIF_minor_version = snapshot.jfif_minor_version;
+        // Step 4: copy num_components and per-component info. Re-borrow
+        // because the quant-table install used a fresh borrow.
+        let dst: &mut JpegCompressPublic = match unsafe { cinfo_compress_mut(dstinfo) } {
+            Some(c) => c,
+            None => return,
+        };
+        let n: usize = snapshot.num_components.max(0) as usize;
+        if n == 0 || n > MAX_COMPS_OWNED {
+            return;
         }
-        dst.density_unit = snapshot.density_unit;
-        dst.X_density = snapshot.x_density;
-        dst.Y_density = snapshot.y_density;
-    }
+        dst.num_components = snapshot.num_components;
+        if !dst.comp_info.is_null() {
+            let dst_comps: &mut [JpegComponentInfoPublic] =
+                unsafe { std::slice::from_raw_parts_mut(dst.comp_info, n) };
+            for (ci, dst_comp) in dst_comps.iter_mut().enumerate().take(n) {
+                let src_comp: &SrcComponentSnapshot = &snapshot.components[ci];
+                dst_comp.component_id = src_comp.component_id;
+                dst_comp.component_index = ci as c_int;
+                dst_comp.h_samp_factor = src_comp.h_samp_factor;
+                dst_comp.v_samp_factor = src_comp.v_samp_factor;
+                dst_comp.quant_tbl_no = src_comp.quant_tbl_no;
+                // Re-link the per-component quant_table pointer at the
+                // newly-installed dst slot so downstream `jpeg_finish_compress`
+                // (and any tooling that walks comp_info[i].quant_table) sees
+                // the dst-side table, not a stray src pointer.
+                let qno: usize = src_comp.quant_tbl_no.max(0) as usize;
+                if qno < NUM_QUANT_TBLS {
+                    dst_comp.quant_table = dst.quant_tbl_ptrs[qno];
+                }
+            }
+        }
+
+        // Step 5: JFIF version + density. Mirror upstream's "only copy on
+        // saw_JFIF_marker, and not for major-version > 1" guard.
+        if snapshot.saw_jfif_marker != 0 {
+            if snapshot.jfif_major_version == 1 {
+                dst.JFIF_major_version = snapshot.jfif_major_version;
+                dst.JFIF_minor_version = snapshot.jfif_minor_version;
+            }
+            dst.density_unit = snapshot.density_unit;
+            dst.X_density = snapshot.x_density;
+            dst.Y_density = snapshot.y_density;
+        }
+    })
 }
 
 /// Per-component subset of the source snapshot used by
@@ -3386,7 +3443,9 @@ unsafe fn snapshot_src_for_copy(srcinfo: *mut c_void) -> Option<SrcCriticalSnaps
 /// the `_min_DCT_*` accessors.
 #[no_mangle]
 pub extern "C" fn jpeg_core_output_dimensions(cinfo: *mut c_void) {
-    jpeg_calc_output_dimensions(cinfo);
+    crate::unwind_guard!((), {
+        jpeg_calc_output_dimensions(cinfo);
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -3520,43 +3579,45 @@ pub extern "C" fn jpeg12_read_scanlines(
     scanlines: *mut *mut i16,
     max_lines: JDimension,
 ) -> JDimension {
-    let c: &mut JpegDecompressPublic = match unsafe { cinfo_mut(cinfo) } {
-        Some(c) => c,
-        None => return 0,
-    };
-    let priv_ptr: *mut c_void = decompress_private_raw(cinfo);
-    let priv_state: &mut DecompressPrivate = match unsafe { priv_from_ptr(priv_ptr) } {
-        Some(p) => p,
-        None => return 0,
-    };
-    if scanlines.is_null() || max_lines == 0 {
-        return 0;
-    }
-    let bytes: Vec<u8> = match priv_state.source.as_bytes() {
-        Some(b) => b.to_vec(),
-        None => {
-            priv_state.last_error =
-                CString::new("jpeg12_read_scanlines: no source").unwrap_or_default();
+    crate::unwind_guard!(0, {
+        let c: &mut JpegDecompressPublic = match unsafe { cinfo_mut(cinfo) } {
+            Some(c) => c,
+            None => return 0,
+        };
+        let priv_ptr: *mut c_void = decompress_private_raw(cinfo);
+        let priv_state: &mut DecompressPrivate = match unsafe { priv_from_ptr(priv_ptr) } {
+            Some(p) => p,
+            None => return 0,
+        };
+        if scanlines.is_null() || max_lines == 0 {
             return 0;
         }
-    };
-    if let Err(e) = hp_take_or_init_12(priv_ptr, &bytes) {
-        priv_state.last_error =
-            CString::new(format!("jpeg12_read_scanlines: {e}")).unwrap_or_default();
-        return 0;
-    }
-    let produced: JDimension = HIGH_PRECISION_STATE.with(|s| {
-        let mut map = s.borrow_mut();
-        let slot: &mut HighPrecisionSlot =
-            map.get_mut(&hp_key(priv_ptr)).expect("just inserted above");
-        let dec: &mut Decoded12 = slot.dec12.as_mut().expect("just inserted above");
-        read_scanlines_12_inner(dec, scanlines, max_lines)
-    });
-    // Mirror jdapistd.c: the public scanline counter drives wrppm's main
-    // loop (`while output_scanline < output_height`). Not advancing it
-    // here causes the caller to spin forever.
-    c.output_scanline = c.output_scanline.saturating_add(produced);
-    produced
+        let bytes: Vec<u8> = match priv_state.source.as_bytes() {
+            Some(b) => b.to_vec(),
+            None => {
+                priv_state.last_error =
+                    CString::new("jpeg12_read_scanlines: no source").unwrap_or_default();
+                return 0;
+            }
+        };
+        if let Err(e) = hp_take_or_init_12(priv_ptr, &bytes) {
+            priv_state.last_error =
+                CString::new(format!("jpeg12_read_scanlines: {e}")).unwrap_or_default();
+            return 0;
+        }
+        let produced: JDimension = HIGH_PRECISION_STATE.with(|s| {
+            let mut map = s.borrow_mut();
+            let slot: &mut HighPrecisionSlot =
+                map.get_mut(&hp_key(priv_ptr)).expect("just inserted above");
+            let dec: &mut Decoded12 = slot.dec12.as_mut().expect("just inserted above");
+            read_scanlines_12_inner(dec, scanlines, max_lines)
+        });
+        // Mirror jdapistd.c: the public scanline counter drives wrppm's main
+        // loop (`while output_scanline < output_height`). Not advancing it
+        // here causes the caller to spin forever.
+        c.output_scanline = c.output_scanline.saturating_add(produced);
+        produced
+    })
 }
 
 fn read_scanlines_12_inner(
@@ -3599,26 +3660,28 @@ fn read_scanlines_12_inner(
 /// `jpeg12_skip_scanlines(cinfo, num_lines) -> JDIMENSION`.
 #[no_mangle]
 pub extern "C" fn jpeg12_skip_scanlines(cinfo: *mut c_void, num_lines: JDimension) -> JDimension {
-    let c: &mut JpegDecompressPublic = match unsafe { cinfo_mut(cinfo) } {
-        Some(c) => c,
-        None => return 0,
-    };
-    let priv_ptr: *mut c_void = decompress_private_raw(cinfo);
-    let skipped: JDimension = HIGH_PRECISION_STATE.with(|s| {
-        let mut map = s.borrow_mut();
-        let slot: Option<&mut HighPrecisionSlot> = map.get_mut(&hp_key(priv_ptr));
-        let dec: &mut Decoded12 = match slot.and_then(|s| s.dec12.as_mut()) {
-            Some(d) => d,
+    crate::unwind_guard!(0, {
+        let c: &mut JpegDecompressPublic = match unsafe { cinfo_mut(cinfo) } {
+            Some(c) => c,
             None => return 0,
         };
-        let total: JDimension = dec.height as JDimension;
-        let remaining: JDimension = total.saturating_sub(dec.cursor);
-        let skip: JDimension = std::cmp::min(num_lines, remaining);
-        dec.cursor += skip;
-        skip
-    });
-    c.output_scanline = c.output_scanline.saturating_add(skipped);
-    skipped
+        let priv_ptr: *mut c_void = decompress_private_raw(cinfo);
+        let skipped: JDimension = HIGH_PRECISION_STATE.with(|s| {
+            let mut map = s.borrow_mut();
+            let slot: Option<&mut HighPrecisionSlot> = map.get_mut(&hp_key(priv_ptr));
+            let dec: &mut Decoded12 = match slot.and_then(|s| s.dec12.as_mut()) {
+                Some(d) => d,
+                None => return 0,
+            };
+            let total: JDimension = dec.height as JDimension;
+            let remaining: JDimension = total.saturating_sub(dec.cursor);
+            let skip: JDimension = std::cmp::min(num_lines, remaining);
+            dec.cursor += skip;
+            skip
+        });
+        c.output_scanline = c.output_scanline.saturating_add(skipped);
+        skipped
+    })
 }
 
 /// `jpeg12_crop_scanline(cinfo, *xoffset, *width)`.
@@ -3628,38 +3691,40 @@ pub extern "C" fn jpeg12_crop_scanline(
     xoffset: *mut JDimension,
     width: *mut JDimension,
 ) {
-    let _c: &mut JpegDecompressPublic = match unsafe { cinfo_mut(cinfo) } {
-        Some(c) => c,
-        None => return,
-    };
-    if xoffset.is_null() || width.is_null() {
-        return;
-    }
-    let priv_ptr: *mut c_void = decompress_private_raw(cinfo);
-    HIGH_PRECISION_STATE.with(|s| {
-        let mut map = s.borrow_mut();
-        let slot: Option<&mut HighPrecisionSlot> = map.get_mut(&hp_key(priv_ptr));
-        let dec: &mut Decoded12 = match slot.and_then(|s| s.dec12.as_mut()) {
-            Some(d) => d,
+    crate::unwind_guard!((), {
+        let _c: &mut JpegDecompressPublic = match unsafe { cinfo_mut(cinfo) } {
+            Some(c) => c,
             None => return,
         };
-        // SAFETY: caller-supplied pointers checked for NULL above.
-        let (mut x, mut w): (JDimension, JDimension) = unsafe { (*xoffset, *width) };
-        let out_w: JDimension = dec.width as JDimension;
-        if x >= out_w {
-            x = out_w;
-            w = 0;
-        } else if x.saturating_add(w) > out_w {
-            w = out_w - x;
+        if xoffset.is_null() || width.is_null() {
+            return;
         }
-        dec.crop_x = x;
-        dec.crop_w = w;
-        dec.crop_active = true;
-        unsafe {
-            *xoffset = x;
-            *width = w;
-        }
-    });
+        let priv_ptr: *mut c_void = decompress_private_raw(cinfo);
+        HIGH_PRECISION_STATE.with(|s| {
+            let mut map = s.borrow_mut();
+            let slot: Option<&mut HighPrecisionSlot> = map.get_mut(&hp_key(priv_ptr));
+            let dec: &mut Decoded12 = match slot.and_then(|s| s.dec12.as_mut()) {
+                Some(d) => d,
+                None => return,
+            };
+            // SAFETY: caller-supplied pointers checked for NULL above.
+            let (mut x, mut w): (JDimension, JDimension) = unsafe { (*xoffset, *width) };
+            let out_w: JDimension = dec.width as JDimension;
+            if x >= out_w {
+                x = out_w;
+                w = 0;
+            } else if x.saturating_add(w) > out_w {
+                w = out_w - x;
+            }
+            dec.crop_x = x;
+            dec.crop_w = w;
+            dec.crop_active = true;
+            unsafe {
+                *xoffset = x;
+                *width = w;
+            }
+        });
+    })
 }
 
 /// `jpeg16_read_scanlines(cinfo, scanlines, max_lines) -> JDIMENSION`.
@@ -3671,60 +3736,62 @@ pub extern "C" fn jpeg16_read_scanlines(
     scanlines: *mut *mut u16,
     max_lines: JDimension,
 ) -> JDimension {
-    let c: &mut JpegDecompressPublic = match unsafe { cinfo_mut(cinfo) } {
-        Some(c) => c,
-        None => return 0,
-    };
-    let priv_ptr: *mut c_void = decompress_private_raw(cinfo);
-    let priv_state: &mut DecompressPrivate = match unsafe { priv_from_ptr(priv_ptr) } {
-        Some(p) => p,
-        None => return 0,
-    };
-    if scanlines.is_null() || max_lines == 0 {
-        return 0;
-    }
-    let bytes: Vec<u8> = match priv_state.source.as_bytes() {
-        Some(b) => b.to_vec(),
-        None => {
+    crate::unwind_guard!(0, {
+        let c: &mut JpegDecompressPublic = match unsafe { cinfo_mut(cinfo) } {
+            Some(c) => c,
+            None => return 0,
+        };
+        let priv_ptr: *mut c_void = decompress_private_raw(cinfo);
+        let priv_state: &mut DecompressPrivate = match unsafe { priv_from_ptr(priv_ptr) } {
+            Some(p) => p,
+            None => return 0,
+        };
+        if scanlines.is_null() || max_lines == 0 {
+            return 0;
+        }
+        let bytes: Vec<u8> = match priv_state.source.as_bytes() {
+            Some(b) => b.to_vec(),
+            None => {
+                priv_state.last_error =
+                    CString::new("jpeg16_read_scanlines: no source").unwrap_or_default();
+                return 0;
+            }
+        };
+        if let Err(e) = hp_take_or_init_16(priv_ptr, &bytes) {
             priv_state.last_error =
-                CString::new("jpeg16_read_scanlines: no source").unwrap_or_default();
+                CString::new(format!("jpeg16_read_scanlines: {e}")).unwrap_or_default();
             return 0;
         }
-    };
-    if let Err(e) = hp_take_or_init_16(priv_ptr, &bytes) {
-        priv_state.last_error =
-            CString::new(format!("jpeg16_read_scanlines: {e}")).unwrap_or_default();
-        return 0;
-    }
-    let produced: JDimension = HIGH_PRECISION_STATE.with(|s| {
-        let mut map = s.borrow_mut();
-        let slot: &mut HighPrecisionSlot =
-            map.get_mut(&hp_key(priv_ptr)).expect("just inserted above");
-        let dec: &mut Decoded16 = slot.dec16.as_mut().expect("just inserted above");
-        let row_samples: usize = dec.width * dec.num_components;
-        let total: JDimension = dec.height as JDimension;
-        let remaining: JDimension = total.saturating_sub(dec.cursor);
-        let to_copy: JDimension = std::cmp::min(max_lines, remaining);
-        if to_copy == 0 {
-            return 0;
-        }
-        for i in 0..(to_copy as usize) {
-            let dst: *mut u16 = unsafe { *scanlines.add(i) };
-            if dst.is_null() {
-                break;
+        let produced: JDimension = HIGH_PRECISION_STATE.with(|s| {
+            let mut map = s.borrow_mut();
+            let slot: &mut HighPrecisionSlot =
+                map.get_mut(&hp_key(priv_ptr)).expect("just inserted above");
+            let dec: &mut Decoded16 = slot.dec16.as_mut().expect("just inserted above");
+            let row_samples: usize = dec.width * dec.num_components;
+            let total: JDimension = dec.height as JDimension;
+            let remaining: JDimension = total.saturating_sub(dec.cursor);
+            let to_copy: JDimension = std::cmp::min(max_lines, remaining);
+            if to_copy == 0 {
+                return 0;
             }
-            let row: usize = dec.cursor as usize + i;
-            let src_off: usize = row * row_samples;
-            let src: &[u16] = &dec.data[src_off..src_off + row_samples];
-            unsafe {
-                std::ptr::copy_nonoverlapping(src.as_ptr(), dst, row_samples);
+            for i in 0..(to_copy as usize) {
+                let dst: *mut u16 = unsafe { *scanlines.add(i) };
+                if dst.is_null() {
+                    break;
+                }
+                let row: usize = dec.cursor as usize + i;
+                let src_off: usize = row * row_samples;
+                let src: &[u16] = &dec.data[src_off..src_off + row_samples];
+                unsafe {
+                    std::ptr::copy_nonoverlapping(src.as_ptr(), dst, row_samples);
+                }
             }
-        }
-        dec.cursor += to_copy;
-        to_copy
-    });
-    c.output_scanline = c.output_scanline.saturating_add(produced);
-    produced
+            dec.cursor += to_copy;
+            to_copy
+        });
+        c.output_scanline = c.output_scanline.saturating_add(produced);
+        produced
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -3795,156 +3862,159 @@ pub extern "C" fn jpeg_read_raw_data(
     data: *mut *mut *mut u8,
     max_lines: JDimension,
 ) -> JDimension {
-    let c: &mut JpegDecompressPublic = match unsafe { cinfo_mut(cinfo) } {
-        Some(c) => c,
-        None => return 0,
-    };
-    let priv_ptr: *mut c_void = decompress_private_raw(cinfo);
-    let priv_state: &mut DecompressPrivate = match unsafe { priv_from_ptr(priv_ptr) } {
-        Some(p) => p,
-        None => return 0,
-    };
+    crate::unwind_guard!(0, {
+        let c: &mut JpegDecompressPublic = match unsafe { cinfo_mut(cinfo) } {
+            Some(c) => c,
+            None => return 0,
+        };
+        let priv_ptr: *mut c_void = decompress_private_raw(cinfo);
+        let priv_state: &mut DecompressPrivate = match unsafe { priv_from_ptr(priv_ptr) } {
+            Some(p) => p,
+            None => return 0,
+        };
 
-    // Reject unsupported precision (12-bit, 16-bit).
-    if c.data_precision > 8 {
-        priv_state.last_error = CString::new(
+        // Reject unsupported precision (12-bit, 16-bit).
+        if c.data_precision > 8 {
+            priv_state.last_error = CString::new(
             "jpeg_read_raw_data: only 8-bit precision is supported; use jpeg12_read_raw_data for 12-bit"
         ).unwrap_or_default();
-        return 0;
-    }
+            return 0;
+        }
 
-    // EOF sentinel: output_scanline >= output_height → return 0 (no error,
-    // matches libjpeg's JWRN_TOO_MUCH_DATA path).
-    if c.output_scanline >= c.output_height {
-        return 0;
-    }
+        // EOF sentinel: output_scanline >= output_height → return 0 (no error,
+        // matches libjpeg's JWRN_TOO_MUCH_DATA path).
+        if c.output_scanline >= c.output_height {
+            return 0;
+        }
 
-    // Validate caller supplied a non-null array pointer.
-    if data.is_null() {
-        priv_state.last_error =
-            CString::new("jpeg_read_raw_data: data pointer is NULL").unwrap_or_default();
-        return 0;
-    }
+        // Validate caller supplied a non-null array pointer.
+        if data.is_null() {
+            priv_state.last_error =
+                CString::new("jpeg_read_raw_data: data pointer is NULL").unwrap_or_default();
+            return 0;
+        }
 
-    // `max_v_samp_factor` and per-component `v_samp_factor` are set by
-    // `jpeg_read_header` / `jpeg_calc_output_dimensions`.
-    let max_vsf: usize = c.max_v_samp_factor as usize;
-    // For typical DCT-based streams, DCTSIZE = 8.  The public struct
-    // exposes `min_DCT_v_scaled_size` (set to 8 in jpeg_calc_output_dimensions);
-    // use it when positive, fall back to DCTSIZE otherwise.
-    let dct_size: usize = if c.min_DCT_v_scaled_size > 0 {
-        c.min_DCT_v_scaled_size as usize
-    } else {
-        DCTSIZE
-    };
-    let rows_per_imcu: usize = max_vsf * dct_size;
+        // `max_v_samp_factor` and per-component `v_samp_factor` are set by
+        // `jpeg_read_header` / `jpeg_calc_output_dimensions`.
+        let max_vsf: usize = c.max_v_samp_factor as usize;
+        // For typical DCT-based streams, DCTSIZE = 8.  The public struct
+        // exposes `min_DCT_v_scaled_size` (set to 8 in jpeg_calc_output_dimensions);
+        // use it when positive, fall back to DCTSIZE otherwise.
+        let dct_size: usize = if c.min_DCT_v_scaled_size > 0 {
+            c.min_DCT_v_scaled_size as usize
+        } else {
+            DCTSIZE
+        };
+        let rows_per_imcu: usize = max_vsf * dct_size;
 
-    // Validate buffer size: caller must supply at least `rows_per_imcu` rows.
-    if (max_lines as usize) < rows_per_imcu {
-        priv_state.last_error = CString::new(format!(
+        // Validate buffer size: caller must supply at least `rows_per_imcu` rows.
+        if (max_lines as usize) < rows_per_imcu {
+            priv_state.last_error = CString::new(format!(
             "jpeg_read_raw_data: JERR_BUFFER_SIZE — max_lines ({max_lines}) < rows_per_iMCU ({rows_per_imcu})"
         )).unwrap_or_default();
-        return 0;
-    }
-
-    // Lazy materialisation: decode the whole stream on the first call.
-    if priv_state.raw_image_cache.is_none() {
-        let bytes: &[u8] = match priv_state.source.as_bytes() {
-            Some(b) => b,
-            None => {
-                priv_state.last_error =
-                    CString::new("jpeg_read_raw_data: no source").unwrap_or_default();
-                return 0;
-            }
-        };
-        match libjpeg_turbo_rs::decompress_raw(bytes) {
-            Ok(raw) => {
-                let ncomp: usize = raw.num_components;
-                priv_state.raw_rows_consumed = vec![0usize; ncomp];
-                priv_state.raw_image_cache = Some(raw);
-            }
-            Err(e) => {
-                priv_state.last_error =
-                    CString::new(format!("jpeg_read_raw_data: decompress_raw failed: {e}"))
-                        .unwrap_or_default();
-                return 0;
-            }
-        }
-    }
-
-    let raw: &libjpeg_turbo_rs::RawImage = priv_state.raw_image_cache.as_ref().expect("just set");
-    let num_components: usize = raw.num_components;
-
-    // Build a local snapshot of plane sizes before the mutable borrow.
-    let plane_widths: Vec<usize> = raw.plane_widths.clone();
-    let plane_heights: Vec<usize> = raw.plane_heights.clone();
-
-    // Number of `v_samp_factor` values comes from the public `comp_info` array
-    // populated by `jpeg_read_header`.
-    let comp_info_slice: &[JpegComponentInfoPublic] =
-        if c.comp_info.is_null() || c.num_components as usize != num_components {
-            // Fallback: derive v_samp_factor from plane height ratios when
-            // comp_info is unavailable (unusual but defensive).
-            &[]
-        } else {
-            unsafe { std::slice::from_raw_parts(c.comp_info, num_components) }
-        };
-
-    // For each component, copy `comp_v_samp_factor * dct_size` rows of
-    // `plane_width` samples into the caller's row pointers.
-    for comp_idx in 0..num_components {
-        // Derive v_samp_factor for this component.
-        let vsf: usize = if comp_idx < comp_info_slice.len() {
-            comp_info_slice[comp_idx].v_samp_factor.max(1) as usize
-        } else {
-            // Fallback: use plane height proportional to luma.
-            // For 4:2:0 luma=max_vsf, chroma=max_vsf/2.
-            let luma_h: usize = plane_heights.first().copied().unwrap_or(1);
-            let this_h: usize = plane_heights.get(comp_idx).copied().unwrap_or(1);
-            // v_samp_factor ≈ max_vsf * this_h / luma_h, clamped ≥ 1.
-            ((max_vsf * this_h + luma_h / 2) / luma_h).max(1)
-        };
-        let rows_this_call: usize = vsf * dct_size;
-        let plane_width: usize = plane_widths.get(comp_idx).copied().unwrap_or(0);
-        let plane_height: usize = plane_heights.get(comp_idx).copied().unwrap_or(0);
-        let rows_already: usize = priv_state
-            .raw_rows_consumed
-            .get(comp_idx)
-            .copied()
-            .unwrap_or(0);
-
-        // Get the outer pointer for this component: data[comp_idx].
-        let comp_outer_ptr: *mut *mut u8 = unsafe { *data.add(comp_idx) };
-        if comp_outer_ptr.is_null() {
-            continue;
+            return 0;
         }
 
-        for row_in_imcu in 0..rows_this_call {
-            let src_row: usize = rows_already + row_in_imcu;
-            if src_row >= plane_height {
-                break;
+        // Lazy materialisation: decode the whole stream on the first call.
+        if priv_state.raw_image_cache.is_none() {
+            let bytes: &[u8] = match priv_state.source.as_bytes() {
+                Some(b) => b,
+                None => {
+                    priv_state.last_error =
+                        CString::new("jpeg_read_raw_data: no source").unwrap_or_default();
+                    return 0;
+                }
+            };
+            match libjpeg_turbo_rs::decompress_raw(bytes) {
+                Ok(raw) => {
+                    let ncomp: usize = raw.num_components;
+                    priv_state.raw_rows_consumed = vec![0usize; ncomp];
+                    priv_state.raw_image_cache = Some(raw);
+                }
+                Err(e) => {
+                    priv_state.last_error =
+                        CString::new(format!("jpeg_read_raw_data: decompress_raw failed: {e}"))
+                            .unwrap_or_default();
+                    return 0;
+                }
             }
-            let dst_row_ptr: *mut u8 = unsafe { *comp_outer_ptr.add(row_in_imcu) };
-            if dst_row_ptr.is_null() {
+        }
+
+        let raw: &libjpeg_turbo_rs::RawImage =
+            priv_state.raw_image_cache.as_ref().expect("just set");
+        let num_components: usize = raw.num_components;
+
+        // Build a local snapshot of plane sizes before the mutable borrow.
+        let plane_widths: Vec<usize> = raw.plane_widths.clone();
+        let plane_heights: Vec<usize> = raw.plane_heights.clone();
+
+        // Number of `v_samp_factor` values comes from the public `comp_info` array
+        // populated by `jpeg_read_header`.
+        let comp_info_slice: &[JpegComponentInfoPublic] =
+            if c.comp_info.is_null() || c.num_components as usize != num_components {
+                // Fallback: derive v_samp_factor from plane height ratios when
+                // comp_info is unavailable (unusual but defensive).
+                &[]
+            } else {
+                unsafe { std::slice::from_raw_parts(c.comp_info, num_components) }
+            };
+
+        // For each component, copy `comp_v_samp_factor * dct_size` rows of
+        // `plane_width` samples into the caller's row pointers.
+        for comp_idx in 0..num_components {
+            // Derive v_samp_factor for this component.
+            let vsf: usize = if comp_idx < comp_info_slice.len() {
+                comp_info_slice[comp_idx].v_samp_factor.max(1) as usize
+            } else {
+                // Fallback: use plane height proportional to luma.
+                // For 4:2:0 luma=max_vsf, chroma=max_vsf/2.
+                let luma_h: usize = plane_heights.first().copied().unwrap_or(1);
+                let this_h: usize = plane_heights.get(comp_idx).copied().unwrap_or(1);
+                // v_samp_factor ≈ max_vsf * this_h / luma_h, clamped ≥ 1.
+                ((max_vsf * this_h + luma_h / 2) / luma_h).max(1)
+            };
+            let rows_this_call: usize = vsf * dct_size;
+            let plane_width: usize = plane_widths.get(comp_idx).copied().unwrap_or(0);
+            let plane_height: usize = plane_heights.get(comp_idx).copied().unwrap_or(0);
+            let rows_already: usize = priv_state
+                .raw_rows_consumed
+                .get(comp_idx)
+                .copied()
+                .unwrap_or(0);
+
+            // Get the outer pointer for this component: data[comp_idx].
+            let comp_outer_ptr: *mut *mut u8 = unsafe { *data.add(comp_idx) };
+            if comp_outer_ptr.is_null() {
                 continue;
             }
-            let src_plane: &[u8] = &raw.planes[comp_idx];
-            let src_offset: usize = src_row * plane_width;
-            let src_slice: &[u8] = &src_plane[src_offset..src_offset + plane_width];
-            unsafe {
-                std::ptr::copy_nonoverlapping(src_slice.as_ptr(), dst_row_ptr, plane_width);
+
+            for row_in_imcu in 0..rows_this_call {
+                let src_row: usize = rows_already + row_in_imcu;
+                if src_row >= plane_height {
+                    break;
+                }
+                let dst_row_ptr: *mut u8 = unsafe { *comp_outer_ptr.add(row_in_imcu) };
+                if dst_row_ptr.is_null() {
+                    continue;
+                }
+                let src_plane: &[u8] = &raw.planes[comp_idx];
+                let src_offset: usize = src_row * plane_width;
+                let src_slice: &[u8] = &src_plane[src_offset..src_offset + plane_width];
+                unsafe {
+                    std::ptr::copy_nonoverlapping(src_slice.as_ptr(), dst_row_ptr, plane_width);
+                }
+            }
+
+            if let Some(consumed) = priv_state.raw_rows_consumed.get_mut(comp_idx) {
+                *consumed += rows_this_call;
             }
         }
 
-        if let Some(consumed) = priv_state.raw_rows_consumed.get_mut(comp_idx) {
-            *consumed += rows_this_call;
-        }
-    }
-
-    let delivered: JDimension = rows_per_imcu as JDimension;
-    c.output_scanline = c.output_scanline.saturating_add(delivered);
-    priv_state.last_error = CString::new("No error").expect("static");
-    delivered
+        let delivered: JDimension = rows_per_imcu as JDimension;
+        c.output_scanline = c.output_scanline.saturating_add(delivered);
+        priv_state.last_error = CString::new("No error").expect("static");
+        delivered
+    })
 }
 
 /// `jpeg12_read_raw_data(cinfo, data, max_lines) -> JDIMENSION`.
@@ -3966,143 +4036,145 @@ pub extern "C" fn jpeg12_read_raw_data(
     data: *mut *mut *mut i16,
     max_lines: JDimension,
 ) -> JDimension {
-    let c: &mut JpegDecompressPublic = match unsafe { cinfo_mut(cinfo) } {
-        Some(c) => c,
-        None => return 0,
-    };
-    let priv_ptr: *mut c_void = decompress_private_raw(cinfo);
-    let priv_state: &mut DecompressPrivate = match unsafe { priv_from_ptr(priv_ptr) } {
-        Some(p) => p,
-        None => return 0,
-    };
+    crate::unwind_guard!(0, {
+        let c: &mut JpegDecompressPublic = match unsafe { cinfo_mut(cinfo) } {
+            Some(c) => c,
+            None => return 0,
+        };
+        let priv_ptr: *mut c_void = decompress_private_raw(cinfo);
+        let priv_state: &mut DecompressPrivate = match unsafe { priv_from_ptr(priv_ptr) } {
+            Some(p) => p,
+            None => return 0,
+        };
 
-    // 12-bit gate: only `data_precision == 12` reaches this entry
-    // point; 8-bit callers should use `jpeg_read_raw_data`.
-    if c.data_precision != 12 {
-        priv_state.last_error = CString::new(format!(
-            "jpeg12_read_raw_data: JERR_BAD_PRECISION (data_precision={} not 12)",
-            c.data_precision
-        ))
-        .unwrap_or_default();
-        return 0;
-    }
+        // 12-bit gate: only `data_precision == 12` reaches this entry
+        // point; 8-bit callers should use `jpeg_read_raw_data`.
+        if c.data_precision != 12 {
+            priv_state.last_error = CString::new(format!(
+                "jpeg12_read_raw_data: JERR_BAD_PRECISION (data_precision={} not 12)",
+                c.data_precision
+            ))
+            .unwrap_or_default();
+            return 0;
+        }
 
-    // EOF sentinel: output_scanline >= output_height → return 0
-    // (matches libjpeg's JWRN_TOO_MUCH_DATA path).
-    if c.output_scanline >= c.output_height {
-        return 0;
-    }
+        // EOF sentinel: output_scanline >= output_height → return 0
+        // (matches libjpeg's JWRN_TOO_MUCH_DATA path).
+        if c.output_scanline >= c.output_height {
+            return 0;
+        }
 
-    if data.is_null() {
-        priv_state.last_error =
-            CString::new("jpeg12_read_raw_data: data pointer is NULL").unwrap_or_default();
-        return 0;
-    }
+        if data.is_null() {
+            priv_state.last_error =
+                CString::new("jpeg12_read_raw_data: data pointer is NULL").unwrap_or_default();
+            return 0;
+        }
 
-    let max_vsf: usize = c.max_v_samp_factor as usize;
-    let dct_size: usize = if c.min_DCT_v_scaled_size > 0 {
-        c.min_DCT_v_scaled_size as usize
-    } else {
-        DCTSIZE
-    };
-    let rows_per_imcu: usize = max_vsf * dct_size;
+        let max_vsf: usize = c.max_v_samp_factor as usize;
+        let dct_size: usize = if c.min_DCT_v_scaled_size > 0 {
+            c.min_DCT_v_scaled_size as usize
+        } else {
+            DCTSIZE
+        };
+        let rows_per_imcu: usize = max_vsf * dct_size;
 
-    if (max_lines as usize) < rows_per_imcu {
-        priv_state.last_error = CString::new(format!(
+        if (max_lines as usize) < rows_per_imcu {
+            priv_state.last_error = CString::new(format!(
             "jpeg12_read_raw_data: JERR_BUFFER_SIZE — max_lines ({max_lines}) < rows_per_iMCU ({rows_per_imcu})"
         )).unwrap_or_default();
-        return 0;
-    }
-
-    if priv_state.raw_image_cache_12.is_none() {
-        let bytes: &[u8] = match priv_state.source.as_bytes() {
-            Some(b) => b,
-            None => {
-                priv_state.last_error =
-                    CString::new("jpeg12_read_raw_data: no source").unwrap_or_default();
-                return 0;
-            }
-        };
-        match libjpeg_turbo_rs::raw_data_12::decompress_raw_12(bytes) {
-            Ok(raw) => {
-                let ncomp: usize = raw.num_components;
-                priv_state.raw_rows_consumed = vec![0usize; ncomp];
-                priv_state.raw_image_cache_12 = Some(raw);
-            }
-            Err(e) => {
-                priv_state.last_error = CString::new(format!(
-                    "jpeg12_read_raw_data: decompress_raw_12 failed: {e}"
-                ))
-                .unwrap_or_default();
-                return 0;
-            }
-        }
-    }
-
-    let raw: &libjpeg_turbo_rs::raw_data_12::RawImage12 =
-        priv_state.raw_image_cache_12.as_ref().expect("just set");
-    let num_components: usize = raw.num_components;
-
-    let plane_widths: Vec<usize> = raw.plane_widths.clone();
-    let plane_heights: Vec<usize> = raw.plane_heights.clone();
-
-    let comp_info_slice: &[JpegComponentInfoPublic] =
-        if c.comp_info.is_null() || c.num_components as usize != num_components {
-            &[]
-        } else {
-            unsafe { std::slice::from_raw_parts(c.comp_info, num_components) }
-        };
-
-    for comp_idx in 0..num_components {
-        let vsf: usize = if comp_idx < comp_info_slice.len() {
-            comp_info_slice[comp_idx].v_samp_factor.max(1) as usize
-        } else {
-            let luma_h: usize = plane_heights.first().copied().unwrap_or(1);
-            let this_h: usize = plane_heights.get(comp_idx).copied().unwrap_or(1);
-            ((max_vsf * this_h + luma_h / 2) / luma_h).max(1)
-        };
-        let rows_this_call: usize = vsf * dct_size;
-        let plane_width: usize = plane_widths.get(comp_idx).copied().unwrap_or(0);
-        let plane_height: usize = plane_heights.get(comp_idx).copied().unwrap_or(0);
-        let rows_already: usize = priv_state
-            .raw_rows_consumed
-            .get(comp_idx)
-            .copied()
-            .unwrap_or(0);
-
-        let comp_outer_ptr: *mut *mut i16 = unsafe { *data.add(comp_idx) };
-        if comp_outer_ptr.is_null() {
-            continue;
+            return 0;
         }
 
-        for row_in_imcu in 0..rows_this_call {
-            let src_row: usize = rows_already + row_in_imcu;
-            if src_row >= plane_height {
-                break;
+        if priv_state.raw_image_cache_12.is_none() {
+            let bytes: &[u8] = match priv_state.source.as_bytes() {
+                Some(b) => b,
+                None => {
+                    priv_state.last_error =
+                        CString::new("jpeg12_read_raw_data: no source").unwrap_or_default();
+                    return 0;
+                }
+            };
+            match libjpeg_turbo_rs::raw_data_12::decompress_raw_12(bytes) {
+                Ok(raw) => {
+                    let ncomp: usize = raw.num_components;
+                    priv_state.raw_rows_consumed = vec![0usize; ncomp];
+                    priv_state.raw_image_cache_12 = Some(raw);
+                }
+                Err(e) => {
+                    priv_state.last_error = CString::new(format!(
+                        "jpeg12_read_raw_data: decompress_raw_12 failed: {e}"
+                    ))
+                    .unwrap_or_default();
+                    return 0;
+                }
             }
-            let dst_row_ptr: *mut i16 = unsafe { *comp_outer_ptr.add(row_in_imcu) };
-            if dst_row_ptr.is_null() {
+        }
+
+        let raw: &libjpeg_turbo_rs::raw_data_12::RawImage12 =
+            priv_state.raw_image_cache_12.as_ref().expect("just set");
+        let num_components: usize = raw.num_components;
+
+        let plane_widths: Vec<usize> = raw.plane_widths.clone();
+        let plane_heights: Vec<usize> = raw.plane_heights.clone();
+
+        let comp_info_slice: &[JpegComponentInfoPublic] =
+            if c.comp_info.is_null() || c.num_components as usize != num_components {
+                &[]
+            } else {
+                unsafe { std::slice::from_raw_parts(c.comp_info, num_components) }
+            };
+
+        for comp_idx in 0..num_components {
+            let vsf: usize = if comp_idx < comp_info_slice.len() {
+                comp_info_slice[comp_idx].v_samp_factor.max(1) as usize
+            } else {
+                let luma_h: usize = plane_heights.first().copied().unwrap_or(1);
+                let this_h: usize = plane_heights.get(comp_idx).copied().unwrap_or(1);
+                ((max_vsf * this_h + luma_h / 2) / luma_h).max(1)
+            };
+            let rows_this_call: usize = vsf * dct_size;
+            let plane_width: usize = plane_widths.get(comp_idx).copied().unwrap_or(0);
+            let plane_height: usize = plane_heights.get(comp_idx).copied().unwrap_or(0);
+            let rows_already: usize = priv_state
+                .raw_rows_consumed
+                .get(comp_idx)
+                .copied()
+                .unwrap_or(0);
+
+            let comp_outer_ptr: *mut *mut i16 = unsafe { *data.add(comp_idx) };
+            if comp_outer_ptr.is_null() {
                 continue;
             }
-            let src_plane: &[i16] = &raw.planes[comp_idx];
-            let src_offset: usize = src_row * plane_width;
-            let src_slice: &[i16] = &src_plane[src_offset..src_offset + plane_width];
-            // SAFETY: src/dst point to `plane_width` valid i16
-            // samples each; copy_nonoverlapping count is in *items*.
-            unsafe {
-                std::ptr::copy_nonoverlapping(src_slice.as_ptr(), dst_row_ptr, plane_width);
+
+            for row_in_imcu in 0..rows_this_call {
+                let src_row: usize = rows_already + row_in_imcu;
+                if src_row >= plane_height {
+                    break;
+                }
+                let dst_row_ptr: *mut i16 = unsafe { *comp_outer_ptr.add(row_in_imcu) };
+                if dst_row_ptr.is_null() {
+                    continue;
+                }
+                let src_plane: &[i16] = &raw.planes[comp_idx];
+                let src_offset: usize = src_row * plane_width;
+                let src_slice: &[i16] = &src_plane[src_offset..src_offset + plane_width];
+                // SAFETY: src/dst point to `plane_width` valid i16
+                // samples each; copy_nonoverlapping count is in *items*.
+                unsafe {
+                    std::ptr::copy_nonoverlapping(src_slice.as_ptr(), dst_row_ptr, plane_width);
+                }
+            }
+
+            if let Some(consumed) = priv_state.raw_rows_consumed.get_mut(comp_idx) {
+                *consumed += rows_this_call;
             }
         }
 
-        if let Some(consumed) = priv_state.raw_rows_consumed.get_mut(comp_idx) {
-            *consumed += rows_this_call;
-        }
-    }
-
-    let delivered: JDimension = rows_per_imcu as JDimension;
-    c.output_scanline = c.output_scanline.saturating_add(delivered);
-    priv_state.last_error = CString::new("No error").expect("static");
-    delivered
+        let delivered: JDimension = rows_per_imcu as JDimension;
+        c.output_scanline = c.output_scanline.saturating_add(delivered);
+        priv_state.last_error = CString::new("No error").expect("static");
+        delivered
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -4154,88 +4226,90 @@ const JPEG_REACHED_EOI: c_int = 2;
 ///     up front.
 #[no_mangle]
 pub extern "C" fn jpeg_consume_input(cinfo: *mut c_void) -> c_int {
-    let c: &mut JpegDecompressPublic = match unsafe { cinfo_mut(cinfo) } {
-        Some(c) => c,
-        None => return JPEG_SUSPENDED,
-    };
-    // Short-circuit if the header has already been parsed: rerunning
-    // `jpeg_read_header` would clobber the caller's post-header
-    // tweaks (out_color_space, comp_info, quantize_colors, …). For our
-    // fully-buffered shim, EOI is the truthful answer the moment a
-    // header is in hand.
-    //
-    // We must also advance `global_state` to `DSTATE_SCANNING` here so
-    // that `jpeg_input_complete()` (which gates on
-    // `global_state >= DSTATE_SCANNING`) reports TRUE. Otherwise a
-    // caller polling `while (!jpeg_input_complete()) jpeg_consume_input()`
-    // — the buffered/progressive idiom — would loop forever even
-    // though we keep returning `JPEG_REACHED_EOI`.
-    let priv_ptr: *mut c_void = decompress_private_raw(cinfo);
-    let header_done: bool = match unsafe { priv_from_ptr(priv_ptr) } {
-        Some(p) => p.header_parsed_ok,
-        None => false,
-    };
-    if header_done {
-        if c.global_state < DSTATE_SCANNING {
-            c.global_state = DSTATE_SCANNING;
-        }
-        return JPEG_REACHED_EOI;
-    }
-    match c.global_state {
-        DSTATE_START | DSTATE_INHEADER => {
-            // `require_image=FALSE`: stock libjpeg's `jpeg_consume_input`
-            // accepts a tables-only abbreviated datastream as a valid
-            // input — it returns `JPEG_REACHED_EOI` rather than raising
-            // `JERR_NO_IMAGE` (which is the public `jpeg_read_header(…,
-            // require_image=TRUE)` contract). Passing `0` here lets the
-            // tables-only branch return `JPEG_HEADER_TABLES_ONLY`, which
-            // the match arm below maps to `JPEG_REACHED_EOI`.
-            let result: c_int = jpeg_read_header(cinfo, /*require_image=*/ 0);
-            // Re-read the state because `jpeg_read_header` mutated it.
-            let c2: &mut JpegDecompressPublic = match unsafe { cinfo_mut(cinfo) } {
-                Some(c) => c,
-                None => return JPEG_SUSPENDED,
-            };
-            match result {
-                JPEG_HEADER_OK => {
-                    // Our `jpeg_read_header` leaves state at
-                    // `DSTATE_INHEADER` on success (upstream uses
-                    // `DSTATE_READY`, which we don't model
-                    // separately). Advance past the header-parse
-                    // arm so subsequent `consume_input` polls report
-                    // `JPEG_REACHED_EOI` instead of looping forever
-                    // on `JPEG_REACHED_SOS`. `jpeg_start_decompress`
-                    // re-asserts `DSTATE_SCANNING` regardless, so
-                    // skipping ahead is safe.
-                    c2.global_state = DSTATE_SCANNING;
-                    JPEG_REACHED_SOS
-                }
-                JPEG_HEADER_TABLES_ONLY => {
-                    // Mirror stock libjpeg's `inputctl->eoi_reached = TRUE`
-                    // for tables-only inputs by advancing past
-                    // `DSTATE_SCANNING` so `jpeg_input_complete` returns
-                    // `TRUE`. Without this, a documented buffered-image
-                    // polling loop —
-                    //
-                    //     while (!jpeg_input_complete(&cinfo))
-                    //         (void) jpeg_consume_input(&cinfo);
-                    //
-                    // — never terminates on a tables-only datastream
-                    // because the EOI return below isn't observed by
-                    // `jpeg_input_complete`'s `global_state >=
-                    // DSTATE_SCANNING` gate. `jpeg_start_decompress`
-                    // re-asserts `DSTATE_SCANNING` regardless, so
-                    // skipping ahead does not stomp on a real image
-                    // header that arrives later (it can't — we just
-                    // returned EOI).
-                    c2.global_state = DSTATE_SCANNING;
-                    JPEG_REACHED_EOI
-                }
-                _ => JPEG_SUSPENDED,
+    crate::unwind_guard!(JPEG_SUSPENDED, {
+        let c: &mut JpegDecompressPublic = match unsafe { cinfo_mut(cinfo) } {
+            Some(c) => c,
+            None => return JPEG_SUSPENDED,
+        };
+        // Short-circuit if the header has already been parsed: rerunning
+        // `jpeg_read_header` would clobber the caller's post-header
+        // tweaks (out_color_space, comp_info, quantize_colors, …). For our
+        // fully-buffered shim, EOI is the truthful answer the moment a
+        // header is in hand.
+        //
+        // We must also advance `global_state` to `DSTATE_SCANNING` here so
+        // that `jpeg_input_complete()` (which gates on
+        // `global_state >= DSTATE_SCANNING`) reports TRUE. Otherwise a
+        // caller polling `while (!jpeg_input_complete()) jpeg_consume_input()`
+        // — the buffered/progressive idiom — would loop forever even
+        // though we keep returning `JPEG_REACHED_EOI`.
+        let priv_ptr: *mut c_void = decompress_private_raw(cinfo);
+        let header_done: bool = match unsafe { priv_from_ptr(priv_ptr) } {
+            Some(p) => p.header_parsed_ok,
+            None => false,
+        };
+        if header_done {
+            if c.global_state < DSTATE_SCANNING {
+                c.global_state = DSTATE_SCANNING;
             }
+            return JPEG_REACHED_EOI;
         }
-        _ => JPEG_REACHED_EOI,
-    }
+        match c.global_state {
+            DSTATE_START | DSTATE_INHEADER => {
+                // `require_image=FALSE`: stock libjpeg's `jpeg_consume_input`
+                // accepts a tables-only abbreviated datastream as a valid
+                // input — it returns `JPEG_REACHED_EOI` rather than raising
+                // `JERR_NO_IMAGE` (which is the public `jpeg_read_header(…,
+                // require_image=TRUE)` contract). Passing `0` here lets the
+                // tables-only branch return `JPEG_HEADER_TABLES_ONLY`, which
+                // the match arm below maps to `JPEG_REACHED_EOI`.
+                let result: c_int = jpeg_read_header(cinfo, /*require_image=*/ 0);
+                // Re-read the state because `jpeg_read_header` mutated it.
+                let c2: &mut JpegDecompressPublic = match unsafe { cinfo_mut(cinfo) } {
+                    Some(c) => c,
+                    None => return JPEG_SUSPENDED,
+                };
+                match result {
+                    JPEG_HEADER_OK => {
+                        // Our `jpeg_read_header` leaves state at
+                        // `DSTATE_INHEADER` on success (upstream uses
+                        // `DSTATE_READY`, which we don't model
+                        // separately). Advance past the header-parse
+                        // arm so subsequent `consume_input` polls report
+                        // `JPEG_REACHED_EOI` instead of looping forever
+                        // on `JPEG_REACHED_SOS`. `jpeg_start_decompress`
+                        // re-asserts `DSTATE_SCANNING` regardless, so
+                        // skipping ahead is safe.
+                        c2.global_state = DSTATE_SCANNING;
+                        JPEG_REACHED_SOS
+                    }
+                    JPEG_HEADER_TABLES_ONLY => {
+                        // Mirror stock libjpeg's `inputctl->eoi_reached = TRUE`
+                        // for tables-only inputs by advancing past
+                        // `DSTATE_SCANNING` so `jpeg_input_complete` returns
+                        // `TRUE`. Without this, a documented buffered-image
+                        // polling loop —
+                        //
+                        //     while (!jpeg_input_complete(&cinfo))
+                        //         (void) jpeg_consume_input(&cinfo);
+                        //
+                        // — never terminates on a tables-only datastream
+                        // because the EOI return below isn't observed by
+                        // `jpeg_input_complete`'s `global_state >=
+                        // DSTATE_SCANNING` gate. `jpeg_start_decompress`
+                        // re-asserts `DSTATE_SCANNING` regardless, so
+                        // skipping ahead does not stomp on a real image
+                        // header that arrives later (it can't — we just
+                        // returned EOI).
+                        c2.global_state = DSTATE_SCANNING;
+                        JPEG_REACHED_EOI
+                    }
+                    _ => JPEG_SUSPENDED,
+                }
+            }
+            _ => JPEG_REACHED_EOI,
+        }
+    })
 }
 
 /// `jpeg_input_complete(cinfo) -> boolean` — see `jpeglib.h:1106`.
@@ -4245,16 +4319,18 @@ pub extern "C" fn jpeg_consume_input(cinfo: *mut c_void) -> c_int {
 /// after just installing a source.
 #[no_mangle]
 pub extern "C" fn jpeg_input_complete(cinfo: *mut c_void) -> CBoolean {
-    match unsafe { cinfo_mut(cinfo) } {
-        Some(c) => {
-            if c.global_state >= DSTATE_SCANNING {
-                1
-            } else {
-                0
+    crate::unwind_guard!(0, {
+        match unsafe { cinfo_mut(cinfo) } {
+            Some(c) => {
+                if c.global_state >= DSTATE_SCANNING {
+                    1
+                } else {
+                    0
+                }
             }
+            None => 0,
         }
-        None => 0,
-    }
+    })
 }
 
 /// `jpeg_has_multiple_scans(cinfo) -> boolean`.
@@ -4264,10 +4340,12 @@ pub extern "C" fn jpeg_input_complete(cinfo: *mut c_void) -> CBoolean {
 /// `references/libjpeg-turbo/src/jdmaster.c::jpeg_has_multiple_scans`.
 #[no_mangle]
 pub extern "C" fn jpeg_has_multiple_scans(cinfo: *mut c_void) -> CBoolean {
-    match unsafe { cinfo_mut(cinfo) } {
-        Some(c) => c.progressive_mode,
-        None => 0,
-    }
+    crate::unwind_guard!(0, {
+        match unsafe { cinfo_mut(cinfo) } {
+            Some(c) => c.progressive_mode,
+            None => 0,
+        }
+    })
 }
 
 /// `jpeg_start_output(cinfo, scan_number) -> boolean` — buffered-image
@@ -4275,20 +4353,22 @@ pub extern "C" fn jpeg_has_multiple_scans(cinfo: *mut c_void) -> CBoolean {
 /// any scan number succeeds.
 #[no_mangle]
 pub extern "C" fn jpeg_start_output(_cinfo: *mut c_void, _scan_number: c_int) -> CBoolean {
-    1
+    crate::unwind_guard!(0, { 1 })
 }
 
 /// `jpeg_finish_output(cinfo) -> boolean` — buffered-image multi-pass
 /// finish. No-op success in our non-buffered model.
 #[no_mangle]
 pub extern "C" fn jpeg_finish_output(_cinfo: *mut c_void) -> CBoolean {
-    1
+    crate::unwind_guard!(0, { 1 })
 }
 
 /// `jpeg_new_colormap(cinfo)` — buffered-image colormap update. We
 /// don't ship the upstream 1-pass color quantizer, so this is a no-op.
 #[no_mangle]
-pub extern "C" fn jpeg_new_colormap(_cinfo: *mut c_void) {}
+pub extern "C" fn jpeg_new_colormap(_cinfo: *mut c_void) {
+    crate::unwind_guard!((), {})
+}
 
 // ---------------------------------------------------------------------------
 // Abort / generic destroy entry points (P0-3 follow-on).
@@ -4312,25 +4392,27 @@ pub extern "C" fn jpeg_new_colormap(_cinfo: *mut c_void) {}
 /// aborted run's APP2 ICC chunks.
 #[no_mangle]
 pub extern "C" fn jpeg_abort_compress(cinfo: *mut c_void) {
-    let c: &mut JpegCompressPublic = match unsafe { cinfo_compress_mut(cinfo) } {
-        Some(c) => c,
-        None => return,
-    };
-    let priv_ptr: *mut c_void = c.master;
-    if let Some(p) = unsafe { priv_compress_from_ptr(priv_ptr) } {
-        p.have_started = false;
-        p.tables_only = false;
-        p.pixels_u8.clear();
-        p.pixels_u16.clear();
-        p.pending_markers.clear();
-        // Drop the pending ICC profile too — otherwise a reuse path
-        // that re-runs encode without `jpeg_write_icc_profile` would
-        // still inject the aborted image's APP2 ICC chunks.
-        p.icc_profile = None;
-        p.pending_coef_arrays = std::ptr::null();
-    }
-    c.global_state = CSTATE_START;
-    c.next_scanline = 0;
+    crate::unwind_guard!((), {
+        let c: &mut JpegCompressPublic = match unsafe { cinfo_compress_mut(cinfo) } {
+            Some(c) => c,
+            None => return,
+        };
+        let priv_ptr: *mut c_void = c.master;
+        if let Some(p) = unsafe { priv_compress_from_ptr(priv_ptr) } {
+            p.have_started = false;
+            p.tables_only = false;
+            p.pixels_u8.clear();
+            p.pixels_u16.clear();
+            p.pending_markers.clear();
+            // Drop the pending ICC profile too — otherwise a reuse path
+            // that re-runs encode without `jpeg_write_icc_profile` would
+            // still inject the aborted image's APP2 ICC chunks.
+            p.icc_profile = None;
+            p.pending_coef_arrays = std::ptr::null();
+        }
+        c.global_state = CSTATE_START;
+        c.next_scanline = 0;
+    })
 }
 
 /// `jpeg_abort_decompress(cinfo)` — reset decompress state for reuse.
@@ -4342,94 +4424,100 @@ pub extern "C" fn jpeg_abort_compress(cinfo: *mut c_void) {
 /// new source the caller has installed.
 #[no_mangle]
 pub extern "C" fn jpeg_abort_decompress(cinfo: *mut c_void) {
-    let c: &mut JpegDecompressPublic = match unsafe { cinfo_mut(cinfo) } {
-        Some(c) => c,
-        None => return,
-    };
-    let priv_ptr: *mut c_void = decompress_private_raw(cinfo);
-    if let Some(p) = unsafe { priv_from_ptr(priv_ptr) } {
-        p.decoded = None;
-        // Unhook the foreign array from the global side table BEFORE
-        // dropping the `CoefHandle` it was registered against; if we
-        // dropped the handle first, a follow-up
-        // `jpeg_write_coefficients(other_dst, our_array_ptr)` could
-        // hit the side table and dereference freed memory.
-        //
-        // Then release the JPOOL_IMAGE allocations that backed the
-        // foreign barray array. See the matching comment in
-        // `jpeg_finish_decompress` for the rationale (codex round-8
-        // review of b7f690d — without this the abort path leaks the
-        // previous image's virtual arrays).
-        if !p.coef_array_ptr.is_null() {
-            coef_unregister_array(p.coef_array_ptr as *const c_void);
-            p.coef_array_ptr = std::ptr::null_mut();
-            release_decompress_image_pool(cinfo, c.mem);
+    crate::unwind_guard!((), {
+        let c: &mut JpegDecompressPublic = match unsafe { cinfo_mut(cinfo) } {
+            Some(c) => c,
+            None => return,
+        };
+        let priv_ptr: *mut c_void = decompress_private_raw(cinfo);
+        if let Some(p) = unsafe { priv_from_ptr(priv_ptr) } {
+            p.decoded = None;
+            // Unhook the foreign array from the global side table BEFORE
+            // dropping the `CoefHandle` it was registered against; if we
+            // dropped the handle first, a follow-up
+            // `jpeg_write_coefficients(other_dst, our_array_ptr)` could
+            // hit the side table and dereference freed memory.
+            //
+            // Then release the JPOOL_IMAGE allocations that backed the
+            // foreign barray array. See the matching comment in
+            // `jpeg_finish_decompress` for the rationale (codex round-8
+            // review of b7f690d — without this the abort path leaks the
+            // previous image's virtual arrays).
+            if !p.coef_array_ptr.is_null() {
+                coef_unregister_array(p.coef_array_ptr as *const c_void);
+                p.coef_array_ptr = std::ptr::null_mut();
+                release_decompress_image_pool(cinfo, c.mem);
+            }
+            p.coefficients = None;
+            p.crop_active = false;
+            p.crop_xoffset = 0;
+            p.crop_width = 0;
+            // Drop any source bytes bridged from the previous run so
+            // `jpeg_read_header` re-bridges from the (possibly new)
+            // `cinfo->src` next time. Also clear the bridge resume buffer
+            // so a non-blocking source from a future image doesn't
+            // accidentally resume in the middle of an unrelated stream.
+            p.source = JpegSource::None;
+            p.bridge_partial.clear();
+            // Force a re-parse of the next image's header.
+            p.header_parsed_ok = false;
+            // Drop the previous image's saved-marker linked list. Stock
+            // libjpeg-turbo's `jpeg_abort` releases `JPOOL_IMAGE` (which
+            // backs `marker_list`) and the next `jpeg_read_header` starts
+            // with a clean slate. We mirror that here so a follow-up
+            // `jpeg_read_header` that fails early (returns
+            // `JPEG_SUSPENDED` before reaching the marker builder) cannot
+            // leave `cinfo->marker_list` pointing at the previous image's
+            // markers — caught by the post-implementation review.
+            c.marker_list = std::ptr::null_mut();
+            p.marker_list_storage.clear();
+            // Drop the lazy raw-data caches; reuse on a new JPEG must
+            // re-materialise. Same rationale as the matching block in
+            // `jpeg_finish_decompress`.
+            p.raw_image_cache = None;
+            p.raw_image_cache_12 = None;
+            p.raw_rows_consumed.clear();
         }
-        p.coefficients = None;
-        p.crop_active = false;
-        p.crop_xoffset = 0;
-        p.crop_width = 0;
-        // Drop any source bytes bridged from the previous run so
-        // `jpeg_read_header` re-bridges from the (possibly new)
-        // `cinfo->src` next time. Also clear the bridge resume buffer
-        // so a non-blocking source from a future image doesn't
-        // accidentally resume in the middle of an unrelated stream.
-        p.source = JpegSource::None;
-        p.bridge_partial.clear();
-        // Force a re-parse of the next image's header.
-        p.header_parsed_ok = false;
-        // Drop the previous image's saved-marker linked list. Stock
-        // libjpeg-turbo's `jpeg_abort` releases `JPOOL_IMAGE` (which
-        // backs `marker_list`) and the next `jpeg_read_header` starts
-        // with a clean slate. We mirror that here so a follow-up
-        // `jpeg_read_header` that fails early (returns
-        // `JPEG_SUSPENDED` before reaching the marker builder) cannot
-        // leave `cinfo->marker_list` pointing at the previous image's
-        // markers — caught by the post-implementation review.
-        c.marker_list = std::ptr::null_mut();
-        p.marker_list_storage.clear();
-        // Drop the lazy raw-data caches; reuse on a new JPEG must
-        // re-materialise. Same rationale as the matching block in
-        // `jpeg_finish_decompress`.
-        p.raw_image_cache = None;
-        p.raw_image_cache_12 = None;
-        p.raw_rows_consumed.clear();
-    }
-    c.global_state = DSTATE_START;
-    c.output_scanline = 0;
+        c.global_state = DSTATE_START;
+        c.output_scanline = 0;
+    })
 }
 
 /// `jpeg_abort(cinfo)` — common-struct abort. Dispatches via the
 /// `is_decompressor` flag at offset 32 of the common prefix.
 #[no_mangle]
 pub extern "C" fn jpeg_abort(cinfo: *mut c_void) {
-    // Both struct prefixes carry `is_decompressor` at offset 32. We
-    // only need to read the flag through whichever struct was
-    // originally allocated; field offset is identical.
-    if cinfo.is_null() {
-        return;
-    }
-    let is_decompressor: CBoolean = unsafe { *(cinfo as *const u8).add(32).cast::<CBoolean>() };
-    if is_decompressor != 0 {
-        jpeg_abort_decompress(cinfo);
-    } else {
-        jpeg_abort_compress(cinfo);
-    }
+    crate::unwind_guard!((), {
+        // Both struct prefixes carry `is_decompressor` at offset 32. We
+        // only need to read the flag through whichever struct was
+        // originally allocated; field offset is identical.
+        if cinfo.is_null() {
+            return;
+        }
+        let is_decompressor: CBoolean = unsafe { *(cinfo as *const u8).add(32).cast::<CBoolean>() };
+        if is_decompressor != 0 {
+            jpeg_abort_decompress(cinfo);
+        } else {
+            jpeg_abort_compress(cinfo);
+        }
+    })
 }
 
 /// `jpeg_destroy(cinfo)` — common-struct destroy. Same dispatch as
 /// `jpeg_abort`.
 #[no_mangle]
 pub extern "C" fn jpeg_destroy(cinfo: *mut c_void) {
-    if cinfo.is_null() {
-        return;
-    }
-    let is_decompressor: CBoolean = unsafe { *(cinfo as *const u8).add(32).cast::<CBoolean>() };
-    if is_decompressor != 0 {
-        jpeg_destroy_decompress(cinfo);
-    } else {
-        jpeg_destroy_compress(cinfo);
-    }
+    crate::unwind_guard!((), {
+        if cinfo.is_null() {
+            return;
+        }
+        let is_decompressor: CBoolean = unsafe { *(cinfo as *const u8).add(32).cast::<CBoolean>() };
+        if is_decompressor != 0 {
+            jpeg_destroy_decompress(cinfo);
+        } else {
+            jpeg_destroy_compress(cinfo);
+        }
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -4498,22 +4586,26 @@ unsafe fn alloc_through_memmgr_or_heap(cinfo: *mut c_void, size: usize) -> *mut 
 /// at `references/libjpeg-turbo/src/jcomapi.c`.
 #[no_mangle]
 pub extern "C" fn jpeg_alloc_quant_table(cinfo: *mut c_void) -> *mut JQuantTblPublic {
-    // SAFETY: passing through to the memory manager owned by the
-    // caller's `cinfo`.
-    let raw: *mut u8 =
-        unsafe { alloc_through_memmgr_or_heap(cinfo, std::mem::size_of::<JQuantTblPublic>()) };
-    raw.cast::<JQuantTblPublic>()
+    crate::unwind_guard!(std::ptr::null_mut(), {
+        // SAFETY: passing through to the memory manager owned by the
+        // caller's `cinfo`.
+        let raw: *mut u8 =
+            unsafe { alloc_through_memmgr_or_heap(cinfo, std::mem::size_of::<JQuantTblPublic>()) };
+        raw.cast::<JQuantTblPublic>()
+    })
 }
 
 /// `jpeg_alloc_huff_table(cinfo) -> JHUFF_TBL*`. Zero-initialised.
 /// Allocated via the memory manager — see `jpeg_alloc_quant_table`.
 #[no_mangle]
 pub extern "C" fn jpeg_alloc_huff_table(cinfo: *mut c_void) -> *mut JHuffTblPublic {
-    // SAFETY: passing through to the memory manager owned by the
-    // caller's `cinfo`.
-    let raw: *mut u8 =
-        unsafe { alloc_through_memmgr_or_heap(cinfo, std::mem::size_of::<JHuffTblPublic>()) };
-    raw.cast::<JHuffTblPublic>()
+    crate::unwind_guard!(std::ptr::null_mut(), {
+        // SAFETY: passing through to the memory manager owned by the
+        // caller's `cinfo`.
+        let raw: *mut u8 =
+            unsafe { alloc_through_memmgr_or_heap(cinfo, std::mem::size_of::<JHuffTblPublic>()) };
+        raw.cast::<JHuffTblPublic>()
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -5011,94 +5103,96 @@ fn default_num_components_for(cs: c_int) -> c_int {
 /// `version = JPEG_LIB_VERSION` and `structsize = sizeof(*cinfo)`.
 #[no_mangle]
 pub extern "C" fn jpeg_CreateCompress(cinfo: *mut c_void, _version: c_int, _struct_size: usize) {
-    let c: &mut JpegCompressPublic = match unsafe { cinfo_compress_mut(cinfo) } {
-        Some(c) => c,
-        None => return,
-    };
-    // Per jcapimin.c jpeg_CreateCompress, the struct is memset to zero with
-    // `err` and `client_data` preserved, then fields are populated.
-    //
-    // Wire up the memory-manager vtable so stock cjpeg / jpegtran can
-    // invoke `cinfo->mem->alloc_*` from their init paths.
-    c.mem = memmgr::create_memory_mgr() as *mut c_void;
-    c.progress = std::ptr::null_mut();
-    // err / client_data are already set by the caller; do NOT overwrite.
-    c.is_decompressor = 0;
-    c.global_state = CSTATE_START;
-    c.dest = std::ptr::null_mut();
-    c.image_width = 0;
-    c.image_height = 0;
-    c.input_components = 0;
-    c.in_color_space = JCS_UNKNOWN;
-    c.input_gamma = 1.0;
-    c.scale_num = 1;
-    c.scale_denom = 1;
-    c.jpeg_width = 0;
-    c.jpeg_height = 0;
-    c.data_precision = 8; // BITS_IN_JSAMPLE
-    c.num_components = 0;
-    c.jpeg_color_space = JCS_UNKNOWN;
-    c.comp_info = std::ptr::null_mut();
-    c.quant_tbl_ptrs = [std::ptr::null_mut(); 4];
-    c.q_scale_factor = [100; 4];
-    c.dc_huff_tbl_ptrs = [std::ptr::null_mut(); 4];
-    c.ac_huff_tbl_ptrs = [std::ptr::null_mut(); 4];
-    c.arith_dc_L = [0; 16];
-    c.arith_dc_U = [0; 16];
-    c.arith_ac_K = [0; 16];
-    c.num_scans = 0;
-    c.scan_info = std::ptr::null();
-    c.raw_data_in = 0;
-    c.arith_code = 0;
-    c.optimize_coding = 0;
-    c.CCIR601_sampling = 0;
-    c.do_fancy_downsampling = 0;
-    c.smoothing_factor = 0;
-    c.dct_method = 0; // JDCT_ISLOW
-    c.restart_interval = 0;
-    c.restart_in_rows = 0;
-    c.write_JFIF_header = 1;
-    c.JFIF_major_version = 1;
-    c.JFIF_minor_version = 1;
-    c.density_unit = 0;
-    c.X_density = 1;
-    c.Y_density = 1;
-    c.write_Adobe_marker = 0;
-    c.next_scanline = 0;
-    c.progressive_mode = 0;
-    c.max_h_samp_factor = 0;
-    c.max_v_samp_factor = 0;
-    c.min_DCT_h_scaled_size = 8; // DCTSIZE
-    c.min_DCT_v_scaled_size = 8;
-    c.total_iMCU_rows = 0;
-    c.comps_in_scan = 0;
-    c.cur_comp_info = [std::ptr::null_mut(); 4];
-    c.MCUs_per_row = 0;
-    c.MCU_rows_in_scan = 0;
-    c.blocks_in_MCU = 0;
-    c.MCU_membership = [0; 10];
-    c.Ss = 0;
-    c.Se = 0;
-    c.Ah = 0;
-    c.Al = 0;
-    c.block_size = 8; // DCTSIZE (JPEG_LIB_VERSION >= 80)
-    c.natural_order = std::ptr::null();
-    c.lim_Se = 63; // DCTSIZE2 - 1
-                   // `master` doubles as our Rust-side private-state pointer; everything
-                   // else in the tail is opaque libjpeg internal state we never populate.
-    c.main_ctrl = std::ptr::null_mut();
-    c.prep = std::ptr::null_mut();
-    c.coef = std::ptr::null_mut();
-    c.marker = std::ptr::null_mut();
-    c.cconvert = std::ptr::null_mut();
-    c.downsample = std::ptr::null_mut();
-    c.fdct = std::ptr::null_mut();
-    c.entropy = std::ptr::null_mut();
-    c.script_space = std::ptr::null_mut();
-    c.script_space_size = 0;
+    crate::unwind_guard!((), {
+        let c: &mut JpegCompressPublic = match unsafe { cinfo_compress_mut(cinfo) } {
+            Some(c) => c,
+            None => return,
+        };
+        // Per jcapimin.c jpeg_CreateCompress, the struct is memset to zero with
+        // `err` and `client_data` preserved, then fields are populated.
+        //
+        // Wire up the memory-manager vtable so stock cjpeg / jpegtran can
+        // invoke `cinfo->mem->alloc_*` from their init paths.
+        c.mem = memmgr::create_memory_mgr() as *mut c_void;
+        c.progress = std::ptr::null_mut();
+        // err / client_data are already set by the caller; do NOT overwrite.
+        c.is_decompressor = 0;
+        c.global_state = CSTATE_START;
+        c.dest = std::ptr::null_mut();
+        c.image_width = 0;
+        c.image_height = 0;
+        c.input_components = 0;
+        c.in_color_space = JCS_UNKNOWN;
+        c.input_gamma = 1.0;
+        c.scale_num = 1;
+        c.scale_denom = 1;
+        c.jpeg_width = 0;
+        c.jpeg_height = 0;
+        c.data_precision = 8; // BITS_IN_JSAMPLE
+        c.num_components = 0;
+        c.jpeg_color_space = JCS_UNKNOWN;
+        c.comp_info = std::ptr::null_mut();
+        c.quant_tbl_ptrs = [std::ptr::null_mut(); 4];
+        c.q_scale_factor = [100; 4];
+        c.dc_huff_tbl_ptrs = [std::ptr::null_mut(); 4];
+        c.ac_huff_tbl_ptrs = [std::ptr::null_mut(); 4];
+        c.arith_dc_L = [0; 16];
+        c.arith_dc_U = [0; 16];
+        c.arith_ac_K = [0; 16];
+        c.num_scans = 0;
+        c.scan_info = std::ptr::null();
+        c.raw_data_in = 0;
+        c.arith_code = 0;
+        c.optimize_coding = 0;
+        c.CCIR601_sampling = 0;
+        c.do_fancy_downsampling = 0;
+        c.smoothing_factor = 0;
+        c.dct_method = 0; // JDCT_ISLOW
+        c.restart_interval = 0;
+        c.restart_in_rows = 0;
+        c.write_JFIF_header = 1;
+        c.JFIF_major_version = 1;
+        c.JFIF_minor_version = 1;
+        c.density_unit = 0;
+        c.X_density = 1;
+        c.Y_density = 1;
+        c.write_Adobe_marker = 0;
+        c.next_scanline = 0;
+        c.progressive_mode = 0;
+        c.max_h_samp_factor = 0;
+        c.max_v_samp_factor = 0;
+        c.min_DCT_h_scaled_size = 8; // DCTSIZE
+        c.min_DCT_v_scaled_size = 8;
+        c.total_iMCU_rows = 0;
+        c.comps_in_scan = 0;
+        c.cur_comp_info = [std::ptr::null_mut(); 4];
+        c.MCUs_per_row = 0;
+        c.MCU_rows_in_scan = 0;
+        c.blocks_in_MCU = 0;
+        c.MCU_membership = [0; 10];
+        c.Ss = 0;
+        c.Se = 0;
+        c.Ah = 0;
+        c.Al = 0;
+        c.block_size = 8; // DCTSIZE (JPEG_LIB_VERSION >= 80)
+        c.natural_order = std::ptr::null();
+        c.lim_Se = 63; // DCTSIZE2 - 1
+                       // `master` doubles as our Rust-side private-state pointer; everything
+                       // else in the tail is opaque libjpeg internal state we never populate.
+        c.main_ctrl = std::ptr::null_mut();
+        c.prep = std::ptr::null_mut();
+        c.coef = std::ptr::null_mut();
+        c.marker = std::ptr::null_mut();
+        c.cconvert = std::ptr::null_mut();
+        c.downsample = std::ptr::null_mut();
+        c.fdct = std::ptr::null_mut();
+        c.entropy = std::ptr::null_mut();
+        c.script_space = std::ptr::null_mut();
+        c.script_space_size = 0;
 
-    let private: Box<CompressPrivate> = Box::default();
-    c.master = Box::into_raw(private) as *mut c_void;
+        let private: Box<CompressPrivate> = Box::default();
+        c.master = Box::into_raw(private) as *mut c_void;
+    })
 }
 
 /// Expansion of the `jpeg_create_compress(cinfo)` convenience macro.
@@ -5106,7 +5200,9 @@ pub extern "C" fn jpeg_CreateCompress(cinfo: *mut c_void, _version: c_int, _stru
 /// both names so callers compiled against either form link cleanly.
 #[no_mangle]
 pub extern "C" fn jpeg_create_compress(cinfo: *mut c_void) {
-    jpeg_CreateCompress(cinfo, 80, std::mem::size_of::<JpegCompressPublic>());
+    crate::unwind_guard!((), {
+        jpeg_CreateCompress(cinfo, 80, std::mem::size_of::<JpegCompressPublic>());
+    })
 }
 
 fn calc_compress_jpeg_dimensions(c: &mut JpegCompressPublic, lossless: bool) {
@@ -5124,43 +5220,47 @@ fn calc_compress_jpeg_dimensions(c: &mut JpegCompressPublic, lossless: bool) {
 /// DCT unit is 8 for lossy JPEG or 1 for lossless JPEG.
 #[no_mangle]
 pub extern "C" fn jpeg_calc_jpeg_dimensions(cinfo: *mut c_void) {
-    let c: &mut JpegCompressPublic = match unsafe { cinfo_compress_mut(cinfo) } {
-        Some(c) => c,
-        None => return,
-    };
-    let lossless: bool = match unsafe { priv_compress_from_ptr(c.master) } {
-        Some(p) => p.lossless_predictor != 0,
-        None => false,
-    };
-    calc_compress_jpeg_dimensions(c, lossless);
+    crate::unwind_guard!((), {
+        let c: &mut JpegCompressPublic = match unsafe { cinfo_compress_mut(cinfo) } {
+            Some(c) => c,
+            None => return,
+        };
+        let lossless: bool = match unsafe { priv_compress_from_ptr(c.master) } {
+            Some(p) => p.lossless_predictor != 0,
+            None => false,
+        };
+        calc_compress_jpeg_dimensions(c, lossless);
+    })
 }
 
 /// `jpeg_destroy_compress(cinfo)`.
 #[no_mangle]
 pub extern "C" fn jpeg_destroy_compress(cinfo: *mut c_void) {
-    let c: &mut JpegCompressPublic = match unsafe { cinfo_compress_mut(cinfo) } {
-        Some(c) => c,
-        None => return,
-    };
-    if !c.master.is_null() {
-        // SAFETY: we allocated this in `jpeg_CreateCompress`.
-        let _drop: Box<CompressPrivate> =
-            unsafe { Box::from_raw(c.master as *mut CompressPrivate) };
-        c.master = std::ptr::null_mut();
-    }
-    // Release the memory manager and every pool it owns; mirrors
-    // `self_destruct` in jmemmgr.c.
-    if !c.mem.is_null() {
-        // SAFETY: `c.mem` was produced by `memmgr::create_memory_mgr`
-        // in `jpeg_CreateCompress` and has not been freed.
-        unsafe {
-            memmgr::destroy_memory_mgr(c.mem as *mut memmgr::JpegMemoryMgr);
+    crate::unwind_guard!((), {
+        let c: &mut JpegCompressPublic = match unsafe { cinfo_compress_mut(cinfo) } {
+            Some(c) => c,
+            None => return,
+        };
+        if !c.master.is_null() {
+            // SAFETY: we allocated this in `jpeg_CreateCompress`.
+            let _drop: Box<CompressPrivate> =
+                unsafe { Box::from_raw(c.master as *mut CompressPrivate) };
+            c.master = std::ptr::null_mut();
         }
-        c.mem = std::ptr::null_mut();
-    }
-    c.dest = std::ptr::null_mut();
-    c.comp_info = std::ptr::null_mut();
-    c.global_state = 0;
+        // Release the memory manager and every pool it owns; mirrors
+        // `self_destruct` in jmemmgr.c.
+        if !c.mem.is_null() {
+            // SAFETY: `c.mem` was produced by `memmgr::create_memory_mgr`
+            // in `jpeg_CreateCompress` and has not been freed.
+            unsafe {
+                memmgr::destroy_memory_mgr(c.mem as *mut memmgr::JpegMemoryMgr);
+            }
+            c.mem = std::ptr::null_mut();
+        }
+        c.dest = std::ptr::null_mut();
+        c.comp_info = std::ptr::null_mut();
+        c.global_state = 0;
+    })
 }
 
 // --- destination manager callbacks (mem/stdio share staging buffer) ----
@@ -5279,17 +5379,19 @@ fn write_c_file(file: *mut c_void, bytes: &[u8]) {
 /// Install a destination manager that streams bytes into a `FILE *`.
 #[no_mangle]
 pub extern "C" fn jpeg_stdio_dest(cinfo: *mut c_void, outfile: *mut c_void) {
-    let c: &mut JpegCompressPublic = match unsafe { cinfo_compress_mut(cinfo) } {
-        Some(c) => c,
-        None => return,
-    };
-    let priv_ptr: *mut c_void = c.master;
-    let priv_state: &mut CompressPrivate = match unsafe { priv_compress_from_ptr(priv_ptr) } {
-        Some(p) => p,
-        None => return,
-    };
-    priv_state.dest_kind = JpegDest::File { file: outfile };
-    install_dest_mgr(c, priv_state);
+    crate::unwind_guard!((), {
+        let c: &mut JpegCompressPublic = match unsafe { cinfo_compress_mut(cinfo) } {
+            Some(c) => c,
+            None => return,
+        };
+        let priv_ptr: *mut c_void = c.master;
+        let priv_state: &mut CompressPrivate = match unsafe { priv_compress_from_ptr(priv_ptr) } {
+            Some(p) => p,
+            None => return,
+        };
+        priv_state.dest_kind = JpegDest::File { file: outfile };
+        install_dest_mgr(c, priv_state);
+    })
 }
 
 /// Install a destination manager that accumulates into a libc-allocated
@@ -5300,28 +5402,30 @@ pub extern "C" fn jpeg_mem_dest(
     outbuffer: *mut *mut u8,
     outsize: *mut std::os::raw::c_ulong,
 ) {
-    let c: &mut JpegCompressPublic = match unsafe { cinfo_compress_mut(cinfo) } {
-        Some(c) => c,
-        None => return,
-    };
-    let priv_ptr: *mut c_void = c.master;
-    let priv_state: &mut CompressPrivate = match unsafe { priv_compress_from_ptr(priv_ptr) } {
-        Some(p) => p,
-        None => return,
-    };
-    if outbuffer.is_null() || outsize.is_null() {
-        priv_state.dest_kind = JpegDest::None;
-        return;
-    }
-    // libjpeg contract: if `*outbuffer` is NULL, allocate on first flush
-    // and set `*outsize` to 0. Honour that pre-state.
-    unsafe {
-        if (*outbuffer).is_null() {
-            *outsize = 0;
+    crate::unwind_guard!((), {
+        let c: &mut JpegCompressPublic = match unsafe { cinfo_compress_mut(cinfo) } {
+            Some(c) => c,
+            None => return,
+        };
+        let priv_ptr: *mut c_void = c.master;
+        let priv_state: &mut CompressPrivate = match unsafe { priv_compress_from_ptr(priv_ptr) } {
+            Some(p) => p,
+            None => return,
+        };
+        if outbuffer.is_null() || outsize.is_null() {
+            priv_state.dest_kind = JpegDest::None;
+            return;
         }
-    }
-    priv_state.dest_kind = JpegDest::Mem { outbuffer, outsize };
-    install_dest_mgr(c, priv_state);
+        // libjpeg contract: if `*outbuffer` is NULL, allocate on first flush
+        // and set `*outsize` to 0. Honour that pre-state.
+        unsafe {
+            if (*outbuffer).is_null() {
+                *outsize = 0;
+            }
+        }
+        priv_state.dest_kind = JpegDest::Mem { outbuffer, outsize };
+        install_dest_mgr(c, priv_state);
+    })
 }
 
 /// Create-or-reuse the `JpegDestinationMgr` and point `cinfo.dest` at it.
@@ -5408,50 +5512,54 @@ fn apply_colorspace_defaults(c: &mut JpegCompressPublic, priv_state: &mut Compre
 /// corresponding to `in_color_space`.
 #[no_mangle]
 pub extern "C" fn jpeg_default_colorspace(cinfo: *mut c_void) {
-    let c: &mut JpegCompressPublic = match unsafe { cinfo_compress_mut(cinfo) } {
-        Some(c) => c,
-        None => return,
-    };
-    // JCS_EXT_* values follow libjpeg-turbo `jmorecfg.h` enum order
-    // (`JCS_EXT_RGB = 6` … `JCS_EXT_ARGB = 15`). All RGB-family
-    // packed inputs map to a YCbCr-encoded JPEG datastream.
-    let jcs: c_int = match c.in_color_space {
-        JCS_GRAYSCALE => JCS_GRAYSCALE,
-        JCS_RGB => JCS_YCBCR,
-        JCS_YCBCR => JCS_YCBCR,
-        JCS_CMYK => JCS_CMYK,
-        JCS_YCCK => JCS_YCCK,
-        6..=15 => JCS_YCBCR,
-        _ => JCS_UNKNOWN,
-    };
-    jpeg_set_colorspace(cinfo, jcs);
+    crate::unwind_guard!((), {
+        let c: &mut JpegCompressPublic = match unsafe { cinfo_compress_mut(cinfo) } {
+            Some(c) => c,
+            None => return,
+        };
+        // JCS_EXT_* values follow libjpeg-turbo `jmorecfg.h` enum order
+        // (`JCS_EXT_RGB = 6` … `JCS_EXT_ARGB = 15`). All RGB-family
+        // packed inputs map to a YCbCr-encoded JPEG datastream.
+        let jcs: c_int = match c.in_color_space {
+            JCS_GRAYSCALE => JCS_GRAYSCALE,
+            JCS_RGB => JCS_YCBCR,
+            JCS_YCBCR => JCS_YCBCR,
+            JCS_CMYK => JCS_CMYK,
+            JCS_YCCK => JCS_YCCK,
+            6..=15 => JCS_YCBCR,
+            _ => JCS_UNKNOWN,
+        };
+        jpeg_set_colorspace(cinfo, jcs);
+    })
 }
 
 /// `jpeg_set_colorspace(cinfo, colorspace)` — select the JPEG color space
 /// and populate `comp_info[]` with libjpeg's defaults.
 #[no_mangle]
 pub extern "C" fn jpeg_set_colorspace(cinfo: *mut c_void, colorspace: c_int) {
-    let c: &mut JpegCompressPublic = match unsafe { cinfo_compress_mut(cinfo) } {
-        Some(c) => c,
-        None => return,
-    };
-    let priv_ptr: *mut c_void = c.master;
-    let priv_state: &mut CompressPrivate = match unsafe { priv_compress_from_ptr(priv_ptr) } {
-        Some(p) => p,
-        None => return,
-    };
-    c.jpeg_color_space = colorspace;
-    c.num_components = default_num_components_for(colorspace);
-    // JFIF header is only valid for grayscale and YCbCr per spec.
-    let jfif_applicable: bool = matches!(colorspace, JCS_GRAYSCALE | JCS_YCBCR);
-    c.write_JFIF_header = if jfif_applicable && priv_state.write_jfif {
-        1
-    } else {
-        0
-    };
-    // Adobe marker for CMYK / YCCK / RGB.
-    c.write_Adobe_marker = matches!(colorspace, JCS_RGB | JCS_CMYK | JCS_YCCK) as CBoolean;
-    apply_colorspace_defaults(c, priv_state);
+    crate::unwind_guard!((), {
+        let c: &mut JpegCompressPublic = match unsafe { cinfo_compress_mut(cinfo) } {
+            Some(c) => c,
+            None => return,
+        };
+        let priv_ptr: *mut c_void = c.master;
+        let priv_state: &mut CompressPrivate = match unsafe { priv_compress_from_ptr(priv_ptr) } {
+            Some(p) => p,
+            None => return,
+        };
+        c.jpeg_color_space = colorspace;
+        c.num_components = default_num_components_for(colorspace);
+        // JFIF header is only valid for grayscale and YCbCr per spec.
+        let jfif_applicable: bool = matches!(colorspace, JCS_GRAYSCALE | JCS_YCBCR);
+        c.write_JFIF_header = if jfif_applicable && priv_state.write_jfif {
+            1
+        } else {
+            0
+        };
+        // Adobe marker for CMYK / YCCK / RGB.
+        c.write_Adobe_marker = matches!(colorspace, JCS_RGB | JCS_CMYK | JCS_YCCK) as CBoolean;
+        apply_colorspace_defaults(c, priv_state);
+    })
 }
 
 /// `jpeg_set_defaults(cinfo)` — populate default compression parameters,
@@ -5459,43 +5567,45 @@ pub extern "C" fn jpeg_set_colorspace(cinfo: *mut c_void, colorspace: c_int) {
 /// have already set `in_color_space`.
 #[no_mangle]
 pub extern "C" fn jpeg_set_defaults(cinfo: *mut c_void) {
-    let c: &mut JpegCompressPublic = match unsafe { cinfo_compress_mut(cinfo) } {
-        Some(c) => c,
-        None => return,
-    };
-    // JPEG_LIB_VERSION >= 70: 1:1 scaling by default.
-    c.scale_num = 1;
-    c.scale_denom = 1;
-    // Default arithmetic-coding conditioning: L=0, U=1, K=5 per spec.
-    c.arith_dc_L = [0; 16];
-    c.arith_dc_U = [1; 16];
-    c.arith_ac_K = [5; 16];
-    c.num_scans = 0;
-    c.scan_info = std::ptr::null();
-    c.raw_data_in = 0;
-    c.arith_code = 0;
-    // 12-bit precision forces optimize_coding so valid tables get computed
-    // (libjpeg's builtin standard tables are only valid for 8-bit).
-    c.optimize_coding = if c.data_precision == 12 { 1 } else { 0 };
-    c.CCIR601_sampling = 0;
-    // JPEG_LIB_VERSION >= 70: apply fancy downsampling by default.
-    c.do_fancy_downsampling = 1;
-    c.smoothing_factor = 0;
-    c.dct_method = 0; // JDCT_ISLOW (JDCT_DEFAULT)
-    c.restart_interval = 0;
-    c.restart_in_rows = 0;
-    // Default JFIF 1.01 marker parameters; actual emission decided by
-    // jpeg_set_colorspace based on the selected JPEG color space.
-    c.JFIF_major_version = 1;
-    c.JFIF_minor_version = 1;
-    c.density_unit = 0;
-    c.X_density = 1;
-    c.Y_density = 1;
-    c.progressive_mode = 0;
-    // Apply the defaults that flow from `in_color_space` → `jpeg_color_space`.
-    jpeg_default_colorspace(cinfo);
-    // Default quality = 75 with baseline restriction per libjpeg.
-    jpeg_set_quality(cinfo, 75, 1);
+    crate::unwind_guard!((), {
+        let c: &mut JpegCompressPublic = match unsafe { cinfo_compress_mut(cinfo) } {
+            Some(c) => c,
+            None => return,
+        };
+        // JPEG_LIB_VERSION >= 70: 1:1 scaling by default.
+        c.scale_num = 1;
+        c.scale_denom = 1;
+        // Default arithmetic-coding conditioning: L=0, U=1, K=5 per spec.
+        c.arith_dc_L = [0; 16];
+        c.arith_dc_U = [1; 16];
+        c.arith_ac_K = [5; 16];
+        c.num_scans = 0;
+        c.scan_info = std::ptr::null();
+        c.raw_data_in = 0;
+        c.arith_code = 0;
+        // 12-bit precision forces optimize_coding so valid tables get computed
+        // (libjpeg's builtin standard tables are only valid for 8-bit).
+        c.optimize_coding = if c.data_precision == 12 { 1 } else { 0 };
+        c.CCIR601_sampling = 0;
+        // JPEG_LIB_VERSION >= 70: apply fancy downsampling by default.
+        c.do_fancy_downsampling = 1;
+        c.smoothing_factor = 0;
+        c.dct_method = 0; // JDCT_ISLOW (JDCT_DEFAULT)
+        c.restart_interval = 0;
+        c.restart_in_rows = 0;
+        // Default JFIF 1.01 marker parameters; actual emission decided by
+        // jpeg_set_colorspace based on the selected JPEG color space.
+        c.JFIF_major_version = 1;
+        c.JFIF_minor_version = 1;
+        c.density_unit = 0;
+        c.X_density = 1;
+        c.Y_density = 1;
+        c.progressive_mode = 0;
+        // Apply the defaults that flow from `in_color_space` → `jpeg_color_space`.
+        jpeg_default_colorspace(cinfo);
+        // Default quality = 75 with baseline restriction per libjpeg.
+        jpeg_set_quality(cinfo, 75, 1);
+    })
 }
 
 /// `jpeg_set_quality(cinfo, quality, force_baseline)` — install the
@@ -5507,22 +5617,24 @@ pub extern "C" fn jpeg_set_defaults(cinfo: *mut c_void) {
 /// slots 0 and 1.
 #[no_mangle]
 pub extern "C" fn jpeg_set_quality(cinfo: *mut c_void, quality: c_int, _force_baseline: CBoolean) {
-    let c: &mut JpegCompressPublic = match unsafe { cinfo_compress_mut(cinfo) } {
-        Some(c) => c,
-        None => return,
-    };
-    let priv_ptr: *mut c_void = c.master;
-    let priv_state: &mut CompressPrivate = match unsafe { priv_compress_from_ptr(priv_ptr) } {
-        Some(p) => p,
-        None => return,
-    };
-    let clamped: u8 = quality.clamp(1, 100) as u8;
-    priv_state.quality = clamped;
-    // JPEG_LIB_VERSION >= 70: record the scaled factor so downstream
-    // table emission can re-scale at start-compress time.
-    let scale: c_int = libjpeg_turbo_rs::quality_scaling(clamped) as c_int;
-    c.q_scale_factor[0] = scale;
-    c.q_scale_factor[1] = scale;
+    crate::unwind_guard!((), {
+        let c: &mut JpegCompressPublic = match unsafe { cinfo_compress_mut(cinfo) } {
+            Some(c) => c,
+            None => return,
+        };
+        let priv_ptr: *mut c_void = c.master;
+        let priv_state: &mut CompressPrivate = match unsafe { priv_compress_from_ptr(priv_ptr) } {
+            Some(p) => p,
+            None => return,
+        };
+        let clamped: u8 = quality.clamp(1, 100) as u8;
+        priv_state.quality = clamped;
+        // JPEG_LIB_VERSION >= 70: record the scaled factor so downstream
+        // table emission can re-scale at start-compress time.
+        let scale: c_int = libjpeg_turbo_rs::quality_scaling(clamped) as c_int;
+        c.q_scale_factor[0] = scale;
+        c.q_scale_factor[1] = scale;
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -5576,74 +5688,76 @@ fn input_pixel_format(c: &JpegCompressPublic) -> PixelFormat {
 /// front, so we accumulate.
 #[no_mangle]
 pub extern "C" fn jpeg_start_compress(cinfo: *mut c_void, _write_all_tables: CBoolean) {
-    let c: &mut JpegCompressPublic = match unsafe { cinfo_compress_mut(cinfo) } {
-        Some(c) => c,
-        None => return,
-    };
-    let priv_ptr: *mut c_void = c.master;
-    let priv_state: &mut CompressPrivate = match unsafe { priv_compress_from_ptr(priv_ptr) } {
-        Some(p) => p,
-        None => return,
-    };
-    // When raw_data_in is set, the state machine uses CSTATE_RAW_OK
-    // instead of CSTATE_SCANNING so jpeg_write_raw_data knows it is legal.
-    c.global_state = if c.raw_data_in != 0 {
-        CSTATE_RAW_OK
-    } else {
-        CSTATE_SCANNING
-    };
-    c.next_scanline = 0;
+    crate::unwind_guard!((), {
+        let c: &mut JpegCompressPublic = match unsafe { cinfo_compress_mut(cinfo) } {
+            Some(c) => c,
+            None => return,
+        };
+        let priv_ptr: *mut c_void = c.master;
+        let priv_state: &mut CompressPrivate = match unsafe { priv_compress_from_ptr(priv_ptr) } {
+            Some(p) => p,
+            None => return,
+        };
+        // When raw_data_in is set, the state machine uses CSTATE_RAW_OK
+        // instead of CSTATE_SCANNING so jpeg_write_raw_data knows it is legal.
+        c.global_state = if c.raw_data_in != 0 {
+            CSTATE_RAW_OK
+        } else {
+            CSTATE_SCANNING
+        };
+        c.next_scanline = 0;
 
-    // --- Populate derived fields (libjpeg `jcmaster.c::initial_setup`). ---
-    calc_compress_jpeg_dimensions(c, priv_state.lossless_predictor != 0);
-    // max_h/v_samp_factor = max of comp_info[i].h/v_samp_factor.
-    let mut max_h: c_int = 1;
-    let mut max_v: c_int = 1;
-    for comp in &priv_state.comp_info {
-        if comp.h_samp_factor > max_h {
-            max_h = comp.h_samp_factor;
+        // --- Populate derived fields (libjpeg `jcmaster.c::initial_setup`). ---
+        calc_compress_jpeg_dimensions(c, priv_state.lossless_predictor != 0);
+        // max_h/v_samp_factor = max of comp_info[i].h/v_samp_factor.
+        let mut max_h: c_int = 1;
+        let mut max_v: c_int = 1;
+        for comp in &priv_state.comp_info {
+            if comp.h_samp_factor > max_h {
+                max_h = comp.h_samp_factor;
+            }
+            if comp.v_samp_factor > max_v {
+                max_v = comp.v_samp_factor;
+            }
         }
-        if comp.v_samp_factor > max_v {
-            max_v = comp.v_samp_factor;
-        }
-    }
-    c.max_h_samp_factor = max_h;
-    c.max_v_samp_factor = max_v;
-    // total_iMCU_rows = ceil(image_height / (max_v_samp_factor * data_unit)).
-    // `data_unit` is 8 for lossy JPEG and 1 for lossless JPEG.
-    let data_unit: u32 = c.min_DCT_v_scaled_size.max(1) as u32;
-    let imcu_row_height: u32 = (max_v as u32).saturating_mul(data_unit).max(1);
-    c.total_iMCU_rows = c.image_height.div_ceil(imcu_row_height);
+        c.max_h_samp_factor = max_h;
+        c.max_v_samp_factor = max_v;
+        // total_iMCU_rows = ceil(image_height / (max_v_samp_factor * data_unit)).
+        // `data_unit` is 8 for lossy JPEG and 1 for lossless JPEG.
+        let data_unit: u32 = c.min_DCT_v_scaled_size.max(1) as u32;
+        let imcu_row_height: u32 = (max_v as u32).saturating_mul(data_unit).max(1);
+        c.total_iMCU_rows = c.image_height.div_ceil(imcu_row_height);
 
-    let input_components: usize = c.input_components.max(1) as usize;
-    let width: usize = c.image_width as usize;
-    let height: usize = c.image_height as usize;
-    let row_bytes: usize = width.saturating_mul(input_components);
-    let total_bytes: usize = row_bytes.saturating_mul(height);
-    priv_state.pixels_u8.clear();
-    priv_state.pixels_u16.clear();
-    // In raw-data mode we don't pre-allocate a pixel buffer — rows come
-    // in via jpeg_write_raw_data instead.
-    if c.raw_data_in == 0 {
-        priv_state.pixels_u8.resize(total_bytes, 0);
-    }
-    // Reset raw-data accumulation buffers (both 8-bit and 12-bit).
-    priv_state.raw_plane_buffers.clear();
-    priv_state.raw_plane_buffers_12.clear();
-    priv_state.raw_rows_filled.clear();
-    priv_state.raw_plane_widths.clear();
-    priv_state.raw_plane_heights.clear();
-    priv_state.have_started = true;
-    priv_state.tables_only = false;
-
-    // Kick the destination manager via `init_destination` if installed so
-    // the first write_scanline has a live staging buffer waiting.
-    if !c.dest.is_null() {
-        let dest: &JpegDestinationMgr = unsafe { &*c.dest };
-        if let Some(init) = dest.init_destination {
-            unsafe { init(cinfo) };
+        let input_components: usize = c.input_components.max(1) as usize;
+        let width: usize = c.image_width as usize;
+        let height: usize = c.image_height as usize;
+        let row_bytes: usize = width.saturating_mul(input_components);
+        let total_bytes: usize = row_bytes.saturating_mul(height);
+        priv_state.pixels_u8.clear();
+        priv_state.pixels_u16.clear();
+        // In raw-data mode we don't pre-allocate a pixel buffer — rows come
+        // in via jpeg_write_raw_data instead.
+        if c.raw_data_in == 0 {
+            priv_state.pixels_u8.resize(total_bytes, 0);
         }
-    }
+        // Reset raw-data accumulation buffers (both 8-bit and 12-bit).
+        priv_state.raw_plane_buffers.clear();
+        priv_state.raw_plane_buffers_12.clear();
+        priv_state.raw_rows_filled.clear();
+        priv_state.raw_plane_widths.clear();
+        priv_state.raw_plane_heights.clear();
+        priv_state.have_started = true;
+        priv_state.tables_only = false;
+
+        // Kick the destination manager via `init_destination` if installed so
+        // the first write_scanline has a live staging buffer waiting.
+        if !c.dest.is_null() {
+            let dest: &JpegDestinationMgr = unsafe { &*c.dest };
+            if let Some(init) = dest.init_destination {
+                unsafe { init(cinfo) };
+            }
+        }
+    })
 }
 
 /// `jpeg_write_scanlines(cinfo, scanlines, num_lines) -> JDIMENSION`.
@@ -5657,41 +5771,43 @@ pub extern "C" fn jpeg_write_scanlines(
     scanlines: *mut *mut u8,
     num_lines: JDimension,
 ) -> JDimension {
-    let c: &mut JpegCompressPublic = match unsafe { cinfo_compress_mut(cinfo) } {
-        Some(c) => c,
-        None => return 0,
-    };
-    let priv_ptr: *mut c_void = c.master;
-    let priv_state: &mut CompressPrivate = match unsafe { priv_compress_from_ptr(priv_ptr) } {
-        Some(p) => p,
-        None => return 0,
-    };
-    if scanlines.is_null() || num_lines == 0 {
-        return 0;
-    }
-    let input_components: usize = c.input_components.max(1) as usize;
-    let row_bytes: usize = (c.image_width as usize).saturating_mul(input_components);
-    let total_rows: JDimension = c.image_height;
-    let remaining: JDimension = total_rows.saturating_sub(c.next_scanline);
-    let to_copy: JDimension = std::cmp::min(num_lines, remaining);
-    if to_copy == 0 {
-        return 0;
-    }
-    // SAFETY: caller guarantees `scanlines` holds `num_lines` row
-    // pointers, each referencing at least `row_bytes` bytes.
-    for i in 0..(to_copy as usize) {
-        let row_ptr: *const u8 = unsafe { *scanlines.add(i) } as *const u8;
-        if row_ptr.is_null() {
-            break;
+    crate::unwind_guard!(0, {
+        let c: &mut JpegCompressPublic = match unsafe { cinfo_compress_mut(cinfo) } {
+            Some(c) => c,
+            None => return 0,
+        };
+        let priv_ptr: *mut c_void = c.master;
+        let priv_state: &mut CompressPrivate = match unsafe { priv_compress_from_ptr(priv_ptr) } {
+            Some(p) => p,
+            None => return 0,
+        };
+        if scanlines.is_null() || num_lines == 0 {
+            return 0;
         }
-        let dst_offset: usize = (c.next_scanline as usize + i) * row_bytes;
-        let dst: &mut [u8] = &mut priv_state.pixels_u8[dst_offset..dst_offset + row_bytes];
-        unsafe {
-            std::ptr::copy_nonoverlapping(row_ptr, dst.as_mut_ptr(), row_bytes);
+        let input_components: usize = c.input_components.max(1) as usize;
+        let row_bytes: usize = (c.image_width as usize).saturating_mul(input_components);
+        let total_rows: JDimension = c.image_height;
+        let remaining: JDimension = total_rows.saturating_sub(c.next_scanline);
+        let to_copy: JDimension = std::cmp::min(num_lines, remaining);
+        if to_copy == 0 {
+            return 0;
         }
-    }
-    c.next_scanline += to_copy;
-    to_copy
+        // SAFETY: caller guarantees `scanlines` holds `num_lines` row
+        // pointers, each referencing at least `row_bytes` bytes.
+        for i in 0..(to_copy as usize) {
+            let row_ptr: *const u8 = unsafe { *scanlines.add(i) } as *const u8;
+            if row_ptr.is_null() {
+                break;
+            }
+            let dst_offset: usize = (c.next_scanline as usize + i) * row_bytes;
+            let dst: &mut [u8] = &mut priv_state.pixels_u8[dst_offset..dst_offset + row_bytes];
+            unsafe {
+                std::ptr::copy_nonoverlapping(row_ptr, dst.as_mut_ptr(), row_bytes);
+            }
+        }
+        c.next_scanline += to_copy;
+        to_copy
+    })
 }
 
 /// Actually invoke the Rust encoder over the accumulated pixels. On
@@ -6112,40 +6228,42 @@ fn write_marker_segment(out: &mut Vec<u8>, marker_code: c_int, data: &[u8]) {
 /// `jpeg_finish_compress(cinfo)` — close the datastream, flush to sink.
 #[no_mangle]
 pub extern "C" fn jpeg_finish_compress(cinfo: *mut c_void) {
-    let c: &mut JpegCompressPublic = match unsafe { cinfo_compress_mut(cinfo) } {
-        Some(c) => c,
-        None => return,
-    };
-    let priv_ptr: *mut c_void = c.master;
-    let priv_state: &mut CompressPrivate = match unsafe { priv_compress_from_ptr(priv_ptr) } {
-        Some(p) => p,
-        None => return,
-    };
-    if !priv_state.have_started {
-        return;
-    }
-    priv_state.have_started = false;
-    // CSTATE_WRCOEFS branch: jpegtran-style lossless transcode flow.
-    // Emit the bytes from the coefficient handle stashed by the matching
-    // `jpeg_write_coefficients` call. Otherwise fall through to the
-    // pixel-encoding path.
-    if c.global_state == CSTATE_WRCOEFS {
-        let _ = run_coefficient_writer_and_flush(c, priv_state);
-    } else if c.raw_data_in != 0 {
-        // Raw-data encode path: flush accumulated per-component planes
-        // collected by jpeg_write_raw_data / jpeg12_write_raw_data.
-        // Dispatch on `data_precision`: 12-bit goes through the
-        // `compress_raw_12` backend (i16 planes), every other precision
-        // through the 8-bit `compress_raw` backend (u8 planes).
-        if c.data_precision == 12 {
-            let _ = run_raw_encoder_12_and_flush(c, priv_state);
-        } else {
-            let _ = run_raw_encoder_and_flush(c, priv_state);
+    crate::unwind_guard!((), {
+        let c: &mut JpegCompressPublic = match unsafe { cinfo_compress_mut(cinfo) } {
+            Some(c) => c,
+            None => return,
+        };
+        let priv_ptr: *mut c_void = c.master;
+        let priv_state: &mut CompressPrivate = match unsafe { priv_compress_from_ptr(priv_ptr) } {
+            Some(p) => p,
+            None => return,
+        };
+        if !priv_state.have_started {
+            return;
         }
-    } else {
-        let _ = run_encoder_and_flush(c, priv_state);
-    }
-    c.global_state = CSTATE_START;
+        priv_state.have_started = false;
+        // CSTATE_WRCOEFS branch: jpegtran-style lossless transcode flow.
+        // Emit the bytes from the coefficient handle stashed by the matching
+        // `jpeg_write_coefficients` call. Otherwise fall through to the
+        // pixel-encoding path.
+        if c.global_state == CSTATE_WRCOEFS {
+            let _ = run_coefficient_writer_and_flush(c, priv_state);
+        } else if c.raw_data_in != 0 {
+            // Raw-data encode path: flush accumulated per-component planes
+            // collected by jpeg_write_raw_data / jpeg12_write_raw_data.
+            // Dispatch on `data_precision`: 12-bit goes through the
+            // `compress_raw_12` backend (i16 planes), every other precision
+            // through the 8-bit `compress_raw` backend (u8 planes).
+            if c.data_precision == 12 {
+                let _ = run_raw_encoder_12_and_flush(c, priv_state);
+            } else {
+                let _ = run_raw_encoder_and_flush(c, priv_state);
+            }
+        } else {
+            let _ = run_encoder_and_flush(c, priv_state);
+        }
+        c.global_state = CSTATE_START;
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -6159,8 +6277,10 @@ pub extern "C" fn jpeg_finish_compress(cinfo: *mut c_void) {
 /// `libjpeg_turbo_rs::quality_scaling`, wrapped for the libjpeg signature.
 #[no_mangle]
 pub extern "C" fn jpeg_quality_scaling(quality: c_int) -> c_int {
-    let q: u8 = quality.clamp(1, 100) as u8;
-    libjpeg_turbo_rs::quality_scaling(q) as c_int
+    crate::unwind_guard!(-1, {
+        let q: u8 = quality.clamp(1, 100) as u8;
+        libjpeg_turbo_rs::quality_scaling(q) as c_int
+    })
 }
 
 /// `jpeg_add_quant_table(cinfo, which_tbl, basic_table, scale_factor,
@@ -6184,34 +6304,36 @@ pub extern "C" fn jpeg_add_quant_table(
     scale_factor: c_int,
     _force_baseline: CBoolean,
 ) {
-    let c: &mut JpegCompressPublic = match unsafe { cinfo_compress_mut(cinfo) } {
-        Some(c) => c,
-        None => return,
-    };
-    let priv_ptr: *mut c_void = c.master;
-    let priv_state: &mut CompressPrivate = match unsafe { priv_compress_from_ptr(priv_ptr) } {
-        Some(p) => p,
-        None => return,
-    };
-    if basic_table.is_null() || !(0..4).contains(&which_tbl) {
-        return;
-    }
-    // SAFETY: libjpeg callers pass a 64-entry `const unsigned int *`.
-    let src: &[u32] = unsafe { std::slice::from_raw_parts(basic_table, 64) };
-    // Apply scale_factor per libjpeg formula:
-    //   quant = (basic * scale + 50) / 100
-    // clamped to 1..32767 (or 1..255 if force_baseline).
-    let mut scaled: [u16; 64] = [0u16; 64];
-    let scale: i64 = scale_factor as i64;
-    for (i, &v) in src.iter().enumerate() {
-        let s: i64 = (v as i64 * scale + 50) / 100;
-        let clamped: i64 = s.clamp(1, 32767);
-        scaled[i] = clamped as u16;
-    }
-    while priv_state.quant_tables.len() <= which_tbl as usize {
-        priv_state.quant_tables.push(None);
-    }
-    priv_state.quant_tables[which_tbl as usize] = Some(scaled);
+    crate::unwind_guard!((), {
+        let c: &mut JpegCompressPublic = match unsafe { cinfo_compress_mut(cinfo) } {
+            Some(c) => c,
+            None => return,
+        };
+        let priv_ptr: *mut c_void = c.master;
+        let priv_state: &mut CompressPrivate = match unsafe { priv_compress_from_ptr(priv_ptr) } {
+            Some(p) => p,
+            None => return,
+        };
+        if basic_table.is_null() || !(0..4).contains(&which_tbl) {
+            return;
+        }
+        // SAFETY: libjpeg callers pass a 64-entry `const unsigned int *`.
+        let src: &[u32] = unsafe { std::slice::from_raw_parts(basic_table, 64) };
+        // Apply scale_factor per libjpeg formula:
+        //   quant = (basic * scale + 50) / 100
+        // clamped to 1..32767 (or 1..255 if force_baseline).
+        let mut scaled: [u16; 64] = [0u16; 64];
+        let scale: i64 = scale_factor as i64;
+        for (i, &v) in src.iter().enumerate() {
+            let s: i64 = (v as i64 * scale + 50) / 100;
+            let clamped: i64 = s.clamp(1, 32767);
+            scaled[i] = clamped as u16;
+        }
+        while priv_state.quant_tables.len() <= which_tbl as usize {
+            priv_state.quant_tables.push(None);
+        }
+        priv_state.quant_tables[which_tbl as usize] = Some(scaled);
+    })
 }
 
 /// `jpeg_default_qtables(cinfo, force_baseline)`.
@@ -6223,30 +6345,34 @@ pub extern "C" fn jpeg_add_quant_table(
 /// caller is past `jpeg_set_defaults`.
 #[no_mangle]
 pub extern "C" fn jpeg_default_qtables(cinfo: *mut c_void, force_baseline: CBoolean) {
-    let quality: c_int = {
-        let c: &JpegCompressPublic = match unsafe { cinfo_compress_mut(cinfo) } {
-            Some(c) => c,
-            None => return,
+    crate::unwind_guard!((), {
+        let quality: c_int = {
+            let c: &JpegCompressPublic = match unsafe { cinfo_compress_mut(cinfo) } {
+                Some(c) => c,
+                None => return,
+            };
+            let priv_ptr: *mut c_void = c.master;
+            let priv_state: &CompressPrivate = match unsafe { priv_compress_from_ptr(priv_ptr) } {
+                Some(p) => p,
+                None => return,
+            };
+            priv_state.quality as c_int
         };
-        let priv_ptr: *mut c_void = c.master;
-        let priv_state: &CompressPrivate = match unsafe { priv_compress_from_ptr(priv_ptr) } {
-            Some(p) => p,
-            None => return,
-        };
-        priv_state.quality as c_int
-    };
-    jpeg_set_quality(cinfo, quality, force_baseline);
+        jpeg_set_quality(cinfo, quality, force_baseline);
+    })
 }
 
 /// `jpeg_simple_progression(cinfo)` — switch the encoder to the default
 /// libjpeg progressive scan script.
 #[no_mangle]
 pub extern "C" fn jpeg_simple_progression(cinfo: *mut c_void) {
-    let c: &mut JpegCompressPublic = match unsafe { cinfo_compress_mut(cinfo) } {
-        Some(c) => c,
-        None => return,
-    };
-    c.progressive_mode = 1;
+    crate::unwind_guard!((), {
+        let c: &mut JpegCompressPublic = match unsafe { cinfo_compress_mut(cinfo) } {
+            Some(c) => c,
+            None => return,
+        };
+        c.progressive_mode = 1;
+    })
 }
 
 /// `jpeg_enable_lossless(cinfo, predictor_selection_value, point_transform)`.
@@ -6259,20 +6385,22 @@ pub extern "C" fn jpeg_enable_lossless(
     predictor_selection_value: c_int,
     point_transform: c_int,
 ) {
-    let c: &mut JpegCompressPublic = match unsafe { cinfo_compress_mut(cinfo) } {
-        Some(c) => c,
-        None => return,
-    };
-    let priv_ptr: *mut c_void = c.master;
-    let priv_state: &mut CompressPrivate = match unsafe { priv_compress_from_ptr(priv_ptr) } {
-        Some(p) => p,
-        None => return,
-    };
-    // Predictor 1..7; point_transform 0..15 per JPEG spec.
-    let p: u8 = predictor_selection_value.clamp(1, 7) as u8;
-    let pt: u8 = point_transform.clamp(0, 15) as u8;
-    priv_state.lossless_predictor = p;
-    priv_state.lossless_point_transform = pt;
+    crate::unwind_guard!((), {
+        let c: &mut JpegCompressPublic = match unsafe { cinfo_compress_mut(cinfo) } {
+            Some(c) => c,
+            None => return,
+        };
+        let priv_ptr: *mut c_void = c.master;
+        let priv_state: &mut CompressPrivate = match unsafe { priv_compress_from_ptr(priv_ptr) } {
+            Some(p) => p,
+            None => return,
+        };
+        // Predictor 1..7; point_transform 0..15 per JPEG spec.
+        let p: u8 = predictor_selection_value.clamp(1, 7) as u8;
+        let pt: u8 = point_transform.clamp(0, 15) as u8;
+        priv_state.lossless_predictor = p;
+        priv_state.lossless_point_transform = pt;
+    })
 }
 
 /// `jpeg_suppress_tables(cinfo, suppress)` — when set, quant and Huffman
@@ -6280,16 +6408,18 @@ pub extern "C" fn jpeg_enable_lossless(
 /// them separately via `jpeg_write_tables`). Stored in private state.
 #[no_mangle]
 pub extern "C" fn jpeg_suppress_tables(cinfo: *mut c_void, suppress: CBoolean) {
-    let c: &mut JpegCompressPublic = match unsafe { cinfo_compress_mut(cinfo) } {
-        Some(c) => c,
-        None => return,
-    };
-    let priv_ptr: *mut c_void = c.master;
-    let priv_state: &mut CompressPrivate = match unsafe { priv_compress_from_ptr(priv_ptr) } {
-        Some(p) => p,
-        None => return,
-    };
-    priv_state.suppress_tables = suppress != 0;
+    crate::unwind_guard!((), {
+        let c: &mut JpegCompressPublic = match unsafe { cinfo_compress_mut(cinfo) } {
+            Some(c) => c,
+            None => return,
+        };
+        let priv_ptr: *mut c_void = c.master;
+        let priv_state: &mut CompressPrivate = match unsafe { priv_compress_from_ptr(priv_ptr) } {
+            Some(p) => p,
+            None => return,
+        };
+        priv_state.suppress_tables = suppress != 0;
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -6308,23 +6438,25 @@ pub extern "C" fn jpeg_write_marker(
     dataptr: *const u8,
     datalen: std::os::raw::c_uint,
 ) {
-    let c: &mut JpegCompressPublic = match unsafe { cinfo_compress_mut(cinfo) } {
-        Some(c) => c,
-        None => return,
-    };
-    let priv_ptr: *mut c_void = c.master;
-    let priv_state: &mut CompressPrivate = match unsafe { priv_compress_from_ptr(priv_ptr) } {
-        Some(p) => p,
-        None => return,
-    };
-    let len: usize = datalen as usize;
-    let data: Vec<u8> = if dataptr.is_null() || len == 0 {
-        Vec::new()
-    } else {
-        // SAFETY: caller-owned slice valid for `datalen` bytes.
-        unsafe { std::slice::from_raw_parts(dataptr, len).to_vec() }
-    };
-    priv_state.pending_markers.push((marker, data));
+    crate::unwind_guard!((), {
+        let c: &mut JpegCompressPublic = match unsafe { cinfo_compress_mut(cinfo) } {
+            Some(c) => c,
+            None => return,
+        };
+        let priv_ptr: *mut c_void = c.master;
+        let priv_state: &mut CompressPrivate = match unsafe { priv_compress_from_ptr(priv_ptr) } {
+            Some(p) => p,
+            None => return,
+        };
+        let len: usize = datalen as usize;
+        let data: Vec<u8> = if dataptr.is_null() || len == 0 {
+            Vec::new()
+        } else {
+            // SAFETY: caller-owned slice valid for `datalen` bytes.
+            unsafe { std::slice::from_raw_parts(dataptr, len).to_vec() }
+        };
+        priv_state.pending_markers.push((marker, data));
+    })
 }
 
 /// `jpeg_write_m_header(cinfo, marker, datalen)` — start a marker that
@@ -6337,37 +6469,41 @@ pub extern "C" fn jpeg_write_m_header(
     marker: c_int,
     datalen: std::os::raw::c_uint,
 ) {
-    let c: &mut JpegCompressPublic = match unsafe { cinfo_compress_mut(cinfo) } {
-        Some(c) => c,
-        None => return,
-    };
-    let priv_ptr: *mut c_void = c.master;
-    let priv_state: &mut CompressPrivate = match unsafe { priv_compress_from_ptr(priv_ptr) } {
-        Some(p) => p,
-        None => return,
-    };
-    let expected: usize = datalen as usize;
-    priv_state
-        .pending_markers
-        .push((marker, Vec::with_capacity(expected)));
+    crate::unwind_guard!((), {
+        let c: &mut JpegCompressPublic = match unsafe { cinfo_compress_mut(cinfo) } {
+            Some(c) => c,
+            None => return,
+        };
+        let priv_ptr: *mut c_void = c.master;
+        let priv_state: &mut CompressPrivate = match unsafe { priv_compress_from_ptr(priv_ptr) } {
+            Some(p) => p,
+            None => return,
+        };
+        let expected: usize = datalen as usize;
+        priv_state
+            .pending_markers
+            .push((marker, Vec::with_capacity(expected)));
+    })
 }
 
 /// `jpeg_write_m_byte(cinfo, val)` — append a single byte to the most
 /// recently opened marker segment (`jpeg_write_m_header`).
 #[no_mangle]
 pub extern "C" fn jpeg_write_m_byte(cinfo: *mut c_void, val: c_int) {
-    let c: &mut JpegCompressPublic = match unsafe { cinfo_compress_mut(cinfo) } {
-        Some(c) => c,
-        None => return,
-    };
-    let priv_ptr: *mut c_void = c.master;
-    let priv_state: &mut CompressPrivate = match unsafe { priv_compress_from_ptr(priv_ptr) } {
-        Some(p) => p,
-        None => return,
-    };
-    if let Some(last) = priv_state.pending_markers.last_mut() {
-        last.1.push((val & 0xFF) as u8);
-    }
+    crate::unwind_guard!((), {
+        let c: &mut JpegCompressPublic = match unsafe { cinfo_compress_mut(cinfo) } {
+            Some(c) => c,
+            None => return,
+        };
+        let priv_ptr: *mut c_void = c.master;
+        let priv_state: &mut CompressPrivate = match unsafe { priv_compress_from_ptr(priv_ptr) } {
+            Some(p) => p,
+            None => return,
+        };
+        if let Some(last) = priv_state.pending_markers.last_mut() {
+            last.1.push((val & 0xFF) as u8);
+        }
+    })
 }
 
 /// `jpeg_write_icc_profile(cinfo, icc_data, icc_data_len)` —
@@ -6379,23 +6515,25 @@ pub extern "C" fn jpeg_write_icc_profile(
     icc_data_ptr: *const u8,
     icc_data_len: std::os::raw::c_uint,
 ) {
-    let c: &mut JpegCompressPublic = match unsafe { cinfo_compress_mut(cinfo) } {
-        Some(c) => c,
-        None => return,
-    };
-    let priv_ptr: *mut c_void = c.master;
-    let priv_state: &mut CompressPrivate = match unsafe { priv_compress_from_ptr(priv_ptr) } {
-        Some(p) => p,
-        None => return,
-    };
-    if icc_data_ptr.is_null() || icc_data_len == 0 {
-        priv_state.icc_profile = None;
-        return;
-    }
-    let len: usize = icc_data_len as usize;
-    // SAFETY: caller-owned slice valid for `icc_data_len` bytes.
-    let data: Vec<u8> = unsafe { std::slice::from_raw_parts(icc_data_ptr, len).to_vec() };
-    priv_state.icc_profile = Some(data);
+    crate::unwind_guard!((), {
+        let c: &mut JpegCompressPublic = match unsafe { cinfo_compress_mut(cinfo) } {
+            Some(c) => c,
+            None => return,
+        };
+        let priv_ptr: *mut c_void = c.master;
+        let priv_state: &mut CompressPrivate = match unsafe { priv_compress_from_ptr(priv_ptr) } {
+            Some(p) => p,
+            None => return,
+        };
+        if icc_data_ptr.is_null() || icc_data_len == 0 {
+            priv_state.icc_profile = None;
+            return;
+        }
+        let len: usize = icc_data_len as usize;
+        // SAFETY: caller-owned slice valid for `icc_data_len` bytes.
+        let data: Vec<u8> = unsafe { std::slice::from_raw_parts(icc_data_ptr, len).to_vec() };
+        priv_state.icc_profile = Some(data);
+    })
 }
 
 /// `jpeg_write_tables(cinfo)` — write an abbreviated JPEG datastream
@@ -6406,42 +6544,44 @@ pub extern "C" fn jpeg_write_icc_profile(
 /// `jpeg_set_defaults(); jpeg_set_quality(75, TRUE); jpeg_write_tables()`.
 #[no_mangle]
 pub extern "C" fn jpeg_write_tables(cinfo: *mut c_void) {
-    let c: &mut JpegCompressPublic = match unsafe { cinfo_compress_mut(cinfo) } {
-        Some(c) => c,
-        None => return,
-    };
-    let priv_ptr: *mut c_void = c.master;
-    let priv_state: &mut CompressPrivate = match unsafe { priv_compress_from_ptr(priv_ptr) } {
-        Some(p) => p,
-        None => return,
-    };
-    priv_state.tables_only = true;
-    // Build a tables-only datastream that matches what upstream
-    // `jcmarker.c::write_tables_only` emits:
-    //   * Huffman (`arith_code == 0`): SOI + DQT(Tq=0/1) + DHT(DC/AC ×
-    //     luma/chroma) + EOI.
-    //   * Arithmetic (`arith_code != 0`): SOI + DQT(Tq=0/1) + EOI. No
-    //     DHT (upstream skips them for arithmetic) and no DAC (DAC is
-    //     emitted later with the scan header for the abbreviated body
-    //     stream, not here).
-    // Strategy: encode a tiny 16×16 RGB Huffman dummy at 4:2:0 — the
-    // resulting DQT segments are identical regardless of entropy mode
-    // (quant tables depend only on quality), so we just filter out DHT
-    // when arithmetic is requested.
-    let arith: bool = c.arith_code != 0;
-    let tables_bytes: Vec<u8> = build_tables_only_datastream(priv_state.quality, arith);
-    // Push through the destination manager exactly like a full encode.
-    if c.dest.is_null() {
-        return;
-    }
-    if let Some(init) = unsafe { (*c.dest).init_destination } {
-        unsafe { init(cinfo) };
-    }
-    let completed: bool = push_bytes_through_dest_mgr(c, priv_state, &tables_bytes);
-    drop(tables_bytes);
-    if !completed {
-        raise_cant_suspend(c, priv_state);
-    }
+    crate::unwind_guard!((), {
+        let c: &mut JpegCompressPublic = match unsafe { cinfo_compress_mut(cinfo) } {
+            Some(c) => c,
+            None => return,
+        };
+        let priv_ptr: *mut c_void = c.master;
+        let priv_state: &mut CompressPrivate = match unsafe { priv_compress_from_ptr(priv_ptr) } {
+            Some(p) => p,
+            None => return,
+        };
+        priv_state.tables_only = true;
+        // Build a tables-only datastream that matches what upstream
+        // `jcmarker.c::write_tables_only` emits:
+        //   * Huffman (`arith_code == 0`): SOI + DQT(Tq=0/1) + DHT(DC/AC ×
+        //     luma/chroma) + EOI.
+        //   * Arithmetic (`arith_code != 0`): SOI + DQT(Tq=0/1) + EOI. No
+        //     DHT (upstream skips them for arithmetic) and no DAC (DAC is
+        //     emitted later with the scan header for the abbreviated body
+        //     stream, not here).
+        // Strategy: encode a tiny 16×16 RGB Huffman dummy at 4:2:0 — the
+        // resulting DQT segments are identical regardless of entropy mode
+        // (quant tables depend only on quality), so we just filter out DHT
+        // when arithmetic is requested.
+        let arith: bool = c.arith_code != 0;
+        let tables_bytes: Vec<u8> = build_tables_only_datastream(priv_state.quality, arith);
+        // Push through the destination manager exactly like a full encode.
+        if c.dest.is_null() {
+            return;
+        }
+        if let Some(init) = unsafe { (*c.dest).init_destination } {
+            unsafe { init(cinfo) };
+        }
+        let completed: bool = push_bytes_through_dest_mgr(c, priv_state, &tables_bytes);
+        drop(tables_bytes);
+        if !completed {
+            raise_cant_suspend(c, priv_state);
+        }
+    })
 }
 
 /// Emit a tables-only JPEG datastream at the given quality, matching
@@ -6569,7 +6709,9 @@ pub extern "C" fn jpeg12_write_scanlines(
     scanlines: *mut *mut u16,
     num_lines: JDimension,
 ) -> JDimension {
-    write_scanlines_highprec(cinfo, scanlines, num_lines, /*precision=*/ 12)
+    crate::unwind_guard!(0, {
+        write_scanlines_highprec(cinfo, scanlines, num_lines, /*precision=*/ 12)
+    })
 }
 
 /// `jpeg16_write_scanlines(cinfo, scanlines, num_lines) -> JDIMENSION`.
@@ -6579,7 +6721,9 @@ pub extern "C" fn jpeg16_write_scanlines(
     scanlines: *mut *mut u16,
     num_lines: JDimension,
 ) -> JDimension {
-    write_scanlines_highprec(cinfo, scanlines, num_lines, /*precision=*/ 16)
+    crate::unwind_guard!(0, {
+        write_scanlines_highprec(cinfo, scanlines, num_lines, /*precision=*/ 16)
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -6618,151 +6762,153 @@ pub extern "C" fn jpeg_write_raw_data(
     data: *mut *mut *mut u8,
     num_lines: JDimension,
 ) -> JDimension {
-    let c: &mut JpegCompressPublic = match unsafe { cinfo_compress_mut(cinfo) } {
-        Some(c) => c,
-        None => return 0,
-    };
-    let priv_ptr: *mut c_void = c.master;
-    let priv_state: &mut CompressPrivate = match unsafe { priv_compress_from_ptr(priv_ptr) } {
-        Some(p) => p,
-        None => return 0,
-    };
+    crate::unwind_guard!(0, {
+        let c: &mut JpegCompressPublic = match unsafe { cinfo_compress_mut(cinfo) } {
+            Some(c) => c,
+            None => return 0,
+        };
+        let priv_ptr: *mut c_void = c.master;
+        let priv_state: &mut CompressPrivate = match unsafe { priv_compress_from_ptr(priv_ptr) } {
+            Some(p) => p,
+            None => return 0,
+        };
 
-    // Only 8-bit supported; 12/16-bit callers should use jpeg12_write_raw_data.
-    if c.data_precision != 8 {
-        priv_state.last_error = CString::new(
-            "jpeg_write_raw_data: JERR_BAD_PRECISION (only data_precision=8 supported)",
-        )
-        .unwrap_or_default();
-        return 0;
-    }
+        // Only 8-bit supported; 12/16-bit callers should use jpeg12_write_raw_data.
+        if c.data_precision != 8 {
+            priv_state.last_error = CString::new(
+                "jpeg_write_raw_data: JERR_BAD_PRECISION (only data_precision=8 supported)",
+            )
+            .unwrap_or_default();
+            return 0;
+        }
 
-    // Must be in RAW_OK state (set by jpeg_start_compress when raw_data_in=1).
-    if c.global_state != CSTATE_RAW_OK {
-        priv_state.last_error =
-            CString::new("jpeg_write_raw_data: JERR_BAD_STATE (call jpeg_start_compress first with raw_data_in=TRUE)")
-                .unwrap_or_default();
-        return 0;
-    }
+        // Must be in RAW_OK state (set by jpeg_start_compress when raw_data_in=1).
+        if c.global_state != CSTATE_RAW_OK {
+            priv_state.last_error =
+                CString::new("jpeg_write_raw_data: JERR_BAD_STATE (call jpeg_start_compress first with raw_data_in=TRUE)")
+                    .unwrap_or_default();
+            return 0;
+        }
 
-    let max_vsf: usize = c.max_v_samp_factor.max(1) as usize;
-    let dct_size: usize = c.min_DCT_v_scaled_size.max(8) as usize;
-    let lines_per_imcu: JDimension = (max_vsf * dct_size) as JDimension;
+        let max_vsf: usize = c.max_v_samp_factor.max(1) as usize;
+        let dct_size: usize = c.min_DCT_v_scaled_size.max(8) as usize;
+        let lines_per_imcu: JDimension = (max_vsf * dct_size) as JDimension;
 
-    // Validate caller supplied enough rows.
-    if num_lines < lines_per_imcu {
-        priv_state.last_error = CString::new(format!(
-            "jpeg_write_raw_data: JERR_BUFFER_SIZE (num_lines={num_lines} < lines_per_iMCU={lines_per_imcu})"
-        ))
-        .unwrap_or_default();
-        return 0;
-    }
+        // Validate caller supplied enough rows.
+        if num_lines < lines_per_imcu {
+            priv_state.last_error = CString::new(format!(
+                "jpeg_write_raw_data: JERR_BUFFER_SIZE (num_lines={num_lines} < lines_per_iMCU={lines_per_imcu})"
+            ))
+            .unwrap_or_default();
+            return 0;
+        }
 
-    let num_components: usize = c.num_components.max(0) as usize;
-    if num_components == 0 || data.is_null() {
-        return 0;
-    }
+        let num_components: usize = c.num_components.max(0) as usize;
+        if num_components == 0 || data.is_null() {
+            return 0;
+        }
 
-    // On first call, allocate the per-component plane buffers.
-    if priv_state.raw_plane_buffers.is_empty() {
-        let image_width: usize = c.image_width as usize;
-        let image_height: usize = c.image_height as usize;
-        let max_hsf: usize = c.max_h_samp_factor.max(1) as usize;
+        // On first call, allocate the per-component plane buffers.
+        if priv_state.raw_plane_buffers.is_empty() {
+            let image_width: usize = c.image_width as usize;
+            let image_height: usize = c.image_height as usize;
+            let max_hsf: usize = c.max_h_samp_factor.max(1) as usize;
 
-        priv_state.raw_plane_buffers = Vec::with_capacity(num_components);
-        priv_state.raw_rows_filled = Vec::with_capacity(num_components);
-        priv_state.raw_plane_widths = Vec::with_capacity(num_components);
-        priv_state.raw_plane_heights = Vec::with_capacity(num_components);
+            priv_state.raw_plane_buffers = Vec::with_capacity(num_components);
+            priv_state.raw_rows_filled = Vec::with_capacity(num_components);
+            priv_state.raw_plane_widths = Vec::with_capacity(num_components);
+            priv_state.raw_plane_heights = Vec::with_capacity(num_components);
 
+            for comp_idx in 0..num_components {
+                // Per-component sampling factors from comp_info.
+                let (h_samp, v_samp): (usize, usize) = if comp_idx < priv_state.comp_info.len() {
+                    let ci: &JpegComponentInfoCompress = &priv_state.comp_info[comp_idx];
+                    (
+                        ci.h_samp_factor.max(1) as usize,
+                        ci.v_samp_factor.max(1) as usize,
+                    )
+                } else {
+                    (1, 1)
+                };
+
+                // MCU-aligned plane width: ceil(image_width * h_samp / max_hsf),
+                // rounded up to the next multiple of dct_size.
+                let dct_h: usize = c.min_DCT_h_scaled_size.max(8) as usize;
+                let raw_w: usize = (image_width * h_samp).div_ceil(max_hsf).div_ceil(dct_h) * dct_h;
+                // MCU-aligned plane height: ceil(image_height * v_samp / max_vsf),
+                // rounded up to dct_size.
+                let raw_h: usize =
+                    (image_height * v_samp).div_ceil(max_vsf).div_ceil(dct_size) * dct_size;
+
+                priv_state.raw_plane_buffers.push(vec![0u8; raw_w * raw_h]);
+                priv_state.raw_rows_filled.push(0);
+                priv_state.raw_plane_widths.push(raw_w);
+                priv_state.raw_plane_heights.push(raw_h);
+            }
+        }
+
+        // For each component copy comp_v_samp_factor * dct_size rows from the
+        // caller's JSAMPIMAGE data[comp][row_idx] into the plane buffer.
         for comp_idx in 0..num_components {
-            // Per-component sampling factors from comp_info.
-            let (h_samp, v_samp): (usize, usize) = if comp_idx < priv_state.comp_info.len() {
+            let (v_samp, h_samp): (usize, usize) = if comp_idx < priv_state.comp_info.len() {
                 let ci: &JpegComponentInfoCompress = &priv_state.comp_info[comp_idx];
                 (
-                    ci.h_samp_factor.max(1) as usize,
                     ci.v_samp_factor.max(1) as usize,
+                    ci.h_samp_factor.max(1) as usize,
                 )
             } else {
                 (1, 1)
             };
+            let max_hsf: usize = c.max_h_samp_factor.max(1) as usize;
+            let rows_this_imcu: usize = v_samp * dct_size;
+            let plane_width: usize = priv_state.raw_plane_widths[comp_idx];
+            let plane_height: usize = priv_state.raw_plane_heights[comp_idx];
+            let already_filled: usize = priv_state.raw_rows_filled[comp_idx];
 
-            // MCU-aligned plane width: ceil(image_width * h_samp / max_hsf),
-            // rounded up to the next multiple of dct_size.
-            let dct_h: usize = c.min_DCT_h_scaled_size.max(8) as usize;
-            let raw_w: usize = (image_width * h_samp).div_ceil(max_hsf).div_ceil(dct_h) * dct_h;
-            // MCU-aligned plane height: ceil(image_height * v_samp / max_vsf),
-            // rounded up to dct_size.
-            let raw_h: usize =
-                (image_height * v_samp).div_ceil(max_vsf).div_ceil(dct_size) * dct_size;
+            // Derive the actual sample width for this component (caller's row
+            // stride may be wider but we only copy meaningful pixels).
+            let image_width: usize = c.image_width as usize;
+            let comp_width: usize = (image_width * h_samp).div_ceil(max_hsf);
 
-            priv_state.raw_plane_buffers.push(vec![0u8; raw_w * raw_h]);
-            priv_state.raw_rows_filled.push(0);
-            priv_state.raw_plane_widths.push(raw_w);
-            priv_state.raw_plane_heights.push(raw_h);
-        }
-    }
-
-    // For each component copy comp_v_samp_factor * dct_size rows from the
-    // caller's JSAMPIMAGE data[comp][row_idx] into the plane buffer.
-    for comp_idx in 0..num_components {
-        let (v_samp, h_samp): (usize, usize) = if comp_idx < priv_state.comp_info.len() {
-            let ci: &JpegComponentInfoCompress = &priv_state.comp_info[comp_idx];
-            (
-                ci.v_samp_factor.max(1) as usize,
-                ci.h_samp_factor.max(1) as usize,
-            )
-        } else {
-            (1, 1)
-        };
-        let max_hsf: usize = c.max_h_samp_factor.max(1) as usize;
-        let rows_this_imcu: usize = v_samp * dct_size;
-        let plane_width: usize = priv_state.raw_plane_widths[comp_idx];
-        let plane_height: usize = priv_state.raw_plane_heights[comp_idx];
-        let already_filled: usize = priv_state.raw_rows_filled[comp_idx];
-
-        // Derive the actual sample width for this component (caller's row
-        // stride may be wider but we only copy meaningful pixels).
-        let image_width: usize = c.image_width as usize;
-        let comp_width: usize = (image_width * h_samp).div_ceil(max_hsf);
-
-        // SAFETY: `data` is a JSAMPIMAGE — pointer to `num_components` entries,
-        // each entry is a `JSAMPARRAY` (array of row pointers for this component).
-        let comp_array: *mut *mut u8 = unsafe { *data.add(comp_idx) };
-        if comp_array.is_null() {
-            continue;
-        }
-
-        for row_in_imcu in 0..rows_this_imcu {
-            let dest_row: usize = already_filled + row_in_imcu;
-            if dest_row >= plane_height {
-                // Past the MCU-aligned height — discard padding rows.
-                break;
-            }
-            let src_row_ptr: *const u8 = unsafe { *comp_array.add(row_in_imcu) as *const u8 };
-            if src_row_ptr.is_null() {
+            // SAFETY: `data` is a JSAMPIMAGE — pointer to `num_components` entries,
+            // each entry is a `JSAMPARRAY` (array of row pointers for this component).
+            let comp_array: *mut *mut u8 = unsafe { *data.add(comp_idx) };
+            if comp_array.is_null() {
                 continue;
             }
-            let dst_offset: usize = dest_row * plane_width;
-            let copy_bytes: usize = comp_width.min(plane_width);
-            // SAFETY: src_row_ptr points to `comp_width` valid samples
-            // provided by the caller; dst slice is within our allocation.
-            unsafe {
-                std::ptr::copy_nonoverlapping(
-                    src_row_ptr,
-                    priv_state.raw_plane_buffers[comp_idx]
-                        .as_mut_ptr()
-                        .add(dst_offset),
-                    copy_bytes,
-                );
+
+            for row_in_imcu in 0..rows_this_imcu {
+                let dest_row: usize = already_filled + row_in_imcu;
+                if dest_row >= plane_height {
+                    // Past the MCU-aligned height — discard padding rows.
+                    break;
+                }
+                let src_row_ptr: *const u8 = unsafe { *comp_array.add(row_in_imcu) as *const u8 };
+                if src_row_ptr.is_null() {
+                    continue;
+                }
+                let dst_offset: usize = dest_row * plane_width;
+                let copy_bytes: usize = comp_width.min(plane_width);
+                // SAFETY: src_row_ptr points to `comp_width` valid samples
+                // provided by the caller; dst slice is within our allocation.
+                unsafe {
+                    std::ptr::copy_nonoverlapping(
+                        src_row_ptr,
+                        priv_state.raw_plane_buffers[comp_idx]
+                            .as_mut_ptr()
+                            .add(dst_offset),
+                        copy_bytes,
+                    );
+                }
             }
+
+            priv_state.raw_rows_filled[comp_idx] += rows_this_imcu;
         }
 
-        priv_state.raw_rows_filled[comp_idx] += rows_this_imcu;
-    }
-
-    // Advance output scanline by the luma rows consumed this iMCU row.
-    c.next_scanline = (c.next_scanline + lines_per_imcu).min(c.image_height);
-    lines_per_imcu
+        // Advance output scanline by the luma rows consumed this iMCU row.
+        c.next_scanline = (c.next_scanline + lines_per_imcu).min(c.image_height);
+        lines_per_imcu
+    })
 }
 
 /// Invoke `libjpeg_turbo_rs::compress_raw` over the raw planes accumulated by
@@ -7065,153 +7211,155 @@ pub extern "C" fn jpeg12_write_raw_data(
     data: *mut *mut *mut i16,
     num_lines: JDimension,
 ) -> JDimension {
-    let c: &mut JpegCompressPublic = match unsafe { cinfo_compress_mut(cinfo) } {
-        Some(c) => c,
-        None => return 0,
-    };
-    let priv_ptr: *mut c_void = c.master;
-    let priv_state: &mut CompressPrivate = match unsafe { priv_compress_from_ptr(priv_ptr) } {
-        Some(p) => p,
-        None => return 0,
-    };
+    crate::unwind_guard!(0, {
+        let c: &mut JpegCompressPublic = match unsafe { cinfo_compress_mut(cinfo) } {
+            Some(c) => c,
+            None => return 0,
+        };
+        let priv_ptr: *mut c_void = c.master;
+        let priv_state: &mut CompressPrivate = match unsafe { priv_compress_from_ptr(priv_ptr) } {
+            Some(p) => p,
+            None => return 0,
+        };
 
-    // 12-bit gate: only `data_precision == 12` reaches this entry point;
-    // 8/16-bit callers should use `jpeg_write_raw_data` /
-    // `jpeg16_write_raw_data` (the latter is not implemented here).
-    if c.data_precision != 12 {
-        priv_state.last_error = CString::new(format!(
-            "jpeg12_write_raw_data: JERR_BAD_PRECISION (data_precision={} not 12)",
-            c.data_precision
-        ))
-        .unwrap_or_default();
-        return 0;
-    }
+        // 12-bit gate: only `data_precision == 12` reaches this entry point;
+        // 8/16-bit callers should use `jpeg_write_raw_data` /
+        // `jpeg16_write_raw_data` (the latter is not implemented here).
+        if c.data_precision != 12 {
+            priv_state.last_error = CString::new(format!(
+                "jpeg12_write_raw_data: JERR_BAD_PRECISION (data_precision={} not 12)",
+                c.data_precision
+            ))
+            .unwrap_or_default();
+            return 0;
+        }
 
-    // Must be in RAW_OK state (set by jpeg_start_compress when raw_data_in=1).
-    if c.global_state != CSTATE_RAW_OK {
-        priv_state.last_error =
-            CString::new("jpeg12_write_raw_data: JERR_BAD_STATE (call jpeg_start_compress first with raw_data_in=TRUE)")
-                .unwrap_or_default();
-        return 0;
-    }
+        // Must be in RAW_OK state (set by jpeg_start_compress when raw_data_in=1).
+        if c.global_state != CSTATE_RAW_OK {
+            priv_state.last_error =
+                CString::new("jpeg12_write_raw_data: JERR_BAD_STATE (call jpeg_start_compress first with raw_data_in=TRUE)")
+                    .unwrap_or_default();
+            return 0;
+        }
 
-    let max_vsf: usize = c.max_v_samp_factor.max(1) as usize;
-    let dct_size: usize = c.min_DCT_v_scaled_size.max(8) as usize;
-    let lines_per_imcu: JDimension = (max_vsf * dct_size) as JDimension;
+        let max_vsf: usize = c.max_v_samp_factor.max(1) as usize;
+        let dct_size: usize = c.min_DCT_v_scaled_size.max(8) as usize;
+        let lines_per_imcu: JDimension = (max_vsf * dct_size) as JDimension;
 
-    if num_lines < lines_per_imcu {
-        priv_state.last_error = CString::new(format!(
-            "jpeg12_write_raw_data: JERR_BUFFER_SIZE (num_lines={num_lines} < lines_per_iMCU={lines_per_imcu})"
-        ))
-        .unwrap_or_default();
-        return 0;
-    }
+        if num_lines < lines_per_imcu {
+            priv_state.last_error = CString::new(format!(
+                "jpeg12_write_raw_data: JERR_BUFFER_SIZE (num_lines={num_lines} < lines_per_iMCU={lines_per_imcu})"
+            ))
+            .unwrap_or_default();
+            return 0;
+        }
 
-    let num_components: usize = c.num_components.max(0) as usize;
-    if num_components == 0 || data.is_null() {
-        return 0;
-    }
+        let num_components: usize = c.num_components.max(0) as usize;
+        if num_components == 0 || data.is_null() {
+            return 0;
+        }
 
-    // On first call, allocate the per-component plane buffers (i16
-    // storage). `raw_rows_filled` / `raw_plane_widths` /
-    // `raw_plane_heights` are shared with the 8-bit accumulator, so
-    // populate them on the same allocation step.
-    if priv_state.raw_plane_buffers_12.is_empty() {
-        let image_width: usize = c.image_width as usize;
-        let image_height: usize = c.image_height as usize;
-        let max_hsf: usize = c.max_h_samp_factor.max(1) as usize;
+        // On first call, allocate the per-component plane buffers (i16
+        // storage). `raw_rows_filled` / `raw_plane_widths` /
+        // `raw_plane_heights` are shared with the 8-bit accumulator, so
+        // populate them on the same allocation step.
+        if priv_state.raw_plane_buffers_12.is_empty() {
+            let image_width: usize = c.image_width as usize;
+            let image_height: usize = c.image_height as usize;
+            let max_hsf: usize = c.max_h_samp_factor.max(1) as usize;
 
-        priv_state.raw_plane_buffers_12 = Vec::with_capacity(num_components);
-        priv_state.raw_rows_filled = Vec::with_capacity(num_components);
-        priv_state.raw_plane_widths = Vec::with_capacity(num_components);
-        priv_state.raw_plane_heights = Vec::with_capacity(num_components);
+            priv_state.raw_plane_buffers_12 = Vec::with_capacity(num_components);
+            priv_state.raw_rows_filled = Vec::with_capacity(num_components);
+            priv_state.raw_plane_widths = Vec::with_capacity(num_components);
+            priv_state.raw_plane_heights = Vec::with_capacity(num_components);
 
+            for comp_idx in 0..num_components {
+                let (h_samp, v_samp): (usize, usize) = if comp_idx < priv_state.comp_info.len() {
+                    let ci: &JpegComponentInfoCompress = &priv_state.comp_info[comp_idx];
+                    (
+                        ci.h_samp_factor.max(1) as usize,
+                        ci.v_samp_factor.max(1) as usize,
+                    )
+                } else {
+                    (1, 1)
+                };
+
+                let dct_h: usize = c.min_DCT_h_scaled_size.max(8) as usize;
+                let raw_w: usize = (image_width * h_samp).div_ceil(max_hsf).div_ceil(dct_h) * dct_h;
+                let raw_h: usize =
+                    (image_height * v_samp).div_ceil(max_vsf).div_ceil(dct_size) * dct_size;
+
+                priv_state
+                    .raw_plane_buffers_12
+                    .push(vec![0i16; raw_w * raw_h]);
+                priv_state.raw_rows_filled.push(0);
+                priv_state.raw_plane_widths.push(raw_w);
+                priv_state.raw_plane_heights.push(raw_h);
+            }
+        }
+
+        // Copy `v_samp * dct_size` rows per component from caller's
+        // `*mut *mut *mut i16` into the i16 plane buffer.
         for comp_idx in 0..num_components {
-            let (h_samp, v_samp): (usize, usize) = if comp_idx < priv_state.comp_info.len() {
+            let (v_samp, h_samp): (usize, usize) = if comp_idx < priv_state.comp_info.len() {
                 let ci: &JpegComponentInfoCompress = &priv_state.comp_info[comp_idx];
                 (
-                    ci.h_samp_factor.max(1) as usize,
                     ci.v_samp_factor.max(1) as usize,
+                    ci.h_samp_factor.max(1) as usize,
                 )
             } else {
                 (1, 1)
             };
+            let max_hsf: usize = c.max_h_samp_factor.max(1) as usize;
+            let rows_this_imcu: usize = v_samp * dct_size;
+            let plane_width: usize = priv_state.raw_plane_widths[comp_idx];
+            let plane_height: usize = priv_state.raw_plane_heights[comp_idx];
+            let already_filled: usize = priv_state.raw_rows_filled[comp_idx];
 
-            let dct_h: usize = c.min_DCT_h_scaled_size.max(8) as usize;
-            let raw_w: usize = (image_width * h_samp).div_ceil(max_hsf).div_ceil(dct_h) * dct_h;
-            let raw_h: usize =
-                (image_height * v_samp).div_ceil(max_vsf).div_ceil(dct_size) * dct_size;
+            let image_width: usize = c.image_width as usize;
+            let comp_width: usize = (image_width * h_samp).div_ceil(max_hsf);
 
-            priv_state
-                .raw_plane_buffers_12
-                .push(vec![0i16; raw_w * raw_h]);
-            priv_state.raw_rows_filled.push(0);
-            priv_state.raw_plane_widths.push(raw_w);
-            priv_state.raw_plane_heights.push(raw_h);
-        }
-    }
-
-    // Copy `v_samp * dct_size` rows per component from caller's
-    // `*mut *mut *mut i16` into the i16 plane buffer.
-    for comp_idx in 0..num_components {
-        let (v_samp, h_samp): (usize, usize) = if comp_idx < priv_state.comp_info.len() {
-            let ci: &JpegComponentInfoCompress = &priv_state.comp_info[comp_idx];
-            (
-                ci.v_samp_factor.max(1) as usize,
-                ci.h_samp_factor.max(1) as usize,
-            )
-        } else {
-            (1, 1)
-        };
-        let max_hsf: usize = c.max_h_samp_factor.max(1) as usize;
-        let rows_this_imcu: usize = v_samp * dct_size;
-        let plane_width: usize = priv_state.raw_plane_widths[comp_idx];
-        let plane_height: usize = priv_state.raw_plane_heights[comp_idx];
-        let already_filled: usize = priv_state.raw_rows_filled[comp_idx];
-
-        let image_width: usize = c.image_width as usize;
-        let comp_width: usize = (image_width * h_samp).div_ceil(max_hsf);
-
-        // SAFETY: `data` is a JSAMPIMAGE16 — pointer to `num_components`
-        // entries, each entry is an array of row pointers for that
-        // component. Caller asserts the per-component array carries at
-        // least `rows_this_imcu` row pointers and each row carries at
-        // least `comp_width` valid i16 samples.
-        let comp_array: *mut *mut i16 = unsafe { *data.add(comp_idx) };
-        if comp_array.is_null() {
-            continue;
-        }
-
-        for row_in_imcu in 0..rows_this_imcu {
-            let dest_row: usize = already_filled + row_in_imcu;
-            if dest_row >= plane_height {
-                break;
-            }
-            let src_row_ptr: *const i16 = unsafe { *comp_array.add(row_in_imcu) as *const i16 };
-            if src_row_ptr.is_null() {
+            // SAFETY: `data` is a JSAMPIMAGE16 — pointer to `num_components`
+            // entries, each entry is an array of row pointers for that
+            // component. Caller asserts the per-component array carries at
+            // least `rows_this_imcu` row pointers and each row carries at
+            // least `comp_width` valid i16 samples.
+            let comp_array: *mut *mut i16 = unsafe { *data.add(comp_idx) };
+            if comp_array.is_null() {
                 continue;
             }
-            let dst_offset: usize = dest_row * plane_width;
-            let copy_samples: usize = comp_width.min(plane_width);
-            // SAFETY: src_row_ptr points to `comp_width` valid i16s;
-            // dst slice is within our allocation. `copy_nonoverlapping`
-            // takes a count in *items*, not bytes.
-            unsafe {
-                std::ptr::copy_nonoverlapping(
-                    src_row_ptr,
-                    priv_state.raw_plane_buffers_12[comp_idx]
-                        .as_mut_ptr()
-                        .add(dst_offset),
-                    copy_samples,
-                );
+
+            for row_in_imcu in 0..rows_this_imcu {
+                let dest_row: usize = already_filled + row_in_imcu;
+                if dest_row >= plane_height {
+                    break;
+                }
+                let src_row_ptr: *const i16 = unsafe { *comp_array.add(row_in_imcu) as *const i16 };
+                if src_row_ptr.is_null() {
+                    continue;
+                }
+                let dst_offset: usize = dest_row * plane_width;
+                let copy_samples: usize = comp_width.min(plane_width);
+                // SAFETY: src_row_ptr points to `comp_width` valid i16s;
+                // dst slice is within our allocation. `copy_nonoverlapping`
+                // takes a count in *items*, not bytes.
+                unsafe {
+                    std::ptr::copy_nonoverlapping(
+                        src_row_ptr,
+                        priv_state.raw_plane_buffers_12[comp_idx]
+                            .as_mut_ptr()
+                            .add(dst_offset),
+                        copy_samples,
+                    );
+                }
             }
+
+            priv_state.raw_rows_filled[comp_idx] += rows_this_imcu;
         }
 
-        priv_state.raw_rows_filled[comp_idx] += rows_this_imcu;
-    }
-
-    c.next_scanline = (c.next_scanline + lines_per_imcu).min(c.image_height);
-    lines_per_imcu
+        c.next_scanline = (c.next_scanline + lines_per_imcu).min(c.image_height);
+        lines_per_imcu
+    })
 }
 
 /// `jpeg_set_linear_quality(cinfo, scale_factor, force_baseline)`.
@@ -7239,26 +7387,29 @@ pub extern "C" fn jpeg_set_linear_quality(
     scale_factor: c_int,
     force_baseline: CBoolean,
 ) {
-    // Standard luminance and chrominance quant tables, in zig-zag order
-    // (matches `references/libjpeg-turbo/src/jcparam.c`'s
-    // `std_luminance_quant_tbl[]` and `std_chrominance_quant_tbl[]`,
-    // re-shuffled into zig-zag order via `jpeg_zigzag_order`).
-    const STD_LUM: [u32; 64] = [
-        16, 11, 12, 14, 12, 10, 16, 14, 13, 14, 18, 17, 16, 19, 24, 40, 26, 24, 22, 22, 24, 49, 35,
-        37, 29, 40, 58, 51, 61, 60, 57, 51, 56, 55, 64, 72, 92, 78, 64, 68, 87, 69, 55, 56, 80,
-        109, 81, 87, 95, 98, 103, 104, 103, 62, 77, 113, 121, 112, 100, 120, 92, 101, 103, 99,
-    ];
-    const STD_CHROM: [u32; 64] = [
-        17, 18, 18, 24, 21, 24, 47, 26, 26, 47, 99, 66, 56, 66, 99, 99, 99, 99, 99, 99, 99, 99, 99,
-        99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99,
-        99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99,
-    ];
+    crate::unwind_guard!((), {
+        // Standard luminance and chrominance quant tables, in zig-zag order
+        // (matches `references/libjpeg-turbo/src/jcparam.c`'s
+        // `std_luminance_quant_tbl[]` and `std_chrominance_quant_tbl[]`,
+        // re-shuffled into zig-zag order via `jpeg_zigzag_order`).
+        const STD_LUM: [u32; 64] = [
+            16, 11, 12, 14, 12, 10, 16, 14, 13, 14, 18, 17, 16, 19, 24, 40, 26, 24, 22, 22, 24, 49,
+            35, 37, 29, 40, 58, 51, 61, 60, 57, 51, 56, 55, 64, 72, 92, 78, 64, 68, 87, 69, 55, 56,
+            80, 109, 81, 87, 95, 98, 103, 104, 103, 62, 77, 113, 121, 112, 100, 120, 92, 101, 103,
+            99,
+        ];
+        const STD_CHROM: [u32; 64] = [
+            17, 18, 18, 24, 21, 24, 47, 26, 26, 47, 99, 66, 56, 66, 99, 99, 99, 99, 99, 99, 99, 99,
+            99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99,
+            99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99,
+        ];
 
-    let scale: c_int = scale_factor.max(1);
-    // Slot 0 = luminance, slot 1 = chrominance (matches upstream
-    // `jpeg_default_qtables`).
-    jpeg_add_quant_table(cinfo, 0, STD_LUM.as_ptr(), scale, force_baseline);
-    jpeg_add_quant_table(cinfo, 1, STD_CHROM.as_ptr(), scale, force_baseline);
+        let scale: c_int = scale_factor.max(1);
+        // Slot 0 = luminance, slot 1 = chrominance (matches upstream
+        // `jpeg_default_qtables`).
+        jpeg_add_quant_table(cinfo, 0, STD_LUM.as_ptr(), scale, force_baseline);
+        jpeg_add_quant_table(cinfo, 1, STD_CHROM.as_ptr(), scale, force_baseline);
+    })
 }
 
 fn write_scanlines_highprec(
@@ -7331,43 +7482,45 @@ fn write_scanlines_highprec(
 /// source alive across the matching `jpeg_finish_compress`.
 #[no_mangle]
 pub extern "C" fn jpeg_write_coefficients(cinfo: *mut c_void, coef_arrays: *mut c_void) {
-    let c: &mut JpegCompressPublic = match unsafe { cinfo_compress_mut(cinfo) } {
-        Some(c) => c,
-        None => return,
-    };
-    let priv_state: &mut CompressPrivate = match unsafe { priv_compress_from_ptr(c.master) } {
-        Some(p) => p,
-        None => return,
-    };
-    if coef_arrays.is_null() {
-        priv_state.last_error =
-            CString::new("jpeg_write_coefficients: coef_arrays is NULL").unwrap_or_default();
-        return;
-    }
-    priv_state.pending_coef_arrays = coef_arrays as *const c_void;
-    priv_state.have_started = true;
-    c.global_state = CSTATE_WRCOEFS;
-
-    // Mirror upstream `transencode_master_selection → jinit_c_master_control →
-    // initial_setup` for the subset of derived fields that transupp's
-    // `jtransform_execute_transformation` reads off the dst comp_info:
-    // `width_in_blocks` and `height_in_blocks`, plus the dst-side
-    // `max_h_samp_factor / max_v_samp_factor` and `total_iMCU_rows`.
-    // Without these, `do_rot_90 / do_transpose / …` see height_in_blocks=0
-    // and skip writing the dst arrays entirely.
-    populate_dst_block_dims_for_transform(c);
-
-    // Kick init_destination once so the staging buffer is live by the
-    // time finish_compress streams bytes through it. Matches the libjpeg
-    // pattern where `jpeg_write_coefficients` finishes the destination
-    // setup that `jpeg_start_compress` would otherwise do.
-    if !c.dest.is_null() {
-        let init_fn: Option<unsafe extern "C" fn(*mut c_void)> =
-            unsafe { (*c.dest).init_destination };
-        if let Some(f) = init_fn {
-            unsafe { f(cinfo) };
+    crate::unwind_guard!((), {
+        let c: &mut JpegCompressPublic = match unsafe { cinfo_compress_mut(cinfo) } {
+            Some(c) => c,
+            None => return,
+        };
+        let priv_state: &mut CompressPrivate = match unsafe { priv_compress_from_ptr(c.master) } {
+            Some(p) => p,
+            None => return,
+        };
+        if coef_arrays.is_null() {
+            priv_state.last_error =
+                CString::new("jpeg_write_coefficients: coef_arrays is NULL").unwrap_or_default();
+            return;
         }
-    }
+        priv_state.pending_coef_arrays = coef_arrays as *const c_void;
+        priv_state.have_started = true;
+        c.global_state = CSTATE_WRCOEFS;
+
+        // Mirror upstream `transencode_master_selection → jinit_c_master_control →
+        // initial_setup` for the subset of derived fields that transupp's
+        // `jtransform_execute_transformation` reads off the dst comp_info:
+        // `width_in_blocks` and `height_in_blocks`, plus the dst-side
+        // `max_h_samp_factor / max_v_samp_factor` and `total_iMCU_rows`.
+        // Without these, `do_rot_90 / do_transpose / …` see height_in_blocks=0
+        // and skip writing the dst arrays entirely.
+        populate_dst_block_dims_for_transform(c);
+
+        // Kick init_destination once so the staging buffer is live by the
+        // time finish_compress streams bytes through it. Matches the libjpeg
+        // pattern where `jpeg_write_coefficients` finishes the destination
+        // setup that `jpeg_start_compress` would otherwise do.
+        if !c.dest.is_null() {
+            let init_fn: Option<unsafe extern "C" fn(*mut c_void)> =
+                unsafe { (*c.dest).init_destination };
+            if let Some(f) = init_fn {
+                unsafe { f(cinfo) };
+            }
+        }
+    })
 }
 
 /// Populate the per-component `width_in_blocks / height_in_blocks` and
@@ -7910,7 +8063,7 @@ fn run_coefficient_writer_and_flush(
 /// libjpeg installs as the default `resync_to_restart` callback.
 #[no_mangle]
 pub extern "C" fn jpeg_resync_to_restart(_cinfo: *mut c_void, _desired: c_int) -> CBoolean {
-    1
+    crate::unwind_guard!(0, { 1 })
 }
 
 /// `jcopy_block_row(input_row, output_row, num_blocks)`.
@@ -7926,14 +8079,16 @@ pub extern "C" fn jcopy_block_row(
     output_row: *mut i16,
     num_blocks: JDimension,
 ) {
-    if input_row.is_null() || output_row.is_null() || num_blocks == 0 {
-        return;
-    }
-    let samples: usize = (num_blocks as usize).saturating_mul(64);
-    // SAFETY: caller-supplied buffers of exactly `samples` i16 entries.
-    unsafe {
-        std::ptr::copy_nonoverlapping(input_row, output_row, samples);
-    }
+    crate::unwind_guard!((), {
+        if input_row.is_null() || output_row.is_null() || num_blocks == 0 {
+            return;
+        }
+        let samples: usize = (num_blocks as usize).saturating_mul(64);
+        // SAFETY: caller-supplied buffers of exactly `samples` i16 entries.
+        unsafe {
+            std::ptr::copy_nonoverlapping(input_row, output_row, samples);
+        }
+    })
 }
 
 /// `jdiv_round_up(a, b) -> long`.
@@ -7942,10 +8097,12 @@ pub extern "C" fn jcopy_block_row(
 /// Matches `jutils.c::jdiv_round_up`.
 #[no_mangle]
 pub extern "C" fn jdiv_round_up(a: c_long, b: c_long) -> c_long {
-    if b == 0 {
-        return 0;
-    }
-    (a + b - 1) / b
+    crate::unwind_guard!(0, {
+        if b == 0 {
+            return 0;
+        }
+        (a + b - 1) / b
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -7961,12 +8118,14 @@ pub extern "C" fn jpeg_capi_test_set_compress_dims(
     input_components: c_int,
     in_color_space: c_int,
 ) {
-    if let Some(c) = unsafe { cinfo_compress_mut(cinfo) } {
-        c.image_width = width;
-        c.image_height = height;
-        c.input_components = input_components;
-        c.in_color_space = in_color_space;
-    }
+    crate::unwind_guard!((), {
+        if let Some(c) = unsafe { cinfo_compress_mut(cinfo) } {
+            c.image_width = width;
+            c.image_height = height;
+            c.input_components = input_components;
+            c.in_color_space = in_color_space;
+        }
+    })
 }
 
 /// Test helper: flip the `progressive_mode` field of a compress cinfo
@@ -7975,9 +8134,11 @@ pub extern "C" fn jpeg_capi_test_set_compress_dims(
 /// honors progressive output between the two calls.
 #[no_mangle]
 pub extern "C" fn jpeg_capi_test_set_progressive(cinfo: *mut c_void, progressive: c_int) {
-    if let Some(c) = unsafe { cinfo_compress_mut(cinfo) } {
-        c.progressive_mode = progressive;
-    }
+    crate::unwind_guard!((), {
+        if let Some(c) = unsafe { cinfo_compress_mut(cinfo) } {
+            c.progressive_mode = progressive;
+        }
+    })
 }
 
 /// Test helper: set `restart_in_rows` directly. Mirrors `jpegtran
@@ -7985,9 +8146,11 @@ pub extern "C" fn jpeg_capi_test_set_progressive(cinfo: *mut c_void, progressive
 /// conversion can be exercised without a full simple_progression call.
 #[no_mangle]
 pub extern "C" fn jpeg_capi_test_set_restart_in_rows(cinfo: *mut c_void, rows: c_int) {
-    if let Some(c) = unsafe { cinfo_compress_mut(cinfo) } {
-        c.restart_in_rows = rows;
-    }
+    crate::unwind_guard!((), {
+        if let Some(c) = unsafe { cinfo_compress_mut(cinfo) } {
+            c.restart_in_rows = rows;
+        }
+    })
 }
 
 /// Test helper: toggle `arith_code` directly. Mirrors `jpegtran
@@ -7995,9 +8158,11 @@ pub extern "C" fn jpeg_capi_test_set_restart_in_rows(cinfo: *mut c_void, rows: c
 /// can be exercised in tests.
 #[no_mangle]
 pub extern "C" fn jpeg_capi_test_set_arith_code(cinfo: *mut c_void, arith: c_int) {
-    if let Some(c) = unsafe { cinfo_compress_mut(cinfo) } {
-        c.arith_code = arith as CBoolean;
-    }
+    crate::unwind_guard!((), {
+        if let Some(c) = unsafe { cinfo_compress_mut(cinfo) } {
+            c.arith_code = arith as CBoolean;
+        }
+    })
 }
 
 #[no_mangle]
@@ -8007,19 +8172,21 @@ pub extern "C" fn jpeg_capi_test_get_compress_state(
     out_jpeg_color_space: *mut c_int,
     out_in_color_space: *mut c_int,
 ) {
-    if let Some(c) = unsafe { cinfo_compress_mut(cinfo) } {
-        unsafe {
-            if !out_num_components.is_null() {
-                *out_num_components = c.num_components;
-            }
-            if !out_jpeg_color_space.is_null() {
-                *out_jpeg_color_space = c.jpeg_color_space;
-            }
-            if !out_in_color_space.is_null() {
-                *out_in_color_space = c.in_color_space;
+    crate::unwind_guard!((), {
+        if let Some(c) = unsafe { cinfo_compress_mut(cinfo) } {
+            unsafe {
+                if !out_num_components.is_null() {
+                    *out_num_components = c.num_components;
+                }
+                if !out_jpeg_color_space.is_null() {
+                    *out_jpeg_color_space = c.jpeg_color_space;
+                }
+                if !out_in_color_space.is_null() {
+                    *out_in_color_space = c.in_color_space;
+                }
             }
         }
-    }
+    })
 }
 
 // Compile-time layout assertions (encode).

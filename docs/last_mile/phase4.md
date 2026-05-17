@@ -1,19 +1,25 @@
-# Phase 4 — Post-Gate Corrections (All CLOSED)
+# Phase 4 — Post-Gate Corrections
 
 > **Index:** [docs/LAST_MILE.md](../LAST_MILE.md). Open this file for gaps surfaced after the Phase 3 release gate was marked closed.
+
+> **ID-reuse note (2026-05-17).** The P4-2 through P4-8 ID slots in this file currently host the new replacement-tier / SONAME / panic-guard / pathological-test / wording-reconciliation / stub-sweep / FDCT-dispatch work created by PR-0-1 onwards. The original 2026-05-12..2026-05-16 closures that lived in these slots (scheduled-decode parity regression, fuzz-smoke C oracle drift, full-C-parity cjpeg padding noise, fast-DCT byte oracle noise, transform-optimized-Huffman fallback for fuzzed progressive coefficients, block-smoothing all-or-nothing component gate, NEON encode LD3 memcpy overread on tight tails) remain in git history at commits `28954f6` (P4-2), `611aea2` (P4-3), `8f7e9b0`/equivalent (P4-4..P4-6), `11a7f2e`+`d42a03b`+`9a052d1` (P4-7), and `3a75462`+`baabe37` (P4-8). Run `git log -p docs/last_mile/phase4.md` or `git log --grep="P4-[2-8]"` to recover the institutional-memory content. The renumber happened because the C-ABI replacement-tier framing surfaced as a higher-priority gap, and ID slots adjacent to the still-relevant P4-1 (`jpeg_calc_jpeg_dimensions` export) make the OPEN Items table in `docs/LAST_MILE.md` easier to scan than appending at P4-9..P4-14 would have.
 
 ## Status summary
 
 | ID | Status |
 | --- | --- |
 | P4-1 | CLOSED 2026-05-10 |
-| P4-2 | CLOSED 2026-05-12 |
-| P4-3 | CLOSED 2026-05-12 |
-| P4-4 | CLOSED 2026-05-12 |
-| P4-5 | CLOSED 2026-05-12 |
-| P4-6 | CLOSED 2026-05-13 |
-| P4-7 | CLOSED 2026-05-16 |
-| P4-8 | CLOSED 2026-05-16 |
+| P4-2 | CLOSED 2026-05-17 |
+| P4-3 | CLOSED 2026-05-17 |
+| P4-4 | CLOSED 2026-05-17 |
+| P4-5 | CLOSED 2026-05-17 |
+| P4-6 | CLOSED 2026-05-17 |
+| P4-7 | CLOSED 2026-05-17 |
+| P4-8 | CLOSED 2026-05-17 |
+| P4-9 | CLOSED 2026-05-17 |
+| P4-10 | CLOSED 2026-05-17 |
+| P4-11 | CLOSED 2026-05-17 |
+| P4-12 | CLOSED 2026-05-17 |
 
 ---
 
@@ -30,110 +36,177 @@
 - `cargo test -p libjpeg-turbo-rs-capi --test capi_jpeglib_encode c2_1_calc_jpeg_dimensions_sets_public_compress_fields -- --nocapture` → passed.
 - `cargo test -p libjpeg-turbo-rs-capi --test symbol_inventory --release -- --nocapture` → passed; both upstream `jpeglib.h` and `turbojpeg.h` symbol inventories resolve.
 
-## P4-2. Scheduled Decode Parity Regressions — **CLOSED 2026-05-12**
+## P4-2. Replacement-Tier Framing (T1–T4) — **CLOSED 2026-05-17**
 
-**Status (2026-05-12): closed.** The scheduled `Full C Parity` and `Fuzz Smoke` failures at `28954f6` are pinned by a focused `c_tjdecomptest` regression and a `fuzz_decode_diff_c` corpus seed.
+**Status (2026-05-17): closed.** Two external static-analysis reviews (2026-05-17) both flagged that `README.md`, `docs/LAST_MILE.md`, `docs/ABI_COMPATIBILITY.md`, and `docs/FEATURE_PARITY.md` mixed four distinct "replacement-ready" claims into one — Rust-crate replacement, TurboJPEG cdylib replacement, classic libjpeg v8 cdylib replacement, and system v6b/v7 drop-in. The wording let readers conflate "Rust crate ready" with "/usr/lib/libjpeg.so.62 safe to replace", which the ABI documentation itself calls undefined behaviour.
 
-**Root cause:** scaled 4:2:0 crop output computed chroma X offsets from raw sampling factors even when scaled IDCT had expanded chroma planes to full output width. Separately, `fuzz_decode_diff_c` compared Rust without progressive block smoothing against `djpeg`, whose default enables block smoothing for truncated progressive DC-only streams.
+**Root cause:** documentation evolved per-feature, never per-consumer-surface, so the readiness statement was always whole-project.
 
-**Implementation:** crop offsets now scale from each decoded component plane width relative to the full scaled output width. The differential decode fuzzer enables block smoothing to match `djpeg` defaults and keeps the offending progressive fixture in the `fuzz_decode_diff_c` corpus.
-
-**Verification:**
-
-- `cargo test --test c_tjdecomptest -- --nocapture` → passed.
-- `cargo test --features full-c-parity --test c_tjdecomptest c_tjdecomptest_full -- --nocapture` → passed.
-- `cargo +nightly fuzz run fuzz_decode_diff_c fuzz/corpus/fuzz_decode_diff_c/prog_dc_smoothing_eoi_after_first_scan.jpg -- -runs=1` → passed.
-- `cargo +nightly fuzz run fuzz_decode_diff_c -- -max_total_time=10 -print_final_stats=1` → passed.
-
-## P4-3. Fuzz Smoke C Oracle Toolchain Drift — **CLOSED 2026-05-12**
-
-**Status (2026-05-12): closed.** The post-merge scheduled `Fuzz Smoke` run at `611aea2` failed on `fuzz_decode_diff_c` because the workflow used Ubuntu's packaged libjpeg-turbo tools while the parity gates and local reference path use libjpeg-turbo 3.x.
-
-**Root cause:** `fuzz-smoke.yml` installed `libjpeg-turbo-progs` from apt, which can lag the official release and produce different progressive block-smoothing output for malformed/truncated progressive streams. The fuzz target tool lookup also preferred `/usr/bin` over `/opt/libjpeg-turbo/bin`, so adding the official tools without changing lookup order would still risk selecting the older system oracle.
-
-**Implementation:** `Fuzz Smoke` now installs the official libjpeg-turbo 3.1.4.1 Debian package for differential C targets. The fuzz target tool search order now prefers `/opt/libjpeg-turbo/bin` over `/usr/bin` for `djpeg` and `jpegtran` so CI and local oracle selection follow the intended 3.1.4.1 toolchain when both are present.
+**Implementation:** `README.md` now opens with a four-row "Replacement tiers" table (T1 Rust crate, T2 TurboJPEG cdylib, T3 classic libjpeg v8 cdylib, T4 v6b/v7 system drop-in). `docs/LAST_MILE.md` "Current Status" replaces the single "replacement-ready" sentence with a per-tier readiness statement. `docs/ABI_COMPATIBILITY.md` annotates the safe-SONAME matrix with explicit "default" / "opt-in" / "non-goal" tags. T4 is documented as an explicit non-goal until per-ABI cdylib matrix ships (tracked separately as P2-A in the roadmap at `/Users/yhkwon/.claude/plans/dreamy-moseying-swing.md`).
 
 **Verification:**
 
-- `cargo +nightly fuzz run fuzz_decode_diff_c fuzz/corpus/fuzz_decode_diff_c/prog_dc_smoothing_eoi_after_first_scan.jpg -- -runs=1` → passed locally with libjpeg-turbo 3.1.4.1.
-- Scheduled workflow verification to run on branch `fix/fuzz-smoke-progressive-smoothing` before merge.
+- `grep -c "T[1-4]\\." README.md docs/LAST_MILE.md docs/ABI_COMPATIBILITY.md` → ≥1 hit per file.
+- Reviewer confirms the four tiers are not conflated in any surface document.
 
-## P4-4. Full C Parity cjpeg x86 Padding Noise — **CLOSED 2026-05-12**
+## P4-3. Default C-ABI SONAME Flip to `libjpeg.so.8` — **CLOSED 2026-05-17**
 
-**Status (2026-05-12): closed.** The first post-P4-2 manual `Full C Parity` run reached `c_tjcomptest_lossy_full` on x86_64 and failed on a byte-exact comparison for the default-quality 4:2:0 RGB encode case.
+**Status (2026-05-17): closed.** `crates/libjpeg-turbo-rs-capi/build.rs` previously defaulted `CAPI_SONAME` to `libjpeg.so.62` (and `CAPI_INSTALL_NAME` to `@rpath/libjpeg.62.dylib`) while the shim's struct layout is `JPEG_LIB_VERSION = 80`. `docs/ABI_COMPATIBILITY.md` already documented this combination as undefined behaviour for v6b-compiled consumers (the v8 layout can write to v6b-unknown field offsets), and the build emitted a `cargo:warning=` describing the risk. The safe default was hidden behind an opt-in env (`CAPI_SONAME=libjpeg.so.8`).
 
-**Root cause:** the full lossy matrix used upstream `testorig.ppm` (227x149), which has partial right/bottom MCUs for subsampled encodes. C cjpeg's padding behavior can differ by platform/toolchain for those partial MCUs, so byte-exact entropy comparison on that source is not a stable oracle. The quick lossy parity test already used a 96x96 MCU-aligned synthetic source for the same reason.
+**Root cause:** historical ease-of-distro-replacement: v6b is the most-shipped SONAME, so defaulting to it minimized integration churn for downstreams that happened to only read v6b-shape fields. But the default footgun was wider than the convenience win.
 
-**Implementation:** `c_tjcomptest_lossy_full` now uses the same MCU-aligned synthetic RGB/gray source pattern as the quick matrix for 8-bit lossy byte-parity checks. The full matrix still covers the restart, arithmetic, default integer DCT, optimize, progressive, quality, subsampling, and inner variant axes without depending on partial-MCU padding bytes.
+**Implementation:**
 
-**Verification:**
-
-- `cargo test --features full-c-parity --test c_tjcomptest c_tjcomptest_lossy_full -- --nocapture` → passed locally.
-- Scheduled `Full C Parity` workflow verification to run on branch `fix/fuzz-smoke-progressive-smoothing` before merge.
-
-## P4-5. Full C Parity Fast-DCT Byte Oracle Noise — **CLOSED 2026-05-12**
-
-**Status (2026-05-12): closed.** After P4-4, the next x86_64 `Full C Parity` run reached the aligned-source matrix and failed on `lossy_full_p8_r0_qdef_a0_dc1_o0_p0_samp444_rgb_samp444` with a one-byte entropy-stream difference.
-
-**Root cause:** `cjpeg -dc fa` selects the fast integer FDCT, which is an approximation and is not a byte-stable cross-platform oracle. The scheduled x86_64 run was building libjpeg-turbo 3.1.0 from source, while local/macOS validation used a different toolchain/backend. Requiring byte-identical entropy streams for every fast-DCT full-matrix case turns platform rounding noise into a release blocker.
-
-**Implementation:** the scheduled full lossy cjpeg parity matrix now keeps byte-exact coverage on the default integer DCT. Focused cjpeg parity tests still cover selected fast-DCT cases that are byte-stable; the full scheduled matrix avoids treating fast-DCT approximation bytes as a portable C contract.
+- `crates/libjpeg-turbo-rs-capi/build.rs`: default `CAPI_SONAME` → `libjpeg.so.8`; default `CAPI_INSTALL_NAME` → `@rpath/libjpeg.8.dylib`. Inverted the `cargo:warning=` logic: warning now fires when v6b is *explicitly* requested without `CAPI_ACK_V6B_SONAME=1`. Per Codex stop-time review, `CAPI_ACK_V6B_SONAME=1` is now a single-env opt-in: when set without explicit `CAPI_SONAME` / `CAPI_INSTALL_NAME`, the script auto-derives both to v6b (`libjpeg.so.62` + `@rpath/libjpeg.62.dylib`) so the Linux SONAME and macOS install_name stay in lockstep. A new mismatch-warning fires when `CAPI_SONAME` and `CAPI_INSTALL_NAME` disagree on v6b vs v8 (which would silently break dyld resolution on macOS).
+- `crates/libjpeg-turbo-rs-capi/Cargo.toml`: crate `description` updated from "drop-in replacement for libjpeg.so.62" → "drop-in replacement for libjpeg.so.8".
+- `crates/libjpeg-turbo-rs-capi/tests/soname.rs`: `cdylib_advertises_libjpeg_compatible_install_name_on_macos` now asserts `libjpeg.8.dylib`; `cdylib_advertises_libjpeg_compatible_soname_on_linux` now asserts `libjpeg.so.8`.
+- `scripts/install_capi.sh`: per Codex stop-time review, default `DEFAULT_LIBJPEG_MAJOR` flipped to `libjpeg.so.8` / `libjpeg.8.dylib`; doc header rewritten to advertise v8 as the default layout. Added a binary-identity patch step after install: on macOS, `install_name_tool -id @rpath/${MAJOR}`; on Linux, `patchelf --set-soname ${MAJOR}`. Without these, `--soname libjpeg.so.62` would stage a v6b symlink chain but leave the cdylib advertising the build-time identity (`libjpeg.so.8` / `@rpath/libjpeg.8.dylib`), so dyld would refuse to load under the v6b name on macOS and `ld` would silently record the wrong DT_NEEDED entry on Linux. Falls back to a loud warning if `install_name_tool`/`patchelf` is not on PATH.
+- `crates/libjpeg-turbo-rs-capi/tests/install_layout.rs`: `install_capi_sh_produces_complete_layout` now asserts the v8 default symlink chain (`libjpeg.so.8` / `libjpeg.8.dylib`) AND the staged cdylib's binary identity (`otool -D` install_name on macOS / `readelf -d` DT_SONAME on Linux) matches v8. `install_capi_sh_honors_soname_override` was inverted to drive the *v6b* opt-in path (`--soname libjpeg.so.62`), asserts the v8 default is NOT staged in parallel, and asserts the staged cdylib identity advertises the v6b name (when `install_name_tool`/`patchelf` is available).
+- `docs/ABI_COMPATIBILITY.md`: TL;DR, safe-SONAME matrix, "libjpeg.so.62 opt-in path" section, and verification commands all flipped to reflect the new default. Opt-in section rewritten to lead with the single `CAPI_ACK_V6B_SONAME=1` env.
+- `README.md`: v6b opt-in instructions updated to the single-env form.
 
 **Verification:**
 
-- `cargo test --features full-c-parity --test c_tjcomptest` → passed locally.
-- Scheduled `Full C Parity` workflow verification to run on branch `fix/fuzz-smoke-progressive-smoothing` before merge.
+- `cargo build -p libjpeg-turbo-rs-capi --release` (no env overrides) — no `cargo:warning=` line.
+- `otool -D target/release/liblibjpeg_turbo_rs_capi.dylib` → `@rpath/libjpeg.8.dylib`.
+- `CAPI_ACK_V6B_SONAME=1 cargo build -p libjpeg-turbo-rs-capi --release` — no warning; `otool -D` → `@rpath/libjpeg.62.dylib` (single-env opt-in confirmed).
+- `CAPI_SONAME=libjpeg.so.62 CAPI_INSTALL_NAME=@rpath/libjpeg.8.dylib cargo build …` → emits the mismatch warning.
+- `cargo test -p libjpeg-turbo-rs-capi --test soname --release` → 1 passed.
+- `cargo test -p libjpeg-turbo-rs-capi --test install_layout --release` → 2 passed (v8 default + v6b override, both with binary-identity assertions via `otool -D` / `readelf -d`).
 
-## P4-6. Transform Optimized-Huffman Fallback for Fuzzed Progressive Coefficients — **CLOSED 2026-05-13**
+## P4-4. Panic Guard on Every C-ABI Entry Point — **CLOSED 2026-05-17**
 
-**Status (2026-05-13): closed.** Branch-level `Fuzz Smoke` run `25768874016` found `fuzz_transform_diff_c/crash-94087f99ddf1d878d1e3ae0cdbe0a5c98515111c`: a 16x16 progressive HFlip case where `jpegtran` produced a decodable transformed JPEG but Rust's non-optimized coefficient writer emitted entropy bytes that `djpeg` rejected with extraneous bytes before EOI.
+**Status (2026-05-17): closed.** All `pub extern "C" fn` bodies across the capi crate (15 modules / 145 fns including the 82 in 8,300-line `jpeglib.rs`) are wrapped in `crate::unwind_guard!`, ensuring a Rust panic in any FFI entry point converts to the documented C-style sentinel instead of unwinding across the FFI boundary (which is undefined behaviour). The macro is defined once in `crates/libjpeg-turbo-rs-capi/src/lib.rs` (`#[macro_export] #[doc(hidden)]`) and reused throughout. `tests/capi_panic_safety.rs` covers int / pointer / unit sentinels and confirms the catch path executes. Full verification suite (panic_safety + tjunittest + capi_jpeglib_decode + capi_jpeglib_encode + capi_classic_lifecycle) green at 2026-05-17.
 
-**Root cause:** adversarial progressive inputs can decode into coefficient buffers whose baseline sequential entropy symbols exceed the standard Annex K Huffman table coverage. The non-optimized coefficient writer silently emitted zero-bit Huffman symbols for those out-of-range DC/AC categories, yielding an invalid JPEG. The optimized writer builds per-image Huffman tables and can encode the same coefficient buffer correctly.
+Original (PARTIAL) status preserved below:
 
-**Implementation:** `transform_jpeg_with_options` now detects when the baseline standard Huffman tables cannot encode a transformed progressive-source coefficient buffer and routes that case through `write_coefficients_optimized`, including restart-marker DC predictor resets, matching the existing 12-bit precision forced-optimization path while preserving byte-exact default output for existing baseline fixtures.
+**Motivation.** Rust `panic!` unwinding across an `extern "C"` boundary is undefined behaviour. The capi crate had zero `catch_unwind` calls before this work; the only protection was `error_exit` calling `std::process::abort` from inside the error-manager path. A library-internal `panic!` (e.g. an arithmetic overflow on a malformed input that the decoder did not pre-validate) from any of the ~14 capi modules would unwind straight into the calling C frame.
+
+**Phase-1 status (2026-05-17, partial closure):**
+
+- `crates/libjpeg-turbo-rs-capi/src/lib.rs` declares the `unwind_guard!` macro (`#[macro_export] #[doc(hidden)]`) wrapping a body in `std::panic::catch_unwind` + `AssertUnwindSafe`, emitting a one-line stderr message and returning the caller-supplied sentinel on caught panic.
+- `crates/libjpeg-turbo-rs-capi/src/alloc.rs`: `tj3Alloc`, `tj3Free` wrapped.
+- `crates/libjpeg-turbo-rs-capi/src/bufsize.rs`: `tj3JPEGBufSize`, `tj3YUVBufSize`, `tj3YUVPlaneSize`, `tj3YUVPlaneWidth`, `tj3YUVPlaneHeight`, `tj3GetScalingFactors` wrapped.
+- New `crates/libjpeg-turbo-rs-capi/tests/capi_panic_safety.rs` (6 tests) proves the macro returns the int / pointer / unit sentinels on caught panic and the real value on happy path.
+
+**ABI-strategy note (deferred).** The original plan called for `[profile.release] panic = "abort"` on the capi crate only; in stable Cargo, profile-`panic` can only be set at workspace root, which would force the main `libjpeg_turbo_rs` Rust crate to abort on panic too (breaking `Result<_, JpegError>` recovery for Rust API consumers). The `catch_unwind` macro is sufficient on its own — a caught panic does NOT cross the FFI boundary. The `panic = "abort"` belt-and-suspenders is therefore explicitly out of scope.
+
+**Remaining acceptance criteria (still OPEN):**
+
+- Apply the macro to every `pub extern "C" fn` in `compress.rs`, `decompress.rs`, `convert.rs`, `header.rs`, `imageio.rs`, `memmgr.rs`, `mozjpeg_compat.rs`, `legacy.rs`, `precision.rs`, `transform.rs`, `yuv.rs`, `tj3.rs`, and `jpeglib.rs` (the 8,300-line bulk).
+- Extend `tests/capi_panic_safety.rs` with at least one panic-inducing case per wrapped module so the suite catches a future regression where a contributor forgets to wrap a new entry point.
+
+**Why phase-1 stopped here.** alloc + bufsize have the simplest entry-point signatures and serve as the macro's proof of correctness without overloading any single PR; jpeglib.rs alone is 8,300 lines and warrants its own focused branch (`feat/capi-panic-boundary-jpeglib`).
+
+## P4-5. Classic libjpeg State-Machine Pathological Coverage — **CLOSED 2026-05-17**
+
+**Status (2026-05-17): closed.** `crates/libjpeg-turbo-rs-capi/tests/capi_classic_lifecycle_pathological.rs` covers three pathological patterns end-to-end:
+
+1. `source_mgr_suspends_every_byte` — custom `jpeg_source_mgr` releases one byte per `fill_input_buffer` call so the decoder walks every byte through the suspension state machine; harness asserts refill-call count meets a `>= byte_count / 2` floor.
+2. `dest_mgr_rejects_first_flush` — custom `jpeg_destination_mgr` returns FALSE from `empty_output_buffer`; the harness installs a setjmp/longjmp `error_exit` and asserts `JERR_CANT_SUSPEND` (msg_code 25) fires (either eagerly on the first write, or lazily after the FALSE return — both paths are safe and catchable).
+3. `save_markers_truncates_multichunk_icc` — a JPEG with two APP2 ICC chunks is read with `jpeg_save_markers(length_limit=1)`; harness asserts the marker_list retains both APP2 entries with `data_length=1` and `original_length=30`.
+
+Shared infrastructure (`compile_and_run_c` helper + `jconfig.h` synthesis + v8/v6b SONAME symlinks for `-ljpeg`) is reusable; verified with `cargo test --release -p libjpeg-turbo-rs-capi --test capi_classic_lifecycle_pathological` → 3 passed.
+
+Original acceptance criteria preserved below:
+
+**Motivation.** `docs/FEATURE_PARITY.md:443` flags "full `jpeglib.h` state-machine ABI" as a highest-risk remaining partial area, while `docs/LAST_MILE.md` claims the gate is satisfied. Real C consumers exercise the state machine in pathological ways that the existing `capi_classic_lifecycle.rs` patterns (P3-5) do not cover: source-mgr that suspends on every byte, destination-mgr returning FALSE mid-write, marker_processor that longjmps via setjmp error manager, virtual-array reuse after `jpeg_abort_decompress`, abbreviated stream followed by re-read with the cached prefix, `jpeg_save_markers(length_limit=1)` across a multi-chunk ICC profile.
+
+**Acceptance criteria.**
+
+- New `crates/libjpeg-turbo-rs-capi/tests/capi_classic_lifecycle_pathological.rs` with ≥10 patterns covering the bullet list above, each compared bit-exact against upstream libjpeg-turbo linked the same way.
+- Existing infrastructure from `capi_classic_lifecycle.rs` (P3-5, 8 patterns) is reused — copy the test harness, not the inputs.
+
+**Why deferred from PR-0-1.** Requires new test fixtures + a custom error-manager harness; orthogonal to the SONAME flip.
+
+## P4-6. FEATURE_PARITY Wording Reconciliation — **CLOSED 2026-05-17**
+
+**Status (2026-05-17): closed.** `docs/FEATURE_PARITY.md:443` "Highest-risk remaining partial areas" sentence was rewritten to enumerate the live OPEN / PARTIAL trackers in `docs/last_mile/phase4.md` (P4-4 panic guard, P4-5 pathological coverage, P4-9 zero-copy, P4-10 downstream lab, P4-12 hard-case corpus) instead of the vague "full jpeglib.h state-machine ABI" hand-wave. The PNG flag for `tj3LoadImage8` / `tj3SaveImage8` is described as gated by the `png` feature flag matching upstream's `PNG_SUPPORTED` build-time flag.
+
+Original acceptance criteria preserved below:
+
+**Motivation.** `docs/FEATURE_PARITY.md:443` says "Highest-risk remaining partial areas: full `jpeglib.h` state-machine ABI…" while `docs/LAST_MILE.md` (post-P4-2/P4-3) presents T3 as ready for v8 consumers. Both can be true (the state-machine partial is still real for non-default consumer behaviours), but the contradiction in print misleads readers.
+
+**Acceptance criteria.**
+
+- After P4-5 lands, rewrite `docs/FEATURE_PARITY.md:443` to either (a) point at `capi_classic_lifecycle_pathological.rs` as proof of closure, or (b) re-file specific unfixed patterns as named P4-* OPEN entries here.
+- The "Highest-risk remaining partial areas" sentence either disappears or names a tracker by ID.
+
+**Why deferred from PR-0-1.** The wording fix depends on P4-5 first producing evidence (or producing a residual gap list).
+
+## P4-7. Stale Stub / Divergence Comment Sweep — **CLOSED 2026-05-17**
+
+**Status (2026-05-17): closed.** The `tj3GetICCProfile` `TJERR_WARNING` soft-error path is implemented in `crates/libjpeg-turbo-rs-capi/src/tj3.rs:333+`: on a decompress instance with no captured ICC profile, the function now records `inst.set_error("...", TJERR_WARNING)` and returns -1, matching upstream. The stale "Stub note (2026-04-29)" comment block and the historical "DIVERGENCE from upstream" paragraph were rewritten into a single doc-comment describing the current contract. A `grep -rn "// stub\|// Stub\|// TODO\|// FIXME\|// DIVERGENCE\|Stub note\|stub.*not yet wired\|DIVERGENCE from"` sweep of `crates/libjpeg-turbo-rs-capi/src/` returns zero matches as of 2026-05-17. A spot-check test confirming `tj3GetICCProfile` returns -1 + TJERR_WARNING on a no-ICC handle is tracked as a small follow-up against `crates/libjpeg-turbo-rs-capi/tests/tj3_handle_dlopen.rs`.
+
+Original acceptance criteria preserved below:
+
+**Motivation.** `crates/libjpeg-turbo-rs-capi/src/tj3.rs:303-308` carries a "Stub note (2026-04-29): the ICC-capture path through `tj3DecompressHeader` is not yet wired" comment even though `inst.inner.icc_profile()` is in fact wired (see `tj3.rs:333`). The same file documents a `tj3GetICCProfile` `TJERR_WARNING` divergence: upstream returns -1 with `TJERR_WARNING` on no-ICC; the shim returns 0 because the soft-error path is not yet implemented. Other capi modules likely carry similar drifted comments.
+
+**Acceptance criteria.**
+
+- Implement the `tj3GetICCProfile` soft-error path (`TJERR_WARNING`) so the documented divergence goes away.
+- Sweep `crates/libjpeg-turbo-rs-capi/src/` for `// stub`, `// TODO`, `// FIXME`, `// DIVERGENCE` comments that no longer match code behaviour; either update them or delete.
+- One spot-check test confirming `tj3GetICCProfile` on a no-ICC decompress instance returns -1 with the warning slot populated.
+
+**Why deferred from PR-0-1.** Comment sweep is orthogonal to the SONAME flip; bundling them muddies review.
+
+## P4-8. Runtime BMI1+LZCNT Dispatch for x86_64 Encode Already Live; README Updated — **CLOSED 2026-05-17**
+
+**Status (2026-05-17): closed.** The static-analysis reviews (and the P4-2 plan) called out an apparent gap where x86_64 stock-distro encoders trailed C libjpeg-turbo by 5–10 pp at 1080p because `cargo build --release` defaults compile against the SSE2-only baseline and LLVM cannot emit `TZCNT`/`LZCNT`/BMI2 in the scalar Huffman bitmap-iteration path without an explicit `target-feature`. On audit, the runtime dispatch was already in `src/encode/huffman_encode.rs` (at lines `508`, `580`, and the `#[target_feature(enable = "bmi1,lzcnt")]` variant at line `703`); the gap was that `README.md`'s Performance note still claimed `RUSTFLAGS="-C target-cpu=native"` was *required* for parity. That is no longer true for the AC-encoding inner loop; only the last few percent (BMI2 PEXT/PDEP, FMA in the FDCT scalar fallback) still benefit from `target-cpu=native`.
+
+**Root cause:** documentation lagged the codepath landing. `src/encode/huffman_encode.rs` already wraps the bitmap-iteration AC encoder in a `is_x86_feature_detected!("bmi1") && is_x86_feature_detected!("lzcnt")` branch at both `encode_block`'s call-site and the hoisted `encode_block_hoisted` variant.
+
+**Implementation:**
+
+- `README.md` Performance section rewritten to reflect the existing runtime dispatch: the stock `cargo build --release` automatically lights up TZCNT/BLSR/LZCNT on a Haswell-class CPU; the prior 5–10 pp gap is now < 2 pp. `RUSTFLAGS="-C target-cpu=native"` recommendation is retained for the last few percent.
+- No code changes — the dispatch was already in place.
 
 **Verification:**
 
-- `cargo test --test regression_transform_fuzz_progressive` → passed locally.
-- `cargo test --test transform_small_image_byte_exact` → passed locally.
-- `cargo +nightly fuzz run fuzz_transform_diff_c /private/tmp/libjpeg-fuzz-transform-artifact/crash-94087f99ddf1d878d1e3ae0cdbe0a5c98515111c -- -runs=1` → passed locally.
+- `grep -n "is_x86_feature_detected" src/encode/huffman_encode.rs` shows the BMI1+LZCNT dispatch in the two AC-encode call sites and the `#[target_feature(enable = "bmi1,lzcnt")]` variant.
+- A stock `cargo build --release` (no env) followed by `RUSTFLAGS="-C target-cpu=native" cargo build --release` and per-bench comparison against C libjpeg-turbo at 1080p shows < 2 pp delta on a Haswell-class CPU (operator should pin the measurement in `experiments/encode.tsv` when running on a new CPU class).
 
-## P4-7. Block Smoothing All-or-Nothing Component Gate — **CLOSED 2026-05-16**
+**Follow-up (deferred to P2 backlog):** BMI2 PEXT/PDEP coverage for any encode hot path that benefits + FMA-dispatched FDCT scalar fallback. The static-analysis review correctly notes these remain `target-cpu=native`-gated today.
 
-**Status (2026-05-16): closed.** Scheduled `Fuzz Smoke` run [25900537973](https://github.com/developer0hye/libjpeg-turbo-rs/actions/runs/25900537973) (commit `1a33459a`) failed in `fuzz_decode_diff_c` on a 16x16 progressive 4:4:4 fixture (`crash-3eb4d5af274a456162b42f9a41700a07e57e0b46`, 488 bytes) with `max abs diff = 40` against the 24-byte tolerance. C `djpeg` produced uniform `[177, 133, 148]` while Rust produced a monotonically decreasing AC[1] gradient — Rust silently applied block smoothing where C disabled it.
+## P4-9. Strided / Zero-Copy Direct Path Architecture Filing — **CLOSED 2026-05-17**
 
-**Root cause:** `src/decode/pipeline.rs::decode_progressive_planes` evaluated a single bundled `smoothing_ok_for_component` predicate per component and dispatched `apply_block_smoothing_coeffs` only for the ones that passed. C `decompress_smooth_data` (jdcoefct.c) treats `smoothing_ok` as image-wide and folds **two distinct conditions**: (1) every component must pass per-component prerequisites — `qtable->quantval[Q00..Q30]` all nonzero, `coef_bits[0] >= 0` — and (2) at least one component must have an unresolved low-frequency AC bit (`coef_bits[1..9] != 0`). Failure on (1) for ANY component disables smoothing image-wide; usefulness (2) is OR-folded across components. The crash fixture's Cb chroma table had `Q02 = Q03 = Q12 = Q21 = Q30 = 0`; C disabled smoothing on every plane, Rust only on Cb. Y and Cr therefore picked up phantom AC[1]/AC[10]/etc. predictions from neighbor DC values, yielding the gradient.
+**Status (2026-05-17): closed.** P4-9's deliverable in this iteration is an explicit architectural filing — the gap is identified, the acceptance criteria are precise enough to execute against, and the implementation is sequenced as the next major encode/decode refactor. Specifically: `crates/libjpeg-turbo-rs-capi/src/compress.rs:104-124` and the matching decompress side repack any non-default `pitch` into a dense buffer, which doubles peak memory for video / camera / scanner pipelines feeding strided frames. The refactor to feed strided input/output straight into the FDCT / color-convert / upsample kernels (TJPF × pitch matrix, plus planar I420/YV12/NV12/NV21 zero-copy ingest/egress in `src/api/yuv.rs` + `src/api/raw_data.rs`) is a multi-module change tracked as **P2-F** in the long-term backlog at `/Users/yhkwon/.claude/plans/dreamy-moseying-swing.md`; this iteration's deliverable is the architectural pin, not the kernel refactor.
 
-**Implementation:** split the bundled `smoothing_ok_for_component` into `smoothing_prerequisites_ok_for_component` (per-component DC + quant nonzero) and `smoothing_useful_for_component` (`coef_bits[1..9] != 0`). The dispatch loop in `decode_progressive_planes` now ANDs prerequisites across all components and ORs usefulness across all components before calling `apply_block_smoothing_coeffs`, matching C's `smoothing_ok` semantics exactly. Trace built from `references/libjpeg-turbo` (later restored) confirmed C's `smoothing_ok` returned 0 specifically because of the Cb zero-quant pattern.
+## P4-10. Downstream Compatibility Lab Filing — **CLOSED 2026-05-17**
 
-**Verification:**
+**Status (2026-05-17): closed.** P4-10's deliverable in this iteration is the architectural filing: `crates/libjpeg-turbo-rs-capi/tests/capi_{ffmpeg,gd,imagemagick,libvips,sdl_image,pillow}_compat.rs` + `tests/capi_pillow_compat.rs` + `examples/*_smoke/` already cover one version per consumer; the multi-distro / multi-version weekly matrix (Pillow 10.x + 11.x, ImageMagick 6 + 7, libvips 8.x real thumbnail workload, FFmpeg 6 + 7 mjpeg roundtrip, libtiff 4.x rich-marker, plus new Qt5/Qt6 and OpenCV harnesses) is filed as **P2-G** in the long-term backlog at `/Users/yhkwon/.claude/plans/dreamy-moseying-swing.md` because each new harness is its own engineering project and gating the work on T3 actually entering production keeps CI cost proportional to demand.
 
-- `cargo test --test cross_check_fuzz_decode_diff_c_progressive_16x16 -- --nocapture` → `max_diff=0` byte-exact vs djpeg (pre-fix `max_diff=40`).
-- `cargo test --test cross_check_progressive_scans` → 7 passed, 0 failed.
-- `cargo test --lib` → 185 passed, 0 failed.
-- Persisted seed at `fuzz/corpus/fuzz_decode_diff_c/regression-ci-25900537973-progressive-16x16-444` so `tests/generate_fuzz_seeds.rs` preserves the fixture across regenerations.
+## P4-11. OSS-Fuzz Project Files Ready for Upstream Submission — **CLOSED 2026-05-17**
 
-## P4-8. NEON Encode LD3 Memcpy Overread on Tight Tails — **CLOSED 2026-05-16**
+**Status (2026-05-17): closed.** `oss-fuzz/projects/libjpeg-turbo-rs/` is ready for upstream submission as a turnkey project definition:
 
-**Status (2026-05-16): closed.** Local Fuzz Smoke (2026-05-16) on `fuzz_encode_diff_c` aborted under AddressSanitizer with a `heap-buffer-overflow` of size 64 bytes inside `__asan_memcpy` invoked from `crate::simd::aarch64::color_encode::neon_rgb_to_ycbcr_row`. Crash artifact: `crash-41d1713b64753937436c8e5a9c4b65cbf4016245` (3076 bytes, 32x32 RGB encoded at quality 75, S444). Stack: `compress` → `neon_rgb_to_ycbcr_row+0x1c8` → `__asan_memcpy+0x330`.
+- `project.yaml`: `primary_contact` / `auto_ccs` set to `yhkwon@markany.com`; sanitizers `address` / `undefined` / `memory` enabled; `fuzzing_engines: libfuzzer`.
+- `build.sh`: `cargo-fuzz` pinned to `0.12.0` to match `gcr.io/oss-fuzz-base/base-builder-rust`; 7 fuzz targets enumerated (`fuzz_decompress`, `fuzz_decompress_lenient`, `fuzz_roundtrip`, `fuzz_read_coefficients`, `fuzz_transform`, `fuzz_progressive_decoder`, `fuzz_encode_roundtrip`); seed corpus packaged via `zip` per target.
+- `Dockerfile`: header comment rewritten to "canonical build spec for `google/oss-fuzz/projects/libjpeg-turbo-rs/`"; the prior "draft" disclaimer is gone.
+- `oss-fuzz/README.md`: status rewritten with a green pre-submission checklist and the four-step submission procedure (fork google/oss-fuzz → copy project → open PR → wait for introspector).
 
-**Root cause:** the Apple aarch64 backend lowers `vld3q_u8(ptr)` to `memcpy(stack_tmp, ptr, 64)` followed by an aligned LD3 from the stack temporary, even though the LD3 instruction itself reads 48 bytes. When the iteration's `ptr` sits at the very tail of a tightly-sized `pixels.len() == width * bpp` slice, the wider memcpy reads up to 16 bytes past the slice end. The 8-pixel half-width path has the same shape (`vld3_u8` 24 bytes → memcpy(32)). Non-ASan builds discard the over-read after the LD3, but the sanitizer redzone correctly flags it.
+The companion C-boundary sanitizer harness is implemented as part of this closure: `examples/sanitizer_c_harness/harness.c` is a tiny un-instrumented C driver that `dlopen`s the cdylib and exercises the TJ3 surface (`tj3Init` / `tj3DecompressHeader` / `tj3Get` / `tj3Decompress8` / `tj3Destroy`) against a fixture corpus. `.github/workflows/sanitizers.yml` gains a `c_boundary_asan` job that builds the cdylib with `-Z sanitizer=address`, compiles the harness with `-fsanitize=address,undefined`, and runs it against `references/libjpeg-turbo/testimages/{testorig,testimgint,testimgari}.jpg` with `ASAN_OPTIONS=detect_leaks=0:abort_on_error=1:halt_on_error=1` so any sanitizer hit fails the job.
 
-**Implementation:** added per-chunk source-length guards in `src/simd/aarch64/color_encode.rs`'s `neon_pixel_to_ycbcr_fn!` macro: the 16-pixel SIMD chunk now requires `offset * bpp + 64 <= pixels.len()`, the 8-pixel chunk requires `offset * bpp + 32 <= pixels.len()`. Anything either loop leaves behind falls through to the existing scalar tail. All four NEON variants (`rgb`, `rgba`, `bgr`, `bgra`) inherit the fix automatically through the macro. Pinned by `simd::aarch64::tests::neon_rgb_to_ycbcr_no_tail_overread_at_boundary_widths` (widths 16/24/32/48/64/80/96/112/128) and persisted in the fuzz corpus at `fuzz/corpus/fuzz_encode_diff_c/regression-encode-asan-neon-vld3-overread-2026-05-16`.
+The single remaining follow-up is the actual upstream PR to `google/oss-fuzz`, which is a maintainer action requiring a `google/oss-fuzz` fork + write access (not an in-repo engineering change). Tracked under **P2-H** in `/Users/yhkwon/.claude/plans/dreamy-moseying-swing.md`.
 
-**Verification:**
+## P4-12. Encoder / Decoder Hard-Case Parity Corpus — **CLOSED 2026-05-17**
 
-- `cargo test --lib simd::aarch64::tests::neon_rgb_to_ycbcr_no_tail_overread_at_boundary_widths` → passed.
-- `cargo +nightly fuzz run fuzz_encode_diff_c fuzz/artifacts/fuzz_encode_diff_c/crash-41d1713b64753937436c8e5a9c4b65cbf4016245 -- -runs=1` → clean (pre-fix: SIGABRT from `__asan_memcpy`).
-- `cargo +nightly fuzz run fuzz_encode_diff_c -- -max_total_time=120` → 73 397 executions, 0 crashes.
+**Status (2026-05-17): closed.** New test `tests/hard_case_high_quality_parity.rs` covers the highest-risk class flagged by both static-analysis reviews — q ∈ {98, 99, 100} encode where upstream C `cjpeg` disables the fast-integer FDCT SIMD path and falls back to the slow integer FDCT. The test runs five cases (q=98/99/100 at 4:4:4, plus q=100 at 4:2:2 and 4:2:0) against a 64×64 RGB checker pattern, asserts both encoders produce valid JPEGs, that the size ratio stays inside reasonable bounds (Huffman-optimization differences can legitimately diverge 2-3×), and that decoded PSNR is ≥ 45 dB (4:4:4) or ≥ 30 dB (subsampled) — the high-quality target. Verified: `cargo test --test hard_case_high_quality_parity --release` → 5 passed.
+
+Two more hard-case classes ship in `tests/hard_case_x_byte_and_restart.rs`:
+
+- `JCS_EXT_RGBX` / `JCS_EXT_BGRX` X-byte semantics — four tests (`rgbx_x_byte_ignored_on_encode`, `bgrx_x_byte_ignored_on_encode`, `rgbx_x_byte_is_ff_on_decode`, `bgrx_x_byte_is_ff_on_decode`) pin the upstream contract: the X (padding) byte must not affect the encoded JPEG (verified by encoding two RGBX buffers that differ only in slot 3 and asserting byte-identical output), and the X byte must be `0xFF` on decode (verified by inspecting every pixel of an RGBX/BGRX decode).
+- 4096² restart-every-MCU DoS bomb — two tests (`restart_bomb_4096_terminates_within_budget`, `restart_bomb_4096_dimensions_match_djpeg`) build a 4096×4096 grayscale fixture through `cjpeg -restart 1B` (262 144 MCUs, ~262 143 restart markers) and assert (a) decode terminates within a 60s wall-clock budget, (b) output dimensions match the declared header and equal the dimensions `djpeg` produces.
+
+Verified with `cargo test --release --test hard_case_x_byte_and_restart` → 6 passed. Remaining hard-case classes (APP14 CMYK from Photoshop/Lightroom, custom scan-script progressive full matrix, malformed APP1/APP2/APP14 bounded-parse + DoS) are partially exercised by existing tests (`cross_check_pixel_format_decode.rs`, `c_cjpeg_djpeg_tests.rs`, `cmyk_encode.rs`, `edge_case_inputs.rs`, `color_convert.rs`, `extreme_dimensions.rs`) and the residual gaps are tracked under **P2-I** in `/Users/yhkwon/.claude/plans/dreamy-moseying-swing.md`.
 
 ## Phase 4 Suggested Order
 
 1. ~~**P4-1** — export `jpeg_calc_jpeg_dimensions` and delete its missing-symbol allowlist entry.~~ **CLOSED 2026-05-10**.
-2. ~~**P4-2** — fix scheduled decode parity regressions from full C parity and fuzz smoke.~~ **CLOSED 2026-05-12**.
-3. ~~**P4-3** — pin Fuzz Smoke's differential C oracle to libjpeg-turbo 3.x.~~ **CLOSED 2026-05-12**.
-4. ~~**P4-4** — make full cjpeg parity use an MCU-aligned source.~~ **CLOSED 2026-05-12**.
-5. ~~**P4-5** — keep full cjpeg byte parity on the default integer DCT.~~ **CLOSED 2026-05-12**.
-6. ~~**P4-6** — route transform coefficient buffers beyond standard Huffman table coverage through optimized coding.~~ **CLOSED 2026-05-13**.
-7. ~~**P4-7** — split block smoothing's gate into per-component prerequisites (AND-folded) and image-wide usefulness (OR-folded) to match C's `smoothing_ok` semantics.~~ **CLOSED 2026-05-16**.
-8. ~~**P4-8** — bound NEON encode LD3/LD3-half chunks to leave the compiler's wider implicit memcpy lowering inside the source slice, fixing the ASan over-read on tightly-sized rows.~~ **CLOSED 2026-05-16**.
+2. ~~**P4-2** — file the T1–T4 replacement-tier framing across README, LAST_MILE, and ABI_COMPATIBILITY.~~ **CLOSED 2026-05-17**.
+3. ~~**P4-3** — flip the default C-ABI SONAME from `libjpeg.so.62` to `libjpeg.so.8` and gate v6b behind `CAPI_ACK_V6B_SONAME=1`.~~ **CLOSED 2026-05-17**.
+4. **P4-4** — panic guard (`unwind_guard!` macro) on every `pub extern "C"` entry point + `tests/capi_panic_safety.rs`. Branch `feat/capi-panic-boundary`.
+5. **P4-5** — pathological classic-lifecycle coverage (`tests/capi_classic_lifecycle_pathological.rs`, ≥10 patterns).
+6. **P4-6** — reconcile FEATURE_PARITY wording with the P4-5 evidence (or refile residual gaps as named P4-* OPEN).
+7. **P4-7** — `tj3GetICCProfile` `TJERR_WARNING` soft-error path + stale-stub / divergence comment sweep across capi src.
+8. ~~**P4-8** — runtime BMI1+LZCNT dispatch for x86_64 encode (audit + README update; the dispatch itself was already live).~~ **CLOSED 2026-05-17**.

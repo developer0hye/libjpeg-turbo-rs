@@ -32,6 +32,11 @@
 //!
 //! Reference: <https://github.com/mozilla/mozjpeg/blob/master/jpeglib.h>
 //! (search for `jpeg_c_bool_param_supported`).
+//!
+//! P4-4: every `pub extern "C" fn` body is wrapped in `crate::unwind_guard!`
+//! for FFI safety even though the stub bodies are constant returns that
+//! cannot panic in practice. The wrap is belt-and-suspenders against a
+//! future change that adds non-trivial logic to one of these stubs.
 
 use std::ffi::{c_float, c_int, c_void};
 
@@ -46,7 +51,7 @@ const JPEG_FALSE: Boolean = 0;
 /// not implement them; consumers must fall back to the standard path).
 #[no_mangle]
 pub extern "C" fn jpeg_c_bool_param_supported(_cinfo: *mut c_void, _param: c_int) -> Boolean {
-    JPEG_FALSE
+    crate::unwind_guard!(JPEG_FALSE, { JPEG_FALSE })
 }
 
 /// `void jpeg_c_set_bool_param(j_compress_ptr cinfo, J_BOOLEAN_PARAM param, boolean value)`
@@ -55,42 +60,48 @@ pub extern "C" fn jpeg_c_bool_param_supported(_cinfo: *mut c_void, _param: c_int
 /// is only here so a consumer that ignores the probe (or a debugging
 /// path that always sets) does not crash.
 #[no_mangle]
-pub extern "C" fn jpeg_c_set_bool_param(_cinfo: *mut c_void, _param: c_int, _value: Boolean) {}
+pub extern "C" fn jpeg_c_set_bool_param(_cinfo: *mut c_void, _param: c_int, _value: Boolean) {
+    crate::unwind_guard!((), {})
+}
 
 /// `boolean jpeg_c_get_bool_param(j_compress_ptr cinfo, J_BOOLEAN_PARAM param)`
 #[no_mangle]
 pub extern "C" fn jpeg_c_get_bool_param(_cinfo: *mut c_void, _param: c_int) -> Boolean {
-    JPEG_FALSE
+    crate::unwind_guard!(JPEG_FALSE, { JPEG_FALSE })
 }
 
 /// `boolean jpeg_c_int_param_supported(j_compress_ptr cinfo, J_INT_PARAM param)`
 #[no_mangle]
 pub extern "C" fn jpeg_c_int_param_supported(_cinfo: *mut c_void, _param: c_int) -> Boolean {
-    JPEG_FALSE
+    crate::unwind_guard!(JPEG_FALSE, { JPEG_FALSE })
 }
 
 /// `void jpeg_c_set_int_param(j_compress_ptr cinfo, J_INT_PARAM param, int value)`
 #[no_mangle]
-pub extern "C" fn jpeg_c_set_int_param(_cinfo: *mut c_void, _param: c_int, _value: c_int) {}
+pub extern "C" fn jpeg_c_set_int_param(_cinfo: *mut c_void, _param: c_int, _value: c_int) {
+    crate::unwind_guard!((), {})
+}
 
 /// `int jpeg_c_get_int_param(j_compress_ptr cinfo, J_INT_PARAM param)`
 #[no_mangle]
 pub extern "C" fn jpeg_c_get_int_param(_cinfo: *mut c_void, _param: c_int) -> c_int {
-    0
+    crate::unwind_guard!(0, { 0 })
 }
 
 /// `boolean jpeg_c_float_param_supported(j_compress_ptr cinfo, J_FLOAT_PARAM param)`
 #[no_mangle]
 pub extern "C" fn jpeg_c_float_param_supported(_cinfo: *mut c_void, _param: c_int) -> Boolean {
-    JPEG_FALSE
+    crate::unwind_guard!(JPEG_FALSE, { JPEG_FALSE })
 }
 
 /// `void jpeg_c_set_float_param(j_compress_ptr cinfo, J_FLOAT_PARAM param, float value)`
 #[no_mangle]
-pub extern "C" fn jpeg_c_set_float_param(_cinfo: *mut c_void, _param: c_int, _value: c_float) {}
+pub extern "C" fn jpeg_c_set_float_param(_cinfo: *mut c_void, _param: c_int, _value: c_float) {
+    crate::unwind_guard!((), {})
+}
 
 /// `float jpeg_c_get_float_param(j_compress_ptr cinfo, J_FLOAT_PARAM param)`
 #[no_mangle]
 pub extern "C" fn jpeg_c_get_float_param(_cinfo: *mut c_void, _param: c_int) -> c_float {
-    0.0
+    crate::unwind_guard!(0.0, { 0.0 })
 }
