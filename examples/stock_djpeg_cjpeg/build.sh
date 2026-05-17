@@ -240,8 +240,12 @@ fi
 
 # macOS: fix the install_name so the tool finds our .dylib at runtime.
 # rdjpgcom/wrjpgcom are standalone and do not need this fix-up.
+# We patch both `@rpath/libjpeg.8.dylib` (post-P4-3 default install_name)
+# and `@rpath/libjpeg.62.dylib` (legacy v6b opt-in) so the harness works
+# regardless of which SONAME the cdylib was built with.
 if [[ "$LIB_EXT" == "dylib" ]]; then
     for t in djpeg cjpeg jpegtran tjbench; do
+        install_name_tool -change "@rpath/libjpeg.8.dylib" "$SHIM_LIB" "$OUT_DIR/$t" 2>/dev/null || true
         install_name_tool -change "@rpath/libjpeg.62.dylib" "$SHIM_LIB" "$OUT_DIR/$t" 2>/dev/null || true
         install_name_tool -change "@rpath/libturbojpeg.0.dylib" "$SHIM_LIB" "$OUT_DIR/$t" 2>/dev/null || true
     done
