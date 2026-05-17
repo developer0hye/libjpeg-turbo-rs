@@ -686,6 +686,7 @@ dependencies = [
  "criterion",
  "loom",
  "png 0.17.16",
+ "tempfile",
  "thiserror",
  "zune-jpeg",
 ]

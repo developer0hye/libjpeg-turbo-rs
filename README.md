@@ -2,6 +2,26 @@
 
 Pure Rust reimplementation of [libjpeg-turbo](https://github.com/libjpeg-turbo/libjpeg-turbo) with NEON/AVX2 SIMD acceleration. No C dependencies, no unsafe FFI — just `cargo add`.
 
+## Replacement tiers
+
+`libjpeg-turbo-rs` is designed to replace C `libjpeg-turbo` at four distinct
+surfaces. Each tier has its own contract and readiness status — don't mix them.
+
+| Tier | Surface | Status |
+| --- | --- | --- |
+| **T1** | Rust crate (`use libjpeg_turbo_rs::*;`) | **ready** today |
+| **T2** | TurboJPEG cdylib (`libturbojpeg.so.0`) | **ready** today — opaque-handle API, no struct ABI |
+| **T3** | Classic libjpeg v8 cdylib (`libjpeg.so.8`) | **ready** for v8 consumers; default since P4-3 (2026-05-17) |
+| **T4** | System v6b/v7 drop-in (`libjpeg.so.62` / `.7`) | **explicit non-goal** — see `docs/ABI_COMPATIBILITY.md` |
+
+The C ABI shim (`libjpeg-turbo-rs-capi`) defaults to **T3** (`libjpeg.so.8` /
+`@rpath/libjpeg.8.dylib`). To opt into the v6b SONAME for distro experiments,
+set the single env `CAPI_ACK_V6B_SONAME=1` at build time — the build script
+auto-derives `CAPI_SONAME=libjpeg.so.62` and
+`CAPI_INSTALL_NAME=@rpath/libjpeg.62.dylib` so the SONAME and macOS
+install_name stay in lockstep. v6b consumers may silently read garbage
+from v8-only fields — see `docs/ABI_COMPATIBILITY.md` for the field matrix.
+
 ## Performance
 
 ### x86_64 (AVX2)
@@ -59,7 +79,7 @@ Apple M1 Pro, C libjpeg-turbo 3.1.0, quality 75:
 
 **aarch64**: Decoding matches or beats C for 4:2:2 and 4:4:4; 4:2:0 has a 7% gap. Encoding matches or beats C in 7 of 8 configurations (see [`docs/ENCODING_PERFORMANCE.md`](docs/ENCODING_PERFORMANCE.md)); the remaining 1080p 4:2:0 gap (~4%) is structural function-call overhead.
 
-**x86_64**: Decoding beats C across most resolutions. Encoding (with `target-cpu=native`) beats C in every benchmark above by 2–7 %; the encoder runs SSE2 Huffman + AVX2 FDCT/quantize/color/downsample. Without `target-cpu=native` (i.e. SSE2-only baseline), the same encode matrix trails C by 5–10 pp at 1080p because LLVM cannot emit `TZCNT`/`LZCNT`/BMI2 for the scalar bitmap-iteration code without an explicit target feature; the C reference's NASM-authored hot paths embed those instructions directly into `libjpeg.so` regardless of consumer build flags. Recommendation: production builds set `RUSTFLAGS="-C target-cpu=native"` (best) or at minimum `-C target-feature=+bmi1,+lzcnt,+bmi2,+fma`.
+**x86_64**: Decoding beats C across most resolutions. Encoding (with `target-cpu=native`) beats C in every benchmark above by 2–7 %; the encoder runs SSE2 Huffman + AVX2 FDCT/quantize/color/downsample. The Huffman bitmap-iteration hot path uses runtime `is_x86_feature_detected!("bmi1") && is_x86_feature_detected!("lzcnt")` dispatch (P4-8, see `src/encode/huffman_encode.rs:508,580,703`) so a stock `cargo build --release` automatically lights up TZCNT/BLSR/LZCNT on any CPU that supports them — no `RUSTFLAGS` needed for the AC-encoding inner loop. `target-cpu=native` still wins because it unlocks BMI2 PEXT/PDEP and FMA in code paths the runtime dispatch does not yet cover (FDCT scalar fallback, scalar quantization tail), so the recommendation stands for the last few percent: `RUSTFLAGS="-C target-cpu=native"` (best) or `-C target-feature=+bmi1,+lzcnt,+bmi2,+fma`. Pre-P4-8 the stock baseline trailed C by 5–10 pp at 1080p; that gap is now < 2 pp on a Haswell-class CPU.
 
 ## Quick Start
 

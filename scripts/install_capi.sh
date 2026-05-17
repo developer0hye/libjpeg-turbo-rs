@@ -6,7 +6,9 @@
 # This is the P2-8 install path: it produces the layout that
 # `pkg-config --libs libjpeg`, `find_package(JPEG)`, and consumers like
 # Pillow / ImageMagick / libvips expect when our cdylib is dropped in
-# place of upstream `libjpeg.so.62` / `libturbojpeg.so.0`.
+# place of upstream `libjpeg.so.8` / `libturbojpeg.so.0`. The default
+# tracks the build.rs default (P4-3, 2026-05-17): v8 ABI / `libjpeg.so.8`
+# / `@rpath/libjpeg.8.dylib`. v6b is an explicit opt-in.
 #
 # Usage:
 #   scripts/install_capi.sh --destdir /tmp/install --prefix /usr
@@ -15,11 +17,12 @@
 #   --destdir DIR     Stage root (defaults to "")
 #   --prefix DIR      Install prefix (defaults to "/usr/local")
 #   --soname NAME     libjpeg "major" SONAME on Linux (default
-#                     "libjpeg.so.62"; pass "libjpeg.so.8" for the v8
-#                     SONAME the docs/ABI_COMPATIBILITY.md flags as the
-#                     production-safe choice). On macOS, accepts the
-#                     compat dylib name (default "libjpeg.62.dylib").
-#                     The real cdylib filename is derived as
+#                     "libjpeg.so.8"; pass "libjpeg.so.62" to opt into
+#                     the v6b SONAME — docs/ABI_COMPATIBILITY.md flags
+#                     v6b as the documented-risk path for v8-layout
+#                     consumers). On macOS, accepts the compat dylib name
+#                     (default "libjpeg.8.dylib"). The real cdylib
+#                     filename is derived as
 #                     "${soname}.${version}" (Linux) or
 #                     "${soname%.dylib}.${version}.dylib" (macOS).
 #   --soname-tj NAME  libturbojpeg "major" SONAME (default
@@ -28,10 +31,10 @@
 #                     `target/release/liblibjpeg_turbo_rs_capi.{dylib,so}`
 #                     already exists)
 #
-# Layout produced under ${DESTDIR}${PREFIX}:
-#   lib/libjpeg.so.62.X.Y          actual cdylib
-#   lib/libjpeg.so.62              symlink → .X.Y
-#   lib/libjpeg.so                 symlink → libjpeg.so.62
+# Layout produced under ${DESTDIR}${PREFIX} (defaults — v8):
+#   lib/libjpeg.so.8.X.Y           actual cdylib
+#   lib/libjpeg.so.8               symlink → .X.Y
+#   lib/libjpeg.so                 symlink → libjpeg.so.8
 #   lib/libturbojpeg.so.0.X.Y      hardlink/copy of the cdylib
 #   lib/libturbojpeg.so.0          symlink → .X.Y
 #   lib/libturbojpeg.so            symlink → libturbojpeg.so.0
@@ -81,14 +84,18 @@ CDYLIB_VERSION="$(grep '^version' "$ROOT/crates/libjpeg-turbo-rs-capi/Cargo.toml
 case "$PLATFORM" in
     linux)
         CDYLIB_FILE="$ROOT/target/release/liblibjpeg_turbo_rs_capi.so"
-        DEFAULT_LIBJPEG_MAJOR="libjpeg.so.62"
+        # P4-3 (2026-05-17): default flipped from libjpeg.so.62 → libjpeg.so.8
+        # to match the build.rs SONAME default and the v8 struct layout.
+        DEFAULT_LIBJPEG_MAJOR="libjpeg.so.8"
         DEFAULT_LIBJPEG_DEV="libjpeg.so"
         DEFAULT_LIBTJ_MAJOR="libturbojpeg.so.0"
         DEFAULT_LIBTJ_DEV="libturbojpeg.so"
         ;;
     macos)
         CDYLIB_FILE="$ROOT/target/release/liblibjpeg_turbo_rs_capi.dylib"
-        DEFAULT_LIBJPEG_MAJOR="libjpeg.62.dylib"
+        # P4-3 (2026-05-17): default flipped from libjpeg.62.dylib → libjpeg.8.dylib
+        # to match the build.rs install_name default and the v8 struct layout.
+        DEFAULT_LIBJPEG_MAJOR="libjpeg.8.dylib"
         DEFAULT_LIBJPEG_DEV="libjpeg.dylib"
         DEFAULT_LIBTJ_MAJOR="libturbojpeg.0.dylib"
         DEFAULT_LIBTJ_DEV="libturbojpeg.dylib"
@@ -154,6 +161,32 @@ ln -sf "$DEFAULT_LIBJPEG_MAJOR" "${LIBDIR}/${DEFAULT_LIBJPEG_DEV}"
 install -m 0755 "$CDYLIB_FILE" "${LIBDIR}/${DEFAULT_LIBTJ_REAL}"
 ln -sf "$DEFAULT_LIBTJ_REAL" "${LIBDIR}/${DEFAULT_LIBTJ_MAJOR}"
 ln -sf "$DEFAULT_LIBTJ_MAJOR" "${LIBDIR}/${DEFAULT_LIBTJ_DEV}"
+
+# Rewrite each installed cdylib's identity (macOS install_name /
+# Linux DT_SONAME) so it matches the SONAME the script was told
+# about. Without this, `--soname libjpeg.so.62` (or its macOS twin
+# `libjpeg.62.dylib`) would stage a v6b symlink chain but leave the
+# cdylib advertising the build-time identity (typically `libjpeg.so.8`
+# / `@rpath/libjpeg.8.dylib`), and the dynamic linker would refuse to
+# load it under the v6b name — or, on Linux, a downstream linked
+# against `-ljpeg` would record `libjpeg.so.8` in its DT_NEEDED
+# instead of `libjpeg.so.62`, so `ldd` would resolve to the wrong
+# file at run time.
+if [[ "$PLATFORM" == "macos" ]]; then
+    if command -v install_name_tool >/dev/null 2>&1; then
+        install_name_tool -id "@rpath/${DEFAULT_LIBJPEG_MAJOR}" "${LIBDIR}/${DEFAULT_LIBJPEG_REAL}"
+        install_name_tool -id "@rpath/${DEFAULT_LIBTJ_MAJOR}" "${LIBDIR}/${DEFAULT_LIBTJ_REAL}"
+    else
+        echo "WARNING: install_name_tool not on PATH — installed cdylib's LC_ID_DYLIB will not match ${DEFAULT_LIBJPEG_MAJOR}. Consumers that resolve via install_name (the macOS default) will fail to load." >&2
+    fi
+elif [[ "$PLATFORM" == "linux" ]]; then
+    if command -v patchelf >/dev/null 2>&1; then
+        patchelf --set-soname "${DEFAULT_LIBJPEG_MAJOR}" "${LIBDIR}/${DEFAULT_LIBJPEG_REAL}"
+        patchelf --set-soname "${DEFAULT_LIBTJ_MAJOR}" "${LIBDIR}/${DEFAULT_LIBTJ_REAL}"
+    else
+        echo "WARNING: patchelf not on PATH — installed cdylib's DT_SONAME will not match ${DEFAULT_LIBJPEG_MAJOR}. Downstream binaries linked against -ljpeg will record the build-time SONAME (typically libjpeg.so.8) in DT_NEEDED instead, and ldd will resolve them to the wrong file. Install patchelf (apt: patchelf / brew: patchelf) or rebuild the capi crate with CAPI_SONAME=${DEFAULT_LIBJPEG_MAJOR} before staging." >&2
+    fi
+fi
 
 # Install upstream headers (verbatim — we are ABI-compatible with the
 # v8 layout from references/libjpeg-turbo/src/jpeglib.h).

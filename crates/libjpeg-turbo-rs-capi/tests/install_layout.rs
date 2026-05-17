@@ -2,9 +2,9 @@
 //!
 //! Runs `scripts/install_capi.sh` into a tempdir and asserts:
 //!
-//! 1. The cdylib lands at the SONAME path (`libjpeg.so.62.X.Y` on
-//!    Linux / `libjpeg.62.X.Y.dylib` on macOS).
-//! 2. The symlink chain resolves (`libjpeg.so → .62 → real cdylib`).
+//! 1. The cdylib lands at the SONAME path (`libjpeg.so.8.X.Y` on
+//!    Linux / `libjpeg.8.X.Y.dylib` on macOS — P4-3 v8 default).
+//! 2. The symlink chain resolves (`libjpeg.so → .8 → real cdylib`).
 //! 3. Both the libjpeg and libturbojpeg symlink chains exist.
 //! 4. The pkg-config file is well-formed (Name/Version/Libs lines).
 //! 5. The CMake config exposes `JPEG::JPEG` imported target wiring.
@@ -28,6 +28,57 @@ fn workspace_root() -> PathBuf {
         .parent()
         .unwrap()
         .to_path_buf()
+}
+
+/// Returns the cdylib identity advertised by `staged` — `@rpath/...`
+/// from `otool -D` on macOS, or the `DT_SONAME` from `readelf -d` on
+/// Linux. Returns `None` (with a printed SKIP) when the inspection
+/// tool isn't on PATH so the test can soft-skip on minimal CI images.
+fn cdylib_identity(staged: &Path) -> Option<String> {
+    if cfg!(target_os = "macos") {
+        if Command::new("which")
+            .arg("otool")
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false)
+        {
+            let out = Command::new("otool").arg("-D").arg(staged).output().ok()?;
+            let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
+            // otool -D output: `<path>:\n<install_name>\n`
+            Some(stdout.lines().nth(1).unwrap_or("").trim().to_string())
+        } else {
+            eprintln!("SKIP cdylib_identity: otool not on PATH");
+            None
+        }
+    } else {
+        if Command::new("which")
+            .arg("readelf")
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false)
+        {
+            let out = Command::new("readelf")
+                .arg("-d")
+                .arg(staged)
+                .output()
+                .ok()?;
+            let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
+            for line in stdout.lines() {
+                if line.contains("SONAME") {
+                    // Format: `0x... (SONAME)  Library soname: [libjpeg.so.8]`
+                    if let Some(start) = line.find('[') {
+                        if let Some(end) = line[start..].find(']') {
+                            return Some(line[start + 1..start + end].to_string());
+                        }
+                    }
+                }
+            }
+            Some(String::new()) // SONAME stripped — caller will fail
+        } else {
+            eprintln!("SKIP cdylib_identity: readelf not on PATH");
+            None
+        }
+    }
 }
 
 fn ensure_cdylib(root: &Path) {
@@ -90,10 +141,12 @@ fn install_capi_sh_produces_complete_layout() {
     } else {
         "libjpeg.so"
     });
+    // P4-3 (2026-05-17): default flipped to the v8 ABI SONAME so the
+    // install layout now stages `libjpeg.8.dylib` / `libjpeg.so.8`.
     let major_libjpeg: PathBuf = lib.join(if cfg!(target_os = "macos") {
-        "libjpeg.62.dylib"
+        "libjpeg.8.dylib"
     } else {
-        "libjpeg.so.62"
+        "libjpeg.so.8"
     });
     assert!(dev_libjpeg.is_symlink(), "{:?} not a symlink", dev_libjpeg);
     assert!(
@@ -109,6 +162,25 @@ fn install_capi_sh_produces_complete_layout() {
         dev_libjpeg,
         resolved
     );
+
+    // P4-3 follow-up (Codex stop-time review): the staged cdylib's
+    // identity (macOS install_name / Linux DT_SONAME) must agree with
+    // the symlink SONAME — otherwise the dynamic linker resolves to
+    // the wrong file at run time.
+    if let Some(id) = cdylib_identity(&resolved) {
+        let expected: &str = if cfg!(target_os = "macos") {
+            "libjpeg.8.dylib"
+        } else {
+            "libjpeg.so.8"
+        };
+        assert!(
+            id.contains(expected),
+            "staged cdylib identity is {:?}, expected to contain {:?} \
+             (install_capi.sh did not patch the binary identity)",
+            id,
+            expected
+        );
+    }
 
     let dev_libtj: PathBuf = lib.join(if cfg!(target_os = "macos") {
         "libturbojpeg.dylib"
@@ -201,10 +273,11 @@ fn install_capi_sh_produces_complete_layout() {
     }
 }
 
-/// Codex round-1: passing `--soname libjpeg.8.dylib` (the
-/// production-safe SONAME from docs/ABI_COMPATIBILITY.md) must change
-/// the symlink chain accordingly. Prior to the fix, `--soname` was
-/// declared but silently ignored.
+/// P4-3 (2026-05-17): the default flipped from v6b → v8, so this test
+/// now drives the v6b *opt-in* path. Passing `--soname libjpeg.so.62`
+/// (the legacy distro SONAME, now documented-risk per
+/// docs/ABI_COMPATIBILITY.md) must stage the v6b symlink chain and
+/// must NOT stage the v8 default in parallel.
 #[test]
 fn install_capi_sh_honors_soname_override() {
     if cfg!(windows) {
@@ -223,11 +296,11 @@ fn install_capi_sh_honors_soname_override() {
     let prefix: &str = "/usr";
     let destdir: &Path = tmp.path();
 
-    // Use the v8 SONAMEs the policy doc names.
+    // Opt into the v6b SONAME (the legacy distro path).
     let (override_soname, expected_major, expected_dev) = if cfg!(target_os = "macos") {
-        ("libjpeg.8.dylib", "libjpeg.8.dylib", "libjpeg.dylib")
+        ("libjpeg.62.dylib", "libjpeg.62.dylib", "libjpeg.dylib")
     } else {
-        ("libjpeg.so.8", "libjpeg.so.8", "libjpeg.so")
+        ("libjpeg.so.62", "libjpeg.so.62", "libjpeg.so")
     };
 
     let status = Command::new("bash")
@@ -257,16 +330,55 @@ fn install_capi_sh_honors_soname_override() {
     );
     assert!(dev.is_symlink(), "{:?} dev symlink missing", dev);
 
-    // The default v6b symlink must NOT be staged when an override is
-    // active — that would silently double-install both ABIs.
-    let v6b: PathBuf = lib.join(if cfg!(target_os = "macos") {
-        "libjpeg.62.dylib"
+    // The v8 default symlink must NOT be staged when --soname overrides
+    // to v6b — that would silently double-install both ABIs.
+    let v8: PathBuf = lib.join(if cfg!(target_os = "macos") {
+        "libjpeg.8.dylib"
     } else {
-        "libjpeg.so.62"
+        "libjpeg.so.8"
     });
     assert!(
-        !v6b.exists(),
+        !v8.exists(),
         "{:?} should not be installed when --soname overrides the default",
-        v6b
+        v8
     );
+
+    // P4-3 follow-up (Codex stop-time review): the staged cdylib's
+    // identity (macOS install_name / Linux DT_SONAME) must follow the
+    // override too. Without this, the v6b symlink chain would point
+    // at a binary still advertising the v8 build-time identity, and
+    // load-time resolution would fail.
+    let resolved: PathBuf =
+        std::fs::canonicalize(&dev).unwrap_or_else(|e| panic!("canonicalize {:?}: {}", dev, e));
+    if let Some(id) = cdylib_identity(&resolved) {
+        let install_tool_present: bool = if cfg!(target_os = "macos") {
+            Command::new("which")
+                .arg("install_name_tool")
+                .output()
+                .map(|o| o.status.success())
+                .unwrap_or(false)
+        } else {
+            Command::new("which")
+                .arg("patchelf")
+                .output()
+                .map(|o| o.status.success())
+                .unwrap_or(false)
+        };
+        if install_tool_present {
+            assert!(
+                id.contains(override_soname),
+                "staged cdylib identity is {:?}, expected to contain {:?} \
+                 (install_capi.sh `--soname {}` did not patch the binary \
+                 identity even though install_name_tool/patchelf is available)",
+                id,
+                override_soname,
+                override_soname
+            );
+        } else {
+            eprintln!(
+                "SKIP identity assertion: neither install_name_tool nor patchelf \
+                 on PATH; install_capi.sh emits a warning in this configuration"
+            );
+        }
+    }
 }

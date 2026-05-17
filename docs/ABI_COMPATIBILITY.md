@@ -2,7 +2,7 @@
 
 > **Audience.** Distro packagers, downstream Rust consumers, anyone shipping a binary that links against `libjpeg-turbo-rs-capi`'s cdylib in place of upstream `libjpeg.so.62` / `libjpeg.so.8` / `libturbojpeg.so.0`. If you are only consuming the Rust API (`use libjpeg_turbo_rs::*;`), this document does not apply — Rust's normal type system gives you binary stability.
 >
-> **TL;DR.** We target **JPEG_LIB_VERSION = 80** (the v8 ABI). The canonical SONAME for that ABI is `libjpeg.so.8` / `libjpeg.8.dylib`. We *historically* default the SONAME to `libjpeg.so.62` for ease of distro replacement, but consumers compiled against v6b headers will silently read garbage from later v8 fields. Production deployments should override with `CAPI_SONAME=libjpeg.so.8 CAPI_INSTALL_NAME=@rpath/libjpeg.8.dylib`.
+> **TL;DR.** We target **JPEG_LIB_VERSION = 80** (the v8 ABI). The canonical SONAME for that ABI is `libjpeg.so.8` / `libjpeg.8.dylib`, and that is the **default** since P4-3 (2026-05-17). The historic `libjpeg.so.62` default has been removed because v6b-compiled consumers can silently read garbage from later v8 fields. v6b is still available via a single opt-in switch: `CAPI_ACK_V6B_SONAME=1`. The build script auto-implies `CAPI_SONAME=libjpeg.so.62` and `CAPI_INSTALL_NAME=@rpath/libjpeg.62.dylib` when that flag is set, so SONAME and macOS install_name stay in lockstep.
 
 ## Why this document exists
 
@@ -38,28 +38,30 @@ The matrix below shows which `CAPI_SONAME` / `CAPI_INSTALL_NAME` settings are sa
 
 | Consumer compiled against     | Safe `CAPI_SONAME`            | Safe `CAPI_INSTALL_NAME`         | Notes                                                  |
 |-------------------------------|-------------------------------|----------------------------------|--------------------------------------------------------|
-| v8 headers (`libjpeg.so.8`)   | `libjpeg.so.8`                | `@rpath/libjpeg.8.dylib`         | **Recommended.** No silent UB.                         |
+| v8 headers (`libjpeg.so.8`)   | `libjpeg.so.8` *(default)*    | `@rpath/libjpeg.8.dylib` *(default)* | **Recommended.** No silent UB. This is the default since P4-3 (2026-05-17). |
 | TurboJPEG (`libturbojpeg.so.0`) | `libturbojpeg.so.0`         | `@rpath/libturbojpeg.0.dylib`    | Safe — TurboJPEG API is opaque-handle, no struct ABI.  |
 | v7 headers (`libjpeg.so.7`)   | (unsupported)                 | (unsupported)                    | Recompile against v8 or use upstream v7.               |
-| v6b headers (`libjpeg.so.62`) | `libjpeg.so.62` *with caveat* | `@rpath/libjpeg.62.dylib` *with caveat* | **Risky.** Works iff the consumer never touches v7+ fields. See below. |
+| v6b headers (`libjpeg.so.62`) | `libjpeg.so.62` *opt-in*      | `@rpath/libjpeg.62.dylib` *opt-in* | **Risky / non-default.** Works iff the consumer never touches v7+ fields, and requires the `CAPI_ACK_V6B_SONAME=1` env to silence the build warning. See below. |
 
-### The `libjpeg.so.62` caveat
+### The `libjpeg.so.62` opt-in path
 
-Our build.rs default is `CAPI_SONAME=libjpeg.so.62` *(historical, kept to ease distro replacement of the most-shipped SONAME)*. This works for the **majority** of v6b consumers (Pillow 10.x, ImageMagick 7, libtiff 4.x, GD 2.x, FFmpeg 6.x with the JPEG codec) because they only read fields that exist in both v6b and v8 at compatible offsets. But there is a non-empty set of cases where it silently breaks:
+Our build.rs default is **`CAPI_SONAME=libjpeg.so.8`** (P4-3, 2026-05-17). The v6b SONAME `libjpeg.so.62` is no longer the default; it remains available as an opt-in for distro experiments.
+
+The v6b SONAME *works* for the majority of v6b consumers (Pillow 10.x, ImageMagick 7, libtiff 4.x, GD 2.x, FFmpeg 6.x with the JPEG codec) because they only read fields that exist in both v6b and v8 at compatible offsets. But there is a non-empty set of cases where it silently breaks:
 
 1. **A v6b consumer reads `cinfo.scale_num` / `cinfo.scale_denom` / `cinfo.do_fancy_upsampling`** — these are at v8 offsets (68, 72, 96 etc.) but a v6b struct does not have them. Our shim writes there. Result: depending on what the v6b consumer has at *those* byte offsets in *its* struct, we silently corrupt a v6b-only field.
 2. **A v6b consumer reads `cinfo.is_baseline` (offset 312, v8-only)** — does not exist in v6b struct. Reading is undefined.
 3. **A v6b consumer with a custom `jpeg_error_mgr` whose `format_message` walks an addon table** — works either way; format_message is at offset 0 of the error manager and is ABI-stable since libjpeg v6.
 
-To opt into the safe SONAME at build time:
+To opt into the v6b SONAME at build time (e.g. for distro replacement experiments where you control every consumer), set the single acknowledgement env:
 
 ```bash
-CAPI_SONAME=libjpeg.so.8 \
-CAPI_INSTALL_NAME=@rpath/libjpeg.8.dylib \
-cargo build -p libjpeg-turbo-rs-capi --release
+CAPI_ACK_V6B_SONAME=1 cargo build -p libjpeg-turbo-rs-capi --release
 ```
 
-Build.rs emits a warning when the default `libjpeg.so.62` SONAME is used in a v8-layout build (P2-9 follow-up).
+The build script then auto-derives `CAPI_SONAME=libjpeg.so.62` and `CAPI_INSTALL_NAME=@rpath/libjpeg.62.dylib`, keeping the Linux SONAME and macOS install_name in lockstep so dyld can resolve the v6b name. Explicit `CAPI_SONAME` / `CAPI_INSTALL_NAME` overrides still win if you need a non-standard combination.
+
+Without `CAPI_ACK_V6B_SONAME=1`, build.rs emits a loud `cargo:warning=` if v6b SONAME or install_name is requested by hand — the same warning fires if SONAME and install_name disagree on v6b vs v8 (which would silently break load-time resolution on macOS).
 
 ## Field-presence reference
 
@@ -118,15 +120,15 @@ This is genuinely large work and is *out of scope* for the current "v8-targeted 
 ## Verification commands
 
 ```bash
-# Default build (libjpeg.so.62 SONAME, v8 layout — the documented-risk path).
+# Default build (libjpeg.so.8 SONAME, v8 layout — the safe, recommended path).
 cargo build -p libjpeg-turbo-rs-capi --release
-otool -D target/release/liblibjpeg_turbo_rs_capi.dylib  # macOS
-readelf -d target/release/liblibjpeg_turbo_rs_capi.so | grep SONAME  # Linux
+otool -D target/release/liblibjpeg_turbo_rs_capi.dylib  # macOS — expects libjpeg.8.dylib
+readelf -d target/release/liblibjpeg_turbo_rs_capi.so | grep SONAME  # Linux — expects libjpeg.so.8
 
-# Production-safe v8 build.
-CAPI_SONAME=libjpeg.so.8 \
-CAPI_INSTALL_NAME=@rpath/libjpeg.8.dylib \
-cargo build -p libjpeg-turbo-rs-capi --release
+# v6b opt-in (documented-risk path). One env switches everything:
+# the build script derives CAPI_SONAME=libjpeg.so.62 and
+# CAPI_INSTALL_NAME=@rpath/libjpeg.62.dylib automatically.
+CAPI_ACK_V6B_SONAME=1 cargo build -p libjpeg-turbo-rs-capi --release
 
 # Verify the offset assertions catch any future struct-shape drift.
 cargo build -p libjpeg-turbo-rs-capi --release  # const-eval asserts run at compile time

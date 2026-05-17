@@ -106,12 +106,16 @@ fn find_cc() -> Option<PathBuf> {
 fn setup_symlinks(lib: &Path, parent: &Path) -> PathBuf {
     let subdir: PathBuf = parent.join("symlinks");
     std::fs::create_dir_all(&subdir).expect("mkdir symlinks");
-    let (versioned, short): (&str, &str) = if cfg!(target_os = "macos") {
-        ("libjpeg.62.dylib", "libjpeg.dylib")
+    // P4-3 (2026-05-17): cdylib default identity flipped to v8. Stage
+    // both v8 and v6b versioned names plus the short link-time name so
+    // any `-ljpeg`-linked C test or prebuilt v6b consumer resolves
+    // through this dir.
+    let names: &[&str] = if cfg!(target_os = "macos") {
+        &["libjpeg.8.dylib", "libjpeg.62.dylib", "libjpeg.dylib"]
     } else {
-        ("libjpeg.so.62", "libjpeg.so")
+        &["libjpeg.so.8", "libjpeg.so.62", "libjpeg.so"]
     };
-    for name in [versioned, short] {
+    for name in names {
         let link = subdir.join(name);
         if !link.exists() {
             std::os::unix::fs::symlink(lib, &link).expect("symlink");
