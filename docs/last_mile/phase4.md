@@ -309,20 +309,21 @@ Each entry is annotated with its `tj3*` successor (e.g. `tjAlloc → tj3Alloc`).
 
 So the partial-coverage story is "v2 / v3 / numbered-variant TJ surface wired; v1 / un-versioned variants + `tjAlloc` / `tjFree` + error-fetcher pair + `tjGetScalingFactors` still missing". A consumer that only calls functions in the 21-wired set works today at link time; a consumer calling any of the 18 missing functions fails at `dlsym` / link time. **No claim is made here about which real-world downstream packages fall on which side** — that requires per-consumer evidence.
 
-The existing downstream compatibility lab (verified by `find . -name '*compat*.rs' -not -path './target/*' -not -path './references/*'` + `find . -name 'libtiff_integration.rs'`) is the place to pin actual call-site coverage:
+**The state of the in-repo evidence base for P4-18 is thin and easy to misread, so here it is explicitly.** Cold inspection of every `*compat*` test in the tree shows:
 
-| Test | Path | Surface |
-| --- | --- | --- |
-| `capi_ffmpeg_compat` | `crates/libjpeg-turbo-rs-capi/tests/capi_ffmpeg_compat.rs` | TurboJPEG via FFmpeg |
-| `capi_gd_compat` | `crates/libjpeg-turbo-rs-capi/tests/capi_gd_compat.rs` | TurboJPEG via libgd |
-| `capi_imagemagick_compat` | `crates/libjpeg-turbo-rs-capi/tests/capi_imagemagick_compat.rs` | TurboJPEG via ImageMagick |
-| `capi_libvips_compat` | `crates/libjpeg-turbo-rs-capi/tests/capi_libvips_compat.rs` | TurboJPEG via libvips |
-| `capi_sdl_image_compat` | `crates/libjpeg-turbo-rs-capi/tests/capi_sdl_image_compat.rs` | TurboJPEG via SDL_image |
-| `capi_pillow_compat` | `tests/capi_pillow_compat.rs` (workspace root) | TurboJPEG via PIL/Pillow |
-| `tjunittest_compat` | `tests/tjunittest_compat.rs` (workspace root) | **Upstream's own tjunittest harness — most authoritative for TJ ABI** |
-| `libtiff_integration` | `crates/libjpeg-turbo-rs-capi/tests/libtiff_integration.rs` | Classic libjpeg v8 via libtiff (T3, not T2 — included for completeness) |
+| Test | Path | What it actually exercises | Relevance to P4-18 |
+| --- | --- | --- | --- |
+| `tjunittest_link` | `crates/libjpeg-turbo-rs-capi/tests/tjunittest_link.rs` | Compiles upstream's `tjunittest.c` against `libturbojpeg.0.dylib`/`.so.0` and runs the binary. **The only direct T2 test in the repo.** | Catches missing TJ3 symbols that upstream tjunittest requires. Does **not** exercise the 18 missing v1/un-versioned aliases unless upstream tjunittest happens to call them. |
+| `capi_pillow_compat` | `tests/capi_pillow_compat.rs` | Symlinks our cdylib as `libjpeg.so.62`/`libjpeg.62.dylib` and runs Pillow. Pillow uses **classic libjpeg API** (`jpeg_*`), not TurboJPEG. | **T3 test, not T2.** Does not exercise any TJ legacy alias. |
+| `capi_imagemagick_compat` | `crates/libjpeg-turbo-rs-capi/tests/capi_imagemagick_compat.rs` | Same pattern — symlinks as `libjpeg.so.62`, runs `convert`. | **T3 test, not T2.** |
+| `capi_ffmpeg_compat` | `crates/libjpeg-turbo-rs-capi/tests/capi_ffmpeg_compat.rs` | Same pattern (symlink+LD_PRELOAD via classic libjpeg surface). | **T3 test, not T2.** |
+| `capi_gd_compat` | `crates/libjpeg-turbo-rs-capi/tests/capi_gd_compat.rs` | Same pattern. | **T3 test, not T2.** |
+| `capi_libvips_compat` | `crates/libjpeg-turbo-rs-capi/tests/capi_libvips_compat.rs` | Same pattern. | **T3 test, not T2.** |
+| `capi_sdl_image_compat` | `crates/libjpeg-turbo-rs-capi/tests/capi_sdl_image_compat.rs` | Same pattern. | **T3 test, not T2.** |
+| `tjunittest_compat` | `tests/tjunittest_compat.rs` | `djpeg` cross-validation using upstream tjunittest's reference images. Despite the filename, this is **not** a TurboJPEG-ABI harness. | T3 test (uses `djpeg`). |
+| `libtiff_integration` | `crates/libjpeg-turbo-rs-capi/tests/libtiff_integration.rs` | libtiff `COMPRESSION_JPEG` round-trip through `jpeg_read_header` / `jpeg_*_raw_data`. | T3 test. |
 
-A specific TJ consumer claim ("Pillow 10.x with the TurboJPEG plugin works on our cdylib") should cite a passing run of the matching test before it lands in any public doc; until then the partial-coverage story above is the only honest framing. The other `*_compat.rs` files in `tests/` (`reference_image_compat.rs`, `cross_encoder_compat.rs`, `crop_c_compat.rs`) are not TJ-ABI-specific and are not part of the P4-18 evidence base.
+**Honest framing for the P4-18 closure decision:** the in-repo evidence base does **not yet contain a test that would fail if any of the 18 missing legacy TJ aliases is needed by a real downstream consumer.** `tjunittest_link.rs` is close but exercises upstream tjunittest, which uses TJ3+numbered legacy variants we already have. Closing P4-18 Option A (implement) should add a targeted `tests/capi_legacy_tj_aliases.rs` that `dlsym`s each of the 18 symbols and exercises a minimal happy path; closing Option B (deprecate-with-rationale) should at minimum add a `dlsym`-fails-cleanly negative test so a future contributor sees the missing-symbol failure as policy rather than oversight. Other `*compat*.rs` files in `tests/` (`reference_image_compat.rs`, `cross_encoder_compat.rs`, `crop_c_compat.rs`) are unrelated to T2/T3 SONAME shimming and are not part of the P4-18 evidence base.
 
 P3-3's closure (2026-05-06; corrected 2026-05-10) explicitly scoped the allowlist triage to "non-blocking legacy TJ aliases". That scope decision is defensible for new C/C++ projects targeting TJ3, but it leaves a closed binary universe of TurboJPEG 1.x/2.x consumers unsupported.
 
