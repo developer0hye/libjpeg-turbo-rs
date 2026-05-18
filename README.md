@@ -10,7 +10,7 @@ surfaces. Each tier has its own contract and readiness status — don't mix them
 | Tier | Surface | Status |
 | --- | --- | --- |
 | **T1** | Rust crate (`use libjpeg_turbo_rs::*;`) | **ready** today |
-| **T2** | TurboJPEG cdylib (`libturbojpeg.so.0`) | **ready** for TJ3 consumers — opaque-handle API, no struct ABI. **Caveat:** 18 legacy TurboJPEG 1.x/2.x symbols (`tjAlloc`, `tjFree`, `tjCompress`, …) remain unimplemented — see [P4-18](docs/last_mile/phase4.md#p4-18-18-legacy-turbojpeg-1x2x-symbols-remain-allowlisted-missing--open). |
+| **T2** | TurboJPEG cdylib (`libturbojpeg.so.0`) | **ready** for TJ3 consumers — opaque-handle API, no struct ABI. **Legacy TurboJPEG 1.x/2.x surface is partial:** 21 legacy aliases wired (mostly v2/v3 variants + buffer/image helpers); 18 still allowlisted-missing (mostly v1 / un-versioned variants like `tjAlloc`, `tjFree`, `tjCompress`, `tjGetScalingFactors`) — see [P4-18](docs/last_mile/phase4.md#p4-18-18-legacy-turbojpeg-1x2x-symbols-remain-allowlisted-missing--open). |
 | **T3** | Classic libjpeg v8 cdylib (`libjpeg.so.8`) | **ready** for v8 consumers; default since P4-3 (2026-05-17) |
 | **T4** | System v6b/v7 drop-in (`libjpeg.so.62` / `.7`) | **explicit non-goal** — see `docs/ABI_COMPATIBILITY.md` |
 
