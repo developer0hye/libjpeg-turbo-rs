@@ -307,7 +307,22 @@ Each entry is annotated with its `tj3*` successor (e.g. `tjAlloc → tj3Alloc`).
 - Image I/O (2): `tjLoadImage`, `tjSaveImage`.
 - Error string (1): `tjGetErrorStr2`.
 
-So the partial-coverage story is "v2 / v3 / numbered-variant TJ surface wired; v1 / un-versioned variants + `tjAlloc` / `tjFree` + error-fetcher pair + `tjGetScalingFactors` still missing". A consumer that only calls functions in the 21-wired set works today at link time; a consumer calling any of the 18 missing functions fails at `dlsym` / link time. **No claim is made here about which real-world downstream packages fall on which side** — that requires per-consumer evidence. The existing downstream compatibility lab — `crates/libjpeg-turbo-rs-capi/tests/capi_ffmpeg_compat.rs`, `capi_gd_compat.rs`, `capi_imagemagick_compat.rs`, `capi_libvips_compat.rs`, `capi_sdl_image_compat.rs`, plus `tests/capi_pillow_compat.rs` at the workspace root (P4-10 / P2-G) — is the place to pin actual call-site coverage, and any specific consumer claim should cite a passing test there before it goes into a public doc.
+So the partial-coverage story is "v2 / v3 / numbered-variant TJ surface wired; v1 / un-versioned variants + `tjAlloc` / `tjFree` + error-fetcher pair + `tjGetScalingFactors` still missing". A consumer that only calls functions in the 21-wired set works today at link time; a consumer calling any of the 18 missing functions fails at `dlsym` / link time. **No claim is made here about which real-world downstream packages fall on which side** — that requires per-consumer evidence.
+
+The existing downstream compatibility lab (verified by `find . -name '*compat*.rs' -not -path './target/*' -not -path './references/*'` + `find . -name 'libtiff_integration.rs'`) is the place to pin actual call-site coverage:
+
+| Test | Path | Surface |
+| --- | --- | --- |
+| `capi_ffmpeg_compat` | `crates/libjpeg-turbo-rs-capi/tests/capi_ffmpeg_compat.rs` | TurboJPEG via FFmpeg |
+| `capi_gd_compat` | `crates/libjpeg-turbo-rs-capi/tests/capi_gd_compat.rs` | TurboJPEG via libgd |
+| `capi_imagemagick_compat` | `crates/libjpeg-turbo-rs-capi/tests/capi_imagemagick_compat.rs` | TurboJPEG via ImageMagick |
+| `capi_libvips_compat` | `crates/libjpeg-turbo-rs-capi/tests/capi_libvips_compat.rs` | TurboJPEG via libvips |
+| `capi_sdl_image_compat` | `crates/libjpeg-turbo-rs-capi/tests/capi_sdl_image_compat.rs` | TurboJPEG via SDL_image |
+| `capi_pillow_compat` | `tests/capi_pillow_compat.rs` (workspace root) | TurboJPEG via PIL/Pillow |
+| `tjunittest_compat` | `tests/tjunittest_compat.rs` (workspace root) | **Upstream's own tjunittest harness — most authoritative for TJ ABI** |
+| `libtiff_integration` | `crates/libjpeg-turbo-rs-capi/tests/libtiff_integration.rs` | Classic libjpeg v8 via libtiff (T3, not T2 — included for completeness) |
+
+A specific TJ consumer claim ("Pillow 10.x with the TurboJPEG plugin works on our cdylib") should cite a passing run of the matching test before it lands in any public doc; until then the partial-coverage story above is the only honest framing. The other `*_compat.rs` files in `tests/` (`reference_image_compat.rs`, `cross_encoder_compat.rs`, `crop_c_compat.rs`) are not TJ-ABI-specific and are not part of the P4-18 evidence base.
 
 P3-3's closure (2026-05-06; corrected 2026-05-10) explicitly scoped the allowlist triage to "non-blocking legacy TJ aliases". That scope decision is defensible for new C/C++ projects targeting TJ3, but it leaves a closed binary universe of TurboJPEG 1.x/2.x consumers unsupported.
 
