@@ -43,6 +43,19 @@ The matrix below shows which `CAPI_SONAME` / `CAPI_INSTALL_NAME` settings are sa
 | v7 headers (`libjpeg.so.7`)   | (unsupported)                 | (unsupported)                    | Recompile against v8 or use upstream v7.               |
 | v6b headers (`libjpeg.so.62`) | `libjpeg.so.62` *opt-in*      | `@rpath/libjpeg.62.dylib` *opt-in* | **Risky / non-default.** Works iff the consumer never touches v7+ fields, and requires the `CAPI_ACK_V6B_SONAME=1` env to silence the build warning. See below. |
 
+### Threading contract
+
+A `jpeg_decompress_struct` / `jpeg_compress_struct` allocated through our C ABI shim **must be used (and freed) on the thread that created it.** Our shim stores per-`cinfo` private state in thread-local side tables keyed by the `cinfo` pointer; transferring `cinfo` ownership across threads silently breaks lookups and leaks the original-thread entry.
+
+Concretely:
+
+- **Safe:** thread A calls `jpeg_create_decompress(cinfo)`, drives the full decode lifecycle through `jpeg_destroy_decompress(cinfo)` on thread A. Likewise for the compress side.
+- **Unsafe:** thread A calls `jpeg_create_decompress(cinfo)`; the application then passes `cinfo` (by value or pointer) to thread B; thread B calls `jpeg_read_header(cinfo, …)`. The shim's private-state lookup on thread B returns `None`, and observable behaviour ranges from `JERR_BAD_STATE` to silent miscompilation. `jpeg_destroy_decompress(cinfo)` on thread B will **not** free thread A's entry — the entry leaks until thread A exits.
+
+**Why this contract.** The v8 `struct jpeg_decompress_struct` is ABI-mirrored byte-for-byte (`crates/libjpeg-turbo-rs-capi/src/jpeglib.rs:3900-3970` pins the offsets). There is no room to append a `priv_ptr` field without breaking offset compatibility with upstream-compiled consumers, so private state lives in TLS instead. Implementation pointers: `DECOMPRESS_PRIVATE_STATE` at `jpeglib.rs:368-372` (decompress side) + compress equivalent at `:3492-3505`.
+
+**Divergence from upstream.** Upstream libjpeg-turbo's contract is "single-threaded per `cinfo`, but ownership transfer between threads is OK provided the application enforces non-concurrent access." We are stricter: ownership stays on the creating thread. If your consumer needs cross-thread `cinfo` ownership transfer (the canonical example is FFmpeg's frame-thread JPEG path), file an issue with the use case — the migration to a global `OnceLock<RwLock<HashMap>>` is tracked as P4-16 Option A in `docs/last_mile/phase4.md` and we will prioritise based on adoption signal.
+
 ### The `libjpeg.so.62` opt-in path
 
 Our build.rs default is **`CAPI_SONAME=libjpeg.so.8`** (P4-3, 2026-05-17). The v6b SONAME `libjpeg.so.62` is no longer the default; it remains available as an opt-in for distro experiments.
