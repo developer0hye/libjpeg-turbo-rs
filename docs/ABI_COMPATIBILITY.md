@@ -23,7 +23,7 @@ The danger: a library that *advertises* the v6b SONAME (`libjpeg.so.62`) but *ex
 ### What we target
 
 - **Struct layout: JPEG_LIB_VERSION = 80** (v8). All offsets in `crates/libjpeg-turbo-rs-capi/src/jpeglib.rs` are computed against the v8 LP64 layout. The compile-time assertion block at `jpeglib.rs:3900-3970` pins these.
-- **Public symbol surface: TurboJPEG 3.x + classic libjpeg API at v8 level.** Includes `tj3*` (TurboJPEG 3); 21 `tj*` legacy 1.x/2.x aliases (lifecycle `tjInitCompress` / `tjInitDecompress` / `tjInitTransform` / `tjDestroy`; `tjCompress2` / `tjDecompress2` / `tjDecompressHeader3`; `tjTransform` / `tjEncodeYUV3` / `tjDecodeYUV`; buffer-size `tjBufSize` / `TJBUFSIZE` / `TJBUFSIZEYUV` / `tjBufSizeYUV` / `tjBufSizeYUV2` / `tjPlaneSizeYUV` / `tjPlaneWidth` / `tjPlaneHeight`; image I/O `tjLoadImage` / `tjSaveImage`; error string `tjGetErrorStr2`); 18 other legacy 1.x/2.x symbols are still allowlisted-missing — see [P4-18](last_mile/phase4.md#p4-18-18-legacy-turbojpeg-1x2x-symbols-remain-allowlisted-missing--open). And the `jpeg_*` classic API at v8.
+- **Public symbol surface: TurboJPEG 3.x + classic libjpeg API at v8 level.** Includes `tj3*` (TurboJPEG 3); 21 `tj*` legacy 1.x/2.x aliases (lifecycle `tjInitCompress` / `tjInitDecompress` / `tjInitTransform` / `tjDestroy`; `tjCompress2` / `tjDecompress2` / `tjDecompressHeader3`; `tjTransform` / `tjEncodeYUV3` / `tjDecodeYUV`; buffer-size `tjBufSize` / `TJBUFSIZE` / `TJBUFSIZEYUV` / `tjBufSizeYUV` / `tjBufSizeYUV2` / `tjPlaneSizeYUV` / `tjPlaneWidth` / `tjPlaneHeight`; image I/O `tjLoadImage` / `tjSaveImage`; error string `tjGetErrorStr2`); 18 other legacy 1.x/2.x symbols are deliberately deprecated with a per-symbol migration matrix in the [Legacy TurboJPEG 1.x/2.x aliases](#legacy-turbojpeg-1x2x-aliases--partial-coverage-p4-18) section below (P4-18 closed 2026-05-19). And the `jpeg_*` classic API at v8.
 - **Default precision: 8-bit/12-bit/16-bit/lossless** as supported through both the TJ3 and classic APIs.
 
 ### What we deliberately do *not* target
@@ -39,7 +39,7 @@ The matrix below shows which `CAPI_SONAME` / `CAPI_INSTALL_NAME` settings are sa
 | Consumer compiled against     | Safe `CAPI_SONAME`            | Safe `CAPI_INSTALL_NAME`         | Notes                                                  |
 |-------------------------------|-------------------------------|----------------------------------|--------------------------------------------------------|
 | v8 headers (`libjpeg.so.8`)   | `libjpeg.so.8` *(default)*    | `@rpath/libjpeg.8.dylib` *(default)* | **Recommended.** No silent UB. This is the default since P4-3 (2026-05-17). |
-| TurboJPEG (`libturbojpeg.so.0`) | `libturbojpeg.so.0`         | `@rpath/libturbojpeg.0.dylib`    | Safe for TJ3 callers — TurboJPEG API is opaque-handle, no struct ABI. Legacy 1.x/2.x surface is partial: 21 aliases wired in `legacy.rs` (mostly v2/v3 variants + buffer/image helpers); 18 still allowlisted-missing (v1 / un-versioned variants like `tjAlloc`, `tjFree`, `tjCompress`, `tjGetScalingFactors`). See [P4-18](last_mile/phase4.md#p4-18-18-legacy-turbojpeg-1x2x-symbols-remain-allowlisted-missing--open) for the implement-vs-deprecate decision matrix. |
+| TurboJPEG (`libturbojpeg.so.0`) | `libturbojpeg.so.0`         | `@rpath/libturbojpeg.0.dylib`    | Safe for TJ3 callers — TurboJPEG API is opaque-handle, no struct ABI. Legacy 1.x/2.x surface is partial: 21 aliases wired in `legacy.rs` (mostly v2/v3 variants + buffer/image helpers); 18 deliberately deprecated (v1 / un-versioned variants like `tjAlloc`, `tjFree`, `tjCompress`, `tjGetScalingFactors`). See the [Legacy TurboJPEG 1.x/2.x aliases](#legacy-turbojpeg-1x2x-aliases--partial-coverage-p4-18) section below for the per-symbol migration matrix (P4-18 closed 2026-05-19). |
 | v7 headers (`libjpeg.so.7`)   | (unsupported)                 | (unsupported)                    | Recompile against v8 or use upstream v7.               |
 | v6b headers (`libjpeg.so.62`) | `libjpeg.so.62` *opt-in*      | `@rpath/libjpeg.62.dylib` *opt-in* | **Risky / non-default.** Works iff the consumer never touches v7+ fields, and requires the `CAPI_ACK_V6B_SONAME=1` env to silence the build warning. See below. |
 
@@ -55,6 +55,48 @@ Concretely:
 **Why this contract.** The v8 `struct jpeg_decompress_struct` is ABI-mirrored byte-for-byte (`crates/libjpeg-turbo-rs-capi/src/jpeglib.rs:3900-3970` pins the offsets). There is no room to append a `priv_ptr` field without breaking offset compatibility with upstream-compiled consumers, so private state lives in TLS instead. Implementation pointers: `DECOMPRESS_PRIVATE_STATE` at `jpeglib.rs:368-372` (decompress side) + compress equivalent at `:3492-3505`.
 
 **Divergence from upstream.** Upstream libjpeg-turbo's contract is "single-threaded per `cinfo`, but ownership transfer between threads is OK provided the application enforces non-concurrent access." We are stricter: ownership stays on the creating thread. If your consumer needs cross-thread `cinfo` ownership transfer (the canonical example is FFmpeg's frame-thread JPEG path), file an issue with the use case — the migration to a global `OnceLock<RwLock<HashMap>>` is tracked as P4-16 Option A in `docs/last_mile/phase4.md` and we will prioritise based on adoption signal.
+
+### Legacy TurboJPEG 1.x/2.x aliases — partial coverage (P4-18)
+
+Our `libturbojpeg.so.0` cdylib exports the full **TurboJPEG 3** API (`tj3*`) and **21 of the 39** legacy 1.x/2.x aliases. The remaining 18 legacy symbols are intentionally not exported and live in `crates/libjpeg-turbo-rs-capi/tests/symbol_inventory.rs:190-207` as "documented-deprecated, migrate to the TJ3 successor". Consumers compiled against TJ 1.x/2.x headers that touch any of the 18 will fail at `dlsym` / link time with `symbol not found`; consumers that touch only the 21 wired aliases work today.
+
+**Migration matrix.** Each missing symbol has a documented successor on the TJ3 surface; in most cases the signatures match closely enough that a thin C shim is one or two lines.
+
+| Missing 1.x/2.x symbol | Recommended successor | Migration notes |
+| --- | --- | --- |
+| `tjAlloc(int bytes)` | `tj3Alloc(size_t bytes)` | Signature change is `int → size_t`; cast at the call site. Allocates from the same allocator. |
+| `tjFree(unsigned char *buf)` | `tj3Free(void *buf)` | Pointer-type widening; no behavioural change. |
+| `tjCompress(...)` | `tjCompress2(...)` (wired) → `tj3Compress8(...)` | The v1 entry point predates the buffer-size argument added in v2. Use `tjCompress2` directly; we already export it. |
+| `tjCompressFromYUV(...)` | `tj3CompressFromYUV8(...)` | Pass quality / subsamp through `tj3Set(handle, TJPARAM_*, …)` before calling. |
+| `tjCompressFromYUVPlanes(...)` | `tj3CompressFromYUVPlanes8(...)` | Same as above; planar variant. |
+| `tjDecodeYUVPlanes(...)` | `tj3DecodeYUVPlanes8(...)` | Planar YUV → packed RGB conversion (no JPEG). |
+| `tjDecompress(...)` | `tjDecompress2(...)` (wired) → `tj3Decompress8(...)` | Like `tjCompress`: use `tjDecompress2` we already export. |
+| `tjDecompressHeader(...)` | `tjDecompressHeader3(...)` (wired) → `tj3DecompressHeader(...)` | Both 1.x and 2.x header-only variants are subsumed by the v3 form, which is wired. |
+| `tjDecompressHeader2(...)` | `tjDecompressHeader3(...)` (wired) → `tj3DecompressHeader(...)` | Same as `tjDecompressHeader`. |
+| `tjDecompressToYUV(...)` | `tj3DecompressToYUV8(...)` | Allocate output via `tj3YUVBufSize()` first. |
+| `tjDecompressToYUV2(...)` | `tj3DecompressToYUV8(...)` | Same as `tjDecompressToYUV`. |
+| `tjDecompressToYUVPlanes(...)` | `tj3DecompressToYUVPlanes8(...)` | Plane sizes via `tj3YUVPlaneSize()`. |
+| `tjEncodeYUV(...)` | `tjEncodeYUV3(...)` (wired) → `tj3EncodeYUV8(...)` | The v3 form is wired in `legacy.rs`. |
+| `tjEncodeYUV2(...)` | `tjEncodeYUV3(...)` (wired) → `tj3EncodeYUV8(...)` | Same as `tjEncodeYUV`. |
+| `tjEncodeYUVPlanes(...)` | `tj3EncodeYUVPlanes8(...)` | Planar variant. |
+| `tjGetErrorCode(tjhandle h)` | `tj3GetErrorCode(tjhandle h)` | Signature compatible; return codes match `TJERR_*` enum. |
+| `tjGetErrorStr(void)` (no-handle) | `tj3GetErrorStr(NULL)` (no-handle form) | TJ3 wraps the no-handle form behind a NULL-handle convention. |
+| `tjGetScalingFactors(int *numFactors)` | `tj3GetScalingFactors(int *numFactors)` | Identical signature; return value is the same `tjscalingfactor *` array. |
+
+**Tiny shim recipe.** If your consumer cannot be recompiled against TJ3, wrap the missing symbol in a one-line C function next to its callers and rebuild that translation unit only. Example:
+
+```c
+/* shim_legacy_tj.c — re-implement two missing symbols in terms of the TJ3 successors. */
+#include <turbojpeg.h>
+#include <stdlib.h>
+
+unsigned char *tjAlloc(int bytes) { return tj3Alloc((size_t)bytes); }
+void           tjFree (unsigned char *buf) { tj3Free(buf); }
+```
+
+Compile and link that file alongside your existing consumer; no source changes required upstream of the shim.
+
+**If you absolutely need the 18 symbols wired in our cdylib itself** (e.g. you cannot ship an extra shim translation unit alongside, or you `LD_PRELOAD` the cdylib directly), see P4-18 Option A in `docs/last_mile/phase4.md`. Each symbol becomes a `pub extern "C" fn` in `crates/libjpeg-turbo-rs-capi/src/legacy.rs` that delegates to its `tj3*` successor — the implementation work is mechanical but not yet scheduled. File an issue with the use case to trigger the work.
 
 ### The `libjpeg.so.62` opt-in path
 
