@@ -182,11 +182,16 @@ fn extract_tj_symbols(turbojpeg_h: &str) -> HashSet<String> {
 /// implemented; the test should hold us to it from this commit on."
 fn allowlisted_missing_symbols() -> HashSet<&'static str> {
     [
-        // Classic libjpeg API:
-        // (none currently allowlisted)
+        // Classic libjpeg API: (none currently allowlisted — P3-3
+        // emptied this list 2026-05-06).
         //
         // Legacy TurboJPEG 1.x/2.x ABI — superseded by the TJ3 forms
-        // and the `*2` / `*3` variants we already export.
+        // and the `*2` / `*3` variants we already export. The 18
+        // entries below are tracked under P4-18 (filed 2026-05-18
+        // after a cold review surfaced them as a blocker for
+        // downstream C/C++ consumers compiled against TurboJPEG
+        // 1.x/2.x headers); see `docs/last_mile/phase4.md` for the
+        // implement-vs-deprecate decision matrix.
         "tjAlloc",                 // → tj3Alloc
         "tjFree",                  // → tj3Free
         "tjCompress",              // → tjCompress2 → tj3Compress8
