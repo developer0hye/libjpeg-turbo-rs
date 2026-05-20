@@ -187,11 +187,18 @@ fn allowlisted_missing_symbols() -> HashSet<&'static str> {
         //
         // Legacy TurboJPEG 1.x/2.x ABI — superseded by the TJ3 forms
         // and the `*2` / `*3` variants we already export. The 18
-        // entries below are tracked under P4-18 (filed 2026-05-18
-        // after a cold review surfaced them as a blocker for
-        // downstream C/C++ consumers compiled against TurboJPEG
-        // 1.x/2.x headers); see `docs/last_mile/phase4.md` for the
-        // implement-vs-deprecate decision matrix.
+        // entries below are documented as deliberately-deprecated
+        // under P4-18 (filed 2026-05-18, closed 2026-05-19 via
+        // Option B): see `docs/ABI_COMPATIBILITY.md` →
+        // `### Legacy TurboJPEG 1.x/2.x aliases — partial coverage`
+        // for the per-symbol migration matrix and the tiny-shim
+        // recipe consumers should use until/unless P4-18 Option A
+        // wires the 18 into our cdylib itself.
+        //
+        // This allowlist remains the test's drift detector: if
+        // upstream `turbojpeg.h` adds a new symbol that we have
+        // not yet exported, the inventory test will surface it
+        // here rather than silently skip it.
         "tjAlloc",                 // → tj3Alloc
         "tjFree",                  // → tj3Free
         "tjCompress",              // → tjCompress2 → tj3Compress8
