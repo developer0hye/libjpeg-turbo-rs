@@ -515,11 +515,6 @@ pub fn transform_jpeg_with_options(data: &[u8], options: &TransformOptions) -> R
         crate::transform::MarkerCopyMode::None => Vec::new(),
     };
 
-    let source_is_progressive: bool = {
-        let mut reader = MarkerReader::new(data);
-        reader.read_markers()?.frame.is_progressive
-    };
-
     let mut coeffs = read_coefficients(data)?;
     let op: TransformOp = options.op;
 
@@ -1063,14 +1058,16 @@ pub fn transform_jpeg_with_options(data: &[u8], options: &TransformOptions) -> R
                 dbx <= comp.blocks_x && dby <= comp.blocks_y
             })
     };
-    // 12-bit precision (e.g. `monkey12.jpg` transcode) and adversarial
-    // progressive coefficient buffers with out-of-range baseline symbols MUST
-    // go through the optimized Huffman writer. The non-optimized path uses the
-    // standard Annex K tables, which do not define every possible DC/AC
-    // category; using it anyway would encode zero-bit Huffman symbols and
-    // produce a JPEG that downstream C tools reject.
-    let force_optimize: bool = coeffs.effective_precision() > 8
-        || (source_is_progressive && needs_optimized_baseline_huffman(&coeffs));
+    // 12-bit precision (e.g. `monkey12.jpg` transcode) and coefficient
+    // buffers with out-of-range baseline symbols MUST go through the
+    // optimized Huffman writer. The non-optimized path uses the standard
+    // Annex K tables, which do not define every possible DC/AC category;
+    // using it anyway would encode zero-bit Huffman symbols and produce
+    // a JPEG that downstream C tools reject. This applies to any source
+    // — baseline JPEGs with custom DHT tables can also carry categories
+    // beyond the Annex K range (DC > 11, AC > 10).
+    let force_optimize: bool =
+        coeffs.effective_precision() > 8 || needs_optimized_baseline_huffman(&coeffs);
     let output: Vec<u8> = if options.arithmetic && progressive_safe {
         write_coefficients_progressive_arithmetic(&coeffs, progressive_restart_rows)?
     } else if options.arithmetic {
