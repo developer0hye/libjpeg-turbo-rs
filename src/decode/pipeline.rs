@@ -3123,6 +3123,9 @@ impl<'a> Decoder<'a> {
                     decoded_mcus,
                     total_mcus,
                 } => format!("truncated: decoded {} of {} MCUs", decoded_mcus, total_mcus),
+                DecodeWarning::UnsupportedRecovered { detail } => {
+                    format!("unsupported feature: {}", detail)
+                }
             };
             return Err(JpegError::CorruptData(format!(
                 "stop_on_warning: {}",
@@ -3732,10 +3735,37 @@ impl<'a> Decoder<'a> {
             // would feed a div-by-zero into the `out_*.div_ceil(*_factor)`
             // calls below and into downstream upsample math.
             if cb_h_factor == 0 || cb_v_factor == 0 || cr_h_factor == 0 || cr_v_factor == 0 {
-                return Err(JpegError::CorruptData(format!(
-                    "chroma upsample factor zero: cb={}x{} cr={}x{}",
+                let detail: String = format!(
+                    "chroma upsample factor zero (a chroma component out-samples luma): \
+                     cb={}x{} cr={}x{}",
                     cb_h_factor, cb_v_factor, cr_h_factor, cr_v_factor
-                )));
+                );
+                if !self.lenient {
+                    return Err(JpegError::CorruptData(detail));
+                }
+                // Lenient recovery (LAST_MILE P4-21): the colour/upsample
+                // pipeline assumes luma is the maximally-sampled component, an
+                // invariant this spec-valid-but-unusual sampling violates
+                // (e.g. Cr=h3v1 while Y=h1v1). djpeg decodes it; rather than
+                // reject and be *less* accepting than the reference, emit a
+                // best-effort neutral raster plus a warning so the lenient
+                // contract holds. Pixel-correct decoding is tracked as P4-21.
+                let mut recovered_warnings: Vec<DecodeWarning> = warnings.clone();
+                recovered_warnings.push(DecodeWarning::UnsupportedRecovered { detail });
+                let data: Vec<u8> = vec![128u8; out_width * out_height * bpp];
+                return Ok(Image {
+                    width: out_width,
+                    height: out_height,
+                    pixel_format: out_format,
+                    precision: 8,
+                    data,
+                    icc_profile: icc_profile.clone(),
+                    exif_data: exif_data.clone(),
+                    comment: self.metadata.comment.clone(),
+                    density: self.metadata.density,
+                    saved_markers: self.metadata.saved_markers.clone(),
+                    warnings: recovered_warnings,
+                });
             }
 
             // When both chroma components have the same factors, use the shared
