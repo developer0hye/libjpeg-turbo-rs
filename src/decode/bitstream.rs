@@ -194,20 +194,47 @@ impl<'a> BitReader<'a> {
         self.bits_left -= count;
     }
 
+    /// Restart-interval handler: discard the partial bit buffer and consume the
+    /// next restart marker.
+    ///
+    /// # Precondition
+    /// Only valid to call at a restart-interval boundary (every caller guards
+    /// it with `restart_interval > 0 && mcu_count % restart_interval == 0`),
+    /// where a `0xFF 0xDn` marker is expected ahead. It scans forward from the
+    /// current position and **may consume intervening bytes** to reach that
+    /// marker; do not call it expecting a "consume only if the marker is exactly
+    /// at `pos`" semantics.
     pub fn reset(&mut self) {
         self.bit_buffer = 0;
         self.bits_left = 0;
 
-        // Skip past the restart marker (0xFF 0xDn) if present.
-        while self.pos < self.data.len() {
-            if self.data[self.pos] == 0xFF {
+        // Scan forward to the next restart marker (0xFF 0xDn) and consume it.
+        //
+        // On a valid stream the interval's entropy decode consumes exactly up
+        // to the marker, so `pos` already points at the `0xFF` and nothing is
+        // skipped. On a CORRUPT stream the Huffman decode can terminate early,
+        // leaving one or more trailing data bytes between `pos` and the marker
+        // (e.g. a `0xAF` byte right before `0xFF 0xD0`). libjpeg's
+        // `process_restart` -> `read_restart_marker` -> `next_marker` skips
+        // those bytes to reach the marker; an earlier version of this routine
+        // only consumed a marker sitting exactly at `pos`, so it left `pos`
+        // mid-data and desynced every interval after the first. `0xFF 0x00`
+        // stuffing and `0xFF 0xFF` fill runs are walked like data; any
+        // non-restart marker (EOI/SOS/…) stops the scan without being
+        // consumed so end-of-scan handling still sees it.
+        while self.pos + 1 < self.data.len() {
+            if self.data[self.pos] != 0xFF {
                 self.pos += 1;
-                if self.pos < self.data.len() && (0xD0..=0xD7).contains(&self.data[self.pos]) {
-                    self.pos += 1;
-                    break;
+                continue;
+            }
+            match self.data[self.pos + 1] {
+                0xD0..=0xD7 => {
+                    self.pos += 2; // consume the restart marker
+                    return;
                 }
-            } else {
-                break;
+                0x00 => self.pos += 2, // stuffed literal 0xFF data byte
+                0xFF => self.pos += 1, // fill-byte run — re-examine next byte
+                _ => return,           // other marker: restart marker absent
             }
         }
     }
@@ -295,5 +322,89 @@ impl<'a> BitReader<'a> {
     /// Returns true if the reader has exhausted all input data.
     pub fn is_eof(&self) -> bool {
         self.pos >= self.data.len()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::BitReader;
+
+    /// Regression: on a corrupt stream the entropy decode of a restart
+    /// interval can terminate early, leaving trailing data byte(s) between the
+    /// reader position and the `0xFF 0xDn` marker. `reset()` must scan forward
+    /// past those bytes to consume the marker (mirroring libjpeg's
+    /// `process_restart` -> `next_marker`), otherwise every interval after the
+    /// first desyncs. Found by the local fuzz_decode_diff_c smoke sweep
+    /// (artifacts `pix_arm_2517` / `pix_arm_9320`).
+    #[test]
+    fn reset_scans_forward_past_trailing_data_to_rst() {
+        // [data, data, 0xAF (under-consumed), FF D0 (RST0), next-interval data]
+        let data = [0x12u8, 0x34, 0xAF, 0xFF, 0xD0, 0x56, 0x78];
+        let mut br = BitReader::new(&data);
+        br.set_position(2); // interval decode stopped at 0xAF, before the marker
+        br.reset();
+        assert_eq!(
+            br.position(),
+            5,
+            "reset() must skip the trailing 0xAF and consume FF D0, landing at \
+             the next interval's first byte"
+        );
+    }
+
+    #[test]
+    fn reset_consumes_marker_already_at_pos() {
+        // Valid-stream case: the interval consumed exactly up to the marker.
+        let data = [0xFFu8, 0xD1, 0x99];
+        let mut br = BitReader::new(&data);
+        br.reset();
+        assert_eq!(br.position(), 2, "reset() consumes the RST marker at pos");
+    }
+
+    #[test]
+    fn reset_walks_ff00_stuffing_before_rst() {
+        // 0xFF 0x00 is a stuffed literal 0xFF data byte, not a marker — it must
+        // be walked over while scanning to the real RST marker.
+        let data = [0xFFu8, 0x00, 0xFF, 0xD2, 0xAB];
+        let mut br = BitReader::new(&data);
+        br.reset();
+        assert_eq!(
+            br.position(),
+            4,
+            "reset() walks FF00 stuffing then takes RST2"
+        );
+    }
+
+    #[test]
+    fn reset_stops_at_non_restart_marker() {
+        // EOI (or any non-RST marker) before a restart: stop without consuming
+        // so end-of-scan handling still observes it.
+        let data = [0xABu8, 0xFF, 0xD9, 0x00];
+        let mut br = BitReader::new(&data);
+        br.reset();
+        assert_eq!(
+            br.position(),
+            1,
+            "reset() stops at the FF preceding a non-restart marker (EOI)"
+        );
+    }
+
+    #[test]
+    fn reset_consumes_rst_as_final_two_bytes() {
+        // Boundary: the RST marker is the last two bytes, reached after a
+        // trailing data byte — the `pos + 1 < len` bound must still consume it.
+        let data = [0xABu8, 0xFF, 0xD0];
+        let mut br = BitReader::new(&data);
+        br.reset();
+        assert_eq!(br.position(), 3, "reset() consumes a trailing RST at EOF");
+    }
+
+    #[test]
+    fn reset_falls_through_on_dangling_ff() {
+        // A lone trailing 0xFF with no following byte must not panic and must
+        // leave the reader at EOF.
+        let data = [0x12u8, 0xFF];
+        let mut br = BitReader::new(&data);
+        br.reset();
+        assert_eq!(br.position(), 1, "reset() halts on a dangling final 0xFF");
     }
 }
