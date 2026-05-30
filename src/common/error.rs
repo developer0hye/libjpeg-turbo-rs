@@ -40,6 +40,12 @@ pub enum DecodeWarning {
         decoded_mcus: usize,
         total_mcus: usize,
     },
+    /// A spec-valid but unsupported feature was encountered and recovered from
+    /// in lenient mode by emitting a best-effort (neutral-filled) raster — e.g.
+    /// non-standard sampling where a chroma component out-samples luma (the
+    /// upsample pipeline assumes luma is the maximally-sampled component; see
+    /// LAST_MILE P4-21). Strict mode rejects these instead.
+    UnsupportedRecovered { detail: String },
 }
 
 impl std::fmt::Display for DecodeWarning {
@@ -65,6 +71,9 @@ impl std::fmt::Display for DecodeWarning {
                     "truncated data: decoded {}/{} MCUs",
                     decoded_mcus, total_mcus
                 )
+            }
+            Self::UnsupportedRecovered { detail } => {
+                write!(f, "unsupported feature recovered (lenient): {}", detail)
             }
         }
     }
