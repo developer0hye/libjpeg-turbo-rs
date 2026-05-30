@@ -60,6 +60,7 @@ Filed 2026-05-18 after an independent cold review (Claude + codex, two-pass) sur
 | P4-13 | [`jpeg_consume_input` returns EOI instead of honoring per-byte source suspension](last_mile/phase4.md#p4-13-jpeg_consume_input-returns-eoi-instead-of-honoring-per-byte-source-suspension--open) | 4 | OPEN | Streaming/suspension contract divergence; documented at `jpeglib.rs:4234-4238` in code. |
 | P4-14 | [`max_memory_to_use` is ABI-mirrored but not enforced in the C-side allocation path](last_mile/phase4.md#p4-14-max_memory_to_use-is-abi-mirrored-but-not-enforced-in-the-c-side-allocation-path--open) | 4 | OPEN | Field at correct offset, but zero comparisons against it anywhere in `memmgr.rs`. |
 | P4-17 | [`source_mgr_suspends_every_byte` test exercises chunked-refill, not real suspension](last_mile/phase4.md#p4-17-source_mgr_suspends_every_byte-test-exercises-chunked-refill-not-real-suspension--open) | 4 | OPEN | P4-5's primary pattern returns TRUE after one byte; a real `JPEG_SUSPENDED` test is still missing. |
+| P4-20 | [x86 SSE2 IDCT full path is i32 4-lane, not an i16-faithful port](last_mile/phase4.md#p4-20-x86-sse2-idct-full-path-is-i32-4-lane-not-an-i16-faithful-port--open) | 4 | OPEN | Corrupt-input-only: rows-1–7-non-zero overflow blocks wrap/saturate unlike C-SSE2. AVX2 already faithful. Filed under the P4-19 fix. |
 
 P4-15 (`jpeg16_*_raw_data` parity audit) was filed and closed-as-N/A in the same 2026-05-18 pass — upstream `jpeglib.h:1039-1041` / `:1096-1098` declares raw-data only for 8/12-bit precision, so our omission mirrors theirs.
 

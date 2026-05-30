@@ -457,14 +457,26 @@ pub fn idct_float_8x8(coeffs: &[i16; 64], quant: &[u16; 64]) -> [i16; 64] {
 }
 
 pub fn idct_8x8(coeffs: &[i16; 64]) -> [i16; 64] {
-    let mut workspace = [0i32; 64];
+    // libjpeg-turbo's SIMD islow (the codec djpeg actually runs on every
+    // platform — verified bit-identical between x86 SSE2/AVX2 and AArch64
+    // NEON) keeps the pass-1 column workspace in 16-bit lanes: the DC shift
+    // is `psllw`/`vshl_n_s16` and the general descale is `packssdw`/`vrshrn`,
+    // both of which narrow to i16 *before* pass 2 reads them. For valid
+    // inputs every pass-1 result fits in i16, so this is a no-op; only
+    // corrupt/out-of-range coefficients (e.g. a DC predictor that ran away
+    // on a fuzzed bitstream) overflow, and there the i16 wrap is exactly the
+    // reference behavior. Our NEON port already mirrors this — storing the
+    // workspace as i32 here is what made the scalar/x86 paths diverge from C
+    // (and from our own NEON path) on such inputs.
+    let mut workspace = [0i16; 64];
 
     // Pass 1: process columns
     for col in 0..8 {
         let s = |row: usize| coeffs[row * 8 + col] as i32;
 
         if s(1) == 0 && s(2) == 0 && s(3) == 0 && s(4) == 0 && s(5) == 0 && s(6) == 0 && s(7) == 0 {
-            let dcval = s(0) << PASS1_BITS;
+            // Wrapping i16 shift mirrors `psllw` / `vshl_n_s16`.
+            let dcval = (s(0) as i16).wrapping_shl(PASS1_BITS as u32);
             for row in 0..8 {
                 workspace[row * 8 + col] = dcval;
             }
@@ -473,7 +485,8 @@ pub fn idct_8x8(coeffs: &[i16; 64]) -> [i16; 64] {
 
         let result = idct_1d(s(0), s(1), s(2), s(3), s(4), s(5), s(6), s(7));
         for (row, &val) in result.iter().enumerate() {
-            workspace[row * 8 + col] = descale(val, CONST_BITS - PASS1_BITS);
+            // Narrow to i16 (wrapping) like the SIMD pass-1 pack.
+            workspace[row * 8 + col] = descale(val, CONST_BITS - PASS1_BITS) as i16;
         }
     }
 
@@ -482,7 +495,7 @@ pub fn idct_8x8(coeffs: &[i16; 64]) -> [i16; 64] {
     let descale_bits = CONST_BITS + PASS1_BITS + 3;
 
     for row in 0..8 {
-        let w = |col: usize| workspace[row * 8 + col];
+        let w = |col: usize| workspace[row * 8 + col] as i32;
 
         if w(1) == 0 && w(2) == 0 && w(3) == 0 && w(4) == 0 && w(5) == 0 && w(6) == 0 && w(7) == 0 {
             let dcval = descale(w(0), PASS1_BITS + 3) as i16;
