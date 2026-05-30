@@ -191,22 +191,19 @@ unsafe fn sse2_idct_islow_core(
         let row0_ac = _mm_and_si128(row0, ac_mask);
 
         if _mm_movemask_epi8(_mm_cmpeq_epi8(row0_ac, zero)) == 0xFFFF {
-            // Mirror the i32-lane pipeline exactly. Pass-1 IDCT of
-            // [dq, 0, ..., 0] computes `dq << CONST_BITS` then descales
-            // by `CONST_BITS - PASS1_BITS = 11` with rounding. Pass-2
-            // does the same `<< CONST_BITS` on the pass-1 result —
-            // **this can wrap i32** when the pass-1 value is large
-            // (e.g. `coeff[0]=512, quant[0]=255` → pass1=522240, then
-            // `522240 << 13 = 4278190080` overflows i32 to -16777216,
-            // and the final clamped pixel is 64, not the un-wrapped 255).
-            // Use `wrapping_shl` + `wrapping_add` to match `_mm_slli_epi32`
-            // + `_mm_add_epi32` semantics.
-            let dq_i32: i32 = (coeffs[0] as i32) * (quant[0] as i32);
-            let pass1_pre: i32 = dq_i32.wrapping_shl(CONST_BITS as u32);
-            let pass1_i32: i32 = pass1_pre.wrapping_add(1 << (CONST_BITS - PASS1_BITS - 1))
-                >> (CONST_BITS - PASS1_BITS);
-            let pass2_pre: i32 = pass1_i32.wrapping_shl(CONST_BITS as u32);
-            let pass2_i32: i32 = pass2_pre.wrapping_add(1 << (CONST_BITS + PASS1_BITS + 3 - 1))
+            // Mirror libjpeg-turbo's SIMD "AC terms all zero" shortcut, which
+            // keeps the per-column DC in a *16-bit* lane: `pmullw` (dequant)
+            // then `psllw PASS1_BITS`, both of which wrap on i16 overflow.
+            // Only pass 2 widens to i32. An earlier version replicated our
+            // own i32 4-lane pipeline instead, which wraps at a different
+            // point (i32, after `<< CONST_BITS`) and diverged from djpeg on
+            // out-of-range DC values. For valid inputs the lanes fit i16, so
+            // both agree.
+            let dq_i16: i16 = coeffs[0].wrapping_mul(quant[0] as i16); // pmullw
+            let x_i16: i16 = dq_i16.wrapping_shl(PASS1_BITS as u32); // psllw
+                                                                     // Pass 2 (DC-only row): tmp0 = x << CONST_BITS, then DESCALE_P2.
+            let pass2_pre: i32 = (x_i16 as i32) << CONST_BITS;
+            let pass2_i32: i32 = (pass2_pre + (1 << (CONST_BITS + PASS1_BITS + 3 - 1)))
                 >> (CONST_BITS + PASS1_BITS + 3);
             let pv: u8 = (pass2_i32 + 128).clamp(0, 255) as u8;
             let fill = _mm_set1_epi8(pv as i8);
@@ -215,6 +212,21 @@ unsafe fn sse2_idct_islow_core(
             }
             return;
         }
+
+        // AC-all-zero block (rows 1-7 zero) with a non-zero row-0 AC term.
+        // libjpeg-turbo's SIMD takes the `psllw` pass-1 shortcut here, which
+        // *wraps* each column DC in a 16-bit lane; our i32 4-lane full path
+        // below would instead *saturate* (`packssdw`), diverging from djpeg on
+        // out-of-range coefficients (e.g. a DC predictor that ran away on a
+        // corrupt bitstream). This shape is rare and only matters for such
+        // inputs, so fall back to the i16-faithful scalar IDCT to stay
+        // bit-identical to the reference. Valid images never reach the wrap.
+        let mut tmp = [0u8; 64];
+        crate::simd::scalar::scalar_idct_islow(coeffs, quant, &mut tmp);
+        for r in 0..8 {
+            std::ptr::copy_nonoverlapping(tmp.as_ptr().add(r * 8), output.add(r * stride), 8);
+        }
+        return;
     }
 
     // --- Full IDCT path ---
