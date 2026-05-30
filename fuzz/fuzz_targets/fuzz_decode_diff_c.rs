@@ -89,10 +89,7 @@ fn djpeg_path() -> Option<PathBuf> {
 /// flag this gives the fuzz target a *bilateral* recovery signal:
 /// pixel-diff is only skipped when both sides agree the input is
 /// corrupt, so Rust cannot unilaterally suppress the C oracle.
-fn decode_with_djpeg(
-    djpeg: &PathBuf,
-    jpeg: &[u8],
-) -> Option<(usize, usize, usize, Vec<u8>, bool)> {
+fn decode_with_djpeg(djpeg: &PathBuf, jpeg: &[u8]) -> Option<(usize, usize, usize, Vec<u8>, bool)> {
     let mut child = Command::new(djpeg)
         .arg("-pnm")
         .stdin(Stdio::piped())
@@ -157,14 +154,29 @@ fn parse_pnm(bytes: &[u8]) -> Option<(usize, usize, usize, Vec<u8>)> {
     Some((w, h, channels, bytes[i..i + needed].to_vec()))
 }
 
-/// Returns (width, height, channels, raw_pixels, lenient_recovery_used).
-///
-/// When `lenient_recovery_used` is true, our Rust decoder gray-filled
-/// at least one block. The fuzz_target then skips the pixel-diff
-/// assertion because djpeg's recovery (often last-valid-block fill)
-/// produces a different but equally valid output for that block — the
-/// IDCT-tolerance pixel check is only meaningful for clean decodes.
-fn rust_decode(jpeg: &[u8]) -> Option<(usize, usize, usize, Vec<u8>, bool)> {
+/// Outcome of the Rust decode, with a third state for "decoded fine but to a
+/// format this differential can't compare".
+enum RustOutcome {
+    /// Decoded to a comparable Grayscale/RGB raster:
+    /// `(width, height, channels, raw_pixels, lenient_recovery_used)`.
+    ///
+    /// When `lenient_recovery_used` is true, our Rust decoder gray-filled at
+    /// least one block. The fuzz_target then skips the pixel-diff assertion
+    /// because djpeg's recovery (often last-valid-block fill) produces a
+    /// different but equally valid output for that block — the IDCT-tolerance
+    /// pixel check is only meaningful for clean decodes.
+    Pixels(usize, usize, usize, Vec<u8>, bool),
+    /// Decoded *successfully*, but to a 4-component CMYK/YCCK raster. djpeg
+    /// renders these to a 3-channel PNM via an Adobe/YCCK colour transform we
+    /// deliberately don't replicate in the raw `Image.data`, so the rasters
+    /// aren't byte-comparable. This is NOT a drop-in regression — both
+    /// decoders accepted the input — so the caller skips rather than panics.
+    OutOfScopeFormat,
+    /// Rust rejected the input outright (header parse or decode error).
+    Rejected,
+}
+
+fn rust_decode(jpeg: &[u8]) -> RustOutcome {
     // Use lenient mode to mirror djpeg's default best-effort behaviour.
     // djpeg treats CorruptData (truncated scans, invalid AC run/size,
     // out-of-bounds coefficient indices, etc.) as warnings and fills
@@ -173,20 +185,30 @@ fn rust_decode(jpeg: &[u8]) -> Option<(usize, usize, usize, Vec<u8>, bool)> {
     // regression" panics. The strict path is exercised by
     // `fuzz_decompress`; this target compares Rust's *drop-in*
     // behaviour against djpeg's *drop-in* behaviour.
-    let mut decoder = Decoder::new(jpeg).ok()?;
+    let Ok(mut decoder) = Decoder::new(jpeg) else {
+        return RustOutcome::Rejected;
+    };
     decoder.set_lenient(true);
     // djpeg enables block smoothing by default for progressive images.
     // Keep the differential oracle aligned, especially for truncated
     // progressive streams that only contain early DC scans.
     decoder.set_block_smoothing(true);
-    let img = decoder.decode_image().ok()?;
+    let Ok(img) = decoder.decode_image() else {
+        return RustOutcome::Rejected;
+    };
     let channels: usize = match img.pixel_format {
         libjpeg_turbo_rs::PixelFormat::Grayscale => 1,
         libjpeg_turbo_rs::PixelFormat::Rgb => 3,
-        _ => return None, // out-of-scope formats — skip the differential.
+        _ => return RustOutcome::OutOfScopeFormat,
     };
     let lenient_recovery_used = !img.warnings.is_empty();
-    Some((img.width, img.height, channels, img.data, lenient_recovery_used))
+    RustOutcome::Pixels(
+        img.width,
+        img.height,
+        channels,
+        img.data,
+        lenient_recovery_used,
+    )
 }
 
 fuzz_target!(|data: &[u8]| {
@@ -225,10 +247,12 @@ fuzz_target!(|data: &[u8]| {
     let r_result = rust_decode(data);
 
     match (c_result, r_result) {
-        (
-            Some((cw, ch, cc, c_px, c_lenient)),
-            Some((rw, rh, rc, r_px, r_lenient)),
-        ) => {
+        // Rust decoded fine but to a 4-component CMYK/YCCK raster that isn't
+        // byte-comparable to djpeg's colour-transformed RGB output. Both
+        // decoders accepted the input, so this is not a drop-in regression —
+        // skip the differential (regardless of what C produced).
+        (_, RustOutcome::OutOfScopeFormat) => {}
+        (Some((cw, ch, cc, c_px, c_lenient)), RustOutcome::Pixels(rw, rh, rc, r_px, r_lenient)) => {
             // (1) Acceptance agreement: when C succeeds, Rust succeeded
             // (we're inside Some(...) on both arms — pass).
             // (2) Dimension agreement.
@@ -294,7 +318,7 @@ fuzz_target!(|data: &[u8]| {
                 );
             }
         }
-        (Some(_), None) => {
+        (Some(_), RustOutcome::Rejected) => {
             // C accepted, Rust rejected — drop-in regression. The
             // intent of "we are at least as accepting as the reference"
             // gates here.
