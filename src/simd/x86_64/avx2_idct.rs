@@ -200,6 +200,20 @@ unsafe fn avx2_idct_islow_core(
             }
             return;
         }
+
+        // AC-all-zero block (rows 1-7 zero) with a non-zero row-0 AC term.
+        // libjpeg-turbo's SIMD takes the `psllw` pass-1 shortcut here, which
+        // *wraps* each column DC in a 16-bit lane; the saturating full path
+        // below (`_mm256_packs_epi32`) would diverge from djpeg on out-of-range
+        // coefficients. This shape is rare and only matters for such corrupt
+        // inputs, so fall back to the i16-faithful scalar IDCT. Valid images
+        // never reach the wrap.
+        let mut tmp = [0u8; 64];
+        crate::simd::scalar::scalar_idct_islow(coeffs, quant, &mut tmp);
+        for r in 0..8 {
+            std::ptr::copy_nonoverlapping(tmp.as_ptr().add(r * 8), output.add(r * stride), 8);
+        }
+        return;
     }
 
     // --- Load & dequantize: 2 rows per ymm ---
