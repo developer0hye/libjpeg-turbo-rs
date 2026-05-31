@@ -1636,9 +1636,14 @@ impl<'a> Decoder<'a> {
         mcus_y: usize,
         comp_block_sizes: &[usize],
     ) -> Result<(Vec<Vec<u8>>, Vec<DecodeWarning>)> {
-        // Allocate component planes (full MCU-aligned size, zero-initialized).
-        // Zero-init is needed because non-interleaved scans may encode fewer
-        // blocks than the plane holds (padding blocks at right/bottom edges).
+        // Allocate component planes (full MCU-aligned size), pre-filled with the
+        // level-shift midpoint 128 (CENTERJSAMPLE). Any sample not overwritten by
+        // a decoded IDCT — a component that no scan ever covers, or MCU-alignment
+        // padding blocks past the encoded edge — must equal what libjpeg-turbo
+        // produces there: the IDCT of all-zero coefficients, i.e. `0 + 128`, NOT
+        // 0. (P4-22: a zero-init left a never-scanned luma component at Y=0,
+        // decoding a flat 4:4:4 stream to RGB (178,0,0) where djpeg yields
+        // (255,52,54) — a both-arch divergence of 128.)
         let mut component_planes: Vec<Vec<u8>> = frame
             .components
             .iter()
@@ -1648,7 +1653,7 @@ impl<'a> Decoder<'a> {
                     mcus_x * comp.horizontal_sampling as usize * comp_block_sizes[ci];
                 let comp_h: usize = mcus_y * comp.vertical_sampling as usize * comp_block_sizes[ci];
                 let size: usize = comp_w * comp_h;
-                vec![0u8; size]
+                vec![128u8; size]
             })
             .collect();
 
