@@ -169,10 +169,11 @@ fn multiscan_noninterleaved_64x64_444_matches_djpeg() {
 }
 
 /// P4-23: lenient mode must be at least as accepting as `djpeg`, which silently
-/// conceals the corrupt entropy data here. Currently our lenient decode rejects
-/// outright, so `(Some, Rejected)` would panic the fuzz oracle.
+/// conceals the corrupt entropy here (the stream fragments into spurious
+/// non-interleaved scans, and the non-interleaved decode path hit an invalid
+/// Huffman code). Lenient decode must recover (gray-fill + warning), not reject
+/// — otherwise the differential fuzzer's `(Some, Rejected)` arm panics.
 #[test]
-#[ignore = "P4-23 OPEN: lenient mode rejects invalid-Huffman that djpeg conceals; see docs/last_mile/phase4.md#p4-23"]
 fn corrupt_huffman_65x65_422_lenient_matches_djpeg() {
     let Some(djpeg) = djpeg_path() else {
         if is_ci() {
@@ -197,7 +198,21 @@ fn corrupt_huffman_65x65_422_lenient_matches_djpeg() {
     assert_eq!((img.width, img.height), (65, 65));
     assert_eq!(img.pixel_format, PixelFormat::Rgb);
 
-    // Once recovery lands, both sides did lenient fill, so the fuzz oracle skips
-    // the pixel compare; we only assert acceptance + dims here.
+    // Lenient recovery must mark itself with at least one warning, so the fuzz
+    // oracle's bilateral-OR lenient gate skips the pixel compare (both sides did
+    // best-effort fill, and the two recovery strategies legitimately differ).
+    // We assert acceptance + dims + warning, not pixels.
+    assert!(
+        !img.warnings.is_empty(),
+        "P4-23: lenient decode must emit a recovery warning (djpeg concealed the corrupt scan)"
+    );
     let _ = c_pixels;
+
+    // Strict mode must still reject — the recovery is gated on lenient mode.
+    let mut strict = Decoder::new(CORRUPT_HUFFMAN_422).expect("decoder rejected P4-23 header");
+    strict.set_lenient(false);
+    assert!(
+        strict.decode_image().is_err(),
+        "P4-23: strict mode must still reject the corrupt stream"
+    );
 }
