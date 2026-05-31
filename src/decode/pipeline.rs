@@ -1658,6 +1658,7 @@ impl<'a> Decoder<'a> {
             .collect();
 
         // Process each scan independently
+        let mut warnings: Vec<DecodeWarning> = Vec::new();
         for scan_info in &self.metadata.scans {
             let scan = &scan_info.header;
 
@@ -1734,7 +1735,21 @@ impl<'a> Decoder<'a> {
             // In a non-interleaved scan, each MCU is a single block.
             // Iterate over encoded blocks (may be fewer than plane blocks
             // when image dimensions don't align with the MCU grid).
-            for by in 0..encoded_blocks_y {
+            // Lenient only: reset this component's plane to the 128 midpoint
+            // before decoding the scan. A component covered by an earlier scan
+            // (duplicate-component non-interleaved streams, the P4-22 family)
+            // would otherwise leak that earlier scan's pixels into any block this
+            // scan fails to overwrite under lenient recovery; resetting first
+            // makes every un-decoded block read as djpeg's gray fill, never stale
+            // prior-scan data, and preserves last-scan-wins for clean re-scans.
+            // Strict mode returns `Err` on the first decode error and never
+            // produces a partially-overwritten plane, so it needs no reset and
+            // stays byte-identical to the pre-P4-23 path.
+            if self.lenient {
+                component_planes[comp_idx].fill(128);
+            }
+            let mut scan_error: bool = false;
+            'blocks: for by in 0..encoded_blocks_y {
                 for bx in 0..encoded_blocks_x {
                     // Restart interval handling
                     if restart_interval > 0
@@ -1746,13 +1761,43 @@ impl<'a> Decoder<'a> {
                     }
 
                     // Decode one 8x8 block
-                    mcu_decoder.decode_block(
+                    match mcu_decoder.decode_block(
                         &mut bit_reader,
                         comp_idx,
                         dc_table,
                         ac_table,
                         &mut coeffs,
-                    )?;
+                    ) {
+                        Ok(()) => {}
+                        // Lenient recovery (P4-23), mirroring the interleaved
+                        // general path in `decode_baseline_planes` and libjpeg
+                        // `jdhuff`'s "fake a zero" concealment: zero the offending
+                        // block (so the IDCT below writes the 128 midpoint), warn
+                        // once per scan, reset the DC predictor, and keep decoding
+                        // — so a restart interval resyncs at the next RST rather
+                        // than discarding the recoverable tail. A corrupt stream
+                        // often fragments into spurious non-interleaved scans,
+                        // which is how this path is reached. Strict mode still
+                        // propagates the error.
+                        Err(e) if self.lenient => {
+                            coeffs = [0i16; 64];
+                            if !scan_error {
+                                warnings.push(DecodeWarning::HuffmanError {
+                                    mcu_x: bx,
+                                    mcu_y: by,
+                                    message: e.to_string(),
+                                });
+                                scan_error = true;
+                            }
+                            // Out of entropy data: remaining blocks keep the 128
+                            // plane init, so stop this scan.
+                            if matches!(e, JpegError::UnexpectedEof) {
+                                break 'blocks;
+                            }
+                            mcu_decoder.reset();
+                        }
+                        Err(e) => return Err(e),
+                    }
 
                     // IDCT and store into the component plane
                     let block_x: usize = bx * bs;
@@ -1769,7 +1814,7 @@ impl<'a> Decoder<'a> {
             }
         }
 
-        Ok((component_planes, Vec::new()))
+        Ok((component_planes, warnings))
     }
 
     /// Decode arithmetic-coded planes (SOF9 sequential).
