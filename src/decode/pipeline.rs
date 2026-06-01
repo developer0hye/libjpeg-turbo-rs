@@ -1829,10 +1829,22 @@ impl<'a> Decoder<'a> {
     ) -> Result<(Vec<Vec<u8>>, Vec<DecodeWarning>)> {
         use crate::decode::arithmetic::ArithDecoder;
 
+        // Non-interleaved arithmetic sequential: multiple SOS markers, each with
+        // a single component. Dispatch to the dedicated multi-scan path (P4-24).
+        // The body below handles the interleaved single-scan case only.
+        if self.metadata.scans.len() > 1 {
+            return self.decode_arithmetic_multiscan_planes(
+                frame,
+                quant_tables,
+                mcus_x,
+                mcus_y,
+                comp_block_sizes,
+            );
+        }
+
         let scan = &self.metadata.scan;
 
         // Allocate component planes
-        #[allow(clippy::uninit_vec)]
         let mut component_planes: Vec<Vec<u8>> = frame
             .components
             .iter()
@@ -1872,14 +1884,19 @@ impl<'a> Decoder<'a> {
                     .components
                     .iter()
                     .position(|fc| fc.id == sc.component_id)
-                    .unwrap_or(0);
-                (
+                    .ok_or_else(|| {
+                        JpegError::CorruptData(format!(
+                            "scan references unknown component id {}",
+                            sc.component_id
+                        ))
+                    })?;
+                Ok((
                     comp_idx,
                     sc.dc_table_index as usize,
                     sc.ac_table_index as usize,
-                )
+                ))
             })
-            .collect();
+            .collect::<Result<Vec<(usize, usize, usize)>>>()?;
 
         let entropy_data = &self.raw_data[self.metadata.entropy_data_offset..];
         let mut arith = ArithDecoder::new(entropy_data, 0);
@@ -1939,6 +1956,186 @@ impl<'a> Decoder<'a> {
                 }
                 if restart_interval > 0 {
                     restarts_to_go -= 1;
+                }
+            }
+        }
+
+        Ok((component_planes, Vec::new()))
+    }
+
+    /// Decode arithmetic sequential (SOF9) multi-scan into component planes
+    /// (P4-24). Each SOS carries its own arithmetic entropy segment and may be
+    /// non-interleaved (one component) or partially interleaved (a subset of
+    /// components, e.g. the `cjpeg -scans "0; 1 2;"` script). This mirrors
+    /// libjpeg-turbo's per-scan `start_pass`: a fresh `ArithDecoder` per scan
+    /// (resetting coder state, statistics, and DC predictors) on
+    /// `scan_info.data_offset`, using the scan's own MCU layout — a single-block
+    /// raster for a one-component scan (T.81 A.2.3), or the frame-level
+    /// interleaved MCU grid with `Hi·Vi` blocks per component for a multi-
+    /// component scan (A.2.2). Planes are pre-filled with the 128 midpoint
+    /// (the IDCT of zero) so a component no scan covers, or MCU-alignment
+    /// padding past the encoded edge, matches libjpeg-turbo instead of reading
+    /// as 0 (the P4-22 fix, applied here too).
+    fn decode_arithmetic_multiscan_planes(
+        &self,
+        frame: &FrameHeader,
+        quant_tables: &[&QuantTable],
+        mcus_x: usize,
+        mcus_y: usize,
+        comp_block_sizes: &[usize],
+    ) -> Result<(Vec<Vec<u8>>, Vec<DecodeWarning>)> {
+        use crate::decode::arithmetic::ArithDecoder;
+
+        let mut component_planes: Vec<Vec<u8>> = frame
+            .components
+            .iter()
+            .enumerate()
+            .map(|(ci, comp)| {
+                let comp_w: usize =
+                    mcus_x * comp.horizontal_sampling as usize * comp_block_sizes[ci];
+                let comp_h: usize = mcus_y * comp.vertical_sampling as usize * comp_block_sizes[ci];
+                vec![128u8; comp_w * comp_h]
+            })
+            .collect();
+
+        let max_h: usize = frame
+            .components
+            .iter()
+            .map(|c| c.horizontal_sampling as usize)
+            .max()
+            .unwrap_or(1);
+        let max_v: usize = frame
+            .components
+            .iter()
+            .map(|c| c.vertical_sampling as usize)
+            .max()
+            .unwrap_or(1);
+
+        // Process each scan independently: a fresh arithmetic stream (reset
+        // coder state + statistics + DC predictors) on the scan's own entropy
+        // segment, matching libjpeg-turbo's per-scan `start_pass` semantics.
+        for scan_info in &self.metadata.scans {
+            let scan = &scan_info.header;
+            if scan.components.is_empty() {
+                return Err(JpegError::CorruptData(
+                    "arithmetic scan has 0 components".into(),
+                ));
+            }
+
+            // Resolve this scan's components → (frame index, dc tbl, ac tbl),
+            // rejecting unknown selectors rather than misrouting them. `comp_idx`
+            // is always < 4 (SOF rejects >4 components), so it indexes the
+            // arithmetic decoder's fixed per-component predictor arrays safely.
+            let scan_comps: Vec<(usize, usize, usize)> = scan
+                .components
+                .iter()
+                .map(|sc| {
+                    let comp_idx = frame
+                        .components
+                        .iter()
+                        .position(|fc| fc.id == sc.component_id)
+                        .ok_or_else(|| {
+                            JpegError::CorruptData(format!(
+                                "scan references unknown component id {}",
+                                sc.component_id
+                            ))
+                        })?;
+                    Ok((
+                        comp_idx,
+                        sc.dc_table_index as usize,
+                        sc.ac_table_index as usize,
+                    ))
+                })
+                .collect::<Result<Vec<(usize, usize, usize)>>>()?;
+
+            let entropy_data: &[u8] = &self.raw_data[scan_info.data_offset..];
+            let mut arith = ArithDecoder::new(entropy_data, 0);
+            for i in 0..crate::decode::arithmetic::NUM_ARITH_TBLS {
+                let (l, u) = self.metadata.arith_dc_params[i];
+                arith.set_dc_conditioning(i, l, u);
+                arith.set_ac_conditioning(i, self.metadata.arith_ac_params[i]);
+            }
+
+            let restart_interval: u32 = scan_info.restart_interval as u32;
+            let mut restarts_to_go: u32 = restart_interval;
+            let mut coeffs: [i16; 64];
+
+            if scan_comps.len() == 1 {
+                // Non-interleaved (T.81 A.2.3): each MCU is a single block of the
+                // component, laid out in its own block raster sized from the
+                // component's sample dimensions.
+                let (comp_idx, dc_tbl, ac_tbl) = scan_comps[0];
+                let comp = &frame.components[comp_idx];
+                let h_samp: usize = comp.horizontal_sampling as usize;
+                let v_samp: usize = comp.vertical_sampling as usize;
+                let comp_width_samples: usize = (frame.width as usize * h_samp).div_ceil(max_h);
+                let comp_height_samples: usize = (frame.height as usize * v_samp).div_ceil(max_v);
+                let encoded_blocks_x: usize = comp_width_samples.div_ceil(8);
+                let encoded_blocks_y: usize = comp_height_samples.div_ceil(8);
+                let bs: usize = comp_block_sizes[comp_idx];
+                let comp_w: usize = mcus_x * h_samp * bs;
+                let qt_values: &[u16; 64] = &quant_tables[comp_idx].values;
+
+                for by in 0..encoded_blocks_y {
+                    for bx in 0..encoded_blocks_x {
+                        if restart_interval > 0 && restarts_to_go == 0 {
+                            arith.process_restart();
+                            restarts_to_go = restart_interval;
+                        }
+                        coeffs = [0i16; 64];
+                        arith.decode_dc_sequential(&mut coeffs, comp_idx, dc_tbl)?;
+                        arith.decode_ac_sequential(&mut coeffs, ac_tbl)?;
+                        let dst_offset: usize = (by * bs) * comp_w + (bx * bs);
+                        unsafe {
+                            let dst: *mut u8 =
+                                component_planes[comp_idx].as_mut_ptr().add(dst_offset);
+                            self.idct_scaled_strided(&coeffs, qt_values, dst, comp_w, bs);
+                        }
+                        if restart_interval > 0 {
+                            restarts_to_go -= 1;
+                        }
+                    }
+                }
+            } else {
+                // Interleaved subset (T.81 A.2.2): MCUs walk the frame-level grid
+                // (`mcus_x`×`mcus_y`, sized from frame max sampling), and each MCU
+                // holds `Hi·Vi` blocks for every component in the scan, in scan
+                // order. Components absent from this scan keep their 128 fill.
+                for mcu_y in 0..mcus_y {
+                    for mcu_x in 0..mcus_x {
+                        if restart_interval > 0 && restarts_to_go == 0 {
+                            arith.process_restart();
+                            restarts_to_go = restart_interval;
+                        }
+                        for &(comp_idx, dc_tbl, ac_tbl) in &scan_comps {
+                            let comp = &frame.components[comp_idx];
+                            let h_blocks: usize = comp.horizontal_sampling as usize;
+                            let v_blocks: usize = comp.vertical_sampling as usize;
+                            let bs: usize = comp_block_sizes[comp_idx];
+                            let comp_w: usize = mcus_x * h_blocks * bs;
+                            let qt_values: &[u16; 64] = &quant_tables[comp_idx].values;
+                            for v in 0..v_blocks {
+                                for h in 0..h_blocks {
+                                    coeffs = [0i16; 64];
+                                    arith.decode_dc_sequential(&mut coeffs, comp_idx, dc_tbl)?;
+                                    arith.decode_ac_sequential(&mut coeffs, ac_tbl)?;
+                                    let bx = mcu_x * h_blocks + h;
+                                    let by = mcu_y * v_blocks + v;
+                                    let dst_offset: usize = (by * bs) * comp_w + (bx * bs);
+                                    unsafe {
+                                        let dst: *mut u8 =
+                                            component_planes[comp_idx].as_mut_ptr().add(dst_offset);
+                                        self.idct_scaled_strided(
+                                            &coeffs, qt_values, dst, comp_w, bs,
+                                        );
+                                    }
+                                }
+                            }
+                        }
+                        if restart_interval > 0 {
+                            restarts_to_go -= 1;
+                        }
+                    }
                 }
             }
         }
