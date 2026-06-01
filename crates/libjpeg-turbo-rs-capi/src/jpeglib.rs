@@ -442,6 +442,15 @@ impl JpegSource {
             JpegSource::None => None,
         }
     }
+
+    /// Mutable access to the backing `Vec` when the source is `Owned`, so the
+    /// P4-13 incremental drain can append freshly-pulled body bytes in place.
+    fn as_owned_mut(&mut self) -> Option<&mut Vec<u8>> {
+        match self {
+            JpegSource::Owned(v) => Some(v),
+            _ => None,
+        }
+    }
 }
 
 /// J_COLOR_SPACE numeric constants matching `jpeglib.h`. Only the
@@ -648,6 +657,24 @@ struct DecompressPrivate {
     /// `jpeg_read_header` first on the bare tables blob, then on each
     /// strip's image-without-tables payload.
     tables_only_prefix: Option<Vec<u8>>,
+    /// P4-13: `TRUE` when `jpeg_read_header` returned `JPEG_HEADER_OK` from a
+    /// *suspending* source manager that had delivered the header (through the
+    /// first SOS) but not yet the full body (entropy + remaining scans + EOI).
+    /// While set, `jpeg_consume_input` drives the body drain in lock-step with
+    /// the source manager (returning `JPEG_REACHED_SOS` / `JPEG_REACHED_EOI` /
+    /// `JPEG_SUSPENDED`), and pixel decode is deferred until the body is
+    /// complete. Only ever set when `fill_input_buffer` returns `FALSE` mid-body
+    /// — so non-suspending consumers (libtiff, Pillow's `mem_src`, djpeg) never
+    /// take this path and keep the original fully-buffered behaviour.
+    body_incomplete: bool,
+    /// Offset into `source` from which `scan_next_boundary` resumes looking for
+    /// the next scan / EOI. Starts at the first byte of entropy data (one past
+    /// the first SOS header) and advances past each boundary `consume_input`
+    /// reports.
+    body_scan_cursor: usize,
+    /// `TRUE` once the EOI marker has been drained into `source`, i.e. the input
+    /// is complete and the buffered decode can run.
+    eoi_seen: bool,
 }
 
 impl Default for DecompressPrivate {
@@ -672,6 +699,9 @@ impl Default for DecompressPrivate {
             raw_image_cache_12: None,
             raw_rows_consumed: Vec::new(),
             tables_only_prefix: None,
+            body_incomplete: false,
+            body_scan_cursor: 0,
+            eoi_seen: false,
         }
     }
 }
@@ -1631,6 +1661,133 @@ unsafe fn drain_caller_source_mgr(
     }
 }
 
+/// Outcome of a single incremental pull from the caller's live source manager.
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
+enum PullResult {
+    /// New bytes were appended to the accumulator.
+    Progressed,
+    /// `fill_input_buffer` returned `FALSE` — the source is dry right now
+    /// (`JPEG_SUSPENDED`); the caller should retry after delivering more.
+    Suspended,
+    /// No callback, or a successful fill produced zero bytes — end of stream.
+    Ended,
+}
+
+/// Pull one chunk from the caller's live source manager into `accumulator`:
+/// drain whatever is currently in the public buffer, or — if it is empty —
+/// call `fill_input_buffer` once. Drives a suspending source in lock-step for
+/// `jpeg_consume_input` (P4-13), mirroring how `drain_caller_source_mgr`
+/// consumes the public buffer but a single step at a time so suspension can be
+/// surfaced between scan boundaries.
+unsafe fn pull_more_from_source_mgr(
+    c: &mut JpegDecompressPublic,
+    accumulator: &mut Vec<u8>,
+) -> PullResult {
+    let src_ptr: *mut JpegSourceMgr = c.src;
+    if src_ptr.is_null() {
+        return PullResult::Ended;
+    }
+    // SAFETY: caller asserts `c.src` points at a live JpegSourceMgr.
+    let src: &mut JpegSourceMgr = unsafe { &mut *src_ptr };
+    let cinfo_ptr: *mut c_void = c as *mut JpegDecompressPublic as *mut c_void;
+
+    // Drain whatever is already buffered first.
+    if src.bytes_in_buffer > 0 && !src.next_input_byte.is_null() {
+        // SAFETY: the ABI promises `next_input_byte` is valid for
+        // `bytes_in_buffer` reads.
+        let chunk: &[u8] =
+            unsafe { std::slice::from_raw_parts(src.next_input_byte, src.bytes_in_buffer) };
+        accumulator.extend_from_slice(chunk);
+        src.next_input_byte = unsafe { src.next_input_byte.add(src.bytes_in_buffer) };
+        src.bytes_in_buffer = 0;
+        return PullResult::Progressed;
+    }
+
+    // Buffer empty: ask the caller for more.
+    let fill: unsafe extern "C" fn(*mut c_void) -> CBoolean = match src.fill_input_buffer {
+        Some(f) => f,
+        None => return PullResult::Ended,
+    };
+    let ok: CBoolean = unsafe { fill(cinfo_ptr) };
+    if ok == 0 {
+        return PullResult::Suspended;
+    }
+    if src.bytes_in_buffer == 0 || src.next_input_byte.is_null() {
+        return PullResult::Ended;
+    }
+    // SAFETY: as above.
+    let chunk: &[u8] =
+        unsafe { std::slice::from_raw_parts(src.next_input_byte, src.bytes_in_buffer) };
+    accumulator.extend_from_slice(chunk);
+    src.next_input_byte = unsafe { src.next_input_byte.add(src.bytes_in_buffer) };
+    src.bytes_in_buffer = 0;
+    PullResult::Progressed
+}
+
+/// Finish draining a `body_incomplete` (P4-13) stream to EOI, resuming the live
+/// source manager and counting each later SOS into `input_scan_number`. Returns
+/// `true` once the body is complete (`eoi_seen` set, `body_incomplete` cleared),
+/// or `false` if the source suspended (caller should report suspension and be
+/// retried) or the 256 MiB cap tripped. Shared by `jpeg_start_decompress`
+/// (non-buffered), `jpeg_read_coefficients`, and `jpeg_read_raw_data`, which all
+/// need the complete buffer before parsing.
+fn finish_body_drain(c: &mut JpegDecompressPublic, priv_state: &mut DecompressPrivate) -> bool {
+    if !priv_state.body_incomplete {
+        return true;
+    }
+    loop {
+        let cursor: usize = priv_state.body_scan_cursor;
+        match priv_state
+            .source
+            .as_bytes()
+            .map(|b| scan_next_boundary(b, cursor))
+        {
+            Some(MarkerBoundary::Eoi(off)) => {
+                priv_state.body_scan_cursor = off;
+                priv_state.eoi_seen = true;
+                priv_state.body_incomplete = false;
+                rebuild_marker_list_from_source(c, priv_state);
+                return true;
+            }
+            Some(MarkerBoundary::Sos(off)) => {
+                priv_state.body_scan_cursor = off;
+                c.input_scan_number = c.input_scan_number.saturating_add(1);
+                continue;
+            }
+            // NeedMore: resume the next scan from where this one stalled (avoids
+            // O(n²) rescans on a small-packet source). `None` (no source bytes)
+            // leaves the cursor unchanged.
+            Some(MarkerBoundary::NeedMore(resume)) => priv_state.body_scan_cursor = resume,
+            None => {}
+        }
+        let pull: PullResult = match priv_state.source.as_owned_mut() {
+            // SAFETY: `c` and `priv_state` are disjoint allocations.
+            Some(buf) => unsafe { pull_more_from_source_mgr(c, buf) },
+            None => return false,
+        };
+        match pull {
+            PullResult::Progressed => {
+                if priv_state.source.as_bytes().map_or(0, <[u8]>::len) > P4_13_MAX_BODY_BYTES {
+                    // Cap tripped: clear `body_incomplete` so a retry can't
+                    // re-enter the drain and append past the cap (bounds memory).
+                    priv_state.body_incomplete = false;
+                    priv_state.last_error =
+                        CString::new("jpeg decode: suspended body exceeds 256 MiB cap")
+                            .unwrap_or_default();
+                    return false;
+                }
+            }
+            PullResult::Suspended => return false,
+            PullResult::Ended => {
+                priv_state.eoi_seen = true;
+                priv_state.body_incomplete = false;
+                rebuild_marker_list_from_source(c, priv_state);
+                return true;
+            }
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // `jpeg_read_header` — subtask #5.
 // ---------------------------------------------------------------------------
@@ -1770,8 +1927,33 @@ pub extern "C" fn jpeg_read_header(cinfo: *mut c_void, require_image: CBoolean) 
         if priv_state.source.as_bytes().is_none() {
             // SAFETY: c is a live JpegDecompressPublic; if c.src is non-NULL,
             // the caller asserts it points at a libjpeg-ABI source manager.
-            if let Some(drained) = unsafe { drain_caller_source_mgr(c, priv_state) } {
-                priv_state.source = JpegSource::Owned(drained);
+            match unsafe { drain_caller_source_mgr(c, priv_state) } {
+                Some(drained) => {
+                    priv_state.source = JpegSource::Owned(drained);
+                }
+                None => {
+                    // The source manager suspended (`fill_input_buffer` → FALSE)
+                    // before EOI. P4-13: if the bytes drained so far already
+                    // contain a complete header (through the first SOS), promote
+                    // to `JPEG_HEADER_OK` now and let `jpeg_consume_input` drive
+                    // the remaining body in lock-step with the suspending source.
+                    // Otherwise leave the partial parked in `bridge_partial` and
+                    // fall through to `JPEG_SUSPENDED` (header not yet complete).
+                    // Non-suspending sources never return `None` here, so libtiff
+                    // / djpeg / `mem_src` keep the original fully-buffered path.
+                    if let Some(sos_end) = find_first_sos(&priv_state.bridge_partial) {
+                        let prefix: Vec<u8> = std::mem::take(&mut priv_state.bridge_partial);
+                        priv_state.source = JpegSource::Owned(prefix);
+                        priv_state.body_incomplete = true;
+                        priv_state.body_scan_cursor = sos_end;
+                        priv_state.eoi_seen = false;
+                        // Upstream sets input_scan_number to 1 once the first SOS
+                        // is reached; mirror that so a buffered-image consumer
+                        // reads a correct scan index (jpeg_consume_input bumps it
+                        // per subsequent SOS).
+                        c.input_scan_number = 1;
+                    }
+                }
             }
         }
 
@@ -1858,7 +2040,17 @@ pub extern "C" fn jpeg_read_header(cinfo: *mut c_void, require_image: CBoolean) 
             combined.extend_from_slice(&strip_body);
             priv_state.source = JpegSource::Owned(combined);
         }
-        let bytes: &[u8] = match priv_state.source.as_bytes() {
+        // P4-13: re-derive the body scan cursor from the FINAL source buffer.
+        // If a tables-only prefix was spliced in just above, the first-SOS
+        // offset shifted by `prefix.len() - 2`; recomputing here keeps the
+        // incremental drain resuming at the real entropy start regardless of
+        // splicing. A no-op for the common (no-splice) case — same offset.
+        if priv_state.body_incomplete {
+            if let Some(sos_end) = priv_state.source.as_bytes().and_then(find_first_sos) {
+                priv_state.body_scan_cursor = sos_end;
+            }
+        }
+        let src_bytes: &[u8] = match priv_state.source.as_bytes() {
             Some(b) if b.len() >= 2 => b,
             _ => {
                 priv_state.last_error =
@@ -1866,6 +2058,39 @@ pub extern "C" fn jpeg_read_header(cinfo: *mut c_void, require_image: CBoolean) 
                         .unwrap_or_default();
                 return JPEG_SUSPENDED;
             }
+        };
+        // P4-13: when the body is still being drained from a suspending source,
+        // the buffered prefix ends just after the first SOS header (no entropy /
+        // EOI). Append a synthetic EOI for header parsing only, so `read_markers`
+        // terminates cleanly after recording the frame header instead of erroring
+        // on truncation — a progressive stream otherwise scans past SOS-1 hunting
+        // for more scans and hits end-of-buffer. The actual pixel decode later
+        // runs on the complete (real-EOI) buffer, never this synthetic one. All
+        // public header fields come from markers before SOS-1, so they are exact.
+        let ends_with_eoi: bool = src_bytes.len() >= 2
+            && src_bytes[src_bytes.len() - 2] == 0xFF
+            && src_bytes[src_bytes.len() - 1] == 0xD9;
+        let needs_synthetic_eoi: bool = priv_state.body_incomplete && !ends_with_eoi;
+        let parse_holder: Vec<u8> = if needs_synthetic_eoi {
+            // Parse exactly the through-SOS prefix (everything up to the first
+            // byte of scan-1 entropy, `body_scan_cursor`) plus the synthetic
+            // EOI — never the partial entropy bytes that may have arrived before
+            // the source suspended. All header fields precede SOS-1, so this is
+            // sufficient, and it keeps the parse input independent of entropy
+            // content. `priv_state.source` still holds every drained byte for
+            // the eventual decode; only this temporary parse copy is truncated.
+            let end: usize = priv_state.body_scan_cursor.min(src_bytes.len());
+            let mut v: Vec<u8> = Vec::with_capacity(end + 2);
+            v.extend_from_slice(&src_bytes[..end]);
+            v.extend_from_slice(&[0xFF, 0xD9]);
+            v
+        } else {
+            Vec::new()
+        };
+        let bytes: &[u8] = if needs_synthetic_eoi {
+            &parse_holder
+        } else {
+            src_bytes
         };
 
         let mut decoder: libjpeg_turbo_rs::Decoder<'_> = match libjpeg_turbo_rs::Decoder::new(bytes)
@@ -2051,66 +2276,7 @@ pub extern "C" fn jpeg_read_header(cinfo: *mut c_void, require_image: CBoolean) 
         // freed memory — even though only this thread can observe the
         // window, defensive ordering keeps the invariant local and
         // obvious to a future reader.
-        c.marker_list = std::ptr::null_mut();
-        priv_state.marker_list_storage.clear();
-        let saved: Vec<libjpeg_turbo_rs::SavedMarker> = decoder.saved_markers().to_vec();
-        for marker in saved {
-            // Honor stock libjpeg's `jpeg_save_markers(cinfo, code, length_limit)`
-            // contract: `original_length` is the full marker body length from the
-            // stream, while `data_length` and `data` are truncated to
-            // `min(original_length, length_limit)` so consumers (e.g.
-            // `jcopy_markers_execute` → `jpeg_write_marker`) never see more bytes
-            // than the caller requested.
-            let original_len: usize = marker.data.len();
-            let limit: usize = priv_state
-                .marker_save
-                .limits
-                .get(&marker.code)
-                .copied()
-                .map(|l| l as usize)
-                .unwrap_or(usize::MAX);
-            let truncated_len: usize = original_len.min(limit);
-            let mut full: Vec<u8> = marker.data;
-            full.truncate(truncated_len);
-            let payload: Box<[u8]> = full.into_boxed_slice();
-            priv_state.marker_list_storage.push(Box::new(OwnedMarker {
-                public: JpegMarkerStructPublic {
-                    next: std::ptr::null_mut(),
-                    marker: marker.code,
-                    original_length: original_len as c_uint,
-                    data_length: truncated_len as c_uint,
-                    data: std::ptr::null_mut(),
-                },
-                payload,
-            }));
-        }
-        // Fix up `data` to point into the boxed payload (stable: `Box`
-        // pins the heap allocation), then thread `next` pointers across
-        // adjacent nodes.
-        for node in priv_state.marker_list_storage.iter_mut() {
-            node.public.data = node.payload.as_mut_ptr();
-        }
-        let len: usize = priv_state.marker_list_storage.len();
-        if len > 1 {
-            // Collect raw pointers up-front to avoid simultaneous mutable
-            // borrows during the next-pointer fix-up.
-            let next_ptrs: Vec<*mut JpegMarkerStructPublic> = priv_state
-                .marker_list_storage
-                .iter_mut()
-                .skip(1)
-                .map(|n| &mut n.public as *mut _)
-                .collect();
-            for (i, node) in priv_state.marker_list_storage.iter_mut().enumerate() {
-                if i < next_ptrs.len() {
-                    node.public.next = next_ptrs[i];
-                }
-            }
-        }
-        c.marker_list = priv_state
-            .marker_list_storage
-            .first_mut()
-            .map(|n| &mut n.public as *mut _)
-            .unwrap_or(std::ptr::null_mut());
+        populate_marker_list(c, priv_state, decoder.saved_markers().to_vec());
 
         c.global_state = DSTATE_INHEADER;
         priv_state.last_error = CString::new("No error").expect("static");
@@ -2121,6 +2287,108 @@ pub extern "C" fn jpeg_read_header(cinfo: *mut c_void, require_image: CBoolean) 
         priv_state.header_parsed_ok = true;
         JPEG_HEADER_OK
     })
+}
+
+/// Rebuild `cinfo->marker_list` from the decoder's saved APP/COM markers,
+/// honoring each marker's `jpeg_save_markers` `length_limit`. Backs the list
+/// with `marker_list_storage` (boxed nodes, address-stable) and threads the
+/// `next` pointers, so stock C consumers (e.g. `jcopy_markers_execute` from
+/// `jpegtran -copy all`) can iterate them. Shared by `jpeg_read_header` (full
+/// stream) and the P4-13 deferred decode (`ensure_decoded_deferred`), so a
+/// suspending stream with markers after the first SOS preserves them too.
+fn populate_marker_list(
+    c: &mut JpegDecompressPublic,
+    priv_state: &mut DecompressPrivate,
+    saved: Vec<libjpeg_turbo_rs::SavedMarker>,
+) {
+    // Null `c.marker_list` *before* clearing the backing storage so the cinfo
+    // never exposes a pointer into freed memory, even momentarily.
+    c.marker_list = std::ptr::null_mut();
+    priv_state.marker_list_storage.clear();
+    for marker in saved {
+        // `original_length` is the full body length; `data_length`/`data` are
+        // truncated to `min(original_length, length_limit)` per the
+        // `jpeg_save_markers` contract.
+        let original_len: usize = marker.data.len();
+        let limit: usize = priv_state
+            .marker_save
+            .limits
+            .get(&marker.code)
+            .copied()
+            .map(|l| l as usize)
+            .unwrap_or(usize::MAX);
+        let truncated_len: usize = original_len.min(limit);
+        let mut full: Vec<u8> = marker.data;
+        full.truncate(truncated_len);
+        let payload: Box<[u8]> = full.into_boxed_slice();
+        priv_state.marker_list_storage.push(Box::new(OwnedMarker {
+            public: JpegMarkerStructPublic {
+                next: std::ptr::null_mut(),
+                marker: marker.code,
+                original_length: original_len as c_uint,
+                data_length: truncated_len as c_uint,
+                data: std::ptr::null_mut(),
+            },
+            payload,
+        }));
+    }
+    for node in priv_state.marker_list_storage.iter_mut() {
+        node.public.data = node.payload.as_mut_ptr();
+    }
+    let len: usize = priv_state.marker_list_storage.len();
+    if len > 1 {
+        let next_ptrs: Vec<*mut JpegMarkerStructPublic> = priv_state
+            .marker_list_storage
+            .iter_mut()
+            .skip(1)
+            .map(|n| &mut n.public as *mut _)
+            .collect();
+        for (i, node) in priv_state.marker_list_storage.iter_mut().enumerate() {
+            if i < next_ptrs.len() {
+                node.public.next = next_ptrs[i];
+            }
+        }
+    }
+    c.marker_list = priv_state
+        .marker_list_storage
+        .first_mut()
+        .map(|n| &mut n.public as *mut _)
+        .unwrap_or(std::ptr::null_mut());
+}
+
+/// Re-parse the now-complete `priv_state.source` for saved APP/COM markers and
+/// rebuild `cinfo->marker_list` (P4-13). `jpeg_read_header` only parsed the
+/// through-SOS prefix for a suspending source, so any markers between scans
+/// were not yet visible; once the body drain reaches EOI, every completion path
+/// (`jpeg_consume_input`, `finish_body_drain`) calls this so non-scanline
+/// consumers see the same marker list the non-suspending path produces. No-op
+/// unless `jpeg_save_markers` / a marker processor is active. Mirrors the marker
+/// setup in `jpeg_read_header` (`Decoder::new` → `save_markers` →
+/// `saved_markers`).
+fn rebuild_marker_list_from_source(
+    c: &mut JpegDecompressPublic,
+    priv_state: &mut DecompressPrivate,
+) {
+    let save_config: libjpeg_turbo_rs::MarkerSaveConfig =
+        marker_save_to_config(&priv_state.marker_save);
+    let saving_enabled: bool = !matches!(save_config, libjpeg_turbo_rs::MarkerSaveConfig::None)
+        || !priv_state.marker_processors.is_empty();
+    if !saving_enabled {
+        return;
+    }
+    let bytes: Vec<u8> = match priv_state.source.as_bytes() {
+        Some(b) if b.len() >= 2 => b.to_vec(),
+        _ => return,
+    };
+    let mut decoder: libjpeg_turbo_rs::Decoder<'_> = match libjpeg_turbo_rs::Decoder::new(&bytes) {
+        Ok(d) => d,
+        Err(_) => return,
+    };
+    if !matches!(save_config, libjpeg_turbo_rs::MarkerSaveConfig::None) {
+        decoder.save_markers(save_config);
+    }
+    let saved: Vec<libjpeg_turbo_rs::SavedMarker> = decoder.saved_markers().to_vec();
+    populate_marker_list(c, priv_state, saved);
 }
 
 // ---------------------------------------------------------------------------
@@ -2174,6 +2442,31 @@ pub extern "C" fn jpeg_start_decompress(cinfo: *mut c_void) -> CBoolean {
             Some(p) => p,
             None => return 0,
         };
+
+        // P4-13: the body is still draining from a suspending source.
+        if priv_state.body_incomplete {
+            if c.buffered_image != 0 {
+                // Buffered-image mode: the caller drives `jpeg_consume_input` to
+                // drain the body before reading pixels. Publish output dimensions
+                // from the parsed header and defer the (buffered) pixel decode
+                // until the body is complete — `jpeg_read_scanlines` /
+                // `jpeg_start_output` materialise `priv_state.decoded` lazily once
+                // `jpeg_consume_input` has reached EOI.
+                c.output_scanline = 0;
+                c.global_state = DSTATE_SCANNING;
+                let _ = c; // release the &mut before jpeg_calc_output_dimensions re-borrows
+                jpeg_calc_output_dimensions(cinfo);
+                return 1;
+            }
+            // Non-buffered mode with a suspending source: finish draining the
+            // whole body to EOI now, resuming the live source manager. If it
+            // suspends, report suspension (return FALSE) so the caller refills
+            // and retries — matching upstream's multi-scan PRELOAD behaviour.
+            if !finish_body_drain(c, priv_state) {
+                return 0;
+            }
+            // Source is now complete; fall through to the normal decode path.
+        }
 
         let bytes: Vec<u8> = match priv_state.source.as_bytes() {
             Some(b) => b.to_vec(),
@@ -2345,6 +2638,59 @@ fn run_decoder_for_start(
 // `jpeg_read_scanlines` — subtask #7.
 // ---------------------------------------------------------------------------
 
+/// Materialise the deferred 8-bit pixel decode for the P4-13 buffered-image
+/// path: when `jpeg_start_decompress` deferred decoding because the body was
+/// still draining, run the buffered decode now (on the complete source) and
+/// populate the output fields exactly as `jpeg_start_decompress` would have.
+/// Returns `false` if the body is not yet complete or the decode failed.
+fn ensure_decoded_deferred(
+    c: &mut JpegDecompressPublic,
+    priv_state: &mut DecompressPrivate,
+) -> bool {
+    if priv_state.decoded.is_some() {
+        return true;
+    }
+    if priv_state.body_incomplete || c.data_precision > 8 {
+        return false;
+    }
+    let bytes: Vec<u8> = match priv_state.source.as_bytes() {
+        Some(b) => b.to_vec(),
+        None => return false,
+    };
+    let format: PixelFormat = jcs_to_pixel_format(c.out_color_space).unwrap_or(PixelFormat::Rgb);
+    let save_config: libjpeg_turbo_rs::MarkerSaveConfig =
+        marker_save_to_config(&priv_state.marker_save);
+    match run_decoder_for_start(&bytes, format, save_config, &priv_state.marker_processors) {
+        Ok(image) => {
+            let out_cs_effective: c_int = colorspace_to_jcs(match image.pixel_format {
+                PixelFormat::Grayscale => libjpeg_turbo_rs::ColorSpace::Grayscale,
+                PixelFormat::Cmyk => libjpeg_turbo_rs::ColorSpace::Cmyk,
+                _ => libjpeg_turbo_rs::ColorSpace::Rgb,
+            });
+            c.output_width = image.width as JDimension;
+            c.output_height = image.height as JDimension;
+            c.out_color_components = image.pixel_format.bytes_per_pixel() as c_int;
+            c.output_components = c.out_color_components;
+            c.out_color_space = out_cs_effective;
+            c.data_precision = image.precision as c_int;
+            // P4-13: jpeg_read_header parsed only the through-SOS prefix, so
+            // cinfo->marker_list holds only the pre-SOS markers. The deferred
+            // full-stream decode saw any APP/COM markers that appear after the
+            // first SOS too — rebuild the list from the complete set so the
+            // suspending path preserves inter-scan metadata exactly like the
+            // non-suspending path.
+            populate_marker_list(c, priv_state, image.saved_markers.clone());
+            priv_state.decoded = Some(image);
+            true
+        }
+        Err(e) => {
+            priv_state.last_error =
+                CString::new(format!("jpeg_read_scanlines: {e}")).unwrap_or_default();
+            false
+        }
+    }
+}
+
 /// Copy up to `max_lines` rows from the already-decoded image into the
 /// application's row-pointer array. Returns the number of rows copied.
 ///
@@ -2366,6 +2712,12 @@ pub extern "C" fn jpeg_read_scanlines(
             None => return 0,
         };
         if scanlines.is_null() || max_lines == 0 {
+            return 0;
+        }
+        // P4-13: in buffered-image mode the pixel decode was deferred at
+        // `jpeg_start_decompress` until `jpeg_consume_input` finished draining
+        // the body. Materialise it now (once the body is complete).
+        if priv_state.decoded.is_none() && !ensure_decoded_deferred(c, priv_state) {
             return 0;
         }
         let image: &libjpeg_turbo_rs::Image = match priv_state.decoded.as_ref() {
@@ -2547,6 +2899,14 @@ pub extern "C" fn jpeg_finish_decompress(cinfo: *mut c_void) -> CBoolean {
             // image; clear the flag so `jpeg_consume_input` doesn't
             // short-circuit.
             priv_state.header_parsed_ok = false;
+            // P4-13 incremental-input state, reset for handle reuse.
+            priv_state.body_incomplete = false;
+            priv_state.body_scan_cursor = 0;
+            priv_state.eoi_seen = false;
+            // Reset the public scan counter too — the suspending path advances
+            // it per SOS, and a reused handle decoding a new (e.g. mem_src)
+            // image must not expose the previous image's scan count.
+            c.input_scan_number = 0;
             // Drop the previous-image's parsed coefficients and unhook
             // the foreign `jvirt_barray_ptr*` from the global side
             // table. Without this, a `finish_decompress` → new
@@ -2995,6 +3355,14 @@ pub extern "C" fn jpeg_read_coefficients(cinfo: *mut c_void) -> *mut c_void {
         // reads on the same cinfo).
         if !priv_state.coef_array_ptr.is_null() && priv_state.coefficients.is_some() {
             return priv_state.coef_array_ptr;
+        }
+
+        // P4-13: if the header was parsed from a through-SOS prefix of a
+        // suspending source, finish draining the body to EOI before parsing
+        // coefficients (upstream `jpeg_read_coefficients` consumes to EOI). On
+        // suspension, return null so the caller refills and retries.
+        if priv_state.body_incomplete && !finish_body_drain(c, priv_state) {
+            return std::ptr::null_mut();
         }
 
         let bytes: Vec<u8> = match priv_state.source.as_bytes() {
@@ -3881,6 +4249,14 @@ pub extern "C" fn jpeg_read_raw_data(
             return 0;
         }
 
+        // P4-13: a suspending source's body may still be draining (normally
+        // `jpeg_start_decompress` finished it, but a caller that reaches here
+        // with `body_incomplete` must complete the drain before the raw cache
+        // is built from `priv_state.source`). On suspension, return 0.
+        if priv_state.body_incomplete && !finish_body_drain(c, priv_state) {
+            return 0;
+        }
+
         // EOF sentinel: output_scanline >= output_height → return 0 (no error,
         // matches libjpeg's JWRN_TOO_MUCH_DATA path).
         if c.output_scanline >= c.output_height {
@@ -4178,6 +4554,152 @@ pub extern "C" fn jpeg12_read_raw_data(
 }
 
 // ---------------------------------------------------------------------------
+// Incremental-input marker scanning (P4-13).
+//
+// These pure helpers let `jpeg_consume_input` drive a multi-scan stream in
+// lock-step with a suspending source manager: `find_first_sos` reports when the
+// accumulated bytes contain a complete header (through the first SOS), and
+// `scan_next_boundary` walks the entropy-coded body to the next scan / EOI,
+// returning `NeedMore` when the buffered prefix is too short — the signal to
+// pull another chunk (or report `JPEG_SUSPENDED`).
+// ---------------------------------------------------------------------------
+
+/// Result of scanning accumulated JPEG bytes for the next decode-relevant
+/// marker boundary past a given offset.
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
+enum MarkerBoundary {
+    /// A complete SOS marker header ends at this byte offset (the first byte of
+    /// the scan's entropy-coded data).
+    Sos(usize),
+    /// An EOI marker (`FF D9`) ends at this byte offset (one past it).
+    Eoi(usize),
+    /// Not enough bytes are buffered yet to reach the next boundary. Carries the
+    /// offset the scan stalled at, so a resuming caller restarts from there
+    /// instead of rescanning already-examined bytes (avoids O(n²) on a
+    /// small-packet suspending source).
+    NeedMore(usize),
+}
+
+/// DoS guard for the P4-13 incremental body drain: a misbehaving or adversarial
+/// suspending source manager could keep delivering body bytes that never form a
+/// scan / EOI boundary. Mirrors the 256 MiB cap in `drain_caller_source_mgr`;
+/// past it the drain stops pulling rather than growing `source` without bound.
+const P4_13_MAX_BODY_BYTES: usize = 256 * 1024 * 1024;
+
+/// Scan from the SOI for the first SOS marker. Returns `Some(offset)` where
+/// `offset` is the first byte of entropy-coded data (one past the SOS header
+/// segment), or `None` if no complete SOS is buffered yet — either more bytes
+/// are needed, or the stream hits EOI first (a tables-only abbreviated
+/// datastream, which has no SOS).
+fn find_first_sos(bytes: &[u8]) -> Option<usize> {
+    if bytes.len() < 2 || bytes[0] != 0xFF || bytes[1] != 0xD8 {
+        return None; // not a JPEG SOI start
+    }
+    let n: usize = bytes.len();
+    let mut p: usize = 2; // index of the next marker's 0xFF, just past the SOI
+    loop {
+        if p + 1 >= n {
+            return None; // need the marker code byte
+        }
+        if bytes[p] != 0xFF {
+            return None; // misaligned — not at a marker
+        }
+        // Collapse any run of fill 0xFF bytes; the code is the first non-FF.
+        let mut code_idx: usize = p + 1;
+        while code_idx < n && bytes[code_idx] == 0xFF {
+            code_idx += 1;
+        }
+        if code_idx >= n {
+            return None;
+        }
+        let marker: u8 = bytes[code_idx];
+        match marker {
+            // Standalone markers (no length): SOI, TEM, RSTn.
+            0xD8 | 0x01 | 0xD0..=0xD7 => {
+                p = code_idx + 1;
+            }
+            // EOI before any SOS → tables-only; no SOS present.
+            0xD9 => return None,
+            // Every other marker (incl. SOS) carries a 2-byte length.
+            _ => {
+                let len_at: usize = code_idx + 1;
+                if len_at + 2 > n {
+                    return None; // length field not yet buffered
+                }
+                let seg_len: usize = ((bytes[len_at] as usize) << 8) | bytes[len_at + 1] as usize;
+                if seg_len < 2 {
+                    return None; // malformed length
+                }
+                let seg_end: usize = len_at + seg_len;
+                if seg_end > n {
+                    return None; // segment payload not fully buffered
+                }
+                if marker == 0xDA {
+                    return Some(seg_end); // entropy data starts here
+                }
+                p = seg_end;
+            }
+        }
+    }
+}
+
+/// Scan forward from `from` (inside entropy-coded data) for the next scan
+/// boundary, skipping stuffed `FF 00`, fill `FF FF`, and restart markers
+/// `FF D0..D7`, and skipping any length-bearing inter-scan segments (DHT / DQT
+/// / DRI / APPn that a progressive stream may interleave between scans).
+fn scan_next_boundary(bytes: &[u8], from: usize) -> MarkerBoundary {
+    let n: usize = bytes.len();
+    let mut i: usize = from;
+    loop {
+        while i < n && bytes[i] != 0xFF {
+            i += 1;
+        }
+        if i + 1 >= n {
+            return MarkerBoundary::NeedMore(i); // trailing 0xFF, need the code
+        }
+        let code: u8 = bytes[i + 1];
+        match code {
+            0x00 => i += 2,        // stuffed FF (literal 0xFF in entropy)
+            0xFF => i += 1,        // fill byte; re-examine the next byte
+            0xD0..=0xD7 => i += 2, // restart marker, still entropy
+            0x01 => i += 2,        // TEM — parameterless, like RSTn
+            0xD9 => return MarkerBoundary::Eoi(i + 2),
+            0xDA => {
+                let len_at: usize = i + 2;
+                if len_at + 2 > n {
+                    return MarkerBoundary::NeedMore(i);
+                }
+                let seg_len: usize = ((bytes[len_at] as usize) << 8) | bytes[len_at + 1] as usize;
+                if seg_len < 2 {
+                    return MarkerBoundary::NeedMore(i);
+                }
+                let seg_end: usize = len_at + seg_len;
+                if seg_end > n {
+                    return MarkerBoundary::NeedMore(i);
+                }
+                return MarkerBoundary::Sos(seg_end);
+            }
+            _ => {
+                // Inter-scan length-bearing marker (tables/DRI/APPn).
+                let len_at: usize = i + 2;
+                if len_at + 2 > n {
+                    return MarkerBoundary::NeedMore(i);
+                }
+                let seg_len: usize = ((bytes[len_at] as usize) << 8) | bytes[len_at + 1] as usize;
+                if seg_len < 2 {
+                    return MarkerBoundary::NeedMore(i);
+                }
+                let seg_end: usize = len_at + seg_len;
+                if seg_end > n {
+                    return MarkerBoundary::NeedMore(i);
+                }
+                i = seg_end;
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Buffered-image-mode shim (P0-3 follow-on).
 //
 // Stock djpeg/cjpeg/jpegtran do not exercise these in the default
@@ -4244,6 +4766,96 @@ pub extern "C" fn jpeg_consume_input(cinfo: *mut c_void) -> c_int {
         // — the buffered/progressive idiom — would loop forever even
         // though we keep returning `JPEG_REACHED_EOI`.
         let priv_ptr: *mut c_void = decompress_private_raw(cinfo);
+
+        // P4-13: a suspending source delivered the header (through the first
+        // SOS) but not yet the whole body. Drive the remaining body in lock-step
+        // with the source manager: report the next scan boundary, or
+        // `JPEG_SUSPENDED` when the source is dry, exactly as upstream
+        // `consume_input` does. `c` and the private state live in disjoint
+        // allocations, so holding both `&mut` here matches the established
+        // pattern (`jpeg_start_decompress`).
+        if let Some(priv_state) = unsafe { priv_from_ptr(priv_ptr) } {
+            if priv_state.body_incomplete {
+                loop {
+                    let cursor: usize = priv_state.body_scan_cursor;
+                    let boundary: MarkerBoundary = match priv_state.source.as_bytes() {
+                        Some(b) => scan_next_boundary(b, cursor),
+                        None => MarkerBoundary::NeedMore(cursor),
+                    };
+                    match boundary {
+                        MarkerBoundary::Sos(off) => {
+                            priv_state.body_scan_cursor = off;
+                            // Mirror upstream: each consumed SOS advances the
+                            // public scan counter (read_header set it to 1 at
+                            // the first SOS), so a buffered-image consumer that
+                            // reads `input_scan_number` / passes it to
+                            // `jpeg_start_output` stays in lock-step.
+                            c.input_scan_number = c.input_scan_number.saturating_add(1);
+                            return JPEG_REACHED_SOS;
+                        }
+                        MarkerBoundary::Eoi(off) => {
+                            priv_state.body_scan_cursor = off;
+                            priv_state.eoi_seen = true;
+                            priv_state.body_incomplete = false;
+                            if c.global_state < DSTATE_SCANNING {
+                                c.global_state = DSTATE_SCANNING;
+                            }
+                            // Body complete: refresh marker_list so a caller that
+                            // only drains via consume_input still sees inter-scan
+                            // APP/COM markers (P4-13).
+                            rebuild_marker_list_from_source(c, priv_state);
+                            return JPEG_REACHED_EOI;
+                        }
+                        MarkerBoundary::NeedMore(resume) => {
+                            // Resume the next scan from where this one stalled so
+                            // a small-packet source doesn't rescan O(n²).
+                            priv_state.body_scan_cursor = resume;
+                            let pull: PullResult = match priv_state.source.as_owned_mut() {
+                                // SAFETY: `c` and `priv_state` are disjoint
+                                // allocations; the fill callback touches only the
+                                // caller's source manager, never `buf`.
+                                Some(buf) => unsafe { pull_more_from_source_mgr(c, buf) },
+                                None => return JPEG_SUSPENDED,
+                            };
+                            match pull {
+                                PullResult::Progressed => {
+                                    if priv_state.source.as_bytes().map_or(0, <[u8]>::len)
+                                        > P4_13_MAX_BODY_BYTES
+                                    {
+                                        // Cap tripped: clear `body_incomplete` so a
+                                        // retry can't re-enter this loop and append
+                                        // past the cap (bounds memory; terminal).
+                                        priv_state.body_incomplete = false;
+                                        priv_state.last_error = CString::new(
+                                            "jpeg_consume_input: suspended body exceeds 256 MiB cap",
+                                        )
+                                        .unwrap_or_default();
+                                        return JPEG_SUSPENDED;
+                                    }
+                                    continue;
+                                }
+                                PullResult::Suspended => return JPEG_SUSPENDED,
+                                PullResult::Ended => {
+                                    // Stream ended without an EOI (truncated).
+                                    // Mark the body complete so the buffered
+                                    // decode can run best-effort, matching the
+                                    // lenient drain that `drain_caller_source_mgr`
+                                    // applies to a callback-less source.
+                                    priv_state.eoi_seen = true;
+                                    priv_state.body_incomplete = false;
+                                    if c.global_state < DSTATE_SCANNING {
+                                        c.global_state = DSTATE_SCANNING;
+                                    }
+                                    rebuild_marker_list_from_source(c, priv_state);
+                                    return JPEG_REACHED_EOI;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
         let header_done: bool = match unsafe { priv_from_ptr(priv_ptr) } {
             Some(p) => p.header_parsed_ok,
             None => false,
@@ -4320,16 +4932,25 @@ pub extern "C" fn jpeg_consume_input(cinfo: *mut c_void) -> c_int {
 #[no_mangle]
 pub extern "C" fn jpeg_input_complete(cinfo: *mut c_void) -> CBoolean {
     crate::unwind_guard!(0, {
-        match unsafe { cinfo_mut(cinfo) } {
-            Some(c) => {
-                if c.global_state >= DSTATE_SCANNING {
-                    1
-                } else {
-                    0
-                }
-            }
-            None => 0,
+        let c: &mut JpegDecompressPublic = match unsafe { cinfo_mut(cinfo) } {
+            Some(c) => c,
+            None => return 0,
+        };
+        if c.global_state < DSTATE_SCANNING {
+            return 0;
         }
+        // P4-13: while the body is still draining from a suspending source the
+        // input is NOT complete, even though the header is parsed and the state
+        // has advanced — so the buffered-image polling idiom
+        // (`while (!jpeg_input_complete()) jpeg_consume_input();`) keeps driving
+        // until `jpeg_consume_input` reaches EOI and clears `body_incomplete`.
+        let priv_ptr: *mut c_void = decompress_private_raw(cinfo);
+        if let Some(p) = unsafe { priv_from_ptr(priv_ptr) } {
+            if p.body_incomplete {
+                return 0;
+            }
+        }
+        1
     })
 }
 
@@ -4350,10 +4971,20 @@ pub extern "C" fn jpeg_has_multiple_scans(cinfo: *mut c_void) -> CBoolean {
 
 /// `jpeg_start_output(cinfo, scan_number) -> boolean` — buffered-image
 /// multi-pass output entry. We always hold the fully decoded image, so
-/// any scan number succeeds.
+/// any scan number succeeds. Records `scan_number` into
+/// `cinfo->output_scan_number` as upstream does, so the documented
+/// buffered-image loop (which stops once
+/// `jpeg_input_complete() && input_scan_number == output_scan_number`)
+/// terminates for the P4-13 suspending path where `input_scan_number`
+/// advances per scan.
 #[no_mangle]
-pub extern "C" fn jpeg_start_output(_cinfo: *mut c_void, _scan_number: c_int) -> CBoolean {
-    crate::unwind_guard!(0, { 1 })
+pub extern "C" fn jpeg_start_output(cinfo: *mut c_void, scan_number: c_int) -> CBoolean {
+    crate::unwind_guard!(0, {
+        if let Some(c) = unsafe { cinfo_mut(cinfo) } {
+            c.output_scan_number = scan_number;
+        }
+        1
+    })
 }
 
 /// `jpeg_finish_output(cinfo) -> boolean` — buffered-image multi-pass
@@ -4461,6 +5092,11 @@ pub extern "C" fn jpeg_abort_decompress(cinfo: *mut c_void) {
             p.bridge_partial.clear();
             // Force a re-parse of the next image's header.
             p.header_parsed_ok = false;
+            // P4-13 incremental-input state, reset on abort.
+            p.body_incomplete = false;
+            p.body_scan_cursor = 0;
+            p.eoi_seen = false;
+            c.input_scan_number = 0;
             // Drop the previous image's saved-marker linked list. Stock
             // libjpeg-turbo's `jpeg_abort` releases `JPOOL_IMAGE` (which
             // backs `marker_list`) and the next `jpeg_read_header` starts
@@ -8463,5 +9099,144 @@ mod tables_only_tests {
                 );
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod marker_scan_tests {
+    use super::{find_first_sos, scan_next_boundary, MarkerBoundary};
+
+    /// Build a length-bearing marker segment: `FF <code> <len:2> <payload>`,
+    /// where the 2-byte length counts itself + payload.
+    fn seg(code: u8, payload: &[u8]) -> Vec<u8> {
+        let len: usize = payload.len() + 2;
+        let mut v: Vec<u8> = vec![0xFF, code, (len >> 8) as u8, (len & 0xFF) as u8];
+        v.extend_from_slice(payload);
+        v
+    }
+
+    #[test]
+    fn first_sos_on_minimal_baseline() {
+        let mut j: Vec<u8> = vec![0xFF, 0xD8]; // SOI
+        j.extend(seg(0xDB, &[0u8; 65])); // DQT
+        j.extend(seg(0xC0, &[0u8; 15])); // SOF0
+        j.extend(seg(0xC4, &[0u8; 20])); // DHT
+        j.extend(seg(0xDA, &[0u8; 8])); // SOS header
+        let entropy_start: usize = j.len();
+        // Entropy with a stuffed FF (FF 00) then EOI.
+        j.extend_from_slice(&[0x12, 0x34, 0xFF, 0x00, 0x56]);
+        j.extend_from_slice(&[0xFF, 0xD9]); // EOI
+        assert_eq!(find_first_sos(&j), Some(entropy_start));
+        // From the entropy start, the next boundary is EOI at end-of-buffer.
+        assert_eq!(
+            scan_next_boundary(&j, entropy_start),
+            MarkerBoundary::Eoi(j.len())
+        );
+    }
+
+    #[test]
+    fn boundary_skips_restart_and_stuffing() {
+        let mut j: Vec<u8> = vec![0xFF, 0xD8];
+        j.extend(seg(0xDA, &[0u8; 8]));
+        let entropy_start: usize = j.len();
+        // entropy: literal data, stuffed FF, restart marker D2, more data, EOI
+        j.extend_from_slice(&[0xAB, 0xFF, 0x00, 0xCD, 0xFF, 0xD2, 0xEF]);
+        j.extend_from_slice(&[0xFF, 0xD9]);
+        assert_eq!(
+            scan_next_boundary(&j, entropy_start),
+            MarkerBoundary::Eoi(j.len())
+        );
+    }
+
+    #[test]
+    fn two_scan_progressive_walks_each_boundary() {
+        let mut j: Vec<u8> = vec![0xFF, 0xD8];
+        j.extend(seg(0xC2, &[0u8; 15])); // SOF2 (progressive)
+        j.extend(seg(0xC4, &[0u8; 20])); // DHT
+        j.extend(seg(0xDA, &[0u8; 8])); // SOS #1
+        let e1: usize = j.len();
+        j.extend_from_slice(&[0x11, 0x22, 0xFF, 0x00]); // scan-1 entropy
+                                                        // Inter-scan DHT, then SOS #2.
+        j.extend(seg(0xC4, &[0u8; 20]));
+        j.extend(seg(0xDA, &[0u8; 8])); // SOS #2
+        let e2: usize = j.len();
+        j.extend_from_slice(&[0x33, 0x44]); // scan-2 entropy
+        j.extend_from_slice(&[0xFF, 0xD9]); // EOI
+        assert_eq!(find_first_sos(&j), Some(e1));
+        // From scan-1 entropy, skip the inter-scan DHT and reach SOS #2.
+        assert_eq!(scan_next_boundary(&j, e1), MarkerBoundary::Sos(e2));
+        // From scan-2 entropy, reach EOI.
+        assert_eq!(scan_next_boundary(&j, e2), MarkerBoundary::Eoi(j.len()));
+    }
+
+    #[test]
+    fn boundary_skips_tem_marker() {
+        // A TEM marker (FF 01) is parameterless; the scanner must skip it like a
+        // restart marker rather than reading the next bytes as a bogus length.
+        let mut j: Vec<u8> = vec![0xFF, 0xD8];
+        j.extend(seg(0xDA, &[0u8; 8]));
+        let entropy_start: usize = j.len();
+        j.extend_from_slice(&[0xAB, 0xFF, 0x01, 0xCD]); // entropy with a TEM
+        j.extend_from_slice(&[0xFF, 0xD9]);
+        assert_eq!(
+            scan_next_boundary(&j, entropy_start),
+            MarkerBoundary::Eoi(j.len())
+        );
+    }
+
+    #[test]
+    fn tables_only_has_no_sos() {
+        let mut j: Vec<u8> = vec![0xFF, 0xD8];
+        j.extend(seg(0xDB, &[0u8; 65])); // DQT
+        j.extend(seg(0xC4, &[0u8; 20])); // DHT
+        j.extend_from_slice(&[0xFF, 0xD9]); // EOI, no SOS
+        assert_eq!(find_first_sos(&j), None);
+    }
+
+    #[test]
+    fn truncated_sos_header_needs_more() {
+        let mut j: Vec<u8> = vec![0xFF, 0xD8];
+        j.extend(seg(0xC0, &[0u8; 15]));
+        // SOS marker claiming an 8-byte segment but only 3 bytes present.
+        j.extend_from_slice(&[0xFF, 0xDA, 0x00, 0x08, 0x01]);
+        assert_eq!(find_first_sos(&j), None);
+    }
+
+    #[test]
+    fn unterminated_entropy_needs_more() {
+        let mut j: Vec<u8> = vec![0xFF, 0xD8];
+        j.extend(seg(0xDA, &[0u8; 8]));
+        let entropy_start: usize = j.len();
+        j.extend_from_slice(&[0x12, 0x34, 0x56]); // no marker terminates it
+        assert!(matches!(
+            scan_next_boundary(&j, entropy_start),
+            MarkerBoundary::NeedMore(_)
+        ));
+    }
+
+    #[test]
+    fn needmore_resume_offset_avoids_rescan() {
+        // The resume offset returned with NeedMore must let a caller continue
+        // scanning newly-appended bytes without rescanning from the start.
+        let mut j: Vec<u8> = vec![0xFF, 0xD8];
+        j.extend(seg(0xDA, &[0u8; 8]));
+        let entropy_start: usize = j.len();
+        j.extend_from_slice(&[0x11, 0x22, 0x33]); // entropy, no terminator yet
+        let resume: usize = match scan_next_boundary(&j, entropy_start) {
+            MarkerBoundary::NeedMore(r) => r,
+            other => panic!("expected NeedMore, got {other:?}"),
+        };
+        // Resume must not have rewound before the bytes already scanned.
+        assert!(resume >= entropy_start && resume <= j.len());
+        // Append an EOI; scanning from the resume offset must still find it.
+        j.extend_from_slice(&[0xFF, 0xD9]);
+        assert_eq!(scan_next_boundary(&j, resume), MarkerBoundary::Eoi(j.len()));
+    }
+
+    #[test]
+    fn not_a_jpeg_returns_none() {
+        assert_eq!(find_first_sos(&[0x00, 0x01, 0x02]), None);
+        assert_eq!(find_first_sos(&[0xFF]), None);
+        assert_eq!(find_first_sos(&[]), None);
     }
 }
