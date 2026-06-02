@@ -662,3 +662,396 @@ fn save_markers_truncates_multichunk_icc() {
         "save-markers-truncates-multichunk-icc harness exited with code {rc}"
     );
 }
+
+// ---------- pattern: P4-13 — real per-marker consume_input suspension ----------
+//
+// A *real* suspending source manager (`fill_input_buffer` returns FALSE when
+// its drip buffer is empty — not the chunked-refill of
+// `source_mgr_suspends_every_byte`) drives a multi-scan PROGRESSIVE JPEG through
+// the buffered-image polling idiom. The harness asserts that:
+//   * `jpeg_read_header` returns `JPEG_HEADER_OK` once the header (through the
+//     first SOS) has been delivered, suspending until then;
+//   * `jpeg_consume_input` returns `JPEG_SUSPENDED` when the drip buffer is dry
+//     mid-body, `JPEG_REACHED_SOS` at each scan boundary, and `JPEG_REACHED_EOI`
+//     at end-of-image — resuming after each suspension by delivering more bytes;
+//   * the resumed decode is byte-for-byte identical to a full-buffer (`mem_src`)
+//     decode of the same JPEG; and
+//   * `cinfo.global_state == DSTATE_STOPPING` after `jpeg_finish_decompress`.
+// The progressive fixture is generated with `cjpeg -progressive` and embedded.
+const PATTERN_CONSUME_INPUT_SUSPEND_PROGRESSIVE_TEMPLATE: &str = r#"
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <jpeglib.h>
+#include <jerror.h>
+
+/*{PROG_JPEG}*/
+
+/* Reference RGB pixels produced by STOCK libjpeg-turbo `djpeg -pnm` on the same
+ * JPEG (decoded by the Rust test at build time and embedded here), so the
+ * drip-fed decode is cross-validated against the C oracle, not just our own
+ * mem_src path. */
+/*{DJPEG_REF}*/
+#define DJPEG_REF_LEN ((int)sizeof(DJPEG_REF))
+
+/* DSTATE_STOPPING as numbered by the Rust shim (jpeglib.rs). Upstream uses
+ * 210; the shim uses 206. global_state is a public field we can read here. */
+#define SHIM_DSTATE_STOPPING 206
+
+/* Suspending source: delivers bytes only up to `avail`; fill returns FALSE
+ * (real suspension) once `pos` reaches `avail`. The driver raises `avail`
+ * after each suspension to model bytes arriving over time. */
+struct drip_src {
+    struct jpeg_source_mgr pub_mgr;
+    const unsigned char *data;
+    size_t total;
+    size_t pos;
+    size_t avail;
+    JOCTET buf[64];
+};
+
+static void drip_init(j_decompress_ptr cinfo) {
+    struct drip_src *s = (struct drip_src *)cinfo->src;
+    s->pos = 0;
+    s->pub_mgr.next_input_byte = NULL;
+    s->pub_mgr.bytes_in_buffer = 0;
+}
+static boolean drip_fill(j_decompress_ptr cinfo) {
+    struct drip_src *s = (struct drip_src *)cinfo->src;
+    if (s->pos >= s->avail) return FALSE;        /* real suspension */
+    size_t n = s->avail - s->pos;
+    if (n > sizeof(s->buf)) n = sizeof(s->buf);
+    memcpy(s->buf, s->data + s->pos, n);
+    s->pub_mgr.next_input_byte = s->buf;
+    s->pub_mgr.bytes_in_buffer = n;
+    s->pos += n;
+    return TRUE;
+}
+static void drip_skip(j_decompress_ptr cinfo, long num_bytes) {
+    struct drip_src *s = (struct drip_src *)cinfo->src;
+    if (num_bytes <= 0) return;
+    size_t skip = (size_t)num_bytes;
+    if (skip <= s->pub_mgr.bytes_in_buffer) {
+        s->pub_mgr.next_input_byte += skip;
+        s->pub_mgr.bytes_in_buffer -= skip;
+    } else {
+        skip -= s->pub_mgr.bytes_in_buffer;
+        s->pub_mgr.bytes_in_buffer = 0;
+        s->pos += skip;
+    }
+}
+static void drip_term(j_decompress_ptr cinfo) { (void)cinfo; }
+
+/* Full-buffer reference decode via mem_src. */
+static int decode_full(unsigned char *out, size_t out_cap,
+                       JDIMENSION *w, JDIMENSION *h, int *comps) {
+    struct jpeg_decompress_struct cinfo;
+    struct jpeg_error_mgr jerr;
+    cinfo.err = jpeg_std_error(&jerr);
+    jpeg_create_decompress(&cinfo);
+    jpeg_mem_src(&cinfo, (unsigned char *)PROG_JPEG, sizeof(PROG_JPEG));
+    if (jpeg_read_header(&cinfo, TRUE) != JPEG_HEADER_OK) {
+        jpeg_destroy_decompress(&cinfo); return -1;
+    }
+    if (!jpeg_start_decompress(&cinfo)) { jpeg_destroy_decompress(&cinfo); return -2; }
+    *w = cinfo.output_width; *h = cinfo.output_height; *comps = cinfo.output_components;
+    size_t row_bytes = (size_t)cinfo.output_width * cinfo.output_components;
+    if (row_bytes * cinfo.output_height > out_cap) { jpeg_destroy_decompress(&cinfo); return -3; }
+    while (cinfo.output_scanline < cinfo.output_height) {
+        unsigned char *rowp = out + (size_t)cinfo.output_scanline * row_bytes;
+        JSAMPROW rows[1]; rows[0] = rowp;
+        if (jpeg_read_scanlines(&cinfo, rows, 1) != 1) break;
+    }
+    jpeg_finish_decompress(&cinfo);
+    jpeg_destroy_decompress(&cinfo);
+    return 0;
+}
+
+static unsigned char g_ref[4 * 1024 * 1024];
+static unsigned char g_drip[4 * 1024 * 1024];
+
+int main(void) {
+    JDIMENSION rw = 0, rh = 0; int rcomp = 0;
+    if (decode_full(g_ref, sizeof(g_ref), &rw, &rh, &rcomp) != 0) {
+        fprintf(stderr, "reference (mem_src) decode failed\n"); return 10;
+    }
+
+    struct jpeg_decompress_struct cinfo;
+    struct jpeg_error_mgr jerr;
+    struct drip_src src;
+    cinfo.err = jpeg_std_error(&jerr);
+    jpeg_create_decompress(&cinfo);
+    memset(&src, 0, sizeof(src));
+    src.pub_mgr.init_source = drip_init;
+    src.pub_mgr.fill_input_buffer = drip_fill;
+    src.pub_mgr.skip_input_data = drip_skip;
+    src.pub_mgr.resync_to_restart = jpeg_resync_to_restart;
+    src.pub_mgr.term_source = drip_term;
+    src.data = PROG_JPEG;
+    src.total = sizeof(PROG_JPEG);
+    src.pos = 0;
+    src.avail = 2; /* start tiny: even the header must wait for more bytes */
+    cinfo.src = (struct jpeg_source_mgr *)&src;
+
+    /* Header: suspend until the through-SOS prefix has been delivered. */
+    int hdr_suspends = 0, r;
+    while ((r = jpeg_read_header(&cinfo, TRUE)) == JPEG_SUSPENDED) {
+        hdr_suspends++;
+        src.avail += 16; if (src.avail > src.total) src.avail = src.total;
+        if (hdr_suspends > (int)src.total + 16) { fprintf(stderr, "header loop runaway\n"); return 11; }
+    }
+    if (r != JPEG_HEADER_OK) { fprintf(stderr, "header result %d\n", r); return 12; }
+
+    cinfo.buffered_image = TRUE;
+    if (!jpeg_start_decompress(&cinfo)) { fprintf(stderr, "start_decompress failed\n"); return 13; }
+
+    /* Body: drive consume_input, resuming after each real suspension. */
+    int consume_suspends = 0, reached_sos = 0, reached_eoi = 0, guard = 0;
+    while (!jpeg_input_complete(&cinfo)) {
+        int cr = jpeg_consume_input(&cinfo);
+        if (cr == JPEG_SUSPENDED) {
+            consume_suspends++;
+            src.avail += 16; if (src.avail > src.total) src.avail = src.total;
+        } else if (cr == JPEG_REACHED_SOS) {
+            reached_sos++;
+        } else if (cr == JPEG_REACHED_EOI) {
+            reached_eoi++;
+        }
+        if (++guard > 1000000) { fprintf(stderr, "consume loop runaway\n"); return 14; }
+    }
+    if (consume_suspends < 1) { fprintf(stderr, "no real body suspension exercised\n"); return 15; }
+    if (reached_sos < 1) { fprintf(stderr, "no JPEG_REACHED_SOS (expected progressive multi-scan)\n"); return 16; }
+    if (reached_eoi < 1) { fprintf(stderr, "no JPEG_REACHED_EOI\n"); return 17; }
+    /* input_scan_number must track the SOS events in lock-step: read_header set
+     * it to 1 at the first SOS, and each REACHED_SOS bumped it by one. */
+    if (cinfo.input_scan_number != 1 + reached_sos) {
+        fprintf(stderr, "input_scan_number=%d, expected %d (1 + %d REACHED_SOS)\n",
+                cinfo.input_scan_number, 1 + reached_sos, reached_sos);
+        return 23;
+    }
+
+    if (cinfo.output_width != rw || cinfo.output_height != rh || cinfo.output_components != rcomp) {
+        fprintf(stderr, "dim mismatch drip=%ux%ux%d ref=%ux%ux%d\n",
+                cinfo.output_width, cinfo.output_height, cinfo.output_components, rw, rh, rcomp);
+        return 18;
+    }
+    size_t row_bytes = (size_t)rw * rcomp;
+    size_t total = row_bytes * rh;
+    if (total > sizeof(g_drip)) { fprintf(stderr, "image too big\n"); return 19; }
+
+    int final_scan = cinfo.input_scan_number;
+    jpeg_start_output(&cinfo, final_scan);
+    /* jpeg_start_output must record the requested scan so the documented
+     * buffered-image termination (input_scan_number == output_scan_number)
+     * holds for this suspending stream. */
+    if (cinfo.output_scan_number != final_scan) {
+        fprintf(stderr, "output_scan_number=%d, expected %d\n",
+                cinfo.output_scan_number, final_scan);
+        return 24;
+    }
+    while (cinfo.output_scanline < cinfo.output_height) {
+        unsigned char *rowp = g_drip + (size_t)cinfo.output_scanline * row_bytes;
+        JSAMPROW rows[1]; rows[0] = rowp;
+        if (jpeg_read_scanlines(&cinfo, rows, 1) != 1) break;
+    }
+    jpeg_finish_output(&cinfo);
+
+    if (memcmp(g_ref, g_drip, total) != 0) {
+        fprintf(stderr, "PIXEL MISMATCH: drip-fed decode != full-buffer decode\n");
+        return 20;
+    }
+
+    /* Cross-validate against the STOCK libjpeg-turbo (djpeg) reference — the
+     * repo's mandatory C oracle. Catches a shim-vs-stock divergence that the
+     * shim-only comparison above would miss. */
+    if (total != (size_t)DJPEG_REF_LEN) {
+        fprintf(stderr, "stock djpeg ref length %d != decoded %zu\n", DJPEG_REF_LEN, total);
+        return 25;
+    }
+    {
+        int maxd = 0;
+        for (size_t k = 0; k < total; k++) {
+            int d = (int)g_drip[k] - (int)DJPEG_REF[k];
+            if (d < 0) d = -d;
+            if (d > maxd) maxd = d;
+        }
+        /* P4-13 acceptance requires byte-identical cross-validation; our decoder
+         * is byte-exact with libjpeg-turbo's islow IDCT, so demand maxd == 0. */
+        if (maxd != 0) {
+            fprintf(stderr, "drip-fed decode differs from stock djpeg by %d (require 0)\n", maxd);
+            return 26;
+        }
+    }
+
+    if (!jpeg_finish_decompress(&cinfo)) { fprintf(stderr, "finish_decompress failed\n"); return 21; }
+    if (cinfo.global_state != SHIM_DSTATE_STOPPING) {
+        fprintf(stderr, "global_state %d != DSTATE_STOPPING (%d)\n",
+                cinfo.global_state, SHIM_DSTATE_STOPPING);
+        return 22;
+    }
+    jpeg_destroy_decompress(&cinfo);
+    return 0;
+}
+"#;
+
+fn djpeg_path() -> Option<PathBuf> {
+    for p in [
+        "/opt/homebrew/bin/djpeg",
+        "/usr/local/bin/djpeg",
+        "/usr/bin/djpeg",
+        "/opt/libjpeg-turbo/bin/djpeg",
+    ] {
+        let pb = PathBuf::from(p);
+        if pb.exists() {
+            return Some(pb);
+        }
+    }
+    None
+}
+
+/// Decode `jpeg` with stock `djpeg -pnm` and return the raw interleaved RGB
+/// pixels (P6 PPM body). The C oracle for the P4-13 cross-validation.
+fn djpeg_decode_rgb(jpeg: &[u8]) -> Option<Vec<u8>> {
+    use std::io::Write as _;
+    use std::process::Stdio;
+    let djpeg = djpeg_path()?;
+    let mut child = Command::new(&djpeg)
+        .arg("-pnm")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .ok()?;
+    child.stdin.take()?.write_all(jpeg).ok()?;
+    let out = child.wait_with_output().ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    // Parse a binary PPM (P6): magic, width, height, maxval, then w*h*3 bytes.
+    let b = &out.stdout;
+    if b.len() < 2 || &b[..2] != b"P6" {
+        return None;
+    }
+    let mut i = 2usize;
+    let mut toks: Vec<usize> = Vec::new();
+    while toks.len() < 3 && i < b.len() {
+        while i < b.len() && b[i].is_ascii_whitespace() {
+            i += 1;
+        }
+        let start = i;
+        while i < b.len() && !b[i].is_ascii_whitespace() {
+            i += 1;
+        }
+        if start < i {
+            toks.push(std::str::from_utf8(&b[start..i]).ok()?.parse().ok()?);
+        }
+    }
+    if toks.len() < 3 {
+        return None;
+    }
+    i += 1; // single whitespace after maxval
+    let need = toks[0].checked_mul(toks[1])?.checked_mul(3)?;
+    if b.len() < i + need {
+        return None;
+    }
+    Some(b[i..i + need].to_vec())
+}
+
+fn cjpeg_path() -> Option<PathBuf> {
+    for p in [
+        "/opt/homebrew/bin/cjpeg",
+        "/usr/local/bin/cjpeg",
+        "/usr/bin/cjpeg",
+        "/opt/libjpeg-turbo/bin/cjpeg",
+    ] {
+        let pb = PathBuf::from(p);
+        if pb.exists() {
+            return Some(pb);
+        }
+    }
+    None
+}
+
+/// Generate a multi-scan progressive JPEG with `cjpeg -progressive` from a
+/// 32x32 RGB gradient. Returns `None` if `cjpeg` is unavailable.
+fn make_progressive_jpeg() -> Option<Vec<u8>> {
+    use std::io::Write as _;
+    use std::process::Stdio;
+    let cjpeg = cjpeg_path()?;
+    let (w, h) = (32usize, 32usize);
+    let mut ppm: Vec<u8> = format!("P6\n{w} {h}\n255\n").into_bytes();
+    for y in 0..h {
+        for x in 0..w {
+            ppm.push((x * 8) as u8);
+            ppm.push((y * 8) as u8);
+            ppm.push(((x + y) * 4) as u8);
+        }
+    }
+    let mut child = Command::new(&cjpeg)
+        .args(["-progressive", "-quality", "90", "-sample", "1x1"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .ok()?;
+    child.stdin.take()?.write_all(&ppm).ok()?;
+    let out = child.wait_with_output().ok()?;
+    if !out.status.success() || out.stdout.len() < 100 {
+        return None;
+    }
+    Some(out.stdout)
+}
+
+fn bytes_to_c_array(name: &str, bytes: &[u8]) -> String {
+    let mut s = format!("static const unsigned char {name}[] = {{\n");
+    for (i, b) in bytes.iter().enumerate() {
+        if i % 16 == 0 {
+            s.push_str("    ");
+        }
+        s.push_str(&format!("0x{b:02X},"));
+        if i % 16 == 15 {
+            s.push('\n');
+        }
+    }
+    s.push_str("\n};\n");
+    s
+}
+
+#[test]
+fn consume_input_suspends_through_progressive_body() {
+    let jpeg = match make_progressive_jpeg() {
+        Some(j) => j,
+        None => {
+            eprintln!("SKIP consume_input_suspends_through_progressive_body: cjpeg unavailable");
+            return;
+        }
+    };
+    // The fixture must actually be progressive (SOF2) to have multiple scans.
+    assert!(
+        jpeg.windows(2).any(|w| w == [0xFF, 0xC2]),
+        "generated fixture is not progressive (no SOF2 marker)"
+    );
+    // Stock C oracle: decode the same JPEG with djpeg and embed the reference
+    // pixels so the harness cross-validates against libjpeg-turbo, not just our
+    // own mem_src path (repo rule + P4-13 acceptance criterion).
+    let djpeg_ref = match djpeg_decode_rgb(&jpeg) {
+        Some(r) => r,
+        None => {
+            eprintln!("SKIP consume_input_suspends_through_progressive_body: djpeg unavailable");
+            return;
+        }
+    };
+    let c_array = bytes_to_c_array("PROG_JPEG", &jpeg);
+    let ref_array = bytes_to_c_array("DJPEG_REF", &djpeg_ref);
+    let c_source = PATTERN_CONSUME_INPUT_SUSPEND_PROGRESSIVE_TEMPLATE
+        .replace("/*{PROG_JPEG}*/", &c_array)
+        .replace("/*{DJPEG_REF}*/", &ref_array);
+    let rc = match compile_and_run_c(&c_source, "consume_input_suspend_progressive") {
+        Some(rc) => rc,
+        None => return,
+    };
+    assert_eq!(
+        rc, 0,
+        "P4-13 consume_input suspension harness exited with code {rc}"
+    );
+}
