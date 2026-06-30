@@ -482,7 +482,7 @@ fn a6_3_default_strategy_does_not_abort_on_rst_mismatch() {
     let jpeg = make_jpeg_with_corrupt_rst_number();
     // Should NOT error out on the RST number mismatch — default behavior
     // is Continue.
-    let mut decoder = Decoder::new(&jpeg).expect("parse headers");
+    let decoder = Decoder::new(&jpeg).expect("parse headers");
     let _img = decoder
         .decode_image()
         .expect("default strategy must not abort on RST mismatch");
@@ -499,6 +499,20 @@ fn a6_3_abort_strategy_surfaces_error_on_rst_mismatch() {
         .decode_image()
         .expect_err("abort strategy must surface error on RST mismatch");
     // The only guarantee: decoder returns an error rather than OK.
+    let _ = err;
+}
+
+// Regression for grayscale baseline restart handling: single-component
+// baseline scans use the non-interleaved block path, but they must still
+// honor the same restart-resync hook as interleaved color scans.
+#[test]
+fn a6_3_abort_strategy_surfaces_error_on_grayscale_rst_mismatch() {
+    let jpeg = make_grayscale_jpeg_with_corrupt_rst_number();
+    let mut decoder = Decoder::new(&jpeg).expect("parse headers");
+    decoder.set_resync_strategy(AbortStrategy);
+    let err = decoder
+        .decode_image()
+        .expect_err("abort strategy must surface grayscale RST mismatch");
     let _ = err;
 }
 
@@ -676,4 +690,50 @@ fn make_jpeg_with_corrupt_rst_number() -> Vec<u8> {
         }
     }
     jpeg
+}
+
+fn make_grayscale_jpeg_with_corrupt_rst_number() -> Vec<u8> {
+    use libjpeg_turbo_rs::Encoder;
+
+    let width: usize = 32;
+    let height: usize = 32;
+    let pixels: Vec<u8> = (0..width * height).map(|i| (i % 251) as u8).collect();
+    let mut jpeg = Encoder::new(&pixels, width, height, PixelFormat::Grayscale)
+        .quality(75)
+        .restart_blocks(4)
+        .encode()
+        .unwrap();
+
+    corrupt_first_rst_number(&mut jpeg);
+    jpeg
+}
+
+fn corrupt_first_rst_number(jpeg: &mut [u8]) {
+    let mut i: usize = 2;
+    while i + 3 < jpeg.len() && jpeg[i] == 0xFF {
+        let code = jpeg[i + 1];
+        if code == 0xDA {
+            let seg_len = u16::from_be_bytes([jpeg[i + 2], jpeg[i + 3]]) as usize;
+            i += 2 + seg_len;
+            break;
+        }
+        let seg_len = u16::from_be_bytes([jpeg[i + 2], jpeg[i + 3]]) as usize;
+        i += 2 + seg_len;
+    }
+
+    while i + 1 < jpeg.len() {
+        if jpeg[i] == 0xFF {
+            let code = jpeg[i + 1];
+            if (0xD0..=0xD7).contains(&code) {
+                jpeg[i + 1] = 0xD0 | ((code & 0x07) ^ 0x03);
+                return;
+            }
+            if code == 0xD9 {
+                return;
+            }
+            i += 2;
+        } else {
+            i += 1;
+        }
+    }
 }

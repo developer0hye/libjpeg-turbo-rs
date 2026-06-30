@@ -1387,9 +1387,12 @@ impl<'a> Decoder<'a> {
         mcus_y: usize,
         comp_block_sizes: &[usize],
     ) -> Result<(Vec<Vec<u8>>, Vec<DecodeWarning>)> {
-        // Non-interleaved baseline: multiple SOS markers, each with a single component.
-        // Dispatch to dedicated multi-scan path.
-        if self.metadata.scans.len() > 1 {
+        let scan = &self.metadata.scan;
+
+        // Non-interleaved baseline: each SOS has a single component. A grayscale
+        // image still uses this one-block raster semantics even when the SOF
+        // sampling factors are not 1x1.
+        if self.metadata.scans.len() > 1 || scan.components.len() == 1 {
             return self.decode_non_interleaved_baseline_planes(
                 frame,
                 quant_tables,
@@ -1400,7 +1403,6 @@ impl<'a> Decoder<'a> {
             );
         }
 
-        let scan = &self.metadata.scan;
         let block_size: usize = comp_block_sizes[0]; // min (luma) block size for MCU row range
 
         // Determine MCU row range for IDCT
@@ -1731,6 +1733,7 @@ impl<'a> Decoder<'a> {
 
             let restart_interval: u32 = scan_info.restart_interval as u32;
             let mut mcu_count: u32 = 0;
+            let mut expected_rst: u8 = 0;
 
             // In a non-interleaved scan, each MCU is a single block.
             // Iterate over encoded blocks (may be fewer than plane blocks
@@ -1756,7 +1759,12 @@ impl<'a> Decoder<'a> {
                         && mcu_count > 0
                         && mcu_count.is_multiple_of(restart_interval)
                     {
-                        bit_reader.reset();
+                        if self.resync_strategy.borrow().is_some() {
+                            let mut strat_ref = self.resync_strategy.borrow_mut();
+                            Self::apply_resync(&mut bit_reader, &mut expected_rst, &mut strat_ref)?;
+                        } else {
+                            bit_reader.reset();
+                        }
                         mcu_decoder.reset();
                     }
 
