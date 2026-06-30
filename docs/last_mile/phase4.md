@@ -34,6 +34,8 @@
 | P4-24 | CLOSED 2026-06-01 (arithmetic multi-scan support: non-interleaved + partial-interleaved) |
 | P4-25 | OPEN (filed 2026-06-01; P4-24 review) |
 | P4-26 | OPEN (filed 2026-06-02; P4-13 codex round-8 review) |
+| P4-27 | CLOSED 2026-06-29 (single-component baseline h1v4 scans use one-block raster semantics) |
+| P4-28 | CLOSED 2026-06-29 (progressive AC-refine one-past-Se coefficient placement) |
 
 ---
 
@@ -465,6 +467,26 @@ P3-3's closure (2026-05-06; corrected 2026-05-10) explicitly scoped the allowlis
 
 **Why deferred.** P4-13's stated acceptance criteria (real suspending source → lock-step boundaries → byte-exact decode) are met and proven; these three are deeper upstream-contract-fidelity gaps with no known consumer, and gap (a) in particular is a behaviour change to every fully-buffered consumer that must not regress the verified byte-identical paths. Filed rather than expanding the P4-13 PR scope.
 
+## P4-27. Single-Component Baseline With Non-1x1 Sampling Used Interleaved MCU Block Order — **CLOSED 2026-06-29**
+
+**Motivation.** Scheduled Fuzz Smoke run 27930557237 (`fuzz_decode_diff_c`, commit `b60227c44ee14d0a713aaf4c043fafa8848d01ad`) found a 16x16 baseline grayscale fixture (`crash-a0fa322dc25942c53df490e8edce2d448580c9ad`) with SOF0 component sampling `h=1,v=4`. `djpeg` decoded a 16x16 P5 raster, while Rust diverged by `max abs diff = 240` (tolerance 24), with the second horizontal block decoded from the wrong entropy position.
+
+**Root cause.** `decode_baseline_planes` only dispatched to the non-interleaved baseline path when `metadata.scans.len() > 1`. A single-component JPEG still uses non-interleaved one-block raster semantics: the entropy stream contains `ceil(width/8) * ceil(height/8)` data units for that component. Falling through to the interleaved MCU path made Rust honor the SOF sampling factors as MCU layout (`mcus_x * v_samp` blocks here), so it consumed and placed too many blocks in MCU sampling order instead of the component's encoded block raster.
+
+**Fix.** Route any baseline SOS with one scan component through `decode_non_interleaved_baseline_planes`, even when there is only one SOS. That path already computes encoded block counts from the component sample dimensions and pre-fills unvisited padding with 128, matching libjpeg-turbo.
+
+**Status (2026-06-29): closed.** Pinned by `tests/cross_check_fuzz_decode_diff_c_baseline_h4v1.rs::fuzz_decode_diff_c_baseline_gray_16x16_h1v4_matches_djpeg` (byte-identical vs `djpeg`, max diff 0). Exact repro passes: `cargo +nightly fuzz run fuzz_decode_diff_c /tmp/libjpeg-run-27930557237/fuzz-artifacts-fuzz_decode_diff_c/crash-a0fa322dc25942c53df490e8edce2d448580c9ad -- -runs=1`.
+
+## P4-28. Progressive AC-Refine Wrote One-Past-Se Coefficients to the Padded Natural-Order Slot — **CLOSED 2026-06-29**
+
+**Motivation.** Scheduled Fuzz Smoke run 28349528808 (`fuzz_decode_diff_c`, same commit `b60227c44ee14d0a713aaf4c043fafa8848d01ad`) found a 16x16 progressive 4:2:2 fixture (`crash-39e136ac088b7b2b3fc3786a4a23bae4d15ba632`) with clean C and Rust decodes but pixel divergence `max abs diff = 114` (tolerance 24). The mismatch was entirely in the right luma block; Cb/Cr were neutral and all RGB channels moved together.
+
+**Root cause.** In `decode_ac_refine`, libjpeg-turbo writes a newly significant coefficient through `jpeg_natural_order[k]` even when the zero-run loop exits because `k > Se`. Rust treated every `k > Se` as an out-of-range soft landing and wrote to `coeff[63]`. That is only correct for libjpeg's padded natural-order entries `k=64..79`; for real zigzag positions `k < 64`, C still writes the actual natural coefficient. This artifact needed `k=60` (natural coefficient 47), but Rust wrote the `1` into natural coefficient 63.
+
+**Fix.** In AC refinement, write `ZIGZAG_ORDER[k]` whenever `k < 64`; only route `64 <= k < 80` to the padded natural coefficient 63. This preserves the prior soft landing for genuinely padded writes while matching C for one-past-`Se` real coefficients.
+
+**Status (2026-06-29): closed.** C coefficient dump (`jpeg_read_coefficients`) and Rust `read_coefficients` match on the artifact after the fix, and the decoded raster is byte-identical to `djpeg` (max diff 0). Pinned by `tests/cross_check_fuzz_decode_diff_c_progressive_16x16.rs::fuzz_decode_diff_c_progressive_16x16_h2v1_ac_refine_matches_djpeg`. Exact repro passes: `cargo +nightly fuzz run fuzz_decode_diff_c /tmp/libjpeg-run-28349528808/fuzz-artifacts-fuzz_decode_diff_c/crash-39e136ac088b7b2b3fc3786a4a23bae4d15ba632 -- -runs=1`.
+
 ## Phase 4 Suggested Order
 
 1. ~~**P4-1** — export `jpeg_calc_jpeg_dimensions` and delete its missing-symbol allowlist entry.~~ **CLOSED 2026-05-10**.
@@ -489,3 +511,5 @@ P3-3's closure (2026-05-06; corrected 2026-05-10) explicitly scoped the allowlis
 20. ~~**P4-24** — arithmetic sequential (SOF9) non-interleaved multi-scan: `decode_arithmetic_planes` has no multi-scan dispatch (drops scans, 0-fill not 128, `unwrap_or(0)` Cs-misroute).~~ **CLOSED 2026-06-01** — added `decode_arithmetic_multiscan_planes` (per-scan `ArithDecoder`, 128 fill, reject unknown `Cs`; handles both non-interleaved and partially-interleaved scan scripts). Regression: `tests/cross_check_arith_noninterleaved.rs` (byte-exact vs djpeg).
 21. **P4-25** — arithmetic DAC conditioning not snapshotted per scan (shared global read by all arith paths; same-slot redefinition between scans would mis-decode). Pre-existing; found in the P4-24 review. Not `fuzz_decode_diff_c`-reachable. Filed 2026-06-01.
 22. **P4-26** — deeper streaming-contract fidelity beyond the P4-13 core: (a) `jpeg_read_header` stop-at-first-SOS for all sources (not just suspending), (b) buffered-image output calls pull input from the source manager, (c) `marker_list` extended in place instead of rebuilt (stable `jpeg_saved_marker_ptr`). No known consumer; none block T3; each needs a consumer-risky refactor. Filed 2026-06-02 from the P4-13 codex round-8 review.
+23. ~~**P4-27** — single-component baseline with non-1x1 sampling used interleaved MCU block order.~~ **CLOSED 2026-06-29** — baseline one-component SOS now routes through non-interleaved block-raster decode. Regression: `fuzz_decode_diff_c_baseline_gray_16x16_h1v4_matches_djpeg`.
+24. ~~**P4-28** — progressive AC-refine wrote one-past-`Se` real coefficients to padded coefficient 63.~~ **CLOSED 2026-06-29** — AC refine now uses real zigzag positions for `k < 64`, padded slot only for `64..79`. Regression: `fuzz_decode_diff_c_progressive_16x16_h2v1_ac_refine_matches_djpeg`.

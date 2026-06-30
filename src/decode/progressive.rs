@@ -260,16 +260,11 @@ pub fn decode_ac_refine(
             // libjpeg-turbo's `decode_mcu_AC_refine` writes
             // `*block + jpeg_natural_order[k]` here unconditionally when
             // s != 0 — including when the inner zero-run loop exited via
-            // `k > Se`. The natural-order array's `[DCTSIZE2 + 16]` pad
-            // (jutils.c) maps any k in 64..80 to natural index 63, so
-            // libjpeg silently clobbers `coeff[63]` rather than skipping
-            // the write. Our previous `k <= se` guard dropped the write
-            // entirely, leaving `coeff[63]` untouched and producing
-            // pixels that diverge from djpeg by up to ±61 on adversarial
-            // tiny-entropy progressive fixtures (`fuzz_decode_diff_c`).
-            // Match the C behavior: route k > se to coeff[63].
+            // `k > Se`. If k is still within the real 0..63 zigzag table,
+            // this can legally place a coefficient just beyond Se. Only the
+            // padded natural-order entries k=64..79 all map to natural 63.
             if new_val != 0 {
-                if k <= se {
+                if k < 64 {
                     let natural = unsafe { *ZIGZAG_ORDER.get_unchecked(k) };
                     unsafe { *coeffs.get_unchecked_mut(natural) = new_val };
                 } else if k < 80 {
