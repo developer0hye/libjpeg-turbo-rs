@@ -252,12 +252,22 @@ pub fn apply_block_smoothing_coeffs(
         0
     };
 
+    // Nothing to smooth on a degenerate grid (e.g. a malformed SOF with
+    // zero height reaches here with an empty coefficient buffer); bail
+    // out before the iMCU geometry below underflows.
+    if blocks_x == 0 || blocks_y == 0 || row_stride == 0 || v_samp == 0 {
+        return;
+    }
+
     // The padded grid height and the iMCU-row geometry drive C's row
     // window selection below. All real rows are contiguous at the top of
     // the buffer; dummy rows (if any) sit at the bottom of the last iMCU
     // row and are readable as `next-next` neighbors but never smoothed.
     let padded_rows: usize = coeff_buf.len() / row_stride;
     let total_imcu_rows: usize = padded_rows / v_samp;
+    if total_imcu_rows == 0 {
+        return;
+    }
     let last_imcu_row: usize = total_imcu_rows - 1;
 
     // Snapshot the DC values (padded rows included — C reads dummy-row
@@ -628,5 +638,23 @@ pub fn decode_with_colorspace_override(
             "output colorspace {:?} not supported",
             target_cs
         ))),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A malformed SOF with zero height reaches smoothing with an empty
+    /// coefficient buffer (`mcus_y == 0`); the iMCU geometry must bail
+    /// out instead of underflowing `total_imcu_rows - 1` (codex review
+    /// of the P4-29 fix).
+    #[test]
+    fn block_smoothing_empty_grid_does_not_panic() {
+        let mut empty: Vec<[i16; 64]> = Vec::new();
+        let quant = QuantTable::from_zigzag(&[1u16; 64]);
+        let coef_bits: [i32; SAVED_COEFS] = [0, 1, 1, 1, 1, 1, 1, 1, 1, 1];
+        apply_block_smoothing_coeffs(&mut empty, 0, 0, 0, 1, &coef_bits, &quant);
+        apply_block_smoothing_coeffs(&mut empty, 2, 2, 0, 4, &coef_bits, &quant);
     }
 }
