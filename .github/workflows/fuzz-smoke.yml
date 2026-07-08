@@ -132,6 +132,9 @@ jobs:
             echo "max_total_time=${EFFECTIVE_TIME} clamped to 1800"
             EFFECTIVE_TIME=1800
           fi
+          # Expose the clamped budget to the failure-path repro step so the
+          # uploaded rerun command matches what CI actually executed.
+          echo "EFFECTIVE_TIME=${EFFECTIVE_TIME}" >> "$GITHUB_ENV"
           cargo +nightly fuzz run \
             --target x86_64-unknown-linux-gnu \
             "${FUZZ_TARGET}" \
@@ -174,13 +177,13 @@ jobs:
             echo "run: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}/attempts/${GITHUB_RUN_ATTEMPT}"
             echo "commit: ${GITHUB_SHA}"
             echo "runner: ${RUNNER_OS} ${RUNNER_ARCH}"
-            echo "max_total_time: ${MAX_TOTAL_TIME}"
+            echo "max_total_time: ${EFFECTIVE_TIME:-${MAX_TOTAL_TIME}} (requested ${MAX_TOTAL_TIME})"
             echo
             echo "Rebuild the seed corpus first:"
             echo "  cargo test --test generate_fuzz_seeds"
             echo
             echo "Re-run the same smoke budget:"
-            echo "  cargo +nightly fuzz run --target x86_64-unknown-linux-gnu ${FUZZ_TARGET} -- -max_total_time=${MAX_TOTAL_TIME} -fork=4 -timeout=30 -dict=fuzz/jpeg.dict -print_final_stats=1"
+            echo "  cargo +nightly fuzz run --target x86_64-unknown-linux-gnu ${FUZZ_TARGET} -- -max_total_time=${EFFECTIVE_TIME:-${MAX_TOTAL_TIME}} -fork=4 -timeout=30 -dict=fuzz/jpeg.dict -print_final_stats=1"
             echo
             echo "Download crash artifacts from this run:"
             echo "  gh run download ${GITHUB_RUN_ID} -n fuzz-artifacts-${FUZZ_TARGET} -D fuzz/artifacts/${FUZZ_TARGET}"
