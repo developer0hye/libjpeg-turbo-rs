@@ -26,7 +26,7 @@ on:
   workflow_dispatch:
     inputs:
       max_total_time:
-        description: "Seconds per target (default 600)"
+        description: "Seconds per target (default 600, clamped to 1800 to fit the job timeout)"
         required: false
         default: "600"
 
@@ -37,7 +37,10 @@ jobs:
   fuzz:
     name: Fuzz ${{ matrix.target }}
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    # Sized for the 1800s clamp on MAX_TOTAL_TIME (30 min fuzz + toolchain
+    # setup + build + cmin margin). GitHub expressions cannot do arithmetic,
+    # so the budget is clamped in the run step instead of derived here.
+    timeout-minutes: 75
     env:
       FUZZ_TARGET: ${{ matrix.target }}
       MAX_TOTAL_TIME: ${{ github.event.inputs.max_total_time || '600' }}
@@ -97,13 +100,14 @@ jobs:
 
       - name: Restore accumulated corpus
         # Coverage-driven corpus carried over from previous runs. The key
-        # never hits exactly (it embeds the run id), so restore-keys picks
+        # never hits exactly (it embeds the run id AND the attempt, so even
+        # a rerun of the same run saves fresh progress); restore-keys picks
         # the most recent save and the post-run save step always writes a
-        # fresh entry — the standard pattern for an evolving cache.
+        # new entry — the standard pattern for an evolving cache.
         uses: actions/cache/restore@v4
         with:
           path: fuzz/corpus/${{ matrix.target }}
-          key: fuzz-corpus-v1-${{ matrix.target }}-${{ github.run_id }}
+          key: fuzz-corpus-v1-${{ matrix.target }}-${{ github.run_id }}-${{ github.run_attempt }}
           restore-keys: |
             fuzz-corpus-v1-${{ matrix.target }}-
 
@@ -120,10 +124,18 @@ jobs:
         # isn't installed on ubuntu-latest. Explicitly building for gnu
         # picks up the host toolchain that dtolnay/rust-toolchain set up.
         run: |
+          # Clamp the dispatch input so the fuzz budget always fits inside
+          # timeout-minutes — a cancelled job would skip the repro/artifact
+          # upload steps.
+          EFFECTIVE_TIME="${MAX_TOTAL_TIME}"
+          if [ "${EFFECTIVE_TIME}" -gt 1800 ]; then
+            echo "max_total_time=${EFFECTIVE_TIME} clamped to 1800"
+            EFFECTIVE_TIME=1800
+          fi
           cargo +nightly fuzz run \
             --target x86_64-unknown-linux-gnu \
             "${FUZZ_TARGET}" \
-            -- -max_total_time="${MAX_TOTAL_TIME}" \
+            -- -max_total_time="${EFFECTIVE_TIME}" \
                -fork=4 \
                -timeout=30 \
                -dict=fuzz/jpeg.dict \
@@ -147,7 +159,7 @@ jobs:
         uses: actions/cache/save@v4
         with:
           path: fuzz/corpus/${{ matrix.target }}
-          key: fuzz-corpus-v1-${{ matrix.target }}-${{ github.run_id }}
+          key: fuzz-corpus-v1-${{ matrix.target }}-${{ github.run_id }}-${{ github.run_attempt }}
 
       - name: Write repro metadata
         if: failure()
