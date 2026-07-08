@@ -1,14 +1,28 @@
 name: Fuzz Smoke
 
-# Nightly libFuzzer smoke test: 10 minutes per target, uploading any new
-# crashes as artifacts. Intentionally kept as its own workflow so it does not
-# gate PR merges on libFuzzer flakes or missing nightly toolchain components.
+# Scheduled libFuzzer smoke test, uploading any new crashes as artifacts.
+# Intentionally kept as its own workflow so it does not gate PR merges on
+# libFuzzer flakes or missing nightly toolchain components.
+#
+# Throughput hardening (2026-07-08) — find bugs faster:
+#   - runs every 6 hours instead of nightly (4x feedback cadence);
+#   - `-fork=4` uses all runner vCPUs — the differential targets spend most
+#     wall time blocked on djpeg/cjpeg/jpegtran subprocesses, so parallel
+#     workers overlap that wait;
+#   - `-dict=fuzz/jpeg.dict` feeds marker-structure mutations (the dict was
+#     committed with the corpus expansion but never wired into this run);
+#   - `-timeout=30` turns per-input hangs into findings instead of letting
+#     one input silently eat the whole budget (libFuzzer default is 1200s);
+#   - the corpus accumulates across runs via actions/cache (saved even when
+#     the run fails), so every run explores new frontier instead of
+#     re-discovering the same coverage from the deterministic seeds, and is
+#     `cmin`-minimized on green runs to keep the cache lean.
 
 on:
   schedule:
-    # 03:17 UTC every day — offset from the top of the hour to avoid the
-    # GitHub scheduler's congestion window.
-    - cron: "17 3 * * *"
+    # xx:17 UTC every 6 hours — offset from the top of the hour to avoid
+    # the GitHub scheduler's congestion window.
+    - cron: "17 */6 * * *"
   workflow_dispatch:
     inputs:
       max_total_time:
@@ -23,6 +37,7 @@ jobs:
   fuzz:
     name: Fuzz ${{ matrix.target }}
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     env:
       FUZZ_TARGET: ${{ matrix.target }}
       MAX_TOTAL_TIME: ${{ github.event.inputs.max_total_time || '600' }}
@@ -80,6 +95,18 @@ jobs:
           /opt/libjpeg-turbo/bin/cjpeg -version
           /opt/libjpeg-turbo/bin/jpegtran -version
 
+      - name: Restore accumulated corpus
+        # Coverage-driven corpus carried over from previous runs. The key
+        # never hits exactly (it embeds the run id), so restore-keys picks
+        # the most recent save and the post-run save step always writes a
+        # fresh entry — the standard pattern for an evolving cache.
+        uses: actions/cache/restore@v4
+        with:
+          path: fuzz/corpus/${{ matrix.target }}
+          key: fuzz-corpus-v1-${{ matrix.target }}-${{ github.run_id }}
+          restore-keys: |
+            fuzz-corpus-v1-${{ matrix.target }}-
+
       - name: Regenerate seed corpus
         run: cargo test --test generate_fuzz_seeds
 
@@ -96,7 +123,31 @@ jobs:
           cargo +nightly fuzz run \
             --target x86_64-unknown-linux-gnu \
             "${FUZZ_TARGET}" \
-            -- -max_total_time="${MAX_TOTAL_TIME}" -print_final_stats=1
+            -- -max_total_time="${MAX_TOTAL_TIME}" \
+               -fork=4 \
+               -timeout=30 \
+               -dict=fuzz/jpeg.dict \
+               -print_final_stats=1
+
+      - name: Minimize corpus before caching
+        # Keep the accumulated cache lean: drop corpus entries whose
+        # coverage is subsumed by others. Only on green runs — after a
+        # crash we want the full discovery neighborhood preserved.
+        # Non-fatal: a cmin hiccup must not fail an otherwise green run.
+        if: success()
+        run: |
+          cargo +nightly fuzz cmin \
+            --target x86_64-unknown-linux-gnu \
+            "${FUZZ_TARGET}" || true
+
+      - name: Save accumulated corpus
+        # Save even on failure so the coverage that led to a crash is not
+        # lost with the failed job.
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: fuzz/corpus/${{ matrix.target }}
+          key: fuzz-corpus-v1-${{ matrix.target }}-${{ github.run_id }}
 
       - name: Write repro metadata
         if: failure()
@@ -117,7 +168,7 @@ jobs:
             echo "  cargo test --test generate_fuzz_seeds"
             echo
             echo "Re-run the same smoke budget:"
-            echo "  cargo +nightly fuzz run --target x86_64-unknown-linux-gnu ${FUZZ_TARGET} -- -max_total_time=${MAX_TOTAL_TIME} -print_final_stats=1"
+            echo "  cargo +nightly fuzz run --target x86_64-unknown-linux-gnu ${FUZZ_TARGET} -- -max_total_time=${MAX_TOTAL_TIME} -fork=4 -timeout=30 -dict=fuzz/jpeg.dict -print_final_stats=1"
             echo
             echo "Download crash artifacts from this run:"
             echo "  gh run download ${GITHUB_RUN_ID} -n fuzz-artifacts-${FUZZ_TARGET} -D fuzz/artifacts/${FUZZ_TARGET}"
