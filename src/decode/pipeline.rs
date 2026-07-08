@@ -2471,10 +2471,17 @@ impl<'a> Decoder<'a> {
                 .any(crate::decode::toggles::smoothing_useful_for_component);
             if all_prerequisites_ok && smoothing_useful {
                 for (comp_idx, ci) in comp_infos.iter().enumerate() {
+                    // Smooth only the real block grid. The iMCU-padded dummy
+                    // blocks (blocks_x/blocks_y beyond width/height_in_blocks)
+                    // can hold DC values decoded by interleaved scans; C's
+                    // decompress_smooth_data never reads them as neighbors
+                    // nor smooths them (P4-29, fuzz smoke run 28921468958).
                     crate::decode::toggles::apply_block_smoothing_coeffs(
                         &mut coeff_bufs[comp_idx],
                         ci.blocks_x,
-                        ci.blocks_y,
+                        ci.width_in_blocks,
+                        ci.height_in_blocks,
+                        ci.v_samp,
                         &coef_bits_all[comp_idx],
                         quant_tables[comp_idx],
                     );
