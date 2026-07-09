@@ -168,16 +168,49 @@ pub fn smoothing_useful_for_component(coef_bits: &[i32; SAVED_COEFS]) -> bool {
 /// to predict imprecise AC coefficients before IDCT.
 ///
 /// Parameters:
-///   - `coeff_buf`: coefficient blocks in natural (row-major) order, `blocks_x * blocks_y` blocks
-///   - `blocks_x`: number of blocks horizontally
-///   - `blocks_y`: number of blocks vertically
+///   - `coeff_buf`: coefficient blocks in natural (row-major) order, laid out
+///     `row_stride` blocks per row (the iMCU-padded grid width)
+///   - `row_stride`: buffer row pitch in blocks (`mcus_x * h_samp`)
+///   - `blocks_x`: number of *real* blocks horizontally (`width_in_blocks`)
+///   - `blocks_y`: number of *real* blocks vertically (`height_in_blocks`)
+///   - `v_samp`: vertical sampling factor (block rows per iMCU row)
 ///   - `coef_bits`: per-coefficient precision for this component (SAVED_COEFS entries)
 ///   - `quant`: quantization table for this component
+///
+/// Only the real `blocks_x * blocks_y` grid is smoothed, and the 5x5 DC
+/// neighbor window selection replicates C's per-iMCU-row processing
+/// (fuzz smoke run 28921468958, P4-29). C clamps its column window at
+/// `width_in_blocks - 1`, so dummy padding columns are never read; its
+/// row window, however, is driven by the scaled per-iMCU-row indices
+///
+/// ```c
+/// image_block_row  = output_iMCU_row * block_rows + block_row;
+/// image_block_rows = block_rows * total_iMCU_rows;
+/// ```
+///
+/// where `block_rows` is `v_samp` except on the last iMCU row (partial
+/// height). Two consequences faithfully reproduced here: on non-final
+/// iMCU rows the `next-next` row can reach *into* the trailing dummy
+/// rows (whose DC values interleaved scans decode for real), and on a
+/// partial last iMCU row the scaled indices clamp `prev`/`prev-prev`
+/// earlier than plain image-row arithmetic would. A naive clamp at the
+/// real grid edge matches C only when `total_iMCU_rows == 1`; the padded
+/// whole-grid clamp used before this port smoothed dummy rows and read
+/// them where C does not, producing phantom AC predictions in the last
+/// real block row.
+///
+/// Neighbor DC values are read from a snapshot taken before any block is
+/// modified: C runs IDCT straight off the smoothed workspace and never
+/// writes it back, so its neighbor reads always see original DC values.
+/// Without the snapshot the `change_dc` path (DC interpolation) would feed
+/// already-smoothed DC values into later blocks' predictions.
 #[allow(clippy::too_many_lines)]
 pub fn apply_block_smoothing_coeffs(
     coeff_buf: &mut [[i16; 64]],
+    row_stride: usize,
     blocks_x: usize,
     blocks_y: usize,
+    v_samp: usize,
     coef_bits: &[i32; SAVED_COEFS],
     quant: &QuantTable,
 ) {
@@ -219,10 +252,40 @@ pub fn apply_block_smoothing_coeffs(
         0
     };
 
-    /// Helper: get DC value (natural position 0) from a block.
+    // Nothing to smooth on a degenerate grid (e.g. a malformed SOF with
+    // zero height reaches here with an empty coefficient buffer); bail
+    // out before the iMCU geometry below underflows.
+    if blocks_x == 0 || blocks_y == 0 || row_stride == 0 || v_samp == 0 {
+        return;
+    }
+
+    // The padded grid height and the iMCU-row geometry drive C's row
+    // window selection below. All real rows are contiguous at the top of
+    // the buffer; dummy rows (if any) sit at the bottom of the last iMCU
+    // row and are readable as `next-next` neighbors but never smoothed.
+    let padded_rows: usize = coeff_buf.len() / row_stride;
+    let total_imcu_rows: usize = padded_rows / v_samp;
+    if total_imcu_rows == 0 {
+        return;
+    }
+    let last_imcu_row: usize = total_imcu_rows - 1;
+
+    // Snapshot the DC values (padded rows included — C reads dummy-row
+    // DCs as neighbors in the cases described above) so neighbor reads
+    // are unaffected by blocks already smoothed this pass (C never writes
+    // the smoothed workspace back to the buffer it reads DC neighbors
+    // from).
+    let mut dc_snapshot: Vec<i32> = Vec::with_capacity(blocks_x * padded_rows);
+    for by in 0..padded_rows {
+        for bx in 0..blocks_x {
+            dc_snapshot.push(coeff_buf[by * row_stride + bx][0] as i32);
+        }
+    }
+
+    /// Helper: get an original (pre-smoothing) DC value from the snapshot.
     #[inline(always)]
-    fn dc_val(coeff_buf: &[[i16; 64]], blocks_x: usize, row: usize, col: usize) -> i32 {
-        coeff_buf[row * blocks_x + col][0] as i32
+    fn dc_val(dc_snapshot: &[i32], blocks_x: usize, row: usize, col: usize) -> i32 {
+        dc_snapshot[row * blocks_x + col]
     }
 
     /// Helper: compute prediction value with rounding and Al clamping.
@@ -247,27 +310,37 @@ pub fn apply_block_smoothing_coeffs(
     // We need to work on a copy of each block to avoid reading modified neighbors.
     // Process row by row. The C code uses a workspace copy per block.
     for by in 0..blocks_y {
-        // Determine neighboring row indices (clamped to image bounds)
-        let row_pp: usize = if by >= 2 {
-            by - 2
-        } else if by >= 1 {
-            by - 1
+        // Determine neighboring row indices exactly the way C's
+        // decompress_smooth_data does: per-iMCU-row `block_rows` (partial
+        // on the last iMCU row) feeds the scaled image_block_row /
+        // image_block_rows guards, while the actual neighbor offsets are
+        // plain +/-1/+/-2 rows in the padded buffer.
+        let imcu_row: usize = by / v_samp;
+        let block_row: usize = by % v_samp;
+        let block_rows: usize = if imcu_row < last_imcu_row {
+            v_samp
         } else {
-            by
+            blocks_y - last_imcu_row * v_samp
         };
-        let row_p: usize = if by >= 1 { by - 1 } else { by };
-        let row_n: usize = if by + 1 < blocks_y { by + 1 } else { by };
-        let row_nn: usize = if by + 2 < blocks_y {
-            by + 2
-        } else if by + 1 < blocks_y {
+        let image_block_row: usize = imcu_row * block_rows + block_row;
+        let image_block_rows: usize = block_rows * total_imcu_rows;
+
+        let row_p: usize = if image_block_row > 0 { by - 1 } else { by };
+        let row_pp: usize = if image_block_row > 1 { by - 2 } else { row_p };
+        let row_n: usize = if image_block_row + 1 < image_block_rows {
             by + 1
         } else {
             by
         };
+        let row_nn: usize = if image_block_row + 2 < image_block_rows {
+            by + 2
+        } else {
+            row_n
+        };
 
         for bx in 0..blocks_x {
             // Copy current block to workspace
-            let block_idx: usize = by * blocks_x + bx;
+            let block_idx: usize = by * row_stride + bx;
             let mut workspace: [i16; 64] = coeff_buf[block_idx];
 
             // Column indices for the 5-wide DC window (clamped)
@@ -289,35 +362,35 @@ pub fn apply_block_smoothing_coeffs(
             };
 
             // Gather 25 DC values from the 5x5 neighborhood
-            let dc01: i32 = dc_val(coeff_buf, blocks_x, row_pp, col_pp);
-            let dc02: i32 = dc_val(coeff_buf, blocks_x, row_pp, col_p);
-            let dc03: i32 = dc_val(coeff_buf, blocks_x, row_pp, bx);
-            let dc04: i32 = dc_val(coeff_buf, blocks_x, row_pp, col_n);
-            let dc05: i32 = dc_val(coeff_buf, blocks_x, row_pp, col_nn);
+            let dc01: i32 = dc_val(&dc_snapshot, blocks_x, row_pp, col_pp);
+            let dc02: i32 = dc_val(&dc_snapshot, blocks_x, row_pp, col_p);
+            let dc03: i32 = dc_val(&dc_snapshot, blocks_x, row_pp, bx);
+            let dc04: i32 = dc_val(&dc_snapshot, blocks_x, row_pp, col_n);
+            let dc05: i32 = dc_val(&dc_snapshot, blocks_x, row_pp, col_nn);
 
-            let dc06: i32 = dc_val(coeff_buf, blocks_x, row_p, col_pp);
-            let dc07: i32 = dc_val(coeff_buf, blocks_x, row_p, col_p);
-            let dc08: i32 = dc_val(coeff_buf, blocks_x, row_p, bx);
-            let dc09: i32 = dc_val(coeff_buf, blocks_x, row_p, col_n);
-            let dc10: i32 = dc_val(coeff_buf, blocks_x, row_p, col_nn);
+            let dc06: i32 = dc_val(&dc_snapshot, blocks_x, row_p, col_pp);
+            let dc07: i32 = dc_val(&dc_snapshot, blocks_x, row_p, col_p);
+            let dc08: i32 = dc_val(&dc_snapshot, blocks_x, row_p, bx);
+            let dc09: i32 = dc_val(&dc_snapshot, blocks_x, row_p, col_n);
+            let dc10: i32 = dc_val(&dc_snapshot, blocks_x, row_p, col_nn);
 
-            let dc11: i32 = dc_val(coeff_buf, blocks_x, by, col_pp);
-            let dc12: i32 = dc_val(coeff_buf, blocks_x, by, col_p);
-            let dc13: i32 = dc_val(coeff_buf, blocks_x, by, bx);
-            let dc14: i32 = dc_val(coeff_buf, blocks_x, by, col_n);
-            let dc15: i32 = dc_val(coeff_buf, blocks_x, by, col_nn);
+            let dc11: i32 = dc_val(&dc_snapshot, blocks_x, by, col_pp);
+            let dc12: i32 = dc_val(&dc_snapshot, blocks_x, by, col_p);
+            let dc13: i32 = dc_val(&dc_snapshot, blocks_x, by, bx);
+            let dc14: i32 = dc_val(&dc_snapshot, blocks_x, by, col_n);
+            let dc15: i32 = dc_val(&dc_snapshot, blocks_x, by, col_nn);
 
-            let dc16: i32 = dc_val(coeff_buf, blocks_x, row_n, col_pp);
-            let dc17: i32 = dc_val(coeff_buf, blocks_x, row_n, col_p);
-            let dc18: i32 = dc_val(coeff_buf, blocks_x, row_n, bx);
-            let dc19: i32 = dc_val(coeff_buf, blocks_x, row_n, col_n);
-            let dc20: i32 = dc_val(coeff_buf, blocks_x, row_n, col_nn);
+            let dc16: i32 = dc_val(&dc_snapshot, blocks_x, row_n, col_pp);
+            let dc17: i32 = dc_val(&dc_snapshot, blocks_x, row_n, col_p);
+            let dc18: i32 = dc_val(&dc_snapshot, blocks_x, row_n, bx);
+            let dc19: i32 = dc_val(&dc_snapshot, blocks_x, row_n, col_n);
+            let dc20: i32 = dc_val(&dc_snapshot, blocks_x, row_n, col_nn);
 
-            let dc21: i32 = dc_val(coeff_buf, blocks_x, row_nn, col_pp);
-            let dc22: i32 = dc_val(coeff_buf, blocks_x, row_nn, col_p);
-            let dc23: i32 = dc_val(coeff_buf, blocks_x, row_nn, bx);
-            let dc24: i32 = dc_val(coeff_buf, blocks_x, row_nn, col_n);
-            let dc25: i32 = dc_val(coeff_buf, blocks_x, row_nn, col_nn);
+            let dc21: i32 = dc_val(&dc_snapshot, blocks_x, row_nn, col_pp);
+            let dc22: i32 = dc_val(&dc_snapshot, blocks_x, row_nn, col_p);
+            let dc23: i32 = dc_val(&dc_snapshot, blocks_x, row_nn, bx);
+            let dc24: i32 = dc_val(&dc_snapshot, blocks_x, row_nn, col_n);
+            let dc25: i32 = dc_val(&dc_snapshot, blocks_x, row_nn, col_nn);
 
             // AC01 (natural position 1)
             let al: i32 = coef_bits[1];
@@ -565,5 +638,23 @@ pub fn decode_with_colorspace_override(
             "output colorspace {:?} not supported",
             target_cs
         ))),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A malformed SOF with zero height reaches smoothing with an empty
+    /// coefficient buffer (`mcus_y == 0`); the iMCU geometry must bail
+    /// out instead of underflowing `total_imcu_rows - 1` (codex review
+    /// of the P4-29 fix).
+    #[test]
+    fn block_smoothing_empty_grid_does_not_panic() {
+        let mut empty: Vec<[i16; 64]> = Vec::new();
+        let quant = QuantTable::from_zigzag(&[1u16; 64]);
+        let coef_bits: [i32; SAVED_COEFS] = [0, 1, 1, 1, 1, 1, 1, 1, 1, 1];
+        apply_block_smoothing_coeffs(&mut empty, 0, 0, 0, 1, &coef_bits, &quant);
+        apply_block_smoothing_coeffs(&mut empty, 2, 2, 0, 4, &coef_bits, &quant);
     }
 }
