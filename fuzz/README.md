@@ -88,6 +88,24 @@ cargo +nightly fuzz list
 cargo +nightly fuzz run fuzz_decompress fuzz/artifacts/fuzz_decompress/<crash-file>
 ```
 
+## CI smoke schedule and throughput
+
+The Fuzz Smoke workflow runs every 6 hours with, per target:
+
+- `-fork=4` — 4 parallel workers (the differential targets spend most wall time blocked
+  on djpeg/cjpeg/jpegtran subprocesses, so parallelism overlaps that wait);
+- `-dict=fuzz/jpeg.dict` — marker-structure mutations;
+- `-timeout=30` — per-input hangs become findings instead of eating the time budget;
+- an **accumulated corpus** carried across runs via `actions/cache` (key prefix
+  `fuzz-corpus-v1-<target>-`), so each run continues from all previously discovered
+  coverage instead of restarting from the deterministic seeds. Green runs `cmin` the
+  corpus before saving; failed runs save unminimized so the crash neighborhood survives.
+
+Regression seeds named `regression_p4_*.jpg` in `corpus/fuzz_decode_diff_c/` are past CI
+crash artifacts (P4-22/23/27/28/29 class bugs) committed permanently so mutation always
+starts near historically bug-prone structures (exotic sampling geometries, non-conformant
+progressive scan scripts).
+
 ## CI smoke failure artifacts
 
 The Fuzz Smoke workflow uploads two artifact groups when a target fails:
