@@ -37,6 +37,7 @@
 | P4-27 | CLOSED 2026-06-29 (single-component baseline h1v4 scans use one-block raster semantics) |
 | P4-28 | CLOSED 2026-06-29 (progressive AC-refine one-past-Se coefficient placement) |
 | P4-29 | CLOSED 2026-07-08 (block smoothing clamps at the real block grid, not the iMCU-padded one) |
+| P4-30 | CLOSED 2026-07-12 (unsupported 12-bit sampling layouts return an error instead of writing past component planes) |
 
 ---
 
@@ -498,6 +499,16 @@ P3-3's closure (2026-05-06; corrected 2026-05-10) explicitly scoped the allowlis
 
 **Status (2026-07-08): closed.** Decoded raster is byte-identical to `djpeg` on the artifact (max diff 0; measured pre-fix 26) and on the multi-iMCU-row fixture (max diff 0; naive clamp 2). Pinned by `tests/cross_check_fuzz_decode_diff_c_progressive_16x16.rs::fuzz_decode_diff_c_progressive_16x16_h1v4_smoothing_matches_djpeg` and `::progressive_16x20_multi_imcu_row_partial_last_smoothing_matches_djpeg`. Exact repro passes: `cargo +nightly fuzz run fuzz_decode_diff_c <artifact> -- -runs=1` with the crash file from `gh run download 28921468958 -n fuzz-artifacts-fuzz_decode_diff_c`.
 
+## P4-30. Unsupported 12-Bit Sampling Layout Panicked During Plane Writes — **CLOSED 2026-07-12**
+
+**Motivation.** Fuzz Smoke runs 117, 118, and 121 (run IDs `29009942928`, `29029935318`, and `29084489200`; commit `6500749`) independently reached the same panic through `fuzz_decompress_lenient` or `fuzz_decompress`. Each input declared 12-bit component sampling that is legal JPEG syntax but is not an integral divisor of the frame's maximum sampling factors.
+
+**Root cause.** `decompress_12bit` assumed every component sampling factor evenly divided the frame maximum. The derived MCU-sized component planes and later upsampling factors rely on that invariant, but the decoder neither validated it nor checked the final 8x8 block write. Unsupported layouts could therefore calculate a block origin exactly one row beyond the allocated plane and panic on index `len`.
+
+**Fix.** The 12-bit path now rejects zero sampling as corrupt and non-integral-divisor sampling as explicitly unsupported before MCU sizing. Every decoded block is also checked against its component plane before its samples are written. This closes the panic without claiming the broader non-standard-sampling support tracked by P4-21.
+
+**Status (2026-07-12): closed.** The minimized regression `api::precision::tests::unsupported_12bit_sampling_layout_returns_error_instead_of_panicking` returns an error, and all three downloaded CI artifacts complete under their original fuzz targets with `-runs=1`. This is an error-path stability test and produces no decoded raster to compare with `djpeg`.
+
 ## Phase 4 Suggested Order
 
 1. ~~**P4-1** — export `jpeg_calc_jpeg_dimensions` and delete its missing-symbol allowlist entry.~~ **CLOSED 2026-05-10**.
@@ -525,3 +536,4 @@ P3-3's closure (2026-05-06; corrected 2026-05-10) explicitly scoped the allowlis
 23. ~~**P4-27** — single-component baseline with non-1x1 sampling used interleaved MCU block order.~~ **CLOSED 2026-06-29** — baseline one-component SOS now routes through non-interleaved block-raster decode. Regression: `fuzz_decode_diff_c_baseline_gray_16x16_h1v4_matches_djpeg`.
 24. ~~**P4-28** — progressive AC-refine wrote one-past-`Se` real coefficients to padded coefficient 63.~~ **CLOSED 2026-06-29** — AC refine now uses real zigzag positions for `k < 64`, padded slot only for `64..79`. Regression: `fuzz_decode_diff_c_progressive_16x16_h2v1_ac_refine_matches_djpeg`.
 25. ~~**P4-29** — block smoothing read dummy iMCU-padding blocks as DC neighbors (and wrote smoothed blocks back into the neighbor-read buffer).~~ **CLOSED 2026-07-08** — smoothing now iterates and clamps at the real `width_in_blocks`/`height_in_blocks` grid over a `row_stride`-pitched buffer, reading neighbor DCs from a pre-pass snapshot. Regression: `fuzz_decode_diff_c_progressive_16x16_h1v4_smoothing_matches_djpeg`.
+26. ~~**P4-30** — unsupported 12-bit sampling layout could write beyond a component plane.~~ **CLOSED 2026-07-12** — validate the 12-bit upsampling invariant before decode and bounds-check each block write. Regression: `unsupported_12bit_sampling_layout_returns_error_instead_of_panicking`; exact replays for Fuzz Smoke 117, 118, and 121.
