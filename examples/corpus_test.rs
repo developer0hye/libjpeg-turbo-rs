@@ -291,22 +291,37 @@ impl ExpectedCoverage {
             return Ok(());
         }
         let required = required_expected_outcomes();
-        if self.observed == required {
+        let p4_20_outcomes = [p4_20_outcome("pass"), p4_20_outcome("known-mismatch")];
+        let observed_p4_20 = p4_20_outcomes
+            .iter()
+            .filter(|outcome| self.observed.contains(*outcome))
+            .cloned()
+            .collect::<Vec<_>>();
+        let observed_without_p4_20 = self
+            .observed
+            .iter()
+            .filter(|outcome| !p4_20_outcomes.contains(outcome))
+            .cloned()
+            .collect::<BTreeSet<_>>();
+        if observed_p4_20.len() == 1 && observed_without_p4_20 == required {
             return Ok(());
         }
         let missing = required
-            .difference(&self.observed)
+            .difference(&observed_without_p4_20)
             .cloned()
             .collect::<Vec<_>>();
-        let unexpected = self
-            .observed
+        let unexpected = observed_without_p4_20
             .difference(&required)
             .cloned()
             .collect::<Vec<_>>();
         Err(format!(
-            "expected-outcome coverage mismatch; missing={missing:?}, unexpected={unexpected:?}"
+            "expected-outcome coverage mismatch; P4-20 must have exactly one observed pass or known-mismatch, got={observed_p4_20:?}; missing={missing:?}, unexpected={unexpected:?}"
         ))
     }
+}
+
+fn p4_20_outcome(label: &str) -> String {
+    format!("fuzz_seeds/24fd23785278a9577686f501e17ee8164f8b977b\tdecode\t{label}")
 }
 
 fn required_expected_outcomes() -> BTreeSet<String> {
@@ -324,11 +339,6 @@ fn required_expected_outcomes() -> BTreeSet<String> {
         required.insert(format!("{path}\t{operation}\t{label}"));
     };
 
-    add(
-        "fuzz_seeds/24fd23785278a9577686f501e17ee8164f8b977b",
-        "decode",
-        p4_20_expected_label(),
-    );
     add(
         "fuzz_seeds/crash-cf56f76b13a5eaa5a65b46a3503c0951f034d735",
         "decode",
@@ -371,17 +381,6 @@ fn required_expected_outcomes() -> BTreeSet<String> {
         }
     }
     required
-}
-
-fn p4_20_expected_label() -> &'static str {
-    if std::env::var("JSIMD_FORCENONE").ok().as_deref() == Some("1") {
-        return "known-mismatch";
-    }
-    #[cfg(target_arch = "x86_64")]
-    if std::is_x86_feature_detected!("avx2") {
-        return "pass";
-    }
-    "known-mismatch"
 }
 
 // ===========================================================================
@@ -1382,7 +1381,7 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::{
-        apply_expected_reject, c_tool_path, collect_jpeg_files, operation_applies,
+        apply_expected_reject, c_tool_path, collect_jpeg_files, operation_applies, p4_20_outcome,
         required_expected_outcomes, run_decode_test, Counts, ExpectedCoverage, TestResult,
     };
     use std::path::PathBuf;
@@ -1532,7 +1531,8 @@ mod tests {
 
     #[test]
     fn full_corpus_requires_every_exact_expected_outcome() {
-        let required = required_expected_outcomes();
+        let mut required = required_expected_outcomes();
+        required.insert(p4_20_outcome("known-mismatch"));
         let complete = ExpectedCoverage {
             observed: required.clone(),
         };
@@ -1548,6 +1548,30 @@ mod tests {
         let removed_path = removed.split('\t').next().expect("outcome path");
         assert!(error.contains(removed_path), "{error}");
         assert!(incomplete.verify_full_corpus(false).is_ok());
+    }
+
+    #[test]
+    fn full_corpus_accepts_exactly_one_observed_p4_20_backend_outcome() {
+        let required = required_expected_outcomes();
+        for label in ["pass", "known-mismatch"] {
+            let mut observed = required.clone();
+            observed.insert(p4_20_outcome(label));
+            assert!(ExpectedCoverage { observed }
+                .verify_full_corpus(true)
+                .is_ok());
+        }
+
+        let missing = ExpectedCoverage {
+            observed: required.clone(),
+        };
+        assert!(missing.verify_full_corpus(true).is_err());
+
+        let mut both = required;
+        both.insert(p4_20_outcome("pass"));
+        both.insert(p4_20_outcome("known-mismatch"));
+        assert!(ExpectedCoverage { observed: both }
+            .verify_full_corpus(true)
+            .is_err());
     }
 
     #[test]
