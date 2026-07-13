@@ -5,8 +5,11 @@ use std::process::Command;
 
 use libjpeg_turbo_rs::{
     compress_arithmetic, compress_arithmetic_progressive, compress_progressive, decompress,
-    decompress_to, PixelFormat, Subsampling,
+    decompress_to, Decoder, PixelFormat, Subsampling,
 };
+
+const P4_20_ARITHMETIC_PROGRESSIVE_GRAY: &[u8] =
+    include_bytes!("../fuzz/corpus/fuzz_decompress/24fd23785278a9577686f501e17ee8164f8b977b");
 
 fn parse_ppm(path: &Path) -> (usize, usize, Vec<u8>) {
     let raw: Vec<u8> = std::fs::read(path).expect("read PPM");
@@ -91,6 +94,79 @@ fn progressive_huffman_still_works() {
         .max()
         .unwrap_or(0);
     assert!(max_diff <= 5, "progressive huffman max_diff={}", max_diff);
+}
+
+#[test]
+fn tracked_arithmetic_progressive_gray_is_pinned_to_p4_20() {
+    const SCALAR_CHILD: &str = "LIBJPEG_P4_20_SCALAR_CHILD";
+    if std::env::var(SCALAR_CHILD).ok().as_deref() != Some("1") {
+        let status = Command::new(std::env::current_exe().expect("locate integration test binary"))
+            .args([
+                "--exact",
+                "tracked_arithmetic_progressive_gray_is_pinned_to_p4_20",
+                "--nocapture",
+            ])
+            .env(SCALAR_CHILD, "1")
+            .env("JSIMD_FORCENONE", "1")
+            .status()
+            .expect("run isolated scalar P4-20 characterization");
+        assert!(status.success(), "scalar P4-20 child test failed");
+        return;
+    }
+
+    let djpeg: PathBuf = require_c_tool!("djpeg");
+    let (c_width, c_height, c_pixels) = helpers::decode_gray_with_c_djpeg(
+        &djpeg,
+        P4_20_ARITHMETIC_PROGRESSIVE_GRAY,
+        "p4_20_arithmetic_progressive_gray",
+    );
+
+    let mut smooth_decoder =
+        Decoder::new(P4_20_ARITHMETIC_PROGRESSIVE_GRAY).expect("parse tracked SOF10 seed");
+    smooth_decoder.set_block_smoothing(true);
+    let smooth = smooth_decoder
+        .decode_image()
+        .expect("decode tracked SOF10 seed with smoothing");
+
+    let mut unsmoothed_decoder =
+        Decoder::new(P4_20_ARITHMETIC_PROGRESSIVE_GRAY).expect("parse tracked SOF10 seed");
+    unsmoothed_decoder.set_block_smoothing(false);
+    let unsmoothed = unsmoothed_decoder
+        .decode_image()
+        .expect("decode tracked SOF10 seed without smoothing");
+
+    let nonce = format!(
+        "{}_{}",
+        std::process::id(),
+        std::thread::current().name().unwrap_or("test")
+    );
+    let jpeg_path = std::env::temp_dir().join(format!("p4_20_{nonce}.jpg"));
+    let pgm_path = std::env::temp_dir().join(format!("p4_20_{nonce}.pgm"));
+    std::fs::write(&jpeg_path, P4_20_ARITHMETIC_PROGRESSIVE_GRAY).expect("write C input");
+    let c_nosmooth_status = Command::new(&djpeg)
+        .args(["-strict", "-nosmooth", "-outfile"])
+        .arg(&pgm_path)
+        .arg(&jpeg_path)
+        .status()
+        .expect("run strict djpeg -nosmooth");
+    assert!(c_nosmooth_status.success());
+    let c_nosmooth_raw = std::fs::read(&pgm_path).expect("read C nosmooth PGM");
+    let (_, _, c_nosmooth_pixels) =
+        helpers::parse_pgm(&c_nosmooth_raw).expect("parse C nosmooth PGM");
+    std::fs::remove_file(&jpeg_path).ok();
+    std::fs::remove_file(&pgm_path).ok();
+
+    assert_eq!((c_width, c_height), (144, 16));
+    assert_eq!((smooth.width, smooth.height), (c_width, c_height));
+    let smooth_diff = helpers::pixel_max_diff(&smooth.data, &c_pixels);
+    let unsmoothed_diff = helpers::pixel_max_diff(&unsmoothed.data, &c_pixels);
+    let rust_vs_c_nosmooth = helpers::pixel_max_diff(&unsmoothed.data, &c_nosmooth_pixels);
+    assert_eq!(smooth_diff, 255, "P4-20 scalar characterization changed");
+    assert_eq!(unsmoothed_diff, 255, "P4-20 is not smoothing-related");
+    assert_eq!(
+        rust_vs_c_nosmooth, 255,
+        "P4-20 characterization against djpeg -nosmooth changed"
+    );
 }
 
 /// Test SOF10 decode with a REAL C-encoded arithmetic progressive JPEG.
