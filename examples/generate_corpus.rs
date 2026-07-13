@@ -6,6 +6,7 @@
 ///   tests/corpus/generated/  — JPEGs produced by C cjpeg from synthetic/reference PPMs
 ///   tests/corpus/fuzz_seeds/ — copies of fuzz/corpus/fuzz_decompress/*.jpg
 ///   tests/corpus/fixtures/   — copies of tests/fixtures/*.jpg
+use std::io::Read;
 use std::path::{Path, PathBuf};
 
 // ---------------------------------------------------------------------------
@@ -439,22 +440,185 @@ fn generate_jpegs(cjpeg: &Path, sources: &[SourcePpm], out_dir: &Path) -> (usize
 // File copying
 // ---------------------------------------------------------------------------
 
-fn copy_jpgs(src_dir: &Path, dst_dir: &Path) -> usize {
-    let mut count = 0usize;
-    let entries = match std::fs::read_dir(src_dir) {
-        Ok(e) => e,
-        Err(_) => return 0,
-    };
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if path.extension().and_then(|e| e.to_str()) == Some("jpg") {
-            let dst = dst_dir.join(path.file_name().unwrap());
-            if std::fs::copy(&path, &dst).is_ok() {
-                count += 1;
+fn copy_jpgs(src_dir: &Path, dst_dir: &Path) -> Result<usize, String> {
+    copy_jpgs_recursive(src_dir, src_dir, dst_dir)
+}
+
+fn copy_jpgs_recursive(root: &Path, current_dir: &Path, dst_dir: &Path) -> Result<usize, String> {
+    let mut count: usize = 0;
+    let entries = std::fs::read_dir(current_dir)
+        .map_err(|error| format!("read corpus directory {}: {error}", current_dir.display()))?;
+    for entry in entries {
+        let entry = entry.map_err(|error| {
+            format!(
+                "read corpus directory entry under {}: {error}",
+                current_dir.display()
+            )
+        })?;
+        let path: PathBuf = entry.path();
+        let file_type = entry
+            .file_type()
+            .map_err(|error| format!("inspect corpus path {}: {error}", path.display()))?;
+        if file_type.is_symlink() {
+            return Err(format!(
+                "symlink is not allowed in corpus: {}",
+                path.display()
+            ));
+        }
+        if file_type.is_dir() {
+            count += copy_jpgs_recursive(root, &path, dst_dir)?;
+            continue;
+        }
+        if !file_type.is_file() {
+            continue;
+        }
+
+        let extension_is_jpeg: bool = path
+            .extension()
+            .and_then(|extension| extension.to_str())
+            .is_some_and(|extension| {
+                extension.eq_ignore_ascii_case("jpg") || extension.eq_ignore_ascii_case("jpeg")
+            });
+        let extensionless_soi: bool = if path.extension().is_none() {
+            let mut file = std::fs::File::open(&path)
+                .map_err(|error| format!("open corpus input {}: {error}", path.display()))?;
+            let mut signature: [u8; 2] = [0; 2];
+            let bytes_read: usize = file
+                .read(&mut signature)
+                .map_err(|error| format!("read corpus input {}: {error}", path.display()))?;
+            bytes_read == signature.len() && signature == [0xff, 0xd8]
+        } else {
+            false
+        };
+        if extension_is_jpeg || extensionless_soi {
+            let relative: &Path = path.strip_prefix(root).map_err(|error| {
+                format!(
+                    "derive relative corpus path for {} from {}: {error}",
+                    path.display(),
+                    root.display()
+                )
+            })?;
+            let dst: PathBuf = dst_dir.join(relative);
+            if let Some(parent) = dst.parent() {
+                std::fs::create_dir_all(parent).map_err(|error| {
+                    format!("create corpus destination {}: {error}", parent.display())
+                })?;
             }
+            std::fs::copy(&path, &dst).map_err(|error| {
+                format!(
+                    "copy corpus input {} to {}: {error}",
+                    path.display(),
+                    dst.display()
+                )
+            })?;
+            count += 1;
         }
     }
-    count
+    Ok(count)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::copy_jpgs;
+    use std::path::PathBuf;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+    struct TempTree {
+        path: PathBuf,
+    }
+
+    impl TempTree {
+        fn new(label: &str) -> Self {
+            let counter: u64 = TEMP_COUNTER.fetch_add(1, Ordering::Relaxed);
+            let path: PathBuf = std::env::temp_dir().join(format!(
+                "libjpeg_corpus_copy_{}_{}_{}",
+                std::process::id(),
+                counter,
+                label
+            ));
+            std::fs::create_dir_all(&path).expect("create temp tree");
+            Self { path }
+        }
+    }
+
+    impl Drop for TempTree {
+        fn drop(&mut self) {
+            std::fs::remove_dir_all(&self.path).ok();
+        }
+    }
+
+    #[test]
+    fn copy_jpgs_preserves_nested_paths_and_extensionless_jpeg_seeds() {
+        let source: TempTree = TempTree::new("source");
+        let destination: TempTree = TempTree::new("destination");
+        let nested: PathBuf = source.path.join("real_world/camera");
+        std::fs::create_dir_all(&nested).expect("create nested source");
+
+        std::fs::write(source.path.join("top.jpg"), b"not validated here")
+            .expect("write top-level JPEG");
+        std::fs::write(nested.join("photo.jpeg"), b"nested fixture").expect("write nested JPEG");
+        std::fs::write(nested.join("00592c456b03"), b"\xff\xd8\xff\xd9")
+            .expect("write extensionless JPEG seed");
+        std::fs::write(nested.join("not-a-jpeg"), b"plain corpus bytes")
+            .expect("write non-JPEG corpus input");
+
+        let copied: usize = copy_jpgs(&source.path, &destination.path).expect("copy corpus");
+
+        assert_eq!(copied, 3, "all and only JPEG candidates must be copied");
+        assert!(destination.path.join("top.jpg").is_file());
+        assert!(
+            destination
+                .path
+                .join("real_world/camera/photo.jpeg")
+                .is_file(),
+            "nested relative path must be preserved"
+        );
+        assert!(
+            destination
+                .path
+                .join("real_world/camera/00592c456b03")
+                .is_file(),
+            "extensionless SOI seed must be included"
+        );
+        assert!(!destination
+            .path
+            .join("real_world/camera/not-a-jpeg")
+            .exists());
+    }
+
+    #[test]
+    fn copy_jpgs_fails_when_source_cannot_be_read() {
+        let source: TempTree = TempTree::new("missing-source");
+        let destination: TempTree = TempTree::new("missing-destination");
+        std::fs::remove_dir_all(&source.path).expect("remove source");
+
+        let error: String = copy_jpgs(&source.path, &destination.path)
+            .expect_err("missing source must fail closed");
+
+        assert!(error.contains("read corpus directory"), "{error}");
+        assert!(
+            error.contains(&source.path.display().to_string()),
+            "{error}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn copy_jpgs_rejects_directory_symlinks() {
+        use std::os::unix::fs::symlink;
+
+        let source: TempTree = TempTree::new("symlink-source");
+        let destination: TempTree = TempTree::new("symlink-destination");
+        symlink(&source.path, source.path.join("cycle")).expect("create symlink cycle");
+
+        let error: String = copy_jpgs(&source.path, &destination.path)
+            .expect_err("symlinked corpus paths must be rejected");
+
+        assert!(error.contains("symlink"), "{error}");
+        assert!(error.contains("cycle"), "{error}");
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -511,13 +675,20 @@ fn main() {
 
     // Copy fuzz seeds
     let fuzz_src = PathBuf::from("fuzz/corpus/fuzz_decompress");
-    let fuzz_count = copy_jpgs(&fuzz_src, &fuzz_seeds_dir);
+    let fuzz_count = copy_jpgs(&fuzz_src, &fuzz_seeds_dir).expect("copy fuzz seed corpus");
     println!("  fuzz_seeds: {} files copied", fuzz_count);
 
     // Copy fixtures
     let fixtures_src = PathBuf::from("tests/fixtures");
-    let fixtures_count = copy_jpgs(&fixtures_src, &fixtures_dir);
+    let fixtures_count = copy_jpgs(&fixtures_src, &fixtures_dir).expect("copy fixture corpus");
     println!("  fixtures: {} files copied", fixtures_count);
+
+    assert!(generated > 0, "generated corpus bucket must not be empty");
+    assert!(fuzz_count > 0, "fuzz seed corpus bucket must not be empty");
+    assert!(
+        fixtures_count > 0,
+        "fixture corpus bucket must not be empty"
+    );
 
     // Summary
     let total = generated + fuzz_count + fixtures_count;
