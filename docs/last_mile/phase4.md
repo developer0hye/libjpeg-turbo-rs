@@ -39,6 +39,7 @@
 | P4-29 | CLOSED 2026-07-08 (block smoothing clamps at the real block grid, not the iMCU-padded one) |
 | P4-30 | CLOSED 2026-07-12 (unsupported 12-bit sampling layouts return an error instead of writing past component planes) |
 | P4-31 | OPEN (filed 2026-07-13; real-world/corpus CI gates can silently lose coverage) |
+| P4-32 | CLOSED AS DUPLICATE OF P4-20 2026-07-13 (coefficients/quantization match C; divergence is IDCT overflow fidelity) |
 
 ---
 
@@ -400,7 +401,9 @@ P3-3's closure (2026-05-06; corrected 2026-05-10) explicitly scoped the allowlis
 
 **Related: pass-2 row path.** The same truncate-vs-`packssdw`-saturate gap exists in the scalar `idct_8x8` pass-2 row store (`output[...] = descale(val, descale_bits) as i16`) and therefore in the SSE2/AVX2 scalar fallback when a corrupt block has rows 1–7 zero *and* a row-0 AC term that drives the pass-2 row IDCT out of i16 range. Same fix scope (i16-faithful saturating narrow), same corrupt-input-only reachability.
 
-**Why deferred.** Not yet observed in a fuzz finding (P4-19's crash was the AC-all-zero shortcut, now fixed). Filed proactively because the differential fuzzer may eventually reach the full-path overflow. AVX2 — the path most CI x86 runners actually use — is already correct, lowering urgency.
+**Why deferred.** Originally filed proactively after P4-19; P4-31 has now produced the valid-input observation below. AVX2 — the path most CI x86 runners actually use — is already correct, but the scalar/pass-2 and AArch64 behavior now has a concrete tracked repro rather than only a corrupt-input hypothesis.
+
+**P4-31 corpus evidence (2026-07-13).** The newly exercised tracked seed `24fd23785278a9577686f501e17ee8164f8b977b` is accepted by `djpeg -strict` and exposes this family on a valid 144x16 arithmetic-progressive grayscale stream: Rust and C coefficient buffers and quantization tables match exactly, but decoded pixels differ with and without block smoothing. The observed maximum is backend-specific: 34 on AArch64 NEON and 255 with scalar dispatch, while the x86 AVX2 path can already match C. Four blocks contain rows-1–7-non-zero dequantized values above the i16 range (maximum absolute dequantized coefficient 92280, with zigzag coefficients aligned to natural-order quantization entries). `tests/sof10_decode.rs::tracked_arithmetic_progressive_gray_is_pinned_to_p4_20` isolates and pins the scalar result, and the corpus runner records the native backend result rather than misattributing it to arithmetic entropy decode. This evidence broadens the implementation audit beyond the original x86-SSE2-only hypothesis to the scalar/pass-2 and AArch64 paths.
 
 ## P4-21. Decoder Rejects Non-Standard Sampling Where a Chroma Component Out-Samples Luma — **OPEN**
 
@@ -516,9 +519,17 @@ P3-3's closure (2026-05-06; corrected 2026-05-10) explicitly scoped the allowlis
 
 **Root-cause hypothesis.** The individual suites grew independently: real-world tests prioritized diagnostic continuity, the corpus copier assumed flat extension-bearing fixtures, and the CI shell gate accumulated count-based exceptions. Together those choices allow a missing directory, new Rust rejection, or oracle execution error to reduce effective coverage without failing CI.
 
-**Acceptance criteria.** (1) Rust panics/errors in valid real-world decoding fail the test; only unavailable external C capabilities may skip. (2) Fixture inventory/category minimums prevent silent shrinkage. (3) Corpus generation recursively preserves nested fixtures and includes extensionless files only when their bytes have a JPEG SOI signature, without modifying the fuzz source corpus. (4) CMYK/YCCK/12-bit comparisons normalize both decoders to the same pixel format. (5) Malformed inputs use an exact path + operation + reason `ExpectedReject` allowlist that must be fully exercised; no arbitrary skip budget. (6) The corpus runner exits nonzero for every unallowlisted failure/crash/skip, CI requires all operations including encode, and source-bucket minimums prove real-world, Kodak, USC-SIPI, generated, and fuzz inputs were exercised.
+**Acceptance criteria.** (1) Rust panics/errors in valid real-world decoding fail the test; only unavailable external C capabilities may skip. (2) Fixture inventory/category minimums prevent silent shrinkage. (3) Corpus generation recursively preserves nested fixtures and includes tracked extensionless fuzz files only when their bytes have a JPEG SOI signature, without modifying or incorporating local untracked fuzz corpus. (4) CMYK/YCCK/12-bit comparisons normalize both decoders to the same pixel format. (5) Malformed inputs use an exact path + operation + reason `ExpectedReject` classification; pre-existing valid-input divergences use an equally exact named `KnownMismatch` tied to an open LAST_MILE item. Every expected path-operation outcome must be exercised by a full corpus run; there is no arbitrary skip budget. (6) The corpus runner exits nonzero for every unclassified failure/crash/skip, CI requires all operations including encode, and source-bucket minimums prove real-world, generated, and fuzz inputs were exercised.
 
 **Why release-blocking.** Version `0.6.3` is intended to publish decoder-stability fixes. Publishing while a green gate can silently omit real-world inputs or downgrade Rust failures would weaken the evidence for that claim; the tag remains blocked until P4-31 closes with PR and post-merge CI evidence.
+
+## P4-32. Valid Arithmetic-Progressive Grayscale Seed Diverges From `djpeg` — **CLOSED AS DUPLICATE OF P4-20 2026-07-13**
+
+**Motivation.** P4-31's extensionless-seed coverage surfaced tracked fuzz input `fuzz/corpus/fuzz_decompress/24fd23785278a9577686f501e17ee8164f8b977b`. libjpeg-turbo 3.1.4.1 accepts it with `djpeg -strict`; the stream is a 144x16, one-component SOF10 arithmetic-progressive JPEG with four scans (`DC first`, two `AC first`, then `AC refine`). Rust completes decoding but differs from `djpeg` by max 34 beginning at pixel (0,0).
+
+**Current evidence.** This is not malformed-input tolerance: the strict C oracle succeeds. Rust and C coefficient buffers and quantization tables match exactly, while the backend-specific pixel mismatch is unchanged by disabling block smoothing (max 34 on AArch64 NEON and 255 with scalar dispatch; x86 AVX2 can match C). Four blocks hit the rows-1–7-non-zero i16-overflow shape already tracked by P4-20, with maximum absolute dequantized coefficient 92280 after aligning zigzag coefficients to natural-order quantization entries. The separate tracked `crash-cf56...` rejection remains P4-21.
+
+**Disposition.** Closed as a duplicate rather than creating a second decoder item. The exact seed is pinned in `tests/sof10_decode.rs`, the corpus reports it as a named P4-20 `KnownMismatch`, and P4-20 retains the eventual diff-to-zero acceptance criterion.
 
 ## Phase 4 Suggested Order
 
@@ -549,3 +560,4 @@ P3-3's closure (2026-05-06; corrected 2026-05-10) explicitly scoped the allowlis
 25. ~~**P4-29** — block smoothing read dummy iMCU-padding blocks as DC neighbors (and wrote smoothed blocks back into the neighbor-read buffer).~~ **CLOSED 2026-07-08** — smoothing now iterates and clamps at the real `width_in_blocks`/`height_in_blocks` grid over a `row_stride`-pitched buffer, reading neighbor DCs from a pre-pass snapshot. Regression: `fuzz_decode_diff_c_progressive_16x16_h1v4_smoothing_matches_djpeg`.
 26. ~~**P4-30** — unsupported 12-bit sampling layout could write beyond a component plane.~~ **CLOSED 2026-07-12** — validate the 12-bit upsampling invariant before decode and bounds-check each block write. Regression: `unsupported_12bit_sampling_layout_returns_error_instead_of_panicking`; exact replays for Fuzz Smoke 117, 118, and 121.
 27. **P4-31** — harden real-world/corpus coverage against soft-skipped Rust failures, nested-fixture omission, extensionless JPEG-seed omission, and fail-open summary parsing.
+28. ~~**P4-32** — triage the strict-C-valid SOF10 grayscale seed `24fd237...`.~~ **CLOSED AS DUPLICATE OF P4-20 2026-07-13** — coefficients and quantization match C; the max-34 pixel delta is the existing IDCT i16-fidelity family.
