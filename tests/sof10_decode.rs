@@ -3,11 +3,14 @@ mod helpers;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+#[cfg(not(target_arch = "wasm32"))]
+use libjpeg_turbo_rs::Decoder;
 use libjpeg_turbo_rs::{
     compress_arithmetic, compress_arithmetic_progressive, compress_progressive, decompress,
-    decompress_to, Decoder, PixelFormat, Subsampling,
+    decompress_to, PixelFormat, Subsampling,
 };
 
+#[cfg(not(target_arch = "wasm32"))]
 const P4_20_ARITHMETIC_PROGRESSIVE_GRAY: &[u8] =
     include_bytes!("../fuzz/corpus/fuzz_decompress/24fd23785278a9577686f501e17ee8164f8b977b");
 
@@ -96,6 +99,10 @@ fn progressive_huffman_still_works() {
     assert!(max_diff <= 5, "progressive huffman max_diff={}", max_diff);
 }
 
+// This differential characterization needs a native child process so the
+// process-global SIMD override cannot race other tests. WASI cannot spawn the
+// current test binary, and it has no external `djpeg` oracle.
+#[cfg(not(target_arch = "wasm32"))]
 #[test]
 fn tracked_arithmetic_progressive_gray_is_pinned_to_p4_20() {
     const SCALAR_CHILD: &str = "LIBJPEG_P4_20_SCALAR_CHILD";
