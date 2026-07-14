@@ -1,15 +1,16 @@
+use std::collections::BTreeSet;
 /// Corpus test harness: validates libjpeg-turbo-rs against C libjpeg-turbo
 /// across a directory of JPEG files.
 ///
 /// Usage:
 ///   cargo run --example corpus_test -- --corpus-dir tests/corpus/ [--decode-only] [--encode-only] [--transform-only]
-use std::io::Write;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use libjpeg_turbo_rs::{
-    compress, decompress, transform, Image, PixelFormat, Subsampling, TransformOp,
+    compress, decompress, decompress_to, transform, Image, PixelFormat, Subsampling, TransformOp,
 };
 
 // ===========================================================================
@@ -108,16 +109,17 @@ fn parse_ppm(data: &[u8]) -> Option<(usize, usize, Vec<u8>)> {
     pos = skip_ws_comments(data, next);
     let (height, next) = read_number(data, pos)?;
     pos = skip_ws_comments(data, next);
-    let (_maxval, next) = read_number(data, pos)?;
+    let (maxval, next) = read_number(data, pos)?;
     pos = next;
     if pos < data.len() && data[pos].is_ascii_whitespace() {
         pos += 1;
     }
-    let expected_len: usize = width * height * 3;
-    if data.len() - pos < expected_len {
-        return None;
-    }
-    Some((width, height, data[pos..pos + expected_len].to_vec()))
+    let pixels = parse_pnm_samples(
+        data.get(pos..)?,
+        width.checked_mul(height)?.checked_mul(3)?,
+        maxval,
+    )?;
+    Some((width, height, pixels))
 }
 
 fn parse_pgm(data: &[u8]) -> Option<(usize, usize, Vec<u8>)> {
@@ -130,16 +132,43 @@ fn parse_pgm(data: &[u8]) -> Option<(usize, usize, Vec<u8>)> {
     pos = skip_ws_comments(data, next);
     let (height, next) = read_number(data, pos)?;
     pos = skip_ws_comments(data, next);
-    let (_maxval, next) = read_number(data, pos)?;
+    let (maxval, next) = read_number(data, pos)?;
     pos = next;
     if pos < data.len() && data[pos].is_ascii_whitespace() {
         pos += 1;
     }
-    let expected_len: usize = width * height;
-    if data.len() - pos < expected_len {
+    let pixels = parse_pnm_samples(data.get(pos..)?, width.checked_mul(height)?, maxval)?;
+    Some((width, height, pixels))
+}
+
+fn parse_pnm_samples(data: &[u8], sample_count: usize, maxval: usize) -> Option<Vec<u8>> {
+    if maxval == 0 || maxval > u16::MAX as usize {
         return None;
     }
-    Some((width, height, data[pos..pos + expected_len].to_vec()))
+    if maxval <= u8::MAX as usize {
+        let samples = data.get(..sample_count)?;
+        if maxval == u8::MAX as usize {
+            return Some(samples.to_vec());
+        }
+        return Some(
+            samples
+                .iter()
+                .map(|sample| (*sample as usize * 255 / maxval) as u8)
+                .collect(),
+        );
+    }
+
+    let byte_count = sample_count.checked_mul(2)?;
+    let samples = data.get(..byte_count)?;
+    Some(
+        samples
+            .chunks_exact(2)
+            .map(|sample| {
+                let value = u16::from_be_bytes([sample[0], sample[1]]) as usize;
+                (value * 255 / maxval) as u8
+            })
+            .collect(),
+    )
 }
 
 // ===========================================================================
@@ -149,6 +178,8 @@ fn parse_pgm(data: &[u8]) -> Option<(usize, usize, Vec<u8>)> {
 #[derive(Clone)]
 enum TestResult {
     Pass { max_diff: u32 },
+    ExpectedReject { notes: String },
+    KnownMismatch { max_diff: u32, notes: String },
     Fail { max_diff: u32, notes: String },
     Crash { notes: String },
     Skip { notes: String },
@@ -158,6 +189,8 @@ impl TestResult {
     fn label(&self) -> &'static str {
         match self {
             TestResult::Pass { .. } => "pass",
+            TestResult::ExpectedReject { .. } => "expected-reject",
+            TestResult::KnownMismatch { .. } => "known-mismatch",
             TestResult::Fail { .. } => "fail",
             TestResult::Crash { .. } => "crash",
             TestResult::Skip { .. } => "skip",
@@ -168,13 +201,18 @@ impl TestResult {
         match self {
             TestResult::Pass { max_diff } => max_diff.to_string(),
             TestResult::Fail { max_diff, .. } => max_diff.to_string(),
-            TestResult::Crash { .. } | TestResult::Skip { .. } => "-".to_string(),
+            TestResult::KnownMismatch { max_diff, .. } => max_diff.to_string(),
+            TestResult::ExpectedReject { .. }
+            | TestResult::Crash { .. }
+            | TestResult::Skip { .. } => "-".to_string(),
         }
     }
 
     fn notes(&self) -> &str {
         match self {
             TestResult::Pass { .. } => "",
+            TestResult::ExpectedReject { notes } => notes,
+            TestResult::KnownMismatch { notes, .. } => notes,
             TestResult::Fail { notes, .. } => notes,
             TestResult::Crash { notes } => notes,
             TestResult::Skip { notes } => notes,
@@ -200,6 +238,8 @@ fn print_row(file: &str, operation: &str, result: &TestResult) {
 #[derive(Default)]
 struct Counts {
     pass: u32,
+    expected_reject: u32,
+    known_mismatch: u32,
     fail: u32,
     crash: u32,
     skip: u32,
@@ -209,40 +249,204 @@ impl Counts {
     fn record(&mut self, r: &TestResult) {
         match r {
             TestResult::Pass { .. } => self.pass += 1,
+            TestResult::ExpectedReject { .. } => self.expected_reject += 1,
+            TestResult::KnownMismatch { .. } => self.known_mismatch += 1,
             TestResult::Fail { .. } => self.fail += 1,
             TestResult::Crash { .. } => self.crash += 1,
             TestResult::Skip { .. } => self.skip += 1,
         }
     }
+
+    fn has_unexpected_outcomes(&self) -> bool {
+        self.fail != 0 || self.crash != 0 || self.skip != 0
+    }
+
+    fn total(&self) -> u32 {
+        self.pass + self.expected_reject + self.known_mismatch + self.fail + self.crash + self.skip
+    }
+}
+
+#[derive(Default)]
+struct ExpectedCoverage {
+    observed: BTreeSet<String>,
+}
+
+impl ExpectedCoverage {
+    fn record(&mut self, relative_path: &Path, operation: &str, result: &TestResult) {
+        let path = relative_path.to_string_lossy().replace('\\', "/");
+        let is_p4_20_decode =
+            path == "fuzz_seeds/24fd23785278a9577686f501e17ee8164f8b977b" && operation == "decode";
+        let label = match result {
+            TestResult::Pass { .. } if is_p4_20_decode => "pass",
+            TestResult::ExpectedReject { .. } => "expected-reject",
+            TestResult::KnownMismatch { .. } => "known-mismatch",
+            _ => return,
+        };
+        self.observed
+            .insert(format!("{path}\t{operation}\t{label}"));
+    }
+
+    fn verify_full_corpus(&self, is_full_corpus_run: bool) -> Result<(), String> {
+        if !is_full_corpus_run {
+            return Ok(());
+        }
+        let required = required_expected_outcomes();
+        let p4_20_outcomes = [p4_20_outcome("pass"), p4_20_outcome("known-mismatch")];
+        let observed_p4_20 = p4_20_outcomes
+            .iter()
+            .filter(|outcome| self.observed.contains(*outcome))
+            .cloned()
+            .collect::<Vec<_>>();
+        let observed_without_p4_20 = self
+            .observed
+            .iter()
+            .filter(|outcome| !p4_20_outcomes.contains(outcome))
+            .cloned()
+            .collect::<BTreeSet<_>>();
+        if observed_p4_20.len() == 1 && observed_without_p4_20 == required {
+            return Ok(());
+        }
+        let missing = required
+            .difference(&observed_without_p4_20)
+            .cloned()
+            .collect::<Vec<_>>();
+        let unexpected = observed_without_p4_20
+            .difference(&required)
+            .cloned()
+            .collect::<Vec<_>>();
+        Err(format!(
+            "expected-outcome coverage mismatch; P4-20 must have exactly one observed pass or known-mismatch, got={observed_p4_20:?}; missing={missing:?}, unexpected={unexpected:?}"
+        ))
+    }
+}
+
+fn p4_20_outcome(label: &str) -> String {
+    format!("fuzz_seeds/24fd23785278a9577686f501e17ee8164f8b977b\tdecode\t{label}")
+}
+
+fn required_expected_outcomes() -> BTreeSet<String> {
+    const TRANSFORMS: &[&str] = &[
+        "transform_rotate90",
+        "transform_rotate180",
+        "transform_rotate270",
+        "transform_fliph",
+        "transform_flipv",
+        "transform_transpose",
+        "transform_transverse",
+    ];
+    let mut required = BTreeSet::new();
+    let mut add = |path: &str, operation: &str, label: &str| {
+        required.insert(format!("{path}\t{operation}\t{label}"));
+    };
+
+    add(
+        "fuzz_seeds/crash-cf56f76b13a5eaa5a65b46a3503c0951f034d735",
+        "decode",
+        "expected-reject",
+    );
+    let corrupt = "fixtures/fuzz_repro/corrupt_huffman_65x65_422.jpg";
+    add(corrupt, "decode", "expected-reject");
+    add(corrupt, "encode", "expected-reject");
+
+    for path in [
+        "fixtures/fuzz_repro/arith_noninterleaved_16x16_444.jpg",
+        "fixtures/fuzz_repro/arith_partial_interleaved_16x16_444.jpg",
+    ] {
+        for operation in TRANSFORMS {
+            add(path, operation, "known-mismatch");
+        }
+    }
+    for path in [
+        "fixtures/fuzz_repro/corrupt_huffman_65x65_422.jpg",
+        "fixtures/fuzz_repro/multiscan_noninterleaved_64x64_444.jpg",
+        "fixtures/real_world/zune_non_interleaved_420_64x64.jpg",
+        "fixtures/real_world/zune_non_interleaved_422_65x65.jpg",
+        "fixtures/real_world/zune_non_interleaved_440_64x64.jpg",
+        "fixtures/real_world/zune_non_interleaved_444_64x64.jpg",
+        "fixtures/real_world/zune_tiny_non_interleaved_444_16x16.jpg",
+        "fixtures/real_world/zune_mjpeg_huffman_1280x720.jpg",
+        "fixtures/real_world/zune_grayscale_progressive_900x675.jpg",
+    ] {
+        for operation in TRANSFORMS {
+            add(path, operation, "expected-reject");
+        }
+    }
+    for path in [
+        "fixtures/real_world/pil_cmyk.jpg",
+        "fixtures/real_world/zune_ycck_1318x611_4comp.jpg",
+        "fixtures/real_world/zune_ycck_progressive_383x740_4comp.jpg",
+    ] {
+        for operation in TRANSFORMS {
+            add(path, operation, "known-mismatch");
+        }
+    }
+    required
 }
 
 // ===========================================================================
 // File discovery
 // ===========================================================================
 
-fn collect_jpeg_files(dir: &Path) -> Vec<PathBuf> {
+fn collect_jpeg_files(dir: &Path) -> Result<Vec<PathBuf>, String> {
     let mut files: Vec<PathBuf> = Vec::new();
-    collect_recursive(dir, &mut files);
+    collect_recursive(dir, &mut files)?;
     files.sort();
-    files
+    Ok(files)
 }
 
-fn collect_recursive(dir: &Path, out: &mut Vec<PathBuf>) {
-    let entries = match std::fs::read_dir(dir) {
-        Ok(e) => e,
-        Err(_) => return,
-    };
-    for entry in entries.flatten() {
+fn collect_recursive(dir: &Path, out: &mut Vec<PathBuf>) -> Result<(), String> {
+    let entries = std::fs::read_dir(dir)
+        .map_err(|error| format!("read corpus directory {}: {error}", dir.display()))?;
+    for entry in entries {
+        let entry =
+            entry.map_err(|error| format!("read corpus entry under {}: {error}", dir.display()))?;
         let path: PathBuf = entry.path();
-        if path.is_dir() {
-            collect_recursive(&path, out);
-        } else if let Some(ext) = path.extension() {
-            let ext_lower: String = ext.to_string_lossy().to_lowercase();
-            if ext_lower == "jpg" || ext_lower == "jpeg" {
-                out.push(path);
-            }
+        let file_type = entry
+            .file_type()
+            .map_err(|error| format!("inspect corpus path {}: {error}", path.display()))?;
+        if file_type.is_symlink() {
+            return Err(format!(
+                "symlink is not allowed in corpus: {}",
+                path.display()
+            ));
+        }
+        if file_type.is_dir() {
+            collect_recursive(&path, out)?;
+            continue;
+        }
+        if !file_type.is_file() {
+            continue;
+        }
+
+        let extension_is_jpeg = path
+            .extension()
+            .and_then(|extension| extension.to_str())
+            .is_some_and(|extension| {
+                extension.eq_ignore_ascii_case("jpg") || extension.eq_ignore_ascii_case("jpeg")
+            });
+        let extensionless_soi = if path.extension().is_none() {
+            let mut file = std::fs::File::open(&path)
+                .map_err(|error| format!("open corpus input {}: {error}", path.display()))?;
+            let mut signature = [0_u8; 2];
+            let bytes_read = file
+                .read(&mut signature)
+                .map_err(|error| format!("read corpus input {}: {error}", path.display()))?;
+            bytes_read == signature.len() && signature == [0xff, 0xd8]
+        } else {
+            false
+        };
+        if extension_is_jpeg || extensionless_soi {
+            out.push(path);
         }
     }
+    Ok(())
+}
+
+fn operation_applies(path: &Path, operation: &str) -> bool {
+    let is_decompress_fuzz_seed = path
+        .components()
+        .any(|component| component.as_os_str() == "fuzz_seeds");
+    !is_decompress_fuzz_seed || operation == "decode"
 }
 
 // ===========================================================================
@@ -263,6 +467,7 @@ fn decode_with_c_djpeg(
         let out_tmp: TempFile = TempFile::new("out.pgm");
         let status = Command::new(djpeg)
             .args([
+                "-strict",
                 "-grayscale",
                 "-outfile",
                 out_tmp.path().to_str().unwrap(),
@@ -284,6 +489,7 @@ fn decode_with_c_djpeg(
         let out_tmp: TempFile = TempFile::new("out.ppm");
         let status = Command::new(djpeg)
             .args([
+                "-strict",
                 "-ppm",
                 "-outfile",
                 out_tmp.path().to_str().unwrap(),
@@ -310,23 +516,35 @@ fn decode_with_c_djpeg(
 
 fn run_decode_test(djpeg: &Path, jpeg_data: &[u8]) -> TestResult {
     // Step 1: decode with Rust
-    let rust_img: Image = match decompress(jpeg_data) {
+    let native_image: Image = match decompress(jpeg_data) {
         Ok(img) => img,
         Err(e) => {
             return TestResult::Crash {
-                notes: format!("Rust decompress error: {}", e),
+                notes: format!("Rust decompress error: {e}"),
             }
         }
     };
 
-    let is_gray: bool = rust_img.pixel_format == PixelFormat::Grayscale;
+    let is_gray: bool = native_image.pixel_format == PixelFormat::Grayscale;
+    let rust_img: Image = if is_gray {
+        native_image
+    } else {
+        match decompress_to(jpeg_data, PixelFormat::Rgb) {
+            Ok(image) => image,
+            Err(error) => {
+                return TestResult::Crash {
+                    notes: format!("Rust RGB decompress error: {error}"),
+                }
+            }
+        }
+    };
 
     // Step 2: decode with C djpeg
     let (c_w, c_h, c_pixels, _) = match decode_with_c_djpeg(djpeg, jpeg_data, is_gray) {
         Ok(v) => v,
         Err(e) => {
-            return TestResult::Skip {
-                notes: format!("C djpeg error: {}", e),
+            return TestResult::Crash {
+                notes: format!("strict C output parse failed after acceptance: {e}"),
             }
         }
     };
@@ -380,6 +598,158 @@ fn run_decode_test(djpeg: &Path, jpeg_data: &[u8]) -> TestResult {
             max_diff,
             notes: format!("pixel diff at ({},{})", px, py),
         }
+    }
+}
+
+fn apply_expected_reject(path: &Path, operation: &str, result: TestResult) -> TestResult {
+    const CORRUPT_HUFFMAN_SUFFIX: &str = "fixtures/fuzz_repro/corrupt_huffman_65x65_422.jpg";
+    const CORRUPT_HUFFMAN_ERROR: &str = "Rust decompress error: corrupt data: invalid Huffman code";
+    const P4_20_IDCT_SUFFIX: &str = "fuzz_seeds/24fd23785278a9577686f501e17ee8164f8b977b";
+    const P4_21_SAMPLING_SUFFIX: &str = "fuzz_seeds/crash-cf56f76b13a5eaa5a65b46a3503c0951f034d735";
+
+    let normalized_path = path.to_string_lossy().replace('\\', "/");
+    let known_transform_gap = |suffixes: &[&str], result: &TestResult, note_fragment: &str| {
+        operation.starts_with("transform_")
+            && suffixes
+                .iter()
+                .any(|suffix| normalized_path.ends_with(suffix))
+            && result.notes().contains(note_fragment)
+    };
+
+    let multi_scan_transform_gaps = [
+        "fixtures/fuzz_repro/corrupt_huffman_65x65_422.jpg",
+        "fixtures/fuzz_repro/multiscan_noninterleaved_64x64_444.jpg",
+        "fixtures/real_world/zune_non_interleaved_420_64x64.jpg",
+        "fixtures/real_world/zune_non_interleaved_422_65x65.jpg",
+        "fixtures/real_world/zune_non_interleaved_440_64x64.jpg",
+        "fixtures/real_world/zune_non_interleaved_444_64x64.jpg",
+        "fixtures/real_world/zune_tiny_non_interleaved_444_16x16.jpg",
+    ];
+    let pinned_transform_pixel_mismatch = |max_diff: u32| -> Option<&'static str> {
+        const ALL_OPS: &[&str] = &[
+            "transform_rotate90",
+            "transform_rotate180",
+            "transform_rotate270",
+            "transform_fliph",
+            "transform_flipv",
+            "transform_transpose",
+            "transform_transverse",
+        ];
+        if !ALL_OPS.contains(&operation) {
+            return None;
+        }
+
+        let arithmetic = normalized_path
+            .ends_with("fixtures/fuzz_repro/arith_noninterleaved_16x16_444.jpg")
+            || normalized_path
+                .ends_with("fixtures/fuzz_repro/arith_partial_interleaved_16x16_444.jpg");
+        if arithmetic && max_diff == 157 {
+            return Some("known arithmetic multi-scan transform parity gap");
+        }
+
+        if normalized_path.ends_with("fixtures/real_world/pil_cmyk.jpg") {
+            let expected = match operation {
+                "transform_rotate180" | "transform_fliph" | "transform_flipv" => 153,
+                _ => 152,
+            };
+            return (max_diff == expected).then_some("known CMYK transform parity gap");
+        }
+        if normalized_path.ends_with("fixtures/real_world/zune_ycck_1318x611_4comp.jpg")
+            && max_diff == 250
+        {
+            return Some("known YCCK transform parity gap");
+        }
+        if normalized_path.ends_with("fixtures/real_world/zune_ycck_progressive_383x740_4comp.jpg")
+            && max_diff == 255
+        {
+            return Some("known progressive YCCK transform parity gap");
+        }
+        None
+    };
+
+    match result {
+        TestResult::Fail { max_diff, notes }
+            if operation == "decode"
+                && normalized_path.ends_with(P4_20_IDCT_SUFFIX)
+                && matches!(max_diff, 34 | 255)
+                && notes == "pixel diff at (0,0)" =>
+        {
+            TestResult::KnownMismatch {
+                max_diff,
+                notes: "P4-20 i16 IDCT full-path fidelity gap".to_string(),
+            }
+        }
+        TestResult::Crash { notes }
+            if operation == "decode"
+                && normalized_path.ends_with(P4_21_SAMPLING_SUFFIX)
+                && notes
+                    == "Rust decompress error: corrupt data: chroma upsample factor zero (a chroma component out-samples luma): cb=4x0 cr=4x1" =>
+        {
+            TestResult::ExpectedReject {
+                notes: "P4-21 non-standard chroma-outsamples-luma limitation".to_string(),
+            }
+        }
+        TestResult::Crash { notes }
+            if operation == "decode"
+                && normalized_path.ends_with(CORRUPT_HUFFMAN_SUFFIX)
+                && notes == CORRUPT_HUFFMAN_ERROR =>
+        {
+            TestResult::ExpectedReject {
+                notes: "known corrupt Huffman stream rejected exactly".to_string(),
+            }
+        }
+        TestResult::Crash { notes }
+            if operation == "encode"
+                && normalized_path.ends_with(CORRUPT_HUFFMAN_SUFFIX)
+                && notes == CORRUPT_HUFFMAN_ERROR =>
+        {
+            TestResult::ExpectedReject {
+                notes: "known corrupt Huffman stream cannot seed encode comparison".to_string(),
+            }
+        }
+        TestResult::Fail { max_diff, notes }
+            if notes.starts_with("pixel diff (Rust")
+                && pinned_transform_pixel_mismatch(max_diff).is_some() =>
+        {
+            TestResult::KnownMismatch {
+                max_diff,
+                notes: pinned_transform_pixel_mismatch(max_diff).unwrap().to_string(),
+            }
+        }
+        result
+            if known_transform_gap(
+                &multi_scan_transform_gaps,
+                &result,
+                "baseline SOS covers 1 components but frame has 3",
+            ) =>
+        {
+            TestResult::ExpectedReject {
+                notes: "known non-interleaved transform limitation".to_string(),
+            }
+        }
+        result
+            if known_transform_gap(
+                &["fixtures/real_world/zune_mjpeg_huffman_1280x720.jpg"],
+                &result,
+                "missing DC Huffman table 0",
+            ) =>
+        {
+            TestResult::ExpectedReject {
+                notes: "known MJPEG implicit-Huffman transform limitation".to_string(),
+            }
+        }
+        result
+            if known_transform_gap(
+                &["fixtures/real_world/zune_grayscale_progressive_900x675.jpg"],
+                &result,
+                "extraneous bytes before marker 0xd9",
+            ) =>
+        {
+            TestResult::ExpectedReject {
+                notes: "known progressive grayscale transform output gap".to_string(),
+            }
+        }
+        other => other,
     }
 }
 
@@ -844,7 +1214,10 @@ fn main() {
     }
 
     // Collect JPEG files
-    let files: Vec<PathBuf> = collect_jpeg_files(&cfg.corpus_dir);
+    let files: Vec<PathBuf> = collect_jpeg_files(&cfg.corpus_dir).unwrap_or_else(|error| {
+        eprintln!("Failed to discover JPEG corpus: {error}");
+        std::process::exit(1);
+    });
     if files.is_empty() {
         eprintln!("No JPEG files found in {:?}", cfg.corpus_dir);
         std::process::exit(1);
@@ -856,6 +1229,7 @@ fn main() {
     let mut decode_counts: Counts = Counts::default();
     let mut encode_counts: Counts = Counts::default();
     let mut transform_counts: Counts = Counts::default();
+    let mut expected_coverage = ExpectedCoverage::default();
 
     let transform_ops: &[TransformOp] = &[
         TransformOp::Rot90,
@@ -893,7 +1267,6 @@ fn main() {
                 continue;
             }
         };
-
         // Decode test
         if cfg.run_decode {
             let result: TestResult = match &djpeg {
@@ -902,24 +1275,30 @@ fn main() {
                     notes: "djpeg not found".to_string(),
                 },
             };
+            let result = apply_expected_reject(file_path, "decode", result);
+            let relative_path = file_path.strip_prefix(&cfg.corpus_dir).unwrap_or(file_path);
+            expected_coverage.record(relative_path, "decode", &result);
             print_row(file_str, "decode", &result);
             decode_counts.record(&result);
         }
 
         // Encode test
-        if cfg.run_encode {
+        if cfg.run_encode && operation_applies(file_path, "encode") {
             let result: TestResult = match (&djpeg, &cjpeg) {
                 (Some(dj), Some(cj)) => catch_encode(dj, cj, jpeg_data.clone()),
                 _ => TestResult::Skip {
                     notes: "djpeg or cjpeg not found".to_string(),
                 },
             };
+            let result = apply_expected_reject(file_path, "encode", result);
+            let relative_path = file_path.strip_prefix(&cfg.corpus_dir).unwrap_or(file_path);
+            expected_coverage.record(relative_path, "encode", &result);
             print_row(file_str, "encode", &result);
             encode_counts.record(&result);
         }
 
         // Transform tests
-        if cfg.run_transform {
+        if cfg.run_transform && operation_applies(file_path, "transform") {
             for &op in transform_ops {
                 let result: TestResult = match (&jpegtran, &djpeg) {
                     (Some(jt), Some(dj)) => catch_transform(jt, dj, jpeg_data.clone(), op),
@@ -927,6 +1306,9 @@ fn main() {
                         notes: "jpegtran or djpeg not found".to_string(),
                     },
                 };
+                let result = apply_expected_reject(file_path, transform_op_name(op), result);
+                let relative_path = file_path.strip_prefix(&cfg.corpus_dir).unwrap_or(file_path);
+                expected_coverage.record(relative_path, transform_op_name(op), &result);
                 print_row(file_str, transform_op_name(op), &result);
                 transform_counts.record(&result);
             }
@@ -939,23 +1321,358 @@ fn main() {
     println!("Total files: {}", files.len());
     if cfg.run_decode {
         println!(
-            "Decode:    {} pass, {} fail, {} crash, {} skip",
-            decode_counts.pass, decode_counts.fail, decode_counts.crash, decode_counts.skip
+            "Decode:    {} pass, {} expected-reject, {} known-mismatch, {} fail, {} crash, {} skip",
+            decode_counts.pass,
+            decode_counts.expected_reject,
+            decode_counts.known_mismatch,
+            decode_counts.fail,
+            decode_counts.crash,
+            decode_counts.skip
         );
     }
     if cfg.run_encode {
         println!(
-            "Encode:    {} pass, {} fail, {} crash, {} skip",
-            encode_counts.pass, encode_counts.fail, encode_counts.crash, encode_counts.skip
+            "Encode:    {} pass, {} expected-reject, {} known-mismatch, {} fail, {} crash, {} skip",
+            encode_counts.pass,
+            encode_counts.expected_reject,
+            encode_counts.known_mismatch,
+            encode_counts.fail,
+            encode_counts.crash,
+            encode_counts.skip
         );
     }
     if cfg.run_transform {
         println!(
-            "Transform: {} pass, {} fail, {} crash, {} skip",
+            "Transform: {} pass, {} expected-reject, {} known-mismatch, {} fail, {} crash, {} skip",
             transform_counts.pass,
+            transform_counts.expected_reject,
+            transform_counts.known_mismatch,
             transform_counts.fail,
             transform_counts.crash,
             transform_counts.skip
         );
+    }
+
+    let is_full_corpus_run = cfg.run_decode
+        && cfg.run_encode
+        && cfg.run_transform
+        && ["generated", "fuzz_seeds", "fixtures"]
+            .iter()
+            .all(|bucket| cfg.corpus_dir.join(bucket).is_dir());
+    let expected_coverage_error = expected_coverage
+        .verify_full_corpus(is_full_corpus_run)
+        .err();
+    if let Some(error) = &expected_coverage_error {
+        eprintln!("{error}");
+    }
+
+    let failed = expected_coverage_error.is_some()
+        || (cfg.run_decode
+            && (decode_counts.total() == 0 || decode_counts.has_unexpected_outcomes()))
+        || (cfg.run_encode
+            && (encode_counts.total() == 0 || encode_counts.has_unexpected_outcomes()))
+        || (cfg.run_transform
+            && (transform_counts.total() == 0 || transform_counts.has_unexpected_outcomes()));
+    if failed {
+        std::process::exit(1);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        apply_expected_reject, c_tool_path, collect_jpeg_files, operation_applies, p4_20_outcome,
+        required_expected_outcomes, run_decode_test, Counts, ExpectedCoverage, TestResult,
+    };
+    use std::path::PathBuf;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+    struct TempTree(PathBuf);
+
+    impl TempTree {
+        fn new() -> Self {
+            let counter = TEMP_COUNTER.fetch_add(1, Ordering::Relaxed);
+            let path = std::env::temp_dir().join(format!(
+                "libjpeg_corpus_discovery_{}_{}",
+                std::process::id(),
+                counter
+            ));
+            std::fs::create_dir_all(&path).expect("create temp corpus");
+            Self(path)
+        }
+    }
+
+    impl Drop for TempTree {
+        fn drop(&mut self) {
+            std::fs::remove_dir_all(&self.0).ok();
+        }
+    }
+
+    #[test]
+    fn discovery_includes_extensionless_soi_inputs() {
+        let corpus = TempTree::new();
+        std::fs::write(corpus.0.join("named.jpg"), b"fixture").expect("write named input");
+        std::fs::write(corpus.0.join("seed"), b"\xff\xd8\xff\xd9")
+            .expect("write extensionless input");
+        std::fs::write(corpus.0.join("not-jpeg"), b"plain bytes").expect("write non-JPEG");
+
+        let files = collect_jpeg_files(&corpus.0).expect("discover corpus");
+
+        assert_eq!(
+            files,
+            vec![corpus.0.join("named.jpg"), corpus.0.join("seed")]
+        );
+    }
+
+    #[test]
+    fn discovery_fails_closed_for_missing_directory() {
+        let missing = std::env::temp_dir().join(format!(
+            "libjpeg_missing_corpus_{}_{}",
+            std::process::id(),
+            TEMP_COUNTER.fetch_add(1, Ordering::Relaxed)
+        ));
+
+        let error = collect_jpeg_files(&missing).expect_err("missing corpus must fail");
+
+        assert!(error.contains("read corpus directory"), "{error}");
+        assert!(error.contains(&missing.display().to_string()), "{error}");
+    }
+
+    #[test]
+    fn color_and_high_precision_fixtures_compare_in_rgb() {
+        let Some(djpeg) = c_tool_path("djpeg") else {
+            return;
+        };
+        let fixtures = [
+            "tests/fixtures/cmyk_scanner/scanner_64x64.jpg",
+            "tests/fixtures/real_world/libjpeg_testorig12_227x149_12bit.jpg",
+            "tests/fixtures/real_world/pil_cmyk.jpg",
+            "tests/fixtures/real_world/zune_cmyk_600x397_4comp.jpg",
+            "tests/fixtures/real_world/zune_ycck_1318x611_4comp.jpg",
+            "tests/fixtures/real_world/zune_ycck_progressive_383x740_4comp.jpg",
+        ];
+
+        for fixture in fixtures {
+            let data = std::fs::read(fixture).expect("read fixture");
+            assert!(
+                matches!(run_decode_test(&djpeg, &data), TestResult::Pass { .. }),
+                "fixture must compare in a common RGB output space: {fixture}"
+            );
+        }
+    }
+
+    #[test]
+    fn corrupt_huffman_fixture_is_an_exact_expected_reject() {
+        let raw = TestResult::Crash {
+            notes: "Rust decompress error: corrupt data: invalid Huffman code".to_string(),
+        };
+
+        let classified = apply_expected_reject(
+            PathBuf::from("tests/corpus/fixtures/fuzz_repro/corrupt_huffman_65x65_422.jpg")
+                .as_path(),
+            "decode",
+            raw,
+        );
+
+        assert!(matches!(classified, TestResult::ExpectedReject { .. }));
+    }
+
+    #[test]
+    fn expected_reject_does_not_hide_other_paths_or_reasons() {
+        let wrong_path = apply_expected_reject(
+            PathBuf::from("tests/corpus/fixtures/other.jpg").as_path(),
+            "decode",
+            TestResult::Crash {
+                notes: "Rust decompress error: corrupt data: invalid Huffman code".to_string(),
+            },
+        );
+        let wrong_reason = apply_expected_reject(
+            PathBuf::from("tests/corpus/fixtures/fuzz_repro/corrupt_huffman_65x65_422.jpg")
+                .as_path(),
+            "decode",
+            TestResult::Crash {
+                notes: "different decoder failure".to_string(),
+            },
+        );
+
+        assert!(matches!(wrong_path, TestResult::Crash { .. }));
+        assert!(matches!(wrong_reason, TestResult::Crash { .. }));
+    }
+
+    #[test]
+    fn corpus_counts_fail_closed_on_failures_crashes_and_skips() {
+        let mut counts = Counts::default();
+        counts.record(&TestResult::Pass { max_diff: 0 });
+        counts.record(&TestResult::ExpectedReject {
+            notes: "intentional".to_string(),
+        });
+        assert!(!counts.has_unexpected_outcomes());
+        assert_eq!(counts.total(), 2);
+
+        for unexpected in [
+            TestResult::Fail {
+                max_diff: 1,
+                notes: "mismatch".to_string(),
+            },
+            TestResult::Crash {
+                notes: "decoder error".to_string(),
+            },
+            TestResult::Skip {
+                notes: "tool missing".to_string(),
+            },
+        ] {
+            let mut counts = Counts::default();
+            counts.record(&unexpected);
+            assert!(counts.has_unexpected_outcomes());
+        }
+    }
+
+    #[test]
+    fn full_corpus_requires_every_exact_expected_outcome() {
+        let mut required = required_expected_outcomes();
+        required.insert(p4_20_outcome("known-mismatch"));
+        let complete = ExpectedCoverage {
+            observed: required.clone(),
+        };
+        assert!(complete.verify_full_corpus(true).is_ok());
+
+        let mut missing = required;
+        let removed = missing.iter().next().cloned().expect("required outcome");
+        missing.remove(&removed);
+        let incomplete = ExpectedCoverage { observed: missing };
+        let error = incomplete
+            .verify_full_corpus(true)
+            .expect_err("missing exact outcome must fail full corpus gate");
+        let removed_path = removed.split('\t').next().expect("outcome path");
+        assert!(error.contains(removed_path), "{error}");
+        assert!(incomplete.verify_full_corpus(false).is_ok());
+    }
+
+    #[test]
+    fn full_corpus_accepts_exactly_one_observed_p4_20_backend_outcome() {
+        let required = required_expected_outcomes();
+        for label in ["pass", "known-mismatch"] {
+            let mut observed = required.clone();
+            observed.insert(p4_20_outcome(label));
+            assert!(ExpectedCoverage { observed }
+                .verify_full_corpus(true)
+                .is_ok());
+        }
+
+        let missing = ExpectedCoverage {
+            observed: required.clone(),
+        };
+        assert!(missing.verify_full_corpus(true).is_err());
+
+        let mut both = required;
+        both.insert(p4_20_outcome("pass"));
+        both.insert(p4_20_outcome("known-mismatch"));
+        assert!(ExpectedCoverage { observed: both }
+            .verify_full_corpus(true)
+            .is_err());
+    }
+
+    #[test]
+    fn transform_expected_rejects_require_exact_fixture_and_reason_class() {
+        let known = apply_expected_reject(
+            PathBuf::from("tests/corpus/fixtures/real_world/zune_mjpeg_huffman_1280x720.jpg")
+                .as_path(),
+            "transform_rotate90",
+            TestResult::Crash {
+                notes: "Rust transform error: corrupt data: missing DC Huffman table 0".to_string(),
+            },
+        );
+        let wrong_operation = apply_expected_reject(
+            PathBuf::from("tests/corpus/fixtures/real_world/zune_mjpeg_huffman_1280x720.jpg")
+                .as_path(),
+            "decode",
+            TestResult::Crash {
+                notes: "Rust transform error: corrupt data: missing DC Huffman table 0".to_string(),
+            },
+        );
+
+        assert!(matches!(known, TestResult::ExpectedReject { .. }));
+        assert!(matches!(wrong_operation, TestResult::Crash { .. }));
+    }
+
+    #[test]
+    fn transform_pixel_mismatches_require_exact_path_operation_and_max_diff() {
+        let path =
+            PathBuf::from("tests/corpus/fixtures/fuzz_repro/arith_noninterleaved_16x16_444.jpg");
+        let exact = apply_expected_reject(
+            &path,
+            "transform_rotate90",
+            TestResult::Fail {
+                max_diff: 157,
+                notes: "pixel diff (Rust 658 bytes, C 684 bytes)".to_string(),
+            },
+        );
+        let worsened = apply_expected_reject(
+            &path,
+            "transform_rotate90",
+            TestResult::Fail {
+                max_diff: 158,
+                notes: "pixel diff (Rust 658 bytes, C 684 bytes)".to_string(),
+            },
+        );
+        let wrong_operation = apply_expected_reject(
+            &path,
+            "decode",
+            TestResult::Fail {
+                max_diff: 157,
+                notes: "pixel diff (Rust 658 bytes, C 684 bytes)".to_string(),
+            },
+        );
+
+        assert!(matches!(
+            exact,
+            TestResult::KnownMismatch { max_diff: 157, .. }
+        ));
+        assert!(matches!(worsened, TestResult::Fail { max_diff: 158, .. }));
+        assert!(matches!(
+            wrong_operation,
+            TestResult::Fail { max_diff: 157, .. }
+        ));
+    }
+
+    #[test]
+    fn tracked_p4_20_and_p4_21_outcomes_are_exactly_classified() {
+        let p4_20 = apply_expected_reject(
+            PathBuf::from("tests/corpus/fuzz_seeds/24fd23785278a9577686f501e17ee8164f8b977b")
+                .as_path(),
+            "decode",
+            TestResult::Fail {
+                max_diff: 34,
+                notes: "pixel diff at (0,0)".to_string(),
+            },
+        );
+        let p4_21 = apply_expected_reject(
+            PathBuf::from(
+                "tests/corpus/fuzz_seeds/crash-cf56f76b13a5eaa5a65b46a3503c0951f034d735",
+            )
+            .as_path(),
+            "decode",
+            TestResult::Crash {
+                notes: "Rust decompress error: corrupt data: chroma upsample factor zero (a chroma component out-samples luma): cb=4x0 cr=4x1".to_string(),
+            },
+        );
+
+        assert!(matches!(p4_20, TestResult::KnownMismatch { .. }));
+        assert!(matches!(p4_21, TestResult::ExpectedReject { .. }));
+    }
+
+    #[test]
+    fn decompress_fuzz_seeds_are_not_misused_as_encode_or_transform_corpora() {
+        let fuzz_seed = PathBuf::from("tests/corpus/fuzz_seeds/seed");
+        let real_fixture = PathBuf::from("tests/corpus/fixtures/real_world/camera.jpg");
+
+        assert!(operation_applies(&fuzz_seed, "decode"));
+        assert!(!operation_applies(&fuzz_seed, "encode"));
+        assert!(!operation_applies(&fuzz_seed, "transform"));
+        assert!(operation_applies(&real_fixture, "decode"));
+        assert!(operation_applies(&real_fixture, "encode"));
+        assert!(operation_applies(&real_fixture, "transform"));
     }
 }

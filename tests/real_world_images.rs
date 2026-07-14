@@ -5,10 +5,9 @@
 //! 2. Decodes with C `djpeg -ppm`
 //! 3. Compares pixel output (target: diff=0)
 //!
-//! Known exception categories (gracefully skipped):
-//! - Arithmetic images (`*arithmetic*`): skipped if either decoder fails
-//! - Images that cause Rust decoder panics (internal bugs): skipped with message
-//! - Images that cause Rust decoder errors: skipped if in known-issue list
+//! The fixture inventory is gated by feature and provenance minimums. Once C
+//! `djpeg` accepts a fixture, every Rust error, panic, or pixel difference is a
+//! hard test failure.
 
 mod helpers;
 
@@ -179,36 +178,69 @@ fn filter_files(files: &[PathBuf], substrings: &[&str]) -> Vec<PathBuf> {
         .collect()
 }
 
-// ===========================================================================
-// Image classification helpers
-// ===========================================================================
-
-fn is_arithmetic_image(filename: &str) -> bool {
-    filename.contains("arithmetic")
+#[derive(Debug)]
+struct JpegStructure {
+    sof_marker: u8,
+    precision: u8,
+    width: usize,
+    height: usize,
+    components: usize,
+    first_scan_components: usize,
+    has_exif: bool,
 }
 
-fn is_12bit_image(filename: &str) -> bool {
-    filename.contains("12bit")
-}
-
-/// Known issues table: (filename_pattern, reason).
-/// Images matching these patterns are skipped with the given reason.
-/// These represent existing Rust decoder bugs tracked separately.
-const KNOWN_DECODE_ISSUES: &[(&str, &str)] = &[];
-
-fn is_known_decode_issue(filename: &str) -> bool {
-    KNOWN_DECODE_ISSUES
-        .iter()
-        .any(|(pattern, _reason)| filename.contains(pattern))
-}
-
-fn known_issue_reason(filename: &str) -> &'static str {
-    for (pattern, reason) in KNOWN_DECODE_ISSUES {
-        if filename.contains(pattern) {
-            return reason;
-        }
+fn inspect_jpeg_structure(data: &[u8]) -> Option<JpegStructure> {
+    const SOF_MARKERS: &[u8] = &[
+        0xc0, 0xc1, 0xc2, 0xc3, 0xc5, 0xc6, 0xc7, 0xc9, 0xca, 0xcb, 0xcd, 0xce, 0xcf,
+    ];
+    if data.get(..2)? != [0xff, 0xd8] {
+        return None;
     }
-    "unknown issue"
+
+    let mut position = 2;
+    let mut frame: Option<(u8, u8, usize, usize, usize)> = None;
+    while position < data.len() {
+        if data[position] != 0xff {
+            return None;
+        }
+        while data.get(position) == Some(&0xff) {
+            position += 1;
+        }
+        let marker = *data.get(position)?;
+        position += 1;
+        if marker == 0xda {
+            let scan_components = *data.get(position + 2)? as usize;
+            let (sof_marker, precision, width, height, components) = frame?;
+            return Some(JpegStructure {
+                sof_marker,
+                precision,
+                width,
+                height,
+                components,
+                first_scan_components: scan_components,
+                has_exif: data.windows(6).any(|window| window == b"Exif\0\0"),
+            });
+        }
+        if marker == 0xd9 || marker == 0x01 || (0xd0..=0xd7).contains(&marker) {
+            continue;
+        }
+        let segment_length =
+            u16::from_be_bytes([*data.get(position)?, *data.get(position + 1)?]) as usize;
+        if segment_length < 2 || position.checked_add(segment_length)? > data.len() {
+            return None;
+        }
+        if SOF_MARKERS.contains(&marker) {
+            let precision = *data.get(position + 2)?;
+            let height =
+                u16::from_be_bytes([*data.get(position + 3)?, *data.get(position + 4)?]) as usize;
+            let width =
+                u16::from_be_bytes([*data.get(position + 5)?, *data.get(position + 6)?]) as usize;
+            let components = *data.get(position + 7)? as usize;
+            frame = Some((marker, precision, width, height, components));
+        }
+        position += segment_length;
+    }
+    None
 }
 
 // ===========================================================================
@@ -220,9 +252,6 @@ enum ImageResult {
     Pass {
         width: usize,
         height: usize,
-    },
-    Skip {
-        reason: String,
     },
     Fail {
         width: usize,
@@ -239,7 +268,6 @@ struct TestRecord {
 
 fn print_summary(records: &[TestRecord]) {
     let mut pass_count: usize = 0;
-    let mut skip_count: usize = 0;
     let mut fail_count: usize = 0;
 
     eprintln!();
@@ -259,13 +287,6 @@ fn print_summary(records: &[TestRecord]) {
                 );
                 pass_count += 1;
             }
-            ImageResult::Skip { reason } => {
-                eprintln!(
-                    "{:<60} {:>10} {:>10} SKIP: {}",
-                    record.filename, "-", "-", reason
-                );
-                skip_count += 1;
-            }
             ImageResult::Fail {
                 width,
                 height,
@@ -283,10 +304,9 @@ fn print_summary(records: &[TestRecord]) {
 
     eprintln!("{}", "-".repeat(95));
     eprintln!(
-        "Total: {} | Pass: {} | Skip: {} | Fail: {}",
+        "Total: {} | Pass: {} | Fail: {}",
         records.len(),
         pass_count,
-        skip_count,
         fail_count
     );
     eprintln!();
@@ -364,51 +384,13 @@ fn validate_single_image(djpeg: &Path, jpeg_path: &Path) -> TestRecord {
 
     eprintln!("  Testing: {}", filename);
 
-    // --- Known decoder issues (panics/errors) ---
-    if is_known_decode_issue(&filename) {
-        let reason: &str = known_issue_reason(&filename);
-        return TestRecord {
-            filename,
-            result: ImageResult::Skip {
-                reason: format!("known decoder issue: {}", reason),
-            },
-        };
-    }
-
-    let is_arithmetic: bool = is_arithmetic_image(&filename);
-
     // --- C djpeg decode first to determine output format ---
     let c_result: Option<(usize, usize, usize, Vec<u8>)> =
         decode_with_c_djpeg(djpeg, jpeg_path, &name_stem);
 
-    let is_12bit: bool = is_12bit_image(&filename);
     let (c_width, c_height, c_components, c_data) = match c_result {
         Some(result) => result,
-        None => {
-            if is_arithmetic {
-                return TestRecord {
-                    filename,
-                    result: ImageResult::Skip {
-                        reason: "C djpeg failed (arithmetic not supported by this build)"
-                            .to_string(),
-                    },
-                };
-            }
-            if is_12bit {
-                return TestRecord {
-                    filename,
-                    result: ImageResult::Skip {
-                        reason:
-                            "C djpeg failed (12-bit precision not supported in libjpeg-turbo 2.x)"
-                                .to_string(),
-                    },
-                };
-            }
-            panic!(
-                "C djpeg failed for {} (not an expected skip category)",
-                filename
-            );
-        }
+        None => panic!("C djpeg failed for {filename}"),
     };
 
     // --- Read JPEG data ---
@@ -423,44 +405,16 @@ fn validate_single_image(djpeg: &Path, jpeg_path: &Path) -> TestRecord {
         PixelFormat::Rgb
     };
 
-    // Use catch_unwind to handle internal panics gracefully
+    // Preserve the filename in decoder errors while ensuring panics remain
+    // hard failures rather than silently reducing coverage.
     let rust_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         decompress_to(&jpeg_data, target_format)
     }));
 
     let rust_image = match rust_result {
         Ok(Ok(img)) => img,
-        Ok(Err(e)) => {
-            if is_arithmetic {
-                return TestRecord {
-                    filename,
-                    result: ImageResult::Skip {
-                        reason: format!("Rust decode failed (arithmetic): {}", e),
-                    },
-                };
-            }
-            // Unexpected Rust decode error
-            panic!(
-                "Rust decode failed for {} (not an expected skip category): {}",
-                filename, e
-            );
-        }
-        Err(panic_info) => {
-            let msg: String = if let Some(s) = panic_info.downcast_ref::<String>() {
-                s.clone()
-            } else if let Some(s) = panic_info.downcast_ref::<&str>() {
-                s.to_string()
-            } else {
-                "unknown panic".to_string()
-            };
-            // Internal panic — record as skip (these are known bugs to fix separately)
-            return TestRecord {
-                filename,
-                result: ImageResult::Skip {
-                    reason: format!("Rust decoder panicked: {}", msg),
-                },
-            };
-        }
+        Ok(Err(e)) => panic!("Rust decode failed for {filename}: {e}"),
+        Err(panic_info) => std::panic::resume_unwind(panic_info),
     };
 
     // --- Dimension check ---
@@ -524,6 +478,91 @@ fn validate_single_image(djpeg: &Path, jpeg_path: &Path) -> TestRecord {
 // ===========================================================================
 
 #[test]
+fn real_world_fixture_inventory_covers_required_feature_families() {
+    let files = collect_jpeg_files();
+    let names: Vec<&str> = files
+        .iter()
+        .filter_map(|path| path.file_name()?.to_str())
+        .collect();
+    let provenance_families = [
+        "derived_",
+        "exif_",
+        "image_rs_",
+        "libjpeg_",
+        "pil_",
+        "w3c_",
+        "zune_",
+    ]
+    .iter()
+    .filter(|prefix| names.iter().any(|name| name.starts_with(**prefix)))
+    .count();
+    let structures: Vec<JpegStructure> = files
+        .iter()
+        .map(|path| {
+            let data = std::fs::read(path).expect("read real-world fixture inventory");
+            inspect_jpeg_structure(&data)
+                .unwrap_or_else(|| panic!("invalid JPEG structure: {}", path.display()))
+        })
+        .collect();
+    let progressive = structures
+        .iter()
+        .filter(|jpeg| matches!(jpeg.sof_marker, 0xc2 | 0xc6 | 0xca | 0xce))
+        .count();
+    let arithmetic = structures
+        .iter()
+        .filter(|jpeg| matches!(jpeg.sof_marker, 0xc9 | 0xca | 0xcb | 0xcd | 0xce | 0xcf))
+        .count();
+    let four_component = structures
+        .iter()
+        .filter(|jpeg| jpeg.components == 4)
+        .count();
+    let non_interleaved = structures
+        .iter()
+        .filter(|jpeg| jpeg.components > 1 && jpeg.first_scan_components < jpeg.components)
+        .count();
+    let high_resolution = structures
+        .iter()
+        .filter(|jpeg| jpeg.width >= 3840 || jpeg.height >= 2160)
+        .count();
+    let exif = structures.iter().filter(|jpeg| jpeg.has_exif).count();
+
+    assert!(
+        names.len() >= 61,
+        "real-world fixture count shrank to {}",
+        names.len()
+    );
+    assert!(
+        provenance_families >= 7,
+        "only {provenance_families} provenance families remain"
+    );
+    assert!(
+        progressive >= 13,
+        "progressive coverage shrank to {progressive}"
+    );
+    assert!(
+        arithmetic >= 3,
+        "arithmetic coverage shrank to {arithmetic}"
+    );
+    assert!(
+        structures.iter().any(|jpeg| jpeg.precision == 12),
+        "12-bit coverage disappeared"
+    );
+    assert!(
+        four_component >= 4,
+        "four-component CMYK/YCCK coverage shrank to {four_component}"
+    );
+    assert!(
+        non_interleaved >= 5,
+        "non-interleaved coverage shrank to {non_interleaved}"
+    );
+    assert!(
+        high_resolution >= 4,
+        "high-resolution coverage shrank to {high_resolution}"
+    );
+    assert!(exif >= 7, "EXIF-bearing coverage shrank to {exif}");
+}
+
+#[test]
 fn c_djpeg_cross_validation_real_world_images() {
     let djpeg: PathBuf = require_c_tool!("djpeg");
 
@@ -544,7 +583,7 @@ fn c_djpeg_cross_validation_real_world_images() {
 
     print_summary(&records);
 
-    // Assert all non-skipped images pass with diff=0
+    // Assert every image passes with diff=0.
     let failures: Vec<&TestRecord> = records
         .iter()
         .filter(|r| matches!(r.result, ImageResult::Fail { .. }))
@@ -583,10 +622,10 @@ fn c_djpeg_cross_validation_real_world_progressive() {
     let all_files: Vec<PathBuf> = collect_jpeg_files();
     let progressive_files: Vec<PathBuf> = filter_files(&all_files, &["progressive"]);
 
-    if progressive_files.is_empty() {
-        eprintln!("SKIP: no progressive images found");
-        return;
-    }
+    assert!(
+        progressive_files.len() >= 13,
+        "progressive fixture coverage shrank"
+    );
 
     eprintln!("Testing {} progressive JPEG files", progressive_files.len());
 
@@ -623,10 +662,10 @@ fn c_djpeg_cross_validation_real_world_highres() {
     let all_files: Vec<PathBuf> = collect_jpeg_files();
     let highres_files: Vec<PathBuf> = filter_files(&all_files, &["4k", "8k"]);
 
-    if highres_files.is_empty() {
-        eprintln!("SKIP: no 4K/8K images found");
-        return;
-    }
+    assert!(
+        highres_files.len() >= 4,
+        "high-resolution fixture coverage shrank"
+    );
 
     eprintln!("Testing {} high-resolution JPEG files", highres_files.len());
 
@@ -635,7 +674,7 @@ fn c_djpeg_cross_validation_real_world_highres() {
     for jpeg_path in &highres_files {
         let record: TestRecord = validate_single_image(&djpeg, jpeg_path);
 
-        // Print timing for non-skipped images
+        // Print timing for passing images.
         if matches!(record.result, ImageResult::Pass { .. }) {
             let name_stem: String = jpeg_path
                 .file_stem()
