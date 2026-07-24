@@ -111,9 +111,9 @@ pub fn do_rot_270(src: &[i16; 64], dst: &mut [i16; 64]) {
 /// `src[d]` is the source zigzag index feeding destination zigzag index
 /// `d`; `neg[d]` applies the DCT mirror sign flip.
 ///
-/// The maps are `const` so each `MAP_*.apply(..)` call site unrolls with
-/// immediate indices and compile-time signs, matching the codegen of the
-/// natural-domain `do_*` kernels.
+/// The maps are `const`, so each `MAP_*.apply(..)` call site reads a
+/// statically-known table (no runtime derivation) and one gather applies
+/// reorder and sign together.
 pub struct ZigzagMap {
     src: [u8; 64],
     neg: [bool; 64],

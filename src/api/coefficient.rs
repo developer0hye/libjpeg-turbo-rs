@@ -706,8 +706,8 @@ pub fn transform_jpeg_with_options(data: &[u8], options: &TransformOptions) -> R
         // zigzag-composed permutation map instead of converting the whole
         // coefficient corpus to natural order and back (issue #308).
         // Bind the `MAP_*` consts directly (not via `zigzag_map(op)`) so
-        // each branch's permutation indices constant-fold at the call
-        // site; `map_op` is only for the generic fallback branch.
+        // each branch reads a statically-known table; `map_op` is only
+        // for the generic fallback branch.
         let map_op: &spatial::ZigzagMap = spatial::zigzag_map(op);
         let map_transpose: &spatial::ZigzagMap = &spatial::MAP_TRANSPOSE;
         let map_rot90: &spatial::ZigzagMap = &spatial::MAP_ROT90;
