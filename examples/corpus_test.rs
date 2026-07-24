@@ -371,15 +371,13 @@ fn required_expected_outcomes() -> BTreeSet<String> {
             add(path, operation, "expected-reject");
         }
     }
-    for path in [
-        "fixtures/real_world/pil_cmyk.jpg",
-        "fixtures/real_world/zune_ycck_1318x611_4comp.jpg",
-        "fixtures/real_world/zune_ycck_progressive_383x740_4comp.jpg",
-    ] {
-        for operation in TRANSFORMS {
-            add(path, operation, "known-mismatch");
-        }
-    }
+    // pil_cmyk / zune_ycck* transforms were known-mismatch (max_diff
+    // 152-255) until the issue #308 marker fix: `transform()` used to
+    // strip Adobe APP14, so djpeg mis-interpreted the 4-component
+    // colorspace of our output. With markers preserved they are
+    // pixel-identical to jpegtran and must plain-pass; a future
+    // divergence should fail loudly, so they are deliberately NOT
+    // listed here.
     required
 }
 
@@ -647,23 +645,11 @@ fn apply_expected_reject(path: &Path, operation: &str, result: TestResult) -> Te
             return Some("known arithmetic multi-scan transform parity gap");
         }
 
-        if normalized_path.ends_with("fixtures/real_world/pil_cmyk.jpg") {
-            let expected = match operation {
-                "transform_rotate180" | "transform_fliph" | "transform_flipv" => 153,
-                _ => 152,
-            };
-            return (max_diff == expected).then_some("known CMYK transform parity gap");
-        }
-        if normalized_path.ends_with("fixtures/real_world/zune_ycck_1318x611_4comp.jpg")
-            && max_diff == 250
-        {
-            return Some("known YCCK transform parity gap");
-        }
-        if normalized_path.ends_with("fixtures/real_world/zune_ycck_progressive_383x740_4comp.jpg")
-            && max_diff == 255
-        {
-            return Some("known progressive YCCK transform parity gap");
-        }
+        // The former pil_cmyk / zune_ycck* "transform parity gap"
+        // classifications (max_diff 152-255) were removed with the
+        // issue #308 marker fix — those fixtures now transform
+        // pixel-identically to jpegtran, and any new divergence must
+        // surface as a hard Fail.
         None
     };
 

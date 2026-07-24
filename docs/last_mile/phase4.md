@@ -531,6 +531,14 @@ P3-3's closure (2026-05-06; corrected 2026-05-10) explicitly scoped the allowlis
 
 **Disposition.** Closed as a duplicate rather than creating a second decoder item. The exact seed is pinned in `tests/sof10_decode.rs`, the corpus reports it as a named P4-20 `KnownMismatch`, and P4-20 retains the eventual diff-to-zero acceptance criterion.
 
+## P4-33. Checked-In `aspect_*` Fuzz Seeds Drifted From the Current Encoder — **OPEN**
+
+**Motivation.** During the issue #308 work (2026-07-24), a full `cargo test --workspace` run left 14 tracked files modified: `tests/generate_fuzz_seeds.rs` regenerates `fuzz/corpus/*/aspect_wide_chk_420_base.jpg` and `aspect_wide_grad_420_base.jpg` (7 target dirs × 2 seeds) with different bytes than the committed versions (e.g. 830 → 922 bytes; headers identical, divergence starts in the entropy-coded data). Reproduced on a clean `main` checkout, so the drift predates the #308 branch: the committed seeds were produced by an older encoder, and some later encoder change (for the 8×64 / 64×8 4:2:0 shape) altered the output without the seeds being re-committed.
+
+**Root-cause hypothesis.** `fan_out_write` only rewrites when bytes differ, so the drift is invisible until someone runs the generator test and checks `git status`; no CI job asserts the committed seeds match the generator's output.
+
+**Acceptance criteria.** (1) Identify the encoder change that altered the 8×64/64×8 4:2:0 output and confirm it was intentional (both old and new bytes decode identically vs djpeg). (2) Re-commit the regenerated seeds (or pin the generator's inputs) so a clean checkout + full test run leaves the tree clean. (3) Add a CI check (or assertion inside `generate_fuzz_seeds`) that fails when regeneration modifies tracked seeds, so future drift is caught at the PR that causes it.
+
 ## Phase 4 Suggested Order
 
 1. ~~**P4-1** — export `jpeg_calc_jpeg_dimensions` and delete its missing-symbol allowlist entry.~~ **CLOSED 2026-05-10**.
@@ -561,3 +569,4 @@ P3-3's closure (2026-05-06; corrected 2026-05-10) explicitly scoped the allowlis
 26. ~~**P4-30** — unsupported 12-bit sampling layout could write beyond a component plane.~~ **CLOSED 2026-07-12** — validate the 12-bit upsampling invariant before decode and bounds-check each block write. Regression: `unsupported_12bit_sampling_layout_returns_error_instead_of_panicking`; exact replays for Fuzz Smoke 117, 118, and 121.
 27. **P4-31** — harden real-world/corpus coverage against soft-skipped Rust failures, nested-fixture omission, extensionless JPEG-seed omission, and fail-open summary parsing.
 28. ~~**P4-32** — triage the strict-C-valid SOF10 grayscale seed `24fd237...`.~~ **CLOSED AS DUPLICATE OF P4-20 2026-07-13** — coefficients and quantization match C; the max-34 pixel delta is the existing IDCT i16-fidelity family.
+29. **P4-33** — verify the encoder change behind the 8×64/64×8 4:2:0 output drift, re-commit the regenerated `aspect_*` seeds, and add a drift guard so `cargo test` on a clean checkout leaves the tree clean.

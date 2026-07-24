@@ -176,6 +176,36 @@ fn default_copy_markers_is_all() {
     assert_eq!(opts.copy_markers, MarkerCopyMode::All);
 }
 
+// --- Convenience transform_jpeg follows the TransformOptions default ---
+
+/// Issue #308 (PS): `transform_jpeg` used to hard-code
+/// `MarkerCopyMode::None`, silently stripping EXIF/ICC/COM on a simple
+/// rotate even though its docs say it delegates with default options and
+/// `TransformOptions::default()` is `MarkerCopyMode::All`. A lossless
+/// rotate must not quietly drop camera metadata.
+#[test]
+fn convenience_transform_jpeg_preserves_markers_by_default() {
+    let data: Vec<u8> = make_jpeg_with_all_markers();
+
+    let result: Vec<u8> =
+        libjpeg_turbo_rs::transform(&data, libjpeg_turbo_rs::TransformOp::Rot90).unwrap();
+    let markers: Vec<SavedMarker> = read_all_markers(&result);
+
+    for (code, name) in [
+        (0xE1u8, "APP1 (EXIF)"),
+        (0xE2, "APP2 (ICC)"),
+        (0xFE, "COM"),
+        (0xE5, "APP5"),
+    ] {
+        assert!(
+            markers.iter().any(|m| m.code == code),
+            "transform_jpeg must preserve {} by default (TransformOptions::default() is \
+             MarkerCopyMode::All)",
+            name
+        );
+    }
+}
+
 // --- From<bool> backward compatibility ---
 
 #[test]

@@ -151,6 +151,19 @@ use libjpeg_turbo_rs::{transform, TransformOp};
 let rotated = transform(&jpeg_bytes, TransformOp::Rot90)?;
 ```
 
+`transform` preserves metadata (EXIF/ICC/COM markers) by default, matching
+C TurboJPEG's `tjTransform`; use `transform_jpeg_with_options` with
+`MarkerCopyMode::None` to strip markers.
+
+Lossless transforms are coefficient-domain: they entropy-decode to DCT
+coefficients, permute blocks, and entropy-encode — no pixels are ever
+produced, so the pixel-path SIMD (IDCT / color convert / upsample) is not
+involved and transform throughput rides on scalar codegen. Build with the
+default release profile (`opt-level = 3`); a size-optimized profile
+(`opt-level = "z"`) roughly halves transform throughput. `-C
+target-cpu=native` buys only a further ~3% (measured on a 24 MP rot90,
+Zen 4; issue #308 has the full numbers).
+
 ### Scanline-Level I/O
 
 ```rust

@@ -69,6 +69,7 @@ Rust port of libjpeg-turbo with equivalent or better performance.
 - **Never overfit to tests.** Implementation must solve the general problem, not just the specific test cases. No hardcoded returns, no input-matching conditionals, no logic that only handles test values. Use triangulation — when a fake/hardcoded implementation passes, add tests with different inputs to force generalization.
 - Test behavior, not implementation. Assert on observable outcomes, not internal details — tests must survive refactoring.
 - Every new feature or bug fix must have corresponding tests.
+- **Resolving a GitHub issue requires a regression test.** Add a test that reproduces the reported behavior (failing before the fix, passing after) and cite the issue number in its doc comment (e.g., `/// Issue #308: ...`). Performance issues pin the mechanism instead (e.g., dispatch/feature-path selection) plus a benchmark entry in `experiments/`.
 - **Optimize test execution speed.** Use `cargo test` with parallel execution (default behavior). Keep each test isolated — no shared mutable state.
 - **Skip tests when no runtime impact.** Non-runtime changes (docs, README, `.md`, CI pipeline config) should not trigger test runs.
 
