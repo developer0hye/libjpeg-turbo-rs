@@ -88,6 +88,11 @@ fn main() {
     // Warmup.
     let out = transform_jpeg_with_options(&jpeg, &opts).expect("warmup transform");
     eprintln!("rot90 output: {:.2} MB", out.len() as f64 / 1e6);
+    if let Some(path) = save_path {
+        let out_path: String = format!("{}.rot90.jpg", path);
+        std::fs::write(&out_path, &out).expect("save rot90 output");
+        eprintln!("saved rot90 output to {}", out_path);
+    }
 
     // Full transform.
     let start = Instant::now();
