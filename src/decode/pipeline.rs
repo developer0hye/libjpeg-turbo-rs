@@ -3042,7 +3042,7 @@ impl<'a> Decoder<'a> {
                 }
             }
 
-            self.lossless_output_color(&comp_planes, width, height, icc_profile, exif_data)
+            self.lossless_output_color(&comp_planes, width, height, pt, icc_profile, exif_data)
         } else {
             Err(JpegError::Unsupported(format!(
                 "{} components not yet supported for lossless",
@@ -3169,7 +3169,7 @@ impl<'a> Decoder<'a> {
                 }
             }
 
-            self.lossless_output_color(&comp_planes, width, height, icc_profile, exif_data)
+            self.lossless_output_color(&comp_planes, width, height, pt, icc_profile, exif_data)
         } else {
             Err(JpegError::Unsupported(format!(
                 "{} components not yet supported for lossless",
@@ -3281,6 +3281,7 @@ impl<'a> Decoder<'a> {
         comp_planes: &[Vec<u16>],
         width: usize,
         height: usize,
+        pt: u8,
         icc_profile: Option<Vec<u8>>,
         exif_data: Option<Vec<u8>>,
     ) -> Result<Image> {
@@ -3288,15 +3289,22 @@ impl<'a> Decoder<'a> {
         let bpp = out_format.bytes_per_pixel();
         let mut data = Vec::with_capacity(width * height * bpp);
 
+        // C jdlossls.c simple_upscale/noscale: every component sample is
+        // scaled by `<< Al` and truncated to the sample type
+        // (`(_JSAMPLE)(x << Al)`, i.e. `& 0xFF` for 8-bit) — not
+        // saturated. Skipping the shift here left color output in the
+        // point-transformed domain (Fuzz Smoke run 29689718301, P4-38).
+        let shift: u32 = (pt as u32).min(15);
+
         for ((&r_pix, &g_pix), &b_pix) in comp_planes[0]
             .iter()
             .zip(comp_planes[1].iter())
             .zip(comp_planes[2].iter())
         {
             // Raw RGB: output component values directly (no color conversion)
-            let r: u8 = r_pix.min(255) as u8;
-            let g: u8 = g_pix.min(255) as u8;
-            let b: u8 = b_pix.min(255) as u8;
+            let r: u8 = ((r_pix as u32) << shift) as u8;
+            let g: u8 = ((g_pix as u32) << shift) as u8;
+            let b: u8 = ((b_pix as u32) << shift) as u8;
 
             match out_format {
                 PixelFormat::Rgb => {
@@ -4028,6 +4036,26 @@ impl<'a> Decoder<'a> {
                     saved_markers: self.metadata.saved_markers.clone(),
                     warnings: recovered_warnings,
                 });
+            }
+
+            // Non-integer luma/chroma ratios (e.g. Y=4x1 with Cb=3x1 → 4/3)
+            // truncate to a wrong integer factor above; the copy/upsample
+            // paths below would then read luma-sized rows out of a smaller
+            // chroma plane (Fuzz Smoke run 29977722126, P4-36). C rejects
+            // every fractional ratio up front with
+            // ERREXIT(JERR_FRACT_SAMPLE_NOTIMPL) ("Fractional sampling not
+            // implemented yet") in jdsample.c — match it in both strict and
+            // lenient modes (djpeg fails fatally, so there is nothing more
+            // lenient to offer).
+            if !y_width.is_multiple_of(cb_w)
+                || !y_height.is_multiple_of(cb_h)
+                || !y_width.is_multiple_of(cr_w)
+                || !y_height.is_multiple_of(cr_h)
+            {
+                return Err(JpegError::Unsupported(format!(
+                    "fractional chroma sampling ratio: luma {}x{} vs cb {}x{} cr {}x{}",
+                    y_width, y_height, cb_w, cb_h, cr_w, cr_h
+                )));
             }
 
             // When both chroma components have the same factors, use the shared

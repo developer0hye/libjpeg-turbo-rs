@@ -268,6 +268,44 @@ impl<'a> MarkerReader<'a> {
                 }
                 SOS => {
                     let header = self.read_sos()?;
+                    // C jdmarker.c get_sos: every scan component must bind
+                    // to a distinct frame component; no match is fatal
+                    // (ERREXIT JERR_BAD_COMPONENT_ID, "Invalid component ID
+                    // %d in SOS"). Without this, a stream whose later scans
+                    // reference undeclared ids decodes every scan C would
+                    // never reach — Fuzz Smoke run 29815394302 hit a
+                    // 1371-scan arithmetic-progressive stream that C rejects
+                    // at scan 8 in milliseconds while we ground through all
+                    // of it (libFuzzer timeout, P4-37).
+                    //
+                    // C's search guard `!cinfo->cur_comp_info[ci]` indexes by
+                    // frame slot while matches are stored at *scan* slot `i`;
+                    // since slots fill sequentially, the guard reduces to
+                    // "frame index >= scan position". Net effect (replicated
+                    // here exactly): an interleaved scan listing components
+                    // in a different order than the frame header is rejected
+                    // too, and the trailing pointer-equality loop rejects a
+                    // repeated CSi.
+                    if let Some(f) = frame.as_ref() {
+                        let mut chosen: Vec<usize> = Vec::with_capacity(header.components.len());
+                        for (scan_pos, scan_comp) in header.components.iter().enumerate() {
+                            match f
+                                .components
+                                .iter()
+                                .enumerate()
+                                .skip(scan_pos)
+                                .find(|(_, frame_comp)| frame_comp.id == scan_comp.component_id)
+                            {
+                                Some((ci, _)) if !chosen.contains(&ci) => chosen.push(ci),
+                                _ => {
+                                    return Err(JpegError::CorruptData(format!(
+                                        "Invalid component ID {} in SOS",
+                                        scan_comp.component_id
+                                    )));
+                                }
+                            }
+                        }
+                    }
                     let offset = self.pos;
                     scans.push(ScanInfo {
                         header,
