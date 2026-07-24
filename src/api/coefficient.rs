@@ -11,7 +11,7 @@ use crate::encode::marker_writer;
 use crate::encode::pipeline as encoder_pipeline;
 use crate::encode::tables;
 use crate::transform::spatial;
-use crate::transform::{MarkerCopyMode, TransformOp, TransformOptions};
+use crate::transform::{TransformOp, TransformOptions};
 
 /// Per-component DCT coefficient data.
 #[derive(Debug, Clone)]
@@ -473,13 +473,17 @@ pub fn write_coefficients(coeffs: &JpegCoefficients) -> Result<Vec<u8>> {
 
 /// Apply a lossless transform to a JPEG image.
 ///
-/// Delegates to [`transform_jpeg_with_options`] with default options.
+/// Delegates to [`transform_jpeg_with_options`] with default options, so
+/// metadata (EXIF/ICC/COM markers) is preserved
+/// ([`MarkerCopyMode::All`], matching both [`TransformOptions::default`]
+/// and C TurboJPEG's `tjTransform` without `TJXOPT_COPYNONE`). Pass
+/// [`MarkerCopyMode::None`] via [`transform_jpeg_with_options`] to strip
+/// markers instead.
 pub fn transform_jpeg(data: &[u8], op: TransformOp) -> Result<Vec<u8>> {
     transform_jpeg_with_options(
         data,
         &TransformOptions {
             op,
-            copy_markers: MarkerCopyMode::None,
             ..Default::default()
         },
     )
