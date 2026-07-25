@@ -25,6 +25,16 @@ pub struct ArithDecoder<'a> {
     a: i64,  // A register
     ct: i32, // bit shift counter
 
+    // jdarith.c signals spectral/magnitude overflow by setting `ct = -1`
+    // (JWRN_ARITH_BAD_CODE) and every decode_mcu* variant starts with
+    // `if (entropy->ct == -1) return TRUE;` — the rest of the restart
+    // interval decodes to nothing. Without this, continuing to decode
+    // with corrupted coder state can fabricate coefficients up to
+    // ±0x8000 that a later Huffman re-encode cannot represent
+    // (Fuzz Smoke run 30064906856, P4-35). Modeled as a separate flag
+    // so `ct` keeps its pure bit-counter role.
+    error_limbo: bool,
+
     pub last_dc_val: [i32; 4],
     dc_context: [usize; 4],
 
@@ -50,6 +60,7 @@ impl<'a> ArithDecoder<'a> {
             c: 0,
             a: 0,
             ct: -16,
+            error_limbo: false,
             last_dc_val: [0; 4],
             dc_context: [0; 4],
             dc_stats: [[0; DC_STAT_BINS]; NUM_ARITH_TBLS],
@@ -203,6 +214,9 @@ impl<'a> ArithDecoder<'a> {
         comp_idx: usize,
         dc_tbl: usize,
     ) -> Result<()> {
+        if self.error_limbo {
+            return Ok(()); // jdarith.c: `if (entropy->ct == -1) return TRUE;`
+        }
         // S0 = dc_stats[tbl][dc_context[ci]]
         let s0 = self.dc_context[comp_idx];
 
@@ -229,7 +243,10 @@ impl<'a> ArithDecoder<'a> {
             while self.decode(StatRef::Dc(dc_tbl, st_pos))? != 0 {
                 m <<= 1;
                 if m == 0x8000 {
-                    return Err(JpegError::CorruptData("arithmetic DC overflow".into()));
+                    // jdarith.c: WARNMS(JWRN_ARITH_BAD_CODE) + ct = -1 (magnitude
+                    // overflow) — C tolerates this instead of erroring out.
+                    self.error_limbo = true;
+                    return Ok(());
                 }
                 st_pos += 1;
             }
@@ -271,6 +288,9 @@ impl<'a> ArithDecoder<'a> {
     /// Ported from jdarith.c decode_mcu (AC section).
     /// Block output is in zigzag order (matching encoder's quantize_block output).
     pub fn decode_ac_sequential(&mut self, block: &mut [i16; 64], ac_tbl: usize) -> Result<()> {
+        if self.error_limbo {
+            return Ok(()); // jdarith.c: `if (entropy->ct == -1) return TRUE;`
+        }
         let mut k = 1usize;
         while k <= 63 {
             // EOB decision
@@ -284,7 +304,8 @@ impl<'a> ArithDecoder<'a> {
                 st += 3;
                 k += 1;
                 if k > 63 {
-                    // C libjpeg-turbo: WARNMS + return TRUE (tolerate overflow)
+                    // jdarith.c: WARNMS(JWRN_ARITH_BAD_CODE) + ct = -1 (spectral overflow)
+                    self.error_limbo = true;
                     return Ok(());
                 }
             }
@@ -303,7 +324,8 @@ impl<'a> ArithDecoder<'a> {
                 while self.decode(StatRef::Ac(ac_tbl, st_pos))? != 0 {
                     m <<= 1;
                     if m == 0x8000 {
-                        // C libjpeg-turbo: WARNMS + return TRUE (tolerate overflow)
+                        // jdarith.c: WARNMS(JWRN_ARITH_BAD_CODE) + ct = -1 (magnitude overflow)
+                        self.error_limbo = true;
                         return Ok(());
                     }
                     st_pos += 1;
@@ -341,6 +363,9 @@ impl<'a> ArithDecoder<'a> {
         dc_tbl: usize,
         al: u8,
     ) -> Result<()> {
+        if self.error_limbo {
+            return Ok(()); // jdarith.c: `if (entropy->ct == -1) return TRUE;`
+        }
         // Same as decode_dc_sequential but output is LEFT_SHIFT(last_dc_val, al)
         let s0 = self.dc_context[comp_idx];
 
@@ -360,7 +385,10 @@ impl<'a> ArithDecoder<'a> {
             while self.decode(StatRef::Dc(dc_tbl, st_pos))? != 0 {
                 m <<= 1;
                 if m == 0x8000 {
-                    return Err(JpegError::CorruptData("arithmetic DC overflow".into()));
+                    // jdarith.c: WARNMS(JWRN_ARITH_BAD_CODE) + ct = -1 (magnitude
+                    // overflow) — C tolerates this instead of erroring out.
+                    self.error_limbo = true;
+                    return Ok(());
                 }
                 st_pos += 1;
             }
@@ -397,6 +425,8 @@ impl<'a> ArithDecoder<'a> {
 
     /// Decode DC refinement for progressive (arithmetic).
     pub fn decode_dc_refine_progressive(&mut self, block: &mut [i16; 64], al: u8) -> Result<()> {
+        // No error_limbo guard here: jdarith.c decode_mcu_DC_refine is the
+        // one variant without the `ct == -1` check (it has no overflow path).
         let p1 = 1i16 << al;
         if self.decode(StatRef::Fixed(0))? != 0 {
             block[0] |= p1;
@@ -422,6 +452,9 @@ impl<'a> ArithDecoder<'a> {
                 ss, se
             )));
         }
+        if self.error_limbo {
+            return Ok(()); // jdarith.c: `if (entropy->ct == -1) return TRUE;`
+        }
         let mut k = ss as usize;
         while k <= se as usize {
             let mut st = 3 * (k - 1);
@@ -432,7 +465,8 @@ impl<'a> ArithDecoder<'a> {
                 st += 3;
                 k += 1;
                 if k > se as usize {
-                    // C libjpeg-turbo: WARNMS + return TRUE (tolerate overflow)
+                    // jdarith.c: WARNMS(JWRN_ARITH_BAD_CODE) + ct = -1 (spectral overflow)
+                    self.error_limbo = true;
                     return Ok(());
                 }
             }
@@ -447,7 +481,8 @@ impl<'a> ArithDecoder<'a> {
                 while self.decode(StatRef::Ac(ac_tbl, st_pos))? != 0 {
                     m <<= 1;
                     if m == 0x8000 {
-                        // C libjpeg-turbo: WARNMS + return TRUE (tolerate overflow)
+                        // jdarith.c: WARNMS(JWRN_ARITH_BAD_CODE) + ct = -1 (magnitude overflow)
+                        self.error_limbo = true;
                         return Ok(());
                     }
                     st_pos += 1;
@@ -489,6 +524,9 @@ impl<'a> ArithDecoder<'a> {
                 "arithmetic AC-refine scan bounds: ss={} se={}",
                 ss, se
             )));
+        }
+        if self.error_limbo {
+            return Ok(()); // jdarith.c: `if (entropy->ct == -1) return TRUE;`
         }
         let p1 = 1i16 << al;
         let m1 = (-1i16) << al;
@@ -533,7 +571,8 @@ impl<'a> ArithDecoder<'a> {
                 st += 3;
                 k += 1;
                 if k > se as usize {
-                    // C libjpeg-turbo: WARNMS + return TRUE (tolerate overflow)
+                    // jdarith.c: WARNMS(JWRN_ARITH_BAD_CODE) + ct = -1 (spectral overflow)
+                    self.error_limbo = true;
                     return Ok(());
                 }
             }
@@ -561,6 +600,7 @@ impl<'a> ArithDecoder<'a> {
     /// itself.
     pub fn process_restart(&mut self) {
         self.unread_marker = false;
+        self.error_limbo = false;
         self.c = 0;
         self.a = 0;
         self.ct = -16;
@@ -603,5 +643,68 @@ mod tests {
         assert_eq!(decoder.arith_dc_l[10], 10);
         assert_eq!(decoder.arith_dc_u[10], 11);
         assert_eq!(decoder.arith_ac_k[12], 13);
+    }
+}
+
+#[cfg(test)]
+mod error_limbo_tests {
+    use super::*;
+
+    /// Byte pattern (found by exhaustive search) whose sequential
+    /// arithmetic DC decode hits the Figure F.23 magnitude-overflow
+    /// guard (`m == 0x8000`) within the first few blocks.
+    fn overflow_stream() -> Vec<u8> {
+        [0x9a, 0x24, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00]
+            .iter()
+            .cycle()
+            .take(40)
+            .copied()
+            .collect()
+    }
+
+    /// jdarith.c parity: magnitude overflow sets the error state
+    /// (`ct = -1` in C) instead of erroring out, and every subsequent
+    /// decode call leaves its block untouched (P4-35).
+    #[test]
+    fn dc_magnitude_overflow_enters_limbo_and_decodes_nothing() {
+        let data: Vec<u8> = overflow_stream();
+        let mut decoder = ArithDecoder::new(&data, 0);
+        let mut block = [0i16; 64];
+        let mut limbo_seen: bool = false;
+        for _ in 0..8 {
+            decoder
+                .decode_dc_sequential(&mut block, 0, 0)
+                .expect("overflow must be tolerated, not an error (C WARNMS parity)");
+            if decoder.error_limbo {
+                limbo_seen = true;
+                break;
+            }
+        }
+        assert!(limbo_seen, "expected DC magnitude overflow in stream");
+
+        // Post-limbo: nothing decodes, nothing errors — blocks stay as-is.
+        let mut untouched = [7i16; 64];
+        decoder
+            .decode_dc_sequential(&mut untouched, 0, 0)
+            .expect("limbo decode must be a no-op, not an error");
+        decoder
+            .decode_ac_sequential(&mut untouched, 0)
+            .expect("limbo decode must be a no-op, not an error");
+        assert_eq!(untouched, [7i16; 64]);
+    }
+
+    /// jdarith.c parity: process_restart re-initializes the coder,
+    /// clearing the error state (`ct = -16`).
+    #[test]
+    fn restart_clears_error_limbo() {
+        let data: Vec<u8> = overflow_stream();
+        let mut decoder = ArithDecoder::new(&data, 0);
+        let mut block = [0i16; 64];
+        for _ in 0..8 {
+            let _ = decoder.decode_dc_sequential(&mut block, 0, 0);
+        }
+        assert!(decoder.error_limbo);
+        decoder.process_restart();
+        assert!(!decoder.error_limbo);
     }
 }
