@@ -593,7 +593,7 @@ P3-3's closure (2026-05-06; corrected 2026-05-10) explicitly scoped the allowlis
 
 **Status (2026-07-24): closed.** The artifact now decodes byte-exact vs djpeg (max diff 0, down from 189). Pinned by `tests/regression_lossless_point_transform.rs` (djpeg byte-exact cross-check plus a djpeg-pinned first-pixel probe that runs without C tools).
 
-## P4-39. CMYK Encode Path Silently Drops Restart / Custom-Table Options and Rejects Optimize+Smoothing — **OPEN**
+## P4-39. CMYK Encode Path Silently Drops Restart / Custom-Table Options and Rejects Optimize+Smoothing — **PARTIAL: 4 of 5 fixed; optimize/smoothing need a 4-component full-plane path**
 
 **Motivation.** Surfaced 2026-07-25 while refactoring the `compress_*` family onto a single `CompressParams` core (see [P4-40](#p4-40-srcencodepipeliners-is-10k-lines-of-copy-pasted-compress_-variants--partial-acceptance-criteria-1-3-delivered-criterion-4-split-by-mode-remains)). The new characterization fixture `tests/fixtures/encode_pipeline_golden.txt` shows the option-carrying variants producing **byte-identical output to plain `compress`** on CMYK input — the options never reach the encoder. Tracked upstream as GitHub issue [#313](https://github.com/developer0hye/libjpeg-turbo-rs/issues/313).
 
@@ -623,6 +623,14 @@ Five defects, four of them silent (`Ok(bytes)` with the option not applied):
 4. `tests/fixtures/encode_pipeline_golden.txt` regenerated in the *fixing* commit — never in a refactor commit — with the CMYK rows reviewed as a diff.
 
 **Why deferred.** The P4-40 refactor is deliberately byte-exact, so it cannot carry a behavioural fix. It does remove the structural cause: once CMYK is a component-layout choice inside one core rather than a separate narrower function, these become small changes rather than five parallel edits.
+
+**Status (2026-07-26): 4 of 5 closed.** `compress_cmyk` now takes `CompressParams` and honours the restart interval (DRI + RST with all four DC predictors reset together), custom quantization tables, custom Huffman tables, and `dct_method`. Slot 0 is the one that applies: all four components share one quantization table and one DC/AC pair, per `turbojpeg.c:418-427`.
+
+That prediction held — once the option set was a value rather than a signature, the fix was mechanical rather than five parallel edits.
+
+The golden fixture moved in exactly **922 of 20,160** cases, every one of them CMYK: 202 `compress` (the `dct_method` variants), 180 `customhuff`, 180 `customquant`, 360 `restart`. Nothing else shifted. The four corresponding `cmyk|effect|*` rows are gone from the option matrix's allowlist, and four of the six reproductions in `tests/encode_cmyk_option_parity.rs` are un-`#[ignore]`d.
+
+**Remaining.** `optimize_huffman` and `smoothing_factor` still reject or ignore CMYK: both need the full-plane two-pass path, which has no four-component variant. Those two tests stay `#[ignore]`d with that reason rather than a stale one.
 
 ## P4-40. `src/encode/pipeline.rs` Is 10k Lines of Copy-Pasted `compress_*` Variants — **PARTIAL: acceptance criteria 1-3 delivered; criterion 4 (split by mode) remains**
 
@@ -882,7 +890,7 @@ Ruled out along the way, each by direct measurement rather than inspection: `fdc
 32. ~~**P4-36** — fractional chroma sampling ratio panicked in the direct-copy upsample path.~~ **CLOSED 2026-07-24** — C JERR_FRACT_SAMPLE_NOTIMPL parity guard.
 33. ~~**P4-37** — SOS component ids never validated against the frame.~~ **CLOSED 2026-07-24** — jdmarker.c get_sos binding port; 1371-scan timeout stream now rejected at scan 8.
 34. ~~**P4-38** — lossless color output skipped the point transform and wrapped at the wrong modulus.~~ **CLOSED 2026-07-24** — 0xFFFF undifference wrap + `<< Al` truncating output scaler; byte-exact vs djpeg.
-35. **P4-39** — CMYK encode path silently drops restart / custom quant / custom Huffman options and rejects optimize+smoothing (GitHub #313). Blocked on nothing; P4-40's core makes it small.
+35. **P4-39** — CMYK encode path silently drops restart / custom quant / custom Huffman options and rejects optimize+smoothing (GitHub #313). **PARTIAL 2026-07-26** — 4 of 5 fixed via `CompressParams`; optimize/smoothing need a 4-component full-plane path.
 36. **P4-40** — collapse the ten copy-pasted `compress_*` variants onto a single `CompressParams` core (byte-exact), then split `src/encode/pipeline.rs` by mode.
 37. ~~**P4-41** — AVX2 4:2:0 row fast path ignored the dummy-block contract (#314) and bypassed its own AVX2 capability check (#315).~~ **CLOSED 2026-07-25** — single `use_avx2_420` gate + `y_last_col_width == y_mcu_width` guard; fused path now 576/576 vs cjpeg.
 38. ~~**P4-42** — full-plane encode variants (restart / custom-quant / custom-Huffman) skip the dummy-block contract on every platform (#316).~~ **CLOSED 2026-07-25** — the P4-40 core made them shims; 576/576 vs cjpeg.

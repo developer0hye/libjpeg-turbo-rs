@@ -11,9 +11,15 @@
 //! (`jcsample.c`, per-component with a `smoothok` fallback), quantization
 //! slots (`jcparam.c`) and `dct_method` (`jcdctmgr.c`) all apply to CMYK.
 //!
-//! These tests assert the *correct* (C-matching) behaviour and are therefore
-//! expected to fail until issue #313 is fixed. They are `#[ignore]`d rather
-//! than weakened, per the project's strict-assertion rules.
+//! Four of the five defects are fixed: `compress_cmyk` now takes
+//! `CompressParams` and honours the restart interval, custom quantization and
+//! Huffman tables (slot 0 — all four components share one of each, per
+//! `turbojpeg.c:418-427`), and `dct_method`.
+//!
+//! Two remain `#[ignore]`d because they need a four-component variant of the
+//! full-plane path that does not exist yet: `optimize_huffman` (two-pass
+//! statistics) and `smoothing_factor`. They are ignored rather than weakened,
+//! per the project's strict-assertion rules.
 
 use libjpeg_turbo_rs::encode::pipeline;
 use libjpeg_turbo_rs::{DctMethod, Encoder, HuffmanTableDef, PixelFormat, Subsampling};
@@ -51,7 +57,6 @@ fn count_restart_markers(jpeg: &[u8]) -> usize {
 }
 
 #[test]
-#[ignore = "Issue #313: compress_with_restart drops restart_interval for CMYK"]
 fn cmyk_honours_restart_interval() {
     let pixels: Vec<u8> = cmyk_image(WIDTH, HEIGHT);
     let with_restart: Vec<u8> = pipeline::compress_with_restart(
@@ -81,7 +86,6 @@ fn cmyk_honours_restart_interval() {
 }
 
 #[test]
-#[ignore = "Issue #313: compress_custom_quant drops custom tables for CMYK"]
 fn cmyk_honours_custom_quant_tables() {
     let pixels: Vec<u8> = cmyk_image(WIDTH, HEIGHT);
 
@@ -129,7 +133,6 @@ fn cmyk_honours_custom_quant_tables() {
 }
 
 #[test]
-#[ignore = "Issue #313: compress_custom_huffman drops custom tables for CMYK"]
 fn cmyk_honours_custom_huffman_tables() {
     let pixels: Vec<u8> = cmyk_image(WIDTH, HEIGHT);
 
@@ -179,7 +182,7 @@ fn cmyk_honours_custom_huffman_tables() {
 }
 
 #[test]
-#[ignore = "Issue #313: compress_optimized rejects CMYK, so Encoder::optimize_huffman fails"]
+#[ignore = "Issue #313: two-pass optimized Huffman has no 4-component path yet"]
 fn cmyk_supports_optimized_huffman() {
     let pixels: Vec<u8> = cmyk_image(WIDTH, HEIGHT);
 
@@ -206,7 +209,7 @@ fn cmyk_supports_optimized_huffman() {
 }
 
 #[test]
-#[ignore = "Issue #313: compress_optimized rejects CMYK, so Encoder::smoothing_factor fails"]
+#[ignore = "Issue #313: smoothing needs the full-plane path, which has no 4-component variant yet"]
 fn cmyk_supports_smoothing_factor() {
     let pixels: Vec<u8> = cmyk_image(WIDTH, HEIGHT);
 
@@ -231,7 +234,6 @@ fn cmyk_supports_smoothing_factor() {
 }
 
 #[test]
-#[ignore = "Issue #313: compress_cmyk ignores dct_method"]
 fn cmyk_honours_dct_method() {
     let pixels: Vec<u8> = cmyk_image(WIDTH, HEIGHT);
 
