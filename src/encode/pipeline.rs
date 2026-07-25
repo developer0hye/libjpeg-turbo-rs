@@ -111,6 +111,12 @@ pub struct CompressParams<'a> {
     pub custom_dc_huffman: Option<&'a [Option<HuffmanTableDef>; 4]>,
     /// Per-slot AC Huffman tables, same slot convention as `custom_quant`.
     pub custom_ac_huffman: Option<&'a [Option<HuffmanTableDef>; 4]>,
+    /// Two-pass optimized Huffman coding. Computes tables from the actual
+    /// symbol statistics, so any `custom_*_huffman` tables are superseded —
+    /// matching libjpeg's `optimize_coding` semantics.
+    pub optimize_huffman: bool,
+    /// Input smoothing strength 0-100, as C's `smoothing_factor`.
+    pub smoothing_factor: u8,
 }
 
 impl<'a> CompressParams<'a> {
@@ -135,6 +141,8 @@ impl<'a> CompressParams<'a> {
             custom_quant: None,
             custom_dc_huffman: None,
             custom_ac_huffman: None,
+            optimize_huffman: false,
+            smoothing_factor: 0,
         }
     }
 
@@ -160,6 +168,16 @@ impl<'a> CompressParams<'a> {
     ) -> Self {
         self.custom_dc_huffman = Some(dc);
         self.custom_ac_huffman = Some(ac);
+        self
+    }
+
+    pub fn optimize_huffman(mut self, optimize: bool) -> Self {
+        self.optimize_huffman = optimize;
+        self
+    }
+
+    pub fn smoothing_factor(mut self, factor: u8) -> Self {
+        self.smoothing_factor = factor.min(100);
         self
     }
 }
@@ -260,7 +278,17 @@ pub fn compress_with_params(params: &CompressParams<'_>) -> Result<Vec<u8>> {
         custom_quant,
         custom_dc_huffman,
         custom_ac_huffman,
+        optimize_huffman,
+        smoothing_factor,
     } = *params;
+
+    // Two-pass optimized Huffman, and smoothing, both need full-plane
+    // buffering, so they live in the other implementation. Dispatching here
+    // rather than in every caller is what stops the two from masking each
+    // other's options (#322).
+    if optimize_huffman || smoothing_factor > 0 {
+        return compress_optimized_with_params(params);
+    }
 
     // Validate inputs
     if width == 0 || height == 0 {
@@ -8052,8 +8080,11 @@ fn encode_downsampled_chroma_block(
 /// Compress with optimized Huffman tables (2-pass encoding).
 ///
 /// Pass 1: FDCT + quantize all blocks, gather symbol frequencies.
-/// Pass 2: Generate optimal Huffman tables, encode with them.
-/// Produces smaller output than `compress()` at the cost of an extra pass.
+/// Two-pass optimized-Huffman encode: pass 1 gathers symbol statistics, pass 2
+/// generates optimal tables and encodes with them. Produces smaller output
+/// than `compress()` at the cost of an extra pass.
+///
+/// Public shim over [`compress_optimized_with_params`].
 #[allow(clippy::too_many_arguments)]
 pub fn compress_optimized(
     pixels: &[u8],
@@ -8066,6 +8097,37 @@ pub fn compress_optimized(
     dct_method: DctMethod,
     restart_interval: u16,
 ) -> Result<Vec<u8>> {
+    compress_optimized_with_params(
+        &CompressParams::new(pixels, width, height, pixel_format, quality, subsampling)
+            .dct_method(dct_method)
+            .restart_interval(restart_interval)
+            .smoothing_factor(smoothing_factor)
+            .optimize_huffman(true),
+    )
+}
+
+/// Two-pass optimized-Huffman encode, and the only path that applies
+/// `smoothing_factor` — it needs full-plane buffering.
+///
+/// Custom Huffman tables are deliberately ignored: `optimize_coding` derives
+/// tables from the actual symbol statistics, which is the point of the pass,
+/// and matches libjpeg when both are supplied.
+pub fn compress_optimized_with_params(params: &CompressParams<'_>) -> Result<Vec<u8>> {
+    let CompressParams {
+        pixels,
+        width,
+        height,
+        pixel_format,
+        quality,
+        subsampling,
+        dct_method,
+        restart_interval,
+        custom_quant,
+        custom_dc_huffman,
+        custom_ac_huffman,
+        optimize_huffman,
+        smoothing_factor,
+    } = *params;
     // Validate inputs
     if width == 0 || height == 0 {
         return Err(JpegError::CorruptData(
@@ -8095,9 +8157,14 @@ pub fn compress_optimized(
     // AA&N constants in (paired with `fdct_ifast_raw`); islow/float keep
     // the simple `quant * 8` divisors, with the float path routing through
     // the embedded `float_divisors` field via `scalar_fdct_float_quantize`.
-    let luma_quant = tables::quality_scale_quant_table(&tables::STD_LUMINANCE_QUANT_TABLE, quality);
-    let chroma_quant =
-        tables::quality_scale_quant_table(&tables::STD_CHROMINANCE_QUANT_TABLE, quality);
+    let luma_quant: [u16; 64] = match custom_quant.and_then(|tables| tables[0]) {
+        Some(table) => table,
+        None => tables::quality_scale_quant_table(&tables::STD_LUMINANCE_QUANT_TABLE, quality),
+    };
+    let chroma_quant: [u16; 64] = match custom_quant.and_then(|tables| tables[1]) {
+        Some(table) => table,
+        None => tables::quality_scale_quant_table(&tables::STD_CHROMINANCE_QUANT_TABLE, quality),
+    };
     let luma_divisors = if dct_method == DctMethod::IsFast {
         scale_quant_for_ifast(&luma_quant)
     } else {
@@ -8156,7 +8223,13 @@ pub fn compress_optimized(
     )?;
 
     // Apply smoothing to component planes when smoothing_factor > 0.
-    let y_plane: Vec<u8> = if smoothing_factor > 0 && !is_grayscale {
+    //
+    // C selects `fullsize_smooth_downsample` for every component sampled at
+    // the maximum factors (`jcsample.c:506-513`), which for a single-component
+    // image is the grayscale plane itself — `cjpeg -grayscale -smooth 50`
+    // demonstrably differs from `-smooth 0`. Excluding grayscale here made
+    // `Encoder::smoothing_factor` a silent no-op for it (#327).
+    let y_plane: Vec<u8> = if smoothing_factor > 0 {
         fullsize_smooth_plane(&y_plane, padded_w, padded_h, smoothing_factor)
     } else {
         y_plane
@@ -8719,17 +8792,50 @@ pub fn compress_optimized(
     dc_chroma_freq[256] = 1;
     ac_chroma_freq[256] = 1;
 
-    // Generate optimal tables
-    let (dc_luma_bits, dc_luma_values) = huff_opt::gen_optimal_table(&dc_luma_freq);
-    let (ac_luma_bits, ac_luma_values) = huff_opt::gen_optimal_table(&ac_luma_freq);
-    let (dc_chroma_bits, dc_chroma_values) = huff_opt::gen_optimal_table(&dc_chroma_freq);
-    let (ac_chroma_bits, ac_chroma_values) = huff_opt::gen_optimal_table(&ac_chroma_freq);
-
-    // Build encoding tables from optimal bits/values
-    let dc_luma_table = build_huff_table(&dc_luma_bits, &dc_luma_values);
-    let ac_luma_table = build_huff_table(&ac_luma_bits, &ac_luma_values);
-    let dc_chroma_table = build_huff_table(&dc_chroma_bits, &dc_chroma_values);
-    let ac_chroma_table = build_huff_table(&ac_chroma_bits, &ac_chroma_values);
+    // Huffman tables: derived from the gathered statistics when optimization
+    // was asked for, otherwise the caller's custom tables (or Annex K).
+    //
+    // Reaching this function does not by itself imply optimization — a
+    // `smoothing_factor` alone routes here too, because smoothing needs the
+    // full-plane buffering this path provides. Unconditionally deriving
+    // optimal tables would then silently override custom Huffman tables that
+    // the caller supplied alongside smoothing (#322).
+    let resolved: ResolvedHuffman = if optimize_huffman {
+        let (dc_luma_bits, dc_luma_values) = huff_opt::gen_optimal_table(&dc_luma_freq);
+        let (ac_luma_bits, ac_luma_values) = huff_opt::gen_optimal_table(&ac_luma_freq);
+        let (dc_chroma_bits, dc_chroma_values) = huff_opt::gen_optimal_table(&dc_chroma_freq);
+        let (ac_chroma_bits, ac_chroma_values) = huff_opt::gen_optimal_table(&ac_chroma_freq);
+        ResolvedHuffman {
+            dc_luma: build_huff_table(&dc_luma_bits, &dc_luma_values),
+            ac_luma: build_huff_table(&ac_luma_bits, &ac_luma_values),
+            dc_chroma: build_huff_table(&dc_chroma_bits, &dc_chroma_values),
+            ac_chroma: build_huff_table(&ac_chroma_bits, &ac_chroma_values),
+            dc_luma_bits,
+            dc_luma_values,
+            ac_luma_bits,
+            ac_luma_values,
+            dc_chroma_bits,
+            dc_chroma_values,
+            ac_chroma_bits,
+            ac_chroma_values,
+        }
+    } else {
+        ResolvedHuffman::resolve(custom_dc_huffman, custom_ac_huffman)
+    };
+    let ResolvedHuffman {
+        dc_luma: dc_luma_table,
+        ac_luma: ac_luma_table,
+        dc_chroma: dc_chroma_table,
+        ac_chroma: ac_chroma_table,
+        dc_luma_bits,
+        dc_luma_values,
+        ac_luma_bits,
+        ac_luma_values,
+        dc_chroma_bits,
+        dc_chroma_values,
+        ac_chroma_bits,
+        ac_chroma_values,
+    } = resolved;
 
     // === Pass 2: Encode all buffered blocks with optimal tables ===
     let mut bit_writer = BitWriter::new(width * height);

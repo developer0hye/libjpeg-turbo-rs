@@ -914,75 +914,34 @@ impl<'a> Encoder<'a> {
                     restart_in_rows,
                 )?
             }
-        } else if self.optimize_huffman {
-            encoder::compress_optimized(
-                effective_pixels,
-                self.width,
-                self.height,
-                effective_format,
-                quality,
-                effective_subsampling,
-                self.smoothing_factor,
-                self.dct_method,
-                restart_interval,
-            )?
-        } else if self.has_custom_huffman_tables() {
-            encoder::compress_custom_huffman(
-                effective_pixels,
-                self.width,
-                self.height,
-                effective_format,
-                quality,
-                effective_subsampling,
-                &self.custom_huffman_dc,
-                &self.custom_huffman_ac,
-            )?
-        } else if needs_custom_quant {
-            let effective_tables = self.build_quant_tables(quality);
-            encoder::compress_custom_quant(
-                effective_pixels,
-                self.width,
-                self.height,
-                effective_format,
-                quality,
-                effective_subsampling,
-                &effective_tables,
-            )?
-        } else if restart_interval > 0 {
-            encoder::compress_with_restart(
-                effective_pixels,
-                self.width,
-                self.height,
-                effective_format,
-                quality,
-                effective_subsampling,
-                restart_interval,
-                self.dct_method,
-            )?
-        } else if self.smoothing_factor > 0 {
-            // Smoothing requires full-plane buffering, only available in the
-            // optimized path. Route there when smoothing is requested.
-            encoder::compress_optimized(
-                effective_pixels,
-                self.width,
-                self.height,
-                effective_format,
-                quality,
-                effective_subsampling,
-                self.smoothing_factor,
-                self.dct_method,
-                restart_interval,
-            )?
         } else {
-            encoder::compress(
+            // One params value carrying every baseline option, instead of an
+            // if/else chain in which the first matching arm silently discarded
+            // whatever it could not express. That chain lost `restart_blocks`
+            // behind either table option, custom quant behind custom Huffman,
+            // and `dct_method` behind both — 29 masked interactions in all
+            // (#322). The core decides internally whether the two-pass
+            // optimized path is needed.
+            let effective_quant_tables = self.build_quant_tables(quality);
+            let mut params = encoder::CompressParams::new(
                 effective_pixels,
                 self.width,
                 self.height,
                 effective_format,
                 quality,
                 effective_subsampling,
-                self.dct_method,
-            )?
+            )
+            .dct_method(self.dct_method)
+            .restart_interval(restart_interval)
+            .optimize_huffman(self.optimize_huffman)
+            .smoothing_factor(self.smoothing_factor);
+            if needs_custom_quant {
+                params = params.custom_quant(&effective_quant_tables);
+            }
+            if self.has_custom_huffman_tables() {
+                params = params.custom_huffman(&self.custom_huffman_dc, &self.custom_huffman_ac);
+            }
+            encoder::compress_with_params(&params)?
         };
 
         let with_meta = if self.icc_profile.is_some() || self.exif_data.is_some() {
