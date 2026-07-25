@@ -1,7 +1,8 @@
 //! Issue #314: 4:2:0 encode diverged from `cjpeg` whenever `ceil(width/8)` is odd.
 //!
-//! The x86_64 AVX2 4:2:0 row fast path (`src/encode/pipeline.rs:373`) FDCTs
-//! every block of every MCU unconditionally. It guarded the last partial MCU
+//! The x86_64 AVX2 4:2:0 row fast path (guard now at
+//! `src/encode/pipeline.rs:596`) FDCTed every block of every MCU
+//! unconditionally. It guarded the last partial MCU
 //! *row* but not the last partial MCU *column*, so for any width whose luma
 //! block count is odd it forward-transformed replicated edge pixels where C
 //! emits a dummy block — zeroed, with the previous block's DC copied in and no
