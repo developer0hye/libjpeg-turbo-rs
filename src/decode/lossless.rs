@@ -34,11 +34,17 @@ pub fn undifference_row(
     // JPEG T.81 F.1.1: lossless precision is 2..=16, and point_transform
     // must satisfy `point_transform < precision` so the initial prediction
     // `2^(precision - point_transform - 1)` is well-defined. Malformed
-    // frame headers can violate either constraint; clamp the shift widths
-    // so we don't panic and so a downstream bit-exactness comparison will
+    // frame headers can violate the constraint; clamp the shift width so
+    // we don't panic and so a downstream bit-exactness comparison will
     // still catch the bad input rather than aborting the whole decode.
-    let prec_shift: u32 = (precision as u32).min(31);
-    let mask: i32 = ((1u32 << prec_shift).saturating_sub(1)) as i32;
+    //
+    // Undifferencing wraps modulo 0xFFFF regardless of frame precision —
+    // C's jpeg_undifference1..7 (jdlossls.c) all compute
+    // `(diff + PREDICTOR) & 0xFFFF`. Masking by `2^precision - 1` here
+    // diverged from djpeg on every wrap (Fuzz Smoke run 29689718301,
+    // P4-38); the sample-type truncation happens later, at the output
+    // upscale stage.
+    let mask: i32 = 0xFFFF;
     let init_shift: i32 = (precision as i32)
         .saturating_sub(point_transform as i32)
         .saturating_sub(1)

@@ -161,12 +161,21 @@ pub fn read_coefficients(data: &[u8]) -> Result<JpegCoefficients> {
     let mcus_x = (frame.width as usize).div_ceil(mcu_w);
     let mcus_y = (frame.height as usize).div_ceil(mcu_h);
 
-    // Collect quant tables in natural (row-major) order for write_dqt compatibility
-    let quant_tables: Vec<[u16; 64]> = metadata
-        .quant_tables
-        .iter()
-        .filter_map(|qt| qt.as_ref().map(|q| q.values))
-        .collect();
+    // Collect quant tables in natural (row-major) order for write_dqt
+    // compatibility. The four DQT slots may be sparse (e.g. only slot 1
+    // defined, or a gap at slot 2) — the writers emit `quant_tables[i]`
+    // as slot `i`, so compacting the slots requires remapping every
+    // component's slot reference into the dense index space or the
+    // re-encoded SOF would reference a table the output never defines
+    // (Fuzz Smoke runs 29679993066..30064906856, P4-34).
+    let mut slot_to_dense: [Option<u8>; 4] = [None; 4];
+    let mut quant_tables: Vec<[u16; 64]> = Vec::new();
+    for (slot, qt) in metadata.quant_tables.iter().enumerate() {
+        if let Some(q) = qt.as_ref() {
+            slot_to_dense[slot] = Some(quant_tables.len() as u8);
+            quant_tables.push(q.values);
+        }
+    }
 
     // Allocate component coefficient buffers
     let mut comp_data: Vec<ComponentCoefficients> = frame
@@ -181,7 +190,11 @@ pub fn read_coefficients(data: &[u8]) -> Result<JpegCoefficients> {
                 blocks_y: by,
                 h_sampling: comp.horizontal_sampling,
                 v_sampling: comp.vertical_sampling,
-                quant_table_index: comp.quant_table_index,
+                // A reference to an undefined slot falls back to dense
+                // index 0 — the coefficient pass never dequantizes, and
+                // djpeg rejects the C-side equivalent anyway, so any
+                // defined table keeps the output self-consistent.
+                quant_table_index: slot_to_dense[comp.quant_table_index as usize].unwrap_or(0),
                 component_id: comp.id,
             }
         })
@@ -1262,6 +1275,27 @@ pub fn write_coefficients_optimized(coeffs: &JpegCoefficients) -> Result<Vec<u8>
                         // and gather_dc_symbol's leading-zeros classification.
                         let diff: i16 = dc_val.wrapping_sub(prev_dc[ci]);
                         prev_dc[ci] = dc_val;
+                        // Magnitude category 16 cannot be expressed in a DHT
+                        // symbol (4-bit size field); in i16 storage only a
+                        // value/diff of -32768 produces it. C's scalar encoder
+                        // rejects it with ERREXIT(JERR_BAD_DCT_COEF)
+                        // (jchuff.c); its SIMD path silently emits an
+                        // undecodable stream instead — match the scalar
+                        // contract (Fuzz Smoke run 30064906856, P4-35).
+                        //
+                        // Deliberate leniency vs C: C computes the DC diff in
+                        // int and ERREXITs when the *pre-wrap* magnitude needs
+                        // category 16 (e.g. 32767 - (-2) = 32769). Our wrapped
+                        // diff stays representable, pass 2 wraps identically,
+                        // and the decoder's own predictor wrap recovers the
+                        // same i16 DC values — the output is valid and
+                        // decodable, so we transcode where C refuses. Only the
+                        // wrapped value -32768 (true category 16) must reject.
+                        if diff == i16::MIN || block[1..].contains(&i16::MIN) {
+                            return Err(JpegError::CorruptData(
+                                "DCT coefficient out of range for Huffman coding".to_string(),
+                            ));
+                        }
                         huff_opt::gather_dc_symbol(diff, dc_freq);
                         huff_opt::gather_ac_symbols(block, ac_freq);
                     }
@@ -1619,6 +1653,16 @@ pub fn write_coefficients_progressive(
                                 };
                                 let diff: i16 = dc.wrapping_sub(prev_dc[scan_ci]);
                                 prev_dc[scan_ci] = dc;
+                                // DC diff of -32768 needs magnitude category 16,
+                                // which no DHT symbol can express — C's scalar
+                                // encoder ERREXITs (JERR_BAD_DCT_COEF); match it
+                                // (P4-35).
+                                if diff == i16::MIN {
+                                    return Err(JpegError::CorruptData(
+                                        "DCT coefficient out of range for Huffman coding"
+                                            .to_string(),
+                                    ));
+                                }
                                 huff_opt::gather_dc_symbol(diff, freq);
                             }
                         }
@@ -1818,6 +1862,15 @@ pub fn write_coefficients_progressive(
                             let temp: u16 = (abs_coeff >> al) as u16;
                             if temp == 0 {
                                 continue;
+                            }
+                            // temp = 32768 (coeff = i16::MIN with al = 0) needs
+                            // magnitude category 16, which no DHT symbol can
+                            // express — C's scalar encoder ERREXITs
+                            // (JERR_BAD_DCT_COEF); match it (P4-35).
+                            if temp >= 0x8000 {
+                                return Err(JpegError::CorruptData(
+                                    "DCT coefficient out of range for Huffman coding".to_string(),
+                                ));
                             }
                             values[i] = temp;
                             zerobits |= 1u64 << i;
