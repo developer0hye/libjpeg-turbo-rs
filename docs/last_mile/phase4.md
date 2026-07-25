@@ -38,7 +38,7 @@
 | P4-28 | CLOSED 2026-06-29 (progressive AC-refine one-past-Se coefficient placement) |
 | P4-29 | CLOSED 2026-07-08 (block smoothing clamps at the real block grid, not the iMCU-padded one) |
 | P4-30 | CLOSED 2026-07-12 (unsupported 12-bit sampling layouts return an error instead of writing past component planes) |
-| P4-31 | OPEN (filed 2026-07-13; real-world/corpus CI gates can silently lose coverage) |
+| P4-31 | CLOSED 2026-07-25 (PR #307 hardened the gates; post-merge Corpus Test CI green) |
 | P4-32 | CLOSED AS DUPLICATE OF P4-20 2026-07-13 (coefficients/quantization match C; divergence is IDCT overflow fidelity) |
 
 ---
@@ -513,7 +513,7 @@ P3-3's closure (2026-05-06; corrected 2026-05-10) explicitly scoped the allowlis
 
 **Status (2026-07-12): closed.** The minimized regression `api::precision::tests::unsupported_12bit_sampling_layout_returns_error_instead_of_panicking` returns an error, and all three downloaded CI artifacts complete under their original fuzz targets with `-runs=1`. This is an error-path stability test and produces no decoded raster to compare with `djpeg`.
 
-## P4-31. Real-World and Corpus CI Gates Can Silently Lose Coverage — **OPEN**
+## P4-31. Real-World and Corpus CI Gates Can Silently Lose Coverage — **CLOSED 2026-07-25**
 
 **Motivation.** A pre-release audit found that the committed 61-image real-world suite currently passes pixel-identically against libjpeg-turbo, but its harness converts a Rust panic (and some Rust arithmetic decode errors) into successful skips. The generated Corpus Test copies only top-level `.jpg` files, omitting nested `real_world/`, `kodak/`, `usc_sipi/`, and extensionless JPEG fuzz seeds. Its workflow parses a textual summary fail-open, permits arbitrary skips, and treats encode failures as warnings.
 
@@ -521,7 +521,9 @@ P3-3's closure (2026-05-06; corrected 2026-05-10) explicitly scoped the allowlis
 
 **Acceptance criteria.** (1) Rust panics/errors in valid real-world decoding fail the test; only unavailable external C capabilities may skip. (2) Fixture inventory/category minimums prevent silent shrinkage. (3) Corpus generation recursively preserves nested fixtures and includes tracked extensionless fuzz files only when their bytes have a JPEG SOI signature, without modifying or incorporating local untracked fuzz corpus. (4) CMYK/YCCK/12-bit comparisons normalize both decoders to the same pixel format. (5) Malformed inputs use an exact path + operation + reason `ExpectedReject` classification; pre-existing valid-input divergences use an equally exact named `KnownMismatch` tied to an open LAST_MILE item. Every expected path-operation outcome must be exercised by a full corpus run; there is no arbitrary skip budget. (6) The corpus runner exits nonzero for every unclassified failure/crash/skip, CI requires all operations including encode, and source-bucket minimums prove real-world, generated, and fuzz inputs were exercised.
 
-**Why release-blocking.** Version `0.6.3` is intended to publish decoder-stability fixes. Publishing while a green gate can silently omit real-world inputs or downgrade Rust failures would weaken the evidence for that claim; the tag remains blocked until P4-31 closes with PR and post-merge CI evidence.
+**Why release-blocking.** Version `0.6.3` is intended to publish decoder-stability fixes. Publishing while a green gate can silently omit real-world inputs or downgrade Rust failures would weaken the evidence for that claim; the tag remained blocked until P4-31 closed with PR and post-merge CI evidence.
+
+**Status (2026-07-25): closed.** PR #307 (`test: harden real-world JPEG corpus gates`, merge commit `a3da54c`) delivered every acceptance criterion: real-world differential tests fail loudly with marker-based fixture-coverage minimums (1, 2); corpus generation recurses nested fixtures and admits tracked extensionless inputs by SOI signature only (3); CMYK/YCCK/12-bit comparisons are normalized to a shared pixel format (4); expected outcomes use exact `ExpectedReject`/`KnownMismatch` classifications with no skip budget (5); and the corpus runner exits nonzero on any unclassified failure while the `Corpus Test (C parity)` CI job gates on that exit code including encode operations (6). Post-merge CI evidence: the job is required in `ci.yml` and passed on post-#307 runs `30077205876` and `30147718997` (PR #310, both full sweeps green) and on the `main` push run for merge commit `ed00d30`. The `v0.6.3` tag is unblocked.
 
 ## P4-32. Valid Arithmetic-Progressive Grayscale Seed Diverges From `djpeg` — **CLOSED AS DUPLICATE OF P4-20 2026-07-13**
 
@@ -616,7 +618,7 @@ P3-3's closure (2026-05-06; corrected 2026-05-10) explicitly scoped the allowlis
 24. ~~**P4-28** — progressive AC-refine wrote one-past-`Se` real coefficients to padded coefficient 63.~~ **CLOSED 2026-06-29** — AC refine now uses real zigzag positions for `k < 64`, padded slot only for `64..79`. Regression: `fuzz_decode_diff_c_progressive_16x16_h2v1_ac_refine_matches_djpeg`.
 25. ~~**P4-29** — block smoothing read dummy iMCU-padding blocks as DC neighbors (and wrote smoothed blocks back into the neighbor-read buffer).~~ **CLOSED 2026-07-08** — smoothing now iterates and clamps at the real `width_in_blocks`/`height_in_blocks` grid over a `row_stride`-pitched buffer, reading neighbor DCs from a pre-pass snapshot. Regression: `fuzz_decode_diff_c_progressive_16x16_h1v4_smoothing_matches_djpeg`.
 26. ~~**P4-30** — unsupported 12-bit sampling layout could write beyond a component plane.~~ **CLOSED 2026-07-12** — validate the 12-bit upsampling invariant before decode and bounds-check each block write. Regression: `unsupported_12bit_sampling_layout_returns_error_instead_of_panicking`; exact replays for Fuzz Smoke 117, 118, and 121.
-27. **P4-31** — harden real-world/corpus coverage against soft-skipped Rust failures, nested-fixture omission, extensionless JPEG-seed omission, and fail-open summary parsing.
+27. ~~**P4-31** — harden real-world/corpus coverage against soft-skipped Rust failures, nested-fixture omission, extensionless JPEG-seed omission, and fail-open summary parsing.~~ **CLOSED 2026-07-25** — delivered by PR #307; Corpus Test (C parity) gate green post-merge.
 28. ~~**P4-32** — triage the strict-C-valid SOF10 grayscale seed `24fd237...`.~~ **CLOSED AS DUPLICATE OF P4-20 2026-07-13** — coefficients and quantization match C; the max-34 pixel delta is the existing IDCT i16-fidelity family.
 29. **P4-33** — verify the encoder change behind the 8×64/64×8 4:2:0 output drift, re-commit the regenerated `aspect_*` seeds, and add a drift guard so `cargo test` on a clean checkout leaves the tree clean.
 30. ~~**P4-34** — transform re-encode dropped sparse DQT slot references.~~ **CLOSED 2026-07-24** — slot→dense remap in `read_coefficients`; ten Fuzz Smoke crashes resolved.
