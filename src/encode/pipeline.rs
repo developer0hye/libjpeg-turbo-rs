@@ -6049,7 +6049,28 @@ fn downsample_chroma_block(
     // Scalar fallback: alternating bias matching C libjpeg-turbo jcsample.c
     let divisor: u32 = (h_factor * v_factor) as u32;
     let use_alt: bool = h_factor == 2 && (v_factor == 1 || v_factor == 2);
+
+    // Vertical edge handling follows C's two-phase model (jcprepct.c then
+    // jccoefct.c): pad the source up to a complete row *group*, downsample,
+    // and then replicate the resulting **downsampled** row for everything
+    // below the image. Clamping the source row instead is only equivalent
+    // when the final row group is incomplete.
+    //
+    // With `v_factor == 2` and an even height the final group is complete, so
+    // C replicates `avg(last_two_rows)` while a source clamp yields
+    // `last_row` alone — which is why progressive diverged from cjpeg at every
+    // even height that is not a multiple of the MCU height, 1920x1080
+    // included (#324). Odd heights agreed by accident: their last group is
+    // incomplete, so both models replicate the same single row.
+    //
+    // Horizontally there is no such phase — C's `expand_right_edge` replicates
+    // source *pixels* — so column clamping below is already correct.
+    let chroma_rows: usize = plane_height.div_ceil(v_factor);
+    let first_chroma_row: usize = block_y / v_factor;
+
     for row in 0..8 {
+        let source_row_base: usize =
+            (first_chroma_row + row).min(chroma_rows.saturating_sub(1)) * v_factor;
         let mut bias: u32 = if h_factor == 2 && v_factor == 1 {
             0
         } else if h_factor == 2 && v_factor == 2 {
@@ -6063,7 +6084,7 @@ fn downsample_chroma_block(
             for dy in 0..v_factor {
                 for dx in 0..h_factor {
                     let sx = (block_x + col * h_factor + dx).min(plane_width - 1);
-                    let sy = (block_y + row * v_factor + dy).min(plane_height - 1);
+                    let sy = (source_row_base + dy).min(plane_height - 1);
                     sum += plane[sy * plane_width + sx] as u32;
                 }
             }
