@@ -54,10 +54,19 @@ fn pixels_for(format: PixelFormat) -> Vec<u8> {
     buffer
 }
 
+/// A clearly non-default quantization table.
+///
+/// The base is 40, not something much coarser. At 180 every coefficient
+/// quantizes to ~0, which makes `dct_method` unobservable *on top of* this
+/// option — and whether it happens to remain observable turns out to be
+/// backend-dependent: x86_64 still differed, aarch64 did not, so CI failed on
+/// one architecture only. 40 keeps the table's own effect obvious (1143 -> 805
+/// bytes on the RGB fixture) while leaving enough AC energy for the DCT choice
+/// to still matter, on both backends.
 fn coarse_quant() -> [u16; 64] {
     let mut table: [u16; 64] = [0; 64];
     for (index, entry) in table.iter_mut().enumerate() {
-        *entry = 180 + index as u16;
+        *entry = 40 + index as u16;
     }
     table
 }
@@ -138,13 +147,6 @@ const FORMATS: &[(&str, PixelFormat)] = &[
     ("cmyk", PixelFormat::Cmyk),
 ];
 
-/// `test-limit` marks a combination this fixture cannot observe rather than
-/// one the encoder drops. `gray|independence|dct_method_ifast after
-/// quant_table` is the only one: with the deliberately coarse table above,
-/// every coefficient quantizes to ~0 on grayscale, so `islow` and `ifast`
-/// agree exactly (364 bytes each). Against the default tables they differ
-/// (811 vs 810), i.e. `dct_method` composes fine — the table hides it.
-///
 /// Violations that exist today, each tied to the issue tracking it, or to
 /// `by-design` where the combination is genuinely meaningless rather than
 /// dropped:
@@ -198,10 +200,6 @@ const KNOWN_VIOLATIONS: &[(&str, &str)] = &[
         "by-design",
     ),
     // ---- #322: progressive / arithmetic paths still take no custom tables ----
-    (
-        "gray|independence|dct_method_ifast after quant_table",
-        "#322",
-    ),
     ("gray|independence|huffman_tables after progressive", "#322"),
     ("gray|independence|quant_table after arithmetic", "#322"),
     ("gray|independence|quant_table after progressive", "#322"),
