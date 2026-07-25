@@ -119,7 +119,31 @@ Rust port of libjpeg-turbo with equivalent or better performance.
 - **After completing any implementation task** (feature, optimization, bug fix), spawn a `code-reviewer` agent to review the changes before committing.
 - The reviewer should check: missed optimizations, logic defects, SIMD correctness, unnecessary overhead, and SOLID principles.
 - Apply reviewer suggestions if they are clearly beneficial, then commit.
+- **Before opening the PR**, run the `docs-drift-auditor` agent — see **Documentation & Comment Freshness**.
 - **For non-trivial commits** (≥ ~50 changed lines, OR touching `decode/`, `encode/`, `simd/`, public API, or fuzz harness) also run codex review before pushing — independent second opinion. Invoke the CLI directly: `codex review --commit <SHA>` for the just-created commit, or `codex review --uncommitted` for staged/unstaged changes (`--commit` and a custom prompt are mutually exclusive — pass one or the other). Trivial fixes (typos, comments, single-line tweaks) are exempt. The codex stop-review-gate hook also fires automatically at end-of-turn as a safety net, but proactively running it before push surfaces issues earlier.
+
+## Documentation & Comment Freshness
+
+Docs here are load-bearing: `LAST_MILE.md` is the release gate, agents read `CLAUDE.md` before every task, and comments cite C source lines that correctness arguments rest on. A stale sentence routes the next session to the wrong conclusion, so treat it as a defect, not cosmetics.
+
+Use the **`docs-drift-auditor`** agent (`.claude/agents/docs-drift-auditor.md`). Scope it to the diff, never the whole repo, unless auditing deliberately.
+
+**Invoke it when:**
+
+- **Before opening any PR** — mandatory. It is the last gate before prose is published.
+- **After renaming/moving/deleting** a function, type, module, flag, env var, or CI job — prose references produce no compiler error.
+- **After a change that moves a quoted number** — test counts, symbol counts, LOC, benchmark figures, the `LAST_MILE.md` live-gate table.
+- **After editing `.github/workflows/*`** — job names and comments routinely outlive the mechanism they describe.
+- **After a `references/libjpeg-turbo` submodule bump** — every `jc*.c:NNN` citation may have shifted.
+- **When closing a LAST_MILE item** — verify the four docs agree (index, phase file, FEATURE_PARITY, C_API_REFERENCE).
+
+**Skip it for:** pure formatting, dependency bumps with no API change, and changes confined to a single test body.
+
+**Non-negotiables it enforces:**
+
+1. A comment claiming something is tested/guarded/validated must be checked against the *mechanism*, not against the job passing. (A CI job named "SSE2-only" that sets a compile-time flag does not test a runtime-CPUID fallback — issue #320.)
+2. Never resolve a doc/code conflict by making the doc vaguer. Vague docs are undetectable drift.
+3. If the comment is right and the code is wrong, that is a bug — file it per **LAST_MILE Management**; do not change code to match prose.
 
 ## Performance Optimization (Experiment Tracking)
 

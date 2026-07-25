@@ -255,7 +255,7 @@ Each runs a real round-trip with PSNR check. Skip-with-reason allowed only when 
 
 **Status (2026-05-04): closed.** `cargo test --release --features full-c-parity --test c_tjcomptest` is **green for the full lossy + lossless matrix** including progressive + samp411/441/410/24 on the 227×149 testorig fixture. The source-level skip in `tests/c_tjcomptest.rs:717-739` is gone, the new C-tool-free guard `tests/regression_progressive_4pixel_chroma.rs` exercises all four 4-pixel factors, and the `continue-on-error: true` flag for `c_tjcomptest_full` in `.github/workflows/full-c-parity.yml` is removed.
 
-**Root cause (2026-05-04):** `src/encode/pipeline.rs::progressive_fdct_chroma_block` (and the matching arithmetic-progressive Cb/Cr branches at `pipeline.rs:4761` / `:4781`) clamped the chroma sampling factors with:
+**Root cause (2026-05-04):** `src/encode/pipeline.rs::progressive_fdct_chroma_block` (and the matching arithmetic-progressive Cb/Cr branches at `pipeline.rs:4351` / `:4369`) clamped the chroma sampling factors with:
 
 ```rust
 let hf: usize = if h_samp > 1 { 2 } else { 1 };

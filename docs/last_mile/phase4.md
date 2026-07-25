@@ -595,9 +595,9 @@ P3-3's closure (2026-05-06; corrected 2026-05-10) explicitly scoped the allowlis
 
 ## P4-39. CMYK Encode Path Silently Drops Restart / Custom-Table Options and Rejects Optimize+Smoothing — **OPEN**
 
-**Motivation.** Surfaced 2026-07-25 while refactoring the `compress_*` family onto a single `CompressParams` core (see [P4-40](#p4-40-encodepipelinesrs-is-10k-lines-of-copy-pasted-compress-variants--open)). The new characterization fixture `tests/fixtures/encode_pipeline_golden.txt` shows the option-carrying variants producing **byte-identical output to plain `compress`** on CMYK input — the options never reach the encoder. Tracked upstream as GitHub issue [#313](https://github.com/developer0hye/libjpeg-turbo-rs/issues/313).
+**Motivation.** Surfaced 2026-07-25 while refactoring the `compress_*` family onto a single `CompressParams` core (see [P4-40](#p4-40-srcencodepipeliners-is-10k-lines-of-copy-pasted-compress_-variants--partial-acceptance-criteria-1-3-delivered-criterion-4-split-by-mode-remains)). The new characterization fixture `tests/fixtures/encode_pipeline_golden.txt` shows the option-carrying variants producing **byte-identical output to plain `compress`** on CMYK input — the options never reach the encoder. Tracked upstream as GitHub issue [#313](https://github.com/developer0hye/libjpeg-turbo-rs/issues/313).
 
-**Root cause.** CMYK support was implemented exactly once, as `compress_cmyk(pixels, width, height, quality, subsampling)` — a signature that cannot express restart intervals, custom tables, smoothing, or DCT method. Every other variant early-returns into it and silently discards its remaining parameters:
+**Root cause.** CMYK support was implemented exactly once, as `compress_cmyk(pixels, width, height, quality, subsampling)` — a signature that cannot express restart intervals, custom tables, smoothing, or DCT method. Every other variant early-returns into it and silently discards its remaining parameters. Since the P4-40 refactor that early return is a single site — `compress_with_params` at `src/encode/pipeline.rs:294`, carrying a `NOTE(#313)` — that all four baseline shims inherit:
 
 ```rust
 if pixel_format == PixelFormat::Cmyk {
@@ -607,11 +607,11 @@ if pixel_format == PixelFormat::Cmyk {
 
 Five defects, four of them silent (`Ok(bytes)` with the option not applied):
 
-1. `compress_with_restart` drops `restart_interval` (`src/encode/pipeline.rs:1267`) — no RST markers emitted.
-2. `compress_custom_quant` drops custom quantization tables (`:1021`).
-3. `compress_custom_huffman` drops custom Huffman tables (`:788`).
-4. `compress_optimized` rejects CMYK with `JpegError::Unsupported`. Because `Encoder` routes through it for both `optimize_huffman(true)` (`src/api/encoder.rs:918`) and `smoothing_factor(>0)` (`:965`), **both builder options fail outright on CMYK**.
-5. `compress_cmyk` ignores `dct_method` (`:123`) — `IsLow`/`IsFast`/`Float` are byte-identical.
+1. `compress_with_restart` drops `restart_interval` (`src/encode/pipeline.rs:294`) — no RST markers emitted.
+2. `compress_custom_quant` drops custom quantization tables (same site).
+3. `compress_custom_huffman` drops custom Huffman tables (same site).
+4. `compress_optimized` rejects CMYK with `JpegError::Unsupported("CMYK pixel format not supported for encoding")`. Because `Encoder` routes through it for both `optimize_huffman(true)` (`src/api/encoder.rs:918`) and `smoothing_factor(>0)` (`:965`), **both builder options fail outright on CMYK**.
+5. `compress_cmyk` (`src/encode/pipeline.rs:1193`) ignores `dct_method` — `IsLow`/`IsFast`/`Float` are byte-identical.
 
 **Divergence from C.** None of these are colorspace-gated upstream: `optimize_coding` (`jcmaster.c:595-802`, `jcinit.c:83-127`), `restart_interval` (`jchuff.c:693-876`), `smoothing_factor` (`jcsample.c:509-553`, per-component with a `smoothok` fallback, not a colorspace gate), quantization slots (`jcparam.c`), and `dct_method` (`jcdctmgr.c`). `cjpeg -optimize`, `-smooth N`, `-restart N`, `-qtables` and `-dct fast|float` all apply to CMYK/YCCK in C.
 
@@ -626,15 +626,15 @@ Five defects, four of them silent (`Ok(bytes)` with the option not applied):
 
 ## P4-40. `src/encode/pipeline.rs` Is 10k Lines of Copy-Pasted `compress_*` Variants — **PARTIAL: acceptance criteria 1-3 delivered; criterion 4 (split by mode) remains**
 
-**Motivation.** Filed 2026-07-25 from a structural review. `src/encode/pipeline.rs` is 10,647 lines holding 103 free functions, 1 struct and **0 `impl` blocks**, and absorbs 108 of the last 1,174 commits (`src/decode/pipeline.rs` another 118) — the repo's highest size×churn product. Ten public `compress_*` entry points are copy-pasted variants of one algorithm; normalized unique-line overlap is 85% (`compress` vs `compress_with_restart`), 84% (vs `compress_custom_quant`) and 71% (vs `compress_custom_huffman`).
+**Motivation.** Filed 2026-07-25 from a structural review. At filing `src/encode/pipeline.rs` was 10,647 lines holding 103 free functions, 1 struct and **0 `impl` blocks** (10,235 / 3 / 2 after the Status below), and it absorbed 108 of the last 1,174 commits (`src/decode/pipeline.rs` another 118) — the repo's highest size×churn product. Ten public `compress_*` entry points are copy-pasted variants of one algorithm; normalized unique-line overlap is 85% (`compress` vs `compress_with_restart`), 84% (vs `compress_custom_quant`) and 71% (vs `compress_custom_huffman`).
 
 **Realized cost** — this is not a style complaint; the divergence has already produced defects:
 
-- The fused single-pass color-convert path (`:192-207`, keeps data in L1/L2 between conversion and encode) exists **only** in `compress()`. Every other variant still calls full-plane `convert_to_ycbcr`, so restart-interval and custom-table encodes silently run the slow path — against the project's stated goal of matching or beating C.
+- The fused single-pass color-convert path (keeps data in L1/L2 between conversion and encode) existed **only** in `compress()`. Every other variant called full-plane `convert_to_ycbcr`, so restart-interval and custom-table encodes silently ran the slow path — against the project's stated goal of matching or beating C. Resolved by the Status below: it now lives once in `compress_with_params` (`src/encode/pipeline.rs:401-416`) and all four baseline entry points reach it.
 - `smoothing_factor` is implemented **only** in `compress_optimized`.
 - `compress()` clamps scaled quant values to 255, breaking `cjpeg` parity below q≈20. Rather than fix it, `src/api/encoder.rs:770-791` routes around it with the heuristic `q < 50` and the comment *"Use a generous threshold to be safe."*
 - All five CMYK defects in [P4-39](#p4-39-cmyk-encode-path-silently-drops-restart--custom-table-options-and-rejects-optimizesmoothing--open).
-- 36 of the project's 65 `#[allow(clippy::too_many_arguments)]` are in this one file; `compress_optimized` takes 9 positional parameters.
+- 36 of the project's 66 `#[allow(clippy::too_many_arguments)]` are in this one file; `compress_optimized` takes 9 positional parameters.
 
 **Acceptance criteria.**
 
@@ -653,12 +653,12 @@ Five defects, four of them silent (`Ok(bytes)` with the option not applied):
 
 **Motivation.** Found 2026-07-25 while building the P4-40 characterization fixture, which showed `compress()` (fused) and `compress_with_restart()` (full-plane) disagreeing on 176 of 1440 RGB cases. A 576-case geometry sweep against stock `cjpeg` (widths x heights over `{7,8,15,16,17,23,24,31,32,33,48,64}` x 4 subsamplings, q50) scored fused 516/576 and full-plane 372/576 — so at most one could be right, and neither was fully. GitHub [#314](https://github.com/developer0hye/libjpeg-turbo-rs/issues/314) and [#315](https://github.com/developer0hye/libjpeg-turbo-rs/issues/315).
 
-**Root cause (two defects in one `if`).** `src/encode/pipeline.rs:373`:
+**Root cause (two defects in one `if`)** — the AVX2 4:2:0 row fast-path guard, `if is_420 && !cb_half.is_empty() && eff_row_height == y_mcu_height` at `src/encode/pipeline.rs:367` before the fix (the replacement guard is at `:596` today, and the `use_avx2_420` flag it reads at `:438`):
 
 1. **#314 — missing dummy-column guard.** The fast path FDCTs every block of every MCU unconditionally. It guarded the last partial MCU *row* (`eff_row_height == y_mcu_height`) but had no guard for the last partial MCU *column*, so for any width with `ceil(width/8)` odd it transformed replicated edge pixels where C emits a zeroed dummy block carrying the previous block's DC (`jccoefct.c:292-312`). Affected ordinary photo sizes — 500x375, 1000x750, 1000x1000, 1080x1080 all diverged; files ran 0.7–0.9% larger than C's. Only 4:2:0; 4:4:4 / 4:2:2 / 4:4:0 were clean.
 2. **#315 — capability check bypassed.** The path gated on `!cb_half.is_empty()`, an allocation-shape proxy: `cb_half` was allocated whenever the subsampling was 4:2:0 but only *filled* under `is_x86_feature_detected!("avx2")`. On a non-AVX2 x86_64 CPU that reached `#[target_feature(enable = "avx2")]` helpers (undefined behaviour) with never-downsampled all-zero chroma.
 
-**Why it escaped.** Three independent reasons, each worth noting: (a) the fast path is x86_64+AVX2-only and the project was developed on aarch64, which always takes the generic path — the same platform-dependent drift class as P4-33; (b) the byte-exact encoder cross-check (`tests/cross_check_encoder_binary.rs:76-77`) used **only 48x48**, MCU-aligned at 4:2:0, so `ndummy == 0` and the bug was unreachable; (c) `assert_encoder_output_matches` (`:36-62`) falls back from byte comparison to a decoded-pixel comparison with `max_diff <= 1`, and dummy blocks lie outside the image and are cropped on decode — the pixel diff is 0, so that test could never have caught it at *any* size.
+**Why it escaped.** Three independent reasons, each worth noting: (a) the fast path is x86_64+AVX2-only and the project was developed on aarch64, which always takes the generic path — the same platform-dependent drift class as P4-33; (b) the byte-exact encoder cross-check (`tests/cross_check_encoder_binary.rs:77-78`) used **only 48x48**, MCU-aligned at 4:2:0, so `ndummy == 0` and the bug was unreachable; (c) `assert_encoder_output_matches` (`:36-67`) falls back from byte comparison to a decoded-pixel comparison with `max_diff <= 1`, and dummy blocks lie outside the image and are cropped on decode — the pixel diff is 0, so that test could never have caught it at *any* size.
 
 **Fix.** A single `use_avx2_420` capability flag now gates the buffer allocation, the downsample and the encode fast path, so they cannot disagree; and the fast path additionally requires `y_last_col_width == y_mcu_width`. Partial geometries fall through to the generic path, which already handled dummies via `encode_color_mcu_with_dummies`.
 
@@ -710,7 +710,7 @@ P4-33 established the phenomenon (backend-dependent output, decodes pixel-identi
 
 `cross-arch.yml:78` sets `RUSTFLAGS: "-C target-feature=-avx2,-sse4.2"` and the job comment claims it "validates the secondary tier SIMD routines and scalar tail code remain correct when AVX2 is unavailable (older CPUs)". It does not. That flag is compile-time; every SIMD dispatch here is a runtime CPUID query via `is_x86_feature_detected!`, which ignores it. Built with the job's exact flags on an AVX2 machine: `cfg!(target_feature="avx2")` is **false** while `is_x86_feature_detected!("avx2")` is **true**, so the AVX2 branch is taken anyway.
 
-**Scope.** 59 runtime dispatch points (38 on `avx2`, 6 `sse2`, 2 each `ssse3`/`lzcnt`/`bmi1`) across `src/simd/x86_64/{mod,color,idct,avx2_idct,avx2_fdct,avx2_merged,upsample}.rs`, both pipelines, and `src/api/progressive_output.rs`. The SSE2/scalar fallback for essentially the whole x86_64 SIMD layer has never executed in CI. Worse than having no job, since the name asserts coverage that does not exist — #315 is one concrete bug it could never have caught.
+**Scope.** 50 runtime dispatch invocations across 48 lines (the two `huffman_encode.rs` sites each call it twice, `bmi1 && lzcnt`) — 38 on `avx2`, 6 `sse2`, 2 each `ssse3`/`lzcnt`/`bmi1` — in five files: `src/encode/pipeline.rs` (24), `src/decode/pipeline.rs` (17), `src/encode/huffman_encode.rs` (4), `src/simd/x86_64/mod.rs` (3) and `src/api/progressive_output.rs` (2). The `src/simd/x86_64/{color,idct,avx2_idct,avx2_fdct,avx2_merged,upsample}.rs` kernels name the macro only in `// SAFETY:` comments — they are the callees, dispatched from the five files above. The SSE2/scalar fallback for essentially the whole x86_64 SIMD layer has never executed in CI. Worse than having no job, since the name asserts coverage that does not exist — #315 is one concrete bug it could never have caught.
 
 **Acceptance criteria.**
 
