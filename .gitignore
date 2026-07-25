@@ -21,3 +21,7 @@ crates/libjpeg-turbo-rs-wasm/pkg/
 # the actual branch diff against origin/main.
 /tests/corpus/
 fuzz/Cargo.lock
+
+# cargo-mutants run output (mutation-testing reports, regenerated on demand)
+/mutants.out/
+/mutants.out.old/
