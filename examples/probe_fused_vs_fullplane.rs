@@ -1,10 +1,16 @@
 //! Probe: which `compress_*` buffering strategy matches C cjpeg, and where does
 //! the public encoder diverge from cjpeg at partial-MCU geometries?
 //!
-//! `compress()` uses a fused single-pass color-convert + encode strategy for
-//! RGB-family input; every other `compress_*` variant uses full-plane
-//! `convert_to_ycbcr`. The characterization fixture shows the two disagree on
-//! partial-MCU geometries with chroma subsampling, so at most one matches C.
+//! Written against the pre-P4-40 tree, where `compress()` used a fused
+//! single-pass color-convert + encode strategy for RGB-family input while
+//! every other `compress_*` variant used full-plane `convert_to_ycbcr`. The
+//! characterization fixture showed the two disagreeing on partial-MCU
+//! geometries with chroma subsampling, so at most one could match C.
+//!
+//! Both strategies now live behind the single `CompressParams` core, so the
+//! two columns agree; the probe is kept as the sweep harness that answers
+//! "does the public encoder match `cjpeg` at this geometry?" — see P4-44,
+//! which extends it to `-dct fast` / `-dct float`.
 //!
 //! Writes the input as PPM plus both Rust encodings for every case, so a shell
 //! wrapper can run stock `cjpeg` over the same PPM and diff all three. Prints
@@ -73,8 +79,10 @@ fn emit_case(out_dir: &str, width: usize, height: usize, subsampling: Subsamplin
     .expect("fused compress");
     std::fs::write(format!("{out_dir}/{stem}.fused.jpg"), &fused).expect("write fused");
 
-    // restart_interval = 0 emits no RST markers, so this isolates the buffering
-    // strategy as the only difference from the fused path.
+    // restart_interval = 0 emits no RST markers. Pre-P4-40 this isolated the
+    // buffering strategy as the only difference from the fused path; both now
+    // share the `CompressParams` core, so the column doubles as a shim check —
+    // it must stay byte-identical to `fused` above.
     let full_plane: Vec<u8> = pipeline::compress_with_restart(
         &pixels,
         width,
