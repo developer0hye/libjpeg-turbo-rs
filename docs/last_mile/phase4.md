@@ -720,6 +720,23 @@ P4-33 established the phenomenon (backend-dependent output, decodes pixel-identi
 
 **Why deferred.** Not blocking: it is CI coverage, not a product defect, and the P4-41 fix itself is already shipped and verified on AVX2 hardware. Local reproduction needs `qemu-user`, which this box cannot install (no passwordless sudo).
 
+## P4-46. `Encoder` Silently Drops Builder Options When Combined — **OPEN**
+
+**Motivation.** Filed 2026-07-25 while deciding what a README example for `CompressParams` should say. GitHub [#322](https://github.com/developer0hye/libjpeg-turbo-rs/issues/322). Unlike P4-39 this is **not** CMYK-specific — it hits ordinary RGB input through the public builder.
+
+Measured at 64x48 RGB q75: `.restart_blocks(3)` alone gives 3 RST markers, but `.quant_table(..).restart_blocks(3)` gives **0**, and `.huffman_*_table(..).restart_blocks(3)` gives **0**. `.huffman_*_table(..).quant_table(..)` returns output byte-identical to custom-Huffman-alone, i.e. the quant table is discarded.
+
+**Root cause.** `src/api/encoder.rs:918-980` dispatches through an if/else chain; each arm calls a shim forwarding only the options it names, and the first matching arm wins. `compress_custom_quant` and `compress_custom_huffman` take neither a restart interval nor a `dct_method`, so both are dropped alongside either table option.
+
+**Why it is now small.** P4-40 collapsed those four shims onto `CompressParams`, which carries every option at once — the chain can be replaced by building one params value. The `optimize_huffman` / `smoothing_factor` arm still needs `compress_optimized` until that two-pass algorithm is folded into the same type (P4-40 remaining scope).
+
+**Acceptance criteria.**
+
+1. Every pair of `restart_blocks`/`restart_rows`, `quant_table`, `huffman_dc_table`/`huffman_ac_table` and `dct_method` composes, each effect observable regardless of the others.
+2. Cross-validated against `cjpeg` for combinations C can express (`-restart NB` with `-qtables`).
+3. The three `#[ignore]`d tests in `tests/encoder_option_composability.rs` un-ignored and green (all three fail today under `--include-ignored`, which is the reproduction).
+4. Combinations that genuinely cannot be honoured return an error rather than dropping silently.
+
 ## Phase 4 Suggested Order
 
 1. ~~**P4-1** — export `jpeg_calc_jpeg_dimensions` and delete its missing-symbol allowlist entry.~~ **CLOSED 2026-05-10**.
@@ -763,3 +780,4 @@ P4-33 established the phenomenon (backend-dependent output, decodes pixel-identi
 39. **P4-43** — recover the ~3-4.5% the P4-41 correctness fix cost on `ceil(width/8)`-odd 4:2:0 widths (#317).
 40. **P4-44** — quantify encoder byte-parity vs `cjpeg` for `ifast`/`float` and for the aarch64 backend, then document what is actually guaranteed (#319).
 41. **P4-45** — make the `SSE2-only` CI job actually exercise the SSE2 fallback (QEMU/SDE); discharges #315's remaining criterion (#320).
+42. **P4-46** — make `Encoder`'s dispatch build one `CompressParams` so builder options stop dropping each other (#322).
