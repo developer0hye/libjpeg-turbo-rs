@@ -263,6 +263,7 @@ pub fn compress_arithmetic_progressive(
         DctMethod::IsLow,
         0,
         0,
+        None,
     )
 }
 
@@ -341,5 +342,6 @@ pub fn compress_arithmetic(
         subsampling,
         DctMethod::IsLow,
         0,
+        None,
     )
 }

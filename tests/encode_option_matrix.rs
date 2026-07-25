@@ -155,6 +155,11 @@ const FORMATS: &[(&str, PixelFormat)] = &[
 /// - `optimize_huffman after arithmetic` — arithmetic coding carries no Huffman tables
 /// - `huffman_tables after optimize_huffman` — optimize_coding computes tables, overriding supplied ones (libjpeg semantics)
 /// - `optimize_huffman after progressive` — the progressive path already optimizes (jcmaster.c:770-774)
+/// - `huffman_tables after progressive` — a progressive scan covers one
+///   coefficient band, so tables are derived per scan from that scan's own
+///   statistics; a single supplied pair cannot express them. C behaves the
+///   same way (`jcmaster.c:770-774` forces `optimize_coding` for progressive
+///   when tables are absent, and `cjpeg -progressive` always optimizes).
 /// - `optimize_huffman after smoothing_factor` — smoothing routes through the optimized path, so optimization is already on
 ///
 ///
@@ -168,6 +173,10 @@ const KNOWN_VIOLATIONS: &[(&str, &str)] = &[
     ),
     (
         "gray|independence|huffman_tables after optimize_huffman",
+        "by-design",
+    ),
+    (
+        "gray|independence|huffman_tables after progressive",
         "by-design",
     ),
     (
@@ -187,32 +196,16 @@ const KNOWN_VIOLATIONS: &[(&str, &str)] = &[
         "by-design",
     ),
     (
+        "rgb|independence|huffman_tables after progressive",
+        "by-design",
+    ),
+    (
         "rgb|independence|optimize_huffman after arithmetic",
         "by-design",
     ),
     (
         "rgb|independence|optimize_huffman after progressive",
         "by-design",
-    ),
-    // ---- #322: progressive / arithmetic paths still take no custom tables ----
-    ("gray|independence|huffman_tables after progressive", "#322"),
-    ("gray|independence|quant_table after arithmetic", "#322"),
-    ("gray|independence|quant_table after progressive", "#322"),
-    (
-        "gray|independence|smoothing_factor after arithmetic",
-        "#322",
-    ),
-    (
-        "gray|independence|smoothing_factor after progressive",
-        "#322",
-    ),
-    ("rgb|independence|huffman_tables after progressive", "#322"),
-    ("rgb|independence|quant_table after arithmetic", "#322"),
-    ("rgb|independence|quant_table after progressive", "#322"),
-    ("rgb|independence|smoothing_factor after arithmetic", "#322"),
-    (
-        "rgb|independence|smoothing_factor after progressive",
-        "#322",
     ),
 ];
 
