@@ -593,6 +593,58 @@ P3-3's closure (2026-05-06; corrected 2026-05-10) explicitly scoped the allowlis
 
 **Status (2026-07-24): closed.** The artifact now decodes byte-exact vs djpeg (max diff 0, down from 189). Pinned by `tests/regression_lossless_point_transform.rs` (djpeg byte-exact cross-check plus a djpeg-pinned first-pixel probe that runs without C tools).
 
+## P4-39. CMYK Encode Path Silently Drops Restart / Custom-Table Options and Rejects Optimize+Smoothing — **OPEN**
+
+**Motivation.** Surfaced 2026-07-25 while refactoring the `compress_*` family onto a single `CompressParams` core (see [P4-40](#p4-40-encodepipelinesrs-is-10k-lines-of-copy-pasted-compress-variants--open)). The new characterization fixture `tests/fixtures/encode_pipeline_golden.txt` shows the option-carrying variants producing **byte-identical output to plain `compress`** on CMYK input — the options never reach the encoder. Tracked upstream as GitHub issue [#313](https://github.com/developer0hye/libjpeg-turbo-rs/issues/313).
+
+**Root cause.** CMYK support was implemented exactly once, as `compress_cmyk(pixels, width, height, quality, subsampling)` — a signature that cannot express restart intervals, custom tables, smoothing, or DCT method. Every other variant early-returns into it and silently discards its remaining parameters:
+
+```rust
+if pixel_format == PixelFormat::Cmyk {
+    return compress_cmyk(pixels, width, height, quality, subsampling);
+}
+```
+
+Five defects, four of them silent (`Ok(bytes)` with the option not applied):
+
+1. `compress_with_restart` drops `restart_interval` (`src/encode/pipeline.rs:1267`) — no RST markers emitted.
+2. `compress_custom_quant` drops custom quantization tables (`:1021`).
+3. `compress_custom_huffman` drops custom Huffman tables (`:788`).
+4. `compress_optimized` rejects CMYK with `JpegError::Unsupported`. Because `Encoder` routes through it for both `optimize_huffman(true)` (`src/api/encoder.rs:918`) and `smoothing_factor(>0)` (`:965`), **both builder options fail outright on CMYK**.
+5. `compress_cmyk` ignores `dct_method` (`:123`) — `IsLow`/`IsFast`/`Float` are byte-identical.
+
+**Divergence from C.** None of these are colorspace-gated upstream: `optimize_coding` (`jcmaster.c:595-802`, `jcinit.c:83-127`), `restart_interval` (`jchuff.c:693-876`), `smoothing_factor` (`jcsample.c:509-553`, per-component with a `smoothok` fallback, not a colorspace gate), quantization slots (`jcparam.c`), and `dct_method` (`jcdctmgr.c`). `cjpeg -optimize`, `-smooth N`, `-restart N`, `-qtables` and `-dct fast|float` all apply to CMYK/YCCK in C.
+
+**Acceptance criteria.**
+
+1. CMYK honours `restart_interval`, custom quant tables, custom Huffman tables, `smoothing_factor`, `optimize_huffman`, and `dct_method`.
+2. Byte-exact cross-validation against C for each option on CMYK input.
+3. The six regression tests in `tests/encode_cmyk_option_parity.rs` un-`#[ignore]`d and green (all six fail today when run with `--include-ignored`, which is the reproduction).
+4. `tests/fixtures/encode_pipeline_golden.txt` regenerated in the *fixing* commit — never in a refactor commit — with the CMYK rows reviewed as a diff.
+
+**Why deferred.** The P4-40 refactor is deliberately byte-exact, so it cannot carry a behavioural fix. It does remove the structural cause: once CMYK is a component-layout choice inside one core rather than a separate narrower function, these become small changes rather than five parallel edits.
+
+## P4-40. `src/encode/pipeline.rs` Is 10k Lines of Copy-Pasted `compress_*` Variants — **OPEN**
+
+**Motivation.** Filed 2026-07-25 from a structural review. `src/encode/pipeline.rs` is 10,647 lines holding 103 free functions, 1 struct and **0 `impl` blocks**, and absorbs 108 of the last 1,174 commits (`src/decode/pipeline.rs` another 118) — the repo's highest size×churn product. Ten public `compress_*` entry points are copy-pasted variants of one algorithm; normalized unique-line overlap is 85% (`compress` vs `compress_with_restart`), 84% (vs `compress_custom_quant`) and 71% (vs `compress_custom_huffman`).
+
+**Realized cost** — this is not a style complaint; the divergence has already produced defects:
+
+- The fused single-pass color-convert path (`:192-207`, keeps data in L1/L2 between conversion and encode) exists **only** in `compress()`. Every other variant still calls full-plane `convert_to_ycbcr`, so restart-interval and custom-table encodes silently run the slow path — against the project's stated goal of matching or beating C.
+- `smoothing_factor` is implemented **only** in `compress_optimized`.
+- `compress()` clamps scaled quant values to 255, breaking `cjpeg` parity below q≈20. Rather than fix it, `src/api/encoder.rs:770-791` routes around it with the heuristic `q < 50` and the comment *"Use a generous threshold to be safe."*
+- All five CMYK defects in [P4-39](#p4-39-cmyk-encode-path-silently-drops-restart--custom-table-options-and-rejects-optimizesmoothing--open).
+- 36 of the project's 65 `#[allow(clippy::too_many_arguments)]` are in this one file; `compress_optimized` takes 9 positional parameters.
+
+**Acceptance criteria.**
+
+1. A `CompressParams` value type carries the full option set; one core routine subsumes `compress`, `compress_with_restart`, `compress_custom_quant`, `compress_custom_huffman` and `compress_optimized`, which become thin shims retaining their exact public signatures.
+2. The refactor is **byte-exact**: `cargo test --test encode_pipeline_golden` passes unchanged against the pre-refactor fixture (20,160 pinned cases).
+3. Every optimization reachable from every option combination — no feature is available on only one branch.
+4. `src/encode/pipeline.rs` split by mode (baseline / progressive / arithmetic / lossless / downsample / quant-divisors) so no single file exceeds ~2k lines.
+
+**Sequencing.** Criteria 1–3 first (byte-exact, low risk, unblocks P4-39). Criterion 4 is mechanical and can follow. Deliberately excluded: `crates/libjpeg-turbo-rs-capi/src/jpeglib.rs` is also large (9,242 lines) but is 164 flat `extern "C"` shims mirroring a C header — its size is inherent, not tangled, and it needs at most a split by API family.
+
 ## Phase 4 Suggested Order
 
 1. ~~**P4-1** — export `jpeg_calc_jpeg_dimensions` and delete its missing-symbol allowlist entry.~~ **CLOSED 2026-05-10**.
@@ -629,3 +681,5 @@ P3-3's closure (2026-05-06; corrected 2026-05-10) explicitly scoped the allowlis
 32. ~~**P4-36** — fractional chroma sampling ratio panicked in the direct-copy upsample path.~~ **CLOSED 2026-07-24** — C JERR_FRACT_SAMPLE_NOTIMPL parity guard.
 33. ~~**P4-37** — SOS component ids never validated against the frame.~~ **CLOSED 2026-07-24** — jdmarker.c get_sos binding port; 1371-scan timeout stream now rejected at scan 8.
 34. ~~**P4-38** — lossless color output skipped the point transform and wrapped at the wrong modulus.~~ **CLOSED 2026-07-24** — 0xFFFF undifference wrap + `<< Al` truncating output scaler; byte-exact vs djpeg.
+35. **P4-39** — CMYK encode path silently drops restart / custom quant / custom Huffman options and rejects optimize+smoothing (GitHub #313). Blocked on nothing; P4-40's core makes it small.
+36. **P4-40** — collapse the ten copy-pasted `compress_*` variants onto a single `CompressParams` core (byte-exact), then split `src/encode/pipeline.rs` by mode.
