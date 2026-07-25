@@ -151,11 +151,21 @@ fn encoder_keeps_custom_quant_with_custom_huffman() {
 /// that the core honours *every* option at once, which is why the README
 /// documents it rather than `Encoder` (#322).
 ///
-/// Each of the four options is pinned **individually**, by re-encoding with
-/// that one option removed and requiring the output to differ. A joint check
-/// (e.g. "smaller than a plain encode") is not enough: dropping exactly one of
-/// `dct_method` / `custom_quant` / `custom_huffman` still satisfies it, so a
-/// regression in any single option would pass unnoticed.
+/// Each option is pinned **individually**, by applying it alone to a default
+/// encode and requiring the output to change. Two weaker formulations were
+/// tried and rejected:
+///
+/// - A joint check ("smaller than a plain encode") passes even when one of
+///   `dct_method` / `custom_quant` / `custom_huffman` is dropped, so a
+///   single-option regression would go unnoticed.
+/// - Dropping one option from the *full* set is platform-dependent: on top of
+///   the coarse quant table almost every coefficient quantizes to zero, so
+///   `dct_method` stops being observable. That version passed on x86_64 (685
+///   vs 854 bytes) and failed on aarch64, where the two agree exactly.
+///
+/// Applied alone against the default tables the margins are large on every
+/// backend (measured on x86_64: 1153, 1169, 190 and 1343 differing bytes),
+/// which is what makes this formulation robust.
 #[test]
 fn readme_compress_params_example_compiles() {
     let rgb_pixels: Vec<u8> = test_pixels();
@@ -195,8 +205,8 @@ fn readme_compress_params_example_compiles() {
         "README example lost its restart interval — the composing claim is false"
     );
 
-    // Drop exactly one option at a time; each must change the output. If any
-    // of these matches the full encode, that option is being ignored.
+    // Apply each option alone to a default encode; every one must change the
+    // output. If any matches the plain encode, that option is being ignored.
     let base = || {
         CompressParams::new(
             &rgb_pixels,
@@ -207,54 +217,32 @@ fn readme_compress_params_example_compiles() {
             Subsampling::S420,
         )
     };
-    let without_each: [(&str, Vec<u8>); 4] = [
+    let plain: Vec<u8> = compress_with_params(&base()).expect("plain encode");
+    let each_alone: [(&str, Vec<u8>); 4] = [
         (
             "dct_method",
-            compress_with_params(
-                &base()
-                    .restart_interval(8)
-                    .custom_quant(&quant_tables)
-                    .custom_huffman(&dc_tables, &ac_tables),
-            )
-            .expect("without dct_method"),
+            compress_with_params(&base().dct_method(DctMethod::IsFast)).expect("dct_method alone"),
         ),
         (
             "restart_interval",
-            compress_with_params(
-                &base()
-                    .dct_method(DctMethod::IsFast)
-                    .custom_quant(&quant_tables)
-                    .custom_huffman(&dc_tables, &ac_tables),
-            )
-            .expect("without restart_interval"),
+            compress_with_params(&base().restart_interval(8)).expect("restart alone"),
         ),
         (
             "custom_quant",
-            compress_with_params(
-                &base()
-                    .dct_method(DctMethod::IsFast)
-                    .restart_interval(8)
-                    .custom_huffman(&dc_tables, &ac_tables),
-            )
-            .expect("without custom_quant"),
+            compress_with_params(&base().custom_quant(&quant_tables)).expect("quant alone"),
         ),
         (
             "custom_huffman",
-            compress_with_params(
-                &base()
-                    .dct_method(DctMethod::IsFast)
-                    .restart_interval(8)
-                    .custom_quant(&quant_tables),
-            )
-            .expect("without custom_huffman"),
+            compress_with_params(&base().custom_huffman(&dc_tables, &ac_tables))
+                .expect("huffman alone"),
         ),
     ];
 
-    for (option, without) in &without_each {
+    for (option, encoded) in &each_alone {
         assert_ne!(
-            &jpeg, without,
-            "dropping `{option}` produced identical output — the README example's \
-             claim that every option is honoured is false for that option"
+            encoded, &plain,
+            "`{option}` alone produced output identical to a default encode — \
+             the option is being ignored"
         );
     }
 }
