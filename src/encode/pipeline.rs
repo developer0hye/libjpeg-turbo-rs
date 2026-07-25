@@ -643,105 +643,126 @@ pub fn compress_with_params(params: &CompressParams<'_>) -> Result<Vec<u8>> {
             // diverged from cjpeg for every width with `ceil(width/8)` odd —
             // issue #314. Partial geometries fall through to the generic path
             // below, which handles dummies via `encode_color_mcu_with_dummies`.
+            // Where the generic loop below must pick up. The fast path covers
+            // the interior columns; a partial final column falls through.
+            let mut generic_start_col: usize = 0;
+
             #[cfg(target_arch = "x86_64")]
             // Restarts are excluded because this path hoists one bit-buffer
             // region across the whole MCU row; an RST marker mid-row would have
             // to break out of it. Restart encodes take the generic path below.
-            if use_avx2_420
-                && restart_mcu_interval == 0
-                && eff_row_height == y_mcu_height
-                && y_last_col_width == y_mcu_width
-            {
-                unsafe {
-                    // Reserve capacity for entire MCU row
-                    let (mut pb, mut fb, mut buf) = bit_writer.begin_block(3072 * mcus_x);
+            if use_avx2_420 && restart_mcu_interval == 0 && eff_row_height == y_mcu_height {
+                // Every block of every MCU is FDCT'd unconditionally here, so
+                // only columns with no dummy blocks qualify. When the last MCU
+                // column is partial it is excluded and handled generically
+                // rather than disqualifying the whole row — that costs one
+                // column instead of `mcus_x` of them (#317). C zeroes dummy
+                // blocks and copies the previous DC instead of transforming
+                // replicated edge pixels (jccoefct.c:292-312), which is what
+                // #314 got wrong.
+                let fast_cols: usize = if y_last_col_width == y_mcu_width {
+                    mcus_x
+                } else {
+                    mcus_x - 1
+                };
 
-                    for mcu_col in 0..mcus_x {
-                        let x0: usize = mcu_col * mcu_w;
-                        let cx0: usize = mcu_col * (mcu_w / 2);
+                if fast_cols > 0 {
+                    unsafe {
+                        // Reserve capacity for the columns this path will encode
+                        let (mut pb, mut fb, mut buf) = bit_writer.begin_block(3072 * fast_cols);
 
-                        // FDCT + quantize 6 blocks (4Y + Cb + Cr)
-                        let mut q: [[i16; 64]; 6] = [[0i16; 64]; 6];
-                        let y_ptr: *const u8 = y_buf.as_ptr().add(x0);
-                        crate::simd::x86_64::avx2_extract_fdct_quantize(
-                            y_ptr,
-                            padded_w,
-                            &luma_divisors,
-                            &mut q[0],
-                        );
-                        crate::simd::x86_64::avx2_extract_fdct_quantize(
-                            y_ptr.add(8),
-                            padded_w,
-                            &luma_divisors,
-                            &mut q[1],
-                        );
-                        crate::simd::x86_64::avx2_extract_fdct_quantize(
-                            y_ptr.add(8 * padded_w),
-                            padded_w,
-                            &luma_divisors,
-                            &mut q[2],
-                        );
-                        crate::simd::x86_64::avx2_extract_fdct_quantize(
-                            y_ptr.add(8 * padded_w + 8),
-                            padded_w,
-                            &luma_divisors,
-                            &mut q[3],
-                        );
-                        crate::simd::x86_64::avx2_extract_fdct_quantize(
-                            cb_half.as_ptr().add(cx0),
-                            half_w,
-                            &chroma_divisors,
-                            &mut q[4],
-                        );
-                        crate::simd::x86_64::avx2_extract_fdct_quantize(
-                            cr_half.as_ptr().add(cx0),
-                            half_w,
-                            &chroma_divisors,
-                            &mut q[5],
-                        );
+                        for mcu_col in 0..fast_cols {
+                            let x0: usize = mcu_col * mcu_w;
+                            let cx0: usize = mcu_col * (mcu_w / 2);
 
-                        // Huffman encode 6 blocks with row-hoisted state
-                        for block in q.iter().take(4) {
+                            // FDCT + quantize 6 blocks (4Y + Cb + Cr)
+                            let mut q: [[i16; 64]; 6] = [[0i16; 64]; 6];
+                            let y_ptr: *const u8 = y_buf.as_ptr().add(x0);
+                            crate::simd::x86_64::avx2_extract_fdct_quantize(
+                                y_ptr,
+                                padded_w,
+                                &luma_divisors,
+                                &mut q[0],
+                            );
+                            crate::simd::x86_64::avx2_extract_fdct_quantize(
+                                y_ptr.add(8),
+                                padded_w,
+                                &luma_divisors,
+                                &mut q[1],
+                            );
+                            crate::simd::x86_64::avx2_extract_fdct_quantize(
+                                y_ptr.add(8 * padded_w),
+                                padded_w,
+                                &luma_divisors,
+                                &mut q[2],
+                            );
+                            crate::simd::x86_64::avx2_extract_fdct_quantize(
+                                y_ptr.add(8 * padded_w + 8),
+                                padded_w,
+                                &luma_divisors,
+                                &mut q[3],
+                            );
+                            crate::simd::x86_64::avx2_extract_fdct_quantize(
+                                cb_half.as_ptr().add(cx0),
+                                half_w,
+                                &chroma_divisors,
+                                &mut q[4],
+                            );
+                            crate::simd::x86_64::avx2_extract_fdct_quantize(
+                                cr_half.as_ptr().add(cx0),
+                                half_w,
+                                &chroma_divisors,
+                                &mut q[5],
+                            );
+
+                            // Huffman encode 6 blocks with row-hoisted state
+                            for block in q.iter().take(4) {
+                                HuffmanEncoder::encode_block_hoisted(
+                                    &mut pb,
+                                    &mut fb,
+                                    &mut buf,
+                                    block,
+                                    &mut prev_dc_y,
+                                    &dc_luma_table,
+                                    &ac_luma_table,
+                                );
+                            }
                             HuffmanEncoder::encode_block_hoisted(
                                 &mut pb,
                                 &mut fb,
                                 &mut buf,
-                                block,
-                                &mut prev_dc_y,
-                                &dc_luma_table,
-                                &ac_luma_table,
+                                &q[4],
+                                &mut prev_dc_cb,
+                                &dc_chroma_table,
+                                &ac_chroma_table,
+                            );
+                            HuffmanEncoder::encode_block_hoisted(
+                                &mut pb,
+                                &mut fb,
+                                &mut buf,
+                                &q[5],
+                                &mut prev_dc_cr,
+                                &dc_chroma_table,
+                                &ac_chroma_table,
                             );
                         }
-                        HuffmanEncoder::encode_block_hoisted(
-                            &mut pb,
-                            &mut fb,
-                            &mut buf,
-                            &q[4],
-                            &mut prev_dc_cb,
-                            &dc_chroma_table,
-                            &ac_chroma_table,
-                        );
-                        HuffmanEncoder::encode_block_hoisted(
-                            &mut pb,
-                            &mut fb,
-                            &mut buf,
-                            &q[5],
-                            &mut prev_dc_cr,
-                            &dc_chroma_table,
-                            &ac_chroma_table,
-                        );
-                    }
 
-                    bit_writer.end_block(pb, fb, buf);
+                        bit_writer.end_block(pb, fb, buf);
+                    }
+                    // Only reachable with restarts disabled, but keep the counter
+                    // meaningful for every path.
+                    mcu_count += fast_cols as u32;
                 }
-                // Only reachable with restarts disabled, but keep the counter
-                // meaningful for every path.
-                mcu_count += mcus_x as u32;
-                continue; // skip generic MCU column loop below
+
+                if fast_cols == mcus_x {
+                    continue; // whole row handled; skip the generic loop
+                }
+                generic_start_col = fast_cols;
             }
 
-            // Generic path for non-420, edge MCU rows, restarts, or non-x86_64
-            for mcu_col in 0..mcus_x {
+            // Generic path for non-420, edge MCU rows, restarts, non-x86_64,
+            // and the trailing partial column left by the fast path above.
+            for mcu_col in generic_start_col..mcus_x {
                 maybe_emit_restart!();
 
                 let x0: usize = mcu_col * mcu_w;

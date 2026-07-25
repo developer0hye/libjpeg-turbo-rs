@@ -1,9 +1,9 @@
 //! Measures 4:2:0 encode throughput either side of the dummy-block boundary.
 //!
-//! Issue #314's fix narrows the x86_64 AVX2 4:2:0 row fast path so it no longer
-//! runs when the last MCU column needs dummy blocks (`ceil(width/8)` odd).
-//! Those widths now take the generic per-MCU path, so this quantifies what that
-//! costs, and how both sides compare against C.
+//! #314's fix excluded the x86_64 AVX2 4:2:0 row fast path wherever the last
+//! MCU column needs dummy blocks (`ceil(width/8)` odd), which cost 3.2-4.5%.
+//! #317 restored it for the *interior* columns, leaving only the trailing
+//! partial column on the generic path. This quantifies the residual gap.
 //!
 //! Widths are paired so each "odd" (fast path now disabled) case sits next to a
 //! near-identical "even" (fast path still active) control.
@@ -51,10 +51,12 @@ fn main() {
     for &(width, height) in cases {
         let pixels: Vec<u8> = synthetic_pixels(width, height);
         let blocks_across: usize = width.div_ceil(8);
-        let path: &str = if blocks_across % 2 == 0 {
-            "avx2-fast"
+        // Even: every column takes the fast path. Odd: all but the last one
+        // does, with the trailing partial column handled generically (#317).
+        let path: &str = if blocks_across.is_multiple_of(2) {
+            "all-fast"
         } else {
-            "generic"
+            "fast+tail"
         };
 
         // Warm up so the first timed run is not paying for page faults.
