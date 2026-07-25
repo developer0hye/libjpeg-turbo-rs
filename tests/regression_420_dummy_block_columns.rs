@@ -180,3 +180,107 @@ fn issue_314_odd_block_width_420_matches_cjpeg() {
         failures.join("\n")
     );
 }
+
+/// Issue #316: `compress_with_restart` / `compress_custom_quant` /
+/// `compress_custom_huffman` used a full-plane strategy that never implemented
+/// the dummy-block contract, so they diverged from `cjpeg` on 204 of 576 swept
+/// geometries — on every platform, unlike #314.
+///
+/// Fixed structurally by routing all four baseline entry points through the
+/// `CompressParams` core (P4-40) rather than patching each copy.
+#[test]
+fn issue_316_full_plane_variants_match_cjpeg_at_partial_mcus() {
+    let cjpeg = require_c_tool!("cjpeg");
+
+    // Chroma-subsampled modes only: 4:4:4 has no dummy blocks. Geometries mix
+    // `ceil(w/8)` and `ceil(h/8)` parities so both column and row dummies fire.
+    let subsamplings: &[(Subsampling, &str)] = &[
+        (Subsampling::S422, "2x1"),
+        (Subsampling::S420, "2x2"),
+        (Subsampling::S440, "1x2"),
+    ];
+    let geometries: &[(usize, usize)] = &[
+        (7, 8),
+        (8, 24),
+        (17, 17),
+        (23, 32),
+        (24, 15),
+        (33, 33),
+        (16, 16),
+        (48, 48),
+    ];
+
+    let mut failures: Vec<String> = Vec::new();
+
+    for &(subsampling, sample) in subsamplings {
+        for &(width, height) in geometries {
+            let pixels: Vec<u8> = synthetic_pixels(width, height);
+            let mut ppm: Vec<u8> = format!("P6\n{width} {height}\n255\n").into_bytes();
+            ppm.extend_from_slice(&pixels);
+
+            // restart_interval = 0: isolates the buffering strategy, since no
+            // RST markers are emitted and the stream should equal plain cjpeg.
+            let rust_no_restart: Vec<u8> = pipeline::compress_with_restart(
+                &pixels,
+                width,
+                height,
+                PixelFormat::Rgb,
+                50,
+                subsampling,
+                0,
+                DctMethod::IsLow,
+            )
+            .expect("restart-capable encode");
+            let c_no_restart: Vec<u8> = helpers::encode_with_c_cjpeg(
+                &cjpeg,
+                &ppm,
+                &["-quality", "50", "-sample", sample, "-dct", "int"],
+                &format!("issue316_{width}x{height}_{sample}"),
+            );
+            if rust_no_restart != c_no_restart {
+                failures.push(format!(
+                    "  ri=0 {width}x{height} {sample}: rust={} c={}",
+                    rust_no_restart.len(),
+                    c_no_restart.len()
+                ));
+            }
+
+            // A real restart interval. cjpeg's `B` suffix counts MCU blocks,
+            // which is the unit our restart_interval uses.
+            let rust_restart: Vec<u8> = pipeline::compress_with_restart(
+                &pixels,
+                width,
+                height,
+                PixelFormat::Rgb,
+                50,
+                subsampling,
+                3,
+                DctMethod::IsLow,
+            )
+            .expect("restart encode");
+            let c_restart: Vec<u8> = helpers::encode_with_c_cjpeg(
+                &cjpeg,
+                &ppm,
+                &[
+                    "-quality", "50", "-sample", sample, "-dct", "int", "-restart", "3B",
+                ],
+                &format!("issue316_rst_{width}x{height}_{sample}"),
+            );
+            if rust_restart != c_restart {
+                failures.push(format!(
+                    "  ri=3 {width}x{height} {sample}: rust={} c={}",
+                    rust_restart.len(),
+                    c_restart.len()
+                ));
+            }
+        }
+    }
+
+    assert!(
+        failures.is_empty(),
+        "full-plane variants diverged from cjpeg at {} of {} checks (issue #316):\n{}",
+        failures.len(),
+        subsamplings.len() * geometries.len() * 2,
+        failures.join("\n")
+    );
+}
