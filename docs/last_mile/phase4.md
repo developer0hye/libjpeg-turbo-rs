@@ -690,7 +690,7 @@ Measured (EPYC 9554, medians of 15 runs, 3 repeats, `examples/bench_encode_420_g
 
 **Acceptance criteria.** Throughput at `ceil(width/8)` odd within ~1% of the even-width case, with the 576-case sweep and the golden fixture unchanged.
 
-## P4-44. Encoder Byte-Parity Against `cjpeg` Is Unmeasured for `ifast` / `float` and for aarch64 — **OPEN**
+## P4-44. Encoder Byte-Parity Against `cjpeg` Is Unmeasured for `ifast` / `float` and for aarch64 — **PARTIAL: measured and `ifast` fixed; aarch64 leg outstanding**
 
 **Motivation.** Filed 2026-07-25 from PR #318 CI. The x86_64 encoder is now byte-identical to stock `cjpeg` on 576/576 swept geometries (P4-41, P4-42) — but only for `-dct int`. The `linux-aarch64 NEON` job failed the x86_64-pinned golden fixture with divergences clustered in `ifast` and `float`: at 16x16 BGR 4:2:0 q100, x86_64 emits 954 bytes and aarch64 955 (`float`), 944 vs 956 (`ifast`); at 4:2:2 q100 `ifast`, 1058 vs 1078. GitHub [#319](https://github.com/developer0hye/libjpeg-turbo-rs/issues/319).
 
@@ -703,6 +703,14 @@ P4-33 established the phenomenon (backend-dependent output, decodes pixel-identi
 1. A measured answer for each (backend x DCT method) pair against `cjpeg` — cheapest first: extend the sweep in `examples/probe_fused_vs_fullplane.rs` to `-dct fast` / `-dct float` and run it on x86_64, which settles (b) with no aarch64 hardware.
 2. The same sweep as a CI step on the `linux-aarch64 NEON` job, which already installs official libjpeg-turbo 3.1.4.1 and so has `cjpeg` available.
 3. Whatever byte-exactness the project actually guarantees stated in `docs/FEATURE_PARITY.md` and enforced per backend. Concluding "byte-exact for `islow`, pixel-accurate for `ifast`/`float`" is an acceptable outcome — the requirement is that it be a documented decision rather than an unexamined assumption.
+
+**Status (2026-07-26): measured, and it was not a documentation question.** Criterion 1 done on x86_64: sweeping `-dct` across 3456 cases showed `int` byte-exact everywhere, `float` diverging broadly, and `ifast` diverging for 4:4:4 / 4:2:2 / 4:2:0 while matching for grayscale and the 4-factor subsamplings — a pattern that tracks SIMD availability, not the transform.
+
+That led to **P4-50 / #330**: `ifast` was not merely non-byte-exact, it was *2.5x the error and 22% larger* than C's, which no tradeoff explains. Fixed; `int` and `ifast` are now both byte-identical to `cjpeg` across every subsampling and colourspace.
+
+`float` remains non-byte-exact by nature — floating-point operation ordering — but matches C's quality and size, with a measured max per-sample difference of 7. That is now a stated guarantee rather than an assumption, pinned by `float_is_pixel_equivalent_to_cjpeg`.
+
+**Remaining.** Criterion 2: the same sweep as a CI step on the `linux-aarch64 NEON` job.
 
 ## P4-45. `SSE2-only` CI Job Does Not Test the SSE2 Fallback — **OPEN**
 
@@ -812,6 +820,20 @@ Baseline was unaffected because it feeds planes already padded by `pad_chroma_pl
 
 **Status (2026-07-26): closed.** Byte-identical to `cjpeg -grayscale -smooth N` across 6 geometries x smoothing {0,1,25,50,100}, pinned by `tests/regression_grayscale_smoothing.rs`. Note the effect test starts at factor 2: C itself produces identical output for `-smooth 0` and `-smooth 1` on this content, because the weights (`memberscale = 16384 - factor * 80`, `jcsample.c:338`) round away — asserting an effect there would assert something C does not do. The golden fixture moved in exactly 736 of 20,160 cases, all `optimized|gray` with smoothing > 0.
 
+## P4-50. `DctMethod::IsFast` Was Both Lower Quality And Larger Than C's — **CLOSED 2026-07-26**
+
+**Motivation.** Found 2026-07-26 while measuring P4-44. GitHub [#330](https://github.com/developer0hye/libjpeg-turbo-rs/issues/330). On a 64x48 fixture at q75 4:2:0, decoding through `djpeg` and comparing to the source: ours had mean error **15.096** in **1567** bytes against C's **5.902** in **1285**. C's fast path is within noise of its own `int` path on both axes — that is the point of AA&N — so being worse on *both* is a defect, not a tradeoff.
+
+**Root cause.** The fused SIMD extract+FDCT+quantize kernels hardcode the **islow** transform, while `ifast` and `float` carry divisor tables scaled for their own transforms. Feeding islow coefficients to those divisors mis-scales every output by the AA&N factor — which is exactly the ratio observed in the coefficients (index 1: C 3 vs ours 2, C -8 vs ours -6; aanscale 22725/16384 = 1.387).
+
+Several call sites already guarded against this (`encode_single_block`, `encode_downsampled_chroma_block`) and several did not: `encode_mcu_{444,422,420}_x86_64`, `encode_mcu_420_half_chroma`, `fdct_quantize_block`, `fdct_quantize_chroma_h2v1`, and the AVX2 4:2:0 row path. Hence the selective symptom — grayscale and the 4-factor subsamplings take generic paths and matched C; 4:4:4 / 4:2:2 / 4:2:0 have SIMD shortcuts and did not.
+
+Ruled out along the way, each by direct measurement rather than inspection: `fdct_ifast_raw` is **bit-exact** with a fresh port of `jfdctfst.c` (0/64 differing on a test block); the quantization tables written to DQT are identical to C's; the divisor formula matches `jcdctmgr.c:308-317`; and `compute_reciprocal`'s `divisor <= 1` identity case matches C's.
+
+**Fix.** A single `may_use_islow_simd_kernel(fdct_quantize_fn)` helper, replacing four inline copies of the check and applied at the seven sites that lacked it.
+
+**Status (2026-07-26): closed.** `-dct fast` is now byte-identical to `cjpeg -dct fast` across all 8 subsamplings x both colourspaces (was 3/64 at 4:4:4, 4/64 at 4:2:2, 24/64 at 4:2:0), and its quality and size now match C's exactly (mean 5.902, 1285 bytes). Pinned by `tests/regression_dct_method_parity.rs`, which asserts byte-equality *and* that `fast` is never simultaneously worse and bigger than `int` — a byte test alone would not convey the severity. Golden fixture moved in 348 of 20,160 cases, all `compress` with `ifast` (236) or `float` (112); zero `islow`.
+
 ## Phase 4 Suggested Order
 
 1. ~~**P4-1** — export `jpeg_calc_jpeg_dimensions` and delete its missing-symbol allowlist entry.~~ **CLOSED 2026-05-10**.
@@ -853,7 +875,8 @@ Baseline was unaffected because it feeds planes already padded by `pad_chroma_pl
 37. ~~**P4-41** — AVX2 4:2:0 row fast path ignored the dummy-block contract (#314) and bypassed its own AVX2 capability check (#315).~~ **CLOSED 2026-07-25** — single `use_avx2_420` gate + `y_last_col_width == y_mcu_width` guard; fused path now 576/576 vs cjpeg.
 38. ~~**P4-42** — full-plane encode variants (restart / custom-quant / custom-Huffman) skip the dummy-block contract on every platform (#316).~~ **CLOSED 2026-07-25** — the P4-40 core made them shims; 576/576 vs cjpeg.
 39. **P4-43** — recover the ~3-4.5% the P4-41 correctness fix cost on `ceil(width/8)`-odd 4:2:0 widths (#317).
-40. **P4-44** — quantify encoder byte-parity vs `cjpeg` for `ifast`/`float` and for the aarch64 backend, then document what is actually guaranteed (#319).
+40. **P4-44** — quantify encoder byte-parity vs `cjpeg` for `ifast`/`float` and for the aarch64 backend, then document what is actually guaranteed (#319). **PARTIAL 2026-07-26** — measured on x86_64 and `ifast` fixed; aarch64 CI leg remains.
+46. ~~**P4-50** — `DctMethod::IsFast` both lower quality and larger than C's (#330).~~ **CLOSED 2026-07-26** — SIMD kernels gated on the DCT method.
 41. **P4-45** — make the `SSE2-only` CI job actually exercise the SSE2 fallback (QEMU/SDE); discharges #315's remaining criterion (#320).
 42. **P4-46** — make `Encoder`'s dispatch build one `CompressParams` so builder options stop dropping each other (#322). **PARTIAL 2026-07-26** — baseline paths done (22/29); progressive/arithmetic plumbing remains.
 45. ~~**P4-49** — `smoothing_factor` is a silent no-op for grayscale (#327).~~ **CLOSED 2026-07-26** — byte-exact vs `cjpeg -grayscale -smooth`.
