@@ -219,20 +219,27 @@ pub fn compress(
         // For 420 on x86_64: pre-allocate half-resolution chroma buffers.
         // After color conversion, we downsample full-res Cb/Cr into these compact
         // buffers so that FDCT reads from stride=half_w instead of stride=padded_w.
+        //
+        // Both the downsample below and the encode fast path further down call
+        // `#[target_feature(enable = "avx2")]` helpers, so a single capability
+        // flag gates every step. Deriving the fast path's guard from buffer
+        // emptiness instead would let a non-AVX2 x86_64 CPU reach AVX2
+        // intrinsics with never-downsampled (all-zero) chroma — issue #315.
         #[cfg(target_arch = "x86_64")]
-        let is_420: bool = subsampling == Subsampling::S420;
+        let use_avx2_420: bool =
+            subsampling == Subsampling::S420 && is_x86_feature_detected!("avx2");
         #[cfg(target_arch = "x86_64")]
         let half_w: usize = padded_w / 2;
         #[cfg(target_arch = "x86_64")]
         let half_h: usize = padded_h / 2;
         #[cfg(target_arch = "x86_64")]
-        let mut cb_half: Vec<u8> = if is_420 {
+        let mut cb_half: Vec<u8> = if use_avx2_420 {
             vec![0u8; half_w * half_h]
         } else {
             Vec::new()
         };
         #[cfg(target_arch = "x86_64")]
-        let mut cr_half: Vec<u8> = if is_420 {
+        let mut cr_half: Vec<u8> = if use_avx2_420 {
             vec![0u8; half_w * half_h]
         } else {
             Vec::new()
@@ -308,7 +315,7 @@ pub fn compress(
             // This allows FDCT to read from stride=half_w instead of fused
             // downsample+FDCT from stride=padded_w, improving cache locality.
             #[cfg(target_arch = "x86_64")]
-            if is_420 && is_x86_feature_detected!("avx2") {
+            if use_avx2_420 {
                 unsafe {
                     crate::simd::x86_64::avx2_downsample_h2v2_plane(
                         &cb_buf,
@@ -362,9 +369,19 @@ pub fn compress(
             // 420 fast path: row-level hoisted bit buffer + inline FDCT+Huffman.
             // One begin_block/end_block per MCU row (not per MCU), eliminating
             // ~120 ensure_capacity checks per row for 1920-wide images.
-            // Only for interior MCU rows (eff_row_height == y_mcu_height).
+            //
+            // It FDCTs every block of every MCU unconditionally, so it is only
+            // valid where no dummy blocks are needed: interior MCU rows
+            // (`eff_row_height == y_mcu_height`) *and* images whose last MCU
+            // column is full (`y_last_col_width == y_mcu_width`). C zeroes
+            // dummy blocks and copies the previous block's DC rather than
+            // transforming replicated edge pixels (jccoefct.c:292-312), so
+            // running this path over a partial last column produced output that
+            // diverged from cjpeg for every width with `ceil(width/8)` odd —
+            // issue #314. Partial geometries fall through to the generic path
+            // below, which handles dummies via `encode_color_mcu_with_dummies`.
             #[cfg(target_arch = "x86_64")]
-            if is_420 && !cb_half.is_empty() && eff_row_height == y_mcu_height {
+            if use_avx2_420 && eff_row_height == y_mcu_height && y_last_col_width == y_mcu_width {
                 unsafe {
                     // Reserve capacity for entire MCU row
                     let (mut pb, mut fb, mut buf) = bit_writer.begin_block(3072 * mcus_x);

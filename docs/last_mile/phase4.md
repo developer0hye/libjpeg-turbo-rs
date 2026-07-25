@@ -645,6 +645,45 @@ Five defects, four of them silent (`Ok(bytes)` with the option not applied):
 
 **Sequencing.** Criteria 1–3 first (byte-exact, low risk, unblocks P4-39). Criterion 4 is mechanical and can follow. Deliberately excluded: `crates/libjpeg-turbo-rs-capi/src/jpeglib.rs` is also large (9,242 lines) but is 164 flat `extern "C"` shims mirroring a C header — its size is inherent, not tangled, and it needs at most a split by API family.
 
+## P4-41. AVX2 4:2:0 Row Fast Path Ignored the Dummy-Block Contract and Skipped Its Own Capability Check — **CLOSED 2026-07-25**
+
+**Motivation.** Found 2026-07-25 while building the P4-40 characterization fixture, which showed `compress()` (fused) and `compress_with_restart()` (full-plane) disagreeing on 176 of 1440 RGB cases. A 576-case geometry sweep against stock `cjpeg` (widths x heights over `{7,8,15,16,17,23,24,31,32,33,48,64}` x 4 subsamplings, q50) scored fused 516/576 and full-plane 372/576 — so at most one could be right, and neither was fully. GitHub [#314](https://github.com/developer0hye/libjpeg-turbo-rs/issues/314) and [#315](https://github.com/developer0hye/libjpeg-turbo-rs/issues/315).
+
+**Root cause (two defects in one `if`).** `src/encode/pipeline.rs:373`:
+
+1. **#314 — missing dummy-column guard.** The fast path FDCTs every block of every MCU unconditionally. It guarded the last partial MCU *row* (`eff_row_height == y_mcu_height`) but had no guard for the last partial MCU *column*, so for any width with `ceil(width/8)` odd it transformed replicated edge pixels where C emits a zeroed dummy block carrying the previous block's DC (`jccoefct.c:292-312`). Affected ordinary photo sizes — 500x375, 1000x750, 1000x1000, 1080x1080 all diverged; files ran 0.7–0.9% larger than C's. Only 4:2:0; 4:4:4 / 4:2:2 / 4:4:0 were clean.
+2. **#315 — capability check bypassed.** The path gated on `!cb_half.is_empty()`, an allocation-shape proxy: `cb_half` was allocated whenever the subsampling was 4:2:0 but only *filled* under `is_x86_feature_detected!("avx2")`. On a non-AVX2 x86_64 CPU that reached `#[target_feature(enable = "avx2")]` helpers (undefined behaviour) with never-downsampled all-zero chroma.
+
+**Why it escaped.** Three independent reasons, each worth noting: (a) the fast path is x86_64+AVX2-only and the project was developed on aarch64, which always takes the generic path — the same platform-dependent drift class as P4-33; (b) the byte-exact encoder cross-check (`tests/cross_check_encoder_binary.rs:76-77`) used **only 48x48**, MCU-aligned at 4:2:0, so `ndummy == 0` and the bug was unreachable; (c) `assert_encoder_output_matches` (`:36-62`) falls back from byte comparison to a decoded-pixel comparison with `max_diff <= 1`, and dummy blocks lie outside the image and are cropped on decode — the pixel diff is 0, so that test could never have caught it at *any* size.
+
+**Fix.** A single `use_avx2_420` capability flag now gates the buffer allocation, the downsample and the encode fast path, so they cannot disagree; and the fast path additionally requires `y_last_col_width == y_mcu_width`. Partial geometries fall through to the generic path, which already handled dummies via `encode_color_mcu_with_dummies`.
+
+**Status (2026-07-25): closed.** The fused path now matches `cjpeg` on **576/576** swept geometries (was 516/576) and on all 24 real-world cases (500x375 … 1920x1080 x 4 subsamplings). Pinned by `tests/regression_420_dummy_block_columns.rs` — a `cjpeg` byte-exact check over 10 geometries plus 6 C-tool-free length+hash pins taken from `cjpeg`-verified output. Cost ~3.2–4.5% throughput on affected widths (medians of 15 runs x 3 repeats; recorded in `experiments/x86_64_pipeline.tsv`), tracked for recovery as [#317](https://github.com/developer0hye/libjpeg-turbo-rs/issues/317) / P4-43. Note #315's acceptance criterion 2 — a CI leg that masks AVX2 at the CPUID level — is **not** delivered here; the UB is removed by construction but remains untested on this hardware.
+
+## P4-42. Full-Plane Encode Variants Skip the Dummy-Block Contract on Every Platform — **OPEN**
+
+**Motivation.** Filed 2026-07-25 alongside P4-41. `compress_with_restart`, `compress_custom_quant` and `compress_custom_huffman` use full-plane `convert_to_ycbcr` and never implement C's dummy-block contract, so they diverge from `cjpeg` on **204 of 576** swept cases — unlike P4-41 this is **not** platform-gated. GitHub [#316](https://github.com/developer0hye/libjpeg-turbo-rs/issues/316).
+
+Divergences by subsampling: 4:2:0 → 108, 4:2:2 → 72, 4:4:0 → 24; 4:4:4 clean. The failing set is exactly C's `ndummy > 0` condition — at 4:2:2 it fails for width ∈ {7,8,17,23,24,33} (`ceil(w/8)` odd) and passes for {15,16,31,32,48,64} (even); at 4:4:0 it fails for height ∈ {8,24}. `restart_interval = 0` throughout, so the buffering strategy is the only variable.
+
+`Encoder` routes to these whenever a restart interval, custom quant tables or custom Huffman tables are requested (`src/api/encoder.rs:930-952`), so any such encode at a partial-MCU geometry is non-conformant.
+
+**Acceptance criteria.**
+
+1. Restart / custom-quant / custom-Huffman encodes byte-identical to the equivalent `cjpeg` invocation at partial-MCU geometries for 4:2:0, 4:2:2 and 4:4:0.
+2. Regression coverage over `ceil(width/8)` odd and `ceil(height/8)` odd, not only MCU-aligned sizes.
+3. Satisfied by routing every variant through one code path (the P4-40 `CompressParams` core) rather than by patching dummy-block logic into each copy.
+
+## P4-43. Recover the AVX2 4:2:0 Fast Path for Interior MCU Columns — **OPEN**
+
+**Motivation.** The P4-41 fix disables the fast path for the whole image when the last MCU column needs dummy blocks (`ceil(width/8)` odd — roughly half of all widths), costing ~3.2–4.5%. GitHub [#317](https://github.com/developer0hye/libjpeg-turbo-rs/issues/317).
+
+Measured (EPYC 9554, medians of 15 runs, 3 repeats, `examples/bench_encode_420_geometry.rs`), width pairs 8px apart so only `ceil(w/8)` parity changes: 1008x750 fast 433.1 MP/s vs 1000x750 generic 413.6 (-4.5%); 1920x1080 fast 432.3 vs 1928x1080 generic 416.7 (-3.6%); 3840x2160 fast 432.6 vs 3848x2160 generic 418.7 (-3.2%).
+
+**Why deferred.** The fast path hoists one `begin_block`/`end_block` pair across the whole MCU row and writes through a raw `(pb, fb, buf)` triple, while the dummy path writes through `bit_writer`; splitting a row between them is not a local change. Correctness shipped first.
+
+**Acceptance criteria.** Throughput at `ceil(width/8)` odd within ~1% of the even-width case, with the 576-case sweep and the golden fixture unchanged.
+
 ## Phase 4 Suggested Order
 
 1. ~~**P4-1** — export `jpeg_calc_jpeg_dimensions` and delete its missing-symbol allowlist entry.~~ **CLOSED 2026-05-10**.
@@ -683,3 +722,6 @@ Five defects, four of them silent (`Ok(bytes)` with the option not applied):
 34. ~~**P4-38** — lossless color output skipped the point transform and wrapped at the wrong modulus.~~ **CLOSED 2026-07-24** — 0xFFFF undifference wrap + `<< Al` truncating output scaler; byte-exact vs djpeg.
 35. **P4-39** — CMYK encode path silently drops restart / custom quant / custom Huffman options and rejects optimize+smoothing (GitHub #313). Blocked on nothing; P4-40's core makes it small.
 36. **P4-40** — collapse the ten copy-pasted `compress_*` variants onto a single `CompressParams` core (byte-exact), then split `src/encode/pipeline.rs` by mode.
+37. ~~**P4-41** — AVX2 4:2:0 row fast path ignored the dummy-block contract (#314) and bypassed its own AVX2 capability check (#315).~~ **CLOSED 2026-07-25** — single `use_avx2_420` gate + `y_last_col_width == y_mcu_width` guard; fused path now 576/576 vs cjpeg.
+38. **P4-42** — full-plane encode variants (restart / custom-quant / custom-Huffman) skip the dummy-block contract on every platform (#316). Closed by the P4-40 core.
+39. **P4-43** — recover the ~3-4.5% the P4-41 correctness fix cost on `ceil(width/8)`-odd 4:2:0 widths (#317).
