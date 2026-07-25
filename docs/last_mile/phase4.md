@@ -748,7 +748,7 @@ Scoped to tests that do not subprocess the C tools, since `qemu-user` intercepts
 
 The old job is renamed `Build (linux-x86_64, AVX2 disabled at compile time)` with a comment stating plainly what it does and does not cover. This also discharges #315's outstanding acceptance criterion 2.
 
-## P4-46. `Encoder` Silently Drops Builder Options When Combined — **PARTIAL: baseline paths fixed; progressive/arithmetic still take no custom tables or smoothing**
+## P4-46. `Encoder` Silently Drops Builder Options When Combined — **CLOSED 2026-07-26**
 
 **Motivation.** Filed 2026-07-25 while deciding what a README example for `CompressParams` should say. GitHub [#322](https://github.com/developer0hye/libjpeg-turbo-rs/issues/322). Unlike P4-39 this is **not** CMYK-specific — it hits ordinary RGB input through the public builder.
 
@@ -773,7 +773,13 @@ One entry was reclassified `test-limit` rather than fixed: `gray|independence|dc
 
 Fixing this also surfaced **P4-49 / #327** — `smoothing_factor` was a silent no-op for grayscale. It had been masked: grayscale + smoothing previously routed through the optimized path whose optimal tables changed the bytes, so smoothing appeared to work while contributing nothing.
 
-**Remaining.** The progressive and arithmetic arms still accept neither custom quant tables, custom Huffman tables, nor smoothing — 10 violations. Each needs its own plumbing (`compress_progressive_with_scans`, `compress_arithmetic*`) rather than the shared baseline core, so it is tracked separately from the closed baseline work.
+**Status (2026-07-26): closed.** The remaining 10 are resolved three ways, each matching what the option can actually mean:
+
+- **Custom quantization tables now reach progressive and arithmetic** (4 violations). `compress_progressive_with_scans`, `compress_arithmetic` and `compress_arithmetic_progressive` take an `Option<&[Option<[u16; 64]>; 4]>`, resolved through a shared `resolve_quant_tables` helper that replaced four duplicated copies of the same match.
+- **Smoothing combined with progressive / arithmetic / lossless now returns an error** (4 violations) instead of being accepted and dropped. It needs the full-plane buffering only the baseline optimized path provides; those paths downsample per block from unpadded planes. This is acceptance criterion 4 — a visible failure beats a silent one.
+- **Custom Huffman tables with progressive are reclassified `by-design`** (2 violations). A progressive scan covers one coefficient band, so tables are derived per scan from that scan's own statistics; a single supplied pair cannot express them. C behaves identically (`jcmaster.c:770-774` forces `optimize_coding` for progressive when tables are absent, and `cjpeg -progressive` always optimizes).
+
+Every entry left in the matrix's allowlist is now `by-design` — zero outstanding drops.
 
 ## P4-47. Progressive Encoding Diverges From `cjpeg` At Every Even Height Not A Multiple Of 16 — **CLOSED 2026-07-26**
 
@@ -898,7 +904,7 @@ Ruled out along the way, each by direct measurement rather than inspection: `fdc
 40. **P4-44** — quantify encoder byte-parity vs `cjpeg` for `ifast`/`float` and for the aarch64 backend, then document what is actually guaranteed (#319). **PARTIAL 2026-07-26** — measured on x86_64 and `ifast` fixed; aarch64 CI leg remains.
 46. ~~**P4-50** — `DctMethod::IsFast` both lower quality and larger than C's (#330).~~ **CLOSED 2026-07-26** — SIMD kernels gated on the DCT method.
 41. **P4-45** — make the `SSE2-only` CI job actually exercise the SSE2 fallback (QEMU/SDE); discharges #315's remaining criterion (#320).
-42. **P4-46** — make `Encoder`'s dispatch build one `CompressParams` so builder options stop dropping each other (#322). **PARTIAL 2026-07-26** — baseline paths done (22/29); progressive/arithmetic plumbing remains.
+42. ~~**P4-46** — make `Encoder`'s dispatch build one `CompressParams` so builder options stop dropping each other (#322).~~ **CLOSED 2026-07-26** — all 29 resolved: 26 fixed, 3 classes reclassified by-design with reasons.
 45. ~~**P4-49** — `smoothing_factor` is a silent no-op for grayscale (#327).~~ **CLOSED 2026-07-26** — byte-exact vs `cjpeg -grayscale -smooth`.
 43. ~~**P4-47** — progressive 4:2:0/4:4:0 diverges from `cjpeg` at every even height not a multiple of 16, including 1920x1080 (#324).~~ **CLOSED 2026-07-26** — chroma row-group replication; 4032/4032 vs cjpeg.
 44. **P4-48** — close the mutation-testing blind spots in `api/encoder.rs`, then shard `encode/pipeline.rs` (#325). **PARTIAL 2026-07-26** — encoder.rs closed (81/81 caught); pipeline.rs unsampled.

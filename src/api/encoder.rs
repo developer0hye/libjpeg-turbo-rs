@@ -758,6 +758,28 @@ impl<'a> Encoder<'a> {
             || self.has_custom_quant_tables()
             || scaled_quant_could_exceed_255;
 
+        // Smoothing needs the full-plane buffering that only the baseline
+        // optimized path provides; the progressive, arithmetic and lossless
+        // paths downsample per block from unpadded planes and have no
+        // equivalent. Rather than accept the option and drop it — which is
+        // what used to happen, and is the whole subject of #322 — say so.
+        if self.smoothing_factor > 0 && (self.progressive || self.arithmetic || self.lossless) {
+            return Err(crate::common::error::JpegError::Unsupported(
+                "smoothing_factor is not supported with progressive, arithmetic \
+                 or lossless encoding; it requires the full-plane path used by \
+                 baseline encodes"
+                    .to_string(),
+            ));
+        }
+
+        // Resolved once so every arm can pass it. Only `Some` when the builder
+        // actually needs non-default tables, so the default path is unchanged.
+        let progressive_quant_tables: Option<[Option<[u16; 64]>; 4]> = if needs_custom_quant {
+            Some(self.build_quant_tables(quality))
+        } else {
+            None
+        };
+
         // Map a 3-component custom sampling factor list to a standard
         // YCbCr `Subsampling` variant when one matches. This lets
         // `Encoder::sampling_factors([(h,v),(1,1),(1,1)])` route through the
@@ -833,6 +855,8 @@ impl<'a> Encoder<'a> {
                 restart_interval,
             )?
         } else if self.arithmetic && self.progressive {
+            // Custom quantization tables reach these paths too; they used to be
+            // discarded because only the baseline arms could carry them (#322).
             encoder::compress_arithmetic_progressive(
                 effective_pixels,
                 self.width,
@@ -843,6 +867,7 @@ impl<'a> Encoder<'a> {
                 self.dct_method,
                 restart_interval,
                 restart_in_rows,
+                progressive_quant_tables.as_ref(),
             )?
         } else if self.arithmetic {
             encoder::compress_arithmetic(
@@ -854,6 +879,7 @@ impl<'a> Encoder<'a> {
                 effective_subsampling,
                 self.dct_method,
                 restart_interval,
+                progressive_quant_tables.as_ref(),
             )?
         } else if self.progressive {
             if let Some(ref script) = self.scan_script {
@@ -868,6 +894,7 @@ impl<'a> Encoder<'a> {
                     self.dct_method,
                     restart_interval,
                     restart_in_rows,
+                    progressive_quant_tables.as_ref(),
                 )?
             } else {
                 encoder::compress_progressive_with_restart(
@@ -880,6 +907,7 @@ impl<'a> Encoder<'a> {
                     self.dct_method,
                     restart_interval,
                     restart_in_rows,
+                    progressive_quant_tables.as_ref(),
                 )?
             }
         } else {
