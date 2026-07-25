@@ -326,7 +326,8 @@ fn serialize(results: &BTreeMap<String, String>) -> String {
 /// docs. Other backends emit different but equally valid entropy codings
 /// (P4-33), so comparing them against x86_64 bytes would fail for reasons that
 /// have nothing to do with the change under test.
-const IS_CANONICAL_PLATFORM: bool = cfg!(target_arch = "x86_64");
+const IS_CANONICAL_PLATFORM: bool =
+    cfg!(target_arch = "x86_64") || std::option_env!("GOLDEN_ALL_PLATFORMS").is_some();
 
 #[test]
 fn compress_variants_are_byte_identical_to_golden() {
