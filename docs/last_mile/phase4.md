@@ -712,7 +712,7 @@ That led to **P4-50 / #330**: `ifast` was not merely non-byte-exact, it was *2.5
 
 **Remaining.** Criterion 2: the same sweep as a CI step on the `linux-aarch64 NEON` job.
 
-## P4-45. `SSE2-only` CI Job Does Not Test the SSE2 Fallback — **OPEN**
+## P4-45. `SSE2-only` CI Job Does Not Test the SSE2 Fallback — **CLOSED 2026-07-26**
 
 **Motivation.** Filed 2026-07-25 while looking for a way to verify P4-41/#315 on a non-AVX2 CPU. GitHub [#320](https://github.com/developer0hye/libjpeg-turbo-rs/issues/320).
 
@@ -726,7 +726,13 @@ That led to **P4-50 / #330**: `ifast` was not merely non-byte-exact, it was *2.5
 2. Full suite green under it. This also discharges #315's outstanding acceptance criterion 2.
 3. The existing compile-time job renamed to say it is a build check.
 
-**Why deferred.** Not blocking: it is CI coverage, not a product defect, and the P4-41 fix itself is already shipped and verified on AVX2 hardware. Local reproduction needs `qemu-user`, which this box cannot install (no passwordless sudo).
+**Status (2026-07-26): closed.** A new `Test (linux-x86_64 no-AVX2, emulated)` job runs the SIMD-sensitive tests under `qemu-x86_64 -cpu Nehalem`, a CPU model predating AVX entirely, so CPUID genuinely reports no AVX2 and the fallback kernels execute.
+
+The leg is **self-verifying**: `EXPECT_NO_AVX2=1` makes `tests/simd_dispatch_capability.rs` assert AVX2 really is masked. Without that, an emulation change could silently stop masking and the job would pass while testing the AVX2 path — reproducing exactly the false confidence being fixed. Verified in both directions locally: passes normally, fails with a pointed message when `EXPECT_NO_AVX2=1` is set on an AVX2 machine.
+
+Scoped to tests that do not subprocess the C tools, since `qemu-user` intercepts `execve` and running native `cjpeg`/`djpeg` from an emulated process is not like-for-like. It does include the golden fixture, which asserts the fallback produces byte-identical output to the AVX2 path. The C cross-checks run natively in the other legs.
+
+The old job is renamed `Build (linux-x86_64, AVX2 disabled at compile time)` with a comment stating plainly what it does and does not cover. This also discharges #315's outstanding acceptance criterion 2.
 
 ## P4-46. `Encoder` Silently Drops Builder Options When Combined — **PARTIAL: baseline paths fixed; progressive/arithmetic still take no custom tables or smoothing**
 
