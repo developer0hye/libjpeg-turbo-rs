@@ -38,6 +38,7 @@ jobs:
         run: cargo test --tests
         timeout-minutes: 45
 
+
   # Default x86_64 Linux job with AVX2 explicitly enabled so the AVX2
   # kernels are compiled and exercised. GitHub-hosted ubuntu-24.04
   # runners expose AVX2 in their CPU features.
