@@ -77,27 +77,191 @@ fn select_bgra_to_ycbcr_fn() -> ColorConvertRowFn {
     color::bgra_to_ycbcr_row_scalar
 }
 
-/// Compress raw pixel data into a JPEG byte stream.
+/// The full option set for a single-pass baseline encode.
 ///
-/// # Arguments
-/// * `pixels` - Raw pixel data in the format specified by `pixel_format`
-/// * `width` - Image width in pixels
-/// * `height` - Image height in pixels
-/// * `pixel_format` - Pixel format of the input data
-/// * `quality` - JPEG quality factor (1-100, where 100 is best quality)
-/// * `subsampling` - Chroma subsampling mode
+/// This exists so that the baseline `compress_*` entry points are thin shims
+/// over one implementation instead of near-copies of it. Historically each
+/// variant carried only the options it named — `compress_with_restart` could
+/// not express custom tables, `compress_custom_quant` could not express a
+/// restart interval — so a fix or an optimization landed in whichever copy the
+/// author happened to be editing. That produced real divergence: the
+/// dummy-block contract was implemented in one branch and not the others
+/// (#316), and CMYK silently discarded every option a variant could not pass
+/// on (#313).
 ///
-/// # Returns
-/// A `Vec<u8>` containing the complete JPEG file data.
-pub fn compress(
-    pixels: &[u8],
-    width: usize,
-    height: usize,
-    pixel_format: PixelFormat,
-    quality: u8,
-    subsampling: Subsampling,
-    dct_method: DctMethod,
-) -> Result<Vec<u8>> {
+/// Options that are `None` / zero mean "not requested" and select the JPEG
+/// default, so adding a field does not change any existing caller's output.
+pub struct CompressParams<'a> {
+    /// Raw pixel data in the format given by `pixel_format`.
+    pub pixels: &'a [u8],
+    pub width: usize,
+    pub height: usize,
+    pub pixel_format: PixelFormat,
+    /// Quality factor 1-100. Ignored for components whose quantization table
+    /// is supplied through `custom_quant`.
+    pub quality: u8,
+    pub subsampling: Subsampling,
+    pub dct_method: DctMethod,
+    /// MCUs between RST markers; 0 emits no DRI marker and no restarts.
+    pub restart_interval: u16,
+    /// Per-slot quantization tables. Slot 0 overrides luma, slot 1 chroma;
+    /// unset slots fall back to the quality-scaled Annex K tables.
+    pub custom_quant: Option<&'a [Option<[u16; 64]>; 4]>,
+    /// Per-slot DC Huffman tables, same slot convention as `custom_quant`.
+    pub custom_dc_huffman: Option<&'a [Option<HuffmanTableDef>; 4]>,
+    /// Per-slot AC Huffman tables, same slot convention as `custom_quant`.
+    pub custom_ac_huffman: Option<&'a [Option<HuffmanTableDef>; 4]>,
+}
+
+impl<'a> CompressParams<'a> {
+    /// Construct with every optional knob at its JPEG default.
+    pub fn new(
+        pixels: &'a [u8],
+        width: usize,
+        height: usize,
+        pixel_format: PixelFormat,
+        quality: u8,
+        subsampling: Subsampling,
+    ) -> Self {
+        Self {
+            pixels,
+            width,
+            height,
+            pixel_format,
+            quality,
+            subsampling,
+            dct_method: DctMethod::IsLow,
+            restart_interval: 0,
+            custom_quant: None,
+            custom_dc_huffman: None,
+            custom_ac_huffman: None,
+        }
+    }
+
+    pub fn dct_method(mut self, dct_method: DctMethod) -> Self {
+        self.dct_method = dct_method;
+        self
+    }
+
+    pub fn restart_interval(mut self, restart_interval: u16) -> Self {
+        self.restart_interval = restart_interval;
+        self
+    }
+
+    pub fn custom_quant(mut self, custom_quant: &'a [Option<[u16; 64]>; 4]) -> Self {
+        self.custom_quant = Some(custom_quant);
+        self
+    }
+
+    pub fn custom_huffman(
+        mut self,
+        dc: &'a [Option<HuffmanTableDef>; 4],
+        ac: &'a [Option<HuffmanTableDef>; 4],
+    ) -> Self {
+        self.custom_dc_huffman = Some(dc);
+        self.custom_ac_huffman = Some(ac);
+        self
+    }
+}
+
+/// Resolved Huffman tables: the encoding tables plus the exact bits/values that
+/// must be written into the DHT markers, so the two can never disagree.
+struct ResolvedHuffman {
+    dc_luma_bits: [u8; 17],
+    dc_luma_values: Vec<u8>,
+    ac_luma_bits: [u8; 17],
+    ac_luma_values: Vec<u8>,
+    dc_chroma_bits: [u8; 17],
+    dc_chroma_values: Vec<u8>,
+    ac_chroma_bits: [u8; 17],
+    ac_chroma_values: Vec<u8>,
+    dc_luma: HuffTable,
+    ac_luma: HuffTable,
+    dc_chroma: HuffTable,
+    ac_chroma: HuffTable,
+}
+
+impl ResolvedHuffman {
+    /// Custom slot 0 overrides luma, slot 1 chroma; unset slots use Annex K.
+    fn resolve(
+        custom_dc: Option<&[Option<HuffmanTableDef>; 4]>,
+        custom_ac: Option<&[Option<HuffmanTableDef>; 4]>,
+    ) -> Self {
+        fn pick(
+            custom: Option<&[Option<HuffmanTableDef>; 4]>,
+            slot: usize,
+            default_bits: &[u8; 17],
+            default_values: &[u8],
+        ) -> ([u8; 17], Vec<u8>) {
+            match custom.and_then(|tables| tables[slot].as_ref()) {
+                Some(table) => (table.bits, table.values.clone()),
+                None => (*default_bits, default_values.to_vec()),
+            }
+        }
+
+        let (dc_luma_bits, dc_luma_values) = pick(
+            custom_dc,
+            0,
+            &tables::DC_LUMINANCE_BITS,
+            &tables::DC_LUMINANCE_VALUES,
+        );
+        let (ac_luma_bits, ac_luma_values) = pick(
+            custom_ac,
+            0,
+            &tables::AC_LUMINANCE_BITS,
+            &tables::AC_LUMINANCE_VALUES,
+        );
+        let (dc_chroma_bits, dc_chroma_values) = pick(
+            custom_dc,
+            1,
+            &tables::DC_CHROMINANCE_BITS,
+            &tables::DC_CHROMINANCE_VALUES,
+        );
+        let (ac_chroma_bits, ac_chroma_values) = pick(
+            custom_ac,
+            1,
+            &tables::AC_CHROMINANCE_BITS,
+            &tables::AC_CHROMINANCE_VALUES,
+        );
+
+        Self {
+            dc_luma: build_huff_table(&dc_luma_bits, &dc_luma_values),
+            ac_luma: build_huff_table(&ac_luma_bits, &ac_luma_values),
+            dc_chroma: build_huff_table(&dc_chroma_bits, &dc_chroma_values),
+            ac_chroma: build_huff_table(&ac_chroma_bits, &ac_chroma_values),
+            dc_luma_bits,
+            dc_luma_values,
+            ac_luma_bits,
+            ac_luma_values,
+            dc_chroma_bits,
+            dc_chroma_values,
+            ac_chroma_bits,
+            ac_chroma_values,
+        }
+    }
+}
+
+/// Single-pass baseline encode — the one implementation behind `compress`,
+/// `compress_with_restart`, `compress_custom_quant` and
+/// `compress_custom_huffman`.
+///
+/// Two-pass optimized-Huffman encoding (`compress_optimized`) is a genuinely
+/// different algorithm and still lives separately.
+pub fn compress_with_params(params: &CompressParams<'_>) -> Result<Vec<u8>> {
+    let CompressParams {
+        pixels,
+        width,
+        height,
+        pixel_format,
+        quality,
+        subsampling,
+        dct_method,
+        restart_interval,
+        custom_quant,
+        custom_dc_huffman,
+        custom_ac_huffman,
+    } = *params;
+
     // Validate inputs
     if width == 0 || height == 0 {
         return Err(JpegError::CorruptData(
@@ -120,17 +284,28 @@ pub fn compress(
         });
     }
 
-    // CMYK: 4-component path, no color conversion (ignores dct_method for now)
+    // CMYK: 4-component path, no color conversion.
+    //
+    // NOTE(#313): `compress_cmyk` cannot express a restart interval, custom
+    // tables or a DCT method, so all of those are silently dropped here. That
+    // is pre-existing behaviour, deliberately preserved by this refactor —
+    // changing it moves output bytes and needs its own C cross-validation.
+    // Centralizing the drop in one place is what makes #313 a small fix.
     if pixel_format == PixelFormat::Cmyk {
         return compress_cmyk(pixels, width, height, quality, subsampling);
     }
 
     let is_grayscale = pixel_format == PixelFormat::Grayscale;
 
-    // Generate scaled quantization tables (for DQT markers)
-    let luma_quant = tables::quality_scale_quant_table(&tables::STD_LUMINANCE_QUANT_TABLE, quality);
-    let chroma_quant =
-        tables::quality_scale_quant_table(&tables::STD_CHROMINANCE_QUANT_TABLE, quality);
+    // Quantization tables: a custom slot wins, otherwise scale Annex K by quality.
+    let luma_quant: [u16; 64] = match custom_quant.and_then(|tables| tables[0]) {
+        Some(table) => table,
+        None => tables::quality_scale_quant_table(&tables::STD_LUMINANCE_QUANT_TABLE, quality),
+    };
+    let chroma_quant: [u16; 64] = match custom_quant.and_then(|tables| tables[1]) {
+        Some(table) => table,
+        None => tables::quality_scale_quant_table(&tables::STD_CHROMINANCE_QUANT_TABLE, quality),
+    };
 
     // Divisor tables scale quant values for the chosen FDCT method.
     // IsLow: multiply by 8 (islow leaves factor-of-8 in output).
@@ -146,13 +321,23 @@ pub fn compress(
         scale_quant_for_fdct(&chroma_quant)
     };
 
-    // Build Huffman tables
-    let dc_luma_table = build_huff_table(&tables::DC_LUMINANCE_BITS, &tables::DC_LUMINANCE_VALUES);
-    let ac_luma_table = build_huff_table(&tables::AC_LUMINANCE_BITS, &tables::AC_LUMINANCE_VALUES);
-    let dc_chroma_table =
-        build_huff_table(&tables::DC_CHROMINANCE_BITS, &tables::DC_CHROMINANCE_VALUES);
-    let ac_chroma_table =
-        build_huff_table(&tables::AC_CHROMINANCE_BITS, &tables::AC_CHROMINANCE_VALUES);
+    // Huffman tables: custom slots win, otherwise Annex K. Destructured so the
+    // encoding tables keep the names the MCU loops already use, and so the
+    // bits/values that go into the DHT markers travel with them.
+    let ResolvedHuffman {
+        dc_luma: dc_luma_table,
+        ac_luma: ac_luma_table,
+        dc_chroma: dc_chroma_table,
+        ac_chroma: ac_chroma_table,
+        dc_luma_bits,
+        dc_luma_values,
+        ac_luma_bits,
+        ac_luma_values,
+        dc_chroma_bits,
+        dc_chroma_values,
+        ac_chroma_bits,
+        ac_chroma_values,
+    } = ResolvedHuffman::resolve(custom_dc_huffman, custom_ac_huffman);
 
     // SIMD dispatch — used for both color conversion and FDCT+quantize
     let enc_simd = crate::simd::detect_encoder();
@@ -188,6 +373,30 @@ pub fn compress(
     let mut prev_dc_y: i16 = 0;
     let mut prev_dc_cb: i16 = 0;
     let mut prev_dc_cr: i16 = 0;
+
+    // Restart state, shared by both encode strategies below. `mcu_count` runs
+    // across MCU rows, so a restart can fall anywhere inside a row.
+    let restart_mcu_interval: u32 = restart_interval as u32;
+    let mut mcu_count: u32 = 0;
+    let mut restart_marker_index: u8 = 0;
+
+    /// Emit an RST marker and reset the DC predictors when the MCU index lands
+    /// on an interval boundary. Never fires before the first MCU.
+    macro_rules! maybe_emit_restart {
+        () => {
+            if restart_mcu_interval > 0
+                && mcu_count > 0
+                && mcu_count.is_multiple_of(restart_mcu_interval)
+            {
+                bit_writer.flush_restart();
+                bit_writer.write_restart_marker(restart_marker_index);
+                restart_marker_index = restart_marker_index.wrapping_add(1);
+                prev_dc_y = 0;
+                prev_dc_cb = 0;
+                prev_dc_cr = 0;
+            }
+        };
+    }
 
     // Single-pass fused approach: convert MCU rows on-the-fly instead
     // of pre-allocating full-size planes. Keeps data in L1/L2 cache between
@@ -381,7 +590,14 @@ pub fn compress(
             // issue #314. Partial geometries fall through to the generic path
             // below, which handles dummies via `encode_color_mcu_with_dummies`.
             #[cfg(target_arch = "x86_64")]
-            if use_avx2_420 && eff_row_height == y_mcu_height && y_last_col_width == y_mcu_width {
+            // Restarts are excluded because this path hoists one bit-buffer
+            // region across the whole MCU row; an RST marker mid-row would have
+            // to break out of it. Restart encodes take the generic path below.
+            if use_avx2_420
+                && restart_mcu_interval == 0
+                && eff_row_height == y_mcu_height
+                && y_last_col_width == y_mcu_width
+            {
                 unsafe {
                     // Reserve capacity for entire MCU row
                     let (mut pb, mut fb, mut buf) = bit_writer.begin_block(3072 * mcus_x);
@@ -464,11 +680,16 @@ pub fn compress(
 
                     bit_writer.end_block(pb, fb, buf);
                 }
+                // Only reachable with restarts disabled, but keep the counter
+                // meaningful for every path.
+                mcu_count += mcus_x as u32;
                 continue; // skip generic MCU column loop below
             }
 
-            // Generic path for non-420, edge MCU rows, or non-x86_64
+            // Generic path for non-420, edge MCU rows, restarts, or non-x86_64
             for mcu_col in 0..mcus_x {
+                maybe_emit_restart!();
+
                 let x0: usize = mcu_col * mcu_w;
                 let is_last_mcu_col: bool = mcu_col == mcus_x - 1;
                 let eff_col_width: usize = if is_last_mcu_col {
@@ -527,6 +748,8 @@ pub fn compress(
                         fdct_quantize_fn,
                     );
                 }
+
+                mcu_count += 1;
             }
         }
     } else {
@@ -638,6 +861,8 @@ pub fn compress(
 
         for mcu_row in 0..mcus_y {
             for mcu_col in 0..mcus_x {
+                maybe_emit_restart!();
+
                 let x0: usize = mcu_col * mcu_w;
                 let y0: usize = mcu_row * mcu_h;
 
@@ -678,6 +903,8 @@ pub fn compress(
                         fdct_quantize_fn,
                     );
                 }
+
+                mcu_count += 1;
             }
         }
     }
@@ -696,10 +923,20 @@ pub fn compress(
         marker_writer::write_dqt(&mut output, 1, &chroma_quant);
     }
 
-    // Frame header
+    // Frame header. A quantization value above 255 needs 16-bit DQT entries,
+    // which baseline (SOF0) forbids, so those streams are extended sequential
+    // (SOF1). Only reachable through custom quant tables — the quality-scaled
+    // Annex K tables clamp at 255.
+    let needs_sof1: bool = luma_quant.iter().any(|&value| value > 255)
+        || (!is_grayscale && chroma_quant.iter().any(|&value| value > 255));
+    let write_frame_header = if needs_sof1 {
+        marker_writer::write_sof1
+    } else {
+        marker_writer::write_sof0
+    };
     if is_grayscale {
         let components = vec![(1, 1, 1, 0)];
-        marker_writer::write_sof0(&mut output, width as u16, height as u16, &components);
+        write_frame_header(&mut output, width as u16, height as u16, &components);
     } else {
         let (h_samp, v_samp) = subsampling.sampling_factors();
         let components = vec![
@@ -707,39 +944,20 @@ pub fn compress(
             (2, 1, 1, 1),           // Cb
             (3, 1, 1, 1),           // Cr
         ];
-        marker_writer::write_sof0(&mut output, width as u16, height as u16, &components);
+        write_frame_header(&mut output, width as u16, height as u16, &components);
     }
 
-    // Huffman tables
-    marker_writer::write_dht(
-        &mut output,
-        0,
-        0,
-        &tables::DC_LUMINANCE_BITS,
-        &tables::DC_LUMINANCE_VALUES,
-    );
-    marker_writer::write_dht(
-        &mut output,
-        1,
-        0,
-        &tables::AC_LUMINANCE_BITS,
-        &tables::AC_LUMINANCE_VALUES,
-    );
+    // Huffman tables — the same bits/values the encoding tables were built from.
+    marker_writer::write_dht(&mut output, 0, 0, &dc_luma_bits, &dc_luma_values);
+    marker_writer::write_dht(&mut output, 1, 0, &ac_luma_bits, &ac_luma_values);
     if !is_grayscale {
-        marker_writer::write_dht(
-            &mut output,
-            0,
-            1,
-            &tables::DC_CHROMINANCE_BITS,
-            &tables::DC_CHROMINANCE_VALUES,
-        );
-        marker_writer::write_dht(
-            &mut output,
-            1,
-            1,
-            &tables::AC_CHROMINANCE_BITS,
-            &tables::AC_CHROMINANCE_VALUES,
-        );
+        marker_writer::write_dht(&mut output, 0, 1, &dc_chroma_bits, &dc_chroma_values);
+        marker_writer::write_dht(&mut output, 1, 1, &ac_chroma_bits, &ac_chroma_values);
+    }
+
+    // Restart interval. Omitted entirely when zero, matching C.
+    if restart_interval > 0 {
+        marker_writer::write_dri(&mut output, restart_interval);
     }
 
     // Scan header
@@ -761,6 +979,34 @@ pub fn compress(
     marker_writer::write_eoi(&mut output);
 
     Ok(output)
+}
+
+/// Compress raw pixel data into a JPEG byte stream.
+///
+/// # Arguments
+/// * `pixels` - Raw pixel data in the format specified by `pixel_format`
+/// * `width` - Image width in pixels
+/// * `height` - Image height in pixels
+/// * `pixel_format` - Pixel format of the input data
+/// * `quality` - JPEG quality factor (1-100, where 100 is best quality)
+/// * `subsampling` - Chroma subsampling mode
+/// * `dct_method` - Forward DCT algorithm
+///
+/// # Returns
+/// A `Vec<u8>` containing the complete JPEG file data.
+pub fn compress(
+    pixels: &[u8],
+    width: usize,
+    height: usize,
+    pixel_format: PixelFormat,
+    quality: u8,
+    subsampling: Subsampling,
+    dct_method: DctMethod,
+) -> Result<Vec<u8>> {
+    compress_with_params(
+        &CompressParams::new(pixels, width, height, pixel_format, quality, subsampling)
+            .dct_method(dct_method),
+    )
 }
 
 /// Compress raw pixel data into a JPEG byte stream using user-supplied Huffman tables.
@@ -779,223 +1025,10 @@ pub fn compress_custom_huffman(
     custom_dc: &[Option<HuffmanTableDef>; 4],
     custom_ac: &[Option<HuffmanTableDef>; 4],
 ) -> Result<Vec<u8>> {
-    // Validate inputs
-    if width == 0 || height == 0 {
-        return Err(JpegError::CorruptData(
-            "image dimensions must be non-zero".to_string(),
-        ));
-    }
-    if width > 65535 || height > 65535 {
-        return Err(JpegError::CorruptData(format!(
-            "JPEG dimensions must be <= 65535, got {}x{}",
-            width, height
-        )));
-    }
-
-    let bpp = pixel_format.bytes_per_pixel();
-    let expected_size = width * height * bpp;
-    if pixels.len() < expected_size {
-        return Err(JpegError::BufferTooSmall {
-            need: expected_size,
-            got: pixels.len(),
-        });
-    }
-
-    // CMYK: 4-component path, no color conversion
-    if pixel_format == PixelFormat::Cmyk {
-        return compress_cmyk(pixels, width, height, quality, subsampling);
-    }
-
-    let is_grayscale = pixel_format == PixelFormat::Grayscale;
-
-    // Generate scaled quantization tables
-    let luma_quant = tables::quality_scale_quant_table(&tables::STD_LUMINANCE_QUANT_TABLE, quality);
-    let chroma_quant =
-        tables::quality_scale_quant_table(&tables::STD_CHROMINANCE_QUANT_TABLE, quality);
-
-    let luma_divisors = scale_quant_for_fdct(&luma_quant);
-    let chroma_divisors = scale_quant_for_fdct(&chroma_quant);
-
-    // Resolve Huffman bits/values: use custom when provided, standard otherwise.
-    let dc_luma_bits: [u8; 17] = custom_dc[0]
-        .as_ref()
-        .map(|t| t.bits)
-        .unwrap_or(tables::DC_LUMINANCE_BITS);
-    let dc_luma_vals: Vec<u8> = custom_dc[0]
-        .as_ref()
-        .map(|t| t.values.clone())
-        .unwrap_or_else(|| tables::DC_LUMINANCE_VALUES.to_vec());
-
-    let ac_luma_bits: [u8; 17] = custom_ac[0]
-        .as_ref()
-        .map(|t| t.bits)
-        .unwrap_or(tables::AC_LUMINANCE_BITS);
-    let ac_luma_vals: Vec<u8> = custom_ac[0]
-        .as_ref()
-        .map(|t| t.values.clone())
-        .unwrap_or_else(|| tables::AC_LUMINANCE_VALUES.to_vec());
-
-    let dc_chroma_bits: [u8; 17] = custom_dc[1]
-        .as_ref()
-        .map(|t| t.bits)
-        .unwrap_or(tables::DC_CHROMINANCE_BITS);
-    let dc_chroma_vals: Vec<u8> = custom_dc[1]
-        .as_ref()
-        .map(|t| t.values.clone())
-        .unwrap_or_else(|| tables::DC_CHROMINANCE_VALUES.to_vec());
-
-    let ac_chroma_bits: [u8; 17] = custom_ac[1]
-        .as_ref()
-        .map(|t| t.bits)
-        .unwrap_or(tables::AC_CHROMINANCE_BITS);
-    let ac_chroma_vals: Vec<u8> = custom_ac[1]
-        .as_ref()
-        .map(|t| t.values.clone())
-        .unwrap_or_else(|| tables::AC_CHROMINANCE_VALUES.to_vec());
-
-    // Build encoding Huffman tables from resolved bits/values
-    let dc_luma_table = build_huff_table(&dc_luma_bits, &dc_luma_vals);
-    let ac_luma_table = build_huff_table(&ac_luma_bits, &ac_luma_vals);
-    let dc_chroma_table = build_huff_table(&dc_chroma_bits, &dc_chroma_vals);
-    let ac_chroma_table = build_huff_table(&ac_chroma_bits, &ac_chroma_vals);
-
-    // SIMD dispatch — used for both color conversion and FDCT+quantize
-    let enc_simd = crate::simd::detect_encoder();
-
-    // Color convert to YCbCr planes (or just Y for grayscale)
-    let (y_plane, cb_plane, cr_plane) = convert_to_ycbcr(
-        pixels,
-        width,
-        height,
-        pixel_format,
-        enc_simd.rgb_to_ycbcr_row,
-    )?;
-
-    // Determine MCU dimensions based on subsampling
-    let (mcu_w, mcu_h) = if is_grayscale {
-        (8, 8)
-    } else {
-        match subsampling {
-            Subsampling::S444 | Subsampling::Unknown => (8, 8),
-            Subsampling::S422 => (16, 8),
-            Subsampling::S420 => (16, 16),
-            Subsampling::S440 => (8, 16),
-            Subsampling::S411 => (32, 8),
-            Subsampling::S441 => (8, 32),
-            Subsampling::S410 => (32, 16),
-            Subsampling::S24 => (16, 32),
-        }
-    };
-
-    let mcus_x = width.div_ceil(mcu_w);
-    let mcus_y = height.div_ceil(mcu_h);
-
-    // Entropy encode all MCUs
-    let mut bit_writer = BitWriter::new(width * height);
-    let mut prev_dc_y: i16 = 0;
-    let mut prev_dc_cb: i16 = 0;
-    let mut prev_dc_cr: i16 = 0;
-
-    for mcu_row in 0..mcus_y {
-        for mcu_col in 0..mcus_x {
-            let x0 = mcu_col * mcu_w;
-            let y0 = mcu_row * mcu_h;
-
-            if is_grayscale {
-                encode_single_block(
-                    &y_plane,
-                    width,
-                    height,
-                    x0,
-                    y0,
-                    &luma_divisors,
-                    &dc_luma_table,
-                    &ac_luma_table,
-                    &mut bit_writer,
-                    &mut prev_dc_y,
-                    enc_simd.fdct_quantize,
-                );
-            } else {
-                encode_color_mcu(
-                    &y_plane,
-                    &cb_plane,
-                    &cr_plane,
-                    width,
-                    height,
-                    x0,
-                    y0,
-                    subsampling,
-                    &luma_divisors,
-                    &chroma_divisors,
-                    &dc_luma_table,
-                    &ac_luma_table,
-                    &dc_chroma_table,
-                    &ac_chroma_table,
-                    &mut bit_writer,
-                    &mut prev_dc_y,
-                    &mut prev_dc_cb,
-                    &mut prev_dc_cr,
-                    enc_simd.fdct_quantize,
-                );
-            }
-        }
-    }
-
-    bit_writer.flush();
-
-    // Assemble output: markers + entropy data + EOI
-    let mut output = Vec::with_capacity(bit_writer.data().len() + 1024);
-
-    marker_writer::write_soi(&mut output);
-    marker_writer::write_app0_jfif(&mut output);
-
-    // Quantization tables
-    marker_writer::write_dqt(&mut output, 0, &luma_quant);
-    if !is_grayscale {
-        marker_writer::write_dqt(&mut output, 1, &chroma_quant);
-    }
-
-    // Frame header
-    if is_grayscale {
-        let components = vec![(1, 1, 1, 0)];
-        marker_writer::write_sof0(&mut output, width as u16, height as u16, &components);
-    } else {
-        let (h_samp, v_samp) = subsampling.sampling_factors();
-        let components = vec![
-            (1, h_samp, v_samp, 0), // Y
-            (2, 1, 1, 1),           // Cb
-            (3, 1, 1, 1),           // Cr
-        ];
-        marker_writer::write_sof0(&mut output, width as u16, height as u16, &components);
-    }
-
-    // Write Huffman tables (using resolved custom/standard bits and values)
-    marker_writer::write_dht(&mut output, 0, 0, &dc_luma_bits, &dc_luma_vals);
-    marker_writer::write_dht(&mut output, 1, 0, &ac_luma_bits, &ac_luma_vals);
-    if !is_grayscale {
-        marker_writer::write_dht(&mut output, 0, 1, &dc_chroma_bits, &dc_chroma_vals);
-        marker_writer::write_dht(&mut output, 1, 1, &ac_chroma_bits, &ac_chroma_vals);
-    }
-
-    // Scan header
-    if is_grayscale {
-        let scan_components = vec![(1, 0, 0)];
-        marker_writer::write_sos(&mut output, &scan_components);
-    } else {
-        let scan_components = vec![
-            (1, 0, 0), // Y: DC table 0, AC table 0
-            (2, 1, 1), // Cb: DC table 1, AC table 1
-            (3, 1, 1), // Cr: DC table 1, AC table 1
-        ];
-        marker_writer::write_sos(&mut output, &scan_components);
-    }
-
-    // Entropy-coded data
-    output.extend_from_slice(bit_writer.data());
-
-    marker_writer::write_eoi(&mut output);
-
-    Ok(output)
+    compress_with_params(
+        &CompressParams::new(pixels, width, height, pixel_format, quality, subsampling)
+            .custom_huffman(custom_dc, custom_ac),
+    )
 }
 
 /// Compress raw pixel data into a JPEG byte stream using custom quantization tables.
@@ -1012,234 +1045,10 @@ pub fn compress_custom_quant(
     subsampling: Subsampling,
     custom_quant: &[Option<[u16; 64]>; 4],
 ) -> Result<Vec<u8>> {
-    // Validate inputs
-    if width == 0 || height == 0 {
-        return Err(JpegError::CorruptData(
-            "image dimensions must be non-zero".to_string(),
-        ));
-    }
-    if width > 65535 || height > 65535 {
-        return Err(JpegError::CorruptData(format!(
-            "JPEG dimensions must be <= 65535, got {}x{}",
-            width, height
-        )));
-    }
-
-    let bpp = pixel_format.bytes_per_pixel();
-    let expected_size = width * height * bpp;
-    if pixels.len() < expected_size {
-        return Err(JpegError::BufferTooSmall {
-            need: expected_size,
-            got: pixels.len(),
-        });
-    }
-
-    // CMYK: 4-component path, no color conversion
-    if pixel_format == PixelFormat::Cmyk {
-        return compress_cmyk(pixels, width, height, quality, subsampling);
-    }
-
-    let is_grayscale = pixel_format == PixelFormat::Grayscale;
-
-    // Use custom tables when provided, otherwise fall back to quality-scaled defaults
-    // compress_custom_quant: resolve quant tables
-    let luma_quant = match custom_quant[0] {
-        Some(table) => table,
-        None => tables::quality_scale_quant_table(&tables::STD_LUMINANCE_QUANT_TABLE, quality),
-    };
-    let chroma_quant = match custom_quant[1] {
-        Some(table) => table,
-        None => tables::quality_scale_quant_table(&tables::STD_CHROMINANCE_QUANT_TABLE, quality),
-    };
-
-    // The islow FDCT leaves a factor-of-8 scaling in its output. To absorb this,
-    // the divisor tables used during quantization multiply the quant values by 8,
-    // matching libjpeg-turbo's jcdctmgr.c (quantval[i] << 3).
-    let luma_divisors = scale_quant_for_fdct(&luma_quant);
-    let chroma_divisors = scale_quant_for_fdct(&chroma_quant);
-
-    // Build Huffman tables
-    let dc_luma_table = build_huff_table(&tables::DC_LUMINANCE_BITS, &tables::DC_LUMINANCE_VALUES);
-    let ac_luma_table = build_huff_table(&tables::AC_LUMINANCE_BITS, &tables::AC_LUMINANCE_VALUES);
-    let dc_chroma_table =
-        build_huff_table(&tables::DC_CHROMINANCE_BITS, &tables::DC_CHROMINANCE_VALUES);
-    let ac_chroma_table =
-        build_huff_table(&tables::AC_CHROMINANCE_BITS, &tables::AC_CHROMINANCE_VALUES);
-
-    // SIMD dispatch — used for both color conversion and FDCT+quantize
-    let enc_simd = crate::simd::detect_encoder();
-
-    // Color convert to YCbCr planes (or just Y for grayscale)
-    let (y_plane, cb_plane, cr_plane) = convert_to_ycbcr(
-        pixels,
-        width,
-        height,
-        pixel_format,
-        enc_simd.rgb_to_ycbcr_row,
-    )?;
-
-    // Determine MCU dimensions based on subsampling
-    let (mcu_w, mcu_h) = if is_grayscale {
-        (8, 8)
-    } else {
-        match subsampling {
-            Subsampling::S444 | Subsampling::Unknown => (8, 8),
-            Subsampling::S422 => (16, 8),
-            Subsampling::S420 => (16, 16),
-            Subsampling::S440 => (8, 16),
-            Subsampling::S411 => (32, 8),
-            Subsampling::S441 => (8, 32),
-            Subsampling::S410 => (32, 16),
-            Subsampling::S24 => (16, 32),
-        }
-    };
-
-    let mcus_x = width.div_ceil(mcu_w);
-    let mcus_y = height.div_ceil(mcu_h);
-
-    // Entropy encode all MCUs
-    let mut bit_writer = BitWriter::new(width * height);
-    let mut prev_dc_y: i16 = 0;
-    let mut prev_dc_cb: i16 = 0;
-    let mut prev_dc_cr: i16 = 0;
-
-    for mcu_row in 0..mcus_y {
-        for mcu_col in 0..mcus_x {
-            let x0 = mcu_col * mcu_w;
-            let y0 = mcu_row * mcu_h;
-
-            if is_grayscale {
-                encode_single_block(
-                    &y_plane,
-                    width,
-                    height,
-                    x0,
-                    y0,
-                    &luma_divisors,
-                    &dc_luma_table,
-                    &ac_luma_table,
-                    &mut bit_writer,
-                    &mut prev_dc_y,
-                    enc_simd.fdct_quantize,
-                );
-            } else {
-                encode_color_mcu(
-                    &y_plane,
-                    &cb_plane,
-                    &cr_plane,
-                    width,
-                    height,
-                    x0,
-                    y0,
-                    subsampling,
-                    &luma_divisors,
-                    &chroma_divisors,
-                    &dc_luma_table,
-                    &ac_luma_table,
-                    &dc_chroma_table,
-                    &ac_chroma_table,
-                    &mut bit_writer,
-                    &mut prev_dc_y,
-                    &mut prev_dc_cb,
-                    &mut prev_dc_cr,
-                    enc_simd.fdct_quantize,
-                );
-            }
-        }
-    }
-
-    bit_writer.flush();
-
-    // Assemble output: markers + entropy data + EOI
-    let mut output = Vec::with_capacity(bit_writer.data().len() + 1024);
-
-    marker_writer::write_soi(&mut output);
-    marker_writer::write_app0_jfif(&mut output);
-
-    // Quantization tables
-    marker_writer::write_dqt(&mut output, 0, &luma_quant);
-    if !is_grayscale {
-        marker_writer::write_dqt(&mut output, 1, &chroma_quant);
-    }
-
-    // Frame header — SOF0 (baseline) when all quant values fit in 8 bits,
-    // SOF1 (extended sequential) when any quant value exceeds 255. Matches
-    // C cjpeg behaviour: with default `force_baseline=FALSE`, low quality
-    // produces 16-bit DQT entries which require SOF1.
-    let needs_sof1 = luma_quant.iter().any(|&v| v > 255)
-        || (!is_grayscale && chroma_quant.iter().any(|&v| v > 255));
-    if is_grayscale {
-        let components = vec![(1, 1, 1, 0)];
-        if needs_sof1 {
-            marker_writer::write_sof1(&mut output, width as u16, height as u16, &components);
-        } else {
-            marker_writer::write_sof0(&mut output, width as u16, height as u16, &components);
-        }
-    } else {
-        let (h_samp, v_samp) = subsampling.sampling_factors();
-        let components = vec![
-            (1, h_samp, v_samp, 0), // Y
-            (2, 1, 1, 1),           // Cb
-            (3, 1, 1, 1),           // Cr
-        ];
-        if needs_sof1 {
-            marker_writer::write_sof1(&mut output, width as u16, height as u16, &components);
-        } else {
-            marker_writer::write_sof0(&mut output, width as u16, height as u16, &components);
-        }
-    }
-
-    // Huffman tables
-    marker_writer::write_dht(
-        &mut output,
-        0,
-        0,
-        &tables::DC_LUMINANCE_BITS,
-        &tables::DC_LUMINANCE_VALUES,
-    );
-    marker_writer::write_dht(
-        &mut output,
-        1,
-        0,
-        &tables::AC_LUMINANCE_BITS,
-        &tables::AC_LUMINANCE_VALUES,
-    );
-    if !is_grayscale {
-        marker_writer::write_dht(
-            &mut output,
-            0,
-            1,
-            &tables::DC_CHROMINANCE_BITS,
-            &tables::DC_CHROMINANCE_VALUES,
-        );
-        marker_writer::write_dht(
-            &mut output,
-            1,
-            1,
-            &tables::AC_CHROMINANCE_BITS,
-            &tables::AC_CHROMINANCE_VALUES,
-        );
-    }
-
-    // Scan header
-    if is_grayscale {
-        let scan_components = vec![(1, 0, 0)];
-        marker_writer::write_sos(&mut output, &scan_components);
-    } else {
-        let scan_components = vec![
-            (1, 0, 0), // Y: DC table 0, AC table 0
-            (2, 1, 1), // Cb: DC table 1, AC table 1
-            (3, 1, 1), // Cr: DC table 1, AC table 1
-        ];
-        marker_writer::write_sos(&mut output, &scan_components);
-    }
-
-    // Entropy-coded data
-    output.extend_from_slice(bit_writer.data());
-
-    marker_writer::write_eoi(&mut output);
-
-    Ok(output)
+    compress_with_params(
+        &CompressParams::new(pixels, width, height, pixel_format, quality, subsampling)
+            .custom_quant(custom_quant),
+    )
 }
 
 /// Compress raw pixel data into a JPEG byte stream with DRI restart markers.
@@ -1258,249 +1067,11 @@ pub fn compress_with_restart(
     restart_interval: u16,
     dct_method: DctMethod,
 ) -> Result<Vec<u8>> {
-    // Validate inputs
-    if width == 0 || height == 0 {
-        return Err(JpegError::CorruptData(
-            "image dimensions must be non-zero".to_string(),
-        ));
-    }
-    if width > 65535 || height > 65535 {
-        return Err(JpegError::CorruptData(format!(
-            "JPEG dimensions must be <= 65535, got {}x{}",
-            width, height
-        )));
-    }
-
-    let bpp = pixel_format.bytes_per_pixel();
-    let expected_size = width * height * bpp;
-    if pixels.len() < expected_size {
-        return Err(JpegError::BufferTooSmall {
-            need: expected_size,
-            got: pixels.len(),
-        });
-    }
-
-    // CMYK not supported with restart (fall through to normal compress)
-    if pixel_format == PixelFormat::Cmyk {
-        return compress_cmyk(pixels, width, height, quality, subsampling);
-    }
-
-    let is_grayscale = pixel_format == PixelFormat::Grayscale;
-
-    // Generate scaled quantization tables
-    let luma_quant = tables::quality_scale_quant_table(&tables::STD_LUMINANCE_QUANT_TABLE, quality);
-    let chroma_quant =
-        tables::quality_scale_quant_table(&tables::STD_CHROMINANCE_QUANT_TABLE, quality);
-
-    let luma_divisors = if dct_method == DctMethod::IsFast {
-        scale_quant_for_ifast(&luma_quant)
-    } else {
-        scale_quant_for_fdct(&luma_quant)
-    };
-    let chroma_divisors = if dct_method == DctMethod::IsFast {
-        scale_quant_for_ifast(&chroma_quant)
-    } else {
-        scale_quant_for_fdct(&chroma_quant)
-    };
-
-    // Build Huffman tables
-    let dc_luma_table = build_huff_table(&tables::DC_LUMINANCE_BITS, &tables::DC_LUMINANCE_VALUES);
-    let ac_luma_table = build_huff_table(&tables::AC_LUMINANCE_BITS, &tables::AC_LUMINANCE_VALUES);
-    let dc_chroma_table =
-        build_huff_table(&tables::DC_CHROMINANCE_BITS, &tables::DC_CHROMINANCE_VALUES);
-    let ac_chroma_table =
-        build_huff_table(&tables::AC_CHROMINANCE_BITS, &tables::AC_CHROMINANCE_VALUES);
-
-    // SIMD dispatch — used for both color conversion and FDCT+quantize
-    let enc_simd = crate::simd::detect_encoder();
-    let fdct_quantize_fn: fn(&mut [i16; 64], &QuantDivisors, &mut [i16; 64]) = match dct_method {
-        DctMethod::IsLow => enc_simd.fdct_quantize,
-        DctMethod::IsFast => crate::simd::scalar::scalar_fdct_ifast_quantize,
-        DctMethod::Float => crate::simd::scalar::scalar_fdct_float_quantize,
-    };
-
-    // Color convert to YCbCr planes (or just Y for grayscale)
-    let (y_plane, cb_plane, cr_plane) = convert_to_ycbcr(
-        pixels,
-        width,
-        height,
-        pixel_format,
-        enc_simd.rgb_to_ycbcr_row,
-    )?;
-
-    // Determine MCU dimensions based on subsampling
-    let (mcu_w, mcu_h) = if is_grayscale {
-        (8, 8)
-    } else {
-        match subsampling {
-            Subsampling::S444 | Subsampling::Unknown => (8, 8),
-            Subsampling::S422 => (16, 8),
-            Subsampling::S420 => (16, 16),
-            Subsampling::S440 => (8, 16),
-            Subsampling::S411 => (32, 8),
-            Subsampling::S441 => (8, 32),
-            Subsampling::S410 => (32, 16),
-            Subsampling::S24 => (16, 32),
-        }
-    };
-
-    let mcus_x = width.div_ceil(mcu_w);
-    let mcus_y = height.div_ceil(mcu_h);
-
-    // Entropy encode all MCUs with restart markers
-    let mut bit_writer = BitWriter::new(width * height);
-    let mut prev_dc_y: i16 = 0;
-    let mut prev_dc_cb: i16 = 0;
-    let mut prev_dc_cr: i16 = 0;
-    let mut mcu_count: u32 = 0;
-    let mut rst_count: u8 = 0;
-    let ri = restart_interval as u32;
-
-    for mcu_row in 0..mcus_y {
-        for mcu_col in 0..mcus_x {
-            // Insert restart marker between MCU intervals (not before the first MCU)
-            if ri > 0 && mcu_count > 0 && mcu_count.is_multiple_of(ri) {
-                bit_writer.flush_restart();
-                bit_writer.write_restart_marker(rst_count);
-                rst_count = rst_count.wrapping_add(1);
-                // Reset DC predictors
-                prev_dc_y = 0;
-                prev_dc_cb = 0;
-                prev_dc_cr = 0;
-            }
-
-            let x0 = mcu_col * mcu_w;
-            let y0 = mcu_row * mcu_h;
-
-            if is_grayscale {
-                encode_single_block(
-                    &y_plane,
-                    width,
-                    height,
-                    x0,
-                    y0,
-                    &luma_divisors,
-                    &dc_luma_table,
-                    &ac_luma_table,
-                    &mut bit_writer,
-                    &mut prev_dc_y,
-                    fdct_quantize_fn,
-                );
-            } else {
-                encode_color_mcu(
-                    &y_plane,
-                    &cb_plane,
-                    &cr_plane,
-                    width,
-                    height,
-                    x0,
-                    y0,
-                    subsampling,
-                    &luma_divisors,
-                    &chroma_divisors,
-                    &dc_luma_table,
-                    &ac_luma_table,
-                    &dc_chroma_table,
-                    &ac_chroma_table,
-                    &mut bit_writer,
-                    &mut prev_dc_y,
-                    &mut prev_dc_cb,
-                    &mut prev_dc_cr,
-                    fdct_quantize_fn,
-                );
-            }
-
-            mcu_count += 1;
-        }
-    }
-
-    bit_writer.flush();
-
-    // Assemble output: markers + entropy data + EOI
-    let mut output = Vec::with_capacity(bit_writer.data().len() + 1024);
-
-    marker_writer::write_soi(&mut output);
-    marker_writer::write_app0_jfif(&mut output);
-
-    // Quantization tables
-    marker_writer::write_dqt(&mut output, 0, &luma_quant);
-    if !is_grayscale {
-        marker_writer::write_dqt(&mut output, 1, &chroma_quant);
-    }
-
-    // Frame header
-    if is_grayscale {
-        let components = vec![(1, 1, 1, 0)];
-        marker_writer::write_sof0(&mut output, width as u16, height as u16, &components);
-    } else {
-        let (h_samp, v_samp) = subsampling.sampling_factors();
-        let components = vec![
-            (1, h_samp, v_samp, 0), // Y
-            (2, 1, 1, 1),           // Cb
-            (3, 1, 1, 1),           // Cr
-        ];
-        marker_writer::write_sof0(&mut output, width as u16, height as u16, &components);
-    }
-
-    // Huffman tables
-    marker_writer::write_dht(
-        &mut output,
-        0,
-        0,
-        &tables::DC_LUMINANCE_BITS,
-        &tables::DC_LUMINANCE_VALUES,
-    );
-    marker_writer::write_dht(
-        &mut output,
-        1,
-        0,
-        &tables::AC_LUMINANCE_BITS,
-        &tables::AC_LUMINANCE_VALUES,
-    );
-    if !is_grayscale {
-        marker_writer::write_dht(
-            &mut output,
-            0,
-            1,
-            &tables::DC_CHROMINANCE_BITS,
-            &tables::DC_CHROMINANCE_VALUES,
-        );
-        marker_writer::write_dht(
-            &mut output,
-            1,
-            1,
-            &tables::AC_CHROMINANCE_BITS,
-            &tables::AC_CHROMINANCE_VALUES,
-        );
-    }
-
-    // DRI marker — emitted from `write_scan_header` in C (jcmarker.c::emit_dri),
-    // i.e. right before the SOS marker, NOT in the frame header. Some viewers
-    // tolerate the earlier placement, but byte-parity with cjpeg requires the
-    // C ordering.
-    if restart_interval > 0 {
-        marker_writer::write_dri(&mut output, restart_interval);
-    }
-
-    // Scan header
-    if is_grayscale {
-        let scan_components = vec![(1, 0, 0)];
-        marker_writer::write_sos(&mut output, &scan_components);
-    } else {
-        let scan_components = vec![
-            (1, 0, 0), // Y: DC table 0, AC table 0
-            (2, 1, 1), // Cb: DC table 1, AC table 1
-            (3, 1, 1), // Cr: DC table 1, AC table 1
-        ];
-        marker_writer::write_sos(&mut output, &scan_components);
-    }
-
-    // Entropy-coded data (includes embedded RST markers)
-    output.extend_from_slice(bit_writer.data());
-
-    marker_writer::write_eoi(&mut output);
-
-    Ok(output)
+    compress_with_params(
+        &CompressParams::new(pixels, width, height, pixel_format, quality, subsampling)
+            .dct_method(dct_method)
+            .restart_interval(restart_interval),
+    )
 }
 
 /// Compress with optional ICC profile and EXIF metadata.

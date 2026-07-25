@@ -89,6 +89,38 @@ fn emit_case(out_dir: &str, width: usize, height: usize, subsampling: Subsamplin
     std::fs::write(format!("{out_dir}/{stem}.fullplane.jpg"), &full_plane)
         .expect("write full-plane");
 
+    // The two-pass optimized-Huffman variant, which is what `Encoder` uses
+    // whenever `optimize_huffman(true)` or a smoothing factor is set. Compared
+    // against `cjpeg -optimize`.
+    let optimized: Vec<u8> = pipeline::compress_optimized(
+        &pixels,
+        width,
+        height,
+        PixelFormat::Rgb,
+        quality,
+        subsampling,
+        0,
+        DctMethod::IsLow,
+        0,
+    )
+    .expect("optimized compress");
+    std::fs::write(format!("{out_dir}/{stem}.optimized.jpg"), &optimized).expect("write optimized");
+
+    // A real restart interval, compared against `cjpeg -restart 3B` (the `B`
+    // suffix means "in MCU blocks", which is what our interval counts).
+    let restarted: Vec<u8> = pipeline::compress_with_restart(
+        &pixels,
+        width,
+        height,
+        PixelFormat::Rgb,
+        quality,
+        subsampling,
+        3,
+        DctMethod::IsLow,
+    )
+    .expect("restart compress");
+    std::fs::write(format!("{out_dir}/{stem}.restart3.jpg"), &restarted).expect("write restart3");
+
     let _ = writeln!(
         std::io::stdout(),
         "{stem}\t{sample}\t{width}\t{height}\t{}",
