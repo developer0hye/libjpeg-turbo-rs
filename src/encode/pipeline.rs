@@ -14,6 +14,25 @@ use crate::encode::progressive::ProgressiveScan;
 use crate::encode::tables;
 use crate::simd::QuantDivisors;
 
+/// Resolves the luma/chroma quantization tables for a component pair.
+///
+/// A custom slot wins; otherwise Annex K scaled by quality. Slot 0 is luma,
+/// slot 1 chroma — the convention every entry point here shares.
+fn resolve_quant_tables(
+    custom_quant: Option<&[Option<[u16; 64]>; 4]>,
+    quality: u8,
+) -> ([u16; 64], [u16; 64]) {
+    let luma: [u16; 64] = match custom_quant.and_then(|tables| tables[0]) {
+        Some(table) => table,
+        None => tables::quality_scale_quant_table(&tables::STD_LUMINANCE_QUANT_TABLE, quality),
+    };
+    let chroma: [u16; 64] = match custom_quant.and_then(|tables| tables[1]) {
+        Some(table) => table,
+        None => tables::quality_scale_quant_table(&tables::STD_CHROMINANCE_QUANT_TABLE, quality),
+    };
+    (luma, chroma)
+}
+
 /// Whether the fused SIMD extract+FDCT+quantize kernels may be used.
 ///
 /// Those kernels hardcode the **islow** transform. The `ifast` and `float`
@@ -2287,6 +2306,7 @@ pub fn compress_progressive(
         dct_method,
         0,
         0,
+        None,
     )
 }
 
@@ -2312,6 +2332,7 @@ pub fn compress_progressive_with_restart(
     dct_method: DctMethod,
     restart_interval: u16,
     restart_in_rows: u16,
+    custom_quant: Option<&[Option<[u16; 64]>; 4]>,
 ) -> Result<Vec<u8>> {
     use crate::encode::progressive::simple_progression;
 
@@ -2330,6 +2351,7 @@ pub fn compress_progressive_with_restart(
         dct_method,
         restart_interval,
         restart_in_rows,
+        custom_quant,
     )
 }
 
@@ -2359,6 +2381,7 @@ pub fn compress_progressive_custom(
         dct_method,
         0,
         0,
+        None,
     )
 }
 
@@ -2375,6 +2398,7 @@ pub fn compress_progressive_custom_with_restart(
     dct_method: DctMethod,
     restart_interval: u16,
     restart_in_rows: u16,
+    custom_quant: Option<&[Option<[u16; 64]>; 4]>,
 ) -> Result<Vec<u8>> {
     let scans: Vec<ProgressiveScan> = script
         .iter()
@@ -2398,6 +2422,7 @@ pub fn compress_progressive_custom_with_restart(
         dct_method,
         restart_interval,
         restart_in_rows,
+        custom_quant,
     )
 }
 
@@ -2414,6 +2439,7 @@ fn compress_progressive_with_scans(
     dct_method: DctMethod,
     restart_interval: u16,
     restart_in_rows: u16,
+    custom_quant: Option<&[Option<[u16; 64]>; 4]>,
 ) -> Result<Vec<u8>> {
     if width == 0 || height == 0 {
         return Err(JpegError::CorruptData(
@@ -2446,9 +2472,7 @@ fn compress_progressive_with_scans(
     };
     let use_simd_fdct: bool = dct_method == DctMethod::IsLow;
 
-    let luma_quant = tables::quality_scale_quant_table(&tables::STD_LUMINANCE_QUANT_TABLE, quality);
-    let chroma_quant =
-        tables::quality_scale_quant_table(&tables::STD_CHROMINANCE_QUANT_TABLE, quality);
+    let (luma_quant, chroma_quant) = resolve_quant_tables(custom_quant, quality);
     let luma_divisors = if dct_method == DctMethod::IsFast {
         scale_quant_for_ifast(&luma_quant)
     } else {
@@ -3717,6 +3741,7 @@ pub fn compress_arithmetic(
     subsampling: Subsampling,
     dct_method: DctMethod,
     restart_interval: u16,
+    custom_quant: Option<&[Option<[u16; 64]>; 4]>,
 ) -> Result<Vec<u8>> {
     use crate::encode::arithmetic::ArithEncoder;
 
@@ -3751,9 +3776,7 @@ pub fn compress_arithmetic(
     // islow/float keep the simple `quant * 8` divisors. Float routes the
     // per-coefficient `1 / (q · aan_row · aan_col · 8)` value through
     // `QuantDivisors::float_divisors`.
-    let luma_quant = tables::quality_scale_quant_table(&tables::STD_LUMINANCE_QUANT_TABLE, quality);
-    let chroma_quant =
-        tables::quality_scale_quant_table(&tables::STD_CHROMINANCE_QUANT_TABLE, quality);
+    let (luma_quant, chroma_quant) = resolve_quant_tables(custom_quant, quality);
     let luma_divisors = if dct_method == DctMethod::IsFast {
         scale_quant_for_ifast(&luma_quant)
     } else {
@@ -4237,6 +4260,7 @@ pub fn compress_arithmetic_progressive(
     dct_method: DctMethod,
     restart_interval: u16,
     restart_in_rows: u16,
+    custom_quant: Option<&[Option<[u16; 64]>; 4]>,
 ) -> Result<Vec<u8>> {
     use crate::encode::arithmetic::ArithEncoder;
     use crate::encode::progressive::simple_progression;
@@ -4267,10 +4291,7 @@ pub fn compress_arithmetic_progressive(
 
     let enc_simd = crate::simd::detect_encoder();
 
-    let luma_quant: [u16; 64] =
-        tables::quality_scale_quant_table(&tables::STD_LUMINANCE_QUANT_TABLE, quality);
-    let chroma_quant: [u16; 64] =
-        tables::quality_scale_quant_table(&tables::STD_CHROMINANCE_QUANT_TABLE, quality);
+    let (luma_quant, chroma_quant) = resolve_quant_tables(custom_quant, quality);
     let luma_divisors: QuantDivisors = if dct_method == DctMethod::IsFast {
         scale_quant_for_ifast(&luma_quant)
     } else {
