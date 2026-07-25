@@ -739,7 +739,7 @@ Measured at 64x48 RGB q75: `.restart_blocks(3)` alone gives 3 RST markers, but `
 3. The three `#[ignore]`d tests in `tests/encoder_option_composability.rs` un-ignored and green (all three fail today under `--include-ignored`, which is the reproduction).
 4. Combinations that genuinely cannot be honoured return an error rather than dropping silently.
 
-## P4-47. Progressive Encoding Diverges From `cjpeg` At Every Even Height Not A Multiple Of 16 — **OPEN**
+## P4-47. Progressive Encoding Diverges From `cjpeg` At Every Even Height Not A Multiple Of 16 — **CLOSED 2026-07-26**
 
 **Motivation.** Filed 2026-07-25, found within 90 seconds of giving `fuzz_encode_diff_c` a reference oracle. GitHub [#324](https://github.com/developer0hye/libjpeg-turbo-rs/issues/324).
 
@@ -756,6 +756,14 @@ Swept heights 1..24 at width 32: every even height fails except 16; every odd he
 1. Progressive output byte-identical to `cjpeg -progressive` for all heights, 4:2:0 and 4:4:0, Huffman and arithmetic.
 2. Regression coverage over even heights not divisible by 16, including 1920x1080 — MCU-aligned sizes alone would not have caught this.
 3. `fuzz_encode_diff_c` clean over an extended session afterwards.
+
+**Root cause.** `downsample_chroma_block` clamped the *source* row — `(block_y + row * v_factor + dy).min(plane_height - 1)` — which models C only when the final row group is incomplete. C works in two phases (`jcprepct.c` then `jccoefct.c`): pad the source up to a complete row **group**, downsample, then replicate the resulting **downsampled** row. With `v_factor == 2` and an even height the last group is complete, so C replicates `avg(last_two_rows)` while a source clamp yields `last_row` alone. Odd heights agreed by accident — their last group is incomplete, so both models replicate the same single row.
+
+Baseline was unaffected because it feeds planes already padded by `pad_chroma_plane`, which implements both phases, so the clamp never engaged. Only the progressive path passed an unpadded plane and relied on it.
+
+**Fix.** Clamp the *output* chroma row instead: `(block_y / v_factor + row).min(plane_height.div_ceil(v_factor) - 1) * v_factor`. Horizontal clamping is left alone — C's `expand_right_edge` replicates source *pixels*, so column clamping was already the right model.
+
+**Status (2026-07-26): closed.** All four entropy modes now match `cjpeg` on **4032/4032** swept cases — 8 subsamplings (including the 4-factor 4:4:1 / 4:1:1 / 4:1:0 / 2:4), both colourspaces, 28 geometries covering heights 1..20 plus 1920x1080 / 800x600 / 1920x1088 / 500x375, at four qualities. Was 4016/4032 before. Pinned by `tests/regression_progressive_chroma_row_group.rs`. The P4-33 drift guard correctly flagged 108 `*_441_*_prog` / `_aprog` corpus seeds whose bytes the fix changes; the regenerated seeds are committed and verified to still decode under `djpeg`.
 
 ## P4-48. Mutation Testing: 12 Of 38 Encoder Mutants Survive The Full Suite — **OPEN**
 
@@ -819,5 +827,5 @@ Swept heights 1..24 at width 32: every even height fails except 16; every odd he
 40. **P4-44** — quantify encoder byte-parity vs `cjpeg` for `ifast`/`float` and for the aarch64 backend, then document what is actually guaranteed (#319).
 41. **P4-45** — make the `SSE2-only` CI job actually exercise the SSE2 fallback (QEMU/SDE); discharges #315's remaining criterion (#320).
 42. **P4-46** — make `Encoder`'s dispatch build one `CompressParams` so builder options stop dropping each other (#322).
-43. **P4-47** — progressive 4:2:0/4:4:0 diverges from `cjpeg` at every even height not a multiple of 16, including 1920x1080 (#324).
+43. ~~**P4-47** — progressive 4:2:0/4:4:0 diverges from `cjpeg` at every even height not a multiple of 16, including 1920x1080 (#324).~~ **CLOSED 2026-07-26** — chroma row-group replication; 4032/4032 vs cjpeg.
 44. **P4-48** — close the mutation-testing blind spots in `api/encoder.rs`, then shard `encode/pipeline.rs` (#325).

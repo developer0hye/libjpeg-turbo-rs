@@ -71,18 +71,44 @@ fn main() {
         (Subsampling::S422, "2x1"),
         (Subsampling::S420, "2x2"),
         (Subsampling::S440, "1x2"),
+        (Subsampling::S441, "1x4"),
+        (Subsampling::S411, "4x1"),
+        (Subsampling::S410, "4x2"),
+        (Subsampling::S24, "2x4"),
     ];
     // Deliberately mixes MCU-aligned and partial-MCU geometries, since that is
     // where the encoder has historically diverged (#314, #316).
     // Deliberately mixes MCU-aligned with the geometry classes that have
     // actually broken: partial-MCU widths (#314, #316) and even heights that
     // are not multiples of 16 (#324).
+    // Covers every partial-MCU residue in both axes: partial-MCU widths
+    // (#314, #316) and the even/odd height classes behind #324, plus real
+    // photo sizes as end-to-end controls.
     let geometries: &[(usize, usize)] = &[
-        (16, 16),
+        (32, 1),
+        (32, 2),
+        (32, 3),
+        (32, 4),
+        (32, 5),
+        (32, 6),
+        (32, 7),
+        (32, 8),
+        (32, 9),
+        (32, 10),
+        (32, 11),
+        (32, 12),
+        (32, 13),
+        (32, 14),
+        (32, 15),
+        (32, 16),
+        (32, 17),
+        (32, 18),
+        (32, 19),
+        (32, 20),
+        (7, 16),
         (17, 17),
         (23, 33),
-        (32, 2),
-        (32, 4),
+        (33, 18),
         (48, 48),
         (64, 48),
         (800, 600),
