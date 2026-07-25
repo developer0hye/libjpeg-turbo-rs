@@ -161,11 +161,6 @@ const FORMATS: &[(&str, PixelFormat)] = &[
 /// Format: `"<format>|<property>|<detail>"`. Enforced in both directions —
 /// see the module docs.
 const KNOWN_VIOLATIONS: &[(&str, &str)] = &[
-    // ---- #313: CMYK routes into compress_cmyk, which cannot carry options ----
-    ("cmyk|effect|dct_method_ifast", "#313"),
-    ("cmyk|effect|huffman_tables", "#313"),
-    ("cmyk|effect|quant_table", "#313"),
-    ("cmyk|effect|restart_blocks", "#313"),
     // ---- by design: the combination is meaningless, not dropped ----
     (
         "gray|independence|huffman_tables after arithmetic",
