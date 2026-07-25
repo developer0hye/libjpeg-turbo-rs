@@ -720,6 +720,61 @@ P4-33 established the phenomenon (backend-dependent output, decodes pixel-identi
 
 **Why deferred.** Not blocking: it is CI coverage, not a product defect, and the P4-41 fix itself is already shipped and verified on AVX2 hardware. Local reproduction needs `qemu-user`, which this box cannot install (no passwordless sudo).
 
+## P4-46. `Encoder` Silently Drops Builder Options When Combined — **OPEN**
+
+**Motivation.** Filed 2026-07-25 while deciding what a README example for `CompressParams` should say. GitHub [#322](https://github.com/developer0hye/libjpeg-turbo-rs/issues/322). Unlike P4-39 this is **not** CMYK-specific — it hits ordinary RGB input through the public builder.
+
+Measured at 64x48 RGB q75: `.restart_blocks(3)` alone gives 3 RST markers, but `.quant_table(..).restart_blocks(3)` gives **0**, and `.huffman_*_table(..).restart_blocks(3)` gives **0**. `.huffman_*_table(..).quant_table(..)` returns output byte-identical to custom-Huffman-alone, i.e. the quant table is discarded.
+
+**Scope (2026-07-25, from `tests/encode_option_matrix.rs`).** The metamorphic matrix found **29** masked interactions, not 3: `restart_blocks` lost after `quant_table`/`huffman_tables`; `quant_table` lost after `huffman_tables`/`arithmetic`/`progressive`/`optimize_huffman`; `huffman_tables` lost after `progressive`; `dct_method` lost after `quant_table`/`huffman_tables`; and `smoothing_factor` lost after `arithmetic`/`progressive`/`huffman_tables`/`quant_table`/`restart_blocks` — all for both RGB and grayscale. `smoothing_factor` is the worst: it reaches the encoder only via `compress_optimized` (`api/encoder.rs:925`, `:972`), so every earlier branch discards it, while upstream applies smoothing in `jcsample.c` independently of entropy mode. Five combinations were classified **by-design** rather than dropped (arithmetic has no Huffman tables; `optimize_coding` overrides supplied tables; progressive already optimizes).
+
+**Root cause.** `src/api/encoder.rs:918-980` dispatches through an if/else chain; each arm calls a shim forwarding only the options it names, and the first matching arm wins. `compress_custom_quant` and `compress_custom_huffman` take neither a restart interval nor a `dct_method`, so both are dropped alongside either table option.
+
+**Why it is now small.** P4-40 collapsed those four shims onto `CompressParams`, which carries every option at once — the chain can be replaced by building one params value. The `optimize_huffman` / `smoothing_factor` arm still needs `compress_optimized` until that two-pass algorithm is folded into the same type (P4-40 remaining scope).
+
+**Acceptance criteria.**
+
+1. Every pair of `restart_blocks`/`restart_rows`, `quant_table`, `huffman_dc_table`/`huffman_ac_table` and `dct_method` composes, each effect observable regardless of the others.
+2. Cross-validated against `cjpeg` for combinations C can express (`-restart NB` with `-qtables`).
+3. The three `#[ignore]`d tests in `tests/encoder_option_composability.rs` un-ignored and green (all three fail today under `--include-ignored`, which is the reproduction).
+4. Combinations that genuinely cannot be honoured return an error rather than dropping silently.
+
+## P4-47. Progressive Encoding Diverges From `cjpeg` At Every Even Height Not A Multiple Of 16 — **OPEN**
+
+**Motivation.** Filed 2026-07-25, found within 90 seconds of giving `fuzz_encode_diff_c` a reference oracle. GitHub [#324](https://github.com/developer0hye/libjpeg-turbo-rs/issues/324).
+
+Progressive output diverges from stock `cjpeg` whenever the height is **even and not a multiple of 16**, for any subsampling with vertical chroma decimation (4:2:0, 4:4:0). Odd heights and multiples of 16 are byte-exact. This covers **1920x1080 progressive 4:2:0**, the most common web configuration: 673,854 bytes against C's 673,796. Also 800x600 (158,182 vs 158,167). 1280x720, 640x480, 1024x768, 1920x1088 and 500x375 all match.
+
+Swept heights 1..24 at width 32: every even height fails except 16; every odd height passes. Affects Huffman progressive and arithmetic progressive alike. Baseline and arithmetic-sequential are clean at the same geometries, and 4:4:4 / 4:2:2 are clean in every mode — so the trigger is progressive scan emission combined with `v_samp == 2`.
+
+**Not a P4-41/P4-42 relapse.** Those were the baseline dummy-block contract; baseline passes here and their geometries are unaffected.
+
+**Why it was invisible.** `fuzz_encode_diff_c` asserted only that `djpeg` accepts our output and that both decoders read it identically — *validity* oracles, which stay green when we emit a valid JPEG that is simply not the one `cjpeg` would emit. The same blindness explains P4-41/P4-42 surviving in a target whose geometry range covered them many times over.
+
+**Acceptance criteria.**
+
+1. Progressive output byte-identical to `cjpeg -progressive` for all heights, 4:2:0 and 4:4:0, Huffman and arithmetic.
+2. Regression coverage over even heights not divisible by 16, including 1920x1080 — MCU-aligned sizes alone would not have caught this.
+3. `fuzz_encode_diff_c` clean over an extended session afterwards.
+
+## P4-48. Mutation Testing: 12 Of 38 Encoder Mutants Survive The Full Suite — **OPEN**
+
+**Motivation.** Filed 2026-07-25 from the first `cargo-mutants` pass over `src/api/encoder.rs`. GitHub [#325](https://github.com/developer0hye/libjpeg-turbo-rs/issues/325). This is the meta-level complement to P4-39/P4-46/P4-47: those are bugs, this is where a bug *would not be noticed*.
+
+**Blind spot 1 — `extract_luminance` has no correctness coverage (8 mutants).** The BT.601 luma weights (`19595*R + 38470*G + 7471*B + 32768 >> 16`, `encoder.rs:478-520`) can be scrambled — `*`→`+`, `+`→`-`, `*`→`/` — with the full suite green. It is the path taken by `grayscale_from_color(true)` for every non-RGB format (plain `Rgb` routes through the SIMD `rgb_to_ycbcr_row`, per the comment at `:717-721`). Tests *do* execute it (`tests/grayscale_encode.rs:22`, `:35`, `tests/pixel_formats.rs:335`) but assert only `img.pixel_format == Grayscale` — metadata, not content — on uniform `vec![128u8; ..]` input. Same shape as the pixel-diff fallback that hid P4-41: the test runs the code and then declines to check it.
+
+**Blind spot 2 — `_effective_quant_tables` is dead code (3 mutants).** Declared at `encoder.rs:427`, referenced nowhere. Survives mutation because it is never called; the leading underscore silences the dead-code lint instead of removing the function. `build_quant_tables` (`:1069`) is the live equivalent.
+
+**Blind spot 3 — `compute_restart_interval` (1 mutant).** `==` at `:409:45` can be inverted undetected. Given P4-46 shows restart handling is already fragile, worth pinning.
+
+**Method.** `cargo mutants --file src/api/encoder.rs --shard 1/10 -j 16 --timeout 300`, full workspace suite as oracle (unmutated baseline green in 120s); 38 of 380 mutants sampled, 12 missed / 26 caught. A separate run against only the five newest encode-focused tests scored 312 missed / 30 caught / 38 unviable — expected, since those target specific properties, and only the full-suite figures are blind spots.
+
+**Acceptance criteria.**
+
+1. Blind spots 1-3 closed, each with a test that fails if the mutant is reintroduced.
+2. A sharded run over `src/encode/pipeline.rs` (**3807** mutants, not attempted here), surviving mutants triaged into "needs a test" vs "equivalent mutant".
+3. `cargo mutants --in-diff` in CI so untested new code is flagged at review time.
+
 ## Phase 4 Suggested Order
 
 1. ~~**P4-1** — export `jpeg_calc_jpeg_dimensions` and delete its missing-symbol allowlist entry.~~ **CLOSED 2026-05-10**.
@@ -763,3 +818,6 @@ P4-33 established the phenomenon (backend-dependent output, decodes pixel-identi
 39. **P4-43** — recover the ~3-4.5% the P4-41 correctness fix cost on `ceil(width/8)`-odd 4:2:0 widths (#317).
 40. **P4-44** — quantify encoder byte-parity vs `cjpeg` for `ifast`/`float` and for the aarch64 backend, then document what is actually guaranteed (#319).
 41. **P4-45** — make the `SSE2-only` CI job actually exercise the SSE2 fallback (QEMU/SDE); discharges #315's remaining criterion (#320).
+42. **P4-46** — make `Encoder`'s dispatch build one `CompressParams` so builder options stop dropping each other (#322).
+43. **P4-47** — progressive 4:2:0/4:4:0 diverges from `cjpeg` at every even height not a multiple of 16, including 1920x1080 (#324).
+44. **P4-48** — close the mutation-testing blind spots in `api/encoder.rs`, then shard `encode/pipeline.rs` (#325).

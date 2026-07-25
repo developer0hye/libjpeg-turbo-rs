@@ -143,6 +143,28 @@ let jpeg = Encoder::new(&pixels, width, height, PixelFormat::Rgb)
     .encode()?;
 ```
 
+Options handled by different internal paths can currently drop one another
+([#322](https://github.com/developer0hye/libjpeg-turbo-rs/issues/322)) — use
+`CompressParams` below when combining restart intervals with custom tables.
+
+### Composing baseline options
+
+`Encoder` covers the common cases; `CompressParams` is the single-pass baseline
+core underneath it, and takes every option at once — except on CMYK input, where
+restart intervals and custom tables are still dropped ([#313](https://github.com/developer0hye/libjpeg-turbo-rs/issues/313)).
+
+```rust
+use libjpeg_turbo_rs::encode::pipeline::{compress_with_params, CompressParams};
+
+let jpeg = compress_with_params(
+    &CompressParams::new(&rgb_pixels, width, height, PixelFormat::Rgb, 85, Subsampling::S420)
+        .dct_method(DctMethod::IsFast)
+        .restart_interval(8)
+        .custom_quant(&quant_tables)
+        .custom_huffman(&dc_tables, &ac_tables),
+)?;
+```
+
 ### Lossless Transform
 
 ```rust
