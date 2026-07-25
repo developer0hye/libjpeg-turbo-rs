@@ -54,10 +54,19 @@ fn pixels_for(format: PixelFormat) -> Vec<u8> {
     buffer
 }
 
+/// A clearly non-default quantization table.
+///
+/// The base is 40, not something much coarser. At 180 every coefficient
+/// quantizes to ~0, which makes `dct_method` unobservable *on top of* this
+/// option — and whether it happens to remain observable turns out to be
+/// backend-dependent: x86_64 still differed, aarch64 did not, so CI failed on
+/// one architecture only. 40 keeps the table's own effect obvious (1143 -> 805
+/// bytes on the RGB fixture) while leaving enough AC energy for the DCT choice
+/// to still matter, on both backends.
 fn coarse_quant() -> [u16; 64] {
     let mut table: [u16; 64] = [0; 64];
     for (index, entry) in table.iter_mut().enumerate() {
-        *entry = 180 + index as u16;
+        *entry = 40 + index as u16;
     }
     table
 }
@@ -153,10 +162,10 @@ const FORMATS: &[(&str, PixelFormat)] = &[
 /// see the module docs.
 const KNOWN_VIOLATIONS: &[(&str, &str)] = &[
     // ---- #313: CMYK routes into compress_cmyk, which cannot carry options ----
-    ("cmyk|effect|restart_blocks", "#313"),
-    ("cmyk|effect|quant_table", "#313"),
-    ("cmyk|effect|huffman_tables", "#313"),
     ("cmyk|effect|dct_method_ifast", "#313"),
+    ("cmyk|effect|huffman_tables", "#313"),
+    ("cmyk|effect|quant_table", "#313"),
+    ("cmyk|effect|restart_blocks", "#313"),
     // ---- by design: the combination is meaningless, not dropped ----
     (
         "gray|independence|huffman_tables after arithmetic",
@@ -175,10 +184,6 @@ const KNOWN_VIOLATIONS: &[(&str, &str)] = &[
         "by-design",
     ),
     (
-        "gray|independence|optimize_huffman after smoothing_factor",
-        "by-design",
-    ),
-    (
         "rgb|independence|huffman_tables after arithmetic",
         "by-design",
     ),
@@ -194,92 +199,24 @@ const KNOWN_VIOLATIONS: &[(&str, &str)] = &[
         "rgb|independence|optimize_huffman after progressive",
         "by-design",
     ),
-    (
-        "rgb|independence|optimize_huffman after smoothing_factor",
-        "by-design",
-    ),
-    // ---- #322: Encoder's if/else dispatch lets options mask each other ----
-    (
-        "gray|independence|dct_method_ifast after huffman_tables",
-        "#322",
-    ),
-    (
-        "gray|independence|dct_method_ifast after quant_table",
-        "#322",
-    ),
+    // ---- #322: progressive / arithmetic paths still take no custom tables ----
     ("gray|independence|huffman_tables after progressive", "#322"),
     ("gray|independence|quant_table after arithmetic", "#322"),
-    ("gray|independence|quant_table after huffman_tables", "#322"),
-    (
-        "gray|independence|quant_table after optimize_huffman",
-        "#322",
-    ),
     ("gray|independence|quant_table after progressive", "#322"),
     (
-        "gray|independence|restart_blocks after huffman_tables",
-        "#322",
-    ),
-    ("gray|independence|restart_blocks after quant_table", "#322"),
-    (
         "gray|independence|smoothing_factor after arithmetic",
-        "#322",
-    ),
-    (
-        "gray|independence|smoothing_factor after huffman_tables",
-        "#322",
-    ),
-    (
-        "gray|independence|smoothing_factor after optimize_huffman",
         "#322",
     ),
     (
         "gray|independence|smoothing_factor after progressive",
         "#322",
     ),
-    (
-        "gray|independence|smoothing_factor after quant_table",
-        "#322",
-    ),
-    (
-        "gray|independence|smoothing_factor after restart_blocks",
-        "#322",
-    ),
-    (
-        "rgb|independence|dct_method_ifast after huffman_tables",
-        "#322",
-    ),
-    (
-        "rgb|independence|dct_method_ifast after quant_table",
-        "#322",
-    ),
     ("rgb|independence|huffman_tables after progressive", "#322"),
     ("rgb|independence|quant_table after arithmetic", "#322"),
-    ("rgb|independence|quant_table after huffman_tables", "#322"),
-    (
-        "rgb|independence|quant_table after optimize_huffman",
-        "#322",
-    ),
     ("rgb|independence|quant_table after progressive", "#322"),
-    (
-        "rgb|independence|restart_blocks after huffman_tables",
-        "#322",
-    ),
-    ("rgb|independence|restart_blocks after quant_table", "#322"),
     ("rgb|independence|smoothing_factor after arithmetic", "#322"),
     (
-        "rgb|independence|smoothing_factor after huffman_tables",
-        "#322",
-    ),
-    (
         "rgb|independence|smoothing_factor after progressive",
-        "#322",
-    ),
-    (
-        "rgb|independence|smoothing_factor after quant_table",
-        "#322",
-    ),
-    (
-        "rgb|independence|smoothing_factor after restart_blocks",
         "#322",
     ),
 ];
