@@ -68,11 +68,17 @@ jobs:
         run: cargo test --tests
         timeout-minutes: 45
 
-  # Force the SSE2-only fallback path by disabling AVX2 and SSE4.2 at
-  # compile time. Validates the secondary tier SIMD routines and scalar
-  # tail code remain correct when AVX2 is unavailable (older CPUs).
-  test-linux-x86_64-sse2-only:
-    name: Test (linux-x86_64 SSE2-only)
+  # Builds with AVX2 and SSE4.2 disabled at compile time.
+  #
+  # This is a BUILD check only. It does NOT exercise the AVX2-unavailable
+  # path: `-C target-feature` is compile-time, while every SIMD dispatch in
+  # this crate is a runtime `is_x86_feature_detected!` CPUID query, which
+  # ignores it. On a runner that has AVX2 the tests below still take the AVX2
+  # branch. The job that actually tests the fallback is
+  # `test-linux-x86_64-no-avx2-emulated`, which masks the feature at the CPUID
+  # level and asserts that it did (#320).
+  test-linux-x86_64-no-avx2-build:
+    name: Build (linux-x86_64, AVX2 disabled at compile time)
     runs-on: ubuntu-24.04
     env:
       RUSTFLAGS: "-C target-feature=-avx2,-sse4.2"
@@ -92,10 +98,63 @@ jobs:
           sudo apt-get install -y /tmp/ljt.deb
           echo "/opt/libjpeg-turbo/bin" >> $GITHUB_PATH
           /opt/libjpeg-turbo/bin/djpeg -version
-      - name: Run full test suite on SSE2-only fallback
+      - name: Run full test suite with AVX2 disabled at compile time
         # Use default features only — `--all-features` enables `full-c-parity`
         # which gates aspirational Rust-vs-C byte-exact encoder tests (opt-in).
         run: cargo test --tests
+        timeout-minutes: 45
+
+  # Runs the SIMD-sensitive tests under an emulated pre-AVX2 CPU, so
+  # `is_x86_feature_detected!("avx2")` genuinely returns false and the SSE2 /
+  # scalar fallback kernels execute.
+  #
+  # `EXPECT_NO_AVX2=1` makes the leg self-verifying: if the emulation ever
+  # stops masking the feature, `simd_dispatch_capability` fails rather than
+  # passing while silently testing the AVX2 path — which is exactly how the
+  # previous compile-time-only job gave false confidence (#320).
+  #
+  # Scoped to tests that do not shell out to the C tools: `qemu-user`
+  # intercepts `execve`, so subprocessing native `cjpeg`/`djpeg` from an
+  # emulated process is not a like-for-like comparison. The C cross-checks run
+  # natively in the other legs.
+  test-linux-x86_64-no-avx2-emulated:
+    name: Test (linux-x86_64 no-AVX2, emulated)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Install qemu-user
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y qemu-user
+          qemu-x86_64 --version
+      - name: Build test binaries
+        run: |
+          cargo test --release --no-run \
+            --test simd_dispatch_capability \
+            --test encode_pipeline_golden \
+            --test encode_option_matrix \
+            --test encode_params_composability
+      - name: Run under an emulated Nehalem (SSE4.2, no AVX)
+        env:
+          EXPECT_NO_AVX2: "1"
+        run: |
+          set -euo pipefail
+          # -cpu Nehalem predates AVX entirely, so CPUID reports no AVX2 and
+          # the runtime dispatch takes the fallback.
+          cargo test --release --no-run --message-format=json \
+            --test simd_dispatch_capability \
+            --test encode_pipeline_golden \
+            --test encode_option_matrix \
+            --test encode_params_composability \
+            | jq -r 'select(.executable != null) | .executable' \
+            | while read -r binary; do
+                echo "=== $binary ==="
+                qemu-x86_64 -cpu Nehalem "$binary" --nocapture
+              done
         timeout-minutes: 45
 
   # WASM SIMD128 smoke — runs on every PR. Build-only for `wasm-pack
