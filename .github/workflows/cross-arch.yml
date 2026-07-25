@@ -38,6 +38,15 @@ jobs:
         run: cargo test --tests
         timeout-minutes: 45
 
+      # EXPERIMENT (#319): is the encoder backend-independent now that the
+      # SIMD kernels are gated on the DCT method? The golden fixture pins
+      # x86_64 bytes; this runs it on aarch64 to find out. Non-blocking.
+      - name: Golden fixture against x86_64 bytes (informational)
+        continue-on-error: true
+        env:
+          GOLDEN_ALL_PLATFORMS: "1"
+        run: cargo test --release --test encode_pipeline_golden -- --nocapture 2>&1 | tail -60
+
   # Default x86_64 Linux job with AVX2 explicitly enabled so the AVX2
   # kernels are compiled and exercised. GitHub-hosted ubuntu-24.04
   # runners expose AVX2 in their CPU features.
