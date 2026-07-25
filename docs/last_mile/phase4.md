@@ -680,7 +680,7 @@ Divergences by subsampling: 4:2:0 → 108, 4:2:2 → 72, 4:4:0 → 24; 4:4:4 cle
 
 **Status (2026-07-25): closed.** Delivered by criterion 3 — the three variants are now shims over `compress_with_params`, so they inherit the fused strategy's dummy-block handling instead of carrying their own. All three match `cjpeg` on **576/576** swept geometries (was 372/576), and `compress_with_restart(ri=3)` additionally matches `cjpeg -restart 3B` byte-for-byte on all 576. Pinned by `issue_316_full_plane_variants_match_cjpeg_at_partial_mcus` in `tests/regression_420_dummy_block_columns.rs` (48 cjpeg cross-checks over 3 subsamplings x 8 geometries x {ri=0, ri=3}).
 
-## P4-43. Recover the AVX2 4:2:0 Fast Path for Interior MCU Columns — **OPEN**
+## P4-43. Recover the AVX2 4:2:0 Fast Path for Interior MCU Columns — **CLOSED 2026-07-26**
 
 **Motivation.** The P4-41 fix disables the fast path for the whole image when the last MCU column needs dummy blocks (`ceil(width/8)` odd — roughly half of all widths), costing ~3.2–4.5%. GitHub [#317](https://github.com/developer0hye/libjpeg-turbo-rs/issues/317).
 
@@ -689,6 +689,12 @@ Measured (EPYC 9554, medians of 15 runs, 3 repeats, `examples/bench_encode_420_g
 **Why deferred.** The fast path hoists one `begin_block`/`end_block` pair across the whole MCU row and writes through a raw `(pb, fb, buf)` triple, while the dummy path writes through `bit_writer`; splitting a row between them is not a local change. Correctness shipped first.
 
 **Acceptance criteria.** Throughput at `ceil(width/8)` odd within ~1% of the even-width case, with the 576-case sweep and the golden fixture unchanged.
+
+**Status (2026-07-26): closed.** The row fast path now runs over `0..mcus_x - 1` when the last MCU column is partial, and only that trailing column falls through to `encode_color_mcu_with_dummies`. Previously one partial column disqualified the entire row.
+
+Residual gap (medians of 15 runs x 2 repeats, EPYC 9554): 3848x2160 **0.7%** (was 3.2%), 1928x1080 **1.2%** (was 3.6%), 1000x750 **2.0%** (was 4.5%). The two large sizes meet the ~1% criterion; the smallest retains a little more because one generic column is a larger share of a short row.
+
+Free of correctness cost: the golden fixture is unchanged (byte-exact) and the C sweep shows no new divergence.
 
 ## P4-44. Encoder Byte-Parity Against `cjpeg` Is Unmeasured for `ifast` / `float` and for aarch64 — **PARTIAL: measured and `ifast` fixed; aarch64 leg outstanding**
 
@@ -880,7 +886,7 @@ Ruled out along the way, each by direct measurement rather than inspection: `fdc
 36. **P4-40** — collapse the ten copy-pasted `compress_*` variants onto a single `CompressParams` core (byte-exact), then split `src/encode/pipeline.rs` by mode.
 37. ~~**P4-41** — AVX2 4:2:0 row fast path ignored the dummy-block contract (#314) and bypassed its own AVX2 capability check (#315).~~ **CLOSED 2026-07-25** — single `use_avx2_420` gate + `y_last_col_width == y_mcu_width` guard; fused path now 576/576 vs cjpeg.
 38. ~~**P4-42** — full-plane encode variants (restart / custom-quant / custom-Huffman) skip the dummy-block contract on every platform (#316).~~ **CLOSED 2026-07-25** — the P4-40 core made them shims; 576/576 vs cjpeg.
-39. **P4-43** — recover the ~3-4.5% the P4-41 correctness fix cost on `ceil(width/8)`-odd 4:2:0 widths (#317).
+39. ~~**P4-43** — recover the ~3-4.5% the P4-41 correctness fix cost on `ceil(width/8)`-odd 4:2:0 widths (#317).~~ **CLOSED 2026-07-26** — fast path kept for interior columns; residual 0.7-2.0%.
 40. **P4-44** — quantify encoder byte-parity vs `cjpeg` for `ifast`/`float` and for the aarch64 backend, then document what is actually guaranteed (#319). **PARTIAL 2026-07-26** — measured on x86_64 and `ifast` fixed; aarch64 CI leg remains.
 46. ~~**P4-50** — `DctMethod::IsFast` both lower quality and larger than C's (#330).~~ **CLOSED 2026-07-26** — SIMD kernels gated on the DCT method.
 41. **P4-45** — make the `SSE2-only` CI job actually exercise the SSE2 fallback (QEMU/SDE); discharges #315's remaining criterion (#320).
