@@ -91,8 +91,26 @@ const PINNED: &[(usize, usize, usize, u64)] = &[
     (1920, 1080, 135493, 0xb08b_5058_4758_f0db), // ceil(1920/8) = 240 even (control)
 ];
 
+/// Pinned bytes are x86_64 output. Other backends emit different but equally
+/// valid entropy codings for some cases (P4-33), so a byte pin can only be
+/// asserted on the canonical platform. The `*_matches_cjpeg` tests below carry
+/// the correctness guarantee on every platform, because they compare against
+/// the C encoder on the same machine rather than against frozen bytes.
+const IS_CANONICAL_PLATFORM: bool = cfg!(target_arch = "x86_64");
+
 #[test]
 fn issue_314_odd_block_width_420_pinned_bytes() {
+    if !IS_CANONICAL_PLATFORM {
+        eprintln!(
+            "SKIP: pinned bytes are x86_64 output; this target ({}) may emit a \
+             different valid encoding (P4-33). Correctness here is covered by \
+             issue_314_odd_block_width_420_matches_cjpeg, which compares \
+             against stock cjpeg on this platform.",
+            std::env::consts::ARCH
+        );
+        return;
+    }
+
     let mut failures: Vec<String> = Vec::new();
 
     for &(width, height, expected_len, expected_hash) in PINNED {
