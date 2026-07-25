@@ -541,6 +541,56 @@ P3-3's closure (2026-05-06; corrected 2026-05-10) explicitly scoped the allowlis
 
 **Status (2026-07-25): closed.** Proof: PR #311 — canonical guard fails with "14 committed fuzz seed(s) drifted" against the pre-fix seeds and passes after re-commit; linux-aarch64 NEON + WASM CI jobs (which regenerate different backend bytes) pass with the committed corpus untouched; old vs new seed decodes byte-equal via `djpeg -ppm` + `cmp`.
 
+## P4-34. Transform Re-Encode Dropped Sparse DQT Slot References — **CLOSED 2026-07-24**
+
+**Motivation.** Ten scheduled Fuzz Smoke `fuzz_transform_diff_c` failures between 2026-07-19 and 2026-07-24 (runs `29679993066`, `29715965508`, `29751094520`, `29773970372`, `29799281292`, `29815394302`, `29905093435`, `29928183424`, `30039214522`, `30064906856` — the last also carried the distinct P4-35) shared one root cause: djpeg rejected our transformed output with "Quantization table 0xNN was not defined" while accepting jpegtran's.
+
+**Root cause.** `read_coefficients` collected the four DQT slots with `filter_map`, compacting them into a dense `Vec` while every component kept its *original* slot index. Any stream whose defined slots are not exactly `0..n` (only slot 1 defined; slots {0,1,3} with a gap at 2) re-encoded into a SOF that references a quantization table the output never defines.
+
+**Fix.** `read_coefficients` now builds a slot→dense map and remaps each component's `quant_table_index` through it (undefined references fall back to dense index 0; djpeg rejects the C-side equivalent anyway). All writers keep the dense invariant they already assumed.
+
+**Status (2026-07-24): closed.** All ten crash artifacts pass the harness pipeline (djpeg accepts, dimensions agree with jpegtran). Pinned by `tests/regression_transform_sparse_dqt_slots.rs` (slot-1-only and gap-at-2 fixtures; pure-Rust structural check plus djpeg/jpegtran cross-validation).
+
+## P4-35. Category-16 Coefficients Re-Encoded Into an Undecodable Huffman Stream — **CLOSED 2026-07-24**
+
+**Motivation.** Fuzz Smoke run `30064906856` (crash-7a0c14f3, 228x186 SOF10 arithmetic progressive): djpeg flagged our transformed output with "bad Huffman code" warnings (exit 2) while jpegtran's decoded cleanly.
+
+**Root cause.** The arithmetic AC-first decode yields an AC coefficient of -32768 (`(v << Al)` wrap — C's jdarith.c wraps identically; verified byte-for-byte against `jpeg_read_coefficients`). Re-encoding it needs Huffman magnitude category 16, which the 4-bit size field of a DHT symbol cannot express; the symbol computation `(run << 4) | 16` bled into the wrong symbol and desynced the stream. C's scalar encoder rejects the coefficient with ERREXIT(JERR_BAD_DCT_COEF); its x86 SIMD path silently emits garbage.
+
+**Fix.** Two parts. (1) The transcode writers (`write_coefficients_optimized` pass 1, progressive DC-first gather, progressive AC-first gather) now return `CorruptData("DCT coefficient out of range for Huffman coding")` on any category-16 value — in i16 storage that is exactly a stored/diffed -32768 (or `abs >> Al >= 0x8000` in AC-first) — matching the scalar C contract; the differential harness treats it as inconclusive-skip. (2) The arithmetic decoder gained jdarith.c's error-limbo semantics: spectral/magnitude overflow sets a poison flag (C: `ct = -1`) and every subsequent per-block decode is a no-op until `process_restart`, instead of continuing with corrupted coder state (DC overflow previously hard-errored where C tolerates).
+
+**Status (2026-07-24): closed.** The crash artifact now takes the CorruptData skip path. Pinned by `tests/regression_transform_unencodable_coefficient.rs` (fixture must decode to an i16::MIN coefficient, transform must fail with CorruptData) and `src/decode/arithmetic.rs::error_limbo_tests` (overflow enters limbo, limbo decodes nothing, restart clears it).
+
+## P4-36. Fractional Chroma Sampling Ratio Panicked in the Direct-Copy Upsample Path — **CLOSED 2026-07-24**
+
+**Motivation.** Fuzz Smoke run `29977722126` (`fuzz_decompress_lenient`, crash-4a2b926c): 64x64 baseline with Y=4x1, Cb=3x1, Cr=1x1 panicked with `range end index 3088 out of range for slice of length 3072` at pipeline.rs:4333.
+
+**Root cause.** The per-component upsample factor `y_width / cb_w` truncates 4/3 to 1, routing the component into the "no upsampling needed" direct-copy branch, which then reads luma-width rows out of a 3/4-width chroma plane. C rejects every non-integer sampling ratio up front with ERREXIT(JERR_FRACT_SAMPLE_NOTIMPL) ("Fractional sampling not implemented yet"; verified djpeg exit 1).
+
+**Fix.** Reject non-integer luma/chroma plane ratios right after the zero-factor guard with `Unsupported("fractional chroma sampling ratio…")`, in both strict and lenient modes — djpeg fails fatally, so there is nothing more lenient to offer.
+
+**Status (2026-07-24): closed.** Crash artifact completes under `cargo +nightly fuzz run fuzz_decompress_lenient <artifact> -- -runs=1`. Pinned by `tests/regression_decompress_fractional_sampling.rs` (strict + lenient error, djpeg-rejects cross-check).
+
+## P4-37. SOS Component IDs Were Never Validated Against the Frame — **CLOSED 2026-07-24**
+
+**Motivation.** Fuzz Smoke run `29815394302` (`fuzz_read_coefficients`, timeout-7a780449): a 16400x48 SOF10 arithmetic-progressive stream with 1371 scans where scan 8 (and many later scans) references component id 2 while the frame declares only id 1. C rejects at scan 8 in ~3 ms with ERREXIT(JERR_BAD_COMPONENT_ID, "Invalid component ID %d in SOS"); we decoded all 1371 scans (~670 ms native → 30 s+ libFuzzer timeout under instrumentation) and returned Ok.
+
+**Root cause.** `read_sos` parsed component ids without binding them to frame components; the arithmetic-progressive scan loop silently skipped unmatched scans (huffman-progressive happened to reject deeper in the pipeline).
+
+**Fix.** The marker reader now ports jdmarker.c get_sos binding: each scan component must match a distinct frame component (searching in frame order, skipping already-bound entries); no match is `CorruptData("Invalid component ID N in SOS")`. This also rejects duplicate CSi in one scan, which C treats identically.
+
+**Status (2026-07-24): closed.** Both artifacts (slow-unit + timeout) now error in microseconds. Pinned by `tests/regression_sos_invalid_component_id.rs` (baseline unknown id, duplicate id, progressive unknown id; djpeg-rejects cross-check for all three).
+
+## P4-38. Lossless Color Output Skipped the Point Transform and Wrapped at the Wrong Modulus — **CLOSED 2026-07-24**
+
+**Motivation.** Fuzz Smoke run `29689718301` (`fuzz_decode_diff_c`, crash-e3ad88d5): 16x16 3-component lossless (SOF3, ids 'R','G','B', Adobe transform 0, predictor 1, point transform Al=2) decoded cleanly on both sides but diverged from djpeg on every pixel (max abs diff 189).
+
+**Root cause.** Two C-parity gaps against jdlossls.c: (1) undifferencing wrapped modulo `2^precision - 1` instead of C's unconditional `& 0xFFFF`; (2) `lossless_output_color` never applied the `<< Al` output upscale (C `simple_upscale`) and saturated with `.min(255)` where C truncates via the `(_JSAMPLE)` cast. The grayscale output path already scaled correctly.
+
+**Fix.** `undifference_row` wraps at 0xFFFF; `lossless_output_color` takes `pt` and emits `((sample << Al) & 0xFF)` per component, matching C's scaler for both the Huffman (SOF3) and arithmetic (SOF11) lossless paths.
+
+**Status (2026-07-24): closed.** The artifact now decodes byte-exact vs djpeg (max diff 0, down from 189). Pinned by `tests/regression_lossless_point_transform.rs` (djpeg byte-exact cross-check plus a djpeg-pinned first-pixel probe that runs without C tools).
+
 ## Phase 4 Suggested Order
 
 1. ~~**P4-1** — export `jpeg_calc_jpeg_dimensions` and delete its missing-symbol allowlist entry.~~ **CLOSED 2026-05-10**.
@@ -572,3 +622,8 @@ P3-3's closure (2026-05-06; corrected 2026-05-10) explicitly scoped the allowlis
 27. **P4-31** — harden real-world/corpus coverage against soft-skipped Rust failures, nested-fixture omission, extensionless JPEG-seed omission, and fail-open summary parsing.
 28. ~~**P4-32** — triage the strict-C-valid SOF10 grayscale seed `24fd237...`.~~ **CLOSED AS DUPLICATE OF P4-20 2026-07-13** — coefficients and quantization match C; the max-34 pixel delta is the existing IDCT i16-fidelity family.
 29. ~~**P4-33** — verify the encoder change behind the 8×64/64×8 4:2:0 output drift, re-commit the regenerated `aspect_*` seeds, and add a drift guard so `cargo test` on a clean checkout leaves the tree clean.~~ **CLOSED 2026-07-25** — no encoder change existed: the bytes are backend-dependent (aarch64/NEON vs x86) for this partial-MCU shape and the committed seeds were aarch64 output. Corpus canonicalized to x86_64-linux; non-canonical platforms never overwrite; canonical drift guard asserts zero rewritten seeds.
+30. ~~**P4-34** — transform re-encode dropped sparse DQT slot references.~~ **CLOSED 2026-07-24** — slot→dense remap in `read_coefficients`; ten Fuzz Smoke crashes resolved.
+31. ~~**P4-35** — category-16 coefficients re-encoded into an undecodable Huffman stream.~~ **CLOSED 2026-07-24** — scalar-C JERR_BAD_DCT_COEF contract in the transcode writers + jdarith.c error-limbo port.
+32. ~~**P4-36** — fractional chroma sampling ratio panicked in the direct-copy upsample path.~~ **CLOSED 2026-07-24** — C JERR_FRACT_SAMPLE_NOTIMPL parity guard.
+33. ~~**P4-37** — SOS component ids never validated against the frame.~~ **CLOSED 2026-07-24** — jdmarker.c get_sos binding port; 1371-scan timeout stream now rejected at scan 8.
+34. ~~**P4-38** — lossless color output skipped the point transform and wrapped at the wrong modulus.~~ **CLOSED 2026-07-24** — 0xFFFF undifference wrap + `<< Al` truncating output scaler; byte-exact vs djpeg.
