@@ -370,13 +370,12 @@ fn compress_variants_are_byte_identical_to_golden() {
         return;
     }
 
-    let golden_text: String = std::fs::read_to_string(&path).unwrap_or_else(|error| {
-        panic!(
-            "golden fixture {} is missing or unreadable ({error}); generate it with \
-             REGEN_ENCODE_GOLDEN=1 cargo test --test encode_pipeline_golden",
-            path.display()
-        )
-    });
+    // Embedded rather than read at runtime: the wasm32-wasip1 leg runs under
+    // wasmtime with only `.` and `/tmp` mapped, so an absolute
+    // CARGO_MANIFEST_DIR path is unreadable there. Embedding keeps the fixture
+    // verified on every target instead of quietly skipping the one that cannot
+    // open files.
+    let golden_text: &str = include_str!("fixtures/encode_pipeline_golden.txt");
 
     let mut golden: BTreeMap<String, String> = BTreeMap::new();
     for line in golden_text.lines() {
