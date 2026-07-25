@@ -342,7 +342,7 @@ pub fn compress_with_params(params: &CompressParams<'_>) -> Result<Vec<u8>> {
     // changing it moves output bytes and needs its own C cross-validation.
     // Centralizing the drop in one place is what makes #313 a small fix.
     if pixel_format == PixelFormat::Cmyk {
-        return compress_cmyk(pixels, width, height, quality, subsampling);
+        return compress_cmyk(params);
     }
 
     let is_grayscale = pixel_format == PixelFormat::Grayscale;
@@ -1265,13 +1265,20 @@ pub fn inject_saved_markers(base: &[u8], markers: &[SavedMarker]) -> Vec<u8> {
 /// `h_samp * v_samp` K blocks. No color conversion — CMYK samples are
 /// encoded directly. Matches the SOF subsamp inference path so
 /// `tj3DecompressHeader` reports the requested `TJSAMP_*` value back.
-fn compress_cmyk(
-    pixels: &[u8],
-    width: usize,
-    height: usize,
-    quality: u8,
-    subsampling: Subsampling,
-) -> Result<Vec<u8>> {
+fn compress_cmyk(params: &CompressParams<'_>) -> Result<Vec<u8>> {
+    let CompressParams {
+        pixels,
+        width,
+        height,
+        quality,
+        subsampling,
+        dct_method,
+        restart_interval,
+        custom_quant,
+        custom_dc_huffman,
+        custom_ac_huffman,
+        ..
+    } = *params;
     let (h_samp_u8, v_samp_u8) = subsampling.sampling_factors();
     let h_samp: usize = h_samp_u8 as usize;
     let v_samp: usize = v_samp_u8 as usize;
@@ -1291,12 +1298,25 @@ fn compress_cmyk(
         )));
     }
 
-    let quant_table =
-        tables::quality_scale_quant_table(&tables::STD_LUMINANCE_QUANT_TABLE, quality);
-    let divisors = scale_quant_for_fdct(&quant_table);
+    let quant_table: [u16; 64] = match custom_quant.and_then(|tables| tables[0]) {
+        Some(table) => table,
+        None => tables::quality_scale_quant_table(&tables::STD_LUMINANCE_QUANT_TABLE, quality),
+    };
+    let divisors = if dct_method == DctMethod::IsFast {
+        scale_quant_for_ifast(&quant_table)
+    } else {
+        scale_quant_for_fdct(&quant_table)
+    };
 
-    let dc_table = build_huff_table(&tables::DC_LUMINANCE_BITS, &tables::DC_LUMINANCE_VALUES);
-    let ac_table = build_huff_table(&tables::AC_LUMINANCE_BITS, &tables::AC_LUMINANCE_VALUES);
+    let ResolvedHuffman {
+        dc_luma: dc_table,
+        ac_luma: ac_table,
+        dc_luma_bits,
+        dc_luma_values,
+        ac_luma_bits,
+        ac_luma_values,
+        ..
+    } = ResolvedHuffman::resolve(custom_dc_huffman, custom_ac_huffman);
 
     // De-interleave CMYK -> 4 planar buffers at full resolution. We do not
     // pre-downsample the M and Y planes; the per-MCU `encode_downsampled_chroma_block`
@@ -1322,11 +1342,30 @@ fn compress_cmyk(
     let mcus_y = height.div_ceil(mcu_h);
 
     let enc_simd = crate::simd::detect_encoder();
+    let fdct_quantize_fn: fn(&mut [i16; 64], &QuantDivisors, &mut [i16; 64]) = match dct_method {
+        DctMethod::IsLow => enc_simd.fdct_quantize,
+        DctMethod::IsFast => crate::simd::scalar::scalar_fdct_ifast_quantize,
+        DctMethod::Float => crate::simd::scalar::scalar_fdct_float_quantize,
+    };
     let mut bit_writer = BitWriter::new(width * height);
     let mut prev_dc = [0i16; 4];
+    let restart_mcu_interval: u32 = restart_interval as u32;
+    let mut mcu_count: u32 = 0;
+    let mut restart_marker_index: u8 = 0;
 
     for mcu_row in 0..mcus_y {
         for mcu_col in 0..mcus_x {
+            // All four components reset together at a restart, as C does.
+            if restart_mcu_interval > 0
+                && mcu_count > 0
+                && mcu_count.is_multiple_of(restart_mcu_interval)
+            {
+                bit_writer.flush_restart();
+                bit_writer.write_restart_marker(restart_marker_index);
+                restart_marker_index = restart_marker_index.wrapping_add(1);
+                prev_dc = [0i16; 4];
+            }
+            mcu_count += 1;
             let x0 = mcu_col * mcu_w;
             let y0 = mcu_row * mcu_h;
             // Component 0 (C): h_samp * v_samp blocks at full resolution.
@@ -1343,7 +1382,7 @@ fn compress_cmyk(
                         &ac_table,
                         &mut bit_writer,
                         &mut prev_dc[0],
-                        enc_simd.fdct_quantize,
+                        fdct_quantize_fn,
                     );
                 }
             }
@@ -1361,7 +1400,7 @@ fn compress_cmyk(
                         &ac_table,
                         &mut bit_writer,
                         &mut prev_dc[c],
-                        enc_simd.fdct_quantize,
+                        fdct_quantize_fn,
                     );
                 } else {
                     encode_downsampled_chroma_block(
@@ -1377,7 +1416,7 @@ fn compress_cmyk(
                         &ac_table,
                         &mut bit_writer,
                         &mut prev_dc[c],
-                        enc_simd.fdct_quantize,
+                        fdct_quantize_fn,
                     );
                 }
             }
@@ -1396,7 +1435,7 @@ fn compress_cmyk(
                         &ac_table,
                         &mut bit_writer,
                         &mut prev_dc[3],
-                        enc_simd.fdct_quantize,
+                        fdct_quantize_fn,
                     );
                 }
             }
@@ -1423,20 +1462,12 @@ fn compress_cmyk(
     ];
     marker_writer::write_sof0(&mut output, width as u16, height as u16, &components);
 
-    marker_writer::write_dht(
-        &mut output,
-        0,
-        0,
-        &tables::DC_LUMINANCE_BITS,
-        &tables::DC_LUMINANCE_VALUES,
-    );
-    marker_writer::write_dht(
-        &mut output,
-        1,
-        0,
-        &tables::AC_LUMINANCE_BITS,
-        &tables::AC_LUMINANCE_VALUES,
-    );
+    marker_writer::write_dht(&mut output, 0, 0, &dc_luma_bits, &dc_luma_values);
+    marker_writer::write_dht(&mut output, 1, 0, &ac_luma_bits, &ac_luma_values);
+
+    if restart_interval > 0 {
+        marker_writer::write_dri(&mut output, restart_interval);
+    }
 
     let scan_components = vec![(1, 0, 0), (2, 0, 0), (3, 0, 0), (4, 0, 0)];
     marker_writer::write_sos(&mut output, &scan_components);
