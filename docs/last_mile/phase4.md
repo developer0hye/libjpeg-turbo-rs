@@ -720,7 +720,7 @@ P4-33 established the phenomenon (backend-dependent output, decodes pixel-identi
 
 **Why deferred.** Not blocking: it is CI coverage, not a product defect, and the P4-41 fix itself is already shipped and verified on AVX2 hardware. Local reproduction needs `qemu-user`, which this box cannot install (no passwordless sudo).
 
-## P4-46. `Encoder` Silently Drops Builder Options When Combined — **OPEN**
+## P4-46. `Encoder` Silently Drops Builder Options When Combined — **PARTIAL: baseline paths fixed; progressive/arithmetic still take no custom tables or smoothing**
 
 **Motivation.** Filed 2026-07-25 while deciding what a README example for `CompressParams` should say. GitHub [#322](https://github.com/developer0hye/libjpeg-turbo-rs/issues/322). Unlike P4-39 this is **not** CMYK-specific — it hits ordinary RGB input through the public builder.
 
@@ -738,6 +738,14 @@ Measured at 64x48 RGB q75: `.restart_blocks(3)` alone gives 3 RST markers, but `
 2. Cross-validated against `cjpeg` for combinations C can express (`-restart NB` with `-qtables`).
 3. The three `#[ignore]`d tests in `tests/encoder_option_composability.rs` un-ignored and green (all three fail today under `--include-ignored`, which is the reproduction).
 4. Combinations that genuinely cannot be honoured return an error rather than dropping silently.
+
+**Status (2026-07-26): baseline paths closed.** The if/else chain is replaced by a single `CompressParams` build, and `compress_optimized` became `compress_optimized_with_params`, honouring custom quant tables and — new — the `optimize_huffman` flag separately from `smoothing_factor`. Previously *any* smoothing forced two-pass optimization, which silently overrode custom Huffman tables. 22 of the 29 tracked violations no longer reproduce.
+
+One entry was reclassified `test-limit` rather than fixed: `gray|independence|dct_method_ifast after quant_table` is unobservable with the fixture's deliberately coarse table (every coefficient quantizes to ~0, so `islow` and `ifast` agree at 364 bytes each), while against the default tables they differ (811 vs 810).
+
+Fixing this also surfaced **P4-49 / #327** — `smoothing_factor` was a silent no-op for grayscale. It had been masked: grayscale + smoothing previously routed through the optimized path whose optimal tables changed the bytes, so smoothing appeared to work while contributing nothing.
+
+**Remaining.** The progressive and arithmetic arms still accept neither custom quant tables, custom Huffman tables, nor smoothing — 10 violations. Each needs its own plumbing (`compress_progressive_with_scans`, `compress_arithmetic*`) rather than the shared baseline core, so it is tracked separately from the closed baseline work.
 
 ## P4-47. Progressive Encoding Diverges From `cjpeg` At Every Even Height Not A Multiple Of 16 — **CLOSED 2026-07-26**
 
@@ -783,6 +791,18 @@ Baseline was unaffected because it feeds planes already padded by `pad_chroma_pl
 2. A sharded run over `src/encode/pipeline.rs` (**3807** mutants, not attempted here), surviving mutants triaged into "needs a test" vs "equivalent mutant".
 3. `cargo mutants --in-diff` in CI so untested new code is flagged at review time.
 
+## P4-49. `smoothing_factor` Is A Silent No-Op For Grayscale — **CLOSED 2026-07-26**
+
+**Motivation.** Found 2026-07-26 by the metamorphic option matrix while closing the baseline half of P4-46. GitHub [#327](https://github.com/developer0hye/libjpeg-turbo-rs/issues/327).
+
+`src/encode/pipeline.rs` gated the full-size smoothing on `!is_grayscale`. C selects `fullsize_smooth_downsample` for **every** component sampled at the maximum factors (`jcsample.c:506-513`), which for a single-component image is the grayscale plane itself: on a 48x32 noisy gradient at q75, `cjpeg -grayscale` emits 811 bytes and `-smooth 50` emits 657.
+
+**Why it was invisible.** Before P4-46, grayscale + smoothing routed unconditionally through the optimized-Huffman path, and those optimal tables changed the bytes — so smoothing *appeared* to do something while contributing nothing. Only once the dispatch stopped forcing optimization did the no-op become observable.
+
+**Fix.** Drop the `!is_grayscale` term from the luma gate. The adjacent `use_smooth_chroma` gate keeps its own — a grayscale image has no chroma planes to smooth.
+
+**Status (2026-07-26): closed.** Byte-identical to `cjpeg -grayscale -smooth N` across 6 geometries x smoothing {0,1,25,50,100}, pinned by `tests/regression_grayscale_smoothing.rs`. Note the effect test starts at factor 2: C itself produces identical output for `-smooth 0` and `-smooth 1` on this content, because the weights (`memberscale = 16384 - factor * 80`, `jcsample.c:338`) round away — asserting an effect there would assert something C does not do. The golden fixture moved in exactly 736 of 20,160 cases, all `optimized|gray` with smoothing > 0.
+
 ## Phase 4 Suggested Order
 
 1. ~~**P4-1** — export `jpeg_calc_jpeg_dimensions` and delete its missing-symbol allowlist entry.~~ **CLOSED 2026-05-10**.
@@ -826,6 +846,7 @@ Baseline was unaffected because it feeds planes already padded by `pad_chroma_pl
 39. **P4-43** — recover the ~3-4.5% the P4-41 correctness fix cost on `ceil(width/8)`-odd 4:2:0 widths (#317).
 40. **P4-44** — quantify encoder byte-parity vs `cjpeg` for `ifast`/`float` and for the aarch64 backend, then document what is actually guaranteed (#319).
 41. **P4-45** — make the `SSE2-only` CI job actually exercise the SSE2 fallback (QEMU/SDE); discharges #315's remaining criterion (#320).
-42. **P4-46** — make `Encoder`'s dispatch build one `CompressParams` so builder options stop dropping each other (#322).
+42. **P4-46** — make `Encoder`'s dispatch build one `CompressParams` so builder options stop dropping each other (#322). **PARTIAL 2026-07-26** — baseline paths done (22/29); progressive/arithmetic plumbing remains.
+45. ~~**P4-49** — `smoothing_factor` is a silent no-op for grayscale (#327).~~ **CLOSED 2026-07-26** — byte-exact vs `cjpeg -grayscale -smooth`.
 43. ~~**P4-47** — progressive 4:2:0/4:4:0 diverges from `cjpeg` at every even height not a multiple of 16, including 1920x1080 (#324).~~ **CLOSED 2026-07-26** — chroma row-group replication; 4032/4032 vs cjpeg.
 44. **P4-48** — close the mutation-testing blind spots in `api/encoder.rs`, then shard `encode/pipeline.rs` (#325).
