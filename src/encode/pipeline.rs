@@ -14,6 +14,28 @@ use crate::encode::progressive::ProgressiveScan;
 use crate::encode::tables;
 use crate::simd::QuantDivisors;
 
+/// Whether the fused SIMD extract+FDCT+quantize kernels may be used.
+///
+/// Those kernels hardcode the **islow** transform. The `ifast` and `float`
+/// methods come with divisor tables scaled for their own transforms, so
+/// feeding islow coefficients to them mis-scales every output by the AA&N
+/// factor — which is how `-dct fast` ended up both lower quality and larger
+/// than C's (#330). Callers that hold a `fdct_quantize_fn` must therefore ask
+/// this before taking a SIMD shortcut.
+fn may_use_islow_simd_kernel(
+    fdct_quantize_fn: fn(&mut [i16; 64], &QuantDivisors, &mut [i16; 64]),
+) -> bool {
+    let is_ifast: bool = std::ptr::eq(
+        fdct_quantize_fn as *const (),
+        crate::simd::scalar::scalar_fdct_ifast_quantize as *const (),
+    );
+    let is_float: bool = std::ptr::eq(
+        fdct_quantize_fn as *const (),
+        crate::simd::scalar::scalar_fdct_float_quantize as *const (),
+    );
+    !is_ifast && !is_float
+}
+
 /// Color conversion function: (pixels, y, cb, cr, width).
 type ColorConvertRowFn = fn(&[u8], &mut [u8], &mut [u8], &mut [u8], usize);
 
@@ -463,8 +485,12 @@ pub fn compress_with_params(params: &CompressParams<'_>) -> Result<Vec<u8>> {
         // emptiness instead would let a non-AVX2 x86_64 CPU reach AVX2
         // intrinsics with never-downsampled (all-zero) chroma — issue #315.
         #[cfg(target_arch = "x86_64")]
-        let use_avx2_420: bool =
-            subsampling == Subsampling::S420 && is_x86_feature_detected!("avx2");
+        // Also gated on the DCT method: this path calls the islow AVX2 kernels
+        // directly, while ifast/float carry divisors scaled for their own
+        // transforms (#330).
+        let use_avx2_420: bool = subsampling == Subsampling::S420
+            && is_x86_feature_detected!("avx2")
+            && may_use_islow_simd_kernel(fdct_quantize_fn);
         #[cfg(target_arch = "x86_64")]
         let half_w: usize = padded_w / 2;
         #[cfg(target_arch = "x86_64")]
@@ -6449,15 +6475,7 @@ fn encode_single_block(
 
     // The fused SIMD path uses islow FDCT internally. Skip it for ifast/float
     // so the caller-provided fdct_quantize_fn (with correct divisors) is used.
-    let is_ifast: bool = std::ptr::eq(
-        fdct_quantize_fn as *const (),
-        crate::simd::scalar::scalar_fdct_ifast_quantize as *const (),
-    );
-    let is_float: bool = std::ptr::eq(
-        fdct_quantize_fn as *const (),
-        crate::simd::scalar::scalar_fdct_float_quantize as *const (),
-    );
-    let use_fused_simd: bool = !is_ifast && !is_float;
+    let use_fused_simd: bool = may_use_islow_simd_kernel(fdct_quantize_fn);
 
     // Fused path for interior blocks: load u8 → FDCT → quantize → zigzag
     // without intermediate [i16; 64] buffer between extract and FDCT.
@@ -7230,7 +7248,10 @@ fn fdct_quantize_block(
     fdct_quantize_fn: fn(&mut [i16; 64], &QuantDivisors, &mut [i16; 64]),
     out: &mut [i16; 64],
 ) {
-    if block_x + 8 <= plane_width && block_y + 8 <= plane_height && is_x86_feature_detected!("avx2")
+    if block_x + 8 <= plane_width
+        && block_y + 8 <= plane_height
+        && is_x86_feature_detected!("avx2")
+        && may_use_islow_simd_kernel(fdct_quantize_fn)
     {
         unsafe {
             crate::simd::x86_64::avx2_extract_fdct_quantize(
@@ -7271,6 +7292,7 @@ fn fdct_quantize_chroma_h2v1(
     if block_x + 16 <= plane_width
         && block_y + 8 <= plane_height
         && is_x86_feature_detected!("avx2")
+        && may_use_islow_simd_kernel(fdct_quantize_fn)
     {
         unsafe {
             crate::simd::x86_64::avx2_downsample_h2v1_fdct_quantize(
@@ -7286,6 +7308,7 @@ fn fdct_quantize_chroma_h2v1(
     if block_x + 16 <= plane_width
         && block_y + 8 <= plane_height
         && is_x86_feature_detected!("ssse3")
+        && may_use_islow_simd_kernel(fdct_quantize_fn)
     {
         let mut block = [0i16; 64];
         unsafe {
@@ -7334,7 +7357,10 @@ fn encode_mcu_444_x86_64(
     fdct_quantize_fn: fn(&mut [i16; 64], &QuantDivisors, &mut [i16; 64]),
 ) {
     let mut q: [[i16; 64]; 3] = [[0i16; 64]; 3];
-    let has_avx2: bool = is_x86_feature_detected!("avx2");
+    // The AVX2 kernels below are islow-only; ifast/float carry divisors
+    // scaled for their own transforms (#330).
+    let has_avx2: bool =
+        is_x86_feature_detected!("avx2") && may_use_islow_simd_kernel(fdct_quantize_fn);
     let interior: bool = x0 + 8 <= width && y0 + 8 <= height;
 
     if interior && has_avx2 {
@@ -7450,7 +7476,10 @@ fn encode_mcu_422_x86_64(
     fdct_quantize_fn: fn(&mut [i16; 64], &QuantDivisors, &mut [i16; 64]),
 ) {
     let mut q: [[i16; 64]; 4] = [[0i16; 64]; 4];
-    let has_avx2: bool = is_x86_feature_detected!("avx2");
+    // The AVX2 kernels below are islow-only; ifast/float carry divisors
+    // scaled for their own transforms (#330).
+    let has_avx2: bool =
+        is_x86_feature_detected!("avx2") && may_use_islow_simd_kernel(fdct_quantize_fn);
     // Interior check: 2 Y blocks (16 wide) + H2V1 chroma (16 wide, 8 tall)
     let interior: bool = x0 + 16 <= width && y0 + 8 <= height;
 
@@ -7592,7 +7621,10 @@ fn encode_mcu_420_x86_64(
     // Phase 1: FDCT + quantize all 6 blocks (4 Y + 1 Cb + 1 Cr)
     // Cache feature detection once per MCU (not per block).
     let mut q: [[i16; 64]; 6] = [[0i16; 64]; 6];
-    let has_avx2: bool = is_x86_feature_detected!("avx2");
+    // The AVX2 kernels below are islow-only; ifast/float carry divisors
+    // scaled for their own transforms (#330).
+    let has_avx2: bool =
+        is_x86_feature_detected!("avx2") && may_use_islow_simd_kernel(fdct_quantize_fn);
 
     // Check if all 4 Y blocks and both chroma blocks are interior (common case).
     // For 1080p with 16x16 MCUs, only edge MCUs fail this check.
@@ -7757,7 +7789,10 @@ fn encode_mcu_420_half_chroma(
     fdct_quantize_fn: fn(&mut [i16; 64], &QuantDivisors, &mut [i16; 64]),
 ) {
     let mut q: [[i16; 64]; 6] = [[0i16; 64]; 6];
-    let has_avx2: bool = is_x86_feature_detected!("avx2");
+    // The AVX2 kernels below are islow-only; ifast/float carry divisors
+    // scaled for their own transforms (#330).
+    let has_avx2: bool =
+        is_x86_feature_detected!("avx2") && may_use_islow_simd_kernel(fdct_quantize_fn);
 
     // Check if all blocks are interior (common case for non-edge MCUs)
     let y_interior: bool = y_x0 + 16 <= y_stride && y_y0 + 16 <= 16;
@@ -7903,15 +7938,7 @@ fn encode_downsampled_chroma_block(
     fdct_quantize_fn: fn(&mut [i16; 64], &QuantDivisors, &mut [i16; 64]),
 ) {
     // The fused SIMD paths use islow FDCT; skip for ifast/float.
-    let is_ifast: bool = std::ptr::eq(
-        fdct_quantize_fn as *const (),
-        crate::simd::scalar::scalar_fdct_ifast_quantize as *const (),
-    );
-    let is_float: bool = std::ptr::eq(
-        fdct_quantize_fn as *const (),
-        crate::simd::scalar::scalar_fdct_float_quantize as *const (),
-    );
-    let use_fused_simd: bool = !is_ifast && !is_float;
+    let use_fused_simd: bool = may_use_islow_simd_kernel(fdct_quantize_fn);
 
     // Fused NEON path: downsample + FDCT + quantize + zigzag in one pass,
     // eliminating the intermediate [i16; 64] downsampled block.
@@ -9162,15 +9189,7 @@ fn gather_block(
     // For ifast / float methods the caller supplies a scalar `fdct_quantize_fn`
     // that pairs the matching FDCT with its method-specific divisors, so the
     // SIMD shortcuts must be bypassed to avoid silently downgrading to islow.
-    let is_ifast: bool = std::ptr::eq(
-        fdct_quantize_fn as *const (),
-        crate::simd::scalar::scalar_fdct_ifast_quantize as *const (),
-    );
-    let is_float: bool = std::ptr::eq(
-        fdct_quantize_fn as *const (),
-        crate::simd::scalar::scalar_fdct_float_quantize as *const (),
-    );
-    let use_fused_simd: bool = !is_ifast && !is_float;
+    let use_fused_simd: bool = may_use_islow_simd_kernel(fdct_quantize_fn);
 
     // NEON/AVX2 fused path for interior blocks
     if use_fused_simd && block_x + 8 <= plane_width && block_y + 8 <= plane_height {
@@ -9274,15 +9293,7 @@ fn gather_downsampled_block(
     // The fused downsample+FDCT NEON/AVX2 kernels here use islow internally;
     // bypass them when the caller asked for ifast/float so the supplied
     // `fdct_quantize_fn` (with method-matching divisors) is used instead.
-    let is_ifast: bool = std::ptr::eq(
-        fdct_quantize_fn as *const (),
-        crate::simd::scalar::scalar_fdct_ifast_quantize as *const (),
-    );
-    let is_float: bool = std::ptr::eq(
-        fdct_quantize_fn as *const (),
-        crate::simd::scalar::scalar_fdct_float_quantize as *const (),
-    );
-    let use_fused_simd: bool = !is_ifast && !is_float;
+    let use_fused_simd: bool = may_use_islow_simd_kernel(fdct_quantize_fn);
 
     // NEON/AVX2 fused downsample+FDCT+quantize for interior blocks
     if use_fused_simd && block_x + src_w <= plane_width && block_y + src_h <= plane_height {
