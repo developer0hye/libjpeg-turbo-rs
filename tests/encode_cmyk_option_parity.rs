@@ -1,9 +1,10 @@
 //! Issue #313: the CMYK encode path silently drops per-variant options.
 //!
-//! Every `compress_*` variant early-returns into `compress_cmyk(pixels, width,
-//! height, quality, subsampling)` — a signature that cannot carry restart
-//! intervals, custom tables, smoothing, or DCT method — so those options are
-//! discarded without any error reaching the caller.
+//! The four baseline `compress_*` entry points share one early return into
+//! `compress_cmyk(pixels, width, height, quality, subsampling)` — a signature
+//! that cannot carry restart intervals, custom tables, or a DCT method — so
+//! those options are discarded without any error reaching the caller.
+//! `compress_optimized`, which owns smoothing, rejects CMYK outright instead.
 //!
 //! Upstream libjpeg-turbo gates none of these on colorspace: `optimize_coding`
 //! (`jcmaster.c`), `restart_interval` (`jchuff.c`), `smoothing_factor`
