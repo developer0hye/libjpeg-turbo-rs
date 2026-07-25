@@ -424,38 +424,6 @@ impl<'a> Encoder<'a> {
         }
     }
 
-    fn _effective_quant_tables(&self) -> [Option<[u16; 64]>; 4] {
-        let mut result = self.custom_quant_tables;
-        if self.force_baseline {
-            for table in result.iter_mut().flatten() {
-                for val in table.iter_mut() {
-                    if *val > 255 {
-                        *val = 255;
-                    }
-                }
-            }
-        }
-        if let Some(factors) = self.quality_factors {
-            let base_tables: [&[u8; 64]; 4] = [
-                &tables::STD_LUMINANCE_QUANT_TABLE,
-                &tables::STD_CHROMINANCE_QUANT_TABLE,
-                &tables::STD_CHROMINANCE_QUANT_TABLE,
-                &tables::STD_CHROMINANCE_QUANT_TABLE,
-            ];
-            for (i, base) in base_tables.iter().enumerate() {
-                if result[i].is_none() {
-                    let scale: u32 = quality::quality_scaling(factors[i]);
-                    result[i] = Some(quality::scale_quant_table_linear(
-                        base,
-                        scale,
-                        self.force_baseline,
-                    ));
-                }
-            }
-        }
-        result
-    }
-
     fn has_custom_quant_tables(&self) -> bool {
         self.custom_quant_tables.iter().any(|t| t.is_some()) || self.quality_factors.is_some()
     }
@@ -1074,5 +1042,127 @@ impl<'a> Encoder<'a> {
             ));
         }
         result
+    }
+}
+
+#[cfg(test)]
+mod luminance_tests {
+    use super::*;
+
+    /// BT.601 reference, written independently of the implementation.
+    fn bt601(red: u8, green: u8, blue: u8) -> u8 {
+        ((19595 * red as u32 + 38470 * green as u32 + 7471 * blue as u32 + 32768) >> 16) as u8
+    }
+
+    fn interleave(format: PixelFormat, red: u8, green: u8, blue: u8) -> Vec<u8> {
+        const PAD: u8 = 0xA5;
+        match format {
+            PixelFormat::Grayscale => vec![bt601(red, green, blue)],
+            PixelFormat::Rgb => vec![red, green, blue],
+            PixelFormat::Bgr => vec![blue, green, red],
+            PixelFormat::Rgba | PixelFormat::Rgbx => vec![red, green, blue, PAD],
+            PixelFormat::Bgra | PixelFormat::Bgrx => vec![blue, green, red, PAD],
+            PixelFormat::Xrgb | PixelFormat::Argb => vec![PAD, red, green, blue],
+            PixelFormat::Xbgr | PixelFormat::Abgr => vec![PAD, blue, green, red],
+            other => panic!("unsupported in this test: {other:?}"),
+        }
+    }
+
+    /// Covers `extract_luminance` directly rather than through `Encoder`.
+    ///
+    /// `Encoder` never reaches the `Rgb` or `Grayscale` arms — it routes plain
+    /// `Rgb` through the SIMD `rgb_to_ycbcr_row` and skips the call entirely
+    /// for `Grayscale` — so an integration test cannot exercise them, and
+    /// mutation testing showed 16 mutants surviving in the `Rgb` arm alone
+    /// (issue #325). A unit test is the only way to reach them.
+    #[test]
+    fn extract_luminance_matches_bt601_for_every_format() {
+        let formats: &[PixelFormat] = &[
+            PixelFormat::Grayscale,
+            PixelFormat::Rgb,
+            PixelFormat::Bgr,
+            PixelFormat::Rgba,
+            PixelFormat::Bgra,
+            PixelFormat::Rgbx,
+            PixelFormat::Bgrx,
+            PixelFormat::Xrgb,
+            PixelFormat::Xbgr,
+            PixelFormat::Argb,
+            PixelFormat::Abgr,
+        ];
+        // Primaries isolate each weight; the asymmetric mixes catch an R/B swap.
+        let colours: &[(u8, u8, u8)] = &[
+            (255, 0, 0),
+            (0, 255, 0),
+            (0, 0, 255),
+            (240, 12, 33),
+            (17, 200, 93),
+            (255, 255, 255),
+            (0, 0, 0),
+        ];
+
+        for &format in formats {
+            for &(red, green, blue) in colours {
+                let pixel: Vec<u8> = interleave(format, red, green, blue);
+                let got: Vec<u8> = Encoder::extract_luminance(&pixel, 1, format);
+                assert_eq!(
+                    got,
+                    vec![bt601(red, green, blue)],
+                    "{format:?} rgb({red},{green},{blue})"
+                );
+            }
+        }
+    }
+
+    /// `restart_rows(n)` converts to MCU blocks as `n * MCUs_per_row`, so the
+    /// MCU width per subsampling has to be right. Mutation testing found the
+    /// `==` in that conversion invertible undetected (issue #325), and #322
+    /// showed restart handling is fragile enough to be worth pinning.
+    #[test]
+    fn restart_rows_convert_to_blocks_using_the_mcu_width() {
+        let pixels: Vec<u8> = vec![0u8; 64 * 64 * 3];
+        // 64px wide: 8 MCUs across at mcu_w=8, 4 at 16, 2 at 32.
+        let cases: &[(Subsampling, u16)] = &[
+            (Subsampling::S444, 8),
+            (Subsampling::S440, 8),
+            (Subsampling::S441, 8),
+            (Subsampling::S422, 4),
+            (Subsampling::S420, 4),
+            (Subsampling::S24, 4),
+            (Subsampling::S411, 2),
+            (Subsampling::S410, 2),
+        ];
+        for &(subsampling, mcus_across) in cases {
+            let encoder = Encoder::new(&pixels, 64, 64, PixelFormat::Rgb)
+                .subsampling(subsampling)
+                .restart_rows(3);
+            assert_eq!(
+                encoder.compute_restart_interval(subsampling),
+                3 * mcus_across,
+                "{subsampling:?}: restart_rows(3) should be 3 x {mcus_across} MCU blocks"
+            );
+        }
+    }
+
+    /// `restart_blocks` is already in MCU units and must pass through unchanged.
+    #[test]
+    fn restart_blocks_passes_through_unchanged() {
+        let pixels: Vec<u8> = vec![0u8; 64 * 64 * 3];
+        for n in [1u16, 7, 1000] {
+            let encoder = Encoder::new(&pixels, 64, 64, PixelFormat::Rgb).restart_blocks(n);
+            assert_eq!(encoder.compute_restart_interval(Subsampling::S420), n);
+        }
+        // Unset means no restarts at all.
+        let encoder = Encoder::new(&pixels, 64, 64, PixelFormat::Rgb);
+        assert_eq!(encoder.compute_restart_interval(Subsampling::S420), 0);
+    }
+
+    /// CMYK and RGB565 are not colour-converted here; both fill a neutral grey.
+    #[test]
+    fn extract_luminance_fills_neutral_for_unconverted_formats() {
+        for format in [PixelFormat::Cmyk, PixelFormat::Rgb565] {
+            let got: Vec<u8> = Encoder::extract_luminance(&[0u8; 16], 4, format);
+            assert_eq!(got, vec![128u8; 4], "{format:?}");
+        }
     }
 }

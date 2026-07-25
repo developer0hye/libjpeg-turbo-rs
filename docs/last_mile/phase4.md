@@ -773,7 +773,7 @@ Baseline was unaffected because it feeds planes already padded by `pad_chroma_pl
 
 **Status (2026-07-26): closed.** All four entropy modes now match `cjpeg` on **4032/4032** swept cases — 8 subsamplings (including the 4-factor 4:4:1 / 4:1:1 / 4:1:0 / 2:4), both colourspaces, 28 geometries covering heights 1..20 plus 1920x1080 / 800x600 / 1920x1088 / 500x375, at four qualities. Was 4016/4032 before. Pinned by `tests/regression_progressive_chroma_row_group.rs`. The P4-33 drift guard correctly flagged 108 `*_441_*_prog` / `_aprog` corpus seeds whose bytes the fix changes; the regenerated seeds are committed and verified to still decode under `djpeg`.
 
-## P4-48. Mutation Testing: 12 Of 38 Encoder Mutants Survive The Full Suite — **OPEN**
+## P4-48. Mutation Testing: 12 Of 38 Encoder Mutants Survive The Full Suite — **PARTIAL: `api/encoder.rs` blind spots closed; `encode/pipeline.rs` unsampled**
 
 **Motivation.** Filed 2026-07-25 from the first `cargo-mutants` pass over `src/api/encoder.rs`. GitHub [#325](https://github.com/developer0hye/libjpeg-turbo-rs/issues/325). This is the meta-level complement to P4-39/P4-46/P4-47: those are bugs, this is where a bug *would not be noticed*.
 
@@ -790,6 +790,15 @@ Baseline was unaffected because it feeds planes already padded by `pad_chroma_pl
 1. Blind spots 1-3 closed, each with a test that fails if the mutant is reintroduced.
 2. A sharded run over `src/encode/pipeline.rs` (**3807** mutants, not attempted here), surviving mutants triaged into "needs a test" vs "equivalent mutant".
 3. `cargo mutants --in-diff` in CI so untested new code is flagged at review time.
+
+**Status (2026-07-26): criteria 1 closed.** All three blind spots are shut, verified by re-running the same mutation scope: **81/81 mutants now caught**, versus 16 surviving before.
+
+- **`extract_luminance`** gained assertions on the actual luma values, checked against an independently written BT.601 reference, for all 11 formats x 7 colours — with primaries isolating each weight and asymmetric mixes catching an R/B swap, which greys cannot. A separate test pins that the pad/alpha byte of the 4-byte formats does not reach the computation.
+  Note this needed a **unit** test, not an integration one: `Encoder` never reaches the `Rgb` or `Grayscale` arms (it routes plain `Rgb` through the SIMD `rgb_to_ycbcr_row` and skips the call entirely for grayscale), so 16 mutants in the `Rgb` arm alone were unreachable from outside the crate.
+- **`_effective_quant_tables`** deleted — 31 lines, referenced nowhere.
+- **`compute_restart_interval`** pinned: `restart_rows(n)` must convert as `n x MCUs_across` for all eight subsamplings, and `restart_blocks` must pass through unchanged.
+
+**Remaining.** Criteria 2 and 3: `src/encode/pipeline.rs` (**3807** mutants) is still unsampled, and `cargo mutants --in-diff` is not yet in CI.
 
 ## P4-49. `smoothing_factor` Is A Silent No-Op For Grayscale — **CLOSED 2026-07-26**
 
@@ -849,4 +858,4 @@ Baseline was unaffected because it feeds planes already padded by `pad_chroma_pl
 42. **P4-46** — make `Encoder`'s dispatch build one `CompressParams` so builder options stop dropping each other (#322). **PARTIAL 2026-07-26** — baseline paths done (22/29); progressive/arithmetic plumbing remains.
 45. ~~**P4-49** — `smoothing_factor` is a silent no-op for grayscale (#327).~~ **CLOSED 2026-07-26** — byte-exact vs `cjpeg -grayscale -smooth`.
 43. ~~**P4-47** — progressive 4:2:0/4:4:0 diverges from `cjpeg` at every even height not a multiple of 16, including 1920x1080 (#324).~~ **CLOSED 2026-07-26** — chroma row-group replication; 4032/4032 vs cjpeg.
-44. **P4-48** — close the mutation-testing blind spots in `api/encoder.rs`, then shard `encode/pipeline.rs` (#325).
+44. **P4-48** — close the mutation-testing blind spots in `api/encoder.rs`, then shard `encode/pipeline.rs` (#325). **PARTIAL 2026-07-26** — encoder.rs closed (81/81 caught); pipeline.rs unsampled.
