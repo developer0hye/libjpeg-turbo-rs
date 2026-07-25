@@ -704,6 +704,22 @@ P4-33 established the phenomenon (backend-dependent output, decodes pixel-identi
 2. The same sweep as a CI step on the `linux-aarch64 NEON` job, which already installs official libjpeg-turbo 3.1.4.1 and so has `cjpeg` available.
 3. Whatever byte-exactness the project actually guarantees stated in `docs/FEATURE_PARITY.md` and enforced per backend. Concluding "byte-exact for `islow`, pixel-accurate for `ifast`/`float`" is an acceptable outcome — the requirement is that it be a documented decision rather than an unexamined assumption.
 
+## P4-45. `SSE2-only` CI Job Does Not Test the SSE2 Fallback — **OPEN**
+
+**Motivation.** Filed 2026-07-25 while looking for a way to verify P4-41/#315 on a non-AVX2 CPU. GitHub [#320](https://github.com/developer0hye/libjpeg-turbo-rs/issues/320).
+
+`cross-arch.yml:78` sets `RUSTFLAGS: "-C target-feature=-avx2,-sse4.2"` and the job comment claims it "validates the secondary tier SIMD routines and scalar tail code remain correct when AVX2 is unavailable (older CPUs)". It does not. That flag is compile-time; every SIMD dispatch here is a runtime CPUID query via `is_x86_feature_detected!`, which ignores it. Built with the job's exact flags on an AVX2 machine: `cfg!(target_feature="avx2")` is **false** while `is_x86_feature_detected!("avx2")` is **true**, so the AVX2 branch is taken anyway.
+
+**Scope.** 59 runtime dispatch points (38 on `avx2`, 6 `sse2`, 2 each `ssse3`/`lzcnt`/`bmi1`) across `src/simd/x86_64/{mod,color,idct,avx2_idct,avx2_fdct,avx2_merged,upsample}.rs`, both pipelines, and `src/api/progressive_output.rs`. The SSE2/scalar fallback for essentially the whole x86_64 SIMD layer has never executed in CI. Worse than having no job, since the name asserts coverage that does not exist — #315 is one concrete bug it could never have caught.
+
+**Acceptance criteria.**
+
+1. A CI leg where `is_x86_feature_detected!("avx2")` genuinely returns false for the test binaries — user-mode QEMU (`qemu-x86_64 -cpu Nehalem`) or Intel SDE (`sde -snb`) — asserted in a test rather than assumed.
+2. Full suite green under it. This also discharges #315's outstanding acceptance criterion 2.
+3. The existing compile-time job renamed to say it is a build check.
+
+**Why deferred.** Not blocking: it is CI coverage, not a product defect, and the P4-41 fix itself is already shipped and verified on AVX2 hardware. Local reproduction needs `qemu-user`, which this box cannot install (no passwordless sudo).
+
 ## Phase 4 Suggested Order
 
 1. ~~**P4-1** — export `jpeg_calc_jpeg_dimensions` and delete its missing-symbol allowlist entry.~~ **CLOSED 2026-05-10**.
@@ -746,3 +762,4 @@ P4-33 established the phenomenon (backend-dependent output, decodes pixel-identi
 38. ~~**P4-42** — full-plane encode variants (restart / custom-quant / custom-Huffman) skip the dummy-block contract on every platform (#316).~~ **CLOSED 2026-07-25** — the P4-40 core made them shims; 576/576 vs cjpeg.
 39. **P4-43** — recover the ~3-4.5% the P4-41 correctness fix cost on `ceil(width/8)`-odd 4:2:0 widths (#317).
 40. **P4-44** — quantify encoder byte-parity vs `cjpeg` for `ifast`/`float` and for the aarch64 backend, then document what is actually guaranteed (#319).
+41. **P4-45** — make the `SSE2-only` CI job actually exercise the SSE2 fallback (QEMU/SDE); discharges #315's remaining criterion (#320).
