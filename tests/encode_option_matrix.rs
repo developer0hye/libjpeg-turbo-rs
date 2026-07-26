@@ -174,14 +174,27 @@ const FORMATS: &[(&str, PixelFormat, Option<ColorSpace>)] = &[
 /// Format: `"<format>|<property>|<detail>"`. Enforced in both directions —
 /// see the module docs.
 const KNOWN_VIOLATIONS: &[(&str, &str)] = &[
-    // ---- real gaps, tracked ----
-    // `colorspace(Rgb)` takes precedence over the mode switches and the mode is
-    // discarded, so the caller gets a baseline stream and no error. C supports
-    // both with JCS_RGB. The precedence predates #343 and reversing it is a
-    // user-visible change, so it is filed rather than fixed in passing.
-    ("rgb-direct|effect|progressive", "#345"),
-    ("rgb-direct|effect|arithmetic", "#345"),
     // ---- by design: the combination is meaningless, not dropped ----
+    // The same four classes `rgb` and `gray` have: arithmetic coding carries no
+    // Huffman tables at all, and progressive derives them per scan from that
+    // scan's own statistics. JCS_RGB reaches them only since #345 made these
+    // modes compose with `colorspace(Rgb)` instead of being discarded.
+    (
+        "rgb-direct|independence|huffman_tables after arithmetic",
+        "by-design",
+    ),
+    (
+        "rgb-direct|independence|huffman_tables after progressive",
+        "by-design",
+    ),
+    (
+        "rgb-direct|independence|optimize_huffman after arithmetic",
+        "by-design",
+    ),
+    (
+        "rgb-direct|independence|optimize_huffman after progressive",
+        "by-design",
+    ),
     // Optimized coding derives its own tables from the image's own symbol
     // statistics, so supplied tables cannot survive it. C does the same
     // (`jcmaster.c`), and this entry only appeared once CMYK stopped

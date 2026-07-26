@@ -143,12 +143,13 @@ let jpeg = Encoder::new(&pixels, width, height, PixelFormat::Rgb)
     .encode()?;
 ```
 
-Every builder option composes with every other, on every colorspace, including
-CMYK and `colorspace(Rgb)` ([#313](https://github.com/developer0hye/libjpeg-turbo-rs/issues/313),
+Every builder option composes with every other, on every colorspace and in
+every mode — including CMYK, and `colorspace(Rgb)` with `progressive`,
+`arithmetic` or `lossless`
+([#313](https://github.com/developer0hye/libjpeg-turbo-rs/issues/313),
 [#322](https://github.com/developer0hye/libjpeg-turbo-rs/issues/322),
-[#343](https://github.com/developer0hye/libjpeg-turbo-rs/issues/343)). One
-exception remains: `colorspace(Rgb)` takes precedence over `progressive` /
-`arithmetic`, which it does not implement yet ([#345](https://github.com/developer0hye/libjpeg-turbo-rs/issues/345)).
+[#343](https://github.com/developer0hye/libjpeg-turbo-rs/issues/343),
+[#345](https://github.com/developer0hye/libjpeg-turbo-rs/issues/345)).
 
 ### Composing baseline options
 

@@ -985,7 +985,7 @@ Review of the fix found two more, both in configurations the sweep could not rea
 
 **The matrix gained a colorspace axis**, which is the part that generalizes: the next entry point to early-return past the option set gets caught by the suite rather than by someone thinking to look. It immediately earned its keep by surfacing [P4-54](#p4-54-colorspacergb-silently-ignores-progressive--arithmetic--lossless--open).
 
-## P4-54. `colorspace(Rgb)` Silently Ignores `progressive` / `arithmetic` / `lossless` — **OPEN**
+## P4-54. `colorspace(Rgb)` Silently Ignores `progressive` / `arithmetic` / `lossless` — **CLOSED 2026-07-26**
 
 **Motivation.** Surfaced 2026-07-26 by the colorspace axis P4-53 added to the option matrix, on its first run. GitHub [#345](https://github.com/developer0hye/libjpeg-turbo-rs/issues/345).
 
@@ -1001,7 +1001,17 @@ Review of the fix found two more, both in configurations the sweep could not rea
 2. If implemented: byte-exact against `cjpeg -rgb -progressive` and `cjpeg -rgb -arithmetic`.
 3. The `rgb-direct|effect|progressive` / `|arithmetic` entries removed from `KNOWN_VIOLATIONS`.
 
+**Status (2026-07-26): closed, and implemented rather than rejected.** Rejecting would have taken working files away from callers; implementing is what C does. All four mode combinations are now byte-exact against `cjpeg -rgb`: `-progressive`, `-arithmetic`, `-arithmetic -progressive`, and `-lossless 1,0`.
+
+Each encoder needed the same four things, because each had the YCbCr assumption baked in the same four places: skip the colour conversion, put every component on quantization and entropy table slot 0 (with one DQT and one DAC entry rather than two), write `'R','G','B'` and the Adobe marker, and — for the Huffman DC scan — gather all three components into **one** histogram, since splitting them fits a table to a distribution no scan actually has.
+
+The one non-obvious piece was the **scan script**. `jpeg_simple_progression` takes its tuned 10-scan script only when `ncomps == 3 && jpeg_color_space == JCS_YCbCr`; every other three-component colorspace gets the 14-scan all-purpose script (`jcparam.c`). Ours keyed on the component count alone, so JCS_RGB got the YCbCr script. That script's shortcuts are chroma-specific — *"chroma data is too small to be worth expending many scans on"* is a statement about Cb and Cr, and simply false of G and B. `simple_progression_for(ncomps, ycbcr)` now mirrors C's condition.
+
+**Lossless needed no encoder work at all** — `compress_lossless_rgb` already wrote JCS_RGB correctly. It was only the dispatch chain routing `lossless` into the baseline arm, which is the same class of defect as [P4-53](#p4-53-rgb-direct-encode-jcs_rgb-silently-drops-every-builder-option--closed-2026-07-26): a working implementation made unreachable by the branch in front of it.
+
+**Proof.** `tests/regression_rgb_direct_options.rs::issue_345_rgb_direct_composes_with_every_mode` sweeps 5 geometries x 3 qualities x 4 modes, all byte-identical to `cjpeg`. The four `rgb-direct|effect|*` entries are gone from `KNOWN_VIOLATIONS`; the four that replace them are the by-design classes `rgb` and `gray` already carry (arithmetic has no Huffman tables; progressive derives them per scan).
+
 47. ~~**P4-51** — CMYK streams carry a JFIF APP0 marker C never writes, and non-libjpeg component IDs (#339).~~ **CLOSED 2026-07-26** — SOI then Adobe APP14 only; IDs are `'C','M','Y','K'`.
 48. ~~**P4-52** — CMYK bottom padding clamps the last row where C repeats the last row group (#340).~~ **CLOSED 2026-07-26** — per-component row-group height.
 49. ~~**P4-53** — RGB-direct encode drops every builder option (#343).~~ **CLOSED 2026-07-26** — CMYK and RGB-direct share one `compress_direct_planar`; 75/75 vs `cjpeg -rgb`.
-50. **P4-54** — `colorspace(Rgb)` silently ignores `progressive` / `arithmetic` / `lossless` (#345).
+51. ~~**P4-54** — `colorspace(Rgb)` silently ignores `progressive` / `arithmetic` / `lossless` (#345).~~ **CLOSED 2026-07-26** — implemented, not rejected; all four modes byte-exact vs `cjpeg -rgb`.
