@@ -2338,6 +2338,13 @@ impl<'a> Decoder<'a> {
             .iter()
             .map(|ci| vec![[0i16; 64]; ci.blocks_x * ci.blocks_y])
             .collect();
+        // Per-block highest nonzero AC zigzag index, maintained by the
+        // AC scan decoders so refinement EOB-run walks can stop at the
+        // block's real spectral extent instead of Se (issue #352).
+        let mut ac_max_k_bufs: Vec<Vec<u8>> = comp_infos
+            .iter()
+            .map(|ci| vec![0u8; ci.blocks_x * ci.blocks_y])
+            .collect();
 
         // Process each scan, enforcing scan_limit if set
         for (scan_idx, scan_info) in self.metadata.scans.iter().enumerate() {
@@ -2355,6 +2362,7 @@ impl<'a> Decoder<'a> {
                 scan_info,
                 &comp_infos,
                 &mut coeff_bufs,
+                &mut ac_max_k_bufs,
                 mcus_x,
                 mcus_y,
                 max_h,
@@ -2363,6 +2371,9 @@ impl<'a> Decoder<'a> {
         }
 
         // Apply coefficient-level block smoothing before IDCT (if requested).
+        // Must stay after the scan loop: smoothing writes AC coefficients
+        // without updating ac_max_k_bufs, which is only safe once no
+        // further refinement scan will read the tracker (#352).
         // This matches C libjpeg-turbo's decompress_smooth_data() approach:
         // smooth the DCT coefficients, then run IDCT on the smoothed coefficients.
         //
@@ -2456,6 +2467,7 @@ impl<'a> Decoder<'a> {
         scan_info: &ScanInfo,
         comp_infos: &[CompInfo],
         coeff_bufs: &mut [Vec<[i16; 64]>],
+        ac_max_k_bufs: &mut [Vec<u8>],
         mcus_x: usize,
         mcus_y: usize,
         max_h: usize,
@@ -2515,6 +2527,7 @@ impl<'a> Decoder<'a> {
                 comp_idx,
                 comp_infos,
                 coeff_bufs,
+                ac_max_k_bufs,
                 &mut bit_reader,
                 mcus_x,
                 mcus_y,
@@ -2631,6 +2644,7 @@ impl<'a> Decoder<'a> {
         comp_idx: usize,
         comp_infos: &[CompInfo],
         coeff_bufs: &mut [Vec<[i16; 64]>],
+        ac_max_k_bufs: &mut [Vec<u8>],
         bit_reader: &mut BitReader,
         _mcus_x: usize,
         _mcus_y: usize,
@@ -2703,6 +2717,7 @@ impl<'a> Decoder<'a> {
         // which may be smaller than blocks_x/blocks_y (the MCU-aligned buffer size).
         // Dummy blocks at the right/bottom edges only receive DC from interleaved scans.
         let coeff_slice = &mut coeff_bufs[comp_idx];
+        let ac_max_k = &mut ac_max_k_bufs[comp_idx];
         let scan_blocks_x = ci.width_in_blocks;
         let scan_blocks_y = ci.height_in_blocks;
         let stride = ci.blocks_x; // buffer stride (MCU-aligned)
@@ -2740,7 +2755,7 @@ impl<'a> Decoder<'a> {
                 for bx in 0..scan_blocks_x {
                     restart_check_ac!(bit_reader, eob_run, restart_countdown, restart_interval);
                     let coeffs = &mut coeff_slice[by * stride + bx];
-                    progressive::decode_ac_first(
+                    progressive::decode_ac_first_tracked(
                         bit_reader,
                         ac_table,
                         coeffs,
@@ -2748,6 +2763,7 @@ impl<'a> Decoder<'a> {
                         se,
                         al,
                         &mut eob_run,
+                        &mut ac_max_k[by * stride + bx],
                     )?;
                 }
             }
@@ -2759,7 +2775,7 @@ impl<'a> Decoder<'a> {
                 for bx in 0..scan_blocks_x {
                     restart_check_ac!(bit_reader, eob_run, restart_countdown, restart_interval);
                     let coeffs = &mut coeff_slice[by * stride + bx];
-                    progressive::decode_ac_refine(
+                    progressive::decode_ac_refine_tracked(
                         bit_reader,
                         ac_table,
                         coeffs,
@@ -2767,6 +2783,7 @@ impl<'a> Decoder<'a> {
                         se,
                         al,
                         &mut eob_run,
+                        &mut ac_max_k[by * stride + bx],
                     )?;
                 }
             }
