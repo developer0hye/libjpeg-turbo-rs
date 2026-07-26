@@ -704,7 +704,7 @@ Residual gap (medians of 15 runs x 2 repeats, EPYC 9554): 3848x2160 **0.7%** (wa
 
 Free of correctness cost: the golden fixture is unchanged (byte-exact) and the C sweep shows no new divergence.
 
-## P4-44. Encoder Byte-Parity Against `cjpeg` Is Unmeasured for `ifast` / `float` and for aarch64 — **PARTIAL: measured and `ifast` fixed; aarch64 leg outstanding**
+## P4-44. Encoder Byte-Parity Against `cjpeg` Is Unmeasured for `ifast` / `float` and for aarch64 — **CLOSED 2026-07-26**
 
 **Motivation.** Filed 2026-07-25 from PR #318 CI. The x86_64 encoder is now byte-identical to stock `cjpeg` on 576/576 swept geometries (P4-41, P4-42) — but only for `-dct int`. The `linux-aarch64 NEON` job failed the x86_64-pinned golden fixture with divergences clustered in `ifast` and `float`: at 16x16 BGR 4:2:0 q100, x86_64 emits 954 bytes and aarch64 955 (`float`), 944 vs 956 (`ifast`); at 4:2:2 q100 `ifast`, 1058 vs 1078. GitHub [#319](https://github.com/developer0hye/libjpeg-turbo-rs/issues/319).
 
@@ -724,7 +724,14 @@ That led to **P4-50 / #330**: `ifast` was not merely non-byte-exact, it was *2.5
 
 `float` remains non-byte-exact by nature — floating-point operation ordering — but matches C's quality and size, with a measured max per-sample difference of 7. That is now a stated guarantee rather than an assumption, pinned by `float_is_pixel_equivalent_to_cjpeg`.
 
-**Remaining.** Criterion 2: the same sweep as a CI step on the `linux-aarch64 NEON` job.
+**Status (2026-07-26): closed.** Criterion 2 needed no new CI job. `tests/regression_dct_method_parity.rs` is unguarded — it runs on every platform that has `cjpeg` — and the `Test (linux-aarch64 NEON)` leg installs official libjpeg-turbo 3.1.4.1, so it has been answering the aarch64 question on every run since #330 merged. Run 30175204716 shows all three of its tests green on that leg with **zero** `SKIP` lines, which is what distinguishes a leg that passed from a leg that ran.
+
+Two gaps in what that actually proved are now closed:
+
+- The sweep stopped at q95 and used RGB and grayscale only, while every divergence #319 cited was **BGR at 16x16 q100**. The sweep now includes q100 and 16x16, and `issue_319_bgr_input_matches_cjpeg_on_every_backend` covers BGR by comparing against cjpeg's RGB encode of the same pixels — cjpeg has no BGR input, and a channel order that reaches a different SIMD colour-conversion kernel is exactly where a backend difference would hide.
+- The golden fixture (`tests/encode_pipeline_golden.txt`) is no longer x86_64-pinned: all 33,600 cases, including the `bgra|q100|ifast` and `bgra|q100|float` rows #319 quoted, are byte-identical on aarch64. Backend-independence and C-parity are now both enforced, on both architectures.
+
+**Guarantee, stated:** `int` and `fast` are byte-identical to `cjpeg` on x86_64 and aarch64; `float` is pixel-equivalent, max 7 per sample measured.
 
 ## P4-45. `SSE2-only` CI Job Does Not Test the SSE2 Fallback — **CLOSED 2026-07-26**
 
@@ -917,7 +924,7 @@ Ruled out along the way, each by direct measurement rather than inspection: `fdc
 37. ~~**P4-41** — AVX2 4:2:0 row fast path ignored the dummy-block contract (#314) and bypassed its own AVX2 capability check (#315).~~ **CLOSED 2026-07-25** — single `use_avx2_420` gate + `y_last_col_width == y_mcu_width` guard; fused path now 576/576 vs cjpeg.
 38. ~~**P4-42** — full-plane encode variants (restart / custom-quant / custom-Huffman) skip the dummy-block contract on every platform (#316).~~ **CLOSED 2026-07-25** — the P4-40 core made them shims; 576/576 vs cjpeg.
 39. ~~**P4-43** — recover the ~3-4.5% the P4-41 correctness fix cost on `ceil(width/8)`-odd 4:2:0 widths (#317).~~ **CLOSED 2026-07-26** — fast path kept for interior columns; residual 0.7-2.0%.
-40. **P4-44** — quantify encoder byte-parity vs `cjpeg` for `ifast`/`float` and for the aarch64 backend, then document what is actually guaranteed (#319). **PARTIAL 2026-07-26** — measured on x86_64 and `ifast` fixed; aarch64 CI leg remains.
+40. ~~**P4-44** — quantify encoder byte-parity vs `cjpeg` for `ifast`/`float` and for the aarch64 backend, then document what is actually guaranteed (#319).~~ **CLOSED 2026-07-26** — the parity sweep is unguarded, so the aarch64 CI leg runs it; extended to q100 and BGR, the cases #319 cited.
 46. ~~**P4-50** — `DctMethod::IsFast` both lower quality and larger than C's (#330).~~ **CLOSED 2026-07-26** — SIMD kernels gated on the DCT method.
 41. **P4-45** — make the `SSE2-only` CI job actually exercise the SSE2 fallback (QEMU/SDE); discharges #315's remaining criterion (#320).
 42. ~~**P4-46** — make `Encoder`'s dispatch build one `CompressParams` so builder options stop dropping each other (#322).~~ **CLOSED 2026-07-26** — all 29 resolved: 26 fixed, 3 classes reclassified by-design with reasons.
