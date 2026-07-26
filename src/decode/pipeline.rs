@@ -1249,6 +1249,21 @@ impl<'a> Decoder<'a> {
         }
     }
 
+    /// One output row of the vertical-only 2x triangle filter (S440).
+    ///
+    /// Matches C jdsample.c `h1v2_fancy_upsample`:
+    /// `(3*cur + adj + bias) >> 2` with bias 1 for the top row
+    /// (adj = above) and bias 2 for the bottom row (adj = below); the
+    /// alternating bias avoids a systematic rounding drift. Shared by
+    /// the whole-plane `fancy_h1v2` and the row-streaming H1V2 decode
+    /// path so the rounding behaviour cannot silently diverge.
+    #[inline(always)]
+    fn fancy_h1v2_row(cur: &[u8], adj: &[u8], out: &mut [u8], width: usize, bias: u16) {
+        for i in 0..width {
+            out[i] = ((3 * cur[i] as u16 + adj[i] as u16 + bias) >> 2) as u8;
+        }
+    }
+
     /// Fancy h1v2 upsample: vertical-only 2x (for S440).
     /// Each input row produces two output rows using triangle filter vertically.
     /// Horizontal samples are copied 1:1.
@@ -1279,13 +1294,8 @@ impl<'a> Decoder<'a> {
             let (top_half, bot_half) = output.split_at_mut(out_y_bot * out_width);
             let out_top = &mut top_half[out_y_top * out_width..out_y_top * out_width + in_width];
             let out_bot = &mut bot_half[..in_width];
-            // Vertical triangle filter with ordered dither to avoid systematic
-            // rounding bias (matches C jdsample.c h1v2_fancy_upsample):
-            //   top row: bias=1, bottom row: bias=2
-            for i in 0..in_width {
-                out_top[i] = ((3 * cur_row[i] as u16 + above[i] as u16 + 1) >> 2) as u8;
-                out_bot[i] = ((3 * cur_row[i] as u16 + below[i] as u16 + 2) >> 2) as u8;
-            }
+            Self::fancy_h1v2_row(cur_row, above, out_top, in_width, 1);
+            Self::fancy_h1v2_row(cur_row, below, out_bot, in_width, 2);
         }
     }
 
@@ -4215,6 +4225,157 @@ impl<'a> Decoder<'a> {
                                 &mut data[out_y_bot * out_width * bpp..],
                                 out_width,
                                 out_y_bot,
+                            );
+                        }
+                    }
+
+                    return Ok(Image {
+                        width: out_width,
+                        height: out_height,
+                        pixel_format: out_format,
+                        precision: 8,
+                        data,
+                        icc_profile: icc_profile.clone(),
+                        exif_data: exif_data.clone(),
+                        comment: self.metadata.comment.clone(),
+                        density: self.metadata.density,
+                        saved_markers: self.metadata.saved_markers.clone(),
+                        warnings: warnings.clone(),
+                    });
+                }
+
+                // Row-streaming H2V1 (4:2:2): one chroma row per output row.
+                // Mirrors the H2V2 block above — fuse the fancy horizontal
+                // upsample + colour convert per row so the two
+                // full-resolution cb_full/cr_full planes (~4.2 MB extra at
+                // 1080p) are never materialised (issue #350). Same gate
+                // shape as H2V2: the non-streamed conditions
+                // (fast_upsample, actual_cb_w <= 2, scaled IDCT) fall
+                // through to the generic path, which reproduces C's
+                // filter selection for each of them (jdsample.c:478/506
+                // — box filter only for !do_fancy_upsampling,
+                // downsampled_width <= 2 on 2h1v, or
+                // _min_DCT_scaled_size == 1).
+                if !self.fast_upsample
+                    && uniform_chroma
+                    && h_factor == 2
+                    && v_factor == 1
+                    && actual_cb_w > 2
+                    && block_size == 8
+                {
+                    let data_size: usize = out_width * out_height * bpp;
+                    let mut data: Vec<u8> = vec![0u8; data_size];
+
+                    // Per-row upsample scratch (full_width per component).
+                    let mut cb_row: Vec<u8> = vec![0u8; full_width];
+                    let mut cr_row: Vec<u8> = vec![0u8; full_width];
+
+                    let cb_off: usize = comp_x_offsets[1];
+                    let cr_off: usize = comp_x_offsets[2];
+                    let y_off: usize = comp_x_offsets[0];
+                    // Exact-length row slices are safe: cb_off ==
+                    // aligned_x / h_factor exactly (aligned_x is a
+                    // multiple of max_h*block_size and cb_w*h_factor ==
+                    // full_width under the block_size==8 gate) and
+                    // out_width <= pre-crop out_width - aligned_x, so
+                    // off + actual_cb_w <= cb_w for every crop. The
+                    // upsample kernels read exactly in_width samples
+                    // (audited: scalar/NEON/SSE2/AVX2/WASM stop at
+                    // in_width-1). Cr shares cb_w: uniform_chroma pins
+                    // identical sampling factors.
+                    debug_assert_eq!(cb_w, cr_w, "uniform_chroma implies equal plane strides");
+                    for y in 0..out_height {
+                        let cb_src = &component_planes[1]
+                            [y * cb_w + cb_off..y * cb_w + cb_off + actual_cb_w];
+                        let cr_src = &component_planes[2]
+                            [y * cb_w + cr_off..y * cb_w + cr_off + actual_cb_w];
+                        self.fancy_upsample_h2v1(cb_src, actual_cb_w, &mut cb_row);
+                        self.fancy_upsample_h2v1(cr_src, actual_cb_w, &mut cr_row);
+                        self.color_convert_row(
+                            out_format,
+                            &y_plane[y * y_width + y_off..],
+                            &cb_row,
+                            &cr_row,
+                            &mut data[y * out_width * bpp..],
+                            out_width,
+                            y,
+                        );
+                    }
+
+                    return Ok(Image {
+                        width: out_width,
+                        height: out_height,
+                        pixel_format: out_format,
+                        precision: 8,
+                        data,
+                        icc_profile: icc_profile.clone(),
+                        exif_data: exif_data.clone(),
+                        comment: self.metadata.comment.clone(),
+                        density: self.metadata.density,
+                        saved_markers: self.metadata.saved_markers.clone(),
+                        warnings: warnings.clone(),
+                    });
+                }
+
+                // Row-streaming H1V2 (4:4:0): one chroma row per two output
+                // rows, vertical-only triangle filter (chroma width already
+                // matches the output). Same structural fix as H2V1 above.
+                // The blend biases (top +1, bottom +2) match C jdsample.c
+                // h1v2_fancy_upsample and the whole-plane fancy_h1v2 helper.
+                if !self.fast_upsample
+                    && uniform_chroma
+                    && h_factor == 1
+                    && v_factor == 2
+                    && block_size == 8
+                {
+                    let data_size: usize = out_width * out_height * bpp;
+                    let mut data: Vec<u8> = vec![0u8; data_size];
+
+                    let mut cb_row: Vec<u8> = vec![0u8; full_width];
+                    let mut cr_row: Vec<u8> = vec![0u8; full_width];
+
+                    let cb_off: usize = comp_x_offsets[1];
+                    let cr_off: usize = comp_x_offsets[2];
+                    let y_off: usize = comp_x_offsets[0];
+                    // Exact-length row slices are safe: cb_off ==
+                    // aligned_x / h_factor exactly (aligned_x is a
+                    // multiple of max_h*block_size and cb_w*h_factor ==
+                    // full_width under the block_size==8 gate) and
+                    // out_width <= pre-crop out_width - aligned_x, so
+                    // off + actual_cb_w <= cb_w for every crop. Cr shares
+                    // cb_w: uniform_chroma pins identical sampling factors.
+                    debug_assert_eq!(cb_w, cr_w, "uniform_chroma implies equal plane strides");
+                    let row_range = |row: usize, off: usize| -> std::ops::Range<usize> {
+                        let start = row * cb_w + off;
+                        start..start + actual_cb_w
+                    };
+                    // Loop bound: actual_cb_h >= 1 whenever the loop body
+                    // runs (out_height >= 1), so last_cy cannot underflow
+                    // into a wrap.
+                    let last_cy: usize = actual_cb_h.saturating_sub(1);
+                    for cy in 0..actual_cb_h {
+                        let above_idx: usize = cy.saturating_sub(1);
+                        let below_idx: usize = (cy + 1).min(last_cy);
+                        let cb_cur = &component_planes[1][row_range(cy, cb_off)];
+                        let cr_cur = &component_planes[2][row_range(cy, cr_off)];
+                        for (out_y, adj_idx, bias) in
+                            [(cy * 2, above_idx, 1u16), (cy * 2 + 1, below_idx, 2u16)]
+                        {
+                            if out_y >= out_height {
+                                continue;
+                            }
+                            let cb_adj = &component_planes[1][row_range(adj_idx, cb_off)];
+                            let cr_adj = &component_planes[2][row_range(adj_idx, cr_off)];
+                            Self::fancy_h1v2_row(cb_cur, cb_adj, &mut cb_row, actual_cb_w, bias);
+                            Self::fancy_h1v2_row(cr_cur, cr_adj, &mut cr_row, actual_cb_w, bias);
+                            self.color_convert_row(
+                                out_format,
+                                &y_plane[out_y * y_width + y_off..],
+                                &cb_row,
+                                &cr_row,
+                                &mut data[out_y * out_width * bpp..],
+                                out_width,
+                                out_y,
                             );
                         }
                     }
