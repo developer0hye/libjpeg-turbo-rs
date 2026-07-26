@@ -65,7 +65,7 @@
 - **4:2:0 baseline**: Rust is now **0.83-0.98x C** across all resolutions (faster than C!)
 - **4:2:2 / 4:4:4**: Rust is **0.83-0.93x C** (significantly faster than C)
 - **Progressive**: Rust is **0.83-0.91x C** (faster than C across the board)
-- **vs zune-jpeg**: Rust is **19-21% faster** at large resolutions
+- **vs zune-jpeg**: Rust is **19-21% faster** on the cases measured here — **4:2:0/4:4:4 baseline at 640x480 and above only**. The 2026-07-26 wide-matrix analysis (issue #361) found the *unmeasured* categories losing to zune at the time: 4:2:2 (1.11-1.24x, #350), tiny images (2-3.6x, #351), and 8K progressive (1.30x, #352). Do not quote this line without the coverage caveat; the wide matrix lives in `examples/bench_zune_matrix.rs` (#360).
 - **Average improvement from baseline**: ~10% on 4:2:0, up to 30% on graphic content
 
 ### Encode
