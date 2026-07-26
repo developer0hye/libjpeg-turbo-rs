@@ -54,9 +54,25 @@ jobs:
         run: |
           git diff "origin/${{ github.base_ref || 'main' }}"...HEAD > /tmp/pr.diff
           wc -l /tmp/pr.diff
+      # Bounded on purpose. A large diff can produce hundreds of mutants, each
+      # rebuilding and re-running three test binaries, and the first PR to
+      # touch `compress_cmyk` blew straight through the 30-minute step limit —
+      # a job that times out reports "fail" and tells the reader nothing. So
+      # the work is capped at what fits, and whatever is skipped is announced
+      # rather than quietly dropped.
       - name: Mutate only the changed lines
         run: |
-          cargo mutants --in-diff /tmp/pr.diff -j 4 --timeout 300 \
+          set -uo pipefail
+          TOTAL=$(cargo mutants --in-diff /tmp/pr.diff --list 2>/dev/null | wc -l)
+          echo "$TOTAL mutants in the changed lines"
+          # ~90 mutants is what this job gets through inside its step timeout.
+          BUDGET=90
+          SHARDS=$(( (TOTAL + BUDGET - 1) / BUDGET ))
+          if [ "$SHARDS" -lt 1 ]; then SHARDS=1; fi
+          if [ "$SHARDS" -gt 1 ]; then
+            echo "::warning::$TOTAL mutants exceed this job's budget; testing shard 0/$SHARDS (~$BUDGET) and skipping the other $(( TOTAL - TOTAL / SHARDS )). A clean result here does NOT mean the whole diff was checked."
+          fi
+          cargo mutants --in-diff /tmp/pr.diff --shard "0/$SHARDS" -j 4 --timeout 300 \
             --cargo-test-arg --test --cargo-test-arg encode_pipeline_golden \
             --cargo-test-arg --test --cargo-test-arg encode_option_matrix \
             --cargo-test-arg --test --cargo-test-arg encode_input_validation \
