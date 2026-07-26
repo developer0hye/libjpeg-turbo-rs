@@ -1,6 +1,6 @@
 [package]
 name = "libjpeg-turbo-rs-capi"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 rust-version = "1.87"
 description = "C ABI shim for libjpeg-turbo-rs: libjpeg.so.8 drop-in for v8 consumers + TurboJPEG 3 API on libturbojpeg.so.0 (21 of 39 TJ 1.x/2.x legacy aliases wired; remaining 18 documented with migration matrix per P4-18)"
@@ -25,7 +25,7 @@ png = ["libjpeg-turbo-rs/png"]
 # `path` is used for local workspace builds; `version` is what crates.io
 # resolves to when this crate is depended on as a published artifact.
 # Both must be present — path-only deps are rejected by `cargo publish`.
-libjpeg-turbo-rs = { path = "../..", version = "0.6" }
+libjpeg-turbo-rs = { path = "../..", version = "0.7" }
 
 [dev-dependencies]
 libloading = "0.8"
