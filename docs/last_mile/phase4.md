@@ -888,6 +888,8 @@ Two real gaps were found and closed on the way:
 
 **Criterion 3 — `--in-diff` in CI.** A non-blocking `Mutation test (changed lines)` job mutates only what a PR touches. Non-blocking on purpose: a surviving mutant is sometimes an equivalent mutant, a judgement call rather than a defect, and failing the build on it would train people to ignore the job.
 
+The job is also **time-bounded**, which the first large PR through it proved necessary: P4-39's CMYK diff produced enough mutants to run past the 30-minute step limit, and a timed-out job reports `fail` while telling the reader nothing. It now counts the mutants first and shards down to what fits, emitting a `::warning::` naming how many it skipped — a clean result on a large diff means "the sampled shard was clean", not "the diff was checked".
+
 ## P4-49. `smoothing_factor` Is A Silent No-Op For Grayscale — **CLOSED 2026-07-26**
 
 **Motivation.** Found 2026-07-26 by the metamorphic option matrix while closing the baseline half of P4-46. GitHub [#327](https://github.com/developer0hye/libjpeg-turbo-rs/issues/327).
