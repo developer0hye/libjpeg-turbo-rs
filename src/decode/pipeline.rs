@@ -1253,11 +1253,10 @@ impl<'a> Decoder<'a> {
     ///
     /// Matches C jdsample.c `h1v2_fancy_upsample`:
     /// `(3*cur + adj + bias) >> 2` with bias 1 for the top row
-    /// (adj = above) and bias 2 for the bottom row (adj = below) — the
-    /// alternating bias avoids a systematic rounding drift, and being
-    /// shared by the whole-plane
-    /// `fancy_h1v2` and the row-streaming H1V2 decode path so the
-    /// rounding behaviour cannot silently diverge.
+    /// (adj = above) and bias 2 for the bottom row (adj = below); the
+    /// alternating bias avoids a systematic rounding drift. Shared by
+    /// the whole-plane `fancy_h1v2` and the row-streaming H1V2 decode
+    /// path so the rounding behaviour cannot silently diverge.
     #[inline(always)]
     fn fancy_h1v2_row(cur: &[u8], adj: &[u8], out: &mut [u8], width: usize, bias: u16) {
         for i in 0..width {
@@ -4250,9 +4249,13 @@ impl<'a> Decoder<'a> {
                 // upsample + colour convert per row so the two
                 // full-resolution cb_full/cr_full planes (~4.2 MB extra at
                 // 1080p) are never materialised (issue #350). Same gate
-                // shape as H2V2: box-filter conditions (fast_upsample,
-                // actual_cb_w <= 2, scaled IDCT) fall through to the
-                // generic path, which matches C's filter selection.
+                // shape as H2V2: the non-streamed conditions
+                // (fast_upsample, actual_cb_w <= 2, scaled IDCT) fall
+                // through to the generic path, which reproduces C's
+                // filter selection for each of them (jdsample.c:478/506
+                // — box filter only for !do_fancy_upsampling,
+                // downsampled_width <= 2 on 2h1v, or
+                // _min_DCT_scaled_size == 1).
                 if !self.fast_upsample
                     && uniform_chroma
                     && h_factor == 2
@@ -4271,10 +4274,10 @@ impl<'a> Decoder<'a> {
                     let cr_off: usize = comp_x_offsets[2];
                     let y_off: usize = comp_x_offsets[0];
                     // Exact-length row slices are safe: cb_off ==
-                    // aligned_crop_x / h_factor exactly (aligned_x is a
+                    // aligned_x / h_factor exactly (aligned_x is a
                     // multiple of max_h*block_size and cb_w*h_factor ==
                     // full_width under the block_size==8 gate) and
-                    // out_width <= out_width_orig - aligned_x, so
+                    // out_width <= pre-crop out_width - aligned_x, so
                     // off + actual_cb_w <= cb_w for every crop. The
                     // upsample kernels read exactly in_width samples
                     // (audited: scalar/NEON/SSE2/AVX2/WASM stop at
@@ -4335,10 +4338,10 @@ impl<'a> Decoder<'a> {
                     let cr_off: usize = comp_x_offsets[2];
                     let y_off: usize = comp_x_offsets[0];
                     // Exact-length row slices are safe: cb_off ==
-                    // aligned_crop_x / h_factor exactly (aligned_x is a
+                    // aligned_x / h_factor exactly (aligned_x is a
                     // multiple of max_h*block_size and cb_w*h_factor ==
                     // full_width under the block_size==8 gate) and
-                    // out_width <= out_width_orig - aligned_x, so
+                    // out_width <= pre-crop out_width - aligned_x, so
                     // off + actual_cb_w <= cb_w for every crop. Cr shares
                     // cb_w: uniform_chroma pins identical sampling factors.
                     debug_assert_eq!(cb_w, cr_w, "uniform_chroma implies equal plane strides");

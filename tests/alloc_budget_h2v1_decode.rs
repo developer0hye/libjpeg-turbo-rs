@@ -4,21 +4,23 @@
 //! `cr_full`, ~4.2 MB extra for 1080p) before colour conversion, while
 //! H2V2 (4:2:0) streams rows and never allocates them.
 //!
-//! Budget model for 1920×1080 4:2:2 with the row-streaming path:
+//! Budget model for 1920×1080 4:2:2 with the row-streaming path
+//! (4:2:2 iMCUs are 16×8, so plane heights align to 8 — 1080 rows, not
+//! 4:2:0's 1088):
 //!   output RGB   1920×1080×3      ≈ 6.22 MB
-//!   Y plane      1920×1088        ≈ 2.09 MB
-//!   Cb+Cr planes 2 × 960×1088     ≈ 2.09 MB   (decoded, half-res — intrinsic)
+//!   Y plane      1920×1080        ≈ 2.07 MB
+//!   Cb+Cr planes 2 × 960×1080     ≈ 2.07 MB   (decoded, half-res — intrinsic)
 //!   row scratch  a few × full_width
 //!   ------------------------------------------------
-//!   total        ≈ 10.5 MB
+//!   total        ≈ 10.4 MB
 //!
-//! The pre-fix path allocated ≈ 14.6 MB (the two full-res chroma planes
+//! The pre-fix path allocated ≈ 14.5 MB (the two full-res chroma planes
 //! on top). The assertion pins the post-fix ceiling with margin so the
 //! full-plane fallback cannot silently return for standard 4:2:2.
 //!
 //! Note: 4:2:2 cannot reach 4:2:0's total (≈ 9.4 MB) exactly — its
 //! decoded chroma planes are half-resolution rather than
-//! quarter-resolution, an intrinsic +1.04 MB at 1080p. Removing the
+//! quarter-resolution, an intrinsic +1.03 MB at 1080p. Removing the
 //! whole-image plane architecture is tracked separately (issue #353).
 
 #![cfg(not(target_arch = "wasm32"))]
@@ -90,12 +92,12 @@ fn h2v1_1080p_decode_does_not_materialise_full_res_chroma() {
 
     eprintln!("photo_1920x1080_422 decode: {bytes_422} bytes allocated");
 
-    // Budget: output (6.22 MB) + Y (2.09 MB) + half-res chroma (2.09 MB)
-    // + small fixed cost, with ~5% headroom => 11 MB. The pre-fix
-    // full-plane path allocates ≈ 14.6 MB and must fail this.
+    // Budget: output (6.22 MB) + Y (2.07 MB) + half-res chroma (2.07 MB)
+    // + small fixed cost, with ~10% headroom => 11 MiB. The pre-fix
+    // full-plane path allocates ≈ 14.5 MB and must fail this.
     assert!(
         bytes_422 <= 11 * 1024 * 1024,
-        "4:2:2 1080p decode must stream chroma rows (≤ 11 MB), got {bytes_422} — \
+        "4:2:2 1080p decode must stream chroma rows (≤ 11 MiB), got {bytes_422} — \
          full-resolution cb_full/cr_full buffers are back (issue #350)"
     );
 }
@@ -132,12 +134,13 @@ fn h1v2_1080p_decode_does_not_materialise_full_res_chroma() {
 
     eprintln!("synthetic_1920x1080_440 decode: {bytes_440} bytes allocated");
 
-    // Same budget model as 4:2:2: output (6.22 MB) + Y (2.09 MB) +
-    // half-res chroma (2 x 1.04 MB) + row scratch => ~10.5 MB; the
-    // full-plane fallback adds ~4.2 MB and must fail this.
+    // Same budget model as 4:2:2, with 4:4:0's 8×16 iMCUs padding the
+    // planes to 1088 rows: output (6.22 MB) + Y (2.09 MB) + half-res
+    // chroma (2 x 1.04 MB) + row scratch => ~10.4 MB; the full-plane
+    // fallback adds ~4.2 MB and must fail this.
     assert!(
         bytes_440 <= 11 * 1024 * 1024,
-        "4:4:0 1080p decode must stream chroma rows (≤ 11 MB), got {bytes_440} — \
+        "4:4:0 1080p decode must stream chroma rows (≤ 11 MiB), got {bytes_440} — \
          the H1V2 streaming gate regressed to the full-plane path (issue #350)"
     );
 }
