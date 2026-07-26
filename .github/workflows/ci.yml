@@ -50,6 +50,18 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: Install cargo-mutants
         run: cargo install cargo-mutants --locked
+      # The encode cross-checks are the oracle that catches most encoder
+      # mutants. Without the C tools they skip, and a mutant only detectable by
+      # a byte-comparison against cjpeg reports as MISSED for the wrong reason.
+      - name: Install libjpeg-turbo 3.x from official release
+        run: |
+          ARCH=$(dpkg --print-architecture)
+          VERSION=3.1.4.1
+          curl -fL -o /tmp/ljt.deb \
+            "https://github.com/libjpeg-turbo/libjpeg-turbo/releases/download/${VERSION}/libjpeg-turbo-official_${VERSION}_${ARCH}.deb"
+          sudo apt-get update -qq
+          sudo apt-get install -y /tmp/ljt.deb
+          echo "/opt/libjpeg-turbo/bin" >> $GITHUB_PATH
       - name: Build the diff against the base branch
         run: |
           git diff "origin/${{ github.base_ref || 'main' }}"...HEAD > /tmp/pr.diff
@@ -65,8 +77,11 @@ jobs:
           set -uo pipefail
           TOTAL=$(cargo mutants --in-diff /tmp/pr.diff --list 2>/dev/null | wc -l)
           echo "$TOTAL mutants in the changed lines"
-          # ~90 mutants is what this job gets through inside its step timeout.
-          BUDGET=90
+          # Each mutant costs a full rebuild — measured at ~3 minutes on a
+          # hosted runner — so the budget is about ten, not the ninety this
+          # first guessed at. Guessing wrong is why PR #348 still timed out
+          # after the bound was added.
+          BUDGET=10
           SHARDS=$(( (TOTAL + BUDGET - 1) / BUDGET ))
           if [ "$SHARDS" -lt 1 ]; then SHARDS=1; fi
           if [ "$SHARDS" -gt 1 ]; then
@@ -76,10 +91,12 @@ jobs:
             --cargo-test-arg --test --cargo-test-arg encode_pipeline_golden \
             --cargo-test-arg --test --cargo-test-arg encode_option_matrix \
             --cargo-test-arg --test --cargo-test-arg encode_input_validation \
+            --cargo-test-arg --test --cargo-test-arg regression_rgb_direct_options \
+            --cargo-test-arg --test --cargo-test-arg regression_cmyk_c_parity \
             || true
           echo "--- surviving mutants (review these) ---"
           cat mutants.out/missed.txt 2>/dev/null || echo "(none)"
-        timeout-minutes: 30
+        timeout-minutes: 45
 
   clippy:
     name: Clippy

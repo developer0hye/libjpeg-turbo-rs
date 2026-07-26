@@ -862,12 +862,25 @@ impl<'a> Encoder<'a> {
             params
         };
 
-        let base = if rgb_direct {
-            // Ahead of the mode switches, as the early return it replaces was:
-            // `colorspace(Rgb)` has always taken precedence over `progressive`
-            // / `arithmetic` / `lossless`, none of which JCS_RGB implements
-            // yet. What changes is that it no longer drops the baseline
-            // options on the way past.
+        let base = if rgb_direct && self.arithmetic && self.progressive && !self.lossless {
+            // JCS_RGB arithmetic progressive (#345).
+            encoder::compress_arithmetic_progressive_rgb_direct(&baseline_params, self.icc_profile)?
+        } else if rgb_direct && self.arithmetic && !self.lossless {
+            // JCS_RGB arithmetic (#345). `jcarith.c` codes coefficients and
+            // never looks at the colorspace.
+            encoder::compress_arithmetic_rgb_direct(&baseline_params, self.icc_profile)?
+        } else if rgb_direct && self.progressive && !self.lossless {
+            // JCS_RGB progressive (#345). Progressive coding is
+            // colorspace-agnostic in C — the scan script comes from the
+            // component count, not the colorspace — so `colorspace(Rgb)` and
+            // `progressive` compose rather than one silently winning.
+            encoder::compress_progressive_rgb_direct(&baseline_params, self.icc_profile)?
+        } else if rgb_direct && !self.lossless {
+            // Ahead of the remaining mode switches, as the early return it
+            // replaces was. Lossless is excluded because the lossless arms
+            // below already encode RGB as JCS_RGB — no colour conversion,
+            // Adobe APP14, 'R','G','B' component IDs — so routing it here
+            // would have replaced a lossless stream with a baseline one.
             encoder::compress_rgb_direct_with_params(&baseline_params, self.icc_profile)?
         } else if use_custom_sampling {
             let factors: &Vec<(u8, u8)> = self.custom_sampling_factors.as_ref().unwrap();

@@ -2614,6 +2614,7 @@ pub fn compress_progressive_with_restart(
         restart_interval,
         restart_in_rows,
         custom_quant,
+        false,
     )
 }
 
@@ -2685,7 +2686,43 @@ pub fn compress_progressive_custom_with_restart(
         restart_interval,
         restart_in_rows,
         custom_quant,
+        false,
     )
+}
+
+/// Compress RGB pixels as a progressive `JCS_RGB` stream (`cjpeg -rgb -progressive`).
+///
+/// Progressive coding is colorspace-agnostic in C — `jcmaster.c` builds the
+/// scan script from the component count, not the colorspace — so this is the
+/// ordinary progressive encoder with the colour conversion skipped, every
+/// component on table slot 0, and the RGB markers (#345).
+pub fn compress_progressive_rgb_direct(
+    params: &CompressParams<'_>,
+    icc_profile: Option<&[u8]>,
+) -> Result<Vec<u8>> {
+    use crate::encode::progressive::simple_progression_for;
+
+    // JCS_RGB is not YCbCr, so it takes C's 14-scan all-purpose script rather
+    // than the 10-scan one tuned for chroma (`jcparam.c`).
+    let scans = simple_progression_for(3, false);
+    let base: Vec<u8> = compress_progressive_with_scans(
+        params.pixels,
+        params.width,
+        params.height,
+        PixelFormat::Rgb,
+        params.quality,
+        Subsampling::S444,
+        &scans,
+        params.dct_method,
+        params.restart_interval,
+        0,
+        params.custom_quant,
+        true,
+    )?;
+    match icc_profile {
+        Some(icc) => inject_metadata(&base, Some(icc), None),
+        None => Ok(base),
+    }
 }
 
 /// Shared progressive encoding logic used by both default and custom scan scripts.
@@ -2702,6 +2739,7 @@ fn compress_progressive_with_scans(
     restart_interval: u16,
     restart_in_rows: u16,
     custom_quant: Option<&[Option<[u16; 64]>; 4]>,
+    direct_rgb: bool,
 ) -> Result<Vec<u8>> {
     if width == 0 || height == 0 {
         return Err(JpegError::CorruptData(
@@ -2735,6 +2773,9 @@ fn compress_progressive_with_scans(
     let use_simd_fdct: bool = dct_method == DctMethod::IsLow;
 
     let (luma_quant, chroma_quant) = resolve_quant_tables(custom_quant, quality);
+    // All three JCS_RGB components use quantization slot 0, so the second
+    // table is the first one; the DQT for slot 1 is suppressed below.
+    let chroma_quant: [u16; 64] = if direct_rgb { luma_quant } else { chroma_quant };
     let luma_divisors = if dct_method == DctMethod::IsFast {
         scale_quant_for_ifast(&luma_quant)
     } else {
@@ -2746,13 +2787,39 @@ fn compress_progressive_with_scans(
         scale_quant_for_fdct(&chroma_quant)
     };
 
-    let (y_plane, cb_plane, cr_plane) = convert_to_ycbcr(
-        pixels,
-        width,
-        height,
-        pixel_format,
-        enc_simd.rgb_to_ycbcr_row,
-    )?;
+    // `JCS_RGB` skips colour conversion entirely and encodes the three
+    // channels as components (`jcparam.c:365-370`). Everything downstream is
+    // colorspace-agnostic — progressive coding operates on coefficients — so
+    // the only differences are which planes go in, that all three components
+    // share table slot 0, and the markers.
+    let (y_plane, cb_plane, cr_plane) = if direct_rgb {
+        let num_pixels: usize = width * height;
+        let mut red: Vec<u8> = vec![0u8; num_pixels];
+        let mut green: Vec<u8> = vec![0u8; num_pixels];
+        let mut blue: Vec<u8> = vec![0u8; num_pixels];
+        for pixel in 0..num_pixels {
+            red[pixel] = pixels[pixel * 3];
+            green[pixel] = pixels[pixel * 3 + 1];
+            blue[pixel] = pixels[pixel * 3 + 2];
+        }
+        (red, green, blue)
+    } else {
+        convert_to_ycbcr(
+            pixels,
+            width,
+            height,
+            pixel_format,
+            enc_simd.rgb_to_ycbcr_row,
+        )?
+    };
+
+    // Every JCS_RGB component sits at 1x1, so there is nothing to subsample
+    // and the MCU is one block wide however `subsampling` was set.
+    let subsampling: Subsampling = if direct_rgb {
+        Subsampling::S444
+    } else {
+        subsampling
+    };
 
     let (mcu_w, mcu_h) = if is_grayscale {
         (8, 8)
@@ -2920,17 +2987,28 @@ fn compress_progressive_with_scans(
     let mut output = Vec::with_capacity(width * height * 2);
 
     marker_writer::write_soi(&mut output);
-    marker_writer::write_app0_jfif(&mut output);
+    // JFIF is defined for grayscale and YCbCr only. `jpeg_set_colorspace` sets
+    // `write_Adobe_marker` for JCS_RGB and leaves `write_JFIF_header` clear
+    // (`jcparam.c:357-370`), same as it does for CMYK (#339).
+    if direct_rgb {
+        marker_writer::write_app14_adobe(&mut output, 0);
+    } else {
+        marker_writer::write_app0_jfif(&mut output);
+    }
 
     // Quantization tables
     marker_writer::write_dqt(&mut output, 0, &luma_quant);
-    if !is_grayscale {
+    if !is_grayscale && !direct_rgb {
         marker_writer::write_dqt(&mut output, 1, &chroma_quant);
     }
 
     // SOF2 (progressive)
     if is_grayscale {
         let components = vec![(1, 1, 1, 0)];
+        marker_writer::write_sof2(&mut output, width as u16, height as u16, &components);
+    } else if direct_rgb {
+        // ASCII initials, 1x1, quantization slot 0 for all three.
+        let components = vec![(b'R', 1, 1, 0), (b'G', 1, 1, 0), (b'B', 1, 1, 0)];
         marker_writer::write_sof2(&mut output, width as u16, height as u16, &components);
     } else {
         let components = vec![
@@ -2991,8 +3069,14 @@ fn compress_progressive_with_scans(
         let mut sos_comps: [(u8, u8, u8); 3] = [(0, 0, 0); 3];
         let sos_len: usize = scan.component_indices.len();
         for (idx, &ci) in scan.component_indices.iter().enumerate() {
-            let comp_id: u8 = (ci + 1) as u8;
-            let tbl_idx: u8 = if ci == 0 { 0 } else { 1 };
+            let comp_id: u8 = if direct_rgb {
+                b"RGB"[ci]
+            } else {
+                (ci + 1) as u8
+            };
+            // JCS_RGB puts every component on table slot 0; YCbCr splits luma
+            // and chroma across slots 0 and 1.
+            let tbl_idx: u8 = if direct_rgb || ci == 0 { 0 } else { 1 };
             let dc_tbl: u8 = if is_dc_scan { tbl_idx } else { 0 };
             let ac_tbl: u8 = if is_dc_scan { 0 } else { tbl_idx };
             sos_comps[idx] = (comp_id, dc_tbl, ac_tbl);
@@ -3025,7 +3109,11 @@ fn compress_progressive_with_scans(
                     }
                     for (scan_ci, &ci) in scan.component_indices.iter().enumerate() {
                         let layout = &comp_layouts[ci];
-                        let freq = if ci == 0 {
+                        // JCS_RGB puts all three components on table slot 0,
+                        // so their DC statistics belong to the same histogram —
+                        // splitting them would fit the table to a distribution
+                        // no scan actually has.
+                        let freq = if direct_rgb || ci == 0 {
                             &mut dc_luma_freq
                         } else {
                             &mut dc_chroma_freq
@@ -3050,7 +3138,7 @@ fn compress_progressive_with_scans(
                 crate::encode::huff_opt::gen_optimal_table(&dc_luma_freq);
             marker_writer::write_dht(&mut output, 0, 0, &dc_luma_bits, &dc_luma_values);
 
-            if !is_grayscale {
+            if !is_grayscale && !direct_rgb {
                 let (dc_chroma_bits, dc_chroma_values) =
                     crate::encode::huff_opt::gen_optimal_table(&dc_chroma_freq);
                 marker_writer::write_dht(&mut output, 0, 1, &dc_chroma_bits, &dc_chroma_values);
@@ -3101,8 +3189,15 @@ fn compress_progressive_with_scans(
                 );
 
                 let dc_luma_table: HuffTable = build_huff_table(&dc_luma_bits, &dc_luma_values);
-                let dc_chroma_table: HuffTable =
-                    build_huff_table(&tables::DC_CHROMINANCE_BITS, &tables::DC_CHROMINANCE_VALUES);
+                // Grayscale never reaches components 1 and 2; JCS_RGB reaches
+                // them but codes them with slot 0, so both arms pass the same
+                // table twice rather than a chrominance table that is not in
+                // the stream.
+                let dc_chroma_table: HuffTable = if direct_rgb {
+                    build_huff_table(&dc_luma_bits, &dc_luma_values)
+                } else {
+                    build_huff_table(&tables::DC_CHROMINANCE_BITS, &tables::DC_CHROMINANCE_VALUES)
+                };
                 encode_progressive_dc_scan(
                     &coeff_bufs,
                     &comp_layouts,
@@ -3119,8 +3214,11 @@ fn compress_progressive_with_scans(
             // DC refinement scan (ah > 0): no DHT needed, just write SOS and encode.
             let dc_luma_table: HuffTable =
                 build_huff_table(&tables::DC_LUMINANCE_BITS, &tables::DC_LUMINANCE_VALUES);
-            let dc_chroma_table: HuffTable =
-                build_huff_table(&tables::DC_CHROMINANCE_BITS, &tables::DC_CHROMINANCE_VALUES);
+            let dc_chroma_table: HuffTable = if direct_rgb {
+                build_huff_table(&tables::DC_LUMINANCE_BITS, &tables::DC_LUMINANCE_VALUES)
+            } else {
+                build_huff_table(&tables::DC_CHROMINANCE_BITS, &tables::DC_CHROMINANCE_VALUES)
+            };
             if restart_interval != last_ri {
                 if restart_interval > 0 {
                     marker_writer::write_dri(&mut output, restart_interval);
@@ -3254,7 +3352,7 @@ fn compress_progressive_with_scans(
 
                 // Generate optimal table, write DHT + (DRI) + SOS
                 let (ac_bits, ac_values) = crate::encode::huff_opt::gen_optimal_table(&ac_freq);
-                let table_id: u8 = if ci == 0 { 0 } else { 1 };
+                let table_id: u8 = if direct_rgb || ci == 0 { 0 } else { 1 };
                 marker_writer::write_dht(&mut output, 1, table_id, &ac_bits, &ac_values);
                 if restart_interval != last_ri {
                     if restart_interval > 0 {
@@ -3458,7 +3556,7 @@ fn compress_progressive_with_scans(
 
                 // Generate optimal table, write DHT + (DRI) + SOS
                 let (ac_bits, ac_values) = crate::encode::huff_opt::gen_optimal_table(&ac_freq);
-                let table_id: u8 = if ci == 0 { 0 } else { 1 };
+                let table_id: u8 = if direct_rgb || ci == 0 { 0 } else { 1 };
                 marker_writer::write_dht(&mut output, 1, table_id, &ac_bits, &ac_values);
                 if restart_interval != last_ri {
                     if restart_interval > 0 {
@@ -4005,6 +4103,62 @@ pub fn compress_arithmetic(
     restart_interval: u16,
     custom_quant: Option<&[Option<[u16; 64]>; 4]>,
 ) -> Result<Vec<u8>> {
+    compress_arithmetic_inner(
+        pixels,
+        width,
+        height,
+        pixel_format,
+        quality,
+        subsampling,
+        dct_method,
+        restart_interval,
+        custom_quant,
+        false,
+    )
+}
+
+/// Compress RGB pixels as an arithmetic-coded `JCS_RGB` stream
+/// (`cjpeg -rgb -arithmetic`).
+///
+/// Arithmetic coding is colorspace-agnostic in C (`jcarith.c` works on
+/// coefficients), so this is the ordinary arithmetic encoder with the colour
+/// conversion skipped, all three components on conditioning table 0, and the
+/// RGB markers (#345).
+pub fn compress_arithmetic_rgb_direct(
+    params: &CompressParams<'_>,
+    icc_profile: Option<&[u8]>,
+) -> Result<Vec<u8>> {
+    let base: Vec<u8> = compress_arithmetic_inner(
+        params.pixels,
+        params.width,
+        params.height,
+        PixelFormat::Rgb,
+        params.quality,
+        Subsampling::S444,
+        params.dct_method,
+        params.restart_interval,
+        params.custom_quant,
+        true,
+    )?;
+    match icc_profile {
+        Some(icc) => inject_metadata(&base, Some(icc), None),
+        None => Ok(base),
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn compress_arithmetic_inner(
+    pixels: &[u8],
+    width: usize,
+    height: usize,
+    pixel_format: PixelFormat,
+    quality: u8,
+    subsampling: Subsampling,
+    dct_method: DctMethod,
+    restart_interval: u16,
+    custom_quant: Option<&[Option<[u16; 64]>; 4]>,
+    direct_rgb: bool,
+) -> Result<Vec<u8>> {
     use crate::encode::arithmetic::ArithEncoder;
 
     // Validate inputs
@@ -4039,6 +4193,8 @@ pub fn compress_arithmetic(
     // per-coefficient `1 / (q · aan_row · aan_col · 8)` value through
     // `QuantDivisors::float_divisors`.
     let (luma_quant, chroma_quant) = resolve_quant_tables(custom_quant, quality);
+    // All three JCS_RGB components use quantization slot 0.
+    let chroma_quant: [u16; 64] = if direct_rgb { luma_quant } else { chroma_quant };
     let luma_divisors = if dct_method == DctMethod::IsFast {
         scale_quant_for_ifast(&luma_quant)
     } else {
@@ -4071,17 +4227,40 @@ pub fn compress_arithmetic(
     let padded_w: usize = mcus_x * mcu_w;
     let padded_h: usize = mcus_y * mcu_h;
 
-    // Color convert with MCU-aligned padding
-    let (y_plane, cb_plane, cr_plane) = convert_to_ycbcr_padded(
-        pixels,
-        width,
-        height,
-        padded_w,
-        padded_h,
-        pixel_format,
-        enc_simd.rgb_to_ycbcr_row,
-        mcu_h / 8,
-    )?;
+    // Color convert with MCU-aligned padding — except for JCS_RGB, which has
+    // nothing to convert and pads the three channels directly.
+    let (y_plane, cb_plane, cr_plane) = if direct_rgb {
+        let num_pixels: usize = width * height;
+        let mut channels: [Vec<u8>; 3] = [
+            vec![0u8; num_pixels],
+            vec![0u8; num_pixels],
+            vec![0u8; num_pixels],
+        ];
+        for pixel in 0..num_pixels {
+            for (channel, plane) in channels.iter_mut().enumerate() {
+                plane[pixel] = pixels[pixel * 3 + channel];
+            }
+        }
+        let [red, green, blue] = &channels;
+        // Every component is at the maximum sampling factor, so the bottom
+        // padding is a plain last-row repeat (see `pad_plane_to_mcu_grid`).
+        (
+            pad_plane_to_mcu_grid(red, width, height, padded_w, padded_h, 1),
+            pad_plane_to_mcu_grid(green, width, height, padded_w, padded_h, 1),
+            pad_plane_to_mcu_grid(blue, width, height, padded_w, padded_h, 1),
+        )
+    } else {
+        convert_to_ycbcr_padded(
+            pixels,
+            width,
+            height,
+            padded_w,
+            padded_h,
+            pixel_format,
+            enc_simd.rgb_to_ycbcr_row,
+            mcu_h / 8,
+        )?
+    };
 
     let original_width: usize = width;
     let original_height: usize = height;
@@ -4429,13 +4608,15 @@ pub fn compress_arithmetic(
                     arith_enc.encode_ac_sequential(&all_blocks[block_idx], 0);
                     block_idx += 1;
                 }
-                // Cb
-                arith_enc.encode_dc_sequential(&all_blocks[block_idx], 1, 1);
-                arith_enc.encode_ac_sequential(&all_blocks[block_idx], 1);
+                // Components 1 and 2. Their DC prediction state is still
+                // per component, but JCS_RGB puts every component on
+                // conditioning table 0 where YCbCr splits luma and chroma.
+                let chroma_table: usize = if direct_rgb { 0 } else { 1 };
+                arith_enc.encode_dc_sequential(&all_blocks[block_idx], 1, chroma_table);
+                arith_enc.encode_ac_sequential(&all_blocks[block_idx], chroma_table);
                 block_idx += 1;
-                // Cr
-                arith_enc.encode_dc_sequential(&all_blocks[block_idx], 2, 1);
-                arith_enc.encode_ac_sequential(&all_blocks[block_idx], 1);
+                arith_enc.encode_dc_sequential(&all_blocks[block_idx], 2, chroma_table);
+                arith_enc.encode_ac_sequential(&all_blocks[block_idx], chroma_table);
                 block_idx += 1;
             }
             mcu_count_arith = mcu_count_arith.wrapping_add(1);
@@ -4448,17 +4629,30 @@ pub fn compress_arithmetic(
     let mut output = Vec::with_capacity(arith_enc.data().len() + 1024);
 
     marker_writer::write_soi(&mut output);
-    marker_writer::write_app0_jfif(&mut output);
+    // JCS_RGB carries the Adobe marker and no JFIF (#339, `jcparam.c:365-370`).
+    if direct_rgb {
+        marker_writer::write_app14_adobe(&mut output, 0);
+    } else {
+        marker_writer::write_app0_jfif(&mut output);
+    }
 
     // Quantization tables
     marker_writer::write_dqt(&mut output, 0, &luma_quant);
-    if !is_grayscale {
+    if !is_grayscale && !direct_rgb {
         marker_writer::write_dqt(&mut output, 1, &chroma_quant);
     }
 
     // SOF9 (arithmetic sequential)
     if is_grayscale {
         let components = vec![(1, 1, 1, 0)];
+        marker_writer::write_sof9(
+            &mut output,
+            original_width as u16,
+            original_height as u16,
+            &components,
+        );
+    } else if direct_rgb {
+        let components = vec![(b'R', 1, 1, 0), (b'G', 1, 1, 0), (b'B', 1, 1, 0)];
         marker_writer::write_sof9(
             &mut output,
             original_width as u16,
@@ -4479,8 +4673,10 @@ pub fn compress_arithmetic(
     // DAC marker
     let dc_params = [(0u8, 1u8), (0, 1)];
     let ac_params = [5u8, 5];
-    let num_dc = if is_grayscale { 1 } else { 2 };
-    let num_ac = if is_grayscale { 1 } else { 2 };
+    // One conditioning entry per table actually referenced: grayscale and
+    // JCS_RGB use slot 0 only, YCbCr uses slots 0 and 1.
+    let num_dc = if is_grayscale || direct_rgb { 1 } else { 2 };
+    let num_ac = if is_grayscale || direct_rgb { 1 } else { 2 };
     marker_writer::write_dac(&mut output, num_dc, &dc_params, num_ac, &ac_params);
 
     // DRI marker — emitted from `write_scan_header` in C
@@ -4492,6 +4688,9 @@ pub fn compress_arithmetic(
     // SOS
     if is_grayscale {
         let scan_components = vec![(1, 0, 0)];
+        marker_writer::write_sos(&mut output, &scan_components);
+    } else if direct_rgb {
+        let scan_components = vec![(b'R', 0, 0), (b'G', 0, 0), (b'B', 0, 0)];
         marker_writer::write_sos(&mut output, &scan_components);
     } else {
         let scan_components = vec![(1, 0, 0), (2, 1, 1), (3, 1, 1)];
@@ -4524,8 +4723,62 @@ pub fn compress_arithmetic_progressive(
     restart_in_rows: u16,
     custom_quant: Option<&[Option<[u16; 64]>; 4]>,
 ) -> Result<Vec<u8>> {
+    compress_arithmetic_progressive_inner(
+        pixels,
+        width,
+        height,
+        pixel_format,
+        quality,
+        subsampling,
+        dct_method,
+        restart_interval,
+        restart_in_rows,
+        custom_quant,
+        false,
+    )
+}
+
+/// Compress RGB pixels as an arithmetic-coded progressive `JCS_RGB` stream
+/// (`cjpeg -rgb -arithmetic -progressive`).
+pub fn compress_arithmetic_progressive_rgb_direct(
+    params: &CompressParams<'_>,
+    icc_profile: Option<&[u8]>,
+) -> Result<Vec<u8>> {
+    let base: Vec<u8> = compress_arithmetic_progressive_inner(
+        params.pixels,
+        params.width,
+        params.height,
+        PixelFormat::Rgb,
+        params.quality,
+        Subsampling::S444,
+        params.dct_method,
+        params.restart_interval,
+        0,
+        params.custom_quant,
+        true,
+    )?;
+    match icc_profile {
+        Some(icc) => inject_metadata(&base, Some(icc), None),
+        None => Ok(base),
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn compress_arithmetic_progressive_inner(
+    pixels: &[u8],
+    width: usize,
+    height: usize,
+    pixel_format: PixelFormat,
+    quality: u8,
+    subsampling: Subsampling,
+    dct_method: DctMethod,
+    restart_interval: u16,
+    restart_in_rows: u16,
+    custom_quant: Option<&[Option<[u16; 64]>; 4]>,
+    direct_rgb: bool,
+) -> Result<Vec<u8>> {
     use crate::encode::arithmetic::ArithEncoder;
-    use crate::encode::progressive::simple_progression;
+    use crate::encode::progressive::simple_progression_for;
 
     if width == 0 || height == 0 {
         return Err(JpegError::CorruptData(
@@ -4554,6 +4807,8 @@ pub fn compress_arithmetic_progressive(
     let enc_simd = crate::simd::detect_encoder();
 
     let (luma_quant, chroma_quant) = resolve_quant_tables(custom_quant, quality);
+    // All three JCS_RGB components use quantization slot 0.
+    let chroma_quant: [u16; 64] = if direct_rgb { luma_quant } else { chroma_quant };
     let luma_divisors: QuantDivisors = if dct_method == DctMethod::IsFast {
         scale_quant_for_ifast(&luma_quant)
     } else {
@@ -4565,13 +4820,34 @@ pub fn compress_arithmetic_progressive(
         scale_quant_for_fdct(&chroma_quant)
     };
 
-    let (y_plane, cb_plane, cr_plane) = convert_to_ycbcr(
-        pixels,
-        width,
-        height,
-        pixel_format,
-        enc_simd.rgb_to_ycbcr_row,
-    )?;
+    let (y_plane, cb_plane, cr_plane) = if direct_rgb {
+        let num_pixels: usize = width * height;
+        let mut channels: [Vec<u8>; 3] = [
+            vec![0u8; num_pixels],
+            vec![0u8; num_pixels],
+            vec![0u8; num_pixels],
+        ];
+        for pixel in 0..num_pixels {
+            for (channel, plane) in channels.iter_mut().enumerate() {
+                plane[pixel] = pixels[pixel * 3 + channel];
+            }
+        }
+        let [red, green, blue] = channels;
+        (red, green, blue)
+    } else {
+        convert_to_ycbcr(
+            pixels,
+            width,
+            height,
+            pixel_format,
+            enc_simd.rgb_to_ycbcr_row,
+        )?
+    };
+    let subsampling: Subsampling = if direct_rgb {
+        Subsampling::S444
+    } else {
+        subsampling
+    };
 
     let (mcu_w, mcu_h): (usize, usize) = if is_grayscale {
         (8, 8)
@@ -4773,23 +5049,31 @@ pub fn compress_arithmetic_progressive(
     }
 
     // Generate scan progression
-    let scans = simple_progression(num_components);
+    // JCS_RGB is not YCbCr, so it takes C's all-purpose scan script.
+    let scans = simple_progression_for(num_components, !direct_rgb);
 
     // Assemble output
     let mut output: Vec<u8> = Vec::with_capacity(width * height * 2);
 
     marker_writer::write_soi(&mut output);
-    marker_writer::write_app0_jfif(&mut output);
+    if direct_rgb {
+        marker_writer::write_app14_adobe(&mut output, 0);
+    } else {
+        marker_writer::write_app0_jfif(&mut output);
+    }
 
     // Quantization tables
     marker_writer::write_dqt(&mut output, 0, &luma_quant);
-    if !is_grayscale {
+    if !is_grayscale && !direct_rgb {
         marker_writer::write_dqt(&mut output, 1, &chroma_quant);
     }
 
     // SOF10 (arithmetic progressive)
     if is_grayscale {
         let components = vec![(1, 1, 1, 0)];
+        marker_writer::write_sof10(&mut output, width as u16, height as u16, &components);
+    } else if direct_rgb {
+        let components = vec![(b'R', 1, 1, 0), (b'G', 1, 1, 0), (b'B', 1, 1, 0)];
         marker_writer::write_sof10(&mut output, width as u16, height as u16, &components);
     } else {
         let components = vec![
@@ -4843,8 +5127,12 @@ pub fn compress_arithmetic_progressive(
             .component_indices
             .iter()
             .map(|&ci| {
-                let comp_id: u8 = (ci + 1) as u8;
-                let tbl_idx: u8 = if ci == 0 { 0 } else { 1 };
+                let comp_id: u8 = if direct_rgb {
+                    b"RGB"[ci]
+                } else {
+                    (ci + 1) as u8
+                };
+                let tbl_idx: u8 = if direct_rgb || ci == 0 { 0 } else { 1 };
                 let dc_tbl: u8 = if is_dc_scan_arith { tbl_idx } else { 0 };
                 let ac_tbl: u8 = if is_dc_scan_arith { 0 } else { tbl_idx };
                 (comp_id, dc_tbl, ac_tbl)
@@ -4908,6 +5196,7 @@ pub fn compress_arithmetic_progressive(
                     mcus_y,
                     &mut arith_enc,
                     scan_ri,
+                    direct_rgb,
                 );
             } else {
                 // DC refine scan
@@ -4931,6 +5220,7 @@ pub fn compress_arithmetic_progressive(
                 scan,
                 &mut arith_enc,
                 scan_ri,
+                direct_rgb,
             );
         } else {
             // AC refine scan
@@ -4942,6 +5232,7 @@ pub fn compress_arithmetic_progressive(
                 scan,
                 &mut arith_enc,
                 scan_ri,
+                direct_rgb,
             );
         }
 
@@ -4964,6 +5255,9 @@ fn encode_arith_dc_first_scan(
     mcus_y: usize,
     arith_enc: &mut crate::encode::arithmetic::ArithEncoder,
     restart_interval: u16,
+    // JCS_RGB puts every component on conditioning table 0 where YCbCr
+    // splits luma and chroma across 0 and 1.
+    direct_rgb: bool,
 ) {
     let al: u8 = scan.al;
     let ri: u32 = restart_interval as u32;
@@ -4978,7 +5272,7 @@ fn encode_arith_dc_first_scan(
             }
             for &ci in &scan.component_indices {
                 let layout: &CompLayout = &comp_layouts[ci];
-                let dc_tbl: usize = if ci == 0 { 0 } else { 1 };
+                let dc_tbl: usize = if direct_rgb || ci == 0 { 0 } else { 1 };
 
                 for bv in 0..layout.v_blocks {
                     for bh in 0..layout.h_blocks {
@@ -5054,10 +5348,13 @@ fn encode_arith_ac_first_scan(
     scan: &crate::encode::progressive::ProgressiveScan,
     arith_enc: &mut crate::encode::arithmetic::ArithEncoder,
     restart_interval: u16,
+    // JCS_RGB puts every component on conditioning table 0 where YCbCr
+    // splits luma and chroma across 0 and 1.
+    direct_rgb: bool,
 ) {
     let ci: usize = scan.component_indices[0]; // AC scans are single-component
     let layout: &CompLayout = &comp_layouts[ci];
-    let ac_tbl: usize = if ci == 0 { 0 } else { 1 };
+    let ac_tbl: usize = if direct_rgb || ci == 0 { 0 } else { 1 };
     let wib: usize = comp_wib[ci];
     let hib: usize = comp_hib[ci];
     let stride: usize = layout.blocks_x;
@@ -5090,10 +5387,13 @@ fn encode_arith_ac_refine_scan(
     scan: &crate::encode::progressive::ProgressiveScan,
     arith_enc: &mut crate::encode::arithmetic::ArithEncoder,
     restart_interval: u16,
+    // JCS_RGB puts every component on conditioning table 0 where YCbCr
+    // splits luma and chroma across 0 and 1.
+    direct_rgb: bool,
 ) {
     let ci: usize = scan.component_indices[0]; // AC scans are single-component
     let layout: &CompLayout = &comp_layouts[ci];
-    let ac_tbl: usize = if ci == 0 { 0 } else { 1 };
+    let ac_tbl: usize = if direct_rgb || ci == 0 { 0 } else { 1 };
     let wib: usize = comp_wib[ci];
     let hib: usize = comp_hib[ci];
     let stride: usize = layout.blocks_x;
