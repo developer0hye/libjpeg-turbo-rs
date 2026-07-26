@@ -5,11 +5,56 @@ struct CompareCase {
     path: &'static str,
 }
 
+// Every subsampling × {baseline, progressive} × size tier must be
+// represented: the pre-#360 matrix covered only 4:2:0/4:4:4 baseline,
+// which is exactly why the 4:2:2, small-image, and progressive losses
+// to zune-jpeg went unnoticed (issues #350–#353). The wide sweep with
+// allocation metrics lives in `examples/bench_zune_matrix.rs`; this
+// criterion set is the statistically-rigorous subset.
 const COMPARE_CASES: &[CompareCase] = &[
+    // tiny — fixed cost dominates (#351)
+    CompareCase {
+        name: "gray_8x8",
+        path: "tests/fixtures/gray_8x8.jpg",
+    },
+    CompareCase {
+        name: "16x16_420",
+        path: "tests/fixtures/blue_16x16_420.jpg",
+    },
+    CompareCase {
+        name: "64x64_420",
+        path: "tests/fixtures/photo_64x64_420.jpg",
+    },
+    // small / medium, all subsamplings (#350)
+    CompareCase {
+        name: "320x240_422",
+        path: "tests/fixtures/photo_320x240_422.jpg",
+    },
+    CompareCase {
+        name: "320x240_444",
+        path: "tests/fixtures/photo_320x240_444.jpg",
+    },
     CompareCase {
         name: "640x480",
         path: "tests/fixtures/gradient_640x480.jpg",
     },
+    CompareCase {
+        name: "640x480_422",
+        path: "tests/fixtures/photo_640x480_422.jpg",
+    },
+    CompareCase {
+        name: "640x480_444",
+        path: "tests/fixtures/photo_640x480_444.jpg",
+    },
+    CompareCase {
+        name: "640x480_420_rst",
+        path: "tests/fixtures/photo_640x480_420_rst.jpg",
+    },
+    CompareCase {
+        name: "graphic_640x480",
+        path: "tests/fixtures/graphic_640x480_420.jpg",
+    },
+    // HD and up
     CompareCase {
         name: "1280x720",
         path: "tests/fixtures/photo_1280x720_420.jpg",
@@ -19,6 +64,14 @@ const COMPARE_CASES: &[CompareCase] = &[
         path: "tests/fixtures/photo_1920x1080_420.jpg",
     },
     CompareCase {
+        name: "1920x1080_422",
+        path: "tests/fixtures/photo_1920x1080_422.jpg",
+    },
+    CompareCase {
+        name: "1920x1080_444",
+        path: "tests/fixtures/photo_1920x1080_444.jpg",
+    },
+    CompareCase {
         name: "2560x1440",
         path: "tests/fixtures/photo_2560x1440_420.jpg",
     },
@@ -26,13 +79,27 @@ const COMPARE_CASES: &[CompareCase] = &[
         name: "3840x2160",
         path: "tests/fixtures/photo_3840x2160_420.jpg",
     },
+    // progressive (#352)
     CompareCase {
-        name: "320x240_444",
-        path: "tests/fixtures/photo_320x240_444.jpg",
+        name: "320x240_420_prog",
+        path: "tests/fixtures/photo_320x240_420_prog.jpg",
     },
     CompareCase {
-        name: "graphic_640x480",
-        path: "tests/fixtures/graphic_640x480_420.jpg",
+        name: "1920x1080_420_prog",
+        path: "tests/fixtures/photo_1920x1080_420_prog.jpg",
+    },
+    CompareCase {
+        name: "3840x2160_420_prog",
+        path: "tests/fixtures/photo_3840x2160_420_prog.jpg",
+    },
+    // 8K real-world (#352's superlinear-scaling witness)
+    CompareCase {
+        name: "8k_420",
+        path: "tests/fixtures/real_world/derived_7680x4320_8k_420_q75.jpg",
+    },
+    CompareCase {
+        name: "8k_progressive",
+        path: "tests/fixtures/real_world/derived_7680x4320_8k_progressive.jpg",
     },
 ];
 
