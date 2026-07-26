@@ -232,44 +232,171 @@ fn issue_343_rgb_direct_keeps_the_comment_and_exif() {
     );
 }
 
-/// `colorspace(Rgb)` has always taken precedence over the mode switches, and
-/// this test pins that so the precedence is a decision rather than an accident
-/// of where the branch sits. JCS_RGB progressive and arithmetic are #345.
+/// Issue #345: `colorspace(Rgb)` used to take precedence over the mode
+/// switches and discard them, so `progressive(true)` returned a baseline
+/// Huffman stream with nothing to say it had not been applied.
+///
+/// C has none of that: `jcmaster.c` builds the scan script from the component
+/// count and `jcarith.c` codes coefficients — neither looks at the colorspace.
+/// So all four combinations are compared against the `cjpeg -rgb` invocation
+/// that means the same thing.
 #[test]
-fn issue_343_rgb_direct_still_wins_over_unimplemented_modes() {
+fn issue_345_rgb_direct_composes_with_every_mode() {
+    let cjpeg = require_c_tool!("cjpeg");
+
+    let mut failures: Vec<String> = Vec::new();
+    let mut compared: usize = 0;
+
+    for &(width, height) in GEOMETRIES {
+        let pixels: Vec<u8> = rgb_pixels(width, height);
+        let mut ppm: Vec<u8> = format!("P6\n{width} {height}\n255\n").into_bytes();
+        ppm.extend_from_slice(&pixels);
+
+        for &quality in QUALITIES {
+            let quality_arg: String = quality.to_string();
+            let base = || {
+                Encoder::new(&pixels, width, height, PixelFormat::Rgb)
+                    .quality(quality)
+                    .colorspace(ColorSpace::Rgb)
+            };
+
+            let cases: Vec<(&str, Vec<u8>, Vec<&str>)> = vec![
+                (
+                    "progressive",
+                    base()
+                        .progressive(true)
+                        .encode()
+                        .expect("rgb-direct progressive"),
+                    vec!["-progressive"],
+                ),
+                (
+                    "arithmetic",
+                    base()
+                        .arithmetic(true)
+                        .encode()
+                        .expect("rgb-direct arithmetic"),
+                    vec!["-arithmetic"],
+                ),
+                (
+                    "arith-progressive",
+                    base()
+                        .arithmetic(true)
+                        .progressive(true)
+                        .encode()
+                        .expect("rgb-direct arithmetic progressive"),
+                    vec!["-arithmetic", "-progressive"],
+                ),
+                (
+                    "lossless",
+                    base().lossless(true).encode().expect("rgb-direct lossless"),
+                    vec!["-lossless", "1,0"],
+                ),
+            ];
+
+            for (label, ours, extra) in cases {
+                let mut args: Vec<&str> = vec!["-quality", &quality_arg, "-baseline", "-rgb"];
+                args.extend(extra);
+                let theirs: Vec<u8> = helpers::encode_with_c_cjpeg(
+                    &cjpeg,
+                    &ppm,
+                    &args,
+                    &format!("i345_{label}_{width}x{height}_q{quality}"),
+                );
+                compared += 1;
+                if ours != theirs {
+                    let first_difference: usize = ours
+                        .iter()
+                        .zip(theirs.iter())
+                        .take_while(|(a, b)| a == b)
+                        .count();
+                    failures.push(format!(
+                        "  {label} {width}x{height} q{quality}: ours={} c={} \
+                         first diff at byte {first_difference}",
+                        ours.len(),
+                        theirs.len()
+                    ));
+                }
+            }
+        }
+    }
+
+    assert_eq!(
+        compared,
+        GEOMETRIES.len() * QUALITIES.len() * 4,
+        "the sweep must compare every case; a short run reads as a pass"
+    );
+    assert!(
+        failures.is_empty(),
+        "{} of {compared} JCS_RGB mode cases diverged from cjpeg (issue #345):\n{}",
+        failures.len(),
+        failures.join("\n")
+    );
+}
+
+/// The mode markers themselves, without a C tool, so the contract holds even
+/// where cjpeg is unavailable. A baseline SOF0 here would mean the mode was
+/// dropped — the exact failure #345 was about.
+#[test]
+fn issue_345_each_mode_writes_its_own_frame_marker() {
     let (width, height) = (32usize, 16usize);
     let pixels: Vec<u8> = rgb_pixels(width, height);
 
-    let baseline: Vec<u8> = Encoder::new(&pixels, width, height, PixelFormat::Rgb)
-        .quality(75)
-        .colorspace(ColorSpace::Rgb)
-        .encode()
-        .expect("rgb-direct encode");
-
-    for (label, encoder) in [
+    for (label, marker, encoded) in [
         (
             "progressive",
+            0xC2u8,
             Encoder::new(&pixels, width, height, PixelFormat::Rgb)
                 .quality(75)
                 .colorspace(ColorSpace::Rgb)
-                .progressive(true),
+                .progressive(true)
+                .encode()
+                .expect("progressive"),
         ),
         (
             "arithmetic",
+            0xC9,
             Encoder::new(&pixels, width, height, PixelFormat::Rgb)
                 .quality(75)
                 .colorspace(ColorSpace::Rgb)
-                .arithmetic(true),
+                .arithmetic(true)
+                .encode()
+                .expect("arithmetic"),
+        ),
+        (
+            "arith-progressive",
+            0xCA,
+            Encoder::new(&pixels, width, height, PixelFormat::Rgb)
+                .quality(75)
+                .colorspace(ColorSpace::Rgb)
+                .arithmetic(true)
+                .progressive(true)
+                .encode()
+                .expect("arithmetic progressive"),
+        ),
+        (
+            "lossless",
+            0xC3,
+            Encoder::new(&pixels, width, height, PixelFormat::Rgb)
+                .quality(75)
+                .colorspace(ColorSpace::Rgb)
+                .lossless(true)
+                .encode()
+                .expect("lossless"),
         ),
     ] {
-        let encoded: Vec<u8> = encoder
-            .encode()
-            .unwrap_or_else(|error| panic!("colorspace(Rgb) + {label} failed: {error:?}"));
+        let found: bool = encoded
+            .windows(2)
+            .any(|window| window[0] == 0xFF && window[1] == marker);
+        assert!(
+            found,
+            "colorspace(Rgb) + {label} did not write its SOF marker (FF{marker:02X}) — \
+             the mode was dropped (#345)"
+        );
+        // Still JCS_RGB: Adobe APP14, never a JFIF APP0.
         assert_eq!(
-            encoded, baseline,
-            "colorspace(Rgb) + {label} must still produce the baseline \
-             RGB-direct stream — that precedence predates #343 and changing it \
-             is #345's call, not this fix's"
+            &encoded[..4],
+            &[0xFF, 0xD8, 0xFF, 0xEE],
+            "{label}: JCS_RGB must open SOI then Adobe APP14"
         );
     }
 }

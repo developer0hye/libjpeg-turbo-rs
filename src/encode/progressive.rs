@@ -28,7 +28,19 @@ pub struct ProgressiveScan {
 ///
 /// For other component counts, uses the generic all-purpose script.
 pub fn simple_progression(num_components: usize) -> Vec<ProgressiveScan> {
-    if num_components == 3 {
+    simple_progression_for(num_components, true)
+}
+
+/// The scan script C picks, given the component count *and* the colorspace.
+///
+/// `jpeg_simple_progression` takes the tuned 10-scan script only when
+/// `ncomps == 3 && jpeg_color_space == JCS_YCbCr` (`jcparam.c`); every other
+/// three-component colorspace gets the 14-scan all-purpose script. The
+/// distinction matters because that script's shortcuts are chroma-specific —
+/// "chroma data is too small to be worth expending many scans on" is a
+/// statement about Cb and Cr, and is simply false of G and B.
+pub fn simple_progression_for(num_components: usize, ycbcr: bool) -> Vec<ProgressiveScan> {
+    if num_components == 3 && ycbcr {
         ycbcr_progression()
     } else {
         generic_progression(num_components)
