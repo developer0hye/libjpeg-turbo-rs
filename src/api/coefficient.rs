@@ -2991,6 +2991,13 @@ fn decode_progressive_coefficients(
         .max()
         .unwrap_or(1);
 
+    // Per-block highest nonzero AC zigzag index (issue #352: bounds the
+    // refinement EOB-run walk to the block's spectral extent).
+    let mut ac_max_k: Vec<Vec<u8>> = comp_data
+        .iter()
+        .map(|cd| vec![0u8; cd.blocks.len()])
+        .collect();
+
     for scan_info in &metadata.scans {
         let scan = &scan_info.header;
         let ss = scan.spec_start;
@@ -3151,7 +3158,7 @@ fn decode_progressive_coefficients(
                             progressive::decode_dc_refine(&mut bit_reader, coeffs, al)?;
                         }
                     } else if ah == 0 {
-                        progressive::decode_ac_first(
+                        progressive::decode_ac_first_tracked(
                             &mut bit_reader,
                             ac_table.unwrap(),
                             coeffs,
@@ -3159,9 +3166,10 @@ fn decode_progressive_coefficients(
                             se,
                             al,
                             &mut eob_run,
+                            &mut ac_max_k[comp_idx][block_idx],
                         )?;
                     } else {
-                        progressive::decode_ac_refine(
+                        progressive::decode_ac_refine_tracked(
                             &mut bit_reader,
                             ac_table.unwrap(),
                             coeffs,
@@ -3169,6 +3177,7 @@ fn decode_progressive_coefficients(
                             se,
                             al,
                             &mut eob_run,
+                            &mut ac_max_k[comp_idx][block_idx],
                         )?;
                     }
 
