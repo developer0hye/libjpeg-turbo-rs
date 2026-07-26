@@ -964,5 +964,44 @@ Ruled out along the way, each by direct measurement rather than inspection: `fdc
 45. ~~**P4-49** — `smoothing_factor` is a silent no-op for grayscale (#327).~~ **CLOSED 2026-07-26** — byte-exact vs `cjpeg -grayscale -smooth`.
 43. ~~**P4-47** — progressive 4:2:0/4:4:0 diverges from `cjpeg` at every even height not a multiple of 16, including 1920x1080 (#324).~~ **CLOSED 2026-07-26** — chroma row-group replication; 4032/4032 vs cjpeg.
 44. ~~**P4-48** — close the mutation-testing blind spots in `api/encoder.rs`, then shard `encode/pipeline.rs` (#325).~~ **CLOSED 2026-07-26** — encoder.rs 81/81; pipeline.rs 288 sampled, 51→20 survivors all triaged equivalent; `--in-diff` job added.
+## P4-53. RGB-Direct Encode (`JCS_RGB`) Silently Drops Every Builder Option — **CLOSED 2026-07-26**
+
+**Motivation.** Found 2026-07-26 immediately after [P4-39](#p4-39-cmyk-encode-path-silently-drops-restart--custom-table-options-and-rejects-optimizesmoothing--closed-2026-07-26) closed, by asking the obvious follow-up question: *what else sits behind an early return into a narrower signature?* GitHub [#343](https://github.com/developer0hye/libjpeg-turbo-rs/issues/343).
+
+**Root cause.** `Encoder::encode` returned early into `compress_rgb_direct(pixels, width, height, quality, dct_method, icc_profile)` — and the `dct_method` parameter was spelled `_dct_method`, i.e. the signature said out loud that it was ignored. Restart interval, custom quantization tables, custom Huffman tables, `optimize_huffman`, `smoothing_factor` and the DCT method were all discarded, along with the comment / EXIF / saved-marker injection that every other colorspace runs. Six options, all silent.
+
+Identical in shape to P4-39, and found the same way: not by reading the code, but by asking which entry points cannot express the option set.
+
+**Why it went unnoticed.** Unlike CMYK, this path *is* cross-validatable — `cjpeg -rgb` reads ordinary PPM. Nothing was checking it. `tests/encode_option_matrix.rs`, which exists precisely to catch dropped options, swept `rgb`/`gray`/`cmyk` at the **default** colorspace and so never reached the RGB-direct branch. A metamorphic matrix is only as good as its axes.
+
+**Status (2026-07-26): closed.** CMYK and RGB-direct now share one `compress_direct_planar`, parameterized by a `DirectPlanarSpec` (component IDs plus per-component sampling factors). They always were the same encoder — Adobe APP14 and no JFIF, one quantization and Huffman slot for every component, ASCII-initial component IDs (`jcparam.c:365-390`) — differing only in component count and which components carry the sampling factors. Two copies of that is how P4-39's five dropped options and this one's six got there.
+
+75 cases byte-exact against `cjpeg -rgb` across 5 geometries x 3 qualities x {plain, `-dct fast`, `-restart 3B`, `-optimize`, `-smooth 50`}. Custom tables get the weaker property (the option must change the bytes) because cjpeg has no flag that expresses them.
+
+Review of the fix found two more, both in configurations the sweep could not reach and both now pinned against C:
+
+- **Row-based restarts used the wrong MCU width.** RGB-direct puts every component at 1x1, so its MCU is 8 pixels wide whatever `subsampling` says — but `compute_restart_interval` counted rows against the requested subsampling's MCU, normally 4:2:0's 16. Visible only where `ceil(width/8) != ceil(width/16)`.
+- **16-bit quantization tables were declared SOF0.** Below quality ~20 with `force_baseline` off, or with a coarse custom table, the DQT entries exceed 255 — which baseline forbids. C switches to SOF1 and emits `JTRC_16BIT_TABLES` (`jcmarker.c:517-535`); we wrote SOF0 and a non-conforming stream. The fix lands in the shared core, so it closes the same latent hole on the CMYK side: 180 `customquant|cmyk` fixture rows moved, and nothing else.
+
+**The matrix gained a colorspace axis**, which is the part that generalizes: the next entry point to early-return past the option set gets caught by the suite rather than by someone thinking to look. It immediately earned its keep by surfacing [P4-54](#p4-54-colorspacergb-silently-ignores-progressive--arithmetic--lossless--open).
+
+## P4-54. `colorspace(Rgb)` Silently Ignores `progressive` / `arithmetic` / `lossless` — **OPEN**
+
+**Motivation.** Surfaced 2026-07-26 by the colorspace axis P4-53 added to the option matrix, on its first run. GitHub [#345](https://github.com/developer0hye/libjpeg-turbo-rs/issues/345).
+
+**Root cause.** RGB-direct takes precedence over the mode switches: the baseline encoder runs and `progressive` / `arithmetic` / `lossless` are discarded. The caller gets `Ok(bytes)` holding a baseline Huffman stream. C supports all three with `JCS_RGB` (`cjpeg -rgb -progressive`), so this is a missing feature rather than a colorspace-imposed limit.
+
+`tests/cross_product_compress.rs::tjcomptest_lossy_rgb_colorspace` has been exercising 40 such cases all along and passing, because the baseline stream round-trips — a weaker property than "the requested mode was used".
+
+**Why not fixed with P4-53.** The precedence predates it. Reversing it either starts emitting YCbCr progressive streams where a caller asked for `JCS_RGB`, or starts returning errors where callers currently get a working file. Both are user-visible changes that deserve their own decision, not a side effect of a bug fix.
+
+**Acceptance criteria.**
+
+1. `colorspace(Rgb)` + `progressive` / `arithmetic` either produces that mode or errors — never a silently-baseline `Ok`.
+2. If implemented: byte-exact against `cjpeg -rgb -progressive` and `cjpeg -rgb -arithmetic`.
+3. The `rgb-direct|effect|progressive` / `|arithmetic` entries removed from `KNOWN_VIOLATIONS`.
+
 47. ~~**P4-51** — CMYK streams carry a JFIF APP0 marker C never writes, and non-libjpeg component IDs (#339).~~ **CLOSED 2026-07-26** — SOI then Adobe APP14 only; IDs are `'C','M','Y','K'`.
 48. ~~**P4-52** — CMYK bottom padding clamps the last row where C repeats the last row group (#340).~~ **CLOSED 2026-07-26** — per-component row-group height.
+49. ~~**P4-53** — RGB-direct encode drops every builder option (#343).~~ **CLOSED 2026-07-26** — CMYK and RGB-direct share one `compress_direct_planar`; 75/75 vs `cjpeg -rgb`.
+50. **P4-54** — `colorspace(Rgb)` silently ignores `progressive` / `arithmetic` / `lossless` (#345).
