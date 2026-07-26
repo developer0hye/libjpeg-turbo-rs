@@ -5,10 +5,11 @@
 //! matching arm wins, so everything it cannot express is discarded without an
 //! error. Unlike #313 this is not CMYK-specific — it hits ordinary RGB input.
 //!
-//! The `#[ignore]`d tests below assert the correct behaviour and fail today;
-//! they are the reproduction. `readme_compress_params_example_compiles` is not
-//! ignored: it pins the README snippet, which uses the `CompressParams` core
-//! precisely because that core *does* compose.
+//! Fixed: `Encoder::encode` now builds one `CompressParams` and hands it to the
+//! core, so there is no dispatch chain left to drop anything. These tests were
+//! the reproduction and are now the regression — they were left `#[ignore]`d
+//! after the fix landed, which is how an exemption list quietly becomes a list
+//! of things that used to be broken.
 
 use libjpeg_turbo_rs::encode::pipeline::{compress_with_params, CompressParams};
 use libjpeg_turbo_rs::{DctMethod, Encoder, HuffmanTableDef, PixelFormat, Subsampling};
@@ -74,7 +75,6 @@ fn nonstandard_huffman() -> (HuffmanTableDef, HuffmanTableDef) {
 const EXPECTED_RESTARTS: usize = 3;
 
 #[test]
-#[ignore = "Issue #322: Encoder drops restart_blocks when custom quant tables are set"]
 fn encoder_keeps_restart_with_custom_quant() {
     let pixels: Vec<u8> = test_pixels();
     let encoded: Vec<u8> = Encoder::new(&pixels, WIDTH, HEIGHT, PixelFormat::Rgb)
@@ -93,7 +93,6 @@ fn encoder_keeps_restart_with_custom_quant() {
 }
 
 #[test]
-#[ignore = "Issue #322: Encoder drops restart_blocks when custom Huffman tables are set"]
 fn encoder_keeps_restart_with_custom_huffman() {
     let pixels: Vec<u8> = test_pixels();
     let (dc, ac) = nonstandard_huffman();
@@ -113,7 +112,6 @@ fn encoder_keeps_restart_with_custom_huffman() {
 }
 
 #[test]
-#[ignore = "Issue #322: Encoder drops custom quant tables when custom Huffman tables are set"]
 fn encoder_keeps_custom_quant_with_custom_huffman() {
     let pixels: Vec<u8> = test_pixels();
     let (dc, ac) = nonstandard_huffman();

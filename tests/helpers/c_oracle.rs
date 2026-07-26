@@ -1,0 +1,178 @@
+//! Builds and runs the four-component CMYK reference oracle.
+//!
+//! Issues #313 / #339. Every other encode cross-check shells out to `cjpeg`,
+//! but cjpeg reads only PNM/BMP/GIF/Targa — it cannot ingest CMYK at all. The
+//! four-component path therefore had no C reference and its options were only
+//! ever compared against themselves, which is how an 18-byte spurious JFIF
+//! marker survived in every CMYK file we ever wrote.
+//!
+//! `examples/cmyk_encode_c_oracle.c` drives libjpeg directly to close that
+//! gap. It needs libjpeg's headers and library, which a runtime-only install
+//! does not provide, so this module locates a development install and compiles
+//! the harness on demand, caching the binary next to the test executables.
+//!
+//! Set `CMYK_C_ORACLE` to a prebuilt binary to skip discovery and compilation
+//! entirely — useful where libjpeg is built from source in a non-standard
+//! layout.
+
+use std::path::{Path, PathBuf};
+use std::process::Command;
+
+/// A libjpeg development install: headers plus a linkable library.
+struct LibjpegDevInstall {
+    include_dir: PathBuf,
+    lib_dir: PathBuf,
+}
+
+fn find_libjpeg_dev() -> Option<LibjpegDevInstall> {
+    let mut prefixes: Vec<PathBuf> = Vec::new();
+    if let Ok(prefix) = std::env::var("LIBJPEG_TURBO_PREFIX") {
+        prefixes.push(PathBuf::from(prefix));
+    }
+    if let Ok(prefix) = std::env::var("CONDA_PREFIX") {
+        prefixes.push(PathBuf::from(prefix));
+    }
+    prefixes.extend(
+        [
+            "/opt/libjpeg-turbo",
+            "/opt/homebrew/opt/jpeg-turbo",
+            "/opt/homebrew",
+            "/usr/local",
+            "/usr",
+        ]
+        .iter()
+        .map(PathBuf::from),
+    );
+
+    for prefix in prefixes {
+        let include_dir: PathBuf = prefix.join("include");
+        if !include_dir.join("jpeglib.h").exists() {
+            continue;
+        }
+        for lib_name in ["lib64", "lib"] {
+            let lib_dir: PathBuf = prefix.join(lib_name);
+            let has_library: bool = ["libjpeg.a", "libjpeg.so", "libjpeg.dylib"]
+                .iter()
+                .any(|file| lib_dir.join(file).exists());
+            if has_library {
+                return Some(LibjpegDevInstall {
+                    include_dir,
+                    lib_dir,
+                });
+            }
+        }
+    }
+    None
+}
+
+/// Directory holding the test executables — a writable, per-profile location
+/// that is already gitignored, so the compiled oracle lands beside the binaries
+/// that use it rather than in the source tree.
+fn artifact_dir() -> Option<PathBuf> {
+    let mut path: PathBuf = std::env::current_exe().ok()?;
+    // .../target/<profile>/deps/<test-binary>
+    path.pop();
+    path.pop();
+    Some(path)
+}
+
+/// Locate — building if necessary — the CMYK reference oracle.
+///
+/// Returns `None` when no libjpeg development install can be found, which is
+/// the ordinary state of a machine with only the runtime tools installed.
+/// Callers apply the project's skip-locally / fail-in-CI policy.
+pub fn cmyk_c_oracle() -> Option<PathBuf> {
+    if let Ok(prebuilt) = std::env::var("CMYK_C_ORACLE") {
+        let path: PathBuf = PathBuf::from(prebuilt);
+        if path.exists() {
+            return Some(path);
+        }
+        // An explicit path that does not exist is a misconfiguration, not a
+        // reason to silently fall back to a different binary.
+        panic!("CMYK_C_ORACLE points at {path:?}, which does not exist");
+    }
+
+    let artifact_dir: PathBuf = artifact_dir()?;
+    let oracle: PathBuf = artifact_dir.join("cmyk_encode_c_oracle");
+
+    let source: PathBuf = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("examples")
+        .join("cmyk_encode_c_oracle.c");
+    if !source.exists() {
+        return None;
+    }
+    if is_newer(&oracle, &source) {
+        return Some(oracle);
+    }
+
+    let install: LibjpegDevInstall = find_libjpeg_dev()?;
+
+    // Build to a unique name and rename, so concurrent test binaries cannot
+    // observe a half-written executable.
+    let staging: PathBuf =
+        artifact_dir.join(format!("cmyk_encode_c_oracle.{}.tmp", std::process::id()));
+    let compiler: String = std::env::var("CC").unwrap_or_else(|_| "cc".to_string());
+    let output = Command::new(&compiler)
+        .arg("-O2")
+        .arg("-o")
+        .arg(&staging)
+        .arg(&source)
+        .arg(format!("-I{}", install.include_dir.display()))
+        .arg(format!("-L{}", install.lib_dir.display()))
+        .arg("-ljpeg")
+        .arg(format!("-Wl,-rpath,{}", install.lib_dir.display()))
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        let _ = std::fs::remove_file(&staging);
+        panic!(
+            "failed to build the CMYK C oracle with {compiler} against {:?}:\n{}",
+            install.include_dir,
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    std::fs::rename(&staging, &oracle).ok()?;
+    Some(oracle)
+}
+
+fn is_newer(candidate: &Path, source: &Path) -> bool {
+    let (Ok(candidate_meta), Ok(source_meta)) = (candidate.metadata(), source.metadata()) else {
+        return false;
+    };
+    match (candidate_meta.modified(), source_meta.modified()) {
+        (Ok(built), Ok(edited)) => built >= edited,
+        _ => false,
+    }
+}
+
+/// Encode raw interleaved CMYK through the C oracle, returning the JPEG bytes.
+///
+/// Panics on oracle failure: once the harness exists, a non-zero exit is a real
+/// problem with the case under test, not a reason to skip.
+pub fn encode_with_cmyk_c_oracle(oracle: &Path, pixels: &[u8], args: &[String]) -> Vec<u8> {
+    use std::io::Write;
+    use std::process::Stdio;
+
+    let mut child = Command::new(oracle)
+        .args(args)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap_or_else(|error| panic!("failed to spawn {oracle:?}: {error:?}"));
+    let mut stdin = child.stdin.take().expect("oracle stdin");
+    let payload: Vec<u8> = pixels.to_vec();
+    let writer = std::thread::spawn(move || {
+        let _ = stdin.write_all(&payload);
+    });
+    let output = child
+        .wait_with_output()
+        .unwrap_or_else(|error| panic!("failed to run {oracle:?}: {error:?}"));
+    let _ = writer.join();
+    assert!(
+        output.status.success() && !output.stdout.is_empty(),
+        "CMYK C oracle failed for args {args:?}: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    output.stdout
+}

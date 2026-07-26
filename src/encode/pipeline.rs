@@ -1274,6 +1274,166 @@ pub fn inject_saved_markers(base: &[u8], markers: &[SavedMarker]) -> Vec<u8> {
     out
 }
 
+/// A Huffman table in the form DHT wants it: the per-length code counts and
+/// the value list, before either is turned into an encoding table.
+type HuffmanTableSpec = ([u8; 17], Vec<u8>);
+
+/// Geometry of a CMYK scan: image and MCU-padded dimensions plus the sampling
+/// factors that components 0 and 3 carry.
+struct CmykLayout {
+    width: usize,
+    height: usize,
+    padded_width: usize,
+    padded_height: usize,
+    h_samp: usize,
+    v_samp: usize,
+    mcus_x: usize,
+    mcus_y: usize,
+    restart_interval: u16,
+}
+
+/// What [`scan_cmyk_blocks`] hands back to its caller, in scan order.
+enum CmykScanEvent<'a> {
+    /// An MCU boundary where the restart interval elapsed. DC predictors reset
+    /// for all four components; the single-pass caller also emits the marker.
+    Restart,
+    /// One quantized, zigzagged block belonging to `component`.
+    Block {
+        component: usize,
+        coefficients: &'a [i16; 64],
+    },
+}
+
+/// Walk the CMYK MCU grid, producing every block in scan order.
+///
+/// Both the direct-write path and the optimized-Huffman path drive this one
+/// walk, so their block streams cannot drift: the statistics that pick the
+/// optimal tables are gathered from exactly the blocks that will be written
+/// with them. Getting that wrong is silent — the file still decodes, just with
+/// tables fitted to a slightly different distribution.
+fn scan_cmyk_blocks(
+    planes: &[Vec<u8>; 4],
+    halved_chroma: Option<&[Vec<u8>; 2]>,
+    layout: &CmykLayout,
+    divisors: &QuantDivisors,
+    fdct_quantize_fn: fn(&mut [i16; 64], &QuantDivisors, &mut [i16; 64]),
+    on_event: &mut dyn FnMut(CmykScanEvent),
+) {
+    let CmykLayout {
+        width,
+        height,
+        padded_width,
+        padded_height,
+        h_samp,
+        v_samp,
+        mcus_x,
+        mcus_y,
+        restart_interval,
+    } = *layout;
+    let mcu_w: usize = h_samp * 8;
+    let mcu_h: usize = v_samp * 8;
+    let restart_mcu_interval: u32 = restart_interval as u32;
+
+    let mut prev_dc = [0i16; 4];
+    let mut mcu_count: u32 = 0;
+
+    for mcu_row in 0..mcus_y {
+        for mcu_col in 0..mcus_x {
+            if restart_mcu_interval > 0
+                && mcu_count > 0
+                && mcu_count.is_multiple_of(restart_mcu_interval)
+            {
+                prev_dc = [0i16; 4];
+                on_event(CmykScanEvent::Restart);
+            }
+            mcu_count += 1;
+            let x0: usize = mcu_col * mcu_w;
+            let y0: usize = mcu_row * mcu_h;
+
+            // Components 0 (C) and 3 (K): h_samp * v_samp blocks each at full
+            // resolution, mirroring each other (turbojpeg.c:418-427).
+            //
+            // The dummy-block test uses the *original* dimensions while the
+            // reads use the padded plane: a block past the image edge is a
+            // dummy (`jccoefct.c:178-199`), but a block that merely straddles
+            // the edge must read the padding C generated, not a clamp.
+            macro_rules! emit_full_resolution_component {
+                ($component:expr) => {
+                    for dy in 0..v_samp {
+                        for dx in 0..h_samp {
+                            let coefficients: [i16; 64] = gather_block_or_dummy(
+                                &planes[$component],
+                                padded_width,
+                                padded_height,
+                                x0 + dx * 8,
+                                y0 + dy * 8,
+                                width,
+                                height,
+                                prev_dc[$component],
+                                divisors,
+                                fdct_quantize_fn,
+                            );
+                            prev_dc[$component] = coefficients[0];
+                            on_event(CmykScanEvent::Block {
+                                component: $component,
+                                coefficients: &coefficients,
+                            });
+                        }
+                    }
+                };
+            }
+
+            emit_full_resolution_component!(0);
+
+            // Components 1 and 2 (M, Y): one block each per MCU. They are
+            // never dummies — their block count per MCU is 1, which is exactly
+            // `ceil(width / (8 * max_h))`, so the grid can never overrun them.
+            for component in [1usize, 2] {
+                let coefficients: [i16; 64] = if let Some(halved) = halved_chroma {
+                    gather_block(
+                        &halved[component - 1],
+                        padded_width / 2,
+                        padded_height / 2,
+                        x0 / 2,
+                        y0 / 2,
+                        divisors,
+                        fdct_quantize_fn,
+                    )
+                } else if h_samp == 1 && v_samp == 1 {
+                    gather_block(
+                        &planes[component],
+                        padded_width,
+                        padded_height,
+                        x0,
+                        y0,
+                        divisors,
+                        fdct_quantize_fn,
+                    )
+                } else {
+                    gather_downsampled_block(
+                        &planes[component],
+                        padded_width,
+                        padded_height,
+                        x0,
+                        y0,
+                        h_samp,
+                        v_samp,
+                        divisors,
+                        fdct_quantize_fn,
+                    )
+                };
+                prev_dc[component] = coefficients[0];
+                on_event(CmykScanEvent::Block {
+                    component,
+                    coefficients: &coefficients,
+                });
+            }
+
+            emit_full_resolution_component!(3);
+        }
+    }
+}
+
 /// Compress CMYK pixel data as a 4-component JPEG with Adobe APP14 marker.
 ///
 /// Honors `subsampling` by writing the SOF sampling factors that
@@ -1296,6 +1456,8 @@ fn compress_cmyk(params: &CompressParams<'_>) -> Result<Vec<u8>> {
         custom_quant,
         custom_dc_huffman,
         custom_ac_huffman,
+        optimize_huffman,
+        smoothing_factor,
         ..
     } = *params;
     let (h_samp_u8, v_samp_u8) = subsampling.sampling_factors();
@@ -1359,6 +1521,98 @@ fn compress_cmyk(params: &CompressParams<'_>) -> Result<Vec<u8>> {
     let mcu_h: usize = v_samp * 8;
     let mcus_x = width.div_ceil(mcu_w);
     let mcus_y = height.div_ceil(mcu_h);
+    let padded_w: usize = mcus_x * mcu_w;
+    let padded_h: usize = mcus_y * mcu_h;
+
+    let chroma_at_maximum: bool = h_samp == 1 && v_samp == 1;
+    let chroma_halved: bool = h_samp == 2 && v_samp == 2;
+
+    // Pad to the MCU grid the way C does (#340), rather than letting the
+    // per-block edge path clamp. Components 0 and 3 carry the sampling factors
+    // and so downsample 1:1 — their bottom padding is a plain last-row repeat.
+    // Components 1 and 2 are subsampled `v_samp` ways, so theirs repeats the
+    // last complete row group, which is a different thing whenever the height
+    // is a multiple of `v_samp` but not of the MCU height.
+    let pad_to_mcu_grid = |plane: &[u8], row_group_height: usize| {
+        pad_plane_to_mcu_grid(plane, width, height, padded_w, padded_h, row_group_height)
+    };
+
+    // Smoothing takes a different padding rule than the unsmoothed path, and
+    // the difference is the whole reason a naive implementation drifts from C.
+    //
+    // Without smoothing the downsampler is fed exactly the image rows, and the
+    // *output* is then padded to the iMCU height by repeating the last output
+    // row (`jcprepct.c:197-205`) — which at full resolution is the row-group
+    // repeat above. A smoothing downsampler needs context rows, so C switches
+    // to `pre_process_context` (`jcprepct.c:220-299`), and that routine has no
+    // output-side padding at all: it keeps padding the *input* with copies of
+    // the last real row and smoothing another row group until the iMCU row is
+    // full. So here every padded row is a plain repeat of the last image row,
+    // and the filter runs over all of them.
+    //
+    // Horizontally `expand_right_edge` repeats the last column, and the filter
+    // clamps at the final column, so the two agree and no special case is
+    // needed.
+    //
+    // Which components get smoothed follows `jcsample.c:506-553`, not the
+    // colorspace. Components 0 and 3 carry the sampling factors, so they are
+    // always at the maximum and always take `fullsize_smooth_downsample`.
+    // Components 1 and 2 sit at 1x1: at the maximum too when the image is 1x1
+    // sampled, exactly halved when it is 2x2 (`h2v2_smooth_downsample`), and
+    // anything else clears `smoothok` and falls back to the plain downsample
+    // with a JTRC_SMOOTH_NOTIMPL trace — which is what the unsmoothed path
+    // already does.
+    let smoothing_input = |plane: &[u8]| pad_to_mcu_grid(plane, 1);
+    let smooth_full_size = |plane: &[u8]| {
+        fullsize_smooth_plane(
+            &smoothing_input(plane),
+            padded_w,
+            padded_h,
+            smoothing_factor,
+        )
+    };
+    let smooth_halved = |plane: &[u8]| {
+        h2v2_smooth_downsample_plane(
+            &smoothing_input(plane),
+            padded_w,
+            padded_h,
+            smoothing_factor,
+        )
+    };
+
+    let smoothing_on: bool = smoothing_factor > 0;
+    let smooth_halved_chroma: Option<[Vec<u8>; 2]> = if smoothing_on && chroma_halved {
+        Some([smooth_halved(&planes[1]), smooth_halved(&planes[2])])
+    } else {
+        None
+    };
+    let planes: [Vec<u8>; 4] = {
+        let [c_plane, m_plane, y_plane, k_plane] = &planes;
+        let full_resolution = |plane: &[u8]| {
+            if smoothing_on {
+                smooth_full_size(plane)
+            } else {
+                pad_to_mcu_grid(plane, 1)
+            }
+        };
+        let chroma = |plane: &[u8]| match (smoothing_on, chroma_at_maximum) {
+            (true, true) => smooth_full_size(plane),
+            // `need_context_rows` is a property of the whole prep controller,
+            // not of one component: switching smoothing on moves *every*
+            // component onto `pre_process_context` and its input-side padding,
+            // including the ones C declines to smooth. So M and Y take the
+            // plain last-row repeat here even though the filter never touches
+            // them.
+            (true, false) => pad_to_mcu_grid(plane, 1),
+            (false, _) => pad_to_mcu_grid(plane, v_samp),
+        };
+        [
+            full_resolution(c_plane),
+            chroma(m_plane),
+            chroma(y_plane),
+            full_resolution(k_plane),
+        ]
+    };
 
     let enc_simd = crate::simd::detect_encoder();
     let fdct_quantize_fn: fn(&mut [i16; 64], &QuantDivisors, &mut [i16; 64]) = match dct_method {
@@ -1366,129 +1620,144 @@ fn compress_cmyk(params: &CompressParams<'_>) -> Result<Vec<u8>> {
         DctMethod::IsFast => crate::simd::scalar::scalar_fdct_ifast_quantize,
         DctMethod::Float => crate::simd::scalar::scalar_fdct_float_quantize,
     };
+    let layout = CmykLayout {
+        width,
+        height,
+        padded_width: padded_w,
+        padded_height: padded_h,
+        h_samp,
+        v_samp,
+        mcus_x,
+        mcus_y,
+        restart_interval,
+    };
+
+    // Optimized Huffman runs the scan twice, as C's `optimize_coding` does
+    // (`jcmaster.c`): once to count symbols, once to emit them. Re-deriving the
+    // coefficients costs a second FDCT pass but keeps memory flat, which
+    // matters more here — a 4-component image buffers a third more blocks than
+    // a 3-component one.
+    let optimized_tables: Option<(HuffmanTableSpec, HuffmanTableSpec)> = if optimize_huffman {
+        let mut dc_freq = [0u32; 257];
+        let mut ac_freq = [0u32; 257];
+        let mut prev_dc = [0i16; 4];
+        scan_cmyk_blocks(
+            &planes,
+            smooth_halved_chroma.as_ref(),
+            &layout,
+            &divisors,
+            fdct_quantize_fn,
+            &mut |event| match event {
+                CmykScanEvent::Restart => prev_dc = [0i16; 4],
+                CmykScanEvent::Block {
+                    component,
+                    coefficients,
+                } => {
+                    let diff: i16 = coefficients[0] - prev_dc[component];
+                    prev_dc[component] = coefficients[0];
+                    crate::encode::huff_opt::gather_dc_symbol(diff, &mut dc_freq);
+                    crate::encode::huff_opt::gather_ac_symbols(coefficients, &mut ac_freq);
+                }
+            },
+        );
+        Some((
+            crate::encode::huff_opt::gen_optimal_table(&dc_freq),
+            crate::encode::huff_opt::gen_optimal_table(&ac_freq),
+        ))
+    } else {
+        None
+    };
+
+    // All four components share table slot 0 (`jcparam.c:383-390`), so there is
+    // one DC and one AC table regardless of which mode produced them.
+    let (dc_bits, dc_values, ac_bits, ac_values): (&[u8; 17], &[u8], &[u8; 17], &[u8]) =
+        match &optimized_tables {
+            Some(((dc_bits, dc_values), (ac_bits, ac_values))) => {
+                (dc_bits, dc_values, ac_bits, ac_values)
+            }
+            None => (
+                &dc_luma_bits,
+                &dc_luma_values,
+                &ac_luma_bits,
+                &ac_luma_values,
+            ),
+        };
+    let dc_table: HuffTable = match &optimized_tables {
+        Some(_) => build_huff_table(dc_bits, dc_values),
+        None => dc_table,
+    };
+    let ac_table: HuffTable = match &optimized_tables {
+        Some(_) => build_huff_table(ac_bits, ac_values),
+        None => ac_table,
+    };
+
     let mut bit_writer = BitWriter::new(width * height);
     let mut prev_dc = [0i16; 4];
-    let restart_mcu_interval: u32 = restart_interval as u32;
-    let mut mcu_count: u32 = 0;
     let mut restart_marker_index: u8 = 0;
-
-    for mcu_row in 0..mcus_y {
-        for mcu_col in 0..mcus_x {
+    scan_cmyk_blocks(
+        &planes,
+        smooth_halved_chroma.as_ref(),
+        &layout,
+        &divisors,
+        fdct_quantize_fn,
+        &mut |event| match event {
             // All four components reset together at a restart, as C does.
-            if restart_mcu_interval > 0
-                && mcu_count > 0
-                && mcu_count.is_multiple_of(restart_mcu_interval)
-            {
+            CmykScanEvent::Restart => {
                 bit_writer.flush_restart();
                 bit_writer.write_restart_marker(restart_marker_index);
                 restart_marker_index = restart_marker_index.wrapping_add(1);
                 prev_dc = [0i16; 4];
             }
-            mcu_count += 1;
-            let x0 = mcu_col * mcu_w;
-            let y0 = mcu_row * mcu_h;
-            // Component 0 (C): h_samp * v_samp blocks at full resolution.
-            for dy in 0..v_samp {
-                for dx in 0..h_samp {
-                    encode_single_block(
-                        &planes[0],
-                        width,
-                        height,
-                        x0 + dx * 8,
-                        y0 + dy * 8,
-                        &divisors,
-                        &dc_table,
-                        &ac_table,
-                        &mut bit_writer,
-                        &mut prev_dc[0],
-                        fdct_quantize_fn,
-                    );
-                }
-            }
-            // Components 1 and 2 (M, Y): one downsampled block each per MCU.
-            for c in [1usize, 2] {
-                if h_samp == 1 && v_samp == 1 {
-                    encode_single_block(
-                        &planes[c],
-                        width,
-                        height,
-                        x0,
-                        y0,
-                        &divisors,
-                        &dc_table,
-                        &ac_table,
-                        &mut bit_writer,
-                        &mut prev_dc[c],
-                        fdct_quantize_fn,
-                    );
-                } else {
-                    encode_downsampled_chroma_block(
-                        &planes[c],
-                        width,
-                        height,
-                        x0,
-                        y0,
-                        h_samp,
-                        v_samp,
-                        &divisors,
-                        &dc_table,
-                        &ac_table,
-                        &mut bit_writer,
-                        &mut prev_dc[c],
-                        fdct_quantize_fn,
-                    );
-                }
-            }
-            // Component 3 (K): h_samp * v_samp blocks at full resolution,
-            // mirroring component 0 (matches libjpeg-turbo turbojpeg.c:418-427).
-            for dy in 0..v_samp {
-                for dx in 0..h_samp {
-                    encode_single_block(
-                        &planes[3],
-                        width,
-                        height,
-                        x0 + dx * 8,
-                        y0 + dy * 8,
-                        &divisors,
-                        &dc_table,
-                        &ac_table,
-                        &mut bit_writer,
-                        &mut prev_dc[3],
-                        fdct_quantize_fn,
-                    );
-                }
-            }
-        }
-    }
+            CmykScanEvent::Block {
+                component,
+                coefficients,
+            } => HuffmanEncoder::encode_block(
+                &mut bit_writer,
+                coefficients,
+                &mut prev_dc[component],
+                &dc_table,
+                &ac_table,
+            ),
+        },
+    );
 
     bit_writer.flush();
 
     let mut output = Vec::with_capacity(bit_writer.data().len() + 1024);
 
     marker_writer::write_soi(&mut output);
-    marker_writer::write_app0_jfif(&mut output);
+    // No JFIF APP0 (#339). `jpeg_set_colorspace` clears `write_JFIF_header` and
+    // re-enables it only for JCS_GRAYSCALE and JCS_YCbCr (`jcparam.c:357-392`);
+    // for JCS_CMYK it sets `write_Adobe_marker` alone. JFIF is defined for
+    // grayscale and YCbCr only, so an APP0 on a CMYK stream asserts something
+    // untrue about the data — and cost 18 bytes in every CMYK file we wrote.
     marker_writer::write_app14_adobe(&mut output, 0);
 
     marker_writer::write_dqt(&mut output, 0, &quant_table);
 
+    // Component IDs are the ASCII initials 'C', 'M', 'Y', 'K' (#339), matching
+    // `jcparam.c:383-390`. We used to write 1..4, which decoders tolerate but
+    // which is not what libjpeg emits.
+    //
     // Sampling pattern matches turbojpeg.c:418-427: comp 0 and comp 3 take
     // the luma sampling factors; comp 1 and comp 2 stay at (1, 1).
     let components = vec![
-        (1, h_samp_u8, v_samp_u8, 0),
-        (2, 1, 1, 0),
-        (3, 1, 1, 0),
-        (4, h_samp_u8, v_samp_u8, 0),
+        (b'C', h_samp_u8, v_samp_u8, 0),
+        (b'M', 1, 1, 0),
+        (b'Y', 1, 1, 0),
+        (b'K', h_samp_u8, v_samp_u8, 0),
     ];
     marker_writer::write_sof0(&mut output, width as u16, height as u16, &components);
 
-    marker_writer::write_dht(&mut output, 0, 0, &dc_luma_bits, &dc_luma_values);
-    marker_writer::write_dht(&mut output, 1, 0, &ac_luma_bits, &ac_luma_values);
+    marker_writer::write_dht(&mut output, 0, 0, dc_bits, dc_values);
+    marker_writer::write_dht(&mut output, 1, 0, ac_bits, ac_values);
 
     if restart_interval > 0 {
         marker_writer::write_dri(&mut output, restart_interval);
     }
 
-    let scan_components = vec![(1, 0, 0), (2, 0, 0), (3, 0, 0), (4, 0, 0)];
+    // SOS references the same IDs the SOF declared.
+    let scan_components = vec![(b'C', 0, 0), (b'M', 0, 0), (b'Y', 0, 0), (b'K', 0, 0)];
     marker_writer::write_sos(&mut output, &scan_components);
 
     output.extend_from_slice(bit_writer.data());
@@ -6515,6 +6784,67 @@ fn h2v2_smooth_downsample_plane(
     output
 }
 
+/// Expand a component plane to the MCU grid exactly as C's prep controller
+/// does, so the blocks that straddle the image edge see the same samples.
+///
+/// Horizontally this is `expand_right_edge` (`jcsample.c`): repeat the last
+/// column. Vertically C pads twice — once on the input rows, to complete a row
+/// group of `max_v` rows (`jcprepct.c:171-178`), and once on the *downsampled*
+/// output, to fill the iMCU height by repeating the last output row
+/// (`jcprepct.c:197-205`).
+///
+/// `row_group_height` is what carries that second pass back to full
+/// resolution. A component sampled at the maximum downsamples 1:1, so
+/// repeating its last output row is just repeating its last input row: pass 1.
+/// A component subsampled `v` ways has one output row per `v` input rows, so
+/// repeating the last output row means repeating the last complete *group* of
+/// `v` input rows: pass `v`. Getting this backwards is invisible until the
+/// height is a multiple of `v` but not of the MCU height, where group repeat
+/// gives rows 16,17,16,17 and a plain clamp gives 17,17,17,17.
+fn pad_plane_to_mcu_grid(
+    plane: &[u8],
+    src_width: usize,
+    src_height: usize,
+    dst_width: usize,
+    dst_height: usize,
+    row_group_height: usize,
+) -> Vec<u8> {
+    if src_width == dst_width && src_height == dst_height {
+        return plane.to_vec();
+    }
+    let mut padded: Vec<u8> = vec![0u8; dst_width * dst_height];
+    for row in 0..src_height {
+        let src_start: usize = row * src_width;
+        let dst_start: usize = row * dst_width;
+        padded[dst_start..dst_start + src_width]
+            .copy_from_slice(&plane[src_start..src_start + src_width]);
+        let last: u8 = plane[src_start + src_width - 1];
+        padded[dst_start + src_width..dst_start + dst_width].fill(last);
+    }
+    if src_height < dst_height {
+        let row_group_end: usize = src_height.div_ceil(row_group_height) * row_group_height;
+        // Phase 1: repeat the last real row up to the row-group boundary.
+        let last_row: Vec<u8> =
+            padded[(src_height - 1) * dst_width..src_height * dst_width].to_vec();
+        for row in src_height..row_group_end.min(dst_height) {
+            let dst_start: usize = row * dst_width;
+            padded[dst_start..dst_start + dst_width].copy_from_slice(&last_row);
+        }
+        // Phase 2: repeat the last complete row group.
+        if row_group_end < dst_height {
+            let group_start: usize = row_group_end - row_group_height;
+            for row in row_group_end..dst_height {
+                let src_row: usize = group_start + (row - row_group_end) % row_group_height;
+                let src_start: usize = src_row * dst_width;
+                let source: Vec<u8> = padded[src_start..src_start + dst_width].to_vec();
+                let dst_start: usize = row * dst_width;
+                padded[dst_start..dst_start + dst_width].copy_from_slice(&source);
+            }
+        }
+    }
+    padded
+}
+
 /// Encode a single 8x8 block through the DCT -> quantize -> Huffman pipeline.
 #[allow(clippy::too_many_arguments)]
 fn encode_single_block(
@@ -8248,6 +8578,14 @@ pub fn compress_optimized_with_params(params: &CompressParams<'_>) -> Result<Vec
             need: expected_size,
             got: pixels.len(),
         });
+    }
+
+    // CMYK owns its own two-pass mode (#313). Neither `optimize_coding` nor
+    // `smoothing_factor` is colorspace-gated in C — `jcmaster.c` and
+    // `jcsample.c` both work per component — so rejecting four-component input
+    // here made two builder options fail outright on it.
+    if pixel_format == PixelFormat::Cmyk {
+        return compress_cmyk(params);
     }
 
     let is_grayscale = pixel_format == PixelFormat::Grayscale;

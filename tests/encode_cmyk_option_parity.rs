@@ -16,10 +16,14 @@
 //! Huffman tables (slot 0 — all four components share one of each, per
 //! `turbojpeg.c:418-427`), and `dct_method`.
 //!
-//! Two remain `#[ignore]`d because they need a four-component variant of the
-//! full-plane path that does not exist yet: `optimize_huffman` (two-pass
-//! statistics) and `smoothing_factor`. They are ignored rather than weakened,
-//! per the project's strict-assertion rules.
+//! All five are fixed. `optimize_huffman` runs the MCU scan twice, as C's
+//! `optimize_coding` does, and `smoothing_factor` follows `jcsample.c`'s
+//! per-component chooser rather than a colorspace gate.
+//!
+//! These tests assert the *observable effect* of each option. Byte-exactness
+//! against C lives in `tests/regression_cmyk_c_parity.rs`, which needs the
+//! purpose-built oracle in `examples/cmyk_encode_c_oracle.c` — cjpeg cannot
+//! read CMYK.
 
 use libjpeg_turbo_rs::encode::pipeline;
 use libjpeg_turbo_rs::{DctMethod, Encoder, HuffmanTableDef, PixelFormat, Subsampling};
@@ -182,7 +186,6 @@ fn cmyk_honours_custom_huffman_tables() {
 }
 
 #[test]
-#[ignore = "Issue #313: two-pass optimized Huffman has no 4-component path yet"]
 fn cmyk_supports_optimized_huffman() {
     let pixels: Vec<u8> = cmyk_image(WIDTH, HEIGHT);
 
@@ -209,7 +212,6 @@ fn cmyk_supports_optimized_huffman() {
 }
 
 #[test]
-#[ignore = "Issue #313: smoothing needs the full-plane path, which has no 4-component variant yet"]
 fn cmyk_supports_smoothing_factor() {
     let pixels: Vec<u8> = cmyk_image(WIDTH, HEIGHT);
 

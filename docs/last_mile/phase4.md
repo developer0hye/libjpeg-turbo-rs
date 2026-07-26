@@ -593,7 +593,7 @@ P3-3's closure (2026-05-06; corrected 2026-05-10) explicitly scoped the allowlis
 
 **Status (2026-07-24): closed.** The artifact now decodes byte-exact vs djpeg (max diff 0, down from 189). Pinned by `tests/regression_lossless_point_transform.rs` (djpeg byte-exact cross-check plus a djpeg-pinned first-pixel probe that runs without C tools).
 
-## P4-39. CMYK Encode Path Silently Drops Restart / Custom-Table Options and Rejects Optimize+Smoothing — **PARTIAL: 4 of 5 fixed; optimize/smoothing need a 4-component full-plane path**
+## P4-39. CMYK Encode Path Silently Drops Restart / Custom-Table Options and Rejects Optimize+Smoothing — **CLOSED 2026-07-26**
 
 **Motivation.** Surfaced 2026-07-25 while refactoring the `compress_*` family onto a single `CompressParams` core (see [P4-40](#p4-40-srcencodepipeliners-is-10k-lines-of-copy-pasted-compress_-variants--partial-acceptance-criteria-1-3-delivered-criterion-4-split-by-mode-remains)). The new characterization fixture `tests/fixtures/encode_pipeline_golden.txt` shows the option-carrying variants producing **byte-identical output to plain `compress`** on CMYK input — the options never reach the encoder. Tracked upstream as GitHub issue [#313](https://github.com/developer0hye/libjpeg-turbo-rs/issues/313).
 
@@ -630,7 +630,38 @@ That prediction held — once the option set was a value rather than a signature
 
 The golden fixture moved in exactly **922 of 20,160** cases, every one of them CMYK: 202 `compress` (the `dct_method` variants), 180 `customhuff`, 180 `customquant`, 360 `restart`. Nothing else shifted. The four corresponding `cmyk|effect|*` rows are gone from the option matrix's allowlist, and four of the six reproductions in `tests/encode_cmyk_option_parity.rs` are un-`#[ignore]`d.
 
-**Remaining.** `optimize_huffman` and `smoothing_factor` still reject or ignore CMYK: both need the full-plane two-pass path, which has no four-component variant. Those two tests stay `#[ignore]`d with that reason rather than a stale one.
+**Status (2026-07-26): closed.** `optimize_huffman` and `smoothing_factor` now work on CMYK, and the whole path is byte-exact against C.
+
+Closing the last two required first building the thing that should have existed from the start: **a C oracle**. `cjpeg` reads PNM, BMP, GIF and Targa — none of which carry CMYK — so the four-component path was the one encode path in this tree that could only ever be compared against itself. `examples/cmyk_encode_c_oracle.c` drives libjpeg directly with `JCS_CMYK` and TurboJPEG's component layout; `tests/helpers/c_oracle.rs` compiles it on demand against whatever libjpeg development install it finds.
+
+The first sweep answered the question the issue had been asking for a week, and then some. **Every single case differed** — but by exactly 18 bytes, all at byte 3. That was a JFIF APP0 marker C never writes ([#339](https://github.com/developer0hye/libjpeg-turbo-rs/issues/339)), and behind it component IDs `1,2,3,4` where libjpeg writes `'C','M','Y','K'`, and behind *those* a bottom-padding rule that clamped the last row where C repeats the last row group ([#340](https://github.com/developer0hye/libjpeg-turbo-rs/issues/340)). Three defects stacked in the header and the padding, each invisible until the one in front of it was removed.
+
+The two features themselves:
+
+- **`optimize_huffman`** — the MCU walk is now a single `scan_cmyk_blocks` driven by a callback, so the pass that counts symbols and the pass that writes them cannot drift apart. It runs twice, as C's `optimize_coding` does, rather than buffering every block: a four-component image buffers a third more than a three-component one, and re-deriving costs a second FDCT pass instead of memory.
+- **`smoothing_factor`** — follows `jcsample.c:506-553`'s per-component chooser, not a colorspace gate. Components 0 and 3 are always at the maximum and take `fullsize_smooth_downsample`; components 1 and 2 take it too at 1x1, `h2v2_smooth_downsample` at 2x2, and nothing at all otherwise, which is what C's `smoothok` fallback does.
+
+The subtlety worth recording: **enabling smoothing changes the padding of components it never touches**. Smoothing needs context rows, which moves the whole prep controller onto `pre_process_context` (`jcprepct.c:220-299`) — and that routine has no output-side padding at all, so every component switches from the row-group repeat to a plain last-row repeat. `need_context_rows` is a pipeline-wide flag, not a per-component one. This cost six cases at 1x2 and was the last thing to fall.
+
+**Proof.** 504 cases — 4 subsamplings x 7 geometries x 3 qualities x {plain, restart 3, `-dct fast`, `-optimize`, `-smooth 25`, `-smooth 100`} — byte-identical to the C oracle, in `tests/regression_cmyk_c_parity.rs`. `-dct float` gets the weaker guarantee it gets everywhere else: pixel-equivalent, max 4 per sample measured. All six reproductions in `tests/encode_cmyk_option_parity.rs` are un-`#[ignore]`d. The golden fixture moved in 2,520 rows, every one CMYK, and 1,080 `ERR Unsupported` rows became real output — the 840 that remain are the S410/S24 combinations that genuinely exceed the 10-block MCU cap.
+
+## P4-51. CMYK Streams Carry a JFIF APP0 Marker C Never Writes, and Non-libjpeg Component IDs — **CLOSED 2026-07-26**
+
+**Motivation.** Found 2026-07-26 the moment the P4-39 C oracle existed. GitHub [#339](https://github.com/developer0hye/libjpeg-turbo-rs/issues/339).
+
+**Root cause.** `jpeg_set_colorspace` clears both marker flags and re-enables `write_JFIF_header` only for `JCS_GRAYSCALE` and `JCS_YCbCr` (`jcparam.c:357-392`); `JCS_CMYK` sets `write_Adobe_marker` alone. We wrote both. JFIF is defined for grayscale and YCbCr only, so an APP0 on a CMYK stream is not merely 18 redundant bytes — it asserts something untrue about the data. The same section sets the component IDs to the ASCII initials `'C','M','Y','K'`; we wrote `1,2,3,4`, which decoders tolerate but libjpeg does not emit.
+
+**Status (2026-07-26): closed.** Both fixed. `tests/regression_cmyk_c_parity.rs::cmyk_stream_carries_the_adobe_marker_and_no_jfif` pins the marker sequence and the IDs without needing any C tool, so the contract holds even where the oracle cannot be built.
+
+## P4-52. CMYK Bottom Padding Clamps the Last Row Where C Repeats the Last Row Group — **CLOSED 2026-07-26**
+
+**Motivation.** Found 2026-07-26 once P4-51 was out of the way and the byte comparison could reach the entropy-coded data. GitHub [#340](https://github.com/developer0hye/libjpeg-turbo-rs/issues/340).
+
+**Root cause.** C pads twice, in different places and by different rules: the **input** side completes the final row group by repeating the last real row (`jcprepct.c:171-178`), and the **output** side fills the rest of the iMCU by repeating the last *downsampled* row (`jcprepct.c:197-205`). Carried back to full resolution, that second rule means different things per component. A component sampled at the maximum downsamples 1:1, so repeating its last output row is just repeating its last input row. A component subsampled `v` ways has one output row per `v` input rows, so repeating its last output row means repeating the last complete **group** of `v` input rows.
+
+CMYK has both kinds in one image — components 0 and 3 carry the sampling factors, 1 and 2 sit at 1x1 — so no single rule is right for the whole image, and letting the per-block edge path clamp is right for neither when `v > 1`. This is the same distinction as [P4-47](#p4-47-progressive-420--440-diverges-from-cjpeg-at-every-even-height-not-a-multiple-of-16--closed-2026-07-26) (#324), arrived at from the other direction.
+
+**Status (2026-07-26): closed.** `pad_plane_to_mcu_grid` takes the row-group height as a parameter and each component passes its own. Byte-exact against the C oracle for every legal CMYK subsampling; before the fix, 1x2 and 2x2 were 15/21 and the six failures per subsampling were exactly the geometries whose height is a multiple of `v_samp` but not of the MCU height.
 
 ## P4-40. `src/encode/pipeline.rs` Is 10k Lines of Copy-Pasted `compress_*` Variants — **PARTIAL: acceptance criteria 1-3 delivered; criterion 4 (split by mode) remains**
 
@@ -896,7 +927,7 @@ Ruled out along the way, each by direct measurement rather than inspection: `fdc
 32. ~~**P4-36** — fractional chroma sampling ratio panicked in the direct-copy upsample path.~~ **CLOSED 2026-07-24** — C JERR_FRACT_SAMPLE_NOTIMPL parity guard.
 33. ~~**P4-37** — SOS component ids never validated against the frame.~~ **CLOSED 2026-07-24** — jdmarker.c get_sos binding port; 1371-scan timeout stream now rejected at scan 8.
 34. ~~**P4-38** — lossless color output skipped the point transform and wrapped at the wrong modulus.~~ **CLOSED 2026-07-24** — 0xFFFF undifference wrap + `<< Al` truncating output scaler; byte-exact vs djpeg.
-35. **P4-39** — CMYK encode path silently drops restart / custom quant / custom Huffman options and rejects optimize+smoothing (GitHub #313). **PARTIAL 2026-07-26** — 4 of 5 fixed via `CompressParams`; optimize/smoothing need a 4-component full-plane path.
+35. ~~**P4-39** — CMYK encode path silently drops restart / custom quant / custom Huffman options and rejects optimize+smoothing (GitHub #313).~~ **CLOSED 2026-07-26** — all five fixed; 504/504 byte-exact vs a purpose-built C oracle. Closed P4-51 and P4-52 on the way.
 36. **P4-40** — collapse the ten copy-pasted `compress_*` variants onto a single `CompressParams` core (byte-exact), then split `src/encode/pipeline.rs` by mode.
 37. ~~**P4-41** — AVX2 4:2:0 row fast path ignored the dummy-block contract (#314) and bypassed its own AVX2 capability check (#315).~~ **CLOSED 2026-07-25** — single `use_avx2_420` gate + `y_last_col_width == y_mcu_width` guard; fused path now 576/576 vs cjpeg.
 38. ~~**P4-42** — full-plane encode variants (restart / custom-quant / custom-Huffman) skip the dummy-block contract on every platform (#316).~~ **CLOSED 2026-07-25** — the P4-40 core made them shims; 576/576 vs cjpeg.
@@ -908,3 +939,5 @@ Ruled out along the way, each by direct measurement rather than inspection: `fdc
 45. ~~**P4-49** — `smoothing_factor` is a silent no-op for grayscale (#327).~~ **CLOSED 2026-07-26** — byte-exact vs `cjpeg -grayscale -smooth`.
 43. ~~**P4-47** — progressive 4:2:0/4:4:0 diverges from `cjpeg` at every even height not a multiple of 16, including 1920x1080 (#324).~~ **CLOSED 2026-07-26** — chroma row-group replication; 4032/4032 vs cjpeg.
 44. **P4-48** — close the mutation-testing blind spots in `api/encoder.rs`, then shard `encode/pipeline.rs` (#325). **PARTIAL 2026-07-26** — encoder.rs closed (81/81 caught); pipeline.rs unsampled.
+47. ~~**P4-51** — CMYK streams carry a JFIF APP0 marker C never writes, and non-libjpeg component IDs (#339).~~ **CLOSED 2026-07-26** — SOI then Adobe APP14 only; IDs are `'C','M','Y','K'`.
+48. ~~**P4-52** — CMYK bottom padding clamps the last row where C repeats the last row group (#340).~~ **CLOSED 2026-07-26** — per-component row-group height.
