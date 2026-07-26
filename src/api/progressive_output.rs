@@ -39,6 +39,9 @@ pub struct ProgressiveDecoder {
     routines: SimdRoutines,
     /// Per-component coefficient buffers, accumulated across scans.
     coeff_bufs: Vec<Vec<[i16; 64]>>,
+    /// Per-block highest nonzero AC zigzag index (see issue #352:
+    /// bounds refinement EOB-run walks to the block's spectral extent).
+    ac_max_k_bufs: Vec<Vec<u8>>,
     /// Per-component layout info.
     comp_infos: Vec<CompInfo>,
     /// MCUs in horizontal direction.
@@ -106,6 +109,10 @@ impl ProgressiveDecoder {
             .iter()
             .map(|ci| vec![[0i16; 64]; ci.blocks_x * ci.blocks_y])
             .collect();
+        let ac_max_k_bufs: Vec<Vec<u8>> = comp_infos
+            .iter()
+            .map(|ci| vec![0u8; ci.blocks_x * ci.blocks_y])
+            .collect();
 
         let routines: SimdRoutines = simd::detect();
 
@@ -114,6 +121,7 @@ impl ProgressiveDecoder {
             metadata,
             routines,
             coeff_bufs,
+            ac_max_k_bufs,
             comp_infos,
             mcus_x,
             mcus_y,
@@ -498,7 +506,7 @@ impl ProgressiveDecoder {
                             progressive::decode_dc_refine(&mut bit_reader, coeffs, al)?;
                         }
                     } else if ah == 0 {
-                        progressive::decode_ac_first(
+                        progressive::decode_ac_first_tracked(
                             &mut bit_reader,
                             ac_table_ref.unwrap(),
                             coeffs,
@@ -506,9 +514,10 @@ impl ProgressiveDecoder {
                             se,
                             al,
                             &mut eob_run,
+                            &mut self.ac_max_k_bufs[comp_idx][block_idx],
                         )?;
                     } else {
-                        progressive::decode_ac_refine(
+                        progressive::decode_ac_refine_tracked(
                             &mut bit_reader,
                             ac_table_ref.unwrap(),
                             coeffs,
@@ -516,6 +525,7 @@ impl ProgressiveDecoder {
                             se,
                             al,
                             &mut eob_run,
+                            &mut self.ac_max_k_bufs[comp_idx][block_idx],
                         )?;
                     }
 
