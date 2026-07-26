@@ -110,6 +110,13 @@ const SUBSAMPLINGS: &[(&str, Subsampling)] = &[
     ("24", Subsampling::S24),
 ];
 
+/// The pad-byte formats (`rgbx` onward) are here for coverage, not variety.
+///
+/// `Rgb`/`Rgba`/`Bgr`/`Bgra` take the fused single-pass path and `Cmyk` has its
+/// own; only these reach the full-plane fallback that contains `pad_plane` and
+/// `pad_chroma_plane`. Without them, mutation testing showed
+/// `pad_chroma_plane` could return `vec![]` with the whole encode suite green
+/// — the function was simply never called (#325).
 const FORMATS: &[(&str, PixelFormat, usize)] = &[
     ("gray", PixelFormat::Grayscale, 1),
     ("rgb", PixelFormat::Rgb, 3),
@@ -117,6 +124,10 @@ const FORMATS: &[(&str, PixelFormat, usize)] = &[
     ("bgr", PixelFormat::Bgr, 3),
     ("bgra", PixelFormat::Bgra, 4),
     ("cmyk", PixelFormat::Cmyk, 4),
+    ("rgbx", PixelFormat::Rgbx, 4),
+    ("xrgb", PixelFormat::Xrgb, 4),
+    ("bgrx", PixelFormat::Bgrx, 4),
+    ("abgr", PixelFormat::Abgr, 4),
 ];
 
 const DCT_METHODS: &[(&str, DctMethod)] = &[
