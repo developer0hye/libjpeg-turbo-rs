@@ -4234,6 +4234,134 @@ impl<'a> Decoder<'a> {
                     });
                 }
 
+                // Row-streaming H2V1 (4:2:2): one chroma row per output row.
+                // Mirrors the H2V2 block above — fuse the fancy horizontal
+                // upsample + colour convert per row so the two
+                // full-resolution cb_full/cr_full planes (~4.2 MB extra at
+                // 1080p) are never materialised (issue #350). Same gate
+                // shape as H2V2: box-filter conditions (fast_upsample,
+                // actual_cb_w <= 2, scaled IDCT) fall through to the
+                // generic path, which matches C's filter selection.
+                if !self.fast_upsample
+                    && uniform_chroma
+                    && h_factor == 2
+                    && v_factor == 1
+                    && actual_cb_w > 2
+                    && block_size == 8
+                {
+                    let data_size: usize = out_width * out_height * bpp;
+                    let mut data: Vec<u8> = vec![0u8; data_size];
+
+                    // Per-row upsample scratch (full_width per component).
+                    let mut cb_row: Vec<u8> = vec![0u8; full_width];
+                    let mut cr_row: Vec<u8> = vec![0u8; full_width];
+
+                    let cb_off: usize = comp_x_offsets[1];
+                    let cr_off: usize = comp_x_offsets[2];
+                    let y_off: usize = comp_x_offsets[0];
+                    for y in 0..out_height {
+                        let cb_src = &component_planes[1]
+                            [y * cb_w + cb_off..y * cb_w + cb_off + actual_cb_w];
+                        let cr_src = &component_planes[2]
+                            [y * cb_w + cr_off..y * cb_w + cr_off + actual_cb_w];
+                        self.fancy_upsample_h2v1(cb_src, actual_cb_w, &mut cb_row);
+                        self.fancy_upsample_h2v1(cr_src, actual_cb_w, &mut cr_row);
+                        self.color_convert_row(
+                            out_format,
+                            &y_plane[y * y_width + y_off..],
+                            &cb_row,
+                            &cr_row,
+                            &mut data[y * out_width * bpp..],
+                            out_width,
+                            y,
+                        );
+                    }
+
+                    return Ok(Image {
+                        width: out_width,
+                        height: out_height,
+                        pixel_format: out_format,
+                        precision: 8,
+                        data,
+                        icc_profile: icc_profile.clone(),
+                        exif_data: exif_data.clone(),
+                        comment: self.metadata.comment.clone(),
+                        density: self.metadata.density,
+                        saved_markers: self.metadata.saved_markers.clone(),
+                        warnings: warnings.clone(),
+                    });
+                }
+
+                // Row-streaming H1V2 (4:4:0): one chroma row per two output
+                // rows, vertical-only triangle filter (chroma width already
+                // matches the output). Same structural fix as H2V1 above.
+                // The blend biases (top +1, bottom +2) match C jdsample.c
+                // h1v2_fancy_upsample and the whole-plane fancy_h1v2 helper.
+                if !self.fast_upsample
+                    && uniform_chroma
+                    && h_factor == 1
+                    && v_factor == 2
+                    && block_size == 8
+                {
+                    let data_size: usize = out_width * out_height * bpp;
+                    let mut data: Vec<u8> = vec![0u8; data_size];
+
+                    let mut cb_row: Vec<u8> = vec![0u8; full_width];
+                    let mut cr_row: Vec<u8> = vec![0u8; full_width];
+
+                    let cb_off: usize = comp_x_offsets[1];
+                    let cr_off: usize = comp_x_offsets[2];
+                    let y_off: usize = comp_x_offsets[0];
+                    let row_range = |row: usize, off: usize| -> std::ops::Range<usize> {
+                        let start = row * cb_w + off;
+                        start..start + actual_cb_w
+                    };
+                    for cy in 0..actual_cb_h {
+                        let above_idx: usize = cy.saturating_sub(1);
+                        let below_idx: usize = (cy + 1).min(actual_cb_h - 1);
+                        for (out_y, adj_idx, bias) in
+                            [(cy * 2, above_idx, 1u16), (cy * 2 + 1, below_idx, 2u16)]
+                        {
+                            if out_y >= out_height {
+                                continue;
+                            }
+                            let cb_cur = &component_planes[1][row_range(cy, cb_off)];
+                            let cb_adj = &component_planes[1][row_range(adj_idx, cb_off)];
+                            let cr_cur = &component_planes[2][row_range(cy, cr_off)];
+                            let cr_adj = &component_planes[2][row_range(adj_idx, cr_off)];
+                            for x in 0..actual_cb_w {
+                                cb_row[x] =
+                                    ((3 * cb_cur[x] as u16 + cb_adj[x] as u16 + bias) >> 2) as u8;
+                                cr_row[x] =
+                                    ((3 * cr_cur[x] as u16 + cr_adj[x] as u16 + bias) >> 2) as u8;
+                            }
+                            self.color_convert_row(
+                                out_format,
+                                &y_plane[out_y * y_width + y_off..],
+                                &cb_row,
+                                &cr_row,
+                                &mut data[out_y * out_width * bpp..],
+                                out_width,
+                                out_y,
+                            );
+                        }
+                    }
+
+                    return Ok(Image {
+                        width: out_width,
+                        height: out_height,
+                        pixel_format: out_format,
+                        precision: 8,
+                        data,
+                        icc_profile: icc_profile.clone(),
+                        exif_data: exif_data.clone(),
+                        comment: self.metadata.comment.clone(),
+                        density: self.metadata.density,
+                        saved_markers: self.metadata.saved_markers.clone(),
+                        warnings: warnings.clone(),
+                    });
+                }
+
                 // All remaining paths need full-plane cb_full/cr_full buffers.
                 let alloc_size = full_width * full_height;
                 let mut cb_full = vec![0u8; alloc_size];
