@@ -838,7 +838,7 @@ Baseline was unaffected because it feeds planes already padded by `pad_chroma_pl
 
 **Status (2026-07-26): closed.** All four entropy modes now match `cjpeg` on **4032/4032** swept cases — 8 subsamplings (including the 4-factor 4:4:1 / 4:1:1 / 4:1:0 / 2:4), both colourspaces, 28 geometries covering heights 1..20 plus 1920x1080 / 800x600 / 1920x1088 / 500x375, at four qualities. Was 4016/4032 before. Pinned by `tests/regression_progressive_chroma_row_group.rs`. The P4-33 drift guard correctly flagged 108 `*_441_*_prog` / `_aprog` corpus seeds whose bytes the fix changes; the regenerated seeds are committed and verified to still decode under `djpeg`.
 
-## P4-48. Mutation Testing: 12 Of 38 Encoder Mutants Survive The Full Suite — **PARTIAL: `api/encoder.rs` blind spots closed; `encode/pipeline.rs` unsampled**
+## P4-48. Mutation Testing: 12 Of 38 Encoder Mutants Survive The Full Suite — **CLOSED 2026-07-26**
 
 **Motivation.** Filed 2026-07-25 from the first `cargo-mutants` pass over `src/api/encoder.rs`. GitHub [#325](https://github.com/developer0hye/libjpeg-turbo-rs/issues/325). This is the meta-level complement to P4-39/P4-46/P4-47: those are bugs, this is where a bug *would not be noticed*.
 
@@ -863,7 +863,23 @@ Baseline was unaffected because it feeds planes already padded by `pad_chroma_pl
 - **`_effective_quant_tables`** deleted — 31 lines, referenced nowhere.
 - **`compute_restart_interval`** pinned: `restart_rows(n)` must convert as `n x MCUs_across` for all eight subsamplings, and `restart_blocks` must pass through unchanged.
 
-**Remaining.** Criteria 2 and 3: `src/encode/pipeline.rs` (**3807** mutants) is still unsampled, and `cargo mutants --in-diff` is not yet in CI.
+**Status (2026-07-26): criteria 2 and 3 closed.**
+
+**Criterion 2 — `encode/pipeline.rs` sampled.** 288 of its 3807 mutants, three shards of 40, with the encode suites as oracle. Surviving mutants fell from **51 to 20**, and every one of the 20 was triaged as an *equivalent mutant* rather than a missing test — several proven so by applying the mutation and confirming all 33,600 golden cases stay byte-identical:
+
+- `need_dummies` forced always-true (`:796`) — `encode_color_mcu_with_dummies` at full dimensions is exactly `encode_color_mcu`, which is a good property to have confirmed.
+- `(row - row_group_end) % max_v` → `+` (`:588`) — `row_group_end` is a multiple of `max_v`, so the sign cannot matter.
+- The `.min(dst_h / max_v)` clamps (`:575`, `:926`) — `dst_h` is always a multiple of `max_v` and at least `src_h`, so the clamp never binds.
+- The `if src_w < dst_w` / `if src_h < dst_h` padding guards — on equality the loop body is an empty range.
+- `BitWriter::new(..)` and `begin_block(..)` arguments — capacity hints only.
+- `may_use_islow_simd_kernel -> false` — forces the generic path, which P4-45's emulated leg already proved byte-identical.
+
+Two real gaps were found and closed on the way:
+
+1. **The validation prologue had no tests at all** (8 mutants). `width == 0 || height == 0` could become `&&`, `width > 65535` could become `>=`, and the buffer-size product could become `/` or `+`, all with the suite green — nothing exercised them because every other test passes well-formed input. Closed by `tests/encode_input_validation.rs`.
+2. **The full-plane fallback was never executed** (23 mutants). `pad_chroma_plane` could return `vec![]` unnoticed: `Rgb`/`Rgba`/`Bgr`/`Bgra` take the fused path and `Cmyk` has its own, so only the pad-byte formats reach it — and the golden fixture carried none. Adding `rgbx`/`xrgb`/`bgrx`/`abgr` to it (13,440 new cases, **zero** existing rows changed) exercises the path.
+
+**Criterion 3 — `--in-diff` in CI.** A non-blocking `Mutation test (changed lines)` job mutates only what a PR touches. Non-blocking on purpose: a surviving mutant is sometimes an equivalent mutant, a judgement call rather than a defect, and failing the build on it would train people to ignore the job.
 
 ## P4-49. `smoothing_factor` Is A Silent No-Op For Grayscale — **CLOSED 2026-07-26**
 
@@ -938,6 +954,6 @@ Ruled out along the way, each by direct measurement rather than inspection: `fdc
 42. ~~**P4-46** — make `Encoder`'s dispatch build one `CompressParams` so builder options stop dropping each other (#322).~~ **CLOSED 2026-07-26** — all 29 resolved: 26 fixed, 3 classes reclassified by-design with reasons.
 45. ~~**P4-49** — `smoothing_factor` is a silent no-op for grayscale (#327).~~ **CLOSED 2026-07-26** — byte-exact vs `cjpeg -grayscale -smooth`.
 43. ~~**P4-47** — progressive 4:2:0/4:4:0 diverges from `cjpeg` at every even height not a multiple of 16, including 1920x1080 (#324).~~ **CLOSED 2026-07-26** — chroma row-group replication; 4032/4032 vs cjpeg.
-44. **P4-48** — close the mutation-testing blind spots in `api/encoder.rs`, then shard `encode/pipeline.rs` (#325). **PARTIAL 2026-07-26** — encoder.rs closed (81/81 caught); pipeline.rs unsampled.
+44. ~~**P4-48** — close the mutation-testing blind spots in `api/encoder.rs`, then shard `encode/pipeline.rs` (#325).~~ **CLOSED 2026-07-26** — encoder.rs 81/81; pipeline.rs 288 sampled, 51→20 survivors all triaged equivalent; `--in-diff` job added.
 47. ~~**P4-51** — CMYK streams carry a JFIF APP0 marker C never writes, and non-libjpeg component IDs (#339).~~ **CLOSED 2026-07-26** — SOI then Adobe APP14 only; IDs are `'C','M','Y','K'`.
 48. ~~**P4-52** — CMYK bottom padding clamps the last row where C repeats the last row group (#340).~~ **CLOSED 2026-07-26** — per-component row-group height.
