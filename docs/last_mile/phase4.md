@@ -976,6 +976,11 @@ Identical in shape to P4-39, and found the same way: not by reading the code, bu
 
 75 cases byte-exact against `cjpeg -rgb` across 5 geometries x 3 qualities x {plain, `-dct fast`, `-restart 3B`, `-optimize`, `-smooth 50`}. Custom tables get the weaker property (the option must change the bytes) because cjpeg has no flag that expresses them.
 
+Review of the fix found two more, both in configurations the sweep could not reach and both now pinned against C:
+
+- **Row-based restarts used the wrong MCU width.** RGB-direct puts every component at 1x1, so its MCU is 8 pixels wide whatever `subsampling` says — but `compute_restart_interval` counted rows against the requested subsampling's MCU, normally 4:2:0's 16. Visible only where `ceil(width/8) != ceil(width/16)`.
+- **16-bit quantization tables were declared SOF0.** Below quality ~20 with `force_baseline` off, or with a coarse custom table, the DQT entries exceed 255 — which baseline forbids. C switches to SOF1 and emits `JTRC_16BIT_TABLES` (`jcmarker.c:517-535`); we wrote SOF0 and a non-conforming stream. The fix lands in the shared core, so it closes the same latent hole on the CMYK side: 180 `customquant|cmyk` fixture rows moved, and nothing else.
+
 **The matrix gained a colorspace axis**, which is the part that generalizes: the next entry point to early-return past the option set gets caught by the suite rather than by someone thinking to look. It immediately earned its keep by surfacing [P4-54](#p4-54-colorspacergb-silently-ignores-progressive--arithmetic--lossless--open).
 
 ## P4-54. `colorspace(Rgb)` Silently Ignores `progressive` / `arithmetic` / `lossless` — **OPEN**

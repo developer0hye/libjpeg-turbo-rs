@@ -23,7 +23,7 @@ Phase 3 history: P3-1 / P3-2 / P3-3 / P3-4 / P3-5 / P3-6 all CLOSED. P3-2 closed
 
 | Check | Result |
 | --- | --- |
-| `cargo test --workspace --release` | **Passes** — 2246 tests, 0 failures, **0 ignored** (re-derived 2026-07-26). Every P4-39 (#313) and P4-46 (#322) reproduction now runs as a regression; the last three had been left `#[ignore]`d after their fix landed. |
+| `cargo test --workspace --release` | **Passes** — 2247 tests, 0 failures, **0 ignored** (re-derived 2026-07-26). Every P4-39 (#313) and P4-46 (#322) reproduction now runs as a regression; the last three had been left `#[ignore]`d after their fix landed. |
 | `cargo test -p libjpeg-turbo-rs --test cross_product_transform` | **Passes** all 12 cases. P0-1 closed. |
 | `cargo test -p libjpeg-turbo-rs --test regression_progressive_4pixel_chroma_transform` | **Passes** 256 cases byte-exact vs `jpegtran -progressive -copy all <op>`. P3-4 closed. |
 | `cargo test --test cross_check_p3_6_nonstandard_rgb565` | **Passes** 4 fixtures: 3x2 decode (vs `djpeg`), 3x2 encode (vs `cjpeg -sample 3x2,1x1,1x1` + `djpeg`), 3x1 decode, RGB565 merged-upsample (vs `djpeg -nosmooth` + 5-6-5 truncate chain). P3-6 closed. |

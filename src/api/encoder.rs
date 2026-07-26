@@ -811,7 +811,16 @@ impl<'a> Encoder<'a> {
         // `sampling_factors([(h,v),(1,1),(1,1)])` instead of `subsampling()`.
         // Compute it after the mapping so e.g. samp410 (4x2) lands on
         // mcu_w=32, not the default S420 mcu_w=16.
-        let restart_interval: u16 = self.compute_restart_interval(effective_subsampling);
+        // RGB-direct puts every component at 1x1 (`jcparam.c:365-370`), so its
+        // MCU is 8 pixels wide whatever `subsampling` says. A row-based
+        // restart interval counted against a 16-wide MCU would put the markers
+        // on the wrong rows.
+        let restart_subsampling: Subsampling = if rgb_direct {
+            Subsampling::S444
+        } else {
+            effective_subsampling
+        };
+        let restart_interval: u16 = self.compute_restart_interval(restart_subsampling);
         // For progressive: each scan recomputes restart_interval from
         // `restart_in_rows * MCUs_per_row(scan)` — interleaved DC scans use
         // the iMCU width while non-interleaved AC scans use the per-component

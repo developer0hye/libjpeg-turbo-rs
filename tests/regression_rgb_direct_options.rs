@@ -273,3 +273,96 @@ fn issue_343_rgb_direct_still_wins_over_unimplemented_modes() {
         );
     }
 }
+
+/// Two things the sweep above cannot reach, both found by review of the fix
+/// rather than by the fix's own tests.
+///
+/// - **Row-based restarts.** RGB-direct puts every component at 1x1, so its MCU
+///   is 8 wide whatever `subsampling` says. Counting a row interval against the
+///   default 4:2:0's 16-wide MCU lands the markers on the wrong rows — visible
+///   only where `ceil(width/8) != ceil(width/16)`.
+/// - **16-bit quantization tables.** Below quality ~20 without `force_baseline`,
+///   the scaled table exceeds 255 and needs 16-bit DQT entries, which SOF0
+///   forbids. `cjpeg` switches to SOF1 and warns; writing SOF0 there produces a
+///   non-conforming stream.
+#[test]
+fn issue_343_rgb_direct_row_restarts_and_16bit_tables_match_cjpeg() {
+    let cjpeg = require_c_tool!("cjpeg");
+
+    let mut failures: Vec<String> = Vec::new();
+
+    // Widths where the 8-wide and 16-wide MCU counts differ, so a row interval
+    // computed from the wrong MCU width is observable.
+    for &(width, height) in &[(17usize, 16usize), (33, 24), (48, 32)] {
+        let pixels: Vec<u8> = rgb_pixels(width, height);
+        let mut ppm: Vec<u8> = format!("P6\n{width} {height}\n255\n").into_bytes();
+        ppm.extend_from_slice(&pixels);
+
+        for &rows in &[1u16, 2] {
+            let ours: Vec<u8> = Encoder::new(&pixels, width, height, PixelFormat::Rgb)
+                .quality(75)
+                .colorspace(ColorSpace::Rgb)
+                .restart_rows(rows)
+                .encode()
+                .expect("rgb-direct restart_rows");
+            let rows_arg: String = rows.to_string();
+            let theirs: Vec<u8> = helpers::encode_with_c_cjpeg(
+                &cjpeg,
+                &ppm,
+                &[
+                    "-quality",
+                    "75",
+                    "-dct",
+                    "int",
+                    "-baseline",
+                    "-rgb",
+                    "-restart",
+                    &rows_arg,
+                ],
+                &format!("i343_rows{rows}_{width}x{height}"),
+            );
+            if ours != theirs {
+                failures.push(format!(
+                    "  restart_rows({rows}) {width}x{height}: ours={} c={}",
+                    ours.len(),
+                    theirs.len()
+                ));
+            }
+        }
+
+        // Quality 1 scales the Annex K table well past 255. `force_baseline`
+        // is off by default here and in cjpeg, so both must emit SOF1.
+        let ours: Vec<u8> = Encoder::new(&pixels, width, height, PixelFormat::Rgb)
+            .quality(1)
+            .colorspace(ColorSpace::Rgb)
+            .encode()
+            .expect("rgb-direct q1");
+        let theirs: Vec<u8> = helpers::encode_with_c_cjpeg(
+            &cjpeg,
+            &ppm,
+            &["-quality", "1", "-dct", "int", "-rgb"],
+            &format!("i343_q1_{width}x{height}"),
+        );
+        let sof1: bool = ours.windows(2).any(|window| window == [0xFF, 0xC1]);
+        if !sof1 {
+            failures.push(format!(
+                "  q1 {width}x{height}: no SOF1 — 16-bit quantization tables are \
+                 not legal in a baseline (SOF0) frame"
+            ));
+        }
+        if ours != theirs {
+            failures.push(format!(
+                "  q1 {width}x{height}: ours={} c={}",
+                ours.len(),
+                theirs.len()
+            ));
+        }
+    }
+
+    assert!(
+        failures.is_empty(),
+        "{} RGB-direct cases diverged from cjpeg (issue #343):\n{}",
+        failures.len(),
+        failures.join("\n")
+    );
+}
