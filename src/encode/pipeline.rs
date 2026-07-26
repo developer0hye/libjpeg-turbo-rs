@@ -1769,7 +1769,18 @@ fn compress_direct_planar(params: &CompressParams<'_>, spec: &DirectPlanarSpec) 
         .zip(spec.sampling.iter())
         .map(|(&id, &(h, v))| (id, h as u8, v as u8, 0))
         .collect();
-    marker_writer::write_sof0(&mut output, width as u16, height as u16, &sof_components);
+    // A quantization value above 255 needs 16-bit DQT entries, which baseline
+    // (SOF0) forbids, so those streams are extended sequential (SOF1) — what
+    // `cjpeg -rgb -quality 1` writes, warning "quantization tables are too
+    // coarse for baseline JPEG" as it does. Reachable through custom tables or
+    // a low quality with `force_baseline` off.
+    let needs_sof1: bool = quant_table.iter().any(|&value| value > 255);
+    let write_frame_header = if needs_sof1 {
+        marker_writer::write_sof1
+    } else {
+        marker_writer::write_sof0
+    };
+    write_frame_header(&mut output, width as u16, height as u16, &sof_components);
 
     marker_writer::write_dht(&mut output, 0, 0, dc_bits, dc_values);
     marker_writer::write_dht(&mut output, 1, 0, ac_bits, ac_values);
