@@ -84,8 +84,10 @@ fn encode(
 fn issue_330_int_and_fast_match_cjpeg_byte_for_byte() {
     let cjpeg = require_c_tool!("cjpeg");
 
-    let geometries: &[(usize, usize)] = &[(64, 48), (17, 17), (32, 2), (48, 48)];
-    let qualities: &[u8] = &[25, 75, 95];
+    let geometries: &[(usize, usize)] = &[(64, 48), (17, 17), (32, 2), (48, 48), (16, 16)];
+    // q100 and 16x16 are here on purpose: those are the exact cases #319
+    // reported diverging between x86_64 and aarch64 for `ifast` and `float`.
+    let qualities: &[u8] = &[25, 75, 95, 100];
     let methods: &[(DctMethod, &str)] = &[(DctMethod::IsLow, "int"), (DctMethod::IsFast, "fast")];
 
     let mut failures: Vec<String> = Vec::new();
@@ -218,6 +220,88 @@ fn issue_330_fast_is_not_worse_and_bigger_than_int() {
             int_jpeg.len()
         );
     }
+}
+
+/// #319 asked whether the aarch64 backend matches `cjpeg` the way x86_64 does.
+/// Every test in this file is unguarded, so the `Test (linux-aarch64 NEON)` CI
+/// leg answers that on each run — but only for the input orders the sweep above
+/// uses, and #319's divergences were all **BGR** at 16x16 q100.
+///
+/// A channel order that reaches a different SIMD colour-conversion kernel is
+/// exactly where a backend difference would hide. cjpeg has no BGR input, so
+/// the reference is its RGB encode of the same pixels in the order it reads.
+#[test]
+fn issue_319_bgr_input_matches_cjpeg_on_every_backend() {
+    let cjpeg = require_c_tool!("cjpeg");
+
+    let mut failures: Vec<String> = Vec::new();
+    let mut compared: usize = 0;
+    for &(width, height) in &[(16usize, 16usize), (17, 17), (64, 48)] {
+        let rgb: Vec<u8> = pixels(width, height, 3);
+        let bgr: Vec<u8> = rgb
+            .chunks_exact(3)
+            .flat_map(|pixel| [pixel[2], pixel[1], pixel[0]])
+            .collect();
+
+        for &(subsampling, sample) in SUBSAMPLINGS {
+            for &quality in &[75u8, 100] {
+                for &(dct_method, dct_name) in
+                    &[(DctMethod::IsLow, "int"), (DctMethod::IsFast, "fast")]
+                {
+                    let ours: Vec<u8> = encode(
+                        &bgr,
+                        width,
+                        height,
+                        PixelFormat::Bgr,
+                        quality,
+                        subsampling,
+                        dct_method,
+                    );
+
+                    let mut ppm: Vec<u8> = format!("P6\n{width} {height}\n255\n").into_bytes();
+                    ppm.extend_from_slice(&rgb);
+                    let quality_arg: String = quality.to_string();
+                    let theirs: Vec<u8> = helpers::encode_with_c_cjpeg(
+                        &cjpeg,
+                        &ppm,
+                        &[
+                            "-quality",
+                            &quality_arg,
+                            "-dct",
+                            dct_name,
+                            "-baseline",
+                            "-sample",
+                            sample,
+                        ],
+                        &format!("i319_bgr_{dct_name}_{width}x{height}_{sample}"),
+                    );
+
+                    compared += 1;
+                    if ours != theirs {
+                        failures.push(format!(
+                            "  BGR -dct {dct_name} {width}x{height} {sample} q{quality}: \
+                             ours={} c={}",
+                            ours.len(),
+                            theirs.len()
+                        ));
+                    }
+                }
+            }
+        }
+    }
+
+    assert_eq!(
+        compared,
+        3 * SUBSAMPLINGS.len() * 2 * 2,
+        "the sweep must compare every case; a short run reads as a pass"
+    );
+    assert!(
+        failures.is_empty(),
+        "{} BGR cases diverged from cjpeg — on aarch64 that is #319's open \
+         question, on x86_64 it is a regression:\n{}",
+        failures.len(),
+        failures.join("\n")
+    );
 }
 
 /// `float` is deliberately *not* claimed byte-exact. This pins the guarantee
