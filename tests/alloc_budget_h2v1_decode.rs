@@ -99,3 +99,45 @@ fn h2v1_1080p_decode_does_not_materialise_full_res_chroma() {
          full-resolution cb_full/cr_full buffers are back (issue #350)"
     );
 }
+
+/// H1V2 (4:4:0) streaming-path witness: byte-exactness alone cannot
+/// detect a gate regression (the generic fallback produces identical
+/// pixels), but the fallback's two full-resolution chroma planes add
+/// ~4.2 MB at 1080p, which this ceiling catches (review of #350).
+#[test]
+fn h1v2_1080p_decode_does_not_materialise_full_res_chroma() {
+    // No committed 1080p 4:4:0 fixture exists; synthesise one by
+    // re-encoding the 4:2:0 photo fixture's pixels at S440.
+    let jpeg_420 = std::fs::read("tests/fixtures/photo_1920x1080_420.jpg")
+        .expect("photo_1920x1080_420.jpg fixture required");
+    let src = libjpeg_turbo_rs::decompress(&jpeg_420).expect("decode source");
+    let jpeg_440 = libjpeg_turbo_rs::compress(
+        &src.data,
+        1920,
+        1080,
+        libjpeg_turbo_rs::PixelFormat::Rgb,
+        85,
+        libjpeg_turbo_rs::Subsampling::S440,
+    )
+    .expect("encode 4:4:0");
+
+    let warm = libjpeg_turbo_rs::decompress(&jpeg_440).expect("warm-up decode");
+    assert_eq!((warm.width, warm.height), (1920, 1080));
+
+    let bytes_440 = measure_bytes(move || {
+        let img = libjpeg_turbo_rs::decompress(&jpeg_440).expect("decode 440");
+        assert_eq!((img.width, img.height), (1920, 1080));
+        assert_eq!(img.data.len(), 1920 * 1080 * 3);
+    });
+
+    eprintln!("synthetic_1920x1080_440 decode: {bytes_440} bytes allocated");
+
+    // Same budget model as 4:2:2: output (6.22 MB) + Y (2.09 MB) +
+    // half-res chroma (2 x 1.04 MB) + row scratch => ~10.5 MB; the
+    // full-plane fallback adds ~4.2 MB and must fail this.
+    assert!(
+        bytes_440 <= 11 * 1024 * 1024,
+        "4:4:0 1080p decode must stream chroma rows (≤ 11 MB), got {bytes_440} — \
+         the H1V2 streaming gate regressed to the full-plane path (issue #350)"
+    );
+}

@@ -3,44 +3,19 @@
 //! previously fell through to the generic path that materialises two
 //! full-resolution chroma planes; they now stream per row like H2V2.
 //!
-//! The geometry matrix deliberately includes odd widths/heights and
-//! sub-MCU images so the last-column/last-row handling of the streamed
-//! fancy filter is pinned against C for every edge shape.
+//! The geometry matrix includes odd widths/heights and sub-MCU images so
+//! last-column/last-row handling is pinned against C for every edge
+//! shape. Widths 5 and 7 are the smallest that actually enter the
+//! streamed H2V1 fancy kernel (`actual_cb_w` 3 and 4); width 3 has
+//! `actual_cb_w == 2` and deliberately pins the box-filter fallback
+//! gate instead.
 //!
 //! Skip rule: missing C tools soft-skip locally, hard-fail in CI.
 
+mod helpers;
+
 use std::io::Write;
-use std::path::PathBuf;
 use std::process::{Command, Stdio};
-
-fn is_ci() -> bool {
-    std::env::var("CI").is_ok() || std::env::var("GITHUB_ACTIONS").is_ok()
-}
-
-fn tool_path(name: &str) -> Option<PathBuf> {
-    for dir in [
-        "/opt/homebrew/bin",
-        "/usr/local/bin",
-        "/usr/bin",
-        "/opt/libjpeg-turbo/bin",
-    ] {
-        let pb = PathBuf::from(dir).join(name);
-        if pb.exists() {
-            return Some(pb);
-        }
-    }
-    let out = Command::new("which").arg(name).output().ok()?;
-    if !out.status.success() {
-        return None;
-    }
-    let path = String::from_utf8(out.stdout).ok()?;
-    let path = path.trim();
-    if path.is_empty() {
-        None
-    } else {
-        Some(PathBuf::from(path))
-    }
-}
 
 /// Photo-like RGB content: gradients + texture so chroma is non-trivial.
 fn test_pixels(width: usize, height: usize) -> Vec<u8> {
@@ -56,33 +31,14 @@ fn test_pixels(width: usize, height: usize) -> Vec<u8> {
     pixels
 }
 
-fn parse_ppm(data: &[u8]) -> (usize, usize, Vec<u8>) {
-    let mut fields = Vec::new();
-    let mut pos = 0usize;
-    while fields.len() < 4 && pos < data.len() {
-        while pos < data.len() && data[pos].is_ascii_whitespace() {
-            pos += 1;
-        }
-        if data[pos] == b'#' {
-            while pos < data.len() && data[pos] != b'\n' {
-                pos += 1;
-            }
-            continue;
-        }
-        let start = pos;
-        while pos < data.len() && !data[pos].is_ascii_whitespace() {
-            pos += 1;
-        }
-        fields.push(std::str::from_utf8(&data[start..pos]).unwrap().to_string());
-    }
-    assert_eq!(fields[0], "P6");
-    let width: usize = fields[1].parse().unwrap();
-    let height: usize = fields[2].parse().unwrap();
-    pos += 1;
-    (width, height, data[pos..].to_vec())
-}
-
-fn run_case(cjpeg: &PathBuf, djpeg: &PathBuf, w: usize, h: usize, sample: &str, quality: &str) {
+fn run_case(
+    cjpeg: &std::path::Path,
+    djpeg: &std::path::Path,
+    w: usize,
+    h: usize,
+    sample: &str,
+    quality: &str,
+) {
     let dir = std::env::temp_dir().join(format!("h2v1_stream_{}_{w}x{h}", std::process::id()));
     std::fs::create_dir_all(&dir).expect("temp dir");
     let ppm_path = dir.join("input.ppm");
@@ -128,7 +84,8 @@ fn run_case(cjpeg: &PathBuf, djpeg: &PathBuf, w: usize, h: usize, sample: &str, 
         "djpeg {w}x{h} {sample}: {}",
         String::from_utf8_lossy(&djpeg_out.stderr)
     );
-    let (rw, rh, reference) = parse_ppm(&djpeg_out.stdout);
+    let (rw, rh, reference) =
+        helpers::parse_ppm(&djpeg_out.stdout).expect("djpeg must emit binary PPM");
     assert_eq!((rw, rh), (w, h));
     assert_eq!(ours.data.len(), reference.len());
 
@@ -149,17 +106,15 @@ fn run_case(cjpeg: &PathBuf, djpeg: &PathBuf, w: usize, h: usize, sample: &str, 
 
 #[test]
 fn h2v1_and_h1v2_decode_byte_exact_vs_djpeg_across_geometries() {
-    let (Some(cjpeg), Some(djpeg)) = (tool_path("cjpeg"), tool_path("djpeg")) else {
-        if is_ci() {
+    let (Some(cjpeg), Some(djpeg)) = (helpers::cjpeg_path(), helpers::djpeg_path()) else {
+        if helpers::is_ci() {
             panic!("cjpeg/djpeg must be installed in CI — the #350 gate cannot skip");
         }
         eprintln!("SKIP: cjpeg/djpeg not found");
         return;
     };
 
-    // Odd/even/sub-MCU geometries hit every last-column and last-row shape
-    // of the streamed fancy filter.
-    let geometries: [(usize, usize); 8] = [
+    let geometries: [(usize, usize); 10] = [
         (16, 16),
         (15, 9),
         (17, 17),
@@ -168,6 +123,8 @@ fn h2v1_and_h1v2_decode_byte_exact_vs_djpeg_across_geometries() {
         (320, 240),
         (319, 241),
         (3, 5),
+        (5, 3),
+        (7, 7),
     ];
     for &(w, h) in &geometries {
         for sample in ["2x1", "1x2"] {
