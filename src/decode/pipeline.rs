@@ -4412,6 +4412,129 @@ impl<'a> Decoder<'a> {
                     });
                 }
 
+                // Generic row-streaming for nearest/box-filtered chroma
+                // (C's int_upsample): covers fast_upsample (djpeg
+                // -nosmooth) in every mode, 4:1:1 (H4V1), 4:4:1 (H1V4),
+                // and non-uniform factor combinations — any case where
+                // BOTH chroma components resolve to replication rather
+                // than a fancy filter (issue #353). Only fancy-filter
+                // modes (streamed above when uniform, full-plane below
+                // when mixed) and scaled IDCT still materialise
+                // full-resolution chroma.
+                //
+                // Filter selection mirrors the full-plane path exactly:
+                // a component is nearest-eligible when it is 1:1, or
+                // `use_box_filter` would fire for it, or its factors
+                // have no fancy kernel ((2,1)/(2,2)/(1,2) are the only
+                // fancy shapes, matching C jdsample.c).
+                // block_size == 1 always selects box in the full-plane
+                // path, but the gate below is 8-only so it cannot reach
+                // here; scaled-IDCT streaming is deferred to #353 step 2.
+                let nearest_eligible = |hf: usize, vf: usize, actual_w: usize| -> bool {
+                    let use_box: bool = self.fast_upsample || (actual_w <= 2 && hf >= 2);
+                    (hf == 1 && vf == 1) || use_box || !matches!((hf, vf), (2, 1) | (2, 2) | (1, 2))
+                };
+                if block_size == 8
+                    && nearest_eligible(cb_h_factor, cb_v_factor, actual_cb_w)
+                    && nearest_eligible(cr_h_factor, cr_v_factor, actual_cr_w)
+                {
+                    let data_size: usize = out_width * out_height * bpp;
+                    let mut data: Vec<u8> = vec![0u8; data_size];
+
+                    let mut cb_row: Vec<u8> = vec![0u8; full_width];
+                    let mut cr_row: Vec<u8> = vec![0u8; full_width];
+
+                    let y_off: usize = comp_x_offsets[0];
+                    // Exact-length slices are safe for every admitted
+                    // (hf, vf): comp_w * hf == full_width exactly (luma
+                    // is max-sampled, so full_width is a multiple of
+                    // hf), hence actual_w * hf <= full_width (no scratch
+                    // overrun) and comp_x_offsets[i] == aligned_crop_x /
+                    // hf exactly, giving off + actual_w <= comp_w for
+                    // every crop.
+                    //
+                    // Expand one chroma source row by horizontal
+                    // replication (dst x -> src x/hf), the exact
+                    // per-row slice of `upsample_nearest`'s mapping.
+                    let expand_row = |plane: &[u8],
+                                      stride: usize,
+                                      off: usize,
+                                      src_y: usize,
+                                      actual_w: usize,
+                                      hf: usize,
+                                      out: &mut [u8]| {
+                        let src = &plane[src_y * stride + off..src_y * stride + off + actual_w];
+                        if hf == 1 {
+                            out[..actual_w].copy_from_slice(src);
+                        } else {
+                            for (sx, &v) in src.iter().enumerate() {
+                                let start = sx * hf;
+                                out[start..start + hf].fill(v);
+                            }
+                        }
+                    };
+
+                    // Track the last expanded source row per component so
+                    // vf > 1 rows reuse the scratch instead of re-expanding.
+                    let mut last_cb_src: usize = usize::MAX;
+                    let mut last_cr_src: usize = usize::MAX;
+                    for y in 0..out_height {
+                        let cb_src_y: usize = y / cb_v_factor;
+                        let cr_src_y: usize = y / cr_v_factor;
+                        // actual_h == ceil(out_height / vf), so the map
+                        // stays inside the decoded rows; the full-plane
+                        // path has no clamp either.
+                        debug_assert!(cb_src_y < actual_cb_h && cr_src_y < actual_cr_h);
+                        if cb_src_y != last_cb_src {
+                            expand_row(
+                                &component_planes[1],
+                                cb_w,
+                                comp_x_offsets[1],
+                                cb_src_y,
+                                actual_cb_w,
+                                cb_h_factor,
+                                &mut cb_row,
+                            );
+                            last_cb_src = cb_src_y;
+                        }
+                        if cr_src_y != last_cr_src {
+                            expand_row(
+                                &component_planes[2],
+                                cr_w,
+                                comp_x_offsets[2],
+                                cr_src_y,
+                                actual_cr_w,
+                                cr_h_factor,
+                                &mut cr_row,
+                            );
+                            last_cr_src = cr_src_y;
+                        }
+                        self.color_convert_row(
+                            out_format,
+                            &y_plane[y * y_width + y_off..],
+                            &cb_row,
+                            &cr_row,
+                            &mut data[y * out_width * bpp..],
+                            out_width,
+                            y,
+                        );
+                    }
+
+                    return Ok(Image {
+                        width: out_width,
+                        height: out_height,
+                        pixel_format: out_format,
+                        precision: 8,
+                        data,
+                        icc_profile: icc_profile.clone(),
+                        exif_data: exif_data.clone(),
+                        comment: self.metadata.comment.clone(),
+                        density: self.metadata.density,
+                        saved_markers: self.metadata.saved_markers.clone(),
+                        warnings: warnings.clone(),
+                    });
+                }
+
                 // All remaining paths need full-plane cb_full/cr_full buffers.
                 let alloc_size = full_width * full_height;
                 let mut cb_full = vec![0u8; alloc_size];
