@@ -664,6 +664,8 @@ pub fn compress_with_params(params: &CompressParams<'_>) -> Result<Vec<u8>> {
             // below, which handles dummies via `encode_color_mcu_with_dummies`.
             // Where the generic loop below must pick up. The fast path covers
             // the interior columns; a partial final column falls through.
+            // Only the x86_64 fast path below mutates this.
+            #[cfg_attr(not(target_arch = "x86_64"), allow(unused_mut))]
             let mut generic_start_col: usize = 0;
 
             #[cfg(target_arch = "x86_64")]
