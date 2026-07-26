@@ -144,3 +144,71 @@ fn h1v2_1080p_decode_does_not_materialise_full_res_chroma() {
          the H1V2 streaming gate regressed to the full-plane path (issue #350)"
     );
 }
+
+/// H4V1 (4:1:1) generic nearest-streaming witness (issue #353): 4:1:1
+/// previously always took the full-plane path (no fancy kernel exists
+/// for 4x factors — C uses int_upsample), adding two full-resolution
+/// chroma planes (~4.2 MB at 1080p) to a mode whose decoded chroma is
+/// only quarter-width.
+#[test]
+fn h4v1_1080p_decode_does_not_materialise_full_res_chroma() {
+    let jpeg_420 = std::fs::read("tests/fixtures/photo_1920x1080_420.jpg")
+        .expect("photo_1920x1080_420.jpg fixture required");
+    let src = libjpeg_turbo_rs::decompress(&jpeg_420).expect("decode source");
+    let jpeg_411 = libjpeg_turbo_rs::compress(
+        &src.data,
+        1920,
+        1080,
+        libjpeg_turbo_rs::PixelFormat::Rgb,
+        85,
+        libjpeg_turbo_rs::Subsampling::S411,
+    )
+    .expect("encode 4:1:1");
+
+    let warm = libjpeg_turbo_rs::decompress(&jpeg_411).expect("warm-up decode");
+    assert_eq!((warm.width, warm.height), (1920, 1080));
+
+    let bytes_411 = measure_bytes(move || {
+        let img = libjpeg_turbo_rs::decompress(&jpeg_411).expect("decode 411");
+        assert_eq!((img.width, img.height), (1920, 1080));
+        assert_eq!(img.data.len(), 1920 * 1080 * 3);
+    });
+
+    eprintln!("synthetic_1920x1080_411 decode: {bytes_411} bytes allocated");
+
+    // Budget: output (6.22 MB) + Y (2.09 MB) + quarter-width chroma
+    // (2 x 0.52 MB) + row scratch => ~9.4 MB; the full-plane fallback
+    // adds ~4.2 MB and must fail this.
+    assert!(
+        bytes_411 <= 10 * 1024 * 1024,
+        "4:1:1 1080p decode must stream chroma rows (≤ 10 MiB), got {bytes_411} — \
+         the generic nearest streaming gate regressed to the full-plane path (issue #353)"
+    );
+}
+
+/// `-nosmooth` (box filter) routing witness (issue #353 review MEDIUM):
+/// byte-exactness cannot distinguish "streamed" from "full-plane
+/// fallback" because both produce identical bytes; dropping the
+/// `fast_upsample` term from the streaming gate would only show up as
+/// this ceiling regressing (~8.9 MB -> ~13 MB at 1080p 4:2:0).
+#[test]
+fn nosmooth_1080p_decode_does_not_materialise_full_res_chroma() {
+    let jpeg_420 = std::fs::read("tests/fixtures/photo_1920x1080_420.jpg")
+        .expect("photo_1920x1080_420.jpg fixture required");
+
+    let bytes = measure_bytes(move || {
+        let mut d = libjpeg_turbo_rs::Decoder::new(&jpeg_420).expect("parse");
+        d.set_fast_upsample(true);
+        d.set_output_format(libjpeg_turbo_rs::PixelFormat::Rgb);
+        let img = d.decode_image().expect("decode 420 nosmooth");
+        assert_eq!((img.width, img.height), (1920, 1080));
+    });
+
+    eprintln!("photo_1920x1080_420 nosmooth decode: {bytes} bytes allocated");
+
+    assert!(
+        bytes <= 10 * 1024 * 1024,
+        "-nosmooth 1080p decode must stream chroma rows (≤ 10 MiB), got {bytes} — \
+         the fast_upsample term of the nearest streaming gate regressed (issue #353)"
+    );
+}
