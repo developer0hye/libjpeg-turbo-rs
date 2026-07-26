@@ -197,6 +197,22 @@ pub struct ComponentInfo {
     pub quant_table_index: u8,
 }
 
+/// Maximum number of frame/scan components the decoder supports.
+///
+/// `read_sof` / `read_sos` reject anything above this, which is what
+/// lets the decode path use fixed `[_; MAX_COMPONENTS]` arrays instead
+/// of per-decode Vecs (issue #351).
+///
+/// For **scans** this is exactly the spec limit: ISO 10918-1 B.2.3 caps
+/// `Ns ≤ 4`, and C's `MAX_COMPS_IN_SCAN` (`jpeglib.h:71`) is likewise 4.
+/// For **frames** it is deliberately stricter than C: ISO 10918-1 B.2.2
+/// allows `Nf ≤ 255` and C caps frame components at `MAX_COMPONENTS`
+/// = 10 (`jmorecfg.h:30`, enforced in `jdinput.c:74` with
+/// `JERR_COMPONENT_COUNT`). No real-world colour model needs more than
+/// 4 (YCbCr / YCCK / CMYK), and a 5+-component SOF that C would accept
+/// is rejected here — a known, intentional divergence, not spec parity.
+pub const MAX_COMPONENTS: usize = 4;
+
 /// Parsed from the SOF marker — describes the image frame.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FrameHeader {

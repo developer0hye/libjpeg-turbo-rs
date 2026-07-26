@@ -1,7 +1,13 @@
+use std::sync::{Arc, OnceLock};
+
 use crate::common::error::{JpegError, Result};
 
 const LOOKUP_BITS: usize = 10;
 const LOOKUP_SIZE: usize = 1 << LOOKUP_BITS;
+
+/// Maximum number of symbols a DHT segment may define (ISO 10918-1 B.2.4.2;
+/// libjpeg-turbo rejects `count > 256` with `JERR_BAD_HUFF_TABLE`).
+const MAX_SYMBOLS: usize = 256;
 
 /// Huffman decoding table built from DHT marker data.
 /// Uses a fast lookup table for short codes, with a fallback slow
@@ -16,16 +22,25 @@ const LOOKUP_SIZE: usize = 1 << LOOKUP_BITS;
 /// For AC codes where `code_len + magnitude_bits ≤ LOOKUP_BITS`, the upper
 /// half pre-computes the coefficient value, eliminating a separate
 /// `read_bits` + sign-extend in the hot AC decode loop.
+/// All storage is inline (no nested heap blocks) so that building a table
+/// costs exactly one allocation when wrapped in `Arc` — decoder metadata
+/// shares tables via `Arc<HuffmanTable>`, making per-scan snapshots a
+/// refcount bump instead of a 4 KB memcpy (issue #351).
 #[derive(Debug, Clone)]
 pub struct HuffmanTable {
-    fast: Box<[u32; LOOKUP_SIZE]>,
+    fast: [u32; LOOKUP_SIZE],
     maxcode: [i32; 18],
     valoffset: [i32; 18],
-    values: Vec<u8>,
+    values: [u8; MAX_SYMBOLS],
     count: usize,
     /// Minimum code length that requires the slow path (> LOOKUP_BITS).
     min_slow_length: u8,
 }
+
+// `build` constructs the table on the stack before the caller moves it
+// into an `Arc`; pin the size so it cannot silently grow past what
+// small-stack targets (wasm) can absorb transiently.
+const _: () = assert!(std::mem::size_of::<HuffmanTable>() <= 8192);
 
 impl HuffmanTable {
     #[inline(always)]
@@ -39,24 +54,38 @@ impl HuffmanTable {
     }
 
     /// Build a Huffman table from DHT marker data.
+    ///
+    /// Performs no heap allocation itself; wrap the result in `Arc::new`
+    /// for the single-allocation shared form used by decoder metadata.
     pub fn build(bits: &[u8; 17], values: &[u8]) -> Result<Self> {
         let total_symbols: usize = bits[1..=16].iter().map(|&b| b as usize).sum();
+        if total_symbols > MAX_SYMBOLS {
+            // Matches libjpeg-turbo's JERR_BAD_HUFF_TABLE for count > 256.
+            return Err(JpegError::CorruptData(
+                "Huffman table: more than 256 symbols (malformed DHT)".into(),
+            ));
+        }
         if values.len() < total_symbols {
             return Err(JpegError::CorruptData(
                 "Huffman table: insufficient symbol data".into(),
             ));
         }
 
-        // Generate code values for each symbol (JPEG spec Figure C.1)
-        let mut huffcode = Vec::with_capacity(total_symbols);
+        // Generate code values for each symbol (JPEG spec Figure C.1).
+        // Length fits in u8 (≤ 16); keeping the tuple at 8 bytes halves
+        // this stack buffer vs (u32, usize).
+        let mut huffcode = [(0u32, 0u8); MAX_SYMBOLS];
+        let mut num_codes: usize = 0;
         let mut code: u32 = 0;
         for (length, &bit_count) in bits.iter().enumerate().skip(1) {
             for _ in 0..bit_count {
-                huffcode.push((code, length));
+                huffcode[num_codes] = (code, length as u8);
+                num_codes += 1;
                 code += 1;
             }
             code <<= 1;
         }
+        let huffcode = &huffcode[..num_codes];
 
         // Build maxcode and valoffset arrays for slow decode path
         let mut maxcode = [-1i32; 18];
@@ -78,11 +107,9 @@ impl HuffmanTable {
         // Build fast lookup table for codes <= LOOKUP_BITS.
         // Lower 16 bits: (symbol << 8) | code_len.
         // Upper 16 bits: accelerated AC entry (built inline to avoid a second pass).
-        let mut fast: Box<[u32; LOOKUP_SIZE]> = vec![0u32; LOOKUP_SIZE]
-            .into_boxed_slice()
-            .try_into()
-            .unwrap();
+        let mut fast = [0u32; LOOKUP_SIZE];
         for (i, &(code_val, code_len)) in huffcode.iter().enumerate() {
+            let code_len = code_len as usize;
             if code_len <= LOOKUP_BITS {
                 let code_shifted: usize = (code_val as usize) << (LOOKUP_BITS - code_len);
                 let fill_count: usize = 1 << (LOOKUP_BITS - code_len);
@@ -132,11 +159,14 @@ impl HuffmanTable {
             }
         }
 
+        let mut values_arr = [0u8; MAX_SYMBOLS];
+        values_arr[..total_symbols].copy_from_slice(&values[..total_symbols]);
+
         Ok(Self {
             fast,
             maxcode,
             valoffset,
-            values: values[..total_symbols].to_vec(),
+            values: values_arr,
             count: total_symbols,
             min_slow_length,
         })
@@ -183,7 +213,7 @@ impl HuffmanTable {
         for length in start..=16usize {
             if code <= self.maxcode[length] {
                 let idx = (code + self.valoffset[length]) as usize;
-                if idx < self.values.len() {
+                if idx < self.count {
                     return Ok((self.values[idx], length as u8));
                 }
             }
@@ -199,6 +229,42 @@ impl HuffmanTable {
     pub fn num_symbols(&self) -> usize {
         self.count
     }
+}
+
+/// The four standard Huffman tables from JPEG Annex K.3, built once per
+/// process and shared by `Arc` (issue #351: they were previously rebuilt
+/// and deep-cloned on every `Decoder::new`).
+///
+/// Index order: `[0]` DC luminance, `[1]` DC chrominance, `[2]` AC
+/// luminance, `[3]` AC chrominance — mirroring libjpeg-turbo's
+/// `std_huff_tables()` slot assignment (DC/AC slots 0 and 1).
+pub fn std_huffman_tables() -> &'static [Arc<HuffmanTable>; 4] {
+    static STD_TABLES: OnceLock<[Arc<HuffmanTable>; 4]> = OnceLock::new();
+    STD_TABLES.get_or_init(|| {
+        use crate::encode::tables::{
+            AC_CHROMINANCE_BITS, AC_CHROMINANCE_VALUES, AC_LUMINANCE_BITS, AC_LUMINANCE_VALUES,
+            DC_CHROMINANCE_BITS, DC_CHROMINANCE_VALUES, DC_LUMINANCE_BITS, DC_LUMINANCE_VALUES,
+        };
+        // The Annex K constants are compile-time valid; `build` cannot fail.
+        [
+            Arc::new(
+                HuffmanTable::build(&DC_LUMINANCE_BITS, &DC_LUMINANCE_VALUES)
+                    .expect("Annex K DC luminance table is valid"),
+            ),
+            Arc::new(
+                HuffmanTable::build(&DC_CHROMINANCE_BITS, &DC_CHROMINANCE_VALUES)
+                    .expect("Annex K DC chrominance table is valid"),
+            ),
+            Arc::new(
+                HuffmanTable::build(&AC_LUMINANCE_BITS, &AC_LUMINANCE_VALUES)
+                    .expect("Annex K AC luminance table is valid"),
+            ),
+            Arc::new(
+                HuffmanTable::build(&AC_CHROMINANCE_BITS, &AC_CHROMINANCE_VALUES)
+                    .expect("Annex K AC chrominance table is valid"),
+            ),
+        ]
+    })
 }
 
 #[cfg(test)]

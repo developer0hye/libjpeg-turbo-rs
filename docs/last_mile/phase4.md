@@ -1015,3 +1015,19 @@ The one non-obvious piece was the **scan script**. `jpeg_simple_progression` tak
 48. ~~**P4-52** — CMYK bottom padding clamps the last row where C repeats the last row group (#340).~~ **CLOSED 2026-07-26** — per-component row-group height.
 49. ~~**P4-53** — RGB-direct encode drops every builder option (#343).~~ **CLOSED 2026-07-26** — CMYK and RGB-direct share one `compress_direct_planar`; 75/75 vs `cjpeg -rgb`.
 51. ~~**P4-54** — `colorspace(Rgb)` silently ignores `progressive` / `arithmetic` / `lossless` (#345).~~ **CLOSED 2026-07-26** — implemented, not rejected; all four modes byte-exact vs `cjpeg -rgb`.
+
+## P4-55. zune-jpeg Competitive-Gap Program (#350–#361) — **OPEN**
+
+**Motivation.** The 2026-07-26 full gap analysis vs `zune-jpeg` 0.5.15 (GitHub tracking issue #361, AMD EPYC 9554 reference box) found us slower in four specific areas nobody was measuring — 4:2:2 decode (1.22–1.24×, #350), small-image fixed cost (2–3.6×, #351), 8K progressive scaling (1.30×, #352), 4:4:4/low-density multi-pass output (#353) — plus six capability gaps (#354–#359) and a benchmark blind spot (#360). Detail, measurements, and per-item acceptance criteria live in the GitHub issues; this entry keeps the program visible to the LAST_MILE release gate rather than duplicating it.
+
+**Acceptance criteria.** All sub-issues #350–#360 closed on GitHub with their stated criteria (each requires C cross-validation and an `experiments/` record where perf-related), and the #361 tracking table re-measured.
+
+**Progress.** #351 (small-image fixed cost) closed by the PR that adds this entry: gray_8x8 44 allocs/60.5 KB → 8 allocs/9.6 KB, ratio vs zune 3.60× → 1.35×, all large-image cases improved.
+
+## P4-56. Frame Component Cap Is 4 Where C Accepts Up To 10 — **OPEN**
+
+**Motivation.** Surfaced by the #351 docs audit: our `read_sof` rejects frames with more than `MAX_COMPONENTS = 4` components at header parse, while the C *library* caps frames at `MAX_COMPONENTS 10` (`jmorecfg.h:30`, enforced at `jdinput.c:74` via `JERR_COMPONENT_COUNT`); ISO 10918-1 B.2.2 allows Nf ≤ 255. Stock `djpeg` is **not** a divergence witness here: it parses the 5-component header fine but aborts at output-colour selection (`JERR_CONVERSION_NOTIMPL`, `jdcolor.c:254` et al.) because none of its output formats accept a 5-component stream. The C surface that genuinely decodes 5–10-component streams is the library raw-data path (`jpeg_read_raw_data` with `JCS_UNKNOWN`) and coefficient transcoding (`jpeg_read_coefficients`/`jdtrans.c`) — our equivalents (`decompress_raw`, `read_coefficients`) reject at `read_sof` instead. Same less-accepting-than-C class as P4-21, but library-level only. Scan-level Ns ≤ 4 is exact parity (`MAX_COMPS_IN_SCAN`).
+
+**Root-cause hypothesis.** The decode pipeline assumes ≤ 4 planes throughout (fixed `[_; 4]` table/plane arrays, colour paths for 1/3/4 components), so the cap was set to the scan limit rather than C's frame limit.
+
+**Acceptance criteria.** Either (a) frames with 5–10 components work through the raw-data and coefficient paths, cross-validated against a small C harness linked to libjpeg-turbo driving `jpeg_read_raw_data` / `jpeg_read_coefficients` (stock `djpeg` cannot serve as the oracle — no output format accepts these streams), or (b) an explicit decision records the cap as an intentional divergence in `docs/ABI_COMPATIBILITY.md` with the rejection error made descriptive. Low urgency: no real-world corpus input exercises >4 components.

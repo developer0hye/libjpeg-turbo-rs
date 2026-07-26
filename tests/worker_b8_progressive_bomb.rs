@@ -45,10 +45,13 @@ const LIMITED_DECODE_WALL_CLOCK_MS: u128 = 1_000;
 /// catches O(N^2) regressions: a quadratic 5000-scan walk at 1 us/iter would
 /// hit 25 s and blow this bound.
 const UNLIMITED_PARSE_WALL_CLOCK_MS: u128 = 1_000;
-/// Peak RSS delta bound. Parser stores a ScanInfo per SOS with cloned Huffman
-/// tables; 5000 * ~O(KB) + coefficient buffers = single-digit MiB expected.
-/// 100 MiB catches order-of-magnitude regressions.
+/// Peak RSS delta bound. Parser stores a ScanInfo per SOS; since issue #351
+/// those hold `Arc<HuffmanTable>` handles, so 5000 scans share one copy of
+/// each table (8 pointers per scan, not ~4 KB). Scan state + coefficient
+/// buffers still dominate. 100 MiB catches order-of-magnitude regressions.
 // Measured ~155 MiB peak_rss_delta on aarch64 macOS under `cargo test --tests`
+// BEFORE the #351 Arc sharing landed; the bound is now conservative, not
+// re-measured. Tighten only against a fresh measurement.
 // aggregation (the decoder allocates scan-state before/while the scan_limit
 // fires and before max_memory caps hit). Bound set to measured + ~45 MiB
 // margin; catches true runaway (GiB-scale) allocation, still well under the

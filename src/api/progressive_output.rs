@@ -343,10 +343,11 @@ impl ProgressiveDecoder {
         // Clone scan component selectors to avoid holding borrow on metadata
         let scan_components: Vec<ScanComponentSelector> = scan_info.header.components.clone();
 
-        // Clone Huffman tables needed for this scan
-        let dc_tables: [Option<crate::common::huffman_table::HuffmanTable>; 4] =
+        // Clone Huffman table handles needed for this scan (Arc refcount
+        // bumps — the tables themselves are shared, not copied).
+        let dc_tables: [Option<std::sync::Arc<crate::common::huffman_table::HuffmanTable>>; 4] =
             scan_info.dc_huffman_tables.clone();
-        let ac_tables: [Option<crate::common::huffman_table::HuffmanTable>; 4] =
+        let ac_tables: [Option<std::sync::Arc<crate::common::huffman_table::HuffmanTable>>; 4] =
             scan_info.ac_huffman_tables.clone();
 
         let entropy_data: &[u8] = &self.raw_data[data_offset..];
