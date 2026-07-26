@@ -167,6 +167,15 @@ const FORMATS: &[(&str, PixelFormat)] = &[
 /// see the module docs.
 const KNOWN_VIOLATIONS: &[(&str, &str)] = &[
     // ---- by design: the combination is meaningless, not dropped ----
+    // Optimized coding derives its own tables from the image's own symbol
+    // statistics, so supplied tables cannot survive it. C does the same
+    // (`jcmaster.c`), and this entry only appeared once CMYK stopped
+    // rejecting `optimize_huffman` outright (#313) — before that the pair was
+    // never measured.
+    (
+        "cmyk|independence|huffman_tables after optimize_huffman",
+        "by-design",
+    ),
     (
         "gray|independence|huffman_tables after arithmetic",
         "by-design",
