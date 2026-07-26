@@ -214,6 +214,43 @@ fn progressive_dc_refinement_with_undefined_td_still_decodes() {
 }
 
 #[test]
+fn dht_symbol_count_exceeding_segment_length_is_rejected() {
+    // C's get_dht (jdmarker.c) rejects a DHT whose bits[] claim more
+    // symbols than the segment length holds: `if (count > 256 ||
+    // ((INT32)count) > length) ERREXIT(JERR_BAD_HUFF_TABLE)`. Without
+    // the segment bound, the parser silently consumes bytes belonging
+    // to the following markers where djpeg aborts (found in the #351
+    // review).
+    let pixels = vec![128u8; 8 * 8];
+    let mut jpeg =
+        libjpeg_turbo_rs::compress(&pixels, 8, 8, PixelFormat::Grayscale, 75, Subsampling::S444)
+            .expect("baseline compress");
+    let pos = jpeg
+        .windows(2)
+        .position(|w| w == [0xFF, 0xC4])
+        .expect("DHT marker present");
+    // Shrink the declared segment length by 4 so the symbol bytes run
+    // past the segment end while remaining inside the stream.
+    let old_len = u16::from_be_bytes([jpeg[pos + 2], jpeg[pos + 3]]);
+    let new_len = (old_len - 4).to_be_bytes();
+    jpeg[pos + 2] = new_len[0];
+    jpeg[pos + 3] = new_len[1];
+
+    let result = libjpeg_turbo_rs::Decoder::new(&jpeg).and_then(|mut d| {
+        d.set_lenient(true);
+        d.decode_image()
+    });
+    assert!(
+        matches!(
+            result,
+            Err(JpegError::UnexpectedEof) | Err(JpegError::CorruptData(_))
+        ),
+        "DHT with symbol count exceeding segment length must error \
+         (matches djpeg's Bogus Huffman table definition), got: {result:?}"
+    );
+}
+
+#[test]
 fn dht_with_invalid_table_class_is_rejected() {
     // Tc must be 0 (DC) or 1 (AC). libjpeg-turbo rejects Tc>=2 with
     // `JERR_DHT_INDEX` ("Bogus DHT index %d"). Without this check, a

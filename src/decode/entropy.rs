@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use crate::common::error::{JpegError, Result};
 use crate::common::huffman_table::HuffmanTable;
 use crate::common::types::*;
@@ -21,8 +23,8 @@ pub struct McuComponentPlan<'a> {
 pub fn resolve_mcu_plan<'a>(
     frame: &FrameHeader,
     scan: &ScanHeader,
-    dc_tables: &'a [Option<HuffmanTable>; 4],
-    ac_tables: &'a [Option<HuffmanTable>; 4],
+    dc_tables: &'a [Option<Arc<HuffmanTable>>; 4],
+    ac_tables: &'a [Option<Arc<HuffmanTable>>; 4],
 ) -> Result<Vec<McuComponentPlan<'a>>> {
     let mut plan = Vec::with_capacity(scan.components.len());
 
@@ -40,7 +42,7 @@ pub fn resolve_mcu_plan<'a>(
             })?;
 
         let dc_table = dc_tables[scan_comp.dc_table_index as usize]
-            .as_ref()
+            .as_deref()
             .ok_or_else(|| {
                 JpegError::CorruptData(format!(
                     "missing DC Huffman table {}",
@@ -49,7 +51,7 @@ pub fn resolve_mcu_plan<'a>(
             })?;
 
         let ac_table = ac_tables[scan_comp.ac_table_index as usize]
-            .as_ref()
+            .as_deref()
             .ok_or_else(|| {
                 JpegError::CorruptData(format!(
                     "missing AC Huffman table {}",
@@ -150,8 +152,8 @@ impl McuDecoder {
         reader: &mut BitReader,
         frame: &FrameHeader,
         scan: &ScanHeader,
-        dc_tables: &[Option<HuffmanTable>; 4],
-        ac_tables: &[Option<HuffmanTable>; 4],
+        dc_tables: &[Option<Arc<HuffmanTable>>; 4],
+        ac_tables: &[Option<Arc<HuffmanTable>>; 4],
         blocks: &mut Vec<[i16; 64]>,
     ) -> Result<()> {
         let plan = resolve_mcu_plan(frame, scan, dc_tables, ac_tables)?;

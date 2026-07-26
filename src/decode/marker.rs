@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use crate::common::error::{JpegError, Result};
 use crate::common::huffman_table::HuffmanTable;
 use crate::common::quant_table::QuantTable;
@@ -43,8 +45,8 @@ pub struct ScanInfo {
     pub header: ScanHeader,
     /// Byte offset where this scan's entropy-coded data begins.
     pub data_offset: usize,
-    pub dc_huffman_tables: [Option<HuffmanTable>; 4],
-    pub ac_huffman_tables: [Option<HuffmanTable>; 4],
+    pub dc_huffman_tables: [Option<Arc<HuffmanTable>>; 4],
+    pub ac_huffman_tables: [Option<Arc<HuffmanTable>>; 4],
     pub restart_interval: u16,
 }
 
@@ -58,8 +60,8 @@ pub struct JpegMetadata {
     /// First scan header (used by baseline path).
     pub scan: ScanHeader,
     pub quant_tables: [Option<QuantTable>; 4],
-    pub dc_huffman_tables: [Option<HuffmanTable>; 4],
-    pub ac_huffman_tables: [Option<HuffmanTable>; 4],
+    pub dc_huffman_tables: [Option<Arc<HuffmanTable>>; 4],
+    pub ac_huffman_tables: [Option<Arc<HuffmanTable>>; 4],
     pub restart_interval: u16,
     /// Byte offset where the first scan's entropy-coded data begins.
     pub entropy_data_offset: usize,
@@ -167,8 +169,8 @@ impl<'a> MarkerReader<'a> {
 
         let mut frame: Option<FrameHeader> = None;
         let mut quant_tables: [Option<QuantTable>; 4] = [None, None, None, None];
-        let mut dc_huffman_tables: [Option<HuffmanTable>; 4] = [None, None, None, None];
-        let mut ac_huffman_tables: [Option<HuffmanTable>; 4] = [None, None, None, None];
+        let mut dc_huffman_tables: [Option<Arc<HuffmanTable>>; 4] = [None, None, None, None];
+        let mut ac_huffman_tables: [Option<Arc<HuffmanTable>>; 4] = [None, None, None, None];
         let mut restart_interval: u16 = 0;
         let mut scans: Vec<ScanInfo> = Vec::new();
         let mut saw_adobe_marker: bool = false;
@@ -287,7 +289,10 @@ impl<'a> MarkerReader<'a> {
                     // too, and the trailing pointer-equality loop rejects a
                     // repeated CSi.
                     if let Some(f) = frame.as_ref() {
-                        let mut chosen: Vec<usize> = Vec::with_capacity(header.components.len());
+                        // Fixed-size scratch: read_sos caps scan components
+                        // at MAX_COMPONENTS, and this runs per SOS on the
+                        // small-decode fixed-cost path (issue #351).
+                        let mut chosen: [usize; MAX_COMPONENTS] = [usize::MAX; MAX_COMPONENTS];
                         for (scan_pos, scan_comp) in header.components.iter().enumerate() {
                             match f
                                 .components
@@ -296,7 +301,9 @@ impl<'a> MarkerReader<'a> {
                                 .skip(scan_pos)
                                 .find(|(_, frame_comp)| frame_comp.id == scan_comp.component_id)
                             {
-                                Some((ci, _)) if !chosen.contains(&ci) => chosen.push(ci),
+                                Some((ci, _)) if !chosen[..scan_pos].contains(&ci) => {
+                                    chosen[scan_pos] = ci;
+                                }
                                 _ => {
                                     return Err(JpegError::CorruptData(format!(
                                         "Invalid component ID {} in SOS",
@@ -425,7 +432,9 @@ impl<'a> MarkerReader<'a> {
             }
         }
 
-        let frame = frame.ok_or(JpegError::CorruptData("missing SOF marker".into()))?;
+        // `ok_or_else`, not `ok_or`: the latter builds the error String
+        // eagerly on every successful parse.
+        let frame = frame.ok_or_else(|| JpegError::CorruptData("missing SOF marker".into()))?;
         if scans.is_empty() {
             return Err(JpegError::CorruptData("missing SOS marker".into()));
         }
@@ -703,10 +712,10 @@ impl<'a> MarkerReader<'a> {
         if width == 0 {
             return Err(JpegError::CorruptData("SOF width must not be 0".into()));
         }
-        if num_components == 0 || num_components > 4 {
+        if num_components == 0 || num_components > MAX_COMPONENTS {
             return Err(JpegError::CorruptData(format!(
-                "SOF component count must be 1-4, got {}",
-                num_components
+                "SOF component count must be 1-{}, got {}",
+                MAX_COMPONENTS, num_components
             )));
         }
 
@@ -787,8 +796,8 @@ impl<'a> MarkerReader<'a> {
 
     fn read_dht(
         &mut self,
-        dc_tables: &mut [Option<HuffmanTable>; 4],
-        ac_tables: &mut [Option<HuffmanTable>; 4],
+        dc_tables: &mut [Option<Arc<HuffmanTable>>; 4],
+        ac_tables: &mut [Option<Arc<HuffmanTable>>; 4],
     ) -> Result<()> {
         let length = self.read_u16_be()? as usize;
         let end = self.pos + length - 2;
@@ -820,12 +829,20 @@ impl<'a> MarkerReader<'a> {
             }
 
             let total: usize = bits[1..=16].iter().map(|&b| b as usize).sum();
-            let mut values = Vec::with_capacity(total);
-            for _ in 0..total {
-                values.push(self.read_u8()?);
+            // Mirror C's get_dht bounds (jdmarker.c JERR_BAD_HUFF_TABLE):
+            // the symbol count must fit inside the DHT segment itself, not
+            // just the stream — otherwise a short segment would silently
+            // consume bytes belonging to the following markers where djpeg
+            // aborts.
+            if total > end.saturating_sub(self.pos) || self.pos + total > self.data.len() {
+                return Err(JpegError::UnexpectedEof);
             }
+            // Borrow symbol bytes directly from the input; `build` copies
+            // them into the table's inline storage (no temp Vec).
+            let values = &self.data[self.pos..self.pos + total];
+            self.pos += total;
 
-            let table = HuffmanTable::build(&bits, &values)?;
+            let table = Arc::new(HuffmanTable::build(&bits, values)?);
 
             if table_class == 0 {
                 dc_tables[table_id] = Some(table);
@@ -893,10 +910,10 @@ impl<'a> MarkerReader<'a> {
         let _length = self.read_u16_be()?;
         let num_components = self.read_u8()? as usize;
 
-        if num_components == 0 || num_components > 4 {
+        if num_components == 0 || num_components > MAX_COMPONENTS {
             return Err(JpegError::CorruptData(format!(
-                "SOS component count must be 1-4, got {}",
-                num_components
+                "SOS component count must be 1-{}, got {}",
+                MAX_COMPONENTS, num_components
             )));
         }
 
