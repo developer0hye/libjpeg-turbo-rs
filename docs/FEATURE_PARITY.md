@@ -355,7 +355,7 @@
 - [x] AVX2 vertical blend for H2V2
 - [x] AVX2 merged H2V1 upsample + color convert
 - [x] AVX2 merged H2V2 upsample + color convert
-- [x] Row-streaming H2V2 upsample+color pipeline (fused, no full-plane alloc)
+- [x] Row-streaming H2V2 / H2V1 / H1V2 upsample+color pipeline (fused, no full-plane alloc)
 - [x] AVX2 color conversion for RGBA/BGR/BGRA formats (`avx2_ycbcr_to_rgba_row`, `avx2_ycbcr_to_bgr_row`, `avx2_ycbcr_to_bgra_row`)
 - [x] SSE2 IDCT DC-only fast path + strided output
 - [x] x86_64 encoder SIMD (AVX2 FDCT, RGB→YCbCr, quantization + zigzag)
