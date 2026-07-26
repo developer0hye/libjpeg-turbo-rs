@@ -143,15 +143,18 @@ let jpeg = Encoder::new(&pixels, width, height, PixelFormat::Rgb)
     .encode()?;
 ```
 
-Options handled by different internal paths can currently drop one another
-([#322](https://github.com/developer0hye/libjpeg-turbo-rs/issues/322)) — use
-`CompressParams` below when combining restart intervals with custom tables.
+Every builder option composes with every other, on every colorspace, including
+CMYK and `colorspace(Rgb)` ([#313](https://github.com/developer0hye/libjpeg-turbo-rs/issues/313),
+[#322](https://github.com/developer0hye/libjpeg-turbo-rs/issues/322),
+[#343](https://github.com/developer0hye/libjpeg-turbo-rs/issues/343)). One
+exception remains: `colorspace(Rgb)` takes precedence over `progressive` /
+`arithmetic`, which it does not implement yet ([#345](https://github.com/developer0hye/libjpeg-turbo-rs/issues/345)).
 
 ### Composing baseline options
 
-`Encoder` covers the common cases; `CompressParams` is the single-pass baseline
-core underneath it, and takes every option at once — except on CMYK input, where
-restart intervals and custom tables are still dropped ([#313](https://github.com/developer0hye/libjpeg-turbo-rs/issues/313)).
+`Encoder` covers the common cases; `CompressParams` is the baseline core
+underneath it, and takes every option at once — on every pixel format, CMYK
+included.
 
 ```rust
 use libjpeg_turbo_rs::encode::pipeline::{compress_with_params, CompressParams};
