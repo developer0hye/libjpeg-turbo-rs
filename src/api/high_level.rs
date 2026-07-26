@@ -13,6 +13,37 @@ pub fn decompress_to(data: &[u8], format: PixelFormat) -> Result<Image> {
     Decoder::decode_to(data, format)
 }
 
+/// Bytes required by [`decompress_into`] for this stream at `format`.
+///
+/// ```no_run
+/// # fn main() -> libjpeg_turbo_rs::Result<()> {
+/// # let jpeg: &[u8] = &[];
+/// let size = libjpeg_turbo_rs::output_buffer_size(jpeg, libjpeg_turbo_rs::PixelFormat::Rgb)?;
+/// let mut out = vec![0u8; size]; // caller-owned, reusable across frames
+/// let info = libjpeg_turbo_rs::decompress_into(jpeg, libjpeg_turbo_rs::PixelFormat::Rgb, &mut out)?;
+/// # let _ = info; Ok(()) }
+/// ```
+#[must_use = "the returned size is the whole point of this query"]
+pub fn output_buffer_size(data: &[u8], format: PixelFormat) -> Result<usize> {
+    let mut decoder = Decoder::new(data)?;
+    decoder.set_output_format(format);
+    decoder.output_buffer_size()
+}
+
+/// Decode into a caller-provided buffer (issue #354): no output-sized
+/// heap allocation on the standard decode paths, so frame loops can
+/// reuse one buffer. Errors with [`crate::JpegError::BufferTooSmall`]
+/// if `out` is shorter than [`output_buffer_size`].
+pub fn decompress_into(
+    data: &[u8],
+    format: PixelFormat,
+    out: &mut [u8],
+) -> Result<crate::decode::pipeline::ImageInfo> {
+    let mut decoder = Decoder::new(data)?;
+    decoder.set_output_format(format);
+    decoder.decode_image_into(out)
+}
+
 /// Decompress a JPEG in lenient mode — continue on errors, filling corrupt areas with gray.
 /// The returned Image may have non-empty `warnings` if errors were encountered.
 pub fn decompress_lenient(data: &[u8]) -> Result<Image> {

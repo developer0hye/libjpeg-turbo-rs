@@ -119,6 +119,13 @@ println!("{}x{}", img.width, img.height);
 
 // Decode to specific format
 let img = decompress_to(&jpeg_bytes, PixelFormat::Rgba)?;
+
+// Decode into a caller-owned, reusable buffer (no per-frame output allocation)
+use libjpeg_turbo_rs::{decompress_into, output_buffer_size};
+let size = output_buffer_size(&jpeg_bytes, PixelFormat::Rgb)?;
+let mut out = vec![0u8; size];
+let info = decompress_into(&jpeg_bytes, PixelFormat::Rgb, &mut out)?;
+println!("{}x{} ({} bytes)", info.width, info.height, info.bytes_written);
 ```
 
 ### Compress

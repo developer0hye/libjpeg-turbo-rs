@@ -180,6 +180,7 @@
 
 ### Output Format
 - [x] Output pixel format selection (`decompress_to`)
+- [x] Decode into caller-owned buffer (`decompress_into`, `output_buffer_size`, `Decoder::decode_image_into` — #354)
 - [x] Scaled IDCT — all 16 factors: 1/8 through 2/1 (`set_scale`)
 - [x] Crop decode (`decompress_cropped`, `set_crop_region`)
 - [x] `TJPARAM_BOTTOMUP` — Bottom-up row order (`ScanlineDecoder::set_bottom_up()`)
