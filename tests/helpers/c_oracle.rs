@@ -17,6 +17,14 @@
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::Mutex;
+
+/// Serializes builds within a process. Tests run concurrently and several will
+/// ask for the oracle at once; without this they race to compile into the same
+/// artifact directory, and the loser sees its staging file renamed out from
+/// under it. That failure surfaces as "no libjpeg install found", which is a
+/// thoroughly misleading way to say "you lost a race".
+static BUILD_LOCK: Mutex<()> = Mutex::new(());
 
 /// A libjpeg development install: headers plus a linkable library.
 struct LibjpegDevInstall {
@@ -94,6 +102,9 @@ pub fn cmyk_c_oracle() -> Option<PathBuf> {
 
     let artifact_dir: PathBuf = artifact_dir()?;
     let oracle: PathBuf = artifact_dir.join("cmyk_encode_c_oracle");
+    let _guard = BUILD_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
 
     let source: PathBuf = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("examples")
@@ -107,8 +118,9 @@ pub fn cmyk_c_oracle() -> Option<PathBuf> {
 
     let install: LibjpegDevInstall = find_libjpeg_dev()?;
 
-    // Build to a unique name and rename, so concurrent test binaries cannot
-    // observe a half-written executable.
+    // Build to a name unique across processes and rename, so a concurrently
+    // running test binary cannot observe a half-written executable or compile
+    // into the same staging path.
     let staging: PathBuf =
         artifact_dir.join(format!("cmyk_encode_c_oracle.{}.tmp", std::process::id()));
     let compiler: String = std::env::var("CC").unwrap_or_else(|_| "cc".to_string());
@@ -131,7 +143,11 @@ pub fn cmyk_c_oracle() -> Option<PathBuf> {
             String::from_utf8_lossy(&output.stderr)
         );
     }
-    std::fs::rename(&staging, &oracle).ok()?;
+    if std::fs::rename(&staging, &oracle).is_err() {
+        // Another test binary finished first and its build is equally valid.
+        let _ = std::fs::remove_file(&staging);
+        return oracle.exists().then_some(oracle);
+    }
     Some(oracle)
 }
 
