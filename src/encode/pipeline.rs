@@ -1278,24 +1278,80 @@ pub fn inject_saved_markers(base: &[u8], markers: &[SavedMarker]) -> Vec<u8> {
 /// the value list, before either is turned into an encoding table.
 type HuffmanTableSpec = ([u8; 17], Vec<u8>);
 
-/// Geometry of a CMYK scan: image and MCU-padded dimensions plus the sampling
-/// factors that components 0 and 3 carry.
-struct CmykLayout {
+/// A colorspace encoded plane-by-plane with no colour conversion: CMYK
+/// (`JCS_CMYK`) and RGB-direct (`JCS_RGB`).
+///
+/// Both write an Adobe APP14 and no JFIF, give every component the same
+/// quantization and Huffman slot, and name their components with ASCII
+/// initials (`jcparam.c:365-390`). They differ only in how many components
+/// there are and which of them carry the sampling factors, so they share one
+/// encoder rather than two copies of it — the copies are how #313's five
+/// dropped options and #343's six got there in the first place.
+struct DirectPlanarSpec {
+    /// Component IDs in scan order: `b"RGB"` or `b"CMYK"`.
+    component_ids: &'static [u8],
+    /// `(h, v)` sampling factors per component, in scan order.
+    sampling: Vec<(usize, usize)>,
+    /// ICC profile to emit as APP2 right after the Adobe marker.
+    icc_profile: Option<Vec<u8>>,
+}
+
+impl DirectPlanarSpec {
+    /// TurboJPEG's CMYK layout (`turbojpeg.c:418-427`): components 0 and 3
+    /// carry the sampling factors, 1 and 2 stay at 1x1.
+    fn cmyk(h_samp: usize, v_samp: usize) -> Self {
+        Self {
+            component_ids: b"CMYK",
+            sampling: vec![(h_samp, v_samp), (1, 1), (1, 1), (h_samp, v_samp)],
+            icc_profile: None,
+        }
+    }
+
+    /// `JCS_RGB` (`jcparam.c:365-370`): three components, all at 1x1.
+    /// Subsampling is not expressible — every component is already maximal.
+    fn rgb_direct(icc_profile: Option<&[u8]>) -> Self {
+        Self {
+            component_ids: b"RGB",
+            sampling: vec![(1, 1), (1, 1), (1, 1)],
+            icc_profile: icc_profile.map(<[u8]>::to_vec),
+        }
+    }
+
+    fn components(&self) -> usize {
+        self.component_ids.len()
+    }
+
+    fn max_sampling(&self) -> (usize, usize) {
+        self.sampling
+            .iter()
+            .fold((1, 1), |(h, v), &(ch, cv)| (h.max(ch), v.max(cv)))
+    }
+
+    /// How far component `index` is downsampled from the maximum, as the
+    /// `(h, v)` factor the block-gather helpers take.
+    fn downsample_factor(&self, index: usize) -> (usize, usize) {
+        let (max_h, max_v) = self.max_sampling();
+        let (h, v) = self.sampling[index];
+        (max_h / h, max_v / v)
+    }
+}
+
+/// Geometry of a direct-planar scan: image and MCU-padded dimensions plus the
+/// MCU grid derived from the maximum sampling factors.
+struct PlanarLayout {
     width: usize,
     height: usize,
     padded_width: usize,
     padded_height: usize,
-    h_samp: usize,
-    v_samp: usize,
     mcus_x: usize,
     mcus_y: usize,
     restart_interval: u16,
 }
 
-/// What [`scan_cmyk_blocks`] hands back to its caller, in scan order.
-enum CmykScanEvent<'a> {
+/// What [`scan_planar_blocks`] hands back to its caller, in scan order.
+enum PlanarScanEvent<'a> {
     /// An MCU boundary where the restart interval elapsed. DC predictors reset
-    /// for all four components; the single-pass caller also emits the marker.
+    /// for every component; the single-pass caller also emits the marker.
     Restart,
     /// One quantized, zigzagged block belonging to `component`.
     Block {
@@ -1304,37 +1360,37 @@ enum CmykScanEvent<'a> {
     },
 }
 
-/// Walk the CMYK MCU grid, producing every block in scan order.
+/// Walk the MCU grid, producing every block in scan order.
 ///
 /// Both the direct-write path and the optimized-Huffman path drive this one
 /// walk, so their block streams cannot drift: the statistics that pick the
 /// optimal tables are gathered from exactly the blocks that will be written
 /// with them. Getting that wrong is silent — the file still decodes, just with
 /// tables fitted to a slightly different distribution.
-fn scan_cmyk_blocks(
-    planes: &[Vec<u8>; 4],
-    halved_chroma: Option<&[Vec<u8>; 2]>,
-    layout: &CmykLayout,
+fn scan_planar_blocks(
+    planes: &[Vec<u8>],
+    smoothed_halved: &[Option<Vec<u8>>],
+    spec: &DirectPlanarSpec,
+    layout: &PlanarLayout,
     divisors: &QuantDivisors,
     fdct_quantize_fn: fn(&mut [i16; 64], &QuantDivisors, &mut [i16; 64]),
-    on_event: &mut dyn FnMut(CmykScanEvent),
+    on_event: &mut dyn FnMut(PlanarScanEvent),
 ) {
-    let CmykLayout {
+    let PlanarLayout {
         width,
         height,
         padded_width,
         padded_height,
-        h_samp,
-        v_samp,
         mcus_x,
         mcus_y,
         restart_interval,
     } = *layout;
-    let mcu_w: usize = h_samp * 8;
-    let mcu_h: usize = v_samp * 8;
+    let (max_h, max_v) = spec.max_sampling();
+    let mcu_w: usize = max_h * 8;
+    let mcu_h: usize = max_v * 8;
     let restart_mcu_interval: u32 = restart_interval as u32;
 
-    let mut prev_dc = [0i16; 4];
+    let mut prev_dc: Vec<i16> = vec![0i16; spec.components()];
     let mut mcu_count: u32 = 0;
 
     for mcu_row in 0..mcus_y {
@@ -1343,93 +1399,85 @@ fn scan_cmyk_blocks(
                 && mcu_count > 0
                 && mcu_count.is_multiple_of(restart_mcu_interval)
             {
-                prev_dc = [0i16; 4];
-                on_event(CmykScanEvent::Restart);
+                prev_dc.fill(0);
+                on_event(PlanarScanEvent::Restart);
             }
             mcu_count += 1;
             let x0: usize = mcu_col * mcu_w;
             let y0: usize = mcu_row * mcu_h;
 
-            // Components 0 (C) and 3 (K): h_samp * v_samp blocks each at full
-            // resolution, mirroring each other (turbojpeg.c:418-427).
-            //
-            // The dummy-block test uses the *original* dimensions while the
-            // reads use the padded plane: a block past the image edge is a
-            // dummy (`jccoefct.c:178-199`), but a block that merely straddles
-            // the edge must read the padding C generated, not a clamp.
-            macro_rules! emit_full_resolution_component {
-                ($component:expr) => {
-                    for dy in 0..v_samp {
-                        for dx in 0..h_samp {
-                            let coefficients: [i16; 64] = gather_block_or_dummy(
-                                &planes[$component],
-                                padded_width,
-                                padded_height,
-                                x0 + dx * 8,
-                                y0 + dy * 8,
-                                width,
-                                height,
-                                prev_dc[$component],
-                                divisors,
-                                fdct_quantize_fn,
-                            );
-                            prev_dc[$component] = coefficients[0];
-                            on_event(CmykScanEvent::Block {
-                                component: $component,
-                                coefficients: &coefficients,
+            for component in 0..spec.components() {
+                let (h_samp, v_samp) = spec.sampling[component];
+                let (h_factor, v_factor) = spec.downsample_factor(component);
+                // A component's blocks tile the MCU at its own resolution, so
+                // each covers `8 * factor` source samples.
+                let block_w: usize = 8 * h_factor;
+                let block_h: usize = 8 * v_factor;
+
+                for dy in 0..v_samp {
+                    for dx in 0..h_samp {
+                        let block_x: usize = x0 + dx * block_w;
+                        let block_y: usize = y0 + dy * block_h;
+
+                        // The dummy-block test uses the *original* dimensions
+                        // while the reads use the padded plane: a block past
+                        // the image edge is a dummy (`jccoefct.c:178-199`), but
+                        // one that merely straddles the edge is real and must
+                        // read the padding C generated, not a clamp.
+                        if block_x >= width || block_y >= height {
+                            let mut dummy = [0i16; 64];
+                            dummy[0] = prev_dc[component];
+                            on_event(PlanarScanEvent::Block {
+                                component,
+                                coefficients: &dummy,
                             });
+                            continue;
                         }
+
+                        let coefficients: [i16; 64] =
+                            if let Some(halved) = &smoothed_halved[component] {
+                                // Pre-smoothed at half resolution, so the block
+                                // is a plain gather at halved coordinates.
+                                gather_block(
+                                    halved,
+                                    padded_width / 2,
+                                    padded_height / 2,
+                                    block_x / 2,
+                                    block_y / 2,
+                                    divisors,
+                                    fdct_quantize_fn,
+                                )
+                            } else if h_factor == 1 && v_factor == 1 {
+                                gather_block(
+                                    &planes[component],
+                                    padded_width,
+                                    padded_height,
+                                    block_x,
+                                    block_y,
+                                    divisors,
+                                    fdct_quantize_fn,
+                                )
+                            } else {
+                                gather_downsampled_block(
+                                    &planes[component],
+                                    padded_width,
+                                    padded_height,
+                                    block_x,
+                                    block_y,
+                                    h_factor,
+                                    v_factor,
+                                    divisors,
+                                    fdct_quantize_fn,
+                                )
+                            };
+                        prev_dc[component] = coefficients[0];
+                        on_event(PlanarScanEvent::Block {
+                            component,
+                            coefficients: &coefficients,
+                        });
                     }
-                };
+                }
             }
-
-            emit_full_resolution_component!(0);
-
-            // Components 1 and 2 (M, Y): one block each per MCU. They are
-            // never dummies — their block count per MCU is 1, which is exactly
-            // `ceil(width / (8 * max_h))`, so the grid can never overrun them.
-            for component in [1usize, 2] {
-                let coefficients: [i16; 64] = if let Some(halved) = halved_chroma {
-                    gather_block(
-                        &halved[component - 1],
-                        padded_width / 2,
-                        padded_height / 2,
-                        x0 / 2,
-                        y0 / 2,
-                        divisors,
-                        fdct_quantize_fn,
-                    )
-                } else if h_samp == 1 && v_samp == 1 {
-                    gather_block(
-                        &planes[component],
-                        padded_width,
-                        padded_height,
-                        x0,
-                        y0,
-                        divisors,
-                        fdct_quantize_fn,
-                    )
-                } else {
-                    gather_downsampled_block(
-                        &planes[component],
-                        padded_width,
-                        padded_height,
-                        x0,
-                        y0,
-                        h_samp,
-                        v_samp,
-                        divisors,
-                        fdct_quantize_fn,
-                    )
-                };
-                prev_dc[component] = coefficients[0];
-                on_event(CmykScanEvent::Block {
-                    component,
-                    coefficients: &coefficients,
-                });
-            }
-
-            emit_full_resolution_component!(3);
         }
     }
 }
@@ -1445,24 +1493,8 @@ fn scan_cmyk_blocks(
 /// encoded directly. Matches the SOF subsamp inference path so
 /// `tj3DecompressHeader` reports the requested `TJSAMP_*` value back.
 fn compress_cmyk(params: &CompressParams<'_>) -> Result<Vec<u8>> {
-    let CompressParams {
-        pixels,
-        width,
-        height,
-        quality,
-        subsampling,
-        dct_method,
-        restart_interval,
-        custom_quant,
-        custom_dc_huffman,
-        custom_ac_huffman,
-        optimize_huffman,
-        smoothing_factor,
-        ..
-    } = *params;
-    let (h_samp_u8, v_samp_u8) = subsampling.sampling_factors();
-    let h_samp: usize = h_samp_u8 as usize;
-    let v_samp: usize = v_samp_u8 as usize;
+    let (h_samp_u8, v_samp_u8) = params.subsampling.sampling_factors();
+    let (h_samp, v_samp) = (h_samp_u8 as usize, v_samp_u8 as usize);
 
     // JPEG spec § B.2.3 caps an MCU at 10 blocks. CMYK applies the luma
     // sampling factors to comp 0 AND comp 3, so per-MCU block count is
@@ -1475,9 +1507,37 @@ fn compress_cmyk(params: &CompressParams<'_>) -> Result<Vec<u8>> {
         return Err(JpegError::Unsupported(format!(
             "CMYK with subsampling {:?} would emit {} blocks per MCU; JPEG spec § B.2.3 caps at 10. \
              Use a less aggressive subsampling for CMYK input.",
-            subsampling, blocks_per_mcu
+            params.subsampling, blocks_per_mcu
         )));
     }
+
+    compress_direct_planar(params, &DirectPlanarSpec::cmyk(h_samp, v_samp))
+}
+
+/// Encode a colorspace that is stored plane-by-plane with no colour
+/// conversion: CMYK (`JCS_CMYK`) or RGB-direct (`JCS_RGB`).
+///
+/// Every option in `params` applies. That is the whole point of this function
+/// existing: both colorspaces used to sit behind an early return into a
+/// narrower signature, and each dropped the options it could not express —
+/// five of them for CMYK (#313), six for RGB-direct (#343), all silently.
+fn compress_direct_planar(params: &CompressParams<'_>, spec: &DirectPlanarSpec) -> Result<Vec<u8>> {
+    let CompressParams {
+        pixels,
+        width,
+        height,
+        quality,
+        dct_method,
+        restart_interval,
+        custom_quant,
+        custom_dc_huffman,
+        custom_ac_huffman,
+        optimize_huffman,
+        smoothing_factor,
+        ..
+    } = *params;
+    let components: usize = spec.components();
+    let (max_h, max_v) = spec.max_sampling();
 
     let quant_table: [u16; 64] = match custom_quant.and_then(|tables| tables[0]) {
         Some(table) => table,
@@ -1490,8 +1550,8 @@ fn compress_cmyk(params: &CompressParams<'_>) -> Result<Vec<u8>> {
     };
 
     let ResolvedHuffman {
-        dc_luma: dc_table,
-        ac_luma: ac_table,
+        dc_luma: default_dc_table,
+        ac_luma: default_ac_table,
         dc_luma_bits,
         dc_luma_values,
         ac_luma_bits,
@@ -1499,120 +1559,80 @@ fn compress_cmyk(params: &CompressParams<'_>) -> Result<Vec<u8>> {
         ..
     } = ResolvedHuffman::resolve(custom_dc_huffman, custom_ac_huffman);
 
-    // De-interleave CMYK -> 4 planar buffers at full resolution. We do not
-    // pre-downsample the M and Y planes; the per-MCU `encode_downsampled_chroma_block`
-    // call handles that on the fly so the SIMD downsample helpers run.
-    let num_pixels = width * height;
-    let mut planes: [Vec<u8>; 4] = [
-        vec![0u8; num_pixels],
-        vec![0u8; num_pixels],
-        vec![0u8; num_pixels],
-        vec![0u8; num_pixels],
-    ];
-    for i in 0..num_pixels {
-        planes[0][i] = pixels[i * 4];
-        planes[1][i] = pixels[i * 4 + 1];
-        planes[2][i] = pixels[i * 4 + 2];
-        planes[3][i] = pixels[i * 4 + 3];
+    // De-interleave into one plane per component at full resolution. Sub-
+    // sampling happens per block during the scan so the SIMD downsample
+    // helpers run, except under smoothing where the filter needs the whole
+    // neighbourhood up front.
+    let num_pixels: usize = width * height;
+    let mut planes: Vec<Vec<u8>> = vec![vec![0u8; num_pixels]; components];
+    for pixel in 0..num_pixels {
+        for (component, plane) in planes.iter_mut().enumerate() {
+            plane[pixel] = pixels[pixel * components + component];
+        }
     }
 
-    // MCU dimensions in pixels: luma sampling factors * 8.
-    let mcu_w: usize = h_samp * 8;
-    let mcu_h: usize = v_samp * 8;
-    let mcus_x = width.div_ceil(mcu_w);
-    let mcus_y = height.div_ceil(mcu_h);
+    let mcu_w: usize = max_h * 8;
+    let mcu_h: usize = max_v * 8;
+    let mcus_x: usize = width.div_ceil(mcu_w);
+    let mcus_y: usize = height.div_ceil(mcu_h);
     let padded_w: usize = mcus_x * mcu_w;
     let padded_h: usize = mcus_y * mcu_h;
 
-    let chroma_at_maximum: bool = h_samp == 1 && v_samp == 1;
-    let chroma_halved: bool = h_samp == 2 && v_samp == 2;
-
     // Pad to the MCU grid the way C does (#340), rather than letting the
-    // per-block edge path clamp. Components 0 and 3 carry the sampling factors
-    // and so downsample 1:1 — their bottom padding is a plain last-row repeat.
-    // Components 1 and 2 are subsampled `v_samp` ways, so theirs repeats the
-    // last complete row group, which is a different thing whenever the height
-    // is a multiple of `v_samp` but not of the MCU height.
+    // per-block edge path clamp.
+    //
+    // C pads twice by different rules: the input side completes a row group
+    // (`jcprepct.c:171-178`), the output side fills the iMCU by repeating the
+    // last *downsampled* row (`:197-205`). Carried back to full resolution the
+    // second rule differs per component — one sampled at the maximum
+    // downsamples 1:1, so repeating its last output row is repeating its last
+    // input row, while one subsampled `v` ways means repeating the last
+    // complete group of `v` input rows. A single rule cannot serve both, and a
+    // plain clamp serves neither once `v > 1`.
+    //
+    // Smoothing changes this again: it needs context rows, which moves the
+    // whole prep controller onto `pre_process_context` (`jcprepct.c:220-299`),
+    // and that routine has no output-side padding at all — every component
+    // falls back to a plain last-row repeat, including the ones C declines to
+    // smooth. `need_context_rows` is pipeline-wide, not per component.
+    let smoothing_on: bool = smoothing_factor > 0;
     let pad_to_mcu_grid = |plane: &[u8], row_group_height: usize| {
         pad_plane_to_mcu_grid(plane, width, height, padded_w, padded_h, row_group_height)
     };
-
-    // Smoothing takes a different padding rule than the unsmoothed path, and
-    // the difference is the whole reason a naive implementation drifts from C.
-    //
-    // Without smoothing the downsampler is fed exactly the image rows, and the
-    // *output* is then padded to the iMCU height by repeating the last output
-    // row (`jcprepct.c:197-205`) — which at full resolution is the row-group
-    // repeat above. A smoothing downsampler needs context rows, so C switches
-    // to `pre_process_context` (`jcprepct.c:220-299`), and that routine has no
-    // output-side padding at all: it keeps padding the *input* with copies of
-    // the last real row and smoothing another row group until the iMCU row is
-    // full. So here every padded row is a plain repeat of the last image row,
-    // and the filter runs over all of them.
-    //
-    // Horizontally `expand_right_edge` repeats the last column, and the filter
-    // clamps at the final column, so the two agree and no special case is
-    // needed.
-    //
-    // Which components get smoothed follows `jcsample.c:506-553`, not the
-    // colorspace. Components 0 and 3 carry the sampling factors, so they are
-    // always at the maximum and always take `fullsize_smooth_downsample`.
-    // Components 1 and 2 sit at 1x1: at the maximum too when the image is 1x1
-    // sampled, exactly halved when it is 2x2 (`h2v2_smooth_downsample`), and
-    // anything else clears `smoothok` and falls back to the plain downsample
-    // with a JTRC_SMOOTH_NOTIMPL trace — which is what the unsmoothed path
-    // already does.
-    let smoothing_input = |plane: &[u8]| pad_to_mcu_grid(plane, 1);
     let smooth_full_size = |plane: &[u8]| {
         fullsize_smooth_plane(
-            &smoothing_input(plane),
-            padded_w,
-            padded_h,
-            smoothing_factor,
-        )
-    };
-    let smooth_halved = |plane: &[u8]| {
-        h2v2_smooth_downsample_plane(
-            &smoothing_input(plane),
+            &pad_to_mcu_grid(plane, 1),
             padded_w,
             padded_h,
             smoothing_factor,
         )
     };
 
-    let smoothing_on: bool = smoothing_factor > 0;
-    let smooth_halved_chroma: Option<[Vec<u8>; 2]> = if smoothing_on && chroma_halved {
-        Some([smooth_halved(&planes[1]), smooth_halved(&planes[2])])
-    } else {
-        None
-    };
-    let planes: [Vec<u8>; 4] = {
-        let [c_plane, m_plane, y_plane, k_plane] = &planes;
-        let full_resolution = |plane: &[u8]| {
-            if smoothing_on {
-                smooth_full_size(plane)
-            } else {
-                pad_to_mcu_grid(plane, 1)
-            }
-        };
-        let chroma = |plane: &[u8]| match (smoothing_on, chroma_at_maximum) {
+    // Which components get smoothed follows `jcsample.c:506-553`, not the
+    // colorspace: a component at the maximum takes `fullsize_smooth_downsample`,
+    // one halved in both axes takes `h2v2_smooth_downsample`, and any other
+    // ratio clears `smoothok` and falls back to the plain downsample with a
+    // JTRC_SMOOTH_NOTIMPL trace — which is what the unsmoothed path does.
+    let mut smoothed_halved: Vec<Option<Vec<u8>>> = vec![None; components];
+    let mut prepared: Vec<Vec<u8>> = Vec::with_capacity(components);
+    for (component, plane) in planes.iter().enumerate() {
+        let (h_factor, v_factor) = spec.downsample_factor(component);
+        let at_maximum: bool = h_factor == 1 && v_factor == 1;
+        if smoothing_on && h_factor == 2 && v_factor == 2 {
+            smoothed_halved[component] = Some(h2v2_smooth_downsample_plane(
+                &pad_to_mcu_grid(plane, 1),
+                padded_w,
+                padded_h,
+                smoothing_factor,
+            ));
+        }
+        prepared.push(match (smoothing_on, at_maximum) {
             (true, true) => smooth_full_size(plane),
-            // `need_context_rows` is a property of the whole prep controller,
-            // not of one component: switching smoothing on moves *every*
-            // component onto `pre_process_context` and its input-side padding,
-            // including the ones C declines to smooth. So M and Y take the
-            // plain last-row repeat here even though the filter never touches
-            // them.
             (true, false) => pad_to_mcu_grid(plane, 1),
-            (false, _) => pad_to_mcu_grid(plane, v_samp),
-        };
-        [
-            full_resolution(c_plane),
-            chroma(m_plane),
-            chroma(y_plane),
-            full_resolution(k_plane),
-        ]
-    };
+            (false, _) => pad_to_mcu_grid(plane, v_factor),
+        });
+    }
+    let planes: Vec<Vec<u8>> = prepared;
 
     let enc_simd = crate::simd::detect_encoder();
     let fdct_quantize_fn: fn(&mut [i16; 64], &QuantDivisors, &mut [i16; 64]) = match dct_method {
@@ -1620,36 +1640,36 @@ fn compress_cmyk(params: &CompressParams<'_>) -> Result<Vec<u8>> {
         DctMethod::IsFast => crate::simd::scalar::scalar_fdct_ifast_quantize,
         DctMethod::Float => crate::simd::scalar::scalar_fdct_float_quantize,
     };
-    let layout = CmykLayout {
+
+    let layout = PlanarLayout {
         width,
         height,
         padded_width: padded_w,
         padded_height: padded_h,
-        h_samp,
-        v_samp,
         mcus_x,
         mcus_y,
         restart_interval,
     };
 
     // Optimized Huffman runs the scan twice, as C's `optimize_coding` does
-    // (`jcmaster.c`): once to count symbols, once to emit them. Re-deriving the
-    // coefficients costs a second FDCT pass but keeps memory flat, which
-    // matters more here — a 4-component image buffers a third more blocks than
-    // a 3-component one.
+    // (`jcmaster.c`): once to count symbols, once to emit them. Re-deriving
+    // the coefficients costs a second FDCT pass but keeps memory flat, which
+    // matters more here — a four-component image buffers a third more blocks
+    // than a three-component one.
     let optimized_tables: Option<(HuffmanTableSpec, HuffmanTableSpec)> = if optimize_huffman {
         let mut dc_freq = [0u32; 257];
         let mut ac_freq = [0u32; 257];
-        let mut prev_dc = [0i16; 4];
-        scan_cmyk_blocks(
+        let mut prev_dc: Vec<i16> = vec![0i16; components];
+        scan_planar_blocks(
             &planes,
-            smooth_halved_chroma.as_ref(),
+            &smoothed_halved,
+            spec,
             &layout,
             &divisors,
             fdct_quantize_fn,
             &mut |event| match event {
-                CmykScanEvent::Restart => prev_dc = [0i16; 4],
-                CmykScanEvent::Block {
+                PlanarScanEvent::Restart => prev_dc.fill(0),
+                PlanarScanEvent::Block {
                     component,
                     coefficients,
                 } => {
@@ -1668,7 +1688,7 @@ fn compress_cmyk(params: &CompressParams<'_>) -> Result<Vec<u8>> {
         None
     };
 
-    // All four components share table slot 0 (`jcparam.c:383-390`), so there is
+    // Every component shares table slot 0 (`jcparam.c:365-390`), so there is
     // one DC and one AC table regardless of which mode produced them.
     let (dc_bits, dc_values, ac_bits, ac_values): (&[u8; 17], &[u8], &[u8; 17], &[u8]) =
         match &optimized_tables {
@@ -1684,31 +1704,32 @@ fn compress_cmyk(params: &CompressParams<'_>) -> Result<Vec<u8>> {
         };
     let dc_table: HuffTable = match &optimized_tables {
         Some(_) => build_huff_table(dc_bits, dc_values),
-        None => dc_table,
+        None => default_dc_table,
     };
     let ac_table: HuffTable = match &optimized_tables {
         Some(_) => build_huff_table(ac_bits, ac_values),
-        None => ac_table,
+        None => default_ac_table,
     };
 
     let mut bit_writer = BitWriter::new(width * height);
-    let mut prev_dc = [0i16; 4];
+    let mut prev_dc: Vec<i16> = vec![0i16; components];
     let mut restart_marker_index: u8 = 0;
-    scan_cmyk_blocks(
+    scan_planar_blocks(
         &planes,
-        smooth_halved_chroma.as_ref(),
+        &smoothed_halved,
+        spec,
         &layout,
         &divisors,
         fdct_quantize_fn,
         &mut |event| match event {
-            // All four components reset together at a restart, as C does.
-            CmykScanEvent::Restart => {
+            // Every component resets together at a restart, as C does.
+            PlanarScanEvent::Restart => {
                 bit_writer.flush_restart();
                 bit_writer.write_restart_marker(restart_marker_index);
                 restart_marker_index = restart_marker_index.wrapping_add(1);
-                prev_dc = [0i16; 4];
+                prev_dc.fill(0);
             }
-            CmykScanEvent::Block {
+            PlanarScanEvent::Block {
                 component,
                 coefficients,
             } => HuffmanEncoder::encode_block(
@@ -1728,26 +1749,38 @@ fn compress_cmyk(params: &CompressParams<'_>) -> Result<Vec<u8>> {
     marker_writer::write_soi(&mut output);
     // No JFIF APP0 (#339). `jpeg_set_colorspace` clears `write_JFIF_header` and
     // re-enables it only for JCS_GRAYSCALE and JCS_YCbCr (`jcparam.c:357-392`);
-    // for JCS_CMYK it sets `write_Adobe_marker` alone. JFIF is defined for
-    // grayscale and YCbCr only, so an APP0 on a CMYK stream asserts something
-    // untrue about the data — and cost 18 bytes in every CMYK file we wrote.
+    // JCS_CMYK and JCS_RGB set `write_Adobe_marker` alone. JFIF is defined for
+    // grayscale and YCbCr only, so an APP0 here asserts something untrue about
+    // the data — and cost 18 bytes in every CMYK file we wrote.
     marker_writer::write_app14_adobe(&mut output, 0);
+
+    // ICC profile immediately after APP14, matching C cjpeg's marker order.
+    if let Some(icc) = &spec.icc_profile {
+        marker_writer::write_app2_icc(&mut output, icc);
+    }
 
     marker_writer::write_dqt(&mut output, 0, &quant_table);
 
-    // Component IDs are the ASCII initials 'C', 'M', 'Y', 'K' (#339), matching
-    // `jcparam.c:383-390`. We used to write 1..4, which decoders tolerate but
-    // which is not what libjpeg emits.
-    //
-    // Sampling pattern matches turbojpeg.c:418-427: comp 0 and comp 3 take
-    // the luma sampling factors; comp 1 and comp 2 stay at (1, 1).
-    let components = vec![
-        (b'C', h_samp_u8, v_samp_u8, 0),
-        (b'M', 1, 1, 0),
-        (b'Y', 1, 1, 0),
-        (b'K', h_samp_u8, v_samp_u8, 0),
-    ];
-    marker_writer::write_sof0(&mut output, width as u16, height as u16, &components);
+    // Component IDs are the ASCII initials libjpeg writes (#339):
+    // 'C','M','Y','K' or 'R','G','B' (`jcparam.c:365-390`).
+    let sof_components: Vec<(u8, u8, u8, u8)> = spec
+        .component_ids
+        .iter()
+        .zip(spec.sampling.iter())
+        .map(|(&id, &(h, v))| (id, h as u8, v as u8, 0))
+        .collect();
+    // A quantization value above 255 needs 16-bit DQT entries, which baseline
+    // (SOF0) forbids, so those streams are extended sequential (SOF1) — what
+    // `cjpeg -rgb -quality 1` writes, warning "quantization tables are too
+    // coarse for baseline JPEG" as it does. Reachable through custom tables or
+    // a low quality with `force_baseline` off.
+    let needs_sof1: bool = quant_table.iter().any(|&value| value > 255);
+    let write_frame_header = if needs_sof1 {
+        marker_writer::write_sof1
+    } else {
+        marker_writer::write_sof0
+    };
+    write_frame_header(&mut output, width as u16, height as u16, &sof_components);
 
     marker_writer::write_dht(&mut output, 0, 0, dc_bits, dc_values);
     marker_writer::write_dht(&mut output, 1, 0, ac_bits, ac_values);
@@ -1757,7 +1790,11 @@ fn compress_cmyk(params: &CompressParams<'_>) -> Result<Vec<u8>> {
     }
 
     // SOS references the same IDs the SOF declared.
-    let scan_components = vec![(b'C', 0, 0), (b'M', 0, 0), (b'Y', 0, 0), (b'K', 0, 0)];
+    let scan_components: Vec<(u8, u8, u8)> = spec
+        .component_ids
+        .iter()
+        .map(|&id| (id, 0u8, 0u8))
+        .collect();
     marker_writer::write_sos(&mut output, &scan_components);
 
     output.extend_from_slice(bit_writer.data());
@@ -1772,107 +1809,63 @@ fn compress_cmyk(params: &CompressParams<'_>) -> Result<Vec<u8>> {
 /// Component IDs follow C libjpeg-turbo convention: R=82('R'), G=71('G'), B=66('B').
 /// All 3 components use 1x1 sampling and the same luminance quantization table.
 /// Produces Adobe APP14 marker with transform=0 (no JFIF APP0).
+///
+/// This signature carries only quality and the DCT method. Anything else the
+/// caller set — restart interval, custom tables, optimized Huffman, smoothing —
+/// has to reach [`compress_rgb_direct_with_params`], which is what `Encoder`
+/// uses. Routing through here instead is what made all six silently vanish
+/// (#343).
 pub fn compress_rgb_direct(
     pixels: &[u8],
     width: usize,
     height: usize,
     quality: u8,
-    _dct_method: DctMethod,
+    dct_method: DctMethod,
     icc_profile: Option<&[u8]>,
 ) -> Result<Vec<u8>> {
-    let quant_table =
-        tables::quality_scale_quant_table(&tables::STD_LUMINANCE_QUANT_TABLE, quality);
-    let divisors = scale_quant_for_fdct(&quant_table);
+    compress_rgb_direct_with_params(
+        &CompressParams::new(
+            pixels,
+            width,
+            height,
+            PixelFormat::Rgb,
+            quality,
+            Subsampling::S444,
+        )
+        .dct_method(dct_method),
+        icc_profile,
+    )
+}
 
-    let dc_table = build_huff_table(&tables::DC_LUMINANCE_BITS, &tables::DC_LUMINANCE_VALUES);
-    let ac_table = build_huff_table(&tables::AC_LUMINANCE_BITS, &tables::AC_LUMINANCE_VALUES);
-
-    // Extract 3 component planes from interleaved RGB
-    let num_pixels: usize = width * height;
-    let mut planes: [Vec<u8>; 3] = [
-        vec![0u8; num_pixels],
-        vec![0u8; num_pixels],
-        vec![0u8; num_pixels],
-    ];
-    for i in 0..num_pixels {
-        planes[0][i] = pixels[i * 3]; // R
-        planes[1][i] = pixels[i * 3 + 1]; // G
-        planes[2][i] = pixels[i * 3 + 2]; // B
+/// Compress RGB pixels as `JCS_RGB`, honouring every option in `params`.
+///
+/// `subsampling` is the one thing that cannot apply: `jpeg_set_colorspace`
+/// puts all three components at 1x1 (`jcparam.c:365-370`), so there is nothing
+/// to subsample. C is the same — `cjpeg -rgb -sample 2x2` writes 1x1.
+pub fn compress_rgb_direct_with_params(
+    params: &CompressParams<'_>,
+    icc_profile: Option<&[u8]>,
+) -> Result<Vec<u8>> {
+    if params.width == 0 || params.height == 0 {
+        return Err(JpegError::CorruptData(
+            "image dimensions must be non-zero".to_string(),
+        ));
+    }
+    if params.width > 65535 || params.height > 65535 {
+        return Err(JpegError::CorruptData(format!(
+            "JPEG dimensions must be <= 65535, got {}x{}",
+            params.width, params.height
+        )));
+    }
+    let expected_size: usize = params.width * params.height * 3;
+    if params.pixels.len() < expected_size {
+        return Err(JpegError::BufferTooSmall {
+            need: expected_size,
+            got: params.pixels.len(),
+        });
     }
 
-    let mcus_x: usize = width.div_ceil(8);
-    let mcus_y: usize = height.div_ceil(8);
-
-    let enc_simd = crate::simd::detect_encoder();
-    let mut bit_writer = BitWriter::new(width * height);
-    let mut prev_dc = [0i16; 3];
-
-    for mcu_row in 0..mcus_y {
-        for mcu_col in 0..mcus_x {
-            let x0: usize = mcu_col * 8;
-            let y0: usize = mcu_row * 8;
-            for c in 0..3 {
-                encode_single_block(
-                    &planes[c],
-                    width,
-                    height,
-                    x0,
-                    y0,
-                    &divisors,
-                    &dc_table,
-                    &ac_table,
-                    &mut bit_writer,
-                    &mut prev_dc[c],
-                    enc_simd.fdct_quantize,
-                );
-            }
-        }
-    }
-
-    bit_writer.flush();
-
-    let mut output: Vec<u8> = Vec::with_capacity(bit_writer.data().len() + 1024);
-
-    marker_writer::write_soi(&mut output);
-    // RGB: Adobe APP14 with transform=0, NO JFIF APP0
-    marker_writer::write_app14_adobe(&mut output, 0);
-
-    // ICC profile immediately after APP14 (matching C cjpeg marker order)
-    if let Some(icc) = icc_profile {
-        marker_writer::write_app2_icc(&mut output, icc);
-    }
-
-    // Single quant table for all 3 components
-    marker_writer::write_dqt(&mut output, 0, &quant_table);
-
-    // SOF0: component IDs = 'R'(82), 'G'(71), 'B'(66), all 1x1, qt=0
-    let components: Vec<(u8, u8, u8, u8)> = vec![(82, 1, 1, 0), (71, 1, 1, 0), (66, 1, 1, 0)];
-    marker_writer::write_sof0(&mut output, width as u16, height as u16, &components);
-
-    // Single pair of Huffman tables
-    marker_writer::write_dht(
-        &mut output,
-        0,
-        0,
-        &tables::DC_LUMINANCE_BITS,
-        &tables::DC_LUMINANCE_VALUES,
-    );
-    marker_writer::write_dht(
-        &mut output,
-        1,
-        0,
-        &tables::AC_LUMINANCE_BITS,
-        &tables::AC_LUMINANCE_VALUES,
-    );
-
-    // SOS: 3 components, all using table 0
-    let scan_components: Vec<(u8, u8, u8)> = vec![(82, 0, 0), (71, 0, 0), (66, 0, 0)];
-    marker_writer::write_sos(&mut output, &scan_components);
-
-    output.extend_from_slice(bit_writer.data());
-    marker_writer::write_eoi(&mut output);
-
-    Ok(output)
+    compress_direct_planar(params, &DirectPlanarSpec::rgb_direct(icc_profile))
 }
 
 /// Compress as lossless JPEG (SOF3).
