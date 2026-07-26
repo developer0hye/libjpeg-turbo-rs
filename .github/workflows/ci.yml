@@ -29,6 +29,42 @@ jobs:
           components: rustfmt
       - run: cargo fmt -- --check
 
+  # Mutation-tests only the lines this PR changed. Fast, because
+  # `--in-diff` restricts the mutant set to the diff rather than the 3807
+  # mutants `src/encode/pipeline.rs` carries in total.
+  #
+  # Non-blocking: a surviving mutant is sometimes an equivalent mutant, which
+  # is a judgement call rather than a defect. Failing the build on it would
+  # train people to ignore the job. The output is there to be read at review
+  # time — untested new code, flagged when it is cheap to fix (#325).
+  mutants-in-diff:
+    name: Mutation test (changed lines)
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Install cargo-mutants
+        run: cargo install cargo-mutants --locked
+      - name: Build the diff against the base branch
+        run: |
+          git diff "origin/${{ github.base_ref || 'main' }}"...HEAD > /tmp/pr.diff
+          wc -l /tmp/pr.diff
+      - name: Mutate only the changed lines
+        run: |
+          cargo mutants --in-diff /tmp/pr.diff -j 4 --timeout 300 \
+            --cargo-test-arg --test --cargo-test-arg encode_pipeline_golden \
+            --cargo-test-arg --test --cargo-test-arg encode_option_matrix \
+            --cargo-test-arg --test --cargo-test-arg encode_input_validation \
+            || true
+          echo "--- surviving mutants (review these) ---"
+          cat mutants.out/missed.txt 2>/dev/null || echo "(none)"
+        timeout-minutes: 30
+
   clippy:
     name: Clippy
     runs-on: ubuntu-latest
