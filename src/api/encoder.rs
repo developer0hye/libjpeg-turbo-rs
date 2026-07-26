@@ -722,18 +722,16 @@ impl<'a> Encoder<'a> {
 
         // RGB-direct encoding: bypass color conversion entirely.
         // Matches C cjpeg `-rgb` (JCS_RGB colorspace).
-        if self.colorspace_override == Some(ColorSpace::Rgb) && effective_format == PixelFormat::Rgb
-        {
-            let base = encoder::compress_rgb_direct(
-                effective_pixels,
-                self.width,
-                self.height,
-                quality,
-                self.dct_method,
-                self.icc_profile,
-            )?;
-            return Ok(base);
-        }
+        //
+        // This used to be an early `return` that forwarded pixels, dimensions,
+        // quality and the ICC profile and dropped everything else on the floor
+        // — restart interval, custom tables, optimized Huffman, smoothing, the
+        // DCT method, and the comment / EXIF / saved-marker injection below
+        // (#343). It is now a flag consumed by the first arm of the mode
+        // dispatch, which keeps its precedence while carrying the full option
+        // set.
+        let rgb_direct: bool = self.colorspace_override == Some(ColorSpace::Rgb)
+            && effective_format == PixelFormat::Rgb;
 
         // Route through compress_custom_quant whenever the builder may need
         // non-baseline (16-bit) quantization values. C cjpeg defaults to
@@ -825,7 +823,44 @@ impl<'a> Encoder<'a> {
             _ => 0,
         };
 
-        let base = if use_custom_sampling {
+        // One params value carrying every baseline option, instead of an if/else
+        // chain in which the first matching arm silently discarded whatever it
+        // could not express. That chain lost `restart_blocks` behind either
+        // table option, custom quant behind custom Huffman, and `dct_method`
+        // behind both — 29 masked interactions in all (#322) — and the
+        // RGB-direct arm lost all six (#343). The core decides internally
+        // whether the two-pass optimized path is needed.
+        let effective_quant_tables = self.build_quant_tables(quality);
+        let baseline_params = {
+            let mut params = encoder::CompressParams::new(
+                effective_pixels,
+                self.width,
+                self.height,
+                effective_format,
+                quality,
+                effective_subsampling,
+            )
+            .dct_method(self.dct_method)
+            .restart_interval(restart_interval)
+            .optimize_huffman(self.optimize_huffman)
+            .smoothing_factor(self.smoothing_factor);
+            if needs_custom_quant {
+                params = params.custom_quant(&effective_quant_tables);
+            }
+            if self.has_custom_huffman_tables() {
+                params = params.custom_huffman(&self.custom_huffman_dc, &self.custom_huffman_ac);
+            }
+            params
+        };
+
+        let base = if rgb_direct {
+            // Ahead of the mode switches, as the early return it replaces was:
+            // `colorspace(Rgb)` has always taken precedence over `progressive`
+            // / `arithmetic` / `lossless`, none of which JCS_RGB implements
+            // yet. What changes is that it no longer drops the baseline
+            // options on the way past.
+            encoder::compress_rgb_direct_with_params(&baseline_params, self.icc_profile)?
+        } else if use_custom_sampling {
             let factors: &Vec<(u8, u8)> = self.custom_sampling_factors.as_ref().unwrap();
             encoder::compress_custom_sampling(
                 effective_pixels,
@@ -911,37 +946,15 @@ impl<'a> Encoder<'a> {
                 )?
             }
         } else {
-            // One params value carrying every baseline option, instead of an
-            // if/else chain in which the first matching arm silently discarded
-            // whatever it could not express. That chain lost `restart_blocks`
-            // behind either table option, custom quant behind custom Huffman,
-            // and `dct_method` behind both — 29 masked interactions in all
-            // (#322). The core decides internally whether the two-pass
-            // optimized path is needed.
-            let effective_quant_tables = self.build_quant_tables(quality);
-            let mut params = encoder::CompressParams::new(
-                effective_pixels,
-                self.width,
-                self.height,
-                effective_format,
-                quality,
-                effective_subsampling,
-            )
-            .dct_method(self.dct_method)
-            .restart_interval(restart_interval)
-            .optimize_huffman(self.optimize_huffman)
-            .smoothing_factor(self.smoothing_factor);
-            if needs_custom_quant {
-                params = params.custom_quant(&effective_quant_tables);
-            }
-            if self.has_custom_huffman_tables() {
-                params = params.custom_huffman(&self.custom_huffman_dc, &self.custom_huffman_ac);
-            }
-            encoder::compress_with_params(&params)?
+            encoder::compress_with_params(&baseline_params)?
         };
 
-        let with_meta = if self.icc_profile.is_some() || self.exif_data.is_some() {
-            encoder::inject_metadata(&base, self.icc_profile, self.exif_data)?
+        // RGB-direct writes the ICC profile itself, right after the Adobe
+        // marker, to keep cjpeg's marker order; injecting it again here would
+        // emit two copies.
+        let icc_to_inject: Option<&[u8]> = if rgb_direct { None } else { self.icc_profile };
+        let with_meta = if icc_to_inject.is_some() || self.exif_data.is_some() {
+            encoder::inject_metadata(&base, icc_to_inject, self.exif_data)?
         } else {
             base
         };

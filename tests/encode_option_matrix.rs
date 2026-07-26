@@ -23,7 +23,7 @@
 //! fails, with a message to delete the entry. An exemption list that silently
 //! rots into a list of things that used to be broken is worse than no list.
 
-use libjpeg_turbo_rs::{Encoder, HuffmanTableDef, PixelFormat, Subsampling};
+use libjpeg_turbo_rs::{ColorSpace, Encoder, HuffmanTableDef, PixelFormat, Subsampling};
 use std::collections::BTreeSet;
 
 const WIDTH: usize = 48;
@@ -141,10 +141,18 @@ const OPTIONS: &[OptionSpec] = &[
     },
 ];
 
-const FORMATS: &[(&str, PixelFormat)] = &[
-    ("rgb", PixelFormat::Rgb),
-    ("gray", PixelFormat::Grayscale),
-    ("cmyk", PixelFormat::Cmyk),
+/// The (name, pixel format, colorspace override) triples the matrix sweeps.
+///
+/// The colorspace axis exists because #343 was invisible without it: the
+/// matrix swept `rgb`/`gray`/`cmyk` at the *default* colorspace and so never
+/// reached `colorspace(Rgb)`, where all six options were being dropped. A
+/// matrix is only as good as its axes, and an entry point reached by a
+/// configuration nobody sweeps is exactly where the next silent drop will be.
+const FORMATS: &[(&str, PixelFormat, Option<ColorSpace>)] = &[
+    ("rgb", PixelFormat::Rgb, None),
+    ("gray", PixelFormat::Grayscale, None),
+    ("cmyk", PixelFormat::Cmyk, None),
+    ("rgb-direct", PixelFormat::Rgb, Some(ColorSpace::Rgb)),
 ];
 
 /// Violations that exist today, each tied to the issue tracking it, or to
@@ -166,6 +174,13 @@ const FORMATS: &[(&str, PixelFormat)] = &[
 /// Format: `"<format>|<property>|<detail>"`. Enforced in both directions —
 /// see the module docs.
 const KNOWN_VIOLATIONS: &[(&str, &str)] = &[
+    // ---- real gaps, tracked ----
+    // `colorspace(Rgb)` takes precedence over the mode switches and the mode is
+    // discarded, so the caller gets a baseline stream and no error. C supports
+    // both with JCS_RGB. The precedence predates #343 and reversing it is a
+    // user-visible change, so it is filed rather than fixed in passing.
+    ("rgb-direct|effect|progressive", "#345"),
+    ("rgb-direct|effect|arithmetic", "#345"),
     // ---- by design: the combination is meaningless, not dropped ----
     // Optimized coding derives its own tables from the image's own symbol
     // statistics, so supplied tables cannot survive it. C does the same
@@ -174,6 +189,10 @@ const KNOWN_VIOLATIONS: &[(&str, &str)] = &[
     // never measured.
     (
         "cmyk|independence|huffman_tables after optimize_huffman",
+        "by-design",
+    ),
+    (
+        "rgb-direct|independence|huffman_tables after optimize_huffman",
         "by-design",
     ),
     (
@@ -221,11 +240,15 @@ const KNOWN_VIOLATIONS: &[(&str, &str)] = &[
 fn encode(
     pixels: &[u8],
     format: PixelFormat,
+    colorspace: Option<ColorSpace>,
     mutations: &[&OptionSpec],
 ) -> Result<Vec<u8>, String> {
     let mut encoder = Encoder::new(pixels, WIDTH, HEIGHT, format)
         .quality(75)
         .subsampling(Subsampling::S420);
+    if let Some(colorspace) = colorspace {
+        encoder = encoder.colorspace(colorspace);
+    }
     for mutation in mutations {
         encoder = (mutation.apply)(encoder);
     }
@@ -236,10 +259,10 @@ fn encode(
 fn collect_violations() -> BTreeSet<String> {
     let mut violations: BTreeSet<String> = BTreeSet::new();
 
-    for &(format_name, format) in FORMATS {
+    for &(format_name, format, colorspace) in FORMATS {
         let pixels: Vec<u8> = pixels_for(format);
 
-        let Ok(base) = encode(&pixels, format, &[]) else {
+        let Ok(base) = encode(&pixels, format, colorspace, &[]) else {
             // A format that cannot encode at all is out of scope here; other
             // suites cover that.
             continue;
@@ -248,7 +271,7 @@ fn collect_violations() -> BTreeSet<String> {
         // --- property: effect ---
         let mut single: Vec<(&OptionSpec, Option<Vec<u8>>)> = Vec::new();
         for option in OPTIONS {
-            match encode(&pixels, format, &[option]) {
+            match encode(&pixels, format, colorspace, &[option]) {
                 Ok(encoded) => {
                     if encoded == base {
                         violations.insert(format!("{format_name}|effect|{}", option.name));
@@ -275,8 +298,8 @@ fn collect_violations() -> BTreeSet<String> {
                     continue;
                 }
                 let (Ok(with_second), Ok(with_both)) = (
-                    encode(&pixels, format, &[second]),
-                    encode(&pixels, format, &[second, first]),
+                    encode(&pixels, format, colorspace, &[second]),
+                    encode(&pixels, format, colorspace, &[second, first]),
                 ) else {
                     continue;
                 };
