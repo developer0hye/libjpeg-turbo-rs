@@ -55,6 +55,9 @@ pub fn rdjpgcom_path() -> Option<PathBuf> {
 
 pub mod c_oracle;
 pub mod c_tools;
+// Re-exports are unused in test binaries that include `mod helpers`
+// without touching them; that's expected for a shared test module.
+#[allow(unused_imports)]
 pub use c_tools::{is_ci, require_c_tool};
 
 /// Require a C libjpeg-turbo tool inside a `#[test]` function.
