@@ -255,88 +255,12 @@ impl<'a> Decoder<'a> {
     /// reference a never-emitted slot in SOS (real-world C-decodable inputs
     /// found by `fuzz_decode_diff_c`), and standard JFIF inputs (a no-op
     /// because the per-slot fill below only writes `None` slots).
+    ///
+    /// The four Annex K tables are process-global (`std_huffman_tables`,
+    /// built once behind a `OnceLock`) and shared by `Arc` clone — filling
+    /// a slot is a refcount bump, not a 4 KB table build (issue #351).
     fn fill_default_huffman_tables(metadata: &mut JpegMetadata) {
-        use crate::common::huffman_table::HuffmanTable;
-
-        // Standard DC luminance (table 0)
-        #[rustfmt::skip]
-        const BITS_DC_LUM: [u8; 17] = [
-            0, 0, 1, 5, 1, 1, 1, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0
-        ];
-        #[rustfmt::skip]
-        const VALS_DC_LUM: [u8; 12] = [
-            0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11
-        ];
-
-        // Standard DC chrominance (table 1)
-        #[rustfmt::skip]
-        const BITS_DC_CHR: [u8; 17] = [
-            0, 0, 3, 1, 1, 1, 1, 1, 1, 1, 1, 1, 0, 0, 0, 0, 0
-        ];
-        #[rustfmt::skip]
-        const VALS_DC_CHR: [u8; 12] = [
-            0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11
-        ];
-
-        // Standard AC luminance (table 0)
-        #[rustfmt::skip]
-        const BITS_AC_LUM: [u8; 17] = [
-            0, 0, 2, 1, 3, 3, 2, 4, 3, 5, 5, 4, 4, 0, 0, 1, 0x7d
-        ];
-        #[rustfmt::skip]
-        const VALS_AC_LUM: [u8; 162] = [
-            0x01, 0x02, 0x03, 0x00, 0x04, 0x11, 0x05, 0x12,
-            0x21, 0x31, 0x41, 0x06, 0x13, 0x51, 0x61, 0x07,
-            0x22, 0x71, 0x14, 0x32, 0x81, 0x91, 0xa1, 0x08,
-            0x23, 0x42, 0xb1, 0xc1, 0x15, 0x52, 0xd1, 0xf0,
-            0x24, 0x33, 0x62, 0x72, 0x82, 0x09, 0x0a, 0x16,
-            0x17, 0x18, 0x19, 0x1a, 0x25, 0x26, 0x27, 0x28,
-            0x29, 0x2a, 0x34, 0x35, 0x36, 0x37, 0x38, 0x39,
-            0x3a, 0x43, 0x44, 0x45, 0x46, 0x47, 0x48, 0x49,
-            0x4a, 0x53, 0x54, 0x55, 0x56, 0x57, 0x58, 0x59,
-            0x5a, 0x63, 0x64, 0x65, 0x66, 0x67, 0x68, 0x69,
-            0x6a, 0x73, 0x74, 0x75, 0x76, 0x77, 0x78, 0x79,
-            0x7a, 0x83, 0x84, 0x85, 0x86, 0x87, 0x88, 0x89,
-            0x8a, 0x92, 0x93, 0x94, 0x95, 0x96, 0x97, 0x98,
-            0x99, 0x9a, 0xa2, 0xa3, 0xa4, 0xa5, 0xa6, 0xa7,
-            0xa8, 0xa9, 0xaa, 0xb2, 0xb3, 0xb4, 0xb5, 0xb6,
-            0xb7, 0xb8, 0xb9, 0xba, 0xc2, 0xc3, 0xc4, 0xc5,
-            0xc6, 0xc7, 0xc8, 0xc9, 0xca, 0xd2, 0xd3, 0xd4,
-            0xd5, 0xd6, 0xd7, 0xd8, 0xd9, 0xda, 0xe1, 0xe2,
-            0xe3, 0xe4, 0xe5, 0xe6, 0xe7, 0xe8, 0xe9, 0xea,
-            0xf1, 0xf2, 0xf3, 0xf4, 0xf5, 0xf6, 0xf7, 0xf8,
-            0xf9, 0xfa,
-        ];
-
-        // Standard AC chrominance (table 1)
-        #[rustfmt::skip]
-        const BITS_AC_CHR: [u8; 17] = [
-            0, 0, 2, 1, 2, 4, 4, 3, 4, 7, 5, 4, 4, 0, 1, 2, 0x77
-        ];
-        #[rustfmt::skip]
-        const VALS_AC_CHR: [u8; 162] = [
-            0x00, 0x01, 0x02, 0x03, 0x11, 0x04, 0x05, 0x21,
-            0x31, 0x06, 0x12, 0x41, 0x51, 0x07, 0x61, 0x71,
-            0x13, 0x22, 0x32, 0x81, 0x08, 0x14, 0x42, 0x91,
-            0xa1, 0xb1, 0xc1, 0x09, 0x23, 0x33, 0x52, 0xf0,
-            0x15, 0x62, 0x72, 0xd1, 0x0a, 0x16, 0x24, 0x34,
-            0xe1, 0x25, 0xf1, 0x17, 0x18, 0x19, 0x1a, 0x26,
-            0x27, 0x28, 0x29, 0x2a, 0x35, 0x36, 0x37, 0x38,
-            0x39, 0x3a, 0x43, 0x44, 0x45, 0x46, 0x47, 0x48,
-            0x49, 0x4a, 0x53, 0x54, 0x55, 0x56, 0x57, 0x58,
-            0x59, 0x5a, 0x63, 0x64, 0x65, 0x66, 0x67, 0x68,
-            0x69, 0x6a, 0x73, 0x74, 0x75, 0x76, 0x77, 0x78,
-            0x79, 0x7a, 0x82, 0x83, 0x84, 0x85, 0x86, 0x87,
-            0x88, 0x89, 0x8a, 0x92, 0x93, 0x94, 0x95, 0x96,
-            0x97, 0x98, 0x99, 0x9a, 0xa2, 0xa3, 0xa4, 0xa5,
-            0xa6, 0xa7, 0xa8, 0xa9, 0xaa, 0xb2, 0xb3, 0xb4,
-            0xb5, 0xb6, 0xb7, 0xb8, 0xb9, 0xba, 0xc2, 0xc3,
-            0xc4, 0xc5, 0xc6, 0xc7, 0xc8, 0xc9, 0xca, 0xd2,
-            0xd3, 0xd4, 0xd5, 0xd6, 0xd7, 0xd8, 0xd9, 0xda,
-            0xe2, 0xe3, 0xe4, 0xe5, 0xe6, 0xe7, 0xe8, 0xe9,
-            0xea, 0xf2, 0xf3, 0xf4, 0xf5, 0xf6, 0xf7, 0xf8,
-            0xf9, 0xfa,
-        ];
+        use crate::common::huffman_table::std_huffman_tables;
 
         // libjpeg-turbo only auto-fills standard tables for the
         // baseline (sequential Huffman) decoder via `jinit_huff_decoder`
@@ -351,45 +275,34 @@ impl<'a> Decoder<'a> {
             return;
         }
 
-        // Build the four standard tables once. Use them to fill missing
-        // slots in the *final metadata snapshot* (baseline single-scan
-        // path reads `metadata.dc_huffman_tables` directly) AND in each
-        // per-scan snapshot. The per-scan fill must use the standard
-        // table — never the final-metadata table — because a later DHT
-        // can redefine the same slot mid-stream (non-interleaved
-        // baseline emits one DHT per scan); copying a late definition
-        // back into an earlier scan silently alters the bytes that
-        // scan was supposed to decode against.
-        let std_dc_lum = HuffmanTable::build(&BITS_DC_LUM, &VALS_DC_LUM).ok();
-        let std_dc_chr = HuffmanTable::build(&BITS_DC_CHR, &VALS_DC_CHR).ok();
-        let std_ac_lum = HuffmanTable::build(&BITS_AC_LUM, &VALS_AC_LUM).ok();
-        let std_ac_chr = HuffmanTable::build(&BITS_AC_CHR, &VALS_AC_CHR).ok();
+        // Fill missing slots in the *final metadata snapshot* (baseline
+        // single-scan path reads `metadata.dc_huffman_tables` directly)
+        // AND in each per-scan snapshot. The per-scan fill must use the
+        // standard table — never the final-metadata table — because a
+        // later DHT can redefine the same slot mid-stream
+        // (non-interleaved baseline emits one DHT per scan); copying a
+        // late definition back into an earlier scan silently alters the
+        // bytes that scan was supposed to decode against.
+        let [std_dc_lum, std_dc_chr, std_ac_lum, std_ac_chr] = std_huffman_tables();
+        let std_dc = [std_dc_lum, std_dc_chr];
+        let std_ac = [std_ac_lum, std_ac_chr];
 
-        let std_dc = [std_dc_lum.as_ref(), std_dc_chr.as_ref()];
-        let std_ac = [std_ac_lum.as_ref(), std_ac_chr.as_ref()];
-
-        if metadata.dc_huffman_tables[0].is_none() {
-            metadata.dc_huffman_tables[0] = std_dc[0].cloned();
-        }
-        if metadata.dc_huffman_tables[1].is_none() {
-            metadata.dc_huffman_tables[1] = std_dc[1].cloned();
-        }
-        if metadata.ac_huffman_tables[0].is_none() {
-            metadata.ac_huffman_tables[0] = std_ac[0].cloned();
-        }
-        if metadata.ac_huffman_tables[1].is_none() {
-            metadata.ac_huffman_tables[1] = std_ac[1].cloned();
+        for i in 0..2 {
+            if metadata.dc_huffman_tables[i].is_none() {
+                metadata.dc_huffman_tables[i] = Some(std_dc[i].clone());
+            }
+            if metadata.ac_huffman_tables[i].is_none() {
+                metadata.ac_huffman_tables[i] = Some(std_ac[i].clone());
+            }
         }
 
         for scan in &mut metadata.scans {
-            for (i, std_tbl) in std_dc.iter().enumerate() {
+            for i in 0..2 {
                 if scan.dc_huffman_tables[i].is_none() {
-                    scan.dc_huffman_tables[i] = std_tbl.cloned();
+                    scan.dc_huffman_tables[i] = Some(std_dc[i].clone());
                 }
-            }
-            for (i, std_tbl) in std_ac.iter().enumerate() {
                 if scan.ac_huffman_tables[i].is_none() {
-                    scan.ac_huffman_tables[i] = std_tbl.cloned();
+                    scan.ac_huffman_tables[i] = Some(std_ac[i].clone());
                 }
             }
         }
@@ -929,25 +842,27 @@ impl<'a> Decoder<'a> {
     }
 
     /// Compute per-component block sizes for all components in a frame.
+    /// Returns a fixed-size array (frame components are capped at 4 by
+    /// `read_sof`); only the first `components.len()` entries are
+    /// meaningful. Fixed-size to keep small-image decode allocation-free
+    /// here (issue #351).
     fn compute_all_comp_block_sizes(
         min_block_size: usize,
         max_h: usize,
         max_v: usize,
         frame: &FrameHeader,
-    ) -> Vec<usize> {
-        frame
-            .components
-            .iter()
-            .map(|comp| {
-                Self::compute_comp_block_size(
-                    min_block_size,
-                    max_h,
-                    max_v,
-                    comp.horizontal_sampling as usize,
-                    comp.vertical_sampling as usize,
-                )
-            })
-            .collect()
+    ) -> [usize; 4] {
+        let mut sizes = [min_block_size; 4];
+        for (size, comp) in sizes.iter_mut().zip(frame.components.iter()) {
+            *size = Self::compute_comp_block_size(
+                min_block_size,
+                max_h,
+                max_v,
+                comp.horizontal_sampling as usize,
+                comp.vertical_sampling as usize,
+            );
+        }
+        sizes
     }
 
     #[inline(always)]
@@ -2852,11 +2767,11 @@ impl<'a> Decoder<'a> {
 
     /// Resolve a Huffman table by index, returning an error if missing.
     fn resolve_table<'t>(
-        tables: &'t [Option<HuffmanTable>; 4],
+        tables: &'t [Option<std::sync::Arc<HuffmanTable>>; 4],
         index: u8,
         kind: &str,
     ) -> Result<&'t HuffmanTable> {
-        tables[index as usize].as_ref().ok_or_else(|| {
+        tables[index as usize].as_deref().ok_or_else(|| {
             JpegError::CorruptData(format!("missing {} Huffman table {}", kind, index))
         })
     }
@@ -3603,7 +3518,7 @@ impl<'a> Decoder<'a> {
         let block_size = self.scale.block_size();
         // Per-component IDCT block sizes: chroma components may use a larger
         // IDCT to absorb subsampling factors (matches C libjpeg-turbo).
-        let comp_block_sizes: Vec<usize> =
+        let comp_block_sizes: [usize; 4] =
             Self::compute_all_comp_block_sizes(block_size, max_h, max_v, frame);
         let mcu_width = max_h * 8;
         let mcu_height = max_v * 8;
@@ -3623,11 +3538,13 @@ impl<'a> Decoder<'a> {
             return self.decode_lossless_image(frame, width, height, icc_profile, exif_data);
         }
 
-        // Pre-resolve quant tables per component (once, not per-block)
-        let quant_tables: Vec<&QuantTable> = frame
-            .components
-            .iter()
-            .map(|comp| {
+        // Pre-resolve quant tables per component (once, not per-block).
+        // Fixed-size backing array (≤ 4 components) — the slice passed
+        // downstream is length `num_components`, so the tail padding with
+        // the first table is never read.
+        let mut quant_table_refs: [Option<&QuantTable>; 4] = [None; 4];
+        for (slot, comp) in quant_table_refs.iter_mut().zip(frame.components.iter()) {
+            *slot = Some(
                 self.metadata.quant_tables[comp.quant_table_index as usize]
                     .as_ref()
                     .ok_or_else(|| {
@@ -3635,53 +3552,63 @@ impl<'a> Decoder<'a> {
                             "missing quant table {}",
                             comp.quant_table_index
                         ))
-                    })
-            })
-            .collect::<Result<Vec<_>>>()?;
+                    })?,
+            );
+        }
+        let first_quant: &QuantTable = quant_table_refs[0].ok_or_else(|| {
+            // Unreachable for streams parsed by read_sof (component count
+            // validated 1..=MAX_COMPONENTS), but the input is
+            // attacker-controlled — error, don't panic.
+            JpegError::CorruptData("frame has no components".into())
+        })?;
+        let quant_table_arr: [&QuantTable; 4] =
+            quant_table_refs.map(|slot| slot.unwrap_or(first_quant));
+        let quant_tables: &[&QuantTable] = &quant_table_arr[..num_components];
 
         // Decode component planes — different paths for baseline vs progressive vs arithmetic
-        let (component_planes, warnings) = if self.metadata.is_arithmetic && frame.is_progressive {
-            self.decode_arithmetic_progressive_planes(
-                frame,
-                &quant_tables,
-                num_components,
-                mcus_x,
-                mcus_y,
-                max_h,
-                max_v,
-                &comp_block_sizes,
-            )?
-        } else if self.metadata.is_arithmetic {
-            self.decode_arithmetic_planes(
-                frame,
-                &quant_tables,
-                num_components,
-                mcus_x,
-                mcus_y,
-                &comp_block_sizes,
-            )?
-        } else if frame.is_progressive {
-            self.decode_progressive_planes(
-                frame,
-                &quant_tables,
-                num_components,
-                mcus_x,
-                mcus_y,
-                max_h,
-                max_v,
-                &comp_block_sizes,
-                self.block_smoothing,
-            )?
-        } else {
-            self.decode_baseline_planes(
-                frame,
-                &quant_tables,
-                num_components,
-                mcus_x,
-                mcus_y,
-                &comp_block_sizes,
-            )?
-        };
+        let (mut component_planes, warnings) =
+            if self.metadata.is_arithmetic && frame.is_progressive {
+                self.decode_arithmetic_progressive_planes(
+                    frame,
+                    quant_tables,
+                    num_components,
+                    mcus_x,
+                    mcus_y,
+                    max_h,
+                    max_v,
+                    &comp_block_sizes,
+                )?
+            } else if self.metadata.is_arithmetic {
+                self.decode_arithmetic_planes(
+                    frame,
+                    quant_tables,
+                    num_components,
+                    mcus_x,
+                    mcus_y,
+                    &comp_block_sizes,
+                )?
+            } else if frame.is_progressive {
+                self.decode_progressive_planes(
+                    frame,
+                    quant_tables,
+                    num_components,
+                    mcus_x,
+                    mcus_y,
+                    max_h,
+                    max_v,
+                    &comp_block_sizes,
+                    self.block_smoothing,
+                )?
+            } else {
+                self.decode_baseline_planes(
+                    frame,
+                    quant_tables,
+                    num_components,
+                    mcus_x,
+                    mcus_y,
+                    &comp_block_sizes,
+                )?
+            };
 
         // Crop-aware output: when crop_x/crop_width are set, the output
         // narrows to the crop width. Matches C jpeg_crop_scanline behavior:
@@ -3713,23 +3640,20 @@ impl<'a> Decoder<'a> {
         // Per-component X offsets for horizontal crop.
         // scaled_crop_x is an offset into the full-width component planes,
         // NOT clamped to out_width (which is the crop width).
-        let comp_x_offsets: Vec<usize> = if let Some(cx) = scaled_crop_x {
-            frame
-                .components
-                .iter()
-                .enumerate()
-                .map(|(ci, comp)| {
-                    let comp_w: usize =
-                        mcus_x * comp.horizontal_sampling as usize * comp_block_sizes[ci];
-                    // Scaled IDCT can absorb subsampling by using a larger block
-                    // size for chroma components, so derive the crop offset from
-                    // the decoded plane width rather than sampling factors alone.
-                    (cx * comp_w / full_width).min(comp_w.saturating_sub(1))
-                })
-                .collect()
-        } else {
-            vec![0; num_components]
-        };
+        let mut comp_x_offsets: [usize; 4] = [0; 4];
+        if let Some(cx) = scaled_crop_x {
+            for (off, (ci, comp)) in comp_x_offsets
+                .iter_mut()
+                .zip(frame.components.iter().enumerate())
+            {
+                let comp_w: usize =
+                    mcus_x * comp.horizontal_sampling as usize * comp_block_sizes[ci];
+                // Scaled IDCT can absorb subsampling by using a larger block
+                // size for chroma components, so derive the crop offset from
+                // the decoded plane width rather than sampling factors alone.
+                *off = (cx * comp_w / full_width).min(comp_w.saturating_sub(1));
+            }
+        }
 
         // Handle output colorspace override (with crop offsets applied)
         if let Some(cs) = self.output_colorspace {
@@ -3796,13 +3720,24 @@ impl<'a> Decoder<'a> {
                 mcus_x * frame.components[0].horizontal_sampling as usize * comp_block_sizes[0];
 
             if out_format == PixelFormat::Grayscale {
-                let mut data = Vec::with_capacity(out_width * out_height);
-                for y in 0..out_height {
-                    let off: usize = comp_x_offsets[0];
-                    data.extend_from_slice(
-                        &component_planes[0][y * comp_w + off..y * comp_w + off + out_width],
-                    );
-                }
+                let off: usize = comp_x_offsets[0];
+                // When the decoded plane already has exactly the output
+                // geometry (MCU-aligned dimensions, no crop/scale slack),
+                // hand it over instead of row-copying into a fresh buffer.
+                let data = if off == 0
+                    && comp_w == out_width
+                    && component_planes[0].len() == comp_w * out_height
+                {
+                    std::mem::take(&mut component_planes[0])
+                } else {
+                    let mut data = Vec::with_capacity(out_width * out_height);
+                    for y in 0..out_height {
+                        data.extend_from_slice(
+                            &component_planes[0][y * comp_w + off..y * comp_w + off + out_width],
+                        );
+                    }
+                    data
+                };
                 Ok(Image {
                     width: out_width,
                     height: out_height,

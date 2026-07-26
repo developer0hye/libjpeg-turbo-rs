@@ -5,6 +5,8 @@
 //! - Body-only stream: full JPEG with DQT/DHT stripped
 //! - Inter-session table reuse via `TablesOnlyState`
 
+use std::sync::Arc;
+
 use crate::common::error::{JpegError, Result};
 use crate::common::huffman_table::HuffmanTable;
 use crate::common::quant_table::QuantTable;
@@ -197,9 +199,9 @@ pub struct TablesOnlyState {
     /// Quantization tables indexed 0-3 (in zigzag → natural order via `QuantTable`).
     pub(crate) quant_tables: [Option<QuantTable>; 4],
     /// DC Huffman tables indexed 0-3.
-    pub(crate) dc_huffman_tables: [Option<HuffmanTable>; 4],
+    pub(crate) dc_huffman_tables: [Option<Arc<HuffmanTable>>; 4],
     /// AC Huffman tables indexed 0-3.
-    pub(crate) ac_huffman_tables: [Option<HuffmanTable>; 4],
+    pub(crate) ac_huffman_tables: [Option<Arc<HuffmanTable>>; 4],
     /// Whether arithmetic coding conditioning tables were present.
     pub(crate) is_arithmetic: bool,
     /// DAC DC conditioning parameters (L, U) per slot (16 slots per spec F.2.4.3).
@@ -285,8 +287,8 @@ fn try_parse_tables_only(data: &[u8]) -> Result<Option<TablesOnlyState>> {
 
     let mut pos: usize = 2;
     let mut quant_tables: [Option<QuantTable>; 4] = [None, None, None, None];
-    let mut dc_huffman_tables: [Option<HuffmanTable>; 4] = [None, None, None, None];
-    let mut ac_huffman_tables: [Option<HuffmanTable>; 4] = [None, None, None, None];
+    let mut dc_huffman_tables: [Option<Arc<HuffmanTable>>; 4] = [None, None, None, None];
+    let mut ac_huffman_tables: [Option<Arc<HuffmanTable>>; 4] = [None, None, None, None];
     let mut is_arithmetic = false;
     let mut arith_dc_params: [(u8, u8); crate::decode::arithmetic::NUM_ARITH_TBLS] =
         [(0, 1); crate::decode::arithmetic::NUM_ARITH_TBLS];
@@ -425,8 +427,8 @@ fn parse_dqt(
 fn parse_dht(
     data: &[u8],
     pos: &mut usize,
-    dc_tables: &mut [Option<HuffmanTable>; 4],
-    ac_tables: &mut [Option<HuffmanTable>; 4],
+    dc_tables: &mut [Option<Arc<HuffmanTable>>; 4],
+    ac_tables: &mut [Option<Arc<HuffmanTable>>; 4],
 ) -> Result<()> {
     if *pos + 2 > data.len() {
         return Err(JpegError::UnexpectedEof);
@@ -461,10 +463,10 @@ fn parse_dht(
         if *pos + total > data.len() {
             return Err(JpegError::UnexpectedEof);
         }
-        let values = data[*pos..*pos + total].to_vec();
+        let values = &data[*pos..*pos + total];
         *pos += total;
 
-        let table = HuffmanTable::build(&bits, &values)?;
+        let table = Arc::new(HuffmanTable::build(&bits, values)?);
         if table_class == 0 {
             dc_tables[table_id] = Some(table);
         } else {

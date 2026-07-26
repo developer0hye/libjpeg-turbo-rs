@@ -434,12 +434,40 @@ unsafe extern "C" fn alloc_large_impl(
 /// # Safety
 /// Same contract as [`alloc_small_impl`]. Returned `JSAMPARRAY` is
 /// valid until the pool is freed.
+/// Bytes per sample for an `alloc_sarray` request, mirroring upstream
+/// `jmemmgr.c::alloc_sarray`: rows are `J16SAMPLE`/`J12SAMPLE` (2 bytes)
+/// when the consumer's `data_precision` exceeds 8, else `JSAMPLE`
+/// (1 byte). Stock 12-bit consumers (`j12init_write_ppm` → wrppm's
+/// `alloc_sarray`) write `samplesperrow * 2` bytes into each row, so
+/// sizing rows at 1 byte/sample is a heap overflow (caught by the
+/// stock-tool link gate on `monkey12.jpg` after #351 shifted heap
+/// layout; valgrind shows the same invalid writes on earlier commits).
+unsafe fn sarray_sample_size(cinfo: *mut c_void) -> usize {
+    if cinfo.is_null() {
+        return 1;
+    }
+    // Both public struct prefixes carry `is_decompressor` at offset 32
+    // (same dispatch as `jpeg_abort` / `jpeg_destroy` in jpeglib.rs).
+    let is_decompressor: CBoolean = unsafe { *(cinfo as *const u8).add(32).cast::<CBoolean>() };
+    let data_precision: c_int = if is_decompressor != 0 {
+        unsafe { (*(cinfo as *const crate::jpeglib::JpegDecompressPublic)).data_precision }
+    } else {
+        unsafe { (*(cinfo as *const crate::jpeglib::JpegCompressPublic)).data_precision }
+    };
+    if data_precision > 8 {
+        2
+    } else {
+        1
+    }
+}
+
 unsafe extern "C" fn alloc_sarray_impl(
     cinfo: *mut c_void,
     pool_id: c_int,
     samplesperrow: JDimension,
     numrows: JDimension,
 ) -> JSampArray {
+    let sample_size: usize = unsafe { sarray_sample_size(cinfo) };
     let pool: &mut MemPool = match unsafe { pool_from_cinfo(cinfo) } {
         Some(p) => p,
         None => return std::ptr::null_mut(),
@@ -449,7 +477,7 @@ unsafe extern "C" fn alloc_sarray_impl(
     }
     // Align row width up to `2*ALIGN_SIZE` so SIMD upsamplers can
     // overwrite the end of a row without trampling the next row.
-    let row_bytes: usize = align_up(samplesperrow as usize, 64);
+    let row_bytes: usize = align_up(samplesperrow as usize * sample_size, 64);
     let rows: usize = numrows as usize;
     let ptr_array_bytes: usize = rows * std::mem::size_of::<JSampRow>();
 
@@ -634,7 +662,8 @@ unsafe extern "C" fn realize_virt_arrays_impl(cinfo: *mut c_void) {
         // prefer the simpler correctness-first path; buffers big enough
         // to matter are bounded by image size anyway.
         if pre_zero != 0 && !buffer.is_null() {
-            let row_bytes: usize = align_up(samplesperrow as usize, 64);
+            let sample_size: usize = unsafe { sarray_sample_size(cinfo) };
+            let row_bytes: usize = align_up(samplesperrow as usize * sample_size, 64);
             for r in 0..numrows as usize {
                 // SAFETY: `buffer` has `numrows` rows; each row points
                 // to `row_bytes` contiguous bytes (allocated above).
