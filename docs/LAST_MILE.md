@@ -23,7 +23,7 @@ Phase 3 history: P3-1 / P3-2 / P3-3 / P3-4 / P3-5 / P3-6 all CLOSED. P3-2 closed
 
 | Check | Result |
 | --- | --- |
-| `cargo test --workspace --release` | **Passes** — 2339 tests, 0 failures, **0 ignored** (re-measured 2026-07-28 on macOS aarch64 while closing P4-57, which added the 5 `regression_issue_369_gray_argb_abgr` gates: channel placement, tj3 byte-equality, `decompress_into` identity — the workspace gate cannot be re-run on a Windows host, see P4-62). Every P4-39 (#313), P4-46 (#322) and P4-41 (#314 / #362) reproduction runs as a regression. |
+| `cargo test --workspace --release` | **Passes** — 2356 tests, 0 failures, **0 ignored** (re-measured 2026-07-28 on macOS aarch64 after the #382/#383/#384 closures landed their 16 regression gates on top of the P4-57 set — the workspace gate cannot be re-run on a Windows host, see P4-62). Every P4-39 (#313), P4-46 (#322) and P4-41 (#314 / #362) reproduction runs as a regression. |
 | `cargo test -p libjpeg-turbo-rs --test cross_product_transform` | **Passes** all 12 cases. P0-1 closed. |
 | `cargo test -p libjpeg-turbo-rs --test regression_progressive_4pixel_chroma_transform` | **Passes** 256 cases byte-exact vs `jpegtran -progressive -copy all <op>`. P3-4 closed. |
 | `cargo test --test cross_check_p3_6_nonstandard_rgb565` | **Passes** 4 fixtures: 3x2 decode (vs `djpeg`), 3x2 encode (vs `cjpeg -sample 3x2,1x1,1x1` + `djpeg`), 3x1 decode, RGB565 merged-upsample (vs `djpeg -nosmooth` + 5-6-5 truncate chain). P3-6 closed. |
