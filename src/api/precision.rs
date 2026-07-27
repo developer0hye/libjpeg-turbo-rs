@@ -1363,7 +1363,7 @@ fn undifference_row_16(
     // Callers validate `pt < precision` (issue #382, mirroring
     // jdlossls.c:247-261); clamp anyway so a future unvalidated caller
     // cannot reintroduce the debug shift-overflow panic — same defense as
-    // the 8-bit path in decode/lossless.rs (P4-38).
+    // `undifference_row` in decode/lossless.rs.
     let init_shift: i32 = (precision as i32)
         .saturating_sub(pt as i32)
         .saturating_sub(1)

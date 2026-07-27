@@ -256,12 +256,18 @@
 ### Fuzzing
 - [x] Fuzz decompress — `fuzz/fuzz_targets/fuzz_decompress.rs`
 - [x] Fuzz decompress lenient — `fuzz/fuzz_targets/fuzz_decompress_lenient.rs`
+- [x] Fuzz decompress precision (12/16-bit + arbitrary lossless, issue #382) — `fuzz/fuzz_targets/fuzz_decompress_precision.rs`
 - [x] Fuzz roundtrip — `fuzz/fuzz_targets/fuzz_roundtrip.rs`
+- [x] Fuzz encode roundtrip — `fuzz/fuzz_targets/fuzz_encode_roundtrip.rs`
 - [x] Fuzz coefficient reader — `fuzz/fuzz_targets/fuzz_read_coefficients.rs`
 - [x] Fuzz transform — `fuzz/fuzz_targets/fuzz_transform.rs`
+- [x] Fuzz transform options — `fuzz/fuzz_targets/fuzz_transform_options.rs`
 - [x] Fuzz progressive decoder — `fuzz/fuzz_targets/fuzz_progressive_decoder.rs`
+- [x] Differential decode vs djpeg — `fuzz/fuzz_targets/fuzz_decode_diff_c.rs`
+- [x] Differential encode vs cjpeg/djpeg — `fuzz/fuzz_targets/fuzz_encode_diff_c.rs`
+- [x] Differential transform vs jpegtran — `fuzz/fuzz_targets/fuzz_transform_diff_c.rs`
 - [x] Seed corpus generation — `tests/generate_fuzz_seeds.rs`
-- [ ] Continuous fuzzing (OSS-Fuzz integration) — not set up
+- [ ] Continuous fuzzing (OSS-Fuzz integration) — project files ready, upstream submission tracked in P2-H
 
 ---
 

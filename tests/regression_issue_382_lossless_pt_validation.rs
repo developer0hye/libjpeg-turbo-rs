@@ -6,9 +6,10 @@
 //! `jdlossls.c` start_pass requires `0 <= Al <= data_precision - 1`
 //! and raises `JERR_BAD_PROGRESSION` otherwise (jdlossls.c:247-261).
 //!
-//! The identical 8-bit defect was fixed under P4-38
-//! (`src/decode/lossless.rs` clamp); the high-precision twin in
-//! `src/api/precision.rs` never received it. Encode had the same gap:
+//! The identical 8-bit defect was clamped in `src/decode/lossless.rs`
+//! (`undifference_row`) by the 2026-04-21 fuzz-hardening pass
+//! (`cd98c21`); the high-precision twin in `src/api/precision.rs` never
+//! received it. Encode had the same gap:
 //! the precision variants only rejected `pt > 15`, so `pt >= precision`
 //! slipped through and produced streams C refuses to decode.
 
@@ -129,9 +130,40 @@ fn issue_382_c_djpeg_also_rejects_al_ge_precision() {
     );
 }
 
+/// The fuzz target this issue added (`fuzz_decompress_precision`) found a
+/// second overflow immediately: a corrupt DHT can map a code to any symbol
+/// value, and `decode_dc_wide`'s sign extension shifted by it
+/// (`-1i32 << category`), overflowing in debug for category >= 32. C
+/// rejects DC symbols above 16 when building the table
+/// (jdhuff.c:252-260, `JERR_BAD_HUFF_TABLE`).
+#[test]
+fn issue_382_dc_category_above_16_rejected() {
+    let mut stream: Vec<u8> = crafted_lossless_stream(12, 4);
+    // Patch the single DHT value byte (category 0 -> 200); it is the byte
+    // immediately before the SOS marker in the crafted skeleton.
+    let sos: usize = stream
+        .windows(2)
+        .position(|w| w == [0xFF, 0xDA])
+        .expect("SOS present");
+    assert_eq!(
+        stream[sos - 1],
+        0x00,
+        "fixture layout changed: expected the DHT value byte before SOS"
+    );
+    stream[sos - 1] = 200;
+    let result = decompress_lossless_arbitrary(&stream);
+    assert!(
+        result.is_err(),
+        "DC category 200 from a corrupt DHT must be a typed error, got Ok"
+    );
+}
+
 /// Issue #382 encode twin: the precision encode variants only rejected
 /// `pt > 15`, so `pt >= precision` slipped through and wrote streams C
-/// refuses (jclossls.c has the same `Al <= precision - 1` contract).
+/// refuses. C enforces the same `Al <= precision - 1` contract on the
+/// encode side too, in `jpeg_enable_lossless` (jcparam.c:580-589,
+/// `JERR_BAD_PROGRESSION`) and `validate_script` (jcmaster.c:390-399,
+/// `JERR_BAD_PROG_SCRIPT`).
 #[test]
 fn issue_382_encode_rejects_pt_ge_precision() {
     let pixels: Vec<u16> = vec![0u16; 16];
