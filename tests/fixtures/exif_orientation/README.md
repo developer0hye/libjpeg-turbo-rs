@@ -28,6 +28,10 @@ difference is the embedded Orientation value.  This lets
   (the Orientation tag must NOT alter decoded pixels — it is
   downstream display metadata only).
 
+`regression_issue_391_exif_orientation.rs` is a second consumer: it
+reads the same eight files to check that `Decoder::exif_orientation()`
+sees the value from the header parse alone, with no pixel decode.
+
 Generation script lives alongside this README's git history: the
 synthetic PPM source is a 16x8 red-to-blue gradient, encoded via
 `cjpeg -quality 90 -sample 1x1`, then post-processed to inject the
