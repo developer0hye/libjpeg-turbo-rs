@@ -305,6 +305,19 @@ impl Image {
 }
 
 /// JPEG decoder. Orchestrates the full decoding pipeline.
+///
+/// # Threading
+///
+/// `Decoder` is [`Send`] — a configured decoder can move to another
+/// thread (rayon, `tokio::task::spawn_blocking`) and decode there
+/// (issue #384). It is deliberately **not** [`Sync`]: in-decode state
+/// lives behind interior mutability (`RefCell`) and the installed
+/// callbacks are `Send`-only boxes, so one decoder serves one thread
+/// at a time — upstream libjpeg-turbo's per-`cinfo` rule. Our own C
+/// ABI shim is stricter still: a `cinfo` may not leave the thread that
+/// created it (`docs/ABI_COMPATIBILITY.md`, "Threading contract").
+/// Decode the same bytes concurrently by giving each thread its own
+/// `Decoder`; construction from `&[u8]` is cheap (header parse only).
 pub struct Decoder<'a> {
     metadata: JpegMetadata,
     raw_data: &'a [u8],
@@ -338,15 +351,19 @@ pub struct Decoder<'a> {
     pub(crate) merged_upsample: bool,
     /// Custom marker processor callbacks, keyed by marker code.
     #[allow(clippy::type_complexity)]
-    marker_processors: alloc::collections::BTreeMap<u8, Box<dyn Fn(&[u8]) -> Option<Vec<u8>>>>,
+    /// `+ Send` so the whole `Decoder` stays `Send` (issue #384):
+    /// installed callbacks must be movable with the decoder they live in.
+    marker_processors:
+        alloc::collections::BTreeMap<u8, Box<dyn Fn(&[u8]) -> Option<Vec<u8>> + Send>>,
     /// Optional RST-marker desync recovery strategy (A6-3, mirrors
     /// `jpeg_resync_to_restart`). `None` means the historical Rust
     /// behavior of unconditionally skipping past the RST.
     ///
     /// Uses `RefCell` because `decode_image(&self)` must mutate the
-    /// strategy through an immutable receiver.
+    /// strategy through an immutable receiver. `+ Send` on the box for
+    /// the same issue #384 reason as `marker_processors`.
     pub(crate) resync_strategy:
-        core::cell::RefCell<Option<Box<dyn crate::decode::resync::RestartResyncStrategy>>>,
+        core::cell::RefCell<Option<Box<dyn crate::decode::resync::RestartResyncStrategy + Send>>>,
 }
 
 impl<'a> Decoder<'a> {
@@ -597,6 +614,29 @@ impl<'a> Decoder<'a> {
         self.crop_width = Some(width);
     }
 
+    /// Set only the vertical crop range, leaving any horizontal crop
+    /// untouched. MCU rows fully outside the range skip IDCT during
+    /// decoding (issue #383: backs `StreamingDecoder::skip_scanlines`).
+    pub fn set_crop_y(&mut self, y: usize, height: usize) {
+        self.crop_y = Some(y);
+        self.crop_height = Some(height);
+    }
+
+    /// Rows a decode will actually emit: the scaled frame height, except
+    /// on the 12-bit and lossless paths, which bypass scaled decode (see
+    /// `output_buffer_size`). `crop_y`/`crop_height` are interpreted in
+    /// these output rows, matching C, where `jpeg_skip_scanlines`
+    /// validates against `cinfo->output_height` (jdapistd.c).
+    pub fn output_height(&self) -> usize {
+        let frame = self.header();
+        let h: usize = frame.height as usize;
+        if frame.precision != 12 && !frame.is_lossless {
+            self.scale.scale_dim(h)
+        } else {
+            h
+        }
+    }
+
     /// Set full crop region (horizontal + vertical).
     /// MCU rows outside the vertical range will skip IDCT during decoding.
     pub fn set_crop_region(&mut self, x: usize, y: usize, width: usize, height: usize) {
@@ -772,9 +812,13 @@ impl<'a> Decoder<'a> {
     }
 
     /// Register a custom marker processor callback for a specific marker type.
+    ///
+    /// The callback must be `Send`: the decoder itself is `Send`
+    /// (issue #384), so everything installed into it travels across
+    /// threads with it.
     pub fn set_marker_processor<F>(&mut self, marker_type: u8, processor: F)
     where
-        F: Fn(&[u8]) -> Option<Vec<u8>> + 'static,
+        F: Fn(&[u8]) -> Option<Vec<u8>> + Send + 'static,
     {
         let has_marker: bool = self
             .metadata
@@ -807,7 +851,7 @@ impl<'a> Decoder<'a> {
     /// RST marker it finds.
     pub fn set_resync_strategy<S>(&mut self, strategy: S)
     where
-        S: crate::decode::resync::RestartResyncStrategy + 'static,
+        S: crate::decode::resync::RestartResyncStrategy + Send + 'static,
     {
         *self.resync_strategy.borrow_mut() = Some(Box::new(strategy));
     }
@@ -820,7 +864,7 @@ impl<'a> Decoder<'a> {
     fn apply_resync(
         bit_reader: &mut crate::decode::bitstream::BitReader,
         expected_rst: &mut u8,
-        strategy: &mut Option<Box<dyn crate::decode::resync::RestartResyncStrategy>>,
+        strategy: &mut Option<Box<dyn crate::decode::resync::RestartResyncStrategy + Send>>,
     ) -> Result<()> {
         use crate::decode::resync::ResyncAction;
         let found: Option<u8> = bit_reader.reset_and_consume_rst();

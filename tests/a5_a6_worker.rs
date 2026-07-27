@@ -434,13 +434,16 @@ fn a6_2_reset_quant_tables_force_baseline_clamps_to_255() {
 use libjpeg_turbo_rs::decode::pipeline::Decoder;
 use libjpeg_turbo_rs::{RestartResyncStrategy, ResyncAction};
 
+// Arc + atomic rather than Rc + Cell: set_resync_strategy requires
+// `Send` since issue #384 made `Decoder: Send`.
 struct SkipStrategy {
-    desync_count: std::rc::Rc<std::cell::Cell<u32>>,
+    desync_count: std::sync::Arc<std::sync::atomic::AtomicU32>,
 }
 
 impl RestartResyncStrategy for SkipStrategy {
     fn on_desync(&mut self, _expected: u8, _found: Option<u8>) -> ResyncAction {
-        self.desync_count.set(self.desync_count.get() + 1);
+        self.desync_count
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         ResyncAction::Skip
     }
 }
@@ -566,7 +569,7 @@ fn a6_3_diagnostic_test_jpeg_has_rst_markers() {
 fn a6_3_skip_strategy_fires_on_rst_mismatch() {
     let jpeg = make_jpeg_with_corrupt_rst_number();
     let mut decoder = Decoder::new(&jpeg).expect("parse headers");
-    let desync_count = std::rc::Rc::new(std::cell::Cell::new(0));
+    let desync_count = std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0));
     let strategy = SkipStrategy {
         desync_count: desync_count.clone(),
     };
@@ -577,9 +580,9 @@ fn a6_3_skip_strategy_fires_on_rst_mismatch() {
     // — otherwise the hook is not wired.
     let _ = decoder.decode_image();
     assert!(
-        strategy_counter.get() >= 1,
+        strategy_counter.load(std::sync::atomic::Ordering::Relaxed) >= 1,
         "Skip strategy must observe at least one desync event, saw {}",
-        strategy_counter.get()
+        strategy_counter.load(std::sync::atomic::Ordering::Relaxed)
     );
 }
 
@@ -595,11 +598,11 @@ fn a6_3_continue_strategy_on_clean_stream_does_not_abort() {
     use libjpeg_turbo_rs::{Encoder, ResyncAction};
 
     struct ContinueStrategy {
-        seen: std::rc::Rc<std::cell::Cell<u32>>,
+        seen: std::sync::Arc<std::sync::atomic::AtomicU32>,
     }
     impl RestartResyncStrategy for ContinueStrategy {
         fn on_desync(&mut self, _e: u8, _f: Option<u8>) -> ResyncAction {
-            self.seen.set(self.seen.get() + 1);
+            self.seen.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             ResyncAction::Continue
         }
     }
@@ -626,7 +629,7 @@ fn a6_3_continue_strategy_on_clean_stream_does_not_abort() {
     }
 
     let mut decoder = Decoder::new(&jpeg).expect("parse headers");
-    let seen = std::rc::Rc::new(std::cell::Cell::new(0));
+    let seen = std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0));
     let strategy = ContinueStrategy { seen: seen.clone() };
     let counter = seen;
     decoder.set_resync_strategy(strategy);
@@ -634,7 +637,7 @@ fn a6_3_continue_strategy_on_clean_stream_does_not_abort() {
     // proceed. The decoder should not abort on this desync.
     let _ = decoder.decode_image();
     assert!(
-        counter.get() >= 1,
+        counter.load(std::sync::atomic::Ordering::Relaxed) >= 1,
         "Continue strategy must be consulted on RST mismatch"
     );
 }
