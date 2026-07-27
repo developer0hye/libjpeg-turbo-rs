@@ -171,6 +171,9 @@ enum RustOutcome {
     /// deliberately don't replicate in the raw `Image.data`, so the rasters
     /// aren't byte-comparable. This is NOT a drop-in regression — both
     /// decoders accepted the input — so the caller skips rather than panics.
+    /// Also used for deliberate, documented divergences (the #355
+    /// parse-time scan cap, recorded in P4-55) that must not be reported
+    /// as regressions.
     OutOfScopeFormat,
     /// Rust rejected the input outright (header parse or decode error).
     Rejected,
@@ -185,9 +188,18 @@ fn rust_decode(jpeg: &[u8]) -> RustOutcome {
     // regression" panics. The strict path is exercised by
     // `fuzz_decompress`; this target compares Rust's *drop-in*
     // behaviour against djpeg's *drop-in* behaviour.
-    let Ok(mut decoder) = Decoder::new(jpeg) else {
-        return RustOutcome::Rejected;
+    let decoder = match Decoder::new(jpeg) {
+        Ok(d) => d,
+        // Deliberate drop-in divergence (#355): the parse-time scan cap
+        // (8192) bounds ScanInfo buffering; C has no library-level cap
+        // and djpeg would accept such streams. Recorded in P4-55 —
+        // don't let the oracle report it as a regression.
+        Err(libjpeg_turbo_rs::JpegError::LimitExceeded { .. }) => {
+            return RustOutcome::OutOfScopeFormat;
+        }
+        Err(_) => return RustOutcome::Rejected,
     };
+    let mut decoder = decoder;
     decoder.set_lenient(true);
     // djpeg enables block smoothing by default for progressive images.
     // Keep the differential oracle aligned, especially for truncated
