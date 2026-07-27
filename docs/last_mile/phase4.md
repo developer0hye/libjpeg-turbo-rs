@@ -1046,6 +1046,13 @@ The one non-obvious piece was the **scan script**. `jpeg_simple_progression` tak
 
 **Acceptance criteria.** Peak RSS for a streaming baseline decode of the 8K fixture bounded by intermediates + a fixed input window (measured); slice-path throughput unchanged on the full matrix (recorded in `experiments/`); design reviewed against P4-26 before implementation.
 
+## P4-60. Scalar Kernels Are ~2.5x Slower Than C's Scalar Kernels — **OPEN**
+
+**Motivation.** The issue [#359](https://github.com/developer0hye/libjpeg-turbo-rs/issues/359) step-1 measurement (`experiments/riscv64_scalar_2026-07-27.md`, 2026-07-27) was run to decide whether a portable-SIMD fallback is warranted. It answered a different and more useful question: on `riscv64gc-unknown-linux-gnu`, where **neither** implementation has a vector path, C libjpeg-turbo's scalar decode beats ours by ~2.5–2.9x (640x480 4:2:0 and 1080p 4:2:0, process-startup-corrected). #359 had assumed scalar-on-RISC-V was "parity with C, not a regression against it" — measurement falsifies that.
+
+**Why it matters beyond RISC-V.** The same scalar kernels serve POWER, s390x, LoongArch, 32-bit ARM, any x86_64 without SSE2/AVX2, and — since #356 — every `no_std` build, which dispatches scalar unless `target_feature` is set at compile time. This is stable-Rust work with measured headroom, unlike the portable-SIMD half of #359 which stays blocked on `core::simd` stabilising.
+
+**Acceptance criteria.** Profile the scalar IDCT / fancy upsample / YCbCr→RGB against `jidctint.c` / `jdsample.c` / `jdcolor.c` and close the gap to ≤ 1.2x C on the RISC-V harness; byte-exactness vs `djpeg` preserved (the scalar path is the reference every SIMD kernel is checked against, so it must not drift); experiment recorded per `experiments/README.md`.
 ## P4-59. Extended XMP Writing Not Implemented — **OPEN**
 
 **Motivation.** #358 landed XMP/IPTC read (with Extended XMP reassembly) and single-segment write. Packets larger than one APP1 segment (65,504 payload bytes) error at encode time with `JpegError::Unsupported` rather than being split into `http://ns.adobe.com/xmp/extension/` chunks with a GUID + full-length + offset header and an `xmpNote:HasExtendedXMP` reference in the standard packet. Cameras and editors do emit such packets, so a read-modify-write round trip through our encoder currently fails on them instead of preserving the metadata.
