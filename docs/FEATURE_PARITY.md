@@ -181,6 +181,8 @@
 ### Output Format
 - [x] Configurable decoder resource limits (`DecodeLimits`, `Decoder::set_limits` — width/height/pixels/scans/memory, #355)
 - [x] Output pixel format selection (`decompress_to`)
+- [x] XMP metadata accessor with Extended XMP reassembly (`Image::xmp_data`, `Encoder::xmp_data` — #358)
+- [x] IPTC IIM accessor from the APP13 Photoshop IRB (`Image::iptc_data`, `Encoder::iptc_data` — #358)
 - [x] Decode into caller-owned buffer (`decompress_into`, `output_buffer_size`, `Decoder::decode_image_into` — #354)
 - [x] Scaled IDCT — all 16 factors: 1/8 through 2/1 (`set_scale`)
 - [x] Crop decode (`decompress_cropped`, `set_crop_region`)

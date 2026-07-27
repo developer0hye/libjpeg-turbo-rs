@@ -14,6 +14,17 @@ pub const DEFAULT_PARSE_SCAN_CAP: usize = 8_192;
 /// "Exif\0\0" identifier (6 bytes) in APP1 markers.
 const EXIF_HEADER: &[u8; 6] = b"Exif\0\0";
 
+/// Standard XMP packet identifier in APP1 markers (Adobe XMP Part 3).
+const XMP_HEADER: &[u8; 29] = b"http://ns.adobe.com/xap/1.0/\0";
+
+/// Extended XMP chunk identifier in APP1 markers. Each chunk carries a
+/// 32-byte GUID + u32 full length + u32 offset after this header.
+const XMP_EXT_HEADER: &[u8; 35] = b"http://ns.adobe.com/xmp/extension/\0";
+
+/// Photoshop 3.0 IRB identifier in APP13 markers (hosts IPTC IIM in
+/// resource 0x0404).
+const PHOTOSHOP_HEADER: &[u8; 14] = b"Photoshop 3.0\0";
+
 // JPEG marker codes
 const SOI: u8 = 0xD8;
 const EOI: u8 = 0xD9;
@@ -40,6 +51,16 @@ const DQT: u8 = 0xDB;
 const SOS: u8 = 0xDA;
 const DRI: u8 = 0xDD;
 const COM: u8 = 0xFE;
+
+/// One Extended XMP chunk (APP1 `http://ns.adobe.com/xmp/extension/`),
+/// reassembled into the full extension packet in offset order.
+#[derive(Debug, Clone)]
+struct XmpExtChunk {
+    guid: [u8; 32],
+    full_len: u32,
+    offset: u32,
+    data: Vec<u8>,
+}
 
 /// Per-scan info with Huffman table snapshot (needed because tables can be
 /// redefined between scans in progressive JPEG).
@@ -78,6 +99,11 @@ pub struct JpegMetadata {
     pub icc_chunks: Vec<IccChunk>,
     /// Raw EXIF TIFF data from the first APP1 marker (after "Exif\0\0" header).
     pub exif_data: Option<Vec<u8>>,
+    /// Raw XMP packet from APP1 (standard packet, with any Extended XMP
+    /// chunks reassembled in offset order and appended).
+    pub xmp_data: Option<Vec<u8>>,
+    /// Raw IPTC IIM payload from the APP13 Photoshop IRB (resource 0x0404).
+    pub iptc_data: Option<Vec<u8>>,
     /// COM marker text, if present.
     pub comment: Option<String>,
     /// True if a JFIF APP0 marker was observed (regardless of its
@@ -192,6 +218,9 @@ impl<'a> MarkerReader<'a> {
         let mut adobe_transform: u8 = 0;
         let mut icc_chunks: Vec<IccChunk> = Vec::new();
         let mut exif_data: Option<Vec<u8>> = None;
+        let mut xmp_data: Option<Vec<u8>> = None;
+        let mut xmp_ext_chunks: Vec<XmpExtChunk> = Vec::new();
+        let mut iptc_data: Option<Vec<u8>> = None;
         let mut is_arithmetic = false;
         let mut arith_dc_params: [(u8, u8); crate::decode::arithmetic::NUM_ARITH_TBLS] =
             [(0, 1); crate::decode::arithmetic::NUM_ARITH_TBLS];
@@ -384,7 +413,7 @@ impl<'a> MarkerReader<'a> {
                             });
                         }
                     }
-                    self.read_app1(&mut exif_data)?;
+                    self.read_app1(&mut exif_data, &mut xmp_data, &mut xmp_ext_chunks)?;
                 }
                 // APP2 (ICC profile) — parse for ICC profile chunks
                 0xE2 => {
@@ -398,6 +427,19 @@ impl<'a> MarkerReader<'a> {
                         }
                     }
                     self.read_app2(&mut icc_chunks)?;
+                }
+                // APP13 (Photoshop IRB) — parse for IPTC IIM
+                0xED => {
+                    if self.should_save_marker(0xED) {
+                        if let Some(mut raw) = self.peek_marker_data() {
+                            raw.truncate(self.marker_limit(0xED));
+                            saved_markers.push(SavedMarker {
+                                code: 0xED,
+                                data: raw,
+                            });
+                        }
+                    }
+                    self.read_app13(&mut iptc_data)?;
                 }
                 // APP14 (Adobe marker) — parse for color transform info
                 0xEE => {
@@ -473,6 +515,60 @@ impl<'a> MarkerReader<'a> {
         let first_scan = scans[0].header.clone();
         let first_offset = scans[0].data_offset;
 
+        // Reassemble Extended XMP (offset order, single GUID) and append
+        // to the standard packet. Malformed chunk geometry degrades to
+        // the standard packet alone rather than erroring — metadata must
+        // never fail an otherwise-valid decode.
+        if !xmp_ext_chunks.is_empty() {
+            if let Some(std_packet) = xmp_data.as_mut() {
+                const MAX_XMP_EXT: usize = 64 * 1024 * 1024;
+                let guid = xmp_ext_chunks[0].guid;
+                let full_len = xmp_ext_chunks[0].full_len as usize;
+                // Cap the extension buffer by BOTH the hard ceiling and
+                // the bytes actually present, so a tiny file declaring
+                // 64 MiB cannot make us reserve it (codex/review).
+                let available: usize = xmp_ext_chunks
+                    .iter()
+                    .filter(|c| c.guid == guid && c.full_len as usize == full_len)
+                    .map(|c| c.data.len())
+                    .sum();
+                if full_len > 0 && full_len <= MAX_XMP_EXT && available >= full_len {
+                    let mut ext = vec![0u8; full_len];
+                    let mut chunks: Vec<&XmpExtChunk> = xmp_ext_chunks
+                        .iter()
+                        .filter(|c| c.guid == guid && c.full_len as usize == full_len)
+                        .collect();
+                    chunks.sort_by_key(|c| c.offset);
+                    // Exact contiguity: summing lengths would let
+                    // overlapping chunks satisfy the coverage test while
+                    // leaving zero-filled holes — silent corruption an
+                    // attacker controls (review MEDIUM).
+                    let mut cursor: usize = 0;
+                    let mut valid = true;
+                    for c in chunks {
+                        let off = c.offset as usize;
+                        if off != cursor {
+                            valid = false;
+                            break;
+                        }
+                        let Some(end) = off.checked_add(c.data.len()) else {
+                            valid = false;
+                            break;
+                        };
+                        if end > full_len {
+                            valid = false;
+                            break;
+                        }
+                        ext[off..end].copy_from_slice(&c.data);
+                        cursor = end;
+                    }
+                    if valid && cursor == full_len {
+                        std_packet.extend_from_slice(&ext);
+                    }
+                }
+            }
+        }
+
         Ok(JpegMetadata {
             frame,
             scan: first_scan,
@@ -486,6 +582,8 @@ impl<'a> MarkerReader<'a> {
             adobe_transform,
             icc_chunks,
             exif_data,
+            xmp_data,
+            iptc_data,
             comment,
             saw_jfif_marker,
             jfif_major_version,
@@ -665,12 +763,22 @@ impl<'a> MarkerReader<'a> {
 
     /// Parse APP1 marker for EXIF data.
     /// Only the first EXIF APP1 is stored; subsequent ones are skipped.
-    fn read_app1(&mut self, exif_data: &mut Option<Vec<u8>>) -> Result<()> {
+    fn read_app1(
+        &mut self,
+        exif_data: &mut Option<Vec<u8>>,
+        xmp_data: &mut Option<Vec<u8>>,
+        xmp_ext_chunks: &mut Vec<XmpExtChunk>,
+    ) -> Result<()> {
         let length = self.read_u16_be()? as usize;
         if length < 2 {
             return Err(JpegError::CorruptData("APP1 segment length < 2".into()));
         }
         let end = self.pos + length - 2;
+        // Clamp the body upper bound to the buffer size: a truncated stream
+        // can declare a segment length that runs past EOF, and unguarded
+        // slicing would panic. `self.pos = end` past EOF is fine — the
+        // outer marker loop hits EOF on the next read.
+        let data_end = end.min(self.data.len());
 
         // "Exif\0\0" header is 6 bytes; only store first EXIF APP1
         if exif_data.is_none()
@@ -679,13 +787,93 @@ impl<'a> MarkerReader<'a> {
             && &self.data[self.pos..self.pos + 6] == EXIF_HEADER
         {
             let data_start = self.pos + 6;
-            // Clamp the body upper bound to the buffer size: a truncated stream
-            // can declare a segment length that runs past EOF, and unguarded
-            // slicing would panic. `self.pos = end` past EOF is fine — the
-            // outer marker loop hits EOF on the next read.
-            let data_end = end.min(self.data.len());
             let data_len = data_end.saturating_sub(data_start);
             *exif_data = Some(self.data[data_start..data_start + data_len].to_vec());
+        }
+
+        // Standard XMP packet (issue #358); only the first is stored,
+        // mirroring the EXIF rule above.
+        if xmp_data.is_none()
+            && self.pos + XMP_HEADER.len() <= data_end
+            && &self.data[self.pos..self.pos + XMP_HEADER.len()] == XMP_HEADER
+        {
+            let data_start = self.pos + XMP_HEADER.len();
+            *xmp_data = Some(self.data[data_start..data_end].to_vec());
+        }
+
+        // Extended XMP chunk: GUID (32 ASCII bytes) + full length (u32
+        // BE) + this chunk's offset (u32 BE), then payload bytes.
+        let ext_hdr = XMP_EXT_HEADER.len();
+        if self.pos + ext_hdr + 40 <= data_end
+            && &self.data[self.pos..self.pos + ext_hdr] == XMP_EXT_HEADER
+        {
+            let p = self.pos + ext_hdr;
+            let guid: [u8; 32] = self.data[p..p + 32].try_into().expect("32-byte slice");
+            let full_len = u32::from_be_bytes(self.data[p + 32..p + 36].try_into().unwrap());
+            let offset = u32::from_be_bytes(self.data[p + 36..p + 40].try_into().unwrap());
+            xmp_ext_chunks.push(XmpExtChunk {
+                guid,
+                full_len,
+                offset,
+                data: self.data[p + 40..data_end].to_vec(),
+            });
+        }
+
+        self.pos = end;
+        Ok(())
+    }
+
+    /// Parse APP13 (Photoshop 3.0 IRB) for the IPTC IIM payload
+    /// (resource 0x0404), walking `8BIM` resources with their even-byte
+    /// padding rules (issue #358). Only the first IPTC resource is kept.
+    fn read_app13(&mut self, iptc_data: &mut Option<Vec<u8>>) -> Result<()> {
+        let length = self.read_u16_be()? as usize;
+        if length < 2 {
+            return Err(JpegError::CorruptData("APP13 segment length < 2".into()));
+        }
+        let end = self.pos + length - 2;
+        let data_end = end.min(self.data.len());
+
+        let hdr = PHOTOSHOP_HEADER.len();
+        if self.pos + hdr <= data_end && &self.data[self.pos..self.pos + hdr] == PHOTOSHOP_HEADER {
+            let mut p = self.pos + hdr;
+            // Resource block: '8BIM' + u16 id + Pascal name (padded to
+            // even including the length byte) + u32 size + data (padded
+            // to even).
+            while data_end >= 12 && p <= data_end - 12 && &self.data[p..p + 4] == b"8BIM" {
+                let id = u16::from_be_bytes([self.data[p + 4], self.data[p + 5]]);
+                let name_len = self.data[p + 6] as usize;
+                // name storage = 1 length byte + name, padded to even.
+                let name_storage = 1 + name_len + (1 + name_len) % 2;
+                let Some(size_pos) = p.checked_add(6).and_then(|v| v.checked_add(name_storage))
+                else {
+                    break;
+                };
+                if data_end < 4 || size_pos > data_end - 4 {
+                    break;
+                }
+                let size = u32::from_be_bytes(self.data[size_pos..size_pos + 4].try_into().unwrap())
+                    as usize;
+                let payload = size_pos + 4;
+                if size > data_end.saturating_sub(payload) {
+                    break;
+                }
+                if id == 0x0404 && iptc_data.is_none() {
+                    *iptc_data = Some(self.data[payload..payload + size].to_vec());
+                }
+                // Advance past this resource. Checked, and forward
+                // progress is required so a malformed IRB cannot spin.
+                let Some(next) = payload
+                    .checked_add(size)
+                    .and_then(|v| v.checked_add(size % 2))
+                else {
+                    break;
+                };
+                if next <= p {
+                    break;
+                }
+                p = next;
+            }
         }
 
         self.pos = end;
@@ -1195,7 +1383,9 @@ mod tests {
         let mut exif: Option<Vec<u8>> = None;
         // The parse may report end-of-data later (since pos = end overshoots),
         // but it must not panic during the slice copy.
-        let _ = reader.read_app1(&mut exif);
+        let mut xmp: Option<Vec<u8>> = None;
+        let mut xmp_ext: Vec<XmpExtChunk> = Vec::new();
+        let _ = reader.read_app1(&mut exif, &mut xmp, &mut xmp_ext);
         // If the EXIF header was recognised, we must have grabbed only the
         // bytes that actually exist (no out-of-bounds slice).
         if let Some(body) = exif {

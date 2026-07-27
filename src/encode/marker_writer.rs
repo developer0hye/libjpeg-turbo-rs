@@ -377,6 +377,54 @@ pub fn write_app1_exif(buf: &mut Vec<u8>, tiff_data: &[u8]) {
     buf.extend_from_slice(tiff_data);
 }
 
+/// Write an APP1 XMP segment (`http://ns.adobe.com/xap/1.0/\0` + packet).
+///
+/// Only the standard packet is written; payloads too large for one
+/// segment (> 65,533 - 29 bytes) are rejected rather than silently
+/// truncated — Extended XMP writing is a separate feature (issue #358).
+pub fn write_app1_xmp(buf: &mut Vec<u8>, xmp_packet: &[u8]) -> bool {
+    const XMP_ID: &[u8] = b"http://ns.adobe.com/xap/1.0/\0";
+    let payload_len = XMP_ID.len() + xmp_packet.len();
+    if payload_len + 2 > 65_535 {
+        return false;
+    }
+    buf.push(0xFF);
+    buf.push(0xE1);
+    buf.extend_from_slice(&((payload_len + 2) as u16).to_be_bytes());
+    buf.extend_from_slice(XMP_ID);
+    buf.extend_from_slice(xmp_packet);
+    true
+}
+
+/// Write an APP13 Photoshop IRB carrying one IPTC IIM resource (0x0404).
+///
+/// Emits `Photoshop 3.0\0` + `8BIM` + id + empty Pascal name + size +
+/// payload, with the resource data padded to an even length per the IRB
+/// spec (issue #358). Returns false if the payload cannot fit one segment.
+pub fn write_app13_iptc(buf: &mut Vec<u8>, iptc: &[u8]) -> bool {
+    const PS_ID: &[u8] = b"Photoshop 3.0\0";
+    let pad: usize = iptc.len() % 2;
+    // PS_ID + "8BIM" + id(2) + name(2: len 0 + pad) + size(4) + data + pad
+    let payload_len = PS_ID.len() + 4 + 2 + 2 + 4 + iptc.len() + pad;
+    if payload_len + 2 > 65_535 {
+        return false;
+    }
+    buf.push(0xFF);
+    buf.push(0xED);
+    buf.extend_from_slice(&((payload_len + 2) as u16).to_be_bytes());
+    buf.extend_from_slice(PS_ID);
+    buf.extend_from_slice(b"8BIM");
+    buf.extend_from_slice(&0x0404u16.to_be_bytes());
+    buf.push(0); // empty Pascal name
+    buf.push(0); // pad to even
+    buf.extend_from_slice(&(iptc.len() as u32).to_be_bytes());
+    buf.extend_from_slice(iptc);
+    if pad == 1 {
+        buf.push(0);
+    }
+    true
+}
+
 /// Write APP2 ICC profile markers. Splits profile into chunks of max 65519 bytes.
 pub fn write_app2_icc(buf: &mut Vec<u8>, profile: &[u8]) {
     const ICC_OVERHEAD: usize = 14; // "ICC_PROFILE\0" + seq_no + num_markers

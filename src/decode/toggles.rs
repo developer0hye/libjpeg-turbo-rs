@@ -568,6 +568,8 @@ pub fn decode_with_colorspace_override(
     comp_block_sizes: &[usize],
     icc_profile: Option<Vec<u8>>,
     exif_data: Option<Vec<u8>>,
+    xmp_data: Option<Vec<u8>>,
+    iptc_data: Option<Vec<u8>>,
     comment: Option<String>,
     density: DensityInfo,
     saved_markers: Vec<SavedMarker>,
@@ -582,6 +584,8 @@ pub fn decode_with_colorspace_override(
                 data.extend_from_slice(&component_planes[0][y * cw..y * cw + out_width]);
             }
             Ok(Image {
+                xmp_data: xmp_data.clone(),
+                iptc_data: iptc_data.clone(),
                 width: out_width,
                 height: out_height,
                 pixel_format: PixelFormat::Grayscale,
@@ -621,6 +625,8 @@ pub fn decode_with_colorspace_override(
                 }
             }
             Ok(Image {
+                xmp_data: xmp_data.clone(),
+                iptc_data: iptc_data.clone(),
                 width: out_width,
                 height: out_height,
                 pixel_format: PixelFormat::Rgb,

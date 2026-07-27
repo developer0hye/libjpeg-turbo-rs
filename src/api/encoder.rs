@@ -45,6 +45,8 @@ pub struct Encoder<'a> {
     restart_interval: Option<RestartConfig>,
     icc_profile: Option<&'a [u8]>,
     exif_data: Option<&'a [u8]>,
+    xmp_data: Option<&'a [u8]>,
+    iptc_data: Option<&'a [u8]>,
     comment: Option<&'a str>,
     scan_script: Option<Vec<ScanScript>>,
     quality_factors: Option<[u8; 4]>,
@@ -104,6 +106,8 @@ impl<'a> Encoder<'a> {
             scan_script: None,
             icc_profile: None,
             exif_data: None,
+            xmp_data: None,
+            iptc_data: None,
             comment: None,
             custom_quant_tables: [None; 4],
             custom_huffman_dc: [None, None, None, None],
@@ -213,6 +217,20 @@ impl<'a> Encoder<'a> {
     /// Embed EXIF metadata (raw TIFF data).
     pub fn exif_data(mut self, data: &'a [u8]) -> Self {
         self.exif_data = Some(data);
+        self
+    }
+
+    /// Embed an XMP packet (APP1 `http://ns.adobe.com/xap/1.0/`).
+    /// Packets larger than one APP1 segment error at encode time —
+    /// Extended XMP writing is not implemented (issue #358).
+    pub fn xmp_data(mut self, data: &'a [u8]) -> Self {
+        self.xmp_data = Some(data);
+        self
+    }
+
+    /// Embed an IPTC IIM payload in an APP13 Photoshop IRB (0x0404).
+    pub fn iptc_data(mut self, data: &'a [u8]) -> Self {
+        self.iptc_data = Some(data);
         self
     }
 
@@ -975,8 +993,18 @@ impl<'a> Encoder<'a> {
         // marker, to keep cjpeg's marker order; injecting it again here would
         // emit two copies.
         let icc_to_inject: Option<&[u8]> = if rgb_direct { None } else { self.icc_profile };
-        let with_meta = if icc_to_inject.is_some() || self.exif_data.is_some() {
-            encoder::inject_metadata(&base, icc_to_inject, self.exif_data)?
+        let with_meta = if icc_to_inject.is_some()
+            || self.exif_data.is_some()
+            || self.xmp_data.is_some()
+            || self.iptc_data.is_some()
+        {
+            encoder::inject_metadata_full(
+                &base,
+                icc_to_inject,
+                self.exif_data,
+                self.xmp_data,
+                self.iptc_data,
+            )?
         } else {
             base
         };
