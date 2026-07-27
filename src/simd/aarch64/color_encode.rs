@@ -13,7 +13,7 @@
 //!   F_0_169 = 11059,  F_0_331 = 21709,  F_0_500 = 32768
 //!   F_0_419 = 27439,  F_0_081 = 5329
 
-use std::arch::aarch64::*;
+use core::arch::aarch64::*;
 
 /// Fixed-point constants packed for NEON lane-indexed multiply.
 /// Layout: [F_0_299, F_0_587, F_0_114, F_0_169, F_0_331, F_0_500, F_0_419, F_0_081]

@@ -2,6 +2,7 @@ pub mod abbreviated;
 pub mod coefficient;
 pub mod encoder;
 pub mod high_level;
+#[cfg(feature = "std")]
 pub mod image_io;
 pub mod precision;
 pub mod progressive_output;
@@ -11,6 +12,7 @@ pub mod raw_data;
 pub mod raw_data_12;
 pub mod raw_thumbnail;
 pub mod scanline;
+#[cfg(feature = "std")]
 pub mod stream;
 pub mod streaming;
 pub mod tj3;

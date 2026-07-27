@@ -1,3 +1,4 @@
+// libjpeg-turbo-rs: alloc prelude (no_std support, issue #356)
 /// Progressive buffered output / scan-by-scan decode.
 ///
 /// Matches libjpeg-turbo's `buffered_image` mode: `jpeg_has_multiple_scans()`,
@@ -15,6 +16,10 @@ use crate::decode::marker::{JpegMetadata, MarkerReader, ScanInfo};
 use crate::decode::pipeline::{upsample_generic_nearest, Image};
 use crate::decode::progressive;
 use crate::simd::{self, SimdRoutines};
+#[allow(unused_imports)]
+use alloc::vec::Vec;
+#[allow(unused_imports)]
+use alloc::{format, vec};
 
 /// Per-component layout info for progressive coefficient management.
 struct CompInfo {
@@ -349,12 +354,12 @@ impl ProgressiveDecoder {
 
         #[cfg(all(target_arch = "x86_64", feature = "simd"))]
         {
-            if is_x86_feature_detected!("avx2") {
+            if crate::cpu_has!("avx2") {
                 return crate::simd::x86_64::avx2_idct::avx2_idct_islow_strided(
                     coeffs, quant, output, stride,
                 );
             }
-            if is_x86_feature_detected!("sse2") {
+            if crate::cpu_has!("sse2") {
                 return crate::simd::x86_64::idct::sse2_idct_islow_strided(
                     coeffs, quant, output, stride,
                 );
@@ -366,7 +371,7 @@ impl ProgressiveDecoder {
             let mut tmp = [0u8; 64];
             (self.routines.idct_islow)(coeffs, quant, &mut tmp);
             for row in 0..8 {
-                std::ptr::copy_nonoverlapping(
+                core::ptr::copy_nonoverlapping(
                     tmp.as_ptr().add(row * 8),
                     output.add(row * stride),
                     8,
@@ -393,9 +398,9 @@ impl ProgressiveDecoder {
 
         // Clone Huffman table handles needed for this scan (Arc refcount
         // bumps — the tables themselves are shared, not copied).
-        let dc_tables: [Option<std::sync::Arc<crate::common::huffman_table::HuffmanTable>>; 4] =
+        let dc_tables: [Option<alloc::sync::Arc<crate::common::huffman_table::HuffmanTable>>; 4] =
             scan_info.dc_huffman_tables.clone();
-        let ac_tables: [Option<std::sync::Arc<crate::common::huffman_table::HuffmanTable>>; 4] =
+        let ac_tables: [Option<alloc::sync::Arc<crate::common::huffman_table::HuffmanTable>>; 4] =
             scan_info.ac_huffman_tables.clone();
 
         let entropy_data: &[u8] = &self.raw_data[data_offset..];

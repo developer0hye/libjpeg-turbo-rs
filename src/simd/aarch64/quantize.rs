@@ -6,7 +6,7 @@
 //! The quantization formula is: `output[i] = round(input[i] / quant[i])`
 //! with correct sign handling for negative coefficients.
 
-use std::arch::aarch64::*;
+use core::arch::aarch64::*;
 
 /// NEON-accelerated quantization: divide DCT coefficients by quantization table values.
 ///

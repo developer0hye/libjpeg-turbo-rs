@@ -1,3 +1,4 @@
+// libjpeg-turbo-rs: alloc prelude (no_std support, issue #356)
 /// YUV planar encode/decode API.
 ///
 /// Provides functions matching libjpeg-turbo's TurboJPEG YUV API:
@@ -15,6 +16,10 @@ use crate::common::error::{JpegError, Result};
 use crate::common::types::{PixelFormat, Subsampling};
 use crate::decode::color as decode_color;
 use crate::encode::color as encode_color;
+#[allow(unused_imports)]
+use alloc::{format, vec};
+#[allow(unused_imports)]
+use alloc::{string::ToString, vec::Vec};
 
 /// Returns whether the given pixel format is grayscale (single channel, no color).
 fn is_grayscale_format(pixel_format: PixelFormat) -> bool {

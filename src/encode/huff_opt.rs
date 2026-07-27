@@ -1,3 +1,8 @@
+// libjpeg-turbo-rs: alloc prelude (no_std support, issue #356)
+#[allow(unused_imports)]
+use alloc::vec::Vec;
+#[allow(unused_imports)]
+use alloc::{format, vec};
 /// Huffman optimization: symbol frequency gathering + optimal table generation.
 ///
 /// Implements JPEG Annex K.2 algorithm to build optimal Huffman tables

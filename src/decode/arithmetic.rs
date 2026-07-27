@@ -1,9 +1,14 @@
+// libjpeg-turbo-rs: alloc prelude (no_std support, issue #356)
 /// Arithmetic entropy decoder for JPEG (ITU-T T.81).
 ///
 /// Precise port of jdarith.c from libjpeg-turbo.
 use crate::common::arith_tables::*;
 use crate::common::error::{JpegError, Result};
 use crate::common::quant_table::ZIGZAG_ORDER;
+#[allow(unused_imports)]
+use alloc::vec::Vec;
+#[allow(unused_imports)]
+use alloc::{format, vec};
 
 #[derive(Clone, Copy)]
 enum StatRef {

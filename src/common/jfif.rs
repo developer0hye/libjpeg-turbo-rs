@@ -3,6 +3,9 @@
 //! Parses the JFIF APP0 marker in a JPEG byte stream to extract an embedded
 //! uncompressed RGB thumbnail, if present.
 
+// libjpeg-turbo-rs: alloc prelude (no_std support, issue #356)
+#[allow(unused_imports)]
+use alloc::vec::Vec;
 /// Extract JFIF thumbnail from JPEG data if present.
 ///
 /// Parses the first APP0 (JFIF) marker in the JPEG stream and extracts the

@@ -27,15 +27,19 @@ exclude = [
 ]
 
 [features]
-default = ["simd"]
+default = ["std", "simd"]
+# `std` (default): std::io streaming API, file-path helpers, runtime SIMD
+# feature detection, and std-backed error types. Disable for a
+# `no_std + alloc` core codec (issue #356).
+std = ["thiserror/std"]
 simd = []
 full-c-parity = []
 # Optional PNG support for tj3LoadImage8 / tj3SaveImage8. Off by default so
 # the codec crate stays small. Enable with --features png.
-png = ["dep:png"]
+png = ["dep:png", "std"]
 
 [dependencies]
-thiserror = "2"
+thiserror = { version = "2", default-features = false }
 png = { version = "0.17", optional = true }
 
 [dev-dependencies]

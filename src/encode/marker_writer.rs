@@ -1,7 +1,12 @@
+// libjpeg-turbo-rs: alloc prelude (no_std support, issue #356)
 /// JPEG marker writing for the encoder.
 ///
 /// Writes the required JFIF/JPEG markers to produce a valid baseline JPEG file.
 use crate::encode::tables::ZIGZAG_ORDER;
+#[allow(unused_imports)]
+use alloc::vec::Vec;
+#[allow(unused_imports)]
+use alloc::{format, vec};
 
 /// Write SOI (Start Of Image) marker: 0xFFD8.
 pub fn write_soi(buf: &mut Vec<u8>) {

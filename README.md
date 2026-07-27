@@ -108,6 +108,22 @@ SSE2-only `x86_64-v1` baseline and the encoder trails C by 5–10 pp at
 1080p; with them, Rust beats C in every encode benchmark in the
 Performance section above. aarch64 / NEON builds are unaffected.
 
+## Feature flags
+
+| flag | default | effect |
+|---|---|---|
+| `std` | ✅ | `std::io` streaming API (`decompress_from_reader`, `compress_to_writer`), file-path helpers, PNG image I/O, runtime CPU-feature detection, and `std::io::Error` interop. |
+| `simd` | ✅ | Architecture intrinsics: NEON (aarch64), SSE2/AVX2 (x86_64), SIMD128 (wasm32). |
+| `png` | ❌ | PNG support for `tj3LoadImage8` / `tj3SaveImage8` (implies `std`). |
+
+**`no_std` + `alloc`**: build with `--no-default-features` for the core
+codec — headers, entropy decode, IDCT, upsample, colour convert, and
+encode all work. `alloc` is required (the decoder allocates pixel and
+coefficient buffers). Without `std` there is no CPUID probe, so SIMD
+dispatches on compile-time `target_feature` only; pass `-C
+target-feature=+neon` (or equivalent) to vectorise a bare-metal build.
+CI builds the crate for `thumbv7em-none-eabihf` on every PR.
+
 ### Decompress
 
 ```rust

@@ -1,3 +1,4 @@
+// libjpeg-turbo-rs: alloc prelude (no_std support, issue #356)
 /// Full JPEG encoder pipeline.
 ///
 /// Orchestrates color conversion, forward DCT, quantization, Huffman encoding,
@@ -13,6 +14,10 @@ use crate::encode::marker_writer;
 use crate::encode::progressive::ProgressiveScan;
 use crate::encode::tables;
 use crate::simd::QuantDivisors;
+#[allow(unused_imports)]
+use alloc::{format, vec};
+#[allow(unused_imports)]
+use alloc::{string::ToString, vec::Vec};
 
 /// Resolves the luma/chroma quantization tables for a component pair.
 ///
@@ -44,11 +49,11 @@ fn resolve_quant_tables(
 fn may_use_islow_simd_kernel(
     fdct_quantize_fn: fn(&mut [i16; 64], &QuantDivisors, &mut [i16; 64]),
 ) -> bool {
-    let is_ifast: bool = std::ptr::eq(
+    let is_ifast: bool = core::ptr::eq(
         fdct_quantize_fn as *const (),
         crate::simd::scalar::scalar_fdct_ifast_quantize as *const (),
     );
-    let is_float: bool = std::ptr::eq(
+    let is_float: bool = core::ptr::eq(
         fdct_quantize_fn as *const (),
         crate::simd::scalar::scalar_fdct_float_quantize as *const (),
     );
@@ -70,7 +75,7 @@ fn select_rgba_to_ycbcr_fn() -> ColorConvertRowFn {
     }
     #[cfg(all(target_arch = "x86_64", feature = "simd"))]
     {
-        if is_x86_feature_detected!("avx2") {
+        if crate::cpu_has!("avx2") {
             return crate::simd::x86_64::avx2_color_encode::avx2_rgba_to_ycbcr_row;
         }
     }
@@ -90,7 +95,7 @@ fn select_bgr_to_ycbcr_fn() -> ColorConvertRowFn {
     }
     #[cfg(all(target_arch = "x86_64", feature = "simd"))]
     {
-        if is_x86_feature_detected!("avx2") {
+        if crate::cpu_has!("avx2") {
             return crate::simd::x86_64::avx2_color_encode::avx2_bgr_to_ycbcr_row;
         }
     }
@@ -110,7 +115,7 @@ fn select_bgra_to_ycbcr_fn() -> ColorConvertRowFn {
     }
     #[cfg(all(target_arch = "x86_64", feature = "simd"))]
     {
-        if is_x86_feature_detected!("avx2") {
+        if crate::cpu_has!("avx2") {
             return crate::simd::x86_64::avx2_color_encode::avx2_bgra_to_ycbcr_row;
         }
     }
@@ -508,7 +513,7 @@ pub fn compress_with_params(params: &CompressParams<'_>) -> Result<Vec<u8>> {
         // directly, while ifast/float carry divisors scaled for their own
         // transforms (#330).
         let use_avx2_420: bool = subsampling == Subsampling::S420
-            && is_x86_feature_detected!("avx2")
+            && crate::cpu_has!("avx2")
             && may_use_islow_simd_kernel(fdct_quantize_fn);
         #[cfg(target_arch = "x86_64")]
         let half_w: usize = padded_w / 2;
@@ -6055,7 +6060,7 @@ fn flss(val: u16) -> i32 {
 pub fn compute_reciprocal(divisor: u16) -> (u16, u16, u16, i16) {
     if divisor <= 1 {
         // scale=1 for the identity case (matches C: dtbl[DCTSIZE2*2] = 1)
-        return (1, 0, 1, -(std::mem::size_of::<i16>() as i16 * 8));
+        return (1, 0, 1, -(core::mem::size_of::<i16>() as i16 * 8));
     }
 
     let b: i32 = flss(divisor) - 1;
@@ -6413,7 +6418,7 @@ fn convert_to_ycbcr(
                 }
                 #[cfg(all(target_arch = "x86_64", feature = "simd"))]
                 {
-                    if is_x86_feature_detected!("avx2") {
+                    if crate::cpu_has!("avx2") {
                         crate::simd::x86_64::avx2_color_encode::avx2_rgba_to_ycbcr_row(
                             &pixels[src_offset..src_offset + width * bpp],
                             &mut y_plane[dst_offset..dst_offset + width],
@@ -6462,7 +6467,7 @@ fn convert_to_ycbcr(
                 }
                 #[cfg(all(target_arch = "x86_64", feature = "simd"))]
                 {
-                    if is_x86_feature_detected!("avx2") {
+                    if crate::cpu_has!("avx2") {
                         crate::simd::x86_64::avx2_color_encode::avx2_bgr_to_ycbcr_row(
                             &pixels[src_offset..src_offset + width * bpp],
                             &mut y_plane[dst_offset..dst_offset + width],
@@ -6511,7 +6516,7 @@ fn convert_to_ycbcr(
                 }
                 #[cfg(all(target_arch = "x86_64", feature = "simd"))]
                 {
-                    if is_x86_feature_detected!("avx2") {
+                    if crate::cpu_has!("avx2") {
                         crate::simd::x86_64::avx2_color_encode::avx2_bgra_to_ycbcr_row(
                             &pixels[src_offset..src_offset + width * bpp],
                             &mut y_plane[dst_offset..dst_offset + width],
@@ -6592,7 +6597,7 @@ fn extract_block(
         }
         #[cfg(target_arch = "x86_64")]
         {
-            if is_x86_feature_detected!("sse2") {
+            if crate::cpu_has!("sse2") {
                 // SAFETY: SSE2 availability checked above, interior block bounds verified.
                 unsafe {
                     extract_block_sse2(plane, plane_width, block_x, block_y, block);
@@ -6630,7 +6635,7 @@ fn extract_block_neon(
     block_y: usize,
     block: &mut [i16; 64],
 ) {
-    use std::arch::aarch64::*;
+    use core::arch::aarch64::*;
     unsafe {
         let level_shift: int16x8_t = vdupq_n_s16(128);
 
@@ -6739,7 +6744,7 @@ fn downsample_chroma_block(
             }
             #[cfg(target_arch = "x86_64")]
             {
-                if is_x86_feature_detected!("ssse3") {
+                if crate::cpu_has!("ssse3") {
                     if h_factor == 2 && v_factor == 2 {
                         // SAFETY: SSSE3 availability checked above, interior block bounds verified.
                         unsafe {
@@ -6833,7 +6838,7 @@ fn downsample_chroma_block_h2v2_neon(
     block_y: usize,
     block: &mut [i16; 64],
 ) {
-    use std::arch::aarch64::*;
+    use core::arch::aarch64::*;
     unsafe {
         // Rounding bias of 2 for divide-by-4 (matches scalar: (sum + 2) / 4)
         let bias: uint16x8_t = vreinterpretq_u16_u32(vdupq_n_u32(0x00020001));
@@ -6872,7 +6877,7 @@ fn downsample_chroma_block_h2v1_neon(
     block_y: usize,
     block: &mut [i16; 64],
 ) {
-    use std::arch::aarch64::*;
+    use core::arch::aarch64::*;
     unsafe {
         // Rounding bias of 1 for divide-by-2 (matches scalar: (sum + 1) / 2)
         let bias: uint16x8_t = vreinterpretq_u16_u32(vdupq_n_u32(0x00010000));
@@ -7226,7 +7231,7 @@ fn encode_single_block(
         }
         #[cfg(target_arch = "x86_64")]
         {
-            if is_x86_feature_detected!("avx2") {
+            if crate::cpu_has!("avx2") {
                 unsafe {
                     crate::simd::x86_64::avx2_extract_fdct_quantize(
                         plane.as_ptr().add(block_y * plane_width + block_x),
@@ -7284,7 +7289,7 @@ fn encode_single_block(
             }
             #[cfg(target_arch = "x86_64")]
             {
-                if is_x86_feature_detected!("avx2") {
+                if crate::cpu_has!("avx2") {
                     unsafe {
                         crate::simd::x86_64::avx2_extract_fdct_quantize(
                             local_buf.as_ptr(),
@@ -7981,7 +7986,7 @@ fn fdct_quantize_block(
 ) {
     if block_x + 8 <= plane_width
         && block_y + 8 <= plane_height
-        && is_x86_feature_detected!("avx2")
+        && crate::cpu_has!("avx2")
         && may_use_islow_simd_kernel(fdct_quantize_fn)
     {
         unsafe {
@@ -8022,7 +8027,7 @@ fn fdct_quantize_chroma_h2v1(
     // Fused path: downsample + FDCT + quantize in one pass (AVX2)
     if block_x + 16 <= plane_width
         && block_y + 8 <= plane_height
-        && is_x86_feature_detected!("avx2")
+        && crate::cpu_has!("avx2")
         && may_use_islow_simd_kernel(fdct_quantize_fn)
     {
         unsafe {
@@ -8038,7 +8043,7 @@ fn fdct_quantize_chroma_h2v1(
     // Separate downsample + FDCT (SSSE3 downsample only)
     if block_x + 16 <= plane_width
         && block_y + 8 <= plane_height
-        && is_x86_feature_detected!("ssse3")
+        && crate::cpu_has!("ssse3")
         && may_use_islow_simd_kernel(fdct_quantize_fn)
     {
         let mut block = [0i16; 64];
@@ -8090,8 +8095,7 @@ fn encode_mcu_444_x86_64(
     let mut q: [[i16; 64]; 3] = [[0i16; 64]; 3];
     // The AVX2 kernels below are islow-only; ifast/float carry divisors
     // scaled for their own transforms (#330).
-    let has_avx2: bool =
-        is_x86_feature_detected!("avx2") && may_use_islow_simd_kernel(fdct_quantize_fn);
+    let has_avx2: bool = crate::cpu_has!("avx2") && may_use_islow_simd_kernel(fdct_quantize_fn);
     let interior: bool = x0 + 8 <= width && y0 + 8 <= height;
 
     if interior && has_avx2 {
@@ -8209,8 +8213,7 @@ fn encode_mcu_422_x86_64(
     let mut q: [[i16; 64]; 4] = [[0i16; 64]; 4];
     // The AVX2 kernels below are islow-only; ifast/float carry divisors
     // scaled for their own transforms (#330).
-    let has_avx2: bool =
-        is_x86_feature_detected!("avx2") && may_use_islow_simd_kernel(fdct_quantize_fn);
+    let has_avx2: bool = crate::cpu_has!("avx2") && may_use_islow_simd_kernel(fdct_quantize_fn);
     // Interior check: 2 Y blocks (16 wide) + H2V1 chroma (16 wide, 8 tall)
     let interior: bool = x0 + 16 <= width && y0 + 8 <= height;
 
@@ -8354,8 +8357,7 @@ fn encode_mcu_420_x86_64(
     let mut q: [[i16; 64]; 6] = [[0i16; 64]; 6];
     // The AVX2 kernels below are islow-only; ifast/float carry divisors
     // scaled for their own transforms (#330).
-    let has_avx2: bool =
-        is_x86_feature_detected!("avx2") && may_use_islow_simd_kernel(fdct_quantize_fn);
+    let has_avx2: bool = crate::cpu_has!("avx2") && may_use_islow_simd_kernel(fdct_quantize_fn);
 
     // Check if all 4 Y blocks and both chroma blocks are interior (common case).
     // For 1080p with 16x16 MCUs, only edge MCUs fail this check.
@@ -8522,8 +8524,7 @@ fn encode_mcu_420_half_chroma(
     let mut q: [[i16; 64]; 6] = [[0i16; 64]; 6];
     // The AVX2 kernels below are islow-only; ifast/float carry divisors
     // scaled for their own transforms (#330).
-    let has_avx2: bool =
-        is_x86_feature_detected!("avx2") && may_use_islow_simd_kernel(fdct_quantize_fn);
+    let has_avx2: bool = crate::cpu_has!("avx2") && may_use_islow_simd_kernel(fdct_quantize_fn);
 
     // Check if all blocks are interior (common case for non-edge MCUs)
     let y_interior: bool = y_x0 + 16 <= y_stride && y_y0 + 16 <= 16;
@@ -8713,7 +8714,7 @@ fn encode_downsampled_chroma_block(
     if use_fused_simd {
         let src_w: usize = 8 * h_factor;
         let src_h: usize = 8 * v_factor;
-        if is_x86_feature_detected!("avx2")
+        if crate::cpu_has!("avx2")
             && block_x + src_w <= plane_width
             && block_y + src_h <= plane_height
         {
@@ -8793,7 +8794,7 @@ fn encode_downsampled_chroma_block(
         }
         #[cfg(target_arch = "x86_64")]
         {
-            if is_x86_feature_detected!("avx2") {
+            if crate::cpu_has!("avx2") {
                 let mut quantized = [0i16; 64];
                 if h_factor == 2 && v_factor == 2 {
                     unsafe {
@@ -9946,7 +9947,7 @@ fn gather_block(
         }
         #[cfg(target_arch = "x86_64")]
         {
-            if is_x86_feature_detected!("avx2") {
+            if crate::cpu_has!("avx2") {
                 unsafe {
                     crate::simd::x86_64::avx2_extract_fdct_quantize(
                         plane.as_ptr().add(block_y * plane_width + block_x),
@@ -9985,7 +9986,7 @@ fn gather_block(
         }
         #[cfg(target_arch = "x86_64")]
         {
-            if is_x86_feature_detected!("avx2") {
+            if crate::cpu_has!("avx2") {
                 unsafe {
                     crate::simd::x86_64::avx2_extract_fdct_quantize(
                         local_buf.as_ptr(),
@@ -10064,7 +10065,7 @@ fn gather_downsampled_block(
         }
         #[cfg(target_arch = "x86_64")]
         {
-            if is_x86_feature_detected!("avx2") {
+            if crate::cpu_has!("avx2") {
                 let mut quantized = [0i16; 64];
                 if h_factor == 2 && v_factor == 2 {
                     unsafe {
@@ -10130,7 +10131,7 @@ fn gather_downsampled_block(
         }
         #[cfg(target_arch = "x86_64")]
         {
-            if is_x86_feature_detected!("avx2") {
+            if crate::cpu_has!("avx2") {
                 let mut quantized = [0i16; 64];
                 if h_factor == 2 && v_factor == 2 {
                     unsafe {

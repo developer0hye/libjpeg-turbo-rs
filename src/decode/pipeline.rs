@@ -1,3 +1,4 @@
+// libjpeg-turbo-rs: alloc prelude (no_std support, issue #356)
 use crate::common::error::{DecodeWarning, JpegError, Result};
 use crate::common::huffman_table::HuffmanTable;
 use crate::common::icc;
@@ -12,6 +13,10 @@ use crate::decode::lossless;
 use crate::decode::marker::{JpegMetadata, MarkerReader, ScanInfo};
 use crate::decode::progressive;
 use crate::simd::{self, SimdRoutines};
+#[allow(unused_imports)]
+use alloc::{boxed::Box, string::String, string::ToString, vec::Vec};
+#[allow(unused_imports)]
+use alloc::{format, vec};
 
 /// Generic nearest-neighbor upsampling for arbitrary h/v factor combinations.
 ///
@@ -53,12 +58,12 @@ pub(crate) fn upsample_generic_nearest(
 fn fancy_h2v2_row_dispatch(cur: &[u8], neighbor: &[u8], output: &mut [u8], in_width: usize) {
     #[cfg(all(target_arch = "x86_64", feature = "simd"))]
     {
-        if is_x86_feature_detected!("avx2") {
+        if crate::cpu_has!("avx2") {
             return crate::simd::x86_64::avx2_upsample::avx2_fancy_h2v2_row(
                 cur, neighbor, output, in_width,
             );
         }
-        if is_x86_feature_detected!("sse2") {
+        if crate::cpu_has!("sse2") {
             return crate::simd::x86_64::upsample::sse2_fancy_h2v2_row(
                 cur, neighbor, output, in_width,
             );
@@ -183,7 +188,7 @@ enum OutBuf<'a> {
     Borrowed(&'a mut [u8]),
 }
 
-impl std::ops::Deref for OutBuf<'_> {
+impl core::ops::Deref for OutBuf<'_> {
     type Target = [u8];
     fn deref(&self) -> &[u8] {
         match self {
@@ -193,7 +198,7 @@ impl std::ops::Deref for OutBuf<'_> {
     }
 }
 
-impl std::ops::DerefMut for OutBuf<'_> {
+impl core::ops::DerefMut for OutBuf<'_> {
     fn deref_mut(&mut self) -> &mut [u8] {
         match self {
             OutBuf::Owned(v) => v,
@@ -317,7 +322,7 @@ pub struct Decoder<'a> {
     pub(crate) merged_upsample: bool,
     /// Custom marker processor callbacks, keyed by marker code.
     #[allow(clippy::type_complexity)]
-    marker_processors: std::collections::HashMap<u8, Box<dyn Fn(&[u8]) -> Option<Vec<u8>>>>,
+    marker_processors: alloc::collections::BTreeMap<u8, Box<dyn Fn(&[u8]) -> Option<Vec<u8>>>>,
     /// Optional RST-marker desync recovery strategy (A6-3, mirrors
     /// `jpeg_resync_to_restart`). `None` means the historical Rust
     /// behavior of unconditionally skipping past the RST.
@@ -325,7 +330,7 @@ pub struct Decoder<'a> {
     /// Uses `RefCell` because `decode_image(&self)` must mutate the
     /// strategy through an immutable receiver.
     pub(crate) resync_strategy:
-        std::cell::RefCell<Option<Box<dyn crate::decode::resync::RestartResyncStrategy>>>,
+        core::cell::RefCell<Option<Box<dyn crate::decode::resync::RestartResyncStrategy>>>,
 }
 
 impl<'a> Decoder<'a> {
@@ -365,8 +370,8 @@ impl<'a> Decoder<'a> {
             output_colorspace: None,
             dither_565: false,
             merged_upsample: false,
-            marker_processors: std::collections::HashMap::new(),
-            resync_strategy: std::cell::RefCell::new(None),
+            marker_processors: alloc::collections::BTreeMap::new(),
+            resync_strategy: core::cell::RefCell::new(None),
         })
     }
 
@@ -513,8 +518,8 @@ impl<'a> Decoder<'a> {
             output_colorspace: None,
             dither_565: false,
             merged_upsample: false,
-            marker_processors: std::collections::HashMap::new(),
-            resync_strategy: std::cell::RefCell::new(None),
+            marker_processors: alloc::collections::BTreeMap::new(),
+            resync_strategy: core::cell::RefCell::new(None),
         })
     }
 
@@ -899,12 +904,12 @@ impl<'a> Decoder<'a> {
 
             #[cfg(all(target_arch = "x86_64", feature = "simd"))]
             {
-                if is_x86_feature_detected!("avx2") {
+                if crate::cpu_has!("avx2") {
                     return crate::simd::x86_64::avx2_idct::avx2_idct_islow_strided(
                         coeffs, quant, output, stride,
                     );
                 }
-                if is_x86_feature_detected!("sse2") {
+                if crate::cpu_has!("sse2") {
                     return crate::simd::x86_64::idct::sse2_idct_islow_strided(
                         coeffs, quant, output, stride,
                     );
@@ -919,7 +924,7 @@ impl<'a> Decoder<'a> {
             let mut tmp = [0u8; 64];
             idct(coeffs, quant, &mut tmp);
             for row in 0..8 {
-                std::ptr::copy_nonoverlapping(
+                core::ptr::copy_nonoverlapping(
                     tmp.as_ptr().add(row * 8),
                     output.add(row * stride),
                     8,
@@ -1030,7 +1035,7 @@ impl<'a> Decoder<'a> {
 
         #[cfg(all(target_arch = "x86_64", feature = "simd"))]
         {
-            if is_x86_feature_detected!("avx2") {
+            if crate::cpu_has!("avx2") {
                 return crate::simd::x86_64::avx2_color::avx2_ycbcr_to_rgba_row(
                     y, cb, cr, out, width,
                 );
@@ -1055,7 +1060,7 @@ impl<'a> Decoder<'a> {
 
         #[cfg(all(target_arch = "x86_64", feature = "simd"))]
         {
-            if is_x86_feature_detected!("avx2") {
+            if crate::cpu_has!("avx2") {
                 return crate::simd::x86_64::avx2_color::avx2_ycbcr_to_bgr_row(
                     y, cb, cr, out, width,
                 );
@@ -1080,7 +1085,7 @@ impl<'a> Decoder<'a> {
 
         #[cfg(all(target_arch = "x86_64", feature = "simd"))]
         {
-            if is_x86_feature_detected!("avx2") {
+            if crate::cpu_has!("avx2") {
                 return crate::simd::x86_64::avx2_color::avx2_ycbcr_to_bgra_row(
                     y, cb, cr, out, width,
                 );
@@ -1126,7 +1131,7 @@ impl<'a> Decoder<'a> {
 
                 #[cfg(all(target_arch = "x86_64", feature = "simd"))]
                 {
-                    if is_x86_feature_detected!("avx2") {
+                    if crate::cpu_has!("avx2") {
                         return crate::simd::x86_64::avx2_color::avx2_ycbcr_to_rgbx_row(
                             y, cb, cr, out, width,
                         );
@@ -1145,7 +1150,7 @@ impl<'a> Decoder<'a> {
 
                 #[cfg(all(target_arch = "x86_64", feature = "simd"))]
                 {
-                    if is_x86_feature_detected!("avx2") {
+                    if crate::cpu_has!("avx2") {
                         return crate::simd::x86_64::avx2_color::avx2_ycbcr_to_bgrx_row(
                             y, cb, cr, out, width,
                         );
@@ -1164,7 +1169,7 @@ impl<'a> Decoder<'a> {
 
                 #[cfg(all(target_arch = "x86_64", feature = "simd"))]
                 {
-                    if is_x86_feature_detected!("avx2") {
+                    if crate::cpu_has!("avx2") {
                         return crate::simd::x86_64::avx2_color::avx2_ycbcr_to_xrgb_row(
                             y, cb, cr, out, width,
                         );
@@ -1183,7 +1188,7 @@ impl<'a> Decoder<'a> {
 
                 #[cfg(all(target_arch = "x86_64", feature = "simd"))]
                 {
-                    if is_x86_feature_detected!("avx2") {
+                    if crate::cpu_has!("avx2") {
                         return crate::simd::x86_64::avx2_color::avx2_ycbcr_to_xbgr_row(
                             y, cb, cr, out, width,
                         );
@@ -1202,7 +1207,7 @@ impl<'a> Decoder<'a> {
 
                 #[cfg(all(target_arch = "x86_64", feature = "simd"))]
                 {
-                    if is_x86_feature_detected!("avx2") {
+                    if crate::cpu_has!("avx2") {
                         return crate::simd::x86_64::avx2_color::avx2_ycbcr_to_argb_row(
                             y, cb, cr, out, width,
                         );
@@ -1221,7 +1226,7 @@ impl<'a> Decoder<'a> {
 
                 #[cfg(all(target_arch = "x86_64", feature = "simd"))]
                 {
-                    if is_x86_feature_detected!("avx2") {
+                    if crate::cpu_has!("avx2") {
                         return crate::simd::x86_64::avx2_color::avx2_ycbcr_to_abgr_row(
                             y, cb, cr, out, width,
                         );
@@ -1249,7 +1254,7 @@ impl<'a> Decoder<'a> {
     fn merged_h2v1(y_row: &[u8], cb_row: &[u8], cr_row: &[u8], rgb_out: &mut [u8], width: usize) {
         #[cfg(all(target_arch = "x86_64", feature = "simd"))]
         {
-            if is_x86_feature_detected!("avx2") {
+            if crate::cpu_has!("avx2") {
                 crate::simd::x86_64::avx2_merged::avx2_merged_h2v1_ycbcr_to_rgb(
                     y_row, cb_row, cr_row, rgb_out, width,
                 );
@@ -1291,7 +1296,7 @@ impl<'a> Decoder<'a> {
     ) {
         #[cfg(all(target_arch = "x86_64", feature = "simd"))]
         {
-            if is_x86_feature_detected!("avx2") {
+            if crate::cpu_has!("avx2") {
                 crate::simd::x86_64::avx2_merged::avx2_merged_h2v2_ycbcr_to_rgb(
                     y_row0, y_row1, cb_row, cr_row, rgb_out0, rgb_out1, width,
                 );
@@ -1366,12 +1371,12 @@ impl<'a> Decoder<'a> {
 
         #[cfg(all(target_arch = "x86_64", feature = "simd"))]
         {
-            if is_x86_feature_detected!("avx2") {
+            if crate::cpu_has!("avx2") {
                 return crate::simd::x86_64::avx2_upsample::avx2_fancy_upsample_h2v2(
                     input, in_width, in_height, output, out_width,
                 );
             }
-            if is_x86_feature_detected!("sse2") {
+            if crate::cpu_has!("sse2") {
                 return crate::simd::x86_64::upsample::sse2_fancy_upsample_h2v2(
                     input, in_width, in_height, output, out_width,
                 );
@@ -2935,7 +2940,7 @@ impl<'a> Decoder<'a> {
 
     /// Resolve a Huffman table by index, returning an error if missing.
     fn resolve_table<'t>(
-        tables: &'t [Option<std::sync::Arc<HuffmanTable>>; 4],
+        tables: &'t [Option<alloc::sync::Arc<HuffmanTable>>; 4],
         index: u8,
         kind: &str,
     ) -> Result<&'t HuffmanTable> {
@@ -4034,7 +4039,7 @@ impl<'a> Decoder<'a> {
                     for row in 0..comp_h {
                         shifted.extend_from_slice(&plane[row * comp_w + off..(row + 1) * comp_w]);
                         // Pad to maintain stride
-                        shifted.extend(std::iter::repeat_n(0, off));
+                        shifted.extend(core::iter::repeat_n(0, off));
                     }
                     shifted
                 })
@@ -4100,7 +4105,7 @@ impl<'a> Decoder<'a> {
                     }
                     buf.into_vec()
                 } else if exact_geometry {
-                    std::mem::take(&mut component_planes[0])
+                    core::mem::take(&mut component_planes[0])
                 } else {
                     let mut data = Vec::with_capacity(out_width * out_height);
                     for y in 0..out_height {
@@ -4721,7 +4726,7 @@ impl<'a> Decoder<'a> {
                     // off + actual_cb_w <= cb_w for every crop. Cr shares
                     // cb_w: uniform_chroma pins identical sampling factors.
                     debug_assert_eq!(cb_w, cr_w, "uniform_chroma implies equal plane strides");
-                    let row_range = |row: usize, off: usize| -> std::ops::Range<usize> {
+                    let row_range = |row: usize, off: usize| -> core::ops::Range<usize> {
                         let start = row * cb_w + off;
                         start..start + actual_cb_w
                     };
