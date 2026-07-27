@@ -310,6 +310,99 @@ impl Default for ScalingFactor {
 }
 
 /// Pixel density information from JFIF marker.
+/// Configurable decoder resource limits (issue #355, the Rust-side twin
+/// of P4-14's C-ABI `max_memory_to_use`).
+///
+/// Defaults are permissive — they accept everything `djpeg` accepts in
+/// the corpus gates (the drop-in contract comes first) while still
+/// bounding the pathological corner: a header-only 65535x65535 SOF
+/// (4.29 gigapixels from a few dozen bytes) exceeds the default
+/// `max_pixels` and is rejected before any plane allocation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DecodeLimits {
+    /// Maximum image width in pixels (default: 65_500, matching C's
+    /// `JPEG_MAX_DIMENSION`). Mostly shadowed by `max_pixels`; matters
+    /// for extreme aspect ratios.
+    pub max_width: usize,
+    /// Maximum image height in pixels (default: 65_500).
+    pub max_height: usize,
+    /// Maximum total pixels, guarding the product the individual
+    /// dimension caps cannot (default: 2_147_483_647 ≈ 2.1 gigapixels).
+    pub max_pixels: u64,
+    /// Maximum number of scans (default: 8_192 — far above any real
+    /// progressive script, low enough to stop scan bombs).
+    pub max_scans: usize,
+    /// Estimated decode-memory ceiling in bytes (default: `None`).
+    /// Shares the estimation model of `Decoder::set_max_memory`.
+    ///
+    /// Note: the default `max_pixels` bounds the *header bomb*, not
+    /// decode memory — a 2-gigapixel progressive image legitimately
+    /// needs multi-GB coefficient buffers. Set `max_memory` to bound
+    /// memory.
+    pub max_memory: Option<u64>,
+}
+
+impl Default for DecodeLimits {
+    fn default() -> Self {
+        Self {
+            max_width: 65_500,
+            max_height: 65_500,
+            max_pixels: 2_147_483_647,
+            max_scans: 8_192,
+            max_memory: None,
+        }
+    }
+}
+
+impl DecodeLimits {
+    /// Frame-dimension checks shared by every decode entry point,
+    /// including the ones without a limits API (`read_coefficients`,
+    /// `decompress_12bit`/`_16bit`), which apply the defaults.
+    pub(crate) fn check_frame(
+        &self,
+        width: usize,
+        height: usize,
+    ) -> crate::common::error::Result<()> {
+        use crate::common::error::JpegError;
+        if width > self.max_width {
+            return Err(JpegError::LimitExceeded {
+                what: "image width",
+                actual: width as u64,
+                limit: self.max_width as u64,
+            });
+        }
+        if height > self.max_height {
+            return Err(JpegError::LimitExceeded {
+                what: "image height",
+                actual: height as u64,
+                limit: self.max_height as u64,
+            });
+        }
+        let total_pixels: u64 = (width as u64) * (height as u64);
+        if total_pixels > self.max_pixels {
+            return Err(JpegError::LimitExceeded {
+                what: "total pixels",
+                actual: total_pixels,
+                limit: self.max_pixels,
+            });
+        }
+        Ok(())
+    }
+
+    /// zune-jpeg `new_safe`-like values for callers that want tight
+    /// bounds: 16_384x16_384, 100 scans. Memory stays unbounded — set
+    /// `max_memory` if you need a byte ceiling.
+    pub fn strict() -> Self {
+        Self {
+            max_width: 16_384,
+            max_height: 16_384,
+            max_pixels: 16_384 * 16_384,
+            max_scans: 100,
+            max_memory: None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct DensityInfo {
     pub unit: DensityUnit,

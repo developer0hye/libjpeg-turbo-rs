@@ -686,6 +686,14 @@ fn fancy_upsample_12bit(
 pub fn decompress_12bit(data: &[u8]) -> Result<Image12> {
     let mut reader = MarkerReader::new(data);
     let metadata = reader.read_markers()?;
+    // Default frame-dimension guard (issue #355 review HIGH-1): this
+    // entry point has no limits API, so the permissive defaults bound
+    // the header bomb before block buffers are sized from the SOF.
+    crate::common::types::DecodeLimits::default().check_frame(
+        metadata.frame.width as usize,
+        metadata.frame.height as usize,
+    )?;
+
     let frame = &metadata.frame;
     let width: usize = frame.width as usize;
     let height: usize = frame.height as usize;
@@ -1179,6 +1187,14 @@ fn encode_dc_only_wide(
 pub fn decompress_16bit(data: &[u8]) -> Result<Image16> {
     let mut reader = MarkerReader::new(data);
     let metadata = reader.read_markers()?;
+    // Default frame-dimension guard (issue #355 review HIGH-1): this
+    // entry point has no limits API, so the permissive defaults bound
+    // the header bomb before block buffers are sized from the SOF.
+    crate::common::types::DecodeLimits::default().check_frame(
+        metadata.frame.width as usize,
+        metadata.frame.height as usize,
+    )?;
+
     let frame = &metadata.frame;
     let width = frame.width as usize;
     let height = frame.height as usize;
@@ -1640,6 +1656,14 @@ fn compress_arbitrary_multi(
 pub fn decompress_lossless_arbitrary(data: &[u8]) -> Result<Image16> {
     let mut reader = MarkerReader::new(data);
     let metadata = reader.read_markers()?;
+    // Default frame-dimension guard (issue #355 review HIGH-1): this
+    // entry point has no limits API, so the permissive defaults bound
+    // the header bomb before block buffers are sized from the SOF.
+    crate::common::types::DecodeLimits::default().check_frame(
+        metadata.frame.width as usize,
+        metadata.frame.height as usize,
+    )?;
+
     let frame = &metadata.frame;
     let width: usize = frame.width as usize;
     let height: usize = frame.height as usize;

@@ -57,7 +57,7 @@ pub enum TjParam {
     YDensity,
     /// TJPARAM_DENSITYUNITS: Density units (0=unknown, 1=DPI, 2=DPCM).
     DensityUnits,
-    /// TJPARAM_MAXMEMORY: Max memory in bytes (0=unlimited).
+    /// TJPARAM_MAXMEMORY: Max memory in MEGABYTES (0=unlimited), per the C contract; converted x1048576 at decode time.
     MaxMemory,
     /// TJPARAM_MAXPIXELS: Max image size in pixels (0=unlimited).
     MaxPixels,
@@ -659,7 +659,31 @@ impl TjHandle {
     }
 
     pub fn decompress(&mut self, data: &[u8]) -> Result<Image> {
-        let mut decoder = Decoder::new(data)?;
+        // Build limits from the TurboJPEG params FIRST and construct
+        // with them, so SCANLIMIT applies from marker parsing onward and
+        // 0 keeps the C contract's no-library-level-cap semantics
+        // (turbojpeg.h TJPARAM_SCANLIMIT / TJPARAM_MAXMEMORY; the
+        // latter is in MEGABYTES, converted x1048576 like turbojpeg.c).
+        let mut limits = crate::common::types::DecodeLimits {
+            // C's JPEG_MAX_DIMENSION (65,500) is an unconditional
+            // library-level cap ("Maximum supported image dimension"),
+            // not a TurboJPEG param — keep it.
+            max_width: 65_500,
+            max_height: 65_500,
+            max_pixels: u64::MAX,
+            max_scans: usize::MAX,
+            max_memory: None,
+        };
+        if self.max_pixels > 0 {
+            limits.max_pixels = self.max_pixels as u64;
+        }
+        if self.max_memory > 0 {
+            limits.max_memory = Some(self.max_memory as u64 * 1_048_576);
+        }
+        if self.scan_limit > 0 {
+            limits.max_scans = self.scan_limit as usize;
+        }
+        let mut decoder = Decoder::new_with_limits(data, limits)?;
 
         // Apply scaling
         if self.scaling_factor != ScalingFactor::default() {
@@ -669,21 +693,6 @@ impl TjHandle {
         // Apply stop-on-warning
         if self.stop_on_warning != 0 {
             decoder.set_stop_on_warning(true);
-        }
-
-        // Apply max pixels limit
-        if self.max_pixels > 0 {
-            decoder.set_max_pixels(self.max_pixels as usize);
-        }
-
-        // Apply max memory limit
-        if self.max_memory > 0 {
-            decoder.set_max_memory(self.max_memory as usize);
-        }
-
-        // Apply scan limit
-        if self.scan_limit > 0 {
-            decoder.set_scan_limit(self.scan_limit as u32);
         }
 
         // Wire FastUpSample

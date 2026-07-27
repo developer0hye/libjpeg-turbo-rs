@@ -141,6 +141,14 @@ pub fn copy_critical_parameters(coeffs: &JpegCoefficients) -> EncoderConfig {
 pub fn read_coefficients(data: &[u8]) -> Result<JpegCoefficients> {
     let mut reader = MarkerReader::new(data);
     let metadata = reader.read_markers()?;
+    // Default frame-dimension guard (issue #355 review HIGH-1): this
+    // entry point has no limits API, so the permissive defaults bound
+    // the header bomb before block buffers are sized from the SOF.
+    crate::common::types::DecodeLimits::default().check_frame(
+        metadata.frame.width as usize,
+        metadata.frame.height as usize,
+    )?;
+
     let frame = &metadata.frame;
 
     let max_h = frame

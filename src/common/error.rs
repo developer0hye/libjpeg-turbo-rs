@@ -1,5 +1,10 @@
 /// All errors that can occur during JPEG processing.
+///
+/// `#[non_exhaustive]`: variants may be added in minor releases (the
+/// #355 `LimitExceeded` addition was source-breaking for exhaustive
+/// downstream matches — this prevents a repeat).
 #[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
 pub enum JpegError {
     #[error("invalid marker: 0xFF{0:02X}")]
     InvalidMarker(u8),
@@ -15,6 +20,13 @@ pub enum JpegError {
 
     #[error("buffer too small: need {need}, got {got}")]
     BufferTooSmall { need: usize, got: usize },
+
+    #[error("{what} {actual} exceeds limit {limit}")]
+    LimitExceeded {
+        what: &'static str,
+        actual: u64,
+        limit: u64,
+    },
 
     #[error("unexpected end of data")]
     UnexpectedEof,
