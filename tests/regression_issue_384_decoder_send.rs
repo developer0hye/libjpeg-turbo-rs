@@ -28,7 +28,10 @@ fn issue_384_streaming_and_scanline_decoders_are_send() {
 }
 
 /// Not just the bound: a real configured decoder must decode correctly
-/// on another thread.
+/// on another thread. Gated off wasm32: wasm32-wasip1 has no threads, so
+/// `std::thread::spawn` traps (`unreachable`) under wasmtime — the Send
+/// bound itself is still compile-asserted above on every target.
+#[cfg(not(target_arch = "wasm32"))]
 #[test]
 fn issue_384_decoder_decodes_on_another_thread() {
     let (width, height): (usize, usize) = (32, 24);
