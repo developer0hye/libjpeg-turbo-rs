@@ -133,8 +133,9 @@ pub extern "C" fn tj3Compress12(
         // ITU-T T.81 / Annex H: in lossless mode the point transform Pt
         // shifts the lower Pt bits off each sample, so Pt must be strictly
         // less than the sample precision (Pt == P would zero every
-        // sample). Mirror
-        // `references/libjpeg-turbo/src/jclossls.c::start_pass_lossls`.
+        // sample). Mirror C's encode-side Al checks in
+        // `jcparam.c::jpeg_enable_lossless` (jcparam.c:586-589) and
+        // `jcmaster.c::validate_script` (jcmaster.c:396-399).
         if is_lossless {
             let point_transform: i32 = inst.inner.get(TjParam::LosslessPt);
             if point_transform >= effective_precision {
@@ -377,8 +378,9 @@ pub extern "C" fn tj3Compress16(
         };
         // ITU-T T.81 / Annex H: in lossless mode the point transform Pt
         // shifts the lower Pt bits off each sample, so Pt must be strictly
-        // less than the sample precision. Mirror
-        // `references/libjpeg-turbo/src/jclossls.c::start_pass_lossls`.
+        // less than the sample precision. Mirror C's encode-side Al checks
+        // in `jcparam.c::jpeg_enable_lossless` (jcparam.c:586-589) and
+        // `jcmaster.c::validate_script` (jcmaster.c:396-399).
         let point_transform: i32 = inst.inner.get(TjParam::LosslessPt);
         if point_transform >= effective_precision {
             inst.set_error(

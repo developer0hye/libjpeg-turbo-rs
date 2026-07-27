@@ -614,7 +614,7 @@ impl TjHandle {
 
     /// Compress 16-bit pixels with an explicit SOF precision override.
     ///
-    /// `precision` must be in 13..=16 (lossless-only path).
+    /// `precision` must be in 2..=16 (SOF3-legal, lossless-only path).
     pub fn compress_16bit_with_precision(
         &self,
         pixels: &[u16],

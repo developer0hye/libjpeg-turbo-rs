@@ -50,6 +50,7 @@ jobs:
         target:
           - fuzz_decompress
           - fuzz_decompress_lenient
+          - fuzz_decompress_precision  # 12/16-bit + arbitrary-precision decode (issue #382)
           - fuzz_roundtrip
           - fuzz_read_coefficients
           - fuzz_transform
