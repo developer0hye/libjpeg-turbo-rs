@@ -42,6 +42,15 @@ struct JpegErrorMgrLayout {
     last_addon_message: c_int,
 }
 
+// The MSVC UCRT declares `snprintf` as an inline in <stdio.h> and does
+// not export it from the import libraries, so linking the raw symbol
+// fails with LNK2019 and — because that is a build failure — no
+// workspace test could even build on a Windows host (issue #378,
+// P4-62). `legacy_stdio_definitions.lib` ships out-of-line exported
+// definitions of the inline printf family exactly for external-symbol
+// consumers like this oracle; linking it preserves the P2-2
+// printf-expansion coverage on MSVC instead of cfg-ing the tests away.
+#[cfg_attr(target_env = "msvc", link(name = "legacy_stdio_definitions"))]
 extern "C" {
     fn snprintf(buf: *mut c_char, size: usize, fmt: *const c_char, ...) -> c_int;
 }
