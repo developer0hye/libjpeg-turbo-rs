@@ -222,7 +222,7 @@ the header alone — no pixel decode — and apply it in whichever domain
 fits (issue #391):
 
 ```rust
-use libjpeg_turbo_rs::{decompress, transform, Decoder, TransformOp};
+use libjpeg_turbo_rs::{decompress, Decoder, TransformOp};
 
 // Probe without decoding pixels (None when the JPEG carries no EXIF):
 let orientation: Option<u8> = Decoder::new(&jpeg_bytes)?.exif_orientation();
@@ -231,9 +231,12 @@ let orientation: Option<u8> = Decoder::new(&jpeg_bytes)?.exif_orientation();
 let upright = decompress(&jpeg_bytes)?.apply_orientation();
 
 // DCT domain — rewrite the JPEG losslessly instead (skip the no-op
-// re-encode for upright/untagged images). Strip the markers: `transform`
-// copies them by default, and a stale orientation tag on already-rotated
-// pixels would make EXIF-aware viewers rotate twice.
+// re-encode for upright/untagged images). Strip the markers: transforms
+// copy them by default, and a stale orientation tag on already-rotated
+// pixels would make EXIF-aware viewers rotate twice. Note lossless
+// transforms cannot fully reorient partial edge blocks when dimensions
+// are not iMCU-aligned (see TransformOp::from_exif_orientation docs) —
+// the pixel-domain path above is exact at any size.
 use libjpeg_turbo_rs::{MarkerCopyMode, TransformOptions};
 if let Some(op) = orientation.and_then(TransformOp::from_exif_orientation) {
     if op != TransformOp::None {
