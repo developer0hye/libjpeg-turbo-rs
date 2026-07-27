@@ -1,9 +1,16 @@
-//! Streaming I/O for JPEG compression and decompression.
+//! Reader/writer convenience wrappers for JPEG compression and
+//! decompression.
 //!
-//! Provides functions to compress/decompress JPEG data using `std::io::Read`
-//! and `std::io::Write` traits, plus convenience functions for file paths.
-//! This is the Rust equivalent of libjpeg-turbo's `jpeg_source_mgr` /
-//! `jpeg_destination_mgr` custom I/O abstraction.
+//! **These are not incremental**: every `*_from_reader` / `*_from_file`
+//! function buffers the entire input with `read_to_end` before handing
+//! it to the in-memory decoder, so peak memory is the full compressed
+//! size plus all decode intermediates (issue #357). They are I/O-trait
+//! conveniences, not an equivalent of libjpeg-turbo's suspending
+//! `jpeg_source_mgr`. A Rust-native incremental source is tracked in
+//! `docs/last_mile/phase4.md` (P4-58, designed together with P4-26);
+//! the slice-based `decompress()` core stays the default because its
+//! bounds-checked slice fetches are a measured throughput win over
+//! trait-object reads.
 
 #[cfg(any(not(target_arch = "wasm32"), target_os = "wasi"))]
 use std::fs::File;
@@ -43,9 +50,11 @@ pub fn compress_to_writer<W: Write>(
 
 /// Read JPEG data from a reader and decompress.
 ///
-/// Reads all bytes from the reader into memory, then delegates to the
-/// in-memory `decompress()`. Equivalent to libjpeg-turbo's `jpeg_stdio_src()`
-/// or a custom `jpeg_source_mgr`.
+/// **Buffers the entire stream first**: reads all bytes with
+/// `read_to_end`, then delegates to the in-memory `decompress()`. Peak
+/// memory is the full compressed size plus decode intermediates — this
+/// is *not* an incremental source like libjpeg-turbo's suspending
+/// `jpeg_source_mgr` (issue #357; incremental design tracked as P4-58).
 pub fn decompress_from_reader<R: Read>(reader: &mut R) -> Result<Image> {
     let mut buffer: Vec<u8> = Vec::new();
     reader.read_to_end(&mut buffer)?;
@@ -81,8 +90,8 @@ pub fn compress_to_file<P: AsRef<Path>>(
 
 /// Read and decompress JPEG from a file path.
 ///
-/// Opens the file for reading, reads all JPEG data, and decompresses it.
-/// Equivalent to using libjpeg-turbo's `jpeg_stdio_src()` with `fopen()`.
+/// **Buffers the whole file into memory first** (see
+/// [`decompress_from_reader`]) — not an incremental read (issue #357).
 #[cfg(any(not(target_arch = "wasm32"), target_os = "wasi"))]
 pub fn decompress_from_file<P: AsRef<Path>>(path: P) -> Result<Image> {
     let mut file: File = File::open(path)?;
