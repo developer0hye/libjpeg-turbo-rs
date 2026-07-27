@@ -43,6 +43,10 @@ const DECODER_TARGETS: &[&str] = &[
     // the other decoder targets (raw JPEG bytes, no header), so it
     // benefits from the same seed corpus.
     "fuzz_decode_diff_c",
+    // Issue #382: 12/16-bit + arbitrary-precision decode entry points.
+    // Raw JPEG bytes like the rest; the generated corpus gives it more
+    // than its three hand-crafted lossless seeds.
+    "fuzz_decompress_precision",
 ];
 
 #[derive(Clone, Copy)]

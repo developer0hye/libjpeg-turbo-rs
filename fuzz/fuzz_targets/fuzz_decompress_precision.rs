@@ -2,10 +2,14 @@
 //! Fuzz the 12/16-bit and arbitrary-precision decode entry points
 //! (`src/api/precision.rs`).
 //!
-//! Issue #382: this ~1.9k-LOC module had no fuzz coverage at all, which
-//! is exactly why the smoke sweeps that caught the 8-bit lossless
-//! shift-overflow (P4-38) could not catch its 12/16-bit twin — a
-//! crafted SOF3 `P=2`/`Al=15` stream made
+//! Issue #382: of this ~1.9k-LOC module only the *baseline* 12-bit
+//! decoder was ever fuzzed, and only indirectly — `Decoder` routes
+//! `precision == 12` to `decompress_12bit` (pipeline.rs), which is how
+//! the sweeps found P4-30. That entry rejects lossless outright, and
+//! nothing reached `decompress_16bit` / `decompress_lossless_arbitrary`
+//! at all, so the sweeps that caught the 8-bit lossless shift-overflow
+//! (clamped 2026-04-21 in `decode/lossless.rs`) could not reach its
+//! 12/16-bit twin — a crafted SOF3 `P=2`/`Al=15` stream made
 //! `1 << (precision - pt - 1)` negative: panic in debug, wrong pixels
 //! in release. Every entry point here must return `Err` on malformed
 //! input, never panic.
@@ -13,8 +17,9 @@
 use libfuzzer_sys::fuzz_target;
 use libjpeg_turbo_rs::precision::{decompress_12bit, decompress_16bit, decompress_lossless_arbitrary};
 
-// Same rationale as fuzz_decompress: bound decoded size so the fuzzer
-// spends time in parsing/entropy/prediction code, not in huge allocs.
+// Same rationale as fuzz_decompress_lenient: bound decoded size so the
+// fuzzer spends time in parsing/entropy/prediction code, not in huge
+// allocs.
 const MAX_FUZZ_PIXELS: u64 = 1_048_576;
 
 fuzz_target!(|data: &[u8]| {
