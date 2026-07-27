@@ -614,6 +614,29 @@ impl<'a> Decoder<'a> {
         self.crop_width = Some(width);
     }
 
+    /// Set only the vertical crop range, leaving any horizontal crop
+    /// untouched. MCU rows fully outside the range skip IDCT during
+    /// decoding (issue #383: backs `StreamingDecoder::skip_scanlines`).
+    pub fn set_crop_y(&mut self, y: usize, height: usize) {
+        self.crop_y = Some(y);
+        self.crop_height = Some(height);
+    }
+
+    /// Rows a decode will actually emit: the scaled frame height, except
+    /// on the 12-bit and lossless paths, which bypass scaled decode (see
+    /// `output_buffer_size`). `crop_y`/`crop_height` are interpreted in
+    /// these output rows, matching C, where `jpeg_skip_scanlines`
+    /// validates against `cinfo->output_height` (jdapistd.c).
+    pub fn output_height(&self) -> usize {
+        let frame = self.header();
+        let h: usize = frame.height as usize;
+        if frame.precision != 12 && !frame.is_lossless {
+            self.scale.scale_dim(h)
+        } else {
+            h
+        }
+    }
+
     /// Set full crop region (horizontal + vertical).
     /// MCU rows outside the vertical range will skip IDCT during decoding.
     pub fn set_crop_region(&mut self, x: usize, y: usize, width: usize, height: usize) {
