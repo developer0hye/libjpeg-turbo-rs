@@ -31,7 +31,7 @@ use std::path::PathBuf;
 /// hard-fail path rather than the silent-skip path.
 pub fn is_ci() -> bool {
     std::env::var("CI")
-        .map(|v: String| !v.is_empty() && v != "0" && v.to_ascii_lowercase() != "false")
+        .map(|v: String| !v.is_empty() && v != "0" && !v.eq_ignore_ascii_case("false"))
         .unwrap_or(false)
 }
 
