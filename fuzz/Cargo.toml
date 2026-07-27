@@ -32,6 +32,11 @@ path = "fuzz_targets/fuzz_decompress.rs"
 doc = false
 
 [[bin]]
+name = "fuzz_decompress_precision"
+path = "fuzz_targets/fuzz_decompress_precision.rs"
+doc = false
+
+[[bin]]
 name = "fuzz_decompress_lenient"
 path = "fuzz_targets/fuzz_decompress_lenient.rs"
 doc = false
