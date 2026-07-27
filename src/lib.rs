@@ -27,7 +27,7 @@ pub use api::high_level::{
     compress, compress_arithmetic, compress_arithmetic_progressive, compress_into,
     compress_lossless, compress_lossless_arithmetic, compress_lossless_extended,
     compress_optimized, compress_progressive, compress_with_metadata, decompress,
-    decompress_cropped, decompress_lenient, decompress_to,
+    decompress_cropped, decompress_into, decompress_lenient, decompress_to, output_buffer_size,
 };
 #[cfg(feature = "png")]
 pub use api::image_io::load_png_from_bytes;
@@ -73,7 +73,7 @@ pub use common::jfif::extract_jfif_thumbnail;
 pub use common::sample::Sample;
 pub use common::traits::{DefaultErrorHandler, ErrorHandler, ProgressInfo, ProgressListener};
 pub use common::types::*;
-pub use decode::pipeline::{Decoder, Image};
+pub use decode::pipeline::{Decoder, Image, ImageInfo};
 pub use decode::resync::{DefaultResyncStrategy, RestartResyncStrategy, ResyncAction};
 pub use transform::{MarkerCopyMode, TransformOp, TransformOptions};
 /// 12-bit and 16-bit sample precision support.

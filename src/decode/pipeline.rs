@@ -139,6 +139,93 @@ pub struct Image {
     pub warnings: Vec<DecodeWarning>,
 }
 
+/// Metadata for a decode that wrote pixels into a caller-provided buffer
+/// (`Decoder::decode_image_into` / `decompress_into`): everything
+/// [`Image`] carries except the pixel `data`.
+#[derive(Debug)]
+pub struct ImageInfo {
+    pub width: usize,
+    pub height: usize,
+    pub pixel_format: PixelFormat,
+    pub precision: u8,
+    /// Number of bytes written into the caller buffer
+    /// (`width * height * pixel_format.bytes_per_pixel()`).
+    pub bytes_written: usize,
+    /// Reassembled ICC profile from APP2 markers, if present and valid.
+    pub icc_profile: Option<Vec<u8>>,
+    /// Raw EXIF TIFF data from APP1 marker, if present.
+    pub exif_data: Option<Vec<u8>>,
+    /// COM marker text, if present.
+    pub comment: Option<String>,
+    /// Pixel density from JFIF header.
+    pub density: DensityInfo,
+    /// Saved APP/COM markers.
+    pub saved_markers: Vec<SavedMarker>,
+    /// Warnings accumulated during lenient decoding.
+    pub warnings: Vec<DecodeWarning>,
+}
+
+/// Output destination for one decode: a decoder-owned `Vec` (the
+/// `decode_image` path) or a caller-provided slice
+/// (`decode_image_into`). Sized-and-taken exactly once per decode by
+/// [`take_out_buf`]; every branch that consumes it fully overwrites the
+/// prefix it sized, so the borrowed form is never read uninitialised.
+enum OutBuf<'a> {
+    Owned(Vec<u8>),
+    Borrowed(&'a mut [u8]),
+}
+
+impl std::ops::Deref for OutBuf<'_> {
+    type Target = [u8];
+    fn deref(&self) -> &[u8] {
+        match self {
+            OutBuf::Owned(v) => v,
+            OutBuf::Borrowed(b) => b,
+        }
+    }
+}
+
+impl std::ops::DerefMut for OutBuf<'_> {
+    fn deref_mut(&mut self) -> &mut [u8] {
+        match self {
+            OutBuf::Owned(v) => v,
+            OutBuf::Borrowed(b) => b,
+        }
+    }
+}
+
+impl OutBuf<'_> {
+    /// The `Vec` to store in [`Image::data`]. Empty in borrowed mode —
+    /// the pixels already live in the caller's buffer, and
+    /// `decode_image_into` treats a non-empty `data` as the signal that
+    /// the taken branch did not support the sink natively.
+    fn into_vec(self) -> Vec<u8> {
+        match self {
+            OutBuf::Owned(v) => v,
+            OutBuf::Borrowed(_) => Vec::new(),
+        }
+    }
+}
+
+/// Claim the output destination for a terminal decode branch: the
+/// caller's buffer when a sink is armed (validated against `size`, so a
+/// short buffer is a typed error, never a panic or truncation), else a
+/// fresh zero-filled `Vec`.
+fn take_out_buf<'a>(sink: &mut Option<&'a mut [u8]>, size: usize) -> Result<OutBuf<'a>> {
+    match sink.take() {
+        Some(buf) => {
+            if buf.len() < size {
+                return Err(JpegError::BufferTooSmall {
+                    need: size,
+                    got: buf.len(),
+                });
+            }
+            Ok(OutBuf::Borrowed(&mut buf[..size]))
+        }
+        None => Ok(OutBuf::Owned(vec![0u8; size])),
+    }
+}
+
 impl Image {
     /// Returns the ICC color profile embedded in this JPEG, if any.
     pub fn icc_profile(&self) -> Option<&[u8]> {
@@ -3314,7 +3401,138 @@ impl<'a> Decoder<'a> {
     }
 
     pub fn decode_image(&self) -> Result<Image> {
-        let mut image: Image = self.decode_image_inner()?;
+        self.decode_image_with_sink(&mut None)
+    }
+
+    /// Bytes `decode_image_into` needs for this stream with the current
+    /// decoder options. Exact for the standard paths; a safe upper
+    /// bound when an output-colourspace override is active (sized at 4
+    /// bytes/pixel) or when cropping trims the image below the
+    /// MCU-aligned estimate.
+    #[must_use = "the returned size is the whole point of this query"]
+    pub fn output_buffer_size(&self) -> Result<usize> {
+        let frame = &self.metadata.frame;
+        let num_components: usize = frame.components.len();
+        let bpp: usize = if self.output_colorspace.is_some() {
+            4
+        } else {
+            self.output_format
+                .unwrap_or(match num_components {
+                    1 => PixelFormat::Grayscale,
+                    4 => PixelFormat::Cmyk,
+                    _ => PixelFormat::Rgb,
+                })
+                .bytes_per_pixel()
+        };
+
+        // The 12-bit and lossless paths return through
+        // decode_12bit_as_8bit / decode_lossless_image, which apply
+        // neither scaled decode nor horizontal crop — size them at full
+        // frame geometry or the advertised size under-reports (codex P2
+        // on #354). Vertical crop still applies to every path: it is a
+        // post-slice in decode_image.
+        let scale_and_hcrop_apply: bool = frame.precision != 12 && !frame.is_lossless;
+        let (base_w, base_h): (usize, usize) = if scale_and_hcrop_apply {
+            (
+                self.scale.scale_dim(frame.width as usize),
+                self.scale.scale_dim(frame.height as usize),
+            )
+        } else {
+            (frame.width as usize, frame.height as usize)
+        };
+
+        // Horizontal crop mirrors decode_image_inner: X aligns down to
+        // the scaled iMCU boundary and the width expands to compensate,
+        // then clamps to the image.
+        let out_w: usize = if !scale_and_hcrop_apply {
+            base_w
+        } else if let (Some(cx), Some(cw)) = (self.crop_x, self.crop_width) {
+            let max_h_samp: usize = frame
+                .components
+                .iter()
+                .map(|c| c.horizontal_sampling as usize)
+                .max()
+                .unwrap_or(1);
+            let scaled_imcu_w: usize = max_h_samp * self.scale.block_size();
+            let aligned_x: usize = (cx / scaled_imcu_w) * scaled_imcu_w;
+            let expanded_w: usize = cw + (cx - aligned_x);
+            expanded_w.min(base_w.saturating_sub(aligned_x))
+        } else {
+            base_w
+        };
+        // Vertical crop is applied as a post-slice in decode_image.
+        let out_h: usize = if let (Some(cy), Some(ch)) = (self.crop_y, self.crop_height) {
+            let offset: usize = cy.min(base_h);
+            ch.min(base_h.saturating_sub(offset))
+        } else {
+            base_h
+        };
+
+        out_w
+            .checked_mul(out_h)
+            .and_then(|px| px.checked_mul(bpp))
+            .ok_or_else(|| {
+                JpegError::Unsupported(format!("output size {out_w}x{out_h}x{bpp} exceeds usize"))
+            })
+    }
+
+    /// Decode into a caller-provided buffer, returning the metadata
+    /// [`Image`] would carry minus the pixel `Vec` (issue #354).
+    ///
+    /// `out` must hold at least [`Self::output_buffer_size`] bytes; a
+    /// short buffer is a typed [`JpegError::BufferTooSmall`], never a
+    /// panic or truncation. The standard baseline/progressive output
+    /// paths (grayscale, 4:4:4, and every streamed subsampling mode)
+    /// write pixels directly into `out` with no output-sized heap
+    /// allocation; the remaining paths (CMYK, 12-bit, lossless, output
+    /// colourspace overrides, vertical crop) stage through an internal
+    /// buffer and copy, which is still allocation-neutral versus
+    /// `decode_image` and byte-identical to it.
+    ///
+    /// On error the contents of `out` are unspecified: a decode may
+    /// have written part of the frame before failing.
+    pub fn decode_image_into(&self, out: &mut [u8]) -> Result<ImageInfo> {
+        // Vertical crop re-slices the finished image below, which cannot
+        // be expressed in a caller buffer written at full height — stage
+        // those decodes.
+        let use_sink: bool = self.crop_y.is_none() && self.crop_height.is_none();
+        let mut sink: Option<&mut [u8]> = if use_sink { Some(&mut *out) } else { None };
+        let image: Image = self.decode_image_with_sink(&mut sink)?;
+        let sink_consumed: bool = use_sink && sink.is_none();
+
+        // Structural, not asserted: the staged path reports exactly what
+        // it copied, so a hypothetical path producing data shorter than
+        // w*h*bpp cannot over-report and expose stale caller bytes.
+        let bytes_written: usize = if sink_consumed {
+            debug_assert!(image.data.is_empty(), "sink branches return empty data");
+            image.width * image.height * image.pixel_format.bytes_per_pixel()
+        } else {
+            if out.len() < image.data.len() {
+                return Err(JpegError::BufferTooSmall {
+                    need: image.data.len(),
+                    got: out.len(),
+                });
+            }
+            out[..image.data.len()].copy_from_slice(&image.data);
+            image.data.len()
+        };
+        Ok(ImageInfo {
+            width: image.width,
+            height: image.height,
+            pixel_format: image.pixel_format,
+            precision: image.precision,
+            bytes_written,
+            icc_profile: image.icc_profile,
+            exif_data: image.exif_data,
+            comment: image.comment,
+            density: image.density,
+            saved_markers: image.saved_markers,
+            warnings: image.warnings,
+        })
+    }
+
+    fn decode_image_with_sink(&self, sink: &mut Option<&mut [u8]>) -> Result<Image> {
+        let mut image: Image = self.decode_image_inner(sink)?;
         if !self.marker_processors.is_empty() {
             for marker in &image.saved_markers {
                 if let Some(processor) = self.marker_processors.get(&marker.code) {
@@ -3353,12 +3571,22 @@ impl<'a> Decoder<'a> {
             let offset: usize = cy.min(image.height);
             let height: usize = ch.min(image.height.saturating_sub(offset));
             if offset > 0 || height < image.height {
-                let bpp: usize = image.pixel_format.bytes_per_pixel();
-                let row_bytes: usize = image.width * bpp;
-                let start: usize = offset * row_bytes;
-                let end: usize = start + height * row_bytes;
-                image.data = image.data[start..end].to_vec();
-                image.height = height;
+                // A sink-claimed decode returns empty data; vertical crop
+                // is excluded from sink mode in decode_image_into, so this
+                // is unreachable — keep it panic-free if that invariant
+                // ever breaks rather than indexing out of range.
+                debug_assert!(
+                    !image.data.is_empty(),
+                    "vertical crop cannot apply to a sink-claimed decode"
+                );
+                if !image.data.is_empty() {
+                    let bpp: usize = image.pixel_format.bytes_per_pixel();
+                    let row_bytes: usize = image.width * bpp;
+                    let start: usize = offset * row_bytes;
+                    let end: usize = start + height * row_bytes;
+                    image.data = image.data[start..end].to_vec();
+                    image.height = height;
+                }
             }
         }
         Ok(image)
@@ -3474,7 +3702,11 @@ impl<'a> Decoder<'a> {
         }
     }
 
-    fn decode_image_inner(&self) -> Result<Image> {
+    /// `sink`: caller-provided output buffer for `decode_image_into`.
+    /// Branches with native support claim it via `take_out_buf` (which
+    /// leaves it `None`); branches without leave it untouched and the
+    /// wrapper stages through the returned owned `data` instead.
+    fn decode_image_inner(&self, sink: &mut Option<&mut [u8]>) -> Result<Image> {
         let frame = &self.metadata.frame;
         let width = frame.width as usize;
         let height = frame.height as usize;
@@ -3750,11 +3982,25 @@ impl<'a> Decoder<'a> {
                 let off: usize = comp_x_offsets[0];
                 // When the decoded plane already has exactly the output
                 // geometry (MCU-aligned dimensions, no crop/scale slack),
-                // hand it over instead of row-copying into a fresh buffer.
-                let data = if off == 0
+                // hand it over instead of row-copying into a fresh buffer
+                // (owned mode) or bulk-copy it (caller-buffer mode).
+                let exact_geometry: bool = off == 0
                     && comp_w == out_width
-                    && component_planes[0].len() == comp_w * out_height
-                {
+                    && component_planes[0].len() == comp_w * out_height;
+                let data: Vec<u8> = if sink.is_some() {
+                    let mut buf = take_out_buf(sink, out_width * out_height)?;
+                    if exact_geometry {
+                        buf.copy_from_slice(&component_planes[0]);
+                    } else {
+                        for y in 0..out_height {
+                            buf[y * out_width..(y + 1) * out_width].copy_from_slice(
+                                &component_planes[0]
+                                    [y * comp_w + off..y * comp_w + off + out_width],
+                            );
+                        }
+                    }
+                    buf.into_vec()
+                } else if exact_geometry {
                     std::mem::take(&mut component_planes[0])
                 } else {
                     let mut data = Vec::with_capacity(out_width * out_height);
@@ -3782,7 +4028,7 @@ impl<'a> Decoder<'a> {
                 // Expand grayscale to requested color format
                 let bpp = out_format.bytes_per_pixel();
                 let data_size = out_width * out_height * bpp;
-                let mut data = vec![0u8; data_size];
+                let mut data = take_out_buf(sink, data_size)?;
                 for y in 0..out_height {
                     let row = &component_planes[0][y * comp_w + comp_x_offsets[0]
                         ..y * comp_w + comp_x_offsets[0] + out_width];
@@ -3837,7 +4083,7 @@ impl<'a> Decoder<'a> {
                     height: out_height,
                     pixel_format: out_format,
                     precision: 8,
-                    data,
+                    data: data.into_vec(),
                     icc_profile: icc_profile.clone(),
                     exif_data: exif_data.clone(),
                     comment: self.metadata.comment.clone(),
@@ -3899,7 +4145,7 @@ impl<'a> Decoder<'a> {
                 }
 
                 let data_size: usize = out_width * out_height * 3;
-                let mut data: Vec<u8> = vec![0u8; data_size];
+                let mut data = take_out_buf(sink, data_size)?;
                 for y in 0..out_height {
                     let r_row: &[u8] = &r_plane[y * r_stride + comp_x_offsets[0]..];
                     let g_row: &[u8] = &g_plane[y * g_stride + comp_x_offsets[1]..];
@@ -3917,7 +4163,7 @@ impl<'a> Decoder<'a> {
                     height: out_height,
                     pixel_format: out_format,
                     precision: 8,
-                    data,
+                    data: data.into_vec(),
                     icc_profile: icc_profile.clone(),
                     exif_data: exif_data.clone(),
                     comment: self.metadata.comment.clone(),
@@ -4169,7 +4415,7 @@ impl<'a> Decoder<'a> {
                     // allocating full-size cb_full/cr_full buffers (~4MB for 1080p).
                     // Process 2 output rows at a time, keeping data in L1/L2 cache.
                     let data_size = out_width * out_height * bpp;
-                    let mut data = vec![0u8; data_size];
+                    let mut data = take_out_buf(sink, data_size)?;
 
                     // Small per-row upsample buffers (2 rows × full_width per component)
                     let mut cb_row_top = vec![0u8; full_width];
@@ -4251,7 +4497,7 @@ impl<'a> Decoder<'a> {
                         height: out_height,
                         pixel_format: out_format,
                         precision: 8,
-                        data,
+                        data: data.into_vec(),
                         icc_profile: icc_profile.clone(),
                         exif_data: exif_data.clone(),
                         comment: self.metadata.comment.clone(),
@@ -4281,7 +4527,7 @@ impl<'a> Decoder<'a> {
                     && block_size == 8
                 {
                     let data_size: usize = out_width * out_height * bpp;
-                    let mut data: Vec<u8> = vec![0u8; data_size];
+                    let mut data = take_out_buf(sink, data_size)?;
 
                     // Per-row upsample scratch (full_width per component).
                     let mut cb_row: Vec<u8> = vec![0u8; full_width];
@@ -4324,7 +4570,7 @@ impl<'a> Decoder<'a> {
                         height: out_height,
                         pixel_format: out_format,
                         precision: 8,
-                        data,
+                        data: data.into_vec(),
                         icc_profile: icc_profile.clone(),
                         exif_data: exif_data.clone(),
                         comment: self.metadata.comment.clone(),
@@ -4346,7 +4592,7 @@ impl<'a> Decoder<'a> {
                     && block_size == 8
                 {
                     let data_size: usize = out_width * out_height * bpp;
-                    let mut data: Vec<u8> = vec![0u8; data_size];
+                    let mut data = take_out_buf(sink, data_size)?;
 
                     let mut cb_row: Vec<u8> = vec![0u8; full_width];
                     let mut cr_row: Vec<u8> = vec![0u8; full_width];
@@ -4402,7 +4648,7 @@ impl<'a> Decoder<'a> {
                         height: out_height,
                         pixel_format: out_format,
                         precision: 8,
-                        data,
+                        data: data.into_vec(),
                         icc_profile: icc_profile.clone(),
                         exif_data: exif_data.clone(),
                         comment: self.metadata.comment.clone(),
@@ -4439,7 +4685,7 @@ impl<'a> Decoder<'a> {
                     && nearest_eligible(cr_h_factor, cr_v_factor, actual_cr_w)
                 {
                     let data_size: usize = out_width * out_height * bpp;
-                    let mut data: Vec<u8> = vec![0u8; data_size];
+                    let mut data = take_out_buf(sink, data_size)?;
 
                     let mut cb_row: Vec<u8> = vec![0u8; full_width];
                     let mut cr_row: Vec<u8> = vec![0u8; full_width];
@@ -4525,7 +4771,7 @@ impl<'a> Decoder<'a> {
                         height: out_height,
                         pixel_format: out_format,
                         precision: 8,
-                        data,
+                        data: data.into_vec(),
                         icc_profile: icc_profile.clone(),
                         exif_data: exif_data.clone(),
                         comment: self.metadata.comment.clone(),
@@ -4668,7 +4914,7 @@ impl<'a> Decoder<'a> {
                 // then reconstruct and drop them. But simpler: just use a nested scope.
                 // Actually, let's just do the color conversion here and return.
                 let data_size = out_width * out_height * bpp;
-                let mut data = vec![0u8; data_size];
+                let mut data = take_out_buf(sink, data_size)?;
                 for y in 0..out_height {
                     self.color_convert_row(
                         out_format,
@@ -4686,7 +4932,7 @@ impl<'a> Decoder<'a> {
                     height: out_height,
                     pixel_format: out_format,
                     precision: 8,
-                    data,
+                    data: data.into_vec(),
                     icc_profile: icc_profile.clone(),
                     exif_data: exif_data.clone(),
                     comment: self.metadata.comment.clone(),
@@ -4698,7 +4944,7 @@ impl<'a> Decoder<'a> {
 
             // 4:4:4 path (no upsampling)
             let data_size = out_width * out_height * bpp;
-            let mut data = vec![0u8; data_size];
+            let mut data = take_out_buf(sink, data_size)?;
             for y in 0..out_height {
                 self.color_convert_row(
                     out_format,
@@ -4716,7 +4962,7 @@ impl<'a> Decoder<'a> {
                 height: out_height,
                 pixel_format: out_format,
                 precision: 8,
-                data,
+                data: data.into_vec(),
                 icc_profile: icc_profile.clone(),
                 exif_data: exif_data.clone(),
                 comment: self.metadata.comment.clone(),
