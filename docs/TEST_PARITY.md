@@ -250,7 +250,7 @@
 - [x] Multi-threaded encode — `concurrency.rs`
 - [x] Mixed encode/decode — `concurrency.rs`
 - [x] SIMD thread safety — `concurrency.rs`
-- [x] Send trait verification — `concurrency.rs`
+- [x] Send trait verification — `concurrency.rs` (`Image`, `Encoder`), `regression_issue_384_decoder_send.rs` (`Decoder` + wrappers)
 - [ ] Stress test under memory pressure — not tested
 
 ### Fuzzing
