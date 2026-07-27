@@ -269,9 +269,7 @@ pub struct Decoder<'a> {
     /// Vertical crop height in pixels.
     crop_height: Option<usize>,
     stop_on_warning: bool,
-    max_pixels: Option<usize>,
-    max_memory: Option<usize>,
-    scan_limit: Option<u32>,
+    limits: DecodeLimits,
     /// Fast upsampling toggle.
     pub(crate) fast_upsample: bool,
     /// Fast DCT toggle.
@@ -301,7 +299,16 @@ pub struct Decoder<'a> {
 
 impl<'a> Decoder<'a> {
     pub fn new(data: &'a [u8]) -> Result<Self> {
+        Self::new_with_limits(data, DecodeLimits::default())
+    }
+
+    /// Like [`Self::new`], but the limits apply from marker parsing
+    /// onward: a `max_scans` tighter than the parse default bounds
+    /// ScanInfo buffering during the header walk itself, not just at
+    /// decode time (issue #355).
+    pub fn new_with_limits(data: &'a [u8], limits: DecodeLimits) -> Result<Self> {
         let mut reader = MarkerReader::new(data);
+        reader.set_scan_cap(limits.max_scans);
         let mut metadata = reader.read_markers()?;
         // MJPEG frames may omit Huffman tables; provide standard defaults
         // (JPEG spec section K.3), matching C libjpeg-turbo's std_huff_tables().
@@ -319,9 +326,7 @@ impl<'a> Decoder<'a> {
             crop_y: None,
             crop_height: None,
             stop_on_warning: false,
-            max_pixels: None,
-            max_memory: None,
-            scan_limit: None,
+            limits,
             fast_upsample: false,
             fast_dct: false,
             dct_method: DctMethod::IsLow,
@@ -469,9 +474,7 @@ impl<'a> Decoder<'a> {
             crop_y: None,
             crop_height: None,
             stop_on_warning: false,
-            max_pixels: None,
-            max_memory: None,
-            scan_limit: None,
+            limits: DecodeLimits::default(),
             fast_upsample: false,
             fast_dct: false,
             dct_method: DctMethod::IsLow,
@@ -558,17 +561,41 @@ impl<'a> Decoder<'a> {
 
     /// Set maximum allowed image size in pixels. Reject images exceeding this.
     pub fn set_max_pixels(&mut self, limit: usize) {
-        self.max_pixels = Some(limit);
+        self.limits.max_pixels = limit as u64;
     }
 
     /// Set maximum memory usage in bytes.
     pub fn set_max_memory(&mut self, limit: usize) {
-        self.max_memory = Some(limit);
+        self.limits.max_memory = Some(limit as u64);
     }
 
     /// Set maximum number of progressive scans before error.
     pub fn set_scan_limit(&mut self, limit: u32) {
-        self.scan_limit = Some(limit);
+        self.limits.max_scans = limit as usize;
+    }
+
+    /// Configure all decoder resource limits at once (issue #355).
+    ///
+    /// Defaults ([`DecodeLimits::default`]) are permissive — they accept
+    /// everything djpeg accepts in the corpus gates while rejecting the
+    /// pathological corner (a header-only 65535x65535 SOF exceeds the
+    /// default `max_pixels` before any plane allocation). Use
+    /// [`DecodeLimits::strict`] for zune-like tight bounds. Exceeding a
+    /// limit is a typed [`JpegError::LimitExceeded`], never a panic.
+    /// Note on `max_scans`: marker parsing happens in the constructor,
+    /// bounded by the construction-time cap (`new` uses the 8192
+    /// default; `new_with_limits` threads the caller's value, higher or
+    /// lower). Setting a different `max_scans` here affects only the
+    /// decode-time check — a stream needing a larger parse cap must be
+    /// constructed with `new_with_limits`.
+    pub fn set_limits(&mut self, limits: DecodeLimits) {
+        self.limits = limits;
+    }
+
+    /// The currently configured resource limits.
+    #[must_use]
+    pub fn limits(&self) -> &DecodeLimits {
+        &self.limits
     }
 
     /// Enable or disable fast (nearest-neighbor) upsampling.
@@ -2213,14 +2240,12 @@ impl<'a> Decoder<'a> {
 
         // Process each scan, enforcing scan_limit if set
         for (scan_idx, scan_info) in self.metadata.scans.iter().enumerate() {
-            if let Some(limit) = self.scan_limit {
-                if scan_idx as u32 >= limit {
-                    return Err(JpegError::Unsupported(format!(
-                        "progressive scan count {} exceeds limit of {}",
-                        scan_idx + 1,
-                        limit
-                    )));
-                }
+            if scan_idx >= self.limits.max_scans {
+                return Err(JpegError::LimitExceeded {
+                    what: "progressive scan count",
+                    actual: (scan_idx + 1) as u64,
+                    limit: self.limits.max_scans as u64,
+                });
             }
             let scan_header = &scan_info.header;
             let is_dc = scan_header.spec_start == 0 && scan_header.spec_end == 0;
@@ -2435,14 +2460,12 @@ impl<'a> Decoder<'a> {
 
         // Process each scan, enforcing scan_limit if set
         for (scan_idx, scan_info) in self.metadata.scans.iter().enumerate() {
-            if let Some(limit) = self.scan_limit {
-                if scan_idx as u32 >= limit {
-                    return Err(JpegError::Unsupported(format!(
-                        "progressive scan count {} exceeds limit of {}",
-                        scan_idx + 1,
-                        limit
-                    )));
-                }
+            if scan_idx >= self.limits.max_scans {
+                return Err(JpegError::LimitExceeded {
+                    what: "progressive scan count",
+                    actual: (scan_idx + 1) as u64,
+                    limit: self.limits.max_scans as u64,
+                });
             }
             self.decode_progressive_scan(
                 frame,
@@ -3404,6 +3427,60 @@ impl<'a> Decoder<'a> {
         self.decode_image_with_sink(&mut None)
     }
 
+    /// Header-derived limit checks shared by every decode entry point
+    /// (decode_image_inner, decode_raw, output_buffer_size): dimensions,
+    /// pixel product, and scan count, all validated before any
+    /// output-scale allocation (issue #355; the sizing-path and raw-path
+    /// coverage came from the codex review).
+    fn check_header_limits(&self) -> Result<()> {
+        let frame = &self.metadata.frame;
+        let width: usize = frame.width as usize;
+        let height: usize = frame.height as usize;
+        self.limits.check_frame(width, height)?;
+        let total_pixels: u64 = (width as u64) * (height as u64);
+        if self.metadata.scans.len() > self.limits.max_scans {
+            return Err(JpegError::LimitExceeded {
+                what: "scan count",
+                actual: self.metadata.scans.len() as u64,
+                limit: self.limits.max_scans as u64,
+            });
+        }
+        // Estimated decode memory: output buffer + component planes.
+        // Enforced here so the sizing and raw paths share it (stop-gate
+        // review on #355); the estimate intentionally includes the
+        // packed-output term even for decode_raw — one conservative
+        // model, one enforcement point.
+        if let Some(max_mem) = self.limits.max_memory {
+            let nc = frame.components.len();
+            let out_bpp = self
+                .output_format
+                .unwrap_or(if nc == 1 {
+                    PixelFormat::Grayscale
+                } else {
+                    PixelFormat::Rgb
+                })
+                .bytes_per_pixel();
+            // Progressive adds one [i16; 64] per 8x8 block per component
+            // (~2 B/pixel/component) plus the ac_max_k byte per block —
+            // without this term the ceiling under-enforced by ~1.5x on
+            // exactly the hostile input class (#355 review).
+            let coeff_bytes: u64 = if frame.is_progressive {
+                total_pixels * (2 * nc as u64) + total_pixels * nc as u64 / 64
+            } else {
+                0
+            };
+            let total_estimated: u64 = total_pixels * (out_bpp as u64 + nc as u64) + coeff_bytes;
+            if total_estimated > max_mem {
+                return Err(JpegError::LimitExceeded {
+                    what: "estimated decode memory",
+                    actual: total_estimated,
+                    limit: max_mem,
+                });
+            }
+        }
+        Ok(())
+    }
+
     /// Bytes `decode_image_into` needs for this stream with the current
     /// decoder options. Exact for the standard paths; a safe upper
     /// bound when an output-colourspace override is active (sized at 4
@@ -3411,6 +3488,10 @@ impl<'a> Decoder<'a> {
     /// MCU-aligned estimate.
     #[must_use = "the returned size is the whole point of this query"]
     pub fn output_buffer_size(&self) -> Result<usize> {
+        // Untrusted-input workflow is size -> allocate -> decode, so the
+        // limits must fire here too or the caller OOMs before decode can
+        // reject (codex P1 on #355).
+        self.check_header_limits()?;
         let frame = &self.metadata.frame;
         let num_components: usize = frame.components.len();
         let bpp: usize = if self.output_colorspace.is_some() {
@@ -3711,37 +3792,8 @@ impl<'a> Decoder<'a> {
         let width = frame.width as usize;
         let height = frame.height as usize;
 
-        // Check pixel limit
-        if let Some(max) = self.max_pixels {
-            let total = width * height;
-            if total > max {
-                return Err(JpegError::Unsupported(format!(
-                    "image {}x{} ({} pixels) exceeds limit of {}",
-                    width, height, total, max
-                )));
-            }
-        }
-
-        // Enforce max_memory: reject if estimated decode memory exceeds limit.
-        // Estimate = output_buffer + component_plane_buffers.
-        if let Some(max_mem) = self.max_memory {
-            let nc = frame.components.len();
-            let out_bpp = self
-                .output_format
-                .unwrap_or(if nc == 1 {
-                    PixelFormat::Grayscale
-                } else {
-                    PixelFormat::Rgb
-                })
-                .bytes_per_pixel();
-            let total_estimated = width * height * out_bpp + width * height * nc;
-            if total_estimated > max_mem {
-                return Err(JpegError::Unsupported(format!(
-                    "estimated decode memory {} bytes exceeds limit of {} bytes",
-                    total_estimated, max_mem
-                )));
-            }
-        }
+        // Dimension / pixel / scan-count limits (issue #355).
+        self.check_header_limits()?;
 
         let icc_profile = self.icc_profile();
         let exif_data = self.metadata.exif_data.clone();
@@ -5001,6 +5053,7 @@ impl<'a> Decoder<'a> {
     /// resolution, without performing color conversion or upsampling.
     /// This matches libjpeg-turbo's `jpeg_read_raw_data()` functionality.
     pub fn decode_raw(self) -> Result<crate::api::raw_data::RawImage> {
+        self.check_header_limits()?;
         let frame = &self.metadata.frame;
         let width: usize = frame.width as usize;
         let height: usize = frame.height as usize;

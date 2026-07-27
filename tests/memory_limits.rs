@@ -30,12 +30,18 @@ fn max_pixels_rejects_image_exceeding_limit() {
         result.is_err(),
         "should reject 1024-pixel image with max_pixels=100"
     );
-    let err_msg = format!("{}", result.unwrap_err());
-    assert!(
-        err_msg.contains("exceeds limit"),
-        "error should mention exceeds limit, got: {}",
-        err_msg
-    );
+    match result.unwrap_err() {
+        libjpeg_turbo_rs::JpegError::LimitExceeded {
+            what,
+            actual,
+            limit,
+        } => {
+            assert_eq!(what, "total pixels");
+            assert_eq!(actual, 1024);
+            assert_eq!(limit, 100);
+        }
+        other => panic!("expected typed LimitExceeded (issue #355), got: {other}"),
+    }
 }
 
 #[test]
@@ -50,7 +56,7 @@ fn max_pixels_allows_image_within_limit() {
 }
 
 #[test]
-fn max_pixels_zero_means_unlimited() {
+fn max_pixels_zero_rejects_everything() {
     // Setting max_pixels to 0 means the limit IS 0 pixels, so any image is rejected.
     let pixels: Vec<u8> = vec![128u8; 8 * 8 * 3];
     let jpeg = compress(&pixels, 8, 8, PixelFormat::Rgb, 75, Subsampling::S444).unwrap();
