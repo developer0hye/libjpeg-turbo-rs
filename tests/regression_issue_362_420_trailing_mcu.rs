@@ -16,8 +16,10 @@
 //!
 //!   * the trailing MCU's second luma block column lies entirely outside the
 //!     image and must be a **dummy** block — AC all zero, the previous block's
-//!     DC copied in so the coded DC difference is zero (`jccoefct.c:292-312`) —
-//!     never the FDCT of replicated edge pixels;
+//!     DC copied in so the coded DC difference is zero (`jccoefct.c:184-192`
+//!     in `compress_data`, the single-pass path these tests drive; the
+//!     full-buffer variant is `:292-312`) — never the FDCT of replicated edge
+//!     pixels;
 //!   * 4:2:0 chroma has exactly `ceil(width/16)` block columns, i.e. never a
 //!     padding column at all, so no chroma-side padding strategy can produce
 //!     the reported window.
