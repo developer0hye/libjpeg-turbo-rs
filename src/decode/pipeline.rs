@@ -3787,6 +3787,14 @@ impl<'a> Decoder<'a> {
         icc_profile: Option<Vec<u8>>,
         exif_data: Option<Vec<u8>>,
     ) -> Result<Image> {
+        // Reject unsupported targets before the frame decode allocates
+        // anything (codex review on issue #394): a 12-bit source never
+        // converts to Cmyk in either arm.
+        if self.output_format == Some(PixelFormat::Cmyk) {
+            return Err(JpegError::Unsupported(
+                "cannot convert 12-bit JPEG to Cmyk".to_string(),
+            ));
+        }
         let img12 = crate::api::precision::decompress_12bit(self.raw_data)?;
         let num_components: usize = img12.num_components;
 
@@ -3805,19 +3813,83 @@ impl<'a> Decoder<'a> {
         let height: usize = img12.height;
 
         if num_components == 1 {
-            // Grayscale: scale directly, ignore output format conversion
-            // (only Grayscale makes sense for 1-component).
-            let mut data: Vec<u8> = Vec::with_capacity(width * height);
-            for &val in &img12.data {
-                let clamped: i16 = val.clamp(0, 4095);
-                data.push((clamped as u32 * 255 / 4095) as u8);
-            }
+            // Scale to 8-bit gray first, then honour the requested output
+            // format with the same expansion family as the 8-bit grayscale
+            // path — this arm used to hard-code Grayscale and silently
+            // ignore `output_format` while `output_buffer_size()`
+            // advertised the requested bpp (issue #394 / P4-65; C's
+            // `djpeg -rgb` expands instead of ignoring).
+            let gray8: Vec<u8> = img12
+                .data
+                .iter()
+                .map(|&val| (val.clamp(0, 4095) as u32 * 255 / 4095) as u8)
+                .collect();
+            let pad_off: Option<usize> = pad_alpha_offset(out_format);
+            let bpp: usize = out_format.bytes_per_pixel();
+            // Each arm builds its own buffer: the Grayscale case moves
+            // gray8 straight through with no second allocation, and the
+            // expansion cases allocate exactly once (codex review on
+            // issue #394).
+            let data: Vec<u8> = match out_format {
+                PixelFormat::Grayscale => gray8,
+                PixelFormat::Rgb | PixelFormat::Bgr => {
+                    let mut out: Vec<u8> = Vec::with_capacity(width * height * bpp);
+                    for &v in &gray8 {
+                        out.extend_from_slice(&[v, v, v]);
+                    }
+                    out
+                }
+                PixelFormat::Rgba
+                | PixelFormat::Bgra
+                | PixelFormat::Rgbx
+                | PixelFormat::Bgrx
+                | PixelFormat::Xrgb
+                | PixelFormat::Xbgr
+                | PixelFormat::Argb
+                | PixelFormat::Abgr => {
+                    let pad: usize = pad_off.expect("4bpp format has a pad offset");
+                    let mut out: Vec<u8> = Vec::with_capacity(width * height * bpp);
+                    for &v in &gray8 {
+                        let mut px: [u8; 4] = [v; 4];
+                        px[pad] = 255;
+                        out.extend_from_slice(&px);
+                    }
+                    out
+                }
+                PixelFormat::Rgb565 => {
+                    if self.dither_565 {
+                        // Same row-aware ordered dither as the 8-bit
+                        // grayscale path (codex review on issue #394:
+                        // set_dither_565 must not be silently ignored).
+                        let mut out: Vec<u8> = vec![0u8; width * height * 2];
+                        for y in 0..height {
+                            crate::decode::color::gray_to_rgb565_dithered_row(
+                                &gray8[y * width..(y + 1) * width],
+                                &mut out[y * width * 2..(y + 1) * width * 2],
+                                width,
+                                y,
+                            );
+                        }
+                        out
+                    } else {
+                        let mut out: Vec<u8> = Vec::with_capacity(width * height * 2);
+                        for &v in &gray8 {
+                            let packed: u16 = (((v as u16) >> 3) << 11)
+                                | (((v as u16) >> 2) << 5)
+                                | ((v as u16) >> 3);
+                            out.extend_from_slice(&packed.to_ne_bytes());
+                        }
+                        out
+                    }
+                }
+                PixelFormat::Cmyk => unreachable!("rejected above"),
+            };
             Ok(Image {
                 xmp_data: self.metadata.xmp_data.clone(),
                 iptc_data: self.metadata.iptc_data.clone(),
                 width,
                 height,
-                pixel_format: PixelFormat::Grayscale,
+                pixel_format: out_format,
                 precision: 8,
                 data,
                 icc_profile,
