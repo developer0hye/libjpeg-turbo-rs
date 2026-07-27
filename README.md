@@ -215,6 +215,39 @@ default release profile (`opt-level = 3`); a size-optimized profile
 target-cpu=native` buys only a further ~3% (measured on a 24 MP rot90,
 Zen 4; issue #308 has the full numbers).
 
+### EXIF Orientation (load a phone photo the right way up)
+
+Nearly every camera JPEG carries an EXIF orientation tag. Read it from
+the header alone — no pixel decode — and apply it in whichever domain
+fits (issue #391):
+
+```rust
+use libjpeg_turbo_rs::{decompress, Decoder, TransformOp};
+
+// Probe without decoding pixels (None when the JPEG carries no EXIF):
+let orientation: Option<u8> = Decoder::new(&jpeg_bytes)?.exif_orientation();
+
+// Pixel domain — decode, then reorient in one call:
+let upright = decompress(&jpeg_bytes)?.apply_orientation();
+
+// DCT domain — rewrite the JPEG losslessly instead (skip the no-op
+// re-encode for upright/untagged images). Strip the markers: transforms
+// copy them by default, and a stale orientation tag on already-rotated
+// pixels would make EXIF-aware viewers rotate twice. Note lossless
+// transforms cannot fully reorient partial edge blocks when dimensions
+// are not iMCU-aligned (see TransformOp::from_exif_orientation docs) —
+// the pixel-domain path above is exact at any size.
+use libjpeg_turbo_rs::{MarkerCopyMode, TransformOptions};
+if let Some(op) = orientation.and_then(TransformOp::from_exif_orientation) {
+    if op != TransformOp::None {
+        let upright_jpeg = libjpeg_turbo_rs::transform_jpeg_with_options(
+            &jpeg_bytes,
+            &TransformOptions { op, copy_markers: MarkerCopyMode::None, ..Default::default() },
+        )?;
+    }
+}
+```
+
 ### Scanline-Level I/O
 
 ```rust

@@ -117,10 +117,32 @@ fn issue_394_12bit_gray_honours_output_format() {
         output_buffer_size(&jpeg, PixelFormat::Rgb565).expect("output_buffer_size 565");
     let img565 = decompress_to(&jpeg, PixelFormat::Rgb565).expect("565 decode");
     assert_eq!(img565.pixel_format, PixelFormat::Rgb565);
+    assert_eq!((img565.width, img565.height), (width, height), "565 dims");
     assert_eq!(img565.data.len(), advertised);
     let v: u8 = gray.data[0];
     let packed: u16 = (((v as u16) >> 3) << 11) | (((v as u16) >> 2) << 5) | ((v as u16) >> 3);
     assert_eq!(&img565.data[0..2], &packed.to_ne_bytes(), "565 packing");
+
+    // Cmyk is the one target with no 12-bit conversion: typed error, not
+    // a panic and not a wrong-format Ok (drift audit on issue #394).
+    assert!(
+        matches!(
+            decompress_to(&jpeg, PixelFormat::Cmyk),
+            Err(libjpeg_turbo_rs::JpegError::Unsupported(_))
+        ),
+        "12-bit gray -> Cmyk must be a typed Unsupported error"
+    );
+
+    // decompress_into must agree byte-for-byte with decompress_to on
+    // this path (the #369 leg (e) pattern; the 12-bit route stages
+    // through a copy today — pin the equality, not the mechanism).
+    for &fmt in formats {
+        let reference = decompress_to(&jpeg, fmt).expect("decompress_to");
+        let mut buf: Vec<u8> = vec![0u8; reference.data.len()];
+        libjpeg_turbo_rs::decompress_into(&jpeg, fmt, &mut buf)
+            .unwrap_or_else(|e| panic!("{fmt:?}: decompress_into failed: {e}"));
+        assert_eq!(buf, reference.data, "{fmt:?}: decompress_into parity");
+    }
 
     // set_dither_565 must be honoured, exactly like the 8-bit grayscale
     // path: the dithered output goes through the same row-aware kernel,
@@ -240,4 +262,66 @@ fn issue_394_c_djpeg_rgb_expansion_matches() {
     let _ = std::fs::remove_file(&tmp_pgm);
     let _ = std::fs::remove_file(&tmp_jpg);
     let _ = std::fs::remove_file(&tmp_ppm);
+}
+
+/// P4-68 (found by the #394 drift audit): requesting Cmyk output from a
+/// non-CMYK source used to PANIC in three separate 8-bit arms
+/// (baseline colour at the unreachable colour-row match, baseline
+/// grayscale, lossless grayscale). C raises JERR_CONVERSION_NOTIMPL
+/// (jdcolor.c) — a typed error, never an abort. CMYK sources keep
+/// working.
+#[test]
+fn p4_68_cmyk_request_on_non_cmyk_sources_errors_not_panics() {
+    let rgb: Vec<u8> = (0..16 * 8 * 3).map(|i| (i % 256) as u8).collect();
+    let gray: Vec<u8> = (0..16 * 8).map(|i| (i % 256) as u8).collect();
+
+    let baseline_color = libjpeg_turbo_rs::compress(
+        &rgb,
+        16,
+        8,
+        PixelFormat::Rgb,
+        90,
+        libjpeg_turbo_rs::Subsampling::S420,
+    )
+    .expect("encode colour");
+    let baseline_gray = libjpeg_turbo_rs::compress(
+        &gray,
+        16,
+        8,
+        PixelFormat::Grayscale,
+        90,
+        libjpeg_turbo_rs::Subsampling::S444,
+    )
+    .expect("encode gray");
+    let lossless_gray = libjpeg_turbo_rs::compress_lossless(&gray, 16, 8, PixelFormat::Grayscale)
+        .expect("encode lossless gray");
+
+    for (label, jpeg) in [
+        ("baseline colour", &baseline_color),
+        ("baseline grayscale", &baseline_gray),
+        ("lossless grayscale", &lossless_gray),
+    ] {
+        assert!(
+            matches!(
+                decompress_to(jpeg, PixelFormat::Cmyk),
+                Err(libjpeg_turbo_rs::JpegError::Unsupported(_))
+            ),
+            "{label}: Cmyk request must be a typed error (was a panic, P4-68)"
+        );
+    }
+
+    // Control: a real CMYK source still decodes to Cmyk.
+    let cmyk: Vec<u8> = (0..16 * 8 * 4).map(|i| (i % 256) as u8).collect();
+    let cmyk_jpeg = libjpeg_turbo_rs::compress(
+        &cmyk,
+        16,
+        8,
+        PixelFormat::Cmyk,
+        90,
+        libjpeg_turbo_rs::Subsampling::S444,
+    )
+    .expect("encode cmyk");
+    let out = decompress_to(&cmyk_jpeg, PixelFormat::Cmyk).expect("cmyk decode");
+    assert_eq!(out.pixel_format, PixelFormat::Cmyk);
+    assert_eq!(out.data.len(), 16 * 8 * 4);
 }
