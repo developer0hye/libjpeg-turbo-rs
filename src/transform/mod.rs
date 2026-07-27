@@ -30,6 +30,38 @@ pub enum TransformOp {
     Rot270,
 }
 
+impl TransformOp {
+    /// The lossless transform that makes an image with this EXIF
+    /// orientation (tag 0x0112, values 1-8) display upright — the
+    /// standard mapping every photo application otherwise hand-rolls
+    /// (issue #391). Returns `None` for values outside 1..=8.
+    ///
+    /// Lossless caveats (same as `jpegtran`): when the dimensions are
+    /// not iMCU-aligned (e.g. a 600x450 4:2:0 photo), coefficient-domain
+    /// transforms cannot fully reorient the partial edge blocks — use
+    /// [`crate::TransformOptions`] with `perfect` to reject such images,
+    /// `trim` to drop the edge, or the pixel-domain
+    /// `Image::apply_orientation` for exact output at any size. And the
+    /// default marker copying preserves the original orientation tag on
+    /// the transformed output, which would make EXIF-aware viewers
+    /// rotate twice — pair the transform with
+    /// [`crate::MarkerCopyMode::None`] (or rewrite the tag) when the
+    /// output is meant for display.
+    pub fn from_exif_orientation(orientation: u8) -> Option<Self> {
+        match orientation {
+            1 => Some(Self::None),
+            2 => Some(Self::HFlip),
+            3 => Some(Self::Rot180),
+            4 => Some(Self::VFlip),
+            5 => Some(Self::Transpose),
+            6 => Some(Self::Rot90),
+            7 => Some(Self::Transverse),
+            8 => Some(Self::Rot270),
+            _ => None,
+        }
+    }
+}
+
 /// Configuration for a lossless transform operation.
 #[derive(Debug, Clone)]
 pub struct TransformInfo {
