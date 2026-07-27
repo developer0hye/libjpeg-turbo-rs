@@ -48,6 +48,7 @@ cargo +nightly fuzz run fuzz_decompress -- -dict=fuzz/jpeg.dict -max_total_time=
 |--------|-------------|-------------|
 | `fuzz_decompress` | Main decoder — highest priority target | ~347 |
 | `fuzz_decompress_lenient` | Lenient-mode decoder (tolerates partial corruption) | ~347 |
+| `fuzz_decompress_precision` | 12/16-bit and arbitrary-precision decode entry points (`api/precision.rs`) | 3 |
 | `fuzz_roundtrip` | Compress then decompress — checks encoder/decoder consistency | ~320 |
 | `fuzz_read_coefficients` | DCT coefficient reader | ~347 |
 | `fuzz_transform` | Read coefficients then write them back | ~331 |
