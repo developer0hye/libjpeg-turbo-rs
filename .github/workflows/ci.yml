@@ -229,8 +229,6 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - os: ubuntu-latest
-            install: sudo apt-get install -y libjpeg-turbo-progs
           - os: macos-latest  # aarch64
             install: brew install jpeg-turbo
     steps:
@@ -241,8 +239,22 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: Install libjpeg-turbo tools
         run: ${{ matrix.install }}
-      - run: cargo test "cross_encode|cross_check" --tests
-        timeout-minutes: 15
+      # Full test run, deliberately unfiltered (issue #377, P4-61). The old
+      # `cargo test "cross_encode|cross_check" --tests` matched nothing:
+      # libtest's positional filter is a substring match against test NAMES
+      # (not a regex, not file names), and the tests inside the
+      # cross_check_*/cross_encode_* files have names like
+      # c_xval_decode_bgr_444 — so the job built every test binary and ran
+      # zero tests. Even the corrected multi-filter form
+      # (`-- cross_encode cross_check`) selects only 8 tests by name.
+      # This job's unique coverage is the C-tool environment: aarch64 +
+      # Homebrew jpeg-turbo 3.x, the only such leg in CI. The former
+      # ubuntu-latest leg is gone: with apt's 2.1.x tools the suite cannot
+      # run (tests feed SOF3/12-bit streams to djpeg unconditionally), and
+      # installing the official 3.1.4.1 deb would make it an exact duplicate
+      # of the Integration Tests job.
+      - run: cargo test --tests
+        timeout-minutes: 30
 
   test-corpus:
     name: Corpus Test (C parity)
