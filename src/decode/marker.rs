@@ -8,6 +8,9 @@ use crate::common::types::*;
 /// "ICC_PROFILE\0" identifier (12 bytes) in APP2 markers.
 const ICC_PROFILE_HEADER: &[u8; 12] = b"ICC_PROFILE\0";
 
+/// Default parse-time SOS cap (issue #355). See `MarkerReader::set_scan_cap`.
+pub const DEFAULT_PARSE_SCAN_CAP: usize = 8_192;
+
 /// "Exif\0\0" identifier (6 bytes) in APP1 markers.
 const EXIF_HEADER: &[u8; 6] = b"Exif\0\0";
 
@@ -111,6 +114,9 @@ pub struct MarkerReader<'a> {
     data: &'a [u8],
     pos: usize,
     marker_save_config: MarkerSaveConfig,
+    /// Parse-time SOS cap (issue #355): bounds ScanInfo buffering while
+    /// markers are read, before any decode-time limit can apply.
+    scan_cap: usize,
 }
 
 impl<'a> MarkerReader<'a> {
@@ -119,7 +125,16 @@ impl<'a> MarkerReader<'a> {
             data,
             pos: 0,
             marker_save_config: MarkerSaveConfig::None,
+            scan_cap: DEFAULT_PARSE_SCAN_CAP,
         }
+    }
+
+    /// Override the parse-time SOS cap. The default (8192) bounds
+    /// parse-stage buffering for every caller; raising it is for the
+    /// C-ABI shim, whose TurboJPEG contract (TJPARAM_SCANLIMIT = 0)
+    /// promises NO library-level scan cap.
+    pub fn set_scan_cap(&mut self, cap: usize) {
+        self.scan_cap = cap;
     }
 
     /// Set the marker save configuration.
@@ -269,6 +284,22 @@ impl<'a> MarkerReader<'a> {
                     restart_interval = self.read_dri()?;
                 }
                 SOS => {
+                    // Parse-time scan-bomb bound (issue #355): each
+                    // ScanInfo buffers a table snapshot, so an unbounded
+                    // SOS count lets a small file allocate without limit
+                    // during header parse — before any Decoder limit can
+                    // apply. The default is far above any real
+                    // progressive script (and above the 5000-scan bomb
+                    // the worker_b8 suite pins as parseable);
+                    // Decoder::new_with_limits threads a tighter
+                    // DecodeLimits::max_scans in via set_scan_cap.
+                    if scans.len() >= self.scan_cap {
+                        return Err(JpegError::LimitExceeded {
+                            what: "scan count at parse",
+                            actual: (scans.len() + 1) as u64,
+                            limit: self.scan_cap as u64,
+                        });
+                    }
                     let header = self.read_sos()?;
                     // C jdmarker.c get_sos: every scan component must bind
                     // to a distinct frame component; no match is fatal

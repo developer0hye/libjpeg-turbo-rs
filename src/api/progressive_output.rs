@@ -58,8 +58,18 @@ pub struct ProgressiveDecoder {
 
 impl ProgressiveDecoder {
     /// Create from JPEG data. Returns error if not a progressive JPEG.
+    /// Applies [`crate::common::types::DecodeLimits::default`]; use
+    /// [`Self::with_limits`] to tighten (e.g. a `max_memory` ceiling for
+    /// the coefficient buffers this decoder holds across scans).
     pub fn new(data: &[u8]) -> Result<Self> {
+        Self::with_limits(data, crate::common::types::DecodeLimits::default())
+    }
+
+    /// Like [`Self::new`] with caller-chosen resource limits, applied
+    /// from marker parsing onward (issue #355).
+    pub fn with_limits(data: &[u8], limits: crate::common::types::DecodeLimits) -> Result<Self> {
         let mut reader: MarkerReader<'_> = MarkerReader::new(data);
+        reader.set_scan_cap(limits.max_scans);
         let metadata: JpegMetadata = reader.read_markers()?;
 
         if !metadata.frame.is_progressive {
@@ -81,6 +91,36 @@ impl ProgressiveDecoder {
             .map(|c| c.vertical_sampling as usize)
             .max()
             .unwrap_or(1);
+
+        // Resource guards (issue #355): coefficient buffers are
+        // allocated below from header-declared dimensions, so bound them
+        // before any allocation.
+        limits.check_frame(frame.width as usize, frame.height as usize)?;
+        // Defence-in-depth: with default limits this is subsumed by the
+        // parse-time cap in read_markers; it stays so the two cannot
+        // drift and so tighter caller limits apply here too.
+        if metadata.scans.len() > limits.max_scans {
+            return Err(JpegError::LimitExceeded {
+                what: "progressive scan count",
+                actual: metadata.scans.len() as u64,
+                limit: limits.max_scans as u64,
+            });
+        }
+        // Coefficient memory ceiling (progressive holds ~2 B/px/component
+        // of i16 coefficients plus the raw stream copy).
+        if let Some(max_mem) = limits.max_memory {
+            let total_pixels: u64 = (frame.width as u64) * (frame.height as u64);
+            let nc: u64 = frame.components.len() as u64;
+            let estimated: u64 =
+                total_pixels * (2 * nc) + total_pixels * nc / 64 + data.len() as u64;
+            if estimated > max_mem {
+                return Err(JpegError::LimitExceeded {
+                    what: "estimated decode memory",
+                    actual: estimated,
+                    limit: max_mem,
+                });
+            }
+        }
 
         let mcu_w: usize = max_h * 8;
         let mcu_h: usize = max_v * 8;
