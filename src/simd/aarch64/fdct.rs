@@ -12,7 +12,7 @@
 //! matching `fdct_islow` output. This scaling factor is removed during
 //! quantization.
 
-use std::arch::aarch64::*;
+use core::arch::aarch64::*;
 
 const CONST_BITS: i32 = 13;
 const PASS1_BITS: i32 = 2;

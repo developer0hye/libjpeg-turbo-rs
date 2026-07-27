@@ -1,4 +1,9 @@
+// libjpeg-turbo-rs: alloc prelude (no_std support, issue #356)
 use crate::common::types::IccChunk;
+#[allow(unused_imports)]
+use alloc::vec::Vec;
+#[allow(unused_imports)]
+use alloc::{format, vec};
 
 /// Reassemble an ICC profile from APP2 marker chunks.
 ///

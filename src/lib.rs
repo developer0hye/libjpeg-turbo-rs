@@ -1,3 +1,22 @@
+//! Pure-Rust libjpeg-turbo reimplementation.
+//!
+//! # Feature flags
+//!
+//! - **`std`** *(default)*: `std::io` streaming API, file-path helpers,
+//!   runtime CPU-feature detection, and std-backed error types.
+//! - **`no_std` + `alloc`**: disable default features for the core
+//!   codec (headers, entropy decode, IDCT, upsample, colour convert,
+//!   encode). SIMD then dispatches on compile-time `target_feature`
+//!   only — there is no CPUID probe without `std` (issue #356).
+//! - **`simd`** *(default)*: architecture intrinsics (NEON / SSE2 /
+//!   AVX2 / WASM SIMD128).
+#![cfg_attr(not(feature = "std"), no_std)]
+
+// libjpeg-turbo-rs: alloc prelude (no_std support, issue #356)
+#[allow(unused_imports)]
+use alloc::vec::Vec;
+extern crate alloc;
+
 pub mod api;
 pub mod common;
 pub mod decode;
@@ -30,13 +49,17 @@ pub use api::high_level::{
     decompress_cropped, decompress_into, decompress_lenient, decompress_to, output_buffer_size,
 };
 #[cfg(feature = "png")]
+#[cfg(feature = "std")]
 pub use api::image_io::load_png_from_bytes;
 #[cfg(all(feature = "png", any(not(target_arch = "wasm32"), target_os = "wasi")))]
+#[cfg(feature = "std")]
 pub use api::image_io::save_png;
 #[cfg(any(not(target_arch = "wasm32"), target_os = "wasi"))]
+#[cfg(feature = "std")]
 pub use api::image_io::{
     load_image, load_ppm_12bit, load_ppm_16bit, save_bmp, save_ppm, save_ppm_12bit, save_ppm_16bit,
 };
+#[cfg(feature = "std")]
 pub use api::image_io::{
     load_image_from_bytes, load_ppm_12bit_from_bytes, load_ppm_16bit_from_bytes, LoadedImage,
     LoadedImage12, LoadedImage16,
@@ -63,6 +86,7 @@ pub mod quantize {
 pub use api::progressive_output::ProgressiveDecoder;
 pub use api::scanline::{ScanlineDecoder, ScanlineEncoder};
 /// Streaming I/O functions for reading/writing JPEG via `std::io` traits and file paths.
+#[cfg(feature = "std")]
 pub use api::stream;
 pub use common::bufsize::{
     calc_jpeg_dimensions, calc_output_dimensions, jpeg_buf_size, transform_buf_size, yuv_buf_size,

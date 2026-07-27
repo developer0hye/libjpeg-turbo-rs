@@ -6,6 +6,11 @@
 //! Supports H2V1 (4:2:2) and H2V2 (4:2:0) subsampling modes.
 //! Uses the same BT.601 fixed-point coefficients as `color.rs`.
 
+// libjpeg-turbo-rs: alloc prelude (no_std support, issue #356)
+#[allow(unused_imports)]
+use alloc::vec::Vec;
+#[allow(unused_imports)]
+use alloc::{format, vec};
 /// Fixed-point scale: 16-bit shift (matches libjpeg-turbo SCALEBITS=16).
 const SCALEBITS: i32 = 16;
 const ONE_HALF: i32 = 1 << (SCALEBITS - 1);

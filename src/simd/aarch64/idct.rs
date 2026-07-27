@@ -7,7 +7,7 @@
 //! in natural (row-major) order. We first reorder to natural order during
 //! the dequantization step, then perform the 2-pass IDCT.
 
-use std::arch::aarch64::*;
+use core::arch::aarch64::*;
 
 const CONST_BITS: i32 = 13;
 const PASS1_BITS: i32 = 2;

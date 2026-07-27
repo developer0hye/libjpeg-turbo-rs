@@ -1,3 +1,6 @@
+// libjpeg-turbo-rs: alloc prelude (no_std support, issue #356)
+#[allow(unused_imports)]
+use alloc::vec::Vec;
 /// JPEG color spaces.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ColorSpace {
@@ -458,7 +461,7 @@ pub enum MarkerSaveConfig {
     /// per-code truncation: the saved `data` slice is `min(full_len, limit)`
     /// bytes long.  A missing entry for a code is treated as "no limit"
     /// (`usize::MAX`).
-    WithLimits(std::collections::HashMap<u8, usize>),
+    WithLimits(alloc::collections::BTreeMap<u8, usize>),
 }
 
 /// Progressive scan script entry.

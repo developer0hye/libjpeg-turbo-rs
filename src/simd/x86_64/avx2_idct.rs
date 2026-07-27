@@ -211,7 +211,7 @@ unsafe fn avx2_idct_islow_core(
         let mut tmp = [0u8; 64];
         crate::simd::scalar::scalar_idct_islow(coeffs, quant, &mut tmp);
         for r in 0..8 {
-            std::ptr::copy_nonoverlapping(tmp.as_ptr().add(r * 8), output.add(r * stride), 8);
+            core::ptr::copy_nonoverlapping(tmp.as_ptr().add(r * 8), output.add(r * stride), 8);
         }
         return;
     }

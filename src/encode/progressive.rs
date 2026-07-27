@@ -1,3 +1,8 @@
+// libjpeg-turbo-rs: alloc prelude (no_std support, issue #356)
+#[allow(unused_imports)]
+use alloc::vec::Vec;
+#[allow(unused_imports)]
+use alloc::{format, vec};
 /// Progressive JPEG scan script generation and encoding.
 ///
 /// Generates a simple progressive scan order following libjpeg-turbo's

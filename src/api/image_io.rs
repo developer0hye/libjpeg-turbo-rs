@@ -3,8 +3,13 @@
 //! Provides `load_image` / `save_bmp` / `save_ppm` matching libjpeg-turbo's
 //! `tj3LoadImage8()` / `tj3SaveImage8()` functionality.
 
+// libjpeg-turbo-rs: alloc prelude (no_std support, issue #356)
 use crate::common::error::{JpegError, Result};
 use crate::common::types::PixelFormat;
+#[allow(unused_imports)]
+use alloc::{format, vec};
+#[allow(unused_imports)]
+use alloc::{string::String, vec::Vec};
 #[cfg(any(not(target_arch = "wasm32"), target_os = "wasi"))]
 use std::fs;
 #[cfg(any(not(target_arch = "wasm32"), target_os = "wasi"))]
@@ -365,12 +370,12 @@ fn load_ppm_from_bytes(data: &[u8]) -> Result<LoadedImage> {
     if !is_grayscale && !is_rgb {
         return Err(JpegError::Unsupported(format!(
             "unsupported PPM magic: {:?}",
-            std::str::from_utf8(magic).unwrap_or("??")
+            core::str::from_utf8(magic).unwrap_or("??")
         )));
     }
 
     // Parse header: "P[56]\n{width} {height}\n{maxval}\n"
-    let header_str: &str = std::str::from_utf8(data)
+    let header_str: &str = core::str::from_utf8(data)
         .map_err(|_| JpegError::CorruptData("PPM header is not valid UTF-8".into()))
         .or_else(|_| {
             // The pixel data may not be valid UTF-8; parse only enough of the header.
@@ -389,7 +394,7 @@ fn load_ppm_from_bytes(data: &[u8]) -> Result<LoadedImage> {
             if header_end == 0 {
                 return Err(JpegError::CorruptData("cannot parse PPM header".into()));
             }
-            std::str::from_utf8(&data[..header_end])
+            core::str::from_utf8(&data[..header_end])
                 .map_err(|_| JpegError::CorruptData("PPM header is not valid UTF-8".into()))
         })?;
 
@@ -657,7 +662,7 @@ fn parse_ppm_highbit(data: &[u8]) -> Result<(usize, usize, usize, usize, Vec<u16
     if !is_grayscale && !is_rgb {
         return Err(JpegError::Unsupported(format!(
             "unsupported PPM magic for high-bit load: {:?}",
-            std::str::from_utf8(magic).unwrap_or("??")
+            core::str::from_utf8(magic).unwrap_or("??")
         )));
     }
 
@@ -667,14 +672,14 @@ fn parse_ppm_highbit(data: &[u8]) -> Result<(usize, usize, usize, usize, Vec<u16
     // (width, height, maxval), skipping `#`-prefixed comments. Capping at
     // 64 KiB keeps worst-case effort bounded.
     let scan_len: usize = data.len().min(65536);
-    let header_str: &str = std::str::from_utf8(&data[..scan_len])
+    let header_str: &str = core::str::from_utf8(&data[..scan_len])
         .or_else(|_| {
             // Fall back to the longest valid-UTF-8 prefix of the scan window.
             let mut cut: usize = scan_len;
-            while cut > 0 && std::str::from_utf8(&data[..cut]).is_err() {
+            while cut > 0 && core::str::from_utf8(&data[..cut]).is_err() {
                 cut -= 1;
             }
-            std::str::from_utf8(&data[..cut])
+            core::str::from_utf8(&data[..cut])
         })
         .map_err(|_| JpegError::CorruptData("PPM header is not valid UTF-8".into()))?;
 

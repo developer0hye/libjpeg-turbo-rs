@@ -11,7 +11,12 @@
 //!   F_1_402 = 22971  (1.4020386 = 22971 * 2^-14)
 //!   F_1_772 = 29033  (1.7720337 = 29033 * 2^-14)
 
-use std::arch::aarch64::*;
+// libjpeg-turbo-rs: alloc prelude (no_std support, issue #356)
+#[allow(unused_imports)]
+use alloc::vec::Vec;
+#[allow(unused_imports)]
+use alloc::{format, vec};
+use core::arch::aarch64::*;
 
 /// Color conversion constants (same as color.rs, matching C libjpeg-turbo).
 #[repr(align(16))]

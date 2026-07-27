@@ -1,3 +1,6 @@
+// libjpeg-turbo-rs: alloc prelude (no_std support, issue #356)
+#[allow(unused_imports)]
+use alloc::string::String;
 /// All errors that can occur during JPEG processing.
 ///
 /// `#[non_exhaustive]`: variants may be added in minor releases (the
@@ -31,12 +34,13 @@ pub enum JpegError {
     #[error("unexpected end of data")]
     UnexpectedEof,
 
+    #[cfg(feature = "std")]
     #[error(transparent)]
     Io(#[from] std::io::Error),
 }
 
 /// Convenience alias used throughout the crate.
-pub type Result<T> = std::result::Result<T, JpegError>;
+pub type Result<T> = core::result::Result<T, JpegError>;
 
 /// Non-fatal warning that allows recovery in lenient mode.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -60,8 +64,8 @@ pub enum DecodeWarning {
     UnsupportedRecovered { detail: String },
 }
 
-impl std::fmt::Display for DecodeWarning {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl core::fmt::Display for DecodeWarning {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
             Self::HuffmanError {
                 mcu_x,

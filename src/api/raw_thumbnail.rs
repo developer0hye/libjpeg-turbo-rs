@@ -24,7 +24,12 @@
 //! * Walks at most a small number of IFDs to avoid pathological loops in
 //!   hostile input.
 
+// libjpeg-turbo-rs: alloc prelude (no_std support, issue #356)
 use crate::common::error::{JpegError, Result};
+#[allow(unused_imports)]
+use alloc::vec::Vec;
+#[allow(unused_imports)]
+use alloc::{format, vec};
 
 /// Maximum number of IFDs to follow in the next-IFD chain.  Real cameras
 /// use at most 3 (IFD0 = metadata, IFD1 = thumbnail, IFD2 = preview); we

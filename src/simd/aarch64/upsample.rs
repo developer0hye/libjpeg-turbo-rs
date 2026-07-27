@@ -8,7 +8,7 @@
 //! Unlike libjpeg-turbo's NEON implementation which relies on over-allocated
 //! buffers, this version uses explicit bounds checking for safe operation.
 
-use std::arch::aarch64::*;
+use core::arch::aarch64::*;
 
 /// NEON fancy horizontal 2x upsample.
 pub fn neon_fancy_upsample_h2v1(input: &[u8], in_width: usize, output: &mut [u8]) {

@@ -180,6 +180,7 @@
 
 ### Output Format
 - [x] Configurable decoder resource limits (`DecodeLimits`, `Decoder::set_limits` — width/height/pixels/scans/memory, #355)
+- [x] `no_std` + `alloc` core codec (`--no-default-features`; CI-built for `thumbv7em-none-eabihf`, #356)
 - [x] Output pixel format selection (`decompress_to`)
 - [x] Decode into caller-owned buffer (`decompress_into`, `output_buffer_size`, `Decoder::decode_image_into` — #354)
 - [x] Scaled IDCT — all 16 factors: 1/8 through 2/1 (`set_scale`)
