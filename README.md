@@ -147,6 +147,8 @@ let jpeg = Encoder::new(&pixels, width, height, PixelFormat::Rgb)
     .progressive(true)
     .optimize_huffman(true)
     .icc_profile(&icc_data)
+    .xmp_data(&xmp_packet)   // APP1 XMP
+    .iptc_data(&iptc_iim)    // APP13 Photoshop IRB
     .encode()?;
 ```
 
@@ -251,7 +253,7 @@ All SIMD routines have scalar fallbacks. SIMD is enabled by default via the `sim
 - Scaled IDCT (all 16 libjpeg factors: 2/1, 15/8, 7/4, ..., 1/2, 1/4, 1/8)
 - Lossless spatial transforms (rotate, flip, transpose)
 - DCT coefficient access (`read_coefficients` / `write_coefficients`)
-- Metadata: JFIF, EXIF, ICC profile, Adobe APP14, comments
+- Metadata: JFIF, EXIF, ICC profile, XMP (read incl. Extended XMP reassembly; write is single-segment), IPTC (APP13 Photoshop IRB), Adobe APP14, comments
 - YUV plane encode/decode (raw component data)
 - Scanline-level streaming API
 - Crop decoding (MCU-aligned)

@@ -90,6 +90,8 @@ pub fn decompress_cropped(data: &[u8], region: CropRegion) -> Result<Image> {
 
     if w == 0 || h == 0 {
         return Ok(Image {
+            xmp_data: None,
+            iptc_data: None,
             width: w,
             height: h,
             pixel_format: PixelFormat::Rgb,
