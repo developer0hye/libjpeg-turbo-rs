@@ -1,3 +1,4 @@
+// libjpeg-turbo-rs: alloc prelude (no_std support, issue #356)
 /// Raw data encode/decode API.
 ///
 /// Provides functions to encode JPEG from pre-downsampled component planes
@@ -8,6 +9,8 @@ use crate::common::error::Result;
 use crate::common::types::Subsampling;
 use crate::decode::pipeline::Decoder;
 use crate::encode::pipeline as encoder;
+#[allow(unused_imports)]
+use alloc::vec::Vec;
 
 /// Decoded raw component plane data.
 ///

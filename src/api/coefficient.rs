@@ -1,3 +1,4 @@
+// libjpeg-turbo-rs: alloc prelude (no_std support, issue #356)
 /// Coefficient-level JPEG access for lossless transforms.
 ///
 /// Provides read_coefficients() / write_coefficients() / transform() API
@@ -12,6 +13,10 @@ use crate::encode::pipeline as encoder_pipeline;
 use crate::encode::tables;
 use crate::transform::spatial;
 use crate::transform::{TransformOp, TransformOptions};
+#[allow(unused_imports)]
+use alloc::{format, vec};
+#[allow(unused_imports)]
+use alloc::{string::ToString, vec::Vec};
 
 /// Per-component DCT coefficient data.
 #[derive(Debug, Clone)]
@@ -880,9 +885,9 @@ pub fn transform_jpeg_with_options(data: &[u8], options: &TransformOptions) -> R
         }
 
         if swaps_dims {
-            std::mem::swap(&mut coeffs.width, &mut coeffs.height);
+            core::mem::swap(&mut coeffs.width, &mut coeffs.height);
             for comp in &mut coeffs.components {
-                std::mem::swap(&mut comp.h_sampling, &mut comp.v_sampling);
+                core::mem::swap(&mut comp.h_sampling, &mut comp.v_sampling);
             }
             for qt in &mut coeffs.quant_tables {
                 transpose_quant_table(qt);

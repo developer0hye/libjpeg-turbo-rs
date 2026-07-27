@@ -6,11 +6,14 @@
 //!   - AC first:  Initial AC coefficient scan (Ah=0, Ss>0)
 //!   - AC refine: Refinement bits for AC (Ah≠0, Ss>0)
 
+// libjpeg-turbo-rs: alloc prelude (no_std support, issue #356)
 use crate::common::error::{JpegError, Result};
 use crate::common::huffman_table::HuffmanTable;
 use crate::common::quant_table::ZIGZAG_ORDER;
 use crate::decode::bitstream::BitReader;
 use crate::decode::huffman;
+#[allow(unused_imports)]
+use alloc::{format, vec};
 
 /// Extend a raw bit value to a signed coefficient.
 ///

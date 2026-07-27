@@ -8,7 +8,7 @@
 //!   G = Y - 0.34414 * (Cb - 128) - 0.71414 * (Cr - 128)
 //!   B = Y + 1.77200 * (Cb - 128)
 
-use std::arch::aarch64::*;
+use core::arch::aarch64::*;
 
 /// Scaled integer constants (matching libjpeg-turbo):
 ///   F_0_344 = 11277  (0.3441467 = 11277 * 2^-15)

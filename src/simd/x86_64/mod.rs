@@ -19,7 +19,7 @@ use crate::simd::{EncoderSimdRoutines, QuantDivisors, SimdRoutines};
 ///
 /// Selects AVX2 if available, then SSE2, otherwise falls back to scalar.
 pub fn routines() -> SimdRoutines {
-    if is_x86_feature_detected!("avx2") {
+    if crate::cpu_has!("avx2") {
         return SimdRoutines {
             idct_islow: avx2_idct::avx2_idct_islow,
             idct_ifast: crate::simd::scalar::scalar_idct_ifast,
@@ -29,7 +29,7 @@ pub fn routines() -> SimdRoutines {
         };
     }
 
-    if is_x86_feature_detected!("sse2") {
+    if crate::cpu_has!("sse2") {
         return SimdRoutines {
             idct_islow: idct::sse2_idct_islow,
             idct_ifast: crate::simd::scalar::scalar_idct_ifast,
@@ -44,7 +44,7 @@ pub fn routines() -> SimdRoutines {
 
 /// Return x86_64 encoder SIMD routines.
 pub fn encoder_routines() -> EncoderSimdRoutines {
-    if is_x86_feature_detected!("avx2") {
+    if crate::cpu_has!("avx2") {
         return EncoderSimdRoutines {
             rgb_to_ycbcr_row: avx2_color_encode::avx2_rgb_to_ycbcr_row,
             fdct_quantize: avx2_fdct_quantize,

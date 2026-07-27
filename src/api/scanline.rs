@@ -1,3 +1,4 @@
+// libjpeg-turbo-rs: alloc prelude (no_std support, issue #356)
 /// Scanline-level encode and decode API for row-by-row JPEG processing.
 ///
 /// `ScanlineDecoder` wraps the existing `Decoder` and exposes a scanline-at-a-time
@@ -9,6 +10,10 @@
 use crate::common::error::{JpegError, Result};
 use crate::common::types::{ColorSpace, DctMethod, FrameHeader, PixelFormat, Subsampling};
 use crate::decode::pipeline::{Decoder, Image};
+#[allow(unused_imports)]
+use alloc::vec::Vec;
+#[allow(unused_imports)]
+use alloc::{format, vec};
 
 /// Row-by-row JPEG decoder.
 pub struct ScanlineDecoder<'a> {

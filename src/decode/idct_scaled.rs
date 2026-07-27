@@ -1,3 +1,6 @@
+// libjpeg-turbo-rs: alloc prelude (no_std support, issue #356)
+#[allow(unused_imports)]
+use alloc::{format, vec};
 /// Reduced-size IDCT implementations for scaled JPEG decoding.
 ///
 /// These produce smaller output blocks from 8x8 DCT coefficients:
@@ -231,7 +234,7 @@ pub unsafe fn idct_4x4_strided(
     let mut tmp = [0u8; 16];
     idct_4x4(coeffs, quant, &mut tmp);
     for row in 0..4 {
-        std::ptr::copy_nonoverlapping(tmp.as_ptr().add(row * 4), output.add(row * stride), 4);
+        core::ptr::copy_nonoverlapping(tmp.as_ptr().add(row * 4), output.add(row * stride), 4);
     }
 }
 
@@ -248,7 +251,7 @@ pub unsafe fn idct_2x2_strided(
     let mut tmp = [0u8; 4];
     idct_2x2(coeffs, quant, &mut tmp);
     for row in 0..2 {
-        std::ptr::copy_nonoverlapping(tmp.as_ptr().add(row * 2), output.add(row * stride), 2);
+        core::ptr::copy_nonoverlapping(tmp.as_ptr().add(row * 2), output.add(row * stride), 2);
     }
 }
 

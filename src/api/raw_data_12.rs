@@ -1,3 +1,4 @@
+// libjpeg-turbo-rs: alloc prelude (no_std support, issue #356)
 /// 12-bit raw data encode/decode API.
 ///
 /// Provides functions to encode JPEG from pre-downsampled 12-bit component
@@ -15,6 +16,10 @@ use crate::encode::huffman_encode::{build_huff_table, BitWriter, HuffmanEncoder}
 use crate::encode::marker_writer;
 use crate::encode::quant;
 use crate::encode::tables;
+#[allow(unused_imports)]
+use alloc::{format, vec};
+#[allow(unused_imports)]
+use alloc::{string::ToString, vec::Vec};
 
 /// Decoded 12-bit raw component plane data.
 ///

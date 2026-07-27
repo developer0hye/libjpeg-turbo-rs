@@ -2,6 +2,8 @@
 ///
 /// This is a direct port of libjpeg-turbo's `jfdctint.c` (the "islow" forward DCT).
 /// It uses fixed-point arithmetic with CONST_BITS=13 and PASS1_BITS=2 for 8-bit samples.
+#[allow(unused_imports)]
+use crate::common::{FloatCompat, FloatCompat64};
 // Fixed-point constants for CONST_BITS = 13.
 // These match the pre-calculated values in libjpeg-turbo's jfdctint.c.
 const CONST_BITS: i32 = 13;
@@ -425,7 +427,7 @@ pub fn fdct_float(input: &[i16; 64], output: &mut [i32; 64]) {
         workspace[base] = tmp10 + tmp11;
         workspace[base + 4] = tmp10 - tmp11;
 
-        let z1: f64 = (tmp12 + tmp13) * std::f64::consts::FRAC_1_SQRT_2;
+        let z1: f64 = (tmp12 + tmp13) * core::f64::consts::FRAC_1_SQRT_2;
         workspace[base + 2] = tmp13 + z1;
         workspace[base + 6] = tmp13 - z1;
 
@@ -437,7 +439,7 @@ pub fn fdct_float(input: &[i16; 64], output: &mut [i32; 64]) {
         let z5: f64 = (tmp10 - tmp12) * 0.382683433;
         let z2: f64 = 0.541196100 * tmp10 + z5;
         let z4: f64 = 1.306562965 * tmp12 + z5;
-        let z3: f64 = tmp11 * std::f64::consts::FRAC_1_SQRT_2;
+        let z3: f64 = tmp11 * core::f64::consts::FRAC_1_SQRT_2;
 
         let z11: f64 = tmp7 + z3;
         let z13: f64 = tmp7 - z3;
@@ -468,7 +470,7 @@ pub fn fdct_float(input: &[i16; 64], output: &mut [i32; 64]) {
         workspace[col] = tmp10 + tmp11;
         workspace[col + 32] = tmp10 - tmp11;
 
-        let z1: f64 = (tmp12 + tmp13) * std::f64::consts::FRAC_1_SQRT_2;
+        let z1: f64 = (tmp12 + tmp13) * core::f64::consts::FRAC_1_SQRT_2;
         workspace[col + 16] = tmp13 + z1;
         workspace[col + 48] = tmp13 - z1;
 
@@ -480,7 +482,7 @@ pub fn fdct_float(input: &[i16; 64], output: &mut [i32; 64]) {
         let z5: f64 = (tmp10 - tmp12) * 0.382683433;
         let z2: f64 = 0.541196100 * tmp10 + z5;
         let z4: f64 = 1.306562965 * tmp12 + z5;
-        let z3: f64 = tmp11 * std::f64::consts::FRAC_1_SQRT_2;
+        let z3: f64 = tmp11 * core::f64::consts::FRAC_1_SQRT_2;
 
         let z11: f64 = tmp7 + z3;
         let z13: f64 = tmp7 - z3;
@@ -572,8 +574,8 @@ pub fn fdct_float_workspace(data: &mut [f32; 64]) {
         let tmp12b: f32 = tmp6 + tmp7;
 
         let z5: f32 = (tmp10b - tmp12b) * C6;
-        let z2: f32 = C2_MINUS_C6.mul_add(tmp10b, z5);
-        let z4: f32 = C2_PLUS_C6.mul_add(tmp12b, z5);
+        let z2: f32 = C2_MINUS_C6.__mul_add_compat(tmp10b, z5);
+        let z4: f32 = C2_PLUS_C6.__mul_add_compat(tmp12b, z5);
         let z3: f32 = tmp11b * C4;
 
         let z11: f32 = tmp7 + z3;
@@ -612,8 +614,8 @@ pub fn fdct_float_workspace(data: &mut [f32; 64]) {
         let tmp12b: f32 = tmp6 + tmp7;
 
         let z5: f32 = (tmp10b - tmp12b) * C6;
-        let z2: f32 = C2_MINUS_C6.mul_add(tmp10b, z5);
-        let z4: f32 = C2_PLUS_C6.mul_add(tmp12b, z5);
+        let z2: f32 = C2_MINUS_C6.__mul_add_compat(tmp10b, z5);
+        let z4: f32 = C2_PLUS_C6.__mul_add_compat(tmp12b, z5);
         let z3: f32 = tmp11b * C4;
 
         let z11: f32 = tmp7 + z3;

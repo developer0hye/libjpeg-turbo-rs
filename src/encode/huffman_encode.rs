@@ -1,3 +1,6 @@
+// libjpeg-turbo-rs: alloc prelude (no_std support, issue #356)
+#[allow(unused_imports)]
+use alloc::vec::Vec;
 /// Huffman entropy encoding for JPEG compression.
 ///
 /// Implements the bit-packing, byte-stuffing, and run-length encoding
@@ -107,7 +110,7 @@ impl BitWriter {
         let mut v: Vec<u8> = Vec::with_capacity(alloc_cap);
         let ptr: *mut u8 = v.as_mut_ptr();
         let cap: usize = v.capacity();
-        std::mem::forget(v);
+        core::mem::forget(v);
         Self {
             buf: ptr,
             pos: 0,
@@ -128,7 +131,7 @@ impl BitWriter {
                 v.reserve(new_cap - self.pos);
                 self.buf = v.as_mut_ptr();
                 self.cap = v.capacity();
-                std::mem::forget(v);
+                core::mem::forget(v);
             }
         }
     }
@@ -310,7 +313,7 @@ impl BitWriter {
     /// Get a reference to the accumulated output bytes.
     pub fn data(&self) -> &[u8] {
         // SAFETY: buf[..pos] has been written by our emit methods.
-        unsafe { std::slice::from_raw_parts(self.buf, self.pos) }
+        unsafe { core::slice::from_raw_parts(self.buf, self.pos) }
     }
 
     /// Hoist bit-accumulator and buffer pointer to local variables.
@@ -505,7 +508,7 @@ impl HuffmanEncoder {
                 // --- AC coefficients ---
                 #[cfg(target_arch = "x86_64")]
                 {
-                    if is_x86_feature_detected!("bmi1") && is_x86_feature_detected!("lzcnt") {
+                    if crate::cpu_has!("bmi1") && crate::cpu_has!("lzcnt") {
                         encode_ac_x86_64_bmi1_lzcnt(
                             &mut pb,
                             &mut fb,
@@ -577,7 +580,7 @@ impl HuffmanEncoder {
         // call). The elevated path skips the inner indirect call that
         // wrapping `encode_ac_corrected_lsb` would otherwise impose, so the
         // TZCNT + BLSR savings flow through without offsetting overhead.
-        if is_x86_feature_detected!("bmi1") && is_x86_feature_detected!("lzcnt") {
+        if crate::cpu_has!("bmi1") && crate::cpu_has!("lzcnt") {
             encode_ac_x86_64_bmi1_lzcnt(pb, fb, buf, coeffs_zigzag, ac_table);
         } else {
             encode_ac_x86_64(pb, fb, buf, coeffs_zigzag, ac_table);
@@ -1086,7 +1089,7 @@ unsafe fn encode_ac_neon_local(
     coeffs_zigzag: &[i16; 64],
     ac_table: &HuffTable,
 ) {
-    use std::arch::aarch64::*;
+    use core::arch::aarch64::*;
 
     let mut bitmap: u64 = 0;
 
@@ -1138,7 +1141,7 @@ unsafe fn encode_ac_dense_neon_local(
     mut bitmap: u64,
     ac_table: &HuffTable,
 ) {
-    use std::arch::aarch64::*;
+    use core::arch::aarch64::*;
 
     let mut block_nbits = [0u8; 64];
     let mut block_diff = [0u16; 64];

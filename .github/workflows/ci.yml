@@ -109,6 +109,25 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo clippy --lib -- -D warnings
 
+  no-std:
+    name: no_std + alloc build (thumbv7em-none-eabihf)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: thumbv7em-none-eabihf
+      - uses: Swatinem/rust-cache@v2
+      # Bare-metal target: proves the core codec links without std,
+      # not merely that it compiles on a std-capable host (issue #356).
+      - name: Build core codec without std
+        run: cargo build --lib --no-default-features --target thumbv7em-none-eabihf
+      - name: Build without std but with SIMD feature
+        run: cargo build --lib --no-default-features --features simd --target thumbv7em-none-eabihf
+      # The default (std) build must be unaffected.
+      - name: Default features still build
+        run: cargo build --lib
+
   test-lib:
     name: Unit Tests
     runs-on: ubuntu-latest

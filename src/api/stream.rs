@@ -12,6 +12,9 @@
 //! bounds-checked slice fetches are a measured throughput win over
 //! trait-object reads.
 
+// libjpeg-turbo-rs: alloc prelude (no_std support, issue #356)
+#[allow(unused_imports)]
+use alloc::vec::Vec;
 #[cfg(any(not(target_arch = "wasm32"), target_os = "wasi"))]
 use std::fs::File;
 use std::io::{Read, Write};

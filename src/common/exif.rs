@@ -1,3 +1,6 @@
+// libjpeg-turbo-rs: alloc prelude (no_std support, issue #356)
+#[allow(unused_imports)]
+use alloc::vec::Vec;
 /// Parse the EXIF orientation tag (0x0112) from raw TIFF data.
 ///
 /// The input is the raw TIFF data (after stripping the "Exif\0\0" header from APP1).

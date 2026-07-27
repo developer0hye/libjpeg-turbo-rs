@@ -4,12 +4,17 @@
 //! pattern: `tj3Init()`/`tj3Set()`/`tj3Get()`/`tj3Destroy()`. All JPEG
 //! parameters are stored in a single `TjHandle` and accessed via `TjParam`.
 
+// libjpeg-turbo-rs: alloc prelude (no_std support, issue #356)
 use crate::common::error::{JpegError, Result};
 use crate::common::types::{
     ColorSpace, CropRegion, DctMethod, DensityUnit, MarkerSaveConfig, PixelFormat, ScalingFactor,
     Subsampling,
 };
 use crate::decode::pipeline::{Decoder, Image};
+#[allow(unused_imports)]
+use alloc::vec::Vec;
+#[allow(unused_imports)]
+use alloc::{format, vec};
 
 /// All TJPARAM parameter identifiers from libjpeg-turbo TJ3 API.
 ///

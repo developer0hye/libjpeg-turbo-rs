@@ -1,3 +1,4 @@
+// libjpeg-turbo-rs: alloc prelude (no_std support, issue #356)
 use crate::api::quality;
 use crate::common::error::Result;
 use crate::common::types::{
@@ -5,6 +6,10 @@ use crate::common::types::{
 };
 use crate::encode::pipeline as encoder;
 use crate::encode::tables;
+#[allow(unused_imports)]
+use alloc::{format, vec};
+#[allow(unused_imports)]
+use alloc::{string::ToString, vec::Vec};
 
 /// Configuration for DRI restart interval encoding.
 #[derive(Debug, Clone, Copy)]

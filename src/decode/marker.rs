@@ -1,4 +1,9 @@
-use std::sync::Arc;
+// libjpeg-turbo-rs: alloc prelude (no_std support, issue #356)
+use alloc::sync::Arc;
+#[allow(unused_imports)]
+use alloc::{format, vec};
+#[allow(unused_imports)]
+use alloc::{string::String, vec::Vec};
 
 use crate::common::error::{JpegError, Result};
 use crate::common::huffman_table::HuffmanTable;

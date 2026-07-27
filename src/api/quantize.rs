@@ -5,9 +5,16 @@
 //! Compatible with libjpeg-turbo's `quantize_colors`, `dither_mode`, `two_pass_quantize`,
 //! and `colormap` features.
 
+#![allow(clippy::needless_range_loop)]
+#[allow(unused_imports)]
+use crate::common::{FloatCompat, FloatCompat64};
+// libjpeg-turbo-rs: alloc prelude (no_std support, issue #356)
+#[allow(unused_imports)]
+use alloc::{boxed::Box, vec::Vec};
+#[allow(unused_imports)]
+use alloc::{format, vec};
 // The C-compatible algorithm uses index variables to address 3-D histogram arrays.
 // Clippy's needless_range_loop lint fires on these but the indices are essential.
-#![allow(clippy::needless_range_loop)]
 
 use crate::common::error::{JpegError, Result};
 
@@ -985,8 +992,8 @@ struct ColorBox {
 /// Build an optimal N-color palette from pixel data using median-cut.
 fn build_palette_median_cut(pixels: &[u8], num_colors: usize) -> Vec<[u8; 3]> {
     // Collect unique colors with counts
-    let mut color_counts: std::collections::HashMap<[u8; 3], u64> =
-        std::collections::HashMap::new();
+    let mut color_counts: alloc::collections::BTreeMap<[u8; 3], u64> =
+        alloc::collections::BTreeMap::new();
     for chunk in pixels.chunks_exact(3) {
         let color: [u8; 3] = [chunk[0], chunk[1], chunk[2]];
         *color_counts.entry(color).or_insert(0) += 1;
@@ -1156,7 +1163,7 @@ fn box_average(indices: &[usize], colors: &[[u8; 3]], counts: &[u64]) -> [u8; 3]
 /// Build a uniform RGB palette with approximately `num_colors` entries.
 /// Uses an NxNxN cube where N = cbrt(num_colors).
 fn build_palette_uniform(num_colors: usize) -> Vec<[u8; 3]> {
-    let n: usize = (num_colors as f64).cbrt().floor() as usize;
+    let n: usize = (num_colors as f64).__cbrt_compat().__floor_compat() as usize;
     let n: usize = n.clamp(1, 6); // 6^3 = 216 max
 
     let mut palette: Vec<[u8; 3]> = Vec::with_capacity(n * n * n);
@@ -1253,13 +1260,13 @@ fn map_ordered_dither(pixels: &[u8], palette: &[[u8; 3]], width: usize, height: 
             let threshold: f32 = BAYER_4X4[y % 4][x % 4] * spread;
 
             let r: u8 = (pixels[offset] as f32 + threshold)
-                .round()
+                .__round_compat()
                 .clamp(0.0, 255.0) as u8;
             let g: u8 = (pixels[offset + 1] as f32 + threshold)
-                .round()
+                .__round_compat()
                 .clamp(0.0, 255.0) as u8;
             let b: u8 = (pixels[offset + 2] as f32 + threshold)
-                .round()
+                .__round_compat()
                 .clamp(0.0, 255.0) as u8;
 
             indices.push(nearest_palette_index(r, g, b, palette));
@@ -1293,9 +1300,9 @@ fn map_floyd_steinberg(pixels: &[u8], palette: &[[u8; 3]], width: usize, height:
             let idx: usize = y * width + x;
 
             // Clamp the error-adjusted pixel
-            let r: u8 = buffer[idx][0].round().clamp(0.0, 255.0) as u8;
-            let g: u8 = buffer[idx][1].round().clamp(0.0, 255.0) as u8;
-            let b: u8 = buffer[idx][2].round().clamp(0.0, 255.0) as u8;
+            let r: u8 = buffer[idx][0].__round_compat().clamp(0.0, 255.0) as u8;
+            let g: u8 = buffer[idx][1].__round_compat().clamp(0.0, 255.0) as u8;
+            let b: u8 = buffer[idx][2].__round_compat().clamp(0.0, 255.0) as u8;
 
             let palette_idx: u8 = nearest_palette_index(r, g, b, palette);
             indices[idx] = palette_idx;

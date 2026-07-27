@@ -1,9 +1,14 @@
 //! Decode toggle features: fast upsample, block smoothing, colorspace override.
 
+// libjpeg-turbo-rs: alloc prelude (no_std support, issue #356)
 use crate::common::error::{DecodeWarning, JpegError, Result};
 use crate::common::quant_table::QuantTable;
 use crate::common::types::*;
 use crate::decode::pipeline::Image;
+#[allow(unused_imports)]
+use alloc::{format, vec};
+#[allow(unused_imports)]
+use alloc::{string::String, vec::Vec};
 
 /// Generic nearest-neighbor upsampling for any h_factor x v_factor.
 #[allow(clippy::too_many_arguments)]

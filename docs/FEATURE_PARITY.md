@@ -180,6 +180,7 @@
 
 ### Output Format
 - [x] Configurable decoder resource limits (`DecodeLimits`, `Decoder::set_limits` — width/height/pixels/scans/memory, #355)
+- [x] `no_std` + `alloc` core codec (`--no-default-features`; CI-built for `thumbv7em-none-eabihf`, #356)
 - [x] Output pixel format selection (`decompress_to`)
 - [x] XMP metadata accessor with Extended XMP reassembly (`Image::xmp_data`, `Encoder::xmp_data` — #358)
 - [x] IPTC IIM accessor from the APP13 Photoshop IRB (`Image::iptc_data`, `Encoder::iptc_data` — #358)
