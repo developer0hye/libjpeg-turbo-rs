@@ -9,7 +9,12 @@ keywords = ["jpeg", "image", "codec", "decoder", "encoder"]
 categories = ["multimedia::images", "multimedia::encoding"]
 
 [dependencies]
-libjpeg-turbo-rs = { path = "../..", default-features = false, features = ["simd"] }
+# Default features on purpose: `std` carries runtime CPU detection, and
+# without it a stock x86-64 build of this bridge silently ran SSE2-only
+# (issue #381). `version` alongside `path` so the crate is publishable
+# (issue #380); the version must exist on crates.io before this crate
+# can be published.
+libjpeg-turbo-rs = { path = "../..", version = "0.8.0" }
 image = "0.25"
 
 [dev-dependencies]
