@@ -1,4 +1,7 @@
-use std::sync::{Arc, OnceLock};
+// libjpeg-turbo-rs: alloc prelude (no_std support, issue #356)
+#[allow(unused_imports)]
+use alloc::boxed::Box;
+use alloc::sync::Arc;
 
 use crate::common::error::{JpegError, Result};
 
@@ -40,7 +43,7 @@ pub struct HuffmanTable {
 // `build` constructs the table on the stack before the caller moves it
 // into an `Arc`; pin the size so it cannot silently grow past what
 // small-stack targets (wasm) can absorb transiently.
-const _: () = assert!(std::mem::size_of::<HuffmanTable>() <= 8192);
+const _: () = assert!(core::mem::size_of::<HuffmanTable>() <= 8192);
 
 impl HuffmanTable {
     #[inline(always)]
@@ -231,6 +234,62 @@ impl HuffmanTable {
     }
 }
 
+/// Minimal `OnceLock` equivalent that works without `std` (issue #356).
+///
+/// `std::sync::OnceLock` is std-only, but the Annex K tables must stay
+/// process-global and built once (issue #351). This is a leaked-Box
+/// once-cell over an `AtomicPtr`: racing initialisers each build a
+/// value, exactly one CAS wins and its pointer is published, the losers
+/// drop theirs. Initialisation is idempotent and side-effect-free here,
+/// so a rare duplicate build is wasted work, never incorrect. The
+/// winner is intentionally leaked — it lives for the process.
+struct OnceBox<T: 'static> {
+    ptr: core::sync::atomic::AtomicPtr<T>,
+}
+
+// SAFETY: the pointee is published exactly once via a Release CAS and
+// only ever read through an Acquire load, so all readers observe a
+// fully-initialised value. T must be shareable for `&'static T` to be.
+unsafe impl<T: Send + Sync + 'static> Sync for OnceBox<T> {}
+unsafe impl<T: Send + Sync + 'static> Send for OnceBox<T> {}
+
+impl<T: 'static> OnceBox<T> {
+    const fn new() -> Self {
+        Self {
+            ptr: core::sync::atomic::AtomicPtr::new(core::ptr::null_mut()),
+        }
+    }
+
+    fn get_or_init(&self, init: impl FnOnce() -> T) -> &'static T {
+        use core::sync::atomic::Ordering;
+        let existing = self.ptr.load(Ordering::Acquire);
+        if !existing.is_null() {
+            // SAFETY: non-null implies a previous Release publish of a
+            // leaked Box; the pointee outlives the process.
+            return unsafe { &*existing };
+        }
+        let boxed: *mut T = alloc::boxed::Box::into_raw(alloc::boxed::Box::new(init()));
+        match self.ptr.compare_exchange(
+            core::ptr::null_mut(),
+            boxed,
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        ) {
+            // SAFETY: we just published this pointer; it is leaked and
+            // therefore valid for 'static.
+            Ok(_) => unsafe { &*boxed },
+            Err(winner) => {
+                // Another thread won: reclaim ours, use theirs.
+                // SAFETY: `boxed` came from Box::into_raw above and was
+                // never published, so we hold the only reference.
+                drop(unsafe { alloc::boxed::Box::from_raw(boxed) });
+                // SAFETY: as in the fast path above.
+                unsafe { &*winner }
+            }
+        }
+    }
+}
+
 /// The four standard Huffman tables from JPEG Annex K.3, built once per
 /// process and shared by `Arc` (issue #351: they were previously rebuilt
 /// and deep-cloned on every `Decoder::new`).
@@ -239,7 +298,7 @@ impl HuffmanTable {
 /// luminance, `[3]` AC chrominance — mirroring libjpeg-turbo's
 /// `std_huff_tables()` slot assignment (DC/AC slots 0 and 1).
 pub fn std_huffman_tables() -> &'static [Arc<HuffmanTable>; 4] {
-    static STD_TABLES: OnceLock<[Arc<HuffmanTable>; 4]> = OnceLock::new();
+    static STD_TABLES: OnceBox<[Arc<HuffmanTable>; 4]> = OnceBox::new();
     STD_TABLES.get_or_init(|| {
         use crate::encode::tables::{
             AC_CHROMINANCE_BITS, AC_CHROMINANCE_VALUES, AC_LUMINANCE_BITS, AC_LUMINANCE_VALUES,

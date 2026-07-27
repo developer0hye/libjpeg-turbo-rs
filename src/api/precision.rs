@@ -1,3 +1,4 @@
+// libjpeg-turbo-rs: alloc prelude (no_std support, issue #356)
 /// 12-bit and 16-bit sample precision support for JPEG encoding/decoding.
 ///
 /// - 12-bit (J12SAMPLE / i16): DCT-based encode/decode with values 0-4095,
@@ -13,6 +14,10 @@ use crate::encode::huffman_encode::{build_huff_table, BitWriter, HuffmanEncoder}
 use crate::encode::marker_writer;
 use crate::encode::quant;
 use crate::encode::tables;
+#[allow(unused_imports)]
+use alloc::{format, vec};
+#[allow(unused_imports)]
+use alloc::{string::ToString, vec::Vec};
 
 /// Decoded 12-bit JPEG image.
 #[derive(Debug)]

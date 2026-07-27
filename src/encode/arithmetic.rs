@@ -1,9 +1,12 @@
+// libjpeg-turbo-rs: alloc prelude (no_std support, issue #356)
 /// Arithmetic entropy encoder for JPEG (ITU-T T.81).
 ///
 /// Implements the QM-coder binary arithmetic encoder used for
 /// SOF9 (sequential arithmetic) JPEG encoding.
 use crate::common::arith_tables::*;
 use crate::decode::arithmetic::NUM_ARITH_TBLS;
+#[allow(unused_imports)]
+use alloc::vec::Vec;
 
 /// Which statistics table to read/write.
 #[derive(Clone, Copy)]

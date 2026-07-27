@@ -8,7 +8,7 @@
 //! Uses `vpadalq_u8` (pairwise add and accumulate) for efficient adjacent
 //! element summation, matching libjpeg-turbo's NEON approach.
 
-use std::arch::aarch64::*;
+use core::arch::aarch64::*;
 
 /// Downsample a row by 2:1 horizontally (H2V1).
 ///

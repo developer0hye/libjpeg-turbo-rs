@@ -8,7 +8,7 @@
 //!
 //! Each function combines dequantization, IDCT, level-shift (+128), and clamping.
 
-use std::arch::aarch64::*;
+use core::arch::aarch64::*;
 
 const CONST_BITS: i32 = 13;
 const PASS1_BITS: i32 = 2;

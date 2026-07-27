@@ -5,7 +5,10 @@
 //! - Body-only stream: full JPEG with DQT/DHT stripped
 //! - Inter-session table reuse via `TablesOnlyState`
 
-use std::sync::Arc;
+// libjpeg-turbo-rs: alloc prelude (no_std support, issue #356)
+use alloc::sync::Arc;
+#[allow(unused_imports)]
+use alloc::{boxed::Box, vec::Vec};
 
 use crate::common::error::{JpegError, Result};
 use crate::common::huffman_table::HuffmanTable;

@@ -1,7 +1,12 @@
+// libjpeg-turbo-rs: alloc prelude (no_std support, issue #356)
 use crate::common::error::Result;
 use crate::common::types::{CropRegion, DctMethod, DensityInfo, PixelFormat, Subsampling};
 use crate::decode::pipeline::{Decoder, Image};
 use crate::encode::pipeline as encoder;
+#[allow(unused_imports)]
+use alloc::vec::Vec;
+#[allow(unused_imports)]
+use alloc::{format, vec};
 
 /// Decompress a JPEG byte slice into an Image (default: RGB for color, Grayscale for gray).
 pub fn decompress(data: &[u8]) -> Result<Image> {

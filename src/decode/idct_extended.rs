@@ -1,5 +1,5 @@
 // These constants are exact fixed-point values ported from C's jidctint.c,
-// not approximations of std::f64::consts — changing them would alter the IDCT output.
+// not approximations of core::f64::consts — changing them would alter the IDCT output.
 #![allow(clippy::approx_constant)]
 
 /// Extended IDCT kernels for all 16 JPEG scaling factors.
@@ -1087,7 +1087,7 @@ macro_rules! strided_wrapper {
             let mut tmp = [0u8; $n * $n];
             $inner(coeffs, quant, &mut tmp);
             for row in 0..$n {
-                std::ptr::copy_nonoverlapping(
+                core::ptr::copy_nonoverlapping(
                     tmp.as_ptr().add(row * $n),
                     output.add(row * stride),
                     $n,

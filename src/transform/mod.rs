@@ -1,3 +1,6 @@
+// libjpeg-turbo-rs: alloc prelude (no_std support, issue #356)
+#[allow(unused_imports)]
+use alloc::boxed::Box;
 /// Lossless JPEG transforms operating on DCT coefficients.
 ///
 /// Implements spatial transforms (flip, rotate, transpose) that manipulate
@@ -142,8 +145,8 @@ impl Default for TransformOptions {
     }
 }
 
-impl std::fmt::Debug for TransformOptions {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl core::fmt::Debug for TransformOptions {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.debug_struct("TransformOptions")
             .field("op", &self.op)
             .field("perfect", &self.perfect)

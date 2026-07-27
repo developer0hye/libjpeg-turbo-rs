@@ -2,6 +2,11 @@
 //!
 //! NEON is mandatory on ARMv8, so no runtime feature detection is needed.
 
+// libjpeg-turbo-rs: alloc prelude (no_std support, issue #356)
+#[allow(unused_imports)]
+use alloc::vec::Vec;
+#[allow(unused_imports)]
+use alloc::{format, vec};
 pub mod color;
 pub mod color_encode;
 pub mod downsample;
@@ -84,7 +89,7 @@ unsafe fn neon_extract_fdct_quantize_inner(
     quant: &QuantDivisors,
     output: &mut [i16; 64],
 ) {
-    use std::arch::aarch64::*;
+    use core::arch::aarch64::*;
 
     let level_shift: int16x8_t = vdupq_n_s16(128);
 
@@ -147,7 +152,7 @@ unsafe fn neon_downsample_h2v2_fdct_quantize_inner(
     quant: &QuantDivisors,
     output: &mut [i16; 64],
 ) {
-    use std::arch::aarch64::*;
+    use core::arch::aarch64::*;
 
     let bias: uint16x8_t = vreinterpretq_u16_u32(vdupq_n_u32(0x00020001));
     let level_shift: int16x8_t = vdupq_n_s16(128);
@@ -221,7 +226,7 @@ unsafe fn neon_downsample_h2v1_fdct_quantize_inner(
     quant: &QuantDivisors,
     output: &mut [i16; 64],
 ) {
-    use std::arch::aarch64::*;
+    use core::arch::aarch64::*;
 
     let bias: uint16x8_t = vreinterpretq_u16_u32(vdupq_n_u32(0x00010000));
     let level_shift: int16x8_t = vdupq_n_s16(128);
@@ -244,10 +249,10 @@ unsafe fn neon_downsample_h2v1_fdct_quantize_inner(
 unsafe fn neon_downsample_h2v2_row(
     row0_ptr: *const u8,
     row1_ptr: *const u8,
-    bias: std::arch::aarch64::uint16x8_t,
-    level_shift: std::arch::aarch64::int16x8_t,
-) -> std::arch::aarch64::int16x8_t {
-    use std::arch::aarch64::*;
+    bias: core::arch::aarch64::uint16x8_t,
+    level_shift: core::arch::aarch64::int16x8_t,
+) -> core::arch::aarch64::int16x8_t {
+    use core::arch::aarch64::*;
 
     let r0: uint8x16_t = vld1q_u8(row0_ptr);
     let r1: uint8x16_t = vld1q_u8(row1_ptr);
@@ -261,10 +266,10 @@ unsafe fn neon_downsample_h2v2_row(
 #[target_feature(enable = "neon")]
 unsafe fn neon_downsample_h2v1_row(
     row_ptr: *const u8,
-    bias: std::arch::aarch64::uint16x8_t,
-    level_shift: std::arch::aarch64::int16x8_t,
-) -> std::arch::aarch64::int16x8_t {
-    use std::arch::aarch64::*;
+    bias: core::arch::aarch64::uint16x8_t,
+    level_shift: core::arch::aarch64::int16x8_t,
+) -> core::arch::aarch64::int16x8_t {
+    use core::arch::aarch64::*;
 
     let row: uint8x16_t = vld1q_u8(row_ptr);
     let sum: uint16x8_t = vpadalq_u8(bias, row);
@@ -276,18 +281,18 @@ unsafe fn neon_downsample_h2v1_row(
 #[target_feature(enable = "neon")]
 #[allow(clippy::too_many_arguments)]
 unsafe fn neon_rows_fdct_quantize(
-    row0: std::arch::aarch64::int16x8_t,
-    row1: std::arch::aarch64::int16x8_t,
-    row2: std::arch::aarch64::int16x8_t,
-    row3: std::arch::aarch64::int16x8_t,
-    row4: std::arch::aarch64::int16x8_t,
-    row5: std::arch::aarch64::int16x8_t,
-    row6: std::arch::aarch64::int16x8_t,
-    row7: std::arch::aarch64::int16x8_t,
+    row0: core::arch::aarch64::int16x8_t,
+    row1: core::arch::aarch64::int16x8_t,
+    row2: core::arch::aarch64::int16x8_t,
+    row3: core::arch::aarch64::int16x8_t,
+    row4: core::arch::aarch64::int16x8_t,
+    row5: core::arch::aarch64::int16x8_t,
+    row6: core::arch::aarch64::int16x8_t,
+    row7: core::arch::aarch64::int16x8_t,
     quant: &QuantDivisors,
     output: &mut [i16; 64],
 ) {
-    use std::arch::aarch64::*;
+    use core::arch::aarch64::*;
 
     // 8×8 transpose: row-major → column-major for FDCT pass 1
     // Step 1: vtrnq_s16 on pairs (swap within 2×2 blocks)
@@ -356,7 +361,7 @@ unsafe fn neon_rows_fdct_quantize(
 /// Requires aarch64 NEON. Both pointers must address 64-element i16 arrays.
 #[target_feature(enable = "neon")]
 unsafe fn neon_zigzag_reorder(natural_ptr: *const i16, output_ptr: *mut i16) {
-    use std::arch::aarch64::*;
+    use core::arch::aarch64::*;
 
     let src: *const u8 = natural_ptr as *const u8;
     let dst: *mut u8 = output_ptr as *mut u8;
@@ -431,7 +436,7 @@ unsafe fn neon_quantize_recip(
     shift_ptr: *const i16,
     out_ptr: *mut i16,
 ) {
-    use std::arch::aarch64::*;
+    use core::arch::aarch64::*;
 
     for i in (0..64).step_by(8) {
         // Load 8 coefficients, reciprocals, corrections, and shifts
