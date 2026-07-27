@@ -178,6 +178,17 @@ pub struct ImageInfo {
     pub warnings: Vec<DecodeWarning>,
 }
 
+impl ImageInfo {
+    /// EXIF orientation (1-8) parsed from `exif_data`, for parity with
+    /// [`Image::exif_orientation`] and [`Decoder::exif_orientation`] on
+    /// the caller-buffer decode path (issue #391).
+    pub fn exif_orientation(&self) -> Option<u8> {
+        self.exif_data
+            .as_deref()
+            .and_then(crate::common::exif::parse_orientation)
+    }
+}
+
 /// Output destination for one decode: a decoder-owned `Vec` (the
 /// `decode_image` path) or a caller-provided slice
 /// (`decode_image_into`). Sized-and-taken exactly once per decode by
@@ -301,6 +312,77 @@ impl Image {
     /// Only populated when the decoder was configured with `save_markers()`.
     pub fn markers(&self) -> &[SavedMarker] {
         &self.saved_markers
+    }
+
+    /// Reorient the pixels so the image displays upright according to its
+    /// own EXIF orientation tag (issue #391). Identity when there is no
+    /// EXIF, no orientation tag, or orientation 1. Convenience over
+    /// [`Image::apply_orientation_value`] using [`Image::exif_orientation`].
+    ///
+    /// **Not idempotent**: the tag in `exif_data` is left at its original
+    /// value, so calling this twice reorients twice, and re-encoding with
+    /// the returned `exif_data` re-applies the rotation on display —
+    /// strip or rewrite the metadata when re-encoding.
+    ///
+    /// For a lossless alternative that never leaves the DCT domain, map
+    /// the tag with [`crate::TransformOp::from_exif_orientation`] and run
+    /// [`crate::transform()`] on the compressed bytes instead.
+    #[must_use]
+    pub fn apply_orientation(self) -> Self {
+        let orientation: u8 = self.exif_orientation().unwrap_or(1);
+        self.apply_orientation_value(orientation)
+    }
+
+    /// Reorient the pixels for an explicitly supplied EXIF orientation
+    /// value (1-8) — the primitive behind [`Image::apply_orientation`],
+    /// for callers whose orientation comes from elsewhere (XMP
+    /// `tiff:Orientation`, a container, a user override). Identity for
+    /// 1 and out-of-range values.
+    ///
+    /// Orientations 5-8 swap `width`/`height`. Works for every pixel
+    /// format: the remap moves whole `bytes_per_pixel` units, including
+    /// packed `Rgb565`.
+    #[must_use]
+    pub fn apply_orientation_value(mut self, orientation: u8) -> Self {
+        if !(2..=8).contains(&orientation) {
+            return self;
+        }
+        let bpp: usize = self.pixel_format.bytes_per_pixel();
+        let (w, h): (usize, usize) = (self.width, self.height);
+        // Structural invariant, not asserted elsewhere: an all-pub-fields
+        // Image can be hand-built undersized (or with dims whose product
+        // overflows); bail rather than index OOB or panic on the multiply.
+        let Some(expected) = w.checked_mul(h).and_then(|n| n.checked_mul(bpp)) else {
+            return self;
+        };
+        if self.data.len() < expected {
+            return self;
+        }
+        let swaps_dims: bool = (5..=8).contains(&orientation);
+        let (dst_w, dst_h): (usize, usize) = if swaps_dims { (h, w) } else { (w, h) };
+        let mut out: Vec<u8> = vec![0u8; self.data.len()];
+        for dy in 0..dst_h {
+            for dx in 0..dst_w {
+                // EXIF tag 0x0112: source coordinates that land at
+                // (dx, dy) of the upright image.
+                let (sx, sy): (usize, usize) = match orientation {
+                    2 => (w - 1 - dx, dy),         // mirrored horizontally
+                    3 => (w - 1 - dx, h - 1 - dy), // rotated 180
+                    4 => (dx, h - 1 - dy),         // mirrored vertically
+                    5 => (dy, dx),                 // transposed
+                    6 => (dy, h - 1 - dx),         // rotate 90 CW to fix
+                    7 => (w - 1 - dy, h - 1 - dx), // transverse
+                    _ => (w - 1 - dy, dx),         // 8: rotate 270 CW to fix
+                };
+                let src: usize = (sy * w + sx) * bpp;
+                let dst: usize = (dy * dst_w + dx) * bpp;
+                out[dst..dst + bpp].copy_from_slice(&self.data[src..src + bpp]);
+            }
+        }
+        self.data = out;
+        self.width = dst_w;
+        self.height = dst_h;
+        self
     }
 }
 
@@ -554,6 +636,28 @@ impl<'a> Decoder<'a> {
             marker_processors: alloc::collections::BTreeMap::new(),
             resync_strategy: core::cell::RefCell::new(None),
         })
+    }
+
+    /// EXIF orientation (1-8) from the already-parsed headers, without
+    /// any pixel decode (issue #391). `Decoder::new` is a header parse
+    /// only, so probing a camera JPEG's orientation costs no decoding:
+    ///
+    /// ```
+    /// # let jpeg = libjpeg_turbo_rs::compress(&[128; 48], 4, 4,
+    /// #     libjpeg_turbo_rs::PixelFormat::Rgb, 90,
+    /// #     libjpeg_turbo_rs::Subsampling::S444).unwrap();
+    /// let decoder = libjpeg_turbo_rs::Decoder::new(&jpeg)?;
+    /// // This fixture carries no EXIF; a camera JPEG returns Some(1..=8).
+    /// // Map 2-8 with TransformOp::from_exif_orientation (lossless, DCT
+    /// // domain) or Image::apply_orientation (pixels).
+    /// assert_eq!(decoder.exif_orientation(), None);
+    /// # Ok::<(), libjpeg_turbo_rs::JpegError>(())
+    /// ```
+    pub fn exif_orientation(&self) -> Option<u8> {
+        self.metadata
+            .exif_data
+            .as_deref()
+            .and_then(crate::common::exif::parse_orientation)
     }
 
     pub fn header(&self) -> &FrameHeader {
@@ -3787,9 +3891,9 @@ impl<'a> Decoder<'a> {
         icc_profile: Option<Vec<u8>>,
         exif_data: Option<Vec<u8>>,
     ) -> Result<Image> {
-        // Reject unsupported targets before the frame decode allocates
-        // anything (codex review on issue #394): a 12-bit source never
-        // converts to Cmyk in either arm.
+        // Defense in depth: decode_image_inner rejects Cmyk-for-non-CMYK
+        // before dispatching here (P4-68), and a 12-bit source never
+        // converts to Cmyk in either arm (codex review on issue #394).
         if self.output_format == Some(PixelFormat::Cmyk) {
             return Err(JpegError::Unsupported(
                 "cannot convert 12-bit JPEG to Cmyk".to_string(),
@@ -3819,22 +3923,21 @@ impl<'a> Decoder<'a> {
             // ignore `output_format` while `output_buffer_size()`
             // advertised the requested bpp (issue #394 / P4-65; C's
             // `djpeg -rgb` expands instead of ignoring).
-            let gray8: Vec<u8> = img12
-                .data
-                .iter()
-                .map(|&val| (val.clamp(0, 4095) as u32 * 255 / 4095) as u8)
-                .collect();
+            // Scale each 12-bit sample inline (v * 255 / 4095, matching C
+            // djpeg's 12->8 downscale) straight into the output buffer:
+            // no intermediate 8-bit plane, so peak memory stays within
+            // what check_header_limits estimated (codex P1 on #394 —
+            // a staging plane pushed RGBA to 7 bytes/pixel against a
+            // 5 bytes/pixel estimate under max_memory).
+            let scale = |v: i16| (v.clamp(0, 4095) as u32 * 255 / 4095) as u8;
             let pad_off: Option<usize> = pad_alpha_offset(out_format);
             let bpp: usize = out_format.bytes_per_pixel();
-            // Each arm builds its own buffer: the Grayscale case moves
-            // gray8 straight through with no second allocation, and the
-            // expansion cases allocate exactly once (codex review on
-            // issue #394).
             let data: Vec<u8> = match out_format {
-                PixelFormat::Grayscale => gray8,
+                PixelFormat::Grayscale => img12.data.iter().map(|&v| scale(v)).collect(),
                 PixelFormat::Rgb | PixelFormat::Bgr => {
                     let mut out: Vec<u8> = Vec::with_capacity(width * height * bpp);
-                    for &v in &gray8 {
+                    for &v12 in &img12.data {
+                        let v: u8 = scale(v12);
                         out.extend_from_slice(&[v, v, v]);
                     }
                     out
@@ -3849,8 +3952,8 @@ impl<'a> Decoder<'a> {
                 | PixelFormat::Abgr => {
                     let pad: usize = pad_off.expect("4bpp format has a pad offset");
                     let mut out: Vec<u8> = Vec::with_capacity(width * height * bpp);
-                    for &v in &gray8 {
-                        let mut px: [u8; 4] = [v; 4];
+                    for &v12 in &img12.data {
+                        let mut px: [u8; 4] = [scale(v12); 4];
                         px[pad] = 255;
                         out.extend_from_slice(&px);
                     }
@@ -3861,10 +3964,17 @@ impl<'a> Decoder<'a> {
                         // Same row-aware ordered dither as the 8-bit
                         // grayscale path (codex review on issue #394:
                         // set_dither_565 must not be silently ignored).
+                        // One row of 8-bit scratch, not a full plane.
                         let mut out: Vec<u8> = vec![0u8; width * height * 2];
+                        let mut row8: Vec<u8> = vec![0u8; width];
                         for y in 0..height {
+                            for (dst, &v12) in
+                                row8.iter_mut().zip(&img12.data[y * width..(y + 1) * width])
+                            {
+                                *dst = scale(v12);
+                            }
                             crate::decode::color::gray_to_rgb565_dithered_row(
-                                &gray8[y * width..(y + 1) * width],
+                                &row8,
                                 &mut out[y * width * 2..(y + 1) * width * 2],
                                 width,
                                 y,
@@ -3873,7 +3983,8 @@ impl<'a> Decoder<'a> {
                         out
                     } else {
                         let mut out: Vec<u8> = Vec::with_capacity(width * height * 2);
-                        for &v in &gray8 {
+                        for &v12 in &img12.data {
+                            let v: u8 = scale(v12);
                             let packed: u16 = (((v as u16) >> 3) << 11)
                                 | (((v as u16) >> 2) << 5)
                                 | ((v as u16) >> 3);
@@ -3976,6 +4087,23 @@ impl<'a> Decoder<'a> {
 
         // Dimension / pixel / scan-count limits (issue #355).
         self.check_header_limits()?;
+
+        // Cmyk output exists only for CMYK/YCCK sources; C raises
+        // JERR_CONVERSION_NOTIMPL for everything else (jdcolor.c). The
+        // Rust paths used to panic on this well-formed request (P4-68:
+        // three separate unreachable!/match panics for baseline colour,
+        // baseline grayscale, and lossless grayscale sources).
+        if self.output_format == Some(PixelFormat::Cmyk)
+            && !matches!(
+                self.detect_color_space(),
+                ColorSpace::Cmyk | ColorSpace::Ycck
+            )
+        {
+            return Err(JpegError::Unsupported(format!(
+                "cannot convert {:?} JPEG to Cmyk (C: JERR_CONVERSION_NOTIMPL)",
+                self.detect_color_space()
+            )));
+        }
 
         let icc_profile = self.icc_profile();
         let exif_data = self.metadata.exif_data.clone();

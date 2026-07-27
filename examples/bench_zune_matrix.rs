@@ -61,34 +61,62 @@ fn count_allocs<F: FnOnce()>(f: F) -> (usize, usize) {
     (ALLOC_COUNT.with(|n| n.get()), ALLOC_BYTES.with(|b| b.get()))
 }
 
-/// Best-of-N wall clock with a per-case time budget: keeps tiny images
-/// statistically meaningful (thousands of iterations) without letting
-/// 8K cases run for minutes.
-fn best_of_budget<F: FnMut()>(mut f: F) -> f64 {
-    // Warm-up + single-shot estimate.
-    let t = Instant::now();
-    f();
-    let est_us: f64 = t.elapsed().as_secs_f64() * 1e6;
-    let iters: usize = ((1_500_000.0 / est_us.max(1.0)) as usize).clamp(5, 20_000);
+/// One timed measurement: best-of-N and median-of-N wall clock, plus the
+/// iteration count actually used.
+struct Timing {
+    best_us: f64,
+    median_us: f64,
+    iters: usize,
+}
+
+/// Minimum measured iterations for any case. A sample this small is the
+/// issue #376 failure mode (single perturbed shot → collapsed count →
+/// noisy best-of-few), so anything that would fall below it is raised to
+/// it and flagged in the output.
+const MIN_ITERS: usize = 20;
+
+/// Best/median-of-N wall clock with a per-case time budget: keeps tiny
+/// images statistically meaningful (thousands of iterations) without
+/// letting 8K cases run for minutes.
+///
+/// Issue #376: the iteration count was sized from ONE untimed warm-up
+/// shot; a single cold-cache/scheduler/thermal perturbation collapsed it
+/// and the reported best-of-few swung 0.97x..1.37x across runs of the
+/// same commit. The estimate is now the median of three warm-up shots,
+/// the count has a hard floor, and the median is reported next to the
+/// best so residual instability is visible instead of silent.
+fn best_of_budget<F: FnMut()>(mut f: F) -> Timing {
+    // Warm-up + median-of-3 estimate.
+    let mut est: [f64; 3] = [0.0; 3];
+    for slot in est.iter_mut() {
+        let t = Instant::now();
+        f();
+        *slot = t.elapsed().as_secs_f64() * 1e6;
+    }
+    est.sort_by(|a, b| a.total_cmp(b));
+    let est_us: f64 = est[1];
+    let iters: usize = ((1_500_000.0 / est_us.max(1.0)) as usize).clamp(MIN_ITERS, 20_000);
     for _ in 0..iters / 20 {
         f();
     }
-    let mut best = f64::INFINITY;
+    let mut samples: Vec<f64> = Vec::with_capacity(iters);
     for _ in 0..iters {
         let t = Instant::now();
         f();
-        let dt = t.elapsed().as_secs_f64() * 1e6;
-        if dt < best {
-            best = dt;
-        }
+        samples.push(t.elapsed().as_secs_f64() * 1e6);
     }
-    best
+    samples.sort_by(|a, b| a.total_cmp(b));
+    Timing {
+        best_us: samples[0],
+        median_us: samples[iters / 2],
+        iters,
+    }
 }
 
 struct CaseResult {
     name: &'static str,
-    ours_us: f64,
-    zune_us: f64,
+    ours: Timing,
+    zune: Timing,
     ours_allocs: usize,
     ours_bytes: usize,
     zune_allocs: usize,
@@ -243,11 +271,11 @@ fn main() {
             len_zune = pixels.len();
         });
 
-        let ours_us = best_of_budget(|| {
+        let ours = best_of_budget(|| {
             let img = libjpeg_turbo_rs::decompress(std::hint::black_box(&jpeg)).unwrap();
             std::hint::black_box(&img.data);
         });
-        let zune_us = best_of_budget(|| {
+        let zune = best_of_budget(|| {
             let cursor = std::io::Cursor::new(std::hint::black_box(&jpeg));
             let mut decoder = zune_jpeg::JpegDecoder::new(cursor);
             let pixels = decoder.decode().unwrap();
@@ -256,8 +284,8 @@ fn main() {
 
         results.push(CaseResult {
             name,
-            ours_us,
-            zune_us,
+            ours,
+            zune,
             ours_allocs,
             ours_bytes,
             zune_allocs,
@@ -268,13 +296,30 @@ fn main() {
     }
 
     println!(
-        "{:<26} {:>10} {:>10} {:>6}  {:>7} {:>12}  {:>7} {:>12}  {}",
-        "case", "ours(us)", "zune(us)", "ratio", "allocs", "bytes", "z.allocs", "z.bytes", "parity"
+        "{:<26} {:>10} {:>10} {:>10} {:>10} {:>6}  {:>7} {:>12}  {:>7} {:>12}  {}",
+        "case",
+        "ours(us)",
+        "o.med",
+        "zune(us)",
+        "z.med",
+        "ratio",
+        "allocs",
+        "bytes",
+        "z.allocs",
+        "z.bytes",
+        "parity"
     );
     let (mut wins, mut losses, mut ties, mut mismatches) = (0usize, 0usize, 0usize, 0usize);
     let mut loss_names: Vec<String> = Vec::new();
+    let mut floored: Vec<&str> = Vec::new();
     for r in &results {
-        let ratio = r.ours_us / r.zune_us;
+        let ratio = r.ours.best_us / r.zune.best_us;
+        // Announce degraded samples instead of hiding them (issue #376):
+        // a case pinned at the iteration floor was too slow for its
+        // budget, so its best-of-N rests on the minimum sample size.
+        if r.ours.iters == MIN_ITERS || r.zune.iters == MIN_ITERS {
+            floored.push(r.name);
+        }
         // Output-length parity: a decoder emitting a different pixel
         // format must be flagged, not scored (criterion 4 of #360).
         let parity = if r.len_ours == r.len_zune {
@@ -294,10 +339,12 @@ fn main() {
             }
         }
         println!(
-            "{:<26} {:>10.1} {:>10.1} {:>6.2}  {:>7} {:>12}  {:>7} {:>12}  {}",
+            "{:<26} {:>10.1} {:>10.1} {:>10.1} {:>10.1} {:>6.2}  {:>7} {:>12}  {:>7} {:>12}  {}",
             r.name,
-            r.ours_us,
-            r.zune_us,
+            r.ours.best_us,
+            r.ours.median_us,
+            r.zune.best_us,
+            r.zune.median_us,
             ratio,
             r.ours_allocs,
             r.ours_bytes,
@@ -314,6 +361,13 @@ fn main() {
     );
     if !loss_names.is_empty() {
         println!("losses: {}", loss_names.join(", "));
+    }
+    if !floored.is_empty() {
+        println!(
+            "note: iteration floor ({MIN_ITERS}) hit for: {} — best-of-N for these \
+             rests on the minimum sample size; treat their ratios with care.",
+            floored.join(", ")
+        );
     }
     if mismatches > 0 {
         println!(

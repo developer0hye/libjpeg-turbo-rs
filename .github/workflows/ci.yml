@@ -236,6 +236,40 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo test --lib
 
+  test-windows-workspace:
+    # Issue #378 / P4-62: no job built the integration or capi test
+    # targets on windows-msvc, so an MSVC-only link failure (the UCRT
+    # does not export `snprintf`; format_message.rs binds it as its
+    # printf oracle) shipped unseen and `cargo test --workspace` could
+    # not even BUILD on a Windows host. This job:
+    # 1. builds every workspace test target (`--no-run`), which is where
+    #    LNK2019 surfaces — the next Windows-only link break fails here;
+    # 2. runs the two suites the defect and its sibling live in, both
+    #    deliberately C-tool-free: the capi printf-expansion oracle and
+    #    the allocation budgets (whose gray_8x8 case measures 9 allocs
+    #    on Windows, pinned per-platform in the test).
+    # The full suite is NOT run here: the C cross-validation tests
+    # hard-fail in CI when djpeg/cjpeg are absent, and provisioning
+    # libjpeg-turbo tools on the Windows runner is its own project.
+    name: Workspace build + targeted tests (windows)
+    runs-on: windows-latest
+    needs: [check]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Build every workspace test target
+        run: cargo test --workspace --no-run
+        timeout-minutes: 30
+      - name: Printf-expansion oracle (issue #378 fix)
+        run: cargo test -p libjpeg-turbo-rs-capi --test format_message -- --nocapture
+        timeout-minutes: 10
+      - name: Allocation budgets (P4-62 sibling re-measure)
+        run: cargo test -p libjpeg-turbo-rs --test alloc_budget_small_decode -- --nocapture
+        timeout-minutes: 10
+
   capi-abi-checks:
     # P2-3 / P2-4 / P2-5: per-platform C-ABI structural validation.
     #
