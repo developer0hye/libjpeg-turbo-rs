@@ -1202,7 +1202,20 @@ pub fn inject_metadata(
     icc_profile: Option<&[u8]>,
     exif_data: Option<&[u8]>,
 ) -> Result<Vec<u8>> {
-    if icc_profile.is_none() && exif_data.is_none() {
+    inject_metadata_full(base, icc_profile, exif_data, None, None)
+}
+
+/// Like [`inject_metadata`] with XMP (APP1) and IPTC (APP13) payloads
+/// (issue #358). Segment-sized payloads only; oversized ones error
+/// rather than truncating.
+pub fn inject_metadata_full(
+    base: &[u8],
+    icc_profile: Option<&[u8]>,
+    exif_data: Option<&[u8]>,
+    xmp_data: Option<&[u8]>,
+    iptc_data: Option<&[u8]>,
+) -> Result<Vec<u8>> {
+    if icc_profile.is_none() && exif_data.is_none() && xmp_data.is_none() && iptc_data.is_none() {
         return Ok(base.to_vec());
     }
 
@@ -1218,15 +1231,35 @@ pub fn inject_metadata(
         insert_pos += 2 + app_len;
     }
 
-    let extra_cap =
-        icc_profile.map_or(0, |p| p.len() + 100) + exif_data.map_or(0, |e| e.len() + 20);
+    let extra_cap = icc_profile.map_or(0, |p| p.len() + 100)
+        + exif_data.map_or(0, |e| e.len() + 20)
+        + xmp_data.map_or(0, |x| x.len() + 40)
+        + iptc_data.map_or(0, |i| i.len() + 40);
     let mut out = Vec::with_capacity(base.len() + extra_cap);
     out.extend_from_slice(&base[..insert_pos]);
     if let Some(exif) = exif_data {
         marker_writer::write_app1_exif(&mut out, exif);
     }
+    if let Some(xmp) = xmp_data {
+        if !marker_writer::write_app1_xmp(&mut out, xmp) {
+            return Err(JpegError::Unsupported(format!(
+                "XMP packet of {} bytes exceeds one APP1 segment (Extended XMP writing not implemented)",
+                xmp.len()
+            )));
+        }
+    }
+    // Adobe/exiftool convention: APP0 JFIF, APP1 Exif, APP1 XMP,
+    // APP2 ICC, APP13 Photoshop — ICC precedes IPTC (review LOW).
     if let Some(icc) = icc_profile {
         marker_writer::write_app2_icc(&mut out, icc);
+    }
+    if let Some(iptc) = iptc_data {
+        if !marker_writer::write_app13_iptc(&mut out, iptc) {
+            return Err(JpegError::Unsupported(format!(
+                "IPTC payload of {} bytes exceeds one APP13 segment",
+                iptc.len()
+            )));
+        }
     }
     out.extend_from_slice(&base[insert_pos..]);
     Ok(out)

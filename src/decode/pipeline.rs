@@ -129,6 +129,10 @@ pub struct Image {
     pub icc_profile: Option<Vec<u8>>,
     /// Raw EXIF TIFF data from APP1 marker, if present.
     pub exif_data: Option<Vec<u8>>,
+    /// Raw XMP packet from APP1 (Extended XMP reassembled + appended).
+    pub xmp_data: Option<Vec<u8>>,
+    /// Raw IPTC IIM payload from the APP13 Photoshop IRB.
+    pub iptc_data: Option<Vec<u8>>,
     /// COM marker text, if present.
     pub comment: Option<String>,
     /// Pixel density from JFIF header.
@@ -155,6 +159,10 @@ pub struct ImageInfo {
     pub icc_profile: Option<Vec<u8>>,
     /// Raw EXIF TIFF data from APP1 marker, if present.
     pub exif_data: Option<Vec<u8>>,
+    /// Raw XMP packet (see [`Image::xmp_data`]).
+    pub xmp_data: Option<Vec<u8>>,
+    /// Raw IPTC IIM payload (see [`Image::iptc_data`]).
+    pub iptc_data: Option<Vec<u8>>,
     /// COM marker text, if present.
     pub comment: Option<String>,
     /// Pixel density from JFIF header.
@@ -235,6 +243,29 @@ impl Image {
     /// Returns the raw EXIF TIFF data, if present.
     pub fn exif_data(&self) -> Option<&[u8]> {
         self.exif_data.as_deref()
+    }
+
+    /// Raw XMP packet (APP1 `http://ns.adobe.com/xap/1.0/`), with
+    /// Extended XMP chunks reassembled in offset order and appended.
+    /// Returns the bytes, not a parsed tree (issue #358).
+    ///
+    /// Reassembly requires exact contiguous coverage of the declared
+    /// length; a gapped, overlapping, or partial chunk set degrades to
+    /// the standard packet alone. Extension chunks arriving without a
+    /// standard packet are dropped. The extension set is selected by
+    /// the first extension chunk's GUID rather than the standard
+    /// packet's `xmpNote:HasExtendedXMP` — parsing the RDF to read that
+    /// belongs in a consumer crate, not the codec.
+    /// TODO(#358): revisit if a consumer needs GUID-authoritative
+    /// selection.
+    pub fn xmp_data(&self) -> Option<&[u8]> {
+        self.xmp_data.as_deref()
+    }
+
+    /// Raw IPTC IIM payload extracted from the APP13 Photoshop IRB
+    /// (resource 0x0404). Returns the bytes, not parsed datasets.
+    pub fn iptc_data(&self) -> Option<&[u8]> {
+        self.iptc_data.as_deref()
     }
 
     /// Parses and returns the EXIF orientation tag (1-8), if present.
@@ -3254,6 +3285,8 @@ impl<'a> Decoder<'a> {
                 data.push(val);
             }
             Ok(Image {
+                xmp_data: self.metadata.xmp_data.clone(),
+                iptc_data: self.metadata.iptc_data.clone(),
                 width,
                 height,
                 pixel_format: PixelFormat::Grayscale,
@@ -3309,6 +3342,8 @@ impl<'a> Decoder<'a> {
                 }
             }
             Ok(Image {
+                xmp_data: self.metadata.xmp_data.clone(),
+                iptc_data: self.metadata.iptc_data.clone(),
                 width,
                 height,
                 pixel_format: out_format,
@@ -3409,6 +3444,8 @@ impl<'a> Decoder<'a> {
         }
 
         Ok(Image {
+            xmp_data: self.metadata.xmp_data.clone(),
+            iptc_data: self.metadata.iptc_data.clone(),
             width,
             height,
             pixel_format: out_format,
@@ -3605,6 +3642,8 @@ impl<'a> Decoder<'a> {
             bytes_written,
             icc_profile: image.icc_profile,
             exif_data: image.exif_data,
+            xmp_data: image.xmp_data,
+            iptc_data: image.iptc_data,
             comment: image.comment,
             density: image.density,
             saved_markers: image.saved_markers,
@@ -3707,6 +3746,8 @@ impl<'a> Decoder<'a> {
                 data.push((clamped as u32 * 255 / 4095) as u8);
             }
             Ok(Image {
+                xmp_data: self.metadata.xmp_data.clone(),
+                iptc_data: self.metadata.iptc_data.clone(),
                 width,
                 height,
                 pixel_format: PixelFormat::Grayscale,
@@ -3768,6 +3809,8 @@ impl<'a> Decoder<'a> {
                 }
             }
             Ok(Image {
+                xmp_data: self.metadata.xmp_data.clone(),
+                iptc_data: self.metadata.iptc_data.clone(),
                 width,
                 height,
                 pixel_format: out_format,
@@ -3797,6 +3840,8 @@ impl<'a> Decoder<'a> {
 
         let icc_profile = self.icc_profile();
         let exif_data = self.metadata.exif_data.clone();
+        let xmp_data = self.metadata.xmp_data.clone();
+        let iptc_data = self.metadata.iptc_data.clone();
 
         // Handle 12-bit JPEG transparently: decode via the 12-bit path, then
         // scale samples from 0-4095 to 0-255 so callers get standard 8-bit output.
@@ -4004,6 +4049,8 @@ impl<'a> Decoder<'a> {
                 &comp_block_sizes,
                 icc_profile,
                 exif_data,
+                self.metadata.xmp_data.clone(),
+                self.metadata.iptc_data.clone(),
                 self.metadata.comment.clone(),
                 self.metadata.density,
                 self.metadata.saved_markers.clone(),
@@ -4064,6 +4111,8 @@ impl<'a> Decoder<'a> {
                     data
                 };
                 Ok(Image {
+                    xmp_data: xmp_data.clone(),
+                    iptc_data: iptc_data.clone(),
                     width: out_width,
                     height: out_height,
                     pixel_format: PixelFormat::Grayscale,
@@ -4131,6 +4180,8 @@ impl<'a> Decoder<'a> {
                     }
                 }
                 Ok(Image {
+                    xmp_data: xmp_data.clone(),
+                    iptc_data: iptc_data.clone(),
                     width: out_width,
                     height: out_height,
                     pixel_format: out_format,
@@ -4211,6 +4262,8 @@ impl<'a> Decoder<'a> {
                 }
 
                 return Ok(Image {
+                    xmp_data: xmp_data.clone(),
+                    iptc_data: iptc_data.clone(),
                     width: out_width,
                     height: out_height,
                     pixel_format: out_format,
@@ -4284,6 +4337,8 @@ impl<'a> Decoder<'a> {
                 recovered_warnings.push(DecodeWarning::UnsupportedRecovered { detail });
                 let data: Vec<u8> = vec![128u8; out_width * out_height * bpp];
                 return Ok(Image {
+                    xmp_data: xmp_data.clone(),
+                    iptc_data: iptc_data.clone(),
                     width: out_width,
                     height: out_height,
                     pixel_format: out_format,
@@ -4437,6 +4492,8 @@ impl<'a> Decoder<'a> {
                     };
 
                     return Ok(Image {
+                        xmp_data: self.metadata.xmp_data.clone(),
+                        iptc_data: self.metadata.iptc_data.clone(),
                         width: out_width,
                         height: out_height,
                         pixel_format: out_format,
@@ -4545,6 +4602,8 @@ impl<'a> Decoder<'a> {
                     }
 
                     return Ok(Image {
+                        xmp_data: self.metadata.xmp_data.clone(),
+                        iptc_data: self.metadata.iptc_data.clone(),
                         width: out_width,
                         height: out_height,
                         pixel_format: out_format,
@@ -4618,6 +4677,8 @@ impl<'a> Decoder<'a> {
                     }
 
                     return Ok(Image {
+                        xmp_data: self.metadata.xmp_data.clone(),
+                        iptc_data: self.metadata.iptc_data.clone(),
                         width: out_width,
                         height: out_height,
                         pixel_format: out_format,
@@ -4696,6 +4757,8 @@ impl<'a> Decoder<'a> {
                     }
 
                     return Ok(Image {
+                        xmp_data: self.metadata.xmp_data.clone(),
+                        iptc_data: self.metadata.iptc_data.clone(),
                         width: out_width,
                         height: out_height,
                         pixel_format: out_format,
@@ -4819,6 +4882,8 @@ impl<'a> Decoder<'a> {
                     }
 
                     return Ok(Image {
+                        xmp_data: self.metadata.xmp_data.clone(),
+                        iptc_data: self.metadata.iptc_data.clone(),
                         width: out_width,
                         height: out_height,
                         pixel_format: out_format,
@@ -4980,6 +5045,8 @@ impl<'a> Decoder<'a> {
                 }
 
                 return Ok(Image {
+                    xmp_data: xmp_data.clone(),
+                    iptc_data: iptc_data.clone(),
                     width: out_width,
                     height: out_height,
                     pixel_format: out_format,
@@ -5010,6 +5077,8 @@ impl<'a> Decoder<'a> {
             }
 
             Ok(Image {
+                xmp_data: xmp_data.clone(),
+                iptc_data: iptc_data.clone(),
                 width: out_width,
                 height: out_height,
                 pixel_format: out_format,
@@ -5523,6 +5592,8 @@ impl<'a> Decoder<'a> {
         }
 
         Ok(Image {
+            xmp_data: self.metadata.xmp_data.clone(),
+            iptc_data: self.metadata.iptc_data.clone(),
             width,
             height,
             pixel_format: out_format,

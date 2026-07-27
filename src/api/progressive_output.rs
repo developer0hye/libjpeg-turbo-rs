@@ -591,6 +591,8 @@ impl ProgressiveDecoder {
             data.extend_from_slice(&component_planes[0][y * comp_w..y * comp_w + out_width]);
         }
         Ok(Image {
+            xmp_data: self.metadata.xmp_data.clone(),
+            iptc_data: self.metadata.iptc_data.clone(),
             width: out_width,
             height: out_height,
             pixel_format: PixelFormat::Grayscale,
@@ -703,6 +705,8 @@ impl ProgressiveDecoder {
                 );
             }
             Ok(Image {
+                xmp_data: self.metadata.xmp_data.clone(),
+                iptc_data: self.metadata.iptc_data.clone(),
                 width: out_width,
                 height: out_height,
                 pixel_format: out_format,
@@ -808,6 +812,8 @@ impl ProgressiveDecoder {
             }
 
             Ok(Image {
+                xmp_data: self.metadata.xmp_data.clone(),
+                iptc_data: self.metadata.iptc_data.clone(),
                 width: out_width,
                 height: out_height,
                 pixel_format: out_format,
@@ -855,6 +861,8 @@ impl ProgressiveDecoder {
         }
 
         Ok(Image {
+            xmp_data: self.metadata.xmp_data.clone(),
+            iptc_data: self.metadata.iptc_data.clone(),
             width: out_width,
             height: out_height,
             pixel_format: PixelFormat::Cmyk,

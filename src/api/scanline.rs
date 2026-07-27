@@ -171,6 +171,8 @@ impl<'a> ScanlineDecoder<'a> {
             data.extend_from_slice(&img.data[src_start..src_start + dst_row_bytes]);
         }
         Ok(Image {
+            xmp_data: None,
+            iptc_data: None,
             width,
             height: img.height,
             pixel_format: img.pixel_format,
