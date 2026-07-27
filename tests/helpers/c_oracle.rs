@@ -1,4 +1,6 @@
-//! Builds and runs the four-component CMYK reference oracle.
+//! Builds and runs the C reference oracles that the stock tools cannot
+//! stand in for: the four-component CMYK oracle, and the gray→4bpp
+//! TurboJPEG oracle added for issue #369.
 //!
 //! Issues #313 / #339. Every other encode cross-check shells out to `cjpeg`,
 //! but cjpeg reads only PNM/BMP/GIF/Targa — it cannot ingest CMYK at all. The
@@ -149,6 +151,127 @@ pub fn cmyk_c_oracle() -> Option<PathBuf> {
         return oracle.exists().then_some(oracle);
     }
     Some(oracle)
+}
+
+/// A TurboJPEG development install: `turbojpeg.h` plus a linkable
+/// `libturbojpeg`. Discovered separately from libjpeg because runtime
+/// packages (e.g. `libjpeg-turbo-progs`) ship neither, and some prefixes
+/// carry one library but not the other.
+fn find_turbojpeg_dev() -> Option<LibjpegDevInstall> {
+    let mut prefixes: Vec<PathBuf> = Vec::new();
+    if let Ok(prefix) = std::env::var("LIBJPEG_TURBO_PREFIX") {
+        prefixes.push(PathBuf::from(prefix));
+    }
+    if let Ok(prefix) = std::env::var("CONDA_PREFIX") {
+        prefixes.push(PathBuf::from(prefix));
+    }
+    prefixes.extend(
+        [
+            "/opt/libjpeg-turbo",
+            "/opt/homebrew/opt/jpeg-turbo",
+            "/opt/homebrew",
+            "/usr/local",
+            "/usr",
+        ]
+        .iter()
+        .map(PathBuf::from),
+    );
+
+    for prefix in prefixes {
+        let include_dir: PathBuf = prefix.join("include");
+        if !include_dir.join("turbojpeg.h").exists() {
+            continue;
+        }
+        for lib_name in ["lib64", "lib"] {
+            let lib_dir: PathBuf = prefix.join(lib_name);
+            let has_library: bool = ["libturbojpeg.a", "libturbojpeg.so", "libturbojpeg.dylib"]
+                .iter()
+                .any(|file| lib_dir.join(file).exists());
+            if has_library {
+                return Some(LibjpegDevInstall {
+                    include_dir,
+                    lib_dir,
+                });
+            }
+        }
+    }
+    None
+}
+
+/// Locate — building if necessary — the issue #369 gray→4bpp TurboJPEG
+/// oracle (`examples/gray_argb_c_oracle.c`). Same build-and-cache and
+/// `None`-means-skip contract as [`cmyk_c_oracle`], but linked against
+/// `libturbojpeg` (tj3 API) rather than `libjpeg`, and with no prebuilt-binary
+/// environment override.
+pub fn gray_argb_c_oracle() -> Option<PathBuf> {
+    let artifact_dir: PathBuf = artifact_dir()?;
+    let oracle: PathBuf = artifact_dir.join("gray_argb_c_oracle");
+    let _guard = BUILD_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+
+    let source: PathBuf = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("examples")
+        .join("gray_argb_c_oracle.c");
+    if !source.exists() {
+        return None;
+    }
+    if is_newer(&oracle, &source) {
+        return Some(oracle);
+    }
+
+    let install: LibjpegDevInstall = find_turbojpeg_dev()?;
+
+    let staging: PathBuf =
+        artifact_dir.join(format!("gray_argb_c_oracle.{}.tmp", std::process::id()));
+    let compiler: String = std::env::var("CC").unwrap_or_else(|_| "cc".to_string());
+    let output = Command::new(&compiler)
+        .arg("-O2")
+        .arg("-o")
+        .arg(&staging)
+        .arg(&source)
+        .arg(format!("-I{}", install.include_dir.display()))
+        .arg(format!("-L{}", install.lib_dir.display()))
+        .arg("-lturbojpeg")
+        .arg(format!("-Wl,-rpath,{}", install.lib_dir.display()))
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        let _ = std::fs::remove_file(&staging);
+        panic!(
+            "failed to build the gray-ARGB C oracle with {compiler} against {:?}:\n{}",
+            install.include_dir,
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    if std::fs::rename(&staging, &oracle).is_err() {
+        let _ = std::fs::remove_file(&staging);
+        return oracle.exists().then_some(oracle);
+    }
+    Some(oracle)
+}
+
+/// Decode `jpeg_path` through the gray-ARGB oracle to `format_name`
+/// (e.g. "ARGB"), returning the raw 4bpp pixel buffer.
+///
+/// Panics on oracle failure: once the harness exists, a non-zero exit is a
+/// real problem with the case under test, not a reason to skip.
+pub fn decode_with_gray_argb_c_oracle(
+    oracle: &Path,
+    jpeg_path: &Path,
+    format_name: &str,
+) -> Vec<u8> {
+    let output = Command::new(oracle)
+        .arg(jpeg_path)
+        .arg(format_name)
+        .output()
+        .unwrap_or_else(|error| panic!("failed to run {oracle:?}: {error:?}"));
+    assert!(
+        output.status.success() && !output.stdout.is_empty(),
+        "gray-ARGB C oracle failed for {format_name}: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    output.stdout
 }
 
 fn is_newer(candidate: &Path, source: &Path) -> bool {
