@@ -220,6 +220,22 @@ impl OutBuf<'_> {
     }
 }
 
+/// Pad/alpha byte position within a 4bpp pixel: the one offset in `0..=3` not
+/// taken by R, G, or B (the four offsets sum to 6). Deriving it from the
+/// format — like the CMYK/YCCK conversion arms — makes a wrong alpha-first vs
+/// alpha-last grouping unrepresentable (issue #369). `None` for everything
+/// else, including the 4bpp formats without R/G/B offsets (`Cmyk`).
+fn pad_alpha_offset(format: PixelFormat) -> Option<usize> {
+    match (
+        format.red_offset(),
+        format.green_offset(),
+        format.blue_offset(),
+    ) {
+        (Some(r), Some(g), Some(b)) if format.bytes_per_pixel() == 4 => Some(6 - r - g - b),
+        _ => None,
+    }
+}
+
 /// Claim the output destination for a terminal decode branch: the
 /// caller's buffer when a sink is armed (validated against `size`, so a
 /// short buffer is a typed error, never a panic or truncation), else a
@@ -3305,6 +3321,13 @@ impl<'a> Decoder<'a> {
                 warnings: Vec::new(),
             })
         } else {
+            // Note: C refuses lossless non-RGB→extended-RGB conversion
+            // outright (jdcolor.c JERR_CONVERSION_NOTIMPL when
+            // master->lossless && jpeg_color_space != JCS_RGB, see P4-64);
+            // we expand with the same channel layout as the baseline
+            // grayscale path below (issue #369 had Argb/Abgr grouped
+            // alpha-last here).
+            let pad_off: Option<usize> = pad_alpha_offset(out_format);
             let mut data = Vec::with_capacity(width * height * bpp);
             for &sample in output {
                 let val = if pt > 0 {
@@ -3322,18 +3345,13 @@ impl<'a> Decoder<'a> {
                     | PixelFormat::Bgra
                     | PixelFormat::Rgbx
                     | PixelFormat::Bgrx
+                    | PixelFormat::Xrgb
+                    | PixelFormat::Xbgr
                     | PixelFormat::Argb
                     | PixelFormat::Abgr => {
-                        data.push(val);
-                        data.push(val);
-                        data.push(val);
-                        data.push(255);
-                    }
-                    PixelFormat::Xrgb | PixelFormat::Xbgr => {
-                        data.push(255);
-                        data.push(val);
-                        data.push(val);
-                        data.push(val);
+                        let mut px: [u8; 4] = [val; 4];
+                        px[pad_off.expect("4bpp format has a pad offset")] = 255;
+                        data.extend_from_slice(&px);
                     }
                     PixelFormat::Rgb565 => {
                         let packed: u16 = ((val as u16 >> 3) << 11)
@@ -4134,6 +4152,7 @@ impl<'a> Decoder<'a> {
                 // Expand grayscale to requested color format
                 let bpp = out_format.bytes_per_pixel();
                 let data_size = out_width * out_height * bpp;
+                let pad_off: Option<usize> = pad_alpha_offset(out_format);
                 let mut data = take_out_buf(sink, data_size)?;
                 for y in 0..out_height {
                     let row = &component_planes[0][y * comp_w + comp_x_offsets[0]
@@ -4154,22 +4173,22 @@ impl<'a> Decoder<'a> {
                                 out_row[x * 3 + 1] = v;
                                 out_row[x * 3 + 2] = v;
                             }
+                            // Offset-derived like the CMYK/YCCK arms: the
+                            // pad/alpha byte position comes from the format,
+                            // matching the 3-component colour path and C
+                            // JCS_EXT_* (issue #369 had Argb/Abgr grouped
+                            // alpha-last).
                             PixelFormat::Rgba
                             | PixelFormat::Bgra
                             | PixelFormat::Rgbx
                             | PixelFormat::Bgrx
+                            | PixelFormat::Xrgb
+                            | PixelFormat::Xbgr
                             | PixelFormat::Argb
                             | PixelFormat::Abgr => {
-                                out_row[x * 4] = v;
-                                out_row[x * 4 + 1] = v;
-                                out_row[x * 4 + 2] = v;
-                                out_row[x * 4 + 3] = 255;
-                            }
-                            PixelFormat::Xrgb | PixelFormat::Xbgr => {
-                                out_row[x * 4] = 255;
-                                out_row[x * 4 + 1] = v;
-                                out_row[x * 4 + 2] = v;
-                                out_row[x * 4 + 3] = v;
+                                let mut px: [u8; 4] = [v; 4];
+                                px[pad_off.expect("4bpp format has a pad offset")] = 255;
+                                out_row[x * 4..x * 4 + 4].copy_from_slice(&px);
                             }
                             PixelFormat::Rgb565 => {
                                 // Grayscale v → pack as R=G=B=v (no dither)
