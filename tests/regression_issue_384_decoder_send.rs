@@ -6,9 +6,11 @@
 //!
 //! Contract pinned here: `Decoder` (and the wrappers that embed it) are
 //! `Send`. `Sync` stays off — the decoder uses interior mutability
-//! (`RefCell`) for in-decode state, and its rustdoc documents the
-//! per-instance threading contract, mirroring the per-`cinfo` affinity
-//! documented for the C ABI in docs/ABI_COMPATIBILITY.md.
+//! (`RefCell`) for in-decode state and holds `Send`-only callback boxes
+//! — but that half is documented on `Decoder`, not asserted here; it
+//! matches upstream libjpeg-turbo's one-thread-at-a-time rule per
+//! `cinfo`, and our C ABI shim is stricter still (a `cinfo` may not
+//! leave its creating thread — docs/ABI_COMPATIBILITY.md).
 
 fn assert_send<T: Send>() {}
 

@@ -311,11 +311,13 @@ impl Image {
 /// `Decoder` is [`Send`] — a configured decoder can move to another
 /// thread (rayon, `tokio::task::spawn_blocking`) and decode there
 /// (issue #384). It is deliberately **not** [`Sync`]: in-decode state
-/// lives behind interior mutability (`RefCell`), so one decoder serves
-/// one thread at a time — the same per-instance affinity the C ABI
-/// documents per `cinfo` in `docs/ABI_COMPATIBILITY.md`. Decode the
-/// same bytes concurrently by giving each thread its own `Decoder`;
-/// construction from `&[u8]` is cheap (header parse only).
+/// lives behind interior mutability (`RefCell`) and the installed
+/// callbacks are `Send`-only boxes, so one decoder serves one thread
+/// at a time — upstream libjpeg-turbo's per-`cinfo` rule. Our own C
+/// ABI shim is stricter still: a `cinfo` may not leave the thread that
+/// created it (`docs/ABI_COMPATIBILITY.md`, "Threading contract").
+/// Decode the same bytes concurrently by giving each thread its own
+/// `Decoder`; construction from `&[u8]` is cheap (header parse only).
 pub struct Decoder<'a> {
     metadata: JpegMetadata,
     raw_data: &'a [u8],
