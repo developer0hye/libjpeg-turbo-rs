@@ -449,6 +449,15 @@ pub struct Decoder<'a> {
 }
 
 impl<'a> Decoder<'a> {
+    /// Parse the JPEG headers in `data` and return a configurable
+    /// decoder. No entropy decoding and no pixel work happen here, but
+    /// for progressive and non-interleaved streams locating the scan
+    /// boundaries walks the entropy bytes, so worst-case probe time
+    /// scales with the compressed input length (still far cheaper than
+    /// a decode). Suitable as a probe (dimensions,
+    /// [`Decoder::exif_orientation`], markers) even when no decode
+    /// follows. Uses [`DecodeLimits::default`]; use
+    /// [`Decoder::new_with_limits`] to bound resource use differently.
     pub fn new(data: &'a [u8]) -> Result<Self> {
         Self::new_with_limits(data, DecodeLimits::default())
     }
@@ -660,6 +669,9 @@ impl<'a> Decoder<'a> {
             .and_then(crate::common::exif::parse_orientation)
     }
 
+    /// The parsed frame header: dimensions, per-component sampling,
+    /// precision, progressive/lossless flags. Available immediately
+    /// after [`Decoder::new`], before any pixel decode.
     pub fn header(&self) -> &FrameHeader {
         &self.metadata.frame
     }
@@ -3631,6 +3643,12 @@ impl<'a> Decoder<'a> {
         })
     }
 
+    /// Decode the full image into an owned [`Image`] using the
+    /// configuration set on this decoder (output format, scaling, crop,
+    /// leniency, ...). To decode into a caller-owned buffer, see
+    /// [`Decoder::decode_image_into`] (which avoids the per-frame output
+    /// allocation on the standard direct-output paths; its docs list the
+    /// staged exceptions).
     pub fn decode_image(&self) -> Result<Image> {
         self.decode_image_with_sink(&mut None)
     }
