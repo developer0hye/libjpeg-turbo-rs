@@ -74,8 +74,16 @@ fn issue_391_orientation_readable_from_header_probe() {
         .expect("encode");
     assert_eq!(
         Decoder::new(&plain).expect("header").exif_orientation(),
-        None
+        None,
+        "no EXIF must probe as None"
     );
+
+    // The caller-buffer path's ImageInfo carries the same accessor.
+    let tagged: Vec<u8> = fixture_with_orientation(16, 16, 6);
+    let mut buf: Vec<u8> = vec![0u8; 16 * 16 * 3];
+    let info = libjpeg_turbo_rs::decompress_into(&tagged, PixelFormat::Rgb, &mut buf)
+        .expect("decompress_into");
+    assert_eq!(info.exif_orientation(), Some(6), "ImageInfo accessor");
 }
 
 /// The DCT-domain mapping follows the standard EXIF table; values
@@ -106,14 +114,18 @@ fn issue_391_transform_op_mapping() {
 /// Pixel-domain apply cross-validated against the DCT-domain transforms
 /// (which are themselves `jpegtran`-cross-checked). Byte-exactness is NOT
 /// the contract: the integer IDCT rounds its column pass and row pass
-/// asymmetrically, so decode-then-transpose and transpose-then-decode can
-/// legitimately differ by one code on a few pixels (C behaves the same
-/// way). A placement error, by contrast, moves whole gradient values:
-/// measured max per-channel diff on this fixture is 3 (orientation 5,
-/// 2026-07-28; the axis-swapping orientations expose the most rounding),
+/// asymmetrically (`jidctint.c:307` descales pass 1 by `CONST_BITS -
+/// PASS1_BITS`, `:410` descales pass 2 by `CONST_BITS + PASS1_BITS + 3`),
+/// so decode-then-transpose and transpose-then-decode legitimately differ
+/// by one code on a few samples, which YCbCr->RGB widens to at most 3 per
+/// channel. C behaves the same way: on this content `djpeg` vs `jpegtran
+/// -transpose | djpeg` measures 1 in the Y samples and 3 in RGB.
+/// A placement error, by contrast, moves whole gradient values: measured
+/// max per-channel diff on this fixture is 3 (orientations 5-8,
+/// 2026-07-28; only the axis-swapping cases round at all, 2-4 measure 0),
 /// while a one-pixel placement slip measures 13 (horizontal) / 21
-/// (vertical) on this fixture's gradient and a wrong-case mapping
-/// measures 249 (reviewer-measured, 2026-07-28). Assert measured + 1.
+/// (vertical) on this fixture's gradient and the tightest of the 56
+/// wrong-case mappings measures 251. Assert measured + 1.
 #[test]
 fn issue_391_apply_orientation_matches_dct_domain_transforms() {
     let (width, height): (usize, usize) = (48, 32);

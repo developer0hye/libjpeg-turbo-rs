@@ -237,7 +237,7 @@
 | `jpeg_read_scanlines(cinfo, scanlines, max_lines)` | Read scanline rows | `ScanlineDecoder::read_scanlines()` | ✅ |
 | `jpeg12_read_scanlines(...)` | Read 12-bit scanlines | `read_scanlines_12()` | ✅ |
 | `jpeg16_read_scanlines(...)` | Read 16-bit scanlines | `read_scanlines_16()` | ✅ |
-| `jpeg_skip_scanlines(cinfo, num_lines)` | Skip rows during decode | `ScanlineDecoder::skip_scanlines()` | ✅ |
+| `jpeg_skip_scanlines(cinfo, num_lines)` | Skip rows during decode | `ScanlineDecoder::skip_scanlines()`, `StreamingDecoder::skip_scanlines()` (C-matching clamp, issue #383) | ✅ |
 | `jpeg12_skip_scanlines(...)` | Skip 12-bit scanlines | `read_scanlines_12()` (skip via offset) | ✅ |
 | `jpeg_crop_scanline(cinfo, &xoffset, &width)` | Scanline-level crop | `ScanlineDecoder::set_crop_x()` | ✅ |
 | `jpeg12_crop_scanline(...)` | 12-bit crop | `read_scanlines_12()` (crop support) | ✅ |
