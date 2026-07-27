@@ -100,6 +100,26 @@ pub use common::types::*;
 pub use decode::pipeline::{Decoder, Image, ImageInfo};
 pub use decode::resync::{DefaultResyncStrategy, RestartResyncStrategy, ResyncAction};
 pub use transform::{MarkerCopyMode, TransformOp, TransformOptions};
+
+/// Whether this build of the codec has both the `simd` and `std` cargo
+/// features — the feature wiring a repackaging crate must preserve.
+///
+/// This is a feature-flag predicate, not a claim about the current CPU
+/// or target. What the two features buy is target-dependent: `simd`
+/// compiles the vector kernels (NEON / SSE2 / AVX2 / WASM SIMD128 where
+/// the target has them; other architectures run scalar either way), and
+/// `std` additionally lets `x86_64` builds pick AVX2 vs SSE2 through
+/// `std::arch::is_x86_feature_detected!` at runtime — without it a
+/// stock x86-64-baseline build never takes the AVX2 paths.
+///
+/// Downstream crates that repackage this codec (e.g. the `image`
+/// bridge) assert on this to catch a feature-wiring regression — issue
+/// #381 shipped exactly that: the bridge depended on the codec with
+/// `default-features = false`, silently turning its performance
+/// headline off.
+pub const fn simd_and_std_features_enabled() -> bool {
+    cfg!(all(feature = "std", feature = "simd"))
+}
 /// 12-bit and 16-bit sample precision support.
 pub mod precision {
     pub use crate::api::precision::{

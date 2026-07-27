@@ -128,6 +128,64 @@ jobs:
       - name: Default features still build
         run: cargo build --lib
 
+  publish-check:
+    # Issue #380: the image/wasm bridge crates shipped with path-only
+    # dependencies on the root crate and could not be published — the
+    # `image`-bridge adoption channel simply did not exist on crates.io.
+    # Two gates, because modern cargo (>=1.90) only WARNS on a missing
+    # `version` key and infers one at package time:
+    # 1. an explicit manifest assertion that every intra-workspace `path`
+    #    dependency in crates/*/Cargo.toml carries a `version` key;
+    # 2. `cargo package --no-verify` for each publishable member
+    #    (--no-verify because the workspace version may not be on
+    #    crates.io yet — this gates manifest shape, not registry state).
+    name: Publish check (manifest + cargo package)
+    runs-on: ubuntu-latest
+    needs: [check]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Intra-workspace path deps must carry a version key
+        # Parsed as TOML (not grepped) so table-syntax deps
+        # ([dependencies.foo] with path/version on separate lines) are
+        # judged correctly. Dev-dependencies are exempt: cargo strips
+        # versionless path dev-deps at publish time.
+        run: |
+          python3 - <<'EOF'
+          import glob, sys, tomllib
+          bad = 0
+          for manifest in glob.glob("crates/*/Cargo.toml"):
+              with open(manifest, "rb") as fh:
+                  data = tomllib.load(fh)
+              for section in ("dependencies", "build-dependencies"):
+                  for name, spec in (data.get(section) or {}).items():
+                      if isinstance(spec, dict) and "path" in spec and "version" not in spec:
+                          print(f"::error file={manifest}::{section}.{name} has a path dependency without a version key (issue #380)")
+                          bad = 1
+          sys.exit(bad)
+          EOF
+      - name: cargo package every publishable member
+        # --exclude-lockfile as well as --no-verify: lockfile generation
+        # resolves the packaged `version = "0.8.0"` deps against
+        # crates.io, which fails whenever the workspace version is ahead
+        # of the published one (the normal state between releases).
+        run: |
+          set -euo pipefail
+          for crate in libjpeg-turbo-rs libjpeg-turbo-rs-capi libjpeg-turbo-rs-image libjpeg-turbo-rs-wasm; do
+            echo "::group::$crate"
+            cargo package --no-verify --exclude-lockfile -p "$crate"
+            echo "::endgroup::"
+          done
+      - name: Bridge feature wiring (isolated resolution, issue #381)
+        # Must be `-p`: whole-workspace builds unify the root crate's
+        # default `std` feature and would mask a bridge manifest that
+        # drops it. `-p` resolves features exactly like a crates.io
+        # consumer of the bridge does.
+        run: cargo test -p libjpeg-turbo-rs-image
+
   test-lib:
     name: Unit Tests
     runs-on: ubuntu-latest
