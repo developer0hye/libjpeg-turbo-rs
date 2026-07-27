@@ -973,7 +973,9 @@ pub fn compress_16bit(
 }
 
 /// Like `compress_16bit` but with an explicit lossless precision override
-/// (13..=16). When `None` the default of 16 is used.
+/// (2..=16, the SOF3-legal range; the TurboJPEG layer uses 9..=12 for
+/// 12-bit lossless and 13..=16 for 16-bit). When `None` the default of 16
+/// is used.
 pub fn compress_16bit_with_precision(
     pixels: &[u16],
     width: usize,
@@ -989,12 +991,6 @@ pub fn compress_16bit_with_precision(
             predictor
         )));
     }
-    if point_transform > 15 {
-        return Err(JpegError::Unsupported(format!(
-            "point transform must be 0-15, got {}",
-            point_transform
-        )));
-    }
     if width == 0 || height == 0 {
         return Err(JpegError::CorruptData(
             "image dimensions must be non-zero".to_string(),
@@ -1006,14 +1002,50 @@ pub fn compress_16bit_with_precision(
             num_components
         )));
     }
-    let expected = width * height * num_components;
+    let precision: u8 = precision_override.unwrap_or(16);
+    // SOF3-legal precision range (2..=16, same contract as
+    // compress_lossless_arbitrary); enforcing precision <= 16 also implies
+    // pt <= 15, keeping Al inside its 4-bit SOS field (codex review on
+    // issue #382: with the old `pt > 15` guard removed, Some(17)/Pt=16
+    // would serialize a self-inconsistent Al and Some(255)/Pt=32 would
+    // panic in the residual shifts). The TurboJPEG capi layer routes
+    // 9..=12 (tj3Compress12 lossless) and 13..=16 (tj3Compress16) here.
+    if !(2..=16).contains(&precision) {
+        return Err(JpegError::Unsupported(format!(
+            "lossless precision override must be 2-16, got {}",
+            precision
+        )));
+    }
+    // Same contract as decode: 0 <= Pt <= precision - 1 (jdlossls.c:247-261;
+    // the encoder writes Al into the SOS, and C refuses to decode Al >=
+    // precision). The old `> 15` guard let pt >= precision slip through for
+    // sub-16 precision overrides, making `1 << (precision - pt - 1)`
+    // negative in lossless_diff_16 (issue #382). Parameter checks run
+    // before buffer sizing so absurd dimensions cannot panic the error
+    // path first, and the sizing itself is checked.
+    if point_transform >= precision {
+        return Err(JpegError::Unsupported(format!(
+            "point transform must be 0..{} (< precision {}), got {}",
+            precision - 1,
+            precision,
+            point_transform
+        )));
+    }
+    let expected: usize = width
+        .checked_mul(height)
+        .and_then(|n| n.checked_mul(num_components))
+        .ok_or_else(|| {
+            JpegError::CorruptData(format!(
+                "image dimensions {}x{}x{} overflow",
+                width, height, num_components
+            ))
+        })?;
     if pixels.len() < expected {
         return Err(JpegError::BufferTooSmall {
             need: expected,
             got: pixels.len(),
         });
     }
-    let precision: u8 = precision_override.unwrap_or(16);
     if num_components == 1 {
         compress_16bit_gray(pixels, width, height, predictor, point_transform, precision)
     } else {
@@ -1132,7 +1164,13 @@ fn lossless_diff_16(
     pt: u8,
     precision: u8,
 ) -> i32 {
-    let initial = 1i32 << (precision as i32 - pt as i32 - 1);
+    // Same clamp defense as undifference_row_16 (issue #382): callers
+    // validate `pt < precision`, this only prevents a panic path.
+    let init_shift: i32 = (precision as i32)
+        .saturating_sub(pt as i32)
+        .saturating_sub(1)
+        .clamp(0, 31);
+    let initial = 1i32 << init_shift;
     let sample = pixel >> pt as i32;
     let prediction = if y == 0 && x == 0 {
         initial
@@ -1322,7 +1360,15 @@ fn undifference_row_16(
     is_first_row: bool,
 ) {
     let mask: i64 = (1i64 << precision as i64) - 1;
-    let initial = 1i32 << (precision as i32 - pt as i32 - 1);
+    // Callers validate `pt < precision` (issue #382, mirroring
+    // jdlossls.c:247-261); clamp anyway so a future unvalidated caller
+    // cannot reintroduce the debug shift-overflow panic — same defense as
+    // the 8-bit path in decode/lossless.rs (P4-38).
+    let init_shift: i32 = (precision as i32)
+        .saturating_sub(pt as i32)
+        .saturating_sub(1)
+        .clamp(0, 31);
+    let initial = 1i32 << init_shift;
     for x in 0..diffs.len() {
         let prediction = if is_first_row && x == 0 {
             initial
@@ -1355,6 +1401,16 @@ fn decode_dc_wide(
     // it always represents the value 32768 without reading any extra bits.
     if category == 16 {
         return Ok(-32768i16);
+    }
+    // A corrupt DHT can carry any symbol value; C rejects DC symbols above
+    // 16 when building the table (jdhuff.c, JERR_BAD_HUFF_TABLE). Found by
+    // fuzz_decompress_precision (issue #382): category >= 32 overflows the
+    // sign-extension shift below.
+    if category > 16 {
+        return Err(JpegError::CorruptData(format!(
+            "lossless DC category {} exceeds 16 (bogus Huffman table)",
+            category
+        )));
     }
     let extra_bits = reader.read_bits(category);
     if extra_bits >= 1u16.wrapping_shl(category as u32 - 1) {
@@ -1692,6 +1748,17 @@ pub fn decompress_lossless_arbitrary(data: &[u8]) -> Result<Image16> {
         return Err(JpegError::Unsupported(format!(
             "lossless predictor {} (must be 1-7)",
             psv
+        )));
+    }
+    // C rejects the scan when Al (point transform) reaches the data
+    // precision: legal values are 0 <= Pt <= precision - 1 and jdlossls.c
+    // start_pass raises JERR_BAD_PROGRESSION otherwise (jdlossls.c:247-261).
+    // Without this check the initial-prediction shift
+    // `1 << (precision - pt - 1)` goes negative (issue #382).
+    if pt >= frame.precision {
+        return Err(JpegError::CorruptData(format!(
+            "lossless point transform Al={} must be < precision {}",
+            pt, frame.precision
         )));
     }
     let mut dc_tables = Vec::with_capacity(nc);
