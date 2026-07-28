@@ -9,7 +9,12 @@
 //! so this file builds cleanly on every supported architecture. Where a
 //! port is missing the comparison block compiles away and only the scalar
 //! not-panic path runs — today that is the reduced-size IDCT trio off
-//! aarch64 (tracked as P4-71).
+//! aarch64 (tracked as P4-71). The wasm32 blocks additionally require
+//! `target_feature = "simd128"` at compile time: build without
+//! `-C target-feature=+simd128` and EVERY wasm comparison compiles away,
+//! leaving the whole suite scalar-only. In-repo builds get the flag from
+//! `.cargo/config.toml` (both wasm targets), so this bites only
+//! out-of-repo invocations that bypass that config.
 //!
 //! Reproducibility
 //! ---------------
