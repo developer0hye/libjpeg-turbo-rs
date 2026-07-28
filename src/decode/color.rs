@@ -1,19 +1,114 @@
+// ---------------------------------------------------------------------------
+// Table-driven YCbCr→RGB (P4-60, issue #359).
+//
+// C libjpeg-turbo's scalar path (`build_ycc_rgb_table` in `jdcolor.c`,
+// `ycc_rgb_convert` in `jdcolext.c`) spends zero multiplies per pixel:
+// the per-chroma contributions are precomputed into 256-entry tables
+// and clamping goes through a range-limit table instead of branches. On
+// targets with no SIMD backend (RISC-V, POWER, s390x, no_std) adopting
+// that shape made this kernel 1.63x faster on riscv64 — one step into
+// P4-60's 2.5x scalar gap, not the whole of it
+// (`experiments/riscv64_scalar_2026-07-27.md`, 07-28 section). The
+// tables below precompute EXACTLY the expressions the multiply form
+// used, so output is byte-identical by construction — the parity suites
+// (`simd_parity`, the djpeg cross-checks) pin it.
+// ---------------------------------------------------------------------------
+
+/// `(91881 * (cr - 128) + 32768) >> 16` for every `cr`.
+static CR_R_TAB: [i32; 256] = build_cr_r_tab();
+/// `(116130 * (cb - 128) + 32768) >> 16` for every `cb`.
+static CB_B_TAB: [i32; 256] = build_cb_b_tab();
+/// `22554 * (cb - 128)` (unshifted partial) for every `cb`.
+static CB_G_TAB: [i32; 256] = build_cb_g_tab();
+/// `46802 * (cr - 128) + 32768` (unshifted partial + rounding) for every `cr`.
+static CR_G_TAB: [i32; 256] = build_cr_g_tab();
+
+/// Branch-free clamp: `y + tab` lands in `[-227, 480]`; biased by 256
+/// it indexes `[29, 736]`, comfortably inside the table. The `& 1023`
+/// mask is an identity on that range and lets the compiler drop the
+/// bounds check without `unsafe` (the non-SIMD build aims at
+/// `forbid(unsafe_code)` — #389).
+static RANGE_LIMIT: [u8; 1024] = build_range_limit();
+
+const fn build_cr_r_tab() -> [i32; 256] {
+    let mut tab = [0i32; 256];
+    let mut i: usize = 0;
+    while i < 256 {
+        tab[i] = (91881 * (i as i32 - 128) + 32768) >> 16;
+        i += 1;
+    }
+    tab
+}
+
+const fn build_cb_b_tab() -> [i32; 256] {
+    let mut tab = [0i32; 256];
+    let mut i: usize = 0;
+    while i < 256 {
+        tab[i] = (116130 * (i as i32 - 128) + 32768) >> 16;
+        i += 1;
+    }
+    tab
+}
+
+const fn build_cb_g_tab() -> [i32; 256] {
+    let mut tab = [0i32; 256];
+    let mut i: usize = 0;
+    while i < 256 {
+        tab[i] = 22554 * (i as i32 - 128);
+        i += 1;
+    }
+    tab
+}
+
+const fn build_cr_g_tab() -> [i32; 256] {
+    let mut tab = [0i32; 256];
+    let mut i: usize = 0;
+    while i < 256 {
+        tab[i] = 46802 * (i as i32 - 128) + 32768;
+        i += 1;
+    }
+    tab
+}
+
+const fn build_range_limit() -> [u8; 1024] {
+    let mut tab = [0u8; 1024];
+    let mut i: usize = 0;
+    while i < 1024 {
+        let v: i32 = i as i32 - 256;
+        tab[i] = if v < 0 {
+            0
+        } else if v > 255 {
+            255
+        } else {
+            v as u8
+        };
+        i += 1;
+    }
+    tab
+}
+
 #[inline(always)]
-fn clamp(val: i32) -> u8 {
-    val.clamp(0, 255) as u8
+fn range_limit(v: i32) -> u8 {
+    RANGE_LIMIT[((v + 256) as usize) & 1023]
 }
 
 /// Convert a single YCbCr pixel to RGB (ITU-R BT.601, fixed-point).
+///
+/// Table-driven per C's `ycc_rgb_convert`: three table loads, three
+/// adds, one shift, three range-limit loads — no multiplies, no
+/// branches. Produces bit-identical output to the multiply form it
+/// replaced (the tables hold the same expressions precomputed).
+#[inline(always)]
 pub fn ycbcr_to_rgb_pixel(y: u8, cb: u8, cr: u8) -> (u8, u8, u8) {
     let y = y as i32;
-    let cb = cb as i32 - 128;
-    let cr = cr as i32 - 128;
+    let cb = cb as usize;
+    let cr = cr as usize;
 
-    let r = y + ((91881 * cr + 32768) >> 16);
-    let g = y - ((22554 * cb + 46802 * cr + 32768) >> 16);
-    let b = y + ((116130 * cb + 32768) >> 16);
+    let r = y + CR_R_TAB[cr];
+    let g = y - ((CB_G_TAB[cb] + CR_G_TAB[cr]) >> 16);
+    let b = y + CB_B_TAB[cb];
 
-    (clamp(r), clamp(g), clamp(b))
+    (range_limit(r), range_limit(g), range_limit(b))
 }
 
 /// Convert a row of YCbCr pixels to interleaved RGB.
@@ -230,5 +325,71 @@ pub fn cmyk_passthrough_row(c: &[u8], m: &[u8], y: &[u8], k: &[u8], cmyk: &mut [
         cmyk[x * 4 + 1] = m[x];
         cmyk[x * 4 + 2] = y[x];
         cmyk[x * 4 + 3] = k[x];
+    }
+}
+
+#[cfg(test)]
+mod table_equivalence_tests {
+    use super::*;
+
+    fn clamp(val: i32) -> u8 {
+        val.clamp(0, 255) as u8
+    }
+
+    /// The multiply form the tables replaced (P4-60). Kept ONLY as the
+    /// oracle for the exhaustive equivalence proof below.
+    fn reference_pixel(y: u8, cb: u8, cr: u8) -> (u8, u8, u8) {
+        let y = y as i32;
+        let cb = cb as i32 - 128;
+        let cr = cr as i32 - 128;
+        let r = y + ((91881 * cr + 32768) >> 16);
+        let g = y - ((22554 * cb + 46802 * cr + 32768) >> 16);
+        let b = y + ((116130 * cb + 32768) >> 16);
+        (clamp(r), clamp(g), clamp(b))
+    }
+
+    /// Exhaustive over (cb, cr) — the table dimensions — with the luma
+    /// extremes plus midpoints; a full 256^3 sweep is redundant because
+    /// y only shifts the already-verified per-chroma deltas linearly.
+    #[test]
+    fn tables_match_multiply_form_exhaustively_over_chroma() {
+        for y in [0u8, 1, 127, 128, 254, 255] {
+            for cb in 0..=255u8 {
+                for cr in 0..=255u8 {
+                    assert_eq!(
+                        ycbcr_to_rgb_pixel(y, cb, cr),
+                        reference_pixel(y, cb, cr),
+                        "mismatch at y={y} cb={cb} cr={cr}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// The range-limit mask must be an identity for every reachable
+    /// index: prove the documented bounds by scanning the extreme table
+    /// entries rather than trusting the comment.
+    #[test]
+    fn range_limit_indices_stay_in_bounds_unmasked() {
+        let min_delta: i32 = [
+            CR_R_TAB.iter().min().copied().unwrap(),
+            CB_B_TAB.iter().min().copied().unwrap(),
+        ]
+        .into_iter()
+        .min()
+        .unwrap();
+        let max_delta: i32 = [
+            CR_R_TAB.iter().max().copied().unwrap(),
+            CB_B_TAB.iter().max().copied().unwrap(),
+        ]
+        .into_iter()
+        .max()
+        .unwrap();
+        let g_min: i32 = -((CB_G_TAB[255] + CR_G_TAB[255]) >> 16);
+        let g_max: i32 = -((CB_G_TAB[0] + CR_G_TAB[0]) >> 16);
+        let lo: i32 = min_delta.min(g_min);
+        let hi: i32 = (255 + max_delta).max(255 + g_max);
+        assert!(lo + 256 >= 0, "lowest index {lo} escapes the table");
+        assert!(hi + 256 < 1024, "highest index {hi} escapes the table");
     }
 }
