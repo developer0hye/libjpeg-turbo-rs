@@ -68,6 +68,7 @@
 //! | Encode, configured | [`Encoder`] builder — quality, subsampling, progressive, markers |
 //! | Lossless transform | [`transform()`] — DCT-domain rotate/flip/crop, no re-encode |
 //! | Row streaming | [`ScanlineDecoder`] / [`ScanlineEncoder`], `stream::*` for readers |
+//! | Bounded-memory stream decode | [`decompress_from_reader_incremental`] — sliding input window for baseline JPEGs |
 //! | 12/16-bit & lossless | [`precision`] module |
 //!
 //! **Specialised `compress_*` entry points.** The remaining
