@@ -312,7 +312,6 @@ impl Default for ScalingFactor {
     }
 }
 
-/// Pixel density information from JFIF marker.
 /// Configurable decoder resource limits (issue #355, the Rust-side twin
 /// of P4-14's C-ABI `max_memory_to_use`).
 ///
@@ -406,6 +405,7 @@ impl DecodeLimits {
     }
 }
 
+/// Pixel density information from JFIF marker.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct DensityInfo {
     pub unit: DensityUnit,

@@ -127,9 +127,16 @@ fn gray_8x8_decode_allocation_budget() {
     });
 
     eprintln!("gray_8x8 decode: {allocs} allocations, {bytes} bytes");
+    // Windows measures one more allocation than the 8 pinned elsewhere —
+    // 9 allocations / 9,634 bytes on x86_64-pc-windows-msvc, reproduced
+    // on a clean tree (P4-62, 2026-07-27) and stable across the CI job
+    // issue #378 added. The extra event's origin inside std's Windows
+    // plumbing is unattributed; the budget stays exact-measured per
+    // platform rather than loosened globally.
+    let alloc_budget: usize = if cfg!(windows) { 9 } else { 8 };
     assert!(
-        allocs <= 8,
-        "8x8 grayscale decode must stay within 8 allocations, got {allocs}"
+        allocs <= alloc_budget,
+        "8x8 grayscale decode must stay within {alloc_budget} allocations, got {allocs}"
     );
     assert!(
         bytes <= 12 * 1024,
