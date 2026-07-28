@@ -145,6 +145,45 @@ jobs:
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
 
+  # Issue #380: the image bridge is the highest-leverage adoption
+  # artifact — it must ship with every root release or the crates.io
+  # page goes stale against the root crate it re-exports.
+  publish-image:
+    name: Publish libjpeg-turbo-rs-image to crates.io
+    runs-on: ubuntu-latest
+    # After capi for registry-index ordering only (both depend solely on
+    # the root crate). Runs on `v*` tags; capi-v*/wasm-v* don't bump the
+    # bridge.
+    needs: [publish-capi, changelog-check]
+    if: ${{ !cancelled() && startsWith(github.ref, 'refs/tags/v') && !startsWith(github.ref, 'refs/tags/wasm-v') && !startsWith(github.ref, 'refs/tags/capi-v') && (needs.publish-capi.result == 'success') && needs.changelog-check.result == 'success' }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Wait for crates.io to index the root crate
+        run: sleep 90
+      - run: cargo publish -p libjpeg-turbo-rs-image --dry-run --allow-dirty
+      - name: Publish to crates.io (skip if already published)
+        # Same precise-failure handling as the other publish steps.
+        run: |
+          set +e
+          output=$(cargo publish -p libjpeg-turbo-rs-image --allow-dirty 2>&1)
+          status=$?
+          set -e
+          echo "$output"
+          if [ "$status" -eq 0 ]; then
+            exit 0
+          fi
+          if echo "$output" | grep -qiE "already (uploaded|exists)"; then
+            echo "::warning::libjpeg-turbo-rs-image already at this version on crates.io; skipping"
+            exit 0
+          fi
+          echo "::error::cargo publish failed for libjpeg-turbo-rs-image (not an already-published case)"
+          exit "$status"
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+
   publish-wasm:
     name: Publish to npm
     runs-on: ubuntu-latest
@@ -223,8 +262,8 @@ jobs:
   github-release:
     name: Create GitHub Release from CHANGELOG
     runs-on: ubuntu-latest
-    needs: [changelog-check, publish, publish-capi, publish-wasm]
-    if: ${{ !cancelled() && startsWith(github.ref, 'refs/tags/v') && needs.changelog-check.result == 'success' && needs.publish.result == 'success' && needs.publish-capi.result == 'success' && needs.publish-wasm.result == 'success' }}
+    needs: [changelog-check, publish, publish-capi, publish-image, publish-wasm]
+    if: ${{ !cancelled() && startsWith(github.ref, 'refs/tags/v') && needs.changelog-check.result == 'success' && needs.publish.result == 'success' && needs.publish-capi.result == 'success' && needs.publish-image.result == 'success' && needs.publish-wasm.result == 'success' }}
     permissions:
       contents: write
     steps:
