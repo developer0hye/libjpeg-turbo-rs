@@ -103,6 +103,25 @@ fn read_raw<R: Read>(reader: &mut R, scratch: &mut [u8; READ_CHUNK]) -> Result<u
     }
 }
 
+/// Append `chunk` to `buf` under a hard cap on ALLOCATION, not just
+/// length: the length check alone still lets the final
+/// `extend_from_slice` trigger Vec's geometric growth (~2x the cap in
+/// one request — codex P1), so growth is reserved explicitly, doubling
+/// but never past the cap. Rejects with `message` when the bytes
+/// themselves would exceed the cap.
+fn append_capped(buf: &mut Vec<u8>, chunk: &[u8], cap: usize, message: &str) -> Result<()> {
+    let needed: usize = buf.len() + chunk.len();
+    if needed > cap {
+        return Err(JpegError::CorruptData(message.to_string()));
+    }
+    if buf.capacity() < needed {
+        let target: usize = needed.max(buf.capacity().saturating_mul(2)).min(cap);
+        buf.reserve_exact(target - buf.len());
+    }
+    buf.extend_from_slice(chunk);
+    Ok(())
+}
+
 fn decode_incremental<R: Read>(mut reader: R) -> Result<(Image, usize)> {
     let mut buf: Vec<u8> = Vec::new();
     let mut scratch: Box<[u8; READ_CHUNK]> = Box::new([0u8; READ_CHUNK]);
@@ -126,12 +145,12 @@ fn decode_incremental<R: Read>(mut reader: R) -> Result<(Image, usize)> {
             break None;
         }
         let n: usize = read_raw(&mut reader, &mut scratch)?;
-        if buf.len() + n > MAX_HEADER_BYTES {
-            return Err(JpegError::CorruptData(
-                "no SOS marker within the 256 MiB header cap".to_string(),
-            ));
-        }
-        buf.extend_from_slice(&scratch[..n]);
+        append_capped(
+            &mut buf,
+            &scratch[..n],
+            MAX_HEADER_BYTES,
+            "no SOS marker within the 256 MiB header cap",
+        )?;
         peak = peak.max(READ_CHUNK + buf.capacity());
         if n == 0 {
             source_done = true;
@@ -164,12 +183,12 @@ fn decode_incremental<R: Read>(mut reader: R) -> Result<(Image, usize)> {
             // compares against the ACTUAL read size so a legal stream
             // just under it is never rejected.
             let n: usize = read_raw(&mut reader, &mut scratch)?;
-            if buf.len() + n > MAX_HEADER_BYTES {
-                return Err(JpegError::CorruptData(
-                    "stream exceeded the 256 MiB buffering cap".to_string(),
-                ));
-            }
-            buf.extend_from_slice(&scratch[..n]);
+            append_capped(
+                &mut buf,
+                &scratch[..n],
+                MAX_HEADER_BYTES,
+                "stream exceeded the 256 MiB buffering cap",
+            )?;
             peak = peak.max(READ_CHUNK + buf.capacity());
             if n == 0 {
                 break;
@@ -222,13 +241,12 @@ fn decode_incremental<R: Read>(mut reader: R) -> Result<(Image, usize)> {
         let mut refilled: usize = 0;
         loop {
             let n: usize = read_raw(&mut reader, &mut scratch)?;
-            if buf.len() + n > MAX_WINDOW_BYTES {
-                return Err(JpegError::CorruptData(format!(
-                    "entropy window exceeded {} bytes without an MCU row committing",
-                    MAX_WINDOW_BYTES
-                )));
-            }
-            buf.extend_from_slice(&scratch[..n]);
+            append_capped(
+                &mut buf,
+                &scratch[..n],
+                MAX_WINDOW_BYTES,
+                "entropy window exceeded 64 MiB without an MCU row committing",
+            )?;
             peak = peak.max(READ_CHUNK + header.capacity() + buf.capacity());
             if n == 0 {
                 is_final = true;
