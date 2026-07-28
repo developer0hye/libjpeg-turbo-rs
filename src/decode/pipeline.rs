@@ -455,8 +455,8 @@ impl<'a> Decoder<'a> {
     /// boundaries walks the entropy bytes, so worst-case probe time
     /// scales with the compressed input length (still far cheaper than
     /// a decode). Suitable as a probe (dimensions,
-    /// [`Decoder::exif_orientation`], markers) even when no decode
-    /// follows. Uses [`DecodeLimits::default`]; use
+    /// [`Decoder::exif_orientation`], ICC/EXIF/XMP metadata) even when
+    /// no decode follows. Uses [`DecodeLimits::default`]; use
     /// [`Decoder::new_with_limits`] to bound resource use differently.
     pub fn new(data: &'a [u8]) -> Result<Self> {
         Self::new_with_limits(data, DecodeLimits::default())
@@ -3909,6 +3909,14 @@ impl<'a> Decoder<'a> {
         icc_profile: Option<Vec<u8>>,
         exif_data: Option<Vec<u8>>,
     ) -> Result<Image> {
+        // Defense in depth: decode_image_inner rejects Cmyk-for-non-CMYK
+        // before dispatching here (P4-68), and a 12-bit source never
+        // converts to Cmyk in either arm (codex review on issue #394).
+        if self.output_format == Some(PixelFormat::Cmyk) {
+            return Err(JpegError::Unsupported(
+                "cannot convert 12-bit JPEG to Cmyk".to_string(),
+            ));
+        }
         let img12 = crate::api::precision::decompress_12bit(self.raw_data)?;
         let num_components: usize = img12.num_components;
 
@@ -3927,19 +3935,90 @@ impl<'a> Decoder<'a> {
         let height: usize = img12.height;
 
         if num_components == 1 {
-            // Grayscale: scale directly, ignore output format conversion
-            // (only Grayscale makes sense for 1-component).
-            let mut data: Vec<u8> = Vec::with_capacity(width * height);
-            for &val in &img12.data {
-                let clamped: i16 = val.clamp(0, 4095);
-                data.push((clamped as u32 * 255 / 4095) as u8);
-            }
+            // Scale to 8-bit gray first, then honour the requested output
+            // format with the same expansion family as the 8-bit grayscale
+            // path — this arm used to hard-code Grayscale and silently
+            // ignore `output_format` while `output_buffer_size()`
+            // advertised the requested bpp (issue #394 / P4-65; C's
+            // `djpeg -rgb` expands instead of ignoring).
+            // Scale each 12-bit sample inline (v * 255 / 4095, matching C
+            // djpeg's 12->8 downscale) straight into the output buffer:
+            // no intermediate 8-bit plane, so peak memory stays within
+            // what check_header_limits estimated (codex P1 on #394 —
+            // a staging plane pushed RGBA to 7 bytes/pixel against a
+            // 5 bytes/pixel estimate under max_memory).
+            let scale = |v: i16| (v.clamp(0, 4095) as u32 * 255 / 4095) as u8;
+            let pad_off: Option<usize> = pad_alpha_offset(out_format);
+            let bpp: usize = out_format.bytes_per_pixel();
+            let data: Vec<u8> = match out_format {
+                PixelFormat::Grayscale => img12.data.iter().map(|&v| scale(v)).collect(),
+                PixelFormat::Rgb | PixelFormat::Bgr => {
+                    let mut out: Vec<u8> = Vec::with_capacity(width * height * bpp);
+                    for &v12 in &img12.data {
+                        let v: u8 = scale(v12);
+                        out.extend_from_slice(&[v, v, v]);
+                    }
+                    out
+                }
+                PixelFormat::Rgba
+                | PixelFormat::Bgra
+                | PixelFormat::Rgbx
+                | PixelFormat::Bgrx
+                | PixelFormat::Xrgb
+                | PixelFormat::Xbgr
+                | PixelFormat::Argb
+                | PixelFormat::Abgr => {
+                    let pad: usize = pad_off.expect("4bpp format has a pad offset");
+                    let mut out: Vec<u8> = Vec::with_capacity(width * height * bpp);
+                    for &v12 in &img12.data {
+                        let mut px: [u8; 4] = [scale(v12); 4];
+                        px[pad] = 255;
+                        out.extend_from_slice(&px);
+                    }
+                    out
+                }
+                PixelFormat::Rgb565 => {
+                    if self.dither_565 {
+                        // Same row-aware ordered dither as the 8-bit
+                        // grayscale path (codex review on issue #394:
+                        // set_dither_565 must not be silently ignored).
+                        // One row of 8-bit scratch, not a full plane.
+                        let mut out: Vec<u8> = vec![0u8; width * height * 2];
+                        let mut row8: Vec<u8> = vec![0u8; width];
+                        for y in 0..height {
+                            for (dst, &v12) in
+                                row8.iter_mut().zip(&img12.data[y * width..(y + 1) * width])
+                            {
+                                *dst = scale(v12);
+                            }
+                            crate::decode::color::gray_to_rgb565_dithered_row(
+                                &row8,
+                                &mut out[y * width * 2..(y + 1) * width * 2],
+                                width,
+                                y,
+                            );
+                        }
+                        out
+                    } else {
+                        let mut out: Vec<u8> = Vec::with_capacity(width * height * 2);
+                        for &v12 in &img12.data {
+                            let v: u8 = scale(v12);
+                            let packed: u16 = (((v as u16) >> 3) << 11)
+                                | (((v as u16) >> 2) << 5)
+                                | ((v as u16) >> 3);
+                            out.extend_from_slice(&packed.to_ne_bytes());
+                        }
+                        out
+                    }
+                }
+                PixelFormat::Cmyk => unreachable!("rejected above"),
+            };
             Ok(Image {
                 xmp_data: self.metadata.xmp_data.clone(),
                 iptc_data: self.metadata.iptc_data.clone(),
                 width,
                 height,
-                pixel_format: PixelFormat::Grayscale,
+                pixel_format: out_format,
                 precision: 8,
                 data,
                 icc_profile,
@@ -4026,6 +4105,23 @@ impl<'a> Decoder<'a> {
 
         // Dimension / pixel / scan-count limits (issue #355).
         self.check_header_limits()?;
+
+        // Cmyk output exists only for CMYK/YCCK sources; C raises
+        // JERR_CONVERSION_NOTIMPL for everything else (jdcolor.c). The
+        // Rust paths used to panic on this well-formed request (P4-68:
+        // three separate unreachable!/match panics for baseline colour,
+        // baseline grayscale, and lossless grayscale sources).
+        if self.output_format == Some(PixelFormat::Cmyk)
+            && !matches!(
+                self.detect_color_space(),
+                ColorSpace::Cmyk | ColorSpace::Ycck
+            )
+        {
+            return Err(JpegError::Unsupported(format!(
+                "cannot convert {:?} JPEG to Cmyk (C: JERR_CONVERSION_NOTIMPL)",
+                self.detect_color_space()
+            )));
+        }
 
         let icc_profile = self.icc_profile();
         let exif_data = self.metadata.exif_data.clone();
