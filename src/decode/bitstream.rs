@@ -21,7 +21,9 @@ pub struct BitReader<'a> {
 
 /// Resumable byte/bit cursor for windowed decoding (P4-58): captures
 /// everything needed to re-create a `BitReader` over a grown window at
-/// an MCU-row checkpoint.
+/// an MCU-row checkpoint. Internal checkpoint plumbing — hidden from
+/// the documented surface (#386 curation), semver-exempt.
+#[doc(hidden)]
 #[derive(Debug, Clone, Copy)]
 pub struct BitReaderState {
     pub pos: usize,
@@ -44,6 +46,7 @@ impl<'a> BitReader<'a> {
     /// Re-create a reader over a (possibly grown) window from a
     /// checkpoint taken with [`Self::state`]. The window must start at
     /// the same stream offset as the one the checkpoint was taken in.
+    #[doc(hidden)]
     pub fn resume_windowed(data: &'a [u8], state: BitReaderState, is_final: bool) -> Self {
         Self {
             data,
@@ -58,6 +61,7 @@ impl<'a> BitReader<'a> {
     /// Snapshot the cursor for a later [`Self::resume_windowed`]. Only
     /// meaningful when `!self.starved()` — a starved reader's state is
     /// mid-garbage by definition.
+    #[doc(hidden)]
     pub fn state(&self) -> BitReaderState {
         BitReaderState {
             pos: self.pos,
@@ -68,6 +72,7 @@ impl<'a> BitReader<'a> {
 
     /// True when a window-bounded read ran out of buffered bytes; the
     /// values read since the last checkpoint are unreliable.
+    #[doc(hidden)]
     pub fn starved(&self) -> bool {
         self.starved
     }

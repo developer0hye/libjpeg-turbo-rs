@@ -1964,6 +1964,22 @@ impl<'a> Decoder<'a> {
         // stream eligibility check already guaranteed the interleaved
         // path, and the planes are complete either way.
         if let Some(planes) = self.prefilled_baseline_planes.borrow_mut().take() {
+            // Injected geometry must match what this call computed — a
+            // future second injection site with different scale/crop
+            // state should fail loudly, not index a mis-sized plane.
+            debug_assert_eq!(planes.len(), frame.components.len());
+            for (ci, (plane, comp)) in planes.iter().zip(frame.components.iter()).enumerate() {
+                debug_assert_eq!(
+                    plane.len(),
+                    mcus_x
+                        * comp.horizontal_sampling as usize
+                        * comp_block_sizes[ci]
+                        * mcus_y
+                        * comp.vertical_sampling as usize
+                        * comp_block_sizes[ci],
+                    "prefilled plane {ci} geometry mismatch"
+                );
+            }
             return Ok((planes, Vec::new()));
         }
         let scan = &self.metadata.scan;

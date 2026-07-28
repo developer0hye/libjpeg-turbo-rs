@@ -198,3 +198,63 @@ fn incremental_input_window_stays_bounded() {
         );
     }
 }
+
+/// Direct C cross-validation for the 8K acceptance fixture: the
+/// incremental output must equal `djpeg`'s PPM byte-for-byte (diff=0),
+/// not merely equal our own slice path (codex P2: a shared defect
+/// would survive slice-equality alone).
+#[test]
+fn incremental_8k_matches_djpeg() {
+    let djpeg: std::path::PathBuf = require_c_tool!("djpeg");
+    let fixture: &[u8] = include_bytes!("fixtures/real_world/derived_7680x4320_8k_420_q75.jpg");
+
+    let img: Image = decompress_from_reader_incremental(ChunkedReader::new(fixture, usize::MAX))
+        .expect("incremental 8K decode");
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let src = dir.path().join("8k.jpg");
+    std::fs::write(&src, fixture).expect("write fixture");
+    let out = std::process::Command::new(&djpeg)
+        .arg("-pnm")
+        .arg(&src)
+        .output()
+        .expect("run djpeg");
+    assert!(out.status.success(), "djpeg failed on the 8K fixture");
+    // P6 header: "P6\n<w> <h>\n255\n" then RGB bytes.
+    let header_end: usize = out
+        .stdout
+        .iter()
+        .enumerate()
+        .filter(|&(_, b)| *b == b'\n')
+        .map(|(i, _)| i)
+        .nth(2)
+        .expect("PPM header")
+        + 1;
+    let c_pixels: &[u8] = &out.stdout[header_end..];
+    assert_eq!(c_pixels.len(), img.data.len(), "geometry mismatch vs djpeg");
+    assert_eq!(
+        c_pixels,
+        &img.data[..],
+        "8K incremental decode must be pixel-identical to djpeg (diff=0)"
+    );
+}
+
+/// Reviewer P2: the error VARIANT must match `decompress` for header
+/// failures — the old code blanket-reported UnexpectedEof where the
+/// slice path says "unexpected marker" / "missing SOF".
+#[test]
+fn incremental_error_variants_match_slice_path() {
+    for (input, label) in [
+        (&b"\xFF\x65not a jpeg at all"[..], "non-JPEG bytes"),
+        (&b"\xFF\xD8\xFF\xD9"[..], "tables-only SOI+EOI"),
+    ] {
+        let slice_err = decompress(input).expect_err(label);
+        let inc_err =
+            decompress_from_reader_incremental(ChunkedReader::new(input, 4096)).expect_err(label);
+        assert_eq!(
+            std::mem::discriminant(&slice_err),
+            std::mem::discriminant(&inc_err),
+            "{label}: slice={slice_err:?} incremental={inc_err:?}"
+        );
+    }
+}
