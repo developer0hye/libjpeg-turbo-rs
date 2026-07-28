@@ -70,7 +70,7 @@ pub struct QuantDivisors {
     /// Float divisors matching C `jcdctmgr.c` `forward_DCT_float`:
     /// `1 / (quant[i] * aanscale[row] * aanscale[col] * 8)`. Paired with the
     /// raw float FDCT (no AA&N rescale) and `quantize_float` to reproduce
-    /// `cjpeg -dc fa` byte-for-byte.
+    /// `cjpeg -dct float` byte-for-byte.
     pub float_divisors: [f32; 64],
     /// Float divisors re-arranged in zigzag scan order so the float quant
     /// step can fuse zigzag reorder.

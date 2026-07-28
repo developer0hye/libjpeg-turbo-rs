@@ -33,6 +33,11 @@ default = ["std", "simd"]
 # `no_std + alloc` core codec (issue #356).
 std = ["thiserror/std"]
 simd = []
+# INTERNAL, test-only (issue #386): widens the C cross-validation test
+# matrices in tests/c_tjcomptest.rs, c_tjdecomptest.rs, c_tjtrantest.rs
+# and c_croptest.rs (all four run by .github/workflows/full-c-parity.yml).
+# Gates no library code — enabling it changes nothing for consumers of
+# the crate.
 full-c-parity = []
 # Optional PNG support for tj3LoadImage8 / tj3SaveImage8. Off by default so
 # the codec crate stays small. Enable with --features png.

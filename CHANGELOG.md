@@ -9,6 +9,19 @@ and `git log` between tags.
 ## [Unreleased]
 
 ### Added
+- One-call header probe `probe(&[u8]) -> Result<JpegInfo>` — dimensions,
+  coding mode, subsampling, colorspace, metadata presence, EXIF
+  orientation without decoding pixels (#386).
+- Chainable decoder configuration: 21 `with_*` counterparts of the
+  `Decoder` mutators — the 20 `set_*` methods plus `save_markers`
+  (#386).
+- `Image::as_bytes()` / `Image::into_vec()`; `Image` and the new
+  `JpegInfo` derive `Clone`/`PartialEq`/`Eq` (`SavedMarker` gains
+  `PartialEq`/`Eq`); `FrameHeader::width()/height()/dimensions()`
+  `usize` accessors (#386).
+- Crate-doc "Canonical API map" naming the entry point per task; the
+  legacy `compress_*` variants grouped as specialised entry points with
+  a stated deprecation intent (next semver-major) (#386).
 - EXIF orientation surface (#391): `Decoder::exif_orientation()` /
   `ImageInfo::exif_orientation()` header probes,
   `TransformOp::from_exif_orientation`, and pixel-domain
@@ -63,6 +76,18 @@ and `git log` between tags.
   `fmt::Pointer` impl), caught by the new `cargo-deny` gate (#390).
 
 ### Fixed
+- `set_output_format(Grayscale)` on a colour (YCbCr) JPEG errored while
+  the equivalent `set_output_colorspace` route worked; it now decodes,
+  byte-identical to `djpeg -grayscale` (#386). The WASM bindings'
+  `decode_to(.., Grayscale)` inherits this: previously an error on
+  colour sources, now a 1-byte-per-pixel luma image. The override's gray arm
+  also panicked on legal streams whose component 0 is subsampled below
+  max — now a clean `Unsupported` (full conversion tracked as P4-72) —
+  and no longer doubles plane memory past a `set_max_memory` cap when
+  no crop shift is needed.
+- `examples/pillow_smoke/run.sh` ignored `CARGO_TARGET_DIR` and could
+  validate a stale in-repo shim (#386; the wider capi-test variant is
+  P4-73).
 - Grayscale decode to `Argb`/`Abgr` wrote the alpha byte in the wrong
   slot (#369); 12-bit grayscale decode ignored the requested output
   format (#394); `decompress_to(.., Cmyk)` panicked on non-CMYK sources

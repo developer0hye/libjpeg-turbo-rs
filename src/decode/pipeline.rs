@@ -123,7 +123,11 @@ struct CompInfo {
 }
 
 /// Decoded image data.
-#[derive(Debug)]
+///
+/// `Clone`/`PartialEq` (issue #386) compare every field including the
+/// pixel buffer — handy in tests and caches; clone consciously copies
+/// the full pixel allocation.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Image {
     pub width: usize,
     pub height: usize,
@@ -187,6 +191,94 @@ impl ImageInfo {
             .as_deref()
             .and_then(crate::common::exif::parse_orientation)
     }
+}
+
+/// Everything a caller usually wants to know about a JPEG before
+/// deciding whether/how to decode it — returned by [`probe`] in one
+/// call (issue #386). Header-parse only; no pixels are decoded.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct JpegInfo {
+    /// Image width in pixels.
+    pub width: usize,
+    /// Image height in pixels.
+    pub height: usize,
+    /// Number of frame components (1 gray, 3 YCbCr/RGB, 4 CMYK/YCCK).
+    pub components: usize,
+    /// Sample precision in bits, reported verbatim from SOF: 8 for
+    /// baseline/progressive, 12 for the extended path, and anything in
+    /// 2-16 for arbitrary-precision lossless. Not validated here — a
+    /// corrupt stream can report any value.
+    pub precision: u8,
+    /// True for progressive DCT (SOF2/SOF10).
+    pub progressive: bool,
+    /// True for lossless (SOF3/SOF11).
+    pub lossless: bool,
+    /// True for arithmetic entropy coding (SOF9-SOF11).
+    pub arithmetic: bool,
+    /// Chroma subsampling derived from the SOF sampling factors.
+    /// Grayscale sources report [`Subsampling::Unknown`] (there is no
+    /// `Gray` variant) — check `components == 1` / `color_space`.
+    pub subsampling: Subsampling,
+    /// Source color space (from component count + APP14/JFIF heuristics,
+    /// same detection the decoder itself uses).
+    pub color_space: ColorSpace,
+    /// EXIF orientation tag value (1-8) if present.
+    pub exif_orientation: Option<u8>,
+    /// An APP1 EXIF segment is present.
+    pub has_exif: bool,
+    /// APP2 ICC profile chunks are present.
+    pub has_icc: bool,
+    /// An APP1 XMP packet is present.
+    pub has_xmp: bool,
+    /// An APP13 Photoshop IRB with IPTC data is present.
+    pub has_iptc: bool,
+    /// COM marker text, if present.
+    pub comment: Option<String>,
+    /// Pixel density from the JFIF APP0 marker.
+    pub density: DensityInfo,
+}
+
+/// One-call header probe: dimensions, coding mode, subsampling,
+/// colorspace, and metadata presence without decoding any pixels
+/// (issue #386).
+///
+/// Wraps `Decoder::new` (marker parse only), so it never allocates
+/// pixel buffers; cost is linear in the compressed size for multi-scan
+/// streams (scan boundaries are walked byte-wise), far below a decode. For decoding afterwards, create a
+/// [`Decoder`] — the header work is repeated, but it is negligible next
+/// to the pixel decode.
+///
+/// ```
+/// # let jpeg = libjpeg_turbo_rs::compress(&[128; 48], 4, 4,
+/// #     libjpeg_turbo_rs::PixelFormat::Rgb, 90,
+/// #     libjpeg_turbo_rs::Subsampling::S444).unwrap();
+/// let info = libjpeg_turbo_rs::probe(&jpeg)?;
+/// assert_eq!((info.width, info.height), (4, 4));
+/// assert!(!info.progressive);
+/// # Ok::<(), libjpeg_turbo_rs::JpegError>(())
+/// ```
+pub fn probe(jpeg: &[u8]) -> Result<JpegInfo> {
+    let decoder: Decoder = Decoder::new(jpeg)?;
+    let metadata: &crate::decode::marker::JpegMetadata = &decoder.metadata;
+    let frame: &FrameHeader = &metadata.frame;
+    Ok(JpegInfo {
+        width: frame.width(),
+        height: frame.height(),
+        components: frame.components.len(),
+        precision: frame.precision,
+        progressive: frame.is_progressive,
+        lossless: frame.is_lossless,
+        arithmetic: metadata.is_arithmetic,
+        subsampling: decoder.jpeg_subsampling(),
+        color_space: decoder.jpeg_color_space(),
+        exif_orientation: decoder.exif_orientation(),
+        has_exif: metadata.exif_data.is_some(),
+        has_icc: !metadata.icc_chunks.is_empty(),
+        has_xmp: metadata.xmp_data.is_some(),
+        has_iptc: metadata.iptc_data.is_some(),
+        comment: metadata.comment.clone(),
+        density: metadata.density,
+    })
 }
 
 /// Output destination for one decode: a decoder-owned `Vec` (the
@@ -312,6 +404,19 @@ impl Image {
     /// Only populated when the decoder was configured with `save_markers()`.
     pub fn markers(&self) -> &[SavedMarker] {
         &self.saved_markers
+    }
+
+    /// The raw pixel bytes — row-major, `width * height *
+    /// pixel_format.bytes_per_pixel()` long (issue #386). Prefer this
+    /// over reaching into `.data` directly.
+    pub fn as_bytes(&self) -> &[u8] {
+        &self.data
+    }
+
+    /// Consume the image and hand back the owned pixel buffer, dropping
+    /// the metadata (issue #386).
+    pub fn into_vec(self) -> Vec<u8> {
+        self.data
     }
 
     /// Reorient the pixels so the image displays upright according to its
@@ -882,6 +987,32 @@ impl<'a> Decoder<'a> {
         self.output_colorspace = Some(cs);
     }
 
+    /// The colorspace override the decode stage should honour: the
+    /// explicit `set_output_colorspace` value, or — issue #386 — the
+    /// grayscale conversion implied by `set_output_format(Grayscale)`
+    /// on a 3-component source. TurboJPEG decodes TJPF_GRAY from colour
+    /// JPEGs by exactly this mapping (TJPF_GRAY -> JCS_GRAYSCALE), so a
+    /// Grayscale *pixel format* request must not error where the
+    /// *colorspace* request succeeds.
+    fn effective_output_colorspace(&self) -> Option<ColorSpace> {
+        if self.output_colorspace.is_some() {
+            return self.output_colorspace;
+        }
+        // YCbCr only: the override's grayscale path emits component
+        // plane 0, which is luma for YCbCr but RED for a JCS_RGB source
+        // (codex P1 — 31/32 pixels wrong vs djpeg -grayscale). RGB
+        // sources keep the explicit Unsupported error until a real
+        // RGB->gray conversion exists (P4-72 tracks the same defect in
+        // the explicit set_output_colorspace route).
+        if self.output_format == Some(PixelFormat::Grayscale)
+            && self.metadata.frame.components.len() == 3
+            && self.detect_color_space() == ColorSpace::YCbCr
+        {
+            return Some(ColorSpace::Grayscale);
+        }
+        None
+    }
+
     /// Enable or disable ordered dithering for RGB565 output.
     ///
     /// When enabled, applies a 4x4 ordered dither pattern before truncating
@@ -925,6 +1056,183 @@ impl<'a> Decoder<'a> {
     #[inline]
     pub fn saved_markers(&self) -> &[SavedMarker] {
         &self.metadata.saved_markers
+    }
+
+    // -----------------------------------------------------------------
+    // Chainable configuration (issue #386). Each `with_*` is a by-value
+    // wrapper over the matching `set_*` so construction reads as one
+    // expression. The `set_*` forms stay for imperative call sites;
+    // both routes hit the same field, so mixing them is fine.
+    // -----------------------------------------------------------------
+
+    /// Chainable [`Decoder::set_output_format`].
+    ///
+    /// ```
+    /// # let jpeg = libjpeg_turbo_rs::compress(&[128; 48], 4, 4,
+    /// #     libjpeg_turbo_rs::PixelFormat::Rgb, 90,
+    /// #     libjpeg_turbo_rs::Subsampling::S444).unwrap();
+    /// use libjpeg_turbo_rs::{Decoder, PixelFormat};
+    /// let image = Decoder::new(&jpeg)?
+    ///     .with_output_format(PixelFormat::Bgra)
+    ///     .with_block_smoothing(false)
+    ///     .decode_image()?;
+    /// assert_eq!(image.pixel_format, PixelFormat::Bgra);
+    /// # Ok::<(), libjpeg_turbo_rs::JpegError>(())
+    /// ```
+    #[must_use]
+    pub fn with_output_format(mut self, format: PixelFormat) -> Self {
+        self.set_output_format(format);
+        self
+    }
+
+    /// Chainable [`Decoder::set_scale`].
+    #[must_use]
+    pub fn with_scale(mut self, scale: ScalingFactor) -> Self {
+        self.set_scale(scale);
+        self
+    }
+
+    /// Chainable [`Decoder::set_lenient`].
+    #[must_use]
+    pub fn with_lenient(mut self, lenient: bool) -> Self {
+        self.set_lenient(lenient);
+        self
+    }
+
+    /// Chainable [`Decoder::set_crop`].
+    #[must_use]
+    pub fn with_crop(mut self, x: usize, width: usize) -> Self {
+        self.set_crop(x, width);
+        self
+    }
+
+    /// Chainable [`Decoder::set_crop_y`].
+    #[must_use]
+    pub fn with_crop_y(mut self, y: usize, height: usize) -> Self {
+        self.set_crop_y(y, height);
+        self
+    }
+
+    /// Chainable [`Decoder::set_crop_region`].
+    #[must_use]
+    pub fn with_crop_region(mut self, x: usize, y: usize, width: usize, height: usize) -> Self {
+        self.set_crop_region(x, y, width, height);
+        self
+    }
+
+    /// Chainable [`Decoder::set_stop_on_warning`].
+    #[must_use]
+    pub fn with_stop_on_warning(mut self, stop: bool) -> Self {
+        self.set_stop_on_warning(stop);
+        self
+    }
+
+    /// Chainable [`Decoder::set_max_pixels`].
+    #[must_use]
+    pub fn with_max_pixels(mut self, limit: usize) -> Self {
+        self.set_max_pixels(limit);
+        self
+    }
+
+    /// Chainable [`Decoder::set_max_memory`].
+    #[must_use]
+    pub fn with_max_memory(mut self, limit: usize) -> Self {
+        self.set_max_memory(limit);
+        self
+    }
+
+    /// Chainable [`Decoder::set_scan_limit`].
+    #[must_use]
+    pub fn with_scan_limit(mut self, limit: u32) -> Self {
+        self.set_scan_limit(limit);
+        self
+    }
+
+    /// Chainable [`Decoder::set_limits`].
+    #[must_use]
+    pub fn with_limits(mut self, limits: DecodeLimits) -> Self {
+        self.set_limits(limits);
+        self
+    }
+
+    /// Chainable [`Decoder::set_fast_upsample`].
+    #[must_use]
+    pub fn with_fast_upsample(mut self, fast: bool) -> Self {
+        self.set_fast_upsample(fast);
+        self
+    }
+
+    /// Chainable [`Decoder::set_fast_dct`].
+    #[must_use]
+    pub fn with_fast_dct(mut self, fast: bool) -> Self {
+        self.set_fast_dct(fast);
+        self
+    }
+
+    /// Chainable [`Decoder::set_dct_method`].
+    #[must_use]
+    pub fn with_dct_method(mut self, method: DctMethod) -> Self {
+        self.set_dct_method(method);
+        self
+    }
+
+    /// Chainable [`Decoder::set_block_smoothing`].
+    #[must_use]
+    pub fn with_block_smoothing(mut self, smooth: bool) -> Self {
+        self.set_block_smoothing(smooth);
+        self
+    }
+
+    /// Chainable [`Decoder::set_output_colorspace`].
+    #[must_use]
+    pub fn with_output_colorspace(mut self, cs: ColorSpace) -> Self {
+        self.set_output_colorspace(cs);
+        self
+    }
+
+    /// Chainable [`Decoder::set_dither_565`].
+    #[must_use]
+    pub fn with_dither_565(mut self, dither: bool) -> Self {
+        self.set_dither_565(dither);
+        self
+    }
+
+    /// Chainable [`Decoder::set_merged_upsample`].
+    #[must_use]
+    pub fn with_merged_upsample(mut self, enabled: bool) -> Self {
+        self.set_merged_upsample(enabled);
+        self
+    }
+
+    /// Chainable [`Decoder::save_markers`].
+    ///
+    /// Like `save_markers`, a marker re-parse failure is swallowed and
+    /// previously parsed metadata stays in effect — check
+    /// [`Decoder::saved_markers`] afterwards if the distinction matters.
+    #[must_use]
+    pub fn with_save_markers(mut self, config: MarkerSaveConfig) -> Self {
+        self.save_markers(config);
+        self
+    }
+
+    /// Chainable [`Decoder::set_marker_processor`].
+    #[must_use]
+    pub fn with_marker_processor<F>(mut self, marker_type: u8, processor: F) -> Self
+    where
+        F: Fn(&[u8]) -> Option<Vec<u8>> + Send + 'static,
+    {
+        self.set_marker_processor(marker_type, processor);
+        self
+    }
+
+    /// Chainable [`Decoder::set_resync_strategy`].
+    #[must_use]
+    pub fn with_resync_strategy<S>(mut self, strategy: S) -> Self
+    where
+        S: crate::decode::resync::RestartResyncStrategy + Send + 'static,
+    {
+        self.set_resync_strategy(strategy);
+        self
     }
 
     /// Register a custom marker processor callback for a specific marker type.
@@ -4301,7 +4609,30 @@ impl<'a> Decoder<'a> {
         }
 
         // Handle output colorspace override (with crop offsets applied)
-        if let Some(cs) = self.output_colorspace {
+        if let Some(cs) = self.effective_output_colorspace() {
+            // No crop-X shift needed: hand the planes over as-is. The
+            // clone below would double plane memory and blow through a
+            // `set_max_memory` cap the limit check just approved
+            // (codex P1 on #386) — only pay it when an offset exists.
+            if comp_x_offsets.iter().all(|&off| off == 0) {
+                return crate::decode::toggles::decode_with_colorspace_override(
+                    cs,
+                    &component_planes,
+                    frame,
+                    out_width,
+                    out_height,
+                    mcus_x,
+                    &comp_block_sizes,
+                    icc_profile,
+                    exif_data,
+                    self.metadata.xmp_data.clone(),
+                    self.metadata.iptc_data.clone(),
+                    self.metadata.comment.clone(),
+                    self.metadata.density,
+                    self.metadata.saved_markers.clone(),
+                    warnings,
+                );
+            }
             // Shift component planes by the crop X offset so the override
             // function reads from the correct horizontal position.
             let cropped_planes: Vec<Vec<u8>> = component_planes
@@ -4491,10 +4822,14 @@ impl<'a> Decoder<'a> {
 
             // Handle grayscale output request
             if out_format == PixelFormat::Grayscale {
-                // For RGB-colorspace JPEGs, grayscale output is the Y channel;
-                // for YCbCr, it's also just the Y channel.  Both work the same.
-                // However, the simple "copy Y" path only works when the output
-                // colorspace is the same (no conversion needed).  For now, reject.
+                // Only non-YCbCr 3-component sources still land here: for
+                // YCbCr, `effective_output_colorspace` sends the request to
+                // the override path above, which emits component plane 0
+                // (#386). That shortcut is *not* valid here — plane 0 of a
+                // JCS_RGB stream is red, not luma (31/32 pixels off vs
+                // `djpeg -grayscale`), and the real RGB->gray conversion is
+                // not written yet (P4-72). Reject rather than emit the red
+                // channel as if it were luma.
                 return Err(JpegError::Unsupported(
                     "cannot convert color JPEG to grayscale".to_string(),
                 ));

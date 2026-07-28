@@ -20,7 +20,11 @@ fuzz_target!(|data: &[u8]| {
     decoder.set_scan_limit(100);
     // Drive the riskiest sink branches too: derive options from the
     // input, applied identically to both decode paths so parity holds.
-    match data.first().copied().unwrap_or(0) % 6 {
+    // Keyed off the LENGTH, not data[0]: every decodable input starts
+    // with SOI's 0xFF, so a data[0]-keyed match always took the same arm
+    // (0xFF % 6 == 3) and the other options got zero coverage (codex P2
+    // on #386 — a pre-existing harness defect this fixes for all arms).
+    match data.len() % 7 {
         1 => decoder.set_output_format(libjpeg_turbo_rs::PixelFormat::Rgba),
         2 => {
             decoder.set_output_format(libjpeg_turbo_rs::PixelFormat::Rgb565);
@@ -29,6 +33,9 @@ fuzz_target!(|data: &[u8]| {
         3 => decoder.set_scale(libjpeg_turbo_rs::ScalingFactor::new(1, 2)),
         4 => decoder.set_crop_region(3, 0, 40, frame_h as usize),
         5 => decoder.set_output_format(libjpeg_turbo_rs::PixelFormat::Xrgb),
+        // The implied gray route slices component plane 0 directly; a
+        // comp0 sampled below max used to panic (#386 review P1).
+        6 => decoder.set_output_format(libjpeg_turbo_rs::PixelFormat::Grayscale),
         _ => {}
     }
     let owned = decoder.decode_image();
@@ -40,9 +47,13 @@ fuzz_target!(|data: &[u8]| {
     // Two sizes per input (each is a full decode — keep fuzz throughput):
     // the advertised size (success + parity) and an input-derived
     // adversarial size (short buffers must yield BufferTooSmall).
-    let byte0 = data.first().copied().unwrap_or(0) as usize;
+    // A mid-stream byte, not data[0]: SOI pins the first byte to 0xFF,
+    // which froze this "input-derived" size at min(255, advertised-1)
+    // for every decodable input (same defect class as the option-arm
+    // keying above).
+    let adversarial = data.get(data.len() / 2).copied().unwrap_or(0) as usize;
     let advertised = decoder.output_buffer_size().unwrap_or(0);
-    for size in [advertised, byte0.min(advertised.saturating_sub(1))] {
+    for size in [advertised, adversarial.min(advertised.saturating_sub(1))] {
         // Cap so a fuzz input claiming huge dimensions cannot OOM the
         // harness through our own test allocation.
         if size as u64 > MAX_FUZZ_PIXELS * 4 {

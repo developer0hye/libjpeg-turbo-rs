@@ -521,7 +521,7 @@ pub fn fdct_float(input: &[i16; 64], output: &mut [i32; 64]) {
 ///
 /// Single-precision throughout — matches C `FAST_FLOAT = float` so the
 /// per-element rounding via `(int)(temp + 16384.5) - 16384` produces the
-/// same `JCOEF` values as `cjpeg -dc fa`.
+/// same `JCOEF` values as `cjpeg -dct float`.
 ///
 /// Constants are written as `(<f64 literal>) as f32` to mirror C's
 /// `(FAST_FLOAT)<literal>` semantics: parse the literal as `double`, then
@@ -533,7 +533,7 @@ pub fn fdct_float(input: &[i16; 64], output: &mut [i32; 64]) {
 /// so without the explicit `mul_add` we drift by a few ULP per block and
 /// nudge the occasional quantized coefficient onto the wrong side of the
 /// `(int)(temp + 16384.5)` rounding boundary, breaking byte-parity with
-/// `cjpeg -dc fa`.
+/// `cjpeg -dct float`.
 #[allow(clippy::approx_constant)]
 pub fn fdct_float_workspace(data: &mut [f32; 64]) {
     // Cosine constants taken verbatim from libjpeg-turbo `jfdctflt.c` so that
