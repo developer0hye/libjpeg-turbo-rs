@@ -28,5 +28,5 @@ png = ["libjpeg-turbo-rs/png"]
 libjpeg-turbo-rs = { path = "../..", version = "0.8" }
 
 [dev-dependencies]
-libloading = "0.8"
+libloading = "0.9"
 tempfile = "3"
