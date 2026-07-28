@@ -400,19 +400,6 @@ impl Image {
         &self.saved_markers
     }
 
-    /// Reorient the pixels so the image displays upright according to its
-    /// own EXIF orientation tag (issue #391). Identity when there is no
-    /// EXIF, no orientation tag, or orientation 1. Convenience over
-    /// [`Image::apply_orientation_value`] using [`Image::exif_orientation`].
-    ///
-    /// **Not idempotent**: the tag in `exif_data` is left at its original
-    /// value, so calling this twice reorients twice, and re-encoding with
-    /// the returned `exif_data` re-applies the rotation on display —
-    /// strip or rewrite the metadata when re-encoding.
-    ///
-    /// For a lossless alternative that never leaves the DCT domain, map
-    /// the tag with [`crate::TransformOp::from_exif_orientation`] and run
-    /// [`crate::transform()`] on the compressed bytes instead.
     /// The raw pixel bytes — row-major, `width * height *
     /// pixel_format.bytes_per_pixel()` long (issue #386). Prefer this
     /// over reaching into `.data` directly.
@@ -426,6 +413,19 @@ impl Image {
         self.data
     }
 
+    /// Reorient the pixels so the image displays upright according to its
+    /// own EXIF orientation tag (issue #391). Identity when there is no
+    /// EXIF, no orientation tag, or orientation 1. Convenience over
+    /// [`Image::apply_orientation_value`] using [`Image::exif_orientation`].
+    ///
+    /// **Not idempotent**: the tag in `exif_data` is left at its original
+    /// value, so calling this twice reorients twice, and re-encoding with
+    /// the returned `exif_data` re-applies the rotation on display —
+    /// strip or rewrite the metadata when re-encoding.
+    ///
+    /// For a lossless alternative that never leaves the DCT domain, map
+    /// the tag with [`crate::TransformOp::from_exif_orientation`] and run
+    /// [`crate::transform()`] on the compressed bytes instead.
     #[must_use]
     pub fn apply_orientation(self) -> Self {
         let orientation: u8 = self.exif_orientation().unwrap_or(1);
@@ -992,8 +992,15 @@ impl<'a> Decoder<'a> {
         if self.output_colorspace.is_some() {
             return self.output_colorspace;
         }
+        // YCbCr only: the override's grayscale path emits component
+        // plane 0, which is luma for YCbCr but RED for a JCS_RGB source
+        // (codex P1 — 31/32 pixels wrong vs djpeg -grayscale). RGB
+        // sources keep the explicit Unsupported error until a real
+        // RGB->gray conversion exists (P4-72 tracks the same defect in
+        // the explicit set_output_colorspace route).
         if self.output_format == Some(PixelFormat::Grayscale)
             && self.metadata.frame.components.len() == 3
+            && self.detect_color_space() == ColorSpace::YCbCr
         {
             return Some(ColorSpace::Grayscale);
         }
@@ -4574,6 +4581,29 @@ impl<'a> Decoder<'a> {
 
         // Handle output colorspace override (with crop offsets applied)
         if let Some(cs) = self.effective_output_colorspace() {
+            // No crop-X shift needed: hand the planes over as-is. The
+            // clone below would double plane memory and blow through a
+            // `set_max_memory` cap the limit check just approved
+            // (codex P1 on #386) — only pay it when an offset exists.
+            if comp_x_offsets.iter().all(|&off| off == 0) {
+                return crate::decode::toggles::decode_with_colorspace_override(
+                    cs,
+                    &component_planes,
+                    frame,
+                    out_width,
+                    out_height,
+                    mcus_x,
+                    &comp_block_sizes,
+                    icc_profile,
+                    exif_data,
+                    self.metadata.xmp_data.clone(),
+                    self.metadata.iptc_data.clone(),
+                    self.metadata.comment.clone(),
+                    self.metadata.density,
+                    self.metadata.saved_markers.clone(),
+                    warnings,
+                );
+            }
             // Shift component planes by the crop X offset so the override
             // function reads from the correct horizontal position.
             let cropped_planes: Vec<Vec<u8>> = component_planes

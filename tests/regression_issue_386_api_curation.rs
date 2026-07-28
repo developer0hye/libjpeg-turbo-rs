@@ -237,6 +237,34 @@ fn grayscale_output_format_matches_colorspace_route_and_djpeg() {
     );
 }
 
+/// Codex P1 on #386: the implied gray route must NOT trigger for
+/// JCS_RGB sources — the override's gray path emits component plane 0,
+/// which is RED there, not luma. Until a real RGB→gray conversion
+/// exists (P4-72), the request must fail loudly instead of returning
+/// wrong pixels.
+#[test]
+fn grayscale_output_format_rejects_rgb_colorspace_source() {
+    let rgb: Vec<u8> = (0..32u32 * 32 * 3).map(|i| (i * 7) as u8).collect();
+    let jpeg: Vec<u8> = libjpeg_turbo_rs::Encoder::new(&rgb, 32, 32, PixelFormat::Rgb)
+        .colorspace(libjpeg_turbo_rs::ColorSpace::Rgb)
+        .quality(95)
+        .encode()
+        .expect("encode JCS_RGB source");
+    assert_eq!(
+        probe(&jpeg).expect("probe").color_space,
+        libjpeg_turbo_rs::ColorSpace::Rgb,
+        "fixture must really be a JCS_RGB stream"
+    );
+
+    let mut decoder = Decoder::new(&jpeg).expect("decoder");
+    decoder.set_output_format(PixelFormat::Grayscale);
+    let result = decoder.decode_image();
+    assert!(
+        result.is_err(),
+        "gray from a JCS_RGB source must error, not silently emit the red plane"
+    );
+}
+
 #[test]
 fn chainable_limits_still_enforced() {
     // with_max_pixels must behave exactly like set_max_pixels: the
