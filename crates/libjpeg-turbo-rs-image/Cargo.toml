@@ -20,7 +20,13 @@ categories = ["multimedia::images", "multimedia::encoding"]
 # (issue #380); the version must exist on crates.io before this crate
 # can be published.
 libjpeg-turbo-rs = { path = "../..", version = "0.8.0" }
-image = "0.25"
+# default-features = false: the bridge only uses image's core traits
+# (ImageDecoder/ImageEncoder/ColorType/error types). The defaults would
+# drag the whole format-codec set — including avif→ravif→rav1e, whose
+# pinned core2/paste carry RUSTSEC advisories — into every consumer's
+# normal build graph (codex P2 on the cargo-deny gate).
+image = { version = "0.25", default-features = false }
 
 [dev-dependencies]
-image = { version = "0.25", features = [] }
+# Tests/examples compare against image's own JPEG codec.
+image = { version = "0.25", default-features = false, features = ["jpeg"] }
