@@ -1,6 +1,7 @@
-use criterion::{black_box, criterion_group, criterion_main, Criterion};
+use criterion::{criterion_group, criterion_main, Criterion};
 use libjpeg_turbo_rs::api::streaming::StreamingDecoder;
 use libjpeg_turbo_rs::simd;
+use std::hint::black_box;
 
 fn bench_idct_8x8(c: &mut Criterion) {
     let routines = simd::detect();
