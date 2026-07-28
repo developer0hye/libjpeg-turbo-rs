@@ -68,7 +68,7 @@
 //! | Encode, configured | [`Encoder`] builder — quality, subsampling, progressive, markers |
 //! | Lossless transform | [`transform()`] — DCT-domain rotate/flip/crop, no re-encode |
 //! | Row streaming | [`ScanlineDecoder`] / [`ScanlineEncoder`], `stream::*` for readers |
-//! | Bounded-memory stream decode | [`decompress_from_reader_incremental`] — sliding input window for baseline JPEGs |
+//! | Bounded-memory stream decode | [`decompress_from_reader_incremental`] — sliding input window for interleaved baseline JPEGs |
 //! | 12/16-bit & lossless | [`precision`] module |
 //!
 //! **Specialised `compress_*` entry points.** The remaining
@@ -148,6 +148,7 @@ pub use api::encoder::{Encoder, HuffmanTableDef};
 pub fn jpeg_write_tables(encoder: &Encoder<'_>) -> Vec<u8> {
     encoder.write_tables()
 }
+#[doc(inline)]
 pub use api::high_level::{
     compress, compress_arithmetic, compress_arithmetic_progressive, compress_into,
     compress_lossless, compress_lossless_arithmetic, compress_lossless_extended,

@@ -138,7 +138,7 @@ are called out in `CHANGELOG.md`.
 
 | flag | default | effect |
 |---|---|---|
-| `std` | ✅ | `std::io` streaming API (`decompress_from_reader`, `compress_to_writer`), file-path helpers, PNG image I/O, runtime CPU-feature detection, and `std::io::Error` interop. |
+| `std` | ✅ | `std::io` streaming API (`decompress_from_reader`, `compress_to_writer`, bounded-memory `decompress_from_reader_incremental`), file-path helpers, PNG image I/O, runtime CPU-feature detection, and `std::io::Error` interop. |
 | `simd` | ✅ | Architecture intrinsics: NEON (aarch64), SSE2/AVX2 (x86_64), SIMD128 (wasm32). |
 | `png` | ❌ | PNG support for `tj3LoadImage8` / `tj3SaveImage8` (implies `std`). |
 
