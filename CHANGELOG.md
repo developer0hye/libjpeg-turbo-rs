@@ -1,0 +1,109 @@
+# Changelog
+
+All notable changes to the `libjpeg-turbo-rs` workspace are documented
+here. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
+versions follow [SemVer](https://semver.org/). Entries before v0.6.0 predate
+this file — see the [GitHub releases](https://github.com/developer0hye/libjpeg-turbo-rs/releases)
+and `git log` between tags.
+
+## [Unreleased]
+
+### Added
+- EXIF orientation surface (#391): `Decoder::exif_orientation()` /
+  `ImageInfo::exif_orientation()` header probes,
+  `TransformOp::from_exif_orientation`, and pixel-domain
+  `Image::apply_orientation[_value]`.
+- `StreamingDecoder::skip_scanlines` now actually skips, C-clamp
+  semantics, byte-identical to `djpeg -skip` (#383).
+- User-facing `examples/` set with a curated index, plus an
+  `image`-bridge example (#388); `cargo check --examples` in CI.
+- docs.rs metadata + crate-level quickstart with asserting doctests
+  (#387); user-first README with badges and measured zune/C comparisons
+  (#385); `CONTRIBUTING.md`.
+- `fuzz_decompress_precision` target covering the 12/16-bit and
+  arbitrary-precision decoders (#382).
+- Windows CI leg building every workspace test target + the two
+  C-tool-free suites (#378); Miri CI job over the non-SIMD unit tests
+  (#389 phase 1); `publish-check` CI job (#380).
+
+### Changed
+- `Decoder` (and the wrappers embedding it) are now `Send`; the
+  `set_marker_processor` / `set_resync_strategy` callbacks require
+  `Send` (technically breaking for non-`Send` closures) (#384).
+- Crate-level `#![deny(unsafe_op_in_unsafe_fn)]`; encoder NEON/SSE2/
+  WASM-SIMD fast paths now honour the `simd` feature being disabled
+  (#389 phase 1).
+- Bridge crates are publishable (`version` + `path` deps); the `image`
+  bridge builds the codec with default features, restoring runtime
+  AVX2/NEON dispatch (#380, #381).
+- `bench_zune_matrix` calibration stabilized (median-of-3 estimate,
+  iteration floor, visible medians) (#376).
+
+### Fixed
+- Grayscale decode to `Argb`/`Abgr` wrote the alpha byte in the wrong
+  slot (#369); 12-bit grayscale decode ignored the requested output
+  format (#394); `decompress_to(.., Cmyk)` panicked on non-CMYK sources
+  (P4-68).
+- 12/16-bit lossless point-transform validation: crafted `Al >=
+  precision` streams panicked in debug and mis-decoded in release; a
+  corrupt DHT DC category > 16 overflowed a shift (#382).
+- The `C Interop` CI job ran zero tests (substring filter) (#377); the
+  MSVC UCRT `snprintf` link failure blocked `cargo test --workspace` on
+  Windows (#378).
+
+## [0.7.0] - 2026-07-26
+
+### Added
+- RGB-direct (`JCS_RGB`) encode modes incl. progressive + arithmetic
+  combinations (#345, #346, #348).
+- Cross-platform golden tests pinning encoder output byte-stability
+  (#319, #337).
+
+### Fixed
+- 4:2:0 AVX2 encoder emitted non-dummy trailing-MCU column blocks for
+  `width % 16 in 1..=8` (#314 / #362 class); aarch64 DCT parity (#342).
+- CMYK encode dropped options and wrote a spurious JFIF marker (#313,
+  #339); progressive+arithmetic option combinations (#322).
+
+## [0.6.3] - 2026-07-25
+
+### Added
+- Real-world corpus decode/encode gates vs C libjpeg-turbo in CI
+  (P4-31, #307).
+
+### Fixed
+- Scheduled fuzz findings: sparse-DQT-slot remap, category-16
+  coefficient rejection, fractional-chroma-ratio reject, SOS
+  component-id binding, lossless undifference wrap + `<< Al` scaling
+  (P4-34..38); 12-bit sampling-layout overflow (P4-30); block smoothing
+  read dummy padding blocks (P4-29); transform perf + marker
+  preservation (#308).
+
+## [0.6.2] - 2026-05-24
+
+Fuzz-driven robustness batch (29 PRs): multi-scan non-interleaved
+baseline divergence (P4-22), lenient-recovery parity with djpeg
+(P4-23), arithmetic multi-scan support (P4-24), IDCT i16-overflow
+parity with C SIMD (P4-19), streaming `jpeg_consume_input` suspension
+core (P4-13 partial), and the first scheduled fuzz-smoke pipeline.
+
+## [0.6.1] - 2026-05-06
+
+C-ABI hardening: classic `jpeglib.h` lifecycle/suspension harness
+(P3-5), ABI offset cross-checks extended to all six structs (P3-1),
+12-bit raw-data backend (P3-2), non-standard sampling + RGB565
+merged-upsample fixtures (P3-6). WASM crate v0.2.0 split out.
+
+## [0.6.0] - 2026-05-03
+
+First release with the full T1 (Rust crate) + T2 (TurboJPEG 3 cdylib)
++ T3 (classic libjpeg v8 cdylib) replacement surface: byte-exact stock
+djpeg/cjpeg/jpegtran parity, Pillow/libtiff integration, panic guards
+on all C entry points.
+
+[Unreleased]: https://github.com/developer0hye/libjpeg-turbo-rs/compare/v0.7.0...HEAD
+[0.7.0]: https://github.com/developer0hye/libjpeg-turbo-rs/compare/v0.6.3...v0.7.0
+[0.6.3]: https://github.com/developer0hye/libjpeg-turbo-rs/compare/v0.6.2...v0.6.3
+[0.6.2]: https://github.com/developer0hye/libjpeg-turbo-rs/compare/v0.6.1...v0.6.2
+[0.6.1]: https://github.com/developer0hye/libjpeg-turbo-rs/compare/v0.6.0...v0.6.1
+[0.6.0]: https://github.com/developer0hye/libjpeg-turbo-rs/releases/tag/v0.6.0

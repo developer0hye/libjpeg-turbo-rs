@@ -122,8 +122,10 @@ Performance section above. aarch64 / NEON builds are unaffected.
 
 ## Feature flags, MSRV, platforms
 
-**MSRV: 1.87** (declared as `rust-version`; no CI job pins it yet —
-[#390](https://github.com/developer0hye/libjpeg-turbo-rs/issues/390)).
+**MSRV: 1.87** for the root and capi crates, CI-enforced (`cargo +1.87
+check` job). The `image`-bridge crate is 1.88 (inherited from
+`image@0.25`). MSRV bumps are considered minor, never patch, changes and
+are called out in `CHANGELOG.md`.
 
 | Target | SIMD | Notes |
 | --- | --- | --- |

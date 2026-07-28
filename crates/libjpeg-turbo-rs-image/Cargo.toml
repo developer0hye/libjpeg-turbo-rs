@@ -2,6 +2,11 @@
 name = "libjpeg-turbo-rs-image"
 version = "0.1.0"
 edition = "2021"
+# Higher than the workspace's 1.87 because image@0.25 requires rustc 1.88
+# (verified: `cargo +1.87 check -p libjpeg-turbo-rs-image` fails on the
+# image crate). The MSRV CI job therefore covers the root and capi crates
+# at 1.87 and this crate on stable.
+rust-version = "1.88"
 description = "image crate backend powered by libjpeg-turbo-rs — fast pure-Rust JPEG codec"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/developer0hye/libjpeg-turbo-rs"

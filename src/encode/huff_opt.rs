@@ -315,7 +315,7 @@ mod tests {
         freq[0] = 50;
         freq[1] = 50;
         freq[256] = 1; // pseudo-symbol
-        let (bits, values) = gen_optimal_table(&freq);
+        let (bits, _values) = gen_optimal_table(&freq);
         let total: usize = bits[1..=16].iter().map(|&b| b as usize).sum();
         assert_eq!(total, 2); // 2 real symbols
     }
@@ -331,7 +331,7 @@ mod tests {
         freq[256] = 1;
         let (bits, _values) = gen_optimal_table(&freq);
         // All codes must fit in 16 bits
-        for i in 17..bits.len() {
+        for _i in 17..bits.len() {
             // bits only goes to 17
         }
         let _ = bits; // ensure no panic
