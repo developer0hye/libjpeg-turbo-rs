@@ -12,9 +12,10 @@
 //! aarch64 (tracked as P4-71). The wasm32 blocks additionally require
 //! `target_feature = "simd128"` at compile time: build without
 //! `-C target-feature=+simd128` and EVERY wasm comparison compiles away,
-//! leaving the whole suite scalar-only. In-repo builds get the flag from
-//! `.cargo/config.toml` (both wasm targets), so this bites only
-//! out-of-repo invocations that bypass that config.
+//! leaving the whole suite scalar-only. In-repo builds normally get the
+//! flag from `.cargo/config.toml` (both wasm targets); beware that a
+//! `RUSTFLAGS` env var overrides that config, so custom flags must keep
+//! `-C target-feature=+simd128`.
 //!
 //! Reproducibility
 //! ---------------
