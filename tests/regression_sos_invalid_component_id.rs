@@ -89,7 +89,7 @@ fn assert_all_paths_reject(source: &[u8], label: &str) {
         "{label}: expected the C JERR_BAD_COMPONENT_ID-parity rejection, got {coeff_err:?}"
     );
     let decode_err = Decoder::new(source)
-        .and_then(|mut d| d.decode_image())
+        .and_then(|d| d.decode_image())
         .err()
         .unwrap_or_else(|| panic!("{label}: decode must reject the stream"));
     assert!(

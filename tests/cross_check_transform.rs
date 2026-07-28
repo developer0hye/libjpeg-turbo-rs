@@ -52,10 +52,6 @@ impl Drop for TempFile {
     }
 }
 
-fn reference_path(name: &str) -> PathBuf {
-    PathBuf::from(format!("references/libjpeg-turbo/testimages/{}", name))
-}
-
 /// Parse a binary PPM (P6) file and return `(width, height, data)`.
 fn parse_ppm(path: &Path) -> (usize, usize, Vec<u8>) {
     let raw: Vec<u8> = std::fs::read(path).expect("failed to read PPM file");
@@ -130,16 +126,6 @@ fn get_test_jpeg() -> Vec<u8> {
         }
     }
     compress(&pixels, w, h, PixelFormat::Rgb, 90, Subsampling::S444).expect("compress test image")
-}
-
-/// Get the reference testorig.jpg for non-pixel-exact tests (e.g., decodeability).
-/// Falls back to a synthetic JPEG if not available.
-fn get_reference_jpeg() -> Vec<u8> {
-    let ref_path: PathBuf = reference_path("testorig.jpg");
-    if ref_path.exists() {
-        return std::fs::read(&ref_path).expect("read testorig.jpg");
-    }
-    get_test_jpeg()
 }
 
 /// Map TransformOp to jpegtran CLI arguments.
@@ -1077,7 +1063,7 @@ fn c_jpegtran_arithmetic_reencode() {
 /// Affected dimensions: 7x11, 33x17 (non-multiples of 8 and 16).
 #[test]
 fn progressive_odd_dimensions_transform_no_crash() {
-    let jpegtran: PathBuf = require_c_tool!("jpegtran");
+    let _jpegtran: PathBuf = require_c_tool!("jpegtran");
     let djpeg: PathBuf = require_c_tool!("djpeg");
 
     // cjpeg is at the same location as djpeg

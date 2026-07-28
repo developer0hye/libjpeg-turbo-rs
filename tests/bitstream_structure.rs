@@ -28,7 +28,6 @@ const SOF9: u8 = 0xC9; // Arithmetic sequential
 const SOF10: u8 = 0xCA; // Arithmetic progressive
 const DHT: u8 = 0xC4; // Huffman table
 const DAC: u8 = 0xCC; // Arithmetic conditioning table
-const DRI: u8 = 0xDD; // Restart interval
 
 /// Extract the ordered sequence of JPEG markers from a bitstream.
 ///

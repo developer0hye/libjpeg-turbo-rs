@@ -38,7 +38,7 @@ fn is_valid_scale_for_subsamp(num: u32, denom: u32, subsamp: Subsampling) -> boo
         }
         Subsampling::S411 | Subsampling::S441 => {
             // 1/1, 1/2 only
-            (num == 1 && denom == 1) || (num == 1 && denom == 2)
+            num == 1 && (denom == 1 || denom == 2)
         }
         _ => num == 1 && denom == 1,
     }

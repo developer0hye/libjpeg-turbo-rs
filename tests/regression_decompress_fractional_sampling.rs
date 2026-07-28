@@ -81,7 +81,7 @@ fn fixture_fractional_sampling() -> Vec<u8> {
 #[test]
 fn fractional_sampling_errors_instead_of_panicking_strict() {
     let source: Vec<u8> = fixture_fractional_sampling();
-    let mut decoder = Decoder::new(&source).expect("header parse should succeed");
+    let decoder = Decoder::new(&source).expect("header parse should succeed");
     let err = decoder.decode_image().expect_err(
         "fractional 4/3 chroma ratio must be rejected like C JERR_FRACT_SAMPLE_NOTIMPL",
     );

@@ -2,6 +2,12 @@
 name = "libjpeg-turbo-rs-image"
 version = "0.1.0"
 edition = "2021"
+# Higher than the workspace's 1.87 because image@0.25 requires rustc 1.88
+# (verified: `cargo +1.87 check -p libjpeg-turbo-rs-image` fails on the
+# image crate). The MSRV CI job therefore covers the root and capi crates
+# at a pinned 1.87 and this crate at a pinned 1.88 — not stable, which
+# would let post-1.88 APIs slip past CI.
+rust-version = "1.88"
 description = "image crate backend powered by libjpeg-turbo-rs — fast pure-Rust JPEG codec"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/developer0hye/libjpeg-turbo-rs"
@@ -15,7 +21,13 @@ categories = ["multimedia::images", "multimedia::encoding"]
 # (issue #380); the version must exist on crates.io before this crate
 # can be published.
 libjpeg-turbo-rs = { path = "../..", version = "0.8.0" }
-image = "0.25"
+# default-features = false: the bridge only uses image's core traits
+# (ImageDecoder/ImageEncoder/ColorType/error types). The defaults would
+# drag the whole format-codec set — including avif→ravif→rav1e, whose
+# pinned core2/paste carry RUSTSEC advisories — into every consumer's
+# normal build graph (codex P2 on the cargo-deny gate).
+image = { version = "0.25", default-features = false }
 
 [dev-dependencies]
-image = { version = "0.25", features = [] }
+# Tests/examples compare against image's own JPEG codec.
+image = { version = "0.25", default-features = false, features = ["jpeg"] }

@@ -1,7 +1,6 @@
 mod helpers;
 
 use std::io::BufRead;
-use std::path::PathBuf;
 use std::process::Command;
 
 use libjpeg_turbo_rs::{

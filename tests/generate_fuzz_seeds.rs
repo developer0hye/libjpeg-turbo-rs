@@ -84,7 +84,7 @@ impl Content {
                 let tile: usize = 4;
                 for y in 0..h {
                     for x in 0..w {
-                        let on: bool = ((x / tile) + (y / tile)) % 2 == 0;
+                        let on: bool = ((x / tile) + (y / tile)).is_multiple_of(2);
                         let v: u8 = if on { 230 } else { 30 };
                         buf.push(v);
                         buf.push(v);
@@ -831,7 +831,7 @@ fn generate_seeds() {
         // Stuffed 0xFF bytes between SOI and next marker exercise the marker
         // scanner's fill-byte skip path.
         let mut fill_stuffed: Vec<u8> = vec![0xFF, 0xD8];
-        fill_stuffed.extend(std::iter::repeat(0xFF).take(8));
+        fill_stuffed.extend(std::iter::repeat_n(0xFF, 8));
         fill_stuffed.extend_from_slice(&base_jpeg[2..]);
         fan_out_write(
             "transform_fill_stuffed.bin",

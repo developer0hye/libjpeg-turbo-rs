@@ -1,12 +1,21 @@
 //! Cross-arch SIMD parity tests.
 //!
-//! For every SIMD kernel pair (scalar reference vs SIMD implementation),
-//! this suite generates N=1000 reproducible randomized inputs using a
-//! Mulberry32 PRNG and asserts that the SIMD backend produces bit-exact
-//! output compared to the scalar reference. The scalar reference path
-//! is always available (see `src/simd/scalar.rs`), and platform-specific
-//! SIMD kernels are gated with `#[cfg(target_arch)]` so this file builds
-//! cleanly on every supported architecture.
+//! For every SIMD kernel pair (scalar reference vs SIMD implementation)
+//! that exists on the host arch, this suite generates N=1000 reproducible
+//! randomized inputs using a Mulberry32 PRNG and asserts that the SIMD
+//! backend produces bit-exact output compared to the scalar reference.
+//! The scalar reference path is always available (see `src/simd/scalar.rs`),
+//! and platform-specific SIMD kernels are gated with `#[cfg(target_arch)]`
+//! so this file builds cleanly on every supported architecture. Where a
+//! port is missing the comparison block compiles away and only the scalar
+//! not-panic path runs — today that is the reduced-size IDCT trio off
+//! aarch64 (tracked as P4-71). The wasm32 blocks additionally require
+//! `target_feature = "simd128"` at compile time: build without
+//! `-C target-feature=+simd128` and EVERY wasm comparison compiles away,
+//! leaving the whole suite scalar-only. In-repo builds normally get the
+//! flag from `.cargo/config.toml` (both wasm targets); beware that a
+//! `RUSTFLAGS` env var overrides that config, so custom flags must keep
+//! `-C target-feature=+simd128`.
 //!
 //! Reproducibility
 //! ---------------
@@ -239,9 +248,13 @@ fn parity_idct_islow_full() {
 // =====================================================================
 // These are scalar-reference only (`idct_4x4` etc.) on x86_64 and wasm,
 // but aarch64 has NEON variants. Run parity on aarch64, and a scalar
-// self-consistency check elsewhere (it must at least not panic).
+// self-consistency check elsewhere (it must at least not panic) — hence
+// the allow(unused_variables) off aarch64, where the comparison block
+// that consumes `i`/`scalar_out` compiles away. The missing x86_64/wasm
+// reduced-size kernels are tracked as P4-71 in docs/last_mile/phase4.md.
 
 #[test]
+#[cfg_attr(not(target_arch = "aarch64"), allow(unused_variables))]
 fn parity_idct_4x4() {
     use libjpeg_turbo_rs::decode::idct_scaled::idct_4x4;
     let mut rng: Mulberry32 = Mulberry32::new(0xA5A5_0002);
@@ -262,6 +275,7 @@ fn parity_idct_4x4() {
 }
 
 #[test]
+#[cfg_attr(not(target_arch = "aarch64"), allow(unused_variables))]
 fn parity_idct_2x2() {
     use libjpeg_turbo_rs::decode::idct_scaled::idct_2x2;
     let mut rng: Mulberry32 = Mulberry32::new(0xA5A5_0003);
@@ -282,6 +296,7 @@ fn parity_idct_2x2() {
 }
 
 #[test]
+#[cfg_attr(not(target_arch = "aarch64"), allow(unused_variables))]
 fn parity_idct_1x1() {
     use libjpeg_turbo_rs::decode::idct_scaled::idct_1x1;
     let mut rng: Mulberry32 = Mulberry32::new(0xA5A5_0004);
@@ -832,7 +847,10 @@ fn parity_rgb_to_ycbcr_rows() {
             #[cfg(target_arch = "x86_64")]
             {
                 if is_x86_feature_detected!("avx2") {
-                    use libjpeg_turbo_rs::simd::x86_64::avx2_color_encode::avx2_rgb_to_ycbcr_row;
+                    use libjpeg_turbo_rs::simd::x86_64::avx2_color_encode::{
+                        avx2_bgr_to_ycbcr_row, avx2_bgra_to_ycbcr_row, avx2_rgb_to_ycbcr_row,
+                        avx2_rgba_to_ycbcr_row,
+                    };
                     let mut simd_y: Vec<u8> = vec![0u8; width];
                     let mut simd_cb: Vec<u8> = vec![0u8; width];
                     let mut simd_cr: Vec<u8> = vec![0u8; width];
@@ -840,6 +858,60 @@ fn parity_rgb_to_ycbcr_rows() {
                     assert_eq!(simd_y, scalar_y, "AVX2 RGB→Y w={width} iter={i}");
                     assert_eq!(simd_cb, scalar_cb, "AVX2 RGB→Cb w={width}");
                     assert_eq!(simd_cr, scalar_cr, "AVX2 RGB→Cr w={width}");
+
+                    // RGBA / BGR / BGRA via their own scalar references,
+                    // mirroring the NEON and WASM blocks above/below.
+                    let mut sc_y: Vec<u8> = vec![0u8; width];
+                    let mut sc_cb: Vec<u8> = vec![0u8; width];
+                    let mut sc_cr: Vec<u8> = vec![0u8; width];
+                    libjpeg_turbo_rs::encode::color::rgba_to_ycbcr_row(
+                        &rgba, &mut sc_y, &mut sc_cb, &mut sc_cr, width,
+                    );
+                    let mut sd_y: Vec<u8> = vec![0u8; width];
+                    let mut sd_cb: Vec<u8> = vec![0u8; width];
+                    let mut sd_cr: Vec<u8> = vec![0u8; width];
+                    avx2_rgba_to_ycbcr_row(&rgba, &mut sd_y, &mut sd_cb, &mut sd_cr, width);
+                    assert_eq!(sd_y, sc_y, "AVX2 RGBA→Y w={width} iter={i}");
+                    assert_eq!(sd_cb, sc_cb, "AVX2 RGBA→Cb w={width}");
+                    assert_eq!(sd_cr, sc_cr, "AVX2 RGBA→Cr w={width}");
+
+                    let bgr: &[u8] = &rgb;
+                    let mut sc_y2: Vec<u8> = vec![0u8; width];
+                    let mut sc_cb2: Vec<u8> = vec![0u8; width];
+                    let mut sc_cr2: Vec<u8> = vec![0u8; width];
+                    libjpeg_turbo_rs::encode::color::bgr_to_ycbcr_row_scalar(
+                        bgr,
+                        &mut sc_y2,
+                        &mut sc_cb2,
+                        &mut sc_cr2,
+                        width,
+                    );
+                    let mut sd_y2: Vec<u8> = vec![0u8; width];
+                    let mut sd_cb2: Vec<u8> = vec![0u8; width];
+                    let mut sd_cr2: Vec<u8> = vec![0u8; width];
+                    avx2_bgr_to_ycbcr_row(bgr, &mut sd_y2, &mut sd_cb2, &mut sd_cr2, width);
+                    assert_eq!(sd_y2, sc_y2, "AVX2 BGR→Y w={width} iter={i}");
+                    assert_eq!(sd_cb2, sc_cb2, "AVX2 BGR→Cb w={width}");
+                    assert_eq!(sd_cr2, sc_cr2, "AVX2 BGR→Cr w={width}");
+
+                    let bgra: &[u8] = &rgba;
+                    let mut sc_y3: Vec<u8> = vec![0u8; width];
+                    let mut sc_cb3: Vec<u8> = vec![0u8; width];
+                    let mut sc_cr3: Vec<u8> = vec![0u8; width];
+                    libjpeg_turbo_rs::encode::color::bgra_to_ycbcr_row_scalar(
+                        bgra,
+                        &mut sc_y3,
+                        &mut sc_cb3,
+                        &mut sc_cr3,
+                        width,
+                    );
+                    let mut sd_y3: Vec<u8> = vec![0u8; width];
+                    let mut sd_cb3: Vec<u8> = vec![0u8; width];
+                    let mut sd_cr3: Vec<u8> = vec![0u8; width];
+                    avx2_bgra_to_ycbcr_row(bgra, &mut sd_y3, &mut sd_cb3, &mut sd_cr3, width);
+                    assert_eq!(sd_y3, sc_y3, "AVX2 BGRA→Y w={width} iter={i}");
+                    assert_eq!(sd_cb3, sc_cb3, "AVX2 BGRA→Cb w={width}");
+                    assert_eq!(sd_cr3, sc_cr3, "AVX2 BGRA→Cr w={width}");
                 }
             }
             #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]

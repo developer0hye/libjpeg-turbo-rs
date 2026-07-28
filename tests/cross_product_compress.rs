@@ -868,7 +868,7 @@ fn tjcomptest_lossless_8bit() {
             for use_restart in [false, true] {
                 // --- Grayscale: exact roundtrip ---
                 {
-                    let mask: u8 = 0xFF & !((1u8 << pt).wrapping_sub(1));
+                    let mask: u8 = !((1u8 << pt).wrapping_sub(1));
                     let masked_gray: Vec<u8> = gray_pixels.iter().map(|&v| v & mask).collect();
 
                     let mut enc = Encoder::new(&masked_gray, w, h, PixelFormat::Grayscale)

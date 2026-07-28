@@ -1419,7 +1419,7 @@ mod tests {
         // -5 -> one's complement in 3 bits: -5 - 1 = -6, as u16 = 0xFFFA
         // But only 3 bits are used: 0xFFFA & 0x7 = 2 (which is 010 binary)
         // Actually the magnitude_bits is the raw u16 value; the caller writes only `cat` bits
-        assert_eq!(bits as u16, (-5i16 - 1) as u16);
+        assert_eq!(bits, (-5i16 - 1) as u16);
     }
 
     #[test]
@@ -1487,7 +1487,7 @@ mod tests {
         writer.flush();
 
         // Should encode DC category 0 + EOB, producing a small number of bytes
-        assert!(writer.data().len() > 0);
+        assert!(!writer.data().is_empty());
         assert!(writer.data().len() < 10);
     }
 

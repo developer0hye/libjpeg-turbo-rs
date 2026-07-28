@@ -81,7 +81,7 @@ mod tests {
             let rb = 110;
             let rc = 105;
             let pred = predict(psv, ra, rb, rc);
-            assert!(pred >= 0 && pred < 512, "predictor {psv} gave {pred}");
+            assert!((0..512).contains(&pred), "predictor {psv} gave {pred}");
         }
     }
 
