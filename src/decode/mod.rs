@@ -1,5 +1,6 @@
 pub mod arithmetic;
 pub mod bitstream;
+pub mod boundary;
 pub mod color;
 pub mod dequant;
 pub mod entropy;
