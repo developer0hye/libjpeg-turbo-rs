@@ -8,6 +8,10 @@ and `git log` between tags.
 
 ## [Unreleased]
 
+Nothing yet.
+
+## [0.8.0] - 2026-07-28
+
 ### Added
 - `decompress_from_reader_incremental`: bounded-input-memory decode
   from any `Read` source — interleaved baseline JPEGs decode from a
@@ -170,7 +174,8 @@ First release with the full T1 (Rust crate) + T2 (TurboJPEG 3 cdylib)
 djpeg/cjpeg/jpegtran parity, Pillow/libtiff integration, panic guards
 on all C entry points.
 
-[Unreleased]: https://github.com/developer0hye/libjpeg-turbo-rs/compare/v0.7.0...HEAD
+[Unreleased]: https://github.com/developer0hye/libjpeg-turbo-rs/compare/v0.8.0...HEAD
+[0.8.0]: https://github.com/developer0hye/libjpeg-turbo-rs/compare/v0.7.0...v0.8.0
 [0.7.0]: https://github.com/developer0hye/libjpeg-turbo-rs/compare/v0.6.3...v0.7.0
 [0.6.3]: https://github.com/developer0hye/libjpeg-turbo-rs/compare/v0.6.2...v0.6.3
 [0.6.2]: https://github.com/developer0hye/libjpeg-turbo-rs/compare/v0.6.1...v0.6.2
