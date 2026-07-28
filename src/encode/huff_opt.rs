@@ -329,11 +329,12 @@ mod tests {
             freq[i] = 1;
         }
         freq[256] = 1;
-        let (bits, _values) = gen_optimal_table(&freq);
-        // All codes must fit in 16 bits
-        for _i in 17..bits.len() {
-            // bits only goes to 17
-        }
-        let _ = bits; // ensure no panic
+        let (bits, values) = gen_optimal_table(&freq);
+        // Slot 0 of the JPEG DHT bits array is unused, and every code
+        // must fit in 16 bits: all 20 real symbols land in lengths 1..=16.
+        assert_eq!(bits[0], 0);
+        let total: usize = bits[1..=16].iter().map(|&b| b as usize).sum();
+        assert_eq!(total, 20);
+        assert_eq!(values.len(), 20);
     }
 }
