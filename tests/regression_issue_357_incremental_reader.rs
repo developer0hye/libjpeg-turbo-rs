@@ -50,18 +50,32 @@ fn assert_identical(a: &Image, b: &Image, label: &str) {
 }
 
 /// The incremental path must match the slice path bit-for-bit across
-/// chunk sizes that stress every window-boundary case, including a
-/// 1-byte feed. The slice path is djpeg-pinned by the existing suites,
-/// so equality here is transitive C cross-validation.
+/// chunk sizes that stress every window-boundary case. The slice path
+/// is djpeg-pinned by the existing suites, so equality here is
+/// transitive C cross-validation.
+///
+/// A short read makes the driver retry the starved row immediately
+/// (it cannot block waiting for a source that may already have
+/// delivered the whole image), so a 1-byte drip is retry-per-byte —
+/// quadratic in row size by design. The drip cases therefore run on a
+/// small interleaved fixture; the 640x480 trio uses realistic chunks.
 #[test]
 fn incremental_matches_slice_for_baseline_across_chunk_sizes() {
+    let small: &[u8] = include_bytes!("fixtures/blue_16x16_420.jpg");
+    let small_ref: Image = decompress(small).expect("slice decode small");
+    for chunk in [1usize, 3, 7] {
+        let streamed: Image = decompress_from_reader_incremental(ChunkedReader::new(small, chunk))
+            .unwrap_or_else(|e| panic!("blue_16x16 chunk={chunk}: {e:?}"));
+        assert_identical(&small_ref, &streamed, &format!("blue_16x16 chunk={chunk}"));
+    }
+
     for (fixture, name) in [
         (BASELINE_420, "photo_640x480_420"),
         (BASELINE_444, "photo_640x480_444"),
         (BASELINE_RST, "photo_640x480_420_rst"),
     ] {
         let reference: Image = decompress(fixture).expect("slice decode");
-        for chunk in [1usize, 7, 64, 1024, 65536, usize::MAX] {
+        for chunk in [1024usize, 4096, 65536, usize::MAX] {
             let reader = ChunkedReader::new(fixture, chunk);
             let streamed: Image = decompress_from_reader_incremental(reader)
                 .unwrap_or_else(|e| panic!("{name} chunk={chunk}: {e:?}"));

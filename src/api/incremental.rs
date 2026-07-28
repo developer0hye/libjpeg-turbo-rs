@@ -35,6 +35,13 @@ const MIN_RETRY_REFILL: usize = 4 * 1024;
 /// that never presents an SOS must not grow the buffer unboundedly.
 const MAX_HEADER_BYTES: usize = 256 * 1024 * 1024;
 
+/// Hard cap on the entropy window while a single MCU row refuses to
+/// commit (codex P1: an attacker streaming endless `0xFF` fill after
+/// SOS would otherwise grow the window to OOM). A legal row's entropy
+/// is bounded far below this — worst case ~18 MiB for a maximum-width
+/// 4:4:4 frame — so hitting the cap is a corrupt/hostile stream.
+const MAX_WINDOW_BYTES: usize = 64 * 1024 * 1024;
+
 /// Decode a JPEG from a byte stream with bounded input memory.
 ///
 /// For interleaved baseline streams the input window stays small and
@@ -60,23 +67,25 @@ pub fn decompress_from_reader_incremental_instrumented<R: Read>(
     decode_incremental(reader)
 }
 
-/// Read up to [`READ_CHUNK`] more bytes into `buf`. Returns the byte
+/// One `read` call into `scratch`, appended to `buf`. Returns the byte
 /// count (0 = end of stream); propagates reader errors as
-/// [`JpegError::Io`].
-fn read_some<R: Read>(reader: &mut R, buf: &mut Vec<u8>) -> Result<usize> {
-    // Take + read_to_end loops over however many small reads the
-    // source needs to produce up to READ_CHUNK bytes — a drip-feed
-    // reader costs one function call per drip, not one buffer resize
-    // (the naive resize-then-read version made a 1-byte/read source
-    // memset 64 KiB per byte).
-    reader
-        .take(READ_CHUNK as u64)
-        .read_to_end(buf)
-        .map_err(JpegError::Io)
+/// [`JpegError::Io`]. Deliberately a SINGLE read: looping until a
+/// fixed chunk fills (`Take::read_to_end` style) would block on a
+/// persistent socket that has already delivered the complete image but
+/// stays open (codex P1).
+fn read_some<R: Read>(
+    reader: &mut R,
+    buf: &mut Vec<u8>,
+    scratch: &mut [u8; READ_CHUNK],
+) -> Result<usize> {
+    let n: usize = reader.read(&mut scratch[..]).map_err(JpegError::Io)?;
+    buf.extend_from_slice(&scratch[..n]);
+    Ok(n)
 }
 
 fn decode_incremental<R: Read>(mut reader: R) -> Result<(Image, usize)> {
     let mut buf: Vec<u8> = Vec::new();
+    let mut scratch: Box<[u8; READ_CHUNK]> = Box::new([0u8; READ_CHUNK]);
     let mut peak: usize = 0;
     let mut source_done: bool = false;
 
@@ -94,7 +103,7 @@ fn decode_incremental<R: Read>(mut reader: R) -> Result<(Image, usize)> {
                 "no SOS marker within the 256 MiB header cap".to_string(),
             ));
         }
-        let n: usize = read_some(&mut reader, &mut buf)?;
+        let n: usize = read_some(&mut reader, &mut buf, &mut scratch)?;
         peak = peak.max(buf.len());
         if n == 0 {
             source_done = true;
@@ -117,7 +126,7 @@ fn decode_incremental<R: Read>(mut reader: R) -> Result<(Image, usize)> {
         // layout requires the full stream (progressive multi-pass,
         // non-interleaved block rasters, arithmetic conditioning).
         loop {
-            let n: usize = read_some(&mut reader, &mut buf)?;
+            let n: usize = read_some(&mut reader, &mut buf, &mut scratch)?;
             peak = peak.max(buf.len());
             if n == 0 {
                 break;
@@ -127,10 +136,15 @@ fn decode_incremental<R: Read>(mut reader: R) -> Result<(Image, usize)> {
         return Ok((image, peak));
     }
 
-    // Phase 3: windowed row decode. The header prefix moves to its own
-    // allocation so `buf` can shrink to just the entropy window.
-    let header: Vec<u8> = buf[..entropy_start].to_vec();
-    buf.drain(..entropy_start);
+    // Phase 3: windowed row decode. Split rather than clone: `buf`
+    // keeps its allocation as the header, the entropy tail moves to a
+    // new window vector — no moment holds two copies of the header
+    // (codex P2 on peak accounting).
+    let window_tail: Vec<u8> = buf[entropy_start..].to_vec();
+    peak = peak.max(buf.len() + window_tail.len());
+    buf.truncate(entropy_start);
+    let header: Vec<u8> = buf;
+    let mut buf: Vec<u8> = window_tail;
     let decoder: Decoder = Decoder::new(&header)?;
     let mut st = decoder.baseline_stream_begin()?;
     let mut is_final: bool = source_done;
@@ -152,18 +166,29 @@ fn decode_incremental<R: Read>(mut reader: R) -> Result<(Image, usize)> {
             buf.drain(..consumable);
             st.rebase(consumable);
         }
-        // Accumulate a meaningful refill before retrying: each retry
-        // re-decodes a full MCU row, so advancing one byte at a time
-        // against a drip-feed reader would be quadratic in row size.
+        if buf.len() > MAX_WINDOW_BYTES {
+            return Err(JpegError::CorruptData(format!(
+                "entropy window exceeded {} bytes without an MCU row committing",
+                MAX_WINDOW_BYTES
+            )));
+        }
+        // Batch refills only while the source keeps delivering full
+        // reads: a short read means the source has nothing more ready
+        // (drip feed or idle socket), and looping for more would either
+        // waste retries or block on a stream that already delivered the
+        // image — retry the row with what arrived instead.
         let mut refilled: usize = 0;
-        while refilled < MIN_RETRY_REFILL {
-            let n: usize = read_some(&mut reader, &mut buf)?;
+        loop {
+            let n: usize = read_some(&mut reader, &mut buf, &mut scratch)?;
             peak = peak.max(header.len() + buf.len());
             if n == 0 {
                 is_final = true;
                 break;
             }
             refilled += n;
+            if refilled >= MIN_RETRY_REFILL || n < READ_CHUNK {
+                break;
+            }
         }
     }
 
