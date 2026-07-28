@@ -820,7 +820,12 @@ pub fn load_png_from_bytes(data: &[u8]) -> Result<LoadedImage> {
         }
     };
 
-    let mut frame_buf: Vec<u8> = vec![0u8; reader.output_buffer_size()];
+    // png 0.18: `output_buffer_size` returns `None` when the decoded size
+    // would overflow `usize` — treat that as corrupt input, not a panic.
+    let buffer_size: usize = reader
+        .output_buffer_size()
+        .ok_or_else(|| JpegError::CorruptData("PNG output buffer size overflows usize".into()))?;
+    let mut frame_buf: Vec<u8> = vec![0u8; buffer_size];
     let frame_info: png::OutputInfo = reader
         .next_frame(&mut frame_buf)
         .map_err(|e| JpegError::CorruptData(format!("PNG frame decode error: {e}")))?;
