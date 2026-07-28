@@ -105,3 +105,24 @@ above the ≤1.2× target: the residual is in other stages (fancy
 upsample, IDCT column passes, Huffman decode). P4-60 stays OPEN; next
 candidate per C source: `jdsample.c`-style incremental fancy upsample
 and Huffman decode table width.
+
+## 2026-07-28 — P4-60 per-stage profile (the acceptance criteria's outstanding step)
+
+Same-run numbers only (this container session is globally faster than
+the earlier ones — emulation variance; ratios within the run are the
+data). `bench_scalar_p460 profile` micro-benches each scalar kernel at
+exactly a 1080p 4:2:0 decode's volume:
+
+| stage (1080p volume) | µs | share of 111,190 µs total |
+|---|---:|---:|
+| `idct_8x8` × 48,600 blocks | 15,034 | 13.5% |
+| `fancy_h2v2_row` × 2,160 rows | 10,198 | 9.2% |
+| `ycbcr_to_rgb_row` × 1,080 rows (post-tables) | 15,199 | 13.7% |
+| **Σ kernels** | **40,431** | **36.4%** |
+| **residual: Huffman entropy decode + BitReader + plane plumbing** | **≈ 70,759** | **≈ 63.6%** |
+
+**Conclusion.** Further kernel tuning has ≤ 36% of the pie to work
+with; the scalar gap to C now lives overwhelmingly in entropy decode
+(`jdhuff.c`'s two-level lookahead tables vs our `decode/huffman.rs`
+path). P4-60's next step is the Huffman decode loop — with this
+measurement, no longer a guess.
