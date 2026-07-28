@@ -181,7 +181,7 @@ jobs:
       - name: Build wasm-pack (bundler target)
         run: cd crates/libjpeg-turbo-rs-wasm && wasm-pack build --target bundler --out-dir pkg
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: '20'
           registry-url: 'https://registry.npmjs.org'
