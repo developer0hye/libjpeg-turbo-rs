@@ -381,7 +381,7 @@
 - [x] `jpeg_stdio_dest()` / `jpeg_stdio_src()` — File I/O (`stream::compress_to_file` / `stream::decompress_from_file`)
 - [x] `jpeg_mem_dest()` / `jpeg_mem_src()` — C memory I/O (Rust equivalent: already native)
 - [x] Custom `jpeg_destination_mgr` — User-defined output stream (`stream::compress_to_writer`)
-- [x] Custom `jpeg_source_mgr` — User-defined input stream (`stream::decompress_from_reader`)
+- [x] Custom `jpeg_source_mgr` — User-defined input stream (`stream::decompress_from_reader`, buffering; `decompress_from_reader_incremental` for bounded input memory on interleaved baseline — P4-58)
 - [x] `TJPARAM_NOREALLOC` — Pre-allocated output buffer (`compress_into()`)
 
 ### Buffer Size Calculation

@@ -8,6 +8,27 @@ pub struct BitReader<'a> {
     pos: usize,
     bit_buffer: u64,
     bits_left: u8,
+    /// False when `data` is a partial window of a longer stream
+    /// (P4-58 incremental decode). EOF-class events then flag
+    /// starvation instead of being treated as the true end of stream.
+    is_final: bool,
+    /// Set when a read (or restart scan) ran past the window end while
+    /// `!is_final`: every value produced since the caller's last
+    /// checkpoint is unreliable and must be discarded, the window
+    /// extended, and the work retried. Never set when `is_final`.
+    starved: bool,
+}
+
+/// Resumable byte/bit cursor for windowed decoding (P4-58): captures
+/// everything needed to re-create a `BitReader` over a grown window at
+/// an MCU-row checkpoint. Internal checkpoint plumbing — hidden from
+/// the documented surface (#386 curation), semver-exempt.
+#[doc(hidden)]
+#[derive(Debug, Clone, Copy)]
+pub struct BitReaderState {
+    pub pos: usize,
+    pub bit_buffer: u64,
+    pub bits_left: u8,
 }
 
 impl<'a> BitReader<'a> {
@@ -17,7 +38,43 @@ impl<'a> BitReader<'a> {
             pos: 0,
             bit_buffer: 0,
             bits_left: 0,
+            is_final: true,
+            starved: false,
         }
+    }
+
+    /// Re-create a reader over a (possibly grown) window from a
+    /// checkpoint taken with [`Self::state`]. The window must start at
+    /// the same stream offset as the one the checkpoint was taken in.
+    #[doc(hidden)]
+    pub fn resume_windowed(data: &'a [u8], state: BitReaderState, is_final: bool) -> Self {
+        Self {
+            data,
+            pos: state.pos,
+            bit_buffer: state.bit_buffer,
+            bits_left: state.bits_left,
+            is_final,
+            starved: false,
+        }
+    }
+
+    /// Snapshot the cursor for a later [`Self::resume_windowed`]. Only
+    /// meaningful when `!self.starved()` — a starved reader's state is
+    /// mid-garbage by definition.
+    #[doc(hidden)]
+    pub fn state(&self) -> BitReaderState {
+        BitReaderState {
+            pos: self.pos,
+            bit_buffer: self.bit_buffer,
+            bits_left: self.bits_left,
+        }
+    }
+
+    /// True when a window-bounded read ran out of buffered bytes; the
+    /// values read since the last checkpoint are unreliable.
+    #[doc(hidden)]
+    pub fn starved(&self) -> bool {
+        self.starved
     }
 
     /// Appends one byte from `window` at `off` into the bit buffer.
@@ -101,6 +158,9 @@ impl<'a> BitReader<'a> {
             let byte: u8 = match self.data.get(pos) {
                 Some(&b) => b,
                 None => {
+                    if !self.is_final {
+                        self.starved = true;
+                    }
                     self.bit_buffer <<= 8;
                     self.bits_left += 8;
                     continue;
@@ -145,11 +205,17 @@ impl<'a> BitReader<'a> {
                     self.bits_left += 8;
                 }
                 None => {
-                    // True EOF in the middle of (or right after) the FF
-                    // run — no marker will ever materialize. Skip the
-                    // entire run so subsequent calls hit the
-                    // `data.get(pos) == None` short-circuit at the top.
-                    self.pos = self.data.len();
+                    // EOF in the middle of (or right after) the FF run.
+                    // For a final window no marker will ever materialize
+                    // — skip the run so subsequent calls short-circuit.
+                    // For a partial window the run's classification
+                    // depends on bytes not buffered yet: starve WITHOUT
+                    // moving pos, so the retry re-examines the run.
+                    if self.is_final {
+                        self.pos = self.data.len();
+                    } else {
+                        self.starved = true;
+                    }
                     self.bit_buffer <<= 8;
                     self.bits_left += 8;
                 }
@@ -237,6 +303,11 @@ impl<'a> BitReader<'a> {
                 _ => return,           // other marker: restart marker absent
             }
         }
+        // Ran off the end of the buffered bytes without classifying a
+        // marker — only meaningful for a partial window (P4-58).
+        if !self.is_final {
+            self.starved = true;
+        }
     }
 
     /// Reset bit state and consume the next 0xFF 0xDn restart marker if
@@ -266,6 +337,9 @@ impl<'a> BitReader<'a> {
             // Any other non-RST marker: stop without consuming so caller
             // can decide.
             return None;
+        }
+        if !self.is_final {
+            self.starved = true;
         }
         None
     }
@@ -302,6 +376,9 @@ impl<'a> BitReader<'a> {
                 continue;
             }
             self.pos += 1;
+        }
+        if !self.is_final {
+            self.starved = true;
         }
         None
     }

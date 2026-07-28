@@ -78,6 +78,9 @@ pub fn resolve_mcu_plan<'a>(
 }
 
 /// Decodes MCUs from entropy-coded data. Manages DC prediction per component.
+/// `Clone` snapshots the DC predictors for the windowed row-retry loop
+/// (P4-58 incremental decode).
+#[derive(Clone)]
 pub struct McuDecoder {
     dc_pred: [i16; 4],
 }
