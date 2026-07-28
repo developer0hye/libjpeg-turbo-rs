@@ -508,24 +508,24 @@ pub fn compress_with_params(params: &CompressParams<'_>) -> Result<Vec<u8>> {
         // flag gates every step. Deriving the fast path's guard from buffer
         // emptiness instead would let a non-AVX2 x86_64 CPU reach AVX2
         // intrinsics with never-downsampled (all-zero) chroma — issue #315.
-        #[cfg(target_arch = "x86_64")]
+        #[cfg(all(target_arch = "x86_64", feature = "simd"))]
         // Also gated on the DCT method: this path calls the islow AVX2 kernels
         // directly, while ifast/float carry divisors scaled for their own
         // transforms (#330).
         let use_avx2_420: bool = subsampling == Subsampling::S420
             && crate::cpu_has!("avx2")
             && may_use_islow_simd_kernel(fdct_quantize_fn);
-        #[cfg(target_arch = "x86_64")]
+        #[cfg(all(target_arch = "x86_64", feature = "simd"))]
         let half_w: usize = padded_w / 2;
-        #[cfg(target_arch = "x86_64")]
+        #[cfg(all(target_arch = "x86_64", feature = "simd"))]
         let half_h: usize = padded_h / 2;
-        #[cfg(target_arch = "x86_64")]
+        #[cfg(all(target_arch = "x86_64", feature = "simd"))]
         let mut cb_half: Vec<u8> = if use_avx2_420 {
             vec![0u8; half_w * half_h]
         } else {
             Vec::new()
         };
-        #[cfg(target_arch = "x86_64")]
+        #[cfg(all(target_arch = "x86_64", feature = "simd"))]
         let mut cr_half: Vec<u8> = if use_avx2_420 {
             vec![0u8; half_w * half_h]
         } else {
@@ -601,7 +601,7 @@ pub fn compress_with_params(params: &CompressParams<'_>) -> Result<Vec<u8>> {
             // For 420: downsample full-res Cb/Cr to compact half-res buffers.
             // This allows FDCT to read from stride=half_w instead of fused
             // downsample+FDCT from stride=padded_w, improving cache locality.
-            #[cfg(target_arch = "x86_64")]
+            #[cfg(all(target_arch = "x86_64", feature = "simd"))]
             if use_avx2_420 {
                 unsafe {
                     crate::simd::x86_64::avx2_downsample_h2v2_plane(
@@ -673,7 +673,7 @@ pub fn compress_with_params(params: &CompressParams<'_>) -> Result<Vec<u8>> {
             #[cfg_attr(not(target_arch = "x86_64"), allow(unused_mut))]
             let mut generic_start_col: usize = 0;
 
-            #[cfg(target_arch = "x86_64")]
+            #[cfg(all(target_arch = "x86_64", feature = "simd"))]
             // Restarts are excluded because this path hoists one bit-buffer
             // region across the whole MCU row; an RST marker mid-row would have
             // to break out of it. Restart encodes take the generic path below.
@@ -3745,11 +3745,11 @@ fn prepare_ac_first_coeffs(
     values: &mut [u16; 64],
     diffs: &mut [u16; 64],
 ) {
-    #[cfg(target_arch = "x86_64")]
+    #[cfg(all(target_arch = "x86_64", feature = "simd"))]
     unsafe {
         prepare_ac_first_sse2(block, ss, band_len, al, zerobits, values, diffs);
     }
-    #[cfg(not(target_arch = "x86_64"))]
+    #[cfg(not(all(target_arch = "x86_64", feature = "simd")))]
     {
         *zerobits = 0;
         for i in 0..band_len {
@@ -3776,7 +3776,7 @@ fn prepare_ac_first_coeffs(
 ///
 /// Processes 8 i16 coefficients per iteration: abs via sign-mask,
 /// point-transform shift, bitmap via cmpgt+movemask.
-#[cfg(target_arch = "x86_64")]
+#[cfg(all(target_arch = "x86_64", feature = "simd"))]
 #[inline(always)]
 unsafe fn prepare_ac_first_sse2(
     block: &[i16; 64],
@@ -3787,55 +3787,57 @@ unsafe fn prepare_ac_first_sse2(
     values: &mut [u16; 64],
     diffs: &mut [u16; 64],
 ) {
-    use core::arch::x86_64::*;
+    unsafe {
+        use core::arch::x86_64::*;
 
-    *zerobits = 0;
-    let shift_amt: __m128i = _mm_cvtsi64_si128(al as i64);
-    let zeros: __m128i = _mm_setzero_si128();
+        *zerobits = 0;
+        let shift_amt: __m128i = _mm_cvtsi64_si128(al as i64);
+        let zeros: __m128i = _mm_setzero_si128();
 
-    let mut i: usize = 0;
-    while i + 8 <= band_len {
-        let raw: __m128i = _mm_loadu_si128(block.as_ptr().add(ss + i) as *const __m128i);
+        let mut i: usize = 0;
+        while i + 8 <= band_len {
+            let raw: __m128i = _mm_loadu_si128(block.as_ptr().add(ss + i) as *const __m128i);
 
-        // abs(coeff) via sign-mask
-        let sign: __m128i = _mm_srai_epi16(raw, 15);
-        let abs_val: __m128i = _mm_sub_epi16(_mm_xor_si128(raw, sign), sign);
+            // abs(coeff) via sign-mask
+            let sign: __m128i = _mm_srai_epi16(raw, 15);
+            let abs_val: __m128i = _mm_sub_epi16(_mm_xor_si128(raw, sign), sign);
 
-        // Point-transform shift: temp = abs_val >> al
-        let temp: __m128i = _mm_sra_epi16(abs_val, shift_amt);
+            // Point-transform shift: temp = abs_val >> al
+            let temp: __m128i = _mm_sra_epi16(abs_val, shift_amt);
 
-        // Store values
-        _mm_storeu_si128(values.as_mut_ptr().add(i) as *mut __m128i, temp);
+            // Store values
+            _mm_storeu_si128(values.as_mut_ptr().add(i) as *mut __m128i, temp);
 
-        // Compute diffs: sign_mask ^ (abs_coeff >> al)
-        let diff: __m128i = _mm_xor_si128(sign, temp);
-        _mm_storeu_si128(diffs.as_mut_ptr().add(i) as *mut __m128i, diff);
+            // Compute diffs: sign_mask ^ (abs_coeff >> al)
+            let diff: __m128i = _mm_xor_si128(sign, temp);
+            _mm_storeu_si128(diffs.as_mut_ptr().add(i) as *mut __m128i, diff);
 
-        // Build bitmap: nonzero positions
-        let nz: __m128i = _mm_cmpgt_epi16(temp, zeros);
-        let packed: __m128i = _mm_packs_epi16(nz, zeros);
-        let mask: u32 = _mm_movemask_epi8(packed) as u32;
-        *zerobits |= (mask as u64 & 0xFF) << i;
+            // Build bitmap: nonzero positions
+            let nz: __m128i = _mm_cmpgt_epi16(temp, zeros);
+            let packed: __m128i = _mm_packs_epi16(nz, zeros);
+            let mask: u32 = _mm_movemask_epi8(packed) as u32;
+            *zerobits |= (mask as u64 & 0xFF) << i;
 
-        i += 8;
-    }
-
-    // Scalar tail for remaining coefficients
-    while i < band_len {
-        let coeff: i16 = *block.get_unchecked(ss + i);
-        if coeff != 0 {
-            // i32 widen: see api/coefficient.rs note (i16::MIN abs overflow).
-            let coeff: i32 = coeff as i32;
-            let sign_mask: i32 = coeff >> 31;
-            let abs_coeff: i32 = (coeff ^ sign_mask) - sign_mask;
-            let temp: u16 = (abs_coeff >> al) as u16;
-            if temp != 0 {
-                *values.get_unchecked_mut(i) = temp;
-                *diffs.get_unchecked_mut(i) = (sign_mask ^ (abs_coeff >> al)) as u16;
-                *zerobits |= 1u64 << i;
-            }
+            i += 8;
         }
-        i += 1;
+
+        // Scalar tail for remaining coefficients
+        while i < band_len {
+            let coeff: i16 = *block.get_unchecked(ss + i);
+            if coeff != 0 {
+                // i32 widen: see api/coefficient.rs note (i16::MIN abs overflow).
+                let coeff: i32 = coeff as i32;
+                let sign_mask: i32 = coeff >> 31;
+                let abs_coeff: i32 = (coeff ^ sign_mask) - sign_mask;
+                let temp: u16 = (abs_coeff >> al) as u16;
+                if temp != 0 {
+                    *values.get_unchecked_mut(i) = temp;
+                    *diffs.get_unchecked_mut(i) = (sign_mask ^ (abs_coeff >> al)) as u16;
+                    *zerobits |= 1u64 << i;
+                }
+            }
+            i += 1;
+        }
     }
 }
 
@@ -3852,11 +3854,11 @@ fn prepare_ac_refine_coeffs(
     sign_bits: &mut [u16; 64],
     eob_pos: &mut usize,
 ) {
-    #[cfg(target_arch = "x86_64")]
+    #[cfg(all(target_arch = "x86_64", feature = "simd"))]
     unsafe {
         prepare_ac_refine_sse2(block, ss, band_len, al, absvals, sign_bits, eob_pos);
     }
-    #[cfg(not(target_arch = "x86_64"))]
+    #[cfg(not(all(target_arch = "x86_64", feature = "simd")))]
     {
         *eob_pos = 0;
         for i in 0..band_len {
@@ -3877,7 +3879,7 @@ fn prepare_ac_refine_coeffs(
 ///
 /// Processes 8 i16 coefficients per iteration: abs via sign-mask,
 /// point-transform shift, sign extraction, eob_pos tracking.
-#[cfg(target_arch = "x86_64")]
+#[cfg(all(target_arch = "x86_64", feature = "simd"))]
 #[inline(always)]
 unsafe fn prepare_ac_refine_sse2(
     block: &[i16; 64],
@@ -3888,55 +3890,57 @@ unsafe fn prepare_ac_refine_sse2(
     sign_bits: &mut [u16; 64],
     eob_pos: &mut usize,
 ) {
-    use core::arch::x86_64::*;
+    unsafe {
+        use core::arch::x86_64::*;
 
-    *eob_pos = 0;
-    let shift_amt: __m128i = _mm_cvtsi64_si128(al as i64);
-    let ones: __m128i = _mm_set1_epi16(1);
+        *eob_pos = 0;
+        let shift_amt: __m128i = _mm_cvtsi64_si128(al as i64);
+        let ones: __m128i = _mm_set1_epi16(1);
 
-    let mut i: usize = 0;
-    while i + 8 <= band_len {
-        let raw: __m128i = _mm_loadu_si128(block.as_ptr().add(ss + i) as *const __m128i);
+        let mut i: usize = 0;
+        while i + 8 <= band_len {
+            let raw: __m128i = _mm_loadu_si128(block.as_ptr().add(ss + i) as *const __m128i);
 
-        // abs(coeff)
-        let sign: __m128i = _mm_srai_epi16(raw, 15);
-        let abs_val: __m128i = _mm_sub_epi16(_mm_xor_si128(raw, sign), sign);
+            // abs(coeff)
+            let sign: __m128i = _mm_srai_epi16(raw, 15);
+            let abs_val: __m128i = _mm_sub_epi16(_mm_xor_si128(raw, sign), sign);
 
-        // temp = abs_val >> al
-        let temp: __m128i = _mm_sra_epi16(abs_val, shift_amt);
-        _mm_storeu_si128(absvals.as_mut_ptr().add(i) as *mut __m128i, temp);
+            // temp = abs_val >> al
+            let temp: __m128i = _mm_sra_epi16(abs_val, shift_amt);
+            _mm_storeu_si128(absvals.as_mut_ptr().add(i) as *mut __m128i, temp);
 
-        // sign_bits = (sign_mask as u16) + 1 = 0 for negative, 1 for positive/zero
-        let sign_out: __m128i = _mm_add_epi16(sign, ones);
-        _mm_storeu_si128(sign_bits.as_mut_ptr().add(i) as *mut __m128i, sign_out);
+            // sign_bits = (sign_mask as u16) + 1 = 0 for negative, 1 for positive/zero
+            let sign_out: __m128i = _mm_add_epi16(sign, ones);
+            _mm_storeu_si128(sign_bits.as_mut_ptr().add(i) as *mut __m128i, sign_out);
 
-        // Track eob_pos: find positions where temp == 1
-        let eq_one: __m128i = _mm_cmpeq_epi16(temp, ones);
-        let mask: u32 = _mm_movemask_epi8(_mm_packs_epi16(eq_one, _mm_setzero_si128())) as u32;
-        if mask != 0 {
-            // Highest set bit position in the 8-bit mask
-            let highest: u32 = 7 - (mask as u8).leading_zeros();
-            let pos: usize = i + highest as usize + 1;
-            if pos > *eob_pos {
-                *eob_pos = pos;
+            // Track eob_pos: find positions where temp == 1
+            let eq_one: __m128i = _mm_cmpeq_epi16(temp, ones);
+            let mask: u32 = _mm_movemask_epi8(_mm_packs_epi16(eq_one, _mm_setzero_si128())) as u32;
+            if mask != 0 {
+                // Highest set bit position in the 8-bit mask
+                let highest: u32 = 7 - (mask as u8).leading_zeros();
+                let pos: usize = i + highest as usize + 1;
+                if pos > *eob_pos {
+                    *eob_pos = pos;
+                }
             }
+
+            i += 8;
         }
 
-        i += 8;
-    }
-
-    // Scalar tail
-    while i < band_len {
-        let coeff: i32 = *block.get_unchecked(ss + i) as i32;
-        let sign_mask: i32 = coeff >> 31;
-        let abs_coeff: i32 = (coeff ^ sign_mask) - sign_mask;
-        let temp: u16 = (abs_coeff >> al) as u16;
-        *absvals.get_unchecked_mut(i) = temp;
-        *sign_bits.get_unchecked_mut(i) = (sign_mask as u16).wrapping_add(1);
-        if temp == 1 {
-            *eob_pos = i + 1;
+        // Scalar tail
+        while i < band_len {
+            let coeff: i32 = *block.get_unchecked(ss + i) as i32;
+            let sign_mask: i32 = coeff >> 31;
+            let abs_coeff: i32 = (coeff ^ sign_mask) - sign_mask;
+            let temp: u16 = (abs_coeff >> al) as u16;
+            *absvals.get_unchecked_mut(i) = temp;
+            *sign_bits.get_unchecked_mut(i) = (sign_mask as u16).wrapping_add(1);
+            if temp == 1 {
+                *eob_pos = i + 1;
+            }
+            i += 1;
         }
-        i += 1;
     }
 }
 
@@ -5927,7 +5931,7 @@ fn progressive_fdct_y_block(
     output: &mut [i16; 64],
     use_simd_fdct: bool,
 ) {
-    #[cfg(target_arch = "aarch64")]
+    #[cfg(all(target_arch = "aarch64", feature = "simd"))]
     {
         if use_simd_fdct && bx + 8 <= plane_w && by + 8 <= plane_h {
             unsafe {
@@ -5986,7 +5990,7 @@ fn progressive_fdct_chroma_block(
         return;
     }
 
-    #[cfg(target_arch = "aarch64")]
+    #[cfg(all(target_arch = "aarch64", feature = "simd"))]
     {
         let src_w: usize = hf * 8;
         let src_h: usize = vf * 8;
@@ -6011,7 +6015,7 @@ fn progressive_fdct_chroma_block(
         }
     }
 
-    #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
+    #[cfg(all(target_arch = "wasm32", target_feature = "simd128", feature = "simd"))]
     {
         let src_w: usize = hf * 8;
         let src_h: usize = vf * 8;
@@ -6590,12 +6594,12 @@ fn extract_block(
 ) {
     // SIMD fast path for interior blocks (no bounds checking needed)
     if block_x + 8 <= plane_width && block_y + 8 <= plane_height {
-        #[cfg(target_arch = "aarch64")]
+        #[cfg(all(target_arch = "aarch64", feature = "simd"))]
         {
             extract_block_neon(plane, plane_width, block_x, block_y, block);
             return;
         }
-        #[cfg(target_arch = "x86_64")]
+        #[cfg(all(target_arch = "x86_64", feature = "simd"))]
         {
             if crate::cpu_has!("sse2") {
                 // SAFETY: SSE2 availability checked above, interior block bounds verified.
@@ -6605,7 +6609,7 @@ fn extract_block(
                 return;
             }
         }
-        #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
+        #[cfg(all(target_arch = "wasm32", target_feature = "simd128", feature = "simd"))]
         {
             unsafe {
                 extract_block_wasm(plane, plane_width, block_x, block_y, block);
@@ -6627,7 +6631,7 @@ fn extract_block(
 /// NEON-accelerated block extraction with level-shift for interior blocks.
 ///
 /// Loads 8 bytes per row, widens to i16, subtracts 128. No bounds checking.
-#[cfg(target_arch = "aarch64")]
+#[cfg(all(target_arch = "aarch64", feature = "simd"))]
 fn extract_block_neon(
     plane: &[u8],
     plane_width: usize,
@@ -6656,7 +6660,7 @@ fn extract_block_neon(
 /// # Safety
 /// Requires SSE2. Caller must ensure `block_x + 8 <= plane_width` and
 /// `block_y + 8 <= plane_height` (interior block bounds).
-#[cfg(target_arch = "x86_64")]
+#[cfg(all(target_arch = "x86_64", feature = "simd"))]
 #[target_feature(enable = "sse2")]
 unsafe fn extract_block_sse2(
     plane: &[u8],
@@ -6665,20 +6669,22 @@ unsafe fn extract_block_sse2(
     block_y: usize,
     block: &mut [i16; 64],
 ) {
-    use core::arch::x86_64::*;
+    unsafe {
+        use core::arch::x86_64::*;
 
-    let level_shift: __m128i = _mm_set1_epi16(128);
-    let zeros: __m128i = _mm_setzero_si128();
+        let level_shift: __m128i = _mm_set1_epi16(128);
+        let zeros: __m128i = _mm_setzero_si128();
 
-    for row in 0..8 {
-        let src_ptr: *const u8 = plane.as_ptr().add((block_y + row) * plane_width + block_x);
-        // Load 8 bytes (only low 64 bits used)
-        let pixels: __m128i = _mm_loadl_epi64(src_ptr as *const __m128i);
-        // Zero-extend u8 → i16
-        let wide: __m128i = _mm_unpacklo_epi8(pixels, zeros);
-        // Level-shift: subtract 128
-        let shifted: __m128i = _mm_sub_epi16(wide, level_shift);
-        _mm_storeu_si128(block.as_mut_ptr().add(row * 8) as *mut __m128i, shifted);
+        for row in 0..8 {
+            let src_ptr: *const u8 = plane.as_ptr().add((block_y + row) * plane_width + block_x);
+            // Load 8 bytes (only low 64 bits used)
+            let pixels: __m128i = _mm_loadl_epi64(src_ptr as *const __m128i);
+            // Zero-extend u8 → i16
+            let wide: __m128i = _mm_unpacklo_epi8(pixels, zeros);
+            // Level-shift: subtract 128
+            let shifted: __m128i = _mm_sub_epi16(wide, level_shift);
+            _mm_storeu_si128(block.as_mut_ptr().add(row * 8) as *mut __m128i, shifted);
+        }
     }
 }
 
@@ -6689,7 +6695,7 @@ unsafe fn extract_block_sse2(
 /// # Safety
 /// Requires simd128. Caller must ensure `block_x + 8 <= plane_width` and
 /// `block_y + 8 <= plane_height` (interior block bounds).
-#[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
+#[cfg(all(target_arch = "wasm32", target_feature = "simd128", feature = "simd"))]
 #[target_feature(enable = "simd128")]
 unsafe fn extract_block_wasm(
     plane: &[u8],
@@ -6698,16 +6704,18 @@ unsafe fn extract_block_wasm(
     block_y: usize,
     block: &mut [i16; 64],
 ) {
-    use core::arch::wasm32::*;
+    unsafe {
+        use core::arch::wasm32::*;
 
-    let level_shift: v128 = i16x8_splat(128);
+        let level_shift: v128 = i16x8_splat(128);
 
-    for row in 0..8 {
-        let src_ptr: *const u8 = plane.as_ptr().add((block_y + row) * plane_width + block_x);
-        let pixels: v128 = v128_load64_zero(src_ptr as *const u64);
-        let wide: v128 = u16x8_extend_low_u8x16(pixels);
-        let shifted: v128 = i16x8_sub(wide, level_shift);
-        v128_store(block.as_mut_ptr().add(row * 8) as *mut v128, shifted);
+        for row in 0..8 {
+            let src_ptr: *const u8 = plane.as_ptr().add((block_y + row) * plane_width + block_x);
+            let pixels: v128 = v128_load64_zero(src_ptr as *const u64);
+            let wide: v128 = u16x8_extend_low_u8x16(pixels);
+            let shifted: v128 = i16x8_sub(wide, level_shift);
+            v128_store(block.as_mut_ptr().add(row * 8) as *mut v128, shifted);
+        }
     }
 }
 
@@ -6731,7 +6739,7 @@ fn downsample_chroma_block(
         let src_w: usize = 8 * h_factor;
         let src_h: usize = 8 * v_factor;
         if block_x + src_w <= plane_width && block_y + src_h <= plane_height {
-            #[cfg(target_arch = "aarch64")]
+            #[cfg(all(target_arch = "aarch64", feature = "simd"))]
             {
                 if h_factor == 2 && v_factor == 2 {
                     downsample_chroma_block_h2v2_neon(plane, plane_width, block_x, block_y, block);
@@ -6742,7 +6750,7 @@ fn downsample_chroma_block(
                     return;
                 }
             }
-            #[cfg(target_arch = "x86_64")]
+            #[cfg(all(target_arch = "x86_64", feature = "simd"))]
             {
                 if crate::cpu_has!("ssse3") {
                     if h_factor == 2 && v_factor == 2 {
@@ -6830,7 +6838,7 @@ fn downsample_chroma_block(
 ///
 /// Processes 16x16 source pixels → 8x8 output using vpadalq_u8 pairwise add.
 /// Each 2x2 block is averaged and level-shifted (-128) in NEON registers.
-#[cfg(target_arch = "aarch64")]
+#[cfg(all(target_arch = "aarch64", feature = "simd"))]
 fn downsample_chroma_block_h2v2_neon(
     plane: &[u8],
     plane_width: usize,
@@ -6869,7 +6877,7 @@ fn downsample_chroma_block_h2v2_neon(
 }
 
 /// NEON-accelerated H2V1 downsample + level-shift for interior chroma blocks.
-#[cfg(target_arch = "aarch64")]
+#[cfg(all(target_arch = "aarch64", feature = "simd"))]
 fn downsample_chroma_block_h2v1_neon(
     plane: &[u8],
     plane_width: usize,
@@ -6906,7 +6914,7 @@ fn downsample_chroma_block_h2v1_neon(
 /// # Safety
 /// Requires SSSE3. Caller must ensure `block_x + 16 <= plane_width` and
 /// `block_y + 16 <= plane_height` (interior block bounds).
-#[cfg(target_arch = "x86_64")]
+#[cfg(all(target_arch = "x86_64", feature = "simd"))]
 #[target_feature(enable = "ssse3")]
 unsafe fn downsample_chroma_block_h2v2_ssse3(
     plane: &[u8],
@@ -6915,32 +6923,34 @@ unsafe fn downsample_chroma_block_h2v2_ssse3(
     block_y: usize,
     block: &mut [i16; 64],
 ) {
-    use core::arch::x86_64::*;
+    unsafe {
+        use core::arch::x86_64::*;
 
-    // maddubs(data, ones) computes pairwise sum of adjacent u8 pairs → i16
-    let ones: __m128i = _mm_set1_epi8(1);
-    let bias: __m128i = _mm_set_epi16(2, 1, 2, 1, 2, 1, 2, 1); // rounding for divide-by-4
-    let level_shift: __m128i = _mm_set1_epi16(128);
+        // maddubs(data, ones) computes pairwise sum of adjacent u8 pairs → i16
+        let ones: __m128i = _mm_set1_epi8(1);
+        let bias: __m128i = _mm_set_epi16(2, 1, 2, 1, 2, 1, 2, 1); // rounding for divide-by-4
+        let level_shift: __m128i = _mm_set1_epi16(128);
 
-    for row in 0..8 {
-        let sy: usize = block_y + row * 2;
-        let r0_ptr: *const u8 = plane.as_ptr().add(sy * plane_width + block_x);
-        let r1_ptr: *const u8 = plane.as_ptr().add((sy + 1) * plane_width + block_x);
+        for row in 0..8 {
+            let sy: usize = block_y + row * 2;
+            let r0_ptr: *const u8 = plane.as_ptr().add(sy * plane_width + block_x);
+            let r1_ptr: *const u8 = plane.as_ptr().add((sy + 1) * plane_width + block_x);
 
-        let r0: __m128i = _mm_loadu_si128(r0_ptr as *const __m128i);
-        let r1: __m128i = _mm_loadu_si128(r1_ptr as *const __m128i);
+            let r0: __m128i = _mm_loadu_si128(r0_ptr as *const __m128i);
+            let r1: __m128i = _mm_loadu_si128(r1_ptr as *const __m128i);
 
-        // Pairwise add: sum adjacent u8 pairs from each row → i16
-        let sum0: __m128i = _mm_maddubs_epi16(r0, ones);
-        let sum1: __m128i = _mm_maddubs_epi16(r1, ones);
+            // Pairwise add: sum adjacent u8 pairs from each row → i16
+            let sum0: __m128i = _mm_maddubs_epi16(r0, ones);
+            let sum1: __m128i = _mm_maddubs_epi16(r1, ones);
 
-        // Sum both rows + bias, divide by 4
-        let total: __m128i = _mm_add_epi16(_mm_add_epi16(sum0, sum1), bias);
-        let avg: __m128i = _mm_srai_epi16::<2>(total);
+            // Sum both rows + bias, divide by 4
+            let total: __m128i = _mm_add_epi16(_mm_add_epi16(sum0, sum1), bias);
+            let avg: __m128i = _mm_srai_epi16::<2>(total);
 
-        // Level-shift (-128) and store
-        let shifted: __m128i = _mm_sub_epi16(avg, level_shift);
-        _mm_storeu_si128(block.as_mut_ptr().add(row * 8) as *mut __m128i, shifted);
+            // Level-shift (-128) and store
+            let shifted: __m128i = _mm_sub_epi16(avg, level_shift);
+            _mm_storeu_si128(block.as_mut_ptr().add(row * 8) as *mut __m128i, shifted);
+        }
     }
 }
 
@@ -6949,7 +6959,7 @@ unsafe fn downsample_chroma_block_h2v2_ssse3(
 /// # Safety
 /// Requires SSSE3. Caller must ensure `block_x + 16 <= plane_width` and
 /// `block_y + 8 <= plane_height` (interior block bounds).
-#[cfg(target_arch = "x86_64")]
+#[cfg(all(target_arch = "x86_64", feature = "simd"))]
 #[target_feature(enable = "ssse3")]
 unsafe fn downsample_chroma_block_h2v1_ssse3(
     plane: &[u8],
@@ -6958,21 +6968,23 @@ unsafe fn downsample_chroma_block_h2v1_ssse3(
     block_y: usize,
     block: &mut [i16; 64],
 ) {
-    use core::arch::x86_64::*;
+    unsafe {
+        use core::arch::x86_64::*;
 
-    let ones: __m128i = _mm_set1_epi8(1);
-    let bias: __m128i = _mm_set_epi16(1, 0, 1, 0, 1, 0, 1, 0); // rounding for divide-by-2
-    let level_shift: __m128i = _mm_set1_epi16(128);
+        let ones: __m128i = _mm_set1_epi8(1);
+        let bias: __m128i = _mm_set_epi16(1, 0, 1, 0, 1, 0, 1, 0); // rounding for divide-by-2
+        let level_shift: __m128i = _mm_set1_epi16(128);
 
-    for row in 0..8 {
-        let sy: usize = block_y + row;
-        let r_ptr: *const u8 = plane.as_ptr().add(sy * plane_width + block_x);
+        for row in 0..8 {
+            let sy: usize = block_y + row;
+            let r_ptr: *const u8 = plane.as_ptr().add(sy * plane_width + block_x);
 
-        let r: __m128i = _mm_loadu_si128(r_ptr as *const __m128i);
-        let sum: __m128i = _mm_add_epi16(_mm_maddubs_epi16(r, ones), bias);
-        let avg: __m128i = _mm_srai_epi16::<1>(sum);
-        let shifted: __m128i = _mm_sub_epi16(avg, level_shift);
-        _mm_storeu_si128(block.as_mut_ptr().add(row * 8) as *mut __m128i, shifted);
+            let r: __m128i = _mm_loadu_si128(r_ptr as *const __m128i);
+            let sum: __m128i = _mm_add_epi16(_mm_maddubs_epi16(r, ones), bias);
+            let avg: __m128i = _mm_srai_epi16::<1>(sum);
+            let shifted: __m128i = _mm_sub_epi16(avg, level_shift);
+            _mm_storeu_si128(block.as_mut_ptr().add(row * 8) as *mut __m128i, shifted);
+        }
     }
 }
 
@@ -7216,7 +7228,7 @@ fn encode_single_block(
     // Fused path for interior blocks: load u8 → FDCT → quantize → zigzag
     // without intermediate [i16; 64] buffer between extract and FDCT.
     if use_fused_simd && block_x + 8 <= plane_width && block_y + 8 <= plane_height {
-        #[cfg(target_arch = "aarch64")]
+        #[cfg(all(target_arch = "aarch64", feature = "simd"))]
         {
             unsafe {
                 crate::simd::aarch64::neon_extract_fdct_quantize(
@@ -7229,7 +7241,7 @@ fn encode_single_block(
             HuffmanEncoder::encode_block(writer, &quantized, prev_dc, dc_table, ac_table);
             return;
         }
-        #[cfg(target_arch = "x86_64")]
+        #[cfg(all(target_arch = "x86_64", feature = "simd"))]
         {
             if crate::cpu_has!("avx2") {
                 unsafe {
@@ -7244,7 +7256,7 @@ fn encode_single_block(
                 return;
             }
         }
-        #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
+        #[cfg(all(target_arch = "wasm32", target_feature = "simd128", feature = "simd"))]
         {
             unsafe {
                 crate::simd::wasm32::wasm_extract_fdct_quantize(
@@ -7274,7 +7286,7 @@ fn encode_single_block(
         }
 
         if use_fused_simd {
-            #[cfg(target_arch = "aarch64")]
+            #[cfg(all(target_arch = "aarch64", feature = "simd"))]
             {
                 unsafe {
                     crate::simd::aarch64::neon_extract_fdct_quantize(
@@ -7287,7 +7299,7 @@ fn encode_single_block(
                 HuffmanEncoder::encode_block(writer, &quantized, prev_dc, dc_table, ac_table);
                 return;
             }
-            #[cfg(target_arch = "x86_64")]
+            #[cfg(all(target_arch = "x86_64", feature = "simd"))]
             {
                 if crate::cpu_has!("avx2") {
                     unsafe {
@@ -7346,7 +7358,7 @@ fn encode_color_mcu(
     match subsampling {
         Subsampling::S444 | Subsampling::Unknown => {
             // 1 Y + 1 Cb + 1 Cr = 3 blocks, MCU-level hoisting saves 2 begin/end pairs
-            #[cfg(target_arch = "x86_64")]
+            #[cfg(all(target_arch = "x86_64", feature = "simd"))]
             {
                 encode_mcu_444_x86_64(
                     y_plane,
@@ -7369,7 +7381,7 @@ fn encode_color_mcu(
                     fdct_quantize_fn,
                 );
             }
-            #[cfg(not(target_arch = "x86_64"))]
+            #[cfg(not(all(target_arch = "x86_64", feature = "simd")))]
             {
                 encode_single_block(
                     y_plane,
@@ -7414,7 +7426,7 @@ fn encode_color_mcu(
         }
         Subsampling::S422 => {
             // 2 Y + 1 Cb + 1 Cr = 4 blocks, MCU-level hoisting saves 3 begin/end pairs
-            #[cfg(target_arch = "x86_64")]
+            #[cfg(all(target_arch = "x86_64", feature = "simd"))]
             {
                 encode_mcu_422_x86_64(
                     y_plane,
@@ -7437,7 +7449,7 @@ fn encode_color_mcu(
                     fdct_quantize_fn,
                 );
             }
-            #[cfg(not(target_arch = "x86_64"))]
+            #[cfg(not(all(target_arch = "x86_64", feature = "simd")))]
             {
                 encode_single_block(
                     y_plane,
@@ -7501,7 +7513,7 @@ fn encode_color_mcu(
             // 4 Y blocks (2x2 arrangement) + 1 downsampled Cb + 1 downsampled Cr
             // Optimized path: do all FDCT+quantize first, then all Huffman encoding
             // with a single hoisted begin_block/end_block per MCU (saves 5 pairs).
-            #[cfg(target_arch = "x86_64")]
+            #[cfg(all(target_arch = "x86_64", feature = "simd"))]
             {
                 encode_mcu_420_x86_64(
                     y_plane,
@@ -7524,7 +7536,7 @@ fn encode_color_mcu(
                     fdct_quantize_fn,
                 );
             }
-            #[cfg(not(target_arch = "x86_64"))]
+            #[cfg(not(all(target_arch = "x86_64", feature = "simd")))]
             {
                 // Y blocks in order: top-left, top-right, bottom-left, bottom-right
                 encode_single_block(
@@ -7972,7 +7984,7 @@ fn encode_color_mcu_with_dummies(
 }
 
 /// Helper: FDCT+quantize a single block (interior: fused SIMD, border: scalar fallback).
-#[cfg(target_arch = "x86_64")]
+#[cfg(all(target_arch = "x86_64", feature = "simd"))]
 #[allow(clippy::too_many_arguments)]
 fn fdct_quantize_block(
     plane: &[u8],
@@ -8012,7 +8024,7 @@ fn fdct_quantize_block(
 }
 
 /// Helper: FDCT+quantize a downsampled H2V1 chroma block.
-#[cfg(target_arch = "x86_64")]
+#[cfg(all(target_arch = "x86_64", feature = "simd"))]
 #[allow(clippy::too_many_arguments)]
 fn fdct_quantize_chroma_h2v1(
     plane: &[u8],
@@ -8070,7 +8082,7 @@ fn fdct_quantize_chroma_h2v1(
 /// Optimized 4:4:4 MCU encoding with MCU-level BitWriter hoisting.
 ///
 /// 3 blocks (Y + Cb + Cr), saves 2 begin/end pairs per MCU.
-#[cfg(target_arch = "x86_64")]
+#[cfg(all(target_arch = "x86_64", feature = "simd"))]
 #[allow(clippy::too_many_arguments)]
 fn encode_mcu_444_x86_64(
     y_plane: &[u8],
@@ -8188,7 +8200,7 @@ fn encode_mcu_444_x86_64(
 /// Optimized 4:2:2 MCU encoding with MCU-level BitWriter hoisting.
 ///
 /// 4 blocks (2 Y + Cb + Cr), saves 3 begin/end pairs per MCU.
-#[cfg(target_arch = "x86_64")]
+#[cfg(all(target_arch = "x86_64", feature = "simd"))]
 #[allow(clippy::too_many_arguments)]
 fn encode_mcu_422_x86_64(
     y_plane: &[u8],
@@ -8330,7 +8342,7 @@ fn encode_mcu_422_x86_64(
 /// Does all FDCT+quantize for 6 blocks first, then all Huffman encoding in one
 /// hoisted begin_block/end_block pair. Saves 5 begin/end pairs per MCU.
 /// 6 blocks × 128 bytes = 768 bytes of quantized data fits in L1.
-#[cfg(target_arch = "x86_64")]
+#[cfg(all(target_arch = "x86_64", feature = "simd"))]
 #[allow(clippy::too_many_arguments)]
 fn encode_mcu_420_x86_64(
     y_plane: &[u8],
@@ -8497,7 +8509,7 @@ fn encode_mcu_420_x86_64(
 /// Cb/Cr blocks are read from half-resolution buffers (stride = `chroma_stride`).
 /// Since chroma is already downsampled, we use `avx2_extract_fdct_quantize`
 /// instead of the heavier `avx2_downsample_h2v2_fdct_quantize`.
-#[cfg(target_arch = "x86_64")]
+#[cfg(all(target_arch = "x86_64", feature = "simd"))]
 #[allow(clippy::too_many_arguments, dead_code)]
 fn encode_mcu_420_half_chroma(
     y_plane: &[u8],
@@ -8674,7 +8686,7 @@ fn encode_downsampled_chroma_block(
 
     // Fused NEON path: downsample + FDCT + quantize + zigzag in one pass,
     // eliminating the intermediate [i16; 64] downsampled block.
-    #[cfg(target_arch = "aarch64")]
+    #[cfg(all(target_arch = "aarch64", feature = "simd"))]
     if use_fused_simd {
         let src_w: usize = 8 * h_factor;
         let src_h: usize = 8 * v_factor;
@@ -8710,7 +8722,7 @@ fn encode_downsampled_chroma_block(
     }
 
     // x86_64 fused path: AVX2 downsample+FDCT+quantize+zigzag
-    #[cfg(target_arch = "x86_64")]
+    #[cfg(all(target_arch = "x86_64", feature = "simd"))]
     if use_fused_simd {
         let src_w: usize = 8 * h_factor;
         let src_h: usize = 8 * v_factor;
@@ -8764,7 +8776,7 @@ fn encode_downsampled_chroma_block(
 
     // Try NEON/AVX2 fused downsample+FDCT+quantize on the padded local buffer
     if use_fused_simd {
-        #[cfg(target_arch = "aarch64")]
+        #[cfg(all(target_arch = "aarch64", feature = "simd"))]
         {
             let mut quantized = [0i16; 64];
             if h_factor == 2 && v_factor == 2 {
@@ -8792,7 +8804,7 @@ fn encode_downsampled_chroma_block(
                 return;
             }
         }
-        #[cfg(target_arch = "x86_64")]
+        #[cfg(all(target_arch = "x86_64", feature = "simd"))]
         {
             if crate::cpu_has!("avx2") {
                 let mut quantized = [0i16; 64];
@@ -9933,7 +9945,7 @@ fn gather_block(
 
     // NEON/AVX2 fused path for interior blocks
     if use_fused_simd && block_x + 8 <= plane_width && block_y + 8 <= plane_height {
-        #[cfg(target_arch = "aarch64")]
+        #[cfg(all(target_arch = "aarch64", feature = "simd"))]
         {
             unsafe {
                 crate::simd::aarch64::neon_extract_fdct_quantize(
@@ -9945,7 +9957,7 @@ fn gather_block(
             }
             return quantized;
         }
-        #[cfg(target_arch = "x86_64")]
+        #[cfg(all(target_arch = "x86_64", feature = "simd"))]
         {
             if crate::cpu_has!("avx2") {
                 unsafe {
@@ -9972,7 +9984,7 @@ fn gather_block(
                 local_buf[row * 8 + col] = plane[src_y * plane_width + src_x];
             }
         }
-        #[cfg(target_arch = "aarch64")]
+        #[cfg(all(target_arch = "aarch64", feature = "simd"))]
         {
             unsafe {
                 crate::simd::aarch64::neon_extract_fdct_quantize(
@@ -9984,7 +9996,7 @@ fn gather_block(
             }
             return quantized;
         }
-        #[cfg(target_arch = "x86_64")]
+        #[cfg(all(target_arch = "x86_64", feature = "simd"))]
         {
             if crate::cpu_has!("avx2") {
                 unsafe {
@@ -10037,7 +10049,7 @@ fn gather_downsampled_block(
 
     // NEON/AVX2 fused downsample+FDCT+quantize for interior blocks
     if use_fused_simd && block_x + src_w <= plane_width && block_y + src_h <= plane_height {
-        #[cfg(target_arch = "aarch64")]
+        #[cfg(all(target_arch = "aarch64", feature = "simd"))]
         {
             let mut quantized = [0i16; 64];
             if h_factor == 2 && v_factor == 2 {
@@ -10063,7 +10075,7 @@ fn gather_downsampled_block(
                 return quantized;
             }
         }
-        #[cfg(target_arch = "x86_64")]
+        #[cfg(all(target_arch = "x86_64", feature = "simd"))]
         {
             if crate::cpu_has!("avx2") {
                 let mut quantized = [0i16; 64];
@@ -10103,7 +10115,7 @@ fn gather_downsampled_block(
         }
     }
     if use_fused_simd {
-        #[cfg(target_arch = "aarch64")]
+        #[cfg(all(target_arch = "aarch64", feature = "simd"))]
         {
             let mut quantized = [0i16; 64];
             if h_factor == 2 && v_factor == 2 {
@@ -10129,7 +10141,7 @@ fn gather_downsampled_block(
                 return quantized;
             }
         }
-        #[cfg(target_arch = "x86_64")]
+        #[cfg(all(target_arch = "x86_64", feature = "simd"))]
         {
             if crate::cpu_has!("avx2") {
                 let mut quantized = [0i16; 64];

@@ -142,11 +142,13 @@ impl BitWriter {
     /// Caller must ensure at least 2 bytes of spare capacity remain.
     #[inline(always)]
     unsafe fn emit_byte_unchecked(&mut self, byte: u8) {
-        let ptr: *mut u8 = self.buf.add(self.pos);
-        ptr.write(byte);
-        ptr.add(1).write(0x00);
-        let stuffed: usize = (byte == 0xFF) as usize;
-        self.pos += 1 + stuffed;
+        unsafe {
+            let ptr: *mut u8 = self.buf.add(self.pos);
+            ptr.write(byte);
+            ptr.add(1).write(0x00);
+            let stuffed: usize = (byte == 0xFF) as usize;
+            self.pos += 1 + stuffed;
+        }
     }
 
     /// Flush all 64 bits from the accumulator to output.
@@ -329,8 +331,10 @@ impl BitWriter {
     /// and must call `end_block` before any other BitWriter method.
     #[inline(always)]
     pub unsafe fn begin_block(&mut self, reserve: usize) -> (u64, i32, *mut u8) {
-        self.ensure_capacity(reserve);
-        (self.put_buffer, self.free_bits, self.buf.add(self.pos))
+        unsafe {
+            self.ensure_capacity(reserve);
+            (self.put_buffer, self.free_bits, self.buf.add(self.pos))
+        }
     }
 
     /// Write back hoisted local variables after encoding a block.
@@ -339,9 +343,11 @@ impl BitWriter {
     /// `buf_ptr` must be within the allocated buffer bounds.
     #[inline(always)]
     pub unsafe fn end_block(&mut self, put_buffer: u64, free_bits: i32, buf_ptr: *mut u8) {
-        self.put_buffer = put_buffer;
-        self.free_bits = free_bits;
-        self.pos = buf_ptr.offset_from(self.buf) as usize;
+        unsafe {
+            self.put_buffer = put_buffer;
+            self.free_bits = free_bits;
+            self.pos = buf_ptr.offset_from(self.buf) as usize;
+        }
     }
 }
 
@@ -358,11 +364,13 @@ pub(crate) unsafe fn local_put_bits(
     code: u32,
     size: u8,
 ) {
-    *fb -= size as i32;
-    if *fb >= 0 {
-        *pb = (*pb << size) | (code as u64);
-    } else {
-        local_put_and_flush(pb, fb, buf, code, size);
+    unsafe {
+        *fb -= size as i32;
+        if *fb >= 0 {
+            *pb = (*pb << size) | (code as u64);
+        } else {
+            local_put_and_flush(pb, fb, buf, code, size);
+        }
     }
 }
 
@@ -377,25 +385,28 @@ pub(crate) unsafe fn local_put_and_flush(
     code: u32,
     size: u8,
 ) {
-    let overshoot: u32 = (-*fb) as u32;
-    let fits: u32 = size as u32 - overshoot;
-    *pb = (*pb << fits) | ((code as u64) >> overshoot);
+    unsafe {
+        let overshoot: u32 = (-*fb) as u32;
+        let fits: u32 = size as u32 - overshoot;
+        *pb = (*pb << fits) | ((code as u64) >> overshoot);
 
-    // Flush 8 bytes with 0xFF byte stuffing
-    let has_ff: u64 = (*pb & 0x8080_8080_8080_8080) & !(*pb).wrapping_add(0x0101_0101_0101_0101);
-    if has_ff == 0 {
-        (*buf).cast::<u64>().write_unaligned((*pb).to_be());
-        *buf = (*buf).add(8);
-    } else {
-        for byte in (*pb).to_be_bytes() {
-            (*buf).write(byte);
-            (*buf).add(1).write(0x00);
-            *buf = (*buf).add(1 + (byte == 0xFF) as usize);
+        // Flush 8 bytes with 0xFF byte stuffing
+        let has_ff: u64 =
+            (*pb & 0x8080_8080_8080_8080) & !(*pb).wrapping_add(0x0101_0101_0101_0101);
+        if has_ff == 0 {
+            (*buf).cast::<u64>().write_unaligned((*pb).to_be());
+            *buf = (*buf).add(8);
+        } else {
+            for byte in (*pb).to_be_bytes() {
+                (*buf).write(byte);
+                (*buf).add(1).write(0x00);
+                *buf = (*buf).add(1 + (byte == 0xFF) as usize);
+            }
         }
-    }
 
-    *fb += 64;
-    *pb = code as u64;
+        *fb += 64;
+        *pb = code as u64;
+    }
 }
 
 /// Drain remaining bits from hoisted local variables, padding with 1s.
@@ -405,27 +416,29 @@ pub(crate) unsafe fn local_put_and_flush(
 /// into an output Vec.
 #[inline(always)]
 pub(crate) unsafe fn local_drain_bits(pb: &mut u64, fb: &mut i32, buf: &mut *mut u8) {
-    let used: u32 = (64 - *fb) as u32;
-    if used == 0 {
-        return;
+    unsafe {
+        let used: u32 = (64 - *fb) as u32;
+        if used == 0 {
+            return;
+        }
+        let aligned: u64 = *pb << (*fb as u32);
+        let bytes: [u8; 8] = aligned.to_be_bytes();
+        let full_bytes: u32 = used / 8;
+        let partial_bits: u32 = used % 8;
+        for &byte in &bytes[..full_bytes as usize] {
+            (*buf).write(byte);
+            (*buf).add(1).write(0x00);
+            *buf = (*buf).add(1 + (byte == 0xFF) as usize);
+        }
+        if partial_bits > 0 {
+            let byte: u8 = bytes[full_bytes as usize] | ((1u8 << (8 - partial_bits)) - 1);
+            (*buf).write(byte);
+            (*buf).add(1).write(0x00);
+            *buf = (*buf).add(1 + (byte == 0xFF) as usize);
+        }
+        *pb = 0;
+        *fb = 64;
     }
-    let aligned: u64 = *pb << (*fb as u32);
-    let bytes: [u8; 8] = aligned.to_be_bytes();
-    let full_bytes: u32 = used / 8;
-    let partial_bits: u32 = used % 8;
-    for &byte in &bytes[..full_bytes as usize] {
-        (*buf).write(byte);
-        (*buf).add(1).write(0x00);
-        *buf = (*buf).add(1 + (byte == 0xFF) as usize);
-    }
-    if partial_bits > 0 {
-        let byte: u8 = bytes[full_bytes as usize] | ((1u8 << (8 - partial_bits)) - 1);
-        (*buf).write(byte);
-        (*buf).add(1).write(0x00);
-        *buf = (*buf).add(1 + (byte == 0xFF) as usize);
-    }
-    *pb = 0;
-    *fb = 64;
 }
 
 /// Huffman encoder for JPEG 8x8 blocks.
@@ -446,7 +459,7 @@ impl HuffmanEncoder {
         dc_table: &HuffTable,
         ac_table: &HuffTable,
     ) {
-        #[cfg(target_arch = "aarch64")]
+        #[cfg(all(target_arch = "aarch64", feature = "simd"))]
         {
             // Hoist put_buffer/free_bits/buf to registers for entire block.
             // 512 bytes worst-case: DC (4) + 63 AC × max 26 bits ≈ 205 bytes + stuffing.
@@ -478,7 +491,7 @@ impl HuffmanEncoder {
             };
         }
 
-        #[cfg(not(target_arch = "aarch64"))]
+        #[cfg(not(all(target_arch = "aarch64", feature = "simd")))]
         {
             // Hoist put_buffer/free_bits/buf to registers for entire block,
             // matching the aarch64 path. Avoids store-reload on every flush.
@@ -506,7 +519,7 @@ impl HuffmanEncoder {
                 local_put_bits(&mut pb, &mut fb, &mut buf, combined, huff_size + category);
 
                 // --- AC coefficients ---
-                #[cfg(target_arch = "x86_64")]
+                #[cfg(all(target_arch = "x86_64", feature = "simd"))]
                 {
                     if crate::cpu_has!("bmi1") && crate::cpu_has!("lzcnt") {
                         encode_ac_x86_64_bmi1_lzcnt(
@@ -523,14 +536,15 @@ impl HuffmanEncoder {
                 #[cfg(all(
                     not(target_arch = "x86_64"),
                     target_arch = "wasm32",
-                    target_feature = "simd128"
+                    target_feature = "simd128",
+                    feature = "simd"
                 ))]
                 {
                     encode_ac_wasm_local(&mut pb, &mut fb, &mut buf, coeffs_zigzag, ac_table);
                 }
                 #[cfg(not(any(
-                    target_arch = "x86_64",
-                    all(target_arch = "wasm32", target_feature = "simd128")
+                    all(target_arch = "x86_64", feature = "simd"),
+                    all(target_arch = "wasm32", target_feature = "simd128", feature = "simd")
                 )))]
                 {
                     encode_ac_scalar_local(&mut pb, &mut fb, &mut buf, coeffs_zigzag, ac_table);
@@ -548,7 +562,7 @@ impl HuffmanEncoder {
     ///
     /// # Safety
     /// `pb`, `fb`, `buf` must be valid hoisted state from `BitWriter::begin_block`.
-    #[cfg(target_arch = "x86_64")]
+    #[cfg(all(target_arch = "x86_64", feature = "simd"))]
     #[inline(always)]
     pub unsafe fn encode_block_hoisted(
         pb: &mut u64,
@@ -559,31 +573,33 @@ impl HuffmanEncoder {
         dc_table: &HuffTable,
         ac_table: &HuffTable,
     ) {
-        let dc: i16 = coeffs_zigzag[0];
-        // Adversarial / corrupt input can produce a quantized DC pair whose
-        // difference exceeds i16 range. Use wrapping_sub to match the bit
-        // pattern Huffman category encoding expects (and the existing
-        // baseline-encoder convention at lines 461 / 495); silent overflow
-        // in release stayed silent only by luck and panicked under fuzz.
-        let diff: i16 = dc.wrapping_sub(*prev_dc);
-        *prev_dc = dc;
+        unsafe {
+            let dc: i16 = coeffs_zigzag[0];
+            // Adversarial / corrupt input can produce a quantized DC pair whose
+            // difference exceeds i16 range. Use wrapping_sub to match the bit
+            // pattern Huffman category encoding expects (and the existing
+            // baseline-encoder convention at lines 461 / 495); silent overflow
+            // in release stayed silent only by luck and panicked under fuzz.
+            let diff: i16 = dc.wrapping_sub(*prev_dc);
+            *prev_dc = dc;
 
-        let (magnitude_bits, category) = encode_dc_value(diff);
-        let huff_code: u32 = dc_table.ehufco[category as usize] as u32;
-        let huff_size: u8 = dc_table.ehufsi[category as usize];
-        let mag_masked: u32 = magnitude_bits as u32 & ((1u32 << category) - 1);
-        let combined: u32 = (huff_code << category) | mag_masked;
-        local_put_bits(pb, fb, buf, combined, huff_size + category);
+            let (magnitude_bits, category) = encode_dc_value(diff);
+            let huff_code: u32 = dc_table.ehufco[category as usize] as u32;
+            let huff_size: u8 = dc_table.ehufsi[category as usize];
+            let mag_masked: u32 = magnitude_bits as u32 & ((1u32 << category) - 1);
+            let combined: u32 = (huff_code << category) | mag_masked;
+            local_put_bits(pb, fb, buf, combined, huff_size + category);
 
-        // BMI1+LZCNT runtime dispatch (one branch per block; the cached
-        // `is_x86_feature_detected!` macro is essentially free after first
-        // call). The elevated path skips the inner indirect call that
-        // wrapping `encode_ac_corrected_lsb` would otherwise impose, so the
-        // TZCNT + BLSR savings flow through without offsetting overhead.
-        if crate::cpu_has!("bmi1") && crate::cpu_has!("lzcnt") {
-            encode_ac_x86_64_bmi1_lzcnt(pb, fb, buf, coeffs_zigzag, ac_table);
-        } else {
-            encode_ac_x86_64(pb, fb, buf, coeffs_zigzag, ac_table);
+            // BMI1+LZCNT runtime dispatch (one branch per block; the cached
+            // `is_x86_feature_detected!` macro is essentially free after first
+            // call). The elevated path skips the inner indirect call that
+            // wrapping `encode_ac_corrected_lsb` would otherwise impose, so the
+            // TZCNT + BLSR savings flow through without offsetting overhead.
+            if crate::cpu_has!("bmi1") && crate::cpu_has!("lzcnt") {
+                encode_ac_x86_64_bmi1_lzcnt(pb, fb, buf, coeffs_zigzag, ac_table);
+            } else {
+                encode_ac_x86_64(pb, fb, buf, coeffs_zigzag, ac_table);
+            }
         }
     }
 
@@ -617,7 +633,7 @@ impl HuffmanEncoder {
 ///
 /// # Safety
 /// `pb`, `fb`, `buf` must be valid hoisted state from `BitWriter::begin_block`.
-#[cfg(target_arch = "x86_64")]
+#[cfg(all(target_arch = "x86_64", feature = "simd"))]
 #[inline(always)]
 unsafe fn encode_ac_x86_64_body(
     pb: &mut u64,
@@ -626,50 +642,53 @@ unsafe fn encode_ac_x86_64_body(
     coeffs_zigzag: &[i16; 64],
     ac_table: &HuffTable,
 ) {
-    use core::arch::x86_64::*;
+    unsafe {
+        use core::arch::x86_64::*;
 
-    let mut bitmap: u64 = 0;
-    let zeros: __m128i = _mm_setzero_si128();
-    let mut t = [0i16; 64];
+        let mut bitmap: u64 = 0;
+        let zeros: __m128i = _mm_setzero_si128();
+        let mut t = [0i16; 64];
 
-    // Build non-zero bitmap + pre-compute sign-corrected coefficients using SSE2.
-    // Matches C libjpeg-turbo jchuff-sse2.asm: interleave pcmpgtw/paddw (sign
-    // correction) with pcmpeqw/packsswb/pmovmskb (zero detection) so the sign
-    // correction fills pipeline bubbles in the bitmap loop (nearly free).
-    // LSB-first layout: bit 0 = position 0 (DC), bit 63 = position 63.
-    for chunk in 0..8u32 {
-        let offset: usize = (chunk * 8) as usize;
-        let row: __m128i = _mm_loadu_si128(coeffs_zigzag.as_ptr().add(offset) as *const __m128i);
+        // Build non-zero bitmap + pre-compute sign-corrected coefficients using SSE2.
+        // Matches C libjpeg-turbo jchuff-sse2.asm: interleave pcmpgtw/paddw (sign
+        // correction) with pcmpeqw/packsswb/pmovmskb (zero detection) so the sign
+        // correction fills pipeline bubbles in the bitmap loop (nearly free).
+        // LSB-first layout: bit 0 = position 0 (DC), bit 63 = position 63.
+        for chunk in 0..8u32 {
+            let offset: usize = (chunk * 8) as usize;
+            let row: __m128i =
+                _mm_loadu_si128(coeffs_zigzag.as_ptr().add(offset) as *const __m128i);
 
-        // Sign correction: ones' complement for negatives, identity for non-negatives.
-        // corrected[i] = row[i] + (row[i] < 0 ? -1 : 0)
-        let sign_mask: __m128i = _mm_cmpgt_epi16(zeros, row);
-        let corrected: __m128i = _mm_add_epi16(row, sign_mask);
-        _mm_storeu_si128(t.as_mut_ptr().add(offset) as *mut __m128i, corrected);
+            // Sign correction: ones' complement for negatives, identity for non-negatives.
+            // corrected[i] = row[i] + (row[i] < 0 ? -1 : 0)
+            let sign_mask: __m128i = _mm_cmpgt_epi16(zeros, row);
+            let corrected: __m128i = _mm_add_epi16(row, sign_mask);
+            _mm_storeu_si128(t.as_mut_ptr().add(offset) as *mut __m128i, corrected);
 
-        // Zero detection for bitmap (use original row — zero detection is
-        // equivalent on corrected, but matching C's ordering is cleaner)
-        let eq: __m128i = _mm_cmpeq_epi16(row, zeros);
-        let packed: __m128i = _mm_packs_epi16(eq, zeros);
-        let mask: u8 = _mm_movemask_epi8(packed) as u8;
-        bitmap |= (!mask as u64) << (chunk * 8);
+            // Zero detection for bitmap (use original row — zero detection is
+            // equivalent on corrected, but matching C's ordering is cleaner)
+            let eq: __m128i = _mm_cmpeq_epi16(row, zeros);
+            let packed: __m128i = _mm_packs_epi16(eq, zeros);
+            let mask: u8 = _mm_movemask_epi8(packed) as u8;
+            bitmap |= (!mask as u64) << (chunk * 8);
+        }
+
+        // Clear DC bit (position 0) — we only care about AC positions 1..63
+        bitmap &= !1u64;
+
+        if bitmap == 0 {
+            local_put_bits(
+                pb,
+                fb,
+                buf,
+                ac_table.ehufco[0x00] as u32,
+                ac_table.ehufsi[0x00],
+            );
+            return;
+        }
+
+        encode_ac_corrected_lsb(pb, fb, buf, &t, bitmap, ac_table);
     }
-
-    // Clear DC bit (position 0) — we only care about AC positions 1..63
-    bitmap &= !1u64;
-
-    if bitmap == 0 {
-        local_put_bits(
-            pb,
-            fb,
-            buf,
-            ac_table.ehufco[0x00] as u32,
-            ac_table.ehufsi[0x00],
-        );
-        return;
-    }
-
-    encode_ac_corrected_lsb(pb, fb, buf, &t, bitmap, ac_table);
 }
 
 /// Default x86_64 entry point — SSE2 baseline (no BMI1/LZCNT).
@@ -677,7 +696,7 @@ unsafe fn encode_ac_x86_64_body(
 /// Wraps the `#[inline(always)]` body so callers always have one stable
 /// indirect symbol regardless of whether the elevated `_bmi1_lzcnt` variant
 /// is dispatched.
-#[cfg(target_arch = "x86_64")]
+#[cfg(all(target_arch = "x86_64", feature = "simd"))]
 unsafe fn encode_ac_x86_64(
     pb: &mut u64,
     fb: &mut i32,
@@ -685,7 +704,7 @@ unsafe fn encode_ac_x86_64(
     coeffs_zigzag: &[i16; 64],
     ac_table: &HuffTable,
 ) {
-    encode_ac_x86_64_body(pb, fb, buf, coeffs_zigzag, ac_table)
+    unsafe { encode_ac_x86_64_body(pb, fb, buf, coeffs_zigzag, ac_table) }
 }
 
 /// BMI1 + LZCNT-elevated entry point. Re-compiles the same body under those
@@ -702,7 +721,7 @@ unsafe fn encode_ac_x86_64(
 ///
 /// # Safety
 /// CPU must support BMI1 + LZCNT (caller checks via `is_x86_feature_detected!`).
-#[cfg(target_arch = "x86_64")]
+#[cfg(all(target_arch = "x86_64", feature = "simd"))]
 #[target_feature(enable = "bmi1,lzcnt")]
 unsafe fn encode_ac_x86_64_bmi1_lzcnt(
     pb: &mut u64,
@@ -711,7 +730,7 @@ unsafe fn encode_ac_x86_64_bmi1_lzcnt(
     coeffs_zigzag: &[i16; 64],
     ac_table: &HuffTable,
 ) {
-    encode_ac_x86_64_body(pb, fb, buf, coeffs_zigzag, ac_table)
+    unsafe { encode_ac_x86_64_body(pb, fb, buf, coeffs_zigzag, ac_table) }
 }
 
 /// AC emit loop with pre-loaded table pointers and minimal live variables.
@@ -721,7 +740,7 @@ unsafe fn encode_ac_x86_64_bmi1_lzcnt(
 ///
 /// # Safety
 /// `pb`, `fb`, `buf` must be valid hoisted state.
-#[cfg(target_arch = "x86_64")]
+#[cfg(all(target_arch = "x86_64", feature = "simd"))]
 #[allow(dead_code)]
 unsafe fn encode_ac_sparse_lsb(
     pb: &mut u64,
@@ -731,46 +750,48 @@ unsafe fn encode_ac_sparse_lsb(
     mut bitmap: u64,
     ac_table: &HuffTable,
 ) {
-    let ehufco: *const u16 = ac_table.ehufco.as_ptr();
-    let ehufsi: *const u8 = ac_table.ehufsi.as_ptr();
-    let coeffs: *const i16 = coeffs_zigzag.as_ptr();
+    unsafe {
+        let ehufco: *const u16 = ac_table.ehufco.as_ptr();
+        let ehufsi: *const u8 = ac_table.ehufsi.as_ptr();
+        let coeffs: *const i16 = coeffs_zigzag.as_ptr();
 
-    let mut prev_pos: u32 = 0;
-    while bitmap != 0 {
-        let pos: u32 = bitmap.trailing_zeros();
-        let run: u32 = pos - prev_pos - 1;
-        prev_pos = pos;
+        let mut prev_pos: u32 = 0;
+        while bitmap != 0 {
+            let pos: u32 = bitmap.trailing_zeros();
+            let run: u32 = pos - prev_pos - 1;
+            prev_pos = pos;
 
-        // Emit ZRL for long runs
-        let mut r: u32 = run;
-        while r >= 16 {
-            local_put_bits(pb, fb, buf, *ehufco.add(0xF0) as u32, *ehufsi.add(0xF0));
-            r -= 16;
+            // Emit ZRL for long runs
+            let mut r: u32 = run;
+            while r >= 16 {
+                local_put_bits(pb, fb, buf, *ehufco.add(0xF0) as u32, *ehufsi.add(0xF0));
+                r -= 16;
+            }
+
+            // Load coefficient, use NBITS table + branchless complement
+            let ac: i16 = *coeffs.add(pos as usize);
+            let nbits: u32 = *JPEG_NBITS.as_ptr().add(ac as u16 as usize) as u32;
+            let sign: i16 = ac >> 15;
+            let mag: u32 = (ac.wrapping_add(sign) as u16 as u32) & ((1u32 << nbits) - 1);
+
+            // Emit combined Huffman code + magnitude
+            let symbol: u32 = (r << 4) | nbits;
+            let huff_code: u32 = *ehufco.add(symbol as usize) as u32;
+            let huff_size: u32 = *ehufsi.add(symbol as usize) as u32;
+            local_put_bits(
+                pb,
+                fb,
+                buf,
+                (huff_code << nbits) | mag,
+                (huff_size + nbits) as u8,
+            );
+
+            bitmap &= bitmap - 1;
         }
 
-        // Load coefficient, use NBITS table + branchless complement
-        let ac: i16 = *coeffs.add(pos as usize);
-        let nbits: u32 = *JPEG_NBITS.as_ptr().add(ac as u16 as usize) as u32;
-        let sign: i16 = ac >> 15;
-        let mag: u32 = (ac.wrapping_add(sign) as u16 as u32) & ((1u32 << nbits) - 1);
-
-        // Emit combined Huffman code + magnitude
-        let symbol: u32 = (r << 4) | nbits;
-        let huff_code: u32 = *ehufco.add(symbol as usize) as u32;
-        let huff_size: u32 = *ehufsi.add(symbol as usize) as u32;
-        local_put_bits(
-            pb,
-            fb,
-            buf,
-            (huff_code << nbits) | mag,
-            (huff_size + nbits) as u8,
-        );
-
-        bitmap &= bitmap - 1;
-    }
-
-    if prev_pos < 63 {
-        local_put_bits(pb, fb, buf, *ehufco.add(0x00) as u32, *ehufsi.add(0x00));
+        if prev_pos < 63 {
+            local_put_bits(pb, fb, buf, *ehufco.add(0x00) as u32, *ehufsi.add(0x00));
+        }
     }
 }
 
@@ -787,7 +808,7 @@ unsafe fn encode_ac_sparse_lsb(
 ///
 /// # Safety
 /// `pb`, `fb`, `buf` must be valid hoisted state.
-#[cfg(target_arch = "x86_64")]
+#[cfg(all(target_arch = "x86_64", feature = "simd"))]
 #[inline(always)]
 unsafe fn encode_ac_corrected_lsb(
     pb: &mut u64,
@@ -797,47 +818,49 @@ unsafe fn encode_ac_corrected_lsb(
     mut bitmap: u64,
     ac_table: &HuffTable,
 ) {
-    let ehufco: *const u16 = ac_table.ehufco.as_ptr();
-    let ehufsi: *const u8 = ac_table.ehufsi.as_ptr();
-    let tp: *const i16 = t.as_ptr();
+    unsafe {
+        let ehufco: *const u16 = ac_table.ehufco.as_ptr();
+        let ehufsi: *const u8 = ac_table.ehufsi.as_ptr();
+        let tp: *const i16 = t.as_ptr();
 
-    let mut prev_pos: u32 = 0;
-    while bitmap != 0 {
-        let pos: u32 = bitmap.trailing_zeros();
-        let run: u32 = pos - prev_pos - 1;
-        prev_pos = pos;
+        let mut prev_pos: u32 = 0;
+        while bitmap != 0 {
+            let pos: u32 = bitmap.trailing_zeros();
+            let run: u32 = pos - prev_pos - 1;
+            prev_pos = pos;
 
-        // Emit ZRL for long runs
-        let mut r: u32 = run;
-        while r >= 16 {
-            local_put_bits(pb, fb, buf, *ehufco.add(0xF0) as u32, *ehufsi.add(0xF0));
-            r -= 16;
+            // Emit ZRL for long runs
+            let mut r: u32 = run;
+            while r >= 16 {
+                local_put_bits(pb, fb, buf, *ehufco.add(0xF0) as u32, *ehufsi.add(0xF0));
+                r -= 16;
+            }
+
+            // Load sign-corrected coefficient — no scalar sign correction needed.
+            // For negative originals: t[i] = original + (-1) = ones' complement.
+            // For non-negative: t[i] = original (unchanged).
+            let corrected: i16 = *tp.add(pos as usize);
+            let nbits: u32 = *JPEG_NBITS_CORRECTED.as_ptr().add(corrected as u16 as usize) as u32;
+            let mag: u32 = (corrected as u16 as u32) & ((1u32 << nbits) - 1);
+
+            // Emit combined Huffman code + magnitude
+            let symbol: u32 = (r << 4) | nbits;
+            let huff_code: u32 = *ehufco.add(symbol as usize) as u32;
+            let huff_size: u32 = *ehufsi.add(symbol as usize) as u32;
+            local_put_bits(
+                pb,
+                fb,
+                buf,
+                (huff_code << nbits) | mag,
+                (huff_size + nbits) as u8,
+            );
+
+            bitmap &= bitmap - 1;
         }
 
-        // Load sign-corrected coefficient — no scalar sign correction needed.
-        // For negative originals: t[i] = original + (-1) = ones' complement.
-        // For non-negative: t[i] = original (unchanged).
-        let corrected: i16 = *tp.add(pos as usize);
-        let nbits: u32 = *JPEG_NBITS_CORRECTED.as_ptr().add(corrected as u16 as usize) as u32;
-        let mag: u32 = (corrected as u16 as u32) & ((1u32 << nbits) - 1);
-
-        // Emit combined Huffman code + magnitude
-        let symbol: u32 = (r << 4) | nbits;
-        let huff_code: u32 = *ehufco.add(symbol as usize) as u32;
-        let huff_size: u32 = *ehufsi.add(symbol as usize) as u32;
-        local_put_bits(
-            pb,
-            fb,
-            buf,
-            (huff_code << nbits) | mag,
-            (huff_size + nbits) as u8,
-        );
-
-        bitmap &= bitmap - 1;
-    }
-
-    if prev_pos < 63 {
-        local_put_bits(pb, fb, buf, *ehufco.add(0x00) as u32, *ehufsi.add(0x00));
+        if prev_pos < 63 {
+            local_put_bits(pb, fb, buf, *ehufco.add(0x00) as u32, *ehufsi.add(0x00));
+        }
     }
 }
 
@@ -847,7 +870,7 @@ unsafe fn encode_ac_corrected_lsb(
 ///
 /// # Safety
 /// `pb`, `fb`, `buf` must be valid hoisted state.
-#[cfg(target_arch = "aarch64")]
+#[cfg(all(target_arch = "aarch64", feature = "simd"))]
 #[inline(always)]
 unsafe fn encode_ac_sparse_local(
     pb: &mut u64,
@@ -857,46 +880,48 @@ unsafe fn encode_ac_sparse_local(
     mut bitmap: u64,
     ac_table: &HuffTable,
 ) {
-    let mut pos: u32 = 1;
-    while bitmap != 0 {
-        let lz: u32 = bitmap.leading_zeros();
-        pos += lz;
-        bitmap <<= lz;
+    unsafe {
+        let mut pos: u32 = 1;
+        while bitmap != 0 {
+            let lz: u32 = bitmap.leading_zeros();
+            pos += lz;
+            bitmap <<= lz;
 
-        let ac: i16 = *coeffs_zigzag.get_unchecked(pos as usize);
-        let (magnitude_bits, nbits) = encode_ac_value(ac);
-        let mag_masked: u32 = magnitude_bits as u32 & ((1u32 << nbits) - 1);
+            let ac: i16 = *coeffs_zigzag.get_unchecked(pos as usize);
+            let (magnitude_bits, nbits) = encode_ac_value(ac);
+            let mag_masked: u32 = magnitude_bits as u32 & ((1u32 << nbits) - 1);
 
-        let mut run: u32 = lz;
-        while run >= 16 {
+            let mut run: u32 = lz;
+            while run >= 16 {
+                local_put_bits(
+                    pb,
+                    fb,
+                    buf,
+                    ac_table.ehufco[0xF0] as u32,
+                    ac_table.ehufsi[0xF0],
+                );
+                run -= 16;
+            }
+
+            let symbol: usize = ((run as usize) << 4) | (nbits as usize);
+            let huff_code: u32 = ac_table.ehufco[symbol] as u32;
+            let huff_size: u8 = ac_table.ehufsi[symbol];
+            let combined: u32 = (huff_code << nbits) | mag_masked;
+            local_put_bits(pb, fb, buf, combined, huff_size + nbits);
+
+            pos += 1;
+            bitmap <<= 1;
+        }
+
+        if pos <= 63 {
             local_put_bits(
                 pb,
                 fb,
                 buf,
-                ac_table.ehufco[0xF0] as u32,
-                ac_table.ehufsi[0xF0],
+                ac_table.ehufco[0x00] as u32,
+                ac_table.ehufsi[0x00],
             );
-            run -= 16;
         }
-
-        let symbol: usize = ((run as usize) << 4) | (nbits as usize);
-        let huff_code: u32 = ac_table.ehufco[symbol] as u32;
-        let huff_size: u8 = ac_table.ehufsi[symbol];
-        let combined: u32 = (huff_code << nbits) | mag_masked;
-        local_put_bits(pb, fb, buf, combined, huff_size + nbits);
-
-        pos += 1;
-        bitmap <<= 1;
-    }
-
-    if pos <= 63 {
-        local_put_bits(
-            pb,
-            fb,
-            buf,
-            ac_table.ehufco[0x00] as u32,
-            ac_table.ehufsi[0x00],
-        );
     }
 }
 
@@ -905,9 +930,9 @@ unsafe fn encode_ac_sparse_local(
 /// # Safety
 /// `pb`, `fb`, `buf` must be valid hoisted state.
 #[cfg(not(any(
-    target_arch = "aarch64",
-    target_arch = "x86_64",
-    all(target_arch = "wasm32", target_feature = "simd128")
+    all(target_arch = "aarch64", feature = "simd"),
+    all(target_arch = "x86_64", feature = "simd"),
+    all(target_arch = "wasm32", target_feature = "simd128", feature = "simd")
 )))]
 unsafe fn encode_ac_scalar_local(
     pb: &mut u64,
@@ -916,64 +941,66 @@ unsafe fn encode_ac_scalar_local(
     coeffs_zigzag: &[i16; 64],
     ac_table: &HuffTable,
 ) {
-    let mut bitmap: u64 = 0;
-    for k in 1u32..64 {
-        if *coeffs_zigzag.get_unchecked(k as usize) != 0 {
-            bitmap |= 1u64 << (64 - k);
+    unsafe {
+        let mut bitmap: u64 = 0;
+        for k in 1u32..64 {
+            if *coeffs_zigzag.get_unchecked(k as usize) != 0 {
+                bitmap |= 1u64 << (64 - k);
+            }
         }
-    }
 
-    if bitmap == 0 {
-        local_put_bits(
-            pb,
-            fb,
-            buf,
-            ac_table.ehufco[0x00] as u32,
-            ac_table.ehufsi[0x00],
-        );
-        return;
-    }
-
-    let mut pos: u32 = 1;
-    while bitmap != 0 {
-        let lz: u32 = bitmap.leading_zeros();
-        pos += lz;
-        bitmap <<= lz;
-
-        let ac: i16 = *coeffs_zigzag.get_unchecked(pos as usize);
-        let (magnitude_bits, nbits) = encode_ac_value(ac);
-        let mag_masked: u32 = magnitude_bits as u32 & ((1u32 << nbits) - 1);
-
-        let mut run: u32 = lz;
-        while run >= 16 {
+        if bitmap == 0 {
             local_put_bits(
                 pb,
                 fb,
                 buf,
-                ac_table.ehufco[0xF0] as u32,
-                ac_table.ehufsi[0xF0],
+                ac_table.ehufco[0x00] as u32,
+                ac_table.ehufsi[0x00],
             );
-            run -= 16;
+            return;
         }
 
-        let symbol: usize = ((run as usize) << 4) | (nbits as usize);
-        let huff_code: u32 = ac_table.ehufco[symbol] as u32;
-        let huff_size: u8 = ac_table.ehufsi[symbol];
-        let combined: u32 = (huff_code << nbits) | mag_masked;
-        local_put_bits(pb, fb, buf, combined, huff_size + nbits);
+        let mut pos: u32 = 1;
+        while bitmap != 0 {
+            let lz: u32 = bitmap.leading_zeros();
+            pos += lz;
+            bitmap <<= lz;
 
-        pos += 1;
-        bitmap <<= 1;
-    }
+            let ac: i16 = *coeffs_zigzag.get_unchecked(pos as usize);
+            let (magnitude_bits, nbits) = encode_ac_value(ac);
+            let mag_masked: u32 = magnitude_bits as u32 & ((1u32 << nbits) - 1);
 
-    if pos <= 63 {
-        local_put_bits(
-            pb,
-            fb,
-            buf,
-            ac_table.ehufco[0x00] as u32,
-            ac_table.ehufsi[0x00],
-        );
+            let mut run: u32 = lz;
+            while run >= 16 {
+                local_put_bits(
+                    pb,
+                    fb,
+                    buf,
+                    ac_table.ehufco[0xF0] as u32,
+                    ac_table.ehufsi[0xF0],
+                );
+                run -= 16;
+            }
+
+            let symbol: usize = ((run as usize) << 4) | (nbits as usize);
+            let huff_code: u32 = ac_table.ehufco[symbol] as u32;
+            let huff_size: u8 = ac_table.ehufsi[symbol];
+            let combined: u32 = (huff_code << nbits) | mag_masked;
+            local_put_bits(pb, fb, buf, combined, huff_size + nbits);
+
+            pos += 1;
+            bitmap <<= 1;
+        }
+
+        if pos <= 63 {
+            local_put_bits(
+                pb,
+                fb,
+                buf,
+                ac_table.ehufco[0x00] as u32,
+                ac_table.ehufsi[0x00],
+            );
+        }
     }
 }
 
@@ -986,7 +1013,7 @@ unsafe fn encode_ac_scalar_local(
 /// # Safety
 /// Requires simd128. `pb`, `fb`, `buf` must be valid hoisted state from
 /// `BitWriter::begin_block`.
-#[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
+#[cfg(all(target_arch = "wasm32", target_feature = "simd128", feature = "simd"))]
 #[target_feature(enable = "simd128")]
 unsafe fn encode_ac_wasm_local(
     pb: &mut u64,
@@ -995,78 +1022,80 @@ unsafe fn encode_ac_wasm_local(
     coeffs_zigzag: &[i16; 64],
     ac_table: &HuffTable,
 ) {
-    use core::arch::wasm32::*;
+    unsafe {
+        use core::arch::wasm32::*;
 
-    let zero: v128 = i16x8_splat(0);
-    let mut bitmap: u64 = 0;
+        let zero: v128 = i16x8_splat(0);
+        let mut bitmap: u64 = 0;
 
-    // Build non-zero bitmap: 8 chunks of 8 i16 = 64 coefficients
-    for chunk in 0..8u32 {
-        let offset: usize = (chunk * 8) as usize;
-        let row: v128 = v128_load(coeffs_zigzag.as_ptr().add(offset) as *const v128);
-        let ne: v128 = i16x8_ne(row, zero);
-        // i16x8_bitmask returns lane 0 as bit 0 (LSB), but we need lane 0
-        // as bit 7 (MSB) to match the scalar bitmap layout where earlier
-        // coefficients occupy higher bit positions.
-        let bits: u8 = i16x8_bitmask(ne).reverse_bits();
-        bitmap |= (bits as u64) << (56 - chunk * 8);
-    }
+        // Build non-zero bitmap: 8 chunks of 8 i16 = 64 coefficients
+        for chunk in 0..8u32 {
+            let offset: usize = (chunk * 8) as usize;
+            let row: v128 = v128_load(coeffs_zigzag.as_ptr().add(offset) as *const v128);
+            let ne: v128 = i16x8_ne(row, zero);
+            // i16x8_bitmask returns lane 0 as bit 0 (LSB), but we need lane 0
+            // as bit 7 (MSB) to match the scalar bitmap layout where earlier
+            // coefficients occupy higher bit positions.
+            let bits: u8 = i16x8_bitmask(ne).reverse_bits();
+            bitmap |= (bits as u64) << (56 - chunk * 8);
+        }
 
-    // Shift left 1 to remove DC bit (we only care about AC positions 1..63)
-    bitmap <<= 1;
+        // Shift left 1 to remove DC bit (we only care about AC positions 1..63)
+        bitmap <<= 1;
 
-    if bitmap == 0 {
-        local_put_bits(
-            pb,
-            fb,
-            buf,
-            ac_table.ehufco[0x00] as u32,
-            ac_table.ehufsi[0x00],
-        );
-        return;
-    }
-
-    // Huffman emit loop (same as scalar path)
-    let mut pos: u32 = 1;
-    while bitmap != 0 {
-        let lz: u32 = bitmap.leading_zeros();
-        pos += lz;
-        bitmap <<= lz;
-
-        let ac: i16 = *coeffs_zigzag.get_unchecked(pos as usize);
-        let (magnitude_bits, nbits) = encode_ac_value(ac);
-        let mag_masked: u32 = magnitude_bits as u32 & ((1u32 << nbits) - 1);
-
-        let mut run: u32 = lz;
-        while run >= 16 {
+        if bitmap == 0 {
             local_put_bits(
                 pb,
                 fb,
                 buf,
-                ac_table.ehufco[0xF0] as u32,
-                ac_table.ehufsi[0xF0],
+                ac_table.ehufco[0x00] as u32,
+                ac_table.ehufsi[0x00],
             );
-            run -= 16;
+            return;
         }
 
-        let symbol: usize = ((run as usize) << 4) | (nbits as usize);
-        let huff_code: u32 = ac_table.ehufco[symbol] as u32;
-        let huff_size: u8 = ac_table.ehufsi[symbol];
-        let combined: u32 = (huff_code << nbits) | mag_masked;
-        local_put_bits(pb, fb, buf, combined, huff_size + nbits);
+        // Huffman emit loop (same as scalar path)
+        let mut pos: u32 = 1;
+        while bitmap != 0 {
+            let lz: u32 = bitmap.leading_zeros();
+            pos += lz;
+            bitmap <<= lz;
 
-        pos += 1;
-        bitmap <<= 1;
-    }
+            let ac: i16 = *coeffs_zigzag.get_unchecked(pos as usize);
+            let (magnitude_bits, nbits) = encode_ac_value(ac);
+            let mag_masked: u32 = magnitude_bits as u32 & ((1u32 << nbits) - 1);
 
-    if pos <= 63 {
-        local_put_bits(
-            pb,
-            fb,
-            buf,
-            ac_table.ehufco[0x00] as u32,
-            ac_table.ehufsi[0x00],
-        );
+            let mut run: u32 = lz;
+            while run >= 16 {
+                local_put_bits(
+                    pb,
+                    fb,
+                    buf,
+                    ac_table.ehufco[0xF0] as u32,
+                    ac_table.ehufsi[0xF0],
+                );
+                run -= 16;
+            }
+
+            let symbol: usize = ((run as usize) << 4) | (nbits as usize);
+            let huff_code: u32 = ac_table.ehufco[symbol] as u32;
+            let huff_size: u8 = ac_table.ehufsi[symbol];
+            let combined: u32 = (huff_code << nbits) | mag_masked;
+            local_put_bits(pb, fb, buf, combined, huff_size + nbits);
+
+            pos += 1;
+            bitmap <<= 1;
+        }
+
+        if pos <= 63 {
+            local_put_bits(
+                pb,
+                fb,
+                buf,
+                ac_table.ehufco[0x00] as u32,
+                ac_table.ehufsi[0x00],
+            );
+        }
     }
 }
 
@@ -1080,7 +1109,7 @@ unsafe fn encode_ac_wasm_local(
 /// # Safety
 /// Requires aarch64 NEON (mandatory on ARMv8). `pb`, `fb`, `buf` must be
 /// valid hoisted state from `BitWriter::begin_block`.
-#[cfg(target_arch = "aarch64")]
+#[cfg(all(target_arch = "aarch64", feature = "simd"))]
 #[target_feature(enable = "neon")]
 unsafe fn encode_ac_neon_local(
     pb: &mut u64,
@@ -1089,49 +1118,51 @@ unsafe fn encode_ac_neon_local(
     coeffs_zigzag: &[i16; 64],
     ac_table: &HuffTable,
 ) {
-    use core::arch::aarch64::*;
+    unsafe {
+        use core::arch::aarch64::*;
 
-    let mut bitmap: u64 = 0;
+        let mut bitmap: u64 = 0;
 
-    let zero: int16x8_t = vdupq_n_s16(0);
-    let weights: uint8x8_t = vcreate_u8(0x0102_0408_1020_4080_u64);
+        let zero: int16x8_t = vdupq_n_s16(0);
+        let weights: uint8x8_t = vcreate_u8(0x0102_0408_1020_4080_u64);
 
-    for chunk in 0..8u32 {
-        let offset: usize = (chunk * 8) as usize;
-        let row: int16x8_t = vld1q_s16(coeffs_zigzag.as_ptr().add(offset));
+        for chunk in 0..8u32 {
+            let offset: usize = (chunk * 8) as usize;
+            let row: int16x8_t = vld1q_s16(coeffs_zigzag.as_ptr().add(offset));
 
-        // Non-zero bitmap: compare, narrow to u8, AND with bit weights, sum
-        let ne: uint16x8_t = vmvnq_u16(vceqq_s16(row, zero));
-        let narrow: uint8x8_t = vmovn_u16(ne);
-        let masked: uint8x8_t = vand_u8(narrow, weights);
-        let byte: u8 = vaddv_u8(masked);
-        bitmap |= (byte as u64) << (56 - chunk * 8);
+            // Non-zero bitmap: compare, narrow to u8, AND with bit weights, sum
+            let ne: uint16x8_t = vmvnq_u16(vceqq_s16(row, zero));
+            let narrow: uint8x8_t = vmovn_u16(ne);
+            let masked: uint8x8_t = vand_u8(narrow, weights);
+            let byte: u8 = vaddv_u8(masked);
+            bitmap |= (byte as u64) << (56 - chunk * 8);
+        }
+
+        // Shift left 1 to remove DC bit (we only care about AC positions 1..63)
+        bitmap <<= 1;
+
+        if bitmap == 0 {
+            local_put_bits(
+                pb,
+                fb,
+                buf,
+                ac_table.ehufco[0x00] as u32,
+                ac_table.ehufsi[0x00],
+            );
+            return;
+        }
+
+        if bitmap.count_ones() <= 8 {
+            encode_ac_sparse_local(pb, fb, buf, coeffs_zigzag, bitmap, ac_table);
+            return;
+        }
+
+        encode_ac_dense_neon_local(pb, fb, buf, coeffs_zigzag, bitmap, ac_table);
     }
-
-    // Shift left 1 to remove DC bit (we only care about AC positions 1..63)
-    bitmap <<= 1;
-
-    if bitmap == 0 {
-        local_put_bits(
-            pb,
-            fb,
-            buf,
-            ac_table.ehufco[0x00] as u32,
-            ac_table.ehufsi[0x00],
-        );
-        return;
-    }
-
-    if bitmap.count_ones() <= 8 {
-        encode_ac_sparse_local(pb, fb, buf, coeffs_zigzag, bitmap, ac_table);
-        return;
-    }
-
-    encode_ac_dense_neon_local(pb, fb, buf, coeffs_zigzag, bitmap, ac_table);
 }
 
 /// Dense NEON AC path: pre-compute nbits and masked diff for every coefficient.
-#[cfg(target_arch = "aarch64")]
+#[cfg(all(target_arch = "aarch64", feature = "simd"))]
 #[target_feature(enable = "neon")]
 unsafe fn encode_ac_dense_neon_local(
     pb: &mut u64,
@@ -1141,67 +1172,69 @@ unsafe fn encode_ac_dense_neon_local(
     mut bitmap: u64,
     ac_table: &HuffTable,
 ) {
-    use core::arch::aarch64::*;
+    unsafe {
+        use core::arch::aarch64::*;
 
-    let mut block_nbits = [0u8; 64];
-    let mut block_diff = [0u16; 64];
-    let sixteen: int16x8_t = vdupq_n_s16(16);
+        let mut block_nbits = [0u8; 64];
+        let mut block_diff = [0u16; 64];
+        let sixteen: int16x8_t = vdupq_n_s16(16);
 
-    for chunk in 0..8u32 {
-        let offset: usize = (chunk * 8) as usize;
-        let row: int16x8_t = vld1q_s16(coeffs_zigzag.as_ptr().add(offset));
+        for chunk in 0..8u32 {
+            let offset: usize = (chunk * 8) as usize;
+            let row: int16x8_t = vld1q_s16(coeffs_zigzag.as_ptr().add(offset));
 
-        let abs_row: int16x8_t = vabsq_s16(row);
-        let lz: int16x8_t = vclzq_s16(abs_row);
-        let nbits_s16: int16x8_t = vsubq_s16(sixteen, lz);
-        let nbits_u8: uint8x8_t = vmovn_u16(vreinterpretq_u16_s16(nbits_s16));
-        vst1_u8(block_nbits.as_mut_ptr().add(offset), nbits_u8);
+            let abs_row: int16x8_t = vabsq_s16(row);
+            let lz: int16x8_t = vclzq_s16(abs_row);
+            let nbits_s16: int16x8_t = vsubq_s16(sixteen, lz);
+            let nbits_u8: uint8x8_t = vmovn_u16(vreinterpretq_u16_s16(nbits_s16));
+            vst1_u8(block_nbits.as_mut_ptr().add(offset), nbits_u8);
 
-        let sign: uint16x8_t = vreinterpretq_u16_s16(vshrq_n_s16::<15>(row));
-        let mask: uint16x8_t = vshlq_u16(sign, vnegq_s16(lz));
-        let diff: uint16x8_t = veorq_u16(vreinterpretq_u16_s16(abs_row), mask);
-        vst1q_u16(block_diff.as_mut_ptr().add(offset), diff);
-    }
+            let sign: uint16x8_t = vreinterpretq_u16_s16(vshrq_n_s16::<15>(row));
+            let mask: uint16x8_t = vshlq_u16(sign, vnegq_s16(lz));
+            let diff: uint16x8_t = veorq_u16(vreinterpretq_u16_s16(abs_row), mask);
+            vst1q_u16(block_diff.as_mut_ptr().add(offset), diff);
+        }
 
-    let mut pos: u32 = 1;
-    while bitmap != 0 {
-        let lz: u32 = bitmap.leading_zeros();
-        pos += lz;
+        let mut pos: u32 = 1;
+        while bitmap != 0 {
+            let lz: u32 = bitmap.leading_zeros();
+            pos += lz;
 
-        let nbits: u8 = *block_nbits.get_unchecked(pos as usize);
-        let diff: u32 = *block_diff.get_unchecked(pos as usize) as u32;
+            let nbits: u8 = *block_nbits.get_unchecked(pos as usize);
+            let diff: u32 = *block_diff.get_unchecked(pos as usize) as u32;
 
-        let mut run: u32 = lz;
-        while run >= 16 {
+            let mut run: u32 = lz;
+            while run >= 16 {
+                local_put_bits(
+                    pb,
+                    fb,
+                    buf,
+                    ac_table.ehufco[0xF0] as u32,
+                    ac_table.ehufsi[0xF0],
+                );
+                run -= 16;
+            }
+
+            let symbol: usize = ((run as usize) << 4) | (nbits as usize);
+            let huff_code: u32 = ac_table.ehufco[symbol] as u32;
+            let huff_size: u8 = ac_table.ehufsi[symbol];
+            let combined: u32 = (huff_code << nbits) | diff;
+            local_put_bits(pb, fb, buf, combined, huff_size + nbits);
+
+            pos += 1;
+            bitmap <<= lz;
+            bitmap <<= 1;
+        }
+
+        if pos <= 63 {
             local_put_bits(
                 pb,
                 fb,
                 buf,
-                ac_table.ehufco[0xF0] as u32,
-                ac_table.ehufsi[0xF0],
+                ac_table.ehufco[0x00] as u32,
+                ac_table.ehufsi[0x00],
             );
-            run -= 16;
         }
-
-        let symbol: usize = ((run as usize) << 4) | (nbits as usize);
-        let huff_code: u32 = ac_table.ehufco[symbol] as u32;
-        let huff_size: u8 = ac_table.ehufsi[symbol];
-        let combined: u32 = (huff_code << nbits) | diff;
-        local_put_bits(pb, fb, buf, combined, huff_size + nbits);
-
-        pos += 1;
-        bitmap <<= lz;
-        bitmap <<= 1;
-    }
-
-    if pos <= 63 {
-        local_put_bits(
-            pb,
-            fb,
-            buf,
-            ac_table.ehufco[0x00] as u32,
-            ac_table.ehufsi[0x00],
-        );
     }
 }
 
