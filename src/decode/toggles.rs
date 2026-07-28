@@ -584,6 +584,22 @@ pub fn decode_with_colorspace_override(
         ColorSpace::Grayscale => {
             let cw: usize =
                 mcus_x * frame.components[0].horizontal_sampling as usize * comp_block_sizes[0];
+            // Component 0 is not required to carry the max sampling
+            // factor (read_sof only validates 1..=4), so its plane can
+            // be narrower or shorter than the output geometry — e.g.
+            // comp0=1x1 with comp1=2x2 decodes fine to RGB but plane 0
+            // is quarter-size. Slicing blindly panicked (#386 review
+            // P1); reject instead.
+            if cw < out_width || component_planes[0].len() < out_height.saturating_mul(cw) {
+                return Err(JpegError::CorruptData(format!(
+                    "grayscale output requires a full-resolution component 0: \
+                     plane width {} (len {}) vs output {}x{}",
+                    cw,
+                    component_planes[0].len(),
+                    out_width,
+                    out_height
+                )));
+            }
             let mut data: Vec<u8> = Vec::with_capacity(out_width * out_height);
             for y in 0..out_height {
                 data.extend_from_slice(&component_planes[0][y * cw..y * cw + out_width]);

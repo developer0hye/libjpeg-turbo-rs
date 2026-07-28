@@ -235,17 +235,26 @@ pub struct FrameHeader {
 
 impl FrameHeader {
     /// Image width as `usize`, so callers stop casting the raw `u16`
-    /// field at every use site (issue #386).
+    /// field at every use site (issue #386). Shadows the `width` field
+    /// by name — safe, since the field is `u16` and this is `usize`,
+    /// so mixing them up is a type error.
+    #[must_use]
+    #[inline]
     pub fn width(&self) -> usize {
         usize::from(self.width)
     }
 
-    /// Image height as `usize` (issue #386).
+    /// Image height as `usize` (issue #386); same field-shadowing note
+    /// as [`FrameHeader::width`].
+    #[must_use]
+    #[inline]
     pub fn height(&self) -> usize {
         usize::from(self.height)
     }
 
     /// `(width, height)` as `usize`, for destructuring (issue #386).
+    #[must_use]
+    #[inline]
     pub fn dimensions(&self) -> (usize, usize) {
         (self.width(), self.height())
     }
