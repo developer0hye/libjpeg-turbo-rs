@@ -116,7 +116,7 @@ pub fn scalar_fdct_ifast_quantize(
 ///   `workspace = jpeg_fdct_float(input - 128)`
 ///   `coef[i]   = (int)(workspace[i] * float_divisors[i] + 16384.5) - 16384`
 /// The float divisors fold the AA&N scale and the per-coefficient quantizer
-/// into a single multiplication, so this routine reproduces `cjpeg -dc fa`
+/// into a single multiplication, so this routine reproduces `cjpeg -dct float`
 /// byte-for-byte.
 pub fn scalar_fdct_float_quantize(
     input: &mut [i16; 64],

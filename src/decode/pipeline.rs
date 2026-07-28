@@ -204,7 +204,10 @@ pub struct JpegInfo {
     pub height: usize,
     /// Number of frame components (1 gray, 3 YCbCr/RGB, 4 CMYK/YCCK).
     pub components: usize,
-    /// Sample precision in bits (8, 12, or 16 for lossless).
+    /// Sample precision in bits, reported verbatim from SOF: 8 for
+    /// baseline/progressive, 12 for the extended path, and anything in
+    /// 2-16 for arbitrary-precision lossless. Not validated here — a
+    /// corrupt stream can report any value.
     pub precision: u8,
     /// True for progressive DCT (SOF2/SOF10).
     pub progressive: bool,
@@ -4819,10 +4822,14 @@ impl<'a> Decoder<'a> {
 
             // Handle grayscale output request
             if out_format == PixelFormat::Grayscale {
-                // For RGB-colorspace JPEGs, grayscale output is the Y channel;
-                // for YCbCr, it's also just the Y channel.  Both work the same.
-                // However, the simple "copy Y" path only works when the output
-                // colorspace is the same (no conversion needed).  For now, reject.
+                // Only non-YCbCr 3-component sources still land here: for
+                // YCbCr, `effective_output_colorspace` sends the request to
+                // the override path above, which emits component plane 0
+                // (#386). That shortcut is *not* valid here — plane 0 of a
+                // JCS_RGB stream is red, not luma (31/32 pixels off vs
+                // `djpeg -grayscale`), and the real RGB->gray conversion is
+                // not written yet (P4-72). Reject rather than emit the red
+                // channel as if it were luma.
                 return Err(JpegError::Unsupported(
                     "cannot convert color JPEG to grayscale".to_string(),
                 ));
