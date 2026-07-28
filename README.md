@@ -20,9 +20,10 @@ let jpeg = compress(&image.data, image.width, image.height,
                     image.pixel_format, 85, Subsampling::S420)?; // re-encode
 ```
 
-These snippets are compile-checked: the crate-level doctests mirror them
-(`cargo test --doc`). Runnable examples live in
-[`examples/`](examples/) (the directory README fronts the user-facing set once #388 lands; GitHub renders it in the directory view).
+The crate-level doctests mirror these snippets and are compile-checked
+(`cargo test --doc`); the doctest decode calls `decompress`, the
+format-defaulting sibling of `decompress_to`. Runnable examples live in
+[`examples/`](examples/README.md).
 
 ## How it compares
 
@@ -30,7 +31,7 @@ Measured with the in-repo harnesses (methodology: [#361](https://github.com/deve
 
 | vs | Result (decode) |
 | --- | --- |
-| **zune-jpeg** (the `image` crate's default) | **31 wins / 3 losses** of 34 scored cases (±2% threshold) across subsampling × progressive × 8×8→8K, quiet aarch64, 2026-07-28; e.g. 4K progressive **0.65×**, 4K 4:2:0 **0.74×** of zune's time. Through the `image`-crate bridge: **1.31× faster** at 1080p. Losses are three tiny-image fixed-cost cases. |
+| **zune-jpeg** (the `image` crate's default) | **31 wins / 3 losses** of 34 scored cases (±2% threshold) across subsampling × progressive × 16×16→8K, quiet aarch64, 2026-07-28; e.g. 4K progressive **0.65×**, 4K 4:2:0 **0.74×** of zune's time. Through the `image`-crate bridge: **1.31× faster** at 1080p. Two losses are 16×16 fixed-cost cases (1.20×, 1.08×); the third is a 64×64 non-interleaved 4:4:0 image (1.78×) on the multi-scan path. Full output: [`experiments/zune_matrix_aarch64_2026-07-28.md`](experiments/zune_matrix_aarch64_2026-07-28.md). |
 | **C libjpeg-turbo** | Matches or beats C on most decode benchmarks on x86_64/AVX2 (i5-10400) and within a few % on aarch64/NEON (M1 Pro) — the dated per-platform tables are below. |
 
 ## Performance
@@ -121,8 +122,8 @@ Performance section above. aarch64 / NEON builds are unaffected.
 
 ## Feature flags, MSRV, platforms
 
-**MSRV: 1.87** (declared as `rust-version`; older compilers are not
-tested).
+**MSRV: 1.87** (declared as `rust-version`; no CI job pins it yet —
+[#390](https://github.com/developer0hye/libjpeg-turbo-rs/issues/390)).
 
 | Target | SIMD | Notes |
 | --- | --- | --- |
@@ -340,9 +341,17 @@ All SIMD routines have scalar fallbacks. SIMD is enabled by default via the `sim
 Beyond the Rust crate, the workspace ships C ABI shims: a TurboJPEG 3
 cdylib (`libturbojpeg.so.0`, ready for TJ3 consumers) and a classic
 libjpeg v8 cdylib (`libjpeg.so.8`, ready for v8 consumers) — with
-byte-exact stock `djpeg`/`cjpeg`/`jpegtran` parity gates. The full
-T1–T4 tier framing, legacy-alias matrix, SONAME opt-ins, and threading
-contract live in [`docs/ABI_COMPATIBILITY.md`](docs/ABI_COMPATIBILITY.md).
+byte-exact stock `djpeg`/`cjpeg`/`jpegtran` parity gates. The
+legacy-alias matrix, SONAME opt-ins, threading contract, and the v6b/v7
+drop-in non-goal live in
+[`docs/ABI_COMPATIBILITY.md`](docs/ABI_COMPATIBILITY.md); the T1–T4
+replacement-tier framing and its readiness status live in
+[`docs/LAST_MILE.md`](docs/LAST_MILE.md).
+
+## Contributing
+
+Development workflow, the pre-commit gate, and the local sanitizer
+recipes live in [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## License
 
