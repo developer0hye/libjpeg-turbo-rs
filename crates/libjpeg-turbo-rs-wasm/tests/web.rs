@@ -45,9 +45,14 @@ fn decode_to_rgba() {
 }
 
 #[wasm_bindgen_test]
-fn decode_to_grayscale_from_color_errors() {
-    let result = decode_to(TEST_JPEG, PixelFormat::Grayscale);
-    assert!(result.is_err());
+fn decode_to_grayscale_from_color_converts() {
+    // Used to assert an error: gray output from a colour JPEG was
+    // rejected until issue #386 routed it through the grayscale
+    // conversion (TurboJPEG's TJPF_GRAY semantics). Now it converts.
+    let img: DecodedImage = decode_to(TEST_JPEG, PixelFormat::Grayscale).unwrap();
+    assert_eq!(img.format().unwrap(), PixelFormat::Grayscale);
+    assert_eq!(img.data().length(), 16 * 16);
+    assert_eq!(img.bytes_per_pixel(), 1);
 }
 
 #[wasm_bindgen_test]

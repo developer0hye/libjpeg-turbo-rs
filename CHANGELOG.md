@@ -78,7 +78,9 @@ and `git log` between tags.
 ### Fixed
 - `set_output_format(Grayscale)` on a colour (YCbCr) JPEG errored while
   the equivalent `set_output_colorspace` route worked; it now decodes,
-  byte-identical to `djpeg -grayscale` (#386). The override's gray arm
+  byte-identical to `djpeg -grayscale` (#386). The WASM bindings'
+  `decode_to(.., Grayscale)` inherits this: previously an error on
+  colour sources, now a 1-byte-per-pixel luma image. The override's gray arm
   also panicked on legal streams whose component 0 is subsampled below
   max — now a clean `Unsupported` (full conversion tracked as P4-72) —
   and no longer doubles plane memory past a `set_max_memory` cap when
