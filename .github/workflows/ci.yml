@@ -121,25 +121,33 @@ jobs:
           -A clippy::too_many_arguments
           -A clippy::type_complexity
 
-  # Proves the declared `rust-version` actually compiles (issue #390).
-  # Workspace-wide check is impossible at 1.87: the image-bridge crate
-  # inherits image@0.25's rustc 1.88 floor, so it declares its own
-  # rust-version and is checked on stable instead.
+  # Proves each declared `rust-version` actually compiles (issue #390).
+  # A single workspace-wide 1.87 check is impossible: the image-bridge
+  # crate inherits image@0.25's rustc 1.88 floor, so it declares
+  # rust-version 1.88 and gets its own pinned leg (codex P2: checking it
+  # only on latest stable would let post-1.88 APIs slip past CI).
   msrv:
-    name: MSRV (1.87)
+    name: MSRV (1.87 root/capi, 1.88 image bridge)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: "1.87"
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.88"
       - uses: Swatinem/rust-cache@v2
-      - run: cargo check -p libjpeg-turbo-rs --all-features
-      - run: cargo check -p libjpeg-turbo-rs --no-default-features
-      - run: cargo check -p libjpeg-turbo-rs-capi
+      - run: cargo +1.87 check -p libjpeg-turbo-rs --all-features
+      - run: cargo +1.87 check -p libjpeg-turbo-rs --no-default-features
+      - run: cargo +1.87 check -p libjpeg-turbo-rs-capi
+      - run: cargo +1.88 check -p libjpeg-turbo-rs-image
 
   # Supply-chain gate (issue #390): advisories, licenses, duplicate majors,
-  # untrusted sources. Policy lives in deny.toml.
+  # untrusted sources. Policy lives in deny.toml. `--workspace` because the
+  # root manifest is itself a package — without it cargo-deny roots the
+  # graph at `libjpeg-turbo-rs` only and skips violations introduced
+  # solely through the capi/image/wasm members (codex P2).
   cargo-deny:
     name: cargo-deny
     runs-on: ubuntu-latest
@@ -148,6 +156,7 @@ jobs:
       - uses: EmbarkStudios/cargo-deny-action@v2
         with:
           command: check advisories bans licenses sources
+          arguments: --all-features --workspace
 
   no-std:
     name: no_std + alloc build (thumbv7em-none-eabihf)

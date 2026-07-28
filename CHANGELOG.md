@@ -80,25 +80,36 @@ and `git log` between tags.
 
 ## [0.6.3] - 2026-07-25
 
+Fuzz-driven robustness batch spanning two months of scheduled
+fuzz-smoke findings.
+
 ### Added
 - Real-world corpus decode/encode gates vs C libjpeg-turbo in CI
   (P4-31, #307).
+- Arithmetic multi-scan support (SOF9, interleaved or not) (P4-24);
+  streaming `jpeg_consume_input` suspension core (P4-13 partial).
 
 ### Fixed
+- Multi-scan non-interleaved baseline divergence (P4-22);
+  lenient-recovery parity with djpeg on invalid Huffman codes (P4-23);
+  IDCT i16-overflow parity with C SIMD (P4-19).
 - Scheduled fuzz findings: sparse-DQT-slot remap, category-16
   coefficient rejection, fractional-chroma-ratio reject, SOS
   component-id binding, lossless undifference wrap + `<< Al` scaling
   (P4-34..38); 12-bit sampling-layout overflow (P4-30); block smoothing
-  read dummy padding blocks (P4-29); transform perf + marker
+  read dummy padding blocks (P4-29); single-component h1v4 block order +
+  progressive AC-refine placement (P4-27/28); transform perf + marker
   preservation (#308).
 
 ## [0.6.2] - 2026-05-24
 
-Fuzz-driven robustness batch (29 PRs): multi-scan non-interleaved
-baseline divergence (P4-22), lenient-recovery parity with djpeg
-(P4-23), arithmetic multi-scan support (P4-24), IDCT i16-overflow
-parity with C SIMD (P4-19), streaming `jpeg_consume_input` suspension
-core (P4-13 partial), and the first scheduled fuzz-smoke pipeline.
+C-ABI replacement-tier hardening: P4-2..P4-12 closed (default SONAME
+flip to `libjpeg.so.8` with staged loader symlinks, panic guards on all
+C entry points, pathological-lifecycle harness, x86_64 dispatch audit),
+thread-affinity contract (P4-16) and legacy-TJ migration matrix (P4-18)
+documented, cold-review gaps P4-13/14/17 filed, and the scheduled
+fuzz-smoke pipeline's repro-artifact workflow with C tools pinned to
+libjpeg-turbo 3.x.
 
 ## [0.6.1] - 2026-05-06
 
