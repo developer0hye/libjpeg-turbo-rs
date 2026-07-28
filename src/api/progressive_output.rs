@@ -345,37 +345,39 @@ impl ProgressiveDecoder {
         output: *mut u8,
         stride: usize,
     ) {
-        #[cfg(all(target_arch = "aarch64", feature = "simd"))]
-        {
-            return crate::simd::aarch64::idct::neon_idct_islow_strided(
-                coeffs, quant, output, stride,
-            );
-        }
-
-        #[cfg(all(target_arch = "x86_64", feature = "simd"))]
-        {
-            if crate::cpu_has!("avx2") {
-                return crate::simd::x86_64::avx2_idct::avx2_idct_islow_strided(
+        unsafe {
+            #[cfg(all(target_arch = "aarch64", feature = "simd"))]
+            {
+                return crate::simd::aarch64::idct::neon_idct_islow_strided(
                     coeffs, quant, output, stride,
                 );
             }
-            if crate::cpu_has!("sse2") {
-                return crate::simd::x86_64::idct::sse2_idct_islow_strided(
-                    coeffs, quant, output, stride,
-                );
-            }
-        }
 
-        #[allow(unreachable_code)]
-        {
-            let mut tmp = [0u8; 64];
-            (self.routines.idct_islow)(coeffs, quant, &mut tmp);
-            for row in 0..8 {
-                core::ptr::copy_nonoverlapping(
-                    tmp.as_ptr().add(row * 8),
-                    output.add(row * stride),
-                    8,
-                );
+            #[cfg(all(target_arch = "x86_64", feature = "simd"))]
+            {
+                if crate::cpu_has!("avx2") {
+                    return crate::simd::x86_64::avx2_idct::avx2_idct_islow_strided(
+                        coeffs, quant, output, stride,
+                    );
+                }
+                if crate::cpu_has!("sse2") {
+                    return crate::simd::x86_64::idct::sse2_idct_islow_strided(
+                        coeffs, quant, output, stride,
+                    );
+                }
+            }
+
+            #[allow(unreachable_code)]
+            {
+                let mut tmp = [0u8; 64];
+                (self.routines.idct_islow)(coeffs, quant, &mut tmp);
+                for row in 0..8 {
+                    core::ptr::copy_nonoverlapping(
+                        tmp.as_ptr().add(row * 8),
+                        output.add(row * stride),
+                        8,
+                    );
+                }
             }
         }
     }
