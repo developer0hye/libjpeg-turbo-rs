@@ -37,23 +37,52 @@
 //! # Ok::<(), libjpeg_turbo_rs::JpegError>(())
 //! ```
 //!
-//! Probe a header without decoding any pixels — [`Decoder::new`] never
-//! entropy-decodes or produces pixels (multi-scan streams are walked
-//! byte-wise to find scan boundaries, so worst-case cost is linear in
-//! the compressed size, far below a decode):
+//! Probe a header without decoding any pixels — [`probe`] parses
+//! markers only (multi-scan streams are walked byte-wise to find scan
+//! boundaries, so worst-case cost is linear in the compressed size,
+//! far below a decode):
 //!
 //! ```
-//! use libjpeg_turbo_rs::Decoder;
 //! # let jpeg_bytes = libjpeg_turbo_rs::compress(
 //! #     &[0; 64 * 48 * 3], 64, 48,
 //! #     libjpeg_turbo_rs::PixelFormat::Rgb, 90,
 //! #     libjpeg_turbo_rs::Subsampling::S444,
 //! # ).unwrap();
-//! let decoder = Decoder::new(&jpeg_bytes)?;
-//! assert_eq!((decoder.header().width, decoder.header().height), (64, 48));
-//! assert_eq!(decoder.exif_orientation(), None); // no EXIF in this fixture
+//! let info = libjpeg_turbo_rs::probe(&jpeg_bytes)?;
+//! assert_eq!((info.width, info.height), (64, 48));
+//! assert_eq!(info.exif_orientation, None); // no EXIF in this fixture
 //! # Ok::<(), libjpeg_turbo_rs::JpegError>(())
 //! ```
+//!
+//! # Canonical API map
+//!
+//! Rustdoc renders every export flat, so here is which entry point to
+//! reach for first (issue #386):
+//!
+//! | Task | Canonical path |
+//! |---|---|
+//! | Decode, defaults fine | [`decompress`] (or [`decompress_to`] / [`decompress_into`]) |
+//! | Decode, configured | [`Decoder`] — chainable `with_*`, or imperative `set_*` |
+//! | Probe header/metadata | [`probe`] (one call), [`Decoder::new`] + accessors for more |
+//! | Encode, defaults fine | [`compress`] |
+//! | Encode, configured | [`Encoder`] builder — quality, subsampling, progressive, markers |
+//! | Lossless transform | [`transform()`] — DCT-domain rotate/flip/crop, no re-encode |
+//! | Row streaming | [`ScanlineDecoder`] / [`ScanlineEncoder`], `stream::*` for readers |
+//! | 12/16-bit & lossless | [`precision`] module |
+//!
+//! **Specialised `compress_*` entry points.** The remaining
+//! free-function encode variants ([`compress_optimized`],
+//! [`compress_progressive`], [`compress_arithmetic`],
+//! [`compress_arithmetic_progressive`], the `compress_lossless*`
+//! family, [`compress_into`], [`compress_with_metadata`], …) predate
+//! the [`Encoder`] builder, which can express every one of them —
+//! e.g. `Encoder::new().progressive(true)` replaces
+//! [`compress_progressive`]. They stay for source compatibility and
+//! one-line convenience; new code should prefer [`Encoder`] once more
+//! than one knob is involved. **Deprecation intent:** these variants
+//! are candidates for `#[deprecated]` at the next semver-major once
+//! [`Encoder`] has shipped a full release cycle without gaps; none are
+//! removed before that.
 //!
 //! # Feature flags
 //!
@@ -187,7 +216,7 @@ pub use common::sample::Sample;
 pub use common::traits::{DefaultErrorHandler, ErrorHandler, ProgressInfo, ProgressListener};
 pub use common::types::*;
 #[doc(inline)]
-pub use decode::pipeline::{Decoder, Image, ImageInfo};
+pub use decode::pipeline::{probe, Decoder, Image, ImageInfo, JpegInfo};
 pub use decode::resync::{DefaultResyncStrategy, RestartResyncStrategy, ResyncAction};
 #[doc(inline)]
 pub use transform::{MarkerCopyMode, TransformOp, TransformOptions};

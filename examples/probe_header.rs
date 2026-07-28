@@ -5,7 +5,7 @@
 //! cargo run --example probe_header [path/to/image.jpg]
 //! ```
 
-use libjpeg_turbo_rs::Decoder;
+use libjpeg_turbo_rs::{probe, JpegInfo};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Default fixture, resolved from the crate root regardless of the
@@ -18,23 +18,30 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     });
     let jpeg: Vec<u8> = std::fs::read(&path)?;
 
-    let decoder = Decoder::new(&jpeg)?;
-    let header = decoder.header();
+    // One call gets everything (issue #386). For accessors beyond
+    // JpegInfo — density, JFIF version, saved markers — construct a
+    // `Decoder` and use its getters; it too never decodes pixels.
+    let info: JpegInfo = probe(&jpeg)?;
     println!("{path}:");
     println!(
         "  {}x{} px, {} component(s), precision {}",
-        header.width,
-        header.height,
-        header.components.len(),
-        header.precision
+        info.width, info.height, info.components, info.precision
     );
     println!(
-        "  progressive: {}, lossless: {}",
-        header.is_progressive, header.is_lossless
+        "  progressive: {}, lossless: {}, arithmetic: {}",
+        info.progressive, info.lossless, info.arithmetic
     );
-    match decoder.exif_orientation() {
+    println!(
+        "  subsampling: {:?}, colorspace: {:?}",
+        info.subsampling, info.color_space
+    );
+    match info.exif_orientation {
         Some(o) => println!("  EXIF orientation: {o} (1 = upright)"),
         None => println!("  EXIF orientation: none"),
     }
+    println!(
+        "  metadata: exif={} icc={} xmp={} iptc={}",
+        info.has_exif, info.has_icc, info.has_xmp, info.has_iptc
+    );
     Ok(())
 }
