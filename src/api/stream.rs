@@ -6,11 +6,12 @@
 //! it to the in-memory decoder, so peak memory is the full compressed
 //! size plus all decode intermediates (issue #357). They are I/O-trait
 //! conveniences, not an equivalent of libjpeg-turbo's suspending
-//! `jpeg_source_mgr`. A Rust-native incremental source is tracked in
-//! `docs/last_mile/phase4.md` (P4-58, designed together with P4-26);
-//! the slice-based `decompress()` core stays the default because its
-//! bounds-checked slice fetches are a measured throughput win over
-//! trait-object reads.
+//! `jpeg_source_mgr`. For bounded input memory on interleaved baseline
+//! streams use
+//! [`decompress_from_reader_incremental`](crate::decompress_from_reader_incremental)
+//! (P4-58); the slice-based `decompress()` core stays the default
+//! because its bounds-checked slice fetches are a measured throughput
+//! win over trait-object reads.
 
 // libjpeg-turbo-rs: alloc prelude (no_std support, issue #356)
 #[allow(unused_imports)]

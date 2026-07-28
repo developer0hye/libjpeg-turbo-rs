@@ -9,6 +9,12 @@ and `git log` between tags.
 ## [Unreleased]
 
 ### Added
+- `decompress_from_reader_incremental`: bounded-input-memory decode
+  from any `Read` source — interleaved baseline JPEGs decode from a
+  sliding window (measured peak 87,994 bytes on a 1.25 MB 1080p
+  stream, independent of compressed size); other coding modes fall
+  back to buffering. The C-ABI suspension core and the new reader now
+  share one marker-boundary scanner (`decode::boundary`) (#357).
 - One-call header probe `probe(&[u8]) -> Result<JpegInfo>` — dimensions,
   coding mode, subsampling, colorspace, metadata presence, EXIF
   orientation without decoding pixels (#386).
