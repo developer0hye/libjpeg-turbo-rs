@@ -233,6 +233,33 @@ pub struct FrameHeader {
     pub is_lossless: bool,
 }
 
+impl FrameHeader {
+    /// Image width as `usize`, so callers stop casting the raw `u16`
+    /// field at every use site (issue #386). Shadows the `width` field
+    /// by name — safe, since the field is `u16` and this is `usize`,
+    /// so mixing them up is a type error.
+    #[must_use]
+    #[inline]
+    pub fn width(&self) -> usize {
+        usize::from(self.width)
+    }
+
+    /// Image height as `usize` (issue #386); same field-shadowing note
+    /// as [`FrameHeader::width`].
+    #[must_use]
+    #[inline]
+    pub fn height(&self) -> usize {
+        usize::from(self.height)
+    }
+
+    /// `(width, height)` as `usize`, for destructuring (issue #386).
+    #[must_use]
+    #[inline]
+    pub fn dimensions(&self) -> (usize, usize) {
+        (self.width(), self.height())
+    }
+}
+
 /// Parsed from the SOS marker — describes one scan.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ScanHeader {
@@ -431,7 +458,7 @@ pub enum DensityUnit {
 }
 
 /// A saved JPEG marker (APP or COM).
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SavedMarker {
     /// Marker code (e.g., 0xE0 for APP0, 0xFE for COM).
     pub code: u8,

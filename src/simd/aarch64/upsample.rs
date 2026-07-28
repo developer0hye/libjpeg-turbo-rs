@@ -1,9 +1,9 @@
 //! NEON-accelerated fancy horizontal 2x upsampling.
 //!
 //! Triangle filter with alternating bias (matches C libjpeg-turbo):
-//!   output[2i]   = (3*input[i] + input[i-1] + 1) >> 2   (even: bias +1)
-//!   output[2i+1] = (3*input[i] + input[i+1] + 2) >> 2   (odd:  bias +2)
-//! Edge samples: output[0] = input[0], output[last] = input[last].
+//!   `output[2i]   = (3*input[i] + input[i-1] + 1) >> 2`   (even: bias +1)
+//!   `output[2i+1] = (3*input[i] + input[i+1] + 2) >> 2`   (odd:  bias +2)
+//! Edge samples: `output[0] = input[0]`, `output[last] = input[last]`.
 //!
 //! Unlike libjpeg-turbo's NEON implementation which relies on over-allocated
 //! buffers, this version uses explicit bounds checking for safe operation.

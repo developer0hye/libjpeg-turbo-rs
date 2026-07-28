@@ -6,7 +6,7 @@
 | --- | --- |
 | [`decode.rs`](decode.rs) | Decode to RGB / any pixel format |
 | [`encode.rs`](encode.rs) | One-shot encode + the `Encoder` builder |
-| [`probe_header.rs`](probe_header.rs) | Dimensions & EXIF orientation with no pixel decode |
+| [`probe_header.rs`](probe_header.rs) | One-call `probe`: dimensions, mode, subsampling, colorspace, metadata — no pixel decode |
 | [`decode_into.rs`](decode_into.rs) | Decode into a caller-owned, reusable buffer |
 | [`transform_lossless.rs`](transform_lossless.rs) | DCT-domain rotate — no decode, no quality loss |
 

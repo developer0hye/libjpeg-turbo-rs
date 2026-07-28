@@ -584,6 +584,24 @@ pub fn decode_with_colorspace_override(
         ColorSpace::Grayscale => {
             let cw: usize =
                 mcus_x * frame.components[0].horizontal_sampling as usize * comp_block_sizes[0];
+            // Component 0 is not required to carry the max sampling
+            // factor (read_sof only validates 1..=4), so its plane can
+            // be narrower or shorter than the output geometry — e.g. a
+            // VALID `cjpeg -sample 1x1,2x2,1x1` stream decodes to RGB
+            // under `set_lenient(true)` (strict decode is rejected
+            // earlier by P4-21's chroma-out-samples-luma guard), but
+            // plane 0 is quarter-size. Slicing blindly panicked
+            // (#386 review P1). C handles this by running component 0
+            // through the upsampler before gray output; until that
+            // lands (P4-72) the request is refused as Unsupported —
+            // the input is legal, our conversion is what's missing.
+            if cw < out_width || component_planes[0].len() < out_height.saturating_mul(cw) {
+                return Err(JpegError::Unsupported(format!(
+                    "grayscale output from a source whose component 0 is subsampled \
+                     (plane width {} vs output {}x{}) is not implemented yet (P4-72)",
+                    cw, out_width, out_height
+                )));
+            }
             let mut data: Vec<u8> = Vec::with_capacity(out_width * out_height);
             for y in 0..out_height {
                 data.extend_from_slice(&component_planes[0][y * cw..y * cw + out_width]);
