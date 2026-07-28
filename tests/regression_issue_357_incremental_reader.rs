@@ -144,8 +144,9 @@ fn incremental_propagates_reader_errors() {
 fn incremental_input_window_stays_bounded() {
     // 1.25 MB 1080p baseline: large enough that the fixed refill chunk
     // (64 KiB) is a small fraction of the stream. Measured peak on this
-    // fixture: 87,994 bytes (header + entropy window). The assertion
-    // allows up to 256 KiB as margin — still 5x below the compressed
+    // fixture: 195,985 bytes (header + entropy window + the 64 KiB
+    // read-staging buffer the metric deliberately counts). The
+    // assertion allows up to 256 KiB — still 6x below the compressed
     // size, and independent of it.
     let fixture: &[u8] = include_bytes!("fixtures/photo_1920x1080_420.jpg");
     let compressed_len: usize = fixture.len();
