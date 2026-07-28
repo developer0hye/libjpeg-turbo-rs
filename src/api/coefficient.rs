@@ -501,9 +501,9 @@ pub fn write_coefficients(coeffs: &JpegCoefficients) -> Result<Vec<u8>> {
 ///
 /// Delegates to [`transform_jpeg_with_options`] with default options, so
 /// metadata (EXIF/ICC/COM markers) is preserved
-/// ([`MarkerCopyMode::All`], matching both [`TransformOptions::default`]
+/// ([`MarkerCopyMode::All`](crate::MarkerCopyMode::All), matching both [`TransformOptions::default`]
 /// and C TurboJPEG's `tjTransform` without `TJXOPT_COPYNONE`). Pass
-/// [`MarkerCopyMode::None`] via [`transform_jpeg_with_options`] to strip
+/// [`MarkerCopyMode::None`](crate::MarkerCopyMode::None) via [`transform_jpeg_with_options`] to strip
 /// markers instead.
 pub fn transform_jpeg(data: &[u8], op: TransformOp) -> Result<Vec<u8>> {
     transform_jpeg_with_options(
