@@ -1,0 +1,18 @@
+# Dependency update automation (issue #390).
+version: 2
+updates:
+  - package-ecosystem: cargo
+    directory: /
+    schedule:
+      interval: weekly
+    # Group patch/minor bumps into one PR to keep CI load sane;
+    # major bumps stay individual so breaking changes get their own review.
+    groups:
+      minor-and-patch:
+        update-types:
+          - minor
+          - patch
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
