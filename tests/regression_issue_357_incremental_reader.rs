@@ -143,11 +143,12 @@ fn incremental_propagates_reader_errors() {
 #[test]
 fn incremental_input_window_stays_bounded() {
     // 1.25 MB 1080p baseline: large enough that the fixed refill chunk
-    // (64 KiB) is a small fraction of the stream. Measured peak on this
-    // fixture: 195,985 bytes of allocation capacity (header + entropy
+    // (64 KiB) is a small fraction of the stream. Measured peak at this
+    // 8 KiB feed: 129,203 bytes of allocation capacity (header + entropy
     // window + the 64 KiB read-staging buffer — the metric counts
-    // capacities, not just live bytes). The assertion allows up to
-    // 256 KiB — still 6x below the compressed size, independent of it.
+    // capacities, not just live bytes); a reader delivering 64 KiB or
+    // more per call peaks higher, at 195,985. The assertion allows up to
+    // 256 KiB — still 4.8x below the compressed size, independent of it.
     let fixture: &[u8] = include_bytes!("fixtures/photo_1920x1080_420.jpg");
     let compressed_len: usize = fixture.len();
     let (image, peak_window): (Image, usize) =
@@ -167,4 +168,33 @@ fn incremental_input_window_stays_bounded() {
         "peak input window {peak_window} must stay well below the \
          compressed size {compressed_len} — the whole point of P4-58"
     );
+
+    // Size-independence across resolutions (the P4-58 acceptance
+    // criterion names the 8K fixture): with full-chunk feeds the peak
+    // is EXACTLY 195,985 bytes on 1080p (1.25 MB), 4K (5.0 MB), and
+    // the 8K corpus fixture alike — measured 2026-07-28.
+    for (fixture, label) in [
+        (
+            &include_bytes!("fixtures/photo_3840x2160_420.jpg")[..],
+            "photo_3840x2160_420",
+        ),
+        (
+            &include_bytes!("fixtures/real_world/derived_7680x4320_8k_420_q75.jpg")[..],
+            "derived_7680x4320_8k_420_q75",
+        ),
+    ] {
+        let (img, peak): (Image, usize) =
+            libjpeg_turbo_rs::decompress_from_reader_incremental_instrumented(ChunkedReader::new(
+                fixture,
+                usize::MAX,
+            ))
+            .expect(label);
+        let reference: Image = decompress(fixture).expect("slice decode");
+        assert_identical(&reference, &img, label);
+        assert!(
+            peak <= 4 * 64 * 1024,
+            "{label}: peak {peak} exceeded 256 KiB on a {} byte stream",
+            fixture.len()
+        );
+    }
 }

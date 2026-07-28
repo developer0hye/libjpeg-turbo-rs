@@ -58,7 +58,10 @@ pub fn compress_to_writer<W: Write>(
 /// `read_to_end`, then delegates to the in-memory `decompress()`. Peak
 /// memory is the full compressed size plus decode intermediates — this
 /// is *not* an incremental source like libjpeg-turbo's suspending
-/// `jpeg_source_mgr` (issue #357; incremental design tracked as P4-58).
+/// `jpeg_source_mgr` (issue #357). For a bounded input window on
+/// interleaved baseline streams use
+/// [`decompress_from_reader_incremental`](crate::decompress_from_reader_incremental)
+/// (P4-58).
 pub fn decompress_from_reader<R: Read>(reader: &mut R) -> Result<Image> {
     let mut buffer: Vec<u8> = Vec::new();
     reader.read_to_end(&mut buffer)?;

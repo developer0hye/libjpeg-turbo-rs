@@ -6,16 +6,19 @@
 //! compressed bytes: the window grows only while a single MCU row's
 //! entropy data straddles its end, and consumed bytes are dropped as
 //! rows commit, so peak input memory is a fixed window rather than the
-//! whole stream. Progressive, non-interleaved (including grayscale),
+//! whole stream. Progressive, non-interleaved multi-component,
 //! arithmetic, lossless, and 12/16-bit streams require the full entropy
-//! stream by construction; for those this entry point transparently
+//! stream by construction, and single-component (grayscale) streams
+//! decode through the one-block raster of P4-27, which the row loop
+//! does not model; for all of those this entry point transparently
 //! falls back to buffering, exactly like
 //! [`decompress_from_reader`](crate::stream::decompress_from_reader).
 //!
-//! The window/boundary machinery is shared with the C-ABI
-//! `jpeg_consume_input` suspension core
-//! ([`crate::decode::boundary`]) — one streaming mechanism, not
-//! three (the P4-26 co-design constraint).
+//! The marker-boundary scanner is shared with the C-ABI
+//! `jpeg_consume_input` suspension core ([`crate::decode::boundary`]),
+//! so this is not a third independent streaming mechanism (the P4-26
+//! co-design constraint); the sliding window and the row checkpoints
+//! are specific to this path.
 
 use crate::common::error::{JpegError, Result};
 use crate::decode::boundary;

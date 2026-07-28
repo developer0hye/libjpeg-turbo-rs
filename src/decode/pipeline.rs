@@ -6531,9 +6531,4 @@ impl<'a> Decoder<'a> {
     pub(crate) fn set_prefilled_baseline_planes(&self, planes: Vec<Vec<u8>>) {
         *self.prefilled_baseline_planes.borrow_mut() = Some(planes);
     }
-
-    /// Byte offset where the first scan's entropy data begins.
-    pub(crate) fn entropy_data_offset(&self) -> usize {
-        self.metadata.entropy_data_offset
-    }
 }

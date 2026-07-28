@@ -41,21 +41,6 @@ impl<'a> BitReader<'a> {
         }
     }
 
-    /// A reader over a partial window of a longer stream. Identical to
-    /// [`BitReader::new`] except EOF-class events set [`Self::starved`]
-    /// rather than silently zero-stuffing forever; pass
-    /// `is_final = true` once the window holds the stream's tail.
-    pub fn new_windowed(data: &'a [u8], is_final: bool) -> Self {
-        Self {
-            data,
-            pos: 0,
-            bit_buffer: 0,
-            bits_left: 0,
-            is_final,
-            starved: false,
-        }
-    }
-
     /// Re-create a reader over a (possibly grown) window from a
     /// checkpoint taken with [`Self::state`]. The window must start at
     /// the same stream offset as the one the checkpoint was taken in.

@@ -498,7 +498,7 @@
 | `jpeg_error_mgr` | Error handler (5 callbacks + state) | `ErrorHandler` trait (3 callbacks) | 🔶 |
 | `jpeg_progress_mgr` | Progress callback + counters | `ProgressListener` trait | ✅ |
 | `jpeg_destination_mgr` | Output stream (buffer + 3 callbacks) | `stream::compress_to_writer<W: Write>` | ✅ |
-| `jpeg_source_mgr` | Input stream (buffer + 5 callbacks) | `stream::decompress_from_reader<R: Read>` | ✅ |
+| `jpeg_source_mgr` | Input stream (buffer + 5 callbacks) | `stream::decompress_from_reader<R: Read>` (buffering); `decompress_from_reader_incremental` (bounded window, interleaved baseline — P4-58) | ✅ |
 | `jpeg_memory_mgr` | Memory allocator (12 methods) | N/A (Rust allocator) | N/A |
 
 ---
