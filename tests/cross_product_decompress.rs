@@ -1416,7 +1416,7 @@ fn tjdecomptest_arithmetic_progressive_sources() {
             .unwrap();
         for scale in &scales {
             for dct in &dct_methods {
-                let label: String = format!(
+                let _label: String = format!(
                     "subsamp=gray source=arithmetic scale={}/{} dct={:?}",
                     scale.num, scale.denom, dct
                 );

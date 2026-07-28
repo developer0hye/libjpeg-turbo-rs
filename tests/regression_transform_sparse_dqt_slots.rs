@@ -132,7 +132,7 @@ fn assert_sof_quant_refs_defined(jpeg: &[u8], label: &str) {
                     j += 1 + if precision != 0 { 128 } else { 64 };
                 }
             }
-            0xC0 | 0xC1 | 0xC2 => {
+            0xC0..=0xC2 => {
                 let component_count: usize = seg[5] as usize;
                 for c in 0..component_count {
                     referenced.push(seg[8 + 3 * c]);

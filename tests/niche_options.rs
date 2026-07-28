@@ -131,12 +131,7 @@ fn jfif_default_version_is_1_01() {
 }
 
 fn find_marker(data: &[u8], code: u8) -> Option<usize> {
-    for i in 0..data.len() - 1 {
-        if data[i] == 0xFF && data[i + 1] == code {
-            return Some(i);
-        }
-    }
-    None
+    (0..data.len() - 1).find(|&i| data[i] == 0xFF && data[i + 1] == code)
 }
 
 #[test]

@@ -13,15 +13,49 @@ on:
     #            (mozjpeg compat, install staging, symbol-inventory
     #            additions, etc.) without forcing a no-op root release.
     tags: ['v*', 'wasm-v*', 'capi-v*']
-  release:
-    types: [published]
+  # NOTE: no `release: published` trigger (codex P1). Entering via an
+  # already-public Release would put the Release online BEFORE changelog
+  # validation and registry uploads — the exact partial-release state
+  # the sequencing below prevents. Tag pushes are the only entry point;
+  # the github-release job creates the Release as the final step.
 
 jobs:
+  # Gate for root-crate (`v*`) tags: the tag's CHANGELOG.md section must
+  # exist BEFORE anything publishes (issue #390; sequencing per codex P1
+  # — validation precedes publication, release creation comes last, so
+  # a missing changelog entry can never race the registry uploads).
+  changelog-check:
+    name: Validate CHANGELOG entry for tag
+    runs-on: ubuntu-latest
+    if: ${{ startsWith(github.ref, 'refs/tags/v') }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Require a CHANGELOG section for this version
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          VERSION="${TAG#v}"
+          awk -v ver="$VERSION" '
+            $0 ~ "^## \\[" ver "\\]" { grab = 1; next }
+            grab && /^## \[/ { exit }
+            grab { print }
+          ' CHANGELOG.md > /tmp/notes.md
+          if ! grep -q "[^[:space:]]" /tmp/notes.md; then
+            echo "::error::CHANGELOG.md has no section for $VERSION — write it, retag or re-run"
+            exit 1
+          fi
+          echo "CHANGELOG section for $VERSION found:"
+          cat /tmp/notes.md
+
   publish:
     name: Publish libjpeg-turbo-rs to crates.io
     runs-on: ubuntu-latest
-    # Skip on WASM-only or capi-only tags — those don't bump the root crate.
-    if: ${{ !startsWith(github.ref, 'refs/tags/wasm-v') && !startsWith(github.ref, 'refs/tags/capi-v') }}
+    needs: changelog-check
+    # Skip on WASM-only or capi-only tags — those don't bump the root
+    # crate. `!cancelled()` (not `always()`) so operator cancellation
+    # stops the run before the irreversible upload (codex P1). For `v*`
+    # tags a failed changelog-check blocks every publish.
+    if: ${{ !cancelled() && !startsWith(github.ref, 'refs/tags/wasm-v') && !startsWith(github.ref, 'refs/tags/capi-v') && needs.changelog-check.result == 'success' }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -66,8 +100,11 @@ jobs:
     #   - `capi-v*` tag → root crate is already on crates.io (capi
     #     ships an ABI-shim-only fix); skip the wait and publish capi
     #     directly.
-    needs: publish
-    if: ${{ always() && !startsWith(github.ref, 'refs/tags/wasm-v') && (needs.publish.result == 'success' || needs.publish.result == 'skipped') }}
+    # changelog-check must not have FAILED: on `v*` tags a missing
+    # CHANGELOG section blocks this job too (`skipped` = capi-v* tag,
+    # where no root section is expected).
+    needs: [publish, changelog-check]
+    if: ${{ !cancelled() && !startsWith(github.ref, 'refs/tags/wasm-v') && (needs.publish.result == 'success' || needs.publish.result == 'skipped') && needs.changelog-check.result != 'failure' }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -111,11 +148,13 @@ jobs:
   publish-wasm:
     name: Publish to npm
     runs-on: ubuntu-latest
-    needs: publish
+    needs: [publish, changelog-check]
     # Run on `v*` (root crate published) and `wasm-v*` (publish job
     # was skipped intentionally). Skip on `capi-v*` — those are ABI
-    # shim releases that don't bump the WASM bindings.
-    if: ${{ always() && !startsWith(github.ref, 'refs/tags/capi-v') && (needs.publish.result == 'success' || needs.publish.result == 'skipped') }}
+    # shim releases that don't bump the WASM bindings. Like
+    # publish-capi, a FAILED changelog-check blocks this job, and
+    # `!cancelled()` honors operator cancellation.
+    if: ${{ !cancelled() && !startsWith(github.ref, 'refs/tags/capi-v') && (needs.publish.result == 'success' || needs.publish.result == 'skipped') && needs.changelog-check.result != 'failure' }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -175,3 +214,34 @@ jobs:
           exit "$status"
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+  # Runs LAST (issue #390, sequenced per codex P1): the GitHub Release
+  # only appears after every publish channel for a `v*` tag succeeded,
+  # so a failed registry upload can never leave a public release for a
+  # version that is not actually installable. Notes come from the
+  # CHANGELOG section that changelog-check already validated.
+  github-release:
+    name: Create GitHub Release from CHANGELOG
+    runs-on: ubuntu-latest
+    needs: [changelog-check, publish, publish-capi, publish-wasm]
+    if: ${{ !cancelled() && startsWith(github.ref, 'refs/tags/v') && needs.changelog-check.result == 'success' && needs.publish.result == 'success' && needs.publish-capi.result == 'success' && needs.publish-wasm.result == 'success' }}
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - name: Create release with CHANGELOG notes
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          if gh release view "$TAG" > /dev/null 2>&1; then
+            echo "release for $TAG already exists (drafted manually?); leaving it alone"
+            exit 0
+          fi
+          VERSION="${TAG#v}"
+          awk -v ver="$VERSION" '
+            $0 ~ "^## \\[" ver "\\]" { grab = 1; next }
+            grab && /^## \[/ { exit }
+            grab { print }
+          ' CHANGELOG.md > /tmp/notes.md
+          gh release create "$TAG" --verify-tag --title "$TAG" --notes-file /tmp/notes.md

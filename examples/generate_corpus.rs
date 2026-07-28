@@ -85,7 +85,7 @@ fn make_checkerboard(width: usize, height: usize, block: usize) -> Vec<u8> {
     let mut pixels = Vec::with_capacity(width * height * 3);
     for y in 0..height {
         for x in 0..width {
-            let is_white = ((x / block) + (y / block)) % 2 == 0;
+            let is_white = ((x / block) + (y / block)).is_multiple_of(2);
             let v = if is_white { 255u8 } else { 0u8 };
             pixels.push(v);
             pixels.push(v);
@@ -151,9 +151,9 @@ fn make_natural(width: usize, height: usize) -> Vec<u8> {
             let fx = x as f64 / width.max(1) as f64;
             let fy = y as f64 / height.max(1) as f64;
             // Low-frequency base
-            let base_r = ((fx * 2.0 * std::f64::consts::PI).sin() * 60.0 + 128.0) as f64;
-            let base_g = ((fy * 1.5 * std::f64::consts::PI).cos() * 60.0 + 128.0) as f64;
-            let base_b = (((fx * fy) * 4.0 * std::f64::consts::PI).sin() * 40.0 + 128.0) as f64;
+            let base_r = (fx * 2.0 * std::f64::consts::PI).sin() * 60.0 + 128.0;
+            let base_g = (fy * 1.5 * std::f64::consts::PI).cos() * 60.0 + 128.0;
+            let base_b = ((fx * fy) * 4.0 * std::f64::consts::PI).sin() * 40.0 + 128.0;
             // High-frequency noise
             state = state.wrapping_mul(6364136223846793005).wrapping_add(1);
             let noise = ((state >> 33) as f64 / 255.0 - 0.5) * 30.0;
@@ -198,18 +198,8 @@ fn prepare_sources(tmp_dir: &Path) -> Vec<SourcePpm> {
     // Synthetic images: (name, width, height, pixel_fn)
     type PixelFn = Box<dyn Fn(usize, usize) -> Vec<u8>>;
     let mut synthetics: Vec<(&str, usize, usize, PixelFn)> = vec![
-        (
-            "gradient_64x64",
-            64,
-            64,
-            Box::new(|w, h| make_gradient(w, h)),
-        ),
-        (
-            "gradient_640x480",
-            640,
-            480,
-            Box::new(|w, h| make_gradient(w, h)),
-        ),
+        ("gradient_64x64", 64, 64, Box::new(make_gradient)),
+        ("gradient_640x480", 640, 480, Box::new(make_gradient)),
         (
             "solid_red_8x8",
             8,
@@ -222,12 +212,12 @@ fn prepare_sources(tmp_dir: &Path) -> Vec<SourcePpm> {
             32,
             Box::new(|w, h| make_checkerboard(w, h, 2)),
         ),
-        ("tiny_1x1", 1, 1, Box::new(|w, h| make_gradient(w, h))),
-        ("tiny_3x3", 3, 3, Box::new(|w, h| make_gradient(w, h))),
-        ("odd_7x11", 7, 11, Box::new(|w, h| make_gradient(w, h))),
-        ("odd_33x17", 33, 17, Box::new(|w, h| make_gradient(w, h))),
-        ("strip_100x1", 100, 1, Box::new(|w, h| make_gradient(w, h))),
-        ("strip_1x100", 1, 100, Box::new(|w, h| make_gradient(w, h))),
+        ("tiny_1x1", 1, 1, Box::new(make_gradient)),
+        ("tiny_3x3", 3, 3, Box::new(make_gradient)),
+        ("odd_7x11", 7, 11, Box::new(make_gradient)),
+        ("odd_33x17", 33, 17, Box::new(make_gradient)),
+        ("strip_100x1", 100, 1, Box::new(make_gradient)),
+        ("strip_1x100", 1, 100, Box::new(make_gradient)),
         // Phase 2 additions: more resolutions, content patterns, edge cases
         (
             "noise_320x240",
@@ -241,29 +231,19 @@ fn prepare_sources(tmp_dir: &Path) -> Vec<SourcePpm> {
             31,
             Box::new(|w, h| make_noise(w, h, 67890)),
         ),
-        ("edges_256x256", 256, 256, Box::new(|w, h| make_edges(w, h))),
-        ("sine_800x600", 800, 600, Box::new(|w, h| make_sine(w, h))),
-        (
-            "natural_640x480",
-            640,
-            480,
-            Box::new(|w, h| make_natural(w, h)),
-        ),
-        (
-            "natural_1280x720",
-            1280,
-            720,
-            Box::new(|w, h| make_natural(w, h)),
-        ),
-        ("odd_127x63", 127, 63, Box::new(|w, h| make_gradient(w, h))),
+        ("edges_256x256", 256, 256, Box::new(make_edges)),
+        ("sine_800x600", 800, 600, Box::new(make_sine)),
+        ("natural_640x480", 640, 480, Box::new(make_natural)),
+        ("natural_1280x720", 1280, 720, Box::new(make_natural)),
+        ("odd_127x63", 127, 63, Box::new(make_gradient)),
         (
             "odd_255x127",
             255,
             127,
             Box::new(|w, h| make_noise(w, h, 99999)),
         ),
-        ("tall_16x256", 16, 256, Box::new(|w, h| make_gradient(w, h))),
-        ("wide_256x16", 256, 16, Box::new(|w, h| make_edges(w, h))),
+        ("tall_16x256", 16, 256, Box::new(make_gradient)),
+        ("wide_256x16", 256, 16, Box::new(make_edges)),
         (
             "solid_black_8x8",
             8,
@@ -277,41 +257,21 @@ fn prepare_sources(tmp_dir: &Path) -> Vec<SourcePpm> {
             Box::new(|w, h| make_solid(w, h, 255, 255, 255)),
         ),
         // Large resolutions: 4K (always included)
-        (
-            "natural_3840x2160",
-            3840,
-            2160,
-            Box::new(|w, h| make_natural(w, h)),
-        ),
+        ("natural_3840x2160", 3840, 2160, Box::new(make_natural)),
     ];
 
     // 8K sources are opt-in via CORPUS_INCLUDE_8K=1 (too slow for CI)
     if std::env::var("CORPUS_INCLUDE_8K").as_deref() == Ok("1") {
-        synthetics.push((
-            "gradient_7680x4320",
-            7680,
-            4320,
-            Box::new(|w, h| make_gradient(w, h)),
-        ));
+        synthetics.push(("gradient_7680x4320", 7680, 4320, Box::new(make_gradient)));
         synthetics.push((
             "noise_7680x4320",
             7680,
             4320,
             Box::new(|w, h| make_noise(w, h, 77777)),
         ));
-        synthetics.push((
-            "edges_7680x4320",
-            7680,
-            4320,
-            Box::new(|w, h| make_edges(w, h)),
-        ));
+        synthetics.push(("edges_7680x4320", 7680, 4320, Box::new(make_edges)));
         // Odd 8K dimensions (non-MCU-aligned)
-        synthetics.push((
-            "natural_7681x4321",
-            7681,
-            4321,
-            Box::new(|w, h| make_natural(w, h)),
-        ));
+        synthetics.push(("natural_7681x4321", 7681, 4321, Box::new(make_natural)));
     }
 
     for (name, width, height, gen) in &synthetics {
@@ -408,7 +368,7 @@ fn generate_jpegs(cjpeg: &Path, sources: &[SourcePpm], out_dir: &Path) -> (usize
     let parallelism = std::thread::available_parallelism()
         .map(|n| n.get())
         .unwrap_or(4);
-    let chunk_size = (work.len() + parallelism - 1) / parallelism;
+    let chunk_size = work.len().div_ceil(parallelism);
 
     let generated_ref = &generated;
     let failed_ref = &failed;

@@ -106,11 +106,61 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          # --all-targets compiles test binaries that include_bytes!
+          # fixtures out of references/libjpeg-turbo (e.g. testorig.jpg).
+          submodules: recursive
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy
       - uses: Swatinem/rust-cache@v2
-      - run: cargo clippy --lib -- -D warnings
+      # Library and bin code: zero allowances.
+      - run: cargo clippy --workspace -- -D warnings
+      # Tests/benches/examples too (issue #390). Three structural lints are
+      # allowed in test code only — the sites are enumerated in
+      # docs/last_mile/phase4.md P4-70; do not grow the list.
+      - run: >
+          cargo clippy --workspace --all-targets -- -D warnings
+          -A clippy::needless_range_loop
+          -A clippy::too_many_arguments
+          -A clippy::type_complexity
+
+  # Proves each declared `rust-version` actually compiles (issue #390).
+  # A single workspace-wide 1.87 check is impossible: the image-bridge
+  # crate inherits image@0.25's rustc 1.88 floor, so it declares
+  # rust-version 1.88 and gets its own pinned leg (codex P2: checking it
+  # only on latest stable would let post-1.88 APIs slip past CI).
+  msrv:
+    name: MSRV (1.87 root/capi, 1.88 image bridge)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.87"
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.88"
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo +1.87 check -p libjpeg-turbo-rs --all-features
+      - run: cargo +1.87 check -p libjpeg-turbo-rs --no-default-features
+      - run: cargo +1.87 check -p libjpeg-turbo-rs-capi
+      - run: cargo +1.88 check -p libjpeg-turbo-rs-image
+
+  # Supply-chain gate (issue #390): advisories, licenses, duplicate majors,
+  # untrusted sources. Policy lives in deny.toml. `--workspace` because the
+  # root manifest is itself a package — without it cargo-deny roots the
+  # graph at `libjpeg-turbo-rs` only and skips violations introduced
+  # solely through the capi/image/wasm members (codex P2).
+  cargo-deny:
+    name: cargo-deny
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          command: check advisories bans licenses sources
+          arguments: --all-features --workspace
 
   no-std:
     name: no_std + alloc build (thumbv7em-none-eabihf)
@@ -204,7 +254,10 @@ jobs:
         with:
           components: miri
       - uses: Swatinem/rust-cache@v2
-      - run: cargo miri test --no-default-features --features std --lib -- --skip simd::
+      # Quoted: a plain YAML scalar may not end in `:`; GitHub's parser
+      # tolerates it but strict YAML tooling (PyYAML, actionlint) rejects
+      # the whole file.
+      - run: "cargo miri test --no-default-features --features std --lib -- --skip simd::"
         env:
           MIRIFLAGS: -Zmiri-disable-isolation
         timeout-minutes: 25

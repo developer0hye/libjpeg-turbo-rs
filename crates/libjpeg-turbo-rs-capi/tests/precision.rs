@@ -407,9 +407,9 @@ fn tj3_compress12_lossless_precision10_writes_sof_byte_10() {
         let mut src: Vec<i16> = Vec::with_capacity((w * h_px * 3) as usize);
         for y in 0..h_px {
             for x in 0..w {
-                src.push(((x as i32 * 17 + y as i32 * 31) & 0x03FF) as i16);
-                src.push(((x as i32 * 23 + y as i32 * 11) & 0x03FF) as i16);
-                src.push(((x as i32 * 41 + y as i32 * 7) & 0x03FF) as i16);
+                src.push(((x * 17 + y * 31) & 0x03FF) as i16);
+                src.push(((x * 23 + y * 11) & 0x03FF) as i16);
+                src.push(((x * 41 + y * 7) & 0x03FF) as i16);
             }
         }
 

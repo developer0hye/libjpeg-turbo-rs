@@ -26,13 +26,11 @@ fn bench_fdct_quantize_8x8(c: &mut Criterion) {
     let mut corrections_zigzag = [0u16; 64];
     let mut shifts_zigzag = [0i16; 64];
     let mut scales_zigzag = [0u16; 64];
-    for i in 0..64 {
-        divisors_zigzag[i] = divisors[i];
-        reciprocals_zigzag[i] = reciprocals[i];
-        corrections_zigzag[i] = corrections[i];
-        shifts_zigzag[i] = shifts[i];
-        scales_zigzag[i] = scales[i];
-    }
+    divisors_zigzag.copy_from_slice(&divisors);
+    reciprocals_zigzag.copy_from_slice(&reciprocals);
+    corrections_zigzag.copy_from_slice(&corrections);
+    shifts_zigzag.copy_from_slice(&shifts);
+    scales_zigzag.copy_from_slice(&scales);
     // Float divisors mirror `1 / (quant * 8)` — irrelevant for the
     // integer `fdct_quantize` benchmarked here, but the struct is
     // shared with the float-FDCT path so all fields must be filled.

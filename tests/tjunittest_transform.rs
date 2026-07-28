@@ -98,7 +98,7 @@ fn tjunittest_all_transforms_420() {
 fn tjunittest_all_transforms_grayscale() {
     let (w, h): (usize, usize) = (48, 32);
     let mut gray: Vec<u8> = Vec::with_capacity(w * h);
-    for y in 0..h {
+    for _y in 0..h {
         for x in 0..w {
             gray.push(((x * 255) / w.max(1)) as u8);
         }

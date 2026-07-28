@@ -7,7 +7,10 @@
 ```toml
 [dependencies]
 libjpeg-turbo-rs-image = "0.1"
-image = "0.25"
+# default-features = false keeps image's other format codecs (and the
+# AVIF encoder's advisory-carrying rav1e chain) out of your build graph.
+# Add the formats you actually use, e.g. features = ["png"].
+image = { version = "0.25", default-features = false }
 ```
 
 ### Decoding

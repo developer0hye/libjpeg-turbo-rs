@@ -138,7 +138,7 @@ fn reference_12bit_decode() {
         "output buffer size mismatch"
     );
     for &v in &img.data {
-        assert!(v >= 0 && v <= 4095, "12-bit sample {} out of range", v);
+        assert!((0..=4095).contains(&v), "12-bit sample {} out of range", v);
     }
 }
 

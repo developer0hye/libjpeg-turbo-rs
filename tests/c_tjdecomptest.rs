@@ -309,7 +309,7 @@ fn run_combo(
     let crop_str: String = if crop_arg.is_empty() {
         "none".to_string()
     } else {
-        crop_arg.replace('+', "_").replace('x', "_")
+        crop_arg.replace(['+', 'x'], "_")
     };
     let label: String = format!(
         "{}_{}_scale={}_crop={}_ns={}_dctf={}",

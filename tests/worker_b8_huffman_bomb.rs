@@ -123,7 +123,7 @@ fn build_huffman_bomb_jpeg() -> Vec<u8> {
     //             as 16-bit MSB-first.
     //   AC table: 128 symbols at length 15 (codes 0..127), then 34 symbols at
     //             length 16 (codes 256..289).
-    let mcus: usize = ((BOMB_WIDTH + 7) / 8) * ((BOMB_HEIGHT + 7) / 8);
+    let mcus: usize = BOMB_WIDTH.div_ceil(8) * BOMB_HEIGHT.div_ceil(8);
     let dc_code_0: u32 = 0; // first symbol at length 16 -> binary 0000_0000_0000_0000
     let dc_len_0: u8 = 16;
     // AC EOB is ac_symbols[0] == 0x00, first symbol at length 15 -> code 0, 15 bits.

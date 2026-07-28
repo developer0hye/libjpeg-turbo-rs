@@ -9,6 +9,7 @@
 //!      - `testimgari.jpg` arithmetic coded (lossless transcode of testimgint)
 //!      - `testimgint.jpg` baseline sequential, integer DCT, 8-bit
 //!      - `monkey12.jpg`   lossless / 12-bit (needs djpeg12)
+//!
 //!    Decodes each with our Rust decoder and with C djpeg (absolute path
 //!    `/opt/homebrew/bin/djpeg` preferred) via the shared helpers, then
 //!    asserts the RGB8 outputs are pixel-identical. 12-bit files are routed

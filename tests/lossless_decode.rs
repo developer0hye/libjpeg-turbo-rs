@@ -75,7 +75,7 @@ fn make_lossless_jpeg(pixels: &[u8], width: u16, height: u16, precision: u8) -> 
                 pixels[y * width as usize + x - 1] as i32
             };
 
-            let diff = ((pixel - prediction) as i32) & (mask as i32);
+            let diff = (pixel - prediction) & (mask as i32);
             // Encode diff as signed: if >= 2^(p-1), it's negative
             let signed_diff = if diff >= (1 << (precision - 1)) {
                 diff - (1 << precision)
