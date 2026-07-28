@@ -82,7 +82,7 @@ jobs:
       # we DO want to keep are in lsan_suppressions.txt.
       LSAN_OPTIONS: "suppressions=${{ github.workspace }}/lsan_suppressions.txt:detect_leaks=1"
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           submodules: recursive
 
@@ -119,7 +119,7 @@ jobs:
       # correct nightly UB detection knob.
       RUSTFLAGS: "-Z ub-checks=yes"
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           submodules: recursive
 
@@ -175,7 +175,7 @@ jobs:
       #                  false-positive on the un-instrumented C harness.
       ASAN_OPTIONS: "detect_leaks=0:abort_on_error=1:halt_on_error=1"
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           submodules: recursive
 
