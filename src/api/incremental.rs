@@ -28,9 +28,13 @@ use std::io::Read;
 /// Bytes requested from the reader per refill.
 const READ_CHUNK: usize = 64 * 1024;
 
-/// Minimum bytes to accumulate after a starved row before retrying it —
-/// a retry re-decodes the whole row, so tiny refills would be
-/// quadratic against drip-feed readers.
+/// Refill batching floor for FAST sources only: while `read()` keeps
+/// returning full chunks, accumulate this much before re-attempting a
+/// starved row. A source that short-reads breaks the batch immediately
+/// (we cannot wait for more without risking a block on a stream that
+/// already delivered the whole image), so this constant does NOT
+/// protect against drip-feed retry cost — see the retry-granularity
+/// note on [`decompress_from_reader_incremental`].
 const MIN_RETRY_REFILL: usize = 4 * 1024;
 
 /// Hard cap on the buffered header prefix (SOI through the first SOS),
@@ -56,6 +60,13 @@ const MAX_WINDOW_BYTES: usize = 64 * 1024 * 1024;
 /// Decode options (output format, scaling, cropping) are not yet
 /// plumbed through this entry point — it decodes with defaults, like
 /// `decompress`. Use the slice API when you need options.
+///
+/// **Retry granularity.** A starved MCU row is re-attempted after every
+/// short read (waiting for more would block on a source that already
+/// delivered the image), so retry cost scales with how few bytes each
+/// `read()` returns: a pathological 1-byte-per-read source re-decodes
+/// each row once per byte. Sources that deliver kilobytes per read —
+/// files, buffered sockets — are unaffected.
 pub fn decompress_from_reader_incremental<R: Read>(reader: R) -> Result<Image> {
     decode_incremental(reader).map(|(image, _)| image)
 }
@@ -106,13 +117,17 @@ fn decode_incremental<R: Read>(mut reader: R) -> Result<(Image, usize)> {
     let mut source_done: bool = false;
 
     // Phase 1: accumulate the header prefix through the first SOS. The
-    // shared boundary scanner reports when the prefix is complete.
-    let entropy_start: usize = loop {
+    // shared boundary scanner reports when the prefix is complete. A
+    // stream that ends with no SOS (non-JPEG bytes, tables-only,
+    // truncated header) falls through to the buffered path so the
+    // error VARIANT matches `decompress` on the same bytes exactly
+    // (reviewer P2: this used to blanket-report UnexpectedEof).
+    let entropy_start: Option<usize> = loop {
         if let Some(off) = boundary::find_first_sos(&buf) {
-            break off;
+            break Some(off);
         }
         if source_done {
-            return Err(JpegError::UnexpectedEof);
+            break None;
         }
         if buf.len() > MAX_HEADER_BYTES {
             return Err(JpegError::CorruptData(
@@ -131,9 +146,12 @@ fn decode_incremental<R: Read>(mut reader: R) -> Result<(Image, usize)> {
     // streams walk every scan during header parse, which runs past the
     // prefix — exactly the shapes that take the buffered fallback,
     // where the full-stream parse delivers the real verdict.
-    let eligible: bool = match Decoder::new(&buf[..entropy_start]) {
-        Ok(probe) => probe.baseline_stream_eligible(),
-        Err(_) => false,
+    let eligible: bool = match entropy_start {
+        Some(off) => match Decoder::new(&buf[..off]) {
+            Ok(probe) => probe.baseline_stream_eligible(),
+            Err(_) => false,
+        },
+        None => false,
     };
 
     if !eligible {
@@ -142,6 +160,15 @@ fn decode_incremental<R: Read>(mut reader: R) -> Result<(Image, usize)> {
         // layout requires the full stream (progressive multi-pass,
         // non-interleaved block rasters, arithmetic conditioning).
         loop {
+            // Bounded like every other accumulation path in this module
+            // (reviewer P3): `decompress_from_reader` itself has no cap,
+            // so this is deliberately stricter than "exactly like" it —
+            // a hostile endless source cannot OOM the fallback.
+            if buf.len() > MAX_HEADER_BYTES {
+                return Err(JpegError::CorruptData(
+                    "stream exceeded the 256 MiB buffering cap".to_string(),
+                ));
+            }
             let n: usize = read_some(&mut reader, &mut buf, &mut scratch)?;
             peak = peak.max(READ_CHUNK + buf.capacity());
             if n == 0 {
@@ -151,6 +178,7 @@ fn decode_incremental<R: Read>(mut reader: R) -> Result<(Image, usize)> {
         let image: Image = crate::api::high_level::decompress(&buf)?;
         return Ok((image, peak));
     }
+    let entropy_start: usize = entropy_start.expect("eligible implies an SOS offset was found");
 
     // Phase 3: windowed row decode. Split rather than clone: `buf`
     // keeps its allocation as the header, the entropy tail moves to a
