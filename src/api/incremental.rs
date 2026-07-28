@@ -83,28 +83,24 @@ pub fn decompress_from_reader_incremental_instrumented<R: Read>(
     decode_incremental(reader)
 }
 
-/// One `read` call into `scratch`, appended to `buf`. Returns the byte
-/// count (0 = end of stream); propagates reader errors as
-/// [`JpegError::Io`]. Deliberately a SINGLE read: looping until a
-/// fixed chunk fills (`Take::read_to_end` style) would block on a
-/// persistent socket that has already delivered the complete image but
-/// stays open (codex P1).
-fn read_some<R: Read>(
-    reader: &mut R,
-    buf: &mut Vec<u8>,
-    scratch: &mut [u8; READ_CHUNK],
-) -> Result<usize> {
-    let n: usize = loop {
+/// One `read` call into `scratch`; the caller checks its accumulation
+/// cap against the ACTUAL byte count before appending (a pre-read
+/// check would falsely reject legal streams sized within one chunk of
+/// the cap — codex P2). Returns 0 at end of stream; propagates reader
+/// errors as [`JpegError::Io`]. Deliberately a SINGLE read: looping
+/// until a fixed chunk fills (`Take::read_to_end` style) would block
+/// on a persistent socket that has already delivered the complete
+/// image but stays open (codex P1).
+fn read_raw<R: Read>(reader: &mut R, scratch: &mut [u8; READ_CHUNK]) -> Result<usize> {
+    loop {
         match reader.read(&mut scratch[..]) {
-            Ok(n) => break n,
+            Ok(n) => return Ok(n),
             // The Read contract expects callers to retry Interrupted
             // (read_to_end did so implicitly); anything else is real.
             Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
             Err(e) => return Err(JpegError::Io(e)),
         }
-    };
-    buf.extend_from_slice(&scratch[..n]);
-    Ok(n)
+    }
 }
 
 fn decode_incremental<R: Read>(mut reader: R) -> Result<(Image, usize)> {
@@ -129,15 +125,13 @@ fn decode_incremental<R: Read>(mut reader: R) -> Result<(Image, usize)> {
         if source_done {
             break None;
         }
-        // Guard BEFORE appending: one more chunk at the cap boundary
-        // would trigger Vec's amortized doubling (~2x the cap in one
-        // allocation request), defeating the limit (codex P2).
-        if buf.len() + READ_CHUNK > MAX_HEADER_BYTES {
+        let n: usize = read_raw(&mut reader, &mut scratch)?;
+        if buf.len() + n > MAX_HEADER_BYTES {
             return Err(JpegError::CorruptData(
                 "no SOS marker within the 256 MiB header cap".to_string(),
             ));
         }
-        let n: usize = read_some(&mut reader, &mut buf, &mut scratch)?;
+        buf.extend_from_slice(&scratch[..n]);
         peak = peak.max(READ_CHUNK + buf.capacity());
         if n == 0 {
             source_done = true;
@@ -166,13 +160,16 @@ fn decode_incremental<R: Read>(mut reader: R) -> Result<(Image, usize)> {
             // Bounded like every other accumulation path in this module
             // (reviewer P3): `decompress_from_reader` itself has no cap,
             // so this is deliberately stricter than "exactly like" it —
-            // a hostile endless source cannot OOM the fallback.
-            if buf.len() + READ_CHUNK > MAX_HEADER_BYTES {
+            // a hostile endless source cannot OOM the fallback. The cap
+            // compares against the ACTUAL read size so a legal stream
+            // just under it is never rejected.
+            let n: usize = read_raw(&mut reader, &mut scratch)?;
+            if buf.len() + n > MAX_HEADER_BYTES {
                 return Err(JpegError::CorruptData(
                     "stream exceeded the 256 MiB buffering cap".to_string(),
                 ));
             }
-            let n: usize = read_some(&mut reader, &mut buf, &mut scratch)?;
+            buf.extend_from_slice(&scratch[..n]);
             peak = peak.max(READ_CHUNK + buf.capacity());
             if n == 0 {
                 break;
@@ -217,12 +214,6 @@ fn decode_incremental<R: Read>(mut reader: R) -> Result<(Image, usize)> {
             buf.drain(..consumable);
             st.rebase(consumable);
         }
-        if buf.len() + READ_CHUNK + MIN_RETRY_REFILL > MAX_WINDOW_BYTES {
-            return Err(JpegError::CorruptData(format!(
-                "entropy window exceeded {} bytes without an MCU row committing",
-                MAX_WINDOW_BYTES
-            )));
-        }
         // Batch refills only while the source keeps delivering full
         // reads: a short read means the source has nothing more ready
         // (drip feed or idle socket), and looping for more would either
@@ -230,7 +221,14 @@ fn decode_incremental<R: Read>(mut reader: R) -> Result<(Image, usize)> {
         // image — retry the row with what arrived instead.
         let mut refilled: usize = 0;
         loop {
-            let n: usize = read_some(&mut reader, &mut buf, &mut scratch)?;
+            let n: usize = read_raw(&mut reader, &mut scratch)?;
+            if buf.len() + n > MAX_WINDOW_BYTES {
+                return Err(JpegError::CorruptData(format!(
+                    "entropy window exceeded {} bytes without an MCU row committing",
+                    MAX_WINDOW_BYTES
+                )));
+            }
+            buf.extend_from_slice(&scratch[..n]);
             peak = peak.max(READ_CHUNK + header.capacity() + buf.capacity());
             if n == 0 {
                 is_final = true;
