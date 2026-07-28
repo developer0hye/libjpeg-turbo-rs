@@ -57,12 +57,12 @@ pub fn decompress_from_reader_incremental<R: Read>(reader: R) -> Result<Image> {
     decode_incremental(reader).map(|(image, _)| image)
 }
 
-/// [`decompress_from_reader_incremental`] plus the peak number of
-/// compressed-input bytes held at any point — header prefix + entropy
-/// window + the fixed 64 KiB read-staging buffer — the observable that
-/// P4-58's bounded-memory acceptance test asserts on. Exposed (rather
-/// than a test-only hook) so callers tuning window behaviour can
-/// measure too.
+/// [`decompress_from_reader_incremental`] plus the peak input storage
+/// held at any point, measured as allocation CAPACITY (not just live
+/// bytes): header prefix + entropy window + the fixed 64 KiB
+/// read-staging buffer. This is the observable P4-58's bounded-memory
+/// acceptance test asserts on. Exposed (rather than a test-only hook)
+/// so callers tuning window behaviour can measure too.
 pub fn decompress_from_reader_incremental_instrumented<R: Read>(
     reader: R,
 ) -> Result<(Image, usize)> {
@@ -117,7 +117,7 @@ fn decode_incremental<R: Read>(mut reader: R) -> Result<(Image, usize)> {
             ));
         }
         let n: usize = read_some(&mut reader, &mut buf, &mut scratch)?;
-        peak = peak.max(READ_CHUNK + buf.len());
+        peak = peak.max(READ_CHUNK + buf.capacity());
         if n == 0 {
             source_done = true;
         }
@@ -140,7 +140,7 @@ fn decode_incremental<R: Read>(mut reader: R) -> Result<(Image, usize)> {
         // non-interleaved block rasters, arithmetic conditioning).
         loop {
             let n: usize = read_some(&mut reader, &mut buf, &mut scratch)?;
-            peak = peak.max(READ_CHUNK + buf.len());
+            peak = peak.max(READ_CHUNK + buf.capacity());
             if n == 0 {
                 break;
             }
@@ -154,16 +154,20 @@ fn decode_incremental<R: Read>(mut reader: R) -> Result<(Image, usize)> {
     // new window vector — no moment holds two copies of the header
     // (codex P2 on peak accounting).
     let window_tail: Vec<u8> = buf[entropy_start..].to_vec();
-    peak = peak.max(READ_CHUNK + buf.len() + window_tail.len());
+    peak = peak.max(READ_CHUNK + buf.capacity() + window_tail.capacity());
     buf.truncate(entropy_start);
-    let header: Vec<u8> = buf;
+    let mut header: Vec<u8> = buf;
+    // The header keeps the capacity of the whole accumulated prefix;
+    // release the tail's worth so the retained allocation matches what
+    // the metric reports.
+    header.shrink_to_fit();
     let mut buf: Vec<u8> = window_tail;
     let decoder: Decoder = Decoder::new(&header)?;
     let mut st = decoder.baseline_stream_begin()?;
     let mut is_final: bool = source_done;
 
     loop {
-        peak = peak.max(READ_CHUNK + header.len() + buf.len());
+        peak = peak.max(READ_CHUNK + header.capacity() + buf.capacity());
         if decoder.baseline_stream_step(&buf, is_final, &mut st)? {
             break;
         }
@@ -193,7 +197,7 @@ fn decode_incremental<R: Read>(mut reader: R) -> Result<(Image, usize)> {
         let mut refilled: usize = 0;
         loop {
             let n: usize = read_some(&mut reader, &mut buf, &mut scratch)?;
-            peak = peak.max(READ_CHUNK + header.len() + buf.len());
+            peak = peak.max(READ_CHUNK + header.capacity() + buf.capacity());
             if n == 0 {
                 is_final = true;
                 break;
