@@ -1,8 +1,3 @@
-#[inline(always)]
-fn clamp(val: i32) -> u8 {
-    val.clamp(0, 255) as u8
-}
-
 // ---------------------------------------------------------------------------
 // Table-driven YCbCr→RGB (P4-60, issue #359).
 //
@@ -335,6 +330,10 @@ pub fn cmyk_passthrough_row(c: &[u8], m: &[u8], y: &[u8], k: &[u8], cmyk: &mut [
 mod table_equivalence_tests {
     use super::*;
 
+    fn clamp(val: i32) -> u8 {
+        val.clamp(0, 255) as u8
+    }
+
     /// The multiply form the tables replaced (P4-60). Kept ONLY as the
     /// oracle for the exhaustive equivalence proof below.
     fn reference_pixel(y: u8, cb: u8, cr: u8) -> (u8, u8, u8) {
@@ -386,7 +385,7 @@ mod table_equivalence_tests {
         .unwrap();
         let g_min: i32 = -((CB_G_TAB[255] + CR_G_TAB[255]) >> 16);
         let g_max: i32 = -((CB_G_TAB[0] + CR_G_TAB[0]) >> 16);
-        let lo: i32 = (0 + min_delta).min(0 + g_min);
+        let lo: i32 = min_delta.min(g_min);
         let hi: i32 = (255 + max_delta).max(255 + g_max);
         assert!(lo + 256 >= 0, "lowest index {lo} escapes the table");
         assert!(hi + 256 < 1024, "highest index {hi} escapes the table");
