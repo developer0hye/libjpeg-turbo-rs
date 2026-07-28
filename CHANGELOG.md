@@ -25,6 +25,9 @@ and `git log` between tags.
 - Windows CI leg building every workspace test target + the two
   C-tool-free suites (#378); Miri CI job over the non-SIMD unit tests
   (#389 phase 1); `publish-check` CI job (#380).
+- Regression test for #362 (duplicate report of #314, filed against
+  v0.6.3 after the v0.7.0 fix shipped; PR #379 confirmed no further
+  product change was needed).
 - This changelog; MSRV CI job (rustc 1.87 for the root and capi crates);
   `cargo-deny` supply-chain gate (advisories/bans/licenses/sources) with
   `deny.toml` policy; Dependabot for cargo + GitHub Actions; a README
@@ -81,7 +84,7 @@ and `git log` between tags.
 
 ### Fixed
 - 4:2:0 AVX2 encoder emitted non-dummy trailing-MCU column blocks for
-  `width % 16 in 1..=8` (#314 / #362 class); aarch64 DCT parity (#342).
+  `width % 16 in 1..=8` (#314); aarch64 DCT parity (#342).
 - CMYK encode dropped options and wrote a spurious JFIF marker (#313,
   #339); progressive+arithmetic option combinations (#322).
 

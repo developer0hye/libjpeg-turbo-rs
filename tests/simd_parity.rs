@@ -1,12 +1,15 @@
 //! Cross-arch SIMD parity tests.
 //!
-//! For every SIMD kernel pair (scalar reference vs SIMD implementation),
-//! this suite generates N=1000 reproducible randomized inputs using a
-//! Mulberry32 PRNG and asserts that the SIMD backend produces bit-exact
-//! output compared to the scalar reference. The scalar reference path
-//! is always available (see `src/simd/scalar.rs`), and platform-specific
-//! SIMD kernels are gated with `#[cfg(target_arch)]` so this file builds
-//! cleanly on every supported architecture.
+//! For every SIMD kernel pair (scalar reference vs SIMD implementation)
+//! that exists on the host arch, this suite generates N=1000 reproducible
+//! randomized inputs using a Mulberry32 PRNG and asserts that the SIMD
+//! backend produces bit-exact output compared to the scalar reference.
+//! The scalar reference path is always available (see `src/simd/scalar.rs`),
+//! and platform-specific SIMD kernels are gated with `#[cfg(target_arch)]`
+//! so this file builds cleanly on every supported architecture. Where a
+//! port is missing the comparison block compiles away and only the scalar
+//! not-panic path runs — today that is the reduced-size IDCT trio off
+//! aarch64 (tracked as P4-71).
 //!
 //! Reproducibility
 //! ---------------
