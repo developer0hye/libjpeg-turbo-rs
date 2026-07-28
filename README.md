@@ -83,6 +83,10 @@ Apple M1 Pro, C libjpeg-turbo 3.1.0, quality 75:
 
 ## Quick Start
 
+Runnable examples live in [`examples/`](examples/README.md) — decode,
+encode, header probing, caller-buffer decode, and lossless transforms,
+each a `cargo run --example <name>` away.
+
 ```toml
 [dependencies]
 libjpeg-turbo-rs = "0.8"
