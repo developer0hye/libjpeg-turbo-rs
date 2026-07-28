@@ -70,3 +70,38 @@ That reframes the work:
 Recommendation: keep #359 open for the portable-SIMD half, and treat
 scalar-kernel optimisation as the near-term item — it is stable-Rust
 work with a measured 2.5×+ headroom.
+
+## 2026-07-28 — P4-60 step 1: table-driven YCbCr→RGB (branch feat/issue-359-scalar-color-tables)
+
+Same harness shape (linux/riscv64 container under emulation, `rust:1-slim`
+image — note the C side is this image's distro djpeg, a DIFFERENT build
+than the 2026-07-27 run, so the ours/C ratios below are comparable only
+within this section). The two decode rows carry their 07-27 figures for
+orientation, but **no same-env baseline was re-measured**: that pair
+crosses container images, so the end-to-end delta it implies is
+indicative, not a controlled A/B. The kernel A/B is the controlled
+measurement — same binary, same run, one call site swapped.
+
+| measurement | value |
+|---|---:|
+| kernel A/B, 1080p frame of rows: multiply form | 34,479 µs |
+| kernel A/B, same: table form | **21,120 µs (1.63× faster)** |
+| decode `photo_640x480_420` (was 22,143 in the 07-27 env) | **19,015 µs** |
+| decode `photo_1920x1080_420` (was 168,094) | **147,494 µs** |
+| djpeg 640×480, best of 3 minus startup (~34,967) | ~17,050 µs |
+| djpeg 1080p, best of 3 minus startup | ~85,802 µs |
+| ours/C same-run: 640×480 | **~1.12×** |
+| ours/C same-run: 1080p | **~1.72×** |
+
+**Verdict: keep.** The conversion tables (exact precomputation of the
+multiply form — bit-identical, proven exhaustively over chroma and by
+49 simd-off djpeg cross-checks) cut the kernel 1.63×, and the decode
+totals moved 12–14% against the 07-27 env — read that pair as the
+direction, not a measured end-to-end win. The C comparison here is
+coarse too (3 process-level runs, PPM write included, emulation noise —
+the 640×480 ratio should be read as "near parity", not a precise
+1.12), but the 1080p gap clearly remains
+above the ≤1.2× target: the residual is in other stages (fancy
+upsample, IDCT column passes, Huffman decode). P4-60 stays OPEN; next
+candidate per C source: `jdsample.c`-style incremental fancy upsample
+and Huffman decode table width.
