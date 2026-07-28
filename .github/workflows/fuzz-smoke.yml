@@ -233,7 +233,7 @@ jobs:
 
       - name: Upload repro metadata
         if: failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: fuzz-repro-${{ matrix.target }}
           path: fuzz/repro/${{ matrix.target }}
@@ -242,7 +242,7 @@ jobs:
 
       - name: Upload crash artifacts
         if: failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: fuzz-artifacts-${{ matrix.target }}
           path: fuzz/artifacts/${{ matrix.target }}
