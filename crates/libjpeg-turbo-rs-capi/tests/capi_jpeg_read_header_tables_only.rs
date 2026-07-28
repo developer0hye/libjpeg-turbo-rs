@@ -88,7 +88,7 @@ fn build_tables_only_blob() -> Vec<u8> {
     v.extend_from_slice(&[0xFF, 0xD8]);
     // DQT: 2 (len bytes) + 1 (Pq/Tq) + 64 (8-bit quant values) = 67 = 0x43.
     v.extend_from_slice(&[0xFF, 0xDB, 0x00, 0x43, 0x00]);
-    v.extend(std::iter::repeat(16u8).take(64));
+    v.extend(std::iter::repeat_n(16u8, 64));
     // DHT: 2 (len bytes) + 1 (Tc/Th) + 16 (bits[1..17]) + 12 (huffvals) = 31 = 0x1F.
     v.extend_from_slice(&[0xFF, 0xC4, 0x00, 0x1F, 0x00]);
     // bits[1..17] sums to 12 (one DC code at length 1, six at length 3,

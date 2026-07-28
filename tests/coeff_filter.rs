@@ -2,7 +2,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
 use libjpeg_turbo_rs::{
-    compress, decompress, read_coefficients, transform_jpeg_with_options, PixelFormat, Subsampling,
+    compress, read_coefficients, transform_jpeg_with_options, PixelFormat, Subsampling,
     TransformOp, TransformOptions,
 };
 

@@ -148,7 +148,7 @@ fn djpeg_dims(djpeg: &PathBuf, jpeg: &[u8]) -> Option<(usize, usize, usize)> {
 
 #[test]
 fn strict_mode_rejects_chroma_oversampling() {
-    let mut decoder = Decoder::new(FIXTURE).expect("header parse");
+    let decoder = Decoder::new(FIXTURE).expect("header parse");
     // default = strict
     let err = decoder
         .decode_image()

@@ -40,7 +40,7 @@ fn uniform_color_image_quantizes_to_one_entry() {
     let width = 8;
     let height = 8;
     // Solid red image
-    let pixels: Vec<u8> = vec![255, 0, 0].repeat(width * height);
+    let pixels: Vec<u8> = [255, 0, 0].repeat(width * height);
 
     let options = QuantizeOptions {
         num_colors: 256,
@@ -166,7 +166,7 @@ fn external_colormap_is_used() {
     let width = 4;
     let height = 4;
     // Pixels are all (128, 128, 128)
-    let pixels: Vec<u8> = vec![128, 128, 128].repeat(width * height);
+    let pixels: Vec<u8> = [128, 128, 128].repeat(width * height);
 
     let colormap = vec![[0, 0, 0], [128, 128, 128], [255, 255, 255]];
     let options = QuantizeOptions {
@@ -422,7 +422,7 @@ fn ordered_dither_produces_spatial_pattern() {
     let height = 16;
     // Uniform mid-gray: quantizing to 2 colors with ordered dither should produce a pattern.
     // Use an external colormap so the palette has exactly 2 entries (black and white).
-    let pixels: Vec<u8> = vec![128, 128, 128].repeat(width * height);
+    let pixels: Vec<u8> = [128, 128, 128].repeat(width * height);
 
     let options = QuantizeOptions {
         num_colors: 2,
@@ -446,7 +446,7 @@ fn ordered_dither_produces_spatial_pattern() {
 fn quantized_image_dimensions_match() {
     let width = 13;
     let height = 7;
-    let pixels: Vec<u8> = vec![100, 150, 200].repeat(width * height);
+    let pixels: Vec<u8> = [100, 150, 200].repeat(width * height);
 
     let options = QuantizeOptions::default();
     let result = quantize(&pixels, width, height, &options).unwrap();

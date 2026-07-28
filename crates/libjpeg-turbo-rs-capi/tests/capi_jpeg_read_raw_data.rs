@@ -60,9 +60,9 @@ fn manifest_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
 }
 
-/// Byte offsets into `JpegDecompressPublic` — verified by the compile-time
-/// `offset_of!` assertions and a one-shot runtime print in jpeglib.rs.
-/// These values are for LP64 targets (macOS/Linux aarch64/x86_64).
+// Byte offsets into `JpegDecompressPublic` — verified by the compile-time
+// `offset_of!` assertions and a one-shot runtime print in jpeglib.rs.
+// These values are for LP64 targets (macOS/Linux aarch64/x86_64).
 
 /// `raw_data_out` — asserted by ABI test in jpeglib.rs.
 const RAW_DATA_OUT_OFFSET: usize = 92;

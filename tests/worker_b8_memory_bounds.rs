@@ -123,8 +123,7 @@ fn max_pixels_rejects_image_exceeding_limit_bounded() {
         decoder.set_max_pixels(100);
         let err = decoder
             .decode_image()
-            .err()
-            .expect("must reject 1024-pixel image with max_pixels=100");
+            .expect_err("must reject 1024-pixel image with max_pixels=100");
         format!("{}", err)
     });
     assert!(
@@ -156,7 +155,7 @@ fn max_pixels_zero_rejects_any_nonzero_image_bounded() {
     let (err, m) = measure("max_pixels_zero", || {
         let mut decoder: Decoder = Decoder::new(&jpeg).unwrap();
         decoder.set_max_pixels(0);
-        decoder.decode_image().err().expect(
+        decoder.decode_image().expect_err(
             "max_pixels=0 must reject any non-zero image (0 means zero, not unlimited, here)",
         )
     });
@@ -180,8 +179,7 @@ fn max_pixels_exact_boundary_bounded() {
         let mut d: Decoder = Decoder::new(&jpeg).unwrap();
         d.set_max_pixels(1023);
         d.decode_image()
-            .err()
-            .expect("max_pixels=1023 must reject 1024-pixel image")
+            .expect_err("max_pixels=1023 must reject 1024-pixel image")
     });
     assert_within_small_decode_bounds("max_pixels_lt", m_err);
 }
@@ -199,8 +197,7 @@ fn max_memory_very_low_rejects_bounded() {
         format!(
             "{}",
             d.decode_image()
-                .err()
-                .expect("must reject with max_memory=1024")
+                .expect_err("must reject with max_memory=1024")
         )
     });
     assert!(
@@ -243,8 +240,7 @@ fn max_memory_large_image_tight_limit_bounded() {
         let mut d: Decoder = Decoder::new(&jpeg).unwrap();
         d.set_max_memory(1_000);
         d.decode_image()
-            .err()
-            .expect("should reject 64x64 with max_memory=1000")
+            .expect_err("should reject 64x64 with max_memory=1000")
     });
     assert_within_small_decode_bounds("max_mem_tight", m);
 }
@@ -261,7 +257,7 @@ fn scan_limit_rejects_progressive_with_many_scans_bounded() {
         d.set_scan_limit(1);
         format!(
             "{}",
-            d.decode_image().err().expect(
+            d.decode_image().expect_err(
                 "scan_limit=1 must reject multi-scan progressive JPEG — \
                  this is the DoS mitigation under test",
             )
@@ -342,8 +338,7 @@ fn stop_on_warning_rejects_truncated_jpeg_bounded() {
         format!(
             "{}",
             d.decode_image()
-                .err()
-                .expect("stop_on_warning must convert warning to error")
+                .expect_err("stop_on_warning must convert warning to error")
         )
     });
     assert!(
@@ -380,8 +375,7 @@ fn max_pixels_and_max_memory_both_enforced_bounded() {
         d.set_max_pixels(100);
         d.set_max_memory(10 * 1024 * 1024);
         d.decode_image()
-            .err()
-            .expect("pixel limit must fire before mem limit")
+            .expect_err("pixel limit must fire before mem limit")
     });
     assert_within_small_decode_bounds("combined_pixels", m1);
 
@@ -390,8 +384,7 @@ fn max_pixels_and_max_memory_both_enforced_bounded() {
         d.set_max_pixels(100_000);
         d.set_max_memory(100);
         d.decode_image()
-            .err()
-            .expect("memory limit must fire independently")
+            .expect_err("memory limit must fire independently")
     });
     assert_within_small_decode_bounds("combined_memory", m2);
 }

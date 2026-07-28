@@ -225,7 +225,7 @@ fn c_djpeg_cross_validation_rgb565() {
         c_bmp_data[12],
         c_bmp_data[13],
     ]);
-    let row_stride: usize = ((64 * 2 + 3) / 4) * 4; // 128, already 4-byte aligned
+    let row_stride: usize = (64usize * 2).div_ceil(4) * 4; // 128, already 4-byte aligned
     let bottom_up: bool = c_height_raw > 0;
 
     let mut c_pixels: Vec<u8> = Vec::with_capacity(64 * 64 * 2);
@@ -246,11 +246,7 @@ fn c_djpeg_cross_validation_rgb565() {
             let c_val: u16 = u16::from_le_bytes([c_pixels[i * 2], c_pixels[i * 2 + 1]]);
             let r_val: u16 =
                 u16::from_le_bytes([rust_image.data[i * 2], rust_image.data[i * 2 + 1]]);
-            let diff: u16 = if c_val > r_val {
-                c_val - r_val
-            } else {
-                r_val - c_val
-            };
+            let diff: u16 = c_val.abs_diff(r_val);
             if diff > max_diff {
                 max_diff = diff;
             }

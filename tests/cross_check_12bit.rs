@@ -587,10 +587,9 @@ fn c_cross_validation_12bit_encode_decode() {
         // otherwise generate a small 16-bit PGM.
         let ppm_path: PathBuf = reference_path("monkey16.ppm");
         let tmp_pgm: TempFile = TempFile::new("12bit_src.pgm");
-        let source_path: PathBuf;
 
-        if ppm_path.exists() {
-            source_path = ppm_path;
+        let source_path: PathBuf = if ppm_path.exists() {
+            ppm_path
         } else {
             // Generate a 16x16 16-bit PGM (maxval=4095) for cjpeg input
             let (w, h): (usize, usize) = (16, 16);
@@ -604,8 +603,8 @@ fn c_cross_validation_12bit_encode_decode() {
                 }
             }
             std::fs::write(tmp_pgm.path(), &pgm_data).expect("write temp PGM");
-            source_path = tmp_pgm.path().to_path_buf();
-        }
+            tmp_pgm.path().to_path_buf()
+        };
 
         let tmp_jpg: TempFile = TempFile::new("c12_enc.jpg");
         let output = Command::new(&cjpeg)

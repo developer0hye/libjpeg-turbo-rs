@@ -588,13 +588,12 @@ fn comment_empty_string_roundtrip() {
         .encode()
         .unwrap();
     let img = decompress(&jpeg).unwrap();
-    // Empty comment might be stored as Some("") or None
-    match &img.comment {
-        Some(c) => assert!(
+    // Empty comment may be stored as Some("") or None — both are acceptable.
+    if let Some(c) = &img.comment {
+        assert!(
             c.is_empty(),
             "empty comment input should yield empty string"
-        ),
-        None => {} // Also acceptable
+        );
     }
 }
 

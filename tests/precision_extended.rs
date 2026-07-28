@@ -203,7 +203,7 @@ fn lossless_precision_12_full_range_values() {
     let img = decompress_12bit(&jpeg).unwrap();
     for &val in &img.data {
         assert!(
-            val >= 0 && val <= 4095,
+            (0..=4095).contains(&val),
             "12-bit value {} out of valid range 0-4095",
             val
         );
@@ -253,7 +253,11 @@ fn lossless_precision_12_quality_50() {
     assert_eq!(img.height, h);
     // At quality 50, output is valid but lossy
     for &val in &img.data {
-        assert!(val >= 0 && val <= 4095, "12-bit value {} out of range", val);
+        assert!(
+            (0..=4095).contains(&val),
+            "12-bit value {} out of range",
+            val
+        );
     }
 }
 

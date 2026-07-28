@@ -81,7 +81,7 @@ fn run_lossy_combo(
     let (rgb_w, rgb_h, rgb_pixels) = helpers::parse_ppm_file(rgb_ppm_path);
     let (gray_w, gray_h, gray_pixels) = helpers::parse_pgm_file(gray_pgm_path);
 
-    let icc_data: Option<Vec<u8>> = icc_path.map(|p| helpers::read_icc_profile(p));
+    let icc_data: Option<Vec<u8>> = icc_path.map(helpers::read_icc_profile);
 
     // cjpeg restart arg fragment.
     //
@@ -813,7 +813,7 @@ fn run_lossless_combo(
     };
 
     // Rust encode
-    let icc_data: Option<Vec<u8>> = icc_path.map(|p| helpers::read_icc_profile(p));
+    let icc_data: Option<Vec<u8>> = icc_path.map(helpers::read_icc_profile);
 
     let mut enc = Encoder::new(pixels, width, height, pixel_format);
     enc = enc

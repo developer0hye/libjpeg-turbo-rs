@@ -170,7 +170,8 @@ fn c_xval_12bit_rgb_subsamplings() {
     let pixels: Vec<i16> = generate_12bit_gradient(w, h);
 
     // 12-bit color only supports 4:4:4 subsampling
-    for &(subsamp, sname) in &[(Subsampling::S444, "444")] {
+    {
+        let &(subsamp, sname) = &(Subsampling::S444, "444");
         let label: String = format!("12bit_rgb_{}", sname);
 
         // Encode 12-bit with Rust

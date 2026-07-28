@@ -368,20 +368,17 @@ fn tjtrantest_arithmetic_cross_product() {
             };
 
             tested += 1;
-            match transform_jpeg_with_options(&gray_jpeg, &opts) {
-                Ok(result) => {
-                    if !result.is_empty() {
-                        if let Err(e) = decompress(&result) {
-                            decode_failures.push(format!(
-                                "gray-{} ari prog={}: decode error: {}",
-                                op_label(op),
-                                progressive,
-                                e
-                            ));
-                        }
+            if let Ok(result) = transform_jpeg_with_options(&gray_jpeg, &opts) {
+                if !result.is_empty() {
+                    if let Err(e) = decompress(&result) {
+                        decode_failures.push(format!(
+                            "gray-{} ari prog={}: decode error: {}",
+                            op_label(op),
+                            progressive,
+                            e
+                        ));
                     }
                 }
-                Err(_) => {}
             }
         }
     }
@@ -449,21 +446,18 @@ fn tjtrantest_copy_modes_cross_product() {
                 };
 
                 tested += 1;
-                match transform_jpeg_with_options(jpeg, &opts) {
-                    Ok(result) => {
-                        if !result.is_empty() {
-                            if let Err(e) = decompress(&result) {
-                                decode_failures.push(format!(
-                                    "{}-{} copy={:?}: decode error: {}",
-                                    subsamp_label(*subsamp),
-                                    op_label(op),
-                                    copy_mode,
-                                    e
-                                ));
-                            }
+                if let Ok(result) = transform_jpeg_with_options(jpeg, &opts) {
+                    if !result.is_empty() {
+                        if let Err(e) = decompress(&result) {
+                            decode_failures.push(format!(
+                                "{}-{} copy={:?}: decode error: {}",
+                                subsamp_label(*subsamp),
+                                op_label(op),
+                                copy_mode,
+                                e
+                            ));
                         }
                     }
-                    Err(_) => {}
                 }
             }
         }
@@ -705,19 +699,16 @@ fn tjtrantest_trim_cross_product() {
         };
 
         tested += 1;
-        match transform_jpeg_with_options(&gray_jpeg, &opts) {
-            Ok(result) => {
-                if !result.is_empty() {
-                    if let Err(e) = decompress(&result) {
-                        decode_failures.push(format!(
-                            "gray-{} trim: decode error: {}",
-                            op_label(op),
-                            e
-                        ));
-                    }
+        if let Ok(result) = transform_jpeg_with_options(&gray_jpeg, &opts) {
+            if !result.is_empty() {
+                if let Err(e) = decompress(&result) {
+                    decode_failures.push(format!(
+                        "gray-{} trim: decode error: {}",
+                        op_label(op),
+                        e
+                    ));
                 }
             }
-            Err(_) => {}
         }
     }
 
@@ -790,21 +781,23 @@ fn tjtrantest_grayscale_input_cross_product() {
                                                 progressive,
                                                 arithmetic
                                             );
-                                            if swaps_dims(op) {
-                                                assert_eq!(
-                                                    (img.width, img.height),
-                                                    (48, 48),
-                                                    "gray-{}: wrong dims",
-                                                    op_label(op)
-                                                );
+                                            // make_gray_jpeg() is square, so the
+                                            // swapped and unswapped expectations
+                                            // coincide today; derive them anyway so
+                                            // the assertion stays honest if the
+                                            // fixture ever becomes non-square.
+                                            let (src_w, src_h): (usize, usize) = (48, 48);
+                                            let expected_dims: (usize, usize) = if swaps_dims(op) {
+                                                (src_h, src_w)
                                             } else {
-                                                assert_eq!(
-                                                    (img.width, img.height),
-                                                    (48, 48),
-                                                    "gray-{}: wrong dims",
-                                                    op_label(op)
-                                                );
-                                            }
+                                                (src_w, src_h)
+                                            };
+                                            assert_eq!(
+                                                (img.width, img.height),
+                                                expected_dims,
+                                                "gray-{}: wrong dims",
+                                                op_label(op)
+                                            );
                                         }
                                         Err(e) => {
                                             decode_failures.push(format!(
@@ -909,21 +902,18 @@ fn tjtrantest_restart_cross_product() {
                 };
 
                 tested += 1;
-                match transform_jpeg_with_options(jpeg, &opts) {
-                    Ok(result) => {
-                        if !result.is_empty() {
-                            if let Err(e) = decompress(&result) {
-                                decode_failures.push(format!(
-                                    "{}-{} {}: decode error: {}",
-                                    subsamp_label(subsamp),
-                                    op_label(op),
-                                    restart_label,
-                                    e
-                                ));
-                            }
+                if let Ok(result) = transform_jpeg_with_options(jpeg, &opts) {
+                    if !result.is_empty() {
+                        if let Err(e) = decompress(&result) {
+                            decode_failures.push(format!(
+                                "{}-{} {}: decode error: {}",
+                                subsamp_label(subsamp),
+                                op_label(op),
+                                restart_label,
+                                e
+                            ));
                         }
                     }
-                    Err(_) => {}
                 }
             }
         }

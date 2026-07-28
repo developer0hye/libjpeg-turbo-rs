@@ -57,9 +57,9 @@ fn cdylib_path() -> PathBuf {
     panic!("could not locate cdylib near {}", exe.display());
 }
 
-/// Byte offsets into `JpegCompressPublic` — verified by compile-time
-/// `offset_of!` assertions in jpeglib.rs (see the ABI test function).
-/// All offsets are for LP64 targets (macOS/Linux aarch64/x86_64).
+// Byte offsets into `JpegCompressPublic` — verified by compile-time
+// `offset_of!` assertions in jpeglib.rs (see the ABI test function).
+// All offsets are for LP64 targets (macOS/Linux aarch64/x86_64).
 
 /// `image_width` — offset 48.
 const IMAGE_WIDTH_OFFSET: usize = 48;
@@ -304,8 +304,8 @@ fn raw_data_encode_4_2_0_round_trip() {
         .collect();
 
     // Cb / Cr: half in each dimension (4:2:0) → 16×16.
-    let c_width: usize = (image_width + 1) / 2;
-    let c_height: usize = (image_height + 1) / 2;
+    let c_width: usize = image_width.div_ceil(2);
+    let c_height: usize = image_height.div_ceil(2);
     let cb_plane: Vec<u8> = vec![128u8; c_width * c_height];
     let cr_plane: Vec<u8> = vec![128u8; c_width * c_height];
 
@@ -570,8 +570,8 @@ fn raw_data_encode_non_aligned_4_2_0() {
         .collect();
 
     // Cb/Cr: 15×15 (ceil(30/2) × ceil(30/2)).
-    let c_width: usize = (image_width + 1) / 2;
-    let c_height: usize = (image_height + 1) / 2;
+    let c_width: usize = image_width.div_ceil(2);
+    let c_height: usize = image_height.div_ceil(2);
     let cb_plane: Vec<u8> = vec![128u8; c_width * c_height];
     let cr_plane: Vec<u8> = vec![128u8; c_width * c_height];
 

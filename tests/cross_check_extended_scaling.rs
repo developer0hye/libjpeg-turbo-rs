@@ -87,7 +87,7 @@ fn c_xval_extended_scaling_420() {
     let jpeg: Vec<u8> = make_test_jpeg(48, 48, Subsampling::S420);
     for &(num, denom, name) in ALL_SCALES {
         let bs: u32 = (num * 8).div_ceil(denom);
-        if bs % 2 != 0 && bs != 1 {
+        if !bs.is_multiple_of(2) && bs != 1 {
             continue;
         }
         let label = format!("ext_scale_{name}_420_48x48");

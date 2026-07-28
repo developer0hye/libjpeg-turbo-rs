@@ -11,7 +11,6 @@ use libjpeg_turbo_rs::{
     decompress_to, Encoder, PixelFormat, Subsampling,
 };
 
-const MAX_SAMPLE: u8 = 255;
 const RED_TO_Y: u8 = 76;
 const YELLOW_TO_Y: u8 = 226;
 const HALFWAY: usize = 16;

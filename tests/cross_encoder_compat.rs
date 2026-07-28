@@ -132,8 +132,8 @@ fn c_testorig_decode_scaled_half() {
     let half: Image = decoder.decode().unwrap();
 
     // Scaled dimensions should be approximately half (rounding rules apply).
-    let expected_w: usize = (full.width + 1) / 2;
-    let expected_h: usize = (full.height + 1) / 2;
+    let expected_w: usize = full.width.div_ceil(2);
+    let expected_h: usize = full.height.div_ceil(2);
     assert!(
         (half.width as i64 - expected_w as i64).unsigned_abs() <= 1,
         "1/2 width: expected ~{}, got {}",
@@ -146,7 +146,7 @@ fn c_testorig_decode_scaled_half() {
         expected_h,
         half.height
     );
-    assert!(half.data.len() > 0, "scaled decode produced empty data");
+    assert!(!half.data.is_empty(), "scaled decode produced empty data");
 }
 
 #[test]
@@ -160,8 +160,8 @@ fn c_testorig_decode_scaled_quarter() {
     decoder.set_scale(ScalingFactor::new(1, 4));
     let quarter: Image = decoder.decode().unwrap();
 
-    let expected_w: usize = (full.width + 3) / 4;
-    let expected_h: usize = (full.height + 3) / 4;
+    let expected_w: usize = full.width.div_ceil(4);
+    let expected_h: usize = full.height.div_ceil(4);
     assert!(
         (quarter.width as i64 - expected_w as i64).unsigned_abs() <= 1,
         "1/4 width: expected ~{}, got {}",
@@ -187,8 +187,8 @@ fn c_testorig_decode_scaled_eighth() {
     decoder.set_scale(ScalingFactor::new(1, 8));
     let eighth: Image = decoder.decode().unwrap();
 
-    let expected_w: usize = (full.width + 7) / 8;
-    let expected_h: usize = (full.height + 7) / 8;
+    let expected_w: usize = full.width.div_ceil(8);
+    let expected_h: usize = full.height.div_ceil(8);
     assert!(
         (eighth.width as i64 - expected_w as i64).unsigned_abs() <= 1,
         "1/8 width: expected ~{}, got {}",
@@ -379,7 +379,7 @@ fn c_12bit_decode_success() {
     );
     for &sample in &img.data {
         assert!(
-            sample >= 0 && sample <= 4095,
+            (0..=4095).contains(&sample),
             "12-bit sample out of range: {}",
             sample
         );
