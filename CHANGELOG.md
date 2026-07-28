@@ -46,6 +46,13 @@ and `git log` between tags.
   `--workspace --all-targets` (three structural lints allowed in test
   code only, tracked as P4-70); the `image`-bridge crate declares
   `rust-version = "1.88"` (inherited from `image@0.25`) (#390).
+- The `image` bridge now depends on `image` with
+  `default-features = false` — it only uses the codec traits, and the
+  defaults pulled the whole format-codec set (including
+  `ravif`→`rav1e`, whose pinned `core2`/`paste` carry RUSTSEC
+  advisories) into every consumer's build graph. Consumers who relied
+  on the bridge transitively enabling image's default formats should
+  enable those features on their own `image` dependency (#390).
 
 ### Security
 - Bumped `crossbeam-epoch` 0.9.18 → 0.9.20 in the dev/bench dependency
