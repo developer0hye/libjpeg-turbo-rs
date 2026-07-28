@@ -302,8 +302,9 @@ fn grayscale_output_rejects_subsampled_component0_without_panicking() {
         }
         let result = decoder.decode_image();
         assert!(
-            result.is_err(),
-            "gray via {route} with quarter-size comp0 must error, got {result:?}"
+            matches!(result, Err(libjpeg_turbo_rs::JpegError::Unsupported(_))),
+            "gray via {route} with quarter-size comp0 must raise Unsupported \
+             (the stream is valid; the conversion is missing, P4-72), got {result:?}"
         );
     }
 }
