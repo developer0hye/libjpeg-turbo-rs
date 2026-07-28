@@ -75,7 +75,12 @@ work with a measured 2.5×+ headroom.
 
 Same harness shape (linux/riscv64 container under emulation, `rust:1-slim`
 image — note the C side is this image's distro djpeg, a DIFFERENT build
-than the 2026-07-27 run, so compare only within this section).
+than the 2026-07-27 run, so the ours/C ratios below are comparable only
+within this section). The two decode rows carry their 07-27 figures for
+orientation, but **no same-env baseline was re-measured**: that pair
+crosses container images, so the end-to-end delta it implies is
+indicative, not a controlled A/B. The kernel A/B is the controlled
+measurement — same binary, same run, one call site swapped.
 
 | measurement | value |
 |---|---:|
@@ -90,10 +95,12 @@ than the 2026-07-27 run, so compare only within this section).
 
 **Verdict: keep.** The conversion tables (exact precomputation of the
 multiply form — bit-identical, proven exhaustively over chroma and by
-49 simd-off djpeg cross-checks) removed 12–14% of end-to-end scalar
-decode. The C comparison here is coarse (3 process-level runs, PPM
-write included, emulation noise — the 640×480 ratio should be read as
-"near parity", not a precise 1.12), but the 1080p gap clearly remains
+49 simd-off djpeg cross-checks) cut the kernel 1.63×, and the decode
+totals moved 12–14% against the 07-27 env — read that pair as the
+direction, not a measured end-to-end win. The C comparison here is
+coarse too (3 process-level runs, PPM write included, emulation noise —
+the 640×480 ratio should be read as "near parity", not a precise
+1.12), but the 1080p gap clearly remains
 above the ≤1.2× target: the residual is in other stages (fancy
 upsample, IDCT column passes, Huffman decode). P4-60 stays OPEN; next
 candidate per C source: `jdsample.c`-style incremental fancy upsample

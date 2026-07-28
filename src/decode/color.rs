@@ -1,15 +1,17 @@
 // ---------------------------------------------------------------------------
 // Table-driven YCbCr→RGB (P4-60, issue #359).
 //
-// C libjpeg-turbo's scalar path (`jdcolor.c` `build_ycc_rgb_table` /
-// `ycc_rgb_convert`) spends zero multiplies per pixel: the per-chroma
-// contributions are precomputed into 256-entry tables and clamping goes
-// through a range-limit table instead of branches. On targets with no
-// SIMD backend (RISC-V, POWER, s390x, no_std) this was the largest
-// measured share of our 2.5x scalar gap. The tables below precompute
-// EXACTLY the expressions the multiply form used, so output is
-// byte-identical by construction — the parity suites (`simd_parity`,
-// the djpeg cross-checks) pin it.
+// C libjpeg-turbo's scalar path (`build_ycc_rgb_table` in `jdcolor.c`,
+// `ycc_rgb_convert` in `jdcolext.c`) spends zero multiplies per pixel:
+// the per-chroma contributions are precomputed into 256-entry tables
+// and clamping goes through a range-limit table instead of branches. On
+// targets with no SIMD backend (RISC-V, POWER, s390x, no_std) adopting
+// that shape made this kernel 1.63x faster on riscv64 — one step into
+// P4-60's 2.5x scalar gap, not the whole of it
+// (`experiments/riscv64_scalar_2026-07-27.md`, 07-28 section). The
+// tables below precompute EXACTLY the expressions the multiply form
+// used, so output is byte-identical by construction — the parity suites
+// (`simd_parity`, the djpeg cross-checks) pin it.
 // ---------------------------------------------------------------------------
 
 /// `(91881 * (cr - 128) + 32768) >> 16` for every `cr`.
@@ -21,8 +23,8 @@ static CB_G_TAB: [i32; 256] = build_cb_g_tab();
 /// `46802 * (cr - 128) + 32768` (unshifted partial + rounding) for every `cr`.
 static CR_G_TAB: [i32; 256] = build_cr_g_tab();
 
-/// Branch-free clamp: `y + tab` lands in `[-227, 481]`; biased by 256
-/// it indexes `[29, 737]`, comfortably inside the table. The `& 1023`
+/// Branch-free clamp: `y + tab` lands in `[-227, 480]`; biased by 256
+/// it indexes `[29, 736]`, comfortably inside the table. The `& 1023`
 /// mask is an identity on that range and lets the compiler drop the
 /// bounds check without `unsafe` (the non-SIMD build aims at
 /// `forbid(unsafe_code)` — #389).
