@@ -1,26 +1,37 @@
 # libjpeg-turbo-rs
 
-Pure Rust reimplementation of [libjpeg-turbo](https://github.com/libjpeg-turbo/libjpeg-turbo) with NEON/AVX2 SIMD acceleration. No C dependencies, no unsafe FFI — just `cargo add`.
+[![crates.io](https://img.shields.io/crates/v/libjpeg-turbo-rs.svg)](https://crates.io/crates/libjpeg-turbo-rs)
+[![docs.rs](https://img.shields.io/docsrs/libjpeg-turbo-rs)](https://docs.rs/libjpeg-turbo-rs)
+[![CI](https://github.com/developer0hye/libjpeg-turbo-rs/actions/workflows/ci.yml/badge.svg)](https://github.com/developer0hye/libjpeg-turbo-rs/actions/workflows/ci.yml)
+![MSRV](https://img.shields.io/badge/MSRV-1.87-blue)
+![license](https://img.shields.io/crates/l/libjpeg-turbo-rs)
 
-## Replacement tiers
+Pure-Rust reimplementation of [libjpeg-turbo](https://github.com/libjpeg-turbo/libjpeg-turbo) with NEON/AVX2/SSE2/WASM-SIMD128 acceleration. No C dependencies, no unsafe FFI, `no_std`-capable — and byte-for-byte cross-validated against C libjpeg-turbo in CI.
 
-`libjpeg-turbo-rs` is designed to replace C `libjpeg-turbo` at four distinct
-surfaces. Each tier has its own contract and readiness status — don't mix them.
+```sh
+cargo add libjpeg-turbo-rs
+```
 
-| Tier | Surface | Status |
-| --- | --- | --- |
-| **T1** | Rust crate (`use libjpeg_turbo_rs::*;`) | **ready** today |
-| **T2** | TurboJPEG cdylib (`libturbojpeg.so.0`) | **ready** for TJ3 consumers — opaque-handle API, no struct ABI. **Legacy TurboJPEG 1.x/2.x surface is partial:** 21 legacy aliases wired (mostly v2/v3 variants + buffer/image helpers); 18 deliberately deprecated (v1 / un-versioned variants like `tjAlloc`, `tjFree`, `tjCompress`, `tjGetScalingFactors`) — per-symbol migration matrix + tiny-shim recipe in [`docs/ABI_COMPATIBILITY.md` § Legacy TurboJPEG 1.x/2.x aliases](docs/ABI_COMPATIBILITY.md#legacy-turbojpeg-1x2x-aliases--partial-coverage-p4-18). |
-| **T3** | Classic libjpeg v8 cdylib (`libjpeg.so.8`) | **ready** for v8 consumers; default since P4-3 (2026-05-17) |
-| **T4** | System v6b/v7 drop-in (`libjpeg.so.62` / `.7`) | **explicit non-goal** — see `docs/ABI_COMPATIBILITY.md` |
+```rust
+use libjpeg_turbo_rs::{compress, decompress_to, PixelFormat, Subsampling};
 
-The C ABI shim (`libjpeg-turbo-rs-capi`) defaults to **T3** (`libjpeg.so.8` /
-`@rpath/libjpeg.8.dylib`). To opt into the v6b SONAME for distro experiments,
-set the single env `CAPI_ACK_V6B_SONAME=1` at build time — the build script
-auto-derives `CAPI_SONAME=libjpeg.so.62` and
-`CAPI_INSTALL_NAME=@rpath/libjpeg.62.dylib` so the SONAME and macOS
-install_name stay in lockstep. v6b consumers may silently read garbage
-from v8-only fields — see `docs/ABI_COMPATIBILITY.md` for the field matrix.
+let image = decompress_to(&jpeg_bytes, PixelFormat::Rgb)?; // decode any JPEG to RGB
+let jpeg = compress(&image.data, image.width, image.height,
+                    image.pixel_format, 85, Subsampling::S420)?; // re-encode
+```
+
+These snippets are compile-checked: the crate-level doctests mirror them
+(`cargo test --doc`). Runnable examples live in
+[`examples/`](examples/) (the directory README fronts the user-facing set once #388 lands; GitHub renders it in the directory view).
+
+## How it compares
+
+Measured with the in-repo harnesses (methodology: [#361](https://github.com/developer0hye/libjpeg-turbo-rs/issues/361), [#392](https://github.com/developer0hye/libjpeg-turbo-rs/issues/392); `examples/bench_zune_matrix.rs`, `experiments/image_bridge.md`):
+
+| vs | Result (decode) |
+| --- | --- |
+| **zune-jpeg** (the `image` crate's default) | **31 wins / 3 losses** of 34 scored cases (±2% threshold) across subsampling × progressive × 8×8→8K, quiet aarch64, 2026-07-28; e.g. 4K progressive **0.65×**, 4K 4:2:0 **0.74×** of zune's time. Through the `image`-crate bridge: **1.31× faster** at 1080p. Losses are three tiny-image fixed-cost cases. |
+| **C libjpeg-turbo** | Matches or beats C on most decode benchmarks on x86_64/AVX2 (i5-10400) and within a few % on aarch64/NEON (M1 Pro) — the dated per-platform tables are below. |
 
 ## Performance
 
@@ -108,7 +119,19 @@ SSE2-only `x86_64-v1` baseline and the encoder trails C by 5–10 pp at
 1080p; with them, Rust beats C in every encode benchmark in the
 Performance section above. aarch64 / NEON builds are unaffected.
 
-## Feature flags
+## Feature flags, MSRV, platforms
+
+**MSRV: 1.87** (declared as `rust-version`; older compilers are not
+tested).
+
+| Target | SIMD | Notes |
+| --- | --- | --- |
+| `aarch64` (Linux/macOS) | NEON | compile-time selection, CI-tested |
+| `x86_64` (Linux/macOS/Windows) | AVX2/SSE2 | runtime CPUID dispatch (`std`), CI-tested incl. no-AVX2 emulation |
+| `wasm32` (browser/WASI) | SIMD128 | compile-time `target_feature` — see the wasm crate README |
+| RISC-V / POWER / s390x / 32-bit ARM | scalar | works, unoptimized ([#359](https://github.com/developer0hye/libjpeg-turbo-rs/issues/359)) |
+| `thumbv7em` (bare metal) | scalar | `no_std + alloc`, CI-built; no NEON backend is registered for thumb targets |
+
 
 | flag | default | effect |
 |---|---|---|
@@ -312,35 +335,14 @@ All SIMD routines have scalar fallbacks. SIMD is enabled by default via the `sim
 - Restart markers (DRI)
 - Progress callbacks
 
-## Running sanitizers locally
+## C ABI replacement tiers
 
-Requires a nightly toolchain (`rustup install nightly`) and the `rust-src` component:
-
-```bash
-rustup component add rust-src --toolchain nightly
-```
-
-**AddressSanitizer** (detects heap overflows, use-after-free, stack overflows):
-
-```bash
-RUSTFLAGS="-Z sanitizer=address" \
-LSAN_OPTIONS="suppressions=$(pwd)/lsan_suppressions.txt:detect_leaks=1" \
-cargo +nightly test --workspace --lib \
-  --target x86_64-unknown-linux-gnu \
-  --no-fail-fast -- --test-threads=1
-```
-
-**UB checks** (detects signed integer overflow, invalid enum discriminant, misaligned pointer dereference):
-
-```bash
-RUSTFLAGS="-Z ub-checks=yes" \
-cargo +nightly test --workspace --lib \
-  --no-fail-fast -- --test-threads=1
-```
-
-Note: `rustc` does not implement `sanitizer=undefined`; `-Z ub-checks=yes` is the correct nightly knob for runtime UB detection.
-
-Both jobs run on every PR via `.github/workflows/sanitizers.yml`. macOS is excluded because the NEON SIMD paths produce spurious cross-thread ASan shadow-map false positives under parallel test execution.
+Beyond the Rust crate, the workspace ships C ABI shims: a TurboJPEG 3
+cdylib (`libturbojpeg.so.0`, ready for TJ3 consumers) and a classic
+libjpeg v8 cdylib (`libjpeg.so.8`, ready for v8 consumers) — with
+byte-exact stock `djpeg`/`cjpeg`/`jpegtran` parity gates. The full
+T1–T4 tier framing, legacy-alias matrix, SONAME opt-ins, and threading
+contract live in [`docs/ABI_COMPATIBILITY.md`](docs/ABI_COMPATIBILITY.md).
 
 ## License
 
