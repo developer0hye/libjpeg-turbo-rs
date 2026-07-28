@@ -61,7 +61,7 @@ jobs:
           - fuzz_encode_diff_c     # P2-7 differential encode-roundtrip vs subprocess djpeg
           - fuzz_transform_diff_c  # P2-7 differential transform vs subprocess jpegtran
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - uses: dtolnay/rust-toolchain@nightly
 
