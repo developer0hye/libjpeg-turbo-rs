@@ -13,7 +13,8 @@ and `git log` between tags.
   coding mode, subsampling, colorspace, metadata presence, EXIF
   orientation without decoding pixels (#386).
 - Chainable decoder configuration: 21 `with_*` counterparts of the
-  `set_*` family (#386).
+  `Decoder` mutators — the 20 `set_*` methods plus `save_markers`
+  (#386).
 - `Image::as_bytes()` / `Image::into_vec()`; `Image` and the new
   `JpegInfo` derive `Clone`/`PartialEq`/`Eq` (`SavedMarker` gains
   `PartialEq`/`Eq`); `FrameHeader::width()/height()/dimensions()`

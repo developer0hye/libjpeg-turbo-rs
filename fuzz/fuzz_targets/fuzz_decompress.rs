@@ -47,9 +47,13 @@ fuzz_target!(|data: &[u8]| {
     // Two sizes per input (each is a full decode — keep fuzz throughput):
     // the advertised size (success + parity) and an input-derived
     // adversarial size (short buffers must yield BufferTooSmall).
-    let byte0 = data.first().copied().unwrap_or(0) as usize;
+    // A mid-stream byte, not data[0]: SOI pins the first byte to 0xFF,
+    // which froze this "input-derived" size at min(255, advertised-1)
+    // for every decodable input (same defect class as the option-arm
+    // keying above).
+    let adversarial = data.get(data.len() / 2).copied().unwrap_or(0) as usize;
     let advertised = decoder.output_buffer_size().unwrap_or(0);
-    for size in [advertised, byte0.min(advertised.saturating_sub(1))] {
+    for size in [advertised, adversarial.min(advertised.saturating_sub(1))] {
         // Cap so a fuzz input claiming huge dimensions cannot OOM the
         // harness through our own test allocation.
         if size as u64 > MAX_FUZZ_PIXELS * 4 {

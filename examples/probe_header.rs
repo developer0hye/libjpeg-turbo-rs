@@ -1,5 +1,6 @@
-//! Read dimensions, EXIF orientation, and metadata without decoding
-//! any pixels — `Decoder::new` parses markers only.
+//! Read dimensions, coding mode, subsampling, colorspace, EXIF
+//! orientation and metadata presence without decoding any pixels —
+//! `probe` parses markers only.
 //!
 //! ```sh
 //! cargo run --example probe_header [path/to/image.jpg]
@@ -19,8 +20,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let jpeg: Vec<u8> = std::fs::read(&path)?;
 
     // One call gets everything (issue #386). For accessors beyond
-    // JpegInfo — density, JFIF version, saved markers — construct a
-    // `Decoder` and use its getters; it too never decodes pixels.
+    // JpegInfo — JFIF version, saved markers, the raw ICC/EXIF/XMP
+    // payloads rather than a presence flag — construct a `Decoder` and
+    // use its getters; it too never decodes pixels.
     let info: JpegInfo = probe(&jpeg)?;
     println!("{path}:");
     println!(

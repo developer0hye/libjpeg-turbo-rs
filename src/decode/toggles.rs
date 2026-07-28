@@ -587,8 +587,10 @@ pub fn decode_with_colorspace_override(
             // Component 0 is not required to carry the max sampling
             // factor (read_sof only validates 1..=4), so its plane can
             // be narrower or shorter than the output geometry — e.g. a
-            // VALID `cjpeg -sample 1x1,2x2,1x1` stream decodes fine to
-            // RGB but plane 0 is quarter-size. Slicing blindly panicked
+            // VALID `cjpeg -sample 1x1,2x2,1x1` stream decodes to RGB
+            // under `set_lenient(true)` (strict decode is rejected
+            // earlier by P4-21's chroma-out-samples-luma guard), but
+            // plane 0 is quarter-size. Slicing blindly panicked
             // (#386 review P1). C handles this by running component 0
             // through the upsampler before gray output; until that
             // lands (P4-72) the request is refused as Unsupported —

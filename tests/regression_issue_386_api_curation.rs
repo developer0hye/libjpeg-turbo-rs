@@ -267,10 +267,12 @@ fn grayscale_output_format_rejects_rgb_colorspace_source() {
 }
 
 /// Review P1 on #386: component 0 is not required to carry the max
-/// sampling factor. With comp0=1x1 and comp1=2x2 the stream decodes
-/// fine to RGB, but plane 0 is quarter-size — the gray output arm used
-/// to slice past it and panic (`range end index 77120 out of range`).
-/// Both gray routes must return an error, never panic.
+/// sampling factor. With comp0=1x1 and comp1=2x2 the stream decodes to
+/// RGB under `set_lenient(true)` (strict decode is rejected earlier by
+/// P4-21's chroma-out-samples-luma guard), but plane 0 is quarter-size
+/// — the gray output arm used to slice past it and panic (`range end
+/// index 77120 out of range`). Both gray routes must return an error,
+/// never panic.
 #[test]
 fn grayscale_output_rejects_subsampled_component0_without_panicking() {
     // Patch the SOF0 sampling bytes: comp0 2x2 -> 1x1, comp1 1x1 -> 2x2.
