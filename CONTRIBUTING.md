@@ -43,5 +43,5 @@ cargo +nightly test --workspace --lib \
 
 Note: `rustc` does not implement `sanitizer=undefined`; `-Z ub-checks=yes` is the correct nightly knob for runtime UB detection.
 
-Both jobs run on every PR via `.github/workflows/sanitizers.yml`. macOS is excluded because the NEON SIMD paths produce spurious cross-thread ASan shadow-map false positives under parallel test execution.
+All three sanitizer jobs (asan, ubsan, and the P4-11 C-boundary asan harness) run on every PR via `.github/workflows/sanitizers.yml`. macOS is excluded because the NEON SIMD paths produce spurious cross-thread ASan shadow-map false positives under parallel test execution.
 
