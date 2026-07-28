@@ -4,6 +4,8 @@ pub mod encoder;
 pub mod high_level;
 #[cfg(feature = "std")]
 pub mod image_io;
+#[cfg(feature = "std")]
+pub mod incremental;
 pub mod precision;
 pub mod progressive_output;
 pub mod quality;

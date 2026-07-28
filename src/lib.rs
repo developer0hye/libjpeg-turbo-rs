@@ -68,6 +68,7 @@
 //! | Encode, configured | [`Encoder`] builder — quality, subsampling, progressive, markers |
 //! | Lossless transform | [`transform()`] — DCT-domain rotate/flip/crop, no re-encode |
 //! | Row streaming | [`ScanlineDecoder`] / [`ScanlineEncoder`], `stream::*` for readers |
+//! | Bounded-memory stream decode | [`decompress_from_reader_incremental`] — sliding input window for interleaved baseline JPEGs |
 //! | 12/16-bit & lossless | [`precision`] module |
 //!
 //! **Specialised `compress_*` entry points.** The remaining
@@ -179,6 +180,12 @@ pub use api::image_io::{
 pub use api::image_io::{
     load_image_from_bytes, load_ppm_12bit_from_bytes, load_ppm_16bit_from_bytes, LoadedImage,
     LoadedImage12, LoadedImage16,
+};
+#[doc(inline)]
+#[cfg(feature = "std")]
+#[cfg_attr(docsrs, doc(cfg(feature = "std")))]
+pub use api::incremental::{
+    decompress_from_reader_incremental, decompress_from_reader_incremental_instrumented,
 };
 pub use api::precision::{
     compress_12bit, compress_16bit, decompress_12bit, decompress_16bit, read_scanlines_12,
