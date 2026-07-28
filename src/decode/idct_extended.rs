@@ -1084,14 +1084,16 @@ macro_rules! strided_wrapper {
         /// `output` must point to at least `(N - 1) * stride + N` writable bytes,
         /// where N is the block dimension for this IDCT variant.
         pub unsafe fn $name(coeffs: &[i16; 64], quant: &[u16; 64], output: *mut u8, stride: usize) {
-            let mut tmp = [0u8; $n * $n];
-            $inner(coeffs, quant, &mut tmp);
-            for row in 0..$n {
-                core::ptr::copy_nonoverlapping(
-                    tmp.as_ptr().add(row * $n),
-                    output.add(row * stride),
-                    $n,
-                );
+            unsafe {
+                let mut tmp = [0u8; $n * $n];
+                $inner(coeffs, quant, &mut tmp);
+                for row in 0..$n {
+                    core::ptr::copy_nonoverlapping(
+                        tmp.as_ptr().add(row * $n),
+                        output.add(row * stride),
+                        $n,
+                    );
+                }
             }
         }
     };
