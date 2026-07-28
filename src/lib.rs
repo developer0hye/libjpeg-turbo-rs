@@ -73,6 +73,10 @@
 //! [repository README](https://github.com/developer0hye/libjpeg-turbo-rs).
 #![cfg_attr(not(feature = "std"), no_std)]
 #![cfg_attr(docsrs, feature(doc_cfg))]
+// Safety posture (issue #389): every unsafe operation inside an unsafe fn
+// must be acknowledged with its own block + SAFETY reasoning, matching
+// the capi crate's existing policy.
+#![deny(unsafe_op_in_unsafe_fn)]
 
 // libjpeg-turbo-rs: alloc prelude (no_std support, issue #356)
 #[allow(unused_imports)]
@@ -83,6 +87,12 @@ pub mod api;
 pub mod common;
 pub mod decode;
 pub mod encode;
+// The SIMD backends predate the crate-level lint and carry ~780 bare
+// unsafe operations inside their unsafe fns; wrapping each with its own
+// block + SAFETY note is a mechanical-but-careful sweep tracked in
+// LAST_MILE (filed with issue #389). Non-SIMD code gets the full deny
+// immediately.
+#[allow(unsafe_op_in_unsafe_fn)]
 pub mod simd;
 pub mod transform;
 
