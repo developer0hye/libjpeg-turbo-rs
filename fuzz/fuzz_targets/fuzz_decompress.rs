@@ -20,7 +20,7 @@ fuzz_target!(|data: &[u8]| {
     decoder.set_scan_limit(100);
     // Drive the riskiest sink branches too: derive options from the
     // input, applied identically to both decode paths so parity holds.
-    match data.first().copied().unwrap_or(0) % 6 {
+    match data.first().copied().unwrap_or(0) % 7 {
         1 => decoder.set_output_format(libjpeg_turbo_rs::PixelFormat::Rgba),
         2 => {
             decoder.set_output_format(libjpeg_turbo_rs::PixelFormat::Rgb565);
@@ -29,6 +29,9 @@ fuzz_target!(|data: &[u8]| {
         3 => decoder.set_scale(libjpeg_turbo_rs::ScalingFactor::new(1, 2)),
         4 => decoder.set_crop_region(3, 0, 40, frame_h as usize),
         5 => decoder.set_output_format(libjpeg_turbo_rs::PixelFormat::Xrgb),
+        // The implied gray route slices component plane 0 directly; a
+        // comp0 sampled below max used to panic (#386 review P1).
+        6 => decoder.set_output_format(libjpeg_turbo_rs::PixelFormat::Grayscale),
         _ => {}
     }
     let owned = decoder.decode_image();

@@ -127,7 +127,7 @@ struct CompInfo {
 /// `Clone`/`PartialEq` (issue #386) compare every field including the
 /// pixel buffer — handy in tests and caches; clone consciously copies
 /// the full pixel allocation.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Image {
     pub width: usize,
     pub height: usize,
@@ -196,7 +196,7 @@ impl ImageInfo {
 /// Everything a caller usually wants to know about a JPEG before
 /// deciding whether/how to decode it — returned by [`probe`] in one
 /// call (issue #386). Header-parse only; no pixels are decoded.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct JpegInfo {
     /// Image width in pixels.
     pub width: usize,
@@ -213,6 +213,8 @@ pub struct JpegInfo {
     /// True for arithmetic entropy coding (SOF9-SOF11).
     pub arithmetic: bool,
     /// Chroma subsampling derived from the SOF sampling factors.
+    /// Grayscale sources report [`Subsampling::Unknown`] (there is no
+    /// `Gray` variant) — check `components == 1` / `color_space`.
     pub subsampling: Subsampling,
     /// Source color space (from component count + APP14/JFIF heuristics,
     /// same detection the decoder itself uses).
@@ -237,8 +239,9 @@ pub struct JpegInfo {
 /// colorspace, and metadata presence without decoding any pixels
 /// (issue #386).
 ///
-/// Wraps `Decoder::new` (marker parse only), so it costs microseconds
-/// and never allocates pixel buffers. For decoding afterwards, create a
+/// Wraps `Decoder::new` (marker parse only), so it never allocates
+/// pixel buffers; cost is linear in the compressed size for multi-scan
+/// streams (scan boundaries are walked byte-wise), far below a decode. For decoding afterwards, create a
 /// [`Decoder`] — the header work is repeated, but it is negligible next
 /// to the pixel decode.
 ///
@@ -1055,25 +1058,24 @@ impl<'a> Decoder<'a> {
     // -----------------------------------------------------------------
     // Chainable configuration (issue #386). Each `with_*` is a by-value
     // wrapper over the matching `set_*` so construction reads as one
-    // expression:
-    //
-    // ```
-    // # let jpeg = libjpeg_turbo_rs::compress(&[128; 48], 4, 4,
-    // #     libjpeg_turbo_rs::PixelFormat::Rgb, 90,
-    // #     libjpeg_turbo_rs::Subsampling::S444).unwrap();
-    // use libjpeg_turbo_rs::{Decoder, PixelFormat};
-    // let image = Decoder::new(&jpeg)?
-    //     .with_output_format(PixelFormat::Gray)
-    //     .with_block_smoothing(false)
-    //     .decode_image()?;
-    // # Ok::<(), libjpeg_turbo_rs::JpegError>(())
-    // ```
-    //
-    // The `set_*` forms stay for imperative call sites; both routes hit
-    // the same field, so mixing them is fine.
+    // expression. The `set_*` forms stay for imperative call sites;
+    // both routes hit the same field, so mixing them is fine.
     // -----------------------------------------------------------------
 
     /// Chainable [`Decoder::set_output_format`].
+    ///
+    /// ```
+    /// # let jpeg = libjpeg_turbo_rs::compress(&[128; 48], 4, 4,
+    /// #     libjpeg_turbo_rs::PixelFormat::Rgb, 90,
+    /// #     libjpeg_turbo_rs::Subsampling::S444).unwrap();
+    /// use libjpeg_turbo_rs::{Decoder, PixelFormat};
+    /// let image = Decoder::new(&jpeg)?
+    ///     .with_output_format(PixelFormat::Bgra)
+    ///     .with_block_smoothing(false)
+    ///     .decode_image()?;
+    /// assert_eq!(image.pixel_format, PixelFormat::Bgra);
+    /// # Ok::<(), libjpeg_turbo_rs::JpegError>(())
+    /// ```
     #[must_use]
     pub fn with_output_format(mut self, format: PixelFormat) -> Self {
         self.set_output_format(format);
@@ -1200,9 +1202,33 @@ impl<'a> Decoder<'a> {
     }
 
     /// Chainable [`Decoder::save_markers`].
+    ///
+    /// Like `save_markers`, a marker re-parse failure is swallowed and
+    /// previously parsed metadata stays in effect — check
+    /// [`Decoder::saved_markers`] afterwards if the distinction matters.
     #[must_use]
     pub fn with_save_markers(mut self, config: MarkerSaveConfig) -> Self {
         self.save_markers(config);
+        self
+    }
+
+    /// Chainable [`Decoder::set_marker_processor`].
+    #[must_use]
+    pub fn with_marker_processor<F>(mut self, marker_type: u8, processor: F) -> Self
+    where
+        F: Fn(&[u8]) -> Option<Vec<u8>> + Send + 'static,
+    {
+        self.set_marker_processor(marker_type, processor);
+        self
+    }
+
+    /// Chainable [`Decoder::set_resync_strategy`].
+    #[must_use]
+    pub fn with_resync_strategy<S>(mut self, strategy: S) -> Self
+    where
+        S: crate::decode::resync::RestartResyncStrategy + Send + 'static,
+    {
+        self.set_resync_strategy(strategy);
         self
     }
 

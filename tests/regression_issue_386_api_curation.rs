@@ -115,7 +115,8 @@ fn probe_dimensions_match_djpeg() {
         .expect("run djpeg");
     assert!(out.status.success(), "djpeg failed on the fixture");
     // PPM header: "P6\n<width> <height>\n255\n"
-    let text: String = String::from_utf8_lossy(&out.stdout[..32]).into_owned();
+    let header: &[u8] = out.stdout.get(..32).unwrap_or(&out.stdout);
+    let text: String = String::from_utf8_lossy(header).into_owned();
     let mut fields = text.split_ascii_whitespace();
     assert_eq!(fields.next(), Some("P6"));
     let w: usize = fields.next().unwrap().parse().unwrap();
@@ -260,9 +261,51 @@ fn grayscale_output_format_rejects_rgb_colorspace_source() {
     decoder.set_output_format(PixelFormat::Grayscale);
     let result = decoder.decode_image();
     assert!(
-        result.is_err(),
-        "gray from a JCS_RGB source must error, not silently emit the red plane"
+        matches!(result, Err(libjpeg_turbo_rs::JpegError::Unsupported(_))),
+        "gray from a JCS_RGB source must raise Unsupported, got {result:?}"
     );
+}
+
+/// Review P1 on #386: component 0 is not required to carry the max
+/// sampling factor. With comp0=1x1 and comp1=2x2 the stream decodes
+/// fine to RGB, but plane 0 is quarter-size — the gray output arm used
+/// to slice past it and panic (`range end index 77120 out of range`).
+/// Both gray routes must return an error, never panic.
+#[test]
+fn grayscale_output_rejects_subsampled_component0_without_panicking() {
+    // Patch the SOF0 sampling bytes: comp0 2x2 -> 1x1, comp1 1x1 -> 2x2.
+    let mut jpeg: Vec<u8> = FIXTURE.to_vec();
+    let sof: usize = jpeg
+        .windows(2)
+        .position(|w| w == [0xFF, 0xC0])
+        .expect("baseline SOF0 in fixture");
+    // SOF0 layout: FF C0 len(2) prec(1) h(2) w(2) ncomp(1), then per
+    // component: id(1) sampling(1) qtbl(1).
+    let comp0_sampling: usize = sof + 11;
+    let comp1_sampling: usize = comp0_sampling + 3;
+    assert_eq!(jpeg[comp0_sampling], 0x22, "fixture must start as 4:2:0");
+    jpeg[comp0_sampling] = 0x11;
+    jpeg[comp1_sampling] = 0x22;
+
+    let mut rgb_ok = Decoder::new(&jpeg).expect("decoder");
+    rgb_ok.set_lenient(true);
+    rgb_ok
+        .decode_image()
+        .expect("the patched stream itself must stay decodable to RGB");
+
+    for route in ["output_format", "output_colorspace"] {
+        let mut decoder = Decoder::new(&jpeg).expect("decoder");
+        decoder.set_lenient(true);
+        match route {
+            "output_format" => decoder.set_output_format(PixelFormat::Grayscale),
+            _ => decoder.set_output_colorspace(libjpeg_turbo_rs::ColorSpace::Grayscale),
+        }
+        let result = decoder.decode_image();
+        assert!(
+            result.is_err(),
+            "gray via {route} with quarter-size comp0 must error, got {result:?}"
+        );
+    }
 }
 
 #[test]

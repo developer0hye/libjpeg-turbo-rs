@@ -76,7 +76,7 @@
 //! [`compress_arithmetic_progressive`], the `compress_lossless*`
 //! family, [`compress_into`], [`compress_with_metadata`], …) predate
 //! the [`Encoder`] builder, which can express every one of them —
-//! e.g. `Encoder::new().progressive(true)` replaces
+//! e.g. `Encoder::new(&px, w, h, fmt).progressive(true)` replaces
 //! [`compress_progressive`]. They stay for source compatibility and
 //! one-line convenience; new code should prefer [`Encoder`] once more
 //! than one knob is involved. **Deprecation intent:** these variants
