@@ -20,7 +20,11 @@ fuzz_target!(|data: &[u8]| {
     decoder.set_scan_limit(100);
     // Drive the riskiest sink branches too: derive options from the
     // input, applied identically to both decode paths so parity holds.
-    match data.first().copied().unwrap_or(0) % 7 {
+    // Keyed off the LENGTH, not data[0]: every decodable input starts
+    // with SOI's 0xFF, so a data[0]-keyed match always took the same arm
+    // (0xFF % 6 == 3) and the other options got zero coverage (codex P2
+    // on #386 — a pre-existing harness defect this fixes for all arms).
+    match data.len() % 7 {
         1 => decoder.set_output_format(libjpeg_turbo_rs::PixelFormat::Rgba),
         2 => {
             decoder.set_output_format(libjpeg_turbo_rs::PixelFormat::Rgb565);
