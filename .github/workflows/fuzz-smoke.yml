@@ -105,7 +105,7 @@ jobs:
         # a rerun of the same run saves fresh progress); restore-keys picks
         # the most recent save and the post-run save step always writes a
         # new entry — the standard pattern for an evolving cache.
-        uses: actions/cache/restore@v4
+        uses: actions/cache/restore@v6
         with:
           path: fuzz/corpus/${{ matrix.target }}
           key: fuzz-corpus-v1-${{ matrix.target }}-${{ github.run_id }}-${{ github.run_attempt }}
@@ -160,7 +160,7 @@ jobs:
         # Save even on failure so the coverage that led to a crash is not
         # lost with the failed job.
         if: always()
-        uses: actions/cache/save@v4
+        uses: actions/cache/save@v6
         with:
           path: fuzz/corpus/${{ matrix.target }}
           key: fuzz-corpus-v1-${{ matrix.target }}-${{ github.run_id }}-${{ github.run_attempt }}
