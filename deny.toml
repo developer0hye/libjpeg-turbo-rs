@@ -9,6 +9,16 @@ all-features = true
 # Fail on any advisory: security vulnerabilities, unmaintained crates,
 # unsound crates, and yanked versions all deserve a human look.
 yanked = "deny"
+# Documented exceptions only. All three below come through the same
+# chain — image → ravif → rav1e (the image crate's AVIF encoder) —
+# which exists solely in the image-bridge crate's graph; none of it is
+# code this workspace ships. Nothing to update: rav1e 0.8 pins these,
+# and core2 has no unyanked version at all. Revisit on image/rav1e bumps.
+ignore = [
+  { id = "RUSTSEC-2026-0105", reason = "core2 unmaintained; via image→ravif→rav1e→bitstream-io" },
+  { id = "RUSTSEC-2024-0436", reason = "paste unmaintained; compile-time proc-macro via rav1e" },
+  { crate = "core2@0.4.0", reason = "all versions yanked upstream; same rav1e chain, no replacement to update to" },
+]
 
 [licenses]
 # Permissive-only. Everything in the current tree resolves to one of these
