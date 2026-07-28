@@ -241,7 +241,10 @@ jobs:
         with:
           components: miri
       - uses: Swatinem/rust-cache@v2
-      - run: cargo miri test --no-default-features --features std --lib -- --skip simd::
+      # Quoted: a plain YAML scalar may not end in `:`; GitHub's parser
+      # tolerates it but strict YAML tooling (PyYAML, actionlint) rejects
+      # the whole file.
+      - run: "cargo miri test --no-default-features --features std --lib -- --skip simd::"
         env:
           MIRIFLAGS: -Zmiri-disable-isolation
         timeout-minutes: 25

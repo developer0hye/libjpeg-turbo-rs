@@ -18,6 +18,7 @@
 //!     and full-corpus observations, with a small margin for platform variance.
 //!   * q90 floor: measured 43.57 dB and 44.88 dB on the seeds (min = 43.57).
 //!     Full-res Kodak q90 PSNR typically 38-44 dB; floor 36.0 dB covers both.
+//!
 //!   These floors are intentionally below the seed-only measurements so the
 //!   test remains meaningful once the full 24-image Kodak corpus is fetched.
 

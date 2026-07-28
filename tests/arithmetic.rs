@@ -3,7 +3,7 @@ mod helpers;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use libjpeg_turbo_rs::{compress_arithmetic, decompress, decompress_to, PixelFormat, Subsampling};
+use libjpeg_turbo_rs::{compress_arithmetic, decompress_to, PixelFormat, Subsampling};
 
 fn parse_ppm(path: &Path) -> (usize, usize, Vec<u8>) {
     let raw: Vec<u8> = std::fs::read(path).expect("read PPM");

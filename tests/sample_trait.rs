@@ -1,3 +1,8 @@
+// These tests pin the associated constants of the `Sample` trait impls. The
+// assertions are always-true by construction — that constant-ness is exactly
+// the property under test, so a regression in an impl turns them false.
+#![allow(clippy::assertions_on_constants)]
+
 use libjpeg_turbo_rs::Sample;
 
 #[test]

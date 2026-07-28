@@ -35,8 +35,8 @@ fn idct_known_values() {
     // Vertically constant for this pattern
     for col in 0..8 {
         assert_eq!(
-            output[0 * 8 + col],
-            output[1 * 8 + col],
+            output[col],
+            output[8 + col],
             "rows should be identical for this coefficient pattern"
         );
     }

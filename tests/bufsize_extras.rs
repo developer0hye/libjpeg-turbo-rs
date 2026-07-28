@@ -168,11 +168,7 @@ fn extract_jfif_thumbnail_with_embedded_thumb() {
     let base_jpeg: Vec<u8> =
         compress(&pixels, 8, 8, PixelFormat::Rgb, 75, Subsampling::S420).expect("compress failed");
 
-    let mut new_jpeg: Vec<u8> = Vec::new();
-    new_jpeg.push(0xFF);
-    new_jpeg.push(0xD8);
-    new_jpeg.push(0xFF);
-    new_jpeg.push(0xE0);
+    let mut new_jpeg: Vec<u8> = vec![0xFF, 0xD8, 0xFF, 0xE0];
     new_jpeg.extend_from_slice(&app0_length.to_be_bytes());
     new_jpeg.extend_from_slice(&app0_data);
 
@@ -206,11 +202,7 @@ fn extract_jfif_thumbnail_zero_size() {
     let base_jpeg: Vec<u8> =
         compress(&pixels, 8, 8, PixelFormat::Rgb, 75, Subsampling::S420).expect("compress failed");
 
-    let mut new_jpeg: Vec<u8> = Vec::new();
-    new_jpeg.push(0xFF);
-    new_jpeg.push(0xD8);
-    new_jpeg.push(0xFF);
-    new_jpeg.push(0xE0);
+    let mut new_jpeg: Vec<u8> = vec![0xFF, 0xD8, 0xFF, 0xE0];
     new_jpeg.extend_from_slice(&app0_length.to_be_bytes());
     new_jpeg.extend_from_slice(&app0_data);
 

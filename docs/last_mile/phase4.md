@@ -1169,3 +1169,11 @@ C expands instead of ignoring: `djpeg -rgb` on a `cjpeg -precision 12` grayscale
 4. **Goal state (#389's last criterion)**: `#![cfg_attr(not(feature = "simd"), forbid(unsafe_code))]` compiles, README-advertised and CI-checked — requires (3) to reach zero.
 
 **Acceptance criteria.** Each numbered item lands with tests/benches per the project rules; #389 closes only when all four do. The phase-1 Miri job (non-SIMD `--lib` subset, 191 tests) must stay green throughout.
+
+## P4-70. Clippy Structural-Lint Allow-List in Test Code — **OPEN**
+
+**Motivation.** Filed 2026-07-28 while closing the clippy half of #390. The Clippy CI job was widened from `--lib` to two gates: `--workspace` with zero allowances, and `--workspace --all-targets` with exactly three structural lints allowed: `clippy::needless_range_loop`, `clippy::too_many_arguments`, `clippy::type_complexity`. Everything else in the test/bench long tail (~80 warnings across ~25 files: manual `div_ceil`, doc-list indentation, dead test helpers, `vec_init_then_push`, `manual_memcpy`, …) was fixed in the same PR. The three allowed classes remained at 56 warnings when measured (`cargo clippy --workspace --all-targets`, 2026-07-28): 43× `needless_range_loop` (index-synchronized multi-array loops in `src/encode/fdct.rs`/`huff_opt.rs`/`pipeline.rs` `#[cfg(test)]` modules and `tests/`), 9× `too_many_arguments`, 4× `type_complexity` — all in test code, none in the library proper (the zero-allowance `--workspace` gate proves that).
+
+**Why deferred.** The remaining sites are semantic rewrites, not mechanical fixes: iterator-zip conversions of loops that index three parallel arrays by design (DCT reference comparisons), and signature/type refactors of test helpers. Rushing them risks changing what a test asserts for zero coverage gain.
+
+**Acceptance criteria.** The `-A` flags are deleted from the second clippy invocation in `.github/workflows/ci.yml` and the job stays green; no `#[allow]` may be added to library (non-`#[cfg(test)]`) code to get there. Blanket module-level allows in test files are acceptable only with a one-line why-comment.

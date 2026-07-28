@@ -17,6 +17,39 @@ on:
     types: [published]
 
 jobs:
+  # Every root-crate tag gets a GitHub Release with notes (issue #390).
+  # Notes come from the tag's CHANGELOG.md section; if the section is
+  # missing the job FAILS rather than shipping an empty release — the
+  # fix is to write the changelog entry and re-run.
+  github-release:
+    name: Create GitHub Release from CHANGELOG
+    runs-on: ubuntu-latest
+    if: ${{ github.ref_type == 'tag' && startsWith(github.ref, 'refs/tags/v') }}
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - name: Create release with CHANGELOG notes
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          if gh release view "$TAG" > /dev/null 2>&1; then
+            echo "release for $TAG already exists (drafted manually?); leaving it alone"
+            exit 0
+          fi
+          VERSION="${TAG#v}"
+          awk -v ver="$VERSION" '
+            $0 ~ "^## \\[" ver "\\]" { grab = 1; next }
+            grab && /^## \[/ { exit }
+            grab { print }
+          ' CHANGELOG.md > /tmp/notes.md
+          if ! grep -q "[^[:space:]]" /tmp/notes.md; then
+            echo "::error::CHANGELOG.md has no section for $VERSION — write it, then re-run this job"
+            exit 1
+          fi
+          gh release create "$TAG" --verify-tag --title "$TAG" --notes-file /tmp/notes.md
+
   publish:
     name: Publish libjpeg-turbo-rs to crates.io
     runs-on: ubuntu-latest

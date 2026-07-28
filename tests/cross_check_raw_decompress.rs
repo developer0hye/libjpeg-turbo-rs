@@ -254,10 +254,10 @@ fn raw_decompress_roundtrip(
     // Verify plane dimensions based on subsampling
     let (expected_chroma_w, expected_chroma_h): (usize, usize) = match subsampling {
         Subsampling::S444 => (raw.plane_widths[0], raw.plane_heights[0]),
-        Subsampling::S422 => ((raw.plane_widths[0] + 1) / 2, raw.plane_heights[0]),
+        Subsampling::S422 => (raw.plane_widths[0].div_ceil(2), raw.plane_heights[0]),
         Subsampling::S420 => (
-            (raw.plane_widths[0] + 1) / 2,
-            (raw.plane_heights[0] + 1) / 2,
+            raw.plane_widths[0].div_ceil(2),
+            raw.plane_heights[0].div_ceil(2),
         ),
         _ => panic!("[{label}] unexpected subsampling"),
     };

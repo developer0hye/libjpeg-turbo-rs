@@ -160,8 +160,9 @@ fn libtiff_jpeg_roundtrip_via_shim() {
             );
             return;
         }
-        Some(3) | _ => {
-            // Compilation failed — this is a real error that must not be skipped.
+        _ => {
+            // Exit 3 is the documented "compilation failed" code; any other
+            // exit is equally unexpected. Both are real errors, not skips.
             panic!(
                 "examples/libtiff_integration/build.sh FAILED (exit {:?}): \
                  compilation error — this is a real build failure, not a \

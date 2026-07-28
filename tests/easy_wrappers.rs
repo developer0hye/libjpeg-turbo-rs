@@ -4,10 +4,7 @@ use std::io::Write;
 use std::path::PathBuf;
 use std::process::Command;
 
-use libjpeg_turbo_rs::precision::{
-    compress_12bit, compress_16bit, decompress_12bit, decompress_16bit,
-};
-use libjpeg_turbo_rs::quantize::{dequantize, quantize, DitherMode, QuantizeOptions};
+use libjpeg_turbo_rs::quantize::{quantize, DitherMode, QuantizeOptions};
 use libjpeg_turbo_rs::{
     compress, compress_into, decompress, read_scanlines_12, read_scanlines_16, requantize,
     write_scanlines_12, write_scanlines_16, Image, PixelFormat, ScanlineDecoder, Subsampling,

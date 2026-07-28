@@ -296,7 +296,7 @@ fn main() {
     }
 
     println!(
-        "{:<26} {:>10} {:>10} {:>10} {:>10} {:>6}  {:>7} {:>12}  {:>7} {:>12}  {}",
+        "{:<26} {:>10} {:>10} {:>10} {:>10} {:>6}  {:>7} {:>12}  {:>7} {:>12}  parity",
         "case",
         "ours(us)",
         "o.med",
@@ -306,8 +306,7 @@ fn main() {
         "allocs",
         "bytes",
         "z.allocs",
-        "z.bytes",
-        "parity"
+        "z.bytes"
     );
     let (mut wins, mut losses, mut ties, mut mismatches) = (0usize, 0usize, 0usize, 0usize);
     let mut loss_names: Vec<String> = Vec::new();

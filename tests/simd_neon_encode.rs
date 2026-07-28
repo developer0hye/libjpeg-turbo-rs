@@ -263,7 +263,7 @@ mod tests {
 
     /// Scalar H2V1 downsample for reference: average pairs of horizontal samples.
     fn scalar_downsample_h2v1(input: &[u8], in_width: usize, output: &mut [u8]) {
-        let out_width = (in_width + 1) / 2;
+        let out_width = in_width.div_ceil(2);
         for i in 0..out_width {
             let left = input[i * 2] as u16;
             let right = if i * 2 + 1 < in_width {
@@ -277,7 +277,7 @@ mod tests {
 
     /// Scalar H2V2 downsample for reference: average 2x2 blocks.
     fn scalar_downsample_h2v2(row0: &[u8], row1: &[u8], in_width: usize, output: &mut [u8]) {
-        let out_width = (in_width + 1) / 2;
+        let out_width = in_width.div_ceil(2);
         for i in 0..out_width {
             let tl = row0[i * 2] as u16;
             let tr = if i * 2 + 1 < in_width {
@@ -297,9 +297,9 @@ mod tests {
 
     #[test]
     fn neon_downsample_h2v1_matches_scalar() {
-        for &in_width in &[16, 32, 33, 48, 64, 100, 128] {
+        for &in_width in &[16usize, 32, 33, 48, 64, 100, 128] {
             let input: Vec<u8> = (0..in_width).map(|i| (i * 37 % 256) as u8).collect();
-            let out_width = (in_width + 1) / 2;
+            let out_width = in_width.div_ceil(2);
             let mut scalar_out = vec![0u8; out_width];
             let mut neon_out = vec![0u8; out_width];
 
@@ -338,10 +338,10 @@ mod tests {
 
     #[test]
     fn neon_downsample_h2v2_matches_scalar() {
-        for &in_width in &[16, 32, 33, 48, 64, 100, 128] {
+        for &in_width in &[16usize, 32, 33, 48, 64, 100, 128] {
             let row0: Vec<u8> = (0..in_width).map(|i| (i * 37 % 256) as u8).collect();
             let row1: Vec<u8> = (0..in_width).map(|i| (i * 73 + 11) as u8).collect();
-            let out_width = (in_width + 1) / 2;
+            let out_width = in_width.div_ceil(2);
             let mut scalar_out = vec![0u8; out_width];
             let mut neon_out = vec![0u8; out_width];
 

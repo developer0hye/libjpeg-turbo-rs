@@ -25,6 +25,10 @@ and `git log` between tags.
 - Windows CI leg building every workspace test target + the two
   C-tool-free suites (#378); Miri CI job over the non-SIMD unit tests
   (#389 phase 1); `publish-check` CI job (#380).
+- This changelog; MSRV CI job (rustc 1.87 for the root and capi crates);
+  `cargo-deny` supply-chain gate (advisories/bans/licenses/sources) with
+  `deny.toml` policy; Dependabot for cargo + GitHub Actions; a README
+  for the capi crate (#390).
 
 ### Changed
 - `Decoder` (and the wrappers embedding it) are now `Send`; the
@@ -38,6 +42,15 @@ and `git log` between tags.
   AVX2/NEON dispatch (#380, #381).
 - `bench_zune_matrix` calibration stabilized (median-of-3 estimate,
   iteration floor, visible medians) (#376).
+- Clippy CI widened from `--lib` to `--workspace` (zero allowances) plus
+  `--workspace --all-targets` (three structural lints allowed in test
+  code only, tracked as P4-70); the `image`-bridge crate declares
+  `rust-version = "1.88"` (inherited from `image@0.25`) (#390).
+
+### Security
+- Bumped `crossbeam-epoch` 0.9.18 → 0.9.20 in the dev/bench dependency
+  tree (RUSTSEC-2026-0204, invalid pointer dereference in a
+  `fmt::Pointer` impl), caught by the new `cargo-deny` gate (#390).
 
 ### Fixed
 - Grayscale decode to `Argb`/`Abgr` wrote the alpha byte in the wrong

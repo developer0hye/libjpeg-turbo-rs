@@ -659,14 +659,6 @@ fn read_number(data: &[u8], idx: usize) -> (usize, usize) {
     (val, end)
 }
 
-/// Generate deterministic grayscale u16 pixels for a given precision, using
-/// values that cover the full range from 0 to `(1 << precision) - 1`.
-fn make_gray_pixels_16(width: usize, height: usize, precision: u8) -> Vec<u16> {
-    let modulus: u32 = 1u32 << precision as u32;
-    let count: usize = width * height;
-    (0..count).map(|i| ((i as u32) % modulus) as u16).collect()
-}
-
 /// Cross-validate arbitrary lossless precision (2-16 bit) encoding against
 /// C djpeg. For each precision:
 /// - Rust lossless encode at that precision -> write JPEG -> C djpeg decode

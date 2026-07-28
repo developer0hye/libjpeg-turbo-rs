@@ -586,7 +586,7 @@ fn twelve_bit_boundary_values() {
     // Verify values are within valid 12-bit range
     for &v in &img.data {
         assert!(
-            v >= 0 && v <= 4095,
+            (0..=4095).contains(&v),
             "12-bit value {} out of range [0,4095]",
             v
         );
