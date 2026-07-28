@@ -34,6 +34,10 @@ fn multiply_pixel(y: u8, cb: u8, cr: u8) -> (u8, u8, u8) {
 }
 
 fn main() {
+    if std::env::args().nth(1).as_deref() == Some("profile") {
+        profile_stages();
+        return;
+    }
     let f640: &[u8] = include_bytes!("../tests/fixtures/photo_640x480_420.jpg");
     let f1080: &[u8] = include_bytes!("../tests/fixtures/photo_1920x1080_420.jpg");
 
@@ -82,4 +86,63 @@ fn main() {
         9,
     );
     println!("kernel ycbcr_row 1080p-frame: table={med_table} us multiply={med_mul} us");
+}
+
+// P4-60 per-stage profile (the acceptance criteria's outstanding step):
+// micro-bench each scalar kernel at the exact volume a 1080p 4:2:0
+// decode performs, so `decode_total - sum(stages)` bounds the residual
+// (Huffman decode + plane plumbing). Invoked when the first CLI arg is
+// `profile`; the plain run keeps its original output for comparability.
+fn profile_stages() {
+    use std::time::Instant;
+    // 1080p 4:2:0: luma 240x135 = 32,400 blocks; chroma 2 x 8,100.
+    let blocks_total: usize = 32_400 + 2 * 8_100;
+    let coeffs: [i16; 64] = {
+        let mut c = [0i16; 64];
+        let mut i: usize = 0;
+        while i < 64 {
+            c[i] = ((i as i16 * 29) % 256) - 128;
+            i += 1;
+        }
+        c
+    };
+    let t = Instant::now();
+    let mut sink: i16 = 0;
+    for _ in 0..blocks_total {
+        let out = libjpeg_turbo_rs::decode::idct::idct_8x8(std::hint::black_box(&coeffs));
+        sink ^= out[0];
+    }
+    println!(
+        "stage idct_8x8 x{blocks_total}: {} us (sink {sink})",
+        t.elapsed().as_micros()
+    );
+
+    // Chroma upsample: 2 components, 540 input rows -> 1080 output rows
+    // of 960 -> 1920 samples (fancy h2v2 row form).
+    let cur: Vec<u8> = (0..960usize).map(|i| (i * 3) as u8).collect();
+    let nb: Vec<u8> = (0..960usize).map(|i| (i * 5) as u8).collect();
+    let mut orow: Vec<u8> = vec![0u8; 1920];
+    let t = Instant::now();
+    for _ in 0..(2 * 1080usize) {
+        libjpeg_turbo_rs::decode::upsample::fancy_h2v2_row(
+            std::hint::black_box(&cur),
+            std::hint::black_box(&nb),
+            &mut orow,
+            960,
+        );
+        std::hint::black_box(&orow);
+    }
+    println!("stage fancy_h2v2_row x2160: {} us", t.elapsed().as_micros());
+
+    // Colour convert: 1080 rows of 1920 (post-table form).
+    let y: Vec<u8> = (0..1920usize).map(|i| (i * 7) as u8).collect();
+    let cb: Vec<u8> = (0..1920usize).map(|i| (i * 13) as u8).collect();
+    let cr: Vec<u8> = (0..1920usize).map(|i| (i * 29) as u8).collect();
+    let mut rgb: Vec<u8> = vec![0u8; 1920 * 3];
+    let t = Instant::now();
+    for _ in 0..1080 {
+        libjpeg_turbo_rs::decode::color::ycbcr_to_rgb_row(&y, &cb, &cr, &mut rgb, 1920);
+        std::hint::black_box(&rgb);
+    }
+    println!("stage ycbcr_rows x1080: {} us", t.elapsed().as_micros());
 }
