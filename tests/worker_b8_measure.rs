@@ -101,7 +101,7 @@ fn linux_peak_rss_bytes() -> Option<u64> {
     let content: String = std::fs::read_to_string("/proc/self/status").ok()?;
     for line in content.lines() {
         if let Some(rest) = line.strip_prefix("VmHWM:") {
-            let num_str: &str = rest.trim().split_whitespace().next()?;
+            let num_str: &str = rest.split_whitespace().next()?;
             let kb: u64 = num_str.parse().ok()?;
             return Some(kb * 1024);
         }

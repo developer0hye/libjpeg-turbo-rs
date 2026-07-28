@@ -63,7 +63,7 @@ unsafe fn neon_fancy_h2v1_inner(input: &[u8], in_width: usize, output: &mut [u8]
 
     // 16-wide NEON loop: process 16 interior samples per iteration.
     // Reads input[i-1..i+17] (18 bytes), writes output[2*i..2*i+32] (32 bytes).
-    while i + 16 <= in_width - 1 {
+    while i + 16 < in_width {
         let left: uint8x16_t = vld1q_u8(inptr.add(i - 1));
         let cur: uint8x16_t = vld1q_u8(inptr.add(i));
         let right: uint8x16_t = vld1q_u8(inptr.add(i + 1));
@@ -100,7 +100,7 @@ unsafe fn neon_fancy_h2v1_inner(input: &[u8], in_width: usize, output: &mut [u8]
     }
 
     // 8-wide NEON tail for remaining chunks.
-    while i + 8 <= in_width - 1 {
+    while i + 8 < in_width {
         let left: uint8x8_t = vld1_u8(inptr.add(i - 1));
         let cur: uint8x8_t = vld1_u8(inptr.add(i));
         let right: uint8x8_t = vld1_u8(inptr.add(i + 1));
