@@ -4564,140 +4564,15 @@ pub extern "C" fn jpeg12_read_raw_data(
 // pull another chunk (or report `JPEG_SUSPENDED`).
 // ---------------------------------------------------------------------------
 
-/// Result of scanning accumulated JPEG bytes for the next decode-relevant
-/// marker boundary past a given offset.
-#[derive(Debug, PartialEq, Eq, Clone, Copy)]
-enum MarkerBoundary {
-    /// A complete SOS marker header ends at this byte offset (the first byte of
-    /// the scan's entropy-coded data).
-    Sos(usize),
-    /// An EOI marker (`FF D9`) ends at this byte offset (one past it).
-    Eoi(usize),
-    /// Not enough bytes are buffered yet to reach the next boundary. Carries the
-    /// offset the scan stalled at, so a resuming caller restarts from there
-    /// instead of rescanning already-examined bytes (avoids O(n²) on a
-    /// small-packet suspending source).
-    NeedMore(usize),
-}
+// P4-58: the boundary scanner moved to the library crate
+// (`libjpeg_turbo_rs::decode::boundary`) so the Rust-native incremental
+// reader and this suspension core share one mechanism (P4-26). The
+// types/functions below are re-imports of the identical code.
+use libjpeg_turbo_rs::decode::boundary::{find_first_sos, scan_next_boundary, MarkerBoundary};
 
-/// DoS guard for the P4-13 incremental body drain: a misbehaving or adversarial
-/// suspending source manager could keep delivering body bytes that never form a
-/// scan / EOI boundary. Mirrors the 256 MiB cap in `drain_caller_source_mgr`;
-/// past it the drain stops pulling rather than growing `source` without bound.
+/// Hard ceiling on the accumulated body so a source that never delivers
+/// EOI cannot grow the buffer without bound (P4-13).
 const P4_13_MAX_BODY_BYTES: usize = 256 * 1024 * 1024;
-
-/// Scan from the SOI for the first SOS marker. Returns `Some(offset)` where
-/// `offset` is the first byte of entropy-coded data (one past the SOS header
-/// segment), or `None` if no complete SOS is buffered yet — either more bytes
-/// are needed, or the stream hits EOI first (a tables-only abbreviated
-/// datastream, which has no SOS).
-fn find_first_sos(bytes: &[u8]) -> Option<usize> {
-    if bytes.len() < 2 || bytes[0] != 0xFF || bytes[1] != 0xD8 {
-        return None; // not a JPEG SOI start
-    }
-    let n: usize = bytes.len();
-    let mut p: usize = 2; // index of the next marker's 0xFF, just past the SOI
-    loop {
-        if p + 1 >= n {
-            return None; // need the marker code byte
-        }
-        if bytes[p] != 0xFF {
-            return None; // misaligned — not at a marker
-        }
-        // Collapse any run of fill 0xFF bytes; the code is the first non-FF.
-        let mut code_idx: usize = p + 1;
-        while code_idx < n && bytes[code_idx] == 0xFF {
-            code_idx += 1;
-        }
-        if code_idx >= n {
-            return None;
-        }
-        let marker: u8 = bytes[code_idx];
-        match marker {
-            // Standalone markers (no length): SOI, TEM, RSTn.
-            0xD8 | 0x01 | 0xD0..=0xD7 => {
-                p = code_idx + 1;
-            }
-            // EOI before any SOS → tables-only; no SOS present.
-            0xD9 => return None,
-            // Every other marker (incl. SOS) carries a 2-byte length.
-            _ => {
-                let len_at: usize = code_idx + 1;
-                if len_at + 2 > n {
-                    return None; // length field not yet buffered
-                }
-                let seg_len: usize = ((bytes[len_at] as usize) << 8) | bytes[len_at + 1] as usize;
-                if seg_len < 2 {
-                    return None; // malformed length
-                }
-                let seg_end: usize = len_at + seg_len;
-                if seg_end > n {
-                    return None; // segment payload not fully buffered
-                }
-                if marker == 0xDA {
-                    return Some(seg_end); // entropy data starts here
-                }
-                p = seg_end;
-            }
-        }
-    }
-}
-
-/// Scan forward from `from` (inside entropy-coded data) for the next scan
-/// boundary, skipping stuffed `FF 00`, fill `FF FF`, and restart markers
-/// `FF D0..D7`, and skipping any length-bearing inter-scan segments (DHT / DQT
-/// / DRI / APPn that a progressive stream may interleave between scans).
-fn scan_next_boundary(bytes: &[u8], from: usize) -> MarkerBoundary {
-    let n: usize = bytes.len();
-    let mut i: usize = from;
-    loop {
-        while i < n && bytes[i] != 0xFF {
-            i += 1;
-        }
-        if i + 1 >= n {
-            return MarkerBoundary::NeedMore(i); // trailing 0xFF, need the code
-        }
-        let code: u8 = bytes[i + 1];
-        match code {
-            0x00 => i += 2,        // stuffed FF (literal 0xFF in entropy)
-            0xFF => i += 1,        // fill byte; re-examine the next byte
-            0xD0..=0xD7 => i += 2, // restart marker, still entropy
-            0x01 => i += 2,        // TEM — parameterless, like RSTn
-            0xD9 => return MarkerBoundary::Eoi(i + 2),
-            0xDA => {
-                let len_at: usize = i + 2;
-                if len_at + 2 > n {
-                    return MarkerBoundary::NeedMore(i);
-                }
-                let seg_len: usize = ((bytes[len_at] as usize) << 8) | bytes[len_at + 1] as usize;
-                if seg_len < 2 {
-                    return MarkerBoundary::NeedMore(i);
-                }
-                let seg_end: usize = len_at + seg_len;
-                if seg_end > n {
-                    return MarkerBoundary::NeedMore(i);
-                }
-                return MarkerBoundary::Sos(seg_end);
-            }
-            _ => {
-                // Inter-scan length-bearing marker (tables/DRI/APPn).
-                let len_at: usize = i + 2;
-                if len_at + 2 > n {
-                    return MarkerBoundary::NeedMore(i);
-                }
-                let seg_len: usize = ((bytes[len_at] as usize) << 8) | bytes[len_at + 1] as usize;
-                if seg_len < 2 {
-                    return MarkerBoundary::NeedMore(i);
-                }
-                let seg_end: usize = len_at + seg_len;
-                if seg_end > n {
-                    return MarkerBoundary::NeedMore(i);
-                }
-                i = seg_end;
-            }
-        }
-    }
-}
 
 // ---------------------------------------------------------------------------
 // Buffered-image-mode shim (P0-3 follow-on).

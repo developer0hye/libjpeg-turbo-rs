@@ -147,7 +147,6 @@ pub use api::encoder::{Encoder, HuffmanTableDef};
 pub fn jpeg_write_tables(encoder: &Encoder<'_>) -> Vec<u8> {
     encoder.write_tables()
 }
-#[doc(inline)]
 pub use api::high_level::{
     compress, compress_arithmetic, compress_arithmetic_progressive, compress_into,
     compress_lossless, compress_lossless_arithmetic, compress_lossless_extended,
@@ -179,6 +178,12 @@ pub use api::image_io::{
 pub use api::image_io::{
     load_image_from_bytes, load_ppm_12bit_from_bytes, load_ppm_16bit_from_bytes, LoadedImage,
     LoadedImage12, LoadedImage16,
+};
+#[doc(inline)]
+#[cfg(feature = "std")]
+#[cfg_attr(docsrs, doc(cfg(feature = "std")))]
+pub use api::incremental::{
+    decompress_from_reader_incremental, decompress_from_reader_incremental_instrumented,
 };
 pub use api::precision::{
     compress_12bit, compress_16bit, decompress_12bit, decompress_16bit, read_scanlines_12,
