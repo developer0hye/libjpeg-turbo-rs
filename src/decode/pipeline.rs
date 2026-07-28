@@ -1069,42 +1069,44 @@ impl<'a> Decoder<'a> {
         output: *mut u8,
         stride: usize,
     ) {
-        // For ISLOW, use optimized strided SIMD paths when available.
-        if matches!(self.dct_method, DctMethod::IsLow) {
-            #[cfg(all(target_arch = "aarch64", feature = "simd"))]
-            {
-                return crate::simd::aarch64::idct::neon_idct_islow_strided(
-                    coeffs, quant, output, stride,
-                );
-            }
-
-            #[cfg(all(target_arch = "x86_64", feature = "simd"))]
-            {
-                if crate::cpu_has!("avx2") {
-                    return crate::simd::x86_64::avx2_idct::avx2_idct_islow_strided(
+        unsafe {
+            // For ISLOW, use optimized strided SIMD paths when available.
+            if matches!(self.dct_method, DctMethod::IsLow) {
+                #[cfg(all(target_arch = "aarch64", feature = "simd"))]
+                {
+                    return crate::simd::aarch64::idct::neon_idct_islow_strided(
                         coeffs, quant, output, stride,
                     );
                 }
-                if crate::cpu_has!("sse2") {
-                    return crate::simd::x86_64::idct::sse2_idct_islow_strided(
-                        coeffs, quant, output, stride,
-                    );
+
+                #[cfg(all(target_arch = "x86_64", feature = "simd"))]
+                {
+                    if crate::cpu_has!("avx2") {
+                        return crate::simd::x86_64::avx2_idct::avx2_idct_islow_strided(
+                            coeffs, quant, output, stride,
+                        );
+                    }
+                    if crate::cpu_has!("sse2") {
+                        return crate::simd::x86_64::idct::sse2_idct_islow_strided(
+                            coeffs, quant, output, stride,
+                        );
+                    }
                 }
             }
-        }
 
-        // Generic path: IDCT into temp buffer, then copy row-by-row.
-        #[allow(unreachable_code)]
-        {
-            let idct = self.idct_fn();
-            let mut tmp = [0u8; 64];
-            idct(coeffs, quant, &mut tmp);
-            for row in 0..8 {
-                core::ptr::copy_nonoverlapping(
-                    tmp.as_ptr().add(row * 8),
-                    output.add(row * stride),
-                    8,
-                );
+            // Generic path: IDCT into temp buffer, then copy row-by-row.
+            #[allow(unreachable_code)]
+            {
+                let idct = self.idct_fn();
+                let mut tmp = [0u8; 64];
+                idct(coeffs, quant, &mut tmp);
+                for row in 0..8 {
+                    core::ptr::copy_nonoverlapping(
+                        tmp.as_ptr().add(row * 8),
+                        output.add(row * stride),
+                        8,
+                    );
+                }
             }
         }
     }
@@ -1122,24 +1124,26 @@ impl<'a> Decoder<'a> {
         stride: usize,
         block_size: usize,
     ) {
-        match block_size {
-            16 => idct_extended::idct_16x16_strided(coeffs, quant, output, stride),
-            15 => idct_extended::idct_15x15_strided(coeffs, quant, output, stride),
-            14 => idct_extended::idct_14x14_strided(coeffs, quant, output, stride),
-            13 => idct_extended::idct_13x13_strided(coeffs, quant, output, stride),
-            12 => idct_extended::idct_12x12_strided(coeffs, quant, output, stride),
-            11 => idct_extended::idct_11x11_strided(coeffs, quant, output, stride),
-            10 => idct_extended::idct_10x10_strided(coeffs, quant, output, stride),
-            9 => idct_extended::idct_9x9_strided(coeffs, quant, output, stride),
-            8 => self.idct_islow_strided(coeffs, quant, output, stride),
-            7 => idct_extended::idct_7x7_strided(coeffs, quant, output, stride),
-            6 => idct_extended::idct_6x6_strided(coeffs, quant, output, stride),
-            5 => idct_extended::idct_5x5_strided(coeffs, quant, output, stride),
-            4 => idct_scaled::idct_4x4_strided(coeffs, quant, output, stride),
-            3 => idct_extended::idct_3x3_strided(coeffs, quant, output, stride),
-            2 => idct_scaled::idct_2x2_strided(coeffs, quant, output, stride),
-            1 => idct_scaled::idct_1x1_strided(coeffs, quant, output, stride),
-            _ => unreachable!("invalid block_size: {}", block_size),
+        unsafe {
+            match block_size {
+                16 => idct_extended::idct_16x16_strided(coeffs, quant, output, stride),
+                15 => idct_extended::idct_15x15_strided(coeffs, quant, output, stride),
+                14 => idct_extended::idct_14x14_strided(coeffs, quant, output, stride),
+                13 => idct_extended::idct_13x13_strided(coeffs, quant, output, stride),
+                12 => idct_extended::idct_12x12_strided(coeffs, quant, output, stride),
+                11 => idct_extended::idct_11x11_strided(coeffs, quant, output, stride),
+                10 => idct_extended::idct_10x10_strided(coeffs, quant, output, stride),
+                9 => idct_extended::idct_9x9_strided(coeffs, quant, output, stride),
+                8 => self.idct_islow_strided(coeffs, quant, output, stride),
+                7 => idct_extended::idct_7x7_strided(coeffs, quant, output, stride),
+                6 => idct_extended::idct_6x6_strided(coeffs, quant, output, stride),
+                5 => idct_extended::idct_5x5_strided(coeffs, quant, output, stride),
+                4 => idct_scaled::idct_4x4_strided(coeffs, quant, output, stride),
+                3 => idct_extended::idct_3x3_strided(coeffs, quant, output, stride),
+                2 => idct_scaled::idct_2x2_strided(coeffs, quant, output, stride),
+                1 => idct_scaled::idct_1x1_strided(coeffs, quant, output, stride),
+                _ => unreachable!("invalid block_size: {}", block_size),
+            }
         }
     }
 
