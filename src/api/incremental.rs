@@ -129,7 +129,10 @@ fn decode_incremental<R: Read>(mut reader: R) -> Result<(Image, usize)> {
         if source_done {
             break None;
         }
-        if buf.len() > MAX_HEADER_BYTES {
+        // Guard BEFORE appending: one more chunk at the cap boundary
+        // would trigger Vec's amortized doubling (~2x the cap in one
+        // allocation request), defeating the limit (codex P2).
+        if buf.len() + READ_CHUNK > MAX_HEADER_BYTES {
             return Err(JpegError::CorruptData(
                 "no SOS marker within the 256 MiB header cap".to_string(),
             ));
@@ -164,7 +167,7 @@ fn decode_incremental<R: Read>(mut reader: R) -> Result<(Image, usize)> {
             // (reviewer P3): `decompress_from_reader` itself has no cap,
             // so this is deliberately stricter than "exactly like" it —
             // a hostile endless source cannot OOM the fallback.
-            if buf.len() > MAX_HEADER_BYTES {
+            if buf.len() + READ_CHUNK > MAX_HEADER_BYTES {
                 return Err(JpegError::CorruptData(
                     "stream exceeded the 256 MiB buffering cap".to_string(),
                 ));
@@ -214,7 +217,7 @@ fn decode_incremental<R: Read>(mut reader: R) -> Result<(Image, usize)> {
             buf.drain(..consumable);
             st.rebase(consumable);
         }
-        if buf.len() > MAX_WINDOW_BYTES {
+        if buf.len() + READ_CHUNK + MIN_RETRY_REFILL > MAX_WINDOW_BYTES {
             return Err(JpegError::CorruptData(format!(
                 "entropy window exceeded {} bytes without an MCU row committing",
                 MAX_WINDOW_BYTES
