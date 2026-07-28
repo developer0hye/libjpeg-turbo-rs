@@ -18,6 +18,9 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - run: cargo check --lib
+      # The user-facing examples are documentation (issue #388); keep
+      # them compiling.
+      - run: cargo check --examples
 
   fmt:
     name: Format
