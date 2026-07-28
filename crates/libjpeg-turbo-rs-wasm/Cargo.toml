@@ -1,6 +1,10 @@
 [package]
 name = "libjpeg-turbo-rs-wasm"
 version = "0.2.2"
+# Distribution (issue #380): npm is the channel — release.yml publishes
+# the wasm-pack bundle on v*/wasm-v* tags. crates.io publication is not
+# planned: the crate is wasm-bindgen glue, useless as a cargo dependency;
+# Rust consumers depend on the root crate and build for wasm32 directly.
 edition = "2021"
 description = "WASM bindings for libjpeg-turbo-rs — fast, pure-Rust JPEG codec for the browser"
 license = "MIT OR Apache-2.0"
