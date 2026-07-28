@@ -171,7 +171,7 @@ fn c_xval_12bit_rgb_subsamplings() {
 
     // 12-bit color only supports 4:4:4 subsampling
     {
-        let &(subsamp, sname) = &(Subsampling::S444, "444");
+        let (subsamp, sname): (Subsampling, &str) = (Subsampling::S444, "444");
         let label: String = format!("12bit_rgb_{}", sname);
 
         // Encode 12-bit with Rust

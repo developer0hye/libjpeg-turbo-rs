@@ -32,11 +32,13 @@ fn idct_known_values() {
 
     let output = idct::idct_8x8(&coeffs);
 
-    // Vertically constant for this pattern
+    // Vertically constant for this pattern: row 0 == row 1 of the
+    // 8-wide block.
+    const STRIDE: usize = 8;
     for col in 0..8 {
         assert_eq!(
             output[col],
-            output[8 + col],
+            output[STRIDE + col],
             "rows should be identical for this coefficient pattern"
         );
     }
