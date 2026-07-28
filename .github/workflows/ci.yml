@@ -226,6 +226,26 @@ jobs:
         # consumer of the bridge does.
         run: cargo test -p libjpeg-turbo-rs-image
 
+  miri:
+    # Issue #389: interpret the non-SIMD unit tests under Miri. The simd
+    # feature is off and simd:: module tests are skipped — Miri cannot
+    # emulate vendor intrinsics — so this checks exactly the safe-Rust +
+    # non-SIMD-unsafe surface (uninit-Vec patterns, BitWriter, parsing).
+    # -Zmiri-disable-isolation because fixture-reading tests stat files.
+    name: Miri (non-SIMD unit tests)
+    runs-on: ubuntu-latest
+    needs: [check]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: miri
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo miri test --no-default-features --features std --lib -- --skip simd::
+        env:
+          MIRIFLAGS: -Zmiri-disable-isolation
+        timeout-minutes: 25
+
   test-lib:
     name: Unit Tests
     runs-on: ubuntu-latest

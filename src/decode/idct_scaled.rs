@@ -231,10 +231,12 @@ pub unsafe fn idct_4x4_strided(
     output: *mut u8,
     stride: usize,
 ) {
-    let mut tmp = [0u8; 16];
-    idct_4x4(coeffs, quant, &mut tmp);
-    for row in 0..4 {
-        core::ptr::copy_nonoverlapping(tmp.as_ptr().add(row * 4), output.add(row * stride), 4);
+    unsafe {
+        let mut tmp = [0u8; 16];
+        idct_4x4(coeffs, quant, &mut tmp);
+        for row in 0..4 {
+            core::ptr::copy_nonoverlapping(tmp.as_ptr().add(row * 4), output.add(row * stride), 4);
+        }
     }
 }
 
@@ -248,10 +250,12 @@ pub unsafe fn idct_2x2_strided(
     output: *mut u8,
     stride: usize,
 ) {
-    let mut tmp = [0u8; 4];
-    idct_2x2(coeffs, quant, &mut tmp);
-    for row in 0..2 {
-        core::ptr::copy_nonoverlapping(tmp.as_ptr().add(row * 2), output.add(row * stride), 2);
+    unsafe {
+        let mut tmp = [0u8; 4];
+        idct_2x2(coeffs, quant, &mut tmp);
+        for row in 0..2 {
+            core::ptr::copy_nonoverlapping(tmp.as_ptr().add(row * 2), output.add(row * stride), 2);
+        }
     }
 }
 
@@ -265,7 +269,9 @@ pub unsafe fn idct_1x1_strided(
     output: *mut u8,
     _stride: usize,
 ) {
-    *output = idct_1x1(coeffs, quant);
+    unsafe {
+        *output = idct_1x1(coeffs, quant);
+    }
 }
 
 #[cfg(test)]
