@@ -28,7 +28,17 @@ set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
-RELEASE_DIR="${REPO_ROOT}/target/release"
+# Honor CARGO_TARGET_DIR: the build below inherits it, so the shim
+# lands there, not in the in-repo target/ (this host offloads all cargo
+# artifacts to an external SSD). Absolute paths only — a relative
+# CARGO_TARGET_DIR resolves against the repo root, same as cargo does
+# for the `cd REPO_ROOT && cargo build` invocation below.
+case "${CARGO_TARGET_DIR:-}" in
+    "")  TARGET_BASE="${REPO_ROOT}/target" ;;
+    /*)  TARGET_BASE="${CARGO_TARGET_DIR}" ;;
+    *)   TARGET_BASE="${REPO_ROOT}/${CARGO_TARGET_DIR}" ;;
+esac
+RELEASE_DIR="${TARGET_BASE}/release"
 
 log() { printf '[run.sh] %s\n' "$*"; }
 
