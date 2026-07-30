@@ -132,7 +132,8 @@ are called out in `CHANGELOG.md`.
 | `aarch64` (Linux/macOS) | NEON | compile-time selection, CI-tested |
 | `x86_64` (Linux/macOS/Windows) | AVX2/SSE2 | runtime CPUID dispatch (`std`), CI-tested incl. no-AVX2 emulation |
 | `wasm32` (browser/WASI) | SIMD128 | compile-time `target_feature` — see the wasm crate README |
-| RISC-V / POWER / s390x / 32-bit ARM | scalar | works, unoptimized ([#359](https://github.com/developer0hye/libjpeg-turbo-rs/issues/359)) |
+| RISC-V / POWER / s390x | scalar | works, unoptimized. C libjpeg-turbo is also scalar on these, and still ~1.1–1.7× faster than our scalar kernels ([#359](https://github.com/developer0hye/libjpeg-turbo-rs/issues/359)) |
+| `armv7` / 32-bit ARM (Cortex-A) | scalar | builds and passes locally; no CI leg executes here yet. Our widest gap: C *does* vectorize 32-bit ARM (AArch32 NEON), we do not — **estimated** 2–5× slower, not yet measured on hardware ([#424](https://github.com/developer0hye/libjpeg-turbo-rs/issues/424), [P4-78](docs/last_mile/phase4.md#p4-78-no-32-bit-arm-aarch32-neon-backend--armv7-is-our-widest-gap-vs-c--open)) |
 | `thumbv7em` (bare metal) | scalar | `no_std + alloc`, CI-built; no NEON backend is registered for thumb targets |
 
 
