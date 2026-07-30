@@ -1770,6 +1770,22 @@ pub fn decompress_lossless_arbitrary(data: &[u8]) -> Result<Image16> {
                 .ok_or_else(|| JpegError::CorruptData(format!("missing DC table {}", idx)))?,
         );
     }
+    // This entry point decodes a single fully-interleaved scan, so every
+    // frame component must appear in that scan's component list. A SOS
+    // with `Ns < Nf` (legal at parse time — C splits the remaining
+    // components across further scans) left `dc_tables` short and the
+    // `for c in 0..nc` decode loop below indexed past its end. Reject up
+    // front, mirroring the identical guard the 8-bit path already carries
+    // in `decode/pipeline.rs` (`decode_lossless_huffman`).
+    if dc_tables.len() < nc {
+        return Err(JpegError::CorruptData(format!(
+            "lossless {}-component frame has a SOS listing {} component(s); \
+             all {} must be present in a single interleaved scan",
+            nc,
+            dc_tables.len(),
+            nc
+        )));
+    }
     let entropy = &data[metadata.entropy_data_offset..];
     let mut br = BitReader::new(entropy);
     if nc == 1 {
