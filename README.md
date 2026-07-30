@@ -103,7 +103,9 @@ libjpeg-turbo-rs = "0.8"
 # libjpeg-turbo-rs = { version = "0.8", features = ["png"] }
 ```
 
-### Build flags (x86_64 only)
+### Build flags
+
+#### x86_64
 
 For x86_64 production builds, set:
 
@@ -119,6 +121,32 @@ embeds. Without these flags `cargo build --release` defaults to the
 SSE2-only `x86_64-v1` baseline and the encoder trails C by 5–10 pp at
 1080p; with them, Rust beats C in every encode benchmark in the
 Performance section above. aarch64 / NEON builds are unaffected.
+
+#### 32-bit ARM (`armv7`) — measure before you ship it
+
+The `armv7-unknown-linux-gnueabihf` target carries `-neon` in its baseline,
+so LLVM's auto-vectoriser never runs on our kernels there — on `x86_64`,
+where SSE2 *is* baseline, the same code vectorises silently. Enabling the
+feature turns it back on with no `unsafe` and no intrinsics:
+
+```sh
+RUSTFLAGS="-C target-feature=+neon -C target-cpu=cortex-a7" cargo build --release \
+  --target armv7-unknown-linux-gnueabihf
+```
+
+Measured effect on the generated code (`experiments/armv7_autovec_2026-07-30.md`):
+`idct_8x8` goes from 0 to 270 vector instructions, `ycbcr_to_rgb_row` 0 to
+140, `fancy_h2v2_row` 0 to 232; 204/204 tests still pass under `qemu-arm`.
+
+**This is not a recommended default, for two reasons.** `target-feature` is
+compile-time, so a `+neon` binary **crashes with SIGILL on an ARMv7 core
+that has no NEON** (C ships one binary for both by probing `/proc/cpuinfo`;
+a compile-time flag cannot). And it is **unmeasured on hardware**: the only
+A/B available was under emulation, which models no pipeline, cache, or
+NEON↔ARM register transfer cost — the very things that make
+auto-vectorised code regress on Cortex-A8 (transfer stalls) and A7/A9
+(64-bit NEON datapath). Set `-C target-cpu=` to your actual core, A/B it
+per kernel on the real device, and keep it off if you cannot.
 
 ## Feature flags, MSRV, platforms
 
