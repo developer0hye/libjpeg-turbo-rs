@@ -18,8 +18,13 @@
 //! The 8-bit twin in `decode/pipeline.rs` (`decode_lossless_huffman`)
 //! already carried this guard, added from a `fuzz_decompress_lenient`
 //! finding; the arbitrary-precision path never received it.
+//!
+//! `decompress_16bit` had the *same* defect at `precision.rs:1316`.
+//! Fixing only the arbitrary-precision site let the dispatched Fuzz
+//! Smoke run 30504332488 walk straight into the twin, so both now share
+//! one `lossless_dc_tables` helper and both are covered here.
 
-use libjpeg_turbo_rs::precision::decompress_lossless_arbitrary;
+use libjpeg_turbo_rs::precision::{decompress_16bit, decompress_lossless_arbitrary};
 
 /// Minimal lossless (SOF3) stream, 4x4, precision 8, predictor 1.
 ///
@@ -29,6 +34,16 @@ use libjpeg_turbo_rs::precision::decompress_lossless_arbitrary;
 /// not an unknown component id (that path is covered by
 /// `regression_sos_invalid_component_id.rs`).
 fn lossless_stream(frame_components: usize, scan_components: usize) -> Vec<u8> {
+    lossless_stream_with_precision(frame_components, scan_components, 8)
+}
+
+/// As above, with an explicit sample precision so the `decompress_16bit`
+/// entry point (which requires `P=16`) can be driven by the same fixture.
+fn lossless_stream_with_precision(
+    frame_components: usize,
+    scan_components: usize,
+    precision: u8,
+) -> Vec<u8> {
     assert!(scan_components <= frame_components);
     let ids: [u8; 4] = [1, 2, 3, 4];
 
@@ -38,7 +53,7 @@ fn lossless_stream(frame_components: usize, scan_components: usize) -> Vec<u8> {
     let sof_len: usize = 8 + 3 * frame_components;
     s.extend_from_slice(&[0xFF, 0xC3]);
     s.extend_from_slice(&[(sof_len >> 8) as u8, sof_len as u8]);
-    s.push(8); // precision
+    s.push(precision);
     s.extend_from_slice(&[0x00, 0x04]); // height
     s.extend_from_slice(&[0x00, 0x04]); // width
     s.push(frame_components as u8);
@@ -94,6 +109,40 @@ fn every_short_scan_component_count_is_rejected() {
                 "Nf={frame_components}/Ns={scan_components} must be a typed error, got Ok"
             );
         }
+    }
+}
+
+/// `decompress_16bit` is the twin that Fuzz Smoke 30504332488 found once
+/// the arbitrary-precision site alone was fixed. Same contract, `P=16`.
+#[test]
+fn decompress_16bit_short_scan_is_rejected_not_panicking() {
+    for frame_components in 2..=4usize {
+        for scan_components in 1..frame_components {
+            let stream: Vec<u8> =
+                lossless_stream_with_precision(frame_components, scan_components, 16);
+            let result = decompress_16bit(&stream);
+            assert!(
+                result.is_err(),
+                "16-bit Nf={frame_components}/Ns={scan_components} must be a typed error, got Ok"
+            );
+        }
+    }
+}
+
+/// Control for the 16-bit twin: `Ns == Nf` still decodes.
+#[test]
+fn decompress_16bit_matching_scan_component_count_still_decodes() {
+    for n in 1..=4usize {
+        let stream: Vec<u8> = lossless_stream_with_precision(n, n, 16);
+        let image = decompress_16bit(&stream)
+            .unwrap_or_else(|e| panic!("16-bit Nf=Ns={n} fixture must decode: {e}"));
+        assert_eq!((image.width, image.height), (4, 4));
+        assert_eq!(image.num_components, n);
+        // Initial prediction 1 << (16 - 0 - 1) = 32768, every diff zero.
+        assert!(
+            image.data.iter().all(|&v| v == 32768),
+            "16-bit Nf=Ns={n}: expected a uniform 32768 plane"
+        );
     }
 }
 
