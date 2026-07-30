@@ -104,9 +104,13 @@ fn fuzz_decompress_crashes_are_panic_safe() {
 fn fuzz_decompress_crashes_are_panic_safe_under_every_option_arm() {
     // The `% 7` keying pins each seed to one arm, so a seed minimized
     // under "scale 1/2" never exercises Rgb565 and vice versa. Sweep all
-    // arms over all seeds by padding the input length — trailing bytes
-    // after EOI are ignored by the decoder, so the pixels are unchanged
-    // and only the arm selection moves.
+    // arms over all seeds by padding the input length.
+    //
+    // Padding is an arm-selection lever, not a pixel-preserving one: for a
+    // seed that ends at EOI the appended bytes are ignored, but many
+    // crash seeds are truncated mid-entropy, where the extra zero bytes
+    // do feed the bit reader. That is fine — the contract asserted here
+    // is only "no panic, for any input", which every variant must meet.
     let seeds = crash_seeds("fuzz_decompress");
     assert!(!seeds.is_empty(), "no crash-* seeds under fuzz_decompress");
     for seed in seeds {
