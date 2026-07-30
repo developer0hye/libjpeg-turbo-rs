@@ -1,14 +1,8 @@
-# PARKED FILE — not active while it lives in `.github/ci-pending/`.
+# ARMv7-A (32-bit ARM) correctness gate — issue #424, P4-78 criterion (5).
 #
-# To activate: move this file to `.github/workflows/armv7.yml` (in the
-# GitHub web editor, open it, click Edit, and change the path in the
-# filename box). It is parked here only because pushing under
-# `.github/workflows/` requires a token with the `workflow` OAuth scope,
-# which the authoring credential lacked; the web editor uses your session
-# instead and is not scope-restricted.
-#
-# Once moved, this directory should be empty — nothing else belongs here.
-# Tracked as acceptance criterion (5) of P4-78 in docs/last_mile/phase4.md.
+# Kept in its own workflow file rather than folded into cross-arch.yml
+# because it was landed through the GitHub web editor: pushing under
+# .github/workflows/ requires a token with the `workflow` OAuth scope.
 name: ARMv7 (32-bit ARM)
 
 on:
