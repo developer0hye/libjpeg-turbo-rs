@@ -1,0 +1,99 @@
+# PARKED FILE — not active while it lives in `.github/ci-pending/`.
+#
+# To activate: move this file to `.github/workflows/armv7.yml` (in the
+# GitHub web editor, open it, click Edit, and change the path in the
+# filename box). It is parked here only because pushing under
+# `.github/workflows/` requires a token with the `workflow` OAuth scope,
+# which the authoring credential lacked; the web editor uses your session
+# instead and is not scope-restricted.
+#
+# Once moved, this directory should be empty — nothing else belongs here.
+# Tracked as acceptance criterion (5) of P4-78 in docs/last_mile/phase4.md.
+name: ARMv7 (32-bit ARM)
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  # 32-bit ARM (ARMv7-A, hard-float) — issue #424, tracked as P4-78.
+  #
+  # This is the one mainstream platform where C libjpeg-turbo is fully
+  # NEON-accelerated (`simd/CMakeLists.txt:352-359` compiles the same 13
+  # shared `simd/arm/*-neon.c` kernels for CPU_TYPE=arm as for arm64) and
+  # we are 100% scalar: `src/simd/mod.rs` registers backends for
+  # aarch64/x86_64/wasm32 only, because `core::arch::arm`'s NEON
+  # intrinsics are still behind the unstable `stdarch_arm_neon_intrinsics`
+  # feature.
+  #
+  # So this leg is deliberately a CORRECTNESS gate, not a performance one
+  # — qemu-arm wall times are not hardware-representative, and unlike the
+  # RISC-V harness in `experiments/riscv64_scalar_2026-07-27.md` the two
+  # sides would not even pay a symmetric emulation tax here (C's NEON
+  # kernels would be emulated, our scalar ones would not).
+  #
+  # What it adds over the existing legs. 32-bit *pointer width* is already
+  # executed by `wasm.yml`'s `cargo test --target wasm32-wasip1` under
+  # wasmtime (and scalar dispatch with it, since simd128 is off by default
+  # there) — so that is NOT this job's novelty. What is new is a 32-bit
+  # hardware ISA: native ARM codegen, the armhf ABI, and real
+  # unaligned-access semantics rather than a VM's. 32-bit is also where
+  # C's `JLONG` (`long`, `jpegint.h:62`) is 32-bit — the wrap contract our
+  # IDCT `wrapping_*` ports match (P4-19, P4-74).
+  #
+  # `-C overflow-checks=on` is part of the gate and is set by no other
+  # leg: at half width a size/stride computation that wraps is a bug and
+  # should fail loudly, while the kernels that are *meant* to wrap say so
+  # with `wrapping_*` / `core::num::Wrapping`, which these checks do not
+  # touch.
+  test-linux-armv7-scalar-emulated:
+    name: Test (linux-armv7 scalar, emulated)
+    runs-on: ubuntu-24.04
+    env:
+      CARGO_TARGET_ARMV7_UNKNOWN_LINUX_GNUEABIHF_LINKER: arm-linux-gnueabihf-gcc
+      RUSTFLAGS: "-C overflow-checks=on"
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          submodules: recursive
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: armv7-unknown-linux-gnueabihf
+      - uses: Swatinem/rust-cache@v2
+      # The armhf gcc is the linker for the Rust target, and is also
+      # required by `criterion -> alloca`, whose cc-rs build script looks
+      # for exactly `arm-linux-gnueabihf-gcc`. We ship no C code
+      # ourselves, so nothing in the crate under test needs it.
+      - name: Install armhf cross toolchain + qemu-user
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y gcc-arm-linux-gnueabihf qemu-user
+          qemu-arm --version
+      - name: Build lib + dispatch tests for armv7
+        run: |
+          cargo test --release --target armv7-unknown-linux-gnueabihf --no-run \
+            --lib --test simd_dispatch --test no_std_dispatch
+        timeout-minutes: 20
+      # Scoped to C-tool-free targets on purpose: the byte-exact
+      # cross-checks shell out to native x86_64 djpeg/cjpeg, and the
+      # scalar path they would exercise is already gated natively by
+      # `no_std_dispatch` (scalar output == host dispatch output) plus the
+      # JSIMD_FORCENONE legs. Here the point is that the same kernels run
+      # correctly when pointers and lengths are 32 bits wide.
+      - name: Run under qemu-arm (ARMv7-A)
+        run: |
+          set -euo pipefail
+          cargo test --release --target armv7-unknown-linux-gnueabihf --no-run \
+            --message-format=json \
+            --lib --test simd_dispatch --test no_std_dispatch \
+            | jq -r 'select(.executable != null) | .executable' \
+            | while read -r binary; do
+                echo "=== $binary ==="
+                qemu-arm -L /usr/arm-linux-gnueabihf "$binary"
+              done
+        timeout-minutes: 30

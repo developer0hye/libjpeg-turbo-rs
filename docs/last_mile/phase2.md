@@ -45,7 +45,7 @@ test format_message_no_specifier_matches_msgtext_verbatim   ... ok
 The remaining platform ideas are future hardening, not OPEN/PARTIAL release-gate work:
 
 1. **Windows/MSVC compile-time `const_assert!` blocks.** The runtime `abi_offsets` gate is platform-aware and compares Rust's host layout to a C harness compiled on the same host. Dedicated Windows compile-time constants would be additive.
-2. **32-bit ABI targets** (`i686-pc-windows-msvc`, `i686-unknown-linux-gnu`, `armv7-unknown-linux-gnueabihf`). Add these only when a downstream consumer requests that platform; a useful gate needs a matching target C harness, not just a cross-compile build.
+2. **32-bit ABI targets** (`i686-pc-windows-msvc`, `i686-unknown-linux-gnu`, `armv7-unknown-linux-gnueabihf`). Add these only when a downstream consumer requests that platform; a useful gate needs a matching target C harness, not just a cross-compile build. **Trigger fired 2026-07-30 for `armv7-unknown-linux-gnueabihf`** — issue [#424](https://github.com/developer0hye/libjpeg-turbo-rs/issues/424) asked about ARMv7 performance, and per the rule below the follow-up is Phase 4's [P4-78](phase4.md#p4-78-no-32-bit-arm-aarch32-neon-backend--armv7-is-our-widest-gap-vs-c--open). What landed with it is the codec-side 32-bit gate (`Test (linux-armv7 scalar, emulated)`, cross-build + `qemu-arm`); the **C-ABI** half of this item — a matching armhf C harness for `abi_offsets` — is still untaken, and the `i686-*` pair remains untriggered.
 
 If either future-hardening trigger becomes concrete, open a Phase 4 item instead of reopening this Phase 2 release gate.
 

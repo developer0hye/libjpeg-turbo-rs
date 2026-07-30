@@ -1,0 +1,18 @@
+# DCO app configuration (https://github.com/probot/dco).
+#
+# Why individual remediation is enabled: changes under `.github/workflows/`
+# cannot be pushed by an OAuth token that lacks the `workflow` scope, so those
+# files are sometimes committed through the GitHub web editor instead — and the
+# web editor's description field silently drops the `Signed-off-by` trailer
+# (first hit: PR #426, commit 570dc16, which moved `armv7.yml` into place).
+#
+# The usual fix, `git rebase --signoff`, is not available for exactly those
+# commits: rewriting them means pushing the workflow file again, which hits the
+# same scope rejection that forced the web editor in the first place.
+#
+# `individual: true` lets the original author self-certify a past commit with a
+# follow-up commit reading "I, <name> <email>, hereby add my Signed-off-by to
+# this commit: <sha>". Third-party remediation is deliberately NOT enabled —
+# nobody may sign off on another person's commit.
+allowRemediationCommits:
+  individual: true
