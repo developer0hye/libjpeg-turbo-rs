@@ -6,12 +6,27 @@
 //! the process). libFuzzer runs the same seeds nightly; this harness
 //! catches regressions fast between nightly runs.
 //!
+//! **The replay must drive the same decoder options the fuzz target
+//! does.** `fuzz_decompress` keys an option matrix (scale 1/2, RGB565,
+//! crop, grayscale, …) off `data.len() % 7`; this harness used to call
+//! bare `decompress()`, so every seed whose crash needed one of those
+//! options replayed green here while still failing in CI.
+//! `crash-8d3c593a…` sat committed and "passing" in exactly that state
+//! until the 2026-07-29 Fuzz Smoke runs — see `drive_decompress` below,
+//! which is kept in lock-step with `fuzz/fuzz_targets/fuzz_decompress.rs`.
+//!
 //! Gated off `wasm` because the corpus is loaded via `std::fs`.
 
 #![cfg(not(target_family = "wasm"))]
 
-use libjpeg_turbo_rs::{decompress, decompress_lenient, read_coefficients};
+use libjpeg_turbo_rs::precision::{
+    decompress_12bit, decompress_16bit, decompress_lossless_arbitrary,
+};
+use libjpeg_turbo_rs::{decompress, decompress_lenient, read_coefficients, Decoder, PixelFormat};
 use std::path::PathBuf;
+
+/// Mirrors `MAX_FUZZ_PIXELS` in the fuzz targets.
+const MAX_FUZZ_PIXELS: u64 = 1_048_576;
 
 fn crash_seeds(target: &str) -> Vec<PathBuf> {
     let dir: PathBuf = [env!("CARGO_MANIFEST_DIR"), "fuzz", "corpus", target]
@@ -47,17 +62,80 @@ fn run<F: Fn(&[u8])>(target: &str, call: F) {
     }
 }
 
+/// Replay of `fuzz/fuzz_targets/fuzz_decompress.rs`. Keep the option
+/// matrix and its `data.len() % 7` keying identical to that target — a
+/// seed only reproduces under the arm the fuzzer picked for it.
+fn drive_decompress(data: &[u8]) {
+    let Ok(mut decoder) = Decoder::new(data) else {
+        return;
+    };
+    let (frame_w, frame_h) = {
+        let header = decoder.header();
+        (header.width, header.height)
+    };
+    let pixels = (frame_w as u64).saturating_mul(frame_h as u64);
+    if frame_w == 0 || frame_h == 0 || pixels > MAX_FUZZ_PIXELS {
+        return;
+    }
+    decoder.set_scan_limit(100);
+    match data.len() % 7 {
+        1 => decoder.set_output_format(PixelFormat::Rgba),
+        2 => {
+            decoder.set_output_format(PixelFormat::Rgb565);
+            decoder.set_dither_565(true);
+        }
+        // The reduced-size IDCT lives behind this arm only; five of the
+        // 2026-07-29 crash seeds panic on i32 overflow without it.
+        3 => decoder.set_scale(libjpeg_turbo_rs::ScalingFactor::new(1, 2)),
+        4 => decoder.set_crop_region(3, 0, 40, frame_h as usize),
+        5 => decoder.set_output_format(PixelFormat::Xrgb),
+        6 => decoder.set_output_format(PixelFormat::Grayscale),
+        _ => {}
+    }
+    let _ = decoder.decode_image();
+}
+
 #[test]
 fn fuzz_decompress_crashes_are_panic_safe() {
-    run("fuzz_decompress", |d| {
-        let _ = decompress(d);
-    });
+    run("fuzz_decompress", drive_decompress);
+}
+
+#[test]
+fn fuzz_decompress_crashes_are_panic_safe_under_every_option_arm() {
+    // The `% 7` keying pins each seed to one arm, so a seed minimized
+    // under "scale 1/2" never exercises Rgb565 and vice versa. Sweep all
+    // arms over all seeds by padding the input length.
+    //
+    // Padding is an arm-selection lever, not a pixel-preserving one: for a
+    // seed that ends at EOI the appended bytes are ignored, but many
+    // crash seeds are truncated mid-entropy, where the extra zero bytes
+    // do feed the bit reader. That is fine — the contract asserted here
+    // is only "no panic, for any input", which every variant must meet.
+    let seeds = crash_seeds("fuzz_decompress");
+    assert!(!seeds.is_empty(), "no crash-* seeds under fuzz_decompress");
+    for seed in seeds {
+        let data = std::fs::read(&seed).unwrap_or_else(|e| panic!("read {:?}: {}", seed, e));
+        for pad in 0..7 {
+            let mut padded = data.clone();
+            padded.extend(std::iter::repeat_n(0u8, pad));
+            drive_decompress(&padded);
+        }
+    }
 }
 
 #[test]
 fn fuzz_decompress_lenient_crashes_are_panic_safe() {
     run("fuzz_decompress_lenient", |d| {
         let _ = decompress_lenient(d);
+    });
+}
+
+#[test]
+fn fuzz_decompress_precision_crashes_are_panic_safe() {
+    run("fuzz_decompress_precision", |d| {
+        let _ = decompress_12bit(d);
+        let _ = decompress_16bit(d);
+        let _ = decompress_lossless_arbitrary(d);
     });
 }
 

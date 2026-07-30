@@ -27,15 +27,35 @@ const FIX_3_624509785: i32 = 29692;
 
 const CONST_BITS: i32 = 13;
 const PASS1_BITS: i32 = 2;
+const CENTERJSAMPLE: i32 = 128;
 
+/// Descale and round, mirroring C's `DESCALE`.
+///
+/// The rounding fudge is added with `wrapping_add` for the same reason
+/// `decode/idct.rs` does: C's intermediates are `JLONG`, which
+/// `jpegint.h:62` declares as `long` — only *"must hold at least signed
+/// 32-bit values"*, so on LLP64/32-bit hosts these expressions wrap
+/// silently. Corrupt coefficient/quant pairs drive them past `i32`, and
+/// a Rust overflow-checked build turns that wrap into a panic
+/// (Fuzz Smoke runs 30420069849 / 30438301770 / 30461194331 /
+/// 30485530878 — five distinct `fuzz_decompress` crash seeds).
 #[inline(always)]
 fn descale(x: i32, n: i32) -> i32 {
-    (x + (1 << (n - 1))) >> n
+    x.wrapping_add(1 << (n - 1)) >> n
 }
 
+/// Level-shift by `CENTERJSAMPLE` and clamp to a `u8` sample.
+///
+/// C indexes `range_limit[value & RANGE_MASK]` (`jidctred.c:278-289`),
+/// which is *identical* to saturating for every `value` in
+/// `[-512, 511]` — the range legal input can produce — and wraps
+/// beyond it. We saturate instead, matching both the NEON twin in
+/// `simd/aarch64/idct_scaled.rs` (`vqmovun_s16`) and C's own
+/// `jidctred-neon.c`, so the scalar and SIMD backends agree on
+/// corrupt input.
 #[inline(always)]
-fn clamp_to_u8(val: i32) -> u8 {
-    val.clamp(0, 255) as u8
+fn level_shift_clamp(val: i32) -> u8 {
+    val.saturating_add(CENTERJSAMPLE).clamp(0, 255) as u8
 }
 
 /// 4x4 reduced IDCT: produces 4x4 output from 8x8 DCT coefficients.
@@ -69,29 +89,33 @@ pub fn idct_4x4(coeffs: &[i16; 64], quant: &[u16; 64], output: &mut [u8; 16]) {
         let tmp0 = c(0) << (CONST_BITS + 1);
         let z2 = c(2);
         let z3 = c(6);
-        let tmp2 = z2 * FIX_1_847759065 + z3 * (-FIX_0_765366865);
-        let tmp10 = tmp0 + tmp2;
-        let tmp12 = tmp0 - tmp2;
+        let tmp2 = z2
+            .wrapping_mul(FIX_1_847759065)
+            .wrapping_add(z3.wrapping_mul(-FIX_0_765366865));
+        let tmp10 = tmp0.wrapping_add(tmp2);
+        let tmp12 = tmp0.wrapping_sub(tmp2);
 
         // Odd part
         let z1 = c(7);
         let z2 = c(5);
         let z3 = c(3);
         let z4 = c(1);
-        let tmp0 = z1 * (-FIX_0_211164243)
-            + z2 * FIX_1_451774981
-            + z3 * (-FIX_2_172734803)
-            + z4 * FIX_1_061594337;
-        let tmp2 = z1 * (-FIX_0_509795579)
-            + z2 * (-FIX_0_601344887)
-            + z3 * FIX_0_899976223
-            + z4 * FIX_2_562915447;
+        let tmp0 = z1
+            .wrapping_mul(-FIX_0_211164243)
+            .wrapping_add(z2.wrapping_mul(FIX_1_451774981))
+            .wrapping_add(z3.wrapping_mul(-FIX_2_172734803))
+            .wrapping_add(z4.wrapping_mul(FIX_1_061594337));
+        let tmp2 = z1
+            .wrapping_mul(-FIX_0_509795579)
+            .wrapping_add(z2.wrapping_mul(-FIX_0_601344887))
+            .wrapping_add(z3.wrapping_mul(FIX_0_899976223))
+            .wrapping_add(z4.wrapping_mul(FIX_2_562915447));
 
         let ws_col = if col < 4 { col } else { col - 1 };
-        workspace[ws_col] = descale(tmp10 + tmp2, CONST_BITS - PASS1_BITS + 1);
-        workspace[3 * 7 + ws_col] = descale(tmp10 - tmp2, CONST_BITS - PASS1_BITS + 1);
-        workspace[7 + ws_col] = descale(tmp12 + tmp0, CONST_BITS - PASS1_BITS + 1);
-        workspace[2 * 7 + ws_col] = descale(tmp12 - tmp0, CONST_BITS - PASS1_BITS + 1);
+        workspace[ws_col] = descale(tmp10.wrapping_add(tmp2), CONST_BITS - PASS1_BITS + 1);
+        workspace[3 * 7 + ws_col] = descale(tmp10.wrapping_sub(tmp2), CONST_BITS - PASS1_BITS + 1);
+        workspace[7 + ws_col] = descale(tmp12.wrapping_add(tmp0), CONST_BITS - PASS1_BITS + 1);
+        workspace[2 * 7 + ws_col] = descale(tmp12.wrapping_sub(tmp0), CONST_BITS - PASS1_BITS + 1);
     }
 
     // Pass 2: rows. Process 4 rows, producing 4 output pixels each.
@@ -100,7 +124,7 @@ pub fn idct_4x4(coeffs: &[i16; 64], quant: &[u16; 64], output: &mut [u8; 16]) {
 
         // DC-only shortcut
         if w(1) == 0 && w(2) == 0 && w(3) == 0 && w(4) == 0 && w(5) == 0 && w(6) == 0 {
-            let dcval = clamp_to_u8(descale(w(0), PASS1_BITS + 3) + 128);
+            let dcval = level_shift_clamp(descale(w(0), PASS1_BITS + 3));
             output[row * 4] = dcval;
             output[row * 4 + 1] = dcval;
             output[row * 4 + 2] = dcval;
@@ -112,29 +136,33 @@ pub fn idct_4x4(coeffs: &[i16; 64], quant: &[u16; 64], output: &mut [u8; 16]) {
         let tmp0 = w(0) << (CONST_BITS + 1);
         let z2 = w(2);
         let z3 = w(5); // note: ws col 5 maps to original col 6 (skipping col 4)
-        let tmp2 = z2 * FIX_1_847759065 + z3 * (-FIX_0_765366865);
-        let tmp10 = tmp0 + tmp2;
-        let tmp12 = tmp0 - tmp2;
+        let tmp2 = z2
+            .wrapping_mul(FIX_1_847759065)
+            .wrapping_add(z3.wrapping_mul(-FIX_0_765366865));
+        let tmp10 = tmp0.wrapping_add(tmp2);
+        let tmp12 = tmp0.wrapping_sub(tmp2);
 
         // Odd part
         let z1 = w(6); // original col 7
         let z2 = w(4); // original col 5
         let z3 = w(3); // original col 3
         let z4 = w(1); // original col 1
-        let tmp0 = z1 * (-FIX_0_211164243)
-            + z2 * FIX_1_451774981
-            + z3 * (-FIX_2_172734803)
-            + z4 * FIX_1_061594337;
-        let tmp2 = z1 * (-FIX_0_509795579)
-            + z2 * (-FIX_0_601344887)
-            + z3 * FIX_0_899976223
-            + z4 * FIX_2_562915447;
+        let tmp0 = z1
+            .wrapping_mul(-FIX_0_211164243)
+            .wrapping_add(z2.wrapping_mul(FIX_1_451774981))
+            .wrapping_add(z3.wrapping_mul(-FIX_2_172734803))
+            .wrapping_add(z4.wrapping_mul(FIX_1_061594337));
+        let tmp2 = z1
+            .wrapping_mul(-FIX_0_509795579)
+            .wrapping_add(z2.wrapping_mul(-FIX_0_601344887))
+            .wrapping_add(z3.wrapping_mul(FIX_0_899976223))
+            .wrapping_add(z4.wrapping_mul(FIX_2_562915447));
 
         let shift = CONST_BITS + PASS1_BITS + 3 + 1;
-        output[row * 4] = clamp_to_u8(descale(tmp10 + tmp2, shift) + 128);
-        output[row * 4 + 3] = clamp_to_u8(descale(tmp10 - tmp2, shift) + 128);
-        output[row * 4 + 1] = clamp_to_u8(descale(tmp12 + tmp0, shift) + 128);
-        output[row * 4 + 2] = clamp_to_u8(descale(tmp12 - tmp0, shift) + 128);
+        output[row * 4] = level_shift_clamp(descale(tmp10.wrapping_add(tmp2), shift));
+        output[row * 4 + 3] = level_shift_clamp(descale(tmp10.wrapping_sub(tmp2), shift));
+        output[row * 4 + 1] = level_shift_clamp(descale(tmp12.wrapping_add(tmp0), shift));
+        output[row * 4 + 2] = level_shift_clamp(descale(tmp12.wrapping_sub(tmp0), shift));
     }
 }
 
@@ -171,10 +199,11 @@ pub fn idct_2x2(coeffs: &[i16; 64], quant: &[u16; 64], output: &mut [u8; 4]) {
         let tmp10 = c(0) << (CONST_BITS + 2);
 
         // Odd part
-        let tmp0 = c(7) * (-FIX_0_720959822)
-            + c(5) * FIX_0_850430095
-            + c(3) * (-FIX_1_272758580)
-            + c(1) * FIX_3_624509785;
+        let tmp0 = c(7)
+            .wrapping_mul(-FIX_0_720959822)
+            .wrapping_add(c(5).wrapping_mul(FIX_0_850430095))
+            .wrapping_add(c(3).wrapping_mul(-FIX_1_272758580))
+            .wrapping_add(c(1).wrapping_mul(FIX_3_624509785));
 
         let ws_col = match col {
             0 => 0,
@@ -184,8 +213,8 @@ pub fn idct_2x2(coeffs: &[i16; 64], quant: &[u16; 64], output: &mut [u8; 4]) {
             7 => 4,
             _ => unreachable!(),
         };
-        workspace[ws_col] = descale(tmp10 + tmp0, CONST_BITS - PASS1_BITS + 2);
-        workspace[5 + ws_col] = descale(tmp10 - tmp0, CONST_BITS - PASS1_BITS + 2);
+        workspace[ws_col] = descale(tmp10.wrapping_add(tmp0), CONST_BITS - PASS1_BITS + 2);
+        workspace[5 + ws_col] = descale(tmp10.wrapping_sub(tmp0), CONST_BITS - PASS1_BITS + 2);
     }
 
     // Pass 2: rows
@@ -194,7 +223,7 @@ pub fn idct_2x2(coeffs: &[i16; 64], quant: &[u16; 64], output: &mut [u8; 4]) {
 
         // DC-only shortcut
         if w(1) == 0 && w(2) == 0 && w(3) == 0 && w(4) == 0 {
-            let dcval = clamp_to_u8(descale(w(0), PASS1_BITS + 3) + 128);
+            let dcval = level_shift_clamp(descale(w(0), PASS1_BITS + 3));
             output[row * 2] = dcval;
             output[row * 2 + 1] = dcval;
             continue;
@@ -204,21 +233,24 @@ pub fn idct_2x2(coeffs: &[i16; 64], quant: &[u16; 64], output: &mut [u8; 4]) {
         let tmp10 = w(0) << (CONST_BITS + 2);
 
         // Odd part: ws cols 1,2,3,4 map to original cols 1,3,5,7
-        let tmp0 = w(4) * (-FIX_0_720959822)
-            + w(3) * FIX_0_850430095
-            + w(2) * (-FIX_1_272758580)
-            + w(1) * FIX_3_624509785;
+        let tmp0 = w(4)
+            .wrapping_mul(-FIX_0_720959822)
+            .wrapping_add(w(3).wrapping_mul(FIX_0_850430095))
+            .wrapping_add(w(2).wrapping_mul(-FIX_1_272758580))
+            .wrapping_add(w(1).wrapping_mul(FIX_3_624509785));
 
         let shift = CONST_BITS + PASS1_BITS + 3 + 2;
-        output[row * 2] = clamp_to_u8(descale(tmp10 + tmp0, shift) + 128);
-        output[row * 2 + 1] = clamp_to_u8(descale(tmp10 - tmp0, shift) + 128);
+        output[row * 2] = level_shift_clamp(descale(tmp10.wrapping_add(tmp0), shift));
+        output[row * 2 + 1] = level_shift_clamp(descale(tmp10.wrapping_sub(tmp0), shift));
     }
 }
 
 /// 1x1 reduced IDCT: produces single pixel from DC coefficient.
 pub fn idct_1x1(coeffs: &[i16; 64], quant: &[u16; 64]) -> u8 {
+    // `i16 * u16` peaks at 32767 * 65535 = 2_147_418_945 < i32::MAX, so the
+    // dequantize itself cannot overflow for any input.
     let dcval = coeffs[0] as i32 * quant[0] as i32;
-    clamp_to_u8(descale(dcval, 3) + 128)
+    level_shift_clamp(descale(dcval, 3))
 }
 
 /// 4x4 reduced IDCT writing directly to a strided buffer.
@@ -437,5 +469,78 @@ mod tests {
             }
             assert_eq!(buf[row * stride + 2], 0xFF);
         }
+    }
+
+    /// Fuzz Smoke runs 30420069849 / 30438301770 / 30461194331 /
+    /// 30485530878: corrupt streams decoded at `ScalingFactor::new(1, 2)`
+    /// drove the reduced IDCT's fixed-point intermediates past `i32` and
+    /// panicked on every arithmetic op in the block (`attempt to
+    /// {add,subtract,multiply} with overflow` at five distinct lines).
+    /// C's `JLONG` is `long` (`jpegint.h:62`), which is only required to
+    /// hold 32 bits, so wrapping here is the documented C contract — not
+    /// a bug to report to the caller.
+    ///
+    /// Extreme-but-legal encodings: `i16` coefficients and `u16` quant
+    /// values are both fully attacker-controlled through DQT/entropy.
+    #[test]
+    fn reduced_idct_wraps_instead_of_panicking_on_saturated_coefficients() {
+        let extremes: [(i16, u16); 4] = [
+            (i16::MAX, u16::MAX),
+            (i16::MIN, u16::MAX),
+            (i16::MAX, 1),
+            (i16::MIN, u16::MAX / 2),
+        ];
+        for (coeff, q) in extremes {
+            let coeffs = [coeff; 64];
+            let quant = [q; 64];
+
+            let mut out_4x4 = [0u8; 16];
+            idct_4x4(&coeffs, &quant, &mut out_4x4);
+            let mut out_2x2 = [0u8; 4];
+            idct_2x2(&coeffs, &quant, &mut out_2x2);
+            let _ = idct_1x1(&coeffs, &quant);
+
+            // Deterministic, in-range output is the contract — the exact
+            // wrapped value is not, since C's own result depends on
+            // whether `long` is 32- or 64-bit on the host.
+            let mut again = [0u8; 16];
+            idct_4x4(&coeffs, &quant, &mut again);
+            assert_eq!(out_4x4, again, "coeff={coeff} q={q}: not deterministic");
+        }
+    }
+
+    /// The odd-part accumulators overflow only when *some* rows are
+    /// non-zero, so the all-`i16::MAX` case above can miss the DC-only
+    /// early-out interaction. Sweep one saturated row at a time.
+    #[test]
+    fn reduced_idct_handles_single_saturated_row() {
+        for row in 0..8 {
+            let mut coeffs = [0i16; 64];
+            for col in 0..8 {
+                coeffs[row * 8 + col] = i16::MIN;
+            }
+            let quant = [u16::MAX; 64];
+
+            let mut out_4x4 = [0u8; 16];
+            idct_4x4(&coeffs, &quant, &mut out_4x4);
+            let mut out_2x2 = [0u8; 4];
+            idct_2x2(&coeffs, &quant, &mut out_2x2);
+            let _ = idct_1x1(&coeffs, &quant);
+        }
+    }
+
+    /// The level shift must saturate, never wrap: a descaled value just
+    /// past the `u8` window has to land on the nearest bound, matching
+    /// `vqmovun_s16` in the NEON twin.
+    #[test]
+    fn level_shift_clamp_saturates_at_both_ends() {
+        assert_eq!(level_shift_clamp(0), 128);
+        assert_eq!(level_shift_clamp(127), 255);
+        assert_eq!(level_shift_clamp(128), 255);
+        assert_eq!(level_shift_clamp(-128), 0);
+        assert_eq!(level_shift_clamp(-129), 0);
+        // Saturating (not wrapping) add: i32::MAX + 128 must stay high.
+        assert_eq!(level_shift_clamp(i32::MAX), 255);
+        assert_eq!(level_shift_clamp(i32::MIN), 0);
     }
 }
