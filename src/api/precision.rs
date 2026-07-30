@@ -1226,6 +1226,49 @@ fn encode_dc_only_wide(
 // 16-bit lossless decompress
 // ============================================================
 
+/// Resolve one DC Huffman table per **frame** component for a lossless scan.
+///
+/// Both high-precision lossless entry points below decode the single
+/// fully-interleaved scan held in `metadata.scan` and index the result by
+/// frame-component index (`for c in 0..nc`). A SOS listing fewer
+/// components than the frame (`Ns < Nf`) is legal at parse time — C
+/// splits the remainder across further scans (`jdmarker.c` `get_sos`) —
+/// but it cannot be decoded here, so it is rejected up front instead of
+/// indexing past a short table list.
+///
+/// This lives in one place because the two callers are twins and drifted:
+/// Fuzz Smoke run 30485530878 panicked in the arbitrary-precision path
+/// and, once that alone was fixed, run 30504332488 immediately found the
+/// identical defect in `decompress_16bit`. The 8-bit equivalents in
+/// `decode/pipeline.rs` carry their own copies of this guard.
+fn lossless_dc_tables<'a>(
+    scan: &crate::common::types::ScanHeader,
+    dc_huffman_tables: &'a [Option<alloc::sync::Arc<crate::common::huffman_table::HuffmanTable>>;
+            4],
+    nc: usize,
+) -> Result<Vec<&'a crate::common::huffman_table::HuffmanTable>> {
+    let mut dc_tables: Vec<&crate::common::huffman_table::HuffmanTable> = Vec::with_capacity(nc);
+    for sc in scan.components.iter().take(nc) {
+        let idx: usize = sc.dc_table_index as usize;
+        dc_tables.push(
+            dc_huffman_tables
+                .get(idx)
+                .and_then(|slot| slot.as_deref())
+                .ok_or_else(|| JpegError::CorruptData(format!("missing DC table {}", idx)))?,
+        );
+    }
+    if dc_tables.len() < nc {
+        return Err(JpegError::CorruptData(format!(
+            "lossless {}-component frame has a SOS listing {} component(s); \
+             all {} must be present in a single interleaved scan",
+            nc,
+            dc_tables.len(),
+            nc
+        )));
+    }
+    Ok(dc_tables)
+}
+
 /// Decompress lossless JPEG to 16-bit sample data.
 pub fn decompress_16bit(data: &[u8]) -> Result<Image16> {
     let mut reader = MarkerReader::new(data);
@@ -1262,15 +1305,7 @@ pub fn decompress_16bit(data: &[u8]) -> Result<Image16> {
             psv
         )));
     }
-    let mut dc_tables = Vec::with_capacity(nc);
-    for i in 0..scan.components.len().min(nc) {
-        let idx = scan.components[i].dc_table_index as usize;
-        dc_tables.push(
-            metadata.dc_huffman_tables[idx]
-                .as_ref()
-                .ok_or_else(|| JpegError::CorruptData(format!("missing DC table {}", idx)))?,
-        );
-    }
+    let dc_tables = lossless_dc_tables(scan, &metadata.dc_huffman_tables, nc)?;
     let entropy = &data[metadata.entropy_data_offset..];
     let mut br = BitReader::new(entropy);
     if nc == 1 {
@@ -1761,15 +1796,7 @@ pub fn decompress_lossless_arbitrary(data: &[u8]) -> Result<Image16> {
             pt, frame.precision
         )));
     }
-    let mut dc_tables = Vec::with_capacity(nc);
-    for i in 0..scan.components.len().min(nc) {
-        let idx: usize = scan.components[i].dc_table_index as usize;
-        dc_tables.push(
-            metadata.dc_huffman_tables[idx]
-                .as_ref()
-                .ok_or_else(|| JpegError::CorruptData(format!("missing DC table {}", idx)))?,
-        );
-    }
+    let dc_tables = lossless_dc_tables(scan, &metadata.dc_huffman_tables, nc)?;
     let entropy = &data[metadata.entropy_data_offset..];
     let mut br = BitReader::new(entropy);
     if nc == 1 {

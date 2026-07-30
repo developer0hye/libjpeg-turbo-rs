@@ -4,27 +4,68 @@
 
 /// Extended IDCT kernels for all 16 JPEG scaling factors.
 /// Ported from libjpeg-turbo's jidctint.c.
-const CONST_BITS: i32 = 13;
-const PASS1_BITS: i32 = 2;
-const fn fix(val: f64) -> i32 {
-    (val * (1i64 << CONST_BITS) as f64 + 0.5) as i32
-}
+// `usize` because `Wrapping<i32>` only implements `Shl`/`Shr` with a
+// `usize` right-hand side. Every derived shift width used below
+// (`CONST_BITS - PASS1_BITS - 1` = 10, `CONST_BITS - 1` = 12,
+// `CONST_BITS + PASS1_BITS + 3` = 18, `PASS1_BITS + 2` = 4) is
+// non-negative, so the unsigned subtraction cannot underflow.
+const CONST_BITS: usize = 13;
+const PASS1_BITS: usize = 2;
+const CENTERJSAMPLE: i32 = 128;
+
+/// Every fixed-point intermediate in this module is `Wrapping<i32>`.
+///
+/// C's counterparts are `JLONG`, declared `long` at `jpegint.h:62` with
+/// only a *"must hold at least signed 32-bit values"* guarantee — so
+/// these expressions wrap silently in C on any LLP64 or 32-bit host, and
+/// libjpeg-turbo treats that as the contract rather than an error. A
+/// dequantized coefficient is bounded by `i16::MAX * u16::MAX` (fits
+/// `i32`), but one multiply by a `FIX_*` constant is not, so corrupt
+/// DQT/coefficient pairs blow past `i32` and a Rust overflow-checked
+/// build panics instead of wrapping.
+///
+/// Using the newtype rather than hand-written `wrapping_*` calls keeps
+/// these 13 dense kernels readable and makes the compiler — not review —
+/// responsible for catching a missed operator. The 8x8 twin
+/// (`decode/idct.rs`) and the reduced-size twin
+/// (`decode/idct_scaled.rs`) use explicit `wrapping_*`; all three agree
+/// on semantics.
+type W = core::num::Wrapping<i32>;
+
+const W_ZERO: W = core::num::Wrapping(0);
+
 #[inline(always)]
-fn clamp_to_u8(val: i32) -> u8 {
-    val.clamp(0, 255) as u8
+const fn wrap(val: i32) -> W {
+    core::num::Wrapping(val)
 }
-const FIX_0_541196100: i32 = 4433;
-const FIX_0_765366865: i32 = 6270;
-const FIX_0_899976223: i32 = 7373;
-const FIX_1_847759065: i32 = 15137;
-const FIX_2_562915447: i32 = 20995;
+
+const fn fix(val: f64) -> W {
+    core::num::Wrapping((val * (1i64 << CONST_BITS) as f64 + 0.5) as i32)
+}
+
+/// Level-shift by `CENTERJSAMPLE` and clamp to a `u8` sample.
+///
+/// C indexes `range_limit[value & RANGE_MASK]` (`jidctint.c`), which is
+/// identical to saturating over `[-512, 511]` — the range legal input
+/// produces — and wraps beyond it. We saturate, matching the SIMD IDCT
+/// backends (and C's own, which use saturating narrows).
+#[inline(always)]
+fn level_shift_clamp(val: W) -> u8 {
+    val.0.saturating_add(CENTERJSAMPLE).clamp(0, 255) as u8
+}
+
+const FIX_0_541196100: W = core::num::Wrapping(4433);
+const FIX_0_765366865: W = core::num::Wrapping(6270);
+const FIX_0_899976223: W = core::num::Wrapping(7373);
+const FIX_1_847759065: W = core::num::Wrapping(15137);
+const FIX_2_562915447: W = core::num::Wrapping(20995);
 
 #[allow(clippy::erasing_op, clippy::identity_op)]
 pub fn idct_3x3(coeffs: &[i16; 64], quant: &[u16; 64], output: &mut [u8; 9]) {
-    let mut ws = [0i32; 9];
+    let mut ws = [W_ZERO; 9];
     for col in 0..3 {
-        let c = |r: usize| -> i32 { coeffs[r * 8 + col] as i32 * quant[r * 8 + col] as i32 };
-        let tmp0 = (c(0) << CONST_BITS) + (1 << (CONST_BITS - PASS1_BITS - 1));
+        let c = |r: usize| -> W { wrap(coeffs[r * 8 + col] as i32 * quant[r * 8 + col] as i32) };
+        let tmp0 = (c(0) << CONST_BITS) + wrap(1 << (CONST_BITS - PASS1_BITS - 1));
         let tmp2 = c(2);
         let tmp12 = tmp2 * fix(0.707106781);
         let tmp10 = tmp0 + tmp12;
@@ -35,26 +76,26 @@ pub fn idct_3x3(coeffs: &[i16; 64], quant: &[u16; 64], output: &mut [u8; 9]) {
         ws[3 + col] = tmp2 >> (CONST_BITS - PASS1_BITS);
     }
     for row in 0..3 {
-        let w = |c: usize| -> i32 { ws[row * 3 + c] };
-        let tmp0 = (w(0) + (1 << (PASS1_BITS + 2))) << CONST_BITS;
+        let w = |c: usize| -> W { ws[row * 3 + c] };
+        let tmp0 = (w(0) + wrap(1 << (PASS1_BITS + 2))) << CONST_BITS;
         let tmp2 = w(2);
         let tmp12 = tmp2 * fix(0.707106781);
         let tmp10 = tmp0 + tmp12;
         let tmp2 = tmp0 - tmp12 - tmp12;
         let tmp0 = w(1) * fix(1.224744871);
         let s = CONST_BITS + PASS1_BITS + 3;
-        output[row * 3] = clamp_to_u8(((tmp10 + tmp0) >> s) + 128);
-        output[row * 3 + 2] = clamp_to_u8(((tmp10 - tmp0) >> s) + 128);
-        output[row * 3 + 1] = clamp_to_u8((tmp2 >> s) + 128);
+        output[row * 3] = level_shift_clamp((tmp10 + tmp0) >> s);
+        output[row * 3 + 2] = level_shift_clamp((tmp10 - tmp0) >> s);
+        output[row * 3 + 1] = level_shift_clamp(tmp2 >> s);
     }
 }
 
 #[allow(clippy::erasing_op, clippy::identity_op)]
 pub fn idct_5x5(coeffs: &[i16; 64], quant: &[u16; 64], output: &mut [u8; 25]) {
-    let mut ws = [0i32; 25];
+    let mut ws = [W_ZERO; 25];
     for col in 0..5 {
-        let c = |r: usize| -> i32 { coeffs[r * 8 + col] as i32 * quant[r * 8 + col] as i32 };
-        let tmp12 = (c(0) << CONST_BITS) + (1 << (CONST_BITS - PASS1_BITS - 1));
+        let c = |r: usize| -> W { wrap(coeffs[r * 8 + col] as i32 * quant[r * 8 + col] as i32) };
+        let tmp12 = (c(0) << CONST_BITS) + wrap(1 << (CONST_BITS - PASS1_BITS - 1));
         let z1 = (c(2) + c(4)) * fix(0.790569415);
         let z2 = (c(2) - c(4)) * fix(0.353553391);
         let z3 = tmp12 + z2;
@@ -71,8 +112,8 @@ pub fn idct_5x5(coeffs: &[i16; 64], quant: &[u16; 64], output: &mut [u8; 25]) {
         ws[10 + col] = tmp12 >> (CONST_BITS - PASS1_BITS);
     }
     for row in 0..5 {
-        let w = |c: usize| -> i32 { ws[row * 5 + c] };
-        let tmp12 = (w(0) + (1 << (PASS1_BITS + 2))) << CONST_BITS;
+        let w = |c: usize| -> W { ws[row * 5 + c] };
+        let tmp12 = (w(0) + wrap(1 << (PASS1_BITS + 2))) << CONST_BITS;
         let z1 = (w(2) + w(4)) * fix(0.790569415);
         let z2 = (w(2) - w(4)) * fix(0.353553391);
         let z3 = tmp12 + z2;
@@ -83,20 +124,20 @@ pub fn idct_5x5(coeffs: &[i16; 64], quant: &[u16; 64], output: &mut [u8; 25]) {
         let tmp0 = z1 + w(1) * fix(0.513743148);
         let tmp1 = z1 - w(3) * fix(2.176250899);
         let s = CONST_BITS + PASS1_BITS + 3;
-        output[row * 5] = clamp_to_u8(((tmp10 + tmp0) >> s) + 128);
-        output[row * 5 + 4] = clamp_to_u8(((tmp10 - tmp0) >> s) + 128);
-        output[row * 5 + 1] = clamp_to_u8(((tmp11 + tmp1) >> s) + 128);
-        output[row * 5 + 3] = clamp_to_u8(((tmp11 - tmp1) >> s) + 128);
-        output[row * 5 + 2] = clamp_to_u8((tmp12 >> s) + 128);
+        output[row * 5] = level_shift_clamp((tmp10 + tmp0) >> s);
+        output[row * 5 + 4] = level_shift_clamp((tmp10 - tmp0) >> s);
+        output[row * 5 + 1] = level_shift_clamp((tmp11 + tmp1) >> s);
+        output[row * 5 + 3] = level_shift_clamp((tmp11 - tmp1) >> s);
+        output[row * 5 + 2] = level_shift_clamp(tmp12 >> s);
     }
 }
 
 #[allow(clippy::erasing_op, clippy::identity_op)]
 pub fn idct_6x6(coeffs: &[i16; 64], quant: &[u16; 64], output: &mut [u8; 36]) {
-    let mut ws = [0i32; 36];
+    let mut ws = [W_ZERO; 36];
     for col in 0..6 {
-        let c = |r: usize| -> i32 { coeffs[r * 8 + col] as i32 * quant[r * 8 + col] as i32 };
-        let tmp0 = (c(0) << CONST_BITS) + (1 << (CONST_BITS - PASS1_BITS - 1));
+        let c = |r: usize| -> W { wrap(coeffs[r * 8 + col] as i32 * quant[r * 8 + col] as i32) };
+        let tmp0 = (c(0) << CONST_BITS) + wrap(1 << (CONST_BITS - PASS1_BITS - 1));
         let tmp10m = c(4) * fix(0.707106781);
         let tmp1 = tmp0 + tmp10m;
         let tmp11 = (tmp0 - tmp10m - tmp10m) >> (CONST_BITS - PASS1_BITS);
@@ -116,8 +157,8 @@ pub fn idct_6x6(coeffs: &[i16; 64], quant: &[u16; 64], output: &mut [u8; 36]) {
         ws[18 + col] = (tmp12 - tmp2o) >> (CONST_BITS - PASS1_BITS);
     }
     for row in 0..6 {
-        let w = |c: usize| -> i32 { ws[row * 6 + c] };
-        let tmp0 = (w(0) + (1 << (PASS1_BITS + 2))) << CONST_BITS;
+        let w = |c: usize| -> W { ws[row * 6 + c] };
+        let tmp0 = (w(0) + wrap(1 << (PASS1_BITS + 2))) << CONST_BITS;
         let tmp10m = w(4) * fix(0.707106781);
         let tmp1 = tmp0 + tmp10m;
         let tmp11 = tmp0 - tmp10m - tmp10m;
@@ -130,21 +171,21 @@ pub fn idct_6x6(coeffs: &[i16; 64], quant: &[u16; 64], output: &mut [u8; 36]) {
         let tmp2o = tmp1o + ((z3 - z2) << CONST_BITS);
         let tmp1f = (z1 - z2 - z3) << CONST_BITS;
         let s = CONST_BITS + PASS1_BITS + 3;
-        output[row * 6] = clamp_to_u8(((tmp10 + tmp0o) >> s) + 128);
-        output[row * 6 + 5] = clamp_to_u8(((tmp10 - tmp0o) >> s) + 128);
-        output[row * 6 + 1] = clamp_to_u8(((tmp11 + tmp1f) >> s) + 128);
-        output[row * 6 + 4] = clamp_to_u8(((tmp11 - tmp1f) >> s) + 128);
-        output[row * 6 + 2] = clamp_to_u8(((tmp12 + tmp2o) >> s) + 128);
-        output[row * 6 + 3] = clamp_to_u8(((tmp12 - tmp2o) >> s) + 128);
+        output[row * 6] = level_shift_clamp((tmp10 + tmp0o) >> s);
+        output[row * 6 + 5] = level_shift_clamp((tmp10 - tmp0o) >> s);
+        output[row * 6 + 1] = level_shift_clamp((tmp11 + tmp1f) >> s);
+        output[row * 6 + 4] = level_shift_clamp((tmp11 - tmp1f) >> s);
+        output[row * 6 + 2] = level_shift_clamp((tmp12 + tmp2o) >> s);
+        output[row * 6 + 3] = level_shift_clamp((tmp12 - tmp2o) >> s);
     }
 }
 
 #[allow(clippy::erasing_op, clippy::identity_op)]
 pub fn idct_7x7(coeffs: &[i16; 64], quant: &[u16; 64], output: &mut [u8; 49]) {
-    let mut ws = [0i32; 49];
+    let mut ws = [W_ZERO; 49];
     for col in 0..7 {
-        let c = |r: usize| -> i32 { coeffs[r * 8 + col] as i32 * quant[r * 8 + col] as i32 };
-        let tmp13 = (c(0) << CONST_BITS) + (1 << (CONST_BITS - PASS1_BITS - 1));
+        let c = |r: usize| -> W { wrap(coeffs[r * 8 + col] as i32 * quant[r * 8 + col] as i32) };
+        let tmp13 = (c(0) << CONST_BITS) + wrap(1 << (CONST_BITS - PASS1_BITS - 1));
         let (z1, z2, z3) = (c(2), c(4), c(6));
         let tmp10 = (z2 - z3) * fix(0.881747734);
         let tmp12 = (z1 - z2) * fix(0.314692123);
@@ -174,8 +215,8 @@ pub fn idct_7x7(coeffs: &[i16; 64], quant: &[u16; 64], output: &mut [u8; 49]) {
         ws[21 + col] = tmp13 >> (CONST_BITS - PASS1_BITS);
     }
     for row in 0..7 {
-        let w = |c: usize| -> i32 { ws[row * 7 + c] };
-        let tmp13 = (w(0) + (1 << (PASS1_BITS + 2))) << CONST_BITS;
+        let w = |c: usize| -> W { ws[row * 7 + c] };
+        let tmp13 = (w(0) + wrap(1 << (PASS1_BITS + 2))) << CONST_BITS;
         let (z1, z2, z3) = (w(2), w(4), w(6));
         let tmp10 = (z2 - z3) * fix(0.881747734);
         let tmp12 = (z1 - z2) * fix(0.314692123);
@@ -197,22 +238,22 @@ pub fn idct_7x7(coeffs: &[i16; 64], quant: &[u16; 64], output: &mut [u8; 49]) {
         let tmp0 = tmp0 + z2v;
         let tmp2 = tmp2 + z2v + z3 * fix(1.870828693);
         let s = CONST_BITS + PASS1_BITS + 3;
-        output[row * 7] = clamp_to_u8(((tmp10 + tmp0) >> s) + 128);
-        output[row * 7 + 6] = clamp_to_u8(((tmp10 - tmp0) >> s) + 128);
-        output[row * 7 + 1] = clamp_to_u8(((tmp11 + tmp1) >> s) + 128);
-        output[row * 7 + 5] = clamp_to_u8(((tmp11 - tmp1) >> s) + 128);
-        output[row * 7 + 2] = clamp_to_u8(((tmp12 + tmp2) >> s) + 128);
-        output[row * 7 + 4] = clamp_to_u8(((tmp12 - tmp2) >> s) + 128);
-        output[row * 7 + 3] = clamp_to_u8((tmp13 >> s) + 128);
+        output[row * 7] = level_shift_clamp((tmp10 + tmp0) >> s);
+        output[row * 7 + 6] = level_shift_clamp((tmp10 - tmp0) >> s);
+        output[row * 7 + 1] = level_shift_clamp((tmp11 + tmp1) >> s);
+        output[row * 7 + 5] = level_shift_clamp((tmp11 - tmp1) >> s);
+        output[row * 7 + 2] = level_shift_clamp((tmp12 + tmp2) >> s);
+        output[row * 7 + 4] = level_shift_clamp((tmp12 - tmp2) >> s);
+        output[row * 7 + 3] = level_shift_clamp(tmp13 >> s);
     }
 }
 
 #[allow(clippy::erasing_op, clippy::identity_op)]
 pub fn idct_9x9(coeffs: &[i16; 64], quant: &[u16; 64], output: &mut [u8; 81]) {
-    let mut ws = [0i32; 72];
+    let mut ws = [W_ZERO; 72];
     for col in 0..8 {
-        let c = |r: usize| -> i32 { coeffs[r * 8 + col] as i32 * quant[r * 8 + col] as i32 };
-        let tmp0 = (c(0) << CONST_BITS) + (1 << (CONST_BITS - PASS1_BITS - 1));
+        let c = |r: usize| -> W { wrap(coeffs[r * 8 + col] as i32 * quant[r * 8 + col] as i32) };
+        let tmp0 = (c(0) << CONST_BITS) + wrap(1 << (CONST_BITS - PASS1_BITS - 1));
         let (z1, z2, z3) = (c(2), c(4), c(6));
         let tmp3 = z3 * fix(0.707106781);
         let tmp1 = tmp0 + tmp3;
@@ -246,8 +287,8 @@ pub fn idct_9x9(coeffs: &[i16; 64], quant: &[u16; 64], output: &mut [u8; 81]) {
         ws[32 + col] = tmp14 >> (CONST_BITS - PASS1_BITS);
     }
     for row in 0..9 {
-        let w = |c: usize| -> i32 { ws[row * 8 + c] };
-        let tmp0 = (w(0) + (1 << (PASS1_BITS + 2))) << CONST_BITS;
+        let w = |c: usize| -> W { ws[row * 8 + c] };
+        let tmp0 = (w(0) + wrap(1 << (PASS1_BITS + 2))) << CONST_BITS;
         let (z1, z2, z3) = (w(2), w(4), w(6));
         let tmp3 = z3 * fix(0.707106781);
         let tmp1 = tmp0 + tmp3;
@@ -271,24 +312,24 @@ pub fn idct_9x9(coeffs: &[i16; 64], quant: &[u16; 64], output: &mut [u8; 81]) {
         let tmp3 = tmp3 + z2 + tmp1;
         let tmp1 = (z1 - z3 - z4) * fix(1.224744871);
         let s = CONST_BITS + PASS1_BITS + 3;
-        output[row * 9] = clamp_to_u8(((tmp10 + tmp0) >> s) + 128);
-        output[row * 9 + 8] = clamp_to_u8(((tmp10 - tmp0) >> s) + 128);
-        output[row * 9 + 1] = clamp_to_u8(((tmp11 + tmp1) >> s) + 128);
-        output[row * 9 + 7] = clamp_to_u8(((tmp11 - tmp1) >> s) + 128);
-        output[row * 9 + 2] = clamp_to_u8(((tmp12 + tmp2) >> s) + 128);
-        output[row * 9 + 6] = clamp_to_u8(((tmp12 - tmp2) >> s) + 128);
-        output[row * 9 + 3] = clamp_to_u8(((tmp13 + tmp3) >> s) + 128);
-        output[row * 9 + 5] = clamp_to_u8(((tmp13 - tmp3) >> s) + 128);
-        output[row * 9 + 4] = clamp_to_u8((tmp14 >> s) + 128);
+        output[row * 9] = level_shift_clamp((tmp10 + tmp0) >> s);
+        output[row * 9 + 8] = level_shift_clamp((tmp10 - tmp0) >> s);
+        output[row * 9 + 1] = level_shift_clamp((tmp11 + tmp1) >> s);
+        output[row * 9 + 7] = level_shift_clamp((tmp11 - tmp1) >> s);
+        output[row * 9 + 2] = level_shift_clamp((tmp12 + tmp2) >> s);
+        output[row * 9 + 6] = level_shift_clamp((tmp12 - tmp2) >> s);
+        output[row * 9 + 3] = level_shift_clamp((tmp13 + tmp3) >> s);
+        output[row * 9 + 5] = level_shift_clamp((tmp13 - tmp3) >> s);
+        output[row * 9 + 4] = level_shift_clamp(tmp14 >> s);
     }
 }
 
 #[allow(clippy::erasing_op, clippy::identity_op)]
 pub fn idct_10x10(coeffs: &[i16; 64], quant: &[u16; 64], output: &mut [u8; 100]) {
-    let mut ws = [0i32; 80];
+    let mut ws = [W_ZERO; 80];
     for col in 0..8 {
-        let c = |r: usize| -> i32 { coeffs[r * 8 + col] as i32 * quant[r * 8 + col] as i32 };
-        let z3 = (c(0) << CONST_BITS) + (1 << (CONST_BITS - PASS1_BITS - 1));
+        let c = |r: usize| -> W { wrap(coeffs[r * 8 + col] as i32 * quant[r * 8 + col] as i32) };
+        let z3 = (c(0) << CONST_BITS) + wrap(1 << (CONST_BITS - PASS1_BITS - 1));
         let z4 = c(4);
         let z1 = z4 * fix(1.144122806);
         let z2 = z4 * fix(0.437016024);
@@ -329,8 +370,8 @@ pub fn idct_10x10(coeffs: &[i16; 64], quant: &[u16; 64], output: &mut [u8; 100])
         ws[40 + col] = (tmp24 - tmp14) >> (CONST_BITS - PASS1_BITS);
     }
     for row in 0..10 {
-        let w = |c: usize| -> i32 { ws[row * 8 + c] };
-        let z3 = (w(0) + (1 << (PASS1_BITS + 2))) << CONST_BITS;
+        let w = |c: usize| -> W { ws[row * 8 + c] };
+        let z3 = (w(0) + wrap(1 << (PASS1_BITS + 2))) << CONST_BITS;
         let z4 = w(4);
         let z1 = z4 * fix(1.144122806);
         let z2 = z4 * fix(0.437016024);
@@ -360,25 +401,25 @@ pub fn idct_10x10(coeffs: &[i16; 64], quant: &[u16; 64], output: &mut [u8; 100])
         let tmp11 = z1 * fix(1.260073511) - z2 - z4;
         let tmp13 = z1 * fix(0.642039522) - z2 + z4;
         let s = CONST_BITS + PASS1_BITS + 3;
-        output[row * 10] = clamp_to_u8(((tmp20 + tmp10) >> s) + 128);
-        output[row * 10 + 9] = clamp_to_u8(((tmp20 - tmp10) >> s) + 128);
-        output[row * 10 + 1] = clamp_to_u8(((tmp21 + tmp11) >> s) + 128);
-        output[row * 10 + 8] = clamp_to_u8(((tmp21 - tmp11) >> s) + 128);
-        output[row * 10 + 2] = clamp_to_u8(((tmp22 + tmp12) >> s) + 128);
-        output[row * 10 + 7] = clamp_to_u8(((tmp22 - tmp12) >> s) + 128);
-        output[row * 10 + 3] = clamp_to_u8(((tmp23 + tmp13) >> s) + 128);
-        output[row * 10 + 6] = clamp_to_u8(((tmp23 - tmp13) >> s) + 128);
-        output[row * 10 + 4] = clamp_to_u8(((tmp24 + tmp14) >> s) + 128);
-        output[row * 10 + 5] = clamp_to_u8(((tmp24 - tmp14) >> s) + 128);
+        output[row * 10] = level_shift_clamp((tmp20 + tmp10) >> s);
+        output[row * 10 + 9] = level_shift_clamp((tmp20 - tmp10) >> s);
+        output[row * 10 + 1] = level_shift_clamp((tmp21 + tmp11) >> s);
+        output[row * 10 + 8] = level_shift_clamp((tmp21 - tmp11) >> s);
+        output[row * 10 + 2] = level_shift_clamp((tmp22 + tmp12) >> s);
+        output[row * 10 + 7] = level_shift_clamp((tmp22 - tmp12) >> s);
+        output[row * 10 + 3] = level_shift_clamp((tmp23 + tmp13) >> s);
+        output[row * 10 + 6] = level_shift_clamp((tmp23 - tmp13) >> s);
+        output[row * 10 + 4] = level_shift_clamp((tmp24 + tmp14) >> s);
+        output[row * 10 + 5] = level_shift_clamp((tmp24 - tmp14) >> s);
     }
 }
 
 #[allow(clippy::erasing_op, clippy::identity_op)]
 pub fn idct_11x11(coeffs: &[i16; 64], quant: &[u16; 64], output: &mut [u8; 121]) {
-    let mut ws = [0i32; 88];
+    let mut ws = [W_ZERO; 88];
     for col in 0..8 {
-        let c = |r: usize| -> i32 { coeffs[r * 8 + col] as i32 * quant[r * 8 + col] as i32 };
-        let tmp10 = (c(0) << CONST_BITS) + (1 << (CONST_BITS - PASS1_BITS - 1));
+        let c = |r: usize| -> W { wrap(coeffs[r * 8 + col] as i32 * quant[r * 8 + col] as i32) };
+        let tmp10 = (c(0) << CONST_BITS) + wrap(1 << (CONST_BITS - PASS1_BITS - 1));
         let (z1, z2, z3) = (c(2), c(4), c(6));
         let tmp20 = (z2 - z3) * fix(2.546640132);
         let tmp23 = (z2 - z1) * fix(0.430815045);
@@ -421,8 +462,8 @@ pub fn idct_11x11(coeffs: &[i16; 64], quant: &[u16; 64], output: &mut [u8; 121])
         ws[40 + col] = tmp25 >> (CONST_BITS - PASS1_BITS);
     }
     for row in 0..11 {
-        let w = |c: usize| -> i32 { ws[row * 8 + c] };
-        let tmp10 = (w(0) + (1 << (PASS1_BITS + 2))) << CONST_BITS;
+        let w = |c: usize| -> W { ws[row * 8 + c] };
+        let tmp10 = (w(0) + wrap(1 << (PASS1_BITS + 2))) << CONST_BITS;
         let (z1, z2, z3) = (w(2), w(4), w(6));
         let tmp20 = (z2 - z3) * fix(2.546640132);
         let tmp23 = (z2 - z1) * fix(0.430815045);
@@ -453,26 +494,26 @@ pub fn idct_11x11(coeffs: &[i16; 64], quant: &[u16; 64], output: &mut [u8; 121])
         let tmp14 =
             tmp14 + z2 * (-fix(1.467221301)) + z3 * fix(1.001388905) - z4 * fix(1.684843907);
         let s = CONST_BITS + PASS1_BITS + 3;
-        output[row * 11] = clamp_to_u8(((tmp20 + tmp10) >> s) + 128);
-        output[row * 11 + 10] = clamp_to_u8(((tmp20 - tmp10) >> s) + 128);
-        output[row * 11 + 1] = clamp_to_u8(((tmp21 + tmp11) >> s) + 128);
-        output[row * 11 + 9] = clamp_to_u8(((tmp21 - tmp11) >> s) + 128);
-        output[row * 11 + 2] = clamp_to_u8(((tmp22 + tmp12) >> s) + 128);
-        output[row * 11 + 8] = clamp_to_u8(((tmp22 - tmp12) >> s) + 128);
-        output[row * 11 + 3] = clamp_to_u8(((tmp23 + tmp13) >> s) + 128);
-        output[row * 11 + 7] = clamp_to_u8(((tmp23 - tmp13) >> s) + 128);
-        output[row * 11 + 4] = clamp_to_u8(((tmp24 + tmp14) >> s) + 128);
-        output[row * 11 + 6] = clamp_to_u8(((tmp24 - tmp14) >> s) + 128);
-        output[row * 11 + 5] = clamp_to_u8((tmp25 >> s) + 128);
+        output[row * 11] = level_shift_clamp((tmp20 + tmp10) >> s);
+        output[row * 11 + 10] = level_shift_clamp((tmp20 - tmp10) >> s);
+        output[row * 11 + 1] = level_shift_clamp((tmp21 + tmp11) >> s);
+        output[row * 11 + 9] = level_shift_clamp((tmp21 - tmp11) >> s);
+        output[row * 11 + 2] = level_shift_clamp((tmp22 + tmp12) >> s);
+        output[row * 11 + 8] = level_shift_clamp((tmp22 - tmp12) >> s);
+        output[row * 11 + 3] = level_shift_clamp((tmp23 + tmp13) >> s);
+        output[row * 11 + 7] = level_shift_clamp((tmp23 - tmp13) >> s);
+        output[row * 11 + 4] = level_shift_clamp((tmp24 + tmp14) >> s);
+        output[row * 11 + 6] = level_shift_clamp((tmp24 - tmp14) >> s);
+        output[row * 11 + 5] = level_shift_clamp(tmp25 >> s);
     }
 }
 
 #[allow(clippy::erasing_op, clippy::identity_op)]
 pub fn idct_12x12(coeffs: &[i16; 64], quant: &[u16; 64], output: &mut [u8; 144]) {
-    let mut ws = [0i32; 96];
+    let mut ws = [W_ZERO; 96];
     for col in 0..8 {
-        let c = |r: usize| -> i32 { coeffs[r * 8 + col] as i32 * quant[r * 8 + col] as i32 };
-        let z3 = (c(0) << CONST_BITS) + (1 << (CONST_BITS - PASS1_BITS - 1));
+        let c = |r: usize| -> W { wrap(coeffs[r * 8 + col] as i32 * quant[r * 8 + col] as i32) };
+        let z3 = (c(0) << CONST_BITS) + wrap(1 << (CONST_BITS - PASS1_BITS - 1));
         let z4 = c(4) * fix(1.224744871);
         let tmp10 = z3 + z4;
         let tmp11 = z3 - z4;
@@ -520,8 +561,8 @@ pub fn idct_12x12(coeffs: &[i16; 64], quant: &[u16; 64], output: &mut [u8; 144])
         ws[48 + col] = (tmp25 - tmp15) >> (CONST_BITS - PASS1_BITS);
     }
     for row in 0..12 {
-        let w = |c: usize| -> i32 { ws[row * 8 + c] };
-        let z3 = (w(0) + (1 << (PASS1_BITS + 2))) << CONST_BITS;
+        let w = |c: usize| -> W { ws[row * 8 + c] };
+        let z3 = (w(0) + wrap(1 << (PASS1_BITS + 2))) << CONST_BITS;
         let z4 = w(4) * fix(1.224744871);
         let tmp10 = z3 + z4;
         let tmp11 = z3 - z4;
@@ -556,27 +597,27 @@ pub fn idct_12x12(coeffs: &[i16; 64], quant: &[u16; 64], output: &mut [u8; 144])
         let tmp11 = z3 + z1 * FIX_0_765366865;
         let tmp14 = z3 - z2 * FIX_1_847759065;
         let s = CONST_BITS + PASS1_BITS + 3;
-        output[row * 12] = clamp_to_u8(((tmp20 + tmp10) >> s) + 128);
-        output[row * 12 + 11] = clamp_to_u8(((tmp20 - tmp10) >> s) + 128);
-        output[row * 12 + 1] = clamp_to_u8(((tmp21 + tmp11) >> s) + 128);
-        output[row * 12 + 10] = clamp_to_u8(((tmp21 - tmp11) >> s) + 128);
-        output[row * 12 + 2] = clamp_to_u8(((tmp22 + tmp12) >> s) + 128);
-        output[row * 12 + 9] = clamp_to_u8(((tmp22 - tmp12) >> s) + 128);
-        output[row * 12 + 3] = clamp_to_u8(((tmp23 + tmp13) >> s) + 128);
-        output[row * 12 + 8] = clamp_to_u8(((tmp23 - tmp13) >> s) + 128);
-        output[row * 12 + 4] = clamp_to_u8(((tmp24 + tmp14) >> s) + 128);
-        output[row * 12 + 7] = clamp_to_u8(((tmp24 - tmp14) >> s) + 128);
-        output[row * 12 + 5] = clamp_to_u8(((tmp25 + tmp15) >> s) + 128);
-        output[row * 12 + 6] = clamp_to_u8(((tmp25 - tmp15) >> s) + 128);
+        output[row * 12] = level_shift_clamp((tmp20 + tmp10) >> s);
+        output[row * 12 + 11] = level_shift_clamp((tmp20 - tmp10) >> s);
+        output[row * 12 + 1] = level_shift_clamp((tmp21 + tmp11) >> s);
+        output[row * 12 + 10] = level_shift_clamp((tmp21 - tmp11) >> s);
+        output[row * 12 + 2] = level_shift_clamp((tmp22 + tmp12) >> s);
+        output[row * 12 + 9] = level_shift_clamp((tmp22 - tmp12) >> s);
+        output[row * 12 + 3] = level_shift_clamp((tmp23 + tmp13) >> s);
+        output[row * 12 + 8] = level_shift_clamp((tmp23 - tmp13) >> s);
+        output[row * 12 + 4] = level_shift_clamp((tmp24 + tmp14) >> s);
+        output[row * 12 + 7] = level_shift_clamp((tmp24 - tmp14) >> s);
+        output[row * 12 + 5] = level_shift_clamp((tmp25 + tmp15) >> s);
+        output[row * 12 + 6] = level_shift_clamp((tmp25 - tmp15) >> s);
     }
 }
 
 #[allow(clippy::erasing_op, clippy::identity_op)]
 pub fn idct_13x13(coeffs: &[i16; 64], quant: &[u16; 64], output: &mut [u8; 169]) {
-    let mut ws = [0i32; 104];
+    let mut ws = [W_ZERO; 104];
     for col in 0..8 {
-        let c = |r: usize| -> i32 { coeffs[r * 8 + col] as i32 * quant[r * 8 + col] as i32 };
-        let z1 = (c(0) << CONST_BITS) + (1 << (CONST_BITS - PASS1_BITS - 1));
+        let c = |r: usize| -> W { wrap(coeffs[r * 8 + col] as i32 * quant[r * 8 + col] as i32) };
+        let z1 = (c(0) << CONST_BITS) + wrap(1 << (CONST_BITS - PASS1_BITS - 1));
         let (z2, z3, z4) = (c(2), c(4), c(6));
         let tmp10 = z3 + z4;
         let tmp11 = z3 - z4;
@@ -628,8 +669,8 @@ pub fn idct_13x13(coeffs: &[i16; 64], quant: &[u16; 64], output: &mut [u8; 169])
         ws[48 + col] = tmp26 >> (CONST_BITS - PASS1_BITS);
     }
     for row in 0..13 {
-        let w = |c: usize| -> i32 { ws[row * 8 + c] };
-        let z1 = (w(0) + (1 << (PASS1_BITS + 2))) << CONST_BITS;
+        let w = |c: usize| -> W { ws[row * 8 + c] };
+        let z1 = (w(0) + wrap(1 << (PASS1_BITS + 2))) << CONST_BITS;
         let (z2, z3, z4) = (w(2), w(4), w(6));
         let tmp10 = z3 + z4;
         let tmp11 = z3 - z4;
@@ -667,28 +708,28 @@ pub fn idct_13x13(coeffs: &[i16; 64], quant: &[u16; 64], output: &mut [u8; 169])
         let tmp14 = tmp14 + z1t;
         let tmp15 = tmp15 + z1t + z3 * fix(0.384515595) - z4 * fix(1.742345811);
         let s = CONST_BITS + PASS1_BITS + 3;
-        output[row * 13] = clamp_to_u8(((tmp20 + tmp10) >> s) + 128);
-        output[row * 13 + 12] = clamp_to_u8(((tmp20 - tmp10) >> s) + 128);
-        output[row * 13 + 1] = clamp_to_u8(((tmp21 + tmp11) >> s) + 128);
-        output[row * 13 + 11] = clamp_to_u8(((tmp21 - tmp11) >> s) + 128);
-        output[row * 13 + 2] = clamp_to_u8(((tmp22 + tmp12) >> s) + 128);
-        output[row * 13 + 10] = clamp_to_u8(((tmp22 - tmp12) >> s) + 128);
-        output[row * 13 + 3] = clamp_to_u8(((tmp23 + tmp13) >> s) + 128);
-        output[row * 13 + 9] = clamp_to_u8(((tmp23 - tmp13) >> s) + 128);
-        output[row * 13 + 4] = clamp_to_u8(((tmp24 + tmp14) >> s) + 128);
-        output[row * 13 + 8] = clamp_to_u8(((tmp24 - tmp14) >> s) + 128);
-        output[row * 13 + 5] = clamp_to_u8(((tmp25 + tmp15) >> s) + 128);
-        output[row * 13 + 7] = clamp_to_u8(((tmp25 - tmp15) >> s) + 128);
-        output[row * 13 + 6] = clamp_to_u8((tmp26 >> s) + 128);
+        output[row * 13] = level_shift_clamp((tmp20 + tmp10) >> s);
+        output[row * 13 + 12] = level_shift_clamp((tmp20 - tmp10) >> s);
+        output[row * 13 + 1] = level_shift_clamp((tmp21 + tmp11) >> s);
+        output[row * 13 + 11] = level_shift_clamp((tmp21 - tmp11) >> s);
+        output[row * 13 + 2] = level_shift_clamp((tmp22 + tmp12) >> s);
+        output[row * 13 + 10] = level_shift_clamp((tmp22 - tmp12) >> s);
+        output[row * 13 + 3] = level_shift_clamp((tmp23 + tmp13) >> s);
+        output[row * 13 + 9] = level_shift_clamp((tmp23 - tmp13) >> s);
+        output[row * 13 + 4] = level_shift_clamp((tmp24 + tmp14) >> s);
+        output[row * 13 + 8] = level_shift_clamp((tmp24 - tmp14) >> s);
+        output[row * 13 + 5] = level_shift_clamp((tmp25 + tmp15) >> s);
+        output[row * 13 + 7] = level_shift_clamp((tmp25 - tmp15) >> s);
+        output[row * 13 + 6] = level_shift_clamp(tmp26 >> s);
     }
 }
 
 #[allow(clippy::erasing_op, clippy::identity_op)]
 pub fn idct_14x14(coeffs: &[i16; 64], quant: &[u16; 64], output: &mut [u8; 196]) {
-    let mut ws = [0i32; 112];
+    let mut ws = [W_ZERO; 112];
     for col in 0..8 {
-        let c = |r: usize| -> i32 { coeffs[r * 8 + col] as i32 * quant[r * 8 + col] as i32 };
-        let z1 = (c(0) << CONST_BITS) + (1 << (CONST_BITS - PASS1_BITS - 1));
+        let c = |r: usize| -> W { wrap(coeffs[r * 8 + col] as i32 * quant[r * 8 + col] as i32) };
+        let z1 = (c(0) << CONST_BITS) + wrap(1 << (CONST_BITS - PASS1_BITS - 1));
         let z4 = c(4);
         let z2 = z4 * fix(1.274162392);
         let z3 = z4 * fix(0.314692123);
@@ -743,8 +784,8 @@ pub fn idct_14x14(coeffs: &[i16; 64], quant: &[u16; 64], output: &mut [u8; 196])
         ws[56 + col] = (tmp26 - tmp16) >> (CONST_BITS - PASS1_BITS);
     }
     for row in 0..14 {
-        let w = |c: usize| -> i32 { ws[row * 8 + c] };
-        let z1 = (w(0) + (1 << (PASS1_BITS + 2))) << CONST_BITS;
+        let w = |c: usize| -> W { ws[row * 8 + c] };
+        let z1 = (w(0) + wrap(1 << (PASS1_BITS + 2))) << CONST_BITS;
         let z4 = w(4);
         let z2 = z4 * fix(1.274162392);
         let z3 = z4 * fix(0.314692123);
@@ -783,29 +824,29 @@ pub fn idct_14x14(coeffs: &[i16; 64], quant: &[u16; 64], output: &mut [u8; 196])
         let tmp15 = tmp15 + tmp13 + z2 * fix(0.674957567);
         let tmp13 = ((z1 - z3) << CONST_BITS) + z4s;
         let s = CONST_BITS + PASS1_BITS + 3;
-        output[row * 14] = clamp_to_u8(((tmp20 + tmp10) >> s) + 128);
-        output[row * 14 + 13] = clamp_to_u8(((tmp20 - tmp10) >> s) + 128);
-        output[row * 14 + 1] = clamp_to_u8(((tmp21 + tmp11) >> s) + 128);
-        output[row * 14 + 12] = clamp_to_u8(((tmp21 - tmp11) >> s) + 128);
-        output[row * 14 + 2] = clamp_to_u8(((tmp22 + tmp12) >> s) + 128);
-        output[row * 14 + 11] = clamp_to_u8(((tmp22 - tmp12) >> s) + 128);
-        output[row * 14 + 3] = clamp_to_u8(((tmp23 + tmp13) >> s) + 128);
-        output[row * 14 + 10] = clamp_to_u8(((tmp23 - tmp13) >> s) + 128);
-        output[row * 14 + 4] = clamp_to_u8(((tmp24 + tmp14) >> s) + 128);
-        output[row * 14 + 9] = clamp_to_u8(((tmp24 - tmp14) >> s) + 128);
-        output[row * 14 + 5] = clamp_to_u8(((tmp25 + tmp15) >> s) + 128);
-        output[row * 14 + 8] = clamp_to_u8(((tmp25 - tmp15) >> s) + 128);
-        output[row * 14 + 6] = clamp_to_u8(((tmp26 + tmp16) >> s) + 128);
-        output[row * 14 + 7] = clamp_to_u8(((tmp26 - tmp16) >> s) + 128);
+        output[row * 14] = level_shift_clamp((tmp20 + tmp10) >> s);
+        output[row * 14 + 13] = level_shift_clamp((tmp20 - tmp10) >> s);
+        output[row * 14 + 1] = level_shift_clamp((tmp21 + tmp11) >> s);
+        output[row * 14 + 12] = level_shift_clamp((tmp21 - tmp11) >> s);
+        output[row * 14 + 2] = level_shift_clamp((tmp22 + tmp12) >> s);
+        output[row * 14 + 11] = level_shift_clamp((tmp22 - tmp12) >> s);
+        output[row * 14 + 3] = level_shift_clamp((tmp23 + tmp13) >> s);
+        output[row * 14 + 10] = level_shift_clamp((tmp23 - tmp13) >> s);
+        output[row * 14 + 4] = level_shift_clamp((tmp24 + tmp14) >> s);
+        output[row * 14 + 9] = level_shift_clamp((tmp24 - tmp14) >> s);
+        output[row * 14 + 5] = level_shift_clamp((tmp25 + tmp15) >> s);
+        output[row * 14 + 8] = level_shift_clamp((tmp25 - tmp15) >> s);
+        output[row * 14 + 6] = level_shift_clamp((tmp26 + tmp16) >> s);
+        output[row * 14 + 7] = level_shift_clamp((tmp26 - tmp16) >> s);
     }
 }
 
 #[allow(clippy::erasing_op, clippy::identity_op)]
 pub fn idct_15x15(coeffs: &[i16; 64], quant: &[u16; 64], output: &mut [u8; 225]) {
-    let mut ws = [0i32; 120];
+    let mut ws = [W_ZERO; 120];
     for col in 0..8 {
-        let c = |r: usize| -> i32 { coeffs[r * 8 + col] as i32 * quant[r * 8 + col] as i32 };
-        let z1 = (c(0) << CONST_BITS) + (1 << (CONST_BITS - PASS1_BITS - 1));
+        let c = |r: usize| -> W { wrap(coeffs[r * 8 + col] as i32 * quant[r * 8 + col] as i32) };
+        let z1 = (c(0) << CONST_BITS) + wrap(1 << (CONST_BITS - PASS1_BITS - 1));
         let (z2, z3, z4) = (c(2), c(4), c(6));
         let tmp10 = z4 * fix(0.437016024);
         let tmp11 = z4 * fix(1.144122806);
@@ -865,8 +906,8 @@ pub fn idct_15x15(coeffs: &[i16; 64], quant: &[u16; 64], output: &mut [u8; 225])
         ws[56 + col] = tmp27 >> (CONST_BITS - PASS1_BITS);
     }
     for row in 0..15 {
-        let w = |c: usize| -> i32 { ws[row * 8 + c] };
-        let z1 = (w(0) + (1 << (PASS1_BITS + 2))) << CONST_BITS;
+        let w = |c: usize| -> W { ws[row * 8 + c] };
+        let z1 = (w(0) + wrap(1 << (PASS1_BITS + 2))) << CONST_BITS;
         let (z2, z3, z4) = (w(2), w(4), w(6));
         let tmp10 = z4 * fix(0.437016024);
         let tmp11 = z4 * fix(1.144122806);
@@ -910,30 +951,30 @@ pub fn idct_15x15(coeffs: &[i16; 64], quant: &[u16; 64], output: &mut [u8; 225])
         let tmp13 = tmp13 + z2 + z1 * fix(0.475753014) - z3;
         let tmp15 = tmp15 + z2 - z4 * fix(0.869244010) + z3;
         let s = CONST_BITS + PASS1_BITS + 3;
-        output[row * 15] = clamp_to_u8(((tmp20 + tmp10) >> s) + 128);
-        output[row * 15 + 14] = clamp_to_u8(((tmp20 - tmp10) >> s) + 128);
-        output[row * 15 + 1] = clamp_to_u8(((tmp21 + tmp11) >> s) + 128);
-        output[row * 15 + 13] = clamp_to_u8(((tmp21 - tmp11) >> s) + 128);
-        output[row * 15 + 2] = clamp_to_u8(((tmp22 + tmp12) >> s) + 128);
-        output[row * 15 + 12] = clamp_to_u8(((tmp22 - tmp12) >> s) + 128);
-        output[row * 15 + 3] = clamp_to_u8(((tmp23 + tmp13) >> s) + 128);
-        output[row * 15 + 11] = clamp_to_u8(((tmp23 - tmp13) >> s) + 128);
-        output[row * 15 + 4] = clamp_to_u8(((tmp24 + tmp14) >> s) + 128);
-        output[row * 15 + 10] = clamp_to_u8(((tmp24 - tmp14) >> s) + 128);
-        output[row * 15 + 5] = clamp_to_u8(((tmp25 + tmp15) >> s) + 128);
-        output[row * 15 + 9] = clamp_to_u8(((tmp25 - tmp15) >> s) + 128);
-        output[row * 15 + 6] = clamp_to_u8(((tmp26 + tmp16) >> s) + 128);
-        output[row * 15 + 8] = clamp_to_u8(((tmp26 - tmp16) >> s) + 128);
-        output[row * 15 + 7] = clamp_to_u8((tmp27 >> s) + 128);
+        output[row * 15] = level_shift_clamp((tmp20 + tmp10) >> s);
+        output[row * 15 + 14] = level_shift_clamp((tmp20 - tmp10) >> s);
+        output[row * 15 + 1] = level_shift_clamp((tmp21 + tmp11) >> s);
+        output[row * 15 + 13] = level_shift_clamp((tmp21 - tmp11) >> s);
+        output[row * 15 + 2] = level_shift_clamp((tmp22 + tmp12) >> s);
+        output[row * 15 + 12] = level_shift_clamp((tmp22 - tmp12) >> s);
+        output[row * 15 + 3] = level_shift_clamp((tmp23 + tmp13) >> s);
+        output[row * 15 + 11] = level_shift_clamp((tmp23 - tmp13) >> s);
+        output[row * 15 + 4] = level_shift_clamp((tmp24 + tmp14) >> s);
+        output[row * 15 + 10] = level_shift_clamp((tmp24 - tmp14) >> s);
+        output[row * 15 + 5] = level_shift_clamp((tmp25 + tmp15) >> s);
+        output[row * 15 + 9] = level_shift_clamp((tmp25 - tmp15) >> s);
+        output[row * 15 + 6] = level_shift_clamp((tmp26 + tmp16) >> s);
+        output[row * 15 + 8] = level_shift_clamp((tmp26 - tmp16) >> s);
+        output[row * 15 + 7] = level_shift_clamp(tmp27 >> s);
     }
 }
 
 #[allow(clippy::erasing_op, clippy::identity_op)]
 pub fn idct_16x16(coeffs: &[i16; 64], quant: &[u16; 64], output: &mut [u8; 256]) {
-    let mut ws = [0i32; 128];
+    let mut ws = [W_ZERO; 128];
     for col in 0..8 {
-        let c = |r: usize| -> i32 { coeffs[r * 8 + col] as i32 * quant[r * 8 + col] as i32 };
-        let tmp0 = (c(0) << CONST_BITS) + (1 << (CONST_BITS - PASS1_BITS - 1));
+        let c = |r: usize| -> W { wrap(coeffs[r * 8 + col] as i32 * quant[r * 8 + col] as i32) };
+        let tmp0 = (c(0) << CONST_BITS) + wrap(1 << (CONST_BITS - PASS1_BITS - 1));
         let z1 = c(4);
         let tmp1 = z1 * fix(1.306562965);
         let tmp2 = z1 * FIX_0_541196100;
@@ -1004,8 +1045,8 @@ pub fn idct_16x16(coeffs: &[i16; 64], quant: &[u16; 64], output: &mut [u8; 256])
         ws[64 + col] = (tmp27 - tmp13) >> (CONST_BITS - PASS1_BITS);
     }
     for row in 0..16 {
-        let w = |c: usize| -> i32 { ws[row * 8 + c] };
-        let tmp0 = (w(0) + (1 << (PASS1_BITS + 2))) << CONST_BITS;
+        let w = |c: usize| -> W { ws[row * 8 + c] };
+        let tmp0 = (w(0) + wrap(1 << (PASS1_BITS + 2))) << CONST_BITS;
         let z1 = w(4);
         let tmp1 = z1 * fix(1.306562965);
         let tmp2 = z1 * FIX_0_541196100;
@@ -1059,22 +1100,22 @@ pub fn idct_16x16(coeffs: &[i16; 64], quant: &[u16; 64], output: &mut [u8; 256])
         let tmp10 = tmp10 + z2;
         let tmp11 = tmp11 + z2;
         let s = CONST_BITS + PASS1_BITS + 3;
-        output[row * 16] = clamp_to_u8(((tmp20 + tmp0) >> s) + 128);
-        output[row * 16 + 15] = clamp_to_u8(((tmp20 - tmp0) >> s) + 128);
-        output[row * 16 + 1] = clamp_to_u8(((tmp21 + tmp1) >> s) + 128);
-        output[row * 16 + 14] = clamp_to_u8(((tmp21 - tmp1) >> s) + 128);
-        output[row * 16 + 2] = clamp_to_u8(((tmp22 + tmp2) >> s) + 128);
-        output[row * 16 + 13] = clamp_to_u8(((tmp22 - tmp2) >> s) + 128);
-        output[row * 16 + 3] = clamp_to_u8(((tmp23 + tmp3) >> s) + 128);
-        output[row * 16 + 12] = clamp_to_u8(((tmp23 - tmp3) >> s) + 128);
-        output[row * 16 + 4] = clamp_to_u8(((tmp24 + tmp10) >> s) + 128);
-        output[row * 16 + 11] = clamp_to_u8(((tmp24 - tmp10) >> s) + 128);
-        output[row * 16 + 5] = clamp_to_u8(((tmp25 + tmp11) >> s) + 128);
-        output[row * 16 + 10] = clamp_to_u8(((tmp25 - tmp11) >> s) + 128);
-        output[row * 16 + 6] = clamp_to_u8(((tmp26 + tmp12) >> s) + 128);
-        output[row * 16 + 9] = clamp_to_u8(((tmp26 - tmp12) >> s) + 128);
-        output[row * 16 + 7] = clamp_to_u8(((tmp27 + tmp13) >> s) + 128);
-        output[row * 16 + 8] = clamp_to_u8(((tmp27 - tmp13) >> s) + 128);
+        output[row * 16] = level_shift_clamp((tmp20 + tmp0) >> s);
+        output[row * 16 + 15] = level_shift_clamp((tmp20 - tmp0) >> s);
+        output[row * 16 + 1] = level_shift_clamp((tmp21 + tmp1) >> s);
+        output[row * 16 + 14] = level_shift_clamp((tmp21 - tmp1) >> s);
+        output[row * 16 + 2] = level_shift_clamp((tmp22 + tmp2) >> s);
+        output[row * 16 + 13] = level_shift_clamp((tmp22 - tmp2) >> s);
+        output[row * 16 + 3] = level_shift_clamp((tmp23 + tmp3) >> s);
+        output[row * 16 + 12] = level_shift_clamp((tmp23 - tmp3) >> s);
+        output[row * 16 + 4] = level_shift_clamp((tmp24 + tmp10) >> s);
+        output[row * 16 + 11] = level_shift_clamp((tmp24 - tmp10) >> s);
+        output[row * 16 + 5] = level_shift_clamp((tmp25 + tmp11) >> s);
+        output[row * 16 + 10] = level_shift_clamp((tmp25 - tmp11) >> s);
+        output[row * 16 + 6] = level_shift_clamp((tmp26 + tmp12) >> s);
+        output[row * 16 + 9] = level_shift_clamp((tmp26 - tmp12) >> s);
+        output[row * 16 + 7] = level_shift_clamp((tmp27 + tmp13) >> s);
+        output[row * 16 + 8] = level_shift_clamp((tmp27 - tmp13) >> s);
     }
 }
 
