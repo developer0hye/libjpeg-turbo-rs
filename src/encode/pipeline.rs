@@ -1882,9 +1882,11 @@ pub fn compress_rgb_direct(
 
 /// Compress RGB pixels as `JCS_RGB`, honouring every option in `params`.
 ///
-/// `subsampling` is the one thing that cannot apply: `jpeg_set_colorspace`
-/// puts all three components at 1x1 (`jcparam.c:365-370`), so there is nothing
-/// to subsample. C is the same — `cjpeg -rgb -sample 2x2` writes 1x1.
+/// `jpeg_set_colorspace(JCS_RGB)` defaults all three components to 1x1
+/// (`jcparam.c:367-373`), but cjpeg applies an explicit `-sample` after those
+/// defaults (`cjpeg.c:544-552,609-611`). Accordingly, `params.subsampling`
+/// controls R's sampling factor while G and B remain 1x1. This is RGB component
+/// sampling, not JFIF/YCbCr chroma subsampling.
 pub fn compress_rgb_direct_with_params(
     params: &CompressParams<'_>,
     icc_profile: Option<&[u8]>,
