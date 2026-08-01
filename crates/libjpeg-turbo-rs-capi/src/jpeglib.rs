@@ -5469,7 +5469,8 @@ struct CompressPrivate {
     suppress_tables: bool,
     /// Custom quantization tables installed via `jpeg_add_quant_table`.
     /// Index = `which_tbl` (0..3). Each entry is 64 u16 values in
-    /// zig-zag order. Unused slots are `None`.
+    /// natural order, matching upstream `JQUANT_TBL::quantval` and the native
+    /// encoder input. Unused slots are `None`.
     quant_tables: Vec<Option<[u16; 64]>>,
     /// Coefficient handle stashed by `jpeg_write_coefficients`. The
     /// pointer is interpreted as `*const libjpeg_turbo_rs::JpegCoefficients`
@@ -6119,13 +6120,13 @@ pub extern "C" fn jpeg_set_defaults(cinfo: *mut c_void) {
     })
 }
 
-/// `jpeg_set_quality(cinfo, quality, force_baseline)` — install the
-/// scaled luma and chroma quant tables for the requested quality
-/// factor. The scaling curve matches libjpeg `jpeg_quality_scaling`.
+/// `jpeg_set_quality(cinfo, quality, force_baseline)` — record the requested
+/// quality and matching public scale factors. P4-85 tracks installation of
+/// the scaled public tables and the `force_baseline` behavior; output currently
+/// derives default tables from the private quality value at finish time.
 ///
-/// Also updates `q_scale_factor[]` per libjpeg `jcparam.c::jpeg_set_quality`,
-/// which calls `jpeg_quality_scaling(quality)` and stores the result in
-/// slots 0 and 1.
+/// The scaling curve matches libjpeg `jpeg_quality_scaling`; slots 0 and 1 of
+/// `q_scale_factor[]` receive that scale per `jcparam.c::jpeg_set_quality`.
 #[no_mangle]
 pub extern "C" fn jpeg_set_quality(cinfo: *mut c_void, quality: c_int, _force_baseline: CBoolean) {
     crate::unwind_guard!((), {
@@ -6335,60 +6336,112 @@ fn run_encoder_and_flush(c: &mut JpegCompressPublic, priv_state: &mut CompressPr
         subsampling_from_comp_info(priv_state, c.num_components);
     priv_state.subsampling = subsamp;
 
+    let restart_interval: u16 = c.restart_interval.min(u16::MAX as c_uint) as u16;
+    let restart_in_rows: u16 = c.restart_in_rows.clamp(0, u16::MAX as c_int) as u16;
+    let baseline_restart_interval: u16 = if restart_in_rows > 0 {
+        // For a non-progressive interleaved scan, libjpeg converts the public
+        // row count into MCUs once during initial_setup. Progressive writers
+        // instead retain restart_in_rows and derive the interval per scan.
+        let data_unit: u32 = c.min_DCT_h_scaled_size.max(1) as u32;
+        // C's master selection disables chroma subsampling for lossless
+        // output before per_scan_setup, so a lossless MCU is one sample wide
+        // even if jpeg_set_defaults initially installed 2x2 factors.
+        let effective_max_h: u32 = if priv_state.lossless_predictor != 0 {
+            1
+        } else {
+            c.max_h_samp_factor.max(1) as u32
+        };
+        let mcu_width: u32 = effective_max_h.saturating_mul(data_unit).max(1);
+        let jpeg_width: u32 = if c.jpeg_width != 0 {
+            c.jpeg_width
+        } else {
+            c.image_width
+        };
+        let mcus_per_row: u32 = jpeg_width.div_ceil(mcu_width);
+        (restart_in_rows as u32)
+            .saturating_mul(mcus_per_row)
+            .min(u16::MAX as u32) as u16
+    } else {
+        restart_interval
+    };
+    let dct_method = libjpeg_turbo_rs::DctMethod::IsLow;
+
     // Choose encode variant based on parameters captured earlier.
     let bytes_result = if priv_state.lossless_predictor != 0 {
-        libjpeg_turbo_rs::compress_lossless_extended(
+        libjpeg_turbo_rs::encode::pipeline::compress_lossless_extended(
             &priv_state.pixels_u8,
             width,
             height,
             pf,
             priv_state.lossless_predictor,
             priv_state.lossless_point_transform,
+            baseline_restart_interval,
         )
     } else if c.progressive_mode != 0 && c.arith_code != 0 {
-        libjpeg_turbo_rs::compress_arithmetic_progressive(
+        libjpeg_turbo_rs::encode::pipeline::compress_arithmetic_progressive(
             &priv_state.pixels_u8,
             width,
             height,
             pf,
             priv_state.quality,
             subsamp,
+            dct_method,
+            restart_interval,
+            restart_in_rows,
+            None,
         )
     } else if c.progressive_mode != 0 {
-        libjpeg_turbo_rs::compress_progressive(
+        libjpeg_turbo_rs::encode::pipeline::compress_progressive_with_restart(
             &priv_state.pixels_u8,
             width,
             height,
             pf,
             priv_state.quality,
             subsamp,
+            dct_method,
+            restart_interval,
+            restart_in_rows,
+            None,
         )
     } else if c.arith_code != 0 {
-        libjpeg_turbo_rs::compress_arithmetic(
+        libjpeg_turbo_rs::encode::pipeline::compress_arithmetic(
             &priv_state.pixels_u8,
             width,
             height,
             pf,
             priv_state.quality,
             subsamp,
+            dct_method,
+            baseline_restart_interval,
+            None,
         )
-    } else if c.optimize_coding != 0 {
-        libjpeg_turbo_rs::compress_optimized(
-            &priv_state.pixels_u8,
-            width,
-            height,
-            pf,
-            priv_state.quality,
-            subsamp,
+    } else if c.optimize_coding != 0 || c.smoothing_factor != 0 {
+        libjpeg_turbo_rs::encode::pipeline::compress_optimized_with_params(
+            &libjpeg_turbo_rs::encode::pipeline::CompressParams::new(
+                &priv_state.pixels_u8,
+                width,
+                height,
+                pf,
+                priv_state.quality,
+                subsamp,
+            )
+            .dct_method(dct_method)
+            .restart_interval(baseline_restart_interval)
+            .smoothing_factor(c.smoothing_factor.clamp(0, 100) as u8)
+            .optimize_huffman(c.optimize_coding != 0),
         )
     } else {
-        libjpeg_turbo_rs::compress(
-            &priv_state.pixels_u8,
-            width,
-            height,
-            pf,
-            priv_state.quality,
-            subsamp,
+        libjpeg_turbo_rs::encode::pipeline::compress_with_params(
+            &libjpeg_turbo_rs::encode::pipeline::CompressParams::new(
+                &priv_state.pixels_u8,
+                width,
+                height,
+                pf,
+                priv_state.quality,
+                subsamp,
+            )
+            .dct_method(dct_method)
+            .restart_interval(baseline_restart_interval),
         )
     };
 
@@ -6798,15 +6851,15 @@ pub extern "C" fn jpeg_quality_scaling(quality: c_int) -> c_int {
 ///                       force_baseline)`.
 ///
 /// Installs a quantization table at slot `which_tbl` (0..3). `basic_table`
-/// is in zig-zag order, 64 entries. `scale_factor` matches libjpeg: 100
+/// is in natural order, 64 entries. `scale_factor` matches libjpeg: 100
 /// leaves the table unchanged; smaller values scale toward finer quant,
 /// larger toward coarser. When `force_baseline` is non-zero, all entries
 /// are clamped to 1..255 for baseline JPEG compatibility.
 ///
-/// Captured into the private state and passed to the encoder at
-/// `jpeg_finish_compress` time. Our lossy/optimized encode API doesn't
-/// currently accept raw tables — this stores them for future wiring while
-/// remaining a no-op on output (quality field still drives scaling).
+/// The native encoder accepts raw tables, but this classic boundary currently
+/// stores them only in private state and does not apply them at
+/// `jpeg_finish_compress` time. P4-85 tracks that output no-op plus the public
+/// slot and `force_baseline` semantics.
 #[no_mangle]
 pub extern "C" fn jpeg_add_quant_table(
     cinfo: *mut c_void,
@@ -8669,6 +8722,18 @@ pub extern "C" fn jpeg_capi_test_set_restart_in_rows(cinfo: *mut c_void, rows: c
     })
 }
 
+/// Test helper: set the public `restart_interval` field directly, matching
+/// consumers such as OpenCV that configure block-mode restarts through the
+/// ordinary v8 cinfo layout.
+#[no_mangle]
+pub extern "C" fn jpeg_capi_test_set_restart_interval(cinfo: *mut c_void, interval: c_uint) {
+    crate::unwind_guard!((), {
+        if let Some(c) = unsafe { cinfo_compress_mut(cinfo) } {
+            c.restart_interval = interval;
+        }
+    })
+}
+
 /// Test helper: toggle `arith_code` directly. Mirrors `jpegtran
 /// -arithmetic` so the coefficient transcode path's arithmetic dispatch
 /// can be exercised in tests.
@@ -8677,6 +8742,28 @@ pub extern "C" fn jpeg_capi_test_set_arith_code(cinfo: *mut c_void, arith: c_int
     crate::unwind_guard!((), {
         if let Some(c) = unsafe { cinfo_compress_mut(cinfo) } {
             c.arith_code = arith as CBoolean;
+        }
+    })
+}
+
+/// Test helper: set the public optimized-Huffman flag without relying on a
+/// private Rust struct layout in dlopen-based integration tests.
+#[no_mangle]
+pub extern "C" fn jpeg_capi_test_set_optimize_coding(cinfo: *mut c_void, optimize: c_int) {
+    crate::unwind_guard!((), {
+        if let Some(c) = unsafe { cinfo_compress_mut(cinfo) } {
+            c.optimize_coding = optimize as CBoolean;
+        }
+    })
+}
+
+/// Test helper: set the public input-smoothing field at the classic C-ABI
+/// boundary exercised by the scanline encoder matrix.
+#[no_mangle]
+pub extern "C" fn jpeg_capi_test_set_smoothing_factor(cinfo: *mut c_void, smoothing: c_int) {
+    crate::unwind_guard!((), {
+        if let Some(c) = unsafe { cinfo_compress_mut(cinfo) } {
+            c.smoothing_factor = smoothing;
         }
     })
 }

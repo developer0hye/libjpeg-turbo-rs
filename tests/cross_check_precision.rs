@@ -2,12 +2,14 @@
 //!
 //! Gaps addressed:
 //! - 12-bit RGB (non-grayscale) encode/decode with C cross-validation
-//! - 12-bit with multiple subsamplings (only grayscale was tested)
+//! - 12-bit raw planar S444 cross-validation (the six-layout matrix lives in
+//!   `raw_data_12bit.rs`)
 //! - Precision 2-16 lossless encode/decode roundtrip
-//! - B6-1: 12-bit matrix subsamp(7) × progressive × arithmetic × quality{20,60,90}
+//! - B6-1: 12-bit baseline Huffman quality matrix at the supported S444 layout
 //! - B6-3: 16-bit lossless matrix predictor(1-7) × point_transform(0,4,8,15)
 //!
-//! All tests gracefully skip if djpeg/cjpeg don't support 12-bit.
+//! Required CI fails closed when C tools are absent; local development may
+//! skip when a suitable 12-bit oracle is unavailable.
 
 mod helpers;
 
@@ -160,7 +162,7 @@ fn generate_12bit_gray(w: usize, h: usize) -> Vec<i16> {
 // ===========================================================================
 
 #[test]
-fn c_xval_12bit_rgb_subsamplings() {
+fn c_xval_12bit_rgb_s444() {
     let djpeg = require_c_tool!("djpeg");
     assert!(
         djpeg_supports_12bit(&djpeg),
@@ -395,17 +397,13 @@ fn lossless_arbitrary_all_predictors() {
 }
 
 // ===========================================================================
-// B6-1: 12-bit matrix — subsamp(7) × progressive × arithmetic × quality
+// B6-1: 12-bit baseline Huffman S444 × quality
 // ===========================================================================
 
-/// Encode and decode 12-bit JPEG with all subsamplings × qualities, comparing
+/// Encode and decode 12-bit baseline Huffman JPEGs across qualities, comparing
 /// Rust round-trip against C djpeg output where 12-bit is supported.
-///
-/// Note: `compress_12bit` currently only supports 4:4:4 for color images.
-/// Grayscale supports all subsamplings (stored as 4:4:4 internally).
-/// The matrix tests all 7 subsamplings via grayscale for maximum coverage.
 #[test]
-fn b6_1_12bit_quality_matrix_grayscale() {
+fn b6_1_12bit_baseline_quality_matrix_grayscale() {
     let djpeg = require_c_tool!("djpeg");
     assert!(
         djpeg_supports_12bit(&djpeg),
@@ -526,56 +524,6 @@ fn b6_1_12bit_quality_matrix_color_444() {
         assert_eq!(max_diff, 0, "{label}: Rust vs C djpeg max_diff={max_diff}");
 
         eprintln!("{label}: PASS (max_diff=0)");
-    }
-}
-
-/// 12-bit Rust-only round-trip matrix: subsamp(7) × quality(20,60,90).
-/// Uses grayscale to exercise all 7 subsamplings (color only supports 4:4:4).
-/// No C cross-check needed here — this validates the Rust codec itself.
-#[test]
-fn b6_1_12bit_rust_roundtrip_matrix() {
-    let w: usize = 32;
-    let h: usize = 32;
-    let gray_pixels: Vec<i16> = generate_12bit_gray(w, h);
-    let rgb_pixels: Vec<i16> = generate_12bit_gradient(w, h);
-
-    // All 7 subsamplings via grayscale
-    let subsamplings: &[(Subsampling, &str)] = &[
-        (Subsampling::S444, "444"),
-        (Subsampling::S422, "422"),
-        (Subsampling::S420, "420"),
-        (Subsampling::S440, "440"),
-        (Subsampling::S411, "411"),
-        (Subsampling::S441, "441"),
-    ];
-    let qualities: &[u8] = &[20, 60, 90];
-
-    for &(subsamp, sname) in subsamplings {
-        for &quality in qualities {
-            let label: String = format!("12bit_gray_{sname}_q{quality}");
-            let jpeg: Vec<u8> = compress_12bit(&gray_pixels, w, h, 1, quality, Subsampling::S444)
-                .unwrap_or_else(|e| panic!("{label}: compress failed: {e:?}"));
-            let decoded = decompress_12bit(&jpeg)
-                .unwrap_or_else(|e| panic!("{label}: decompress failed: {e:?}"));
-            assert_eq!(decoded.width, w, "{label}: width");
-            assert_eq!(decoded.height, h, "{label}: height");
-            // Grayscale round-trip: values close to original within JPEG quantization error.
-            // Quality 20 is very aggressive. No strict tolerance needed — just check it decodes.
-            assert_eq!(decoded.num_components, 1, "{label}: components");
-            let _ = subsamp; // used in label for clarity
-        }
-    }
-
-    // Color 4:4:4 × qualities
-    for &quality in qualities {
-        let label: String = format!("12bit_rgb_444_q{quality}");
-        let jpeg: Vec<u8> = compress_12bit(&rgb_pixels, w, h, 3, quality, Subsampling::S444)
-            .unwrap_or_else(|e| panic!("{label}: compress failed: {e:?}"));
-        let decoded =
-            decompress_12bit(&jpeg).unwrap_or_else(|e| panic!("{label}: decompress failed: {e:?}"));
-        assert_eq!(decoded.width, w, "{label}: width");
-        assert_eq!(decoded.height, h, "{label}: height");
-        assert_eq!(decoded.num_components, 3, "{label}: components");
     }
 }
 

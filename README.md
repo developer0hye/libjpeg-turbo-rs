@@ -338,7 +338,7 @@ Grayscale, RGB, BGR, RGBA, BGRA, ARGB, ABGR, RGBX, BGRX, XRGB, XBGR, CMYK, RGB56
 
 ### Chroma Subsampling
 
-4:4:4, 4:2:2, 4:2:0, 4:4:0, 4:1:1, 4:4:1
+4:4:4, 4:2:2, 4:2:0, 4:4:0, 4:1:1, 4:4:1, 4:1:0, 2:4
 
 ### SIMD
 
@@ -371,9 +371,11 @@ All SIMD routines have scalar fallbacks. SIMD is enabled by default via the `sim
 
 Beyond the Rust crate, the workspace ships C ABI shims: a TurboJPEG 3
 cdylib (`libturbojpeg.so.0`, ready for TJ3 consumers) and a classic
-libjpeg v8 cdylib (`libjpeg.so.8`, ready for v8 consumers) — with
-byte-exact stock `djpeg`/`jpegtran` gates plus a cjpeg decoded-output
-equivalence gate. The
+libjpeg v8 cdylib (`libjpeg.so.8`, experimental/partial). A pinned OpenCV 4.6
+workload and stock-tool gates prove important default paths, but open classic
+ABI ownership, lifecycle, option, error, and test-integrity gaps mean it is not
+yet a general system-library replacement; GNU ELF symbol versions are also
+tracked as P4-81. The
 legacy-alias matrix, SONAME opt-ins, threading contract, and the v6b/v7
 drop-in non-goal live in
 [`docs/ABI_COMPATIBILITY.md`](docs/ABI_COMPATIBILITY.md); the T1–T4

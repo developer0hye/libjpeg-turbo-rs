@@ -169,8 +169,8 @@
 | C Function | Description | Rust | Status |
 |---|---|---|---|
 | `jpeg_std_error(err)` | Create default error manager | `JpegError` enum | ✅ |
-| `jpeg_create_compress(cinfo)` | Create compression struct | `Encoder` / `ScanlineEncoder` | ✅ |
-| `jpeg_create_decompress(cinfo)` | Create decompression struct | `Decoder::new()` / `ScanlineDecoder::new()` | ✅ |
+| `jpeg_create_compress(cinfo)` | Create compression struct | `Encoder` / `ScanlineEncoder`; classic version/size guards remain P4-110 | 🔶 |
+| `jpeg_create_decompress(cinfo)` | Create decompression struct | `Decoder::new()` / `ScanlineDecoder::new()`; classic version/size guards remain P4-110 | 🔶 |
 | `jpeg_destroy_compress(cinfo)` | Destroy compressor | RAII / `Drop` | ✅ |
 | `jpeg_destroy_decompress(cinfo)` | Destroy decompressor | RAII / `Drop` | ✅ |
 | `jpeg_abort_compress(cinfo)` | Abort compression | N/A (RAII) | N/A |
@@ -182,26 +182,26 @@
 
 | C Function | Description | Rust | Status |
 |---|---|---|---|
-| `jpeg_stdio_dest(cinfo, file)` | Output to FILE* | `stream::compress_to_file` / `stream::compress_to_writer` | ✅ |
-| `jpeg_stdio_src(cinfo, file)` | Input from FILE* | `stream::decompress_from_file` / `stream::decompress_from_reader` | ✅ |
-| `jpeg_mem_dest(cinfo, &outbuf, &outsize)` | Output to memory buffer | `Vec<u8>` output (native) | ✅ |
-| `jpeg_mem_src(cinfo, inbuf, insize)` | Input from memory buffer | `&[u8]` input (native) | ✅ |
+| `jpeg_stdio_dest(cinfo, file)` | Output to FILE* | Native writer exists; classic short-write/flush errors remain P4-108 | 🔶 |
+| `jpeg_stdio_src(cinfo, file)` | Input from FILE* | Native reader exists; classic FILE buffering/Windows/error semantics remain P4-109 | 🔶 |
+| `jpeg_mem_dest(cinfo, &outbuf, &outsize)` | Output to memory buffer | Native `Vec<u8>` exists; classic caller-buffer ownership/reallocation remains P4-108 | 🔶 |
+| `jpeg_mem_src(cinfo, inbuf, insize)` | Input from memory buffer | Native `&[u8]` exists; classic validation/manager replacement remains P4-109 | 🔶 |
 
 ### Compression Setup
 
 | C Function | Description | Rust | Status |
 |---|---|---|---|
-| `jpeg_set_defaults(cinfo)` | Set default compression params | Automatic in `compress()` | ✅ |
-| `jpeg_set_colorspace(cinfo, cs)` | Set JPEG colorspace | `Encoder::colorspace()` | ✅ |
-| `jpeg_default_colorspace(cinfo)` | Reset to default colorspace | `Encoder::reset_colorspace()` | ✅ |
-| `jpeg_set_quality(cinfo, quality, force_baseline)` | Set quality factor | `quality: u8` parameter + `Encoder::force_baseline()` | ✅ |
-| `jpeg_set_linear_quality(cinfo, scale, force_baseline)` | Set linear quality scaling | `Encoder::linear_quality()` | ✅ |
-| `jpeg_default_qtables(cinfo, force_baseline)` | Reset quant tables | `Encoder::reset_quant_tables(force_baseline)` | ✅ |
-| `jpeg_add_quant_table(cinfo, which, table, scale, force_baseline)` | Add custom quant table | `Encoder::quant_table()` | ✅ |
+| `jpeg_set_defaults(cinfo)` | Set default compression params | Automatic in `compress()`; classic public-table setup remains P4-85 | 🔶 |
+| `jpeg_set_colorspace(cinfo, cs)` | Set JPEG colorspace | `Encoder::colorspace()`; classic scanline forwarding remains P4-93 | 🔶 |
+| `jpeg_default_colorspace(cinfo)` | Reset to default colorspace | `Encoder::reset_colorspace()`; classic scanline forwarding remains P4-93 | 🔶 |
+| `jpeg_set_quality(cinfo, quality, force_baseline)` | Set quality factor | `quality: u8` parameter + `Encoder::force_baseline()`; classic public-table/16-bit DQT semantics remain P4-85 | 🔶 |
+| `jpeg_set_linear_quality(cinfo, scale, force_baseline)` | Set linear quality scaling | `Encoder::linear_quality()`; classic scanline table wiring is P4-85 | 🔶 |
+| `jpeg_default_qtables(cinfo, force_baseline)` | Reset quant tables | `Encoder::reset_quant_tables(force_baseline)`; classic per-slot scales/table setup remain P4-85 | 🔶 |
+| `jpeg_add_quant_table(cinfo, which, table, scale, force_baseline)` | Add custom quant table | `Encoder::quant_table()`; classic scanline table wiring/`force_baseline` semantics are P4-85 | 🔶 |
 | `jpeg_quality_scaling(quality)` | Convert quality to scale factor | `quality_scaling()` | ✅ |
-| `jpeg_enable_lossless(cinfo, psv, pt)` | Enable lossless mode | `Encoder::lossless_predictor()` + `Encoder::lossless_point_transform()` | ✅ |
-| `jpeg_simple_progression(cinfo)` | Set standard progressive scan script | Used internally in `compress_progressive()` | ✅ |
-| `jpeg_suppress_tables(cinfo, suppress)` | Control table output | `Encoder::suppress_tables(bool)` — emits body-only JPEG (no DQT/DHT) | ✅ |
+| `jpeg_enable_lossless(cinfo, psv, pt)` | Enable lossless mode | Native builder exists; classic validation/public-state semantics remain P4-107 | 🔶 |
+| `jpeg_simple_progression(cinfo)` | Set standard progressive scan script | Native progressive script exists; classic public-script setup remains P4-91 | 🔶 |
+| `jpeg_suppress_tables(cinfo, suppress)` | Control table output | `Encoder::suppress_tables(bool)`; classic cinfo sent/suppression state remains P4-87 | 🔶 |
 | `jpeg_alloc_quant_table(cinfo)` | Allocate quant table | N/A (Rust arrays) | N/A |
 | `jpeg_alloc_huff_table(cinfo)` | Allocate Huffman table | N/A (Rust structs) | N/A |
 
@@ -209,66 +209,66 @@
 
 | C Function | Description | Rust | Status |
 |---|---|---|---|
-| `jpeg_start_compress(cinfo, write_all_tables)` | Begin compression | `ScanlineEncoder::new()` | ✅ |
-| `jpeg_write_scanlines(cinfo, scanlines, num_lines)` | Write scanline rows | `ScanlineEncoder::write_scanlines()` | ✅ |
-| `jpeg12_write_scanlines(...)` | Write 12-bit scanlines | `write_scanlines_12()` | ✅ |
-| `jpeg16_write_scanlines(...)` | Write 16-bit scanlines | `write_scanlines_16()` | ✅ |
-| `jpeg_finish_compress(cinfo)` | Finalize compression | `ScanlineEncoder::finish()` | ✅ |
+| `jpeg_start_compress(cinfo, write_all_tables)` | Begin compression | `ScanlineEncoder::new()`; classic `write_all_tables` remains P4-87 | 🔶 |
+| `jpeg_write_scanlines(cinfo, scanlines, num_lines)` | Write scanline rows | `ScanlineEncoder::write_scanlines()`; residual option gaps are P4-84..P4-93 | 🔶 |
+| `jpeg12_write_scanlines(...)` | Write 12-bit scanlines | Native 12-bit encode exists; classic finish dispatch remains P4-94 | 🔶 |
+| `jpeg16_write_scanlines(...)` | Write 16-bit scanlines | Native 16-bit lossless encode exists; classic finish dispatch remains P4-94 | 🔶 |
+| `jpeg_finish_compress(cinfo)` | Finalize compression | Native finish exists; classic incomplete-input/state/error semantics remain P4-100/P4-106 | 🔶 |
 | `jpeg_calc_jpeg_dimensions(cinfo)` | Compute compression-side JPEG dimensions; no compression scaling | `calc_jpeg_dimensions()` | ✅ |
-| `jpeg_write_raw_data(cinfo, data, num_lines)` | Write raw downsampled data | `compress_raw()` | ✅ |
-| `jpeg12_write_raw_data(...)` | Write 12-bit raw data | `compress_raw_12()` | ✅ |
+| `jpeg_write_raw_data(cinfo, data, num_lines)` | Write raw downsampled data | Default `compress_raw()` path works; full classic options remain P4-95 | 🔶 |
+| `jpeg12_write_raw_data(...)` | Write 12-bit raw data | Default `compress_raw_12()` path works; full classic options remain P4-95 | 🔶 |
 
 ### Marker Writing
 
 | C Function | Description | Rust | Status |
 |---|---|---|---|
-| `jpeg_write_marker(cinfo, marker, data, len)` | Write arbitrary marker | `marker_writer::write_marker()` | ✅ |
-| `jpeg_write_m_header(cinfo, marker, len)` | Begin streaming marker write | `MarkerStreamWriter` | ✅ |
-| `jpeg_write_m_byte(cinfo, val)` | Write one byte of marker data | `MarkerStreamWriter` | ✅ |
-| `jpeg_write_tables(cinfo)` | Write tables-only datastream | `api::abbreviated::jpeg_write_tables(&encoder)` — SOI + DQT + DHT + (DAC) + EOI | ✅ |
+| `jpeg_write_marker(cinfo, marker, data, len)` | Write arbitrary marker | Native writer exists; classic timing/state validation remains P4-105 | 🔶 |
+| `jpeg_write_m_header(cinfo, marker, len)` | Begin streaming marker write | Native writer exists; classic declared-length/state semantics remain P4-105 | 🔶 |
+| `jpeg_write_m_byte(cinfo, val)` | Write one byte of marker data | Native writer exists; classic declared-length/state semantics remain P4-105 | 🔶 |
+| `jpeg_write_tables(cinfo)` | Write tables-only datastream | Native tables-only output exists; classic installed-table/sent-state semantics remain P4-87 | 🔶 |
 | `jpeg_write_icc_profile(cinfo, data, len)` | Write ICC profile | `marker_writer::write_app2_icc()` | 🔶 |
 
 ### Decompression
 
 | C Function | Description | Rust | Status |
 |---|---|---|---|
-| `jpeg_read_header(cinfo, require_image)` | Parse headers | `Decoder::new()` / `ScanlineDecoder::new()` | ✅ |
-| `jpeg_start_decompress(cinfo)` | Begin decompression | `ScanlineDecoder::new()` | ✅ |
-| `jpeg_read_scanlines(cinfo, scanlines, max_lines)` | Read scanline rows | `ScanlineDecoder::read_scanlines()` | ✅ |
-| `jpeg12_read_scanlines(...)` | Read 12-bit scanlines | `read_scanlines_12()` | ✅ |
-| `jpeg16_read_scanlines(...)` | Read 16-bit scanlines | `read_scanlines_16()` | ✅ |
+| `jpeg_read_header(cinfo, require_image)` | Parse headers | Native parser works; classic metadata/state/tables remain P4-99/P4-101/P4-104 | 🔶 |
+| `jpeg_start_decompress(cinfo)` | Begin decompression | Basic `ScanlineDecoder` path works; classic option dispatch remains P4-96/P4-99 | 🔶 |
+| `jpeg_read_scanlines(cinfo, scanlines, max_lines)` | Read scanline rows | Basic rows work; classic quantization/options remain P4-96/P4-99 | 🔶 |
+| `jpeg12_read_scanlines(...)` | Read 12-bit scanlines | Native precision decode exists; classic lifecycle/options remain P4-98 | 🔶 |
+| `jpeg16_read_scanlines(...)` | Read 16-bit scanlines | Native precision decode exists; classic lifecycle/options remain P4-98 | 🔶 |
 | `jpeg_skip_scanlines(cinfo, num_lines)` | Skip rows during decode | `ScanlineDecoder::skip_scanlines()`, `StreamingDecoder::skip_scanlines()` (C-matching clamp, issue #383) | ✅ |
-| `jpeg12_skip_scanlines(...)` | Skip 12-bit scanlines | `read_scanlines_12()` (skip via offset) | ✅ |
-| `jpeg_crop_scanline(cinfo, &xoffset, &width)` | Scanline-level crop | `ScanlineDecoder::set_crop_x()` | ✅ |
-| `jpeg12_crop_scanline(...)` | 12-bit crop | `read_scanlines_12()` (crop support) | ✅ |
-| `jpeg_finish_decompress(cinfo)` | Finalize decompression | `ScanlineDecoder::finish()` | ✅ |
-| `jpeg_read_raw_data(cinfo, data, max_lines)` | Read raw downsampled data | `decompress_raw()` | ✅ |
-| `jpeg12_read_raw_data(...)` | Read 12-bit raw data | `decompress_raw_12()` | ✅ |
+| `jpeg12_skip_scanlines(...)` | Skip 12-bit scanlines | Private offset support exists; immediate-after-start behavior remains P4-98 | 🔶 |
+| `jpeg_crop_scanline(cinfo, &xoffset, &width)` | Scanline-level crop | Native exact crop exists; classic iMCU alignment/state semantics remain P4-103 | 🔶 |
+| `jpeg12_crop_scanline(...)` | 12-bit crop | Private crop support exists; immediate-after-start/output proof remains P4-98 | 🔶 |
+| `jpeg_finish_decompress(cinfo)` | Finalize decompression | Native finish exists; classic lifecycle/suspension/error semantics remain P4-100/P4-104 | 🔶 |
+| `jpeg_read_raw_data(cinfo, data, max_lines)` | Read raw downsampled data | Native raw decode exists; classic options/state/error semantics remain P4-102 | 🔶 |
+| `jpeg12_read_raw_data(...)` | Read 12-bit raw data | Native raw decode exists; classic options/state/error semantics remain P4-102 | 🔶 |
 
 ### Buffered Image Mode (Progressive Output)
 
 | C Function | Description | Rust | Status |
 |---|---|---|---|
-| `jpeg_has_multiple_scans(cinfo)` | Check if progressive/multi-scan | `ProgressiveDecoder::has_multiple_scans()` | ✅ |
-| `jpeg_start_output(cinfo, scan_number)` | Begin output for specific scan | `ProgressiveDecoder::output()` | ✅ |
-| `jpeg_finish_output(cinfo)` | Finish scan output | `ProgressiveDecoder::finish()` | ✅ |
-| `jpeg_input_complete(cinfo)` | Check if all input consumed | `ProgressiveDecoder::input_complete()` | ✅ |
-| `jpeg_consume_input(cinfo)` | Process more input data | `ProgressiveDecoder::consume_input()` | ✅ |
-| `jpeg_new_colormap(cinfo)` | Update colormap after quant change | `requantize()` | ✅ |
+| `jpeg_has_multiple_scans(cinfo)` | Check if progressive/multi-scan | Native progressive query exists; classic sequential multi-scan/state semantics remain P4-114 | 🔶 |
+| `jpeg_start_output(cinfo, scan_number)` | Begin output for specific scan | Native output exists; classic input-pull/state behavior remains P4-26/P4-104 | 🔶 |
+| `jpeg_finish_output(cinfo)` | Finish scan output | Native finish exists; classic input-pull/state behavior remains P4-26/P4-104 | 🔶 |
+| `jpeg_input_complete(cinfo)` | Check if all input consumed | Native query exists; deeper streaming/state fidelity remains P4-26/P4-104 | 🔶 |
+| `jpeg_consume_input(cinfo)` | Process more input data | Suspension core works; deeper streaming/state fidelity remains P4-13/P4-26/P4-104 | 🔶 |
+| `jpeg_new_colormap(cinfo)` | Update colormap after quant change | Native `requantize()` exists; classic color quantization remains P4-96 | 🔶 |
 
 ### Output Dimensions
 
 | C Function | Description | Rust | Status |
 |---|---|---|---|
-| `jpeg_calc_output_dimensions(cinfo)` | Compute scaled output size | `calc_output_dimensions()` | ✅ |
-| `jpeg_core_output_dimensions(cinfo)` | Core dimension calculation | `calc_jpeg_dimensions()` | ✅ |
+| `jpeg_calc_output_dimensions(cinfo)` | Compute scaled output size | Calculation exists; actual classic decode does not honor it (P4-99) | 🔶 |
+| `jpeg_core_output_dimensions(cinfo)` | Core dimension calculation | Helper exists; odd-size public component geometry remains P4-99 | 🔶 |
 
 ### Marker Management
 
 | C Function | Description | Rust | Status |
 |---|---|---|---|
-| `jpeg_save_markers(cinfo, marker_code, length_limit)` | Enable marker saving | `Decoder::save_markers()` | ✅ |
-| `jpeg_set_marker_processor(cinfo, marker_code, routine)` | Custom marker parser | `Decoder::set_marker_processor()` | ✅ |
+| `jpeg_save_markers(cinfo, marker_code, length_limit)` | Enable marker saving | Native saving works; classic incremental marker-list pointer stability remains P4-26 | 🔶 |
+| `jpeg_set_marker_processor(cinfo, marker_code, routine)` | Custom marker parser | Native callback API exists; classic callback invocation remains P4-112 | 🔶 |
 
 ### Coefficient Access
 
@@ -276,19 +276,19 @@
 |---|---|---|---|
 | `jpeg_read_coefficients(cinfo)` | Read DCT coefficient arrays | `read_coefficients()` | ✅ |
 | `jpeg_write_coefficients(cinfo, coef_arrays)` | Write coefficient arrays to JPEG | `write_coefficients()` | ✅ |
-| `jpeg_copy_critical_parameters(src, dst)` | Copy quant/Huffman/colorspace between sessions | `copy_critical_parameters()` | ✅ |
+| `jpeg_copy_critical_parameters(src, dst)` | Copy quant/Huffman/colorspace between sessions | Native copy exists; classic source public-table publication remains P4-101 | 🔶 |
 
 ### Error / Sync
 
 | C Function | Description | Rust | Status |
 |---|---|---|---|
-| `jpeg_resync_to_restart(cinfo, desired)` | Resync to restart marker after error | `RestartResyncStrategy` trait + `Decoder::set_resync_strategy()` with `ResyncAction {Continue,Skip,Abort}` | ✅ |
+| `jpeg_resync_to_restart(cinfo, desired)` | Resync to restart marker after error | Native strategy extension exists; classic default algorithm remains P4-97 | 🔶 |
 
 ### ICC Profile
 
 | C Function | Description | Rust | Status |
 |---|---|---|---|
-| `jpeg_read_icc_profile(cinfo, &data, &len)` | Read ICC profile from decoded image | `Image.icc_profile()` | ✅ |
+| `jpeg_read_icc_profile(cinfo, &data, &len)` | Read ICC profile from decoded image | Native ICC reassembly exists; classic saved-marker/header semantics remain P4-113 | 🔶 |
 
 ---
 
@@ -437,8 +437,8 @@
 | Value | Description | Rust | Status |
 |---|---|---|---|
 | `JDCT_ISLOW` | Accurate integer DCT | `DctMethod::IsLow` (default) | ✅ |
-| `JDCT_IFAST` | Fast integer DCT (less accurate) | `DctMethod::IsFast` | ✅ |
-| `JDCT_FLOAT` | Floating-point DCT | `DctMethod::Float` | ✅ |
+| `JDCT_IFAST` | Fast integer DCT (less accurate) | `DctMethod::IsFast`; classic scanline forwarding is P4-86 | 🔶 |
+| `JDCT_FLOAT` | Floating-point DCT | `DctMethod::Float`; classic scanline forwarding is P4-86 | 🔶 |
 
 ### Dithering (`J_DITHER_MODE`)
 | Value | Description | Rust | Status |
@@ -490,15 +490,15 @@
 | `JQUANT_TBL` | Quantization table (64 values + sent_table) | Internal `[u16; 64]` arrays | ✅ |
 | `JHUFF_TBL` | Huffman table (bits[17] + huffval[256]) | `HuffmanTable` / `HuffTable` | ✅ |
 | `jpeg_component_info` | Per-component metadata | `ComponentInfo` | ✅ |
-| `jpeg_scan_info` | Scan script entry (components, Ss/Se/Ah/Al) | `ScanScript` / `ScanInfo` | ✅ |
-| `jpeg_marker_struct` | Saved marker (code, length, data, next) | `Image.markers()` / `Image.saved_markers` | ✅ |
-| `jpeg_common_struct` | Common fields (err, mem, progress) | Spread across `Decoder` / `Encoder` | ✅ |
-| `jpeg_compress_struct` | Full compression state (~50 fields) | `Encoder` / `ScanlineEncoder` | ✅ |
-| `jpeg_decompress_struct` | Full decompression state (~60 fields) | `Decoder` / `ScanlineDecoder` | ✅ |
+| `jpeg_scan_info` | Scan script entry (components, Ss/Se/Ah/Al) | `ScanScript` / `ScanInfo`; classic scanline wiring remains P4-91 | 🔶 |
+| `jpeg_marker_struct` | Saved marker (code, length, data, next) | Native markers exist; classic incremental pointer stability remains P4-26 | 🔶 |
+| `jpeg_common_struct` | Common fields (err, mem, progress) | Native equivalents exist; classic error/state/progress contracts remain P4-100/P4-104/P4-111 | 🔶 |
+| `jpeg_compress_struct` | Full compression state (~50 fields) | `Encoder` / `ScanlineEncoder`; residual classic option/state gaps are P4-84..P4-111 | 🔶 |
+| `jpeg_decompress_struct` | Full decompression state (~60 fields) | `Decoder` / `ScanlineDecoder`; residual classic state/options gaps are P4-96..P4-114 | 🔶 |
 | `jpeg_error_mgr` | Error handler (5 callbacks + state) | `ErrorHandler` trait (3 callbacks) | 🔶 |
-| `jpeg_progress_mgr` | Progress callback + counters | `ProgressListener` trait | ✅ |
-| `jpeg_destination_mgr` | Output stream (buffer + 3 callbacks) | `stream::compress_to_writer<W: Write>` | ✅ |
-| `jpeg_source_mgr` | Input stream (buffer + 5 callbacks) | `stream::decompress_from_reader<R: Read>` (buffering); `decompress_from_reader_incremental` (bounded window, interleaved baseline — P4-58) | ✅ |
+| `jpeg_progress_mgr` | Progress callback + counters | Native `ProgressListener` exists; classic callback/counters remain P4-111 | 🔶 |
+| `jpeg_destination_mgr` | Output stream (buffer + 3 callbacks) | Native writer exists; classic ownership/I/O semantics remain P4-108 | 🔶 |
+| `jpeg_source_mgr` | Input stream (buffer + 5 callbacks) | Native readers exist; classic setup/stdio semantics remain P4-109 | 🔶 |
 | `jpeg_memory_mgr` | Memory allocator (12 methods) | N/A (Rust allocator) | N/A |
 
 ---
@@ -512,6 +512,6 @@ These are the highest-signal C API surfaces that still lack end-to-end public pa
 | `tj3LoadImage8()` / `tj3SaveImage8()` PNG | ✅ | BMP/PPM/PGM implemented; PNG added behind `--features png` (default off). Dispatch by 8-byte magic on load, by `.png` extension on save. 8-bit RGB/RGBA/Grayscale only; 16-bit and indexed-colour return `Unsupported`. |
 | `tj3GetErrorStr()` / `tj3GetErrorCode()` | 🔶 | Rust uses `Result` / `JpegError`, not C-style per-handle getters (C ABI shim in `libjpeg-turbo-rs-capi` exposes both for FFI callers) |
 | `tj3Alloc()` / `tj3Free()` | 🔶 | N/A — Rust ownership replaces C allocator API (FFI-facing aliases exist in `libjpeg-turbo-rs-capi`) |
-| `jpeg_write_icc_profile()` | 🔶 | Low-level helper exists, but no libjpeg-style public wrapper around a compression state object |
-| `jpeg_create_(de)compress()` + full `jpeg_*` state-machine ABI | 🔶 | C ABI shim (`libjpeg-turbo-rs-capi`) covers TJ3 API + 21 legacy TJ1/TJ2 aliases (`tjInitCompress`/`tjInitDecompress`/`tjInitTransform`/`tjDestroy` + `tjCompress2`/`tjDecompress2`/`tjDecompressHeader3` + `tjTransform`/`tjEncodeYUV3`/`tjDecodeYUV` + buffer-size helpers + `tjLoadImage`/`tjSaveImage` + `tjGetErrorStr2`); 18 other legacy 1.x/2.x symbols deliberately deprecated with migration matrix per P4-18 closure (see `docs/ABI_COMPATIBILITY.md` § Legacy TurboJPEG 1.x/2.x aliases); + SONAME + pkg-config + 9 decode entry points (`jpeg_create_decompress`, `jpeg_std_error`, `jpeg_stdio_src`/`jpeg_mem_src`, `jpeg_read_header`, `jpeg_start_decompress`, `jpeg_read_scanlines`, `jpeg_finish_decompress`, `jpeg_destroy_decompress`). Full jpeglib.h state-machine ABI (~200 struct fields + classic encode + marker/coef APIs) remains follow-up — tracked in B9-2/B9-4 skip reasons. |
-| B9-4 / B9-5 — drop-in `libjpeg.so.62` link test against stock djpeg/cjpeg + tjunittest.c | ✅ | B9-4 covers the full `references/libjpeg-turbo/testimages/*.jpg` corpus: shim-linked `djpeg` and `jpegtran -copy all -rotate 90` produce `cmp -s` identical output to upstream libjpeg-turbo (8-bit `testorig`/`testimgari`/`testimgint`, 12-bit `monkey12`); cjpeg must be byte-identical or successfully stock-decode to identical output. B9-5 harness operational (tjunittest runs to completion on our shim after fixing `tj3Compress8` NOREALLOC in-place semantics). |
+| `jpeg_write_icc_profile()` | 🔶 | Native helper and classic export exist; marker state/error contracts remain P4-105/P4-100. |
+| `jpeg_create_(de)compress()` + full `jpeg_*` state-machine ABI | 🔶 | The v8 export/layout surface is broad, but create guards, ownership, public state/options, lifecycle, callbacks, and error propagation remain P4-84..P4-114. See `docs/LAST_MILE.md`; symbol presence is not behavioral parity. |
+| B9-4 / B9-5 — stock-tool/tjunittest link and behavior gates | ✅ | B9-4 covers the reference image corpus for the operations it runs; B9-5 reaches completion. These are selected consumer gates, not a v6b/v8 general drop-in claim. |
