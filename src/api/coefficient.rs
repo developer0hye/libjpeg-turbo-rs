@@ -94,7 +94,7 @@ fn has_rgb_component_ids(coeffs: &JpegCoefficients) -> bool {
             .components
             .iter()
             .map(|component| component.component_id)
-            .eq([b'R', b'G', b'B'])
+            .eq(*b"RGB")
 }
 
 fn uses_single_rgb_coding_table(coeffs: &JpegCoefficients) -> bool {
