@@ -8,7 +8,26 @@ and `git log` between tags.
 
 ## [Unreleased]
 
+### Added
+- A pinned Ubuntu 24.04/OpenCV 4.6 replacement harness that proves OpenCV's
+  JPEG compression/decompression symbols bind to the Rust `libjpeg.so.8` and
+  runs system/Rust bidirectional cross-decodes.
+
 ### Fixed
+- The P4-13 progressive-suspension C oracle now discovers `cjpeg`/`djpeg` on
+  `PATH`, fails closed on tool/compile errors in CI, and runs as an explicit
+  provisioned Linux CI gate instead of reporting a soft-skipped pass.
+- Classic C-ABI documentation now distinguishes selected OpenCV/stock-tool
+  evidence from general drop-in readiness and tracks the newly audited
+  ABI/ownership/state/error/test-integrity gaps through P4-116.
+- Classic `jpeg_*` scanline compression now honors the public
+  `restart_interval` and `restart_in_rows` fields in baseline, optimized,
+  progressive, arithmetic, and lossless modes. The OpenCV replacement
+  harness structurally checks DRI/RST markers and produces a byte-identical
+  progressive JPEG to Ubuntu's libjpeg-turbo baseline.
+- Baseline classic scanline compression also honors `smoothing_factor`
+  without implicitly enabling optimized Huffman coding, matching
+  `cjpeg -smooth`.
 - `Decoder` grayscale output requests now match libjpeg-turbo for JCS_RGB
   input and for legal streams whose component 0 requires upsampling, rather
   than treating red as luma or rejecting the conversion.

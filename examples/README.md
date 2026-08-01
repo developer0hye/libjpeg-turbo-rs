@@ -27,3 +27,17 @@ workflow (`bench_*`, `probe_*`, `diag_*`, `generate_corpus`,
 at this level because CI jobs and `experiments/` logs reference their
 `cargo run --example <name>` invocations; the table above is the
 user-facing surface.
+
+`opencv_smoke/` is a pinned Ubuntu 24.04/OpenCV 4.6 manual integration
+harness. It replaces OpenCV's `libjpeg.so.8` at load time, proves the
+compress/decompress symbol bindings, and runs bidirectional JPEG cross-decodes:
+
+```bash
+cargo build -p libjpeg-turbo-rs-capi --release
+bash examples/opencv_smoke/run.sh \
+  --lib target/release/liblibjpeg_turbo_rs_capi.so \
+  --workdir target/opencv-smoke
+```
+
+The measured environment, results, and limitations are recorded in
+[`experiments/opencv_downstream_2026-08-02.md`](../experiments/opencv_downstream_2026-08-02.md).
