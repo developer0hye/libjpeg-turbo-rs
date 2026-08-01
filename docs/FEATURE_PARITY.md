@@ -30,8 +30,9 @@
 ## 2. Sample Precision
 
 - [x] 8-bit (`JSAMPLE` / `u8`)
-- [x] 12-bit (`J12SAMPLE` / `i16`) — `compress_12bit`, `decompress_12bit`, `jpeg12_write_scanlines`, `jpeg12_read_scanlines` (not wired through `TjHandle::compress()` / `decompress()`)
-- [x] 16-bit (`J16SAMPLE` / `u16`, lossless only) — `compress_16bit`, `decompress_16bit`, `jpeg16_write_scanlines`, `jpeg16_read_scanlines` (not wired through `TjHandle::compress()` / `decompress()`)
+- [x] Native 12-bit (`J12SAMPLE` / `i16`) — `compress_12bit`, `decompress_12bit`, `jpeg12_read_scanlines` (not wired through `TjHandle`)
+- [x] Native 16-bit (`J16SAMPLE` / `u16`, lossless only) — `compress_16bit`, `decompress_16bit`, `jpeg16_read_scanlines` (not wired through `TjHandle`)
+- [ ] Classic `jpeg12_write_scanlines` / `jpeg16_write_scanlines` finish pipeline — P4-94
 
 ---
 
@@ -62,6 +63,8 @@
 - [x] TJSAMP_440 (4:4:0)
 - [x] TJSAMP_411 (4:1:1)
 - [x] TJSAMP_441 (4:4:1)
+- [x] TJSAMP_410 (4:1:0; H=4,V=2)
+- [x] TJSAMP_24 (2:4; H=2,V=4)
 - [x] TJSAMP_UNKNOWN (unusual/custom subsampling detection) (`Subsampling::Unknown`)
 
 ---
@@ -81,32 +84,34 @@
 
 ### Quality & Quantization
 - [x] `TJPARAM_QUALITY` — Quality factor 1-100 (`jpeg_set_quality`)
-- [x] `q_scale_factor[NUM_QUANT_TBLS]` — Per-component quality (`Encoder::quality_factor()`)
-- [x] `jpeg_add_quant_table()` — Custom quantization table (`Encoder::quant_table()`)
-- [x] `jpeg_set_linear_quality()` — Linear quality scaling (`Encoder::linear_quality()`)
-- [x] `jpeg_default_qtables()` — Reset to default tables (`Encoder::reset_quant_tables()`)
+- [ ] Classic `q_scale_factor[NUM_QUANT_TBLS]` wiring — native `Encoder::quality_factor()` is ready; classic setup remains P4-85
+- [ ] Classic `jpeg_add_quant_table()` output wiring — native `Encoder::quant_table()` is ready; classic scanline output remains P4-85
+- [ ] Classic `jpeg_set_linear_quality()` output wiring — native `Encoder::linear_quality()` is ready; classic scanline output remains P4-85
+- [ ] Classic `jpeg_default_qtables()` semantics — native `Encoder::reset_quant_tables()` is ready; classic setup remains P4-85
 - [x] `jpeg_quality_scaling()` — Quality to scale factor conversion (`quality_scaling()`)
-- [x] `force_baseline` parameter — Constrain quant values to 1-255 (`Encoder::force_baseline()`)
+- [ ] Classic `force_baseline` table semantics — native `Encoder::force_baseline()` is ready; classic setup remains P4-85
 
 ### Huffman Tables
 - [x] Standard DC/AC luminance + chrominance tables
 - [x] `TJPARAM_OPTIMIZE` — 2-pass optimized Huffman (`compress_optimized`)
-- [x] Custom `dc_huff_tbl_ptrs[4]` — User-supplied DC Huffman tables (`Encoder::huffman_dc_table()`)
-- [x] Custom `ac_huff_tbl_ptrs[4]` — User-supplied AC Huffman tables (`Encoder::huffman_ac_table()`)
+- [ ] Classic custom `dc_huff_tbl_ptrs[4]` wiring — native `Encoder::huffman_dc_table()` is ready; classic scanline output remains P4-85
+- [ ] Classic custom `ac_huff_tbl_ptrs[4]` wiring — native `Encoder::huffman_ac_table()` is ready; classic scanline output remains P4-85
 - [x] `jpeg_alloc_huff_table()` — N/A for Rust (Huffman tables are value types, no allocation needed)
-- [x] `jpeg_suppress_tables()` — N/A for Rust (ownership handles table reuse; no persistent "sent" state needed)
+- [ ] Classic `jpeg_suppress_tables()`/sent-state semantics — native abbreviated streams are ready; classic cinfo reuse remains P4-87
 
 ### Entropy Coding Mode
 - [x] `TJPARAM_PROGRESSIVE` — Progressive mode
 - [x] `TJPARAM_ARITHMETIC` — Arithmetic coding
 - [x] `TJPARAM_ARITHMETIC` + `TJPARAM_PROGRESSIVE` combined — SOF10 encode
+- [ ] Classic arithmetic DAC conditioning fields — native arithmetic defaults work; public conditioning remains P4-90
 
 ### Lossless Mode
 - [x] `TJPARAM_LOSSLESS` — Enable lossless
 - [x] `TJPARAM_LOSSLESSPSV` — Predictor selection 1-7 (`Encoder::lossless_predictor()`)
 - [x] `TJPARAM_LOSSLESSPT` — Point transform 0-15 (`Encoder::lossless_point_transform()`)
 - [x] Lossless multi-component (color) encode (`compress_lossless_extended()`)
-- [x] `jpeg_enable_lossless()` — Combined predictor + pt setup (via Encoder builder)
+- [ ] Full classic `jpeg_enable_lossless()` validation/public-state contract — native builder works; P4-107
+- [ ] Classic arithmetic+lossless error contract — native SOF11 is supported, but classic compatibility remains P4-89
 
 ### Restart Markers
 - [x] `TJPARAM_RESTARTBLOCKS` — Restart interval in MCU blocks (`Encoder::restart_blocks()`)
@@ -115,42 +120,44 @@
 - [x] `restart_in_rows` field — via Encoder builder
 
 ### JFIF / Density
-- [x] `write_JFIF_header` — JFIF marker (written by default with 1x1 unknown-density fields unless coefficient metadata is rewritten)
+- [ ] Classic `write_JFIF_header`/version/density fields — native marker controls are ready; classic scanline wiring remains P4-88
 - [x] `TJPARAM_XDENSITY` — wired through `TjHandle` compress/decompress + `Encoder::density()`
 - [x] `TJPARAM_YDENSITY` — wired through `TjHandle` compress/decompress + `Encoder::density()`
 - [x] `TJPARAM_DENSITYUNITS` — wired through `TjHandle` compress/decompress + `Encoder::density()`
-- [x] `JFIF_major_version` / `JFIF_minor_version` configurable (`Encoder::jfif_version()`)
+- [x] Native JFIF version configurable (`Encoder::jfif_version()`)
 - [x] JFIF density read (`Image.density`)
 - [x] Low-level density rewrite via coefficient API (`JpegCoefficients.{density_unit,x_density,y_density}`)
 
 ### Adobe Marker
-- [x] `write_Adobe_marker` — Adobe APP14 (for CMYK)
-- [x] `write_Adobe_marker` toggle — Enable/disable (`Encoder::write_adobe_marker()`)
+- [x] Adobe APP14 default (CMYK/RGB-direct native encode)
+- [ ] Classic `write_Adobe_marker` toggle — native `Encoder::write_adobe_marker()` is ready; classic scanline wiring remains P4-88
 
 ### Progressive Scan Control
-- [x] `jpeg_simple_progression()` — Standard scan script
-- [x] `scan_info` / `num_scans` — Custom scan progression script (`Encoder::scan_script()`)
+- [ ] Full classic `jpeg_simple_progression()` semantics — progressive mode works, but public script installation remains P4-91
+- [ ] Classic `scan_info` / `num_scans` wiring — native `Encoder::scan_script()` is ready; classic scanline wiring remains P4-91
 - [x] `jpeg_scan_info` struct — `ScanScript` struct
 
 ### DCT Method
 - [x] `JDCT_ISLOW` — Accurate integer DCT
 - [x] `JDCT_IFAST` — Fast integer DCT (`DctMethod::IsFast`)
 - [x] `JDCT_FLOAT` — Floating-point DCT (`DctMethod::Float`)
+- [ ] Classic scanline `dct_method` forwarding — native methods are ready; classic lossy output remains P4-86
 
 ### Color Space Control
 - [x] Auto YCbCr from RGB/RGBA/BGR/BGRA input
 - [x] CMYK direct (no conversion)
-- [x] `jpeg_set_colorspace()` — Explicit colorspace override (`Encoder::colorspace()`)
-- [x] `jpeg_default_colorspace()` — Reset to auto-detection (`Encoder::reset_colorspace()`)
-- [x] `in_color_space` / `jpeg_color_space` — Input format inferred from `PixelFormat`; JPEG colorspace via `Encoder::colorspace()` / `TjHandle` `TJPARAM_COLORSPACE` with `TJCS_DEFAULT=-1`
+- [ ] Full classic `jpeg_set_colorspace()` / `jpeg_default_colorspace()` scanline behavior — native controls work; P4-93
+- [x] Native input/JPEG colorspace control via `Encoder::colorspace()` / `TjHandle`
+- [ ] Classic `in_color_space` / `jpeg_color_space` scanline translation — P4-93
 - [x] Grayscale-from-color encode option (`Encoder::grayscale_from_color()`)
 
 ### Input Options
 - [x] `TJPARAM_BOTTOMUP` — Bottom-up row order (`Encoder::bottom_up()`)
 - [x] `raw_data_in` — Encode from raw downsampled component data (`compress_raw()`)
-- [x] `smoothing_factor` — Input smoothing (0-100) (`Encoder::smoothing_factor()`)
-- [x] `do_fancy_downsampling` — Fancy vs simple chroma downsample (`Encoder::fancy_downsampling()`)
-- [x] `CCIR601_sampling` — N/A (field exists in C struct but never used in libjpeg-turbo encode path)
+- [x] Native `smoothing_factor` — Input smoothing (0-100) (`Encoder::smoothing_factor()`)
+- [ ] Classic progressive/arithmetic smoothing composition — P4-84
+- [x] Classic `do_fancy_downsampling` — mirrored no-op; upstream silently ignores it because compressor DCT scaling is unsupported. Native `Encoder::fancy_downsampling()` is an extension
+- [ ] Classic `CCIR601_sampling` rejection — upstream raises `JERR_CCIR601_NOTIMPL`; shim handling remains P4-88
 - [x] `input_gamma` — N/A (gamma correction is user-space preprocessing, not encoder responsibility; C field initialized to 1.0 and never applied)
 
 ### Marker Writing
@@ -158,19 +165,18 @@
 - [x] EXIF APP1 (`compress_with_metadata`)
 - [x] ICC APP2 (`compress_with_metadata`, multi-chunk)
 - [x] Adobe APP14 (CMYK encode)
-- [x] `jpeg_write_marker()` — Write arbitrary marker data (`marker_writer::write_marker()`)
-- [x] `jpeg_write_m_header()` / `jpeg_write_m_byte()` — Streaming marker write (`MarkerStreamWriter`)
-- [x] `jpeg_write_icc_profile()` — ICC embedded via `Encoder::icc_profile()` / `compress_with_metadata()` / `TjHandle::set_icc_profile()`
-- [x] `jpeg_write_tables()` — Write tables-only JPEG (`marker_writer::write_tables_only()`)
+- [ ] Full classic `jpeg_write_marker()` state contract — native writer works; P4-105
+- [ ] Full classic `jpeg_write_m_header()` / `jpeg_write_m_byte()` length/state contract — native writer works; P4-105
+- [ ] Full classic `jpeg_write_icc_profile()` state/error contract — native ICC writing works; P4-105/P4-100
+- [ ] Classic `jpeg_write_tables()` installed-table/sent-state semantics — native tables-only output is ready; classic reuse remains P4-87
 - [x] COM (comment) marker write (`Encoder::comment()`, `marker_writer::write_com()`)
 
 ### Scanline-Level Encode API
-- [x] `jpeg_start_compress()` — Begin compression (`ScanlineEncoder::new()`)
-- [x] `jpeg_write_scanlines()` — Write scanline rows (`ScanlineEncoder::write_scanlines()`)
-- [x] `jpeg_finish_compress()` — Finalize compression (`ScanlineEncoder::finish()`)
-- [x] `jpeg_write_raw_data()` — Write raw downsampled data (`compress_raw()`)
-- [x] `jpeg12_write_scanlines()` — 12-bit scanlines (`write_scanlines_12()`)
-- [x] `jpeg16_write_scanlines()` — 16-bit scanlines (`write_scanlines_16()`)
+- [ ] Full classic `jpeg_start_compress()` contract — basic start works; `write_all_tables` remains P4-87
+- [ ] Full classic `jpeg_write_scanlines()` option contract — basic rows work; residual gaps are P4-84..P4-93
+- [ ] Full classic `jpeg_finish_compress()` lifecycle/error contract — native finish works; P4-100/P4-106
+- [ ] Full classic `jpeg_write_raw_data()` / `jpeg12_write_raw_data()` option contract — default raw encode works; P4-95
+- [ ] Classic `jpeg12_write_scanlines()` / `jpeg16_write_scanlines()` encode completion — P4-94
 - [x] `jpeg_calc_jpeg_dimensions()` — Compute compression-side JPEG dimensions; no compression scaling (`calc_jpeg_dimensions()`, P4-1 2026-05-10)
 - [x] `next_scanline` tracking (`ScanlineEncoder::next_scanline()`)
 
@@ -188,7 +194,8 @@
 - [x] Scaled IDCT — all 16 factors: 1/8 through 2/1 (`set_scale`)
 - [x] Crop decode (`decompress_cropped`, `set_crop_region`)
 - [x] `TJPARAM_BOTTOMUP` — Bottom-up row order (`ScanlineDecoder::set_bottom_up()`)
-- [x] `out_color_space` — Explicit output colorspace (`Decoder::set_output_colorspace()`)
+- [x] Native explicit output colorspace (`Decoder::set_output_colorspace()`)
+- [ ] Classic `out_color_space` translation and error contract — P4-98/P4-99
 - [x] YCbCr/YUV raw output (skip color conversion) (`decompress_raw()`)
 - [x] `raw_data_out` — Raw downsampled component output (`decompress_raw()`)
 
@@ -220,40 +227,40 @@
 - [x] Adobe APP14 detection (CMYK/YCCK)
 - [x] Restart marker (DRI/RST) handling
 - [x] `TJPARAM_SAVEMARKERS` — Configurable marker saving via `Decoder::save_markers()` / `MarkerSaveConfig` (not yet wired through `TjHandle`)
-- [x] `jpeg_save_markers()` — Per-marker-type save control with per-code `length_limit` truncation (`Decoder::save_markers()` / `MarkerSaveConfig::WithLimits`; C ABI shim truncates `cinfo->marker_list` entries to the requested limit)
-- [x] `jpeg_set_marker_processor()` — Custom marker parser callback (`Decoder::set_marker_processor()`)
+- [ ] Full classic `jpeg_save_markers()` incremental pointer-stability contract — native saving/truncation works; P4-26
+- [ ] Classic `jpeg_set_marker_processor()` callback invocation — native callback API exists; P4-112
 - [x] COM (comment) marker read/expose (`Image.comment`)
 - [x] Arbitrary marker access via `marker_list` linked list (`Image.markers()` / `Image.saved_markers`)
 - [x] JFIF version / density read (`Image.density`)
 
 ### Multi-Scan / Progressive Output
-- [x] `jpeg_has_multiple_scans()` — Query progressive (`ProgressiveDecoder::has_multiple_scans()`)
+- [ ] Classic `jpeg_has_multiple_scans()` sequential multi-scan/state semantics — native progressive query exists; P4-114
 - [x] `buffered_image` mode — Enable scan-by-scan output (`ProgressiveDecoder`)
-- [x] `jpeg_start_output()` / `jpeg_finish_output()` — Per-scan output control (`ProgressiveDecoder::output()` / `ProgressiveDecoder::finish()`)
-- [x] `jpeg_consume_input()` — Incremental input processing (`ProgressiveDecoder::consume_input()`)
-- [x] `jpeg_input_complete()` — Check if all input consumed (`ProgressiveDecoder::input_complete()`)
+- [ ] Full classic `jpeg_start_output()` / `jpeg_finish_output()` input-pull/state contract — native output works; P4-26/P4-104
+- [ ] Full classic `jpeg_consume_input()` contract — suspension core works; P4-13/P4-26/P4-104
+- [ ] Full classic `jpeg_input_complete()` state/streaming contract — native query works; P4-26/P4-104
 
 ### Scanline-Level Decode API
-- [x] `jpeg_read_header()` — Parse headers (`ScanlineDecoder::new()`)
-- [x] `jpeg_start_decompress()` — Begin decompression (`ScanlineDecoder::new()`)
-- [x] `jpeg_read_scanlines()` — Read scanline rows (`ScanlineDecoder::read_scanlines()`)
+- [ ] Full classic `jpeg_read_header()` public state/tables contract — native parser works; P4-99/P4-101/P4-104
+- [ ] Full classic `jpeg_start_decompress()` option/state contract — native decoder works; P4-96/P4-99/P4-104
+- [ ] Full classic `jpeg_read_scanlines()` option/error contract — basic rows work; P4-96/P4-99/P4-100
 - [x] `jpeg_skip_scanlines()` — Skip rows during decode (`ScanlineDecoder::skip_scanlines()`)
-- [x] `jpeg_crop_scanline()` — Scanline-level horizontal crop (`ScanlineDecoder::set_crop_x()`)
-- [x] `jpeg_finish_decompress()` — Finalize decompression (`ScanlineDecoder::finish()`)
-- [x] `jpeg_read_raw_data()` — Read raw downsampled data (`decompress_raw()`)
-- [x] `jpeg12_read_scanlines()` / `jpeg12_skip_scanlines()` / `jpeg12_crop_scanline()` (`read_scanlines_12()`)
-- [x] `jpeg16_read_scanlines()` (`read_scanlines_16()`)
-- [x] `jpeg_calc_output_dimensions()` / `jpeg_core_output_dimensions()` (`calc_output_dimensions()`, `calc_jpeg_dimensions()`)
+- [ ] Full classic `jpeg_crop_scanline()` iMCU-aligned/state semantics — native exact crop exists; P4-103
+- [ ] Full classic `jpeg_finish_decompress()` lifecycle/suspension contract — native finish works; P4-100/P4-104
+- [ ] Full classic `jpeg_read_raw_data()` option/state/error contract — native raw decode works; P4-102
+- [ ] Full classic `jpeg12_read/skip/crop_scanline` lifecycle/options — native precision decode exists; P4-98
+- [ ] Full classic `jpeg16_read_scanlines` lifecycle/options — native precision decode exists; P4-98
+- [ ] Classic calculated dimensions matching actual scaled decode — helpers exist; P4-99
+- [ ] Classic public component/core dimensions for odd-size sampling — P4-99
 - [x] `output_scanline` tracking (`ScanlineDecoder::output_scanline()`)
 
 ### Color Quantization (8-bit indexed output)
-- [x] `quantize_colors` — Enable color quantization (`quantize::quantize()`)
+- [ ] Classic `quantize_colors` output — native `quantize::quantize()` is ready; classic decode remains P4-96
 - [x] `desired_number_of_colors` / `actual_number_of_colors` (`QuantizeOptions::num_colors`, `QuantizedImage::palette.len()`)
 - [x] `dither_mode` — JDITHER_NONE / JDITHER_ORDERED / JDITHER_FS (`DitherMode` enum)
-- [x] `two_pass_quantize` — Two-pass color selection (`QuantizeOptions::two_pass`, median-cut algorithm)
-- [x] `colormap` — External colormap input (`QuantizeOptions::colormap`)
-- [x] `enable_1pass_quant` / `enable_2pass_quant` / `enable_external_quant` (`QuantizeOptions::two_pass` + `colormap`)
-- [x] `jpeg_new_colormap()` — Update colormap (`requantize()`)
+- [ ] Classic `two_pass_quantize` — native median-cut is ready; classic decode remains P4-96
+- [ ] Classic external `colormap` and enable flags — native `QuantizeOptions` is ready; classic decode remains P4-96
+- [ ] Classic `jpeg_new_colormap()` — native `requantize()` is ready; classic buffered-image switching remains P4-96
 
 ---
 
@@ -262,6 +269,7 @@
 - [x] APP0 JFIF — Read / write
 - [x] APP1 EXIF — Read / write (orientation parsing)
 - [x] APP2 ICC profile — Read (multi-chunk reassembly) / write (multi-chunk)
+- [ ] Classic `jpeg_read_icc_profile()` saved-marker/header contract — native ICC reassembly exists; P4-113
 - [x] APP14 Adobe — Read / write (CMYK/YCCK signaling)
 - [x] COM (comment) — Read (`Image.comment`) / Write (`Encoder::comment()`)
 - [x] Arbitrary APP markers — Read (`Decoder::save_markers()` + `Image.markers()`)
@@ -300,7 +308,7 @@
 - [x] `read_coefficients()` — Extract quantized DCT blocks
 - [x] `write_coefficients()` — Encode from coefficient blocks
 - [x] `transform_jpeg()` — Apply spatial transform
-- [x] `jpeg_copy_critical_parameters()` — Copy tables between compress/decompress (`copy_critical_parameters()`)
+- [ ] Full classic `jpeg_copy_critical_parameters()` source-table contract — native copy works; P4-101
 - [x] `tjtransform.customFilter` — User callback for coefficient inspection/modification
 - [x] `tj3TransformBufSize()` — Output buffer size estimation (`transform_buf_size()`)
 
@@ -378,8 +386,11 @@
 ### Source / Destination
 - [x] Memory-to-memory compress (`Vec<u8>` output)
 - [x] Memory-to-memory decompress (byte slice → `Image`)
-- [x] `jpeg_stdio_dest()` / `jpeg_stdio_src()` — File I/O (`stream::compress_to_file` / `stream::decompress_from_file`)
-- [x] `jpeg_mem_dest()` / `jpeg_mem_src()` — C memory I/O (Rust equivalent: already native)
+- [ ] Classic `jpeg_CreateCompress` / `jpeg_CreateDecompress` version/size guards — P4-110
+- [ ] Full classic `jpeg_stdio_dest()` contract — native file I/O exists; short-write/flush errors remain P4-108
+- [ ] Full classic `jpeg_stdio_src()` contract — native file I/O exists; FILE buffering/Windows/error semantics remain P4-109
+- [ ] Full classic `jpeg_mem_dest()` ownership/reallocation contract — native Vec output exists; P4-108
+- [ ] Full classic `jpeg_mem_src()` validation/manager-replacement contract — native slice input exists; P4-109
 - [x] Custom `jpeg_destination_mgr` — User-defined output stream (`stream::compress_to_writer`)
 - [x] Custom `jpeg_source_mgr` — User-defined input stream (`stream::decompress_from_reader`, buffering; `decompress_from_reader_incremental` for bounded input memory on interleaved baseline — P4-58)
 - [x] `TJPARAM_NOREALLOC` — Pre-allocated output buffer (`compress_into()`)
@@ -409,7 +420,7 @@
 - [x] `Result<T, JpegError>` for all public operations
 - [x] `DecodeWarning` list (HuffmanError, TruncatedData) in lenient mode
 - [x] Custom error handler — `ErrorHandler` trait
-- [x] `error_exit()` callback — `ErrorHandler::error_exit()`
+- [ ] Classic codec failures consistently reach `error_exit()` — native typed errors exist; P4-100
 - [x] `emit_message()` callback — `ErrorHandler::emit_warning()` + `ErrorHandler::trace()`
 - [x] `output_message()` / `format_message()` — N/A (Rust `Display` trait on `JpegError` replaces C message callbacks)
 - [x] `reset_error_mgr()` — N/A (Rust `Result` is stateless; no accumulated error state to reset)
@@ -417,16 +428,16 @@
 - [x] `num_warnings` counter — `Image.warnings` vec (count via `.len()`)
 - [x] `msg_code` / `msg_parm` / `jpeg_message_table` — N/A (Rust uses typed `JpegError` / `DecodeWarning` enums instead of C integer codes + format strings)
 - [x] `tj3GetErrorStr()` / `tj3GetErrorCode()` — Rust `Result<T, JpegError>` with `Display` impl replaces C per-handle error getters
-- [x] `jpeg_resync_to_restart()` — Internal restart resync handled automatically by decoder; no public hook needed (matches C default behavior)
+- [ ] Classic `jpeg_resync_to_restart()` default algorithm — native strategy extension exists; C callback behavior remains P4-97
 
 ---
 
 ## 14. Progress Monitoring
 
-- [x] `jpeg_progress_mgr` struct — `ProgressListener` trait
-- [x] `progress_monitor()` callback — `ProgressListener::update()` (closure support)
-- [x] `pass_counter` / `pass_limit` — `ProgressInfo.progress`
-- [x] `completed_passes` / `total_passes` — `ProgressInfo.pass` / `ProgressInfo.total_passes`
+- [ ] Classic `jpeg_progress_mgr` wiring — native `ProgressListener` exists; P4-111
+- [ ] Classic `progress_monitor()` callback invocation — native listener exists; P4-111
+- [ ] Classic `pass_counter` / `pass_limit` publication — P4-111
+- [ ] Classic `completed_passes` / `total_passes` publication — P4-111
 
 ---
 
@@ -445,31 +456,32 @@
 ## Summary
 
 - Percentage rollups were removed from this document. They looked precise, but they mixed core codec support, handle parity, and adjacent Rust-only surfaces in a way that overstated completion.
-- Treat the checklist above as the source of truth. Open follow-ups (tracked in `docs/last_mile/phase4.md`): P4-13 (true streaming `jpeg_consume_input` / `JPEG_SUSPENDED` semantics — the existing entry point is a fully-buffered shim per `jpeglib.rs:4234-4238`); P4-14 (C-ABI `max_memory_to_use` enforcement — field is ABI-mirrored but unconsulted); P4-17 (real `JPEG_SUSPENDED` test — the P4-5 `source_mgr_suspends_every_byte` pattern actually exercises chunked refill). P4-4 (panic guard on every C-ABI entry point) and P4-5 (pathological classic-lifecycle coverage) both closed 2026-05-17; P4-16 (per-`cinfo` thread-affinity contract) closed 2026-05-19 via documentation in `docs/ABI_COMPATIBILITY.md` ("Threading contract" section); P4-18 (18 legacy TurboJPEG 1.x/2.x aliases) closed 2026-05-19 via documentation in `docs/ABI_COMPATIBILITY.md` ("Legacy TurboJPEG 1.x/2.x aliases" migration matrix). PNG for `tj3LoadImage8()` / `tj3SaveImage8()` is gated by the optional `png` feature flag, mirroring upstream's `PNG_SUPPORTED` build-time flag.
+- Treat the checklist above as the feature map and `docs/LAST_MILE.md` as the authoritative live-gap index. P4-13 is partial (its real suspension core is proven; deeper streaming is P4-26), P4-14 remains open, and the classic C-ABI/test audit is tracked as P4-84..P4-116. Closed historical items stay in `docs/last_mile/phase4.md`. PNG for `tj3LoadImage8()` / `tj3SaveImage8()` remains behind the optional `png` feature, mirroring upstream's build-time flag.
 
 ## Recent Additions (batch reconciliation)
 
-The following gaps were closed in the latest batch of merges:
+The following capabilities landed in earlier batches; any residual scope is
+named explicitly rather than implied complete:
 
 - **Arithmetic table count widened 4 → 16** per spec F.2.4.3 (DAC parser/writer + `ArithDecoder`/`ArithEncoder`); spec-compliant streams with `tbl_no > 3` now decode/encode correctly.
 - **Abbreviated datastream** (JPEG spec F.1.2.4): `jpeg_write_tables()`, `HeaderResult::TablesOnly`, `Decoder::new_with_tables()` inter-session table reuse, `Encoder::suppress_tables(bool)` body-only output.
-- **12-bit raw planar I/O**: `compress_raw_12()` / `decompress_raw_12()` covering all 7 subsamplings × baseline/progressive/arithmetic.
+- **12-bit raw planar I/O**: `compress_raw_12()` / `decompress_raw_12()` have stock-C odd-size coverage for baseline Huffman S420/S422/S444/S440/S411/S441. S410/S24 and progressive/arithmetic mode coverage remain P4-115.
 - **12/16-bit PPM file I/O**: `load_ppm_12bit()` / `save_ppm_12bit()` / `load_ppm_16bit()` / `save_ppm_16bit()` matching C scope (PPM only).
 - **TjHandle gaps**: `TJPARAM_NOREALLOC` (`compress_into()` returns `BufferTooSmall{need,got}`), `TJPARAM_SAVEMARKERS` behavioral wiring, `tj3GetICCProfile()` handle symmetry with `Image.icc_profile()`.
 - **Session-reset APIs**: `Encoder::reset_colorspace()` (`jpeg_default_colorspace`), `Encoder::reset_quant_tables(force_baseline)` (`jpeg_default_qtables`).
 - **Restart resync hook**: `RestartResyncStrategy` trait + `Decoder::set_resync_strategy()` with `ResyncAction {Continue, Skip, Abort}` — replaces the internal-only implementation of `jpeg_resync_to_restart`.
 - **JPEG-in-RAW thumbnail**: `extract_embedded_jpeg()` walks TIFF IFDs (LE/BE, bounds-checked) to extract embedded JPEG thumbnails from ARW/CR2-style files.
-- **C ABI shim crate** (`crates/libjpeg-turbo-rs-capi`, cdylib + staticlib): TJ3 API (TJInit/Destroy/Set/Get/Compress8/Decompress8/DecompressHeader/SetScalingFactor/SetCroppingRegion/Transform/YUV x8/ErrorStr/ErrorCode/Alloc/Free/Compress12/Decompress12/Compress16/Decompress16) + 21 legacy TJ1/TJ2 aliases wired in `crates/libjpeg-turbo-rs-capi/src/legacy.rs` (lifecycle `tjInitCompress`/`tjInitDecompress`/`tjInitTransform`/`tjDestroy`; `tjCompress2`/`tjDecompress2`/`tjDecompressHeader3`; `tjTransform`/`tjEncodeYUV3`/`tjDecodeYUV`; buffer-size helpers + image I/O + error string) — 18 other legacy 1.x/2.x symbols (v1 / un-versioned variants like `tjAlloc`, `tjFree`, `tjCompress`, `tjGetScalingFactors`) remain allowlisted-missing per P4-18; + classic `jpeg_*` decode/encode/transform/raw-data lifecycle + SONAME/install_name (default `libjpeg.so.8` / `@rpath/libjpeg.8.dylib` since P4-3 2026-05-17; v6b opt-in via `CAPI_ACK_V6B_SONAME=1`; TurboJPEG `libturbojpeg.so.0`) + pkg-config `.pc` generation. Verified by the LAST_MILE stock-tool, Pillow/ImageMagick, tjunittest, ABI-offset, symbol-inventory, and downstream-consumer gates.
+- **C ABI shim crate** (`crates/libjpeg-turbo-rs-capi`, cdylib + staticlib): exports TJ3, 21 legacy TJ aliases, and a broad classic `jpeg_*` surface with v8 SONAME/pkg-config packaging. Symbol/layout and selected downstream paths are verified; this is not a blanket classic behavioral-parity claim (P4-84..P4-114).
 
 ## Second-Batch Reconciliation (parallel follow-up workers)
 
 - **A4 restored** (reverted revert after confirming the earlier corpus-test crash was classification-only, not an A4 regression): arithmetic table count widened 4 → 16 per spec F.2.4.3 is live on `main`.
-- **FFI A1-11 jpeglib.h decode subset**: `jpeg_create_decompress`, `jpeg_std_error`, `jpeg_stdio_src`, `jpeg_mem_src`, `jpeg_read_header`, `jpeg_start_decompress`, `jpeg_read_scanlines`, `jpeg_finish_decompress`, `jpeg_destroy_decompress` all `#[no_mangle] extern "C"` in the capi crate. `#[repr(C)] JpegDecompressPublic` subset exposes the fields consumed by these entry points; fuller field layout + classic encode symmetrical (A1-12) + coefficient/marker APIs are tracked as follow-up in `COORDINATOR_NOTES.md`.
+- **FFI A1-11 export milestone**: the named decode symbols and public v8 struct mirror landed. Their remaining behavioral contracts are now tracked in P4-96..P4-114, not in the historical coordinator notes.
 - **tj3 auxiliary surfaces** added by B9-5: `tj3GetScalingFactors`, `tj3YUVBufSize`, `tj3YUVPlaneSize`, `tj3YUVPlaneWidth`, `tj3YUVPlaneHeight`, `tj3JPEGBufSize`, `tj3InitVersion`, `tj3LoadImage{8,12,16}`/`tj3SaveImage{8,12,16}`, `TJBUFSIZE`, `TJBUFSIZEYUV`, `tjBufSizeYUV`, process-global no-handle error slot for `tj3GetErrorStr(NULL)`.
 - **`tj3Init` enum fix**: `TJINIT_COMPRESS/DECOMPRESS/TRANSFORM` were previously treated as bit flags (1/2/4) instead of enum values (0/1/2); every C caller was getting NULL. Fixed, and exercised by the tjunittest link harness.
 - **`tj3Compress8` NOREALLOC in-place fix**: when `TJPARAM_NOREALLOC == 1` and the caller pre-supplies `*jpegBuf`, we now write in place via `copy_nonoverlapping` instead of allocating a fresh libc buffer and swapping the pointer. The old behavior leaked every iteration of the tjunittest `doTest` loop and eventually corrupted the malloc heap (SIGSEGV at `_os_unfair_lock_unlock_slow` inside `mfm_alloc`). Now tjunittest runs to completion on our shim.
 - **CI on libjpeg-turbo 3.1.4.1**: apt ships 2.1.x on Ubuntu 24.04, which lacks `-lossless`, `-precision`, and SOF3 decode. CI now downloads the official `libjpeg-turbo-official_3.1.4.1_${ARCH}.deb` from upstream GitHub releases and prepends `/opt/libjpeg-turbo/bin` to `$PATH`, so test expectations match the macOS homebrew reality.
-- **B1 helper migration completed**: all 90 test files with local `fn djpeg_path()/cjpeg_path()/jpegtran_path()` helpers migrated to `helpers::require_c_tool!()` — CI now fails hard when C tools are missing, local dev still skips. 3 shards (A-E / F-P / Q-Z) × 20 batches.
+- **B1 root-suite helper migration**: 90 root test files were migrated to `helpers::require_c_tool!()`, but a later workspace audit found residual private helpers and result-to-skip paths. Full fail-closed/accounting completion remains P4-116.
 - **B9-2 Pillow / B9-3 ImageMagick**: link harnesses are active (`examples/pillow_smoke/`, `examples/imagemagick_smoke/`, `tests/capi_pillow_compat.rs`, `crates/libjpeg-turbo-rs-capi/tests/capi_imagemagick_compat.rs`). They are no longer `#[ignore]`d; the tests only soft-skip for missing external tools or macOS loader-injection restrictions.
 - **B9-4 stock djpeg–cjpeg–jpegtran parity achieved**: `examples/stock_djpeg_cjpeg/build.sh` builds stock `djpeg`, `cjpeg`, and `jpegtran` against our capi over the full `references/libjpeg-turbo/testimages/*.jpg` corpus (8-bit `testorig`, arithmetic `testimgari`, integer-quant `testimgint`, 12-bit `monkey12`). `djpeg` and `jpegtran -copy all -rotate 90` are byte-identical to upstream; cjpeg must either be byte-identical or produce byte-identical output after both files are successfully decoded by stock djpeg. Unblocked by the 33 classic `jpeg_*` symbols (A1-12) + precision-routing fixes in `jpeg_start_decompress` / `jpeg12_read_scanlines` / `jpeg16_read_scanlines` / `jpeg12_skip_scanlines` and the new `jpeg_calc_output_dimensions` export (commit `f70b41f`).
 - **B9-5 tjunittest**: now passes 100% on the capi cdylib — `EXIT=0`, 0 ERROR, 0 FAILED, 1012 subtest passes. Closed by four 2026-04-25 fixes: grayscale-to-RGB repack in `tj3Decompress8`, TJSAMP_441/410/24 enum widening end-to-end, CMYK SOF sampling factors honoring TJPARAM_SUBSAMP, and TJPARAM_FASTUPSAMPLE wired into the 4-component decode upsample path.
@@ -482,6 +494,9 @@ Two parallel workers shipped **36 new `#[no_mangle] extern "C"` symbols** in `cr
 - **Decode extensions (C1, 12 symbols)**: `jpeg_skip_scanlines`, `jpeg_crop_scanline`, `jpeg_save_markers`, `jpeg_set_marker_processor`, `jpeg_read_icc_profile`, `jpeg_read_coefficients`, `jpeg_copy_critical_parameters`, `jpeg_core_output_dimensions`, `jpeg12_read_scanlines`, `jpeg12_skip_scanlines`, `jpeg12_crop_scanline`, `jpeg16_read_scanlines`. High-precision state lives in a `thread_local!` side table keyed by the cinfo pointer.
 - **Encode side + utilities (C2, 24 symbols)**: `jpeg_CreateCompress`/`jpeg_destroy_compress`, `jpeg_stdio_dest`/`jpeg_mem_dest`, `jpeg_set_defaults`/`jpeg_set_colorspace`/`jpeg_default_colorspace`, `jpeg_set_quality`, `jpeg_start_compress`/`jpeg_write_scanlines`/`jpeg_finish_compress`, `jpeg_quality_scaling`, `jpeg_add_quant_table`, `jpeg_default_qtables`, `jpeg_simple_progression`, `jpeg_enable_lossless`, `jpeg_suppress_tables`, `jpeg_write_marker`/`jpeg_write_m_header`/`jpeg_write_m_byte`, `jpeg_write_icc_profile`, `jpeg_write_tables`, `jpeg12_write_scanlines`/`jpeg16_write_scanlines`, `jpeg_write_coefficients`, `jpeg_resync_to_restart`, `jcopy_block_row`, `jdiv_round_up`.
 - **Test count**: 38 (decode) + 15 (encode) new dlopen-and-exercise tests, all green on main.
+
+Those counts record the historical export milestone; P4-116 tracks cases where
+green tests still need fail-closed execution accounting.
 
 ## Stock-tool byte-exact milestone (B9-4)
 
@@ -501,7 +516,7 @@ Two parallel workers shipped **36 new `#[no_mangle] extern "C"` symbols** in `cr
 - **Real-world corpus**: fetch scripts + seed fixtures for Kodak PhotoCD (PSNR round-trip), USC-SIPI Miscellaneous (djpeg byte-exact), EXIF Orientation 1..8, CMYK scanner, JPEG-in-RAW thumbnail.
 - **DoS bounds**: cross-platform peak-RSS + wall-clock measure helper, Huffman bomb (max 16-bit codes), progressive 5000-scan bomb with `SCANLIMIT` mitigation, restart-interval=1 4096×4096 bomb. Bounds documented from measured reality per CLAUDE.md tolerance rule.
 - **Concurrency stress**: rayon-substituted `std::thread` stress (1000 concurrent decodes, interleaved Encoder/Decoder handoff via mpsc, shared custom quant table), plus loom permutation skeleton gated on `#[cfg(loom)]`.
-- **CI C-tool enforcement**: `require_c_tool!` macro panics in CI when `djpeg`/`cjpeg`/`jpegtran` missing; silent skip allowed only for local dev. All 90 test files with local `djpeg_path()/cjpeg_path()/jpegtran_path()` helpers have been migrated (A-E / F-P / Q-Z shards, 20 batches total).
+- **CI C-tool enforcement**: `require_c_tool!` panics in CI when a required stock tool is missing. The earlier 90-file root-suite migration did not cover every workspace-private helper or exact matrix accounting; P4-116 tracks the residual audit.
 - **libtiff end-to-end test wired** (`examples/libtiff_integration/` + `crates/libjpeg-turbo-rs-capi/tests/libtiff_integration.rs`): a C program opens a TIFF with `COMPRESSION_JPEG`, writes/reads strips via `TIFFWriteEncodedStrip` / `TIFFReadEncodedStrip`, with our cdylib staged as the JPEG provider via `DYLD_LIBRARY_PATH` / `LD_LIBRARY_PATH`. This exercises the real downstream consumer of `jpeg_write_raw_data` / `jpeg_read_raw_data` (PR #240/#241). The test is active now; it soft-skips only when `cc`/libtiff are absent or on Windows. The former `JPEG_HEADER_TABLES_ONLY` gap is closed by the tables-only prefix splice path recorded in `docs/LAST_MILE.md`.
 
 ## Documentation Policy

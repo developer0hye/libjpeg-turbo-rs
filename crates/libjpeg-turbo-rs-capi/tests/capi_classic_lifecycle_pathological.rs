@@ -79,6 +79,26 @@ fn cdylib_path() -> PathBuf {
 }
 
 fn find_cc() -> Option<PathBuf> {
+    if let Ok(test_cc) = std::env::var("CAPI_TEST_CC") {
+        if !test_cc.is_empty() {
+            return Some(PathBuf::from(test_cc));
+        }
+    }
+    // These harnesses must link natively against the Rust cdylib. A Conda
+    // build-wide CC can target an older sysroot and reject current glibc
+    // symbols, so prefer the host compiler unless the test-specific override
+    // above is set.
+    for candidate in [
+        "/usr/bin/cc",
+        "/usr/bin/clang",
+        "/usr/local/bin/cc",
+        "/opt/homebrew/opt/llvm/bin/clang",
+    ] {
+        let path: PathBuf = PathBuf::from(candidate);
+        if path.is_file() {
+            return Some(path);
+        }
+    }
     if let Ok(env_cc) = std::env::var("CC") {
         if !env_cc.is_empty() {
             return Some(PathBuf::from(env_cc));
@@ -95,6 +115,62 @@ fn find_cc() -> Option<PathBuf> {
         }
     }
     None
+}
+
+fn is_ci() -> bool {
+    std::env::var("CI")
+        .map(|value: String| {
+            let normalized: String = value.to_ascii_lowercase();
+            !normalized.is_empty() && normalized != "0" && normalized != "false"
+        })
+        .unwrap_or(false)
+}
+
+fn find_c_tool(name: &str) -> Option<PathBuf> {
+    for directory in [
+        "/opt/homebrew/bin",
+        "/usr/local/bin",
+        "/usr/bin",
+        "/opt/libjpeg-turbo/bin",
+    ] {
+        let candidate: PathBuf = Path::new(directory).join(name);
+        if candidate.is_file() {
+            return Some(candidate);
+        }
+    }
+
+    std::env::var_os("PATH").and_then(|path: std::ffi::OsString| {
+        std::env::split_paths(&path)
+            .map(|directory: PathBuf| directory.join(name))
+            .find(|candidate: &PathBuf| candidate.is_file())
+    })
+}
+
+fn require_c_tool(name: &str, test_name: &str) -> Option<PathBuf> {
+    if let Some(path) = find_c_tool(name) {
+        return Some(path);
+    }
+    if is_ci() {
+        panic!("{test_name}: required C oracle `{name}` was not found on PATH");
+    }
+    eprintln!("SKIP {test_name}: required C oracle `{name}` was not found on PATH");
+    None
+}
+
+#[cfg(unix)]
+fn compiler_tool_path(cc: &Path) -> std::ffi::OsString {
+    let mut directories: Vec<PathBuf> = Vec::new();
+    if let Some(parent) = cc.parent() {
+        if !parent.as_os_str().is_empty() {
+            directories.push(parent.to_path_buf());
+        }
+    }
+    for directory in [PathBuf::from("/usr/bin"), PathBuf::from("/bin")] {
+        if !directories.contains(&directory) {
+            directories.push(directory);
+        }
+    }
+    std::env::join_paths(directories).expect("construct compiler helper PATH")
 }
 
 #[cfg(unix)]
@@ -151,6 +227,9 @@ fn compile_and_run_c(c_source: &str, test_name: &str) -> Option<i32> {
     let cc: PathBuf = match find_cc() {
         Some(p) => p,
         None => {
+            if is_ci() {
+                panic!("{test_name}: no C compiler on PATH");
+            }
             eprintln!("SKIP {test_name}: no C compiler on PATH");
             return None;
         }
@@ -158,6 +237,11 @@ fn compile_and_run_c(c_source: &str, test_name: &str) -> Option<i32> {
     let upstream: PathBuf = match upstream_src_dir() {
         Some(p) => p,
         None => {
+            if is_ci() {
+                panic!(
+                    "{test_name}: references/libjpeg-turbo/src missing; initialize the submodule"
+                );
+            }
             eprintln!(
                 "SKIP {test_name}: references/libjpeg-turbo/src missing — run \
                  `git submodule update --init --depth 1 references/libjpeg-turbo`"
@@ -185,14 +269,18 @@ fn compile_and_run_c(c_source: &str, test_name: &str) -> Option<i32> {
         .arg(&exe)
         .arg(format!("-L{}", symlink_dir.display()))
         .arg("-ljpeg")
-        .arg(format!("-Wl,-rpath,{}", symlink_dir.display()));
+        .arg(format!("-Wl,-rpath,{}", symlink_dir.display()))
+        // C oracle discovery still honors the caller's PATH, but a compiler
+        // must not accidentally pick Conda's incompatible `ld` ahead of the
+        // system linker. Keep the compiler's own directory plus system tools.
+        .env("PATH", compiler_tool_path(&cc));
     let compile = cmd.output().expect("cc");
     if !compile.status.success() {
-        eprintln!(
-            "SKIP {test_name}: compile failed:\n{}",
-            String::from_utf8_lossy(&compile.stderr)
+        panic!(
+            "{test_name}: C harness compilation failed:\n--- stdout ---\n{}\n--- stderr ---\n{}",
+            String::from_utf8_lossy(&compile.stdout),
+            String::from_utf8_lossy(&compile.stderr),
         );
-        return None;
     }
 
     let run = Command::new(&exe).output().expect("run harness");
@@ -675,8 +763,8 @@ fn save_markers_truncates_multichunk_icc() {
 //     mid-body, `JPEG_REACHED_SOS` at each scan boundary, and `JPEG_REACHED_EOI`
 //     at end-of-image — resuming after each suspension by delivering more bytes;
 //   * the resumed decode is byte-for-byte identical to a full-buffer (`mem_src`)
-//     decode of the same JPEG; and
-//   * `cinfo.global_state == DSTATE_STOPPING` after `jpeg_finish_decompress`.
+//     decode of the same JPEG.
+// P4-104 separately tracks finish-decompress state/reset fidelity.
 // The progressive fixture is generated with `cjpeg -progressive` and embedded.
 const PATTERN_CONSUME_INPUT_SUSPEND_PROGRESSIVE_TEMPLATE: &str = r#"
 #include <stdio.h>
@@ -693,10 +781,6 @@ const PATTERN_CONSUME_INPUT_SUSPEND_PROGRESSIVE_TEMPLATE: &str = r#"
  * mem_src path. */
 /*{DJPEG_REF}*/
 #define DJPEG_REF_LEN ((int)sizeof(DJPEG_REF))
-
-/* DSTATE_STOPPING as numbered by the Rust shim (jpeglib.rs). Upstream uses
- * 210; the shim uses 206. global_state is a public field we can read here. */
-#define SHIM_DSTATE_STOPPING 206
 
 /* Suspending source: delivers bytes only up to `avail`; fill returns FALSE
  * (real suspension) once `pos` reaches `avail`. The driver raises `avail`
@@ -884,38 +968,17 @@ int main(void) {
     }
 
     if (!jpeg_finish_decompress(&cinfo)) { fprintf(stderr, "finish_decompress failed\n"); return 21; }
-    if (cinfo.global_state != SHIM_DSTATE_STOPPING) {
-        fprintf(stderr, "global_state %d != DSTATE_STOPPING (%d)\n",
-                cinfo.global_state, SHIM_DSTATE_STOPPING);
-        return 22;
-    }
     jpeg_destroy_decompress(&cinfo);
     return 0;
 }
 "#;
 
-fn djpeg_path() -> Option<PathBuf> {
-    for p in [
-        "/opt/homebrew/bin/djpeg",
-        "/usr/local/bin/djpeg",
-        "/usr/bin/djpeg",
-        "/opt/libjpeg-turbo/bin/djpeg",
-    ] {
-        let pb = PathBuf::from(p);
-        if pb.exists() {
-            return Some(pb);
-        }
-    }
-    None
-}
-
 /// Decode `jpeg` with stock `djpeg -pnm` and return the raw interleaved RGB
 /// pixels (P6 PPM body). The C oracle for the P4-13 cross-validation.
-fn djpeg_decode_rgb(jpeg: &[u8]) -> Option<Vec<u8>> {
+fn djpeg_decode_rgb(djpeg: &Path, jpeg: &[u8]) -> Option<Vec<u8>> {
     use std::io::Write as _;
     use std::process::Stdio;
-    let djpeg = djpeg_path()?;
-    let mut child = Command::new(&djpeg)
+    let mut child = Command::new(djpeg)
         .arg("-pnm")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -957,27 +1020,11 @@ fn djpeg_decode_rgb(jpeg: &[u8]) -> Option<Vec<u8>> {
     Some(b[i..i + need].to_vec())
 }
 
-fn cjpeg_path() -> Option<PathBuf> {
-    for p in [
-        "/opt/homebrew/bin/cjpeg",
-        "/usr/local/bin/cjpeg",
-        "/usr/bin/cjpeg",
-        "/opt/libjpeg-turbo/bin/cjpeg",
-    ] {
-        let pb = PathBuf::from(p);
-        if pb.exists() {
-            return Some(pb);
-        }
-    }
-    None
-}
-
 /// Generate a multi-scan progressive JPEG with `cjpeg -progressive` from a
-/// 32x32 RGB gradient. Returns `None` if `cjpeg` is unavailable.
-fn make_progressive_jpeg() -> Option<Vec<u8>> {
+/// 32x32 RGB gradient.
+fn make_progressive_jpeg(cjpeg: &Path) -> Option<Vec<u8>> {
     use std::io::Write as _;
     use std::process::Stdio;
-    let cjpeg = cjpeg_path()?;
     let (w, h) = (32usize, 32usize);
     let mut ppm: Vec<u8> = format!("P6\n{w} {h}\n255\n").into_bytes();
     for y in 0..h {
@@ -987,7 +1034,7 @@ fn make_progressive_jpeg() -> Option<Vec<u8>> {
             ppm.push(((x + y) * 4) as u8);
         }
     }
-    let mut child = Command::new(&cjpeg)
+    let mut child = Command::new(cjpeg)
         .args(["-progressive", "-quality", "90", "-sample", "1x1"])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -1019,13 +1066,15 @@ fn bytes_to_c_array(name: &str, bytes: &[u8]) -> String {
 
 #[test]
 fn consume_input_suspends_through_progressive_body() {
-    let jpeg = match make_progressive_jpeg() {
-        Some(j) => j,
-        None => {
-            eprintln!("SKIP consume_input_suspends_through_progressive_body: cjpeg unavailable");
-            return;
-        }
+    const TEST_NAME: &str = "consume_input_suspends_through_progressive_body";
+    let Some(cjpeg) = require_c_tool("cjpeg", TEST_NAME) else {
+        return;
     };
+    let Some(djpeg) = require_c_tool("djpeg", TEST_NAME) else {
+        return;
+    };
+    let jpeg: Vec<u8> = make_progressive_jpeg(&cjpeg)
+        .expect("cjpeg was found but failed to produce the progressive fixture");
     // The fixture must actually be progressive (SOF2) to have multiple scans.
     assert!(
         jpeg.windows(2).any(|w| w == [0xFF, 0xC2]),
@@ -1034,13 +1083,8 @@ fn consume_input_suspends_through_progressive_body() {
     // Stock C oracle: decode the same JPEG with djpeg and embed the reference
     // pixels so the harness cross-validates against libjpeg-turbo, not just our
     // own mem_src path (repo rule + P4-13 acceptance criterion).
-    let djpeg_ref = match djpeg_decode_rgb(&jpeg) {
-        Some(r) => r,
-        None => {
-            eprintln!("SKIP consume_input_suspends_through_progressive_body: djpeg unavailable");
-            return;
-        }
-    };
+    let djpeg_ref: Vec<u8> = djpeg_decode_rgb(&djpeg, &jpeg)
+        .expect("djpeg was found but failed to decode the progressive fixture");
     let c_array = bytes_to_c_array("PROG_JPEG", &jpeg);
     let ref_array = bytes_to_c_array("DJPEG_REF", &djpeg_ref);
     let c_source = PATTERN_CONSUME_INPUT_SUSPEND_PROGRESSIVE_TEMPLATE

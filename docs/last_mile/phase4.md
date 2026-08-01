@@ -40,6 +40,41 @@
 | P4-30 | CLOSED 2026-07-12 (unsupported 12-bit sampling layouts return an error instead of writing past component planes) |
 | P4-31 | CLOSED 2026-07-25 (PR #307 hardened the gates; post-merge Corpus Test CI green) |
 | P4-32 | CLOSED AS DUPLICATE OF P4-20 2026-07-13 (coefficients/quantization match C; divergence is IDCT overflow fidelity) |
+| P4-82 | CLOSED 2026-08-02 (classic scanline encoder now forwards public restart settings through every entropy branch) |
+| P4-83 | CLOSED 2026-08-02 (baseline classic scanline encoder now honors public input smoothing without forcing Huffman optimization) |
+| P4-84 | OPEN (classic C-ABI progressive/arithmetic scanline encoding still drops public input smoothing) |
+| P4-85 | OPEN (classic scanline compression stores but does not apply public custom quantization/Huffman tables) |
+| P4-86 | OPEN (classic lossy scanline compression hardcodes ISLOW and ignores public `dct_method`) |
+| P4-87 | OPEN (classic abbreviated-datastream table state is not wired) |
+| P4-88 | OPEN (classic scanline marker controls and CCIR601 rejection are ignored) |
+| P4-89 | OPEN (classic arithmetic+lossless requests silently become Huffman lossless) |
+| P4-90 | OPEN (classic arithmetic scanline compression ignores public DAC conditioning) |
+| P4-91 | OPEN (classic scanline compression ignores custom scan scripts) |
+| P4-92 | OPEN (classic scanline compression collapses valid sampling-factor layouts to 4:4:4) |
+| P4-93 | OPEN (classic scanline compression ignores requested JPEG colorspace) |
+| P4-94 | OPEN (classic 12/16-bit scanline buffers never reach a high-precision encoder) |
+| P4-95 | OPEN (classic raw-data compression drops most public encode options) |
+| P4-96 | OPEN (classic decompression color quantization and colormap switching are not wired) |
+| P4-97 | OPEN (`jpeg_resync_to_restart` is an unconditional success no-op) |
+| P4-98 | OPEN (classic 12/16-bit decode bypasses lifecycle and public output options) |
+| P4-99 | OPEN (classic decode dispatcher ignores output options and colorspace metadata) |
+| P4-100 | OPEN (classic codec failures are reported as suspension or silent success) |
+| P4-101 | OPEN (classic header parse does not publish coding tables/scan state) |
+| P4-102 | OPEN (classic raw-data decode bypasses public options and state contracts) |
+| P4-103 | OPEN (`jpeg_crop_scanline` does not implement iMCU-aligned C semantics) |
+| P4-104 | OPEN (classic decompressor state constants/transitions and finish lifecycle diverge) |
+| P4-105 | OPEN (classic marker writers ignore state and declared lengths) |
+| P4-106 | OPEN (`jpeg_finish_compress` accepts incomplete input and bad states) |
+| P4-107 | OPEN (`jpeg_enable_lossless` clamps invalid input and omits public state) |
+| P4-108 | OPEN (classic destination managers violate buffer ownership and I/O errors) |
+| P4-109 | OPEN (classic source-manager setup/stdio semantics diverge) |
+| P4-110 | OPEN (`jpeg_Create*` ignores version/struct-size ABI guards) |
+| P4-111 | OPEN (classic progress-manager callbacks/counters are not wired) |
+| P4-112 | OPEN (`jpeg_set_marker_processor` callbacks are stored but never invoked) |
+| P4-113 | OPEN (`jpeg_read_icc_profile` bypasses classic saved-marker semantics) |
+| P4-114 | OPEN (`jpeg_has_multiple_scans` equates multi-scan with progressive) |
+| P4-115 | OPEN (native 12-bit coverage claims include modes and sampling layouts that are not tested) |
+| P4-116 | OPEN (C-parity tests can convert Rust/oracle failures or missing comparisons into a pass) |
 
 ---
 
@@ -196,7 +231,19 @@ Original acceptance criteria preserved below:
 
 ## P4-10. Downstream Compatibility Lab Filing — **CLOSED 2026-05-17**
 
-**Status (2026-05-17): closed.** P4-10's deliverable in this iteration is the architectural filing: `crates/libjpeg-turbo-rs-capi/tests/capi_{ffmpeg,gd,imagemagick,libvips,sdl_image,pillow}_compat.rs` + `tests/capi_pillow_compat.rs` + `examples/*_smoke/` already cover one version per consumer; the multi-distro / multi-version weekly matrix (Pillow 10.x + 11.x, ImageMagick 6 + 7, libvips 8.x real thumbnail workload, FFmpeg 6 + 7 mjpeg roundtrip, libtiff 4.x rich-marker, plus new Qt5/Qt6 and OpenCV harnesses) is filed as **P2-G** in the long-term backlog at `/Users/yhkwon/.claude/plans/dreamy-moseying-swing.md` because each new harness is its own engineering project and gating the work on T3 actually entering production keeps CI cost proportional to demand.
+**Status (2026-05-17): closed.** P4-10's deliverable in this iteration is the architectural filing: `crates/libjpeg-turbo-rs-capi/tests/capi_{ffmpeg,gd,imagemagick,libvips,sdl_image,pillow}_compat.rs` + `tests/capi_pillow_compat.rs` + `examples/*_smoke/` already cover one version per consumer; the multi-distro / multi-version weekly matrix (Pillow 10.x + 11.x, ImageMagick 6 + 7, libvips 8.x real thumbnail workload, FFmpeg 6 + 7 mjpeg roundtrip, libtiff 4.x rich-marker, plus new Qt5/Qt6 and OpenCV harnesses) is filed as **[P2-G](backlog.md#p2-g-downstream-lab-multi-version--multi-distro-matrix--open)** in the in-repository long-term backlog because each new harness is its own engineering project and gating the work on T3 actually entering production keeps CI cost proportional to demand.
+
+**Follow-up evidence (2026-08-02):** the first OpenCV leg now lives in
+`examples/opencv_smoke/`. A pinned Ubuntu 24.04 image installs OpenCV 4.6,
+executes real `cv::imwrite` plus color/grayscale `cv::imread`, proves through
+glibc binding logs that OpenCV's `jpeg_CreateCompress` and
+`jpeg_CreateDecompress` resolve to the Rust `libjpeg.so.8`, and cross-decodes
+the system and Rust outputs in both directions. All four paths measure 49.226
+dB PSNR with the same grayscale checksum. The reproducible record is
+`experiments/opencv_downstream_2026-08-02.md`. This delivers one P2-G OpenCV
+version, not the deferred Qt5/Qt6 or multi-version/multi-distro matrix. The
+run also surfaced the missing GNU ELF `LIBJPEG_8.0` symbol definitions now
+tracked as P4-81.
 
 ## P4-11. OSS-Fuzz Project Files Ready for Upstream Submission — **CLOSED 2026-05-17**
 
@@ -233,7 +280,7 @@ Verified with `cargo test --release --test hard_case_x_byte_and_restart` → 6 p
 - A C harness in `crates/libjpeg-turbo-rs-capi/tests/capi_classic_lifecycle_pathological.rs` that:
   1. Installs a custom `jpeg_source_mgr` whose `fill_input_buffer` returns `FALSE` when its drip-feed buffer is empty (real suspension — not the chunked-refill pattern flagged in P4-17).
   2. Drives `jpeg_consume_input` through the body of a multi-scan progressive JPEG, asserting `JPEG_SUSPENDED` returns when the drip buffer is empty and `JPEG_REACHED_SOS` / `JPEG_REACHED_EOI` when scan boundaries / EOI are observed.
-  3. Resumes after each `JPEG_SUSPENDED` by refilling the buffer; the final `cinfo->global_state` must equal `DSTATE_STOPPING` after `jpeg_finish_decompress`.
+  3. Resumes after each `JPEG_SUSPENDED` by refilling the buffer; finish-decompress state/reset fidelity is tracked separately by P4-104.
 - Bit-exact comparison of the resumed decode against the same JPEG decoded with the upstream linked-against-stock `libjpeg.so.8`.
 
 **Fix (Option b — incremental input drain, decode stays buffered).** Implemented in `crates/libjpeg-turbo-rs-capi/src/jpeglib.rs`. Two pure marker-scan helpers (`find_first_sos`, `scan_next_boundary`, unit-tested in `marker_scan_tests`) let the shim walk the entropy body. The drain is split, gated on a single runtime signal — *did `fill_input_buffer` return `FALSE` before EOI?*:
@@ -245,7 +292,7 @@ Verified with `cargo test --release --test hard_case_x_byte_and_restart` → 6 p
 - **`jpeg_input_complete`**: returns `FALSE` while `body_incomplete`, so the `while (!jpeg_input_complete()) jpeg_consume_input()` idiom drives the body to EOI.
 - `jpeg_finish_decompress` / `jpeg_abort_decompress` reset the new state for handle reuse.
 
-**Status (2026-06-02): PARTIAL — the stated acceptance criteria are met and byte-exact-proven; three deeper upstream-contract gaps surfaced in the codex round-8 review are deferred to [P4-26](#p4-26-deeper-streaming-contract-fidelity-beyond-the-p4-13-core--open).** `cargo test -p libjpeg-turbo-rs-capi --test capi_classic_lifecycle_pathological consume_input_suspends_through_progressive_body` passes: a *real* suspending source manager (`fill_input_buffer` → `FALSE`) drip-feeds a multi-scan progressive JPEG (`cjpeg -progressive`); the harness asserts `JPEG_SUSPENDED` mid-body, `JPEG_REACHED_SOS` per scan, `JPEG_REACHED_EOI` at end, resume after each suspension, `global_state == DSTATE_STOPPING` after `jpeg_finish_decompress`, and pixels **byte-identical** to a full-buffer `mem_src` decode. Full `cargo test --workspace --release` green; no consumer regressions (Pillow/libtiff/djpeg never suspend, so they keep the original fully-buffered path). The drip-fed decode is cross-validated **against stock libjpeg-turbo**: the Rust test decodes the same progressive JPEG with `djpeg -pnm` and embeds those reference RGB pixels in the harness, which asserts the drip-fed output matches them (≤2 LSB). It *also* checks drip-vs-`mem_src` through our shim (resume-consistency). (The harness links our cdylib *as* `libjpeg`, so the stock comparison uses the `djpeg` binary as the oracle rather than linking a second library in-process.) Review hardening (code-reviewer + codex): the synthetic-EOI parse buffer is truncated to exactly the through-SOS prefix; a 256 MiB cap bounds the incremental drain loops (DoS guard mirroring `drain_caller_source_mgr`); the body cursor is re-derived from the final post-splice buffer (so a cached tables-only prefix can't desync it); and `input_scan_number` advances per `JPEG_REACHED_SOS` (asserted in the harness) to keep the public scan index in lock-step. Further scan-state sync (codex round 3): `marker_list` is rebuilt from the full-stream decode (so APP/COM markers after the first SOS aren't dropped), `input_scan_number` is reset in `jpeg_finish_decompress` / `jpeg_abort_decompress` (handle reuse) and also advanced in the non-buffered `jpeg_start_decompress` drain, and `jpeg_start_output` records `output_scan_number` so the documented `input_scan_number == output_scan_number` buffered-image termination holds. Round 4: `scan_next_boundary` skips a `TEM` marker (`FF 01`) as parameterless (unit-tested), and `jpeg_read_coefficients` / `jpeg_read_raw_data` finish the body drain (shared `finish_body_drain` helper) before parsing, so the transform/raw paths also pull later bytes from a suspending source instead of reading the through-SOS prefix.
+**Status (2026-06-02): PARTIAL — suspension is byte-exact-proven; deeper contracts are P4-26 and finish lifecycle is P4-104.** `cargo test -p libjpeg-turbo-rs-capi --test capi_classic_lifecycle_pathological consume_input_suspends_through_progressive_body` passes: a real suspending source manager drip-feeds a multi-scan progressive JPEG; the harness asserts mid-body suspension, SOS/EOI progression, resume, and pixels byte-identical to both full-buffer shim decode and stock `djpeg`. It no longer treats the shim's post-finish `DSTATE_STOPPING` as an oracle because upstream resets the cinfo. Boundary scanning, the 256 MiB drain cap, marker rebuild, scan tracking, and raw/coefficient body drain remain covered.
 
 **Why PARTIAL, not CLOSED.** Codex round 8 (on commit `4645b52`) raised three upstream-contract-fidelity gaps that lie *beyond* the stated acceptance criteria but mean the broad title — "honor per-byte source suspension" — is not yet fully met across every entry point: (1) `jpeg_read_header` only stops at the first SOS on the *suspending* path (gated on `body_incomplete`); a fully-buffered consumer still has the whole body swallowed in `read_header`, so a later `jpeg_consume_input` reports `REACHED_EOI` immediately without per-scan `REACHED_SOS` callbacks. (2) Buffered-image *output* calls (`jpeg_start_output` / `jpeg_read_scanlines` / `jpeg_finish_output`) do not themselves pull from the source manager — a consumer driving decode purely through the output side on a still-`body_incomplete` handle makes no forward progress. (3) The `marker_list` is *rebuilt* from the completed stream rather than *appended* in place, so a `jpeg_saved_marker_ptr` a consumer retained mid-stream is invalidated by the rebuild. All three need a deeper, consumer-risky refactor (gap (1) changes every fully-buffered consumer's `read_header` behavior), none block T3, and no known consumer exercises them — so they are filed as [P4-26](#p4-26-deeper-streaming-contract-fidelity-beyond-the-p4-13-core--open) rather than expanding this PR's scope. The verified streaming-suspension core lands here.
 
@@ -1291,3 +1338,775 @@ So **(D) enable the target feature and let the compiler vectorise** joins the li
 **Motivation.** Filed 2026-08-02 by P4-72's final docs audit. `decode::toggles` is public, so the pre-existing `decode_with_colorspace_override` function and its full signature are part of the source-compatibility surface even though production decoding calls it only for planar YCbCr output. Its grayscale arm receives decoded planes, a `FrameHeader`, and output geometry, but not the JFIF/Adobe markers needed to distinguish every JCS_RGB source from YCbCr, nor the `Decoder` upsampling policy and complete geometry used by P4-72. It therefore cannot implement metadata-correct RGB→gray and C-matched component upsampling for every input without a new API. Removing or renaming it would break downstream compilation, so P4-72 retained the symbol and its legacy full-size component-0 behavior; subsampled component 0 returns a typed `Unsupported` instead of panicking. The corrected supported surface is `Decoder::set_output_format(Grayscale)` / `set_output_colorspace(Grayscale)`.
 
 **Acceptance criteria.** Decide the intended status of the public `decode` internals: (A) deprecate the low-level helper and make the module crate-private in the next semver-major release, with a downstream source scan and migration note; or (B) add a metadata- and policy-aware public companion, migrate callers, and make the legacy function delegate wherever its inputs are sufficient. In either case, rustdoc must state the exact behavior, source compatibility must be tested for the supported release line, and the legacy path must never panic on short or subsampled planes.
+
+## P4-81. Linux cdylib Omits GNU `LIBJPEG_8.0` Symbol Versions — **OPEN**
+
+**Motivation.** Filed 2026-08-02 by the real OpenCV replacement experiment.
+Ubuntu's prebuilt `libopencv_imgcodecs.so.406` requests
+`jpeg_CreateCompress@LIBJPEG_8.0` and
+`jpeg_CreateDecompress@LIBJPEG_8.0`. glibc currently falls back to the Rust
+cdylib's unversioned exports and the workload succeeds, but prints
+`libjpeg.so.8: no version information available`. The same warning appears
+for libtiff, GDAL, Poppler, and HDF4 transitive consumers loaded by OpenCV.
+The SONAME and symbol names are therefore sufficient for this measured glibc
+run, but the library is not yet a warning-free distro replacement and no
+claim is established for stricter ELF loaders.
+
+**Root cause.** The Linux build sets `DT_SONAME=libjpeg.so.8`, but supplies no
+GNU linker version script. `readelf --version-info` shows only the Rust
+cdylib's imported GLIBC/GCC version requirements; its exported `jpeg_*`
+symbols are global/unversioned. Ubuntu's reference `libjpeg.so.8` defines
+`LIBJPEG_8.0` and `LIBJPEGTURBO_8.0` version nodes.
+
+**Acceptance criteria.** (1) Linux `libjpeg.so.8` reproduces the reference v8
+symbol-to-node inventory: upstream exports live under `LIBJPEG_8.0`, while the
+reference's empty `LIBJPEGTURBO_8.0` node is preserved. Crate-only extra/test
+and TurboJPEG symbols need an explicit, tested visibility/version policy; they
+must not be mislabeled as reference libjpeg-turbo extension exports. Do not
+change macOS/Windows builds or the separately named TurboJPEG artifact; (2) an
+automated `readelf --version-info`/symbol inventory test fails on an absent or
+wrong node or symbol assignment; (3) the OpenCV harness keeps both binding
+assertions and runs without `no version information available`; and (4)
+alternative SONAME configurations are either given their correct version map
+or rejected with a clear build-time error rather than mislabeled silently.
+
+## P4-82. Classic Scanline Encoder Dropped Public Restart Settings — **CLOSED 2026-08-02**
+
+**Motivation.** Filed and closed 2026-08-02 after the first OpenCV replacement
+run initially reported a false green. OpenCV requested progressive Huffman
+compression with `restart_interval = 4`; Ubuntu's libjpeg-turbo output carried
+DRI=4 plus RST markers, while the Rust C shim's output carried neither. The
+first harness version checked only decoded pixels, so both files appeared to
+pass despite the encoded-structure contract divergence.
+
+**Root cause.** `run_encoder_and_flush` selected high-level Rust compression
+helpers that did not accept restart settings. It therefore discarded both
+public `jpeg_compress_struct` fields, `restart_interval` and
+`restart_in_rows`, when the deferred classic scanline input was finally
+encoded. The omission affected baseline, optimized, progressive, arithmetic,
+and lossless pixel-encode dispatch branches.
+
+**Acceptance criteria.** (1) Both public restart fields reach baseline,
+optimized, progressive, arithmetic-baseline, arithmetic-progressive, and
+lossless scanline output; (2) row mode matches C's per-scan MCU calculation,
+including lossless mode's forced 1x1 sampling; (3) a stock-C cross-validation
+matrix requires identical DRI sequences and RST counts for block and row mode
+in every branch, with byte-exact lossy output and pixel-exact lossless output;
+and (4) the OpenCV workload requires SOF2, DRI=4, and RST before accepting the
+replacement run.
+
+**Implementation.** The dispatcher now forwards the direct block interval to
+every entropy branch. For non-progressive scans, row-mode restarts are
+converted to MCUs using the derived JPEG width, maximum horizontal sampling
+factor, and scaled data-unit width; lossless calculation uses the 1x1 sampling
+that C forces before `per_scan_setup`. Progressive branches retain both public
+values so the encoder derives the row interval separately for each scan, as
+libjpeg does.
+
+**Status (2026-08-02): closed.** The first structural regression failed before
+the dispatcher change. The final 14-case C-ABI matrix covers block and row
+restarts across all six dispatcher modes against stock `cjpeg`; every case
+requires identical DRI sequences and RST counts, all lossy cases are
+byte-identical, and stock `djpeg` decodes both lossless outputs back to the
+source pixels exactly. The optimized
+mode has distinct block/row cases; smoothing likewise composes with both public
+restart fields. That matrix also caught the lossless row-mode 2x sampling error
+before closure. The OpenCV
+harness independently requires SOF2, DRI=4, and an RST marker, then compares
+both JPEG files and all four self/cross-decoded BGR and grayscale matrices
+byte-for-byte. On the pinned Ubuntu 24.04/OpenCV 4.6 environment, Rust and
+system output share SHA-256
+`2945f085182223131779686ca88c83d0ee816222a1517bd289946ac106316905`.
+
+## P4-83. Baseline Classic Scanline Encoder Dropped Public Input Smoothing — **CLOSED 2026-08-02**
+
+**Motivation.** Filed and closed 2026-08-02 during P4-82's dispatcher review.
+The same deferred C-ABI boundary read `smoothing_factor` from the public
+`jpeg_compress_struct` but never supplied it to the Rust baseline pixel
+encoder, making ordinary baseline `jpeg_write_scanlines` callers silently
+encode unsmoothed data.
+
+**Root cause.** The old high-level optimized helper could express neither the
+public smoothing value nor smoothing without optimized Huffman coding. Simply
+routing every smoothed input through its replacement wrapper would also have
+changed C semantics by enabling `optimize_coding` implicitly.
+
+**Acceptance criteria.** (1) For baseline output, nonzero public smoothing
+selects the full-plane path and reaches its downsampler; (2)
+`optimize_coding = FALSE` remains false, so Annex K selection is not silently
+replaced; (3) both restart fields compose with smoothing; and (4)
+a deterministic baseline classic-C-ABI encode is byte-identical to stock
+`cjpeg -smooth` with the same row restart setting. Progressive/arithmetic
+composition is explicitly outside this closure and filed as P4-84.
+
+**Status (2026-08-02): closed.** `run_encoder_and_flush` now builds
+`CompressParams` with independent smoothing and Huffman-optimization flags.
+The `smoothing-blocks` and `smoothing-rows` legs of
+`c2_3_scanline_option_dispatch_matches_cjpeg` set smoothing 25 with
+`optimize_coding = FALSE` and exercise `restart_interval = 4` and
+`restart_in_rows = 2`, respectively. Both are byte-identical to the matching
+`cjpeg -smooth 25 -restart` output, including the DRI sequence and RST count.
+
+## P4-84. Progressive/Arithmetic Classic Scanline Encoding Still Drops Input Smoothing — **OPEN**
+
+**Motivation.** Filed 2026-08-02 while tightening P4-83's closure claim. The
+baseline path is fixed and C-exact, but `run_encoder_and_flush` selects the
+progressive and arithmetic branches before its smoothing-capable baseline
+branch. A caller that combines nonzero `smoothing_factor` with
+`progressive_mode` or `arith_code` therefore still receives an unsmoothed
+stream without an error. Lossless is not part of this filing: upstream
+deliberately resets smoothing to zero for lossless output.
+
+**Root cause.** The Rust progressive and arithmetic pixel encoders downsample
+per block and do not accept the full-plane smoothing parameter. The native
+`Encoder` already rejects these combinations visibly under P4-46 rather than
+dropping the option, but the deferred classic C-ABI dispatcher bypasses that
+builder validation.
+
+**Acceptance criteria.** Choose and test one explicit contract: (A) add
+full-plane smoothing to progressive, arithmetic-baseline, and
+arithmetic-progressive encoding and cross-validate each against the matching
+`cjpeg -smooth` mode; or (B) reject the combinations through the classic
+error-manager path before emitting output, with a C harness proving the
+failure is visible and no partial JPEG is accepted. In either case, no
+nonzero public smoothing value may be silently ignored.
+
+## P4-85. Classic Scanline Compression Ignores Public Custom Quantization and Huffman Tables — **OPEN**
+
+**Motivation.** Filed 2026-08-02 during the P4-83 closure audit. The native
+`Encoder` and baseline `CompressParams` support custom tables, but the classic
+`jpeg_write_scanlines` boundary advertises the corresponding libjpeg fields
+and setup functions without applying their values to the encoded stream. This
+is another silent option drop: callers receive a valid JPEG built with default
+quality-scaled/Annex K tables.
+
+**Root cause.** `jpeg_set_quality` records only an 8-bit quality and ignores
+its `_force_baseline` argument instead of installing the public scaled tables,
+so low-quality `force_baseline = FALSE` cannot select upstream's 16-bit
+DQT/SOF1 behavior. `jpeg_add_quant_table` stores scaled entries only in
+`CompressPrivate::quant_tables` instead of installing the public
+`quant_tbl_ptrs` slot. Despite documenting the upstream clamp, it names its
+argument `_force_baseline` and always permits values through 32767 rather than
+clamping to 255 when requested. `jpeg_default_qtables` ignores caller-edited
+per-slot `q_scale_factor` values and delegates back to the single private
+quality, while `jpeg_set_linear_quality` passes pre-zigzagged constants into
+`jpeg_add_quant_table` even though that function's C contract is natural
+order. Callers can separately populate
+`quant_tbl_ptrs`/`dc_huff_tbl_ptrs`/`ac_huff_tbl_ptrs`, but
+`run_encoder_and_flush` reads none of them. It constructs its lossy encoders
+from `quality` alone. As a result, custom quantization setup (including the
+direct linear-scaling path used by `jpeg_set_linear_quality`) and caller-supplied
+Huffman tables do not reach classic scanline output. Coefficient transcoding
+has a separate table-materialization path and is outside this filing.
+
+**Acceptance criteria.** (1) Make `jpeg_set_quality`, `jpeg_default_qtables`,
+`jpeg_set_linear_quality`, and `jpeg_add_quant_table` install natural-order
+public tables with libjpeg ownership/lifetime semantics, honor per-slot
+`q_scale_factor` values, and apply the correct 1..255 or 1..32767 clamp
+according to `force_baseline`, including 16-bit DQT/SOF1 selection; (2) convert all
+referenced public quantization and Huffman slots into the Rust encoder's table
+definitions, respecting each component's
+`quant_tbl_no`/`dc_tbl_no`/`ac_tbl_no`; (3) baseline Huffman output uses caller
+tables unless `optimize_coding` supersedes them, while progressive Huffman
+matches upstream's forced optimization/derived-table behavior and lossy
+arithmetic output still honors custom quantization; (4) lossless output matches
+upstream exactly: custom quantization/AC tables are inapplicable, Huffman
+lossless forces optimization and regenerates its DC table, and the unsupported
+arithmetic+lossless combination is rejected as tracked by P4-89; (5) a real C harness installs non-default tables through the
+public structs/setup functions and cross-validates DQT/DHT contents plus
+decoded pixels against stock libjpeg-turbo, including composition with
+smoothing and both restart controls; and (6) invalid or incomplete tables fail
+through the classic error manager rather than panicking or silently falling
+back.
+
+## P4-86. Classic Lossy Scanline Compression Ignores Public DCT Method — **OPEN**
+
+**Motivation.** Filed 2026-08-02 during the P4-82 option-dispatch review.
+Classic callers may select `JDCT_ISLOW`, `JDCT_IFAST`, or `JDCT_FLOAT` through
+`jpeg_compress_struct::dct_method`. The shim accepts all three but silently
+encodes every lossy `jpeg_write_scanlines` request as ISLOW. The P4-82 matrix
+fixed its C oracle to `-dct int`, so it intentionally proves restart behavior
+without covering this separate option.
+
+**Root cause.** `run_encoder_and_flush` assigns
+`DctMethod::IsLow` unconditionally instead of translating `c.dct_method`, then
+passes that constant into every lossy baseline/progressive/arithmetic helper.
+Lossless output has no DCT and is outside this filing.
+
+**Acceptance criteria.** (1) Translate all public DCT enum values accepted by
+upstream and reject invalid values through the classic error manager; (2)
+forward the selected method through baseline, optimized, smoothed,
+progressive, arithmetic-baseline, and arithmetic-progressive scanline paths;
+(3) cross-validate deterministic `JDCT_IFAST` and `JDCT_FLOAT` C callers
+against matching stock `cjpeg -dct fast|float`, including block/row restarts;
+and (4) keep ISLOW output byte-identical to the P4-82 matrix.
+
+## P4-87. Classic Abbreviated-Datastream Table State Is Not Wired — **OPEN**
+
+**Motivation.** Filed 2026-08-02 during the P4-85 table audit. Native
+abbreviated datastream support exists, but the classic API accepts the
+table-reuse controls without changing its output. Applications that emit one
+tables-only stream and then suppress tables in image bodies cannot use the shim
+as a libjpeg-compatible replacement.
+
+**Root cause.** `jpeg_start_compress` ignores `write_all_tables`,
+`jpeg_suppress_tables` stores a private boolean that no encode path reads, and
+`jpeg_write_tables` synthesizes quality-based defaults rather than serializing
+the installed public quantization/Huffman tables and their `sent_table` state.
+
+**Acceptance criteria.** (1) Implement libjpeg's `write_all_tables`,
+`sent_table`, and suppress/reset state transitions across cinfo reuse; (2)
+`jpeg_write_tables` emits the installed applicable tables exactly, including
+custom tables and arithmetic-mode rules; (3) suppressed image bodies omit
+DQT/DHT while decoding correctly when paired with the tables-only stream; (4)
+a stock-C harness cross-validates marker inventories and pixels across at least
+two reused images; and (5) the test fails if either side silently emits a
+self-contained body.
+
+## P4-88. Classic Scanline Marker Controls and CCIR601 Rejection Are Ignored — **OPEN**
+
+**Motivation.** Filed 2026-08-02 while auditing all public options consumed by
+`run_encoder_and_flush`. The native `Encoder` can express these policies, but
+the classic scanline boundary always accepts its own defaults.
+
+**Root cause.** Pixel scanline encoding does not forward
+`write_JFIF_header`, JFIF version/density, `write_Adobe_marker`, or
+`CCIR601_sampling`. Upstream raises `JERR_CCIR601_NOTIMPL` for the latter. Its
+`do_fancy_downsampling` field is deliberately ignored too, so the shim already
+matches that classic behavior; native `Encoder::fancy_downsampling()` is a
+Rust extension, not a classic contract. The coefficient writer has separate
+metadata handling and is outside this filing.
+
+**Acceptance criteria.** (1) Honor the public JFIF/Adobe marker toggles,
+version, and density byte-exactly; (2) reject `CCIR601_sampling = TRUE`
+visibly through the classic error manager before output; and (3)
+cross-validate marker inventories/fields against stock libjpeg-turbo for
+grayscale, YCbCr, RGB-direct, and CMYK where each option is applicable.
+
+## P4-89. Classic Arithmetic+Lossless Requests Silently Become Huffman Lossless — **OPEN**
+
+**Motivation.** Filed 2026-08-02 during the P4-85 lossless table review.
+Upstream classic compression rejects arithmetic lossless with
+`JERR_ARITH_NOTIMPL`, but the shim returns a valid SOF3 Huffman stream. Native
+SOF11 support is a separate, intentional Rust capability and can remain.
+
+**Root cause.** `run_encoder_and_flush` tests `lossless_predictor` before
+`arith_code`, so the lossless Huffman helper wins and the arithmetic request is
+discarded.
+
+**Acceptance criteria.** A real C harness requests arithmetic+lossless through
+the public classic fields and proves both stock and Rust invoke the error
+manager before accepting an image; the Rust side must emit no usable partial
+JPEG. Native Rust SOF11 tests remain green and are explicitly outside the
+classic compatibility contract.
+
+## P4-90. Classic Arithmetic Scanline Compression Ignores Public DAC Conditioning — **OPEN**
+
+**Motivation.** Filed 2026-08-02 during the same dispatcher audit. Arithmetic
+callers can set the 16 public DC/AC conditioning slots, but classic scanline
+output always uses the Rust encoder defaults. P4-25 is the decode-side
+per-scan snapshot problem and does not cover this encode gap.
+
+**Root cause.** `run_encoder_and_flush` never reads `arith_dc_L`,
+`arith_dc_U`, or `arith_ac_K`; its arithmetic helpers accept no conditioning
+arrays.
+
+**Acceptance criteria.** (1) Forward all referenced conditioning slots to
+sequential and progressive arithmetic writers; (2) validate the same ranges
+and signal errors through the classic manager; and (3) cross-validate DAC
+markers and decoded pixels against a stock-C harness using non-default,
+multi-slot conditioning plus both restart controls.
+
+## P4-91. Classic Scanline Compression Ignores Custom Scan Scripts — **OPEN**
+
+**Motivation.** Filed 2026-08-02 during the public-field audit. The native
+encoder supports `ScanScript`, but classic callers that set `scan_info` and
+`num_scans` receive the fixed default progressive script instead.
+
+**Root cause.** `jpeg_simple_progression` only flips `progressive_mode`, and
+`run_encoder_and_flush` never reads `scan_info`/`num_scans`. No classic-path
+validation translates component indices, spectral selection, or successive
+approximation fields.
+
+**Acceptance criteria.** (1) Translate valid public scripts into the native
+scan-script representation without retaining caller pointers past the legal
+lifetime; (2) mirror upstream validation/error behavior for malformed scripts;
+and (3) cross-validate SOS sequences, entropy mode, restarts, and decoded
+pixels against stock libjpeg-turbo for custom Huffman and arithmetic scripts.
+
+## P4-92. Classic Scanline Compression Collapses Valid Sampling-Factor Layouts to 4:4:4 — **OPEN**
+
+**Motivation.** Filed 2026-08-02 during the P4-82 dispatcher review. The
+restart matrix proves the common 2x2 layout, but classic callers can populate
+every component's sampling factors directly. Several valid layouts silently
+produce a different SOF and pixel stream.
+
+**Root cause.** `subsampling_from_comp_info` inspects only component 0 and
+recognizes six `(H,V)` pairs. It maps standard 4x2 (TJSAMP_410), standard 2x4
+(TJSAMP_24), and non-standard layouts such as `3x2,1x1,1x1` to S444; chroma
+component factors are ignored entirely. P3-6 covers native sampling-factor
+encoding, not this classic translation boundary.
+
+**Acceptance criteria.** (1) Preserve the complete public per-component
+sampling-factor layout instead of lossy luma-only enum inference; (2) derive
+MCU geometry and row restarts from those exact factors; and (3) use a real C
+struct harness to cross-validate SOF sampling factors, DRI/RST structure, and
+stock-`djpeg` pixels for all eight standard layouts plus at least two valid
+non-standard layouts, including RGB-direct sampling.
+
+## P4-93. Classic Scanline Compression Ignores Requested JPEG Colorspace — **OPEN**
+
+**Motivation.** Filed 2026-08-02 during the same public-field audit.
+`jpeg_set_colorspace` updates the public struct, but classic scanline output
+can still encode a different colorspace while returning success.
+
+**Root cause.** `run_encoder_and_flush` never reads `jpeg_color_space`.
+`JCS_RGB` output therefore routes through the ordinary YCbCr helper despite
+RGB component metadata, while `JCS_YCbCr` input falls back to `PixelFormat::Rgb`
+and is color-converted a second time. Native `Encoder::colorspace` support from
+P4-53/P4-54 does not reach this shim boundary.
+
+**Acceptance criteria.** (1) Translate input and requested JPEG colorspaces
+independently, preserving direct YCbCr/CMYK/RGB data where upstream does; (2)
+route every supported entropy mode without discarding the requested output
+colorspace; (3) mirror upstream errors for unsupported conversions; and (4)
+cross-validate SOF component IDs/sampling factors, JFIF/Adobe markers, bytes
+where deterministic, and stock-`djpeg` pixels for RGB→YCbCr, RGB→RGB,
+YCbCr→YCbCr, CMYK, and YCCK classic callers.
+
+## P4-94. Classic 12/16-Bit Scanline Buffers Never Reach a High-Precision Encoder — **OPEN**
+
+**Motivation.** Filed 2026-08-02 during the final P4-82 test audit. The only
+new C-ABI test loaded `jpeg12_write_scanlines`/`jpeg16_write_scanlines` and
+called them with a null cinfo. Its former name/comment claimed row mechanics
+and outside pipeline coverage that it did not exercise.
+
+**Root cause.** The high-precision writers fill `pixels_u16`, clear
+`pixels_u8`, and record `priv_state.precision`. `jpeg_finish_compress` still
+routes every non-raw scanline job to `run_encoder_and_flush`, which reads only
+`pixels_u8` and never calls the 12-bit or 16-bit encoder. The finish failure is
+stored privately and can look like a successful void C call.
+
+**Acceptance criteria.** (1) Dispatch real 12-bit lossy scanlines and 12/16-bit
+lossless scanlines to the matching native precision backends; (2) validate
+precision/mode/colorspace combinations and report failures through the classic
+error manager; (3) run real stock-C create→start→write→finish harnesses with
+multiple non-null row batches and compare headers, precision, and decoded
+samples exactly against stock libjpeg-turbo; and (4) replace the null-only
+smoke with active 12-bit and 16-bit regressions that fail if zero rows reach
+the encoder or no complete JPEG is emitted.
+
+## P4-95. Classic Raw-Data Compression Drops Most Public Encode Options — **OPEN**
+
+**Motivation.** Filed 2026-08-02 while checking P4-94's separate raw-data
+dispatch. Eight- and 12-bit raw planes do reach native encoders, but only a
+small default subset of the classic compressor contract is preserved.
+
+**Root cause.** `run_raw_encoder_and_flush` and its 12-bit counterpart reduce
+the public state to planes, geometry, one private quality, and lossy enum-based
+sampling. They omit restart controls, optimized/progressive/arithmetic modes,
+DCT and smoothing policy where applicable, custom quant/Huffman/DAC tables,
+table suppression/reuse, custom scan scripts, exact component sampling, and
+requested output colorspace.
+
+**Acceptance criteria.** (1) Define and implement every upstream option that
+applies to raw-data input, visibly rejecting only combinations upstream
+rejects; (2) share option translation/validation with scanline compression so
+the two paths cannot drift again; and (3) cross-validate real C raw-plane
+harnesses for 8/12-bit precision, all supported sampling layouts, entropy
+modes, custom tables/scripts, and both restart controls using marker/SOF/SOS/
+DRI/DAC inventories plus stock-decoded samples. Default quality-only round
+trips do not close this item.
+
+## P4-96. Classic Decompression Color Quantization and Colormap Switching Are Not Wired — **OPEN**
+
+**Motivation.** Filed 2026-08-02 during the final classic C-ABI audit. Native
+one/two-pass/external-palette quantization exists, but the classic public fields
+and `jpeg_new_colormap` are documented as complete without a behavioral test.
+
+**Root cause.** The shim initializes and inspects quantization flags only far
+enough to set `output_components = 1`; it never calls the native quantizer,
+populates `actual_number_of_colors`/`colormap`, or returns palette indices.
+`jpeg_new_colormap` is unconditional no-op. With RGB bytes still buffered but
+one-byte row sizing selected, scanline output can expose the wrong packed-RGB
+slice rather than a valid index row.
+
+**Acceptance criteria.** A real C harness must cross-validate stock and Rust
+for one-pass, two-pass, and external-colormap quantization, asserting every
+index row plus `actual_number_of_colors`, the public colormap planes, dithering
+behavior, and output component counts. Buffered-image mode must also switch an
+external palette through `jpeg_new_colormap` and prove re-quantized output.
+Unsupported state transitions fail visibly; no test may infer completion from
+only a one-component row length.
+
+## P4-97. `jpeg_resync_to_restart` Is an Unconditional Success No-Op — **OPEN**
+
+**Motivation.** Filed 2026-08-02 after the C-ABI encode test's null-only
+utility smoke was compared with upstream `jdmarker.c`. Native restart recovery
+strategies exist, but the exported classic function and installed source
+callback do not implement the C default algorithm.
+
+**Root cause.** Both paths return TRUE without inspecting `unread_marker`,
+emitting warnings, scanning/discarding markers, mutating restart state, pulling
+the source manager, or suspending. The filing PR removed the old null-cinfo
+test that asserted this broken constant as a positive result.
+
+**Acceptance criteria.** Add a real suspending C source-manager harness
+cross-validated against stock libjpeg-turbo. Cover desired,
+past, and future RST markers; non-RST markers; invalid-byte scan-forward;
+warning/state mutation; refill; and a FALSE suspension return. The exported
+function and default callback must share one C-exact implementation while the
+native strategy extension remains available separately.
+
+## P4-98. Classic 12/16-Bit Decode Bypasses Lifecycle and Public Output Options — **OPEN**
+
+**Motivation.** Filed 2026-08-02 after the high-precision encode false-green
+prompted review of the matching decode tests. Those tests cover grayscale and
+call read-scanlines immediately after header parsing, certifying a lifecycle
+that stock libjpeg does not permit while missing configured output behavior.
+
+**Root cause.** `jpeg12_read_scanlines`/`jpeg16_read_scanlines` lazily invoke
+the native full-image precision decoders directly from source bytes without
+requiring `jpeg_start_decompress`. They bypass `out_color_space`, scaling,
+DCT/upsampling controls, quantization and, on the 16-bit path, crop. The 12-bit
+helper always converts three-component input to RGB; current assertions are
+only grayscale or “some nonzero sample.”
+
+**Acceptance criteria.** Build real stock-C and Rust lifecycle matrices for
+12-bit lossy and 12/16-bit lossless inputs: read-header→start→batched
+read/skip/crop→finish, plus invalid-state calls. Cross-validate public output
+fields, requested colorspaces, applicable scaling/crop/DCT/upsampling options,
+row counts, and exact or measured-C-tolerance samples. Tests must include color
+sources and fail if read succeeds before start or silently ignores an option.
+Exercise 12-bit skip and crop immediately after start, before any read has
+created private decoded state, then assert subsequent cropped pixel rows; an
+echoed x/width pair without output pixels is not evidence. Finish→new source
+and abort→new source reuse must prove the thread-local high-precision image and
+cursor are cleared rather than returning stale pixels/EOF.
+
+## P4-99. Classic Decode Dispatcher Ignores Output Options and Colorspace Metadata — **OPEN**
+
+**Motivation.** Filed 2026-08-02 during the same classic decode dispatcher
+audit. This is safety-relevant: callers commonly size scanline buffers from
+`jpeg_calc_output_dimensions`, but start-decompress can restore the full image
+width and then copy full-width rows.
+
+**Root cause.** `run_decoder_for_start` never reads `scale_num`/`scale_denom`,
+`dct_method`, `do_fancy_upsampling`, or `do_block_smoothing`. Its colorspace
+translation maps requested YCbCr to RGB, omits YCCK, and catches any configured
+decode error by retrying a format-agnostic decode, erasing caller intent and C
+errors. Dimension calculation publishes scaled fields without configuring the
+decoder; start then decodes full size and overwrites those fields. Header setup
+also ignores Adobe APP14, so RGB-direct/YCCK streams get guessed colorspaces and
+leave `saw_Adobe_marker`/`Adobe_transform` cleared. Dimension calculation also
+rounds public per-component downsampled dimensions to 8-pixel blocks instead
+of upstream's unrounded sampling-ratio ceil to accommodate local writer
+assumptions.
+
+**Acceptance criteria.** (1) Apply every supported libjpeg scaling ratio and
+the public DCT/upsampling/block-smoothing policies before decoding; (2) keep
+calculated and actual output dimensions identical through the lifecycle; (3)
+cross-validate rows and dimensions with stock `djpeg`/a real C harness across
+all scale factors, ISLOW/IFAST/FLOAT, fancy on/off, and progressive smoothing
+on/off; (4) cross-validate YCbCr, RGB-family, grayscale, CMYK, and YCCK output
+requests plus forbidden conversions without a fallback that changes format;
+(5) assert APP14 transform 0/1/2 header metadata and derived colorspaces against
+stock C; and (6) use canary-guarded C buffers sized from
+`jpeg_calc_output_dimensions` to prove no overwrite at reduced scales. Compare
+odd-size/scaled per-component downsampled dimensions and minimum DCT sizes
+exactly; repair downstream writer assumptions instead of publishing non-C
+geometry.
+
+## P4-100. Classic Codec Failures Are Reported as Suspension or Silent Success — **OPEN**
+
+**Motivation.** Filed 2026-08-02 after P4-94 showed that a void
+`jpeg_finish_compress` can appear successful without emitting an image. The
+same systemic error-boundary issue explains several option-dispatch false
+greens; it needs one shared fix rather than per-path private strings.
+
+**Root cause.** Encoder helpers write native failures only to private
+`last_error`; `jpeg_finish_compress` ignores their boolean results and resets
+to `CSTATE_START`. `jpeg_start_decompress` maps native failure to FALSE, whose
+classic meaning is source suspension, and some paths retry a different decode.
+Ordinary codec failures do not consistently populate `msg_code` and call
+`cinfo->err->error_exit`.
+
+**Acceptance criteria.** (1) Centralize native→classic error translation with
+stock-equivalent `msg_code`/parameters and exactly one `error_exit`; (2) reserve
+FALSE returns for legal suspension only; (3) never reset to a success state or
+accept a usable partial stream after encoder failure; and (4) use real setjmp C
+harnesses for malformed input, unsupported option/conversion, high-precision
+misconfiguration, and encoder failure, cross-validating callback, state, and
+output behavior against stock libjpeg-turbo.
+
+## P4-101. Classic Header Parse Does Not Publish Coding Tables or Scan State — **OPEN**
+
+**Motivation.** Filed 2026-08-02 during the classic decode audit. Consumers
+inspect public DQT/DHT/DAC/DRI/SOS state after `jpeg_read_header`; geometry and
+saved markers alone are not the full header contract.
+
+**Root cause.** Header parsing leaves public quant/Huffman table pointers,
+arithmetic conditioning, restart interval, active scan selectors, and
+`coef_bits` at create-time defaults. `is_baseline` is also derived as
+`!progressive && !lossless`, which incorrectly labels extended-sequential SOF1
+and arithmetic-sequential SOF9 streams as baseline even though upstream sets it
+only for SOF0. Private metadata used by decode/transcode does not materialize
+those C fields.
+
+**Acceptance criteria.** A real C harness compares all public table slots,
+conditioning, DRI, scan selectors, `is_baseline`, and pointer lifetime/state
+for SOF0/SOF1/SOF2/SOF3/SOF9/SOF10/SOF11 plus abbreviated streams across
+consume-input and cinfo reuse. Published tables must also feed
+copy-critical-parameters exactly.
+
+## P4-102. Classic Raw-Data Decode Bypasses Public Options and State Contracts — **OPEN**
+
+**Motivation.** Filed 2026-08-02 while scoping P4-99. Eight/12-bit raw output
+works for defaults, but its lazy full-image helpers bypass the classic decoder
+configuration and error boundary.
+
+**Root cause.** `jpeg_read_raw_data`/`jpeg12_read_raw_data` call native raw
+decoders from source bytes without forwarding applicable scaling/DCT policy;
+failures become zero/private text. Twelve-bit raw reads also lack the 8-bit
+suspending-body drain check.
+
+**Acceptance criteria.** Cross-validate stock-C raw-plane geometry/samples for
+applicable scaled-IDCT/DCT choices, state and `raw_data_out` validation,
+suspension/resume, both precisions, and reuse. Invalid calls use the classic
+error manager, not zero as an ambiguous soft result.
+
+## P4-103. `jpeg_crop_scanline` Does Not Implement iMCU-Aligned C Semantics — **OPEN**
+
+**Motivation.** Filed 2026-08-02 after the existing aligned-crop test was found
+to compare only against this project's exact-slice implementation.
+
+**Root cause.** The shim clamps/slices decoded RGB bytes. Upstream validates
+state/precision/order, aligns x down to the iMCU column, expands width to keep
+the requested right edge, and updates output/component geometry.
+
+**Acceptance criteria.** A stock-C harness covers unaligned offsets,
+subsampling/scaling/grayscale, invalid null/zero/out-of-bounds/after-read calls,
+returned x/width/output_width, component geometry, and subsequent row bytes.
+The 12-bit initialization/order portion remains in P4-98.
+
+## P4-104. Classic Decompressor State Constants, Transitions, and Finish Lifecycle Diverge — **OPEN**
+
+**Motivation.** Filed 2026-08-02 after P4-13's harness was found to assert the
+shim's `DSTATE_STOPPING`, the opposite of upstream's abort-reset completion.
+That false oracle was removed in the filing PR.
+
+**Root cause.** The shim defines `DSTATE_STOPPING = 206`, but upstream assigns
+206 to `DSTATE_RAW_OK` and STOPPING is 210; several intermediate states are
+missing. Successful header parse remains `DSTATE_INHEADER` instead of READY and
+has no repeated-call guard. Finish unconditionally sets its misnumbered
+STOPPING, clears caches/source, and returns TRUE rather than rejecting unread
+rows/bad state, draining EOI with suspension, calling `term_source`, and
+abort-resetting for reuse.
+
+**Acceptance criteria.** Match every upstream state constant and transition
+after create/header/start, buffered/raw/coefficient operation, finish, and
+abort. Stock-C setjmp/source-manager cases cover repeated/out-of-order header,
+incomplete rows, EOI suspension/retry, exactly-once `term_source`, final reset,
+and same-handle reuse. P4-13 continues to prove body suspension without
+asserting a shim-specific state.
+
+## P4-105. Classic Marker Writers Ignore State and Declared Lengths — **OPEN**
+
+**Motivation.** Filed 2026-08-02 during the deferred-encode audit. Valid
+pre-scanline markers work, but invalid timing and piecemeal lengths are silently
+accepted/reordered.
+
+**Root cause.** Marker/ICC functions only append private buffers. They do not
+enforce global state/`next_scanline`; `jpeg_write_m_header` uses `datalen` only
+as capacity, so under/over-write changes the emitted length.
+
+**Acceptance criteria.** A stock-C setjmp harness covers before-start,
+valid pre-row, after-row, wrong byte counts, invalid sizes, ordering, and exact
+marker bytes for complete, piecemeal, and ICC writers.
+
+## P4-106. `jpeg_finish_compress` Accepts Incomplete Input and Bad States — **OPEN**
+
+**Motivation.** Filed 2026-08-02 alongside P4-100. Finishing partial scanlines
+currently encodes zero-filled unwritten rows and returns a valid-looking JPEG.
+
+**Root cause.** Finish checks only private `have_started`, not expected
+scanline/raw row counts or legal state, then resets regardless of helper result.
+
+**Acceptance criteria.** Stock-C setjmp cases cover partial scanline/raw input,
+bad/double finish, progress passes, helper failure/no usable partial output,
+destination termination, final reset, and reuse. `JERR_TOO_LITTLE_DATA` and
+other errors flow through P4-100's shared translator.
+
+## P4-107. `jpeg_enable_lossless` Clamps Invalid Input and Omits Public State — **OPEN**
+
+**Motivation.** Filed 2026-08-02 after the helper's only direct test was found
+to be a null guard.
+
+**Root cause.** The shim silently clamps predictor/Pt, stores private values,
+and omits `Ss/Se/Ah/Al`, state validation, and `Pt < data_precision`. Upstream
+raises `JERR_BAD_PROGRESSION` for invalid values.
+
+**Acceptance criteria.** A real C harness compares fields and error callbacks
+for valid/invalid predictors and point transforms at 8/12/16-bit precision,
+including after-start calls, then proves valid settings reach output.
+
+## P4-108. Classic Destination Managers Violate Buffer Ownership and I/O Errors — **OPEN**
+
+**Motivation.** Filed 2026-08-02 as a P0 memory-safety finding. `jpeg_mem_dest`
+tests only NULL/0 allocation, omitting libjpeg's caller-supplied-buffer branch;
+stdio tests cover successful files only.
+
+**Root cause.** The shim interprets caller `*outsize` capacity as existing data,
+prefixes it to output, and unconditionally frees a non-NULL caller pointer when
+growing. `jpeg_stdio_dest` ignores short `fwrite`, `fflush`, and `ferror`.
+
+**Acceptance criteria.** Canary C tests cover sufficient stack/static buffers
+(SOI at offset 0, used size, no free), insufficient caller buffers (original
+never freed, returned allocated output), NULL allocation, and reuse. Stdio
+tests use `/dev/full` plus a portable failing stream and require
+`JERR_FILE_WRITE`; successful controls prove flush/term behavior.
+
+## P4-109. Classic Source-Manager Setup and Stdio Semantics Diverge — **OPEN**
+
+**Motivation.** Filed 2026-08-02 during the destination review. Source setup is
+documented as complete but misses public validation, FILE buffering, and
+Windows support.
+
+**Root cause.** `jpeg_mem_src` accepts null/empty input and overwrites foreign
+managers. Unix stdio duplicates the fd and `read_to_end`s outside `FILE*`
+buffering; Windows is unavailable. Errors do not consistently reach
+`error_exit`.
+
+**Acceptance criteria.** Cross-validate null/empty, foreign-manager replacement,
+pre-read/buffered FILE positions, I/O failure, `term_source`, and reuse against
+stock C on Unix/Windows. Preserve FILE position/buffer semantics and exact
+`JERR_INPUT_EMPTY`/`JERR_BUFFER_SIZE` behavior.
+
+## P4-110. `jpeg_Create*` Ignores Version and Struct-Size ABI Guards — **OPEN**
+
+**Motivation.** Filed 2026-08-02 as a P0 ABI memory-safety finding. Many tests
+pass a 4096-byte blob/size that stock v8 rejects, normalizing the missing guard.
+
+**Root cause.** Both create functions ignore `version`/`struct_size` and write
+the full Rust mirror. Upstream validates before writing, preserves caller `err`
+and `client_data`, then zero-initializes the remaining exact struct.
+
+**Acceptance criteria.** Convert behavioral tests to compiled C structs or the
+exact mirrored size. Canary/setjmp tests cover wrong version and smaller/larger
+sizes, exact `JERR_BAD_LIB_VERSION`/`JERR_BAD_STRUCT_SIZE`, no write past the
+declared object, preservation of `err`/`client_data`, and zero-init of all other
+public fields for both compressor and decompressor.
+
+## P4-111. Classic Progress-Manager Callbacks and Counters Are Not Wired — **OPEN**
+
+**Motivation.** Filed 2026-08-02 after docs mapped `jpeg_progress_mgr` to the
+unrelated native listener without testing the C struct.
+
+**Root cause.** Compressor/decompressor `cinfo->progress` is initialized but no
+codec path reads it, invokes `progress_monitor`, or updates pass/counter fields.
+
+**Acceptance criteria.** Real C harnesses cover baseline, optimized multi-pass,
+progressive, coefficient, and suspending decode/encode, comparing callback
+counts, pass numbers/totals, and monotonic counters with stock C (exact counts
+where stable).
+
+## P4-112. `jpeg_set_marker_processor` Callbacks Are Stored but Never Invoked — **OPEN**
+
+**Motivation.** Filed 2026-08-02 after the marker audit found docs claiming a
+callback path that no active test exercises.
+
+**Root cause.** The shim stores marker-code callbacks but only adds those codes
+to native marker saving. Header/consume paths never invoke the C routine or let
+it read marker bytes through `cinfo->src`.
+
+**Acceptance criteria.** A stock-C suspending source-manager harness proves
+callback timing during header/consume, source-byte access, FALSE
+suspension/resume, state mutation, callback replacement/removal, and longjmp
+safety. Saving a marker without invoking the processor cannot pass.
+
+## P4-113. `jpeg_read_icc_profile` Bypasses Classic Saved-Marker Semantics — **OPEN**
+
+**Motivation.** Filed 2026-08-02 after the positive test was found to succeed
+without `jpeg_save_markers(APP2)`, which does not prove upstream's helper
+contract.
+
+**Root cause.** The shim reads ICC only from the post-start native image, not
+`cinfo->marker_list`; header-only calls fail while unsaved APP2 data can
+succeed. Classic chunk validation/warnings are bypassed.
+
+**Acceptance criteria.** Stock-C header-only tests cover saved vs unsaved APP2,
+multi-chunk ordering, duplicate/missing/inconsistent chunks and warnings, null
+arguments/state, returned malloc ownership, and reconstruction before start.
+
+## P4-114. `jpeg_has_multiple_scans` Equates Multi-Scan with Progressive — **OPEN**
+
+**Motivation.** Filed 2026-08-02 during buffered-image API review. Sequential
+noninterleaved JPEGs may contain multiple scans without progressive coding.
+
+**Root cause.** The shim returns `progressive_mode` instead of parsed
+input-controller multi-scan state and omits upstream state validation.
+
+**Acceptance criteria.** A stock-C harness compares single-scan baseline,
+sequential multi-scan, progressive, abbreviated, and invalid-state cases. The
+answer must come from parsed scan structure and remain correct across
+consume-input/buffered-image progression.
+
+## P4-115. Native 12-Bit Coverage Claims Include Untested Modes and Sampling Layouts — **OPEN**
+
+**Motivation.** Filed 2026-08-02 after the C-parity audit found that B6-1 and
+`FEATURE_PARITY.md` claimed a 12-bit subsampling x progressive x arithmetic
+matrix that the executable tests never construct.
+
+**Root cause.** Before this filing, `tests/cross_check_precision.rs` called baseline
+`compress_12bit` with S444 while labels/comments varied unused subsampling
+values; no progressive or arithmetic path was invoked. The real odd-size
+`compress_raw_12`/`decompress_raw_12` C matrix covers baseline Huffman S420,
+S422, S444, S440, S411, and S441 only, omitting the now-supported S410 and S24
+enum layouts. Grayscale S444 output cannot prove alternate chroma geometry.
+
+**Acceptance criteria.** Either expose and cross-validate native 12-bit
+progressive/arithmetic/SOF10 encode paths or document those modes as
+unsupported. Add odd-size 12-bit raw C-parity cases for S410 and S24, with
+structural sampling-factor assertions and stock-C pixel/raw-plane comparison.
+Descriptions and case counts must name only modes that actually execute.
+
+**Progress (2026-08-02).** The false B6-1 mode/subsampling descriptions were
+corrected and its redundant weak Rust-only loop was removed; the two retained
+S444 quality matrices compare samples to 12-bit `djpeg`. The missing product
+mode decision and S410/S24 raw C cases keep this item open.
+
+## P4-116. C-Parity Tests Can Convert Failures or Missing Comparisons into a Pass — **OPEN**
+
+**Motivation.** Filed 2026-08-02 after a documented P4-13 regression reported
+`1 passed` while silently skipping because its private tool lookup ignored a
+working `cjpeg` on PATH. The same audit found broader forbidden error-to-skip
+patterns in active C-parity matrices.
+
+**Root cause.** Some tests return/continue after Rust codec errors, failed C
+commands, malformed oracle output, dimension/length mismatches, or unavailable
+tools after discovery. Several matrix drivers do not assert the exact number
+of comparisons executed. A green Cargo test can therefore mean zero or only a
+subset of the advertised cases ran.
+
+**Acceptance criteria.** Use PATH-aware C-tool discovery everywhere and fail
+closed in required CI. Once prerequisites are established, Rust errors and C
+oracle/process/output failures must panic. Every matrix asserts its exact
+planned/executed comparison count, including quick/full variants and each
+supported corpus vector. Cover at least `c_tjdecomptest`,
+`c_cjpeg_djpeg_tests`, `cross_check_metadata`, `worker_b3_conformance_t83`,
+`cross_check_crop_scale`, `c_croptest`, `cross_product_transform`,
+`abbreviated_datastream`, `encoder_builder`, and
+`capi_jpeglib_write_coefficients`, then audit analogous patterns
+repository-wide. Tests that never invoke the Rust operation (for example the
+current ICC jpegtran case) are removed or given a real Rust-side assertion;
+attempted-loop counters cannot substitute for successful comparisons. The
+crop grid must assert its real planned count and must not collapse progressive
+inputs to baseline when `cjpeg` is absent. Tables-only probes must pass
+multi-token CLI arguments separately and assert all planned comparisons;
+required in-repo fixtures cannot disappear through a bare return.
+
+**Progress (2026-08-02).** The P4-13 pathological harness now discovers
+`cjpeg`/`djpeg` through PATH, fails on tool execution and C compilation errors,
+requires missing tools in CI, and its complete four-test binary is selected by
+the provisioned Linux workflow. A host-tool run completed 4/4 with no skip.
+The broader matrices above remain open.
