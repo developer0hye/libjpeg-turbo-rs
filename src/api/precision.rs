@@ -1903,7 +1903,7 @@ fn compress_arbitrary_multi(
     let mut out = Vec::with_capacity(bw.data().len() + 512);
     marker_writer::write_soi(&mut out);
     marker_writer::write_app14_adobe(&mut out, 0);
-    let component_ids = [b'R', b'G', b'B'];
+    let component_ids = *b"RGB";
     let comps: Vec<(u8, u8, u8, u8)> = component_ids[..nc]
         .iter()
         .map(|&id| (id, 1, 1, 0))

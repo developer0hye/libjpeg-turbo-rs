@@ -6117,7 +6117,7 @@ impl<'a> Decoder<'a> {
                 } else {
                     let components = &self.metadata.frame.components;
                     let ids = [components[0].id, components[1].id, components[2].id];
-                    if ids == [b'R', b'G', b'B'] || self.metadata.frame.is_lossless {
+                    if ids == *b"RGB" || self.metadata.frame.is_lossless {
                         ColorSpace::Rgb
                     } else {
                         ColorSpace::YCbCr
