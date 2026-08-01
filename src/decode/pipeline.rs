@@ -14,7 +14,7 @@ use crate::decode::marker::{JpegMetadata, MarkerReader, ScanInfo};
 use crate::decode::progressive;
 use crate::simd::{self, SimdRoutines};
 #[allow(unused_imports)]
-use alloc::{boxed::Box, string::String, string::ToString, vec::Vec};
+use alloc::{borrow::Cow, boxed::Box, string::String, string::ToString, vec::Vec};
 #[allow(unused_imports)]
 use alloc::{format, vec};
 
@@ -1004,15 +1004,8 @@ impl<'a> Decoder<'a> {
         if self.output_colorspace.is_some() {
             return self.output_colorspace;
         }
-        // YCbCr only: the override's grayscale path emits component
-        // plane 0, which is luma for YCbCr but RED for a JCS_RGB source
-        // (codex P1 — 31/32 pixels wrong vs djpeg -grayscale). RGB
-        // sources keep the explicit Unsupported error until a real
-        // RGB->gray conversion exists (P4-72 tracks the same defect in
-        // the explicit set_output_colorspace route).
         if self.output_format == Some(PixelFormat::Grayscale)
             && self.metadata.frame.components.len() == 3
-            && self.detect_color_space() == ColorSpace::YCbCr
         {
             return Some(ColorSpace::Grayscale);
         }
@@ -1941,6 +1934,302 @@ impl<'a> Decoder<'a> {
             Self::fancy_h1v2_row(cur_row, above, out_top, in_width, 1);
             Self::fancy_h1v2_row(cur_row, below, out_bot, in_width, 2);
         }
+    }
+
+    /// Return one decoded component at full output resolution.
+    ///
+    /// This mirrors `jdsample.c`'s per-component selection: full-size planes
+    /// are borrowed, 2:1 ratios use the fancy triangle filters when enabled,
+    /// and all other integral ratios use box replication.  The active source
+    /// area is repacked first so right-edge MCU padding is never treated as an
+    /// image sample by a fancy filter.
+    #[allow(clippy::too_many_arguments)]
+    fn upsample_component_plane<'plane>(
+        &self,
+        component_plane: &'plane [u8],
+        component_index: usize,
+        frame: &FrameHeader,
+        mcus_x: usize,
+        mcus_y: usize,
+        comp_block_sizes: &[usize],
+        full_width: usize,
+        full_height: usize,
+        output_width: usize,
+        output_height: usize,
+        block_size: usize,
+    ) -> Result<(Cow<'plane, [u8]>, usize)> {
+        let component = frame.components.get(component_index).ok_or_else(|| {
+            JpegError::CorruptData(format!(
+                "missing component {component_index} for colorspace conversion"
+            ))
+        })?;
+        let component_block_size = *comp_block_sizes.get(component_index).ok_or_else(|| {
+            JpegError::CorruptData(format!(
+                "missing IDCT block size for component {component_index}"
+            ))
+        })?;
+        let component_width =
+            mcus_x * component.horizontal_sampling as usize * component_block_size;
+        let component_height = mcus_y * component.vertical_sampling as usize * component_block_size;
+        let required_len = component_width
+            .checked_mul(component_height)
+            .ok_or_else(|| {
+                JpegError::CorruptData(format!(
+                    "component {component_index} plane dimensions overflow"
+                ))
+            })?;
+        if component_width == 0 || component_height == 0 || component_plane.len() < required_len {
+            return Err(JpegError::CorruptData(format!(
+                "invalid component {component_index} plane: {} bytes for {component_width}x{component_height}",
+                component_plane.len()
+            )));
+        }
+        if !full_width.is_multiple_of(component_width)
+            || !full_height.is_multiple_of(component_height)
+        {
+            return Err(JpegError::CorruptData(format!(
+                "non-integral upsample ratio for component {component_index}: \
+                 {component_width}x{component_height} -> {full_width}x{full_height}"
+            )));
+        }
+        let horizontal_factor = full_width / component_width;
+        let vertical_factor = full_height / component_height;
+        if horizontal_factor == 0 || vertical_factor == 0 {
+            return Err(JpegError::CorruptData(format!(
+                "zero upsample factor for component {component_index}"
+            )));
+        }
+        if horizontal_factor == 1 && vertical_factor == 1 {
+            return Ok((Cow::Borrowed(component_plane), component_width));
+        }
+
+        let active_width = output_width.div_ceil(horizontal_factor);
+        let active_height = output_height.div_ceil(vertical_factor);
+        if active_width > component_width || active_height > component_height {
+            return Err(JpegError::CorruptData(format!(
+                "component {component_index} active area exceeds its plane: \
+                 active={active_width}x{active_height}, plane={component_width}x{component_height}"
+            )));
+        }
+        let mut active = Vec::with_capacity(active_width * active_height);
+        for row in 0..active_height {
+            let start = row * component_width;
+            active.extend_from_slice(&component_plane[start..start + active_width]);
+        }
+
+        let mut full = vec![0u8; full_width * full_height];
+        // C disables fancy upsampling for a 1x1 scaled IDCT, and for the
+        // horizontal 2:1 kernels when the active input is at most two pixels.
+        let horizontal_fancy_too_narrow = horizontal_factor == 2 && active_width <= 2;
+        let use_box_filter = self.fast_upsample || block_size == 1 || horizontal_fancy_too_narrow;
+        if use_box_filter {
+            upsample_generic_nearest(
+                &active,
+                active_width,
+                active_height,
+                &mut full,
+                full_width,
+                horizontal_factor,
+                vertical_factor,
+            );
+        } else if horizontal_factor == 2 && vertical_factor == 1 {
+            for row in 0..active_height {
+                self.fancy_upsample_h2v1(
+                    &active[row * active_width..(row + 1) * active_width],
+                    active_width,
+                    &mut full[row * full_width..(row + 1) * full_width],
+                );
+            }
+        } else if horizontal_factor == 2 && vertical_factor == 2 {
+            fancy_h2v2_strided_dispatch(
+                &active,
+                active_width,
+                active_width,
+                active_height,
+                &mut full,
+                full_width,
+            );
+        } else if horizontal_factor == 1 && vertical_factor == 2 {
+            self.fancy_h1v2(&active, active_width, active_height, &mut full, full_width);
+        } else {
+            upsample_generic_nearest(
+                &active,
+                active_width,
+                active_height,
+                &mut full,
+                full_width,
+                horizontal_factor,
+                vertical_factor,
+            );
+        }
+
+        Ok((Cow::Owned(full), full_width))
+    }
+
+    /// Produce grayscale output through the same two conversions as
+    /// libjpeg-turbo's `jdcolor.c`: YCbCr/gray copies the fully upsampled
+    /// component 0, while JCS_RGB applies the fixed-point RGB→Y matrix after
+    /// all three component planes have been upsampled.
+    #[allow(clippy::too_many_arguments)]
+    fn decode_grayscale_override(
+        &self,
+        component_planes: &[Vec<u8>],
+        frame: &FrameHeader,
+        out_width: usize,
+        out_height: usize,
+        uncropped_out_width: usize,
+        full_width: usize,
+        full_height: usize,
+        mcus_x: usize,
+        mcus_y: usize,
+        block_size: usize,
+        comp_block_sizes: &[usize],
+        crop_x: Option<usize>,
+        icc_profile: Option<Vec<u8>>,
+        exif_data: Option<Vec<u8>>,
+        warnings: Vec<DecodeWarning>,
+    ) -> Result<Image> {
+        let jpeg_color_space = self.detect_color_space();
+        let (required_components, geometry_components): (usize, usize) = match jpeg_color_space {
+            ColorSpace::Grayscale if frame.components.len() == 1 => (1, 1),
+            ColorSpace::YCbCr if frame.components.len() == 3 => (1, 3),
+            ColorSpace::Rgb if frame.components.len() == 3 => (3, 3),
+            other => {
+                return Err(JpegError::Unsupported(format!(
+                    "cannot convert {other:?} JPEG with {} components to grayscale (C: JERR_CONVERSION_NOTIMPL)",
+                    frame.components.len()
+                )));
+            }
+        };
+        if comp_block_sizes.len() < geometry_components {
+            return Err(JpegError::CorruptData(format!(
+                "{jpeg_color_space:?} grayscale conversion needs {geometry_components} component geometries, got {}",
+                comp_block_sizes.len()
+            )));
+        }
+        if component_planes.len() < required_components {
+            return Err(JpegError::CorruptData(format!(
+                "{jpeg_color_space:?} grayscale conversion needs {required_components} components, got {}",
+                component_planes.len()
+            )));
+        }
+        // Preserve P4-21's strict contract.  Grayscale needs only component
+        // 0, but a strict YCbCr decode still rejects streams where chroma
+        // out-samples luma; lenient mode is the opt-in that accepts them.
+        if !self.lenient && jpeg_color_space == ColorSpace::YCbCr {
+            let component_width = |index: usize| {
+                mcus_x
+                    * frame.components[index].horizontal_sampling as usize
+                    * comp_block_sizes[index]
+            };
+            let component_height = |index: usize| {
+                mcus_y
+                    * frame.components[index].vertical_sampling as usize
+                    * comp_block_sizes[index]
+            };
+            let luma_width = component_width(0);
+            let luma_height = component_height(0);
+            let cb_width = component_width(1);
+            let cb_height = component_height(1);
+            let cr_width = component_width(2);
+            let cr_height = component_height(2);
+            if [
+                luma_width,
+                luma_height,
+                cb_width,
+                cb_height,
+                cr_width,
+                cr_height,
+            ]
+            .contains(&0)
+            {
+                return Err(JpegError::CorruptData(
+                    "cannot validate grayscale sampling factors with zero component geometry"
+                        .into(),
+                ));
+            }
+            let cb_h_factor = luma_width / cb_width;
+            let cb_v_factor = luma_height / cb_height;
+            let cr_h_factor = luma_width / cr_width;
+            let cr_v_factor = luma_height / cr_height;
+            if cb_h_factor == 0 || cb_v_factor == 0 || cr_h_factor == 0 || cr_v_factor == 0 {
+                return Err(JpegError::CorruptData(format!(
+                    "chroma upsample factor zero (a chroma component out-samples luma): \
+                     cb={cb_h_factor}x{cb_v_factor} cr={cr_h_factor}x{cr_v_factor}"
+                )));
+            }
+        }
+
+        let mut full_planes: Vec<Cow<'_, [u8]>> = Vec::with_capacity(required_components);
+        let mut strides: Vec<usize> = Vec::with_capacity(required_components);
+        for (component_index, component_plane) in component_planes
+            .iter()
+            .take(required_components)
+            .enumerate()
+        {
+            let (full_plane, stride) = self.upsample_component_plane(
+                component_plane,
+                component_index,
+                frame,
+                mcus_x,
+                mcus_y,
+                comp_block_sizes,
+                full_width,
+                full_height,
+                uncropped_out_width,
+                out_height,
+                block_size,
+            )?;
+            full_planes.push(full_plane);
+            strides.push(stride);
+        }
+
+        let output_x_offset = crop_x.unwrap_or(0);
+        if output_x_offset.saturating_add(out_width) > full_width || out_height > full_height {
+            return Err(JpegError::CorruptData(format!(
+                "grayscale output region {output_x_offset}+{out_width}x{out_height} exceeds {full_width}x{full_height}"
+            )));
+        }
+        let mut data = Vec::with_capacity(out_width * out_height);
+        if jpeg_color_space == ColorSpace::Rgb {
+            for y in 0..out_height {
+                let red_row = &full_planes[0][y * strides[0]..];
+                let green_row = &full_planes[1][y * strides[1]..];
+                let blue_row = &full_planes[2][y * strides[2]..];
+                for x in output_x_offset..output_x_offset + out_width {
+                    // `jdcolor.c::rgb_gray_convert`: FIX(0.299) * R +
+                    // FIX(0.587) * G + FIX(0.114) * B + ONE_HALF, >> 16.
+                    let y_sample = (19595 * red_row[x] as u32
+                        + 38470 * green_row[x] as u32
+                        + 7471 * blue_row[x] as u32
+                        + 32768)
+                        >> 16;
+                    data.push(y_sample as u8);
+                }
+            }
+        } else {
+            for y in 0..out_height {
+                let row = &full_planes[0][y * strides[0] + output_x_offset
+                    ..y * strides[0] + output_x_offset + out_width];
+                data.extend_from_slice(row);
+            }
+        }
+
+        Ok(Image {
+            xmp_data: self.metadata.xmp_data.clone(),
+            iptc_data: self.metadata.iptc_data.clone(),
+            width: out_width,
+            height: out_height,
+            pixel_format: PixelFormat::Grayscale,
+            precision: 8,
+            data,
+            icc_profile,
+            exif_data,
+            comment: self.metadata.comment.clone(),
+            density: self.metadata.density,
+            saved_markers: self.metadata.saved_markers.clone(),
+            warnings,
+        })
     }
 
     /// Decode baseline (single-scan) into component planes.
@@ -4086,31 +4375,43 @@ impl<'a> Decoder<'a> {
                     PixelFormat::Rgb
                 })
                 .bytes_per_pixel();
-            let direct_rgb_expansion_planes: usize =
-                if nc == 3 && self.detect_color_space() == ColorSpace::Rgb {
-                    let max_h = frame
-                        .components
-                        .iter()
-                        .map(|component| component.horizontal_sampling)
-                        .max()
-                        .unwrap_or(1);
-                    let max_v = frame
-                        .components
-                        .iter()
-                        .map(|component| component.vertical_sampling)
-                        .max()
-                        .unwrap_or(1);
-                    frame
-                        .components
-                        .iter()
-                        .filter(|component| {
-                            component.horizontal_sampling != max_h
-                                || component.vertical_sampling != max_v
-                        })
-                        .count()
-                } else {
-                    0
+            let upsample_expansion_planes: usize = if nc == 3 {
+                let max_h = frame
+                    .components
+                    .iter()
+                    .map(|component| component.horizontal_sampling)
+                    .max()
+                    .unwrap_or(1);
+                let max_v = frame
+                    .components
+                    .iter()
+                    .map(|component| component.vertical_sampling)
+                    .max()
+                    .unwrap_or(1);
+                let is_subsampled = |component: &ComponentInfo| {
+                    component.horizontal_sampling != max_h || component.vertical_sampling != max_v
                 };
+                match self.detect_color_space() {
+                    // Direct RGB output and RGB→gray both need all three
+                    // component planes at full resolution.
+                    ColorSpace::Rgb => frame
+                        .components
+                        .iter()
+                        .filter(|component| is_subsampled(component))
+                        .count(),
+                    // YCbCr→gray only needs component 0, but P4-72 now
+                    // expands it when an unusual legal stream samples it
+                    // below another component.
+                    ColorSpace::YCbCr
+                        if self.effective_output_colorspace() == Some(ColorSpace::Grayscale) =>
+                    {
+                        usize::from(is_subsampled(&frame.components[0]))
+                    }
+                    _ => 0,
+                }
+            } else {
+                0
+            };
             // Progressive adds one [i16; 64] per 8x8 block per component
             // (~2 B/pixel/component) plus the ac_max_k byte per block —
             // without this term the ceiling under-enforced by ~1.5x on
@@ -4121,7 +4422,7 @@ impl<'a> Decoder<'a> {
                 0
             };
             let total_estimated: u64 = total_pixels
-                * (out_bpp as u64 + nc as u64 + direct_rgb_expansion_planes as u64)
+                * (out_bpp as u64 + nc as u64 + upsample_expansion_planes as u64)
                 + coeff_bytes;
             if total_estimated > max_mem {
                 return Err(JpegError::LimitExceeded {
@@ -4728,13 +5029,37 @@ impl<'a> Decoder<'a> {
 
         // Handle output colorspace override (with crop offsets applied)
         if let Some(cs) = self.effective_output_colorspace() {
+            if cs == ColorSpace::Grayscale {
+                return self.decode_grayscale_override(
+                    &component_planes,
+                    frame,
+                    out_width,
+                    out_height,
+                    uncropped_out_width,
+                    full_width,
+                    full_height,
+                    mcus_x,
+                    mcus_y,
+                    block_size,
+                    &comp_block_sizes,
+                    scaled_crop_x,
+                    icc_profile,
+                    exif_data,
+                    warnings,
+                );
+            }
+            if cs != ColorSpace::YCbCr {
+                return Err(JpegError::Unsupported(format!(
+                    "output colorspace {cs:?} not supported"
+                )));
+            }
             // No crop-X shift needed: hand the planes over as-is. The
             // clone below would double plane memory and blow through a
             // `set_max_memory` cap the limit check just approved
             // (codex P1 on #386) — only pay it when an offset exists.
             if comp_x_offsets.iter().all(|&off| off == 0) {
                 return crate::decode::toggles::decode_with_colorspace_override(
-                    cs,
+                    ColorSpace::YCbCr,
                     &component_planes,
                     frame,
                     out_width,
@@ -4778,7 +5103,7 @@ impl<'a> Decoder<'a> {
                 })
                 .collect();
             return crate::decode::toggles::decode_with_colorspace_override(
-                cs,
+                ColorSpace::YCbCr,
                 &cropped_planes,
                 frame,
                 out_width,
@@ -4938,21 +5263,6 @@ impl<'a> Decoder<'a> {
             let out_format = self.output_format.unwrap_or(PixelFormat::Rgb);
             let jpeg_color_space: ColorSpace = self.detect_color_space();
 
-            // Handle grayscale output request
-            if out_format == PixelFormat::Grayscale {
-                // Only non-YCbCr 3-component sources still land here: for
-                // YCbCr, `effective_output_colorspace` sends the request to
-                // the override path above, which emits component plane 0
-                // (#386). That shortcut is *not* valid here — plane 0 of a
-                // JCS_RGB stream is red, not luma (31/32 pixels off vs
-                // `djpeg -grayscale`), and the real RGB->gray conversion is
-                // not written yet (P4-72). Reject rather than emit the red
-                // channel as if it were luma.
-                return Err(JpegError::Unsupported(
-                    "cannot convert color JPEG to grayscale".to_string(),
-                ));
-            }
-
             // For RGB-colorspace JPEGs (e.g., cjpeg -rgb with Adobe APP14
             // transform=0), component planes store raw R,G,B — no YCbCr→RGB
             // conversion needed.  Interleave planes directly.
@@ -4967,94 +5277,24 @@ impl<'a> Decoder<'a> {
                 // component planes before interleaving them; treating G/B as
                 // full-size rows either truncates the planes or reads across
                 // row boundaries for every non-1x1 sampling mode.
-                let mut rgb_full: [Vec<u8>; 3] = core::array::from_fn(|_| Vec::new());
+                let mut rgb_full: Vec<Cow<'_, [u8]>> = Vec::with_capacity(3);
                 let mut rgb_strides: [usize; 3] = [0; 3];
                 for ci in 0..3 {
-                    let comp = &frame.components[ci];
-                    let comp_w = mcus_x * comp.horizontal_sampling as usize * comp_block_sizes[ci];
-                    let comp_h = mcus_y * comp.vertical_sampling as usize * comp_block_sizes[ci];
-                    if comp_w == 0 || comp_h == 0 {
-                        return Err(JpegError::CorruptData(format!(
-                            "zero RGB component plane dimensions for component {ci}"
-                        )));
-                    }
-                    let h_factor = full_width / comp_w;
-                    let v_factor = full_height / comp_h;
-                    if h_factor == 0 || v_factor == 0 {
-                        return Err(JpegError::CorruptData(format!(
-                            "RGB upsample factor zero for component {ci}: {h_factor}x{v_factor}"
-                        )));
-                    }
-
-                    if h_factor == 1 && v_factor == 1 {
-                        // The decoded component plane already has the required
-                        // resolution and stride. Borrow it directly below;
-                        // allocating and copying another full-size plane would
-                        // add three bytes per pixel for ordinary S444 RGB.
-                        rgb_strides[ci] = comp_w;
-                        continue;
-                    }
-
-                    let actual_w = uncropped_out_width.div_ceil(h_factor);
-                    let actual_h = out_height.div_ceil(v_factor);
-                    if actual_h > comp_h || actual_w > comp_w {
-                        return Err(JpegError::CorruptData(format!(
-                            "RGB component {ci} active area exceeds its plane: actual={actual_w}x{actual_h}, plane={comp_w}x{comp_h}"
-                        )));
-                    }
-                    rgb_full[ci] = vec![0u8; full_width * full_height];
-                    rgb_strides[ci] = full_width;
-                    // Repack away right-edge MCU padding, but retain the full
-                    // horizontal image. Fancy filters need samples on both
-                    // sides of a crop boundary to match jpeg_crop_scanline.
-                    let mut active = Vec::with_capacity(actual_w * actual_h);
-                    for row in 0..actual_h {
-                        let start = row * comp_w;
-                        active.extend_from_slice(&component_planes[ci][start..start + actual_w]);
-                    }
-
-                    let use_box_filter =
-                        self.fast_upsample || (actual_w <= 2 && h_factor >= 2) || block_size == 1;
-                    if use_box_filter {
-                        upsample_generic_nearest(
-                            &active,
-                            actual_w,
-                            actual_h,
-                            &mut rgb_full[ci],
-                            full_width,
-                            h_factor,
-                            v_factor,
-                        );
-                    } else if h_factor == 2 && v_factor == 1 {
-                        for row in 0..actual_h {
-                            self.fancy_upsample_h2v1(
-                                &active[row * actual_w..],
-                                actual_w,
-                                &mut rgb_full[ci][row * full_width..],
-                            );
-                        }
-                    } else if h_factor == 2 && v_factor == 2 {
-                        fancy_h2v2_strided_dispatch(
-                            &active,
-                            actual_w,
-                            actual_w,
-                            actual_h,
-                            &mut rgb_full[ci],
-                            full_width,
-                        );
-                    } else if h_factor == 1 && v_factor == 2 {
-                        self.fancy_h1v2(&active, actual_w, actual_h, &mut rgb_full[ci], full_width);
-                    } else {
-                        upsample_generic_nearest(
-                            &active,
-                            actual_w,
-                            actual_h,
-                            &mut rgb_full[ci],
-                            full_width,
-                            h_factor,
-                            v_factor,
-                        );
-                    }
+                    let (full_plane, stride) = self.upsample_component_plane(
+                        &component_planes[ci],
+                        ci,
+                        frame,
+                        mcus_x,
+                        mcus_y,
+                        &comp_block_sizes,
+                        full_width,
+                        full_height,
+                        uncropped_out_width,
+                        out_height,
+                        block_size,
+                    )?;
+                    rgb_full.push(full_plane);
+                    rgb_strides[ci] = stride;
                 }
 
                 let bytes_per_pixel: usize = out_format.bytes_per_pixel();
@@ -5062,21 +5302,9 @@ impl<'a> Decoder<'a> {
                 let mut data = take_out_buf(sink, data_size)?;
                 let output_x_offset: usize = scaled_crop_x.unwrap_or(0);
                 for y in 0..out_height {
-                    let r_plane: &[u8] = if rgb_full[0].is_empty() {
-                        &component_planes[0]
-                    } else {
-                        &rgb_full[0]
-                    };
-                    let g_plane: &[u8] = if rgb_full[1].is_empty() {
-                        &component_planes[1]
-                    } else {
-                        &rgb_full[1]
-                    };
-                    let b_plane: &[u8] = if rgb_full[2].is_empty() {
-                        &component_planes[2]
-                    } else {
-                        &rgb_full[2]
-                    };
+                    let r_plane: &[u8] = &rgb_full[0];
+                    let g_plane: &[u8] = &rgb_full[1];
+                    let b_plane: &[u8] = &rgb_full[2];
                     let r_row: &[u8] = &r_plane[y * rgb_strides[0]..];
                     let g_row: &[u8] = &g_plane[y * rgb_strides[1]..];
                     let b_row: &[u8] = &b_plane[y * rgb_strides[2]..];

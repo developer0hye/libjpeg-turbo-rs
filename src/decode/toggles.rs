@@ -561,7 +561,12 @@ pub fn apply_block_smoothing_coeffs(
     }
 }
 
-/// Decode with output colorspace override.
+/// Decode with an output colorspace override.
+///
+/// This public low-level entry point predates `Decoder`'s complete grayscale
+/// conversion path. Its grayscale arm retains the legacy component-0 behavior
+/// for API compatibility; callers that need colorspace-aware RGB-to-gray or
+/// component upsampling should configure [`crate::Decoder`] instead.
 #[allow(clippy::too_many_arguments)]
 pub fn decode_with_colorspace_override(
     target_cs: ColorSpace,
@@ -580,94 +585,76 @@ pub fn decode_with_colorspace_override(
     saved_markers: Vec<SavedMarker>,
     warnings: Vec<DecodeWarning>,
 ) -> Result<Image> {
-    match target_cs {
-        ColorSpace::Grayscale => {
-            let cw: usize =
-                mcus_x * frame.components[0].horizontal_sampling as usize * comp_block_sizes[0];
-            // Component 0 is not required to carry the max sampling
-            // factor (read_sof only validates 1..=4), so its plane can
-            // be narrower or shorter than the output geometry — e.g. a
-            // VALID `cjpeg -sample 1x1,2x2,1x1` stream decodes to RGB
-            // under `set_lenient(true)` (strict decode is rejected
-            // earlier by P4-21's chroma-out-samples-luma guard), but
-            // plane 0 is quarter-size. Slicing blindly panicked
-            // (#386 review P1). C handles this by running component 0
-            // through the upsampler before gray output; until that
-            // lands (P4-72) the request is refused as Unsupported —
-            // the input is legal, our conversion is what's missing.
-            if cw < out_width || component_planes[0].len() < out_height.saturating_mul(cw) {
-                return Err(JpegError::Unsupported(format!(
-                    "grayscale output from a source whose component 0 is subsampled \
-                     (plane width {} vs output {}x{}) is not implemented yet (P4-72)",
-                    cw, out_width, out_height
-                )));
-            }
-            let mut data: Vec<u8> = Vec::with_capacity(out_width * out_height);
-            for y in 0..out_height {
-                data.extend_from_slice(&component_planes[0][y * cw..y * cw + out_width]);
-            }
-            Ok(Image {
-                xmp_data: xmp_data.clone(),
-                iptc_data: iptc_data.clone(),
-                width: out_width,
-                height: out_height,
-                pixel_format: PixelFormat::Grayscale,
-                precision: 8,
-                data,
-                icc_profile,
-                exif_data,
-                comment,
-                density,
-                saved_markers,
-                warnings,
-            })
+    if target_cs == ColorSpace::Grayscale {
+        let cw: usize =
+            mcus_x * frame.components[0].horizontal_sampling as usize * comp_block_sizes[0];
+        if cw < out_width || component_planes[0].len() < out_height.saturating_mul(cw) {
+            return Err(JpegError::Unsupported(format!(
+                "legacy grayscale override requires a full-resolution component 0 plane (plane width {cw} vs output {out_width}x{out_height}); use Decoder's grayscale output instead"
+            )));
         }
-        ColorSpace::YCbCr => {
-            if frame.components.len() < 3 {
-                return Err(JpegError::Unsupported(
-                    "YCbCr output requires 3+ components".into(),
-                ));
-            }
-            let cw: usize =
-                mcus_x * frame.components[0].horizontal_sampling as usize * comp_block_sizes[0];
-            let cbw: usize =
-                mcus_x * frame.components[1].horizontal_sampling as usize * comp_block_sizes[1];
-            // Effective upsample factors considering per-component IDCT sizes
-            let hf: usize = cw / cbw;
-            let vf: usize = (frame.components[0].vertical_sampling as usize * comp_block_sizes[0])
-                / (frame.components[1].vertical_sampling as usize * comp_block_sizes[1]);
-            let mut data: Vec<u8> = Vec::with_capacity(out_width * out_height * 3);
-            for y in 0..out_height {
-                for x in 0..out_width {
-                    data.push(component_planes[0][y * cw + x]);
-                    let cx: usize = (x / hf).min(cbw.saturating_sub(1));
-                    let cy: usize =
-                        (y / vf).min((component_planes[1].len() / cbw).saturating_sub(1));
-                    data.push(component_planes[1][cy * cbw + cx]);
-                    data.push(component_planes[2][cy * cbw + cx]);
-                }
-            }
-            Ok(Image {
-                xmp_data: xmp_data.clone(),
-                iptc_data: iptc_data.clone(),
-                width: out_width,
-                height: out_height,
-                pixel_format: PixelFormat::Rgb,
-                precision: 8,
-                data,
-                icc_profile,
-                exif_data,
-                comment,
-                density,
-                saved_markers,
-                warnings,
-            })
+        let mut data: Vec<u8> = Vec::with_capacity(out_width * out_height);
+        for y in 0..out_height {
+            data.extend_from_slice(&component_planes[0][y * cw..y * cw + out_width]);
         }
-        _ => Err(JpegError::Unsupported(format!(
-            "output colorspace {:?} not supported",
-            target_cs
-        ))),
+        return Ok(Image {
+            xmp_data,
+            iptc_data,
+            width: out_width,
+            height: out_height,
+            pixel_format: PixelFormat::Grayscale,
+            precision: 8,
+            data,
+            icc_profile,
+            exif_data,
+            comment,
+            density,
+            saved_markers,
+            warnings,
+        });
     }
+    if target_cs != ColorSpace::YCbCr {
+        return Err(JpegError::Unsupported(format!(
+            "output colorspace {target_cs:?} not supported"
+        )));
+    }
+    if frame.components.len() < 3 {
+        return Err(JpegError::Unsupported(
+            "YCbCr output requires 3+ components".into(),
+        ));
+    }
+    let cw: usize = mcus_x * frame.components[0].horizontal_sampling as usize * comp_block_sizes[0];
+    let cbw: usize =
+        mcus_x * frame.components[1].horizontal_sampling as usize * comp_block_sizes[1];
+    // Effective upsample factors considering per-component IDCT sizes
+    let hf: usize = cw / cbw;
+    let vf: usize = (frame.components[0].vertical_sampling as usize * comp_block_sizes[0])
+        / (frame.components[1].vertical_sampling as usize * comp_block_sizes[1]);
+    let mut data: Vec<u8> = Vec::with_capacity(out_width * out_height * 3);
+    for y in 0..out_height {
+        for x in 0..out_width {
+            data.push(component_planes[0][y * cw + x]);
+            let cx: usize = (x / hf).min(cbw.saturating_sub(1));
+            let cy: usize = (y / vf).min((component_planes[1].len() / cbw).saturating_sub(1));
+            data.push(component_planes[1][cy * cbw + cx]);
+            data.push(component_planes[2][cy * cbw + cx]);
+        }
+    }
+    Ok(Image {
+        xmp_data,
+        iptc_data,
+        width: out_width,
+        height: out_height,
+        pixel_format: PixelFormat::Rgb,
+        precision: 8,
+        data,
+        icc_profile,
+        exif_data,
+        comment,
+        density,
+        saved_markers,
+        warnings,
+    })
 }
 
 #[cfg(test)]

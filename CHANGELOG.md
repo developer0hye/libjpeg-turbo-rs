@@ -8,7 +8,10 @@ and `git log` between tags.
 
 ## [Unreleased]
 
-Nothing yet.
+### Fixed
+- `Decoder` grayscale output requests now match libjpeg-turbo for JCS_RGB
+  input and for legal streams whose component 0 requires upsampling, rather
+  than treating red as luma or rejecting the conversion.
 
 ## [0.8.0] - 2026-07-28
 

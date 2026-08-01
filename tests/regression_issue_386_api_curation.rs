@@ -4,9 +4,83 @@
 
 mod helpers;
 
-use libjpeg_turbo_rs::{probe, Decoder, Image, PixelFormat, Subsampling};
+use libjpeg_turbo_rs::{probe, Decoder, Image, JpegError, PixelFormat, Subsampling};
 
 const FIXTURE: &[u8] = include_bytes!("fixtures/photo_640x480_420.jpg");
+
+fn djpeg_grayscale_pixels(djpeg: &std::path::Path, jpeg: &[u8]) -> Vec<u8> {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let src = dir.path().join("grayscale_source.jpg");
+    std::fs::write(&src, jpeg).expect("write grayscale source");
+    let out = std::process::Command::new(djpeg)
+        .arg("-grayscale")
+        .arg("-pnm")
+        .arg(&src)
+        .output()
+        .expect("run djpeg -grayscale");
+    assert!(
+        out.status.success(),
+        "djpeg -grayscale failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    // PGM: `P5\n<w> <h>\n255\n` followed by the grayscale samples.
+    let header_end: usize = out
+        .stdout
+        .iter()
+        .enumerate()
+        .filter(|&(_, byte)| *byte == b'\n')
+        .map(|(index, _)| index)
+        .nth(2)
+        .expect("PGM header")
+        + 1;
+    out.stdout[header_end..].to_vec()
+}
+
+fn djpeg_grayscale_rejection(djpeg: &std::path::Path, jpeg: &[u8]) -> String {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let src = dir.path().join("invalid_grayscale_source.jpg");
+    std::fs::write(&src, jpeg).expect("write invalid grayscale source");
+    let out = std::process::Command::new(djpeg)
+        .arg("-grayscale")
+        .arg("-pnm")
+        .arg(&src)
+        .output()
+        .expect("run djpeg -grayscale on invalid source");
+    assert!(
+        !out.status.success(),
+        "djpeg must reject the same malformed grayscale source"
+    );
+    String::from_utf8_lossy(&out.stderr).into_owned()
+}
+
+fn cjpeg_with_sampling(
+    cjpeg: &std::path::Path,
+    sampling: &str,
+    width: usize,
+    height: usize,
+    rgb: &[u8],
+) -> Vec<u8> {
+    assert_eq!(rgb.len(), width * height * 3);
+    let dir = tempfile::tempdir().expect("tempdir");
+    let src = dir.path().join("sampled_source.ppm");
+    let mut ppm: Vec<u8> = format!("P6\n{width} {height}\n255\n").into_bytes();
+    ppm.extend_from_slice(rgb);
+    std::fs::write(&src, ppm).expect("write sampled PPM source");
+    let out = std::process::Command::new(cjpeg)
+        .arg("-quality")
+        .arg("95")
+        .arg("-sample")
+        .arg(sampling)
+        .arg(&src)
+        .output()
+        .expect("run cjpeg with explicit sampling");
+    assert!(
+        out.status.success(),
+        "cjpeg -sample {sampling} failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    out.stdout
+}
 
 /// Splice an EXIF APP1 segment (orientation tag only) right after SOI,
 /// same layout the issue-#391 regression tests use.
@@ -209,106 +283,209 @@ fn grayscale_output_format_matches_colorspace_route_and_djpeg() {
     );
 
     let djpeg: std::path::PathBuf = require_c_tool!("djpeg");
-    let dir = tempfile::tempdir().expect("tempdir");
-    let src = dir.path().join("gray_fixture.jpg");
-    std::fs::write(&src, FIXTURE).expect("write fixture");
-    let out = std::process::Command::new(&djpeg)
-        .arg("-grayscale")
-        .arg("-pnm")
-        .arg(&src)
-        .output()
-        .expect("run djpeg");
-    assert!(out.status.success(), "djpeg -grayscale failed");
-    // PGM: "P5\n<w> <h>\n255\n" then w*h luma bytes.
-    let header_end: usize = out
-        .stdout
-        .iter()
-        .enumerate()
-        .filter(|&(_, b)| *b == b'\n')
-        .map(|(i, _)| i)
-        .nth(2)
-        .expect("PGM header")
-        + 1;
-    let c_pixels: &[u8] = &out.stdout[header_end..];
+    let c_pixels: Vec<u8> = djpeg_grayscale_pixels(&djpeg, FIXTURE);
     assert_eq!(c_pixels.len(), img_format.data.len());
     assert_eq!(
-        c_pixels,
+        &c_pixels,
         &img_format.data[..],
         "gray output must be pixel-identical to djpeg -grayscale (diff=0)"
     );
 }
 
-/// Codex P1 on #386: the implied gray route must NOT trigger for
-/// JCS_RGB sources — the override's gray path emits component plane 0,
-/// which is RED there, not luma. Until a real RGB→gray conversion
-/// exists (P4-72), the request must fail loudly instead of returning
-/// wrong pixels.
+/// P4-72: component plane 0 of a JCS_RGB stream is RED, not luma. Both
+/// grayscale request routes must run libjpeg's RGB→gray conversion instead
+/// of copying that plane.
 #[test]
-fn grayscale_output_format_rejects_rgb_colorspace_source() {
-    let rgb: Vec<u8> = (0..32u32 * 32 * 3).map(|i| (i * 7) as u8).collect();
-    let jpeg: Vec<u8> = libjpeg_turbo_rs::Encoder::new(&rgb, 32, 32, PixelFormat::Rgb)
-        .colorspace(libjpeg_turbo_rs::ColorSpace::Rgb)
-        .quality(95)
-        .encode()
-        .expect("encode JCS_RGB source");
-    assert_eq!(
-        probe(&jpeg).expect("probe").color_space,
-        libjpeg_turbo_rs::ColorSpace::Rgb,
-        "fixture must really be a JCS_RGB stream"
-    );
+fn grayscale_output_converts_rgb_colorspace_source_like_djpeg() {
+    let djpeg: std::path::PathBuf = require_c_tool!("djpeg");
+    let width: usize = 33;
+    let height: usize = 21;
+    let rgb: Vec<u8> = (0..width * height)
+        .flat_map(|index| {
+            let x: usize = index % width;
+            let y: usize = index / width;
+            [
+                (x * 13 + y * 29) as u8,
+                (x * 31 + y * 7) as u8,
+                (x * 3 + y * 17) as u8,
+            ]
+        })
+        .collect();
 
-    let mut decoder = Decoder::new(&jpeg).expect("decoder");
-    decoder.set_output_format(PixelFormat::Grayscale);
-    let result = decoder.decode_image();
-    assert!(
-        matches!(result, Err(libjpeg_turbo_rs::JpegError::Unsupported(_))),
-        "gray from a JCS_RGB source must raise Unsupported, got {result:?}"
-    );
+    for subsampling in [Subsampling::S444, Subsampling::S420] {
+        let jpeg: Vec<u8> = libjpeg_turbo_rs::Encoder::new(&rgb, width, height, PixelFormat::Rgb)
+            .colorspace(libjpeg_turbo_rs::ColorSpace::Rgb)
+            .subsampling(subsampling)
+            .quality(95)
+            .encode()
+            .expect("encode JCS_RGB source");
+        let info = probe(&jpeg).expect("probe");
+        assert_eq!(
+            info.color_space,
+            libjpeg_turbo_rs::ColorSpace::Rgb,
+            "fixture must really be a JCS_RGB stream"
+        );
+        assert_eq!(
+            info.subsampling, subsampling,
+            "fixture must retain the requested {subsampling:?} sampling"
+        );
+        let expected: Vec<u8> = djpeg_grayscale_pixels(&djpeg, &jpeg);
+
+        for route in ["output_format", "output_colorspace"] {
+            let mut decoder = Decoder::new(&jpeg).expect("decoder");
+            match route {
+                "output_format" => decoder.set_output_format(PixelFormat::Grayscale),
+                _ => decoder.set_output_colorspace(libjpeg_turbo_rs::ColorSpace::Grayscale),
+            }
+            let image: Image = decoder.decode_image().unwrap_or_else(|error| {
+                panic!("gray via {route} for {subsampling:?} failed: {error}")
+            });
+            assert_eq!(image.pixel_format, PixelFormat::Grayscale);
+            assert_eq!(
+                image.data, expected,
+                "gray via {route} for {subsampling:?} must be pixel-identical to djpeg -grayscale"
+            );
+        }
+    }
 }
 
-/// Review P1 on #386: component 0 is not required to carry the max
-/// sampling factor. With comp0=1x1 and comp1=2x2 the stream decodes to
-/// RGB under `set_lenient(true)` (strict decode is rejected earlier by
-/// P4-21's chroma-out-samples-luma guard), but plane 0 is quarter-size
-/// — the gray output arm used to slice past it and panic (`range end
-/// index 77120 out of range`). Both gray routes must return an error,
-/// never panic.
+/// P4-72: component 0 is not required to carry the max sampling factor.
+/// With comp0=1x1 and comp1=2x2, lenient decode must upsample plane 0 before
+/// emitting gray. Strict mode must continue to enforce P4-21's
+/// chroma-out-samples-luma guard.
 #[test]
-fn grayscale_output_rejects_subsampled_component0_without_panicking() {
-    // Patch the SOF0 sampling bytes: comp0 2x2 -> 1x1, comp1 1x1 -> 2x2.
-    let mut jpeg: Vec<u8> = FIXTURE.to_vec();
-    let sof: usize = jpeg
-        .windows(2)
-        .position(|w| w == [0xFF, 0xC0])
-        .expect("baseline SOF0 in fixture");
-    // SOF0 layout: FF C0 len(2) prec(1) h(2) w(2) ncomp(1), then per
-    // component: id(1) sampling(1) qtbl(1).
-    let comp0_sampling: usize = sof + 11;
-    let comp1_sampling: usize = comp0_sampling + 3;
-    assert_eq!(jpeg[comp0_sampling], 0x22, "fixture must start as 4:2:0");
-    jpeg[comp0_sampling] = 0x11;
-    jpeg[comp1_sampling] = 0x22;
+fn grayscale_output_upsamples_subsampled_component0_like_djpeg() {
+    let djpeg: std::path::PathBuf = require_c_tool!("djpeg");
+    let cjpeg: std::path::PathBuf = require_c_tool!("cjpeg");
+    let width: usize = 33;
+    let height: usize = 21;
+    let rgb: Vec<u8> = (0..width * height)
+        .flat_map(|index| {
+            let x: usize = index % width;
+            let y: usize = index / width;
+            [
+                (x * 17 + y * 3) as u8,
+                (x * 5 + y * 19) as u8,
+                (x * 11 + y * 7) as u8,
+            ]
+        })
+        .collect();
+    let jpeg: Vec<u8> = cjpeg_with_sampling(&cjpeg, "1x1,2x2,1x1", width, height, &rgb);
 
     let mut rgb_ok = Decoder::new(&jpeg).expect("decoder");
     rgb_ok.set_lenient(true);
     rgb_ok
         .decode_image()
-        .expect("the patched stream itself must stay decodable to RGB");
+        .expect("the unusual sampled stream itself must stay decodable to RGB");
+    let expected: Vec<u8> = djpeg_grayscale_pixels(&djpeg, &jpeg);
 
     for route in ["output_format", "output_colorspace"] {
+        let mut strict = Decoder::new(&jpeg).expect("strict decoder");
+        match route {
+            "output_format" => strict.set_output_format(PixelFormat::Grayscale),
+            _ => strict.set_output_colorspace(libjpeg_turbo_rs::ColorSpace::Grayscale),
+        }
+        match strict.decode_image() {
+            Err(JpegError::CorruptData(message)) => assert!(
+                message.contains("chroma upsample factor zero")
+                    && message.contains("out-samples luma"),
+                "strict gray via {route} returned the wrong corruption reason: {message}"
+            ),
+            Err(error) => panic!("strict gray via {route} returned the wrong error: {error}"),
+            Ok(_) => panic!("strict gray via {route} must retain the P4-21 rejection"),
+        }
+
         let mut decoder = Decoder::new(&jpeg).expect("decoder");
         decoder.set_lenient(true);
         match route {
             "output_format" => decoder.set_output_format(PixelFormat::Grayscale),
             _ => decoder.set_output_colorspace(libjpeg_turbo_rs::ColorSpace::Grayscale),
         }
-        let result = decoder.decode_image();
-        assert!(
-            matches!(result, Err(libjpeg_turbo_rs::JpegError::Unsupported(_))),
-            "gray via {route} with quarter-size comp0 must raise Unsupported \
-             (the stream is valid; the conversion is missing, P4-72), got {result:?}"
+        let image: Image = decoder
+            .decode_image()
+            .unwrap_or_else(|error| panic!("lenient gray via {route} failed: {error}"));
+        assert_eq!(image.pixel_format, PixelFormat::Grayscale);
+        assert_eq!(
+            image.data, expected,
+            "lenient gray via {route} must upsample component 0 like djpeg"
         );
     }
+}
+
+/// P4-72's strict P4-21 recheck must not divide by zero while a legal
+/// zero-height SOF is still waiting for a DNL marker to define its height.
+#[test]
+fn grayscale_output_zero_height_sof_never_panics() {
+    let djpeg: std::path::PathBuf = require_c_tool!("djpeg");
+    let mut jpeg = FIXTURE.to_vec();
+    let sof = jpeg
+        .windows(2)
+        .position(|bytes| bytes == [0xFF, 0xC0])
+        .expect("baseline SOF0 marker");
+    jpeg[sof + 5] = 0;
+    jpeg[sof + 6] = 0;
+    assert!(
+        djpeg_grayscale_rejection(&djpeg, &jpeg).contains("Empty JPEG image"),
+        "C must reject the unresolved-DNL source as an empty image"
+    );
+
+    let decoded = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let mut decoder = Decoder::new(&jpeg).expect("zero-height SOF header is DNL-capable");
+        decoder.set_output_format(PixelFormat::Grayscale);
+        decoder.decode_image()
+    }));
+    assert!(
+        decoded.is_ok(),
+        "zero-height grayscale decode must not panic"
+    );
+    assert!(
+        decoded.expect("panic checked").is_err(),
+        "a stream without the required DNL must be rejected"
+    );
+}
+
+/// Explicit grayscale output must reject a non-standard two-component source
+/// without indexing a third YCbCr component that is not present.
+#[test]
+fn grayscale_output_two_component_frame_never_panics() {
+    let djpeg: std::path::PathBuf = require_c_tool!("djpeg");
+    let mut jpeg = FIXTURE.to_vec();
+    let sof = jpeg
+        .windows(2)
+        .position(|bytes| bytes == [0xFF, 0xC0])
+        .expect("baseline SOF0 marker");
+    jpeg[sof + 3] = 14;
+    jpeg[sof + 5] = 0;
+    jpeg[sof + 6] = 0;
+    jpeg[sof + 9] = 2;
+    jpeg.drain(sof + 16..sof + 19);
+
+    let sos = jpeg
+        .windows(2)
+        .position(|bytes| bytes == [0xFF, 0xDA])
+        .expect("baseline SOS marker");
+    jpeg[sos + 3] = 10;
+    jpeg[sos + 4] = 2;
+    jpeg.drain(sos + 9..sos + 11);
+    let c_error = djpeg_grayscale_rejection(&djpeg, &jpeg);
+    assert!(
+        !c_error.trim().is_empty(),
+        "C rejection must include a diagnostic"
+    );
+
+    let decoded = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let mut decoder = Decoder::new(&jpeg)?;
+        decoder.set_output_colorspace(libjpeg_turbo_rs::ColorSpace::Grayscale);
+        decoder.decode_image()
+    }));
+    assert!(
+        decoded.is_ok(),
+        "two-component grayscale decode must not panic"
+    );
+    assert!(
+        decoded.expect("panic checked").is_err(),
+        "a two-component source must be rejected"
+    );
 }
 
 #[test]
