@@ -28,6 +28,9 @@ use std::sync::atomic::{AtomicI32, AtomicUsize, Ordering};
 
 use libloading::Library;
 
+#[path = "support/cdylib.rs"]
+mod cdylib_support;
+
 const JMSG_STR_PARM_MAX: usize = 80;
 
 #[repr(C)]
@@ -49,34 +52,7 @@ struct JpegErrorMgrLayout {
 }
 
 fn cdylib_path() -> std::path::PathBuf {
-    let workspace_root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .unwrap()
-        .parent()
-        .unwrap()
-        .to_path_buf();
-    let candidates = [
-        workspace_root.join("target/release/liblibjpeg_turbo_rs_capi.dylib"),
-        workspace_root.join("target/release/liblibjpeg_turbo_rs_capi.so"),
-        workspace_root.join("target/release/libjpeg_turbo_rs_capi.dll"),
-    ];
-    for c in &candidates {
-        if c.exists() {
-            return c.clone();
-        }
-    }
-    let status = std::process::Command::new(env!("CARGO"))
-        .args(["build", "-p", "libjpeg-turbo-rs-capi", "--release"])
-        .current_dir(&workspace_root)
-        .status()
-        .expect("cargo build");
-    assert!(status.success(), "cargo build failed");
-    for c in &candidates {
-        if c.exists() {
-            return c.clone();
-        }
-    }
-    panic!("cdylib not found after build");
+    cdylib_support::cdylib_path()
 }
 
 /// Hand-crafted tables-only JPEG: SOI + minimal DQT + minimal DHT + EOI.

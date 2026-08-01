@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # FFI B9-4: run stock djpeg/cjpeg/jpegtran linked against OUR shim over
-# references/libjpeg-turbo/testimages/*.jpg, compare byte-for-byte against
-# the system-installed stock libjpeg-turbo binaries.
+# references/libjpeg-turbo/testimages/*.jpg. djpeg/jpegtran must match the
+# system binaries byte-for-byte; cjpeg may instead stock-decode identically.
 #
 # Outputs a machine-readable TSV to stdout with one line per test:
 #   tool\timage\tpass|fail\treason_if_fail
@@ -38,7 +38,7 @@ if [[ -z "${STOCK_BIN:-}" ]]; then
         fi
     fi
 fi
-TESTIMAGES="$REPO_ROOT/references/libjpeg-turbo/testimages"
+TESTIMAGES="${TESTIMAGES:-$REPO_ROOT/references/libjpeg-turbo/testimages}"
 
 if [[ ! -x "$OUR_BUILD/djpeg" ]]; then
     echo "ERROR: our-linked djpeg not found at $OUR_BUILD/djpeg; run build.sh first" >&2
@@ -110,8 +110,18 @@ fi
 # global LD_LIBRARY_PATH would silently make the reference side load
 # our shim and turn the byte comparison into Rust-vs-Rust.
 run_ours() {
-    DYLD_LIBRARY_PATH="$LOADER_DIR" \
-    LD_LIBRARY_PATH="$LOADER_DIR" \
+    env -u LD_PRELOAD -u DYLD_INSERT_LIBRARIES \
+        DYLD_LIBRARY_PATH="$LOADER_DIR" \
+        LD_LIBRARY_PATH="$LOADER_DIR" \
+        "$@"
+}
+
+# The reference side must never inherit a loader override from the caller.
+# Otherwise a directory containing our libjpeg-compatible SONAME can turn the
+# comparison into Rust-vs-Rust while still printing stock-looking commands.
+run_stock() {
+    env -u DYLD_LIBRARY_PATH -u LD_LIBRARY_PATH \
+        -u LD_PRELOAD -u DYLD_INSERT_LIBRARIES \
         "$@"
 }
 STOCK_DJPEG="${STOCK_DJPEG:-$STOCK_BIN/djpeg}"
@@ -126,28 +136,38 @@ for bin in "$STOCK_DJPEG" "$STOCK_CJPEG" "$STOCK_JPEGTRAN"; do
 done
 
 FAIL=0
+FIXTURE_COUNT=0
+CASE_COUNT=0
+
+pass_case() {
+    printf '%s\t%s\tpass\t%s\n' "$1" "$2" "${3:-}"
+    CASE_COUNT=$((CASE_COUNT + 1))
+}
+
+fail_case() {
+    printf '%s\t%s\tfail\t%s\n' "$1" "$2" "$3"
+    CASE_COUNT=$((CASE_COUNT + 1))
+    FAIL=$((FAIL + 1))
+}
+
 for img in "$TESTIMAGES"/*.jpg; do
     [[ -f "$img" ]] || continue
+    FIXTURE_COUNT=$((FIXTURE_COUNT + 1))
     name="$(basename "$img" .jpg)"
+    ours_jpg=""
 
     # ------- decode: djpeg (our-linked) vs djpeg (stock) -------
     ours_ppm="$WORK/${name}.ours.ppm"
     stock_ppm="$WORK/${name}.stock.ppm"
     if ! run_ours "$OUR_DJPEG" -outfile "$ours_ppm" "$img" 2>"$WORK/djpeg_err_ours.log"; then
-        echo -e "djpeg\t${name}\tfail\tours_crashed"
-        FAIL=$((FAIL + 1))
-        continue
-    fi
-    if ! "$STOCK_DJPEG" -outfile "$stock_ppm" "$img" 2>"$WORK/djpeg_err_stock.log"; then
-        echo -e "djpeg\t${name}\tskip\tstock_failed"
-        continue
-    fi
-    if cmp -s "$ours_ppm" "$stock_ppm"; then
-        echo -e "djpeg\t${name}\tpass\t"
+        fail_case djpeg "$name" ours_crashed
+    elif ! run_stock "$STOCK_DJPEG" -outfile "$stock_ppm" "$img" 2>"$WORK/djpeg_err_stock.log"; then
+        fail_case djpeg "$name" stock_failed
+    elif cmp -s "$ours_ppm" "$stock_ppm"; then
+        pass_case djpeg "$name"
     else
         sz_o=$(wc -c < "$ours_ppm"); sz_s=$(wc -c < "$stock_ppm")
-        echo -e "djpeg\t${name}\tfail\tbytes_differ_ours=${sz_o}_stock=${sz_s}"
-        FAIL=$((FAIL + 1))
+        fail_case djpeg "$name" "bytes_differ_ours=${sz_o}_stock=${sz_s}"
     fi
 
     # ------- encode: cjpeg (our-linked) vs cjpeg (stock) over ours_ppm -------
@@ -155,30 +175,38 @@ for img in "$TESTIMAGES"/*.jpg; do
         ours_jpg="$WORK/${name}.ours.jpg"
         stock_jpg="$WORK/${name}.stock.jpg"
         if ! run_ours "$OUR_CJPEG" -outfile "$ours_jpg" "$ours_ppm" 2>"$WORK/cjpeg_err_ours.log"; then
-            echo -e "cjpeg\t${name}\tfail\tours_crashed"
-            FAIL=$((FAIL + 1))
-        elif ! "$STOCK_CJPEG" -outfile "$stock_jpg" "$ours_ppm" 2>"$WORK/cjpeg_err_stock.log"; then
-            echo -e "cjpeg\t${name}\tskip\tstock_failed"
+            fail_case cjpeg "$name" ours_crashed
+        elif ! run_stock "$STOCK_CJPEG" -outfile "$stock_jpg" "$ours_ppm" 2>"$WORK/cjpeg_err_stock.log"; then
+            fail_case cjpeg "$name" stock_failed
         else
             if cmp -s "$ours_jpg" "$stock_jpg"; then
-                echo -e "cjpeg\t${name}\tpass\tbyte_exact"
+                pass_case cjpeg "$name" byte_exact
             else
-                # Encode byte-exactness is aspirational; accept PSNR>50dB by
-                # roundtripping both outputs through stock djpeg and diffing.
+                # When encoder bytes differ, require their stock-decoded
+                # outputs to be identical (equivalent to infinite PSNR).
                 ours_rt="$WORK/${name}.ours.rt.ppm"
                 stock_rt="$WORK/${name}.stock.rt.ppm"
-                "$STOCK_DJPEG" -outfile "$ours_rt"  "$ours_jpg"  || true
-                "$STOCK_DJPEG" -outfile "$stock_rt" "$stock_jpg" || true
-                if [[ -f "$ours_rt" && -f "$stock_rt" ]] && cmp -s "$ours_rt" "$stock_rt"; then
-                    echo -e "cjpeg\t${name}\tpass\troundtrip_identical"
+                ours_rt_ok=0
+                stock_rt_ok=0
+                if run_stock "$STOCK_DJPEG" -outfile "$ours_rt" "$ours_jpg"; then
+                    ours_rt_ok=1
+                fi
+                if run_stock "$STOCK_DJPEG" -outfile "$stock_rt" "$stock_jpg"; then
+                    stock_rt_ok=1
+                fi
+                if (( ours_rt_ok == 0 || stock_rt_ok == 0 )); then
+                    fail_case cjpeg "$name" stock_roundtrip_failed
+                elif [[ -f "$ours_rt" && -f "$stock_rt" ]] && cmp -s "$ours_rt" "$stock_rt"; then
+                    pass_case cjpeg "$name" roundtrip_identical
                 else
                     sz_o=$(wc -c < "$ours_jpg" 2>/dev/null || echo 0)
                     sz_s=$(wc -c < "$stock_jpg" 2>/dev/null || echo 0)
-                    echo -e "cjpeg\t${name}\tfail\tbytes_differ_ours=${sz_o}_stock=${sz_s}"
-                    FAIL=$((FAIL + 1))
+                    fail_case cjpeg "$name" "bytes_differ_ours=${sz_o}_stock=${sz_s}"
                 fi
             fi
         fi
+    else
+        fail_case cjpeg "$name" decode_input_missing
     fi
 
     # ------- transform: jpegtran (our-linked) vs jpegtran (stock) -------
@@ -193,60 +221,62 @@ for img in "$TESTIMAGES"/*.jpg; do
     ours_trn="$WORK/${name}.ours.trn.jpg"
     stock_trn="$WORK/${name}.stock.trn.jpg"
     if ! run_ours "$OUR_JPEGTRAN" -copy all -rotate 90 -outfile "$ours_trn" "$img" 2>"$WORK/trn_err_ours.log"; then
-        echo -e "jpegtran\t${name}\tfail\tours_crashed"
-        FAIL=$((FAIL + 1))
-        continue
-    fi
-    if ! "$STOCK_JPEGTRAN" -copy all -rotate 90 -outfile "$stock_trn" "$img" 2>"$WORK/trn_err_stock.log"; then
-        echo -e "jpegtran\t${name}\tskip\tstock_failed"
-        continue
-    fi
-    if cmp -s "$ours_trn" "$stock_trn"; then
-        echo -e "jpegtran\t${name}\tpass\t"
+        fail_case jpegtran "$name" ours_crashed
+    elif ! run_stock "$STOCK_JPEGTRAN" -copy all -rotate 90 -outfile "$stock_trn" "$img" 2>"$WORK/trn_err_stock.log"; then
+        fail_case jpegtran "$name" stock_failed
+    elif cmp -s "$ours_trn" "$stock_trn"; then
+        pass_case jpegtran "$name"
     else
         sz_o=$(wc -c < "$ours_trn"); sz_s=$(wc -c < "$stock_trn")
-        echo -e "jpegtran\t${name}\tfail\tbytes_differ_ours=${sz_o}_stock=${sz_s}"
-        FAIL=$((FAIL + 1))
+        fail_case jpegtran "$name" "bytes_differ_ours=${sz_o}_stock=${sz_s}"
     fi
 
     # ------- comment round-trip: wrjpgcom + rdjpgcom (standalone tools) -------
     # Both tools parse JPEG markers directly without linking against
     # libjpeg/libturbojpeg, so they exercise our JPEG marker layout
     # rather than the shim's `jpeg_*` ABI. Round-trip: insert a COM
-    # marker via wrjpgcom on `our` output, then read it back via
-    # rdjpgcom and assert the text survived. We run both upstream and
-    # our-built variants and compare stdout.
-    if [[ -f "$ours_jpg" ]]; then
+    # marker via our-built wrjpgcom, then read it back via our-built rdjpgcom
+    # and assert the text survived.
+    if [[ -n "$ours_jpg" && -f "$ours_jpg" ]]; then
         ours_with_com="$WORK/${name}.ours.com.jpg"
         if "$OUR_WRJPGCOM" -comment "ljt-test-${name}" "$ours_jpg" > "$ours_with_com" 2>/dev/null; then
             ours_com_text="$("$OUR_RDJPGCOM" "$ours_with_com" 2>/dev/null | tr -d '\n')"
             if [[ "$ours_com_text" == "ljt-test-${name}" ]]; then
-                echo -e "comtools\t${name}\tpass\troundtrip"
+                pass_case comtools "$name" roundtrip
             else
-                echo -e "comtools\t${name}\tfail\troundtrip_text='${ours_com_text}'"
-                FAIL=$((FAIL + 1))
+                fail_case comtools "$name" "roundtrip_text='${ours_com_text}'"
             fi
         else
-            echo -e "comtools\t${name}\tfail\twrjpgcom_failed"
-            FAIL=$((FAIL + 1))
+            fail_case comtools "$name" wrjpgcom_failed
         fi
+    else
+        fail_case comtools "$name" encode_input_missing
     fi
 
     # ------- tjbench short decompress benchmark -------
     # Smoke-test only: verify tjbench runs end-to-end against our shim
     # for a JPG input. Output exit code is the gate; we don't compare
     # numbers (that's the bench harness's job, separately).
-    if run_ours "$OUR_TJBENCH" "$img" -benchtime 0.1 -warmup 0 >"$WORK/${name}.tjbench.log" 2>&1; then
-        echo -e "tjbench\t${name}\tpass\t"
+    if run_ours "$OUR_TJBENCH" "$img" -nowrite -benchtime 0.1 -warmup 0 >"$WORK/${name}.tjbench.log" 2>&1; then
+        pass_case tjbench "$name"
     else
-        echo -e "tjbench\t${name}\tfail\texit_$?"
+        tjbench_status=$?
+        fail_case tjbench "$name" "exit_${tjbench_status}"
         cat "$WORK/${name}.tjbench.log" >&2 || true
-        FAIL=$((FAIL + 1))
     fi
 done
 
-if (( FAIL > 0 )); then
-    echo "FAIL total=${FAIL}" >&2
+if (( FIXTURE_COUNT == 0 )); then
+    echo "FAIL: no JPEG fixtures found under $TESTIMAGES" >&2
     exit 1
 fi
-echo "OK all_byte_exact" >&2
+EXPECTED_CASES=$((FIXTURE_COUNT * 5))
+if (( CASE_COUNT != EXPECTED_CASES )); then
+    echo "FAIL: incomplete matrix cases=${CASE_COUNT} expected=${EXPECTED_CASES}" >&2
+    exit 1
+fi
+if (( FAIL > 0 )); then
+    echo "FAIL total=${FAIL} fixtures=${FIXTURE_COUNT} cases=${CASE_COUNT}" >&2
+    exit 1
+fi
+echo "OK fixtures=${FIXTURE_COUNT} cases=${CASE_COUNT}" >&2

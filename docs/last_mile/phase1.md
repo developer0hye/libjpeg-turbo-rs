@@ -40,7 +40,7 @@ All must pass. No new skip is acceptable.
 
 ### P0-2. Stock Tools Link But Our-Linked `djpeg` Aborts — **CLOSED**
 
-**Status (2026-04-28): closed.** `examples/stock_djpeg_cjpeg/run.sh` reports `OK all_byte_exact` — every fixture (`monkey12`, `testimgari`, `testimgint`, `testorig`) passes for `djpeg`, `cjpeg`, and `jpegtran` (with `monkey12` jpegtran the documented 12-bit-transcode skip tracked under P0-4). The companion `shim_exports_classic_jpeg_api` gate hard-asserts the classic API surface.
+**Status (2026-04-28): closed.** The current `examples/stock_djpeg_cjpeg/run.sh` reports `OK fixtures=N cases=5N`: every fixture (`monkey12`, `testimgari`, `testimgint`, `testorig`) is byte-exact for djpeg and `jpegtran -copy all -rotate 90`, while cjpeg is byte-exact or stock-decodes to identical output. The companion `shim_exports_classic_jpeg_api` gate hard-asserts the classic API surface.
 
 **Original symptom (historical):** `cargo test --test capi_stock_tool_link -- --include-ignored` proved the stock tools could link, but `run.sh` reported `djpeg <fixture> fail ours_crashed` across all four 8-bit fixtures.
 
@@ -382,7 +382,7 @@ A task is done only when:
 
 1. ~~Fix `cross_product_transform` so the workspace is green (P0-1).~~ **CLOSED 2026-04-28** — all 12 cases pass.
 2. ~~Harden gates by removing stale ignores and blocker-as-skip behavior (P1 Soft-Skip).~~ **CLOSED 2026-04-28** — every product-path ignore/skip is now a real failure path.
-3. ~~Fix stock `djpeg` aborts (P0-2).~~ **CLOSED 2026-04-28** — `run.sh` reports `OK all_byte_exact`.
+3. ~~Fix stock `djpeg` aborts (P0-2).~~ **CLOSED 2026-04-28** — the current `run.sh` reports a complete five-case result matrix for every fixture.
 4. ~~Add high-precision raw-data symbols and make Pillow load (P0-3).~~ **CLOSED 2026-04-28** — Pillow round-trip @ q=90 PSNR 49.49 dB.
 5. ~~Implement virtual coefficient-array materialization (P0-4).~~ **CLOSED 2026-04-28** — full TJXOP + crop + `-copy` cross-product byte-exact for 8-bit fixtures; 12-bit transcode pixel-equal.
 5b. ~~Preserve source DHT in `JpegCoefficients` so 12-bit transcode can byte-match upstream `jpegtran`.~~ **CLOSED 2026-04-28** — root cause was *not* DHT regeneration. Actual divergence: `jpeg_read_header` in the FFI shim never populated `cinfo->marker_list`, so stock `transupp::jcopy_markers_execute` (used by `jpegtran -copy all`) found no source markers to forward and silently dropped the 3040-byte APP2/ICC chunk. Closure: `jpeg_read_header` now re-parses with the per-cinfo marker save list and threads `JpegMarkerStructPublic` nodes into `cinfo->marker_list`. `tests/transcode_12bit_byte_exact.rs` asserts byte-equality across `-rotate 90/180`, `-flip horizontal`, `-transpose`.
