@@ -8363,6 +8363,10 @@ fn materialize_foreign_coef_arrays(
     } else {
         None
     };
+    let saw_jfif_marker: bool = match coef_lookup_handle(handle) {
+        Some(handle_ptr) => unsafe { (*handle_ptr).inner.saw_jfif_marker },
+        None => c.write_JFIF_header != 0,
+    };
 
     Ok(libjpeg_turbo_rs::JpegCoefficients {
         width: width.min(u16::MAX as u32) as u16,
@@ -8374,6 +8378,7 @@ fn materialize_foreign_coef_arrays(
         density_unit: c.density_unit,
         x_density: c.X_density,
         y_density: c.Y_density,
+        saw_jfif_marker,
         adobe_transform,
     })
 }

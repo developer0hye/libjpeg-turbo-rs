@@ -5,7 +5,8 @@
 //! - Lossless: PSV × PT × restart × image-variant (grayscale + RGB)
 //! - Arbitrary-precision lossless: precision 2-16 × PSV × PT × image-variant
 //!
-//! Known limitations tracked as `known_fail` (not counted as unexpected failures):
+//! Legacy limitation classifications remain in the diagnostics below, but
+//! every classified failure is now a hard test failure:
 //! - arithmetic + progressive: SOF10 decode not yet fully supported
 //! - Huffman progressive + S440/S441: progressive scan script issue with these subsamplings
 
@@ -15,7 +16,9 @@ use std::path::PathBuf;
 use std::process::Command;
 
 use libjpeg_turbo_rs::precision::{compress_lossless_arbitrary, decompress_lossless_arbitrary};
-use libjpeg_turbo_rs::{decompress, DctMethod, Encoder, PixelFormat, Subsampling};
+use libjpeg_turbo_rs::{
+    decompress, DctMethod, Decoder, Encoder, PixelFormat, ScalingFactor, Subsampling,
+};
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -55,6 +58,62 @@ fn generate_gray_u16(width: usize, height: usize, precision: u8) -> Vec<u16> {
     (0..width * height)
         .map(|i| ((i as u32 * 7 + 37) % modulus) as u16)
         .collect()
+}
+
+fn direct_rgb_expected(rgb: &[u8], format: PixelFormat) -> Vec<u8> {
+    let mut output: Vec<u8> = Vec::with_capacity(rgb.len() / 3 * format.bytes_per_pixel());
+    for pixel in rgb.chunks_exact(3) {
+        let (r, g, b): (u8, u8, u8) = (pixel[0], pixel[1], pixel[2]);
+        match format {
+            PixelFormat::Rgb => output.extend_from_slice(&[r, g, b]),
+            PixelFormat::Bgr => output.extend_from_slice(&[b, g, r]),
+            PixelFormat::Rgba | PixelFormat::Rgbx => output.extend_from_slice(&[r, g, b, 255]),
+            PixelFormat::Bgra | PixelFormat::Bgrx => output.extend_from_slice(&[b, g, r, 255]),
+            PixelFormat::Xrgb | PixelFormat::Argb => output.extend_from_slice(&[255, r, g, b]),
+            PixelFormat::Xbgr | PixelFormat::Abgr => output.extend_from_slice(&[255, b, g, r]),
+            PixelFormat::Rgb565 => {
+                let packed: u16 =
+                    ((r as u16 >> 3) << 11) | ((g as u16 >> 2) << 5) | (b as u16 >> 3);
+                output.extend_from_slice(&packed.to_ne_bytes());
+            }
+            PixelFormat::Grayscale | PixelFormat::Cmyk => unreachable!(),
+        }
+    }
+    output
+}
+
+fn verify_direct_rgb_output_formats(jpeg: &[u8], rgb: &[u8]) -> Result<(), String> {
+    const FORMATS: &[PixelFormat] = &[
+        PixelFormat::Bgr,
+        PixelFormat::Rgba,
+        PixelFormat::Bgra,
+        PixelFormat::Argb,
+        PixelFormat::Abgr,
+        PixelFormat::Rgb565,
+    ];
+    for &format in FORMATS {
+        let mut decoder: Decoder =
+            Decoder::new(jpeg).map_err(|error| format!("{format:?} header: {error}"))?;
+        decoder.set_output_format(format);
+        let image = decoder
+            .decode_image()
+            .map_err(|error| format!("{format:?} decode: {error}"))?;
+        let expected: Vec<u8> = direct_rgb_expected(rgb, format);
+        if image.data != expected {
+            let mismatch: usize = image
+                .data
+                .iter()
+                .zip(expected.iter())
+                .position(|(actual, expected)| actual != expected)
+                .unwrap_or(image.data.len().min(expected.len()));
+            return Err(format!(
+                "{format:?} channel layout mismatch at byte {mismatch}: actual_len={}, expected_len={}",
+                image.data.len(),
+                expected.len()
+            ));
+        }
+    }
+    Ok(())
 }
 
 /// Generate a deterministic 16-bit 3-component pattern for arbitrary precision.
@@ -153,11 +212,16 @@ impl TestCounters {
         );
     }
 
-    fn assert_no_unexpected(&self) {
+    fn assert_all_passed(&self) {
         assert_eq!(
             self.unexpected_fail, 0,
             "{} unexpected failures out of {} tested",
             self.unexpected_fail, self.tested
+        );
+        assert_eq!(
+            self.known_fail, 0,
+            "{} classified failures out of {} tested; known failures are not accepted",
+            self.known_fail, self.tested
         );
     }
 }
@@ -235,7 +299,8 @@ fn parse_ppm(bytes: &[u8]) -> Result<(usize, usize, Vec<u8>), String> {
 }
 
 /// Run a lossy encode/decode roundtrip and record the result.
-/// Returns whether the combination is a known failure (skipped from unexpected count).
+/// Legacy failure classifications improve diagnostics, but all failures are
+/// rejected by `TestCounters::assert_all_passed`.
 fn run_lossy_roundtrip(
     counters: &mut TestCounters,
     pixels: &[u8],
@@ -447,7 +512,7 @@ fn tjcomptest_lossy_rgb() {
         "expected >300 combos, got {}",
         counters.tested
     );
-    counters.assert_no_unexpected();
+    counters.assert_all_passed();
 }
 
 // ---------------------------------------------------------------------------
@@ -583,7 +648,7 @@ fn tjcomptest_lossy_grayscale_from_rgb() {
         "expected >300 combos, got {}",
         counters.tested
     );
-    counters.assert_no_unexpected();
+    counters.assert_all_passed();
 }
 
 // ---------------------------------------------------------------------------
@@ -718,7 +783,7 @@ fn tjcomptest_lossy_grayscale_input() {
         "expected >300 combos, got {}",
         counters.tested
     );
-    counters.assert_no_unexpected();
+    counters.assert_all_passed();
 }
 
 // ---------------------------------------------------------------------------
@@ -780,7 +845,7 @@ fn tjcomptest_lossy_icc_restart() {
         "expected >50 combos, got {}",
         counters.tested
     );
-    counters.assert_no_unexpected();
+    counters.assert_all_passed();
 }
 
 // ---------------------------------------------------------------------------
@@ -841,7 +906,7 @@ fn tjcomptest_lossy_restart_blocks() {
         "expected >50 combos, got {}",
         counters.tested
     );
-    counters.assert_no_unexpected();
+    counters.assert_all_passed();
 }
 
 // ---------------------------------------------------------------------------
@@ -852,9 +917,7 @@ fn tjcomptest_lossy_restart_blocks() {
 ///
 /// Matches C `tjcomptest.in` lossless loop for precision=8:
 ///   PSV 1-7 × PT 0-7 × restart {none, rows} × {grayscale, RGB} = 7×8×2×2 = 224.
-/// Verifies EXACT roundtrip for grayscale.
-/// For RGB, verifies encode/decode succeeds and dimensions match (YCbCr color
-/// conversion makes exact pixel matching infeasible).
+/// Verifies the exact point-transformed samples for grayscale and RGB.
 #[test]
 fn tjcomptest_lossless_8bit() {
     let (w, h): (usize, usize) = (16, 16);
@@ -913,17 +976,12 @@ fn tjcomptest_lossless_8bit() {
                     }
                 }
 
-                // --- RGB: verify encode/decode succeeds, check dimensions ---
+                // --- RGB: exact point-transformed roundtrip ---
                 {
                     let desc: String =
                         format!("lossless rgb psv={} pt={} restart={}", psv, pt, use_restart);
-
-                    // Skip pt>0 for RGB: YCbCr + point transform makes pixel matching infeasible
-                    if pt > 0 {
-                        counters.tested += 1;
-                        counters.passed += 1;
-                        continue;
-                    }
+                    let mask: u8 = 0xFF & !((1u8 << pt).wrapping_sub(1));
+                    let expected_rgb: Vec<u8> = rgb_pixels.iter().map(|&v| v & mask).collect();
 
                     let mut enc = Encoder::new(&rgb_pixels, w, h, PixelFormat::Rgb)
                         .lossless(true)
@@ -938,13 +996,20 @@ fn tjcomptest_lossless_8bit() {
                             Ok(img) => {
                                 if img.width != w || img.height != h {
                                     counters.record_unexpected_fail(&desc, "dimension mismatch");
-                                } else if img.data.len() != w * h * 3 {
+                                } else if img.data != expected_rgb {
+                                    let first_mismatch: usize = img
+                                        .data
+                                        .iter()
+                                        .zip(expected_rgb.iter())
+                                        .position(|(actual, expected)| actual != expected)
+                                        .unwrap_or(0);
                                     counters.record_unexpected_fail(
                                         &desc,
                                         &format!(
-                                            "data length mismatch: expected {}, got {}",
-                                            w * h * 3,
-                                            img.data.len()
+                                            "point-transformed roundtrip failed at byte {}: actual={}, expected={}",
+                                            first_mismatch,
+                                            img.data[first_mismatch],
+                                            expected_rgb[first_mismatch]
                                         ),
                                     );
                                 } else {
@@ -970,7 +1035,7 @@ fn tjcomptest_lossless_8bit() {
         "expected >=224 combos, got {}",
         counters.tested
     );
-    counters.assert_no_unexpected();
+    counters.assert_all_passed();
 }
 
 // ---------------------------------------------------------------------------
@@ -1077,7 +1142,7 @@ fn tjcomptest_lossless_arbitrary_precision() {
         "expected >=1000 combos, got {}",
         counters.tested
     );
-    counters.assert_no_unexpected();
+    counters.assert_all_passed();
 }
 
 // ---------------------------------------------------------------------------
@@ -1199,7 +1264,7 @@ fn tjcomptest_lossy_grayscale_from_rgb_icc() {
         "expected >300 combos, got {}",
         counters.tested
     );
-    counters.assert_no_unexpected();
+    counters.assert_all_passed();
 }
 
 // ---------------------------------------------------------------------------
@@ -1249,28 +1314,60 @@ fn tjcomptest_lossy_rgb_colorspace() {
                     }
 
                     match enc.encode() {
-                        Ok(jpeg) => match decompress(&jpeg) {
-                            Ok(img) => {
-                                if img.width != w || img.height != h {
-                                    if known {
-                                        counters.record_known_fail(&desc, "dimension mismatch");
+                        Ok(jpeg) => {
+                            let encoded_subsampling = match Decoder::new(&jpeg) {
+                                Ok(decoder) => decoder.jpeg_subsampling(),
+                                Err(error) => {
+                                    counters.record_unexpected_fail(
+                                        &desc,
+                                        &format!("header decode failed: {error}"),
+                                    );
+                                    continue;
+                                }
+                            };
+                            if encoded_subsampling != subsamp {
+                                counters.record_unexpected_fail(
+                                    &desc,
+                                    &format!(
+                                        "SOF sampling mismatch: requested {subsamp:?}, encoded {encoded_subsampling:?}"
+                                    ),
+                                );
+                                continue;
+                            }
+
+                            match decompress(&jpeg) {
+                                Ok(img) => {
+                                    if img.width != w || img.height != h {
+                                        if known {
+                                            counters.record_known_fail(&desc, "dimension mismatch");
+                                        } else {
+                                            counters.record_unexpected_fail(
+                                                &desc,
+                                                "dimension mismatch",
+                                            );
+                                        }
+                                    } else if let Err(reason) =
+                                        verify_direct_rgb_output_formats(&jpeg, &img.data)
+                                    {
+                                        if known {
+                                            counters.record_known_fail(&desc, &reason);
+                                        } else {
+                                            counters.record_unexpected_fail(&desc, &reason);
+                                        }
                                     } else {
-                                        counters
-                                            .record_unexpected_fail(&desc, "dimension mismatch");
+                                        counters.record_pass();
                                     }
-                                } else {
-                                    counters.record_pass();
+                                }
+                                Err(e) => {
+                                    let reason: String = format!("decode failed: {}", e);
+                                    if known {
+                                        counters.record_known_fail(&desc, &reason);
+                                    } else {
+                                        counters.record_unexpected_fail(&desc, &reason);
+                                    }
                                 }
                             }
-                            Err(e) => {
-                                let reason: String = format!("decode failed: {}", e);
-                                if known {
-                                    counters.record_known_fail(&desc, &reason);
-                                } else {
-                                    counters.record_unexpected_fail(&desc, &reason);
-                                }
-                            }
-                        },
+                        }
                         Err(e) => {
                             let reason: String = format!("encode failed: {}", e);
                             if known {
@@ -1291,7 +1388,225 @@ fn tjcomptest_lossy_rgb_colorspace() {
         "expected >90 combos, got {}",
         counters.tested
     );
-    counters.assert_no_unexpected();
+    counters.assert_all_passed();
+}
+
+#[test]
+fn direct_rgb_builder_metadata_and_quant_table_are_applied() {
+    let djpeg: PathBuf = require_c_tool!("djpeg");
+    let (width, height): (usize, usize) = (19, 17);
+    let pixels: Vec<u8> = generate_rgb_pattern(width, height);
+    let icc: Vec<u8> = vec![0x42; 128];
+    let exif: Vec<u8> = vec![0x49, 0x49, 0x2A, 0x00, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00];
+    let comment: &str = "direct RGB metadata";
+    let quant_table: [u16; 64] = [17; 64];
+
+    let jpeg: Vec<u8> = Encoder::new(&pixels, width, height, PixelFormat::Rgb)
+        .colorspace(libjpeg_turbo_rs::ColorSpace::Rgb)
+        .subsampling(Subsampling::S444)
+        .quant_table(0, quant_table)
+        .icc_profile(&icc)
+        .exif_data(&exif)
+        .comment(comment)
+        .encode()
+        .expect("direct-RGB metadata/custom-quant encode must succeed");
+
+    let dqt_start: usize = jpeg
+        .windows(5)
+        .position(|window| window == [0xFF, 0xDB, 0x00, 0x43, 0x00])
+        .expect("direct-RGB output must contain an 8-bit DQT for table 0");
+    assert!(
+        jpeg[dqt_start + 5..dqt_start + 69]
+            .iter()
+            .all(|&value| value == 17),
+        "direct-RGB output ignored custom quantization table 0"
+    );
+
+    let rust_image = decompress(&jpeg).expect("Rust direct-RGB decode must succeed");
+    assert_eq!(rust_image.icc_profile(), Some(icc.as_slice()));
+    assert_eq!(rust_image.exif_data(), Some(exif.as_slice()));
+    assert_eq!(rust_image.comment.as_deref(), Some(comment));
+
+    let (c_width, c_height, c_pixels) =
+        helpers::decode_with_c_djpeg(&djpeg, &jpeg, "direct_rgb_metadata_quant");
+    assert_eq!((c_width, c_height), (width, height));
+    assert_eq!(
+        c_pixels, rust_image.data,
+        "direct-RGB custom-quant output must decode pixel-identically in C and Rust"
+    );
+}
+
+#[test]
+fn direct_rgb_low_quality_uses_extended_sequential_and_matches_c() {
+    let cjpeg: PathBuf = require_c_tool!("cjpeg");
+    let (width, height): (usize, usize) = (19, 17);
+    let pixels: Vec<u8> = generate_rgb_pattern(width, height);
+    let rust_jpeg = Encoder::new(&pixels, width, height, PixelFormat::Rgb)
+        .colorspace(libjpeg_turbo_rs::ColorSpace::Rgb)
+        .quality(1)
+        .encode()
+        .expect("direct-RGB quality 1 encode must succeed");
+    assert!(
+        rust_jpeg.windows(2).any(|window| window == [0xFF, 0xC1]),
+        "16-bit direct-RGB quantization tables require SOF1"
+    );
+    assert!(
+        !rust_jpeg.windows(2).any(|window| window == [0xFF, 0xC0]),
+        "direct-RGB quality 1 must not claim baseline SOF0"
+    );
+
+    let ppm: Vec<u8> = helpers::build_ppm(&pixels, width, height);
+    let c_jpeg =
+        helpers::encode_with_c_cjpeg(&cjpeg, &ppm, &["-rgb", "-quality", "1"], "direct_rgb_q1");
+    helpers::assert_bytes_identical(&rust_jpeg, &c_jpeg, "direct_rgb_q1");
+}
+
+#[test]
+fn direct_rgb_without_adobe_marker_uses_rgb_component_ids_like_c() {
+    let djpeg: PathBuf = require_c_tool!("djpeg");
+    let (width, height): (usize, usize) = (19, 17);
+    let pixels: Vec<u8> = generate_rgb_pattern(width, height);
+    let jpeg: Vec<u8> = Encoder::new(&pixels, width, height, PixelFormat::Rgb)
+        .colorspace(libjpeg_turbo_rs::ColorSpace::Rgb)
+        .write_adobe_marker(false)
+        .encode()
+        .expect("direct-RGB encode without Adobe marker must succeed");
+    assert!(
+        !jpeg
+            .windows(7)
+            .any(|window| window == b"\xFF\xEE\x00\x0EAdobe"),
+        "write_adobe_marker(false) must remove APP14 Adobe"
+    );
+
+    let rust_image = decompress(&jpeg).expect("Rust direct-RGB decode must succeed");
+    let (c_width, c_height, c_pixels) =
+        helpers::decode_with_c_djpeg(&djpeg, &jpeg, "direct_rgb_no_adobe");
+    assert_eq!((c_width, c_height), (width, height));
+    assert_eq!(
+        rust_image.data, c_pixels,
+        "without markers, ASCII R/G/B component IDs must select RGB like C libjpeg-turbo"
+    );
+}
+
+#[test]
+fn direct_rgb_vertical_subsampling_bottom_padding_matches_c() {
+    let cjpeg: PathBuf = require_c_tool!("cjpeg");
+    let (width, height): (usize, usize) = (38, 36);
+    let pixels: Vec<u8> = generate_rgb_pattern(width, height);
+    let rust_jpeg: Vec<u8> = Encoder::new(&pixels, width, height, PixelFormat::Rgb)
+        .colorspace(libjpeg_turbo_rs::ColorSpace::Rgb)
+        .subsampling(Subsampling::S420)
+        .quality(90)
+        .encode()
+        .expect("direct-RGB S420 encode must succeed");
+    let ppm: Vec<u8> = helpers::build_ppm(&pixels, width, height);
+    let c_jpeg = helpers::encode_with_c_cjpeg(
+        &cjpeg,
+        &ppm,
+        &["-rgb", "-sample", "2x2", "-quality", "90"],
+        "direct_rgb_s420_partial_bottom",
+    );
+    helpers::assert_bytes_identical(&rust_jpeg, &c_jpeg, "direct-RGB S420 partial-bottom encode");
+}
+
+#[test]
+fn direct_rgb_nonstandard_sampling_is_rejected_instead_of_ignored() {
+    let (width, height): (usize, usize) = (16, 16);
+    let pixels: Vec<u8> = generate_rgb_pattern(width, height);
+    let error = Encoder::new(&pixels, width, height, PixelFormat::Rgb)
+        .colorspace(libjpeg_turbo_rs::ColorSpace::Rgb)
+        .sampling_factors(vec![(3, 2), (1, 1), (1, 1)])
+        .encode()
+        .expect_err("unsupported direct-RGB sampling must not silently use S420");
+    assert!(
+        error
+            .to_string()
+            .contains("direct-RGB encoding requires sampling factors"),
+        "unexpected validation error: {error}"
+    );
+}
+
+#[test]
+fn direct_rgb_scaled_crop_matches_c_djpeg() {
+    let djpeg: PathBuf = require_c_tool!("djpeg");
+    let (width, height): (usize, usize) = (64, 64);
+    let pixels: Vec<u8> = generate_rgb_pattern(width, height);
+    let jpeg: Vec<u8> = Encoder::new(&pixels, width, height, PixelFormat::Rgb)
+        .colorspace(libjpeg_turbo_rs::ColorSpace::Rgb)
+        .subsampling(Subsampling::S420)
+        .quality(90)
+        .encode()
+        .expect("direct-RGB sampled encode must succeed");
+
+    let mut decoder: Decoder = Decoder::new(&jpeg).expect("Rust header parse must succeed");
+    decoder.set_scale(ScalingFactor::new(1, 2));
+    decoder.set_crop(8, 16);
+    let rust_image = decoder
+        .decode_image()
+        .expect("Rust scaled/cropped direct-RGB decode must succeed");
+
+    let jpeg_file: helpers::TempFile = helpers::TempFile::new("direct_rgb_crop.jpg");
+    let ppm_file: helpers::TempFile = helpers::TempFile::new("direct_rgb_crop.ppm");
+    jpeg_file.write_bytes(&jpeg);
+    helpers::run_c_djpeg(
+        &djpeg,
+        &["-rgb", "-scale", "1/2", "-crop", "16x32+8+0"],
+        jpeg_file.path(),
+        ppm_file.path(),
+    );
+    let (c_width, c_height, c_pixels) = helpers::parse_ppm_file(ppm_file.path());
+    assert_eq!((rust_image.width, rust_image.height), (c_width, c_height));
+    assert_eq!(
+        rust_image.data, c_pixels,
+        "scaled/cropped direct-RGB pixels must match C djpeg exactly"
+    );
+}
+
+#[test]
+fn single_component_arithmetic_explicit_sampling_restart_matches_c() {
+    let cjpeg: PathBuf = require_c_tool!("cjpeg");
+    let djpeg: PathBuf = require_c_tool!("djpeg");
+    let (width, height): (usize, usize) = (31, 29);
+    let pixels: Vec<u8> = generate_gray_pattern(width, height);
+    let pgm_file: helpers::TempFile = helpers::TempFile::new("arith_gray_sampled_input.pgm");
+    let jpeg_file: helpers::TempFile = helpers::TempFile::new("arith_gray_sampled.jpg");
+    helpers::write_pgm_file(pgm_file.path(), width, height, &pixels);
+    helpers::run_c_cjpeg(
+        &cjpeg,
+        &[
+            "-arithmetic",
+            "-sample",
+            "2x2",
+            "-restart",
+            "1b",
+            "-quality",
+            "90",
+        ],
+        pgm_file.path(),
+        jpeg_file.path(),
+    );
+    let jpeg: Vec<u8> = std::fs::read(jpeg_file.path()).expect("read C arithmetic JPEG");
+
+    let sof9: usize = jpeg
+        .windows(2)
+        .position(|window| window == [0xFF, 0xC9])
+        .expect("C fixture must be arithmetic sequential (SOF9)");
+    assert_eq!(jpeg[sof9 + 11], 0x22, "C fixture must retain 2x2 sampling");
+    assert!(
+        jpeg.windows(6)
+            .any(|window| window == [0xFF, 0xDD, 0x00, 0x04, 0x00, 0x01]),
+        "C fixture must restart after every non-interleaved scan MCU"
+    );
+
+    let rust_image = decompress(&jpeg).expect("Rust arithmetic decode must succeed");
+    let (c_width, c_height, c_pixels) =
+        helpers::decode_gray_with_c_djpeg(&djpeg, &jpeg, "arith_gray_sampled");
+    assert_eq!((rust_image.width, rust_image.height), (c_width, c_height));
+    assert_eq!(rust_image.pixel_format, PixelFormat::Grayscale);
+    assert_eq!(
+        rust_image.data, c_pixels,
+        "single-component arithmetic restart accounting must match C djpeg"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -1367,7 +1682,7 @@ fn tjcomptest_lossy_rgb_icc() {
         "expected >200 combos, got {}",
         counters.tested
     );
-    counters.assert_no_unexpected();
+    counters.assert_all_passed();
 }
 
 // ---------------------------------------------------------------------------

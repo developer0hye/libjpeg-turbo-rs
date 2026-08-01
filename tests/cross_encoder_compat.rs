@@ -23,9 +23,9 @@ fn reference_path(name: &str) -> String {
     format!("references/libjpeg-turbo/testimages/{}", name)
 }
 
-fn load_reference(name: &str) -> Option<Vec<u8>> {
+fn load_reference(name: &str) -> Vec<u8> {
     let path: String = reference_path(name);
-    std::fs::read(&path).ok()
+    std::fs::read(&path).unwrap_or_else(|e| panic!("required fixture {path}: {e}"))
 }
 
 /// Compute PSNR between two same-length pixel buffers (8-bit samples).
@@ -55,10 +55,7 @@ fn psnr(a: &[u8], b: &[u8]) -> f64 {
 
 #[test]
 fn c_testorig_decode_succeeds_with_valid_dimensions() {
-    let data: Vec<u8> = match load_reference("testorig.jpg") {
-        Some(d) => d,
-        None => return, // skip if reference file not available
-    };
+    let data: Vec<u8> = load_reference("testorig.jpg");
     let img: Image = decompress(&data).expect("testorig.jpg should decode");
     assert!(img.width > 0, "width must be positive");
     assert!(img.height > 0, "height must be positive");
@@ -71,10 +68,7 @@ fn c_testorig_decode_succeeds_with_valid_dimensions() {
 
 #[test]
 fn c_testorig_pixel_values_reasonable() {
-    let data: Vec<u8> = match load_reference("testorig.jpg") {
-        Some(d) => d,
-        None => return,
-    };
+    let data: Vec<u8> = load_reference("testorig.jpg");
     let img: Image = decompress_to(&data, PixelFormat::Rgb).expect("decode failed");
     let min_val: u8 = *img.data.iter().min().unwrap();
     let max_val: u8 = *img.data.iter().max().unwrap();
@@ -91,10 +85,7 @@ fn c_testorig_pixel_values_reasonable() {
 
 #[test]
 fn c_testorig_decode_multiple_output_formats() {
-    let data: Vec<u8> = match load_reference("testorig.jpg") {
-        Some(d) => d,
-        None => return,
-    };
+    let data: Vec<u8> = load_reference("testorig.jpg");
     // Note: Grayscale is excluded because color-to-grayscale conversion
     // is not supported by the decompress_to API for color JPEGs.
     let formats_and_bpp: &[(PixelFormat, usize)] = &[
@@ -122,10 +113,7 @@ fn c_testorig_decode_multiple_output_formats() {
 
 #[test]
 fn c_testorig_decode_scaled_half() {
-    let data: Vec<u8> = match load_reference("testorig.jpg") {
-        Some(d) => d,
-        None => return,
-    };
+    let data: Vec<u8> = load_reference("testorig.jpg");
     let full: Image = decompress(&data).unwrap();
     let mut decoder: StreamingDecoder = StreamingDecoder::new(&data).unwrap();
     decoder.set_scale(ScalingFactor::new(1, 2));
@@ -151,10 +139,7 @@ fn c_testorig_decode_scaled_half() {
 
 #[test]
 fn c_testorig_decode_scaled_quarter() {
-    let data: Vec<u8> = match load_reference("testorig.jpg") {
-        Some(d) => d,
-        None => return,
-    };
+    let data: Vec<u8> = load_reference("testorig.jpg");
     let full: Image = decompress(&data).unwrap();
     let mut decoder: StreamingDecoder = StreamingDecoder::new(&data).unwrap();
     decoder.set_scale(ScalingFactor::new(1, 4));
@@ -178,10 +163,7 @@ fn c_testorig_decode_scaled_quarter() {
 
 #[test]
 fn c_testorig_decode_scaled_eighth() {
-    let data: Vec<u8> = match load_reference("testorig.jpg") {
-        Some(d) => d,
-        None => return,
-    };
+    let data: Vec<u8> = load_reference("testorig.jpg");
     let full: Image = decompress(&data).unwrap();
     let mut decoder: StreamingDecoder = StreamingDecoder::new(&data).unwrap();
     decoder.set_scale(ScalingFactor::new(1, 8));
@@ -209,24 +191,15 @@ fn c_testorig_decode_scaled_eighth() {
 
 #[test]
 fn c_arithmetic_decode_succeeds() {
-    let data: Vec<u8> = match load_reference("testimgari.jpg") {
-        Some(d) => d,
-        None => return,
-    };
+    let data: Vec<u8> = load_reference("testimgari.jpg");
     let img: Image = decompress(&data).expect("testimgari.jpg should decode");
     assert!(img.width > 0 && img.height > 0);
 }
 
 #[test]
 fn c_arithmetic_same_dimensions_as_baseline() {
-    let baseline_data: Vec<u8> = match load_reference("testorig.jpg") {
-        Some(d) => d,
-        None => return,
-    };
-    let arith_data: Vec<u8> = match load_reference("testimgari.jpg") {
-        Some(d) => d,
-        None => return,
-    };
+    let baseline_data: Vec<u8> = load_reference("testorig.jpg");
+    let arith_data: Vec<u8> = load_reference("testimgari.jpg");
     let baseline: Image = decompress(&baseline_data).unwrap();
     let arith: Image = decompress(&arith_data).unwrap();
     assert_eq!(
@@ -238,14 +211,8 @@ fn c_arithmetic_same_dimensions_as_baseline() {
 
 #[test]
 fn c_arithmetic_pixel_similarity_to_baseline() {
-    let baseline_data: Vec<u8> = match load_reference("testorig.jpg") {
-        Some(d) => d,
-        None => return,
-    };
-    let arith_data: Vec<u8> = match load_reference("testimgari.jpg") {
-        Some(d) => d,
-        None => return,
-    };
+    let baseline_data: Vec<u8> = load_reference("testorig.jpg");
+    let arith_data: Vec<u8> = load_reference("testimgari.jpg");
     let baseline: Image = decompress_to(&baseline_data, PixelFormat::Rgb).unwrap();
     let arith: Image = decompress_to(&arith_data, PixelFormat::Rgb).unwrap();
 
@@ -289,24 +256,15 @@ fn c_arithmetic_pixel_similarity_to_baseline() {
 
 #[test]
 fn c_interleaved_decode_succeeds() {
-    let data: Vec<u8> = match load_reference("testimgint.jpg") {
-        Some(d) => d,
-        None => return,
-    };
+    let data: Vec<u8> = load_reference("testimgint.jpg");
     let img: Image = decompress(&data).expect("testimgint.jpg should decode");
     assert!(img.width > 0 && img.height > 0);
 }
 
 #[test]
 fn c_interleaved_same_dimensions_as_baseline() {
-    let baseline_data: Vec<u8> = match load_reference("testorig.jpg") {
-        Some(d) => d,
-        None => return,
-    };
-    let interleaved_data: Vec<u8> = match load_reference("testimgint.jpg") {
-        Some(d) => d,
-        None => return,
-    };
+    let baseline_data: Vec<u8> = load_reference("testorig.jpg");
+    let interleaved_data: Vec<u8> = load_reference("testimgint.jpg");
     let baseline: Image = decompress(&baseline_data).unwrap();
     let interleaved: Image = decompress(&interleaved_data).unwrap();
     assert_eq!(
@@ -318,10 +276,7 @@ fn c_interleaved_same_dimensions_as_baseline() {
 
 #[test]
 fn c_interleaved_is_not_progressive() {
-    let data: Vec<u8> = match load_reference("testimgint.jpg") {
-        Some(d) => d,
-        None => return,
-    };
+    let data: Vec<u8> = load_reference("testimgint.jpg");
     let decoder: StreamingDecoder = StreamingDecoder::new(&data).unwrap();
     let header = decoder.header();
     // testimgint.jpg is a baseline sequential interleaved image, not progressive.
@@ -333,14 +288,8 @@ fn c_interleaved_is_not_progressive() {
 
 #[test]
 fn c_interleaved_pixel_similarity_to_baseline() {
-    let baseline_data: Vec<u8> = match load_reference("testorig.jpg") {
-        Some(d) => d,
-        None => return,
-    };
-    let interleaved_data: Vec<u8> = match load_reference("testimgint.jpg") {
-        Some(d) => d,
-        None => return,
-    };
+    let baseline_data: Vec<u8> = load_reference("testorig.jpg");
+    let interleaved_data: Vec<u8> = load_reference("testimgint.jpg");
     let baseline: Image = decompress_to(&baseline_data, PixelFormat::Rgb).unwrap();
     let interleaved: Image = decompress_to(&interleaved_data, PixelFormat::Rgb).unwrap();
 
@@ -365,12 +314,9 @@ fn c_interleaved_pixel_similarity_to_baseline() {
 
 #[test]
 fn c_12bit_decode_success() {
-    let data: Vec<u8> = match load_reference("testorig12.jpg") {
-        Some(d) => d,
-        None => return,
-    };
+    let data: &[u8] = include_bytes!("fixtures/real_world/libjpeg_testorig12_227x149_12bit.jpg");
     use libjpeg_turbo_rs::precision::decompress_12bit;
-    let img = decompress_12bit(&data).expect("C-encoded 12-bit JPEG should decode successfully");
+    let img = decompress_12bit(data).expect("C-encoded 12-bit JPEG should decode successfully");
     assert!(img.width > 0 && img.height > 0);
     assert_eq!(
         img.data.len(),
@@ -396,39 +342,11 @@ fn c_12bit_decode_success() {
 
 #[test]
 fn c_12bit_precision_detected() {
-    let data: Vec<u8> = match load_reference("testorig12.jpg") {
-        Some(d) => d,
-        None => return,
-    };
-    // The SOF marker for 12-bit JPEG has precision byte = 12.
-    // We verify by reading the frame header via StreamingDecoder.
-    // Note: StreamingDecoder may fail if 12-bit is not supported for
-    // standard 8-bit decode path, so we check the raw bytes as fallback.
-    match StreamingDecoder::new(&data) {
-        Ok(decoder) => {
-            let precision: u8 = decoder.header().precision;
-            assert_eq!(precision, 12, "testorig12.jpg precision should be 12");
-        }
-        Err(_) => {
-            // Parse SOF marker manually: find FF C0/C1/C2 and check precision byte.
-            let mut found_12bit: bool = false;
-            for i in 0..data.len().saturating_sub(4) {
-                if data[i] == 0xFF
-                    && (data[i + 1] == 0xC0 || data[i + 1] == 0xC1 || data[i + 1] == 0xC2)
-                {
-                    // SOF marker: bytes [i+2..i+4] = length, [i+4] = precision
-                    if i + 4 < data.len() && data[i + 4] == 12 {
-                        found_12bit = true;
-                    }
-                    break;
-                }
-            }
-            assert!(
-                found_12bit,
-                "testorig12.jpg should contain 12-bit SOF marker"
-            );
-        }
-    }
+    let data: &[u8] = include_bytes!("fixtures/real_world/libjpeg_testorig12_227x149_12bit.jpg");
+    let decoder: StreamingDecoder = StreamingDecoder::new(data)
+        .expect("StreamingDecoder must parse the checked-in 12-bit fixture header");
+    let precision: u8 = decoder.header().precision;
+    assert_eq!(precision, 12, "testorig12.jpg precision should be 12");
 }
 
 // ===========================================================================
@@ -630,10 +548,7 @@ fn arithmetic_encoded_jpeg_has_sof9() {
 
 #[test]
 fn c_testorig_multi_format_all_succeed() {
-    let data: Vec<u8> = match load_reference("testorig.jpg") {
-        Some(d) => d,
-        None => return,
-    };
+    let data: Vec<u8> = load_reference("testorig.jpg");
     let formats: &[PixelFormat] = &[
         PixelFormat::Rgb,
         PixelFormat::Bgr,
@@ -654,10 +569,7 @@ fn c_testorig_multi_format_all_succeed() {
 
 #[test]
 fn c_testorig_rgb_bgr_channel_swap() {
-    let data: Vec<u8> = match load_reference("testorig.jpg") {
-        Some(d) => d,
-        None => return,
-    };
+    let data: Vec<u8> = load_reference("testorig.jpg");
     let rgb: Image = decompress_to(&data, PixelFormat::Rgb).unwrap();
     let bgr: Image = decompress_to(&data, PixelFormat::Bgr).unwrap();
 
@@ -680,10 +592,7 @@ fn c_testorig_rgb_bgr_channel_swap() {
 
 #[test]
 fn c_testorig_rgba_alpha_is_255() {
-    let data: Vec<u8> = match load_reference("testorig.jpg") {
-        Some(d) => d,
-        None => return,
-    };
+    let data: Vec<u8> = load_reference("testorig.jpg");
     let rgba: Image = decompress_to(&data, PixelFormat::Rgba).unwrap();
     let pixel_count: usize = rgba.width * rgba.height;
 
@@ -699,10 +608,7 @@ fn c_testorig_rgba_alpha_is_255() {
 
 #[test]
 fn c_testorig_rgba_matches_rgb_channels() {
-    let data: Vec<u8> = match load_reference("testorig.jpg") {
-        Some(d) => d,
-        None => return,
-    };
+    let data: Vec<u8> = load_reference("testorig.jpg");
     let rgb: Image = decompress_to(&data, PixelFormat::Rgb).unwrap();
     let rgba: Image = decompress_to(&data, PixelFormat::Rgba).unwrap();
 
@@ -783,10 +689,8 @@ fn c_djpeg_cross_validation_decode_diff_zero() {
 
     for &name in reference_images {
         let jpeg_path: String = reference_path(name);
-        let data: Vec<u8> = match std::fs::read(&jpeg_path) {
-            Ok(d) => d,
-            Err(_) => continue,
-        };
+        let data: Vec<u8> = std::fs::read(&jpeg_path)
+            .unwrap_or_else(|e| panic!("required fixture {jpeg_path}: {e}"));
 
         // C djpeg decode
         let tmp_ppm: String = format!("/tmp/ljt_cross_{}.ppm", name);

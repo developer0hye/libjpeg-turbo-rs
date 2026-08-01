@@ -10,6 +10,7 @@ use crate::decode::bitstream::BitReader;
 use crate::decode::huffman;
 use crate::decode::lossless;
 use crate::decode::marker::MarkerReader;
+use crate::encode::huff_opt;
 use crate::encode::huffman_encode::{build_huff_table, BitWriter, HuffmanEncoder};
 use crate::encode::marker_writer;
 use crate::encode::quant;
@@ -264,17 +265,20 @@ fn compress_12bit_grayscale(
     precision: u8,
 ) -> Result<Vec<u8>> {
     let level_shift: i32 = 2048;
-    // 12-bit needs force_baseline=false to allow quant values > 255
     let luma_quant =
         tables::quality_scale_quant_table_ext(&tables::STD_LUMINANCE_QUANT_TABLE, quality, false);
-    let luma_quant_12 = scale_quant_12bit(&luma_quant);
-    let luma_divisors = scale_quant_for_fdct(&luma_quant_12);
-    let dc_table = build_huff_table(&tables::DC_LUMINANCE_BITS, &tables::DC_LUMINANCE_VALUES);
-    let ac_table = build_huff_table(&tables::AC_LUMINANCE_BITS, &tables::AC_LUMINANCE_VALUES);
+    let luma_divisors = scale_quant_for_fdct(&luma_quant);
     let mcus_x = width.div_ceil(8);
     let mcus_y = height.div_ceil(8);
-    let mut bit_writer = BitWriter::new(width * height);
-    let mut prev_dc: i16 = 0;
+
+    // Extended sequential JPEG can produce DC and AC categories that are not
+    // present in the default 8-bit Huffman tables.  libjpeg-turbo therefore
+    // enables entropy optimization automatically for 12-bit compression.
+    // Gather the actual symbols first so every emitted coefficient has a code.
+    let mut blocks = Vec::with_capacity(mcus_x * mcus_y);
+    let mut dc_frequency = [0u32; 257];
+    let mut ac_frequency = [0u32; 257];
+    let mut previous_dc = 0i16;
     for mcu_row in 0..mcus_y {
         for mcu_col in 0..mcus_x {
             let x0 = mcu_col * 8;
@@ -285,23 +289,32 @@ fn compress_12bit_grayscale(
             fdct_12bit(&block, &mut dct_output);
             let mut quantized = [0i16; 64];
             quant::quantize_block(&dct_output, &luma_divisors, &mut quantized);
-            for q in &mut quantized[1..64] {
-                *q = (*q).clamp(-1023, 1023);
-            }
-            HuffmanEncoder::encode_block(
-                &mut bit_writer,
+            gather_12bit_block(
                 &quantized,
-                &mut prev_dc,
-                &dc_table,
-                &ac_table,
+                &mut previous_dc,
+                &mut dc_frequency,
+                &mut ac_frequency,
             );
+            blocks.push(quantized);
         }
+    }
+    dc_frequency[256] = 1;
+    ac_frequency[256] = 1;
+    let (dc_bits, dc_values) = huff_opt::gen_optimal_table(&dc_frequency);
+    let (ac_bits, ac_values) = huff_opt::gen_optimal_table(&ac_frequency);
+    let dc_table = build_huff_table(&dc_bits, &dc_values);
+    let ac_table = build_huff_table(&ac_bits, &ac_values);
+
+    let mut bit_writer = BitWriter::new(width * height);
+    let mut prev_dc: i16 = 0;
+    for block in &blocks {
+        HuffmanEncoder::encode_block(&mut bit_writer, block, &mut prev_dc, &dc_table, &ac_table);
     }
     bit_writer.flush();
     let mut output = Vec::with_capacity(bit_writer.data().len() + 512);
     marker_writer::write_soi(&mut output);
     marker_writer::write_app0_jfif(&mut output);
-    marker_writer::write_dqt(&mut output, 0, &luma_quant_12);
+    marker_writer::write_dqt(&mut output, 0, &luma_quant);
     write_sof0_precision(
         &mut output,
         width as u16,
@@ -309,20 +322,8 @@ fn compress_12bit_grayscale(
         precision,
         &[(1, 1, 1, 0)],
     );
-    marker_writer::write_dht(
-        &mut output,
-        0,
-        0,
-        &tables::DC_LUMINANCE_BITS,
-        &tables::DC_LUMINANCE_VALUES,
-    );
-    marker_writer::write_dht(
-        &mut output,
-        1,
-        0,
-        &tables::AC_LUMINANCE_BITS,
-        &tables::AC_LUMINANCE_VALUES,
-    );
+    marker_writer::write_dht(&mut output, 0, 0, &dc_bits, &dc_values);
+    marker_writer::write_dht(&mut output, 1, 0, &ac_bits, &ac_values);
     marker_writer::write_sos(&mut output, &[(1, 0, 0)]);
     output.extend_from_slice(bit_writer.data());
     marker_writer::write_eoi(&mut output);
@@ -337,116 +338,280 @@ fn compress_12bit_color(
     subsampling: Subsampling,
     precision: u8,
 ) -> Result<Vec<u8>> {
-    let level_shift: i32 = 2048;
-    if subsampling != Subsampling::S444 {
-        return Err(JpegError::Unsupported(
-            "12-bit color only supports 4:4:4 subsampling".to_string(),
-        ));
-    }
-    // 12-bit needs force_baseline=false to allow quant values > 255
+    let (h_factor, v_factor) = sampling_factors_12bit(subsampling)?;
     let luma_quant =
         tables::quality_scale_quant_table_ext(&tables::STD_LUMINANCE_QUANT_TABLE, quality, false);
     let chroma_quant =
         tables::quality_scale_quant_table_ext(&tables::STD_CHROMINANCE_QUANT_TABLE, quality, false);
-    let luma_quant_12 = scale_quant_12bit(&luma_quant);
-    let chroma_quant_12 = scale_quant_12bit(&chroma_quant);
-    let luma_divisors = scale_quant_for_fdct(&luma_quant_12);
-    let chroma_divisors = scale_quant_for_fdct(&chroma_quant_12);
-    let dc_luma = build_huff_table(&tables::DC_LUMINANCE_BITS, &tables::DC_LUMINANCE_VALUES);
-    let ac_luma = build_huff_table(&tables::AC_LUMINANCE_BITS, &tables::AC_LUMINANCE_VALUES);
-    let dc_chroma = build_huff_table(&tables::DC_CHROMINANCE_BITS, &tables::DC_CHROMINANCE_VALUES);
-    let ac_chroma = build_huff_table(&tables::AC_CHROMINANCE_BITS, &tables::AC_CHROMINANCE_VALUES);
-    let num_pixels = width * height;
-    let mut comp_planes: Vec<Vec<i16>> = vec![vec![0i16; num_pixels]; 3];
-    for i in 0..num_pixels {
-        comp_planes[0][i] = pixels[i * 3].clamp(0, 4095);
-        comp_planes[1][i] = pixels[i * 3 + 1].clamp(0, 4095);
-        comp_planes[2][i] = pixels[i * 3 + 2].clamp(0, 4095);
-    }
-    let mcus_x = width.div_ceil(8);
-    let mcus_y = height.div_ceil(8);
-    let mut bit_writer = BitWriter::new(num_pixels * 3);
+    let luma_divisors = scale_quant_for_fdct(&luma_quant);
+    let chroma_divisors = scale_quant_for_fdct(&chroma_quant);
+
+    let mcu_width = h_factor * 8;
+    let mcu_height = v_factor * 8;
+    let mcus_x = width.div_ceil(mcu_width);
+    let mcus_y = height.div_ceil(mcu_height);
+    let padded_width = mcus_x * mcu_width;
+    let padded_height = mcus_y * mcu_height;
+    let (y_plane, cb_full, cr_full) =
+        rgb_to_ycbcr_12bit_padded(pixels, width, height, padded_width, padded_height);
+    let cb_plane = downsample_12bit_plane(
+        &cb_full,
+        padded_width,
+        padded_height,
+        height,
+        h_factor,
+        v_factor,
+    );
+    let cr_plane = downsample_12bit_plane(
+        &cr_full,
+        padded_width,
+        padded_height,
+        height,
+        h_factor,
+        v_factor,
+    );
+    let chroma_width = padded_width / h_factor;
+
+    // libjpeg-turbo automatically enables Huffman optimization for 12-bit
+    // sequential JPEG when the caller has not supplied custom tables.
+    let mut dc_luma_freq = [0u32; 257];
+    let mut ac_luma_freq = [0u32; 257];
+    let mut dc_chroma_freq = [0u32; 257];
+    let mut ac_chroma_freq = [0u32; 257];
+    let mut blocks: Vec<(u8, [i16; 64])> =
+        Vec::with_capacity(mcus_x * mcus_y * (h_factor * v_factor + 2));
     let mut prev_dc = [0i16; 3];
-    let dc_tables = [&dc_luma, &dc_chroma, &dc_chroma];
-    let ac_tables = [&ac_luma, &ac_chroma, &ac_chroma];
-    let divisors_list = [&luma_divisors, &chroma_divisors, &chroma_divisors];
+    let y_width_in_blocks = width.div_ceil(8);
+    let y_height_in_blocks = height.div_ceil(8);
+
     for mcu_row in 0..mcus_y {
         for mcu_col in 0..mcus_x {
-            let x0 = mcu_col * 8;
-            let y0 = mcu_row * 8;
-            for c in 0..3 {
-                let mut block = [0i16; 64];
-                extract_block_12bit(
-                    &comp_planes[c],
-                    width,
-                    height,
-                    x0,
-                    y0,
-                    level_shift,
-                    &mut block,
-                );
-                let mut dct_out = [0i32; 64];
-                fdct_12bit(&block, &mut dct_out);
-                let mut quantized = [0i16; 64];
-                quant::quantize_block(&dct_out, divisors_list[c], &mut quantized);
-                for q in &mut quantized[1..64] {
-                    *q = (*q).clamp(-1023, 1023);
+            for block_y in 0..v_factor {
+                for block_x in 0..h_factor {
+                    let absolute_block_x = mcu_col * h_factor + block_x;
+                    let absolute_block_y = mcu_row * v_factor + block_y;
+                    let quantized = if absolute_block_x >= y_width_in_blocks
+                        || absolute_block_y >= y_height_in_blocks
+                    {
+                        let mut dummy = [0i16; 64];
+                        dummy[0] = prev_dc[0];
+                        dummy
+                    } else {
+                        quantize_12bit_block(
+                            &y_plane,
+                            padded_width,
+                            absolute_block_x * 8,
+                            absolute_block_y * 8,
+                            &luma_divisors,
+                        )
+                    };
+                    gather_12bit_block(
+                        &quantized,
+                        &mut prev_dc[0],
+                        &mut dc_luma_freq,
+                        &mut ac_luma_freq,
+                    );
+                    blocks.push((0, quantized));
                 }
-                HuffmanEncoder::encode_block(
-                    &mut bit_writer,
-                    &quantized,
-                    &mut prev_dc[c],
-                    dc_tables[c],
-                    ac_tables[c],
+            }
+
+            for (component, plane) in [(1u8, &cb_plane), (2u8, &cr_plane)] {
+                let quantized = quantize_12bit_block(
+                    plane,
+                    chroma_width,
+                    mcu_col * 8,
+                    mcu_row * 8,
+                    &chroma_divisors,
                 );
+                gather_12bit_block(
+                    &quantized,
+                    &mut prev_dc[component as usize],
+                    &mut dc_chroma_freq,
+                    &mut ac_chroma_freq,
+                );
+                blocks.push((component, quantized));
             }
         }
+    }
+
+    dc_luma_freq[256] = 1;
+    ac_luma_freq[256] = 1;
+    dc_chroma_freq[256] = 1;
+    ac_chroma_freq[256] = 1;
+    let (dc_luma_bits, dc_luma_values) = huff_opt::gen_optimal_table(&dc_luma_freq);
+    let (ac_luma_bits, ac_luma_values) = huff_opt::gen_optimal_table(&ac_luma_freq);
+    let (dc_chroma_bits, dc_chroma_values) = huff_opt::gen_optimal_table(&dc_chroma_freq);
+    let (ac_chroma_bits, ac_chroma_values) = huff_opt::gen_optimal_table(&ac_chroma_freq);
+    let dc_luma = build_huff_table(&dc_luma_bits, &dc_luma_values);
+    let ac_luma = build_huff_table(&ac_luma_bits, &ac_luma_values);
+    let dc_chroma = build_huff_table(&dc_chroma_bits, &dc_chroma_values);
+    let ac_chroma = build_huff_table(&ac_chroma_bits, &ac_chroma_values);
+
+    let mut bit_writer = BitWriter::new(width * height * 3);
+    let mut prev_dc = [0i16; 3];
+    for (component, block) in &blocks {
+        let component = *component as usize;
+        let (dc_table, ac_table) = if component == 0 {
+            (&dc_luma, &ac_luma)
+        } else {
+            (&dc_chroma, &ac_chroma)
+        };
+        HuffmanEncoder::encode_block(
+            &mut bit_writer,
+            block,
+            &mut prev_dc[component],
+            dc_table,
+            ac_table,
+        );
     }
     bit_writer.flush();
     let mut output = Vec::with_capacity(bit_writer.data().len() + 1024);
     marker_writer::write_soi(&mut output);
     marker_writer::write_app0_jfif(&mut output);
-    marker_writer::write_dqt(&mut output, 0, &luma_quant_12);
-    marker_writer::write_dqt(&mut output, 1, &chroma_quant_12);
+    marker_writer::write_dqt(&mut output, 0, &luma_quant);
+    marker_writer::write_dqt(&mut output, 1, &chroma_quant);
     write_sof0_precision(
         &mut output,
         width as u16,
         height as u16,
         precision,
-        &[(1, 1, 1, 0), (2, 1, 1, 1), (3, 1, 1, 1)],
+        &[
+            (1, h_factor as u8, v_factor as u8, 0),
+            (2, 1, 1, 1),
+            (3, 1, 1, 1),
+        ],
     );
-    marker_writer::write_dht(
-        &mut output,
-        0,
-        0,
-        &tables::DC_LUMINANCE_BITS,
-        &tables::DC_LUMINANCE_VALUES,
-    );
-    marker_writer::write_dht(
-        &mut output,
-        1,
-        0,
-        &tables::AC_LUMINANCE_BITS,
-        &tables::AC_LUMINANCE_VALUES,
-    );
-    marker_writer::write_dht(
-        &mut output,
-        0,
-        1,
-        &tables::DC_CHROMINANCE_BITS,
-        &tables::DC_CHROMINANCE_VALUES,
-    );
-    marker_writer::write_dht(
-        &mut output,
-        1,
-        1,
-        &tables::AC_CHROMINANCE_BITS,
-        &tables::AC_CHROMINANCE_VALUES,
-    );
+    marker_writer::write_dht(&mut output, 0, 0, &dc_luma_bits, &dc_luma_values);
+    marker_writer::write_dht(&mut output, 1, 0, &ac_luma_bits, &ac_luma_values);
+    marker_writer::write_dht(&mut output, 0, 1, &dc_chroma_bits, &dc_chroma_values);
+    marker_writer::write_dht(&mut output, 1, 1, &ac_chroma_bits, &ac_chroma_values);
     marker_writer::write_sos(&mut output, &[(1, 0, 0), (2, 1, 1), (3, 1, 1)]);
     output.extend_from_slice(bit_writer.data());
     marker_writer::write_eoi(&mut output);
     Ok(output)
+}
+
+fn sampling_factors_12bit(subsampling: Subsampling) -> Result<(usize, usize)> {
+    match subsampling {
+        Subsampling::S444 | Subsampling::Unknown => Ok((1, 1)),
+        Subsampling::S422 => Ok((2, 1)),
+        Subsampling::S440 => Ok((1, 2)),
+        Subsampling::S420 => Ok((2, 2)),
+        Subsampling::S411 => Ok((4, 1)),
+        Subsampling::S441 => Ok((1, 4)),
+        Subsampling::S410 => Ok((4, 2)),
+        Subsampling::S24 => Ok((2, 4)),
+    }
+}
+
+fn rgb_to_ycbcr_12bit_padded(
+    pixels: &[i16],
+    width: usize,
+    height: usize,
+    padded_width: usize,
+    padded_height: usize,
+) -> (Vec<i16>, Vec<i16>, Vec<i16>) {
+    let mut y_plane = vec![0i16; padded_width * padded_height];
+    let mut cb_plane = vec![0i16; padded_width * padded_height];
+    let mut cr_plane = vec![0i16; padded_width * padded_height];
+    const CENTER: i32 = 2048 << 16;
+    for y in 0..padded_height {
+        let source_y = y.min(height - 1);
+        for x in 0..padded_width {
+            let source_x = x.min(width - 1);
+            let source = (source_y * width + source_x) * 3;
+            let r = pixels[source].clamp(0, 4095) as i32;
+            let g = pixels[source + 1].clamp(0, 4095) as i32;
+            let b = pixels[source + 2].clamp(0, 4095) as i32;
+            let destination = y * padded_width + x;
+            y_plane[destination] = ((19595 * r + 38470 * g + 7471 * b + 32768) >> 16) as i16;
+            cb_plane[destination] =
+                ((-11059 * r - 21709 * g + 32768 * b + CENTER + 32767) >> 16) as i16;
+            cr_plane[destination] =
+                ((32768 * r - 27439 * g - 5329 * b + CENTER + 32767) >> 16) as i16;
+        }
+    }
+    (y_plane, cb_plane, cr_plane)
+}
+
+fn downsample_12bit_plane(
+    input: &[i16],
+    input_width: usize,
+    input_height: usize,
+    active_input_height: usize,
+    horizontal: usize,
+    vertical: usize,
+) -> Vec<i16> {
+    let output_width = input_width / horizontal;
+    let output_height = input_height / vertical;
+    let active_output_height = active_input_height.div_ceil(vertical);
+    let mut output = vec![0i16; output_width * output_height];
+    for y in 0..output_height {
+        if y >= active_output_height {
+            let previous_row = (active_output_height - 1) * output_width;
+            let destination = y * output_width;
+            output.copy_within(previous_row..previous_row + output_width, destination);
+            continue;
+        }
+        for x in 0..output_width {
+            let value = if horizontal == 2 && vertical == 1 {
+                let offset = y * input_width + x * 2;
+                (input[offset] as i32 + input[offset + 1] as i32 + (x & 1) as i32) >> 1
+            } else if horizontal == 2 && vertical == 2 {
+                let offset = y * 2 * input_width + x * 2;
+                let bias = if x & 1 == 0 { 1 } else { 2 };
+                (input[offset] as i32
+                    + input[offset + 1] as i32
+                    + input[offset + input_width] as i32
+                    + input[offset + input_width + 1] as i32
+                    + bias)
+                    >> 2
+            } else {
+                let mut sum = 0i32;
+                for dy in 0..vertical {
+                    for dx in 0..horizontal {
+                        sum +=
+                            input[(y * vertical + dy) * input_width + x * horizontal + dx] as i32;
+                    }
+                }
+                let sample_count = (horizontal * vertical) as i32;
+                (sum + sample_count / 2) / sample_count
+            };
+            output[y * output_width + x] = value as i16;
+        }
+    }
+    output
+}
+
+fn quantize_12bit_block(
+    plane: &[i16],
+    stride: usize,
+    x: usize,
+    y: usize,
+    divisors: &[u16; 64],
+) -> [i16; 64] {
+    let mut block = [0i16; 64];
+    for row in 0..8 {
+        for column in 0..8 {
+            block[row * 8 + column] = plane[(y + row) * stride + x + column] - 2048;
+        }
+    }
+    let mut dct_output = [0i32; 64];
+    fdct_12bit(&block, &mut dct_output);
+    let mut quantized = [0i16; 64];
+    quant::quantize_block(&dct_output, divisors, &mut quantized);
+    quantized
+}
+
+fn gather_12bit_block(
+    block: &[i16; 64],
+    previous_dc: &mut i16,
+    dc_frequency: &mut [u32; 257],
+    ac_frequency: &mut [u32; 257],
+) {
+    huff_opt::gather_dc_symbol(block[0].wrapping_sub(*previous_dc), dc_frequency);
+    *previous_dc = block[0];
+    huff_opt::gather_ac_symbols(block, ac_frequency);
 }
 
 fn extract_block_12bit(
@@ -468,14 +633,6 @@ fn extract_block_12bit(
     }
 }
 
-fn scale_quant_12bit(table: &[u16; 64]) -> [u16; 64] {
-    let mut r = [0u16; 64];
-    for i in 0..64 {
-        r[i] = (table[i] as u32 * 16).min(65535) as u16;
-    }
-    r
-}
-
 fn scale_quant_for_fdct(table: &[u16; 64]) -> [u16; 64] {
     let mut r = [0u16; 64];
     for i in 0..64 {
@@ -492,7 +649,9 @@ fn write_sof0_precision(
     components: &[(u8, u8, u8, u8)],
 ) {
     buf.push(0xFF);
-    buf.push(0xC0);
+    // Baseline SOF0 is restricted to 8-bit samples. Extended sequential
+    // DCT (SOF1) is required for 9- through 12-bit precision.
+    buf.push(if precision > 8 { 0xC1 } else { 0xC0 });
     let length: u16 = 2 + 1 + 2 + 2 + 1 + (components.len() as u16 * 3);
     buf.extend_from_slice(&length.to_be_bytes());
     buf.push(precision);
@@ -1657,8 +1816,8 @@ fn compress_arbitrary_gray(
     predictor: u8,
     pt: u8,
 ) -> Result<Vec<u8>> {
-    let dc_table = build_huff_table(&DC_LUMA_EXT_BITS, &DC_LUMA_EXT_VALUES);
-    let mut bw = BitWriter::new(width * height * 2);
+    let mut diffs = Vec::with_capacity(width * height);
+    let mut dc_freq = [0u32; 257];
     for y in 0..height {
         for x in 0..width {
             let diff = lossless_diff_16(
@@ -1671,13 +1830,21 @@ fn compress_arbitrary_gray(
                 pt,
                 precision,
             );
-            encode_dc_only_wide(&mut bw, diff, &dc_table);
+            gather_dc_symbol_wide(diff, &mut dc_freq);
+            diffs.push(diff);
         }
+    }
+    dc_freq[256] = 1;
+    let (dc_bits, dc_values) = huff_opt::gen_optimal_table(&dc_freq);
+    let dc_table = build_huff_table(&dc_bits, &dc_values);
+    let mut bw = BitWriter::new(width * height * 2);
+    for diff in diffs {
+        encode_dc_only_wide(&mut bw, diff, &dc_table);
     }
     bw.flush();
     let mut out = Vec::with_capacity(bw.data().len() + 256);
     marker_writer::write_soi(&mut out);
-    marker_writer::write_dht(&mut out, 0, 0, &DC_LUMA_EXT_BITS, &DC_LUMA_EXT_VALUES);
+    marker_writer::write_app0_jfif(&mut out);
     marker_writer::write_sof3(
         &mut out,
         width as u16,
@@ -1685,6 +1852,7 @@ fn compress_arbitrary_gray(
         precision,
         &[(1, 1, 1, 0)],
     );
+    marker_writer::write_dht(&mut out, 0, 0, &dc_bits, &dc_values);
     marker_writer::write_sos_lossless(&mut out, &[(1, 0)], predictor, pt);
     out.extend_from_slice(bw.data());
     marker_writer::write_eoi(&mut out);
@@ -1704,12 +1872,11 @@ fn compress_arbitrary_multi(
     let planes: Vec<Vec<u16>> = (0..nc)
         .map(|c| (0..np).map(|i| pixels[i * nc + c]).collect())
         .collect();
-    let dc_luma = build_huff_table(&DC_LUMA_EXT_BITS, &DC_LUMA_EXT_VALUES);
-    let dc_chroma = build_huff_table(&DC_CHROMA_EXT_BITS, &DC_CHROMA_EXT_VALUES);
-    let mut bw = BitWriter::new(np * nc * 2);
+    let mut diffs = Vec::with_capacity(np * nc);
+    let mut dc_freq = [0u32; 257];
     for y in 0..height {
         for x in 0..width {
-            for (c, plane) in planes.iter().enumerate() {
+            for plane in &planes {
                 let diff = lossless_diff_16(
                     plane[y * width + x] as i32,
                     x,
@@ -1720,25 +1887,43 @@ fn compress_arbitrary_multi(
                     pt,
                     precision,
                 );
-                let t = if c == 0 { &dc_luma } else { &dc_chroma };
-                encode_dc_only_wide(&mut bw, diff, t);
+                gather_dc_symbol_wide(diff, &mut dc_freq);
+                diffs.push(diff);
             }
         }
+    }
+    dc_freq[256] = 1;
+    let (dc_bits, dc_values) = huff_opt::gen_optimal_table(&dc_freq);
+    let dc_table = build_huff_table(&dc_bits, &dc_values);
+    let mut bw = BitWriter::new(np * nc * 2);
+    for diff in diffs {
+        encode_dc_only_wide(&mut bw, diff, &dc_table);
     }
     bw.flush();
     let mut out = Vec::with_capacity(bw.data().len() + 512);
     marker_writer::write_soi(&mut out);
-    marker_writer::write_dht(&mut out, 0, 0, &DC_LUMA_EXT_BITS, &DC_LUMA_EXT_VALUES);
-    marker_writer::write_dht(&mut out, 0, 1, &DC_CHROMA_EXT_BITS, &DC_CHROMA_EXT_VALUES);
-    let comps: Vec<(u8, u8, u8, u8)> = (0..nc).map(|c| (c as u8 + 1, 1, 1, 0)).collect();
-    marker_writer::write_sof3(&mut out, width as u16, height as u16, precision, &comps);
-    let sc: Vec<(u8, u8)> = (0..nc)
-        .map(|c| (c as u8 + 1, if c == 0 { 0 } else { 1 }))
+    marker_writer::write_app14_adobe(&mut out, 0);
+    let component_ids = [b'R', b'G', b'B'];
+    let comps: Vec<(u8, u8, u8, u8)> = component_ids[..nc]
+        .iter()
+        .map(|&id| (id, 1, 1, 0))
         .collect();
+    marker_writer::write_sof3(&mut out, width as u16, height as u16, precision, &comps);
+    marker_writer::write_dht(&mut out, 0, 0, &dc_bits, &dc_values);
+    let sc: Vec<(u8, u8)> = component_ids[..nc].iter().map(|&id| (id, 0)).collect();
     marker_writer::write_sos_lossless(&mut out, &sc, predictor, pt);
     out.extend_from_slice(bw.data());
     marker_writer::write_eoi(&mut out);
     Ok(out)
+}
+
+fn gather_dc_symbol_wide(diff: i32, freq: &mut [u32; 257]) {
+    let category = if diff == 0 {
+        0
+    } else {
+        32 - diff.unsigned_abs().leading_zeros() as usize
+    };
+    freq[category] += 1;
 }
 
 // ============================================================
