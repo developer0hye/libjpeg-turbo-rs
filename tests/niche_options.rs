@@ -88,20 +88,25 @@ fn fancy_downsampling_on_vs_off_produces_different_output() {
 }
 
 #[test]
-fn fancy_downsampling_default_is_true() {
-    let pixels = gradient_pixels(32, 32);
+fn fancy_downsampling_default_is_false() {
+    let djpeg: PathBuf = require_c_tool!("djpeg");
+    let mut pixels = vec![0u8; 32 * 32 * 3];
+    for (i, pixel) in pixels.iter_mut().enumerate() {
+        *pixel = ((i * 37 + i / 3 * 53 + 7) % 256) as u8;
+    }
     let default_enc = Encoder::new(&pixels, 32, 32, PixelFormat::Rgb)
         .quality(75)
         .subsampling(Subsampling::S420)
         .encode()
         .unwrap();
-    let fancy_enc = Encoder::new(&pixels, 32, 32, PixelFormat::Rgb)
+    let simple_enc = Encoder::new(&pixels, 32, 32, PixelFormat::Rgb)
         .quality(75)
         .subsampling(Subsampling::S420)
-        .fancy_downsampling(true)
+        .fancy_downsampling(false)
         .encode()
         .unwrap();
-    assert_eq!(default_enc, fancy_enc);
+    assert_eq!(default_enc, simple_enc);
+    assert_djpeg_matches_rust(&djpeg, &default_enc, 32, 32, "fancy_default_false");
 }
 
 #[test]

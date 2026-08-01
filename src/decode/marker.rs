@@ -1296,24 +1296,14 @@ mod tests {
         }
     }
 
-    /// `testimgari.jpg` (SOF9) — arithmetic sequential.  Exercises the real-file
-    /// path through `read_markers` to confirm `is_arithmetic = true`.
+    /// Checked-in SOF9 arithmetic-sequential fixture exercises the real-file
+    /// path through `read_markers` without depending on the optional submodule.
     #[test]
     fn is_arithmetic_true_for_testimgari() {
-        let manifest: std::path::PathBuf = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-        // libjpeg-turbo-rs/src  → up two levels → repo root → references/
-        let path: std::path::PathBuf =
-            manifest.join("../../references/libjpeg-turbo/testimages/testimgari.jpg");
-        if !path.exists() {
-            eprintln!(
-                "SKIP: testimgari.jpg not found at {} — submodule not initialised",
-                path.display()
-            );
-            return;
-        }
-        let data: Vec<u8> = std::fs::read(&path)
-            .unwrap_or_else(|e| panic!("could not read {}: {e}", path.display()));
-        let mut reader: MarkerReader = MarkerReader::new(&data);
+        let data: &[u8] = include_bytes!(
+            "../../tests/fixtures/real_world/libjpeg_testimgari_227x149_arithmetic.jpg"
+        );
+        let mut reader: MarkerReader = MarkerReader::new(data);
         let meta: JpegMetadata = reader.read_markers().expect("testimgari.jpg must parse");
         assert!(
             meta.is_arithmetic,
@@ -1321,27 +1311,19 @@ mod tests {
         );
     }
 
-    /// `testimgint.jpg` (SOF2, progressive Huffman).  Confirms `is_arithmetic =
-    /// false` for a real progressive Huffman file.
+    /// Checked-in SOF2 progressive-Huffman fixture confirms
+    /// `is_arithmetic = false` for the process actually named by the test.
     #[test]
     fn is_arithmetic_false_for_progressive_huffman() {
-        let manifest: std::path::PathBuf = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-        let path: std::path::PathBuf =
-            manifest.join("../../references/libjpeg-turbo/testimages/testimgint.jpg");
-        if !path.exists() {
-            eprintln!(
-                "SKIP: testimgint.jpg not found at {} — submodule not initialised",
-                path.display()
-            );
-            return;
-        }
-        let data: Vec<u8> = std::fs::read(&path)
-            .unwrap_or_else(|e| panic!("could not read {}: {e}", path.display()));
-        let mut reader: MarkerReader = MarkerReader::new(&data);
-        let meta: JpegMetadata = reader.read_markers().expect("testimgint.jpg must parse");
+        let data: &[u8] =
+            include_bytes!("../../tests/fixtures/real_world/derived_227x149_progressive.jpg");
+        let mut reader: MarkerReader = MarkerReader::new(data);
+        let meta: JpegMetadata = reader
+            .read_markers()
+            .expect("progressive fixture must parse");
         assert!(
             !meta.is_arithmetic,
-            "testimgint.jpg (SOF2) must report is_arithmetic=false"
+            "SOF2 progressive Huffman must report is_arithmetic=false"
         );
     }
 

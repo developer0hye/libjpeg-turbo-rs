@@ -6,8 +6,7 @@
 //! Direction 3: Roundtrip (Rust->C->Rust and C->Rust->C)
 //! Direction 4: Pixel-level comparison of decoders
 //!
-//! All tests gracefully skip if cjpeg/djpeg are not found in PATH or at
-//! /opt/homebrew/bin, so CI environments without them still pass.
+//! Cross-validation requires cjpeg/djpeg in PATH or at /opt/homebrew/bin.
 
 mod helpers;
 
@@ -236,13 +235,7 @@ fn rust_encode_c_decode(
     ) -> libjpeg_turbo_rs::Result<Vec<u8>>,
     tolerance: u8,
 ) -> bool {
-    let djpeg: PathBuf = match helpers::djpeg_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: djpeg not found");
-            return true;
-        }
-    };
+    let djpeg: PathBuf = helpers::require_c_tool("djpeg").expect("cross-validation requires djpeg");
 
     let jpeg: Vec<u8> =
         encode_fn(pixels, w, h, pixel_format, quality, subsampling).expect("Rust encode failed");
@@ -490,13 +483,11 @@ fn rust_encode_c_decode_arithmetic() {
         .output()
         .expect("failed to run djpeg");
 
-    if !output.status.success() {
-        eprintln!(
-            "SKIP: djpeg cannot decode arithmetic JPEG: {}",
-            String::from_utf8_lossy(&output.stderr).trim()
-        );
-        return;
-    }
+    assert!(
+        output.status.success(),
+        "djpeg cannot decode Rust arithmetic JPEG: {}",
+        String::from_utf8_lossy(&output.stderr).trim()
+    );
 
     let (dw, dh, c_pixels) = parse_ppm(tmp_ppm.path());
     assert_eq!(dw, w);
@@ -629,17 +620,11 @@ fn rust_encode_c_decode_all_subsampling() {
 /// Encode a PPM/PGM file with C cjpeg, decode with Rust, verify dimensions
 /// and pixel range.
 fn c_encode_rust_decode(input: &Path, cjpeg_args: &[&str]) -> bool {
-    let cjpeg: PathBuf = match helpers::cjpeg_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: cjpeg not found");
-            return true;
-        }
-    };
-    if !input.exists() {
-        eprintln!("SKIP: reference image not found: {:?}", input);
-        return true;
-    }
+    let cjpeg: PathBuf = helpers::require_c_tool("cjpeg").expect("cross-validation requires cjpeg");
+    assert!(
+        input.is_file(),
+        "required reference image missing: {input:?}"
+    );
 
     let tmp_jpg: TempFile = TempFile::new("c_enc.jpg");
 
@@ -651,14 +636,12 @@ fn c_encode_rust_decode(input: &Path, cjpeg_args: &[&str]) -> bool {
 
     let output = cmd.output().expect("failed to run cjpeg");
 
-    if !output.status.success() {
-        eprintln!(
-            "SKIP: cjpeg failed with args {:?}: {}",
-            cjpeg_args,
-            String::from_utf8_lossy(&output.stderr).trim()
-        );
-        return true;
-    }
+    assert!(
+        output.status.success(),
+        "cjpeg failed with args {:?}: {}",
+        cjpeg_args,
+        String::from_utf8_lossy(&output.stderr).trim()
+    );
 
     let jpeg: Vec<u8> = std::fs::read(tmp_jpg.path()).expect("read c-encoded JPEG");
 
@@ -700,10 +683,10 @@ fn c_encode_rust_decode_progressive() {
 #[test]
 fn c_encode_rust_decode_arithmetic() {
     let cjpeg: PathBuf = require_c_tool!("cjpeg");
-    if !cjpeg_supports_arithmetic(&cjpeg) {
-        eprintln!("SKIP: cjpeg does not support -arithmetic");
-        return;
-    }
+    assert!(
+        cjpeg_supports_arithmetic(&cjpeg),
+        "arithmetic cross-validation requires cjpeg -arithmetic support"
+    );
     let ppm: PathBuf = reference_path("testorig.ppm");
     assert!(c_encode_rust_decode(
         &ppm,
@@ -730,10 +713,7 @@ fn c_encode_rust_decode_grayscale() {
 fn c_encode_rust_decode_various_quality() {
     let cjpeg: PathBuf = require_c_tool!("cjpeg");
     let ppm: PathBuf = reference_path("testorig.ppm");
-    if !ppm.exists() {
-        eprintln!("SKIP: testorig.ppm not found");
-        return;
-    }
+    assert!(ppm.is_file(), "required fixture missing: {}", ppm.display());
 
     for &q in &[1, 25, 50, 75, 100] {
         let q_str: String = q.to_string();
@@ -746,10 +726,11 @@ fn c_encode_rust_decode_various_quality() {
             .output()
             .expect("failed to run cjpeg");
 
-        if !output.status.success() {
-            eprintln!("SKIP: cjpeg failed for q={}", q);
-            continue;
-        }
+        assert!(
+            output.status.success(),
+            "cjpeg failed for q={q}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
 
         let jpeg: Vec<u8> = std::fs::read(tmp_jpg.path()).expect("read c-encoded JPEG");
         let img = decompress(&jpeg).unwrap_or_else(|e| {
@@ -790,48 +771,33 @@ fn c_encode_rust_decode_various_subsampling() {
 
 #[test]
 fn c_encode_rust_decode_grayscale_pgm() {
-    let pgm: PathBuf = reference_path("testorig.pgm");
-    if !pgm.exists() {
-        eprintln!("SKIP: testorig.pgm not found");
-        return;
-    }
+    let (width, height): (usize, usize) = (48, 48);
+    let pixels: Vec<u8> = generate_grayscale_pattern(width, height);
+    let pgm: TempFile = TempFile::new("gray_input.pgm");
+    std::fs::write(pgm.path(), helpers::build_pgm(&pixels, width, height))
+        .expect("write generated grayscale fixture");
     let cjpeg: PathBuf = require_c_tool!("cjpeg");
 
     let tmp_jpg: TempFile = TempFile::new("gray_pgm.jpg");
     let output = Command::new(&cjpeg)
         .args(["-quality", "90", "-outfile"])
         .arg(tmp_jpg.path())
-        .arg(&pgm)
+        .arg(pgm.path())
         .output()
         .expect("failed to run cjpeg");
 
-    if !output.status.success() {
-        eprintln!(
-            "SKIP: cjpeg failed on PGM: {}",
-            String::from_utf8_lossy(&output.stderr).trim()
-        );
-        return;
-    }
+    assert!(
+        output.status.success(),
+        "cjpeg failed on generated PGM: {}",
+        String::from_utf8_lossy(&output.stderr).trim()
+    );
 
     let jpeg: Vec<u8> = std::fs::read(tmp_jpg.path()).expect("read c-encoded JPEG");
 
-    // Attempt Rust decode; skip gracefully if the format is unsupported
-    match decompress(&jpeg) {
-        Ok(img) => {
-            assert!(img.width > 0);
-            assert!(img.height > 0);
-            assert_eq!(
-                img.data.len(),
-                img.width * img.height * img.pixel_format.bytes_per_pixel()
-            );
-        }
-        Err(e) => {
-            eprintln!(
-                "KNOWN ISSUE: Rust decoder cannot handle PGM-sourced JPEG: {}",
-                e
-            );
-        }
-    }
+    let img: Image = decompress(&jpeg).expect("Rust decoder must handle a PGM-sourced JPEG");
+    assert_eq!((img.width, img.height), (width, height));
+    assert_eq!(img.pixel_format, PixelFormat::Grayscale);
+    assert_eq!(img.data.len(), width * height);
 }
 
 // ===========================================================================
@@ -901,10 +867,11 @@ fn roundtrip_c_rust_c() {
     let cjpeg: PathBuf = require_c_tool!("cjpeg");
 
     let ppm_path: PathBuf = reference_path("testorig.ppm");
-    if !ppm_path.exists() {
-        eprintln!("SKIP: testorig.ppm not found");
-        return;
-    }
+    assert!(
+        ppm_path.is_file(),
+        "required fixture missing: {}",
+        ppm_path.display()
+    );
 
     let tmp_jpg1: TempFile = TempFile::new("rt2_c1.jpg");
     let tmp_jpg2: TempFile = TempFile::new("rt2_r.jpg");
@@ -971,10 +938,11 @@ fn roundtrip_c_rust_c() {
 fn pixel_match_rust_vs_c_decode_testorig() {
     let djpeg: PathBuf = require_c_tool!("djpeg");
     let jpg_path: PathBuf = reference_path("testorig.jpg");
-    if !jpg_path.exists() {
-        eprintln!("SKIP: testorig.jpg not found");
-        return;
-    }
+    assert!(
+        jpg_path.is_file(),
+        "required fixture missing: {}",
+        jpg_path.display()
+    );
 
     let jpeg: Vec<u8> = std::fs::read(&jpg_path).expect("read testorig.jpg");
 
@@ -1011,21 +979,17 @@ fn pixel_match_rust_vs_c_decode_testorig() {
 fn pixel_match_rust_vs_c_decode_arithmetic() {
     let djpeg: PathBuf = require_c_tool!("djpeg");
     let jpg_path: PathBuf = reference_path("testimgari.jpg");
-    if !jpg_path.exists() {
-        eprintln!("SKIP: testimgari.jpg not found");
-        return;
-    }
+    assert!(
+        jpg_path.is_file(),
+        "required fixture missing: {}",
+        jpg_path.display()
+    );
 
     let jpeg: Vec<u8> = std::fs::read(&jpg_path).expect("read testimgari.jpg");
 
     // Rust decode
-    let rust_img: Image = match decompress_to(&jpeg, PixelFormat::Rgb) {
-        Ok(img) => img,
-        Err(e) => {
-            eprintln!("SKIP: Rust decoder cannot handle testimgari.jpg: {}", e);
-            return;
-        }
-    };
+    let rust_img: Image =
+        decompress_to(&jpeg, PixelFormat::Rgb).expect("Rust must decode testimgari.jpg");
 
     // C decode
     let tmp_ppm: TempFile = TempFile::new("arith_cmp.ppm");
@@ -1037,13 +1001,11 @@ fn pixel_match_rust_vs_c_decode_arithmetic() {
         .output()
         .expect("djpeg failed");
 
-    if !output.status.success() {
-        eprintln!(
-            "SKIP: djpeg failed on arithmetic JPEG: {}",
-            String::from_utf8_lossy(&output.stderr).trim()
-        );
-        return;
-    }
+    assert!(
+        output.status.success(),
+        "djpeg failed on arithmetic JPEG: {}",
+        String::from_utf8_lossy(&output.stderr).trim()
+    );
 
     let (dw, dh, c_pixels) = parse_ppm(tmp_ppm.path());
 
@@ -1067,10 +1029,11 @@ fn pixel_match_rust_vs_c_decode_arithmetic() {
 fn pixel_match_rust_vs_c_decode_progressive() {
     let djpeg: PathBuf = require_c_tool!("djpeg");
     let jpg_path: PathBuf = reference_path("testimgint.jpg");
-    if !jpg_path.exists() {
-        eprintln!("SKIP: testimgint.jpg not found");
-        return;
-    }
+    assert!(
+        jpg_path.is_file(),
+        "required fixture missing: {}",
+        jpg_path.display()
+    );
 
     let jpeg: Vec<u8> = std::fs::read(&jpg_path).expect("read testimgint.jpg");
 

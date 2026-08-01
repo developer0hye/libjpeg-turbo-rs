@@ -122,15 +122,8 @@ fn reference_progressive_matches_baseline_dimensions() {
 #[test]
 fn reference_12bit_decode() {
     use libjpeg_turbo_rs::precision::decompress_12bit;
-    let path = std::path::Path::new("references/libjpeg-turbo/testimages/testorig12.jpg");
-    let data: Vec<u8> = match std::fs::read(path) {
-        Ok(d) => d,
-        Err(_) => {
-            eprintln!("SKIP: testorig12.jpg not found");
-            return;
-        }
-    };
-    let img = decompress_12bit(&data).expect("C-encoded 12-bit JPEG should decode successfully");
+    let data: &[u8] = include_bytes!("fixtures/real_world/libjpeg_testorig12_227x149_12bit.jpg");
+    let img = decompress_12bit(data).expect("C-encoded 12-bit JPEG should decode successfully");
     assert!(img.width > 0 && img.height > 0);
     assert_eq!(
         img.data.len(),
@@ -145,19 +138,19 @@ fn reference_12bit_decode() {
 #[test]
 fn reference_12bit_has_diverse_values() {
     use libjpeg_turbo_rs::precision::decompress_12bit;
-    let path = std::path::Path::new("references/libjpeg-turbo/testimages/testorig12.jpg");
-    let data: Vec<u8> = match std::fs::read(path) {
-        Ok(d) => d,
-        Err(_) => {
-            eprintln!("SKIP: testorig12.jpg not found");
-            return;
-        }
-    };
-    if let Ok(img) = decompress_12bit(&data) {
-        let min: i16 = *img.data.iter().min().unwrap();
-        let max: i16 = *img.data.iter().max().unwrap();
-        assert!(max - min > 100, "12-bit diverse: min={}, max={}", min, max);
-    }
+    let data: &[u8] = include_bytes!("fixtures/real_world/libjpeg_testorig12_227x149_12bit.jpg");
+    let img = decompress_12bit(data).expect("C-encoded 12-bit JPEG should decode successfully");
+    let min: i16 = *img
+        .data
+        .iter()
+        .min()
+        .expect("12-bit image must have samples");
+    let max: i16 = *img
+        .data
+        .iter()
+        .max()
+        .expect("12-bit image must have samples");
+    assert!(max - min > 100, "12-bit diverse: min={}, max={}", min, max);
 }
 
 // Cross-format consistency
@@ -349,26 +342,40 @@ fn c_djpeg_reference_images_diff_zero() {
     let djpeg: PathBuf = require_c_tool!("djpeg");
 
     let test_dir: &Path = Path::new("references/libjpeg-turbo/testimages");
-    if !test_dir.exists() {
-        eprintln!("SKIP: reference testimages directory not found");
-        return;
-    }
+    assert!(
+        test_dir.is_dir(),
+        "required reference image directory missing: {}",
+        test_dir.display()
+    );
 
-    let image_names: &[&str] = &[
-        "testorig.jpg",
-        "testimgari.jpg",
-        "testimgint.jpg",
-        "testprog.jpg",
+    let images: &[(&str, &str)] = &[
+        (
+            "testorig.jpg",
+            "references/libjpeg-turbo/testimages/testorig.jpg",
+        ),
+        (
+            "testimgari.jpg",
+            "references/libjpeg-turbo/testimages/testimgari.jpg",
+        ),
+        (
+            "testimgint.jpg",
+            "references/libjpeg-turbo/testimages/testimgint.jpg",
+        ),
+        (
+            "derived_227x149_progressive.jpg",
+            "tests/fixtures/real_world/derived_227x149_progressive.jpg",
+        ),
     ];
 
     let mut tested_count: usize = 0;
 
-    for &name in image_names {
-        let image_path: PathBuf = test_dir.join(name);
-        if !image_path.exists() {
-            eprintln!("SKIP: {} not found, skipping", name);
-            continue;
-        }
+    for &(name, path) in images {
+        let image_path = PathBuf::from(path);
+        assert!(
+            image_path.is_file(),
+            "required reference fixture missing: {}",
+            image_path.display()
+        );
 
         // Decode with C djpeg (output PPM to stdout)
         let djpeg_output = Command::new(&djpeg)
@@ -457,8 +464,9 @@ fn c_djpeg_reference_images_diff_zero() {
         );
     }
 
-    assert!(
-        tested_count > 0,
-        "No reference images were tested — all files were missing"
+    assert_eq!(
+        tested_count,
+        images.len(),
+        "every declared reference image must be cross-validated"
     );
 }

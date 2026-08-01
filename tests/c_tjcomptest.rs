@@ -57,9 +57,6 @@ fn apply_subsampling(enc: Encoder<'_>, sampi: usize) -> Encoder<'_> {
 /// Encodes `rgb_ppm_path` (a PPM file) with the Rust `Encoder` and `cjpeg`,
 /// asserts byte-identical JPEG output, then repeats for the 3 additional
 /// inner variants (grayscale-from-color, RGB colorspace, grayscale input).
-///
-/// Returns `false` and prints a skip message if a particular combination is
-/// unsupported by the current Rust API.
 #[allow(clippy::too_many_arguments)]
 fn run_lossy_combo(
     cjpeg: &Path,
@@ -134,12 +131,6 @@ fn run_lossy_combo(
         cjpeg_misc.push("-p".to_string());
     }
 
-    // noice for sampi==4 with PNG input — the testorig source is a PPM here,
-    // so we never need -noicc for the RGB path.  The gray source is testorig.png
-    // in C, but we derive it from the PPM, so no -noicc needed either.
-    let noicc_rgb: bool = false;
-    let _ = noicc_rgb;
-
     // -----------------------------------------------------------------------
     // Variant 1: RGB encode
     // -----------------------------------------------------------------------
@@ -210,204 +201,193 @@ fn run_lossy_combo(
 
     // -----------------------------------------------------------------------
     // Variant 2: grayscale-from-color (-g / cjpeg -gr)
-    // SKIP for sampi != 0 (non-S444 modes): cjpeg applies its internal fancy
-    // downsampling prefilter to the RGB input before Y extraction when a chroma-
-    // subsampled mode is requested, even though the output is single-channel
-    // grayscale.  The Rust encoder correctly ignores subsampling for grayscale
-    // output (always emits 8×8 MCU, 1 component, (1,1) sampling factors) so the
-    // prefiltered vs non-prefiltered Y extraction diverges for sampi > 0.
-    // S444 (sampi==0) matches because no chroma prefiltering is applied.
     {
         let label = format!(
             "{}_gray_from_rgb_samp{}",
             label_prefix, TJCOMP_SUBSAMP[sampi]
         );
-        if sampi != 0 {
-            eprintln!(
-                "SKIP: {} — cjpeg -gr with non-S444 subsampling applies fancy downsampling \
-                 prefilter before Y extraction; Rust encoder ignores subsampling for grayscale",
-                label
-            );
-        } else {
-            let mut enc = Encoder::new(&rgb_pixels, rgb_w, rgb_h, PixelFormat::Rgb);
-            enc = enc.fancy_downsampling(false);
-            enc = apply_subsampling(enc, sampi);
-            enc = enc.grayscale_from_color(true);
-            if let Some(q) = quality {
-                enc = enc.quality(q);
-            }
-            if force_baseline {
-                enc = enc.force_baseline(true);
-            }
-            if let Some(n) = restart_blocks {
-                enc = enc.restart_blocks(n);
-            } else if let Some(n) = restart_rows {
-                enc = enc.restart_rows(n);
-            }
-            if let Some(ref icc) = icc_data {
-                enc = enc.icc_profile(icc);
-            }
-            if arithmetic {
-                enc = enc.arithmetic(true);
-            }
-            if dct_fast {
-                enc = enc.dct_method(DctMethod::IsFast);
-            }
-            if optimize {
-                enc = enc.optimize_huffman(true);
-            }
-            if progressive {
-                enc = enc.progressive(true);
-            }
-
-            let rust_jpeg = enc.encode().expect("Rust encode failed");
-            let rust_out = helpers::TempFile::new(&format!("{}_rust.jpg", label));
-            rust_out.write_bytes(&rust_jpeg);
-
-            let mut c_args: Vec<&str> = Vec::new();
-            for a in &cjpeg_misc {
-                c_args.push(a.as_str());
-            }
-            for a in &cjpeg_restart_args {
-                c_args.push(a.as_str());
-            }
-            for a in &icc_cjpeg_args {
-                c_args.push(a.as_str());
-            }
-            for a in &cjpeg_qual_args {
-                c_args.push(a.as_str());
-            }
-            c_args.push("-sa");
-            c_args.push(CJPEG_SAMP[sampi]);
-            c_args.push("-gr");
-
-            let c_out = helpers::TempFile::new(&format!("{}_c.jpg", label));
-            helpers::run_c_cjpeg(cjpeg, &c_args, rgb_ppm_path, c_out.path());
-            helpers::assert_files_identical(rust_out.path(), c_out.path(), &label);
+        let mut enc = Encoder::new(&rgb_pixels, rgb_w, rgb_h, PixelFormat::Rgb);
+        enc = enc.fancy_downsampling(false);
+        enc = apply_subsampling(enc, sampi);
+        enc = enc.grayscale_from_color(true);
+        if let Some(q) = quality {
+            enc = enc.quality(q);
         }
+        if force_baseline {
+            enc = enc.force_baseline(true);
+        }
+        if let Some(n) = restart_blocks {
+            enc = enc.restart_blocks(n);
+        } else if let Some(n) = restart_rows {
+            enc = enc.restart_rows(n);
+        }
+        if let Some(ref icc) = icc_data {
+            enc = enc.icc_profile(icc);
+        }
+        if arithmetic {
+            enc = enc.arithmetic(true);
+        }
+        if dct_fast {
+            enc = enc.dct_method(DctMethod::IsFast);
+        }
+        if optimize {
+            enc = enc.optimize_huffman(true);
+        }
+        if progressive {
+            enc = enc.progressive(true);
+        }
+
+        let rust_jpeg = enc.encode().expect("Rust encode failed");
+        let rust_out = helpers::TempFile::new(&format!("{}_rust.jpg", label));
+        rust_out.write_bytes(&rust_jpeg);
+
+        let mut c_args: Vec<&str> = Vec::new();
+        for a in &cjpeg_misc {
+            c_args.push(a.as_str());
+        }
+        for a in &cjpeg_restart_args {
+            c_args.push(a.as_str());
+        }
+        for a in &icc_cjpeg_args {
+            c_args.push(a.as_str());
+        }
+        for a in &cjpeg_qual_args {
+            c_args.push(a.as_str());
+        }
+        c_args.push("-sa");
+        c_args.push(CJPEG_SAMP[sampi]);
+        c_args.push("-gr");
+
+        let c_out = helpers::TempFile::new(&format!("{}_c.jpg", label));
+        helpers::run_c_cjpeg(cjpeg, &c_args, rgb_ppm_path, c_out.path());
+        helpers::assert_files_identical(rust_out.path(), c_out.path(), &label);
     }
 
     // -----------------------------------------------------------------------
     // Variant 3: RGB colorspace (-rg / cjpeg -rgb)
-    // Only valid for S444 (sampi=0) — RGB colorspace uses 1x1 sampling for
-    // all components, which C cjpeg -rgb also enforces.
     {
         let label = format!("{}_rgb_cs_samp{}", label_prefix, TJCOMP_SUBSAMP[sampi]);
-        if sampi != 0 {
-            eprintln!(
-                "SKIP: {} — RGB colorspace only supports S444 (1x1 sampling)",
-                label
-            );
-        } else {
-            let mut enc = Encoder::new(&rgb_pixels, rgb_w, rgb_h, PixelFormat::Rgb);
-            enc = enc.colorspace(ColorSpace::Rgb);
-            enc = enc.fancy_downsampling(false);
-            if let Some(q) = quality {
-                enc = enc.quality(q);
-            }
-            if let Some(ref icc) = icc_data {
-                enc = enc.icc_profile(icc);
-            }
-            // RGB colorspace: no arithmetic/progressive/optimize/restart (C cjpeg -rgb
-            // in the test script only uses default encoding options)
-
-            let rust_jpeg = enc.encode().expect("Rust RGB encode failed");
-            let rust_out = helpers::TempFile::new(&format!("{}_rust.jpg", label));
-            rust_out.write_bytes(&rust_jpeg);
-
-            // cjpeg -rgb always uses 1x1 sampling
-            let mut c_args: Vec<&str> = vec!["-rgb"];
-            for a in &cjpeg_qual_args {
-                c_args.push(a.as_str());
-            }
-            for a in &icc_cjpeg_args {
-                c_args.push(a.as_str());
-            }
-
-            let c_out = helpers::TempFile::new(&format!("{}_c.jpg", label));
-            helpers::run_c_cjpeg(cjpeg, &c_args, rgb_ppm_path, c_out.path());
-            helpers::assert_files_identical(rust_out.path(), c_out.path(), &label);
+        let mut enc = Encoder::new(&rgb_pixels, rgb_w, rgb_h, PixelFormat::Rgb);
+        enc = enc.colorspace(ColorSpace::Rgb);
+        enc = enc.fancy_downsampling(false);
+        enc = apply_subsampling(enc, sampi);
+        if let Some(q) = quality {
+            enc = enc.quality(q);
         }
+        if force_baseline {
+            enc = enc.force_baseline(true);
+        }
+        if let Some(n) = restart_blocks {
+            enc = enc.restart_blocks(n);
+        } else if let Some(n) = restart_rows {
+            enc = enc.restart_rows(n);
+        }
+        if let Some(ref icc) = icc_data {
+            enc = enc.icc_profile(icc);
+        }
+        if arithmetic {
+            enc = enc.arithmetic(true);
+        }
+        if dct_fast {
+            enc = enc.dct_method(DctMethod::IsFast);
+        }
+        if optimize {
+            enc = enc.optimize_huffman(true);
+        }
+        if progressive {
+            enc = enc.progressive(true);
+        }
+
+        let rust_jpeg = enc.encode().expect("Rust RGB encode failed");
+        let rust_out = helpers::TempFile::new(&format!("{}_rust.jpg", label));
+        rust_out.write_bytes(&rust_jpeg);
+
+        let mut c_args: Vec<&str> = Vec::new();
+        for a in &cjpeg_misc {
+            c_args.push(a.as_str());
+        }
+        for a in &cjpeg_restart_args {
+            c_args.push(a.as_str());
+        }
+        for a in &icc_cjpeg_args {
+            c_args.push(a.as_str());
+        }
+        for a in &cjpeg_qual_args {
+            c_args.push(a.as_str());
+        }
+        c_args.push("-sa");
+        c_args.push(CJPEG_SAMP[sampi]);
+        c_args.push("-rgb");
+
+        let c_out = helpers::TempFile::new(&format!("{}_c.jpg", label));
+        helpers::run_c_cjpeg(cjpeg, &c_args, rgb_ppm_path, c_out.path());
+        helpers::assert_files_identical(rust_out.path(), c_out.path(), &label);
     }
 
     // -----------------------------------------------------------------------
     // Variant 4: grayscale input
-    // SKIP for sampi != 0: cjpeg applies its subsampling/fancy-downsampling
-    // pipeline differently when a non-S444 factor is specified for a grayscale
-    // source, producing different DCT coefficients than the Rust encoder which
-    // always treats grayscale as 8×8 MCU / (1,1) sampling regardless of the
-    // subsampling parameter.  S444 (sampi==0) matches because no chroma
-    // downsampling path is triggered.
     // -----------------------------------------------------------------------
     {
         let label = format!("{}_gray_input_samp{}", label_prefix, TJCOMP_SUBSAMP[sampi]);
 
-        if sampi != 0 {
-            eprintln!(
-                "SKIP: {} — cjpeg with non-S444 subsampling flag on grayscale input produces \
-                 different output; Rust encoder ignores subsampling for grayscale",
-                label
-            );
-        } else {
-            // Write PGM to a temp file for cjpeg
-            let gray_ppm_tmp = helpers::TempFile::new(&format!("{}_gray_in.pgm", label));
-            helpers::write_pgm_file(gray_ppm_tmp.path(), gray_w, gray_h, &gray_pixels);
+        // Write PGM to a temp file for cjpeg
+        let gray_ppm_tmp = helpers::TempFile::new(&format!("{}_gray_in.pgm", label));
+        helpers::write_pgm_file(gray_ppm_tmp.path(), gray_w, gray_h, &gray_pixels);
 
-            let mut enc = Encoder::new(&gray_pixels, gray_w, gray_h, PixelFormat::Grayscale);
-            // Grayscale has no chroma, but disable prefilter for consistency.
-            enc = enc.fancy_downsampling(false);
-            enc = apply_subsampling(enc, sampi);
-            if let Some(q) = quality {
-                enc = enc.quality(q);
-            }
-            if force_baseline {
-                enc = enc.force_baseline(true);
-            }
-            if let Some(n) = restart_blocks {
-                enc = enc.restart_blocks(n);
-            } else if let Some(n) = restart_rows {
-                enc = enc.restart_rows(n);
-            }
-            if let Some(ref icc) = icc_data {
-                enc = enc.icc_profile(icc);
-            }
-            if arithmetic {
-                enc = enc.arithmetic(true);
-            }
-            if dct_fast {
-                enc = enc.dct_method(DctMethod::IsFast);
-            }
-            if optimize {
-                enc = enc.optimize_huffman(true);
-            }
-            if progressive {
-                enc = enc.progressive(true);
-            }
+        let mut enc = Encoder::new(&gray_pixels, gray_w, gray_h, PixelFormat::Grayscale);
+        // Grayscale has no chroma, but disable prefilter for consistency.
+        enc = enc.fancy_downsampling(false);
+        enc = apply_subsampling(enc, sampi);
+        if let Some(q) = quality {
+            enc = enc.quality(q);
+        }
+        if force_baseline {
+            enc = enc.force_baseline(true);
+        }
+        if let Some(n) = restart_blocks {
+            enc = enc.restart_blocks(n);
+        } else if let Some(n) = restart_rows {
+            enc = enc.restart_rows(n);
+        }
+        if let Some(ref icc) = icc_data {
+            enc = enc.icc_profile(icc);
+        }
+        if arithmetic {
+            enc = enc.arithmetic(true);
+        }
+        if dct_fast {
+            enc = enc.dct_method(DctMethod::IsFast);
+        }
+        if optimize {
+            enc = enc.optimize_huffman(true);
+        }
+        if progressive {
+            enc = enc.progressive(true);
+        }
 
-            let rust_jpeg = enc.encode().expect("Rust encode failed");
-            let rust_out = helpers::TempFile::new(&format!("{}_rust.jpg", label));
-            rust_out.write_bytes(&rust_jpeg);
+        let rust_jpeg = enc.encode().expect("Rust encode failed");
+        let rust_out = helpers::TempFile::new(&format!("{}_rust.jpg", label));
+        rust_out.write_bytes(&rust_jpeg);
 
-            let mut c_args: Vec<&str> = Vec::new();
-            for a in &cjpeg_misc {
-                c_args.push(a.as_str());
-            }
-            for a in &cjpeg_restart_args {
-                c_args.push(a.as_str());
-            }
-            for a in &icc_cjpeg_args {
-                c_args.push(a.as_str());
-            }
-            for a in &cjpeg_qual_args {
-                c_args.push(a.as_str());
-            }
-            c_args.push("-sa");
-            c_args.push(CJPEG_SAMP[sampi]);
+        let mut c_args: Vec<&str> = Vec::new();
+        for a in &cjpeg_misc {
+            c_args.push(a.as_str());
+        }
+        for a in &cjpeg_restart_args {
+            c_args.push(a.as_str());
+        }
+        for a in &icc_cjpeg_args {
+            c_args.push(a.as_str());
+        }
+        for a in &cjpeg_qual_args {
+            c_args.push(a.as_str());
+        }
+        c_args.push("-sa");
+        c_args.push(CJPEG_SAMP[sampi]);
 
-            let c_out = helpers::TempFile::new(&format!("{}_c.jpg", label));
-            helpers::run_c_cjpeg(cjpeg, &c_args, gray_ppm_tmp.path(), c_out.path());
-            helpers::assert_files_identical(rust_out.path(), c_out.path(), &label);
-        } // end else (sampi == 0)
+        let c_out = helpers::TempFile::new(&format!("{}_c.jpg", label));
+        helpers::run_c_cjpeg(cjpeg, &c_args, gray_ppm_tmp.path(), c_out.path());
+        helpers::assert_files_identical(rust_out.path(), c_out.path(), &label);
     }
 }
 
@@ -467,14 +447,11 @@ fn c_tjcomptest_lossy_quick() {
     helpers::write_pgm_file(gray_pgm_tmp.path(), rgb_w, rgb_h, &gray_pixels);
     let gray_pgm: &Path = gray_pgm_tmp.path();
 
-    // restartarg variants for quick: only no-restart.
-    // The restart+ICC ("-r 1 -icc") and restart-rows ("-r 1b") cases are
-    // skipped in the quick test because:
-    //  - restart+ICC: the Rust compress_with_restart pipeline produces
-    //    different scan data from cjpeg at restart boundaries (DC prediction
-    //    reset point diverges in the entropy-coded stream).
-    //  - restart_rows: tested separately via existing restart_rows tests.
-    // Both are covered by the full test matrix.
+    let restart_cases: &[(Option<u16>, Option<u16>, Option<&Path>, &str)] = &[
+        (None, None, None, "r0"),
+        (None, Some(1), Some(&icc_file), "r1icc"),
+        (Some(1), None, None, "r1b"),
+    ];
 
     // quality variants: default (75) and Q100
     let qual_cases: &[(Option<u8>, bool, &str)] =
@@ -483,38 +460,40 @@ fn c_tjcomptest_lossy_quick() {
     // sampi quick subset: 444, 422, 420
     let sampi_quick: &[usize] = &[0, 1, 3];
 
-    // No-restart, no-ICC case only
-    for &(quality, force_baseline, qtag) in qual_cases {
-        for &sampi in sampi_quick {
-            let label = format!("lossy_quick_p8_r0_{}_samp{}", qtag, TJCOMP_SUBSAMP[sampi]);
-
-            run_lossy_combo(
-                &cjpeg,
-                rgb_ppm,
-                gray_pgm,
-                sampi,
-                quality,
-                force_baseline,
-                None,  // restart_blocks
-                None,  // restart_rows
-                None,  // icc
-                false, // arithmetic
-                false, // dct_fast
-                false, // optimize
-                false, // progressive
-                &label,
+    for &(restart_blocks, restart_rows, icc, rtag) in restart_cases {
+        if icc.is_some() {
+            assert!(
+                icc_file.is_file(),
+                "required ICC fixture missing: {}",
+                icc_file.display()
             );
         }
+        for &(quality, force_baseline, qtag) in qual_cases {
+            for &sampi in sampi_quick {
+                let label = format!(
+                    "lossy_quick_p8_{}_{}_samp{}",
+                    rtag, qtag, TJCOMP_SUBSAMP[sampi]
+                );
+
+                run_lossy_combo(
+                    &cjpeg,
+                    rgb_ppm,
+                    gray_pgm,
+                    sampi,
+                    quality,
+                    force_baseline,
+                    restart_blocks,
+                    restart_rows,
+                    icc,
+                    false,
+                    false,
+                    false,
+                    false,
+                    &label,
+                );
+            }
+        }
     }
-
-    // Inform about skipped restart cases
-    eprintln!(
-        "SKIP: lossy_quick restart+ICC and restart_rows cases — \
-         restart boundary DC prediction differs between Rust compress_with_restart \
-         and cjpeg; covered by full test matrix"
-    );
-
-    let _ = &icc_file; // suppress unused warning
 }
 
 // ---------------------------------------------------------------------------
@@ -540,23 +519,29 @@ fn c_tjcomptest_lossy_full() {
         String::from_utf8_lossy(&help.stderr),
         String::from_utf8_lossy(&help.stdout)
     );
-    if !help_text.contains("-precision") {
-        eprintln!("SKIP: cjpeg lacks -precision (need libjpeg-turbo 3.x)");
-        return;
-    }
+    assert!(
+        help_text.contains("-precision"),
+        "full-c-parity requires libjpeg-turbo 3.x cjpeg with -precision"
+    );
 
     let img_dir: PathBuf = helpers::c_testimages_dir();
 
     // --- Precision 12 subset: basic quality × subsampling via compress_12bit ---
     {
         let rgb_ppm = img_dir.join("testorig.ppm");
-        if rgb_ppm.exists() {
+        assert!(
+            rgb_ppm.is_file(),
+            "required fixture missing: {}",
+            rgb_ppm.display()
+        );
+        {
             let (rgb_w, rgb_h, rgb_pixels) = helpers::parse_ppm_file(&rgb_ppm);
-            // Scale 8-bit to 12-bit: sample_12 = sample_8 * 4095 / 255
+            // Match rdppm.c's rescaling table: round 8-bit input to the
+            // nearest 12-bit sample rather than truncating.
             // Use i32 intermediate — 255 * 4095 = 1_044_225 overflows i16 in debug.
             let pixels_12: Vec<i16> = rgb_pixels
                 .iter()
-                .map(|&s| (s as i32 * 4095 / 255) as i16)
+                .map(|&s| ((s as i32 * 4095 + 127) / 255) as i16)
                 .collect();
             let num_components: usize = 3;
 
@@ -581,13 +566,8 @@ fn c_tjcomptest_lossy_full() {
                         quality,
                         samp,
                     );
-                    let rust_jpeg = match rust_jpeg {
-                        Ok(j) => j,
-                        Err(e) => {
-                            eprintln!("SKIP {}: Rust compress_12bit error: {}", label, e);
-                            continue;
-                        }
-                    };
+                    let rust_jpeg = rust_jpeg
+                        .unwrap_or_else(|e| panic!("{label}: Rust compress_12bit failed: {e}"));
 
                     // C cjpeg -precision 12
                     let ppm_data = helpers::build_ppm(&rgb_pixels, rgb_w, rgb_h);
@@ -602,16 +582,7 @@ fn c_tjcomptest_lossy_full() {
                     ];
                     let c_jpeg = helpers::encode_with_c_cjpeg(&cjpeg, &ppm_data, &c_args, &label);
 
-                    if rust_jpeg == c_jpeg {
-                        eprintln!("{}: BYTE-IDENTICAL", label);
-                    } else {
-                        eprintln!(
-                            "{}: byte diff (rust={}, c={})",
-                            label,
-                            rust_jpeg.len(),
-                            c_jpeg.len()
-                        );
-                    }
+                    helpers::assert_bytes_identical(&rust_jpeg, &c_jpeg, &label);
                 }
             }
         }
@@ -629,6 +600,11 @@ fn c_tjcomptest_lossy_full() {
         let rgb_ppm_tmp: helpers::TempFile = helpers::TempFile::new("full_rgb_aligned.ppm");
         helpers::write_ppm_file(rgb_ppm_tmp.path(), rgb_w, rgb_h, &rgb_pixels);
         let rgb_ppm: &Path = rgb_ppm_tmp.path();
+        assert!(
+            icc_file.is_file(),
+            "required fixture missing: {}",
+            icc_file.display()
+        );
 
         let gray_pixels: Vec<u8> = rgb_to_gray(&rgb_pixels);
         let gray_pgm_tmp: helpers::TempFile = helpers::TempFile::new("full_gray.pgm");
@@ -668,11 +644,6 @@ fn c_tjcomptest_lossy_full() {
         ];
 
         for rc in &restart_cases {
-            if rc.icc.is_some() && !icc_file.exists() {
-                eprintln!("SKIP: test3.icc not found");
-                continue;
-            }
-
             // for ariarg in "" "-a"
             for arithmetic in [false, true] {
                 // The fast integer FDCT (`cjpeg -dc fa`) is an approximation
@@ -702,23 +673,16 @@ fn c_tjcomptest_lossy_full() {
                             }
 
                             // for qualarg in "" "-q 1" "-q 100"
-                            // Skip q=1: it is a documented degenerate quality
-                            // where every quant entry clamps to 255, so 1-LSB
-                            // differences in our pipeline (color conversion,
-                            // FDCT, downsampling) get magnified into
-                            // entropy-stream divergences vs cjpeg. The output
-                            // is barely recognisable as an image, so byte-
-                            // parity here has no practical value. q=1 sanity
-                            // remains covered by the `c_tjcomptest_lossy_quick`
-                            // suite when applicable.
-                            for qual_idx in [0usize, 2usize] {
+                            for qual_idx in [0usize, 1usize, 2usize] {
                                 let (quality, force_baseline): (Option<u8>, bool) = match qual_idx {
                                     0 => (None, false),
+                                    1 => (Some(1), true),
                                     2 => (Some(100), false),
                                     _ => unreachable!(),
                                 };
                                 let qtag = match qual_idx {
                                     0 => "qdef",
+                                    1 => "q1",
                                     2 => "q100",
                                     _ => unreachable!(),
                                 };
@@ -783,10 +747,6 @@ fn c_tjcomptest_lossy_full() {
 /// Encode `source_path` losslessly with the Rust `Encoder` API and with C
 /// `cjpeg`, asserting byte-identical JPEG output.
 ///
-/// Currently unused because the Rust lossless encoder produces a different
-/// JPEG marker structure than cjpeg (no JFIF APP0, different ordering).
-/// Retained for when the encoder is updated to emit matching headers.
-#[allow(dead_code)]
 fn run_lossless_combo(
     cjpeg: &Path,
     source_path: &Path, // PPM or PGM for cjpeg input
@@ -858,13 +818,6 @@ fn run_lossless_combo(
 
 /// Quick lossless parity test against C cjpeg.
 ///
-/// NOTE: The Rust lossless encoder (SOF3) emits a minimal JPEG structure:
-/// `SOI → DHT → SOF3 → SOS → data → EOI` (no JFIF APP0, no APP14).
-/// C cjpeg emits `SOI → APP0/JFIF → APP14 → SOF3 → DHT → SOS → data → EOI`.
-/// Byte-identical comparison is not achievable due to these structural
-/// differences.  All combinations are currently skipped with an explanatory
-/// message.  When the Rust lossless encoder is updated to emit full JFIF
-/// headers matching cjpeg, this test will enforce byte-identical parity.
 #[test]
 fn c_tjcomptest_lossless_quick() {
     let cjpeg: PathBuf = require_c_tool!("cjpeg");
@@ -894,41 +847,48 @@ fn c_tjcomptest_lossless_quick() {
     let psv_quick: &[u8] = &[1, 4, 7];
     let pt_quick: &[u8] = &[0, 1];
 
-    for &(restart_blocks, icc_path, rtag) in restart_cases {
-        if icc_path.is_some() && !icc_file.exists() {
-            eprintln!("SKIP: test3.icc not found, skipping ICC lossless case");
-            continue;
-        }
+    assert!(
+        icc_file.is_file(),
+        "required ICC fixture missing: {}",
+        icc_file.display()
+    );
 
+    for &(restart_blocks, icc_path, rtag) in restart_cases {
         for &psv in psv_quick {
             for &pt in pt_quick {
-                // pt must be < precision (8 for testorig)
-                if pt >= 8 {
-                    continue;
-                }
-
                 // RGB lossless
                 {
                     let label = format!("lossless_quick_p8_{}_psv{}_pt{}_rgb", rtag, psv, pt);
-                    // SKIP: Rust lossless encoder emits SOI→DHT→SOF3→SOS structure
-                    // (no JFIF/APP14) while cjpeg emits SOI→APP0→APP14→SOF3→DHT→SOS.
-                    // Byte-identical comparison is not achievable until the Rust
-                    // lossless encoder is updated to emit matching JFIF headers.
-                    eprintln!(
-                        "SKIP: {} — Rust lossless JPEG structure differs from cjpeg \
-                         (no JFIF APP0 / different marker ordering)",
-                        label
+                    run_lossless_combo(
+                        &cjpeg,
+                        rgb_ppm,
+                        &rgb_pixels,
+                        rgb_w,
+                        rgb_h,
+                        PixelFormat::Rgb,
+                        psv,
+                        pt,
+                        restart_blocks,
+                        icc_path,
+                        &label,
                     );
-                    let _ = (&rgb_ppm, &gray_pgm, &cjpeg, icc_path, restart_blocks);
                 }
 
                 // Grayscale lossless
                 {
                     let label = format!("lossless_quick_p8_{}_psv{}_pt{}_gray", rtag, psv, pt);
-                    eprintln!(
-                        "SKIP: {} — Rust lossless JPEG structure differs from cjpeg \
-                         (no JFIF APP0 / different marker ordering)",
-                        label
+                    run_lossless_combo(
+                        &cjpeg,
+                        gray_pgm,
+                        &gray_pixels,
+                        rgb_w,
+                        rgb_h,
+                        PixelFormat::Grayscale,
+                        psv,
+                        pt,
+                        restart_blocks,
+                        icc_path,
+                        &label,
                     );
                 }
             }
@@ -958,10 +918,10 @@ fn c_tjcomptest_lossless_full() {
         String::from_utf8_lossy(&help.stderr),
         String::from_utf8_lossy(&help.stdout)
     );
-    if !help_text.contains("-lossless") {
-        eprintln!("SKIP: cjpeg does not support -lossless (need libjpeg-turbo 3.x)");
-        return;
-    }
+    assert!(
+        help_text.contains("-lossless"),
+        "full-c-parity requires libjpeg-turbo 3.x cjpeg with -lossless"
+    );
 
     let img_dir: PathBuf = helpers::c_testimages_dir();
     let icc_file = img_dir.join("test3.icc");
@@ -969,7 +929,12 @@ fn c_tjcomptest_lossless_full() {
     // --- Non-8-bit lossless: basic psv × pt via compress_16bit ---
     {
         let rgb_ppm = img_dir.join("testorig.ppm");
-        if rgb_ppm.exists() {
+        assert!(
+            rgb_ppm.is_file(),
+            "required fixture missing: {}",
+            rgb_ppm.display()
+        );
+        {
             let (rgb_w, rgb_h, rgb_pixels) = helpers::parse_ppm_file(&rgb_ppm);
             for precision in [2u8, 4, 12, 16] {
                 let max_val: u16 = (1u32 << precision).saturating_sub(1).min(65535) as u16;
@@ -977,22 +942,17 @@ fn c_tjcomptest_lossless_full() {
                 let gray_pixels: Vec<u8> = rgb_to_gray(&rgb_pixels);
                 let pixels_16: Vec<u16> = gray_pixels
                     .iter()
-                    .map(|&s| (s as u32 * max_val as u32 / 255) as u16)
+                    .map(|&s| ((s as u32 * max_val as u32 + 127) / 255) as u16)
                     .collect();
 
                 for psv in [1u8, 4, 7] {
                     let pt: u8 = 0;
                     let label = format!("lossless-p{}-psv{}-pt{}", precision, psv, pt);
 
-                    let rust_jpeg =
-                        libjpeg_turbo_rs::compress_16bit(&pixels_16, rgb_w, rgb_h, 1, psv, pt);
-                    let rust_jpeg = match rust_jpeg {
-                        Ok(j) => j,
-                        Err(e) => {
-                            eprintln!("SKIP {}: compress_16bit error: {}", label, e);
-                            continue;
-                        }
-                    };
+                    let rust_jpeg = libjpeg_turbo_rs::precision::compress_lossless_arbitrary(
+                        &pixels_16, rgb_w, rgb_h, 1, precision, psv, pt,
+                    )
+                    .unwrap_or_else(|e| panic!("{label}: Rust lossless encode failed: {e}"));
 
                     // C cjpeg -precision P -lossless psv,pt
                     let gray_pgm_tmp =
@@ -1005,16 +965,7 @@ fn c_tjcomptest_lossless_full() {
                     let pgm_data = std::fs::read(gray_pgm_tmp.path()).unwrap();
                     let c_jpeg = helpers::encode_with_c_cjpeg(&cjpeg, &pgm_data, &c_args, &label);
 
-                    if rust_jpeg == c_jpeg {
-                        eprintln!("{}: BYTE-IDENTICAL", label);
-                    } else {
-                        eprintln!(
-                            "{}: byte diff (rust={}, c={})",
-                            label,
-                            rust_jpeg.len(),
-                            c_jpeg.len()
-                        );
-                    }
+                    helpers::assert_bytes_identical(&rust_jpeg, &c_jpeg, &label);
                 }
             }
         }
@@ -1022,10 +973,16 @@ fn c_tjcomptest_lossless_full() {
 
     for precision in [8u8] {
         let rgb_ppm = img_dir.join("testorig.ppm");
-        if !rgb_ppm.exists() {
-            eprintln!("SKIP: testorig.ppm not found at {:?}", rgb_ppm);
-            continue;
-        }
+        assert!(
+            rgb_ppm.is_file(),
+            "required fixture missing: {}",
+            rgb_ppm.display()
+        );
+        assert!(
+            icc_file.is_file(),
+            "required fixture missing: {}",
+            icc_file.display()
+        );
 
         let (rgb_w, rgb_h, rgb_pixels) = helpers::parse_ppm_file(&rgb_ppm);
         let gray_pixels: Vec<u8> = rgb_to_gray(&rgb_pixels);
@@ -1044,10 +1001,6 @@ fn c_tjcomptest_lossless_full() {
                     &[(None, None, "r0"), (Some(1), Some(icc_path_ref), "r1icc")];
 
                 for &(restart_blocks, icc_path, rtag) in restart_cases {
-                    if icc_path.is_some() && !icc_file.exists() {
-                        continue;
-                    }
-
                     // RGB lossless
                     {
                         let label = format!(

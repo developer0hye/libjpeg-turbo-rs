@@ -231,12 +231,12 @@ fn lossless_precision_12_three_components() {
 fn lossless_precision_12_sof_marker_verification() {
     let pixels: Vec<i16> = vec![2048i16; 64];
     let jpeg = compress_12bit(&pixels, 8, 8, 1, 90, Subsampling::S444).unwrap();
-    let sof_pos = jpeg.windows(2).position(|w| w[0] == 0xFF && w[1] == 0xC0);
-    assert!(sof_pos.is_some(), "SOF0 marker not found in 12-bit JPEG");
+    let sof_pos = jpeg.windows(2).position(|w| w[0] == 0xFF && w[1] == 0xC1);
+    assert!(sof_pos.is_some(), "SOF1 marker not found in 12-bit JPEG");
     assert_eq!(
         jpeg[sof_pos.unwrap() + 4],
         12,
-        "SOF0 precision should be 12"
+        "SOF1 precision should be 12"
     );
 }
 
@@ -669,34 +669,23 @@ fn c_cross_validation_precision_extended() {
         // -----------------------------------------------------------
         // (a) Rust encode -> C decode
         // -----------------------------------------------------------
-        if let Some(ref djpeg_bin) = djpeg {
-            let jpeg_result: Option<Vec<u8>> = match precision {
-                8 => {
-                    let pixels_u8: Vec<u8> = samples.iter().map(|&s| s as u8).collect();
-                    Some(
+        // The public 12-bit encoder is intentionally lossy (SOF1), so this
+        // lossless Rust-to-C direction exists only for the 8- and 16-bit
+        // encoders.  Twelve-bit lossless interoperability is covered below
+        // in the C-to-Rust direction.
+        if precision != 12 {
+            if let Some(ref djpeg_bin) = djpeg {
+                let jpeg_data: Vec<u8> = match precision {
+                    8 => {
+                        let pixels_u8: Vec<u8> = samples.iter().map(|&s| s as u8).collect();
                         compress_lossless(&pixels_u8, w, h, PixelFormat::Grayscale)
-                            .expect("Rust 8-bit lossless encode failed"),
-                    )
-                }
-                12 => {
-                    // 12-bit API is DCT-based (lossy, SOF0), not lossless SOF3.
-                    // C djpeg can decode it, but the comparison cannot be exact.
-                    // Skip lossless cross-validation for 12-bit Rust encode.
-                    eprintln!(
-                        "SKIP precision={}: 12-bit API is DCT-based (lossy), \
-                         not lossless SOF3. Skipping Rust encode -> C decode.",
-                        precision
-                    );
-                    None
-                }
-                16 => Some(
-                    compress_16bit(&samples, w, h, 1, 1, 0)
+                            .expect("Rust 8-bit lossless encode failed")
+                    }
+                    16 => compress_16bit(&samples, w, h, 1, 1, 0)
                         .expect("Rust 16-bit lossless encode failed"),
-                ),
-                _ => unreachable!(),
-            };
+                    _ => unreachable!(),
+                };
 
-            if let Some(jpeg_data) = jpeg_result {
                 let tmp_jpg: TempFile =
                     TempFile::new(&format!("prec_ext_rust_enc_p{}.jpg", precision));
                 let tmp_out: TempFile =
@@ -711,23 +700,20 @@ fn c_cross_validation_precision_extended() {
                     .output()
                     .expect("failed to run djpeg");
 
-                if !output.status.success() {
-                    eprintln!(
-                        "SKIP precision={}: djpeg cannot decode ({})",
-                        precision,
-                        String::from_utf8_lossy(&output.stderr).trim()
-                    );
-                } else {
-                    let (dw, dh, _dmaxval, decoded) = parse_pgm_16(tmp_out.path());
-                    assert_eq!(dw, w, "precision={}: width mismatch", precision);
-                    assert_eq!(dh, h, "precision={}: height mismatch", precision);
-                    assert_eq!(
-                        decoded, samples,
-                        "precision={}: Rust encode -> C djpeg decode must be pixel-exact \
-                         for lossless",
-                        precision
-                    );
-                }
+                assert!(
+                    output.status.success(),
+                    "precision={}: djpeg cannot decode Rust lossless JPEG: {}",
+                    precision,
+                    String::from_utf8_lossy(&output.stderr).trim()
+                );
+                let (dw, dh, _dmaxval, decoded) = parse_pgm_16(tmp_out.path());
+                assert_eq!(dw, w, "precision={}: width mismatch", precision);
+                assert_eq!(dh, h, "precision={}: height mismatch", precision);
+                assert_eq!(
+                    decoded, samples,
+                    "precision={}: Rust encode -> C djpeg decode must be pixel-exact for lossless",
+                    precision
+                );
             }
         }
 
@@ -799,33 +785,27 @@ fn c_cross_validation_precision_extended() {
                     // C cjpeg with -precision N -lossless produces SOF3 with
                     // precision=N. Use decompress_lossless_arbitrary which
                     // handles any precision 2-16 via SOF3.
-                    match decompress_lossless_arbitrary(&jpeg_data) {
-                        Ok(img) => {
-                            assert_eq!(
-                                img.width, w,
-                                "precision={} C encode -> Rust decode: width mismatch",
-                                precision
-                            );
-                            assert_eq!(
-                                img.height, h,
-                                "precision={} C encode -> Rust decode: height mismatch",
-                                precision
-                            );
-                            assert_eq!(
-                                img.data, samples,
-                                "precision={}: C cjpeg encode -> Rust decode \
-                                 must be pixel-exact",
-                                precision
-                            );
-                        }
-                        Err(e) => {
-                            eprintln!(
-                                "SKIP precision={}: Rust cannot decode C-produced \
-                                 lossless JPEG ({})",
-                                precision, e
-                            );
-                        }
-                    }
+                    let img = decompress_lossless_arbitrary(&jpeg_data).unwrap_or_else(|error| {
+                        panic!(
+                            "precision={}: Rust cannot decode C-produced lossless JPEG: {}",
+                            precision, error
+                        )
+                    });
+                    assert_eq!(
+                        img.width, w,
+                        "precision={} C encode -> Rust decode: width mismatch",
+                        precision
+                    );
+                    assert_eq!(
+                        img.height, h,
+                        "precision={} C encode -> Rust decode: height mismatch",
+                        precision
+                    );
+                    assert_eq!(
+                        img.data, samples,
+                        "precision={}: C cjpeg encode -> Rust decode must be pixel-exact",
+                        precision
+                    );
                 }
                 _ => unreachable!(),
             }

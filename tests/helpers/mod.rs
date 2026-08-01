@@ -150,6 +150,10 @@ impl TempFile {
 
 impl Drop for TempFile {
     fn drop(&mut self) {
+        if std::env::var_os("KEEP_LJT_TEST_OUTPUT").is_some() {
+            eprintln!("keeping test output: {}", self.path.display());
+            return;
+        }
         std::fs::remove_file(&self.path).ok();
     }
 }
@@ -270,6 +274,44 @@ pub fn parse_pgm_file(path: &Path) -> (usize, usize, Vec<u8>) {
     parse_pgm(&raw).unwrap_or_else(|| panic!("failed to parse PGM from {:?}", path))
 }
 
+/// Parse P5/P6 PNM data with either 8-bit or big-endian 16-bit samples.
+pub fn parse_pnm_i16(data: &[u8]) -> Option<(usize, usize, usize, usize, Vec<i16>)> {
+    if data.len() < 3 || (&data[0..2] != b"P5" && &data[0..2] != b"P6") {
+        return None;
+    }
+    let components: usize = if &data[0..2] == b"P5" { 1 } else { 3 };
+    let mut pos: usize = 2;
+    pos = skip_ws_comments(data, pos);
+    let (width, next) = read_number(data, pos)?;
+    pos = skip_ws_comments(data, next);
+    let (height, next) = read_number(data, pos)?;
+    pos = skip_ws_comments(data, next);
+    let (maxval, next) = read_number(data, pos)?;
+    pos = next;
+    if pos < data.len() && data[pos].is_ascii_whitespace() {
+        pos += 1;
+    }
+
+    let sample_count: usize = width.checked_mul(height)?.checked_mul(components)?;
+    let bytes_per_sample: usize = if maxval > 255 { 2 } else { 1 };
+    let byte_count: usize = sample_count.checked_mul(bytes_per_sample)?;
+    if data.len().saturating_sub(pos) < byte_count {
+        return None;
+    }
+    let samples: Vec<i16> = if bytes_per_sample == 2 {
+        data[pos..pos + byte_count]
+            .chunks_exact(2)
+            .map(|sample| u16::from_be_bytes([sample[0], sample[1]]) as i16)
+            .collect()
+    } else {
+        data[pos..pos + byte_count]
+            .iter()
+            .map(|&sample| sample as i16)
+            .collect()
+    };
+    Some((width, height, components, maxval, samples))
+}
+
 // ===========================================================================
 // Pixel comparison
 // ===========================================================================
@@ -374,6 +416,34 @@ pub fn decode_with_c_djpeg(djpeg: &Path, jpeg_data: &[u8], label: &str) -> (usiz
         .unwrap_or_else(|e| panic!("Failed to read PPM {:?}: {:?}", ppm_file.path(), e));
     parse_ppm(&ppm_data)
         .unwrap_or_else(|| panic!("Failed to parse PPM output from djpeg for {}", label))
+}
+
+/// Decode an extended-precision JPEG using C djpeg and retain its PNM precision.
+pub fn decode_with_c_djpeg_i16(
+    djpeg: &Path,
+    jpeg_data: &[u8],
+    label: &str,
+) -> (usize, usize, usize, usize, Vec<i16>) {
+    let jpeg_file: TempFile = TempFile::new(&format!("{}_12bit.jpg", label));
+    let pnm_file: TempFile = TempFile::new(&format!("{}_12bit.pnm", label));
+    jpeg_file.write_bytes(jpeg_data);
+
+    let output: std::process::Output = Command::new(djpeg)
+        .arg("-pnm")
+        .arg("-outfile")
+        .arg(pnm_file.path())
+        .arg(jpeg_file.path())
+        .output()
+        .unwrap_or_else(|error| panic!("failed to run djpeg for {label}: {error}"));
+    assert!(
+        output.status.success(),
+        "djpeg failed for {label}: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let pnm: Vec<u8> = std::fs::read(pnm_file.path())
+        .unwrap_or_else(|error| panic!("failed to read djpeg output for {label}: {error}"));
+    parse_pnm_i16(&pnm).unwrap_or_else(|| panic!("failed to parse djpeg PNM for {label}"))
 }
 
 /// Decode JPEG data to grayscale using C djpeg, returning `(width, height, gray_pixels)`.
@@ -553,6 +623,15 @@ pub fn assert_files_identical(path_a: &Path, path_b: &Path, label: &str) {
     let data_b: Vec<u8> = std::fs::read(path_b)
         .unwrap_or_else(|e| panic!("{}: failed to read {:?}: {:?}", label, path_b, e));
 
+    assert_bytes_identical(
+        &data_a,
+        &data_b,
+        &format!("{label} (a={}, b={})", path_a.display(), path_b.display()),
+    );
+}
+
+/// Assert two byte slices are identical, reporting only the first difference.
+pub fn assert_bytes_identical(data_a: &[u8], data_b: &[u8], label: &str) {
     if data_a == data_b {
         return;
     }
@@ -562,17 +641,20 @@ pub fn assert_files_identical(path_a: &Path, path_b: &Path, label: &str) {
     let first_diff: Option<usize> = (0..min_len).find(|&i| data_a[i] != data_b[i]);
     if let Some(pos) = first_diff {
         panic!(
-            "{}: files differ at byte {} (a=0x{:02x}, b=0x{:02x}); a_len={}, b_len={}\n  a: {:?}\n  b: {:?}",
-            label, pos, data_a[pos], data_b[pos], data_a.len(), data_b.len(), path_a, path_b
+            "{}: bytes differ at byte {} (a=0x{:02x}, b=0x{:02x}); a_len={}, b_len={}",
+            label,
+            pos,
+            data_a[pos],
+            data_b[pos],
+            data_a.len(),
+            data_b.len()
         );
     } else {
         panic!(
-            "{}: files differ in length (a={}, b={})\n  a: {:?}\n  b: {:?}",
+            "{}: bytes differ in length (a={}, b={})",
             label,
             data_a.len(),
-            data_b.len(),
-            path_a,
-            path_b
+            data_b.len()
         );
     }
 }

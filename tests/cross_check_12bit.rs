@@ -22,10 +22,12 @@ use libjpeg_turbo_rs::Subsampling;
 
 /// Check if djpeg can handle 12-bit JPEG (by trying to decode testorig12.jpg).
 fn djpeg_supports_12bit(djpeg: &Path) -> bool {
-    let test_file: PathBuf = reference_path("testorig12.jpg");
-    if !test_file.exists() {
-        return false;
-    }
+    let test_file: PathBuf = twelve_bit_reference_path();
+    assert!(
+        test_file.is_file(),
+        "checked-in 12-bit probe fixture is missing: {}",
+        test_file.display()
+    );
     let tmp = std::env::temp_dir().join("ljt_12bit_probe.ppm");
     let result = Command::new(djpeg)
         .arg("-ppm")
@@ -60,6 +62,10 @@ fn temp_path(name: &str) -> PathBuf {
     let counter: u64 = TEMP_COUNTER.fetch_add(1, Ordering::Relaxed);
     let pid: u32 = std::process::id();
     std::env::temp_dir().join(format!("ljt_12bit_{}_{:04}_{}", pid, counter, name))
+}
+
+fn twelve_bit_reference_path() -> PathBuf {
+    PathBuf::from("tests/fixtures/real_world/libjpeg_testorig12_227x149_12bit.jpg")
 }
 
 struct TempFile {
@@ -160,9 +166,52 @@ fn read_number(data: &[u8], idx: usize) -> (usize, usize) {
     (val, end)
 }
 
+fn build_ppm_12bit(pixels: &[i16], width: usize, height: usize) -> Vec<u8> {
+    let mut ppm = format!("P6\n{width} {height}\n4095\n").into_bytes();
+    for &sample in pixels {
+        ppm.extend_from_slice(&(sample as u16).to_be_bytes());
+    }
+    ppm
+}
+
 // ===========================================================================
 // Rust 12-bit encode -> C djpeg decode
 // ===========================================================================
+
+#[test]
+fn rust_12bit_four_row_downsampling_matches_c_at_partial_bottom_group() {
+    let cjpeg: PathBuf = require_c_tool!("cjpeg");
+    assert!(
+        cjpeg_supports_precision(&cjpeg),
+        "12-bit cross-validation requires cjpeg -precision support"
+    );
+
+    // height % 4 == 3 exercises libjpeg's rule that the first partially
+    // downsampled row is duplicated through the remaining iMCU padding.
+    let (width, height): (usize, usize) = (37, 35);
+    let mut pixels: Vec<i16> = Vec::with_capacity(width * height * 3);
+    for y in 0..height {
+        for x in 0..width {
+            pixels.push(((x * 97 + y * 31 + x * y * 3) % 4096) as i16);
+            pixels.push(((x * 17 + y * 113 + x * y * 5 + 509) % 4096) as i16);
+            pixels.push(((x * 67 + y * 43 + x * y * 7 + 1301) % 4096) as i16);
+        }
+    }
+    let ppm: Vec<u8> = build_ppm_12bit(&pixels, width, height);
+
+    for &(subsampling, sample) in &[(Subsampling::S441, "1x4"), (Subsampling::S24, "2x4")] {
+        let label: String = format!("12bit_partial_v4_{sample}");
+        let rust_jpeg = compress_12bit(&pixels, width, height, 3, 90, subsampling)
+            .unwrap_or_else(|error| panic!("{label}: Rust encode failed: {error}"));
+        let c_jpeg = helpers::encode_with_c_cjpeg(
+            &cjpeg,
+            &ppm,
+            &["-precision", "12", "-quality", "90", "-sample", sample],
+            &label,
+        );
+        helpers::assert_bytes_identical(&rust_jpeg, &c_jpeg, &label);
+    }
+}
 
 #[test]
 fn rust_12bit_c_decode() {
@@ -186,7 +235,11 @@ fn rust_12bit_c_decode() {
     let tmp_out: TempFile = TempFile::new("rust_12bit.pnm");
     std::fs::write(tmp_jpg.path(), &jpeg).expect("write temp");
 
-    // Try to decode with djpeg; 12-bit support depends on the djpeg build
+    assert!(
+        djpeg_supports_12bit(&djpeg),
+        "12-bit cross-validation requires a 12-bit-capable djpeg"
+    );
+
     let output = Command::new(&djpeg)
         .arg("-pnm")
         .arg("-outfile")
@@ -195,13 +248,11 @@ fn rust_12bit_c_decode() {
         .output()
         .expect("failed to run djpeg");
 
-    if !output.status.success() {
-        eprintln!(
-            "SKIP: djpeg cannot decode 12-bit JPEG (may not be built with 12-bit support): {}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-        return;
-    }
+    assert!(
+        output.status.success(),
+        "djpeg failed to decode Rust 12-bit output: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
 
     // Verify output file exists and has valid PNM structure
     let out_data: Vec<u8> = std::fs::read(tmp_out.path()).expect("read djpeg output");
@@ -218,13 +269,9 @@ fn rust_12bit_c_decode() {
 
 #[test]
 fn c_12bit_rust_decode_testorig12() {
-    let ref_path: PathBuf = reference_path("testorig12.jpg");
-    if !ref_path.exists() {
-        eprintln!("SKIP: testorig12.jpg not found");
-        return;
-    }
+    let ref_path: PathBuf = twelve_bit_reference_path();
 
-    let jpeg_data: Vec<u8> = std::fs::read(&ref_path).expect("read testorig12.jpg");
+    let jpeg_data: Vec<u8> = std::fs::read(&ref_path).expect("read checked-in 12-bit fixture");
     let img = decompress_12bit(&jpeg_data).expect("Rust decompress_12bit should succeed");
 
     assert!(img.width > 0, "width should be positive");
@@ -249,17 +296,18 @@ fn c_12bit_rust_decode_testorig12() {
 #[test]
 fn c_12bit_cjpeg_precision_rust_decode() {
     let cjpeg: PathBuf = require_c_tool!("cjpeg");
-    if !cjpeg_supports_precision(&cjpeg) {
-        eprintln!("SKIP: cjpeg does not support -precision flag");
-        return;
-    }
+    assert!(
+        cjpeg_supports_precision(&cjpeg),
+        "12-bit cross-validation requires cjpeg -precision support"
+    );
 
-    // monkey16.ppm is a 16-bit PPM that cjpeg can use with -precision 12
-    let ppm_path: PathBuf = reference_path("monkey16.ppm");
-    if !ppm_path.exists() {
-        eprintln!("SKIP: monkey16.ppm not found");
-        return;
-    }
+    // monkey16.pgm is a 16-bit PGM that cjpeg can use with -precision 12.
+    let ppm_path: PathBuf = reference_path("monkey16.pgm");
+    assert!(
+        ppm_path.is_file(),
+        "checked-in 16-bit PGM fixture is missing: {}",
+        ppm_path.display()
+    );
 
     let tmp_jpg: TempFile = TempFile::new("c_12bit_monkey.jpg");
 
@@ -272,13 +320,11 @@ fn c_12bit_cjpeg_precision_rust_decode() {
         .output()
         .expect("failed to run cjpeg");
 
-    if !output.status.success() {
-        eprintln!(
-            "SKIP: cjpeg -precision 12 failed: {}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-        return;
-    }
+    assert!(
+        output.status.success(),
+        "cjpeg advertised -precision but -precision 12 failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
 
     let jpeg_data: Vec<u8> = std::fs::read(tmp_jpg.path()).expect("read cjpeg 12-bit output");
     let img = decompress_12bit(&jpeg_data)
@@ -317,21 +363,17 @@ fn c_12bit_cjpeg_precision_rust_decode() {
 fn pixel_match_12bit_c_reference() {
     let djpeg: PathBuf = require_c_tool!("djpeg");
 
-    let ref_path: PathBuf = reference_path("testorig12.jpg");
-    if !ref_path.exists() {
-        eprintln!("SKIP: testorig12.jpg not found");
-        return;
-    }
+    let ref_path: PathBuf = twelve_bit_reference_path();
 
-    if !djpeg_supports_12bit(&djpeg) {
-        eprintln!("SKIP: djpeg does not support 12-bit decoding");
-        return;
-    }
+    assert!(
+        djpeg_supports_12bit(&djpeg),
+        "12-bit cross-validation requires a 12-bit-capable djpeg"
+    );
 
     // Decode with Rust — must not fail
-    let jpeg_data: Vec<u8> = std::fs::read(&ref_path).expect("read testorig12.jpg");
-    let rust_img =
-        decompress_12bit(&jpeg_data).expect("Rust decompress_12bit must succeed on testorig12.jpg");
+    let jpeg_data: Vec<u8> = std::fs::read(&ref_path).expect("read checked-in 12-bit fixture");
+    let rust_img = decompress_12bit(&jpeg_data)
+        .expect("Rust decompress_12bit must succeed on the checked-in 12-bit fixture");
 
     // Decode with C djpeg
     let tmp_out: TempFile = TempFile::new("c_12bit_ref.pnm");
@@ -343,13 +385,11 @@ fn pixel_match_12bit_c_reference() {
         .output()
         .expect("failed to run djpeg");
 
-    if !output.status.success() {
-        eprintln!(
-            "SKIP: djpeg failed on testorig12.jpg: {}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-        return;
-    }
+    assert!(
+        output.status.success(),
+        "12-bit capability probe succeeded but djpeg failed on the same fixture: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
 
     let (c_w, c_h, c_components, maxval, c_pixels) = parse_pnm_to_i16(tmp_out.path());
 
@@ -424,16 +464,7 @@ fn pixel_match_12bit_c_reference() {
             max_diff
         );
     } else {
-        // Unexpected maxval - djpeg might not truly support 12-bit.
-        // Just verify both decoders produced non-zero, valid-looking output.
-        eprintln!(
-            "NOTE: djpeg produced PNM with unexpected maxval={}, skipping pixel comparison",
-            maxval
-        );
-        assert!(
-            !c_pixels.is_empty(),
-            "djpeg should produce non-empty pixel output"
-        );
+        panic!("djpeg produced unexpected PNM maxval={maxval}; expected 255 or 4095");
     }
 }
 
@@ -480,16 +511,20 @@ fn rust_12bit_roundtrip_encode_decode() {
 /// - Rust encode 12-bit grayscale -> write to temp -> C djpeg decode -> compare.
 /// - C cjpeg `-precision 12` encode -> Rust decode -> compare against C djpeg decode.
 ///
-/// Requires both cjpeg and djpeg with 12-bit support; skips gracefully if unavailable.
+/// Requires both cjpeg and djpeg with 12-bit support.
 #[test]
 fn c_cross_validation_12bit_encode_decode() {
     let djpeg: PathBuf = require_c_tool!("djpeg");
     let cjpeg: PathBuf = require_c_tool!("cjpeg");
 
-    if !cjpeg_supports_precision(&cjpeg) {
-        eprintln!("SKIP: cjpeg does not support -precision flag");
-        return;
-    }
+    assert!(
+        cjpeg_supports_precision(&cjpeg),
+        "12-bit cross-validation requires cjpeg -precision support"
+    );
+    assert!(
+        djpeg_supports_12bit(&djpeg),
+        "12-bit cross-validation requires a 12-bit-capable djpeg"
+    );
 
     // --- Part 1: Rust 12-bit encode -> C djpeg decode -> compare ---
     {
@@ -521,13 +556,11 @@ fn c_cross_validation_12bit_encode_decode() {
             .output()
             .expect("failed to run djpeg");
 
-        if !output.status.success() {
-            eprintln!(
-                "SKIP: djpeg cannot decode 12-bit JPEG: {}",
-                String::from_utf8_lossy(&output.stderr)
-            );
-            return;
-        }
+        assert!(
+            output.status.success(),
+            "{label}: djpeg failed to decode Rust 12-bit output: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
 
         // Rust decode of the same JPEG
         let rust_img = decompress_12bit(&jpeg)
@@ -583,28 +616,12 @@ fn c_cross_validation_12bit_encode_decode() {
     {
         let label: &str = "c_encode_rust_decode_12bit";
 
-        // We need a PNM source for cjpeg. Use monkey16.ppm if available,
-        // otherwise generate a small 16-bit PGM.
-        let ppm_path: PathBuf = reference_path("monkey16.ppm");
-        let tmp_pgm: TempFile = TempFile::new("12bit_src.pgm");
-
-        let source_path: PathBuf = if ppm_path.exists() {
-            ppm_path
-        } else {
-            // Generate a 16x16 16-bit PGM (maxval=4095) for cjpeg input
-            let (w, h): (usize, usize) = (16, 16);
-            let mut pgm_data: Vec<u8> = Vec::new();
-            pgm_data.extend_from_slice(format!("P5\n{} {}\n4095\n", w, h).as_bytes());
-            for y in 0..h {
-                for x in 0..w {
-                    let v: u16 = ((y * 256 + x * 256) % 4096) as u16;
-                    pgm_data.push((v >> 8) as u8); // big-endian
-                    pgm_data.push((v & 0xFF) as u8);
-                }
-            }
-            std::fs::write(tmp_pgm.path(), &pgm_data).expect("write temp PGM");
-            tmp_pgm.path().to_path_buf()
-        };
+        let source_path: PathBuf = reference_path("monkey16.pgm");
+        assert!(
+            source_path.is_file(),
+            "required 16-bit PGM fixture missing: {}",
+            source_path.display()
+        );
 
         let tmp_jpg: TempFile = TempFile::new("c12_enc.jpg");
         let output = Command::new(&cjpeg)
@@ -618,13 +635,11 @@ fn c_cross_validation_12bit_encode_decode() {
             .output()
             .expect("failed to run cjpeg");
 
-        if !output.status.success() {
-            eprintln!(
-                "SKIP: cjpeg -precision 12 failed: {}",
-                String::from_utf8_lossy(&output.stderr)
-            );
-            return;
-        }
+        assert!(
+            output.status.success(),
+            "{label}: cjpeg -precision 12 failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
 
         let jpeg_data: Vec<u8> = std::fs::read(tmp_jpg.path()).expect("read cjpeg 12-bit output");
         let rust_img = decompress_12bit(&jpeg_data)
@@ -640,20 +655,11 @@ fn c_cross_validation_12bit_encode_decode() {
             .output()
             .expect("failed to run djpeg");
 
-        if !output.status.success() {
-            eprintln!(
-                "SKIP: djpeg cannot decode cjpeg -precision 12 output: {}",
-                String::from_utf8_lossy(&output.stderr)
-            );
-            // At minimum verify Rust decoded something valid
-            assert!(rust_img.width > 0);
-            assert!(rust_img.height > 0);
-            assert_eq!(
-                rust_img.data.len(),
-                rust_img.width * rust_img.height * rust_img.num_components
-            );
-            return;
-        }
+        assert!(
+            output.status.success(),
+            "{label}: djpeg failed to decode cjpeg 12-bit output: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
 
         let (c_w, c_h, c_components, c_maxval, c_pixels) = parse_pnm_to_i16(tmp_pnm.path());
 

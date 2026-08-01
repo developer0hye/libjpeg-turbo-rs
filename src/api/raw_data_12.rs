@@ -12,6 +12,7 @@ use crate::common::types::Subsampling;
 use crate::decode::bitstream::BitReader;
 use crate::decode::huffman;
 use crate::decode::marker::MarkerReader;
+use crate::encode::huff_opt;
 use crate::encode::huffman_encode::{build_huff_table, BitWriter, HuffmanEncoder};
 use crate::encode::marker_writer;
 use crate::encode::quant;
@@ -175,16 +176,6 @@ fn fdct_12bit(input: &[i16; 64], output: &mut [i32; 64]) {
             FDCT12_CONST_BITS + FDCT12_PASS1_BITS,
         );
     }
-}
-
-/// Scale a standard quant table for 12-bit: multiply each entry by 16.
-/// Matches `precision.rs::scale_quant_12bit`.
-fn scale_quant_12bit(table: &[u16; 64]) -> [u16; 64] {
-    let mut r: [u16; 64] = [0u16; 64];
-    for i in 0..64 {
-        r[i] = (table[i] as u32 * 16).min(65535) as u16;
-    }
-    r
 }
 
 /// Scale a 12-bit quant table for the FDCT divisor: multiply each entry by 8.
@@ -463,21 +454,22 @@ pub fn compress_raw_12(
 
     let (h_samp, v_samp): (u8, u8) = subsampling.sampling_factors();
 
+    if plane_widths[0] < image_width || plane_heights[0] < image_height {
+        return Err(JpegError::CorruptData(format!(
+            "Y plane dimensions {}x{} are smaller than image dimensions {}x{}",
+            plane_widths[0], plane_heights[0], image_width, image_height
+        )));
+    }
+
     if !is_grayscale {
         let expected_cb_w: usize = image_width.div_ceil(h_samp as usize);
         let expected_cb_h: usize = image_height.div_ceil(v_samp as usize);
 
-        if plane_widths[0] != image_width || plane_heights[0] != image_height {
-            return Err(JpegError::CorruptData(format!(
-                "Y plane dimensions {}x{} do not match image dimensions {}x{}",
-                plane_widths[0], plane_heights[0], image_width, image_height
-            )));
-        }
         for comp_idx in 1..3 {
             let comp_name: &str = if comp_idx == 1 { "Cb" } else { "Cr" };
-            if plane_widths[comp_idx] != expected_cb_w || plane_heights[comp_idx] != expected_cb_h {
+            if plane_widths[comp_idx] < expected_cb_w || plane_heights[comp_idx] < expected_cb_h {
                 return Err(JpegError::CorruptData(format!(
-                    "{} plane dimensions {}x{} do not match expected {}x{} for {:?} subsampling",
+                    "{} plane dimensions {}x{} are smaller than required {}x{} for {:?} subsampling",
                     comp_name,
                     plane_widths[comp_idx],
                     plane_heights[comp_idx],
@@ -499,30 +491,25 @@ pub fn compress_raw_12(
         }
     }
 
-    // 12-bit quantization: scale standard tables for 12-bit range, then for FDCT.
-    // force_baseline=false allows quant values > 255 (needed for 12-bit).
-    let luma_base: [u16; 64] =
+    // 12-bit extended-sequential JPEG uses the quality-scaled DQT values
+    // directly.  Only the internal FDCT divisors carry the transform's ×8
+    // scaling; multiplying the serialized DQT by 16 makes raw and
+    // interleaved 12-bit compression use incompatible quantization.
+    let luma_quant: [u16; 64] =
         tables::quality_scale_quant_table_ext(&tables::STD_LUMINANCE_QUANT_TABLE, quality, false);
-    let luma_quant: [u16; 64] = scale_quant_12bit(&luma_base);
     let luma_div: [u16; 64] = scale_quant_for_fdct(&luma_quant);
 
     let (chroma_quant, chroma_div): ([u16; 64], [u16; 64]) = if !is_grayscale {
-        let chroma_base: [u16; 64] = tables::quality_scale_quant_table_ext(
+        let cq: [u16; 64] = tables::quality_scale_quant_table_ext(
             &tables::STD_CHROMINANCE_QUANT_TABLE,
             quality,
             false,
         );
-        let cq: [u16; 64] = scale_quant_12bit(&chroma_base);
         let cd: [u16; 64] = scale_quant_for_fdct(&cq);
         (cq, cd)
     } else {
         ([0u16; 64], [0u16; 64])
     };
-
-    let dc_luma = build_huff_table(&tables::DC_LUMINANCE_BITS, &tables::DC_LUMINANCE_VALUES);
-    let ac_luma = build_huff_table(&tables::AC_LUMINANCE_BITS, &tables::AC_LUMINANCE_VALUES);
-    let dc_chroma = build_huff_table(&tables::DC_CHROMINANCE_BITS, &tables::DC_CHROMINANCE_VALUES);
-    let ac_chroma = build_huff_table(&tables::AC_CHROMINANCE_BITS, &tables::AC_CHROMINANCE_VALUES);
 
     let (mcu_w, mcu_h): (usize, usize) = if is_grayscale {
         (8, 8)
@@ -543,85 +530,129 @@ pub fn compress_raw_12(
     let mcus_y: usize = image_height.div_ceil(mcu_h);
     const LEVEL_SHIFT: i32 = 2048;
 
-    let mut bit_writer: BitWriter = BitWriter::new(image_width * image_height * 2);
-    let mut prev_dc_y: i16 = 0;
-    let mut prev_dc_cb: i16 = 0;
-    let mut prev_dc_cr: i16 = 0;
-
-    for mcu_row in 0..mcus_y {
-        for mcu_col in 0..mcus_x {
-            let x0: usize = mcu_col * mcu_w;
-            let y0: usize = mcu_row * mcu_h;
-
-            if is_grayscale {
-                encode_block_12(
-                    planes[0],
-                    plane_widths[0],
-                    plane_heights[0],
-                    x0,
-                    y0,
-                    LEVEL_SHIFT,
-                    &luma_div,
-                    &dc_luma,
-                    &ac_luma,
-                    &mut bit_writer,
-                    &mut prev_dc_y,
-                );
+    // As with the interleaved 12-bit encoder, gather the actual extended
+    // coefficient categories and generate Huffman tables that contain them.
+    // The default 8-bit tables omit valid 12-bit symbols and can otherwise
+    // produce a stream with zero-length Huffman codes.
+    let mut blocks: Vec<(usize, [i16; 64])> = Vec::new();
+    let mut dc_luma_frequency = [0u32; 257];
+    let mut ac_luma_frequency = [0u32; 257];
+    let mut dc_chroma_frequency = [0u32; 257];
+    let mut ac_chroma_frequency = [0u32; 257];
+    {
+        let mut previous_dc = [0i16; 3];
+        let mut add_block = |component: usize, block: [i16; 64]| {
+            let (dc_frequency, ac_frequency) = if component == 0 {
+                (&mut dc_luma_frequency, &mut ac_luma_frequency)
             } else {
-                let h: usize = h_samp as usize;
-                let v: usize = v_samp as usize;
-                // Y luma blocks (h×v per MCU)
-                for vy in 0..v {
-                    for hx in 0..h {
-                        encode_block_12(
+                (&mut dc_chroma_frequency, &mut ac_chroma_frequency)
+            };
+            huff_opt::gather_dc_symbol(block[0].wrapping_sub(previous_dc[component]), dc_frequency);
+            previous_dc[component] = block[0];
+            huff_opt::gather_ac_symbols(&block, ac_frequency);
+            blocks.push((component, block));
+        };
+
+        for mcu_row in 0..mcus_y {
+            for mcu_col in 0..mcus_x {
+                let x0: usize = mcu_col * mcu_w;
+                let y0: usize = mcu_row * mcu_h;
+
+                if is_grayscale {
+                    add_block(
+                        0,
+                        quantize_raw_block_12(
                             planes[0],
                             plane_widths[0],
                             plane_heights[0],
-                            x0 + hx * 8,
-                            y0 + vy * 8,
+                            x0,
+                            y0,
                             LEVEL_SHIFT,
                             &luma_div,
-                            &dc_luma,
-                            &ac_luma,
-                            &mut bit_writer,
-                            &mut prev_dc_y,
-                        );
+                        ),
+                    );
+                } else {
+                    let h: usize = h_samp as usize;
+                    let v: usize = v_samp as usize;
+                    // Y luma blocks (h×v per MCU)
+                    for vy in 0..v {
+                        for hx in 0..h {
+                            add_block(
+                                0,
+                                quantize_raw_block_12(
+                                    planes[0],
+                                    plane_widths[0],
+                                    plane_heights[0],
+                                    x0 + hx * 8,
+                                    y0 + vy * 8,
+                                    LEVEL_SHIFT,
+                                    &luma_div,
+                                ),
+                            );
+                        }
                     }
+                    // One Cb block per MCU
+                    let chroma_x: usize = x0 / h;
+                    let chroma_y: usize = y0 / v;
+                    add_block(
+                        1,
+                        quantize_raw_block_12(
+                            planes[1],
+                            plane_widths[1],
+                            plane_heights[1],
+                            chroma_x,
+                            chroma_y,
+                            LEVEL_SHIFT,
+                            &chroma_div,
+                        ),
+                    );
+                    // One Cr block per MCU
+                    add_block(
+                        2,
+                        quantize_raw_block_12(
+                            planes[2],
+                            plane_widths[2],
+                            plane_heights[2],
+                            chroma_x,
+                            chroma_y,
+                            LEVEL_SHIFT,
+                            &chroma_div,
+                        ),
+                    );
                 }
-                // One Cb block per MCU
-                let chroma_x: usize = x0 / h;
-                let chroma_y: usize = y0 / v;
-                encode_block_12(
-                    planes[1],
-                    plane_widths[1],
-                    plane_heights[1],
-                    chroma_x,
-                    chroma_y,
-                    LEVEL_SHIFT,
-                    &chroma_div,
-                    &dc_chroma,
-                    &ac_chroma,
-                    &mut bit_writer,
-                    &mut prev_dc_cb,
-                );
-                // One Cr block per MCU
-                encode_block_12(
-                    planes[2],
-                    plane_widths[2],
-                    plane_heights[2],
-                    chroma_x,
-                    chroma_y,
-                    LEVEL_SHIFT,
-                    &chroma_div,
-                    &dc_chroma,
-                    &ac_chroma,
-                    &mut bit_writer,
-                    &mut prev_dc_cr,
-                );
             }
         }
     }
 
+    dc_luma_frequency[256] = 1;
+    ac_luma_frequency[256] = 1;
+    dc_chroma_frequency[256] = 1;
+    ac_chroma_frequency[256] = 1;
+    let (dc_luma_bits, dc_luma_values) = huff_opt::gen_optimal_table(&dc_luma_frequency);
+    let (ac_luma_bits, ac_luma_values) = huff_opt::gen_optimal_table(&ac_luma_frequency);
+    let (dc_chroma_bits, dc_chroma_values) = huff_opt::gen_optimal_table(&dc_chroma_frequency);
+    let (ac_chroma_bits, ac_chroma_values) = huff_opt::gen_optimal_table(&ac_chroma_frequency);
+    let dc_luma = build_huff_table(&dc_luma_bits, &dc_luma_values);
+    let ac_luma = build_huff_table(&ac_luma_bits, &ac_luma_values);
+    let dc_chroma = build_huff_table(&dc_chroma_bits, &dc_chroma_values);
+    let ac_chroma = build_huff_table(&ac_chroma_bits, &ac_chroma_values);
+
+    let mut bit_writer: BitWriter = BitWriter::new(image_width * image_height * 2);
+    let mut previous_dc = [0i16; 3];
+    for (component, block) in &blocks {
+        let (dc_table, ac_table) = if *component == 0 {
+            (&dc_luma, &ac_luma)
+        } else {
+            (&dc_chroma, &ac_chroma)
+        };
+        HuffmanEncoder::encode_block(
+            &mut bit_writer,
+            block,
+            &mut previous_dc[*component],
+            dc_table,
+            ac_table,
+        );
+    }
     bit_writer.flush();
 
     let precision: u8 = 12;
@@ -635,7 +666,7 @@ pub fn compress_raw_12(
     }
 
     if is_grayscale {
-        write_sof0_12bit(
+        write_sof1_12bit(
             &mut output,
             image_width as u16,
             image_height as u16,
@@ -643,7 +674,7 @@ pub fn compress_raw_12(
             &[(1, 1, 1, 0)],
         );
     } else {
-        write_sof0_12bit(
+        write_sof1_12bit(
             &mut output,
             image_width as u16,
             image_height as u16,
@@ -652,35 +683,11 @@ pub fn compress_raw_12(
         );
     }
 
-    marker_writer::write_dht(
-        &mut output,
-        0,
-        0,
-        &tables::DC_LUMINANCE_BITS,
-        &tables::DC_LUMINANCE_VALUES,
-    );
-    marker_writer::write_dht(
-        &mut output,
-        1,
-        0,
-        &tables::AC_LUMINANCE_BITS,
-        &tables::AC_LUMINANCE_VALUES,
-    );
+    marker_writer::write_dht(&mut output, 0, 0, &dc_luma_bits, &dc_luma_values);
+    marker_writer::write_dht(&mut output, 1, 0, &ac_luma_bits, &ac_luma_values);
     if !is_grayscale {
-        marker_writer::write_dht(
-            &mut output,
-            0,
-            1,
-            &tables::DC_CHROMINANCE_BITS,
-            &tables::DC_CHROMINANCE_VALUES,
-        );
-        marker_writer::write_dht(
-            &mut output,
-            1,
-            1,
-            &tables::AC_CHROMINANCE_BITS,
-            &tables::AC_CHROMINANCE_VALUES,
-        );
+        marker_writer::write_dht(&mut output, 0, 1, &dc_chroma_bits, &dc_chroma_values);
+        marker_writer::write_dht(&mut output, 1, 1, &ac_chroma_bits, &ac_chroma_values);
     }
 
     if is_grayscale {
@@ -698,9 +705,8 @@ pub fn compress_raw_12(
 // Private helpers
 // ============================================================
 
-/// Encode one 8×8 block from a 12-bit i16 plane.
-#[allow(clippy::too_many_arguments)]
-fn encode_block_12(
+/// FDCT and quantize one 8×8 block from a 12-bit i16 plane.
+fn quantize_raw_block_12(
     plane: &[i16],
     plane_width: usize,
     plane_height: usize,
@@ -708,11 +714,7 @@ fn encode_block_12(
     block_y: usize,
     level_shift: i32,
     divisors: &[u16; 64],
-    dc_table: &crate::encode::huffman_encode::HuffTable,
-    ac_table: &crate::encode::huffman_encode::HuffTable,
-    writer: &mut BitWriter,
-    prev_dc: &mut i16,
-) {
+) -> [i16; 64] {
     let mut block: [i16; 64] = [0i16; 64];
     for row in 0..8 {
         let sy: usize = (block_y + row).min(plane_height.saturating_sub(1));
@@ -726,16 +728,11 @@ fn encode_block_12(
     fdct_12bit(&block, &mut dct_out);
     let mut quantized: [i16; 64] = [0i16; 64];
     quant::quantize_block(&dct_out, divisors, &mut quantized);
-    // AC coefficients bounded at ±1023 (10-bit category) per 12-bit JPEG spec.
-    for q in &mut quantized[1..64] {
-        *q = (*q).clamp(-1023, 1023);
-    }
-    HuffmanEncoder::encode_block(writer, &quantized, prev_dc, dc_table, ac_table);
+    quantized
 }
 
-/// Write SOF0 (extended sequential) marker with an explicit precision byte.
-/// Used for 12-bit JPEG (standard SOF0 always writes precision=8).
-fn write_sof0_12bit(
+/// Write SOF1 (extended sequential) with an explicit precision byte.
+fn write_sof1_12bit(
     buf: &mut Vec<u8>,
     width: u16,
     height: u16,
@@ -743,7 +740,7 @@ fn write_sof0_12bit(
     components: &[(u8, u8, u8, u8)],
 ) {
     buf.push(0xFF);
-    buf.push(0xC0);
+    buf.push(0xC1);
     let length: u16 = 2 + 1 + 2 + 2 + 1 + (components.len() as u16 * 3);
     buf.extend_from_slice(&length.to_be_bytes());
     buf.push(precision);

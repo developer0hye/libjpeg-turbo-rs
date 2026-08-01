@@ -23,16 +23,18 @@ use std::process::Command;
 // 12-bit tool support probes
 // ===========================================================================
 
-fn reference_path(name: &str) -> PathBuf {
-    PathBuf::from(format!("references/libjpeg-turbo/testimages/{}", name))
+fn twelve_bit_reference_path() -> PathBuf {
+    PathBuf::from("tests/fixtures/real_world/libjpeg_testorig12_227x149_12bit.jpg")
 }
 
 /// Check if djpeg can handle 12-bit JPEG.
 fn djpeg_supports_12bit(djpeg: &Path) -> bool {
-    let test_file: PathBuf = reference_path("testorig12.jpg");
-    if !test_file.exists() {
-        return false;
-    }
+    let test_file: PathBuf = twelve_bit_reference_path();
+    assert!(
+        test_file.is_file(),
+        "checked-in 12-bit probe fixture is missing: {}",
+        test_file.display()
+    );
     let tmp = std::env::temp_dir().join("ljt_prec_12bit_probe.ppm");
     let result = Command::new(djpeg)
         .arg("-ppm")
@@ -160,10 +162,10 @@ fn generate_12bit_gray(w: usize, h: usize) -> Vec<i16> {
 #[test]
 fn c_xval_12bit_rgb_subsamplings() {
     let djpeg = require_c_tool!("djpeg");
-    if !djpeg_supports_12bit(&djpeg) {
-        eprintln!("SKIP: djpeg does not support 12-bit");
-        return;
-    }
+    assert!(
+        djpeg_supports_12bit(&djpeg),
+        "12-bit cross-validation requires a 12-bit-capable djpeg"
+    );
 
     let w: usize = 48;
     let h: usize = 48;
@@ -235,10 +237,10 @@ fn c_xval_12bit_rgb_subsamplings() {
 #[test]
 fn c_xval_12bit_grayscale() {
     let djpeg = require_c_tool!("djpeg");
-    if !djpeg_supports_12bit(&djpeg) {
-        eprintln!("SKIP: djpeg does not support 12-bit");
-        return;
-    }
+    assert!(
+        djpeg_supports_12bit(&djpeg),
+        "12-bit cross-validation requires a 12-bit-capable djpeg"
+    );
 
     let w: usize = 48;
     let h: usize = 48;
@@ -404,17 +406,11 @@ fn lossless_arbitrary_all_predictors() {
 /// The matrix tests all 7 subsamplings via grayscale for maximum coverage.
 #[test]
 fn b6_1_12bit_quality_matrix_grayscale() {
-    let djpeg = match helpers::djpeg_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: djpeg not found");
-            return;
-        }
-    };
-    if !djpeg_supports_12bit(&djpeg) {
-        eprintln!("SKIP: djpeg does not support 12-bit");
-        return;
-    }
+    let djpeg = require_c_tool!("djpeg");
+    assert!(
+        djpeg_supports_12bit(&djpeg),
+        "12-bit cross-validation requires a 12-bit-capable djpeg"
+    );
 
     let w: usize = 32;
     let h: usize = 32;
@@ -473,17 +469,11 @@ fn b6_1_12bit_quality_matrix_grayscale() {
 /// 12-bit 4:4:4 color × quality{20, 60, 90} with C cross-validation.
 #[test]
 fn b6_1_12bit_quality_matrix_color_444() {
-    let djpeg = match helpers::djpeg_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: djpeg not found");
-            return;
-        }
-    };
-    if !djpeg_supports_12bit(&djpeg) {
-        eprintln!("SKIP: djpeg does not support 12-bit");
-        return;
-    }
+    let djpeg = require_c_tool!("djpeg");
+    assert!(
+        djpeg_supports_12bit(&djpeg),
+        "12-bit cross-validation requires a 12-bit-capable djpeg"
+    );
 
     let w: usize = 32;
     let h: usize = 32;
@@ -606,52 +596,11 @@ fn b6_1_12bit_rust_roundtrip_matrix() {
 
 #[test]
 fn b6_2_raw12_vs_c_djpeg() {
-    let djpeg = match helpers::djpeg_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: djpeg not found");
-            return;
-        }
-    };
-    if !djpeg_supports_12bit(&djpeg) {
-        // C tool does not support 12-bit. Document and run Rust-only round-trip.
-        // NOTE: Standard Homebrew libjpeg-turbo djpeg is built with 12-bit support
-        // via the WITH_12BIT cmake option. If this skips, the tool was built without it.
-        eprintln!(
-            "SKIP C cross-check: djpeg does not support 12-bit. \
-             Running Rust-only round-trip instead."
-        );
-
-        use libjpeg_turbo_rs::raw_data_12::{compress_raw_12, decompress_raw_12};
-
-        let w: usize = 32;
-        let h: usize = 32;
-        let y: Vec<i16> = (0..w * h).map(|i| ((i * 7 + 50) % 4096) as i16).collect();
-        let cb: Vec<i16> = (0..w * h)
-            .map(|i| ((i * 13 + 1500) % 4096) as i16)
-            .collect();
-        let cr: Vec<i16> = (0..w * h)
-            .map(|i| ((i * 17 + 2500) % 4096) as i16)
-            .collect();
-
-        let jpeg: Vec<u8> = compress_raw_12(
-            &[&y, &cb, &cr],
-            &[w, w, w],
-            &[h, h, h],
-            w,
-            h,
-            90,
-            Subsampling::S444,
-        )
-        .expect("compress_raw_12 must succeed");
-
-        let raw = decompress_raw_12(&jpeg).expect("decompress_raw_12 must succeed");
-        assert_eq!(raw.width, w);
-        assert_eq!(raw.height, h);
-        assert_eq!(raw.num_components, 3);
-        eprintln!("b6_2_raw12_vs_c_djpeg: Rust-only round-trip PASS (C not available)");
-        return;
-    }
+    let djpeg = require_c_tool!("djpeg");
+    assert!(
+        djpeg_supports_12bit(&djpeg),
+        "12-bit cross-validation requires a 12-bit-capable djpeg"
+    );
 
     use libjpeg_turbo_rs::raw_data_12::{compress_raw_12, decompress_raw_12};
 
@@ -733,10 +682,10 @@ fn b6_2_raw12_vs_c_djpeg() {
 // ===========================================================================
 
 /// Encode 16-bit lossless with all predictors × point transforms, decode with
-/// Rust, verify lossless round-trip. Cross-check against C djpeg where available.
+/// Rust, verify lossless round-trip, and cross-check every result against C djpeg.
 #[test]
 fn b6_3_16bit_lossless_matrix() {
-    let djpeg = helpers::djpeg_path();
+    let djpeg = require_c_tool!("djpeg");
 
     let w: usize = 16;
     let h: usize = 16;
@@ -779,49 +728,43 @@ fn b6_3_16bit_lossless_matrix() {
                 "{label}: lossless round-trip diff={max_diff} (must be 0)"
             );
 
-            // C djpeg cross-check (decode only — cjpeg 16-bit not in standard build)
-            if let Some(ref djpeg_path) = djpeg {
-                let jpeg_file = helpers::TempFile::new(&format!("{label}.jpg"));
-                let pgm_file = helpers::TempFile::new(&format!("{label}.pgm"));
-                jpeg_file.write_bytes(&jpeg);
+            let jpeg_file = helpers::TempFile::new(&format!("{label}.jpg"));
+            let pgm_file = helpers::TempFile::new(&format!("{label}.pgm"));
+            jpeg_file.write_bytes(&jpeg);
 
-                let output = Command::new(djpeg_path)
-                    .arg("-ppm")
-                    .arg("-outfile")
-                    .arg(pgm_file.path())
-                    .arg(jpeg_file.path())
-                    .output()
-                    .expect("djpeg failed to run");
+            let output = Command::new(&djpeg)
+                .arg("-ppm")
+                .arg("-outfile")
+                .arg(pgm_file.path())
+                .arg(jpeg_file.path())
+                .output()
+                .expect("djpeg failed to run");
+            assert!(
+                output.status.success(),
+                "{label}: 16-bit djpeg cross-check failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
 
-                if output.status.success() {
-                    let (c_w, c_h, _c_comp, _maxval, c_samples) = parse_pnm_to_i16(pgm_file.path());
-                    assert_eq!(decoded.width, c_w, "{label}: C width");
-                    assert_eq!(decoded.height, c_h, "{label}: C height");
-                    assert_eq!(
-                        decoded.data.len(),
-                        c_samples.len(),
-                        "{label}: C sample count"
-                    );
+            let (c_w, c_h, _c_comp, _maxval, c_samples) = parse_pnm_to_i16(pgm_file.path());
+            assert_eq!(decoded.width, c_w, "{label}: C width");
+            assert_eq!(decoded.height, c_h, "{label}: C height");
+            assert_eq!(
+                decoded.data.len(),
+                c_samples.len(),
+                "{label}: C sample count"
+            );
 
-                    let c_max_diff: i16 = decoded
-                        .data
-                        .iter()
-                        .zip(c_samples.iter())
-                        .map(|(&a, &b)| (a as i16 - b).abs())
-                        .max()
-                        .unwrap_or(0);
-                    // Same JPEG bytes → Rust==C djpeg. measured: 0
-                    assert_eq!(
-                        c_max_diff, 0,
-                        "{label}: Rust vs C djpeg max_diff={c_max_diff}"
-                    );
-                    eprintln!("{label}: PASS (Rust+C, max_diff=0)");
-                } else {
-                    eprintln!("{label}: PASS (Rust only, djpeg failed for 16-bit lossless)");
-                }
-            } else {
-                eprintln!("{label}: PASS (Rust only, djpeg not found)");
-            }
+            let c_max_diff: u16 = decoded
+                .data
+                .iter()
+                .zip(c_samples.iter())
+                .map(|(&a, &b)| (a as i16).abs_diff(b))
+                .max()
+                .unwrap_or(0);
+            assert_eq!(
+                c_max_diff, 0,
+                "{label}: Rust vs C djpeg max_diff={c_max_diff}"
+            );
         }
     }
 }
