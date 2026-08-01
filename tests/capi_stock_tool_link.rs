@@ -22,6 +22,8 @@ use std::sync::OnceLock;
 use std::os::unix::fs::PermissionsExt;
 
 static RELEASE_SHIM: OnceLock<Result<PathBuf, String>> = OnceLock::new();
+const EXECUTABLE_BUSY_RAW_OS_ERROR: i32 = 26;
+const EXECUTABLE_BUSY_RETRY_LIMIT: usize = 20;
 
 fn repo_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -97,6 +99,28 @@ fn cargo_host_target(cargo: &Path) -> Result<String, String> {
         .ok_or_else(|| "cargo -vV did not report a host target".to_owned())
 }
 
+fn retry_executable_busy<T, F, W>(mut operation: F, mut wait: W) -> std::io::Result<T>
+where
+    F: FnMut() -> std::io::Result<T>,
+    W: FnMut(),
+{
+    let mut retry_count: usize = 0;
+    loop {
+        match operation() {
+            Ok(value) => return Ok(value),
+            Err(error)
+                if cfg!(unix)
+                    && error.raw_os_error() == Some(EXECUTABLE_BUSY_RAW_OS_ERROR)
+                    && retry_count < EXECUTABLE_BUSY_RETRY_LIMIT =>
+            {
+                retry_count += 1;
+                wait();
+            }
+            Err(error) => return Err(error),
+        }
+    }
+}
+
 fn build_release_shim_with(
     cargo: &Path,
     target_dir: &Path,
@@ -105,20 +129,28 @@ fn build_release_shim_with(
     eprintln!(
         "INFO: rebuilding shim cdylib for target {target} so stock-tool tests inspect current source"
     );
-    let status: std::process::ExitStatus = Command::new(cargo)
-        .args([
-            "build",
-            "-p",
-            "libjpeg-turbo-rs-capi",
-            "--release",
-            "--quiet",
-            "--target",
-            target,
-        ])
-        .current_dir(repo_root())
-        .env("CARGO_TARGET_DIR", target_dir)
-        .status()
-        .map_err(|error| format!("failed to start release shim build: {error}"))?;
+    let run_build = || -> std::io::Result<std::process::ExitStatus> {
+        Command::new(cargo)
+            .args([
+                "build",
+                "-p",
+                "libjpeg-turbo-rs-capi",
+                "--release",
+                "--quiet",
+                "--target",
+                target,
+            ])
+            .current_dir(repo_root())
+            .env("CARGO_TARGET_DIR", target_dir)
+            .status()
+    };
+    // Linux CI can briefly retain a writable handle to a freshly materialized
+    // executable. Retry only ETXTBSY; every other spawn error remains an
+    // immediate hard failure.
+    let status: std::process::ExitStatus = retry_executable_busy(run_build, || {
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    })
+    .map_err(|error| format!("failed to start release shim build: {error}"))?;
     if !status.success() {
         return Err(format!("release shim build failed with {status}"));
     }
@@ -405,6 +437,61 @@ fn nested_shim_build_and_probe_share_the_target_qualified_tree() {
             .any(|pair| pair == ["--target", target]),
         "the nested build must pin the target used by its artifact probe"
     );
+}
+
+#[cfg(unix)]
+#[test]
+fn executable_busy_retry_is_selective_and_bounded() {
+    let mut transient_attempts: usize = 0;
+    let mut transient_waits: usize = 0;
+    let value: usize = retry_executable_busy(
+        || {
+            transient_attempts += 1;
+            if transient_attempts <= 3 {
+                Err(std::io::Error::from_raw_os_error(
+                    EXECUTABLE_BUSY_RAW_OS_ERROR,
+                ))
+            } else {
+                Ok(17)
+            }
+        },
+        || transient_waits += 1,
+    )
+    .expect("transient ETXTBSY must be retried");
+    assert_eq!(value, 17);
+    assert_eq!(transient_attempts, 4);
+    assert_eq!(transient_waits, 3);
+
+    let mut other_attempts: usize = 0;
+    let other_error: std::io::Error = retry_executable_busy(
+        || -> std::io::Result<()> {
+            other_attempts += 1;
+            Err(std::io::Error::from_raw_os_error(2))
+        },
+        || panic!("non-ETXTBSY errors must not wait or retry"),
+    )
+    .expect_err("non-ETXTBSY spawn errors must remain hard failures");
+    assert_eq!(other_error.raw_os_error(), Some(2));
+    assert_eq!(other_attempts, 1);
+
+    let mut bounded_attempts: usize = 0;
+    let mut bounded_waits: usize = 0;
+    let bounded_error: std::io::Error = retry_executable_busy(
+        || -> std::io::Result<()> {
+            bounded_attempts += 1;
+            Err(std::io::Error::from_raw_os_error(
+                EXECUTABLE_BUSY_RAW_OS_ERROR,
+            ))
+        },
+        || bounded_waits += 1,
+    )
+    .expect_err("persistent ETXTBSY must fail after the retry budget");
+    assert_eq!(
+        bounded_error.raw_os_error(),
+        Some(EXECUTABLE_BUSY_RAW_OS_ERROR)
+    );
+    assert_eq!(bounded_attempts, EXECUTABLE_BUSY_RETRY_LIMIT + 1);
+    assert_eq!(bounded_waits, EXECUTABLE_BUSY_RETRY_LIMIT);
 }
 
 #[cfg(unix)]
