@@ -7358,10 +7358,10 @@ fn encode_single_block(
 fn can_use_fused_islow(
     fdct_quantize_fn: fn(&mut [i16; 64], &QuantDivisors, &mut [i16; 64]),
 ) -> bool {
-    !std::ptr::eq(
+    !core::ptr::eq(
         fdct_quantize_fn as *const (),
         crate::simd::scalar::scalar_fdct_ifast_quantize as *const (),
-    ) && !std::ptr::eq(
+    ) && !core::ptr::eq(
         fdct_quantize_fn as *const (),
         crate::simd::scalar::scalar_fdct_float_quantize as *const (),
     )
