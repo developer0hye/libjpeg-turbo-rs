@@ -574,23 +574,21 @@ int main(int argc, char **argv) {
 }
 
 #[cfg(unix)]
-fn compile_loader_contamination_library(temp: &tempfile::TempDir) -> PathBuf {
+fn loader_contamination_library(temp: &tempfile::TempDir) -> PathBuf {
+    if cfg!(target_os = "macos") {
+        // Apple Silicon system utilities use the arm64e ABI while test-built
+        // artifacts use arm64.  libSystem is present in dyld's shared cache
+        // for both, so it can contaminate setup commands without an ABI trap.
+        return PathBuf::from("/usr/lib/libSystem.B.dylib");
+    }
     let source: PathBuf = temp.path().join("loader_contamination.c");
-    let library: PathBuf = temp.path().join(if cfg!(target_os = "macos") {
-        "libloader_contamination.dylib"
-    } else {
-        "libloader_contamination.so"
-    });
+    let library: PathBuf = temp.path().join("libloader_contamination.so");
     std::fs::write(&source, "void loader_contamination_marker(void) {}\n")
         .expect("write loader contamination source");
     let compiler: std::ffi::OsString =
         std::env::var_os("CC").unwrap_or_else(|| std::ffi::OsString::from("cc"));
     let mut command: Command = Command::new(compiler);
-    if cfg!(target_os = "macos") {
-        command.arg("-dynamiclib");
-    } else {
-        command.args(["-shared", "-fPIC"]);
-    }
+    command.args(["-shared", "-fPIC"]);
     let output: std::process::Output = command
         .arg(&source)
         .arg("-o")
@@ -818,7 +816,7 @@ cp "$input" "$output"
         &our_build.join("tjbench"),
         "#!/bin/sh\nset -eu\ntest -z \"${LD_PRELOAD+x}\"\ntest -z \"${DYLD_INSERT_LIBRARIES+x}\"\n",
     );
-    let loader_contamination_library: PathBuf = compile_loader_contamination_library(&temp);
+    let loader_contamination_library: PathBuf = loader_contamination_library(&temp);
 
     // Start Bash before injecting loader overrides.  On macOS, launching Bash
     // with DYLD_INSERT_LIBRARIES terminates before run.sh can exercise its
