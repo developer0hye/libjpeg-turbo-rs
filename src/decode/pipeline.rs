@@ -4967,7 +4967,7 @@ impl<'a> Decoder<'a> {
                 // component planes before interleaving them; treating G/B as
                 // full-size rows either truncates the planes or reads across
                 // row boundaries for every non-1x1 sampling mode.
-                let mut rgb_full: [Vec<u8>; 3] = std::array::from_fn(|_| Vec::new());
+                let mut rgb_full: [Vec<u8>; 3] = core::array::from_fn(|_| Vec::new());
                 let mut rgb_strides: [usize; 3] = [0; 3];
                 for ci in 0..3 {
                     let comp = &frame.components[ci];
