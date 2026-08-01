@@ -493,7 +493,7 @@ fn c_lossless_gray_rust_decode() {
         .arg("1")
         .arg("-outfile")
         .arg(tmp_jpg.path())
-        .arg(&pgm_path)
+        .arg(pgm_path)
         .output()
         .expect("failed to run cjpeg");
 

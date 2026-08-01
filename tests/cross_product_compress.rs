@@ -980,7 +980,7 @@ fn tjcomptest_lossless_8bit() {
                 {
                     let desc: String =
                         format!("lossless rgb psv={} pt={} restart={}", psv, pt, use_restart);
-                    let mask: u8 = 0xFF & !((1u8 << pt).wrapping_sub(1));
+                    let mask: u8 = !((1u8 << pt).wrapping_sub(1));
                     let expected_rgb: Vec<u8> = rgb_pixels.iter().map(|&v| v & mask).collect();
 
                     let mut enc = Encoder::new(&rgb_pixels, w, h, PixelFormat::Rgb)
