@@ -50,34 +50,32 @@ fn cdylib_identity(staged: &Path) -> Option<String> {
             eprintln!("SKIP cdylib_identity: otool not on PATH");
             None
         }
-    } else {
-        if Command::new("which")
-            .arg("readelf")
+    } else if Command::new("which")
+        .arg("readelf")
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+    {
+        let out = Command::new("readelf")
+            .arg("-d")
+            .arg(staged)
             .output()
-            .map(|o| o.status.success())
-            .unwrap_or(false)
-        {
-            let out = Command::new("readelf")
-                .arg("-d")
-                .arg(staged)
-                .output()
-                .ok()?;
-            let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
-            for line in stdout.lines() {
-                if line.contains("SONAME") {
-                    // Format: `0x... (SONAME)  Library soname: [libjpeg.so.8]`
-                    if let Some(start) = line.find('[') {
-                        if let Some(end) = line[start..].find(']') {
-                            return Some(line[start + 1..start + end].to_string());
-                        }
+            .ok()?;
+        let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
+        for line in stdout.lines() {
+            if line.contains("SONAME") {
+                // Format: `0x... (SONAME)  Library soname: [libjpeg.so.8]`
+                if let Some(start) = line.find('[') {
+                    if let Some(end) = line[start..].find(']') {
+                        return Some(line[start + 1..start + end].to_string());
                     }
                 }
             }
-            Some(String::new()) // SONAME stripped — caller will fail
-        } else {
-            eprintln!("SKIP cdylib_identity: readelf not on PATH");
-            None
         }
+        Some(String::new()) // SONAME stripped — caller will fail
+    } else {
+        eprintln!("SKIP cdylib_identity: readelf not on PATH");
+        None
     }
 }
 
