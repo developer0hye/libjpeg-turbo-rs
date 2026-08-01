@@ -177,6 +177,46 @@ fn max_memory_accounts_for_direct_rgb_upsampling_buffers() {
 }
 
 #[test]
+fn max_memory_accounts_for_grayscale_component0_upsampling_buffer() {
+    let cjpeg: PathBuf = require_c_tool!("cjpeg");
+    let (width, height): (usize, usize) = (64, 64);
+    let pixels: Vec<u8> = (0..width * height * 3)
+        .map(|index| ((index * 29 + index / (width * 3) * 17) & 0xFF) as u8)
+        .collect();
+    let ppm: Vec<u8> = helpers::build_ppm(&pixels, width, height);
+    let jpeg: Vec<u8> = helpers::encode_with_c_cjpeg(
+        &cjpeg,
+        &ppm,
+        &["-sample", "1x1,2x2,1x1", "-quality", "90"],
+        "memory_grayscale_subsampled_component0",
+    );
+
+    let old_underestimate: usize = width * height * 4;
+    let mut limited: Decoder = Decoder::new(&jpeg).expect("parse unusual YCbCr header");
+    limited.set_lenient(true);
+    limited.set_output_format(PixelFormat::Grayscale);
+    limited.set_max_memory(old_underestimate);
+    let error = limited
+        .decode_image()
+        .expect_err("limit must account for component-0 upsampling storage");
+    assert!(
+        error.to_string().contains("estimated decode memory"),
+        "unexpected memory-limit error: {error}"
+    );
+
+    let corrected_estimate: usize = width * height * 5;
+    let mut allowed: Decoder = Decoder::new(&jpeg).expect("parse unusual YCbCr header");
+    allowed.set_lenient(true);
+    allowed.set_output_format(PixelFormat::Grayscale);
+    allowed.set_max_memory(corrected_estimate);
+    let image = allowed
+        .decode_image()
+        .expect("corrected grayscale estimate must permit decode");
+    assert_eq!((image.width, image.height), (width, height));
+    assert_eq!(image.data.len(), width * height);
+}
+
+#[test]
 fn max_memory_default_is_unlimited() {
     // No max_memory set -> should decode fine
     let jpeg = make_32x32_jpeg();
