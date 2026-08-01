@@ -786,16 +786,32 @@ cp "$input" "$output"
         "#!/bin/sh\nset -eu\ntest -z \"${LD_PRELOAD+x}\"\ntest -z \"${DYLD_INSERT_LIBRARIES+x}\"\n",
     );
 
+    // Start Bash before injecting loader overrides.  On macOS, launching Bash
+    // with a nonexistent DYLD_INSERT_LIBRARIES entry terminates in dyld before
+    // run.sh can exercise its per-command environment isolation.
     let output: std::process::Output = Command::new("bash")
+        .arg("-c")
+        .arg(
+            r#"export LD_LIBRARY_PATH="$2"
+export DYLD_LIBRARY_PATH="$3"
+export LD_PRELOAD="$4"
+export DYLD_INSERT_LIBRARIES="$5"
+source "$1""#,
+        )
+        .arg("loader-isolation-test")
         .arg(script_dir().join("run.sh"))
+        .arg("/ambient/rust-shim")
+        .arg("/ambient/rust-shim")
+        .arg("/ambient/rust-shim.so")
+        .arg("/ambient/rust-shim.dylib")
+        .env_remove("LD_LIBRARY_PATH")
+        .env_remove("DYLD_LIBRARY_PATH")
+        .env_remove("LD_PRELOAD")
+        .env_remove("DYLD_INSERT_LIBRARIES")
         .env("OUT_DIR", our_build)
         .env("STOCK_BIN", stock_bin)
         .env("SHIM_DIR", &shim_dir)
         .env("TESTIMAGES", testimages)
-        .env("LD_LIBRARY_PATH", "/ambient/rust-shim")
-        .env("DYLD_LIBRARY_PATH", "/ambient/rust-shim")
-        .env("LD_PRELOAD", "/ambient/rust-shim.so")
-        .env("DYLD_INSERT_LIBRARIES", "/ambient/rust-shim.dylib")
         .env(
             "EXPECTED_SONAME",
             if cfg!(target_os = "macos") {
