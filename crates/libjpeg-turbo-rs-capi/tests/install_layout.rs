@@ -21,6 +21,9 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+#[path = "support/cdylib.rs"]
+mod cdylib_support;
+
 fn workspace_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .parent()
@@ -79,22 +82,6 @@ fn cdylib_identity(staged: &Path) -> Option<String> {
     }
 }
 
-fn ensure_cdylib(root: &Path) {
-    let candidates = [
-        root.join("target/release/liblibjpeg_turbo_rs_capi.dylib"),
-        root.join("target/release/liblibjpeg_turbo_rs_capi.so"),
-    ];
-    if candidates.iter().any(|c| c.exists()) {
-        return;
-    }
-    let status = Command::new(env!("CARGO"))
-        .args(["build", "-p", "libjpeg-turbo-rs-capi", "--release"])
-        .current_dir(root)
-        .status()
-        .expect("cargo build");
-    assert!(status.success(), "pre-test cargo build failed");
-}
-
 #[test]
 fn install_capi_sh_produces_complete_layout() {
     if cfg!(windows) {
@@ -107,7 +94,8 @@ fn install_capi_sh_produces_complete_layout() {
     }
 
     let root: PathBuf = workspace_root();
-    ensure_cdylib(&root);
+    let cdylib: PathBuf = cdylib_support::cdylib_path();
+    let cdylib_dir: &Path = cdylib.parent().expect("Cargo artifact directory");
 
     let tmp: tempfile::TempDir = tempfile::tempdir().expect("mkdir tempdir");
     let prefix: &str = "/usr";
@@ -118,6 +106,7 @@ fn install_capi_sh_produces_complete_layout() {
         .args(["--destdir", &destdir.to_string_lossy()])
         .args(["--prefix", prefix])
         .args(["--root", &root.to_string_lossy()])
+        .env("CAPI_TARGET_DIR", cdylib_dir)
         .output()
         .expect("invoke install_capi.sh");
     assert!(
@@ -288,7 +277,8 @@ fn install_capi_sh_honors_soname_override() {
     }
 
     let root: PathBuf = workspace_root();
-    ensure_cdylib(&root);
+    let cdylib: PathBuf = cdylib_support::cdylib_path();
+    let cdylib_dir: &Path = cdylib.parent().expect("Cargo artifact directory");
 
     let tmp: tempfile::TempDir = tempfile::tempdir().expect("mkdir tempdir");
     let prefix: &str = "/usr";
@@ -307,6 +297,7 @@ fn install_capi_sh_honors_soname_override() {
         .args(["--prefix", prefix])
         .args(["--root", &root.to_string_lossy()])
         .args(["--soname", override_soname])
+        .env("CAPI_TARGET_DIR", cdylib_dir)
         .output()
         .expect("invoke install_capi.sh");
     assert!(
@@ -379,4 +370,114 @@ fn install_capi_sh_honors_soname_override() {
             );
         }
     }
+}
+
+#[test]
+fn install_capi_sh_builds_into_capi_target_dir() {
+    if cfg!(windows) {
+        eprintln!("SKIP: install_capi.sh is bash; Windows packagers use their own conventions");
+        return;
+    }
+    if Command::new("bash").arg("--version").output().is_err() {
+        eprintln!("SKIP: bash not on PATH");
+        return;
+    }
+
+    let root: PathBuf = workspace_root();
+    let temp: tempfile::TempDir = tempfile::tempdir().expect("mkdir tempdir");
+    let cargo_target_dir: PathBuf = temp.path().join("cargo-target");
+    let build_target: &str = "x86_64-unknown-linux-gnu";
+    let release_dir: PathBuf = cargo_target_dir.join(build_target).join("release");
+    let destdir: PathBuf = temp.path().join("stage");
+    let source_cdylib: PathBuf = cdylib_support::cdylib_path();
+    let fake_bin_dir: PathBuf = temp.path().join("bin");
+    std::fs::create_dir_all(&fake_bin_dir).expect("create fake cargo directory");
+    let fake_cargo: PathBuf = fake_bin_dir.join("cargo");
+    std::fs::write(
+        &fake_cargo,
+        r#"#!/usr/bin/env bash
+set -eu
+test "$CARGO_TARGET_DIR" = "$EXPECTED_CARGO_TARGET_DIR"
+previous=
+target=
+for argument in "$@"; do
+    if [ "$previous" = "--target" ]; then
+        target="$argument"
+    fi
+    previous="$argument"
+done
+test "$target" = "$EXPECTED_BUILD_TARGET"
+mkdir -p "$CARGO_TARGET_DIR/$target/release"
+cp "$SOURCE_CDYLIB" "$CARGO_TARGET_DIR/$target/release/$(basename "$SOURCE_CDYLIB")"
+"#,
+    )
+    .expect("write fake cargo");
+    let chmod_status: std::process::ExitStatus = Command::new("chmod")
+        .args(["+x"])
+        .arg(&fake_cargo)
+        .status()
+        .expect("chmod fake cargo");
+    assert!(chmod_status.success(), "chmod fake cargo failed");
+    let inherited_path: std::ffi::OsString = std::env::var_os("PATH").unwrap_or_default();
+    let command_path: std::ffi::OsString = std::env::join_paths(
+        std::iter::once(fake_bin_dir.clone()).chain(std::env::split_paths(&inherited_path)),
+    )
+    .expect("construct PATH with fake cargo");
+
+    let output: std::process::Output = Command::new("bash")
+        .arg(root.join("scripts/install_capi.sh"))
+        .args(["--build", "--destdir", &destdir.to_string_lossy()])
+        .args(["--prefix", "/usr"])
+        .args(["--root", &root.to_string_lossy()])
+        .env("CAPI_TARGET_DIR", &release_dir)
+        .env("CAPI_BUILD_TARGET", build_target)
+        .env("EXPECTED_CARGO_TARGET_DIR", &cargo_target_dir)
+        .env("EXPECTED_BUILD_TARGET", build_target)
+        .env("SOURCE_CDYLIB", &source_cdylib)
+        .env("CARGO", &fake_cargo)
+        .env("PATH", command_path)
+        .env_remove("CARGO_TARGET_DIR")
+        .output()
+        .expect("invoke install_capi.sh --build");
+
+    assert!(
+        output.status.success(),
+        "install_capi.sh --build failed:\n--- stdout ---\n{}\n--- stderr ---\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        cdylib_support::release_cdylib_path_for_target_in(
+            &cargo_target_dir,
+            std::ffi::OsStr::new(build_target),
+        )
+        .is_file(),
+        "--build must emit the cdylib below CAPI_TARGET_DIR"
+    );
+}
+
+#[test]
+fn install_capi_sh_rejects_non_release_capi_target_dir_when_building() {
+    if cfg!(windows) {
+        eprintln!("SKIP: install_capi.sh is bash; Windows packagers use their own conventions");
+        return;
+    }
+
+    let root: PathBuf = workspace_root();
+    let temp: tempfile::TempDir = tempfile::tempdir().expect("mkdir tempdir");
+    let output: std::process::Output = Command::new("bash")
+        .arg(root.join("scripts/install_capi.sh"))
+        .args(["--build", "--root", &root.to_string_lossy()])
+        .env("CAPI_TARGET_DIR", temp.path().join("custom-output"))
+        .env_remove("CARGO_TARGET_DIR")
+        .output()
+        .expect("invoke install_capi.sh --build with invalid target");
+
+    assert!(!output.status.success(), "invalid build target must fail");
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("must end in /")
+            && String::from_utf8_lossy(&output.stderr).contains("/release when building"),
+        "failure must explain the CAPI_TARGET_DIR contract: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
 }

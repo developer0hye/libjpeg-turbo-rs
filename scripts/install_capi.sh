@@ -27,9 +27,15 @@
 #                     "${soname%.dylib}.${version}.dylib" (macOS).
 #   --soname-tj NAME  libturbojpeg "major" SONAME (default
 #                     "libturbojpeg.so.0" / "libturbojpeg.0.dylib").
-#   --build           Build the cdylib first (default: skip; assumes
-#                     `target/release/liblibjpeg_turbo_rs_capi.{dylib,so}`
-#                     already exists)
+#   --build           Force a cdylib build. Without it, a missing cdylib is
+#                     still built automatically.
+#   CAPI_TARGET_DIR   Exact target-qualified Cargo release directory containing
+#                     the cdylib. Relative paths use `$ROOT`. With `--build`,
+#                     it must end in `/<target-triple>/release` so Cargo can
+#                     derive its target root. Defaults below CARGO_TARGET_DIR
+#                     (or `$ROOT/target`) using CAPI_BUILD_TARGET.
+#   CAPI_BUILD_TARGET Cargo target passed explicitly to nested builds. Defaults
+#                     to CARGO_BUILD_TARGET when set, otherwise Cargo's host.
 #
 # Layout produced under ${DESTDIR}${PREFIX} (defaults — v8):
 #   lib/libjpeg.so.8.X.Y           actual cdylib
@@ -55,6 +61,22 @@ SONAME=""
 SONAME_TJ=""
 DO_BUILD=0
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+CARGO_BIN="${CARGO:-cargo}"
+
+resolve_build_target() {
+    if [[ -n "${CAPI_BUILD_TARGET:-}" ]]; then
+        printf '%s\n' "$CAPI_BUILD_TARGET"
+    elif [[ -n "${CARGO_BUILD_TARGET:-}" ]]; then
+        printf '%s\n' "$CARGO_BUILD_TARGET"
+    else
+        "$CARGO_BIN" -vV | sed -n 's/^host: //p'
+    fi
+}
+
+target_component() {
+    local target="$1"
+    basename "${target%.json}"
+}
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -79,11 +101,27 @@ case "$OS_NAME" in
     *) echo "unsupported platform: $OS_NAME" >&2; exit 1 ;;
 esac
 
+BUILD_TARGET=""
+case "${CAPI_TARGET_DIR:-}" in
+    "")
+        BUILD_TARGET="$(resolve_build_target)"
+        [[ -n "$BUILD_TARGET" ]] || { echo "could not resolve Cargo build target" >&2; exit 1; }
+        case "${CARGO_TARGET_DIR:-}" in
+            "")  CARGO_TARGET_ROOT="$ROOT/target" ;;
+            /*)  CARGO_TARGET_ROOT="$CARGO_TARGET_DIR" ;;
+            *)   CARGO_TARGET_ROOT="$ROOT/$CARGO_TARGET_DIR" ;;
+        esac
+        RELEASE_DIR="$CARGO_TARGET_ROOT/$(target_component "$BUILD_TARGET")/release"
+        ;;
+    /*)  RELEASE_DIR="$CAPI_TARGET_DIR" ;;
+    *)   RELEASE_DIR="$ROOT/$CAPI_TARGET_DIR" ;;
+esac
+
 # Resolve cdylib path + version from Cargo.toml.
 CDYLIB_VERSION="$(grep '^version' "$ROOT/crates/libjpeg-turbo-rs-capi/Cargo.toml" | head -1 | sed 's/.*"\(.*\)".*/\1/')"
 case "$PLATFORM" in
     linux)
-        CDYLIB_FILE="$ROOT/target/release/liblibjpeg_turbo_rs_capi.so"
+        CDYLIB_FILE="$RELEASE_DIR/liblibjpeg_turbo_rs_capi.so"
         # P4-3 (2026-05-17): default flipped from libjpeg.so.62 → libjpeg.so.8
         # to match the build.rs SONAME default and the v8 struct layout.
         DEFAULT_LIBJPEG_MAJOR="libjpeg.so.8"
@@ -92,7 +130,7 @@ case "$PLATFORM" in
         DEFAULT_LIBTJ_DEV="libturbojpeg.so"
         ;;
     macos)
-        CDYLIB_FILE="$ROOT/target/release/liblibjpeg_turbo_rs_capi.dylib"
+        CDYLIB_FILE="$RELEASE_DIR/liblibjpeg_turbo_rs_capi.dylib"
         # P4-3 (2026-05-17): default flipped from libjpeg.62.dylib → libjpeg.8.dylib
         # to match the build.rs install_name default and the v8 struct layout.
         DEFAULT_LIBJPEG_MAJOR="libjpeg.8.dylib"
@@ -142,7 +180,17 @@ DEFAULT_LIBTJ_MAJOR="$LIBTJ_MAJOR"
 DEFAULT_LIBTJ_DEV="$LIBTJ_DEV"
 
 if [[ "$DO_BUILD" -eq 1 || ! -f "$CDYLIB_FILE" ]]; then
-    (cd "$ROOT" && cargo build -p libjpeg-turbo-rs-capi --release)
+    BUILD_TARGET="${BUILD_TARGET:-$(resolve_build_target)}"
+    [[ -n "$BUILD_TARGET" ]] || { echo "could not resolve Cargo build target" >&2; exit 1; }
+    TARGET_COMPONENT="$(target_component "$BUILD_TARGET")"
+    if [[ "$(basename "$RELEASE_DIR")" != "release" ||
+          "$(basename "$(dirname "$RELEASE_DIR")")" != "$TARGET_COMPONENT" ]]; then
+        echo "CAPI_TARGET_DIR must end in /${TARGET_COMPONENT}/release when building: $RELEASE_DIR" >&2
+        exit 1
+    fi
+    CARGO_TARGET_ROOT="$(dirname "$(dirname "$RELEASE_DIR")")"
+    (cd "$ROOT" && CARGO_TARGET_DIR="$CARGO_TARGET_ROOT" \
+        "$CARGO_BIN" build -p libjpeg-turbo-rs-capi --release --target "$BUILD_TARGET")
 fi
 [[ -f "$CDYLIB_FILE" ]] || { echo "cdylib not found: $CDYLIB_FILE" >&2; exit 1; }
 

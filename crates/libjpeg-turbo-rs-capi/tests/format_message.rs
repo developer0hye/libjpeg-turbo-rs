@@ -21,6 +21,9 @@ use std::os::raw::c_void;
 
 use libloading::Library;
 
+#[path = "support/cdylib.rs"]
+mod cdylib_support;
+
 const JMSG_LENGTH_MAX: usize = 200;
 const JMSG_STR_PARM_MAX: usize = 80;
 
@@ -56,34 +59,7 @@ extern "C" {
 }
 
 fn cdylib_path() -> std::path::PathBuf {
-    let workspace_root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .unwrap()
-        .parent()
-        .unwrap()
-        .to_path_buf();
-    let candidates = [
-        workspace_root.join("target/release/liblibjpeg_turbo_rs_capi.dylib"),
-        workspace_root.join("target/release/liblibjpeg_turbo_rs_capi.so"),
-        workspace_root.join("target/release/libjpeg_turbo_rs_capi.dll"),
-    ];
-    for c in &candidates {
-        if c.exists() {
-            return c.clone();
-        }
-    }
-    let status = std::process::Command::new(env!("CARGO"))
-        .args(["build", "-p", "libjpeg-turbo-rs-capi", "--release"])
-        .current_dir(&workspace_root)
-        .status()
-        .expect("cargo build");
-    assert!(status.success(), "cargo build failed");
-    for c in &candidates {
-        if c.exists() {
-            return c.clone();
-        }
-    }
-    panic!("cdylib not found after build");
+    cdylib_support::cdylib_path()
 }
 
 /// Set up a JpegErrorMgr with `format_message` patched in via

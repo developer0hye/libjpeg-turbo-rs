@@ -18,8 +18,10 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-/// Repository root (the worktree that contains `Cargo.toml`,
-/// `references/`, and `target/`).
+#[path = "support/cdylib.rs"]
+mod cdylib_support;
+
+/// Repository root (the worktree that contains `Cargo.toml` and `references/`).
 fn repo_root() -> PathBuf {
     let manifest: PathBuf = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     manifest
@@ -27,16 +29,6 @@ fn repo_root() -> PathBuf {
         .and_then(|p| p.parent())
         .expect("repo root above crates/libjpeg-turbo-rs-capi")
         .to_path_buf()
-}
-
-fn dlext() -> &'static str {
-    if cfg!(target_os = "macos") {
-        "dylib"
-    } else if cfg!(target_os = "windows") {
-        "dll"
-    } else {
-        "so"
-    }
 }
 
 fn turbojpeg_versioned_name() -> &'static str {
@@ -55,45 +47,9 @@ fn turbojpeg_short_name() -> &'static str {
     }
 }
 
-fn cdylib_path() -> Option<PathBuf> {
-    if let Ok(p) = std::env::var("CARGO_CDYLIB_FILE_LIBJPEG_TURBO_RS_CAPI") {
-        let pb: PathBuf = PathBuf::from(p);
-        if pb.exists() {
-            return Some(pb);
-        }
-    }
-    let base: PathBuf = repo_root()
-        .join("target")
-        .join("release")
-        .join(format!("liblibjpeg_turbo_rs_capi.{}", dlext()));
-    if base.exists() {
-        return Some(base);
-    }
-    None
-}
-
-/// Like `cdylib_path`, but **always** runs `cargo build -p
-/// libjpeg-turbo-rs-capi --release` first so the test exercises the
-/// *current* source. Without the unconditional rebuild, a stale
-/// `target/release/liblibjpeg_turbo_rs_capi.*` (CI cache, prior run,
-/// etc.) could satisfy the existence check and let `tjunittest` link
-/// against bits that no longer reflect the working tree.
-fn cdylib_path_or_build() -> Option<PathBuf> {
-    let status: std::process::ExitStatus = Command::new(env!("CARGO"))
-        .args([
-            "build",
-            "-p",
-            "libjpeg-turbo-rs-capi",
-            "--release",
-            "--quiet",
-        ])
-        .current_dir(repo_root())
-        .status()
-        .ok()?;
-    if !status.success() {
-        return None;
-    }
-    cdylib_path()
+/// Use the exact cdylib emitted beside this outer Cargo test executable.
+fn cargo_built_cdylib_path() -> Option<PathBuf> {
+    cdylib_support::cargo_built_cdylib_path().ok()
 }
 
 fn find_cc() -> Option<PathBuf> {
@@ -141,8 +97,8 @@ fn install_aliases(cdylib: &Path, link_dir: &Path) -> Result<(), String> {
 /// Build the tjunittest binary, returning the path to it and the link
 /// directory that must be on the runtime library search path.
 ///
-/// Forces a fresh `cargo build -p libjpeg-turbo-rs-capi --release` so the
-/// linker resolves against the current source — no stale-cdylib pass.
+/// Uses the cdylib from the outer Cargo test build so the linker resolves
+/// against the current source with the caller's exact target configuration.
 fn build_tjunittest() -> Result<(PathBuf, PathBuf), String> {
     let root: PathBuf = repo_root();
     let ref_src: PathBuf = root.join("references/libjpeg-turbo/src");
@@ -159,13 +115,10 @@ fn build_tjunittest() -> Result<(PathBuf, PathBuf), String> {
         None => return Err("no C compiler (cc/clang/gcc) on PATH".to_string()),
     };
 
-    let cdylib: PathBuf = match cdylib_path_or_build() {
+    let cdylib: PathBuf = match cargo_built_cdylib_path() {
         Some(p) => p,
         None => {
-            return Err(
-                "cdylib build failed. Run: cargo build -p libjpeg-turbo-rs-capi --release"
-                    .to_string(),
-            )
+            return Err("outer Cargo test build did not emit the sibling C-ABI cdylib".to_string())
         }
     };
 
@@ -274,16 +227,12 @@ fn tjunittest_link_symbols_resolve() {
             return;
         }
     };
-    // Force a fresh build so we exercise the *current* shim source,
-    // not whatever stale `target/release/...` happened to be left from a
-    // prior run or CI cache.
-    let cdylib: PathBuf = match cdylib_path_or_build() {
+    // Load the sibling cdylib produced by the same outer Cargo invocation, not
+    // a release artifact left by a prior run or CI cache.
+    let cdylib: PathBuf = match cargo_built_cdylib_path() {
         Some(p) => p,
         None => {
-            panic!(
-                "tjunittest_link_symbols_resolve: cdylib build failed — `cargo build -p \
-                 libjpeg-turbo-rs-capi --release` reported failure"
-            );
+            panic!("tjunittest_link_symbols_resolve: outer Cargo did not emit the sibling cdylib");
         }
     };
 
@@ -401,8 +350,8 @@ int main(void) {
 /// All error paths panic — the original soft-skip on missing
 /// submodule / cc / cdylib was the soft-skip pattern called out in
 /// `docs/LAST_MILE.md` → P1 (a green test that doesn't actually
-/// exercise the gate). `build_tjunittest` always rebuilds the cdylib
-/// before linking so a stale `target/release/...` cannot let this pass
+/// exercise the gate). `build_tjunittest` links the cdylib emitted beside the
+/// current test executable, so a stale release artifact cannot let this pass
 /// against bits that no longer reflect the working tree.
 #[cfg(unix)]
 #[test]
