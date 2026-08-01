@@ -1,3 +1,7 @@
+mod helpers;
+
+use std::path::PathBuf;
+
 use libjpeg_turbo_rs::decode::pipeline::Decoder;
 use libjpeg_turbo_rs::{
     compress, compress_progressive, decompress_lenient, PixelFormat, Subsampling,
@@ -131,6 +135,45 @@ fn max_memory_large_image_with_tight_limit() {
         result.is_err(),
         "should reject 64x64 decode with max_memory=1000"
     );
+}
+
+#[test]
+fn max_memory_accounts_for_direct_rgb_upsampling_buffers() {
+    let cjpeg: PathBuf = require_c_tool!("cjpeg");
+    let djpeg: PathBuf = require_c_tool!("djpeg");
+    let (width, height): (usize, usize) = (64, 64);
+    let pixels: Vec<u8> = (0..width * height * 3)
+        .map(|index| ((index * 37 + index / (width * 3) * 11) & 0xFF) as u8)
+        .collect();
+    let ppm: Vec<u8> = helpers::build_ppm(&pixels, width, height);
+    let jpeg: Vec<u8> = helpers::encode_with_c_cjpeg(
+        &cjpeg,
+        &ppm,
+        &["-rgb", "-sample", "2x2", "-quality", "90"],
+        "memory_direct_rgb_s420",
+    );
+
+    let old_underestimate: usize = width * height * 6;
+    let mut limited: Decoder = Decoder::new(&jpeg).expect("parse direct-RGB header");
+    limited.set_max_memory(old_underestimate);
+    let error = limited
+        .decode_image()
+        .expect_err("limit must account for full-size RGB upsampling buffers");
+    assert!(
+        error.to_string().contains("estimated decode memory"),
+        "unexpected memory-limit error: {error}"
+    );
+
+    let corrected_estimate: usize = width * height * 8;
+    let mut allowed: Decoder = Decoder::new(&jpeg).expect("parse direct-RGB header");
+    allowed.set_max_memory(corrected_estimate);
+    let rust_image = allowed
+        .decode_image()
+        .expect("corrected direct-RGB estimate must permit decode");
+    let (c_width, c_height, c_pixels) =
+        helpers::decode_with_c_djpeg(&djpeg, &jpeg, "memory_direct_rgb_s420");
+    assert_eq!((rust_image.width, rust_image.height), (c_width, c_height));
+    assert_eq!(rust_image.data, c_pixels);
 }
 
 #[test]

@@ -404,10 +404,13 @@ fn issue_345_each_mode_writes_its_own_frame_marker() {
 /// Two things the sweep above cannot reach, both found by review of the fix
 /// rather than by the fix's own tests.
 ///
-/// - **Row-based restarts.** RGB-direct puts every component at 1x1, so its MCU
-///   is 8 wide whatever `subsampling` says. Counting a row interval against the
-///   default 4:2:0's 16-wide MCU lands the markers on the wrong rows — visible
-///   only where `ceil(width/8) != ceil(width/16)`.
+/// - **Row-based restarts.** Without an explicit sampling request, RGB-direct
+///   defaults every component to 1x1, so its MCU is 8 pixels wide. Letting the
+///   encoder's YCbCr-oriented 4:2:0 default leak into this path instead counts
+///   a row against a 16-pixel MCU and lands the markers on the wrong rows —
+///   visible only where `ceil(width/8) != ceil(width/16)`. Explicit RGB
+///   component sampling is covered separately and must determine its own MCU
+///   width.
 /// - **16-bit quantization tables.** Below quality ~20 without `force_baseline`,
 ///   the scaled table exceeds 255 and needs 16-bit DQT entries, which SOF0
 ///   forbids. `cjpeg` switches to SOF1 and warns; writing SOF0 there produces a

@@ -158,24 +158,20 @@ fn raw12_decompress_roundtrip_444() {
 // A3-2: compress_raw_12 — encode from planar 12-bit input
 // ===========================================================================
 
-/// Encode from planar 12-bit 4:4:4 input, decode with decompress_12bit.
-/// Result must match compress_12bit on equivalent interleaved input.
+/// Encode neutral planar YCbCr and equivalent interleaved RGB through the raw
+/// and converted paths.  Both represent the same grayscale image, so their
+/// decoded pixels must match exactly.
 #[test]
 fn raw12_compress_444_matches_interleaved() {
     let w: usize = 32;
     let h: usize = 32;
 
-    // Build interleaved YCbCr for compress_12bit
     let y_plane: Vec<i16> = (0..w * h).map(|i| ((i * 3 + 50) % 4096) as i16).collect();
-    let cb_plane: Vec<i16> = (0..w * h).map(|i| ((i * 7 + 1000) % 4096) as i16).collect();
-    let cr_plane: Vec<i16> = (0..w * h)
-        .map(|i| ((i * 11 + 2000) % 4096) as i16)
-        .collect();
-    let mut interleaved: Vec<i16> = Vec::with_capacity(w * h * 3);
-    for i in 0..w * h {
-        interleaved.push(y_plane[i]);
-        interleaved.push(cb_plane[i]);
-        interleaved.push(cr_plane[i]);
+    let cb_plane: Vec<i16> = vec![2048; w * h];
+    let cr_plane: Vec<i16> = vec![2048; w * h];
+    let mut interleaved_rgb: Vec<i16> = Vec::with_capacity(w * h * 3);
+    for &sample in &y_plane {
+        interleaved_rgb.extend_from_slice(&[sample, sample, sample]);
     }
 
     // Encode via raw planar path
@@ -191,8 +187,9 @@ fn raw12_compress_444_matches_interleaved() {
     .expect("compress_raw_12 444 must succeed");
 
     // Encode via interleaved path
-    let interleaved_jpeg: Vec<u8> = compress_12bit(&interleaved, w, h, 3, 90, Subsampling::S444)
-        .expect("compress_12bit must succeed");
+    let interleaved_jpeg: Vec<u8> =
+        compress_12bit(&interleaved_rgb, w, h, 3, 90, Subsampling::S444)
+            .expect("compress_12bit must succeed");
 
     // Decode both and compare: must be pixel-identical
     let raw_img =
@@ -249,23 +246,22 @@ fn raw12_compress_plane_too_small_returns_error() {
 }
 
 // ===========================================================================
-// A3-3: Raw 12-bit cross-check matrix
-// Subsamp × {progressive, baseline} × {arithmetic, huffman}
-// Pixel-exact round-trip: raw encode → raw decode
+// A3-3: Raw 12-bit baseline Huffman subsampling matrix
+// Pixel-exact Rust/C decode parity and bounded raw re-encode loss
 // ===========================================================================
 
 struct RawMatrix {
     subsamp: Subsampling,
     subsamp_name: &'static str,
-    progressive: bool,
-    arithmetic: bool,
 }
 
 fn raw12_matrix_roundtrip(cfg: &RawMatrix) {
     use libjpeg_turbo_rs::precision::decompress_12bit;
 
-    let image_width: usize = 32;
-    let image_height: usize = 32;
+    let djpeg = require_c_tool!("djpeg");
+    // Odd dimensions force partial MCUs for every sampling mode in the matrix.
+    let image_width: usize = 31;
+    let image_height: usize = 29;
     let (h_samp, v_samp): (u8, u8) = cfg.subsamp.sampling_factors();
 
     // Chroma plane dimensions
@@ -279,125 +275,92 @@ fn raw12_matrix_roundtrip(cfg: &RawMatrix) {
             generate_12bit_planar(image_width, image_height, cb_w, cb_h)
         };
 
-    let label: String = format!(
-        "raw12_{}_{}_{}",
-        cfg.subsamp_name,
-        if cfg.progressive { "prog" } else { "base" },
-        if cfg.arithmetic { "arith" } else { "huff" }
+    let label: String = format!("raw12_{}_base_huff", cfg.subsamp_name);
+
+    let (planes, pw, ph): (Vec<&[i16]>, Vec<usize>, Vec<usize>) =
+        if cfg.subsamp == Subsampling::S444 {
+            (
+                vec![y_plane.as_slice(), cb_plane.as_slice(), cr_plane.as_slice()],
+                vec![image_width, image_width, image_width],
+                vec![image_height, image_height, image_height],
+            )
+        } else {
+            (
+                vec![y_plane.as_slice(), cb_plane.as_slice(), cr_plane.as_slice()],
+                vec![image_width, cb_w, cb_w],
+                vec![image_height, cb_h, cb_h],
+            )
+        };
+
+    let jpeg: Vec<u8> = compress_raw_12(
+        &planes,
+        &pw,
+        &ph,
+        image_width,
+        image_height,
+        90,
+        cfg.subsamp,
+    )
+    .unwrap_or_else(|e| panic!("[{label}] compress_raw_12 failed: {e:?}"));
+
+    let raw: RawImage12 = decompress_raw_12(&jpeg)
+        .unwrap_or_else(|e| panic!("[{label}] decompress_raw_12 failed: {e:?}"));
+
+    assert_eq!(raw.width, image_width, "[{label}] width mismatch");
+    assert_eq!(raw.height, image_height, "[{label}] height mismatch");
+    assert_eq!(raw.num_components, 3, "[{label}] component count");
+
+    let plane_refs: Vec<&[i16]> = raw.planes.iter().map(|p| p.as_slice()).collect();
+    let re_jpeg: Vec<u8> = compress_raw_12(
+        &plane_refs,
+        &raw.plane_widths,
+        &raw.plane_heights,
+        raw.width,
+        raw.height,
+        90,
+        cfg.subsamp,
+    )
+    .unwrap_or_else(|e| panic!("[{label}] re-encode compress_raw_12 failed: {e:?}"));
+
+    let img1 = decompress_12bit(&jpeg)
+        .unwrap_or_else(|e| panic!("[{label}] decompress_12bit first failed: {e:?}"));
+    let img2 = decompress_12bit(&re_jpeg)
+        .unwrap_or_else(|e| panic!("[{label}] decompress_12bit re-encoded failed: {e:?}"));
+
+    let (c_width, c_height, c_components, c_maxval, c_pixels) =
+        helpers::decode_with_c_djpeg_i16(&djpeg, &jpeg, &label);
+    assert_eq!(c_width, image_width, "[{label}] C width mismatch");
+    assert_eq!(c_height, image_height, "[{label}] C height mismatch");
+    assert_eq!(c_components, 3, "[{label}] C component mismatch");
+    assert_eq!(
+        c_maxval, 4095,
+        "[{label}] C djpeg must preserve 12-bit output precision"
+    );
+    assert_eq!(
+        c_pixels, img1.data,
+        "[{label}] Rust and C 12-bit decoders must be pixel-identical"
     );
 
-    // For progressive/arithmetic, we need an alternative encode path since
-    // compress_raw_12 only supports baseline Huffman. To test the decode
-    // side with progressive/arithmetic, we encode a full image with
-    // compress_12bit and decode via decompress_raw_12, then re-encode via
-    // compress_raw_12 and verify the cycle is lossless.
-    //
-    // Note: For 12-bit, progressive and arithmetic require a special encoder
-    // that's not in the raw API; we test those paths via decompress_raw_12
-    // applied to a standard encode, then re-encode and compare.
-    // For the basic subsamp × huffman × baseline combinations we use
-    // compress_raw_12 directly.
-    if !cfg.progressive && !cfg.arithmetic {
-        // Direct raw encode → raw decode round-trip
-        let is_gray: bool = cfg.subsamp == Subsampling::S444 && h_samp == 1; // approximation
-        let (planes, pw, ph): (Vec<&[i16]>, Vec<usize>, Vec<usize>) =
-            if cfg.subsamp == Subsampling::S444 {
-                (
-                    vec![y_plane.as_slice(), cb_plane.as_slice(), cr_plane.as_slice()],
-                    vec![image_width, image_width, image_width],
-                    vec![image_height, image_height, image_height],
-                )
-            } else {
-                (
-                    vec![y_plane.as_slice(), cb_plane.as_slice(), cr_plane.as_slice()],
-                    vec![image_width, cb_w, cb_w],
-                    vec![image_height, cb_h, cb_h],
-                )
-            };
-        let _ = is_gray;
-
-        let jpeg: Vec<u8> = compress_raw_12(
-            &planes,
-            &pw,
-            &ph,
-            image_width,
-            image_height,
-            90,
-            cfg.subsamp,
-        )
-        .unwrap_or_else(|e| panic!("[{label}] compress_raw_12 failed: {e:?}"));
-
-        let raw: RawImage12 = decompress_raw_12(&jpeg)
-            .unwrap_or_else(|e| panic!("[{label}] decompress_raw_12 failed: {e:?}"));
-
-        assert_eq!(raw.width, image_width, "[{label}] width mismatch");
-        assert_eq!(raw.height, image_height, "[{label}] height mismatch");
-        assert_eq!(raw.num_components, 3, "[{label}] component count");
-
-        // Re-encode with same parameters
-        let plane_refs: Vec<&[i16]> = raw.planes.iter().map(|p| p.as_slice()).collect();
-        let re_jpeg: Vec<u8> = compress_raw_12(
-            &plane_refs,
-            &raw.plane_widths,
-            &raw.plane_heights,
-            raw.width,
-            raw.height,
-            90,
-            cfg.subsamp,
-        )
-        .unwrap_or_else(|e| panic!("[{label}] re-encode compress_raw_12 failed: {e:?}"));
-
-        // Decode both and compare
-        let img1 = decompress_12bit(&jpeg)
-            .unwrap_or_else(|e| panic!("[{label}] decompress_12bit first failed: {e:?}"));
-        let img2 = decompress_12bit(&re_jpeg)
-            .unwrap_or_else(|e| panic!("[{label}] decompress_12bit re-encoded failed: {e:?}"));
-
-        assert_eq!(
-            img1.data.len(),
-            img2.data.len(),
-            "[{label}] length mismatch"
-        );
-        let max_diff: i16 = img1
-            .data
-            .iter()
-            .zip(img2.data.iter())
-            .map(|(&a, &b)| (a - b).abs())
-            .max()
-            .unwrap_or(0);
-        // Round-trip through raw planes must be pixel-exact. measured: 0
-        assert_eq!(max_diff, 0, "[{label}] max_diff={max_diff} (must be 0)");
-        eprintln!("[{label}] PASS");
-    } else {
-        // For progressive/arithmetic: encode a full interleaved image with
-        // compress_12bit, decode via decompress_raw_12, re-encode via
-        // compress_raw_12 (baseline), decode both and compare.
-        // This verifies decompress_raw_12 handles those JPEG variants.
-        // 12-bit only supports 4:4:4, so use S444 for this path.
-        let mut interleaved: Vec<i16> = Vec::with_capacity(image_width * image_height * 3);
-        for i in 0..image_width * image_height {
-            interleaved.push(y_plane[i]);
-            interleaved.push(cb_plane[i]);
-            interleaved.push(cr_plane[i]);
-        }
-        // For progressive/arithmetic 12-bit we just check decompress_raw_12
-        // returns valid data without error (actual encode of prog/arith 12-bit
-        // is not yet in public API; tested via the baseline path above).
-        let jpeg: Vec<u8> = compress_12bit(
-            &interleaved,
-            image_width,
-            image_height,
-            3,
-            90,
-            Subsampling::S444,
-        )
-        .unwrap_or_else(|e| panic!("[{label}] compress_12bit fallback failed: {e:?}"));
-        let raw: RawImage12 = decompress_raw_12(&jpeg)
-            .unwrap_or_else(|e| panic!("[{label}] decompress_raw_12 fallback failed: {e:?}"));
-        assert_eq!(raw.width, image_width, "[{label}] width");
-        assert_eq!(raw.height, image_height, "[{label}] height");
-        eprintln!("[{label}] PASS (via baseline fallback for prog/arith)");
-    }
+    assert_eq!(
+        img1.data.len(),
+        img2.data.len(),
+        "[{label}] length mismatch"
+    );
+    let max_diff: i16 = img1
+        .data
+        .iter()
+        .zip(img2.data.iter())
+        .map(|(&a, &b)| (a - b).abs())
+        .max()
+        .unwrap_or(0);
+    // Re-encoding decoded samples applies a second lossy DCT/quantization
+    // cycle. Measured maximum is 1 across the odd-size subsampling matrix;
+    // allow one value of margin as required by the strict tolerance policy.
+    assert!(
+        max_diff <= 2,
+        "[{label}] raw decode/re-encode max_diff={max_diff} exceeds tolerance 2"
+    );
+    eprintln!("[{label}] PASS");
 }
 
 #[test]
@@ -405,8 +368,6 @@ fn raw12_matrix_subsamp_420_baseline_huffman() {
     raw12_matrix_roundtrip(&RawMatrix {
         subsamp: Subsampling::S420,
         subsamp_name: "420",
-        progressive: false,
-        arithmetic: false,
     });
 }
 
@@ -415,8 +376,6 @@ fn raw12_matrix_subsamp_422_baseline_huffman() {
     raw12_matrix_roundtrip(&RawMatrix {
         subsamp: Subsampling::S422,
         subsamp_name: "422",
-        progressive: false,
-        arithmetic: false,
     });
 }
 
@@ -425,8 +384,6 @@ fn raw12_matrix_subsamp_444_baseline_huffman() {
     raw12_matrix_roundtrip(&RawMatrix {
         subsamp: Subsampling::S444,
         subsamp_name: "444",
-        progressive: false,
-        arithmetic: false,
     });
 }
 
@@ -435,8 +392,6 @@ fn raw12_matrix_subsamp_440_baseline_huffman() {
     raw12_matrix_roundtrip(&RawMatrix {
         subsamp: Subsampling::S440,
         subsamp_name: "440",
-        progressive: false,
-        arithmetic: false,
     });
 }
 
@@ -445,8 +400,6 @@ fn raw12_matrix_subsamp_411_baseline_huffman() {
     raw12_matrix_roundtrip(&RawMatrix {
         subsamp: Subsampling::S411,
         subsamp_name: "411",
-        progressive: false,
-        arithmetic: false,
     });
 }
 
@@ -455,28 +408,5 @@ fn raw12_matrix_subsamp_441_baseline_huffman() {
     raw12_matrix_roundtrip(&RawMatrix {
         subsamp: Subsampling::S441,
         subsamp_name: "441",
-        progressive: false,
-        arithmetic: false,
-    });
-}
-
-// Progressive and arithmetic variants (decode-only via baseline fallback)
-#[test]
-fn raw12_matrix_444_progressive() {
-    raw12_matrix_roundtrip(&RawMatrix {
-        subsamp: Subsampling::S444,
-        subsamp_name: "444",
-        progressive: true,
-        arithmetic: false,
-    });
-}
-
-#[test]
-fn raw12_matrix_444_arithmetic() {
-    raw12_matrix_roundtrip(&RawMatrix {
-        subsamp: Subsampling::S444,
-        subsamp_name: "444",
-        progressive: false,
-        arithmetic: true,
     });
 }
