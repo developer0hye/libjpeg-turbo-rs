@@ -1,6 +1,6 @@
 // libjpeg-turbo-rs: alloc prelude (no_std support, issue #356)
 use crate::api::quality;
-use crate::common::error::Result;
+use crate::common::error::{JpegError, Result};
 use crate::common::types::{
     ColorSpace, DctMethod, PixelFormat, SavedMarker, ScanScript, Subsampling,
 };
@@ -84,6 +84,10 @@ pub struct Encoder<'a> {
     /// The first component (Y) defines the max sampling factor; subsequent
     /// components (Cb, Cr) can use any factor from 1 to max_h/max_v.
     custom_sampling_factors: Option<Vec<(u8, u8)>>,
+    /// Whether the caller explicitly selected sampling rather than accepting
+    /// the builder default. This matters for single-component output: libjpeg
+    /// preserves an explicit sampling factor in the SOF but defaults to 1x1.
+    has_explicit_subsampling: bool,
     /// When true, omit DQT and DHT markers from the output (abbreviated body-only stream).
     /// The resulting JPEG body can be decoded only when a decoder has preloaded the matching tables.
     suppress_tables: bool,
@@ -129,6 +133,7 @@ impl<'a> Encoder<'a> {
             density: None,
             write_adobe_marker: None,
             custom_sampling_factors: None,
+            has_explicit_subsampling: false,
             suppress_tables: false,
         }
     }
@@ -150,6 +155,7 @@ impl<'a> Encoder<'a> {
     /// Set chroma subsampling (default S420).
     pub fn subsampling(mut self, subsampling: Subsampling) -> Self {
         self.subsampling = subsampling;
+        self.has_explicit_subsampling = true;
         self
     }
 
@@ -317,11 +323,11 @@ impl<'a> Encoder<'a> {
         self
     }
 
-    /// Enable or disable fancy chroma downsampling (default: true).
+    /// Enable or disable an additional fancy chroma prefilter (default: false).
     ///
-    /// When true, uses a triangle/tent filter for chroma downsampling.
-    /// When false, uses a simple box average.
-    /// Matches libjpeg-turbo's `do_fancy_downsampling`.
+    /// When true, applies a triangle/tent filter before the encoder pipeline's
+    /// normal chroma downsampling.  The default stays false because the normal
+    /// pipeline already matches libjpeg-turbo's downsampling.
     pub fn fancy_downsampling(mut self, fancy: bool) -> Self {
         self.fancy_downsampling = fancy;
         self
@@ -365,6 +371,7 @@ impl<'a> Encoder<'a> {
     /// Valid factor values are 1..=4 for each dimension.
     pub fn sampling_factors(mut self, factors: Vec<(u8, u8)>) -> Self {
         self.custom_sampling_factors = Some(factors);
+        self.has_explicit_subsampling = true;
         self
     }
 
@@ -429,7 +436,7 @@ impl<'a> Encoder<'a> {
                 // Lossless: 1 MCU = 1 pixel (no 8x8 blocks).
                 let mcu_w: usize = if self.lossless {
                     1
-                } else if self.pixel_format == PixelFormat::Grayscale {
+                } else if self.pixel_format == PixelFormat::Grayscale || self.grayscale_from_color {
                     8
                 } else {
                     match effective_subsampling {
@@ -610,6 +617,66 @@ impl<'a> Encoder<'a> {
         data
     }
 
+    fn patch_single_component_sampling_factor(
+        mut data: Vec<u8>,
+        horizontal: u8,
+        vertical: u8,
+    ) -> Result<Vec<u8>> {
+        let mut marker_start: usize = 2;
+        while marker_start + 3 < data.len() {
+            if data[marker_start] != 0xFF {
+                return Err(JpegError::CorruptData(
+                    "encoder output lost marker alignment before SOF".to_string(),
+                ));
+            }
+            while marker_start + 1 < data.len() && data[marker_start + 1] == 0xFF {
+                marker_start += 1;
+            }
+            let marker: u8 = data[marker_start + 1];
+            if marker == 0xDA || marker == 0xD9 {
+                break;
+            }
+            if matches!(marker, 0x01 | 0xD0..=0xD8) {
+                marker_start += 2;
+                continue;
+            }
+            let segment_length: usize =
+                u16::from_be_bytes([data[marker_start + 2], data[marker_start + 3]]) as usize;
+            if segment_length < 2 || marker_start + 2 + segment_length > data.len() {
+                return Err(JpegError::CorruptData(
+                    "encoder output contains an invalid marker length".to_string(),
+                ));
+            }
+            if matches!(
+                marker,
+                0xC0 | 0xC1
+                    | 0xC2
+                    | 0xC3
+                    | 0xC5
+                    | 0xC6
+                    | 0xC7
+                    | 0xC9
+                    | 0xCA
+                    | 0xCB
+                    | 0xCD
+                    | 0xCE
+                    | 0xCF
+            ) {
+                if segment_length < 11 || data[marker_start + 9] != 1 {
+                    return Err(JpegError::CorruptData(
+                        "expected a single-component SOF in grayscale encoder output".to_string(),
+                    ));
+                }
+                data[marker_start + 11] = (horizontal << 4) | vertical;
+                return Ok(data);
+            }
+            marker_start += 2 + segment_length;
+        }
+        Err(JpegError::CorruptData(
+            "grayscale encoder output contains no SOF marker".to_string(),
+        ))
+    }
+
     fn find_adobe_marker(data: &[u8]) -> Option<usize> {
         let mut pos: usize = 2;
         while pos + 1 < data.len() {
@@ -755,7 +822,6 @@ impl<'a> Encoder<'a> {
         // set.
         let rgb_direct: bool = self.colorspace_override == Some(ColorSpace::Rgb)
             && effective_format == PixelFormat::Rgb;
-
         // Route through compress_custom_quant whenever the builder may need
         // non-baseline (16-bit) quantization values. C cjpeg defaults to
         // `force_baseline = FALSE`, allowing scaled quant values up to 32767
@@ -828,22 +894,29 @@ impl<'a> Encoder<'a> {
             });
         let use_custom_sampling: bool =
             self.custom_sampling_factors.is_some() && mapped_subsampling.is_none();
-        let effective_subsampling: Subsampling = mapped_subsampling.unwrap_or(self.subsampling);
+        let effective_subsampling: Subsampling = if self.colorspace_override
+            == Some(ColorSpace::Rgb)
+            && effective_format == PixelFormat::Rgb
+            && !self.has_explicit_subsampling
+            && self.custom_sampling_factors.is_none()
+        {
+            // jpeg_set_colorspace(JCS_RGB) resets all three components to
+            // 1x1 sampling.  Preserve a caller's explicit sampling request,
+            // but do not leak Encoder's YCbCr-oriented S420 default into the
+            // direct-RGB path.
+            Subsampling::S444
+        } else {
+            mapped_subsampling.unwrap_or(self.subsampling)
+        };
         // restart_interval depends on the *effective* MCU width, which can
         // differ from `self.subsampling` when the caller used
         // `sampling_factors([(h,v),(1,1),(1,1)])` instead of `subsampling()`.
         // Compute it after the mapping so e.g. samp410 (4x2) lands on
         // mcu_w=32, not the default S420 mcu_w=16.
-        // RGB-direct puts every component at 1x1 (`jcparam.c:365-370`), so its
-        // MCU is 8 pixels wide whatever `subsampling` says. A row-based
-        // restart interval counted against a 16-wide MCU would put the markers
-        // on the wrong rows.
-        let restart_subsampling: Subsampling = if rgb_direct {
-            Subsampling::S444
-        } else {
-            effective_subsampling
-        };
-        let restart_interval: u16 = self.compute_restart_interval(restart_subsampling);
+        // The default RGB-direct layout is 1x1, but an explicit standard
+        // sampling request raises the first component. Row-based restart
+        // intervals therefore use the effective MCU width in both cases.
+        let restart_interval: u16 = self.compute_restart_interval(effective_subsampling);
         // For progressive: each scan recomputes restart_interval from
         // `restart_in_rows * MCUs_per_row(scan)` — interleaved DC scans use
         // the iMCU width while non-interleaved AC scans use the per-component
@@ -854,6 +927,13 @@ impl<'a> Encoder<'a> {
             Some(RestartConfig::Rows(n)) => n,
             _ => 0,
         };
+
+        if rgb_direct && use_custom_sampling {
+            return Err(JpegError::Unsupported(
+                "direct-RGB encoding requires sampling factors [(H,V),(1,1),(1,1)] with a supported H/V pair"
+                    .to_string(),
+            ));
+        }
 
         // One params value carrying every baseline option, instead of an if/else
         // chain in which the first matching arm silently discarded whatever it
@@ -887,7 +967,11 @@ impl<'a> Encoder<'a> {
 
         let base = if rgb_direct && self.arithmetic && self.progressive && !self.lossless {
             // JCS_RGB arithmetic progressive (#345).
-            encoder::compress_arithmetic_progressive_rgb_direct(&baseline_params, self.icc_profile)?
+            encoder::compress_arithmetic_progressive_rgb_direct(
+                &baseline_params,
+                self.icc_profile,
+                restart_in_rows,
+            )?
         } else if rgb_direct && self.arithmetic && !self.lossless {
             // JCS_RGB arithmetic (#345). `jcarith.c` codes coefficients and
             // never looks at the colorspace.
@@ -897,7 +981,11 @@ impl<'a> Encoder<'a> {
             // colorspace-agnostic in C — the scan script comes from the
             // component count, not the colorspace — so `colorspace(Rgb)` and
             // `progressive` compose rather than one silently winning.
-            encoder::compress_progressive_rgb_direct(&baseline_params, self.icc_profile)?
+            encoder::compress_progressive_rgb_direct(
+                &baseline_params,
+                self.icc_profile,
+                restart_in_rows,
+            )?
         } else if rgb_direct && !self.lossless {
             // Ahead of the remaining mode switches, as the early return it
             // replaces was. Lossless is excluded because the lossless arms
@@ -994,6 +1082,18 @@ impl<'a> Encoder<'a> {
             encoder::compress_with_params(&baseline_params)?
         };
 
+        let with_sampling: Vec<u8> =
+            if effective_format == PixelFormat::Grayscale && self.has_explicit_subsampling {
+                let (horizontal, vertical): (u8, u8) = self
+                    .custom_sampling_factors
+                    .as_deref()
+                    .and_then(|factors| factors.first().copied())
+                    .unwrap_or_else(|| effective_subsampling.sampling_factors());
+                Self::patch_single_component_sampling_factor(base, horizontal, vertical)?
+            } else {
+                base
+            };
+
         // RGB-direct writes the ICC profile itself, right after the Adobe
         // marker, to keep cjpeg's marker order; injecting it again here would
         // emit two copies.
@@ -1004,14 +1104,14 @@ impl<'a> Encoder<'a> {
             || self.iptc_data.is_some()
         {
             encoder::inject_metadata_full(
-                &base,
+                &with_sampling,
                 icc_to_inject,
                 self.exif_data,
                 self.xmp_data,
                 self.iptc_data,
             )?
         } else {
-            base
+            with_sampling
         };
 
         let with_comment: Vec<u8> = if let Some(text) = self.comment {

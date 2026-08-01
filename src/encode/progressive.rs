@@ -151,7 +151,7 @@ fn ycbcr_progression() -> Vec<ProgressiveScan> {
 }
 
 /// Generic all-purpose progression for non-YCbCr (jcparam.c else branch).
-fn generic_progression(num_components: usize) -> Vec<ProgressiveScan> {
+pub(crate) fn generic_progression(num_components: usize) -> Vec<ProgressiveScan> {
     let mut scans = Vec::new();
     let all_comps: Vec<usize> = (0..num_components).collect();
 
@@ -263,5 +263,20 @@ mod tests {
         assert_eq!(last.component_indices, vec![0]);
         assert_eq!(last.ah, 1);
         assert_eq!(last.al, 0);
+    }
+
+    #[test]
+    fn generic_progression_3_components_rgb() {
+        let scans = generic_progression(3);
+        assert_eq!(scans.len(), 14);
+        assert_eq!(scans[0].component_indices, vec![0, 1, 2]);
+        for (component, scan) in scans[1..4].iter().enumerate() {
+            assert_eq!(scan.component_indices, vec![component]);
+            assert_eq!((scan.ss, scan.se, scan.ah, scan.al), (1, 5, 0, 2));
+        }
+        for (component, scan) in scans[4..7].iter().enumerate() {
+            assert_eq!(scan.component_indices, vec![component]);
+            assert_eq!((scan.ss, scan.se, scan.ah, scan.al), (6, 63, 0, 2));
+        }
     }
 }

@@ -217,7 +217,7 @@ fn make_lossless_jpeg_3comp(
 
                 cur_rows[c][x] = pixel as u16;
 
-                let diff = ((pixel - prediction) as i32) & (mask as i32);
+                let diff = (pixel - prediction) & (mask as i32);
                 let signed_diff = if diff >= (1 << (precision - 1)) {
                     diff - (1 << precision)
                 } else {

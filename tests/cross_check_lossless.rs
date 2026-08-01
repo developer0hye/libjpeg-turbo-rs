@@ -189,10 +189,10 @@ fn read_ascii_number(data: &[u8], idx: usize) -> (usize, usize) {
 #[test]
 fn rust_lossless_gray_c_decode() {
     let djpeg: PathBuf = require_c_tool!("djpeg");
-    if !djpeg_supports_lossless(&djpeg) {
-        eprintln!("SKIP: djpeg lacks lossless decode (need libjpeg-turbo 3.x)");
-        return;
-    }
+    assert!(
+        djpeg_supports_lossless(&djpeg),
+        "lossless cross-validation requires libjpeg-turbo 3.x djpeg"
+    );
 
     let (w, h): (usize, usize) = (32, 32);
     let pixels: Vec<u8> = generate_grayscale_pattern(w, h);
@@ -227,10 +227,10 @@ fn rust_lossless_gray_c_decode() {
 #[test]
 fn rust_lossless_rgb_c_decode() {
     let djpeg: PathBuf = require_c_tool!("djpeg");
-    if !djpeg_supports_lossless(&djpeg) {
-        eprintln!("SKIP: djpeg lacks lossless decode (need libjpeg-turbo 3.x)");
-        return;
-    }
+    assert!(
+        djpeg_supports_lossless(&djpeg),
+        "lossless cross-validation requires libjpeg-turbo 3.x djpeg"
+    );
 
     let (w, h): (usize, usize) = (16, 16);
     let pixels: Vec<u8> = generate_rgb_pattern(w, h);
@@ -273,10 +273,10 @@ fn rust_lossless_rgb_c_decode() {
 #[test]
 fn rust_lossless_all_predictors_c_decode() {
     let djpeg: PathBuf = require_c_tool!("djpeg");
-    if !djpeg_supports_lossless(&djpeg) {
-        eprintln!("SKIP: djpeg lacks lossless decode (need libjpeg-turbo 3.x)");
-        return;
-    }
+    assert!(
+        djpeg_supports_lossless(&djpeg),
+        "lossless cross-validation requires libjpeg-turbo 3.x djpeg"
+    );
 
     let (w, h): (usize, usize) = (24, 24);
     let pixels: Vec<u8> = generate_grayscale_pattern(w, h);
@@ -319,10 +319,10 @@ fn rust_lossless_all_predictors_c_decode() {
 #[test]
 fn rust_lossless_with_point_transform_c_decode() {
     let djpeg: PathBuf = require_c_tool!("djpeg");
-    if !djpeg_supports_lossless(&djpeg) {
-        eprintln!("SKIP: djpeg lacks lossless decode (need libjpeg-turbo 3.x)");
-        return;
-    }
+    assert!(
+        djpeg_supports_lossless(&djpeg),
+        "lossless cross-validation requires libjpeg-turbo 3.x djpeg"
+    );
 
     let (w, h): (usize, usize) = (16, 16);
     let pixels: Vec<u8> = generate_grayscale_pattern(w, h);
@@ -374,16 +374,17 @@ fn rust_lossless_with_point_transform_c_decode() {
 #[test]
 fn c_lossless_rust_decode() {
     let cjpeg: PathBuf = require_c_tool!("cjpeg");
-    if !cjpeg_supports_lossless(&cjpeg) {
-        eprintln!("SKIP: cjpeg does not support -lossless");
-        return;
-    }
+    assert!(
+        cjpeg_supports_lossless(&cjpeg),
+        "lossless cross-validation requires libjpeg-turbo 3.x cjpeg"
+    );
 
     let ppm_path: PathBuf = reference_path("testorig.ppm");
-    if !ppm_path.exists() {
-        eprintln!("SKIP: testorig.ppm not found");
-        return;
-    }
+    assert!(
+        ppm_path.is_file(),
+        "required fixture missing: {}",
+        ppm_path.display()
+    );
 
     let tmp_jpg: TempFile = TempFile::new("c_lossless.jpg");
 
@@ -422,16 +423,17 @@ fn c_lossless_rust_decode() {
 #[test]
 fn c_lossless_all_predictors_rust_decode() {
     let cjpeg: PathBuf = require_c_tool!("cjpeg");
-    if !cjpeg_supports_lossless(&cjpeg) {
-        eprintln!("SKIP: cjpeg does not support -lossless");
-        return;
-    }
+    assert!(
+        cjpeg_supports_lossless(&cjpeg),
+        "lossless cross-validation requires libjpeg-turbo 3.x cjpeg"
+    );
 
     let ppm_path: PathBuf = reference_path("testorig.ppm");
-    if !ppm_path.exists() {
-        eprintln!("SKIP: testorig.ppm not found");
-        return;
-    }
+    assert!(
+        ppm_path.is_file(),
+        "required fixture missing: {}",
+        ppm_path.display()
+    );
 
     let (orig_w, orig_h, _) = parse_ppm(&ppm_path);
 
@@ -472,16 +474,17 @@ fn c_lossless_all_predictors_rust_decode() {
 #[test]
 fn c_lossless_gray_rust_decode() {
     let cjpeg: PathBuf = require_c_tool!("cjpeg");
-    if !cjpeg_supports_lossless(&cjpeg) {
-        eprintln!("SKIP: cjpeg does not support -lossless");
-        return;
-    }
+    assert!(
+        cjpeg_supports_lossless(&cjpeg),
+        "lossless cross-validation requires libjpeg-turbo 3.x cjpeg"
+    );
 
-    let pgm_path: PathBuf = reference_path("testorig.pgm");
-    if !pgm_path.exists() {
-        eprintln!("SKIP: testorig.pgm not found");
-        return;
-    }
+    let (width, height): (usize, usize) = (48, 48);
+    let pixels: Vec<u8> = generate_grayscale_pattern(width, height);
+    let pgm_file: TempFile = TempFile::new("c_lossless_gray_input.pgm");
+    std::fs::write(pgm_file.path(), helpers::build_pgm(&pixels, width, height))
+        .expect("write generated grayscale fixture");
+    let pgm_path: &Path = pgm_file.path();
 
     let tmp_jpg: TempFile = TempFile::new("c_lossless_gray.jpg");
 
@@ -490,7 +493,7 @@ fn c_lossless_gray_rust_decode() {
         .arg("1")
         .arg("-outfile")
         .arg(tmp_jpg.path())
-        .arg(&pgm_path)
+        .arg(pgm_path)
         .output()
         .expect("failed to run cjpeg");
 
@@ -504,7 +507,7 @@ fn c_lossless_gray_rust_decode() {
     let img = decompress_to(&jpeg_data, PixelFormat::Grayscale)
         .expect("Rust decompress of C lossless grayscale JPEG");
 
-    let (orig_w, orig_h, _) = parse_pgm(&pgm_path);
+    let (orig_w, orig_h, _) = parse_pgm(pgm_path);
     assert_eq!(img.width, orig_w, "width mismatch");
     assert_eq!(img.height, orig_h, "height mismatch");
     assert_eq!(
@@ -521,10 +524,10 @@ fn c_lossless_gray_rust_decode() {
 #[test]
 fn lossless_roundtrip_rust_c_exact() {
     let djpeg: PathBuf = require_c_tool!("djpeg");
-    if !djpeg_supports_lossless(&djpeg) {
-        eprintln!("SKIP: djpeg lacks lossless decode (need libjpeg-turbo 3.x)");
-        return;
-    }
+    assert!(
+        djpeg_supports_lossless(&djpeg),
+        "lossless cross-validation requires libjpeg-turbo 3.x djpeg"
+    );
 
     let (w, h): (usize, usize) = (48, 48);
     let pixels: Vec<u8> = generate_grayscale_pattern(w, h);
@@ -572,18 +575,20 @@ fn lossless_roundtrip_rust_c_exact() {
 fn lossless_roundtrip_c_rust_exact() {
     // C encodes lossless -> Rust decodes -> compare with original PPM pixels
     let cjpeg: PathBuf = require_c_tool!("cjpeg");
-    if !cjpeg_supports_lossless(&cjpeg) {
-        eprintln!("SKIP: cjpeg does not support -lossless");
-        return;
-    }
+    assert!(
+        cjpeg_supports_lossless(&cjpeg),
+        "lossless cross-validation requires libjpeg-turbo 3.x cjpeg"
+    );
 
-    let pgm_path: PathBuf = reference_path("testorig.pgm");
-    if !pgm_path.exists() {
-        eprintln!("SKIP: testorig.pgm not found");
-        return;
-    }
-
-    let (orig_w, orig_h, orig_pixels) = parse_pgm(&pgm_path);
+    let (orig_w, orig_h): (usize, usize) = (48, 48);
+    let orig_pixels: Vec<u8> = generate_grayscale_pattern(orig_w, orig_h);
+    let pgm_file: TempFile = TempFile::new("c_lossless_roundtrip_input.pgm");
+    std::fs::write(
+        pgm_file.path(),
+        helpers::build_pgm(&orig_pixels, orig_w, orig_h),
+    )
+    .expect("write generated grayscale fixture");
+    let pgm_path: &Path = pgm_file.path();
 
     let tmp_jpg: TempFile = TempFile::new("rt_c_lossless.jpg");
     let output = Command::new(&cjpeg)
@@ -591,7 +596,7 @@ fn lossless_roundtrip_c_rust_exact() {
         .arg("1")
         .arg("-outfile")
         .arg(tmp_jpg.path())
-        .arg(&pgm_path)
+        .arg(pgm_path)
         .output()
         .expect("failed to run cjpeg");
 

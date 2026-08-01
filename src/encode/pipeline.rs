@@ -1347,12 +1347,14 @@ impl DirectPlanarSpec {
         }
     }
 
-    /// `JCS_RGB` (`jcparam.c:365-370`): three components, all at 1x1.
-    /// Subsampling is not expressible — every component is already maximal.
-    fn rgb_direct(icc_profile: Option<&[u8]>) -> Self {
+    /// `JCS_RGB` starts with all three components at 1x1, after which cjpeg's
+    /// explicit `-sample HxV,1x1,1x1` option may raise the first component's
+    /// sampling factors. `Encoder` maps that supported shape to `subsampling`.
+    fn rgb_direct(subsampling: Subsampling, icc_profile: Option<&[u8]>) -> Self {
+        let (h_samp, v_samp) = subsampling.sampling_factors();
         Self {
             component_ids: b"RGB",
-            sampling: vec![(1, 1), (1, 1), (1, 1)],
+            sampling: vec![(h_samp as usize, v_samp as usize), (1, 1), (1, 1)],
             icc_profile: icc_profile.map(<[u8]>::to_vec),
         }
     }
@@ -1847,7 +1849,8 @@ fn compress_direct_planar(params: &CompressParams<'_>, spec: &DirectPlanarSpec) 
 /// Compress RGB pixels directly without color conversion (JCS_RGB / `cjpeg -rgb`).
 ///
 /// Component IDs follow C libjpeg-turbo convention: R=82('R'), G=71('G'), B=66('B').
-/// All 3 components use 1x1 sampling and the same luminance quantization table.
+/// The R component carries the requested sampling factor; G and B use 1x1,
+/// matching cjpeg `-rgb -sample HxV`.
 /// Produces Adobe APP14 marker with transform=0 (no JFIF APP0).
 ///
 /// This signature carries only quality and the DCT method. Anything else the
@@ -1879,9 +1882,11 @@ pub fn compress_rgb_direct(
 
 /// Compress RGB pixels as `JCS_RGB`, honouring every option in `params`.
 ///
-/// `subsampling` is the one thing that cannot apply: `jpeg_set_colorspace`
-/// puts all three components at 1x1 (`jcparam.c:365-370`), so there is nothing
-/// to subsample. C is the same — `cjpeg -rgb -sample 2x2` writes 1x1.
+/// `jpeg_set_colorspace(JCS_RGB)` defaults all three components to 1x1
+/// (`jcparam.c:367-373`), but cjpeg applies an explicit `-sample` after those
+/// defaults (`cjpeg.c:544-552,609-611`). Accordingly, `params.subsampling`
+/// controls R's sampling factor while G and B remain 1x1. This is RGB component
+/// sampling, not JFIF/YCbCr chroma subsampling.
 pub fn compress_rgb_direct_with_params(
     params: &CompressParams<'_>,
     icc_profile: Option<&[u8]>,
@@ -1905,7 +1910,10 @@ pub fn compress_rgb_direct_with_params(
         });
     }
 
-    compress_direct_planar(params, &DirectPlanarSpec::rgb_direct(icc_profile))
+    compress_direct_planar(
+        params,
+        &DirectPlanarSpec::rgb_direct(params.subsampling, icc_profile),
+    )
 }
 
 /// Compress as lossless JPEG (SOF3).
@@ -2739,6 +2747,7 @@ pub fn compress_progressive_custom_with_restart(
 pub fn compress_progressive_rgb_direct(
     params: &CompressParams<'_>,
     icc_profile: Option<&[u8]>,
+    restart_in_rows: u16,
 ) -> Result<Vec<u8>> {
     use crate::encode::progressive::simple_progression_for;
 
@@ -2751,11 +2760,11 @@ pub fn compress_progressive_rgb_direct(
         params.height,
         PixelFormat::Rgb,
         params.quality,
-        Subsampling::S444,
+        params.subsampling,
         &scans,
         params.dct_method,
         params.restart_interval,
-        0,
+        restart_in_rows,
         params.custom_quant,
         true,
     )?;
@@ -2851,14 +2860,6 @@ fn compress_progressive_with_scans(
             pixel_format,
             enc_simd.rgb_to_ycbcr_row,
         )?
-    };
-
-    // Every JCS_RGB component sits at 1x1, so there is nothing to subsample
-    // and the MCU is one block wide however `subsampling` was set.
-    let subsampling: Subsampling = if direct_rgb {
-        Subsampling::S444
-    } else {
-        subsampling
     };
 
     let (mcu_w, mcu_h) = if is_grayscale {
@@ -3047,8 +3048,14 @@ fn compress_progressive_with_scans(
         let components = vec![(1, 1, 1, 0)];
         marker_writer::write_sof2(&mut output, width as u16, height as u16, &components);
     } else if direct_rgb {
-        // ASCII initials, 1x1, quantization slot 0 for all three.
-        let components = vec![(b'R', 1, 1, 0), (b'G', 1, 1, 0), (b'B', 1, 1, 0)];
+        // ASCII initials and quantization slot 0 for all three. An explicit
+        // sampling request raises the first component just like cjpeg
+        // `-rgb -sample HxV,1x1,1x1`.
+        let components = vec![
+            (b'R', h_samp as u8, v_samp as u8, 0),
+            (b'G', 1, 1, 0),
+            (b'B', 1, 1, 0),
+        ];
         marker_writer::write_sof2(&mut output, width as u16, height as u16, &components);
     } else {
         let components = vec![
@@ -4178,7 +4185,7 @@ pub fn compress_arithmetic_rgb_direct(
         params.height,
         PixelFormat::Rgb,
         params.quality,
-        Subsampling::S444,
+        params.subsampling,
         params.dct_method,
         params.restart_interval,
         params.custom_quant,
@@ -4286,12 +4293,28 @@ fn compress_arithmetic_inner(
             }
         }
         let [red, green, blue] = &channels;
-        // Every component is at the maximum sampling factor, so the bottom
-        // padding is a plain last-row repeat (see `pad_plane_to_mcu_grid`).
+        let (_, vertical_sampling) = subsampling.sampling_factors();
+        // The first component is at the maximum sampling factor. Components
+        // 1 and 2 are downsampled vertically, so their full-resolution
+        // padding must preserve the last complete input row group.
         (
             pad_plane_to_mcu_grid(red, width, height, padded_w, padded_h, 1),
-            pad_plane_to_mcu_grid(green, width, height, padded_w, padded_h, 1),
-            pad_plane_to_mcu_grid(blue, width, height, padded_w, padded_h, 1),
+            pad_plane_to_mcu_grid(
+                green,
+                width,
+                height,
+                padded_w,
+                padded_h,
+                vertical_sampling as usize,
+            ),
+            pad_plane_to_mcu_grid(
+                blue,
+                width,
+                height,
+                padded_w,
+                padded_h,
+                vertical_sampling as usize,
+            ),
         )
     } else {
         convert_to_ycbcr_padded(
@@ -4696,7 +4719,8 @@ fn compress_arithmetic_inner(
             &components,
         );
     } else if direct_rgb {
-        let components = vec![(b'R', 1, 1, 0), (b'G', 1, 1, 0), (b'B', 1, 1, 0)];
+        let (h_samp, v_samp) = subsampling.sampling_factors();
+        let components = vec![(b'R', h_samp, v_samp, 0), (b'G', 1, 1, 0), (b'B', 1, 1, 0)];
         marker_writer::write_sof9(
             &mut output,
             original_width as u16,
@@ -4787,6 +4811,7 @@ pub fn compress_arithmetic_progressive(
 pub fn compress_arithmetic_progressive_rgb_direct(
     params: &CompressParams<'_>,
     icc_profile: Option<&[u8]>,
+    restart_in_rows: u16,
 ) -> Result<Vec<u8>> {
     let base: Vec<u8> = compress_arithmetic_progressive_inner(
         params.pixels,
@@ -4794,10 +4819,10 @@ pub fn compress_arithmetic_progressive_rgb_direct(
         params.height,
         PixelFormat::Rgb,
         params.quality,
-        Subsampling::S444,
+        params.subsampling,
         params.dct_method,
         params.restart_interval,
-        0,
+        restart_in_rows,
         params.custom_quant,
         true,
     )?;
@@ -4887,12 +4912,6 @@ fn compress_arithmetic_progressive_inner(
             enc_simd.rgb_to_ycbcr_row,
         )?
     };
-    let subsampling: Subsampling = if direct_rgb {
-        Subsampling::S444
-    } else {
-        subsampling
-    };
-
     let (mcu_w, mcu_h): (usize, usize) = if is_grayscale {
         (8, 8)
     } else {
@@ -5117,7 +5136,11 @@ fn compress_arithmetic_progressive_inner(
         let components = vec![(1, 1, 1, 0)];
         marker_writer::write_sof10(&mut output, width as u16, height as u16, &components);
     } else if direct_rgb {
-        let components = vec![(b'R', 1, 1, 0), (b'G', 1, 1, 0), (b'B', 1, 1, 0)];
+        let components = vec![
+            (b'R', h_samp as u8, v_samp as u8, 0),
+            (b'G', 1, 1, 0),
+            (b'B', 1, 1, 0),
+        ];
         marker_writer::write_sof10(&mut output, width as u16, height as u16, &components);
     } else {
         let components = vec![
@@ -7332,6 +7355,20 @@ fn encode_single_block(
     HuffmanEncoder::encode_block(writer, &quantized, prev_dc, dc_table, ac_table);
 }
 
+/// Whether an ISLOW-only fused SIMD FDCT can replace the requested transform.
+#[inline]
+fn can_use_fused_islow(
+    fdct_quantize_fn: fn(&mut [i16; 64], &QuantDivisors, &mut [i16; 64]),
+) -> bool {
+    !core::ptr::eq(
+        fdct_quantize_fn as *const (),
+        crate::simd::scalar::scalar_fdct_ifast_quantize as *const (),
+    ) && !core::ptr::eq(
+        fdct_quantize_fn as *const (),
+        crate::simd::scalar::scalar_fdct_float_quantize as *const (),
+    )
+}
+
 /// Encode a full color MCU (multiple Y blocks + Cb + Cr blocks).
 #[allow(clippy::too_many_arguments)]
 fn encode_color_mcu(
@@ -8037,7 +8074,8 @@ fn fdct_quantize_chroma_h2v1(
     out: &mut [i16; 64],
 ) {
     // Fused path: downsample + FDCT + quantize in one pass (AVX2)
-    if block_x + 16 <= plane_width
+    if can_use_fused_islow(fdct_quantize_fn)
+        && block_x + 16 <= plane_width
         && block_y + 8 <= plane_height
         && crate::cpu_has!("avx2")
         && may_use_islow_simd_kernel(fdct_quantize_fn)
@@ -8110,7 +8148,7 @@ fn encode_mcu_444_x86_64(
     let has_avx2: bool = crate::cpu_has!("avx2") && may_use_islow_simd_kernel(fdct_quantize_fn);
     let interior: bool = x0 + 8 <= width && y0 + 8 <= height;
 
-    if interior && has_avx2 {
+    if can_use_fused_islow(fdct_quantize_fn) && interior && has_avx2 {
         unsafe {
             crate::simd::x86_64::avx2_extract_fdct_quantize(
                 y_plane.as_ptr().add(y0 * width + x0),
@@ -8229,7 +8267,7 @@ fn encode_mcu_422_x86_64(
     // Interior check: 2 Y blocks (16 wide) + H2V1 chroma (16 wide, 8 tall)
     let interior: bool = x0 + 16 <= width && y0 + 8 <= height;
 
-    if interior && has_avx2 {
+    if can_use_fused_islow(fdct_quantize_fn) && interior && has_avx2 {
         unsafe {
             let y_ptr: *const u8 = y_plane.as_ptr().add(y0 * width + x0);
             crate::simd::x86_64::avx2_extract_fdct_quantize(y_ptr, width, luma_quant, &mut q[0]);
@@ -8375,7 +8413,9 @@ fn encode_mcu_420_x86_64(
     // For 1080p with 16x16 MCUs, only edge MCUs fail this check.
     let interior: bool = x0 + 16 <= width && y0 + 16 <= height;
 
-    if interior && has_avx2 {
+    let use_fused_islow: bool = can_use_fused_islow(fdct_quantize_fn);
+
+    if use_fused_islow && interior && has_avx2 {
         // Fast path: all blocks are interior, use fused SIMD for everything
         unsafe {
             let y_ptr: *const u8 = y_plane.as_ptr().add(y0 * width + x0);
@@ -8416,7 +8456,7 @@ fn encode_mcu_420_x86_64(
         let y_offsets: [(usize, usize); 4] =
             [(x0, y0), (x0 + 8, y0), (x0, y0 + 8), (x0 + 8, y0 + 8)];
         for (idx, &(bx, by)) in y_offsets.iter().enumerate() {
-            if has_avx2 && bx + 8 <= width && by + 8 <= height {
+            if use_fused_islow && has_avx2 && bx + 8 <= width && by + 8 <= height {
                 unsafe {
                     crate::simd::x86_64::avx2_extract_fdct_quantize(
                         y_plane.as_ptr().add(by * width + bx),
@@ -8431,7 +8471,7 @@ fn encode_mcu_420_x86_64(
                 fdct_quantize_fn(&mut block, luma_quant, &mut q[idx]);
             }
         }
-        if has_avx2 && x0 + 16 <= width && y0 + 16 <= height {
+        if use_fused_islow && has_avx2 && x0 + 16 <= width && y0 + 16 <= height {
             unsafe {
                 crate::simd::x86_64::avx2_downsample_h2v2_fdct_quantize(
                     cb_plane.as_ptr().add(y0 * width + x0),
@@ -8445,7 +8485,7 @@ fn encode_mcu_420_x86_64(
             downsample_chroma_block(cb_plane, width, height, x0, y0, 2, 2, &mut block);
             fdct_quantize_fn(&mut block, chroma_quant, &mut q[4]);
         }
-        if has_avx2 && x0 + 16 <= width && y0 + 16 <= height {
+        if use_fused_islow && has_avx2 && x0 + 16 <= width && y0 + 16 <= height {
             unsafe {
                 crate::simd::x86_64::avx2_downsample_h2v2_fdct_quantize(
                     cr_plane.as_ptr().add(y0 * width + x0),
@@ -8542,7 +8582,9 @@ fn encode_mcu_420_half_chroma(
     let y_interior: bool = y_x0 + 16 <= y_stride && y_y0 + 16 <= 16;
     let c_interior: bool = chroma_x0 + 8 <= chroma_stride && chroma_y0 + 8 <= 8;
 
-    if y_interior && c_interior && has_avx2 {
+    let use_fused_islow: bool = can_use_fused_islow(fdct_quantize_fn);
+
+    if use_fused_islow && y_interior && c_interior && has_avx2 {
         unsafe {
             // 4 Y blocks from full-res plane
             let y_ptr: *const u8 = y_plane.as_ptr().add(y_y0 * y_stride + y_x0);
@@ -8588,7 +8630,7 @@ fn encode_mcu_420_half_chroma(
             (y_x0 + 8, y_y0 + 8),
         ];
         for (idx, &(bx, by)) in y_offsets.iter().enumerate() {
-            if has_avx2 && bx + 8 <= y_stride && by + 8 <= 16 {
+            if use_fused_islow && has_avx2 && bx + 8 <= y_stride && by + 8 <= 16 {
                 unsafe {
                     crate::simd::x86_64::avx2_extract_fdct_quantize(
                         y_plane.as_ptr().add(by * y_stride + bx),
@@ -8604,7 +8646,7 @@ fn encode_mcu_420_half_chroma(
             }
         }
         // Chroma from half-res
-        if has_avx2 && chroma_x0 + 8 <= chroma_stride && chroma_y0 + 8 <= 8 {
+        if use_fused_islow && has_avx2 && chroma_x0 + 8 <= chroma_stride && chroma_y0 + 8 <= 8 {
             unsafe {
                 crate::simd::x86_64::avx2_extract_fdct_quantize(
                     cb_half.as_ptr().add(chroma_y0 * chroma_stride + chroma_x0),
@@ -8765,9 +8807,24 @@ fn encode_downsampled_chroma_block(
     // This matches C libjpeg-turbo's expand_right_edge + SIMD downsample behavior.
     let src_w: usize = 8 * h_factor;
     let src_h: usize = 8 * v_factor;
+    let active_rows: usize = plane_height.saturating_sub(block_y).min(src_h);
+    let last_downsample_group_start: usize = active_rows
+        .div_ceil(v_factor)
+        .saturating_sub(1)
+        .saturating_mul(v_factor);
     let mut local_buf = vec![0u8; src_w * src_h];
     for row in 0..src_h {
-        let src_y: usize = (block_y + row).min(plane_height - 1);
+        let source_row: usize = if row < active_rows || v_factor == 1 {
+            row.min(active_rows.saturating_sub(1))
+        } else {
+            // C pads the input only to complete the final vertical row group,
+            // downsamples it, then replicates that final downsampled row to
+            // the bottom of the iMCU. Repeating the final input group here is
+            // equivalent and avoids downsampling duplicated last samples.
+            let group_offset: usize = (row - last_downsample_group_start) % v_factor;
+            (last_downsample_group_start + group_offset).min(active_rows - 1)
+        };
+        let src_y: usize = block_y + source_row;
         for col in 0..src_w {
             let src_x: usize = (block_x + col).min(plane_width - 1);
             local_buf[row * src_w + col] = plane[src_y * plane_width + src_x];
@@ -10509,8 +10566,11 @@ pub fn compress_custom_sampling(
     }
 
     // MCU dimensions in pixels
-    let mcu_w: usize = max_h as usize * 8;
-    let mcu_h: usize = max_v as usize * 8;
+    // A one-component scan is non-interleaved: its entropy MCU is always one
+    // data unit. Sampling factors remain in SOF for compatibility but do not
+    // enlarge the scan MCU grid.
+    let mcu_w: usize = if is_grayscale { 8 } else { max_h as usize * 8 };
+    let mcu_h: usize = if is_grayscale { 8 } else { max_v as usize * 8 };
     let mcus_x: usize = width.div_ceil(mcu_w);
     let mcus_y: usize = height.div_ceil(mcu_h);
 
@@ -10567,35 +10627,19 @@ pub fn compress_custom_sampling(
             let y0: usize = mcu_row * mcu_h;
 
             if is_grayscale {
-                // Grayscale: h_i x v_i blocks of Y
-                for bv in 0..y_v as usize {
-                    for bh in 0..y_h as usize {
-                        let bx: usize = x0 + bh * 8;
-                        let by: usize = y0 + bv * 8;
-                        if is_y_dummy(bx, by, y_wib, y_hib) {
-                            encode_dummy_block(
-                                &dc_luma_table,
-                                &ac_luma_table,
-                                &mut bit_writer,
-                                &mut prev_dc_y,
-                            );
-                        } else {
-                            encode_single_block(
-                                &y_plane,
-                                width,
-                                height,
-                                bx,
-                                by,
-                                &luma_divisors,
-                                &dc_luma_table,
-                                &ac_luma_table,
-                                &mut bit_writer,
-                                &mut prev_dc_y,
-                                fdct_quantize_fn,
-                            );
-                        }
-                    }
-                }
+                encode_single_block(
+                    &y_plane,
+                    width,
+                    height,
+                    x0,
+                    y0,
+                    &luma_divisors,
+                    &dc_luma_table,
+                    &ac_luma_table,
+                    &mut bit_writer,
+                    &mut prev_dc_y,
+                    fdct_quantize_fn,
+                );
             } else {
                 // Y blocks: y_h x y_v blocks per MCU (row-major order)
                 for bv in 0..y_v as usize {

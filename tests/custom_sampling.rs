@@ -193,6 +193,32 @@ fn custom_sampling_grayscale_single_factor() {
     assert_eq!(img.height, 16);
 }
 
+#[test]
+fn custom_sampling_grayscale_explicit_2x2_matches_c() {
+    let cjpeg: PathBuf = require_c_tool!("cjpeg");
+    let (width, height): (usize, usize) = (31, 29);
+    let pixels: Vec<u8> = (0..width * height)
+        .map(|index| {
+            let x = index % width;
+            let y = index / width;
+            ((x * 13 + y * 29 + x * y * 3) & 0xFF) as u8
+        })
+        .collect();
+    let rust_jpeg = Encoder::new(&pixels, width, height, PixelFormat::Grayscale)
+        .sampling_factors(vec![(2, 2)])
+        .quality(75)
+        .encode()
+        .expect("explicit grayscale sampling must encode as a non-interleaved scan");
+    let pgm: Vec<u8> = helpers::build_pgm(&pixels, width, height);
+    let c_jpeg = helpers::encode_with_c_cjpeg(
+        &cjpeg,
+        &pgm,
+        &["-quality", "75", "-sample", "2x2"],
+        "gray_2x2",
+    );
+    helpers::assert_bytes_identical(&rust_jpeg, &c_jpeg, "gray_2x2");
+}
+
 // ===========================================================================
 // C djpeg cross-validation helpers
 // ===========================================================================

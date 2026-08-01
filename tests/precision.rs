@@ -240,8 +240,8 @@ fn roundtrip_12bit_three_component() {
 fn verify_12bit_sof_precision() {
     let pixels: Vec<i16> = vec![2048i16; 64];
     let jpeg = compress_12bit(&pixels, 8, 8, 1, 90, Subsampling::S444).unwrap();
-    let sof_pos = jpeg.windows(2).position(|w| w == [0xFF, 0xC0]);
-    assert!(sof_pos.is_some(), "SOF0 marker not found");
+    let sof_pos = jpeg.windows(2).position(|w| w == [0xFF, 0xC1]);
+    assert!(sof_pos.is_some(), "SOF1 marker not found");
     assert_eq!(jpeg[sof_pos.unwrap() + 4], 12, "SOF precision should be 12");
 }
 

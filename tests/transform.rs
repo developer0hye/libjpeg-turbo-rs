@@ -5,8 +5,8 @@ use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use libjpeg_turbo_rs::{
-    compress, decompress, read_coefficients, transform, write_coefficients, PixelFormat,
-    Subsampling, TransformOp,
+    compress, decompress, read_coefficients, transform, write_coefficients, ColorSpace, Encoder,
+    PixelFormat, Subsampling, TransformOp,
 };
 
 /// Roundtrip: compress → read_coefficients → write_coefficients → decompress
@@ -234,6 +234,152 @@ fn transform_name(op: TransformOp) -> &'static str {
 // C jpegtran cross-validation test
 // ===========================================================================
 
+#[test]
+fn single_component_explicit_sampling_transform_matches_c() {
+    let cjpeg: PathBuf = require_c_tool!("cjpeg");
+    let jpegtran: PathBuf = require_c_tool!("jpegtran");
+    let djpeg: PathBuf = require_c_tool!("djpeg");
+    let (width, height): (usize, usize) = (32, 24);
+    let pixels: Vec<u8> = (0..width * height)
+        .map(|index| {
+            let x = index % width;
+            let y = index / width;
+            ((x * 13 + y * 29 + x * y * 3) & 0xFF) as u8
+        })
+        .collect();
+    let pgm_file: helpers::TempFile = helpers::TempFile::new("gray_2x2_transform_input.pgm");
+    let source_file: helpers::TempFile = helpers::TempFile::new("gray_2x2_transform.jpg");
+    let rust_file: helpers::TempFile = helpers::TempFile::new("gray_2x2_transform_rust.jpg");
+    let c_file: helpers::TempFile = helpers::TempFile::new("gray_2x2_transform_c.jpg");
+    helpers::write_pgm_file(pgm_file.path(), width, height, &pixels);
+    helpers::run_c_cjpeg(
+        &cjpeg,
+        &["-quality", "90", "-sample", "2x2", "-restart", "1b"],
+        pgm_file.path(),
+        source_file.path(),
+    );
+    let source: Vec<u8> = std::fs::read(source_file.path()).expect("read C grayscale JPEG");
+    let rust_transformed = transform(&source, TransformOp::HFlip)
+        .expect("Rust coefficient transform must support explicit grayscale sampling");
+    rust_file.write_bytes(&rust_transformed);
+    helpers::run_c_jpegtran(
+        &jpegtran,
+        &["-flip", "horizontal"],
+        source_file.path(),
+        c_file.path(),
+    );
+    let c_transformed: Vec<u8> = std::fs::read(c_file.path()).expect("read C grayscale transform");
+
+    let rust_pixels = helpers::decode_gray_with_c_djpeg(&djpeg, &rust_transformed, "gray_2x2_rust");
+    let c_pixels = helpers::decode_gray_with_c_djpeg(&djpeg, &c_transformed, "gray_2x2_c");
+    assert_eq!(
+        rust_pixels, c_pixels,
+        "Rust transform must match C jpegtran"
+    );
+}
+
+#[test]
+fn coefficient_transform_preserves_coexisting_jfif_and_adobe_markers() {
+    let jpegtran: PathBuf = require_c_tool!("jpegtran");
+    let djpeg: PathBuf = require_c_tool!("djpeg");
+    let (width, height): (usize, usize) = (32, 24);
+    let pixels: Vec<u8> = (0..width * height * 3)
+        .map(|index| ((index * 37 + index / (width * 3) * 11) & 0xFF) as u8)
+        .collect();
+    let source = Encoder::new(&pixels, width, height, PixelFormat::Rgb)
+        .subsampling(Subsampling::S420)
+        .density(1, 300, 200)
+        .write_adobe_marker(true)
+        .encode()
+        .expect("source JPEG with APP0 and APP14 must encode");
+    assert!(source.windows(5).any(|window| window == b"JFIF\0"));
+    assert!(source.windows(5).any(|window| window == b"Adobe"));
+
+    let rust_transformed = transform(&source, TransformOp::None)
+        .expect("Rust coefficient roundtrip must preserve marker classification");
+    let source_file: helpers::TempFile = helpers::TempFile::new("both_markers_source.jpg");
+    let c_file: helpers::TempFile = helpers::TempFile::new("both_markers_c.jpg");
+    source_file.write_bytes(&source);
+    helpers::run_c_jpegtran(
+        &jpegtran,
+        &["-copy", "all"],
+        source_file.path(),
+        c_file.path(),
+    );
+    let c_transformed: Vec<u8> =
+        std::fs::read(c_file.path()).expect("read C marker-preserving transform");
+
+    for (label, jpeg) in [
+        ("Rust", rust_transformed.as_slice()),
+        ("C", c_transformed.as_slice()),
+    ] {
+        assert!(
+            jpeg.windows(5).any(|window| window == b"JFIF\0"),
+            "{label} transform dropped JFIF APP0"
+        );
+        assert!(
+            jpeg.windows(5).any(|window| window == b"Adobe"),
+            "{label} transform dropped Adobe APP14"
+        );
+    }
+    assert_eq!(
+        helpers::decode_with_c_djpeg(&djpeg, &rust_transformed, "both_markers_rust"),
+        helpers::decode_with_c_djpeg(&djpeg, &c_transformed, "both_markers_c"),
+        "Rust marker-preserving transform must decode identically to C jpegtran"
+    );
+}
+
+#[test]
+fn coefficient_transform_preserves_markerless_rgb_classification_like_c() {
+    let jpegtran: PathBuf = require_c_tool!("jpegtran");
+    let djpeg: PathBuf = require_c_tool!("djpeg");
+    let (width, height): (usize, usize) = (19, 17);
+    let pixels: Vec<u8> = (0..width * height * 3)
+        .map(|index| ((index * 41 + index / (width * 3) * 17) & 0xFF) as u8)
+        .collect();
+    let source = Encoder::new(&pixels, width, height, PixelFormat::Rgb)
+        .colorspace(ColorSpace::Rgb)
+        .write_adobe_marker(false)
+        .quality(90)
+        .encode()
+        .expect("markerless direct-RGB source must encode");
+    assert!(!source.windows(5).any(|window| window == b"JFIF\0"));
+    assert!(!source.windows(5).any(|window| window == b"Adobe"));
+
+    let rust_transformed = transform(&source, TransformOp::None)
+        .expect("Rust coefficient roundtrip must preserve RGB classification");
+    let source_file: helpers::TempFile = helpers::TempFile::new("markerless_rgb_source.jpg");
+    let c_file: helpers::TempFile = helpers::TempFile::new("markerless_rgb_c.jpg");
+    source_file.write_bytes(&source);
+    helpers::run_c_jpegtran(
+        &jpegtran,
+        &["-copy", "all"],
+        source_file.path(),
+        c_file.path(),
+    );
+    let c_transformed: Vec<u8> =
+        std::fs::read(c_file.path()).expect("read C markerless-RGB transform");
+
+    for (label, jpeg) in [
+        ("Rust", rust_transformed.as_slice()),
+        ("C", c_transformed.as_slice()),
+    ] {
+        assert!(
+            !jpeg.windows(5).any(|window| window == b"JFIF\0"),
+            "{label} transform must not misclassify RGB coefficients as JFIF YCbCr"
+        );
+        assert!(
+            jpeg.windows(5).any(|window| window == b"Adobe"),
+            "{label} transform must emit Adobe transform 0 for RGB classification"
+        );
+    }
+    assert_eq!(
+        helpers::decode_with_c_djpeg(&djpeg, &rust_transformed, "markerless_rgb_rust"),
+        helpers::decode_with_c_djpeg(&djpeg, &c_transformed, "markerless_rgb_c"),
+        "Rust markerless-RGB transform must decode identically to C jpegtran"
+    );
+}
+
 /// Cross-validate all 8 Rust transform operations against C jpegtran by:
 /// 1. Transforming an MCU-aligned 4:4:4 JPEG with both Rust and C jpegtran
 /// 2. Decoding both outputs with C djpeg to get pixel data
@@ -383,14 +529,8 @@ fn c_jpegtran_transform_coeff_diff_zero() {
 /// in decode_progressive_coefficients's non-interleaved scan loop.
 #[test]
 fn transform_large_progressive_no_overflow() {
-    let path = "tests/corpus/fixtures/photo_3840x2160_420_prog.jpg";
-    let data = match std::fs::read(path) {
-        Ok(d) => d,
-        Err(_) => {
-            eprintln!("SKIP: {} not found", path);
-            return;
-        }
-    };
+    let path = "tests/fixtures/photo_3840x2160_420_prog.jpg";
+    let data = std::fs::read(path).unwrap_or_else(|e| panic!("required fixture {path}: {e}"));
 
     let ops = [
         TransformOp::HFlip,

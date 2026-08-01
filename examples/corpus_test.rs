@@ -365,7 +365,6 @@ fn required_expected_outcomes() -> BTreeSet<String> {
         "fixtures/real_world/zune_non_interleaved_444_64x64.jpg",
         "fixtures/real_world/zune_tiny_non_interleaved_444_16x16.jpg",
         "fixtures/real_world/zune_mjpeg_huffman_1280x720.jpg",
-        "fixtures/real_world/zune_grayscale_progressive_900x675.jpg",
     ] {
         for operation in TRANSFORMS {
             add(path, operation, "expected-reject");
@@ -722,17 +721,6 @@ fn apply_expected_reject(path: &Path, operation: &str, result: TestResult) -> Te
         {
             TestResult::ExpectedReject {
                 notes: "known MJPEG implicit-Huffman transform limitation".to_string(),
-            }
-        }
-        result
-            if known_transform_gap(
-                &["fixtures/real_world/zune_grayscale_progressive_900x675.jpg"],
-                &result,
-                "extraneous bytes before marker 0xd9",
-            ) =>
-        {
-            TestResult::ExpectedReject {
-                notes: "known progressive grayscale transform output gap".to_string(),
             }
         }
         other => other,
@@ -1581,6 +1569,23 @@ mod tests {
 
         assert!(matches!(known, TestResult::ExpectedReject { .. }));
         assert!(matches!(wrong_operation, TestResult::Crash { .. }));
+    }
+
+    #[test]
+    fn progressive_grayscale_transform_regressions_are_not_expected_rejects() {
+        let result = apply_expected_reject(
+            PathBuf::from(
+                "tests/corpus/fixtures/real_world/zune_grayscale_progressive_900x675.jpg",
+            )
+            .as_path(),
+            "transform_rotate90",
+            TestResult::Crash {
+                notes: "Rust transform error: corrupt data: extraneous bytes before marker 0xd9"
+                    .to_string(),
+            },
+        );
+
+        assert!(matches!(result, TestResult::Crash { .. }));
     }
 
     #[test]

@@ -64,6 +64,9 @@ pub struct JpegCoefficients {
     pub x_density: u16,
     /// JFIF Y density from source.
     pub y_density: u16,
+    /// Whether the source contained a JFIF APP0 marker. This is independent
+    /// of `adobe_transform`: legal streams can contain both APP0 and APP14.
+    pub saw_jfif_marker: bool,
     /// Adobe APP14 color-transform byte from the source JPEG, if an
     /// Adobe marker was present. `None` means no APP14 was seen.
     /// Re-emitting the same value on transcode preserves the original
@@ -82,6 +85,52 @@ impl JpegCoefficients {
         } else {
             self.data_precision
         }
+    }
+}
+
+fn has_rgb_component_ids(coeffs: &JpegCoefficients) -> bool {
+    coeffs.components.len() == 3
+        && coeffs
+            .components
+            .iter()
+            .map(|component| component.component_id)
+            .eq(*b"RGB")
+}
+
+fn uses_single_rgb_coding_table(coeffs: &JpegCoefficients) -> bool {
+    has_rgb_component_ids(coeffs)
+        && coeffs
+            .components
+            .iter()
+            .all(|component| component.quant_table_index == 0)
+}
+
+fn coding_table_for_component(coeffs: &JpegCoefficients, component_index: usize) -> usize {
+    if component_index == 0 || uses_single_rgb_coding_table(coeffs) {
+        0
+    } else {
+        1
+    }
+}
+
+fn write_coefficient_colorspace_marker(output: &mut Vec<u8>, coeffs: &JpegCoefficients) {
+    if coeffs.saw_jfif_marker
+        || (coeffs.adobe_transform.is_none() && !has_rgb_component_ids(coeffs))
+    {
+        marker_writer::write_app0_jfif_with_density(
+            output,
+            coeffs.density_unit,
+            coeffs.x_density,
+            coeffs.y_density,
+        );
+    }
+    if let Some(transform) = coeffs.adobe_transform {
+        marker_writer::write_app14_adobe(output, transform);
+    } else if has_rgb_component_ids(coeffs) {
+        // Markerless ASCII R/G/B streams are classified as RGB by libjpeg.
+        // jpegtran emits Adobe transform 0 when rewriting such coefficients;
+        // emitting JFIF here would instead make decoders treat them as YCbCr.
+        marker_writer::write_app14_adobe(output, 0);
     }
 }
 
@@ -251,6 +300,7 @@ pub fn read_coefficients(data: &[u8]) -> Result<JpegCoefficients> {
         density_unit,
         x_density: density.x,
         y_density: density.y,
+        saw_jfif_marker: metadata.saw_jfif_marker,
         adobe_transform: if metadata.saw_adobe_marker {
             Some(metadata.adobe_transform)
         } else {
@@ -266,6 +316,7 @@ pub fn read_coefficients(data: &[u8]) -> Result<JpegCoefficients> {
 pub fn write_coefficients(coeffs: &JpegCoefficients) -> Result<Vec<u8>> {
     let num_components = coeffs.components.len();
     let is_grayscale = num_components == 1;
+    let uses_secondary_table: bool = !is_grayscale && !uses_single_rgb_coding_table(coeffs);
 
     // Standard ITU-T T.81 Annex K Huffman tables only define DC
     // categories 0..=11; for `data_precision > 8` the source can produce
@@ -304,8 +355,10 @@ pub fn write_coefficients(coeffs: &JpegCoefficients) -> Result<Vec<u8>> {
         .map(|c| c.v_sampling as usize)
         .max()
         .unwrap_or(1);
-    let mcus_x = coeffs.components[0].blocks_x / coeffs.components[0].h_sampling as usize;
-    let mcus_y = coeffs.components[0].blocks_y / coeffs.components[0].v_sampling as usize;
+    let interleaved_mcus_x =
+        coeffs.components[0].blocks_x / coeffs.components[0].h_sampling as usize;
+    let interleaved_mcus_y =
+        coeffs.components[0].blocks_y / coeffs.components[0].v_sampling as usize;
 
     // Compute actual data block counts per component (not MCU-padded).
     // Blocks beyond these are "dummy" blocks: DC copied from last real block,
@@ -320,6 +373,11 @@ pub fn write_coefficients(coeffs: &JpegCoefficients) -> Result<Vec<u8>> {
         .iter()
         .map(|c| (coeffs.height as usize * c.v_sampling as usize).div_ceil(max_v * 8))
         .collect();
+    let (mcus_x, mcus_y) = if is_grayscale {
+        (data_blocks_x[0], data_blocks_y[0])
+    } else {
+        (interleaved_mcus_x, interleaved_mcus_y)
+    };
 
     // Entropy encode with optional restart markers
     let mut bit_writer = BitWriter::new(coeffs.width as usize * coeffs.height as usize);
@@ -343,21 +401,31 @@ pub fn write_coefficients(coeffs: &JpegCoefficients) -> Result<Vec<u8>> {
             }
 
             for (ci, comp) in coeffs.components.iter().enumerate() {
-                let dc_table = if ci == 0 {
+                let dc_table = if coding_table_for_component(coeffs, ci) == 0 {
                     &dc_luma_table
                 } else {
                     &dc_chroma_table
                 };
-                let ac_table = if ci == 0 {
+                let ac_table = if coding_table_for_component(coeffs, ci) == 0 {
                     &ac_luma_table
                 } else {
                     &ac_chroma_table
                 };
 
-                for v in 0..comp.v_sampling as usize {
-                    for h in 0..comp.h_sampling as usize {
-                        let bx = mcu_x * comp.h_sampling as usize + h;
-                        let by = mcu_y * comp.v_sampling as usize + v;
+                let h_blocks = if is_grayscale {
+                    1
+                } else {
+                    comp.h_sampling as usize
+                };
+                let v_blocks = if is_grayscale {
+                    1
+                } else {
+                    comp.v_sampling as usize
+                };
+                for v in 0..v_blocks {
+                    for h in 0..h_blocks {
+                        let bx = mcu_x * h_blocks + h;
+                        let by = mcu_y * v_blocks + v;
                         let is_dummy: bool = bx >= data_blocks_x[ci] || by >= data_blocks_y[ci];
 
                         if is_dummy {
@@ -395,12 +463,7 @@ pub fn write_coefficients(coeffs: &JpegCoefficients) -> Result<Vec<u8>> {
 
     marker_writer::write_soi(&mut output);
     // Preserve source JFIF density (matches C jpegtran behavior)
-    marker_writer::write_app0_jfif_with_density(
-        &mut output,
-        coeffs.density_unit,
-        coeffs.x_density,
-        coeffs.y_density,
-    );
+    write_coefficient_colorspace_marker(&mut output, coeffs);
 
     // Quantization tables
     for (i, qt) in coeffs.quant_tables.iter().enumerate() {
@@ -457,7 +520,7 @@ pub fn write_coefficients(coeffs: &JpegCoefficients) -> Result<Vec<u8>> {
         &tables::AC_LUMINANCE_BITS,
         &tables::AC_LUMINANCE_VALUES,
     );
-    if !is_grayscale {
+    if uses_secondary_table {
         marker_writer::write_dht(
             &mut output,
             0,
@@ -485,7 +548,7 @@ pub fn write_coefficients(coeffs: &JpegCoefficients) -> Result<Vec<u8>> {
         .iter()
         .enumerate()
         .map(|(i, c)| {
-            let tbl = if i == 0 { 0u8 } else { 1u8 };
+            let tbl = coding_table_for_component(coeffs, i) as u8;
             (c.component_id, tbl, tbl)
         })
         .collect();
@@ -1209,6 +1272,7 @@ pub fn write_coefficients_optimized(coeffs: &JpegCoefficients) -> Result<Vec<u8>
 
     let num_components: usize = coeffs.components.len();
     let is_grayscale: bool = num_components == 1;
+    let uses_secondary_table: bool = !is_grayscale && !uses_single_rgb_coding_table(coeffs);
 
     let opt_max_h: usize = coeffs
         .components
@@ -1222,8 +1286,10 @@ pub fn write_coefficients_optimized(coeffs: &JpegCoefficients) -> Result<Vec<u8>
         .map(|c| c.v_sampling as usize)
         .max()
         .unwrap_or(1);
-    let mcus_x: usize = coeffs.components[0].blocks_x / coeffs.components[0].h_sampling as usize;
-    let mcus_y: usize = coeffs.components[0].blocks_y / coeffs.components[0].v_sampling as usize;
+    let interleaved_mcus_x: usize =
+        coeffs.components[0].blocks_x / coeffs.components[0].h_sampling as usize;
+    let interleaved_mcus_y: usize =
+        coeffs.components[0].blocks_y / coeffs.components[0].v_sampling as usize;
 
     let opt_data_bx: Vec<usize> = coeffs
         .components
@@ -1235,6 +1301,11 @@ pub fn write_coefficients_optimized(coeffs: &JpegCoefficients) -> Result<Vec<u8>
         .iter()
         .map(|c| (coeffs.height as usize * c.v_sampling as usize).div_ceil(opt_max_v * 8))
         .collect();
+    let (mcus_x, mcus_y): (usize, usize) = if is_grayscale {
+        (opt_data_bx[0], opt_data_by[0])
+    } else {
+        (interleaved_mcus_x, interleaved_mcus_y)
+    };
 
     // === Pass 1: gather symbol frequencies ===
     let mut dc_luma_freq = [0u32; 257];
@@ -1257,21 +1328,31 @@ pub fn write_coefficients_optimized(coeffs: &JpegCoefficients) -> Result<Vec<u8>
             }
 
             for (ci, comp) in coeffs.components.iter().enumerate() {
-                let dc_freq: &mut [u32; 257] = if ci == 0 {
+                let dc_freq: &mut [u32; 257] = if coding_table_for_component(coeffs, ci) == 0 {
                     &mut dc_luma_freq
                 } else {
                     &mut dc_chroma_freq
                 };
-                let ac_freq: &mut [u32; 257] = if ci == 0 {
+                let ac_freq: &mut [u32; 257] = if coding_table_for_component(coeffs, ci) == 0 {
                     &mut ac_luma_freq
                 } else {
                     &mut ac_chroma_freq
                 };
 
-                for v in 0..comp.v_sampling as usize {
-                    for h in 0..comp.h_sampling as usize {
-                        let bx: usize = mcu_x * comp.h_sampling as usize + h;
-                        let by: usize = mcu_y * comp.v_sampling as usize + v;
+                let h_blocks: usize = if is_grayscale {
+                    1
+                } else {
+                    comp.h_sampling as usize
+                };
+                let v_blocks: usize = if is_grayscale {
+                    1
+                } else {
+                    comp.v_sampling as usize
+                };
+                for v in 0..v_blocks {
+                    for h in 0..h_blocks {
+                        let bx: usize = mcu_x * h_blocks + h;
+                        let by: usize = mcu_y * v_blocks + v;
                         let is_dummy: bool = bx >= opt_data_bx[ci] || by >= opt_data_by[ci];
 
                         let block: &[i16; 64] = if is_dummy {
@@ -1355,21 +1436,31 @@ pub fn write_coefficients_optimized(coeffs: &JpegCoefficients) -> Result<Vec<u8>
             }
 
             for (ci, comp) in coeffs.components.iter().enumerate() {
-                let dc_table = if ci == 0 {
+                let dc_table = if coding_table_for_component(coeffs, ci) == 0 {
                     &dc_luma_table
                 } else {
                     &dc_chroma_table
                 };
-                let ac_table = if ci == 0 {
+                let ac_table = if coding_table_for_component(coeffs, ci) == 0 {
                     &ac_luma_table
                 } else {
                     &ac_chroma_table
                 };
 
-                for v in 0..comp.v_sampling as usize {
-                    for h in 0..comp.h_sampling as usize {
-                        let bx: usize = mcu_x * comp.h_sampling as usize + h;
-                        let by: usize = mcu_y * comp.v_sampling as usize + v;
+                let h_blocks: usize = if is_grayscale {
+                    1
+                } else {
+                    comp.h_sampling as usize
+                };
+                let v_blocks: usize = if is_grayscale {
+                    1
+                } else {
+                    comp.v_sampling as usize
+                };
+                for v in 0..v_blocks {
+                    for h in 0..h_blocks {
+                        let bx: usize = mcu_x * h_blocks + h;
+                        let by: usize = mcu_y * v_blocks + v;
                         let is_dummy: bool = bx >= opt_data_bx[ci] || by >= opt_data_by[ci];
 
                         if is_dummy {
@@ -1406,12 +1497,7 @@ pub fn write_coefficients_optimized(coeffs: &JpegCoefficients) -> Result<Vec<u8>
     let mut output: Vec<u8> = Vec::with_capacity(bit_writer.data().len() + 1024);
 
     marker_writer::write_soi(&mut output);
-    marker_writer::write_app0_jfif_with_density(
-        &mut output,
-        coeffs.density_unit,
-        coeffs.x_density,
-        coeffs.y_density,
-    );
+    write_coefficient_colorspace_marker(&mut output, coeffs);
 
     // Quantization tables.
     for (i, qt) in coeffs.quant_tables.iter().enumerate() {
@@ -1455,7 +1541,7 @@ pub fn write_coefficients_optimized(coeffs: &JpegCoefficients) -> Result<Vec<u8>
     // Optimized Huffman tables.
     marker_writer::write_dht(&mut output, 0, 0, &dc_luma_bits, &dc_luma_values);
     marker_writer::write_dht(&mut output, 1, 0, &ac_luma_bits, &ac_luma_values);
-    if !is_grayscale {
+    if uses_secondary_table {
         marker_writer::write_dht(&mut output, 0, 1, &dc_chroma_bits, &dc_chroma_values);
         marker_writer::write_dht(&mut output, 1, 1, &ac_chroma_bits, &ac_chroma_values);
     }
@@ -1471,7 +1557,7 @@ pub fn write_coefficients_optimized(coeffs: &JpegCoefficients) -> Result<Vec<u8>
         .iter()
         .enumerate()
         .map(|(i, c)| {
-            let tbl: u8 = if i == 0 { 0u8 } else { 1u8 };
+            let tbl: u8 = coding_table_for_component(coeffs, i) as u8;
             (c.component_id, tbl, tbl)
         })
         .collect();
@@ -1501,10 +1587,11 @@ pub fn write_coefficients_progressive(
     restart_rows: Option<u16>,
 ) -> Result<Vec<u8>> {
     use crate::encode::huff_opt;
-    use crate::encode::progressive::simple_progression;
+    use crate::encode::progressive::{generic_progression, simple_progression};
 
     let num_components: usize = coeffs.components.len();
     let is_grayscale: bool = num_components == 1;
+    let uses_secondary_table: bool = !is_grayscale && !uses_single_rgb_coding_table(coeffs);
 
     let max_h: usize = coeffs
         .components
@@ -1518,8 +1605,10 @@ pub fn write_coefficients_progressive(
         .map(|c| c.v_sampling as usize)
         .max()
         .unwrap_or(1);
-    let mcus_x: usize = coeffs.components[0].blocks_x / coeffs.components[0].h_sampling as usize;
-    let mcus_y: usize = coeffs.components[0].blocks_y / coeffs.components[0].v_sampling as usize;
+    let interleaved_mcus_x: usize =
+        coeffs.components[0].blocks_x / coeffs.components[0].h_sampling as usize;
+    let interleaved_mcus_y: usize =
+        coeffs.components[0].blocks_y / coeffs.components[0].v_sampling as usize;
 
     // Per-component actual block counts for non-interleaved AC scans.
     // C libjpeg-turbo only encodes width_in_blocks × height_in_blocks data
@@ -1534,19 +1623,23 @@ pub fn write_coefficients_progressive(
         .iter()
         .map(|c| (coeffs.height as usize * c.v_sampling as usize).div_ceil(max_v * 8))
         .collect();
+    let (mcus_x, mcus_y): (usize, usize) = if is_grayscale {
+        (data_blocks_x[0], data_blocks_y[0])
+    } else {
+        (interleaved_mcus_x, interleaved_mcus_y)
+    };
 
-    let scans = simple_progression(num_components);
+    let scans = if uses_single_rgb_coding_table(coeffs) {
+        generic_progression(num_components)
+    } else {
+        simple_progression(num_components)
+    };
 
     // === Assemble output header ===
     let mut output: Vec<u8> = Vec::with_capacity(coeffs.width as usize * coeffs.height as usize);
 
     marker_writer::write_soi(&mut output);
-    marker_writer::write_app0_jfif_with_density(
-        &mut output,
-        coeffs.density_unit,
-        coeffs.x_density,
-        coeffs.y_density,
-    );
+    write_coefficient_colorspace_marker(&mut output, coeffs);
 
     for (i, qt) in coeffs.quant_tables.iter().enumerate() {
         marker_writer::write_dqt(&mut output, i as u8, qt);
@@ -1618,7 +1711,7 @@ pub fn write_coefficients_progressive(
             .component_indices
             .iter()
             .map(|&ci| {
-                let tbl: u8 = if ci == 0 { 0 } else { 1 };
+                let tbl: u8 = coding_table_for_component(coeffs, ci) as u8;
                 let dc_tbl: u8 = if is_dc_scan && is_first { tbl } else { 0 };
                 let ac_tbl: u8 = if is_dc_scan { 0 } else { tbl };
                 (coeffs.components[ci].component_id, dc_tbl, ac_tbl)
@@ -1647,15 +1740,25 @@ pub fn write_coefficients_progressive(
                     }
                     for (scan_ci, &ci) in scan.component_indices.iter().enumerate() {
                         let comp = &coeffs.components[ci];
-                        let freq: &mut [u32; 257] = if ci == 0 {
+                        let freq: &mut [u32; 257] = if coding_table_for_component(coeffs, ci) == 0 {
                             &mut dc_luma_freq
                         } else {
                             &mut dc_chroma_freq
                         };
-                        for v in 0..comp.v_sampling as usize {
-                            for h in 0..comp.h_sampling as usize {
-                                let bx: usize = mcu_x * comp.h_sampling as usize + h;
-                                let by: usize = mcu_y * comp.v_sampling as usize + v;
+                        let h_blocks: usize = if scan.component_indices.len() == 1 {
+                            1
+                        } else {
+                            comp.h_sampling as usize
+                        };
+                        let v_blocks: usize = if scan.component_indices.len() == 1 {
+                            1
+                        } else {
+                            comp.v_sampling as usize
+                        };
+                        for v in 0..v_blocks {
+                            for h in 0..h_blocks {
+                                let bx: usize = mcu_x * h_blocks + h;
+                                let by: usize = mcu_y * v_blocks + v;
                                 let is_dummy: bool =
                                     bx >= data_blocks_x[ci] || by >= data_blocks_y[ci];
                                 let dc: i16 = if is_dummy {
@@ -1691,7 +1794,7 @@ pub fn write_coefficients_progressive(
             let dc_luma_table: HuffTable = build_huff_table(&dc_luma_bits, &dc_luma_values);
             marker_writer::write_dht(&mut output, 0, 0, &dc_luma_bits, &dc_luma_values);
 
-            let dc_chroma_table: HuffTable = if !is_grayscale {
+            let dc_chroma_table: HuffTable = if uses_secondary_table {
                 let (bits, vals) = huff_opt::gen_optimal_table(&dc_chroma_freq);
                 marker_writer::write_dht(&mut output, 0, 1, &bits, &vals);
                 build_huff_table(&bits, &vals)
@@ -1733,15 +1836,25 @@ pub fn write_coefficients_progressive(
                     }
                     for (scan_ci, &ci) in scan.component_indices.iter().enumerate() {
                         let comp = &coeffs.components[ci];
-                        let dc_table: &HuffTable = if ci == 0 {
+                        let dc_table: &HuffTable = if coding_table_for_component(coeffs, ci) == 0 {
                             &dc_luma_table
                         } else {
                             &dc_chroma_table
                         };
-                        for v in 0..comp.v_sampling as usize {
-                            for h in 0..comp.h_sampling as usize {
-                                let bx: usize = mcu_x * comp.h_sampling as usize + h;
-                                let by: usize = mcu_y * comp.v_sampling as usize + v;
+                        let h_blocks: usize = if scan.component_indices.len() == 1 {
+                            1
+                        } else {
+                            comp.h_sampling as usize
+                        };
+                        let v_blocks: usize = if scan.component_indices.len() == 1 {
+                            1
+                        } else {
+                            comp.v_sampling as usize
+                        };
+                        for v in 0..v_blocks {
+                            for h in 0..h_blocks {
+                                let bx: usize = mcu_x * h_blocks + h;
+                                let by: usize = mcu_y * v_blocks + v;
                                 let is_dummy: bool =
                                     bx >= data_blocks_x[ci] || by >= data_blocks_y[ci];
                                 let dc: i16 = if is_dummy {
@@ -1797,10 +1910,20 @@ pub fn write_coefficients_progressive(
                     }
                     for &ci in &scan.component_indices {
                         let comp = &coeffs.components[ci];
-                        for v in 0..comp.v_sampling as usize {
-                            for h in 0..comp.h_sampling as usize {
-                                let bx: usize = mcu_x * comp.h_sampling as usize + h;
-                                let by: usize = mcu_y * comp.v_sampling as usize + v;
+                        let h_blocks: usize = if scan.component_indices.len() == 1 {
+                            1
+                        } else {
+                            comp.h_sampling as usize
+                        };
+                        let v_blocks: usize = if scan.component_indices.len() == 1 {
+                            1
+                        } else {
+                            comp.v_sampling as usize
+                        };
+                        for v in 0..v_blocks {
+                            for h in 0..h_blocks {
+                                let bx: usize = mcu_x * h_blocks + h;
+                                let by: usize = mcu_y * v_blocks + v;
                                 let is_dummy: bool =
                                     bx >= data_blocks_x[ci] || by >= data_blocks_y[ci];
                                 let dc_val: i16 = if is_dummy {
@@ -1944,7 +2067,7 @@ pub fn write_coefficients_progressive(
 
                 // Generate optimal table, write DHT + SOS.
                 let (ac_bits, ac_values) = huff_opt::gen_optimal_table(&ac_freq);
-                let table_id: u8 = if ci == 0 { 0 } else { 1 };
+                let table_id: u8 = coding_table_for_component(coeffs, ci) as u8;
                 marker_writer::write_dht(&mut output, 1, table_id, &ac_bits, &ac_values);
                 if scan_ri != saved_ri {
                     marker_writer::write_dri(&mut output, scan_ri);
@@ -2114,7 +2237,7 @@ pub fn write_coefficients_progressive(
 
                 // Generate optimal table, write DHT + SOS.
                 let (ac_bits, ac_values) = huff_opt::gen_optimal_table(&ac_freq);
-                let table_id: u8 = if ci == 0 { 0 } else { 1 };
+                let table_id: u8 = coding_table_for_component(coeffs, ci) as u8;
                 marker_writer::write_dht(&mut output, 1, table_id, &ac_bits, &ac_values);
                 if scan_ri != saved_ri {
                     marker_writer::write_dri(&mut output, scan_ri);
@@ -2198,7 +2321,11 @@ pub fn write_coefficients_arithmetic(coeffs: &JpegCoefficients) -> Result<Vec<u8
 
     let num_components: usize = coeffs.components.len();
     let is_grayscale: bool = num_components == 1;
-    let num_arith_tables: usize = if is_grayscale { 1 } else { 2 };
+    let num_arith_tables: usize = if is_grayscale || uses_single_rgb_coding_table(coeffs) {
+        1
+    } else {
+        2
+    };
 
     let max_h: usize = coeffs
         .components
@@ -2212,8 +2339,10 @@ pub fn write_coefficients_arithmetic(coeffs: &JpegCoefficients) -> Result<Vec<u8
         .map(|c| c.v_sampling as usize)
         .max()
         .unwrap_or(1);
-    let mcus_x: usize = coeffs.components[0].blocks_x / coeffs.components[0].h_sampling as usize;
-    let mcus_y: usize = coeffs.components[0].blocks_y / coeffs.components[0].v_sampling as usize;
+    let interleaved_mcus_x: usize =
+        coeffs.components[0].blocks_x / coeffs.components[0].h_sampling as usize;
+    let interleaved_mcus_y: usize =
+        coeffs.components[0].blocks_y / coeffs.components[0].v_sampling as usize;
 
     let data_blocks_x: Vec<usize> = coeffs
         .components
@@ -2225,6 +2354,11 @@ pub fn write_coefficients_arithmetic(coeffs: &JpegCoefficients) -> Result<Vec<u8
         .iter()
         .map(|c| (coeffs.height as usize * c.v_sampling as usize).div_ceil(max_v * 8))
         .collect();
+    let (mcus_x, mcus_y): (usize, usize) = if is_grayscale {
+        (data_blocks_x[0], data_blocks_y[0])
+    } else {
+        (interleaved_mcus_x, interleaved_mcus_y)
+    };
 
     let mut arith_enc: ArithEncoder =
         ArithEncoder::new(coeffs.width as usize * coeffs.height as usize);
@@ -2245,13 +2379,23 @@ pub fn write_coefficients_arithmetic(coeffs: &JpegCoefficients) -> Result<Vec<u8
                 prev_dc.iter_mut().for_each(|v| *v = 0);
             }
             for (ci, comp) in coeffs.components.iter().enumerate() {
-                let dc_tbl: usize = arithmetic_table_for_component(ci);
-                let ac_tbl: usize = arithmetic_table_for_component(ci);
+                let dc_tbl: usize = coding_table_for_component(coeffs, ci);
+                let ac_tbl: usize = coding_table_for_component(coeffs, ci);
 
-                for v in 0..comp.v_sampling as usize {
-                    for h in 0..comp.h_sampling as usize {
-                        let bx: usize = mcu_x * comp.h_sampling as usize + h;
-                        let by: usize = mcu_y * comp.v_sampling as usize + v;
+                let h_blocks: usize = if is_grayscale {
+                    1
+                } else {
+                    comp.h_sampling as usize
+                };
+                let v_blocks: usize = if is_grayscale {
+                    1
+                } else {
+                    comp.v_sampling as usize
+                };
+                for v in 0..v_blocks {
+                    for h in 0..h_blocks {
+                        let bx: usize = mcu_x * h_blocks + h;
+                        let by: usize = mcu_y * v_blocks + v;
 
                         let mut dummy = [0i16; 64];
                         let block: &[i16; 64] =
@@ -2278,12 +2422,7 @@ pub fn write_coefficients_arithmetic(coeffs: &JpegCoefficients) -> Result<Vec<u8
     let mut output: Vec<u8> = Vec::with_capacity(arith_enc.data().len() + 1024);
 
     marker_writer::write_soi(&mut output);
-    marker_writer::write_app0_jfif_with_density(
-        &mut output,
-        coeffs.density_unit,
-        coeffs.x_density,
-        coeffs.y_density,
-    );
+    write_coefficient_colorspace_marker(&mut output, coeffs);
 
     for (i, qt) in coeffs.quant_tables.iter().enumerate() {
         marker_writer::write_dqt(&mut output, i as u8, qt);
@@ -2328,7 +2467,7 @@ pub fn write_coefficients_arithmetic(coeffs: &JpegCoefficients) -> Result<Vec<u8
         .iter()
         .enumerate()
         .map(|(ci, c)| {
-            let tbl: u8 = arithmetic_table_for_component(ci) as u8;
+            let tbl: u8 = coding_table_for_component(coeffs, ci) as u8;
             (c.component_id, tbl, tbl)
         })
         .collect();
@@ -2358,9 +2497,10 @@ pub fn write_coefficients_progressive_arithmetic(
     restart_rows: Option<u16>,
 ) -> Result<Vec<u8>> {
     use crate::encode::arithmetic::ArithEncoder;
-    use crate::encode::progressive::simple_progression;
+    use crate::encode::progressive::{generic_progression, simple_progression};
 
     let num_components: usize = coeffs.components.len();
+    let is_grayscale: bool = num_components == 1;
 
     let max_h: usize = coeffs
         .components
@@ -2374,8 +2514,10 @@ pub fn write_coefficients_progressive_arithmetic(
         .map(|c| c.v_sampling as usize)
         .max()
         .unwrap_or(1);
-    let mcus_x: usize = coeffs.components[0].blocks_x / coeffs.components[0].h_sampling as usize;
-    let mcus_y: usize = coeffs.components[0].blocks_y / coeffs.components[0].v_sampling as usize;
+    let interleaved_mcus_x: usize =
+        coeffs.components[0].blocks_x / coeffs.components[0].h_sampling as usize;
+    let interleaved_mcus_y: usize =
+        coeffs.components[0].blocks_y / coeffs.components[0].v_sampling as usize;
 
     let data_blocks_x: Vec<usize> = coeffs
         .components
@@ -2387,20 +2529,24 @@ pub fn write_coefficients_progressive_arithmetic(
         .iter()
         .map(|c| (coeffs.height as usize * c.v_sampling as usize).div_ceil(max_v * 8))
         .collect();
+    let (mcus_x, mcus_y): (usize, usize) = if is_grayscale {
+        (data_blocks_x[0], data_blocks_y[0])
+    } else {
+        (interleaved_mcus_x, interleaved_mcus_y)
+    };
 
-    let scans = simple_progression(num_components);
+    let scans = if uses_single_rgb_coding_table(coeffs) {
+        generic_progression(num_components)
+    } else {
+        simple_progression(num_components)
+    };
     let dc_params = [(0u8, 1u8); crate::decode::arithmetic::NUM_ARITH_TBLS];
     let ac_params = [5u8; crate::decode::arithmetic::NUM_ARITH_TBLS];
 
     let mut output: Vec<u8> = Vec::with_capacity(coeffs.width as usize * coeffs.height as usize);
 
     marker_writer::write_soi(&mut output);
-    marker_writer::write_app0_jfif_with_density(
-        &mut output,
-        coeffs.density_unit,
-        coeffs.x_density,
-        coeffs.y_density,
-    );
+    write_coefficient_colorspace_marker(&mut output, coeffs);
 
     for (i, qt) in coeffs.quant_tables.iter().enumerate() {
         marker_writer::write_dqt(&mut output, i as u8, qt);
@@ -2467,7 +2613,7 @@ pub fn write_coefficients_progressive_arithmetic(
             .component_indices
             .iter()
             .map(|&ci| {
-                let tbl: u8 = arithmetic_table_for_component(ci) as u8;
+                let tbl: u8 = coding_table_for_component(coeffs, ci) as u8;
                 let dc_tbl: u8 = if is_dc_scan && is_first { tbl } else { 0 };
                 let ac_tbl: u8 = if scan.se > 0 { tbl } else { 0 };
                 (coeffs.components[ci].component_id, dc_tbl, ac_tbl)
@@ -2478,12 +2624,12 @@ pub fn write_coefficients_progressive_arithmetic(
         let mut ac_in_use = [false; crate::decode::arithmetic::NUM_ARITH_TBLS];
         if is_dc_scan && is_first {
             for &ci in &scan.component_indices {
-                dc_in_use[arithmetic_table_for_component(ci)] = true;
+                dc_in_use[coding_table_for_component(coeffs, ci)] = true;
             }
         }
         if scan.se > 0 {
             for &ci in &scan.component_indices {
-                ac_in_use[arithmetic_table_for_component(ci)] = true;
+                ac_in_use[coding_table_for_component(coeffs, ci)] = true;
             }
         }
 
@@ -2531,12 +2677,22 @@ pub fn write_coefficients_progressive_arithmetic(
                     }
                     for &ci in &scan.component_indices {
                         let comp = &coeffs.components[ci];
-                        let dc_tbl: usize = arithmetic_table_for_component(ci);
+                        let dc_tbl: usize = coding_table_for_component(coeffs, ci);
 
-                        for v in 0..comp.v_sampling as usize {
-                            for h in 0..comp.h_sampling as usize {
-                                let bx: usize = mcu_x * comp.h_sampling as usize + h;
-                                let by: usize = mcu_y * comp.v_sampling as usize + v;
+                        let h_blocks: usize = if scan.component_indices.len() == 1 {
+                            1
+                        } else {
+                            comp.h_sampling as usize
+                        };
+                        let v_blocks: usize = if scan.component_indices.len() == 1 {
+                            1
+                        } else {
+                            comp.v_sampling as usize
+                        };
+                        for v in 0..v_blocks {
+                            for h in 0..h_blocks {
+                                let bx: usize = mcu_x * h_blocks + h;
+                                let by: usize = mcu_y * v_blocks + v;
 
                                 let mut dummy = [0i16; 64];
                                 let block: &[i16; 64] =
@@ -2573,10 +2729,20 @@ pub fn write_coefficients_progressive_arithmetic(
                     for &ci in &scan.component_indices {
                         let comp = &coeffs.components[ci];
 
-                        for v in 0..comp.v_sampling as usize {
-                            for h in 0..comp.h_sampling as usize {
-                                let bx: usize = mcu_x * comp.h_sampling as usize + h;
-                                let by: usize = mcu_y * comp.v_sampling as usize + v;
+                        let h_blocks: usize = if scan.component_indices.len() == 1 {
+                            1
+                        } else {
+                            comp.h_sampling as usize
+                        };
+                        let v_blocks: usize = if scan.component_indices.len() == 1 {
+                            1
+                        } else {
+                            comp.v_sampling as usize
+                        };
+                        for v in 0..v_blocks {
+                            for h in 0..h_blocks {
+                                let bx: usize = mcu_x * h_blocks + h;
+                                let by: usize = mcu_y * v_blocks + v;
 
                                 let mut dummy = [0i16; 64];
                                 let block: &[i16; 64] =
@@ -2602,7 +2768,7 @@ pub fn write_coefficients_progressive_arithmetic(
         } else if is_first {
             let ci: usize = scan.component_indices[0];
             let comp = &coeffs.components[ci];
-            let ac_tbl: usize = arithmetic_table_for_component(ci);
+            let ac_tbl: usize = coding_table_for_component(coeffs, ci);
             let wib: usize = data_blocks_x[ci].min(comp.blocks_x);
             let hib: usize = data_blocks_y[ci].min(comp.blocks_y);
 
@@ -2625,7 +2791,7 @@ pub fn write_coefficients_progressive_arithmetic(
         } else {
             let ci: usize = scan.component_indices[0];
             let comp = &coeffs.components[ci];
-            let ac_tbl: usize = arithmetic_table_for_component(ci);
+            let ac_tbl: usize = coding_table_for_component(coeffs, ci);
             let wib: usize = data_blocks_x[ci].min(comp.blocks_x);
             let hib: usize = data_blocks_y[ci].min(comp.blocks_y);
 
@@ -2651,14 +2817,6 @@ pub fn write_coefficients_progressive_arithmetic(
 
     marker_writer::write_eoi(&mut output);
     Ok(output)
-}
-
-fn arithmetic_table_for_component(component_index: usize) -> usize {
-    if component_index == 0 {
-        0
-    } else {
-        1
-    }
 }
 
 /// Transpose a quantization table (8x8 matrix) in-place.
@@ -2706,6 +2864,63 @@ fn decode_baseline_coefficients(
 
     let frame = &metadata.frame;
     let scan = &metadata.scan;
+
+    // A scan containing the sole frame component is non-interleaved: one
+    // entropy-coded data unit is one block, regardless of the H/V sampling
+    // values retained in the SOF. Decode the actual component block grid so
+    // restart boundaries and partial edge MCUs match jpeg_read_coefficients().
+    if frame.components.len() == 1 {
+        let scan_info = metadata.scans.first().ok_or_else(|| {
+            JpegError::CorruptData("single-component JPEG has no scan data".to_string())
+        })?;
+        let mcu_plan = entropy::resolve_mcu_plan(
+            frame,
+            &scan_info.header,
+            &scan_info.dc_huffman_tables,
+            &scan_info.ac_huffman_tables,
+        )?;
+        if mcu_plan.len() != 1 {
+            return Err(JpegError::CorruptData(format!(
+                "single-component scan has {} entropy plans",
+                mcu_plan.len()
+            )));
+        }
+
+        let comp = &frame.components[0];
+        let max_h = comp.horizontal_sampling as usize;
+        let max_v = comp.vertical_sampling as usize;
+        let blocks_x = (frame.width as usize * max_h).div_ceil(max_h * 8);
+        let blocks_y = (frame.height as usize * max_v).div_ceil(max_v * 8);
+        let stride = comp_data[0].blocks_x;
+        let plan = &mcu_plan[0];
+        let entropy_data = &data[scan_info.data_offset..];
+        let mut bit_reader = BitReader::new(entropy_data);
+        let mut mcu_decoder = entropy::McuDecoder::new(1);
+        let mut coeffs = [0i16; 64];
+        let mut mcu_count: u32 = 0;
+
+        for by in 0..blocks_y {
+            for bx in 0..blocks_x {
+                if scan_info.restart_interval > 0
+                    && mcu_count > 0
+                    && mcu_count.is_multiple_of(scan_info.restart_interval as u32)
+                {
+                    bit_reader.reset();
+                    mcu_decoder.reset();
+                }
+                mcu_decoder.decode_block(
+                    &mut bit_reader,
+                    plan.comp_idx,
+                    plan.dc_table,
+                    plan.ac_table,
+                    &mut coeffs,
+                )?;
+                comp_data[0].blocks[by * stride + bx] = coeffs;
+                mcu_count += 1;
+            }
+        }
+        return Ok(());
+    }
 
     let mcu_plan = entropy::resolve_mcu_plan(
         frame,
@@ -2818,8 +3033,38 @@ fn decode_arithmetic_coefficients(
         .collect();
     let mut coeffs: [i16; 64];
 
+    let restart_interval = metadata.restart_interval as u32;
+    let mut restarts_to_go = restart_interval;
+
+    if frame.components.len() == 1 && scan_comps.len() == 1 {
+        let (comp_idx, dc_tbl, ac_tbl) = scan_comps[0];
+        let blocks_x = (frame.width as usize).div_ceil(8);
+        let blocks_y = (frame.height as usize).div_ceil(8);
+        let stride = comp_data[comp_idx].blocks_x;
+        for by in 0..blocks_y {
+            for bx in 0..blocks_x {
+                if restart_interval > 0 && restarts_to_go == 0 {
+                    arith.process_restart();
+                    restarts_to_go = restart_interval;
+                }
+                coeffs = [0i16; 64];
+                arith.decode_dc_sequential(&mut coeffs, comp_idx, dc_tbl)?;
+                arith.decode_ac_sequential(&mut coeffs, ac_tbl)?;
+                comp_data[comp_idx].blocks[by * stride + bx] = coeffs;
+                if restart_interval > 0 {
+                    restarts_to_go -= 1;
+                }
+            }
+        }
+        return Ok(());
+    }
+
     for mcu_y in 0..mcus_y {
         for mcu_x in 0..mcus_x {
+            if restart_interval > 0 && restarts_to_go == 0 {
+                arith.process_restart();
+                restarts_to_go = restart_interval;
+            }
             for &(comp_idx, dc_tbl, ac_tbl) in &scan_comps {
                 let (h_blocks, v_blocks, blocks_x) = layouts[comp_idx];
 
@@ -2835,6 +3080,9 @@ fn decode_arithmetic_coefficients(
                         comp_data[comp_idx].blocks[block_idx] = coeffs;
                     }
                 }
+            }
+            if restart_interval > 0 {
+                restarts_to_go -= 1;
             }
         }
     }

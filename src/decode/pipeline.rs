@@ -2522,6 +2522,62 @@ impl<'a> Decoder<'a> {
         let restart_interval: u32 = self.metadata.restart_interval as u32;
         let mut restarts_to_go: u32 = restart_interval;
 
+        // A non-interleaved scan has one data unit per MCU, even when its
+        // sole frame component advertises sampling factors greater than 1x1.
+        // In that case the scan grid is the component's actual block grid;
+        // using the interleaved MCU grid would decode HxV blocks per restart
+        // interval and desynchronize the arithmetic coder.
+        if frame.components.len() == 1 && scan_comps.len() == 1 {
+            let (comp_idx, dc_tbl, ac_tbl) = scan_comps[0];
+            let layout = &comp_layouts[comp_idx];
+            let comp = &frame.components[comp_idx];
+            let max_h = frame
+                .components
+                .iter()
+                .map(|component| component.horizontal_sampling as usize)
+                .max()
+                .unwrap_or(1);
+            let max_v = frame
+                .components
+                .iter()
+                .map(|component| component.vertical_sampling as usize)
+                .max()
+                .unwrap_or(1);
+            let blocks_x = ((frame.width as usize * comp.horizontal_sampling as usize)
+                .div_ceil(max_h))
+            .div_ceil(8);
+            let blocks_y = ((frame.height as usize * comp.vertical_sampling as usize)
+                .div_ceil(max_v))
+            .div_ceil(8);
+            let qt_values = &quant_tables[comp_idx].values;
+
+            for by in 0..blocks_y {
+                for bx in 0..blocks_x {
+                    if restart_interval > 0 && restarts_to_go == 0 {
+                        arith.process_restart();
+                        restarts_to_go = restart_interval;
+                    }
+
+                    coeffs = [0i16; 64];
+                    arith.decode_dc_sequential(&mut coeffs, comp_idx, dc_tbl)?;
+                    arith.decode_ac_sequential(&mut coeffs, ac_tbl)?;
+
+                    let bs = layout.block_size;
+                    let plane = &mut component_planes[comp_idx];
+                    unsafe {
+                        let out_ptr = plane.as_mut_ptr().add(by * bs * layout.comp_w + bx * bs);
+                        self.idct_scaled_strided(&coeffs, qt_values, out_ptr, layout.comp_w, bs);
+                    }
+
+                    if restart_interval > 0 {
+                        restarts_to_go -= 1;
+                    }
+                }
+            }
+
+            return Ok((component_planes, Vec::new()));
+        }
+
         for mcu_y in 0..mcus_y {
             for mcu_x in 0..mcus_x {
                 if restart_interval > 0 && restarts_to_go == 0 {
@@ -4030,6 +4086,31 @@ impl<'a> Decoder<'a> {
                     PixelFormat::Rgb
                 })
                 .bytes_per_pixel();
+            let direct_rgb_expansion_planes: usize =
+                if nc == 3 && self.detect_color_space() == ColorSpace::Rgb {
+                    let max_h = frame
+                        .components
+                        .iter()
+                        .map(|component| component.horizontal_sampling)
+                        .max()
+                        .unwrap_or(1);
+                    let max_v = frame
+                        .components
+                        .iter()
+                        .map(|component| component.vertical_sampling)
+                        .max()
+                        .unwrap_or(1);
+                    frame
+                        .components
+                        .iter()
+                        .filter(|component| {
+                            component.horizontal_sampling != max_h
+                                || component.vertical_sampling != max_v
+                        })
+                        .count()
+                } else {
+                    0
+                };
             // Progressive adds one [i16; 64] per 8x8 block per component
             // (~2 B/pixel/component) plus the ac_max_k byte per block —
             // without this term the ceiling under-enforced by ~1.5x on
@@ -4039,7 +4120,9 @@ impl<'a> Decoder<'a> {
             } else {
                 0
             };
-            let total_estimated: u64 = total_pixels * (out_bpp as u64 + nc as u64) + coeff_bytes;
+            let total_estimated: u64 = total_pixels
+                * (out_bpp as u64 + nc as u64 + direct_rgb_expansion_planes as u64)
+                + coeff_bytes;
             if total_estimated > max_mem {
                 return Err(JpegError::LimitExceeded {
                     what: "estimated decode memory",
@@ -4614,6 +4697,9 @@ impl<'a> Decoder<'a> {
             } else {
                 (None, None)
             };
+        // Preserve the uncropped scaled width for filters that need context
+        // outside the requested crop (notably fancy direct-RGB upsampling).
+        let uncropped_out_width: usize = out_width;
         // Apply horizontal crop to out_width so all downstream paths use it.
         let out_width: usize = if let Some(cw) = scaled_crop_w {
             let cx: usize = scaled_crop_x.unwrap_or(0).min(out_width);
@@ -4870,51 +4956,181 @@ impl<'a> Decoder<'a> {
             // For RGB-colorspace JPEGs (e.g., cjpeg -rgb with Adobe APP14
             // transform=0), component planes store raw R,G,B — no YCbCr→RGB
             // conversion needed.  Interleave planes directly.
-            if jpeg_color_space == ColorSpace::Rgb && out_format == PixelFormat::Rgb {
-                let r_plane: &[u8] = &component_planes[0];
-                let g_plane: &[u8] = &component_planes[1];
-                let b_plane: &[u8] = &component_planes[2];
-                let r_stride: usize =
-                    mcus_x * frame.components[0].horizontal_sampling as usize * comp_block_sizes[0];
-                let g_stride: usize =
-                    mcus_x * frame.components[1].horizontal_sampling as usize * comp_block_sizes[1];
-                let b_stride: usize =
-                    mcus_x * frame.components[2].horizontal_sampling as usize * comp_block_sizes[2];
-
-                // For a well-formed JPEG every RGB plane has at least
-                // `y*stride + out_width` bytes past each row's x-offset.
-                // Malformed scan tables with inconsistent sampling can
-                // leave planes short — reject rather than OOB-panicking
-                // inside the interleave loop.
-                if out_height > 0 {
-                    let last_y = out_height - 1;
-                    let min_r = last_y * r_stride + comp_x_offsets[0] + out_width;
-                    let min_g = last_y * g_stride + comp_x_offsets[1] + out_width;
-                    let min_b = last_y * b_stride + comp_x_offsets[2] + out_width;
-                    if r_plane.len() < min_r || g_plane.len() < min_g || b_plane.len() < min_b {
+            if jpeg_color_space == ColorSpace::Rgb {
+                if out_format == PixelFormat::Cmyk {
+                    return Err(JpegError::Unsupported(
+                        "cannot convert direct-RGB JPEG to CMYK".to_string(),
+                    ));
+                }
+                // Direct-RGB JPEGs can still use unequal component sampling
+                // (`cjpeg -rgb -sample HxV`).  Upsample the lower-resolution
+                // component planes before interleaving them; treating G/B as
+                // full-size rows either truncates the planes or reads across
+                // row boundaries for every non-1x1 sampling mode.
+                let mut rgb_full: [Vec<u8>; 3] = core::array::from_fn(|_| Vec::new());
+                let mut rgb_strides: [usize; 3] = [0; 3];
+                for ci in 0..3 {
+                    let comp = &frame.components[ci];
+                    let comp_w = mcus_x * comp.horizontal_sampling as usize * comp_block_sizes[ci];
+                    let comp_h = mcus_y * comp.vertical_sampling as usize * comp_block_sizes[ci];
+                    if comp_w == 0 || comp_h == 0 {
                         return Err(JpegError::CorruptData(format!(
-                            "RGB component plane too short: r={}/{} g={}/{} b={}/{}",
-                            r_plane.len(),
-                            min_r,
-                            g_plane.len(),
-                            min_g,
-                            b_plane.len(),
-                            min_b
+                            "zero RGB component plane dimensions for component {ci}"
                         )));
+                    }
+                    let h_factor = full_width / comp_w;
+                    let v_factor = full_height / comp_h;
+                    if h_factor == 0 || v_factor == 0 {
+                        return Err(JpegError::CorruptData(format!(
+                            "RGB upsample factor zero for component {ci}: {h_factor}x{v_factor}"
+                        )));
+                    }
+
+                    if h_factor == 1 && v_factor == 1 {
+                        // The decoded component plane already has the required
+                        // resolution and stride. Borrow it directly below;
+                        // allocating and copying another full-size plane would
+                        // add three bytes per pixel for ordinary S444 RGB.
+                        rgb_strides[ci] = comp_w;
+                        continue;
+                    }
+
+                    let actual_w = uncropped_out_width.div_ceil(h_factor);
+                    let actual_h = out_height.div_ceil(v_factor);
+                    if actual_h > comp_h || actual_w > comp_w {
+                        return Err(JpegError::CorruptData(format!(
+                            "RGB component {ci} active area exceeds its plane: actual={actual_w}x{actual_h}, plane={comp_w}x{comp_h}"
+                        )));
+                    }
+                    rgb_full[ci] = vec![0u8; full_width * full_height];
+                    rgb_strides[ci] = full_width;
+                    // Repack away right-edge MCU padding, but retain the full
+                    // horizontal image. Fancy filters need samples on both
+                    // sides of a crop boundary to match jpeg_crop_scanline.
+                    let mut active = Vec::with_capacity(actual_w * actual_h);
+                    for row in 0..actual_h {
+                        let start = row * comp_w;
+                        active.extend_from_slice(&component_planes[ci][start..start + actual_w]);
+                    }
+
+                    let use_box_filter =
+                        self.fast_upsample || (actual_w <= 2 && h_factor >= 2) || block_size == 1;
+                    if use_box_filter {
+                        upsample_generic_nearest(
+                            &active,
+                            actual_w,
+                            actual_h,
+                            &mut rgb_full[ci],
+                            full_width,
+                            h_factor,
+                            v_factor,
+                        );
+                    } else if h_factor == 2 && v_factor == 1 {
+                        for row in 0..actual_h {
+                            self.fancy_upsample_h2v1(
+                                &active[row * actual_w..],
+                                actual_w,
+                                &mut rgb_full[ci][row * full_width..],
+                            );
+                        }
+                    } else if h_factor == 2 && v_factor == 2 {
+                        fancy_h2v2_strided_dispatch(
+                            &active,
+                            actual_w,
+                            actual_w,
+                            actual_h,
+                            &mut rgb_full[ci],
+                            full_width,
+                        );
+                    } else if h_factor == 1 && v_factor == 2 {
+                        self.fancy_h1v2(&active, actual_w, actual_h, &mut rgb_full[ci], full_width);
+                    } else {
+                        upsample_generic_nearest(
+                            &active,
+                            actual_w,
+                            actual_h,
+                            &mut rgb_full[ci],
+                            full_width,
+                            h_factor,
+                            v_factor,
+                        );
                     }
                 }
 
-                let data_size: usize = out_width * out_height * 3;
+                let bytes_per_pixel: usize = out_format.bytes_per_pixel();
+                let data_size: usize = out_width * out_height * bytes_per_pixel;
                 let mut data = take_out_buf(sink, data_size)?;
+                let output_x_offset: usize = scaled_crop_x.unwrap_or(0);
                 for y in 0..out_height {
-                    let r_row: &[u8] = &r_plane[y * r_stride + comp_x_offsets[0]..];
-                    let g_row: &[u8] = &g_plane[y * g_stride + comp_x_offsets[1]..];
-                    let b_row: &[u8] = &b_plane[y * b_stride + comp_x_offsets[2]..];
-                    let out_row: &mut [u8] = &mut data[y * out_width * 3..][..out_width * 3];
+                    let r_plane: &[u8] = if rgb_full[0].is_empty() {
+                        &component_planes[0]
+                    } else {
+                        &rgb_full[0]
+                    };
+                    let g_plane: &[u8] = if rgb_full[1].is_empty() {
+                        &component_planes[1]
+                    } else {
+                        &rgb_full[1]
+                    };
+                    let b_plane: &[u8] = if rgb_full[2].is_empty() {
+                        &component_planes[2]
+                    } else {
+                        &rgb_full[2]
+                    };
+                    let r_row: &[u8] = &r_plane[y * rgb_strides[0]..];
+                    let g_row: &[u8] = &g_plane[y * rgb_strides[1]..];
+                    let b_row: &[u8] = &b_plane[y * rgb_strides[2]..];
+                    let out_row: &mut [u8] =
+                        &mut data[y * out_width * bytes_per_pixel..][..out_width * bytes_per_pixel];
                     for x in 0..out_width {
-                        out_row[x * 3] = r_row[x];
-                        out_row[x * 3 + 1] = g_row[x];
-                        out_row[x * 3 + 2] = b_row[x];
+                        let source_x: usize = output_x_offset + x;
+                        let (r, g, b): (u8, u8, u8) =
+                            (r_row[source_x], g_row[source_x], b_row[source_x]);
+                        match out_format {
+                            PixelFormat::Rgb => {
+                                out_row[x * 3] = r;
+                                out_row[x * 3 + 1] = g;
+                                out_row[x * 3 + 2] = b;
+                            }
+                            PixelFormat::Bgr => {
+                                out_row[x * 3] = b;
+                                out_row[x * 3 + 1] = g;
+                                out_row[x * 3 + 2] = r;
+                            }
+                            PixelFormat::Rgba | PixelFormat::Rgbx => {
+                                out_row[x * 4] = r;
+                                out_row[x * 4 + 1] = g;
+                                out_row[x * 4 + 2] = b;
+                                out_row[x * 4 + 3] = 255;
+                            }
+                            PixelFormat::Bgra | PixelFormat::Bgrx => {
+                                out_row[x * 4] = b;
+                                out_row[x * 4 + 1] = g;
+                                out_row[x * 4 + 2] = r;
+                                out_row[x * 4 + 3] = 255;
+                            }
+                            PixelFormat::Xrgb | PixelFormat::Argb => {
+                                out_row[x * 4] = 255;
+                                out_row[x * 4 + 1] = r;
+                                out_row[x * 4 + 2] = g;
+                                out_row[x * 4 + 3] = b;
+                            }
+                            PixelFormat::Xbgr | PixelFormat::Abgr => {
+                                out_row[x * 4] = 255;
+                                out_row[x * 4 + 1] = b;
+                                out_row[x * 4 + 2] = g;
+                                out_row[x * 4 + 3] = r;
+                            }
+                            PixelFormat::Rgb565 => {
+                                let packed: u16 = ((r as u16 >> 3) << 11)
+                                    | ((g as u16 >> 2) << 5)
+                                    | (b as u16 >> 3);
+                                let bytes: [u8; 2] = packed.to_ne_bytes();
+                                out_row[x * 2] = bytes[0];
+                                out_row[x * 2 + 1] = bytes[1];
+                            }
+                            PixelFormat::Grayscale | PixelFormat::Cmyk => unreachable!(),
+                        }
                     }
                 }
 
@@ -5888,10 +6104,24 @@ impl<'a> Decoder<'a> {
         match num_components {
             1 => ColorSpace::Grayscale,
             3 => {
-                if self.metadata.saw_adobe_marker && self.metadata.adobe_transform == 0 {
-                    ColorSpace::Rgb
-                } else {
+                if self.metadata.saw_jfif_marker {
+                    // JFIF takes precedence over Adobe and component IDs in
+                    // libjpeg-turbo: a three-component JFIF stream is YCbCr.
                     ColorSpace::YCbCr
+                } else if self.metadata.saw_adobe_marker {
+                    if self.metadata.adobe_transform == 0 {
+                        ColorSpace::Rgb
+                    } else {
+                        ColorSpace::YCbCr
+                    }
+                } else {
+                    let components = &self.metadata.frame.components;
+                    let ids = [components[0].id, components[1].id, components[2].id];
+                    if ids == *b"RGB" || self.metadata.frame.is_lossless {
+                        ColorSpace::Rgb
+                    } else {
+                        ColorSpace::YCbCr
+                    }
                 }
             }
             4 => {
