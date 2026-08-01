@@ -5,6 +5,9 @@
 //! `dlopen`, then decodes the result via the decode-side entry points
 //! and cross-checks pixels.
 
+#[path = "../../../tests/helpers/mod.rs"]
+mod helpers;
+
 use std::ffi::{c_int, c_uint, c_void};
 use std::mem::MaybeUninit;
 use std::os::raw::c_ulong;
@@ -62,6 +65,162 @@ fn cdylib_path() -> PathBuf {
         }
     }
     panic!("could not locate cdylib near {}", exe.display());
+}
+
+#[derive(Clone, Copy)]
+struct ClassicEncodeCase {
+    label: &'static str,
+    progressive: bool,
+    arithmetic: bool,
+    optimize: bool,
+    lossless: bool,
+    smoothing: c_int,
+    restart_blocks: c_uint,
+    restart_rows: c_int,
+    cjpeg_args: &'static [&'static str],
+    expect_byte_exact: bool,
+}
+
+fn classic_scanline_encode(
+    lib: &libloading::Library,
+    pixels: &[u8],
+    width: usize,
+    height: usize,
+    case: ClassicEncodeCase,
+) -> Vec<u8> {
+    unsafe {
+        const CINFO_BYTES: usize = 4096;
+        const ERR_BYTES: usize = 512;
+        let mut cinfo: MaybeUninit<[u8; CINFO_BYTES]> = MaybeUninit::zeroed();
+        let cinfo_ptr: *mut c_void = cinfo.as_mut_ptr() as *mut c_void;
+        let mut err: MaybeUninit<[u8; ERR_BYTES]> = MaybeUninit::zeroed();
+        let err_ptr: *mut c_void = err.as_mut_ptr() as *mut c_void;
+
+        let jpeg_std_error: libloading::Symbol<unsafe extern "C" fn(*mut c_void) -> *mut c_void> =
+            lib.get(b"jpeg_std_error").expect("jpeg_std_error");
+        let _ = jpeg_std_error(err_ptr);
+        (cinfo_ptr as *mut *mut c_void).write(err_ptr);
+
+        let jpeg_create_compress: libloading::Symbol<
+            unsafe extern "C" fn(*mut c_void, c_int, usize),
+        > = lib
+            .get(b"jpeg_CreateCompress")
+            .expect("jpeg_CreateCompress");
+        jpeg_create_compress(cinfo_ptr, 80, CINFO_BYTES);
+
+        let set_dims: libloading::Symbol<
+            unsafe extern "C" fn(*mut c_void, u32, u32, c_int, c_int),
+        > = lib
+            .get(b"jpeg_capi_test_set_compress_dims")
+            .expect("jpeg_capi_test_set_compress_dims");
+        set_dims(cinfo_ptr, width as u32, height as u32, 3, JCS_RGB);
+
+        let jpeg_set_defaults: libloading::Symbol<unsafe extern "C" fn(*mut c_void)> =
+            lib.get(b"jpeg_set_defaults").expect("jpeg_set_defaults");
+        jpeg_set_defaults(cinfo_ptr);
+        let jpeg_set_quality: libloading::Symbol<unsafe extern "C" fn(*mut c_void, c_int, c_int)> =
+            lib.get(b"jpeg_set_quality").expect("jpeg_set_quality");
+        jpeg_set_quality(cinfo_ptr, 90, 1);
+
+        if case.progressive {
+            let set_progressive: libloading::Symbol<unsafe extern "C" fn(*mut c_void)> = lib
+                .get(b"jpeg_simple_progression")
+                .expect("jpeg_simple_progression");
+            set_progressive(cinfo_ptr);
+        }
+        if case.arithmetic {
+            let set_arithmetic: libloading::Symbol<unsafe extern "C" fn(*mut c_void, c_int)> = lib
+                .get(b"jpeg_capi_test_set_arith_code")
+                .expect("jpeg_capi_test_set_arith_code");
+            set_arithmetic(cinfo_ptr, 1);
+        }
+        if case.optimize {
+            let set_optimize: libloading::Symbol<unsafe extern "C" fn(*mut c_void, c_int)> = lib
+                .get(b"jpeg_capi_test_set_optimize_coding")
+                .expect("jpeg_capi_test_set_optimize_coding");
+            set_optimize(cinfo_ptr, 1);
+        }
+        if case.smoothing > 0 {
+            let set_smoothing: libloading::Symbol<unsafe extern "C" fn(*mut c_void, c_int)> = lib
+                .get(b"jpeg_capi_test_set_smoothing_factor")
+                .expect("jpeg_capi_test_set_smoothing_factor");
+            set_smoothing(cinfo_ptr, case.smoothing);
+        }
+        if case.lossless {
+            let enable_lossless: libloading::Symbol<
+                unsafe extern "C" fn(*mut c_void, c_int, c_int),
+            > = lib
+                .get(b"jpeg_enable_lossless")
+                .expect("jpeg_enable_lossless");
+            enable_lossless(cinfo_ptr, 1, 0);
+        }
+        if case.restart_blocks > 0 {
+            let set_restart: libloading::Symbol<unsafe extern "C" fn(*mut c_void, c_uint)> = lib
+                .get(b"jpeg_capi_test_set_restart_interval")
+                .expect("jpeg_capi_test_set_restart_interval");
+            set_restart(cinfo_ptr, case.restart_blocks);
+        }
+        if case.restart_rows > 0 {
+            let set_restart_rows: libloading::Symbol<unsafe extern "C" fn(*mut c_void, c_int)> =
+                lib.get(b"jpeg_capi_test_set_restart_in_rows")
+                    .expect("jpeg_capi_test_set_restart_in_rows");
+            set_restart_rows(cinfo_ptr, case.restart_rows);
+        }
+
+        let jpeg_mem_dest: libloading::Symbol<
+            unsafe extern "C" fn(*mut c_void, *mut *mut u8, *mut c_ulong),
+        > = lib.get(b"jpeg_mem_dest").expect("jpeg_mem_dest");
+        let mut out_buf: *mut u8 = std::ptr::null_mut();
+        let mut out_size: c_ulong = 0;
+        jpeg_mem_dest(cinfo_ptr, &mut out_buf, &mut out_size);
+
+        let jpeg_start_compress: libloading::Symbol<unsafe extern "C" fn(*mut c_void, c_int)> = lib
+            .get(b"jpeg_start_compress")
+            .expect("jpeg_start_compress");
+        jpeg_start_compress(cinfo_ptr, 1);
+        let jpeg_write_scanlines: libloading::Symbol<
+            unsafe extern "C" fn(*mut c_void, *mut *mut u8, u32) -> u32,
+        > = lib
+            .get(b"jpeg_write_scanlines")
+            .expect("jpeg_write_scanlines");
+        let mut written: usize = 0;
+        while written < height {
+            let row_ptr: *mut u8 = pixels[written * width * 3..].as_ptr() as *mut u8;
+            let mut row_array: [*mut u8; 1] = [row_ptr];
+            let got: u32 = jpeg_write_scanlines(cinfo_ptr, row_array.as_mut_ptr(), 1);
+            assert!(got > 0, "{}: scanline encoder stalled", case.label);
+            written += got as usize;
+        }
+
+        let jpeg_finish_compress: libloading::Symbol<unsafe extern "C" fn(*mut c_void)> = lib
+            .get(b"jpeg_finish_compress")
+            .expect("jpeg_finish_compress");
+        jpeg_finish_compress(cinfo_ptr);
+        assert!(!out_buf.is_null(), "{}: output buffer is null", case.label);
+        let encoded: Vec<u8> = std::slice::from_raw_parts(out_buf, out_size as usize).to_vec();
+
+        let jpeg_destroy_compress: libloading::Symbol<unsafe extern "C" fn(*mut c_void)> = lib
+            .get(b"jpeg_destroy_compress")
+            .expect("jpeg_destroy_compress");
+        jpeg_destroy_compress(cinfo_ptr);
+        let tj3_free: libloading::Symbol<unsafe extern "C" fn(*mut c_void)> =
+            lib.get(b"tj3Free").expect("tj3Free");
+        tj3_free(out_buf as *mut c_void);
+        encoded
+    }
+}
+
+fn dri_intervals(jpeg: &[u8]) -> Vec<u16> {
+    jpeg.windows(6)
+        .filter(|window| window[0..4] == [0xff, 0xdd, 0x00, 0x04])
+        .map(|window| u16::from_be_bytes([window[4], window[5]]))
+        .collect()
+}
+
+fn restart_marker_count(jpeg: &[u8]) -> usize {
+    jpeg.windows(2)
+        .filter(|window| window[0] == 0xff && (0xd0..=0xd7).contains(&window[1]))
+        .count()
 }
 
 /// C2-1: create -> set_defaults -> set_quality -> destroy is crash-free
@@ -445,6 +604,11 @@ fn c2_3_simple_progression_emits_progressive_stream() {
             .expect("jpeg_simple_progression");
         jpeg_simple_progression(cinfo_ptr);
 
+        let set_restart: libloading::Symbol<unsafe extern "C" fn(*mut c_void, c_uint)> = lib
+            .get(b"jpeg_capi_test_set_restart_interval")
+            .expect("jpeg_capi_test_set_restart_interval");
+        set_restart(cinfo_ptr, 4);
+
         let jpeg_mem_dest: libloading::Symbol<
             unsafe extern "C" fn(*mut c_void, *mut *mut u8, *mut c_ulong),
         > = lib.get(b"jpeg_mem_dest").expect("jpeg_mem_dest");
@@ -483,6 +647,18 @@ fn c2_3_simple_progression_emits_progressive_stream() {
         let has_sof0: bool = bytes.windows(2).any(|w| w == [0xFF, 0xC0]);
         assert!(has_sof2, "expected SOF2 marker in progressive stream");
         assert!(!has_sof0, "progressive stream must not contain SOF0");
+        assert!(
+            bytes
+                .windows(6)
+                .any(|w| w == [0xFF, 0xDD, 0x00, 0x04, 0x00, 0x04]),
+            "progressive stream must preserve cinfo.restart_interval as DRI=4"
+        );
+        assert!(
+            bytes
+                .windows(2)
+                .any(|w| w[0] == 0xFF && (0xD0..=0xD7).contains(&w[1])),
+            "progressive stream with DRI=4 must contain restart markers"
+        );
 
         let jpeg_destroy_compress: libloading::Symbol<unsafe extern "C" fn(*mut c_void)> = lib
             .get(b"jpeg_destroy_compress")
@@ -492,6 +668,212 @@ fn c2_3_simple_progression_emits_progressive_stream() {
         let tj3_free: libloading::Symbol<unsafe extern "C" fn(*mut c_void)> =
             lib.get(b"tj3Free").expect("tj3Free");
         tj3_free(out_buf as *mut c_void);
+    }
+}
+
+/// P4-82/P4-83: the classic scanline boundary must preserve public restart
+/// fields across every pixel-encode entropy dispatcher and baseline input
+/// smoothing independently of Huffman optimization. Each case is
+/// cross-validated against stock C `cjpeg` on identical PPM input.
+#[test]
+fn c2_3_scanline_option_dispatch_matches_cjpeg() {
+    let cjpeg: PathBuf = require_c_tool!("cjpeg");
+    let djpeg: PathBuf = require_c_tool!("djpeg");
+    let help = std::process::Command::new(&cjpeg)
+        .arg("-help")
+        .output()
+        .expect("cjpeg -help");
+    let help_text: String = format!(
+        "{}{}",
+        String::from_utf8_lossy(&help.stdout),
+        String::from_utf8_lossy(&help.stderr)
+    );
+    assert!(
+        help_text.contains("-arithmetic") && help_text.contains("-lossless"),
+        "P4-82 C oracle must support arithmetic and lossless modes"
+    );
+
+    let lib = unsafe { libloading::Library::new(cdylib_path()) }.expect("dlopen");
+    let width: usize = 96;
+    let height: usize = 80;
+    let mut pixels: Vec<u8> = Vec::with_capacity(width * height * 3);
+    for y in 0..height {
+        for x in 0..width {
+            pixels.push(((x * 13 + y * 7 + 19) & 0xff) as u8);
+            pixels.push(((x * 3 + y * 17 + 71) & 0xff) as u8);
+            pixels.push(((x * 11 + y * 5 + 137) & 0xff) as u8);
+        }
+    }
+    let ppm: Vec<u8> = helpers::build_ppm(&pixels, width, height);
+
+    let cases: &[ClassicEncodeCase] = &[
+        ClassicEncodeCase {
+            label: "baseline-blocks",
+            progressive: false,
+            arithmetic: false,
+            optimize: false,
+            lossless: false,
+            smoothing: 0,
+            restart_blocks: 4,
+            restart_rows: 0,
+            cjpeg_args: &["-restart", "4b"],
+            expect_byte_exact: true,
+        },
+        ClassicEncodeCase {
+            label: "baseline-rows",
+            restart_blocks: 0,
+            restart_rows: 2,
+            cjpeg_args: &["-restart", "2"],
+            ..cases_default()
+        },
+        ClassicEncodeCase {
+            label: "optimized-blocks",
+            optimize: true,
+            restart_blocks: 4,
+            cjpeg_args: &["-optimize", "-restart", "4b"],
+            ..cases_default()
+        },
+        ClassicEncodeCase {
+            label: "optimized-rows",
+            optimize: true,
+            restart_rows: 2,
+            cjpeg_args: &["-optimize", "-restart", "2"],
+            ..cases_default()
+        },
+        ClassicEncodeCase {
+            label: "smoothing-blocks",
+            smoothing: 25,
+            restart_blocks: 4,
+            cjpeg_args: &["-smooth", "25", "-restart", "4b"],
+            ..cases_default()
+        },
+        ClassicEncodeCase {
+            label: "smoothing-rows",
+            smoothing: 25,
+            restart_rows: 2,
+            cjpeg_args: &["-smooth", "25", "-restart", "2"],
+            ..cases_default()
+        },
+        ClassicEncodeCase {
+            label: "progressive-blocks",
+            progressive: true,
+            restart_blocks: 4,
+            cjpeg_args: &["-progressive", "-restart", "4b"],
+            ..cases_default()
+        },
+        ClassicEncodeCase {
+            label: "progressive-rows",
+            progressive: true,
+            restart_rows: 2,
+            cjpeg_args: &["-progressive", "-restart", "2"],
+            ..cases_default()
+        },
+        ClassicEncodeCase {
+            label: "arithmetic-blocks",
+            arithmetic: true,
+            restart_blocks: 4,
+            cjpeg_args: &["-arithmetic", "-restart", "4b"],
+            ..cases_default()
+        },
+        ClassicEncodeCase {
+            label: "arithmetic-rows",
+            arithmetic: true,
+            restart_rows: 2,
+            cjpeg_args: &["-arithmetic", "-restart", "2"],
+            ..cases_default()
+        },
+        ClassicEncodeCase {
+            label: "arithmetic-progressive-blocks",
+            progressive: true,
+            arithmetic: true,
+            restart_blocks: 4,
+            cjpeg_args: &["-arithmetic", "-progressive", "-restart", "4b"],
+            ..cases_default()
+        },
+        ClassicEncodeCase {
+            label: "arithmetic-progressive-rows",
+            progressive: true,
+            arithmetic: true,
+            restart_rows: 2,
+            cjpeg_args: &["-arithmetic", "-progressive", "-restart", "2"],
+            ..cases_default()
+        },
+        ClassicEncodeCase {
+            label: "lossless-blocks",
+            lossless: true,
+            // C lossless requires a whole number of MCU rows in block mode;
+            // with one-sample MCUs at width 96, 96b is one row.
+            restart_blocks: 96,
+            cjpeg_args: &["-lossless", "1,0", "-restart", "96b"],
+            expect_byte_exact: false,
+            ..cases_default()
+        },
+        ClassicEncodeCase {
+            label: "lossless-rows",
+            lossless: true,
+            restart_rows: 2,
+            cjpeg_args: &["-lossless", "1,0", "-restart", "2"],
+            expect_byte_exact: false,
+            ..cases_default()
+        },
+    ];
+
+    for &case in cases {
+        let rust_jpeg: Vec<u8> = classic_scanline_encode(&lib, &pixels, width, height, case);
+        let mut c_args: Vec<&str> = vec!["-quality", "90", "-sample", "2x2", "-dct", "int"];
+        c_args.extend_from_slice(case.cjpeg_args);
+        let c_jpeg: Vec<u8> = helpers::encode_with_c_cjpeg(&cjpeg, &ppm, &c_args, case.label);
+
+        let rust_dri: Vec<u16> = dri_intervals(&rust_jpeg);
+        let c_dri: Vec<u16> = dri_intervals(&c_jpeg);
+        assert!(
+            !rust_dri.is_empty(),
+            "{}: Rust output lacks DRI",
+            case.label
+        );
+        assert_eq!(rust_dri, c_dri, "{}: DRI sequence differs", case.label);
+        let rust_rst: usize = restart_marker_count(&rust_jpeg);
+        let c_rst: usize = restart_marker_count(&c_jpeg);
+        assert!(rust_rst > 0, "{}: Rust output lacks RST", case.label);
+        assert_eq!(rust_rst, c_rst, "{}: RST count differs", case.label);
+
+        if case.expect_byte_exact {
+            assert_eq!(rust_jpeg, c_jpeg, "{}: bytes differ from cjpeg", case.label);
+        } else {
+            let (rust_width, rust_height, rust_pixels): (usize, usize, Vec<u8>) =
+                helpers::decode_with_c_djpeg(&djpeg, &rust_jpeg, &format!("{}-rust", case.label));
+            let (c_width, c_height, c_pixels): (usize, usize, Vec<u8>) =
+                helpers::decode_with_c_djpeg(&djpeg, &c_jpeg, &format!("{}-c", case.label));
+            assert_eq!(rust_width, width, "{}: Rust JPEG width", case.label);
+            assert_eq!(rust_height, height, "{}: Rust JPEG height", case.label);
+            assert_eq!(c_width, width, "{}: C JPEG width", case.label);
+            assert_eq!(c_height, height, "{}: C JPEG height", case.label);
+            assert_eq!(
+                rust_pixels, c_pixels,
+                "{}: stock djpeg decoded pixels",
+                case.label
+            );
+            assert_eq!(
+                rust_pixels, pixels,
+                "{}: lossless source pixels",
+                case.label
+            );
+        }
+    }
+}
+
+const fn cases_default() -> ClassicEncodeCase {
+    ClassicEncodeCase {
+        label: "",
+        progressive: false,
+        arithmetic: false,
+        optimize: false,
+        lossless: false,
+        smoothing: 0,
+        restart_blocks: 0,
+        restart_rows: 0,
+        cjpeg_args: &[],
+        expect_byte_exact: true,
     }
 }
 
@@ -812,25 +1194,11 @@ fn c2_5_jcopy_block_row_copies_full_blocks() {
     }
 }
 
-/// C2-5: `jpeg_resync_to_restart` returns TRUE (1) unconditionally.
+/// C2-5: 12-bit and 16-bit scanline symbols have null guards. P4-94 tracks
+/// real-row buffering and finish-compress coverage; this is intentionally not
+/// evidence for the high-precision encode pipeline.
 #[test]
-fn c2_5_resync_to_restart_returns_true() {
-    let lib = unsafe { libloading::Library::new(cdylib_path()) }.expect("dlopen");
-    unsafe {
-        let jpeg_resync_to_restart: libloading::Symbol<
-            unsafe extern "C" fn(*mut c_void, c_int) -> c_int,
-        > = lib
-            .get(b"jpeg_resync_to_restart")
-            .expect("jpeg_resync_to_restart");
-        assert_eq!(jpeg_resync_to_restart(std::ptr::null_mut(), 0), 1);
-    }
-}
-
-/// C2-5: 12-bit and 16-bit scanline writers accept rows without crashing
-/// and advance `next_scanline` correctly. Full encode pipeline for
-/// 12-bit output is covered elsewhere; here we verify link + mechanics.
-#[test]
-fn c2_5_high_precision_write_scanlines_link_and_accept_rows() {
+fn c2_5_high_precision_write_scanlines_null_guards() {
     let lib = unsafe { libloading::Library::new(cdylib_path()) }.expect("dlopen");
     unsafe {
         let jpeg12_write_scanlines: libloading::Symbol<
@@ -852,45 +1220,6 @@ fn c2_5_high_precision_write_scanlines_link_and_accept_rows() {
             jpeg16_write_scanlines(std::ptr::null_mut(), std::ptr::null_mut(), 1),
             0
         );
-    }
-}
-
-/// C2-5: `jpeg_write_coefficients` is a stub today; it must not crash
-/// on a freshly-created cinfo.
-#[test]
-fn c2_5_write_coefficients_stub_does_not_crash() {
-    let lib = unsafe { libloading::Library::new(cdylib_path()) }.expect("dlopen");
-    unsafe {
-        const CINFO_BYTES: usize = 4096;
-        let mut cinfo: MaybeUninit<[u8; CINFO_BYTES]> = MaybeUninit::zeroed();
-        let cinfo_ptr: *mut c_void = cinfo.as_mut_ptr() as *mut c_void;
-        const ERR_BYTES: usize = 512;
-        let mut err: MaybeUninit<[u8; ERR_BYTES]> = MaybeUninit::zeroed();
-        let err_ptr: *mut c_void = err.as_mut_ptr() as *mut c_void;
-
-        let jpeg_std_error: libloading::Symbol<unsafe extern "C" fn(*mut c_void) -> *mut c_void> =
-            lib.get(b"jpeg_std_error").expect("jpeg_std_error");
-        let _ = jpeg_std_error(err_ptr);
-        (cinfo_ptr as *mut *mut c_void).write(err_ptr);
-
-        let jpeg_create_compress: libloading::Symbol<
-            unsafe extern "C" fn(*mut c_void, c_int, usize),
-        > = lib
-            .get(b"jpeg_CreateCompress")
-            .expect("jpeg_CreateCompress");
-        jpeg_create_compress(cinfo_ptr, 80, CINFO_BYTES);
-
-        let jpeg_write_coefficients: libloading::Symbol<
-            unsafe extern "C" fn(*mut c_void, *mut c_void),
-        > = lib
-            .get(b"jpeg_write_coefficients")
-            .expect("jpeg_write_coefficients");
-        jpeg_write_coefficients(cinfo_ptr, std::ptr::null_mut());
-
-        let jpeg_destroy_compress: libloading::Symbol<unsafe extern "C" fn(*mut c_void)> = lib
-            .get(b"jpeg_destroy_compress")
-            .expect("jpeg_destroy_compress");
-        jpeg_destroy_compress(cinfo_ptr);
     }
 }
 
