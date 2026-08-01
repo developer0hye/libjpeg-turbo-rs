@@ -2,9 +2,9 @@
 # FFI B9-2: Pillow-against-libjpeg-turbo-rs-capi smoke runner.
 #
 # Flow:
-#   1. Build target/release/liblibjpeg_turbo_rs_capi.{so,dylib}.
+#   1. Build the shim in CARGO_TARGET_DIR's target-qualified release directory.
 #   2. Symlink it as libjpeg.so.62 (Linux) / libjpeg.62.dylib (macOS) next
-#      to the original in target/release.
+#      beside the resolved release artifact.
 #   3. Install Pillow into a venv.
 #   4. *Force* Pillow to load our shim by replacing its bundled libjpeg
 #      (PIL/.dylibs/libjpeg.62.4.0.dylib on macOS wheels,
@@ -17,17 +17,18 @@
 #   5. Run test_pillow.py.
 #   6. Restore the bundled libjpeg so the venv stays usable.
 #
-# Exit codes propagated from test_pillow.py:
+# Runner exit-code contract:
 #   0  PASS
 #   2  SKIP  (python/Pillow/fixture not available)
-#   3  BLOCKER (Pillow loaded our shim but classic libjpeg symbols are
-#              missing — documented in COORDINATOR_NOTES.md)
+#   3  BLOCKER (the shim build/load or Pillow round-trip failed)
 #   1  FAIL  (shim loaded, Pillow ran, but round-trip output is wrong)
 
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
+log() { printf '[run.sh] %s\n' "$*"; }
+
 # Honor CARGO_TARGET_DIR: the build below inherits it, so the shim
 # lands there, not in the in-repo target/ (this host offloads all cargo
 # artifacts to an external SSD). Absolute paths only — a relative
@@ -38,9 +39,20 @@ case "${CARGO_TARGET_DIR:-}" in
     /*)  TARGET_BASE="${CARGO_TARGET_DIR}" ;;
     *)   TARGET_BASE="${REPO_ROOT}/${CARGO_TARGET_DIR}" ;;
 esac
-RELEASE_DIR="${TARGET_BASE}/release"
-
-log() { printf '[run.sh] %s\n' "$*"; }
+CARGO_BIN="${CARGO:-cargo}"
+# This process loads the shim into host Python. An ambient
+# CARGO_BUILD_TARGET may describe a cross-build selected elsewhere, so only
+# the harness-specific override may replace Cargo's reported host target.
+CAPI_BUILD_TARGET="${CAPI_BUILD_TARGET:-}"
+if [ -z "${CAPI_BUILD_TARGET}" ]; then
+    CAPI_BUILD_TARGET="$("${CARGO_BIN}" -vV 2>/dev/null | sed -n 's/^host: //p')"
+fi
+if [ -z "${CAPI_BUILD_TARGET}" ]; then
+    log "BLOCKER: could not resolve Cargo's build target"
+    exit 3
+fi
+TARGET_COMPONENT="$(basename "${CAPI_BUILD_TARGET%.json}")"
+RELEASE_DIR="${TARGET_BASE}/${TARGET_COMPONENT}/release"
 
 # ---- Platform detection --------------------------------------------------
 OS_NAME="$(uname -s)"
@@ -62,12 +74,12 @@ case "${OS_NAME}" in
 esac
 
 # ---- Build capi shim -----------------------------------------------------
-if [ ! -f "${SRC_LIB}" ]; then
-    log "building libjpeg-turbo-rs-capi release cdylib"
-    if ! (cd "${REPO_ROOT}" && cargo build -p libjpeg-turbo-rs-capi --release) ; then
-        log "BLOCKER: cargo build failed"
-        exit 3
-    fi
+# Rebuild unconditionally: an existing file may have come from a cache or an
+# older checkout, and this smoke test must exercise the current source.
+log "building current libjpeg-turbo-rs-capi release cdylib"
+if ! (cd "${REPO_ROOT}" && CARGO_TARGET_DIR="${TARGET_BASE}" "${CARGO_BIN}" build -p libjpeg-turbo-rs-capi --release --target "${CAPI_BUILD_TARGET}") ; then
+    log "BLOCKER: cargo build failed"
+    exit 3
 fi
 
 if [ ! -f "${SRC_LIB}" ]; then
