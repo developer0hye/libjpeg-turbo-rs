@@ -8,6 +8,10 @@
 //!
 //! Cross-validation requires cjpeg/djpeg in PATH or at /opt/homebrew/bin.
 
+// Every test in this binary shells out to native cjpeg or djpeg.  WASI cannot
+// execute those host tools; native CI retains the complete cross-validation.
+#![cfg(not(target_arch = "wasm32"))]
+
 mod helpers;
 
 use std::path::{Path, PathBuf};
