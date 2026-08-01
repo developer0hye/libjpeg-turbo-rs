@@ -372,7 +372,8 @@ All SIMD routines have scalar fallbacks. SIMD is enabled by default via the `sim
 Beyond the Rust crate, the workspace ships C ABI shims: a TurboJPEG 3
 cdylib (`libturbojpeg.so.0`, ready for TJ3 consumers) and a classic
 libjpeg v8 cdylib (`libjpeg.so.8`, ready for v8 consumers) — with
-byte-exact stock `djpeg`/`cjpeg`/`jpegtran` parity gates. The
+byte-exact stock `djpeg`/`jpegtran` gates plus a cjpeg decoded-output
+equivalence gate. The
 legacy-alias matrix, SONAME opt-ins, threading contract, and the v6b/v7
 drop-in non-goal live in
 [`docs/ABI_COMPATIBILITY.md`](docs/ABI_COMPATIBILITY.md); the T1–T4

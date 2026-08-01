@@ -19,6 +19,9 @@ use std::path::PathBuf;
 
 use libloading::Library;
 
+#[path = "support/cdylib.rs"]
+mod cdylib_support;
+
 fn workspace_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .parent()
@@ -28,56 +31,8 @@ fn workspace_root() -> PathBuf {
         .to_path_buf()
 }
 
-fn dylib_ext() -> &'static str {
-    if cfg!(target_os = "windows") {
-        "dll"
-    } else if cfg!(target_os = "macos") {
-        "dylib"
-    } else {
-        "so"
-    }
-}
-
-fn lib_prefix() -> &'static str {
-    if cfg!(target_os = "windows") {
-        ""
-    } else {
-        "lib"
-    }
-}
-
-fn cdylib_filename() -> String {
-    format!("{}libjpeg_turbo_rs_capi.{}", lib_prefix(), dylib_ext())
-}
-
 fn cdylib_path() -> PathBuf {
-    if let Ok(p) = std::env::var("CARGO_CDYLIB_FILE_LIBJPEG_TURBO_RS_CAPI") {
-        return PathBuf::from(p);
-    }
-    let exe: PathBuf = std::env::current_exe().expect("current_exe");
-    let filename: String = cdylib_filename();
-    let mut dir: PathBuf = exe;
-    while dir.pop() {
-        let candidate: PathBuf = dir.join(&filename);
-        if candidate.exists() {
-            return candidate;
-        }
-    }
-
-    let workspace = workspace_root();
-    let status = std::process::Command::new(env!("CARGO"))
-        .args(["build", "-p", "libjpeg-turbo-rs-capi", "--release"])
-        .current_dir(&workspace)
-        .status()
-        .expect("cargo build");
-    assert!(status.success(), "cargo build failed");
-    for rel_dir in ["target/release/deps", "target/release"] {
-        let candidate: PathBuf = workspace.join(rel_dir).join(&filename);
-        if candidate.exists() {
-            return candidate;
-        }
-    }
-    panic!("cdylib not found after build");
+    cdylib_support::cdylib_path()
 }
 
 /// Parse upstream `jpeglib.h` for `EXTERN(...)` declarations and pull

@@ -26,6 +26,9 @@
 use std::path::PathBuf;
 use std::process::Command;
 
+#[path = "support/cdylib.rs"]
+mod cdylib_support;
+
 fn repo_root() -> PathBuf {
     // CARGO_MANIFEST_DIR for the capi crate is
     // <repo>/crates/libjpeg-turbo-rs-capi; go up two levels.
@@ -35,42 +38,50 @@ fn repo_root() -> PathBuf {
         .unwrap_or_else(|e| panic!("cannot canonicalize repo root: {e}"))
 }
 
-/// Hard-build the cdylib if it is not already present.
+/// Return the cdylib emitted by the same Cargo invocation as this test.
 ///
 /// The test must be able to find the cdylib that run.sh will stage as the
-/// JPEG provider.  We replicate the `cdylib_path_or_build()` pattern from
-/// `tjunittest_link.rs` so a stale `target/release/...` cannot silently
-/// satisfy the gate.
+/// JPEG provider. Resolving it beside the current test executable means a
+/// stale artifact in another Cargo profile or target directory cannot
+/// silently satisfy the gate.
 fn cdylib_path() -> PathBuf {
-    let dlext: &str = if cfg!(target_os = "macos") {
-        "dylib"
-    } else {
-        "so"
-    };
-    let lib_prefix: &str = if cfg!(target_os = "windows") {
-        ""
-    } else {
-        "lib"
-    };
+    cdylib_support::cdylib_path()
+}
 
-    // Walk upward from the test binary to find the cdylib, the same way
-    // precision.rs does.
-    if let Ok(p) = std::env::var("CARGO_CDYLIB_FILE_LIBJPEG_TURBO_RS_CAPI") {
-        return PathBuf::from(p);
-    }
-    let exe: PathBuf = std::env::current_exe().expect("current_exe");
-    let mut dir: PathBuf = exe.clone();
-    while dir.pop() {
-        let candidate = dir.join(format!("{}libjpeg_turbo_rs_capi.{}", lib_prefix, dlext));
-        if candidate.exists() {
-            return candidate;
+fn assert_run_status(code: Option<i32>) {
+    match code {
+        Some(0) => {
+            eprintln!("PASS: libtiff JPEG round-trip succeeded via our shim");
+        }
+        Some(1) => {
+            panic!(
+                "examples/libtiff_integration/run.sh FAILED with exit 1: \
+                 pixel mismatch — JPEG round-trip through our shim produced \
+                 incorrect pixel values. This is a real correctness bug in \
+                 jpeg_write_raw_data / jpeg_read_raw_data or the libtiff \
+                 integration path."
+            );
+        }
+        Some(2) => {
+            panic!(
+                "examples/libtiff_integration/run.sh could not find its binary \
+                 or exact shim artifact; this is unexpected after a successful build"
+            );
+        }
+        Some(code) => {
+            panic!(
+                "examples/libtiff_integration/run.sh FAILED with exit code {code}: \
+                 libtiff API error — TIFFWriteEncodedStrip / TIFFReadEncodedStrip \
+                 failed against our shim. This is a real C-ABI shim bug."
+            );
+        }
+        None => {
+            panic!(
+                "run.sh was killed by a signal — likely a crash or abort in our \
+                 shim's jpeg_write_raw_data / jpeg_read_raw_data path"
+            );
         }
     }
-    panic!(
-        "could not locate cdylib near {}: \
-         run `cargo build -p libjpeg-turbo-rs-capi --release` first",
-        exe.display()
-    );
 }
 
 /// `libtiff_jpeg_roundtrip_via_shim` — the primary end-to-end gate.
@@ -101,7 +112,8 @@ fn libtiff_jpeg_roundtrip_via_shim() {
     }
 
     // Ensure the cdylib exists (panics if not).
-    let _cdylib: PathBuf = cdylib_path();
+    let cdylib: PathBuf = cdylib_path();
+    let cdylib_dir = cdylib.parent().expect("Cargo artifact directory");
 
     let root: PathBuf = repo_root();
     let build_sh: PathBuf = root.join("examples/libtiff_integration/build.sh");
@@ -130,6 +142,7 @@ fn libtiff_jpeg_roundtrip_via_shim() {
     eprintln!("==> Running examples/libtiff_integration/build.sh");
     let build_status: std::process::Output = Command::new("bash")
         .arg(&build_sh)
+        .env("CAPI_TARGET_DIR", cdylib_dir)
         .output()
         .expect("failed to spawn build.sh — bash must be on PATH");
 
@@ -174,14 +187,14 @@ fn libtiff_jpeg_roundtrip_via_shim() {
 
     // -----------------------------------------------------------------------
     // Phase 2: run.sh
-    // Exit 2 = skip (binary / shim not found — should not happen after a
-    //   successful build above, but guard defensively).
+    // Exit 2 = broken binary / shim handoff after a successful build — FAIL.
     // Exit 1 = pixel mismatch or API failure — REAL BUG in our shim.
     // Exit 0 = PASS.
     // -----------------------------------------------------------------------
     eprintln!("==> Running examples/libtiff_integration/run.sh");
     let run_status: std::process::Output = Command::new("bash")
         .arg(&run_sh)
+        .env("CAPI_TARGET_DIR", cdylib_dir)
         .output()
         .expect("failed to spawn run.sh");
 
@@ -194,45 +207,11 @@ fn libtiff_jpeg_roundtrip_via_shim() {
         String::from_utf8_lossy(&run_status.stderr)
     );
 
-    match run_status.status.code() {
-        Some(0) => {
-            eprintln!("PASS: libtiff JPEG round-trip succeeded via our shim");
-        }
-        Some(2) => {
-            // run.sh exits 2 only when it cannot find the binary or shim
-            // (pre-flight check failure, not a shim bug).  Unlikely after a
-            // clean build.sh pass but handled gracefully.
-            eprintln!(
-                "SKIP: run.sh reported exit 2 (binary or shim not found) — \
-                 this is unexpected after a successful build"
-            );
-        }
-        Some(1) => {
-            panic!(
-                "examples/libtiff_integration/run.sh FAILED with exit 1: \
-                 pixel mismatch — JPEG round-trip through our shim produced \
-                 incorrect pixel values.  This is a real correctness bug in \
-                 jpeg_write_raw_data / jpeg_read_raw_data or the libtiff \
-                 integration path.  See stdout/stderr above for details."
-            );
-        }
-        Some(code) => {
-            // exit 3 = API failure (TIFFOpen/Write/Read returned error from main.c).
-            // Any other non-zero exit is also a real failure.
-            panic!(
-                "examples/libtiff_integration/run.sh FAILED with exit code {code}: \
-                 libtiff API error — TIFFWriteEncodedStrip / TIFFReadEncodedStrip \
-                 failed against our shim.  This is a real C-ABI shim bug \
-                 (likely in jpeg_write_raw_data / jpeg_read_raw_data or the \
-                 abbreviated tables-only datastream path in jpeg_read_header).  \
-                 See stdout/stderr above for the exact error message."
-            );
-        }
-        None => {
-            panic!(
-                "run.sh was killed by a signal — likely a crash or abort in our \
-                 shim's jpeg_write_raw_data / jpeg_read_raw_data path"
-            );
-        }
-    }
+    assert_run_status(run_status.status.code());
+}
+
+#[test]
+#[should_panic(expected = "unexpected after a successful build")]
+fn post_build_missing_artifact_is_a_hard_failure() {
+    assert_run_status(Some(2));
 }
