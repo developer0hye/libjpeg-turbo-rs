@@ -574,6 +574,39 @@ int main(int argc, char **argv) {
 }
 
 #[cfg(unix)]
+fn compile_loader_contamination_library(temp: &tempfile::TempDir) -> PathBuf {
+    let source: PathBuf = temp.path().join("loader_contamination.c");
+    let library: PathBuf = temp.path().join(if cfg!(target_os = "macos") {
+        "libloader_contamination.dylib"
+    } else {
+        "libloader_contamination.so"
+    });
+    std::fs::write(&source, "void loader_contamination_marker(void) {}\n")
+        .expect("write loader contamination source");
+    let compiler: std::ffi::OsString =
+        std::env::var_os("CC").unwrap_or_else(|| std::ffi::OsString::from("cc"));
+    let mut command: Command = Command::new(compiler);
+    if cfg!(target_os = "macos") {
+        command.arg("-dynamiclib");
+    } else {
+        command.args(["-shared", "-fPIC"]);
+    }
+    let output: std::process::Output = command
+        .arg(&source)
+        .arg("-o")
+        .arg(&library)
+        .output()
+        .expect("compile loader contamination library");
+    assert!(
+        output.status.success(),
+        "loader contamination library must compile:\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    library
+}
+
+#[cfg(unix)]
 fn fake_stock_runner(temp: &tempfile::TempDir, testimages: &Path) -> std::process::Output {
     let our_build: PathBuf = temp.path().join("our-build");
     let stock_bin: PathBuf = temp.path().join("stock-bin");
@@ -785,10 +818,11 @@ cp "$input" "$output"
         &our_build.join("tjbench"),
         "#!/bin/sh\nset -eu\ntest -z \"${LD_PRELOAD+x}\"\ntest -z \"${DYLD_INSERT_LIBRARIES+x}\"\n",
     );
+    let loader_contamination_library: PathBuf = compile_loader_contamination_library(&temp);
 
     // Start Bash before injecting loader overrides.  On macOS, launching Bash
-    // with a nonexistent DYLD_INSERT_LIBRARIES entry terminates in dyld before
-    // run.sh can exercise its per-command environment isolation.
+    // with DYLD_INSERT_LIBRARIES terminates before run.sh can exercise its
+    // per-command isolation unless the injected library is loadable.
     let output: std::process::Output = Command::new("bash")
         .arg("-c")
         .arg(
@@ -802,8 +836,8 @@ source "$1""#,
         .arg(script_dir().join("run.sh"))
         .arg("/ambient/rust-shim")
         .arg("/ambient/rust-shim")
-        .arg("/ambient/rust-shim.so")
-        .arg("/ambient/rust-shim.dylib")
+        .arg(&loader_contamination_library)
+        .arg(&loader_contamination_library)
         .env_remove("LD_LIBRARY_PATH")
         .env_remove("DYLD_LIBRARY_PATH")
         .env_remove("LD_PRELOAD")
