@@ -1,6 +1,7 @@
 //! Issue #327: `smoothing_factor` was a silent no-op for grayscale input.
 //!
-//! `src/encode/pipeline.rs` gated the full-size smoothing on `!is_grayscale`.
+//! Before #327, the code now in `src/encode/pipeline_impl/optimized.rs` gated
+//! full-size smoothing on `!is_grayscale`.
 //! C selects `fullsize_smooth_downsample` for **every** component sampled at
 //! the maximum factors (`jcsample.c:506-513`), which for a single-component
 //! image is the grayscale plane itself — so `cjpeg -grayscale -smooth 50`
