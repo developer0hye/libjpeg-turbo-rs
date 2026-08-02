@@ -13,8 +13,9 @@
 //! `tests/c_tjcomptest.rs` (gated on `--features full-c-parity`).
 //!
 //! TDD-verified: re-introducing the original `if h_samp > 1 { 2 } else { 1 }`
-//! clamp at all three sites in `src/encode/pipeline.rs` makes all four
-//! `progressive_s*` tests below RED-fail with `max pixel diff 172-173`
+//! clamp at all three sites in `src/encode/pipeline_impl/progressive_entropy.rs`
+//! and `src/encode/pipeline_impl/arithmetic.rs` makes all four `progressive_s*`
+//! tests below RED-fail with `max pixel diff 172-173`
 //! (greater than the `≤ 50` ceiling). Removing the clamp restores GREEN.
 //! That delta — not just the absolute pass — is what proves the test
 //! gates the regression.

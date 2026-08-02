@@ -248,7 +248,7 @@ Hotspots #3 (256-bit color load) and #4 (progressive Huffman SIMD) are documente
 
 **Acceptance:** every encode benchmark `Rust/C ≤ 1.05×`. Record the run in `experiments/encode.tsv` per the keep/discard/crash protocol in `experiments/README.md`. If any benchmark exceeds the gate, attack hotspot #3 or #4 above; otherwise mark this gap **CLOSED**. (Bench command in [reference_commands.md](reference_commands.md).)
 
-**Likely area:** `src/simd/x86_64/encode/`, `src/encode/huffman.rs`, `src/encode/pipeline.rs`. Reference SIMD: `references/libjpeg-turbo/simd/x86_64/jchuff-sse2.asm`, `jcsample-sse2.asm`, `jcsample-avx2.asm`, `jcphuff-sse2.asm`.
+**Likely area:** `src/simd/x86_64/{avx2_color_encode,avx2_fdct}.rs`, `src/encode/huffman_encode.rs`, `src/encode/pipeline_impl/`. Reference SIMD: `references/libjpeg-turbo/simd/x86_64/jchuff-sse2.asm`, `jcsample-sse2.asm`, `jcsample-avx2.asm`, `jcphuff-sse2.asm`.
 
 **Why P1 not P0:** the release-gate doctrine puts correctness before performance. The four P0s above are the actual blockers. Encode perf is real, tracked, and the data is in hand — but it is not what currently keeps stock tools and Pillow from loading.
 
