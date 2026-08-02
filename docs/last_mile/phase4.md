@@ -2111,7 +2111,7 @@ requires missing tools in CI, and its complete four-test binary is selected by
 the provisioned Linux workflow. A host-tool run completed 4/4 with no skip.
 The broader matrices above remain open.
 
-## P4-119. `src/decode/pipeline.rs` Concentrates Half of the Decoder Implementation — **PARTIAL: cross-architecture CI pending**
+## P4-119. `src/decode/pipeline.rs` Concentrates Half of the Decoder Implementation — **CLOSED 2026-08-02**
 
 **Motivation.** Filed 2026-08-02 after the encode pipeline split exposed the
 same concentration on decode. At filing, the decoder contained 14,606 Rust
@@ -2180,4 +2180,7 @@ C libjpeg-turbo matrix on the same pinned CPU also completed with the sibling
 profile rather than revealing a split-specific shift. Exact attempts and
 discarded alternatives are recorded in `experiments/pipeline.tsv`.
 
-The only remaining acceptance gate is cross-architecture CI after publication.
+**Status (2026-08-02): closed.** [PR #441](https://github.com/developer0hye/libjpeg-turbo-rs/pull/441)
+completed all 32 checks on the implementation commit, including ARMv7 scalar,
+aarch64 NEON, x86_64 AVX2 and no-AVX2, WASM SIMD128, Linux/macOS/Windows,
+sanitizers, Miri, mutation testing, C interop, and the C-parity corpus gate.
