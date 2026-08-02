@@ -15,7 +15,8 @@
 //! `metadata.scan`, so it must reject the stream rather than index out of
 //! bounds.
 //!
-//! The 8-bit twin in `decode/pipeline.rs` (`decode_lossless_huffman`)
+//! The 8-bit twin in `decode/pipeline_impl/lossless.rs`
+//! (`decode_lossless_huffman`)
 //! already carried this guard, added from a `fuzz_decompress_lenient`
 //! finding; the arbitrary-precision path never received it.
 //!

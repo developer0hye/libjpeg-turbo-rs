@@ -4,7 +4,7 @@
 //!
 //! Issue #382: of this ~1.9k-LOC module only the *baseline* 12-bit
 //! decoder was ever fuzzed, and only indirectly — `Decoder` routes
-//! `precision == 12` to `decompress_12bit` (pipeline.rs), which is how
+//! `precision == 12` to `decompress_12bit` (`pipeline_impl/output.rs`), which is how
 //! the sweeps found P4-30. That entry rejects lossless outright, and
 //! nothing reached `decompress_16bit` / `decompress_lossless_arbitrary`
 //! at all, so the sweeps that caught the 8-bit lossless shift-overflow
