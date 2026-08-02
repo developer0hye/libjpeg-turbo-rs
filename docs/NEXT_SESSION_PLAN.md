@@ -172,7 +172,7 @@ C libjpeg-turbo와의 성능 격차를 좁힘.
 1. **target 선정** — 어느 hot path?
    - 현재 hot paths (project memory 기준):
      - `crates/libjpeg-turbo-rs-capi/src/jpeglib.rs` (37x)
-     - `src/decode/pipeline.rs` (25x)
+     - `src/decode/pipeline_impl/` (25x in the pre-split `pipeline.rs` history)
      - `src/encode/pipeline_impl/` (29x before the monolith was split)
 
 2. **profiling**

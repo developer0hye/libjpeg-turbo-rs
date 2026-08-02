@@ -1399,7 +1399,7 @@ fn encode_dc_only_wide(
 /// Fuzz Smoke run 30485530878 panicked in the arbitrary-precision path
 /// and, once that alone was fixed, run 30504332488 immediately found the
 /// identical defect in `decompress_16bit`. The 8-bit equivalents in
-/// `decode/pipeline.rs` carry their own copies of this guard.
+/// `decode/pipeline_impl/lossless.rs` carry their own copies of this guard.
 fn lossless_dc_tables<'a>(
     scan: &crate::common::types::ScanHeader,
     dc_huffman_tables: &'a [Option<alloc::sync::Arc<crate::common::huffman_table::HuffmanTable>>;
