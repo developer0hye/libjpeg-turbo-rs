@@ -1,6 +1,7 @@
 //! Issue #325: the encoder's input validation had no tests.
 //!
-//! Mutation sampling of `src/encode/pipeline.rs` found the whole validation
+//! Mutation sampling of the former monolithic encoder pipeline (now
+//! `src/encode/pipeline_impl/baseline.rs`) found the whole validation
 //! prologue of `compress_with_params` survivable: `width == 0 || height == 0`
 //! could become `&&`, `width > 65535` could become `>=` or `==`, and the
 //! buffer-size check `width * height * bpp` could become `/` or `+` — all with

@@ -255,7 +255,7 @@ Each runs a real round-trip with PSNR check. Skip-with-reason allowed only when 
 
 **Status (2026-05-04): closed.** `cargo test --release --features full-c-parity --test c_tjcomptest` is **green for the full lossy + lossless matrix** including progressive + samp411/441/410/24 on the 227×149 testorig fixture. The source-level skip in `tests/c_tjcomptest.rs:717-739` is gone, the new C-tool-free guard `tests/regression_progressive_4pixel_chroma.rs` exercises all four 4-pixel factors, and the `continue-on-error: true` flag for `c_tjcomptest_full` in `.github/workflows/full-c-parity.yml` is removed.
 
-**Root cause (2026-05-04):** `src/encode/pipeline.rs::progressive_fdct_chroma_block` (and the matching arithmetic-progressive Cb/Cr branches at `pipeline.rs:4351` / `:4369`) clamped the chroma sampling factors with:
+**Root cause (2026-05-04):** `src/encode/pipeline_impl/progressive_entropy.rs::progressive_fdct_chroma_block` (and the matching branches in `pipeline_impl/arithmetic.rs`) clamped the chroma sampling factors with:
 
 ```rust
 let hf: usize = if h_samp > 1 { 2 } else { 1 };
@@ -287,7 +287,7 @@ The earlier skip-comment claimed "1 LSB downsample diff, decoded pixels match" �
 
 ## Phase 2 Suggested Order (Historical)
 
-1. ~~**P2-11** — Close the TJSAMP_411/441/410/24 progressive-encode byte-parity gap.~~ **CLOSED 2026-05-04** — root cause was a chroma-sampling-factor clamp in `progressive_fdct_chroma_block`; fix landed in `src/encode/pipeline.rs`, source-level test skip deleted, regression test in `tests/regression_progressive_4pixel_chroma.rs`.
+1. ~~**P2-11** — Close the TJSAMP_411/441/410/24 progressive-encode byte-parity gap.~~ **CLOSED 2026-05-04** — root cause was a chroma-sampling-factor clamp in `progressive_fdct_chroma_block` (now in `src/encode/pipeline_impl/progressive_entropy.rs`); source-level test skip deleted, regression test in `tests/regression_progressive_4pixel_chroma.rs`.
 2. ~~**P2-1** (`c_tjcomptest_full` portion) — Remove `continue-on-error` flag for the encode parity test.~~ **CLOSED 2026-05-04** — flag removed once P2-11 fix landed.
 3. ~~**P2-9** — Decide and document the `JPEG_LIB_VERSION` policy.~~ **CLOSED 2026-05-04** — `docs/ABI_COMPATIBILITY.md` documents the v8-only policy with v6b-SONAME risk explicitly called out; `build.rs` emits a loud `cargo:warning` on the default-risk pairing.
 4. ~~**P2-2** — Implement `format_message` printf expansion.~~ **CLOSED 2026-05-04** — `snprintf_jpeg` helper added in `crates/libjpeg-turbo-rs-capi/src/jpeglib.rs`; `tests/format_message.rs` exercises every specifier `jerror.h` uses against `libc::snprintf` as the reference oracle.

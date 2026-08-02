@@ -699,9 +699,9 @@ fn c_tjcomptest_lossy_full() {
                                     // was clamping h_samp/v_samp to {1,2},
                                     // emitting half-resolution chroma against
                                     // an SOF that promised quarter-resolution.
-                                    // Fix landed in src/encode/pipeline.rs
-                                    // (progressive_fdct_chroma_block + the
-                                    // arithmetic-progressive Cb/Cr branches).
+                                    // The fix now lives in pipeline_impl's
+                                    // progressive_entropy.rs and arithmetic.rs
+                                    // chroma branches.
                                     let label = format!(
                                         "lossy_full_p{}_{}_{}_a{}_dc{}_o{}_p{}_samp{}",
                                         precision,
