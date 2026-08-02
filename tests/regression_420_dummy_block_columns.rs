@@ -1,7 +1,7 @@
 //! Issue #314: 4:2:0 encode diverged from `cjpeg` whenever `ceil(width/8)` is odd.
 //!
-//! The x86_64 AVX2 4:2:0 row fast path (guard now at
-//! `src/encode/pipeline.rs:596`) FDCTed every block of every MCU
+//! The x86_64 AVX2 4:2:0 row fast path (guard now in
+//! `src/encode/pipeline_impl/baseline.rs::compress_with_params`) FDCTed every block of every MCU
 //! unconditionally. It guarded the last partial MCU
 //! *row* but not the last partial MCU *column*, so for any width whose luma
 //! block count is odd it forward-transformed replicated edge pixels where C
@@ -95,7 +95,7 @@ const PINNED: &[(usize, usize, usize, u64)] = &[
 /// Pinned bytes are x86_64 output, and are now verified everywhere.
 ///
 /// They were x86_64-only while encoder output was backend-dependent (P4-33).
-/// #330 removed the last cause, and the golden fixture's full 20,160-case
+/// #330 removed the last cause, and the golden fixture's full 33,600-case
 /// sweep now passes unchanged on aarch64 — so a byte pin is meaningful on
 /// every backend, and a cross-backend difference should fail rather than be
 /// excused.

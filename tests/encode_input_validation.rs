@@ -1,6 +1,7 @@
 //! Issue #325: the encoder's input validation had no tests.
 //!
-//! Mutation sampling of `src/encode/pipeline.rs` found the whole validation
+//! Mutation sampling of the former monolithic encoder pipeline (now
+//! `src/encode/pipeline_impl/baseline.rs`) found the whole validation
 //! prologue of `compress_with_params` survivable: `width == 0 || height == 0`
 //! could become `&&`, `width > 65535` could become `>=` or `==`, and the
 //! buffer-size check `width * height * bpp` could become `/` or `+` — all with
@@ -11,8 +12,10 @@
 //! unvalidated boundary here surfaces as a panic or a silent out-of-bounds
 //! read rather than a clean error.
 
-use libjpeg_turbo_rs::encode::pipeline::{compress_with_params, CompressParams};
-use libjpeg_turbo_rs::{JpegError, PixelFormat, Subsampling};
+use libjpeg_turbo_rs::encode::pipeline::{
+    compress_arithmetic, compress_with_params, CompressParams,
+};
+use libjpeg_turbo_rs::{DctMethod, JpegError, PixelFormat, Subsampling};
 
 fn encode(
     pixels: &[u8],
@@ -28,6 +31,20 @@ fn encode(
         75,
         Subsampling::S420,
     ))
+}
+
+fn encode_arithmetic(pixels: &[u8], width: usize, height: usize) -> Result<Vec<u8>, JpegError> {
+    compress_arithmetic(
+        pixels,
+        width,
+        height,
+        PixelFormat::Rgb,
+        75,
+        Subsampling::S420,
+        DctMethod::IsLow,
+        0,
+        None,
+    )
 }
 
 /// Each dimension must be rejected on its own — an `&&` here would accept a
@@ -52,6 +69,25 @@ fn zero_dimensions_are_rejected_independently() {
         encode(&pixels, 1, 1, PixelFormat::Rgb).is_ok(),
         "1x1 must be accepted"
     );
+}
+
+/// The arithmetic encoder has its own validation boundary. Pin both sides of
+/// its zero-dimension disjunction so a mode-specific `||` to `&&` mutation
+/// cannot admit a zero-width or zero-height image.
+#[test]
+fn arithmetic_zero_dimensions_are_rejected_independently() {
+    let pixels: Vec<u8> = vec![0u8; 16 * 16 * 3];
+    for (width, height, label) in [
+        (0usize, 16usize, "zero width"),
+        (16, 0, "zero height"),
+        (0, 0, "both zero"),
+    ] {
+        let result = encode_arithmetic(&pixels, width, height);
+        assert!(
+            matches!(result, Err(JpegError::CorruptData(_))),
+            "arithmetic {label} ({width}x{height}) was accepted; expected CorruptData"
+        );
+    }
 }
 
 /// JPEG's SOF carries 16-bit dimensions, so 65535 is the last legal value.
