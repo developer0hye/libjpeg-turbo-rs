@@ -158,12 +158,12 @@ The closure title reflects the actual delta: stub *semantics* moved from "silent
 - **3x1 decode** — `cjpeg -sample 3x1,1x1,1x1` produces a JPEG; Rust decode pixel-identical to `djpeg`.
 - **RGB565 merged-upsample** — Rust `merged_upsample=true + RGB565` for S420/S422 byte-identical to `djpeg -nosmooth RGB → 5-6-5 truncate` chain.
 
-**Shim fix landed alongside the RGB565 fixture (2026-05-08).** The merged-upsample gate at `src/decode/pipeline.rs::Decoder::decode` previously bound `out_format == PixelFormat::Rgb`, so `set_merged_upsample(true) + Rgb565` silently fell through to the slow path. Fix: lift the gate to also accept `Rgb565` and route the merged kernel's RGB output through a 5-6-5 truncation pass (matches upstream's `jdmrgext-*-565` semantics for the no-dither case). The dedicated SIMD `_565` kernels remain a Phase 4 perf task — the current path keeps the SIMD merged conversion to RGB and packs to RGB565 in scalar; pixel-correctness is unaffected.
+**Shim fix landed alongside the RGB565 fixture (2026-05-08).** The merged-upsample gate now in `src/decode/pipeline_impl/output.rs::Decoder::decode_image_inner` previously bound `out_format == PixelFormat::Rgb`, so `set_merged_upsample(true) + Rgb565` silently fell through to the slow path. Fix: lift the gate to also accept `Rgb565` and route the merged kernel's RGB output through a 5-6-5 truncation pass (matches upstream's `jdmrgext-*-565` semantics for the no-dither case). The dedicated SIMD `_565` kernels remain a Phase 4 perf task — the current path keeps the SIMD merged conversion to RGB and packs to RGB565 in scalar; pixel-correctness is unaffected.
 
 **`cjpeg -sample 3x2,1x1,1x1` baseline.** The non-standard sampling factor matrix at the C cross-check now covers (3,2)/(1,1)/(1,1) and (3,1)/(1,1)/(1,1) — the two configurations the upstream documentation explicitly calls out as "non-standard" while still being valid per ITU-T T.81 Annex B (max sampling factor ≤ 4, sum of products ≤ 10).
 
 **Closure delta:**
-- `src/decode/pipeline.rs::Decoder::decode` — widen the merged-upsample gate from `out_format == PixelFormat::Rgb` to `Rgb || Rgb565`; pack RGB → RGB565 LE after the merged kernel runs.
+- `src/decode/pipeline_impl/output.rs::Decoder::decode_image_inner` — widen the merged-upsample gate from `out_format == PixelFormat::Rgb` to `Rgb || Rgb565`; pack RGB → RGB565 LE after the merged kernel runs.
 - `tests/cross_check_p3_6_nonstandard_rgb565.rs` — new file with 4 fixtures matching the acceptance bar.
 - `docs/FEATURE_PARITY.md` — update the "Merged upsampling" entry to reflect RGB + RGB565 wiring and call out the deferred SIMD `_565` kernels.
 

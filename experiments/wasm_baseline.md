@@ -31,7 +31,12 @@
 
 **Encode summary**: WASM encode is **1.13x-2.20x slower** than native. Largest gap at 7680x4320 (2.20x).
 
-## Scalar Fallback Hotspots (WASM decode pipeline)
+## Scalar Fallback Hotspots (historical pre-optimization snapshot)
+
+This table and priority list record the baseline before the Phase 2/3 work.
+Fancy/merged upsampling, RGB interleave, and BGR/BGRA support have since been
+implemented; see [`wasm_final_report.md`](wasm_final_report.md#what-was-implemented)
+for the current paths and final status.
 
 These functions fall back to scalar on wasm32, despite having SIMD implementations on NEON/AVX2:
 
@@ -39,9 +44,9 @@ These functions fall back to scalar on wasm32, despite having SIMD implementatio
 |----------|----------|--------|---------|
 | `idct_ifast` | `simd/wasm32/mod.rs:23` | Low | Non-default DCT method |
 | `idct_float` | `simd/wasm32/mod.rs:24` | Low | Non-default DCT method |
-| `fancy_h2v2` | `decode/pipeline.rs:938-967` | **HIGH** | All 4:2:0 decode (most common) |
-| `merged_h2v1` | `decode/pipeline.rs:856-879` | **HIGH** | H2V1 merged upsample+color path |
-| `merged_h2v2` | `decode/pipeline.rs:883-914` | **HIGH** | H2V2 merged upsample+color path |
+| `fancy_h2v2` | `decode/pipeline_impl/color.rs` | **HIGH** | All 4:2:0 decode (most common) |
+| `merged_h2v1` | `decode/pipeline_impl/color.rs` | **HIGH** | H2V1 merged upsample+color path |
+| `merged_h2v2` | `decode/pipeline_impl/color.rs` | **HIGH** | H2V2 merged upsample+color path |
 
 ### Priority Order (by impact on decode performance)
 1. **Fancy H2V2 upsample** — used by every 4:2:0 JPEG (>80% of all JPEGs)
