@@ -2666,3 +2666,51 @@ path.
 **Why deferred.** P4-116 is test integrity; this is an encoder validation gap
 it uncovered. The affected call is a misuse that upstream diagnoses, not a
 silent data corruption, so it does not block the test work.
+
+## P4-123. Architecture Umbrella: Codec Plans, C-ABI State, Public Boundaries, SIMD Dispatch — **OPEN**
+
+**Motivation.** Filed 2026-08-08 to give GitHub
+[#442](https://github.com/developer0hye/libjpeg-turbo-rs/issues/442) a
+LAST_MILE home. #438 and #441 split the encoder and decoder monoliths into
+stable facades plus private responsibility modules, so the remaining
+architectural risk is semantic rather than physical: the Rust free functions,
+`Encoder`/`Decoder`, TJ3, and the classic `jpeg_*` ABI still normalise options,
+state, and errors through different paths. That is the shape that produced the
+option-drop family (P4-39/P4-40) and the classic option/state gaps
+(P4-84..P4-115).
+
+This is an **umbrella**, structured like [P4-55](#p4-55-zune-jpeg-competitive-gap-program-350361--open):
+per-defect behaviour stays with the individual entries, and the detail of the
+workstreams lives in #442. It exists here so the next session can find the
+programme at all — #442 had no LAST_MILE entry, which by this repository's own
+rule means it did not exist for anyone reading the index.
+
+**Workstreams (detail in #442).** (1) classic C-ABI context, lifecycle and
+error boundary — executed alongside P4-100/P4-104/P4-106 and then used by
+P4-84..P4-115; (2) canonical `EncodeRequest`/`DecodeRequest` →
+`EncodePlan`/`DecodePlan` models with explicit mode enums instead of
+interacting booleans; (3) public API and dependency boundaries; (4) SIMD
+dispatch containment — ~129 direct architecture-specific references still sit
+outside the SIMD layer; (5) one parser/limits/geometry/output model across
+8/12/16-bit.
+
+**Progress (2026-08-08) — workstream 3, the spec-data dependency inversion.**
+#442's evidence list names two places where lower-level modules reach *upward*
+into `encode`. Both were the same cause: the JPEG Annex K specification
+tables lived in `encode::tables`, although they are direction-neutral data.
+`common::huffman_table::std_huffman_tables()` imported the four standard
+Huffman tables from `encode` to serve the *decoder*, and five `simd/*` sites
+imported `ZIGZAG_ORDER` from `encode` to serve quantisation kernels on both
+sides. They now live in `common::tables`, and `src/common/` has zero
+`crate::encode` references. `encode::tables` re-exports every moved name
+because it is a public path, so this is not a breaking change; the encoder
+*policy* (`quality_scale_quant_table{,_ext}`) stays there, and the three tests
+that validate the Annex K data moved with the data. The `simd → encode`
+references that remain are scalar *kernel* fallbacks for encode-direction SIMD,
+which is the correct direction, not spec data.
+
+**Acceptance criteria.** Each workstream lands incrementally under the existing
+C-parity and golden matrices — explicitly not a big-bang rewrite — with the
+public facades staying compatible. The umbrella closes when #442's five
+workstreams are done or individually re-filed; it does not close by closing any
+single defect it coordinates.

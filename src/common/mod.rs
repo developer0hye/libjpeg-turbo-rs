@@ -7,6 +7,7 @@ pub mod icc;
 pub mod jfif;
 pub mod quant_table;
 pub mod sample;
+pub mod tables;
 pub mod traits;
 pub mod types;
 
