@@ -1900,8 +1900,15 @@ would have let a short raw encode produce a file.
 
 **Status (2026-08-08): partial.** Criteria (1)-(3) hold for
 `jpeg_start_decompress` and `jpeg_finish_compress`, and the finish state gate
-now matches upstream exactly. Not yet done: the remaining private-string-only
-sites (54 of the original 59 `last_error` assignments still have no
+now matches upstream exactly. Nine more sites now raise: every
+raw-data validation failure in `jpeg_read_raw_data`, `jpeg12_read_raw_data`,
+`jpeg_write_raw_data` and `jpeg12_write_raw_data` already *named* its
+upstream code in the message (`JERR_BUFFER_SIZE`, `JERR_BAD_PRECISION`,
+`JERR_BAD_STATE`) but never reached `error_exit`, so a C consumer saw only a
+`0` return. `JERR_BAD_PRECISION` joins the cross-checked constant set.
+
+Not yet done: the remaining private-string-only
+sites (45 of the original 59 `last_error` assignments still have no
 `error_exit` nearby), criterion (4)'s stock-versus-Rust setjmp harness matrix,
 and P4-104's *decompressor* state work, which is separate from the compressor
 states corrected here. `cargo test --workspace --no-fail-fast`: 2466 passed, 0 failed,
