@@ -429,7 +429,7 @@ pub fn decompress_to_yuv(data: &[u8]) -> Result<(Vec<u8>, usize, usize, Subsampl
 /// CMYK/YCCK source** — the plane count comes from the frame, not from the
 /// Y/Cb/Cr naming. The TurboJPEG C ABI models only 1 or 3 planes, so
 /// `tj3DecompressToYUV8` / `tj3DecompressToYUVPlanes8` reject a 4-component
-/// frame rather than passing the fourth plane on (P4-123); a Rust caller that
+/// frame rather than passing the fourth plane on (P4-125); a Rust caller that
 /// sizes buffers for three planes must apply the same check itself.
 pub fn decompress_to_yuv_planes(data: &[u8]) -> Result<(Vec<Vec<u8>>, usize, usize, Subsampling)> {
     let raw: crate::api::raw_data::RawImage = decompress_raw(data)?;

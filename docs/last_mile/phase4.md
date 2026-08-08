@@ -78,8 +78,8 @@
 | P4-117 | CLOSED 2026-08-08 (4:4:1 trim rejected images shorter than one iMCU row) |
 | P4-120 | OPEN (classic-shim allocation-failure paths are unreachable from tests) |
 | P4-121 | OPEN (lossless encode accepts a restart interval C refuses to decode) |
-| P4-123 | CLOSED 2026-08-08 (TurboJPEG YUV decompress entry points emitted one plane per SOF component) |
-| P4-124 | OPEN (`yuv_plane_width`/`yuv_plane_height` accept any component index) |
+| P4-125 | CLOSED 2026-08-08 (TurboJPEG YUV decompress entry points emitted one plane per SOF component) |
+| P4-126 | OPEN (`yuv_plane_width`/`yuv_plane_height` accept any component index) |
 
 ---
 
@@ -2514,7 +2514,7 @@ it uncovered. The affected call is a misuse that upstream diagnoses, not a
 silent data corruption, so it does not block the test work.
 ---
 
-## P4-123. TurboJPEG YUV decompress entry points emit one plane per SOF component, overrunning the 3-plane ABI contract — **CLOSED 2026-08-08**
+## P4-125. TurboJPEG YUV decompress entry points emit one plane per SOF component, overrunning the 3-plane ABI contract — **CLOSED 2026-08-08**
 
 **Motivation.** Filed 2026-08-08 from a scoped security scan of `src/` and
 `crates/` (report `CLAUDE-SECURITY-20260807-214723`, findings F1 and F2, both
@@ -2591,11 +2591,11 @@ runs all three binaries with `LIBJPEG_TURBO_PREFIX=/opt/libjpeg-turbo`, which
 makes the oracle fatal rather than skippable there. Reachable plane
 counts are `{1, 3, 4}` because `detect_subsampling` already rejects 2, so the
 only newly-rejected input is the 4-component frame itself. The second-layer gap
-this work surfaced is tracked as P4-124.
+this work surfaced is tracked as P4-126.
 
-## P4-124. `yuv_plane_width`/`yuv_plane_height` accept any component index where C rejects `componentID >= nc` — **OPEN**
+## P4-126. `yuv_plane_width`/`yuv_plane_height` accept any component index where C rejects `componentID >= nc` — **OPEN**
 
-**Motivation.** Filed 2026-08-08 while closing P4-123, which ported the
+**Motivation.** Filed 2026-08-08 while closing P4-125, which ported the
 first-layer defence but left upstream's second layer unported in the root-crate
 plane-size helpers. Upstream defends the YUV plane model twice: `tj3YUVBufSize`
 (`references/libjpeg-turbo/src/turbojpeg.c:1029`, line 1038) fixes
@@ -2647,10 +2647,10 @@ upstream's `THROWG("Invalid argument", 0)` fills.
 
 **Why deferred.** Not a memory-safety issue on its own. `decompress_to_yuv_planes`
 does still call `yuv_plane_width(3, ..)` / `yuv_plane_height(3, ..)` for every
-4-component frame — P4-123's guard sits in the C-ABI layer and runs *after* that
+4-component frame — P4-125's guard sits in the C-ABI layer and runs *after* that
 helper returns — but the value only sizes the fourth plane's own trim, and the
 guard then discards that plane, so nothing is written out of bounds. No C caller
 reaches the permissive path either, because the wrappers already bound
 `componentID`. It is defence in depth plus an API-contract divergence, so it was
-deliberately kept out of the P4-123 patch to keep that change minimal and
+deliberately kept out of the P4-125 patch to keep that change minimal and
 reviewable.

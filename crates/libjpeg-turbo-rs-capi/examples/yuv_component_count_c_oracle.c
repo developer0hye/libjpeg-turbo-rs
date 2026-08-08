@@ -1,5 +1,5 @@
 /*
- * C oracle for the TurboJPEG YUV decompress component-count contract (P4-123).
+ * C oracle for the TurboJPEG YUV decompress component-count contract (P4-125).
  *
  * Links against stock libjpeg-turbo and reports how upstream's
  * tj3DecompressToYUV8 / tj3DecompressToYUVPlanes8 answer for the JPEG named on
