@@ -182,9 +182,9 @@
 
 | C Function | Description | Rust | Status |
 |---|---|---|---|
-| `jpeg_stdio_dest(cinfo, file)` | Output to FILE* | Native writer exists; classic short-write/flush errors remain P4-108 | 🔶 |
+| `jpeg_stdio_dest(cinfo, file)` | Output to FILE* | Full classic contract: `OUTPUT_BUF_SIZE` staging, short-write/`fflush`/`ferror` → `JERR_FILE_WRITE`, foreign-manager reuse → `JERR_BUFFER_SIZE` (P4-108) | ✅ |
 | `jpeg_stdio_src(cinfo, file)` | Input from FILE* | Native reader exists; classic FILE buffering/Windows/error semantics remain P4-109 | 🔶 |
-| `jpeg_mem_dest(cinfo, &outbuf, &outsize)` | Output to memory buffer | Native `Vec<u8>` exists; classic caller-buffer ownership/reallocation remains P4-108 | 🔶 |
+| `jpeg_mem_dest(cinfo, &outbuf, &outsize)` | Output to memory buffer | Full classic contract: `*outsize` is caller capacity, caller buffers are filled in place and never freed, growth doubles into library memory (P4-108) | ✅ |
 | `jpeg_mem_src(cinfo, inbuf, insize)` | Input from memory buffer | Native `&[u8]` exists; classic validation/manager replacement remains P4-109 | 🔶 |
 
 ### Compression Setup
@@ -497,7 +497,7 @@
 | `jpeg_decompress_struct` | Full decompression state (~60 fields) | `Decoder` / `ScanlineDecoder`; residual classic state/options gaps are P4-96..P4-114 | 🔶 |
 | `jpeg_error_mgr` | Error handler (5 callbacks + state) | `ErrorHandler` trait (3 callbacks) | 🔶 |
 | `jpeg_progress_mgr` | Progress callback + counters | Native `ProgressListener` exists; classic callback/counters remain P4-111 | 🔶 |
-| `jpeg_destination_mgr` | Output stream (buffer + 3 callbacks) | Native writer exists; classic ownership/I/O semantics remain P4-108 | 🔶 |
+| `jpeg_destination_mgr` | Output stream (buffer + 3 callbacks) | Built-in mem/stdio managers are full-contract (P4-108 closed); an application-supplied manager returning `FALSE` from `empty_output_buffer` still gets `JERR_CANT_SUSPEND` instead of suspending (deferred-encode shim, P3-5) | 🔶 |
 | `jpeg_source_mgr` | Input stream (buffer + 5 callbacks) | Native readers exist; classic setup/stdio semantics remain P4-109 | 🔶 |
 | `jpeg_memory_mgr` | Memory allocator (12 methods) | N/A (Rust allocator) | N/A |
 

@@ -849,6 +849,27 @@ unsafe extern "C" fn default_output_message(_cinfo: *mut c_void) {
     // No-op by default — real libjpeg routes through stderr.
 }
 
+// Upstream `JERR_*` message codes as they resolve at `JPEG_LIB_VERSION = 80`.
+//
+// The values are positions in `jerror.h`'s `JMESSAGE` list with the
+// version-gated entries applied (`JERR_ARITH_NOTIMPL` is v6b-only —
+// `#if JPEG_LIB_VERSION < 70`; `JERR_BAD_CROP_SPEC`, `JERR_BAD_DROP_SAMPLING`
+// and `JERR_NO_ARITH_TABLE` are v7+). Consumers compare `err->msg_code`
+// against the enum from their own `jerror.h`, so these must stay exact.
+// Coverage is uneven: `tests/capi_classic_dest_ownership.rs` cross-checks
+// `JERR_BUFFER_SIZE` and `JERR_FILE_WRITE` against a reference v8 build,
+// `tests/capi_classic_lifecycle_pathological.rs` pins `JERR_CANT_SUSPEND`
+// against upstream's own enum, and `JERR_OUT_OF_MEMORY` is unpinned — no test
+// can force the `malloc` failure that reaches it.
+/// "Buffer passed to JPEG library is too small"
+const JERR_BUFFER_SIZE: c_int = 24;
+/// "Suspension not allowed here"
+const JERR_CANT_SUSPEND: c_int = 25;
+/// "Output file write error --- out of disk space?"
+const JERR_FILE_WRITE: c_int = 38;
+/// "Insufficient memory (case %d)"
+const JERR_OUT_OF_MEMORY: c_int = 56;
+
 /// Invoke `cinfo->err->error_exit(cinfo)` with the given `msg_code`,
 /// mirroring upstream's `ERREXIT` macro family in `jerror.h`.
 ///
@@ -881,6 +902,31 @@ fn invoke_error_exit(cinfo: *mut c_void, msg_code: c_int) {
             exit(cinfo);
         }
     }
+}
+
+/// `invoke_error_exit` for the upstream `ERREXIT1` family: also publishes the
+/// single integer parameter the message's `%d` substitutes.
+///
+/// Without it `format_message` renders whatever integer happened to be left in
+/// `msg_parm`, which is exactly the kind of divergence a drop-in replacement
+/// must not have.
+fn invoke_error_exit_parm(cinfo: *mut c_void, msg_code: c_int, parm0: c_int) {
+    if cinfo.is_null() {
+        return;
+    }
+    // SAFETY: caller guarantees `cinfo` is a valid `j_common_ptr`-shaped
+    // struct whose first pointer-sized field is the `err` slot.
+    unsafe {
+        let err_pp: *const *mut JpegErrorMgr = cinfo as *const *mut JpegErrorMgr;
+        let err_ptr: *mut JpegErrorMgr = err_pp.read();
+        if !err_ptr.is_null() {
+            let err: &mut JpegErrorMgr = &mut *err_ptr;
+            // `msg_parm` is the C union's raw bytes; `i[0]` is its first int.
+            let bytes: [u8; std::mem::size_of::<c_int>()] = parm0.to_ne_bytes();
+            err.msg_parm[..bytes.len()].copy_from_slice(&bytes);
+        }
+    }
+    invoke_error_exit(cinfo, msg_code);
 }
 
 unsafe extern "C" fn default_format_message(cinfo: *mut c_void, buffer: *mut u8) {
@@ -4915,6 +4961,14 @@ pub extern "C" fn jpeg_abort_compress(cinfo: *mut c_void) {
             // still inject the aborted image's APP2 ICC chunks.
             p.icc_profile = None;
             p.pending_coef_arrays = std::ptr::null();
+            // Upstream keeps the destination manager across abort so a second
+            // image can be written without re-calling `jpeg_stdio_dest` /
+            // `jpeg_mem_dest` (jdatadst.c:196-198). Keep it — but clear any
+            // failure it recorded, or the aborted image's I/O error would be
+            // reported against the next one.
+            if let Some(ref mut mgr) = p.dest_mgr {
+                mgr.pending_error = None;
+            }
         }
         c.global_state = CSTATE_START;
         c.next_scanline = 0;
@@ -5412,29 +5466,53 @@ const CSTATE_WRCOEFS: c_int = 103;
 // more than 4-component JPEGs.
 const MAX_COMPS_OWNED: usize = 4;
 
-/// Destination variants. `FileHandle` keeps the raw `FILE*` so
-/// `term_destination` can `fflush` and drain buffered bytes to disk.
+/// libjpeg's `OUTPUT_BUF_SIZE` (jdatadst.c:38). It is the stdio staging size
+/// *and* the initial allocation `jpeg_mem_dest` makes when the caller supplies
+/// no buffer, so the value is observable through `*outsize` and must match.
+const OUTPUT_BUF_SIZE: usize = 4096;
+
+/// Mirror of upstream `my_mem_destination_mgr` (jdatadst.c:43-51).
+///
+/// The ownership split is the whole point: `buffer` is whatever we are
+/// currently filling — possibly memory the *application* owns — while
+/// `newbuffer` is the only block this library ever allocated and therefore the
+/// only one it may free. `bufsize` is a capacity, never a payload length.
+struct MemDestState {
+    outbuffer: *mut *mut u8,
+    outsize: *mut std::os::raw::c_ulong,
+    /// Library-allocated block, or null while the caller's buffer is in use.
+    newbuffer: *mut u8,
+    /// Start of the buffer currently being filled.
+    buffer: *mut u8,
+    /// Capacity of `buffer` in bytes.
+    bufsize: usize,
+}
+
+/// Mirror of upstream `my_destination_mgr` (jdatadst.c:29-34).
+struct StdioDestState {
+    outfile: *mut c_void,
+}
+
+/// Destination variants, each carrying the private state its upstream
+/// counterpart keeps behind the public `jpeg_destination_mgr`.
+///
+/// There is no "no destination" variant: that state is `dest_mgr: None`, since
+/// a manager only ever exists because `jpeg_stdio_dest` or `jpeg_mem_dest`
+/// created it with a concrete kind.
 enum JpegDest {
-    None,
     /// Application-owned `unsigned char **outbuffer` + `unsigned long *outsize`.
-    Mem {
-        outbuffer: *mut *mut u8,
-        outsize: *mut std::os::raw::c_ulong,
-    },
-    /// File handle to write to via `fwrite`-equivalent.
-    File {
-        file: *mut c_void,
-    },
+    Mem(MemDestState),
+    /// `FILE *` written through `fwrite`, flushed by `term_destination`.
+    File(StdioDestState),
 }
 
 /// Private encoder state held behind `JpegCompressPublic::priv_ptr`.
 #[allow(dead_code)] // fields populated across C2-1..C2-5 subtasks
 struct CompressPrivate {
-    dest_kind: JpegDest,
-    dest_mgr: Option<Box<JpegDestinationMgr>>,
-    /// Staging buffer that the destination manager writes into. Fresh
-    /// bytes come here before being flushed to the final sink.
-    dest_buf: Vec<u8>,
+    /// The library-provided destination manager, if one is installed, together
+    /// with the private state its callbacks need. Deliberately *not* split
+    /// into separate `CompressPrivate` fields — see `OwnedDestMgr`.
+    dest_mgr: Option<Box<OwnedDestMgr>>,
     /// Accumulated scanlines (8-bit depth). Laid out row-major
     /// `image_width * input_components` bytes per row.
     pixels_u8: Vec<u8>,
@@ -5508,9 +5586,7 @@ struct CompressPrivate {
 impl Default for CompressPrivate {
     fn default() -> Self {
         Self {
-            dest_kind: JpegDest::None,
             dest_mgr: None,
-            dest_buf: Vec::with_capacity(4096),
             pixels_u8: Vec::new(),
             pixels_u16: Vec::new(),
             precision: 8,
@@ -5775,117 +5851,316 @@ pub extern "C" fn jpeg_destroy_compress(cinfo: *mut c_void) {
     })
 }
 
-// --- destination manager callbacks (mem/stdio share staging buffer) ----
+// --- destination manager callbacks -------------------------------------
+//
+// Two independent callback sets, exactly as upstream jdatadst.c has them, and
+// — more importantly — the private state each one needs lives *inside the
+// manager*, reachable only through `cinfo->dest`. Upstream does the same:
+// `my_mem_destination_mgr` embeds the public `jpeg_destination_mgr` as its
+// first member and every callback recovers itself with
+// `(my_mem_dest_ptr)cinfo->dest` (jdatadst.c:43-53, 125).
+//
+// Keeping it there rather than in `CompressPrivate` is a soundness
+// requirement, not a stylistic echo. The callbacks run underneath a Rust frame
+// that already holds `&mut CompressPrivate`; if a callback re-derived a second
+// `&mut CompressPrivate` from `cinfo->master` it would be a sibling of that
+// live reference, not a reborrow of it, invalidating the caller's tag and
+// making every post-flush read of this state undefined behaviour that LLVM's
+// `noalias` is entitled to fold away.
 
-unsafe extern "C" fn mem_init_destination(cinfo: *mut c_void) {
-    install_dest_staging(cinfo);
+/// Our destination manager plus the private state its callbacks need.
+///
+/// `pub_mgr` **must** stay the first field: `cinfo->dest` points at it and the
+/// callbacks cast straight back, mirroring upstream's `struct
+/// jpeg_destination_mgr pub` first member (jdatadst.c:30, 44).
+#[repr(C)]
+struct OwnedDestMgr {
+    pub_mgr: JpegDestinationMgr,
+    kind: JpegDest,
+    /// stdio staging block; upstream's `JPOOL_IMAGE` `OUTPUT_BUF_SIZE` buffer
+    /// (jdatadst.c:67-69). The memory destination never uses it — like
+    /// upstream it fills the caller's buffer directly.
+    staging: Vec<u8>,
+    /// A failure detected inside a callback, as an upstream `JERR_*` code.
+    ///
+    /// Upstream raises these with `ERREXIT` from inside the callback, which
+    /// `longjmp`s straight out. We cannot: the callbacks run underneath a Rust
+    /// frame that still owns the encoded `Vec`, and a `longjmp` past it would
+    /// leak the allocation with no owner left to free it. So the callback
+    /// records the code, byte emission stops, and the public entry point
+    /// raises it through `error_exit` once its own allocations are dropped.
+    /// The C-visible behaviour is identical — `jpeg_finish_compress` still
+    /// leaves through `error_exit` with the same `msg_code`.
+    pending_error: Option<c_int>,
 }
 
+impl OwnedDestMgr {
+    fn new(
+        kind: JpegDest,
+        init_destination: unsafe extern "C" fn(*mut c_void),
+        empty_output_buffer: unsafe extern "C" fn(*mut c_void) -> CBoolean,
+        term_destination: unsafe extern "C" fn(*mut c_void),
+    ) -> Self {
+        Self {
+            pub_mgr: JpegDestinationMgr {
+                next_output_byte: std::ptr::null_mut(),
+                free_in_buffer: 0,
+                init_destination: Some(init_destination),
+                empty_output_buffer: Some(empty_output_buffer),
+                term_destination: Some(term_destination),
+            },
+            kind,
+            staging: Vec::new(),
+            pending_error: None,
+        }
+    }
+}
+
+/// Recover our `OwnedDestMgr` from `cinfo` inside one of our own callbacks.
+///
+/// # Safety
+///
+/// Only valid from a callback this module installed. Reaching such a callback
+/// means `cinfo->dest` is the `pub_mgr` field of an `OwnedDestMgr` we own — a
+/// caller cannot invoke it through a foreign manager without having first
+/// copied our function pointers into it, which no libjpeg contract permits.
+unsafe fn owned_dest_mut<'a>(cinfo: *mut c_void) -> Option<&'a mut OwnedDestMgr> {
+    let c: &mut JpegCompressPublic = unsafe { cinfo_compress_mut(cinfo) }?;
+    let dest: *mut JpegDestinationMgr = c.dest;
+    if dest.is_null() {
+        return None;
+    }
+    // SAFETY: `pub_mgr` is the first field of a `#[repr(C)]` struct, so the
+    // manager pointer and the owning struct share an address.
+    Some(unsafe { &mut *(dest as *mut OwnedDestMgr) })
+}
+
+/// Upstream `init_mem_destination` (jdatadst.c:75-79): deliberately empty.
+/// `jpeg_mem_dest` has already published `next_output_byte` / `free_in_buffer`,
+/// and re-initialising here would discard bytes on a buffered-image restart.
+unsafe extern "C" fn mem_init_destination(_cinfo: *mut c_void) {}
+
+/// Upstream `empty_mem_output_buffer` (jdatadst.c:120-147): the current buffer
+/// is full, so allocate a double-sized replacement, copy everything written so
+/// far into it, and free *only* a block we allocated ourselves.
 unsafe extern "C" fn mem_empty_output_buffer(cinfo: *mut c_void) -> CBoolean {
-    // Called when the staging buffer fills up. Drain what's there to
-    // the private `Vec`, then restart from the beginning.
-    drain_dest_buffer(cinfo, /*final_flush=*/ false);
-    install_dest_staging(cinfo);
+    let owned: &mut OwnedDestMgr = match unsafe { owned_dest_mut(cinfo) } {
+        Some(o) => o,
+        None => return 0,
+    };
+    let state: &mut MemDestState = match owned.kind {
+        JpegDest::Mem(ref mut s) => s,
+        // Unreachable through libjpeg's own flow: this callback is only
+        // installed by `jpeg_mem_dest`, which always sets a `Mem` kind. Report
+        // it as a buffer problem rather than letting it read as suspension.
+        JpegDest::File(_) => {
+            owned.pending_error = Some(JERR_BUFFER_SIZE);
+            return 0;
+        }
+    };
+    if state.buffer.is_null() {
+        owned.pending_error = Some(JERR_BUFFER_SIZE);
+        return 0;
+    }
+
+    // Exact doubling, as upstream (jdatadst.c:128). `bufsize` is never 0 here:
+    // `jpeg_mem_dest` replaces a zero-capacity caller buffer with its own
+    // `OUTPUT_BUF_SIZE` allocation, so this cannot degenerate to `malloc(0)`.
+    let old_bufsize: usize = state.bufsize;
+    let nextsize: usize = old_bufsize.saturating_mul(2);
+    let nextbuffer: *mut u8 = crate::alloc::libc_malloc(nextsize);
+    if nextbuffer.is_null() {
+        // Upstream: ERREXIT1(cinfo, JERR_OUT_OF_MEMORY, 10).
+        owned.pending_error = Some(JERR_OUT_OF_MEMORY);
+        return 0;
+    }
+    // SAFETY: `state.buffer` is a live `old_bufsize`-byte block (either the
+    // caller's buffer, whose capacity they declared, or our own allocation),
+    // and `nextbuffer` is a fresh block strictly larger than `old_bufsize`.
+    unsafe {
+        std::ptr::copy_nonoverlapping(state.buffer, nextbuffer, old_bufsize);
+    }
+    // Only ever free memory this library allocated. A caller-supplied buffer
+    // stays caller-owned (jdatadst.c:231-233) — freeing it would be a
+    // free-of-stack/static or a double free once the caller frees it too.
+    if !state.newbuffer.is_null() {
+        crate::alloc::libc_free(state.newbuffer);
+    }
+    state.newbuffer = nextbuffer;
+    state.buffer = nextbuffer;
+    state.bufsize = nextsize;
+    // SAFETY: `nextbuffer` has `nextsize == 2 * old_bufsize` bytes, so the
+    // offset is in bounds and `old_bufsize` bytes remain writable after it.
+    owned.pub_mgr.next_output_byte = unsafe { nextbuffer.add(old_bufsize) };
+    owned.pub_mgr.free_in_buffer = old_bufsize;
     1
 }
 
+/// Upstream `term_mem_destination` (jdatadst.c:176-183): publish the buffer
+/// actually in use and the number of bytes written into it.
 unsafe extern "C" fn mem_term_destination(cinfo: *mut c_void) {
-    drain_dest_buffer(cinfo, /*final_flush=*/ true);
-}
-
-/// Point `dest->next_output_byte` / `free_in_buffer` at the private
-/// staging buffer so the compressor has somewhere to write. The caller
-/// is responsible for invoking this both at `init_destination` time and
-/// after each `empty_output_buffer`.
-fn install_dest_staging(cinfo: *mut c_void) {
-    let c: &mut JpegCompressPublic = match unsafe { cinfo_compress_mut(cinfo) } {
-        Some(c) => c,
+    let owned: &mut OwnedDestMgr = match unsafe { owned_dest_mut(cinfo) } {
+        Some(o) => o,
         None => return,
     };
-    let priv_ptr: *mut c_void = c.master;
-    let priv_state: &mut CompressPrivate = match unsafe { priv_compress_from_ptr(priv_ptr) } {
-        Some(p) => p,
-        None => return,
-    };
-    // A 4 KiB staging chunk keeps syscall overhead down without bloating
-    // the working set. It matches libjpeg-turbo's `OUTPUT_BUF_SIZE`.
-    const STAGING_BYTES: usize = 4096;
-    priv_state.dest_buf.resize(STAGING_BYTES, 0);
-    if !c.dest.is_null() {
-        let dest: &mut JpegDestinationMgr = unsafe { &mut *c.dest };
-        dest.next_output_byte = priv_state.dest_buf.as_mut_ptr();
-        dest.free_in_buffer = STAGING_BYTES;
+    // Upstream subtracts in `size_t` and would wrap; we clamp instead. Only an
+    // application that corrupted `free_in_buffer` past `bufsize` can tell the
+    // difference, and reporting 0 beats reporting a near-`SIZE_MAX` length.
+    let free_in_buffer: usize = owned.pub_mgr.free_in_buffer;
+    if let JpegDest::Mem(ref state) = owned.kind {
+        // SAFETY: both out-pointers were validated non-NULL in `jpeg_mem_dest`
+        // and belong to the caller for the lifetime of this compress handle.
+        unsafe {
+            *state.outbuffer = state.buffer;
+            *state.outsize = state.bufsize.saturating_sub(free_in_buffer) as std::os::raw::c_ulong;
+        }
     }
 }
 
-/// Copy bytes from the staging buffer into the final destination sink.
-/// The `_final_flush` flag is kept as a contract marker — libjpeg
-/// semantically distinguishes incremental flushes from the terminal
-/// flush, but our synchronous in-memory pipeline copies the same
-/// consumed prefix in either case.
-fn drain_dest_buffer(cinfo: *mut c_void, _final_flush: bool) {
-    let c: &mut JpegCompressPublic = match unsafe { cinfo_compress_mut(cinfo) } {
-        Some(c) => c,
+/// Upstream `init_destination` (jdatadst.c:61-73): hand the compressor an
+/// `OUTPUT_BUF_SIZE` staging block to fill.
+unsafe extern "C" fn stdio_init_destination(cinfo: *mut c_void) {
+    let owned: &mut OwnedDestMgr = match unsafe { owned_dest_mut(cinfo) } {
+        Some(o) => o,
         None => return,
     };
-    let priv_ptr: *mut c_void = c.master;
-    let priv_state: &mut CompressPrivate = match unsafe { priv_compress_from_ptr(priv_ptr) } {
-        Some(p) => p,
+    owned.staging.clear();
+    owned.staging.resize(OUTPUT_BUF_SIZE, 0);
+    owned.pub_mgr.next_output_byte = owned.staging.as_mut_ptr();
+    owned.pub_mgr.free_in_buffer = OUTPUT_BUF_SIZE;
+}
+
+/// Upstream `empty_output_buffer` (jdatadst.c:105-118): write the staging
+/// block out and reset it. A short write is `JERR_FILE_WRITE`.
+unsafe extern "C" fn stdio_empty_output_buffer(cinfo: *mut c_void) -> CBoolean {
+    let owned: &mut OwnedDestMgr = match unsafe { owned_dest_mut(cinfo) } {
+        Some(o) => o,
+        None => return 0,
+    };
+    let file: *mut c_void = match owned.kind {
+        JpegDest::File(ref s) => s.outfile,
+        // See `mem_empty_output_buffer`: not reachable through libjpeg's flow.
+        JpegDest::Mem(_) => {
+            owned.pending_error = Some(JERR_BUFFER_SIZE);
+            return 0;
+        }
+    };
+    if file.is_null() {
+        owned.pending_error = Some(JERR_FILE_WRITE);
+        return 0;
+    }
+    // Upstream writes a hard-coded OUTPUT_BUF_SIZE because it only ever calls
+    // this callback with a full buffer. Deriving the count from
+    // `free_in_buffer` is identical in that case and avoids emitting
+    // uninitialised staging bytes if anything ever calls it early.
+    let datacount: usize = owned
+        .staging
+        .len()
+        .saturating_sub(owned.pub_mgr.free_in_buffer);
+    if datacount > 0 && write_c_file(file, &owned.staging[..datacount]) != datacount {
+        owned.pending_error = Some(JERR_FILE_WRITE);
+        return 0;
+    }
+    owned.pub_mgr.next_output_byte = owned.staging.as_mut_ptr();
+    owned.pub_mgr.free_in_buffer = owned.staging.len();
+    1
+}
+
+/// Upstream `term_destination` (jdatadst.c:159-174): flush the tail, `fflush`,
+/// and fail on any `ferror` the stream accumulated.
+unsafe extern "C" fn stdio_term_destination(cinfo: *mut c_void) {
+    let owned: &mut OwnedDestMgr = match unsafe { owned_dest_mut(cinfo) } {
+        Some(o) => o,
         None => return,
     };
-    if c.dest.is_null() {
+    let file: *mut c_void = match owned.kind {
+        JpegDest::File(ref s) => s.outfile,
+        JpegDest::Mem(_) => {
+            owned.pending_error = Some(JERR_BUFFER_SIZE);
+            return;
+        }
+    };
+    if file.is_null() {
+        owned.pending_error = Some(JERR_FILE_WRITE);
         return;
     }
-    let dest: &mut JpegDestinationMgr = unsafe { &mut *c.dest };
-    let total: usize = priv_state.dest_buf.len();
-    let consumed: usize = total.saturating_sub(dest.free_in_buffer);
-    let bytes: &[u8] = &priv_state.dest_buf[..consumed];
-    if bytes.is_empty() {
+    let datacount: usize = owned
+        .staging
+        .len()
+        .saturating_sub(owned.pub_mgr.free_in_buffer);
+    if datacount > 0 && write_c_file(file, &owned.staging[..datacount]) != datacount {
+        owned.pending_error = Some(JERR_FILE_WRITE);
         return;
     }
-    match priv_state.dest_kind {
-        JpegDest::Mem { outbuffer, outsize } => {
-            // SAFETY: caller-supplied out-pointers, validated non-NULL
-            // at `jpeg_mem_dest` setup time. We grow the buffer by
-            // allocating a fresh libc block each flush; for short files
-            // this is fine, and large files quickly reach EOF.
-            unsafe {
-                let prev_ptr: *mut u8 = *outbuffer;
-                let prev_len: usize = *outsize as usize;
-                let new_len: usize = prev_len + bytes.len();
-                let new_ptr: *mut u8 = crate::alloc::libc_malloc(new_len);
-                if new_ptr.is_null() {
-                    return;
-                }
-                if !prev_ptr.is_null() && prev_len > 0 {
-                    std::ptr::copy_nonoverlapping(prev_ptr, new_ptr, prev_len);
-                }
-                std::ptr::copy_nonoverlapping(bytes.as_ptr(), new_ptr.add(prev_len), bytes.len());
-                if !prev_ptr.is_null() {
-                    crate::alloc::libc_free(prev_ptr);
-                }
-                *outbuffer = new_ptr;
-                *outsize = new_len as std::os::raw::c_ulong;
-            }
-        }
-        JpegDest::File { file } => {
-            if file.is_null() {
-                return;
-            }
-            write_c_file(file, bytes);
-        }
-        JpegDest::None => {}
-    }
-}
-
-/// Write `bytes` to a `FILE *` via libc `fwrite`.
-fn write_c_file(file: *mut c_void, bytes: &[u8]) {
-    extern "C" {
-        fn fwrite(ptr: *const c_void, size: usize, nmemb: usize, stream: *mut c_void) -> usize;
-    }
+    // SAFETY: `file` is the caller-supplied `FILE *`, still open per the
+    // libjpeg contract that the application closes it after compression.
     unsafe {
-        fwrite(bytes.as_ptr() as *const c_void, 1, bytes.len(), file);
+        c_fflush(file);
+        if c_ferror(file) != 0 {
+            owned.pending_error = Some(JERR_FILE_WRITE);
+        }
     }
+}
+
+extern "C" {
+    #[link_name = "fwrite"]
+    fn c_fwrite(ptr: *const c_void, size: usize, nmemb: usize, stream: *mut c_void) -> usize;
+    #[link_name = "fflush"]
+    fn c_fflush(stream: *mut c_void) -> c_int;
+    #[link_name = "ferror"]
+    fn c_ferror(stream: *mut c_void) -> c_int;
+}
+
+/// Write `bytes` to a `FILE *` via libc `fwrite`, returning the byte count it
+/// accepted so callers can detect a short write.
+fn write_c_file(file: *mut c_void, bytes: &[u8]) -> usize {
+    if bytes.is_empty() {
+        return 0;
+    }
+    // SAFETY: `file` is a caller-supplied `FILE *` and `bytes` is a live slice.
+    unsafe { c_fwrite(bytes.as_ptr() as *const c_void, 1, bytes.len(), file) }
+}
+
+/// Whether `cinfo->dest` is the manager this module installed.
+fn dest_mgr_is_ours(c: &JpegCompressPublic, priv_state: &CompressPrivate) -> bool {
+    match priv_state.dest_mgr {
+        Some(ref mgr) => std::ptr::eq(
+            c.dest as *const JpegDestinationMgr,
+            &mgr.pub_mgr as *const JpegDestinationMgr,
+        ),
+        None => false,
+    }
+}
+
+/// Reject reusing a destination manager this function did not create.
+///
+/// Upstream (jdatadst.c:204-212 / 252-257) compares `init_destination` against
+/// its own callback: the manager's private area behind the public struct may be
+/// a different size, so reinterpreting a foreign one would read and write out
+/// of bounds. We compare the manager's *address* against our own box and check
+/// the recorded kind, which decides the same question without depending on
+/// function-pointer identity surviving linker identical-code folding.
+///
+/// Returns `true` when the caller may proceed.
+fn dest_mgr_is_reusable(
+    cinfo: *mut c_void,
+    c: &JpegCompressPublic,
+    priv_state: &CompressPrivate,
+    want_mem: bool,
+) -> bool {
+    if c.dest.is_null() {
+        return true;
+    }
+    let compatible: bool = dest_mgr_is_ours(c, priv_state)
+        && priv_state
+            .dest_mgr
+            .as_ref()
+            .is_some_and(|mgr| matches!(mgr.kind, JpegDest::Mem(_)) == want_mem);
+    if !compatible {
+        invoke_error_exit(cinfo, JERR_BUFFER_SIZE);
+        return false;
+    }
+    true
 }
 
 /// Install a destination manager that streams bytes into a `FILE *`.
@@ -5901,13 +6176,26 @@ pub extern "C" fn jpeg_stdio_dest(cinfo: *mut c_void, outfile: *mut c_void) {
             Some(p) => p,
             None => return,
         };
-        priv_state.dest_kind = JpegDest::File { file: outfile };
-        install_dest_mgr(c, priv_state);
+        if !dest_mgr_is_reusable(cinfo, c, priv_state, /*want_mem=*/ false) {
+            return;
+        }
+        install_dest_mgr(
+            c,
+            priv_state,
+            JpegDest::File(StdioDestState { outfile }),
+            stdio_init_destination,
+            stdio_empty_output_buffer,
+            stdio_term_destination,
+        );
     })
 }
 
-/// Install a destination manager that accumulates into a libc-allocated
-/// buffer owned via `*outbuffer` / `*outsize`.
+/// Install a destination manager that fills the caller's buffer, growing into
+/// library-allocated memory only when the caller's capacity runs out.
+///
+/// Mirrors upstream `jpeg_mem_dest` (jdatadst.c:236-277) including its
+/// ownership rule: `*outsize` is the caller buffer's **capacity**, and a
+/// caller-supplied buffer is never freed by this library.
 #[no_mangle]
 pub extern "C" fn jpeg_mem_dest(
     cinfo: *mut c_void,
@@ -5919,42 +6207,103 @@ pub extern "C" fn jpeg_mem_dest(
             Some(c) => c,
             None => return,
         };
+        if outbuffer.is_null() || outsize.is_null() {
+            // Upstream: ERREXIT(cinfo, JERR_BUFFER_SIZE) (jdatadst.c:242-243).
+            invoke_error_exit(cinfo, JERR_BUFFER_SIZE);
+            return;
+        }
         let priv_ptr: *mut c_void = c.master;
         let priv_state: &mut CompressPrivate = match unsafe { priv_compress_from_ptr(priv_ptr) } {
             Some(p) => p,
             None => return,
         };
-        if outbuffer.is_null() || outsize.is_null() {
-            priv_state.dest_kind = JpegDest::None;
+        if !dest_mgr_is_reusable(cinfo, c, priv_state, /*want_mem=*/ true) {
             return;
         }
-        // libjpeg contract: if `*outbuffer` is NULL, allocate on first flush
-        // and set `*outsize` to 0. Honour that pre-state.
-        unsafe {
-            if (*outbuffer).is_null() {
-                *outsize = 0;
+
+        // SAFETY: both pointers are non-null caller storage, checked above.
+        let (caller_buffer, caller_capacity): (*mut u8, usize) =
+            unsafe { (*outbuffer, *outsize as usize) };
+        let mut state: MemDestState = MemDestState {
+            outbuffer,
+            outsize,
+            newbuffer: std::ptr::null_mut(),
+            buffer: caller_buffer,
+            bufsize: caller_capacity,
+        };
+        if caller_buffer.is_null() || caller_capacity == 0 {
+            // No usable caller buffer: allocate one and publish it right away,
+            // exactly as upstream does (jdatadst.c:267-273). Consumers such as
+            // libtiff read `*outbuffer` before any compression happens.
+            let fresh: *mut u8 = crate::alloc::libc_malloc(OUTPUT_BUF_SIZE);
+            if fresh.is_null() {
+                invoke_error_exit_parm(cinfo, JERR_OUT_OF_MEMORY, 10);
+                return;
+            }
+            state.newbuffer = fresh;
+            state.buffer = fresh;
+            state.bufsize = OUTPUT_BUF_SIZE;
+            // SAFETY: caller storage, validated non-null above.
+            unsafe {
+                *outbuffer = fresh;
+                *outsize = OUTPUT_BUF_SIZE as std::os::raw::c_ulong;
             }
         }
-        priv_state.dest_kind = JpegDest::Mem { outbuffer, outsize };
-        install_dest_mgr(c, priv_state);
+
+        let buffer: *mut u8 = state.buffer;
+        let bufsize: usize = state.bufsize;
+        install_dest_mgr(
+            c,
+            priv_state,
+            JpegDest::Mem(state),
+            mem_init_destination,
+            mem_empty_output_buffer,
+            mem_term_destination,
+        );
+        if let Some(ref mut mgr) = priv_state.dest_mgr {
+            // Upstream publishes the write cursor from `jpeg_mem_dest` itself,
+            // not from `init_destination` (jdatadst.c:275-276).
+            mgr.pub_mgr.next_output_byte = buffer;
+            mgr.pub_mgr.free_in_buffer = bufsize;
+        }
     })
 }
 
-/// Create-or-reuse the `JpegDestinationMgr` and point `cinfo.dest` at it.
-fn install_dest_mgr(c: &mut JpegCompressPublic, priv_state: &mut CompressPrivate) {
-    if priv_state.dest_mgr.is_none() {
-        priv_state.dest_mgr = Some(Box::new(JpegDestinationMgr {
-            next_output_byte: std::ptr::null_mut(),
-            free_in_buffer: 0,
-            init_destination: Some(mem_init_destination),
-            empty_output_buffer: Some(mem_empty_output_buffer),
-            term_destination: Some(mem_term_destination),
-        }));
+/// Create-or-reuse the `OwnedDestMgr` and point `cinfo.dest` at its public
+/// part.
+///
+/// Upstream keeps the manager in the permanent pool so it survives
+/// `jpeg_abort` and multi-image reuse; our equivalent is the box owned by
+/// `CompressPrivate`, which lives until `jpeg_destroy_compress`.
+fn install_dest_mgr(
+    c: &mut JpegCompressPublic,
+    priv_state: &mut CompressPrivate,
+    kind: JpegDest,
+    init_destination: unsafe extern "C" fn(*mut c_void),
+    empty_output_buffer: unsafe extern "C" fn(*mut c_void) -> CBoolean,
+    term_destination: unsafe extern "C" fn(*mut c_void),
+) {
+    match priv_state.dest_mgr {
+        Some(ref mut mgr) => {
+            mgr.pub_mgr.init_destination = Some(init_destination);
+            mgr.pub_mgr.empty_output_buffer = Some(empty_output_buffer);
+            mgr.pub_mgr.term_destination = Some(term_destination);
+            mgr.kind = kind;
+            mgr.pending_error = None;
+        }
+        None => {
+            priv_state.dest_mgr = Some(Box::new(OwnedDestMgr::new(
+                kind,
+                init_destination,
+                empty_output_buffer,
+                term_destination,
+            )));
+        }
     }
     c.dest = priv_state
         .dest_mgr
         .as_mut()
-        .map(|b| b.as_mut() as *mut JpegDestinationMgr)
+        .map(|mgr| &mut mgr.pub_mgr as *mut JpegDestinationMgr)
         .unwrap_or(std::ptr::null_mut());
 }
 
@@ -6479,10 +6828,10 @@ fn run_encoder_and_flush(c: &mut JpegCompressPublic, priv_state: &mut CompressPr
 
     match push_status {
         None => false,
-        Some(true) => true,
-        Some(false) => {
-            raise_cant_suspend(c, priv_state);
-            false
+        Some(completed) => {
+            let failed: bool = !completed || dest_flush_failed(priv_state);
+            finish_dest_flush(c, priv_state, completed);
+            !failed
         }
     }
 }
@@ -6540,8 +6889,12 @@ fn push_bytes_through_dest_mgr(
                     return false;
                 }
             } else {
-                // No callback installed and no room — nothing more we can do.
-                break;
+                // No `empty_output_buffer` and no room left. Upstream cannot
+                // reach this (the callback is mandatory), and continuing would
+                // publish a truncated stream as a success — the exact defect
+                // this function's contract forbids. Report it as suspension so
+                // the caller raises an error instead.
+                return false;
             }
         }
         let (dst_ptr, capacity): (*mut u8, usize) = {
@@ -6549,7 +6902,10 @@ fn push_bytes_through_dest_mgr(
             (dest.next_output_byte, dest.free_in_buffer)
         };
         if dst_ptr.is_null() || capacity == 0 {
-            break;
+            // An application manager returned TRUE from `empty_output_buffer`
+            // without actually granting space. Same reasoning as above: never
+            // silently drop the remaining bytes.
+            return false;
         }
         let take: usize = std::cmp::min(capacity, encoded.len() - offset);
         unsafe {
@@ -6591,7 +6947,69 @@ fn raise_cant_suspend(c: &mut JpegCompressPublic, priv_state: &mut CompressPriva
          — see push_bytes_through_dest_mgr in jpeglib.rs",
     )
     .unwrap_or_default();
-    invoke_error_exit(c as *mut JpegCompressPublic as *mut c_void, 25);
+    invoke_error_exit(
+        c as *mut JpegCompressPublic as *mut c_void,
+        JERR_CANT_SUSPEND,
+    );
+}
+
+/// Whether the library destination manager recorded a failure during the last
+/// flush. Peeks without consuming, so `finish_dest_flush` still reports it.
+fn dest_flush_failed(priv_state: &CompressPrivate) -> bool {
+    priv_state
+        .dest_mgr
+        .as_ref()
+        .is_some_and(|mgr| mgr.pending_error.is_some())
+}
+
+/// Consume the failure the library destination manager recorded, if any.
+///
+/// Safe to reach through `&mut CompressPrivate` because no destination
+/// callback is running at this point — see the `OwnedDestMgr` note on why the
+/// callbacks themselves must not take this route.
+fn take_pending_dest_error(priv_state: &mut CompressPrivate) -> Option<c_int> {
+    priv_state
+        .dest_mgr
+        .as_mut()
+        .and_then(|mgr| mgr.pending_error.take())
+}
+
+/// Close out a `push_bytes_through_dest_mgr` call: report whatever the
+/// destination manager signalled through `cinfo->err->error_exit`.
+///
+/// Two distinct failures arrive here. A library destination manager that hit
+/// an I/O or allocation failure recorded its upstream `JERR_*` code in
+/// `pending_dest_error` (it cannot `longjmp` from inside the callback without
+/// leaking the encoded buffer — see the field's documentation). An
+/// *application-supplied* manager that returned `FALSE` from
+/// `empty_output_buffer` is asking for suspension, which the deferred-encode
+/// shim cannot honour, so it gets `JERR_CANT_SUSPEND`.
+///
+/// Like `raise_cant_suspend`, this must run only after the caller's own heap
+/// allocations are out of scope: `error_exit` normally `longjmp`s away.
+fn finish_dest_flush(
+    c: &mut JpegCompressPublic,
+    priv_state: &mut CompressPrivate,
+    completed: bool,
+) {
+    if let Some(code) = take_pending_dest_error(priv_state) {
+        priv_state.last_error = CString::new(match code {
+            JERR_FILE_WRITE => {
+                "destination stream rejected the encoded bytes (short write or \
+                 stream error at flush) — JERR_FILE_WRITE"
+            }
+            JERR_OUT_OF_MEMORY => {
+                "could not grow the jpeg_mem_dest output buffer — JERR_OUT_OF_MEMORY"
+            }
+            _ => "destination manager reported a fatal error",
+        })
+        .unwrap_or_default();
+        invoke_error_exit(c as *mut JpegCompressPublic as *mut c_void, code);
+        return;
+    }
+    if !completed {
+        raise_cant_suspend(c, priv_state);
+    }
 }
 
 /// Construct a new byte buffer that inserts pending APPn markers and
@@ -7142,9 +7560,7 @@ pub extern "C" fn jpeg_write_tables(cinfo: *mut c_void) {
         }
         let completed: bool = push_bytes_through_dest_mgr(c, priv_state, &tables_bytes);
         drop(tables_bytes);
-        if !completed {
-            raise_cant_suspend(c, priv_state);
-        }
+        finish_dest_flush(c, priv_state, completed);
     })
 }
 
@@ -7609,10 +8025,10 @@ fn run_raw_encoder_and_flush(c: &mut JpegCompressPublic, priv_state: &mut Compre
 
     match push_status {
         None => false,
-        Some(true) => true,
-        Some(false) => {
-            raise_cant_suspend(c, priv_state);
-            false
+        Some(completed) => {
+            let failed: bool = !completed || dest_flush_failed(priv_state);
+            finish_dest_flush(c, priv_state, completed);
+            !failed
         }
     }
 }
@@ -7744,10 +8160,10 @@ fn run_raw_encoder_12_and_flush(
 
     match push_status {
         None => false,
-        Some(true) => true,
-        Some(false) => {
-            raise_cant_suspend(c, priv_state);
-            false
+        Some(completed) => {
+            let failed: bool = !completed || dest_flush_failed(priv_state);
+            finish_dest_flush(c, priv_state, completed);
+            !failed
         }
     }
 }
@@ -8617,10 +9033,10 @@ fn run_coefficient_writer_and_flush(
 
     match push_status {
         None => false,
-        Some(true) => true,
-        Some(false) => {
-            raise_cant_suspend(c, priv_state);
-            false
+        Some(completed) => {
+            let failed: bool = !completed || dest_flush_failed(priv_state);
+            finish_dest_flush(c, priv_state, completed);
+            !failed
         }
     }
 }

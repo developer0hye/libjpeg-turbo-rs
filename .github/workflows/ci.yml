@@ -312,6 +312,42 @@ jobs:
         run: >
           cargo test -p libjpeg-turbo-rs-capi
           --test capi_classic_lifecycle_pathological -- --nocapture
+      # P4-108's destination canaries are differential: one C binary is linked
+      # against our cdylib and against a reference libjpeg, and the two
+      # contract reports must be byte-identical. Build the *pinned submodule*
+      # with WITH_JPEG8=1 so the oracle is the same v8 ABI the shim claims,
+      # rather than whatever libjpeg the runner image happens to ship.
+      - name: Build the pinned reference libjpeg-turbo at the v8 ABI
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake nasm
+          cmake -S references/libjpeg-turbo -B /tmp/ljt8/build \
+            -DCMAKE_BUILD_TYPE=Release -DWITH_JPEG8=1 \
+            -DCMAKE_INSTALL_PREFIX=/tmp/ljt8/prefix
+          cmake --build /tmp/ljt8/build -j"$(nproc)"
+          cmake --install /tmp/ljt8/build
+          grep -Eq '^#define[[:space:]]+JPEG_LIB_VERSION[[:space:]]+80$' \
+            /tmp/ljt8/prefix/include/jconfig.h
+      # Ubuntu also provides /dev/full, so the fflush/ferror scenario runs for
+      # real here instead of reporting itself unavailable as it does on macOS.
+      - name: Classic destination ownership + stdio I/O parity (P4-108)
+        env:
+          LIBJPEG_TURBO_REFERENCE_DIR: /tmp/ljt8/prefix
+        run: |
+          set -o pipefail
+          cargo test -p libjpeg-turbo-rs-capi \
+            --test capi_classic_dest_ownership -- --nocapture 2>&1 | tee p4108.log
+          # A missing reference build would silently drop the differential half
+          # of every case, so fail closed on any skip line.
+          if grep -q '^SKIP' p4108.log; then
+            echo "P4-108 canaries skipped in CI; the reference leg is required here" >&2
+            grep '^SKIP' p4108.log >&2
+            exit 1
+          fi
+          grep -q 'dev_full_available=1' p4108.log || {
+            echo "expected /dev/full to be exercised on ubuntu-latest" >&2
+            exit 1
+          }
 
   test-cross-platform:
     name: Test (${{ matrix.os }})

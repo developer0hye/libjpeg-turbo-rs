@@ -387,9 +387,9 @@
 - [x] Memory-to-memory compress (`Vec<u8>` output)
 - [x] Memory-to-memory decompress (byte slice → `Image`)
 - [ ] Classic `jpeg_CreateCompress` / `jpeg_CreateDecompress` version/size guards — P4-110
-- [ ] Full classic `jpeg_stdio_dest()` contract — native file I/O exists; short-write/flush errors remain P4-108
+- [x] Full classic `jpeg_stdio_dest()` contract — short writes, `fflush`, and `ferror` raise `JERR_FILE_WRITE`; foreign-manager reuse raises `JERR_BUFFER_SIZE` (P4-108)
 - [ ] Full classic `jpeg_stdio_src()` contract — native file I/O exists; FILE buffering/Windows/error semantics remain P4-109
-- [ ] Full classic `jpeg_mem_dest()` ownership/reallocation contract — native Vec output exists; P4-108
+- [x] Full classic `jpeg_mem_dest()` ownership/reallocation contract — caller capacity honoured, caller buffers never freed, doubling growth into library memory (P4-108)
 - [ ] Full classic `jpeg_mem_src()` validation/manager-replacement contract — native slice input exists; P4-109
 - [x] Custom `jpeg_destination_mgr` — User-defined output stream (`stream::compress_to_writer`)
 - [x] Custom `jpeg_source_mgr` — User-defined input stream (`stream::decompress_from_reader`, buffering; `decompress_from_reader_incremental` for bounded input memory on interleaved baseline — P4-58)

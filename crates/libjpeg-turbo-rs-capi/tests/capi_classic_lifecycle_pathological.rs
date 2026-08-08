@@ -543,8 +543,10 @@ int main(void) {
          * catchable; we don't pin which one. We use the symbolic
          * JERR_CANT_SUSPEND from <jerror.h> rather than its numeric
          * value because the enum shifts between JPEG_LIB_VERSION
-         * targets (v6b excludes JERR_ARITH_NOTIMPL, so every code
-         * alphabetically after it slides by 1). */
+         * targets (v6b is the only one that *includes*
+         * JERR_ARITH_NOTIMPL — jerror.h gates it on
+         * `JPEG_LIB_VERSION < 70` — so every code after it sits one
+         * higher there than it does at v7/v8). */
         if (jerr.captured_code != JERR_CANT_SUSPEND) {
             fprintf(stderr,
                 "expected JERR_CANT_SUSPEND (%d), got %d\n",
