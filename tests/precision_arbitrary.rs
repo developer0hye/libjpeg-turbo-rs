@@ -670,9 +670,13 @@ fn read_number(data: &[u8], idx: usize) -> (usize, usize) {
 /// Precisions not supported by C djpeg/cjpeg are gracefully skipped.
 #[test]
 fn c_djpeg_precision_arbitrary_diff_zero() {
-    let djpeg: Option<PathBuf> = helpers::djpeg_path();
-    let cjpeg: Option<PathBuf> = helpers::cjpeg_path();
+    let djpeg: Option<PathBuf> = helpers::optional_c_tool("djpeg");
+    let cjpeg: Option<PathBuf> = helpers::optional_c_tool("cjpeg");
 
+    // P4-116: `optional_c_tool` has already failed the run if either tool is
+    // missing under CI, so reaching here with both absent is local-only. The
+    // former plain check let a runner that had lost *one* tool quietly run half
+    // the matrix and still report green.
     if djpeg.is_none() && cjpeg.is_none() {
         eprintln!("SKIP: neither djpeg nor cjpeg found");
         return;
@@ -680,7 +684,18 @@ fn c_djpeg_precision_arbitrary_diff_zero() {
 
     let (w, h): (usize, usize) = (8, 8);
 
+    // P4-116: two legs of 15 precisions each. Without this the whole matrix
+    // could drop to zero comparisons — an absent tool, an unsupported cjpeg
+    // switch, or a sub-byte precision djpeg mis-renders each removed cases
+    // silently — and the test still reported green.
+    const PRECISIONS: usize = 15; // 2..=16 inclusive
+    let mut tally: helpers::ComparisonTally =
+        helpers::ComparisonTally::new("precision_arbitrary", PRECISIONS * 2);
+
     // --- Part 1: Rust encode -> C djpeg decode for each precision ---
+    if djpeg.is_none() {
+        tally.excluded_n(PRECISIONS, "djpeg absent (local only; CI already failed)");
+    }
     if let Some(ref djpeg_bin) = djpeg {
         for precision in 2u8..=16 {
             let max_val: u32 = (1u32 << precision as u32) - 1;
@@ -723,14 +738,17 @@ fn c_djpeg_precision_arbitrary_diff_zero() {
             // djpeg may output unexpected values for very low precisions (2-7 bit)
             // because C libjpeg-turbo may not fully support sub-byte lossless
             // precisions in its PGM output path. Validate that all output values
-            // are within the expected range; skip if not.
+            // are within the expected range; exclude the case if not.
             let c_max_val: u16 = *c_pixels.iter().max().unwrap_or(&0);
             if c_max_val > out_maxval {
+                // P4-116: recorded as a named exclusion rather than a bare
+                // `continue`, so the summary reports how much of the matrix
+                // this C limitation actually removed.
                 eprintln!(
-                    "SKIP: precision {}: djpeg output contains values up to {} but maxval={}, \
-                     C tool may not support this precision correctly",
+                    "  precision {}: djpeg output reaches {} above its own maxval {}",
                     precision, c_max_val, out_maxval
                 );
+                tally.excluded("djpeg PGM output exceeds its declared maxval");
                 continue;
             }
 
@@ -767,17 +785,27 @@ fn c_djpeg_precision_arbitrary_diff_zero() {
                     max_diff
                 );
             }
+            tally.compared();
         }
     }
 
     // --- Part 2: C cjpeg encode -> Rust decode for each precision ---
+    if cjpeg.is_none() {
+        tally.excluded_n(PRECISIONS, "cjpeg absent (local only; CI already failed)");
+    }
     if let Some(ref cjpeg_bin) = cjpeg {
+        // These used to `return`, which dropped Part 1's comparisons out of the
+        // report entirely. Record the exclusion and finish instead (P4-116).
         if !cjpeg_supports_lossless(cjpeg_bin) {
             helpers::skip_missing_c_capability("cjpeg", "-lossless");
+            tally.excluded_n(PRECISIONS, "cjpeg lacks -lossless");
+            tally.finish();
             return;
         }
         if !cjpeg_supports_precision(cjpeg_bin) {
             helpers::skip_missing_c_capability("cjpeg", "-precision");
+            tally.excluded_n(PRECISIONS, "cjpeg lacks -precision");
+            tally.finish();
             return;
         }
 
@@ -826,6 +854,9 @@ fn c_djpeg_precision_arbitrary_diff_zero() {
                 "precision {}: C-encode -> Rust-decode must be pixel-exact",
                 precision
             );
+            tally.compared();
         }
     }
+
+    tally.finish();
 }

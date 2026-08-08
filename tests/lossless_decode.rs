@@ -366,15 +366,17 @@ fn decode_lossless_3comp_gradient() {
 
 /// Check whether `djpeg` can handle SOF3 (lossless) by feeding it a lossless JPEG
 /// and seeing if it exits successfully.
+///
+/// P4-116: the probe file is named per call rather than from `process::id()`
+/// alone. Cargo runs `#[test]`s as parallel threads of one process, so a
+/// pid-only path is shared by every concurrent caller in this binary — they
+/// delete each other's input mid-`djpeg`, and the probe then reports
+/// "unsupported" for a djpeg that handles SOF3 fine. `helpers::TempFile` adds a
+/// counter and removes the file on drop.
 fn djpeg_supports_lossless(djpeg: &Path, lossless_jpeg: &[u8]) -> bool {
-    let tmp_dir = std::env::temp_dir();
-    let probe_path = tmp_dir.join(format!("ljt_lossless_probe_{}.jpg", std::process::id()));
-    if std::fs::write(&probe_path, lossless_jpeg).is_err() {
-        return false;
-    }
-    let result = Command::new(djpeg).arg("-pnm").arg(&probe_path).output();
-    std::fs::remove_file(&probe_path).ok();
-    match result {
+    let probe: helpers::TempFile = helpers::TempFile::new("lossless_probe.jpg");
+    probe.write_bytes(lossless_jpeg);
+    match Command::new(djpeg).arg("-pnm").arg(probe.path()).output() {
         Ok(o) => o.status.success(),
         Err(_) => false,
     }

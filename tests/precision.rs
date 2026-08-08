@@ -392,9 +392,13 @@ fn roundtrip_16bit_full_range() {
 /// Additionally tests C cjpeg encode -> Rust decode for both precisions.
 #[test]
 fn c_djpeg_precision_diff_zero() {
-    let djpeg: Option<PathBuf> = helpers::djpeg_path();
-    let cjpeg: Option<PathBuf> = helpers::cjpeg_path();
+    let djpeg: Option<PathBuf> = helpers::optional_c_tool("djpeg");
+    let cjpeg: Option<PathBuf> = helpers::optional_c_tool("cjpeg");
 
+    // P4-116: `optional_c_tool` has already failed the run if either tool is
+    // missing under CI, so reaching here with both absent is local-only. The
+    // former plain check let a runner that had lost *one* tool quietly run half
+    // the matrix and still report green.
     if djpeg.is_none() && cjpeg.is_none() {
         eprintln!("SKIP: neither djpeg nor cjpeg found");
         return;
@@ -429,10 +433,11 @@ fn c_djpeg_precision_diff_zero() {
 
         if !output.status.success() {
             eprintln!(
-                "SKIP {}: djpeg cannot decode 12-bit JPEG (may need 12-bit build): {}",
+                "  {}: djpeg stderr: {}",
                 label,
                 String::from_utf8_lossy(&output.stderr).trim()
             );
+            helpers::skip_missing_c_capability("djpeg", "12-bit decode");
         } else {
             // Parse C output and compare against Rust decode
             let rust_img: Image12 = decompress_12bit(&jpeg)
@@ -512,10 +517,11 @@ fn c_djpeg_precision_diff_zero() {
 
         if !output.status.success() {
             eprintln!(
-                "SKIP {}: djpeg cannot decode 16-bit lossless JPEG: {}",
+                "  {}: djpeg stderr: {}",
                 label,
                 String::from_utf8_lossy(&output.stderr).trim()
             );
+            helpers::skip_missing_c_capability("djpeg", "16-bit lossless decode");
         } else {
             let (c_w, c_h, _c_comp, c_maxval, c_pixels) = parse_pnm_to_u16(tmp_pnm.path());
 

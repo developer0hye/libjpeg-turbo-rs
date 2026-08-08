@@ -258,14 +258,17 @@ fn c_djpeg_cross_validation_skip_scanlines() {
 
         if !output.status.success() {
             let stderr: String = String::from_utf8_lossy(&output.stderr).to_string();
-            // Some djpeg versions may not support -skip with -ppm; skip gracefully
-            if stderr.contains("not supported") || stderr.contains("Invalid") {
-                eprintln!(
-                    "SKIP: djpeg -skip {},{} not supported: {}",
-                    skip_y0, skip_y1, stderr
-                );
-                continue;
-            }
+            // P4-116: `-skip` support was probed before this loop, so reaching
+            // here means the *arguments* this case built were rejected. That is
+            // a defect in the case, not a toolchain gap, and used to `continue`
+            // silently past the comparison.
+            assert!(
+                !(stderr.contains("not supported") || stderr.contains("Invalid")),
+                "djpeg rejected `-skip {},{}` after its -skip support was probed: {}",
+                skip_y0,
+                skip_y1,
+                stderr
+            );
             panic!(
                 "djpeg -skip {} failed: {}",
                 skip_arg,

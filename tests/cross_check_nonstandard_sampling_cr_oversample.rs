@@ -172,6 +172,12 @@ fn lenient_mode_recovers_with_warning_and_matches_djpeg_dims() {
             "lenient output dimensions must match djpeg's"
         );
     } else {
-        eprintln!("SKIP: djpeg did not produce a PNM for the fixture");
+        // Not a skip: the contract is "at least as accepting as djpeg", so
+        // djpeg refusing the fixture satisfies it outright. Naming it a SKIP
+        // read as lost coverage (P4-116).
+        eprintln!(
+            "djpeg refuses this fixture; the at-least-as-accepting floor holds \
+             trivially and there are no dimensions to compare"
+        );
     }
 }
