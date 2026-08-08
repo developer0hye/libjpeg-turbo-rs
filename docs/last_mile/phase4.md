@@ -1412,6 +1412,32 @@ land in `LIBJPEG_8.0`, `jpeg_mem_*` in `LIBJPEGTURBO_8.0`, and `tj3Init` in
 neither — a map that defined the nodes but matched nothing would otherwise pass
 a nodes-exist check while leaving every symbol unversioned.
 
+**Hard blocker found by CI (PR #447): rustc's own version script.** Adding
+`-Wl,--version-script` cannot work as designed. The link fails with:
+
+```
+/usr/bin/ld: anonymous version tag cannot be combined with other version tags
+```
+
+because rustc already passes a version script for every cdylib:
+
+```
+-Wl,--version-script=.../deps/rustc*/list      <- rustc's
+-Wl,--version-script,.../out/libjpeg.map       <- ours
+```
+
+rustc's uses an *anonymous* version tag — `{ global: …; local: *; };`, no name —
+to export `#[no_mangle]` items and hide the rest. GNU ld forbids mixing an
+anonymous tag with named ones, and rustc's script is not suppressible on
+stable. The map's content is correct and its content tests pass; the two
+scripts are simply mutually exclusive.
+
+P4-81 therefore needs a different mechanism. Candidates, none free: a post-link
+rewrite that synthesises `.gnu.version_d` / `.gnu.version` (patchelf cannot do
+this today); replacing rather than augmenting rustc's script (no stable knob);
+requiring `lld`, which pushes a toolchain constraint onto packagers; or linking
+the shared object ourselves from a staticlib, a large build-system change.
+
 **A consequence #437's scope does not mention, found by CI (PR #447).** Adding
 version nodes *removes glibc's unversioned-fallback path*, and the Pillow smoke
 leg immediately failed with:
