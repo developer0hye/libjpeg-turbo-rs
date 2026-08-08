@@ -345,14 +345,42 @@ pub struct JpegDecompressPublic {
 #[allow(dead_code)]
 type JCoef = c_short;
 
-// Global-state values mirror libjpeg's internal state machine, just to the
-// level of granularity we need for entry-point sequencing.
-const DSTATE_START: c_int = 200;
-const DSTATE_INHEADER: c_int = 201;
+// Global-state values mirror libjpeg's internal state machine.
+//
+// These are ABI, not private bookkeeping: `cinfo.global_state` is a public
+// field of `jpeg_decompress_struct`, so a C consumer — or a stock libjpeg
+// source file compiled against our headers — reads these numbers directly and
+// compares them against the values in upstream `jpegint.h`.
+//
+// P4-104: the shim previously defined only the five states it sequenced on and
+// gave `DSTATE_STOPPING` the value **206**, which upstream assigns to
+// `DSTATE_RAW_OK`. A consumer inspecting `global_state` during
+// `jpeg_finish_decompress` therefore read "start_decompress done, read_raw_data
+// OK" from a decompressor that was actually looking for EOI. The full ladder is
+// mirrored here so every value means what `jpegint.h` says it means; the ones
+// the shim does not yet transition through are still declared, because their
+// *numbering* is what makes the rest correct.
+//
+// `tests/decompress_state_constants.rs` cross-checks every value below against
+// `references/libjpeg-turbo/src/jpegint.h`.
+const DSTATE_START: c_int = 200; // after create_decompress
+const DSTATE_INHEADER: c_int = 201; // reading header markers, no SOS yet
 #[allow(dead_code)]
-const DSTATE_READY: c_int = 202;
-const DSTATE_SCANNING: c_int = 205;
-const DSTATE_STOPPING: c_int = 206;
+const DSTATE_READY: c_int = 202; // found SOS, ready for start_decompress
+#[allow(dead_code)]
+const DSTATE_PRELOAD: c_int = 203; // reading multiscan file in start_decompress
+#[allow(dead_code)]
+const DSTATE_PRESCAN: c_int = 204; // performing dummy pass for 2-pass quant
+const DSTATE_SCANNING: c_int = 205; // start_decompress done, read_scanlines OK
+#[allow(dead_code)]
+const DSTATE_RAW_OK: c_int = 206; // start_decompress done, read_raw_data OK
+#[allow(dead_code)]
+const DSTATE_BUFIMAGE: c_int = 207; // expecting jpeg_start_output
+#[allow(dead_code)]
+const DSTATE_BUFPOST: c_int = 208; // looking for SOS/EOI in jpeg_finish_output
+#[allow(dead_code)]
+const DSTATE_RDCOEFS: c_int = 209; // reading file in jpeg_read_coefficients
+const DSTATE_STOPPING: c_int = 210; // looking for EOI in jpeg_finish_decompress
 
 // ---------------------------------------------------------------------------
 // Side table for Rust-owned `DecompressPrivate` state.
@@ -2607,6 +2635,24 @@ fn jcs_to_pixel_format(cs: c_int) -> Option<PixelFormat> {
     }
 }
 
+/// The state `jpeg_start_decompress` leaves behind, per `jdapistd.c:170`:
+///
+/// ```c
+/// cinfo->global_state = cinfo->raw_data_out ? DSTATE_RAW_OK : DSTATE_SCANNING;
+/// ```
+///
+/// P4-104: the shim published `DSTATE_SCANNING` unconditionally, so a consumer
+/// that had asked for raw-data output and then inspected `global_state` was
+/// told the decompressor was in the *scanline* mode it had explicitly opted
+/// out of.
+fn started_decompress_state(c: &JpegDecompressPublic) -> c_int {
+    if c.raw_data_out != 0 {
+        DSTATE_RAW_OK
+    } else {
+        DSTATE_SCANNING
+    }
+}
+
 /// Eagerly decode the image so `jpeg_read_scanlines` can serve rows out
 /// of a backing buffer. Returns TRUE on success (libjpeg contract: never
 /// returns FALSE except when suspending via a nonblocking source).
@@ -2633,6 +2679,16 @@ pub extern "C" fn jpeg_start_decompress(cinfo: *mut c_void) -> CBoolean {
                 // `jpeg_start_output` materialise `priv_state.decoded` lazily once
                 // `jpeg_consume_input` has reached EOI.
                 c.output_scanline = 0;
+                // Deliberately *not* `started_decompress_state`. Upstream's
+                // buffered-image branch returns early with `DSTATE_BUFIMAGE`
+                // (`jdapistd.c:60-63`) and never reaches the
+                // `raw_data_out ? RAW_OK : SCANNING` line at :170. This shim
+                // publishes SCANNING here instead so `jpeg_input_complete`
+                // (gated on `>= DSTATE_SCANNING`) reports TRUE — a divergence
+                // that predates P4-104 and belongs to its transitions half,
+                // where `DSTATE_BUFIMAGE` gets wired properly. Routing it
+                // through the raw-data helper would have made it publish a
+                // third value that is neither upstream's nor the intended one.
                 c.global_state = DSTATE_SCANNING;
                 let _ = c; // release the &mut before jpeg_calc_output_dimensions re-borrows
                 jpeg_calc_output_dimensions(cinfo);
@@ -2683,7 +2739,7 @@ pub extern "C" fn jpeg_start_decompress(cinfo: *mut c_void) -> CBoolean {
         // the top of `jpeg12_read_raw_data` (codex review of f0dc137).
         if c.data_precision > 8 {
             c.output_scanline = 0;
-            c.global_state = DSTATE_SCANNING;
+            c.global_state = started_decompress_state(c);
             // The `c: &mut JpegDecompressPublic` borrow is released
             // when this scope returns. `jpeg_calc_output_dimensions`
             // re-borrows `cinfo` via its own `cinfo_mut` call;
@@ -2740,7 +2796,7 @@ pub extern "C" fn jpeg_start_decompress(cinfo: *mut c_void) -> CBoolean {
         c.output_components = c.out_color_components;
         c.out_color_space = out_cs_effective;
         c.output_scanline = 0;
-        c.global_state = DSTATE_SCANNING;
+        c.global_state = started_decompress_state(c);
         // libjpeg's `rec_outbuf_height` is typically 1..4; 2 matches the
         // commonly-observed value for H2V2-subsampled YCbCr streams (the
         // decoder processes 2 rows per iMCU), and 1 is a safe fallback.
@@ -9561,6 +9617,124 @@ const _: () = {
     // Total struct size matches the canonical libjpeg v80 layout (584 B).
     assert!(std::mem::size_of::<JpegCompressPublic>() == 584);
 };
+
+/// P4-104: `cinfo.global_state` is a public field, so these constants are ABI.
+/// Their values must equal upstream's, and the only way to know that is to read
+/// upstream's header rather than to restate its numbers here — a hand-copied
+/// list is exactly how `DSTATE_STOPPING` came to be 206 (upstream's
+/// `DSTATE_RAW_OK`) instead of 210.
+///
+/// Unlike `tests/capi_classic_error_codes.rs`, which compiles a C probe because
+/// `jerror.h`'s codes come from a *positional*, version-gated enum that cannot
+/// be read off safely, these are plain `#define NAME <int>` lines with the
+/// value written out. Parsing the header is therefore sufficient here — and it
+/// compares against the real Rust constants rather than a table transcribed
+/// beside them, which is the transcription step that produced the 206 in the
+/// first place.
+#[cfg(test)]
+mod decompress_state_constant_tests {
+    use super::*;
+    use std::collections::BTreeMap;
+    use std::path::{Path, PathBuf};
+
+    /// Parse `#define <NAME> <VALUE>` lines out of upstream `jpegint.h`.
+    fn upstream_state_constants(header: &Path) -> BTreeMap<String, c_int> {
+        let text: String = std::fs::read_to_string(header)
+            .unwrap_or_else(|e| panic!("read {}: {e}", header.display()));
+        let mut out: BTreeMap<String, c_int> = BTreeMap::new();
+        for line in text.lines() {
+            let rest: &str = match line.trim().strip_prefix("#define ") {
+                Some(rest) => rest,
+                None => continue,
+            };
+            let mut parts = rest.split_whitespace();
+            let (Some(name), Some(value)) = (parts.next(), parts.next()) else {
+                continue;
+            };
+            if !(name.starts_with("DSTATE_") || name.starts_with("CSTATE_")) {
+                continue;
+            }
+            let parsed: c_int = value
+                .parse()
+                .unwrap_or_else(|e| panic!("{name} has non-integer value {value:?}: {e}"));
+            out.insert(name.to_string(), parsed);
+        }
+        out
+    }
+
+    fn upstream_jpegint_h() -> Option<PathBuf> {
+        // The crate lives at crates/libjpeg-turbo-rs-capi/, so the submodule is
+        // two levels up.
+        let path: PathBuf = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../references/libjpeg-turbo/src/jpegint.h");
+        path.exists().then_some(path)
+    }
+
+    fn is_ci() -> bool {
+        std::env::var("CI")
+            .map(|v| !v.is_empty() && v != "0" && !v.eq_ignore_ascii_case("false"))
+            .unwrap_or(false)
+    }
+
+    #[test]
+    fn every_state_constant_matches_upstream_jpegint_h() {
+        let Some(header) = upstream_jpegint_h() else {
+            // P4-116 policy: the submodule is guaranteed on CI, so its absence
+            // there is a provisioning defect rather than a reason to skip.
+            assert!(
+                !is_ci(),
+                "CI checks out submodules recursively, so references/libjpeg-turbo/src/jpegint.h \
+                 must exist"
+            );
+            eprintln!("SKIP: references/libjpeg-turbo not checked out");
+            return;
+        };
+        let upstream: BTreeMap<String, c_int> = upstream_state_constants(&header);
+
+        // Every constant this shim declares, by upstream's name.
+        let ours: [(&str, c_int); 15] = [
+            ("CSTATE_START", CSTATE_START),
+            ("CSTATE_SCANNING", CSTATE_SCANNING),
+            ("CSTATE_RAW_OK", CSTATE_RAW_OK),
+            ("CSTATE_WRCOEFS", CSTATE_WRCOEFS),
+            ("DSTATE_START", DSTATE_START),
+            ("DSTATE_INHEADER", DSTATE_INHEADER),
+            ("DSTATE_READY", DSTATE_READY),
+            ("DSTATE_PRELOAD", DSTATE_PRELOAD),
+            ("DSTATE_PRESCAN", DSTATE_PRESCAN),
+            ("DSTATE_SCANNING", DSTATE_SCANNING),
+            ("DSTATE_RAW_OK", DSTATE_RAW_OK),
+            ("DSTATE_BUFIMAGE", DSTATE_BUFIMAGE),
+            ("DSTATE_BUFPOST", DSTATE_BUFPOST),
+            ("DSTATE_RDCOEFS", DSTATE_RDCOEFS),
+            ("DSTATE_STOPPING", DSTATE_STOPPING),
+        ];
+
+        let mut checked: usize = 0;
+        for (name, value) in ours {
+            let expected: c_int = *upstream.get(name).unwrap_or_else(|| {
+                panic!("upstream jpegint.h no longer defines {name}; found {upstream:?}")
+            });
+            assert_eq!(
+                value, expected,
+                "{name} must equal upstream's value; a consumer reading \
+                 cinfo.global_state compares against upstream's numbering"
+            );
+            checked += 1;
+        }
+
+        // Exact accounting (P4-116): mirroring 15 of upstream's constants while
+        // it defines 16 would leave a state we silently do not model.
+        assert_eq!(
+            checked,
+            upstream.len(),
+            "upstream defines {} C/DSTATE constants but this shim mirrors {}: {:?}",
+            upstream.len(),
+            checked,
+            upstream.keys().collect::<Vec<_>>()
+        );
+    }
+}
 
 #[cfg(test)]
 mod tables_only_tests {

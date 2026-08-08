@@ -1985,6 +1985,51 @@ incomplete rows, EOI suspension/retry, exactly-once `term_source`, final reset,
 and same-handle reuse. P4-13 continues to prove body suspension without
 asserting a shim-specific state.
 
+**Progress (2026-08-08) — the constants half is done; transitions remain.**
+`cinfo.global_state` is a *public* field, so these numbers are ABI: a consumer
+compares them against the values in its own `jpegint.h`. All eleven `DSTATE_*`
+values are now mirrored with upstream's numbering, which corrects
+`DSTATE_STOPPING` from **206** — upstream's `DSTATE_RAW_OK` — to **210**. A
+consumer inspecting `global_state` during `jpeg_finish_decompress` had been
+reading "start_decompress done, read_raw_data OK" from a decompressor that was
+looking for EOI. The six states the shim does not yet transition through
+(`PRELOAD`, `PRESCAN`, `RAW_OK`, `BUFIMAGE`, `BUFPOST`, `RDCOEFS`) are declared
+anyway, because their numbering is what makes the rest correct. The old value
+was only ever assigned, never compared, so no shim logic depended on it.
+
+`jpeg_start_decompress` now also publishes `DSTATE_RAW_OK` when `raw_data_out`
+is set, matching `jdapistd.c:170`
+(`cinfo->global_state = cinfo->raw_data_out ? DSTATE_RAW_OK : DSTATE_SCANNING`).
+A caller that had explicitly opted into raw-data output was previously told the
+decompressor was in scanline mode. This applies to the two sites that
+correspond to upstream's line 170 — the normal path and the 12-bit deferred
+path. It deliberately does **not** apply to the buffered-image early return:
+upstream returns from that branch with `DSTATE_BUFIMAGE` (`jdapistd.c:60-63`)
+and never reaches line 170, while this shim publishes `SCANNING` there so
+`jpeg_input_complete` (gated on `>= DSTATE_SCANNING`) reports TRUE. That
+divergence predates this work and belongs to the transitions half, where
+`DSTATE_BUFIMAGE` gets wired; routing the site through the raw-data helper
+would have published a third value that is neither upstream's nor the intended
+one. The same `BUFIMAGE` gap remains for a `buffered_image` request whose body
+is already complete, which falls through to the normal path.
+
+Guarded by a unit test that parses `references/libjpeg-turbo/src/jpegint.h` and
+compares against the real Rust constants, with exact accounting so mirroring 15
+of upstream's 16 constants fails rather than passing quietly. Confirmed red
+against the original bug: restoring `DSTATE_STOPPING = 206` fails with
+`left: 206, right: 210`. Parsing suffices here, unlike
+`tests/capi_classic_error_codes.rs`'s C probe, because these are plain
+`#define NAME <int>` lines rather than a positional version-gated enum — and
+comparing against the constants themselves removes the transcription step that
+produced the 206.
+
+Still open: the transition work — `DSTATE_BUFIMAGE` in buffered-image mode,
+`DSTATE_READY` after a successful header parse (the shim stays at `INHEADER`),
+the repeated-call guard, and finish's
+unread-row rejection, EOI draining with suspension, exactly-once `term_source`
+and abort-reset for reuse, together with the stock-C setjmp harness the criteria
+above require.
+
 ## P4-105. Classic Marker Writers Ignore State and Declared Lengths — **OPEN**
 
 **Motivation.** Filed 2026-08-02 during the deferred-encode audit. Valid
