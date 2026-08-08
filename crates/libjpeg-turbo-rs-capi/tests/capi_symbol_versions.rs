@@ -128,6 +128,23 @@ fn section<'a>(script: &'a str, node: &str) -> &'a str {
     &script[start..start + end]
 }
 
+/// The symbol name from one `readelf --dyn-syms --wide` row, stripped of any
+/// `@VERSION` / `@@VERSION` suffix.
+///
+/// Rows look like:
+/// `  3796: 000000000030d470  20 FUNC GLOBAL DEFAULT 13 jpeg_read_header@@LIBJPEG_8.0`
+///
+/// Returning the bare name lets callers compare exactly instead of with
+/// `contains`, which matches mangled internals that embed a C name.
+fn dyn_sym_name(line: &str) -> Option<&str> {
+    let last: &str = line.split_whitespace().last()?;
+    // Reject the header row and anything that is plainly not a symbol.
+    if last == "Name" || last.is_empty() {
+        return None;
+    }
+    Some(last.split('@').next().unwrap_or(last))
+}
+
 /// The linker must have produced the nodes, and attached the classic API to
 /// them. ELF-only; every other platform reports why it did not run.
 ///
@@ -247,9 +264,14 @@ fn installed_library_exports_the_reference_version_nodes() {
         ("jpeg_mem_src", "LIBJPEGTURBO_8.0"),
         ("jpeg_mem_dest", "LIBJPEGTURBO_8.0"),
     ] {
+        // Match the symbol *name* exactly, not as a substring. A substring
+        // match finds Rust-mangled internals that merely embed the name --
+        // `_RNvXsl_...21jpeg_CreateDecompress0E...` is a real symbol in this
+        // library -- and then asserts against the wrong line entirely. That is
+        // what the first CI run of this leg reported.
         let line: &str = dyn_syms
             .lines()
-            .find(|l| l.contains(symbol))
+            .find(|l| dyn_sym_name(l).is_some_and(|name| name == symbol))
             .unwrap_or_else(|| panic!("{symbol} is not exported at all:\n{dyn_syms}"));
         assert!(
             line.contains(node),
@@ -259,7 +281,10 @@ fn installed_library_exports_the_reference_version_nodes() {
 
     // TurboJPEG exports stay unversioned on purpose — see
     // `version_script_has_no_catch_all_node`.
-    if let Some(line) = dyn_syms.lines().find(|l| l.contains("tj3Init")) {
+    if let Some(line) = dyn_syms
+        .lines()
+        .find(|l| dyn_sym_name(l).is_some_and(|name| name == "tj3Init"))
+    {
         assert!(
             !line.contains("LIBJPEG_8.0") && !line.contains("LIBJPEGTURBO_8.0"),
             "a TurboJPEG export was labelled as reference libjpeg API: {line}"
