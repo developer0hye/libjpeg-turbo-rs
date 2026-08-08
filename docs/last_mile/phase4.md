@@ -2357,13 +2357,25 @@ be converted uniformly:
   four sites keep their local skip but now assert `!helpers::is_ci()` first, so
   CI — which provisions libjpeg-turbo 3.x — fails instead of skipping.
 
-Ten failure-shaped `SKIP` strings remain, four of them the CI-guarded
-capability cases above. The item stays open until the other six
-(`regression_420_dummy_block_columns`, `rgb565_dither`, `sof10_encode`,
-`encode_pipeline_golden`, and two in `hard_case_x_byte_and_restart`) are
-triaged the same way. Bulk-converting them would turn real environment gaps
-into failures on developer machines, which is why this is triage and not a
-regex.
+**Progress (2026-08-08, fourth pass) — the triage is complete.** Every
+failure-shaped `SKIP` in the suite has now been classified. `rgb565_dither`
+joined the defect column: `djpeg_supports_rgb565` probes the capability before
+the comparison runs, so a failure there is a defect and is now an assertion.
+`sof10_encode`'s `-arithmetic -progressive` case and both `restart_bomb`
+fixture builds in `hard_case_x_byte_and_restart` joined the capability column
+and are CI-guarded.
+
+Nine failure-shaped `SKIP` strings remain across six files, and **all of them
+are now capability gaps that fail in CI** — libjpeg-turbo 3.x is provisioned
+there, so a missing capability is a provisioning defect rather than a skip.
+None of them can any longer turn a real failure into a green run on a
+provisioned machine.
+
+The item stays open for its other criteria: `capi_jpeglib_write_coefficients`
+and the non-matrix suites still carry no planned-vs-executed count, and the
+remaining `SKIP` sites across the wider suite (tool missing, submodule absent,
+platform unsupported) have not been individually re-verified as genuinely
+environmental.
 
 ## P4-119. `src/decode/pipeline.rs` Concentrates Half of the Decoder Implementation — **CLOSED 2026-08-02**
 
