@@ -149,6 +149,12 @@ pub(super) fn encode_single_block(
 }
 
 /// Whether an ISLOW-only fused SIMD FDCT can replace the requested transform.
+///
+/// Only the x86_64 fused AVX2 kernels consult this, and they are gated the
+/// same way — without the gate this is dead code on every other architecture,
+/// which fails `cargo clippy -- -D warnings` on an aarch64 host even though
+/// the ubuntu-x86_64 CI job stays green.
+#[cfg(all(target_arch = "x86_64", feature = "simd"))]
 #[inline]
 pub(super) fn can_use_fused_islow(
     fdct_quantize_fn: fn(&mut [i16; 64], &QuantDivisors, &mut [i16; 64]),

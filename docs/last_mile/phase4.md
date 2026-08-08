@@ -66,7 +66,7 @@
 | P4-105 | OPEN (classic marker writers ignore state and declared lengths) |
 | P4-106 | OPEN (`jpeg_finish_compress` accepts incomplete input and bad states) |
 | P4-107 | OPEN (`jpeg_enable_lossless` clamps invalid input and omits public state) |
-| P4-108 | OPEN (classic destination managers violate buffer ownership and I/O errors) |
+| P4-108 | CLOSED 2026-08-08 (classic destination managers violate buffer ownership and I/O errors) |
 | P4-109 | OPEN (classic source-manager setup/stdio semantics diverge) |
 | P4-110 | OPEN (`jpeg_Create*` ignores version/struct-size ABI guards) |
 | P4-111 | OPEN (classic progress-manager callbacks/counters are not wired) |
@@ -75,6 +75,7 @@
 | P4-114 | OPEN (`jpeg_has_multiple_scans` equates multi-scan with progressive) |
 | P4-115 | OPEN (native 12-bit coverage claims include modes and sampling layouts that are not tested) |
 | P4-116 | OPEN (C-parity tests can convert Rust/oracle failures or missing comparisons into a pass) |
+| P4-120 | OPEN (classic-shim allocation-failure paths are unreachable from tests) |
 
 ---
 
@@ -1950,7 +1951,7 @@ raises `JERR_BAD_PROGRESSION` for invalid values.
 for valid/invalid predictors and point transforms at 8/12/16-bit precision,
 including after-start calls, then proves valid settings reach output.
 
-## P4-108. Classic Destination Managers Violate Buffer Ownership and I/O Errors — **OPEN**
+## P4-108. Classic Destination Managers Violate Buffer Ownership and I/O Errors — **CLOSED 2026-08-08**
 
 **Motivation.** Filed 2026-08-02 as a P0 memory-safety finding. `jpeg_mem_dest`
 tests only NULL/0 allocation, omitting libjpeg's caller-supplied-buffer branch;
@@ -1965,6 +1966,74 @@ growing. `jpeg_stdio_dest` ignores short `fwrite`, `fflush`, and `ferror`.
 never freed, returned allocated output), NULL allocation, and reuse. Stdio
 tests use `/dev/full` plus a portable failing stream and require
 `JERR_FILE_WRITE`; successful controls prove flush/term behavior.
+
+**Fix.** `crates/libjpeg-turbo-rs-capi/src/jpeglib.rs` now mirrors upstream
+`jdatadst.c` structurally rather than approximating it:
+
+* `MemDestState` / `StdioDestState` mirror `my_mem_destination_mgr` /
+  `my_destination_mgr`, so the two managers have **separate** callback sets.
+  That separation is what makes upstream's identity check
+  (`init_destination != init_mem_destination`, jdatadst.c:204-212 / 252-257)
+  expressible; installing a memory destination over a foreign manager now
+  raises `JERR_BUFFER_SIZE` instead of reinterpreting someone else's private
+  area.
+* `*outsize` is read as the caller buffer's **capacity**. A sufficient buffer is
+  filled in place at offset 0 and neither moved nor freed; growth allocates a
+  doubled block, copies the encoded prefix, and frees only `newbuffer` — memory
+  this library allocated. A caller buffer is never passed to `free`.
+* `*outbuffer == NULL || *outsize == 0` allocates `OUTPUT_BUF_SIZE` inside
+  `jpeg_mem_dest` and publishes it immediately, as upstream does
+  (jdatadst.c:267-273). The prior behaviour — leaving `*outbuffer` NULL until
+  the first flush — was pinned by a test that has been corrected.
+* `jpeg_mem_dest(cinfo, NULL, …)` raises `JERR_BUFFER_SIZE` (jdatadst.c:242-243)
+  instead of silently installing no destination at all, which is what the shim
+  previously did — a caller that passed a NULL out-parameter got a successful
+  compress that wrote nowhere.
+* stdio short writes, and any `ferror` after the terminating `fflush`, raise
+  `JERR_FILE_WRITE`. Because the callbacks run beneath a Rust frame that owns
+  the encoded `Vec`, they record the code in `CompressPrivate::pending_dest_error`
+  and the public entry point raises it through `error_exit` after dropping its
+  allocations — same `msg_code`, same `longjmp`, no leaked buffer.
+
+**Status (2026-08-08): closed.** `cargo test -p libjpeg-turbo-rs-capi --test
+capi_classic_dest_ownership` passes 12 C canaries covering every acceptance
+bullet. The test is differential in two layers, because either alone can go
+green while wrong:
+
+* **Contract facts.** Each canary prints implementation-independent
+  `key=value` lines (`buffer_moved=0`, `msg_code=38`, …) and the *same binary*
+  is relinked against a reference libjpeg-turbo v8 build
+  (`LIBJPEG_TURBO_REFERENCE_DIR`); the two reports must match exactly.
+* **Payload.** Marker bookends prove nothing — a manager that dropped every
+  entropy-coded byte still emits `SOI…EOI`. So each canary decodes its own
+  output back to RGB and compares it to the source pixels (measured mean
+  absolute difference 9.180 on both implementations for this deliberately
+  high-frequency 64×64 fixture at q=90 4:2:0; the in-canary bound is 11.0).
+  The encoded size and that error are then reported as `#`-prefixed metrics
+  and compared across legs within a factor of two — the one part of the report
+  a broken destination manager can move independently of the reference.
+
+The reference leg refuses to run against a directory that does not actually
+contain `libjpeg.so.8`/`libjpeg.8.dylib` and its own `jconfig.h`, so it cannot
+silently degrade into a comparison against the system libjpeg. Measured
+locally against both Homebrew `jpeg-turbo` 3.1.4.1 and a fresh
+`-DWITH_JPEG8=1` build of the pinned submodule: 12 passed, 0 failed,
+**0 skips** — every case ran both legs. CI performs the same pinned-submodule
+comparison and fails closed if any case skips or if `/dev/full` was not
+exercised. Before the fix the stack-buffer canary aborted inside `free()`,
+`mem_grow` produced a non-JPEG, and all three stdio error cases reported
+success. `cargo test --workspace --no-fail-fast`: 2455 passed, 0 failed,
+1 ignored (`restart_bomb_4096x4096`, release-only).
+
+One review finding was fixed structurally rather than locally: the destination
+callbacks originally re-derived `&mut CompressPrivate` from `cinfo->master`
+while the flushing frame still held one, which is two live `&mut` to the same
+allocation — undefined behaviour that LLVM's `noalias` would be entitled to
+exploit by folding away the very `pending_error` read this fix depends on. The
+manager's private state now lives *inside* the manager (`OwnedDestMgr`,
+reachable only through `cinfo->dest`), which is both sound and what upstream
+does (`my_mem_destination_mgr`, jdatadst.c:43-53). The same re-derivation
+pattern exists elsewhere in the shim and is not addressed here.
 
 ## P4-109. Classic Source-Manager Setup and Stdio Semantics Diverge — **OPEN**
 
@@ -2184,3 +2253,46 @@ discarded alternatives are recorded in `experiments/pipeline.tsv`.
 completed all 32 checks on the implementation commit, including ARMv7 scalar,
 aarch64 NEON, x86_64 AVX2 and no-AVX2, WASM SIMD128, Linux/macOS/Windows,
 sanitizers, Miri, mutation testing, C interop, and the C-parity corpus gate.
+
+## P4-120. Classic-Shim Allocation-Failure Paths Are Unreachable From Tests — **OPEN**
+
+**Motivation.** Filed 2026-08-08 during the P4-108 review. The classic shim now
+raises `JERR_OUT_OF_MEMORY` (upstream code 56, message `"Insufficient memory
+(case %d)"`) from two places in `crates/libjpeg-turbo-rs-capi/src/jpeglib.rs`:
+`jpeg_mem_dest` when its initial `malloc` fails, and `mem_empty_output_buffer`
+when the doubling `malloc` fails. Neither is reachable from any test in the
+repository, because neither can be provoked without making `malloc` fail.
+
+**Why it matters.** Every other classic error code the shim emits is pinned
+against a reference v8 build — `JERR_BUFFER_SIZE` and `JERR_FILE_WRITE` by
+`tests/capi_classic_dest_ownership.rs`, `JERR_CANT_SUSPEND` by
+`tests/capi_classic_lifecycle_pathological.rs`. `JERR_OUT_OF_MEMORY = 56` is
+asserted only by a source comment. A wrong constant would mis-report
+out-of-memory to every consumer with no test able to notice, and the same blind
+spot covers the `msg_parm` payload: upstream uses `ERREXIT1(…, 10)`, so the
+rendered message is `"Insufficient memory (case 10)"`, and only a test that
+formats the message can prove we match.
+
+**Root cause.** The shim's allocation failures all funnel through
+`crate::alloc::libc_malloc`, which calls libc `malloc` directly. There is no
+injection point, and the C canary harness has no way to starve a specific
+allocation.
+
+**Acceptance criteria.**
+
+1. A mechanism exists to force a chosen shim allocation to fail — a test-only
+   allocator hook behind a `cfg`/feature, or an `LD_PRELOAD`/interposition
+   shim in the C canary harness. It must not change release code paths.
+2. A C canary reaches both `JERR_OUT_OF_MEMORY` sites, asserts the symbolic
+   `JERR_OUT_OF_MEMORY` from upstream's `jerror.h`, and asserts the formatted
+   message text matches the reference v8 build's — proving the `msg_parm`
+   payload, not only the code.
+3. The caller's buffer is still intact and still caller-owned after a failed
+   growth, so the failure path does not itself violate P4-108's ownership
+   contract.
+4. Audit the rest of the classic shim for other `JERR_*` codes emitted on paths
+   no test can reach, and list them.
+
+**Why deferred.** P4-108 delivers the behaviour; this is test reachability for
+one error path. It belongs with the wider test-integrity work in **P4-116**
+rather than blocking the destination-ownership fix.

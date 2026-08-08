@@ -344,8 +344,16 @@ fn c2_1_calc_jpeg_dimensions_sets_public_compress_fields() {
     }
 }
 
-/// C2-1 mem_dest: sets up a memory destination and verifies the
-/// outbuffer pointer remains NULL until compression actually runs.
+/// C2-1 mem_dest: a NULL caller buffer is allocated by the library *inside*
+/// `jpeg_mem_dest`, before any compression runs (jdatadst.c:267-273), and the
+/// caller's stale `*outsize` is replaced by the real capacity.
+///
+/// P4-108: this previously asserted the opposite — that `*outbuffer` stays
+/// NULL and `*outsize` becomes 0 — pinning shim-only behaviour that no C
+/// libjpeg has, so a consumer reading `*outbuffer` between `jpeg_mem_dest` and
+/// `jpeg_finish_compress` saw NULL. The exact allocation size is not asserted
+/// here; `capi_classic_dest_ownership.rs` cross-checks it against a reference
+/// v8 build.
 #[test]
 fn c2_1_mem_dest_installs_cleanly() {
     let lib = unsafe { libloading::Library::new(cdylib_path()) }.expect("dlopen");
@@ -377,13 +385,27 @@ fn c2_1_mem_dest_installs_cleanly() {
         let mut out_buf: *mut u8 = std::ptr::null_mut();
         let mut out_size: c_ulong = 0xDEAD;
         jpeg_mem_dest(cinfo_ptr, &mut out_buf, &mut out_size);
-        assert!(out_buf.is_null());
-        assert_eq!(out_size, 0, "size must be zero'd when outbuffer is NULL");
+        assert!(
+            !out_buf.is_null(),
+            "jpeg_mem_dest must allocate immediately when *outbuffer is NULL"
+        );
+        assert!(
+            out_size > 0 && out_size != 0xDEAD,
+            "*outsize must be replaced by the allocated capacity, got {out_size}"
+        );
+        // The buffer is the caller's to free once jpeg_mem_dest has published
+        // it, exactly as after a full compress.
+        let allocated: *mut u8 = out_buf;
 
         let jpeg_destroy_compress: libloading::Symbol<unsafe extern "C" fn(*mut c_void)> = lib
             .get(b"jpeg_destroy_compress")
             .expect("jpeg_destroy_compress");
         jpeg_destroy_compress(cinfo_ptr);
+        // Release the libc-malloc'd buffer through the same allocator the
+        // library used.
+        let libc_free: libloading::Symbol<unsafe extern "C" fn(*mut c_void)> =
+            lib.get(b"tj3Free").expect("tj3Free");
+        libc_free(allocated as *mut c_void);
     }
 }
 
