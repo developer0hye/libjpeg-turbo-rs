@@ -220,11 +220,26 @@ if [[ "$PLATFORM" == "linux" && "${CAPI_SKIP_SYMBOL_VERSIONS:-0}" != "1" ]]; the
     if [[ "$LIBJPEG_MAJOR" != libjpeg.so.8* ]]; then
         echo "note: SONAME '${LIBJPEG_MAJOR}' is not the v8 identity; shipping without symbol versions (P4-81)" >&2
     else
-        VERSION_MAP="$(find "$RELEASE_DIR/build" -type f -name libjpeg.map 2>/dev/null | head -1)"
-        STATIC_LIB="$RELEASE_DIR/liblibjpeg_turbo_rs_capi.a"
+        # The map lives under `<profile>/build/<pkg>-<hash>/out/`. Callers may
+        # point CAPI_TARGET_DIR at `<profile>/deps` (that is where the test
+        # harness finds the cdylib), so `build/` can be one level up. Prefer the
+        # newest when several build-script hashes are present.
+        VERSION_MAP=""
+        for _dir in "$RELEASE_DIR" "$(dirname "$RELEASE_DIR")"; do
+            [[ -d "$_dir/build" ]] || continue
+            VERSION_MAP="$(find "$_dir/build" -type f -name libjpeg.map -exec ls -t {} + 2>/dev/null | head -1)"
+            [[ -n "$VERSION_MAP" ]] && break
+        done
+        STATIC_LIB=""
+        for _dir in "$RELEASE_DIR" "$(dirname "$RELEASE_DIR")"; do
+            if [[ -f "$_dir/liblibjpeg_turbo_rs_capi.a" ]]; then
+                STATIC_LIB="$_dir/liblibjpeg_turbo_rs_capi.a"
+                break
+            fi
+        done
         CC_BIN="${CC:-cc}"
-        if [[ -z "$VERSION_MAP" || ! -f "$STATIC_LIB" ]] || ! command -v "$CC_BIN" >/dev/null 2>&1; then
-            echo "warning: cannot add GNU symbol versions (map='${VERSION_MAP:-missing}', staticlib='${STATIC_LIB}', cc='${CC_BIN}')." >&2
+        if [[ -z "$VERSION_MAP" || -z "$STATIC_LIB" ]] || ! command -v "$CC_BIN" >/dev/null 2>&1; then
+            echo "warning: cannot add GNU symbol versions (map='${VERSION_MAP:-missing}', staticlib='${STATIC_LIB:-missing}', cc='${CC_BIN}')." >&2
             echo "         Shipping the unversioned cdylib; prebuilt consumers will see 'no version information available' (P4-81)." >&2
         else
             VERSIONED_LIB="${RELEASE_DIR}/${LIBJPEG_MAJOR}.${CDYLIB_VERSION}.versioned"

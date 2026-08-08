@@ -31,6 +31,14 @@ fn version_script() -> String {
         .unwrap_or_else(|e| panic!("could not read the generated version script {path}: {e}"))
 }
 
+fn workspace_root() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(Path::parent)
+        .expect("workspace root above the capi crate")
+        .to_path_buf()
+}
+
 fn is_ci() -> bool {
     std::env::var("CI")
         .map(|v| !v.is_empty() && v != "0" && !v.eq_ignore_ascii_case("false"))
@@ -120,41 +128,6 @@ fn section<'a>(script: &'a str, node: &str) -> &'a str {
     &script[start..start + end]
 }
 
-/// Locate the versioned library `scripts/install_capi.sh` relinks, if a run of
-/// it left one in this tree.
-///
-/// P4-81: the script writes `<release>/libjpeg.so.8.<version>.versioned`
-/// before staging it, so the artifact survives next to the cargo output and
-/// this test can find it without knowing the caller's `--destdir`.
-/// `CAPI_VERSIONED_LIB` overrides for a caller that staged elsewhere.
-fn staged_versioned_library() -> Option<PathBuf> {
-    if let Some(explicit) = std::env::var_os("CAPI_VERSIONED_LIB") {
-        let path: PathBuf = PathBuf::from(explicit);
-        return path.is_file().then_some(path);
-    }
-    let cdylib: PathBuf = cdylib_support::cargo_built_cdylib_path().ok()?;
-    let release_dir: &std::path::Path = cdylib.parent()?;
-    // `deps/` when run from a test binary; the artifacts sit one level up.
-    let candidates: [&std::path::Path; 2] = [release_dir, release_dir.parent()?];
-    for dir in candidates {
-        let entries = match std::fs::read_dir(dir) {
-            Ok(entries) => entries,
-            Err(_) => continue,
-        };
-        for entry in entries.flatten() {
-            let name: std::ffi::OsString = entry.file_name();
-            let name: &str = match name.to_str() {
-                Some(name) => name,
-                None => continue,
-            };
-            if name.starts_with("libjpeg.so.8") && name.ends_with(".versioned") {
-                return Some(entry.path());
-            }
-        }
-    }
-    None
-}
-
 /// The linker must have produced the nodes, and attached the classic API to
 /// them. ELF-only; every other platform reports why it did not run.
 ///
@@ -186,19 +159,55 @@ fn installed_library_exports_the_reference_version_nodes() {
             return;
         }
     };
-    let lib: PathBuf = match staged_versioned_library() {
-        Some(path) => path,
-        None => {
-            // Environmental: nobody has run the install script in this tree.
-            // Not CI-fatal, because the install leg is exercised by
-            // `install_layout.rs`, which drives the script itself.
-            eprintln!(
-                "SKIP: no staged versioned library found; run \
-                 `scripts/install_capi.sh --destdir <dir>` first (P4-81)"
-            );
-            return;
-        }
-    };
+    if Command::new("bash").arg("--version").output().is_err() {
+        assert!(!is_ci(), "CI runners have bash; install_capi.sh needs it");
+        eprintln!("SKIP: bash not on PATH");
+        return;
+    }
+
+    // Stage into a tempdir ourselves rather than hoping someone else did.
+    //
+    // P4-116, applied to my own first draft of this test: it originally looked
+    // for a leftover `*.versioned` artifact and skipped when it found none.
+    // Nothing in CI stages one, so the assertions below never ran and the suite
+    // reported green while proving nothing about the feature. Driving the
+    // install here is what makes the test able to fail.
+    let root: PathBuf = workspace_root();
+    let cdylib: PathBuf = cdylib_support::cargo_built_cdylib_path()
+        .unwrap_or_else(|e| panic!("could not locate the cdylib under test: {e}"));
+    let cdylib_dir: &Path = cdylib.parent().expect("Cargo artifact directory");
+    let tmp: tempfile::TempDir = tempfile::tempdir().expect("mkdir tempdir");
+    let prefix: &str = "/usr";
+
+    let staged = Command::new("bash")
+        .arg(root.join("scripts/install_capi.sh"))
+        .args(["--destdir", &tmp.path().to_string_lossy()])
+        .args(["--prefix", prefix])
+        .args(["--root", &root.to_string_lossy()])
+        .env("CAPI_TARGET_DIR", cdylib_dir)
+        .output()
+        .expect("invoke install_capi.sh");
+    assert!(
+        staged.status.success(),
+        "install_capi.sh failed:\n--- stdout ---\n{}\n--- stderr ---\n{}",
+        String::from_utf8_lossy(&staged.stdout),
+        String::from_utf8_lossy(&staged.stderr)
+    );
+    let stdout: String = String::from_utf8_lossy(&staged.stdout).into_owned();
+    assert!(
+        stdout.contains("P4-81: relinked"),
+        "install_capi.sh did not relink the library with symbol versions, so the \
+         nodes below cannot exist. Its own diagnostics say why:\n--- stdout ---\n{}\n\
+         --- stderr ---\n{}",
+        stdout,
+        String::from_utf8_lossy(&staged.stderr)
+    );
+
+    let lib: PathBuf = tmp
+        .path()
+        .join(prefix.trim_start_matches('/'))
+        .join("lib")
+        .join("libjpeg.so.8");
 
     let out = Command::new(&readelf)
         .arg("--version-info")
