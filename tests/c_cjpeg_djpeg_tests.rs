@@ -116,6 +116,33 @@ fn c_cjpeg_rgb_islow() {
     }
 }
 
+/// Whether the stream's frame marker is SOF3 (lossless, Huffman).
+///
+/// Walks the segment chain so a byte pair inside a DQT payload or a comment
+/// cannot be mistaken for a marker.
+fn has_sof3(jpeg: &[u8]) -> bool {
+    let mut i: usize = 2; // skip SOI
+    while i + 4 <= jpeg.len() {
+        if jpeg[i] != 0xFF {
+            return false;
+        }
+        let marker: u8 = jpeg[i + 1];
+        // SOS or EOI: the frame header, if any, is already behind us.
+        if marker == 0xDA || marker == 0xD9 {
+            return false;
+        }
+        if marker == 0xC3 {
+            return true;
+        }
+        let len: usize = ((jpeg[i + 2] as usize) << 8) | jpeg[i + 3] as usize;
+        if len < 2 {
+            return false;
+        }
+        i += 2 + len;
+    }
+    false
+}
+
 /// CMakeLists line 1566: cjpeg 422-ifast-opt
 /// CMakeLists line 1566: cjpeg 422-islow-opt
 /// -sample 2x1 -dct int -opt  testorig.ppm → JPEG
@@ -394,14 +421,18 @@ fn c_cjpeg_lossless() {
     // which asserted nothing at all — P4-116's "log a diff without asserting"
     // pattern. What lossless actually promises is exactness, so assert that
     // instead, on both sides of the interop boundary.
-    assert!(
-        data.windows(2).any(|w| w == [0xFF, 0xC3]),
-        "Rust lossless output must carry SOF3"
-    );
+    // Walk the marker segments rather than scanning for the byte pair: a DQT
+    // payload (values reach 255) or a comment can contain FF C3, and this is
+    // the assertion guarding the `lossless_predictor`-without-`lossless(true)`
+    // regression, so it has to be exact.
     let c_bytes: Vec<u8> = read_file(c_out.path());
     assert!(
-        c_bytes.windows(2).any(|w| w == [0xFF, 0xC3]),
-        "cjpeg -lossless output must carry SOF3"
+        has_sof3(&data),
+        "Rust lossless output must carry an SOF3 frame marker"
+    );
+    assert!(
+        has_sof3(&c_bytes),
+        "cjpeg -lossless output must carry an SOF3 frame marker"
     );
 
     // 1. Our own decoder must recover the input bit-for-bit.
