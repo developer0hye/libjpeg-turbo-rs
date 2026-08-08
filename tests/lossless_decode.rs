@@ -443,7 +443,7 @@ fn c_djpeg_lossless_decode_diff_zero() {
 
     // Step 3: Check if djpeg supports SOF3 lossless. Skip gracefully if not.
     if !djpeg_supports_lossless(&djpeg, &jpeg) {
-        eprintln!("SKIP: djpeg does not support lossless JPEG (SOF3)");
+        helpers::skip_missing_c_capability("djpeg", "lossless JPEG (SOF3)");
         return;
     }
 

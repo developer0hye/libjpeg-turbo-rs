@@ -487,7 +487,7 @@ fn c_cjpeg_cross_validation_smoothing() {
         Err(_) => false,
     };
     if !supports_smooth {
-        eprintln!("SKIP: cjpeg does not support -smooth option");
+        helpers::skip_missing_c_capability("cjpeg", "-smooth");
         return;
     }
 

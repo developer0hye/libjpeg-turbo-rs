@@ -96,3 +96,42 @@ pub fn optional_c_tool_under(name: &str, ci: bool) -> Option<PathBuf> {
         }
     }
 }
+
+/// Report that the installed C toolchain lacks `capability`, and refuse to let
+/// that remove coverage on a provisioned runner.
+///
+/// This is the second half of the discovery policy. `require_c_tool!` decides
+/// whether the *binary* exists; this decides what happens when the binary
+/// exists but is too old for the switch a case needs. Both answers are the
+/// same on CI: the workflows install libjpeg-turbo 3.x, which has every
+/// capability this repository probes for (verified against 3.1.4: `-colors`,
+/// `-dither ordered`, `-crop`, `-skip`, `-icc`, `-rgb565`, `-dct fast|float`,
+/// `-lossless`, `-precision`, `-arithmetic`, `-smooth`, `-copy icc`). A miss
+/// there is a provisioning defect, and silently dropping the case would hide
+/// it. On a developer machine an older `djpeg` is an ordinary reason to skip.
+///
+/// The one capability this must *not* be used for is arithmetic-coded lossless
+/// (SOF11): upstream omits it at compile time even in 3.1.4 (`cjpeg -lossless
+/// 1 -arithmetic` answers "Requested feature was omitted at compile time"), so
+/// its absence is permanent rather than environmental.
+///
+/// Callers `return` or `continue` themselves, so the skip stays visible at the
+/// call site instead of hiding inside a helper.
+///
+/// P4-116.
+pub fn skip_missing_c_capability(tool: &str, capability: &str) {
+    skip_missing_c_capability_under(tool, capability, is_ci());
+}
+
+/// [`skip_missing_c_capability`] with the CI decision passed in, so both
+/// branches are testable without mutating the shared process environment.
+pub fn skip_missing_c_capability_under(tool: &str, capability: &str, ci: bool) {
+    assert!(
+        !ci,
+        "CI provisions libjpeg-turbo 3.x, so `{} {}` must exist — a missing \
+         capability on a runner is a provisioning defect, not a reason to drop \
+         the case",
+        tool, capability
+    );
+    eprintln!("SKIP: {} does not support {}", tool, capability);
+}

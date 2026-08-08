@@ -541,7 +541,7 @@ fn c_jpegtran_copy_icc_preserves_icc_only() {
     let jpegtran: PathBuf = require_c_tool!("jpegtran");
 
     if !jpegtran_supports_copy_icc(&jpegtran) {
-        eprintln!("SKIP: jpegtran does not support -copy icc");
+        helpers::skip_missing_c_capability("jpegtran", "-copy icc");
         return;
     }
 

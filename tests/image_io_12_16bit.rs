@@ -346,7 +346,7 @@ fn cjpeg_supports_precision(cjpeg: &Path) -> bool {
 fn c_cjpeg_accepts_rust_12bit_ppm() {
     let cjpeg: PathBuf = require_c_tool!("cjpeg");
     if !cjpeg_supports_precision(&cjpeg) {
-        eprintln!("SKIP: cjpeg does not support -precision flag for 12-bit encode");
+        helpers::skip_missing_c_capability("cjpeg", "-precision");
         return;
     }
 

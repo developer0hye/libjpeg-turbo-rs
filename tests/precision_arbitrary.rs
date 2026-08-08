@@ -773,11 +773,11 @@ fn c_djpeg_precision_arbitrary_diff_zero() {
     // --- Part 2: C cjpeg encode -> Rust decode for each precision ---
     if let Some(ref cjpeg_bin) = cjpeg {
         if !cjpeg_supports_lossless(cjpeg_bin) {
-            eprintln!("SKIP: cjpeg does not support -lossless");
+            helpers::skip_missing_c_capability("cjpeg", "-lossless");
             return;
         }
         if !cjpeg_supports_precision(cjpeg_bin) {
-            eprintln!("SKIP: cjpeg does not support -precision");
+            helpers::skip_missing_c_capability("cjpeg", "-precision");
             return;
         }
 

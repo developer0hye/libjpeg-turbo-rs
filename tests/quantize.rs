@@ -625,7 +625,7 @@ fn c_djpeg_quantize_diff_zero() {
     let djpeg: PathBuf = require_c_tool!("djpeg");
 
     if !djpeg_supports_colors(&djpeg) {
-        eprintln!("SKIP: djpeg does not support -colors flag");
+        helpers::skip_missing_c_capability("djpeg", "-colors");
         return;
     }
 
@@ -782,12 +782,12 @@ fn c_djpeg_quantize_ordered_dither_diff_zero() {
     let djpeg: PathBuf = require_c_tool!("djpeg");
 
     if !djpeg_supports_colors(&djpeg) {
-        eprintln!("SKIP: djpeg does not support -colors flag");
+        helpers::skip_missing_c_capability("djpeg", "-colors");
         return;
     }
 
     if !djpeg_supports_dither(&djpeg) {
-        eprintln!("SKIP: djpeg does not support -dither flag");
+        helpers::skip_missing_c_capability("djpeg", "-dither");
         return;
     }
 
@@ -904,12 +904,12 @@ fn c_djpeg_quantize_no_dither_diff_zero() {
     let djpeg: PathBuf = require_c_tool!("djpeg");
 
     if !djpeg_supports_colors(&djpeg) {
-        eprintln!("SKIP: djpeg does not support -colors flag");
+        helpers::skip_missing_c_capability("djpeg", "-colors");
         return;
     }
 
     if !djpeg_supports_dither(&djpeg) {
-        eprintln!("SKIP: djpeg does not support -dither flag");
+        helpers::skip_missing_c_capability("djpeg", "-dither");
         return;
     }
 
@@ -1025,7 +1025,7 @@ fn c_djpeg_quantize_fixture_image() {
     let djpeg: PathBuf = require_c_tool!("djpeg");
 
     if !djpeg_supports_colors(&djpeg) {
-        eprintln!("SKIP: djpeg does not support -colors flag");
+        helpers::skip_missing_c_capability("djpeg", "-colors");
         return;
     }
 

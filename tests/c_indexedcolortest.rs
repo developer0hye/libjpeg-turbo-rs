@@ -200,7 +200,7 @@ fn c_indexedcolortest_8bit() {
     let djpeg: PathBuf = require_c_tool!("djpeg");
 
     if !djpeg_supports_colors(&djpeg) {
-        eprintln!("SKIP: djpeg does not support -colors flag");
+        helpers::skip_missing_c_capability("djpeg", "-colors");
         return;
     }
 
@@ -304,7 +304,7 @@ fn c_indexedcolortest_12bit() {
     let djpeg: PathBuf = require_c_tool!("djpeg");
 
     if !djpeg_supports_colors(&djpeg) {
-        eprintln!("SKIP: djpeg does not support -colors flag");
+        helpers::skip_missing_c_capability("djpeg", "-colors");
         return;
     }
 
@@ -371,7 +371,7 @@ fn c_indexedcolortest_cross_precision() {
     let djpeg: PathBuf = require_c_tool!("djpeg");
 
     if !djpeg_supports_colors(&djpeg) {
-        eprintln!("SKIP: djpeg does not support -colors flag");
+        helpers::skip_missing_c_capability("djpeg", "-colors");
         return;
     }
 

@@ -124,7 +124,7 @@ fn build_tiff_with_orientation(orientation: u16) -> Vec<u8> {
 fn large_icc_100kb_extracted_by_c_djpeg() {
     let djpeg: PathBuf = require_c_tool!("djpeg");
     if !djpeg_supports_icc_extract(&djpeg) {
-        eprintln!("SKIP: djpeg does not support -icc flag");
+        helpers::skip_missing_c_capability("djpeg", "-icc");
         return;
     }
 
@@ -451,7 +451,7 @@ fn multiple_com_markers_readable_by_rdjpgcom() {
 fn icc_survives_rust_rot90_matches_c_jpegtran() {
     let djpeg: PathBuf = require_c_tool!("djpeg");
     if !djpeg_supports_icc_extract(&djpeg) {
-        eprintln!("SKIP: djpeg does not support -icc flag");
+        helpers::skip_missing_c_capability("djpeg", "-icc");
         return;
     }
     let jpegtran: PathBuf = require_c_tool!("jpegtran");
@@ -595,7 +595,7 @@ fn icc_survives_rust_rot90_matches_c_jpegtran() {
 fn c_djpeg_icc_1_byte_profile_roundtrip() {
     let djpeg: PathBuf = require_c_tool!("djpeg");
     if !djpeg_supports_icc_extract(&djpeg) {
-        eprintln!("SKIP: djpeg does not support -icc flag");
+        helpers::skip_missing_c_capability("djpeg", "-icc");
         return;
     }
 
@@ -653,7 +653,7 @@ fn c_djpeg_icc_1_byte_profile_roundtrip() {
 fn c_djpeg_icc_exact_chunk_boundary_65519() {
     let djpeg: PathBuf = require_c_tool!("djpeg");
     if !djpeg_supports_icc_extract(&djpeg) {
-        eprintln!("SKIP: djpeg does not support -icc flag");
+        helpers::skip_missing_c_capability("djpeg", "-icc");
         return;
     }
 
@@ -903,7 +903,7 @@ fn c_djpeg_comment_near_limit_60kb_roundtrip() {
 fn c_djpeg_icc_two_independent_encodes() {
     let djpeg: PathBuf = require_c_tool!("djpeg");
     if !djpeg_supports_icc_extract(&djpeg) {
-        eprintln!("SKIP: djpeg does not support -icc flag");
+        helpers::skip_missing_c_capability("djpeg", "-icc");
         return;
     }
 

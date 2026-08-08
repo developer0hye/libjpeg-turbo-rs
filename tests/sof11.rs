@@ -220,7 +220,7 @@ fn c_cross_validation_sof11_rust_encode_c_decode() {
             || stderr.contains("omitted at compile time")
             || stderr.contains("Requested feature")
         {
-            eprintln!("SKIP: djpeg does not support arithmetic lossless (SOF11)");
+            eprintln!("SKIP: djpeg does not support arithmetic lossless (SOF11) — upstream omits it at compile time, so this is permanent, not environmental");
             return;
         }
         panic!("djpeg failed on Rust SOF11 JPEG: {}", stderr);
@@ -245,11 +245,11 @@ fn c_cross_validation_sof11_c_encode_rust_decode() {
     let cjpeg: PathBuf = require_c_tool!("cjpeg");
 
     if !cjpeg_supports_arithmetic(&cjpeg) {
-        eprintln!("SKIP: cjpeg does not support -arithmetic");
+        helpers::skip_missing_c_capability("cjpeg", "-arithmetic");
         return;
     }
     if !cjpeg_supports_lossless(&cjpeg) {
-        eprintln!("SKIP: cjpeg does not support -lossless");
+        helpers::skip_missing_c_capability("cjpeg", "-lossless");
         return;
     }
 
@@ -280,7 +280,7 @@ fn c_cross_validation_sof11_c_encode_rust_decode() {
             || stderr.contains("omitted at compile time")
             || stderr.contains("Requested feature")
         {
-            eprintln!("SKIP: cjpeg does not support arithmetic lossless encoding");
+            eprintln!("SKIP: cjpeg does not support arithmetic lossless encoding — upstream omits it at compile time, so this is permanent, not environmental");
             return;
         }
         panic!("cjpeg -arithmetic -lossless 1,0 failed: {}", stderr);
@@ -318,11 +318,11 @@ fn c_cross_validation_sof11_roundtrip_exact() {
     let cjpeg: PathBuf = require_c_tool!("cjpeg");
 
     if !cjpeg_supports_arithmetic(&cjpeg) {
-        eprintln!("SKIP: cjpeg does not support -arithmetic");
+        helpers::skip_missing_c_capability("cjpeg", "-arithmetic");
         return;
     }
     if !cjpeg_supports_lossless(&cjpeg) {
-        eprintln!("SKIP: cjpeg does not support -lossless");
+        helpers::skip_missing_c_capability("cjpeg", "-lossless");
         return;
     }
 
@@ -355,7 +355,7 @@ fn c_cross_validation_sof11_roundtrip_exact() {
             || stderr.contains("omitted at compile time")
             || stderr.contains("Requested feature")
         {
-            eprintln!("SKIP: djpeg does not support arithmetic lossless (SOF11)");
+            eprintln!("SKIP: djpeg does not support arithmetic lossless (SOF11) — upstream omits it at compile time, so this is permanent, not environmental");
             return;
         }
         panic!("djpeg failed on Rust SOF11 JPEG: {}", stderr);
@@ -392,7 +392,7 @@ fn c_cross_validation_sof11_roundtrip_exact() {
             || stderr.contains("omitted at compile time")
             || stderr.contains("Requested feature")
         {
-            eprintln!("SKIP: cjpeg does not support arithmetic lossless encoding");
+            eprintln!("SKIP: cjpeg does not support arithmetic lossless encoding — upstream omits it at compile time, so this is permanent, not environmental");
             return;
         }
         panic!("cjpeg -arithmetic -lossless 1,0 failed: {}", stderr);

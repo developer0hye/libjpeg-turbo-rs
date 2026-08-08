@@ -256,10 +256,7 @@ fn c_djpeg_lossless_encode_valid() {
 
     // Step 2: Check if this djpeg supports lossless (SOF3), skip if not
     if !djpeg_supports_lossless(&djpeg) {
-        eprintln!(
-            "SKIP: djpeg at {:?} does not support lossless JPEG (SOF3)",
-            djpeg
-        );
+        helpers::skip_missing_c_capability("djpeg", "lossless JPEG (SOF3)");
         return;
     }
 
@@ -481,10 +478,7 @@ fn c_djpeg_lossless_encode_extended_diff_zero() {
     let djpeg: PathBuf = require_c_tool!("djpeg");
 
     if !djpeg_supports_lossless(&djpeg) {
-        eprintln!(
-            "SKIP: djpeg at {:?} does not support lossless JPEG (SOF3)",
-            djpeg
-        );
+        helpers::skip_missing_c_capability("djpeg", "lossless JPEG (SOF3)");
         return;
     }
 

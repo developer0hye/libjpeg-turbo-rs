@@ -722,10 +722,7 @@ fn c_cross_validation_precision_extended() {
         // -----------------------------------------------------------
         if let Some(ref cjpeg_bin) = cjpeg {
             if !has_lossless {
-                eprintln!(
-                    "SKIP precision={}: cjpeg does not support -lossless",
-                    precision
-                );
+                helpers::skip_missing_c_capability("cjpeg", "-lossless");
                 continue;
             }
 

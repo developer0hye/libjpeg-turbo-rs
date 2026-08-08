@@ -936,7 +936,7 @@ fn c_djpeg_lossless_exact_roundtrip() {
         String::from_utf8_lossy(&ver.stdout)
     );
     if !ver_text.contains("version 3.") && !ver_text.contains("libjpeg-turbo 3.") {
-        eprintln!("SKIP: djpeg lacks lossless decode (need libjpeg-turbo 3.x)");
+        helpers::skip_missing_c_capability("djpeg", "lossless decode (SOF3)");
         return;
     }
 

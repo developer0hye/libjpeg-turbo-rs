@@ -543,7 +543,7 @@ fn c_djpeg_precision_diff_zero() {
     // --- 12-bit: C cjpeg encode -> Rust decode ---
     if let Some(ref cjpeg_bin) = cjpeg {
         if !cjpeg_supports_precision(cjpeg_bin) {
-            eprintln!("SKIP: cjpeg does not support -precision flag for 12-bit encode");
+            helpers::skip_missing_c_capability("cjpeg", "-precision");
         } else {
             let label: &str = "12bit_c_enc_rust_dec";
             let (w, h): (usize, usize) = (16, 16);
@@ -646,7 +646,7 @@ fn c_djpeg_precision_diff_zero() {
     // --- 16-bit lossless: C cjpeg encode -> Rust decode ---
     if let Some(ref cjpeg_bin) = cjpeg {
         if !cjpeg_supports_lossless(cjpeg_bin) || !cjpeg_supports_precision(cjpeg_bin) {
-            eprintln!("SKIP: cjpeg does not support -lossless or -precision for 16-bit encode");
+            helpers::skip_missing_c_capability("cjpeg", "-lossless with -precision 16");
         } else {
             let label: &str = "16bit_c_enc_rust_dec";
             let (w, h): (usize, usize) = (16, 16);

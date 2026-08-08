@@ -233,7 +233,7 @@ fn issue_383_scaled_skip_clamps_and_matches_c() {
     // Byte-identity vs djpeg -scale 1/2 -skip 0,39.
     let djpeg: PathBuf = require_c_tool!("djpeg");
     if !djpeg_supports_skip(&djpeg) {
-        eprintln!("SKIP(C xval): djpeg lacks -skip");
+        helpers::skip_missing_c_capability("djpeg", "-skip");
         return;
     }
     let skip: usize = 40;
@@ -302,7 +302,7 @@ fn issue_383_zero_height_stream_does_not_panic() {
 fn issue_383_skip_matches_c_djpeg_skip() {
     let djpeg: PathBuf = require_c_tool!("djpeg");
     if !djpeg_supports_skip(&djpeg) {
-        eprintln!("SKIP: djpeg lacks -skip (need libjpeg-turbo >= 1.5)");
+        helpers::skip_missing_c_capability("djpeg", "-skip");
         return;
     }
 

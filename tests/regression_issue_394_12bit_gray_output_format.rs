@@ -153,7 +153,7 @@ fn issue_394_c_djpeg_rgb_expansion_matches() {
     let djpeg: PathBuf = require_c_tool!("djpeg");
     let cjpeg: PathBuf = require_c_tool!("cjpeg");
     if !cjpeg_supports_precision(&cjpeg) {
-        eprintln!("SKIP: cjpeg lacks -precision (need libjpeg-turbo 3.x)");
+        helpers::skip_missing_c_capability("cjpeg", "-precision");
         return;
     }
 
