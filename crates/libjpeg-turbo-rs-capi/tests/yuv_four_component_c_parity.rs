@@ -1,4 +1,4 @@
-//! C cross-validation for the P4-120 component-count guard.
+//! C cross-validation for the P4-123 component-count guard.
 //!
 //! `yuv_four_component_guard.rs` and `yuv_decompress_planes_component_guard.rs`
 //! pin *our* rejection of 4-component (CMYK/YCCK) frames on the TurboJPEG YUV
@@ -263,7 +263,7 @@ fn jpeg_fixture(format: PixelFormat, channels: usize) -> Vec<u8> {
         .unwrap_or_else(|e| panic!("compress {channels}-channel fixture: {e}"))
 }
 
-/// P4-120: our accept/reject decision on both YUV decompress entry points must
+/// P4-123: our accept/reject decision on both YUV decompress entry points must
 /// match stock libjpeg-turbo — rejecting the 4-component frame that used to
 /// overrun the caller's buffers, and still accepting a 3-component one.
 #[test]
