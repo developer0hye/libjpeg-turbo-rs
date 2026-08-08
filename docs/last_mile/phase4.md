@@ -2977,3 +2977,52 @@ C-parity and golden matrices — explicitly not a big-bang rewrite — with the
 public facades staying compatible. The umbrella closes when #442's five
 workstreams are done or individually re-filed; it does not close by closing any
 single defect it coordinates.
+
+## P4-124. The OpenCV Harness Tests the Cargo cdylib, Not the Library We Ship — **OPEN**
+
+**Motivation.** Found 2026-08-08 while checking whether P4-81's remaining
+acceptance criterion — "the OpenCV replacement harness emits no
+`no version information available` warning" — was reachable. It is not, and the
+reason is not the lab: the harness does not test the artifact P4-81 fixed.
+
+**Root cause.** `examples/opencv_smoke/container_run.sh:35` stages the raw
+Cargo output directly:
+
+```sh
+ln -sf /input/liblibjpeg_turbo_rs_capi.so /tmp/libjpeg-rs/libjpeg.so.8
+```
+
+and `run.sh` takes that path from the caller as `--lib <release-cdylib>`. So the
+library OpenCV binds to in this harness is the cdylib, while the library
+`scripts/install_capi.sh` stages — and therefore the one a distro or a packager
+actually installs — is a *different binary*: since P4-81 it is relinked from the
+`staticlib` so it can carry `LIBJPEG_8.0` / `LIBJPEGTURBO_8.0`, which the cdylib
+provably cannot (rustc's own anonymous version script; see P4-81).
+
+Two consequences, and the second is the one that matters:
+
+1. P4-81's criterion cannot pass as written. The harness will keep reporting the
+   loader warning no matter how correct the shipped library is, because it is
+   not looking at it.
+2. **The project's headline T3 downstream evidence has been measuring an
+   artifact that is not the shipped one.** That was harmless while the two
+   binaries were byte-identical in every respect a consumer sees. It is not
+   harmless now, and it was never *verified* to be harmless — nothing asserted
+   the equivalence.
+
+This is a P4-116-shaped defect one level out from the test suite: not a test
+that fails to run, but a test that runs against the wrong subject.
+
+**Acceptance criteria.** The harness stages through `scripts/install_capi.sh`
+(or is given the staged tree) so the library under test is the one that ships;
+`container_run.sh` asserts the absence of `no version information available`
+rather than leaving it to a human reading the log; and the equivalence the old
+arrangement assumed is either asserted or abandoned. P4-81's OpenCV criterion is
+re-evaluated only after this lands — until then a green OpenCV run says nothing
+about symbol versions either way.
+
+**Why filed rather than fixed.** The harness is Docker-based and this host could
+not start Docker, so a change to it cannot be verified here; and its result is
+the project's primary T3 claim, so it should not be edited blind. Wiring it into
+CI (where Docker is available) is the natural vehicle, which makes it P2-G's
+neighbour rather than a drive-by fix.
