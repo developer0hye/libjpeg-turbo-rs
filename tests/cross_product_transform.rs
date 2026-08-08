@@ -200,39 +200,6 @@ fn attempt_transform(
     }
 }
 
-/// [`assert_transform_matrix_accounted`] for a matrix with a *named, tracked*
-/// gap: the refusals are still counted, so the totals must add up, but they do
-/// not fail the test. The caller is responsible for having proved every entry
-/// belongs to the tracked gap first.
-fn assert_transform_matrix_accounted_with_known_gap(
-    name: &str,
-    tested: u32,
-    round_tripped: u32,
-    known_gap: &[String],
-    decode_failures: &[String],
-) {
-    println!(
-        "{name}: {tested} attempted, {round_tripped} round-tripped, \
-         {} refused by a tracked gap, {} decode failures",
-        known_gap.len(),
-        decode_failures.len()
-    );
-    assert_eq!(
-        tested as usize,
-        round_tripped as usize + known_gap.len() + decode_failures.len(),
-        "{name}: {tested} attempts do not add up to {round_tripped} round-tripped + \
-         {} tracked-gap refusals + {} decode failures",
-        known_gap.len(),
-        decode_failures.len()
-    );
-    assert!(
-        decode_failures.is_empty(),
-        "{name} decode failures:\n{}",
-        decode_failures.join("\n")
-    );
-    assert!(round_tripped > 0, "{name}: no combination round-tripped");
-}
-
 /// Assert a transform matrix accounted for every attempt and verified at least
 /// one round-trip. Refusals are reported in full rather than tolerated: if a
 /// combination is genuinely out of scope it belongs in an explicit skip rule
@@ -854,60 +821,17 @@ fn tjtrantest_trim_cross_product() {
     println!("Trim cross-product: {skipped} excluded by the C reference's skip rules");
     assert!(tested >= 50, "Expected at least 50 combos, got {}", tested);
 
-    // P4-117 / issue #439: 4:4:1 trim currently reports "trim would remove all
-    // image data" for every spatial op. That is a tracked defect, and the
-    // matrix used to hide it behind `Err(_) => { /* Trim may not resolve all
-    // alignment issues */ }` — the comment asserted the failures were benign
-    // while recording nothing. Carve it out by name instead, so:
-    //   * any *other* refusal fails the test immediately, and
-    //   * the carve-out itself fails once #439 lands, forcing its removal
-    //     rather than letting a stale allowance outlive the bug.
-    const KNOWN_GAP: &str = "corrupt data: trim would remove all image data";
-    let (known_gap, unexpected): (Vec<&String>, Vec<&String>) = refused
-        .iter()
-        .partition(|r| r.starts_with("441-") && r.ends_with(KNOWN_GAP));
-    assert!(
-        unexpected.is_empty(),
-        "tjtrantest_trim_cross_product: refusals outside the tracked P4-117 \
-         4:4:1 gap:\n{}",
-        unexpected
-            .iter()
-            .map(|s| s.as_str())
-            .collect::<Vec<_>>()
-            .join("\n")
-    );
-    // Pin the size, not just "at least one". An unbounded carve-out would
-    // absorb a regression that widened the gap from these eight cases to every
-    // 4:4:1 combination, and a narrowing one would go unnoticed too.
-    const KNOWN_GAP_CASES: usize = 8;
-    assert_eq!(
-        known_gap.len(),
-        KNOWN_GAP_CASES,
-        "tjtrantest_trim_cross_product: the tracked P4-117 4:4:1 trim gap changed \
-         size ({} refusals, expected {KNOWN_GAP_CASES}). If issue #439 is fixed, \
-         delete this carve-out so zero refusals are required; if it grew, \
-         re-triage before adjusting the number.\n{}",
-        known_gap.len(),
-        known_gap
-            .iter()
-            .map(|s| s.as_str())
-            .collect::<Vec<_>>()
-            .join("\n")
-    );
-    eprintln!(
-        "tjtrantest_trim_cross_product: {} refusals allowed by the tracked \
-         P4-117 / #439 4:4:1 trim gap",
-        known_gap.len()
-    );
-
-    // Exact accounting, with the tracked gap passed through so the totals
-    // still have to add up.
-    let carve_out: Vec<String> = known_gap.into_iter().cloned().collect();
-    assert_transform_matrix_accounted_with_known_gap(
+    // P4-117 / issue #439 (fixed): 4:4:1 trim used to report "trim would
+    // remove all image data" for every spatial op, and this matrix hid it
+    // behind `Err(_) => { /* Trim may not resolve all alignment issues */ }`.
+    // The carve-out that replaced that comment has been deleted now the fix
+    // has landed, so zero refusals are required again — which is what the
+    // carve-out's pinned count existed to force.
+    assert_transform_matrix_accounted(
         "tjtrantest_trim_cross_product",
         tested,
         round_tripped,
-        &carve_out,
+        &refused,
         &decode_failures,
     );
 }

@@ -2222,8 +2222,10 @@ testing less than it claimed:
   had `Err(_) => { /* legitimate failure */ }` arms that recorded nothing, and
   one incremented the success counter directly. Every attempt is now bucketed
   and the buckets must sum to the attempt count. This immediately surfaced the
-  tracked **P4-117** 4:4:1 trim defect, which is now an explicit carve-out that
-  fails once #439 lands rather than a silent allowance.
+  **P4-117** 4:4:1 trim defect, which was carved out by name and pinned at
+  eight cases so that both widening and narrowing would fail. That fix landed
+  first (#439), the pin fired as designed, and the carve-out is gone — the
+  trim matrix now reports 78 attempted, 78 round-tripped, 0 refused.
 * **`c_tjdecomptest`, `cross_check_crop_scale`, `c_croptest`** turned real
   Rust/C disagreements — height mismatches, short oracle output, length
   mismatches — into `SKIP` and a `return`. Those are assertions now.
@@ -2240,7 +2242,7 @@ testing less than it claimed:
   could all bail out and the test still reported green.
 * **`helpers_smoke::helpers_c_tool_discovery`** asserted nothing at all.
 
-Measured on macOS aarch64: `cargo test --workspace --no-fail-fast` → 2461
+Measured on macOS aarch64: `cargo test --workspace --no-fail-fast` → 2464
 passed, 0 failed, 1 ignored (`restart_bomb_4096x4096_decodes_within_measured_bound`,
 release-only). Platform-gated tests differ, so this total is host-qualified. `cargo fmt --check` and
 `cargo clippy --workspace --all-targets -- -D warnings` clean.
@@ -2418,7 +2420,7 @@ guard does not weaken trimming where a whole iMCU does fit (35x27 → 32x16).
 Verified red before the fix: `vflip` and three others were rejected, 2 of 3
 tests failing. `cargo test --workspace --no-fail-fast`: 2458 passed, 0 failed,
 1 ignored. Once this merges, `cross_product_transform`'s trim carve-out
-assertion fires and directs the next session to delete it, restoring 78/78.
+assertion fired as designed and the carve-out is deleted; trim now reports 78/78.
 
 ## P4-121. Lossless Encode Accepts a Restart Interval C Refuses to Decode — **OPEN**
 
