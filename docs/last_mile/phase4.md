@@ -2001,7 +2001,17 @@ was only ever assigned, never compared, so no shim logic depended on it.
 is set, matching `jdapistd.c:170`
 (`cinfo->global_state = cinfo->raw_data_out ? DSTATE_RAW_OK : DSTATE_SCANNING`).
 A caller that had explicitly opted into raw-data output was previously told the
-decompressor was in scanline mode.
+decompressor was in scanline mode. This applies to the two sites that
+correspond to upstream's line 170 — the normal path and the 12-bit deferred
+path. It deliberately does **not** apply to the buffered-image early return:
+upstream returns from that branch with `DSTATE_BUFIMAGE` (`jdapistd.c:60-63`)
+and never reaches line 170, while this shim publishes `SCANNING` there so
+`jpeg_input_complete` (gated on `>= DSTATE_SCANNING`) reports TRUE. That
+divergence predates this work and belongs to the transitions half, where
+`DSTATE_BUFIMAGE` gets wired; routing the site through the raw-data helper
+would have published a third value that is neither upstream's nor the intended
+one. The same `BUFIMAGE` gap remains for a `buffered_image` request whose body
+is already complete, which falls through to the normal path.
 
 Guarded by a unit test that parses `references/libjpeg-turbo/src/jpegint.h` and
 compares against the real Rust constants, with exact accounting so mirroring 15
@@ -2013,8 +2023,9 @@ against the original bug: restoring `DSTATE_STOPPING = 206` fails with
 comparing against the constants themselves removes the transcription step that
 produced the 206.
 
-Still open: the transition work — `DSTATE_READY` after a successful header
-parse (the shim stays at `INHEADER`), the repeated-call guard, and finish's
+Still open: the transition work — `DSTATE_BUFIMAGE` in buffered-image mode,
+`DSTATE_READY` after a successful header parse (the shim stays at `INHEADER`),
+the repeated-call guard, and finish's
 unread-row rejection, EOI draining with suspension, exactly-once `term_source`
 and abort-reset for reuse, together with the stock-C setjmp harness the criteria
 above require.

@@ -2679,7 +2679,17 @@ pub extern "C" fn jpeg_start_decompress(cinfo: *mut c_void) -> CBoolean {
                 // `jpeg_start_output` materialise `priv_state.decoded` lazily once
                 // `jpeg_consume_input` has reached EOI.
                 c.output_scanline = 0;
-                c.global_state = started_decompress_state(c);
+                // Deliberately *not* `started_decompress_state`. Upstream's
+                // buffered-image branch returns early with `DSTATE_BUFIMAGE`
+                // (`jdapistd.c:60-63`) and never reaches the
+                // `raw_data_out ? RAW_OK : SCANNING` line at :170. This shim
+                // publishes SCANNING here instead so `jpeg_input_complete`
+                // (gated on `>= DSTATE_SCANNING`) reports TRUE — a divergence
+                // that predates P4-104 and belongs to its transitions half,
+                // where `DSTATE_BUFIMAGE` gets wired properly. Routing it
+                // through the raw-data helper would have made it publish a
+                // third value that is neither upstream's nor the intended one.
+                c.global_state = DSTATE_SCANNING;
                 let _ = c; // release the &mut before jpeg_calc_output_dimensions re-borrows
                 jpeg_calc_output_dimensions(cinfo);
                 return 1;
