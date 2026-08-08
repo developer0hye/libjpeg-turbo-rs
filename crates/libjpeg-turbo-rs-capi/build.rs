@@ -96,7 +96,7 @@ fn main() {
     match target_os.as_str() {
         "linux" | "android" | "freebsd" | "netbsd" | "openbsd" | "dragonfly" => {
             println!("cargo:rustc-cdylib-link-arg=-Wl,-soname,{soname}");
-            apply_gnu_version_script(&soname);
+            note_gnu_version_script_owner(&soname);
         }
         "macos" | "ios" | "tvos" | "watchos" => {
             println!("cargo:rustc-cdylib-link-arg=-Wl,-install_name,{install_name_mac}");
@@ -197,22 +197,44 @@ fn main() {
 /// Only emitted for a v8 libjpeg SONAME: a caller who overrode `CAPI_SONAME`
 /// to something else is not building the artifact these nodes describe, and
 /// applying a v8 map to it would be a silently wrong label.
-fn apply_gnu_version_script(soname: &str) {
+/// # Why this does not hand the map to rustc's linker invocation
+///
+/// It cannot. rustc passes its own version script for every cdylib —
+/// `-Wl,--version-script=.../deps/rustc*/list`, an *anonymous* tag
+/// (`{ global: …; local: *; };`) that exports the `#[no_mangle]` items and
+/// hides the rest — and GNU ld refuses to combine an anonymous version tag
+/// with named ones. Adding ours as a second script fails the link outright:
+///
+/// ```text
+/// /usr/bin/ld: anonymous version tag cannot be combined with other version tags
+/// ```
+///
+/// This was verified against binutils 2.47 across every script surface (see
+/// P4-81 in `docs/last_mile/phase4.md` for the four-case experiment):
+/// a second `--version-script`, a `VERSION { … }` block in a linker-script
+/// input file, and `.symver` directives in the object all fail — `.symver`
+/// differently, with `version node not found`, because the directive *attaches*
+/// a symbol to a node without *defining* one. rustc 1.94.1 exposes no `-C` or
+/// `-Z` knob to suppress its own script.
+///
+/// The one configuration that works is a single named script carrying
+/// `local: *` itself, which means whoever owns the link owns the versioning.
+/// For a cdylib that is rustc, so the versioned artifact is produced instead by
+/// `scripts/install_capi.sh`, which relinks it from the `staticlib` this crate
+/// already builds. The acceptance criterion is about the installed library that
+/// prebuilt consumers bind to, so that is the right artifact to version.
+///
+/// The map is still generated here, and its path published as
+/// `CAPI_VERSION_SCRIPT`, because the install script and the content tests both
+/// consume it.
+fn note_gnu_version_script_owner(soname: &str) {
     if !soname.starts_with("libjpeg.so.8") {
         println!(
             "cargo:warning=libjpeg-turbo-rs-capi: SONAME `{soname}` is not the v8 \
-             libjpeg identity, so no GNU symbol-version script is applied. Prebuilt \
+             libjpeg identity, so no GNU symbol-version script applies. Prebuilt \
              consumers of this artifact will see no version information (P4-81)."
         );
-        return;
     }
-
-    let map: String = gnu_version_script();
-    let map_path: PathBuf = write_version_script(&map);
-    println!(
-        "cargo:rustc-cdylib-link-arg=-Wl,--version-script,{}",
-        map_path.display()
-    );
 }
 
 /// Write the map to `OUT_DIR` and publish its path.

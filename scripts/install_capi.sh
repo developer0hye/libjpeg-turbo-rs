@@ -194,6 +194,60 @@ if [[ "$DO_BUILD" -eq 1 || ! -f "$CDYLIB_FILE" ]]; then
 fi
 [[ -f "$CDYLIB_FILE" ]] || { echo "cdylib not found: $CDYLIB_FILE" >&2; exit 1; }
 
+# ---------------------------------------------------------------------------
+# P4-81: GNU symbol versions on the shipped ELF library.
+#
+# The cdylib cargo produces cannot carry them. rustc passes its own version
+# script for every cdylib -- an *anonymous* tag, `{ global: ...; local: *; };`
+# -- and GNU ld refuses to combine an anonymous version tag with named ones,
+# so adding `LIBJPEG_8.0` as a second script fails the link outright with
+# `anonymous version tag cannot be combined with other version tags`. Verified
+# against binutils 2.47 across every script surface, including `.symver`, which
+# fails differently (`version node not found`) because it attaches a symbol to
+# a node without defining one. rustc exposes no knob to suppress its script.
+#
+# The one configuration that works is a single named script carrying `local: *`
+# itself -- so whoever owns the link owns the versioning. Here we do: relink the
+# shipped library from the staticlib the crate already builds.
+#
+# Policy mirrors the test-suite rule (P4-116): a missing prerequisite is
+# environmental and degrades with a loud warning, but a relink we *attempt* and
+# that fails is a defect and stops the install rather than silently shipping an
+# unversioned library that callers believe is versioned.
+# ---------------------------------------------------------------------------
+JPEG_LIB_SOURCE="$CDYLIB_FILE"
+if [[ "$PLATFORM" == "linux" && "${CAPI_SKIP_SYMBOL_VERSIONS:-0}" != "1" ]]; then
+    if [[ "$LIBJPEG_MAJOR" != libjpeg.so.8* ]]; then
+        echo "note: SONAME '${LIBJPEG_MAJOR}' is not the v8 identity; shipping without symbol versions (P4-81)" >&2
+    else
+        VERSION_MAP="$(find "$RELEASE_DIR/build" -type f -name libjpeg.map 2>/dev/null | head -1)"
+        STATIC_LIB="$RELEASE_DIR/liblibjpeg_turbo_rs_capi.a"
+        CC_BIN="${CC:-cc}"
+        if [[ -z "$VERSION_MAP" || ! -f "$STATIC_LIB" ]] || ! command -v "$CC_BIN" >/dev/null 2>&1; then
+            echo "warning: cannot add GNU symbol versions (map='${VERSION_MAP:-missing}', staticlib='${STATIC_LIB}', cc='${CC_BIN}')." >&2
+            echo "         Shipping the unversioned cdylib; prebuilt consumers will see 'no version information available' (P4-81)." >&2
+        else
+            VERSIONED_LIB="${RELEASE_DIR}/${LIBJPEG_MAJOR}.${CDYLIB_VERSION}.versioned"
+            # --whole-archive: nothing references the `#[no_mangle]` exports, so
+            #   without it the linker drops the entire archive.
+            # --allow-multiple-definition: Rust staticlibs bundle compiler_builtins
+            #   symbols that also arrive from libgcc.
+            if ! "$CC_BIN" -shared -o "$VERSIONED_LIB" \
+                    -Wl,--whole-archive "$STATIC_LIB" -Wl,--no-whole-archive \
+                    -Wl,--version-script,"$VERSION_MAP" \
+                    -Wl,-soname,"$LIBJPEG_MAJOR" \
+                    -Wl,--allow-multiple-definition \
+                    -lpthread -ldl -lm; then
+                echo "ERROR: relinking ${LIBJPEG_MAJOR} with ${VERSION_MAP} failed." >&2
+                echo "       Set CAPI_SKIP_SYMBOL_VERSIONS=1 to install the unversioned cdylib instead." >&2
+                exit 1
+            fi
+            JPEG_LIB_SOURCE="$VERSIONED_LIB"
+            echo "P4-81: relinked ${LIBJPEG_MAJOR} from the staticlib with GNU symbol versions"
+        fi
+    fi
+fi
+
 # Stage roots.
 LIBDIR="${DESTDIR}${PREFIX}/lib"
 INCDIR="${DESTDIR}${PREFIX}/include"
@@ -202,11 +256,13 @@ CMAKEDIR="${LIBDIR}/cmake/JPEG"
 mkdir -p "$LIBDIR" "$INCDIR" "$PKGCFGDIR" "$CMAKEDIR"
 
 # Install cdylib + symlink chains.
-install -m 0755 "$CDYLIB_FILE" "${LIBDIR}/${DEFAULT_LIBJPEG_REAL}"
+install -m 0755 "$JPEG_LIB_SOURCE" "${LIBDIR}/${DEFAULT_LIBJPEG_REAL}"
 ln -sf "$DEFAULT_LIBJPEG_REAL" "${LIBDIR}/${DEFAULT_LIBJPEG_MAJOR}"
 ln -sf "$DEFAULT_LIBJPEG_MAJOR" "${LIBDIR}/${DEFAULT_LIBJPEG_DEV}"
 # libturbojpeg shares the same binary (we export both APIs).
-install -m 0755 "$CDYLIB_FILE" "${LIBDIR}/${DEFAULT_LIBTJ_REAL}"
+# Same binary: our map has no catch-all node, so the tj* surface stays
+# unversioned exactly as before (P4-81).
+install -m 0755 "$JPEG_LIB_SOURCE" "${LIBDIR}/${DEFAULT_LIBTJ_REAL}"
 ln -sf "$DEFAULT_LIBTJ_REAL" "${LIBDIR}/${DEFAULT_LIBTJ_MAJOR}"
 ln -sf "$DEFAULT_LIBTJ_MAJOR" "${LIBDIR}/${DEFAULT_LIBTJ_DEV}"
 
