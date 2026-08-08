@@ -1883,14 +1883,28 @@ The change immediately caught a silent failure:
 shim that quietly did nothing satisfied. Rejection is now *reported*, and the
 test asserts the `msg_code`.
 
+**Correction (2026-08-08).** An earlier revision of this entry claimed the shim
+"only ever enters `CSTATE_START` and `CSTATE_WRCOEFS`, never `CSTATE_SCANNING`
+or `CSTATE_RAW_OK`", and cited that as the blocker for matching upstream's
+state-gated finish contract. That was wrong. `jpeg_start_compress` does set
+them (`jpeglib.rs`, `c.global_state = if c.raw_data_in != 0 { CSTATE_RAW_OK }
+else { CSTATE_SCANNING }`); the claim came from a grep for the literal
+`global_state = CSTATE_`, which does not match that computed form.
+
+`jpeg_finish_compress` now implements jcapimin.c:184-190 verbatim: the
+`next_scanline < image_height` check runs for `CSTATE_SCANNING` **and**
+`CSTATE_RAW_OK`, `CSTATE_WRCOEFS` passes through, and any other state raises
+`JERR_BAD_STATE` with the state value. Both raw-data writers advance
+`next_scanline`, so the raw arm is real — the previous revision exempted it and
+would have let a short raw encode produce a file.
+
 **Status (2026-08-08): partial.** Criteria (1)-(3) hold for
-`jpeg_start_decompress` and `jpeg_finish_compress`. Not yet done: the remaining
-private-string-only sites (54 of the original 59 `last_error` assignments still
-have no `error_exit` nearby), criterion (4)'s stock-versus-Rust setjmp harness
-matrix, and the P4-104 state work this depends on — the shim still only ever
-enters `CSTATE_START` and `CSTATE_WRCOEFS`, never `CSTATE_SCANNING` or
-`CSTATE_RAW_OK`, so upstream's state-gated finish contract cannot be matched
-exactly yet. `cargo test --workspace --no-fail-fast`: 2466 passed, 0 failed,
+`jpeg_start_decompress` and `jpeg_finish_compress`, and the finish state gate
+now matches upstream exactly. Not yet done: the remaining private-string-only
+sites (54 of the original 59 `last_error` assignments still have no
+`error_exit` nearby), criterion (4)'s stock-versus-Rust setjmp harness matrix,
+and P4-104's *decompressor* state work, which is separate from the compressor
+states corrected here. `cargo test --workspace --no-fail-fast`: 2466 passed, 0 failed,
 1 ignored (macOS aarch64).
 
 ## P4-101. Classic Header Parse Does Not Publish Coding Tables or Scan State — **OPEN**

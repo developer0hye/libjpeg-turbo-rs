@@ -7380,34 +7380,54 @@ pub extern "C" fn jpeg_finish_compress(cinfo: *mut c_void) {
             Some(p) => p,
             None => return,
         };
+        // P4-106: upstream's state gate, verbatim (jcapimin.c:184-190):
+        //
+        //   if (state == CSTATE_SCANNING || state == CSTATE_RAW_OK) {
+        //     if (next_scanline < image_height) ERREXIT(JERR_TOO_LITTLE_DATA);
+        //     ...
+        //   } else if (state != CSTATE_WRCOEFS)
+        //     ERREXIT1(JERR_BAD_STATE, state);
+        //
+        // Both scanline and raw-data encodes advance `next_scanline`, so the
+        // row check covers RAW_OK exactly as upstream does — an earlier
+        // version of this exempted the raw path, which would have let a
+        // short raw encode through.
+        match c.global_state {
+            CSTATE_SCANNING | CSTATE_RAW_OK => {
+                if c.next_scanline < c.image_height {
+                    let short_by: c_int = c.image_height.saturating_sub(c.next_scanline) as c_int;
+                    priv_state.have_started = false;
+                    raise_classic_error(
+                        cinfo,
+                        &mut priv_state.last_error,
+                        "jpeg_finish_compress: image is short by rows that were never written",
+                        JERR_TOO_LITTLE_DATA,
+                        Some(short_by),
+                    );
+                    return;
+                }
+            }
+            CSTATE_WRCOEFS => {}
+            other => {
+                // Covers a finish with no matching start (still CSTATE_START)
+                // and any other out-of-order call.
+                raise_classic_error(
+                    cinfo,
+                    &mut priv_state.last_error,
+                    "jpeg_finish_compress: called in a state that cannot finish an image",
+                    JERR_BAD_STATE,
+                    Some(other),
+                );
+                return;
+            }
+        }
         if !priv_state.have_started {
-            // P4-106: upstream rejects a finish that was never started rather
-            // than returning quietly, so the caller learns its call order is
-            // wrong instead of receiving an empty file.
             raise_classic_error(
                 cinfo,
                 &mut priv_state.last_error,
                 "jpeg_finish_compress: called without a matching jpeg_start_compress",
                 JERR_BAD_STATE,
                 Some(c.global_state),
-            );
-            return;
-        }
-        // P4-106: a scanline encode that never received every row must not
-        // produce a file. Upstream raises JERR_TOO_LITTLE_DATA
-        // (jcapistd.c) rather than zero-filling the remainder.
-        let rows_missing: bool = c.global_state != CSTATE_WRCOEFS
-            && c.raw_data_in == 0
-            && c.next_scanline < c.image_height;
-        if rows_missing {
-            let short_by: c_int = c.image_height.saturating_sub(c.next_scanline) as c_int;
-            priv_state.have_started = false;
-            raise_classic_error(
-                cinfo,
-                &mut priv_state.last_error,
-                "jpeg_finish_compress: image is short by rows that were never written",
-                JERR_TOO_LITTLE_DATA,
-                Some(short_by),
             );
             return;
         }
