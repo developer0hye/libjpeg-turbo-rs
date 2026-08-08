@@ -1411,13 +1411,34 @@ land in `LIBJPEG_8.0`, `jpeg_mem_*` in `LIBJPEGTURBO_8.0`, and `tj3Init` in
 neither — a map that defined the nodes but matched nothing would otherwise pass
 a nodes-exist check while leaving every symbol unversioned.
 
-**Status (2026-08-08): partial.** `cargo test --workspace --no-fail-fast`:
-2470 passed, 0 failed, 1 ignored (macOS aarch64, where the ELF leg reports its
-skip). Not yet done: the acceptance criteria also require re-running the OpenCV
-replacement harness to confirm the `no version information available` warning
-is gone, and confirming libtiff/GDAL/Poppler/HDF4 still load. Those need the
-downstream lab, and the warning's disappearance is the criterion that actually
-closes this item — the nodes existing is necessary, not sufficient.
+**A consequence #437's scope does not mention, found by CI (PR #447).** Adding
+version nodes *removes glibc's unversioned-fallback path*, and the Pillow smoke
+leg immediately failed with:
+
+```
+version `LIBJPEG_6.2' not found (required by .../PIL/_imaging...so)
+```
+
+That `_imaging.so` was built against a **v6b** libjpeg. With no version nodes
+the loader bound it to our v8 shim anyway; with nodes present it correctly
+refuses. The failure is the feature working — a v6b consumer had been binding
+to a v8 struct layout, which is the silent ABI mismatch T4's non-goal status
+and the "v6b substitution is not valid T3 evidence" rule both exist to prevent.
+
+Adding a `LIBJPEG_6.2` node would "fix" CI by re-asserting a v6b ABI we do not
+implement, and is rejected. The correct resolution is to make
+`examples/pillow_smoke/run.sh` take its documented v8-rebuild path in that leg
+rather than overwriting Pillow's bundled `libjpeg-*.so.62.4.0` in place.
+
+**Status (2026-08-08): partial, PR #447 held as draft.** `cargo test
+--workspace --no-fail-fast`: 2470 passed, 0 failed, 1 ignored (macOS aarch64,
+where the ELF leg reports its skip); 21 CI checks green including the Linux
+ELF verification, 3 red on the Pillow harness above. Also not yet done: the
+acceptance criteria require re-running the OpenCV replacement harness to
+confirm the `no version information available` warning is gone, and confirming
+libtiff/GDAL/Poppler/HDF4 still load. Those need the downstream lab, and the
+warning's disappearance is the criterion that actually closes this item — the
+nodes existing is necessary, not sufficient.
 
 ## P4-82. Classic Scanline Encoder Dropped Public Restart Settings — **CLOSED 2026-08-02**
 
