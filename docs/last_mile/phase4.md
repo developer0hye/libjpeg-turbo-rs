@@ -75,6 +75,7 @@
 | P4-114 | OPEN (`jpeg_has_multiple_scans` equates multi-scan with progressive) |
 | P4-115 | OPEN (native 12-bit coverage claims include modes and sampling layouts that are not tested) |
 | P4-116 | OPEN (C-parity tests can convert Rust/oracle failures or missing comparisons into a pass) |
+| P4-117 | CLOSED 2026-08-08 (4:4:1 trim rejected images shorter than one iMCU row) |
 | P4-120 | OPEN (classic-shim allocation-failure paths are unreachable from tests) |
 
 ---
@@ -2296,3 +2297,47 @@ allocation.
 **Why deferred.** P4-108 delivers the behaviour; this is test reachability for
 one error path. It belongs with the wider test-integrity work in **P4-116**
 rather than blocking the destination-ownership fix.
+
+## P4-117. 4:4:1 Trim Rejected Images Shorter Than One iMCU Row — **CLOSED 2026-08-08**
+
+**Motivation.** Filed 2026-08-02 as GitHub [#439](https://github.com/developer0hye/libjpeg-turbo-rs/issues/439)
+while making the P4-116 transform matrices fail closed; this phase-file entry
+was missed at filing time and is added here with its closure. The 35x27
+non-MCU-aligned 4:4:1 fixture reported 78 attempted trim cases and only 70
+completions — `VFlip`, `Rot90`, `Rot180` and `Transverse`, in both baseline and
+progressive output, returned `trim would remove all image data`.
+
+**Root cause.** 4:4:1 is `h_samp=1, v_samp=4`, so its iMCU is 8 wide by **32
+tall**. A 27-row image therefore contains zero whole iMCU rows, and
+`transform_coefficients` computed `(27 / 32) * 32 == 0` and rejected the
+transform outright.
+
+Upstream has no such error path. `trim_right_edge` and `trim_bottom_edge`
+(transupp.c:1570-1592) each open with `if (MCU_cols > 0 && …)` /
+`if (MCU_rows > 0 && …)`: an axis holding less than one whole iMCU is simply
+left untrimmed. Measured against stock `jpegtran -trim` on exactly this input:
+
+| op | C output | reason |
+| --- | --- | --- |
+| hflip | 32x27 | width 35 → 32; height not trimmed by this op |
+| vflip | **35x27** | height 27 holds no whole iMCU — guard fires |
+| transpose | 27x35 | transpose never trims (transupp.c:1873) |
+| rot90 | **27x35** | output width comes from source height — guard fires |
+| rot180 | 32x27 | width trims; height guarded |
+| rot270 | 27x32 | output height comes from source width → 32 |
+| transverse | 27x32 | width → 32; height guarded |
+
+**Fix.** `src/api/coefficient.rs` routes both axes through
+`trim_to_whole_imcus`, which returns the extent unchanged when fewer than one
+iMCU fits, mirroring upstream's guard. The `trim would remove all image data`
+error is gone — as in C, trimming can no longer fail.
+
+**Status (2026-08-08): closed.** `tests/regression_s441_trim.rs` pins all seven
+operations: the geometry table above, a pixel-for-pixel cross-check against
+stock `jpegtran -trim` (both sides transforming the *same* source JPEG, decoded
+through the same `djpeg`, `max_diff == 0`), and a 4:2:0 control proving the
+guard does not weaken trimming where a whole iMCU does fit (35x27 → 32x16).
+Verified red before the fix: `vflip` and three others were rejected, 2 of 3
+tests failing. `cargo test --workspace --no-fail-fast`: 2458 passed, 0 failed,
+1 ignored. Once this merges, `cross_product_transform`'s trim carve-out
+assertion fires and directs the next session to delete it, restoring 78/78.
