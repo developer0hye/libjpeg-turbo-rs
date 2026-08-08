@@ -29,9 +29,11 @@ const WIDTH: usize = 16;
 const HEIGHT: usize = 16;
 
 /// A TurboJPEG development install: `turbojpeg.h` plus a linkable
-/// `libturbojpeg`. Mirrors the prefix search `tests/helpers/c_oracle.rs` uses in
-/// the root crate; duplicated rather than shared because that helper is not
-/// reachable from this workspace member.
+/// `libturbojpeg`. Starts from the prefix search `tests/helpers/c_oracle.rs`
+/// uses in the root crate and tightens it — an explicit prefix is exclusive
+/// here but only the first candidate there, the header must declare `tj3*`, and
+/// Debian multiarch lib dirs are probed. Duplicated rather than shared because
+/// that helper is not reachable from this workspace member.
 struct TurboJpegDev {
     include_dir: PathBuf,
     lib_dir: PathBuf,
@@ -66,7 +68,9 @@ fn find_turbojpeg_dev() -> Option<TurboJpegDev> {
 
     // Debian/Ubuntu put the header in `<prefix>/include` but the linker stub in
     // `<prefix>/lib/<triplet>`, so a plain lib64/lib scan reports a perfectly
-    // good install as absent — and the mandatory oracle would silently skip.
+    // good install as absent — which fails the run outright once
+    // LIBJPEG_TURBO_PREFIX has made the oracle mandatory, and skips the C
+    // comparison when it has not.
     let mut lib_subdirs: Vec<PathBuf> = vec![PathBuf::from("lib64"), PathBuf::from("lib")];
     if let Some(triplet) = host_multiarch_triplet() {
         lib_subdirs.push(PathBuf::from("lib").join(&triplet));

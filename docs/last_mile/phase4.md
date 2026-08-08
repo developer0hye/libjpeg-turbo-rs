@@ -78,6 +78,8 @@
 | P4-117 | CLOSED 2026-08-08 (4:4:1 trim rejected images shorter than one iMCU row) |
 | P4-120 | OPEN (classic-shim allocation-failure paths are unreachable from tests) |
 | P4-121 | OPEN (lossless encode accepts a restart interval C refuses to decode) |
+| P4-123 | CLOSED 2026-08-08 (TurboJPEG YUV decompress entry points emitted one plane per SOF component) |
+| P4-124 | OPEN (`yuv_plane_width`/`yuv_plane_height` accept any component index) |
 
 ---
 
@@ -2578,17 +2580,24 @@ respectively. Pinned by `crates/libjpeg-turbo-rs-capi/tests/yuv_four_component_g
 (both entry points) and `crates/libjpeg-turbo-rs-capi/tests/yuv_decompress_planes_component_guard.rs`
 (a canary in `dstPlanes[3]` that observes the pre-fix out-of-bounds write
 directly). Both tests were measured red at `e63c46d` — the packed sink wrote
-4096 bytes past `tj3YUVBufSize` on a 64x64 CMYK frame, and the planar sink wrote
-a full plane through `dstPlanes[3]` — and green with the guard. Reachable plane
+256 bytes past the 768-byte `tj3YUVBufSize` region on the 16x16 CMYK frame and
+still returned 0, and the planar sink wrote a full plane through `dstPlanes[3]`
+— and green with the guard. C cross-validation is
+`crates/libjpeg-turbo-rs-capi/tests/yuv_four_component_c_parity.rs`, which drives
+`examples/yuv_component_count_c_oracle.c` against stock libjpeg-turbo 3.1.4.1 and
+requires both entry points to match C's accept/reject decision (C returns -1/-1
+for the CMYK frame and 0/0 for a 3-component control). The Integration Tests job
+runs all three binaries with `LIBJPEG_TURBO_PREFIX=/opt/libjpeg-turbo`, which
+makes the oracle fatal rather than skippable there. Reachable plane
 counts are `{1, 3, 4}` because `detect_subsampling` already rejects 2, so the
 only newly-rejected input is the 4-component frame itself. The second-layer gap
 this work surfaced is tracked as P4-124.
 
 ## P4-124. `yuv_plane_width`/`yuv_plane_height` accept any component index where C rejects `componentID >= nc` — **OPEN**
 
-**Motivation.** Filed 2026-08-08 while closing P4-123, which removed the
-first-layer defence but left upstream's second layer unported. Upstream defends
-the YUV plane model twice: `tj3YUVBufSize`
+**Motivation.** Filed 2026-08-08 while closing P4-123, which ported the
+first-layer defence but left upstream's second layer unported in the root-crate
+plane-size helpers. Upstream defends the YUV plane model twice: `tj3YUVBufSize`
 (`references/libjpeg-turbo/src/turbojpeg.c:1029`, line 1038) fixes
 `nc = (subsamp == TJSAMP_GRAY ? 1 : 3)`, and `tj3YUVPlaneWidth` /
 `tj3YUVPlaneHeight` (`turbojpeg.c:1115`, lines 1124-1125) additionally reject an
@@ -2603,23 +2612,45 @@ out-of-range component with `THROWG("Invalid argument", 0)`:
 **Root cause hypothesis.** `src/common/bufsize.rs` treats every
 `component != 0` as chroma with no upper bound, so `yuv_plane_width(3, ..)`
 silently returns a chroma-sized plane instead of signalling an invalid argument.
-The C-ABI wrappers `tj3YUVPlaneWidth` / `tj3YUVPlaneHeight` inherit that
-permissiveness.
+The C-ABI wrappers `tj3YUVPlaneWidth` / `tj3YUVPlaneHeight`
+(`crates/libjpeg-turbo-rs-capi/src/bufsize.rs`) do not inherit it — they already
+bound `componentID` to `0..=2` against their own `plane_width` / `plane_height`,
+so the gap is confined to the root-crate helpers, except for grayscale: there the
+wrappers return 0 for components 1-2 without setting the no-handle error slot
+upstream's `THROWG("Invalid argument", 0)` fills.
 
 **Acceptance criteria.**
 
 1. `yuv_plane_width` / `yuv_plane_height` reject a component index at or above
    the subsampling's plane count (1 for grayscale, otherwise 3), and the C-ABI
-   wrappers report it the way upstream does (return 0 with the handle's error
-   set, per `tj3YUVPlaneWidth`'s contract).
+   wrappers report the grayscale case the way upstream does — return 0 *and*
+   set the process-global no-handle error slot, since `tj3YUVPlaneWidth` takes no
+   handle and raises `THROWG("Invalid argument", 0)`.
 2. A cross-check against C `tj3YUVPlaneWidth` / `tj3YUVPlaneHeight` for
    `componentID` in `-1..=4` across every `TJSAMP_*`, including grayscale, where
    only component 0 is valid.
 3. Callers inside the crate keep their current behaviour for valid indices; the
    change must not alter any packed or planar buffer size.
+4. Decide, and record, what `decompress_to_yuv_planes` does for a 4-component
+   frame once the helpers reject index 3. It calls them with 3 today, so
+   criterion 1 forces a choice: trim the fourth plane by some other rule, or
+   reject CMYK/YCCK in the public Rust API too. The two options differ in
+   whether `decompress_to_yuv` keeps returning a 4-plane packed buffer.
+5. While here, correct the mapping rows for these two functions in
+   `docs/C_API_REFERENCE.md` (lines 72-73) and `docs/FEATURE_PARITY.md`
+   (lines 338-339): they name the root-crate `yuv_plane_width()` /
+   `yuv_plane_height()` as the equivalents, but the exported `tj3YUVPlaneWidth`
+   / `tj3YUVPlaneHeight` run the capi-local `plane_width` / `plane_height`
+   instead. Pre-existing inaccuracy, surfaced by this item's audit; the ✅
+   status itself is right, because the exported functions do match C's return
+   values.
 
-**Why deferred.** Not reachable as a memory-safety issue on its own: after
-P4-123 no decode path can present a component index above 2 to these helpers,
-and the two functions are otherwise driven by in-range loops. It is defence in
-depth plus an API-contract divergence, so it was deliberately kept out of the
-P4-123 patch to keep that change minimal and reviewable.
+**Why deferred.** Not a memory-safety issue on its own. `decompress_to_yuv_planes`
+does still call `yuv_plane_width(3, ..)` / `yuv_plane_height(3, ..)` for every
+4-component frame — P4-123's guard sits in the C-ABI layer and runs *after* that
+helper returns — but the value only sizes the fourth plane's own trim, and the
+guard then discards that plane, so nothing is written out of bounds. No C caller
+reaches the permissive path either, because the wrappers already bound
+`componentID`. It is defence in depth plus an API-contract divergence, so it was
+deliberately kept out of the P4-123 patch to keep that change minimal and
+reviewable.

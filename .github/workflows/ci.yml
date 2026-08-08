@@ -352,9 +352,10 @@ jobs:
       # so `cargo test --tests` above does not select them. Name each binary in
       # full rather than filtering, so a renamed or deleted test cannot report
       # green as a zero-test match (P4-61). The oracle needs the turbojpeg
-      # headers the install step above put in /opt/libjpeg-turbo, and skips
-      # loudly without them — running it here is what keeps it from being a
-      # permanent skip.
+      # headers the install step above put in /opt/libjpeg-turbo;
+      # LIBJPEG_TURBO_PREFIX names that prefix exclusively and makes the oracle
+      # mandatory, so a missing or TurboJPEG-2.x install fails this step instead
+      # of skipping it.
       - name: TurboJPEG YUV component-count guard and C parity
         run: >
           cargo test -p libjpeg-turbo-rs-capi

@@ -406,6 +406,10 @@ pub fn compress_from_yuv_planes(
 /// Returns `(yuv_buf, width, height, subsampling)`.
 /// The packed buffer has Y plane first, then Cb, then Cr.
 /// For grayscale JPEGs, only the Y plane is returned.
+///
+/// Like [`decompress_to_yuv_planes`], a 4-component (CMYK/YCCK) source packs
+/// **four** planes, not three — see that function's note on the TurboJPEG
+/// C ABI, which rejects such frames rather than emitting the fourth.
 pub fn decompress_to_yuv(data: &[u8]) -> Result<(Vec<u8>, usize, usize, Subsampling)> {
     let (planes, width, height, subsampling) = decompress_to_yuv_planes(data)?;
 
@@ -420,7 +424,13 @@ pub fn decompress_to_yuv(data: &[u8]) -> Result<(Vec<u8>, usize, usize, Subsampl
 /// Decompress JPEG to separate Y/Cb/Cr plane buffers.
 ///
 /// Returns `(planes, width, height, subsampling)`.
-/// For grayscale JPEGs, returns 1 plane. For color, returns 3 planes.
+///
+/// One plane per SOF component: 1 for grayscale, 3 for YCbCr, and **4 for a
+/// CMYK/YCCK source** — the plane count comes from the frame, not from the
+/// Y/Cb/Cr naming. The TurboJPEG C ABI models only 1 or 3 planes, so
+/// `tj3DecompressToYUV8` / `tj3DecompressToYUVPlanes8` reject a 4-component
+/// frame rather than passing the fourth plane on (P4-120); a Rust caller that
+/// sizes buffers for three planes must apply the same check itself.
 pub fn decompress_to_yuv_planes(data: &[u8]) -> Result<(Vec<Vec<u8>>, usize, usize, Subsampling)> {
     let raw: crate::api::raw_data::RawImage = decompress_raw(data)?;
 
