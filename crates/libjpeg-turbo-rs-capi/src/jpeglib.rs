@@ -851,6 +851,12 @@ unsafe extern "C" fn default_output_message(_cinfo: *mut c_void) {
 
 // Upstream `JERR_*` message codes as they resolve at `JPEG_LIB_VERSION = 80`.
 //
+// Some are reachable only through `classic_error_for`'s table, which the
+// compiler cannot see through, and a few are staged for call sites P4-100's
+// remaining scope converts; `capi_classic_error_codes.rs` cross-checks every
+// one of them against a reference v8 build regardless of whether it is wired
+// yet, so an unused constant is still a verified constant.
+//
 // The values are positions in `jerror.h`'s `JMESSAGE` list with the
 // version-gated entries applied (`JERR_ARITH_NOTIMPL` is v6b-only —
 // `#if JPEG_LIB_VERSION < 70`; `JERR_BAD_CROP_SPEC`, `JERR_BAD_DROP_SAMPLING`
@@ -861,14 +867,139 @@ unsafe extern "C" fn default_output_message(_cinfo: *mut c_void) {
 // `tests/capi_classic_lifecycle_pathological.rs` pins `JERR_CANT_SUSPEND`
 // against upstream's own enum, and `JERR_OUT_OF_MEMORY` is unpinned — no test
 // can force the `malloc` failure that reaches it.
+#[allow(dead_code)]
+/// "DCT coefficient (lossy) or spatial difference (lossless) out of range"
+const JERR_BAD_DCT_COEF: c_int = 6;
+#[allow(dead_code)]
+/// "Bogus marker length"
+const JERR_BAD_LENGTH: c_int = 12;
+#[allow(dead_code)]
+/// "Improper call to JPEG library in state %d"
+const JERR_BAD_STATE: c_int = 21;
+#[allow(dead_code)]
 /// "Buffer passed to JPEG library is too small"
 const JERR_BUFFER_SIZE: c_int = 24;
+#[allow(dead_code)]
 /// "Suspension not allowed here"
 const JERR_CANT_SUSPEND: c_int = 25;
+#[allow(dead_code)]
 /// "Output file write error --- out of disk space?"
 const JERR_FILE_WRITE: c_int = 38;
+#[allow(dead_code)]
+/// "Input file read error"
+const JERR_FILE_READ: c_int = 37;
+#[allow(dead_code)]
+/// "Maximum supported image dimension is %u pixels"
+const JERR_IMAGE_TOO_BIG: c_int = 42;
+#[allow(dead_code)]
+/// "Premature end of input file"
+const JERR_INPUT_EOF: c_int = 44;
+#[allow(dead_code)]
+/// "Requested features are incompatible"
+const JERR_NOTIMPL: c_int = 48;
+#[allow(dead_code)]
+/// "JPEG datastream contains no image"
+const JERR_NO_IMAGE: c_int = 53;
+#[allow(dead_code)]
 /// "Insufficient memory (case %d)"
 const JERR_OUT_OF_MEMORY: c_int = 56;
+#[allow(dead_code)]
+/// "Application transferred too few scanlines"
+const JERR_TOO_LITTLE_DATA: c_int = 69;
+#[allow(dead_code)]
+/// "Unsupported marker type 0x%02x"
+const JERR_UNKNOWN_MARKER: c_int = 70;
+
+/// The classic error a native codec failure corresponds to: an upstream
+/// `JERR_*` message code plus the single integer parameter its message
+/// substitutes, when it takes one.
+///
+/// Mapping fidelity is uneven and deliberately marked as such — a code chosen
+/// to look precise is worse than one documented as approximate:
+///
+/// * **Exact** — the condition and upstream's own condition are the same:
+///   marker problems, buffer sizing, premature EOF, dimension limits, I/O.
+/// * **Closest fit** — `CorruptData` covers entropy, scan and structural
+///   corruption for which upstream has no single code (it reports some as
+///   warnings and continues). `JERR_BAD_DCT_COEF` is the nearest hard error
+///   for the entropy case and is used as the documented default.
+///
+/// Returning the pair rather than raising directly keeps this pure and unit
+/// testable; [`raise_native_error`] is the one place that calls `error_exit`.
+fn classic_error_for(err: &libjpeg_turbo_rs::JpegError) -> (c_int, Option<c_int>) {
+    use libjpeg_turbo_rs::JpegError as E;
+    match err {
+        // Exact: upstream reports the offending marker byte as %02x.
+        E::InvalidMarker(m) | E::UnexpectedMarker(m) => (JERR_UNKNOWN_MARKER, Some(*m as c_int)),
+        // Exact: "Requested features are incompatible" is upstream's answer to
+        // an option or stream feature it will not handle.
+        E::Unsupported(_) => (JERR_NOTIMPL, None),
+        // Exact: caller-sized buffer proved too small.
+        E::BufferTooSmall { .. } => (JERR_BUFFER_SIZE, None),
+        // Exact: upstream substitutes the limit it enforces.
+        E::LimitExceeded { limit, .. } => (
+            JERR_IMAGE_TOO_BIG,
+            Some((*limit).min(c_int::MAX as u64) as c_int),
+        ),
+        // Exact: ran out of input before the stream was complete.
+        E::UnexpectedEof => (JERR_INPUT_EOF, None),
+        // Closest fit — see the note above.
+        E::CorruptData(_) => (JERR_BAD_DCT_COEF, None),
+        E::Io(_) => (JERR_FILE_READ, None),
+        // `JpegError` is `#[non_exhaustive]`. A variant added later has no
+        // established C parity yet, so report it as a feature this build will
+        // not handle rather than guessing at a more specific code.
+        _ => (JERR_NOTIMPL, None),
+    }
+}
+
+/// Report a native codec failure to the application the way stock libjpeg
+/// would: publish the message code (and parameter) and leave through
+/// `cinfo->err->error_exit` — exactly once.
+///
+/// P4-100: the classic entry points used to record these in a private
+/// `last_error` string that no C consumer can read, then return `FALSE`. In
+/// classic libjpeg `FALSE` means *source suspension*, so a caller doing the
+/// documented thing — refill the source and retry — would spin on a stream
+/// that can never decode. `FALSE` is now reserved for real suspension and
+/// every ordinary failure comes through here.
+///
+/// `last_error` is still set, because the crate's own diagnostics read it, but
+/// it is no longer the *only* record of the failure.
+///
+/// Like the other `error_exit` paths, this must be called only once the
+/// caller's heap-owning locals are out of scope: a consumer's handler normally
+/// `longjmp`s and will not run Rust destructors.
+fn raise_native_error(
+    cinfo: *mut c_void,
+    last_error: &mut CString,
+    context: &str,
+    err: &libjpeg_turbo_rs::JpegError,
+) {
+    *last_error = CString::new(format!("{context}: {err}")).unwrap_or_default();
+    let (code, parm) = classic_error_for(err);
+    match parm {
+        Some(p) => invoke_error_exit_parm(cinfo, code, p),
+        None => invoke_error_exit(cinfo, code),
+    }
+}
+
+/// [`raise_native_error`] for a failure the shim detects itself, with no
+/// native `JpegError` behind it (a bad call order, a missing source, an
+/// unsupported configuration). Same contract: exactly one `error_exit`.
+fn raise_classic_error(
+    cinfo: *mut c_void,
+    last_error: &mut CString,
+    context: &str,
+    code: c_int,
+    parm: Option<c_int>,
+) {
+    *last_error = CString::new(context.to_string()).unwrap_or_default();
+    match parm {
+        Some(p) => invoke_error_exit_parm(cinfo, code, p),
+        None => invoke_error_exit(cinfo, code),
+    }
+}
 
 /// Invoke `cinfo->err->error_exit(cinfo)` with the given `msg_code`,
 /// mirroring upstream's `ERREXIT` macro family in `jerror.h`.
@@ -2048,7 +2179,7 @@ pub extern "C" fn jpeg_read_header(cinfo: *mut c_void, require_image: CBoolean) 
                  but the input is a tables-only abbreviated datastream",
                 )
                 .unwrap_or_default();
-                invoke_error_exit(cinfo, 53);
+                invoke_error_exit(cinfo, JERR_NO_IMAGE);
                 // Defensive return if a non-conforming handler returns
                 // without longjmp-ing (violates the libjpeg contract).
                 return JPEG_SUSPENDED;
@@ -2170,7 +2301,7 @@ pub extern "C" fn jpeg_read_header(cinfo: *mut c_void, require_image: CBoolean) 
                     // up the description in the message table. Consumers
                     // that care about the specific cause read
                     // `priv_state.last_error` (already populated above).
-                    invoke_error_exit(cinfo, 12);
+                    invoke_error_exit(cinfo, JERR_BAD_LENGTH);
                     // If a custom handler returns instead of longjmping
                     // (which violates the libjpeg contract), fall through
                     // to JPEG_SUSPENDED so the caller still sees a
@@ -2517,8 +2648,17 @@ pub extern "C" fn jpeg_start_decompress(cinfo: *mut c_void) -> CBoolean {
         let bytes: Vec<u8> = match priv_state.source.as_bytes() {
             Some(b) => b.to_vec(),
             None => {
-                priv_state.last_error =
-                    CString::new("jpeg_start_decompress: no source").unwrap_or_default();
+                // P4-100: `FALSE` from `jpeg_start_decompress` means *source
+                // suspension* in classic libjpeg, so a caller following the
+                // documented contract would refill and retry forever. Having
+                // no source at all is not suspension — report it.
+                raise_classic_error(
+                    cinfo,
+                    &mut priv_state.last_error,
+                    "jpeg_start_decompress: no source manager is installed",
+                    JERR_NO_IMAGE,
+                    None,
+                );
                 return 0;
             }
         };
@@ -2571,8 +2711,17 @@ pub extern "C" fn jpeg_start_decompress(cinfo: *mut c_void) -> CBoolean {
             {
                 Ok(i) => i,
                 Err(e) => {
-                    priv_state.last_error =
-                        CString::new(format!("jpeg_start_decompress: {e}")).unwrap_or_default();
+                    // P4-100: a malformed stream is not source suspension.
+                    // Returning FALSE with only a private string told a
+                    // conforming caller "refill and retry" about a stream that
+                    // can never decode; route it through the shared translator
+                    // so `msg_code` matches what stock libjpeg reports.
+                    raise_native_error(
+                        cinfo,
+                        &mut priv_state.last_error,
+                        "jpeg_start_decompress",
+                        &e,
+                    );
                     return 0;
                 }
             };
@@ -5509,6 +5658,14 @@ enum JpegDest {
 /// Private encoder state held behind `JpegCompressPublic::priv_ptr`.
 #[allow(dead_code)] // fields populated across C2-1..C2-5 subtasks
 struct CompressPrivate {
+    /// Whether a failure on this handle already left through
+    /// `cinfo->err->error_exit`.
+    ///
+    /// P4-100 requires *exactly one* `error_exit` per failure. The encode
+    /// helpers raise destination-manager and suspension failures themselves,
+    /// so `jpeg_finish_compress` must be able to tell "this already reported"
+    /// from "this failed silently and I have to report it".
+    error_reported: bool,
     /// The library-provided destination manager, if one is installed, together
     /// with the private state its callbacks need. Deliberately *not* split
     /// into separate `CompressPrivate` fields — see `OwnedDestMgr`.
@@ -5586,6 +5743,7 @@ struct CompressPrivate {
 impl Default for CompressPrivate {
     fn default() -> Self {
         Self {
+            error_reported: false,
             dest_mgr: None,
             pixels_u8: Vec::new(),
             pixels_u16: Vec::new(),
@@ -6947,6 +7105,7 @@ fn raise_cant_suspend(c: &mut JpegCompressPublic, priv_state: &mut CompressPriva
          — see push_bytes_through_dest_mgr in jpeglib.rs",
     )
     .unwrap_or_default();
+    priv_state.error_reported = true;
     invoke_error_exit(
         c as *mut JpegCompressPublic as *mut c_void,
         JERR_CANT_SUSPEND,
@@ -7004,6 +7163,7 @@ fn finish_dest_flush(
             _ => "destination manager reported a fatal error",
         })
         .unwrap_or_default();
+        priv_state.error_reported = true;
         invoke_error_exit(c as *mut JpegCompressPublic as *mut c_void, code);
         return;
     }
@@ -7221,15 +7381,44 @@ pub extern "C" fn jpeg_finish_compress(cinfo: *mut c_void) {
             None => return,
         };
         if !priv_state.have_started {
+            // P4-106: upstream rejects a finish that was never started rather
+            // than returning quietly, so the caller learns its call order is
+            // wrong instead of receiving an empty file.
+            raise_classic_error(
+                cinfo,
+                &mut priv_state.last_error,
+                "jpeg_finish_compress: called without a matching jpeg_start_compress",
+                JERR_BAD_STATE,
+                Some(c.global_state),
+            );
+            return;
+        }
+        // P4-106: a scanline encode that never received every row must not
+        // produce a file. Upstream raises JERR_TOO_LITTLE_DATA
+        // (jcapistd.c) rather than zero-filling the remainder.
+        let rows_missing: bool = c.global_state != CSTATE_WRCOEFS
+            && c.raw_data_in == 0
+            && c.next_scanline < c.image_height;
+        if rows_missing {
+            let short_by: c_int = c.image_height.saturating_sub(c.next_scanline) as c_int;
+            priv_state.have_started = false;
+            raise_classic_error(
+                cinfo,
+                &mut priv_state.last_error,
+                "jpeg_finish_compress: image is short by rows that were never written",
+                JERR_TOO_LITTLE_DATA,
+                Some(short_by),
+            );
             return;
         }
         priv_state.have_started = false;
+        priv_state.error_reported = false;
         // CSTATE_WRCOEFS branch: jpegtran-style lossless transcode flow.
         // Emit the bytes from the coefficient handle stashed by the matching
         // `jpeg_write_coefficients` call. Otherwise fall through to the
         // pixel-encoding path.
-        if c.global_state == CSTATE_WRCOEFS {
-            let _ = run_coefficient_writer_and_flush(c, priv_state);
+        let completed: bool = if c.global_state == CSTATE_WRCOEFS {
+            run_coefficient_writer_and_flush(c, priv_state)
         } else if c.raw_data_in != 0 {
             // Raw-data encode path: flush accumulated per-component planes
             // collected by jpeg_write_raw_data / jpeg12_write_raw_data.
@@ -7237,12 +7426,33 @@ pub extern "C" fn jpeg_finish_compress(cinfo: *mut c_void) {
             // `compress_raw_12` backend (i16 planes), every other precision
             // through the 8-bit `compress_raw` backend (u8 planes).
             if c.data_precision == 12 {
-                let _ = run_raw_encoder_12_and_flush(c, priv_state);
+                run_raw_encoder_12_and_flush(c, priv_state)
             } else {
-                let _ = run_raw_encoder_and_flush(c, priv_state);
+                run_raw_encoder_and_flush(c, priv_state)
             }
         } else {
-            let _ = run_encoder_and_flush(c, priv_state);
+            run_encoder_and_flush(c, priv_state)
+        };
+
+        if !completed {
+            // P4-100: the helper's result used to be discarded and the state
+            // reset to CSTATE_START regardless, so a failed encode was
+            // indistinguishable from a successful one — the caller got a
+            // clean return and, at best, an empty file. Report it, and leave
+            // the handle in its failed state: upstream's `error_exit` normally
+            // `longjmp`s out, and the application is then required to call
+            // `jpeg_abort_compress` / `jpeg_destroy_compress`.
+            if !priv_state.error_reported {
+                let message: String = priv_state.last_error.to_string_lossy().into_owned();
+                raise_classic_error(
+                    cinfo,
+                    &mut priv_state.last_error,
+                    &message,
+                    JERR_BAD_DCT_COEF,
+                    None,
+                );
+            }
+            return;
         }
         c.global_state = CSTATE_START;
     })
