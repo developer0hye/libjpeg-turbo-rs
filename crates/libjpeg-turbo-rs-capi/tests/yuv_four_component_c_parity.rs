@@ -67,7 +67,15 @@ fn find_turbojpeg_dev() -> Option<TurboJpegDev> {
 
     for prefix in prefixes {
         let include_dir: PathBuf = prefix.join("include");
-        if !include_dir.join("turbojpeg.h").exists() {
+        // The oracle is TJ3-only. Ubuntu's stock `libturbojpeg0-dev` is still
+        // TurboJPEG 2.1.x, whose header declares no `tj3*` entry point, so
+        // accepting it here would turn a skip into a compile failure on a
+        // perfectly ordinary developer machine.
+        let header: PathBuf = include_dir.join("turbojpeg.h");
+        let Ok(header_text) = std::fs::read_to_string(&header) else {
+            continue;
+        };
+        if !header_text.contains("tj3DecompressToYUVPlanes8") {
             continue;
         }
         for lib_subdir in &lib_subdirs {
@@ -101,12 +109,14 @@ fn host_multiarch_triplet() -> Option<String> {
     (!triplet.is_empty()).then_some(triplet)
 }
 
-/// True when a missing TurboJPEG install must fail rather than skip: CI
-/// provisions one deliberately, and an explicit `LIBJPEG_TURBO_PREFIX` is a
-/// statement that one exists. Skipping in either case would leave the parity
-/// gate green while checking nothing.
+/// True when a missing TurboJPEG 3 install must fail rather than skip: an
+/// explicit `LIBJPEG_TURBO_PREFIX` is a statement that one is provisioned, and
+/// skipping would leave the parity gate green while checking nothing. The CI
+/// step that runs this test sets it. Deliberately *not* keyed on a bare `CI`
+/// variable — a CI service running `cargo test --workspace` without TurboJPEG
+/// development files is the missing-tool case CLAUDE.md lets us skip.
 fn oracle_is_required() -> bool {
-    std::env::var_os("CI").is_some() || std::env::var_os("LIBJPEG_TURBO_PREFIX").is_some()
+    std::env::var_os("LIBJPEG_TURBO_PREFIX").is_some()
 }
 
 /// Build the oracle into a temp dir. `None` means no TurboJPEG development
@@ -120,9 +130,11 @@ fn build_oracle() -> Option<PathBuf> {
         None => {
             assert!(
                 !oracle_is_required(),
-                "no TurboJPEG development install (turbojpeg.h + libturbojpeg) found, but CI or \
-                 LIBJPEG_TURBO_PREFIX says one is provisioned — the C parity gate would pass \
-                 without checking anything"
+                "no TurboJPEG 3 development install (a turbojpeg.h declaring tj3* plus a linkable \
+                 libturbojpeg) found under LIBJPEG_TURBO_PREFIX={:?} — that variable says one is \
+                 provisioned, and skipping here would pass the C parity gate without checking \
+                 anything",
+                std::env::var_os("LIBJPEG_TURBO_PREFIX")
             );
             return None;
         }
@@ -245,7 +257,10 @@ fn jpeg_fixture(format: PixelFormat, channels: usize) -> Vec<u8> {
 #[test]
 fn yuv_decompress_component_count_matches_c() {
     let Some(oracle) = build_oracle() else {
-        eprintln!("SKIP: no TurboJPEG development install (turbojpeg.h + libturbojpeg) found");
+        eprintln!(
+            "SKIP: no TurboJPEG 3 development install found (need a turbojpeg.h declaring tj3* \
+             plus a linkable libturbojpeg); set LIBJPEG_TURBO_PREFIX to require it"
+        );
         return;
     };
 
