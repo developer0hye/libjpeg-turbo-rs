@@ -1342,7 +1342,7 @@ So **(D) enable the target feature and let the compiler vectorise** joins the li
 
 **Acceptance criteria.** Decide the intended status of the public `decode` internals: (A) deprecate the low-level helper and make the module crate-private in the next semver-major release, with a downstream source scan and migration note; or (B) add a metadata- and policy-aware public companion, migrate callers, and make the legacy function delegate wherever its inputs are sufficient. In either case, rustdoc must state the exact behavior, source compatibility must be tested for the supported release line, and the legacy path must never panic on short or subsampled planes.
 
-## P4-81. Linux cdylib Omits GNU `LIBJPEG_8.0` Symbol Versions — **OPEN**
+## P4-81. Linux cdylib Omits GNU `LIBJPEG_8.0` Symbol Versions — **PARTIAL: nodes emitted and tested; downstream re-verification pending**
 
 **Motivation.** Filed 2026-08-02 by the real OpenCV replacement experiment.
 Ubuntu's prebuilt `libopencv_imgcodecs.so.406` requests
@@ -1372,6 +1372,52 @@ wrong node or symbol assignment; (3) the OpenCV harness keeps both binding
 assertions and runs without `no version information available`; and (4)
 alternative SONAME configurations are either given their correct version map
 or rejected with a clear build-time error rather than mislabeled silently.
+
+**Progress (2026-08-08) — the nodes exist.** `build.rs` generates a GNU
+version script and passes it to the linker on ELF targets, gated on the v8
+SONAME: an artifact built with `CAPI_SONAME` set to something else gets a
+`cargo:warning` instead of a silently wrong v8 label.
+
+The map mirrors upstream `src/libjpeg.map.in` — `LIBJPEGTURBO_8.0` owning
+`jpeg_mem_dest` / `jpeg_mem_src` and localising `jsimd_*` / `jconst_*`,
+`LIBJPEG_8.0` owning the reference API — with **one deliberate deviation that
+the issue's scope did not anticipate**.
+
+Upstream's `LIBJPEG_8.0` node is `global: *`. It can afford a catch-all because
+it builds *two* libraries: `libjpeg.so.8` from that map and
+`libturbojpeg.so.0` from `src/turbojpeg-mapfile`, which assigns each `tj*`
+symbol to the `TURBOJPEG_1.0`…`TURBOJPEG_3.0` node it was introduced in. We
+ship **one** artifact carrying both surfaces (92 `jpeg_*` exports and 63
+`tj*`/`TJ*`), so applying upstream's map verbatim would stamp every TurboJPEG
+export as reference libjpeg API — precisely the mislabelling this item forbids.
+Re-versioning them under a node of our own would be worse: a consumer linked
+against a real libturbojpeg requests `tjInitCompress@TURBOJPEG_1.0`, and the
+loader fails outright when the library offers that name under a different
+version.
+
+So the map has **no catch-all**. Symbols matched by no node keep default,
+unversioned visibility — exactly their status today — so the TurboJPEG and
+crate-only surfaces are unchanged while the classic API gains the nodes
+prebuilt consumers look for. The `local:` clause hides nothing we ship: the
+crate exports no `jsimd_*` or `jconst_*` symbol.
+
+`tests/capi_symbol_versions.rs` splits verification by what each layer needs.
+The script *content* — node names, membership, and the absence of a catch-all —
+is asserted on every platform from the generated file, because that is the part
+most likely to regress and it needs no Linux. The *ELF result* is asserted with
+`readelf --version-info` and `--dyn-syms` where ELF versioning exists, checking
+both that the nodes exist and that `jpeg_CreateDecompress` / `jpeg_read_header`
+land in `LIBJPEG_8.0`, `jpeg_mem_*` in `LIBJPEGTURBO_8.0`, and `tj3Init` in
+neither — a map that defined the nodes but matched nothing would otherwise pass
+a nodes-exist check while leaving every symbol unversioned.
+
+**Status (2026-08-08): partial.** `cargo test --workspace --no-fail-fast`:
+2470 passed, 0 failed, 1 ignored (macOS aarch64, where the ELF leg reports its
+skip). Not yet done: the acceptance criteria also require re-running the OpenCV
+replacement harness to confirm the `no version information available` warning
+is gone, and confirming libtiff/GDAL/Poppler/HDF4 still load. Those need the
+downstream lab, and the warning's disappearance is the criterion that actually
+closes this item — the nodes existing is necessary, not sufficient.
 
 ## P4-82. Classic Scanline Encoder Dropped Public Restart Settings — **CLOSED 2026-08-02**
 
