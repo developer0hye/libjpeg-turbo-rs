@@ -25,19 +25,6 @@ use libjpeg_turbo_rs::{
 // Tool discovery
 // ===========================================================================
 
-fn rdjpgcom_path() -> Option<PathBuf> {
-    let homebrew: PathBuf = PathBuf::from("/opt/homebrew/bin/rdjpgcom");
-    if homebrew.exists() {
-        return Some(homebrew);
-    }
-    Command::new("which")
-        .arg("rdjpgcom")
-        .output()
-        .ok()
-        .filter(|o| o.status.success())
-        .map(|o| PathBuf::from(String::from_utf8_lossy(&o.stdout).trim().to_string()))
-}
-
 /// Check if cjpeg supports the `-icc` flag.
 fn cjpeg_supports_icc(cjpeg: &Path) -> bool {
     let output = Command::new(cjpeg).arg("-help").output();
@@ -97,10 +84,6 @@ impl Drop for TempFile {
     }
 }
 
-fn reference_path(name: &str) -> PathBuf {
-    PathBuf::from(format!("references/libjpeg-turbo/testimages/{}", name))
-}
-
 /// Generate a small test RGB image.
 fn generate_test_pixels(w: usize, h: usize) -> Vec<u8> {
     let mut pixels: Vec<u8> = Vec::with_capacity(w * h * 3);
@@ -115,13 +98,13 @@ fn generate_test_pixels(w: usize, h: usize) -> Vec<u8> {
 }
 
 /// Load an ICC profile from the reference test images.
-fn load_icc(name: &str) -> Option<Vec<u8>> {
-    let path: PathBuf = reference_path(name);
-    if path.exists() {
-        Some(std::fs::read(&path).expect("read ICC file"))
-    } else {
-        None
-    }
+///
+/// P4-116: the callers used to turn `None` into a silent `return`, so a
+/// renamed fixture disabled the ICC coverage without failing anything. Use
+/// `require_c_testimage!` at the call site instead — it distinguishes "the
+/// submodule is not checked out" from "the fixture this test needs is gone".
+fn load_icc_at(path: &Path) -> Vec<u8> {
+    std::fs::read(path).unwrap_or_else(|e| panic!("read ICC file {path:?}: {e}"))
 }
 
 /// Create a minimal EXIF block (valid TIFF header + IFD with orientation tag).
@@ -155,17 +138,17 @@ fn minimal_exif() -> Vec<u8> {
 fn icc_profile_preserved_through_c_decode() {
     let djpeg: PathBuf = require_c_tool!("djpeg");
     if !djpeg_supports_icc_extract(&djpeg) {
+        // P4-116: CI provisions libjpeg-turbo 3.x, which has this flag, so a
+        // missing capability there is a provisioning failure, not a skip.
+        assert!(
+            !helpers::is_ci(),
+            "CI must provide a djpeg supporting -icc flag"
+        );
         eprintln!("SKIP: djpeg does not support -icc flag");
         return;
     }
 
-    let icc_data: Vec<u8> = match load_icc("test3.icc") {
-        Some(d) => d,
-        None => {
-            eprintln!("SKIP: test3.icc not found");
-            return;
-        }
-    };
+    let icc_data: Vec<u8> = load_icc_at(&require_c_testimage!("test3.icc"));
 
     let (w, h): (usize, usize) = (16, 16);
     let pixels: Vec<u8> = generate_test_pixels(w, h);
@@ -224,21 +207,19 @@ fn icc_profile_preserved_through_c_decode() {
 fn c_icc_preserved_through_rust_decode() {
     let cjpeg: PathBuf = require_c_tool!("cjpeg");
     if !cjpeg_supports_icc(&cjpeg) {
+        // P4-116: CI provisions libjpeg-turbo 3.x, which has this flag, so a
+        // missing capability there is a provisioning failure, not a skip.
+        assert!(
+            !helpers::is_ci(),
+            "CI must provide a cjpeg supporting -icc flag"
+        );
         eprintln!("SKIP: cjpeg does not support -icc flag");
         return;
     }
 
-    let icc_path: PathBuf = reference_path("test3.icc");
-    if !icc_path.exists() {
-        eprintln!("SKIP: test3.icc not found");
-        return;
-    }
+    let icc_path: PathBuf = require_c_testimage!("test3.icc");
 
-    let ppm_path: PathBuf = reference_path("testorig.ppm");
-    if !ppm_path.exists() {
-        eprintln!("SKIP: testorig.ppm not found");
-        return;
-    }
+    let ppm_path: PathBuf = require_c_testimage!("testorig.ppm");
 
     let icc_data: Vec<u8> = std::fs::read(&icc_path).expect("read test3.icc");
 
@@ -280,21 +261,19 @@ fn c_icc_large_profile_rust_decode() {
     // Test with test1.icc which is larger (544K) and may span multiple APP2 chunks
     let cjpeg: PathBuf = require_c_tool!("cjpeg");
     if !cjpeg_supports_icc(&cjpeg) {
+        // P4-116: CI provisions libjpeg-turbo 3.x, which has this flag, so a
+        // missing capability there is a provisioning failure, not a skip.
+        assert!(
+            !helpers::is_ci(),
+            "CI must provide a cjpeg supporting -icc flag"
+        );
         eprintln!("SKIP: cjpeg does not support -icc flag");
         return;
     }
 
-    let icc_path: PathBuf = reference_path("test1.icc");
-    if !icc_path.exists() {
-        eprintln!("SKIP: test1.icc not found");
-        return;
-    }
+    let icc_path: PathBuf = require_c_testimage!("test1.icc");
 
-    let ppm_path: PathBuf = reference_path("testorig.ppm");
-    if !ppm_path.exists() {
-        eprintln!("SKIP: testorig.ppm not found");
-        return;
-    }
+    let ppm_path: PathBuf = require_c_testimage!("testorig.ppm");
 
     let icc_data: Vec<u8> = std::fs::read(&icc_path).expect("read test1.icc");
 
@@ -432,7 +411,7 @@ fn comment_preserved_cross_check() {
     );
 
     // If rdjpgcom is available, verify it can read the comment
-    if let Some(rdjpgcom) = rdjpgcom_path() {
+    if let Some(rdjpgcom) = helpers::rdjpgcom_path() {
         let output = Command::new(&rdjpgcom)
             .arg(tmp_jpg.path())
             .output()
@@ -469,17 +448,17 @@ fn comment_preserved_cross_check() {
 fn icc_preserved_through_transform() {
     let djpeg: PathBuf = require_c_tool!("djpeg");
     if !djpeg_supports_icc_extract(&djpeg) {
+        // P4-116: CI provisions libjpeg-turbo 3.x, which has this flag, so a
+        // missing capability there is a provisioning failure, not a skip.
+        assert!(
+            !helpers::is_ci(),
+            "CI must provide a djpeg supporting -icc flag"
+        );
         eprintln!("SKIP: djpeg does not support -icc flag");
         return;
     }
 
-    let icc_data: Vec<u8> = match load_icc("test3.icc") {
-        Some(d) => d,
-        None => {
-            eprintln!("SKIP: test3.icc not found");
-            return;
-        }
-    };
+    let icc_data: Vec<u8> = load_icc_at(&require_c_testimage!("test3.icc"));
 
     let (w, h): (usize, usize) = (16, 16);
     let pixels: Vec<u8> = generate_test_pixels(w, h);
@@ -508,8 +487,8 @@ fn icc_preserved_through_transform() {
     ) {
         Ok(data) => data,
         Err(e) => {
-            eprintln!("SKIP: Rust transform with ICC failed: {}", e);
-            return;
+            // P4-116: a Rust failure here is the defect under test.
+            panic!("Rust transform with ICC failed: {e}");
         }
     };
 
@@ -563,21 +542,19 @@ fn c_jpegtran_preserves_markers_rust_decode() {
     let cjpeg: PathBuf = require_c_tool!("cjpeg");
     let jpegtran: PathBuf = require_c_tool!("jpegtran");
     if !cjpeg_supports_icc(&cjpeg) {
+        // P4-116: CI provisions libjpeg-turbo 3.x, which has this flag, so a
+        // missing capability there is a provisioning failure, not a skip.
+        assert!(
+            !helpers::is_ci(),
+            "CI must provide a cjpeg supporting -icc flag"
+        );
         eprintln!("SKIP: cjpeg does not support -icc flag");
         return;
     }
 
-    let icc_path: PathBuf = reference_path("test3.icc");
-    if !icc_path.exists() {
-        eprintln!("SKIP: test3.icc not found");
-        return;
-    }
+    let icc_path: PathBuf = require_c_testimage!("test3.icc");
 
-    let ppm_path: PathBuf = reference_path("testorig.ppm");
-    if !ppm_path.exists() {
-        eprintln!("SKIP: testorig.ppm not found");
-        return;
-    }
+    let ppm_path: PathBuf = require_c_testimage!("testorig.ppm");
 
     let icc_data: Vec<u8> = std::fs::read(&icc_path).expect("read test3.icc");
 
@@ -640,13 +617,7 @@ fn c_jpegtran_preserves_markers_rust_decode() {
 
 #[test]
 fn icc_only_copy_preserves_icc_strips_others() {
-    let icc_data: Vec<u8> = match load_icc("test3.icc") {
-        Some(d) => d,
-        None => {
-            eprintln!("SKIP: test3.icc not found");
-            return;
-        }
-    };
+    let icc_data: Vec<u8> = load_icc_at(&require_c_testimage!("test3.icc"));
 
     let (w, h): (usize, usize) = (16, 16);
     let pixels: Vec<u8> = generate_test_pixels(w, h);
@@ -676,8 +647,8 @@ fn icc_only_copy_preserves_icc_strips_others() {
     ) {
         Ok(data) => data,
         Err(e) => {
-            eprintln!("SKIP: Rust transform with IccOnly failed: {}", e);
-            return;
+            // P4-116: a Rust failure here is the defect under test.
+            panic!("Rust transform with IccOnly failed: {e}");
         }
     };
 
@@ -707,13 +678,7 @@ fn icc_only_copy_preserves_icc_strips_others() {
 
 #[test]
 fn no_copy_mode_strips_all_markers() {
-    let icc_data: Vec<u8> = match load_icc("test3.icc") {
-        Some(d) => d,
-        None => {
-            eprintln!("SKIP: test3.icc not found");
-            return;
-        }
-    };
+    let icc_data: Vec<u8> = load_icc_at(&require_c_testimage!("test3.icc"));
 
     let (w, h): (usize, usize) = (16, 16);
     let pixels: Vec<u8> = generate_test_pixels(w, h);
@@ -742,8 +707,8 @@ fn no_copy_mode_strips_all_markers() {
     ) {
         Ok(data) => data,
         Err(e) => {
-            eprintln!("SKIP: Rust transform with copy=None failed: {}", e);
-            return;
+            // P4-116: a Rust failure here is the defect under test.
+            panic!("Rust transform with copy=None failed: {e}");
         }
     };
 

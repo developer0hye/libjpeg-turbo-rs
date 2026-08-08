@@ -37,8 +37,7 @@ use std::path::{Path, PathBuf};
 use libjpeg_turbo_rs::{decompress_to, PixelFormat};
 
 use helpers::{
-    assert_pixels_identical, c_testimages_dir, c_tool_path, decode_with_c_djpeg, djpeg_path,
-    TempFile,
+    assert_pixels_identical, c_testimages_dir, c_tool_path, decode_with_c_djpeg, TempFile,
 };
 
 // ---------------------------------------------------------------------------
@@ -83,16 +82,16 @@ const PROXY_FIXTURES: &[ProxyFixture] = &[
 
 #[test]
 fn conformance_t83_proxy_matrix_matches_djpeg() {
-    let djpeg: PathBuf = match djpeg_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: djpeg not found (expected at /opt/homebrew/bin/djpeg or on PATH)");
-            return;
-        }
-    };
+    // P4-116: the private lookup ignored the CI policy, so a runner without
+    // djpeg reported a pass. `require_c_tool!` panics in CI and skips locally.
+    let djpeg: PathBuf = require_c_tool!("djpeg");
 
     let test_dir: PathBuf = c_testimages_dir();
     if !test_dir.exists() {
+        assert!(
+            !helpers::is_ci(),
+            "CI checks out submodules recursively, so {test_dir:?} must exist"
+        );
         eprintln!(
             "SKIP: libjpeg-turbo testimages directory not found at {:?}. \
              Run `git submodule update --init references/libjpeg-turbo`.",
@@ -115,15 +114,19 @@ fn conformance_t83_proxy_matrix_matches_djpeg() {
         );
     }
 
+    // Exact accounting: every fixture in the matrix must either be checked or
+    // be recorded as absent-from-this-submodule-commit. A bare `continue` let
+    // an arbitrary subset vanish while the suite still reported success.
+    let mut tally: helpers::ComparisonTally =
+        helpers::ComparisonTally::new("conformance_t83_proxy_matrix", PROXY_FIXTURES.len());
     let mut checked: usize = 0;
     for fix in PROXY_FIXTURES {
         let path: PathBuf = test_dir.join(fix.name);
         if !path.exists() {
-            eprintln!(
-                "SKIP: {} not present in {}; fixture not supplied by this submodule commit",
-                fix.name,
-                test_dir.display()
-            );
+            tally.excluded(format!(
+                "{} not supplied by this libjpeg-turbo submodule commit",
+                fix.name
+            ));
             continue;
         }
 
@@ -140,6 +143,7 @@ fn conformance_t83_proxy_matrix_matches_djpeg() {
             ),
         }
         checked += 1;
+        tally.compared();
     }
 
     assert!(
@@ -148,6 +152,7 @@ fn conformance_t83_proxy_matrix_matches_djpeg() {
         mandatory_8bit.len(),
         checked
     );
+    tally.finish();
 }
 
 fn check_8bit_fixture(djpeg: &Path, jpeg_path: &Path, fix: &ProxyFixture) {
@@ -418,18 +423,12 @@ fn conformance_t83_itu_reference_vectors_optin() {
         return;
     }
 
-    let djpeg: PathBuf = match djpeg_path() {
-        Some(p) => p,
-        None => {
-            eprintln!(
-                "SKIP: djpeg not found; cannot cross-validate the {} T.83 vectors found.",
-                vectors.len()
-            );
-            return;
-        }
-    };
+    // Vectors exist, so a missing oracle is no longer an acceptable outcome
+    // anywhere: locally it is still a skip, but in CI it is a failure.
+    let djpeg: PathBuf = require_c_tool!("djpeg");
 
-    let mut tested: usize = 0;
+    let mut tally: helpers::ComparisonTally =
+        helpers::ComparisonTally::new("conformance_t83_itu_vectors", vectors.len());
     for path in &vectors {
         let name: &str = path.file_name().and_then(|n| n.to_str()).unwrap_or("?");
         let jpeg_data: Vec<u8> = std::fs::read(path)
@@ -438,10 +437,15 @@ fn conformance_t83_itu_reference_vectors_optin() {
         // The ITU-T T.83 archive includes lossless and hierarchical bitstreams
         // that libjpeg-turbo's baseline djpeg rejects.  Treat Rust-decode
         // failure on those as diagnostic, but do not silently pass.
+        // The T.83 archive contains hierarchical and lossless bitstreams that
+        // neither this decoder nor baseline djpeg accepts. Those are genuine
+        // out-of-scope cases, so they are recorded as exclusions *with the
+        // reason* rather than silently dropped — the tally then proves how
+        // many vectors were really compared.
         let rust_img = match decompress_to(&jpeg_data, PixelFormat::Rgb) {
             Ok(img) => img,
             Err(e) => {
-                eprintln!("{}: Rust decode failed ({:?}); skipping vector", name, e);
+                tally.excluded(format!("{name}: Rust decoder rejected the vector ({e:?})"));
                 continue;
             }
         };
@@ -457,11 +461,10 @@ fn conformance_t83_itu_reference_vectors_optin() {
             result
         };
         if !output.status.success() {
-            eprintln!(
-                "{}: djpeg rejected vector (likely hierarchical/lossless T.83 case): {}",
-                name,
-                String::from_utf8_lossy(&output.stderr)
-            );
+            tally.excluded(format!(
+                "{name}: djpeg rejected the vector (likely hierarchical/lossless): {}",
+                String::from_utf8_lossy(&output.stderr).trim()
+            ));
             continue;
         }
         let (c_w, c_h, c_rgb) = helpers::parse_ppm(&output.stdout)
@@ -481,16 +484,10 @@ fn conformance_t83_itu_reference_vectors_optin() {
         // Assert byte-exact match.  The T.83 vectors were designed for
         // interop testing, so mismatch here signals a genuine spec gap.
         assert_pixels_identical(&rust_img.data, &c_rgb, c_w, c_h, 3, name);
-        tested += 1;
+        tally.compared();
     }
 
-    // At least one vector must actually reach the equality check, otherwise
-    // the test is silently vacuous.
-    assert!(
-        tested > 0,
-        "Found {} T.83 vectors but none could be cross-validated; \
-         all were rejected by djpeg or by the Rust decoder. Inspect the \
-         logs above to diagnose.",
-        vectors.len()
-    );
+    // Every vector must be either compared or explicitly excluded, and at
+    // least one must have reached the equality check — `finish` asserts both.
+    tally.finish();
 }

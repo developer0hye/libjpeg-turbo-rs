@@ -417,9 +417,24 @@ fn c_djpeg_encoder_builder_extended_diff_zero() {
             );
         } else {
             let _ = std::fs::remove_file(&tmp_out);
-            eprintln!(
-                "NOTE: djpeg does not support lossless JPEG (SOF3): {}",
-                String::from_utf8_lossy(&output.stderr).trim()
+            // P4-116: this used to print a NOTE and move on, so a lossless
+            // encoder regression that produced an unreadable stream was
+            // indistinguishable from an old djpeg. libjpeg-turbo has supported
+            // SOF3 since 3.0, and CI provisions 3.x, so refusing our output
+            // there is a defect on our side.
+            let stderr: String = String::from_utf8_lossy(&output.stderr).trim().to_string();
+            assert!(
+                !helpers::is_ci(),
+                "CI provisions libjpeg-turbo 3.x, which decodes SOF3; djpeg \
+                 rejected our lossless output: {stderr}"
+            );
+            eprintln!("SKIP: djpeg does not support lossless JPEG (SOF3): {stderr}");
+            // The C leg is unavailable, but the Rust round-trip is not: assert
+            // it here so the lossless case still proves something locally.
+            let rust_img = decompress(&jpeg).expect("Rust lossless decode failed");
+            assert_eq!(
+                rust_img.data, gray_pixels,
+                "Rust lossless roundtrip not exact"
             );
         }
     }

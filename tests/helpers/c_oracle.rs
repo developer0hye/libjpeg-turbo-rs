@@ -153,6 +153,63 @@ pub fn cmyk_c_oracle() -> Option<PathBuf> {
     Some(oracle)
 }
 
+/// Locate — building if necessary — the tables-only reference oracle
+/// (`examples/tables_only_c_oracle.c`).
+///
+/// P4-116: `jpeg_write_tables()` has no `cjpeg` switch, so the abbreviated
+/// tables-only stream can only be cross-validated through the library API.
+/// Same build-and-cache and `None`-means-skip contract as [`cmyk_c_oracle`].
+pub fn tables_only_c_oracle() -> Option<PathBuf> {
+    build_libjpeg_oracle("tables_only_c_oracle")
+}
+
+/// Shared build-and-cache for the `libjpeg`-linked oracles under `examples/`.
+fn build_libjpeg_oracle(stem: &str) -> Option<PathBuf> {
+    let artifact_dir: PathBuf = artifact_dir()?;
+    let oracle: PathBuf = artifact_dir.join(stem);
+    let _guard = BUILD_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+
+    let source: PathBuf = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("examples")
+        .join(format!("{stem}.c"));
+    if !source.exists() {
+        return None;
+    }
+    if is_newer(&oracle, &source) {
+        return Some(oracle);
+    }
+
+    let install: LibjpegDevInstall = find_libjpeg_dev()?;
+    let staging: PathBuf = artifact_dir.join(format!("{stem}.{}.tmp", std::process::id()));
+    let compiler: String = std::env::var("CC").unwrap_or_else(|_| "cc".to_string());
+    let output = Command::new(&compiler)
+        .arg("-O2")
+        .arg("-o")
+        .arg(&staging)
+        .arg(&source)
+        .arg(format!("-I{}", install.include_dir.display()))
+        .arg(format!("-L{}", install.lib_dir.display()))
+        .arg("-ljpeg")
+        .arg(format!("-Wl,-rpath,{}", install.lib_dir.display()))
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        let _ = std::fs::remove_file(&staging);
+        panic!(
+            "failed to build the {stem} C oracle with {compiler} against {:?}:\n{}",
+            install.include_dir,
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    if std::fs::rename(&staging, &oracle).is_err() {
+        let _ = std::fs::remove_file(&staging);
+        return oracle.exists().then_some(oracle);
+    }
+    Some(oracle)
+}
+
 /// A TurboJPEG development install: `turbojpeg.h` plus a linkable
 /// `libturbojpeg`. Discovered separately from libjpeg because runtime
 /// packages (e.g. `libjpeg-turbo-progs`) ship neither, and some prefixes

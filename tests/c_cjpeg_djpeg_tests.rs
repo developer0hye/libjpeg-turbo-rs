@@ -8,7 +8,7 @@
 
 mod helpers;
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use libjpeg_turbo_rs::decode::marker::MarkerReader;
 use libjpeg_turbo_rs::{
@@ -20,10 +20,6 @@ use libjpeg_turbo_rs::{
 // ===========================================================================
 // Helpers
 // ===========================================================================
-
-fn testimages() -> PathBuf {
-    helpers::c_testimages_dir()
-}
 
 fn read_file(path: &Path) -> Vec<u8> {
     std::fs::read(path).unwrap_or_else(|e| panic!("Failed to read {:?}: {:?}", path, e))
@@ -83,14 +79,9 @@ fn parse_scan_script(path: &Path) -> Vec<ScanScript> {
 // Previously ignored — fixed by dummy blocks + disabling fancy prefilter
 fn c_cjpeg_rgb_islow() {
     let cjpeg = require_c_tool!("cjpeg");
-    let imgdir = testimages();
-    let src = imgdir.join("testorig.ppm");
-    if !src.exists() {
-        eprintln!("SKIP: testorig.ppm not found");
-        return;
-    }
+    let src = require_c_testimage!("testorig.ppm");
 
-    let icc_path = imgdir.join("test1.icc");
+    let icc_path = require_c_testimage!("test1.icc");
     let c_out = helpers::TempFile::new("c_rgb_islow.jpg");
 
     helpers::run_c_cjpeg(
@@ -118,7 +109,9 @@ fn c_cjpeg_rgb_islow() {
             helpers::assert_files_identical(rust_out.path(), c_out.path(), "cjpeg-rgb-islow");
         }
         Err(e) => {
-            eprintln!("SKIP: Rust encode failed (RGB colorspace): {:?}", e);
+            // P4-116: a Rust codec failure is the defect this cross-check
+            // exists to catch; reporting it as a skip made the suite green.
+            panic!("Rust encode failed (RGB colorspace): {e:?}");
         }
     }
 }
@@ -130,12 +123,7 @@ fn c_cjpeg_rgb_islow() {
 #[test]
 fn c_cjpeg_422_islow_opt() {
     let cjpeg = require_c_tool!("cjpeg");
-    let imgdir = testimages();
-    let src = imgdir.join("testorig.ppm");
-    if !src.exists() {
-        eprintln!("SKIP: testorig.ppm not found");
-        return;
-    }
+    let src = require_c_testimage!("testorig.ppm");
 
     let c_out = helpers::TempFile::new("c_422_islow_opt.jpg");
     helpers::run_c_cjpeg(
@@ -169,12 +157,7 @@ fn c_cjpeg_422_islow_opt() {
 // Previously ignored — fixed by dummy blocks + disabling fancy prefilter
 fn c_cjpeg_440_islow() {
     let cjpeg = require_c_tool!("cjpeg");
-    let imgdir = testimages();
-    let src = imgdir.join("testorig.ppm");
-    if !src.exists() {
-        eprintln!("SKIP: testorig.ppm not found");
-        return;
-    }
+    let src = require_c_testimage!("testorig.ppm");
 
     let c_out = helpers::TempFile::new("c_440_islow.jpg");
     helpers::run_c_cjpeg(
@@ -207,13 +190,8 @@ fn c_cjpeg_440_islow() {
 #[test]
 fn c_cjpeg_420_q100_ifast_prog() {
     let cjpeg = require_c_tool!("cjpeg");
-    let imgdir = testimages();
-    let src = imgdir.join("testorig.ppm");
-    let scan = imgdir.join("test.scan");
-    if !src.exists() || !scan.exists() {
-        eprintln!("SKIP: test images not found");
-        return;
-    }
+    let src = require_c_testimage!("testorig.ppm");
+    let scan = require_c_testimage!("test.scan");
 
     let c_out = helpers::TempFile::new("c_420_q100_ifast_prog.jpg");
     helpers::run_c_cjpeg(
@@ -266,12 +244,7 @@ fn c_cjpeg_420_q100_ifast_prog() {
 // Previously ignored — fixed by skipping fancy prefilter for grayscale + SIMD Y extraction
 fn c_cjpeg_gray_islow() {
     let cjpeg = require_c_tool!("cjpeg");
-    let imgdir = testimages();
-    let src = imgdir.join("testorig.ppm");
-    if !src.exists() {
-        eprintln!("SKIP: testorig.ppm not found");
-        return;
-    }
+    let src = require_c_testimage!("testorig.ppm");
 
     let c_out = helpers::TempFile::new("c_gray_islow.jpg");
     helpers::run_c_cjpeg(&cjpeg, &["-grayscale", "-dct", "int"], &src, c_out.path());
@@ -299,12 +272,7 @@ fn c_cjpeg_gray_islow() {
 #[test]
 fn c_cjpeg_420s_islow_opt() {
     let cjpeg = require_c_tool!("cjpeg");
-    let imgdir = testimages();
-    let src = imgdir.join("testorig.ppm");
-    if !src.exists() {
-        eprintln!("SKIP: testorig.ppm not found");
-        return;
-    }
+    let src = require_c_testimage!("testorig.ppm");
 
     let c_out = helpers::TempFile::new("c_420s_islow_opt.jpg");
     helpers::run_c_cjpeg(
@@ -351,15 +319,19 @@ fn c_cjpeg_lossless() {
         String::from_utf8_lossy(&help.stdout)
     );
     if !help_text.contains("-lossless") {
+        // A capability gap in the installed oracle, not in our encoder. CI
+        // provisions libjpeg-turbo 3.x, so there it is a provisioning failure
+        // and must not pass quietly (P4-116).
+        if helpers::is_ci() {
+            panic!(
+                "CI must provide a cjpeg with -lossless (libjpeg-turbo 3.x); \
+                 {cjpeg:?} does not support it"
+            );
+        }
         eprintln!("SKIP: cjpeg does not support -lossless (need libjpeg-turbo 3.x)");
         return;
     }
-    let imgdir = testimages();
-    let src = imgdir.join("testorig.ppm");
-    if !src.exists() {
-        eprintln!("SKIP: testorig.ppm not found");
-        return;
-    }
+    let src = require_c_testimage!("testorig.ppm");
 
     let c_out = helpers::TempFile::new("c_lossless.jpg");
     helpers::run_c_cjpeg(
@@ -391,27 +363,101 @@ fn c_cjpeg_lossless() {
     let (w, h, pixels) = helpers::parse_ppm(&ppm_data).expect("parse PPM");
 
     // Lossless with PSV=4, restart=1.  Other args should be ignored by both.
+    //
+    // P4-116: this previously omitted `.lossless(true)`. `lossless_predictor`
+    // only selects the predictor — it does not switch the mode on — so the
+    // "lossless" comparison was encoding a baseline SOF0 stream, and the
+    // unasserted NOTE below swallowed the resulting mismatch. The SOF3
+    // assertion further down is what makes that impossible to repeat.
     let rust_jpeg = Encoder::new(&pixels, w, h, PixelFormat::Rgb)
+        .lossless(true)
         .lossless_predictor(4)
-        .restart_blocks(1)
+        // cjpeg's bare `-restart 1` means one MCU *row*, not one MCU block
+        // (cjpeg.c:537-541 — only a trailing `b` selects blocks). The block
+        // spelling was the wrong translation and produced Ri=1, which real
+        // libjpeg refuses to decode in lossless mode: jclossls.c:294-296
+        // requires Ri to be a multiple of MCUs_per_row. C emits Ri=227 here.
+        .restart_rows(1)
         .encode();
 
-    match rust_jpeg {
-        Ok(data) => {
-            let rust_out = helpers::TempFile::new("rust_lossless.jpg");
-            rust_out.write_bytes(&data);
-            // Lossless header structure may differ — check and report
-            if std::fs::read(rust_out.path()).ok() != std::fs::read(c_out.path()).ok() {
-                eprintln!(
-                    "NOTE: cjpeg-lossless output differs (expected: Rust lossless header structure \
-                     differs from C — SOI→DHT→SOF3→SOS vs SOI→APP0→APP14→SOF3→DHT→SOS)"
-                );
-            }
-        }
-        Err(e) => {
-            eprintln!("SKIP: Rust lossless encode failed: {:?}", e);
-        }
-    }
+    let data: Vec<u8> = rust_jpeg
+        // P4-116: a Rust codec failure is the defect this cross-check exists to
+        // catch; reporting it as a skip made the suite green.
+        .unwrap_or_else(|e| panic!("Rust lossless encode failed: {e:?}"));
+    let rust_out = helpers::TempFile::new("rust_lossless.jpg");
+    rust_out.write_bytes(&data);
+
+    // Byte equality with C is *not* the contract here and never was: cjpeg is
+    // invoked with -smooth 100, which pre-filters its input, so the two
+    // encoders are given different pixels before lossless coding even starts.
+    // The previous version noticed the files differed and printed a NOTE,
+    // which asserted nothing at all — P4-116's "log a diff without asserting"
+    // pattern. What lossless actually promises is exactness, so assert that
+    // instead, on both sides of the interop boundary.
+    assert!(
+        data.windows(2).any(|w| w == [0xFF, 0xC3]),
+        "Rust lossless output must carry SOF3"
+    );
+    let c_bytes: Vec<u8> = read_file(c_out.path());
+    assert!(
+        c_bytes.windows(2).any(|w| w == [0xFF, 0xC3]),
+        "cjpeg -lossless output must carry SOF3"
+    );
+
+    // 1. Our own decoder must recover the input bit-for-bit.
+    let decoded = libjpeg_turbo_rs::decompress(&data)
+        .unwrap_or_else(|e| panic!("Rust could not decode its own lossless output: {e:?}"));
+    assert_eq!(
+        (decoded.width, decoded.height),
+        (w, h),
+        "lossless round-trip changed the image dimensions"
+    );
+    assert_eq!(
+        decoded.data,
+        pixels,
+        "lossless round-trip is not exact: {} of {} samples differ",
+        decoded
+            .data
+            .iter()
+            .zip(pixels.iter())
+            .filter(|(a, b)| a != b)
+            .count(),
+        pixels.len()
+    );
+
+    // 2. So must C's, reading our file — the interop direction that matters
+    //    for a drop-in replacement.
+    let c_decoded = helpers::TempFile::new("rust_lossless_via_djpeg.ppm");
+    let djpeg = require_c_tool!("djpeg");
+    helpers::run_c_djpeg(&djpeg, &["-ppm"], rust_out.path(), c_decoded.path());
+    let c_ppm: Vec<u8> = read_file(c_decoded.path());
+    let (cw, ch, c_pixels) = helpers::parse_ppm(&c_ppm).expect("parse djpeg PPM");
+    assert_eq!((cw, ch), (w, h), "djpeg read different dimensions");
+    assert_eq!(
+        c_pixels, pixels,
+        "djpeg did not recover the exact input from our lossless output"
+    );
+
+    // 3. And the other direction: our decoder must read *C's* lossless file.
+    //    Without this, a test named "cross-validation" would never once decode
+    //    a stream libjpeg produced. Byte equality with C is still not the
+    //    contract — cjpeg ran with -smooth 100, so its input pixels differ —
+    //    but both decoders must agree on what C's file contains.
+    let ours_of_c = libjpeg_turbo_rs::decompress(&c_bytes)
+        .unwrap_or_else(|e| panic!("Rust could not decode cjpeg's lossless output: {e:?}"));
+    let c_of_c = helpers::TempFile::new("c_lossless_via_djpeg.ppm");
+    helpers::run_c_djpeg(&djpeg, &["-ppm"], c_out.path(), c_of_c.path());
+    let (c2w, c2h, c2_pixels) =
+        helpers::parse_ppm(&read_file(c_of_c.path())).expect("parse djpeg PPM of C output");
+    assert_eq!(
+        (ours_of_c.width, ours_of_c.height),
+        (c2w, c2h),
+        "Rust and djpeg disagree on the dimensions of cjpeg's lossless output"
+    );
+    assert_eq!(
+        ours_of_c.data, c2_pixels,
+        "Rust and djpeg decode cjpeg's lossless output differently"
+    );
 }
 
 // ===========================================================================
@@ -425,15 +471,10 @@ fn c_cjpeg_lossless() {
 fn c_djpeg_rgb_islow() {
     let cjpeg = require_c_tool!("cjpeg");
     let djpeg = require_c_tool!("djpeg");
-    let imgdir = testimages();
-    let src = imgdir.join("testorig.ppm");
-    if !src.exists() {
-        eprintln!("SKIP: testorig.ppm not found");
-        return;
-    }
+    let src = require_c_testimage!("testorig.ppm");
 
     // First encode with cjpeg (rgb-islow) to get the test JPEG
-    let icc_path = imgdir.join("test1.icc");
+    let icc_path = require_c_testimage!("test1.icc");
     let jpeg_file = helpers::TempFile::new("rgb_islow_src.jpg");
     helpers::run_c_cjpeg(
         &cjpeg,
@@ -468,11 +509,7 @@ fn c_djpeg_rgb_islow() {
 fn c_djpeg_422_ifast() {
     let cjpeg = require_c_tool!("cjpeg");
     let djpeg = require_c_tool!("djpeg");
-    let imgdir = testimages();
-    let src = imgdir.join("testorig.ppm");
-    if !src.exists() {
-        return;
-    }
+    let src = require_c_testimage!("testorig.ppm");
 
     // Encode 422 ifast opt
     let jpeg_file = helpers::TempFile::new("422_ifast_opt.jpg");
@@ -509,11 +546,7 @@ fn c_djpeg_422_ifast() {
 fn c_djpeg_440_islow() {
     let cjpeg = require_c_tool!("cjpeg");
     let djpeg = require_c_tool!("djpeg");
-    let imgdir = testimages();
-    let src = imgdir.join("testorig.ppm");
-    if !src.exists() {
-        return;
-    }
+    let src = require_c_testimage!("testorig.ppm");
 
     let jpeg_file = helpers::TempFile::new("440_islow.jpg");
     helpers::run_c_cjpeg(
@@ -545,11 +578,7 @@ fn c_djpeg_440_islow() {
 fn c_djpeg_422m_ifast() {
     let cjpeg = require_c_tool!("cjpeg");
     let djpeg = require_c_tool!("djpeg");
-    let imgdir = testimages();
-    let src = imgdir.join("testorig.ppm");
-    if !src.exists() {
-        return;
-    }
+    let src = require_c_testimage!("testorig.ppm");
 
     let jpeg_file = helpers::TempFile::new("422_ifast_opt_m.jpg");
     helpers::run_c_cjpeg(
@@ -585,11 +614,7 @@ fn c_djpeg_422m_ifast() {
 fn c_djpeg_gray_islow() {
     let cjpeg = require_c_tool!("cjpeg");
     let djpeg = require_c_tool!("djpeg");
-    let imgdir = testimages();
-    let src = imgdir.join("testorig.ppm");
-    if !src.exists() {
-        return;
-    }
+    let src = require_c_testimage!("testorig.ppm");
 
     // Encode grayscale
     let jpeg_file = helpers::TempFile::new("gray_islow.jpg");
@@ -628,11 +653,7 @@ fn c_djpeg_gray_islow() {
 fn c_djpeg_gray_islow_rgb() {
     let cjpeg = require_c_tool!("cjpeg");
     let djpeg = require_c_tool!("djpeg");
-    let imgdir = testimages();
-    let src = imgdir.join("testorig.ppm");
-    if !src.exists() {
-        return;
-    }
+    let src = require_c_testimage!("testorig.ppm");
 
     let jpeg_file = helpers::TempFile::new("gray_islow_rgb.jpg");
     helpers::run_c_cjpeg(
@@ -667,12 +688,7 @@ fn c_djpeg_gray_islow_rgb() {
 #[test]
 fn c_djpeg_420m_islow_scaled_down() {
     let djpeg = require_c_tool!("djpeg");
-    let imgdir = testimages();
-    let jpeg_path = imgdir.join("testorig.jpg");
-    if !jpeg_path.exists() {
-        eprintln!("SKIP: testorig.jpg not found");
-        return;
-    }
+    let jpeg_path = require_c_testimage!("testorig.jpg");
 
     let scales: &[&str] = &["7/8", "3/4", "5/8", "1/2", "3/8", "1/4", "1/8"];
     let jpeg_data = read_file(&jpeg_path);
@@ -713,12 +729,7 @@ fn c_djpeg_420m_islow_scaled_down() {
 // Previously ignored — fixed by adding set_fast_upsample(true) to match C djpeg -nosmooth
 fn c_djpeg_420m_islow_scaled_up() {
     let djpeg = require_c_tool!("djpeg");
-    let imgdir = testimages();
-    let jpeg_path = imgdir.join("testorig.jpg");
-    if !jpeg_path.exists() {
-        eprintln!("SKIP: testorig.jpg not found");
-        return;
-    }
+    let jpeg_path = require_c_testimage!("testorig.jpg");
 
     let scales: &[&str] = &["2/1", "15/8", "13/8", "11/8", "9/8"];
     let jpeg_data = read_file(&jpeg_path);
@@ -764,12 +775,7 @@ fn c_djpeg_420m_islow_scaled_up() {
 #[test]
 fn c_djpeg_420_islow_skip15_31() {
     let djpeg = require_c_tool!("djpeg");
-    let imgdir = testimages();
-    let src_jpg = imgdir.join("testorig.jpg");
-    if !src_jpg.exists() {
-        eprintln!("SKIP: testorig.jpg not found");
-        return;
-    }
+    let src_jpg = require_c_testimage!("testorig.jpg");
 
     let skip_start: usize = 15;
     let skip_end: usize = 31;
@@ -835,12 +841,7 @@ fn c_djpeg_420_islow_skip15_31() {
 fn c_djpeg_444_islow_skip1_6() {
     let cjpeg = require_c_tool!("cjpeg");
     let djpeg = require_c_tool!("djpeg");
-    let imgdir = testimages();
-    let src_ppm = imgdir.join("testorig.ppm");
-    if !src_ppm.exists() {
-        eprintln!("SKIP: testorig.ppm not found");
-        return;
-    }
+    let src_ppm = require_c_testimage!("testorig.ppm");
 
     let skip_start: usize = 1;
     let skip_end: usize = 6;
@@ -921,11 +922,7 @@ fn c_djpeg_444_islow_skip1_6() {
 fn c_djpeg_420_islow_prog_crop() {
     let cjpeg = require_c_tool!("cjpeg");
     let djpeg = require_c_tool!("djpeg");
-    let imgdir = testimages();
-    let src = imgdir.join("testorig.ppm");
-    if !src.exists() {
-        return;
-    }
+    let src = require_c_testimage!("testorig.ppm");
 
     // Create progressive 420 JPEG
     let jpeg_file = helpers::TempFile::new("420_islow_prog.jpg");
@@ -964,11 +961,7 @@ fn c_djpeg_420_islow_prog_crop() {
 fn c_djpeg_444_islow_prog_crop() {
     let cjpeg = require_c_tool!("cjpeg");
     let djpeg = require_c_tool!("djpeg");
-    let imgdir = testimages();
-    let src = imgdir.join("testorig.ppm");
-    if !src.exists() {
-        return;
-    }
+    let src = require_c_testimage!("testorig.ppm");
 
     let jpeg_file = helpers::TempFile::new("444_islow_prog.jpg");
     helpers::run_c_cjpeg(
@@ -1013,16 +1006,12 @@ fn c_djpeg_444_islow_prog_crop() {
 fn c_jpegtran_icc() {
     let cjpeg = require_c_tool!("cjpeg");
     let jpegtran = require_c_tool!("jpegtran");
-    let imgdir = testimages();
-    let src = imgdir.join("testorig.ppm");
-    let icc_path = imgdir.join("test3.icc");
-    if !src.exists() || !icc_path.exists() {
-        return;
-    }
+    let src = require_c_testimage!("testorig.ppm");
+    let icc_path = require_c_testimage!("test3.icc");
 
     // First create the source JPEG (rgb-islow)
     let src_jpeg = helpers::TempFile::new("rgb_islow_for_tran.jpg");
-    let icc1 = imgdir.join("test1.icc");
+    let icc1 = require_c_testimage!("test1.icc");
     helpers::run_c_cjpeg(
         &cjpeg,
         &["-rgb", "-dct", "int", "-icc", &icc1.to_string_lossy()],
@@ -1051,11 +1040,7 @@ fn c_jpegtran_icc() {
 // Previously ignored — fixed by DAC marker interleaving + SOF height + padded planes
 fn c_cjpeg_420_islow_ari() {
     let cjpeg = require_c_tool!("cjpeg");
-    let imgdir = testimages();
-    let src = imgdir.join("testorig.ppm");
-    if !src.exists() {
-        return;
-    }
+    let src = require_c_testimage!("testorig.ppm");
 
     let c_out = helpers::TempFile::new("c_420_islow_ari.jpg");
     helpers::run_c_cjpeg(&cjpeg, &["-dct", "int", "-arithmetic"], &src, c_out.path());
@@ -1083,11 +1068,7 @@ fn c_cjpeg_420_islow_ari() {
 #[test]
 fn c_jpegtran_crop_transpose() {
     let jpegtran = require_c_tool!("jpegtran");
-    let imgdir = testimages();
-    let jpeg_path = imgdir.join("testorig.jpg");
-    if !jpeg_path.exists() {
-        return;
-    }
+    let jpeg_path = require_c_testimage!("testorig.jpg");
 
     let c_out = helpers::TempFile::new("c_crop_transpose.jpg");
     helpers::run_c_jpegtran(
@@ -1134,11 +1115,7 @@ fn c_jpegtran_crop_transpose() {
 #[test]
 fn c_jpegtran_420_islow_ari() {
     let jpegtran = require_c_tool!("jpegtran");
-    let imgdir = testimages();
-    let jpeg_path = imgdir.join("testimgint.jpg");
-    if !jpeg_path.exists() {
-        return;
-    }
+    let jpeg_path = require_c_testimage!("testimgint.jpg");
 
     let c_out = helpers::TempFile::new("c_420_ari_tran.jpg");
     helpers::run_c_jpegtran(&jpegtran, &["-arithmetic"], &jpeg_path, c_out.path());
@@ -1173,11 +1150,7 @@ fn c_jpegtran_420_islow_ari() {
 #[test]
 fn c_jpegtran_420_islow_from_ari() {
     let jpegtran = require_c_tool!("jpegtran");
-    let imgdir = testimages();
-    let jpeg_path = imgdir.join("testimgari.jpg");
-    if !jpeg_path.exists() {
-        return;
-    }
+    let jpeg_path = require_c_testimage!("testimgari.jpg");
 
     let c_out = helpers::TempFile::new("c_420_islow_from_ari.jpg");
     helpers::run_c_jpegtran(&jpegtran, &[], &jpeg_path, c_out.path());

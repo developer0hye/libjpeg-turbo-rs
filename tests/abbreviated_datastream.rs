@@ -253,114 +253,94 @@ fn a2_4_suppress_tables_no_quant_or_huff() {
 // B10-1: Cross-validate jpeg_write_tables() against cjpeg -tables-only
 // ===========================================================================
 
-/// Cross-validate tables-only stream against cjpeg -tables-only output.
-/// For subsamp x quality combos, compare our DQT/DHT bytes to cjpeg's.
+/// Cross-validate our tables-only stream against libjpeg's `jpeg_write_tables`.
+///
+/// P4-116: this used to shell out to `cjpeg -tables-only`, a switch that does
+/// not exist in any libjpeg release. The support probe looked for
+/// "unrecognized"/"unknown option" while cjpeg prints a usage dump, so it
+/// always reported the flag as present; every invocation then failed and the
+/// loop `continue`d past it. The matrix compared zero cases and passed. The
+/// oracle is now `examples/tables_only_c_oracle.c`, which calls the API
+/// directly, and the tally refuses to finish unless every planned case ran.
 #[test]
-fn b10_1_cross_validate_tables_only_vs_cjpeg() {
-    let cjpeg = match helpers::cjpeg_path() {
-        Some(p) => p,
+fn b10_1_cross_validate_tables_only_vs_libjpeg() {
+    let oracle: std::path::PathBuf = match helpers::c_oracle::tables_only_c_oracle() {
+        Some(path) => path,
         None => {
-            eprintln!("SKIP: cjpeg not found at /opt/homebrew/bin/cjpeg");
+            assert!(
+                !helpers::is_ci(),
+                "CI provisions a libjpeg development install, so the tables-only \
+                 oracle must be buildable there"
+            );
+            eprintln!(
+                "SKIP: no libjpeg development install (headers + library) found; \
+                 cannot build the tables-only oracle"
+            );
             return;
         }
     };
 
-    // Check whether cjpeg supports -tables-only; if not, skip gracefully.
-    // We probe with a dummy invocation and check the exit status / error output.
-    let cjpeg_supports_tables_only = {
-        use std::process::Command;
-        let probe = Command::new(&cjpeg).arg("-tables-only").output();
-        match probe {
-            Ok(out) => {
-                // If it runs (even with error about missing input) the flag is recognized.
-                // If it prints "unrecognized option" or similar, skip.
-                let stderr = String::from_utf8_lossy(&out.stderr);
-                !stderr.contains("unrecognized") && !stderr.contains("unknown option")
-            }
-            Err(_) => false,
-        }
-    };
-
-    if !cjpeg_supports_tables_only {
-        eprintln!("SKIP: installed cjpeg does not support -tables-only");
-        return;
-    }
-
     let width: usize = 64;
     let height: usize = 64;
     let pixels: Vec<u8> = helpers::generate_gradient(width, height);
-    let ppm: Vec<u8> = helpers::build_ppm(&pixels, width, height);
 
     let qualities: &[u8] = &[10, 50, 75, 90];
-    // subsamp arg to cjpeg: "2x2" = 420, "2x1" = 422, "1x1" = 444
     let subsampling_cases: &[(&str, Subsampling)] = &[
         ("2x2", Subsampling::S420),
         ("2x1", Subsampling::S422),
         ("1x1", Subsampling::S444),
     ];
 
+    let mut tally: helpers::ComparisonTally = helpers::ComparisonTally::new(
+        "b10_1_cross_validate_tables_only_vs_libjpeg",
+        qualities.len() * subsampling_cases.len(),
+    );
+
     for &quality in qualities {
         for &(samp_str, subsampling) in subsampling_cases {
-            let label = format!("b10_1_q{}_s{}", quality, samp_str);
+            let label: String = format!("b10_1_q{quality}_s{samp_str}");
+            let (h_samp, v_samp): (&str, &str) =
+                samp_str.split_once('x').expect("sampling label is <h>x<v>");
 
-            // C cjpeg tables-only
-            let c_tables = {
-                use std::process::Command;
-                let ppm_file = helpers::TempFile::new(&format!("{}_in.ppm", label));
-                let out_file = helpers::TempFile::new(&format!("{}_out.jpg", label));
-                ppm_file.write_bytes(&ppm);
-                let out = Command::new(&cjpeg)
-                    .arg("-tables-only")
-                    .arg(format!("-quality {}", quality))
-                    .arg(format!("-sample {}", samp_str))
-                    .arg("-outfile")
-                    .arg(out_file.path())
-                    .arg(ppm_file.path())
-                    .output()
-                    .unwrap_or_else(|e| panic!("{}: failed to run cjpeg: {:?}", label, e));
-                if !out.status.success() {
-                    eprintln!(
-                        "SKIP {}: cjpeg -tables-only failed: {}",
-                        label,
-                        String::from_utf8_lossy(&out.stderr)
-                    );
-                    continue;
-                }
-                std::fs::read(out_file.path())
-                    .unwrap_or_else(|e| panic!("{}: failed to read cjpeg output: {:?}", label, e))
-            };
+            let out_file: helpers::TempFile =
+                helpers::TempFile::new(&format!("{label}_c_tables.jpg"));
+            let out = std::process::Command::new(&oracle)
+                .arg(out_file.path())
+                .arg(quality.to_string())
+                .arg(h_samp)
+                .arg(v_samp)
+                .output()
+                .unwrap_or_else(|e| panic!("{label}: failed to run the tables-only oracle: {e:?}"));
+            assert!(
+                out.status.success(),
+                "{label}: tables-only oracle failed: {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+            let c_tables: Vec<u8> = std::fs::read(out_file.path())
+                .unwrap_or_else(|e| panic!("{label}: failed to read oracle output: {e:?}"));
 
-            // Our tables-only
             let our_tables: Vec<u8> = Encoder::new(&pixels, width, height, PixelFormat::Rgb)
                 .quality(quality)
                 .subsampling(subsampling)
                 .write_tables();
 
-            // Byte-identical comparison
             assert_eq!(
                 our_tables, c_tables,
-                "{}: tables-only stream must be byte-identical to cjpeg output",
-                label
+                "{label}: tables-only stream must be byte-identical to \
+                 jpeg_write_tables() output"
             );
+            tally.compared();
         }
     }
-}
 
-// ===========================================================================
-// B10-2: Compose (tables-only || body-only) → djpeg must match full JPEG
-// ===========================================================================
+    tally.finish();
+}
 
 /// Compose: our tables-only || our body-only → feed to djpeg.
 /// Decoded pixels must equal decoding the normal full JPEG with djpeg. diff=0.
 #[test]
 fn b10_2_compose_tables_body_djpeg_roundtrip() {
-    let djpeg = match helpers::djpeg_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: djpeg not found at /opt/homebrew/bin/djpeg");
-            return;
-        }
-    };
+    let djpeg: std::path::PathBuf = require_c_tool!("djpeg");
 
     let qualities: &[u8] = &[10, 50, 75, 90];
     let subsampling_cases: &[(Subsampling, &str)] = &[
