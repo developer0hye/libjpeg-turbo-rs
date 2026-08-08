@@ -569,6 +569,12 @@ fn c_djpeg_precision_diff_zero() {
                 .expect("failed to run cjpeg");
 
             if !output.status.success() {
+                // P4-116: CI provisions libjpeg-turbo 3.x, which has this
+                // capability, so a failure there is a provisioning defect.
+                assert!(
+                    !helpers::is_ci(),
+                    "CI must provide a cjpeg -precision 12-capable toolchain"
+                );
                 eprintln!(
                     "SKIP {}: cjpeg -precision 12 failed: {}",
                     label,
@@ -666,6 +672,12 @@ fn c_djpeg_precision_diff_zero() {
                 .expect("failed to run cjpeg");
 
             if !output.status.success() {
+                // P4-116: CI provisions libjpeg-turbo 3.x, which has this
+                // capability, so a failure there is a provisioning defect.
+                assert!(
+                    !helpers::is_ci(),
+                    "CI must provide a cjpeg -precision 16 -lossless-capable toolchain"
+                );
                 eprintln!(
                     "SKIP {}: cjpeg -precision 16 -lossless 1,0 failed: {}",
                     label,

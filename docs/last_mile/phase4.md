@@ -2336,10 +2336,34 @@ test built, not an environment gap — the distinction the earlier pass drew for
 the ten named matrices. `cargo test --workspace --no-fail-fast`: 2466 passed,
 0 failed, 1 ignored (macOS aarch64).
 
-The item stays open: 67 test files still contain a `SKIP` site, and those have
-not been individually triaged into "legitimate environment gap" versus "failure
-reported as a skip". The sweep so far has only covered sites already identified
-by name.
+**Progress (2026-08-08, third pass) — triage rather than bulk conversion.** The
+forbidden shape CLAUDE.md names explicitly, a *Rust* failure turned into a
+skip, is now absent from the suite: a repo-wide search for
+`Err(_) => { eprintln!("SKIP…"); return/continue }` finds no remaining
+instance. What is left are oracle-side skips, which split two ways and must not
+be converted uniformly:
+
+* **defects** — the tool was discovered and its capability probed, so a failure
+  is in the request the test built. Making `c_indexedcolortest` assert
+  immediately exposed a *parallelism race* the skip had been hiding: `run_djpeg`
+  named its temp input from `process::id()` alone, but cargo runs `#[test]`s on
+  parallel threads of one process, so concurrent cases deleted each other's
+  input mid-invocation. It surfaced as `djpeg: can't open …` and was swallowed.
+  The path is now unique per call. `tests/c_indexedcolortest.rs`'s five
+  `-colors` sites are now panics; the `-colors` capability is probed once up
+  front, so nothing downstream may treat its absence as news.
+* **capability gaps** — `cjpeg -precision 12`, `-precision 16 -lossless`, and
+  `-arithmetic -progressive` genuinely do not exist on older toolchains. Those
+  four sites keep their local skip but now assert `!helpers::is_ci()` first, so
+  CI — which provisions libjpeg-turbo 3.x — fails instead of skipping.
+
+Ten failure-shaped `SKIP` strings remain, four of them the CI-guarded
+capability cases above. The item stays open until the other six
+(`regression_420_dummy_block_columns`, `rgb565_dither`, `sof10_encode`,
+`encode_pipeline_golden`, and two in `hard_case_x_byte_and_restart`) are
+triaged the same way. Bulk-converting them would turn real environment gaps
+into failures on developer machines, which is why this is triage and not a
+regex.
 
 ## P4-119. `src/decode/pipeline.rs` Concentrates Half of the Decoder Implementation — **CLOSED 2026-08-02**
 
