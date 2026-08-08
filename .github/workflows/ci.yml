@@ -348,6 +348,21 @@ jobs:
             echo "expected /dev/full to be exercised on ubuntu-latest" >&2
             exit 1
           }
+      # P4-123's guard and its C oracle also live in the C-ABI workspace member,
+      # so `cargo test --tests` above does not select them. Name each binary in
+      # full rather than filtering, so a renamed or deleted test cannot report
+      # green as a zero-test match (P4-61). The oracle needs the turbojpeg
+      # headers the install step above put in /opt/libjpeg-turbo, and skips
+      # loudly without them — running it here is what keeps it from being a
+      # permanent skip.
+      - name: TurboJPEG YUV component-count guard and C parity
+        run: >
+          cargo test -p libjpeg-turbo-rs-capi
+          --test yuv_four_component_guard
+          --test yuv_decompress_planes_component_guard
+          --test yuv_four_component_c_parity -- --nocapture
+        env:
+          LIBJPEG_TURBO_PREFIX: /opt/libjpeg-turbo
 
   test-cross-platform:
     name: Test (${{ matrix.os }})
