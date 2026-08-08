@@ -56,13 +56,22 @@ fn find_turbojpeg_dev() -> Option<TurboJpegDev> {
         .map(PathBuf::from),
     );
 
+    // Debian/Ubuntu put the header in `<prefix>/include` but the linker stub in
+    // `<prefix>/lib/<triplet>`, so a plain lib64/lib scan reports a perfectly
+    // good install as absent — and the mandatory oracle would silently skip.
+    let mut lib_subdirs: Vec<PathBuf> = vec![PathBuf::from("lib64"), PathBuf::from("lib")];
+    if let Some(triplet) = host_multiarch_triplet() {
+        lib_subdirs.push(PathBuf::from("lib").join(&triplet));
+        lib_subdirs.push(PathBuf::from("lib64").join(&triplet));
+    }
+
     for prefix in prefixes {
         let include_dir: PathBuf = prefix.join("include");
         if !include_dir.join("turbojpeg.h").exists() {
             continue;
         }
-        for lib_name in ["lib64", "lib"] {
-            let lib_dir: PathBuf = prefix.join(lib_name);
+        for lib_subdir in &lib_subdirs {
+            let lib_dir: PathBuf = prefix.join(lib_subdir);
             let has_library: bool = ["libturbojpeg.so", "libturbojpeg.dylib", "libturbojpeg.a"]
                 .iter()
                 .any(|file| lib_dir.join(file).exists());
@@ -77,12 +86,47 @@ fn find_turbojpeg_dev() -> Option<TurboJpegDev> {
     None
 }
 
-/// Build the oracle into the crate's target dir. `None` means no TurboJPEG
-/// development install was found — the one legitimate reason to skip. A compile
-/// failure once an install *is* present is fatal: it would otherwise hide the
-/// parity check behind a green run.
+/// The compiler's multiarch triplet (e.g. `x86_64-linux-gnu`), or `None` where
+/// the toolchain does not use one (macOS clang prints an empty line).
+fn host_multiarch_triplet() -> Option<String> {
+    let compiler: String = std::env::var("CC").unwrap_or_else(|_| "cc".to_string());
+    let output = Command::new(compiler)
+        .arg("-print-multiarch")
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let triplet: String = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    (!triplet.is_empty()).then_some(triplet)
+}
+
+/// True when a missing TurboJPEG install must fail rather than skip: CI
+/// provisions one deliberately, and an explicit `LIBJPEG_TURBO_PREFIX` is a
+/// statement that one exists. Skipping in either case would leave the parity
+/// gate green while checking nothing.
+fn oracle_is_required() -> bool {
+    std::env::var_os("CI").is_some() || std::env::var_os("LIBJPEG_TURBO_PREFIX").is_some()
+}
+
+/// Build the oracle into a temp dir. `None` means no TurboJPEG development
+/// install was found on a developer machine — the one legitimate reason to
+/// skip, and not one [`oracle_is_required`] allows. A compile failure once an
+/// install *is* present is fatal: it would otherwise hide the parity check
+/// behind a green run.
 fn build_oracle() -> Option<PathBuf> {
-    let install: TurboJpegDev = find_turbojpeg_dev()?;
+    let install: TurboJpegDev = match find_turbojpeg_dev() {
+        Some(install) => install,
+        None => {
+            assert!(
+                !oracle_is_required(),
+                "no TurboJPEG development install (turbojpeg.h + libturbojpeg) found, but CI or \
+                 LIBJPEG_TURBO_PREFIX says one is provisioned — the C parity gate would pass \
+                 without checking anything"
+            );
+            return None;
+        }
+    };
 
     let source: PathBuf = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("examples")
