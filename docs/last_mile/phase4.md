@@ -2310,7 +2310,22 @@ same shapes this pass removed — `tests/c_indexedcolortest.rs:251`,
 `tests/cross_check_misc_gaps.rs:235`, and
 `tests/hard_case_x_byte_and_restart.rs:295` all turn a failed C invocation into
 a skip. Those suites are outside the ten the criteria name and are not touched
-here; the item stays open until they are swept as well.
+here.
+
+**Progress (2026-08-08, second pass).** The nine suites named above are swept:
+15 `if !output.status.success() { … SKIP … return/continue }` blocks across
+`cross_check_color_quantize`, `quantize`, `crop_c_compat`, `crop_skip`,
+`cross_check_misc_gaps`, `cross_check_transform`, `precision_extended` and
+`precision_arbitrary` are now assertions. Each sits *after* tool discovery and
+any capability probe, so a failed invocation is a defect in the request the
+test built, not an environment gap — the distinction the earlier pass drew for
+the ten named matrices. `cargo test --workspace --no-fail-fast`: 2466 passed,
+0 failed, 1 ignored (macOS aarch64).
+
+The item stays open: 67 test files still contain a `SKIP` site, and those have
+not been individually triaged into "legitimate environment gap" versus "failure
+reported as a skip". The sweep so far has only covered sites already identified
+by name.
 
 ## P4-119. `src/decode/pipeline.rs` Concentrates Half of the Decoder Implementation — **CLOSED 2026-08-02**
 

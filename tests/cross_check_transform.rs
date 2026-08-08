@@ -931,19 +931,14 @@ fn c_jpegtran_arithmetic_reencode() {
             .arg(tmp_in.path())
             .output()
             .expect("failed to run jpegtran");
-        if !output.status.success() {
-            let stderr: String = String::from_utf8_lossy(&output.stderr).to_string();
-            if stderr.to_lowercase().contains("arithmetic") {
-                eprintln!(
-                    "SKIP: C jpegtran does not support arithmetic coding: {}",
-                    stderr.trim()
-                );
-                return;
-            }
-            // Some other error — still skip gracefully
-            eprintln!("SKIP: C jpegtran -arithmetic failed: {}", stderr.trim());
-            return;
-        }
+        // P4-116: the tool was already discovered and any capability
+        // probe already passed, so a failed invocation here is a defect
+        // in the request we built — not a reason to report success.
+        assert!(
+            output.status.success(),
+            "arithmetic: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
     }
 
     let transforms: [TransformOp; 8] = [
@@ -1115,14 +1110,15 @@ fn progressive_odd_dimensions_transform_no_crash() {
             .output()
             .expect("cjpeg exec");
 
-        if !output.status.success() {
-            eprintln!(
-                "SKIP: cjpeg failed for {}: {}",
-                label,
-                String::from_utf8_lossy(&output.stderr)
-            );
-            continue;
-        }
+        // P4-116: the tool was already discovered and any capability
+        // probe already passed, so a failed invocation here is a defect
+        // in the request we built — not a reason to report success.
+        assert!(
+            output.status.success(),
+            "cjpeg failed for {}: {}",
+            label,
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
 
         let prog_jpeg: Vec<u8> = std::fs::read(tmp_prog_jpg.path()).expect("read progressive jpeg");
 

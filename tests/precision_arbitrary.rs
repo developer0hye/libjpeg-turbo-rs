@@ -706,14 +706,15 @@ fn c_djpeg_precision_arbitrary_diff_zero() {
                 .output()
                 .expect("failed to run djpeg");
 
-            if !output.status.success() {
-                eprintln!(
-                    "SKIP: djpeg failed for precision {} (may not support): {}",
-                    precision,
-                    String::from_utf8_lossy(&output.stderr).trim()
-                );
-                continue;
-            }
+            // P4-116: the tool was already discovered and any capability
+            // probe already passed, so a failed invocation here is a defect
+            // in the request we built — not a reason to report success.
+            assert!(
+                output.status.success(),
+                "djpeg failed for precision {} (may not support): {}",
+                precision,
+                String::from_utf8_lossy(&output.stderr).trim()
+            );
 
             let (dw, dh, out_maxval, c_pixels) = parse_pgm_16(tmp_out.path());
             assert_eq!(dw, w, "precision {}: width mismatch", precision);
@@ -800,14 +801,15 @@ fn c_djpeg_precision_arbitrary_diff_zero() {
                 .output()
                 .expect("failed to run cjpeg");
 
-            if !output.status.success() {
-                eprintln!(
-                    "SKIP: cjpeg -precision {} -lossless 1,0 failed: {}",
-                    precision,
-                    String::from_utf8_lossy(&output.stderr).trim()
-                );
-                continue;
-            }
+            // P4-116: the tool was already discovered and any capability
+            // probe already passed, so a failed invocation here is a defect
+            // in the request we built — not a reason to report success.
+            assert!(
+                output.status.success(),
+                "cjpeg -precision {} -lossless 1,0 failed: {}",
+                precision,
+                String::from_utf8_lossy(&output.stderr).trim()
+            );
 
             let jpeg_data: Vec<u8> = std::fs::read(tmp_jpg.path()).expect("read cjpeg output");
             let img: Image16 = decompress_lossless_arbitrary(&jpeg_data).unwrap_or_else(|e| {
