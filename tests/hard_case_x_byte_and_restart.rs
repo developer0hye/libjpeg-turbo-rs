@@ -292,6 +292,14 @@ fn restart_bomb_4096_terminates_within_budget() {
     let tmp: tempfile::TempDir = tempfile::tempdir().expect("tempdir");
     let jpeg_path: PathBuf = tmp.path().join("bomb.jpg");
     if !build_restart_bomb(&cjpeg, &jpeg_path) {
+        // P4-116: CI provisions libjpeg-turbo 3.x, so a missing
+        // capability there is a provisioning defect, not a skip.
+        assert!(
+            !std::env::var("CI")
+                .map(|v| !v.is_empty() && v != "0")
+                .unwrap_or(false),
+            "CI must provide a cjpeg restart-bomb build-capable cjpeg"
+        );
         eprintln!("SKIP restart_bomb_4096: cjpeg build failed");
         return;
     }
@@ -348,6 +356,14 @@ fn restart_bomb_4096_dimensions_match_djpeg() {
     let tmp: tempfile::TempDir = tempfile::tempdir().expect("tempdir");
     let jpeg_path: PathBuf = tmp.path().join("bomb.jpg");
     if !build_restart_bomb(&cjpeg, &jpeg_path) {
+        // P4-116: CI provisions libjpeg-turbo 3.x, so a missing
+        // capability there is a provisioning defect, not a skip.
+        assert!(
+            !std::env::var("CI")
+                .map(|v| !v.is_empty() && v != "0")
+                .unwrap_or(false),
+            "CI must provide a cjpeg restart-bomb build-capable cjpeg"
+        );
         eprintln!("SKIP restart_bomb_dim_match: cjpeg build failed");
         return;
     }
