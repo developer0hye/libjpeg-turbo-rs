@@ -74,7 +74,7 @@
 | P4-113 | OPEN (`jpeg_read_icc_profile` bypasses classic saved-marker semantics) |
 | P4-114 | OPEN (`jpeg_has_multiple_scans` equates multi-scan with progressive) |
 | P4-115 | OPEN (native 12-bit coverage claims include modes and sampling layouts that are not tested) |
-| P4-116 | PARTIAL (C-parity tests can convert Rust/oracle failures or missing comparisons into a pass — named suites closed 2026-08-08) |
+| P4-116 | CLOSED 2026-08-08 (C-parity tests can convert Rust/oracle failures or missing comparisons into a pass) |
 | P4-117 | CLOSED 2026-08-08 (4:4:1 trim rejected images shorter than one iMCU row) |
 | P4-120 | OPEN (classic-shim allocation-failure paths are unreachable from tests) |
 | P4-121 | OPEN (lossless encode accepts a restart interval C refuses to decode) |
@@ -2218,7 +2218,7 @@ corrected and its redundant weak Rust-only loop was removed; the two retained
 S444 quality matrices compare samples to 12-bit `djpeg`. The missing product
 mode decision and S410/S24 raw C cases keep this item open.
 
-## P4-116. C-Parity Tests Can Convert Failures or Missing Comparisons into a Pass — **PARTIAL: named matrices closed; repository-wide sweep remains**
+## P4-116. C-Parity Tests Can Convert Failures or Missing Comparisons into a Pass — **CLOSED 2026-08-08**
 
 **Motivation.** Filed 2026-08-02 after a documented P4-13 regression reported
 `1 passed` while silently skipping because its private tool lookup ignored a
@@ -2383,6 +2383,90 @@ and the non-matrix suites still carry no planned-vs-executed count, and the
 remaining `SKIP` sites across the wider suite (tool missing, submodule absent,
 platform unsupported) have not been individually re-verified as genuinely
 environmental.
+
+**Progress (2026-08-08, fifth pass) — the repository-wide sweep is done.**
+
+*Discovery.* Fourteen suites still rolled their own C-tool lookup, and two
+could not fail on a provisioned runner at all:
+`cross_check_fuzz_decode_diff_c_progressive_16x16` (5 sites) and
+`..._baseline_h4v1` (2) had no CI guard whatsoever, so a runner missing `djpeg`
+reported `5 passed` having compared nothing. Several lookups scanned only
+hard-coded directories, so a `djpeg` on PATH was invisible — the exact
+regression that opened this item. `cross_check_transform` derived `cjpeg` from
+`djpeg`'s parent directory. The worst was `regression_issue_369_gray_argb_abgr`:
+with `djpeg` absent it substituted our own grayscale decode as the "reference",
+making the C cross-validation a tautology that could not fail. All now route
+through `require_c_tool!`, or through the new `helpers::optional_c_tool` for
+cross-checks that are one part of a larger test, where the macro's early
+`return` would drop the Rust-side assertions that follow.
+
+*Capabilities.* 47 capability probes across 20 suites answered a missing switch
+with a bare `SKIP`/`return` on CI as much as locally. libjpeg-turbo 3.1.4 was
+verified on the development host to carry every capability this repository
+probes for (`-colors`, `-dither ordered`, `-crop`, `-skip`, `-icc`, `-rgb565`,
+`-dct fast|float`, `-lossless`, `-precision`, `-arithmetic`, `-smooth`,
+`-copy icc`), so a miss on a provisioned runner is a provisioning defect.
+`helpers::skip_missing_c_capability` states that rule once. The single genuine
+exception is arithmetic-coded lossless (SOF11): upstream omits it at compile
+time even in 3.1.4 (`cjpeg -lossless 1 -arithmetic` answers "Requested feature
+was omitted at compile time"), so `sof11.rs` keeps unconditional skips and now
+records why, to stop a later sweep converting them.
+
+*A measurement error, corrected.* The second and third passes above reported
+their skip inventory from a plain `cargo test`, which captures stderr for
+*passing* tests — so it could only ever show skips from failing ones. Measured
+correctly with `--nocapture`, 26 skip lines fire on this host, not one.
+
+*The defect that hid behind a skip.* `lossless_encode`'s
+`djpeg_supports_lossless` named its probe file from `process::id()` alone.
+Cargo runs `#[test]`s as parallel threads of one process and both callers live
+in that binary, so the two probes shared one filename and deleted each other's
+input mid-`djpeg`. The probe then answered "djpeg does not support SOF3" about
+a djpeg that decodes SOF3 fine, and the case skipped. It reproduced only under
+full-workspace load, which is why four passes missed it. `lossless_decode` had
+the same shape. Both use `helpers::TempFile` now — the fix
+`c_indexedcolortest::run_djpeg` already needed. This is the second instance of
+that race found by making a skip fail closed.
+
+*A skip that misnamed its own cause.* `subsamp_410` reported "djpeg cannot
+decode 4:1:0". It decodes 4:1:0 fine; `cjpeg -sample 4x2 | djpeg` round-trips
+on the same binary. `make_jpeg_with_410_sampling` patches the SOF sampling
+factors to 4x2 over entropy data coded for 2x2, so djpeg correctly rejects the
+result — which is the C behaviour the case measures our leniency against. It is
+an explained expected refusal now, deliberately *not* a CI-fatal capability
+assertion.
+
+*Counts.* `precision_arbitrary` gains a `ComparisonTally` — 30 planned across
+two 15-precision legs, reporting `30 comparisons completed out of 30 planned`;
+its sub-byte-precision drop is a named exclusion rather than a silent
+`continue`, and its two capability `return`s record exclusions before finishing
+instead of discarding the first leg's work.
+`capi_jpeglib_write_coefficients` is deliberately left without a tally, and
+this is a finding rather than an omission: it is ten independent `#[test]`
+scenarios with zero `SKIP`s, zero early `return`s and zero `continue`s, so
+every one always reaches its assertions. A tally there would plan one case per
+test and duplicate what cargo's own `10 passed` already states. The same holds
+for the other non-matrix suites the earlier pass named.
+
+*Every remaining skip, classified.* 26 fire on this host, none able to hide a
+failure on a provisioned runner: 3 permanent upstream gaps (arithmetic lossless
+SOF11), 2 deliberate guard-test outputs in `helpers_smoke`, 12
+reference-leg-only skips that still run and pass their shim-side assertions
+(`LIBJPEG_TURBO_REFERENCE_DIR` unset), and 9 environmental — platform
+(`/dev/full` absent on macOS, x86_64 dispatch on aarch64), the opt-in licensed
+ITU-T T.83 corpus, `exiftool`, `djpeg12`, a mozjpeg-bound `libvips`, an
+`ffmpeg` built without libjpeg, and the documented Pillow v6b case.
+
+Five guard tests pin the two new helpers, including two `should_panic`
+intentional reds for their CI branches.
+
+**Status (2026-08-08): closed.** `cargo test --workspace --no-fail-fast` on
+macOS aarch64 → 2471 passed, 0 failed, 1 ignored
+(`restart_bomb_4096x4096_decodes_within_measured_bound`, release-only), run
+twice consecutively to confirm the parallelism race is gone. `cargo fmt
+--check` and `cargo clippy --workspace --all-targets -- -D warnings` with the
+three CI-allowed test-code lints are clean. GitHub
+[#435](https://github.com/developer0hye/libjpeg-turbo-rs/issues/435).
 
 ## P4-119. `src/decode/pipeline.rs` Concentrates Half of the Decoder Implementation — **CLOSED 2026-08-02**
 
