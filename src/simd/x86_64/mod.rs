@@ -326,7 +326,7 @@ pub(crate) unsafe fn avx2_downsample_h2v2_plane(
 unsafe fn avx2_quantize_zigzag(coeffs: &[i16; 64], quant: &QuantDivisors, output: &mut [i16; 64]) {
     use core::arch::x86_64::*;
 
-    let zigzag = &crate::encode::tables::ZIGZAG_ORDER;
+    let zigzag = &crate::common::tables::ZIGZAG_ORDER;
 
     for i in (0..64).step_by(16) {
         // Gather 16 coefficients from natural order into zigzag order
