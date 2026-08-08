@@ -152,6 +152,35 @@ if [ -n "${BUNDLED_DIR}" ]; then
         \( -name 'libjpeg*.dylib' -o -name 'libjpeg*.so.62*' \) \
         -type f 2>/dev/null | head -n 1)"
     if [ -n "${BUNDLED_ORIG}" ]; then
+        # P4-122: refuse to substitute for a *v6b* bundled library.
+        #
+        # This is the policy docs/LAST_MILE.md already states — "environment /
+        # setup failures are reported as explicit skip reasons rather than
+        # silently substituting the v8 shim for a v6b (libjpeg.so.62)
+        # dependency. Direct v6b substitution is forbidden because T4 is a
+        # non-goal" — which this path did not implement. A stock manylinux
+        # wheel's _imaging.so is linked against v6b and requests
+        # jpeg_*@LIBJPEG_6.2; overwriting its bundled library with our v8 shim
+        # bound a v6b consumer to a v8 struct layout, and reported success.
+        #
+        # That only ever "worked" because the shim declared no ELF symbol
+        # versions, so glibc's unversioned-fallback path let the mismatch
+        # through. Once P4-81 adds LIBJPEG_8.0 the loader refuses outright —
+        # which is correct, and is what exposed this.
+        #
+        # Skipping is the honest outcome: this leg cannot produce T3 evidence
+        # from a v6b consumer. Restoring it needs a Pillow whose _imaging.so
+        # actually links v8 (a source build against a v8 SDK), not a different
+        # substitution.
+        case "${BUNDLED_ORIG}" in
+            *.so.62*|*libjpeg.62*.dylib)
+                log "SKIP: Pillow's bundled libjpeg is v6b (${BUNDLED_ORIG})."
+                log "      Substituting our v8 shim for it would bind a v6b-linked"
+                log "      _imaging.so to a v8 struct layout — forbidden (T4 is a"
+                log "      non-goal). Needs a Pillow built against a v8 SDK. See P4-122."
+                exit 2
+                ;;
+        esac
         BUNDLED_BACKUP="${BUNDLED_ORIG}.pillow_smoke_backup"
         if [ ! -f "${BUNDLED_BACKUP}" ]; then
             cp -p "${BUNDLED_ORIG}" "${BUNDLED_BACKUP}"
