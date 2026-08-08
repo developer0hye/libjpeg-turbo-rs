@@ -252,7 +252,7 @@ fn write_version_script(map: &str) -> PathBuf {
     map_path
 }
 
-/// The GNU version script text. See `apply_gnu_version_script` for why it has
+/// The GNU version script text. See `note_gnu_version_script_owner` for why it has
 /// no catch-all node.
 fn gnu_version_script() -> String {
     // Classic exports that are not `jpeg_`-prefixed. Upstream declares these

@@ -2883,8 +2883,13 @@ why the failure surfaced now rather than being introduced now.
    falling back to substitution.
 4. `docs/LAST_MILE.md`'s `capi_pillow_compat` row is re-measured and re-worded
    to describe what the leg actually proves.
-5. P4-81's version script stays enabled while this is fixed; CI going green
-   again by weakening the version nodes is not an acceptable resolution.
+5. P4-81's version nodes stay in place while this is fixed; CI going green
+   again by weakening them is not an acceptable resolution. (Written when the
+   nodes were expected on the cargo cdylib. They now land on the *installed*
+   library `scripts/install_capi.sh` relinks, because rustc's own anonymous
+   version script makes the cdylib incapable of carrying them. The substance is
+   unchanged: the harness must stop substituting for a v6b library, not lose
+   the nodes.)
 
 **Why deferred.** The fix touches the project's headline downstream-compat
 evidence, so it needs its own review rather than being folded into P4-81.
