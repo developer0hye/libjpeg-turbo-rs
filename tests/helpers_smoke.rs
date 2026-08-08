@@ -4,10 +4,19 @@ mod helpers;
 
 #[test]
 fn helpers_c_tool_discovery() {
-    // djpeg should be findable on dev machines; graceful None on CI
-    let djpeg = helpers::djpeg_path();
-    if djpeg.is_none() {
-        eprintln!("SKIP: djpeg not found");
+    // P4-116: this used to look up djpeg and print SKIP when it was absent,
+    // asserting nothing either way — a test that cannot fail. Assert the
+    // contract the helper actually has: whatever it returns must be a path
+    // that exists, and on CI it must return one.
+    match helpers::djpeg_path() {
+        Some(path) => assert!(
+            path.exists(),
+            "c_tool_path returned {path:?}, which does not exist"
+        ),
+        None => assert!(
+            !helpers::is_ci(),
+            "CI provisions libjpeg-turbo, so djpeg must be discoverable"
+        ),
     }
 }
 
@@ -116,4 +125,66 @@ fn helpers_build_ppm_format() {
     let ppm: Vec<u8> = helpers::build_ppm(&pixels, 3, 1);
     assert!(ppm.starts_with(b"P6\n3 1\n255\n"));
     assert_eq!(ppm.len(), "P6\n3 1\n255\n".len() + 9);
+}
+
+// ---------------------------------------------------------------------------
+// ComparisonTally guard tests (P4-116)
+//
+// These live here rather than in `helpers/tally.rs` so they run exactly once.
+// `mod helpers;` is included by dozens of integration-test binaries, and a
+// `#[cfg(test)]` module inside it is compiled into every one of them — which
+// would report the same five results a hundred-odd times and inflate the
+// workspace test count.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn full_coverage_passes() {
+    let mut tally: helpers::ComparisonTally = helpers::ComparisonTally::new("t", 3);
+    tally.compared();
+    tally.compared();
+    tally.compared();
+    tally.finish();
+}
+
+#[test]
+fn exclusions_count_toward_the_plan() {
+    let mut tally: helpers::ComparisonTally = helpers::ComparisonTally::new("t", 3);
+    tally.compared();
+    tally.excluded("no Rust equivalent");
+    tally.excluded("no Rust equivalent");
+    tally.finish();
+}
+
+#[test]
+#[should_panic(expected = "unaccounted for")]
+fn a_dropped_case_fails() {
+    let mut tally: helpers::ComparisonTally = helpers::ComparisonTally::new("t", 3);
+    tally.compared();
+    tally.finish();
+}
+
+#[test]
+#[should_panic(expected = "none reached a comparison")]
+fn excluding_everything_fails() {
+    let mut tally: helpers::ComparisonTally = helpers::ComparisonTally::new("t", 2);
+    tally.excluded("tool missing");
+    tally.excluded("tool missing");
+    tally.finish();
+}
+
+#[test]
+#[should_panic(expected = "planned zero cases")]
+fn an_empty_plan_fails() {
+    helpers::ComparisonTally::new("t", 0).finish();
+}
+
+/// The `Drop` guard must fire when a tally never reaches `finish()` — the
+/// case a type-level `#[must_use]` cannot see, because every real call site
+/// binds the tally to a variable.
+#[test]
+#[should_panic(expected = "dropped without finish()")]
+fn a_tally_that_is_never_finished_fails() {
+    let mut tally: helpers::ComparisonTally = helpers::ComparisonTally::new("t", 2);
+    tally.compared();
+    // Falls out of scope here, exactly as an early `return` would leave it.
 }

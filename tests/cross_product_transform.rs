@@ -169,6 +169,75 @@ fn swaps_dims(op: TransformOp) -> bool {
     )
 }
 
+/// Run one transform, require it to produce a decodable stream, and record the
+/// outcome in the caller's buckets.
+///
+/// P4-116: these matrices used to have `Err(_) => { /* legitimate failure */ }`
+/// arms that recorded nothing, and `if !result.is_empty()` guards that let an
+/// empty output past the decode check. Both made a refusal indistinguishable
+/// from a verified round-trip. Every attempt now lands in exactly one bucket,
+/// and `assert_transform_matrix_accounted` proves the three add back up.
+fn attempt_transform(
+    jpeg: &[u8],
+    opts: &TransformOptions,
+    label: String,
+    round_tripped: &mut u32,
+    refused: &mut Vec<String>,
+    decode_failures: &mut Vec<String>,
+) {
+    match transform_jpeg_with_options(jpeg, opts) {
+        Ok(result) => {
+            if result.is_empty() {
+                refused.push(format!("{label}: transform returned an empty stream"));
+                return;
+            }
+            match decompress(&result) {
+                Ok(_) => *round_tripped += 1,
+                Err(e) => decode_failures.push(format!("{label}: decode error: {e}")),
+            }
+        }
+        Err(e) => refused.push(format!("{label}: {e}")),
+    }
+}
+
+/// Assert a transform matrix accounted for every attempt and verified at least
+/// one round-trip. Refusals are reported in full rather than tolerated: if a
+/// combination is genuinely out of scope it belongs in an explicit skip rule
+/// with a citation, not folded silently into the pass.
+fn assert_transform_matrix_accounted(
+    name: &str,
+    tested: u32,
+    round_tripped: u32,
+    refused: &[String],
+    decode_failures: &[String],
+) {
+    println!(
+        "{name}: {tested} attempted, {round_tripped} round-tripped, {} refused, {} decode failures",
+        refused.len(),
+        decode_failures.len()
+    );
+    assert_eq!(
+        tested as usize,
+        round_tripped as usize + refused.len() + decode_failures.len(),
+        "{name}: {tested} attempts do not add up to {round_tripped} round-tripped + \
+         {} refused + {} decode failures",
+        refused.len(),
+        decode_failures.len()
+    );
+    assert!(
+        decode_failures.is_empty(),
+        "{name} decode failures:\n{}",
+        decode_failures.join("\n")
+    );
+    assert!(
+        refused.is_empty(),
+        "{name}: transform_jpeg_with_options refused {} of {tested} combinations:\n{}",
+        refused.len(),
+        refused.join("\n")
+    );
+    assert!(round_tripped > 0, "{name}: no combination round-tripped");
+}
+
 // ---------------------------------------------------------------------------
 // Test 1: Core cross-product (subsamp x transform x grayscale x optimize x progressive)
 // ---------------------------------------------------------------------------
@@ -193,6 +262,9 @@ fn tjtrantest_core_cross_product() {
     let mut succeeded: u32 = 0;
     let mut skipped: u32 = 0;
     let mut decode_failures: Vec<String> = Vec::new();
+    // Transforms the library refused outright. Kept separate from `succeeded`
+    // so a refusal can never masquerade as a verified round-trip (P4-116).
+    let mut refused: Vec<String> = Vec::new();
 
     // Color JPEGs: subsamp x transform x grayscale x optimize x progressive
     for (subsamp, jpeg) in &jpegs {
@@ -215,27 +287,37 @@ fn tjtrantest_core_cross_product() {
                         };
 
                         tested += 1;
+                        let label: String = format!(
+                            "{}-{} gray={} opt={} prog={}",
+                            subsamp_label(*subsamp),
+                            op_label(op),
+                            grayscale,
+                            optimize,
+                            progressive
+                        );
                         match transform_jpeg_with_options(jpeg, &opts) {
                             Ok(result) => {
-                                if !result.is_empty() {
-                                    if let Err(e) = decompress(&result) {
-                                        decode_failures.push(format!(
-                                            "{}-{} gray={} opt={} prog={}: decode error: {}",
-                                            subsamp_label(*subsamp),
-                                            op_label(op),
-                                            grayscale,
-                                            optimize,
-                                            progressive,
-                                            e
-                                        ));
-                                        continue;
-                                    }
+                                // P4-116: an empty result used to reach the
+                                // success counter without being decoded. A
+                                // transform that produced no bytes is not a
+                                // successful transform.
+                                assert!(
+                                    !result.is_empty(),
+                                    "{label}: transform returned an empty stream"
+                                );
+                                if let Err(e) = decompress(&result) {
+                                    decode_failures.push(format!("{label}: decode error: {e}"));
+                                    continue;
                                 }
                                 succeeded += 1;
                             }
-                            Err(_) => {
-                                // Some combos legitimately fail (non-aligned + transform)
-                                succeeded += 1;
+                            Err(e) => {
+                                // P4-116: this arm used to increment `succeeded`,
+                                // so a transform that *failed* was indistinguishable
+                                // from one that round-tripped. Record it as a
+                                // refusal instead — the counts below assert that
+                                // every case landed in exactly one bucket.
+                                refused.push(format!("{label}: {e}"));
                             }
                         }
                     }
@@ -261,38 +343,47 @@ fn tjtrantest_core_cross_product() {
                 };
 
                 tested += 1;
+                let label: String = format!(
+                    "gray-{} opt={} prog={}",
+                    op_label(op),
+                    optimize,
+                    progressive
+                );
                 match transform_jpeg_with_options(&gray_jpeg, &opts) {
                     Ok(result) => {
-                        if !result.is_empty() {
-                            if let Err(e) = decompress(&result) {
-                                decode_failures.push(format!(
-                                    "gray-{} opt={} prog={}: decode error: {}",
-                                    op_label(op),
-                                    optimize,
-                                    progressive,
-                                    e
-                                ));
-                                continue;
-                            }
+                        assert!(
+                            !result.is_empty(),
+                            "{label}: transform returned an empty stream"
+                        );
+                        if let Err(e) = decompress(&result) {
+                            decode_failures.push(format!("{label}: decode error: {e}"));
+                            continue;
                         }
                         succeeded += 1;
                     }
-                    Err(_) => {
-                        succeeded += 1;
-                    }
+                    Err(e) => refused.push(format!("{label}: {e}")),
                 }
             }
         }
     }
 
     println!(
-        "Core cross-product: {} tested, {} succeeded, {} skipped, {} decode failures",
-        tested,
-        succeeded,
-        skipped,
+        "Core cross-product: {tested} attempted, {succeeded} round-tripped, \
+         {skipped} excluded by the C reference's own skip rules, \
+         {} refused, {} decode failures",
+        refused.len(),
         decode_failures.len()
     );
 
+    // Exact accounting: every attempt must have ended in exactly one bucket.
+    assert_eq!(
+        tested as usize,
+        succeeded as usize + refused.len() + decode_failures.len(),
+        "core cross-product: {tested} attempts do not add up to \
+         {succeeded} round-tripped + {} refused + {} decode failures",
+        refused.len(),
+        decode_failures.len()
+    );
     assert!(
         tested >= 200,
         "Expected at least 200 combos, got {}",
@@ -303,6 +394,17 @@ fn tjtrantest_core_cross_product() {
         "Decode failures:\n{}",
         decode_failures.join("\n")
     );
+    // The library must round-trip every combination this matrix generates.
+    // Any refusal is a real gap, not a "legitimate failure" as the previous
+    // comment claimed — if one is ever intended, it belongs in the explicit
+    // skip rules above with a citation, not folded into the success count.
+    assert!(
+        refused.is_empty(),
+        "transform_jpeg_with_options refused {} of {tested} combinations:\n{}",
+        refused.len(),
+        refused.join("\n")
+    );
+    assert!(succeeded > 0, "core cross-product completed no round-trips");
 }
 
 // ---------------------------------------------------------------------------
@@ -322,6 +424,9 @@ fn tjtrantest_arithmetic_cross_product() {
     let gray_jpeg: Vec<u8> = make_gray_jpeg();
 
     let mut tested: u32 = 0;
+    let mut round_tripped: u32 = 0;
+    // Refusals are recorded, never swallowed — see `attempt_transform`.
+    let mut refused: Vec<String> = Vec::new();
     let mut decode_failures: Vec<String> = Vec::new();
 
     for (subsamp, jpeg) in &jpegs {
@@ -335,24 +440,19 @@ fn tjtrantest_arithmetic_cross_product() {
                 };
 
                 tested += 1;
-                match transform_jpeg_with_options(jpeg, &opts) {
-                    Ok(result) => {
-                        if !result.is_empty() {
-                            if let Err(e) = decompress(&result) {
-                                decode_failures.push(format!(
-                                    "{}-{} ari prog={}: decode error: {}",
-                                    subsamp_label(*subsamp),
-                                    op_label(op),
-                                    progressive,
-                                    e
-                                ));
-                            }
-                        }
-                    }
-                    Err(_) => {
-                        // Legitimate failure for some combos
-                    }
-                }
+                attempt_transform(
+                    jpeg,
+                    &opts,
+                    format!(
+                        "{}-{} ari prog={}",
+                        subsamp_label(*subsamp),
+                        op_label(op),
+                        progressive
+                    ),
+                    &mut round_tripped,
+                    &mut refused,
+                    &mut decode_failures,
+                );
             }
         }
     }
@@ -368,36 +468,28 @@ fn tjtrantest_arithmetic_cross_product() {
             };
 
             tested += 1;
-            if let Ok(result) = transform_jpeg_with_options(&gray_jpeg, &opts) {
-                if !result.is_empty() {
-                    if let Err(e) = decompress(&result) {
-                        decode_failures.push(format!(
-                            "gray-{} ari prog={}: decode error: {}",
-                            op_label(op),
-                            progressive,
-                            e
-                        ));
-                    }
-                }
-            }
+            attempt_transform(
+                &gray_jpeg,
+                &opts,
+                format!("gray-{} ari prog={}", op_label(op), progressive),
+                &mut round_tripped,
+                &mut refused,
+                &mut decode_failures,
+            );
         }
     }
-
-    println!(
-        "Arithmetic cross-product: {} tested, {} decode failures",
-        tested,
-        decode_failures.len()
-    );
 
     assert!(
         tested >= 100,
         "Expected at least 100 combos, got {}",
         tested
     );
-    assert!(
-        decode_failures.is_empty(),
-        "Decode failures:\n{}",
-        decode_failures.join("\n")
+    assert_transform_matrix_accounted(
+        "tjtrantest_arithmetic_cross_product",
+        tested,
+        round_tripped,
+        &refused,
+        &decode_failures,
     );
 }
 
@@ -495,6 +587,9 @@ fn tjtrantest_crop_cross_product() {
     }
 
     let mut tested: u32 = 0;
+    let mut round_tripped: u32 = 0;
+    // Refusals are recorded, never swallowed — see `attempt_transform`.
+    let mut refused: Vec<String> = Vec::new();
     let mut decode_failures: Vec<String> = Vec::new();
 
     for (subsamp, jpeg) in &jpegs {
@@ -530,6 +625,7 @@ fn tjtrantest_crop_cross_product() {
                                         op_label(op),
                                         crop
                                     );
+                                    round_tripped += 1;
                                 }
                                 Err(e) => {
                                     decode_failures.push(format!(
@@ -543,29 +639,28 @@ fn tjtrantest_crop_cross_product() {
                             }
                         }
                     }
-                    Err(_) => {
-                        // Crop region may not be valid for all subsamp/transform combos
-                    }
+                    Err(e) => refused.push(format!(
+                        "{}-{} crop {:?}: {e}",
+                        subsamp_label(*subsamp),
+                        op_label(op),
+                        crop
+                    )),
                 }
             }
         }
     }
-
-    println!(
-        "Crop cross-product: {} tested, {} decode failures",
-        tested,
-        decode_failures.len()
-    );
 
     assert!(
         tested >= 200,
         "Expected at least 200 combos, got {}",
         tested
     );
-    assert!(
-        decode_failures.is_empty(),
-        "Decode failures:\n{}",
-        decode_failures.join("\n")
+    assert_transform_matrix_accounted(
+        "tjtrantest_crop_cross_product",
+        tested,
+        round_tripped,
+        &refused,
+        &decode_failures,
     );
 }
 
@@ -589,6 +684,9 @@ fn tjtrantest_trim_cross_product() {
     let gray_jpeg: Vec<u8> = make_unaligned_gray_jpeg();
 
     let mut tested: u32 = 0;
+    let mut round_tripped: u32 = 0;
+    // Refusals are recorded, never swallowed — see `attempt_transform`.
+    let mut refused: Vec<String> = Vec::new();
     let mut skipped: u32 = 0;
     let mut decode_failures: Vec<String> = Vec::new();
 
@@ -630,7 +728,13 @@ fn tjtrantest_trim_cross_product() {
                     tested += 1;
                     match transform_jpeg_with_options(jpeg, &opts) {
                         Ok(result) => {
-                            if !result.is_empty() {
+                            assert!(
+                                !result.is_empty(),
+                                "{}-{}: transform returned an empty stream",
+                                subsamp_label(*subsamp),
+                                op_label(op)
+                            );
+                            {
                                 match decompress(&result) {
                                     Ok(img) => {
                                         // After trim, dimensions should be MCU-aligned
@@ -667,6 +771,7 @@ fn tjtrantest_trim_cross_product() {
                                             subsamp_label(*subsamp),
                                             op_label(op)
                                         );
+                                        round_tripped += 1;
                                     }
                                     Err(e) => {
                                         decode_failures.push(format!(
@@ -681,9 +786,13 @@ fn tjtrantest_trim_cross_product() {
                                 }
                             }
                         }
-                        Err(_) => {
-                            // Trim may not resolve all alignment issues
-                        }
+                        Err(e) => refused.push(format!(
+                            "{}-{} trim opt={} prog={}: {e}",
+                            subsamp_label(*subsamp),
+                            op_label(op),
+                            optimize,
+                            progressive
+                        )),
                     }
                 }
             }
@@ -699,31 +808,31 @@ fn tjtrantest_trim_cross_product() {
         };
 
         tested += 1;
-        if let Ok(result) = transform_jpeg_with_options(&gray_jpeg, &opts) {
-            if !result.is_empty() {
-                if let Err(e) = decompress(&result) {
-                    decode_failures.push(format!(
-                        "gray-{} trim: decode error: {}",
-                        op_label(op),
-                        e
-                    ));
-                }
-            }
-        }
+        attempt_transform(
+            &gray_jpeg,
+            &opts,
+            format!("gray-{} trim", op_label(op)),
+            &mut round_tripped,
+            &mut refused,
+            &mut decode_failures,
+        );
     }
 
-    println!(
-        "Trim cross-product: {} tested, {} skipped, {} decode failures",
-        tested,
-        skipped,
-        decode_failures.len()
-    );
-
+    println!("Trim cross-product: {skipped} excluded by the C reference's skip rules");
     assert!(tested >= 50, "Expected at least 50 combos, got {}", tested);
-    assert!(
-        decode_failures.is_empty(),
-        "Decode failures:\n{}",
-        decode_failures.join("\n")
+
+    // P4-117 / issue #439 (fixed): 4:4:1 trim used to report "trim would
+    // remove all image data" for every spatial op, and this matrix hid it
+    // behind `Err(_) => { /* Trim may not resolve all alignment issues */ }`.
+    // The carve-out that replaced that comment has been deleted now the fix
+    // has landed, so zero refusals are required again — which is what the
+    // carve-out's pinned count existed to force.
+    assert_transform_matrix_accounted(
+        "tjtrantest_trim_cross_product",
+        tested,
+        round_tripped,
+        &refused,
+        &decode_failures,
     );
 }
 
@@ -740,6 +849,9 @@ fn tjtrantest_grayscale_input_cross_product() {
     let gray_jpeg: Vec<u8> = make_gray_jpeg();
 
     let mut tested: u32 = 0;
+    let mut round_tripped: u32 = 0;
+    // Refusals are recorded, never swallowed — see `attempt_transform`.
+    let mut refused: Vec<String> = Vec::new();
     let mut decode_failures: Vec<String> = Vec::new();
 
     for &op in &ALL_TRANSFORMS {
@@ -798,6 +910,7 @@ fn tjtrantest_grayscale_input_cross_product() {
                                                 "gray-{}: wrong dims",
                                                 op_label(op)
                                             );
+                                            round_tripped += 1;
                                         }
                                         Err(e) => {
                                             decode_failures.push(format!(
@@ -813,9 +926,7 @@ fn tjtrantest_grayscale_input_cross_product() {
                                     }
                                 }
                             }
-                            Err(_) => {
-                                // Legitimate failure
-                            }
+                            Err(e) => refused.push(format!("gray-{}: {e}", op_label(op))),
                         }
                     }
                 }
@@ -823,21 +934,17 @@ fn tjtrantest_grayscale_input_cross_product() {
         }
     }
 
-    println!(
-        "Grayscale input cross-product: {} tested, {} decode failures",
-        tested,
-        decode_failures.len()
-    );
-
     assert!(
         tested >= 100,
         "Expected at least 100 combos, got {}",
         tested
     );
-    assert!(
-        decode_failures.is_empty(),
-        "Decode failures:\n{}",
-        decode_failures.join("\n")
+    assert_transform_matrix_accounted(
+        "tjtrantest_grayscale_input_cross_product",
+        tested,
+        round_tripped,
+        &refused,
+        &decode_failures,
     );
 }
 
@@ -863,6 +970,9 @@ fn tjtrantest_restart_cross_product() {
     let dummy_icc: Vec<u8> = vec![0u8; 128]; // Minimal ICC profile placeholder
 
     let mut tested: u32 = 0;
+    let mut round_tripped: u32 = 0;
+    // Refusals are recorded, never swallowed — see `attempt_transform`.
+    let mut refused: Vec<String> = Vec::new();
     let mut decode_failures: Vec<String> = Vec::new();
 
     for &subsamp in &ALL_SUBSAMPLINGS {
@@ -902,38 +1012,34 @@ fn tjtrantest_restart_cross_product() {
                 };
 
                 tested += 1;
-                if let Ok(result) = transform_jpeg_with_options(jpeg, &opts) {
-                    if !result.is_empty() {
-                        if let Err(e) = decompress(&result) {
-                            decode_failures.push(format!(
-                                "{}-{} {}: decode error: {}",
-                                subsamp_label(subsamp),
-                                op_label(op),
-                                restart_label,
-                                e
-                            ));
-                        }
-                    }
-                }
+                attempt_transform(
+                    jpeg,
+                    &opts,
+                    format!(
+                        "{}-{} {}",
+                        subsamp_label(subsamp),
+                        op_label(op),
+                        restart_label
+                    ),
+                    &mut round_tripped,
+                    &mut refused,
+                    &mut decode_failures,
+                );
             }
         }
     }
-
-    println!(
-        "Restart cross-product: {} tested, {} decode failures",
-        tested,
-        decode_failures.len()
-    );
 
     assert!(
         tested >= 100,
         "Expected at least 100 combos, got {}",
         tested
     );
-    assert!(
-        decode_failures.is_empty(),
-        "Decode failures:\n{}",
-        decode_failures.join("\n")
+    assert_transform_matrix_accounted(
+        "tjtrantest_restart_cross_product",
+        tested,
+        round_tripped,
+        &refused,
+        &decode_failures,
     );
 }
 
@@ -1027,8 +1133,10 @@ fn tjtrantest_full_cross_product() {
     });
 
     let mut tested: u32 = 0;
+    let mut round_tripped: u32 = 0;
+    // Refusals are recorded, never swallowed — see `attempt_transform`.
+    let mut refused: Vec<String> = Vec::new();
     let mut skipped: u32 = 0;
-    let mut transform_errors: u32 = 0;
     let mut decode_failures: Vec<String> = Vec::new();
 
     for source in &all_sources {
@@ -1131,30 +1239,25 @@ fn tjtrantest_full_cross_product() {
                                         };
 
                                         tested += 1;
-                                        match transform_jpeg_with_options(&source.data, &opts) {
-                                            Ok(result) => {
-                                                if !result.is_empty() {
-                                                    if let Err(e) = decompress(&result) {
-                                                        decode_failures.push(format!(
-                                                            "{}-{} ari={} copy={:?} crop={} gray={} opt={} prog={} trim={}: {}",
-                                                            subsamp_name,
-                                                            op_label(op),
-                                                            arithmetic,
-                                                            copy_mode,
-                                                            crop.is_some(),
-                                                            grayscale,
-                                                            optimize,
-                                                            progressive,
-                                                            trim,
-                                                            e
-                                                        ));
-                                                    }
-                                                }
-                                            }
-                                            Err(_) => {
-                                                transform_errors += 1;
-                                            }
-                                        }
+                                        attempt_transform(
+                                            &source.data,
+                                            &opts,
+                                            format!(
+                                                "{}-{} ari={} copy={:?} crop={} gray={} opt={} prog={} trim={}",
+                                                subsamp_name,
+                                                op_label(op),
+                                                arithmetic,
+                                                copy_mode,
+                                                crop.is_some(),
+                                                grayscale,
+                                                optimize,
+                                                progressive,
+                                                trim
+                                            ),
+                                            &mut round_tripped,
+                                            &mut refused,
+                                            &mut decode_failures,
+                                        );
                                     }
                                 }
                             }
@@ -1165,13 +1268,7 @@ fn tjtrantest_full_cross_product() {
         }
     }
 
-    println!(
-        "Full cross-product: {} tested, {} skipped, {} transform errors, {} decode failures",
-        tested,
-        skipped,
-        transform_errors,
-        decode_failures.len()
-    );
+    println!("Full cross-product: {skipped} excluded by the C reference's skip rules");
 
     // The full cross-product with restart folded in should reach ~15000+
     assert!(
@@ -1179,16 +1276,16 @@ fn tjtrantest_full_cross_product() {
         "Expected at least 5000 combos, got {}",
         tested
     );
-    assert!(
-        decode_failures.is_empty(),
-        "Decode failures ({}):\n{}",
-        decode_failures.len(),
-        decode_failures
-            .iter()
-            .take(20)
-            .cloned()
-            .collect::<Vec<_>>()
-            .join("\n")
+    // P4-116: `transform_errors` used to be counted and then only printed, so
+    // this matrix could refuse all ~14,112 combinations and still report green
+    // with `tested >= 5000` satisfied and no decode failures — the exact shape
+    // removed from its six siblings in this file.
+    assert_transform_matrix_accounted(
+        "tjtrantest_full_cross_product",
+        tested,
+        round_tripped,
+        &refused,
+        &decode_failures,
     );
 }
 

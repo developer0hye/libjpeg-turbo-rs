@@ -74,9 +74,10 @@
 | P4-113 | OPEN (`jpeg_read_icc_profile` bypasses classic saved-marker semantics) |
 | P4-114 | OPEN (`jpeg_has_multiple_scans` equates multi-scan with progressive) |
 | P4-115 | OPEN (native 12-bit coverage claims include modes and sampling layouts that are not tested) |
-| P4-116 | OPEN (C-parity tests can convert Rust/oracle failures or missing comparisons into a pass) |
+| P4-116 | PARTIAL (C-parity tests can convert Rust/oracle failures or missing comparisons into a pass — named suites closed 2026-08-08) |
 | P4-117 | CLOSED 2026-08-08 (4:4:1 trim rejected images shorter than one iMCU row) |
 | P4-120 | OPEN (classic-shim allocation-failure paths are unreachable from tests) |
+| P4-121 | OPEN (lossless encode accepts a restart interval C refuses to decode) |
 
 ---
 
@@ -2145,7 +2146,7 @@ corrected and its redundant weak Rust-only loop was removed; the two retained
 S444 quality matrices compare samples to 12-bit `djpeg`. The missing product
 mode decision and S410/S24 raw C cases keep this item open.
 
-## P4-116. C-Parity Tests Can Convert Failures or Missing Comparisons into a Pass — **OPEN**
+## P4-116. C-Parity Tests Can Convert Failures or Missing Comparisons into a Pass — **PARTIAL: named matrices closed; repository-wide sweep remains**
 
 **Motivation.** Filed 2026-08-02 after a documented P4-13 regression reported
 `1 passed` while silently skipping because its private tool lookup ignored a
@@ -2180,6 +2181,85 @@ required in-repo fixtures cannot disappear through a bare return.
 requires missing tools in CI, and its complete four-test binary is selected by
 the provisioned Linux workflow. A host-tool run completed 4/4 with no skip.
 The broader matrices above remain open.
+
+**Progress (2026-08-08) — every named suite is closed.** All ten now fail
+closed. The seven that are matrices — `abbreviated_datastream`, `c_croptest`,
+`c_tjdecomptest`, `cross_check_crop_scale`, `worker_b3_conformance_t83`,
+`cross_product_transform`, and the lossless leg of `encoder_builder` — assert
+exact planned-versus-executed counts, the first five through
+`tests/helpers/tally.rs` (`ComparisonTally`) and `cross_product_transform`
+through its own bucket sum. `ComparisonTally` enforces its own use: `finish()`
+is required by a `Drop` guard rather than a type-level `#[must_use]`, which is
+inert once the tally is bound to a variable — as it is at every real call site.
+Its six guard tests (in `tests/helpers_smoke.rs`) include four intentional reds
+proving both the accounting and the `Drop` guard fire. `c_cjpeg_djpeg_tests`,
+`cross_check_metadata` and `capi_jpeglib_write_coefficients` are fail-closed
+but are not matrices, so they carry no count. Two shared policy helpers replace the private,
+per-file lookups: `require_c_tool!` (already existed, now used everywhere) and
+the new `require_c_testimage!`, which distinguishes "the submodule is not
+checked out" (environmental) from "the fixture this test needs is gone" (a
+defect, and always fatal).
+
+What the hardening actually caught — each was a suite reporting green while
+testing less than it claimed:
+
+* **`abbreviated_datastream`: the tables-only matrix compared zero cases.** It
+  shelled out to `cjpeg -tables-only`, a switch that has never existed in any
+  libjpeg release. Its support probe looked for "unrecognized"/"unknown
+  option" while `cjpeg` prints a usage dump, so the probe always answered
+  "supported"; every invocation then failed and the loop `continue`d past it.
+  `jpeg_write_tables()` is API-only, so the oracle is now
+  `examples/tables_only_c_oracle.c`. All 12 cases compare byte-identically.
+* **`c_cjpeg_djpeg_tests::c_cjpeg_lossless` encoded a baseline JPEG.** It set
+  `.lossless_predictor(4)` without `.lossless(true)` — the predictor selector
+  does not switch the mode on — and then *logged* the resulting mismatch as a
+  `NOTE` instead of asserting. It now asserts SOF3 on both sides and exact
+  round-trips through our decoder and through `djpeg`. Fixing it also exposed
+  that `-restart 1` had been translated as `restart_blocks(1)`; cjpeg's bare
+  `-restart N` counts MCU *rows* (cjpeg.c:537-541), and the block spelling
+  produced a stream real libjpeg refuses (see **P4-121**).
+* **`cross_product_transform` counted refusals as successes.** Four matrices
+  had `Err(_) => { /* legitimate failure */ }` arms that recorded nothing, and
+  one incremented the success counter directly. Every attempt is now bucketed
+  and the buckets must sum to the attempt count. This immediately surfaced the
+  **P4-117** 4:4:1 trim defect, which was carved out by name and pinned at
+  eight cases so that both widening and narrowing would fail. That fix landed
+  first (#439), the pin fired as designed, and the carve-out is gone — the
+  trim matrix now reports 78 attempted, 78 round-tripped, 0 refused.
+* **`c_tjdecomptest`, `cross_check_crop_scale`, `c_croptest`** turned real
+  Rust/C disagreements — height mismatches, short oracle output, length
+  mismatches — into `SKIP` and a `return`. Those are assertions now.
+* **`cross_product_transform::tjtrantest_full_cross_product` asserted nothing
+  about 14,112 transforms.** It counted refusals into `transform_errors` and
+  only *printed* the total, so refusing every combination still satisfied
+  `tested >= 5000` with no decode failures. It now reports
+  `14112 attempted, 14112 round-tripped, 0 refused`.
+* **`encoder_builder` degraded a failed `djpeg` to an unasserted `NOTE`.**
+  libjpeg-turbo has decoded SOF3 since 3.0, so on CI a rejection is our defect;
+  locally it now still asserts the Rust lossless round-trip rather than
+  dropping the case entirely.
+* **`c_croptest_quick_420` discarded its scenario results.** Six scenarios
+  could all bail out and the test still reported green.
+* **`helpers_smoke::helpers_c_tool_discovery`** asserted nothing at all.
+
+Measured on macOS aarch64: `cargo test --workspace --no-fail-fast` → 2464
+passed, 0 failed, 1 ignored (`restart_bomb_4096x4096_decodes_within_measured_bound`,
+release-only). Platform-gated tests differ, so this total is host-qualified. `cargo fmt --check` and
+`cargo clippy --workspace --all-targets -- -D warnings` clean.
+
+**Why still PARTIAL.** The acceptance criteria also ask to "audit analogous
+patterns repository-wide". 82 test files still contain an `eprintln!("SKIP…")` site
+(`tests/*.rs` plus `crates/*/tests/*.rs`; a single-line grep finds only 66 of
+them because 16 spell the macro across lines), and a sample of them carries the
+same shapes this pass removed — `tests/c_indexedcolortest.rs:251`,
+`tests/cross_check_color_quantize.rs:257`, `tests/quantize.rs:674`,
+`tests/precision*.rs` (`precision.rs:432`, `precision_extended.rs:756`,
+`precision_arbitrary.rs:711`), `tests/crop_c_compat.rs:467`,
+`tests/crop_skip.rs:319`, `tests/cross_check_transform.rs:1120`,
+`tests/cross_check_misc_gaps.rs:235`, and
+`tests/hard_case_x_byte_and_restart.rs:295` all turn a failed C invocation into
+a skip. Those suites are outside the ten the criteria name and are not touched
+here; the item stays open until they are swept as well.
 
 ## P4-119. `src/decode/pipeline.rs` Concentrates Half of the Decoder Implementation — **CLOSED 2026-08-02**
 
@@ -2340,4 +2420,42 @@ guard does not weaken trimming where a whole iMCU does fit (35x27 → 32x16).
 Verified red before the fix: `vflip` and three others were rejected, 2 of 3
 tests failing. `cargo test --workspace --no-fail-fast`: 2458 passed, 0 failed,
 1 ignored. Once this merges, `cross_product_transform`'s trim carve-out
-assertion fires and directs the next session to delete it, restoring 78/78.
+assertion fired as designed and the carve-out is deleted; trim now reports 78/78.
+
+## P4-121. Lossless Encode Accepts a Restart Interval C Refuses to Decode — **OPEN**
+
+**Motivation.** Filed 2026-08-08 while repairing `c_cjpeg_djpeg_tests::
+c_cjpeg_lossless` under P4-116. Asking for a lossless stream with
+`restart_blocks(1)` produces a file that real libjpeg cannot read:
+
+```
+djpeg: Invalid restart interval 1; must be an integer multiple of the number
+       of MCUs in an MCU row (227)
+```
+
+**Root cause.** In lossless mode the restart interval must be a whole number of
+MCU rows. Upstream enforces this **in the encoder**: `jclossls.c:294-296`
+raises `JERR_BAD_RESTART` from `start_pass_lossless` when
+`restart_interval % MCUs_per_row != 0`, so C cannot emit such a stream at all.
+The decoder repeats the check at `jddiffct.c:108`. Our encoder performs
+neither check, so it accepts the value, writes `DRI` verbatim, and produces a
+stream every conforming decoder rejects — including our own C shim's oracle
+path.
+
+**Acceptance criteria.**
+
+1. Lossless encode rejects a restart interval that is not a multiple of
+   `MCUs_per_row`, with an error that names both values, matching upstream's
+   `JERR_BAD_RESTART` wording closely enough to be recognisable.
+2. `restart_rows(n)` continues to work: it already resolves to a whole number
+   of MCU rows, which is the spelling `cjpeg -restart N` maps to.
+3. A regression test encodes lossless with a deliberately misaligned block
+   count, asserts the error, and — for an aligned interval — asserts `djpeg`
+   decodes the result back to the exact input.
+4. Check whether the same rule applies to our **decoder**: confirm we reject a
+   lossless stream carrying a misaligned `DRI` as `jddiffct.c:108` does, rather
+   than decoding it into something C would refuse.
+
+**Why deferred.** P4-116 is test integrity; this is an encoder validation gap
+it uncovered. The affected call is a misuse that upstream diagnoses, not a
+silent data corruption, so it does not block the test work.

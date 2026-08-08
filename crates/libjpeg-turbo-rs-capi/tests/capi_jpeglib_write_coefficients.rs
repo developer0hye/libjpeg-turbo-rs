@@ -689,13 +689,15 @@ fn write_coefficients_preserves_source_adobe_app14() {
         .join("..")
         .join("..")
         .join("tests/fixtures/cmyk_scanner/scanner_64x64.jpg");
-    let jpeg_in: Vec<u8> = match std::fs::read(&fixture_path) {
-        Ok(b) => b,
-        Err(_) => {
-            eprintln!("SKIP: missing fixture {}", fixture_path.display());
-            return;
-        }
-    };
+    // P4-116: this fixture is committed to the repository, so a read failure is
+    // never an environment problem — it means the file was moved or deleted and
+    // this test stopped covering anything. A bare `return` made that invisible.
+    let jpeg_in: Vec<u8> = std::fs::read(&fixture_path).unwrap_or_else(|e| {
+        panic!(
+            "required in-repo fixture {} could not be read: {e}",
+            fixture_path.display()
+        )
+    });
 
     let src_app14_pos: usize = jpeg_in
         .windows(9)

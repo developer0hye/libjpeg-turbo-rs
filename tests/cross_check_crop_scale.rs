@@ -207,13 +207,14 @@ fn cross_check_crop_444(
         .output()
         .expect("failed to run djpeg");
 
-    if !output.status.success() {
-        eprintln!(
-            "SKIP: djpeg -crop {crop_arg} failed: {}",
-            String::from_utf8_lossy(&output.stderr).trim()
-        );
-        return;
-    }
+    // P4-116: djpeg was already discovered and the crop request is one this
+    // matrix asserts is supported, so an oracle failure is a defect in the
+    // input we produced — not a reason to report success.
+    assert!(
+        output.status.success(),
+        "[{label}] djpeg -crop {crop_arg} failed: {}",
+        String::from_utf8_lossy(&output.stderr).trim()
+    );
 
     let (c_w, c_h, c_rgb) = parse_ppm(tmp_ppm.path());
     assert_eq!(
@@ -230,30 +231,28 @@ fn cross_check_crop_444(
         for row in 0..rust_img.height {
             let src_start: usize = row * c_w * 3 + crop_x * 3;
             let src_end: usize = src_start + rust_img.width * 3;
-            if src_end <= c_rgb.len() {
-                extracted.extend_from_slice(&c_rgb[src_start..src_end]);
-            } else {
-                eprintln!("SKIP: [{label}] C output too short at row {row}");
-                return;
-            }
+            assert!(
+                src_end <= c_rgb.len(),
+                "[{label}] C output too short at row {row}: need {src_end} bytes, \
+                 djpeg produced {}",
+                c_rgb.len()
+            );
+            extracted.extend_from_slice(&c_rgb[src_start..src_end]);
         }
         extracted
     } else {
-        eprintln!(
-            "SKIP: [{label}] unexpected C width {c_w} < Rust {}",
+        panic!(
+            "[{label}] C produced a narrower image than Rust: c_w={c_w} < rust_w={}",
             rust_img.width
         );
-        return;
     };
 
-    if rust_img.data.len() != c_crop_pixels.len() {
-        eprintln!(
-            "SKIP: [{label}] length mismatch: Rust={} C={}",
-            rust_img.data.len(),
-            c_crop_pixels.len()
-        );
-        return;
-    }
+    assert_eq!(
+        rust_img.data.len(),
+        c_crop_pixels.len(),
+        "[{label}] cropped-pixel length mismatch — a size disagreement is the \
+         defect, not a reason to skip the comparison"
+    );
 
     let max_diff: u8 = pixel_max_diff(&rust_img.data, &c_crop_pixels);
     assert_eq!(
@@ -271,6 +270,11 @@ fn c_xval_crop_aligned_444() {
     let djpeg: PathBuf = require_c_tool!("djpeg");
     let jpeg: Vec<u8> = make_test_jpeg(128, 128, Subsampling::S444);
     if !djpeg_supports_crop(&djpeg, &jpeg) {
+        // P4-116: CI provisions libjpeg-turbo 3.x, which has -crop.
+        assert!(
+            !helpers::is_ci(),
+            "CI must provide a djpeg supporting -crop"
+        );
         eprintln!("SKIP: djpeg does not support -crop");
         return;
     }
@@ -284,6 +288,11 @@ fn c_xval_crop_unaligned_444() {
     let djpeg: PathBuf = require_c_tool!("djpeg");
     let jpeg: Vec<u8> = make_test_jpeg(128, 128, Subsampling::S444);
     if !djpeg_supports_crop(&djpeg, &jpeg) {
+        // P4-116: CI provisions libjpeg-turbo 3.x, which has -crop.
+        assert!(
+            !helpers::is_ci(),
+            "CI must provide a djpeg supporting -crop"
+        );
         eprintln!("SKIP: djpeg does not support -crop");
         return;
     }
@@ -297,6 +306,11 @@ fn c_xval_crop_corner_regions() {
     let djpeg: PathBuf = require_c_tool!("djpeg");
     let jpeg: Vec<u8> = make_test_jpeg(128, 128, Subsampling::S444);
     if !djpeg_supports_crop(&djpeg, &jpeg) {
+        // P4-116: CI provisions libjpeg-turbo 3.x, which has -crop.
+        assert!(
+            !helpers::is_ci(),
+            "CI must provide a djpeg supporting -crop"
+        );
         eprintln!("SKIP: djpeg does not support -crop");
         return;
     }
@@ -368,10 +382,11 @@ fn c_xval_crop_scale_half_420() {
         .output()
         .expect("failed to run djpeg");
 
-    if !output.status.success() {
-        eprintln!("SKIP: djpeg -scale 1/2 failed");
-        return;
-    }
+    assert!(
+        output.status.success(),
+        "djpeg -scale 1/2 failed: {}",
+        String::from_utf8_lossy(&output.stderr).trim()
+    );
 
     let (c_w, c_h, c_rgb) = parse_ppm(tmp_ppm.path());
     assert_eq!(rust_img.width, c_w, "scaled width mismatch");
@@ -406,10 +421,11 @@ fn c_xval_crop_scale_half_444() {
         .output()
         .expect("failed to run djpeg");
 
-    if !output.status.success() {
-        eprintln!("SKIP: djpeg -scale 1/2 failed");
-        return;
-    }
+    assert!(
+        output.status.success(),
+        "djpeg -scale 1/2 failed: {}",
+        String::from_utf8_lossy(&output.stderr).trim()
+    );
 
     let (c_w, c_h, c_rgb) = parse_ppm(tmp_ppm.path());
     assert_eq!(rust_img.width, c_w, "scaled width mismatch");
@@ -430,15 +446,23 @@ fn c_xval_crop_scale_half_444() {
 fn c_xval_crop_scale_matrix() {
     let djpeg: PathBuf = require_c_tool!("djpeg");
 
+    // Exact accounting for the whole matrix: 4 crops + 2 subsamplings x 3
+    // dimensions + 3 subsamplings x 2 scale factors. P4-116: the crop leg used
+    // to disappear wholesale when djpeg lacked -crop, and the closing
+    // "all combinations passed" line was printed either way.
+    const PLANNED: usize = 4 + (2 * 3) + (3 * 2);
+    let mut tally: helpers::ComparisonTally =
+        helpers::ComparisonTally::new("c_xval_crop_scale_matrix", PLANNED);
+
     // S444 crops via djpeg -crop
     let jpeg_444: Vec<u8> = make_test_jpeg(128, 128, Subsampling::S444);
+    let crops: &[(usize, usize, usize, usize, &str)] = &[
+        (32, 32, 0, 0, "32x32+0+0"),
+        (48, 48, 0, 0, "48x48+0+0"),
+        (24, 24, 40, 40, "24x24+40+40"),
+        (64, 32, 32, 48, "64x32+32+48"),
+    ];
     if djpeg_supports_crop(&djpeg, &jpeg_444) {
-        let crops: &[(usize, usize, usize, usize, &str)] = &[
-            (32, 32, 0, 0, "32x32+0+0"),
-            (48, 48, 0, 0, "48x48+0+0"),
-            (24, 24, 40, 40, "24x24+40+40"),
-            (64, 32, 32, 48, "64x32+32+48"),
-        ];
         for &(cw, ch, cx, cy, name) in crops {
             cross_check_crop_444(
                 &djpeg,
@@ -449,6 +473,15 @@ fn c_xval_crop_scale_matrix() {
                 cy,
                 &format!("matrix_444_{name}"),
             );
+            tally.compared();
+        }
+    } else {
+        assert!(
+            !helpers::is_ci(),
+            "CI must provide a djpeg supporting -crop"
+        );
+        for &(_, _, _, _, name) in crops {
+            tally.excluded(format!("djpeg has no -crop, dropping {name}"));
         }
     }
 
@@ -457,6 +490,7 @@ fn c_xval_crop_scale_matrix() {
         for &(w, h) in &[(128, 128), (64, 48), (100, 75)] {
             let jpeg: Vec<u8> = make_test_jpeg(w, h, ss);
             verify_full_decode_matches_c(&djpeg, &jpeg, &format!("matrix_{ss_name}_{w}x{h}"));
+            tally.compared();
         }
     }
 
@@ -487,10 +521,11 @@ fn c_xval_crop_scale_matrix() {
                 .output()
                 .expect("failed to run djpeg");
 
-            if !output.status.success() {
-                eprintln!("SKIP: djpeg -scale {scale_arg} for {ss_name}");
-                continue;
-            }
+            assert!(
+                output.status.success(),
+                "[{ss_name} {scale_name}] djpeg -scale {scale_arg} failed: {}",
+                String::from_utf8_lossy(&output.stderr).trim()
+            );
 
             let (c_w, c_h, c_rgb) = parse_ppm(tmp_ppm.path());
             assert_eq!(rust_img.width, c_w, "[{ss_name} {scale_name}] width");
@@ -501,8 +536,9 @@ fn c_xval_crop_scale_matrix() {
                 max_diff, 0,
                 "[{ss_name} scale {scale_name}] Rust vs C: max_diff={max_diff} (must be 0)"
             );
+            tally.compared();
         }
     }
 
-    eprintln!("crop+scale matrix: all combinations passed");
+    tally.finish();
 }

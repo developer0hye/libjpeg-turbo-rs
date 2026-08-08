@@ -194,10 +194,10 @@ fn run_crop_scenario(
     nosmooth: bool,
     samp_name: &str,
     scenario_label: &str,
-) -> bool {
+) -> Option<&'static str> {
     // Guard: crop must have valid size
     if crop_w == 0 || crop_h == 0 {
-        return false;
+        return Some("crop spec has zero width or height");
     }
 
     // Rust side — use Decoder directly to support nosmooth flag.
@@ -231,10 +231,16 @@ fn run_crop_scenario(
         .decode_image()
         .unwrap_or_else(|e| panic!("[{scenario_label}] Rust decode_image failed: {e}"));
 
-    if rust_img.width == 0 || rust_img.height == 0 {
-        // Crop was clamped to zero — nothing to compare
-        return false;
-    }
+    // P4-116: this used to be an exclusion, but it is decided *after* the Rust
+    // decode and *before* djpeg runs, so a crop regression that clamped Rust to
+    // empty where C yields pixels would be recorded as "deliberately out of
+    // scope". Exclusions may only rest on facts derivable from the matrix
+    // definition — `crop_w == 0 || crop_h == 0` above qualifies, this does not.
+    assert!(
+        rust_img.width > 0 && rust_img.height > 0,
+        "[{scenario_label}] Rust clamped crop {crop_w}x{crop_h}+{crop_x}+{crop_y} to an \
+         empty region; C was never consulted, so this cannot be assumed benign"
+    );
 
     // C djpeg side
     let jpeg_tmp: helpers::TempFile =
@@ -263,14 +269,15 @@ fn run_crop_scenario(
         .output()
         .unwrap_or_else(|e| panic!("[{scenario_label}] failed to spawn djpeg: {e}"));
 
-    if !output.status.success() {
-        // djpeg may refuse certain crop specs (e.g. out-of-image) — skip gracefully
-        eprintln!(
-            "SKIP: [{scenario_label}] djpeg -crop {crop_arg} failed: {}",
-            String::from_utf8_lossy(&output.stderr).trim()
-        );
-        return false;
-    }
+    // P4-116: an oracle that refuses a crop spec this matrix claims to support
+    // is a defect in the spec we generated, and returning `false` here made the
+    // whole case vanish from the count. Callers now record every case, so an
+    // out-of-image crop must be excluded from the plan up front, not here.
+    assert!(
+        output.status.success(),
+        "[{scenario_label}] djpeg -crop {crop_arg} failed: {}",
+        String::from_utf8_lossy(&output.stderr).trim()
+    );
 
     let ppm_data: Vec<u8> = std::fs::read(ppm_tmp.path())
         .unwrap_or_else(|e| panic!("[{scenario_label}] failed to read djpeg PPM: {e}"));
@@ -291,13 +298,11 @@ fn run_crop_scenario(
     let effective_w: usize = rust_img.width;
     let effective_h: usize = rust_img.height;
 
-    if c_h != effective_h {
-        eprintln!(
-            "SKIP: [{scenario_label}] height mismatch Rust={} C={c_h}",
-            effective_h
-        );
-        return false;
-    }
+    assert_eq!(
+        c_h, effective_h,
+        "[{scenario_label}] cropped height mismatch — Rust and C disagreeing on \
+         geometry is the defect, not a reason to skip"
+    );
 
     let rust_pixels: &[u8] = &rust_img.data;
     let bpp: usize = rust_img.pixel_format.bytes_per_pixel();
@@ -311,10 +316,12 @@ fn run_crop_scenario(
         for row in 0..effective_h {
             let src_start: usize = row * c_w * channels + crop_x * channels;
             let src_end: usize = src_start + effective_w * channels;
-            if src_end > c_pixels.len() {
-                eprintln!("SKIP: [{scenario_label}] C buffer too short at row {row}");
-                return false;
-            }
+            assert!(
+                src_end <= c_pixels.len(),
+                "[{scenario_label}] C buffer too short at row {row}: need {src_end}, \
+                 djpeg produced {}",
+                c_pixels.len()
+            );
             extracted.extend_from_slice(&c_pixels[src_start..src_end]);
         }
         extracted
@@ -325,29 +332,28 @@ fn run_crop_scenario(
         for row in 0..effective_h {
             for x in 0..effective_w {
                 let src_idx: usize = (row * c_w + crop_x + x) * 3;
-                if src_idx >= c_pixels.len() {
-                    eprintln!("SKIP: [{scenario_label}] C buffer too short at row {row} x {x} (idx={src_idx}, len={})", c_pixels.len());
-                    return false;
-                }
+                assert!(
+                    src_idx < c_pixels.len(),
+                    "[{scenario_label}] C buffer too short at row {row} x {x} \
+                     (idx={src_idx}, len={})",
+                    c_pixels.len()
+                );
                 extracted.push(c_pixels[src_idx]);
             }
         }
         extracted
     } else {
-        eprintln!(
-            "SKIP: [{scenario_label}] channel/width mismatch c_w={c_w} eff_w={effective_w} c_ch={channels} bpp={bpp}"
+        panic!(
+            "[{scenario_label}] channel/width mismatch c_w={c_w} eff_w={effective_w} \
+             c_ch={channels} bpp={bpp}"
         );
-        return false;
     };
 
-    if rust_pixels.len() != c_extracted.len() {
-        eprintln!(
-            "SKIP: [{scenario_label}] data length mismatch Rust={} C={}",
-            rust_pixels.len(),
-            c_extracted.len()
-        );
-        return false;
-    }
+    assert_eq!(
+        rust_pixels.len(),
+        c_extracted.len(),
+        "[{scenario_label}] cropped data length mismatch"
+    );
 
     let max_diff: u8 = helpers::pixel_max_diff(rust_pixels, &c_extracted);
     assert_eq!(
@@ -356,7 +362,7 @@ fn run_crop_scenario(
         "[{scenario_label}] samp={samp_name} crop={crop_w}x{crop_h}+{crop_x}+{crop_y} nosmooth={nosmooth}: Rust vs C djpeg max_diff={max_diff} (must be 0)"
     );
 
-    true
+    None
 }
 
 // ===========================================================================
@@ -393,6 +399,11 @@ fn c_croptest_quick() {
             .output()
             .expect("failed to spawn djpeg probe");
         if !probe_result.status.success() {
+            // P4-116: CI provisions libjpeg-turbo 3.x, which has -crop.
+            assert!(
+                !helpers::is_ci(),
+                "CI must provide a djpeg supporting -crop"
+            );
             eprintln!("SKIP: djpeg does not support -crop flag");
             return;
         }
@@ -407,9 +418,10 @@ fn c_croptest_quick() {
     let h_values: &[usize] = &[8, 16];
     let samp_indices: &[usize] = &[4]; // 444 only
 
-    let mut compared: usize = 0;
-    let mut skipped: usize = 0;
-
+    let mut tally: helpers::ComparisonTally = helpers::ComparisonTally::new(
+        "c_croptest_quick",
+        y_values.len() * h_values.len() * samp_indices.len(),
+    );
     for &y_iter in y_values {
         for &h_iter in h_values {
             let (crop_w, crop_h, crop_x, crop_y) = compute_crop_spec(y_iter, h_iter);
@@ -425,25 +437,19 @@ fn c_croptest_quick() {
 
                 let label: String = format!("quick_y{y_iter}_h{h_iter}_{}", samp.name);
 
-                let ok: bool = run_crop_scenario(
+                match run_crop_scenario(
                     &djpeg, &jpeg_data, crop_w, crop_h, crop_x, crop_y,
                     false, // nosmooth=false for quick test
                     samp.name, &label,
-                );
-                if ok {
-                    compared += 1;
-                } else {
-                    skipped += 1;
+                ) {
+                    None => tally.compared(),
+                    Some(reason) => tally.excluded(reason),
                 }
             }
         }
     }
 
-    eprintln!("c_croptest_quick: {compared} scenarios compared, {skipped} skipped");
-    assert!(
-        compared > 0,
-        "c_croptest_quick: no scenarios were successfully compared"
-    );
+    tally.finish();
 }
 
 /// Quick crop test for S420 and GRAY — known divergences.
@@ -461,6 +467,10 @@ fn c_croptest_quick_420() {
     let h_values: &[usize] = &[8, 16];
     let samp_indices: &[usize] = &[1]; // 420 only
 
+    let mut tally: helpers::ComparisonTally = helpers::ComparisonTally::new(
+        "c_croptest_quick_420",
+        y_values.len() * h_values.len() * samp_indices.len(),
+    );
     for &y_iter in y_values {
         for &h_iter in h_values {
             let (crop_w, crop_h, crop_x, crop_y) = compute_crop_spec(y_iter, h_iter);
@@ -471,12 +481,16 @@ fn c_croptest_quick_420() {
                     None => make_test_jpeg_rust(&pixels, samp),
                 };
                 let label: String = format!("quick420gray_y{y_iter}_h{h_iter}_{}", samp.name);
-                run_crop_scenario(
+                match run_crop_scenario(
                     &djpeg, &jpeg_data, crop_w, crop_h, crop_x, crop_y, false, samp.name, &label,
-                );
+                ) {
+                    None => tally.compared(),
+                    Some(reason) => tally.excluded(reason),
+                }
             }
         }
     }
+    tally.finish();
 }
 
 /// Quick crop test for GRAY subsampling — channel mismatch fixed.
@@ -491,7 +505,8 @@ fn c_croptest_quick_gray() {
     let y_values: &[usize] = &[0, 8, 16];
     let h_values: &[usize] = &[8, 16];
 
-    let mut compared: usize = 0;
+    let mut tally: helpers::ComparisonTally =
+        helpers::ComparisonTally::new("c_croptest_quick_gray", y_values.len() * h_values.len());
     for &y_iter in y_values {
         for &h_iter in h_values {
             let (crop_w, crop_h, crop_x, crop_y) = compute_crop_spec(y_iter, h_iter);
@@ -501,14 +516,15 @@ fn c_croptest_quick_gray() {
                 None => make_test_jpeg_rust(&pixels, samp),
             };
             let label: String = format!("quick_gray_y{y_iter}_h{h_iter}");
-            if run_crop_scenario(
+            match run_crop_scenario(
                 &djpeg, &jpeg_data, crop_w, crop_h, crop_x, crop_y, false, samp.name, &label,
             ) {
-                compared += 1;
+                None => tally.compared(),
+                Some(reason) => tally.excluded(reason),
             }
         }
     }
-    assert!(compared > 0, "c_croptest_quick_gray: no scenarios compared");
+    tally.finish();
 }
 
 // ===========================================================================
@@ -550,6 +566,11 @@ fn c_croptest_full() {
             .output()
             .expect("failed to spawn djpeg probe");
         if !probe_result.status.success() {
+            // P4-116: CI provisions libjpeg-turbo 3.x, which has -crop.
+            assert!(
+                !helpers::is_ci(),
+                "CI must provide a djpeg supporting -crop"
+            );
             eprintln!("SKIP: djpeg does not support -crop flag");
             return;
         }
@@ -559,17 +580,25 @@ fn c_croptest_full() {
     let prog_flags: &[bool] = &[false, true];
     let nosmooth_flags: &[bool] = &[false, true];
 
-    let mut compared: usize = 0;
-    let mut skipped: usize = 0;
+    // Exact accounting (P4-116). The plan is the full product of the C
+    // script's axes; the colour-quantization half is excluded *by count*, so
+    // the summary states exactly how many cases that missing feature costs
+    // rather than letting them disappear.
+    let cases_per_colors_value: usize = 17 * 16 * SAMP_CONFIGS.len();
+    let planned: usize = prog_flags.len() * nosmooth_flags.len() * 2 * cases_per_colors_value;
+    let mut tally: helpers::ComparisonTally =
+        helpers::ComparisonTally::new("c_croptest_full", planned);
 
     for &prog in prog_flags {
         for &nosmooth in nosmooth_flags {
             // colors loop: "" and "-colors 256 -dither none -onepass"
-            // We only run the "" iteration; skip the colors one.
+            // We only run the "" iteration; the colors one is unimplemented.
             for colors_active in [false, true] {
                 if colors_active {
-                    eprintln!(
-                        "SKIP: color quantization (-colors 256 -dither none -onepass) not implemented in Rust"
+                    tally.excluded_n(
+                        cases_per_colors_value,
+                        "color quantization (-colors 256 -dither none -onepass) \
+                         is not implemented in Rust",
                     );
                     continue;
                 }
@@ -590,14 +619,12 @@ fn c_croptest_full() {
                                 prog as u8, nosmooth as u8, samp.name
                             );
 
-                            let ok: bool = run_crop_scenario(
+                            match run_crop_scenario(
                                 &djpeg, &jpeg_data, crop_w, crop_h, crop_x, crop_y, nosmooth,
                                 samp.name, &label,
-                            );
-                            if ok {
-                                compared += 1;
-                            } else {
-                                skipped += 1;
+                            ) {
+                                None => tally.compared(),
+                                Some(reason) => tally.excluded(reason),
                             }
                         }
                     }
@@ -606,9 +633,5 @@ fn c_croptest_full() {
         }
     }
 
-    eprintln!("c_croptest_full: {compared} scenarios compared, {skipped} skipped");
-    assert!(
-        compared > 0,
-        "c_croptest_full: no scenarios were successfully compared"
-    );
+    tally.finish();
 }

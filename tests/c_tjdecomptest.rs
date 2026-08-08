@@ -150,8 +150,10 @@ fn generate_test_jpeg(cjpeg: &Path, entry: &SubsampEntry, out_path: &Path) {
 }
 
 /// Decode a JPEG with our Rust Decoder and write the RGB output as PPM.
-/// Returns false and prints SKIP if the decode fails (non-Rust-internal skip only for
-/// unsupported scale/crop combos detected before calling this function).
+///
+/// Panics on any decode failure: by the time this is called the combination has
+/// already been filtered to one the decoder is expected to handle, so a failure
+/// is a real defect, not an unsupported case.
 fn rust_decode_rgb(
     jpeg_path: &Path,
     scale_arg: &str,
@@ -159,7 +161,7 @@ fn rust_decode_rgb(
     nosmooth: bool,
     dct_fast: bool,
     out_ppm: &Path,
-) -> bool {
+) {
     let jpeg_data: Vec<u8> = std::fs::read(jpeg_path)
         .unwrap_or_else(|e| panic!("Failed to read {:?}: {:?}", jpeg_path, e));
 
@@ -184,19 +186,16 @@ fn rust_decode_rgb(
         dec.set_dct_method(DctMethod::IsFast);
     }
 
-    let img = match dec.decode_image() {
-        Ok(i) => i,
-        Err(e) => {
-            eprintln!(
-                "SKIP: Rust decode failed (scale={:?} crop={:?}): {:?}",
-                scale_arg, crop_arg, e
-            );
-            return false;
-        }
-    };
+    // A Rust decode failure is the defect this matrix exists to find. Reporting
+    // it as a skip is what let the suite go green while comparing nothing.
+    let img = dec.decode_image().unwrap_or_else(|e| {
+        panic!(
+            "Rust RGB decode failed for {jpeg_path:?} (scale={scale_arg:?} crop={crop_arg:?} \
+             nosmooth={nosmooth} dct_fast={dct_fast}): {e:?}"
+        )
+    });
 
     helpers::write_ppm_file(out_ppm, img.width, img.height, &img.data);
-    true
 }
 
 /// Decode a JPEG with our Rust Decoder to grayscale and write output as PGM.
@@ -207,7 +206,7 @@ fn rust_decode_gray(
     nosmooth: bool,
     dct_fast: bool,
     out_pgm: &Path,
-) -> bool {
+) {
     let jpeg_data: Vec<u8> = std::fs::read(jpeg_path)
         .unwrap_or_else(|e| panic!("Failed to read {:?}: {:?}", jpeg_path, e));
 
@@ -235,19 +234,14 @@ fn rust_decode_gray(
         dec.set_dct_method(DctMethod::IsFast);
     }
 
-    let img = match dec.decode_image() {
-        Ok(i) => i,
-        Err(e) => {
-            eprintln!(
-                "SKIP: Rust gray decode failed (scale={:?} crop={:?}): {:?}",
-                scale_arg, crop_arg, e
-            );
-            return false;
-        }
-    };
+    let img = dec.decode_image().unwrap_or_else(|e| {
+        panic!(
+            "Rust grayscale decode failed for {jpeg_path:?} (scale={scale_arg:?} \
+             crop={crop_arg:?} nosmooth={nosmooth} dct_fast={dct_fast}): {e:?}"
+        )
+    });
 
     helpers::write_pgm_file(out_pgm, img.width, img.height, &img.data);
-    true
 }
 
 /// Build the djpeg args for a given combo.
@@ -325,43 +319,51 @@ fn run_combo(
     let rust_ppm: helpers::TempFile = helpers::TempFile::new(&format!("{}_rust.ppm", label));
     let c_ppm: helpers::TempFile = helpers::TempFile::new(&format!("{}_c.ppm", label));
 
-    if rust_decode_rgb(
+    rust_decode_rgb(
         jpeg_path,
         scale_arg,
         crop_arg,
         nosmooth,
         dct_fast,
         rust_ppm.path(),
-    ) {
-        helpers::run_c_djpeg(djpeg, &rgb_djpeg_refs, jpeg_path, c_ppm.path());
-        helpers::assert_files_identical(rust_ppm.path(), c_ppm.path(), &format!("{} RGB", label));
-        count += 1;
-    }
+    );
+    helpers::run_c_djpeg(djpeg, &rgb_djpeg_refs, jpeg_path, c_ppm.path());
+    helpers::assert_files_identical(rust_ppm.path(), c_ppm.path(), &format!("{} RGB", label));
+    count += 1;
 
     // --- Grayscale comparison (only when nosmooth=false) ---
     if !nosmooth {
         let rust_pgm: helpers::TempFile = helpers::TempFile::new(&format!("{}_rust.pgm", label));
         let c_pgm: helpers::TempFile = helpers::TempFile::new(&format!("{}_c.pgm", label));
 
-        if rust_decode_gray(
+        rust_decode_gray(
             jpeg_path,
             scale_arg,
             crop_arg,
             nosmooth,
             dct_fast,
             rust_pgm.path(),
-        ) {
-            helpers::run_c_djpeg(djpeg, &gray_djpeg_refs, jpeg_path, c_pgm.path());
-            helpers::assert_files_identical(
-                rust_pgm.path(),
-                c_pgm.path(),
-                &format!("{} GRAY", label),
-            );
-            count += 1;
-        }
+        );
+        helpers::run_c_djpeg(djpeg, &gray_djpeg_refs, jpeg_path, c_pgm.path());
+        helpers::assert_files_identical(rust_pgm.path(), c_pgm.path(), &format!("{} GRAY", label));
+        count += 1;
     }
 
+    // Two comparisons per combo except when nosmooth suppresses the grayscale
+    // leg. The caller's plan is built from the same rule, so a drift between
+    // them fails the tally rather than shrinking coverage silently.
+    debug_assert_eq!(count, comparisons_per_combo(nosmooth));
     count
+}
+
+/// Comparisons one combo contributes. Single source of truth for both
+/// `run_combo`'s work and the matrix plan.
+fn comparisons_per_combo(nosmooth: bool) -> usize {
+    if nosmooth {
+        1
+    } else {
+        2
+    }
 }
 
 // ===========================================================================
@@ -374,37 +376,71 @@ fn run_combo(
 /// `include_crop`:   whether to test crop combos.
 /// `include_nosmooth`: whether to test nosmooth.
 /// `include_dct_fast`: whether to test dct fast.
-fn run_decode_matrix(
-    djpeg: &Path,
-    cjpeg: &Path,
-    subsamp_entries: &[&SubsampEntry],
-    scale_filter: &[&str],
+/// One fully-resolved case in the decode matrix.
+#[derive(Clone, Copy)]
+struct DecodeCombo {
+    entry: &'static SubsampEntry,
+    scale_arg: &'static str,
+    crop_arg: &'static str,
+    nosmooth: bool,
+    dct_fast: bool,
+}
+
+/// Enumerate every case the matrix intends to run.
+///
+/// P4-116: the plan and the run must come from one traversal. When
+/// `run_decode_matrix` computed its own plan by re-deriving these nested
+/// conditions, any drift between the two silently shrank coverage; now the
+/// tally's plan is `plan_decode_matrix(...)` and the loop consumes the very
+/// same vector.
+fn plan_decode_matrix(
+    subsamp_entries: &[&'static SubsampEntry],
+    scale_filter: &[&'static str],
     include_crop: bool,
     include_nosmooth: bool,
     include_dct_fast: bool,
-    label_prefix: &str,
-) {
+) -> (Vec<DecodeCombo>, Vec<&'static SubsampEntry>) {
+    let mut combos: Vec<DecodeCombo> = Vec::new();
+    let mut excluded: Vec<&'static SubsampEntry> = Vec::new();
+
     for entry in subsamp_entries {
         if !entry.rust_supported {
-            eprintln!("SKIP: subsampling {} has no Rust equivalent", entry.label);
+            excluded.push(entry);
             continue;
         }
+        combos.extend(combos_for_entry(
+            entry,
+            scale_filter,
+            include_crop,
+            include_nosmooth,
+            include_dct_fast,
+        ));
+    }
 
-        // Generate test JPEG for this subsampling mode.
-        let jpeg_tmp: helpers::TempFile =
-            helpers::TempFile::new(&format!("tjdecomp_{}.jpg", entry.label));
-        generate_test_jpeg(cjpeg, entry, jpeg_tmp.path());
+    (combos, excluded)
+}
 
-        // Build crop list.
-        let crops: Vec<&str> = if include_crop {
+/// Every case one subsampling entry contributes, ignoring `rust_supported`.
+///
+/// Split out so the plan can price an *excluded* entry at the comparisons it
+/// would have run rather than at one — otherwise "planned" mixes two units.
+fn combos_for_entry(
+    entry: &'static SubsampEntry,
+    scale_filter: &[&'static str],
+    include_crop: bool,
+    include_nosmooth: bool,
+    include_dct_fast: bool,
+) -> Vec<DecodeCombo> {
+    let mut combos: Vec<DecodeCombo> = Vec::new();
+    {
+        let crops: Vec<&'static str> = if include_crop {
             CROP_ARGS.to_vec()
         } else {
             vec![""]
         };
 
         for &crop_arg in &crops {
-            // C script: skip crop for S32; already filtered above via rust_supported.
-            // Also skip crop for this entry if label is "32".
+            // C script: crop is not exercised for the 3x2 entry.
             if !crop_arg.is_empty() && entry.label == "32" {
                 continue;
             }
@@ -415,7 +451,6 @@ fn run_decode_matrix(
                     continue;
                 }
 
-                // nosmooth variants
                 let nosmooth_values: &[bool] = if include_nosmooth && entry.nosmooth_supported {
                     &[false, true]
                 } else {
@@ -423,11 +458,8 @@ fn run_decode_matrix(
                 };
 
                 for &nosmooth in nosmooth_values {
-                    // dct_fast variants
-                    // C script rule: dct fast is tested only when scale=4/8 and subsamp in
-                    // {420, 32}, OR when scale is empty (no scale).
-                    // Simplified: we test dct_fast only when include_dct_fast=true and
-                    // the scale is 4/8 with subsamp 420, or scale is empty.
+                    // C script rule: dct fast is tested only when scale=4/8 and
+                    // subsamp in {420, 32}, or when no scale is requested.
                     let dct_fast_values: &[bool] = if include_dct_fast
                         && ((scale_arg == "4/8" && (entry.label == "420" || entry.label == "32"))
                             || scale_arg.is_empty())
@@ -438,21 +470,118 @@ fn run_decode_matrix(
                     };
 
                     for &dct_fast in dct_fast_values {
-                        run_combo(
-                            djpeg,
-                            jpeg_tmp.path(),
+                        combos.push(DecodeCombo {
                             entry,
                             scale_arg,
                             crop_arg,
                             nosmooth,
                             dct_fast,
-                            label_prefix,
-                        );
+                        });
                     }
                 }
             }
         }
     }
+
+    combos
+}
+
+/// Iterate the C script's decode loop for the given subsamp entries and param ranges.
+/// `subsamp_filter`: which entries to include by label.
+/// `scale_filter`:   which scale_arg strings to include.
+/// `include_crop`:   whether to test crop combos.
+/// `include_nosmooth`: whether to test nosmooth.
+/// `include_dct_fast`: whether to test dct fast.
+///
+/// Every planned comparison must complete: the returned `ComparisonTally`
+/// refuses to finish otherwise, so this can no longer report success after
+/// comparing nothing.
+fn run_decode_matrix(
+    djpeg: &Path,
+    cjpeg: &Path,
+    subsamp_entries: &[&'static SubsampEntry],
+    scale_filter: &[&'static str],
+    include_crop: bool,
+    include_nosmooth: bool,
+    include_dct_fast: bool,
+    label_prefix: &str,
+) {
+    let (combos, excluded_entries) = plan_decode_matrix(
+        subsamp_entries,
+        scale_filter,
+        include_crop,
+        include_nosmooth,
+        include_dct_fast,
+    );
+    // An excluded subsampling costs the comparisons it *would* have run, not
+    // one: counting it as one understates the matrix and makes "planned" a
+    // number in two different units.
+    let comparisons = |cs: &[DecodeCombo]| -> usize {
+        cs.iter()
+            .map(|c| comparisons_per_combo(c.nosmooth))
+            .sum::<usize>()
+    };
+    let excluded_per_entry: Vec<(&'static SubsampEntry, usize)> = excluded_entries
+        .iter()
+        .map(|entry| {
+            let cs: Vec<DecodeCombo> = combos_for_entry(
+                entry,
+                scale_filter,
+                include_crop,
+                include_nosmooth,
+                include_dct_fast,
+            );
+            (*entry, comparisons(&cs))
+        })
+        .collect();
+    let planned: usize =
+        comparisons(&combos) + excluded_per_entry.iter().map(|(_, n)| *n).sum::<usize>();
+    let mut tally: helpers::ComparisonTally =
+        helpers::ComparisonTally::new(format!("c_tjdecomptest[{label_prefix}]"), planned);
+    for (entry, n) in &excluded_per_entry {
+        tally.excluded_n(
+            *n,
+            format!("subsampling {} has no Rust equivalent", entry.label),
+        );
+    }
+
+    // One generated JPEG per subsampling, reused across that entry's combos —
+    // `plan_decode_matrix` iterates `subsamp_entries` outermost, so an entry's
+    // combos are contiguous. The key is `samp_opt`, not `label`, because that
+    // is what determines the JPEG's content: two entries sharing a label with
+    // different sampling would otherwise reuse the wrong file and collide on
+    // the temp path.
+    let mut current_samp: &str = "";
+    let mut jpeg_tmp: Option<helpers::TempFile> = None;
+    for combo in &combos {
+        if combo.entry.samp_opt != current_samp {
+            let tmp: helpers::TempFile = helpers::TempFile::new(&format!(
+                "tjdecomp_{}_{}.jpg",
+                combo.entry.label,
+                combo.entry.samp_opt.replace('x', "_")
+            ));
+            generate_test_jpeg(cjpeg, combo.entry, tmp.path());
+            current_samp = combo.entry.samp_opt;
+            jpeg_tmp = Some(tmp);
+        }
+        let jpeg_path: &Path = jpeg_tmp
+            .as_ref()
+            .expect("a JPEG is generated before the first combo")
+            .path();
+        let done: usize = run_combo(
+            djpeg,
+            jpeg_path,
+            combo.entry,
+            combo.scale_arg,
+            combo.crop_arg,
+            combo.nosmooth,
+            combo.dct_fast,
+            label_prefix,
+        );
+        tally.compared_n(done);
+    }
+
+    tally.finish();
 }
 
 // ===========================================================================
@@ -466,12 +595,7 @@ fn c_tjdecomptest_quick() {
     let djpeg: PathBuf = require_c_tool!("djpeg");
     let cjpeg: PathBuf = require_c_tool!("cjpeg");
 
-    // Verify that the reference image exists.
-    let img_dir: PathBuf = helpers::c_testimages_dir();
-    if !img_dir.join("testorig.ppm").exists() {
-        eprintln!("SKIP: testorig.ppm not found in {:?}", img_dir);
-        return;
-    }
+    let _testorig: PathBuf = require_c_testimage!("testorig.ppm");
 
     let quick_subsamps: Vec<&SubsampEntry> = SUBSAMP_TABLE
         .iter()
@@ -501,11 +625,7 @@ fn c_tjdecomptest_scaled_420_crop_chroma_offset_regression() {
     let djpeg: PathBuf = require_c_tool!("djpeg");
     let cjpeg: PathBuf = require_c_tool!("cjpeg");
 
-    let img_dir: PathBuf = helpers::c_testimages_dir();
-    if !img_dir.join("testorig.ppm").exists() {
-        eprintln!("SKIP: testorig.ppm not found in {:?}", img_dir);
-        return;
-    }
+    let _testorig: PathBuf = require_c_testimage!("testorig.ppm");
 
     let entry = SUBSAMP_TABLE
         .iter()
@@ -538,11 +658,7 @@ fn c_tjdecomptest_full() {
     let djpeg: PathBuf = require_c_tool!("djpeg");
     let cjpeg: PathBuf = require_c_tool!("cjpeg");
 
-    let img_dir: PathBuf = helpers::c_testimages_dir();
-    if !img_dir.join("testorig.ppm").exists() {
-        eprintln!("SKIP: testorig.ppm not found in {:?}", img_dir);
-        return;
-    }
+    let _testorig: PathBuf = require_c_testimage!("testorig.ppm");
 
     let all_subsamps: Vec<&SubsampEntry> = SUBSAMP_TABLE.iter().collect();
 

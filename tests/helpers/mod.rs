@@ -55,10 +55,13 @@ pub fn rdjpgcom_path() -> Option<PathBuf> {
 
 pub mod c_oracle;
 pub mod c_tools;
+pub mod tally;
 // Re-exports are unused in test binaries that include `mod helpers`
 // without touching them; that's expected for a shared test module.
 #[allow(unused_imports)]
 pub use c_tools::{is_ci, require_c_tool};
+#[allow(unused_imports)]
+pub use tally::ComparisonTally;
 
 /// Require a C libjpeg-turbo tool inside a `#[test]` function.
 ///
@@ -697,6 +700,78 @@ pub fn read_icc_profile(path: &Path) -> Vec<u8> {
 /// Path to the C libjpeg-turbo test images directory.
 pub fn c_testimages_dir() -> PathBuf {
     PathBuf::from("references/libjpeg-turbo/testimages")
+}
+
+/// Resolve a fixture inside the `references/libjpeg-turbo/testimages` submodule.
+///
+/// P4-116: a bare `return` on a missing fixture turns a required comparison
+/// into a silent pass. The two failure modes are not the same and must not be
+/// handled the same way:
+///
+/// * the submodule directory is absent — the checkout has no submodules, which
+///   is environmental, so `Err` (the macro turns that into a local skip and a
+///   CI failure);
+/// * the directory is present but the fixture is not — the submodule is
+///   initialised and this file is supposed to be in it, so that is a defect and
+///   this returns `Err` with a message the macro escalates to a panic
+///   regardless of CI.
+pub fn require_c_testimage(name: &str) -> Result<PathBuf, TestImageMissing> {
+    let dir: PathBuf = c_testimages_dir();
+    if !dir.is_dir() {
+        return Err(TestImageMissing::SubmoduleAbsent(dir));
+    }
+    let path: PathBuf = dir.join(name);
+    if !path.exists() {
+        return Err(TestImageMissing::FixtureAbsent(path));
+    }
+    Ok(path)
+}
+
+/// Why [`require_c_testimage`] could not produce a fixture.
+#[derive(Debug)]
+pub enum TestImageMissing {
+    /// `references/libjpeg-turbo` is not checked out. Environmental.
+    SubmoduleAbsent(PathBuf),
+    /// The submodule is present but does not contain the fixture. A defect.
+    FixtureAbsent(PathBuf),
+}
+
+/// Require a fixture from the libjpeg-turbo testimages submodule inside a
+/// `#[test]`. Expands to a `PathBuf`.
+///
+/// A missing *fixture* always panics: the submodule is right there, so the file
+/// disappearing means the test's inputs moved. A missing *submodule* panics in
+/// CI (where `submodules: recursive` guarantees it) and skips locally.
+#[macro_export]
+macro_rules! require_c_testimage {
+    ($name:expr) => {{
+        let __image_name: &str = $name;
+        match $crate::helpers::require_c_testimage(__image_name) {
+            Ok(path) => path,
+            Err($crate::helpers::TestImageMissing::FixtureAbsent(path)) => {
+                panic!(
+                    "required fixture {:?} is missing while its submodule is checked out — \
+                     this test's inputs moved, it is not an environment problem",
+                    path
+                );
+            }
+            Err($crate::helpers::TestImageMissing::SubmoduleAbsent(dir)) => {
+                if $crate::helpers::is_ci() {
+                    panic!(
+                        "CI requires the libjpeg-turbo submodule for fixture '{}', but {:?} \
+                         does not exist",
+                        __image_name, dir
+                    );
+                } else {
+                    eprintln!(
+                        "SKIP: {:?} not checked out; run `git submodule update --init`",
+                        dir
+                    );
+                    return;
+                }
+            }
+        }
+    }};
 }
 
 /// Build a raw PPM (P6) file from RGB pixel data.
