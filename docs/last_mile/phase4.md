@@ -58,7 +58,7 @@
 | P4-97 | OPEN (`jpeg_resync_to_restart` is an unconditional success no-op) |
 | P4-98 | OPEN (classic 12/16-bit decode bypasses lifecycle and public output options) |
 | P4-99 | OPEN (classic decode dispatcher ignores output options and colorspace metadata) |
-| P4-100 | OPEN (classic codec failures are reported as suspension or silent success) |
+| P4-100 | PARTIAL (classic codec failures are reported as suspension or silent success — translator + finish/start landed 2026-08-08) |
 | P4-101 | OPEN (classic header parse does not publish coding tables/scan state) |
 | P4-102 | OPEN (classic raw-data decode bypasses public options and state contracts) |
 | P4-103 | OPEN (`jpeg_crop_scanline` does not implement iMCU-aligned C semantics) |
@@ -1820,7 +1820,7 @@ odd-size/scaled per-component downsampled dimensions and minimum DCT sizes
 exactly; repair downstream writer assumptions instead of publishing non-C
 geometry.
 
-## P4-100. Classic Codec Failures Are Reported as Suspension or Silent Success — **OPEN**
+## P4-100. Classic Codec Failures Are Reported as Suspension or Silent Success — **PARTIAL: translator + finish/start entry points landed; batch continues**
 
 **Motivation.** Filed 2026-08-02 after P4-94 showed that a void
 `jpeg_finish_compress` can appear successful without emitting an image. The
@@ -1841,6 +1841,57 @@ accept a usable partial stream after encoder failure; and (4) use real setjmp C
 harnesses for malformed input, unsupported option/conversion, high-precision
 misconfiguration, and encoder failure, cross-validating callback, state, and
 output behavior against stock libjpeg-turbo.
+
+**Progress (2026-08-08) — shared translator and the two worst entry points.**
+
+`classic_error_for` is the single native→classic mapping, and
+`raise_native_error` / `raise_classic_error` are the only places that call
+`error_exit`, satisfying criterion (1)'s "exactly one". The mapping marks its
+own fidelity: marker, buffer, EOF, dimension-limit and I/O conditions map
+exactly; `CorruptData` is a documented closest fit, because upstream has no
+single code for it (it reports some corruption as warnings and continues).
+
+Criterion (2) — `FALSE` reserved for suspension — is applied to
+`jpeg_start_decompress`. Both a malformed stream and a missing source manager
+used to return `FALSE` with the reason in a private string no C consumer can
+read. In classic libjpeg `FALSE` means *source suspension*, so a caller doing
+the documented thing (refill, retry) would spin forever on a stream that can
+never decode.
+
+Criterion (3) — never reset to a success state — is applied to
+`jpeg_finish_compress`, which had all three failure modes at once: it discarded
+its helpers' boolean results, then set `CSTATE_START` unconditionally. It now
+rejects a finish that was never started (`JERR_BAD_STATE`), rejects a scanline
+encode short of `image_height` (`JERR_TOO_LITTLE_DATA`, matching
+jcapimin.c:184-188), reports helper failure, and leaves a failed handle in its
+failed state for `jpeg_abort_compress` / `jpeg_destroy_compress`.
+
+`CompressPrivate::error_reported` keeps the "exactly one `error_exit`"
+guarantee across the layers: the encode helpers raise destination-manager and
+suspension failures themselves, so finish must be able to tell "already
+reported" from "failed silently".
+
+`tests/capi_classic_error_codes.rs` asks the C compiler for every `JERR_*` the
+shim defines — value *and* message text — and fails if the shim adds one the
+table does not cover. That is worth its own test: `jerror.h`'s enum is
+positional, and two hand-written derivations of it disagreed by one during this
+work. 14 codes verified. It also removes the "wrong value silently mis-reports"
+half of **P4-120**, leaving only that item's reachability concern.
+
+The change immediately caught a silent failure:
+`write_coefficients_rejects_foreign_handle` asserted only "no crash", which a
+shim that quietly did nothing satisfied. Rejection is now *reported*, and the
+test asserts the `msg_code`.
+
+**Status (2026-08-08): partial.** Criteria (1)-(3) hold for
+`jpeg_start_decompress` and `jpeg_finish_compress`. Not yet done: the remaining
+private-string-only sites (54 of the original 59 `last_error` assignments still
+have no `error_exit` nearby), criterion (4)'s stock-versus-Rust setjmp harness
+matrix, and the P4-104 state work this depends on — the shim still only ever
+enters `CSTATE_START` and `CSTATE_WRCOEFS`, never `CSTATE_SCANNING` or
+`CSTATE_RAW_OK`, so upstream's state-gated finish contract cannot be matched
+exactly yet. `cargo test --workspace --no-fail-fast`: 2466 passed, 0 failed,
+1 ignored (macOS aarch64).
 
 ## P4-101. Classic Header Parse Does Not Publish Coding Tables or Scan State — **OPEN**
 

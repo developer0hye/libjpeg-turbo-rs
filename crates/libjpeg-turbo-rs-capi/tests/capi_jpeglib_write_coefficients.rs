@@ -10,6 +10,7 @@ use std::ffi::{c_int, c_void};
 use std::mem::MaybeUninit;
 use std::os::raw::c_ulong;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicI32, Ordering};
 
 type TjHandle = *mut c_void;
 
@@ -505,6 +506,29 @@ fn write_coefficients_then_marker_then_finish_emits_marker() {
 /// Foreign coefficient handles (e.g. raw stack pointers, virtual barray
 /// pointers from a real libjpeg memory manager) must be rejected — the
 /// shim cannot blindly dereference them as `JpegCoefficients`.
+/// Records the `msg_code` of the most recent `error_exit` and returns.
+///
+/// Returning from `error_exit` violates libjpeg's contract for a real
+/// consumer (which is expected to `longjmp` or exit), but the shim tolerates
+/// it, and it is the only way a Rust-side test can observe the code without
+/// `setjmp`. The C harnesses in `capi_classic_lifecycle*.rs` cover the
+/// `longjmp` path.
+static LAST_MSG_CODE: AtomicI32 = AtomicI32::new(i32::MIN);
+
+unsafe extern "C" fn recording_error_exit(cinfo: *mut c_void) {
+    // `cinfo->err` is the first pointer-sized field; `msg_code` follows the
+    // five callback pointers in `jpeg_error_mgr`.
+    let err: *mut c_void = (cinfo as *const *mut c_void).read();
+    let msg_code: *const c_int = (err as *const u8).add(MSG_CODE_OFFSET) as *const c_int;
+    LAST_MSG_CODE.store(msg_code.read(), Ordering::SeqCst);
+}
+
+/// Byte offset of `msg_code` inside `jpeg_error_mgr`: five function pointers
+/// (`error_exit`, `emit_message`, `output_message`, `format_message`,
+/// `reset_error_mgr`) precede it. `tests/abi_offsets.rs` cross-checks the
+/// struct against upstream's header, so this stays in step with it.
+const MSG_CODE_OFFSET: usize = 5 * std::mem::size_of::<usize>();
+
 #[test]
 fn write_coefficients_rejects_foreign_handle() {
     let lib = unsafe { libloading::Library::new(cdylib_path()) }.expect("dlopen");
@@ -518,7 +542,14 @@ fn write_coefficients_rejects_foreign_handle() {
         let jpeg_std_error: libloading::Symbol<unsafe extern "C" fn(*mut c_void) -> *mut c_void> =
             lib.get(b"jpeg_std_error").expect("jpeg_std_error");
         let _ = jpeg_std_error(err_ptr);
+        // P4-100: rejecting the handle now means *reporting* it through
+        // `error_exit`, as upstream does. The stock handler prints and exits,
+        // so a test driving the shim from Rust must install one that records
+        // and returns — otherwise the abort looks like a crash.
+        (err_ptr as *mut Option<unsafe extern "C" fn(*mut c_void)>)
+            .write(Some(recording_error_exit));
         (cinfo_ptr as *mut *mut c_void).write(err_ptr);
+        LAST_MSG_CODE.store(i32::MIN, Ordering::SeqCst);
         let jpeg_create_compress: libloading::Symbol<
             unsafe extern "C" fn(*mut c_void, c_int, usize),
         > = lib
@@ -548,9 +579,20 @@ fn write_coefficients_rejects_foreign_handle() {
             .expect("jpeg_finish_compress");
         jpeg_finish_compress(cinfo_ptr);
 
-        // No crash. Output should be empty (no init_destination ever ran
-        // through the encoder, or the magic check failed before push).
-        // Either way, the test's contract is "no crash".
+        // P4-100: the contract used to be only "no crash", which a shim that
+        // silently did nothing satisfied. A rejection must now be reported:
+        // exactly one `error_exit`, carrying a real upstream message code.
+        assert_ne!(
+            LAST_MSG_CODE.load(Ordering::SeqCst),
+            i32::MIN,
+            "a foreign coefficient handle must be reported through error_exit, \
+             not silently ignored"
+        );
+        assert!(
+            LAST_MSG_CODE.load(Ordering::SeqCst) > 0,
+            "msg_code must be a real upstream JERR_* value, got {}",
+            LAST_MSG_CODE.load(Ordering::SeqCst)
+        );
 
         // Cleanup: tj3Free for the (possibly NULL) outbuf, then destroy.
         if !out_buf.is_null() {
