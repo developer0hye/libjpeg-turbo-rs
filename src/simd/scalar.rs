@@ -128,7 +128,7 @@ pub fn scalar_fdct_float_quantize(
         workspace[i] = input[i] as f32;
     }
     fdct::fdct_float_workspace(&mut workspace);
-    let zigzag = &crate::encode::tables::ZIGZAG_ORDER;
+    let zigzag = &crate::common::tables::ZIGZAG_ORDER;
     for zz in 0..64 {
         let natural_idx: usize = zigzag[zz];
         let temp: f32 = workspace[natural_idx] * quant.float_divisors[natural_idx];
@@ -145,7 +145,7 @@ pub fn scalar_fdct_float_quantize(
 ///
 /// Algorithm: `result = sign(coeff) * ((abs(coeff) + correction) * reciprocal >> 16 >> shift)`
 fn quantize_reciprocal(coeffs: &[i32; 64], quant: &QuantDivisors, output: &mut [i16; 64]) {
-    let zigzag = &crate::encode::tables::ZIGZAG_ORDER;
+    let zigzag = &crate::common::tables::ZIGZAG_ORDER;
     for zz in 0..64 {
         let natural_idx: usize = zigzag[zz];
         // C's quantize() operates on DCTELEM (i16) workspace values

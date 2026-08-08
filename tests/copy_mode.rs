@@ -390,7 +390,8 @@ fn c_jpegtran_cross_validation_copy_mode() {
         if !output.status.success() {
             let stderr: String = String::from_utf8_lossy(&output.stderr).to_string();
             if stderr.contains("unrecognized") || stderr.contains("invalid") {
-                eprintln!("SKIP: jpegtran does not support '{}': {}", c_flag, stderr);
+                helpers::skip_missing_c_capability("jpegtran", c_flag);
+                eprintln!("  jpegtran stderr: {stderr}");
                 continue;
             }
             panic!("jpegtran {} failed: {}", label, stderr);

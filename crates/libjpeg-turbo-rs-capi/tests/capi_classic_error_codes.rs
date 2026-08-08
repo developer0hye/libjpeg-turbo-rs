@@ -33,6 +33,11 @@ const EXPECTED: &[(&str, i32, &str)] = &[
     ),
     ("JERR_BAD_LENGTH", 12, "Bogus marker length"),
     (
+        "JERR_BAD_PRECISION",
+        16,
+        "Unsupported JPEG data precision %d",
+    ),
+    (
         "JERR_BAD_STATE",
         21,
         "Improper call to JPEG library in state %d",

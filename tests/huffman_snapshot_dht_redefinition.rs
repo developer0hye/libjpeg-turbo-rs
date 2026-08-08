@@ -13,42 +13,11 @@
 //! Skip rule: missing C tools soft-skip locally but hard-fail in CI so the
 //! gate cannot silently vanish.
 
+mod helpers;
+
 use std::io::Write;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
-
-fn is_ci() -> bool {
-    std::env::var("CI").is_ok() || std::env::var("GITHUB_ACTIONS").is_ok()
-}
-
-fn tool_path(name: &str) -> Option<PathBuf> {
-    for dir in [
-        "/opt/homebrew/bin",
-        "/usr/local/bin",
-        "/usr/bin",
-        "/opt/libjpeg-turbo/bin",
-    ] {
-        let pb = PathBuf::from(dir).join(name);
-        if pb.exists() {
-            return Some(pb);
-        }
-    }
-    which(name)
-}
-
-fn which(name: &str) -> Option<PathBuf> {
-    let out = Command::new("which").arg(name).output().ok()?;
-    if !out.status.success() {
-        return None;
-    }
-    let path = String::from_utf8(out.stdout).ok()?;
-    let path = path.trim();
-    if path.is_empty() {
-        None
-    } else {
-        Some(PathBuf::from(path))
-    }
-}
 
 /// Photo-like 64×64 RGB content: smooth gradients plus texture so every
 /// component has non-trivial AC statistics (distinct optimized tables).
@@ -160,13 +129,8 @@ fn dht_definitions(jpeg: &[u8], class: u8, slot: u8) -> Vec<Vec<u8>> {
 
 #[test]
 fn late_dht_redefinition_does_not_alter_earlier_scan() {
-    let (Some(cjpeg), Some(djpeg)) = (tool_path("cjpeg"), tool_path("djpeg")) else {
-        if is_ci() {
-            panic!("cjpeg/djpeg must be installed in CI — the DHT-snapshot gate cannot skip");
-        }
-        eprintln!("SKIP: cjpeg/djpeg not found");
-        return;
-    };
+    let cjpeg: PathBuf = require_c_tool!("cjpeg");
+    let djpeg: PathBuf = require_c_tool!("djpeg");
 
     let dir = std::env::temp_dir().join(format!("dht_redef_{}", std::process::id()));
     std::fs::create_dir_all(&dir).expect("temp dir");

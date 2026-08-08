@@ -300,7 +300,7 @@ impl<T: 'static> OnceBox<T> {
 pub fn std_huffman_tables() -> &'static [Arc<HuffmanTable>; 4] {
     static STD_TABLES: OnceBox<[Arc<HuffmanTable>; 4]> = OnceBox::new();
     STD_TABLES.get_or_init(|| {
-        use crate::encode::tables::{
+        use crate::common::tables::{
             AC_CHROMINANCE_BITS, AC_CHROMINANCE_VALUES, AC_LUMINANCE_BITS, AC_LUMINANCE_VALUES,
             DC_CHROMINANCE_BITS, DC_CHROMINANCE_VALUES, DC_LUMINANCE_BITS, DC_LUMINANCE_VALUES,
         };

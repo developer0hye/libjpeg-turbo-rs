@@ -314,13 +314,14 @@ fn c_djpeg_crop_skip_diff_zero() {
             .output()
             .expect("failed to run djpeg");
 
-        if !output.status.success() {
-            eprintln!(
-                "SKIP: djpeg -crop failed (may not support -crop): {}",
-                String::from_utf8_lossy(&output.stderr).trim()
-            );
-            return;
-        }
+        // P4-116: the tool was already discovered and any capability
+        // probe already passed, so a failed invocation here is a defect
+        // in the request we built — not a reason to report success.
+        assert!(
+            output.status.success(),
+            "djpeg -crop failed (may not support -crop): {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
 
         let (c_w, c_h, c_pixels) = parse_ppm(tmp_ppm.path());
 

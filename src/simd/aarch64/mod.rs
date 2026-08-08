@@ -499,7 +499,7 @@ mod tests {
             scales[i] = sc;
             shifts[i] = s;
         }
-        let zigzag = &crate::encode::tables::ZIGZAG_ORDER;
+        let zigzag = &crate::common::tables::ZIGZAG_ORDER;
         let mut divisors_zigzag = [0u16; 64];
         let mut reciprocals_zigzag = [0u16; 64];
         let mut corrections_zigzag = [0u16; 64];

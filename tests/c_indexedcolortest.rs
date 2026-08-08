@@ -99,9 +99,20 @@ fn count_unique_colors_rgb(pixels: &[u8]) -> usize {
 /// Run djpeg with the given arguments, returning stdout bytes on success.
 /// Arguments are passed after the input file path.
 fn run_djpeg(djpeg: &Path, args: &[&str], input_jpeg: &[u8]) -> Option<Vec<u8>> {
-    // Write input JPEG to a temp file
-    let tmp_in: PathBuf =
-        std::env::temp_dir().join(format!("indexedcolortest_in_{}.jpg", std::process::id()));
+    // Write input JPEG to a temp file.
+    //
+    // The name must be unique per *call*, not per process: cargo runs `#[test]`
+    // functions on parallel threads of one process, so a path keyed only on
+    // `process::id()` let concurrent cases delete each other's input while
+    // djpeg was reading it. That surfaced as `djpeg: can't open ...` and was
+    // being swallowed as a skip, so the race stayed invisible (P4-116).
+    static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let unique: u64 = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let tmp_in: PathBuf = std::env::temp_dir().join(format!(
+        "indexedcolortest_in_{}_{}.jpg",
+        std::process::id(),
+        unique
+    ));
     std::fs::write(&tmp_in, input_jpeg).ok()?;
 
     let output = Command::new(djpeg).args(args).arg(&tmp_in).output().ok()?;
@@ -189,16 +200,12 @@ fn c_indexedcolortest_8bit() {
     let djpeg: PathBuf = require_c_tool!("djpeg");
 
     if !djpeg_supports_colors(&djpeg) {
-        eprintln!("SKIP: djpeg does not support -colors flag");
+        helpers::skip_missing_c_capability("djpeg", "-colors");
         return;
     }
 
     // Use the reference test image (RGB JPEG)
-    let rgb_jpeg_path: PathBuf = PathBuf::from("references/libjpeg-turbo/testimages/testorig.jpg");
-    if !rgb_jpeg_path.exists() {
-        eprintln!("SKIP: test image not found at {:?}", rgb_jpeg_path);
-        return;
-    }
+    let rgb_jpeg_path: PathBuf = require_c_testimage!("testorig.jpg");
     let rgb_jpeg: Vec<u8> = std::fs::read(&rgb_jpeg_path).expect("read testorig.jpg");
 
     let color_depths: [usize; 2] = [128, 256];
@@ -246,12 +253,12 @@ fn c_indexedcolortest_8bit() {
                     num_colors, max_diff
                 );
             }
-            None => {
-                eprintln!(
-                    "SKIP: djpeg -colors {} -dither fs failed for 8-bit RGB",
-                    num_colors
-                );
-            }
+            None => panic!(
+                // P4-116: the `-colors` capability is probed once up front,
+                // so a failure here is a defect in the request we built.
+                "djpeg -colors {} -dither fs failed for 8-bit RGB",
+                num_colors
+            ),
         }
 
         // Test RGB→RGB quantization with no dithering
@@ -274,12 +281,12 @@ fn c_indexedcolortest_8bit() {
                     num_colors, max_diff
                 );
             }
-            None => {
-                eprintln!(
-                    "SKIP: djpeg -colors {} -dither none failed for 8-bit RGB",
-                    num_colors
-                );
-            }
+            None => panic!(
+                // P4-116: the `-colors` capability is probed once up front,
+                // so a failure here is a defect in the request we built.
+                "djpeg -colors {} -dither none failed for 8-bit RGB",
+                num_colors
+            ),
         }
     }
 
@@ -297,17 +304,13 @@ fn c_indexedcolortest_12bit() {
     let djpeg: PathBuf = require_c_tool!("djpeg");
 
     if !djpeg_supports_colors(&djpeg) {
-        eprintln!("SKIP: djpeg does not support -colors flag");
+        helpers::skip_missing_c_capability("djpeg", "-colors");
         return;
     }
 
     // For 12-bit parity, use testorig.jpg as the RGB source (8-bit JPEG,
     // which represents the 8-bit path used by djpeg for quantization output)
-    let rgb_jpeg_path: PathBuf = PathBuf::from("references/libjpeg-turbo/testimages/testorig.jpg");
-    if !rgb_jpeg_path.exists() {
-        eprintln!("SKIP: test image not found at {:?}", rgb_jpeg_path);
-        return;
-    }
+    let rgb_jpeg_path: PathBuf = require_c_testimage!("testorig.jpg");
     let rgb_jpeg: Vec<u8> = std::fs::read(&rgb_jpeg_path).expect("read testorig.jpg");
 
     let color_depths: [usize; 2] = [128, 256];
@@ -345,12 +348,12 @@ fn c_indexedcolortest_12bit() {
                     num_colors, max_diff
                 );
             }
-            None => {
-                eprintln!(
-                    "SKIP: djpeg -colors {} failed for 12-bit scenario",
-                    num_colors
-                );
-            }
+            None => panic!(
+                // P4-116: the `-colors` capability is probed once up front,
+                // so a failure here is a defect in the request we built.
+                "djpeg -colors {} failed for 12-bit scenario",
+                num_colors
+            ),
         }
     }
 
@@ -368,15 +371,11 @@ fn c_indexedcolortest_cross_precision() {
     let djpeg: PathBuf = require_c_tool!("djpeg");
 
     if !djpeg_supports_colors(&djpeg) {
-        eprintln!("SKIP: djpeg does not support -colors flag");
+        helpers::skip_missing_c_capability("djpeg", "-colors");
         return;
     }
 
-    let rgb_jpeg_path: PathBuf = PathBuf::from("references/libjpeg-turbo/testimages/testorig.jpg");
-    if !rgb_jpeg_path.exists() {
-        eprintln!("SKIP: test image not found at {:?}", rgb_jpeg_path);
-        return;
-    }
+    let rgb_jpeg_path: PathBuf = require_c_testimage!("testorig.jpg");
     let rgb_jpeg: Vec<u8> = std::fs::read(&rgb_jpeg_path).expect("read testorig.jpg");
 
     let color_depths: [usize; 2] = [128, 256];
@@ -408,12 +407,12 @@ fn c_indexedcolortest_cross_precision() {
                     num_colors, max_diff
                 );
             }
-            None => {
-                eprintln!(
-                    "SKIP: djpeg -colors {} failed for cross-precision",
-                    num_colors
-                );
-            }
+            None => panic!(
+                // P4-116: the `-colors` capability is probed once up front,
+                // so a failure here is a defect in the request we built.
+                "djpeg -colors {} failed for cross-precision",
+                num_colors
+            ),
         }
 
         // Also test no-dither for the cross-precision scenario
@@ -442,12 +441,12 @@ fn c_indexedcolortest_cross_precision() {
                     num_colors, max_diff
                 );
             }
-            None => {
-                eprintln!(
-                    "SKIP: djpeg -colors {} -dither none failed for cross-precision",
-                    num_colors
-                );
-            }
+            None => panic!(
+                // P4-116: the `-colors` capability is probed once up front,
+                // so a failure here is a defect in the request we built.
+                "djpeg -colors {} -dither none failed for cross-precision",
+                num_colors
+            ),
         }
     }
 

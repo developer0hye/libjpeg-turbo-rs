@@ -636,9 +636,13 @@ fn read_number(data: &[u8], idx: usize) -> (usize, usize) {
 
 #[test]
 fn c_cross_validation_precision_extended() {
-    let djpeg: Option<PathBuf> = helpers::djpeg_path();
-    let cjpeg: Option<PathBuf> = helpers::cjpeg_path();
+    let djpeg: Option<PathBuf> = helpers::optional_c_tool("djpeg");
+    let cjpeg: Option<PathBuf> = helpers::optional_c_tool("cjpeg");
 
+    // P4-116: `optional_c_tool` has already failed the run if either tool is
+    // missing under CI, so reaching here with both absent is local-only. The
+    // former plain check let a runner that had lost *one* tool quietly run half
+    // the matrix and still report green.
     if djpeg.is_none() && cjpeg.is_none() {
         eprintln!("SKIP: neither djpeg nor cjpeg found");
         return;
@@ -722,10 +726,7 @@ fn c_cross_validation_precision_extended() {
         // -----------------------------------------------------------
         if let Some(ref cjpeg_bin) = cjpeg {
             if !has_lossless {
-                eprintln!(
-                    "SKIP precision={}: cjpeg does not support -lossless",
-                    precision
-                );
+                helpers::skip_missing_c_capability("cjpeg", "-lossless");
                 continue;
             }
 
@@ -751,14 +752,15 @@ fn c_cross_validation_precision_extended() {
                 .output()
                 .expect("failed to run cjpeg");
 
-            if !output.status.success() {
-                eprintln!(
-                    "SKIP precision={}: cjpeg failed ({})",
-                    precision,
-                    String::from_utf8_lossy(&output.stderr).trim()
-                );
-                continue;
-            }
+            // P4-116: the tool was already discovered and any capability
+            // probe already passed, so a failed invocation here is a defect
+            // in the request we built — not a reason to report success.
+            assert!(
+                output.status.success(),
+                "precision={}: cjpeg failed: {}",
+                precision,
+                String::from_utf8_lossy(&output.stderr).trim()
+            );
 
             let jpeg_data: Vec<u8> = std::fs::read(tmp_jpg.path()).expect("read cjpeg output");
 

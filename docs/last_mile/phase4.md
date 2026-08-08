@@ -74,10 +74,11 @@
 | P4-113 | OPEN (`jpeg_read_icc_profile` bypasses classic saved-marker semantics) |
 | P4-114 | OPEN (`jpeg_has_multiple_scans` equates multi-scan with progressive) |
 | P4-115 | OPEN (native 12-bit coverage claims include modes and sampling layouts that are not tested) |
-| P4-116 | PARTIAL (C-parity tests can convert Rust/oracle failures or missing comparisons into a pass — named suites closed 2026-08-08) |
+| P4-116 | CLOSED 2026-08-08 (C-parity tests can convert Rust/oracle failures or missing comparisons into a pass) |
 | P4-117 | CLOSED 2026-08-08 (4:4:1 trim rejected images shorter than one iMCU row) |
 | P4-120 | OPEN (classic-shim allocation-failure paths are unreachable from tests) |
 | P4-121 | OPEN (lossless encode accepts a restart interval C refuses to decode) |
+| P4-122 | OPEN (the Pillow smoke harness substitutes for a v6b library, which its own policy forbids) |
 | P4-125 | CLOSED 2026-08-08 (TurboJPEG YUV decompress entry points emitted one plane per SOF component) |
 | P4-126 | OPEN (`yuv_plane_width`/`yuv_plane_height` accept any component index) |
 
@@ -1344,7 +1345,7 @@ So **(D) enable the target feature and let the compiler vectorise** joins the li
 
 **Acceptance criteria.** Decide the intended status of the public `decode` internals: (A) deprecate the low-level helper and make the module crate-private in the next semver-major release, with a downstream source scan and migration note; or (B) add a metadata- and policy-aware public companion, migrate callers, and make the legacy function delegate wherever its inputs are sufficient. In either case, rustdoc must state the exact behavior, source compatibility must be tested for the supported release line, and the legacy path must never panic on short or subsampled planes.
 
-## P4-81. Linux cdylib Omits GNU `LIBJPEG_8.0` Symbol Versions — **OPEN**
+## P4-81. Linux cdylib Omits GNU `LIBJPEG_8.0` Symbol Versions — **PARTIAL: nodes emitted and tested; downstream re-verification pending**
 
 **Motivation.** Filed 2026-08-02 by the real OpenCV replacement experiment.
 Ubuntu's prebuilt `libopencv_imgcodecs.so.406` requests
@@ -1374,6 +1375,172 @@ wrong node or symbol assignment; (3) the OpenCV harness keeps both binding
 assertions and runs without `no version information available`; and (4)
 alternative SONAME configurations are either given their correct version map
 or rejected with a clear build-time error rather than mislabeled silently.
+
+**Progress (2026-08-08) — the nodes exist.** `build.rs` generates a GNU
+version script and passes it to the linker on ELF targets, gated on the v8
+SONAME: an artifact built with `CAPI_SONAME` set to something else gets a
+`cargo:warning` instead of a silently wrong v8 label.
+
+The map mirrors upstream `src/libjpeg.map.in` — `LIBJPEGTURBO_8.0` owning
+`jpeg_mem_dest` / `jpeg_mem_src` and localising `jsimd_*` / `jconst_*`,
+`LIBJPEG_8.0` owning the reference API — with **one deliberate deviation that
+the issue's scope did not anticipate**.
+
+Upstream's `LIBJPEG_8.0` node is `global: *`. It can afford a catch-all because
+it builds *two* libraries: `libjpeg.so.8` from that map and
+`libturbojpeg.so.0` from `src/turbojpeg-mapfile`, which assigns each `tj*`
+symbol to the `TURBOJPEG_1.0`…`TURBOJPEG_3.0` node it was introduced in. We
+ship **one** artifact carrying both surfaces (92 `jpeg_*` exports and 63
+`tj*`/`TJ*`), so applying upstream's map verbatim would stamp every TurboJPEG
+export as reference libjpeg API — precisely the mislabelling this item forbids.
+Re-versioning them under a node of our own would be worse: a consumer linked
+against a real libturbojpeg requests `tjInitCompress@TURBOJPEG_1.0`, and the
+loader fails outright when the library offers that name under a different
+version.
+
+So the map has **no catch-all**. Symbols matched by no node keep default,
+unversioned visibility — exactly their status today — so the TurboJPEG and
+crate-only surfaces are unchanged while the classic API gains the nodes
+prebuilt consumers look for. The `local:` clause hides nothing we ship: the
+crate exports no `jsimd_*` or `jconst_*` symbol.
+
+`tests/capi_symbol_versions.rs` splits verification by what each layer needs.
+The script *content* — node names, membership, and the absence of a catch-all —
+is asserted on every platform from the generated file, because that is the part
+most likely to regress and it needs no Linux. The *ELF result* is asserted with
+`readelf --version-info` and `--dyn-syms` where ELF versioning exists, checking
+both that the nodes exist and that `jpeg_CreateDecompress` / `jpeg_read_header`
+land in `LIBJPEG_8.0`, `jpeg_mem_*` in `LIBJPEGTURBO_8.0`, and `tj3Init` in
+neither — a map that defined the nodes but matched nothing would otherwise pass
+a nodes-exist check while leaving every symbol unversioned.
+
+**Hard blocker found by CI (PR #447): rustc's own version script.** Adding
+`-Wl,--version-script` cannot work as designed. The link fails with:
+
+```
+/usr/bin/ld: anonymous version tag cannot be combined with other version tags
+```
+
+because rustc already passes a version script for every cdylib:
+
+```
+-Wl,--version-script=.../deps/rustc*/list      <- rustc's
+-Wl,--version-script,.../out/libjpeg.map       <- ours
+```
+
+rustc's uses an *anonymous* version tag — `{ global: …; local: *; };`, no name —
+to export `#[no_mangle]` items and hide the rest. GNU ld forbids mixing an
+anonymous tag with named ones, and rustc's script is not suppressible on
+stable. The map's content is correct and its content tests pass; the two
+scripts are simply mutually exclusive.
+
+P4-81 therefore needs a different mechanism. Candidates, none free: a post-link
+rewrite that synthesises `.gnu.version_d` / `.gnu.version` (patchelf cannot do
+this today); replacing rather than augmenting rustc's script (no stable knob);
+requiring `lld`, which pushes a toolchain constraint onto packagers; or linking
+the shared object ourselves from a staticlib, a large build-system change.
+
+**Settled by experiment (2026-08-08), binutils 2.47 via `x86_64-elf-binutils`.**
+The candidate list above was written from the CI failure alone. Linking the
+cases directly narrows it to one answer, and kills the cheap options
+individually. `a.o` exports `jpeg_read_header`, `jpeg_mem_dest`, `tj3Init`;
+`rustc_like.map` is `{ global: …; local: *; };` — an anonymous tag, exactly
+what rustc emits.
+
+| # | configuration | result |
+| --- | --- | --- |
+| 1 | rustc's anonymous script **+** our named script | `anonymous version tag cannot be combined with other version tags` — reproduces CI exactly |
+| 2 | `.symver` in the object **+** rustc's script only | `version node not found for symbol jpeg_mem_dest@@LIBJPEGTURBO_8.0` |
+| 3 | rustc's anonymous script **+** `VERSION { … }` in a linker-script *input file* | same anonymous-tag error as #1 |
+| 4 | our named script **alone**, `local: *` inside the first node | **works** — emits `.gnu.version_d` with `LIBJPEG_8.0` and `LIBJPEGTURBO_8.0`, and binds the symbols to them |
+
+Case 2 matters because `.symver` looks like a way to sidestep version scripts
+entirely, and it is not: the directive *attaches* a symbol to a node, it does
+not *define* the node, so a script is still required. Case 3 matters because
+`VERSION { … }` inside a linker script is a different surface from
+`--version-script` but merges through the same code path, so it fails
+identically. Neither is a workaround.
+
+Case 4 is the whole finding: the target ELF is reachable with **exactly one**
+version script — ours, carrying `local: *` so it also does the job rustc's was
+doing. And rustc 1.94.1 exposes no way to stop emitting its own: `-C help` and
+`-Z help` list nothing for version scripts or symbol visibility.
+
+So the remaining question is not *which script mechanism* — all of them are the
+same mechanism — but **who runs the link**. The bounded version of that is to
+produce the versioned `libjpeg.so.8` from the `staticlib` (already in
+`crate-type`) at *install* time in `scripts/install_capi.sh`, rather than
+restructuring the cargo build: the acceptance criterion is about the installed
+library prebuilt consumers bind to, and about the OpenCV `no version
+information available` warning, both of which are properties of the staged
+artifact. The cdylib cargo emits would stay unversioned, which would need
+saying plainly in `docs/ABI_COMPATIBILITY.md` so nobody reads a `cargo build`
+artifact as the shippable one.
+
+**A consequence #437's scope does not mention, found by CI (PR #447).** Adding
+version nodes *removes glibc's unversioned-fallback path*, and the Pillow smoke
+leg immediately failed with:
+
+```
+version `LIBJPEG_6.2' not found (required by .../PIL/_imaging...so)
+```
+
+That `_imaging.so` was built against a **v6b** libjpeg. With no version nodes
+the loader bound it to our v8 shim anyway; with nodes present it correctly
+refuses. The failure is the feature working — a v6b consumer had been binding
+to a v8 struct layout, which is the silent ABI mismatch T4's non-goal status
+and the "v6b substitution is not valid T3 evidence" rule both exist to prevent.
+
+Adding a `LIBJPEG_6.2` node would "fix" CI by re-asserting a v6b ABI we do not
+implement, and is rejected. The correct resolution is to make
+`examples/pillow_smoke/run.sh` take its documented v8-rebuild path in that leg
+rather than overwriting Pillow's bundled `libjpeg-*.so.62.4.0` in place.
+
+**Status (2026-08-08): implemented and CI-verified; open for its downstream
+criterion.** The nodes now exist on the shipped library and are asserted on a
+Linux runner.
+
+*What ships them.* Not the cdylib -- it cannot carry them, per the experiment
+above. `scripts/install_capi.sh` relinks `libjpeg.so.8` from the `staticlib`
+with the generated map as the only version script (`--whole-archive`, because
+nothing references the `#[no_mangle]` exports; `--allow-multiple-definition`
+for compiler_builtins symbols that also arrive from libgcc). A missing
+prerequisite warns and degrades; a relink that is attempted and fails stops the
+install, so an unversioned library cannot be shipped as though it were
+versioned. `CAPI_SKIP_SYMBOL_VERSIONS=1` opts out.
+
+*What proves it.* `Classic C-ABI GNU symbol versions (P4-81)` in `Integration
+Tests` runs `capi_symbol_versions` with `--nocapture` and fails closed on any
+`^SKIP`. The test stages the library through the install script itself and
+asserts the script reported `P4-81: relinked` before reading the ELF, so a
+degraded install fails rather than skipping. Green with
+`installed_library_exports_the_reference_version_nodes ... ok`.
+
+*Three false greens preceded that, all found by asking whether the leg ran
+rather than whether it passed*, and each is worth recording because they are
+distinct failure modes:
+
+1. **The PR was `CONFLICTING`.** GitHub cannot build a merge ref for a
+   conflicting PR, so `pull_request` workflows never start at all. Two pushes
+   produced zero Actions runs while the PR showed a green DCO check. Rebasing
+   fixed it.
+2. **The test skipped.** Its first draft looked for a leftover `*.versioned`
+   artifact and skipped when it found none; nothing in CI stages one. It now
+   stages one itself.
+3. **CI never invoked the suite.** This workflow selects the C-ABI crate's
+   tests by name, and `capi_symbol_versions` was not among them -- a test
+   nothing calls cannot fail. Now wired in.
+
+A fourth defect surfaced only once the leg genuinely ran: the assignment
+spot-check used `line.contains(symbol)`, which matched the Rust-mangled
+`_RNvXsl_...jpeg_CreateDecompress0E...` and asserted against it instead of the
+C symbol. Symbol names are compared exactly now.
+
+*Still open, and it is what closes this item.* The acceptance criteria ask for
+the OpenCV replacement harness to be re-run and the `no version information
+available` warning confirmed gone, plus libtiff/GDAL/Poppler/HDF4 still
+loading. Those need the downstream lab (P2-G). The nodes existing is necessary,
+not sufficient -- the warning disappearing is the criterion.
 
 ## P4-82. Classic Scanline Encoder Dropped Public Restart Settings — **CLOSED 2026-08-02**
 
@@ -1885,14 +2052,35 @@ The change immediately caught a silent failure:
 shim that quietly did nothing satisfied. Rejection is now *reported*, and the
 test asserts the `msg_code`.
 
+**Correction (2026-08-08).** An earlier revision of this entry claimed the shim
+"only ever enters `CSTATE_START` and `CSTATE_WRCOEFS`, never `CSTATE_SCANNING`
+or `CSTATE_RAW_OK`", and cited that as the blocker for matching upstream's
+state-gated finish contract. That was wrong. `jpeg_start_compress` does set
+them (`jpeglib.rs`, `c.global_state = if c.raw_data_in != 0 { CSTATE_RAW_OK }
+else { CSTATE_SCANNING }`); the claim came from a grep for the literal
+`global_state = CSTATE_`, which does not match that computed form.
+
+`jpeg_finish_compress` now implements jcapimin.c:184-190 verbatim: the
+`next_scanline < image_height` check runs for `CSTATE_SCANNING` **and**
+`CSTATE_RAW_OK`, `CSTATE_WRCOEFS` passes through, and any other state raises
+`JERR_BAD_STATE` with the state value. Both raw-data writers advance
+`next_scanline`, so the raw arm is real — the previous revision exempted it and
+would have let a short raw encode produce a file.
+
 **Status (2026-08-08): partial.** Criteria (1)-(3) hold for
-`jpeg_start_decompress` and `jpeg_finish_compress`. Not yet done: the remaining
-private-string-only sites (54 of the original 59 `last_error` assignments still
-have no `error_exit` nearby), criterion (4)'s stock-versus-Rust setjmp harness
-matrix, and the P4-104 state work this depends on — the shim still only ever
-enters `CSTATE_START` and `CSTATE_WRCOEFS`, never `CSTATE_SCANNING` or
-`CSTATE_RAW_OK`, so upstream's state-gated finish contract cannot be matched
-exactly yet. `cargo test --workspace --no-fail-fast`: 2466 passed, 0 failed,
+`jpeg_start_decompress` and `jpeg_finish_compress`, and the finish state gate
+now matches upstream exactly. Nine more sites now raise: every
+raw-data validation failure in `jpeg_read_raw_data`, `jpeg12_read_raw_data`,
+`jpeg_write_raw_data` and `jpeg12_write_raw_data` already *named* its
+upstream code in the message (`JERR_BUFFER_SIZE`, `JERR_BAD_PRECISION`,
+`JERR_BAD_STATE`) but never reached `error_exit`, so a C consumer saw only a
+`0` return. `JERR_BAD_PRECISION` joins the cross-checked constant set.
+
+Not yet done: the remaining private-string-only
+sites (45 of the original 59 `last_error` assignments still have no
+`error_exit` nearby), criterion (4)'s stock-versus-Rust setjmp harness matrix,
+and P4-104's *decompressor* state work, which is separate from the compressor
+states corrected here. `cargo test --workspace --no-fail-fast`: 2466 passed, 0 failed,
 1 ignored (macOS aarch64).
 
 ## P4-101. Classic Header Parse Does Not Publish Coding Tables or Scan State — **OPEN**
@@ -1965,6 +2153,51 @@ abort. Stock-C setjmp/source-manager cases cover repeated/out-of-order header,
 incomplete rows, EOI suspension/retry, exactly-once `term_source`, final reset,
 and same-handle reuse. P4-13 continues to prove body suspension without
 asserting a shim-specific state.
+
+**Progress (2026-08-08) — the constants half is done; transitions remain.**
+`cinfo.global_state` is a *public* field, so these numbers are ABI: a consumer
+compares them against the values in its own `jpegint.h`. All eleven `DSTATE_*`
+values are now mirrored with upstream's numbering, which corrects
+`DSTATE_STOPPING` from **206** — upstream's `DSTATE_RAW_OK` — to **210**. A
+consumer inspecting `global_state` during `jpeg_finish_decompress` had been
+reading "start_decompress done, read_raw_data OK" from a decompressor that was
+looking for EOI. The six states the shim does not yet transition through
+(`PRELOAD`, `PRESCAN`, `RAW_OK`, `BUFIMAGE`, `BUFPOST`, `RDCOEFS`) are declared
+anyway, because their numbering is what makes the rest correct. The old value
+was only ever assigned, never compared, so no shim logic depended on it.
+
+`jpeg_start_decompress` now also publishes `DSTATE_RAW_OK` when `raw_data_out`
+is set, matching `jdapistd.c:170`
+(`cinfo->global_state = cinfo->raw_data_out ? DSTATE_RAW_OK : DSTATE_SCANNING`).
+A caller that had explicitly opted into raw-data output was previously told the
+decompressor was in scanline mode. This applies to the two sites that
+correspond to upstream's line 170 — the normal path and the 12-bit deferred
+path. It deliberately does **not** apply to the buffered-image early return:
+upstream returns from that branch with `DSTATE_BUFIMAGE` (`jdapistd.c:60-63`)
+and never reaches line 170, while this shim publishes `SCANNING` there so
+`jpeg_input_complete` (gated on `>= DSTATE_SCANNING`) reports TRUE. That
+divergence predates this work and belongs to the transitions half, where
+`DSTATE_BUFIMAGE` gets wired; routing the site through the raw-data helper
+would have published a third value that is neither upstream's nor the intended
+one. The same `BUFIMAGE` gap remains for a `buffered_image` request whose body
+is already complete, which falls through to the normal path.
+
+Guarded by a unit test that parses `references/libjpeg-turbo/src/jpegint.h` and
+compares against the real Rust constants, with exact accounting so mirroring 15
+of upstream's 16 constants fails rather than passing quietly. Confirmed red
+against the original bug: restoring `DSTATE_STOPPING = 206` fails with
+`left: 206, right: 210`. Parsing suffices here, unlike
+`tests/capi_classic_error_codes.rs`'s C probe, because these are plain
+`#define NAME <int>` lines rather than a positional version-gated enum — and
+comparing against the constants themselves removes the transcription step that
+produced the 206.
+
+Still open: the transition work — `DSTATE_BUFIMAGE` in buffered-image mode,
+`DSTATE_READY` after a successful header parse (the shim stays at `INHEADER`),
+the repeated-call guard, and finish's
+unread-row rejection, EOI draining with suspension, exactly-once `term_source`
+and abort-reset for reuse, together with the stock-C setjmp harness the criteria
+above require.
 
 ## P4-105. Classic Marker Writers Ignore State and Declared Lengths — **OPEN**
 
@@ -2199,7 +2432,7 @@ corrected and its redundant weak Rust-only loop was removed; the two retained
 S444 quality matrices compare samples to 12-bit `djpeg`. The missing product
 mode decision and S410/S24 raw C cases keep this item open.
 
-## P4-116. C-Parity Tests Can Convert Failures or Missing Comparisons into a Pass — **PARTIAL: named matrices closed; repository-wide sweep remains**
+## P4-116. C-Parity Tests Can Convert Failures or Missing Comparisons into a Pass — **CLOSED 2026-08-08**
 
 **Motivation.** Filed 2026-08-02 after a documented P4-13 regression reported
 `1 passed` while silently skipping because its private tool lookup ignored a
@@ -2312,7 +2545,142 @@ same shapes this pass removed — `tests/c_indexedcolortest.rs:251`,
 `tests/cross_check_misc_gaps.rs:235`, and
 `tests/hard_case_x_byte_and_restart.rs:295` all turn a failed C invocation into
 a skip. Those suites are outside the ten the criteria name and are not touched
-here; the item stays open until they are swept as well.
+here.
+
+**Progress (2026-08-08, second pass).** The nine suites named above are swept:
+15 `if !output.status.success() { … SKIP … return/continue }` blocks across
+`cross_check_color_quantize`, `quantize`, `crop_c_compat`, `crop_skip`,
+`cross_check_misc_gaps`, `cross_check_transform`, `precision_extended` and
+`precision_arbitrary` are now assertions. Each sits *after* tool discovery and
+any capability probe, so a failed invocation is a defect in the request the
+test built, not an environment gap — the distinction the earlier pass drew for
+the ten named matrices. `cargo test --workspace --no-fail-fast`: 2466 passed,
+0 failed, 1 ignored (macOS aarch64).
+
+**Progress (2026-08-08, third pass) — triage rather than bulk conversion.** The
+forbidden shape CLAUDE.md names explicitly, a *Rust* failure turned into a
+skip, is now absent from the suite: a repo-wide search for
+`Err(_) => { eprintln!("SKIP…"); return/continue }` finds no remaining
+instance. What is left are oracle-side skips, which split two ways and must not
+be converted uniformly:
+
+* **defects** — the tool was discovered and its capability probed, so a failure
+  is in the request the test built. Making `c_indexedcolortest` assert
+  immediately exposed a *parallelism race* the skip had been hiding: `run_djpeg`
+  named its temp input from `process::id()` alone, but cargo runs `#[test]`s on
+  parallel threads of one process, so concurrent cases deleted each other's
+  input mid-invocation. It surfaced as `djpeg: can't open …` and was swallowed.
+  The path is now unique per call. `tests/c_indexedcolortest.rs`'s five
+  `-colors` sites are now panics; the `-colors` capability is probed once up
+  front, so nothing downstream may treat its absence as news.
+* **capability gaps** — `cjpeg -precision 12`, `-precision 16 -lossless`, and
+  `-arithmetic -progressive` genuinely do not exist on older toolchains. Those
+  four sites keep their local skip but now assert `!helpers::is_ci()` first, so
+  CI — which provisions libjpeg-turbo 3.x — fails instead of skipping.
+
+**Progress (2026-08-08, fourth pass) — the triage is complete.** Every
+failure-shaped `SKIP` in the suite has now been classified. `rgb565_dither`
+joined the defect column: `djpeg_supports_rgb565` probes the capability before
+the comparison runs, so a failure there is a defect and is now an assertion.
+`sof10_encode`'s `-arithmetic -progressive` case and both `restart_bomb`
+fixture builds in `hard_case_x_byte_and_restart` joined the capability column
+and are CI-guarded.
+
+Nine failure-shaped `SKIP` strings remain across six files, and **all of them
+are now capability gaps that fail in CI** — libjpeg-turbo 3.x is provisioned
+there, so a missing capability is a provisioning defect rather than a skip.
+None of them can any longer turn a real failure into a green run on a
+provisioned machine.
+
+The item stays open for its other criteria: `capi_jpeglib_write_coefficients`
+and the non-matrix suites still carry no planned-vs-executed count, and the
+remaining `SKIP` sites across the wider suite (tool missing, submodule absent,
+platform unsupported) have not been individually re-verified as genuinely
+environmental.
+
+**Progress (2026-08-08, fifth pass) — the repository-wide sweep is done.**
+
+*Discovery.* Fourteen suites still rolled their own C-tool lookup, and two
+could not fail on a provisioned runner at all:
+`cross_check_fuzz_decode_diff_c_progressive_16x16` (5 sites) and
+`..._baseline_h4v1` (2) had no CI guard whatsoever, so a runner missing `djpeg`
+reported `5 passed` having compared nothing. Several lookups scanned only
+hard-coded directories, so a `djpeg` on PATH was invisible — the exact
+regression that opened this item. `cross_check_transform` derived `cjpeg` from
+`djpeg`'s parent directory. The worst was `regression_issue_369_gray_argb_abgr`:
+with `djpeg` absent it substituted our own grayscale decode as the "reference",
+making the C cross-validation a tautology that could not fail. All now route
+through `require_c_tool!`, or through the new `helpers::optional_c_tool` for
+cross-checks that are one part of a larger test, where the macro's early
+`return` would drop the Rust-side assertions that follow.
+
+*Capabilities.* 47 capability probes across 20 suites answered a missing switch
+with a bare `SKIP`/`return` on CI as much as locally. libjpeg-turbo 3.1.4 was
+verified on the development host to carry every capability this repository
+probes for (`-colors`, `-dither ordered`, `-crop`, `-skip`, `-icc`, `-rgb565`,
+`-dct fast|float`, `-lossless`, `-precision`, `-arithmetic`, `-smooth`,
+`-copy icc`), so a miss on a provisioned runner is a provisioning defect.
+`helpers::skip_missing_c_capability` states that rule once. The single genuine
+exception is arithmetic-coded lossless (SOF11): upstream omits it at compile
+time even in 3.1.4 (`cjpeg -lossless 1 -arithmetic` answers "Requested feature
+was omitted at compile time"), so `sof11.rs` keeps unconditional skips and now
+records why, to stop a later sweep converting them.
+
+*A measurement error, corrected.* The second and third passes above reported
+their skip inventory from a plain `cargo test`, which captures stderr for
+*passing* tests — so it could only ever show skips from failing ones. Measured
+correctly with `--nocapture`, 26 skip lines fire on this host, not one.
+
+*The defect that hid behind a skip.* `lossless_encode`'s
+`djpeg_supports_lossless` named its probe file from `process::id()` alone.
+Cargo runs `#[test]`s as parallel threads of one process and both callers live
+in that binary, so the two probes shared one filename and deleted each other's
+input mid-`djpeg`. The probe then answered "djpeg does not support SOF3" about
+a djpeg that decodes SOF3 fine, and the case skipped. It reproduced only under
+full-workspace load, which is why four passes missed it. `lossless_decode` had
+the same shape. Both use `helpers::TempFile` now — the fix
+`c_indexedcolortest::run_djpeg` already needed. This is the second instance of
+that race found by making a skip fail closed.
+
+*A skip that misnamed its own cause.* `subsamp_410` reported "djpeg cannot
+decode 4:1:0". It decodes 4:1:0 fine; `cjpeg -sample 4x2 | djpeg` round-trips
+on the same binary. `make_jpeg_with_410_sampling` patches the SOF sampling
+factors to 4x2 over entropy data coded for 2x2, so djpeg correctly rejects the
+result — which is the C behaviour the case measures our leniency against. It is
+an explained expected refusal now, deliberately *not* a CI-fatal capability
+assertion.
+
+*Counts.* `precision_arbitrary` gains a `ComparisonTally` — 30 planned across
+two 15-precision legs, reporting `30 comparisons completed out of 30 planned`;
+its sub-byte-precision drop is a named exclusion rather than a silent
+`continue`, and its two capability `return`s record exclusions before finishing
+instead of discarding the first leg's work.
+`capi_jpeglib_write_coefficients` is deliberately left without a tally, and
+this is a finding rather than an omission: it is ten independent `#[test]`
+scenarios with zero `SKIP`s, zero early `return`s and zero `continue`s, so
+every one always reaches its assertions. A tally there would plan one case per
+test and duplicate what cargo's own `10 passed` already states. The same holds
+for the other non-matrix suites the earlier pass named.
+
+*Every remaining skip, classified.* 26 fire on this host, none able to hide a
+failure on a provisioned runner: 3 permanent upstream gaps (arithmetic lossless
+SOF11), 2 deliberate guard-test outputs in `helpers_smoke`, 12
+reference-leg-only skips that still run and pass their shim-side assertions
+(`LIBJPEG_TURBO_REFERENCE_DIR` unset), and 9 environmental — platform
+(`/dev/full` absent on macOS, x86_64 dispatch on aarch64), the opt-in licensed
+ITU-T T.83 corpus, `exiftool`, `djpeg12`, a mozjpeg-bound `libvips`, an
+`ffmpeg` built without libjpeg, and the documented Pillow v6b case.
+
+Five guard tests pin the two new helpers, including two `should_panic`
+intentional reds for their CI branches.
+
+**Status (2026-08-08): closed.** `cargo test --workspace --no-fail-fast` on
+macOS aarch64 → 2471 passed, 0 failed, 1 ignored
+(`restart_bomb_4096x4096_decodes_within_measured_bound`, release-only), run
+twice consecutively to confirm the parallelism race is gone. `cargo fmt
+--check` and `cargo clippy --workspace --all-targets -- -D warnings` with the
+three CI-allowed test-code lints are clean. GitHub
+[#435](https://github.com/developer0hye/libjpeg-turbo-rs/issues/435).
 
 ## P4-119. `src/decode/pipeline.rs` Concentrates Half of the Decoder Implementation — **CLOSED 2026-08-02**
 
@@ -2512,7 +2880,154 @@ path.
 **Why deferred.** P4-116 is test integrity; this is an encoder validation gap
 it uncovered. The affected call is a misuse that upstream diagnoses, not a
 silent data corruption, so it does not block the test work.
----
+
+## P4-122. The Pillow Smoke Harness Performs the v6b Substitution Its Own Policy Forbids — **OPEN**
+
+**Motivation.** Filed 2026-08-08 from the P4-81 CI run (PR #447). Declaring GNU
+symbol versions made the Pillow leg fail with:
+
+```
+version `LIBJPEG_6.2' not found (required by .../PIL/_imaging...so)
+```
+
+**Root cause.** `examples/pillow_smoke/run.sh` symlinks the shim as
+`libjpeg.so.62` (line 62) and overwrites Pillow's bundled
+`libjpeg-*.so.62.*` with it (lines 150-163). The `_imaging.so` in that wheel is
+built against **v6b** and requests `jpeg_*@LIBJPEG_6.2`. Until P4-81 the shim
+declared no version nodes at all, so glibc's unversioned-fallback path bound a
+v6b consumer to our **v8** struct layout and the harness reported success.
+
+This contradicts the policy the same evidence chain states. `docs/LAST_MILE.md`
+says the Pillow runner "rebuilds a v6b wheel against a discoverable v8 SDK" and
+that "Direct v6b substitution is forbidden because T4 is a non-goal", and T4
+(`libjpeg.so.62`) is an explicit non-goal. The CI leg does the forbidden thing.
+
+**Why it matters.** P0-3 and the `capi_pillow_compat` row in the live-gate
+table are cited as T3 downstream evidence. If the binding under test was
+v6b-consumer-to-v8-library, that evidence is weaker than documented — it
+demonstrated that a mismatch *loads*, not that the ABI matches. P4-81's version
+nodes turn the mismatch from silent UB into a clean load-time refusal, which is
+why the failure surfaced now rather than being introduced now.
+
+**Acceptance criteria.**
+
+1. The Linux Pillow leg obtains a Pillow whose `_imaging.so` links a **v8**
+   libjpeg — the documented rebuild path — and never overwrites a bundled
+   `*.so.62.*` in place.
+2. Adding a `LIBJPEG_6.2` node to satisfy the old wheel is explicitly rejected:
+   it would assert a v6b ABI this project does not implement and restore the
+   struct-layout mismatch.
+3. The harness fails closed when it cannot obtain a v8-ABI Pillow, rather than
+   falling back to substitution.
+4. `docs/LAST_MILE.md`'s `capi_pillow_compat` row is re-measured and re-worded
+   to describe what the leg actually proves.
+5. P4-81's version nodes stay in place while this is fixed; CI going green
+   again by weakening them is not an acceptable resolution. (Written when the
+   nodes were expected on the cargo cdylib. They now land on the *installed*
+   library `scripts/install_capi.sh` relinks, because rustc's own anonymous
+   version script makes the cdylib incapable of carrying them. The substance is
+   unchanged: the harness must stop substituting for a v6b library, not lose
+   the nodes.)
+
+**Why deferred.** The fix touches the project's headline downstream-compat
+evidence, so it needs its own review rather than being folded into P4-81.
+
+## P4-123. Architecture Umbrella: Codec Plans, C-ABI State, Public Boundaries, SIMD Dispatch — **OPEN**
+
+**Motivation.** Filed 2026-08-08 to give GitHub
+[#442](https://github.com/developer0hye/libjpeg-turbo-rs/issues/442) a
+LAST_MILE home. #438 and #441 split the encoder and decoder monoliths into
+stable facades plus private responsibility modules, so the remaining
+architectural risk is semantic rather than physical: the Rust free functions,
+`Encoder`/`Decoder`, TJ3, and the classic `jpeg_*` ABI still normalise options,
+state, and errors through different paths. That is the shape that produced the
+option-drop family (P4-39/P4-40) and the classic option/state gaps
+(P4-84..P4-115).
+
+This is an **umbrella**, structured like [P4-55](#p4-55-zune-jpeg-competitive-gap-program-350361--open):
+per-defect behaviour stays with the individual entries, and the detail of the
+workstreams lives in #442. It exists here so the next session can find the
+programme at all — #442 had no LAST_MILE entry, which by this repository's own
+rule means it did not exist for anyone reading the index.
+
+**Workstreams (detail in #442).** (1) classic C-ABI context, lifecycle and
+error boundary — executed alongside P4-100/P4-104/P4-106 and then used by
+P4-84..P4-115; (2) canonical `EncodeRequest`/`DecodeRequest` →
+`EncodePlan`/`DecodePlan` models with explicit mode enums instead of
+interacting booleans; (3) public API and dependency boundaries; (4) SIMD
+dispatch containment — ~129 direct architecture-specific references still sit
+outside the SIMD layer; (5) one parser/limits/geometry/output model across
+8/12/16-bit.
+
+**Progress (2026-08-08) — workstream 3, the spec-data dependency inversion.**
+#442's evidence list names two places where lower-level modules reach *upward*
+into `encode`. Both were the same cause: the JPEG Annex K specification
+tables lived in `encode::tables`, although they are direction-neutral data.
+`common::huffman_table::std_huffman_tables()` imported the four standard
+Huffman tables from `encode` to serve the *decoder*, and five `simd/*` sites
+imported `ZIGZAG_ORDER` from `encode` to serve quantisation kernels on both
+sides. They now live in `common::tables`, and `src/common/` has zero
+`crate::encode` references. `encode::tables` re-exports every moved name
+because it is a public path, so this is not a breaking change; the encoder
+*policy* (`quality_scale_quant_table{,_ext}`) stays there, and the three tests
+that validate the Annex K data moved with the data. The `simd → encode`
+references that remain are scalar *kernel* fallbacks for encode-direction SIMD,
+which is the correct direction, not spec data.
+
+**Acceptance criteria.** Each workstream lands incrementally under the existing
+C-parity and golden matrices — explicitly not a big-bang rewrite — with the
+public facades staying compatible. The umbrella closes when #442's five
+workstreams are done or individually re-filed; it does not close by closing any
+single defect it coordinates.
+
+## P4-124. The OpenCV Harness Tests the Cargo cdylib, Not the Library We Ship — **OPEN**
+
+**Motivation.** Found 2026-08-08 while checking whether P4-81's remaining
+acceptance criterion — "the OpenCV replacement harness emits no
+`no version information available` warning" — was reachable. It is not, and the
+reason is not the lab: the harness does not test the artifact P4-81 fixed.
+
+**Root cause.** `examples/opencv_smoke/container_run.sh:35` stages the raw
+Cargo output directly:
+
+```sh
+ln -sf /input/liblibjpeg_turbo_rs_capi.so /tmp/libjpeg-rs/libjpeg.so.8
+```
+
+and `run.sh` takes that path from the caller as `--lib <release-cdylib>`. So the
+library OpenCV binds to in this harness is the cdylib, while the library
+`scripts/install_capi.sh` stages — and therefore the one a distro or a packager
+actually installs — is a *different binary*: since P4-81 it is relinked from the
+`staticlib` so it can carry `LIBJPEG_8.0` / `LIBJPEGTURBO_8.0`, which the cdylib
+provably cannot (rustc's own anonymous version script; see P4-81).
+
+Two consequences, and the second is the one that matters:
+
+1. P4-81's criterion cannot pass as written. The harness will keep reporting the
+   loader warning no matter how correct the shipped library is, because it is
+   not looking at it.
+2. **The project's headline T3 downstream evidence has been measuring an
+   artifact that is not the shipped one.** That was harmless while the two
+   binaries were byte-identical in every respect a consumer sees. It is not
+   harmless now, and it was never *verified* to be harmless — nothing asserted
+   the equivalence.
+
+This is a P4-116-shaped defect one level out from the test suite: not a test
+that fails to run, but a test that runs against the wrong subject.
+
+**Acceptance criteria.** The harness stages through `scripts/install_capi.sh`
+(or is given the staged tree) so the library under test is the one that ships;
+`container_run.sh` asserts the absence of `no version information available`
+rather than leaving it to a human reading the log; and the equivalence the old
+arrangement assumed is either asserted or abandoned. P4-81's OpenCV criterion is
+re-evaluated only after this lands — until then a green OpenCV run says nothing
+about symbol versions either way.
+
+**Why filed rather than fixed.** The harness is Docker-based and this host could
+not start Docker, so a change to it cannot be verified here; and its result is
+the project's primary T3 claim, so it should not be edited blind. Wiring it into
+CI (where Docker is available) is the natural vehicle, which makes it P2-G's
+neighbour rather than a drive-by fix.
 
 ## P4-125. TurboJPEG YUV decompress entry points emit one plane per SOF component, overrunning the 3-plane ABI contract — **CLOSED 2026-08-08**
 

@@ -13,24 +13,6 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use libjpeg_turbo_rs::{decompress, ColorSpace, DctMethod, Encoder, PixelFormat, Subsampling};
 
 // ===========================================================================
-// Tool discovery
-// ===========================================================================
-
-/// Locate the rdjpgcom binary.
-fn rdjpgcom_path() -> Option<PathBuf> {
-    let homebrew: PathBuf = PathBuf::from("/opt/homebrew/bin/rdjpgcom");
-    if homebrew.exists() {
-        return Some(homebrew);
-    }
-    Command::new("which")
-        .arg("rdjpgcom")
-        .output()
-        .ok()
-        .filter(|o| o.status.success())
-        .map(|o| PathBuf::from(String::from_utf8_lossy(&o.stdout).trim().to_string()))
-}
-
-// ===========================================================================
 // Helpers
 // ===========================================================================
 
@@ -460,7 +442,7 @@ fn c_xval_encoder_comment() {
     assert_eq!(c_h, height, "C djpeg height mismatch");
 
     // Verify comment with rdjpgcom if available
-    if let Some(rdjpgcom) = rdjpgcom_path() {
+    if let Some(rdjpgcom) = helpers::optional_c_tool("rdjpgcom") {
         let jpeg_file = TempFile::new("comment_check.jpg");
         jpeg_file.write_bytes(&jpeg);
 

@@ -197,6 +197,12 @@ fn c_djpeg_sof10_encode_diff_zero() {
             std::fs::remove_file(&ppm_path).ok();
 
             if !output.status.success() {
+                // P4-116: CI provisions libjpeg-turbo 3.x, so a missing
+                // capability there is a provisioning defect, not a skip.
+                assert!(
+                    !helpers::is_ci(),
+                    "CI must provide a cjpeg -arithmetic -progressive-capable cjpeg"
+                );
                 eprintln!(
                     "SKIP: cjpeg -arithmetic -progressive failed: {}",
                     String::from_utf8_lossy(&output.stderr)

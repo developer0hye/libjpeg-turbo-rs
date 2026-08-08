@@ -217,7 +217,7 @@ fn c_xval_decode_dct_islow_vs_c_int_444() {
 fn c_xval_decode_dct_ifast_vs_c_fast_420() {
     let djpeg: PathBuf = require_c_tool!("djpeg");
     if !djpeg_supports_dct_flag(&djpeg, "fast") {
-        eprintln!("SKIP: djpeg does not support -dct fast");
+        helpers::skip_missing_c_capability("djpeg", "-dct fast");
         return;
     }
 
@@ -241,7 +241,7 @@ fn c_xval_decode_dct_ifast_vs_c_fast_420() {
 fn c_xval_decode_dct_ifast_vs_c_fast_444() {
     let djpeg: PathBuf = require_c_tool!("djpeg");
     if !djpeg_supports_dct_flag(&djpeg, "fast") {
-        eprintln!("SKIP: djpeg does not support -dct fast");
+        helpers::skip_missing_c_capability("djpeg", "-dct fast");
         return;
     }
 
@@ -268,7 +268,7 @@ fn c_xval_decode_dct_ifast_vs_c_fast_444() {
 fn c_xval_decode_dct_float_vs_c_float_420() {
     let djpeg: PathBuf = require_c_tool!("djpeg");
     if !djpeg_supports_dct_flag(&djpeg, "float") {
-        eprintln!("SKIP: djpeg does not support -dct float");
+        helpers::skip_missing_c_capability("djpeg", "-dct float");
         return;
     }
 
@@ -292,7 +292,7 @@ fn c_xval_decode_dct_float_vs_c_float_420() {
 fn c_xval_decode_dct_float_vs_c_float_444() {
     let djpeg: PathBuf = require_c_tool!("djpeg");
     if !djpeg_supports_dct_flag(&djpeg, "float") {
-        eprintln!("SKIP: djpeg does not support -dct float");
+        helpers::skip_missing_c_capability("djpeg", "-dct float");
         return;
     }
 

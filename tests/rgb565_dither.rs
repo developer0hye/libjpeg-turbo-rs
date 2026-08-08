@@ -156,7 +156,7 @@ fn c_djpeg_cross_validation_rgb565() {
     let djpeg: std::path::PathBuf = require_c_tool!("djpeg");
 
     if !djpeg_supports_rgb565(&djpeg) {
-        eprintln!("SKIP: djpeg does not support -rgb565");
+        helpers::skip_missing_c_capability("djpeg", "-rgb565");
         return;
     }
 
@@ -177,13 +177,13 @@ fn c_djpeg_cross_validation_rgb565() {
         .output()
         .expect("failed to run djpeg");
 
-    if !output.status.success() {
-        eprintln!(
-            "SKIP: djpeg -rgb565 -bmp failed: {}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-        return;
-    }
+    // P4-116: `djpeg_supports_rgb565` already probed the capability above, so a
+    // failure here is a defect in the request this test built.
+    assert!(
+        output.status.success(),
+        "djpeg -rgb565 -bmp failed: {}",
+        String::from_utf8_lossy(&output.stderr).trim()
+    );
 
     // Read the C output BMP
     let c_bmp_data: Vec<u8> = std::fs::read(&tmp_bmp.path).expect("read BMP output");

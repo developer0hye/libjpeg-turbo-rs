@@ -90,9 +90,13 @@ fn main() {
         );
     }
 
+    // Always generate it; only Linux-family targets hand it to the linker.
+    let _ = write_version_script(&gnu_version_script());
+
     match target_os.as_str() {
         "linux" | "android" | "freebsd" | "netbsd" | "openbsd" | "dragonfly" => {
             println!("cargo:rustc-cdylib-link-arg=-Wl,-soname,{soname}");
+            note_gnu_version_script_owner(&soname);
         }
         "macos" | "ios" | "tvos" | "watchos" => {
             println!("cargo:rustc-cdylib-link-arg=-Wl,-install_name,{install_name_mac}");
@@ -160,4 +164,113 @@ fn main() {
     println!("cargo:rerun-if-env-changed=CAPI_PKG_LIBDIR");
     println!("cargo:rerun-if-env-changed=CAPI_PKG_INCLUDEDIR");
     println!("cargo:rerun-if-changed=build.rs");
+}
+
+/// P4-81: GNU ELF symbol versions for the classic libjpeg surface.
+///
+/// The staged `libjpeg.so.8` carried a SONAME but no version nodes, so glibc
+/// bound prebuilt consumers (OpenCV, libtiff, GDAL, …) through its
+/// unversioned-fallback path and warned `no version information available`.
+/// That is not a warning-free distro replacement, and stricter loaders may
+/// refuse it outright.
+///
+/// The map mirrors upstream `src/libjpeg.map.in` — `LIBJPEGTURBO_@ver@` owning
+/// the two MEM_SRCDST entry points and localising the SIMD/const internals,
+/// `LIBJPEG_@ver@` owning the reference API — with one deliberate deviation.
+///
+/// **Upstream's `LIBJPEG_8.0` node is `global: *`.** It can afford that
+/// because it builds two libraries: `libjpeg.so.8` from this map and
+/// `libturbojpeg.so.0` from `src/turbojpeg-mapfile`, which assigns each `tj*`
+/// symbol to the `TURBOJPEG_1.0`…`TURBOJPEG_3.0` node it was introduced in.
+/// We ship **one** artifact carrying both surfaces, so a `*` catch-all here
+/// would stamp every `tj*` symbol as a reference libjpeg export — exactly the
+/// mislabelling this item forbids — and re-versioning them under any node of
+/// our own would be worse: a consumer linked against a real libturbojpeg
+/// requests `tjInitCompress@TURBOJPEG_1.0`, and the loader fails outright when
+/// the library offers that name under a different version.
+///
+/// So the map has no catch-all. Symbols matched by no node keep default,
+/// unversioned visibility — which is precisely their status today, so the
+/// TurboJPEG and crate-only surfaces are unchanged while the classic API gains
+/// the nodes prebuilt consumers look for.
+///
+/// Only emitted for a v8 libjpeg SONAME: a caller who overrode `CAPI_SONAME`
+/// to something else is not building the artifact these nodes describe, and
+/// applying a v8 map to it would be a silently wrong label.
+/// # Why this does not hand the map to rustc's linker invocation
+///
+/// It cannot. rustc passes its own version script for every cdylib —
+/// `-Wl,--version-script=.../deps/rustc*/list`, an *anonymous* tag
+/// (`{ global: …; local: *; };`) that exports the `#[no_mangle]` items and
+/// hides the rest — and GNU ld refuses to combine an anonymous version tag
+/// with named ones. Adding ours as a second script fails the link outright:
+///
+/// ```text
+/// /usr/bin/ld: anonymous version tag cannot be combined with other version tags
+/// ```
+///
+/// This was verified against binutils 2.47 across every script surface (see
+/// P4-81 in `docs/last_mile/phase4.md` for the four-case experiment):
+/// a second `--version-script`, a `VERSION { … }` block in a linker-script
+/// input file, and `.symver` directives in the object all fail — `.symver`
+/// differently, with `version node not found`, because the directive *attaches*
+/// a symbol to a node without *defining* one. rustc 1.94.1 exposes no `-C` or
+/// `-Z` knob to suppress its own script.
+///
+/// The one configuration that works is a single named script carrying
+/// `local: *` itself, which means whoever owns the link owns the versioning.
+/// For a cdylib that is rustc, so the versioned artifact is produced instead by
+/// `scripts/install_capi.sh`, which relinks it from the `staticlib` this crate
+/// already builds. The acceptance criterion is about the installed library that
+/// prebuilt consumers bind to, so that is the right artifact to version.
+///
+/// The map is still generated here, and its path published as
+/// `CAPI_VERSION_SCRIPT`, because the install script and the content tests both
+/// consume it.
+fn note_gnu_version_script_owner(soname: &str) {
+    if !soname.starts_with("libjpeg.so.8") {
+        println!(
+            "cargo:warning=libjpeg-turbo-rs-capi: SONAME `{soname}` is not the v8 \
+             libjpeg identity, so no GNU symbol-version script applies. Prebuilt \
+             consumers of this artifact will see no version information (P4-81)."
+        );
+    }
+}
+
+/// Write the map to `OUT_DIR` and publish its path.
+///
+/// Called on every platform, not only where the linker consumes it, so
+/// `tests/capi_symbol_versions.rs` can assert the content a Linux build would
+/// get without needing a Linux host — the node names and the deliberate
+/// absence of a catch-all are the part most likely to regress, and they are
+/// verifiable anywhere.
+fn write_version_script(map: &str) -> PathBuf {
+    let out_dir: PathBuf = PathBuf::from(env::var_os("OUT_DIR").expect("OUT_DIR not set"));
+    let map_path: PathBuf = out_dir.join("libjpeg.map");
+    fs::write(&map_path, map).expect("write libjpeg.map");
+    println!("cargo:rustc-env=CAPI_VERSION_SCRIPT={}", map_path.display());
+    map_path
+}
+
+/// The GNU version script text. See `note_gnu_version_script_owner` for why it has
+/// no catch-all node.
+fn gnu_version_script() -> String {
+    // Classic exports that are not `jpeg_`-prefixed. Upstream declares these
+    // in `jpegint.h` and consumers of the shared library do link them, so they
+    // belong in the reference node rather than falling through unversioned.
+    const CLASSIC_NON_JPEG_PREFIXED: &[&str] = &["jcopy_block_row", "jdiv_round_up"];
+
+    let mut map: String = String::new();
+    map.push_str("LIBJPEGTURBO_8.0 {\n  global:\n");
+    // Upstream places the MEM_SRCDST pair here, not in LIBJPEG_8.0. An exact
+    // name outranks the `jpeg_*` pattern below, which is the same precedence
+    // upstream relies on against its own `*`.
+    map.push_str("    jpeg_mem_dest;\n    jpeg_mem_src;\n");
+    map.push_str("  local:\n    jsimd_*;\n    jconst_*;\n};\n\n");
+    map.push_str("LIBJPEG_8.0 {\n  global:\n    jpeg_*;\n");
+    for name in CLASSIC_NON_JPEG_PREFIXED {
+        map.push_str(&format!("    {name};\n"));
+    }
+    map.push_str("};\n");
+    map
 }

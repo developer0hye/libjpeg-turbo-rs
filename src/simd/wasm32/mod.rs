@@ -204,7 +204,7 @@ pub(crate) unsafe fn wasm_downsample_h2v1_fdct_quantize(
 /// SIMD quantize + zigzag reorder using reciprocal multiply.
 #[target_feature(enable = "simd128")]
 unsafe fn wasm_quantize_zigzag(coeffs: &[i16; 64], quant: &QuantDivisors, output: &mut [i16; 64]) {
-    let zigzag: &[usize; 64] = &crate::encode::tables::ZIGZAG_ORDER;
+    let zigzag: &[usize; 64] = &crate::common::tables::ZIGZAG_ORDER;
 
     for i in (0..64).step_by(8) {
         // Gather 8 coefficients in zigzag order

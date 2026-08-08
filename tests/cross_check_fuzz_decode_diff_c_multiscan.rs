@@ -17,6 +17,8 @@
 //! Skip rule: `djpeg` absent on a developer machine is a soft skip; in CI it
 //! hard-fails so the gate cannot vanish into a green skip.
 
+mod helpers;
+
 use std::io::Write;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
@@ -38,25 +40,6 @@ const MULTISCAN_444: &[u8] =
     include_bytes!("fixtures/fuzz_repro/multiscan_noninterleaved_64x64_444.jpg");
 const CORRUPT_HUFFMAN_422: &[u8] =
     include_bytes!("fixtures/fuzz_repro/corrupt_huffman_65x65_422.jpg");
-
-fn is_ci() -> bool {
-    std::env::var("CI").is_ok() || std::env::var("GITHUB_ACTIONS").is_ok()
-}
-
-fn djpeg_path() -> Option<PathBuf> {
-    for p in [
-        "/opt/homebrew/bin/djpeg",
-        "/usr/local/bin/djpeg",
-        "/usr/bin/djpeg",
-        "/opt/libjpeg-turbo/bin/djpeg",
-    ] {
-        let pb = PathBuf::from(p);
-        if pb.exists() {
-            return Some(pb);
-        }
-    }
-    None
-}
 
 /// Returns `(w, h, channels, pixels, had_stderr)`. `had_stderr` mirrors the
 /// fuzz oracle's `c_lenient_recovery` flag (djpeg emitted a warning).
@@ -123,13 +106,7 @@ fn parse_pnm(bytes: &[u8]) -> Option<(usize, usize, usize, Vec<u8>)> {
 /// (within IDCT tolerance). Pre-fix this diverges by max abs 128.
 #[test]
 fn multiscan_noninterleaved_64x64_444_matches_djpeg() {
-    let Some(djpeg) = djpeg_path() else {
-        if is_ci() {
-            panic!("P4-22 cross-check requires djpeg in CI");
-        }
-        eprintln!("SKIP: djpeg not found on standard paths");
-        return;
-    };
+    let djpeg: PathBuf = require_c_tool!("djpeg");
 
     let mut decoder = Decoder::new(MULTISCAN_444).expect("rust decoder rejected P4-22 fixture");
     decoder.set_lenient(true);
@@ -175,13 +152,7 @@ fn multiscan_noninterleaved_64x64_444_matches_djpeg() {
 /// — otherwise the differential fuzzer's `(Some, Rejected)` arm panics.
 #[test]
 fn corrupt_huffman_65x65_422_lenient_matches_djpeg() {
-    let Some(djpeg) = djpeg_path() else {
-        if is_ci() {
-            panic!("P4-23 cross-check requires djpeg in CI");
-        }
-        eprintln!("SKIP: djpeg not found on standard paths");
-        return;
-    };
+    let djpeg: PathBuf = require_c_tool!("djpeg");
 
     // djpeg accepts (exit 0): the drop-in floor requires we also accept.
     let c = decode_with_djpeg(&djpeg, CORRUPT_HUFFMAN_422);

@@ -183,13 +183,12 @@ fn c_xval_scaling_fixture_images() {
     ];
 
     for &(path, name) in fixtures {
-        let jpeg = match std::fs::read(path) {
-            Ok(data) => data,
-            Err(_) => {
-                eprintln!("SKIP: fixture {} not found", path);
-                continue;
-            }
-        };
+        // P4-116: these fixtures are committed to this repository. A missing
+        // one is a defect in the checkout, never an environment gap, so it
+        // must not be able to silently remove cases from the matrix.
+        let jpeg: Vec<u8> = std::fs::read(path).unwrap_or_else(|error| {
+            panic!("required in-repo fixture {path} is unreadable: {error}")
+        });
 
         for &(num, denom, scale_name) in SUPPORTED_SCALES {
             let label: String = format!("fixture_{}_{}", name, scale_name);

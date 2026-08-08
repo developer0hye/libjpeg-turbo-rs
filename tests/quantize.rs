@@ -625,7 +625,7 @@ fn c_djpeg_quantize_diff_zero() {
     let djpeg: PathBuf = require_c_tool!("djpeg");
 
     if !djpeg_supports_colors(&djpeg) {
-        eprintln!("SKIP: djpeg does not support -colors flag");
+        helpers::skip_missing_c_capability("djpeg", "-colors");
         return;
     }
 
@@ -668,14 +668,15 @@ fn c_djpeg_quantize_diff_zero() {
             .output()
             .expect("failed to run djpeg -colors");
 
-        if !output.status.success() {
-            let stderr: String = String::from_utf8_lossy(&output.stderr).to_string();
-            eprintln!(
-                "SKIP: djpeg -colors {} -dither fs failed: {}",
-                num_colors, stderr
-            );
-            continue;
-        }
+        // P4-116: the tool was already discovered and any capability
+        // probe already passed, so a failed invocation here is a defect
+        // in the request we built — not a reason to report success.
+        assert!(
+            output.status.success(),
+            "djpeg -colors {} -dither fs failed: {}",
+            num_colors,
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
 
         let ppm_data: Vec<u8> = std::fs::read(&tmp_ppm.path).expect("read PPM");
         let (c_width, c_height, c_pixels) = parse_ppm(&ppm_data);
@@ -781,12 +782,12 @@ fn c_djpeg_quantize_ordered_dither_diff_zero() {
     let djpeg: PathBuf = require_c_tool!("djpeg");
 
     if !djpeg_supports_colors(&djpeg) {
-        eprintln!("SKIP: djpeg does not support -colors flag");
+        helpers::skip_missing_c_capability("djpeg", "-colors");
         return;
     }
 
     if !djpeg_supports_dither(&djpeg) {
-        eprintln!("SKIP: djpeg does not support -dither flag");
+        helpers::skip_missing_c_capability("djpeg", "-dither");
         return;
     }
 
@@ -820,14 +821,15 @@ fn c_djpeg_quantize_ordered_dither_diff_zero() {
         .output()
         .expect("failed to run djpeg -colors -dither ordered");
 
-    if !output.status.success() {
-        let stderr: String = String::from_utf8_lossy(&output.stderr).to_string();
-        eprintln!(
-            "SKIP: djpeg -colors {} -dither ordered failed: {}",
-            num_colors, stderr
-        );
-        return;
-    }
+    // P4-116: the tool was already discovered and any capability
+    // probe already passed, so a failed invocation here is a defect
+    // in the request we built — not a reason to report success.
+    assert!(
+        output.status.success(),
+        "djpeg -colors {} -dither ordered failed: {}",
+        num_colors,
+        String::from_utf8_lossy(&output.stderr).trim()
+    );
 
     let ppm_data: Vec<u8> = std::fs::read(&tmp_ppm.path).expect("read PPM");
     let (c_width, c_height, c_pixels) = parse_ppm(&ppm_data);
@@ -902,12 +904,12 @@ fn c_djpeg_quantize_no_dither_diff_zero() {
     let djpeg: PathBuf = require_c_tool!("djpeg");
 
     if !djpeg_supports_colors(&djpeg) {
-        eprintln!("SKIP: djpeg does not support -colors flag");
+        helpers::skip_missing_c_capability("djpeg", "-colors");
         return;
     }
 
     if !djpeg_supports_dither(&djpeg) {
-        eprintln!("SKIP: djpeg does not support -dither flag");
+        helpers::skip_missing_c_capability("djpeg", "-dither");
         return;
     }
 
@@ -941,14 +943,15 @@ fn c_djpeg_quantize_no_dither_diff_zero() {
         .output()
         .expect("failed to run djpeg -colors -dither none");
 
-    if !output.status.success() {
-        let stderr: String = String::from_utf8_lossy(&output.stderr).to_string();
-        eprintln!(
-            "SKIP: djpeg -colors {} -dither none failed: {}",
-            num_colors, stderr
-        );
-        return;
-    }
+    // P4-116: the tool was already discovered and any capability
+    // probe already passed, so a failed invocation here is a defect
+    // in the request we built — not a reason to report success.
+    assert!(
+        output.status.success(),
+        "djpeg -colors {} -dither none failed: {}",
+        num_colors,
+        String::from_utf8_lossy(&output.stderr).trim()
+    );
 
     let ppm_data: Vec<u8> = std::fs::read(&tmp_ppm.path).expect("read PPM");
     let (c_width, c_height, c_pixels) = parse_ppm(&ppm_data);
@@ -1022,7 +1025,7 @@ fn c_djpeg_quantize_fixture_image() {
     let djpeg: PathBuf = require_c_tool!("djpeg");
 
     if !djpeg_supports_colors(&djpeg) {
-        eprintln!("SKIP: djpeg does not support -colors flag");
+        helpers::skip_missing_c_capability("djpeg", "-colors");
         return;
     }
 
@@ -1058,14 +1061,15 @@ fn c_djpeg_quantize_fixture_image() {
         .output()
         .expect("failed to run djpeg -colors");
 
-    if !output.status.success() {
-        let stderr: String = String::from_utf8_lossy(&output.stderr).to_string();
-        eprintln!(
-            "SKIP: djpeg -colors {} -dither fs failed: {}",
-            num_colors, stderr
-        );
-        return;
-    }
+    // P4-116: the tool was already discovered and any capability
+    // probe already passed, so a failed invocation here is a defect
+    // in the request we built — not a reason to report success.
+    assert!(
+        output.status.success(),
+        "djpeg -colors {} -dither fs failed: {}",
+        num_colors,
+        String::from_utf8_lossy(&output.stderr).trim()
+    );
 
     let ppm_data: Vec<u8> = std::fs::read(&tmp_ppm.path).expect("read PPM");
     let (c_width, c_height, c_pixels) = parse_ppm(&ppm_data);

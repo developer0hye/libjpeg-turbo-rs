@@ -362,16 +362,6 @@ fn scan_jpeg_markers(jpeg: &[u8]) -> Vec<RawMarker> {
     markers
 }
 
-/// Load an ICC profile from the reference test images directory.
-fn load_reference_icc(name: &str) -> Option<Vec<u8>> {
-    let path: PathBuf = PathBuf::from(format!("references/libjpeg-turbo/testimages/{}", name));
-    if path.exists() {
-        Some(std::fs::read(&path).expect("read ICC file"))
-    } else {
-        None
-    }
-}
-
 // ===========================================================================
 // C cross-validation: jpegtran -copy all
 // ===========================================================================
@@ -551,17 +541,17 @@ fn c_jpegtran_copy_icc_preserves_icc_only() {
     let jpegtran: PathBuf = require_c_tool!("jpegtran");
 
     if !jpegtran_supports_copy_icc(&jpegtran) {
-        eprintln!("SKIP: jpegtran does not support -copy icc");
+        helpers::skip_missing_c_capability("jpegtran", "-copy icc");
         return;
     }
 
-    let icc_data: Vec<u8> = match load_reference_icc("test3.icc") {
-        Some(d) => d,
-        None => {
-            eprintln!("SKIP: test3.icc not found");
-            return;
-        }
-    };
+    // P4-116: `test3.icc` lives in the libjpeg-turbo submodule, so "absent"
+    // means either the submodule is not checked out (environmental) or the
+    // fixture moved (a defect). `require_c_testimage!` tells those apart; a
+    // bare `return` did not.
+    let icc_path: PathBuf = require_c_testimage!("test3.icc");
+    let icc_data: Vec<u8> = std::fs::read(&icc_path)
+        .unwrap_or_else(|error| panic!("read {}: {error}", icc_path.display()));
 
     // Create input JPEG with ICC profile + COM marker
     let pixels: Vec<u8> = vec![128u8; 16 * 16 * 3];

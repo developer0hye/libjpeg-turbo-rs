@@ -22,26 +22,12 @@ const TEST_H: usize = 48;
 const QUALITY: u8 = 90;
 
 fn require_tools_or_skip() -> Option<(PathBuf, PathBuf)> {
-    let cjpeg = match helpers::cjpeg_path() {
-        Some(p) => p,
-        None => {
-            if helpers::is_ci() {
-                panic!("P3-6 cross-check requires cjpeg in CI");
-            }
-            eprintln!("SKIP: cjpeg not found in /opt/homebrew/bin or /usr/local/bin");
-            return None;
-        }
-    };
-    let djpeg = match helpers::djpeg_path() {
-        Some(p) => p,
-        None => {
-            if helpers::is_ci() {
-                panic!("P3-6 cross-check requires djpeg in CI");
-            }
-            eprintln!("SKIP: djpeg not found in /opt/homebrew/bin or /usr/local/bin");
-            return None;
-        }
-    };
+    // `optional_c_tool` searches PATH as well as /opt/homebrew/bin, and panics
+    // under CI. The hand-rolled version this replaces named only the two
+    // hard-coded directories in its skip message, which misdescribed where it
+    // had actually looked (P4-116).
+    let cjpeg: PathBuf = helpers::optional_c_tool("cjpeg")?;
+    let djpeg: PathBuf = helpers::optional_c_tool("djpeg")?;
     Some((cjpeg, djpeg))
 }
 
