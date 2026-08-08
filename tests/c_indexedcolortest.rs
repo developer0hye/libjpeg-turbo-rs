@@ -246,12 +246,12 @@ fn c_indexedcolortest_8bit() {
                     num_colors, max_diff
                 );
             }
-            None => {
-                eprintln!(
-                    "SKIP: djpeg -colors {} -dither fs failed for 8-bit RGB",
-                    num_colors
-                );
-            }
+            None => panic!(
+                // P4-116: the `-colors` capability is probed once up front,
+                // so a failure here is a defect in the request we built.
+                "djpeg -colors {} -dither fs failed for 8-bit RGB",
+                num_colors
+            ),
         }
 
         // Test RGB→RGB quantization with no dithering
@@ -274,12 +274,12 @@ fn c_indexedcolortest_8bit() {
                     num_colors, max_diff
                 );
             }
-            None => {
-                eprintln!(
-                    "SKIP: djpeg -colors {} -dither none failed for 8-bit RGB",
-                    num_colors
-                );
-            }
+            None => panic!(
+                // P4-116: the `-colors` capability is probed once up front,
+                // so a failure here is a defect in the request we built.
+                "djpeg -colors {} -dither none failed for 8-bit RGB",
+                num_colors
+            ),
         }
     }
 
@@ -345,12 +345,12 @@ fn c_indexedcolortest_12bit() {
                     num_colors, max_diff
                 );
             }
-            None => {
-                eprintln!(
-                    "SKIP: djpeg -colors {} failed for 12-bit scenario",
-                    num_colors
-                );
-            }
+            None => panic!(
+                // P4-116: the `-colors` capability is probed once up front,
+                // so a failure here is a defect in the request we built.
+                "djpeg -colors {} failed for 12-bit scenario",
+                num_colors
+            ),
         }
     }
 
@@ -408,12 +408,12 @@ fn c_indexedcolortest_cross_precision() {
                     num_colors, max_diff
                 );
             }
-            None => {
-                eprintln!(
-                    "SKIP: djpeg -colors {} failed for cross-precision",
-                    num_colors
-                );
-            }
+            None => panic!(
+                // P4-116: the `-colors` capability is probed once up front,
+                // so a failure here is a defect in the request we built.
+                "djpeg -colors {} failed for cross-precision",
+                num_colors
+            ),
         }
 
         // Also test no-dither for the cross-precision scenario
@@ -442,12 +442,12 @@ fn c_indexedcolortest_cross_precision() {
                     num_colors, max_diff
                 );
             }
-            None => {
-                eprintln!(
-                    "SKIP: djpeg -colors {} -dither none failed for cross-precision",
-                    num_colors
-                );
-            }
+            None => panic!(
+                // P4-116: the `-colors` capability is probed once up front,
+                // so a failure here is a defect in the request we built.
+                "djpeg -colors {} -dither none failed for cross-precision",
+                num_colors
+            ),
         }
     }
 

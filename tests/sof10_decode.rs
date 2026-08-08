@@ -213,6 +213,12 @@ fn sof10_c_encoded_decode_pixel_validation() {
         .output()
         .expect("failed to run cjpeg");
     if !output.status.success() {
+        // P4-116: CI provisions libjpeg-turbo 3.x, which has this
+        // capability, so a failure there is a provisioning defect.
+        assert!(
+            !helpers::is_ci(),
+            "CI must provide a cjpeg -arithmetic -progressive-capable toolchain"
+        );
         eprintln!(
             "SKIP: cjpeg -arithmetic -progressive failed: {}",
             String::from_utf8_lossy(&output.stderr)
@@ -397,6 +403,12 @@ fn c_djpeg_sof10_decode_diff_zero() {
             .output()
             .expect("failed to run cjpeg");
         if !output.status.success() {
+            // P4-116: CI provisions libjpeg-turbo 3.x, which has this
+            // capability, so a failure there is a provisioning defect.
+            assert!(
+                !helpers::is_ci(),
+                "CI must provide a cjpeg -arithmetic -progressive-capable toolchain"
+            );
             eprintln!(
                 "SKIP: cjpeg -arithmetic -progressive failed: {}",
                 String::from_utf8_lossy(&output.stderr)
