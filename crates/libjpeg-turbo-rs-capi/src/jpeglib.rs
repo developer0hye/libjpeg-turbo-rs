@@ -874,6 +874,9 @@ const JERR_BAD_DCT_COEF: c_int = 6;
 /// "Bogus marker length"
 const JERR_BAD_LENGTH: c_int = 12;
 #[allow(dead_code)]
+/// "Unsupported JPEG data precision %d"
+const JERR_BAD_PRECISION: c_int = 16;
+#[allow(dead_code)]
 /// "Improper call to JPEG library in state %d"
 const JERR_BAD_STATE: c_int = 21;
 #[allow(dead_code)]
@@ -4483,6 +4486,9 @@ pub extern "C" fn jpeg_read_raw_data(
             priv_state.last_error = CString::new(format!(
             "jpeg_read_raw_data: JERR_BUFFER_SIZE — max_lines ({max_lines}) < rows_per_iMCU ({rows_per_imcu})"
         )).unwrap_or_default();
+            // P4-100: the message already named this code; it never reached
+            // `error_exit`, so a C consumer saw only a FALSE/0 return.
+            invoke_error_exit(cinfo, JERR_BUFFER_SIZE);
             return 0;
         }
 
@@ -4626,6 +4632,9 @@ pub extern "C" fn jpeg12_read_raw_data(
                 c.data_precision
             ))
             .unwrap_or_default();
+            // P4-100: the message already named this code; it never reached
+            // `error_exit`, so a C consumer saw only a FALSE/0 return.
+            invoke_error_exit(cinfo, JERR_BAD_PRECISION);
             return 0;
         }
 
@@ -4653,6 +4662,9 @@ pub extern "C" fn jpeg12_read_raw_data(
             priv_state.last_error = CString::new(format!(
             "jpeg12_read_raw_data: JERR_BUFFER_SIZE — max_lines ({max_lines}) < rows_per_iMCU ({rows_per_imcu})"
         )).unwrap_or_default();
+            // P4-100: the message already named this code; it never reached
+            // `error_exit`, so a C consumer saw only a FALSE/0 return.
+            invoke_error_exit(cinfo, JERR_BUFFER_SIZE);
             return 0;
         }
 
@@ -7989,6 +8001,9 @@ pub extern "C" fn jpeg_write_raw_data(
                 "jpeg_write_raw_data: JERR_BAD_PRECISION (only data_precision=8 supported)",
             )
             .unwrap_or_default();
+            // P4-100: the message already named this code; it never reached
+            // `error_exit`, so a C consumer saw only a FALSE/0 return.
+            invoke_error_exit(cinfo, JERR_BAD_PRECISION);
             return 0;
         }
 
@@ -7997,6 +8012,9 @@ pub extern "C" fn jpeg_write_raw_data(
             priv_state.last_error =
                 CString::new("jpeg_write_raw_data: JERR_BAD_STATE (call jpeg_start_compress first with raw_data_in=TRUE)")
                     .unwrap_or_default();
+            // P4-100: the message already named this code; it never reached
+            // `error_exit`, so a C consumer saw only a FALSE/0 return.
+            invoke_error_exit(cinfo, JERR_BAD_STATE);
             return 0;
         }
 
@@ -8010,6 +8028,9 @@ pub extern "C" fn jpeg_write_raw_data(
                 "jpeg_write_raw_data: JERR_BUFFER_SIZE (num_lines={num_lines} < lines_per_iMCU={lines_per_imcu})"
             ))
             .unwrap_or_default();
+            // P4-100: the message already named this code; it never reached
+            // `error_exit`, so a C consumer saw only a FALSE/0 return.
+            invoke_error_exit(cinfo, JERR_BUFFER_SIZE);
             return 0;
         }
 
@@ -8441,6 +8462,9 @@ pub extern "C" fn jpeg12_write_raw_data(
                 c.data_precision
             ))
             .unwrap_or_default();
+            // P4-100: the message already named this code; it never reached
+            // `error_exit`, so a C consumer saw only a FALSE/0 return.
+            invoke_error_exit(cinfo, JERR_BAD_PRECISION);
             return 0;
         }
 
@@ -8449,6 +8473,9 @@ pub extern "C" fn jpeg12_write_raw_data(
             priv_state.last_error =
                 CString::new("jpeg12_write_raw_data: JERR_BAD_STATE (call jpeg_start_compress first with raw_data_in=TRUE)")
                     .unwrap_or_default();
+            // P4-100: the message already named this code; it never reached
+            // `error_exit`, so a C consumer saw only a FALSE/0 return.
+            invoke_error_exit(cinfo, JERR_BAD_STATE);
             return 0;
         }
 
@@ -8461,6 +8488,9 @@ pub extern "C" fn jpeg12_write_raw_data(
                 "jpeg12_write_raw_data: JERR_BUFFER_SIZE (num_lines={num_lines} < lines_per_iMCU={lines_per_imcu})"
             ))
             .unwrap_or_default();
+            // P4-100: the message already named this code; it never reached
+            // `error_exit`, so a C consumer saw only a FALSE/0 return.
+            invoke_error_exit(cinfo, JERR_BUFFER_SIZE);
             return 0;
         }
 
