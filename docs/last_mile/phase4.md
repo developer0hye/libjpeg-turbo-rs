@@ -1438,6 +1438,43 @@ this today); replacing rather than augmenting rustc's script (no stable knob);
 requiring `lld`, which pushes a toolchain constraint onto packagers; or linking
 the shared object ourselves from a staticlib, a large build-system change.
 
+**Settled by experiment (2026-08-08), binutils 2.47 via `x86_64-elf-binutils`.**
+The candidate list above was written from the CI failure alone. Linking the
+cases directly narrows it to one answer, and kills the cheap options
+individually. `a.o` exports `jpeg_read_header`, `jpeg_mem_dest`, `tj3Init`;
+`rustc_like.map` is `{ global: …; local: *; };` — an anonymous tag, exactly
+what rustc emits.
+
+| # | configuration | result |
+| --- | --- | --- |
+| 1 | rustc's anonymous script **+** our named script | `anonymous version tag cannot be combined with other version tags` — reproduces CI exactly |
+| 2 | `.symver` in the object **+** rustc's script only | `version node not found for symbol jpeg_mem_dest@@LIBJPEGTURBO_8.0` |
+| 3 | rustc's anonymous script **+** `VERSION { … }` in a linker-script *input file* | same anonymous-tag error as #1 |
+| 4 | our named script **alone**, `local: *` inside the first node | **works** — emits `.gnu.version_d` with `LIBJPEG_8.0` and `LIBJPEGTURBO_8.0`, and binds the symbols to them |
+
+Case 2 matters because `.symver` looks like a way to sidestep version scripts
+entirely, and it is not: the directive *attaches* a symbol to a node, it does
+not *define* the node, so a script is still required. Case 3 matters because
+`VERSION { … }` inside a linker script is a different surface from
+`--version-script` but merges through the same code path, so it fails
+identically. Neither is a workaround.
+
+Case 4 is the whole finding: the target ELF is reachable with **exactly one**
+version script — ours, carrying `local: *` so it also does the job rustc's was
+doing. And rustc 1.94.1 exposes no way to stop emitting its own: `-C help` and
+`-Z help` list nothing for version scripts or symbol visibility.
+
+So the remaining question is not *which script mechanism* — all of them are the
+same mechanism — but **who runs the link**. The bounded version of that is to
+produce the versioned `libjpeg.so.8` from the `staticlib` (already in
+`crate-type`) at *install* time in `scripts/install_capi.sh`, rather than
+restructuring the cargo build: the acceptance criterion is about the installed
+library prebuilt consumers bind to, and about the OpenCV `no version
+information available` warning, both of which are properties of the staged
+artifact. The cdylib cargo emits would stay unversioned, which would need
+saying plainly in `docs/ABI_COMPATIBILITY.md` so nobody reads a `cargo build`
+artifact as the shippable one.
+
 **A consequence #437's scope does not mention, found by CI (PR #447).** Adding
 version nodes *removes glibc's unversioned-fallback path*, and the Pillow smoke
 leg immediately failed with:
