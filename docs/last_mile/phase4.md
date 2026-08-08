@@ -2344,7 +2344,12 @@ instance. What is left are oracle-side skips, which split two ways and must not
 be converted uniformly:
 
 * **defects** — the tool was discovered and its capability probed, so a failure
-  is in the request the test built. `tests/c_indexedcolortest.rs`'s five
+  is in the request the test built. Making `c_indexedcolortest` assert
+  immediately exposed a *parallelism race* the skip had been hiding: `run_djpeg`
+  named its temp input from `process::id()` alone, but cargo runs `#[test]`s on
+  parallel threads of one process, so concurrent cases deleted each other's
+  input mid-invocation. It surfaced as `djpeg: can't open …` and was swallowed.
+  The path is now unique per call. `tests/c_indexedcolortest.rs`'s five
   `-colors` sites are now panics; the `-colors` capability is probed once up
   front, so nothing downstream may treat its absence as news.
 * **capability gaps** — `cjpeg -precision 12`, `-precision 16 -lossless`, and
