@@ -38,23 +38,31 @@ struct TurboJpegDev {
 }
 
 fn find_turbojpeg_dev() -> Option<TurboJpegDev> {
-    let mut prefixes: Vec<PathBuf> = Vec::new();
-    for var in ["LIBJPEG_TURBO_PREFIX", "CONDA_PREFIX"] {
-        if let Ok(prefix) = std::env::var(var) {
-            prefixes.push(PathBuf::from(prefix));
+    // An explicit LIBJPEG_TURBO_PREFIX is exclusive: falling through to another
+    // install when it turns out to be TurboJPEG 2.x or unreadable would let the
+    // gate validate a different setup than the one CI provisioned, and pass
+    // while the configured prefix is broken.
+    let prefixes: Vec<PathBuf> = match std::env::var_os("LIBJPEG_TURBO_PREFIX") {
+        Some(prefix) => vec![PathBuf::from(prefix)],
+        None => {
+            let mut prefixes: Vec<PathBuf> = Vec::new();
+            if let Some(prefix) = std::env::var_os("CONDA_PREFIX") {
+                prefixes.push(PathBuf::from(prefix));
+            }
+            prefixes.extend(
+                [
+                    "/opt/libjpeg-turbo",
+                    "/opt/homebrew/opt/jpeg-turbo",
+                    "/opt/homebrew",
+                    "/usr/local",
+                    "/usr",
+                ]
+                .iter()
+                .map(PathBuf::from),
+            );
+            prefixes
         }
-    }
-    prefixes.extend(
-        [
-            "/opt/libjpeg-turbo",
-            "/opt/homebrew/opt/jpeg-turbo",
-            "/opt/homebrew",
-            "/usr/local",
-            "/usr",
-        ]
-        .iter()
-        .map(PathBuf::from),
-    );
+    };
 
     // Debian/Ubuntu put the header in `<prefix>/include` but the linker stub in
     // `<prefix>/lib/<triplet>`, so a plain lib64/lib scan reports a perfectly
