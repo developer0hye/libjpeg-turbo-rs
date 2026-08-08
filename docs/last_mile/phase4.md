@@ -78,6 +78,7 @@
 | P4-117 | CLOSED 2026-08-08 (4:4:1 trim rejected images shorter than one iMCU row) |
 | P4-120 | OPEN (classic-shim allocation-failure paths are unreachable from tests) |
 | P4-121 | OPEN (lossless encode accepts a restart interval C refuses to decode) |
+| P4-122 | OPEN (the Pillow smoke harness substitutes for a v6b library, which its own policy forbids) |
 
 ---
 
@@ -2778,6 +2779,52 @@ path.
 **Why deferred.** P4-116 is test integrity; this is an encoder validation gap
 it uncovered. The affected call is a misuse that upstream diagnoses, not a
 silent data corruption, so it does not block the test work.
+
+## P4-122. The Pillow Smoke Harness Performs the v6b Substitution Its Own Policy Forbids — **OPEN**
+
+**Motivation.** Filed 2026-08-08 from the P4-81 CI run (PR #447). Declaring GNU
+symbol versions made the Pillow leg fail with:
+
+```
+version `LIBJPEG_6.2' not found (required by .../PIL/_imaging...so)
+```
+
+**Root cause.** `examples/pillow_smoke/run.sh` symlinks the shim as
+`libjpeg.so.62` (line 62) and overwrites Pillow's bundled
+`libjpeg-*.so.62.*` with it (lines 150-163). The `_imaging.so` in that wheel is
+built against **v6b** and requests `jpeg_*@LIBJPEG_6.2`. Until P4-81 the shim
+declared no version nodes at all, so glibc's unversioned-fallback path bound a
+v6b consumer to our **v8** struct layout and the harness reported success.
+
+This contradicts the policy the same evidence chain states. `docs/LAST_MILE.md`
+says the Pillow runner "rebuilds a v6b wheel against a discoverable v8 SDK" and
+that "Direct v6b substitution is forbidden because T4 is a non-goal", and T4
+(`libjpeg.so.62`) is an explicit non-goal. The CI leg does the forbidden thing.
+
+**Why it matters.** P0-3 and the `capi_pillow_compat` row in the live-gate
+table are cited as T3 downstream evidence. If the binding under test was
+v6b-consumer-to-v8-library, that evidence is weaker than documented — it
+demonstrated that a mismatch *loads*, not that the ABI matches. P4-81's version
+nodes turn the mismatch from silent UB into a clean load-time refusal, which is
+why the failure surfaced now rather than being introduced now.
+
+**Acceptance criteria.**
+
+1. The Linux Pillow leg obtains a Pillow whose `_imaging.so` links a **v8**
+   libjpeg — the documented rebuild path — and never overwrites a bundled
+   `*.so.62.*` in place.
+2. Adding a `LIBJPEG_6.2` node to satisfy the old wheel is explicitly rejected:
+   it would assert a v6b ABI this project does not implement and restore the
+   struct-layout mismatch.
+3. The harness fails closed when it cannot obtain a v8-ABI Pillow, rather than
+   falling back to substitution.
+4. `docs/LAST_MILE.md`'s `capi_pillow_compat` row is re-measured and re-worded
+   to describe what the leg actually proves.
+5. P4-81's version script stays enabled while this is fixed; CI going green
+   again by weakening the version nodes is not an acceptable resolution.
+
+**Why deferred.** The fix touches the project's headline downstream-compat
+evidence, so it needs its own review rather than being folded into P4-81.
 
 ## P4-123. Architecture Umbrella: Codec Plans, C-ABI State, Public Boundaries, SIMD Dispatch — **OPEN**
 
