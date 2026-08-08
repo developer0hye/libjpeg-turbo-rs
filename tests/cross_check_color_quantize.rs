@@ -251,14 +251,15 @@ fn c_djpeg_cross_validation_color_quantize() {
             .output()
             .expect("failed to run djpeg -colors");
 
-        if !output.status.success() {
-            let stderr: String = String::from_utf8_lossy(&output.stderr).to_string();
-            eprintln!(
-                "SKIP: djpeg -colors {} -dither fs failed: {}",
-                num_colors, stderr
-            );
-            continue;
-        }
+        // P4-116: the tool was already discovered and any capability
+        // probe already passed, so a failed invocation here is a defect
+        // in the request we built — not a reason to report success.
+        assert!(
+            output.status.success(),
+            "djpeg -colors {} -dither fs failed: {}",
+            num_colors,
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
 
         let (c_width, c_height, c_pixels) = parse_ppm(tmp_ppm.path());
         assert_eq!(
@@ -401,14 +402,15 @@ fn c_djpeg_cross_validation_color_quantize_ordered_dither() {
         .output()
         .expect("failed to run djpeg -colors -dither ordered");
 
-    if !output.status.success() {
-        let stderr: String = String::from_utf8_lossy(&output.stderr).to_string();
-        eprintln!(
-            "SKIP: djpeg -colors {} -dither ordered failed: {}",
-            num_colors, stderr
-        );
-        return;
-    }
+    // P4-116: the tool was already discovered and any capability
+    // probe already passed, so a failed invocation here is a defect
+    // in the request we built — not a reason to report success.
+    assert!(
+        output.status.success(),
+        "djpeg -colors {} -dither ordered failed: {}",
+        num_colors,
+        String::from_utf8_lossy(&output.stderr).trim()
+    );
 
     let (c_width, c_height, c_pixels) = parse_ppm(tmp_ppm.path());
     assert_eq!(c_width, width, "C djpeg width mismatch (ordered dither)");

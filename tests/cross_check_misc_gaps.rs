@@ -230,13 +230,14 @@ fn c_xval_block_smoothing_pixel_comparison() {
         .output()
         .expect("failed to run djpeg");
 
-    if !output.status.success() {
-        eprintln!(
-            "SKIP: djpeg failed: {}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-        return;
-    }
+    // P4-116: the tool was already discovered and any capability
+    // probe already passed, so a failed invocation here is a defect
+    // in the request we built — not a reason to report success.
+    assert!(
+        output.status.success(),
+        "djpeg failed: {}",
+        String::from_utf8_lossy(&output.stderr).trim()
+    );
 
     let (c_w, c_h, c_pixels) = parse_ppm(tmp_ppm.path());
     assert_eq!(c_w, dec_w, "C djpeg width mismatch");
@@ -829,13 +830,14 @@ fn c_xval_12bit_lossy_encode_decode() {
         .output()
         .expect("failed to run djpeg");
 
-    if !output.status.success() {
-        eprintln!(
-            "SKIP: djpeg cannot decode 12-bit JPEG (may not be built with 12-bit support): {}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-        return;
-    }
+    // P4-116: the tool was already discovered and any capability
+    // probe already passed, so a failed invocation here is a defect
+    // in the request we built — not a reason to report success.
+    assert!(
+        output.status.success(),
+        "djpeg cannot decode 12-bit JPEG (may not be built with 12-bit support): {}",
+        String::from_utf8_lossy(&output.stderr).trim()
+    );
 
     // Parse C djpeg PNM output and compare against Rust decode (diff=0).
     let out_data: Vec<u8> = std::fs::read(tmp_pnm.path()).expect("read djpeg output");

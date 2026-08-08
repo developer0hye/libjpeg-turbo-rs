@@ -751,14 +751,15 @@ fn c_cross_validation_precision_extended() {
                 .output()
                 .expect("failed to run cjpeg");
 
-            if !output.status.success() {
-                eprintln!(
-                    "SKIP precision={}: cjpeg failed ({})",
-                    precision,
-                    String::from_utf8_lossy(&output.stderr).trim()
-                );
-                continue;
-            }
+            // P4-116: the tool was already discovered and any capability
+            // probe already passed, so a failed invocation here is a defect
+            // in the request we built — not a reason to report success.
+            assert!(
+                output.status.success(),
+                "precision={}: cjpeg failed: {}",
+                precision,
+                String::from_utf8_lossy(&output.stderr).trim()
+            );
 
             let jpeg_data: Vec<u8> = std::fs::read(tmp_jpg.path()).expect("read cjpeg output");
 
