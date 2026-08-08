@@ -1494,15 +1494,51 @@ implement, and is rejected. The correct resolution is to make
 `examples/pillow_smoke/run.sh` take its documented v8-rebuild path in that leg
 rather than overwriting Pillow's bundled `libjpeg-*.so.62.4.0` in place.
 
-**Status (2026-08-08): partial, PR #447 held as draft.** `cargo test
---workspace --no-fail-fast`: 2470 passed, 0 failed, 1 ignored (macOS aarch64,
-where the ELF leg reports its skip); 21 CI checks green including the Linux
-ELF verification, 3 red on the Pillow harness above. Also not yet done: the
-acceptance criteria require re-running the OpenCV replacement harness to
-confirm the `no version information available` warning is gone, and confirming
-libtiff/GDAL/Poppler/HDF4 still load. Those need the downstream lab, and the
-warning's disappearance is the criterion that actually closes this item — the
-nodes existing is necessary, not sufficient.
+**Status (2026-08-08): implemented and CI-verified; open for its downstream
+criterion.** The nodes now exist on the shipped library and are asserted on a
+Linux runner.
+
+*What ships them.* Not the cdylib -- it cannot carry them, per the experiment
+above. `scripts/install_capi.sh` relinks `libjpeg.so.8` from the `staticlib`
+with the generated map as the only version script (`--whole-archive`, because
+nothing references the `#[no_mangle]` exports; `--allow-multiple-definition`
+for compiler_builtins symbols that also arrive from libgcc). A missing
+prerequisite warns and degrades; a relink that is attempted and fails stops the
+install, so an unversioned library cannot be shipped as though it were
+versioned. `CAPI_SKIP_SYMBOL_VERSIONS=1` opts out.
+
+*What proves it.* `Classic C-ABI GNU symbol versions (P4-81)` in `Integration
+Tests` runs `capi_symbol_versions` with `--nocapture` and fails closed on any
+`^SKIP`. The test stages the library through the install script itself and
+asserts the script reported `P4-81: relinked` before reading the ELF, so a
+degraded install fails rather than skipping. Green with
+`installed_library_exports_the_reference_version_nodes ... ok`.
+
+*Three false greens preceded that, all found by asking whether the leg ran
+rather than whether it passed*, and each is worth recording because they are
+distinct failure modes:
+
+1. **The PR was `CONFLICTING`.** GitHub cannot build a merge ref for a
+   conflicting PR, so `pull_request` workflows never start at all. Two pushes
+   produced zero Actions runs while the PR showed a green DCO check. Rebasing
+   fixed it.
+2. **The test skipped.** Its first draft looked for a leftover `*.versioned`
+   artifact and skipped when it found none; nothing in CI stages one. It now
+   stages one itself.
+3. **CI never invoked the suite.** This workflow selects the C-ABI crate's
+   tests by name, and `capi_symbol_versions` was not among them -- a test
+   nothing calls cannot fail. Now wired in.
+
+A fourth defect surfaced only once the leg genuinely ran: the assignment
+spot-check used `line.contains(symbol)`, which matched the Rust-mangled
+`_RNvXsl_...jpeg_CreateDecompress0E...` and asserted against it instead of the
+C symbol. Symbol names are compared exactly now.
+
+*Still open, and it is what closes this item.* The acceptance criteria ask for
+the OpenCV replacement harness to be re-run and the `no version information
+available` warning confirmed gone, plus libtiff/GDAL/Poppler/HDF4 still
+loading. Those need the downstream lab (P2-G). The nodes existing is necessary,
+not sufficient -- the warning disappearing is the criterion.
 
 ## P4-82. Classic Scanline Encoder Dropped Public Restart Settings — **CLOSED 2026-08-02**
 
