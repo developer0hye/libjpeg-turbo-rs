@@ -78,6 +78,7 @@
 | P4-117 | CLOSED 2026-08-08 (4:4:1 trim rejected images shorter than one iMCU row) |
 | P4-120 | OPEN (classic-shim allocation-failure paths are unreachable from tests) |
 | P4-121 | OPEN (lossless encode accepts a restart interval C refuses to decode) |
+| P4-122 | OPEN (the Pillow smoke harness substitutes for a v6b library, which its own policy forbids) |
 
 ---
 
@@ -1342,7 +1343,7 @@ So **(D) enable the target feature and let the compiler vectorise** joins the li
 
 **Acceptance criteria.** Decide the intended status of the public `decode` internals: (A) deprecate the low-level helper and make the module crate-private in the next semver-major release, with a downstream source scan and migration note; or (B) add a metadata- and policy-aware public companion, migrate callers, and make the legacy function delegate wherever its inputs are sufficient. In either case, rustdoc must state the exact behavior, source compatibility must be tested for the supported release line, and the legacy path must never panic on short or subsampled planes.
 
-## P4-81. Linux cdylib Omits GNU `LIBJPEG_8.0` Symbol Versions — **OPEN**
+## P4-81. Linux cdylib Omits GNU `LIBJPEG_8.0` Symbol Versions — **PARTIAL: nodes emitted and tested; downstream re-verification pending**
 
 **Motivation.** Filed 2026-08-02 by the real OpenCV replacement experiment.
 Ubuntu's prebuilt `libopencv_imgcodecs.so.406` requests
@@ -1372,6 +1373,172 @@ wrong node or symbol assignment; (3) the OpenCV harness keeps both binding
 assertions and runs without `no version information available`; and (4)
 alternative SONAME configurations are either given their correct version map
 or rejected with a clear build-time error rather than mislabeled silently.
+
+**Progress (2026-08-08) — the nodes exist.** `build.rs` generates a GNU
+version script and passes it to the linker on ELF targets, gated on the v8
+SONAME: an artifact built with `CAPI_SONAME` set to something else gets a
+`cargo:warning` instead of a silently wrong v8 label.
+
+The map mirrors upstream `src/libjpeg.map.in` — `LIBJPEGTURBO_8.0` owning
+`jpeg_mem_dest` / `jpeg_mem_src` and localising `jsimd_*` / `jconst_*`,
+`LIBJPEG_8.0` owning the reference API — with **one deliberate deviation that
+the issue's scope did not anticipate**.
+
+Upstream's `LIBJPEG_8.0` node is `global: *`. It can afford a catch-all because
+it builds *two* libraries: `libjpeg.so.8` from that map and
+`libturbojpeg.so.0` from `src/turbojpeg-mapfile`, which assigns each `tj*`
+symbol to the `TURBOJPEG_1.0`…`TURBOJPEG_3.0` node it was introduced in. We
+ship **one** artifact carrying both surfaces (92 `jpeg_*` exports and 63
+`tj*`/`TJ*`), so applying upstream's map verbatim would stamp every TurboJPEG
+export as reference libjpeg API — precisely the mislabelling this item forbids.
+Re-versioning them under a node of our own would be worse: a consumer linked
+against a real libturbojpeg requests `tjInitCompress@TURBOJPEG_1.0`, and the
+loader fails outright when the library offers that name under a different
+version.
+
+So the map has **no catch-all**. Symbols matched by no node keep default,
+unversioned visibility — exactly their status today — so the TurboJPEG and
+crate-only surfaces are unchanged while the classic API gains the nodes
+prebuilt consumers look for. The `local:` clause hides nothing we ship: the
+crate exports no `jsimd_*` or `jconst_*` symbol.
+
+`tests/capi_symbol_versions.rs` splits verification by what each layer needs.
+The script *content* — node names, membership, and the absence of a catch-all —
+is asserted on every platform from the generated file, because that is the part
+most likely to regress and it needs no Linux. The *ELF result* is asserted with
+`readelf --version-info` and `--dyn-syms` where ELF versioning exists, checking
+both that the nodes exist and that `jpeg_CreateDecompress` / `jpeg_read_header`
+land in `LIBJPEG_8.0`, `jpeg_mem_*` in `LIBJPEGTURBO_8.0`, and `tj3Init` in
+neither — a map that defined the nodes but matched nothing would otherwise pass
+a nodes-exist check while leaving every symbol unversioned.
+
+**Hard blocker found by CI (PR #447): rustc's own version script.** Adding
+`-Wl,--version-script` cannot work as designed. The link fails with:
+
+```
+/usr/bin/ld: anonymous version tag cannot be combined with other version tags
+```
+
+because rustc already passes a version script for every cdylib:
+
+```
+-Wl,--version-script=.../deps/rustc*/list      <- rustc's
+-Wl,--version-script,.../out/libjpeg.map       <- ours
+```
+
+rustc's uses an *anonymous* version tag — `{ global: …; local: *; };`, no name —
+to export `#[no_mangle]` items and hide the rest. GNU ld forbids mixing an
+anonymous tag with named ones, and rustc's script is not suppressible on
+stable. The map's content is correct and its content tests pass; the two
+scripts are simply mutually exclusive.
+
+P4-81 therefore needs a different mechanism. Candidates, none free: a post-link
+rewrite that synthesises `.gnu.version_d` / `.gnu.version` (patchelf cannot do
+this today); replacing rather than augmenting rustc's script (no stable knob);
+requiring `lld`, which pushes a toolchain constraint onto packagers; or linking
+the shared object ourselves from a staticlib, a large build-system change.
+
+**Settled by experiment (2026-08-08), binutils 2.47 via `x86_64-elf-binutils`.**
+The candidate list above was written from the CI failure alone. Linking the
+cases directly narrows it to one answer, and kills the cheap options
+individually. `a.o` exports `jpeg_read_header`, `jpeg_mem_dest`, `tj3Init`;
+`rustc_like.map` is `{ global: …; local: *; };` — an anonymous tag, exactly
+what rustc emits.
+
+| # | configuration | result |
+| --- | --- | --- |
+| 1 | rustc's anonymous script **+** our named script | `anonymous version tag cannot be combined with other version tags` — reproduces CI exactly |
+| 2 | `.symver` in the object **+** rustc's script only | `version node not found for symbol jpeg_mem_dest@@LIBJPEGTURBO_8.0` |
+| 3 | rustc's anonymous script **+** `VERSION { … }` in a linker-script *input file* | same anonymous-tag error as #1 |
+| 4 | our named script **alone**, `local: *` inside the first node | **works** — emits `.gnu.version_d` with `LIBJPEG_8.0` and `LIBJPEGTURBO_8.0`, and binds the symbols to them |
+
+Case 2 matters because `.symver` looks like a way to sidestep version scripts
+entirely, and it is not: the directive *attaches* a symbol to a node, it does
+not *define* the node, so a script is still required. Case 3 matters because
+`VERSION { … }` inside a linker script is a different surface from
+`--version-script` but merges through the same code path, so it fails
+identically. Neither is a workaround.
+
+Case 4 is the whole finding: the target ELF is reachable with **exactly one**
+version script — ours, carrying `local: *` so it also does the job rustc's was
+doing. And rustc 1.94.1 exposes no way to stop emitting its own: `-C help` and
+`-Z help` list nothing for version scripts or symbol visibility.
+
+So the remaining question is not *which script mechanism* — all of them are the
+same mechanism — but **who runs the link**. The bounded version of that is to
+produce the versioned `libjpeg.so.8` from the `staticlib` (already in
+`crate-type`) at *install* time in `scripts/install_capi.sh`, rather than
+restructuring the cargo build: the acceptance criterion is about the installed
+library prebuilt consumers bind to, and about the OpenCV `no version
+information available` warning, both of which are properties of the staged
+artifact. The cdylib cargo emits would stay unversioned, which would need
+saying plainly in `docs/ABI_COMPATIBILITY.md` so nobody reads a `cargo build`
+artifact as the shippable one.
+
+**A consequence #437's scope does not mention, found by CI (PR #447).** Adding
+version nodes *removes glibc's unversioned-fallback path*, and the Pillow smoke
+leg immediately failed with:
+
+```
+version `LIBJPEG_6.2' not found (required by .../PIL/_imaging...so)
+```
+
+That `_imaging.so` was built against a **v6b** libjpeg. With no version nodes
+the loader bound it to our v8 shim anyway; with nodes present it correctly
+refuses. The failure is the feature working — a v6b consumer had been binding
+to a v8 struct layout, which is the silent ABI mismatch T4's non-goal status
+and the "v6b substitution is not valid T3 evidence" rule both exist to prevent.
+
+Adding a `LIBJPEG_6.2` node would "fix" CI by re-asserting a v6b ABI we do not
+implement, and is rejected. The correct resolution is to make
+`examples/pillow_smoke/run.sh` take its documented v8-rebuild path in that leg
+rather than overwriting Pillow's bundled `libjpeg-*.so.62.4.0` in place.
+
+**Status (2026-08-08): implemented and CI-verified; open for its downstream
+criterion.** The nodes now exist on the shipped library and are asserted on a
+Linux runner.
+
+*What ships them.* Not the cdylib -- it cannot carry them, per the experiment
+above. `scripts/install_capi.sh` relinks `libjpeg.so.8` from the `staticlib`
+with the generated map as the only version script (`--whole-archive`, because
+nothing references the `#[no_mangle]` exports; `--allow-multiple-definition`
+for compiler_builtins symbols that also arrive from libgcc). A missing
+prerequisite warns and degrades; a relink that is attempted and fails stops the
+install, so an unversioned library cannot be shipped as though it were
+versioned. `CAPI_SKIP_SYMBOL_VERSIONS=1` opts out.
+
+*What proves it.* `Classic C-ABI GNU symbol versions (P4-81)` in `Integration
+Tests` runs `capi_symbol_versions` with `--nocapture` and fails closed on any
+`^SKIP`. The test stages the library through the install script itself and
+asserts the script reported `P4-81: relinked` before reading the ELF, so a
+degraded install fails rather than skipping. Green with
+`installed_library_exports_the_reference_version_nodes ... ok`.
+
+*Three false greens preceded that, all found by asking whether the leg ran
+rather than whether it passed*, and each is worth recording because they are
+distinct failure modes:
+
+1. **The PR was `CONFLICTING`.** GitHub cannot build a merge ref for a
+   conflicting PR, so `pull_request` workflows never start at all. Two pushes
+   produced zero Actions runs while the PR showed a green DCO check. Rebasing
+   fixed it.
+2. **The test skipped.** Its first draft looked for a leftover `*.versioned`
+   artifact and skipped when it found none; nothing in CI stages one. It now
+   stages one itself.
+3. **CI never invoked the suite.** This workflow selects the C-ABI crate's
+   tests by name, and `capi_symbol_versions` was not among them -- a test
+   nothing calls cannot fail. Now wired in.
+
+A fourth defect surfaced only once the leg genuinely ran: the assignment
+spot-check used `line.contains(symbol)`, which matched the Rust-mangled
+`_RNvXsl_...jpeg_CreateDecompress0E...` and asserted against it instead of the
+C symbol. Symbol names are compared exactly now.
+
+*Still open, and it is what closes this item.* The acceptance criteria ask for
+the OpenCV replacement harness to be re-run and the `no version information
+available` warning confirmed gone, plus libtiff/GDAL/Poppler/HDF4 still
+loading. Those need the downstream lab (P2-G). The nodes existing is necessary,
+not sufficient -- the warning disappearing is the criterion.
 
 ## P4-82. Classic Scanline Encoder Dropped Public Restart Settings — **CLOSED 2026-08-02**
 
@@ -2711,6 +2878,57 @@ path.
 **Why deferred.** P4-116 is test integrity; this is an encoder validation gap
 it uncovered. The affected call is a misuse that upstream diagnoses, not a
 silent data corruption, so it does not block the test work.
+
+## P4-122. The Pillow Smoke Harness Performs the v6b Substitution Its Own Policy Forbids — **OPEN**
+
+**Motivation.** Filed 2026-08-08 from the P4-81 CI run (PR #447). Declaring GNU
+symbol versions made the Pillow leg fail with:
+
+```
+version `LIBJPEG_6.2' not found (required by .../PIL/_imaging...so)
+```
+
+**Root cause.** `examples/pillow_smoke/run.sh` symlinks the shim as
+`libjpeg.so.62` (line 62) and overwrites Pillow's bundled
+`libjpeg-*.so.62.*` with it (lines 150-163). The `_imaging.so` in that wheel is
+built against **v6b** and requests `jpeg_*@LIBJPEG_6.2`. Until P4-81 the shim
+declared no version nodes at all, so glibc's unversioned-fallback path bound a
+v6b consumer to our **v8** struct layout and the harness reported success.
+
+This contradicts the policy the same evidence chain states. `docs/LAST_MILE.md`
+says the Pillow runner "rebuilds a v6b wheel against a discoverable v8 SDK" and
+that "Direct v6b substitution is forbidden because T4 is a non-goal", and T4
+(`libjpeg.so.62`) is an explicit non-goal. The CI leg does the forbidden thing.
+
+**Why it matters.** P0-3 and the `capi_pillow_compat` row in the live-gate
+table are cited as T3 downstream evidence. If the binding under test was
+v6b-consumer-to-v8-library, that evidence is weaker than documented — it
+demonstrated that a mismatch *loads*, not that the ABI matches. P4-81's version
+nodes turn the mismatch from silent UB into a clean load-time refusal, which is
+why the failure surfaced now rather than being introduced now.
+
+**Acceptance criteria.**
+
+1. The Linux Pillow leg obtains a Pillow whose `_imaging.so` links a **v8**
+   libjpeg — the documented rebuild path — and never overwrites a bundled
+   `*.so.62.*` in place.
+2. Adding a `LIBJPEG_6.2` node to satisfy the old wheel is explicitly rejected:
+   it would assert a v6b ABI this project does not implement and restore the
+   struct-layout mismatch.
+3. The harness fails closed when it cannot obtain a v8-ABI Pillow, rather than
+   falling back to substitution.
+4. `docs/LAST_MILE.md`'s `capi_pillow_compat` row is re-measured and re-worded
+   to describe what the leg actually proves.
+5. P4-81's version nodes stay in place while this is fixed; CI going green
+   again by weakening them is not an acceptable resolution. (Written when the
+   nodes were expected on the cargo cdylib. They now land on the *installed*
+   library `scripts/install_capi.sh` relinks, because rustc's own anonymous
+   version script makes the cdylib incapable of carrying them. The substance is
+   unchanged: the harness must stop substituting for a v6b library, not lose
+   the nodes.)
+
+**Why deferred.** The fix touches the project's headline downstream-compat
+evidence, so it needs its own review rather than being folded into P4-81.
 
 ## P4-123. Architecture Umbrella: Codec Plans, C-ABI State, Public Boundaries, SIMD Dispatch — **OPEN**
 

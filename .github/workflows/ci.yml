@@ -312,6 +312,25 @@ jobs:
         run: >
           cargo test -p libjpeg-turbo-rs-capi
           --test capi_classic_lifecycle_pathological -- --nocapture
+      # P4-81: the ELF symbol-version leg. This crate's tests are selected by
+      # name here, so a suite that is never named never runs -- which is exactly
+      # what happened to this one: it reported green on two full CI runs without
+      # executing, because nothing invoked it. It stages the library through
+      # scripts/install_capi.sh itself and asserts the relink happened, so a
+      # degraded install fails rather than skipping. Linux-only: GNU symbol
+      # versioning is an ELF feature.
+      - name: Classic C-ABI GNU symbol versions (P4-81)
+        run: |
+          set -o pipefail
+          cargo test -p libjpeg-turbo-rs-capi \
+            --test capi_symbol_versions -- --nocapture 2>&1 | tee p481.log
+          # The ELF assertions are the point of this leg; a skip means they did
+          # not run and the nodes are unverified.
+          if grep -q '^SKIP' p481.log; then
+            echo "P4-81 symbol-version checks skipped in CI; this leg must run here" >&2
+            grep '^SKIP' p481.log >&2
+            exit 1
+          fi
       # P4-108's destination canaries are differential: one C binary is linked
       # against our cdylib and against a reference libjpeg, and the two
       # contract reports must be byte-identical. Build the *pinned submodule*
