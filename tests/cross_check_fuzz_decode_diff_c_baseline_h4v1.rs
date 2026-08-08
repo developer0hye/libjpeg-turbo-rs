@@ -23,6 +23,8 @@
 //! SSE2/AVX2 and C-AArch64 NEON), so this test only meaningfully exercises the
 //! fix on x86_64 CI runners; on AArch64 the NEON path always agreed with djpeg.
 
+mod helpers;
+
 use std::io::Write;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
@@ -95,21 +97,6 @@ const FUZZ_CRASH_BYTES: &[u8] = &[
 /// djpeg on every platform, so any non-trivial regression trips this bound.
 const PIXEL_TOLERANCE: i32 = 24;
 
-fn djpeg_path() -> Option<PathBuf> {
-    for p in [
-        "/opt/homebrew/bin/djpeg",
-        "/usr/local/bin/djpeg",
-        "/usr/bin/djpeg",
-        "/opt/libjpeg-turbo/bin/djpeg",
-    ] {
-        let pb = PathBuf::from(p);
-        if pb.exists() {
-            return Some(pb);
-        }
-    }
-    None
-}
-
 /// Mirror of `fuzz_decode_diff_c.rs::decode_with_djpeg`. Returns
 /// `(w, h, channels, pixels)`.
 fn decode_with_djpeg(djpeg: &PathBuf, jpeg: &[u8]) -> Option<(usize, usize, usize, Vec<u8>)> {
@@ -171,10 +158,7 @@ fn parse_pnm(bytes: &[u8]) -> Option<(usize, usize, usize, Vec<u8>)> {
 
 #[test]
 fn fuzz_decode_diff_c_baseline_16x16_h4v1_matches_djpeg() {
-    let Some(djpeg) = djpeg_path() else {
-        eprintln!("SKIP: djpeg not found on standard paths");
-        return;
-    };
+    let djpeg: PathBuf = require_c_tool!("djpeg");
 
     // Match the fuzz harness exactly: lenient mode + block_smoothing(true).
     let mut decoder = Decoder::new(FUZZ_CRASH_BYTES).expect("rust decoder rejected fuzz input");
@@ -260,10 +244,7 @@ const CI_279_BASELINE_GRAY_BYTES: &[u8] = &[
 
 #[test]
 fn fuzz_decode_diff_c_baseline_gray_16x16_h1v4_matches_djpeg() {
-    let Some(djpeg) = djpeg_path() else {
-        eprintln!("SKIP: djpeg not found on standard paths");
-        return;
-    };
+    let djpeg: PathBuf = require_c_tool!("djpeg");
 
     let mut decoder =
         Decoder::new(CI_279_BASELINE_GRAY_BYTES).expect("rust decoder rejected fuzz input");

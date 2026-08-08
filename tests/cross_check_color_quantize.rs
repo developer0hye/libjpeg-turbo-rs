@@ -208,7 +208,7 @@ fn c_djpeg_cross_validation_color_quantize() {
     let djpeg: PathBuf = require_c_tool!("djpeg");
 
     if !djpeg_supports_colors(&djpeg) {
-        eprintln!("SKIP: djpeg does not support -colors flag");
+        helpers::skip_missing_c_capability("djpeg", "-colors");
         return;
     }
 
@@ -362,12 +362,12 @@ fn c_djpeg_cross_validation_color_quantize_ordered_dither() {
     let djpeg: PathBuf = require_c_tool!("djpeg");
 
     if !djpeg_supports_colors(&djpeg) {
-        eprintln!("SKIP: djpeg does not support -colors flag");
+        helpers::skip_missing_c_capability("djpeg", "-colors");
         return;
     }
 
     if !djpeg_supports_dither_ordered(&djpeg) {
-        eprintln!("SKIP: djpeg does not support -dither ordered");
+        helpers::skip_missing_c_capability("djpeg", "-dither ordered");
         return;
     }
 

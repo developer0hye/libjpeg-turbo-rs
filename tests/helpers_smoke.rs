@@ -128,6 +128,67 @@ fn helpers_build_ppm_format() {
 }
 
 // ---------------------------------------------------------------------------
+// optional_c_tool guard tests (P4-116)
+//
+// `optional_c_tool` exists for cross-checks that are one part of a larger test,
+// where `require_c_tool!`'s early `return` would silently drop the Rust-side
+// assertions that follow. The shape it replaces — `if let Some(tool) =
+// private_lookup()` — was fail-open on CI as well as locally, so the CI branch
+// is the reason the helper exists and must be pinned.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn optional_c_tool_returns_a_real_path_when_present() {
+    // Whatever it hands back must exist; a stale or fabricated path would let a
+    // sub-check "run" against a binary that is not there.
+    if let Some(path) = helpers::optional_c_tool_under("djpeg", false) {
+        assert!(
+            path.exists(),
+            "optional_c_tool returned {path:?}, which does not exist"
+        );
+    }
+}
+
+#[test]
+fn optional_c_tool_yields_none_locally_for_a_missing_tool() {
+    assert!(
+        helpers::optional_c_tool_under("definitely_not_a_real_tool_xyz_42", false).is_none(),
+        "a developer machine without the tool must get None, not a panic"
+    );
+}
+
+/// The intentional red: on a provisioned runner a missing tool is a
+/// provisioning defect, so the sub-check must not be allowed to vanish.
+#[test]
+#[should_panic(expected = "CI requires C tool")]
+fn optional_c_tool_panics_on_ci_for_a_missing_tool() {
+    let _ = helpers::optional_c_tool_under("definitely_not_a_real_tool_xyz_42", true);
+}
+
+// ---------------------------------------------------------------------------
+// skip_missing_c_capability guard tests (P4-116)
+//
+// The second half of the discovery policy: `require_c_tool!` decides whether
+// the binary exists, this decides what happens when it exists but is too old
+// for the switch a case needs. Both answers must be the same on CI.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn a_missing_capability_is_a_local_skip() {
+    // No panic, and the caller stays in control of the `return`/`continue`.
+    helpers::skip_missing_c_capability_under("djpeg", "-colors", false);
+}
+
+/// The intentional red: CI installs libjpeg-turbo 3.x, which has every
+/// capability this repository probes for, so a miss there is a provisioning
+/// defect and must not quietly delete the case from its matrix.
+#[test]
+#[should_panic(expected = "provisioning defect")]
+fn a_missing_capability_fails_on_ci() {
+    helpers::skip_missing_c_capability_under("djpeg", "-colors", true);
+}
+
+// ---------------------------------------------------------------------------
 // ComparisonTally guard tests (P4-116)
 //
 // These live here rather than in `helpers/tally.rs` so they run exactly once.

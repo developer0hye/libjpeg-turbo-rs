@@ -200,16 +200,12 @@ fn c_indexedcolortest_8bit() {
     let djpeg: PathBuf = require_c_tool!("djpeg");
 
     if !djpeg_supports_colors(&djpeg) {
-        eprintln!("SKIP: djpeg does not support -colors flag");
+        helpers::skip_missing_c_capability("djpeg", "-colors");
         return;
     }
 
     // Use the reference test image (RGB JPEG)
-    let rgb_jpeg_path: PathBuf = PathBuf::from("references/libjpeg-turbo/testimages/testorig.jpg");
-    if !rgb_jpeg_path.exists() {
-        eprintln!("SKIP: test image not found at {:?}", rgb_jpeg_path);
-        return;
-    }
+    let rgb_jpeg_path: PathBuf = require_c_testimage!("testorig.jpg");
     let rgb_jpeg: Vec<u8> = std::fs::read(&rgb_jpeg_path).expect("read testorig.jpg");
 
     let color_depths: [usize; 2] = [128, 256];
@@ -308,17 +304,13 @@ fn c_indexedcolortest_12bit() {
     let djpeg: PathBuf = require_c_tool!("djpeg");
 
     if !djpeg_supports_colors(&djpeg) {
-        eprintln!("SKIP: djpeg does not support -colors flag");
+        helpers::skip_missing_c_capability("djpeg", "-colors");
         return;
     }
 
     // For 12-bit parity, use testorig.jpg as the RGB source (8-bit JPEG,
     // which represents the 8-bit path used by djpeg for quantization output)
-    let rgb_jpeg_path: PathBuf = PathBuf::from("references/libjpeg-turbo/testimages/testorig.jpg");
-    if !rgb_jpeg_path.exists() {
-        eprintln!("SKIP: test image not found at {:?}", rgb_jpeg_path);
-        return;
-    }
+    let rgb_jpeg_path: PathBuf = require_c_testimage!("testorig.jpg");
     let rgb_jpeg: Vec<u8> = std::fs::read(&rgb_jpeg_path).expect("read testorig.jpg");
 
     let color_depths: [usize; 2] = [128, 256];
@@ -379,15 +371,11 @@ fn c_indexedcolortest_cross_precision() {
     let djpeg: PathBuf = require_c_tool!("djpeg");
 
     if !djpeg_supports_colors(&djpeg) {
-        eprintln!("SKIP: djpeg does not support -colors flag");
+        helpers::skip_missing_c_capability("djpeg", "-colors");
         return;
     }
 
-    let rgb_jpeg_path: PathBuf = PathBuf::from("references/libjpeg-turbo/testimages/testorig.jpg");
-    if !rgb_jpeg_path.exists() {
-        eprintln!("SKIP: test image not found at {:?}", rgb_jpeg_path);
-        return;
-    }
+    let rgb_jpeg_path: PathBuf = require_c_testimage!("testorig.jpg");
     let rgb_jpeg: Vec<u8> = std::fs::read(&rgb_jpeg_path).expect("read testorig.jpg");
 
     let color_depths: [usize; 2] = [128, 256];

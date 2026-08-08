@@ -156,7 +156,7 @@ fn c_djpeg_cross_validation_rgb565() {
     let djpeg: std::path::PathBuf = require_c_tool!("djpeg");
 
     if !djpeg_supports_rgb565(&djpeg) {
-        eprintln!("SKIP: djpeg does not support -rgb565");
+        helpers::skip_missing_c_capability("djpeg", "-rgb565");
         return;
     }
 

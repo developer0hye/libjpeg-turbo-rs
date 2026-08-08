@@ -52,21 +52,6 @@ impl Drop for TempFile {
     }
 }
 
-fn find_c_tool(name: &str) -> Option<PathBuf> {
-    let brew: PathBuf = PathBuf::from(format!("/opt/homebrew/bin/{name}"));
-    if brew.exists() {
-        return Some(brew);
-    }
-    let output = Command::new("which").arg(name).output().ok()?;
-    if output.status.success() {
-        let path_str: String = String::from_utf8_lossy(&output.stdout).trim().to_string();
-        if !path_str.is_empty() {
-            return Some(PathBuf::from(path_str));
-        }
-    }
-    None
-}
-
 fn generate_gray_gradient(width: usize, height: usize) -> Vec<u8> {
     let mut pixels: Vec<u8> = Vec::with_capacity(width * height);
     for y in 0..height {
@@ -201,7 +186,11 @@ fn issue_369_baseline_gray_to_4bpp_channel_placement() {
     // Reference gray values: C djpeg where available (cross-validation),
     // otherwise our own grayscale decode (still pins channel placement, which
     // is the defect under test).
-    let reference: Vec<u8> = match find_c_tool("djpeg") {
+    //
+    // P4-116: the fallback makes this test its own oracle, so it must never be
+    // what CI runs — `optional_c_tool` panics there rather than quietly
+    // downgrading a cross-check into a tautology.
+    let reference: Vec<u8> = match helpers::optional_c_tool("djpeg") {
         Some(djpeg) => {
             let tmp_jpg = TempFile::new("gray.jpg");
             let tmp_pgm = TempFile::new("gray.pgm");

@@ -101,29 +101,12 @@ fn synth_rgb(width: usize, height: usize, seed: u32) -> Vec<u8> {
 }
 
 fn require_tools_or_skip() -> Option<(PathBuf, PathBuf)> {
-    let cjpeg = match helpers::cjpeg_path() {
-        Some(p) => p,
-        None => {
-            if helpers::is_ci() {
-                panic!(
-                    "regression_progressive_4pixel_chroma_transform: cjpeg not found in CI. \
-                     Lifting the LAST_MILE.md P3-4 gate requires this regression to actually run."
-                );
-            }
-            eprintln!("SKIP: cjpeg not found in /opt/homebrew/bin or /usr/local/bin");
-            return None;
-        }
-    };
-    let jpegtran = match helpers::jpegtran_path() {
-        Some(p) => p,
-        None => {
-            if helpers::is_ci() {
-                panic!("regression_progressive_4pixel_chroma_transform: jpegtran not found in CI.");
-            }
-            eprintln!("SKIP: jpegtran not found in /opt/homebrew/bin or /usr/local/bin");
-            return None;
-        }
-    };
+    // Lifting the LAST_MILE.md P3-4 gate requires this regression to actually
+    // run, so CI must not skip: `optional_c_tool` panics there. It also
+    // searches PATH, which the hand-rolled lookup's skip message denied
+    // (P4-116).
+    let cjpeg: PathBuf = helpers::optional_c_tool("cjpeg")?;
+    let jpegtran: PathBuf = helpers::optional_c_tool("jpegtran")?;
     Some((cjpeg, jpegtran))
 }
 

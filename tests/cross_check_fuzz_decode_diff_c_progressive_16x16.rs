@@ -12,6 +12,8 @@
 //! Root cause (filled in once isolated): see `src/decode/progressive.rs` and
 //! the closure note in `docs/last_mile/phase4.md::P4-2`.
 
+mod helpers;
+
 use std::io::Write;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
@@ -65,21 +67,6 @@ const FUZZ_CRASH_BYTES: &[u8] = &[
     0x01, 0x11, 0x21, 0xFF, 0xDA, 0x00, 0x08, 0x01, 0x01, 0x00, 0x01, 0x3F,
     0x10, 0x88, 0x29, 0x4C, 0x45, 0xB3, 0xFF, 0xD9,
 ];
-
-fn djpeg_path() -> Option<PathBuf> {
-    for p in [
-        "/opt/homebrew/bin/djpeg",
-        "/usr/local/bin/djpeg",
-        "/usr/bin/djpeg",
-        "/opt/libjpeg-turbo/bin/djpeg",
-    ] {
-        let pb = PathBuf::from(p);
-        if pb.exists() {
-            return Some(pb);
-        }
-    }
-    None
-}
 
 /// Mirror of `fuzz_decode_diff_c.rs::decode_with_djpeg`. Returns
 /// `(w, h, channels, pixels, stderr_nonempty)`.
@@ -144,10 +131,7 @@ fn parse_pnm(bytes: &[u8]) -> Option<(usize, usize, usize, Vec<u8>)> {
 
 #[test]
 fn fuzz_decode_diff_c_progressive_16x16_4_4_4_matches_djpeg() {
-    let Some(djpeg) = djpeg_path() else {
-        eprintln!("SKIP: djpeg not found on standard paths");
-        return;
-    };
+    let djpeg: PathBuf = require_c_tool!("djpeg");
 
     // Match the fuzz harness exactly: lenient mode + block_smoothing(true).
     // The harness enables block_smoothing to mirror djpeg's default behavior
@@ -300,10 +284,7 @@ const P4_2_SMOOTHING_APPLIES_BYTES: &[u8] = &[
 
 #[test]
 fn fuzz_decode_diff_c_progressive_smoothing_applies_matches_djpeg() {
-    let Some(djpeg) = djpeg_path() else {
-        eprintln!("SKIP: djpeg not found on standard paths");
-        return;
-    };
+    let djpeg: PathBuf = require_c_tool!("djpeg");
 
     let mut decoder =
         Decoder::new(P4_2_SMOOTHING_APPLIES_BYTES).expect("rust decoder rejected P4-2 fixture");
@@ -524,10 +505,7 @@ const MULTI_IMCU_ROW_PARTIAL_LAST_BYTES: &[u8] = &[
 
 #[test]
 fn progressive_16x20_multi_imcu_row_partial_last_smoothing_matches_djpeg() {
-    let Some(djpeg) = djpeg_path() else {
-        eprintln!("SKIP: djpeg not found on standard paths");
-        return;
-    };
+    let djpeg: PathBuf = require_c_tool!("djpeg");
 
     let mut decoder = Decoder::new(MULTI_IMCU_ROW_PARTIAL_LAST_BYTES)
         .expect("rust decoder rejected multi-iMCU-row fixture");
@@ -565,10 +543,7 @@ fn progressive_16x20_multi_imcu_row_partial_last_smoothing_matches_djpeg() {
 
 #[test]
 fn fuzz_decode_diff_c_progressive_16x16_h1v4_smoothing_matches_djpeg() {
-    let Some(djpeg) = djpeg_path() else {
-        eprintln!("SKIP: djpeg not found on standard paths");
-        return;
-    };
+    let djpeg: PathBuf = require_c_tool!("djpeg");
 
     // Match the fuzz harness exactly: lenient mode + block_smoothing(true).
     let mut decoder =
@@ -610,10 +585,7 @@ fn fuzz_decode_diff_c_progressive_16x16_h1v4_smoothing_matches_djpeg() {
 
 #[test]
 fn fuzz_decode_diff_c_progressive_16x16_h2v1_ac_refine_matches_djpeg() {
-    let Some(djpeg) = djpeg_path() else {
-        eprintln!("SKIP: djpeg not found on standard paths");
-        return;
-    };
+    let djpeg: PathBuf = require_c_tool!("djpeg");
 
     let mut decoder =
         Decoder::new(CI_283_PROGRESSIVE_H2V1_BYTES).expect("rust decoder rejected fuzz input");

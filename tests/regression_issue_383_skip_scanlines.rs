@@ -12,26 +12,13 @@
 //! fully-skipped iMCU rows is bounded (the pipeline's crop_y machinery
 //! skips their IDCT).
 
+mod helpers;
+
 use std::path::PathBuf;
 use std::process::Command;
 
 use libjpeg_turbo_rs::api::streaming::StreamingDecoder;
 use libjpeg_turbo_rs::{compress, PixelFormat, Subsampling};
-
-fn find_c_tool(name: &str) -> Option<PathBuf> {
-    let brew: PathBuf = PathBuf::from(format!("/opt/homebrew/bin/{name}"));
-    if brew.exists() {
-        return Some(brew);
-    }
-    let output = Command::new("which").arg(name).output().ok()?;
-    if output.status.success() {
-        let path_str: String = String::from_utf8_lossy(&output.stdout).trim().to_string();
-        if !path_str.is_empty() {
-            return Some(PathBuf::from(path_str));
-        }
-    }
-    None
-}
 
 /// djpeg's `-skip` flag arrived with libjpeg-turbo 1.5's partial decode
 /// support; probe the usage text rather than assuming.
@@ -244,12 +231,9 @@ fn issue_383_scaled_skip_clamps_and_matches_c() {
     );
 
     // Byte-identity vs djpeg -scale 1/2 -skip 0,39.
-    let Some(djpeg) = find_c_tool("djpeg") else {
-        eprintln!("SKIP(C xval): djpeg not found");
-        return;
-    };
+    let djpeg: PathBuf = require_c_tool!("djpeg");
     if !djpeg_supports_skip(&djpeg) {
-        eprintln!("SKIP(C xval): djpeg lacks -skip");
+        helpers::skip_missing_c_capability("djpeg", "-skip");
         return;
     }
     let skip: usize = 40;
@@ -316,12 +300,9 @@ fn issue_383_zero_height_stream_does_not_panic() {
 /// `djpeg -skip 0,N-1` on the same stream.
 #[test]
 fn issue_383_skip_matches_c_djpeg_skip() {
-    let Some(djpeg) = find_c_tool("djpeg") else {
-        eprintln!("SKIP: djpeg not found");
-        return;
-    };
+    let djpeg: PathBuf = require_c_tool!("djpeg");
     if !djpeg_supports_skip(&djpeg) {
-        eprintln!("SKIP: djpeg lacks -skip (need libjpeg-turbo >= 1.5)");
+        helpers::skip_missing_c_capability("djpeg", "-skip");
         return;
     }
 

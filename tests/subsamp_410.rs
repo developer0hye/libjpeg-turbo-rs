@@ -285,11 +285,24 @@ fn c_djpeg_cross_validation_410() {
         .unwrap_or_else(|e| panic!("Failed to run djpeg: {:?}", e));
 
     if !djpeg_output.status.success() {
+        // Neither an environment gap nor a capability gap: djpeg decodes real
+        // 4:1:0 fine — `cjpeg -sample 4x2 | djpeg` round-trips on this very
+        // binary. This fixture is deliberately inconsistent, because
+        // `make_jpeg_with_410_sampling` patches the SOF sampling factors to
+        // 4x2 over entropy data that was coded for 2x2. The MCU geometry no
+        // longer matches the scan, so djpeg reports "extraneous bytes before
+        // marker 0xd9". Refusing it is *correct* C behaviour, and our decoder
+        // being more lenient is exactly what this case measures.
+        //
+        // P4-116: so this must not become a CI-fatal capability assertion. The
+        // old message claimed "djpeg cannot decode 4:1:0", which is false and
+        // sends the reader hunting for a djpeg limitation that does not exist.
         eprintln!(
-            "SKIP: djpeg cannot decode 4:1:0 (exit code {:?}): {}",
+            "djpeg rejects the patched-SOF fixture, as expected (exit {:?}): {}",
             djpeg_output.status.code(),
-            String::from_utf8_lossy(&djpeg_output.stderr)
+            String::from_utf8_lossy(&djpeg_output.stderr).trim()
         );
+        eprintln!("  no C output to compare; the Rust-side leniency assertions already ran");
         return;
     }
 

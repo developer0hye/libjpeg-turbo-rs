@@ -1061,12 +1061,10 @@ fn progressive_odd_dimensions_transform_no_crash() {
     let _jpegtran: PathBuf = require_c_tool!("jpegtran");
     let djpeg: PathBuf = require_c_tool!("djpeg");
 
-    // cjpeg is at the same location as djpeg
-    let cjpeg_path: PathBuf = djpeg.parent().unwrap().join("cjpeg");
-    if !cjpeg_path.exists() {
-        eprintln!("SKIP: cjpeg not found at {:?}", cjpeg_path);
-        return;
-    }
+    // P4-116: deriving cjpeg from djpeg's directory is a private lookup. It
+    // misses a `cjpeg` that sits elsewhere on PATH, and its bare `return`
+    // skipped the case in CI too. Discover it like every other tool.
+    let cjpeg_path: PathBuf = require_c_tool!("cjpeg");
 
     // Test dimensions that previously crashed (non-MCU-aligned for 4:2:0 = must be
     // multiples of 16; 7x11 and 33x17 are not multiples of 16 in either dimension).

@@ -569,10 +569,14 @@ fn c_xval_decode_cmyk() {
         .expect("failed to run djpeg");
 
     if !output.status.success() {
+        // P4-116: djpeg is already discovered here, so this is the installed
+        // toolchain lacking a capability CI's libjpeg-turbo 3.x has — a
+        // provisioning defect there, an ordinary old-toolchain skip locally.
         eprintln!(
-            "SKIP: djpeg cannot decode CMYK JPEG: {}",
+            "  djpeg stderr: {}",
             String::from_utf8_lossy(&output.stderr).trim()
         );
+        helpers::skip_missing_c_capability("djpeg", "CMYK JPEG decode");
         return;
     }
 

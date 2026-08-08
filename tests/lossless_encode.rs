@@ -187,6 +187,14 @@ fn lossless_encode_invalid_point_transform() {
 // ===========================================================================
 
 /// Check if djpeg supports lossless JPEG (SOF3) decoding.
+///
+/// P4-116: the probe paths used to be named from `process::id()` alone. Cargo
+/// runs `#[test]`s as parallel threads of one process, and both callers of this
+/// function live in this binary, so the two probes shared one filename — each
+/// deleting the other's input mid-`djpeg`. The probe then answered "lossless
+/// unsupported" for a djpeg that supports it perfectly well, and the caller
+/// skipped. `helpers::TempFile` names per call (pid *and* a counter) and cleans
+/// up on drop, which is the same fix `c_indexedcolortest::run_djpeg` needed.
 fn djpeg_supports_lossless(djpeg: &std::path::Path) -> bool {
     // Encode a minimal lossless JPEG and try to decode it with djpeg.
     // If djpeg exits with success, it supports lossless.
@@ -195,23 +203,17 @@ fn djpeg_supports_lossless(djpeg: &std::path::Path) -> bool {
         Ok(j) => j,
         Err(_) => return false,
     };
-    let tmp_dir: PathBuf = std::env::temp_dir();
-    let tmp_jpg: PathBuf = tmp_dir.join(format!("ljt_probe_lossless_{}.jpg", std::process::id()));
-    let tmp_out: PathBuf = tmp_dir.join(format!("ljt_probe_lossless_{}.pgm", std::process::id()));
-    if std::fs::write(&tmp_jpg, &jpeg).is_err() {
-        return false;
-    }
-    let result: bool = Command::new(djpeg)
+    let tmp_jpg: helpers::TempFile = helpers::TempFile::new("probe_lossless.jpg");
+    let tmp_out: helpers::TempFile = helpers::TempFile::new("probe_lossless.pgm");
+    tmp_jpg.write_bytes(&jpeg);
+    Command::new(djpeg)
         .arg("-pnm")
         .arg("-outfile")
-        .arg(&tmp_out)
-        .arg(&tmp_jpg)
+        .arg(tmp_out.path())
+        .arg(tmp_jpg.path())
         .output()
         .map(|o| o.status.success())
-        .unwrap_or(false);
-    std::fs::remove_file(&tmp_jpg).ok();
-    std::fs::remove_file(&tmp_out).ok();
-    result
+        .unwrap_or(false)
 }
 
 #[test]
@@ -256,10 +258,7 @@ fn c_djpeg_lossless_encode_valid() {
 
     // Step 2: Check if this djpeg supports lossless (SOF3), skip if not
     if !djpeg_supports_lossless(&djpeg) {
-        eprintln!(
-            "SKIP: djpeg at {:?} does not support lossless JPEG (SOF3)",
-            djpeg
-        );
+        helpers::skip_missing_c_capability("djpeg", "lossless JPEG (SOF3)");
         return;
     }
 
@@ -481,10 +480,7 @@ fn c_djpeg_lossless_encode_extended_diff_zero() {
     let djpeg: PathBuf = require_c_tool!("djpeg");
 
     if !djpeg_supports_lossless(&djpeg) {
-        eprintln!(
-            "SKIP: djpeg at {:?} does not support lossless JPEG (SOF3)",
-            djpeg
-        );
+        helpers::skip_missing_c_capability("djpeg", "lossless JPEG (SOF3)");
         return;
     }
 

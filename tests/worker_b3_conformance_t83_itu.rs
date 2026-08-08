@@ -31,7 +31,7 @@ use std::process::{Command, Stdio};
 
 use libjpeg_turbo_rs::{decompress_to, PixelFormat};
 
-use helpers::{assert_pixels_identical, djpeg_path, parse_ppm, TempFile};
+use helpers::{assert_pixels_identical, parse_ppm, TempFile};
 
 const T83_DIR: &str = "tests/conformance/t83";
 const FETCH_SCRIPT: &str = "scripts/fetch_conformance.sh";
@@ -108,16 +108,7 @@ fn conformance_t83_itu_vectors_strict() {
         );
     }
 
-    let djpeg: PathBuf = match djpeg_path() {
-        Some(p) => p,
-        None => {
-            eprintln!(
-                "SKIP: djpeg not found; cannot cross-validate the {} T.83 vectors present.",
-                vectors.len()
-            );
-            return;
-        }
-    };
+    let djpeg: PathBuf = require_c_tool!("djpeg");
 
     let mut validated: usize = 0;
     let mut rust_errors: Vec<(String, String)> = Vec::new();
