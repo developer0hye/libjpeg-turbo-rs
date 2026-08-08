@@ -294,7 +294,7 @@
 
 ### Options (TJXOPT flags)
 - [x] TJXOPT_PERFECT (1) — Fail if transform is not perfect (partial iMCU) (`TransformOptions.perfect`)
-- [x] TJXOPT_TRIM (2) — Discard partial iMCU edges (`TransformOptions.trim`)
+- [x] TJXOPT_TRIM (2) — Discard partial iMCU edges (`TransformOptions.trim`); an axis holding less than one whole iMCU is left untrimmed rather than rejected, matching `trim_right_edge`/`trim_bottom_edge` (P4-117)
 - [x] TJXOPT_CROP (4) — Enable lossless cropping region (`TransformOptions.crop`)
 - [x] TJXOPT_GRAY (8) — Convert to grayscale during transform (`TransformOptions.grayscale`)
 - [x] TJXOPT_NOOUTPUT (16) — Dry run (no output image) (`TransformOptions.no_output`)

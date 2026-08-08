@@ -568,6 +568,25 @@ pub fn write_coefficients(coeffs: &JpegCoefficients) -> Result<Vec<u8>> {
 /// and C TurboJPEG's `tjTransform` without `TJXOPT_COPYNONE`). Pass
 /// [`MarkerCopyMode::None`](crate::MarkerCopyMode::None) via [`transform_jpeg_with_options`] to strip
 /// markers instead.
+/// One axis of upstream's edge trimming.
+///
+/// Returns the largest whole number of iMCUs that fits in `extent`, or `extent`
+/// unchanged when fewer than one iMCU fits — mirroring the `MCU_cols > 0` /
+/// `MCU_rows > 0` guards in `trim_right_edge` / `trim_bottom_edge`
+/// (transupp.c:1570-1592). Dropping the guard turns "there is nothing to trim"
+/// into "trim everything", which is how P4-117 rejected valid 4:4:1 images.
+fn trim_to_whole_imcus(extent: usize, imcu: usize, trim: bool) -> usize {
+    if !trim || imcu == 0 {
+        return extent;
+    }
+    let whole_imcus: usize = extent / imcu;
+    if whole_imcus > 0 {
+        whole_imcus * imcu
+    } else {
+        extent
+    }
+}
+
 pub fn transform_jpeg(data: &[u8], op: TransformOp) -> Result<Vec<u8>> {
     transform_jpeg_with_options(
         data,
@@ -681,22 +700,19 @@ pub fn transform_jpeg_with_options(data: &[u8], options: &TransformOptions) -> R
             _ => has_partial_height,
         };
 
-        let trimmed_w: usize = if trim_width {
-            (coeffs.width as usize / imcu_w) * imcu_w
-        } else {
-            coeffs.width as usize
-        };
-        let trimmed_h: usize = if trim_height {
-            (coeffs.height as usize / imcu_h) * imcu_h
-        } else {
-            coeffs.height as usize
-        };
-
-        if trimmed_w == 0 || trimmed_h == 0 {
-            return Err(JpegError::CorruptData(
-                "trim would remove all image data".to_string(),
-            ));
-        }
+        // Trim to whole iMCUs, but only when at least one whole iMCU exists on
+        // that axis. Upstream guards each edge the same way — `trim_right_edge`
+        // and `trim_bottom_edge` (transupp.c:1570-1592) both begin
+        // `if (MCU_cols > 0 && ...)` / `if (MCU_rows > 0 && ...)`, so an image
+        // narrower or shorter than one iMCU is simply left alone.
+        //
+        // P4-117: without the guard, a 4:4:1 (h=1, v=4) image only 27 rows tall
+        // computes `(27 / 32) * 32 == 0` and the whole transform was rejected
+        // with "trim would remove all image data". C returns the untrimmed
+        // 35x27 for `-trim -flip vertical` on exactly that input, and there is
+        // no error path in upstream's trim at all.
+        let trimmed_w: usize = trim_to_whole_imcus(coeffs.width as usize, imcu_w, trim_width);
+        let trimmed_h: usize = trim_to_whole_imcus(coeffs.height as usize, imcu_h, trim_height);
 
         coeffs.width = trimmed_w as u16;
         coeffs.height = trimmed_h as u16;
