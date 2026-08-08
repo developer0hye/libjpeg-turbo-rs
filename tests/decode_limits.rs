@@ -224,10 +224,7 @@ fn decode_raw_enforces_limits() {
 /// streams never reached the progressive-loop scan check.
 #[test]
 fn scan_cap_applies_to_non_interleaved_baseline() {
-    let (Some(cjpeg), _) = (helpers::cjpeg_path(), ()) else {
-        eprintln!("SKIP: cjpeg not found");
-        return;
-    };
+    let cjpeg: std::path::PathBuf = require_c_tool!("cjpeg");
     let dir = std::env::temp_dir().join(format!("scan_cap_{}", std::process::id()));
     std::fs::create_dir_all(&dir).expect("dir");
     let ppm = dir.join("in.ppm");

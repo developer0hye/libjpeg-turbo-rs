@@ -6,25 +6,12 @@
 //! advertised size indexed stale bytes. C expands instead: `djpeg -rgb`
 //! on a `cjpeg -precision 12` grayscale JPEG emits a P6 (RGB) PPM.
 
+mod helpers;
+
 use std::path::PathBuf;
 use std::process::Command;
 
 use libjpeg_turbo_rs::{decompress_to, output_buffer_size, PixelFormat};
-
-fn find_c_tool(name: &str) -> Option<PathBuf> {
-    let brew: PathBuf = PathBuf::from(format!("/opt/homebrew/bin/{name}"));
-    if brew.exists() {
-        return Some(brew);
-    }
-    let output = Command::new("which").arg(name).output().ok()?;
-    if output.status.success() {
-        let path_str: String = String::from_utf8_lossy(&output.stdout).trim().to_string();
-        if !path_str.is_empty() {
-            return Some(PathBuf::from(path_str));
-        }
-    }
-    None
-}
 
 fn cjpeg_supports_precision(cjpeg: &PathBuf) -> bool {
     let output = Command::new(cjpeg).arg("-?").output();
@@ -163,14 +150,8 @@ fn issue_394_12bit_gray_honours_output_format() {
 /// tripled — our Rgb output must match it exactly.
 #[test]
 fn issue_394_c_djpeg_rgb_expansion_matches() {
-    let Some(djpeg) = find_c_tool("djpeg") else {
-        eprintln!("SKIP: djpeg not found");
-        return;
-    };
-    let Some(cjpeg) = find_c_tool("cjpeg") else {
-        eprintln!("SKIP: cjpeg not found");
-        return;
-    };
+    let djpeg: PathBuf = require_c_tool!("djpeg");
+    let cjpeg: PathBuf = require_c_tool!("cjpeg");
     if !cjpeg_supports_precision(&cjpeg) {
         eprintln!("SKIP: cjpeg lacks -precision (need libjpeg-turbo 3.x)");
         return;

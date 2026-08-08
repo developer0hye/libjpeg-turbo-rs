@@ -60,3 +60,39 @@ pub fn require_c_tool(name: &str) -> Result<PathBuf, std::io::Error> {
         )),
     }
 }
+
+/// Locate a C tool for a cross-check that is *part* of a larger test rather
+/// than the whole of it — the caller keeps running (and keeps asserting) when
+/// the tool is absent locally.
+///
+/// `require_c_tool!` cannot express this: it `return`s from the enclosing
+/// `#[test]`, which would drop the Rust-side assertions that follow. But the
+/// `if let Some(tool) = private_lookup()` shape it replaces here was fail-open
+/// in CI as well, so this keeps the CI half of the policy: on a provisioned
+/// runner a missing tool panics, because that is a provisioning defect, not
+/// news. Locally it returns `None` and the caller reports its own `SKIP`.
+///
+/// P4-116.
+pub fn optional_c_tool(name: &str) -> Option<PathBuf> {
+    optional_c_tool_under(name, is_ci())
+}
+
+/// [`optional_c_tool`] with the CI decision passed in rather than read from the
+/// environment.
+///
+/// The policy split is the whole point of the helper, so it needs a test — but
+/// `is_ci()` reads a process-global env var, and `cargo` runs `#[test]`s as
+/// parallel threads of one process. Setting `CI` to exercise the panic branch
+/// would race every other test in the binary. Taking the flag as an argument
+/// makes both branches deterministically reachable.
+pub fn optional_c_tool_under(name: &str, ci: bool) -> Option<PathBuf> {
+    match require_c_tool(name) {
+        Ok(path) => Some(path),
+        Err(err) => {
+            if ci {
+                panic!("CI requires C tool '{}' for a sub-check: {}", name, err);
+            }
+            None
+        }
+    }
+}

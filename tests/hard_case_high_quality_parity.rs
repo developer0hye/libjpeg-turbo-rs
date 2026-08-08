@@ -16,30 +16,11 @@
 //! malformed APP1/APP2/APP14 bounded-parse, custom scan-script
 //! progressive full matrix beyond `jpeg_simple_progression`.
 
+mod helpers;
+
 use libjpeg_turbo_rs::{compress, PixelFormat, Subsampling};
 use std::path::{Path, PathBuf};
 use std::process::Command;
-
-fn cjpeg_path() -> Option<PathBuf> {
-    for candidate in [
-        "/opt/homebrew/bin/cjpeg",
-        "/opt/libjpeg-turbo/bin/cjpeg",
-        "/usr/local/bin/cjpeg",
-        "/usr/bin/cjpeg",
-    ] {
-        let p = PathBuf::from(candidate);
-        if p.exists() {
-            return Some(p);
-        }
-    }
-    Command::new("which")
-        .arg("cjpeg")
-        .output()
-        .ok()
-        .filter(|o| o.status.success())
-        .map(|o| PathBuf::from(String::from_utf8_lossy(&o.stdout).trim().to_string()))
-        .filter(|p| p.exists())
-}
 
 /// 64×64 RGB checker. Deterministic test pattern that exercises every
 /// MCU at 4:2:0 (8 horiz × 8 vert MCUs) and stress-tests both DC and AC
@@ -93,13 +74,7 @@ fn run_rust_encode(pixels: &[u8], quality: u8, subsamp: Subsampling) -> Vec<u8> 
 }
 
 fn case(quality: u8, subsamp: Subsampling, cjpeg_sample: &str) {
-    let cjpeg: PathBuf = match cjpeg_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP high_quality_parity (q={quality}, {cjpeg_sample}): cjpeg not on PATH");
-            return;
-        }
-    };
+    let cjpeg: PathBuf = require_c_tool!("cjpeg");
 
     let pixels: Vec<u8> = checker_rgb_64x64();
     let tmp: tempfile::TempDir = tempfile::tempdir().expect("tempdir");

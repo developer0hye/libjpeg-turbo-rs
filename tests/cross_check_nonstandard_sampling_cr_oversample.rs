@@ -16,6 +16,8 @@
 //!   dimensions and records a `DecodeWarning`, so lenient decode stays "at
 //!   least as accepting as the reference".
 
+mod helpers;
+
 use std::io::Write;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
@@ -87,21 +89,6 @@ const FIXTURE: &[u8] = &[
     0x7D, 0x3D, 0xE0, 0x0F, 0xF5, 0x4B, 0xF4, 0xAF, 0xDF, 0xF2, 0x6F, 0x85,
     0x1F, 0xD4, 0x1C, 0x3D, 0xF0, 0xA3, 0xFF, 0xD9,
 ];
-
-fn djpeg_path() -> Option<PathBuf> {
-    for p in [
-        "/opt/homebrew/bin/djpeg",
-        "/usr/local/bin/djpeg",
-        "/usr/bin/djpeg",
-        "/opt/libjpeg-turbo/bin/djpeg",
-    ] {
-        let pb = PathBuf::from(p);
-        if pb.exists() {
-            return Some(pb);
-        }
-    }
-    None
-}
 
 /// Returns djpeg's (width, height, channels) for the fixture, or None.
 fn djpeg_dims(djpeg: &PathBuf, jpeg: &[u8]) -> Option<(usize, usize, usize)> {
@@ -177,10 +164,7 @@ fn lenient_mode_recovers_with_warning_and_matches_djpeg_dims() {
 
     // Cross-validate that we are at least as accepting as djpeg, with matching
     // output dimensions (the drop-in floor the fuzzer enforces).
-    let Some(djpeg) = djpeg_path() else {
-        eprintln!("SKIP djpeg dim cross-check: djpeg not found");
-        return;
-    };
+    let djpeg: PathBuf = require_c_tool!("djpeg");
     if let Some((cw, ch, cc)) = djpeg_dims(&djpeg, FIXTURE) {
         assert_eq!(
             (cw, ch, cc),

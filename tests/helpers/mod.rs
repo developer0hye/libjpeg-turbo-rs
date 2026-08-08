@@ -59,7 +59,7 @@ pub mod tally;
 // Re-exports are unused in test binaries that include `mod helpers`
 // without touching them; that's expected for a shared test module.
 #[allow(unused_imports)]
-pub use c_tools::{is_ci, require_c_tool};
+pub use c_tools::{is_ci, optional_c_tool, optional_c_tool_under, require_c_tool};
 #[allow(unused_imports)]
 pub use tally::ComparisonTally;
 

@@ -43,40 +43,12 @@
 //!
 //! Tracked under P4-12 in `docs/last_mile/phase4.md`.
 
+mod helpers;
+
 use libjpeg_turbo_rs::{compress, decompress, PixelFormat, Subsampling};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{Duration, Instant};
-
-fn cjpeg_path() -> Option<PathBuf> {
-    for candidate in [
-        "/opt/homebrew/bin/cjpeg",
-        "/opt/libjpeg-turbo/bin/cjpeg",
-        "/usr/local/bin/cjpeg",
-        "/usr/bin/cjpeg",
-    ] {
-        let p = PathBuf::from(candidate);
-        if p.exists() {
-            return Some(p);
-        }
-    }
-    None
-}
-
-fn djpeg_path() -> Option<PathBuf> {
-    for candidate in [
-        "/opt/homebrew/bin/djpeg",
-        "/opt/libjpeg-turbo/bin/djpeg",
-        "/usr/local/bin/djpeg",
-        "/usr/bin/djpeg",
-    ] {
-        let p = PathBuf::from(candidate);
-        if p.exists() {
-            return Some(p);
-        }
-    }
-    None
-}
 
 // ---------- helpers ----------
 
@@ -278,16 +250,7 @@ fn build_restart_bomb(cjpeg: &Path, dst: &Path) -> bool {
 
 #[test]
 fn restart_bomb_4096_terminates_within_budget() {
-    // Skip cleanly if the C toolchain isn't installed locally — the
-    // CI matrix runs with cjpeg present, so the test never silently
-    // passes on real CI runs.
-    let cjpeg: PathBuf = match cjpeg_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP restart_bomb_4096: cjpeg not on PATH");
-            return;
-        }
-    };
+    let cjpeg: PathBuf = require_c_tool!("cjpeg");
 
     let tmp: tempfile::TempDir = tempfile::tempdir().expect("tempdir");
     let jpeg_path: PathBuf = tmp.path().join("bomb.jpg");
@@ -338,20 +301,8 @@ fn restart_bomb_4096_terminates_within_budget() {
 /// dimension-truncation regression at MCU-walk boundaries.
 #[test]
 fn restart_bomb_4096_dimensions_match_djpeg() {
-    let cjpeg: PathBuf = match cjpeg_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP restart_bomb_dim_match: cjpeg not on PATH");
-            return;
-        }
-    };
-    let djpeg: PathBuf = match djpeg_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP restart_bomb_dim_match: djpeg not on PATH");
-            return;
-        }
-    };
+    let cjpeg: PathBuf = require_c_tool!("cjpeg");
+    let djpeg: PathBuf = require_c_tool!("djpeg");
 
     let tmp: tempfile::TempDir = tempfile::tempdir().expect("tempdir");
     let jpeg_path: PathBuf = tmp.path().join("bomb.jpg");

@@ -22,19 +22,6 @@ use libjpeg_turbo_rs::{
 // Tool discovery (copied from cross_check_metadata.rs)
 // ===========================================================================
 
-fn rdjpgcom_path() -> Option<PathBuf> {
-    let homebrew: PathBuf = PathBuf::from("/opt/homebrew/bin/rdjpgcom");
-    if homebrew.exists() {
-        return Some(homebrew);
-    }
-    Command::new("which")
-        .arg("rdjpgcom")
-        .output()
-        .ok()
-        .filter(|o| o.status.success())
-        .map(|o| PathBuf::from(String::from_utf8_lossy(&o.stdout).trim().to_string()))
-}
-
 fn exiftool_path() -> Option<PathBuf> {
     let homebrew: PathBuf = PathBuf::from("/opt/homebrew/bin/exiftool");
     if homebrew.exists() {
@@ -296,13 +283,7 @@ fn all_8_exif_orientations_readable_by_c_tool() {
 
 #[test]
 fn utf8_comment_readable_by_rdjpgcom() {
-    let rdjpgcom: PathBuf = match rdjpgcom_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: rdjpgcom not found");
-            return;
-        }
-    };
+    let rdjpgcom: PathBuf = require_c_tool!("rdjpgcom");
 
     let (w, h): (usize, usize) = (16, 16);
     let pixels: Vec<u8> = generate_test_pixels(w, h);
@@ -368,13 +349,7 @@ fn utf8_comment_readable_by_rdjpgcom() {
 
 #[test]
 fn multiple_com_markers_readable_by_rdjpgcom() {
-    let rdjpgcom: PathBuf = match rdjpgcom_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: rdjpgcom not found");
-            return;
-        }
-    };
+    let rdjpgcom: PathBuf = require_c_tool!("rdjpgcom");
 
     let (w, h): (usize, usize) = (16, 16);
     let pixels: Vec<u8> = generate_test_pixels(w, h);
@@ -892,7 +867,7 @@ fn c_djpeg_comment_near_limit_60kb_roundtrip() {
         String::from_utf8_lossy(&output.stderr)
     );
 
-    if let Some(rdjpgcom) = rdjpgcom_path() {
+    if let Some(rdjpgcom) = helpers::optional_c_tool("rdjpgcom") {
         let rdjpg_output = Command::new(&rdjpgcom)
             .arg("-raw")
             .arg(tmp_jpg.path())

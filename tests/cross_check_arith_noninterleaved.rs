@@ -14,6 +14,8 @@
 //! Skip rule: `djpeg` absent on a dev machine is a soft skip; in CI it
 //! hard-fails so the gate cannot vanish into a green skip.
 
+mod helpers;
+
 use std::io::Write;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
@@ -28,25 +30,6 @@ const ARITH_NONINTERLEAVED_444: &[u8] =
 /// must decode via the frame-level interleaved MCU grid (T.81 A.2.2).
 const ARITH_PARTIAL_INTERLEAVED_444: &[u8] =
     include_bytes!("fixtures/fuzz_repro/arith_partial_interleaved_16x16_444.jpg");
-
-fn is_ci() -> bool {
-    std::env::var("CI").is_ok() || std::env::var("GITHUB_ACTIONS").is_ok()
-}
-
-fn djpeg_path() -> Option<PathBuf> {
-    for p in [
-        "/opt/homebrew/bin/djpeg",
-        "/usr/local/bin/djpeg",
-        "/usr/bin/djpeg",
-        "/opt/libjpeg-turbo/bin/djpeg",
-    ] {
-        let pb = PathBuf::from(p);
-        if pb.exists() {
-            return Some(pb);
-        }
-    }
-    None
-}
 
 fn decode_with_djpeg(djpeg: &PathBuf, jpeg: &[u8]) -> Option<(usize, usize, usize, Vec<u8>)> {
     let mut child = Command::new(djpeg)
@@ -149,13 +132,7 @@ fn assert_arith_matches_djpeg(djpeg: &PathBuf, jpeg: &[u8], label: &str) {
 /// decoded and the chroma planes stayed at 0, diverging by 244.
 #[test]
 fn arith_noninterleaved_16x16_444_matches_djpeg() {
-    let Some(djpeg) = djpeg_path() else {
-        if is_ci() {
-            panic!("P4-24 cross-check requires djpeg in CI");
-        }
-        eprintln!("SKIP: djpeg not found on standard paths");
-        return;
-    };
+    let djpeg: PathBuf = require_c_tool!("djpeg");
     assert_arith_matches_djpeg(&djpeg, ARITH_NONINTERLEAVED_444, "arith non-interleaved");
 }
 
@@ -164,13 +141,7 @@ fn arith_noninterleaved_16x16_444_matches_djpeg() {
 /// grid. Pre-fix the decoder rejected the 2-component scan outright.
 #[test]
 fn arith_partial_interleaved_16x16_444_matches_djpeg() {
-    let Some(djpeg) = djpeg_path() else {
-        if is_ci() {
-            panic!("P4-24 cross-check requires djpeg in CI");
-        }
-        eprintln!("SKIP: djpeg not found on standard paths");
-        return;
-    };
+    let djpeg: PathBuf = require_c_tool!("djpeg");
     assert_arith_matches_djpeg(
         &djpeg,
         ARITH_PARTIAL_INTERLEAVED_444,

@@ -13,25 +13,12 @@
 //! the precision variants only rejected `pt > 15`, so `pt >= precision`
 //! slipped through and produced streams C refuses to decode.
 
+mod helpers;
+
 use std::path::PathBuf;
 use std::process::Command;
 
 use libjpeg_turbo_rs::precision::{compress_16bit, decompress_lossless_arbitrary};
-
-fn find_c_tool(name: &str) -> Option<PathBuf> {
-    let brew: PathBuf = PathBuf::from(format!("/opt/homebrew/bin/{name}"));
-    if brew.exists() {
-        return Some(brew);
-    }
-    let output = Command::new("which").arg(name).output().ok()?;
-    if output.status.success() {
-        let path_str: String = String::from_utf8_lossy(&output.stdout).trim().to_string();
-        if !path_str.is_empty() {
-            return Some(PathBuf::from(path_str));
-        }
-    }
-    None
-}
 
 /// Minimal single-component lossless (SOF3) stream: 1x1, precision `p`,
 /// predictor 1, point transform `al`. DC table has a single 1-bit code
@@ -112,10 +99,7 @@ fn issue_382_crafted_stream_with_legal_pt_decodes() {
 /// also refuse the crafted P=12/Al=15 stream.
 #[test]
 fn issue_382_c_djpeg_also_rejects_al_ge_precision() {
-    let Some(djpeg) = find_c_tool("djpeg") else {
-        eprintln!("SKIP: djpeg not found");
-        return;
-    };
+    let djpeg: PathBuf = require_c_tool!("djpeg");
     // djpeg 2.x can't decode SOF3 at all — only meaningful on 3.x, but a
     // 2.x rejection is also a rejection, so no version probe is needed.
     let stream: Vec<u8> = crafted_lossless_stream(12, 15);
