@@ -325,8 +325,8 @@
 - [x] `tj3CompressFromYUVPlanes8()` — Planar YUV → JPEG (`yuv::compress_from_yuv_planes()`)
 
 ### JPEG → YUV (decompress to YUV)
-- [x] `tj3DecompressToYUV8()` — JPEG → packed YUV buffer (`yuv::decompress_to_yuv()`)
-- [x] `tj3DecompressToYUVPlanes8()` — JPEG → separate Y/Cb/Cr plane buffers (`yuv::decompress_to_yuv_planes()`)
+- [x] `tj3DecompressToYUV8()` — JPEG → packed YUV buffer (`yuv::decompress_to_yuv()`; the two are not interchangeable — the C entry point rejects 4-component CMYK/YCCK frames per P4-125, the Rust function packs all four planes)
+- [x] `tj3DecompressToYUVPlanes8()` — JPEG → separate Y/Cb/Cr plane buffers (`yuv::decompress_to_yuv_planes()`; same divergence — the Rust function returns one plane per SOF component, so four for CMYK/YCCK)
 
 ### YUV → RGB (color conversion only, no JPEG)
 - [x] `tj3DecodeYUV8()` — Packed YUV → RGB (`yuv::decode_yuv()`)

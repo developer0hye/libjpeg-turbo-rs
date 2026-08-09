@@ -3107,7 +3107,21 @@ runs all three binaries with `LIBJPEG_TURBO_PREFIX=/opt/libjpeg-turbo`, which
 makes the oracle fatal rather than skippable there. Reachable plane
 counts are `{1, 3, 4}` because `detect_subsampling` already rejects 2, so the
 only newly-rejected input is the 4-component frame itself. The second-layer gap
-this work surfaced is tracked as P4-126.
+this work surfaced is tracked as P4-126, and the validation-ordering gap the same
+review surfaced is P4-127.
+
+**Follow-up (2026-08-09): canonical mapping rows corrected.** Closing this item
+made the C entry points diverge from the root-crate functions they are mapped to,
+but `docs/C_API_REFERENCE.md` (Decompression to YUV) and
+`docs/FEATURE_PARITY.md` (JPEG → YUV) still presented
+`tj3DecompressToYUV8` ≡ `yuv::decompress_to_yuv()` and
+`tj3DecompressToYUVPlanes8` ≡ `yuv::decompress_to_yuv_planes()` without
+qualification. The C entry points now reject 4-component CMYK/YCCK frames while
+the Rust functions still return one plane per SOF component — the divergence this
+patch recorded in the `src/api/yuv.rs` doc comments but not in the two canonical
+mapping documents. Both rows now state it. The `✅` status is unchanged and
+correct: the exported C functions are complete and match C, which is what this
+item established; it is the Rust-native equivalents that differ.
 
 ## P4-126. `yuv_plane_width`/`yuv_plane_height` accept any component index where C rejects `componentID >= nc` — **OPEN**
 

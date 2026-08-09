@@ -127,8 +127,8 @@
 
 | C Function | Description | Rust | Status |
 |---|---|---|---|
-| `tj3DecompressToYUV8(handle, jpeg, size, dst, align)` | JPEG → packed YUV | `yuv::decompress_to_yuv()` | ✅ |
-| `tj3DecompressToYUVPlanes8(handle, jpeg, size, planes, strides)` | JPEG → planar YUV | `yuv::decompress_to_yuv_planes()` | ✅ |
+| `tj3DecompressToYUV8(handle, jpeg, size, dst, align)` | JPEG → packed YUV | `yuv::decompress_to_yuv()` — not interchangeable: the C entry point rejects 4-component CMYK/YCCK frames (P4-125), the Rust function packs all four planes | ✅ |
+| `tj3DecompressToYUVPlanes8(handle, jpeg, size, planes, strides)` | JPEG → planar YUV | `yuv::decompress_to_yuv_planes()` — same divergence; the Rust function returns one plane per SOF component, so four for CMYK/YCCK | ✅ |
 
 ### Color Decode (YUV → RGB, no JPEG)
 
