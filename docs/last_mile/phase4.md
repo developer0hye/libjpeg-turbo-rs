@@ -3327,3 +3327,346 @@ crate, and C agree on one number.
 requires all 42 cells to match libjpeg-turbo 3.1.4.1; red at `bad5493`, green
 after. `cargo test --workspace` is 2481 passed / 0 failed, so no test anywhere
 had pinned the over-padded values — the formula had no coverage at all.
+## P4-129. Test-Only `jpeg_capi_test_*` Symbols Ship in the Installed Library and Are Stamped `LIBJPEG_8.0` — **OPEN**
+
+**Motivation.** Filed 2026-08-09 by the external drop-in readiness review, which
+asked whether the export surface of the shipped library is an exact allowlist.
+It is not. `crates/libjpeg-turbo-rs-capi/src/jpeglib.rs` defines **16**
+`#[no_mangle] pub extern "C"` test accessors — `jpeg_capi_test_arith_code`,
+`jpeg_capi_test_density_unit`, `jpeg_capi_test_dimensions`,
+`jpeg_capi_test_get_compress_state`, `jpeg_capi_test_marker_list`,
+`jpeg_capi_test_output_dims`, `jpeg_capi_test_set_arith_code`,
+`jpeg_capi_test_set_compress_dims`, `jpeg_capi_test_set_optimize_coding`,
+`jpeg_capi_test_set_out_cs`, `jpeg_capi_test_set_progressive`,
+`jpeg_capi_test_set_restart_in_rows`, `jpeg_capi_test_set_restart_interval`,
+`jpeg_capi_test_set_smoothing_factor`, `jpeg_capi_test_x_density`,
+`jpeg_capi_test_y_density` — with **zero `cfg` gates**. They are compiled into
+every build, including the `libjpeg.so.8` that `scripts/install_capi.sh` stages
+as a system replacement.
+
+This is a live violation of **[P4-81](#p4-81-linux-cdylib-omits-gnu-libjpeg_80-symbol-versions--partial-nodes-emitted-and-tested-downstream-re-verification-pending)**'s
+own acceptance criterion (1), which requires that "crate-only extra/test and
+TurboJPEG symbols need an explicit, tested visibility/version policy; they must
+not be mislabeled as reference libjpeg-turbo extension exports."
+
+**Root cause.** `gnu_version_script()` in `crates/libjpeg-turbo-rs-capi/build.rs`
+(line 270) emits the reference node as a glob:
+
+```
+LIBJPEG_8.0 {
+  global:
+    jpeg_*;
+    jcopy_block_row;
+    jdiv_round_up;
+};
+```
+
+`jpeg_capi_test_*` matches `jpeg_*`. P4-81 deliberately omitted a catch-all so
+the TurboJPEG surface would stay unversioned, and that reasoning is sound — but
+it left the *classic* node a wildcard, so the 16 test accessors are not merely
+exported, they are actively stamped as reference libjpeg v8 API in the artifact
+`install_capi.sh` relinks. A consumer running `readelf --dyn-syms` on our
+`libjpeg.so.8` sees 16 symbols at `@@LIBJPEG_8.0` that no real libjpeg has.
+
+The in-code comment above the block (`jpeglib.rs:3212-3215`) asserts the
+opposite: *"These are intentionally NOT `jpeg_*` — they are internal helpers."*
+Every one of the 16 begins with `jpeg_`, so as a statement about glob matching
+it is false, and it is the sentence that would have prevented this had it been
+true. Fix the comment with the code, in the same change.
+
+**Acceptance criteria.**
+
+1. The installed `libjpeg.so.8` exports no `jpeg_capi_test_*` symbol, or exports
+   them only under an explicitly non-reference version node that is documented
+   as crate-private. Prefer removing them from the shipped artifact outright.
+2. `tests/capi_symbol_versions.rs` gains an assertion that fails on **any**
+   symbol in `LIBJPEG_8.0` that is not on an exact, enumerated allowlist of the
+   reference v8 API. A wildcard that happens to match only good symbols today
+   must not pass; the test asserts the allowlist, not the current output.
+3. The dlopen-based tests that consume these accessors keep working — via a
+   `cfg(feature = …)`-gated build, a separate test-only cdylib, or by reading
+   the public struct offsets directly. Record which, and why.
+4. The `jpeglib.rs:3212` comment states what is actually true of the naming, and
+   names the version-script interaction as the reason the prefix matters.
+5. While here, decide and record whether `libjpeg.so.8` and `libturbojpeg.so.0`
+   should be relinked as two artifacts with disjoint allowlists rather than the
+   single cdylib hardlinked under both names (`install_capi.sh:41-46`). P4-81's
+   "we ship one artifact carrying both surfaces" note is the constraint that
+   forced the no-catch-all design; splitting the relink is the alternative that
+   makes an exact allowlist per SONAME possible. This criterion is a recorded
+   decision, not necessarily an implementation.
+
+**Why deferred / severity.** Not memory-unsafe and not a binding failure: the
+extra symbols are additive, so no downstream consumer breaks by their presence.
+The cost is export-surface integrity — we advertise 16 non-existent entry points
+as reference libjpeg v8 API, which is exactly the mislabelling P4-81 set out to
+prevent, and it undermines any claim that the shipped surface is audited.
+
+## P4-130. C-Parity Oracle Is Pinned to 3.1.4.1; Upstream Stable Is 3.2.0 — **OPEN**
+
+**Motivation.** Filed 2026-08-09 by the external drop-in readiness review.
+Upstream released **3.2.0 on 2026-06-30** (verified via the GitHub releases API);
+every CI oracle in this repository still installs **3.1.4.1** (2026-03-27) —
+13 pin sites across five workflows: `ci.yml:62,287,508,523,526`,
+`cross-arch.yml:28,59,95`, `full-c-parity.yml:22,25`,
+`fuzz-smoke.yml:93,198,200`. `docs/FEATURE_PARITY.md:483` documents the pin and
+its original reason (apt ships 2.1.x, which lacks `-lossless`/`-precision`),
+which is still valid — but the pin has not been re-evaluated since 3.2 shipped.
+
+Consequence: our differential gates prove parity with a release that is now one
+minor version behind, and the 3.2 delta is entirely unmeasured. Some of it is
+directly in scope for open items here.
+
+**Upstream 3.2 changes that touch tracked gaps** (from the 3.2 beta1 and 3.2.0
+release notes):
+
+- **Per-instance SIMD dispatch replaces thread-local storage** (beta1 note 2):
+  upstream explicitly "eliminat[ed] the need for thread-local storage in the
+  libjpeg API library." Our shim's private state is still TLS-keyed — see
+  **[P4-132](#p4-132-classic-c-abi-per-cinfo-state-is-thread-affine-p4-16-option-a--open)**.
+  Upstream moving off TLS weakens the "upstream is single-threaded too" framing.
+- **RISC-V Vector (RVV) SIMD** (beta1 note 6): +149-246% compress, +48-180%
+  decompress vs 3.1.x on RVV hardware. See
+  **[P4-134](#p4-134-no-risc-v-rvv-simd-backend--upstream-32-ships-one--open)**;
+  it also moves the goalposts for **[P4-60](#p4-60-scalar-kernels-are-25x-slower-than-cs-scalar-kernels--open)**,
+  whose riscv64 measurement assumed *neither* side had SIMD. That assumption
+  expires with 3.2.
+- **8-bit lossy JPEG → 12-bit output** (beta1 note 8): new capability via
+  `cinfo->data_precision = 12` after `jpeg_read_header()`, and
+  `tj3Decompress12()` after `tj3DecompressHeader()`. Not implemented here.
+- **`jpeg_crop_scanline()` hardening** (3.2.0 note 3): errors when
+  buffered-image mode and raw-data output are both enabled. Relevant to
+  **[P4-103](#p4-103-jpeg_crop_scanline-does-not-implement-imcu-aligned-c-semantics--open)**.
+- **TurboJPEG additions** (beta1 note 10): repeated `tj3GetICCProfile()`,
+  ICC retrieval from a *compression* instance, `TJCS_DEFAULT`, 4:1:0 and 2:4
+  subsampling. The last two are already implemented here, so this is a
+  differential-semantics check rather than new work.
+- **jpegtran `-crop` + `-trim`/`-perfect`** behaviour change (beta1 note 4) and
+  the `-crop`/`-trim` overflow fix (3.2.0 note 4).
+- **8/16-bit PNG in cjpeg/djpeg and `tj3LoadImage*`/`tj3SaveImage*`** with ICC
+  transfer (beta1 note 9).
+
+**Acceptance criteria.**
+
+1. The oracle matrix runs against **both** 3.1.4.1 (behaviour-regression leg,
+   keeping the existing expectations honest) and **3.2.0** (current parity
+   target). A single global version bump is not acceptable: it would silently
+   re-baseline every existing expectation, and any divergence it papers over
+   would be indistinguishable from a pass.
+2. Each of the seven 3.2 deltas above is triaged to exactly one of: already at
+   parity (with the differential test that proves it), a new OPEN LAST_MILE
+   entry, or an explicitly recorded non-goal. No delta is left untriaged.
+3. `docs/FEATURE_PARITY.md:483` states which upstream version each gate runs
+   against and why, rather than naming 3.1.4.1 as if it were current.
+4. A stated policy for how upstream releases are tracked going forward, so the
+   next minor does not sit unnoticed for two months.
+
+**Why deferred.** Nothing regresses today — 3.1.4.1 is a real, supported
+release and the gates it backs are genuine. This is currency, not correctness.
+It is sequenced after the Stage A safety items because re-baselining oracles
+while the classic-ABI error and state contracts are still in flux would mix two
+sources of diff into one signal.
+
+## P4-131. No Native Binary Distribution — Releases Ship crates.io and npm Only — **OPEN**
+
+**Motivation.** Filed 2026-08-09 by the external drop-in readiness review.
+`.github/workflows/release.yml` has six jobs: `changelog-check`, `publish`
+(crates.io), `publish-capi` (crates.io), `publish-image` (crates.io),
+`publish-wasm` (npm), and `github-release` (notes from CHANGELOG). **No job
+produces a native binary artifact.** A user who wants to replace their system
+`libjpeg.so.8` must clone the repository, install a Rust toolchain, build, and
+run `scripts/install_capi.sh` themselves.
+
+The install *layout* is not the gap — `scripts/install_capi.sh` already stages a
+correct prefix: `lib/libjpeg.so.8*`, `lib/libturbojpeg.so.0*`,
+`lib/pkgconfig/libjpeg.pc`, `lib/pkgconfig/libturbojpeg.pc`,
+`lib/cmake/JPEG/JPEGConfig.cmake`, and `include/{jpeglib,jerror,jmorecfg,jconfig,turbojpeg}.h`.
+The gap is that nothing runs it in CI to produce a downloadable artifact, so
+the staged prefix is only ever built on a developer's machine.
+
+Upstream, by contrast, ships signed source tarballs plus official binary
+packages per platform, with published signature-verification instructions.
+A project asking distributions to swap out their JPEG library is asking for a
+higher bar than "build it yourself."
+
+**Acceptance criteria.**
+
+1. A release job builds and attaches, per tag: Linux `libjpeg.so.8` +
+   `libturbojpeg.so.0` (x86_64 + aarch64), macOS dylibs, and Windows DLL +
+   import libraries — each bundled with the headers, `.pc` files, and CMake
+   config that `install_capi.sh` already stages.
+2. Every attached artifact is checksummed, and the checksum manifest is part of
+   the release.
+3. The artifact is produced by the same `install_capi.sh` path that
+   **[P4-124](#p4-124-the-opencv-harness-tests-the-cargo-cdylib-not-the-library-we-ship--open)**
+   requires the downstream harnesses to test — one staging path, not two. This
+   item and P4-124 must not produce divergent "shipped" artifacts.
+4. A recorded decision on signing and SBOM: either implemented, or documented as
+   a known gap with the reason. Do not leave it unstated.
+5. Distro packaging (deb/rpm) is explicitly either in scope with a target
+   release, or a recorded non-goal. It is currently neither.
+
+**Why deferred.** Pure distribution work with no correctness content, and it is
+wasted effort while the T3 classic-ABI gaps are open — shipping a convenient
+binary of a library that is not yet a general drop-in increases the blast
+radius of the gaps rather than reducing it. Sequenced in Stage C, after the
+export surface (P4-129) and the shipped-artifact test path (P4-124) are settled,
+since both change what a release artifact should contain.
+
+## P4-132. Classic C-ABI Per-`cinfo` State Is Thread-Affine (P4-16 Option A) — **OPEN**
+
+**Motivation.** Filed 2026-08-09 by the external drop-in readiness review, which
+names this an adoption blocker for consumers that move codec-context ownership
+between threads. **[P4-16](#p4-16-per-cinfo-private-state-lives-in-thread-local-side-tables--closed-2026-05-19)**
+closed 2026-05-19 via Option B — document the constraint — and recorded its own
+reopen trigger: *"file an issue with the use case … we will prioritise based on
+adoption signal."* This entry is that reopen. P4-16 stays closed; the decision
+it recorded was correct for the evidence available then, and this is a new
+entry because the evidence changed.
+
+**What changed since P4-16 chose Option B.**
+
+1. **Upstream moved off TLS.** libjpeg-turbo 3.2 beta1 (note 2) overhauled its
+   SIMD dispatchers to initialise per-instance rather than per-thread,
+   explicitly "eliminating the need for thread-local storage in the libjpeg API
+   library." P4-16's divergence paragraph is written against upstream's older
+   contract; the gap is now wider than when it was measured.
+2. **The named consumer exists.** `docs/ABI_COMPATIBILITY.md:79` names FFmpeg's
+   frame-thread JPEG path as the canonical case that would force Option A, and
+   the repository already carries `capi_ffmpeg_compat.rs` as a downstream
+   harness. The prerequisite for prioritising is met.
+3. **T3 is the goal.** A general system drop-in cannot ship a threading contract
+   stricter than the library it replaces. Every prebuilt consumer on the system
+   was compiled against upstream's rules, not ours.
+
+**Current state.** Two `thread_local!` side tables in
+`crates/libjpeg-turbo-rs-capi/src/jpeglib.rs` (`:396` decompress, `:4114`
+compress) key private state by `cinfo as usize`. Transferring a `cinfo` to
+another thread silently misses the lookup and leaks the originating thread's
+entry. `docs/ABI_COMPATIBILITY.md:70,79` documents this as a deliberate,
+stricter-than-upstream contract.
+
+**Acceptance criteria.** P4-16 Option A already specifies the shape; this entry
+adds what a pointer-keyed global map needs to be correct:
+
+1. Both side tables migrate off `thread_local!` to a process-global map behind
+   a lock. A `Mutex<HashMap>` alone is not sufficient — see (3).
+2. A single-threaded `tj3Compress8` / `tj3Decompress8` benchmark stays within
+   **1%** of the TLS-keyed baseline (P4-16's original bar), recorded in
+   `experiments/`.
+3. **Pointer reuse is defended.** Keying by `cinfo as usize` means a freed and
+   reallocated `cinfo` can collide with a stale entry. Store a generation
+   counter and a magic value in the private state, and make destroy/abort the
+   single place ownership is released. A test must show that allocating a
+   `cinfo`, destroying it, and allocating a second one that lands at the same
+   address does not surface the first one's state.
+4. `crates/libjpeg-turbo-rs-capi/tests/capi_thread_affinity.rs` proves
+   create-on-thread-A / use-and-destroy-on-thread-B with no leak, and proves
+   that *concurrent* use of one `cinfo` from two threads is still rejected or
+   documented — ownership transfer is the goal, shared concurrent access is not.
+5. `docs/ABI_COMPATIBILITY.md`'s "Threading contract" and "Divergence from
+   upstream" sections are rewritten to the new contract. If any strictness
+   remains, it is stated as strictness, not omitted.
+
+**Why deferred.** Behind the Stage A memory-safety and error-contract items: no
+current test or downstream harness in this repository transfers a `cinfo` across
+threads, so nothing is broken today for what we actually measure. It is a
+correctness-of-contract gap that blocks the T3 claim, not a live defect.
+
+## P4-133. BMI2/FMA Paths Are Reachable Only via `target-cpu=native`, So Portable Builds Leave Them Off — **OPEN**
+
+**Motivation.** Filed 2026-08-09 by the external drop-in readiness review.
+**[P4-8](#p4-8-runtime-bmi1lzcnt-dispatch-for-x86_64-encode-already-live-readme-updated--closed-2026-05-17)** closed 2026-05-17 after establishing that the BMI1/LZCNT AC
+encoding loop already dispatches at runtime
+(`src/encode/huffman_encode.rs:524,598`), so a stock `cargo build --release` is
+within ~2 pp of C. That closure recorded an explicit follow-up
+(`phase4.md:233`): *"BMI2 PEXT/PDEP coverage for any encode hot path that
+benefits + FMA-dispatched FDCT scalar fallback. The static-analysis review
+correctly notes these remain `target-cpu=native`-gated today."*
+
+**That follow-up was never filed anywhere.** It says "deferred to P2 backlog",
+but `docs/last_mile/backlog.md` contains exactly one section, P2-G, which is the
+downstream lab. By this repository's own rule — if it is not in LAST_MILE, it
+does not exist for the next session — the deferral was a silent drop. This entry
+restores it.
+
+**Why it matters for T3 specifically.** `README.md:94,113` still recommends
+`RUSTFLAGS="-C target-cpu=native"` for the last few percent. That is sound advice
+for an application built on the target machine, and unusable for a *system
+library*: a distribution package is built once and runs on every CPU of that
+architecture, so it must be compiled to the baseline and light up wider
+instruction sets at runtime. Every percent that only `target-cpu=native` unlocks
+is a percent a packaged `libjpeg.so.8` cannot have. C libjpeg-turbo has no such
+constraint — its hot loops are hand-written NASM with the instructions embedded,
+dispatched at runtime, which `docs/last_mile/phase1.md:217` already identifies as
+the root of the original gap.
+
+**Acceptance criteria.**
+
+1. The `target-cpu=native`-only wins are enumerated and measured against a
+   baseline build: BMI2 PEXT/PDEP in the encode hot paths, FMA in the FDCT
+   scalar fallback, and anything else the A/B surfaces. State the per-benchmark
+   delta; do not carry "the last few percent" forward as an unmeasured claim.
+2. Each one that pays is reached by runtime detection from a **baseline**
+   build, following the existing `cpu_has!` dispatch pattern.
+3. Feature detection is resolved **once per operation**, not per block or per
+   row — resolve it where the encode/decode plan is built and store the chosen
+   kernel set. (This is workstream 2 of
+   **[P4-123](#p4-123-architecture-umbrella-codec-plans-c-abi-state-public-boundaries-simd-dispatch--open)**;
+   coordinate rather than building a parallel dispatch mechanism. Note that
+   upstream 3.2 made exactly this move — per-instance SIMD dispatchers, beta1
+   note 2.)
+4. A benchmark run comparing **stock `cargo build --release`** against C
+   libjpeg-turbo, recorded in `experiments/encode.tsv` per the keep/discard
+   protocol. The portable build is the number that matters for T3; the
+   `target-cpu=native` figure is supplementary.
+5. `README.md`'s performance section separates portable-build numbers from
+   native-tuned numbers, so a packager reads the one that applies to them.
+
+**Why deferred.** Performance, and gate item 7 puts correctness first. It is
+filed now because the deferral was previously untracked, not because it
+outranks the Stage A items.
+
+## P4-134. No RISC-V RVV SIMD Backend — Upstream 3.2 Ships One — **OPEN**
+
+**Motivation.** Filed 2026-08-09 by the external drop-in readiness review.
+`src/simd/` contains `aarch64/`, `wasm32/`, `x86_64/`, and `scalar.rs` — there is
+no RISC-V backend, and `grep -ri "riscv\|rvv" src/` matches only two comment
+lines in `src/decode/color.rs` referencing the riscv64 scalar experiment.
+
+libjpeg-turbo 3.2 beta1 (note 6) added RVV implementations of colorspace
+conversion, chroma up/downsampling, integer quantization and sample conversion,
+and the integer DCT/IDCT — reporting **149-246% faster compression** and
+**48-180% faster decompression** relative to 3.1.x on a Ky X1.
+
+**This invalidates a premise of an existing item.**
+**[P4-60](#p4-60-scalar-kernels-are-25x-slower-than-cs-scalar-kernels--open)**
+measured our scalar deficit on riscv64 precisely because *neither side* had SIMD
+there, making it a clean scalar-vs-scalar comparison. Against 3.2 that is no
+longer true: on RVV hardware we would be scalar against vectorised, which is the
+same structural position as
+**[P4-78](#p4-78-no-32-bit-arm-aarch32-neon-backend--armv7-is-our-widest-gap-vs-c--open)**
+describes for ARMv7 — the scalar deficit multiplying with C's full vector win.
+P4-60's riscv64 measurements stay valid as *scalar-kernel* data; they stop being
+a statement about our position versus current upstream on that architecture.
+
+**Acceptance criteria.**
+
+1. A measurement, on RVV hardware or a vector-capable emulator, of our decode
+   and encode against libjpeg-turbo **3.2.0** on riscv64 — establishing the real
+   gap rather than inferring it. This is the gating criterion; the rest depends
+   on what it shows.
+2. P4-60's entry is annotated with the premise change so its riscv64 numbers are
+   not later read as a current-upstream comparison.
+3. A recorded scope decision. `core::arch::riscv64` vector intrinsics are
+   unstable, which is the same constraint that made P4-78 an options list rather
+   than a plan — check the current status rather than assuming it, and if it
+   still holds, say what that implies (stable-Rust autovectorisation with an
+   explicit target-feature, `asm!`, or defer).
+4. If deferred after measurement, the deferral names the trigger that would
+   reopen it, in the shape P4-78 uses.
+
+**Why deferred.** Lowest-urgency of the platform items: RISC-V has the smallest
+installed base of the architectures we target, and unlike P4-78 (where ARMv7
+hardware is everywhere and the gap is inferred from a real user question) there
+is no downstream request. It is filed so the P4-60 premise change is on record.
