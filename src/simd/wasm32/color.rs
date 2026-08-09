@@ -26,11 +26,25 @@ fn mulhi_epi16(a: v128, b: v128) -> v128 {
 
 /// WASM simd128 YCbCr to interleaved RGB row conversion.
 pub fn wasm_ycbcr_to_rgb_row(y: &[u8], cb: &[u8], cr: &[u8], rgb: &mut [u8], width: usize) {
-    // SAFETY: Caller guarantees y.len() >= width, cb.len() >= width, cr.len() >= width,
-    // out.len() >= width * BPP. The loop processes 8 pixels per iteration with a scalar
-    // tail for width % 8 != 0, preventing out-of-bounds access.
-    unsafe {
-        wasm_ycbcr_to_rgb_row_inner(y, cb, cr, rgb, width);
+    // P4-135: `width` is a parameter independent of the slice lengths, and
+    // the SIMD loop stores through raw pointers without consulting them. The
+    // old comment stated this as a caller guarantee on a *safe* fn, which
+    // means it held for our dispatch and for nobody else.
+    let out_needed: Option<usize> = width.checked_mul(3);
+    let fits: bool = y.len() >= width
+        && cb.len() >= width
+        && cr.len() >= width
+        && out_needed.is_some_and(|n| rgb.len() >= n);
+
+    if fits {
+        // SAFETY: every slice holds the `width` samples the kernel reads and
+        // the `width * 3` bytes it writes. simd128 is a compile-time target
+        // feature on wasm32, so there is no runtime probe to make here.
+        unsafe {
+            wasm_ycbcr_to_rgb_row_inner(y, cb, cr, rgb, width);
+        }
+    } else {
+        crate::decode::color::ycbcr_to_rgb_row(y, cb, cr, rgb, width);
     }
 }
 
@@ -204,11 +218,25 @@ unsafe fn wasm_ycbcr_to_rgb_row_inner(
 
 /// WASM simd128 YCbCr to interleaved RGBA row conversion.
 pub fn wasm_ycbcr_to_rgba_row(y: &[u8], cb: &[u8], cr: &[u8], rgba: &mut [u8], width: usize) {
-    // SAFETY: Caller guarantees y.len() >= width, cb.len() >= width, cr.len() >= width,
-    // out.len() >= width * BPP. The loop processes 8 pixels per iteration with a scalar
-    // tail for width % 8 != 0, preventing out-of-bounds access.
-    unsafe {
-        wasm_ycbcr_to_rgba_row_inner(y, cb, cr, rgba, width);
+    // P4-135: `width` is a parameter independent of the slice lengths, and
+    // the SIMD loop stores through raw pointers without consulting them. The
+    // old comment stated this as a caller guarantee on a *safe* fn, which
+    // means it held for our dispatch and for nobody else.
+    let out_needed: Option<usize> = width.checked_mul(4);
+    let fits: bool = y.len() >= width
+        && cb.len() >= width
+        && cr.len() >= width
+        && out_needed.is_some_and(|n| rgba.len() >= n);
+
+    if fits {
+        // SAFETY: every slice holds the `width` samples the kernel reads and
+        // the `width * 4` bytes it writes. simd128 is a compile-time target
+        // feature on wasm32, so there is no runtime probe to make here.
+        unsafe {
+            wasm_ycbcr_to_rgba_row_inner(y, cb, cr, rgba, width);
+        }
+    } else {
+        crate::decode::color::ycbcr_to_rgba_row(y, cb, cr, rgba, width);
     }
 }
 
@@ -303,11 +331,25 @@ unsafe fn wasm_ycbcr_to_rgba_row_inner(
 
 /// WASM simd128 YCbCr to interleaved BGR row conversion.
 pub fn wasm_ycbcr_to_bgr_row(y: &[u8], cb: &[u8], cr: &[u8], bgr: &mut [u8], width: usize) {
-    // SAFETY: Caller guarantees y.len() >= width, cb.len() >= width, cr.len() >= width,
-    // bgr.len() >= width * 3. The loop processes 8 pixels per iteration with a scalar
-    // tail for width % 8 != 0, preventing out-of-bounds access.
-    unsafe {
-        wasm_ycbcr_to_bgr_row_inner(y, cb, cr, bgr, width);
+    // P4-135: `width` is a parameter independent of the slice lengths, and
+    // the SIMD loop stores through raw pointers without consulting them. The
+    // old comment stated this as a caller guarantee on a *safe* fn, which
+    // means it held for our dispatch and for nobody else.
+    let out_needed: Option<usize> = width.checked_mul(3);
+    let fits: bool = y.len() >= width
+        && cb.len() >= width
+        && cr.len() >= width
+        && out_needed.is_some_and(|n| bgr.len() >= n);
+
+    if fits {
+        // SAFETY: every slice holds the `width` samples the kernel reads and
+        // the `width * 3` bytes it writes. simd128 is a compile-time target
+        // feature on wasm32, so there is no runtime probe to make here.
+        unsafe {
+            wasm_ycbcr_to_bgr_row_inner(y, cb, cr, bgr, width);
+        }
+    } else {
+        crate::decode::color::ycbcr_to_bgr_row(y, cb, cr, bgr, width);
     }
 }
 
@@ -397,11 +439,25 @@ unsafe fn wasm_ycbcr_to_bgr_row_inner(
 
 /// WASM simd128 YCbCr to interleaved BGRA row conversion.
 pub fn wasm_ycbcr_to_bgra_row(y: &[u8], cb: &[u8], cr: &[u8], bgra: &mut [u8], width: usize) {
-    // SAFETY: Caller guarantees y.len() >= width, cb.len() >= width, cr.len() >= width,
-    // bgra.len() >= width * 4. The loop processes 8 pixels per iteration with a scalar
-    // tail for width % 8 != 0, preventing out-of-bounds access.
-    unsafe {
-        wasm_ycbcr_to_bgra_row_inner(y, cb, cr, bgra, width);
+    // P4-135: `width` is a parameter independent of the slice lengths, and
+    // the SIMD loop stores through raw pointers without consulting them. The
+    // old comment stated this as a caller guarantee on a *safe* fn, which
+    // means it held for our dispatch and for nobody else.
+    let out_needed: Option<usize> = width.checked_mul(4);
+    let fits: bool = y.len() >= width
+        && cb.len() >= width
+        && cr.len() >= width
+        && out_needed.is_some_and(|n| bgra.len() >= n);
+
+    if fits {
+        // SAFETY: every slice holds the `width` samples the kernel reads and
+        // the `width * 4` bytes it writes. simd128 is a compile-time target
+        // feature on wasm32, so there is no runtime probe to make here.
+        unsafe {
+            wasm_ycbcr_to_bgra_row_inner(y, cb, cr, bgra, width);
+        }
+    } else {
+        crate::decode::color::ycbcr_to_bgra_row(y, cb, cr, bgra, width);
     }
 }
 
