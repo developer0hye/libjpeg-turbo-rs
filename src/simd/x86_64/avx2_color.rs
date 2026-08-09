@@ -197,12 +197,51 @@ macro_rules! avx2_color_convert_fn {
     ) => {
         /// AVX2-accelerated YCbCr to interleaved pixel row conversion.
         ///
-        /// # Safety contract
-        /// Caller must ensure AVX2 is available (dispatch verifies this).
+        /// This is a **safe** function, so it must hold for *every* argument
+        /// combination — not only the ones dispatch produces. It previously
+        /// documented "caller must ensure AVX2 is available (dispatch verifies
+        /// this)" and checked nothing, which made two UB routes reachable from
+        /// safe Rust with no `unsafe` block anywhere (P4-135):
+        ///
+        /// ```ignore
+        /// // compiled clean before this change
+        /// let mut out = [0u8; 4];
+        /// avx2_ycbcr_to_rgb_row(&[], &[], &[], &mut out, 4096);
+        /// ```
+        ///
+        /// 1. `width` is independent of the slice lengths, and the SIMD loop
+        ///    loads/stores by raw pointer without consulting them.
+        /// 2. Calling a `#[target_feature(enable = "avx2")]` function without
+        ///    AVX2 present is UB per the Rust reference.
+        ///
+        /// Both are now checked here, in the same function that performs the
+        /// `unsafe` call, so the guarantee does not depend on who calls it.
+        /// Feature detection goes through `cpu_has!`, not
+        /// `std::arch::is_x86_feature_detected!` directly: the latter lives in
+        /// `std` and this crate is `no_std`-capable, so a direct call breaks
+        /// the no-std build (which is what CI's MSRV leg reported).
+        /// A request the arguments cannot satisfy falls back to the scalar
+        /// path, which slices and therefore bounds-checks.
         pub fn $pub_name(y: &[u8], cb: &[u8], cr: &[u8], out: &mut [u8], width: usize) {
-            // SAFETY: AVX2 availability guaranteed by dispatch.
-            unsafe {
-                $inner_name(y, cb, cr, out, width);
+            // `width * bpp` is attacker-influenced through the frame header;
+            // an unchecked product wraps and the comparison below then passes
+            // for a buffer far too small.
+            let out_needed: Option<usize> = width.checked_mul($bpp);
+            let fits: bool = y.len() >= width
+                && cb.len() >= width
+                && cr.len() >= width
+                && out_needed.is_some_and(|n| out.len() >= n);
+
+            if fits && crate::cpu_has!("avx2") {
+                // SAFETY: AVX2 confirmed by runtime detection immediately
+                // above, and every slice is long enough for the `width`
+                // samples the kernel reads and the `width * $bpp` bytes it
+                // writes.
+                unsafe {
+                    $inner_name(y, cb, cr, out, width);
+                }
+            } else {
+                $scalar_fn(y, cb, cr, out, width);
             }
         }
 
@@ -344,3 +383,60 @@ avx2_color_convert_fn!(
         store_4bpp_interleaved(p, alpha, b, g, r);
     }
 );
+
+/// P4-135: the safe AVX2 colour wrappers must not be reachable UB.
+///
+/// Gated on `panic = "unwind"` because the check is observed through
+/// `catch_unwind`; an abort-panic target would terminate the runner instead.
+#[cfg(all(test, panic = "unwind"))]
+mod p4135_soundness_tests {
+    /// The proof-of-concept from issue #474, verbatim: empty inputs, a 4-byte
+    /// output, and `width = 4096`, with no `unsafe` at the call site.
+    ///
+    /// It used to compile clean and then read and write far out of bounds.
+    /// It must now be *sound* — a panic is an acceptable answer for a safe
+    /// function given arguments it cannot satisfy; silent corruption is not.
+    /// What this pins is that control never reaches the SIMD loop.
+    #[test]
+    fn issue_474_poc_is_no_longer_undefined_behaviour() {
+        let mut out: [u8; 4] = [0u8; 4];
+
+        // AssertUnwindSafe so the *caller's* buffer crosses the boundary. A
+        // `move` closure over a local copy would leave the assertion below
+        // comparing two values the function never saw.
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            super::avx2_ycbcr_to_rgb_row(&[], &[], &[], &mut out, 4096);
+        }));
+
+        assert!(
+            result.is_err(),
+            "a 4096-pixel request against empty inputs must not report success"
+        );
+        assert_eq!(
+            out, [0u8; 4],
+            "the caller's buffer must be untouched by a rejected request"
+        );
+    }
+
+    /// A well-formed call still produces pixels — the bounds check must reject
+    /// impossible requests without disabling the fast path for real ones.
+    #[test]
+    fn well_formed_rows_still_convert() {
+        const W: usize = 64;
+        let y: Vec<u8> = (0..W).map(|i| (i * 3) as u8).collect();
+        let cb: Vec<u8> = vec![128u8; W];
+        let cr: Vec<u8> = vec![128u8; W];
+        let mut out: Vec<u8> = vec![0u8; W * 3];
+
+        super::avx2_ycbcr_to_rgb_row(&y, &cb, &cr, &mut out, W);
+
+        // Neutral chroma means R == G == B == Y for every pixel.
+        for (i, chunk) in out.chunks_exact(3).enumerate() {
+            assert_eq!(
+                chunk[0], chunk[1],
+                "pixel {i} is not grey under neutral chroma"
+            );
+            assert_eq!(chunk[1], chunk[2], "pixel {i} is not grey");
+        }
+    }
+}
