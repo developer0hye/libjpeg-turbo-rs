@@ -40,6 +40,7 @@ use libjpeg_turbo_rs::api::yuv::{
     compress_from_yuv, compress_from_yuv_planes, decode_yuv, decode_yuv_planes,
     decompress_to_yuv_planes, encode_yuv, encode_yuv_planes,
 };
+use libjpeg_turbo_rs::tj3::FrameInfo;
 use libjpeg_turbo_rs::{yuv_plane_height, yuv_plane_width, PixelFormat, Subsampling};
 
 use crate::alloc::{libc_free, libc_from_slice};
@@ -602,11 +603,39 @@ pub extern "C" fn tj3DecompressToYUV8(
             Some(i) => i,
             None => return -1,
         };
+        // Upstream validates every argument at function entry, before the
+        // header is read (turbojpeg.c:2395-2397, `"Invalid argument"`). `align`
+        // used to be discovered inside `pack_yuv_planes`, i.e. after the
+        // component guard, which flipped the precedence C reports (P4-127).
         if jpeg_buf.is_null() || dst_buf.is_null() || jpeg_size < 2 {
             inst.set_error("tj3DecompressToYUV8: NULL / size", TJERR_FATAL);
             return -1;
         }
+        if align < 1 || !(align as u32).is_power_of_two() {
+            inst.set_error(
+                "tj3DecompressToYUV8: Invalid argument (align must be a positive power of 2)",
+                TJERR_FATAL,
+            );
+            return -1;
+        }
         let jpeg: &[u8] = unsafe { std::slice::from_raw_parts(jpeg_buf, jpeg_size) };
+        // Header first, decode second — the whole point of P4-127. This also
+        // applies the handle's TJPARAM_MAXPIXELS, which the handle-less
+        // `decompress_to_yuv_planes` below cannot see.
+        let info: FrameInfo = match inst.inner.inspect_header(jpeg) {
+            Ok(info) => info,
+            Err(e) => {
+                inst.set_error(format!("tj3DecompressToYUV8: {e}"), TJERR_FATAL);
+                return -1;
+            }
+        };
+        if info.num_components > MAX_YUV_PLANES {
+            inst.set_error(
+                "tj3DecompressToYUV8: JPEG image must have 3 or fewer components",
+                TJERR_FATAL,
+            );
+            return -1;
+        }
         let (planes, w, h, ss) = match decompress_to_yuv_planes(jpeg) {
             Ok(v) => v,
             Err(e) => {
@@ -614,13 +643,6 @@ pub extern "C" fn tj3DecompressToYUV8(
                 return -1;
             }
         };
-        if planes.len() > MAX_YUV_PLANES {
-            inst.set_error(
-                "tj3DecompressToYUV8: JPEG image must have 3 or fewer components",
-                TJERR_FATAL,
-            );
-            return -1;
-        }
         let packed: Vec<u8> = match pack_yuv_planes(&planes, w, h, align, ss) {
             Some(p) => p,
             None => {
@@ -655,6 +677,36 @@ pub extern "C" fn tj3DecompressToYUVPlanes8(
             return -1;
         }
         let jpeg: &[u8] = unsafe { std::slice::from_raw_parts(jpeg_buf, jpeg_size) };
+        // Header first (P4-127): this applies the handle's TJPARAM_MAXPIXELS and
+        // settles the component count before a single MCU is decoded.
+        let info: FrameInfo = match inst.inner.inspect_header(jpeg) {
+            Ok(info) => info,
+            Err(e) => {
+                inst.set_error(format!("tj3DecompressToYUVPlanes8: {e}"), TJERR_FATAL);
+                return -1;
+            }
+        };
+        if info.num_components > MAX_YUV_PLANES {
+            inst.set_error(
+                "tj3DecompressToYUVPlanes8: JPEG image must have 3 or fewer components",
+                TJERR_FATAL,
+            );
+            return -1;
+        }
+        // Upstream rejects a NULL chroma plane up front, so nothing is written
+        // when it fails (turbojpeg.c:2226-2227). Checking inside the copy loop
+        // below meant planes 0 and 1 were already in caller memory by the time a
+        // NULL plane 2 was noticed.
+        let plane_count: usize = info.num_components.min(MAX_YUV_PLANES);
+        for i in 0..plane_count {
+            if unsafe { *dst_planes.add(i) }.is_null() {
+                inst.set_error(
+                    "tj3DecompressToYUVPlanes8: Invalid argument (NULL plane pointer)",
+                    TJERR_FATAL,
+                );
+                return -1;
+            }
+        }
         let (planes, w, h, ss) = match decompress_to_yuv_planes(jpeg) {
             Ok(v) => v,
             Err(e) => {
@@ -662,13 +714,6 @@ pub extern "C" fn tj3DecompressToYUVPlanes8(
                 return -1;
             }
         };
-        if planes.len() > MAX_YUV_PLANES {
-            inst.set_error(
-                "tj3DecompressToYUVPlanes8: JPEG image must have 3 or fewer components",
-                TJERR_FATAL,
-            );
-            return -1;
-        }
         unsafe {
             for (i, plane) in planes.iter().enumerate() {
                 let pw: usize = yuv_plane_width(i, w, ss);

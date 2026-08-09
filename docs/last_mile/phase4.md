@@ -81,8 +81,9 @@
 | P4-122 | OPEN (the Pillow smoke harness substitutes for a v6b library, which its own policy forbids) |
 | P4-125 | CLOSED 2026-08-08 (TurboJPEG YUV decompress entry points emitted one plane per SOF component) |
 | P4-126 | PARTIAL (C ABI matches C; root-crate helpers still accept any component index) |
-| P4-127 | OPEN (C-ABI YUV decompress entry points validate after decoding, not before) |
+| P4-127 | CLOSED 2026-08-09 (C-ABI YUV decompress entry points validate after decoding, not before) |
 | P4-128 | CLOSED 2026-08-09 (YUV plane dimensions padded to the MCU size in pixels, not the subsampling ratio) |
+| P4-129 | OPEN (`tj3DecompressHeader` decodes the entire image to read the header) |
 
 ---
 
@@ -3217,7 +3218,36 @@ reaches the permissive path either, because the wrappers already bound
 deliberately kept out of the P4-125 patch to keep that change minimal and
 reviewable.
 
-## P4-127. C-ABI YUV Decompress Entry Points Validate After Decoding, Not Before — **OPEN**
+## P4-127. C-ABI YUV Decompress Entry Points Validate After Decoding, Not Before — **CLOSED 2026-08-09**
+
+**Status (2026-08-09): closed.** `TjHandle::inspect_header`
+(`src/api/tj3.rs`) reads the frame from its markers alone —
+`Decoder::new_with_limits` stops after marker parsing — applies the handle's
+`DecodeLimits` including `check_frame`, and returns a `FrameInfo`
+(width/height/num_components/subsampling). Both C-ABI entry points now call it
+before `decompress_to_yuv_planes`, which resolves all three consequences:
+
+1. `TJPARAM_MAXPIXELS` bounds them, enforced at header time as upstream does
+   (`turbojpeg.c:2219-2222`) rather than left to a decode that may never run.
+2. `align` is validated at function entry (`turbojpeg.c:2395-2397`), so it
+   outranks the component guard again, matching C's precedence.
+3. `dstPlanes[0..n]` are NULL-checked up front (`turbojpeg.c:2226-2227`), so a
+   rejected call leaves every caller buffer untouched instead of writing planes
+   0 and 1 before noticing a NULL plane 2.
+
+**How "did not decode" is proven without timing.** The regressions in
+`crates/libjpeg-turbo-rs-capi/tests/yuv_validate_before_decode.rs` use fixtures
+with a **valid header and a truncated entropy segment**: decode-first reports
+`"unexpected end of data"`, header-first reports the specific rejection, so the
+message discriminates the two orders deterministically. All four were measured
+red at `2304bf2` with exactly that decode error, and green after.
+`cargo test --workspace`: 2485 passed / 0 failed.
+
+The remaining `decompress_to_yuv_planes` limitation — a handle-less free
+function that cannot see any of this — is unchanged and still tracked by
+P4-126's criterion 4. What this item removes is the C ABI's dependence on it for
+validation.
+
 
 **Motivation.** Filed 2026-08-09 during the P4-125 review. That item ported
 upstream's `num_components > 3` rejection correctly, but placed it at the only
@@ -3327,3 +3357,48 @@ crate, and C agree on one number.
 requires all 42 cells to match libjpeg-turbo 3.1.4.1; red at `bad5493`, green
 after. `cargo test --workspace` is 2481 passed / 0 failed, so no test anywhere
 had pinned the over-padded values — the formula had no coverage at all.
+
+## P4-129. `tj3DecompressHeader` Decodes the Entire Image to Read the Header — **OPEN**
+
+**Motivation.** Found 2026-08-09 while building P4-127's header-only path.
+`TjHandle::decompress_header` (`src/api/tj3.rs`) does not parse a header — it
+calls `self.decompress(data)` and throws the `Image` away:
+
+```rust
+let result: Result<Image> = self.decompress(data);
+result.map(|_| ())
+```
+
+Upstream's `tj3DecompressHeader` performs `jpeg_read_header` and stops. Reading
+the dimensions of an image is one of the most common things a caller does before
+deciding whether to decode it at all — a thumbnail service checking size, a
+validator screening uploads — and this port charges a full decode for it. The
+cost is the entire image, and it is attacker-controlled, so it is the same
+resource-amplification shape P4-127 just removed from the YUV entry points, on a
+more frequently used call.
+
+**Root cause.** No header-only path existed when `decompress_header` was
+written. One does now: `TjHandle::inspect_header` (added by P4-127) parses
+markers via `Decoder::new_with_limits` and applies the handle's limits without
+touching pixel data.
+
+**Acceptance criteria.**
+
+1. `tj3DecompressHeader` reads the header without decoding, proven the way
+   P4-127's regressions prove it: a fixture with a valid header and a corrupt
+   entropy segment must succeed, since upstream's `jpeg_read_header` succeeds on
+   one.
+2. The handle params it publishes (width, height, subsampling, colorspace,
+   precision, progressive/lossless flags) are unchanged for well-formed input —
+   cross-checked against C for a matrix of subsamplings and colorspaces.
+3. Decide what happens to errors that only a decode can find. Today a corrupt
+   scan makes `tj3DecompressHeader` fail; upstream's succeeds and defers the
+   failure to `tj3Decompress*`. Criterion 1 changes that observable behaviour,
+   so the C cross-check must pin it rather than assume it.
+
+**Why deferred.** Not a correctness bug for well-formed input, and P4-127's
+patch is already at the size where a second behavioural change to a different
+entry point belongs in its own review. Criterion 3 in particular needs its own
+C comparison: it flips a currently-failing call into a succeeding one, which is
+exactly the kind of change that should not ride along in a patch about YUV
+validation order.
