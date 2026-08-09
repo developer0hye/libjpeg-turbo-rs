@@ -221,7 +221,12 @@ fn plane_width(component: c_int, width: c_int, subsamp: c_int) -> usize {
         return 0;
     };
     let ph: usize = mcuw / 8; // luma blocks along width
-    let padded: usize = pad_up(width as usize, mcuw);
+                              // C pads the *width* to a multiple of the horizontal subsampling ratio —
+                              // `PAD(width, tjMCUWidth[subsamp] / 8)` (turbojpeg.c:1127) — not to the MCU
+                              // width in pixels. The padding exists only so the chroma division below is
+                              // exact; padding by 8x more than C over-sized every plane whose width was
+                              // not already MCU-aligned (P4-128).
+    let padded: usize = pad_up(width as usize, ph);
     if component == 0 {
         padded
     } else if is_gray(subsamp) {
@@ -240,7 +245,9 @@ fn plane_height(component: c_int, height: c_int, subsamp: c_int) -> usize {
         return 0;
     };
     let pv: usize = mcuh / 8; // luma blocks along height
-    let padded: usize = pad_up(height as usize, mcuh);
+                              // `PAD(height, tjMCUHeight[subsamp] / 8)` (turbojpeg.c:1150) — same
+                              // reasoning as `plane_width`.
+    let padded: usize = pad_up(height as usize, pv);
     if component == 0 {
         padded
     } else if is_gray(subsamp) {
@@ -337,7 +344,12 @@ pub extern "C" fn tj3YUVPlaneWidth(component_id: c_int, width: c_int, subsamp: c
             set_no_handle_error("tj3YUVPlaneWidth: invalid subsampling");
             return 0;
         }
+        // Upstream folds this into the same `componentID >= nc` test as the
+        // out-of-range case, so it raises `THROWG("Invalid argument", 0)` and
+        // fills the no-handle error slot (turbojpeg.c:1123-1125). Returning a
+        // bare 0 left `tj3GetErrorStr(NULL)` reporting whatever came before.
         if is_gray(subsamp) && component_id != 0 {
+            set_no_handle_error("tj3YUVPlaneWidth: componentID out of range");
             return 0;
         }
         let pw: usize = plane_width(component_id, width, subsamp);
@@ -365,7 +377,10 @@ pub extern "C" fn tj3YUVPlaneHeight(component_id: c_int, height: c_int, subsamp:
             set_no_handle_error("tj3YUVPlaneHeight: invalid subsampling");
             return 0;
         }
+        // See `tj3YUVPlaneWidth`: upstream reports this through the same
+        // `componentID >= nc` throw, error slot included.
         if is_gray(subsamp) && component_id != 0 {
+            set_no_handle_error("tj3YUVPlaneHeight: componentID out of range");
             return 0;
         }
         let ph: usize = plane_height(component_id, height, subsamp);

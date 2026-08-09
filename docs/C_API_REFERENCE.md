@@ -69,8 +69,8 @@
 | `tj3JPEGBufSize(w, h, subsamp)` | Worst-case JPEG output size | `jpeg_buf_size()` | ✅ |
 | `tj3YUVBufSize(w, align, h, subsamp)` | Total YUV buffer size | `yuv_buf_size()` | ✅ |
 | `tj3YUVPlaneSize(comp, w, stride, h, subsamp)` | Single YUV plane size | `yuv_plane_size()` | ✅ |
-| `tj3YUVPlaneWidth(comp, w, subsamp)` | YUV plane width | `yuv_plane_width()` | ✅ |
-| `tj3YUVPlaneHeight(comp, h, subsamp)` | YUV plane height | `yuv_plane_height()` | ✅ |
+| `tj3YUVPlaneWidth(comp, w, subsamp)` | YUV plane width | capi-local `plane_width()`; the root-crate `yuv_plane_width()` is the nearest Rust equivalent but takes a `Subsampling` with no grayscale variant, so it cannot apply C's `componentID >= nc` bound (P4-126) | ✅ |
+| `tj3YUVPlaneHeight(comp, h, subsamp)` | YUV plane height | capi-local `plane_height()`; same relationship to `yuv_plane_height()` | ✅ |
 
 ### ICC Profile
 
