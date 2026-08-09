@@ -164,6 +164,35 @@ The build script then auto-derives `CAPI_SONAME=libjpeg.so.62` and `CAPI_INSTALL
 
 Without `CAPI_ACK_V6B_SONAME=1`, build.rs emits a loud `cargo:warning=` if v6b SONAME or install_name is requested by hand — the same warning fires if SONAME and install_name disagree on v6b vs v8 (which would silently break load-time resolution on macOS).
 
+### `mem->max_memory_to_use` is mirrored but **not enforced** (P4-14)
+
+`cinfo->mem->max_memory_to_use` is present at the correct upstream offset — a
+compile-time `offset_of!` assertion in `crates/libjpeg-turbo-rs-capi/src/memmgr.rs`
+fails the build if it ever drifts — and it defaults to upstream's
+`1000000000L`. **ABI fidelity is intact; the field's *behaviour* is not.**
+
+Nothing in the shim compares against it. `alloc_small`, `alloc_large`,
+`alloc_sarray`, `request_virt_sarray`, `request_virt_barray` and
+`realize_virt_arrays` all allocate without consulting the budget, and no
+`JERR_OUT_OF_MEMORY` is raised from a budget-exceed condition. A C consumer
+that lowers the field to bound memory gets **silence, not enforcement**: the
+allocation succeeds, and an over-budget workload ends in the OS's OOM killer
+or swap rather than upstream's orderly `error_exit(JERR_OUT_OF_MEMORY)`.
+
+**Why it is not simply wired up.** Upstream honours the budget by *spilling
+virtual arrays to a backing store*; this shim has none (`memmgr.rs` keeps
+everything in RAM by design). Enforcing the limit without a spill path would
+not reproduce upstream's behaviour — it would change the failure mode from
+"spill and continue" to "fail the decode", which is a different contract, not
+a stricter one. Choosing between reimplementing the spill path and changing
+the failure semantics is the open decision, tracked as **P4-14 / #467**.
+
+**What to do meanwhile.** Bound memory through the Rust-side controls, which
+*are* enforced: `TJPARAM_MAXMEMORY` on the TurboJPEG API, or
+`Decoder::set_max_memory()` / `DecodeLimits` on the Rust API. Note that
+`docs/FEATURE_PARITY.md` marks this area ✅ on the strength of those; the ✅
+does not extend to the classic `cinfo->mem` field documented here.
+
 ## Field-presence reference
 
 The list below is the contract we mirror from `references/libjpeg-turbo/src/jpeglib.h`. Field names that appear under "v6b layout" are present in the v6b ABI; everything below them is appended in later versions.
