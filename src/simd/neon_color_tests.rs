@@ -1,9 +1,16 @@
+//! Relocated from `tests/neon_color.rs` for P4-135 criterion 2 (#474).
+//!
+//! This suite reaches SIMD kernels directly, which is why the arch
+//! modules had to stay `pub` and were therefore callable from any
+//! downstream crate. As an in-crate test it uses `crate::`, so they
+//! can be private. Moved verbatim apart from the path rewrite.
+
 //! NEON YCbCr→pixel color conversion tests.
 #![cfg(target_arch = "aarch64")]
 
-use libjpeg_turbo_rs::decode::color;
-use libjpeg_turbo_rs::simd;
-use libjpeg_turbo_rs::simd::aarch64::color as neon_color;
+use crate::decode::color;
+use crate::simd;
+use crate::simd::aarch64::color as neon_color;
 
 fn scalar_rgb(y: &[u8], cb: &[u8], cr: &[u8], width: usize) -> Vec<u8> {
     std::env::set_var("JSIMD_FORCENONE", "1");
@@ -15,7 +22,7 @@ fn scalar_rgb(y: &[u8], cb: &[u8], cr: &[u8], width: usize) -> Vec<u8> {
 }
 
 fn neon_rgb(y: &[u8], cb: &[u8], cr: &[u8], width: usize) -> Vec<u8> {
-    let routines = libjpeg_turbo_rs::simd::aarch64::routines();
+    let routines = crate::simd::aarch64::routines();
     let mut rgb = vec![0u8; width * 3];
     (routines.ycbcr_to_rgb_row)(y, cb, cr, &mut rgb, width);
     rgb

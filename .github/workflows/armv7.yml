@@ -68,10 +68,15 @@ jobs:
           sudo apt-get update -qq
           sudo apt-get install -y gcc-arm-linux-gnueabihf qemu-user
           qemu-arm --version
+      # `simd_dispatch` is no longer a `tests/` target: it moved into the
+      # crate as `src/simd/simd_dispatch_tests.rs` so the SIMD modules could
+      # become private (P4-135 criterion 2, #474). It runs as part of `--lib`,
+      # which this job already builds and executes under qemu, so the coverage
+      # is unchanged -- naming it here now fails with "no test target named".
       - name: Build lib + dispatch tests for armv7
         run: |
           cargo test --release --target armv7-unknown-linux-gnueabihf --no-run \
-            --lib --test simd_dispatch --test no_std_dispatch
+            --lib --test no_std_dispatch
         timeout-minutes: 20
       # Scoped to C-tool-free targets on purpose: the byte-exact
       # cross-checks shell out to native x86_64 djpeg/cjpeg, and the
@@ -84,7 +89,7 @@ jobs:
           set -euo pipefail
           cargo test --release --target armv7-unknown-linux-gnueabihf --no-run \
             --message-format=json \
-            --lib --test simd_dispatch --test no_std_dispatch \
+            --lib --test no_std_dispatch \
             | jq -r 'select(.executable != null) | .executable' \
             | while read -r binary; do
                 echo "=== $binary ==="

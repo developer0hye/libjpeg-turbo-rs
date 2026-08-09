@@ -1,3 +1,10 @@
+//! Relocated from `tests/neon_idct.rs` for P4-135 criterion 2 (#474).
+//!
+//! This suite reaches SIMD kernels directly, which is why the arch
+//! modules had to stay `pub` and were therefore callable from any
+//! downstream crate. As an in-crate test it uses `crate::`, so they
+//! can be private. Moved verbatim apart from the path rewrite.
+
 //! NEON IDCT tests — verify byte-exact match with scalar implementation.
 //!
 //! Note: The NEON IDCT uses i16 workspace internally (matching libjpeg-turbo's
@@ -7,7 +14,7 @@
 //! paths agree.
 #![cfg(target_arch = "aarch64")]
 
-use libjpeg_turbo_rs::simd;
+use crate::simd;
 
 /// Helper: compute scalar IDCT result for comparison.
 fn scalar_idct(coeffs: &[i16; 64], quant: &[u16; 64]) -> [u8; 64] {
@@ -24,7 +31,7 @@ fn scalar_idct(coeffs: &[i16; 64], quant: &[u16; 64]) -> [u8; 64] {
 
 /// Helper: compute NEON IDCT result.
 fn neon_idct(coeffs: &[i16; 64], quant: &[u16; 64]) -> [u8; 64] {
-    use libjpeg_turbo_rs::simd::aarch64;
+    use crate::simd::aarch64;
     let routines = aarch64::routines();
     let mut output = [0u8; 64];
     (routines.idct_islow)(coeffs, quant, &mut output);

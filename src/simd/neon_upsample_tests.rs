@@ -1,8 +1,15 @@
+//! Relocated from `tests/neon_upsample.rs` for P4-135 criterion 2 (#474).
+//!
+//! This suite reaches SIMD kernels directly, which is why the arch
+//! modules had to stay `pub` and were therefore callable from any
+//! downstream crate. As an in-crate test it uses `crate::`, so they
+//! can be private. Moved verbatim apart from the path rewrite.
+
 //! NEON fancy h2v1 upsampling tests.
 #![cfg(target_arch = "aarch64")]
 
-use libjpeg_turbo_rs::decode::upsample;
-use libjpeg_turbo_rs::simd;
+use crate::decode::upsample;
+use crate::simd;
 
 fn scalar_upsample(input: &[u8], in_width: usize) -> Vec<u8> {
     std::env::set_var("JSIMD_FORCENONE", "1");
@@ -14,7 +21,7 @@ fn scalar_upsample(input: &[u8], in_width: usize) -> Vec<u8> {
 }
 
 fn neon_upsample(input: &[u8], in_width: usize) -> Vec<u8> {
-    let routines = libjpeg_turbo_rs::simd::aarch64::routines();
+    let routines = crate::simd::aarch64::routines();
     let mut output = vec![0u8; in_width * 2];
     (routines.fancy_upsample_h2v1)(input, in_width, &mut output);
     output
@@ -41,7 +48,7 @@ fn neon_upsample_h2v2(input: &[u8], in_width: usize, in_height: usize) -> Vec<u8
     let out_width = in_width * 2;
     let out_height = in_height * 2;
     let mut output = vec![0u8; out_width * out_height];
-    libjpeg_turbo_rs::simd::aarch64::upsample::neon_fancy_upsample_h2v2(
+    crate::simd::aarch64::upsample::neon_fancy_upsample_h2v2(
         input,
         in_width,
         in_height,

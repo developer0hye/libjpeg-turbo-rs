@@ -1,4 +1,11 @@
-use libjpeg_turbo_rs::simd::{self, SimdRoutines};
+//! Relocated from `tests/simd_dispatch.rs` for P4-135 criterion 2 (#474).
+//!
+//! This suite reaches SIMD kernels directly, which is why the arch
+//! modules had to stay `pub` and were therefore callable from any
+//! downstream crate. As an in-crate test it uses `crate::`, so they
+//! can be private. Moved verbatim apart from the path rewrite.
+
+use crate::simd::{self, SimdRoutines};
 
 #[test]
 fn detect_returns_valid_routines() {
@@ -36,7 +43,7 @@ fn forcenone_forces_scalar() {
 
 #[test]
 fn scalar_idct_matches_existing_functions() {
-    use libjpeg_turbo_rs::decode::idct;
+    use crate::decode::idct;
 
     // Create a block with known coefficients in natural (row-major) order.
     // Position [0] = DC, [1] = (0,1), [8] = (1,0), [16] = (2,0)
@@ -76,7 +83,7 @@ fn scalar_idct_matches_existing_functions() {
 
 #[test]
 fn scalar_ycbcr_to_rgb_matches_existing() {
-    use libjpeg_turbo_rs::decode::color;
+    use crate::decode::color;
 
     let routines = simd::detect();
 
@@ -96,7 +103,7 @@ fn scalar_ycbcr_to_rgb_matches_existing() {
 
 #[test]
 fn scalar_fancy_upsample_matches_existing() {
-    use libjpeg_turbo_rs::decode::upsample;
+    use crate::decode::upsample;
 
     let routines = simd::detect();
 

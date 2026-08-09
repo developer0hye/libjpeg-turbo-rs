@@ -1,3 +1,10 @@
+//! Relocated from `tests/simd_avx2_encode.rs` for P4-135 criterion 2 (#474).
+//!
+//! This suite reaches SIMD kernels directly, which is why the arch
+//! modules had to stay `pub` and were therefore callable from any
+//! downstream crate. As an in-crate test it uses `crate::`, so they
+//! can be private. Moved verbatim apart from the path rewrite.
+
 //! Integration tests for x86_64 AVX2 encode-side SIMD operations.
 //!
 //! Verifies that AVX2-accelerated RGB->YCbCr color conversion produces
@@ -5,8 +12,8 @@
 
 #[cfg(target_arch = "x86_64")]
 mod tests {
-    use libjpeg_turbo_rs::encode::color::rgb_to_ycbcr_row;
-    use libjpeg_turbo_rs::simd::x86_64::avx2_color_encode::avx2_rgb_to_ycbcr_row;
+    use crate::encode::color::rgb_to_ycbcr_row;
+    use crate::simd::x86_64::avx2_color_encode::avx2_rgb_to_ycbcr_row;
 
     fn skip_if_no_avx2() -> bool {
         !is_x86_feature_detected!("avx2")

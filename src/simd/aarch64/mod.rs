@@ -9,11 +9,24 @@ use alloc::vec::Vec;
 use alloc::{format, vec};
 pub mod color;
 pub mod color_encode;
+// Kept reachable but unreferenced. Making the arch modules crate-private
+// (P4-135 criterion 2, #474) turned `dead_code` into a real signal here: 33
+// NEON items in these three modules are called by neither the library nor any
+// test. 26 of them are in `idct_scaled`, which is independent confirmation of
+// **P4-71** — scaled decode never dispatches to the SIMD reduced-size IDCT on
+// any architecture, so those kernels have never had a caller.
+//
+// Allowed rather than deleted: removing them would discard working kernels
+// that P4-71 exists to start using. The allow is scoped to these three modules
+// so genuine dead code elsewhere in the backend still fails the build.
+#[allow(dead_code)]
 pub mod downsample;
 pub mod fdct;
 pub mod idct;
+#[allow(dead_code)]
 pub mod idct_scaled;
 pub mod merged;
+#[allow(dead_code)]
 pub mod quantize;
 pub mod upsample;
 
