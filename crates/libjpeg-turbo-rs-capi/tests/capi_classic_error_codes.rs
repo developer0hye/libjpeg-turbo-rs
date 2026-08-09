@@ -54,6 +54,7 @@ const EXPECTED: &[(&str, i32, &str)] = &[
         38,
         "Output file write error --- out of disk space?",
     ),
+    ("JERR_INPUT_EMPTY", 43, "Empty input file"),
     (
         "JERR_IMAGE_TOO_BIG",
         42,

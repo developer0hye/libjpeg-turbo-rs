@@ -911,6 +911,12 @@ const JERR_BAD_STATE: c_int = 21;
 /// "Buffer passed to JPEG library is too small"
 const JERR_BUFFER_SIZE: c_int = 24;
 #[allow(dead_code)]
+/// "Empty input file" — raised by `jpeg_mem_src` for a NULL or zero-length
+/// buffer (`jdatasrc.c`). Index derived from `jerror.h`'s JMESSAGE order and
+/// cross-checked against the four codes already pinned above, which the raw
+/// ordinal overshoots by exactly one.
+const JERR_INPUT_EMPTY: c_int = 43;
+#[allow(dead_code)]
 /// "Suspension not allowed here"
 const JERR_CANT_SUSPEND: c_int = 25;
 #[allow(dead_code)]
@@ -1634,6 +1640,16 @@ pub extern "C" fn jpeg_mem_src(cinfo: *mut c_void, buf: *const u8, size: std::os
             None => return,
         };
 
+        // Upstream treats an empty input as fatal before touching any state
+        // (`jdatasrc.c`: `if (inbuffer == NULL || insize == 0) ERREXIT(cinfo,
+        // JERR_INPUT_EMPTY)`). We used to accept it and install a source
+        // manager over a NULL pointer, so the failure surfaced later as a
+        // decode error — or not at all — instead of at the call C rejects
+        // (P4-109).
+        if buf.is_null() || size == 0 {
+            invoke_error_exit(cinfo, JERR_INPUT_EMPTY);
+            return;
+        }
         let len: usize = size as usize;
         priv_state.source = JpegSource::Memory { ptr: buf, len };
         install_source_mgr(c, priv_state, buf, len);
