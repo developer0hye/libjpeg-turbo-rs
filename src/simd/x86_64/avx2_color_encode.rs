@@ -48,8 +48,23 @@ pub fn avx2_rgb_to_ycbcr_row(rgb: &[u8], y: &mut [u8], cb: &mut [u8], cr: &mut [
     if width == 0 {
         return;
     }
-    unsafe {
-        avx2_rgb_to_ycbcr_row_inner(rgb, y, cb, cr, width);
+    // P4-135: `width` is independent of the slice lengths, and the SIMD
+    // loop loads/stores by raw pointer without consulting them. The input
+    // holds `width * 3` bytes; each output plane holds `width`.
+    let src_needed: Option<usize> = width.checked_mul(3);
+    let fits: bool = src_needed.is_some_and(|n| rgb.len() >= n)
+        && y.len() >= width
+        && cb.len() >= width
+        && cr.len() >= width;
+
+    if fits && crate::cpu_has!("avx2") {
+        // SAFETY: AVX2 confirmed immediately above, and every slice holds
+        // the samples this kernel reads and writes.
+        unsafe {
+            avx2_rgb_to_ycbcr_row_inner(rgb, y, cb, cr, width);
+        }
+    } else {
+        crate::encode::color::rgb_to_ycbcr_row(rgb, y, cb, cr, width);
     }
 }
 
@@ -64,8 +79,23 @@ pub fn avx2_rgba_to_ycbcr_row(
     if width == 0 {
         return;
     }
-    unsafe {
-        avx2_rgba_to_ycbcr_row_inner(rgba, y, cb, cr, width);
+    // P4-135: `width` is independent of the slice lengths, and the SIMD
+    // loop loads/stores by raw pointer without consulting them. The input
+    // holds `width * 4` bytes; each output plane holds `width`.
+    let src_needed: Option<usize> = width.checked_mul(4);
+    let fits: bool = src_needed.is_some_and(|n| rgba.len() >= n)
+        && y.len() >= width
+        && cb.len() >= width
+        && cr.len() >= width;
+
+    if fits && crate::cpu_has!("avx2") {
+        // SAFETY: AVX2 confirmed immediately above, and every slice holds
+        // the samples this kernel reads and writes.
+        unsafe {
+            avx2_rgba_to_ycbcr_row_inner(rgba, y, cb, cr, width);
+        }
+    } else {
+        crate::encode::color::rgba_to_ycbcr_row(rgba, y, cb, cr, width);
     }
 }
 
@@ -74,8 +104,23 @@ pub fn avx2_bgr_to_ycbcr_row(bgr: &[u8], y: &mut [u8], cb: &mut [u8], cr: &mut [
     if width == 0 {
         return;
     }
-    unsafe {
-        avx2_bgr_to_ycbcr_row_inner(bgr, y, cb, cr, width);
+    // P4-135: `width` is independent of the slice lengths, and the SIMD
+    // loop loads/stores by raw pointer without consulting them. The input
+    // holds `width * 3` bytes; each output plane holds `width`.
+    let src_needed: Option<usize> = width.checked_mul(3);
+    let fits: bool = src_needed.is_some_and(|n| bgr.len() >= n)
+        && y.len() >= width
+        && cb.len() >= width
+        && cr.len() >= width;
+
+    if fits && crate::cpu_has!("avx2") {
+        // SAFETY: AVX2 confirmed immediately above, and every slice holds
+        // the samples this kernel reads and writes.
+        unsafe {
+            avx2_bgr_to_ycbcr_row_inner(bgr, y, cb, cr, width);
+        }
+    } else {
+        crate::encode::color::bgr_to_ycbcr_row_scalar(bgr, y, cb, cr, width);
     }
 }
 
@@ -90,8 +135,23 @@ pub fn avx2_bgra_to_ycbcr_row(
     if width == 0 {
         return;
     }
-    unsafe {
-        avx2_bgra_to_ycbcr_row_inner(bgra, y, cb, cr, width);
+    // P4-135: `width` is independent of the slice lengths, and the SIMD
+    // loop loads/stores by raw pointer without consulting them. The input
+    // holds `width * 4` bytes; each output plane holds `width`.
+    let src_needed: Option<usize> = width.checked_mul(4);
+    let fits: bool = src_needed.is_some_and(|n| bgra.len() >= n)
+        && y.len() >= width
+        && cb.len() >= width
+        && cr.len() >= width;
+
+    if fits && crate::cpu_has!("avx2") {
+        // SAFETY: AVX2 confirmed immediately above, and every slice holds
+        // the samples this kernel reads and writes.
+        unsafe {
+            avx2_bgra_to_ycbcr_row_inner(bgra, y, cb, cr, width);
+        }
+    } else {
+        crate::encode::color::bgra_to_ycbcr_row_scalar(bgra, y, cb, cr, width);
     }
 }
 
