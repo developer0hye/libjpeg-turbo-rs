@@ -80,7 +80,7 @@
 | P4-121 | OPEN (lossless encode accepts a restart interval C refuses to decode) |
 | P4-122 | OPEN (the Pillow smoke harness substitutes for a v6b library, which its own policy forbids) |
 | P4-125 | CLOSED 2026-08-08 (TurboJPEG YUV decompress entry points emitted one plane per SOF component) |
-| P4-126 | PARTIAL (C ABI matches C; root-crate helpers still accept any component index) |
+| P4-126 | CLOSED 2026-08-09 (`yuv_plane_width`/`yuv_plane_height` accept any component index) |
 | P4-127 | CLOSED 2026-08-09 (C-ABI YUV decompress entry points validate after decoding, not before) |
 | P4-128 | CLOSED 2026-08-09 (YUV plane dimensions padded to the MCU size in pixels, not the subsampling ratio) |
 | P4-129 | OPEN (`tj3DecompressHeader` decodes the entire image to read the header) |
@@ -3125,7 +3125,36 @@ mapping documents. Both rows now state it. The `✅` status is unchanged and
 correct: the exported C functions are complete and match C, which is what this
 item established; it is the Rust-native equivalents that differ.
 
-## P4-126. `yuv_plane_width`/`yuv_plane_height` accept any component index where C rejects `componentID >= nc` — **PARTIAL: C ABI matches C across the full matrix; the root-crate helpers remain unbounded**
+## P4-126. `yuv_plane_width`/`yuv_plane_height` accept any component index where C rejects `componentID >= nc` — **CLOSED 2026-08-09**
+
+**Status (2026-08-09): closed.** The root-crate half landed with issue #466.
+`yuv_plane_width` / `yuv_plane_height` now return 0 — C's documented
+invalid-argument return for `tj3YUVPlaneWidth` — for any component index at or
+above `YUV_PLANE_COUNT` (3). The grayscale term stays in the C-ABI layer, which
+still has the raw `subsamp`; `Subsampling` has no grayscale variant and so
+cannot carry it, and that constraint is now stated on the constant rather than
+left for the next reader to rediscover.
+
+**Criterion 4, decided: keep four planes and size the fourth correctly.** The
+alternative — rejecting CMYK/YCCK in the public Rust API to match the C ABI —
+was refused because it would remove working functionality from Rust callers to
+paper over a sizing bug. And it *was* a sizing bug, not merely an unchecked
+index: `decompress_to_yuv_planes` sized the K plane through the chroma rule, so
+a 4:2:0 CMYK frame came back with a K plane of **1024 bytes where the channel
+holds 4096** — three quarters of it silently discarded. In CMYK and YCCK the
+fourth component carries full resolution, like luma, and it is now sized that
+way explicitly.
+
+That measurement is the correction P4-126 needed: this section originally
+called the gap "defence in depth plus an API-contract divergence", which
+understated it. No C caller could reach it — the C ABI rejects 4-component
+frames at the entry points (P4-125) — but every Rust caller decoding a
+subsampled CMYK frame to planes was losing data.
+
+Pinned by `tests/regression_issue_466_cmyk_plane_sizing.rs`, red at `97421a1`
+on both counts. `cargo test --workspace`: 2487 passed / 0 failed, including the
+four-component fixtures from the zune-image corpus.
+
 
 **Status (2026-08-09): partial.** The C-visible half is closed. `tjPlaneWidth` /
 `tjPlaneHeight` now delegate to `tj3YUVPlaneWidth` / `tj3YUVPlaneHeight` and map
