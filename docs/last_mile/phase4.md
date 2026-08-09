@@ -3329,6 +3329,8 @@ after. `cargo test --workspace` is 2481 passed / 0 failed, so no test anywhere
 had pinned the over-padded values — the formula had no coverage at all.
 ## P4-129. Test-Only `jpeg_capi_test_*` Symbols Ship in the Installed Library and Are Stamped `LIBJPEG_8.0` — **OPEN**
 
+**GitHub:** [#460](https://github.com/developer0hye/libjpeg-turbo-rs/issues/460) — under the [#470](https://github.com/developer0hye/libjpeg-turbo-rs/issues/470) umbrella.
+
 **Motivation.** Filed 2026-08-09 by the external drop-in readiness review, which
 asked whether the export surface of the shipped library is an exact allowlist.
 It is not. `crates/libjpeg-turbo-rs-capi/src/jpeglib.rs` defines **16**
@@ -3404,6 +3406,8 @@ prevent, and it undermines any claim that the shipped surface is audited.
 
 ## P4-130. C-Parity Oracle Is Pinned to 3.1.4.1; Upstream Stable Is 3.2.0 — **OPEN**
 
+**GitHub:** [#461](https://github.com/developer0hye/libjpeg-turbo-rs/issues/461) — under the [#470](https://github.com/developer0hye/libjpeg-turbo-rs/issues/470) umbrella.
+
 **Motivation.** Filed 2026-08-09 by the external drop-in readiness review.
 Upstream released **3.2.0 on 2026-06-30** (verified via the GitHub releases API);
 every CI oracle in this repository still installs **3.1.4.1** (2026-03-27) —
@@ -3469,6 +3473,8 @@ sources of diff into one signal.
 
 ## P4-131. No Native Binary Distribution — Releases Ship crates.io and npm Only — **OPEN**
 
+**GitHub:** [#462](https://github.com/developer0hye/libjpeg-turbo-rs/issues/462) — under the [#470](https://github.com/developer0hye/libjpeg-turbo-rs/issues/470) umbrella.
+
 **Motivation.** Filed 2026-08-09 by the external drop-in readiness review.
 `.github/workflows/release.yml` has six jobs: `changelog-check`, `publish`
 (crates.io), `publish-capi` (crates.io), `publish-image` (crates.io),
@@ -3514,6 +3520,8 @@ export surface (P4-129) and the shipped-artifact test path (P4-124) are settled,
 since both change what a release artifact should contain.
 
 ## P4-132. Classic C-ABI Per-`cinfo` State Is Thread-Affine (P4-16 Option A) — **OPEN**
+
+**GitHub:** [#463](https://github.com/developer0hye/libjpeg-turbo-rs/issues/463) — under the [#470](https://github.com/developer0hye/libjpeg-turbo-rs/issues/470) umbrella.
 
 **Motivation.** Filed 2026-08-09 by the external drop-in readiness review, which
 names this an adoption blocker for consumers that move codec-context ownership
@@ -3575,6 +3583,8 @@ correctness-of-contract gap that blocks the T3 claim, not a live defect.
 
 ## P4-133. BMI2/FMA Paths Are Reachable Only via `target-cpu=native`, So Portable Builds Leave Them Off — **OPEN**
 
+**GitHub:** [#464](https://github.com/developer0hye/libjpeg-turbo-rs/issues/464) — under the [#470](https://github.com/developer0hye/libjpeg-turbo-rs/issues/470) umbrella.
+
 **Motivation.** Filed 2026-08-09 by the external drop-in readiness review.
 **[P4-8](#p4-8-runtime-bmi1lzcnt-dispatch-for-x86_64-encode-already-live-readme-updated--closed-2026-05-17)** closed 2026-05-17 after establishing that the BMI1/LZCNT AC
 encoding loop already dispatches at runtime
@@ -3629,6 +3639,8 @@ outranks the Stage A items.
 
 ## P4-134. No RISC-V RVV SIMD Backend — Upstream 3.2 Ships One — **OPEN**
 
+**GitHub:** [#465](https://github.com/developer0hye/libjpeg-turbo-rs/issues/465) — under the [#470](https://github.com/developer0hye/libjpeg-turbo-rs/issues/470) umbrella.
+
 **Motivation.** Filed 2026-08-09 by the external drop-in readiness review.
 `src/simd/` contains `aarch64/`, `wasm32/`, `x86_64/`, and `scalar.rs` — there is
 no RISC-V backend, and `grep -ri "riscv\|rvv" src/` matches only two comment
@@ -3673,7 +3685,7 @@ is no downstream request. It is filed so the P4-60 premise change is on record.
 
 ## P4-135. Public Safe SIMD Wrappers Let Safe Rust Reach `target_feature` Kernels With Unvalidated Slices — **OPEN**
 
-**GitHub:** filed 2026-08-09 by the soundness audit (commit `1849dea`).
+**GitHub:** [#474](https://github.com/developer0hye/libjpeg-turbo-rs/issues/474) — under the [#481](https://github.com/developer0hye/libjpeg-turbo-rs/issues/481) umbrella.
 
 **Motivation.** This is the first *confirmed unsound safe API* in the crate:
 safe Rust, with no `unsafe` block anywhere in the caller, can invoke an AVX2
@@ -3779,7 +3791,7 @@ API is defensible, and the README's framing (P4-140) is unsupportable.
 
 ## P4-136. Progressive Output Calls `set_len()` on Uninitialized `Vec` After an Unchecked Size Multiplication — **OPEN**
 
-**GitHub:** filed 2026-08-09 by the soundness audit (commit `1849dea`).
+**GitHub:** [#475](https://github.com/developer0hye/libjpeg-turbo-rs/issues/475) — under the [#481](https://github.com/developer0hye/libjpeg-turbo-rs/issues/481) umbrella.
 
 **Motivation.** `src/api/progressive_output.rs:256-262` allocates each component
 plane by declaring uninitialized memory initialized:
@@ -3839,7 +3851,7 @@ documented `unsafe` contract violation sitting in the crate's own code.
 
 ## P4-137. C-ABI Raw-Pointer Exports Are Safe Rust Functions — **OPEN**
 
-**GitHub:** filed 2026-08-09 by the soundness audit (commit `1849dea`).
+**GitHub:** [#476](https://github.com/developer0hye/libjpeg-turbo-rs/issues/476) — under the [#481](https://github.com/developer0hye/libjpeg-turbo-rs/issues/481) umbrella.
 
 **Motivation.** `crates/libjpeg-turbo-rs-capi` builds as
 `crate-type = ["rlib", "cdylib", "staticlib"]` (`Cargo.toml:16`), so its Rust
@@ -3915,7 +3927,7 @@ warning.
 
 ## P4-138. `BitWriter` Hand-Rolls Allocation Ownership and Can Double-Free on an Unwinding `reserve` — **OPEN**
 
-**GitHub:** filed 2026-08-09 by the soundness audit (commit `1849dea`).
+**GitHub:** [#477](https://github.com/developer0hye/libjpeg-turbo-rs/issues/477) — under the [#481](https://github.com/developer0hye/libjpeg-turbo-rs/issues/481) umbrella.
 
 **Motivation.** `BitWriter` (`src/encode/huffman_encode.rs`) manages its buffer
 as a raw `*mut u8` + `pos` + `cap` triple with a manual `Drop`, a manual
@@ -3971,7 +3983,7 @@ ordinary encoding if allocation ever fails or the size arithmetic overflows.
 
 ## P4-139. Memory-Layout Arithmetic Is Decentralised and Uses Saturating/Unchecked Multiplication — **OPEN**
 
-**GitHub:** filed 2026-08-09 by the soundness audit (commit `1849dea`).
+**GitHub:** [#478](https://github.com/developer0hye/libjpeg-turbo-rs/issues/478) — under the [#481](https://github.com/developer0hye/libjpeg-turbo-rs/issues/481) umbrella.
 
 **Motivation.** Width × height × bytes-per-pixel, stride × height, padded plane
 sizes, and crop offsets are recomputed independently along many paths, with
@@ -4025,7 +4037,7 @@ out, but do not leave it unstated.
 
 ## P4-140. Public Documentation Claims Safety and Drop-In Status the Code Does Not Support — **OPEN**
 
-**GitHub:** filed 2026-08-09 by the soundness audit (commit `1849dea`).
+**GitHub:** [#479](https://github.com/developer0hye/libjpeg-turbo-rs/issues/479) — under the [#481](https://github.com/developer0hye/libjpeg-turbo-rs/issues/481) umbrella.
 
 **Motivation.** Two documentation claims are currently unsupportable, and one of
 them can cause memory corruption if a reader acts on it.
@@ -4067,7 +4079,7 @@ immediately, ahead of the code work.
 
 ## P4-141. Soundness Verification Program: Miri/Sanitizer/Fuzz Coverage Gaps and an `unsafe` Inventory Gate — **OPEN**
 
-**GitHub:** filed 2026-08-09 by the soundness audit (commit `1849dea`).
+**GitHub:** [#480](https://github.com/developer0hye/libjpeg-turbo-rs/issues/480) — under the [#481](https://github.com/developer0hye/libjpeg-turbo-rs/issues/481) umbrella.
 
 **Motivation.** The existing CI is genuinely strong — Miri on non-SIMD unit
 tests, ASan and UBSan, a C-boundary sanitizer harness, 12 fuzz targets on a
