@@ -183,8 +183,23 @@ pub extern "C" fn tj3InitVersion(init_type: c_int, api_version: c_int) -> *mut c
 }
 
 /// `tj3Destroy(handle)` — free a handle. NULL is a no-op.
+///
+/// # Safety
+///
+/// `handle` must be NULL, or a handle returned by [`tj3Init`] that has not
+/// already been destroyed. Ownership transfers here: the allocation is
+/// reclaimed through `Box::from_raw`, so the pointer dangles on return and
+/// must not be used again.
+///
+/// **Calling this twice with the same handle is a double free**, and no check
+/// here can catch it — the pointer looks identical both times. Detecting it
+/// needs generation-tagged handles in a registry, which P4-137 records as an
+/// open decision rather than something this signature can supply.
+///
+/// The caller must also ensure no other thread is inside a call using the same
+/// handle: those reconstruct `&mut TjInstance` from it and would alias.
 #[no_mangle]
-pub extern "C" fn tj3Destroy(handle: *mut c_void) {
+pub unsafe extern "C" fn tj3Destroy(handle: *mut c_void) {
     crate::unwind_guard!((), {
         if handle.is_null() {
             return;

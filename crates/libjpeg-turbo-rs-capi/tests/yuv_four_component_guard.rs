@@ -61,8 +61,9 @@ fn tj3_decompress_to_yuv8_rejects_four_component_jpeg() {
         dst_buf.as_mut_ptr(),
         ALIGN,
     );
-    tj3Destroy(handle);
-
+    // SAFETY: `handle` is a live handle this test created and has not
+    // destroyed; nothing else can reach it.
+    unsafe { tj3Destroy(handle) };
     assert_eq!(rc, -1, "4-component JPEG must be rejected, not packed");
     assert!(
         dst_buf[sized_len..].iter().all(|&b| b == SENTINEL),
@@ -93,8 +94,9 @@ fn tj3_decompress_to_yuv_planes8_rejects_four_component_jpeg() {
         plane_ptrs.as_mut_ptr(),
         std::ptr::null(),
     );
-    tj3Destroy(handle);
-
+    // SAFETY: `handle` is a live handle this test created and has not
+    // destroyed; nothing else can reach it.
+    unsafe { tj3Destroy(handle) };
     assert_eq!(rc, -1, "4-component JPEG must be rejected, not written out");
     assert!(
         planes[3].iter().all(|&b| b == SENTINEL),

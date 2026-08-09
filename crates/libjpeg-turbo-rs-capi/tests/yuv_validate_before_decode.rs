@@ -95,8 +95,9 @@ fn four_component_frame_is_rejected_without_decoding() {
     assert!(!handle.is_null());
     let rc: c_int = tj3DecompressToYUV8(handle, jpeg.as_ptr(), jpeg.len(), dst.as_mut_ptr(), ALIGN);
     let err: String = error_of(handle);
-    tj3Destroy(handle);
-
+    // SAFETY: `handle` is a live handle this test created and has not
+    // destroyed; nothing else can reach it.
+    unsafe { tj3Destroy(handle) };
     assert_eq!(rc, -1, "4-component frame must be rejected");
     assert!(
         err.contains("3 or fewer components"),
@@ -126,8 +127,9 @@ fn max_pixels_bounds_the_packed_entry_point() {
 
     let rc: c_int = tj3DecompressToYUV8(handle, jpeg.as_ptr(), jpeg.len(), dst.as_mut_ptr(), ALIGN);
     let err: String = error_of(handle);
-    tj3Destroy(handle);
-
+    // SAFETY: `handle` is a live handle this test created and has not
+    // destroyed; nothing else can reach it.
+    unsafe { tj3Destroy(handle) };
     assert_eq!(rc, -1, "a frame over TJPARAM_MAXPIXELS must be rejected");
     assert!(
         err.to_lowercase().contains("pixel"),
@@ -159,8 +161,9 @@ fn null_plane_pointer_leaves_all_caller_buffers_untouched() {
         ptrs.as_mut_ptr(),
         std::ptr::null(),
     );
-    tj3Destroy(handle);
-
+    // SAFETY: `handle` is a live handle this test created and has not
+    // destroyed; nothing else can reach it.
+    unsafe { tj3Destroy(handle) };
     assert_eq!(rc, -1, "a NULL plane pointer must be rejected");
     for (i, plane) in planes.iter().enumerate().take(2) {
         assert!(
@@ -185,8 +188,9 @@ fn bad_align_outranks_the_component_check_as_in_c() {
     assert!(!handle.is_null());
     let rc: c_int = tj3DecompressToYUV8(handle, jpeg.as_ptr(), jpeg.len(), dst.as_mut_ptr(), 0);
     let err: String = error_of(handle);
-    tj3Destroy(handle);
-
+    // SAFETY: `handle` is a live handle this test created and has not
+    // destroyed; nothing else can reach it.
+    unsafe { tj3Destroy(handle) };
     assert_eq!(rc, -1, "align = 0 must be rejected");
     assert!(
         !err.contains("3 or fewer components"),
