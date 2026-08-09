@@ -259,5 +259,5 @@ pub mod precision {
 }
 /// TJ3-compatible handle/parameter API.
 pub mod tj3 {
-    pub use crate::api::tj3::{TjHandle, TjParam};
+    pub use crate::api::tj3::{FrameInfo, TjHandle, TjParam};
 }
