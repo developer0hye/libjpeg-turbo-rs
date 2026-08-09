@@ -34,7 +34,7 @@
 
 use std::ffi::{c_char, c_int, c_void};
 
-use libjpeg_turbo_rs::{calc_jpeg_dimensions, yuv_plane_height, yuv_plane_width, Subsampling};
+use libjpeg_turbo_rs::{calc_jpeg_dimensions, Subsampling};
 
 use crate::compress::tj3Compress8;
 use crate::decompress::tj3Decompress8;
@@ -50,19 +50,6 @@ const TJINIT_TRANSFORM: c_int = 2;
 // --- TJPARAM identifiers we drive from the legacy surface ---
 const TJPARAM_QUALITY: c_int = 3;
 const TJPARAM_SUBSAMP: c_int = 4;
-
-fn subsamp_from_c(tjsamp: c_int) -> Option<Subsampling> {
-    Some(match tjsamp {
-        0 => Subsampling::S444,
-        1 => Subsampling::S422,
-        2 => Subsampling::S420,
-        3 => Subsampling::S444, // TJSAMP_GRAY: no subsampling on luma-only
-        4 => Subsampling::S440,
-        5 => Subsampling::S411,
-        6 => Subsampling::S441,
-        _ => return None,
-    })
-}
 
 // ---------------------------------------------------------------------------
 // Init / Destroy
@@ -498,30 +485,44 @@ pub extern "C" fn tjPlaneSizeYUV(
 }
 
 /// `tjPlaneWidth(componentID, width, subsamp)`.
+///
+/// Delegates to `tj3YUVPlaneWidth` and maps its 0 to the pre-3.0 `-1`
+/// sentinel, exactly as upstream does (`turbojpeg.c`):
+///
+/// ```c
+/// int retval = tj3YUVPlaneWidth(componentID, width, subsamp);
+/// return (retval == 0) ? -1 : retval;
+/// ```
+///
+/// Delegating is what makes the `componentID >= nc` bound apply here. The
+/// previous implementation re-derived the answer from the root-crate
+/// `yuv_plane_width`, whose `Subsampling` argument has no grayscale variant, so
+/// this layer had to translate `TJSAMP_GRAY` into `S444` and the distinction was
+/// gone by the time the helper saw it: grayscale components 1 and 2 came back as
+/// full-size planes instead of being rejected (P4-126). Same shape as P4-125 —
+/// upstream needs one guard because it delegates; re-deriving needs a second
+/// copy of every bound.
 #[no_mangle]
 pub extern "C" fn tjPlaneWidth(component_id: c_int, width: c_int, subsamp: c_int) -> c_int {
     crate::unwind_guard!(-1, {
-        if !(0..=2).contains(&component_id) || width <= 0 {
-            return -1;
+        match crate::bufsize::tj3YUVPlaneWidth(component_id, width, subsamp) {
+            0 => -1,
+            retval => retval,
         }
-        let Some(ss): Option<Subsampling> = subsamp_from_c(subsamp) else {
-            return -1;
-        };
-        yuv_plane_width(component_id as usize, width as usize, ss) as c_int
     })
 }
 
 /// `tjPlaneHeight(componentID, height, subsamp)`.
+///
+/// Delegates to `tj3YUVPlaneHeight` for the reasons given on
+/// [`tjPlaneWidth`].
 #[no_mangle]
 pub extern "C" fn tjPlaneHeight(component_id: c_int, height: c_int, subsamp: c_int) -> c_int {
     crate::unwind_guard!(-1, {
-        if !(0..=2).contains(&component_id) || height <= 0 {
-            return -1;
+        match crate::bufsize::tj3YUVPlaneHeight(component_id, height, subsamp) {
+            0 => -1,
+            retval => retval,
         }
-        let Some(ss): Option<Subsampling> = subsamp_from_c(subsamp) else {
-            return -1;
-        };
-        yuv_plane_height(component_id as usize, height as usize, ss) as c_int
     })
 }
 

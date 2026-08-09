@@ -335,8 +335,8 @@
 ### Buffer Size Helpers
 - [x] `tj3YUVBufSize()` — Total packed YUV buffer size (`yuv_buf_size()`)
 - [x] `tj3YUVPlaneSize()` — Single plane buffer size (`yuv_plane_size()`)
-- [x] `tj3YUVPlaneWidth()` — Plane width in samples (`yuv_plane_width()`)
-- [x] `tj3YUVPlaneHeight()` — Plane height in rows (`yuv_plane_height()`)
+- [x] `tj3YUVPlaneWidth()` — Plane width in samples (exported symbol runs the capi-local `plane_width()`, not the root-crate `yuv_plane_width()`, which cannot express C's `componentID >= nc` bound — P4-126)
+- [x] `tj3YUVPlaneHeight()` — Plane height in rows (capi-local `plane_height()`; same relationship to `yuv_plane_height()`)
 
 ---
 

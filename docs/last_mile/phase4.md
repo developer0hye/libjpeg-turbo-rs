@@ -80,8 +80,9 @@
 | P4-121 | OPEN (lossless encode accepts a restart interval C refuses to decode) |
 | P4-122 | OPEN (the Pillow smoke harness substitutes for a v6b library, which its own policy forbids) |
 | P4-125 | CLOSED 2026-08-08 (TurboJPEG YUV decompress entry points emitted one plane per SOF component) |
-| P4-126 | OPEN (`yuv_plane_width`/`yuv_plane_height` accept any component index) |
+| P4-126 | PARTIAL (C ABI matches C; root-crate helpers still accept any component index) |
 | P4-127 | OPEN (C-ABI YUV decompress entry points validate after decoding, not before) |
+| P4-128 | CLOSED 2026-08-09 (YUV plane dimensions padded to the MCU size in pixels, not the subsampling ratio) |
 
 ---
 
@@ -3123,7 +3124,38 @@ mapping documents. Both rows now state it. The `✅` status is unchanged and
 correct: the exported C functions are complete and match C, which is what this
 item established; it is the Rust-native equivalents that differ.
 
-## P4-126. `yuv_plane_width`/`yuv_plane_height` accept any component index where C rejects `componentID >= nc` — **OPEN**
+## P4-126. `yuv_plane_width`/`yuv_plane_height` accept any component index where C rejects `componentID >= nc` — **PARTIAL: C ABI matches C across the full matrix; the root-crate helpers remain unbounded**
+
+**Status (2026-08-09): partial.** The C-visible half is closed. `tjPlaneWidth` /
+`tjPlaneHeight` now delegate to `tj3YUVPlaneWidth` / `tj3YUVPlaneHeight` and map
+0 to -1, the way upstream does, so the `componentID >= nc` bound reaches them
+instead of being re-derived from a root-crate helper that cannot express it; and
+the grayscale branch of `tj3YUVPlaneWidth` / `tj3YUVPlaneHeight` now fills the
+no-handle error slot upstream's `THROWG("Invalid argument", 0)` fills. Pinned by
+`crates/libjpeg-turbo-rs-capi/tests/yuv_plane_index_c_parity.rs`, which drives
+`examples/yuv_plane_index_c_oracle.c` over every (`TJSAMP_*`, `componentID` in
+-1..=4) cell — 42 cells, all required to match stock libjpeg-turbo 3.1.4.1.
+Measured red at `bad5493`: 21 of the 42 disagreed.
+
+**Criterion 1 is only half-implementable as written, and this is why.**
+`Subsampling` (`src/common/types.rs:32`) has **no grayscale variant** — the C-ABI
+`subsamp_from_c` maps `TJSAMP_GRAY` to `S444` — so the root-crate
+`yuv_plane_width(component, width, subsampling)` cannot compute
+`nc = (subsamp == TJSAMP_GRAY ? 1 : 3)`; grayscale is simply not representable in
+the argument it receives. The bound was therefore placed where the information
+exists (the C-ABI layer, which still has the raw `subsamp` and `is_gray`) rather
+than pushed into a type that cannot carry it. Closing the remaining half needs a
+decision recorded here first: add a `Gray` variant to `Subsampling` (touches every
+match in the codebase), or change the helpers' signature.
+
+**Remaining.** (a) the root-crate helpers still accept any component index —
+unreachable from C now that both wrapper pairs bound it, so this is defence in
+depth plus a Rust-API contract gap; (b) criterion 4's decision for
+`decompress_to_yuv_planes` on a 4-component frame is still open, and note that a
+naive "return 0 for an out-of-range index" would make its trim loop emit an
+**empty** fourth plane rather than reject — a worse failure than today's
+mis-sized one. Criteria 2 and 5 are done.
+
 
 **Motivation.** Filed 2026-08-08 while closing P4-125, which ported the
 first-layer defence but left upstream's second layer unported in the root-crate
@@ -3264,3 +3296,34 @@ where the structure permitted. Fixing this properly means giving the C-ABI layer
 a header-only decode path, which is a structural change well beyond the 12-line
 guard P4-125 deliberately scoped itself to — and it overlaps the C-ABI-state
 workstream P4-123 coordinates.
+
+## P4-128. `tj3YUVPlaneWidth`/`Height` pad plane dimensions to the MCU size in pixels where C pads to the subsampling ratio — **CLOSED 2026-08-09**
+
+**Status (2026-08-09): closed.** Found while building P4-126's C-parity matrix,
+which is the only reason it surfaced: the pre-existing legacy coverage
+(`tests/legacy_aliases.rs`) probes width 640, which is divisible by every
+subsampling factor, so the two formulas agree there and the bug was invisible.
+The new matrix uses 100 deliberately.
+
+**The defect.** `crates/libjpeg-turbo-rs-capi/src/bufsize.rs` padded with
+`pad_up(width, mcuw)` — the MCU width in *pixels* (8/16/32) — where C pads with
+`PAD(width, tjMCUWidth[subsamp] / 8)` — the horizontal subsampling ratio
+(1/2/2/4) (`references/libjpeg-turbo/src/turbojpeg.c:1127`, and :1150 for
+height). That is 8x too coarse, so every plane whose dimension was not already
+MCU-aligned came back over-sized: `tj3YUVPlaneWidth(0, 100, TJSAMP_411)`
+returned 128 where C returns 100, and `TJSAMP_444` returned 104 where C returns
+100. 21 of 42 matrix cells disagreed.
+
+**Why it mattered beyond the reported number.** `plane_width` / `plane_height`
+back `tj3YUVBufSize` and `tj3YUVPlaneSize` as well, so those over-reported too —
+safe for allocation, but they disagreed with the *decompress* path, which sizes
+its rows through the root-crate `yuv_plane_width` (`src/common/bufsize.rs`) and
+pads correctly. A caller that allocated from `tj3YUVBufSize` and then walked the
+result using `tj3YUVPlaneWidth` as its stride read misaligned rows: the data was
+written at the narrower C-correct stride. The fix makes the C ABI, the root
+crate, and C agree on one number.
+
+**Proof.** `crates/libjpeg-turbo-rs-capi/tests/yuv_plane_index_c_parity.rs`
+requires all 42 cells to match libjpeg-turbo 3.1.4.1; red at `bad5493`, green
+after. `cargo test --workspace` is 2481 passed / 0 failed, so no test anywhere
+had pinned the over-padded values — the formula had no coverage at all.
