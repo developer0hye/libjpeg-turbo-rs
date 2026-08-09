@@ -1,3 +1,10 @@
+//! Relocated from `tests/simd_neon_scaled.rs` for P4-135 criterion 2 (#474).
+//!
+//! This suite reaches SIMD kernels directly, which is why the arch
+//! modules had to stay `pub` and were therefore callable from any
+//! downstream crate. As an in-crate test it uses `crate::`, so they
+//! can be private. Moved verbatim apart from the path rewrite.
+
 //! Integration tests for aarch64 NEON scaled IDCT and quantization SIMD operations.
 //!
 //! Verifies that NEON-accelerated scaled IDCT (4x4, 2x2, 1x1) and quantization
@@ -5,11 +12,9 @@
 
 #[cfg(target_arch = "aarch64")]
 mod tests {
-    use libjpeg_turbo_rs::decode::idct_scaled::{idct_1x1, idct_2x2, idct_4x4};
-    use libjpeg_turbo_rs::simd::aarch64::idct_scaled::{
-        neon_idct_1x1, neon_idct_2x2, neon_idct_4x4,
-    };
-    use libjpeg_turbo_rs::simd::aarch64::quantize::neon_quantize;
+    use crate::decode::idct_scaled::{idct_1x1, idct_2x2, idct_4x4};
+    use crate::simd::aarch64::idct_scaled::{neon_idct_1x1, neon_idct_2x2, neon_idct_4x4};
+    use crate::simd::aarch64::quantize::neon_quantize;
 
     // -----------------------------------------------------------------------
     // Scalar quantize reference for testing

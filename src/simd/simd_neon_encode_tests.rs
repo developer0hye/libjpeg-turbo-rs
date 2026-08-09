@@ -1,3 +1,10 @@
+//! Relocated from `tests/simd_neon_encode.rs` for P4-135 criterion 2 (#474).
+//!
+//! This suite reaches SIMD kernels directly, which is why the arch
+//! modules had to stay `pub` and were therefore callable from any
+//! downstream crate. As an in-crate test it uses `crate::`, so they
+//! can be private. Moved verbatim apart from the path rewrite.
+
 //! Integration tests for aarch64 NEON encode-side SIMD operations.
 //!
 //! Verifies that NEON-accelerated FDCT, RGB->YCbCr color conversion,
@@ -5,11 +12,11 @@
 
 #[cfg(target_arch = "aarch64")]
 mod tests {
-    use libjpeg_turbo_rs::encode::color::rgb_to_ycbcr_row;
-    use libjpeg_turbo_rs::encode::fdct::fdct_islow;
-    use libjpeg_turbo_rs::simd::aarch64::color_encode::neon_rgb_to_ycbcr_row;
-    use libjpeg_turbo_rs::simd::aarch64::downsample::{neon_downsample_h2v1, neon_downsample_h2v2};
-    use libjpeg_turbo_rs::simd::aarch64::fdct::neon_fdct;
+    use crate::encode::color::rgb_to_ycbcr_row;
+    use crate::encode::fdct::fdct_islow;
+    use crate::simd::aarch64::color_encode::neon_rgb_to_ycbcr_row;
+    use crate::simd::aarch64::downsample::{neon_downsample_h2v1, neon_downsample_h2v2};
+    use crate::simd::aarch64::fdct::neon_fdct;
 
     // -----------------------------------------------------------------------
     // FDCT tests

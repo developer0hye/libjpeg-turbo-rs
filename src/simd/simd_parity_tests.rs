@@ -1,3 +1,10 @@
+//! Relocated from `tests/simd_parity.rs` for P4-135 criterion 2 (#474).
+//!
+//! This suite reaches SIMD kernels directly, which is why the arch
+//! modules had to stay `pub` and were therefore callable from any
+//! downstream crate. As an in-crate test it uses `crate::`, so they
+//! can be private. Moved verbatim apart from the path rewrite.
+
 //! Cross-arch SIMD parity tests.
 //!
 //! For every SIMD kernel pair (scalar reference vs SIMD implementation)
@@ -37,10 +44,10 @@
 //! `assert!(diff <= measured + 1)` with the measured value documented
 //! in a comment. No such kernel is currently in scope.
 
-use libjpeg_turbo_rs::encode::pipeline::compute_reciprocal;
-use libjpeg_turbo_rs::encode::tables::ZIGZAG_ORDER;
-use libjpeg_turbo_rs::simd::scalar;
-use libjpeg_turbo_rs::simd::QuantDivisors;
+use crate::encode::pipeline::compute_reciprocal;
+use crate::encode::tables::ZIGZAG_ORDER;
+use crate::simd::scalar;
+use crate::simd::QuantDivisors;
 
 /// Number of random inputs per kernel. Large enough to probe corner
 /// cases (DC-only, saturating, sign-extended) while keeping the suite
@@ -213,7 +220,7 @@ fn parity_idct_islow_full() {
 
         #[cfg(target_arch = "aarch64")]
         {
-            use libjpeg_turbo_rs::simd::aarch64::idct::neon_idct_islow;
+            use crate::simd::aarch64::idct::neon_idct_islow;
             let mut simd_out: [u8; 64] = [0u8; 64];
             neon_idct_islow(&coeffs, &quant, &mut simd_out);
             assert_eq!(simd_out, scalar_out, "NEON idct_islow mismatch at iter {i}");
@@ -221,13 +228,13 @@ fn parity_idct_islow_full() {
         #[cfg(target_arch = "x86_64")]
         {
             if is_x86_feature_detected!("avx2") {
-                use libjpeg_turbo_rs::simd::x86_64::avx2_idct::avx2_idct_islow;
+                use crate::simd::x86_64::avx2_idct::avx2_idct_islow;
                 let mut simd_out: [u8; 64] = [0u8; 64];
                 avx2_idct_islow(&coeffs, &quant, &mut simd_out);
                 assert_eq!(simd_out, scalar_out, "AVX2 idct_islow mismatch at iter {i}");
             }
             if is_x86_feature_detected!("sse2") {
-                use libjpeg_turbo_rs::simd::x86_64::idct::sse2_idct_islow;
+                use crate::simd::x86_64::idct::sse2_idct_islow;
                 let mut simd_out: [u8; 64] = [0u8; 64];
                 sse2_idct_islow(&coeffs, &quant, &mut simd_out);
                 assert_eq!(simd_out, scalar_out, "SSE2 idct_islow mismatch at iter {i}");
@@ -235,7 +242,7 @@ fn parity_idct_islow_full() {
         }
         #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
         {
-            use libjpeg_turbo_rs::simd::wasm32::idct::wasm_idct_islow;
+            use crate::simd::wasm32::idct::wasm_idct_islow;
             let mut simd_out: [u8; 64] = [0u8; 64];
             wasm_idct_islow(&coeffs, &quant, &mut simd_out);
             assert_eq!(simd_out, scalar_out, "WASM idct_islow mismatch at iter {i}");
@@ -256,7 +263,7 @@ fn parity_idct_islow_full() {
 #[test]
 #[cfg_attr(not(target_arch = "aarch64"), allow(unused_variables))]
 fn parity_idct_4x4() {
-    use libjpeg_turbo_rs::decode::idct_scaled::idct_4x4;
+    use crate::decode::idct_scaled::idct_4x4;
     let mut rng: Mulberry32 = Mulberry32::new(0xA5A5_0002);
     for i in 0..N {
         let coeffs: [i16; 64] = random_coeffs(&mut rng);
@@ -266,7 +273,7 @@ fn parity_idct_4x4() {
 
         #[cfg(target_arch = "aarch64")]
         {
-            use libjpeg_turbo_rs::simd::aarch64::idct_scaled::neon_idct_4x4;
+            use crate::simd::aarch64::idct_scaled::neon_idct_4x4;
             let mut simd_out: [u8; 16] = [0u8; 16];
             neon_idct_4x4(&coeffs, &quant, &mut simd_out);
             assert_eq!(simd_out, scalar_out, "NEON idct_4x4 mismatch at iter {i}");
@@ -277,7 +284,7 @@ fn parity_idct_4x4() {
 #[test]
 #[cfg_attr(not(target_arch = "aarch64"), allow(unused_variables))]
 fn parity_idct_2x2() {
-    use libjpeg_turbo_rs::decode::idct_scaled::idct_2x2;
+    use crate::decode::idct_scaled::idct_2x2;
     let mut rng: Mulberry32 = Mulberry32::new(0xA5A5_0003);
     for i in 0..N {
         let coeffs: [i16; 64] = random_coeffs(&mut rng);
@@ -287,7 +294,7 @@ fn parity_idct_2x2() {
 
         #[cfg(target_arch = "aarch64")]
         {
-            use libjpeg_turbo_rs::simd::aarch64::idct_scaled::neon_idct_2x2;
+            use crate::simd::aarch64::idct_scaled::neon_idct_2x2;
             let mut simd_out: [u8; 4] = [0u8; 4];
             neon_idct_2x2(&coeffs, &quant, &mut simd_out);
             assert_eq!(simd_out, scalar_out, "NEON idct_2x2 mismatch at iter {i}");
@@ -298,7 +305,7 @@ fn parity_idct_2x2() {
 #[test]
 #[cfg_attr(not(target_arch = "aarch64"), allow(unused_variables))]
 fn parity_idct_1x1() {
-    use libjpeg_turbo_rs::decode::idct_scaled::idct_1x1;
+    use crate::decode::idct_scaled::idct_1x1;
     let mut rng: Mulberry32 = Mulberry32::new(0xA5A5_0004);
     for i in 0..N {
         let coeffs: [i16; 64] = random_coeffs(&mut rng);
@@ -307,7 +314,7 @@ fn parity_idct_1x1() {
 
         #[cfg(target_arch = "aarch64")]
         {
-            use libjpeg_turbo_rs::simd::aarch64::idct_scaled::neon_idct_1x1;
+            use crate::simd::aarch64::idct_scaled::neon_idct_1x1;
             let mut simd_out: [u8; 1] = [0u8; 1];
             neon_idct_1x1(&coeffs, &quant, &mut simd_out);
             assert_eq!(
@@ -338,7 +345,7 @@ fn parity_ycbcr_to_rgb_rows() {
 
             #[cfg(target_arch = "aarch64")]
             {
-                use libjpeg_turbo_rs::simd::aarch64::color::{
+                use crate::simd::aarch64::color::{
                     neon_ycbcr_to_bgr_row, neon_ycbcr_to_bgra_row, neon_ycbcr_to_rgb_row,
                     neon_ycbcr_to_rgba_row,
                 };
@@ -350,13 +357,7 @@ fn parity_ycbcr_to_rgb_rows() {
                 // RGBA / BGR / BGRA compared against their own scalar reference
                 let mut scalar_rgba: Vec<u8> = vec![0u8; width * 4];
                 let mut simd_rgba: Vec<u8> = vec![0u8; width * 4];
-                libjpeg_turbo_rs::decode::color::ycbcr_to_rgba_row(
-                    &y,
-                    &cb,
-                    &cr,
-                    &mut scalar_rgba,
-                    width,
-                );
+                crate::decode::color::ycbcr_to_rgba_row(&y, &cb, &cr, &mut scalar_rgba, width);
                 neon_ycbcr_to_rgba_row(&y, &cb, &cr, &mut simd_rgba, width);
                 assert_eq!(
                     simd_rgba, scalar_rgba,
@@ -365,25 +366,13 @@ fn parity_ycbcr_to_rgb_rows() {
 
                 let mut scalar_bgr: Vec<u8> = vec![0u8; width * 3];
                 let mut simd_bgr: Vec<u8> = vec![0u8; width * 3];
-                libjpeg_turbo_rs::decode::color::ycbcr_to_bgr_row(
-                    &y,
-                    &cb,
-                    &cr,
-                    &mut scalar_bgr,
-                    width,
-                );
+                crate::decode::color::ycbcr_to_bgr_row(&y, &cb, &cr, &mut scalar_bgr, width);
                 neon_ycbcr_to_bgr_row(&y, &cb, &cr, &mut simd_bgr, width);
                 assert_eq!(simd_bgr, scalar_bgr, "NEON BGR mismatch w={width} iter={i}");
 
                 let mut scalar_bgra: Vec<u8> = vec![0u8; width * 4];
                 let mut simd_bgra: Vec<u8> = vec![0u8; width * 4];
-                libjpeg_turbo_rs::decode::color::ycbcr_to_bgra_row(
-                    &y,
-                    &cb,
-                    &cr,
-                    &mut scalar_bgra,
-                    width,
-                );
+                crate::decode::color::ycbcr_to_bgra_row(&y, &cb, &cr, &mut scalar_bgra, width);
                 neon_ycbcr_to_bgra_row(&y, &cb, &cr, &mut simd_bgra, width);
                 assert_eq!(
                     simd_bgra, scalar_bgra,
@@ -394,13 +383,13 @@ fn parity_ycbcr_to_rgb_rows() {
             #[cfg(target_arch = "x86_64")]
             {
                 if is_x86_feature_detected!("avx2") {
-                    use libjpeg_turbo_rs::simd::x86_64::avx2_color::avx2_ycbcr_to_rgb_row;
+                    use crate::simd::x86_64::avx2_color::avx2_ycbcr_to_rgb_row;
                     let mut simd_rgb: Vec<u8> = vec![0u8; width * 3];
                     avx2_ycbcr_to_rgb_row(&y, &cb, &cr, &mut simd_rgb, width);
                     assert_eq!(simd_rgb, scalar_rgb, "AVX2 RGB mismatch w={width} iter={i}");
                 }
                 if is_x86_feature_detected!("sse2") {
-                    use libjpeg_turbo_rs::simd::x86_64::color::sse2_ycbcr_to_rgb_row;
+                    use crate::simd::x86_64::color::sse2_ycbcr_to_rgb_row;
                     let mut simd_rgb: Vec<u8> = vec![0u8; width * 3];
                     sse2_ycbcr_to_rgb_row(&y, &cb, &cr, &mut simd_rgb, width);
                     assert_eq!(simd_rgb, scalar_rgb, "SSE2 RGB mismatch w={width} iter={i}");
@@ -409,7 +398,7 @@ fn parity_ycbcr_to_rgb_rows() {
 
             #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
             {
-                use libjpeg_turbo_rs::simd::wasm32::color::{
+                use crate::simd::wasm32::color::{
                     wasm_ycbcr_to_bgr_row, wasm_ycbcr_to_bgra_row, wasm_ycbcr_to_rgb_row,
                     wasm_ycbcr_to_rgba_row,
                 };
@@ -420,13 +409,7 @@ fn parity_ycbcr_to_rgb_rows() {
 
                 let mut scalar_rgba: Vec<u8> = vec![0u8; width * 4];
                 let mut simd_rgba: Vec<u8> = vec![0u8; width * 4];
-                libjpeg_turbo_rs::decode::color::ycbcr_to_rgba_row(
-                    &y,
-                    &cb,
-                    &cr,
-                    &mut scalar_rgba,
-                    width,
-                );
+                crate::decode::color::ycbcr_to_rgba_row(&y, &cb, &cr, &mut scalar_rgba, width);
                 wasm_ycbcr_to_rgba_row(&y, &cb, &cr, &mut simd_rgba, width);
                 assert_eq!(
                     simd_rgba, scalar_rgba,
@@ -435,25 +418,13 @@ fn parity_ycbcr_to_rgb_rows() {
 
                 let mut scalar_bgr: Vec<u8> = vec![0u8; width * 3];
                 let mut simd_bgr: Vec<u8> = vec![0u8; width * 3];
-                libjpeg_turbo_rs::decode::color::ycbcr_to_bgr_row(
-                    &y,
-                    &cb,
-                    &cr,
-                    &mut scalar_bgr,
-                    width,
-                );
+                crate::decode::color::ycbcr_to_bgr_row(&y, &cb, &cr, &mut scalar_bgr, width);
                 wasm_ycbcr_to_bgr_row(&y, &cb, &cr, &mut simd_bgr, width);
                 assert_eq!(simd_bgr, scalar_bgr, "WASM BGR mismatch w={width} iter={i}");
 
                 let mut scalar_bgra: Vec<u8> = vec![0u8; width * 4];
                 let mut simd_bgra: Vec<u8> = vec![0u8; width * 4];
-                libjpeg_turbo_rs::decode::color::ycbcr_to_bgra_row(
-                    &y,
-                    &cb,
-                    &cr,
-                    &mut scalar_bgra,
-                    width,
-                );
+                crate::decode::color::ycbcr_to_bgra_row(&y, &cb, &cr, &mut scalar_bgra, width);
                 wasm_ycbcr_to_bgra_row(&y, &cb, &cr, &mut simd_bgra, width);
                 assert_eq!(
                     simd_bgra, scalar_bgra,
@@ -480,7 +451,7 @@ fn parity_fancy_upsample_h2v1() {
 
             #[cfg(target_arch = "aarch64")]
             {
-                use libjpeg_turbo_rs::simd::aarch64::upsample::neon_fancy_upsample_h2v1;
+                use crate::simd::aarch64::upsample::neon_fancy_upsample_h2v1;
                 let mut simd_out: Vec<u8> = vec![0u8; in_width * 2];
                 neon_fancy_upsample_h2v1(&input, in_width, &mut simd_out);
                 assert_eq!(
@@ -491,7 +462,7 @@ fn parity_fancy_upsample_h2v1() {
             #[cfg(target_arch = "x86_64")]
             {
                 if is_x86_feature_detected!("avx2") {
-                    use libjpeg_turbo_rs::simd::x86_64::avx2_upsample::avx2_fancy_upsample_h2v1;
+                    use crate::simd::x86_64::avx2_upsample::avx2_fancy_upsample_h2v1;
                     let mut simd_out: Vec<u8> = vec![0u8; in_width * 2];
                     avx2_fancy_upsample_h2v1(&input, in_width, &mut simd_out);
                     assert_eq!(
@@ -500,7 +471,7 @@ fn parity_fancy_upsample_h2v1() {
                     );
                 }
                 if is_x86_feature_detected!("sse2") {
-                    use libjpeg_turbo_rs::simd::x86_64::upsample::sse2_fancy_upsample_h2v1;
+                    use crate::simd::x86_64::upsample::sse2_fancy_upsample_h2v1;
                     let mut simd_out: Vec<u8> = vec![0u8; in_width * 2];
                     sse2_fancy_upsample_h2v1(&input, in_width, &mut simd_out);
                     assert_eq!(
@@ -511,7 +482,7 @@ fn parity_fancy_upsample_h2v1() {
             }
             #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
             {
-                use libjpeg_turbo_rs::simd::wasm32::upsample::wasm_fancy_upsample_h2v1;
+                use crate::simd::wasm32::upsample::wasm_fancy_upsample_h2v1;
                 let mut simd_out: Vec<u8> = vec![0u8; in_width * 2];
                 wasm_fancy_upsample_h2v1(&input, in_width, &mut simd_out);
                 assert_eq!(
@@ -525,7 +496,7 @@ fn parity_fancy_upsample_h2v1() {
 
 #[test]
 fn parity_fancy_upsample_h2v2() {
-    use libjpeg_turbo_rs::decode::upsample::fancy_h2v2;
+    use crate::decode::upsample::fancy_h2v2;
 
     let mut rng: Mulberry32 = Mulberry32::new(0xA5A5_0021);
     // H2V2 needs a 2D plane; use a small set of (w, h) pairs and run
@@ -551,7 +522,7 @@ fn parity_fancy_upsample_h2v2() {
 
             #[cfg(target_arch = "aarch64")]
             {
-                use libjpeg_turbo_rs::simd::aarch64::upsample::neon_fancy_upsample_h2v2;
+                use crate::simd::aarch64::upsample::neon_fancy_upsample_h2v2;
                 let mut simd_out: Vec<u8> = vec![0u8; out_w * out_h];
                 neon_fancy_upsample_h2v2(&input, w, h, &mut simd_out, out_w);
                 assert_eq!(
@@ -562,7 +533,7 @@ fn parity_fancy_upsample_h2v2() {
             #[cfg(target_arch = "x86_64")]
             {
                 if is_x86_feature_detected!("avx2") {
-                    use libjpeg_turbo_rs::simd::x86_64::avx2_upsample::avx2_fancy_upsample_h2v2;
+                    use crate::simd::x86_64::avx2_upsample::avx2_fancy_upsample_h2v2;
                     let mut simd_out: Vec<u8> = vec![0u8; out_w * out_h];
                     avx2_fancy_upsample_h2v2(&input, w, h, &mut simd_out, out_w);
                     assert_eq!(
@@ -571,7 +542,7 @@ fn parity_fancy_upsample_h2v2() {
                     );
                 }
                 if is_x86_feature_detected!("sse2") {
-                    use libjpeg_turbo_rs::simd::x86_64::upsample::sse2_fancy_upsample_h2v2;
+                    use crate::simd::x86_64::upsample::sse2_fancy_upsample_h2v2;
                     let mut simd_out: Vec<u8> = vec![0u8; out_w * out_h];
                     sse2_fancy_upsample_h2v2(&input, w, h, &mut simd_out, out_w);
                     assert_eq!(
@@ -582,7 +553,7 @@ fn parity_fancy_upsample_h2v2() {
             }
             #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
             {
-                use libjpeg_turbo_rs::simd::wasm32::upsample::wasm_fancy_upsample_h2v2;
+                use crate::simd::wasm32::upsample::wasm_fancy_upsample_h2v2;
                 let mut simd_out: Vec<u8> = vec![0u8; out_w * out_h];
                 wasm_fancy_upsample_h2v2(&input, w, h, &mut simd_out, out_w);
                 assert_eq!(
@@ -600,7 +571,7 @@ fn parity_fancy_upsample_h2v2() {
 
 #[test]
 fn parity_merged_upsample_h2v1() {
-    use libjpeg_turbo_rs::decode::merged_upsample::merged_h2v1_ycbcr_to_rgb;
+    use crate::decode::merged_upsample::merged_h2v1_ycbcr_to_rgb;
 
     let mut rng: Mulberry32 = Mulberry32::new(0xA5A5_0030);
     for &luma_w in &[2usize, 4, 6, 8, 16, 18, 32, 62, 64, 128] {
@@ -615,7 +586,7 @@ fn parity_merged_upsample_h2v1() {
 
             #[cfg(target_arch = "aarch64")]
             {
-                use libjpeg_turbo_rs::simd::aarch64::merged::neon_merged_h2v1_ycbcr_to_rgb;
+                use crate::simd::aarch64::merged::neon_merged_h2v1_ycbcr_to_rgb;
                 let mut simd_rgb: Vec<u8> = vec![0u8; luma_w * 3];
                 neon_merged_h2v1_ycbcr_to_rgb(&y, &cb, &cr, &mut simd_rgb, luma_w);
                 assert_eq!(
@@ -626,7 +597,7 @@ fn parity_merged_upsample_h2v1() {
             #[cfg(target_arch = "x86_64")]
             {
                 if is_x86_feature_detected!("avx2") {
-                    use libjpeg_turbo_rs::simd::x86_64::avx2_merged::avx2_merged_h2v1_ycbcr_to_rgb;
+                    use crate::simd::x86_64::avx2_merged::avx2_merged_h2v1_ycbcr_to_rgb;
                     let mut simd_rgb: Vec<u8> = vec![0u8; luma_w * 3];
                     avx2_merged_h2v1_ycbcr_to_rgb(&y, &cb, &cr, &mut simd_rgb, luma_w);
                     assert_eq!(
@@ -637,7 +608,7 @@ fn parity_merged_upsample_h2v1() {
             }
             #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
             {
-                use libjpeg_turbo_rs::simd::wasm32::merged::wasm_merged_h2v1_ycbcr_to_rgb;
+                use crate::simd::wasm32::merged::wasm_merged_h2v1_ycbcr_to_rgb;
                 let mut simd_rgb: Vec<u8> = vec![0u8; luma_w * 3];
                 wasm_merged_h2v1_ycbcr_to_rgb(&y, &cb, &cr, &mut simd_rgb, luma_w);
                 assert_eq!(
@@ -651,7 +622,7 @@ fn parity_merged_upsample_h2v1() {
 
 #[test]
 fn parity_merged_upsample_h2v2() {
-    use libjpeg_turbo_rs::decode::merged_upsample::merged_h2v2_ycbcr_to_rgb;
+    use crate::decode::merged_upsample::merged_h2v2_ycbcr_to_rgb;
 
     let mut rng: Mulberry32 = Mulberry32::new(0xA5A5_0031);
     for &luma_w in &[2usize, 4, 8, 16, 32, 64, 128] {
@@ -676,7 +647,7 @@ fn parity_merged_upsample_h2v2() {
 
             #[cfg(target_arch = "aarch64")]
             {
-                use libjpeg_turbo_rs::simd::aarch64::merged::neon_merged_h2v2_ycbcr_to_rgb;
+                use crate::simd::aarch64::merged::neon_merged_h2v2_ycbcr_to_rgb;
                 let mut simd_rgb0: Vec<u8> = vec![0u8; luma_w * 3];
                 let mut simd_rgb1: Vec<u8> = vec![0u8; luma_w * 3];
                 neon_merged_h2v2_ycbcr_to_rgb(
@@ -700,7 +671,7 @@ fn parity_merged_upsample_h2v2() {
             #[cfg(target_arch = "x86_64")]
             {
                 if is_x86_feature_detected!("avx2") {
-                    use libjpeg_turbo_rs::simd::x86_64::avx2_merged::avx2_merged_h2v2_ycbcr_to_rgb;
+                    use crate::simd::x86_64::avx2_merged::avx2_merged_h2v2_ycbcr_to_rgb;
                     let mut simd_rgb0: Vec<u8> = vec![0u8; luma_w * 3];
                     let mut simd_rgb1: Vec<u8> = vec![0u8; luma_w * 3];
                     avx2_merged_h2v2_ycbcr_to_rgb(
@@ -724,7 +695,7 @@ fn parity_merged_upsample_h2v2() {
             }
             #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
             {
-                use libjpeg_turbo_rs::simd::wasm32::merged::wasm_merged_h2v2_ycbcr_to_rgb;
+                use crate::simd::wasm32::merged::wasm_merged_h2v2_ycbcr_to_rgb;
                 let mut simd_rgb0: Vec<u8> = vec![0u8; luma_w * 3];
                 let mut simd_rgb1: Vec<u8> = vec![0u8; luma_w * 3];
                 wasm_merged_h2v2_ycbcr_to_rgb(
@@ -775,7 +746,7 @@ fn parity_rgb_to_ycbcr_rows() {
 
             #[cfg(target_arch = "aarch64")]
             {
-                use libjpeg_turbo_rs::simd::aarch64::color_encode::{
+                use crate::simd::aarch64::color_encode::{
                     neon_bgr_to_ycbcr_row, neon_bgra_to_ycbcr_row, neon_rgb_to_ycbcr_row,
                     neon_rgba_to_ycbcr_row,
                 };
@@ -795,7 +766,7 @@ fn parity_rgb_to_ycbcr_rows() {
                 let mut sc_y: Vec<u8> = vec![0u8; width];
                 let mut sc_cb: Vec<u8> = vec![0u8; width];
                 let mut sc_cr: Vec<u8> = vec![0u8; width];
-                libjpeg_turbo_rs::encode::color::rgba_to_ycbcr_row(
+                crate::encode::color::rgba_to_ycbcr_row(
                     &rgba, &mut sc_y, &mut sc_cb, &mut sc_cr, width,
                 );
                 let mut sd_y: Vec<u8> = vec![0u8; width];
@@ -810,7 +781,7 @@ fn parity_rgb_to_ycbcr_rows() {
                 let mut sc_y2: Vec<u8> = vec![0u8; width];
                 let mut sc_cb2: Vec<u8> = vec![0u8; width];
                 let mut sc_cr2: Vec<u8> = vec![0u8; width];
-                libjpeg_turbo_rs::encode::color::bgr_to_ycbcr_row_scalar(
+                crate::encode::color::bgr_to_ycbcr_row_scalar(
                     bgr,
                     &mut sc_y2,
                     &mut sc_cb2,
@@ -829,7 +800,7 @@ fn parity_rgb_to_ycbcr_rows() {
                 let mut sc_y3: Vec<u8> = vec![0u8; width];
                 let mut sc_cb3: Vec<u8> = vec![0u8; width];
                 let mut sc_cr3: Vec<u8> = vec![0u8; width];
-                libjpeg_turbo_rs::encode::color::bgra_to_ycbcr_row_scalar(
+                crate::encode::color::bgra_to_ycbcr_row_scalar(
                     bgra,
                     &mut sc_y3,
                     &mut sc_cb3,
@@ -847,7 +818,7 @@ fn parity_rgb_to_ycbcr_rows() {
             #[cfg(target_arch = "x86_64")]
             {
                 if is_x86_feature_detected!("avx2") {
-                    use libjpeg_turbo_rs::simd::x86_64::avx2_color_encode::{
+                    use crate::simd::x86_64::avx2_color_encode::{
                         avx2_bgr_to_ycbcr_row, avx2_bgra_to_ycbcr_row, avx2_rgb_to_ycbcr_row,
                         avx2_rgba_to_ycbcr_row,
                     };
@@ -864,7 +835,7 @@ fn parity_rgb_to_ycbcr_rows() {
                     let mut sc_y: Vec<u8> = vec![0u8; width];
                     let mut sc_cb: Vec<u8> = vec![0u8; width];
                     let mut sc_cr: Vec<u8> = vec![0u8; width];
-                    libjpeg_turbo_rs::encode::color::rgba_to_ycbcr_row(
+                    crate::encode::color::rgba_to_ycbcr_row(
                         &rgba, &mut sc_y, &mut sc_cb, &mut sc_cr, width,
                     );
                     let mut sd_y: Vec<u8> = vec![0u8; width];
@@ -879,7 +850,7 @@ fn parity_rgb_to_ycbcr_rows() {
                     let mut sc_y2: Vec<u8> = vec![0u8; width];
                     let mut sc_cb2: Vec<u8> = vec![0u8; width];
                     let mut sc_cr2: Vec<u8> = vec![0u8; width];
-                    libjpeg_turbo_rs::encode::color::bgr_to_ycbcr_row_scalar(
+                    crate::encode::color::bgr_to_ycbcr_row_scalar(
                         bgr,
                         &mut sc_y2,
                         &mut sc_cb2,
@@ -898,7 +869,7 @@ fn parity_rgb_to_ycbcr_rows() {
                     let mut sc_y3: Vec<u8> = vec![0u8; width];
                     let mut sc_cb3: Vec<u8> = vec![0u8; width];
                     let mut sc_cr3: Vec<u8> = vec![0u8; width];
-                    libjpeg_turbo_rs::encode::color::bgra_to_ycbcr_row_scalar(
+                    crate::encode::color::bgra_to_ycbcr_row_scalar(
                         bgra,
                         &mut sc_y3,
                         &mut sc_cb3,
@@ -916,7 +887,7 @@ fn parity_rgb_to_ycbcr_rows() {
             }
             #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
             {
-                use libjpeg_turbo_rs::simd::wasm32::color_encode::{
+                use crate::simd::wasm32::color_encode::{
                     wasm_bgr_to_ycbcr_row, wasm_bgra_to_ycbcr_row, wasm_rgb_to_ycbcr_row,
                     wasm_rgba_to_ycbcr_row,
                 };
@@ -931,7 +902,7 @@ fn parity_rgb_to_ycbcr_rows() {
                 let mut sc_y: Vec<u8> = vec![0u8; width];
                 let mut sc_cb: Vec<u8> = vec![0u8; width];
                 let mut sc_cr: Vec<u8> = vec![0u8; width];
-                libjpeg_turbo_rs::encode::color::rgba_to_ycbcr_row(
+                crate::encode::color::rgba_to_ycbcr_row(
                     &rgba, &mut sc_y, &mut sc_cb, &mut sc_cr, width,
                 );
                 let mut sd_y: Vec<u8> = vec![0u8; width];
@@ -946,7 +917,7 @@ fn parity_rgb_to_ycbcr_rows() {
                 let mut sc_y2: Vec<u8> = vec![0u8; width];
                 let mut sc_cb2: Vec<u8> = vec![0u8; width];
                 let mut sc_cr2: Vec<u8> = vec![0u8; width];
-                libjpeg_turbo_rs::encode::color::bgr_to_ycbcr_row_scalar(
+                crate::encode::color::bgr_to_ycbcr_row_scalar(
                     bgr,
                     &mut sc_y2,
                     &mut sc_cb2,
@@ -965,7 +936,7 @@ fn parity_rgb_to_ycbcr_rows() {
                 let mut sc_y3: Vec<u8> = vec![0u8; width];
                 let mut sc_cb3: Vec<u8> = vec![0u8; width];
                 let mut sc_cr3: Vec<u8> = vec![0u8; width];
-                libjpeg_turbo_rs::encode::color::bgra_to_ycbcr_row_scalar(
+                crate::encode::color::bgra_to_ycbcr_row_scalar(
                     bgra,
                     &mut sc_y3,
                     &mut sc_cb3,
@@ -1014,7 +985,7 @@ fn parity_fdct_quantize_islow() {
             // There is no pub `neon_fdct_quantize`; the dispatcher picks
             // it via EncoderSimdRoutines. Use the public encoder detector
             // and invoke through the function pointer.
-            let routines = libjpeg_turbo_rs::simd::detect_encoder();
+            let routines = crate::simd::detect_encoder();
             let mut simd_in: [i16; 64] = scalar_input;
             let mut simd_out: [i16; 64] = [0i16; 64];
             (routines.fdct_quantize)(&mut simd_in, &quant_divisors, &mut simd_out);
@@ -1023,7 +994,7 @@ fn parity_fdct_quantize_islow() {
         #[cfg(target_arch = "x86_64")]
         {
             if is_x86_feature_detected!("avx2") {
-                let routines = libjpeg_turbo_rs::simd::detect_encoder();
+                let routines = crate::simd::detect_encoder();
                 let mut simd_in: [i16; 64] = scalar_input;
                 let mut simd_out: [i16; 64] = [0i16; 64];
                 (routines.fdct_quantize)(&mut simd_in, &quant_divisors, &mut simd_out);
@@ -1032,7 +1003,7 @@ fn parity_fdct_quantize_islow() {
         }
         #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
         {
-            let routines = libjpeg_turbo_rs::simd::detect_encoder();
+            let routines = crate::simd::detect_encoder();
             let mut simd_in: [i16; 64] = scalar_input;
             let mut simd_out: [i16; 64] = [0i16; 64];
             (routines.fdct_quantize)(&mut simd_in, &quant_divisors, &mut simd_out);

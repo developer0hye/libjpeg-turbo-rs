@@ -4,16 +4,46 @@
 //! On aarch64, NEON is always available (ARMv8 mandatory).
 //! Set `JSIMD_FORCENONE=1` to force scalar fallback.
 
-pub mod scalar;
+// P4-135 criterion 2 (#474): the arch kernel modules are crate-private. They
+// were `pub` only because the SIMD suites lived in `tests/` and reached them
+// through `libjpeg_turbo_rs::simd::*`; those suites now live in this module,
+// so the kernels are no longer callable from a downstream crate.
+//
+// `detect`, `detect_encoder`, `SimdRoutines` and `QuantDivisors` stay public:
+// `benches/{decode,encode}.rs` use them to select a routine set, and they
+// reach kernels only through the dispatch table, never by path. There is no
+// trade-off between benchmark coverage and reachability here.
+pub(crate) mod scalar;
+
+#[cfg(test)]
+mod neon_color_tests;
+#[cfg(test)]
+mod neon_idct_tests;
+#[cfg(test)]
+mod neon_upsample_tests;
+#[cfg(test)]
+mod simd_avx2_encode_tests;
+#[cfg(test)]
+mod simd_avx2_tests;
+#[cfg(test)]
+mod simd_dispatch_tests;
+#[cfg(test)]
+mod simd_neon_encode_tests;
+#[cfg(test)]
+mod simd_neon_scaled_tests;
+#[cfg(test)]
+mod simd_parity_tests;
+#[cfg(test)]
+mod simd_x86_tests;
 
 #[cfg(target_arch = "aarch64")]
-pub mod aarch64;
+pub(crate) mod aarch64;
 
 #[cfg(target_arch = "x86_64")]
-pub mod x86_64;
+pub(crate) mod x86_64;
 
 #[cfg(target_arch = "wasm32")]
-pub mod wasm32;
+pub(crate) mod wasm32;
 
 /// Function-pointer dispatch table for SIMD-accelerated decode operations.
 pub struct SimdRoutines {

@@ -1,3 +1,10 @@
+//! Relocated from `tests/simd_avx2.rs` for P4-135 criterion 2 (#474).
+//!
+//! This suite reaches SIMD kernels directly, which is why the arch
+//! modules had to stay `pub` and were therefore callable from any
+//! downstream crate. As an in-crate test it uses `crate::`, so they
+//! can be private. Moved verbatim apart from the path rewrite.
+
 //! Tests for x86_64 AVX2 SIMD routines.
 //!
 //! Each AVX2 function is validated against the scalar implementation to ensure
@@ -5,8 +12,8 @@
 
 #[cfg(target_arch = "x86_64")]
 mod tests {
-    use libjpeg_turbo_rs::decode::{color, idct, upsample};
-    use libjpeg_turbo_rs::simd::x86_64::{avx2_color, avx2_idct, avx2_upsample};
+    use crate::decode::{color, idct, upsample};
+    use crate::simd::x86_64::{avx2_color, avx2_idct, avx2_upsample};
 
     // -----------------------------------------------------------------------
     // Helper: compute scalar IDCT reference output (dequant + IDCT + level-shift + clamp)
@@ -508,11 +515,11 @@ mod tests {
             return;
         }
         // Verify that AVX2 functions can be used as SimdRoutines function pointers
-        use libjpeg_turbo_rs::simd::SimdRoutines;
+        use crate::simd::SimdRoutines;
         let _routines = SimdRoutines {
             idct_islow: avx2_idct::avx2_idct_islow,
-            idct_ifast: libjpeg_turbo_rs::simd::scalar::scalar_idct_ifast,
-            idct_float: libjpeg_turbo_rs::simd::scalar::scalar_idct_float,
+            idct_ifast: crate::simd::scalar::scalar_idct_ifast,
+            idct_float: crate::simd::scalar::scalar_idct_float,
             ycbcr_to_rgb_row: avx2_color::avx2_ycbcr_to_rgb_row,
             fancy_upsample_h2v1: avx2_upsample::avx2_fancy_upsample_h2v1,
         };
