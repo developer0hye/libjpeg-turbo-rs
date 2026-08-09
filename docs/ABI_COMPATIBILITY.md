@@ -260,6 +260,48 @@ the work is:
 
 This is genuinely large work and is *out of scope* for the current "v8-targeted with documented v6b risk" policy. The decision to take it on should be evidence-driven: at least one named real consumer that we want to support, and an explicit user requirement that opt-in `CAPI_SONAME=libjpeg.so.8` is not acceptable.
 
+## Binary distribution: what is not shipped, and why (P4-131)
+
+**No native binary artifact is published.** `release.yml` publishes to crates.io
+and npm only, so a packager wanting to replace a system `libjpeg.so.8` must
+clone, install a Rust toolchain, build, and run `scripts/install_capi.sh`.
+
+The install layout itself is correct — that script already stages a proper
+prefix with the libraries, headers, `.pc` files and CMake config. The gap is
+that **nothing runs it in CI**, so the staged prefix only ever exists on a
+developer's machine.
+
+**This is deliberate, not an oversight.** Shipping a convenient binary of a
+library whose classic-ABI gaps are still open would *increase* the blast radius
+of those gaps rather than reduce it: a packager who has to build from source
+reads the tier table on the way past, and one who installs a prebuilt `.so`
+does not. It stays sequenced behind the soundness work (P4-135..P4-139) and the
+T3 error/state contracts. Tracked as **P4-131 (#462)**.
+
+### Signing and SBOM — a recorded gap
+
+Neither is implemented, and no release currently carries a signature, a
+checksum manifest, or an SBOM. Upstream libjpeg-turbo ships signed source
+tarballs and official per-platform packages with published verification
+instructions; a project asking distributions to swap out their JPEG library is
+asking for a higher bar than that, not a lower one.
+
+The reason it is unimplemented is sequencing, not disagreement: signing is only
+meaningful once there is an artifact to sign, and (above) there deliberately
+is not one yet. Recorded here so the absence is a stated position rather than
+something a packager discovers.
+
+### Distro packaging (deb/rpm) — undecided
+
+Currently neither in scope nor a recorded non-goal, which is itself the
+problem: a packager cannot plan against "unstated". The trade-off is that
+first-party `.deb`/`.rpm` packages would reach the consumers most exposed to
+the T3 gaps above, while the same packages are what a distribution would need
+in order to evaluate the library at all.
+
+**This is a maintainer decision, not a technical one**, and it is recorded as
+open rather than resolved here. #462 carries it.
+
 ## Verification commands
 
 ```bash
