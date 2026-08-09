@@ -1656,7 +1656,13 @@ mod tests {
 /// to be confirmed or refuted under fault injection. These reproduce the
 /// unwind for real; run them under Miri and ASan to make the second free
 /// observable if it ever returns.
-#[cfg(test)]
+///
+/// Gated on `panic = "unwind"`: the wasm32-wasip1 leg builds with
+/// `panic = "abort"`, where the panic these tests provoke terminates the
+/// module instead of unwinding, so `catch_unwind` never returns and the whole
+/// test binary aborts. An abort also never reaches `Drop`, which is the thing
+/// under test — the double free can only happen on an unwinding path.
+#[cfg(all(test, panic = "unwind"))]
 mod bitwriter_unwind_tests {
     use super::BitWriter;
 
