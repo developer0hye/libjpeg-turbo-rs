@@ -120,12 +120,29 @@ pub fn wasm_merged_h2v1_ycbcr_to_rgb(
     rgb_out: &mut [u8],
     width: usize,
 ) {
-    // SAFETY: Caller guarantees y_row.len() >= width, cb_row.len() >= width/2,
-    // cr_row.len() >= width/2, rgb_out.len() >= width * 3. The inner function
-    // processes 16 pixels per SIMD iteration with a scalar tail, preventing
-    // out-of-bounds access. simd128 target_feature is enabled on the callee.
-    unsafe {
-        wasm_merged_h2v1_inner(y_row, cb_row, cr_row, rgb_out, width);
+    // P4-135. The old comment stated these as caller guarantees on a *safe*
+    // fn, which binds our dispatch and nobody else. Bounds differ from the
+    // plain colour kernels because this upsamples: one chroma sample feeds two
+    // luma pixels. div_ceil covers the odd-width tail, which indexes chroma at
+    // `(width - 1) / 2`. No runtime probe: simd128 is a compile-time target
+    // feature on wasm32.
+    let chroma_needed: usize = width.div_ceil(2);
+    let rgb_needed: Option<usize> = width.checked_mul(3);
+    let fits: bool = cb_row.len() >= chroma_needed
+        && cr_row.len() >= chroma_needed
+        && y_row.len() >= width
+        && rgb_needed.is_some_and(|n| rgb_out.len() >= n);
+
+    if fits {
+        // SAFETY: every slice satisfies the bounds computed for this
+        // kernel's 2:1 horizontal upsample ratio.
+        unsafe {
+            wasm_merged_h2v1_inner(y_row, cb_row, cr_row, rgb_out, width);
+        }
+    } else {
+        crate::decode::merged_upsample::merged_h2v1_ycbcr_to_rgb(
+            y_row, cb_row, cr_row, rgb_out, width,
+        );
     }
 }
 
@@ -243,11 +260,30 @@ pub fn wasm_merged_h2v2_ycbcr_to_rgb(
     rgb_out1: &mut [u8],
     width: usize,
 ) {
-    // SAFETY: Caller guarantees y_row0/y_row1.len() >= width, cb_row/cr_row.len() >= width/2,
-    // rgb_out0/rgb_out1.len() >= width * 3. The inner function processes 16 pixels per SIMD
-    // iteration with a scalar tail, preventing out-of-bounds access.
-    unsafe {
-        wasm_merged_h2v2_inner(y_row0, y_row1, cb_row, cr_row, rgb_out0, rgb_out1, width);
+    // P4-135. The old comment stated these as caller guarantees on a *safe*
+    // fn, which binds our dispatch and nobody else. Bounds differ from the
+    // plain colour kernels because this upsamples: one chroma sample feeds two
+    // luma pixels. div_ceil covers the odd-width tail, which indexes chroma at
+    // `(width - 1) / 2`. No runtime probe: simd128 is a compile-time target
+    // feature on wasm32.
+    let chroma_needed: usize = width.div_ceil(2);
+    let rgb_needed: Option<usize> = width.checked_mul(3);
+    let fits: bool = cb_row.len() >= chroma_needed
+        && cr_row.len() >= chroma_needed
+        && y_row0.len() >= width
+        && y_row1.len() >= width
+        && rgb_needed.is_some_and(|n| rgb_out0.len() >= n && rgb_out1.len() >= n);
+
+    if fits {
+        // SAFETY: every slice satisfies the bounds computed for this
+        // kernel's 2:1 horizontal upsample ratio.
+        unsafe {
+            wasm_merged_h2v2_inner(y_row0, y_row1, cb_row, cr_row, rgb_out0, rgb_out1, width);
+        }
+    } else {
+        crate::decode::merged_upsample::merged_h2v2_ycbcr_to_rgb(
+            y_row0, y_row1, cb_row, cr_row, rgb_out0, rgb_out1, width,
+        );
     }
 }
 
