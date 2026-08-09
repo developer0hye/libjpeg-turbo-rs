@@ -79,6 +79,9 @@
 | P4-120 | OPEN (classic-shim allocation-failure paths are unreachable from tests) |
 | P4-121 | OPEN (lossless encode accepts a restart interval C refuses to decode) |
 | P4-122 | OPEN (the Pillow smoke harness substitutes for a v6b library, which its own policy forbids) |
+| P4-125 | CLOSED 2026-08-08 (TurboJPEG YUV decompress entry points emitted one plane per SOF component) |
+| P4-126 | OPEN (`yuv_plane_width`/`yuv_plane_height` accept any component index) |
+| P4-127 | OPEN (C-ABI YUV decompress entry points validate after decoding, not before) |
 
 ---
 
@@ -3026,3 +3029,224 @@ not start Docker, so a change to it cannot be verified here; and its result is
 the project's primary T3 claim, so it should not be edited blind. Wiring it into
 CI (where Docker is available) is the natural vehicle, which makes it P2-G's
 neighbour rather than a drive-by fix.
+
+## P4-125. TurboJPEG YUV decompress entry points emit one plane per SOF component, overrunning the 3-plane ABI contract — **CLOSED 2026-08-08**
+
+**Motivation.** Filed 2026-08-08 from a scoped security scan of `src/` and
+`crates/` (report `CLAUDE-SECURITY-20260807-214723`, findings F1 and F2, both
+HIGH). Both TurboJPEG decompress-to-YUV entry points sized their output from the
+attacker-supplied JPEG's SOF component count while the TurboJPEG YUV ABI models
+only 1 (grayscale) or 3 (Y/Cb/Cr) planes, so a 4-component Adobe CMYK/YCCK frame
+wrote a whole extra plane past the caller's allocation:
+
+- `tj3DecompressToYUV8` (`crates/libjpeg-turbo-rs-capi/src/yuv.rs`) packed all
+  four planes and `copy_nonoverlapping`'d them into a destination the caller
+  sized with `tj3YUVBufSize`, which never reports more than 3 planes
+  (`crates/libjpeg-turbo-rs-capi/src/bufsize.rs`). Heap overflow of roughly
+  `PAD(width) * PAD(height)` attacker-influenced sample bytes (CWE-787).
+- `tj3DecompressToYUVPlanes8` looped over all four planes against the caller's
+  documented 3-entry `dstPlanes`/`strides` arrays, so iteration `i == 3` read
+  `*dst_planes.add(3)` past the array and used the result as a write
+  destination. The per-plane NULL check only rejects an exactly-zero word, so a
+  non-NULL adjacent value becomes an arbitrary-address heap write (CWE-125 into
+  CWE-787).
+
+**Root cause.** A missing upstream guard, not a novel defect. Upstream
+libjpeg-turbo rejects these frames in `tj3DecompressToYUVPlanes8`
+(`references/libjpeg-turbo/src/turbojpeg.c:2229-2230`):
+
+```c
+  if (dinfo->num_components > 3)
+    THROW("JPEG image must have 3 or fewer components");
+```
+
+Upstream's `tj3DecompressToYUV8` (`turbojpeg.c:2383`) builds a 3-entry
+`dstPlanes[3]`/`strides[3]` and inherits that guard by *delegating* to
+`tj3DecompressToYUVPlanes8`, so upstream needs only one guard site. **This port
+does not delegate** — both entry points call `decompress_to_yuv_planes`
+independently — so the single upstream guard corresponds to two guard sites
+here, and porting it to one entry point alone leaves the other live.
+
+The subsampling check cannot substitute for it: upstream `getSubsamp()`
+(`turbojpeg.c:431-511`, esp. 446-449) deliberately returns a valid `TJSAMP_*`
+for 4-component CMYK/YCCK frames, and this port's `detect_subsampling`
+(`src/api/yuv.rs`) behaves the same way — an all-1x1 CMYK frame classifies as
+4:4:4. Historically the guard entered upstream in commit `cd7c3e66` ("Add CMYK
+support to the TurboJPEG C API", 2013-08-23), the same commit that taught
+`getSubsamp` about 4-component frames; the port picked up the CMYK-aware
+subsampling detection without its paired guard.
+
+**Acceptance criteria.**
+
+1. Both C-ABI entry points reject frames with more than 3 components before any
+   write, using the crate's `inst.set_error(..., TJERR_FATAL)` + `-1` idiom —
+   no panic, and no clamping that writes fewer planes while reporting success.
+2. Grayscale (1-plane) and 3-component frames are unaffected.
+3. Regression coverage for both entry points, each failing at the pre-fix
+   revision and passing after.
+4. The guard stays in the C-ABI crate: `decompress_to_yuv_planes`
+   (`src/api/yuv.rs`) is a public Rust API with an unrelated third caller
+   (`decompress_to_yuv`), so guarding the shared helper would change behaviour
+   outside this gap.
+
+**Status (2026-08-08): closed.** `crates/libjpeg-turbo-rs-capi/src/yuv.rs`
+carries `MAX_YUV_PLANES = 3` and rejects `planes.len() > MAX_YUV_PLANES` at both
+entry points, ahead of `pack_yuv_planes` and ahead of the `unsafe` plane loop
+respectively. Pinned by `crates/libjpeg-turbo-rs-capi/tests/yuv_four_component_guard.rs`
+(both entry points) and `crates/libjpeg-turbo-rs-capi/tests/yuv_decompress_planes_component_guard.rs`
+(a canary in `dstPlanes[3]` that observes the pre-fix out-of-bounds write
+directly). Both tests were measured red at `e63c46d` — the packed sink wrote
+256 bytes past the 768-byte `tj3YUVBufSize` region on the 16x16 CMYK frame and
+still returned 0, and the planar sink wrote a full plane through `dstPlanes[3]`
+— and green with the guard. C cross-validation is
+`crates/libjpeg-turbo-rs-capi/tests/yuv_four_component_c_parity.rs`, which drives
+`examples/yuv_component_count_c_oracle.c` against stock libjpeg-turbo 3.1.4.1 and
+requires both entry points to match C's accept/reject decision (C returns -1/-1
+for the CMYK frame and 0/0 for a 3-component control). The Integration Tests job
+runs all three binaries with `LIBJPEG_TURBO_PREFIX=/opt/libjpeg-turbo`, which
+makes the oracle fatal rather than skippable there. Reachable plane
+counts are `{1, 3, 4}` because `detect_subsampling` already rejects 2, so the
+only newly-rejected input is the 4-component frame itself. The second-layer gap
+this work surfaced is tracked as P4-126.
+
+## P4-126. `yuv_plane_width`/`yuv_plane_height` accept any component index where C rejects `componentID >= nc` — **OPEN**
+
+**Motivation.** Filed 2026-08-08 while closing P4-125, which ported the
+first-layer defence but left upstream's second layer unported in the root-crate
+plane-size helpers. Upstream defends the YUV plane model twice: `tj3YUVBufSize`
+(`references/libjpeg-turbo/src/turbojpeg.c:1029`, line 1038) fixes
+`nc = (subsamp == TJSAMP_GRAY ? 1 : 3)`, and `tj3YUVPlaneWidth` /
+`tj3YUVPlaneHeight` (`turbojpeg.c:1115`, lines 1124-1125) additionally reject an
+out-of-range component with `THROWG("Invalid argument", 0)`:
+
+```c
+  nc = (subsamp == TJSAMP_GRAY ? 1 : 3);
+  if (componentID < 0 || componentID >= nc)
+    THROWG("Invalid argument", 0);
+```
+
+**Root cause hypothesis.** `src/common/bufsize.rs` treats every
+`component != 0` as chroma with no upper bound, so `yuv_plane_width(3, ..)`
+silently returns a chroma-sized plane instead of signalling an invalid argument.
+The C-ABI wrappers `tj3YUVPlaneWidth` / `tj3YUVPlaneHeight`
+(`crates/libjpeg-turbo-rs-capi/src/bufsize.rs`) do not inherit it — they already
+bound `componentID` to `0..=2` against their own `plane_width` / `plane_height`,
+so the gap is confined to the root-crate helpers, except for grayscale: there the
+wrappers return 0 for components 1-2 without setting the no-handle error slot
+upstream's `THROWG("Invalid argument", 0)` fills.
+
+**Acceptance criteria.**
+
+1. `yuv_plane_width` / `yuv_plane_height` reject a component index at or above
+   the subsampling's plane count (1 for grayscale, otherwise 3), and the C-ABI
+   wrappers report the grayscale case the way upstream does — return 0 *and*
+   set the process-global no-handle error slot, since `tj3YUVPlaneWidth` takes no
+   handle and raises `THROWG("Invalid argument", 0)`.
+2. A cross-check against C `tj3YUVPlaneWidth` / `tj3YUVPlaneHeight` for
+   `componentID` in `-1..=4` across every `TJSAMP_*`, including grayscale, where
+   only component 0 is valid.
+3. Callers inside the crate keep their current behaviour for valid indices; the
+   change must not alter any packed or planar buffer size.
+4. Decide, and record, what `decompress_to_yuv_planes` does for a 4-component
+   frame once the helpers reject index 3. It calls them with 3 today, so
+   criterion 1 forces a choice: trim the fourth plane by some other rule, or
+   reject CMYK/YCCK in the public Rust API too. The two options differ in
+   whether `decompress_to_yuv` keeps returning a 4-plane packed buffer.
+5. While here, correct the mapping rows for these two functions in
+   `docs/C_API_REFERENCE.md` (lines 72-73) and `docs/FEATURE_PARITY.md`
+   (lines 338-339): they name the root-crate `yuv_plane_width()` /
+   `yuv_plane_height()` as the equivalents, but the exported `tj3YUVPlaneWidth`
+   / `tj3YUVPlaneHeight` run the capi-local `plane_width` / `plane_height`
+   instead. Pre-existing inaccuracy, surfaced by this item's audit; the ✅
+   status itself is right, because the exported functions do match C's return
+   values.
+
+**Why deferred.** Not a memory-safety issue on its own. `decompress_to_yuv_planes`
+does still call `yuv_plane_width(3, ..)` / `yuv_plane_height(3, ..)` for every
+4-component frame — P4-125's guard sits in the C-ABI layer and runs *after* that
+helper returns — but the value only sizes the fourth plane's own trim, and the
+guard then discards that plane, so nothing is written out of bounds. No C caller
+reaches the permissive path either, because the wrappers already bound
+`componentID`. It is defence in depth plus an API-contract divergence, so it was
+deliberately kept out of the P4-125 patch to keep that change minimal and
+reviewable.
+
+## P4-127. C-ABI YUV Decompress Entry Points Validate After Decoding, Not Before — **OPEN**
+
+**Motivation.** Filed 2026-08-09 during the P4-125 review. That item ported
+upstream's `num_components > 3` rejection correctly, but placed it at the only
+point the current structure allows: *after* `decompress_to_yuv_planes` has
+already decoded the whole frame and allocated every plane. Upstream validates
+the same frame from the header, before any decompression
+(`references/libjpeg-turbo/src/turbojpeg.c:2214-2230`):
+
+```c
+    jpeg_read_header(dinfo, TRUE);          /* header only */
+  setDecompParameters(this);
+  if (this->maxPixels && ... > this->maxPixels)  THROW("Image is too large");
+  if (this->subsamp == TJSAMP_UNKNOWN)           THROW("Could not determine ...");
+  if (this->subsamp != TJSAMP_GRAY && (!dstPlanes[1] || !dstPlanes[2]))
+                                                 THROW("Invalid argument");
+  if (dinfo->num_components > 3)                 THROW("JPEG image must have 3 ...");
+```
+
+Ours decodes first (`crates/libjpeg-turbo-rs-capi/src/yuv.rs:610` and `:658`)
+and only then checks (`:617`, `:665`). The rejection is correct; the *work done
+before* rejecting is not. Three consequences, one root cause.
+
+**Root cause hypothesis.** Both entry points route through the root-crate free
+function `decompress_to_yuv_planes(data)`, which takes no handle. It calls
+`decompress_raw` → `Decoder::new(data)` (`src/api/raw_data.rs:87-90`), so no
+handle-scoped configuration and no header-only inspection is reachable from
+here. Any check that upstream performs between "header parsed" and "decode
+begins" therefore has nowhere to live in this port.
+
+1. **`TJPARAM_MAXPIXELS` is not enforced on these two entry points.** Upstream
+   checks it at `turbojpeg.c:2219-2222`, *before* the component guard. The
+   handle stores the value (`src/api/tj3.rs:682-683` maps it into `Limits`, and
+   `src/common/types.rs:411` enforces it "before any plane allocation"), but
+   that plumbing is bypassed: `Decoder::new` uses `Limits::default`. A caller
+   setting `TJPARAM_MAXPIXELS` as a DoS bound gets no effect here. Not
+   unbounded — the 2,147,483,647-pixel default still applies — but not the
+   caller's bound either.
+2. **Error precedence diverges for `align`.** Upstream rejects a bad `align` at
+   function entry (`turbojpeg.c:2395-2397`, `"Invalid argument"`). Ours only
+   discovers it inside `pack_yuv_planes` (`yuv.rs:627`), which the P4-125 guard
+   now precedes, so `tj3DecompressToYUV8(h, cmyk, .., align = 0)` reports
+   `"must have 3 or fewer components"` where C reports `"Invalid argument"`.
+   Both return -1, which is why `yuv_four_component_c_parity` cannot see it: it
+   compares accept-vs-reject, not message or precedence.
+3. **Partial writes on a NULL plane pointer.** Upstream checks `dstPlanes[1]`
+   and `dstPlanes[2]` up front (`turbojpeg.c:2226-2227`) and writes nothing on
+   failure. Ours checks each pointer inside the copy loop (`yuv.rs:677`), so a
+   NULL `dstPlanes[2]` returns -1 only after planes 0 and 1 have been written
+   into caller memory.
+
+**Acceptance criteria.**
+
+1. Both entry points reject 4-component frames, an over-`TJPARAM_MAXPIXELS`
+   frame, a bad `align`, and a NULL `dstPlanes[1]`/`[2]` *before* decoding —
+   verified by an observation that decode did not run (e.g. timing on a large
+   frame, or an allocation/callback counter), not merely by the -1.
+2. A C cross-check that pins *precedence*, not just the verdict: for inputs that
+   violate two rules at once (CMYK + `align = 0`; CMYK + over-maxPixels), the
+   reported error string must match upstream's. This is the gap that let (2)
+   through the P4-125 parity test.
+3. `tj3Set(handle, TJPARAM_MAXPIXELS, n)` bounds these two entry points, cross-
+   checked against C for a frame just over and just under `n`.
+4. On any rejection, caller-supplied plane buffers are byte-for-byte unmodified
+   — a sentinel-fill assertion over all three, extending the canary already in
+   `yuv_decompress_planes_component_guard.rs`.
+5. Whatever mechanism lands must reach `decompress_to_yuv_planes`' callers
+   without duplicating the decode: either a header-only inspection entry point,
+   or a handle-aware variant that carries `Limits`. Record which, since P4-126
+   also has to decide what this function does with CMYK.
+
+**Why deferred.** No memory-safety consequence: P4-125 closed the overflow, and
+(1)-(3) are wasted work, an error-string mismatch, and a partial write into
+buffers the caller supplied and still owns. (1) and (3) predate P4-125; only
+(2)'s precedence flip was introduced by it, and only because the guard had to go
+where the structure permitted. Fixing this properly means giving the C-ABI layer
+a header-only decode path, which is a structural change well beyond the 12-line
+guard P4-125 deliberately scoped itself to — and it overlaps the C-ABI-state
+workstream P4-123 coordinates.

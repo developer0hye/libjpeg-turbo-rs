@@ -578,6 +578,17 @@ pub extern "C" fn tj3CompressFromYUVPlanes8(
 // JPEG → YUV (decompress path, no color conversion)
 // ---------------------------------------------------------------------------
 
+/// Upper bound on the planes the TurboJPEG YUV ABI can describe.
+///
+/// `tj3YUVBufSize` only ever sizes 1 (grayscale) or 3 (Y/Cb/Cr) planes,
+/// and `dstPlanes` is documented as a 3-element array. The plane count of
+/// a decompressed frame, in contrast, comes from the JPEG's own SOF
+/// marker, so a 4-component (CMYK/YCCK) stream would make the decompress
+/// sinks below emit a plane the caller never allocated. Both entry points
+/// therefore reject those frames, mirroring the guard upstream applies in
+/// `tj3DecompressToYUVPlanes8` (turbojpeg.c).
+const MAX_YUV_PLANES: usize = 3;
+
 #[no_mangle]
 pub extern "C" fn tj3DecompressToYUV8(
     handle: *mut c_void,
@@ -603,6 +614,13 @@ pub extern "C" fn tj3DecompressToYUV8(
                 return -1;
             }
         };
+        if planes.len() > MAX_YUV_PLANES {
+            inst.set_error(
+                "tj3DecompressToYUV8: JPEG image must have 3 or fewer components",
+                TJERR_FATAL,
+            );
+            return -1;
+        }
         let packed: Vec<u8> = match pack_yuv_planes(&planes, w, h, align, ss) {
             Some(p) => p,
             None => {
@@ -644,6 +662,13 @@ pub extern "C" fn tj3DecompressToYUVPlanes8(
                 return -1;
             }
         };
+        if planes.len() > MAX_YUV_PLANES {
+            inst.set_error(
+                "tj3DecompressToYUVPlanes8: JPEG image must have 3 or fewer components",
+                TJERR_FATAL,
+            );
+            return -1;
+        }
         unsafe {
             for (i, plane) in planes.iter().enumerate() {
                 let pw: usize = yuv_plane_width(i, w, ss);
