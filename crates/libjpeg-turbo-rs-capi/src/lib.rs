@@ -28,10 +28,21 @@
 //! consumers can mix-and-match the C and Rust APIs.
 
 #![deny(unsafe_op_in_unsafe_fn)]
-// `extern "C"` shim functions intentionally accept raw pointers from C and
-// dereference them after validating against NULL. Marking each function
-// `unsafe fn` would change the ABI-visible symbol name and break the
-// drop-in contract, so we silence clippy at the crate level here.
+// `extern "C"` shim functions accept raw pointers from C and dereference them
+// after a NULL check.
+//
+// This suppression previously justified itself with "marking each function
+// `unsafe fn` would change the ABI-visible symbol name and break the drop-in
+// contract". **That is false, and it was measured.** `extern "C"` fixes the
+// calling convention and `#[no_mangle]` fixes the symbol name; `unsafe` adds
+// an obligation for *Rust* callers only. Converting `tj3Free` and `tj3Destroy`
+// left `nm -gU` output byte-identical (`_tj3Alloc`, `_tj3Destroy`, `_tj3Free`).
+//
+// The suppression therefore stays only because the conversion is unfinished:
+// ~84 of the 159 exports still take raw pointers, and `handle_as_mut` still
+// forges an unbounded lifetime across nine modules. It is a TODO, not a
+// rationale. Tracked as P4-137 (#476); the two exports that could double-free
+// or `free()` an arbitrary pointer are already converted.
 #![allow(clippy::not_unsafe_ptr_arg_deref)]
 // Exported symbols must match the C case (`tj3Init`, `tj3Destroy`, ...),
 // so we disable the snake_case lint at the crate root.

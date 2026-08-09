@@ -59,8 +59,9 @@ fn tj3_decompress_to_yuv_planes8_rejects_four_component_jpeg() {
         plane_ptrs.as_mut_ptr(),
         std::ptr::null(),
     );
-    tj3Destroy(handle);
-
+    // SAFETY: `handle` is a live handle this test created and has not
+    // destroyed; nothing else can reach it.
+    unsafe { tj3Destroy(handle) };
     assert!(
         planes[3].iter().all(|&b| b == CANARY),
         "wrote a 4th plane through dstPlanes[3], past the caller's 3-entry array"
