@@ -51,6 +51,30 @@ Distro packagers should treat the missing version definitions as an open
 replacement gap until P4-81 closes. The reproducible binding evidence is in
 `experiments/opencv_downstream_2026-08-02.md`.
 
+### Crate-private version node `LIBJPEGTURBORS_PRIVATE_1.0` (P4-129)
+
+`src/jpeglib.rs` defines 16 `jpeg_capi_test_*` accessors that the shim's own
+dlopen-based test suites resolve out of the shared library. They share the
+`jpeg_` prefix, so the `jpeg_*` pattern in the reference node used to stamp all
+16 as `@@LIBJPEG_8.0` — advertising 16 entry points **no real libjpeg has** as
+reference v8 API.
+
+They are now claimed by exact name under **`LIBJPEGTURBORS_PRIVATE_1.0`**, a
+node deliberately named so it cannot be mistaken for an upstream one. Exact
+names outrank patterns, which is the precedence the `jpeg_mem_dest` /
+`jpeg_mem_src` assignment already relies on.
+
+**These are not API.** They carry no stability guarantee, belong to no libjpeg
+or TurboJPEG surface, and exist only so the shim's tests can inspect state
+through the shared library. Do not link them.
+
+They stay dynamically visible rather than becoming `local:` because eight test
+suites resolve them from this cdylib; hiding them would break those without
+improving the shipped surface's honesty, which is what the mislabelling
+actually cost. `tests/capi_symbol_versions.rs` reads the accessor list out of
+`src/jpeglib.rs`, so a 17th added without updating `build.rs` fails CI instead
+of silently rejoining the reference node.
+
 ### ABI-layout compatibility matrix
 
 The matrix below covers struct-layout/SONAME compatibility only; it does not
