@@ -216,6 +216,10 @@ macro_rules! avx2_color_convert_fn {
         ///
         /// Both are now checked here, in the same function that performs the
         /// `unsafe` call, so the guarantee does not depend on who calls it.
+        /// Feature detection goes through `cpu_has!`, not
+        /// `std::arch::is_x86_feature_detected!` directly: the latter lives in
+        /// `std` and this crate is `no_std`-capable, so a direct call breaks
+        /// the no-std build (which is what CI's MSRV leg reported).
         /// A request the arguments cannot satisfy falls back to the scalar
         /// path, which slices and therefore bounds-checks.
         pub fn $pub_name(y: &[u8], cb: &[u8], cr: &[u8], out: &mut [u8], width: usize) {
@@ -228,7 +232,7 @@ macro_rules! avx2_color_convert_fn {
                 && cr.len() >= width
                 && out_needed.is_some_and(|n| out.len() >= n);
 
-            if fits && std::is_x86_feature_detected!("avx2") {
+            if fits && crate::cpu_has!("avx2") {
                 // SAFETY: AVX2 confirmed by runtime detection immediately
                 // above, and every slice is long enough for the `width`
                 // samples the kernel reads and the `width * $bpp` bytes it
