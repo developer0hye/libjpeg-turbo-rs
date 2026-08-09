@@ -100,7 +100,13 @@ pub extern "C" fn tj3Compress12(
 
         // SAFETY: caller guarantees `src_buf` is valid for
         // `line_samples * h` samples.
-        let total_samples: usize = line_samples.saturating_mul(h);
+        let total_samples: usize = match line_samples.checked_mul(h) {
+            Some(v) => v,
+            None => {
+                inst.set_error("tj3Compress12: pitch * height overflows", TJERR_FATAL);
+                return -1;
+            }
+        };
         let raw: &[i16] = unsafe { std::slice::from_raw_parts(src_buf, total_samples) };
 
         let dense: Vec<i16> = if line_samples == w * components {
@@ -271,7 +277,13 @@ pub extern "C" fn tj3Decompress12(
 
         // SAFETY: caller guarantees `dst_buf` holds at least
         // `line_samples * height` samples.
-        let total: usize = line_samples.saturating_mul(img.height);
+        let total: usize = match line_samples.checked_mul(img.height) {
+            Some(v) => v,
+            None => {
+                inst.set_error("tj3Decompress12: pitch * height overflows", TJERR_FATAL);
+                return -1;
+            }
+        };
         let out: &mut [i16] = unsafe { std::slice::from_raw_parts_mut(dst_buf, total) };
         let row_samples: usize = img.width * components;
         for row in 0..img.height {
@@ -348,7 +360,13 @@ pub extern "C" fn tj3Compress16(
             return -1;
         }
 
-        let total: usize = line_samples.saturating_mul(h);
+        let total: usize = match line_samples.checked_mul(h) {
+            Some(v) => v,
+            None => {
+                inst.set_error("tj3Compress16: pitch * height overflows", TJERR_FATAL);
+                return -1;
+            }
+        };
         // SAFETY: caller guarantees `src_buf` is valid for `total` u16s.
         let raw: &[u16] = unsafe { std::slice::from_raw_parts(src_buf, total) };
         let dense: Vec<u16> = if line_samples == w * components {
@@ -489,7 +507,13 @@ pub extern "C" fn tj3Decompress16(
             return -1;
         }
 
-        let total: usize = line_samples.saturating_mul(img.height);
+        let total: usize = match line_samples.checked_mul(img.height) {
+            Some(v) => v,
+            None => {
+                inst.set_error("tj3Decompress16: pitch * height overflows", TJERR_FATAL);
+                return -1;
+            }
+        };
         let out: &mut [u16] = unsafe { std::slice::from_raw_parts_mut(dst_buf, total) };
         let row_samples: usize = img.width * components;
         for row in 0..img.height {
