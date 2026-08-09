@@ -446,8 +446,17 @@ pub fn decompress_to_yuv_planes(data: &[u8]) -> Result<(Vec<Vec<u8>>, usize, usi
     let mut planes: Vec<Vec<u8>> = Vec::with_capacity(n_comps);
 
     for comp in 0..n_comps {
-        let target_w: usize = yuv_plane_width(comp, width, subsampling);
-        let target_h: usize = yuv_plane_height(comp, height, subsampling);
+        // Components 0..=2 are Y/Cb/Cr and follow the subsampling model. A
+        // 4-component CMYK/YCCK frame's fourth component is the K channel,
+        // which carries **full resolution** — it is not a third chroma plane.
+        // Sizing it through the chroma rule truncated it to the chroma
+        // dimensions, silently dropping three quarters of K on a 4:2:0 frame
+        // (issue #466, P4-126 criterion 4). The helpers now reject index >= 3
+        // outright, so the luma rule is applied explicitly here.
+        let luma_like: bool = comp == 0 || comp >= 3;
+        let dim_component: usize = if luma_like { 0 } else { comp };
+        let target_w: usize = yuv_plane_width(dim_component, width, subsampling);
+        let target_h: usize = yuv_plane_height(dim_component, height, subsampling);
         let target_size: usize = target_w * target_h;
         let raw_w: usize = raw.plane_widths[comp];
         let raw_h: usize = raw.plane_heights[comp];

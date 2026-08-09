@@ -34,11 +34,29 @@ pub fn jpeg_buf_size(width: usize, height: usize, subsampling: Subsampling) -> u
     pad(width, mcu_width) * pad(height, mcu_height) * (2 + chroma_scale_factor) + 2048
 }
 
+/// Number of planes the YUV model describes for a colour subsampling.
+///
+/// Grayscale is deliberately absent: [`Subsampling`] has no variant for it, so
+/// a helper taking one cannot apply C's `nc = (subsamp == TJSAMP_GRAY ? 1 : 3)`.
+/// The grayscale half of that bound lives in the C-ABI layer, which still has
+/// the raw `subsamp` (P4-126).
+const YUV_PLANE_COUNT: usize = 3;
+
 /// Width (in pixels/samples) of a single YUV plane.
 ///
 /// Matches `tj3YUVPlaneWidth()`. Component 0 is luma (Y); components 1 and 2
 /// are chroma (Cb, Cr). The width is padded to the subsampling factor boundary.
+///
+/// Returns 0 for a component index the model has no plane for, which is how
+/// `tj3YUVPlaneWidth` reports an invalid argument
+/// (`references/libjpeg-turbo/src/turbojpeg.c:1123-1125`). A 4-component
+/// CMYK/YCCK frame's fourth component is **not** a chroma plane, so callers
+/// must not size it through here — see `decompress_to_yuv_planes`, which sizes
+/// it at full resolution.
 pub fn yuv_plane_width(component: usize, width: usize, subsampling: Subsampling) -> usize {
+    if component >= YUV_PLANE_COUNT {
+        return 0;
+    }
     let h_factor: usize = subsampling.mcu_width_blocks(); // mcuw / 8
     let padded_width: usize = pad(width, h_factor);
 
@@ -54,7 +72,12 @@ pub fn yuv_plane_width(component: usize, width: usize, subsampling: Subsampling)
 ///
 /// Matches `tj3YUVPlaneHeight()`. Component 0 is luma (Y); components 1 and 2
 /// are chroma (Cb, Cr). The height is padded to the subsampling factor boundary.
+///
+/// Returns 0 for an out-of-range component index — see [`yuv_plane_width`].
 pub fn yuv_plane_height(component: usize, height: usize, subsampling: Subsampling) -> usize {
+    if component >= YUV_PLANE_COUNT {
+        return 0;
+    }
     let v_factor: usize = subsampling.mcu_height_blocks(); // mcuh / 8
     let padded_height: usize = pad(height, v_factor);
 
