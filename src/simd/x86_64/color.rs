@@ -19,11 +19,36 @@ const PW_MF0344: i16 = -22554; // -FIX(0.34414) for G vpmaddwd
 const PW_F0285: i16 = 18734; // FIX(0.28586) for G vpmaddwd
 
 /// SSE2-accelerated YCbCr to interleaved RGB row conversion.
+/// SSE2 YCbCr -> RGB row conversion.
+///
+/// This is the dispatch table's x86_64 fallback, so it runs on any machine
+/// without AVX2 — which makes it the widest-reaching instance of the P4-135
+/// shape fixed in `avx2_color.rs`.
+///
+/// It is a **safe** fn, so it must hold for every argument combination, not
+/// just what dispatch produces. The previous comment claimed "slice bounds are
+/// enforced by the while loop condition `x + 8 <= width`" — but `width` is a
+/// *parameter*, independent of the slice lengths, and the loop loads through
+/// `y.as_ptr().add(x)` without consulting them. A caller passing empty slices
+/// and a large `width` read and wrote out of bounds with no `unsafe` at the
+/// call site.
 pub fn sse2_ycbcr_to_rgb_row(y: &[u8], cb: &[u8], cr: &[u8], rgb: &mut [u8], width: usize) {
-    // SAFETY: SSE2 availability is verified at dispatch time via is_x86_feature_detected!().
-    // Slice bounds are enforced by the while loop condition `x + 8 <= width`.
-    unsafe {
-        sse2_ycbcr_to_rgb_row_inner(y, cb, cr, rgb, width);
+    // `width * 3` comes from frame geometry; unchecked it wraps and the
+    // comparison below passes for a buffer far too small.
+    let rgb_needed: Option<usize> = width.checked_mul(3);
+    let fits: bool = y.len() >= width
+        && cb.len() >= width
+        && cr.len() >= width
+        && rgb_needed.is_some_and(|n| rgb.len() >= n);
+
+    if fits && crate::cpu_has!("sse2") {
+        // SAFETY: SSE2 confirmed immediately above, and every slice holds the
+        // `width` samples the kernel reads and the `width * 3` bytes it writes.
+        unsafe {
+            sse2_ycbcr_to_rgb_row_inner(y, cb, cr, rgb, width);
+        }
+    } else {
+        crate::decode::color::ycbcr_to_rgb_row(y, cb, cr, rgb, width);
     }
 }
 
