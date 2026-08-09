@@ -396,20 +396,22 @@ mod p4135_soundness_tests {
     #[test]
     fn issue_474_poc_is_no_longer_undefined_behaviour() {
         let mut out: [u8; 4] = [0u8; 4];
-        let before: [u8; 4] = out;
 
-        let result = std::panic::catch_unwind(move || {
-            let mut local: [u8; 4] = [0u8; 4];
-            super::avx2_ycbcr_to_rgb_row(&[], &[], &[], &mut local, 4096);
-            local
-        });
+        // AssertUnwindSafe so the *caller's* buffer crosses the boundary. A
+        // `move` closure over a local copy would leave the assertion below
+        // comparing two values the function never saw.
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            super::avx2_ycbcr_to_rgb_row(&[], &[], &[], &mut out, 4096);
+        }));
 
         assert!(
             result.is_err(),
             "a 4096-pixel request against empty inputs must not report success"
         );
-        assert_eq!(out, before, "the caller's buffer must be untouched");
-        out[0] = 0; // keep `out` used after the assertion
+        assert_eq!(
+            out, [0u8; 4],
+            "the caller's buffer must be untouched by a rejected request"
+        );
     }
 
     /// A well-formed call still produces pixels — the bounds check must reject
