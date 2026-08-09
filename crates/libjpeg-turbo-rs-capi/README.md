@@ -1,7 +1,16 @@
 # libjpeg-turbo-rs-capi
 
-C ABI shim over [libjpeg-turbo-rs](https://crates.io/crates/libjpeg-turbo-rs):
-a drop-in replacement for the two shared libraries C consumers link against.
+C ABI shim over [libjpeg-turbo-rs](https://crates.io/crates/libjpeg-turbo-rs)
+for the two shared libraries C consumers link against.
+
+> **Tiers and status (P4-140).** **TurboJPEG 3 (`libturbojpeg.so.0`) is the
+> primary target.** The classic libjpeg leg targets the **v8 identity only**
+> (`libjpeg.so.8`) and is experimental and partial. **v6b (`libjpeg.so.62`)
+> and v7 are explicit non-goals** — their struct layouts differ, so
+> substituting this library for them corrupts memory rather than merely
+> failing. The safe-Rust/unsafe-SIMD boundary in the underlying crate is under
+> audit (P4-135..P4-139), so no memory-safety guarantee is offered yet, and
+> "drop-in replacement" is not a claim this project currently makes.
 
 > **Writing Rust?** You almost certainly want the root
 > [libjpeg-turbo-rs](https://crates.io/crates/libjpeg-turbo-rs) crate

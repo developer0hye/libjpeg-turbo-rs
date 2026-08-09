@@ -1,9 +1,27 @@
 //! C ABI shim for `libjpeg-turbo-rs`.
 //!
-//! Exposes libjpeg-turbo-compatible `extern "C"` symbols so that existing
-//! C consumers (`djpeg`, `cjpeg`, `jpegtran`, Pillow, ImageMagick, …) can
-//! link against this crate in place of the stock `libjpeg.so.62` /
-//! `libturbojpeg.so.0`.
+//! Exposes libjpeg-turbo-compatible `extern "C"` symbols for C consumers
+//! (`djpeg`, `cjpeg`, `jpegtran`, Pillow, ImageMagick, …).
+//!
+//! # Which ABI this targets
+//!
+//! **TurboJPEG 3 (`libturbojpeg.so.0`) is the primary target.** The classic
+//! libjpeg API is offered at the **v8 identity only** (`libjpeg.so.8`,
+//! `JPEG_LIB_VERSION 80`), and that leg is experimental and partial — see
+//! `docs/ABI_COMPATIBILITY.md` for what it does and does not cover.
+//!
+//! **libjpeg v6b (`libjpeg.so.62`) and v7 are explicit non-goals**, and this
+//! crate must not be substituted for them. The struct layouts differ: a
+//! consumer compiled against v6b addresses `jpeg_decompress_struct` fields at
+//! v6b offsets while this library lays them out for v8, so every access lands
+//! at the wrong offset. That is memory corruption, not a missing feature. The
+//! build and install paths reject those identities deliberately (P4-140).
+//!
+//! # Safety status
+//!
+//! The safe-Rust / unsafe-SIMD boundary in the underlying crate is under
+//! audit, so this crate carries no memory-safety guarantee today. See the open
+//! soundness items (P4-135..P4-139) before depending on one.
 //!
 //! The public Rust surface re-exports the underlying pure-Rust
 //! `libjpeg_turbo_rs` crate under `inner` so that downstream Rust
