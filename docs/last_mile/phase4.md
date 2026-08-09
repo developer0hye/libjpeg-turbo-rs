@@ -83,7 +83,7 @@
 | P4-126 | PARTIAL (C ABI matches C; root-crate helpers still accept any component index) |
 | P4-127 | CLOSED 2026-08-09 (C-ABI YUV decompress entry points validate after decoding, not before) |
 | P4-128 | CLOSED 2026-08-09 (YUV plane dimensions padded to the MCU size in pixels, not the subsampling ratio) |
-| P4-129 | OPEN (`tj3DecompressHeader` decodes the entire image to read the header) |
+| P4-142 | OPEN (`tj3DecompressHeader` decodes the entire image to read the header) |
 
 ---
 
@@ -3358,9 +3358,9 @@ requires all 42 cells to match libjpeg-turbo 3.1.4.1; red at `bad5493`, green
 after. `cargo test --workspace` is 2481 passed / 0 failed, so no test anywhere
 had pinned the over-padded values — the formula had no coverage at all.
 
-## P4-129. `tj3DecompressHeader` Decodes the Entire Image to Read the Header — **OPEN**
+## P4-142. `tj3DecompressHeader` Decodes the Entire Image to Read the Header — **OPEN**
 
-**Motivation.** Found 2026-08-09 while building P4-127's header-only path.
+**Motivation.** Found 2026-08-09 while building P4-127's header-only path. Filed as P4-129 and renumbered to P4-142 the same day: P4-129 through P4-141 were already claimed by the 2026-08-09 architecture-audit issues (#460, #461, #474-#480) and by `docs/expert-audit-2026-08-09`, which had not merged yet, so `origin/main`'s phase file did not show them. Checking only the phase file is not enough — open issues and unmerged branches claim IDs too.
 `TjHandle::decompress_header` (`src/api/tj3.rs`) does not parse a header — it
 calls `self.decompress(data)` and throws the `Image` away:
 
