@@ -89,6 +89,73 @@ fn version_script_matches_the_upstream_node_layout() {
     }
 }
 
+/// P4-129: the 16 crate-private `jpeg_capi_test_*` accessors must not be
+/// stamped as reference libjpeg v8 API.
+///
+/// They share the `jpeg_` prefix, so the `jpeg_*` pattern in `LIBJPEG_8.0`
+/// swept all of them in, and a consumer running `readelf --dyn-syms` on our
+/// `libjpeg.so.8` saw 16 entry points at `@@LIBJPEG_8.0` that no real libjpeg
+/// has. They now sit in a node whose name cannot be mistaken for upstream's.
+///
+/// Asserted against the script text so it runs on every platform, not only ELF
+/// hosts: the assignment is the part that regresses, and it is readable
+/// anywhere.
+#[test]
+fn crate_private_accessors_are_not_stamped_as_reference_api() {
+    let script: String = version_script();
+    let private: &str = section(&script, "LIBJPEGTURBORS_PRIVATE_1.0");
+    let reference: &str = section(&script, "LIBJPEG_8.0");
+
+    // Read the names from the shim source rather than restating them, so this
+    // test cannot agree with a stale copy of the list.
+    let accessors: Vec<String> = crate_private_accessor_names();
+    assert_eq!(
+        accessors.len(),
+        16,
+        "expected the 16 accessors P4-129 enumerates, found {}: {accessors:?}",
+        accessors.len()
+    );
+
+    // Each is claimed by exact name, which outranks the `jpeg_*` pattern. A
+    // 17th accessor added without updating build.rs falls through to the
+    // reference node instead, and this fails.
+    for name in &accessors {
+        assert!(
+            private.contains(&format!("{name};")),
+            "`{name}` is not claimed by the crate-private node, so the `jpeg_*` \
+             pattern in LIBJPEG_8.0 stamps it as reference v8 API:\n{private}"
+        );
+        assert!(
+            !reference.contains(&format!("{name};")),
+            "`{name}` is named in the reference node:\n{reference}"
+        );
+    }
+}
+
+/// The `jpeg_capi_test_*` accessor names, parsed out of `src/jpeglib.rs`.
+fn crate_private_accessor_names() -> Vec<String> {
+    let source: PathBuf = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("src")
+        .join("jpeglib.rs");
+    let text: String = std::fs::read_to_string(&source)
+        .unwrap_or_else(|e| panic!("read {}: {e}", source.display()));
+    const PREFIX: &str = "pub extern \"C\" fn ";
+    let mut names: Vec<String> = text
+        .lines()
+        .filter_map(|line| {
+            let idx: usize = line.find(PREFIX)?;
+            let rest: &str = &line[idx + PREFIX.len()..];
+            let end: usize = rest.find('(')?;
+            let name: &str = &rest[..end];
+            name.starts_with("jpeg_capi_test_")
+                .then(|| name.to_string())
+        })
+        .collect();
+    names.sort();
+    names.dedup();
+    names
+}
+
 /// The script must have no catch-all, which is where it deliberately parts
 /// company with upstream's own map.
 #[test]
