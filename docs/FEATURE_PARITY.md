@@ -410,7 +410,7 @@
 - [x] `alloc_small` / `alloc_large` / `alloc_sarray` / `alloc_barray` — N/A (Rust `Vec`/`Box` replaces C pool allocator)
 - [x] `request_virt_sarray` / `request_virt_barray` / virtual array API — N/A (Rust uses direct `Vec<Vec<>>` coefficient storage)
 - [x] `free_pool` / `self_destruct` — N/A (Rust Drop trait handles cleanup)
-- [x] `max_memory_to_use` / `max_alloc_chunk` — `Decoder::set_max_memory()` / `TjHandle` `TJPARAM_MAXMEMORY`
+- [x] `max_memory_to_use` / `max_alloc_chunk` — `Decoder::set_max_memory()` / `TjHandle` `TJPARAM_MAXMEMORY`. **Rust-side only (P4-14).** The classic `cinfo->mem->max_memory_to_use` field is mirrored at the correct offset but never compared against, so a C consumer that lowers it gets no enforcement. See the P4-14 section of `docs/ABI_COMPATIBILITY.md` for why (no virtual-array spill path) and what to use instead.
 - [x] `tj3Alloc()` / `tj3Free()` — N/A (Rust ownership; `Vec<u8>` return replaces C caller-managed buffers)
 
 ---
