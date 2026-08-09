@@ -19,10 +19,24 @@
 //! What actually regresses is someone widening `pub(crate)` back to `pub`.
 //! That is a source-level edit, so this checks the source — the same guard
 //! shape `capi_symbol_versions.rs` and `capi_classic_state_constants.rs`
-//! already use, and it runs on every platform in milliseconds.
+//! already use, and it runs in milliseconds.
 //!
 //! This test lives in `tests/` on purpose: an in-crate test could not observe
 //! the distinction, since `pub(crate)` is visible to it either way.
+//!
+//! # Why this is skipped on wasm
+//!
+//! Reading the source tree requires a filesystem. Under `wasm32-wasip1` the
+//! runner (wasmtime) only exposes directories it was explicitly given, and CI
+//! preopens none — so `read_to_string` fails and, with `panic = "abort"`,
+//! takes the whole test binary down rather than reporting a failure.
+//!
+//! The guard is *inapplicable* there, not merely unrunnable: what it checks is
+//! one line of committed source, identical no matter which target is being
+//! built. Every non-wasm job in the matrix runs it, so a `pub mod` regression
+//! still cannot reach `main`.
+
+#![cfg(not(target_family = "wasm"))]
 
 use std::path::PathBuf;
 
