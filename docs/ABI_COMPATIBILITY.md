@@ -100,7 +100,16 @@ Concretely:
 
 **Why this contract.** The v8 `struct jpeg_decompress_struct` is ABI-mirrored byte-for-byte (`crates/libjpeg-turbo-rs-capi/src/jpeglib.rs:3900-3970` pins the offsets). There is no room to append a `priv_ptr` field without breaking offset compatibility with upstream-compiled consumers, so private state lives in TLS instead. Implementation pointers: `DECOMPRESS_PRIVATE_STATE` at `jpeglib.rs:368-372` (decompress side) + compress equivalent at `:3492-3505`.
 
-**Divergence from upstream.** Upstream libjpeg-turbo's contract is "single-threaded per `cinfo`, but ownership transfer between threads is OK provided the application enforces non-concurrent access." We are stricter: ownership stays on the creating thread. If your consumer needs cross-thread `cinfo` ownership transfer (the canonical example is FFmpeg's frame-thread JPEG path), file an issue with the use case — the migration to a global `OnceLock<RwLock<HashMap>>` is tracked as P4-16 Option A in `docs/last_mile/phase4.md` and we will prioritise based on adoption signal.
+**Divergence from upstream.** Upstream libjpeg-turbo's contract is "single-threaded per `cinfo`, but ownership transfer between threads is OK provided the application enforces non-concurrent access." We are stricter: ownership stays on the creating thread.
+
+**Status (2026-08-09): the reopen trigger has fired, and the gap has widened.** This paragraph used to end by inviting an issue and promising to "prioritise based on adoption signal". That signal arrived — the constraint is now tracked as **P4-132 (#463)**, which reopens P4-16 Option A — so the invitation is no longer the current state and is not repeated here.
+
+Two things changed since P4-16 measured this in 2026-05:
+
+- **Upstream moved off thread-local storage.** libjpeg-turbo 3.2 beta1 overhauled its SIMD dispatchers to initialise per instance rather than per thread, explicitly *"eliminating the need for thread-local storage in the libjpeg API library."* P4-16's comparison was written against the older upstream implementation; our TLS-keyed side tables are now a wider divergence than when the trade-off was accepted.
+- **The oracle CI runs against 3.1.4.1**, one minor behind, so nothing in this repository has measured 3.2's threading behaviour (see P4-130 / #461).
+
+The migration remains a global map keyed by `cinfo` pointer, but a `Mutex<HashMap>` alone is not sufficient: a freed and reallocated `cinfo` can land at the same address and collide with a stale entry, so the private state needs a generation counter and a single release point. That requirement is recorded on **#463**, not here.
 
 ### Legacy TurboJPEG 1.x/2.x aliases — partial coverage (P4-18)
 
