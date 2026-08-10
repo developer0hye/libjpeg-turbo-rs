@@ -78,8 +78,9 @@ fn rust_return_codes(jpeg: &[u8]) -> (c_int, c_int) {
         packed.as_mut_ptr(),
         ALIGN,
     );
-    tj3Destroy(handle);
-
+    // SAFETY: `handle` is a live handle this test created and has not
+    // destroyed; nothing else can reach it.
+    unsafe { tj3Destroy(handle) };
     let mut planes: Vec<Vec<u8>> = (0..3).map(|_| vec![0u8; WIDTH * HEIGHT]).collect();
     let mut plane_ptrs: Vec<*mut u8> = planes.iter_mut().map(|p| p.as_mut_ptr()).collect();
     let handle: *mut c_void = tj3Init(TJINIT_DECOMPRESS);
@@ -91,8 +92,9 @@ fn rust_return_codes(jpeg: &[u8]) -> (c_int, c_int) {
         plane_ptrs.as_mut_ptr(),
         std::ptr::null(),
     );
-    tj3Destroy(handle);
-
+    // SAFETY: `handle` is a live handle this test created and has not
+    // destroyed; nothing else can reach it.
+    unsafe { tj3Destroy(handle) };
     (rc_yuv8, rc_planes8)
 }
 

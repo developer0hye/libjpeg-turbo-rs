@@ -51,6 +51,30 @@ Distro packagers should treat the missing version definitions as an open
 replacement gap until P4-81 closes. The reproducible binding evidence is in
 `experiments/opencv_downstream_2026-08-02.md`.
 
+### Crate-private version node `LIBJPEGTURBORS_PRIVATE_1.0` (P4-129)
+
+`src/jpeglib.rs` defines 16 `jpeg_capi_test_*` accessors that the shim's own
+dlopen-based test suites resolve out of the shared library. They share the
+`jpeg_` prefix, so the `jpeg_*` pattern in the reference node used to stamp all
+16 as `@@LIBJPEG_8.0` — advertising 16 entry points **no real libjpeg has** as
+reference v8 API.
+
+They are now claimed by exact name under **`LIBJPEGTURBORS_PRIVATE_1.0`**, a
+node deliberately named so it cannot be mistaken for an upstream one. Exact
+names outrank patterns, which is the precedence the `jpeg_mem_dest` /
+`jpeg_mem_src` assignment already relies on.
+
+**These are not API.** They carry no stability guarantee, belong to no libjpeg
+or TurboJPEG surface, and exist only so the shim's tests can inspect state
+through the shared library. Do not link them.
+
+They stay dynamically visible rather than becoming `local:` because eight test
+suites resolve them from this cdylib; hiding them would break those without
+improving the shipped surface's honesty, which is what the mislabelling
+actually cost. `tests/capi_symbol_versions.rs` reads the accessor list out of
+`src/jpeglib.rs`, so a 17th added without updating `build.rs` fails CI instead
+of silently rejoining the reference node.
+
 ### ABI-layout compatibility matrix
 
 The matrix below covers struct-layout/SONAME compatibility only; it does not
@@ -76,7 +100,16 @@ Concretely:
 
 **Why this contract.** The v8 `struct jpeg_decompress_struct` is ABI-mirrored byte-for-byte (`crates/libjpeg-turbo-rs-capi/src/jpeglib.rs:3900-3970` pins the offsets). There is no room to append a `priv_ptr` field without breaking offset compatibility with upstream-compiled consumers, so private state lives in TLS instead. Implementation pointers: `DECOMPRESS_PRIVATE_STATE` at `jpeglib.rs:368-372` (decompress side) + compress equivalent at `:3492-3505`.
 
-**Divergence from upstream.** Upstream libjpeg-turbo's contract is "single-threaded per `cinfo`, but ownership transfer between threads is OK provided the application enforces non-concurrent access." We are stricter: ownership stays on the creating thread. If your consumer needs cross-thread `cinfo` ownership transfer (the canonical example is FFmpeg's frame-thread JPEG path), file an issue with the use case — the migration to a global `OnceLock<RwLock<HashMap>>` is tracked as P4-16 Option A in `docs/last_mile/phase4.md` and we will prioritise based on adoption signal.
+**Divergence from upstream.** Upstream libjpeg-turbo's contract is "single-threaded per `cinfo`, but ownership transfer between threads is OK provided the application enforces non-concurrent access." We are stricter: ownership stays on the creating thread.
+
+**Status (2026-08-09): the reopen trigger has fired, and the gap has widened.** This paragraph used to end by inviting an issue and promising to "prioritise based on adoption signal". That signal arrived — the constraint is now tracked as **P4-132 (#463)**, which reopens P4-16 Option A — so the invitation is no longer the current state and is not repeated here.
+
+Two things changed since P4-16 measured this in 2026-05:
+
+- **Upstream moved off thread-local storage.** libjpeg-turbo 3.2 beta1 overhauled its SIMD dispatchers to initialise per instance rather than per thread, explicitly *"eliminating the need for thread-local storage in the libjpeg API library."* P4-16's comparison was written against the older upstream implementation; our TLS-keyed side tables are now a wider divergence than when the trade-off was accepted.
+- **The oracle CI runs against 3.1.4.1**, one minor behind, so nothing in this repository has measured 3.2's threading behaviour (see P4-130 / #461).
+
+The migration remains a global map keyed by `cinfo` pointer, but a `Mutex<HashMap>` alone is not sufficient: a freed and reallocated `cinfo` can land at the same address and collide with a stale entry, so the private state needs a generation counter and a single release point. That requirement is recorded on **#463**, not here.
 
 ### Legacy TurboJPEG 1.x/2.x aliases — partial coverage (P4-18)
 
@@ -140,6 +173,35 @@ The build script then auto-derives `CAPI_SONAME=libjpeg.so.62` and `CAPI_INSTALL
 
 Without `CAPI_ACK_V6B_SONAME=1`, build.rs emits a loud `cargo:warning=` if v6b SONAME or install_name is requested by hand — the same warning fires if SONAME and install_name disagree on v6b vs v8 (which would silently break load-time resolution on macOS).
 
+### `mem->max_memory_to_use` is mirrored but **not enforced** (P4-14)
+
+`cinfo->mem->max_memory_to_use` is present at the correct upstream offset — a
+compile-time `offset_of!` assertion in `crates/libjpeg-turbo-rs-capi/src/memmgr.rs`
+fails the build if it ever drifts — and it defaults to upstream's
+`1000000000L`. **ABI fidelity is intact; the field's *behaviour* is not.**
+
+Nothing in the shim compares against it. `alloc_small`, `alloc_large`,
+`alloc_sarray`, `request_virt_sarray`, `request_virt_barray` and
+`realize_virt_arrays` all allocate without consulting the budget, and no
+`JERR_OUT_OF_MEMORY` is raised from a budget-exceed condition. A C consumer
+that lowers the field to bound memory gets **silence, not enforcement**: the
+allocation succeeds, and an over-budget workload ends in the OS's OOM killer
+or swap rather than upstream's orderly `error_exit(JERR_OUT_OF_MEMORY)`.
+
+**Why it is not simply wired up.** Upstream honours the budget by *spilling
+virtual arrays to a backing store*; this shim has none (`memmgr.rs` keeps
+everything in RAM by design). Enforcing the limit without a spill path would
+not reproduce upstream's behaviour — it would change the failure mode from
+"spill and continue" to "fail the decode", which is a different contract, not
+a stricter one. Choosing between reimplementing the spill path and changing
+the failure semantics is the open decision, tracked as **P4-14 / #467**.
+
+**What to do meanwhile.** Bound memory through the Rust-side controls, which
+*are* enforced: `TJPARAM_MAXMEMORY` on the TurboJPEG API, or
+`Decoder::set_max_memory()` / `DecodeLimits` on the Rust API. Note that
+`docs/FEATURE_PARITY.md` marks this area ✅ on the strength of those; the ✅
+does not extend to the classic `cinfo->mem` field documented here.
+
 ## Field-presence reference
 
 The list below is the contract we mirror from `references/libjpeg-turbo/src/jpeglib.h`. Field names that appear under "v6b layout" are present in the v6b ABI; everything below them is appended in later versions.
@@ -197,6 +259,48 @@ the work is:
 5. Add a CI matrix entry per version.
 
 This is genuinely large work and is *out of scope* for the current "v8-targeted with documented v6b risk" policy. The decision to take it on should be evidence-driven: at least one named real consumer that we want to support, and an explicit user requirement that opt-in `CAPI_SONAME=libjpeg.so.8` is not acceptable.
+
+## Binary distribution: what is not shipped, and why (P4-131)
+
+**No native binary artifact is published.** `release.yml` publishes to crates.io
+and npm only, so a packager wanting to replace a system `libjpeg.so.8` must
+clone, install a Rust toolchain, build, and run `scripts/install_capi.sh`.
+
+The install layout itself is correct — that script already stages a proper
+prefix with the libraries, headers, `.pc` files and CMake config. The gap is
+that **nothing runs it in CI**, so the staged prefix only ever exists on a
+developer's machine.
+
+**This is deliberate, not an oversight.** Shipping a convenient binary of a
+library whose classic-ABI gaps are still open would *increase* the blast radius
+of those gaps rather than reduce it: a packager who has to build from source
+reads the tier table on the way past, and one who installs a prebuilt `.so`
+does not. It stays sequenced behind the soundness work (P4-135..P4-139) and the
+T3 error/state contracts. Tracked as **P4-131 (#462)**.
+
+### Signing and SBOM — a recorded gap
+
+Neither is implemented, and no release currently carries a signature, a
+checksum manifest, or an SBOM. Upstream libjpeg-turbo ships signed source
+tarballs and official per-platform packages with published verification
+instructions; a project asking distributions to swap out their JPEG library is
+asking for a higher bar than that, not a lower one.
+
+The reason it is unimplemented is sequencing, not disagreement: signing is only
+meaningful once there is an artifact to sign, and (above) there deliberately
+is not one yet. Recorded here so the absence is a stated position rather than
+something a packager discovers.
+
+### Distro packaging (deb/rpm) — undecided
+
+Currently neither in scope nor a recorded non-goal, which is itself the
+problem: a packager cannot plan against "unstated". The trade-off is that
+first-party `.deb`/`.rpm` packages would reach the consumers most exposed to
+the T3 gaps above, while the same packages are what a distribution would need
+in order to evaluate the library at all.
+
+**This is a maintainer decision, not a technical one**, and it is recorded as
+open rather than resolved here. #462 carries it.
 
 ## Verification commands
 

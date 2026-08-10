@@ -1,19 +1,48 @@
 //! C ABI shim for `libjpeg-turbo-rs`.
 //!
-//! Exposes libjpeg-turbo-compatible `extern "C"` symbols so that existing
-//! C consumers (`djpeg`, `cjpeg`, `jpegtran`, Pillow, ImageMagick, …) can
-//! link against this crate in place of the stock `libjpeg.so.62` /
-//! `libturbojpeg.so.0`.
+//! Exposes libjpeg-turbo-compatible `extern "C"` symbols for C consumers
+//! (`djpeg`, `cjpeg`, `jpegtran`, Pillow, ImageMagick, …).
+//!
+//! # Which ABI this targets
+//!
+//! **TurboJPEG 3 (`libturbojpeg.so.0`) is the primary target.** The classic
+//! libjpeg API is offered at the **v8 identity only** (`libjpeg.so.8`,
+//! `JPEG_LIB_VERSION 80`), and that leg is experimental and partial — see
+//! `docs/ABI_COMPATIBILITY.md` for what it does and does not cover.
+//!
+//! **libjpeg v6b (`libjpeg.so.62`) and v7 are explicit non-goals**, and this
+//! crate must not be substituted for them. The struct layouts differ: a
+//! consumer compiled against v6b addresses `jpeg_decompress_struct` fields at
+//! v6b offsets while this library lays them out for v8, so every access lands
+//! at the wrong offset. That is memory corruption, not a missing feature. The
+//! build and install paths reject those identities deliberately (P4-140).
+//!
+//! # Safety status
+//!
+//! The safe-Rust / unsafe-SIMD boundary in the underlying crate is under
+//! audit, so this crate carries no memory-safety guarantee today. See the open
+//! soundness items (P4-135..P4-139) before depending on one.
 //!
 //! The public Rust surface re-exports the underlying pure-Rust
 //! `libjpeg_turbo_rs` crate under `inner` so that downstream Rust
 //! consumers can mix-and-match the C and Rust APIs.
 
 #![deny(unsafe_op_in_unsafe_fn)]
-// `extern "C"` shim functions intentionally accept raw pointers from C and
-// dereference them after validating against NULL. Marking each function
-// `unsafe fn` would change the ABI-visible symbol name and break the
-// drop-in contract, so we silence clippy at the crate level here.
+// `extern "C"` shim functions accept raw pointers from C and dereference them
+// after a NULL check.
+//
+// This suppression previously justified itself with "marking each function
+// `unsafe fn` would change the ABI-visible symbol name and break the drop-in
+// contract". **That is false, and it was measured.** `extern "C"` fixes the
+// calling convention and `#[no_mangle]` fixes the symbol name; `unsafe` adds
+// an obligation for *Rust* callers only. Converting `tj3Free` and `tj3Destroy`
+// left `nm -gU` output byte-identical (`_tj3Alloc`, `_tj3Destroy`, `_tj3Free`).
+//
+// The suppression therefore stays only because the conversion is unfinished:
+// ~84 of the 159 exports still take raw pointers, and `handle_as_mut` still
+// forges an unbounded lifetime across nine modules. It is a TODO, not a
+// rationale. Tracked as P4-137 (#476); the two exports that could double-free
+// or `free()` an arbitrary pointer are already converted.
 #![allow(clippy::not_unsafe_ptr_arg_deref)]
 // Exported symbols must match the C case (`tj3Init`, `tj3Destroy`, ...),
 // so we disable the snake_case lint at the crate root.

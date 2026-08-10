@@ -267,6 +267,27 @@ fn gnu_version_script() -> String {
     // upstream relies on against its own `*`.
     map.push_str("    jpeg_mem_dest;\n    jpeg_mem_src;\n");
     map.push_str("  local:\n    jsimd_*;\n    jconst_*;\n};\n\n");
+
+    // Crate-private accessors. They share the `jpeg_` prefix, so the `jpeg_*`
+    // pattern in LIBJPEG_8.0 below would otherwise stamp all 16 of them as
+    // reference libjpeg v8 API — 16 entry points no real libjpeg has, visible
+    // to anyone running `readelf --dyn-syms` on our `libjpeg.so.8` (P4-129).
+    //
+    // They are listed by exact name because an exact match outranks a pattern;
+    // that is the same precedence the MEM_SRCDST pair above relies on, and it
+    // is deterministic where pattern-vs-pattern ordering is not.
+    //
+    // They stay dynamically visible rather than being made `local:` because
+    // eight dlopen-based suites resolve them out of this very cdylib. Moving
+    // them to a distinct, obviously-not-upstream node keeps those tests working
+    // while ending the mislabelling, which is the alternative
+    // `docs/last_mile/phase4.md`'s P4-129 acceptance criterion 1 permits.
+    map.push_str("LIBJPEGTURBORS_PRIVATE_1.0 {\n  global:\n");
+    for name in CRATE_PRIVATE_TEST_ACCESSORS {
+        map.push_str(&format!("    {name};\n"));
+    }
+    map.push_str("};\n\n");
+
     map.push_str("LIBJPEG_8.0 {\n  global:\n    jpeg_*;\n");
     for name in CLASSIC_NON_JPEG_PREFIXED {
         map.push_str(&format!("    {name};\n"));
@@ -274,3 +295,28 @@ fn gnu_version_script() -> String {
     map.push_str("};\n");
     map
 }
+
+/// The `jpeg_capi_test_*` accessors defined in `src/jpeglib.rs`.
+///
+/// Kept in one place so the version script and
+/// `tests/capi_symbol_versions.rs` cannot drift apart: a 17th accessor added
+/// without updating this list falls through to `jpeg_*` and the reference-node
+/// allowlist assertion fails.
+pub(crate) const CRATE_PRIVATE_TEST_ACCESSORS: &[&str] = &[
+    "jpeg_capi_test_arith_code",
+    "jpeg_capi_test_density_unit",
+    "jpeg_capi_test_dimensions",
+    "jpeg_capi_test_get_compress_state",
+    "jpeg_capi_test_marker_list",
+    "jpeg_capi_test_output_dims",
+    "jpeg_capi_test_set_arith_code",
+    "jpeg_capi_test_set_compress_dims",
+    "jpeg_capi_test_set_optimize_coding",
+    "jpeg_capi_test_set_out_cs",
+    "jpeg_capi_test_set_progressive",
+    "jpeg_capi_test_set_restart_in_rows",
+    "jpeg_capi_test_set_restart_interval",
+    "jpeg_capi_test_set_smoothing_factor",
+    "jpeg_capi_test_x_density",
+    "jpeg_capi_test_y_density",
+];

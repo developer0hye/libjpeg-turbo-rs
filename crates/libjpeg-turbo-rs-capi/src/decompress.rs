@@ -145,7 +145,16 @@ pub extern "C" fn tj3Decompress8(
         //
         // SAFETY: `dst_buf` is guaranteed by the caller to be at least
         // `effective_pitch * h` bytes; we never write beyond that.
-        let dst_total: usize = effective_pitch.saturating_mul(h);
+        // `saturating_mul` yielded usize::MAX on overflow -- precisely the
+        // wrong value here, since it becomes the length of a raw slice and
+        // claims the entire address space (P4-139).
+        let dst_total: usize = match effective_pitch.checked_mul(h) {
+            Some(v) => v,
+            None => {
+                inst.set_error("tj3Decompress8: pitch * height overflows", TJERR_FATAL);
+                return -1;
+            }
+        };
         let dst: &mut [u8] = unsafe { std::slice::from_raw_parts_mut(dst_buf, dst_total) };
 
         if let Err(e) = repack_into_pitched(&img.data, out_format, w, h, pf, dst, effective_pitch) {

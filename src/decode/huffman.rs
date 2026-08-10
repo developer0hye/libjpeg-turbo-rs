@@ -82,11 +82,14 @@ pub fn decode_ac_coefficients(
                 coeffs[63] = coeff;
                 return Ok(());
             }
-            // SAFETY: index < 64 (checked above), ZIGZAG_ORDER values are all < 64.
-            unsafe {
-                let natural: usize = *ZIGZAG_ORDER.get_unchecked(index);
-                *coeffs.get_unchecked_mut(natural) = coeff;
-            }
+            // Safe indexing (P4-141 criterion 5): entropy-stream handling is
+            // the largest attack surface, so it should not rely on `unsafe`.
+            // Both bounds are already established -- `index < 64` by the guard
+            // directly above, and every ZIGZAG_ORDER entry is < 64 by
+            // construction -- so the checks are provably redundant and the
+            // optimiser elides them. Measured: no decode throughput change.
+            let natural: usize = ZIGZAG_ORDER[index];
+            coeffs[natural] = coeff;
             index += 1;
             continue;
         }
@@ -121,11 +124,9 @@ pub fn decode_ac_coefficients(
                 coeffs[63] = extend(extra_bits, bit_size);
                 return Ok(());
             }
-            // SAFETY: index < 64 (checked above), ZIGZAG_ORDER values are all < 64.
-            unsafe {
-                let natural: usize = *ZIGZAG_ORDER.get_unchecked(index);
-                *coeffs.get_unchecked_mut(natural) = extend(extra_bits, bit_size);
-            }
+            // Safe indexing -- see the note on the fast AC path above.
+            let natural: usize = ZIGZAG_ORDER[index];
+            coeffs[natural] = extend(extra_bits, bit_size);
             index += 1;
         } else {
             // Slow path: code longer than LOOKUP_BITS.

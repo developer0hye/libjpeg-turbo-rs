@@ -381,7 +381,8 @@ jobs:
           --test yuv_four_component_guard
           --test yuv_decompress_planes_component_guard
           --test yuv_four_component_c_parity
-          --test yuv_plane_index_c_parity -- --nocapture
+          --test yuv_plane_index_c_parity
+          --test yuv_validate_before_decode -- --nocapture
         env:
           LIBJPEG_TURBO_PREFIX: /opt/libjpeg-turbo
 

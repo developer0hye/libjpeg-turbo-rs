@@ -61,6 +61,33 @@ pub struct ProgressiveDecoder {
     scans_consumed: usize,
 }
 
+/// Byte size of a plane, refusing geometry that would wrap `usize`.
+///
+/// The factors come from header geometry an attacker controls, so an unchecked
+/// product wraps in release and yields a short allocation that the IDCT then
+/// writes past — a memory-safety bug independent of how the buffer is
+/// initialized (P4-136). `isize::MAX` is the ceiling because a single
+/// allocation larger than that violates the allocator contract regardless of
+/// available memory.
+fn checked_plane_size(factors: &[usize], what: &'static str) -> Result<usize> {
+    let mut total: usize = 1;
+    for factor in factors {
+        total = total.checked_mul(*factor).ok_or(JpegError::LimitExceeded {
+            what,
+            actual: u64::MAX,
+            limit: isize::MAX as u64,
+        })?;
+    }
+    if total > isize::MAX as usize {
+        return Err(JpegError::LimitExceeded {
+            what,
+            actual: total as u64,
+            limit: isize::MAX as u64,
+        });
+    }
+    Ok(total)
+}
+
 impl ProgressiveDecoder {
     /// Create from JPEG data. Returns error if not a progressive JPEG.
     /// Applies [`crate::common::types::DecodeLimits::default`]; use
@@ -252,16 +279,14 @@ impl ProgressiveDecoder {
         let mut component_planes: Vec<Vec<u8>> = self
             .comp_infos
             .iter()
-            .map(|ci| {
-                let size: usize = ci.comp_w * ci.blocks_y * block_size;
-                let mut v: Vec<u8> = Vec::with_capacity(size);
-                #[allow(clippy::uninit_vec)]
-                unsafe {
-                    v.set_len(size)
-                };
-                v
+            .map(|ci| -> Result<Vec<u8>> {
+                let size: usize = checked_plane_size(
+                    &[ci.comp_w, ci.blocks_y, block_size],
+                    "progressive component plane",
+                )?;
+                Ok(vec![0u8; size])
             })
-            .collect();
+            .collect::<Result<Vec<Vec<u8>>>>()?;
 
         for (comp_idx, ci) in self.comp_infos.iter().enumerate() {
             let qt_values: &[u16; 64] = &quant_tables[comp_idx].values;
@@ -696,12 +721,9 @@ impl ProgressiveDecoder {
 
         if h_factor == 1 && v_factor == 1 && all_full_sampling {
             // 4:4:4: no upsampling needed
-            let data_size: usize = out_width * out_height * bpp;
-            let mut data: Vec<u8> = Vec::with_capacity(data_size);
-            #[allow(clippy::uninit_vec)]
-            unsafe {
-                data.set_len(data_size)
-            };
+            let data_size: usize =
+                checked_plane_size(&[out_width, out_height, bpp], "progressive output image")?;
+            let mut data: Vec<u8> = vec![0u8; data_size];
             for y in 0..out_height {
                 self.ycbcr_to_rgb_row(
                     &y_plane[y * y_width..],
@@ -728,13 +750,12 @@ impl ProgressiveDecoder {
             })
         } else {
             // Upsample chroma
-            let alloc_size: usize = full_width * full_height;
-            let mut cb_full: Vec<u8> = Vec::with_capacity(alloc_size);
-            let mut cr_full: Vec<u8> = Vec::with_capacity(alloc_size);
-            unsafe {
-                cb_full.set_len(alloc_size);
-                cr_full.set_len(alloc_size);
-            }
+            let alloc_size: usize = checked_plane_size(
+                &[full_width, full_height],
+                "progressive upsampled chroma plane",
+            )?;
+            let mut cb_full: Vec<u8> = vec![0u8; alloc_size];
+            let mut cr_full: Vec<u8> = vec![0u8; alloc_size];
 
             if h_factor == 2 && v_factor == 1 {
                 for row in 0..cb_h {
@@ -802,12 +823,9 @@ impl ProgressiveDecoder {
                 )));
             }
 
-            let data_size: usize = out_width * out_height * bpp;
-            let mut data: Vec<u8> = Vec::with_capacity(data_size);
-            #[allow(clippy::uninit_vec)]
-            unsafe {
-                data.set_len(data_size)
-            };
+            let data_size: usize =
+                checked_plane_size(&[out_width, out_height, bpp], "progressive output image")?;
+            let mut data: Vec<u8> = vec![0u8; data_size];
             for y in 0..out_height {
                 self.ycbcr_to_rgb_row(
                     &y_plane[y * y_width..],
@@ -851,12 +869,11 @@ impl ProgressiveDecoder {
     ) -> Result<Image> {
         // For 4-component, output as CMYK (no color conversion)
         let bpp: usize = 4;
-        let data_size: usize = out_width * out_height * bpp;
-        let mut data: Vec<u8> = Vec::with_capacity(data_size);
-        #[allow(clippy::uninit_vec)]
-        unsafe {
-            data.set_len(data_size)
-        };
+        let data_size: usize = checked_plane_size(
+            &[out_width, out_height, bpp],
+            "progressive CMYK output image",
+        )?;
+        let mut data: Vec<u8> = vec![0u8; data_size];
 
         for y in 0..out_height {
             for x in 0..out_width {
@@ -988,9 +1005,12 @@ impl ProgressiveDecoder {
                     ((3 * cur_row[i] as u16 + below[i] as u16 + 2) >> 2) as u8;
             }
         }
-        // The caller allocates `output` with `set_len` (uninitialized). When
-        // safe_height < in_height we skipped writing the tail rows; zero them
-        // explicitly so downstream color-conversion never reads uninit bytes.
+        // When safe_height < in_height the tail rows were skipped. Since
+        // P4-136 the caller hands over a zero-initialized buffer, so those rows
+        // already read as zero and this fill is redundant for that caller. It
+        // stays because it states the guarantee locally rather than relying on
+        // one: a caller that ever passes a reused buffer gets zeros here, not
+        // the previous image's rows.
         let written: usize = safe_height * 2 * out_width;
         let cap: usize = in_height * 2 * out_width;
         if written < cap && cap <= output.len() {

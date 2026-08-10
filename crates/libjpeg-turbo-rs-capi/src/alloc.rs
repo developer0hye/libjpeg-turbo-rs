@@ -68,8 +68,24 @@ pub extern "C" fn tj3Alloc(bytes: usize) -> *mut c_void {
 }
 
 /// `tj3Free(ptr)` — libjpeg-turbo-compatible deallocator. NULL is a no-op.
+///
+/// # Safety
+///
+/// `ptr` must be NULL, or a pointer returned by [`tj3Alloc`] (or the same
+/// allocator's `malloc`) that has not already been freed. It is handed
+/// straight to `free`.
+///
+/// A stack address, an interior pointer, one from a different allocator, or
+/// one already freed is undefined behaviour. Nothing here can detect any of
+/// those — a raw pointer carries no provenance the callee can check — which is
+/// why this is `unsafe fn` rather than a safe one that implies otherwise
+/// (P4-137).
+///
+/// The obligation is the C caller's either way; `unsafe` changes nothing for
+/// them. It exists so *Rust* callers of this crate's `rlib` cannot reach
+/// `free` without acknowledging it.
 #[no_mangle]
-pub extern "C" fn tj3Free(ptr: *mut c_void) {
+pub unsafe extern "C" fn tj3Free(ptr: *mut c_void) {
     crate::unwind_guard!((), {
         libc_free(ptr as *mut u8);
     })

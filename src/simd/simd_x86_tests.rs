@@ -1,7 +1,14 @@
+//! Relocated from `tests/simd_x86.rs` for P4-135 criterion 2 (#474).
+//!
+//! This suite reaches SIMD kernels directly, which is why the arch
+//! modules had to stay `pub` and were therefore callable from any
+//! downstream crate. As an in-crate test it uses `crate::`, so they
+//! can be private. Moved verbatim apart from the path rewrite.
+
 //! x86_64 SSE2 SIMD tests -- verify byte-exact match with scalar implementation.
 #![cfg(target_arch = "x86_64")]
 
-use libjpeg_turbo_rs::simd;
+use crate::simd;
 
 fn scalar_routines() -> simd::SimdRoutines {
     std::env::set_var("JSIMD_FORCENONE", "1");

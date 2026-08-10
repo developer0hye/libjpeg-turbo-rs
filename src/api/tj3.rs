@@ -80,6 +80,23 @@ pub enum TjParam {
     SaveMarkers,
 }
 
+/// Frame facts determined by the JPEG header alone.
+///
+/// Returned by [`TjHandle::inspect_header`], which reads them without decoding
+/// pixel data.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FrameInfo {
+    /// Image width in pixels, unscaled.
+    pub width: usize,
+    /// Image height in pixels, unscaled.
+    pub height: usize,
+    /// Number of components in the SOF marker: 1 for grayscale, 3 for YCbCr,
+    /// 4 for CMYK/YCCK.
+    pub num_components: usize,
+    /// Chroma subsampling implied by the components' sampling factors.
+    pub subsampling: Subsampling,
+}
+
 /// TJ3-compatible handle for JPEG compression/decompression.
 ///
 /// Wraps all parameters in a single object with get/set accessors,
@@ -663,12 +680,13 @@ impl TjHandle {
         result.map(|_| ())
     }
 
-    pub fn decompress(&mut self, data: &[u8]) -> Result<Image> {
-        // Build limits from the TurboJPEG params FIRST and construct
-        // with them, so SCANLIMIT applies from marker parsing onward and
-        // 0 keeps the C contract's no-library-level-cap semantics
-        // (turbojpeg.h TJPARAM_SCANLIMIT / TJPARAM_MAXMEMORY; the
-        // latter is in MEGABYTES, converted x1048576 like turbojpeg.c).
+    /// Resource limits derived from this handle's TurboJPEG params.
+    ///
+    /// Built from the params FIRST so SCANLIMIT applies from marker parsing
+    /// onward, and 0 keeps the C contract's no-library-level-cap semantics
+    /// (turbojpeg.h TJPARAM_SCANLIMIT / TJPARAM_MAXMEMORY; the latter is in
+    /// MEGABYTES, converted x1048576 like turbojpeg.c).
+    fn decode_limits(&self) -> crate::common::types::DecodeLimits {
         let mut limits = crate::common::types::DecodeLimits {
             // C's JPEG_MAX_DIMENSION (65,500) is an unconditional
             // library-level cap ("Maximum supported image dimension"),
@@ -688,7 +706,38 @@ impl TjHandle {
         if self.scan_limit > 0 {
             limits.max_scans = self.scan_limit as usize;
         }
-        let mut decoder = Decoder::new_with_limits(data, limits)?;
+        limits
+    }
+
+    /// Everything about a frame that its header alone determines, read
+    /// **without decoding any pixel data**.
+    ///
+    /// `Decoder::new_with_limits` stops after marker parsing, so this costs the
+    /// header rather than the image. The handle's resource limits apply —
+    /// including `TJPARAM_MAXPIXELS`, which is enforced here rather than left to
+    /// the decode that may never happen.
+    ///
+    /// This exists so C-ABI entry points can apply upstream's header-time
+    /// validation order (`turbojpeg.c:2214-2230`) instead of decoding first and
+    /// rejecting after. The free functions `decompress_to_yuv_planes` and
+    /// friends take no handle, so they cannot see these limits at all (P4-127).
+    pub fn inspect_header(&self, data: &[u8]) -> Result<FrameInfo> {
+        let decoder = Decoder::new_with_limits(data, self.decode_limits())?;
+        let frame = decoder.header();
+        let (width, height): (usize, usize) = (frame.width(), frame.height());
+        // Upstream applies its maxPixels test right after reading the header
+        // and before anything else (turbojpeg.c:2219-2222).
+        decoder.limits().check_frame(width, height)?;
+        Ok(FrameInfo {
+            width,
+            height,
+            num_components: frame.components.len(),
+            subsampling: decoder.jpeg_subsampling(),
+        })
+    }
+
+    pub fn decompress(&mut self, data: &[u8]) -> Result<Image> {
+        let mut decoder = Decoder::new_with_limits(data, self.decode_limits())?;
 
         // Apply scaling
         if self.scaling_factor != ScalingFactor::default() {

@@ -80,9 +80,10 @@
 | P4-121 | OPEN (lossless encode accepts a restart interval C refuses to decode) |
 | P4-122 | OPEN (the Pillow smoke harness substitutes for a v6b library, which its own policy forbids) |
 | P4-125 | CLOSED 2026-08-08 (TurboJPEG YUV decompress entry points emitted one plane per SOF component) |
-| P4-126 | PARTIAL (C ABI matches C; root-crate helpers still accept any component index) |
-| P4-127 | OPEN (C-ABI YUV decompress entry points validate after decoding, not before) |
+| P4-126 | CLOSED 2026-08-09 (`yuv_plane_width`/`yuv_plane_height` accept any component index) |
+| P4-127 | CLOSED 2026-08-09 (C-ABI YUV decompress entry points validate after decoding, not before) |
 | P4-128 | CLOSED 2026-08-09 (YUV plane dimensions padded to the MCU size in pixels, not the subsampling ratio) |
+| P4-142 | OPEN (`tj3DecompressHeader` decodes the entire image to read the header) |
 
 ---
 
@@ -3124,7 +3125,36 @@ mapping documents. Both rows now state it. The `✅` status is unchanged and
 correct: the exported C functions are complete and match C, which is what this
 item established; it is the Rust-native equivalents that differ.
 
-## P4-126. `yuv_plane_width`/`yuv_plane_height` accept any component index where C rejects `componentID >= nc` — **PARTIAL: C ABI matches C across the full matrix; the root-crate helpers remain unbounded**
+## P4-126. `yuv_plane_width`/`yuv_plane_height` accept any component index where C rejects `componentID >= nc` — **CLOSED 2026-08-09**
+
+**Status (2026-08-09): closed.** The root-crate half landed with issue #466.
+`yuv_plane_width` / `yuv_plane_height` now return 0 — C's documented
+invalid-argument return for `tj3YUVPlaneWidth` — for any component index at or
+above `YUV_PLANE_COUNT` (3). The grayscale term stays in the C-ABI layer, which
+still has the raw `subsamp`; `Subsampling` has no grayscale variant and so
+cannot carry it, and that constraint is now stated on the constant rather than
+left for the next reader to rediscover.
+
+**Criterion 4, decided: keep four planes and size the fourth correctly.** The
+alternative — rejecting CMYK/YCCK in the public Rust API to match the C ABI —
+was refused because it would remove working functionality from Rust callers to
+paper over a sizing bug. And it *was* a sizing bug, not merely an unchecked
+index: `decompress_to_yuv_planes` sized the K plane through the chroma rule, so
+a 4:2:0 CMYK frame came back with a K plane of **1024 bytes where the channel
+holds 4096** — three quarters of it silently discarded. In CMYK and YCCK the
+fourth component carries full resolution, like luma, and it is now sized that
+way explicitly.
+
+That measurement is the correction P4-126 needed: this section originally
+called the gap "defence in depth plus an API-contract divergence", which
+understated it. No C caller could reach it — the C ABI rejects 4-component
+frames at the entry points (P4-125) — but every Rust caller decoding a
+subsampled CMYK frame to planes was losing data.
+
+Pinned by `tests/regression_issue_466_cmyk_plane_sizing.rs`, red at `97421a1`
+on both counts. `cargo test --workspace`: 2487 passed / 0 failed, including the
+four-component fixtures from the zune-image corpus.
+
 
 **Status (2026-08-09): partial.** The C-visible half is closed. `tjPlaneWidth` /
 `tjPlaneHeight` now delegate to `tj3YUVPlaneWidth` / `tj3YUVPlaneHeight` and map
@@ -3217,7 +3247,36 @@ reaches the permissive path either, because the wrappers already bound
 deliberately kept out of the P4-125 patch to keep that change minimal and
 reviewable.
 
-## P4-127. C-ABI YUV Decompress Entry Points Validate After Decoding, Not Before — **OPEN**
+## P4-127. C-ABI YUV Decompress Entry Points Validate After Decoding, Not Before — **CLOSED 2026-08-09**
+
+**Status (2026-08-09): closed.** `TjHandle::inspect_header`
+(`src/api/tj3.rs`) reads the frame from its markers alone —
+`Decoder::new_with_limits` stops after marker parsing — applies the handle's
+`DecodeLimits` including `check_frame`, and returns a `FrameInfo`
+(width/height/num_components/subsampling). Both C-ABI entry points now call it
+before `decompress_to_yuv_planes`, which resolves all three consequences:
+
+1. `TJPARAM_MAXPIXELS` bounds them, enforced at header time as upstream does
+   (`turbojpeg.c:2219-2222`) rather than left to a decode that may never run.
+2. `align` is validated at function entry (`turbojpeg.c:2395-2397`), so it
+   outranks the component guard again, matching C's precedence.
+3. `dstPlanes[0..n]` are NULL-checked up front (`turbojpeg.c:2226-2227`), so a
+   rejected call leaves every caller buffer untouched instead of writing planes
+   0 and 1 before noticing a NULL plane 2.
+
+**How "did not decode" is proven without timing.** The regressions in
+`crates/libjpeg-turbo-rs-capi/tests/yuv_validate_before_decode.rs` use fixtures
+with a **valid header and a truncated entropy segment**: decode-first reports
+`"unexpected end of data"`, header-first reports the specific rejection, so the
+message discriminates the two orders deterministically. All four were measured
+red at `2304bf2` with exactly that decode error, and green after.
+`cargo test --workspace`: 2485 passed / 0 failed.
+
+The remaining `decompress_to_yuv_planes` limitation — a handle-less free
+function that cannot see any of this — is unchanged and still tracked by
+P4-126's criterion 4. What this item removes is the C ABI's dependence on it for
+validation.
+
 
 **Motivation.** Filed 2026-08-09 during the P4-125 review. That item ported
 upstream's `num_components > 3` rejection correctly, but placed it at the only
@@ -3327,7 +3386,7 @@ crate, and C agree on one number.
 requires all 42 cells to match libjpeg-turbo 3.1.4.1; red at `bad5493`, green
 after. `cargo test --workspace` is 2481 passed / 0 failed, so no test anywhere
 had pinned the over-padded values — the formula had no coverage at all.
-## P4-129. Test-Only `jpeg_capi_test_*` Symbols Ship in the Installed Library and Are Stamped `LIBJPEG_8.0` — **OPEN**
+## P4-129. Test-Only `jpeg_capi_test_*` Symbols Ship in the Installed Library and Are Stamped `LIBJPEG_8.0` — **CLOSED 2026-08-09**
 
 **GitHub:** [#460](https://github.com/developer0hye/libjpeg-turbo-rs/issues/460) — under the [#470](https://github.com/developer0hye/libjpeg-turbo-rs/issues/470) umbrella.
 
@@ -3403,6 +3462,8 @@ extra symbols are additive, so no downstream consumer breaks by their presence.
 The cost is export-surface integrity — we advertise 16 non-existent entry points
 as reference libjpeg v8 API, which is exactly the mislabelling P4-81 set out to
 prevent, and it undermines any claim that the shipped surface is audited.
+
+**Status (2026-08-09): closed.** Landed in #486; `crates/libjpeg-turbo-rs-capi/build.rs` now routes the 16 `jpeg_capi_test_*` accessors to a `LIBJPEGTURBORS_PRIVATE_1.0` node via an exact-name list, and `tests/soname.rs` asserts no `jpeg_capi_test_*` symbol carries `LIBJPEG_8.0`.
 
 ## P4-130. C-Parity Oracle Is Pinned to 3.1.4.1; Upstream Stable Is 3.2.0 — **OPEN**
 
@@ -4035,7 +4096,7 @@ one-shot convenience APIs defaulting to `untrusted`. This is a robustness/DoS
 posture decision, distinct from the soundness items — decide it here, or split it
 out, but do not leave it unstated.
 
-## P4-140. Public Documentation Claims Safety and Drop-In Status the Code Does Not Support — **OPEN**
+## P4-140. Public Documentation Claims Safety and Drop-In Status the Code Does Not Support — **CLOSED 2026-08-09**
 
 **GitHub:** [#479](https://github.com/developer0hye/libjpeg-turbo-rs/issues/479) — under the [#481](https://github.com/developer0hye/libjpeg-turbo-rs/issues/481) umbrella.
 
@@ -4076,6 +4137,8 @@ them can cause memory corruption if a reader acts on it.
 **Why this is filed as a defect.** (1) is a doc bug that produces memory
 corruption if believed. It is also the cheapest item in this batch — fix it
 immediately, ahead of the code work.
+
+**Status (2026-08-09): closed.** Landed in #485; `crates/libjpeg-turbo-rs-capi/src/lib.rs` no longer offers the crate as a `libjpeg.so.62` replacement, and `README.md` states the safety scope rather than a guarantee.
 
 ## P4-141. Soundness Verification Program: Miri/Sanitizer/Fuzz Coverage Gaps and an `unsafe` Inventory Gate — **OPEN**
 
@@ -4133,3 +4196,48 @@ misuse of a public SIMD entry point; none injects allocation failure; none runs
 **Why P2.** It is the evidence layer. Sequenced after the P0 fixes because
 several criteria here exist specifically to prove those fixes hold, and writing
 the harness first would only pin current behaviour.
+
+## P4-142. `tj3DecompressHeader` Decodes the Entire Image to Read the Header — **OPEN**
+
+**Motivation.** Found 2026-08-09 while building P4-127's header-only path. Filed as P4-129 and renumbered to P4-142 the same day: P4-129 through P4-141 were already claimed by the 2026-08-09 architecture-audit issues (#460, #461, #474-#480) and by `docs/expert-audit-2026-08-09`, which had not merged yet, so `origin/main`'s phase file did not show them. Checking only the phase file is not enough — open issues and unmerged branches claim IDs too.
+`TjHandle::decompress_header` (`src/api/tj3.rs`) does not parse a header — it
+calls `self.decompress(data)` and throws the `Image` away:
+
+```rust
+let result: Result<Image> = self.decompress(data);
+result.map(|_| ())
+```
+
+Upstream's `tj3DecompressHeader` performs `jpeg_read_header` and stops. Reading
+the dimensions of an image is one of the most common things a caller does before
+deciding whether to decode it at all — a thumbnail service checking size, a
+validator screening uploads — and this port charges a full decode for it. The
+cost is the entire image, and it is attacker-controlled, so it is the same
+resource-amplification shape P4-127 just removed from the YUV entry points, on a
+more frequently used call.
+
+**Root cause.** No header-only path existed when `decompress_header` was
+written. One does now: `TjHandle::inspect_header` (added by P4-127) parses
+markers via `Decoder::new_with_limits` and applies the handle's limits without
+touching pixel data.
+
+**Acceptance criteria.**
+
+1. `tj3DecompressHeader` reads the header without decoding, proven the way
+   P4-127's regressions prove it: a fixture with a valid header and a corrupt
+   entropy segment must succeed, since upstream's `jpeg_read_header` succeeds on
+   one.
+2. The handle params it publishes (width, height, subsampling, colorspace,
+   precision, progressive/lossless flags) are unchanged for well-formed input —
+   cross-checked against C for a matrix of subsamplings and colorspaces.
+3. Decide what happens to errors that only a decode can find. Today a corrupt
+   scan makes `tj3DecompressHeader` fail; upstream's succeeds and defers the
+   failure to `tj3Decompress*`. Criterion 1 changes that observable behaviour,
+   so the C cross-check must pin it rather than assume it.
+
+**Why deferred.** Not a correctness bug for well-formed input, and P4-127's
+patch is already at the size where a second behavioural change to a different
+entry point belongs in its own review. Criterion 3 in particular needs its own
+C comparison: it flips a currently-failing call into a succeeding one, which is
+exactly the kind of change that should not ride along in a patch about YUV
+validation order.

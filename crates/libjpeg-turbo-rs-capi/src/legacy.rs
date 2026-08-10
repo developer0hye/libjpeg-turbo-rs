@@ -78,10 +78,18 @@ pub extern "C" fn tjInitTransform() -> *mut c_void {
 }
 
 /// `tjDestroy(handle)` — identical to `tj3Destroy`.
+///
+/// # Safety
+///
+/// Forwards `handle` to [`tj3Destroy`] unchanged, so it carries exactly that
+/// function's obligation: NULL or a live handle from `tjInit*`/`tj3Init`,
+/// never one already destroyed, and no concurrent call using the same handle.
 #[no_mangle]
-pub extern "C" fn tjDestroy(handle: *mut c_void) -> c_int {
+pub unsafe extern "C" fn tjDestroy(handle: *mut c_void) -> c_int {
     crate::unwind_guard!(-1, {
-        tj3Destroy(handle);
+        // SAFETY: the caller's obligation, restated on this function and
+        // discharged unchanged — `handle` is theirs, not one we constructed.
+        unsafe { tj3Destroy(handle) };
         0
     })
 }
@@ -585,7 +593,10 @@ pub extern "C" fn tjLoadImage(
         if buf.is_null() {
             copy_handle_error_to_no_handle_slot(h);
         }
-        crate::tj3::tj3Destroy(h);
+        // SAFETY: `h` came from tj3Init above, is non-null, has not been
+        // destroyed, and no other thread can name it — it never left this
+        // function.
+        unsafe { crate::tj3::tj3Destroy(h) };
         buf
     })
 }
@@ -619,7 +630,10 @@ pub extern "C" fn tjSaveImage(
         if rc != 0 {
             copy_handle_error_to_no_handle_slot(h);
         }
-        crate::tj3::tj3Destroy(h);
+        // SAFETY: `h` came from tj3Init above, is non-null, has not been
+        // destroyed, and no other thread can name it — it never left this
+        // function.
+        unsafe { crate::tj3::tj3Destroy(h) };
         rc
     })
 }

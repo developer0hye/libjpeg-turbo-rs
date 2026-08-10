@@ -41,8 +41,20 @@ pub fn sse2_fancy_upsample_h2v1(input: &[u8], in_width: usize, output: &mut [u8]
     // in_width >= 3 is guaranteed by the early returns above.
     // Loop condition `i + 8 <= in_width - 1` ensures input has >=9 readable bytes
     // and output has >=16 writable bytes at each iteration.
-    unsafe {
-        sse2_fancy_h2v1_inner(input, in_width, output);
+    // P4-135: 2:1 horizontal upsample -- reads `in_width`, writes
+    // `in_width * 2`. `in_width` is a parameter independent of both
+    // slices, and the SIMD block below indexes by raw pointer.
+    let out_needed: Option<usize> = in_width.checked_mul(2);
+    let fits: bool = input.len() >= in_width && out_needed.is_some_and(|n| output.len() >= n);
+
+    if fits && crate::cpu_has!("sse2") {
+        // SAFETY: SSE2 confirmed above; both inputs hold `in_width`
+        // samples and `output` holds the `in_width * 2` it writes.
+        unsafe {
+            sse2_fancy_h2v1_inner(input, in_width, output);
+        }
+    } else {
+        crate::decode::upsample::fancy_h2v1(input, in_width, output, in_width * 2);
     }
 }
 
@@ -146,9 +158,24 @@ pub fn sse2_fancy_h2v2_row(cur: &[u8], neighbor: &[u8], output: &mut [u8], in_wi
     let cs1: i32 = cur[1] as i32 * 3 + neighbor[1] as i32;
     output[1] = ((cs0 * 3 + cs1 + 7) >> 4) as u8;
 
-    // SAFETY: SSE2 availability guaranteed by dispatch in x86_64::routines().
-    unsafe {
-        sse2_fancy_h2v2_row_inner(cur, neighbor, output, in_width);
+    // P4-135: 2:1 horizontal upsample against a neighbouring row --
+    // `cur` and `neighbor` each hold `in_width`, `output` holds
+    // `in_width * 2`. The row arguments are not interchangeable (near
+    // vs far weighting), so this only checks lengths; ordering stays
+    // the caller's contract.
+    let out_needed: Option<usize> = in_width.checked_mul(2);
+    let fits: bool = cur.len() >= in_width
+        && neighbor.len() >= in_width
+        && out_needed.is_some_and(|n| output.len() >= n);
+
+    if fits && crate::cpu_has!("sse2") {
+        // SAFETY: SSE2 confirmed above; both inputs hold `in_width`
+        // samples and `output` holds the `in_width * 2` it writes.
+        unsafe {
+            sse2_fancy_h2v2_row_inner(cur, neighbor, output, in_width);
+        }
+    } else {
+        crate::decode::upsample::fancy_h2v2_row(cur, neighbor, output, in_width);
     }
 
     // Last pixel (scalar edge): odd position

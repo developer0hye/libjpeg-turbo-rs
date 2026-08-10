@@ -6,7 +6,11 @@
 ![MSRV](https://img.shields.io/badge/MSRV-1.87-blue)
 ![license](https://img.shields.io/crates/l/libjpeg-turbo-rs)
 
-Pure-Rust reimplementation of [libjpeg-turbo](https://github.com/libjpeg-turbo/libjpeg-turbo) with NEON/AVX2/SSE2/WASM-SIMD128 acceleration. No C dependencies, no unsafe FFI, `no_std`-capable — and byte-for-byte cross-validated against C libjpeg-turbo in CI.
+Pure-Rust reimplementation of [libjpeg-turbo](https://github.com/libjpeg-turbo/libjpeg-turbo) with NEON/AVX2/SSE2/WASM-SIMD128 acceleration. No C dependencies, no FFI to a C codec, `no_std`-capable — and byte-for-byte cross-validated against C libjpeg-turbo in CI.
+
+> **Safety status.** "No C dependencies" is not "no unsafe code" — the SIMD kernels are `unsafe`, and the boundary between them and the safe API is under audit (P4-135..P4-139 in [`docs/LAST_MILE.md`](docs/LAST_MILE.md)). Until those close this project makes **no memory-safety guarantee** and no unqualified drop-in-replacement claim.
+>
+> **C compatibility tiers.** **TurboJPEG 3 is the primary target.** The classic libjpeg leg targets the **v8 identity only** (`libjpeg.so.8`) and is experimental; **v6b (`libjpeg.so.62`) and v7 are explicit non-goals** — their struct layouts differ, so substituting this library for them corrupts memory rather than merely failing.
 
 ```sh
 cargo add libjpeg-turbo-rs
@@ -32,7 +36,7 @@ Measured with the in-repo harnesses (methodology: [#361](https://github.com/deve
 | vs | Result (decode) |
 | --- | --- |
 | **zune-jpeg** (the `image` crate's default) | **31 wins / 3 losses** of 34 scored cases (±2% threshold) across subsampling × progressive × 16×16→8K, quiet aarch64, 2026-07-28; e.g. 4K progressive **0.65×**, 4K 4:2:0 **0.74×** of zune's time. Through the `image`-crate bridge: **1.31× faster** at 1080p. Two losses are 16×16 fixed-cost cases (1.20×, 1.08×); the third is a 64×64 non-interleaved 4:4:0 image (1.78×) on the multi-scan path. Full output: [`experiments/zune_matrix_aarch64_2026-07-28.md`](experiments/zune_matrix_aarch64_2026-07-28.md). |
-| **C libjpeg-turbo** | Matches or beats C on most decode benchmarks on x86_64/AVX2 (i5-10400) and within a few % on aarch64/NEON (M1 Pro) — the dated per-platform tables are below. |
+| **C libjpeg-turbo** | **Decode** (stock `cargo build --release`): matches or beats C on most benchmarks on x86_64/AVX2 (i5-10400), within a few % on aarch64/NEON (M1 Pro). **Encode**: the x86_64 tables below are built with `RUSTFLAGS="-C target-cpu=native"`, not a stock release build — see [Portable vs native builds](#portable-vs-native-builds) before quoting them. Dated per-platform tables below. |
 
 ## Performance
 
@@ -105,6 +109,17 @@ libjpeg-turbo-rs = "0.8"
 
 ### Build flags
 
+
+#### Portable vs native builds
+
+Two numbers exist and they are not interchangeable (P4-133 / [#464](https://github.com/developer0hye/libjpeg-turbo-rs/issues/464)):
+
+- **Portable** — plain `cargo build --release`. This is what a distribution ships and what a packager should judge the project on. AVX2/NEON/SSE2 kernels are still reached, by runtime detection.
+- **Native** — `RUSTFLAGS="-C target-cpu=native"`. Faster, but the binary is only valid on CPUs matching the build host.
+
+**The x86_64 encoding table below is a native build.** The remaining native-only win is BMI2 PEXT/PDEP and FMA in paths runtime dispatch does not yet cover; moving those behind `cpu_has!` so a portable build reaches them is #464, and the per-benchmark delta is unmeasured until then — treat "the last few percent" as a claim awaiting measurement, not a result.
+
+
 #### x86_64
 
 For x86_64 production builds, set:
@@ -160,7 +175,7 @@ are called out in `CHANGELOG.md`.
 | `aarch64` (Linux/macOS) | NEON | compile-time selection, CI-tested |
 | `x86_64` (Linux/macOS/Windows) | AVX2/SSE2 | runtime CPUID dispatch (`std`), CI-tested incl. no-AVX2 emulation |
 | `wasm32` (browser/WASI) | SIMD128 | compile-time `target_feature` — see the wasm crate README |
-| RISC-V / POWER / s390x | scalar | works, unoptimized. C libjpeg-turbo is also scalar on these, and still ~1.1–1.7× faster than our scalar kernels ([#359](https://github.com/developer0hye/libjpeg-turbo-rs/issues/359)) |
+| RISC-V / POWER / s390x | scalar | works, unoptimized. The ~1.1–1.7× C advantage measured in [#359](https://github.com/developer0hye/libjpeg-turbo-rs/issues/359) was **scalar vs scalar**; libjpeg-turbo **3.2.0 added RISC-V Vector (RVV)**, so on RVV hardware the real gap is larger and currently **unmeasured** ([#465](https://github.com/developer0hye/libjpeg-turbo-rs/issues/465)). POWER/s390x remain scalar on both sides. |
 | `armv7` / 32-bit ARM (Cortex-A) | scalar | CI-tested: 204 tests run under `qemu-arm`. Our widest gap: C *does* vectorize 32-bit ARM (AArch32 NEON), we do not — **estimated** 2–5× slower, not yet measured on hardware ([#424](https://github.com/developer0hye/libjpeg-turbo-rs/issues/424), [P4-78](docs/last_mile/phase4.md#p4-78-no-32-bit-arm-aarch32-neon-backend--armv7-is-our-widest-gap-vs-c--open)) |
 | `thumbv7em` (bare metal) | scalar | `no_std + alloc`, CI-built; no NEON backend is registered for thumb targets |
 

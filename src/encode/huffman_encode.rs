@@ -72,7 +72,7 @@ pub fn build_huff_table(bits: &[u8; 17], values: &[u8]) -> HuffTable {
 /// Uses a raw pointer + position instead of Vec for the output buffer,
 /// matching C libjpeg-turbo's raw buffer approach. This avoids Vec::reserve()
 /// and Vec::set_len() overhead on every flush.
-pub struct BitWriter {
+pub(crate) struct BitWriter {
     /// Raw output buffer pointer (start of allocation).
     buf: *mut u8,
     /// Current write position in the buffer.
@@ -121,13 +121,38 @@ impl BitWriter {
     }
 
     /// Ensure at least `additional` bytes of spare capacity, growing if needed.
+    ///
+    /// # Panics
+    ///
+    /// On capacity overflow, like `Vec` itself. `pos + additional` and
+    /// `cap * 2` are influenced by the coefficient stream and both used to
+    /// wrap silently — a wrapped `new_cap` asks for *less* than is needed, and
+    /// the writes that follow run past the allocation (P4-138).
     fn ensure_capacity(&mut self, additional: usize) {
-        if self.pos + additional > self.cap {
-            // Reconstruct Vec, push to trigger growth, then re-extract.
-            let new_cap: usize = (self.cap * 2).max(self.pos + additional);
-            // SAFETY: ptr/pos/cap are consistent from our allocation.
+        let required: usize = self
+            .pos
+            .checked_add(additional)
+            .expect("BitWriter capacity overflow");
+        if required > self.cap {
+            let new_cap: usize = self.cap.checked_mul(2).unwrap_or(required).max(required);
+
+            // `v` takes ownership for the duration of `reserve`, so `self`
+            // must not also claim it. If `reserve` unwinds — capacity
+            // overflow, or an allocation-error hook configured to unwind —
+            // `v` drops and frees the block while `self.buf`/`self.cap` still
+            // name it, and `BitWriter::drop` frees it a second time.
+            //
+            // Clearing `cap` first closes that window: `drop` is gated on
+            // `cap > 0`, so an unwind here leaves exactly one owner, `v`,
+            // which releases the block correctly on its way out. The fields
+            // are restored below on the success path.
+            let old_cap: usize = self.cap;
+            self.cap = 0;
+
+            // SAFETY: ptr/pos/old_cap are consistent from our allocation, and
+            // `self` has just relinquished its claim on them.
             unsafe {
-                let mut v: Vec<u8> = Vec::from_raw_parts(self.buf, self.pos, self.cap);
+                let mut v: Vec<u8> = Vec::from_raw_parts(self.buf, self.pos, old_cap);
                 v.reserve(new_cap - self.pos);
                 self.buf = v.as_mut_ptr();
                 self.cap = v.capacity();
@@ -452,7 +477,7 @@ impl HuffmanEncoder {
     /// `coeffs_zigzag` contains 64 quantized DCT coefficients in zigzag order.
     /// `prev_dc` is the DC value of the previous block (updated after encoding).
     /// `dc_table` and `ac_table` are the Huffman tables for this component.
-    pub fn encode_block(
+    pub(crate) fn encode_block(
         writer: &mut BitWriter,
         coeffs_zigzag: &[i16; 64],
         prev_dc: &mut i16,
@@ -608,7 +633,7 @@ impl HuffmanEncoder {
     /// Writes the Huffman code for the category, then the magnitude bits.
     /// Category 16 is special per ITU-T T.81: only the Huffman code is
     /// written, with no extra bits (always represents 32768/-32768).
-    pub fn encode_dc_only(writer: &mut BitWriter, diff: i16, dc_table: &HuffTable) {
+    pub(crate) fn encode_dc_only(writer: &mut BitWriter, diff: i16, dc_table: &HuffTable) {
         let (magnitude_bits, category) = encode_dc_value(diff);
         writer.write_bits(
             dc_table.ehufco[category as usize],
@@ -1621,5 +1646,61 @@ mod tests {
                 "magnitude mismatch for v={v}: scalar={mag_scalar}, corrected={mag_corr}"
             );
         }
+    }
+}
+
+/// P4-138 criterion 4: settle the double-free hypothesis by forcing the
+/// growth path to unwind, rather than reasoning about it.
+///
+/// The issue filed the double free as a *static audit* claim and asked for it
+/// to be confirmed or refuted under fault injection. These reproduce the
+/// unwind for real; run them under Miri and ASan to make the second free
+/// observable if it ever returns.
+///
+/// Gated on `panic = "unwind"`: the wasm32-wasip1 leg builds with
+/// `panic = "abort"`, where the panic these tests provoke terminates the
+/// module instead of unwinding, so `catch_unwind` never returns and the whole
+/// test binary aborts. An abort also never reaches `Drop`, which is the thing
+/// under test — the double free can only happen on an unwinding path.
+#[cfg(all(test, panic = "unwind"))]
+mod bitwriter_unwind_tests {
+    use super::BitWriter;
+
+    /// `pos + additional` overflowing must panic *before* the allocation is
+    /// handed to a temporary `Vec`, so no ownership window is ever opened.
+    #[test]
+    fn capacity_overflow_panics_before_the_ownership_window() {
+        let result = std::panic::catch_unwind(|| {
+            let mut w: BitWriter = BitWriter::new(16);
+            // usize::MAX bytes of headroom cannot be added to any pos.
+            w.ensure_capacity(usize::MAX);
+        });
+        assert!(result.is_err(), "an overflowing request must not succeed");
+    }
+
+    /// The real hazard: `reserve` unwinding while the buffer is owned by both
+    /// the temporary `Vec` and `self`. Requesting a capacity `Vec` refuses
+    /// makes `reserve` raise "capacity overflow" from inside the window.
+    ///
+    /// Before the fix, `self.cap` still named the block `v` had just freed and
+    /// `BitWriter::drop` freed it again. Now `cap` is cleared before the
+    /// window opens, so `v` is the sole owner while it unwinds and `drop`
+    /// becomes a no-op. Under ASan or Miri a regression here reports a double
+    /// free; without them the test still pins that the panic is survivable and
+    /// the writer drops cleanly.
+    #[test]
+    fn reserve_unwinding_leaves_exactly_one_owner() {
+        let result = std::panic::catch_unwind(|| {
+            let mut w: BitWriter = BitWriter::new(16);
+            // Just past `isize::MAX`, which is Vec's own capacity ceiling.
+            // That matters: a merely *huge* request (isize::MAX exactly) is
+            // handed to the allocator, which aborts the process on failure
+            // rather than unwinding, and an abort never reaches `drop` at all.
+            // Only the capacity check raises a catchable panic from inside the
+            // window this test exists to cover.
+            w.ensure_capacity((isize::MAX as usize) + 1);
+            // `w` drops here on the unwind path.
+        });
+        assert!(result.is_err(), "the oversized reserve must unwind");
     }
 }
