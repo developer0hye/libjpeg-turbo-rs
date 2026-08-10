@@ -32,8 +32,14 @@
 #   RUSTFLAGS="-Z sanitizer=address" \
 #   RUSTDOCFLAGS="-Z sanitizer=address" \
 #   LSAN_OPTIONS="suppressions=$(pwd)/lsan_suppressions.txt" \
+#   ASAN_OPTIONS="allocator_may_return_null=1" \
 #   cargo +nightly test --workspace --target x86_64-unknown-linux-gnu \
 #     --lib --no-fail-fast -- --test-threads=1
+#
+#   ASAN_OPTIONS is not optional: without it the P4-136 allocation-refusal
+#   test dies with `allocation-size-too-big` and this recipe stops
+#   reproducing the job below.  See the `ASAN_OPTIONS` entry in the asan
+#   job's `env:` for why it does not weaken the check.
 #
 #   # UndefinedBehaviorSanitizer
 #   RUSTFLAGS="-Z sanitizer=undefined" \
@@ -81,6 +87,19 @@ jobs:
       # allocator internals that are not under our control.  Any suppressions
       # we DO want to keep are in lsan_suppressions.txt.
       LSAN_OPTIONS: "suppressions=${{ github.workspace }}/lsan_suppressions.txt:detect_leaks=1"
+      # Make ASan's allocator behave like a real one: return null for a
+      # request it cannot serve, instead of aborting with
+      # `allocation-size-too-big`.  Required by P4-136 criterion 4 — the
+      # decoder's input-derived allocations use `try_reserve_exact` precisely
+      # so that refusal becomes `JpegError::AllocationFailed`, and
+      # `allocator_refusal_is_an_error_not_an_abort` cannot observe that if
+      # ASan kills the process first.
+      #
+      # This does not weaken the job.  An *infallible* allocation handed a
+      # null still aborts, via Rust's own `handle_alloc_error` — so an
+      # oversized `vec![]` fails just as loudly as before.  What changes is
+      # only that code which asked to handle refusal is allowed to.
+      ASAN_OPTIONS: "allocator_may_return_null=1"
     steps:
       - uses: actions/checkout@v7
         with:

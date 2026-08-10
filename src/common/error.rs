@@ -31,6 +31,15 @@ pub enum JpegError {
         limit: u64,
     },
 
+    /// The allocator refused a buffer whose size is derived from the input.
+    ///
+    /// `vec![0u8; n]` and friends *abort the process* when the allocator says
+    /// no, so a hostile header could turn into a denial of service that no
+    /// caller can catch. Sizes taken from the JPEG stream are allocated with
+    /// `try_reserve_exact` instead and surface here (P4-136 criterion 4).
+    #[error("allocation of {bytes} bytes for {what} failed")]
+    AllocationFailed { what: &'static str, bytes: u64 },
+
     #[error("unexpected end of data")]
     UnexpectedEof,
 
