@@ -3386,6 +3386,816 @@ crate, and C agree on one number.
 requires all 42 cells to match libjpeg-turbo 3.1.4.1; red at `bad5493`, green
 after. `cargo test --workspace` is 2481 passed / 0 failed, so no test anywhere
 had pinned the over-padded values — the formula had no coverage at all.
+## P4-129. Test-Only `jpeg_capi_test_*` Symbols Ship in the Installed Library and Are Stamped `LIBJPEG_8.0` — **CLOSED 2026-08-09**
+
+**GitHub:** [#460](https://github.com/developer0hye/libjpeg-turbo-rs/issues/460) — under the [#470](https://github.com/developer0hye/libjpeg-turbo-rs/issues/470) umbrella.
+
+**Motivation.** Filed 2026-08-09 by the external drop-in readiness review, which
+asked whether the export surface of the shipped library is an exact allowlist.
+It is not. `crates/libjpeg-turbo-rs-capi/src/jpeglib.rs` defines **16**
+`#[no_mangle] pub extern "C"` test accessors — `jpeg_capi_test_arith_code`,
+`jpeg_capi_test_density_unit`, `jpeg_capi_test_dimensions`,
+`jpeg_capi_test_get_compress_state`, `jpeg_capi_test_marker_list`,
+`jpeg_capi_test_output_dims`, `jpeg_capi_test_set_arith_code`,
+`jpeg_capi_test_set_compress_dims`, `jpeg_capi_test_set_optimize_coding`,
+`jpeg_capi_test_set_out_cs`, `jpeg_capi_test_set_progressive`,
+`jpeg_capi_test_set_restart_in_rows`, `jpeg_capi_test_set_restart_interval`,
+`jpeg_capi_test_set_smoothing_factor`, `jpeg_capi_test_x_density`,
+`jpeg_capi_test_y_density` — with **zero `cfg` gates**. They are compiled into
+every build, including the `libjpeg.so.8` that `scripts/install_capi.sh` stages
+as a system replacement.
+
+This is a live violation of **[P4-81](#p4-81-linux-cdylib-omits-gnu-libjpeg_80-symbol-versions--partial-nodes-emitted-and-tested-downstream-re-verification-pending)**'s
+own acceptance criterion (1), which requires that "crate-only extra/test and
+TurboJPEG symbols need an explicit, tested visibility/version policy; they must
+not be mislabeled as reference libjpeg-turbo extension exports."
+
+**Root cause.** `gnu_version_script()` in `crates/libjpeg-turbo-rs-capi/build.rs`
+(line 270) emits the reference node as a glob:
+
+```
+LIBJPEG_8.0 {
+  global:
+    jpeg_*;
+    jcopy_block_row;
+    jdiv_round_up;
+};
+```
+
+`jpeg_capi_test_*` matches `jpeg_*`. P4-81 deliberately omitted a catch-all so
+the TurboJPEG surface would stay unversioned, and that reasoning is sound — but
+it left the *classic* node a wildcard, so the 16 test accessors are not merely
+exported, they are actively stamped as reference libjpeg v8 API in the artifact
+`install_capi.sh` relinks. A consumer running `readelf --dyn-syms` on our
+`libjpeg.so.8` sees 16 symbols at `@@LIBJPEG_8.0` that no real libjpeg has.
+
+The in-code comment above the block (`jpeglib.rs:3212-3215`) asserts the
+opposite: *"These are intentionally NOT `jpeg_*` — they are internal helpers."*
+Every one of the 16 begins with `jpeg_`, so as a statement about glob matching
+it is false, and it is the sentence that would have prevented this had it been
+true. Fix the comment with the code, in the same change.
+
+**Acceptance criteria.**
+
+1. The installed `libjpeg.so.8` exports no `jpeg_capi_test_*` symbol, or exports
+   them only under an explicitly non-reference version node that is documented
+   as crate-private. Prefer removing them from the shipped artifact outright.
+2. `tests/capi_symbol_versions.rs` gains an assertion that fails on **any**
+   symbol in `LIBJPEG_8.0` that is not on an exact, enumerated allowlist of the
+   reference v8 API. A wildcard that happens to match only good symbols today
+   must not pass; the test asserts the allowlist, not the current output.
+3. The dlopen-based tests that consume these accessors keep working — via a
+   `cfg(feature = …)`-gated build, a separate test-only cdylib, or by reading
+   the public struct offsets directly. Record which, and why.
+4. The `jpeglib.rs:3212` comment states what is actually true of the naming, and
+   names the version-script interaction as the reason the prefix matters.
+5. While here, decide and record whether `libjpeg.so.8` and `libturbojpeg.so.0`
+   should be relinked as two artifacts with disjoint allowlists rather than the
+   single cdylib hardlinked under both names (`install_capi.sh:41-46`). P4-81's
+   "we ship one artifact carrying both surfaces" note is the constraint that
+   forced the no-catch-all design; splitting the relink is the alternative that
+   makes an exact allowlist per SONAME possible. This criterion is a recorded
+   decision, not necessarily an implementation.
+
+**Why deferred / severity.** Not memory-unsafe and not a binding failure: the
+extra symbols are additive, so no downstream consumer breaks by their presence.
+The cost is export-surface integrity — we advertise 16 non-existent entry points
+as reference libjpeg v8 API, which is exactly the mislabelling P4-81 set out to
+prevent, and it undermines any claim that the shipped surface is audited.
+
+**Status (2026-08-09): closed.** Landed in #486; `crates/libjpeg-turbo-rs-capi/build.rs` now routes the 16 `jpeg_capi_test_*` accessors to a `LIBJPEGTURBORS_PRIVATE_1.0` node via an exact-name list, and `tests/soname.rs` asserts no `jpeg_capi_test_*` symbol carries `LIBJPEG_8.0`.
+
+## P4-130. C-Parity Oracle Is Pinned to 3.1.4.1; Upstream Stable Is 3.2.0 — **OPEN**
+
+**GitHub:** [#461](https://github.com/developer0hye/libjpeg-turbo-rs/issues/461) — under the [#470](https://github.com/developer0hye/libjpeg-turbo-rs/issues/470) umbrella.
+
+**Motivation.** Filed 2026-08-09 by the external drop-in readiness review.
+Upstream released **3.2.0 on 2026-06-30** (verified via the GitHub releases API);
+every CI oracle in this repository still installs **3.1.4.1** (2026-03-27) —
+13 pin sites across five workflows: `ci.yml:62,287,508,523,526`,
+`cross-arch.yml:28,59,95`, `full-c-parity.yml:22,25`,
+`fuzz-smoke.yml:93,198,200`. `docs/FEATURE_PARITY.md:483` documents the pin and
+its original reason (apt ships 2.1.x, which lacks `-lossless`/`-precision`),
+which is still valid — but the pin has not been re-evaluated since 3.2 shipped.
+
+Consequence: our differential gates prove parity with a release that is now one
+minor version behind, and the 3.2 delta is entirely unmeasured. Some of it is
+directly in scope for open items here.
+
+**Upstream 3.2 changes that touch tracked gaps** (from the 3.2 beta1 and 3.2.0
+release notes):
+
+- **Per-instance SIMD dispatch replaces thread-local storage** (beta1 note 2):
+  upstream explicitly "eliminat[ed] the need for thread-local storage in the
+  libjpeg API library." Our shim's private state is still TLS-keyed — see
+  **[P4-132](#p4-132-classic-c-abi-per-cinfo-state-is-thread-affine-p4-16-option-a--open)**.
+  Upstream moving off TLS weakens the "upstream is single-threaded too" framing.
+- **RISC-V Vector (RVV) SIMD** (beta1 note 6): +149-246% compress, +48-180%
+  decompress vs 3.1.x on RVV hardware. See
+  **[P4-134](#p4-134-no-risc-v-rvv-simd-backend--upstream-32-ships-one--open)**;
+  it also moves the goalposts for **[P4-60](#p4-60-scalar-kernels-are-25x-slower-than-cs-scalar-kernels--open)**,
+  whose riscv64 measurement assumed *neither* side had SIMD. That assumption
+  expires with 3.2.
+- **8-bit lossy JPEG → 12-bit output** (beta1 note 8): new capability via
+  `cinfo->data_precision = 12` after `jpeg_read_header()`, and
+  `tj3Decompress12()` after `tj3DecompressHeader()`. Not implemented here.
+- **`jpeg_crop_scanline()` hardening** (3.2.0 note 3): errors when
+  buffered-image mode and raw-data output are both enabled. Relevant to
+  **[P4-103](#p4-103-jpeg_crop_scanline-does-not-implement-imcu-aligned-c-semantics--open)**.
+- **TurboJPEG additions** (beta1 note 10): repeated `tj3GetICCProfile()`,
+  ICC retrieval from a *compression* instance, `TJCS_DEFAULT`, 4:1:0 and 2:4
+  subsampling. The last two are already implemented here, so this is a
+  differential-semantics check rather than new work.
+- **jpegtran `-crop` + `-trim`/`-perfect`** behaviour change (beta1 note 4) and
+  the `-crop`/`-trim` overflow fix (3.2.0 note 4).
+- **8/16-bit PNG in cjpeg/djpeg and `tj3LoadImage*`/`tj3SaveImage*`** with ICC
+  transfer (beta1 note 9).
+
+**Acceptance criteria.**
+
+1. The oracle matrix runs against **both** 3.1.4.1 (behaviour-regression leg,
+   keeping the existing expectations honest) and **3.2.0** (current parity
+   target). A single global version bump is not acceptable: it would silently
+   re-baseline every existing expectation, and any divergence it papers over
+   would be indistinguishable from a pass.
+2. Each of the seven 3.2 deltas above is triaged to exactly one of: already at
+   parity (with the differential test that proves it), a new OPEN LAST_MILE
+   entry, or an explicitly recorded non-goal. No delta is left untriaged.
+3. `docs/FEATURE_PARITY.md:483` states which upstream version each gate runs
+   against and why, rather than naming 3.1.4.1 as if it were current.
+4. A stated policy for how upstream releases are tracked going forward, so the
+   next minor does not sit unnoticed for two months.
+
+**Why deferred.** Nothing regresses today — 3.1.4.1 is a real, supported
+release and the gates it backs are genuine. This is currency, not correctness.
+It is sequenced after the Stage A safety items because re-baselining oracles
+while the classic-ABI error and state contracts are still in flux would mix two
+sources of diff into one signal.
+
+## P4-131. No Native Binary Distribution — Releases Ship crates.io and npm Only — **OPEN**
+
+**GitHub:** [#462](https://github.com/developer0hye/libjpeg-turbo-rs/issues/462) — under the [#470](https://github.com/developer0hye/libjpeg-turbo-rs/issues/470) umbrella.
+
+**Motivation.** Filed 2026-08-09 by the external drop-in readiness review.
+`.github/workflows/release.yml` has six jobs: `changelog-check`, `publish`
+(crates.io), `publish-capi` (crates.io), `publish-image` (crates.io),
+`publish-wasm` (npm), and `github-release` (notes from CHANGELOG). **No job
+produces a native binary artifact.** A user who wants to replace their system
+`libjpeg.so.8` must clone the repository, install a Rust toolchain, build, and
+run `scripts/install_capi.sh` themselves.
+
+The install *layout* is not the gap — `scripts/install_capi.sh` already stages a
+correct prefix: `lib/libjpeg.so.8*`, `lib/libturbojpeg.so.0*`,
+`lib/pkgconfig/libjpeg.pc`, `lib/pkgconfig/libturbojpeg.pc`,
+`lib/cmake/JPEG/JPEGConfig.cmake`, and `include/{jpeglib,jerror,jmorecfg,jconfig,turbojpeg}.h`.
+The gap is that nothing runs it in CI to produce a downloadable artifact, so
+the staged prefix is only ever built on a developer's machine.
+
+Upstream, by contrast, ships signed source tarballs plus official binary
+packages per platform, with published signature-verification instructions.
+A project asking distributions to swap out their JPEG library is asking for a
+higher bar than "build it yourself."
+
+**Acceptance criteria.**
+
+1. A release job builds and attaches, per tag: Linux `libjpeg.so.8` +
+   `libturbojpeg.so.0` (x86_64 + aarch64), macOS dylibs, and Windows DLL +
+   import libraries — each bundled with the headers, `.pc` files, and CMake
+   config that `install_capi.sh` already stages.
+2. Every attached artifact is checksummed, and the checksum manifest is part of
+   the release.
+3. The artifact is produced by the same `install_capi.sh` path that
+   **[P4-124](#p4-124-the-opencv-harness-tests-the-cargo-cdylib-not-the-library-we-ship--open)**
+   requires the downstream harnesses to test — one staging path, not two. This
+   item and P4-124 must not produce divergent "shipped" artifacts.
+4. A recorded decision on signing and SBOM: either implemented, or documented as
+   a known gap with the reason. Do not leave it unstated.
+5. Distro packaging (deb/rpm) is explicitly either in scope with a target
+   release, or a recorded non-goal. It is currently neither.
+
+**Why deferred.** Pure distribution work with no correctness content, and it is
+wasted effort while the T3 classic-ABI gaps are open — shipping a convenient
+binary of a library that is not yet a general drop-in increases the blast
+radius of the gaps rather than reducing it. Sequenced in Stage C, after the
+export surface (P4-129) and the shipped-artifact test path (P4-124) are settled,
+since both change what a release artifact should contain.
+
+## P4-132. Classic C-ABI Per-`cinfo` State Is Thread-Affine (P4-16 Option A) — **OPEN**
+
+**GitHub:** [#463](https://github.com/developer0hye/libjpeg-turbo-rs/issues/463) — under the [#470](https://github.com/developer0hye/libjpeg-turbo-rs/issues/470) umbrella.
+
+**Motivation.** Filed 2026-08-09 by the external drop-in readiness review, which
+names this an adoption blocker for consumers that move codec-context ownership
+between threads. **[P4-16](#p4-16-per-cinfo-private-state-lives-in-thread-local-side-tables--closed-2026-05-19)**
+closed 2026-05-19 via Option B — document the constraint — and recorded its own
+reopen trigger: *"file an issue with the use case … we will prioritise based on
+adoption signal."* This entry is that reopen. P4-16 stays closed; the decision
+it recorded was correct for the evidence available then, and this is a new
+entry because the evidence changed.
+
+**What changed since P4-16 chose Option B.**
+
+1. **Upstream moved off TLS.** libjpeg-turbo 3.2 beta1 (note 2) overhauled its
+   SIMD dispatchers to initialise per-instance rather than per-thread,
+   explicitly "eliminating the need for thread-local storage in the libjpeg API
+   library." P4-16's divergence paragraph is written against upstream's older
+   contract; the gap is now wider than when it was measured.
+2. **The named consumer exists.** `docs/ABI_COMPATIBILITY.md:79` names FFmpeg's
+   frame-thread JPEG path as the canonical case that would force Option A, and
+   the repository already carries `capi_ffmpeg_compat.rs` as a downstream
+   harness. The prerequisite for prioritising is met.
+3. **T3 is the goal.** A general system drop-in cannot ship a threading contract
+   stricter than the library it replaces. Every prebuilt consumer on the system
+   was compiled against upstream's rules, not ours.
+
+**Current state.** Two `thread_local!` side tables in
+`crates/libjpeg-turbo-rs-capi/src/jpeglib.rs` (`:396` decompress, `:4114`
+compress) key private state by `cinfo as usize`. Transferring a `cinfo` to
+another thread silently misses the lookup and leaks the originating thread's
+entry. `docs/ABI_COMPATIBILITY.md:70,79` documents this as a deliberate,
+stricter-than-upstream contract.
+
+**Acceptance criteria.** P4-16 Option A already specifies the shape; this entry
+adds what a pointer-keyed global map needs to be correct:
+
+1. Both side tables migrate off `thread_local!` to a process-global map behind
+   a lock. A `Mutex<HashMap>` alone is not sufficient — see (3).
+2. A single-threaded `tj3Compress8` / `tj3Decompress8` benchmark stays within
+   **1%** of the TLS-keyed baseline (P4-16's original bar), recorded in
+   `experiments/`.
+3. **Pointer reuse is defended.** Keying by `cinfo as usize` means a freed and
+   reallocated `cinfo` can collide with a stale entry. Store a generation
+   counter and a magic value in the private state, and make destroy/abort the
+   single place ownership is released. A test must show that allocating a
+   `cinfo`, destroying it, and allocating a second one that lands at the same
+   address does not surface the first one's state.
+4. `crates/libjpeg-turbo-rs-capi/tests/capi_thread_affinity.rs` proves
+   create-on-thread-A / use-and-destroy-on-thread-B with no leak, and proves
+   that *concurrent* use of one `cinfo` from two threads is still rejected or
+   documented — ownership transfer is the goal, shared concurrent access is not.
+5. `docs/ABI_COMPATIBILITY.md`'s "Threading contract" and "Divergence from
+   upstream" sections are rewritten to the new contract. If any strictness
+   remains, it is stated as strictness, not omitted.
+
+**Why deferred.** Behind the Stage A memory-safety and error-contract items: no
+current test or downstream harness in this repository transfers a `cinfo` across
+threads, so nothing is broken today for what we actually measure. It is a
+correctness-of-contract gap that blocks the T3 claim, not a live defect.
+
+## P4-133. BMI2/FMA Paths Are Reachable Only via `target-cpu=native`, So Portable Builds Leave Them Off — **OPEN**
+
+**GitHub:** [#464](https://github.com/developer0hye/libjpeg-turbo-rs/issues/464) — under the [#470](https://github.com/developer0hye/libjpeg-turbo-rs/issues/470) umbrella.
+
+**Motivation.** Filed 2026-08-09 by the external drop-in readiness review.
+**[P4-8](#p4-8-runtime-bmi1lzcnt-dispatch-for-x86_64-encode-already-live-readme-updated--closed-2026-05-17)** closed 2026-05-17 after establishing that the BMI1/LZCNT AC
+encoding loop already dispatches at runtime
+(`src/encode/huffman_encode.rs:524,598`), so a stock `cargo build --release` is
+within ~2 pp of C. That closure recorded an explicit follow-up
+(`phase4.md:233`): *"BMI2 PEXT/PDEP coverage for any encode hot path that
+benefits + FMA-dispatched FDCT scalar fallback. The static-analysis review
+correctly notes these remain `target-cpu=native`-gated today."*
+
+**That follow-up was never filed anywhere.** It says "deferred to P2 backlog",
+but `docs/last_mile/backlog.md` contains exactly one section, P2-G, which is the
+downstream lab. By this repository's own rule — if it is not in LAST_MILE, it
+does not exist for the next session — the deferral was a silent drop. This entry
+restores it.
+
+**Why it matters for T3 specifically.** `README.md:94,113` still recommends
+`RUSTFLAGS="-C target-cpu=native"` for the last few percent. That is sound advice
+for an application built on the target machine, and unusable for a *system
+library*: a distribution package is built once and runs on every CPU of that
+architecture, so it must be compiled to the baseline and light up wider
+instruction sets at runtime. Every percent that only `target-cpu=native` unlocks
+is a percent a packaged `libjpeg.so.8` cannot have. C libjpeg-turbo has no such
+constraint — its hot loops are hand-written NASM with the instructions embedded,
+dispatched at runtime, which `docs/last_mile/phase1.md:217` already identifies as
+the root of the original gap.
+
+**Acceptance criteria.**
+
+1. The `target-cpu=native`-only wins are enumerated and measured against a
+   baseline build: BMI2 PEXT/PDEP in the encode hot paths, FMA in the FDCT
+   scalar fallback, and anything else the A/B surfaces. State the per-benchmark
+   delta; do not carry "the last few percent" forward as an unmeasured claim.
+2. Each one that pays is reached by runtime detection from a **baseline**
+   build, following the existing `cpu_has!` dispatch pattern.
+3. Feature detection is resolved **once per operation**, not per block or per
+   row — resolve it where the encode/decode plan is built and store the chosen
+   kernel set. (This is workstream 2 of
+   **[P4-123](#p4-123-architecture-umbrella-codec-plans-c-abi-state-public-boundaries-simd-dispatch--open)**;
+   coordinate rather than building a parallel dispatch mechanism. Note that
+   upstream 3.2 made exactly this move — per-instance SIMD dispatchers, beta1
+   note 2.)
+4. A benchmark run comparing **stock `cargo build --release`** against C
+   libjpeg-turbo, recorded in `experiments/encode.tsv` per the keep/discard
+   protocol. The portable build is the number that matters for T3; the
+   `target-cpu=native` figure is supplementary.
+5. `README.md`'s performance section separates portable-build numbers from
+   native-tuned numbers, so a packager reads the one that applies to them.
+
+**Why deferred.** Performance, and gate item 7 puts correctness first. It is
+filed now because the deferral was previously untracked, not because it
+outranks the Stage A items.
+
+## P4-134. No RISC-V RVV SIMD Backend — Upstream 3.2 Ships One — **OPEN**
+
+**GitHub:** [#465](https://github.com/developer0hye/libjpeg-turbo-rs/issues/465) — under the [#470](https://github.com/developer0hye/libjpeg-turbo-rs/issues/470) umbrella.
+
+**Motivation.** Filed 2026-08-09 by the external drop-in readiness review.
+`src/simd/` contains `aarch64/`, `wasm32/`, `x86_64/`, and `scalar.rs` — there is
+no RISC-V backend, and `grep -ri "riscv\|rvv" src/` matches only two comment
+lines in `src/decode/color.rs` referencing the riscv64 scalar experiment.
+
+libjpeg-turbo 3.2 beta1 (note 6) added RVV implementations of colorspace
+conversion, chroma up/downsampling, integer quantization and sample conversion,
+and the integer DCT/IDCT — reporting **149-246% faster compression** and
+**48-180% faster decompression** relative to 3.1.x on a Ky X1.
+
+**This invalidates a premise of an existing item.**
+**[P4-60](#p4-60-scalar-kernels-are-25x-slower-than-cs-scalar-kernels--open)**
+measured our scalar deficit on riscv64 precisely because *neither side* had SIMD
+there, making it a clean scalar-vs-scalar comparison. Against 3.2 that is no
+longer true: on RVV hardware we would be scalar against vectorised, which is the
+same structural position as
+**[P4-78](#p4-78-no-32-bit-arm-aarch32-neon-backend--armv7-is-our-widest-gap-vs-c--open)**
+describes for ARMv7 — the scalar deficit multiplying with C's full vector win.
+P4-60's riscv64 measurements stay valid as *scalar-kernel* data; they stop being
+a statement about our position versus current upstream on that architecture.
+
+**Acceptance criteria.**
+
+1. A measurement, on RVV hardware or a vector-capable emulator, of our decode
+   and encode against libjpeg-turbo **3.2.0** on riscv64 — establishing the real
+   gap rather than inferring it. This is the gating criterion; the rest depends
+   on what it shows.
+2. P4-60's entry is annotated with the premise change so its riscv64 numbers are
+   not later read as a current-upstream comparison.
+3. A recorded scope decision. `core::arch::riscv64` vector intrinsics are
+   unstable, which is the same constraint that made P4-78 an options list rather
+   than a plan — check the current status rather than assuming it, and if it
+   still holds, say what that implies (stable-Rust autovectorisation with an
+   explicit target-feature, `asm!`, or defer).
+4. If deferred after measurement, the deferral names the trigger that would
+   reopen it, in the shape P4-78 uses.
+
+**Why deferred.** Lowest-urgency of the platform items: RISC-V has the smallest
+installed base of the architectures we target, and unlike P4-78 (where ARMv7
+hardware is everywhere and the gap is inferred from a real user question) there
+is no downstream request. It is filed so the P4-60 premise change is on record.
+
+## P4-135. Public Safe SIMD Wrappers Let Safe Rust Reach `target_feature` Kernels With Unvalidated Slices — **OPEN**
+
+**GitHub:** [#474](https://github.com/developer0hye/libjpeg-turbo-rs/issues/474) — under the [#481](https://github.com/developer0hye/libjpeg-turbo-rs/issues/481) umbrella.
+
+**Motivation.** This is the first *confirmed unsound safe API* in the crate:
+safe Rust, with no `unsafe` block anywhere in the caller, can invoke an AVX2
+kernel with empty slices and an arbitrary `width`. It is not a
+theoretical reachability argument — it was **compiler-verified**. This probe
+builds clean against `x86_64-apple-darwin`:
+
+```rust
+fn main() {
+    let mut out = [0u8; 4];
+    // No `unsafe` in this function.
+    libjpeg_turbo_rs::simd::x86_64::avx2_color::avx2_ycbcr_to_rgb_row(
+        &[], &[], &[], &mut out, 4096,
+    );
+}
+```
+
+*(Compile-checked only. It was deliberately never executed.)*
+
+**Root cause.** The wrapper generated by `avx2_color_convert_fn!`
+(`src/simd/x86_64/avx2_color.rs:192-240`) is **safe**, and its safety comment
+states a precondition it does not check:
+
+```rust
+/// # Safety contract
+/// Caller must ensure AVX2 is available (dispatch verifies this).
+pub fn $pub_name(y: &[u8], cb: &[u8], cr: &[u8], out: &mut [u8], width: usize) {
+    // SAFETY: AVX2 availability guaranteed by dispatch.
+    unsafe { $inner_name(y, cb, cr, out, width); }
+}
+```
+
+"Dispatch verifies this" is true of *our* call sites and false of the function's
+actual contract. A safe `pub fn` may not assume anything about its caller. Two
+independent UB routes follow:
+
+1. **Out-of-bounds.** `width` is a parameter separate from the slice lengths.
+   The inner loop runs `while x + 16 <= width` doing
+   `_mm_loadu_si128(y.as_ptr().add(x) as *const __m128i)` and storing through
+   `out.as_mut_ptr().add(x * $bpp)` — no length check against `y`/`cb`/`cr`/`out`.
+   (The scalar tail *does* slice, so it would panic — but only after the SIMD
+   loop already read and wrote out of bounds.)
+2. **Missing CPU feature.** Calling a `#[target_feature(enable = "avx2")]`
+   function without AVX2 actually being available is UB per the Rust reference.
+   The safe wrapper performs no `is_x86_feature_detected!` check, so a safe
+   caller on a pre-Haswell CPU violates it.
+
+**Scope — this is a pattern, not one function.** `avx2_color_convert_fn!` is
+invoked 10 times (`:243-339`). The same "safe `pub fn` in front of a
+`target_feature` kernel" shape appears across the SIMD tree, including
+`avx2_color_encode.rs` (4), `wasm32/color.rs` (4), `wasm32/color_encode.rs` (4),
+`x86_64/upsample.rs` (3), `x86_64/avx2_upsample.rs` (3), `wasm32/upsample.rs` (3),
+`aarch64/idct_scaled.rs` (3), and further sites in `avx2_merged`, `merged`,
+`downsample`, `idct`, `avx2_idct`, `avx2_fdct`, and the `mod.rs` dispatchers.
+
+Reachability comes from the module tree being public at every level:
+`src/lib.rs:128` `pub mod simd;` → `src/simd/mod.rs:13` `pub mod x86_64;`
+(gated on `target_arch` only, **not** on `feature = "simd"`) →
+`src/simd/x86_64/mod.rs:6` `pub mod avx2_color;`.
+
+**`SimdRoutines` has the same hazard, but not uniformly.** Its fields are public
+safe `fn` pointers (`src/simd/mod.rs:19-37`). The three IDCT fields are sound by
+construction — `fn(&[i16; 64], &[u16; 64], &mut [u8; 64])` encodes every length
+in the type. The other two do not: `ycbcr_to_rgb_row` takes `width` alongside
+the slices, and `fancy_upsample_h2v1` documents "Output length must be
+`in_width * 2`" in prose. Those two carry hidden preconditions on a safe type.
+
+**Acceptance criteria.**
+
+1. No safe function reachable from outside the crate can cause UB through
+   argument choice alone. Kernels become `pub(crate) unsafe fn` or private
+   `unsafe fn`; the safe entry points validate first.
+2. `libjpeg_turbo_rs::simd::*` no longer resolves from an external crate. Add a
+   `trybuild`/compile-fail regression so re-publishing the path fails CI.
+3. Every safe entry point validates, before dispatch: each input slice holds at
+   least `width` samples; the output holds at least `width * bytes_per_pixel`
+   computed with **checked** arithmetic; and the CPU feature is confirmed by
+   runtime detection in the same function that performs the `unsafe` call.
+4. Length preconditions are removed from `SimdRoutines`' safe fn-pointer types —
+   by fixed-size array parameters where the shape allows, by making the fields
+   `pub(crate)`, or by making the pointers `unsafe fn`. Record which, per field;
+   the IDCT fields need no change.
+5. Architecture backends compile only under `feature = "simd"`, not on
+   `target_arch` alone.
+6. The blanket `#[allow(unsafe_op_in_unsafe_fn)]` on `pub mod simd`
+   (`src/lib.rs:127`) is removed. **This is a consequence of the work, not the
+   work itself** — see the note below.
+7. Every remaining `SAFETY` comment on a SIMD kernel states CPU feature, input
+   bounds, output bounds, pointer-range/`isize::MAX`, alignment, and
+   aliasing — not "guaranteed by dispatch".
+
+**Relationship to [P4-69](#p4-69-simd-feature-contract-and-the-remaining-389-safety-posture-work--open).**
+P4-69 tracks the lint posture: module-level feature enforcement, the ~780-site
+`unsafe {}` sweep, and the `forbid(unsafe_code)` goal. This item is **not** that
+sweep and outranks it. Annotating 780 operations with `unsafe {}` and a comment
+changes no behaviour and would leave this hole exactly as it is; closing the
+public safe-to-UB path is what matters. P4-69's criteria 1 and the module-gating
+work overlap and should be executed together, with this item leading.
+
+**Why P0.** It is the difference between "we use `unsafe` carefully" and "our
+safe API is sound". Until it is closed, no memory-safety claim about the Rust
+API is defensible, and the README's framing (P4-140) is unsupportable.
+
+## P4-136. Progressive Output Calls `set_len()` on Uninitialized `Vec` After an Unchecked Size Multiplication — **OPEN**
+
+**GitHub:** [#475](https://github.com/developer0hye/libjpeg-turbo-rs/issues/475) — under the [#481](https://github.com/developer0hye/libjpeg-turbo-rs/issues/481) umbrella.
+
+**Motivation.** `src/api/progressive_output.rs:256-262` allocates each component
+plane by declaring uninitialized memory initialized:
+
+```rust
+let size: usize = ci.comp_w * ci.blocks_y * block_size;
+let mut v: Vec<u8> = Vec::with_capacity(size);
+#[allow(clippy::uninit_vec)]
+unsafe { v.set_len(size) };
+v
+```
+
+`Vec::set_len`'s documented contract is that the elements up to the new length
+are already initialized. This does the opposite: it sets the length *first* and
+relies on the IDCT to fill every byte afterwards.
+
+**Two defects, not one.**
+
+1. **Uninitialized `Vec<u8>` exposed to safe code.** Between `set_len` and the
+   last IDCT store, a `Vec<u8>` whose contents are undefined is reachable. The
+   "every byte gets written exactly once" argument is a *global* invariant over
+   block iteration, component geometry, and every early-return path — it is not
+   checked, and any future `?`, `break`, or panic between the two points leaks
+   uninitialized bytes into safe code. LLVM is also entitled to optimise on the
+   assumption the contract held.
+2. **The size is computed with unchecked multiplication.**
+   `ci.comp_w * ci.blocks_y * block_size` comes from attacker-influenced header
+   geometry. In release builds this wraps; a wrapped-small `size` then produces a
+   short allocation that the IDCT writes past. This half is a plain
+   memory-safety bug independent of the `set_len` question.
+
+**Scope.** Six `set_len` sites in this file — `:260`, `:703`, `:735`, `:736`,
+`:809`, `:858` — plus three in `src/encode/pipeline_impl/progressive_entropy.rs`
+(`:65`, `:96`, `:145`) that write into `Vec` spare capacity through raw pointers
+and then re-`set_len`. Audit all of them; they are the same shape.
+
+**Acceptance criteria.**
+
+1. Plane sizes are computed with `checked_mul` and rejected as a typed error
+   (`DimensionOverflow`) rather than wrapping. The result is also checked against
+   `isize::MAX`.
+2. The default allocation is zero-initialized (`vec![0u8; size]`). Any retained
+   uninitialized path must use `MaybeUninit` with a written invariant, not
+   `set_len` on a `u8` `Vec` — and only after (3) shows it is needed.
+3. A benchmark comparing zero-init against the current code on the progressive
+   decode path, recorded in `experiments/` per the keep/discard protocol.
+   **Measure before optimising**: `calloc`-backed zero pages are frequently free
+   for large planes, so the current pattern may be buying nothing.
+4. Allocation is fallible where the size is input-derived — `try_reserve_exact`
+   with a typed `AllocationFailed` error rather than an abort.
+5. A 32-bit-target regression test (`i686`) covering the geometry that overflows
+   `usize` there but not on 64-bit.
+6. Miri covers the progressive output path. It currently does not — see P4-141.
+
+**Why P0.** (2) is exploitable from a crafted header on its own, and (1) is a
+documented `unsafe` contract violation sitting in the crate's own code.
+
+## P4-137. C-ABI Raw-Pointer Exports Are Safe Rust Functions — **OPEN**
+
+**GitHub:** [#476](https://github.com/developer0hye/libjpeg-turbo-rs/issues/476) — under the [#481](https://github.com/developer0hye/libjpeg-turbo-rs/issues/481) umbrella.
+
+**Motivation.** `crates/libjpeg-turbo-rs-capi` builds as
+`crate-type = ["rlib", "cdylib", "staticlib"]` (`Cargo.toml:16`), so its Rust
+signatures are a real Rust API, not only a C symbol table. Those signatures
+declare raw-pointer entry points **safe**:
+
+- `pub extern "C" fn tj3Free(ptr: *mut c_void)` (`src/alloc.rs:72`) passes an
+  arbitrary caller-supplied pointer to `free()`. Safe Rust can hand it a
+  dangling pointer, a stack address, or a pointer already freed.
+- `pub extern "C" fn tj3Destroy(handle: *mut c_void)` (`src/tj3.rs:187`)
+  reconstructs ownership with `Box::from_raw`. Two safe calls with the same
+  handle are a double free.
+
+Both are reachable from safe Rust with no `unsafe` block. The crate suppresses
+the lint that would flag exactly this, crate-wide:
+`#![allow(clippy::not_unsafe_ptr_arg_deref)]` (`src/lib.rs:17`).
+
+**The stated reason for the suppression does not hold.** The comment justifies
+it on the grounds that making the exports `unsafe fn` would change the
+ABI-visible symbol. It would not: `extern "C"` fixes the calling convention and
+`#[no_mangle]` fixes the symbol name, while `unsafe` only adds an obligation for
+*Rust* callers. `pub unsafe extern "C" fn` emits a byte-identical C symbol.
+
+**`handle_as_mut` additionally forges an unbounded lifetime**
+(`src/tj3.rs:127-133`):
+
+```rust
+pub(crate) unsafe fn handle_as_mut<'a>(handle: *mut c_void) -> Option<&'a mut TjInstance> {
+    if handle.is_null() { None } else { unsafe { Some(&mut *(handle as *mut TjInstance)) } }
+}
+```
+
+`'a` is chosen by the caller, so the borrow checker will not constrain the
+reference to the call. Its doc names validity and non-destruction but omits
+exclusivity, cross-thread non-concurrency, reentrancy (a C callback re-entering
+on the same handle), and alignment — so two live `&mut TjInstance` to one
+instance are constructible without tripping any check.
+
+**Memory spans are computed with saturating arithmetic.**
+`decompress.rs:148` does `effective_pitch.saturating_mul(h)` to size an output
+slice, and `precision.rs` repeats the shape at `:103`, `:274`, `:351`, `:492`.
+Saturation converts an overflow into `usize::MAX` instead of an error, which is
+the worst option for a value about to bound a `from_raw_parts_mut` — it must be
+a typed error. Tracked jointly with P4-139.
+
+**Acceptance criteria.**
+
+1. Every export that dereferences a raw pointer or builds a slice from one is
+   `pub unsafe extern "C" fn`. Confirm with a symbol diff that the exported C
+   names and the ABI are unchanged.
+2. `#![allow(clippy::not_unsafe_ptr_arg_deref)]` is deleted; any remaining
+   suppression is per-function with a justification.
+3. Each such export carries a `# Safety` section stating pointer validity,
+   minimum buffer size, alignment, ownership transfer, aliasing, and threading.
+4. `handle_as_mut` is replaced by a helper that confines the borrow to a
+   closure, so no caller can name the lifetime:
+   `unsafe fn with_handle<R>(h: *mut c_void, f: impl FnOnce(&mut TjInstance) -> R) -> Option<R>`.
+5. Slice construction happens only after `checked_mul`/`checked_add` and an
+   `isize::MAX` bound.
+6. A **recorded decision** on handle hardening: generation-tagged handles in a
+   registry to detect double-destroy and stale use, and a busy flag or lock so a
+   concurrent same-handle call returns an error rather than aliasing `&mut`.
+   Weigh against P4-131's threading work — these touch the same state.
+7. Documentation states the boundary plainly: arbitrary invalid pointers from C
+   are **not** defended against, and cannot be. The guarantee is that a
+   *malformed JPEG* cannot corrupt memory when the caller honours the pointer
+   contract.
+
+**Why P0.** Not because C callers are endangered — a C caller was always
+responsible for its pointers — but because the Rust-visible signature currently
+tells the compiler these are safe, which is false, and `rlib` consumers get no
+warning.
+
+## P4-138. `BitWriter` Hand-Rolls Allocation Ownership and Can Double-Free on an Unwinding `reserve` — **OPEN**
+
+**GitHub:** [#477](https://github.com/developer0hye/libjpeg-turbo-rs/issues/477) — under the [#481](https://github.com/developer0hye/libjpeg-turbo-rs/issues/481) umbrella.
+
+**Motivation.** `BitWriter` (`src/encode/huffman_encode.rs`) manages its buffer
+as a raw `*mut u8` + `pos` + `cap` triple with a manual `Drop`, a manual
+`unsafe impl Send` (`:92`), and `Vec::from_raw_parts`/`mem::forget` round-trips
+(`:100`, `:113`, `:130`, `:134`, `:318`).
+
+`ensure_capacity` (`:124-137`) has a window where the allocation is owned twice:
+
+```rust
+unsafe {
+    let mut v: Vec<u8> = Vec::from_raw_parts(self.buf, self.pos, self.cap);
+    v.reserve(new_cap - self.pos);      // <-- may unwind
+    self.buf = v.as_mut_ptr();
+    self.cap = v.capacity();
+    core::mem::forget(v);
+}
+```
+
+If `reserve` unwinds — capacity overflow, or the allocation-error hook being
+configured to unwind — the temporary `v` is dropped and frees the buffer, while
+`self.buf`/`self.cap` still name it. `BitWriter::drop` (`:100`) then reconstructs
+`Vec::from_raw_parts(self.buf, 0, self.cap)` over the freed block: **double
+free**. Reported from static audit; not reproduced under fault injection, which
+criterion 4 below exists to settle.
+
+The size arithmetic in the same function is unchecked: `self.pos + additional`
+and `self.cap * 2` can both overflow.
+
+`begin_block`/`end_block` add a second hazard class — a pointer-cursor protocol
+enforced only by prose (do not call other methods in between; do not exceed the
+per-block reserve estimate; do not reuse a pointer across a reallocation).
+
+**Acceptance criteria.**
+
+1. `BitWriter` owns a plain `Vec<u8>`. No `from_raw_parts`, no `mem::forget`, no
+   manual `Drop`, no manual `unsafe impl Send` (it becomes automatic).
+2. Growth uses `try_reserve` with a typed error, or infallible `Vec` growth —
+   never a raw-pointer round-trip.
+3. If a raw cursor is retained for the block hot path, it lives in **one**
+   private audited helper, and a guard type ensures that on unwind the length
+   reflects only bytes actually written.
+4. A fault-injection test that forces the growth path to fail/unwind and shows
+   no double free, under both Miri and ASan. This is the criterion that
+   confirms or refutes the double-free hypothesis; record the outcome either way.
+5. `BitWriter` is `pub(crate)`, not public API.
+6. An encode benchmark before/after in `experiments/encode.tsv` per the
+   keep/discard protocol. The raw-pointer design presumably bought throughput;
+   the replacement must show what it costs. If it costs materially, (3) is the
+   fallback rather than reverting to raw ownership.
+
+**Why P0.** A double free is memory corruption, and this one is reachable from
+ordinary encoding if allocation ever fails or the size arithmetic overflows.
+
+## P4-139. Memory-Layout Arithmetic Is Decentralised and Uses Saturating/Unchecked Multiplication — **OPEN**
+
+**GitHub:** [#478](https://github.com/developer0hye/libjpeg-turbo-rs/issues/478) — under the [#481](https://github.com/developer0hye/libjpeg-turbo-rs/issues/481) umbrella.
+
+**Motivation.** Width × height × bytes-per-pixel, stride × height, padded plane
+sizes, and crop offsets are recomputed independently along many paths, with
+inconsistent overflow behaviour. Each of P4-136, P4-137 and P4-138 contains an
+instance; this entry is the common cause.
+
+**Confirmed instances.**
+
+- **Saturating spans.** `crates/libjpeg-turbo-rs-capi/src/decompress.rs:148`
+  (`effective_pitch.saturating_mul(h)`) and `precision.rs:103,274,351,492`.
+  Saturation turns overflow into `usize::MAX` — precisely the wrong value to
+  then bound a raw slice. It must be a typed error.
+- **Unchecked products.** `src/api/progressive_output.rs:257`
+  (`ci.comp_w * ci.blocks_y * block_size`) wraps in release.
+- **`ScalingFactor` is a public panic/overflow surface**
+  (`src/common/types.rs:305-335`): `num` and `denom` are `pub`, and `new()`
+  accepts `denom == 0`, so `block_size()` and `scale_dim()` defend with
+  `assert!` — a panic on a public API, not a `Result`. Both then multiply
+  unchecked (`self.num * 8`, `input_dim * self.num as usize`). Because the
+  fields are public, a validating constructor alone cannot fix it: struct-literal
+  construction bypasses any check.
+
+**Acceptance criteria.**
+
+1. One `ImageLayout`-style abstraction owns every span computation: `width`,
+   `height`, `bytes_per_pixel`, optional `stride` (rejecting `stride < row_bytes`),
+   producing `total_bytes` via checked arithmetic with an `isize::MAX` bound and a
+   typed error.
+2. Every output allocation and raw-slice construction goes through it: baseline
+   decode, progressive decode, scaling, crop, 12/16-bit, encode input validation,
+   TJ3, classic `jpeg_*`, YUV planes, transform output.
+3. **No `saturating_*` or `wrapping_*` in any expression that sizes or bounds a
+   memory region.** Enforce with a lint, a CI grep, or a review checklist item —
+   and say which.
+4. `ScalingFactor` fields become private with a validated constructor returning
+   `Result`, or the type becomes an enum over the 16 supported factors. Public
+   methods stop panicking on public input. **Note this is a breaking API change**
+   — sequence it with the next major, and record the migration.
+5. Property tests over adversarial geometry (huge dimensions, `stride` just under
+   `row_bytes`, dimensions whose product overflows on 32-bit) on both 64- and
+   32-bit targets.
+
+**Also recorded: resource-limit defaults.** `DecodeLimits` currently defaults to
+roughly 2.1 billion pixels with `max_memory = None`. That is a compatibility
+default, not a safe-for-untrusted-input default. Consider splitting
+`DecodeLimits::untrusted()` (bounded pixels/memory/scans/metadata) from
+`DecodeLimits::compatibility()` (current behaviour, for libjpeg parity), with the
+one-shot convenience APIs defaulting to `untrusted`. This is a robustness/DoS
+posture decision, distinct from the soundness items — decide it here, or split it
+out, but do not leave it unstated.
+
+## P4-140. Public Documentation Claims Safety and Drop-In Status the Code Does Not Support — **CLOSED 2026-08-09**
+
+**GitHub:** [#479](https://github.com/developer0hye/libjpeg-turbo-rs/issues/479) — under the [#481](https://github.com/developer0hye/libjpeg-turbo-rs/issues/481) umbrella.
+
+**Motivation.** Two documentation claims are currently unsupportable, and one of
+them can cause memory corruption if a reader acts on it.
+
+1. **`crates/libjpeg-turbo-rs-capi/src/lib.rs:5`** tells consumers they can
+   "link against this crate in place of the stock `libjpeg.so.62`". `LAST_MILE.md`
+   classifies v6b/v7 as an **explicit non-goal** (T4), and the build and install
+   paths reject those identities. Acting on the crate doc means loading a v8
+   struct layout into a consumer compiled against v6b — different
+   `jpeg_decompress_struct` offsets, i.e. reads and writes at wrong offsets. This
+   is a memory-safety claim, not a marketing one.
+2. **`README.md:9`** — "Pure-Rust ... No C dependencies, no unsafe FFI". Each
+   clause is literally true, but together, and next to "Pure-Rust", they read as
+   "there is no unsafe code / memory safety is established". With P4-135 open,
+   that reading is false.
+
+**Acceptance criteria.**
+
+1. The capi crate doc names the actual tier: v8 (`libjpeg.so.8`) is the
+   experimental/partial target; v6b/v7 are non-goals. It must not describe
+   `.so.62` substitution as supported.
+2. Tier language is consistent across `README.md`, the capi crate docs,
+   `ABI_COMPATIBILITY.md`, `install_capi.sh`, and the crates.io description — one
+   wording, one source of truth.
+3. Until P4-135..P4-139 close, no "memory-safe replacement" or unqualified
+   "drop-in replacement" claim appears in published material. Interim wording
+   should say the safe-API/unsafe-SIMD boundary is under audit, and name TJ3 as
+   the primary C compatibility target.
+4. Once those close **and** an external audit (P4-141) reports, a scoped
+   guarantee may be published — separating (a) the safe Rust API being sound,
+   (b) unsafe being confined to validated private SIMD kernels, and (c) the C ABI
+   preserving caller pointer obligations, so that malformed *JPEG input* cannot
+   corrupt memory when those obligations are met. It must not claim to defend
+   against arbitrary invalid pointers from C.
+
+**Why this is filed as a defect.** (1) is a doc bug that produces memory
+corruption if believed. It is also the cheapest item in this batch — fix it
+immediately, ahead of the code work.
+
+**Status (2026-08-09): closed.** Landed in #485; `crates/libjpeg-turbo-rs-capi/src/lib.rs` no longer offers the crate as a `libjpeg.so.62` replacement, and `README.md` states the safety scope rather than a guarantee.
+
+## P4-141. Soundness Verification Program: Miri/Sanitizer/Fuzz Coverage Gaps and an `unsafe` Inventory Gate — **OPEN**
+
+**GitHub:** [#480](https://github.com/developer0hye/libjpeg-turbo-rs/issues/480) — under the [#481](https://github.com/developer0hye/libjpeg-turbo-rs/issues/481) umbrella.
+
+**Motivation.** The existing CI is genuinely strong — Miri on non-SIMD unit
+tests, ASan and UBSan, a C-boundary sanitizer harness, 12 fuzz targets on a
+6-hourly schedule, `cargo-deny`, and a `no_std` matrix. But P4-135 was found by
+*reading code*, not by any of it, and that is the diagnostic finding: the
+tooling's coverage does not intersect the crate's highest-risk surface.
+
+**Current gaps.** The Miri job excludes SIMD, integration tests, most of the C
+ABI, and every architecture-specific direct call. No job constructs a safe-Rust
+misuse of a public SIMD entry point; none injects allocation failure; none runs
+32-bit.
+
+**Acceptance criteria.**
+
+1. **Miri** additionally covers non-SIMD integration tests, doctests, progressive
+   output (P4-136), `BitWriter` (P4-138), post-allocation-failure state, and
+   concurrent one-time initialisation.
+2. **Sanitizers** run with SIMD on *and* off; on an AVX2 machine and a
+   non-AVX2 one; on 32-bit `i686`; and on AArch64 NEON. Add guard pages either
+   side of C destination buffers, short-stride and canary buffers, and repeated
+   init/destroy sequences.
+3. **An API-sequence fuzzer** exists alongside the byte fuzzers — driving
+   `new → configure → probe → decode → reset → decode → transform → destroy`
+   orderings — plus a process-isolated C-ABI harness covering
+   `init→destroy→destroy`, undersized output buffers, pitch boundaries, maximum
+   dimensions, same-handle concurrent calls, and callback reentry.
+4. **An `unsafe` inventory is committed and gated.** Per site: location,
+   why safe Rust cannot express it, the invariant (bounds/lifetime/aliasing/CPU
+   feature), whether a safe caller can reach it, the regression test that would
+   catch a broken invariant, tool coverage, and last reviewer. CI diffs the
+   inventory and requires review for additions. **A raw count is not the
+   deliverable** — "780 unsafe operations" says nothing about risk; one
+   precondition-free safe wrapper (P4-135) outweighs hundreds of intrinsic calls.
+5. **Parser and control-plane `unsafe` goes to zero.** Malformed-input handling —
+   progressive scan state, restart markers, EOB runs, spectral ranges,
+   coefficient indexing, marker length parsing, custom scan scripts — is the
+   largest attack surface and should be entirely safe Rust. `decode/huffman.rs`'s
+   `get_unchecked`/`get_unchecked_mut` on `ZIGZAG_ORDER` and coefficients is the
+   known instance: replace with safe indexing and show the generated code is
+   unchanged, or justify with a benchmark.
+6. **`#![cfg_attr(not(feature = "simd"), forbid(unsafe_code))]` compiles.** This
+   is P4-69's goal; it becomes reachable once (5) and P4-138 land. `OnceBox` in
+   `HuffmanTable` is the remaining blocker — the standard Annex K tables are
+   fixed data, so `const` construction is the cleanest route.
+7. **An independent external audit** of public API soundness, SIMD dispatch,
+   progressive decode, `BitWriter`, layout arithmetic, C handle lifecycle,
+   classic ABI struct boundaries, allocator ownership, and panic/concurrency —
+   published with its commit hash and unresolved findings — before any release
+   carrying a memory-safety claim.
+
+**Why P2.** It is the evidence layer. Sequenced after the P0 fixes because
+several criteria here exist specifically to prove those fixes hold, and writing
+the harness first would only pin current behaviour.
 
 ## P4-142. `tj3DecompressHeader` Decodes the Entire Image to Read the Header — **OPEN**
 
