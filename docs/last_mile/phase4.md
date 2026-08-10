@@ -3910,7 +3910,7 @@ and then re-`set_len`. Audit all of them; they are the same shape.
 **Why P0.** (2) is exploitable from a crafted header on its own, and (1) is a
 documented `unsafe` contract violation sitting in the crate's own code.
 
-## P4-137. C-ABI Raw-Pointer Exports Are Safe Rust Functions — **OPEN**
+## P4-137. C-ABI Raw-Pointer Exports Are Safe Rust Functions — **PARTIAL: handle borrow scoped (criterion 4); export `unsafe fn` conversion pending**
 
 **GitHub:** [#476](https://github.com/developer0hye/libjpeg-turbo-rs/issues/476) — under the [#481](https://github.com/developer0hye/libjpeg-turbo-rs/issues/481) umbrella.
 
@@ -3985,6 +3985,59 @@ a typed error. Tracked jointly with P4-139.
 responsible for its pointers — but because the Rust-visible signature currently
 tells the compiler these are safe, which is false, and `rlib` consumers get no
 warning.
+
+**Status (2026-08-10): partial — criterion 4 done.** `handle_as_mut` is gone.
+
+The defect it carried was that its lifetime was caller-chosen:
+
+```rust
+pub(crate) unsafe fn handle_as_mut<'a>(handle: *mut c_void) -> Option<&'a mut TjInstance>
+```
+
+`'a` appeared in no input, so the borrow checker had nothing to tie the
+reference to. Two calls on one handle produced two simultaneously-live
+`&mut TjInstance` — aliasing UB, with no diagnostic and nothing in the type
+system to flag it.
+
+The replacement owns the lifetime instead of exporting it:
+
+```rust
+pub(crate) unsafe fn with_handle<R>(
+    handle: *mut c_void,
+    f: impl FnOnce(&mut TjInstance) -> R,
+) -> Option<R>
+```
+
+All **27 call sites across nine modules** (`tj3`, `header`, `compress`,
+`decompress`, `transform`, `precision`, `imageio`, `yuv`, `legacy`) now go
+through it. Each entry point keeps its own sentinel via `.unwrap_or(-1)` /
+`.unwrap_or(0)` / `.unwrap_or(null_mut())`, so NULL-handle behaviour is
+unchanged.
+
+One structural detail worth keeping: each body is bound to a `let body = |inst:
+&mut TjInstance| -> T { … }` *outside* the `unsafe` block, rather than written
+inline as `unsafe { with_handle(handle, |inst| …) }`. Wrapping the whole body in
+one `unsafe` block would nest every pre-existing inner `unsafe` inside it, which
+both silences `unused_unsafe` as a signal and defeats the point of
+`deny(unsafe_op_in_unsafe_fn)`. The `unsafe` block now covers exactly the
+`with_handle` call.
+
+Proof: `cargo test -p libjpeg-turbo-rs-capi --test handle_borrow_scope`
+(4 tests — the accessor's shape, the absence of `handle_as_mut` in all nine
+modules, a `tj3Set`/`tj3Get` round trip, and NULL-handle sentinels), plus the
+full capi suite at 54 blocks / 0 failures and both CI clippy legs clean.
+
+**What remains: criteria 1, 2, 3, 5, 6, 7.** ~84 of the 159 exports still take
+raw pointers as safe `pub extern "C" fn`, so the crate-wide
+`#![allow(clippy::not_unsafe_ptr_arg_deref)]` stays. `tj3Free` and `tj3Destroy`
+— the two that could `free()` an arbitrary pointer or double-free — were
+converted earlier, and that conversion measured the symbol-name claim as false:
+`nm -gU` output was byte-identical.
+
+The new test documents the gap from the inside: its NULL-handle case has **no**
+`unsafe` block, because `tj3Set`/`tj3Get` are still safe fns. When criterion 1
+lands, that call site stops compiling until it is wrapped — an intended tripwire
+rather than an omission.
 
 ## P4-138. `BitWriter` Hand-Rolls Allocation Ownership and Can Double-Free on an Unwinding `reserve` — **OPEN**
 

@@ -118,18 +118,52 @@ fn is_read_only(param: TjParam) -> bool {
     matches!(param, TjParam::Width | TjParam::Height)
 }
 
-/// Dereference an opaque handle pointer into a mutable `TjInstance`
-/// reference, or return `None` if the pointer is NULL.
+/// Run `f` with a mutable borrow of the `TjInstance` behind `handle`, or
+/// return `None` if the pointer is NULL.
+///
+/// # Why a closure rather than a returned reference
+///
+/// This replaces `handle_as_mut<'a>(*mut c_void) -> Option<&'a mut TjInstance>`
+/// (P4-137, #476). That signature let the *caller* choose `'a`, so the borrow
+/// checker never tied the reference to anything: two calls could produce two
+/// live `&mut TjInstance` aliasing one instance, which is instant UB, with
+/// nothing in the type system to flag it.
+///
+/// Here `'a` is chosen by `with_handle`, not by the caller. The borrow cannot
+/// outlive the closure, so a second overlapping `&mut` to the same instance is
+/// no longer constructible by ordinary code — the compiler rejects it. Nesting
+/// two `with_handle` calls on the same pointer is still possible and still
+/// wrong; that is the caller's obligation, recorded below.
 ///
 /// # Safety
-/// The caller guarantees that `handle` was returned by `tj3Init` and has
-/// not yet been passed to `tj3Destroy`.
-pub(crate) unsafe fn handle_as_mut<'a>(handle: *mut c_void) -> Option<&'a mut TjInstance> {
+///
+/// * `handle` must be NULL, or a pointer returned by [`tj3Init`] that has not
+///   been passed to [`tj3Destroy`].
+/// * It must be correctly aligned for `TjInstance` and point to a live
+///   instance — guaranteed if it came from `tj3Init` unmodified.
+/// * **Exclusivity:** no other `with_handle` call on the same handle may be
+///   active, on this thread or any other, for the duration of `f`. Reentering
+///   through a C callback with the same handle violates this just as surely as
+///   a second thread does.
+/// * `f` must not destroy the handle it is given.
+///
+/// Nothing here can check any of these — a raw pointer carries no provenance
+/// the callee can inspect. Detecting stale or double use needs
+/// generation-tagged handles in a registry, which P4-137 records as an open
+/// decision (its criterion 6) rather than something this signature supplies.
+pub(crate) unsafe fn with_handle<R>(
+    handle: *mut c_void,
+    f: impl FnOnce(&mut TjInstance) -> R,
+) -> Option<R> {
     if handle.is_null() {
-        None
-    } else {
-        unsafe { Some(&mut *(handle as *mut TjInstance)) }
+        return None;
     }
+    // SAFETY: the caller guarantees `handle` is a live, aligned `TjInstance`
+    // from `tj3Init` and that no other borrow of it is active. The reference
+    // is confined to `f` — its lifetime is this block, not the caller's
+    // choice — so it cannot escape or alias a later one.
+    let inst: &mut TjInstance = unsafe { &mut *(handle as *mut TjInstance) };
+    Some(f(inst))
 }
 
 // ---------------------------------------------------------------------------
@@ -218,35 +252,36 @@ pub unsafe extern "C" fn tj3Destroy(handle: *mut c_void) {
 #[no_mangle]
 pub extern "C" fn tj3Set(handle: *mut c_void, param: c_int, value: c_int) -> c_int {
     crate::unwind_guard!(-1, {
-        // SAFETY: dereferenced only if non-NULL; validated above.
-        let inst: &mut TjInstance = match unsafe { handle_as_mut(handle) } {
-            Some(i) => i,
-            None => return -1,
-        };
+        // SAFETY: `with_handle` NULL-checks; the caller owns handle validity
+        // and exclusivity per its contract.
+        unsafe {
+            with_handle(handle, |inst| {
+                let p: TjParam = match param_from_c(param) {
+                    Some(p) => p,
+                    None => {
+                        inst.set_error(format!("unknown TJPARAM id {param}"), TJERR_FATAL);
+                        return -1;
+                    }
+                };
 
-        let p: TjParam = match param_from_c(param) {
-            Some(p) => p,
-            None => {
-                inst.set_error(format!("unknown TJPARAM id {param}"), TJERR_FATAL);
-                return -1;
-            }
-        };
+                if is_read_only(p) {
+                    inst.set_error(format!("TJPARAM id {param} is read-only"), TJERR_FATAL);
+                    return -1;
+                }
 
-        if is_read_only(p) {
-            inst.set_error(format!("TJPARAM id {param} is read-only"), TJERR_FATAL);
-            return -1;
+                match inst.inner.set(p, value) {
+                    Ok(()) => {
+                        inst.clear_error();
+                        0
+                    }
+                    Err(e) => {
+                        inst.set_error(e.to_string(), TJERR_FATAL);
+                        -1
+                    }
+                }
+            })
         }
-
-        match inst.inner.set(p, value) {
-            Ok(()) => {
-                inst.clear_error();
-                0
-            }
-            Err(e) => {
-                inst.set_error(e.to_string(), TJERR_FATAL);
-                -1
-            }
-        }
+        .unwrap_or(-1)
     })
 }
 
@@ -256,21 +291,20 @@ pub extern "C" fn tj3Set(handle: *mut c_void, param: c_int, value: c_int) -> c_i
 #[no_mangle]
 pub extern "C" fn tj3Get(handle: *mut c_void, param: c_int) -> c_int {
     crate::unwind_guard!(-1, {
-        let inst: &mut TjInstance = match unsafe { handle_as_mut(handle) } {
-            Some(i) => i,
-            None => return -1,
-        };
-
-        match param_from_c(param) {
-            Some(p) => {
-                inst.clear_error();
-                inst.inner.get(p)
-            }
-            None => {
-                inst.set_error(format!("unknown TJPARAM id {param}"), TJERR_FATAL);
-                -1
-            }
+        // SAFETY: as `tj3Set` above.
+        unsafe {
+            with_handle(handle, |inst| match param_from_c(param) {
+                Some(p) => {
+                    inst.clear_error();
+                    inst.inner.get(p)
+                }
+                None => {
+                    inst.set_error(format!("unknown TJPARAM id {param}"), TJERR_FATAL);
+                    -1
+                }
+            })
         }
+        .unwrap_or(-1)
     })
 }
 
@@ -342,47 +376,56 @@ pub extern "C" fn tj3GetICCProfile(
     icc_size: *mut usize,
 ) -> c_int {
     crate::unwind_guard!(-1, {
-        let inst: &mut TjInstance = match unsafe { handle_as_mut(handle) } {
-            Some(i) => i,
-            None => return -1,
-        };
-        if icc_size.is_null() {
-            inst.set_error("tj3GetICCProfile: iccSize is NULL", TJERR_FATAL);
-            return -1;
-        }
-        let icc: Option<&[u8]> = inst.inner.icc_profile();
-        // SAFETY: caller guarantees the out-pointers are valid for write.
-        unsafe {
-            match icc {
-                Some(bytes) => {
-                    *icc_size = bytes.len();
-                    if !icc_buf.is_null() {
-                        let out: *mut u8 = crate::alloc::libc_from_slice(bytes);
-                        if out.is_null() && !bytes.is_empty() {
-                            inst.set_error("tj3GetICCProfile: out-of-memory", TJERR_FATAL);
-                            return -1;
-                        }
-                        *icc_buf = out;
-                    }
-                }
-                None => {
-                    *icc_size = 0;
-                    if !icc_buf.is_null() {
-                        *icc_buf = std::ptr::null_mut();
-                    }
-                    // P4-7 (2026-05-17): upstream `tj3GetICCProfile`
-                    // returns -1 with `TJERR_WARNING` when no ICC is
-                    // captured. Record the warning so a caller that
-                    // inspects `tj3GetErrorCode()` distinguishes "no
-                    // ICC" from a fatal failure, and return -1 to
-                    // match the documented contract.
-                    inst.set_error("tj3GetICCProfile: no ICC profile captured", TJERR_WARNING);
+        // Defined outside the `unsafe` block below so the body's own `unsafe`
+        // blocks stay meaningful rather than nesting inside a blanket one.
+        let body = |inst: &mut TjInstance| -> c_int {
+            {
+                if icc_size.is_null() {
+                    inst.set_error("tj3GetICCProfile: iccSize is NULL", TJERR_FATAL);
                     return -1;
                 }
+                let icc: Option<&[u8]> = inst.inner.icc_profile();
+                // SAFETY: caller guarantees the out-pointers are valid for write.
+                unsafe {
+                    match icc {
+                        Some(bytes) => {
+                            *icc_size = bytes.len();
+                            if !icc_buf.is_null() {
+                                let out: *mut u8 = crate::alloc::libc_from_slice(bytes);
+                                if out.is_null() && !bytes.is_empty() {
+                                    inst.set_error("tj3GetICCProfile: out-of-memory", TJERR_FATAL);
+                                    return -1;
+                                }
+                                *icc_buf = out;
+                            }
+                        }
+                        None => {
+                            *icc_size = 0;
+                            if !icc_buf.is_null() {
+                                *icc_buf = std::ptr::null_mut();
+                            }
+                            // P4-7 (2026-05-17): upstream `tj3GetICCProfile`
+                            // returns -1 with `TJERR_WARNING` when no ICC is
+                            // captured. Record the warning so a caller that
+                            // inspects `tj3GetErrorCode()` distinguishes "no
+                            // ICC" from a fatal failure, and return -1 to
+                            // match the documented contract.
+                            inst.set_error(
+                                "tj3GetICCProfile: no ICC profile captured",
+                                TJERR_WARNING,
+                            );
+                            return -1;
+                        }
+                    }
+                }
+                inst.clear_error();
+                0
             }
-        }
-        inst.clear_error();
-        0
+        };
+
+        // SAFETY: `with_handle` NULL-checks; the caller owns handle validity
+        // and exclusivity per its contract.
+        unsafe { with_handle(handle, body) }.unwrap_or(-1)
     })
 }
 
@@ -399,24 +442,28 @@ pub extern "C" fn tj3SetICCProfile(
     icc_size: usize,
 ) -> c_int {
     crate::unwind_guard!(-1, {
-        let inst: &mut TjInstance = match unsafe { handle_as_mut(handle) } {
-            Some(i) => i,
-            None => return -1,
+        // Defined outside the `unsafe` block below — see `tj3GetICCProfile`.
+        let body = |inst: &mut TjInstance| -> c_int {
+            {
+                // Upstream `tj3SetICCProfile` clears the stored profile whenever
+                // `iccBuf == NULL` regardless of `iccSize`. The earlier "iccBuf is
+                // NULL but iccSize > 0 → reject" path was over-strict and meant a
+                // caller passing NULL to remove a previously set profile would
+                // continue to see the stale profile embedded in subsequent
+                // compressions (codex review of d4c28b1).
+                if icc_buf.is_null() || icc_size == 0 {
+                    inst.inner.set_icc_profile(None);
+                } else {
+                    // SAFETY: non-NULL pointer with positive length, validated above.
+                    let bytes: &[u8] = unsafe { std::slice::from_raw_parts(icc_buf, icc_size) };
+                    inst.inner.set_icc_profile(Some(bytes.to_vec()));
+                }
+                inst.clear_error();
+                0
+            }
         };
-        // Upstream `tj3SetICCProfile` clears the stored profile whenever
-        // `iccBuf == NULL` regardless of `iccSize`. The earlier "iccBuf is
-        // NULL but iccSize > 0 → reject" path was over-strict and meant a
-        // caller passing NULL to remove a previously set profile would
-        // continue to see the stale profile embedded in subsequent
-        // compressions (codex review of d4c28b1).
-        if icc_buf.is_null() || icc_size == 0 {
-            inst.inner.set_icc_profile(None);
-        } else {
-            // SAFETY: non-NULL pointer with positive length, validated above.
-            let bytes: &[u8] = unsafe { std::slice::from_raw_parts(icc_buf, icc_size) };
-            inst.inner.set_icc_profile(Some(bytes.to_vec()));
-        }
-        inst.clear_error();
-        0
+
+        // SAFETY: as `tj3GetICCProfile` above.
+        unsafe { with_handle(handle, body) }.unwrap_or(-1)
     })
 }

@@ -39,10 +39,15 @@
 // left `nm -gU` output byte-identical (`_tj3Alloc`, `_tj3Destroy`, `_tj3Free`).
 //
 // The suppression therefore stays only because the conversion is unfinished:
-// ~84 of the 159 exports still take raw pointers, and `handle_as_mut` still
-// forges an unbounded lifetime across nine modules. It is a TODO, not a
+// ~84 of the 159 exports still take raw pointers. It is a TODO, not a
 // rationale. Tracked as P4-137 (#476); the two exports that could double-free
 // or `free()` an arbitrary pointer are already converted.
+//
+// The *lifetime* half of P4-137 is done: `handle_as_mut`, which let the caller
+// choose the lifetime of `&mut TjInstance` and so allowed two aliasing `&mut`
+// to one instance, is gone. All 27 call sites across nine modules now go
+// through `tj3::with_handle`, which owns the lifetime and confines the borrow
+// to a closure.
 #![allow(clippy::not_unsafe_ptr_arg_deref)]
 // Exported symbols must match the C case (`tj3Init`, `tj3Destroy`, ...),
 // so we disable the snake_case lint at the crate root.
