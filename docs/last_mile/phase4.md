@@ -4311,7 +4311,7 @@ The new test documents the gap from the inside: its NULL-handle case has **no**
 lands, that call site stops compiling until it is wrapped — an intended tripwire
 rather than an omission.
 
-## P4-138. `BitWriter` Hand-Rolls Allocation Ownership and Can Double-Free on an Unwinding `reserve` — **PARTIAL: double-free fixed and sanitizer-covered; ownership refactor outstanding**
+## P4-138. `BitWriter` Hand-Rolls Allocation Ownership and Can Double-Free on an Unwinding `reserve` — **CLOSED 2026-08-10**
 
 **GitHub:** [#477](https://github.com/developer0hye/libjpeg-turbo-rs/issues/477) — under the [#481](https://github.com/developer0hye/libjpeg-turbo-rs/issues/481) umbrella.
 
@@ -4385,7 +4385,9 @@ unsafe {
 }
 ```
 
-Two `--lib` tests pin it: `reserve_unwinding_leaves_exactly_one_owner` and
+Two `--lib` tests pin it: `growth_unwinding_leaves_exactly_one_owner` (renamed
+from `reserve_unwinding_leaves_exactly_one_owner` when the ownership refactor
+below removed the `reserve` window it was named for) and
 `capacity_overflow_panics_before_the_ownership_window`. The first requests
 `isize::MAX + 1` specifically so the *capacity check* raises a catchable panic
 from inside the window — a merely huge request goes to the allocator, which
@@ -4402,17 +4404,57 @@ The separately-noted unchecked arithmetic is also fixed:
 
 | # | Criterion | State |
 | --- | --- | --- |
-| 1 | Owns a plain `Vec<u8>` | Not done — still `*mut u8` + `pos`/`cap`, manual `Drop`, manual `unsafe impl Send` |
-| 2 | `try_reserve`, no raw round-trip | Not done — arithmetic checked, round-trip remains |
-| 3 | Raw cursor in one audited helper with an unwind guard | Effectively done — the `cap = 0` idiom *is* that guard, though an idiom rather than a type |
+| 1 | Owns a plain `Vec<u8>` | **Done** 2026-08-10 |
+| 2 | `try_reserve`, no raw round-trip | **Done** 2026-08-10 — infallible `Vec::reserve`, which the criterion permits |
+| 3 | Raw cursor in one audited helper with an unwind guard | **Moot** — with a `Vec` there is no unwind-ownership hazard left to guard |
 | 4 | Fault-injection under Miri + ASan | **Done** |
 | 5 | `pub(crate)` | **Done** |
-| 6 | Encode benchmark | N/A until 1–2 change the design |
+| 6 | Encode benchmark | **Done** 2026-08-10 — neutral |
 
-**What remains** is criteria 1–2: an ownership refactor of the encode hot path,
-whose own criterion 6 requires a benchmark proving what the safer design costs.
-That is a different risk profile from a live double free, and this item is no
-longer a soundness blocker for the [#481](https://github.com/developer0hye/libjpeg-turbo-rs/issues/481) umbrella.
+**Status (2026-08-10): CLOSED — criteria 1, 2 and 6 delivered.**
+
+`BitWriter` now holds a `Vec<u8>`. The manual `Drop`, the manual
+`unsafe impl Send` and both `Vec::from_raw_parts`/`mem::forget` round-trips are
+gone, so the double-free surface is **removed rather than merely closed**: the
+`cap = 0` idiom that guarded the window no longer has a window to guard. `Send`
+is automatic. `BitWriter::new`'s `saturating_mul(2)` became `checked_mul` —
+saturating turns an oversized request into `usize::MAX`, the worst value to hand
+an allocator (P4-139's rule, applied here because the expression sizes memory).
+
+The hot path is untouched: it still writes into the `Vec`'s spare capacity
+through a raw pointer and tracks `pos` itself, so no `Vec` bookkeeping happens
+per flush. What that costs is an invariant — `buf.len()` is a *synchronisation
+point*, not the write cursor, and must be raised to `pos` before anything that
+can reallocate.
+
+**That invariant is where the interesting failure lives, and the first test
+written for it was worthless.** `Vec::reserve(additional)` is defined relative
+to `len`, so growing with a stale `len` of 0 asks for `additional` bytes total
+instead of `pos + additional` — an under-allocation the following writes run
+past. A "did the bytes survive?" test does **not** catch it: the underlying
+`realloc` preserves the whole block whatever `len` says, and `Vec`'s amortised
+doubling usually covers the shortfall. Removing the `set_len` line left that
+test green.
+
+`growth_reserves_room_for_everything_already_written` asserts the postcondition
+directly — capacity ≥ `pos + additional`, with numbers chosen to defeat
+amortised doubling — and fails with `capacity 10000 is short of pos 1000 +
+10000` when the sync is removed. A test-only `capacity()` accessor exists
+because the postcondition is otherwise unobservable from outside; the only other
+way to check it is to write past the end, which is the bug rather than a test
+for it.
+
+**Criterion 6 — neutral, and a methodology note worth more than the number.**
+1080p 420/422/444 on aarch64-darwin: `Vec` 5.4248 / 6.7569 / 10.176 ms against
+`main`'s raw pointer at 5.4416 / 6.7829 / 10.219 ms — 0.3% favourable, i.e.
+noise. The criterion's premise ("the raw-pointer design presumably bought
+throughput") does not hold, because the raw pointer was only ever about
+*ownership*; the hot path already bypassed `Vec` and still does.
+
+The first measurement pass read +5.8% and was **contaminated** by a background
+build. A/B/A/B on the 420 case settled it: 5.4226 / 5.4438 / 5.4247 / 5.4417. A
+single A/B pair would have recorded a regression that does not exist and sent
+this item to the criterion-3 fallback design for no reason.
 
 ## P4-139. Memory-Layout Arithmetic Is Decentralised and Uses Saturating/Unchecked Multiplication — **OPEN**
 
