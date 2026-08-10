@@ -947,6 +947,28 @@ const JERR_TOO_LITTLE_DATA: c_int = 69;
 /// "Unsupported marker type 0x%02x"
 const JERR_UNKNOWN_MARKER: c_int = 70;
 
+// Warning codes used by the restart-resync path (P4-97). Values verified
+// against the installed C headers rather than counted out of `jerror.h` —
+// that file contains `#ifdef`-duplicated `JMESSAGE` entries, so a naive scan
+// is off by one. `JERR_UNKNOWN_MARKER`/`JERR_INPUT_EMPTY` above agree with the
+// same compile-time check, which is what calibrates these.
+/// "Corrupt JPEG data: found marker 0x%02x instead of RST%d"
+const JWRN_MUST_RESYNC: c_int = 124;
+/// "Corrupt JPEG data: %u extraneous bytes before marker 0x%02x"
+const JWRN_EXTRANEOUS_DATA: c_int = 119;
+/// "At marker 0x%02x, recovery action %d" — a trace, but `TRACEMS2` publishes
+/// `msg_code`/`msg_parm` regardless of `trace_level`, so it is observable.
+const JTRC_RECOVERY_ACTION: c_int = 99;
+/// "Premature end of JPEG file"
+const JWRN_JPEG_EOF: c_int = 123;
+
+// Marker codes from `jpegint.h`'s `JPEG_MARKER`, needed by the resync
+// decision table.
+/// First marker code that is a valid JPEG marker (anything below is bogus).
+const M_SOF0: c_int = 0xC0;
+const M_RST0: c_int = 0xD0;
+const M_RST7: c_int = 0xD7;
+
 /// The classic error a native codec failure corresponds to: an upstream
 /// `JERR_*` message code plus the single integer parameter its message
 /// substitutes, when it takes one.
@@ -1594,10 +1616,34 @@ pub extern "C" fn jpeg_destroy_decompress(cinfo: *mut c_void) {
 // safely be stubs. If a consumer does invoke them (e.g. to fill/skip),
 // we keep `bytes_in_buffer`/`next_input_byte` consistent.
 unsafe extern "C" fn noop_init_source(_cinfo: *mut c_void) {}
-unsafe extern "C" fn noop_fill_input_buffer(_cinfo: *mut c_void) -> CBoolean {
-    // Real libjpeg returns FALSE to signal "suspend". We report TRUE so
-    // that callers that accidentally invoke fill_input_buffer don't loop
-    // forever; the entire buffer is already present.
+/// The static fake-EOI upstream hands back at end of buffer
+/// (`jdatasrc.c::fill_mem_input_buffer`). Only the first two bytes are used.
+static FAKE_EOI: [u8; 4] = [0xFF, 0xD9, 0x00, 0x00];
+
+/// `fill_input_buffer` for the built-in memory source.
+///
+/// Mirrors `jdatasrc.c::fill_mem_input_buffer`: the whole datastream is
+/// expected to live in the supplied buffer, so a request for more is an error —
+/// warn `JWRN_JPEG_EOF` and insert a fake `FF D9`.
+///
+/// This used to return TRUE while supplying no bytes. That reads as "more data
+/// arrived" to every caller, and it made `jpeg_resync_to_restart`'s scan-forward
+/// report suspension on a source that can never resume — stock returns TRUE
+/// with an unread EOI instead (P4-97 review).
+unsafe extern "C" fn default_fill_input_buffer(cinfo: *mut c_void) -> CBoolean {
+    // SAFETY: `cinfo` has `j_common_ptr` layout; `emit_message_no_parms` holds
+    // no reference across the callback it invokes.
+    unsafe { emit_message_no_parms(cinfo, JWRN_JPEG_EOF, -1) };
+    // SAFETY: caller passes the decompress object owning this manager.
+    if let Some(c) = unsafe { cinfo_mut(cinfo) } {
+        if !c.src.is_null() {
+            // SAFETY: non-NULL and ABI-shaped; borrow ends with the statement.
+            unsafe {
+                (*c.src).next_input_byte = FAKE_EOI.as_ptr();
+                (*c.src).bytes_in_buffer = 2;
+            }
+        }
+    }
     1
 }
 unsafe extern "C" fn noop_skip_input_data(cinfo: *mut c_void, num_bytes: c_long) {
@@ -1619,9 +1665,17 @@ unsafe extern "C" fn noop_skip_input_data(cinfo: *mut c_void, num_bytes: c_long)
         }
     }
 }
-unsafe extern "C" fn noop_resync_to_restart(_cinfo: *mut c_void, _desired: c_int) -> CBoolean {
-    // Always resync successfully (matches upstream's default).
-    1
+/// The source manager's default `resync_to_restart`.
+///
+/// P4-97 requires this and the exported [`jpeg_resync_to_restart`] to share
+/// **one** C-exact implementation; both forward to `resync_to_restart_impl`, so
+/// the callback installed here cannot drift from the symbol a C consumer calls
+/// directly. (It used to return a constant `TRUE`, i.e. "resync always
+/// succeeded", without inspecting `unread_marker` at all.)
+unsafe extern "C" fn default_resync_to_restart(cinfo: *mut c_void, desired: c_int) -> CBoolean {
+    // SAFETY: invoked by our own decode path with the `cinfo` that owns this
+    // source manager, so it satisfies `resync_to_restart_impl`'s contract.
+    unsafe { resync_to_restart_impl(cinfo, desired) }
 }
 unsafe extern "C" fn noop_term_source(_cinfo: *mut c_void) {}
 
@@ -1755,9 +1809,9 @@ fn install_source_mgr(
             next_input_byte: ptr,
             bytes_in_buffer: len,
             init_source: Some(noop_init_source),
-            fill_input_buffer: Some(noop_fill_input_buffer),
+            fill_input_buffer: Some(default_fill_input_buffer),
             skip_input_data: Some(noop_skip_input_data),
-            resync_to_restart: Some(noop_resync_to_restart),
+            resync_to_restart: Some(default_resync_to_restart),
             term_source: Some(noop_term_source),
         }));
     }
@@ -1807,8 +1861,13 @@ unsafe fn drain_caller_source_mgr(
         return None;
     }
     let cinfo_ptr: *mut c_void = c as *mut JpegDecompressPublic as *mut c_void;
-    // SAFETY: caller asserts `c.src` points at a live JpegSourceMgr.
-    let src: &mut JpegSourceMgr = unsafe { &mut *src_ptr };
+
+    // No long-lived `&mut JpegSourceMgr` is taken here. `init_source` and
+    // `fill_input_buffer` both receive `cinfo` and are expected to mutate the
+    // manager through it, so holding an exclusive Rust reference across either
+    // would alias it — UB, and reachable now that the built-in
+    // `default_fill_input_buffer` writes the fake-EOI buffer back (P4-97
+    // review). Every access below is scoped to a single statement.
 
     // Step 1: init_source. Only invoke once per bridge cycle —
     // otherwise a non-blocking caller's init_source might reset its
@@ -1816,7 +1875,10 @@ unsafe fn drain_caller_source_mgr(
     // by `bridge_partial.is_empty()` (no prior partial drain in flight).
     let is_first_call: bool = priv_state.bridge_partial.is_empty();
     if is_first_call {
-        if let Some(init) = src.init_source {
+        // SAFETY: `src_ptr` is non-NULL and ABI-shaped; the read of the fn
+        // pointer ends before the call, so nothing is borrowed across it.
+        let init = unsafe { (*src_ptr).init_source };
+        if let Some(init) = init {
             // SAFETY: caller-provided callback honoring the libjpeg
             // `void (*init_source)(j_decompress_ptr)` prototype.
             unsafe {
@@ -1834,15 +1896,20 @@ unsafe fn drain_caller_source_mgr(
 
     loop {
         // Step 2a: drain whatever is currently in the public buffer.
-        if src.bytes_in_buffer > 0 && !src.next_input_byte.is_null() {
+        // SAFETY: `src_ptr` is non-NULL and ABI-shaped; each access is scoped.
+        let (next, avail): (*const u8, usize) =
+            unsafe { ((*src_ptr).next_input_byte, (*src_ptr).bytes_in_buffer) };
+        if avail > 0 && !next.is_null() {
             // SAFETY: caller's ABI promises `next_input_byte` is valid
             // for `bytes_in_buffer` reads.
-            let chunk: &[u8] =
-                unsafe { std::slice::from_raw_parts(src.next_input_byte, src.bytes_in_buffer) };
+            let chunk: &[u8] = unsafe { std::slice::from_raw_parts(next, avail) };
             accumulator.extend_from_slice(chunk);
-            // SAFETY: advancing within the asserted-valid window.
-            src.next_input_byte = unsafe { src.next_input_byte.add(src.bytes_in_buffer) };
-            src.bytes_in_buffer = 0;
+            // SAFETY: advancing within the asserted-valid window; the borrow
+            // ends with this statement.
+            unsafe {
+                (*src_ptr).next_input_byte = next.add(avail);
+                (*src_ptr).bytes_in_buffer = 0;
+            }
         }
 
         // Step 2b: stop if we've seen the End-Of-Image marker (FF D9).
@@ -1861,12 +1928,15 @@ unsafe fn drain_caller_source_mgr(
         }
 
         // Step 3: fetch more bytes from the caller.
-        let fill: unsafe extern "C" fn(*mut c_void) -> CBoolean = match src.fill_input_buffer {
-            Some(f) => f,
-            // No callback and no EOI yet → end of stream from a
-            // pre-loaded buffer (typical static-source case).
-            None => return Some(accumulator),
-        };
+        // SAFETY: as above; the fn pointer is copied out before the call so
+        // nothing is borrowed across it.
+        let fill: unsafe extern "C" fn(*mut c_void) -> CBoolean =
+            match unsafe { (*src_ptr).fill_input_buffer } {
+                Some(f) => f,
+                // No callback and no EOI yet → end of stream from a
+                // pre-loaded buffer (typical static-source case).
+                None => return Some(accumulator),
+            };
         // SAFETY: caller-supplied callback. A FALSE return means
         // "suspended; come back later". Park the partial accumulator
         // in `priv_state.bridge_partial` so the next retry resumes
@@ -1878,7 +1948,9 @@ unsafe fn drain_caller_source_mgr(
             priv_state.bridge_partial = accumulator;
             return None;
         }
-        if src.bytes_in_buffer == 0 {
+        // SAFETY: re-read after the callback, which is expected to have
+        // rewritten these fields.
+        if unsafe { (*src_ptr).bytes_in_buffer } == 0 {
             // Successful fill but no bytes — treat as end of stream.
             return Some(accumulator);
         }
@@ -1911,40 +1983,55 @@ unsafe fn pull_more_from_source_mgr(
     if src_ptr.is_null() {
         return PullResult::Ended;
     }
-    // SAFETY: caller asserts `c.src` points at a live JpegSourceMgr.
-    let src: &mut JpegSourceMgr = unsafe { &mut *src_ptr };
     let cinfo_ptr: *mut c_void = c as *mut JpegDecompressPublic as *mut c_void;
 
+    // As in `drain_caller_source_mgr`: no exclusive Rust reference to the
+    // manager may span `fill_input_buffer`, which is expected to rewrite it
+    // through `cinfo` (P4-97 review). Accesses are scoped to one statement.
+
     // Drain whatever is already buffered first.
-    if src.bytes_in_buffer > 0 && !src.next_input_byte.is_null() {
+    // SAFETY: `src_ptr` is non-NULL and ABI-shaped.
+    let (next, avail): (*const u8, usize) =
+        unsafe { ((*src_ptr).next_input_byte, (*src_ptr).bytes_in_buffer) };
+    if avail > 0 && !next.is_null() {
         // SAFETY: the ABI promises `next_input_byte` is valid for
         // `bytes_in_buffer` reads.
-        let chunk: &[u8] =
-            unsafe { std::slice::from_raw_parts(src.next_input_byte, src.bytes_in_buffer) };
+        let chunk: &[u8] = unsafe { std::slice::from_raw_parts(next, avail) };
         accumulator.extend_from_slice(chunk);
-        src.next_input_byte = unsafe { src.next_input_byte.add(src.bytes_in_buffer) };
-        src.bytes_in_buffer = 0;
+        // SAFETY: advancing within that window; borrow ends here.
+        unsafe {
+            (*src_ptr).next_input_byte = next.add(avail);
+            (*src_ptr).bytes_in_buffer = 0;
+        }
         return PullResult::Progressed;
     }
 
     // Buffer empty: ask the caller for more.
-    let fill: unsafe extern "C" fn(*mut c_void) -> CBoolean = match src.fill_input_buffer {
-        Some(f) => f,
-        None => return PullResult::Ended,
-    };
+    // SAFETY: the fn pointer is copied out before the call.
+    let fill: unsafe extern "C" fn(*mut c_void) -> CBoolean =
+        match unsafe { (*src_ptr).fill_input_buffer } {
+            Some(f) => f,
+            None => return PullResult::Ended,
+        };
     let ok: CBoolean = unsafe { fill(cinfo_ptr) };
     if ok == 0 {
         return PullResult::Suspended;
     }
-    if src.bytes_in_buffer == 0 || src.next_input_byte.is_null() {
+    // SAFETY: re-read after the callback, which is expected to have rewritten
+    // these fields.
+    let (next, avail): (*const u8, usize) =
+        unsafe { ((*src_ptr).next_input_byte, (*src_ptr).bytes_in_buffer) };
+    if avail == 0 || next.is_null() {
         return PullResult::Ended;
     }
     // SAFETY: as above.
-    let chunk: &[u8] =
-        unsafe { std::slice::from_raw_parts(src.next_input_byte, src.bytes_in_buffer) };
+    let chunk: &[u8] = unsafe { std::slice::from_raw_parts(next, avail) };
     accumulator.extend_from_slice(chunk);
-    src.next_input_byte = unsafe { src.next_input_byte.add(src.bytes_in_buffer) };
-    src.bytes_in_buffer = 0;
+    // SAFETY: advancing within that window; borrow ends here.
+    unsafe {
+        (*src_ptr).next_input_byte = next.add(avail);
+        (*src_ptr).bytes_in_buffer = 0;
+    }
     PullResult::Progressed
 }
 
@@ -9373,14 +9460,386 @@ fn run_coefficient_writer_and_flush(
     }
 }
 
+/// Publish two integer parameters and emit a message through `cinfo->err` —
+/// upstream's `WARNMS2` (`level = -1`) and `TRACEMS2` (`level = 4`) macros
+/// (`jerror.h`). Both always set `msg_code`/`msg_parm` and always call
+/// `emit_message`; the manager decides whether anything is printed.
+///
+/// `msg_parm` is a union whose integer branch is `int i[8]`; writing the two
+/// parameters as native-endian `c_int` at offsets 0 and 4 is what a C caller's
+/// `format_message` reads back.
+///
+/// Holds no reference across the callback: `emit_message` receives `cinfo`, and
+/// a conforming manager may read or write that same object, so keeping a live
+/// `&mut` over the call would alias it.
+///
+/// # Safety
+/// `cinfo` must be NULL or point to a struct whose first pointer-sized field is
+/// the `err` slot (`j_common_ptr` layout).
+unsafe fn emit_message2(cinfo: *mut c_void, msg_code: c_int, p0: c_int, p1: c_int, level: c_int) {
+    if cinfo.is_null() {
+        return;
+    }
+    // SAFETY: caller guarantees `j_common_ptr` layout.
+    let err_ptr: *mut JpegErrorMgr = unsafe { (cinfo as *const *mut JpegErrorMgr).read() };
+    if err_ptr.is_null() {
+        return;
+    }
+    // Scoped so the borrow ends before `emit` is called.
+    let emit: Option<unsafe extern "C" fn(*mut c_void, c_int)> = {
+        // SAFETY: `err_ptr` is non-NULL and ABI-shaped.
+        let err: &mut JpegErrorMgr = unsafe { &mut *err_ptr };
+        err.msg_code = msg_code;
+        err.msg_parm[0..4].copy_from_slice(&p0.to_ne_bytes());
+        err.msg_parm[4..8].copy_from_slice(&p1.to_ne_bytes());
+        err.emit_message
+    };
+    if let Some(emit) = emit {
+        // SAFETY: caller-provided callback with the libjpeg prototype; no Rust
+        // reference into `cinfo` or `err` is live here.
+        unsafe { emit(cinfo, level) };
+    }
+}
+
+/// `WARNMS` / `TRACEMS` — a message with no integer parameters.
+///
+/// Upstream's single-argument macros set `msg_code` and call `emit_message`
+/// without touching `msg_parm`, so this leaves those bytes alone too rather
+/// than zeroing them.
+///
+/// # Safety
+/// As [`emit_message2`].
+unsafe fn emit_message_no_parms(cinfo: *mut c_void, msg_code: c_int, level: c_int) {
+    if cinfo.is_null() {
+        return;
+    }
+    // SAFETY: caller guarantees `j_common_ptr` layout.
+    let err_ptr: *mut JpegErrorMgr = unsafe { (cinfo as *const *mut JpegErrorMgr).read() };
+    if err_ptr.is_null() {
+        return;
+    }
+    let emit: Option<unsafe extern "C" fn(*mut c_void, c_int)> = {
+        // SAFETY: non-NULL and ABI-shaped; the borrow ends with this block.
+        let err: &mut JpegErrorMgr = unsafe { &mut *err_ptr };
+        err.msg_code = msg_code;
+        err.emit_message
+    };
+    if let Some(emit) = emit {
+        // SAFETY: caller-provided callback; no Rust reference is live here.
+        unsafe { emit(cinfo, level) };
+    }
+}
+
+/// Local copy of the source cursor — upstream's `INPUT_VARS`.
+///
+/// libjpeg's contract (`jdmarker.c:118-121`): *"cinfo->src->next_input_byte and
+/// ->bytes_in_buffer reflect the current restart point; we update them only
+/// when we have reached a suitable place to restart if a suspension occurs."*
+///
+/// That is load-bearing, not stylistic. Committing every byte eagerly would
+/// consume a speculative prefix that a suspension is supposed to leave
+/// re-readable — e.g. a chunk ending on `0xFF`, or between `0xFF` and a stuffed
+/// `0x00`. On retry the source would resume past the marker code and treat it
+/// as discarded data.
+///
+/// Only raw pointers are held, so nothing aliases `cinfo` or the manager across
+/// `fill_input_buffer` — which is specifically required to mutate the manager.
+struct ResyncInput {
+    src: *mut JpegSourceMgr,
+    next: *const u8,
+    remaining: usize,
+}
+
+impl ResyncInput {
+    /// `INPUT_VARS`.
+    ///
+    /// # Safety
+    /// `src` must be non-NULL and follow the `jpeg_source_mgr` ABI.
+    unsafe fn load(src: *mut JpegSourceMgr) -> Self {
+        // SAFETY: caller asserts `src` is live and ABI-shaped; the borrow ends
+        // with this statement.
+        let (next, remaining) = unsafe { ((*src).next_input_byte, (*src).bytes_in_buffer) };
+        Self {
+            src,
+            next,
+            remaining,
+        }
+    }
+
+    /// `INPUT_SYNC` — commit the local cursor. Call only at a restart boundary.
+    ///
+    /// # Safety
+    /// As [`ResyncInput::load`].
+    unsafe fn sync(&self) {
+        // SAFETY: as above; the borrow ends with this statement.
+        unsafe {
+            (*self.src).next_input_byte = self.next;
+            (*self.src).bytes_in_buffer = self.remaining;
+        }
+    }
+
+    /// `INPUT_BYTE`. `None` means suspension, which callers turn into `FALSE`.
+    ///
+    /// Deliberately does **not** sync before `fill_input_buffer`, matching
+    /// upstream's note on `MAKE_BYTE_AVAIL`.
+    ///
+    /// # Safety
+    /// As [`ResyncInput::load`], and `cinfo` must be the object owning `src`.
+    unsafe fn byte(&mut self, cinfo: *mut c_void) -> Option<c_int> {
+        if self.remaining == 0 {
+            // Read the callback out first so no reference is live across it.
+            // SAFETY: `src` is live and ABI-shaped.
+            let fill = unsafe { (*self.src).fill_input_buffer }?;
+            // SAFETY: caller-provided callback with the libjpeg prototype.
+            if unsafe { fill(cinfo) } == 0 {
+                return None; // FALSE = suspend
+            }
+            // `INPUT_RELOAD`.
+            // SAFETY: as above.
+            let (next, remaining) =
+                unsafe { ((*self.src).next_input_byte, (*self.src).bytes_in_buffer) };
+            self.next = next;
+            self.remaining = remaining;
+            if self.remaining == 0 || self.next.is_null() {
+                // A manager that returns TRUE without supplying bytes would
+                // spin forever; treat it as suspension instead of looping.
+                return None;
+            }
+        }
+        if self.next.is_null() {
+            return None;
+        }
+        // SAFETY: `remaining > 0` and `next` is non-NULL, so this read is
+        // inside the window the manager's ABI promises.
+        let byte: u8 = unsafe { *self.next };
+        // SAFETY: advancing by one within that same window.
+        self.next = unsafe { self.next.add(1) };
+        self.remaining -= 1;
+        Some(byte as c_int)
+    }
+}
+
+/// Scan forward to the next marker — upstream's `next_marker` (`jdmarker.c`).
+///
+/// Sets `cinfo->unread_marker` and returns `true`; returns `false` for
+/// suspension. Skips non-`FF` bytes, swallows `FF` padding runs, and discards
+/// stuffed-zero (`FF 00`) sequences, counting discarded bytes so the
+/// `JWRN_EXTRANEOUS_DATA` warning reports the same figure C does.
+///
+/// Sync points match upstream exactly: after each discarded non-`FF` byte (so a
+/// suspending manager can drop it from its buffer), after each discarded
+/// `FF 00` pair, and once on success. A suspension anywhere else leaves the
+/// manager's cursor at the last committed restart point, so the retry re-reads
+/// the speculative prefix rather than losing it.
+///
+/// `discarded` is threaded in by the caller rather than held in a marker struct:
+/// upstream keeps it in the private `cinfo->marker`, which this shim does not
+/// mirror. Within a single non-suspending call the two agree; across a
+/// suspension C carries the running count forward and this does not, which
+/// affects only the number printed in the warning.
+///
+/// # Safety
+/// `cinfo` must be a live decompress object whose `src` is non-NULL and follows
+/// the `jpeg_source_mgr` ABI.
+unsafe fn resync_next_marker(
+    cinfo: *mut c_void,
+    src: *mut JpegSourceMgr,
+    discarded: &mut c_int,
+) -> bool {
+    // SAFETY: caller asserts `src` is live and ABI-shaped.
+    let mut input: ResyncInput = unsafe { ResyncInput::load(src) };
+    loop {
+        // SAFETY: forwarded to `ResyncInput::byte`'s contract.
+        let mut byte: c_int = match unsafe { input.byte(cinfo) } {
+            Some(b) => b,
+            None => return false,
+        };
+        // Skip non-FF bytes. Upstream syncs after each one so a suspending
+        // source can discard it; we do the same.
+        while byte != 0xFF {
+            *discarded = discarded.saturating_add(1);
+            // SAFETY: as above.
+            unsafe { input.sync() };
+            // SAFETY: as above.
+            byte = match unsafe { input.byte(cinfo) } {
+                Some(b) => b,
+                None => return false,
+            };
+        }
+        // Swallow duplicate FF padding. Extra FFs are legal pad bytes and are
+        // not counted as discarded; no sync here, so a suspension mid-run
+        // re-reads from the last committed point.
+        loop {
+            // SAFETY: as above.
+            byte = match unsafe { input.byte(cinfo) } {
+                Some(b) => b,
+                None => return false,
+            };
+            if byte != 0xFF {
+                break;
+            }
+        }
+        if byte != 0 {
+            // A real marker.
+            if *discarded != 0 {
+                // SAFETY: `cinfo` has `j_common_ptr` layout.
+                unsafe { emit_message2(cinfo, JWRN_EXTRANEOUS_DATA, *discarded, byte, -1) };
+                *discarded = 0;
+            }
+            // SAFETY: `cinfo` is a live decompress object; the borrow ends here
+            // and no callback runs while it is held.
+            unsafe { (*(cinfo as *mut JpegDecompressPublic)).unread_marker = byte };
+            // SAFETY: success is a restart boundary — commit the cursor.
+            unsafe { input.sync() };
+            return true;
+        }
+        // FF 00 is a stuffed zero inside entropy data: discard it and retry.
+        *discarded = discarded.saturating_add(2);
+        // SAFETY: upstream syncs here too.
+        unsafe { input.sync() };
+    }
+}
+
+/// The C default `resync_to_restart` algorithm (`jdmarker.c`), shared by the
+/// exported [`jpeg_resync_to_restart`] and by the source manager's installed
+/// default callback so the two cannot drift (P4-97).
+///
+/// Upstream's decision table, reproduced exactly:
+///
+/// * marker `< M_SOF0` — bogus data, scan forward (action 2)
+/// * valid non-restart marker — leave unread so the entropy decoder processes
+///   an empty segment (action 3)
+/// * `RST(desired+1)` / `RST(desired+2)` — one of the next two expected
+///   restarts, also action 3
+/// * `RST(desired-1)` / `RST(desired-2)` — a prior restart, scan forward
+/// * anything else (the desired restart, or one more than two away) — discard
+///   the marker and resume (action 1)
+///
+/// Returns `FALSE` only for suspension.
+///
+/// # Safety
+/// `cinfo` must be NULL or a live `JpegDecompressPublic` whose source manager
+/// follows the libjpeg ABI.
+unsafe fn resync_to_restart_impl(cinfo: *mut c_void, desired: c_int) -> CBoolean {
+    // Only raw pointers are held across callbacks: `emit_message` and
+    // `fill_input_buffer` both receive `cinfo` and may legitimately touch it, so
+    // a live `&mut JpegDecompressPublic` spanning either would alias it. Each
+    // field access below takes a fresh short-lived reference instead.
+    if unsafe { cinfo_mut(cinfo) }.is_none() {
+        // Upstream would have dereferenced; there is nothing meaningful to do
+        // with a NULL cinfo, and claiming success would be the old lie.
+        return 0;
+    }
+    let cinfo_typed: *mut JpegDecompressPublic = cinfo as *mut JpegDecompressPublic;
+
+    // SAFETY: non-NULL and ABI-shaped; the borrow ends with this statement.
+    let mut marker: c_int = unsafe { (*cinfo_typed).unread_marker };
+    let mut discarded: c_int = 0;
+
+    // `cinfo->src` is deliberately *not* cached here. Upstream calls
+    // `next_marker(cinfo)` after the warning and trace, and that re-reads
+    // `cinfo->src` through `INPUT_VARS` each time (`jdmarker.c:1222-1249`). A
+    // custom `emit_message` is allowed to swap the source manager while
+    // handling `JWRN_MUST_RESYNC` or `JTRC_RECOVERY_ACTION`; a pre-callback
+    // snapshot would keep scanning the old one, and become a use-after-free if
+    // the caller released it.
+
+    // Always put up a warning, exactly as upstream does before deciding.
+    // SAFETY: `cinfo` is non-NULL here and has `j_common_ptr` layout.
+    unsafe { emit_message2(cinfo, JWRN_MUST_RESYNC, marker, desired, -1) };
+
+    loop {
+        // Upstream writes the two action-3 cases as separate arms; they are
+        // merged here because clippy rejects identical blocks. The conditions
+        // stay disjoint — a non-restart marker is outside `M_RST0..=M_RST7`,
+        // while `RST(desired+1)`/`RST(desired+2)` are inside it — so the
+        // decision table is unchanged.
+        let action: u8 = if marker < M_SOF0 {
+            2 // invalid marker: certainly bogus data
+        } else if !(M_RST0..=M_RST7).contains(&marker)
+            || marker == M_RST0 + ((desired + 1) & 7)
+            || marker == M_RST0 + ((desired + 2) & 7)
+        {
+            // Either a valid non-restart marker (action 3 keeps us from
+            // overrunning the end of a scan), or one of the next two expected
+            // restarts (we missed `desired`, probably corrupted).
+            3
+        } else if marker == M_RST0 + ((desired - 1) & 7) || marker == M_RST0 + ((desired - 2) & 7) {
+            2 // a prior restart, so advance
+        } else {
+            1 // desired restart, or too far away to trust
+        };
+
+        // Upstream traces the chosen action on every iteration, *before*
+        // applying it (`jdmarker.c:1241`). `TRACEMS2` sets `err->msg_code` and
+        // the two parameters unconditionally — the manager decides whether to
+        // print — so skipping it would leave `msg_code` at `JWRN_MUST_RESYNC`
+        // where a C consumer expects `JTRC_RECOVERY_ACTION`.
+        // SAFETY: `cinfo` is non-NULL and has `j_common_ptr` layout.
+        unsafe { emit_message2(cinfo, JTRC_RECOVERY_ACTION, marker, c_int::from(action), 4) };
+
+        match action {
+            1 => {
+                // Discard the marker and let the entropy decoder resume.
+                // SAFETY: live and ABI-shaped; borrow ends with the statement.
+                unsafe { (*cinfo_typed).unread_marker = 0 };
+                return 1;
+            }
+            2 => {
+                // Re-read the source manager *after* the callbacks above, as
+                // upstream's `next_marker(cinfo)` does.
+                // SAFETY: non-NULL and ABI-shaped; borrow ends with this stmt.
+                let src: *mut JpegSourceMgr = unsafe { (*cinfo_typed).src };
+                if src.is_null() {
+                    // Nothing to scan forward through. Upstream would have
+                    // dereferenced `datasrc`; reporting suspension is the
+                    // honest answer, and never claiming success is the point of
+                    // this item.
+                    return 0;
+                }
+                // SAFETY: `cinfo` is live and `src` is its ABI-shaped manager.
+                if !unsafe { resync_next_marker(cinfo, src, &mut discarded) } {
+                    return 0; // suspension
+                }
+                // SAFETY: as above.
+                marker = unsafe { (*cinfo_typed).unread_marker };
+            }
+            _ => {
+                // Return without advancing: the entropy decoder is forced to
+                // process an empty segment and will re-see this marker.
+                return 1;
+            }
+        }
+    }
+}
+
 /// `jpeg_resync_to_restart(cinfo, desired) -> boolean`.
 ///
-/// Default libjpeg behavior: always return TRUE so corrupted streams
-/// attempt to resume at the next restart marker. Matches the function
-/// libjpeg installs as the default `resync_to_restart` callback.
+/// The default `resync_to_restart` method a data source manager uses when it
+/// has no better recovery strategy. `read_restart_marker` calls it when it
+/// finds a marker other than the restart marker it expected;
+/// `cinfo->unread_marker` is the marker actually found and `desired` is the
+/// restart number (0..7) that was wanted.
+///
+/// Returns `FALSE` only if suspension is required.
+///
+/// This is upstream's algorithm from `jdmarker.c`, not a constant `TRUE`. It
+/// previously returned `TRUE` unconditionally while claiming to "match the
+/// function libjpeg installs as the default" — a consumer relying on it to
+/// recover a corrupt stream got a silent lie instead of recovery (P4-97).
+///
+/// # Safety
+///
+/// `cinfo` must be NULL, or a live `j_decompress_ptr` whose `src` follows the
+/// libjpeg `jpeg_source_mgr` ABI. This reads and writes `cinfo->unread_marker`,
+/// pulls bytes through `src->fill_input_buffer`, and emits warnings through
+/// `cinfo->err`, so all three must be valid for the duration of the call.
 #[no_mangle]
-pub extern "C" fn jpeg_resync_to_restart(_cinfo: *mut c_void, _desired: c_int) -> CBoolean {
-    crate::unwind_guard!(0, { 1 })
+pub unsafe extern "C" fn jpeg_resync_to_restart(cinfo: *mut c_void, desired: c_int) -> CBoolean {
+    crate::unwind_guard!(0, {
+        // SAFETY: the caller's obligation, restated above.
+        unsafe { resync_to_restart_impl(cinfo, desired) }
+    })
 }
 
 /// `jcopy_block_row(input_row, output_row, num_blocks)`.
