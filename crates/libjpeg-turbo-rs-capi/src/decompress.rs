@@ -25,7 +25,7 @@ use std::ffi::{c_int, c_void};
 use libjpeg_turbo_rs::PixelFormat;
 
 use crate::convert::pixel_format_from_tj;
-use crate::tj3::{handle_as_mut, TJERR_FATAL};
+use crate::tj3::{with_handle, TJERR_FATAL};
 
 /// `tj3Decompress8(handle, jpegBuf, jpegSize, dstBuf, pitch, pixelFormat)
 ///   -> int`.
@@ -39,131 +39,136 @@ pub extern "C" fn tj3Decompress8(
     pixel_format: c_int,
 ) -> c_int {
     crate::unwind_guard!(-1, {
-        let inst = match unsafe { handle_as_mut(handle) } {
-            Some(i) => i,
-            None => return -1,
-        };
-
-        if jpeg_buf.is_null() {
-            inst.set_error("tj3Decompress8: jpegBuf is NULL", TJERR_FATAL);
-            return -1;
-        }
-        if dst_buf.is_null() {
-            inst.set_error("tj3Decompress8: dstBuf is NULL", TJERR_FATAL);
-            return -1;
-        }
-        if jpeg_size < 2 {
-            inst.set_error(
-                format!("tj3Decompress8: jpegSize {jpeg_size} too small"),
-                TJERR_FATAL,
-            );
-            return -1;
-        }
-        if pitch < 0 {
-            inst.set_error(
-                format!("tj3Decompress8: pitch must be non-negative (got {pitch})"),
-                TJERR_FATAL,
-            );
-            return -1;
-        }
-
-        let pf: PixelFormat = match pixel_format_from_tj(pixel_format) {
-            Some(p) => p,
-            None => {
+        // Defined outside the `unsafe` block below so the body's own `unsafe`
+        // blocks stay meaningful rather than nesting inside a blanket one.
+        let body = |inst: &mut crate::tj3::TjInstance| -> c_int {
+            if jpeg_buf.is_null() {
+                inst.set_error("tj3Decompress8: jpegBuf is NULL", TJERR_FATAL);
+                return -1;
+            }
+            if dst_buf.is_null() {
+                inst.set_error("tj3Decompress8: dstBuf is NULL", TJERR_FATAL);
+                return -1;
+            }
+            if jpeg_size < 2 {
                 inst.set_error(
-                    format!("tj3Decompress8: unsupported TJPF {pixel_format}"),
+                    format!("tj3Decompress8: jpegSize {jpeg_size} too small"),
                     TJERR_FATAL,
                 );
                 return -1;
             }
-        };
+            if pitch < 0 {
+                inst.set_error(
+                    format!("tj3Decompress8: pitch must be non-negative (got {pitch})"),
+                    TJERR_FATAL,
+                );
+                return -1;
+            }
 
-        // SAFETY: caller asserts `jpeg_buf` is valid for `jpeg_size` bytes.
-        let jpeg: &[u8] = unsafe { std::slice::from_raw_parts(jpeg_buf, jpeg_size) };
+            let pf: PixelFormat = match pixel_format_from_tj(pixel_format) {
+                Some(p) => p,
+                None => {
+                    inst.set_error(
+                        format!("tj3Decompress8: unsupported TJPF {pixel_format}"),
+                        TJERR_FATAL,
+                    );
+                    return -1;
+                }
+            };
 
-        // The Rust-side `decompress` returns an `Image` with a dense row-
-        // major data buffer in the caller-requested pixel format. It also
-        // updates the handle's `Width`/`Height`/etc. as `tj3Decompress*` must.
-        //
-        // We mirror the C contract by overriding the handle's ColorSpace so
-        // the Rust decoder yields the requested `PixelFormat`.
-        let requested_cs: i32 = match pf {
-            PixelFormat::Grayscale => 2, // TJCS_GRAY
-            PixelFormat::Cmyk => 3,
-            _ => 0, // TJCS_RGB for all RGB/BGR/... variants
-        };
-        // Preserve the caller's existing ColorSpace setting to restore later.
-        let saved_cs: i32 = inst.inner.get(libjpeg_turbo_rs::tj3::TjParam::ColorSpace);
-        let _ = inst
-            .inner
-            .set(libjpeg_turbo_rs::tj3::TjParam::ColorSpace, requested_cs);
+            // SAFETY: caller asserts `jpeg_buf` is valid for `jpeg_size` bytes.
+            let jpeg: &[u8] = unsafe { std::slice::from_raw_parts(jpeg_buf, jpeg_size) };
 
-        let img = match inst.inner.decompress(jpeg) {
-            Ok(i) => i,
-            Err(e) => {
-                // Restore color space before returning.
-                let _ = inst
-                    .inner
-                    .set(libjpeg_turbo_rs::tj3::TjParam::ColorSpace, saved_cs);
+            // The Rust-side `decompress` returns an `Image` with a dense row-
+            // major data buffer in the caller-requested pixel format. It also
+            // updates the handle's `Width`/`Height`/etc. as `tj3Decompress*` must.
+            //
+            // We mirror the C contract by overriding the handle's ColorSpace so
+            // the Rust decoder yields the requested `PixelFormat`.
+            let requested_cs: i32 = match pf {
+                PixelFormat::Grayscale => 2, // TJCS_GRAY
+                PixelFormat::Cmyk => 3,
+                _ => 0, // TJCS_RGB for all RGB/BGR/... variants
+            };
+            // Preserve the caller's existing ColorSpace setting to restore later.
+            let saved_cs: i32 = inst.inner.get(libjpeg_turbo_rs::tj3::TjParam::ColorSpace);
+            let _ = inst
+                .inner
+                .set(libjpeg_turbo_rs::tj3::TjParam::ColorSpace, requested_cs);
+
+            let img = match inst.inner.decompress(jpeg) {
+                Ok(i) => i,
+                Err(e) => {
+                    // Restore color space before returning.
+                    let _ = inst
+                        .inner
+                        .set(libjpeg_turbo_rs::tj3::TjParam::ColorSpace, saved_cs);
+                    inst.set_error(format!("tj3Decompress8: {e}"), TJERR_FATAL);
+                    return -1;
+                }
+            };
+            let _ = inst
+                .inner
+                .set(libjpeg_turbo_rs::tj3::TjParam::ColorSpace, saved_cs);
+
+            // Reconcile the decoder's output pixel format with the caller's
+            // request. The Rust `decompress()` selects based on ColorSpace, but
+            // only returns a limited subset of formats. We repack into the
+            // caller's format when the two don't already match.
+            let out_format: PixelFormat = img.pixel_format;
+            let dst_bpp: usize = pf.bytes_per_pixel();
+            let w: usize = img.width;
+            let h: usize = img.height;
+
+            let effective_pitch: usize = if pitch == 0 {
+                w * dst_bpp
+            } else {
+                pitch as usize
+            };
+            if effective_pitch < w * dst_bpp {
+                inst.set_error(
+                    format!(
+                        "tj3Decompress8: pitch {effective_pitch} smaller than width*bpp ({})",
+                        w * dst_bpp
+                    ),
+                    TJERR_FATAL,
+                );
+                return -1;
+            }
+
+            // Pixel format adaptation. We implement the format pairs common in
+            // real-world C clients (Pillow, ImageMagick): request any RGB/BGR
+            // variant and receive RGB/Gray from the decoder. The repack loop
+            // rearranges channels row-by-row directly into `dst_buf`.
+            //
+            // SAFETY: `dst_buf` is guaranteed by the caller to be at least
+            // `effective_pitch * h` bytes; we never write beyond that.
+            // `saturating_mul` yielded usize::MAX on overflow -- precisely the
+            // wrong value here, since it becomes the length of a raw slice and
+            // claims the entire address space (P4-139).
+            let dst_total: usize = match effective_pitch.checked_mul(h) {
+                Some(v) => v,
+                None => {
+                    inst.set_error("tj3Decompress8: pitch * height overflows", TJERR_FATAL);
+                    return -1;
+                }
+            };
+            let dst: &mut [u8] = unsafe { std::slice::from_raw_parts_mut(dst_buf, dst_total) };
+
+            if let Err(e) =
+                repack_into_pitched(&img.data, out_format, w, h, pf, dst, effective_pitch)
+            {
                 inst.set_error(format!("tj3Decompress8: {e}"), TJERR_FATAL);
                 return -1;
             }
+
+            inst.clear_error();
+            0
         };
-        let _ = inst
-            .inner
-            .set(libjpeg_turbo_rs::tj3::TjParam::ColorSpace, saved_cs);
 
-        // Reconcile the decoder's output pixel format with the caller's
-        // request. The Rust `decompress()` selects based on ColorSpace, but
-        // only returns a limited subset of formats. We repack into the
-        // caller's format when the two don't already match.
-        let out_format: PixelFormat = img.pixel_format;
-        let dst_bpp: usize = pf.bytes_per_pixel();
-        let w: usize = img.width;
-        let h: usize = img.height;
-
-        let effective_pitch: usize = if pitch == 0 {
-            w * dst_bpp
-        } else {
-            pitch as usize
-        };
-        if effective_pitch < w * dst_bpp {
-            inst.set_error(
-                format!(
-                    "tj3Decompress8: pitch {effective_pitch} smaller than width*bpp ({})",
-                    w * dst_bpp
-                ),
-                TJERR_FATAL,
-            );
-            return -1;
-        }
-
-        // Pixel format adaptation. We implement the format pairs common in
-        // real-world C clients (Pillow, ImageMagick): request any RGB/BGR
-        // variant and receive RGB/Gray from the decoder. The repack loop
-        // rearranges channels row-by-row directly into `dst_buf`.
-        //
-        // SAFETY: `dst_buf` is guaranteed by the caller to be at least
-        // `effective_pitch * h` bytes; we never write beyond that.
-        // `saturating_mul` yielded usize::MAX on overflow -- precisely the
-        // wrong value here, since it becomes the length of a raw slice and
-        // claims the entire address space (P4-139).
-        let dst_total: usize = match effective_pitch.checked_mul(h) {
-            Some(v) => v,
-            None => {
-                inst.set_error("tj3Decompress8: pitch * height overflows", TJERR_FATAL);
-                return -1;
-            }
-        };
-        let dst: &mut [u8] = unsafe { std::slice::from_raw_parts_mut(dst_buf, dst_total) };
-
-        if let Err(e) = repack_into_pitched(&img.data, out_format, w, h, pf, dst, effective_pitch) {
-            inst.set_error(format!("tj3Decompress8: {e}"), TJERR_FATAL);
-            return -1;
-        }
-
-        inst.clear_error();
-        0
+        // SAFETY: `with_handle` NULL-checks; the caller owns handle validity
+        // and exclusivity per its contract.
+        unsafe { with_handle(handle, body) }.unwrap_or(-1)
     })
 }
 

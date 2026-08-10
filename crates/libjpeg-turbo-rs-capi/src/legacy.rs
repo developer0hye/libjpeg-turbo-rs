@@ -39,7 +39,7 @@ use libjpeg_turbo_rs::{calc_jpeg_dimensions, Subsampling};
 use crate::compress::tj3Compress8;
 use crate::decompress::tj3Decompress8;
 use crate::header::{tj3DecompressHeader, TjRegion};
-use crate::tj3::{handle_as_mut, tj3Destroy, tj3GetErrorStr, tj3Init, tj3Set};
+use crate::tj3::{tj3Destroy, tj3GetErrorStr, tj3Init, tj3Set, with_handle};
 use crate::transform::{tj3Transform, TjTransform};
 
 // --- TJINIT values (matching turbojpeg.h `enum TJINIT`) ---
@@ -184,28 +184,29 @@ pub extern "C" fn tjDecompressHeader3(
             return -1;
         }
 
-        let inst = match unsafe { handle_as_mut(handle) } {
-            Some(i) => i,
-            None => return -1,
+        let body = |inst: &mut crate::tj3::TjInstance| -> c_int {
+            // SAFETY: out-pointers are optional per the C contract — skip if NULL.
+            unsafe {
+                use libjpeg_turbo_rs::tj3::TjParam;
+                if !width.is_null() {
+                    *width = inst.inner.get(TjParam::Width);
+                }
+                if !height.is_null() {
+                    *height = inst.inner.get(TjParam::Height);
+                }
+                if !jpeg_subsamp.is_null() {
+                    *jpeg_subsamp = inst.inner.get(TjParam::Subsampling);
+                }
+                if !jpeg_colorspace.is_null() {
+                    *jpeg_colorspace = inst.inner.get(TjParam::ColorSpace);
+                }
+            }
+            0
         };
 
-        // SAFETY: out-pointers are optional per the C contract — skip if NULL.
-        unsafe {
-            use libjpeg_turbo_rs::tj3::TjParam;
-            if !width.is_null() {
-                *width = inst.inner.get(TjParam::Width);
-            }
-            if !height.is_null() {
-                *height = inst.inner.get(TjParam::Height);
-            }
-            if !jpeg_subsamp.is_null() {
-                *jpeg_subsamp = inst.inner.get(TjParam::Subsampling);
-            }
-            if !jpeg_colorspace.is_null() {
-                *jpeg_colorspace = inst.inner.get(TjParam::ColorSpace);
-            }
-        }
-        0
+        // SAFETY: `with_handle` NULL-checks; the caller owns handle validity
+        // and exclusivity per its contract.
+        unsafe { with_handle(handle, body) }.unwrap_or(-1)
     })
 }
 
