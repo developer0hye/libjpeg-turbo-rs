@@ -156,8 +156,24 @@ pub fn wasm_fancy_h2v2_row(cur: &[u8], neighbor: &[u8], output: &mut [u8], in_wi
     }
 
     // SAFETY: wasm simd128 is enabled by target_feature. We verified in_width >= 3.
-    unsafe {
-        wasm_fancy_h2v2_row_inner(cur, neighbor, output, in_width);
+    // P4-135: 2:1 horizontal upsample against a neighbouring row -- `cur` and
+    // `neighbor` each hold `in_width`, `output` holds `in_width * 2`. The row
+    // arguments are not interchangeable (near vs far weighting), so this checks
+    // lengths only; ordering stays the caller's contract. No runtime probe:
+    // simd128 is a compile-time target feature on wasm32.
+    let out_needed: Option<usize> = in_width.checked_mul(2);
+    let fits: bool = cur.len() >= in_width
+        && neighbor.len() >= in_width
+        && out_needed.is_some_and(|n| output.len() >= n);
+
+    if fits {
+        // SAFETY: both inputs hold `in_width` samples and `output` holds the
+        // `in_width * 2` this kernel writes.
+        unsafe {
+            wasm_fancy_h2v2_row_inner(cur, neighbor, output, in_width);
+        }
+    } else {
+        crate::decode::upsample::fancy_h2v2_row(cur, neighbor, output, in_width);
     }
 
     // Last pixel (scalar edge): odd position
