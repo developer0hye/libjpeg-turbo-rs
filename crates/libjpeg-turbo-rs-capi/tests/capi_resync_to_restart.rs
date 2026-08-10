@@ -43,8 +43,8 @@
 use std::ffi::{c_int, c_long, c_void};
 
 use libjpeg_turbo_rs_capi::jpeglib::{
-    jpeg_CreateDecompress, jpeg_destroy_decompress, jpeg_resync_to_restart, jpeg_std_error,
-    JpegDecompressPublic, JpegErrorMgr,
+    jpeg_CreateDecompress, jpeg_destroy_decompress, jpeg_mem_src, jpeg_resync_to_restart,
+    jpeg_std_error, JpegDecompressPublic, JpegErrorMgr,
 };
 
 const M_RST0: c_int = 0xD0;
@@ -230,4 +230,76 @@ fn null_cinfo_does_not_report_success() {
     // SAFETY: NULL is explicitly handled by the implementation.
     let rc: c_int = unsafe { jpeg_resync_to_restart(std::ptr::null_mut(), 0) };
     assert_eq!(rc, 0, "NULL cinfo must not return TRUE");
+}
+
+// ---------------------------------------------------------------------------
+// Scan-forward against the built-in memory source
+// ---------------------------------------------------------------------------
+
+/// Action 2 over a real (if tiny) `jpeg_mem_src` buffer.
+///
+/// Stock's memory source answers a request past the end by warning
+/// `JWRN_JPEG_EOF` and inserting a fake `FF D9`, so the scan finds EOI and
+/// resync returns `TRUE` with `unread_marker == EOI`. Our default manager used
+/// to return TRUE while supplying no bytes, which this code read as suspension
+/// — `FALSE` on a source that can never resume. Codex review of the first cut
+/// caught that divergence; this pins the corrected behaviour.
+#[test]
+fn scan_forward_past_end_of_memory_source_yields_fake_eoi() {
+    let (mut cinfo, _err) = make_cinfo();
+    // One non-FF byte: the scan discards it, then needs more input.
+    let buf: [u8; 1] = [0x01];
+    jpeg_mem_src(
+        &mut *cinfo as *mut JpegDecompressPublic as *mut c_void,
+        buf.as_ptr(),
+        buf.len() as std::os::raw::c_ulong,
+    );
+
+    // RST2 with desired 3 is `(desired - 1) & 7` → action 2, scan forward.
+    cinfo.unread_marker = M_RST0 + 2;
+    // SAFETY: `cinfo` is live with a memory source attached.
+    let rc: c_int = unsafe {
+        jpeg_resync_to_restart(&mut *cinfo as *mut JpegDecompressPublic as *mut c_void, 3)
+    };
+    let after: c_int = cinfo.unread_marker;
+    destroy(&mut cinfo);
+
+    assert_eq!(
+        rc, 1,
+        "a memory source at end-of-buffer synthesises EOI, so resync succeeds; \
+         returning FALSE here would report suspension on a source that cannot \
+         resume"
+    );
+    assert_eq!(
+        after, 0xD9,
+        "the scan must land on the synthetic EOI marker"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// The recovery-action trace is observable state
+// ---------------------------------------------------------------------------
+
+/// Upstream runs `TRACEMS2(..., JTRC_RECOVERY_ACTION, marker, action)` before
+/// applying each action. `TRACEMS2` publishes `msg_code` and both parameters
+/// regardless of `trace_level`, so a C consumer that inspects `err->msg_code`
+/// after the call sees `JTRC_RECOVERY_ACTION` (99), not `JWRN_MUST_RESYNC`.
+#[test]
+fn recovery_action_trace_is_published() {
+    let (mut cinfo, err) = make_cinfo();
+    cinfo.unread_marker = M_RST0 + 3;
+    // SAFETY: `cinfo` is live.
+    let rc: c_int = unsafe {
+        jpeg_resync_to_restart(&mut *cinfo as *mut JpegDecompressPublic as *mut c_void, 3)
+    };
+    let code: c_int = unsafe { (*cinfo.err).msg_code };
+    destroy(&mut cinfo);
+    drop(err);
+
+    assert_eq!(rc, 1);
+    assert_eq!(
+        code, 99,
+        "msg_code must end at JTRC_RECOVERY_ACTION (99); leaving it at \
+         JWRN_MUST_RESYNC (124) means the trace was skipped"
+    );
 }

@@ -1963,18 +1963,49 @@ existing `JERR_UNKNOWN_MARKER = 70` and `JERR_INPUT_EMPTY = 43`, which is what
 calibrates it.
 
 Proof: `cargo test -p libjpeg-turbo-rs-capi --test capi_resync_to_restart` — 10
-tests over the decision table, the warning, both suspension paths and NULL.
-**Falsification measured**: patching the implementation back to `return 1` fails
-6 of the 10. The remaining 4 are action-3 cases, where a constant `TRUE` that
-never touches `unread_marker` yields the same observable; they are kept to pin
-the other half of the table, and the test file records that they are *not*
-evidence against the old bug.
+tests (12 with the review additions below) over the decision table, the warning,
+the recovery-action trace, scan-forward against a real memory source, both
+suspension paths and NULL. **Falsification measured**: patching the
+implementation back to `return 1` fails 6 of the original 10. The remaining 4
+are action-3 cases, where a constant `TRUE` that never touches `unread_marker`
+yields the same observable; they are kept to pin the other half of the table,
+and the test file records that they are *not* evidence against the old bug.
+
+**Three fidelity defects were found by review of the first cut, not by tests**
+— worth recording because each passed the 10 tests above:
+
+1. **Aliasing UB.** The first version held a live `&mut JpegDecompressPublic`
+   across `emit_message`, and a live `&mut JpegSourceMgr` across
+   `fill_input_buffer`. Both callbacks receive `cinfo` and may legitimately
+   touch it — `fill_input_buffer` is *required* to mutate the manager — so the
+   exclusive references were aliased and every later use was UB. Now only raw
+   pointers cross a callback, with fresh short-lived references either side.
+2. **Suspension lost the restart point.** Upstream keeps a *local* cursor and
+   commits it via `INPUT_SYNC` only at restart boundaries (`jdmarker.c:118-121`,
+   explicitly: *"we update them only when we have reached a suitable place to
+   restart if a suspension occurs"*). The first version committed every byte
+   eagerly, so a chunk ending on `0xFF`, or between `0xFF` and a stuffed `0x00`,
+   consumed a speculative prefix the retry needed. `ResyncInput` now mirrors
+   `INPUT_VARS`/`INPUT_SYNC` with C's exact sync points.
+3. **`TRACEMS2` was skipped.** Upstream traces `JTRC_RECOVERY_ACTION` before
+   applying each action, and `TRACEMS2` publishes `msg_code`/`msg_parm`
+   regardless of `trace_level`. Without it a C consumer inspecting
+   `err->msg_code` after the call saw `JWRN_MUST_RESYNC` (124) where stock
+   leaves `JTRC_RECOVERY_ACTION` (99).
+
+A fourth finding fixed the **built-in memory source** rather than resync itself:
+`fill_input_buffer` returned `TRUE` while supplying no bytes. Stock's
+`fill_mem_input_buffer` warns `JWRN_JPEG_EOF` and inserts a fake `FF D9`
+(`jdatasrc.c:125-137`). The old shape read as "more data arrived" to every
+caller and made scan-forward report suspension on a source that can never
+resume; it also let `drain_caller_source_mgr` spin on a truncated stream. This
+is really P4-109's territory and is noted there.
 
 **What remains** is the harness the criteria actually name: a real **suspending
 C source manager** cross-validated against stock libjpeg-turbo, exercising
 refill mid-scan and a `FALSE` return under genuine suspension. The current tests
-drive the algorithm directly and reach suspension only by the degenerate
-"no source manager attached" route.
+drive the algorithm directly; they now reach a real source at end-of-buffer, but
+not a manager that genuinely suspends and resumes.
 
 One known divergence for that harness to close: upstream keeps `discarded_bytes`
 in the private `cinfo->marker`, so the count survives a suspension mid-scan;
@@ -2390,6 +2421,22 @@ buffering; Windows is unavailable. Errors do not consistently reach
 pre-read/buffered FILE positions, I/O failure, `term_source`, and reuse against
 stock C on Unix/Windows. Preserve FILE position/buffer semantics and exact
 `JERR_INPUT_EMPTY`/`JERR_BUFFER_SIZE` behavior.
+
+**Partial progress (2026-08-10), from the P4-97 review.** `fill_input_buffer`
+for the built-in memory source returned `TRUE` while supplying no bytes. Stock's
+`fill_mem_input_buffer` (`jdatasrc.c:125-137`) instead warns `JWRN_JPEG_EOF` and
+inserts a fake `FF D9`.
+
+The old shape reads as "more data arrived" to every caller. Two concrete
+consequences: `jpeg_resync_to_restart`'s scan-forward reported *suspension* on a
+source that can never resume, where stock returns `TRUE` with an unread EOI; and
+`drain_caller_source_mgr` could spin on a truncated stream, since each iteration
+saw `bytes_in_buffer == 0`, no EOI, and a growing-by-nothing accumulator.
+
+Now `default_fill_input_buffer` mirrors stock. This closes none of the criteria
+above on its own — validation, FILE buffering and Windows all remain — but it
+removes a divergence those cross-validations would otherwise have to encode.
+Pinned by `capi_resync_to_restart.rs::scan_forward_past_end_of_memory_source_yields_fake_eoi`.
 
 ## P4-110. `jpeg_Create*` Ignores Version and Struct-Size ABI Guards — **OPEN**
 
