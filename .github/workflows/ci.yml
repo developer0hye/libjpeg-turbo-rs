@@ -305,6 +305,15 @@ jobs:
         run: >
           cargo test -p libjpeg-turbo-rs-capi
           --test capi_jpeglib_encode -- --nocapture
+      # P4-139's span guards. Named explicitly for the reason the P4-81 note
+      # below records from experience: tests in this crate are selected by
+      # name, so a suite nothing names never runs and reports green forever.
+      - name: Classic C-ABI span overflow guards (P4-139)
+        run: >
+          cargo test -p libjpeg-turbo-rs-capi
+          --test capi_span_overflow_guards
+          --test norealloc_buffer_capacity
+          --test yuv_packed_length_overflow -- --nocapture
       # P4-13/P4-17's documented suspension proof is also in the C-ABI
       # workspace member. Its helper requires cjpeg/djpeg in CI and compilation
       # or oracle failures are fatal, so this cannot report green after a skip.

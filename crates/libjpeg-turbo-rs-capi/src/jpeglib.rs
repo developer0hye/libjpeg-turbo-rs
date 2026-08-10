@@ -943,6 +943,67 @@ const JERR_OUT_OF_MEMORY: c_int = 56;
 #[allow(dead_code)]
 /// "Application transferred too few scanlines"
 const JERR_TOO_LITTLE_DATA: c_int = 69;
+/// Row width in samples, refusing what upstream refuses.
+///
+/// `jcmaster.c:190-194` computes `image_width * input_components` as a `long`
+/// and rejects it when it is not representable as `JDIMENSION`:
+///
+/// ```c
+/// samplesperrow = (long)cinfo->image_width * (long)cinfo->input_components;
+/// jd_samplesperrow = (JDIMENSION)samplesperrow;
+/// if ((long)jd_samplesperrow != samplesperrow) ERREXIT(cinfo, JERR_WIDTH_OVERFLOW);
+/// ```
+///
+/// Checking only for `usize` overflow is not the same test on a 64-bit host: a
+/// 4 GiB row fits `usize` and would sail past, while the C library we replace
+/// errors. The bound is `JDimension::MAX` on every target.
+fn checked_samples_per_row(width: usize, input_components: usize) -> Option<usize> {
+    width
+        .checked_mul(input_components)
+        .filter(|samples| *samples <= JDimension::MAX as usize)
+}
+
+/// Total byte span of a staging buffer, refusing what cannot be allocated.
+///
+/// `checked_mul` alone is not the right test. A 32-bit target can produce a
+/// product that fits `usize` and still exceeds `isize::MAX` — 65500x40000
+/// grayscale is 2.62 GB — at which point `Vec::resize` panics with a capacity
+/// overflow, and the shim's `unwind_guard!` swallows it *after* the cinfo has
+/// already moved to the next state. The bound belongs here, before either
+/// happens.
+///
+/// Upstream reports this as `JERR_OUT_OF_MEMORY` with case `8`
+/// (`jmemmgr.c:364-380`, a request over `MAX_ALLOC_CHUNK`), not as
+/// `JERR_IMAGE_TOO_BIG` — that one is reserved for an individual axis passing
+/// `JPEG_MAX_DIMENSION` (`jcmaster.c:186-189`), which is a different failure.
+fn checked_staging_span(samples_per_row: usize, height: usize, elem_size: usize) -> Option<usize> {
+    samples_per_row
+        .checked_mul(height)
+        .and_then(|samples| samples.checked_mul(elem_size))
+        .filter(|bytes| *bytes <= isize::MAX as usize)
+}
+
+/// Upstream's case number for "single allocation too large"
+/// (`jmemmgr.c:364-380`). `JERR_OUT_OF_MEMORY`'s message is
+/// "Insufficient memory (case %d)".
+const OOM_CASE_ALLOC_TOO_LARGE: c_int = 8;
+
+/// `jmorecfg.h:158` — the parameter `JERR_IMAGE_TOO_BIG`'s `%u` slot expects
+/// ("Maximum supported image dimension is %u pixels").
+///
+/// Unused for now: the overflow paths here report `JERR_WIDTH_OVERFLOW` or
+/// `JERR_OUT_OF_MEMORY`, which is what upstream raises for them.
+/// `JERR_IMAGE_TOO_BIG` is for an individual axis exceeding this limit
+/// (`jcmaster.c:186-189`) — a check the shim does not yet perform, tracked
+/// under P4-99's dimension validation.
+#[allow(dead_code)]
+const JPEG_MAX_DIMENSION: c_int = 65500;
+#[allow(dead_code)]
+/// "Image too wide for this implementation" — upstream's code for
+/// `image_width * input_components` exceeding `JDIMENSION`
+/// (`jcmaster.c:190-194`), which is a *different* failure from the
+/// dimension cap `JERR_IMAGE_TOO_BIG` reports.
+const JERR_WIDTH_OVERFLOW: c_int = 72;
 #[allow(dead_code)]
 /// "Unsupported marker type 0x%02x"
 const JERR_UNKNOWN_MARKER: c_int = 70;
@@ -6753,7 +6814,18 @@ unsafe extern "C" fn mem_empty_output_buffer(cinfo: *mut c_void) -> CBoolean {
     // `jpeg_mem_dest` replaces a zero-capacity caller buffer with its own
     // `OUTPUT_BUF_SIZE` allocation, so this cannot degenerate to `malloc(0)`.
     let old_bufsize: usize = state.bufsize;
-    let nextsize: usize = old_bufsize.saturating_mul(2);
+    // `checked_mul`, not saturating: an overflow here must not turn into
+    // `usize::MAX`, which is the worst value to hand an allocator. Both arms
+    // land on upstream's `JERR_OUT_OF_MEMORY` anyway, so the error contract is
+    // unchanged — what changes is that the size is never a wrapped or
+    // saturated lie (P4-139 criterion 3).
+    let nextsize: usize = match old_bufsize.checked_mul(2) {
+        Some(n) => n,
+        None => {
+            owned.pending_error = Some(JERR_OUT_OF_MEMORY);
+            return 0;
+        }
+    };
     let nextbuffer: *mut u8 = crate::alloc::libc_malloc(nextsize);
     if nextbuffer.is_null() {
         // Upstream: ERREXIT1(cinfo, JERR_OUT_OF_MEMORY, 10).
@@ -7456,13 +7528,47 @@ pub unsafe extern "C" fn jpeg_start_compress(cinfo: *mut c_void, _write_all_tabl
         let input_components: usize = c.input_components.max(1) as usize;
         let width: usize = c.image_width as usize;
         let height: usize = c.image_height as usize;
-        let row_bytes: usize = width.saturating_mul(input_components);
-        let total_bytes: usize = row_bytes.saturating_mul(height);
+        // Checked: this sizes the staging buffer every scanline is copied
+        // into. `width * input_components` already overflows a 32-bit `usize`
+        // for legal JPEG dimensions, and saturating to `usize::MAX` would ask
+        // `resize` for the address space instead of reporting the geometry
+        // (P4-139 criterion 3).
+        // Upstream splits these two failures and so do we. A scanline whose
+        // width is not representable is `JERR_WIDTH_OVERFLOW`
+        // (`jcmaster.c:190-194`, a parameterless `ERREXIT`); the dimension cap
+        // is `JERR_IMAGE_TOO_BIG`, which takes a `%u` parameter. Reporting the
+        // former as the latter would also emit a message with an unfilled
+        // parameter slot.
+        let row_bytes: usize = match checked_samples_per_row(width, input_components) {
+            Some(row) => row,
+            None => {
+                invoke_error_exit(cinfo, JERR_WIDTH_OVERFLOW);
+                return;
+            }
+        };
         priv_state.pixels_u8.clear();
         priv_state.pixels_u16.clear();
         // In raw-data mode we don't pre-allocate a pixel buffer — rows come
         // in via jpeg_write_raw_data instead.
+        //
+        // The span check belongs *inside* this branch for the same reason: in
+        // raw mode there is no packed interleaved buffer, and the separately
+        // allocated Y/Cb/Cr planes are each far smaller. Validating a
+        // hypothetical packed span here would reject legal raw encodes that
+        // upstream accepts — a 65500x11000 4:2:0 raw frame has a notional
+        // packed RGB span over `isize::MAX` on a 32-bit target while every
+        // plane it actually allocates fits comfortably.
+        //
+        // The row-width check above stays unconditional: `JERR_WIDTH_OVERFLOW`
+        // is about the scanline geometry itself, which raw mode shares.
         if c.raw_data_in == 0 {
+            let total_bytes: usize = match checked_staging_span(row_bytes, height, 1) {
+                Some(total) => total,
+                None => {
+                    invoke_error_exit_parm(cinfo, JERR_OUT_OF_MEMORY, OOM_CASE_ALLOC_TOO_LARGE);
+                    return;
+                }
+            };
             priv_state.pixels_u8.resize(total_bytes, 0);
         }
         // Reset raw-data accumulation buffers (both 8-bit and 12-bit).
@@ -7519,7 +7625,21 @@ pub unsafe extern "C" fn jpeg_write_scanlines(
             return 0;
         }
         let input_components: usize = c.input_components.max(1) as usize;
-        let row_bytes: usize = (c.image_width as usize).saturating_mul(input_components);
+        // Checked: `row_bytes` becomes a `copy_nonoverlapping` length below,
+        // reading through caller-supplied row pointers. A saturated
+        // `usize::MAX` would read the address space rather than report the
+        // geometry, and `width * components` overflows a 32-bit `usize` for
+        // dimensions the header can legally declare (P4-139 criterion 3).
+        let row_bytes: usize =
+            match checked_samples_per_row(c.image_width as usize, input_components) {
+                Some(bytes) => bytes,
+                None => {
+                    // Upstream's code for exactly this: a scanline width that
+                    // is not representable (`jcmaster.c:190-194`).
+                    invoke_error_exit(cinfo, JERR_WIDTH_OVERFLOW);
+                    return 0;
+                }
+            };
         let total_rows: JDimension = c.image_height;
         let remaining: JDimension = total_rows.saturating_sub(c.next_scanline);
         let to_copy: JDimension = std::cmp::min(num_lines, remaining);
@@ -9520,10 +9640,27 @@ fn write_scanlines_highprec(
     let input_components: usize = c.input_components.max(1) as usize;
     let width: usize = c.image_width as usize;
     let height: usize = c.image_height as usize;
-    let row_samples: usize = width.saturating_mul(input_components);
+    // Checked: `row_samples` is both a per-row copy length and, times
+    // `height`, the size of the high-precision staging buffer (P4-139
+    // criterion 3).
+    let row_samples: usize = match checked_samples_per_row(width, input_components) {
+        Some(samples) => samples,
+        None => {
+            invoke_error_exit(cinfo, JERR_WIDTH_OVERFLOW);
+            return 0;
+        }
+    };
     // First call: allocate the u16 buffer and release the u8 buffer.
     if priv_state.pixels_u16.is_empty() {
-        priv_state.pixels_u16 = vec![0u16; row_samples.saturating_mul(height)];
+        let total_samples: usize =
+            match checked_staging_span(row_samples, height, core::mem::size_of::<u16>()) {
+                Some(bytes) => bytes / core::mem::size_of::<u16>(),
+                None => {
+                    invoke_error_exit_parm(cinfo, JERR_OUT_OF_MEMORY, OOM_CASE_ALLOC_TOO_LARGE);
+                    return 0;
+                }
+            };
+        priv_state.pixels_u16 = vec![0u16; total_samples];
         priv_state.pixels_u8.clear();
         priv_state.precision = precision;
     }
@@ -10559,7 +10696,14 @@ pub unsafe extern "C" fn jcopy_block_row(
         if input_row.is_null() || output_row.is_null() || num_blocks == 0 {
             return;
         }
-        let samples: usize = (num_blocks as usize).saturating_mul(64);
+        // Checked, because this is a `copy_nonoverlapping` *length*: a
+        // saturated `usize::MAX` here would copy the address space rather than
+        // report the overflow. `num_blocks` is caller-supplied
+        // (P4-139 criterion 3).
+        let samples: usize = match (num_blocks as usize).checked_mul(64) {
+            Some(s) => s,
+            None => return,
+        };
         // SAFETY: caller-supplied buffers of exactly `samples` i16 entries.
         unsafe {
             std::ptr::copy_nonoverlapping(input_row, output_row, samples);
