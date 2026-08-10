@@ -69,16 +69,23 @@ pub fn build_huff_table(bits: &[u8; 17], values: &[u8]) -> HuffTable {
 /// when the accumulator fills. The flush uses a bitmask to detect 0xFF bytes,
 /// enabling a branch-free fast path when no byte stuffing is needed.
 ///
-/// Uses a raw pointer + position instead of Vec for the output buffer,
-/// matching C libjpeg-turbo's raw buffer approach. This avoids Vec::reserve()
-/// and Vec::set_len() overhead on every flush.
+/// The buffer is a plain `Vec<u8>` used as an arena: the hot path writes into
+/// its spare capacity through a raw pointer and advances `pos`, matching C
+/// libjpeg-turbo's raw-buffer approach, so no `Vec` bookkeeping is touched per
+/// flush. Ownership stays with the `Vec` (P4-138 criteria 1-2) — it was
+/// previously a `*mut u8` + `cap` pair with a manual `Drop`, which put the
+/// allocation under two owners for the duration of every growth.
+///
+/// **Invariant.** Bytes `0..pos` are initialised. `buf.len()` is a
+/// synchronisation point rather than the write cursor: it is brought up to
+/// `pos` before anything that can reallocate, because `Vec::reserve` only
+/// promises to preserve the first `len` elements — growing with a stale `len`
+/// would silently discard everything encoded so far.
 pub(crate) struct BitWriter {
-    /// Raw output buffer pointer (start of allocation).
-    buf: *mut u8,
+    /// Output arena. See the invariant above for how `len` relates to `pos`.
+    buf: Vec<u8>,
     /// Current write position in the buffer.
     pos: usize,
-    /// Total allocated capacity in bytes.
-    cap: usize,
     /// 64-bit accumulator — new bits shift in from the right.
     /// When flushed, bytes are extracted MSB-first (earliest bits at top).
     put_buffer: u64,
@@ -87,34 +94,23 @@ pub(crate) struct BitWriter {
     free_bits: i32,
 }
 
-// SAFETY: BitWriter owns its buffer exclusively — no aliasing, no Send/Sync
-// constraints from the raw pointer beyond what a Vec<u8> would have.
-unsafe impl Send for BitWriter {}
-
-impl Drop for BitWriter {
-    fn drop(&mut self) {
-        if self.cap > 0 {
-            // Reconstruct a Vec to handle deallocation correctly.
-            // SAFETY: ptr/cap came from Vec::into_raw_parts of a Vec<u8>.
-            unsafe {
-                let _ = Vec::from_raw_parts(self.buf, 0, self.cap);
-            }
-        }
-    }
-}
+// `Send` is now automatic: `Vec<u8>` is `Send`, so the manual `unsafe impl`
+// this type used to carry is gone along with the raw pointer that needed it.
+// So is `Drop` — the `Vec` deallocates itself, which is what removes the
+// double-free surface entirely rather than merely closing its window.
 
 impl BitWriter {
     /// Create a new writer with the given initial byte capacity.
     pub fn new(capacity: usize) -> Self {
-        let alloc_cap: usize = capacity.saturating_mul(2).max(1024);
-        let mut v: Vec<u8> = Vec::with_capacity(alloc_cap);
-        let ptr: *mut u8 = v.as_mut_ptr();
-        let cap: usize = v.capacity();
-        core::mem::forget(v);
+        // `checked_mul`, not `saturating_mul`: saturating turns an oversized
+        // request into `usize::MAX`, which is the worst possible value to hand
+        // an allocator. Falling back to the caller's own figure lets the
+        // normal growth path size it instead (P4-139's rule, applied here
+        // because this expression sizes a memory region).
+        let alloc_cap: usize = capacity.checked_mul(2).unwrap_or(capacity).max(1024);
         Self {
-            buf: ptr,
+            buf: Vec::with_capacity(alloc_cap),
             pos: 0,
-            cap,
             put_buffer: 0,
             free_bits: 64,
         }
@@ -133,31 +129,30 @@ impl BitWriter {
             .pos
             .checked_add(additional)
             .expect("BitWriter capacity overflow");
-        if required > self.cap {
-            let new_cap: usize = self.cap.checked_mul(2).unwrap_or(required).max(required);
+        let cap: usize = self.buf.capacity();
+        if required > cap {
+            let new_cap: usize = cap.checked_mul(2).unwrap_or(required).max(required);
 
-            // `v` takes ownership for the duration of `reserve`, so `self`
-            // must not also claim it. If `reserve` unwinds — capacity
-            // overflow, or an allocation-error hook configured to unwind —
-            // `v` drops and frees the block while `self.buf`/`self.cap` still
-            // name it, and `BitWriter::drop` frees it a second time.
+            // Publish the encoded bytes before growing. `Vec::reserve` only
+            // promises to preserve the first `len` elements, so reallocating
+            // with the stale `len` the hot path leaves behind would discard
+            // everything written since the last growth.
             //
-            // Clearing `cap` first closes that window: `drop` is gated on
-            // `cap > 0`, so an unwind here leaves exactly one owner, `v`,
-            // which releases the block correctly on its way out. The fields
-            // are restored below on the success path.
-            let old_cap: usize = self.cap;
-            self.cap = 0;
-
-            // SAFETY: ptr/pos/old_cap are consistent from our allocation, and
-            // `self` has just relinquished its claim on them.
+            // SAFETY: `pos <= capacity` (checked above and maintained by
+            // every emit method), and bytes `0..pos` were written by those
+            // methods, so the new length names only initialised memory.
             unsafe {
-                let mut v: Vec<u8> = Vec::from_raw_parts(self.buf, self.pos, old_cap);
-                v.reserve(new_cap - self.pos);
-                self.buf = v.as_mut_ptr();
-                self.cap = v.capacity();
-                core::mem::forget(v);
+                self.buf.set_len(self.pos);
             }
+
+            // Infallible `Vec` growth, which P4-138 criterion 2 permits
+            // alongside `try_reserve`. The fallible form would have to
+            // propagate a `Result` out of every `put_bits` on the encode hot
+            // path; that belongs with the encoder-wide error plumbing, not
+            // here. Ownership never leaves `self.buf`, so an unwind out of
+            // `reserve` simply drops one `Vec` — the double-free window this
+            // item was filed for cannot be reconstructed.
+            self.buf.reserve(new_cap - self.pos);
         }
     }
 
@@ -168,7 +163,7 @@ impl BitWriter {
     #[inline(always)]
     unsafe fn emit_byte_unchecked(&mut self, byte: u8) {
         unsafe {
-            let ptr: *mut u8 = self.buf.add(self.pos);
+            let ptr: *mut u8 = self.buf.as_mut_ptr().add(self.pos);
             ptr.write(byte);
             ptr.add(1).write(0x00);
             let stuffed: usize = (byte == 0xFF) as usize;
@@ -192,7 +187,7 @@ impl BitWriter {
         if has_ff == 0 {
             // Fast path: no 0xFF bytes, write 8 bytes in one shot
             unsafe {
-                let ptr: *mut u8 = self.buf.add(self.pos);
+                let ptr: *mut u8 = self.buf.as_mut_ptr().add(self.pos);
                 ptr.cast::<u64>().write_unaligned(pb.to_be());
                 self.pos += 8;
             }
@@ -312,7 +307,7 @@ impl BitWriter {
     pub fn write_restart_marker(&mut self, index: u8) {
         self.ensure_capacity(2);
         unsafe {
-            let ptr: *mut u8 = self.buf.add(self.pos);
+            let ptr: *mut u8 = self.buf.as_mut_ptr().add(self.pos);
             ptr.write(0xFF);
             ptr.add(1).write(0xD0 + (index & 7));
             self.pos += 2;
@@ -337,10 +332,21 @@ impl BitWriter {
         self.free_bits = 64;
     }
 
+    /// Allocated capacity, for the growth tests below.
+    ///
+    /// `ensure_capacity`'s postcondition — capacity is at least
+    /// `pos + additional` — is otherwise unobservable from outside: the only
+    /// other way to check it is to write past the end and see what happens,
+    /// which is the bug rather than a test for it.
+    #[cfg(test)]
+    pub fn capacity(&self) -> usize {
+        self.buf.capacity()
+    }
+
     /// Get a reference to the accumulated output bytes.
     pub fn data(&self) -> &[u8] {
         // SAFETY: buf[..pos] has been written by our emit methods.
-        unsafe { core::slice::from_raw_parts(self.buf, self.pos) }
+        unsafe { core::slice::from_raw_parts(self.buf.as_ptr(), self.pos) }
     }
 
     /// Hoist bit-accumulator and buffer pointer to local variables.
@@ -358,7 +364,11 @@ impl BitWriter {
     pub unsafe fn begin_block(&mut self, reserve: usize) -> (u64, i32, *mut u8) {
         unsafe {
             self.ensure_capacity(reserve);
-            (self.put_buffer, self.free_bits, self.buf.add(self.pos))
+            (
+                self.put_buffer,
+                self.free_bits,
+                self.buf.as_mut_ptr().add(self.pos),
+            )
         }
     }
 
@@ -371,7 +381,7 @@ impl BitWriter {
         unsafe {
             self.put_buffer = put_buffer;
             self.free_bits = free_bits;
-            self.pos = buf_ptr.offset_from(self.buf) as usize;
+            self.pos = buf_ptr.offset_from(self.buf.as_ptr()) as usize;
         }
     }
 }
@@ -1660,8 +1670,15 @@ mod tests {
 /// Gated on `panic = "unwind"`: the wasm32-wasip1 leg builds with
 /// `panic = "abort"`, where the panic these tests provoke terminates the
 /// module instead of unwinding, so `catch_unwind` never returns and the whole
-/// test binary aborts. An abort also never reaches `Drop`, which is the thing
-/// under test — the double free can only happen on an unwinding path.
+/// test binary aborts. An abort also never reaches the drop glue, which is
+/// what these tests exercise.
+///
+/// These outlive the defect they were written for. P4-138 originally closed a
+/// window in which the allocation had two owners during growth; the buffer is
+/// now a plain `Vec<u8>`, so that window cannot be reconstructed at all. What
+/// the tests still pin is that growth is *panic-safe*: an unwinding
+/// `ensure_capacity` must leave a writer that drops exactly once, which is
+/// what a future rewrite reaching for raw ownership again would break.
 #[cfg(all(test, panic = "unwind"))]
 mod bitwriter_unwind_tests {
     use super::BitWriter;
@@ -1678,29 +1695,88 @@ mod bitwriter_unwind_tests {
         assert!(result.is_err(), "an overflowing request must not succeed");
     }
 
-    /// The real hazard: `reserve` unwinding while the buffer is owned by both
-    /// the temporary `Vec` and `self`. Requesting a capacity `Vec` refuses
-    /// makes `reserve` raise "capacity overflow" from inside the window.
+    /// The original hazard: `reserve` unwinding while the buffer was owned by
+    /// both a temporary `Vec` and `self`, so `BitWriter::drop` freed a block
+    /// the temporary had already released.
     ///
-    /// Before the fix, `self.cap` still named the block `v` had just freed and
-    /// `BitWriter::drop` freed it again. Now `cap` is cleared before the
-    /// window opens, so `v` is the sole owner while it unwinds and `drop`
-    /// becomes a no-op. Under ASan or Miri a regression here reports a double
-    /// free; without them the test still pins that the panic is survivable and
-    /// the writer drops cleanly.
+    /// The buffer is a `Vec<u8>` now, so there is one owner by construction
+    /// and `drop` is the `Vec`'s own. This still asserts the observable
+    /// property — the panic is survivable and the writer unwinds cleanly.
+    /// Under ASan or Miri a regression reports a double free here.
     #[test]
-    fn reserve_unwinding_leaves_exactly_one_owner() {
+    fn growth_unwinding_leaves_exactly_one_owner() {
         let result = std::panic::catch_unwind(|| {
             let mut w: BitWriter = BitWriter::new(16);
             // Just past `isize::MAX`, which is Vec's own capacity ceiling.
             // That matters: a merely *huge* request (isize::MAX exactly) is
             // handed to the allocator, which aborts the process on failure
-            // rather than unwinding, and an abort never reaches `drop` at all.
-            // Only the capacity check raises a catchable panic from inside the
-            // window this test exists to cover.
+            // rather than unwinding, and an abort never reaches drop glue at
+            // all. Only the capacity check raises a catchable panic.
             w.ensure_capacity((isize::MAX as usize) + 1);
             // `w` drops here on the unwind path.
         });
         assert!(result.is_err(), "the oversized reserve must unwind");
+    }
+
+    /// `ensure_capacity(n)` must leave room for `pos + n` bytes.
+    ///
+    /// This pins the reason `len` is synced to `pos` before growing. The hot
+    /// path writes into the `Vec`'s spare capacity and tracks `pos` itself,
+    /// leaving `len` behind, and `Vec::reserve(additional)` is defined
+    /// relative to `len` — so growing with a stale `len` of 0 asks for
+    /// `additional` bytes total instead of `pos + additional`, and the writes
+    /// that follow run past the allocation.
+    ///
+    /// The numbers are chosen to defeat `Vec`'s amortised growth, which is
+    /// what makes the bug invisible in ordinary use: with `pos` near 1000 and
+    /// a 10000-byte request, capacity doubling (2048) is far below what is
+    /// needed, so a stale `len` yields 10000 where 11000 is required. Removing
+    /// the `set_len` line makes this test fail; a plain "did the bytes
+    /// survive?" test does **not**, because the underlying `realloc` happens
+    /// to preserve the whole block regardless of `len`.
+    #[test]
+    fn growth_reserves_room_for_everything_already_written() {
+        let mut w: BitWriter = BitWriter::new(16);
+        for i in 0..1000u32 {
+            w.write_bits((i % 255) as u16, 8);
+        }
+        w.flush();
+        let pos: usize = w.data().len();
+        assert!(pos >= 900, "expected ~1000 bytes buffered, got {pos}");
+
+        w.ensure_capacity(10_000);
+        assert!(
+            w.capacity() >= pos + 10_000,
+            "capacity {} is short of pos {pos} + 10000",
+            w.capacity()
+        );
+    }
+
+    /// Growth must also preserve everything already encoded.
+    ///
+    /// Weaker than the capacity test above — today's `realloc` preserves the
+    /// block whatever `len` says, so this cannot fail for the `set_len`
+    /// reason. It is kept as an end-to-end guard on the stream itself, which
+    /// the capacity assertion does not look at.
+    ///
+    /// 16 bytes of initial capacity against ~4 KiB of output forces several
+    /// reallocations, so the bytes being checked span more than one of them.
+    #[test]
+    fn growth_preserves_bytes_written_before_it() {
+        let mut w: BitWriter = BitWriter::new(16);
+        let mut expected: Vec<u8> = Vec::new();
+        // 0xFF is deliberately excluded: it triggers JPEG byte stuffing, which
+        // would make `expected` a different sequence from what was fed in.
+        for i in 0..4096u32 {
+            let byte: u8 = (i % 255) as u8;
+            w.write_bits(byte as u16, 8);
+            expected.push(byte);
+        }
+        w.flush();
+        assert_eq!(
+            w.data(),
+            expected.as_slice(),
+            "bytes written before a reallocation must survive it"
+        );
     }
 }
