@@ -96,12 +96,28 @@ pub unsafe extern "C" fn tj3Compress8(
             let w: usize = width as usize;
             let h: usize = height as usize;
             let bpp: usize = pf.bytes_per_pixel();
-            let effective_pitch: usize = if pitch == 0 { w * bpp } else { pitch as usize };
-            if effective_pitch < w * bpp {
+            // Checked: `row_bytes` and the span built from it below size a
+            // `slice::from_raw_parts` (P4-139 criterion 3). On a 32-bit target
+            // `w * bpp` overflows well inside the dimensions TurboJPEG accepts.
+            let row_bytes: usize = match w.checked_mul(bpp) {
+                Some(bytes) => bytes,
+                None => {
+                    inst.set_error(
+                        "tj3Compress8: width * bytes_per_pixel overflows",
+                        TJERR_FATAL,
+                    );
+                    return -1;
+                }
+            };
+            let effective_pitch: usize = if pitch == 0 {
+                row_bytes
+            } else {
+                pitch as usize
+            };
+            if effective_pitch < row_bytes {
                 inst.set_error(
                     format!(
-                        "tj3Compress8: pitch {effective_pitch} smaller than width*bpp ({})",
-                        w * bpp
+                        "tj3Compress8: pitch {effective_pitch} smaller than width*bpp ({row_bytes})"
                     ),
                     TJERR_FATAL,
                 );
@@ -115,10 +131,30 @@ pub unsafe extern "C" fn tj3Compress8(
             // SAFETY: caller guarantees `src_buf` is valid for
             // `effective_pitch * height` bytes laid out row-major with the given
             // pitch.
-            let src_len: usize = effective_pitch
-                .checked_mul(h)
-                .unwrap_or(0)
-                .saturating_sub(effective_pitch.saturating_sub(w * bpp));
+            //
+            // The span is `pitch * (h - 1) + row_bytes`: every row but the last
+            // is a full pitch, and the last needs only its own pixels — a
+            // caller is not required to allocate padding past the final row.
+            //
+            // This was `checked_mul(h).unwrap_or(0).saturating_sub(...)`, which
+            // is worse than it looks: an overflow did not error, it produced a
+            // *zero-length* source slice and the encode silently proceeded on
+            // no input. Overflow is now the caller's error (P4-139).
+            let src_len: usize = match h
+                .checked_sub(1)
+                .and_then(|full_rows| effective_pitch.checked_mul(full_rows))
+                .and_then(|head| head.checked_add(row_bytes))
+                .filter(|len| *len <= isize::MAX as usize)
+            {
+                Some(len) => len,
+                None => {
+                    inst.set_error(
+                        "tj3Compress8: pitch * height overflows the source buffer size",
+                        TJERR_FATAL,
+                    );
+                    return -1;
+                }
+            };
             let src_slice: &[u8] = unsafe { std::slice::from_raw_parts(src_buf, src_len) };
 
             let dense: Vec<u8> = if effective_pitch == w * bpp {

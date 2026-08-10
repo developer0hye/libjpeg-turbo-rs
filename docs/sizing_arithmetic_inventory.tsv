@@ -1,0 +1,97 @@
+# P4-139 criterion 3 — enforcement inventory for saturating arithmetic.
+#
+# Saturating a value that SIZES OR BOUNDS A MEMORY REGION turns an overflow
+# into usize::MAX, which is the worst possible value to then hand an allocator
+# or a slice constructor. Every such site has been converted to checked
+# arithmetic with a typed error; this file pins the ones that remain, each of
+# which saturates something that is NOT a memory span.
+#
+# `tests/sizing_arithmetic_gate.rs` fails if this file and the sources
+# disagree, so a NEW saturating expression cannot appear without a human
+# classifying it. That is the mechanism criterion 3 asks to name: a test, not a
+# grep or a review checklist, because a test runs on every CI leg.
+#
+# SCOPE: saturating_mul / saturating_add / saturating_sub. `wrapping_*` is
+# deliberately excluded — it is the IDCT's C-parity idiom at 244 sites, where
+# wrapping is the specified behaviour being matched. That narrows the
+# criterion's literal wording and is recorded as such in P4-139.
+#
+# Classifications:
+#   value-saturation    clamping a sample/pixel value; saturation IS the intent
+#   counter             a monotonic counter; saturation is a graceful cap
+#   bounds-check        saturating high makes the check FAIL, the safe direction
+#   geometry-count      MCU/block/restart counts, not byte spans
+#   capacity-growth     growth hint already bounded by an explicit .min(cap)
+#   clamped-difference  a - b floored at 0, where 0 is the correct answer
+#
+# Columns: path	count	classification	source line (trimmed)
+crates/libjpeg-turbo-rs-capi/src/imageio.rs	1	clamped-difference	let mut bot: usize = rows.saturating_sub(1);
+crates/libjpeg-turbo-rs-capi/src/jpeglib.rs	1	counter	*discarded = discarded.saturating_add(1);
+crates/libjpeg-turbo-rs-capi/src/jpeglib.rs	1	counter	*discarded = discarded.saturating_add(2);
+crates/libjpeg-turbo-rs-capi/src/jpeglib.rs	1	clamped-difference	*state.outsize = state.bufsize.saturating_sub(free_in_buffer) as std::os::raw::c_ulong;
+crates/libjpeg-turbo-rs-capi/src/jpeglib.rs	1	geometry-count	.saturating_mul(mcus_per_row)
+crates/libjpeg-turbo-rs-capi/src/jpeglib.rs	2	clamped-difference	.saturating_sub(owned.pub_mgr.free_in_buffer);
+crates/libjpeg-turbo-rs-capi/src/jpeglib.rs	2	counter	c.input_scan_number = c.input_scan_number.saturating_add(1);
+crates/libjpeg-turbo-rs-capi/src/jpeglib.rs	2	counter	c.output_scanline = c.output_scanline.saturating_add(delivered);
+crates/libjpeg-turbo-rs-capi/src/jpeglib.rs	2	counter	c.output_scanline = c.output_scanline.saturating_add(produced);
+crates/libjpeg-turbo-rs-capi/src/jpeglib.rs	1	counter	c.output_scanline = c.output_scanline.saturating_add(skip);
+crates/libjpeg-turbo-rs-capi/src/jpeglib.rs	1	counter	c.output_scanline = c.output_scanline.saturating_add(skipped);
+crates/libjpeg-turbo-rs-capi/src/jpeglib.rs	1	counter	err.num_warnings = err.num_warnings.saturating_add(1);
+crates/libjpeg-turbo-rs-capi/src/jpeglib.rs	2	clamped-difference	let avail: usize = buf.len().saturating_sub(row_start);
+crates/libjpeg-turbo-rs-capi/src/jpeglib.rs	1	clamped-difference	let cap_excl_nul: usize = out.len().saturating_sub(1);
+crates/libjpeg-turbo-rs-capi/src/jpeglib.rs	1	geometry-count	let imcu_row_height: u32 = (max_v as u32).saturating_mul(data_unit).max(1);
+crates/libjpeg-turbo-rs-capi/src/jpeglib.rs	1	geometry-count	let interval: u32 = (c.restart_in_rows as u32).saturating_mul(mcus_per_row);
+crates/libjpeg-turbo-rs-capi/src/jpeglib.rs	1	geometry-count	let mcu_width: u32 = effective_max_h.saturating_mul(data_unit).max(1);
+crates/libjpeg-turbo-rs-capi/src/jpeglib.rs	1	clamped-difference	let remaining: JDimension = total.saturating_sub(c.output_scanline);
+crates/libjpeg-turbo-rs-capi/src/jpeglib.rs	3	clamped-difference	let remaining: JDimension = total.saturating_sub(dec.cursor);
+crates/libjpeg-turbo-rs-capi/src/jpeglib.rs	2	clamped-difference	let remaining: JDimension = total_rows.saturating_sub(c.next_scanline);
+crates/libjpeg-turbo-rs-capi/src/jpeglib.rs	1	clamped-difference	let remaining: JDimension = total_rows.saturating_sub(c.output_scanline);
+crates/libjpeg-turbo-rs-capi/src/jpeglib.rs	1	clamped-difference	let short_by: c_int = c.image_height.saturating_sub(c.next_scanline) as c_int;
+crates/libjpeg-turbo-rs-capi/src/jpeglib.rs	1	geometry-count	let stride: u32 = (max_h as u32).saturating_mul(8).max(1);
+crates/libjpeg-turbo-rs-capi/src/jpeglib.rs	2	bounds-check	} else if x.saturating_add(w) > out_w {
+crates/libjpeg-turbo-rs-capi/src/memmgr.rs	2	bounds-check	if start_row.saturating_add(num_rows) > ctrl_ref.rows_in_array {
+crates/libjpeg-turbo-rs-capi/src/yuv.rs	1	clamped-difference	out.extend(std::iter::repeat_n(0u8, stride.saturating_sub(pw)));
+src/api/encoder.rs	1	geometry-count	n.saturating_mul(mcus_x)
+src/api/high_level.rs	1	clamped-difference	let h: usize = region.height.min(img_h.saturating_sub(y));
+src/api/high_level.rs	1	clamped-difference	let w: usize = (region.width + input_x - x).min(img_w.saturating_sub(x));
+src/api/incremental.rs	1	capacity-growth	let target: usize = needed.max(buf.capacity().saturating_mul(2)).min(cap);
+src/api/precision.rs	2	clamped-difference	.saturating_sub(1)
+src/api/precision.rs	2	clamped-difference	.saturating_sub(pt as i32)
+src/api/quantize.rs	1	counter	*cell = cell.saturating_add(1);
+src/api/raw_data_12.rs	1	clamped-difference	let sx: usize = (block_x + col).min(plane_width.saturating_sub(1));
+src/api/raw_data_12.rs	1	clamped-difference	let sy: usize = (block_y + row).min(plane_height.saturating_sub(1));
+src/api/streaming.rs	1	clamped-difference	let remaining: usize = out_h.saturating_sub(self.skip_rows);
+src/decode/color.rs	1	value-saturation	let bd: u8 = b.saturating_add(d);
+src/decode/color.rs	1	value-saturation	let gd: u8 = g.saturating_add(d >> 1);
+src/decode/color.rs	1	value-saturation	let rd: u8 = r.saturating_add(d);
+src/decode/color.rs	1	value-saturation	let vd_b: u8 = v.saturating_add(d);
+src/decode/color.rs	1	value-saturation	let vd_g: u8 = v.saturating_add(d >> 1);
+src/decode/color.rs	1	value-saturation	let vd_r: u8 = v.saturating_add(d);
+src/decode/idct_extended.rs	1	value-saturation	val.0.saturating_add(CENTERJSAMPLE).clamp(0, 255) as u8
+src/decode/idct_scaled.rs	1	value-saturation	val.saturating_add(CENTERJSAMPLE).clamp(0, 255) as u8
+src/decode/lossless.rs	1	clamped-difference	.saturating_sub(1)
+src/decode/lossless.rs	1	clamped-difference	.saturating_sub(point_transform as i32)
+src/decode/marker.rs	1	bounds-check	if size > data_end.saturating_sub(payload) {
+src/decode/marker.rs	1	bounds-check	if total > end.saturating_sub(self.pos) || self.pos + total > self.data.len() {
+src/decode/marker.rs	2	clamped-difference	let data_len = data_end.saturating_sub(data_start);
+src/decode/pipeline_impl/color.rs	1	bounds-check	if output_x_offset.saturating_add(out_width) > full_width || out_height > full_height {
+src/decode/pipeline_impl/output.rs	1	clamped-difference	*off = (cx * comp_w / full_width).min(comp_w.saturating_sub(1));
+src/decode/pipeline_impl/output.rs	1	clamped-difference	ch.min(base_h.saturating_sub(offset))
+src/decode/pipeline_impl/output.rs	1	clamped-difference	cw.min(out_width.saturating_sub(cx))
+src/decode/pipeline_impl/output.rs	1	clamped-difference	expanded_w.min(base_w.saturating_sub(aligned_x))
+src/decode/pipeline_impl/output.rs	1	clamped-difference	let above_idx: usize = cy.saturating_sub(1);
+src/decode/pipeline_impl/output.rs	1	clamped-difference	let clamped_w: usize = expanded_w.min(out_width.saturating_sub(aligned_x));
+src/decode/pipeline_impl/output.rs	1	clamped-difference	let height: usize = ch.min(image.height.saturating_sub(offset));
+src/decode/pipeline_impl/output.rs	1	clamped-difference	let last_cy: usize = actual_cb_h.saturating_sub(1);
+src/decode/pipeline_impl/progressive.rs	1	clamped-difference	let mcu_start = mcu_start.saturating_sub(1);
+src/decode/toggles.rs	1	bounds-check	if cw < out_width || component_planes[0].len() < out_height.saturating_mul(cw) {
+src/decode/toggles.rs	1	clamped-difference	let cx: usize = (x / hf).min(cbw.saturating_sub(1));
+src/decode/toggles.rs	1	clamped-difference	let cy: usize = (y / vf).min((component_planes[1].len() / cbw).saturating_sub(1));
+src/encode/pipeline_impl/arithmetic.rs	1	geometry-count	.saturating_mul(mcus_per_row)
+src/encode/pipeline_impl/mcu.rs	1	geometry-count	.saturating_mul(v_factor);
+src/encode/pipeline_impl/mcu.rs	1	clamped-difference	.saturating_sub(1)
+src/encode/pipeline_impl/mcu.rs	1	clamped-difference	let active_rows: usize = plane_height.saturating_sub(block_y).min(src_h);
+src/encode/pipeline_impl/mcu.rs	1	clamped-difference	row.min(active_rows.saturating_sub(1))
+src/encode/pipeline_impl/progressive.rs	1	geometry-count	.saturating_mul(mcus_per_row)
+src/encode/pipeline_impl/sampling.rs	1	clamped-difference	(first_chroma_row + row).min(chroma_rows.saturating_sub(1)) * v_factor;
+src/encode/pipeline_impl/sampling.rs	1	clamped-difference	let middle_end: usize = out_width.saturating_sub(1);

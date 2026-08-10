@@ -70,6 +70,15 @@ const EXPECTED: &[(&str, i32, &str)] = &[
         "Application transferred too few scanlines",
     ),
     ("JERR_UNKNOWN_MARKER", 70, "Unsupported marker type 0x%02x"),
+    // Added with P4-139: upstream raises this — not `JERR_IMAGE_TOO_BIG` — when
+    // `image_width * input_components` is not representable as `JDIMENSION`
+    // (`jcmaster.c:190-194`). The two are different failures and the messages
+    // differ in arity, so conflating them emits a `%u` slot with nothing in it.
+    (
+        "JERR_WIDTH_OVERFLOW",
+        72,
+        "Image too wide for this implementation",
+    ),
 ];
 
 fn find_cc() -> Option<PathBuf> {

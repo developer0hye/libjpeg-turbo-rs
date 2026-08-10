@@ -4557,7 +4557,7 @@ build. A/B/A/B on the 420 case settled it: 5.4226 / 5.4438 / 5.4247 / 5.4417. A
 single A/B pair would have recorded a regression that does not exist and sent
 this item to the criterion-3 fallback design for no reason.
 
-## P4-139. Memory-Layout Arithmetic Is Decentralised and Uses Saturating/Unchecked Multiplication — **OPEN**
+## P4-139. Memory-Layout Arithmetic Is Decentralised and Uses Saturating/Unchecked Multiplication — **PARTIAL: every span is checked and the rule is enforced; centralisation and `ScalingFactor` outstanding**
 
 **GitHub:** [#478](https://github.com/developer0hye/libjpeg-turbo-rs/issues/478) — under the [#481](https://github.com/developer0hye/libjpeg-turbo-rs/issues/481) umbrella.
 
@@ -4625,6 +4625,121 @@ instance; this entry is the common cause.
    `row_bytes`, dimensions whose product overflows on 32-bit) on both 64- and
    32-bit targets.
 
+**Status (2026-08-11): partial — criterion 3 done, and with it every
+*confirmed instance*. What remains is the refactor, not a live defect.**
+
+* **Criterion 3 — done, and it is the load-bearing one.** The rule is enforced
+  by `tests/sizing_arithmetic_gate.rs` against
+  `docs/sizing_arithmetic_inventory.tsv`, which classifies all 83 remaining
+  `saturating_*` occurrences (70 distinct lines) in library sources. A new one fails the build until
+  a human classifies it; a stale row fails until it is removed. **Naming the
+  mechanism was part of the criterion, so: it is a test, not a grep or a review
+  checklist** — a test runs on every CI leg and cannot be skipped by a reviewer
+  in a hurry.
+
+  Scope covers `saturating_mul`/`add`/`sub` — 83 occurrences across 70 lines.
+  **`wrapping_*` is deliberately excluded, which narrows the criterion's literal
+  wording** ("no `saturating_*` or `wrapping_*`"), so it is recorded here rather
+  than left implicit. It is the IDCT's C-parity idiom at 244 sites where
+  wrapping is the *specified* behaviour being matched, and those kernels are
+  under active optimisation; an inventory regenerated on every IDCT edit would
+  be deleted within a month, and a gate nobody maintains is worse than a
+  narrower one that holds.
+
+  The cost of that narrowing, assessed rather than assumed: the excluded set
+  includes index arithmetic such as `src/common/exif.rs:62-75`, where
+  `data[offset.wrapping_add(1)]` would wrap instead of panicking. It is **not
+  reachable** — `data[offset]` is evaluated first and its bounds check panics,
+  and a valid `offset` cannot be within 1 of `usize::MAX` since it is below
+  `data.len()`. Latent style, not a defect; if `wrapping_*` is ever gated, that
+  is the first site to fix.
+
+  `saturating_sub` *is* covered, and adding it found two unclassified sites in
+  `sampling.rs`. It can only floor at 0, never over-size a span, so every
+  instance classifies as `clamped-difference` — but the gate seeing them is the
+  point.
+
+  A second test asserts the gate actually scans hundreds of files across both
+  crates, because a path bug would otherwise make it pass forever.
+
+* **Every confirmed instance is fixed.** The `saturating_mul` spans in
+  `decompress.rs`/`precision.rs` went earlier; `progressive_output.rs` went with
+  P4-136; the packed-YUV and `tj3SaveImage8` slice spans went with P4-137. This
+  change takes the last five, in `jpeglib.rs`: the destination-buffer doubling,
+  the 8-bit and 12/16-bit staging buffers, the per-row copy length in
+  `jpeg_write_scanlines`, and `jcopy_block_row`'s `copy_nonoverlapping` length.
+  The last two are the ones worth naming — both were feeding a *memcpy length*,
+  where saturating to `usize::MAX` copies the address space rather than
+  reporting the geometry.
+
+  The error each raises follows upstream rather than collapsing to one code,
+  because upstream distinguishes three different failures:
+
+  | Failure | Code | Upstream |
+  | --- | --- | --- |
+  | `image_width * input_components` not representable as `JDIMENSION` | `JERR_WIDTH_OVERFLOW` (parameterless) | `jcmaster.c:190-194` |
+  | An individual axis over `JPEG_MAX_DIMENSION` | `JERR_IMAGE_TOO_BIG` (`%u`) | `jcmaster.c:186-189` |
+  | A staging span that cannot be allocated | `JERR_OUT_OF_MEMORY` case 8 (`%d`) | `jmemmgr.c:364-380` |
+
+  Two further details the first attempt got wrong. The width test is
+  representability as `JDIMENSION`, **not** as `usize`: on a 64-bit host a 4 GiB
+  row fits `usize` and would have sailed past a `checked_mul` while the C
+  library errors. And the staging span needs an `isize::MAX` bound on top of
+  `checked_mul`, because a 32-bit product can fit `usize`, exceed `isize::MAX`,
+  and make `Vec::resize` panic *after* the cinfo has already changed state —
+  where `unwind_guard!` swallows it.
+
+  Two paths deliberately do not raise: the destination-buffer doubling records
+  `JERR_OUT_OF_MEMORY` through its existing `pending_error` channel, and
+  `jcopy_block_row` returns silently because it has no error manager to raise
+  through — matching its existing contract for a null or empty request.
+
+  The three `progressive_entropy.rs` `reserve` expressions inherited from P4-136
+  are unchanged and remain listed above; they are unchecked but not saturating,
+  and no reachable path was found.
+
+**What remains.**
+
+* **Criteria 1–2 — the `ImageLayout` abstraction and its adoption.** Not
+  started. This is now a *consistency* refactor rather than a safety fix: the
+  spans are individually checked, but the checking is still written out at each
+  site. Sequence it after the classic-ABI work rather than before — it touches
+  every subsystem in criterion 2's list, and each of those is under active
+  change.
+* **Criterion 4 — `ScalingFactor`. Decision recorded: do it, in 0.9.0, as
+  private fields plus `try_new`.** Not the 16-variant enum: the type is
+  constructed from caller-supplied `num`/`denom` at the C ABI boundary
+  (`tj3SetScalingFactor`), so an enum would need a fallible lookup anyway and
+  would lose the ability to represent what upstream accepts. The migration is
+  `num`/`denom` → `num()`/`denom()` accessors plus `try_new(num, denom) ->
+  Result<Self>`, touching ~30 read sites (mostly `tests/cross_product_*`) and 2
+  struct-literal sites. **It is deferred, not dismissed** — it is the one
+  criterion here that cannot be done without a breaking change, and this crate
+  is 0.8.0, so it belongs in a version bump rather than smuggled into a fix.
+
+  Worth recording so the next session does not re-derive it: the *overflow* half
+  of that criterion is not reachable. `scale_dim`'s `input_dim * self.num`
+  cannot overflow — `input_dim` is bounded by a JPEG's 65535 dimension limit and
+  `num` by 16 — so what is left is the `assert!` on `denom == 0`, a panic on
+  public input. That is an API-quality defect, not a memory-safety one.
+* **Criterion 5 — property tests, and a 32-bit C-ABI leg.** The second half was
+  discovered while closing criterion 3 and is the more useful of the two: the
+  `usize`-overflow and `isize::MAX` arms of the new span guards are 32-bit-only
+  and **no CI leg exercises them**. `armv7.yml` runs the root crate's `--lib`
+  and `no_std_dispatch`; the WASI leg selects the root workspace member; neither
+  builds the C-ABI crate's tests, and selecting it there currently fails a
+  pointer-width ABI assertion. So the 64-bit-reachable `JDIMENSION` arm is
+  covered by `capi_span_overflow_guards.rs` and the rest is argued, not tested.
+  A 32-bit C-ABI leg would close both this and the equivalent gap P4-136's
+  pointer-width tests have.
+
+* **Criterion 5 (original) — property tests over adversarial geometry.** The individual
+  guards have targeted regressions (`yuv_packed_length_overflow.rs`,
+  `norealloc_buffer_capacity.rs`, the P4-136 pointer-width pair), but there is no
+  generative test sweeping huge dimensions and `stride < row_bytes` across both
+  pointer widths. Wants `proptest` or a hand-rolled matrix; the 32-bit leg exists
+  already (`armv7.yml`, `wasm32-wasip1`).
+
 **Also recorded: resource-limit defaults.** `DecodeLimits` currently defaults to
 roughly 2.1 billion pixels with `max_memory = None`. That is a compatibility
 default, not a safe-for-untrusted-input default. Consider splitting
@@ -4633,6 +4748,25 @@ default, not a safe-for-untrusted-input default. Consider splitting
 one-shot convenience APIs defaulting to `untrusted`. This is a robustness/DoS
 posture decision, distinct from the soundness items — decide it here, or split it
 out, but do not leave it unstated.
+
+**Decision (2026-08-11): keep one permissive default; do not add an
+`untrusted()`/`compatibility()` split.** Reasons, in order of weight:
+
+1. The stated goal of this project is to *replace* C libjpeg-turbo. A default
+   that rejects images `djpeg` accepts is a drop-in failure, and it would fail
+   in the worst way — on the user's real input, after they had already switched.
+2. The split invites the wrong mental model. `untrusted()` reads as "safe
+   against hostile input", which memory safety must be **unconditionally**, not
+   as an opt-in profile. Naming a profile that way implies the other one is
+   unsafe, which would be a bug rather than a setting.
+3. `DecodeLimits` is already public and caller-settable, so anyone with a DoS
+   posture to enforce can express it today, in the units their deployment cares
+   about, rather than accepting a ceiling we guessed.
+
+What is worth doing instead, and is *not* claimed as done here: document
+recommended bounds for untrusted input in the crate docs next to
+`DecodeLimits`, as guidance rather than a second default. Recorded with
+criterion 5's remaining work above.
 
 ## P4-140. Public Documentation Claims Safety and Drop-In Status the Code Does Not Support — **CLOSED 2026-08-09**
 
