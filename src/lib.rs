@@ -119,11 +119,17 @@ pub mod api;
 pub mod common;
 pub mod decode;
 pub mod encode;
-// The SIMD backends predate the crate-level lint and carry ~780 bare
-// unsafe operations inside their unsafe fns; wrapping each with its own
-// block + SAFETY note is a mechanical-but-careful sweep tracked in
-// LAST_MILE (filed with issue #389). Non-SIMD code gets the full deny
-// immediately.
+// The SIMD backends predate the crate-level lint. Wrapping each bare
+// operation with its own block + SAFETY note is a mechanical-but-careful
+// sweep tracked in LAST_MILE (filed with issue #389, sized by #474
+// criterion 6). Non-SIMD code gets the full deny immediately.
+//
+// Scope, measured 2026-08-10 by deleting the `allow` below and counting
+// `cargo check --lib [--target T] 2>&1 | grep -c '^error\[E0133\]'`:
+// aarch64-apple-darwin 679, x86_64-apple-darwin 630,
+// wasm32-unknown-unknown 229. These overlap — each build sees its own
+// backend plus the shared scalar code — so they are not additive, and no
+// single target reproduces the "~780" this comment used to claim.
 #[allow(unsafe_op_in_unsafe_fn)]
 pub mod simd;
 pub mod transform;
