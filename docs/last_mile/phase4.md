@@ -305,7 +305,7 @@ Verified with `cargo test --release --test hard_case_x_byte_and_restart` → 6 p
 
 **Why PARTIAL, not CLOSED.** Codex round 8 (on commit `4645b52`) raised three upstream-contract-fidelity gaps that lie *beyond* the stated acceptance criteria but mean the broad title — "honor per-byte source suspension" — is not yet fully met across every entry point: (1) `jpeg_read_header` only stops at the first SOS on the *suspending* path (gated on `body_incomplete`); a fully-buffered consumer still has the whole body swallowed in `read_header`, so a later `jpeg_consume_input` reports `REACHED_EOI` immediately without per-scan `REACHED_SOS` callbacks. (2) Buffered-image *output* calls (`jpeg_start_output` / `jpeg_read_scanlines` / `jpeg_finish_output`) do not themselves pull from the source manager — a consumer driving decode purely through the output side on a still-`body_incomplete` handle makes no forward progress. (3) The `marker_list` is *rebuilt* from the completed stream rather than *appended* in place, so a `jpeg_saved_marker_ptr` a consumer retained mid-stream is invalidated by the rebuild. All three need a deeper, consumer-risky refactor (gap (1) changes every fully-buffered consumer's `read_header` behavior), none block T3, and no known consumer exercises them — so they are filed as [P4-26](#p4-26-deeper-streaming-contract-fidelity-beyond-the-p4-13-core--open) rather than expanding this PR's scope. The verified streaming-suspension core lands here.
 
-## P4-14. `max_memory_to_use` Is ABI-Mirrored But Not Enforced in the C-Side Allocation Path — **OPEN**
+## P4-14. `max_memory_to_use` Is ABI-Mirrored But Not Enforced in the C-Side Allocation Path — **PARTIAL: the memory-manager vtable enforces it; the native decode path does not route through it**
 
 **Correction (2026-08-11): the error contract this item and [#467](https://github.com/developer0hye/libjpeg-turbo-rs/issues/467)
 specify is wrong, and the "no spill path" constraint dissolves.** Recorded
@@ -326,11 +326,92 @@ unconditionally. The library we are replacing has no backing store either. Our
 matching upstream is a ~60-line change in `realize_virt_arrays_impl` rather than
 a new subsystem.
 
-Gaps the implementation will need: `memmgr.rs` has no error plumbing (`:732`
-records "we lack the error-mgr handle"), but `realize_virt_arrays_impl` takes
-`cinfo` and `jpeglib.rs`'s `invoke_error_exit` derives `err` from it — making
-that helper `pub(crate)` is the whole gap. `total_space_allocated`, upstream's
-third argument to the budget check, does not exist on our side yet.
+**Status (2026-08-11): partial.** Enforcement landed in
+`realize_virt_arrays_impl`, which is the only place upstream consults the
+budget:
+
+* `virt_array_maximum_space` mirrors upstream's `maximum_space` accumulation
+  (`jmemmgr.c:712-740`) with `checked_mul`/`checked_add` — including upstream's
+  own overflow guard, which is `checked_add` written in C. P4-139's rule
+  applies: these bound a real allocation.
+* `budget_available` mirrors `jpeg_mem_available` (`jmemnobs.c:66-78`),
+  including that `max_memory_to_use <= 0` means *unlimited*. The field is a
+  signed `long`, so a negative value must not read as an enormous budget.
+* `total_space_allocated` now exists, tracked in `push_block` and released in
+  `free_pool` as upstream does (`jmemmgr.c:1140-1157`). Without it the check
+  would compare each request against the whole allowance and let a sequence of
+  small ones through.
+* `invoke_error_exit` is `pub(crate)`, closing the "we lack the error-mgr
+  handle" gap `memmgr.rs:732` recorded.
+
+**Deliberate simplification, recorded rather than hidden.** Upstream parcels a
+shortfall into strips and errors only for the arrays that still do not fit; we
+allocate full height, so any shortfall is fatal. That is more conservative in *this*
+dimension — it can reject a geometry upstream would have squeezed into strips.
+It is not uniformly more conservative, and the claim that it "never accepts one
+upstream rejects" would be false: the untracked manager and virtual-control
+allocations recorded below mean we can accept, near the limit, what upstream
+refuses. Strip-wise realization is a separate piece of work.
+
+Proof: `capi_max_memory_budget.rs` (3 tests — budget below the working set
+raises `JERR_NO_BACKING_STORE`, an ample budget still realizes, and a
+non-positive budget means unlimited), verified to fail when the guard is
+removed. `capi_classic_error_codes.rs` cross-validates code 51 and the message
+"Memory limit exceeded" against the pinned v8 headers (18 codes now) — note
+this pins the *constant*, not what a C consumer sees: `format_message` renders
+"bogus message code" for every error today, filed as
+[P4-146](#p4-146-jpeg_std_error-leaves-jpeg_message_table-null-so-every-classic-error-formats-as-bogus-message-code--open) — which is
+how the first draft of that test was caught guessing "Backing store not
+supported" from the macro name.
+
+**What is NOT done, and why this is partial rather than closed.** The budget is
+enforced in the memory-manager vtable, but **the classic decode path does not
+route through that vtable**: `run_decoder_for_start()` builds a `Decoder::new()`
+with default limits, and `jpeg_read_coefficients()` materializes
+`JpegCoefficients` before calling it. So a C caller following the sequence this
+item's own criterion names — `jpeg_read_header → jpeg_start_decompress →
+jpeg_read_scanlines` — is still unbounded, and a 1-byte cap decodes a
+progressive fixture that upstream refuses.
+
+That gap was invisible to the first version of this work because its test drove
+`realize_virt_arrays` through the vtable directly. The test proves the callback
+enforces; it does not prove the *documented C sequence* is bounded. Closing this
+item requires plumbing the field into the native decode path's `DecodeLimits`
+and a test that drives the public C API.
+
+Also outstanding: **the enforcement is stricter than upstream in one direction
+and laxer in the other**, and both need recording rather than a single "matches
+upstream" claim.
+
+*Stricter:* upstream parcels a shortfall into strips of `maxaccess` rows and
+fails only when even that minimum will not fit. We compare against the full
+footprint, so a budget landing between the minimum and the full size succeeds
+upstream and fails here. `capi_max_memory_budget.rs` pins *our* behaviour and
+says so; it deliberately does not claim parity for that case. Closing it means
+strip-wise realization.
+
+*Laxer:* `total_space_allocated` starts at zero
+and is updated only in `push_block`, so it excludes the `Combined` manager and
+every `Box<JVirt*Control>` — upstream seeds the counter with the manager size
+and allocates controls through tracked `alloc_small`. Near the limit we accept
+what upstream rejects.
+
+**Two regressions this work would have shipped, caught in review:**
+
+1. `DEFAULT_MAX_MEMORY_TO_USE` was `1_000_000_000` with a comment calling it
+   upstream's default and "advisory only; we never enforce a ceiling". Both
+   halves were wrong the moment the field went live — upstream's
+   `jpeg_mem_init` returns **0** (`jmemnobs.c:101-104`) — and enforcing the
+   dormant value would have turned a harmless wrong constant into a live 1 GB
+   cap rejecting workloads upstream accepts. Now 0.
+2. The estimator assumed 1 byte per sample and counted already-realized arrays.
+   The first let a 12/16-bit array pass a cap it then doubled; the second
+   charged realized bytes twice, so a second no-op `realize_virt_arrays` failed
+   where the first succeeded.
+
+**P4-120 is unaffected and remains open**: forcing a shim *allocation* to fail
+still has no injection point, and the `msg_parm` payload of
+`JERR_OUT_OF_MEMORY` is still unproven.
 
 **Motivation.** Cold inspection of `crates/libjpeg-turbo-rs-capi/src/memmgr.rs` shows:
 
@@ -339,7 +420,15 @@ third argument to the budget check, does not exist on our side yet.
 
 `docs/FEATURE_PARITY.md` lists `max_memory_to_use` as ✅ on the strength of `Decoder::set_max_memory()` / `TJPARAM_MAXMEMORY` honouring it in the **Rust** decode pipeline (now `src/decode/pipeline_impl/api.rs`). For the **C-ABI** consumer using `cinfo->mem->max_memory_to_use` directly (the upstream-documented path), the limit is silently ignored.
 
-**Acceptance criteria.**
+**Acceptance criteria — SUPERSEDED, retained for history.**
+
+> The criteria below were written against a mistaken model of upstream: they
+> ask for `JERR_OUT_OF_MEMORY` "msg_code 16" and assume upstream spills virtual
+> arrays to a backing store. Neither holds. The budget is consulted by
+> `jpeg_mem_available` and a shortfall raises **`JERR_NO_BACKING_STORE` (51)**;
+> upstream's shipped build has no backing store either
+> (`CMakeLists.txt:678` compiles `src/jmemnobs.c`). The live contract is the
+> Status section further down. Do not implement to the text below.
 
 - A C harness that:
   1. Allocates `jpeg_decompress_struct`, sets `cinfo.mem->max_memory_to_use = N` where `N` is below the working-set size of a fixture (e.g. 64 MB cap on a progressive 4096² fixture with restart-every-MCU).
@@ -4655,14 +4744,14 @@ instance; this entry is the common cause.
 
 * **Criterion 3 — done, and it is the load-bearing one.** The rule is enforced
   by `tests/sizing_arithmetic_gate.rs` against
-  `docs/sizing_arithmetic_inventory.tsv`, which classifies all 83 remaining
-  `saturating_*` occurrences (70 distinct lines) in library sources. A new one fails the build until
+  `docs/sizing_arithmetic_inventory.tsv`, which classifies all 86 remaining
+  `saturating_*` occurrences (73 distinct lines) in library sources. A new one fails the build until
   a human classifies it; a stale row fails until it is removed. **Naming the
   mechanism was part of the criterion, so: it is a test, not a grep or a review
   checklist** — a test runs on every CI leg and cannot be skipped by a reviewer
   in a hurry.
 
-  Scope covers `saturating_mul`/`add`/`sub` — 83 occurrences across 70 lines.
+  Scope covers `saturating_mul`/`add`/`sub` — 86 occurrences across 73 lines.
   **`wrapping_*` is deliberately excluded, which narrows the criterion's literal
   wording** ("no `saturating_*` or `wrapping_*`"), so it is recorded here rather
   than left implicit. It is the IDCT's C-parity idiom at 244 sites where
@@ -5084,3 +5173,44 @@ fix.
    the one a doc fix cannot deliver.
 4. The crate-root **Ownership transfer** note and the five `# Safety` sections
    drop the P4-145 caveat once (1)-(3) land.
+
+## P4-146. `jpeg_std_error` Leaves `jpeg_message_table` Null, So Every Classic Error Formats as "bogus message code" — **OPEN**
+
+**GitHub:** [#518](https://github.com/developer0hye/libjpeg-turbo-rs/issues/518) — filed 2026-08-11 from the P4-14 review. Affects every classic
+`JERR_*`, not one code.
+
+**Motivation.** `jpeg_std_error` sets `jpeg_message_table = std::ptr::null()`
+(`jpeglib.rs:1479`). `default_format_message` therefore always takes its
+fallback and writes `"libjpeg-turbo-rs: bogus message code"` into the caller's
+buffer — for *every* error, whatever `msg_code` says.
+
+A C consumer's normal error-reporting path is `err->output_message(cinfo)` or
+`err->format_message(cinfo, buf)`. Both go through that table. So a caller that
+hits, say, the new `max_memory_to_use` guard gets `msg_code = 51` (correct) and
+the string `"libjpeg-turbo-rs: bogus message code"` (useless) where stock
+libjpeg-turbo prints `"Memory limit exceeded"`.
+
+**Why it stayed invisible.** `capi_classic_error_codes.rs` verifies each code's
+number *and* message against the pinned upstream headers — but it reads the
+message from `jerror.h`, never from our formatter. The table is correct and the
+shim cannot produce it. The test is a genuine parity check of the *constants*
+and a false-green on the *rendering*.
+
+That is the same shape as P4-120's complaint one level up: the code is pinned,
+the payload is not.
+
+**Acceptance criteria.**
+
+1. `jpeg_std_error` populates `jpeg_message_table` with the standard message
+   list and sets `last_jpeg_message`, so `format_message` renders upstream's
+   text for every code the shim can raise.
+2. Parameter substitution works for both shapes: `%d`/`%u` from `msg_parm.i`
+   (`JERR_OUT_OF_MEMORY` case %d, `JERR_IMAGE_TOO_BIG` %u) and `%s` from
+   `msg_parm.s`.
+3. An end-to-end test drives a real failure through `format_message` and
+   asserts the rendered string, for at least one parameterless code and one of
+   each parameter shape. Extend `capi_classic_error_codes.rs` so its message
+   column is checked against *our formatter*, not only against `jerror.h` —
+   otherwise the same false-green returns.
+4. `output_message` writes to `stderr` in upstream's format, and
+   `trace_level`-gated `emit_message` calls stay silent by default.

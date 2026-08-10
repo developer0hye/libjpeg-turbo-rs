@@ -21,14 +21,14 @@ use std::ffi::{c_int, c_void};
 use libjpeg_turbo_rs_capi::{
     jpeg_CreateDecompress, jpeg_destroy_decompress, jpeg_mem_src, jpeg_std_error, JpegErrorMgr,
 };
-use std::sync::atomic::{AtomicI32, Ordering};
-
 /// `jerror.h` JMESSAGE ordinal for `JERR_INPUT_EMPTY`.
 const JERR_INPUT_EMPTY: c_int = 43;
 
-static LAST_MSG_CODE: AtomicI32 = AtomicI32::new(-1);
+/// Written into `msg_code` before each run, so "nothing raised" is
+/// distinguishable from "raised code 0".
+const NO_ERROR: c_int = -1;
 
-/// Replacement `error_exit` that records the code and returns.
+/// A no-op `error_exit`.
 ///
 /// libjpeg's contract is that `error_exit` never returns, and a real consumer
 /// would `longjmp` out. A Rust test cannot: panicking across an `extern "C"`
@@ -36,28 +36,33 @@ static LAST_MSG_CODE: AtomicI32 = AtomicI32::new(-1);
 /// the first version of this test did. Returning is safe here because
 /// `jpeg_mem_src` returns immediately after raising — the contract this test
 /// exercises is *which code is raised*, not what a handler does next.
-unsafe extern "C" fn recording_error_exit(cinfo: *mut c_void) {
-    // Read through the real `JpegErrorMgr` rather than a hand-computed offset:
-    // `cinfo`'s first field is `err`, and the struct is the crate's own
-    // ABI-pinned mirror, so this cannot drift from the layout under test.
-    let err: *mut JpegErrorMgr = unsafe { *(cinfo as *const *mut JpegErrorMgr) };
-    LAST_MSG_CODE.store(unsafe { (*err).msg_code }, Ordering::SeqCst);
-}
+///
+/// The code is read afterwards from this run's own error manager. It used to
+/// be captured into a process-global `AtomicI32` that `drive()` reset on entry
+/// — and because `cargo test` runs this file's two tests in parallel, one
+/// could reset the global between the other's raise and its read, so the
+/// second saw `-1` and failed claiming no error was raised. Observed once in a
+/// full-workspace run; the tests pass in isolation, which is what makes that
+/// shape expensive to diagnose. Per-instance state removes the race entirely.
+unsafe extern "C" fn ignore_error_exit(_cinfo: *mut c_void) {}
 
 fn drive(buf: *const u8, size: std::os::raw::c_ulong) -> c_int {
-    LAST_MSG_CODE.store(-1, Ordering::SeqCst);
     let mut cinfo: Vec<u8> = vec![0u8; 1024];
     let mut jerr: JpegErrorMgr = unsafe { std::mem::zeroed() };
     unsafe {
         let errp: *mut JpegErrorMgr = jpeg_std_error(&mut jerr as *mut JpegErrorMgr);
         assert!(!errp.is_null(), "jpeg_std_error");
-        (*errp).error_exit = Some(recording_error_exit);
+        (*errp).error_exit = Some(ignore_error_exit);
+        (*errp).msg_code = NO_ERROR;
         *(cinfo.as_mut_ptr() as *mut *mut JpegErrorMgr) = errp;
         jpeg_CreateDecompress(cinfo.as_mut_ptr() as *mut c_void, 80, cinfo.len());
         jpeg_mem_src(cinfo.as_mut_ptr() as *mut c_void, buf, size);
+        // Read before destroy: the error manager is this run's own `jerr`, so
+        // no other test can have touched it.
+        let raised: c_int = (*errp).msg_code;
         jpeg_destroy_decompress(cinfo.as_mut_ptr() as *mut c_void);
+        raised
     }
-    LAST_MSG_CODE.load(Ordering::SeqCst)
 }
 
 #[test]

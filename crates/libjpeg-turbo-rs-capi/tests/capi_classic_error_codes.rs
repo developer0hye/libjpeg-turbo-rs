@@ -17,6 +17,7 @@
 //! It also asserts the *message text*, because a correct number attached to
 //! the wrong message would still mislead every consumer that formats it.
 
+use std::ffi::c_int;
 use std::path::PathBuf;
 use std::process::Command;
 
@@ -70,6 +71,13 @@ const EXPECTED: &[(&str, i32, &str)] = &[
         "Application transferred too few scanlines",
     ),
     ("JERR_UNKNOWN_MARKER", 70, "Unsupported marker type 0x%02x"),
+    // Added with P4-14: what upstream raises when `max_memory_to_use` cannot
+    // cover the virtual arrays. NOT `JERR_OUT_OF_MEMORY` — the budget is
+    // consulted by `jpeg_mem_available` (`jmemnobs.c:66-78`) and the spill that
+    // follows hits `jmemnobs.c:87-92`. Cross-checked here because the issue
+    // that requested this enforcement named the wrong code *and* the wrong
+    // number for it.
+    ("JERR_NO_BACKING_STORE", 51, "Memory limit exceeded"),
     // Added with P4-139: upstream raises this — not `JERR_IMAGE_TOO_BIG` — when
     // `image_width * input_components` is not representable as `JDIMENSION`
     // (`jcmaster.c:190-194`). The two are different failures and the messages
@@ -248,24 +256,62 @@ fn classic_error_codes_match_upstream() {
 /// The table above must cover every `JERR_*` the shim defines. Without this a
 /// newly added constant is unverified, which is exactly how `JERR_OUT_OF_MEMORY`
 /// stayed unpinned.
+///
+/// Scans **every** shim module that defines error constants, not just
+/// `jpeglib.rs`. P4-14 added `JERR_NO_BACKING_STORE` and `JERR_OUT_OF_MEMORY`
+/// to `memmgr.rs`, where a single-file scan would not have seen them — and
+/// `JERR_OUT_OF_MEMORY` would have looked covered because `jpeglib.rs` happens
+/// to define a constant by the same name. "Every shim error constant" has to
+/// mean every file, or the claim is only as good as the file list.
 #[test]
 fn every_shim_error_constant_is_covered() {
-    let source: String =
-        std::fs::read_to_string(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/jpeglib.rs"))
-            .expect("read jpeglib.rs");
+    const SCANNED_MODULES: [&str; 2] = ["src/jpeglib.rs", "src/memmgr.rs"];
 
-    let defined: Vec<String> = source
-        .lines()
-        .filter_map(|line| {
-            let rest: &str = line.trim().strip_prefix("const JERR_")?;
-            let name: &str = rest.split(':').next()?;
-            Some(format!("JERR_{name}"))
-        })
-        .collect();
-    assert!(
-        !defined.is_empty(),
-        "found no `const JERR_*` in jpeglib.rs — this test's parser has drifted"
-    );
+    let mut defined: Vec<String> = Vec::new();
+    for module in SCANNED_MODULES {
+        let path: PathBuf = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(module);
+        let source: String =
+            std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {module}: {e}"));
+        // Parse the *value* too. Comparing names alone would let
+        // `memmgr.rs`'s `JERR_NO_BACKING_STORE` drift from 51 to anything
+        // while both tests stayed green — `EXPECTED` is checked against
+        // upstream independently, so a name match proves nothing about the
+        // number the shim actually raises.
+        let found: Vec<(String, c_int)> = source
+            .lines()
+            .filter_map(|line| {
+                let rest: &str = line.trim().strip_prefix("const JERR_")?;
+                let (name, tail) = rest.split_once(':')?;
+                let value: c_int = tail
+                    .split('=')
+                    .nth(1)?
+                    .trim()
+                    .trim_end_matches(';')
+                    .trim()
+                    .parse()
+                    .ok()?;
+                Some((format!("JERR_{name}"), value))
+            })
+            .collect();
+        for (name, value) in &found {
+            if let Some((_, expected, _)) = EXPECTED.iter().find(|(n, _, _)| n == name) {
+                assert_eq!(
+                    value, expected,
+                    "{module} defines {name} = {value}, but the upstream-verified \
+                     table says {expected}"
+                );
+            }
+        }
+        let found: Vec<String> = found.into_iter().map(|(name, _)| name).collect();
+        assert!(
+            !found.is_empty(),
+            "found no `const JERR_*` in {module} — this test's parser has drifted, \
+             or the constants moved and this list needs updating"
+        );
+        defined.extend(found);
+    }
+    defined.sort();
+    defined.dedup();
 
     let covered: Vec<&str> = EXPECTED.iter().map(|(name, _, _)| *name).collect();
     let missing: Vec<&String> = defined

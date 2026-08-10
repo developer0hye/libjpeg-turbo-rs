@@ -410,7 +410,7 @@
 - [x] `alloc_small` / `alloc_large` / `alloc_sarray` / `alloc_barray` — N/A (Rust `Vec`/`Box` replaces C pool allocator)
 - [x] `request_virt_sarray` / `request_virt_barray` / virtual array API — N/A (Rust uses direct `Vec<Vec<>>` coefficient storage)
 - [x] `free_pool` / `self_destruct` — N/A (Rust Drop trait handles cleanup)
-- [x] `max_memory_to_use` / `max_alloc_chunk` — `Decoder::set_max_memory()` / `TjHandle` `TJPARAM_MAXMEMORY`. **Rust-side only (P4-14).** The classic `cinfo->mem->max_memory_to_use` field is mirrored at the correct offset but never compared against, so a C consumer that lowers it gets no enforcement. See the P4-14 section of `docs/ABI_COMPATIBILITY.md` for why (no virtual-array spill path) and what to use instead.
+- [x] `max_memory_to_use` / `max_alloc_chunk` — `Decoder::set_max_memory()` / `TjHandle` `TJPARAM_MAXMEMORY`, **plus partial classic enforcement since 2026-08-11 (P4-14).** `cinfo->mem->max_memory_to_use` is now compared against in `realize_virt_arrays`, the only place upstream consults it, raising `JERR_NO_BACKING_STORE` ("Memory limit exceeded", 51) exactly as upstream's no-backing-store build does. Its default is upstream's `0` (unlimited), not the `1000000000L` this line used to claim. **Still partial:** the classic decode path does not route through that vtable, so a C consumer lowering the field does not yet bound `jpeg_read_header` → `jpeg_start_decompress`. See the P4-14 section of `docs/ABI_COMPATIBILITY.md`.
 - [x] `tj3Alloc()` / `tj3Free()` — N/A (Rust ownership; `Vec<u8>` return replaces C caller-managed buffers)
 
 ---

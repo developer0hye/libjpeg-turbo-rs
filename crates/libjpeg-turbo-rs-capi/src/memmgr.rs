@@ -21,11 +21,15 @@
 //!
 //! libjpeg historically spilled "really big" virtual arrays to a backing
 //! file when they exceeded `jpeg_mem_available`. This module keeps all
-//! virtual arrays in memory — on any host that can run this library at
-//! all, virtual memory and physical RAM capacity dwarf the 1990s DOS
-//! assumption that tens-of-MB arrays might not fit. Applications that
-//! truly need disk-spill semantics would need to rebuild against stock
-//! libjpeg-turbo.
+//! virtual arrays in memory.
+//!
+//! That is **not** a divergence from the library we replace, contrary to what
+//! this comment used to say: `references/libjpeg-turbo/CMakeLists.txt:678`
+//! compiles `src/jmemnobs.c` unconditionally — the no-backing-store variant.
+//! Stock libjpeg-turbo has no spill path either, so "rebuild against stock to
+//! get disk spill" was advice that could not work. When the budget cannot
+//! cover the arrays, both libraries raise `JERR_NO_BACKING_STORE`
+//! ("Memory limit exceeded").
 
 use std::alloc::{alloc, dealloc, Layout};
 use std::ffi::{c_int, c_long, c_void};
@@ -62,10 +66,15 @@ pub const JPOOL_NUMPOOLS: usize = 2;
 /// value so the `max_alloc_chunk` vtable field matches upstream.
 const MAX_ALLOC_CHUNK: c_long = 1_000_000_000;
 
-/// libjpeg-turbo's `max_memory_to_use` default: `1000_000_000L` (~1GB).
-/// This is advisory only; we never enforce a ceiling because all
-/// virtual-array buffers live in RAM.
-const DEFAULT_MAX_MEMORY_TO_USE: c_long = 1_000_000_000;
+/// `max_memory_to_use`'s default: **0, meaning unlimited**.
+///
+/// This used to be `1_000_000_000` with a comment claiming it was
+/// libjpeg-turbo's default and "advisory only; we never enforce a ceiling".
+/// Both halves were wrong once P4-14 made the field live: upstream's
+/// `jpeg_mem_init` returns **0** (`jmemnobs.c:101-104`), and enforcing a
+/// dormant 1 GB value would have turned a harmless wrong constant into a live
+/// cap rejecting workloads upstream accepts.
+const DEFAULT_MAX_MEMORY_TO_USE: c_long = 0;
 
 // ---------------------------------------------------------------------------
 // Byte-exact ABI mirror of `struct jpeg_memory_mgr` (jpeglib.h §877–939).
@@ -162,9 +171,15 @@ pub struct JpegMemoryMgr {
     pub access_virt_barray: Option<AccessVirtBarrayFn>,
     pub free_pool: Option<FreePoolFn>,
     pub self_destruct: Option<SelfDestructFn>,
-    /// Advisory memory ceiling for virtual-array buffers. We never
-    /// enforce it but expose the field so applications setting it (e.g.
-    /// via `JPEGMEM` env var) observe sane round-trips.
+    /// Memory ceiling for virtual-array buffers, in bytes. `<= 0` means
+    /// unlimited, matching upstream's `if (cinfo->mem->max_memory_to_use)`
+    /// test and its default of 0 (`jmemnobs.c:101-104`).
+    ///
+    /// **Enforced since P4-14** by `realize_virt_arrays_impl`, which is the
+    /// only place upstream consults it either. Note the scope: the classic
+    /// decode path does not route through this vtable, so setting this field
+    /// does not yet bound `jpeg_read_header` → `jpeg_start_decompress`. That
+    /// remainder is tracked in P4-14.
     pub max_memory_to_use: c_long,
     /// Maximum single `alloc_large` request. Pinned at
     /// `MAX_ALLOC_CHUNK` so libjpeg-turbo modules that read this field
@@ -257,12 +272,19 @@ pub struct MemPool {
     /// Virtual coefficient-array control blocks.
     #[allow(clippy::vec_box)]
     virt_barrays: Vec<Box<JVirtBarrayControl>>,
+    /// Bytes handed out by this manager so far — upstream's
+    /// `mem->total_space_allocated` (`jmemmgr.c:1140-1157`), and the third
+    /// argument `jpeg_mem_available` subtracts from the budget. Without it the
+    /// budget check would compare the *next* request against the whole
+    /// allowance and let a sequence of small requests past (P4-14).
+    total_space_allocated: usize,
 }
 
 impl MemPool {
     fn new() -> Self {
         Self {
             blocks: [Vec::new(), Vec::new()],
+            total_space_allocated: 0,
             virt_sarrays: Vec::new(),
             virt_barrays: Vec::new(),
         }
@@ -295,6 +317,14 @@ impl MemPool {
             return std::ptr::null_mut();
         };
         self.blocks[idx].push(Block { ptr: nn, layout });
+        // Upstream tracks this in `alloc_small`/`alloc_large` and subtracts it
+        // in `free_pool` (`jmemmgr.c:1140-1157`). It is what the budget check
+        // in `realize_virt_arrays_impl` measures the request against, so a
+        // sequence of small allocations cannot each be compared to the full
+        // allowance. Saturating is correct here and not a span: this is an
+        // accounting total, and a saturated one only makes the budget check
+        // stricter, never a larger allocation.
+        self.total_space_allocated = self.total_space_allocated.saturating_add(size);
         nn.as_ptr()
     }
 
@@ -308,6 +338,11 @@ impl MemPool {
         // Virtual arrays live only in the IMAGE pool (upstream enforces
         // this in `request_virt_sarray`). Drop them before freeing the
         // underlying blocks so `Box`-owned control pointers release.
+        for block in &self.blocks[idx] {
+            self.total_space_allocated = self
+                .total_space_allocated
+                .saturating_sub(block.layout.size());
+        }
         if pool_id == JPOOL_IMAGE {
             self.virt_sarrays.clear();
             self.virt_barrays.clear();
@@ -616,11 +651,167 @@ unsafe extern "C" fn request_virt_barray_impl(
 /// # Safety
 /// Caller must guarantee `cinfo` points to a valid common struct whose
 /// memory manager was produced by [`create_memory_mgr`].
+/// `jerror.h:114` — "Memory limit exceeded", which is exactly this situation.
+///
+/// This is what upstream raises when `max_memory_to_use` cannot accommodate
+/// the virtual arrays, **not** `JERR_OUT_OF_MEMORY`. The budget is consulted by
+/// `jpeg_mem_available` (`jmemnobs.c:66-78`), `realize_virt_arrays` parcels the
+/// shortfall into strips (`jmemmgr.c:745-760`), and the spill that follows hits
+/// `jmemnobs.c:87-92`. See the P4-14 correction in `phase4.md`.
+const JERR_NO_BACKING_STORE: c_int = 51;
+
+/// `jerror.h` — "Insufficient memory (case %d)". Used here only for geometry
+/// that cannot be expressed in bytes, which is an allocation failure rather
+/// than a budget one and must not report as `JERR_NO_BACKING_STORE`.
+const JERR_OUT_OF_MEMORY: c_int = 56;
+
+/// Outcome of the budget pre-pass. Three states, not two: "cannot be
+/// expressed" is a distinct failure from "does not fit the budget", and it
+/// occurs even when no budget is set.
+enum BudgetVerdict {
+    Fits,
+    OverBudget,
+    /// Carries upstream's `out_of_memory` case number: **10** for a sample
+    /// array, **11** for a block array (`jmemmgr.c:725-738`). The message is
+    /// "Insufficient memory (case %d)", so raising it without the parameter
+    /// would render a stale `msg_parm.i[0]`.
+    GeometryOverflow(c_int),
+}
+
+/// Total bytes the virtual arrays will occupy once realized, or `None` if the
+/// geometry cannot be expressed.
+///
+/// Mirrors upstream's `maximum_space` accumulation (`jmemmgr.c:712-740`),
+/// including its overflow guard — upstream tests `SIZE_MAX - maximum_space <
+/// new_space` before each add, which is `checked_add` written in C. Sizes here
+/// bound a real allocation, so P4-139's rule applies: checked, never saturating.
+/// `sample_size` is the precision-dependent stride `alloc_sarray_impl` will
+/// actually use — 2 bytes at 12/16-bit. Assuming 1 would let a high-precision
+/// array pass a cap it then doubles.
+///
+/// Already-realized controls are skipped, matching upstream's
+/// `if (sptr->mem_buffer == NULL)` filter: their bytes are already counted in
+/// `total_space_allocated`, so including them here would charge twice and make
+/// a second, no-op `realize_virt_arrays` fail where the first succeeded.
+fn virt_array_maximum_space(pool: &MemPool, sample_size: usize) -> Result<usize, c_int> {
+    const OOM_CASE_SARRAY: c_int = 10;
+    const OOM_CASE_BARRAY: c_int = 11;
+
+    let mut maximum_space: usize = 0;
+    for ctrl in &pool.virt_sarrays {
+        if !ctrl.mem_buffer.is_null() {
+            continue;
+        }
+        let rows: usize = ctrl.rows_in_array as usize;
+        let new_space: usize = (ctrl.samplesperrow as usize)
+            .checked_mul(sample_size)
+            .and_then(|row_bytes| rows.checked_mul(row_bytes))
+            .ok_or(OOM_CASE_SARRAY)?;
+        maximum_space = maximum_space
+            .checked_add(new_space)
+            .ok_or(OOM_CASE_SARRAY)?;
+    }
+    for ctrl in &pool.virt_barrays {
+        if !ctrl.mem_buffer.is_null() {
+            continue;
+        }
+        let rows: usize = ctrl.rows_in_array as usize;
+        let new_space: usize = (ctrl.blocksperrow as usize)
+            .checked_mul(std::mem::size_of::<JBlock>())
+            .and_then(|row_bytes| rows.checked_mul(row_bytes))
+            .ok_or(OOM_CASE_BARRAY)?;
+        maximum_space = maximum_space
+            .checked_add(new_space)
+            .ok_or(OOM_CASE_BARRAY)?;
+    }
+    Ok(maximum_space)
+}
+
+/// Upstream's `jpeg_mem_available` (`jmemnobs.c:66-78`): how much of the
+/// budget is left, or "everything you asked for" when no budget is set.
+///
+/// `max_memory_to_use <= 0` means unlimited, matching the C test
+/// `if (cinfo->mem->max_memory_to_use)` — the field is a signed `long`, so a
+/// negative value is not a huge budget.
+fn budget_available(max_memory_to_use: c_long, already_allocated: usize, wanted: usize) -> usize {
+    if max_memory_to_use <= 0 {
+        return wanted;
+    }
+    let budget: usize = max_memory_to_use as usize;
+    budget.saturating_sub(already_allocated)
+}
+
 unsafe extern "C" fn realize_virt_arrays_impl(cinfo: *mut c_void) {
     // Iterate over the virtual-array indices without holding a mutable
     // borrow on the pool so we can reborrow for each `alloc_sarray`
     // call. This mirrors upstream's loop structure and keeps the
     // borrow checker happy.
+    // P4-14: enforce `max_memory_to_use` here, which is the only place
+    // upstream consults it. We have no backing store to spill to — and neither
+    // does upstream's shipped build, which compiles `jmemnobs.c`
+    // unconditionally (`CMakeLists.txt:678`). So a budget that cannot cover the
+    // arrays is `JERR_NO_BACKING_STORE`, exactly as it is there.
+    //
+    // Deliberate simplification, recorded rather than hidden: upstream first
+    // parcels the shortfall into strips and only errors for the arrays that
+    // still do not fit. We allocate full height, so any shortfall is fatal —
+    // more conservative in that direction, since it can reject a geometry
+    // upstream would have squeezed in.
+    //
+    // It is NOT uniformly more conservative, and claiming so would be false:
+    // `total_space_allocated` starts at zero and excludes the manager and the
+    // boxed virtual-array controls, which upstream counts. Near the limit this
+    // can accept a request upstream refuses. Both gaps are recorded in P4-14.
+    let verdict: BudgetVerdict = {
+        let (max_memory_to_use, already_allocated): (c_long, usize) = {
+            let mem_slot: *mut *mut JpegMemoryMgr =
+                unsafe { (cinfo as *mut *mut JpegMemoryMgr).add(1) };
+            let mgr: *mut JpegMemoryMgr = unsafe { *mem_slot };
+            if mgr.is_null() {
+                return;
+            }
+            let combined: *mut Combined = unsafe { combined_from_mgr(mgr) };
+            unsafe {
+                (
+                    (*mgr).max_memory_to_use,
+                    (*combined).pool.total_space_allocated,
+                )
+            }
+        };
+        let pool: &MemPool = match unsafe { pool_from_cinfo(cinfo) } {
+            Some(p) => p,
+            None => return,
+        };
+        let sample_size: usize = unsafe { sarray_sample_size(cinfo) };
+        match virt_array_maximum_space(pool, sample_size) {
+            // Geometry we cannot express in bytes is not a *budget* failure —
+            // it fails with no budget set at all — so it must not borrow the
+            // budget's error code. Upstream calls `out_of_memory` here with
+            // the case number identifying which array list overflowed.
+            Err(case) => BudgetVerdict::GeometryOverflow(case),
+            Ok(maximum_space) => {
+                if budget_available(max_memory_to_use, already_allocated, maximum_space)
+                    < maximum_space
+                {
+                    BudgetVerdict::OverBudget
+                } else {
+                    BudgetVerdict::Fits
+                }
+            }
+        }
+    };
+    match verdict {
+        BudgetVerdict::Fits => {}
+        BudgetVerdict::OverBudget => {
+            crate::jpeglib::invoke_error_exit(cinfo, JERR_NO_BACKING_STORE);
+            return;
+        }
+        BudgetVerdict::GeometryOverflow(case) => {
+            crate::jpeglib::invoke_error_exit_parm(cinfo, JERR_OUT_OF_MEMORY, case);
+            return;
+        }
+    }
+
     let (sarray_len, barray_len): (usize, usize) = {
         let pool: &mut MemPool = match unsafe { pool_from_cinfo(cinfo) } {
             Some(p) => p,

@@ -1135,7 +1135,7 @@ fn raise_classic_error(
 /// still returns cleanly if a custom handler does return (which
 /// violates the libjpeg contract, but defensive code is cheap), so the
 /// caller can fall through to its own error-return path.
-fn invoke_error_exit(cinfo: *mut c_void, msg_code: c_int) {
+pub(crate) fn invoke_error_exit(cinfo: *mut c_void, msg_code: c_int) {
     if cinfo.is_null() {
         return;
     }
@@ -1161,7 +1161,7 @@ fn invoke_error_exit(cinfo: *mut c_void, msg_code: c_int) {
 /// Without it `format_message` renders whatever integer happened to be left in
 /// `msg_parm`, which is exactly the kind of divergence a drop-in replacement
 /// must not have.
-fn invoke_error_exit_parm(cinfo: *mut c_void, msg_code: c_int, parm0: c_int) {
+pub(crate) fn invoke_error_exit_parm(cinfo: *mut c_void, msg_code: c_int, parm0: c_int) {
     if cinfo.is_null() {
         return;
     }
