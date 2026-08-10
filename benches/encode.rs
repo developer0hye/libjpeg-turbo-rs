@@ -72,7 +72,8 @@ fn bench_rgb_to_ycbcr_row(c: &mut Criterion) {
 
         c.bench_function(&format!("rgb_to_ycbcr_row_{width}"), |b| {
             b.iter(|| {
-                (enc.rgb_to_ycbcr_row)(black_box(&rgb), &mut y, &mut cb, &mut cr, width);
+                // Validating wrapper — see the note in `benches/decode.rs`.
+                enc.rgb_to_ycbcr_row(black_box(&rgb), &mut y, &mut cb, &mut cr, width);
                 black_box((&y, &cb, &cr));
             })
         });
