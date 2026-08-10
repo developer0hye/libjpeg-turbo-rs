@@ -36,7 +36,11 @@ fn bench_ycbcr_to_rgb_row(c: &mut Criterion) {
 
     c.bench_function("ycbcr_to_rgb_row_640", |b| {
         b.iter(|| {
-            (routines.ycbcr_to_rgb_row)(
+            // The validating wrapper, not the raw pointer: it is the only
+            // externally callable path (P4-135, #474), so it is what a
+            // downstream caller's timing actually reflects. The four length
+            // comparisons it adds are constant against a 640-pixel row.
+            routines.ycbcr_to_rgb_row(
                 black_box(&y),
                 black_box(&cb),
                 black_box(&cr),
@@ -56,7 +60,7 @@ fn bench_fancy_upsample_h2v1(c: &mut Criterion) {
 
     c.bench_function("fancy_h2v1_320", |b| {
         b.iter(|| {
-            (routines.fancy_upsample_h2v1)(black_box(&input), in_width, &mut output);
+            routines.fancy_upsample_h2v1(black_box(&input), in_width, &mut output);
             black_box(&output);
         })
     });

@@ -3744,7 +3744,7 @@ installed base of the architectures we target, and unlike P4-78 (where ARMv7
 hardware is everywhere and the gap is inferred from a real user question) there
 is no downstream request. It is filed so the P4-60 premise change is on record.
 
-## P4-135. Public Safe SIMD Wrappers Let Safe Rust Reach `target_feature` Kernels With Unvalidated Slices — **OPEN**
+## P4-135. Public Safe SIMD Wrappers Let Safe Rust Reach `target_feature` Kernels With Unvalidated Slices — **PARTIAL: external safe-to-UB path closed; in-crate `unsafe fn` sweep pending**
 
 **GitHub:** [#474](https://github.com/developer0hye/libjpeg-turbo-rs/issues/474) — under the [#481](https://github.com/developer0hye/libjpeg-turbo-rs/issues/481) umbrella.
 
@@ -3849,6 +3849,93 @@ work overlap and should be executed together, with this item leading.
 **Why P0.** It is the difference between "we use `unsafe` carefully" and "our
 safe API is sound". Until it is closed, no memory-safety claim about the Rust
 API is defensible, and the README's framing (P4-140) is unsupportable.
+
+**Status (2026-08-10): partial — the soundness hole is closed, the hygiene
+sweep is not.** No safe path from outside the crate reaches a SIMD kernel with
+unchecked lengths any more. Two separate routes had to be shut:
+
+* *By path* — closed earlier: the arch modules became `pub(crate)`, guarded by
+  `tests/simd_module_privacy.rs`. This is what the issue's opening
+  proof-of-concept used.
+* *By table* — closed here. Module privacy alone left `simd::detect()` public
+  and returning a struct whose safe `fn`-pointer fields were `pub`, so the
+  identical UB was still reachable with no `unsafe` at the call site:
+
+  ```rust
+  let r = libjpeg_turbo_rs::simd::detect();
+  (r.ycbcr_to_rgb_row)(&[], &[], &[], &mut [0u8; 4], 4096);
+  ```
+
+  That this compiled was confirmed, not inferred: the first run of the new test
+  failed with `error[E0599]: no method named 'ycbcr_to_rgb_row' … field, not a
+  method`, i.e. rustc resolving the `pub` field from an external test crate.
+
+Criteria 1–4 are met; 5 is deliberately deferred:
+
+| # | Criterion | Disposition |
+| --- | --- | --- |
+| 1 | No externally-reachable safe fn can cause UB by argument choice | Met for the public surface. The *sub-clause* "kernels become `unsafe fn`" is not done — see below |
+| 2 | `simd::*` no longer resolves externally | Met earlier; `tests/simd_module_privacy.rs` |
+| 3 | Entry points validate lengths + `checked` byte counts before dispatch | Met — `require_samples` / `require_bytes` in `src/simd/mod.rs` |
+| 4 | Length preconditions removed from `SimdRoutines` fn-pointer types | Met, recorded per field below |
+| 5 | Arch backends compile only under `feature = "simd"` | **Not done, deliberately** — see below |
+
+**Why criterion 5 was backed out.** Adding `feature = "simd"` to the three
+module `cfg`s compiles clean locally and in CI — but only because
+`.cargo/config.toml` forces `-C target-feature=+simd128` on both wasm targets.
+A downstream crate inherits no such thing. Roughly 30 call sites disagree about
+which condition guards them: `encode/pipeline_impl/{dispatch,sampling}.rs` gate
+on the Cargo `simd` feature, `mcu.rs` on the Cargo feature *and* `simd128`, and
+six `neon_*`/`simd_*_tests.rs` files on `target_arch` alone. Narrowing the
+module gate without aligning every one of them turns the documented scalar
+fallback (`crates/libjpeg-turbo-rs-wasm/README.md`) into `E0433` for anyone
+building baseline `wasm32` without `+simd128`.
+
+That regression was caught by review, not by any local build or CI job, which is
+the point worth recording: **the repo-local `.cargo/config.toml` masks wasm
+target-feature regressions from the entire test matrix.** Criterion 5 needs its
+own change — align the call sites first, then narrow the module gates — and
+wants a CI leg that builds `wasm32-unknown-unknown` *without* `+simd128`.
+
+Per-field disposition for criterion 4:
+
+| Field | Disposition | Why |
+| --- | --- | --- |
+| `idct_islow`, `idct_ifast`, `idct_float` | `pub`, unchanged | `fn(&[i16; 64], &[u16; 64], &mut [u8; 64])` — every length is in the type |
+| `fdct_quantize` | `pub`, unchanged | Same: fixed-size arrays plus `&QuantDivisors` |
+| `ycbcr_to_rgb_row` | `pub(crate)` + validating method | `width` is independent of four slice lengths |
+| `fancy_upsample_h2v1` | `pub(crate)` + validating method | Prose-only "output must be `in_width * 2`" |
+| `rgb_to_ycbcr_row` | `pub(crate)` + validating method | `width` independent of four slice lengths |
+
+Proof: `cargo test --test simd_dispatch_bounds` — 13 tests, including the
+issue's verbatim proof-of-concept now panicking instead of reading out of
+bounds, short-input/short-output cases for all three entry points, and
+`width * 3` overflow rejected by `checked_mul` rather than wrapping into a
+bound a short buffer satisfies.
+
+**What remains (criteria 6 and 7).** Both are in-crate hygiene, not
+reachability:
+
+* The kernel wrappers inside the arch modules are still safe `pub(crate) fn`
+  fronting `target_feature` bodies. A *crate-local* caller can therefore still
+  misuse one without writing `unsafe`. No such call site exists today, and none
+  is reachable from outside the crate, so this is defence-in-depth rather than
+  a live defect — but criterion 1's "kernels become `pub(crate) unsafe fn`"
+  sub-clause is genuinely not done.
+* Criterion 5, backed out for the reason above, plus a CI leg that builds
+  baseline `wasm32` without `+simd128` so the next attempt cannot pass on a
+  masked matrix.
+* Criterion 6 (`#[allow(unsafe_op_in_unsafe_fn)]` on `pub mod simd`) and
+  criterion 7 (SAFETY-comment content) are the ~630–679-site sweep measured in
+  `src/lib.rs`. The issue itself calls criterion 6 "a consequence of the work,
+  not the work itself".
+
+This residue belongs with
+[P4-69](#p4-69-simd-feature-contract-and-the-remaining-389-safety-posture-work--open),
+which already tracks the sweep and the `forbid(unsafe_code)` goal. P4-135 keeps
+the row until the kernel signatures change; it is no longer P0, because the
+property it was P0 for — "our safe API is sound" against this defect — now
+holds.
 
 ## P4-136. Progressive Output Calls `set_len()` on Uninitialized `Vec` After an Unchecked Size Multiplication — **OPEN**
 
@@ -4241,3 +4328,57 @@ entry point belongs in its own review. Criterion 3 in particular needs its own
 C comparison: it flips a currently-failing call into a succeeding one, which is
 exactly the kind of change that should not ride along in a patch about YUV
 validation order.
+
+## P4-143. `.cargo/config.toml` Forces `+simd128`, Hiding wasm Target-Feature Regressions From the Whole Matrix — **OPEN**
+
+**GitHub:** filed from the [#474](https://github.com/developer0hye/libjpeg-turbo-rs/issues/474) (P4-135) review.
+
+**Motivation.** `.cargo/config.toml` sets
+`rustflags = ["-C", "target-feature=+simd128"]` for both `wasm32-unknown-unknown`
+and `wasm32-wasip1`. Every local build, every `wasm.yml` job and every developer
+therefore compiles wasm **with** simd128 — and nothing in the matrix ever
+compiles it without.
+
+A downstream crate inherits none of that: `.cargo/config.toml` applies to builds
+*run from this directory tree*, not to consumers who depend on the crate. So the
+configuration CI exercises is not the configuration most wasm consumers get.
+
+**How it was found.** P4-135 criterion 5 narrowed the arch module `cfg`s to
+require `feature = "simd"`. For `wasm32` the natural second condition looked
+like `target_feature = "simd128"`. That built clean locally, passed
+`cargo clippy --workspace --all-targets`, and passed the full workspace suite —
+because `+simd128` was forced the whole time. It is nonetheless a compile break
+for any consumer building baseline `wasm32`: about six call sites in
+`encode/pipeline_impl/{dispatch,sampling}.rs` are guarded by the *Cargo* `simd`
+feature alone and would reference a module that no longer exists (`E0433`),
+turning the scalar fallback documented in `crates/libjpeg-turbo-rs-wasm/README.md`
+into a hard error. Review caught it; no automated gate did.
+
+**Root cause.** Two independent conditions — the Cargo `simd` feature and the
+`simd128` target feature — are used interchangeably across ~30 sites:
+
+* `encode/pipeline_impl/{dispatch,sampling}.rs` — Cargo `feature = "simd"` only.
+* `encode/pipeline_impl/mcu.rs` — both.
+* `simd/{neon_color,neon_idct,neon_upsample,simd_neon_encode,simd_neon_scaled,simd_parity}_tests.rs`
+  — `target_arch` alone (11 aarch64 sites and 8 wasm `simd128` sites in
+  `simd_parity_tests.rs` alone).
+* `simd/mod.rs` `detect`/`detect_encoder` — aarch64/x86_64 on the Cargo feature,
+  wasm32 on `simd128`.
+
+**Acceptance criteria.**
+
+1. A CI leg builds `wasm32-unknown-unknown` **without** `+simd128` — i.e. not
+   inheriting `.cargo/config.toml`, i.e. with an explicit empty `RUSTFLAGS` or
+   from outside the tree — and fails if the scalar fallback does not compile.
+2. Every SIMD call site states which condition it depends on, and the module
+   `cfg`s are narrowed to match. This is the prerequisite for P4-135 criterion 5.
+3. A note in `.cargo/config.toml` itself recording that it changes what the test
+   matrix covers, so the next person narrowing a `cfg` does not repeat this.
+4. Audit whether the same masking applies elsewhere: `aarch64` NEON is mandatory
+   so it has no equivalent, but the x86_64 `target-cpu=native` question in
+   [P4-133](#p4-133-bmi2fma-paths-are-reachable-only-via-target-cpunative-so-portable-builds-leave-them-off--open)
+   is the same class of "CI tests a configuration consumers do not get".
+
+**Why it matters beyond P4-135.** It is a *coverage* defect, not a code defect:
+the tests are green on a build nobody ships. Any future change to a wasm `cfg`
+is equally invisible until a user reports it.
