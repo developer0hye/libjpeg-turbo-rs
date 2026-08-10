@@ -45,7 +45,7 @@
 //
 // The *lifetime* half of P4-137 is done: `handle_as_mut`, which let the caller
 // choose the lifetime of `&mut TjInstance` and so allowed two aliasing `&mut`
-// to one instance, is gone. All 27 call sites across nine modules now go
+// to one instance, is gone. All 30 call sites across nine modules now go
 // through `tj3::with_handle`, which owns the lifetime and confines the borrow
 // to a closure.
 #![allow(clippy::not_unsafe_ptr_arg_deref)]

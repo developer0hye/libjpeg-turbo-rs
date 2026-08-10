@@ -302,14 +302,13 @@ pub extern "C" fn tj3LoadImage12(
     crate::unwind_guard!(std::ptr::null_mut(), {
         // SAFETY: `with_handle` NULL-checks; the caller owns handle validity
         // and exclusivity per its contract.
-        unsafe {
-            with_handle(handle, |inst| {
-                inst.set_error(
-                    "tj3LoadImage12: 12-bit image load not routed through the Rust shim yet",
-                    TJERR_FATAL,
-                );
-            })
+        let body = |inst: &mut crate::tj3::TjInstance| {
+            inst.set_error(
+                "tj3LoadImage12: 12-bit image load not routed through the Rust shim yet",
+                TJERR_FATAL,
+            );
         };
+        unsafe { with_handle(handle, body) };
         std::ptr::null_mut()
     })
 }
@@ -326,14 +325,13 @@ pub extern "C" fn tj3LoadImage16(
 ) -> *mut u16 {
     crate::unwind_guard!(std::ptr::null_mut(), {
         // SAFETY: as `tj3LoadImage12` above.
-        unsafe {
-            with_handle(handle, |inst| {
-                inst.set_error(
-                    "tj3LoadImage16: 16-bit image load not routed through the Rust shim yet",
-                    TJERR_FATAL,
-                );
-            })
+        let body = |inst: &mut crate::tj3::TjInstance| {
+            inst.set_error(
+                "tj3LoadImage16: 16-bit image load not routed through the Rust shim yet",
+                TJERR_FATAL,
+            );
         };
+        unsafe { with_handle(handle, body) };
         std::ptr::null_mut()
     })
 }
@@ -522,14 +520,13 @@ pub extern "C" fn tj3SaveImage12(
     crate::unwind_guard!(-1, {
         // SAFETY: `with_handle` NULL-checks; the caller owns handle validity
         // and exclusivity per its contract.
-        unsafe {
-            with_handle(handle, |inst| {
-                inst.set_error(
-                    "tj3SaveImage12: 12-bit image save not routed through the Rust shim yet",
-                    TJERR_FATAL,
-                );
-            })
+        let body = |inst: &mut crate::tj3::TjInstance| {
+            inst.set_error(
+                "tj3SaveImage12: 12-bit image save not routed through the Rust shim yet",
+                TJERR_FATAL,
+            );
         };
+        unsafe { with_handle(handle, body) };
         -1
     })
 }
@@ -547,14 +544,13 @@ pub extern "C" fn tj3SaveImage16(
 ) -> c_int {
     crate::unwind_guard!(-1, {
         // SAFETY: as `tj3SaveImage12` above.
-        unsafe {
-            with_handle(handle, |inst| {
-                inst.set_error(
-                    "tj3SaveImage16: 16-bit image save not routed through the Rust shim yet",
-                    TJERR_FATAL,
-                );
-            })
+        let body = |inst: &mut crate::tj3::TjInstance| {
+            inst.set_error(
+                "tj3SaveImage16: 16-bit image save not routed through the Rust shim yet",
+                TJERR_FATAL,
+            );
         };
+        unsafe { with_handle(handle, body) };
         -1
     })
 }

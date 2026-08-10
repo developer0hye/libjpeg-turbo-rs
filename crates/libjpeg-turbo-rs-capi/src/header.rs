@@ -91,37 +91,38 @@ pub struct TjRegion {
 #[no_mangle]
 pub extern "C" fn tj3SetScalingFactor(handle: *mut c_void, factor: TjScalingFactor) -> c_int {
     crate::unwind_guard!(-1, {
+        // Defined outside the `unsafe` block below so the body's own `unsafe`
+        // blocks stay meaningful rather than nesting inside a blanket one.
+        let body = |inst: &mut crate::tj3::TjInstance| -> c_int {
+            if factor.num <= 0 || factor.denom <= 0 {
+                inst.set_error(
+                    format!(
+                        "tj3SetScalingFactor: non-positive ratio {}/{}",
+                        factor.num, factor.denom
+                    ),
+                    TJERR_FATAL,
+                );
+                return -1;
+            }
+
+            match inst
+                .inner
+                .set_scaling_factor(factor.num as u32, factor.denom as u32)
+            {
+                Ok(()) => {
+                    inst.clear_error();
+                    0
+                }
+                Err(e) => {
+                    inst.set_error(format!("tj3SetScalingFactor: {e}"), TJERR_FATAL);
+                    -1
+                }
+            }
+        };
+
         // SAFETY: `with_handle` NULL-checks; the caller owns handle validity
         // and exclusivity per its contract.
-        unsafe {
-            with_handle(handle, |inst| {
-                if factor.num <= 0 || factor.denom <= 0 {
-                    inst.set_error(
-                        format!(
-                            "tj3SetScalingFactor: non-positive ratio {}/{}",
-                            factor.num, factor.denom
-                        ),
-                        TJERR_FATAL,
-                    );
-                    return -1;
-                }
-
-                match inst
-                    .inner
-                    .set_scaling_factor(factor.num as u32, factor.denom as u32)
-                {
-                    Ok(()) => {
-                        inst.clear_error();
-                        0
-                    }
-                    Err(e) => {
-                        inst.set_error(format!("tj3SetScalingFactor: {e}"), TJERR_FATAL);
-                        -1
-                    }
-                }
-            })
-        }
-        .unwrap_or(-1)
+        unsafe { with_handle(handle, body) }.unwrap_or(-1)
     })
 }
 
@@ -129,39 +130,38 @@ pub extern "C" fn tj3SetScalingFactor(handle: *mut c_void, factor: TjScalingFact
 #[no_mangle]
 pub extern "C" fn tj3SetCroppingRegion(handle: *mut c_void, region: TjRegion) -> c_int {
     crate::unwind_guard!(-1, {
-        // SAFETY: as `tj3SetScalingFactor` above.
-        unsafe {
-            with_handle(handle, |inst| {
-                // The canonical C contract treats {0,0,0,0} as "clear the region".
-                if region.x == 0 && region.y == 0 && region.w == 0 && region.h == 0 {
-                    inst.inner.set_cropping_region(None);
-                    inst.clear_error();
-                    return 0;
-                }
-
-                if region.x < 0 || region.y < 0 || region.w <= 0 || region.h <= 0 {
-                    inst.set_error(
-                        format!(
-                            "tj3SetCroppingRegion: invalid {{x={},y={},w={},h={}}}",
-                            region.x, region.y, region.w, region.h
-                        ),
-                        TJERR_FATAL,
-                    );
-                    return -1;
-                }
-
-                inst.inner
-                    .set_cropping_region(Some(libjpeg_turbo_rs::CropRegion {
-                        x: region.x as usize,
-                        y: region.y as usize,
-                        width: region.w as usize,
-                        height: region.h as usize,
-                    }));
+        let body = |inst: &mut crate::tj3::TjInstance| -> c_int {
+            // The canonical C contract treats {0,0,0,0} as "clear the region".
+            if region.x == 0 && region.y == 0 && region.w == 0 && region.h == 0 {
+                inst.inner.set_cropping_region(None);
                 inst.clear_error();
-                0
-            })
-        }
-        .unwrap_or(-1)
+                return 0;
+            }
+
+            if region.x < 0 || region.y < 0 || region.w <= 0 || region.h <= 0 {
+                inst.set_error(
+                    format!(
+                        "tj3SetCroppingRegion: invalid {{x={},y={},w={},h={}}}",
+                        region.x, region.y, region.w, region.h
+                    ),
+                    TJERR_FATAL,
+                );
+                return -1;
+            }
+
+            inst.inner
+                .set_cropping_region(Some(libjpeg_turbo_rs::CropRegion {
+                    x: region.x as usize,
+                    y: region.y as usize,
+                    width: region.w as usize,
+                    height: region.h as usize,
+                }));
+            inst.clear_error();
+            0
+        };
+
+        // SAFETY: as `tj3SetScalingFactor` above.
+        unsafe { with_handle(handle, body) }.unwrap_or(-1)
     })
 }
 

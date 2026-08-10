@@ -4008,7 +4008,7 @@ pub(crate) unsafe fn with_handle<R>(
 ) -> Option<R>
 ```
 
-All **27 call sites across nine modules** (`tj3`, `header`, `compress`,
+All **30 call sites across nine modules** (`tj3`, `header`, `compress`,
 `decompress`, `transform`, `precision`, `imageio`, `yuv`, `legacy`) now go
 through it. Each entry point keeps its own sentinel via `.unwrap_or(-1)` /
 `.unwrap_or(0)` / `.unwrap_or(null_mut())`, so NULL-handle behaviour is

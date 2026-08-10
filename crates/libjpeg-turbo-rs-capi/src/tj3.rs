@@ -252,36 +252,37 @@ pub unsafe extern "C" fn tj3Destroy(handle: *mut c_void) {
 #[no_mangle]
 pub extern "C" fn tj3Set(handle: *mut c_void, param: c_int, value: c_int) -> c_int {
     crate::unwind_guard!(-1, {
-        // SAFETY: `with_handle` NULL-checks; the caller owns handle validity
-        // and exclusivity per its contract.
-        unsafe {
-            with_handle(handle, |inst| {
-                let p: TjParam = match param_from_c(param) {
-                    Some(p) => p,
-                    None => {
-                        inst.set_error(format!("unknown TJPARAM id {param}"), TJERR_FATAL);
-                        return -1;
-                    }
-                };
-
-                if is_read_only(p) {
-                    inst.set_error(format!("TJPARAM id {param} is read-only"), TJERR_FATAL);
+        // Defined outside the `unsafe` block below so the body's own `unsafe`
+        // blocks stay meaningful rather than nesting inside a blanket one.
+        let body = |inst: &mut TjInstance| -> c_int {
+            let p: TjParam = match param_from_c(param) {
+                Some(p) => p,
+                None => {
+                    inst.set_error(format!("unknown TJPARAM id {param}"), TJERR_FATAL);
                     return -1;
                 }
+            };
 
-                match inst.inner.set(p, value) {
-                    Ok(()) => {
-                        inst.clear_error();
-                        0
-                    }
-                    Err(e) => {
-                        inst.set_error(e.to_string(), TJERR_FATAL);
-                        -1
-                    }
+            if is_read_only(p) {
+                inst.set_error(format!("TJPARAM id {param} is read-only"), TJERR_FATAL);
+                return -1;
+            }
+
+            match inst.inner.set(p, value) {
+                Ok(()) => {
+                    inst.clear_error();
+                    0
                 }
-            })
-        }
-        .unwrap_or(-1)
+                Err(e) => {
+                    inst.set_error(e.to_string(), TJERR_FATAL);
+                    -1
+                }
+            }
+        };
+
+        // SAFETY: `with_handle` NULL-checks; the caller owns handle validity
+        // and exclusivity per its contract.
+        unsafe { with_handle(handle, body) }.unwrap_or(-1)
     })
 }
 
@@ -291,9 +292,8 @@ pub extern "C" fn tj3Set(handle: *mut c_void, param: c_int, value: c_int) -> c_i
 #[no_mangle]
 pub extern "C" fn tj3Get(handle: *mut c_void, param: c_int) -> c_int {
     crate::unwind_guard!(-1, {
-        // SAFETY: as `tj3Set` above.
-        unsafe {
-            with_handle(handle, |inst| match param_from_c(param) {
+        let body = |inst: &mut TjInstance| -> c_int {
+            match param_from_c(param) {
                 Some(p) => {
                     inst.clear_error();
                     inst.inner.get(p)
@@ -302,9 +302,11 @@ pub extern "C" fn tj3Get(handle: *mut c_void, param: c_int) -> c_int {
                     inst.set_error(format!("unknown TJPARAM id {param}"), TJERR_FATAL);
                     -1
                 }
-            })
-        }
-        .unwrap_or(-1)
+            }
+        };
+
+        // SAFETY: as `tj3Set` above.
+        unsafe { with_handle(handle, body) }.unwrap_or(-1)
     })
 }
 
