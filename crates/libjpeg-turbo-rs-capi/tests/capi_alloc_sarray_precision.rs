@@ -24,9 +24,9 @@ const JPOOL_IMAGE: c_int = 1;
 fn row_stride_for_precision(precision: c_int, samplesperrow: u32) -> usize {
     let mut err: JpegErrorMgr = unsafe { std::mem::zeroed() };
     let mut cinfo: JpegDecompressPublic = unsafe { std::mem::zeroed() };
-    cinfo.err = jpeg_std_error(&mut err);
+    cinfo.err = unsafe { jpeg_std_error(&mut err) };
     let cinfo_ptr: *mut c_void = &mut cinfo as *mut JpegDecompressPublic as *mut c_void;
-    jpeg_CreateDecompress(cinfo_ptr, 80, std::mem::size_of::<JpegDecompressPublic>());
+    unsafe { jpeg_CreateDecompress(cinfo_ptr, 80, std::mem::size_of::<JpegDecompressPublic>()) };
     cinfo.data_precision = precision;
 
     let mgr = unsafe { &*(cinfo.mem as *const JpegMemoryMgr) };
@@ -35,7 +35,7 @@ fn row_stride_for_precision(precision: c_int, samplesperrow: u32) -> usize {
     assert!(!rows.is_null(), "alloc_sarray returned NULL");
     let row0 = unsafe { *rows } as usize;
     let row1 = unsafe { *rows.add(1) } as usize;
-    jpeg_destroy_decompress(cinfo_ptr);
+    unsafe { jpeg_destroy_decompress(cinfo_ptr) };
     row1 - row0
 }
 

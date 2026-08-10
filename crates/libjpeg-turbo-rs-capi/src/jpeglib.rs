@@ -1388,8 +1388,17 @@ unsafe extern "C" fn default_reset_error_mgr(cinfo: *mut c_void) {
 /// Populates the error manager struct with the default callbacks and
 /// returns the same pointer so the common idiom
 /// `cinfo.err = jpeg_std_error(&err);` works as expected.
+///
+/// # Safety
+///
+/// C ABI entry point. `err` must satisfy the crate-level
+/// [pointer contract](crate#pointer-contract): valid for the whole call,
+/// correctly aligned, large enough for the accesses described above, and
+/// not aliased by another live reference. A pointer this function documents as
+/// optional may be null; any other null is reported through the documented
+/// error value rather than dereferenced.
 #[no_mangle]
-pub extern "C" fn jpeg_std_error(err: *mut JpegErrorMgr) -> *mut JpegErrorMgr {
+pub unsafe extern "C" fn jpeg_std_error(err: *mut JpegErrorMgr) -> *mut JpegErrorMgr {
     crate::unwind_guard!(std::ptr::null_mut(), {
         if err.is_null() {
             return std::ptr::null_mut();
@@ -1429,8 +1438,21 @@ pub extern "C" fn jpeg_std_error(err: *mut JpegErrorMgr) -> *mut JpegErrorMgr {
 /// standard defaults (as implemented by `jinit_decompress_master` in
 /// `references/libjpeg-turbo/src/jdapimin.c`) and registers private
 /// Rust-side state in the thread-local side table.
+///
+/// # Safety
+///
+/// C ABI entry point. `cinfo` must satisfy the crate-level
+/// [pointer contract](crate#pointer-contract): valid for the whole call,
+/// correctly aligned, large enough for the accesses described above, and
+/// not aliased by another live reference. A pointer this function documents as
+/// optional may be null; any other null is reported through the documented
+/// error value rather than dereferenced.
 #[no_mangle]
-pub extern "C" fn jpeg_CreateDecompress(cinfo: *mut c_void, _version: c_int, _struct_size: usize) {
+pub unsafe extern "C" fn jpeg_CreateDecompress(
+    cinfo: *mut c_void,
+    _version: c_int,
+    _struct_size: usize,
+) {
     crate::unwind_guard!((), {
         // SAFETY: `cinfo` is caller-allocated; we only touch the bytes that
         // fit the `JpegDecompressPublic` layout. If the buffer is smaller
@@ -1575,8 +1597,17 @@ pub extern "C" fn jpeg_CreateDecompress(cinfo: *mut c_void, _version: c_int, _st
 }
 
 /// `jpeg_destroy_decompress(cinfo)` — free the Rust-side private state.
+///
+/// # Safety
+///
+/// C ABI entry point. `cinfo` must satisfy the crate-level
+/// [pointer contract](crate#pointer-contract): valid for the whole call,
+/// correctly aligned, large enough for the accesses described above, and
+/// not aliased by another live reference. A pointer this function documents as
+/// optional may be null; any other null is reported through the documented
+/// error value rather than dereferenced.
 #[no_mangle]
-pub extern "C" fn jpeg_destroy_decompress(cinfo: *mut c_void) {
+pub unsafe extern "C" fn jpeg_destroy_decompress(cinfo: *mut c_void) {
     crate::unwind_guard!((), {
         if cinfo.is_null() {
             return;
@@ -1681,8 +1712,27 @@ unsafe extern "C" fn noop_term_source(_cinfo: *mut c_void) {}
 
 /// Attach a source manager that reads from an already-in-memory byte
 /// slice. Matches libjpeg `jpeg_mem_src(cinfo, buf, size)`.
+///
+/// # Safety
+///
+/// C ABI entry point. `cinfo`, `buf` must satisfy the crate-level
+/// [pointer contract](crate#pointer-contract): valid for the whole call,
+/// correctly aligned, large enough for the accesses described above, and
+/// not aliased by another live reference. A pointer this function documents as
+/// optional may be null; any other null is reported through the documented
+/// error value rather than dereferenced.
+///
+/// `inbuffer` is **retained**: this function stores it on `cinfo` and every
+/// later read goes through it, so it must stay valid and unmoved until the
+/// source is replaced or the `cinfo` is finished, aborted, or destroyed.
+/// Valid-for-this-call is not enough — see
+/// [Retained pointers](crate#pointer-contract).
 #[no_mangle]
-pub extern "C" fn jpeg_mem_src(cinfo: *mut c_void, buf: *const u8, size: std::os::raw::c_ulong) {
+pub unsafe extern "C" fn jpeg_mem_src(
+    cinfo: *mut c_void,
+    buf: *const u8,
+    size: std::os::raw::c_ulong,
+) {
     crate::unwind_guard!((), {
         let c: &mut JpegDecompressPublic = match unsafe { cinfo_mut(cinfo) } {
             Some(c) => c,
@@ -1720,8 +1770,22 @@ pub extern "C" fn jpeg_mem_src(cinfo: *mut c_void, buf: *const u8, size: std::os
 /// libjpeg does not guarantee that the `FILE *` remains valid after
 /// `jpeg_finish_decompress`, so eagerly copying the bytes matches the
 /// semantics applications rely on in practice.
+///
+/// # Safety
+///
+/// C ABI entry point. `cinfo`, `infile` must satisfy the crate-level
+/// [pointer contract](crate#pointer-contract): valid for the whole call,
+/// correctly aligned, large enough for the accesses described above, and
+/// not aliased by another live reference. A pointer this function documents as
+/// optional may be null; any other null is reported through the documented
+/// error value rather than dereferenced.
+///
+/// `infile` is **retained**: the `FILE *` is stored on `cinfo` and read during
+/// later calls, so it must stay open until the source is replaced or the
+/// `cinfo` is finished, aborted, or destroyed — see
+/// [Retained pointers](crate#pointer-contract).
 #[no_mangle]
-pub extern "C" fn jpeg_stdio_src(cinfo: *mut c_void, infile: *mut c_void) {
+pub unsafe extern "C" fn jpeg_stdio_src(cinfo: *mut c_void, infile: *mut c_void) {
     crate::unwind_guard!((), {
         let c: &mut JpegDecompressPublic = match unsafe { cinfo_mut(cinfo) } {
             Some(c) => c,
@@ -2212,8 +2276,17 @@ fn detect_tables_only(bytes: &[u8]) -> Option<Vec<u8>> {
 ///   * `require_image == FALSE` — return `JPEG_HEADER_TABLES_ONLY` so
 ///     the caller can read the tables and use them on a subsequent
 ///     image-only datastream (the libtiff `JPEGTables` flow).
+///
+/// # Safety
+///
+/// C ABI entry point. `cinfo` must satisfy the crate-level
+/// [pointer contract](crate#pointer-contract): valid for the whole call,
+/// correctly aligned, large enough for the accesses described above, and
+/// not aliased by another live reference. A pointer this function documents as
+/// optional may be null; any other null is reported through the documented
+/// error value rather than dereferenced.
 #[no_mangle]
-pub extern "C" fn jpeg_read_header(cinfo: *mut c_void, require_image: CBoolean) -> c_int {
+pub unsafe extern "C" fn jpeg_read_header(cinfo: *mut c_void, require_image: CBoolean) -> c_int {
     crate::unwind_guard!(JPEG_SUSPENDED, {
         let c: &mut JpegDecompressPublic = match unsafe { cinfo_mut(cinfo) } {
             Some(c) => c,
@@ -2759,8 +2832,17 @@ fn started_decompress_state(c: &JpegDecompressPublic) -> c_int {
 /// Eagerly decode the image so `jpeg_read_scanlines` can serve rows out
 /// of a backing buffer. Returns TRUE on success (libjpeg contract: never
 /// returns FALSE except when suspending via a nonblocking source).
+///
+/// # Safety
+///
+/// C ABI entry point. `cinfo` must satisfy the crate-level
+/// [pointer contract](crate#pointer-contract): valid for the whole call,
+/// correctly aligned, large enough for the accesses described above, and
+/// not aliased by another live reference. A pointer this function documents as
+/// optional may be null; any other null is reported through the documented
+/// error value rather than dereferenced.
 #[no_mangle]
-pub extern "C" fn jpeg_start_decompress(cinfo: *mut c_void) -> CBoolean {
+pub unsafe extern "C" fn jpeg_start_decompress(cinfo: *mut c_void) -> CBoolean {
     crate::unwind_guard!(0, {
         let c: &mut JpegDecompressPublic = match unsafe { cinfo_mut(cinfo) } {
             Some(c) => c,
@@ -2794,7 +2876,7 @@ pub extern "C" fn jpeg_start_decompress(cinfo: *mut c_void) -> CBoolean {
                 // third value that is neither upstream's nor the intended one.
                 c.global_state = DSTATE_SCANNING;
                 let _ = c; // release the &mut before jpeg_calc_output_dimensions re-borrows
-                jpeg_calc_output_dimensions(cinfo);
+                unsafe { jpeg_calc_output_dimensions(cinfo) };
                 return 1;
             }
             // Non-buffered mode with a suspending source: finish draining the
@@ -2852,7 +2934,7 @@ pub extern "C" fn jpeg_start_decompress(cinfo: *mut c_void) -> CBoolean {
             // caller's allocation (not Rust-owned), so aliasing is the
             // unsafe-FFI contract, not a Rust UB.
             let _ = c;
-            jpeg_calc_output_dimensions(cinfo);
+            unsafe { jpeg_calc_output_dimensions(cinfo) };
             priv_state.last_error = CString::new("No error").expect("static");
             return 1;
         }
@@ -3052,8 +3134,17 @@ fn ensure_decoded_deferred(
 /// application's row-pointer array. Returns the number of rows copied.
 ///
 /// `scanlines` is a `JSAMPARRAY` = `JSAMPLE **` (array of row pointers).
+///
+/// # Safety
+///
+/// C ABI entry point. `cinfo`, `scanlines` must satisfy the crate-level
+/// [pointer contract](crate#pointer-contract): valid for the whole call,
+/// correctly aligned, large enough for the accesses described above, and
+/// not aliased by another live reference. A pointer this function documents as
+/// optional may be null; any other null is reported through the documented
+/// error value rather than dereferenced.
 #[no_mangle]
-pub extern "C" fn jpeg_read_scanlines(
+pub unsafe extern "C" fn jpeg_read_scanlines(
     cinfo: *mut c_void,
     scanlines: *mut *mut u8,
     max_lines: JDimension,
@@ -3136,8 +3227,17 @@ pub extern "C" fn jpeg_read_scanlines(
 /// `jinit_write_*` *before* `jpeg_start_decompress`, so the output buffer
 /// can be sized from `output_width * output_components`. We must not
 /// require start_decompress to have run.
+///
+/// # Safety
+///
+/// C ABI entry point. `cinfo` must satisfy the crate-level
+/// [pointer contract](crate#pointer-contract): valid for the whole call,
+/// correctly aligned, large enough for the accesses described above, and
+/// not aliased by another live reference. A pointer this function documents as
+/// optional may be null; any other null is reported through the documented
+/// error value rather than dereferenced.
 #[no_mangle]
-pub extern "C" fn jpeg_calc_output_dimensions(cinfo: *mut c_void) {
+pub unsafe extern "C" fn jpeg_calc_output_dimensions(cinfo: *mut c_void) {
     crate::unwind_guard!((), {
         let c: &mut JpegDecompressPublic = match unsafe { cinfo_mut(cinfo) } {
             Some(c) => c,
@@ -3232,8 +3332,17 @@ fn release_decompress_image_pool(cinfo: *mut c_void, mem_ptr: *mut c_void) {
 
 /// Close out the decode pass. Returns TRUE unless suspended (which we
 /// never do — the entire stream is present in memory).
+///
+/// # Safety
+///
+/// C ABI entry point. `cinfo` must satisfy the crate-level
+/// [pointer contract](crate#pointer-contract): valid for the whole call,
+/// correctly aligned, large enough for the accesses described above, and
+/// not aliased by another live reference. A pointer this function documents as
+/// optional may be null; any other null is reported through the documented
+/// error value rather than dereferenced.
 #[no_mangle]
-pub extern "C" fn jpeg_finish_decompress(cinfo: *mut c_void) -> CBoolean {
+pub unsafe extern "C" fn jpeg_finish_decompress(cinfo: *mut c_void) -> CBoolean {
     crate::unwind_guard!(0, {
         let c: &mut JpegDecompressPublic = match unsafe { cinfo_mut(cinfo) } {
             Some(c) => c,
@@ -3317,9 +3426,16 @@ pub extern "C" fn jpeg_finish_decompress(cinfo: *mut c_void) -> CBoolean {
 // intentionally NOT `jpeg_*` — they are internal helpers, but must be
 // exported from the cdylib for dlopen-based tests to reach them.
 // ---------------------------------------------------------------------------
-
+/// # Safety
+///
+/// C ABI entry point. `cinfo`, `out_w`, `out_h`, `out_nc`, `out_cs` must satisfy the crate-level
+/// [pointer contract](crate#pointer-contract): valid for the whole call,
+/// correctly aligned, large enough for the accesses described above, and
+/// not aliased by another live reference. A pointer this function documents as
+/// optional may be null; any other null is reported through the documented
+/// error value rather than dereferenced.
 #[no_mangle]
-pub extern "C" fn jpeg_capi_test_dimensions(
+pub unsafe extern "C" fn jpeg_capi_test_dimensions(
     cinfo: *mut c_void,
     out_w: *mut u32,
     out_h: *mut u32,
@@ -3346,18 +3462,32 @@ pub extern "C" fn jpeg_capi_test_dimensions(
         }
     })
 }
-
+/// # Safety
+///
+/// C ABI entry point. `cinfo` must satisfy the crate-level
+/// [pointer contract](crate#pointer-contract): valid for the whole call,
+/// correctly aligned, large enough for the accesses described above, and
+/// not aliased by another live reference. A pointer this function documents as
+/// optional may be null; any other null is reported through the documented
+/// error value rather than dereferenced.
 #[no_mangle]
-pub extern "C" fn jpeg_capi_test_set_out_cs(cinfo: *mut c_void, cs: c_int) {
+pub unsafe extern "C" fn jpeg_capi_test_set_out_cs(cinfo: *mut c_void, cs: c_int) {
     crate::unwind_guard!((), {
         if let Some(c) = unsafe { cinfo_mut(cinfo) } {
             c.out_color_space = cs;
         }
     })
 }
-
+/// # Safety
+///
+/// C ABI entry point. `cinfo` must satisfy the crate-level
+/// [pointer contract](crate#pointer-contract): valid for the whole call,
+/// correctly aligned, large enough for the accesses described above, and
+/// not aliased by another live reference. A pointer this function documents as
+/// optional may be null; any other null is reported through the documented
+/// error value rather than dereferenced.
 #[no_mangle]
-pub extern "C" fn jpeg_capi_test_density_unit(cinfo: *mut c_void) -> c_int {
+pub unsafe extern "C" fn jpeg_capi_test_density_unit(cinfo: *mut c_void) -> c_int {
     crate::unwind_guard!(-1, {
         match unsafe { cinfo_mut(cinfo) } {
             Some(c) => c.density_unit as c_int,
@@ -3365,9 +3495,16 @@ pub extern "C" fn jpeg_capi_test_density_unit(cinfo: *mut c_void) -> c_int {
         }
     })
 }
-
+/// # Safety
+///
+/// C ABI entry point. `cinfo` must satisfy the crate-level
+/// [pointer contract](crate#pointer-contract): valid for the whole call,
+/// correctly aligned, large enough for the accesses described above, and
+/// not aliased by another live reference. A pointer this function documents as
+/// optional may be null; any other null is reported through the documented
+/// error value rather than dereferenced.
 #[no_mangle]
-pub extern "C" fn jpeg_capi_test_x_density(cinfo: *mut c_void) -> c_int {
+pub unsafe extern "C" fn jpeg_capi_test_x_density(cinfo: *mut c_void) -> c_int {
     crate::unwind_guard!(-1, {
         match unsafe { cinfo_mut(cinfo) } {
             Some(c) => c.X_density as c_int,
@@ -3375,9 +3512,16 @@ pub extern "C" fn jpeg_capi_test_x_density(cinfo: *mut c_void) -> c_int {
         }
     })
 }
-
+/// # Safety
+///
+/// C ABI entry point. `cinfo` must satisfy the crate-level
+/// [pointer contract](crate#pointer-contract): valid for the whole call,
+/// correctly aligned, large enough for the accesses described above, and
+/// not aliased by another live reference. A pointer this function documents as
+/// optional may be null; any other null is reported through the documented
+/// error value rather than dereferenced.
 #[no_mangle]
-pub extern "C" fn jpeg_capi_test_y_density(cinfo: *mut c_void) -> c_int {
+pub unsafe extern "C" fn jpeg_capi_test_y_density(cinfo: *mut c_void) -> c_int {
     crate::unwind_guard!(-1, {
         match unsafe { cinfo_mut(cinfo) } {
             Some(c) => c.Y_density as c_int,
@@ -3388,8 +3532,17 @@ pub extern "C" fn jpeg_capi_test_y_density(cinfo: *mut c_void) -> c_int {
 
 /// Read `cinfo->arith_code` after `jpeg_read_header`. Returns 1 for
 /// arithmetic-coded streams, 0 for Huffman, -1 if `cinfo` is null.
+///
+/// # Safety
+///
+/// C ABI entry point. `cinfo` must satisfy the crate-level
+/// [pointer contract](crate#pointer-contract): valid for the whole call,
+/// correctly aligned, large enough for the accesses described above, and
+/// not aliased by another live reference. A pointer this function documents as
+/// optional may be null; any other null is reported through the documented
+/// error value rather than dereferenced.
 #[no_mangle]
-pub extern "C" fn jpeg_capi_test_arith_code(cinfo: *mut c_void) -> c_int {
+pub unsafe extern "C" fn jpeg_capi_test_arith_code(cinfo: *mut c_void) -> c_int {
     crate::unwind_guard!(-1, {
         match unsafe { cinfo_mut(cinfo) } {
             Some(c) => c.arith_code as c_int,
@@ -3401,8 +3554,19 @@ pub extern "C" fn jpeg_capi_test_arith_code(cinfo: *mut c_void) -> c_int {
 /// Return `cinfo->marker_list` — the head of the saved-marker linked list
 /// populated by `jpeg_read_header`. Tests use this to inspect the saved
 /// bodies without hard-coding struct offsets.
+///
+/// # Safety
+///
+/// C ABI entry point. `cinfo` must satisfy the crate-level
+/// [pointer contract](crate#pointer-contract): valid for the whole call,
+/// correctly aligned, large enough for the accesses described above, and
+/// not aliased by another live reference. A pointer this function documents as
+/// optional may be null; any other null is reported through the documented
+/// error value rather than dereferenced.
 #[no_mangle]
-pub extern "C" fn jpeg_capi_test_marker_list(cinfo: *mut c_void) -> *mut JpegMarkerStructPublic {
+pub unsafe extern "C" fn jpeg_capi_test_marker_list(
+    cinfo: *mut c_void,
+) -> *mut JpegMarkerStructPublic {
     crate::unwind_guard!(std::ptr::null_mut(), {
         match unsafe { cinfo_mut(cinfo) } {
             Some(c) => c.marker_list,
@@ -3410,9 +3574,16 @@ pub extern "C" fn jpeg_capi_test_marker_list(cinfo: *mut c_void) -> *mut JpegMar
         }
     })
 }
-
+/// # Safety
+///
+/// C ABI entry point. `cinfo`, `out_w`, `out_h`, `out_components`, `out_cs` must satisfy the crate-level
+/// [pointer contract](crate#pointer-contract): valid for the whole call,
+/// correctly aligned, large enough for the accesses described above, and
+/// not aliased by another live reference. A pointer this function documents as
+/// optional may be null; any other null is reported through the documented
+/// error value rather than dereferenced.
 #[no_mangle]
-pub extern "C" fn jpeg_capi_test_output_dims(
+pub unsafe extern "C" fn jpeg_capi_test_output_dims(
     cinfo: *mut c_void,
     out_w: *mut u32,
     out_h: *mut u32,
@@ -3456,8 +3627,20 @@ pub extern "C" fn jpeg_capi_test_output_dims(
 /// Advances the output row cursor by `num_lines` without copying pixels.
 /// Returns the number of rows actually skipped (clamped to the remaining
 /// image height). Mirrors libjpeg 8d+'s same-name API.
+///
+/// # Safety
+///
+/// C ABI entry point. `cinfo` must satisfy the crate-level
+/// [pointer contract](crate#pointer-contract): valid for the whole call,
+/// correctly aligned, large enough for the accesses described above, and
+/// not aliased by another live reference. A pointer this function documents as
+/// optional may be null; any other null is reported through the documented
+/// error value rather than dereferenced.
 #[no_mangle]
-pub extern "C" fn jpeg_skip_scanlines(cinfo: *mut c_void, num_lines: JDimension) -> JDimension {
+pub unsafe extern "C" fn jpeg_skip_scanlines(
+    cinfo: *mut c_void,
+    num_lines: JDimension,
+) -> JDimension {
     crate::unwind_guard!(0, {
         let c: &mut JpegDecompressPublic = match unsafe { cinfo_mut(cinfo) } {
             Some(c) => c,
@@ -3482,8 +3665,17 @@ pub extern "C" fn jpeg_skip_scanlines(cinfo: *mut c_void, num_lines: JDimension)
 /// This implementation records the request in the private state; actual
 /// cropping is applied at row-copy time in `jpeg_read_scanlines` so the
 /// already-decoded full image remains reusable.
+///
+/// # Safety
+///
+/// C ABI entry point. `cinfo`, `xoffset`, `width` must satisfy the crate-level
+/// [pointer contract](crate#pointer-contract): valid for the whole call,
+/// correctly aligned, large enough for the accesses described above, and
+/// not aliased by another live reference. A pointer this function documents as
+/// optional may be null; any other null is reported through the documented
+/// error value rather than dereferenced.
 #[no_mangle]
-pub extern "C" fn jpeg_crop_scanline(
+pub unsafe extern "C" fn jpeg_crop_scanline(
     cinfo: *mut c_void,
     xoffset: *mut JDimension,
     width: *mut JDimension,
@@ -3532,8 +3724,21 @@ pub extern "C" fn jpeg_crop_scanline(
 ///
 /// The configuration is consumed by `jpeg_start_decompress` when the
 /// body is actually decoded.
+///
+/// # Safety
+///
+/// C ABI entry point. `cinfo` must satisfy the crate-level
+/// [pointer contract](crate#pointer-contract): valid for the whole call,
+/// correctly aligned, large enough for the accesses described above, and
+/// not aliased by another live reference. A pointer this function documents as
+/// optional may be null; any other null is reported through the documented
+/// error value rather than dereferenced.
 #[no_mangle]
-pub extern "C" fn jpeg_save_markers(cinfo: *mut c_void, marker_code: c_int, length_limit: c_uint) {
+pub unsafe extern "C" fn jpeg_save_markers(
+    cinfo: *mut c_void,
+    marker_code: c_int,
+    length_limit: c_uint,
+) {
     crate::unwind_guard!((), {
         let _c: &mut JpegDecompressPublic = match unsafe { cinfo_mut(cinfo) } {
             Some(c) => c,
@@ -3580,8 +3785,17 @@ pub extern "C" fn jpeg_save_markers(cinfo: *mut c_void, marker_code: c_int, leng
 /// happens inside `jpeg_start_decompress` via the underlying
 /// `Decoder::set_marker_processor` hook, which forwards the marker
 /// payload to the caller-supplied routine.
+///
+/// # Safety
+///
+/// C ABI entry point. `cinfo` must satisfy the crate-level
+/// [pointer contract](crate#pointer-contract): valid for the whole call,
+/// correctly aligned, large enough for the accesses described above, and
+/// not aliased by another live reference. A pointer this function documents as
+/// optional may be null; any other null is reported through the documented
+/// error value rather than dereferenced.
 #[no_mangle]
-pub extern "C" fn jpeg_set_marker_processor(
+pub unsafe extern "C" fn jpeg_set_marker_processor(
     cinfo: *mut c_void,
     marker_code: c_int,
     routine: Option<MarkerParserFn>,
@@ -3617,8 +3831,17 @@ pub extern "C" fn jpeg_set_marker_processor(
 /// The returned buffer is allocated via libc `malloc`; the caller owns
 /// it and must release it with `free()` once done, matching upstream
 /// libjpeg semantics (see `libjpeg.txt §Special markers`).
+///
+/// # Safety
+///
+/// C ABI entry point. `cinfo`, `icc_data_ptr`, `icc_data_len` must satisfy the crate-level
+/// [pointer contract](crate#pointer-contract): valid for the whole call,
+/// correctly aligned, large enough for the accesses described above, and
+/// not aliased by another live reference. A pointer this function documents as
+/// optional may be null; any other null is reported through the documented
+/// error value rather than dereferenced.
 #[no_mangle]
-pub extern "C" fn jpeg_read_icc_profile(
+pub unsafe extern "C" fn jpeg_read_icc_profile(
     cinfo: *mut c_void,
     icc_data_ptr: *mut *mut u8,
     icc_data_len: *mut c_uint,
@@ -3692,8 +3915,17 @@ pub extern "C" fn jpeg_read_icc_profile(
 /// allocated by transupp) fall through to the slower
 /// "materialise from barrays + cinfo metadata" path implemented in
 /// `run_coefficient_writer_and_flush`.
+///
+/// # Safety
+///
+/// C ABI entry point. `cinfo` must satisfy the crate-level
+/// [pointer contract](crate#pointer-contract): valid for the whole call,
+/// correctly aligned, large enough for the accesses described above, and
+/// not aliased by another live reference. A pointer this function documents as
+/// optional may be null; any other null is reported through the documented
+/// error value rather than dereferenced.
 #[no_mangle]
-pub extern "C" fn jpeg_read_coefficients(cinfo: *mut c_void) -> *mut c_void {
+pub unsafe extern "C" fn jpeg_read_coefficients(cinfo: *mut c_void) -> *mut c_void {
     crate::unwind_guard!(std::ptr::null_mut(), {
         let c: &mut JpegDecompressPublic = match unsafe { cinfo_mut(cinfo) } {
             Some(c) => c,
@@ -3923,8 +4155,17 @@ pub extern "C" fn jpeg_read_coefficients(cinfo: *mut c_void) -> *mut c_void {
 /// On invalid input (NULL pointers, header-not-yet-parsed, mismatched
 /// `is_decompressor` flags) this is a tolerant no-op so callers that
 /// chain it before establishing both cinfos cannot crash the process.
+///
+/// # Safety
+///
+/// C ABI entry point. `srcinfo`, `dstinfo` must satisfy the crate-level
+/// [pointer contract](crate#pointer-contract): valid for the whole call,
+/// correctly aligned, large enough for the accesses described above, and
+/// not aliased by another live reference. A pointer this function documents as
+/// optional may be null; any other null is reported through the documented
+/// error value rather than dereferenced.
 #[no_mangle]
-pub extern "C" fn jpeg_copy_critical_parameters(srcinfo: *mut c_void, dstinfo: *mut c_void) {
+pub unsafe extern "C" fn jpeg_copy_critical_parameters(srcinfo: *mut c_void, dstinfo: *mut c_void) {
     crate::unwind_guard!((), {
         if srcinfo.is_null() || dstinfo.is_null() {
             return;
@@ -3966,8 +4207,8 @@ pub extern "C" fn jpeg_copy_critical_parameters(srcinfo: *mut c_void, dstinfo: *
 
         // Step 2: install canonical defaults, then override colorspace so
         // the comp_info / quant_tbl_no allocation matches the source.
-        jpeg_set_defaults(dstinfo);
-        jpeg_set_colorspace(dstinfo, snapshot.jpeg_color_space);
+        unsafe { jpeg_set_defaults(dstinfo) };
+        unsafe { jpeg_set_colorspace(dstinfo, snapshot.jpeg_color_space) };
 
         // Re-borrow because `jpeg_set_*` re-acquired the cinfo through the
         // pointer. The Rust borrow checker cannot see that.
@@ -3987,7 +4228,7 @@ pub extern "C" fn jpeg_copy_critical_parameters(srcinfo: *mut c_void, dstinfo: *
             let Some(src_quantval) = src_qt else { continue };
             let mut slot: *mut JQuantTblPublic = dst.quant_tbl_ptrs[tblno];
             if slot.is_null() {
-                slot = jpeg_alloc_quant_table(dstinfo);
+                slot = unsafe { jpeg_alloc_quant_table(dstinfo) };
                 if slot.is_null() {
                     return;
                 }
@@ -4166,10 +4407,19 @@ unsafe fn snapshot_src_for_copy(srcinfo: *mut c_void) -> Option<SrcCriticalSnaps
 /// downsampled_*` fields plus `max_h_samp_factor /
 /// max_v_samp_factor / min_DCT_*_scaled_size` that transupp reads via
 /// the `_min_DCT_*` accessors.
+///
+/// # Safety
+///
+/// C ABI entry point. `cinfo` must satisfy the crate-level
+/// [pointer contract](crate#pointer-contract): valid for the whole call,
+/// correctly aligned, large enough for the accesses described above, and
+/// not aliased by another live reference. A pointer this function documents as
+/// optional may be null; any other null is reported through the documented
+/// error value rather than dereferenced.
 #[no_mangle]
-pub extern "C" fn jpeg_core_output_dimensions(cinfo: *mut c_void) {
+pub unsafe extern "C" fn jpeg_core_output_dimensions(cinfo: *mut c_void) {
     crate::unwind_guard!((), {
-        jpeg_calc_output_dimensions(cinfo);
+        unsafe { jpeg_calc_output_dimensions(cinfo) };
     })
 }
 
@@ -4298,8 +4548,17 @@ fn hp_take_or_init_16(
 /// 12-bit variant: emits `i16` samples rather than `u8`. Row pointers
 /// in the `scanlines` array must point at `width * num_components *
 /// sizeof(i16)` bytes of storage per row.
+///
+/// # Safety
+///
+/// C ABI entry point. `cinfo`, `scanlines` must satisfy the crate-level
+/// [pointer contract](crate#pointer-contract): valid for the whole call,
+/// correctly aligned, large enough for the accesses described above, and
+/// not aliased by another live reference. A pointer this function documents as
+/// optional may be null; any other null is reported through the documented
+/// error value rather than dereferenced.
 #[no_mangle]
-pub extern "C" fn jpeg12_read_scanlines(
+pub unsafe extern "C" fn jpeg12_read_scanlines(
     cinfo: *mut c_void,
     scanlines: *mut *mut i16,
     max_lines: JDimension,
@@ -4383,8 +4642,20 @@ fn read_scanlines_12_inner(
 }
 
 /// `jpeg12_skip_scanlines(cinfo, num_lines) -> JDIMENSION`.
+///
+/// # Safety
+///
+/// C ABI entry point. `cinfo` must satisfy the crate-level
+/// [pointer contract](crate#pointer-contract): valid for the whole call,
+/// correctly aligned, large enough for the accesses described above, and
+/// not aliased by another live reference. A pointer this function documents as
+/// optional may be null; any other null is reported through the documented
+/// error value rather than dereferenced.
 #[no_mangle]
-pub extern "C" fn jpeg12_skip_scanlines(cinfo: *mut c_void, num_lines: JDimension) -> JDimension {
+pub unsafe extern "C" fn jpeg12_skip_scanlines(
+    cinfo: *mut c_void,
+    num_lines: JDimension,
+) -> JDimension {
     crate::unwind_guard!(0, {
         let c: &mut JpegDecompressPublic = match unsafe { cinfo_mut(cinfo) } {
             Some(c) => c,
@@ -4410,8 +4681,17 @@ pub extern "C" fn jpeg12_skip_scanlines(cinfo: *mut c_void, num_lines: JDimensio
 }
 
 /// `jpeg12_crop_scanline(cinfo, *xoffset, *width)`.
+///
+/// # Safety
+///
+/// C ABI entry point. `cinfo`, `xoffset`, `width` must satisfy the crate-level
+/// [pointer contract](crate#pointer-contract): valid for the whole call,
+/// correctly aligned, large enough for the accesses described above, and
+/// not aliased by another live reference. A pointer this function documents as
+/// optional may be null; any other null is reported through the documented
+/// error value rather than dereferenced.
 #[no_mangle]
-pub extern "C" fn jpeg12_crop_scanline(
+pub unsafe extern "C" fn jpeg12_crop_scanline(
     cinfo: *mut c_void,
     xoffset: *mut JDimension,
     width: *mut JDimension,
@@ -4455,8 +4735,17 @@ pub extern "C" fn jpeg12_crop_scanline(
 /// `jpeg16_read_scanlines(cinfo, scanlines, max_lines) -> JDIMENSION`.
 ///
 /// 16-bit variant (lossless-only per SOF3). Emits `u16` samples.
+///
+/// # Safety
+///
+/// C ABI entry point. `cinfo`, `scanlines` must satisfy the crate-level
+/// [pointer contract](crate#pointer-contract): valid for the whole call,
+/// correctly aligned, large enough for the accesses described above, and
+/// not aliased by another live reference. A pointer this function documents as
+/// optional may be null; any other null is reported through the documented
+/// error value rather than dereferenced.
 #[no_mangle]
-pub extern "C" fn jpeg16_read_scanlines(
+pub unsafe extern "C" fn jpeg16_read_scanlines(
     cinfo: *mut c_void,
     scanlines: *mut *mut u16,
     max_lines: JDimension,
@@ -4581,8 +4870,17 @@ const DCTSIZE: usize = 8;
 /// Supports 8-bit baseline and progressive JPEGs only. Returns 0 and
 /// sets `last_error` for 12-bit streams, lossless streams, or when
 /// `max_lines` is too small for one full iMCU row.
+///
+/// # Safety
+///
+/// C ABI entry point. `cinfo`, `data` must satisfy the crate-level
+/// [pointer contract](crate#pointer-contract): valid for the whole call,
+/// correctly aligned, large enough for the accesses described above, and
+/// not aliased by another live reference. A pointer this function documents as
+/// optional may be null; any other null is reported through the documented
+/// error value rather than dereferenced.
 #[no_mangle]
-pub extern "C" fn jpeg_read_raw_data(
+pub unsafe extern "C" fn jpeg_read_raw_data(
     cinfo: *mut c_void,
     data: *mut *mut *mut u8,
     max_lines: JDimension,
@@ -4766,8 +5064,17 @@ pub extern "C" fn jpeg_read_raw_data(
 /// failures: wrong precision, missing data pointer, `max_lines`
 /// smaller than one iMCU row, or a Rust-side decode error. Returns
 /// `max_v_samp_factor * DCT_v_scaled_size` rows on success.
+///
+/// # Safety
+///
+/// C ABI entry point. `cinfo`, `data` must satisfy the crate-level
+/// [pointer contract](crate#pointer-contract): valid for the whole call,
+/// correctly aligned, large enough for the accesses described above, and
+/// not aliased by another live reference. A pointer this function documents as
+/// optional may be null; any other null is reported through the documented
+/// error value rather than dereferenced.
 #[no_mangle]
-pub extern "C" fn jpeg12_read_raw_data(
+pub unsafe extern "C" fn jpeg12_read_raw_data(
     cinfo: *mut c_void,
     data: *mut *mut *mut i16,
     max_lines: JDimension,
@@ -4987,8 +5294,17 @@ const JPEG_REACHED_EOI: c_int = 2;
 ///   * Anything past `DSTATE_INHEADER` (post header-parse) → return
 ///     `JPEG_REACHED_EOI` because our shim buffers the entire stream
 ///     up front.
+///
+/// # Safety
+///
+/// C ABI entry point. `cinfo` must satisfy the crate-level
+/// [pointer contract](crate#pointer-contract): valid for the whole call,
+/// correctly aligned, large enough for the accesses described above, and
+/// not aliased by another live reference. A pointer this function documents as
+/// optional may be null; any other null is reported through the documented
+/// error value rather than dereferenced.
 #[no_mangle]
-pub extern "C" fn jpeg_consume_input(cinfo: *mut c_void) -> c_int {
+pub unsafe extern "C" fn jpeg_consume_input(cinfo: *mut c_void) -> c_int {
     crate::unwind_guard!(JPEG_SUSPENDED, {
         let c: &mut JpegDecompressPublic = match unsafe { cinfo_mut(cinfo) } {
             Some(c) => c,
@@ -5116,7 +5432,9 @@ pub extern "C" fn jpeg_consume_input(cinfo: *mut c_void) -> c_int {
                 // require_image=TRUE)` contract). Passing `0` here lets the
                 // tables-only branch return `JPEG_HEADER_TABLES_ONLY`, which
                 // the match arm below maps to `JPEG_REACHED_EOI`.
-                let result: c_int = jpeg_read_header(cinfo, /*require_image=*/ 0);
+                let result: c_int = unsafe {
+                    jpeg_read_header(cinfo, /*require_image=*/ 0)
+                };
                 // Re-read the state because `jpeg_read_header` mutated it.
                 let c2: &mut JpegDecompressPublic = match unsafe { cinfo_mut(cinfo) } {
                     Some(c) => c,
@@ -5170,8 +5488,17 @@ pub extern "C" fn jpeg_consume_input(cinfo: *mut c_void) -> c_int {
 /// TRUE only once the header has been parsed (state ≥ `DSTATE_SCANNING`).
 /// Earlier states would mislead a caller polling for "input ready"
 /// after just installing a source.
+///
+/// # Safety
+///
+/// C ABI entry point. `cinfo` must satisfy the crate-level
+/// [pointer contract](crate#pointer-contract): valid for the whole call,
+/// correctly aligned, large enough for the accesses described above, and
+/// not aliased by another live reference. A pointer this function documents as
+/// optional may be null; any other null is reported through the documented
+/// error value rather than dereferenced.
 #[no_mangle]
-pub extern "C" fn jpeg_input_complete(cinfo: *mut c_void) -> CBoolean {
+pub unsafe extern "C" fn jpeg_input_complete(cinfo: *mut c_void) -> CBoolean {
     crate::unwind_guard!(0, {
         let c: &mut JpegDecompressPublic = match unsafe { cinfo_mut(cinfo) } {
             Some(c) => c,
@@ -5200,8 +5527,17 @@ pub extern "C" fn jpeg_input_complete(cinfo: *mut c_void) -> CBoolean {
 /// Returns the `progressive_mode` flag populated by `jpeg_read_header`.
 /// This is what upstream `jpeg_has_multiple_scans` does — see
 /// `references/libjpeg-turbo/src/jdmaster.c::jpeg_has_multiple_scans`.
+///
+/// # Safety
+///
+/// C ABI entry point. `cinfo` must satisfy the crate-level
+/// [pointer contract](crate#pointer-contract): valid for the whole call,
+/// correctly aligned, large enough for the accesses described above, and
+/// not aliased by another live reference. A pointer this function documents as
+/// optional may be null; any other null is reported through the documented
+/// error value rather than dereferenced.
 #[no_mangle]
-pub extern "C" fn jpeg_has_multiple_scans(cinfo: *mut c_void) -> CBoolean {
+pub unsafe extern "C" fn jpeg_has_multiple_scans(cinfo: *mut c_void) -> CBoolean {
     crate::unwind_guard!(0, {
         match unsafe { cinfo_mut(cinfo) } {
             Some(c) => c.progressive_mode,
@@ -5218,8 +5554,17 @@ pub extern "C" fn jpeg_has_multiple_scans(cinfo: *mut c_void) -> CBoolean {
 /// `jpeg_input_complete() && input_scan_number == output_scan_number`)
 /// terminates for the P4-13 suspending path where `input_scan_number`
 /// advances per scan.
+///
+/// # Safety
+///
+/// C ABI entry point. `cinfo` must satisfy the crate-level
+/// [pointer contract](crate#pointer-contract): valid for the whole call,
+/// correctly aligned, large enough for the accesses described above, and
+/// not aliased by another live reference. A pointer this function documents as
+/// optional may be null; any other null is reported through the documented
+/// error value rather than dereferenced.
 #[no_mangle]
-pub extern "C" fn jpeg_start_output(cinfo: *mut c_void, scan_number: c_int) -> CBoolean {
+pub unsafe extern "C" fn jpeg_start_output(cinfo: *mut c_void, scan_number: c_int) -> CBoolean {
     crate::unwind_guard!(0, {
         if let Some(c) = unsafe { cinfo_mut(cinfo) } {
             c.output_scan_number = scan_number;
@@ -5230,15 +5575,33 @@ pub extern "C" fn jpeg_start_output(cinfo: *mut c_void, scan_number: c_int) -> C
 
 /// `jpeg_finish_output(cinfo) -> boolean` — buffered-image multi-pass
 /// finish. No-op success in our non-buffered model.
+///
+/// # Safety
+///
+/// C ABI entry point. `_cinfo` must satisfy the crate-level
+/// [pointer contract](crate#pointer-contract): valid for the whole call,
+/// correctly aligned, large enough for the accesses described above, and
+/// not aliased by another live reference. A pointer this function documents as
+/// optional may be null; any other null is reported through the documented
+/// error value rather than dereferenced.
 #[no_mangle]
-pub extern "C" fn jpeg_finish_output(_cinfo: *mut c_void) -> CBoolean {
+pub unsafe extern "C" fn jpeg_finish_output(_cinfo: *mut c_void) -> CBoolean {
     crate::unwind_guard!(0, { 1 })
 }
 
 /// `jpeg_new_colormap(cinfo)` — buffered-image colormap update. We
 /// don't ship the upstream 1-pass color quantizer, so this is a no-op.
+///
+/// # Safety
+///
+/// C ABI entry point. `_cinfo` must satisfy the crate-level
+/// [pointer contract](crate#pointer-contract): valid for the whole call,
+/// correctly aligned, large enough for the accesses described above, and
+/// not aliased by another live reference. A pointer this function documents as
+/// optional may be null; any other null is reported through the documented
+/// error value rather than dereferenced.
 #[no_mangle]
-pub extern "C" fn jpeg_new_colormap(_cinfo: *mut c_void) {
+pub unsafe extern "C" fn jpeg_new_colormap(_cinfo: *mut c_void) {
     crate::unwind_guard!((), {})
 }
 
@@ -5262,8 +5625,17 @@ pub extern "C" fn jpeg_new_colormap(_cinfo: *mut c_void) {
 /// stale `next_scanline` / pixel buffers from the failed run, and a
 /// reuse without `jpeg_write_icc_profile` would still emit the
 /// aborted run's APP2 ICC chunks.
+///
+/// # Safety
+///
+/// C ABI entry point. `cinfo` must satisfy the crate-level
+/// [pointer contract](crate#pointer-contract): valid for the whole call,
+/// correctly aligned, large enough for the accesses described above, and
+/// not aliased by another live reference. A pointer this function documents as
+/// optional may be null; any other null is reported through the documented
+/// error value rather than dereferenced.
 #[no_mangle]
-pub extern "C" fn jpeg_abort_compress(cinfo: *mut c_void) {
+pub unsafe extern "C" fn jpeg_abort_compress(cinfo: *mut c_void) {
     crate::unwind_guard!((), {
         let c: &mut JpegCompressPublic = match unsafe { cinfo_compress_mut(cinfo) } {
             Some(c) => c,
@@ -5302,8 +5674,17 @@ pub extern "C" fn jpeg_abort_compress(cinfo: *mut c_void) {
 /// `global_state` to `DSTATE_START` so a follow-up
 /// `jpeg_read_header` re-runs the source bridge against whatever
 /// new source the caller has installed.
+///
+/// # Safety
+///
+/// C ABI entry point. `cinfo` must satisfy the crate-level
+/// [pointer contract](crate#pointer-contract): valid for the whole call,
+/// correctly aligned, large enough for the accesses described above, and
+/// not aliased by another live reference. A pointer this function documents as
+/// optional may be null; any other null is reported through the documented
+/// error value rather than dereferenced.
 #[no_mangle]
-pub extern "C" fn jpeg_abort_decompress(cinfo: *mut c_void) {
+pub unsafe extern "C" fn jpeg_abort_decompress(cinfo: *mut c_void) {
     crate::unwind_guard!((), {
         let c: &mut JpegDecompressPublic = match unsafe { cinfo_mut(cinfo) } {
             Some(c) => c,
@@ -5370,8 +5751,17 @@ pub extern "C" fn jpeg_abort_decompress(cinfo: *mut c_void) {
 
 /// `jpeg_abort(cinfo)` — common-struct abort. Dispatches via the
 /// `is_decompressor` flag at offset 32 of the common prefix.
+///
+/// # Safety
+///
+/// C ABI entry point. `cinfo` must satisfy the crate-level
+/// [pointer contract](crate#pointer-contract): valid for the whole call,
+/// correctly aligned, large enough for the accesses described above, and
+/// not aliased by another live reference. A pointer this function documents as
+/// optional may be null; any other null is reported through the documented
+/// error value rather than dereferenced.
 #[no_mangle]
-pub extern "C" fn jpeg_abort(cinfo: *mut c_void) {
+pub unsafe extern "C" fn jpeg_abort(cinfo: *mut c_void) {
     crate::unwind_guard!((), {
         // Both struct prefixes carry `is_decompressor` at offset 32. We
         // only need to read the flag through whichever struct was
@@ -5381,26 +5771,35 @@ pub extern "C" fn jpeg_abort(cinfo: *mut c_void) {
         }
         let is_decompressor: CBoolean = unsafe { *(cinfo as *const u8).add(32).cast::<CBoolean>() };
         if is_decompressor != 0 {
-            jpeg_abort_decompress(cinfo);
+            unsafe { jpeg_abort_decompress(cinfo) };
         } else {
-            jpeg_abort_compress(cinfo);
+            unsafe { jpeg_abort_compress(cinfo) };
         }
     })
 }
 
 /// `jpeg_destroy(cinfo)` — common-struct destroy. Same dispatch as
 /// `jpeg_abort`.
+///
+/// # Safety
+///
+/// C ABI entry point. `cinfo` must satisfy the crate-level
+/// [pointer contract](crate#pointer-contract): valid for the whole call,
+/// correctly aligned, large enough for the accesses described above, and
+/// not aliased by another live reference. A pointer this function documents as
+/// optional may be null; any other null is reported through the documented
+/// error value rather than dereferenced.
 #[no_mangle]
-pub extern "C" fn jpeg_destroy(cinfo: *mut c_void) {
+pub unsafe extern "C" fn jpeg_destroy(cinfo: *mut c_void) {
     crate::unwind_guard!((), {
         if cinfo.is_null() {
             return;
         }
         let is_decompressor: CBoolean = unsafe { *(cinfo as *const u8).add(32).cast::<CBoolean>() };
         if is_decompressor != 0 {
-            jpeg_destroy_decompress(cinfo);
+            unsafe { jpeg_destroy_decompress(cinfo) };
         } else {
-            jpeg_destroy_compress(cinfo);
+            unsafe { jpeg_destroy_compress(cinfo) };
         }
     })
 }
@@ -5469,8 +5868,17 @@ unsafe fn alloc_through_memmgr_or_heap(cinfo: *mut c_void, size: usize) -> *mut 
 /// the table is released by `jpeg_destroy_*` along with the rest of
 /// the permanent pool; this matches upstream `jpeg_alloc_quant_table`
 /// at `references/libjpeg-turbo/src/jcomapi.c`.
+///
+/// # Safety
+///
+/// C ABI entry point. `cinfo` must satisfy the crate-level
+/// [pointer contract](crate#pointer-contract): valid for the whole call,
+/// correctly aligned, large enough for the accesses described above, and
+/// not aliased by another live reference. A pointer this function documents as
+/// optional may be null; any other null is reported through the documented
+/// error value rather than dereferenced.
 #[no_mangle]
-pub extern "C" fn jpeg_alloc_quant_table(cinfo: *mut c_void) -> *mut JQuantTblPublic {
+pub unsafe extern "C" fn jpeg_alloc_quant_table(cinfo: *mut c_void) -> *mut JQuantTblPublic {
     crate::unwind_guard!(std::ptr::null_mut(), {
         // SAFETY: passing through to the memory manager owned by the
         // caller's `cinfo`.
@@ -5482,8 +5890,17 @@ pub extern "C" fn jpeg_alloc_quant_table(cinfo: *mut c_void) -> *mut JQuantTblPu
 
 /// `jpeg_alloc_huff_table(cinfo) -> JHUFF_TBL*`. Zero-initialised.
 /// Allocated via the memory manager — see `jpeg_alloc_quant_table`.
+///
+/// # Safety
+///
+/// C ABI entry point. `cinfo` must satisfy the crate-level
+/// [pointer contract](crate#pointer-contract): valid for the whole call,
+/// correctly aligned, large enough for the accesses described above, and
+/// not aliased by another live reference. A pointer this function documents as
+/// optional may be null; any other null is reported through the documented
+/// error value rather than dereferenced.
 #[no_mangle]
-pub extern "C" fn jpeg_alloc_huff_table(cinfo: *mut c_void) -> *mut JHuffTblPublic {
+pub unsafe extern "C" fn jpeg_alloc_huff_table(cinfo: *mut c_void) -> *mut JHuffTblPublic {
     crate::unwind_guard!(std::ptr::null_mut(), {
         // SAFETY: passing through to the memory manager owned by the
         // caller's `cinfo`.
@@ -6018,8 +6435,21 @@ fn default_num_components_for(cs: c_int) -> c_int {
 ///
 /// The `jpeg_create_compress(cinfo)` macro expands to this function with
 /// `version = JPEG_LIB_VERSION` and `structsize = sizeof(*cinfo)`.
+///
+/// # Safety
+///
+/// C ABI entry point. `cinfo` must satisfy the crate-level
+/// [pointer contract](crate#pointer-contract): valid for the whole call,
+/// correctly aligned, large enough for the accesses described above, and
+/// not aliased by another live reference. A pointer this function documents as
+/// optional may be null; any other null is reported through the documented
+/// error value rather than dereferenced.
 #[no_mangle]
-pub extern "C" fn jpeg_CreateCompress(cinfo: *mut c_void, _version: c_int, _struct_size: usize) {
+pub unsafe extern "C" fn jpeg_CreateCompress(
+    cinfo: *mut c_void,
+    _version: c_int,
+    _struct_size: usize,
+) {
     crate::unwind_guard!((), {
         let c: &mut JpegCompressPublic = match unsafe { cinfo_compress_mut(cinfo) } {
             Some(c) => c,
@@ -6115,10 +6545,19 @@ pub extern "C" fn jpeg_CreateCompress(cinfo: *mut c_void, _version: c_int, _stru
 /// Expansion of the `jpeg_create_compress(cinfo)` convenience macro.
 /// libjpeg emits a direct call to `jpeg_CreateCompress` — we provide
 /// both names so callers compiled against either form link cleanly.
+///
+/// # Safety
+///
+/// C ABI entry point. `cinfo` must satisfy the crate-level
+/// [pointer contract](crate#pointer-contract): valid for the whole call,
+/// correctly aligned, large enough for the accesses described above, and
+/// not aliased by another live reference. A pointer this function documents as
+/// optional may be null; any other null is reported through the documented
+/// error value rather than dereferenced.
 #[no_mangle]
-pub extern "C" fn jpeg_create_compress(cinfo: *mut c_void) {
+pub unsafe extern "C" fn jpeg_create_compress(cinfo: *mut c_void) {
     crate::unwind_guard!((), {
-        jpeg_CreateCompress(cinfo, 80, std::mem::size_of::<JpegCompressPublic>());
+        unsafe { jpeg_CreateCompress(cinfo, 80, std::mem::size_of::<JpegCompressPublic>()) };
     })
 }
 
@@ -6135,8 +6574,17 @@ fn calc_compress_jpeg_dimensions(c: &mut JpegCompressPublic, lossless: bool) {
 /// Mirrors libjpeg-turbo's no-compression-scaling build: JPEG image
 /// dimensions are hardwired to the input image dimensions, and the scaled
 /// DCT unit is 8 for lossy JPEG or 1 for lossless JPEG.
+///
+/// # Safety
+///
+/// C ABI entry point. `cinfo` must satisfy the crate-level
+/// [pointer contract](crate#pointer-contract): valid for the whole call,
+/// correctly aligned, large enough for the accesses described above, and
+/// not aliased by another live reference. A pointer this function documents as
+/// optional may be null; any other null is reported through the documented
+/// error value rather than dereferenced.
 #[no_mangle]
-pub extern "C" fn jpeg_calc_jpeg_dimensions(cinfo: *mut c_void) {
+pub unsafe extern "C" fn jpeg_calc_jpeg_dimensions(cinfo: *mut c_void) {
     crate::unwind_guard!((), {
         let c: &mut JpegCompressPublic = match unsafe { cinfo_compress_mut(cinfo) } {
             Some(c) => c,
@@ -6151,8 +6599,17 @@ pub extern "C" fn jpeg_calc_jpeg_dimensions(cinfo: *mut c_void) {
 }
 
 /// `jpeg_destroy_compress(cinfo)`.
+///
+/// # Safety
+///
+/// C ABI entry point. `cinfo` must satisfy the crate-level
+/// [pointer contract](crate#pointer-contract): valid for the whole call,
+/// correctly aligned, large enough for the accesses described above, and
+/// not aliased by another live reference. A pointer this function documents as
+/// optional may be null; any other null is reported through the documented
+/// error value rather than dereferenced.
 #[no_mangle]
-pub extern "C" fn jpeg_destroy_compress(cinfo: *mut c_void) {
+pub unsafe extern "C" fn jpeg_destroy_compress(cinfo: *mut c_void) {
     crate::unwind_guard!((), {
         let c: &mut JpegCompressPublic = match unsafe { cinfo_compress_mut(cinfo) } {
             Some(c) => c,
@@ -6493,8 +6950,22 @@ fn dest_mgr_is_reusable(
 }
 
 /// Install a destination manager that streams bytes into a `FILE *`.
+///
+/// # Safety
+///
+/// C ABI entry point. `cinfo`, `outfile` must satisfy the crate-level
+/// [pointer contract](crate#pointer-contract): valid for the whole call,
+/// correctly aligned, large enough for the accesses described above, and
+/// not aliased by another live reference. A pointer this function documents as
+/// optional may be null; any other null is reported through the documented
+/// error value rather than dereferenced.
+///
+/// `outfile` is **retained**: the `FILE *` is stored on `cinfo` and written
+/// during later calls, so it must stay open until the destination is
+/// replaced or the `cinfo` is finished, aborted, or destroyed — see
+/// [Retained pointers](crate#pointer-contract).
 #[no_mangle]
-pub extern "C" fn jpeg_stdio_dest(cinfo: *mut c_void, outfile: *mut c_void) {
+pub unsafe extern "C" fn jpeg_stdio_dest(cinfo: *mut c_void, outfile: *mut c_void) {
     crate::unwind_guard!((), {
         let c: &mut JpegCompressPublic = match unsafe { cinfo_compress_mut(cinfo) } {
             Some(c) => c,
@@ -6525,8 +6996,23 @@ pub extern "C" fn jpeg_stdio_dest(cinfo: *mut c_void, outfile: *mut c_void) {
 /// Mirrors upstream `jpeg_mem_dest` (jdatadst.c:236-277) including its
 /// ownership rule: `*outsize` is the caller buffer's **capacity**, and a
 /// caller-supplied buffer is never freed by this library.
+///
+/// # Safety
+///
+/// C ABI entry point. `cinfo`, `outbuffer`, `outsize` must satisfy the crate-level
+/// [pointer contract](crate#pointer-contract): valid for the whole call,
+/// correctly aligned, large enough for the accesses described above, and
+/// not aliased by another live reference. A pointer this function documents as
+/// optional may be null; any other null is reported through the documented
+/// error value rather than dereferenced.
+///
+/// `outbuffer`/`outsize` are **retained**: this function stores them on
+/// `cinfo` and writes through them during later calls, so they must stay
+/// valid and unmoved until the destination is replaced or the `cinfo` is
+/// finished, aborted, or destroyed — see
+/// [Retained pointers](crate#pointer-contract).
 #[no_mangle]
-pub extern "C" fn jpeg_mem_dest(
+pub unsafe extern "C" fn jpeg_mem_dest(
     cinfo: *mut c_void,
     outbuffer: *mut *mut u8,
     outsize: *mut std::os::raw::c_ulong,
@@ -6700,8 +7186,17 @@ fn apply_colorspace_defaults(c: &mut JpegCompressPublic, priv_state: &mut Compre
 
 /// `jpeg_default_colorspace(cinfo)` — pick the standard JPEG color space
 /// corresponding to `in_color_space`.
+///
+/// # Safety
+///
+/// C ABI entry point. `cinfo` must satisfy the crate-level
+/// [pointer contract](crate#pointer-contract): valid for the whole call,
+/// correctly aligned, large enough for the accesses described above, and
+/// not aliased by another live reference. A pointer this function documents as
+/// optional may be null; any other null is reported through the documented
+/// error value rather than dereferenced.
 #[no_mangle]
-pub extern "C" fn jpeg_default_colorspace(cinfo: *mut c_void) {
+pub unsafe extern "C" fn jpeg_default_colorspace(cinfo: *mut c_void) {
     crate::unwind_guard!((), {
         let c: &mut JpegCompressPublic = match unsafe { cinfo_compress_mut(cinfo) } {
             Some(c) => c,
@@ -6719,14 +7214,23 @@ pub extern "C" fn jpeg_default_colorspace(cinfo: *mut c_void) {
             6..=15 => JCS_YCBCR,
             _ => JCS_UNKNOWN,
         };
-        jpeg_set_colorspace(cinfo, jcs);
+        unsafe { jpeg_set_colorspace(cinfo, jcs) };
     })
 }
 
 /// `jpeg_set_colorspace(cinfo, colorspace)` — select the JPEG color space
 /// and populate `comp_info[]` with libjpeg's defaults.
+///
+/// # Safety
+///
+/// C ABI entry point. `cinfo` must satisfy the crate-level
+/// [pointer contract](crate#pointer-contract): valid for the whole call,
+/// correctly aligned, large enough for the accesses described above, and
+/// not aliased by another live reference. A pointer this function documents as
+/// optional may be null; any other null is reported through the documented
+/// error value rather than dereferenced.
 #[no_mangle]
-pub extern "C" fn jpeg_set_colorspace(cinfo: *mut c_void, colorspace: c_int) {
+pub unsafe extern "C" fn jpeg_set_colorspace(cinfo: *mut c_void, colorspace: c_int) {
     crate::unwind_guard!((), {
         let c: &mut JpegCompressPublic = match unsafe { cinfo_compress_mut(cinfo) } {
             Some(c) => c,
@@ -6755,8 +7259,17 @@ pub extern "C" fn jpeg_set_colorspace(cinfo: *mut c_void, colorspace: c_int) {
 /// `jpeg_set_defaults(cinfo)` — populate default compression parameters,
 /// mirroring libjpeg `jcparam.c::jpeg_set_defaults`. Requires the caller to
 /// have already set `in_color_space`.
+///
+/// # Safety
+///
+/// C ABI entry point. `cinfo` must satisfy the crate-level
+/// [pointer contract](crate#pointer-contract): valid for the whole call,
+/// correctly aligned, large enough for the accesses described above, and
+/// not aliased by another live reference. A pointer this function documents as
+/// optional may be null; any other null is reported through the documented
+/// error value rather than dereferenced.
 #[no_mangle]
-pub extern "C" fn jpeg_set_defaults(cinfo: *mut c_void) {
+pub unsafe extern "C" fn jpeg_set_defaults(cinfo: *mut c_void) {
     crate::unwind_guard!((), {
         let c: &mut JpegCompressPublic = match unsafe { cinfo_compress_mut(cinfo) } {
             Some(c) => c,
@@ -6792,9 +7305,9 @@ pub extern "C" fn jpeg_set_defaults(cinfo: *mut c_void) {
         c.Y_density = 1;
         c.progressive_mode = 0;
         // Apply the defaults that flow from `in_color_space` → `jpeg_color_space`.
-        jpeg_default_colorspace(cinfo);
+        unsafe { jpeg_default_colorspace(cinfo) };
         // Default quality = 75 with baseline restriction per libjpeg.
-        jpeg_set_quality(cinfo, 75, 1);
+        unsafe { jpeg_set_quality(cinfo, 75, 1) };
     })
 }
 
@@ -6805,8 +7318,21 @@ pub extern "C" fn jpeg_set_defaults(cinfo: *mut c_void) {
 ///
 /// The scaling curve matches libjpeg `jpeg_quality_scaling`; slots 0 and 1 of
 /// `q_scale_factor[]` receive that scale per `jcparam.c::jpeg_set_quality`.
+///
+/// # Safety
+///
+/// C ABI entry point. `cinfo` must satisfy the crate-level
+/// [pointer contract](crate#pointer-contract): valid for the whole call,
+/// correctly aligned, large enough for the accesses described above, and
+/// not aliased by another live reference. A pointer this function documents as
+/// optional may be null; any other null is reported through the documented
+/// error value rather than dereferenced.
 #[no_mangle]
-pub extern "C" fn jpeg_set_quality(cinfo: *mut c_void, quality: c_int, _force_baseline: CBoolean) {
+pub unsafe extern "C" fn jpeg_set_quality(
+    cinfo: *mut c_void,
+    quality: c_int,
+    _force_baseline: CBoolean,
+) {
     crate::unwind_guard!((), {
         let c: &mut JpegCompressPublic = match unsafe { cinfo_compress_mut(cinfo) } {
             Some(c) => c,
@@ -6876,8 +7402,17 @@ fn input_pixel_format(c: &JpegCompressPublic) -> PixelFormat {
 /// once all scanlines are present — libjpeg lets callers stream rows
 /// either way, but our Rust-side encoder takes the entire image up
 /// front, so we accumulate.
+///
+/// # Safety
+///
+/// C ABI entry point. `cinfo` must satisfy the crate-level
+/// [pointer contract](crate#pointer-contract): valid for the whole call,
+/// correctly aligned, large enough for the accesses described above, and
+/// not aliased by another live reference. A pointer this function documents as
+/// optional may be null; any other null is reported through the documented
+/// error value rather than dereferenced.
 #[no_mangle]
-pub extern "C" fn jpeg_start_compress(cinfo: *mut c_void, _write_all_tables: CBoolean) {
+pub unsafe extern "C" fn jpeg_start_compress(cinfo: *mut c_void, _write_all_tables: CBoolean) {
     crate::unwind_guard!((), {
         let c: &mut JpegCompressPublic = match unsafe { cinfo_compress_mut(cinfo) } {
             Some(c) => c,
@@ -6955,8 +7490,17 @@ pub extern "C" fn jpeg_start_compress(cinfo: *mut c_void, _write_all_tables: CBo
 /// Copies up to `num_lines` rows from the application's row-pointer
 /// array into our accumulation buffer. Returns the number actually
 /// stored (may be less when near the image bottom).
+///
+/// # Safety
+///
+/// C ABI entry point. `cinfo`, `scanlines` must satisfy the crate-level
+/// [pointer contract](crate#pointer-contract): valid for the whole call,
+/// correctly aligned, large enough for the accesses described above, and
+/// not aliased by another live reference. A pointer this function documents as
+/// optional may be null; any other null is reported through the documented
+/// error value rather than dereferenced.
 #[no_mangle]
-pub extern "C" fn jpeg_write_scanlines(
+pub unsafe extern "C" fn jpeg_write_scanlines(
     cinfo: *mut c_void,
     scanlines: *mut *mut u8,
     num_lines: JDimension,
@@ -7539,8 +8083,17 @@ fn write_marker_segment(out: &mut Vec<u8>, marker_code: c_int, data: &[u8]) {
 }
 
 /// `jpeg_finish_compress(cinfo)` — close the datastream, flush to sink.
+///
+/// # Safety
+///
+/// C ABI entry point. `cinfo` must satisfy the crate-level
+/// [pointer contract](crate#pointer-contract): valid for the whole call,
+/// correctly aligned, large enough for the accesses described above, and
+/// not aliased by another live reference. A pointer this function documents as
+/// optional may be null; any other null is reported through the documented
+/// error value rather than dereferenced.
 #[no_mangle]
-pub extern "C" fn jpeg_finish_compress(cinfo: *mut c_void) {
+pub unsafe extern "C" fn jpeg_finish_compress(cinfo: *mut c_void) {
     crate::unwind_guard!((), {
         let c: &mut JpegCompressPublic = match unsafe { cinfo_compress_mut(cinfo) } {
             Some(c) => c,
@@ -7679,8 +8232,17 @@ pub extern "C" fn jpeg_quality_scaling(quality: c_int) -> c_int {
 /// stores them only in private state and does not apply them at
 /// `jpeg_finish_compress` time. P4-85 tracks that output no-op plus the public
 /// slot and `force_baseline` semantics.
+///
+/// # Safety
+///
+/// C ABI entry point. `cinfo`, `basic_table` must satisfy the crate-level
+/// [pointer contract](crate#pointer-contract): valid for the whole call,
+/// correctly aligned, large enough for the accesses described above, and
+/// not aliased by another live reference. A pointer this function documents as
+/// optional may be null; any other null is reported through the documented
+/// error value rather than dereferenced.
 #[no_mangle]
-pub extern "C" fn jpeg_add_quant_table(
+pub unsafe extern "C" fn jpeg_add_quant_table(
     cinfo: *mut c_void,
     which_tbl: c_int,
     basic_table: *const u32,
@@ -7726,8 +8288,17 @@ pub extern "C" fn jpeg_add_quant_table(
 /// `jpeg_set_quality(cinfo, N, force_baseline)` with `quality == N`,
 /// which is what the libjpeg convenience macro expands to when the
 /// caller is past `jpeg_set_defaults`.
+///
+/// # Safety
+///
+/// C ABI entry point. `cinfo` must satisfy the crate-level
+/// [pointer contract](crate#pointer-contract): valid for the whole call,
+/// correctly aligned, large enough for the accesses described above, and
+/// not aliased by another live reference. A pointer this function documents as
+/// optional may be null; any other null is reported through the documented
+/// error value rather than dereferenced.
 #[no_mangle]
-pub extern "C" fn jpeg_default_qtables(cinfo: *mut c_void, force_baseline: CBoolean) {
+pub unsafe extern "C" fn jpeg_default_qtables(cinfo: *mut c_void, force_baseline: CBoolean) {
     crate::unwind_guard!((), {
         let quality: c_int = {
             let c: &JpegCompressPublic = match unsafe { cinfo_compress_mut(cinfo) } {
@@ -7741,14 +8312,23 @@ pub extern "C" fn jpeg_default_qtables(cinfo: *mut c_void, force_baseline: CBool
             };
             priv_state.quality as c_int
         };
-        jpeg_set_quality(cinfo, quality, force_baseline);
+        unsafe { jpeg_set_quality(cinfo, quality, force_baseline) };
     })
 }
 
 /// `jpeg_simple_progression(cinfo)` — switch the encoder to the default
 /// libjpeg progressive scan script.
+///
+/// # Safety
+///
+/// C ABI entry point. `cinfo` must satisfy the crate-level
+/// [pointer contract](crate#pointer-contract): valid for the whole call,
+/// correctly aligned, large enough for the accesses described above, and
+/// not aliased by another live reference. A pointer this function documents as
+/// optional may be null; any other null is reported through the documented
+/// error value rather than dereferenced.
 #[no_mangle]
-pub extern "C" fn jpeg_simple_progression(cinfo: *mut c_void) {
+pub unsafe extern "C" fn jpeg_simple_progression(cinfo: *mut c_void) {
     crate::unwind_guard!((), {
         let c: &mut JpegCompressPublic = match unsafe { cinfo_compress_mut(cinfo) } {
             Some(c) => c,
@@ -7762,8 +8342,17 @@ pub extern "C" fn jpeg_simple_progression(cinfo: *mut c_void) {
 ///
 /// Switches the encoder to lossless-JPEG (SOF3) mode. Stored in the
 /// private state; wired into the encode path at `jpeg_finish_compress`.
+///
+/// # Safety
+///
+/// C ABI entry point. `cinfo` must satisfy the crate-level
+/// [pointer contract](crate#pointer-contract): valid for the whole call,
+/// correctly aligned, large enough for the accesses described above, and
+/// not aliased by another live reference. A pointer this function documents as
+/// optional may be null; any other null is reported through the documented
+/// error value rather than dereferenced.
 #[no_mangle]
-pub extern "C" fn jpeg_enable_lossless(
+pub unsafe extern "C" fn jpeg_enable_lossless(
     cinfo: *mut c_void,
     predictor_selection_value: c_int,
     point_transform: c_int,
@@ -7789,8 +8378,17 @@ pub extern "C" fn jpeg_enable_lossless(
 /// `jpeg_suppress_tables(cinfo, suppress)` — when set, quant and Huffman
 /// tables are omitted from the next datastream (caller must have emitted
 /// them separately via `jpeg_write_tables`). Stored in private state.
+///
+/// # Safety
+///
+/// C ABI entry point. `cinfo` must satisfy the crate-level
+/// [pointer contract](crate#pointer-contract): valid for the whole call,
+/// correctly aligned, large enough for the accesses described above, and
+/// not aliased by another live reference. A pointer this function documents as
+/// optional may be null; any other null is reported through the documented
+/// error value rather than dereferenced.
 #[no_mangle]
-pub extern "C" fn jpeg_suppress_tables(cinfo: *mut c_void, suppress: CBoolean) {
+pub unsafe extern "C" fn jpeg_suppress_tables(cinfo: *mut c_void, suppress: CBoolean) {
     crate::unwind_guard!((), {
         let c: &mut JpegCompressPublic = match unsafe { cinfo_compress_mut(cinfo) } {
             Some(c) => c,
@@ -7814,8 +8412,17 @@ pub extern "C" fn jpeg_suppress_tables(cinfo: *mut c_void, suppress: CBoolean) {
 /// write a complete APPn-style marker in one call. We accumulate the
 /// segment in a private list; `jpeg_finish_compress` splices it in
 /// directly after the SOI.
+///
+/// # Safety
+///
+/// C ABI entry point. `cinfo`, `dataptr` must satisfy the crate-level
+/// [pointer contract](crate#pointer-contract): valid for the whole call,
+/// correctly aligned, large enough for the accesses described above, and
+/// not aliased by another live reference. A pointer this function documents as
+/// optional may be null; any other null is reported through the documented
+/// error value rather than dereferenced.
 #[no_mangle]
-pub extern "C" fn jpeg_write_marker(
+pub unsafe extern "C" fn jpeg_write_marker(
     cinfo: *mut c_void,
     marker: c_int,
     dataptr: *const u8,
@@ -7846,8 +8453,17 @@ pub extern "C" fn jpeg_write_marker(
 /// will be filled in byte-by-byte via `jpeg_write_m_byte`. Reserve the
 /// slot up front so subsequent `jpeg_write_m_byte` calls know which
 /// entry to append to.
+///
+/// # Safety
+///
+/// C ABI entry point. `cinfo` must satisfy the crate-level
+/// [pointer contract](crate#pointer-contract): valid for the whole call,
+/// correctly aligned, large enough for the accesses described above, and
+/// not aliased by another live reference. A pointer this function documents as
+/// optional may be null; any other null is reported through the documented
+/// error value rather than dereferenced.
 #[no_mangle]
-pub extern "C" fn jpeg_write_m_header(
+pub unsafe extern "C" fn jpeg_write_m_header(
     cinfo: *mut c_void,
     marker: c_int,
     datalen: std::os::raw::c_uint,
@@ -7871,8 +8487,17 @@ pub extern "C" fn jpeg_write_m_header(
 
 /// `jpeg_write_m_byte(cinfo, val)` — append a single byte to the most
 /// recently opened marker segment (`jpeg_write_m_header`).
+///
+/// # Safety
+///
+/// C ABI entry point. `cinfo` must satisfy the crate-level
+/// [pointer contract](crate#pointer-contract): valid for the whole call,
+/// correctly aligned, large enough for the accesses described above, and
+/// not aliased by another live reference. A pointer this function documents as
+/// optional may be null; any other null is reported through the documented
+/// error value rather than dereferenced.
 #[no_mangle]
-pub extern "C" fn jpeg_write_m_byte(cinfo: *mut c_void, val: c_int) {
+pub unsafe extern "C" fn jpeg_write_m_byte(cinfo: *mut c_void, val: c_int) {
     crate::unwind_guard!((), {
         let c: &mut JpegCompressPublic = match unsafe { cinfo_compress_mut(cinfo) } {
             Some(c) => c,
@@ -7892,8 +8517,17 @@ pub extern "C" fn jpeg_write_m_byte(cinfo: *mut c_void, val: c_int) {
 /// `jpeg_write_icc_profile(cinfo, icc_data, icc_data_len)` —
 /// capture an ICC profile blob; the finish-compress path splits it into
 /// APP2 "ICC_PROFILE\0" chunks via `write_app2_icc_inline`.
+///
+/// # Safety
+///
+/// C ABI entry point. `cinfo`, `icc_data_ptr` must satisfy the crate-level
+/// [pointer contract](crate#pointer-contract): valid for the whole call,
+/// correctly aligned, large enough for the accesses described above, and
+/// not aliased by another live reference. A pointer this function documents as
+/// optional may be null; any other null is reported through the documented
+/// error value rather than dereferenced.
 #[no_mangle]
-pub extern "C" fn jpeg_write_icc_profile(
+pub unsafe extern "C" fn jpeg_write_icc_profile(
     cinfo: *mut c_void,
     icc_data_ptr: *const u8,
     icc_data_len: std::os::raw::c_uint,
@@ -7925,8 +8559,17 @@ pub extern "C" fn jpeg_write_icc_profile(
 ///
 /// We emit a standard quality-75 baseline table pair, which matches
 /// `jpeg_set_defaults(); jpeg_set_quality(75, TRUE); jpeg_write_tables()`.
+///
+/// # Safety
+///
+/// C ABI entry point. `cinfo` must satisfy the crate-level
+/// [pointer contract](crate#pointer-contract): valid for the whole call,
+/// correctly aligned, large enough for the accesses described above, and
+/// not aliased by another live reference. A pointer this function documents as
+/// optional may be null; any other null is reported through the documented
+/// error value rather than dereferenced.
 #[no_mangle]
-pub extern "C" fn jpeg_write_tables(cinfo: *mut c_void) {
+pub unsafe extern "C" fn jpeg_write_tables(cinfo: *mut c_void) {
     crate::unwind_guard!((), {
         let c: &mut JpegCompressPublic = match unsafe { cinfo_compress_mut(cinfo) } {
             Some(c) => c,
@@ -8084,8 +8727,17 @@ fn build_tables_only_datastream(quality: u8, arith: bool) -> Vec<u8> {
 /// 12-bit variant: samples are `u16` (zero-extended 12-bit values).
 /// Internally we accumulate into `pixels_u16`; the finish-compress path
 /// can later dispatch to `compress_12bit` for 12-bit-precision output.
+///
+/// # Safety
+///
+/// C ABI entry point. `cinfo`, `scanlines` must satisfy the crate-level
+/// [pointer contract](crate#pointer-contract): valid for the whole call,
+/// correctly aligned, large enough for the accesses described above, and
+/// not aliased by another live reference. A pointer this function documents as
+/// optional may be null; any other null is reported through the documented
+/// error value rather than dereferenced.
 #[no_mangle]
-pub extern "C" fn jpeg12_write_scanlines(
+pub unsafe extern "C" fn jpeg12_write_scanlines(
     cinfo: *mut c_void,
     scanlines: *mut *mut u16,
     num_lines: JDimension,
@@ -8096,8 +8748,17 @@ pub extern "C" fn jpeg12_write_scanlines(
 }
 
 /// `jpeg16_write_scanlines(cinfo, scanlines, num_lines) -> JDIMENSION`.
+///
+/// # Safety
+///
+/// C ABI entry point. `cinfo`, `scanlines` must satisfy the crate-level
+/// [pointer contract](crate#pointer-contract): valid for the whole call,
+/// correctly aligned, large enough for the accesses described above, and
+/// not aliased by another live reference. A pointer this function documents as
+/// optional may be null; any other null is reported through the documented
+/// error value rather than dereferenced.
 #[no_mangle]
-pub extern "C" fn jpeg16_write_scanlines(
+pub unsafe extern "C" fn jpeg16_write_scanlines(
     cinfo: *mut c_void,
     scanlines: *mut *mut u16,
     num_lines: JDimension,
@@ -8137,8 +8798,17 @@ pub extern "C" fn jpeg16_write_scanlines(
 /// # Limitations
 /// - 8-bit (data_precision == 8) baseline only.
 /// - Lossless and 12-bit raw-data are out of scope for this entry point.
+///
+/// # Safety
+///
+/// C ABI entry point. `cinfo`, `data` must satisfy the crate-level
+/// [pointer contract](crate#pointer-contract): valid for the whole call,
+/// correctly aligned, large enough for the accesses described above, and
+/// not aliased by another live reference. A pointer this function documents as
+/// optional may be null; any other null is reported through the documented
+/// error value rather than dereferenced.
 #[no_mangle]
-pub extern "C" fn jpeg_write_raw_data(
+pub unsafe extern "C" fn jpeg_write_raw_data(
     cinfo: *mut c_void,
     data: *mut *mut *mut u8,
     num_lines: JDimension,
@@ -8595,8 +9265,17 @@ fn run_raw_encoder_12_and_flush(
 /// `c.data_precision == 12`. Returns 0 on a precondition or buffer-size
 /// mismatch (after populating `priv_state.last_error`); returns
 /// `lines_per_iMCU` on success.
+///
+/// # Safety
+///
+/// C ABI entry point. `cinfo`, `data` must satisfy the crate-level
+/// [pointer contract](crate#pointer-contract): valid for the whole call,
+/// correctly aligned, large enough for the accesses described above, and
+/// not aliased by another live reference. A pointer this function documents as
+/// optional may be null; any other null is reported through the documented
+/// error value rather than dereferenced.
 #[no_mangle]
-pub extern "C" fn jpeg12_write_raw_data(
+pub unsafe extern "C" fn jpeg12_write_raw_data(
     cinfo: *mut c_void,
     data: *mut *mut *mut i16,
     num_lines: JDimension,
@@ -8780,8 +9459,17 @@ pub extern "C" fn jpeg12_write_raw_data(
 /// and only fall back to `jpeg_set_quality(50)` semantics when the
 /// caller asks for `scale_factor == 100` (the "use defaults
 /// unscaled" case where both paths agree).
+///
+/// # Safety
+///
+/// C ABI entry point. `cinfo` must satisfy the crate-level
+/// [pointer contract](crate#pointer-contract): valid for the whole call,
+/// correctly aligned, large enough for the accesses described above, and
+/// not aliased by another live reference. A pointer this function documents as
+/// optional may be null; any other null is reported through the documented
+/// error value rather than dereferenced.
 #[no_mangle]
-pub extern "C" fn jpeg_set_linear_quality(
+pub unsafe extern "C" fn jpeg_set_linear_quality(
     cinfo: *mut c_void,
     scale_factor: c_int,
     force_baseline: CBoolean,
@@ -8806,8 +9494,8 @@ pub extern "C" fn jpeg_set_linear_quality(
         let scale: c_int = scale_factor.max(1);
         // Slot 0 = luminance, slot 1 = chrominance (matches upstream
         // `jpeg_default_qtables`).
-        jpeg_add_quant_table(cinfo, 0, STD_LUM.as_ptr(), scale, force_baseline);
-        jpeg_add_quant_table(cinfo, 1, STD_CHROM.as_ptr(), scale, force_baseline);
+        unsafe { jpeg_add_quant_table(cinfo, 0, STD_LUM.as_ptr(), scale, force_baseline) };
+        unsafe { jpeg_add_quant_table(cinfo, 1, STD_CHROM.as_ptr(), scale, force_baseline) };
     })
 }
 
@@ -8872,15 +9560,18 @@ fn write_scanlines_highprec(
 /// `jpeg_write_icc_profile`) between the two — matching the libjpeg
 /// jpegtran flow.
 ///
-/// # Safety contract
+/// # Safety
 ///
-/// `coef_arrays` must be the value returned by a prior
+/// C ABI entry point. `cinfo` and `coef_arrays` must satisfy the crate-level
+/// [pointer contract](crate#pointer-contract).
+///
+/// Beyond that, `coef_arrays` must be the value returned by a prior
 /// `jpeg_read_coefficients` call against this shim. The pointer is owned
 /// by the source `j_decompress_ptr`'s private state and stays valid
 /// until that decompress cinfo is destroyed — callers must keep the
 /// source alive across the matching `jpeg_finish_compress`.
 #[no_mangle]
-pub extern "C" fn jpeg_write_coefficients(cinfo: *mut c_void, coef_arrays: *mut c_void) {
+pub unsafe extern "C" fn jpeg_write_coefficients(cinfo: *mut c_void, coef_arrays: *mut c_void) {
     crate::unwind_guard!((), {
         let c: &mut JpegCompressPublic = match unsafe { cinfo_compress_mut(cinfo) } {
             Some(c) => c,
@@ -9849,8 +10540,17 @@ pub unsafe extern "C" fn jpeg_resync_to_restart(cinfo: *mut c_void, desired: c_i
 /// to output. Despite being "internal", libjpeg-turbo exports it from
 /// the shared library so consumers that compile against `jpegint.h`
 /// link cleanly against our shim.
+///
+/// # Safety
+///
+/// C ABI entry point. `input_row`, `output_row` must satisfy the crate-level
+/// [pointer contract](crate#pointer-contract): valid for the whole call,
+/// correctly aligned, large enough for the accesses described above, and
+/// not aliased by another live reference. A pointer this function documents as
+/// optional may be null; any other null is reported through the documented
+/// error value rather than dereferenced.
 #[no_mangle]
-pub extern "C" fn jcopy_block_row(
+pub unsafe extern "C" fn jcopy_block_row(
     input_row: *const i16,
     output_row: *mut i16,
     num_blocks: JDimension,
@@ -9885,9 +10585,16 @@ pub extern "C" fn jdiv_round_up(a: c_long, b: c_long) -> c_long {
 // Test-only accessors (encode side). Mirror the decode-side pattern so
 // tests don't have to lock in field offsets.
 // ---------------------------------------------------------------------------
-
+/// # Safety
+///
+/// C ABI entry point. `cinfo` must satisfy the crate-level
+/// [pointer contract](crate#pointer-contract): valid for the whole call,
+/// correctly aligned, large enough for the accesses described above, and
+/// not aliased by another live reference. A pointer this function documents as
+/// optional may be null; any other null is reported through the documented
+/// error value rather than dereferenced.
 #[no_mangle]
-pub extern "C" fn jpeg_capi_test_set_compress_dims(
+pub unsafe extern "C" fn jpeg_capi_test_set_compress_dims(
     cinfo: *mut c_void,
     width: u32,
     height: u32,
@@ -9908,8 +10615,17 @@ pub extern "C" fn jpeg_capi_test_set_compress_dims(
 /// without going through the full `jpeg_simple_progression` path. Used to
 /// verify the `jpeg_write_coefficients` → `jpeg_finish_compress` flow
 /// honors progressive output between the two calls.
+///
+/// # Safety
+///
+/// C ABI entry point. `cinfo` must satisfy the crate-level
+/// [pointer contract](crate#pointer-contract): valid for the whole call,
+/// correctly aligned, large enough for the accesses described above, and
+/// not aliased by another live reference. A pointer this function documents as
+/// optional may be null; any other null is reported through the documented
+/// error value rather than dereferenced.
 #[no_mangle]
-pub extern "C" fn jpeg_capi_test_set_progressive(cinfo: *mut c_void, progressive: c_int) {
+pub unsafe extern "C" fn jpeg_capi_test_set_progressive(cinfo: *mut c_void, progressive: c_int) {
     crate::unwind_guard!((), {
         if let Some(c) = unsafe { cinfo_compress_mut(cinfo) } {
             c.progressive_mode = progressive;
@@ -9920,8 +10636,17 @@ pub extern "C" fn jpeg_capi_test_set_progressive(cinfo: *mut c_void, progressive
 /// Test helper: set `restart_in_rows` directly. Mirrors `jpegtran
 /// -restart Nrows` so the coefficient writer's row-mode → byte-mode
 /// conversion can be exercised without a full simple_progression call.
+///
+/// # Safety
+///
+/// C ABI entry point. `cinfo` must satisfy the crate-level
+/// [pointer contract](crate#pointer-contract): valid for the whole call,
+/// correctly aligned, large enough for the accesses described above, and
+/// not aliased by another live reference. A pointer this function documents as
+/// optional may be null; any other null is reported through the documented
+/// error value rather than dereferenced.
 #[no_mangle]
-pub extern "C" fn jpeg_capi_test_set_restart_in_rows(cinfo: *mut c_void, rows: c_int) {
+pub unsafe extern "C" fn jpeg_capi_test_set_restart_in_rows(cinfo: *mut c_void, rows: c_int) {
     crate::unwind_guard!((), {
         if let Some(c) = unsafe { cinfo_compress_mut(cinfo) } {
             c.restart_in_rows = rows;
@@ -9932,8 +10657,17 @@ pub extern "C" fn jpeg_capi_test_set_restart_in_rows(cinfo: *mut c_void, rows: c
 /// Test helper: set the public `restart_interval` field directly, matching
 /// consumers such as OpenCV that configure block-mode restarts through the
 /// ordinary v8 cinfo layout.
+///
+/// # Safety
+///
+/// C ABI entry point. `cinfo` must satisfy the crate-level
+/// [pointer contract](crate#pointer-contract): valid for the whole call,
+/// correctly aligned, large enough for the accesses described above, and
+/// not aliased by another live reference. A pointer this function documents as
+/// optional may be null; any other null is reported through the documented
+/// error value rather than dereferenced.
 #[no_mangle]
-pub extern "C" fn jpeg_capi_test_set_restart_interval(cinfo: *mut c_void, interval: c_uint) {
+pub unsafe extern "C" fn jpeg_capi_test_set_restart_interval(cinfo: *mut c_void, interval: c_uint) {
     crate::unwind_guard!((), {
         if let Some(c) = unsafe { cinfo_compress_mut(cinfo) } {
             c.restart_interval = interval;
@@ -9944,8 +10678,17 @@ pub extern "C" fn jpeg_capi_test_set_restart_interval(cinfo: *mut c_void, interv
 /// Test helper: toggle `arith_code` directly. Mirrors `jpegtran
 /// -arithmetic` so the coefficient transcode path's arithmetic dispatch
 /// can be exercised in tests.
+///
+/// # Safety
+///
+/// C ABI entry point. `cinfo` must satisfy the crate-level
+/// [pointer contract](crate#pointer-contract): valid for the whole call,
+/// correctly aligned, large enough for the accesses described above, and
+/// not aliased by another live reference. A pointer this function documents as
+/// optional may be null; any other null is reported through the documented
+/// error value rather than dereferenced.
 #[no_mangle]
-pub extern "C" fn jpeg_capi_test_set_arith_code(cinfo: *mut c_void, arith: c_int) {
+pub unsafe extern "C" fn jpeg_capi_test_set_arith_code(cinfo: *mut c_void, arith: c_int) {
     crate::unwind_guard!((), {
         if let Some(c) = unsafe { cinfo_compress_mut(cinfo) } {
             c.arith_code = arith as CBoolean;
@@ -9955,8 +10698,17 @@ pub extern "C" fn jpeg_capi_test_set_arith_code(cinfo: *mut c_void, arith: c_int
 
 /// Test helper: set the public optimized-Huffman flag without relying on a
 /// private Rust struct layout in dlopen-based integration tests.
+///
+/// # Safety
+///
+/// C ABI entry point. `cinfo` must satisfy the crate-level
+/// [pointer contract](crate#pointer-contract): valid for the whole call,
+/// correctly aligned, large enough for the accesses described above, and
+/// not aliased by another live reference. A pointer this function documents as
+/// optional may be null; any other null is reported through the documented
+/// error value rather than dereferenced.
 #[no_mangle]
-pub extern "C" fn jpeg_capi_test_set_optimize_coding(cinfo: *mut c_void, optimize: c_int) {
+pub unsafe extern "C" fn jpeg_capi_test_set_optimize_coding(cinfo: *mut c_void, optimize: c_int) {
     crate::unwind_guard!((), {
         if let Some(c) = unsafe { cinfo_compress_mut(cinfo) } {
             c.optimize_coding = optimize as CBoolean;
@@ -9966,17 +10718,33 @@ pub extern "C" fn jpeg_capi_test_set_optimize_coding(cinfo: *mut c_void, optimiz
 
 /// Test helper: set the public input-smoothing field at the classic C-ABI
 /// boundary exercised by the scanline encoder matrix.
+///
+/// # Safety
+///
+/// C ABI entry point. `cinfo` must satisfy the crate-level
+/// [pointer contract](crate#pointer-contract): valid for the whole call,
+/// correctly aligned, large enough for the accesses described above, and
+/// not aliased by another live reference. A pointer this function documents as
+/// optional may be null; any other null is reported through the documented
+/// error value rather than dereferenced.
 #[no_mangle]
-pub extern "C" fn jpeg_capi_test_set_smoothing_factor(cinfo: *mut c_void, smoothing: c_int) {
+pub unsafe extern "C" fn jpeg_capi_test_set_smoothing_factor(cinfo: *mut c_void, smoothing: c_int) {
     crate::unwind_guard!((), {
         if let Some(c) = unsafe { cinfo_compress_mut(cinfo) } {
             c.smoothing_factor = smoothing;
         }
     })
 }
-
+/// # Safety
+///
+/// C ABI entry point. `cinfo`, `out_num_components`, `out_jpeg_color_space`, `out_in_color_space` must satisfy the crate-level
+/// [pointer contract](crate#pointer-contract): valid for the whole call,
+/// correctly aligned, large enough for the accesses described above, and
+/// not aliased by another live reference. A pointer this function documents as
+/// optional may be null; any other null is reported through the documented
+/// error value rather than dereferenced.
 #[no_mangle]
-pub extern "C" fn jpeg_capi_test_get_compress_state(
+pub unsafe extern "C" fn jpeg_capi_test_get_compress_state(
     cinfo: *mut c_void,
     out_num_components: *mut c_int,
     out_jpeg_color_space: *mut c_int,

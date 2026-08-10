@@ -54,13 +54,15 @@ fn tj3_decompress_to_yuv8_rejects_four_component_jpeg() {
 
     let handle: *mut c_void = tj3Init(TJINIT_DECOMPRESS);
     assert!(!handle.is_null(), "tj3Init");
-    let rc: c_int = tj3DecompressToYUV8(
-        handle,
-        jpeg.as_ptr(),
-        jpeg.len(),
-        dst_buf.as_mut_ptr(),
-        ALIGN,
-    );
+    let rc: c_int = unsafe {
+        tj3DecompressToYUV8(
+            handle,
+            jpeg.as_ptr(),
+            jpeg.len(),
+            dst_buf.as_mut_ptr(),
+            ALIGN,
+        )
+    };
     // SAFETY: `handle` is a live handle this test created and has not
     // destroyed; nothing else can reach it.
     unsafe { tj3Destroy(handle) };
@@ -87,13 +89,15 @@ fn tj3_decompress_to_yuv_planes8_rejects_four_component_jpeg() {
 
     let handle: *mut c_void = tj3Init(TJINIT_DECOMPRESS);
     assert!(!handle.is_null(), "tj3Init");
-    let rc: c_int = tj3DecompressToYUVPlanes8(
-        handle,
-        jpeg.as_ptr(),
-        jpeg.len(),
-        plane_ptrs.as_mut_ptr(),
-        std::ptr::null(),
-    );
+    let rc: c_int = unsafe {
+        tj3DecompressToYUVPlanes8(
+            handle,
+            jpeg.as_ptr(),
+            jpeg.len(),
+            plane_ptrs.as_mut_ptr(),
+            std::ptr::null(),
+        )
+    };
     // SAFETY: `handle` is a live handle this test created and has not
     // destroyed; nothing else can reach it.
     unsafe { tj3Destroy(handle) };

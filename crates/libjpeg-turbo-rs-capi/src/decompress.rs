@@ -29,8 +29,17 @@ use crate::tj3::{with_handle, TJERR_FATAL};
 
 /// `tj3Decompress8(handle, jpegBuf, jpegSize, dstBuf, pitch, pixelFormat)
 ///   -> int`.
+///
+/// # Safety
+///
+/// C ABI entry point. `handle`, `jpeg_buf`, `dst_buf` must satisfy the crate-level
+/// [pointer contract](crate#pointer-contract): valid for the whole call,
+/// correctly aligned, large enough for the accesses described above, and
+/// not aliased by another live reference. A pointer this function documents as
+/// optional may be null; any other null is reported through the documented
+/// error value rather than dereferenced.
 #[no_mangle]
-pub extern "C" fn tj3Decompress8(
+pub unsafe extern "C" fn tj3Decompress8(
     handle: *mut c_void,
     jpeg_buf: *const u8,
     jpeg_size: usize,

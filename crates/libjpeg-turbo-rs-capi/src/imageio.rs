@@ -127,8 +127,17 @@ fn align_to(v: usize, align: usize) -> usize {
 /// `align` is the minimum row stride alignment in bytes; we honour
 /// it by padding each row out to a multiple of `align`. `align == 0`
 /// or `1` means dense (no padding).
+///
+/// # Safety
+///
+/// C ABI entry point. `handle`, `filename`, `width`, `height`, `pixel_format` must satisfy the crate-level
+/// [pointer contract](crate#pointer-contract): valid for the whole call,
+/// correctly aligned, large enough for the accesses described above, and
+/// not aliased by another live reference. A pointer this function documents as
+/// optional may be null; any other null is reported through the documented
+/// error value rather than dereferenced.
 #[no_mangle]
-pub extern "C" fn tj3LoadImage8(
+pub unsafe extern "C" fn tj3LoadImage8(
     handle: *mut c_void,
     filename: *const c_char,
     width: *mut c_int,
@@ -290,8 +299,17 @@ pub extern "C" fn tj3LoadImage8(
 }
 
 /// `tj3LoadImage12(handle, filename, width, align, height, pixelFormat) -> short *`.
+///
+/// # Safety
+///
+/// C ABI entry point. `handle`, `_filename`, `_width`, `_height`, `_pixel_format` must satisfy the crate-level
+/// [pointer contract](crate#pointer-contract): valid for the whole call,
+/// correctly aligned, large enough for the accesses described above, and
+/// not aliased by another live reference. A pointer this function documents as
+/// optional may be null; any other null is reported through the documented
+/// error value rather than dereferenced.
 #[no_mangle]
-pub extern "C" fn tj3LoadImage12(
+pub unsafe extern "C" fn tj3LoadImage12(
     handle: *mut c_void,
     _filename: *const c_char,
     _width: *mut c_int,
@@ -314,8 +332,17 @@ pub extern "C" fn tj3LoadImage12(
 }
 
 /// `tj3LoadImage16(handle, filename, width, align, height, pixelFormat) -> unsigned short *`.
+///
+/// # Safety
+///
+/// C ABI entry point. `handle`, `_filename`, `_width`, `_height`, `_pixel_format` must satisfy the crate-level
+/// [pointer contract](crate#pointer-contract): valid for the whole call,
+/// correctly aligned, large enough for the accesses described above, and
+/// not aliased by another live reference. A pointer this function documents as
+/// optional may be null; any other null is reported through the documented
+/// error value rather than dereferenced.
 #[no_mangle]
-pub extern "C" fn tj3LoadImage16(
+pub unsafe extern "C" fn tj3LoadImage16(
     handle: *mut c_void,
     _filename: *const c_char,
     _width: *mut c_int,
@@ -349,8 +376,17 @@ pub extern "C" fn tj3LoadImage16(
 ///
 /// `pitch` is bytes per row in the input buffer. `pitch == 0` means
 /// dense (`width * bytes_per_pixel`).
+///
+/// # Safety
+///
+/// C ABI entry point. `handle`, `filename`, `buffer` must satisfy the crate-level
+/// [pointer contract](crate#pointer-contract): valid for the whole call,
+/// correctly aligned, large enough for the accesses described above, and
+/// not aliased by another live reference. A pointer this function documents as
+/// optional may be null; any other null is reported through the documented
+/// error value rather than dereferenced.
 #[no_mangle]
-pub extern "C" fn tj3SaveImage8(
+pub unsafe extern "C" fn tj3SaveImage8(
     handle: *mut c_void,
     filename: *const c_char,
     buffer: *const u8,
@@ -392,7 +428,35 @@ pub extern "C" fn tj3SaveImage8(
             let w: usize = width as usize;
             let h: usize = height as usize;
             let bpp: usize = pf.bytes_per_pixel();
-            let row_dense: usize = w * bpp;
+            // Checked, because `row_dense * h` sizes a `from_raw_parts` below
+            // and every factor is caller-supplied. `w * bpp` can wrap on
+            // 32-bit, and the total can exceed `isize::MAX` on 64-bit for
+            // `c_int::MAX`-square RGBA — both violate `from_raw_parts`'s
+            // documented precondition rather than merely reading too little
+            // (P4-137 criterion 5).
+            let row_dense: usize = match w.checked_mul(bpp) {
+                Some(r) => r,
+                None => {
+                    inst.set_error(
+                        "tj3SaveImage8: width * bytes_per_pixel overflows",
+                        TJERR_FATAL,
+                    );
+                    return -1;
+                }
+            };
+            let dense_total: usize = match row_dense
+                .checked_mul(h)
+                .filter(|total| *total <= isize::MAX as usize)
+            {
+                Some(t) => t,
+                None => {
+                    inst.set_error(
+                        "tj3SaveImage8: image dimensions overflow the buffer size",
+                        TJERR_FATAL,
+                    );
+                    return -1;
+                }
+            };
             let stride: usize = if pitch <= 0 {
                 row_dense
             } else {
@@ -410,10 +474,12 @@ pub extern "C" fn tj3SaveImage8(
             // saver expects dense rows.
             let mut dense_bytes: Vec<u8> = if stride == row_dense {
                 // SAFETY: caller asserts buffer holds at least
-                // `stride * h = row_dense * h` valid bytes.
-                unsafe { std::slice::from_raw_parts(buffer, row_dense * h).to_vec() }
+                // `stride * h = row_dense * h` valid bytes, and `dense_total`
+                // is that product computed with checked arithmetic under the
+                // `isize::MAX` bound `from_raw_parts` requires.
+                unsafe { std::slice::from_raw_parts(buffer, dense_total).to_vec() }
             } else {
-                let mut v: Vec<u8> = Vec::with_capacity(row_dense * h);
+                let mut v: Vec<u8> = Vec::with_capacity(dense_total);
                 for y in 0..h {
                     // SAFETY: caller asserts buffer holds at least `stride * h`
                     // bytes; `y * stride + row_dense ≤ stride * h`.
@@ -507,8 +573,17 @@ pub extern "C" fn tj3SaveImage8(
 }
 
 /// `tj3SaveImage12(handle, filename, buffer, width, pitch, height, pixelFormat)`.
+///
+/// # Safety
+///
+/// C ABI entry point. `handle`, `_filename`, `_buffer` must satisfy the crate-level
+/// [pointer contract](crate#pointer-contract): valid for the whole call,
+/// correctly aligned, large enough for the accesses described above, and
+/// not aliased by another live reference. A pointer this function documents as
+/// optional may be null; any other null is reported through the documented
+/// error value rather than dereferenced.
 #[no_mangle]
-pub extern "C" fn tj3SaveImage12(
+pub unsafe extern "C" fn tj3SaveImage12(
     handle: *mut c_void,
     _filename: *const c_char,
     _buffer: *const i16,
@@ -532,8 +607,17 @@ pub extern "C" fn tj3SaveImage12(
 }
 
 /// `tj3SaveImage16(handle, filename, buffer, width, pitch, height, pixelFormat)`.
+///
+/// # Safety
+///
+/// C ABI entry point. `handle`, `_filename`, `_buffer` must satisfy the crate-level
+/// [pointer contract](crate#pointer-contract): valid for the whole call,
+/// correctly aligned, large enough for the accesses described above, and
+/// not aliased by another live reference. A pointer this function documents as
+/// optional may be null; any other null is reported through the documented
+/// error value rather than dereferenced.
 #[no_mangle]
-pub extern "C" fn tj3SaveImage16(
+pub unsafe extern "C" fn tj3SaveImage16(
     handle: *mut c_void,
     _filename: *const c_char,
     _buffer: *const u16,

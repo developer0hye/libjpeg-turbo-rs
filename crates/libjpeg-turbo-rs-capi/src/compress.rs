@@ -29,8 +29,17 @@ use crate::tj3::{with_handle, TJERR_FATAL};
 
 /// `tj3Compress8(handle, srcBuf, width, pitch, height, pixelFormat,
 ///               jpegBuf, jpegSize) -> int`.
+///
+/// # Safety
+///
+/// C ABI entry point. `handle`, `src_buf`, `jpeg_buf`, `jpeg_size` must satisfy the crate-level
+/// [pointer contract](crate#pointer-contract): valid for the whole call,
+/// correctly aligned, large enough for the accesses described above, and
+/// not aliased by another live reference. A pointer this function documents as
+/// optional may be null; any other null is reported through the documented
+/// error value rather than dereferenced.
 #[no_mangle]
-pub extern "C" fn tj3Compress8(
+pub unsafe extern "C" fn tj3Compress8(
     handle: *mut c_void,
     src_buf: *const u8,
     width: c_int,
@@ -221,13 +230,32 @@ pub extern "C" fn tj3Compress8(
             let prior: *mut u8 = unsafe { *jpeg_buf };
 
             if norealloc && !prior.is_null() {
-                // Path (1): in-place write. We trust the caller that `prior` is
-                // at least `tj3JPEGBufSize(width, height, subsamp)` bytes — the
-                // same rule libjpeg-turbo imposes. `jpeg.len()` is bounded by
-                // that size because our encoder's output never exceeds the
-                // standard worst-case formula.
+                // Path (1): in-place write into the caller's buffer.
+                //
+                // `*jpeg_size` is an *input* here: under NOREALLOC it carries
+                // the capacity of `prior`, and upstream raises
+                // `JERR_BUFFER_SIZE` when the output does not fit
+                // (`jdatadst-tj.c:92` — `if (!dest->alloc) ERREXIT(cinfo,
+                // JERR_BUFFER_SIZE)`).
+                //
+                // This used to trust that `prior` was at least
+                // `tj3JPEGBufSize(...)` and copy `jpeg.len()` regardless. That
+                // is a heap overflow for a caller doing exactly what upstream
+                // permits: allocating a smaller buffer, declaring its size, and
+                // relying on the library to refuse rather than overrun. Found
+                // by the codex review of P4-137 (#476).
+                // SAFETY: `jpeg_size` was NULL-checked above.
+                let capacity: usize = unsafe { *jpeg_size };
+                if jpeg.len() > capacity {
+                    inst.set_error(
+                        "tj3Compress8: TJPARAM_NOREALLOC is set and the JPEG buffer is too small",
+                        TJERR_FATAL,
+                    );
+                    return -1;
+                }
                 // SAFETY: caller-supplied buffer, non-aliasing with `jpeg` (which
-                // is owned by this function), size ≥ jpeg.len() by contract.
+                // is owned by this function), and `capacity >= jpeg.len()` was
+                // just checked rather than assumed.
                 unsafe {
                     std::ptr::copy_nonoverlapping(jpeg.as_ptr(), prior, jpeg.len());
                     *jpeg_size = jpeg.len();

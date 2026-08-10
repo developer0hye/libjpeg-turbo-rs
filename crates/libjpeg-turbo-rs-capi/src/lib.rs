@@ -26,29 +26,106 @@
 //! The public Rust surface re-exports the underlying pure-Rust
 //! `libjpeg_turbo_rs` crate under `inner` so that downstream Rust
 //! consumers can mix-and-match the C and Rust APIs.
+//!
+//! # Pointer contract
+//!
+//! Every exported entry point that takes a raw pointer is declared
+//! `pub unsafe extern "C" fn`. This crate builds as an `rlib` as well as a
+//! `cdylib`, so those signatures are a real Rust API: a safe `fn` taking
+//! `*mut c_void` would let safe Rust hand us a dangling pointer, and
+//! `tj3Destroy`/`tj3Free` would turn that into a double free or a `free()` of
+//! an arbitrary address with no `unsafe` block anywhere (P4-137, #476).
+//!
+//! Marking them `unsafe` changes nothing about the C ABI. `extern "C"` fixes
+//! the calling convention and `#[no_mangle]` fixes the symbol name; `unsafe`
+//! adds an obligation for *Rust* callers only. Converting all 132
+//! pointer-taking exports left `nm -gU` byte-identical at 157 symbols.
+//!
+//! Each function's `# Safety` section names its own pointers. The obligations
+//! below are common to all of them:
+//!
+//! - **Validity.** Every pointer is either null — where the function documents
+//!   that it rejects null with an error code — or points to a live allocation
+//!   for the whole call. We cannot check this, and do not try.
+//! - **Retained pointers outlive the call.** A few entry points *store* the
+//!   pointer instead of only reading through it, and for those "valid for the
+//!   whole call" is far too weak. `jpeg_mem_src` keeps the input buffer and
+//!   reads it during every later `jpeg_read_header` / `jpeg_read_scanlines`;
+//!   `jpeg_mem_dest` keeps the caller's output slot, and `jpeg_stdio_src` /
+//!   `jpeg_stdio_dest` keep the `FILE *`. Each must stay valid, and must not be
+//!   aliased or moved, until it is replaced by another call to the same setter
+//!   or the `cinfo` is finished, aborted, or destroyed. Dropping a `Vec` after
+//!   `jpeg_mem_src` returns and then calling `jpeg_read_header` is a
+//!   use-after-free, and nothing in the signature says otherwise.
+//! - **Size.** A buffer pointer must be valid for at least the number of bytes
+//!   the call reads or writes, as computed from the arguments and the image
+//!   header (pitch, height, subsampling, precision). Where the API has a
+//!   `*BufSize` helper, that helper is the definition of "enough".
+//! - **Alignment.** Pointers must be aligned for the element type. Byte buffers
+//!   need no alignment; `*mut c_int` and struct pointers need natural
+//!   alignment, and a misaligned struct pointer is UB even if it is readable.
+//! - **Ownership transfer.** `tj3Destroy` and `tj3Free` take ownership, but
+//!   what they accept differs and conflating them is a real hazard:
+//!   - `tj3Destroy` requires a handle **this library returned** from
+//!     `tj3Init`. Nothing else is valid, and passing one twice is a double
+//!     free.
+//!   - `tj3Free` requires memory from **the same libc allocator** — `tj3Alloc`
+//!     or a plain `malloc` from the same runtime. It is handed straight to
+//!     `free`, so it accepts more than just this library's own allocations,
+//!     and correspondingly rejects a stack address, an interior pointer, or
+//!     anything from Rust's allocator.
+//!
+//!   The same rule reaches further than those two functions, and the reach is
+//!   easy to miss: the **reusable output slot** is freed by this library. On
+//!   `tj3Compress12`, `tj3Compress16`, `tj3CompressFromYUV8` and
+//!   `tj3CompressFromYUVPlanes8` that slot is `*jpeg_buf`; on `tj3Transform` it
+//!   is each `*dst_bufs[i]` (its `jpeg_buf` is the const *source* and is never
+//!   freed). Each is passed to `free()` before a new pointer is stored, so a
+//!   non-null slot must have come from `tj3Alloc` (or plain `malloc`) — a stack
+//!   array, a `Vec`'s buffer, or anything from Rust's allocator satisfies every
+//!   validity, size and alignment rule above and is *still* undefined behaviour
+//!   to hand over, because it is freed with the wrong allocator.
+//!
+//!   **`TJPARAM_NOREALLOC` does not protect you on those five.** Only
+//!   `tj3Compress8` consults it (writing in place, and erroring when the buffer
+//!   is too small). The other five ignore it and replace the buffer
+//!   unconditionally, which diverges from upstream TurboJPEG — tracked as
+//!   P4-145. Until that closes, treat a caller-owned output slot on those
+//!   entry points as `malloc`-owned memory you are giving away.
+//! - **Aliasing.** For the duration of a call, no other live reference may
+//!   alias the pointed-to memory. Source and destination buffers must not
+//!   overlap unless a function documents otherwise.
+//! - **Threading.** A single `tjhandle` or `j_common_ptr` must not be used
+//!   concurrently from two threads. Distinct instances are independent. The
+//!   classic `jpeg_*` state additionally carries a per-`cinfo` thread-affinity
+//!   constraint tracked as P4-132.
+//!
+//! ## What this crate does and does not guarantee
+//!
+//! Stated plainly, because the distinction is easy to blur (P4-137
+//! criterion 7):
+//!
+//! - **Not guaranteed:** defence against invalid pointers from C. A caller that
+//!   passes a dangling, misaligned, too-small, or already-freed pointer gets
+//!   undefined behaviour. This is not a gap to be closed — it is inherent to
+//!   the C ABI, and C libjpeg-turbo makes the same bargain.
+//! - **Guaranteed (the goal, and what the fuzz and sanitizer gates test):** a
+//!   *malformed or hostile JPEG* cannot corrupt memory when the caller honours
+//!   the pointer contract above. Bad **data** is our problem; bad **pointers**
+//!   are the caller's.
 
 #![deny(unsafe_op_in_unsafe_fn)]
-// `extern "C"` shim functions accept raw pointers from C and dereference them
-// after a NULL check.
-//
-// This suppression previously justified itself with "marking each function
+// `clippy::not_unsafe_ptr_arg_deref` was suppressed crate-wide here until
+// 2026-08-11. The suppression justified itself with "marking each function
 // `unsafe fn` would change the ABI-visible symbol name and break the drop-in
-// contract". **That is false, and it was measured.** `extern "C"` fixes the
-// calling convention and `#[no_mangle]` fixes the symbol name; `unsafe` adds
-// an obligation for *Rust* callers only. Converting `tj3Free` and `tj3Destroy`
-// left `nm -gU` output byte-identical (`_tj3Alloc`, `_tj3Destroy`, `_tj3Free`).
+// contract". **That was false, and it is now measured twice.** `extern "C"`
+// fixes the calling convention and `#[no_mangle]` fixes the symbol name;
+// `unsafe` adds an obligation for *Rust* callers only. Converting all 132
+// pointer-taking exports left `nm -gU` byte-identical at 157 symbols
+// (P4-137 criterion 1, #476).
 //
-// The suppression therefore stays only because the conversion is unfinished:
-// ~84 of the 159 exports still take raw pointers. It is a TODO, not a
-// rationale. Tracked as P4-137 (#476); the two exports that could double-free
-// or `free()` an arbitrary pointer are already converted.
-//
-// The *lifetime* half of P4-137 is done: `handle_as_mut`, which let the caller
-// choose the lifetime of `&mut TjInstance` and so allowed two aliasing `&mut`
-// to one instance, is gone. All 30 call sites across nine modules now go
-// through `tj3::with_handle`, which owns the lifetime and confines the borrow
-// to a closure.
-#![allow(clippy::not_unsafe_ptr_arg_deref)]
+// The lint is now enforced, so a new export that dereferences a raw pointer
+// from a safe `fn` fails the build rather than being waved through.
 // Exported symbols must match the C case (`tj3Init`, `tj3Destroy`, ...),
 // so we disable the snake_case lint at the crate root.
 #![allow(non_snake_case)]

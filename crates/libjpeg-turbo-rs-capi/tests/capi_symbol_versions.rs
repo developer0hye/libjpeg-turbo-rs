@@ -139,12 +139,19 @@ fn crate_private_accessor_names() -> Vec<String> {
         .join("jpeglib.rs");
     let text: String = std::fs::read_to_string(&source)
         .unwrap_or_else(|e| panic!("read {}: {e}", source.display()));
-    const PREFIX: &str = "pub extern \"C\" fn ";
+    // Both spellings, because P4-137 made every pointer-taking export
+    // `unsafe`. Matching only the safe form silently found zero accessors and
+    // turned this test's count assertion into the thing that caught it — which
+    // is the intended behaviour, but the parser has to keep up with the source
+    // it reads or the guard degrades to a tautology.
+    const PREFIXES: [&str; 2] = ["pub unsafe extern \"C\" fn ", "pub extern \"C\" fn "];
     let mut names: Vec<String> = text
         .lines()
         .filter_map(|line| {
-            let idx: usize = line.find(PREFIX)?;
-            let rest: &str = &line[idx + PREFIX.len()..];
+            let (idx, prefix): (usize, &str) = PREFIXES
+                .iter()
+                .find_map(|p| line.find(p).map(|i| (i, *p)))?;
+            let rest: &str = &line[idx + prefix.len()..];
             let end: usize = rest.find('(')?;
             let name: &str = &rest[..end];
             name.starts_with("jpeg_capi_test_")

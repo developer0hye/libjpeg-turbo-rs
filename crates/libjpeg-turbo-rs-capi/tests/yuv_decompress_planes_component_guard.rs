@@ -52,13 +52,15 @@ fn tj3_decompress_to_yuv_planes8_rejects_four_component_jpeg() {
     assert!(!handle.is_null(), "tj3Init");
     // NULL strides keeps every write at `plane_width` bytes per row, so a
     // pre-fix fourth-plane write stays inside the canary buffer.
-    let rc: c_int = tj3DecompressToYUVPlanes8(
-        handle,
-        jpeg.as_ptr(),
-        jpeg.len(),
-        plane_ptrs.as_mut_ptr(),
-        std::ptr::null(),
-    );
+    let rc: c_int = unsafe {
+        tj3DecompressToYUVPlanes8(
+            handle,
+            jpeg.as_ptr(),
+            jpeg.len(),
+            plane_ptrs.as_mut_ptr(),
+            std::ptr::null(),
+        )
+    };
     // SAFETY: `handle` is a live handle this test created and has not
     // destroyed; nothing else can reach it.
     unsafe { tj3Destroy(handle) };

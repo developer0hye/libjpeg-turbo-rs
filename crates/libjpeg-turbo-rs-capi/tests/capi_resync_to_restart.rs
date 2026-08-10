@@ -57,18 +57,24 @@ fn make_cinfo() -> (Box<JpegDecompressPublic>, Box<JpegErrorMgr>) {
     let mut err: Box<JpegErrorMgr> = Box::new(unsafe { std::mem::zeroed() });
     let mut cinfo: Box<JpegDecompressPublic> = Box::new(unsafe { std::mem::zeroed() });
 
-    // No `unsafe` needed for these three: `jpeg_std_error`,
-    // `jpeg_CreateDecompress` and `jpeg_destroy_decompress` are still safe
-    // `pub extern "C" fn` taking raw pointers — P4-137 criterion 1, unfinished.
-    // When that lands, these call sites stop compiling until wrapped, which is
-    // the intended tripwire.
-    let err_ptr: *mut JpegErrorMgr = jpeg_std_error(&mut *err as *mut JpegErrorMgr);
+    // The tripwire this comment used to predict has fired: P4-137 criterion 1
+    // landed, so `jpeg_std_error`, `jpeg_CreateDecompress` and
+    // `jpeg_destroy_decompress` are `unsafe extern "C" fn` and these calls no
+    // longer compile without a block. That is the change working as intended.
+    //
+    // SAFETY: `err` and `cinfo` are live `Box` allocations owned by this
+    // function for the whole call, correctly aligned, and not aliased — the
+    // raw pointers are taken from `&mut` borrows that end at each call. The
+    // declared struct size matches the type actually passed.
+    let err_ptr: *mut JpegErrorMgr = unsafe { jpeg_std_error(&mut *err as *mut JpegErrorMgr) };
     cinfo.err = err_ptr;
-    jpeg_CreateDecompress(
-        &mut *cinfo as *mut JpegDecompressPublic as *mut c_void,
-        JPEG_LIB_VERSION,
-        std::mem::size_of::<JpegDecompressPublic>(),
-    );
+    unsafe {
+        jpeg_CreateDecompress(
+            &mut *cinfo as *mut JpegDecompressPublic as *mut c_void,
+            JPEG_LIB_VERSION,
+            std::mem::size_of::<JpegDecompressPublic>(),
+        );
+    }
     // `jpeg_CreateDecompress` installs its own error manager slot; restore ours
     // so warnings land where this test can count them.
     cinfo.err = err_ptr;
@@ -76,7 +82,12 @@ fn make_cinfo() -> (Box<JpegDecompressPublic>, Box<JpegErrorMgr>) {
 }
 
 fn destroy(cinfo: &mut JpegDecompressPublic) {
-    jpeg_destroy_decompress(cinfo as *mut JpegDecompressPublic as *mut c_void);
+    // SAFETY: `cinfo` is a live, correctly-aligned decompress struct created
+    // by `make_cinfo`, and this is its single destroy — the borrow proves no
+    // other reference is live for the call.
+    unsafe {
+        jpeg_destroy_decompress(cinfo as *mut JpegDecompressPublic as *mut c_void);
+    }
 }
 
 /// Run the resync entry point with a given found-marker / desired pair and
@@ -249,11 +260,16 @@ fn scan_forward_past_end_of_memory_source_yields_fake_eoi() {
     let (mut cinfo, _err) = make_cinfo();
     // One non-FF byte: the scan discards it, then needs more input.
     let buf: [u8; 1] = [0x01];
-    jpeg_mem_src(
-        &mut *cinfo as *mut JpegDecompressPublic as *mut c_void,
-        buf.as_ptr(),
-        buf.len() as std::os::raw::c_ulong,
-    );
+    // SAFETY: `cinfo` is live for the whole call and `buf` outlives the
+    // source manager's use of it within this test; the declared length is
+    // exactly `buf`'s.
+    unsafe {
+        jpeg_mem_src(
+            &mut *cinfo as *mut JpegDecompressPublic as *mut c_void,
+            buf.as_ptr(),
+            buf.len() as std::os::raw::c_ulong,
+        );
+    }
 
     // RST2 with desired 3 is `(desired - 1) & 7` → action 2, scan forward.
     cinfo.unread_marker = M_RST0 + 2;

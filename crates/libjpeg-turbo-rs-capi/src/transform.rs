@@ -102,8 +102,25 @@ fn op_from_c(op: c_int) -> Option<TransformOp> {
 
 /// `tj3Transform(handle, jpegBuf, jpegSize, n, dstBufs, dstSizes, transforms)
 ///   -> int`.
+///
+/// # Safety
+///
+/// C ABI entry point. `handle`, `jpeg_buf`, `dst_bufs`, `dst_sizes`, `transforms` must satisfy the crate-level
+/// [pointer contract](crate#pointer-contract): valid for the whole call,
+/// correctly aligned, large enough for the accesses described above, and
+/// not aliased by another live reference. A pointer this function documents as
+/// optional may be null; any other null is reported through the documented
+/// error value rather than dereferenced.
+///
+/// Each non-null `*dst_bufs[i]` is additionally **freed by this function**, so
+/// every one must have come from `tj3Alloc`/`malloc` — see
+/// [Ownership transfer](crate#pointer-contract). Note it is the *destination*
+/// slots that are freed; `jpeg_buf` is the const source and is never freed.
+/// This entry point does **not** consult `TJPARAM_NOREALLOC`: it always
+/// allocates and frees the previous pointee. That divergence from upstream is
+/// tracked as P4-145.
 #[no_mangle]
-pub extern "C" fn tj3Transform(
+pub unsafe extern "C" fn tj3Transform(
     handle: *mut c_void,
     jpeg_buf: *const u8,
     jpeg_size: usize,
@@ -261,8 +278,20 @@ pub extern "C" fn tj3Transform(
 ///      `TJXOP_ROT270`).
 ///   3. Honoring the crop region in `transform.r` when set.
 ///   4. Delegating to `tj3JPEGBufSize` on the resulting (W,H,S).
+///
+/// # Safety
+///
+/// C ABI entry point. `handle`, `transform` must satisfy the crate-level
+/// [pointer contract](crate#pointer-contract): valid for the whole call,
+/// correctly aligned, large enough for the accesses described above, and
+/// not aliased by another live reference. A pointer this function documents as
+/// optional may be null; any other null is reported through the documented
+/// error value rather than dereferenced.
 #[no_mangle]
-pub extern "C" fn tj3TransformBufSize(handle: *mut c_void, transform: *const TjTransform) -> usize {
+pub unsafe extern "C" fn tj3TransformBufSize(
+    handle: *mut c_void,
+    transform: *const TjTransform,
+) -> usize {
     crate::unwind_guard!(0, {
         use libjpeg_turbo_rs::tj3::TjParam;
 

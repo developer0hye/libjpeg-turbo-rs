@@ -104,8 +104,17 @@ pub unsafe extern "C" fn tjDestroy(handle: *mut c_void) -> c_int {
 /// Matches the 2.x signature: `jpegSize` is a `unsigned long *` — we
 /// accept `*mut usize` (64-bit on modern targets). `flags` is ignored;
 /// TJ3 uses explicit parameters instead.
+///
+/// # Safety
+///
+/// C ABI entry point. `handle`, `src_buf`, `jpeg_buf`, `jpeg_size` must satisfy the crate-level
+/// [pointer contract](crate#pointer-contract): valid for the whole call,
+/// correctly aligned, large enough for the accesses described above, and
+/// not aliased by another live reference. A pointer this function documents as
+/// optional may be null; any other null is reported through the documented
+/// error value rather than dereferenced.
 #[no_mangle]
-pub extern "C" fn tjCompress2(
+pub unsafe extern "C" fn tjCompress2(
     handle: *mut c_void,
     src_buf: *const u8,
     width: c_int,
@@ -121,22 +130,24 @@ pub extern "C" fn tjCompress2(
     crate::unwind_guard!(-1, {
         // Subsampling and quality are set via TJ3 parameters before the
         // actual compress call.
-        if tj3Set(handle, TJPARAM_QUALITY, jpeg_qual) != 0 {
+        if unsafe { tj3Set(handle, TJPARAM_QUALITY, jpeg_qual) } != 0 {
             return -1;
         }
-        if tj3Set(handle, TJPARAM_SUBSAMP, jpeg_subsamp) != 0 {
+        if unsafe { tj3Set(handle, TJPARAM_SUBSAMP, jpeg_subsamp) } != 0 {
             return -1;
         }
-        tj3Compress8(
-            handle,
-            src_buf,
-            width,
-            pitch,
-            height,
-            pixel_format,
-            jpeg_buf,
-            jpeg_size,
-        )
+        unsafe {
+            tj3Compress8(
+                handle,
+                src_buf,
+                width,
+                pitch,
+                height,
+                pixel_format,
+                jpeg_buf,
+                jpeg_size,
+            )
+        }
     })
 }
 
@@ -146,8 +157,17 @@ pub extern "C" fn tjCompress2(
 /// The `width`/`height` parameters are legacy artifacts; TJ3 reads them
 /// from the header. We honor them as an upper-bound sanity check but do
 /// not override the JPEG's real dimensions.
+///
+/// # Safety
+///
+/// C ABI entry point. `handle`, `jpeg_buf`, `dst_buf` must satisfy the crate-level
+/// [pointer contract](crate#pointer-contract): valid for the whole call,
+/// correctly aligned, large enough for the accesses described above, and
+/// not aliased by another live reference. A pointer this function documents as
+/// optional may be null; any other null is reported through the documented
+/// error value rather than dereferenced.
 #[no_mangle]
-pub extern "C" fn tjDecompress2(
+pub unsafe extern "C" fn tjDecompress2(
     handle: *mut c_void,
     jpeg_buf: *const u8,
     jpeg_size: usize,
@@ -159,7 +179,7 @@ pub extern "C" fn tjDecompress2(
     _flags: c_int,
 ) -> c_int {
     crate::unwind_guard!(-1, {
-        tj3Decompress8(handle, jpeg_buf, jpeg_size, dst_buf, pitch, pixel_format)
+        unsafe { tj3Decompress8(handle, jpeg_buf, jpeg_size, dst_buf, pitch, pixel_format) }
     })
 }
 
@@ -168,8 +188,17 @@ pub extern "C" fn tjDecompress2(
 ///
 /// TJ3 reads these values via `tj3Get`; the legacy entry point
 /// populates caller-provided out-pointers.
+///
+/// # Safety
+///
+/// C ABI entry point. `handle`, `jpeg_buf`, `width`, `height`, `jpeg_subsamp`, `jpeg_colorspace` must satisfy the crate-level
+/// [pointer contract](crate#pointer-contract): valid for the whole call,
+/// correctly aligned, large enough for the accesses described above, and
+/// not aliased by another live reference. A pointer this function documents as
+/// optional may be null; any other null is reported through the documented
+/// error value rather than dereferenced.
 #[no_mangle]
-pub extern "C" fn tjDecompressHeader3(
+pub unsafe extern "C" fn tjDecompressHeader3(
     handle: *mut c_void,
     jpeg_buf: *const u8,
     jpeg_size: usize,
@@ -179,7 +208,7 @@ pub extern "C" fn tjDecompressHeader3(
     jpeg_colorspace: *mut c_int,
 ) -> c_int {
     crate::unwind_guard!(-1, {
-        let rc: c_int = tj3DecompressHeader(handle, jpeg_buf, jpeg_size);
+        let rc: c_int = unsafe { tj3DecompressHeader(handle, jpeg_buf, jpeg_size) };
         if rc != 0 {
             return -1;
         }
@@ -219,8 +248,17 @@ pub extern "C" fn tjDecompressHeader3(
 ///
 /// `flags` is ignored (TJ3 drives options through `TJPARAM_*` on the
 /// handle). Otherwise identical to `tj3Transform`.
+///
+/// # Safety
+///
+/// C ABI entry point. `handle`, `jpeg_buf`, `dst_bufs`, `dst_sizes`, `transforms` must satisfy the crate-level
+/// [pointer contract](crate#pointer-contract): valid for the whole call,
+/// correctly aligned, large enough for the accesses described above, and
+/// not aliased by another live reference. A pointer this function documents as
+/// optional may be null; any other null is reported through the documented
+/// error value rather than dereferenced.
 #[no_mangle]
-pub extern "C" fn tjTransform(
+pub unsafe extern "C" fn tjTransform(
     handle: *mut c_void,
     jpeg_buf: *const u8,
     jpeg_size: usize,
@@ -231,9 +269,11 @@ pub extern "C" fn tjTransform(
     _flags: c_int,
 ) -> c_int {
     crate::unwind_guard!(-1, {
-        tj3Transform(
-            handle, jpeg_buf, jpeg_size, n, dst_bufs, dst_sizes, transforms,
-        )
+        unsafe {
+            tj3Transform(
+                handle, jpeg_buf, jpeg_size, n, dst_bufs, dst_sizes, transforms,
+            )
+        }
     })
 }
 
@@ -253,8 +293,17 @@ pub extern "C" fn tjTransform(
 /// `TJPARAM_*` counterparts via `process_legacy_compress_flags`,
 /// then forwards to `tj3EncodeYUV8` with the caller's pitch and
 /// align preserved.
+///
+/// # Safety
+///
+/// C ABI entry point. `handle`, `src_buf`, `dst_buf` must satisfy the crate-level
+/// [pointer contract](crate#pointer-contract): valid for the whole call,
+/// correctly aligned, large enough for the accesses described above, and
+/// not aliased by another live reference. A pointer this function documents as
+/// optional may be null; any other null is reported through the documented
+/// error value rather than dereferenced.
 #[no_mangle]
-pub extern "C" fn tjEncodeYUV3(
+pub unsafe extern "C" fn tjEncodeYUV3(
     handle: *mut c_void,
     src_buf: *const u8,
     width: c_int,
@@ -267,20 +316,22 @@ pub extern "C" fn tjEncodeYUV3(
     flags: c_int,
 ) -> c_int {
     crate::unwind_guard!(-1, {
-        if tj3Set(handle, TJPARAM_SUBSAMP, subsamp) != 0 {
+        if unsafe { tj3Set(handle, TJPARAM_SUBSAMP, subsamp) } != 0 {
             return -1;
         }
         process_legacy_compress_flags(handle, flags);
-        crate::yuv::tj3EncodeYUV8(
-            handle,
-            src_buf,
-            width,
-            pitch,
-            height,
-            pixel_format,
-            dst_buf,
-            align.max(1),
-        )
+        unsafe {
+            crate::yuv::tj3EncodeYUV8(
+                handle,
+                src_buf,
+                width,
+                pitch,
+                height,
+                pixel_format,
+                dst_buf,
+                align.max(1),
+            )
+        }
     })
 }
 
@@ -292,8 +343,17 @@ pub extern "C" fn tjEncodeYUV3(
 /// (`TJFLAG_BOTTOMUP`, `TJFLAG_FASTUPSAMPLE`, `TJFLAG_FASTDCT`) to
 /// their `TJPARAM_*` counterparts on the caller's handle, mirroring
 /// upstream `turbojpeg.c::processFlags(DECOMPRESS)`.
+///
+/// # Safety
+///
+/// C ABI entry point. `handle`, `src_buf`, `dst_buf` must satisfy the crate-level
+/// [pointer contract](crate#pointer-contract): valid for the whole call,
+/// correctly aligned, large enough for the accesses described above, and
+/// not aliased by another live reference. A pointer this function documents as
+/// optional may be null; any other null is reported through the documented
+/// error value rather than dereferenced.
 #[no_mangle]
-pub extern "C" fn tjDecodeYUV(
+pub unsafe extern "C" fn tjDecodeYUV(
     handle: *mut c_void,
     src_buf: *const u8,
     align: c_int,
@@ -306,20 +366,22 @@ pub extern "C" fn tjDecodeYUV(
     flags: c_int,
 ) -> c_int {
     crate::unwind_guard!(-1, {
-        if tj3Set(handle, TJPARAM_SUBSAMP, subsamp) != 0 {
+        if unsafe { tj3Set(handle, TJPARAM_SUBSAMP, subsamp) } != 0 {
             return -1;
         }
         process_legacy_decompress_flags(handle, flags);
-        crate::yuv::tj3DecodeYUV8(
-            handle,
-            src_buf,
-            align.max(1),
-            dst_buf,
-            width,
-            pitch,
-            height,
-            pixel_format,
-        )
+        unsafe {
+            crate::yuv::tj3DecodeYUV8(
+                handle,
+                src_buf,
+                align.max(1),
+                dst_buf,
+                width,
+                pitch,
+                height,
+                pixel_format,
+            )
+        }
     })
 }
 
@@ -350,20 +412,24 @@ const TJPARAM_FASTDCT: c_int = 10;
 /// `TJPARAM_FASTDCT=1` (matching libjpeg-turbo's default), while
 /// quality ≥ 96 or `TJFLAG_ACCURATEDCT` clears it.
 fn process_legacy_compress_flags(handle: *mut c_void, flags: c_int) {
-    let _ = tj3Set(
-        handle,
-        TJPARAM_BOTTOMUP,
-        (flags & TJFLAG_BOTTOMUP != 0) as c_int,
-    );
-    let _ = tj3Set(
-        handle,
-        TJPARAM_PROGRESSIVE,
-        (flags & TJFLAG_PROGRESSIVE != 0) as c_int,
-    );
-    let quality: c_int = crate::tj3::tj3Get(handle, TJPARAM_QUALITY);
+    let _ = unsafe {
+        tj3Set(
+            handle,
+            TJPARAM_BOTTOMUP,
+            (flags & TJFLAG_BOTTOMUP != 0) as c_int,
+        )
+    };
+    let _ = unsafe {
+        tj3Set(
+            handle,
+            TJPARAM_PROGRESSIVE,
+            (flags & TJFLAG_PROGRESSIVE != 0) as c_int,
+        )
+    };
+    let quality: c_int = unsafe { crate::tj3::tj3Get(handle, TJPARAM_QUALITY) };
     let accurate_dct: bool = (flags & TJFLAG_ACCURATEDCT) != 0;
     let fast_dct: bool = quality < 96 && !accurate_dct;
-    let _ = tj3Set(handle, TJPARAM_FASTDCT, fast_dct as c_int);
+    let _ = unsafe { tj3Set(handle, TJPARAM_FASTDCT, fast_dct as c_int) };
 }
 
 /// Mirror of upstream `turbojpeg.c::processFlags(handle, flags,
@@ -372,21 +438,27 @@ fn process_legacy_compress_flags(handle: *mut c_void, flags: c_int) {
 /// applies — there is no compression quality knob to balance
 /// against).
 fn process_legacy_decompress_flags(handle: *mut c_void, flags: c_int) {
-    let _ = tj3Set(
-        handle,
-        TJPARAM_BOTTOMUP,
-        (flags & TJFLAG_BOTTOMUP != 0) as c_int,
-    );
-    let _ = tj3Set(
-        handle,
-        TJPARAM_FASTUPSAMPLE,
-        (flags & TJFLAG_FASTUPSAMPLE != 0) as c_int,
-    );
-    let _ = tj3Set(
-        handle,
-        TJPARAM_FASTDCT,
-        (flags & TJFLAG_FASTDCT != 0) as c_int,
-    );
+    let _ = unsafe {
+        tj3Set(
+            handle,
+            TJPARAM_BOTTOMUP,
+            (flags & TJFLAG_BOTTOMUP != 0) as c_int,
+        )
+    };
+    let _ = unsafe {
+        tj3Set(
+            handle,
+            TJPARAM_FASTUPSAMPLE,
+            (flags & TJFLAG_FASTUPSAMPLE != 0) as c_int,
+        )
+    };
+    let _ = unsafe {
+        tj3Set(
+            handle,
+            TJPARAM_FASTDCT,
+            (flags & TJFLAG_FASTDCT != 0) as c_int,
+        )
+    };
 }
 
 // ---------------------------------------------------------------------------
@@ -566,8 +638,17 @@ fn copy_handle_error_to_no_handle_slot(handle: *mut c_void) {
 /// temp handle's last-error into the no-handle global slot before
 /// destroying so callers can recover the diagnostic via
 /// `tjGetErrorStr2(NULL)`.
+///
+/// # Safety
+///
+/// C ABI entry point. `filename`, `width`, `height`, `pixel_format` must satisfy the crate-level
+/// [pointer contract](crate#pointer-contract): valid for the whole call,
+/// correctly aligned, large enough for the accesses described above, and
+/// not aliased by another live reference. A pointer this function documents as
+/// optional may be null; any other null is reported through the documented
+/// error value rather than dereferenced.
 #[no_mangle]
-pub extern "C" fn tjLoadImage(
+pub unsafe extern "C" fn tjLoadImage(
     filename: *const c_char,
     width: *mut c_int,
     align: c_int,
@@ -587,10 +668,11 @@ pub extern "C" fn tjLoadImage(
         if (flags & TJFLAG_BOTTOMUP) != 0 {
             // TJPARAM_BOTTOMUP = 0 in turbojpeg.h, but use the
             // tj3-published constant via tj3Set to stay layout-independent.
-            let _ = crate::tj3::tj3Set(h, TJPARAM_BOTTOMUP, 1);
+            let _ = unsafe { crate::tj3::tj3Set(h, TJPARAM_BOTTOMUP, 1) };
         }
-        let buf: *mut u8 =
-            crate::imageio::tj3LoadImage8(h, filename, width, align, height, pixel_format);
+        let buf: *mut u8 = unsafe {
+            crate::imageio::tj3LoadImage8(h, filename, width, align, height, pixel_format)
+        };
         if buf.is_null() {
             copy_handle_error_to_no_handle_slot(h);
         }
@@ -607,8 +689,17 @@ pub extern "C" fn tjLoadImage(
 /// Legacy 2.x signature: also handle-less. Same handle lifecycle as
 /// `tjLoadImage` (temp `tjhandle`, propagate `TJFLAG_BOTTOMUP`,
 /// delegate, free, copy error before destroy).
+///
+/// # Safety
+///
+/// C ABI entry point. `filename`, `buffer` must satisfy the crate-level
+/// [pointer contract](crate#pointer-contract): valid for the whole call,
+/// correctly aligned, large enough for the accesses described above, and
+/// not aliased by another live reference. A pointer this function documents as
+/// optional may be null; any other null is reported through the documented
+/// error value rather than dereferenced.
 #[no_mangle]
-pub extern "C" fn tjSaveImage(
+pub unsafe extern "C" fn tjSaveImage(
     filename: *const c_char,
     buffer: *const u8,
     width: c_int,
@@ -624,10 +715,11 @@ pub extern "C" fn tjSaveImage(
             return -1;
         }
         if (flags & TJFLAG_BOTTOMUP) != 0 {
-            let _ = crate::tj3::tj3Set(h, TJPARAM_BOTTOMUP, 1);
+            let _ = unsafe { crate::tj3::tj3Set(h, TJPARAM_BOTTOMUP, 1) };
         }
-        let rc: c_int =
-            crate::imageio::tj3SaveImage8(h, filename, buffer, width, pitch, height, pixel_format);
+        let rc: c_int = unsafe {
+            crate::imageio::tj3SaveImage8(h, filename, buffer, width, pitch, height, pixel_format)
+        };
         if rc != 0 {
             copy_handle_error_to_no_handle_slot(h);
         }
@@ -651,9 +743,18 @@ const TJPARAM_BOTTOMUP: c_int = 1;
 
 /// `tjGetErrorStr2(handle) -> const char *` — identical to
 /// `tj3GetErrorStr` with a handle-aware NULL fallback.
+///
+/// # Safety
+///
+/// C ABI entry point. `handle` must satisfy the crate-level
+/// [pointer contract](crate#pointer-contract): valid for the whole call,
+/// correctly aligned, large enough for the accesses described above, and
+/// not aliased by another live reference. A pointer this function documents as
+/// optional may be null; any other null is reported through the documented
+/// error value rather than dereferenced.
 #[no_mangle]
-pub extern "C" fn tjGetErrorStr2(handle: *mut c_void) -> *const c_char {
-    crate::unwind_guard!(std::ptr::null(), { tj3GetErrorStr(handle) })
+pub unsafe extern "C" fn tjGetErrorStr2(handle: *mut c_void) -> *const c_char {
+    crate::unwind_guard!(std::ptr::null(), { unsafe { tj3GetErrorStr(handle) } })
 }
 
 // ---------------------------------------------------------------------------

@@ -419,8 +419,19 @@ fn scaling_factor_table() -> &'static [TjScalingFactor] {
 /// Returns a pointer to a statically-owned array of `tjscalingfactor`s.
 /// The caller MUST NOT free the pointer. `numScalingFactors` is written
 /// with the count.
+///
+/// # Safety
+///
+/// C ABI entry point. `num_scaling_factors` must satisfy the crate-level
+/// [pointer contract](crate#pointer-contract): valid for the whole call,
+/// correctly aligned, large enough for the accesses described above, and
+/// not aliased by another live reference. A pointer this function documents as
+/// optional may be null; any other null is reported through the documented
+/// error value rather than dereferenced.
 #[no_mangle]
-pub extern "C" fn tj3GetScalingFactors(num_scaling_factors: *mut c_int) -> *mut TjScalingFactor {
+pub unsafe extern "C" fn tj3GetScalingFactors(
+    num_scaling_factors: *mut c_int,
+) -> *mut TjScalingFactor {
     crate::unwind_guard!(std::ptr::null_mut(), {
         let table: &[TjScalingFactor] = scaling_factor_table();
         if !num_scaling_factors.is_null() {
