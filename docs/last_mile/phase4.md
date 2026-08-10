@@ -307,6 +307,31 @@ Verified with `cargo test --release --test hard_case_x_byte_and_restart` → 6 p
 
 ## P4-14. `max_memory_to_use` Is ABI-Mirrored But Not Enforced in the C-Side Allocation Path — **OPEN**
 
+**Correction (2026-08-11): the error contract this item and [#467](https://github.com/developer0hye/libjpeg-turbo-rs/issues/467)
+specify is wrong, and the "no spill path" constraint dissolves.** Recorded
+before implementation so the work is not done twice.
+
+Upstream does **not** raise `JERR_OUT_OF_MEMORY` when `max_memory_to_use` is
+exceeded. The budget is consulted by `jpeg_mem_available`
+(`jmemnobs.c:66-78`), which returns the remaining allowance;
+`realize_virt_arrays` parcels the shortfall into strips
+(`jmemmgr.c:745-760`) and only fails when it must spill — at which point
+`jmemnobs.c:87-92` raises **`JERR_NO_BACKING_STORE` (51)**.
+
+And the constraint this item records — that we have no backing store, so true
+enforcement means reimplementing the spill path — **does not apply**:
+`references/libjpeg-turbo/CMakeLists.txt:678` compiles `src/jmemnobs.c`
+unconditionally. The library we are replacing has no backing store either. Our
+"all data in RAM, never spills" is not a divergence; it is the same design, and
+matching upstream is a ~60-line change in `realize_virt_arrays_impl` rather than
+a new subsystem.
+
+Gaps the implementation will need: `memmgr.rs` has no error plumbing (`:732`
+records "we lack the error-mgr handle"), but `realize_virt_arrays_impl` takes
+`cinfo` and `jpeglib.rs`'s `invoke_error_exit` derives `err` from it — making
+that helper `pub(crate)` is the whole gap. `total_space_allocated`, upstream's
+third argument to the budget check, does not exist on our side yet.
+
 **Motivation.** Cold inspection of `crates/libjpeg-turbo-rs-capi/src/memmgr.rs` shows:
 
 - `JpegMemoryMgr::max_memory_to_use: c_long` is at the correct upstream offset (compile-time `offset_of!` assertion at `:181`), defaulted to `~1GB` at `:817` — ABI fidelity is intact.
