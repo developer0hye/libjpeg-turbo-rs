@@ -37,8 +37,24 @@ fn num_components_from_tjpf(tjpf: c_int) -> Option<usize> {
 /// num_components` when `pitch == 0`, else `pitch` (measured in
 /// samples, matching `turbojpeg.h` `int pitch` in units of sample
 /// count, not bytes).
+///
+/// # Safety
+///
+/// C ABI entry point. `handle`, `src_buf`, `jpeg_buf`, `jpeg_size` must satisfy the crate-level
+/// [pointer contract](crate#pointer-contract): valid for the whole call,
+/// correctly aligned, large enough for the accesses described above, and
+/// not aliased by another live reference. A pointer this function documents as
+/// optional may be null; any other null is reported through the documented
+/// error value rather than dereferenced.
+///
+/// A non-null `*jpeg_buf` is additionally **freed by this function**, so it
+/// must have come from `tj3Alloc`/`malloc` — see
+/// [Ownership transfer](crate#pointer-contract). Unlike `tj3Compress8`, this
+/// entry point does **not** consult `TJPARAM_NOREALLOC`: it always allocates a
+/// new buffer and frees the previous pointee, even when that buffer was large
+/// enough. That divergence from upstream is tracked as P4-145.
 #[no_mangle]
-pub extern "C" fn tj3Compress12(
+pub unsafe extern "C" fn tj3Compress12(
     handle: *mut c_void,
     src_buf: *const c_short,
     width: c_int,
@@ -213,8 +229,17 @@ pub extern "C" fn tj3Compress12(
 
 /// `tj3Decompress12(handle, jpegBuf, jpegSize, dstBuf, pitch,
 ///                  pixelFormat) -> int`.
+///
+/// # Safety
+///
+/// C ABI entry point. `handle`, `jpeg_buf`, `dst_buf` must satisfy the crate-level
+/// [pointer contract](crate#pointer-contract): valid for the whole call,
+/// correctly aligned, large enough for the accesses described above, and
+/// not aliased by another live reference. A pointer this function documents as
+/// optional may be null; any other null is reported through the documented
+/// error value rather than dereferenced.
 #[no_mangle]
-pub extern "C" fn tj3Decompress12(
+pub unsafe extern "C" fn tj3Decompress12(
     handle: *mut c_void,
     jpeg_buf: *const u8,
     jpeg_size: usize,
@@ -308,8 +333,24 @@ pub extern "C" fn tj3Decompress12(
 ///
 /// 16-bit is lossless-only. Uses the handle's `LOSSLESSPSV` /
 /// `LOSSLESSPT` parameters.
+///
+/// # Safety
+///
+/// C ABI entry point. `handle`, `src_buf`, `jpeg_buf`, `jpeg_size` must satisfy the crate-level
+/// [pointer contract](crate#pointer-contract): valid for the whole call,
+/// correctly aligned, large enough for the accesses described above, and
+/// not aliased by another live reference. A pointer this function documents as
+/// optional may be null; any other null is reported through the documented
+/// error value rather than dereferenced.
+///
+/// A non-null `*jpeg_buf` is additionally **freed by this function**, so it
+/// must have come from `tj3Alloc`/`malloc` — see
+/// [Ownership transfer](crate#pointer-contract). Unlike `tj3Compress8`, this
+/// entry point does **not** consult `TJPARAM_NOREALLOC`: it always allocates a
+/// new buffer and frees the previous pointee, even when that buffer was large
+/// enough. That divergence from upstream is tracked as P4-145.
 #[no_mangle]
-pub extern "C" fn tj3Compress16(
+pub unsafe extern "C" fn tj3Compress16(
     handle: *mut c_void,
     src_buf: *const u16,
     width: c_int,
@@ -453,8 +494,17 @@ pub extern "C" fn tj3Compress16(
 
 /// `tj3Decompress16(handle, jpegBuf, jpegSize, dstBuf, pitch, pixelFormat)
 ///   -> int`. Lossless 16-bit decompress.
+///
+/// # Safety
+///
+/// C ABI entry point. `handle`, `jpeg_buf`, `dst_buf` must satisfy the crate-level
+/// [pointer contract](crate#pointer-contract): valid for the whole call,
+/// correctly aligned, large enough for the accesses described above, and
+/// not aliased by another live reference. A pointer this function documents as
+/// optional may be null; any other null is reported through the documented
+/// error value rather than dereferenced.
 #[no_mangle]
-pub extern "C" fn tj3Decompress16(
+pub unsafe extern "C" fn tj3Decompress16(
     handle: *mut c_void,
     jpeg_buf: *const u8,
     jpeg_size: usize,

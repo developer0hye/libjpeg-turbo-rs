@@ -249,8 +249,17 @@ pub unsafe extern "C" fn tj3Destroy(handle: *mut c_void) {
 ///
 /// Returns 0 on success, -1 on error (invalid handle, unknown parameter,
 /// read-only parameter, or value out of range).
+///
+/// # Safety
+///
+/// C ABI entry point. `handle` must satisfy the crate-level
+/// [pointer contract](crate#pointer-contract): valid for the whole call,
+/// correctly aligned, large enough for the accesses described above, and
+/// not aliased by another live reference. A pointer this function documents as
+/// optional may be null; any other null is reported through the documented
+/// error value rather than dereferenced.
 #[no_mangle]
-pub extern "C" fn tj3Set(handle: *mut c_void, param: c_int, value: c_int) -> c_int {
+pub unsafe extern "C" fn tj3Set(handle: *mut c_void, param: c_int, value: c_int) -> c_int {
     crate::unwind_guard!(-1, {
         // Defined outside the `unsafe` block below so the body's own `unsafe`
         // blocks stay meaningful rather than nesting inside a blanket one.
@@ -289,8 +298,17 @@ pub extern "C" fn tj3Set(handle: *mut c_void, param: c_int, value: c_int) -> c_i
 /// `tj3Get(handle, param)` — read a TJ3 parameter.
 ///
 /// Returns the parameter value, or -1 on error.
+///
+/// # Safety
+///
+/// C ABI entry point. `handle` must satisfy the crate-level
+/// [pointer contract](crate#pointer-contract): valid for the whole call,
+/// correctly aligned, large enough for the accesses described above, and
+/// not aliased by another live reference. A pointer this function documents as
+/// optional may be null; any other null is reported through the documented
+/// error value rather than dereferenced.
 #[no_mangle]
-pub extern "C" fn tj3Get(handle: *mut c_void, param: c_int) -> c_int {
+pub unsafe extern "C" fn tj3Get(handle: *mut c_void, param: c_int) -> c_int {
     crate::unwind_guard!(-1, {
         let body = |inst: &mut TjInstance| -> c_int {
             match param_from_c(param) {
@@ -317,8 +335,17 @@ pub extern "C" fn tj3Get(handle: *mut c_void, param: c_int) -> c_int {
 /// back to a canonical "No error" string. That matches the
 /// libjpeg-turbo reference so that `tjunittest`'s
 /// `bufSizeTest()` can call `tj3GetErrorStr(NULL)` after a sizing call.
+///
+/// # Safety
+///
+/// C ABI entry point. `handle` must satisfy the crate-level
+/// [pointer contract](crate#pointer-contract): valid for the whole call,
+/// correctly aligned, large enough for the accesses described above, and
+/// not aliased by another live reference. A pointer this function documents as
+/// optional may be null; any other null is reported through the documented
+/// error value rather than dereferenced.
 #[no_mangle]
-pub extern "C" fn tj3GetErrorStr(handle: *mut c_void) -> *const c_char {
+pub unsafe extern "C" fn tj3GetErrorStr(handle: *mut c_void) -> *const c_char {
     static GLOBAL_NO_ERROR: &[u8] = b"No error\0";
     crate::unwind_guard!(GLOBAL_NO_ERROR.as_ptr() as *const c_char, {
         if handle.is_null() {
@@ -338,8 +365,17 @@ pub extern "C" fn tj3GetErrorStr(handle: *mut c_void) -> *const c_char {
 /// Returns `TJERR_WARNING=0` when the last operation succeeded or raised
 /// only a warning, `TJERR_FATAL=1` on failure. A NULL handle is treated
 /// as fatal.
+///
+/// # Safety
+///
+/// C ABI entry point. `handle` must satisfy the crate-level
+/// [pointer contract](crate#pointer-contract): valid for the whole call,
+/// correctly aligned, large enough for the accesses described above, and
+/// not aliased by another live reference. A pointer this function documents as
+/// optional may be null; any other null is reported through the documented
+/// error value rather than dereferenced.
 #[no_mangle]
-pub extern "C" fn tj3GetErrorCode(handle: *mut c_void) -> c_int {
+pub unsafe extern "C" fn tj3GetErrorCode(handle: *mut c_void) -> c_int {
     crate::unwind_guard!(TJERR_FATAL, {
         if handle.is_null() {
             return TJERR_FATAL;
@@ -371,8 +407,17 @@ pub extern "C" fn tj3GetErrorCode(handle: *mut c_void) -> c_int {
 /// that only check `return == -1` see the same "no ICC" signal as
 /// before; callers that inspect `tj3GetErrorCode()` after a -1 now
 /// distinguish `TJERR_WARNING` (no ICC) from `TJERR_FATAL` (real error).
+///
+/// # Safety
+///
+/// C ABI entry point. `handle`, `icc_buf`, `icc_size` must satisfy the crate-level
+/// [pointer contract](crate#pointer-contract): valid for the whole call,
+/// correctly aligned, large enough for the accesses described above, and
+/// not aliased by another live reference. A pointer this function documents as
+/// optional may be null; any other null is reported through the documented
+/// error value rather than dereferenced.
 #[no_mangle]
-pub extern "C" fn tj3GetICCProfile(
+pub unsafe extern "C" fn tj3GetICCProfile(
     handle: *mut c_void,
     icc_buf: *mut *mut u8,
     icc_size: *mut usize,
@@ -437,8 +482,17 @@ pub extern "C" fn tj3GetICCProfile(
 /// encode/transform calls embed it as APP2 chunks. `iccBuf == NULL`
 /// AND `iccSize == 0` clears the stored profile (mirrors upstream
 /// `references/libjpeg-turbo/src/turbojpeg.h:1511`).
+///
+/// # Safety
+///
+/// C ABI entry point. `handle`, `icc_buf` must satisfy the crate-level
+/// [pointer contract](crate#pointer-contract): valid for the whole call,
+/// correctly aligned, large enough for the accesses described above, and
+/// not aliased by another live reference. A pointer this function documents as
+/// optional may be null; any other null is reported through the documented
+/// error value rather than dereferenced.
 #[no_mangle]
-pub extern "C" fn tj3SetICCProfile(
+pub unsafe extern "C" fn tj3SetICCProfile(
     handle: *mut c_void,
     icc_buf: *mut u8,
     icc_size: usize,

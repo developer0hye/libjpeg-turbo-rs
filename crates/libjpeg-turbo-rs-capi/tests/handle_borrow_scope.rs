@@ -126,22 +126,25 @@ fn set_and_get_still_round_trip_through_with_handle() {
 /// A NULL handle must still be the documented error, not a dereference —
 /// `with_handle` returns `None` and each entry point maps it to its sentinel.
 ///
-/// Note what is *missing* here: no `unsafe` block. `tj3Set` and `tj3Get` take a
-/// raw pointer and are still safe `pub extern "C" fn`, so safe Rust can hand
-/// them any address at all. That is P4-137 criterion 1, which this change does
-/// not do — only criterion 4, the borrow scope. Adding `unsafe` here would warn
-/// as unnecessary, which is a neat demonstration of the remaining gap: when the
-/// exports are converted, this call site will stop compiling until it is
-/// wrapped, and that is the intended signal.
+/// The `unsafe` blocks below were the tripwire this comment used to predict.
+/// `tj3Set` and `tj3Get` take a raw pointer, and until P4-137 criterion 1
+/// landed they were safe `pub extern "C" fn` — safe Rust could hand them any
+/// address at all, and these two calls compiled with no `unsafe` anywhere.
+/// Converting the exports made them stop compiling until wrapped, which is
+/// exactly the signal that was wanted.
+///
+/// SAFETY: passing NULL is the case under test. Every entry point NULL-checks
+/// before dereferencing and returns its documented sentinel, so no
+/// dereference happens on this path.
 #[test]
 fn null_handle_still_returns_the_error_sentinel() {
     assert_eq!(
-        tj3Set(std::ptr::null_mut(), TJPARAM_QUALITY, 50),
+        unsafe { tj3Set(std::ptr::null_mut(), TJPARAM_QUALITY, 50) },
         -1,
         "tj3Set(NULL) must return -1"
     );
     assert_eq!(
-        tj3Get(std::ptr::null_mut(), TJPARAM_QUALITY),
+        unsafe { tj3Get(std::ptr::null_mut(), TJPARAM_QUALITY) },
         -1,
         "tj3Get(NULL) must return -1"
     );

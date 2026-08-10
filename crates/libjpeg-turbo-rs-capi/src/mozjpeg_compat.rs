@@ -49,8 +49,20 @@ const JPEG_FALSE: Boolean = 0;
 ///
 /// Returns FALSE for every mozjpeg-specific boolean parameter (we do
 /// not implement them; consumers must fall back to the standard path).
+///
+/// # Safety
+///
+/// C ABI entry point. `_cinfo` must satisfy the crate-level
+/// [pointer contract](crate#pointer-contract): valid for the whole call,
+/// correctly aligned, large enough for the accesses described above, and
+/// not aliased by another live reference. A pointer this function documents as
+/// optional may be null; any other null is reported through the documented
+/// error value rather than dereferenced.
 #[no_mangle]
-pub extern "C" fn jpeg_c_bool_param_supported(_cinfo: *mut c_void, _param: c_int) -> Boolean {
+pub unsafe extern "C" fn jpeg_c_bool_param_supported(
+    _cinfo: *mut c_void,
+    _param: c_int,
+) -> Boolean {
     crate::unwind_guard!(JPEG_FALSE, { JPEG_FALSE })
 }
 
@@ -59,49 +71,132 @@ pub extern "C" fn jpeg_c_bool_param_supported(_cinfo: *mut c_void, _param: c_int
 /// No-op. A well-behaved consumer probes `*_supported` first; this stub
 /// is only here so a consumer that ignores the probe (or a debugging
 /// path that always sets) does not crash.
+///
+/// # Safety
+///
+/// C ABI entry point. `_cinfo` must satisfy the crate-level
+/// [pointer contract](crate#pointer-contract): valid for the whole call,
+/// correctly aligned, large enough for the accesses described above, and
+/// not aliased by another live reference. A pointer this function documents as
+/// optional may be null; any other null is reported through the documented
+/// error value rather than dereferenced.
 #[no_mangle]
-pub extern "C" fn jpeg_c_set_bool_param(_cinfo: *mut c_void, _param: c_int, _value: Boolean) {
+pub unsafe extern "C" fn jpeg_c_set_bool_param(
+    _cinfo: *mut c_void,
+    _param: c_int,
+    _value: Boolean,
+) {
     crate::unwind_guard!((), {})
 }
 
 /// `boolean jpeg_c_get_bool_param(j_compress_ptr cinfo, J_BOOLEAN_PARAM param)`
+///
+/// # Safety
+///
+/// C ABI entry point. `_cinfo` must satisfy the crate-level
+/// [pointer contract](crate#pointer-contract): valid for the whole call,
+/// correctly aligned, large enough for the accesses described above, and
+/// not aliased by another live reference. A pointer this function documents as
+/// optional may be null; any other null is reported through the documented
+/// error value rather than dereferenced.
 #[no_mangle]
-pub extern "C" fn jpeg_c_get_bool_param(_cinfo: *mut c_void, _param: c_int) -> Boolean {
+pub unsafe extern "C" fn jpeg_c_get_bool_param(_cinfo: *mut c_void, _param: c_int) -> Boolean {
     crate::unwind_guard!(JPEG_FALSE, { JPEG_FALSE })
 }
 
 /// `boolean jpeg_c_int_param_supported(j_compress_ptr cinfo, J_INT_PARAM param)`
+///
+/// # Safety
+///
+/// C ABI entry point. `_cinfo` must satisfy the crate-level
+/// [pointer contract](crate#pointer-contract): valid for the whole call,
+/// correctly aligned, large enough for the accesses described above, and
+/// not aliased by another live reference. A pointer this function documents as
+/// optional may be null; any other null is reported through the documented
+/// error value rather than dereferenced.
 #[no_mangle]
-pub extern "C" fn jpeg_c_int_param_supported(_cinfo: *mut c_void, _param: c_int) -> Boolean {
+pub unsafe extern "C" fn jpeg_c_int_param_supported(_cinfo: *mut c_void, _param: c_int) -> Boolean {
     crate::unwind_guard!(JPEG_FALSE, { JPEG_FALSE })
 }
 
 /// `void jpeg_c_set_int_param(j_compress_ptr cinfo, J_INT_PARAM param, int value)`
+///
+/// # Safety
+///
+/// C ABI entry point. `_cinfo` must satisfy the crate-level
+/// [pointer contract](crate#pointer-contract): valid for the whole call,
+/// correctly aligned, large enough for the accesses described above, and
+/// not aliased by another live reference. A pointer this function documents as
+/// optional may be null; any other null is reported through the documented
+/// error value rather than dereferenced.
 #[no_mangle]
-pub extern "C" fn jpeg_c_set_int_param(_cinfo: *mut c_void, _param: c_int, _value: c_int) {
+pub unsafe extern "C" fn jpeg_c_set_int_param(_cinfo: *mut c_void, _param: c_int, _value: c_int) {
     crate::unwind_guard!((), {})
 }
 
 /// `int jpeg_c_get_int_param(j_compress_ptr cinfo, J_INT_PARAM param)`
+///
+/// # Safety
+///
+/// C ABI entry point. `_cinfo` must satisfy the crate-level
+/// [pointer contract](crate#pointer-contract): valid for the whole call,
+/// correctly aligned, large enough for the accesses described above, and
+/// not aliased by another live reference. A pointer this function documents as
+/// optional may be null; any other null is reported through the documented
+/// error value rather than dereferenced.
 #[no_mangle]
-pub extern "C" fn jpeg_c_get_int_param(_cinfo: *mut c_void, _param: c_int) -> c_int {
+pub unsafe extern "C" fn jpeg_c_get_int_param(_cinfo: *mut c_void, _param: c_int) -> c_int {
     crate::unwind_guard!(0, { 0 })
 }
 
 /// `boolean jpeg_c_float_param_supported(j_compress_ptr cinfo, J_FLOAT_PARAM param)`
+///
+/// # Safety
+///
+/// C ABI entry point. `_cinfo` must satisfy the crate-level
+/// [pointer contract](crate#pointer-contract): valid for the whole call,
+/// correctly aligned, large enough for the accesses described above, and
+/// not aliased by another live reference. A pointer this function documents as
+/// optional may be null; any other null is reported through the documented
+/// error value rather than dereferenced.
 #[no_mangle]
-pub extern "C" fn jpeg_c_float_param_supported(_cinfo: *mut c_void, _param: c_int) -> Boolean {
+pub unsafe extern "C" fn jpeg_c_float_param_supported(
+    _cinfo: *mut c_void,
+    _param: c_int,
+) -> Boolean {
     crate::unwind_guard!(JPEG_FALSE, { JPEG_FALSE })
 }
 
 /// `void jpeg_c_set_float_param(j_compress_ptr cinfo, J_FLOAT_PARAM param, float value)`
+///
+/// # Safety
+///
+/// C ABI entry point. `_cinfo` must satisfy the crate-level
+/// [pointer contract](crate#pointer-contract): valid for the whole call,
+/// correctly aligned, large enough for the accesses described above, and
+/// not aliased by another live reference. A pointer this function documents as
+/// optional may be null; any other null is reported through the documented
+/// error value rather than dereferenced.
 #[no_mangle]
-pub extern "C" fn jpeg_c_set_float_param(_cinfo: *mut c_void, _param: c_int, _value: c_float) {
+pub unsafe extern "C" fn jpeg_c_set_float_param(
+    _cinfo: *mut c_void,
+    _param: c_int,
+    _value: c_float,
+) {
     crate::unwind_guard!((), {})
 }
 
 /// `float jpeg_c_get_float_param(j_compress_ptr cinfo, J_FLOAT_PARAM param)`
+///
+/// # Safety
+///
+/// C ABI entry point. `_cinfo` must satisfy the crate-level
+/// [pointer contract](crate#pointer-contract): valid for the whole call,
+/// correctly aligned, large enough for the accesses described above, and
+/// not aliased by another live reference. A pointer this function documents as
+/// optional may be null; any other null is reported through the documented
+/// error value rather than dereferenced.
 #[no_mangle]
-pub extern "C" fn jpeg_c_get_float_param(_cinfo: *mut c_void, _param: c_int) -> c_float {
+pub unsafe extern "C" fn jpeg_c_get_float_param(_cinfo: *mut c_void, _param: c_int) -> c_float {
     crate::unwind_guard!(0.0, { 0.0 })
 }

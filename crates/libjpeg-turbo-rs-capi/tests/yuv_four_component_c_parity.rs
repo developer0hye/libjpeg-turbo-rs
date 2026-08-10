@@ -71,13 +71,15 @@ fn rust_return_codes(jpeg: &[u8]) -> (c_int, c_int) {
         vec![0; tj3YUVBufSize(WIDTH as c_int, ALIGN, HEIGHT as c_int, TJSAMP_444)];
     let handle: *mut c_void = tj3Init(TJINIT_DECOMPRESS);
     assert!(!handle.is_null(), "tj3Init");
-    let rc_yuv8: c_int = tj3DecompressToYUV8(
-        handle,
-        jpeg.as_ptr(),
-        jpeg.len(),
-        packed.as_mut_ptr(),
-        ALIGN,
-    );
+    let rc_yuv8: c_int = unsafe {
+        tj3DecompressToYUV8(
+            handle,
+            jpeg.as_ptr(),
+            jpeg.len(),
+            packed.as_mut_ptr(),
+            ALIGN,
+        )
+    };
     // SAFETY: `handle` is a live handle this test created and has not
     // destroyed; nothing else can reach it.
     unsafe { tj3Destroy(handle) };
@@ -85,13 +87,15 @@ fn rust_return_codes(jpeg: &[u8]) -> (c_int, c_int) {
     let mut plane_ptrs: Vec<*mut u8> = planes.iter_mut().map(|p| p.as_mut_ptr()).collect();
     let handle: *mut c_void = tj3Init(TJINIT_DECOMPRESS);
     assert!(!handle.is_null(), "tj3Init");
-    let rc_planes8: c_int = tj3DecompressToYUVPlanes8(
-        handle,
-        jpeg.as_ptr(),
-        jpeg.len(),
-        plane_ptrs.as_mut_ptr(),
-        std::ptr::null(),
-    );
+    let rc_planes8: c_int = unsafe {
+        tj3DecompressToYUVPlanes8(
+            handle,
+            jpeg.as_ptr(),
+            jpeg.len(),
+            plane_ptrs.as_mut_ptr(),
+            std::ptr::null(),
+        )
+    };
     // SAFETY: `handle` is a live handle this test created and has not
     // destroyed; nothing else can reach it.
     unsafe { tj3Destroy(handle) };

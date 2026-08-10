@@ -24,8 +24,17 @@ use libjpeg_turbo_rs::tj3::TjParam;
 use crate::tj3::{with_handle, TJERR_FATAL};
 
 /// `tj3DecompressHeader(handle, jpegBuf, jpegSize) -> int`.
+///
+/// # Safety
+///
+/// C ABI entry point. `handle`, `jpeg_buf` must satisfy the crate-level
+/// [pointer contract](crate#pointer-contract): valid for the whole call,
+/// correctly aligned, large enough for the accesses described above, and
+/// not aliased by another live reference. A pointer this function documents as
+/// optional may be null; any other null is reported through the documented
+/// error value rather than dereferenced.
 #[no_mangle]
-pub extern "C" fn tj3DecompressHeader(
+pub unsafe extern "C" fn tj3DecompressHeader(
     handle: *mut c_void,
     jpeg_buf: *const u8,
     jpeg_size: usize,
@@ -88,8 +97,20 @@ pub struct TjRegion {
 }
 
 /// `tj3SetScalingFactor(handle, factor) -> int`.
+///
+/// # Safety
+///
+/// C ABI entry point. `handle` must satisfy the crate-level
+/// [pointer contract](crate#pointer-contract): valid for the whole call,
+/// correctly aligned, large enough for the accesses described above, and
+/// not aliased by another live reference. A pointer this function documents as
+/// optional may be null; any other null is reported through the documented
+/// error value rather than dereferenced.
 #[no_mangle]
-pub extern "C" fn tj3SetScalingFactor(handle: *mut c_void, factor: TjScalingFactor) -> c_int {
+pub unsafe extern "C" fn tj3SetScalingFactor(
+    handle: *mut c_void,
+    factor: TjScalingFactor,
+) -> c_int {
     crate::unwind_guard!(-1, {
         // Defined outside the `unsafe` block below so the body's own `unsafe`
         // blocks stay meaningful rather than nesting inside a blanket one.
@@ -127,8 +148,17 @@ pub extern "C" fn tj3SetScalingFactor(handle: *mut c_void, factor: TjScalingFact
 }
 
 /// `tj3SetCroppingRegion(handle, region) -> int`.
+///
+/// # Safety
+///
+/// C ABI entry point. `handle` must satisfy the crate-level
+/// [pointer contract](crate#pointer-contract): valid for the whole call,
+/// correctly aligned, large enough for the accesses described above, and
+/// not aliased by another live reference. A pointer this function documents as
+/// optional may be null; any other null is reported through the documented
+/// error value rather than dereferenced.
 #[no_mangle]
-pub extern "C" fn tj3SetCroppingRegion(handle: *mut c_void, region: TjRegion) -> c_int {
+pub unsafe extern "C" fn tj3SetCroppingRegion(handle: *mut c_void, region: TjRegion) -> c_int {
     crate::unwind_guard!(-1, {
         let body = |inst: &mut crate::tj3::TjInstance| -> c_int {
             // The canonical C contract treats {0,0,0,0} as "clear the region".

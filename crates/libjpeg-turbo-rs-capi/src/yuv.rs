@@ -44,6 +44,27 @@ use libjpeg_turbo_rs::tj3::FrameInfo;
 use libjpeg_turbo_rs::{yuv_plane_height, yuv_plane_width, PixelFormat, Subsampling};
 
 use crate::alloc::{libc_free, libc_from_slice};
+
+/// Byte length of a packed YUV buffer, or `None` if the geometry cannot
+/// describe one.
+///
+/// Every factor is caller-supplied, so the product is checked rather than
+/// saturated (P4-137 criterion 5). Saturation is the wrong failure here in the
+/// worst possible way: the result went straight into `slice::from_raw_parts`,
+/// so an overflow produced a slice of `usize::MAX` bytes — immediate UB, not a
+/// short read. The `isize::MAX` bound is `from_raw_parts`'s own documented
+/// precondition.
+fn packed_yuv_len(width: usize, height: usize, align: i32, ss: Subsampling) -> Option<usize> {
+    let align: usize = (align.max(1)) as usize;
+    let mut total: usize = 0;
+    for c in 0..3 {
+        let pw: usize = yuv_plane_width(c, width, ss);
+        let ph: usize = yuv_plane_height(c, height, ss);
+        let stride: usize = pw.div_ceil(align).checked_mul(align)?;
+        total = total.checked_add(stride.checked_mul(ph)?)?;
+    }
+    (total <= isize::MAX as usize).then_some(total)
+}
 use crate::convert::pixel_format_from_tj;
 use crate::tj3::{with_handle, TjInstance, TJERR_FATAL};
 
@@ -206,9 +227,16 @@ fn pack_yuv_planes(
 // ---------------------------------------------------------------------------
 // Pixels (RGB/BGR/Gray/...) → YUV (no JPEG involvement)
 // ---------------------------------------------------------------------------
-
+/// # Safety
+///
+/// C ABI entry point. `handle`, `src_buf`, `dst_buf` must satisfy the crate-level
+/// [pointer contract](crate#pointer-contract): valid for the whole call,
+/// correctly aligned, large enough for the accesses described above, and
+/// not aliased by another live reference. A pointer this function documents as
+/// optional may be null; any other null is reported through the documented
+/// error value rather than dereferenced.
 #[no_mangle]
-pub extern "C" fn tj3EncodeYUV8(
+pub unsafe extern "C" fn tj3EncodeYUV8(
     handle: *mut c_void,
     src_buf: *const u8,
     width: c_int,
@@ -292,9 +320,16 @@ pub extern "C" fn tj3EncodeYUV8(
         unsafe { with_handle(handle, body) }.unwrap_or(-1)
     })
 }
-
+/// # Safety
+///
+/// C ABI entry point. `handle`, `src_buf`, `dst_planes`, `strides` must satisfy the crate-level
+/// [pointer contract](crate#pointer-contract): valid for the whole call,
+/// correctly aligned, large enough for the accesses described above, and
+/// not aliased by another live reference. A pointer this function documents as
+/// optional may be null; any other null is reported through the documented
+/// error value rather than dereferenced.
 #[no_mangle]
-pub extern "C" fn tj3EncodeYUVPlanes8(
+pub unsafe extern "C" fn tj3EncodeYUVPlanes8(
     handle: *mut c_void,
     src_buf: *const u8,
     width: c_int,
@@ -394,9 +429,23 @@ pub extern "C" fn tj3EncodeYUVPlanes8(
 // ---------------------------------------------------------------------------
 // Pixels → YUV → JPEG (compress path)
 // ---------------------------------------------------------------------------
-
+/// # Safety
+///
+/// C ABI entry point. `handle`, `src_buf`, `jpeg_buf`, `jpeg_size` must satisfy the crate-level
+/// [pointer contract](crate#pointer-contract): valid for the whole call,
+/// correctly aligned, large enough for the accesses described above, and
+/// not aliased by another live reference. A pointer this function documents as
+/// optional may be null; any other null is reported through the documented
+/// error value rather than dereferenced.
+///
+/// A non-null `*jpeg_buf` is additionally **freed by this function**, so it
+/// must have come from `tj3Alloc`/`malloc` — see
+/// [Ownership transfer](crate#pointer-contract). Unlike `tj3Compress8`, this
+/// entry point does **not** consult `TJPARAM_NOREALLOC`: it always allocates a
+/// new buffer and frees the previous pointee, even when that buffer was large
+/// enough. That divergence from upstream is tracked as P4-145.
 #[no_mangle]
-pub extern "C" fn tj3CompressFromYUV8(
+pub unsafe extern "C" fn tj3CompressFromYUV8(
     handle: *mut c_void,
     src_buf: *const u8,
     width: c_int,
@@ -428,15 +477,19 @@ pub extern "C" fn tj3CompressFromYUV8(
             let quality: i32 = inst.inner.get(libjpeg_turbo_rs::tj3::TjParam::Quality);
 
             // Compute the raw packed YUV length from align+dims.
-            let mut total: usize = 0;
-            for c in 0..3 {
-                let pw: usize = yuv_plane_width(c, width as usize, ss);
-                let ph: usize = yuv_plane_height(c, height as usize, ss);
-                let stride: usize = pw.div_ceil(align.max(1) as usize) * align.max(1) as usize;
-                total = total.saturating_add(stride * ph);
-            }
+            let total: usize = match packed_yuv_len(width as usize, height as usize, align, ss) {
+                Some(t) => t,
+                None => {
+                    inst.set_error(
+                        "tj3CompressFromYUV8: image dimensions overflow the buffer size",
+                        TJERR_FATAL,
+                    );
+                    return -1;
+                }
+            };
             // SAFETY: caller asserted `src_buf` valid for `total` bytes per
-            // `tjBufSizeYUV2(width, align, height, subsamp)`.
+            // `tjBufSizeYUV2(width, align, height, subsamp)`, and `total` is
+            // checked arithmetic bounded by `isize::MAX`.
             let packed: &[u8] = unsafe { std::slice::from_raw_parts(src_buf, total) };
 
             // Unpack into (Y, Cb, Cr) dense planes, then re-pack as Y|Cb|Cr
@@ -487,9 +540,23 @@ pub extern "C" fn tj3CompressFromYUV8(
         unsafe { with_handle(handle, body) }.unwrap_or(-1)
     })
 }
-
+/// # Safety
+///
+/// C ABI entry point. `handle`, `src_planes`, `strides`, `jpeg_buf`, `jpeg_size` must satisfy the crate-level
+/// [pointer contract](crate#pointer-contract): valid for the whole call,
+/// correctly aligned, large enough for the accesses described above, and
+/// not aliased by another live reference. A pointer this function documents as
+/// optional may be null; any other null is reported through the documented
+/// error value rather than dereferenced.
+///
+/// A non-null `*jpeg_buf` is additionally **freed by this function**, so it
+/// must have come from `tj3Alloc`/`malloc` — see
+/// [Ownership transfer](crate#pointer-contract). Unlike `tj3Compress8`, this
+/// entry point does **not** consult `TJPARAM_NOREALLOC`: it always allocates a
+/// new buffer and frees the previous pointee, even when that buffer was large
+/// enough. That divergence from upstream is tracked as P4-145.
 #[no_mangle]
-pub extern "C" fn tj3CompressFromYUVPlanes8(
+pub unsafe extern "C" fn tj3CompressFromYUVPlanes8(
     handle: *mut c_void,
     src_planes: *const *const u8,
     width: c_int,
@@ -606,9 +673,16 @@ pub extern "C" fn tj3CompressFromYUVPlanes8(
 /// therefore reject those frames, mirroring the guard upstream applies in
 /// `tj3DecompressToYUVPlanes8` (turbojpeg.c).
 const MAX_YUV_PLANES: usize = 3;
-
+/// # Safety
+///
+/// C ABI entry point. `handle`, `jpeg_buf`, `dst_buf` must satisfy the crate-level
+/// [pointer contract](crate#pointer-contract): valid for the whole call,
+/// correctly aligned, large enough for the accesses described above, and
+/// not aliased by another live reference. A pointer this function documents as
+/// optional may be null; any other null is reported through the documented
+/// error value rather than dereferenced.
 #[no_mangle]
-pub extern "C" fn tj3DecompressToYUV8(
+pub unsafe extern "C" fn tj3DecompressToYUV8(
     handle: *mut c_void,
     jpeg_buf: *const u8,
     jpeg_size: usize,
@@ -679,9 +753,16 @@ pub extern "C" fn tj3DecompressToYUV8(
         unsafe { with_handle(handle, body) }.unwrap_or(-1)
     })
 }
-
+/// # Safety
+///
+/// C ABI entry point. `handle`, `jpeg_buf`, `dst_planes`, `strides` must satisfy the crate-level
+/// [pointer contract](crate#pointer-contract): valid for the whole call,
+/// correctly aligned, large enough for the accesses described above, and
+/// not aliased by another live reference. A pointer this function documents as
+/// optional may be null; any other null is reported through the documented
+/// error value rather than dereferenced.
 #[no_mangle]
-pub extern "C" fn tj3DecompressToYUVPlanes8(
+pub unsafe extern "C" fn tj3DecompressToYUVPlanes8(
     handle: *mut c_void,
     jpeg_buf: *const u8,
     jpeg_size: usize,
@@ -773,9 +854,16 @@ pub extern "C" fn tj3DecompressToYUVPlanes8(
 // ---------------------------------------------------------------------------
 // YUV → Pixels (color conversion only, no JPEG)
 // ---------------------------------------------------------------------------
-
+/// # Safety
+///
+/// C ABI entry point. `handle`, `src_buf`, `dst_buf` must satisfy the crate-level
+/// [pointer contract](crate#pointer-contract): valid for the whole call,
+/// correctly aligned, large enough for the accesses described above, and
+/// not aliased by another live reference. A pointer this function documents as
+/// optional may be null; any other null is reported through the documented
+/// error value rather than dereferenced.
 #[no_mangle]
-pub extern "C" fn tj3DecodeYUV8(
+pub unsafe extern "C" fn tj3DecodeYUV8(
     handle: *mut c_void,
     src_buf: *const u8,
     align: c_int,
@@ -811,13 +899,18 @@ pub extern "C" fn tj3DecodeYUV8(
             let w: usize = width as usize;
             let h: usize = height as usize;
             // Compute packed length.
-            let mut total: usize = 0;
-            for c in 0..3 {
-                let pw: usize = yuv_plane_width(c, w, ss);
-                let ph: usize = yuv_plane_height(c, h, ss);
-                let stride: usize = pw.div_ceil(align.max(1) as usize) * align.max(1) as usize;
-                total = total.saturating_add(stride * ph);
-            }
+            let total: usize = match packed_yuv_len(w, h, align, ss) {
+                Some(t) => t,
+                None => {
+                    inst.set_error(
+                        "tj3DecodeYUV8: image dimensions overflow the buffer size",
+                        TJERR_FATAL,
+                    );
+                    return -1;
+                }
+            };
+            // SAFETY: caller asserted `src_buf` valid for `total` bytes, and
+            // `total` is checked arithmetic bounded by `isize::MAX`.
             let packed: &[u8] = unsafe { std::slice::from_raw_parts(src_buf, total) };
             let planes: Vec<Vec<u8>> = match split_packed_yuv(packed, w, h, align, ss) {
                 Some(p) => p,
@@ -876,9 +969,16 @@ pub extern "C" fn tj3DecodeYUV8(
         unsafe { with_handle(handle, body) }.unwrap_or(-1)
     })
 }
-
+/// # Safety
+///
+/// C ABI entry point. `handle`, `src_planes`, `strides`, `dst_buf` must satisfy the crate-level
+/// [pointer contract](crate#pointer-contract): valid for the whole call,
+/// correctly aligned, large enough for the accesses described above, and
+/// not aliased by another live reference. A pointer this function documents as
+/// optional may be null; any other null is reported through the documented
+/// error value rather than dereferenced.
 #[no_mangle]
-pub extern "C" fn tj3DecodeYUVPlanes8(
+pub unsafe extern "C" fn tj3DecodeYUVPlanes8(
     handle: *mut c_void,
     src_planes: *const *const u8,
     strides: *const c_int,

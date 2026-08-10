@@ -4182,7 +4182,7 @@ as recorded below.
 and (1) was a documented `unsafe` contract violation sitting in the crate's own
 code. Both were fixed by the criteria 1–2 work above.
 
-## P4-137. C-ABI Raw-Pointer Exports Are Safe Rust Functions — **PARTIAL: handle borrow scoped (criterion 4); export `unsafe fn` conversion pending**
+## P4-137. C-ABI Raw-Pointer Exports Are Safe Rust Functions — **CLOSED 2026-08-11**
 
 **GitHub:** [#476](https://github.com/developer0hye/libjpeg-turbo-rs/issues/476) — under the [#481](https://github.com/developer0hye/libjpeg-turbo-rs/issues/481) umbrella.
 
@@ -4299,17 +4299,118 @@ Proof: `cargo test -p libjpeg-turbo-rs-capi --test handle_borrow_scope`
 modules, a `tj3Set`/`tj3Get` round trip, and NULL-handle sentinels), plus the
 full capi suite at 54 blocks / 0 failures and both CI clippy legs clean.
 
-**What remains: criteria 1, 2, 3, 5, 6, 7.** ~84 of the 159 exports still take
-raw pointers as safe `pub extern "C" fn`, so the crate-wide
-`#![allow(clippy::not_unsafe_ptr_arg_deref)]` stays. `tj3Free` and `tj3Destroy`
-— the two that could `free()` an arbitrary pointer or double-free — were
-converted earlier, and that conversion measured the symbol-name claim as false:
-`nm -gU` output was byte-identical.
+**Status (2026-08-11): CLOSED — criteria 1, 2, 3, 5, 6, 7 delivered.**
 
-The new test documents the gap from the inside: its NULL-handle case has **no**
-`unsafe` block, because `tj3Set`/`tj3Get` are still safe fns. When criterion 1
-lands, that call site stops compiling until it is wrapped — an intended tripwire
-rather than an omission.
+* **Criterion 1 — done.** Every export whose parameter list contains a raw
+  pointer is `pub unsafe extern "C" fn`. The inventory, with the two numbers
+  kept apart because they answer different questions:
+
+  | | Count |
+  | --- | --- |
+  | Pointer-taking exports, now `unsafe` — the **soundness surface** | **136** |
+  | …of which this change converted (4 were already `unsafe`: `tj3Free`, `tj3Destroy`, `tjDestroy`, `jpeg_resync_to_restart`) | 132 |
+  | Pointer-free exports, still safe — nothing to dereference | 21 |
+  | Total exported symbols | 157 |
+
+  The pointer-free 21 (`tj3Alloc`, the `*BufSize`/`*PlaneSize` family,
+  `tjInit*`, `tj3Init*`, `jpeg_quality_scaling`, `jdiv_round_up`) stay safe by
+  design, not by omission.
+
+  **Symbol diff, as the criterion requires:** `nm -gU` on the release cdylib
+  before and after is **byte-identical at 157 symbols**. This is now the second
+  measurement refuting the "unsafe changes the ABI symbol" claim the crate-wide
+  suppression rested on — the first covered only `tj3Free`/`tj3Destroy`, which
+  is also why those two already counted as `unsafe` going in.
+
+* **Criterion 2 — done.** `#![allow(clippy::not_unsafe_ptr_arg_deref)]` is
+  deleted. No per-function suppression replaces it. The lint is now load-bearing:
+  a new export that dereferences a raw pointer from a safe `fn` fails the build.
+
+* **Criterion 3 — done.** Every converted export carries a `# Safety` section
+  naming its own pointer parameters. The obligations common to all of them —
+  validity, minimum size, alignment, ownership transfer, aliasing, threading —
+  are stated once at the crate root under **Pointer contract**, which each
+  section links. Stating them once is deliberate: 132 hand-written copies would
+  drift, and `clippy::missing_safety_doc` enforces the per-function section
+  regardless.
+
+  One obligation was missing from the first draft and is worth naming, because
+  it is the kind a shared contract loses: the **reusable output slot**. A
+  non-null `*jpeg_buf` handed to `tj3Compress12`, `tj3Compress16`,
+  `tj3CompressFromYUV8`, `tj3CompressFromYUVPlanes8` or `tj3Transform` is
+  `free()`d by this library when the output does not fit, so it must come from
+  `tj3Alloc`/`malloc`. A stack array or a `Vec`'s buffer satisfies every
+  validity, size and alignment rule and is still UB to pass, because it is freed
+  with the wrong allocator. Both the crate contract and those five functions now
+  say so. Upstream TurboJPEG makes the same demand; we simply had not written it
+  down.
+
+* **Criterion 5 — done, but not where the first pass looked.** The criterion is
+  about *slice construction*, and claiming it from the P4-139 work on
+  `decompress.rs`/`precision.rs` was wrong: that grep covered the two files this
+  item happens to name, not the crate.
+
+  Review found the real instances — two rounds of them, and the first fix was
+  not the whole story. `tj3CompressFromYUV8` and `tj3DecodeYUV8` sized their
+  packed-YUV slice with `total.saturating_add(stride * ph)` — an *unchecked*
+  multiply inside a saturating add — and fed the result straight to
+  `slice::from_raw_parts`. A later round found `tj3SaveImage8` doing the same
+  shape with `row_dense * h` (`imageio.rs`), where `c_int::MAX`-square RGBA
+  exceeds `isize::MAX` on 64-bit and `w * bpp` wraps on 32-bit; it is now
+  `checked_mul` under the same bound. Saturation is the worst available failure mode there:
+  it yields `usize::MAX`, so an overflowing geometry produced a slice claiming
+  the whole address space, not a short one. Both now go through
+  `packed_yuv_len`, which is `checked_mul`/`checked_add` bounded by `isize::MAX`
+  (`from_raw_parts`'s own precondition) and returns the documented `-1` with a
+  `TJERR_FATAL` message.
+
+  **Still open, and deliberately not claimed here:** `jpeglib.rs` retains
+  memory-sizing `saturating_mul` at `:6697`, `:7382-7383`, `:7444`,
+  `:9429/:9432` and `:10467`. Those size `Vec` allocations rather than raw
+  slices, so they are outside criterion 5's wording but squarely inside
+  [P4-139](#p4-139-memory-layout-arithmetic-is-decentralised-and-uses-saturatingunchecked-multiplication--open)
+  criterion 3, which is where they are recorded.
+
+* **Criterion 7 — done.** The crate root states the boundary plainly: invalid
+  pointers from C are **not** defended against and cannot be — that is inherent
+  to the C ABI, and upstream makes the same bargain. What is guaranteed, and
+  what the fuzz and sanitizer gates test, is that a malformed JPEG cannot
+  corrupt memory when the caller honours the pointer contract. Bad *data* is our
+  problem; bad *pointers* are the caller's.
+
+**Criterion 6 — the recorded decision: do not build a handle registry.**
+
+The criterion asks for generation-tagged handles in a registry plus a busy flag,
+and for the decision to be recorded either way. **Declined**, for three reasons:
+
+1. **It defends against something criterion 7 says we do not defend against.**
+   A stale or double-destroyed `tjhandle` is an invalid pointer from C. Adding a
+   registry for that one case while every other pointer parameter remains the
+   caller's responsibility buys inconsistent, partial safety, and invites the
+   belief that the rest is checked too.
+2. **It costs a process-global lock on every entry point.** A registry lookup
+   per call serialises otherwise-independent instances — the exact property
+   [P4-132](#p4-132-classic-c-abi-per-cinfo-state-is-thread-affine-p4-16-option-a--open)
+   exists to *improve*. Upstream 3.2 moved the other way, removing TLS from its
+   libjpeg API. (The criterion says "weigh against P4-131's threading work";
+   P4-131 is native binary distribution — the threading item is P4-132.)
+3. **Upstream does not do it,** and a drop-in replacement that rejects a handle
+   C libjpeg-turbo would have accepted is a compatibility difference, not a
+   safety improvement.
+
+The *concurrency* half has merit and is not dropped: "a concurrent same-handle
+call returns an error rather than aliasing `&mut`" is a real hazard, and it is
+P4-132's subject, where the per-`cinfo` threading contract is being decided as a
+whole. It is recorded there rather than solved twice.
+
+**A note on the tripwire that fired.** The previous status predicted that when
+criterion 1 landed, the NULL-handle call sites in `handle_borrow_scope.rs` would
+stop compiling until wrapped. They did — along with 20 more sites across six
+test files, and 40 internal delegation calls in `jpeglib.rs`/`legacy.rs`. Every
+one of those was safe Rust calling a raw-pointer entry point with no `unsafe`
+anywhere, which is precisely the condition this item was filed for. The
+comments predicting the tripwire have been replaced with `SAFETY` notes stating
+why each call is sound.
 
 ## P4-138. `BitWriter` Hand-Rolls Allocation Ownership and Can Double-Free on an Unwinding `reserve` — **CLOSED 2026-08-10**
 
@@ -4475,6 +4576,17 @@ instance; this entry is the common cause.
   (`ci.comp_w * ci.blocks_y * block_size`) wraps in release. **Fixed by P4-136**
   (closed 2026-08-10) — every span in that file is now `checked_plane_size` +
   `try_filled_vec`. Listed here because it is the shape, not because it is open.
+- **Inherited from P4-137 (recorded 2026-08-11):** memory-sizing
+  `saturating_mul` in `crates/libjpeg-turbo-rs-capi/src/jpeglib.rs` at `:6697`
+  (`old_bufsize * 2`), `:7382-7383` (`width * input_components`, then
+  `* height`), `:7444`, `:9429`/`:9432` (`row_samples * height`, sizing a
+  `vec![0u16; …]`) and `:10467` (`num_blocks * 64`). These size `Vec`
+  allocations rather than raw slices, so P4-137 criterion 5 did not cover them —
+  but they are exactly this item's criterion 3. The *slice*-sizing instances in
+  `yuv.rs` were live UB (`saturating_add` reaching `usize::MAX` and then being
+  handed to `from_raw_parts`) and were fixed under P4-137; these remaining ones
+  produce an over-large allocation request rather than an over-large span, so
+  they abort or error rather than corrupt.
 - **Inherited from P4-136:** the three `set_len` sites in
   `src/encode/pipeline_impl/progressive_entropy.rs` (`:65`, `:96`, `:145`). The
   `set_len` calls themselves are *correct* — they publish a span a raw cursor
@@ -4762,3 +4874,54 @@ one buffer) and is the instance to measure first.
 4. Record whether the `Result` threading is worth it for the non-amplifying
    clones, or whether criterion 2 should stop at the reassembly buffers. Decide
    it here; do not leave it implicit.
+
+## P4-145. `TJPARAM_NOREALLOC` Is Honoured by `tj3Compress8` Only — **OPEN**
+
+**GitHub:** [#514](https://github.com/developer0hye/libjpeg-turbo-rs/issues/514) — filed 2026-08-11 while closing
+[P4-137](#p4-137-c-abi-raw-pointer-exports-are-safe-rust-functions--closed-2026-08-11);
+found by that PR's codex review.
+
+**Motivation.** Upstream TurboJPEG lets a caller pre-allocate the output buffer
+and set `TJPARAM_NOREALLOC` to promise the library will not resize it. That
+promise is what makes a caller-owned buffer usable at all: with it, the pointer
+the caller passed is the pointer it gets back.
+
+We honour it in **`tj3Compress8` only**. `tj3Compress12`, `tj3Compress16`,
+`tj3CompressFromYUV8`, `tj3CompressFromYUVPlanes8` and `tj3Transform` never read
+the parameter — each allocates a fresh buffer and `libc_free`s the previous
+pointee unconditionally, even when the caller's buffer was large enough.
+
+**One instance was a live heap overflow and is already fixed.** `tj3Compress8`
+*does* read the flag, but its in-place path ignored `*jpeg_size` — the input
+capacity — and `copy_nonoverlapping`'d the encoded output on the assumption the
+buffer was at least `tj3JPEGBufSize(...)`. Upstream instead raises
+`JERR_BUFFER_SIZE` (`jdatadst-tj.c:92`), so a caller doing exactly what upstream
+permits — a smaller buffer, its size declared — got a heap overflow.
+Fixed 2026-08-11 under P4-137: the capacity is now compared before the copy.
+`norealloc_buffer_capacity.rs` pins both directions, and removing the check
+reproduces `AddressSanitizer: heap-buffer-overflow` on the too-small case.
+
+**Two consequences of the remaining five, and the second is the serious one.**
+
+1. A caller that pre-sized its buffer still gets a different pointer back, so
+   any C code holding the original is left with a dangling pointer.
+2. `NOREALLOC` is precisely the flag a caller sets when the buffer is *not*
+   `malloc`-owned — a stack array, or a `Vec` on the Rust side. Upstream's
+   contract makes that safe. Ours frees it, with the wrong allocator.
+
+Documented at the crate root and on all five entry points as of 2026-08-11, so
+the contract is at least honest; but documentation is the workaround, not the
+fix.
+
+**Acceptance criteria.**
+
+1. All five entry points read `TJPARAM_NOREALLOC`, following `tj3Compress8`'s
+   shape — which as of 2026-08-11 includes the capacity check: write in place
+   when set, and raise the documented "buffer too small" error rather than
+   reallocating or overrunning.
+2. The previous pointee is freed only on the reallocating path.
+3. A test per entry point proving the caller's pointer is unchanged when the
+   flag is set and the buffer is large enough — the observable difference, and
+   the one a doc fix cannot deliver.
+4. The crate-root **Ownership transfer** note and the five `# Safety` sections
+   drop the P4-145 caveat once (1)-(3) land.

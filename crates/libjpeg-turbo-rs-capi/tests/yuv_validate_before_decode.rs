@@ -75,7 +75,7 @@ fn rgb_jpeg() -> Vec<u8> {
 }
 
 fn error_of(handle: *mut c_void) -> String {
-    let ptr = tj3GetErrorStr(handle);
+    let ptr = unsafe { tj3GetErrorStr(handle) };
     assert!(!ptr.is_null(), "tj3GetErrorStr returned NULL");
     unsafe { CStr::from_ptr(ptr) }
         .to_string_lossy()
@@ -93,7 +93,8 @@ fn four_component_frame_is_rejected_without_decoding() {
 
     let handle: *mut c_void = tj3Init(TJINIT_DECOMPRESS);
     assert!(!handle.is_null());
-    let rc: c_int = tj3DecompressToYUV8(handle, jpeg.as_ptr(), jpeg.len(), dst.as_mut_ptr(), ALIGN);
+    let rc: c_int =
+        unsafe { tj3DecompressToYUV8(handle, jpeg.as_ptr(), jpeg.len(), dst.as_mut_ptr(), ALIGN) };
     let err: String = error_of(handle);
     // SAFETY: `handle` is a live handle this test created and has not
     // destroyed; nothing else can reach it.
@@ -123,9 +124,14 @@ fn max_pixels_bounds_the_packed_entry_point() {
     assert!(!handle.is_null());
     // One pixel below the frame's own size.
     let limit: c_int = (WIDTH * HEIGHT - 1) as c_int;
-    assert_eq!(tj3Set(handle, TJPARAM_MAXPIXELS, limit), 0, "tj3Set");
+    assert_eq!(
+        unsafe { tj3Set(handle, TJPARAM_MAXPIXELS, limit) },
+        0,
+        "tj3Set"
+    );
 
-    let rc: c_int = tj3DecompressToYUV8(handle, jpeg.as_ptr(), jpeg.len(), dst.as_mut_ptr(), ALIGN);
+    let rc: c_int =
+        unsafe { tj3DecompressToYUV8(handle, jpeg.as_ptr(), jpeg.len(), dst.as_mut_ptr(), ALIGN) };
     let err: String = error_of(handle);
     // SAFETY: `handle` is a live handle this test created and has not
     // destroyed; nothing else can reach it.
@@ -154,13 +160,15 @@ fn null_plane_pointer_leaves_all_caller_buffers_untouched() {
 
     let handle: *mut c_void = tj3Init(TJINIT_DECOMPRESS);
     assert!(!handle.is_null());
-    let rc: c_int = tj3DecompressToYUVPlanes8(
-        handle,
-        jpeg.as_ptr(),
-        jpeg.len(),
-        ptrs.as_mut_ptr(),
-        std::ptr::null(),
-    );
+    let rc: c_int = unsafe {
+        tj3DecompressToYUVPlanes8(
+            handle,
+            jpeg.as_ptr(),
+            jpeg.len(),
+            ptrs.as_mut_ptr(),
+            std::ptr::null(),
+        )
+    };
     // SAFETY: `handle` is a live handle this test created and has not
     // destroyed; nothing else can reach it.
     unsafe { tj3Destroy(handle) };
@@ -186,7 +194,8 @@ fn bad_align_outranks_the_component_check_as_in_c() {
 
     let handle: *mut c_void = tj3Init(TJINIT_DECOMPRESS);
     assert!(!handle.is_null());
-    let rc: c_int = tj3DecompressToYUV8(handle, jpeg.as_ptr(), jpeg.len(), dst.as_mut_ptr(), 0);
+    let rc: c_int =
+        unsafe { tj3DecompressToYUV8(handle, jpeg.as_ptr(), jpeg.len(), dst.as_mut_ptr(), 0) };
     let err: String = error_of(handle);
     // SAFETY: `handle` is a live handle this test created and has not
     // destroyed; nothing else can reach it.
