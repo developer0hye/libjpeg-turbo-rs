@@ -1861,8 +1861,13 @@ unsafe fn drain_caller_source_mgr(
         return None;
     }
     let cinfo_ptr: *mut c_void = c as *mut JpegDecompressPublic as *mut c_void;
-    // SAFETY: caller asserts `c.src` points at a live JpegSourceMgr.
-    let src: &mut JpegSourceMgr = unsafe { &mut *src_ptr };
+
+    // No long-lived `&mut JpegSourceMgr` is taken here. `init_source` and
+    // `fill_input_buffer` both receive `cinfo` and are expected to mutate the
+    // manager through it, so holding an exclusive Rust reference across either
+    // would alias it — UB, and reachable now that the built-in
+    // `default_fill_input_buffer` writes the fake-EOI buffer back (P4-97
+    // review). Every access below is scoped to a single statement.
 
     // Step 1: init_source. Only invoke once per bridge cycle —
     // otherwise a non-blocking caller's init_source might reset its
@@ -1870,7 +1875,10 @@ unsafe fn drain_caller_source_mgr(
     // by `bridge_partial.is_empty()` (no prior partial drain in flight).
     let is_first_call: bool = priv_state.bridge_partial.is_empty();
     if is_first_call {
-        if let Some(init) = src.init_source {
+        // SAFETY: `src_ptr` is non-NULL and ABI-shaped; the read of the fn
+        // pointer ends before the call, so nothing is borrowed across it.
+        let init = unsafe { (*src_ptr).init_source };
+        if let Some(init) = init {
             // SAFETY: caller-provided callback honoring the libjpeg
             // `void (*init_source)(j_decompress_ptr)` prototype.
             unsafe {
@@ -1888,15 +1896,20 @@ unsafe fn drain_caller_source_mgr(
 
     loop {
         // Step 2a: drain whatever is currently in the public buffer.
-        if src.bytes_in_buffer > 0 && !src.next_input_byte.is_null() {
+        // SAFETY: `src_ptr` is non-NULL and ABI-shaped; each access is scoped.
+        let (next, avail): (*const u8, usize) =
+            unsafe { ((*src_ptr).next_input_byte, (*src_ptr).bytes_in_buffer) };
+        if avail > 0 && !next.is_null() {
             // SAFETY: caller's ABI promises `next_input_byte` is valid
             // for `bytes_in_buffer` reads.
-            let chunk: &[u8] =
-                unsafe { std::slice::from_raw_parts(src.next_input_byte, src.bytes_in_buffer) };
+            let chunk: &[u8] = unsafe { std::slice::from_raw_parts(next, avail) };
             accumulator.extend_from_slice(chunk);
-            // SAFETY: advancing within the asserted-valid window.
-            src.next_input_byte = unsafe { src.next_input_byte.add(src.bytes_in_buffer) };
-            src.bytes_in_buffer = 0;
+            // SAFETY: advancing within the asserted-valid window; the borrow
+            // ends with this statement.
+            unsafe {
+                (*src_ptr).next_input_byte = next.add(avail);
+                (*src_ptr).bytes_in_buffer = 0;
+            }
         }
 
         // Step 2b: stop if we've seen the End-Of-Image marker (FF D9).
@@ -1915,12 +1928,15 @@ unsafe fn drain_caller_source_mgr(
         }
 
         // Step 3: fetch more bytes from the caller.
-        let fill: unsafe extern "C" fn(*mut c_void) -> CBoolean = match src.fill_input_buffer {
-            Some(f) => f,
-            // No callback and no EOI yet → end of stream from a
-            // pre-loaded buffer (typical static-source case).
-            None => return Some(accumulator),
-        };
+        // SAFETY: as above; the fn pointer is copied out before the call so
+        // nothing is borrowed across it.
+        let fill: unsafe extern "C" fn(*mut c_void) -> CBoolean =
+            match unsafe { (*src_ptr).fill_input_buffer } {
+                Some(f) => f,
+                // No callback and no EOI yet → end of stream from a
+                // pre-loaded buffer (typical static-source case).
+                None => return Some(accumulator),
+            };
         // SAFETY: caller-supplied callback. A FALSE return means
         // "suspended; come back later". Park the partial accumulator
         // in `priv_state.bridge_partial` so the next retry resumes
@@ -1932,7 +1948,9 @@ unsafe fn drain_caller_source_mgr(
             priv_state.bridge_partial = accumulator;
             return None;
         }
-        if src.bytes_in_buffer == 0 {
+        // SAFETY: re-read after the callback, which is expected to have
+        // rewritten these fields.
+        if unsafe { (*src_ptr).bytes_in_buffer } == 0 {
             // Successful fill but no bytes — treat as end of stream.
             return Some(accumulator);
         }
@@ -1965,40 +1983,55 @@ unsafe fn pull_more_from_source_mgr(
     if src_ptr.is_null() {
         return PullResult::Ended;
     }
-    // SAFETY: caller asserts `c.src` points at a live JpegSourceMgr.
-    let src: &mut JpegSourceMgr = unsafe { &mut *src_ptr };
     let cinfo_ptr: *mut c_void = c as *mut JpegDecompressPublic as *mut c_void;
 
+    // As in `drain_caller_source_mgr`: no exclusive Rust reference to the
+    // manager may span `fill_input_buffer`, which is expected to rewrite it
+    // through `cinfo` (P4-97 review). Accesses are scoped to one statement.
+
     // Drain whatever is already buffered first.
-    if src.bytes_in_buffer > 0 && !src.next_input_byte.is_null() {
+    // SAFETY: `src_ptr` is non-NULL and ABI-shaped.
+    let (next, avail): (*const u8, usize) =
+        unsafe { ((*src_ptr).next_input_byte, (*src_ptr).bytes_in_buffer) };
+    if avail > 0 && !next.is_null() {
         // SAFETY: the ABI promises `next_input_byte` is valid for
         // `bytes_in_buffer` reads.
-        let chunk: &[u8] =
-            unsafe { std::slice::from_raw_parts(src.next_input_byte, src.bytes_in_buffer) };
+        let chunk: &[u8] = unsafe { std::slice::from_raw_parts(next, avail) };
         accumulator.extend_from_slice(chunk);
-        src.next_input_byte = unsafe { src.next_input_byte.add(src.bytes_in_buffer) };
-        src.bytes_in_buffer = 0;
+        // SAFETY: advancing within that window; borrow ends here.
+        unsafe {
+            (*src_ptr).next_input_byte = next.add(avail);
+            (*src_ptr).bytes_in_buffer = 0;
+        }
         return PullResult::Progressed;
     }
 
     // Buffer empty: ask the caller for more.
-    let fill: unsafe extern "C" fn(*mut c_void) -> CBoolean = match src.fill_input_buffer {
-        Some(f) => f,
-        None => return PullResult::Ended,
-    };
+    // SAFETY: the fn pointer is copied out before the call.
+    let fill: unsafe extern "C" fn(*mut c_void) -> CBoolean =
+        match unsafe { (*src_ptr).fill_input_buffer } {
+            Some(f) => f,
+            None => return PullResult::Ended,
+        };
     let ok: CBoolean = unsafe { fill(cinfo_ptr) };
     if ok == 0 {
         return PullResult::Suspended;
     }
-    if src.bytes_in_buffer == 0 || src.next_input_byte.is_null() {
+    // SAFETY: re-read after the callback, which is expected to have rewritten
+    // these fields.
+    let (next, avail): (*const u8, usize) =
+        unsafe { ((*src_ptr).next_input_byte, (*src_ptr).bytes_in_buffer) };
+    if avail == 0 || next.is_null() {
         return PullResult::Ended;
     }
     // SAFETY: as above.
-    let chunk: &[u8] =
-        unsafe { std::slice::from_raw_parts(src.next_input_byte, src.bytes_in_buffer) };
+    let chunk: &[u8] = unsafe { std::slice::from_raw_parts(next, avail) };
     accumulator.extend_from_slice(chunk);
-    src.next_input_byte = unsafe { src.next_input_byte.add(src.bytes_in_buffer) };
-    src.bytes_in_buffer = 0;
+    // SAFETY: advancing within that window; borrow ends here.
+    unsafe {
+        (*src_ptr).next_input_byte = next.add(avail);
+        (*src_ptr).bytes_in_buffer = 0;
+    }
     PullResult::Progressed
 }
 
@@ -9700,9 +9733,16 @@ unsafe fn resync_to_restart_impl(cinfo: *mut c_void, desired: c_int) -> CBoolean
     let cinfo_typed: *mut JpegDecompressPublic = cinfo as *mut JpegDecompressPublic;
 
     // SAFETY: non-NULL and ABI-shaped; the borrow ends with this statement.
-    let (mut marker, src): (c_int, *mut JpegSourceMgr) =
-        unsafe { ((*cinfo_typed).unread_marker, (*cinfo_typed).src) };
+    let mut marker: c_int = unsafe { (*cinfo_typed).unread_marker };
     let mut discarded: c_int = 0;
+
+    // `cinfo->src` is deliberately *not* cached here. Upstream calls
+    // `next_marker(cinfo)` after the warning and trace, and that re-reads
+    // `cinfo->src` through `INPUT_VARS` each time (`jdmarker.c:1222-1249`). A
+    // custom `emit_message` is allowed to swap the source manager while
+    // handling `JWRN_MUST_RESYNC` or `JTRC_RECOVERY_ACTION`; a pre-callback
+    // snapshot would keep scanning the old one, and become a use-after-free if
+    // the caller released it.
 
     // Always put up a warning, exactly as upstream does before deciding.
     // SAFETY: `cinfo` is non-NULL here and has `j_common_ptr` layout.
@@ -9746,6 +9786,10 @@ unsafe fn resync_to_restart_impl(cinfo: *mut c_void, desired: c_int) -> CBoolean
                 return 1;
             }
             2 => {
+                // Re-read the source manager *after* the callbacks above, as
+                // upstream's `next_marker(cinfo)` does.
+                // SAFETY: non-NULL and ABI-shaped; borrow ends with this stmt.
+                let src: *mut JpegSourceMgr = unsafe { (*cinfo_typed).src };
                 if src.is_null() {
                     // Nothing to scan forward through. Upstream would have
                     // dereferenced `datasrc`; reporting suspension is the
