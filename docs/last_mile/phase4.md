@@ -3937,7 +3937,7 @@ the row until the kernel signatures change; it is no longer P0, because the
 property it was P0 for — "our safe API is sound" against this defect — now
 holds.
 
-## P4-136. Progressive Output Calls `set_len()` on Uninitialized `Vec` After an Unchecked Size Multiplication — **OPEN**
+## P4-136. Progressive Output Calls `set_len()` on Uninitialized `Vec` After an Unchecked Size Multiplication — **PARTIAL: memory-safety content closed; benchmark + fallible allocation outstanding**
 
 **GitHub:** [#475](https://github.com/developer0hye/libjpeg-turbo-rs/issues/475) — under the [#481](https://github.com/developer0hye/libjpeg-turbo-rs/issues/481) umbrella.
 
@@ -3990,6 +3990,48 @@ and then re-`set_len`. Audit all of them; they are the same shape.
    for large planes, so the current pattern may be buying nothing.
 4. Allocation is fallible where the size is input-derived — `try_reserve_exact`
    with a typed `AllocationFailed` error rather than an abort.
+
+**Status (2026-08-10): partial — criteria 1 and 2 met; the memory-safety content
+is closed.** Audited against `main` @ 93b74c4.
+
+`grep -c set_len src/api/progressive_output.rs` returns **0**. All six sites the
+item names are now `vec![0u8; size]`, sized by a checked helper:
+
+```rust
+fn checked_plane_size(factors: &[usize], what: &'static str) -> Result<usize> {
+    let mut total: usize = 1;
+    for factor in factors {
+        total = total.checked_mul(*factor).ok_or(JpegError::LimitExceeded { .. })?;
+    }
+    if total > isize::MAX as usize { return Err(JpegError::LimitExceeded { .. }); }
+    ...
+}
+```
+
+Both described defects — an uninitialised `Vec<u8>` reachable from safe code,
+and the wrapped-small allocation the IDCT then writes past — are gone.
+
+**What remains.**
+
+* Criterion 3: no `experiments/` entry records the zero-init comparison. Worth
+  noting the criterion's own hint held — zero-init was adopted with no observed
+  regression, consistent with `calloc`-backed zero pages being free for large
+  planes — but the measurement is unrecorded.
+* Criterion 4: `vec![0u8; size]` still aborts on allocation failure.
+* The three `set_len` sites in `src/encode/pipeline_impl/progressive_entropy.rs`
+  (`:65`, `:96`, `:145`) are a **different shape** and were not in scope of the
+  fix above: they write into `Vec` spare capacity through a raw cursor and then
+  `set_len(base + written)` where `written` comes from `offset_from`. That is a
+  correct use of `set_len`. The residual concern is the reserve arithmetic
+  feeding it — `total_blocks * 4 + restart_overhead + 64`, unchecked, with the
+  in-loop guards comparing against `reserve` rather than actual capacity. The
+  margins hold for legitimate geometry (`>= 68` covers the 64-byte per-block
+  worst case, `>= 84` the 80-byte restart case), so no reachable path was found;
+  it needs `total_blocks > usize::MAX / 4` to wrap. That is
+  [P4-139](#p4-139-memory-layout-arithmetic-is-decentralised-and-uses-saturatingunchecked-multiplication--open)'s
+  class of defect and belongs there.
+
+This item is no longer a soundness blocker for the [#481](https://github.com/developer0hye/libjpeg-turbo-rs/issues/481) umbrella.
 5. A 32-bit-target regression test (`i686`) covering the geometry that overflows
    `usize` there but not on 64-bit.
 6. Miri covers the progressive output path. It currently does not — see P4-141.
@@ -4126,7 +4168,7 @@ The new test documents the gap from the inside: its NULL-handle case has **no**
 lands, that call site stops compiling until it is wrapped — an intended tripwire
 rather than an omission.
 
-## P4-138. `BitWriter` Hand-Rolls Allocation Ownership and Can Double-Free on an Unwinding `reserve` — **OPEN**
+## P4-138. `BitWriter` Hand-Rolls Allocation Ownership and Can Double-Free on an Unwinding `reserve` — **PARTIAL: double-free fixed and sanitizer-covered; ownership refactor outstanding**
 
 **GitHub:** [#477](https://github.com/developer0hye/libjpeg-turbo-rs/issues/477) — under the [#481](https://github.com/developer0hye/libjpeg-turbo-rs/issues/481) umbrella.
 
@@ -4181,6 +4223,53 @@ per-block reserve estimate; do not reuse a pointer across a reallocation).
 
 **Why P0.** A double free is memory corruption, and this one is reachable from
 ordinary encoding if allocation ever fails or the size arithmetic overflows.
+
+**Status (2026-08-10): partial — the hypothesis is confirmed and the defect is
+fixed.** Audited against `main` @ 93b74c4. Criterion 4 gated the rest, so take
+it first: the static finding was **real**, and `ensure_capacity` now closes the
+ownership window before it opens.
+
+```rust
+let old_cap: usize = self.cap;
+self.cap = 0;                    // `drop` is gated on `cap > 0`
+
+unsafe {
+    let mut v: Vec<u8> = Vec::from_raw_parts(self.buf, self.pos, old_cap);
+    v.reserve(new_cap - self.pos);   // may unwind — `v` is now the sole owner
+    self.buf = v.as_mut_ptr();
+    self.cap = v.capacity();
+    core::mem::forget(v);
+}
+```
+
+Two `--lib` tests pin it: `reserve_unwinding_leaves_exactly_one_owner` and
+`capacity_overflow_panics_before_the_ownership_window`. The first requests
+`isize::MAX + 1` specifically so the *capacity check* raises a catchable panic
+from inside the window — a merely huge request goes to the allocator, which
+aborts rather than unwinds, and an abort never reaches `drop` at all. That
+distinction is recorded in the test comment and is easy to get wrong on a
+re-write.
+
+Both sanitizer legs cover these, satisfying criterion 4's "under both Miri and
+ASan": `cargo miri test --no-default-features --features std --lib -- --skip
+simd::` (ci.yml) and the AddressSanitizer `--lib` job (sanitizers.yml).
+
+The separately-noted unchecked arithmetic is also fixed:
+`pos.checked_add(additional)` and `cap.checked_mul(2)`.
+
+| # | Criterion | State |
+| --- | --- | --- |
+| 1 | Owns a plain `Vec<u8>` | Not done — still `*mut u8` + `pos`/`cap`, manual `Drop`, manual `unsafe impl Send` |
+| 2 | `try_reserve`, no raw round-trip | Not done — arithmetic checked, round-trip remains |
+| 3 | Raw cursor in one audited helper with an unwind guard | Effectively done — the `cap = 0` idiom *is* that guard, though an idiom rather than a type |
+| 4 | Fault-injection under Miri + ASan | **Done** |
+| 5 | `pub(crate)` | **Done** |
+| 6 | Encode benchmark | N/A until 1–2 change the design |
+
+**What remains** is criteria 1–2: an ownership refactor of the encode hot path,
+whose own criterion 6 requires a benchmark proving what the safer design costs.
+That is a different risk profile from a live double free, and this item is no
+longer a soundness blocker for the [#481](https://github.com/developer0hye/libjpeg-turbo-rs/issues/481) umbrella.
 
 ## P4-139. Memory-Layout Arithmetic Is Decentralised and Uses Saturating/Unchecked Multiplication — **OPEN**
 
