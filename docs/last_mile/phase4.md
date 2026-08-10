@@ -4682,7 +4682,7 @@ is equally invisible until a user reports it.
 
 ## P4-144. Metadata Copies Are Input-Sized But Still Allocate Infallibly — **OPEN**
 
-**GitHub:** filed 2026-08-10 while closing
+**GitHub:** [#512](https://github.com/developer0hye/libjpeg-turbo-rs/issues/512) — filed 2026-08-10 while closing
 [P4-136](#p4-136-progressive-output-calls-set_len-on-uninitialized-vec-after-an-unchecked-size-multiplication--closed-2026-08-10);
 under the [#481](https://github.com/developer0hye/libjpeg-turbo-rs/issues/481) umbrella.
 
