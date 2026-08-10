@@ -4033,7 +4033,7 @@ the row until the kernel signatures change; it is no longer P0, because the
 property it was P0 for — "our safe API is sound" against this defect — now
 holds.
 
-## P4-136. Progressive Output Calls `set_len()` on Uninitialized `Vec` After an Unchecked Size Multiplication — **PARTIAL: memory-safety content closed; benchmark + fallible allocation outstanding**
+## P4-136. Progressive Output Calls `set_len()` on Uninitialized `Vec` After an Unchecked Size Multiplication — **CLOSED 2026-08-10**
 
 **GitHub:** [#475](https://github.com/developer0hye/libjpeg-turbo-rs/issues/475) — under the [#481](https://github.com/developer0hye/libjpeg-turbo-rs/issues/481) umbrella.
 
@@ -4086,6 +4086,9 @@ and then re-`set_len`. Audit all of them; they are the same shape.
    for large planes, so the current pattern may be buying nothing.
 4. Allocation is fallible where the size is input-derived — `try_reserve_exact`
    with a typed `AllocationFailed` error rather than an abort.
+5. A 32-bit-target regression test (`i686`) covering the geometry that overflows
+   `usize` there but not on 64-bit.
+6. Miri covers the progressive output path. It currently does not — see P4-141.
 
 **Status (2026-08-10): partial — criteria 1 and 2 met; the memory-safety content
 is closed.** Audited against `main` @ 93b74c4.
@@ -4107,33 +4110,77 @@ fn checked_plane_size(factors: &[usize], what: &'static str) -> Result<usize> {
 Both described defects — an uninitialised `Vec<u8>` reachable from safe code,
 and the wrapped-small allocation the IDCT then writes past — are gone.
 
-**What remains.**
-
-* Criterion 3: no `experiments/` entry records the zero-init comparison. Worth
-  noting the criterion's own hint held — zero-init was adopted with no observed
-  regression, consistent with `calloc`-backed zero pages being free for large
-  planes — but the measurement is unrecorded.
-* Criterion 4: `vec![0u8; size]` still aborts on allocation failure.
-* The three `set_len` sites in `src/encode/pipeline_impl/progressive_entropy.rs`
-  (`:65`, `:96`, `:145`) are a **different shape** and were not in scope of the
-  fix above: they write into `Vec` spare capacity through a raw cursor and then
-  `set_len(base + written)` where `written` comes from `offset_from`. That is a
-  correct use of `set_len`. The residual concern is the reserve arithmetic
-  feeding it — `total_blocks * 4 + restart_overhead + 64`, unchecked, with the
-  in-loop guards comparing against `reserve` rather than actual capacity. The
-  margins hold for legitimate geometry (`>= 68` covers the 64-byte per-block
-  worst case, `>= 84` the 80-byte restart case), so no reachable path was found;
-  it needs `total_blocks > usize::MAX / 4` to wrap. That is
-  [P4-139](#p4-139-memory-layout-arithmetic-is-decentralised-and-uses-saturatingunchecked-multiplication--open)'s
-  class of defect and belongs there.
-
 This item is no longer a soundness blocker for the [#481](https://github.com/developer0hye/libjpeg-turbo-rs/issues/481) umbrella.
-5. A 32-bit-target regression test (`i686`) covering the geometry that overflows
-   `usize` there but not on 64-bit.
-6. Miri covers the progressive output path. It currently does not — see P4-141.
 
-**Why P0.** (2) is exploitable from a crafted header on its own, and (1) is a
-documented `unsafe` contract violation sitting in the crate's own code.
+**Status (2026-08-10): CLOSED — criteria 3–6 delivered.** The three `set_len`
+sites in `src/encode/pipeline_impl/progressive_entropy.rs` (`:65`, `:96`,
+`:145`) stay out of scope and move to
+[P4-139](#p4-139-memory-layout-arithmetic-is-decentralised-and-uses-saturatingunchecked-multiplication--open)
+as recorded below.
+
+* **Criterion 3 — met.** `experiments/progressive.tsv` records the zero-init
+  comparison (8K progressive fixture, best-of-7, `examples/p4136_prog_bench.rs`).
+  Two rows now: the original uninit-vs-zero-init pair, and this change's
+  calloc-vs-`try_reserve_exact` pair. **The originally recorded +4.7% zero-init
+  cost did not reproduce**: `main` measures 52.30 / 52.05 ms today, which is that
+  row's own *uninit* figure. Treat the +4.7% as unconfirmed — on this host
+  zero-init is free, exactly as the criterion's `calloc` hint predicted.
+* **Criterion 4 — met for the geometry-sized allocations; metadata copies split
+  out to [P4-144](#p4-144-metadata-copies-are-input-sized-but-still-allocate-infallibly--open).**
+  Every allocation in `src/api/progressive_output.rs` whose size comes from
+  *header geometry* goes through `try_filled_vec`, `try_reserved_vec` or
+  `try_copy_of`, which use `try_reserve_exact` and report refusal as
+  `JpegError::AllocationFailed { what, bytes }` instead of aborting the process.
+
+  That boundary is the point of the item, not a convenience: geometry-sized
+  allocations are **amplifying** — a 300-byte SOF can demand 8 GiB — whereas the
+  metadata copies (`icc::reassemble_icc_profile`, the `saved_markers` / `xmp` /
+  `exif` clones) are bounded by an input the caller already holds in memory.
+  Making those fallible means threading `Result` through
+  `reassemble_icc_profile`'s 11 call sites and `Image` construction in *both*
+  decoders, which is a different change from this item's title; P4-144 owns it.
+  Found by the codex review of this fix.
+
+  The geometry set covers the six plane/output sites the item names plus three
+  the original scope missed:
+  * `coeff_bufs` and `ac_max_k_bufs`, whose `blocks_x * blocks_y` was *also* an
+    unchecked product, and which at 128 bytes per block are the largest buffers
+    this decoder holds;
+  * `assemble_grayscale`'s output raster, which was
+    `Vec::with_capacity(out_width * out_height)` — unchecked *and* infallible.
+    Found by the codex review of the first version of this fix, which correctly
+    refused the "every allocation is fallible" claim while one was not.
+
+  Measured neutral (52.24 / 52.23 ms). The verification cost one CI change:
+  ASan aborts an unservable request with `allocation-size-too-big` before
+  `try_reserve_exact` can return, so `sanitizers.yml` now sets
+  `ASAN_OPTIONS=allocator_may_return_null=1` — which makes ASan's allocator
+  behave like a real one. This does not weaken the job: an *infallible*
+  allocation handed a null still aborts through `handle_alloc_error`.
+  Reproduced both ways locally (SIGABRT without the option, 7/7 with it).
+* **Criterion 5 — met.** `thirty_two_bit_geometry_overflow_is_rejected` and
+  `plane_size_overflow_is_rejected_on_every_pointer_width` pin the width-split.
+  The named target is `i686`, which this repo has no leg for; the coverage comes
+  from `armv7.yml` (a real 32-bit ISA, `--lib` under qemu with
+  `-C overflow-checks=on`) and `wasm.yml`'s `wasm32-wasip1` — both run `--lib`,
+  which is where these tests live. Only the 32-bit arm calls `try_filled_vec`,
+  because only there is the answer decided by arithmetic *before* any
+  allocation; the 64-bit arm stops at the arithmetic deliberately, since calling
+  through would request 8 GiB.
+* **Criterion 6 — met.** `progressive_output_path_is_miri_covered` decodes the
+  522-byte `blue_16x16_420_prog.jpg` (embedded via `include_bytes!`, so no
+  filesystem access is needed) scan by scan under `cargo miri test --lib`.
+  Measured at **4.8 s** inside the job's 25-minute budget. This is the criterion
+  P4-141 was pointed at: Miri ran `--lib` only, the progressive suites are
+  `tests/` integration targets, so the `set_len`-on-uninitialised-`Vec` pattern
+  survived a green Miri job. One sibling test is `#[cfg_attr(miri, ignore)]`:
+  Miri reports an unservable allocation as *resource exhaustion* and aborts the
+  interpreter rather than returning the null `try_reserve_exact` turns into
+  `Err`, so the refusal path is not observable there.
+
+**Why P0 (historical).** (2) was exploitable from a crafted header on its own,
+and (1) was a documented `unsafe` contract violation sitting in the crate's own
+code. Both were fixed by the criteria 1–2 work above.
 
 ## P4-137. C-ABI Raw-Pointer Exports Are Safe Rust Functions — **PARTIAL: handle borrow scoped (criterion 4); export `unsafe fn` conversion pending**
 
@@ -4383,7 +4430,19 @@ instance; this entry is the common cause.
   Saturation turns overflow into `usize::MAX` — precisely the wrong value to
   then bound a raw slice. It must be a typed error.
 - **Unchecked products.** `src/api/progressive_output.rs:257`
-  (`ci.comp_w * ci.blocks_y * block_size`) wraps in release.
+  (`ci.comp_w * ci.blocks_y * block_size`) wraps in release. **Fixed by P4-136**
+  (closed 2026-08-10) — every span in that file is now `checked_plane_size` +
+  `try_filled_vec`. Listed here because it is the shape, not because it is open.
+- **Inherited from P4-136:** the three `set_len` sites in
+  `src/encode/pipeline_impl/progressive_entropy.rs` (`:65`, `:96`, `:145`). The
+  `set_len` calls themselves are *correct* — they publish a span a raw cursor
+  already wrote, with `written` from `offset_from`. What belongs here is the
+  reserve arithmetic feeding them: `total_blocks * 4 + restart_overhead + 64`,
+  unchecked, with the in-loop guards comparing against the requested `reserve`
+  rather than actual capacity. The margins hold for legitimate geometry (`>= 68`
+  covers the 64-byte per-block worst case, `>= 84` the 80-byte restart case) and
+  no reachable path was found — it needs `total_blocks > usize::MAX / 4` to
+  wrap — so this is hardening, not a live defect.
 - **`ScalingFactor` is a public panic/overflow surface**
   (`src/common/types.rs:305-335`): `num` and `denom` are `pub`, and `new()`
   accepts `denom == 0`, so `block_size()` and `scale_dim()` defend with
@@ -4620,3 +4679,44 @@ into a hard error. Review caught it; no automated gate did.
 **Why it matters beyond P4-135.** It is a *coverage* defect, not a code defect:
 the tests are green on a build nobody ships. Any future change to a wasm `cfg`
 is equally invisible until a user reports it.
+
+## P4-144. Metadata Copies Are Input-Sized But Still Allocate Infallibly — **OPEN**
+
+**GitHub:** [#512](https://github.com/developer0hye/libjpeg-turbo-rs/issues/512) — filed 2026-08-10 while closing
+[P4-136](#p4-136-progressive-output-calls-set_len-on-uninitialized-vec-after-an-unchecked-size-multiplication--closed-2026-08-10);
+under the [#481](https://github.com/developer0hye/libjpeg-turbo-rs/issues/481) umbrella.
+
+**Motivation.** P4-136 made every *geometry-sized* allocation in the progressive
+decoder fallible, so a hostile SOF can no longer abort the process by asking for
+more memory than the machine has. The metadata path was deliberately left out of
+that change and is now the remaining infallible input-sized allocation on the
+decode path.
+
+**Confirmed instances.** In `src/api/progressive_output.rs`:
+`icc::reassemble_icc_profile(&self.metadata.icc_chunks)` (`:391`) and the
+`exif_data` / `xmp_data` / `iptc_data` / `saved_markers` / `comment` clones that
+build each `Image` (20 `.clone()` sites in the file). The same shape exists in
+the baseline decoder — `reassemble_icc_profile` alone has 11 call sites.
+
+**Why it is P2, not P0.** These allocations are *bounded by the input the caller
+already holds*: a 100 MB JPEG carries at most ~100 MB of ICC/XMP. They do not
+amplify. The geometry-sized allocations P4-136 fixed did — a 300-byte SOF can
+demand 8 GiB — which is why they came first. Extended XMP reassembly is the
+closest thing to an amplifier here (a multi-segment packet is reassembled into
+one buffer) and is the instance to measure first.
+
+**Acceptance criteria.**
+
+1. `icc::reassemble_icc_profile` and the Extended XMP reassembly path return
+   `Result`, allocating with `try_reserve_exact` and reporting
+   `JpegError::AllocationFailed`.
+2. `Image` construction in both the progressive and baseline decoders propagates
+   that error rather than cloning infallibly.
+3. A test proving refusal is recoverable, in the shape of P4-136's
+   `allocator_refusal_is_an_error_not_an_abort` — including its ASan caveat
+   (`ASAN_OPTIONS=allocator_may_return_null=1`, already set in
+   `sanitizers.yml`) and its Miri caveat (Miri aborts instead of returning
+   null, so the probe is `cfg_attr(miri, ignore)`).
+4. Record whether the `Result` threading is worth it for the non-amplifying
+   clones, or whether criterion 2 should stop at the reassembly buffers. Decide
+   it here; do not leave it implicit.

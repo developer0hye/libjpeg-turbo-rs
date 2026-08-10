@@ -88,6 +88,73 @@ fn checked_plane_size(factors: &[usize], what: &'static str) -> Result<usize> {
     Ok(total)
 }
 
+/// Allocate `len` copies of `value`, reporting allocator refusal as an error.
+///
+/// `vec![value; len]` aborts the process when the allocator refuses, so a
+/// header asking for more memory than the machine has becomes an
+/// uncatchable denial of service. Every size here is derived from the JPEG
+/// stream, so refusal has to be a recoverable [`JpegError`] like the other
+/// limits this decoder enforces (P4-136 criterion 4).
+///
+/// The byte count is checked separately from `try_reserve_exact` so that a
+/// `len` too large to *express* in bytes reports the geometry limit that
+/// caused it rather than being reported as a failed allocation the machine
+/// was never asked to perform. This is the 32-bit hazard: `blocks_x *
+/// blocks_y` fits `usize` on a 32-bit target while `* 128` for the
+/// coefficient buffers does not (P4-136 criterion 5).
+fn try_filled_vec<T: Clone>(len: usize, value: T, what: &'static str) -> Result<Vec<T>> {
+    let elem_size: usize = core::mem::size_of::<T>();
+    let bytes: usize = len
+        .checked_mul(elem_size)
+        .filter(|total| *total <= isize::MAX as usize)
+        .ok_or(JpegError::LimitExceeded {
+            what,
+            // Widen rather than saturate. This product is a *diagnostic*,
+            // never a span — but P4-139 is removing `saturating_*` from this
+            // crate's size arithmetic wholesale, and a saturating call sitting
+            // three lines from a real span computation is precisely what a
+            // grep-based gate cannot tell apart. `u128` cannot overflow for
+            // any `usize` times any element size.
+            actual: ((len as u128) * (elem_size as u128)).min(u64::MAX as u128) as u64,
+            limit: isize::MAX as u64,
+        })?;
+
+    let mut buf: Vec<T> = Vec::new();
+    buf.try_reserve_exact(len)
+        .map_err(|_| JpegError::AllocationFailed {
+            what,
+            bytes: bytes as u64,
+        })?;
+    // Capacity is already reserved, so this fills in place and cannot
+    // reallocate — the abort path `vec![]` would have taken is gone.
+    buf.resize(len, value);
+    Ok(buf)
+}
+
+/// Empty `Vec<u8>` with exactly `len` bytes reserved — the fallible
+/// counterpart to `Vec::with_capacity` for buffers filled by `extend_*`
+/// rather than by indexing. Same rationale as [`try_filled_vec`], without
+/// paying for a zero-fill the caller immediately overwrites.
+///
+/// `len` is bytes, so no element-size product can overflow here; callers
+/// still owe `checked_plane_size` on whatever geometry produced `len`.
+fn try_reserved_vec(len: usize, what: &'static str) -> Result<Vec<u8>> {
+    let mut buf: Vec<u8> = Vec::new();
+    buf.try_reserve_exact(len)
+        .map_err(|_| JpegError::AllocationFailed {
+            what,
+            bytes: len as u64,
+        })?;
+    Ok(buf)
+}
+
+/// Fallible copy of an input slice.
+fn try_copy_of(data: &[u8], what: &'static str) -> Result<Vec<u8>> {
+    let mut buf: Vec<u8> = try_reserved_vec(data.len(), what)?;
+    buf.extend_from_slice(data);
+    Ok(buf)
+}
+
 impl ProgressiveDecoder {
     /// Create from JPEG data. Returns error if not a progressive JPEG.
     /// Applies [`crate::common::types::DecodeLimits::default`]; use
@@ -176,20 +243,33 @@ impl ProgressiveDecoder {
             })
             .collect();
 
-        // Allocate coefficient buffers (zero-initialized for progressive accumulation)
+        // Allocate coefficient buffers (zero-initialized for progressive
+        // accumulation). `blocks_x * blocks_y` is header-derived, so both the
+        // product and the allocation itself are fallible: at 128 bytes per
+        // block this is the largest buffer the decoder holds.
         let coeff_bufs: Vec<Vec<[i16; 64]>> = comp_infos
             .iter()
-            .map(|ci| vec![[0i16; 64]; ci.blocks_x * ci.blocks_y])
-            .collect();
+            .map(|ci| {
+                let blocks: usize = checked_plane_size(
+                    &[ci.blocks_x, ci.blocks_y],
+                    "progressive coefficient buffer",
+                )?;
+                try_filled_vec(blocks, [0i16; 64], "progressive coefficient buffer")
+            })
+            .collect::<Result<Vec<Vec<[i16; 64]>>>>()?;
         let ac_max_k_bufs: Vec<Vec<u8>> = comp_infos
             .iter()
-            .map(|ci| vec![0u8; ci.blocks_x * ci.blocks_y])
-            .collect();
+            .map(|ci| {
+                let blocks: usize =
+                    checked_plane_size(&[ci.blocks_x, ci.blocks_y], "progressive AC-max buffer")?;
+                try_filled_vec(blocks, 0u8, "progressive AC-max buffer")
+            })
+            .collect::<Result<Vec<Vec<u8>>>>()?;
 
         let routines: SimdRoutines = simd::detect();
 
         Ok(Self {
-            raw_data: data.to_vec(),
+            raw_data: try_copy_of(data, "progressive input copy")?,
             metadata,
             routines,
             coeff_bufs,
@@ -284,7 +364,7 @@ impl ProgressiveDecoder {
                     &[ci.comp_w, ci.blocks_y, block_size],
                     "progressive component plane",
                 )?;
-                Ok(vec![0u8; size])
+                try_filled_vec(size, 0u8, "progressive component plane")
             })
             .collect::<Result<Vec<Vec<u8>>>>()?;
 
@@ -618,7 +698,11 @@ impl ProgressiveDecoder {
         exif_data: Option<Vec<u8>>,
     ) -> Result<Image> {
         let comp_w: usize = self.comp_infos[0].comp_w;
-        let mut data: Vec<u8> = Vec::with_capacity(out_width * out_height);
+        let data_size: usize = checked_plane_size(
+            &[out_width, out_height],
+            "progressive grayscale output image",
+        )?;
+        let mut data: Vec<u8> = try_reserved_vec(data_size, "progressive grayscale output image")?;
         for y in 0..out_height {
             data.extend_from_slice(&component_planes[0][y * comp_w..y * comp_w + out_width]);
         }
@@ -723,7 +807,7 @@ impl ProgressiveDecoder {
             // 4:4:4: no upsampling needed
             let data_size: usize =
                 checked_plane_size(&[out_width, out_height, bpp], "progressive output image")?;
-            let mut data: Vec<u8> = vec![0u8; data_size];
+            let mut data: Vec<u8> = try_filled_vec(data_size, 0u8, "progressive output image")?;
             for y in 0..out_height {
                 self.ycbcr_to_rgb_row(
                     &y_plane[y * y_width..],
@@ -754,8 +838,10 @@ impl ProgressiveDecoder {
                 &[full_width, full_height],
                 "progressive upsampled chroma plane",
             )?;
-            let mut cb_full: Vec<u8> = vec![0u8; alloc_size];
-            let mut cr_full: Vec<u8> = vec![0u8; alloc_size];
+            let mut cb_full: Vec<u8> =
+                try_filled_vec(alloc_size, 0u8, "progressive upsampled chroma plane")?;
+            let mut cr_full: Vec<u8> =
+                try_filled_vec(alloc_size, 0u8, "progressive upsampled chroma plane")?;
 
             if h_factor == 2 && v_factor == 1 {
                 for row in 0..cb_h {
@@ -825,7 +911,7 @@ impl ProgressiveDecoder {
 
             let data_size: usize =
                 checked_plane_size(&[out_width, out_height, bpp], "progressive output image")?;
-            let mut data: Vec<u8> = vec![0u8; data_size];
+            let mut data: Vec<u8> = try_filled_vec(data_size, 0u8, "progressive output image")?;
             for y in 0..out_height {
                 self.ycbcr_to_rgb_row(
                     &y_plane[y * y_width..],
@@ -873,7 +959,7 @@ impl ProgressiveDecoder {
             &[out_width, out_height, bpp],
             "progressive CMYK output image",
         )?;
-        let mut data: Vec<u8> = vec![0u8; data_size];
+        let mut data: Vec<u8> = try_filled_vec(data_size, 0u8, "progressive CMYK output image")?;
 
         for y in 0..out_height {
             for x in 0..out_width {
@@ -1016,5 +1102,201 @@ impl ProgressiveDecoder {
         if written < cap && cap <= output.len() {
             output[written..cap].fill(0);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    /// Smallest progressive fixture in the tree (522 bytes, 4:2:0). Embedded
+    /// rather than read at runtime so the test needs no filesystem access —
+    /// Miri only reaches files with `-Zmiri-disable-isolation`, and a test
+    /// that silently depends on a CI flag is one refactor away from being
+    /// skipped without anyone noticing.
+    const PROGRESSIVE_16X16_420: &[u8] =
+        include_bytes!("../../tests/fixtures/blue_16x16_420_prog.jpg");
+
+    /// P4-136 criterion 6: put the progressive output path under Miri.
+    ///
+    /// CI runs `cargo miri test --lib` (`ci.yml`), so a unit test *in this
+    /// module* is what gets Miri onto this code — the `tests/` progressive
+    /// suites are integration targets Miri never builds. That gap is why the
+    /// `set_len`-on-uninitialised-`Vec` pattern this item removed survived a
+    /// green Miri job.
+    ///
+    /// Decode only, from the smallest progressive fixture available: Miri
+    /// interprets every operation, so anything this test does that is not the
+    /// path under audit is paid for at interpreter speed. 16x16 4:2:0 still
+    /// walks all of it — multi-scan coefficient accumulation, IDCT into the
+    /// plane buffers, chroma upsampling (4:2:0 makes `full_width`/`full_height`
+    /// differ from the output geometry), and colour conversion.
+    #[test]
+    fn progressive_output_path_is_miri_covered() {
+        const WIDTH: usize = 16;
+        const HEIGHT: usize = 16;
+
+        let mut decoder: ProgressiveDecoder =
+            ProgressiveDecoder::new(PROGRESSIVE_16X16_420).expect("progressive decode");
+        assert!(decoder.has_multiple_scans());
+
+        // Output after every scan, not just at the end: the per-scan
+        // reconstruction is what allocates and fills the plane buffers, and
+        // it is the path an early return would leave partly written.
+        let mut outputs: usize = 0;
+        loop {
+            let image: Image = decoder.output().expect("scan output");
+            assert_eq!(image.width, WIDTH);
+            assert_eq!(image.height, HEIGHT);
+            assert_eq!(image.data.len(), WIDTH * HEIGHT * 3);
+            outputs += 1;
+            if !decoder.consume_input().expect("consume scan") {
+                break;
+            }
+        }
+        assert!(outputs > 1, "expected a multi-scan walk, got {outputs}");
+
+        let final_image: Image = decoder.finish().expect("finish");
+        assert_eq!(final_image.data.len(), WIDTH * HEIGHT * 3);
+    }
+
+    /// P4-136 criterion 4: a size the allocator cannot serve must surface as
+    /// a recoverable error. Before this, `vec![0u8; n]` aborted the process,
+    /// so a header declaring more memory than the machine has was an
+    /// uncatchable denial of service.
+    ///
+    /// `isize::MAX` elements is 8 EiB — no allocator on any 64-bit target can
+    /// serve it, so this exercises the refusal path deterministically without
+    /// depending on how much memory the test host happens to have.
+    ///
+    /// 64-bit only, and not for convenience: at 32-bit width `isize::MAX` is
+    /// 2 GiB, which a host *may* actually serve. Asserting refusal there would
+    /// be flaky, and letting it succeed would make the armv7 and wasm legs
+    /// zero 2 GiB under emulation. Those legs cover the arithmetic rejection
+    /// paths below instead, which are deterministic at 32-bit width.
+    ///
+    /// Ignored under Miri: Miri's allocator reports an unservable request as
+    /// "resource exhaustion" and aborts the interpreter instead of returning
+    /// the null that `try_reserve_exact` turns into `Err`, so the refusal path
+    /// is not observable there. The rest of this module still runs under Miri
+    /// — see `progressive_output_path_is_miri_covered`.
+    #[cfg(target_pointer_width = "64")]
+    #[cfg_attr(
+        miri,
+        ignore = "Miri aborts on unservable allocations instead of returning null"
+    )]
+    #[test]
+    fn allocator_refusal_is_an_error_not_an_abort() {
+        let err: JpegError =
+            try_filled_vec(isize::MAX as usize, 0u8, "test plane").expect_err("must refuse");
+        assert!(
+            matches!(err, JpegError::AllocationFailed { what, bytes }
+                if what == "test plane" && bytes == isize::MAX as u64),
+            "expected AllocationFailed, got {err:?}"
+        );
+    }
+
+    /// A `len` whose *byte* count cannot be expressed is a geometry limit,
+    /// not a failed allocation: the machine was never asked to allocate.
+    /// Keeping them distinct is what makes the error actionable.
+    #[test]
+    fn byte_count_overflow_reports_the_geometry_limit() {
+        // 128 bytes per element, so half of `isize::MAX` elements already
+        // overflows the byte product on every pointer width.
+        let len: usize = (isize::MAX as usize) / 2 + 1;
+        let err: JpegError = try_filled_vec::<[i16; 64]>(len, [0i16; 64], "test coefficients")
+            .expect_err("must refuse");
+        assert!(
+            matches!(err, JpegError::LimitExceeded { what, .. } if what == "test coefficients"),
+            "expected LimitExceeded, got {err:?}"
+        );
+    }
+
+    /// A size the allocator *can* serve still yields a zero-filled buffer of
+    /// exactly the requested length — the fallible path must not change the
+    /// contract the IDCT relies on.
+    #[test]
+    fn successful_allocation_is_zero_filled_and_exact() {
+        let buf: Vec<u8> = try_filled_vec(1024, 0u8, "test plane").expect("1 KiB must succeed");
+        assert_eq!(buf.len(), 1024);
+        assert!(buf.iter().all(|&b| b == 0));
+
+        let blocks: Vec<[i16; 64]> =
+            try_filled_vec(16, [0i16; 64], "test coefficients").expect("2 KiB must succeed");
+        assert_eq!(blocks.len(), 16);
+        assert!(blocks.iter().all(|block| block.iter().all(|&c| c == 0)));
+    }
+
+    #[test]
+    fn copy_of_input_preserves_contents() {
+        let src: [u8; 5] = [0xFF, 0xD8, 0xFF, 0xC2, 0x00];
+        assert_eq!(
+            try_copy_of(&src, "test copy").expect("small copy must succeed"),
+            src
+        );
+        assert!(try_copy_of(&[], "test copy")
+            .expect("empty copy must succeed")
+            .is_empty());
+    }
+
+    /// P4-136 criterion 5: geometry that fits `usize` on a 64-bit target and
+    /// overflows it on a 32-bit one must be *rejected*, not wrapped.
+    ///
+    /// The shape is real: a 65535x65535 progressive frame yields per-component
+    /// block counts whose product times the 128-byte block stride exceeds
+    /// 32-bit `usize`. On 64-bit the same product is representable, so the
+    /// assertion has to be pointer-width aware to say anything true on both.
+    ///
+    /// Only the 32-bit arm calls `try_filled_vec`, and only because there the
+    /// answer is decided by arithmetic *before* any allocation is attempted.
+    /// The 64-bit arm stops at the arithmetic deliberately: calling it would
+    /// ask the allocator for 8 GiB, which is a memory hog natively and hangs
+    /// the Miri leg, and it would prove nothing this test is about.
+    #[test]
+    fn thirty_two_bit_geometry_overflow_is_rejected() {
+        // 8192 x 8192 blocks = 2^26 blocks; x 128 bytes/block = 2^33 bytes.
+        let blocks: usize =
+            checked_plane_size(&[8192, 8192], "test blocks").expect("block count fits both widths");
+        assert_eq!(blocks, 1 << 26);
+
+        let bytes: Option<usize> = blocks.checked_mul(core::mem::size_of::<[i16; 64]>());
+
+        #[cfg(target_pointer_width = "32")]
+        {
+            assert!(bytes.is_none(), "2^33 bytes must not fit a 32-bit usize");
+            assert!(
+                matches!(
+                    try_filled_vec::<[i16; 64]>(blocks, [0i16; 64], "test coefficients"),
+                    Err(JpegError::LimitExceeded { .. })
+                ),
+                "rejection must come from the arithmetic, before any allocation"
+            );
+        }
+
+        #[cfg(target_pointer_width = "64")]
+        assert_eq!(
+            bytes,
+            Some(1usize << 33),
+            "the same geometry is expressible at 64-bit width"
+        );
+    }
+
+    /// Width-independent companion to the above: a product that overflows
+    /// `usize` itself is rejected on *every* target.
+    #[test]
+    fn plane_size_overflow_is_rejected_on_every_pointer_width() {
+        let half: usize = (isize::MAX as usize) / 2 + 1;
+        assert!(matches!(
+            checked_plane_size(&[half, 4], "test plane"),
+            Err(JpegError::LimitExceeded { .. })
+        ));
+        // Exactly `isize::MAX` is the last accepted value; one more is not.
+        assert_eq!(
+            checked_plane_size(&[isize::MAX as usize, 1], "test plane").expect("boundary is legal"),
+            isize::MAX as usize
+        );
+        assert!(matches!(
+            checked_plane_size(&[isize::MAX as usize / 2 + 1, 2], "test plane"),
+            Err(JpegError::LimitExceeded { .. })
+        ));
     }
 }
