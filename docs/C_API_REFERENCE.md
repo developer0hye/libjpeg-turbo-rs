@@ -282,7 +282,7 @@
 
 | C Function | Description | Rust | Status |
 |---|---|---|---|
-| `jpeg_resync_to_restart(cinfo, desired)` | Resync to restart marker after error | Native strategy extension exists; classic default algorithm remains P4-97 | 🔶 |
+| `jpeg_resync_to_restart(cinfo, desired)` | Resync to restart marker after error | `jdmarker.c` decision table + `next_marker` scan-forward + `JWRN_MUST_RESYNC`/`JWRN_EXTRANEOUS_DATA` + `FALSE` suspension ported 2026-08-10, shared with the default source-manager callback. P4-97 stays PARTIAL for the suspending-source C cross-validation | 🔶 |
 
 ### ICC Profile
 

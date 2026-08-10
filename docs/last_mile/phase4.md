@@ -1914,7 +1914,7 @@ external palette through `jpeg_new_colormap` and prove re-quantized output.
 Unsupported state transitions fail visibly; no test may infer completion from
 only a one-component row length.
 
-## P4-97. `jpeg_resync_to_restart` Is an Unconditional Success No-Op — **OPEN**
+## P4-97. `jpeg_resync_to_restart` Is an Unconditional Success No-Op — **PARTIAL: C algorithm ported and shared; suspending-source C cross-validation pending**
 
 **Motivation.** Filed 2026-08-02 after the C-ABI encode test's null-only
 utility smoke was compared with upstream `jdmarker.c`. Native restart recovery
@@ -1932,6 +1932,55 @@ past, and future RST markers; non-RST markers; invalid-byte scan-forward;
 warning/state mutation; refill; and a FALSE suspension return. The exported
 function and default callback must share one C-exact implementation while the
 native strategy extension remains available separately.
+
+**Status (2026-08-10): partial — the algorithm is implemented and shared.**
+
+`jpeg_resync_to_restart` and the source manager's default callback (formerly
+`noop_resync_to_restart`, now `default_resync_to_restart`) both forward to one
+`resync_to_restart_impl`, so they cannot drift — the "one C-exact
+implementation" half of the criteria. It is a direct port of `jdmarker.c`'s
+decision table:
+
+| Found marker | Action | Effect |
+| --- | --- | --- |
+| `< M_SOF0` (0xC0) | 2 | scan forward via `next_marker` |
+| valid non-restart | 3 | leave `unread_marker` set |
+| `RST(desired+1)` / `RST(desired+2)` | 3 | leave `unread_marker` set |
+| `RST(desired-1)` / `RST(desired-2)` | 2 | scan forward |
+| desired restart, or > 2 away | 1 | clear `unread_marker`, resume |
+
+`next_marker` is ported too: it pulls bytes through `src->fill_input_buffer`,
+skips non-`FF` bytes, swallows `FF` padding runs, discards stuffed `FF 00`
+sequences, counts discarded bytes for `JWRN_EXTRANEOUS_DATA`, and returns
+`FALSE` on suspension. `JWRN_MUST_RESYNC` is emitted unconditionally before the
+decision, as upstream does.
+
+Warning codes came from a compile-time probe against the installed C headers,
+not from counting `JMESSAGE` lines in `jerror.h` — that file has
+`#ifdef`-duplicated entries, so a naive scan is off by one. `JWRN_MUST_RESYNC
+= 124`, `JWRN_EXTRANEOUS_DATA = 119`; the same probe reproduced this crate's
+existing `JERR_UNKNOWN_MARKER = 70` and `JERR_INPUT_EMPTY = 43`, which is what
+calibrates it.
+
+Proof: `cargo test -p libjpeg-turbo-rs-capi --test capi_resync_to_restart` — 10
+tests over the decision table, the warning, both suspension paths and NULL.
+**Falsification measured**: patching the implementation back to `return 1` fails
+6 of the 10. The remaining 4 are action-3 cases, where a constant `TRUE` that
+never touches `unread_marker` yields the same observable; they are kept to pin
+the other half of the table, and the test file records that they are *not*
+evidence against the old bug.
+
+**What remains** is the harness the criteria actually name: a real **suspending
+C source manager** cross-validated against stock libjpeg-turbo, exercising
+refill mid-scan and a `FALSE` return under genuine suspension. The current tests
+drive the algorithm directly and reach suspension only by the degenerate
+"no source manager attached" route.
+
+One known divergence for that harness to close: upstream keeps `discarded_bytes`
+in the private `cinfo->marker`, so the count survives a suspension mid-scan;
+this port threads it as a local, so a scan split by suspension under-reports the
+byte count in `JWRN_EXTRANEOUS_DATA`. The chosen action and the return value are
+unaffected.
 
 ## P4-98. Classic 12/16-Bit Decode Bypasses Lifecycle and Public Output Options — **OPEN**
 

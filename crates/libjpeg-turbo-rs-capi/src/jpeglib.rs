@@ -947,6 +947,23 @@ const JERR_TOO_LITTLE_DATA: c_int = 69;
 /// "Unsupported marker type 0x%02x"
 const JERR_UNKNOWN_MARKER: c_int = 70;
 
+// Warning codes used by the restart-resync path (P4-97). Values verified
+// against the installed C headers rather than counted out of `jerror.h` —
+// that file contains `#ifdef`-duplicated `JMESSAGE` entries, so a naive scan
+// is off by one. `JERR_UNKNOWN_MARKER`/`JERR_INPUT_EMPTY` above agree with the
+// same compile-time check, which is what calibrates these.
+/// "Corrupt JPEG data: found marker 0x%02x instead of RST%d"
+const JWRN_MUST_RESYNC: c_int = 124;
+/// "Corrupt JPEG data: %u extraneous bytes before marker 0x%02x"
+const JWRN_EXTRANEOUS_DATA: c_int = 119;
+
+// Marker codes from `jpegint.h`'s `JPEG_MARKER`, needed by the resync
+// decision table.
+/// First marker code that is a valid JPEG marker (anything below is bogus).
+const M_SOF0: c_int = 0xC0;
+const M_RST0: c_int = 0xD0;
+const M_RST7: c_int = 0xD7;
+
 /// The classic error a native codec failure corresponds to: an upstream
 /// `JERR_*` message code plus the single integer parameter its message
 /// substitutes, when it takes one.
@@ -1619,9 +1636,17 @@ unsafe extern "C" fn noop_skip_input_data(cinfo: *mut c_void, num_bytes: c_long)
         }
     }
 }
-unsafe extern "C" fn noop_resync_to_restart(_cinfo: *mut c_void, _desired: c_int) -> CBoolean {
-    // Always resync successfully (matches upstream's default).
-    1
+/// The source manager's default `resync_to_restart`.
+///
+/// P4-97 requires this and the exported [`jpeg_resync_to_restart`] to share
+/// **one** C-exact implementation; both forward to `resync_to_restart_impl`, so
+/// the callback installed here cannot drift from the symbol a C consumer calls
+/// directly. (It used to return a constant `TRUE`, i.e. "resync always
+/// succeeded", without inspecting `unread_marker` at all.)
+unsafe extern "C" fn default_resync_to_restart(cinfo: *mut c_void, desired: c_int) -> CBoolean {
+    // SAFETY: invoked by our own decode path with the `cinfo` that owns this
+    // source manager, so it satisfies `resync_to_restart_impl`'s contract.
+    unsafe { resync_to_restart_impl(cinfo, desired) }
 }
 unsafe extern "C" fn noop_term_source(_cinfo: *mut c_void) {}
 
@@ -1757,7 +1782,7 @@ fn install_source_mgr(
             init_source: Some(noop_init_source),
             fill_input_buffer: Some(noop_fill_input_buffer),
             skip_input_data: Some(noop_skip_input_data),
-            resync_to_restart: Some(noop_resync_to_restart),
+            resync_to_restart: Some(default_resync_to_restart),
             term_source: Some(noop_term_source),
         }));
     }
@@ -9373,14 +9398,246 @@ fn run_coefficient_writer_and_flush(
     }
 }
 
+/// Emit a warning through `cinfo->err`, publishing two integer parameters —
+/// upstream's `WARNMS2` macro (`jerror.h`).
+///
+/// `msg_parm` is a union whose integer branch is `int i[8]`; writing the two
+/// parameters as native-endian `c_int` at offsets 0 and 4 is what a C caller's
+/// `format_message` will read back.
+///
+/// # Safety
+/// `cinfo` must be NULL or point to a struct whose first pointer-sized field is
+/// the `err` slot (`j_common_ptr` layout).
+unsafe fn emit_warning2(cinfo: *mut c_void, msg_code: c_int, p0: c_int, p1: c_int) {
+    if cinfo.is_null() {
+        return;
+    }
+    // SAFETY: caller guarantees `j_common_ptr` layout.
+    unsafe {
+        let err_pp: *const *mut JpegErrorMgr = cinfo as *const *mut JpegErrorMgr;
+        let err_ptr: *mut JpegErrorMgr = err_pp.read();
+        if err_ptr.is_null() {
+            return;
+        }
+        let err: &mut JpegErrorMgr = &mut *err_ptr;
+        err.msg_code = msg_code;
+        let p0_bytes: [u8; 4] = p0.to_ne_bytes();
+        let p1_bytes: [u8; 4] = p1.to_ne_bytes();
+        err.msg_parm[0..4].copy_from_slice(&p0_bytes);
+        err.msg_parm[4..8].copy_from_slice(&p1_bytes);
+        if let Some(emit) = err.emit_message {
+            // -1 is upstream's warning level.
+            emit(cinfo, -1);
+        }
+    }
+}
+
+/// One byte from the source manager — upstream's `INPUT_BYTE`.
+///
+/// Returns `None` when `fill_input_buffer` reports suspension, which the
+/// callers translate into `FALSE`.
+///
+/// # Safety
+/// `c.src`, if non-NULL, must follow the libjpeg `jpeg_source_mgr` ABI, and its
+/// `next_input_byte` must be valid for `bytes_in_buffer` reads.
+unsafe fn resync_input_byte(c: &mut JpegDecompressPublic) -> Option<c_int> {
+    let src_ptr: *mut JpegSourceMgr = c.src;
+    if src_ptr.is_null() {
+        return None;
+    }
+    let cinfo_ptr: *mut c_void = c as *mut JpegDecompressPublic as *mut c_void;
+    // SAFETY: caller asserts the source manager is live and ABI-shaped.
+    let src: &mut JpegSourceMgr = unsafe { &mut *src_ptr };
+
+    if src.bytes_in_buffer == 0 {
+        let fill = src.fill_input_buffer?;
+        // SAFETY: caller-provided callback with the libjpeg prototype.
+        if unsafe { fill(cinfo_ptr) } == 0 {
+            // FALSE = suspend.
+            return None;
+        }
+        if src.bytes_in_buffer == 0 || src.next_input_byte.is_null() {
+            // A callback that returns TRUE without supplying bytes would spin
+            // forever; treat it as suspension rather than looping.
+            return None;
+        }
+    }
+    if src.next_input_byte.is_null() {
+        return None;
+    }
+    // SAFETY: `bytes_in_buffer > 0` and the pointer is non-NULL, so one read is
+    // inside the window the caller's ABI promises.
+    let byte: u8 = unsafe { *src.next_input_byte };
+    // SAFETY: advancing by one within that same window.
+    src.next_input_byte = unsafe { src.next_input_byte.add(1) };
+    src.bytes_in_buffer -= 1;
+    Some(byte as c_int)
+}
+
+/// Scan forward to the next marker — upstream's `next_marker` (`jdmarker.c`).
+///
+/// Sets `c.unread_marker` and returns `true` on success; returns `false` for
+/// suspension. Skips non-`FF` bytes, swallows `FF` padding runs, and discards
+/// stuffed-zero (`FF 00`) sequences, counting the discarded bytes so the
+/// `JWRN_EXTRANEOUS_DATA` warning reports the same figure C does.
+///
+/// `discarded` is threaded in by the caller rather than held in a marker
+/// struct: upstream keeps it in the private `cinfo->marker`, which this shim
+/// does not mirror. Within a single non-suspending call the two agree; across a
+/// suspension C would carry the running count forward and this does not, which
+/// affects only the number printed in the warning.
+///
+/// # Safety
+/// As `resync_input_byte`.
+unsafe fn resync_next_marker(c: &mut JpegDecompressPublic, discarded: &mut c_int) -> bool {
+    let cinfo_ptr: *mut c_void = c as *mut JpegDecompressPublic as *mut c_void;
+    loop {
+        // SAFETY: forwarded to `resync_input_byte`'s contract.
+        let mut byte: c_int = match unsafe { resync_input_byte(c) } {
+            Some(b) => b,
+            None => return false,
+        };
+        // Skip any non-FF bytes.
+        while byte != 0xFF {
+            *discarded = discarded.saturating_add(1);
+            // SAFETY: as above.
+            byte = match unsafe { resync_input_byte(c) } {
+                Some(b) => b,
+                None => return false,
+            };
+        }
+        // Swallow duplicate FF padding; extra FFs are legal and not counted.
+        loop {
+            // SAFETY: as above.
+            byte = match unsafe { resync_input_byte(c) } {
+                Some(b) => b,
+                None => return false,
+            };
+            if byte != 0xFF {
+                break;
+            }
+        }
+        if byte != 0 {
+            // A real marker.
+            if *discarded != 0 {
+                // SAFETY: `cinfo_ptr` is `c` itself, so the layout holds.
+                unsafe { emit_warning2(cinfo_ptr, JWRN_EXTRANEOUS_DATA, *discarded, byte) };
+                *discarded = 0;
+            }
+            c.unread_marker = byte;
+            return true;
+        }
+        // FF 00 is a stuffed zero inside entropy data: discard and retry.
+        *discarded = discarded.saturating_add(2);
+    }
+}
+
+/// The C default `resync_to_restart` algorithm (`jdmarker.c`), shared by the
+/// exported [`jpeg_resync_to_restart`] and by the source manager's installed
+/// default callback so the two cannot drift (P4-97).
+///
+/// Upstream's decision table, reproduced exactly:
+///
+/// * marker `< M_SOF0` — bogus data, scan forward (action 2)
+/// * valid non-restart marker — leave unread so the entropy decoder processes
+///   an empty segment (action 3)
+/// * `RST(desired+1)` / `RST(desired+2)` — one of the next two expected
+///   restarts, also action 3
+/// * `RST(desired-1)` / `RST(desired-2)` — a prior restart, scan forward
+/// * anything else (the desired restart, or one more than two away) — discard
+///   the marker and resume (action 1)
+///
+/// Returns `FALSE` only for suspension.
+///
+/// # Safety
+/// `cinfo` must be NULL or a live `JpegDecompressPublic` whose source manager
+/// follows the libjpeg ABI.
+unsafe fn resync_to_restart_impl(cinfo: *mut c_void, desired: c_int) -> CBoolean {
+    let c: &mut JpegDecompressPublic = match unsafe { cinfo_mut(cinfo) } {
+        Some(c) => c,
+        // Upstream would have dereferenced; there is nothing meaningful to do
+        // with a NULL cinfo, and claiming success would be the old lie.
+        None => return 0,
+    };
+
+    let mut marker: c_int = c.unread_marker;
+    let mut discarded: c_int = 0;
+
+    // Always put up a warning, exactly as upstream does before deciding.
+    // SAFETY: `cinfo` is non-NULL here and has `j_common_ptr` layout.
+    unsafe { emit_warning2(cinfo, JWRN_MUST_RESYNC, marker, desired) };
+
+    loop {
+        // Upstream writes the two action-3 cases as separate arms; they are
+        // merged here because clippy rejects identical blocks. The conditions
+        // stay disjoint — a non-restart marker is outside `M_RST0..=M_RST7`,
+        // while `RST(desired+1)`/`RST(desired+2)` are inside it — so the
+        // decision table is unchanged.
+        let action: u8 = if marker < M_SOF0 {
+            2 // invalid marker: certainly bogus data
+        } else if !(M_RST0..=M_RST7).contains(&marker)
+            || marker == M_RST0 + ((desired + 1) & 7)
+            || marker == M_RST0 + ((desired + 2) & 7)
+        {
+            // Either a valid non-restart marker (action 3 keeps us from
+            // overrunning the end of a scan), or one of the next two expected
+            // restarts (we missed `desired`, probably corrupted).
+            3
+        } else if marker == M_RST0 + ((desired - 1) & 7) || marker == M_RST0 + ((desired - 2) & 7) {
+            2 // a prior restart, so advance
+        } else {
+            1 // desired restart, or too far away to trust
+        };
+
+        match action {
+            1 => {
+                // Discard the marker and let the entropy decoder resume.
+                c.unread_marker = 0;
+                return 1;
+            }
+            2 => {
+                // SAFETY: `c` is live and its source manager is ABI-shaped.
+                if !unsafe { resync_next_marker(c, &mut discarded) } {
+                    return 0; // suspension
+                }
+                marker = c.unread_marker;
+            }
+            _ => {
+                // Return without advancing: the entropy decoder is forced to
+                // process an empty segment and will re-see this marker.
+                return 1;
+            }
+        }
+    }
+}
+
 /// `jpeg_resync_to_restart(cinfo, desired) -> boolean`.
 ///
-/// Default libjpeg behavior: always return TRUE so corrupted streams
-/// attempt to resume at the next restart marker. Matches the function
-/// libjpeg installs as the default `resync_to_restart` callback.
+/// The default `resync_to_restart` method a data source manager uses when it
+/// has no better recovery strategy. `read_restart_marker` calls it when it
+/// finds a marker other than the restart marker it expected;
+/// `cinfo->unread_marker` is the marker actually found and `desired` is the
+/// restart number (0..7) that was wanted.
+///
+/// Returns `FALSE` only if suspension is required.
+///
+/// This is upstream's algorithm from `jdmarker.c`, not a constant `TRUE`. It
+/// previously returned `TRUE` unconditionally while claiming to "match the
+/// function libjpeg installs as the default" — a consumer relying on it to
+/// recover a corrupt stream got a silent lie instead of recovery (P4-97).
+///
+/// # Safety
+///
+/// `cinfo` must be NULL, or a live `j_decompress_ptr` whose `src` follows the
+/// libjpeg `jpeg_source_mgr` ABI. This reads and writes `cinfo->unread_marker`,
+/// pulls bytes through `src->fill_input_buffer`, and emits warnings through
+/// `cinfo->err`, so all three must be valid for the duration of the call.
 #[no_mangle]
-pub extern "C" fn jpeg_resync_to_restart(_cinfo: *mut c_void, _desired: c_int) -> CBoolean {
-    crate::unwind_guard!(0, { 1 })
+pub unsafe extern "C" fn jpeg_resync_to_restart(cinfo: *mut c_void, desired: c_int) -> CBoolean {
+    crate::unwind_guard!(0, {
+        // SAFETY: the caller's obligation, restated above.
+        unsafe { resync_to_restart_impl(cinfo, desired) }
+    })
 }
 
 /// `jcopy_block_row(input_row, output_row, num_blocks)`.
