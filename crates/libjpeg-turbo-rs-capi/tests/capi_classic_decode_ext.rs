@@ -9,6 +9,7 @@
 //! `tj3Compress8` entry point so the test is self-contained and does
 //! not depend on external reference files.
 
+use libjpeg_turbo_rs_capi::jpeglib::JpegDecompressPublic;
 use std::ffi::{c_int, c_void};
 use std::mem::MaybeUninit;
 use std::os::raw::{c_uint, c_ulong};
@@ -124,14 +125,27 @@ fn build_fixture_jpeg(lib: &libloading::Library) -> (Vec<u8>, Vec<u8>, usize, us
 /// (must live as long as cinfo_ptr is used) and the primed pointers.
 unsafe fn setup_decompress(
     lib: &libloading::Library,
-) -> (Box<[u8; 4096]>, Box<[u8; 512]>, *mut c_void, *mut c_void) {
-    let cinfo: Box<[u8; 4096]> = Box::new([0u8; 4096]);
+) -> (
+    Box<JpegDecompressPublic>,
+    Box<[u8; 512]>,
+    *mut c_void,
+    *mut c_void,
+) {
+    // P4-110: a `[u8; N]` is align-1, so casting it to a `j_decompress_ptr`
+    // was undefined however large it was; and the shim now rejects a declared
+    // size that is not exactly the struct's. Boxing the mirrored struct fixes
+    // both.
+    // SAFETY: `JpegDecompressPublic` is `#[repr(C)]` plain data — pointers,
+    // integers and floats — for which all-zero is a valid bit pattern, which
+    // is also the state `jpeg_CreateDecompress` expects to overwrite.
+    let cinfo: Box<JpegDecompressPublic> = Box::new(unsafe { std::mem::zeroed() });
     let err: Box<[u8; 512]> = Box::new([0u8; 512]);
-    let cinfo_ptr: *mut c_void = Box::leak(cinfo).as_mut_ptr() as *mut c_void;
+    let cinfo_ptr: *mut c_void = Box::leak(cinfo) as *mut JpegDecompressPublic as *mut c_void;
     let err_ptr: *mut c_void = Box::leak(err).as_mut_ptr() as *mut c_void;
     // Re-box via from_raw to get round trip; tests use explicit Box-leak
     // so we can control lifetime.
-    let cinfo_box: Box<[u8; 4096]> = unsafe { Box::from_raw(cinfo_ptr as *mut [u8; 4096]) };
+    let cinfo_box: Box<JpegDecompressPublic> =
+        unsafe { Box::from_raw(cinfo_ptr as *mut JpegDecompressPublic) };
     let err_box: Box<[u8; 512]> = unsafe { Box::from_raw(err_ptr as *mut [u8; 512]) };
     let jpeg_std_error: libloading::Symbol<unsafe extern "C" fn(*mut c_void) -> *mut c_void> =
         unsafe { lib.get(b"jpeg_std_error") }.expect("jpeg_std_error");
@@ -143,7 +157,7 @@ unsafe fn setup_decompress(
     let jpeg_create_decompress: libloading::Symbol<
         unsafe extern "C" fn(*mut c_void, c_int, usize),
     > = unsafe { lib.get(b"jpeg_CreateDecompress") }.expect("jpeg_CreateDecompress");
-    unsafe { jpeg_create_decompress(cinfo_ptr, 80, 4096) };
+    unsafe { jpeg_create_decompress(cinfo_ptr, 80, std::mem::size_of::<JpegDecompressPublic>()) };
     (cinfo_box, err_box, cinfo_ptr, err_ptr)
 }
 

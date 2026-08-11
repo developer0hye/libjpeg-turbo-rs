@@ -261,6 +261,23 @@ jobs:
         env:
           MIRIFLAGS: -Zmiri-disable-isolation
         timeout-minutes: 25
+      # P4-110: the create guards are a memory-safety fix whose claim is
+      # "no reference is ever formed over memory the caller did not
+      # allocate". Only Miri can check that — the suite allocates exactly
+      # the declared size, so an oversized borrow is a hard error rather
+      # than an accident that happens to land inside a canary. The two
+      # tests that spawn a process (C oracle, abort-in-child) carry
+      # `cfg_attr(miri, ignore)`.
+      #
+      # Its own `env`/`timeout-minutes`: a step's settings belong to the step
+      # above them in YAML, so appending a bare `run` here would have silently
+      # taken both from the library run.
+      - run: >
+          cargo miri test -p libjpeg-turbo-rs-capi
+          --test capi_create_abi_guards
+        env:
+          MIRIFLAGS: -Zmiri-disable-isolation
+        timeout-minutes: 25
 
   test-lib:
     name: Unit Tests
@@ -396,6 +413,18 @@ jobs:
       # against is the same source tree the citations in those tests quote,
       # not whatever libjpeg the runner image ships. This step therefore has to
       # follow that build.
+      # P4-110's create-time ABI guards, the last P0. The suite compares the
+      # shim's whole (code, parameters, canary, preserved-fields) behaviour
+      # against `examples/create_abi_guards_oracle.c` linked to the pinned
+      # reference built above, so the prefix is what makes the comparison
+      # mandatory rather than skippable.
+      - name: Classic C-ABI create guards (P4-110)
+        run: >
+          cargo test -p libjpeg-turbo-rs-capi
+          --test capi_create_abi_guards -- --nocapture
+        env:
+          LIBJPEG_TURBO_PREFIX: /tmp/ljt8/prefix
+
       - name: Classic C-ABI state transitions (P4-104)
         run: >
           cargo test -p libjpeg-turbo-rs-capi

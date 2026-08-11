@@ -19,6 +19,8 @@
 //! `libjpeg_turbo_rs::raw_data_12::{compress,decompress}_raw_12`
 //! turns the round-trip GREEN.
 
+use libjpeg_turbo_rs_capi::jpeglib::JpegCompressPublic;
+use libjpeg_turbo_rs_capi::jpeglib::JpegDecompressPublic;
 use std::ffi::{c_int, c_void};
 use std::mem::MaybeUninit;
 use std::os::raw::c_ulong;
@@ -155,8 +157,7 @@ unsafe fn encode_12bit_4_2_0_via_capi(
         .get(b"jpeg_destroy_compress")
         .expect("jpeg_destroy_compress");
 
-    const CINFO_BYTES: usize = 4096;
-    let mut cinfo_buf: MaybeUninit<[u8; CINFO_BYTES]> = MaybeUninit::zeroed();
+    let mut cinfo_buf: MaybeUninit<JpegDecompressPublic> = MaybeUninit::zeroed();
     let cinfo_ptr: *mut c_void = cinfo_buf.as_mut_ptr() as *mut c_void;
 
     const ERR_BYTES: usize = 512;
@@ -167,7 +168,11 @@ unsafe fn encode_12bit_4_2_0_via_capi(
     assert_eq!(err_ret, err_ptr, "jpeg_std_error must return its argument");
     (cinfo_ptr as *mut *mut c_void).write(err_ptr);
 
-    jpeg_create_compress(cinfo_ptr, 80 /* JPEG_LIB_VERSION */, CINFO_BYTES);
+    jpeg_create_compress(
+        cinfo_ptr,
+        80, /* JPEG_LIB_VERSION */
+        std::mem::size_of::<JpegCompressPublic>(),
+    );
 
     let mut out_ptr: *mut u8 = std::ptr::null_mut();
     let mut out_size: c_ulong = 0;
@@ -293,8 +298,7 @@ unsafe fn decode_12bit_via_capi(
         .get(b"jpeg_destroy_decompress")
         .expect("jpeg_destroy_decompress");
 
-    const CINFO_BYTES: usize = 4096;
-    let mut cinfo_buf: MaybeUninit<[u8; CINFO_BYTES]> = MaybeUninit::zeroed();
+    let mut cinfo_buf: MaybeUninit<JpegDecompressPublic> = MaybeUninit::zeroed();
     let cinfo_ptr: *mut c_void = cinfo_buf.as_mut_ptr() as *mut c_void;
 
     const ERR_BYTES: usize = 512;
@@ -305,7 +309,7 @@ unsafe fn decode_12bit_via_capi(
     assert_eq!(err_ret, err_ptr, "jpeg_std_error must return its argument");
     (cinfo_ptr as *mut *mut c_void).write(err_ptr);
 
-    jpeg_create_decompress(cinfo_ptr, 80, CINFO_BYTES);
+    jpeg_create_decompress(cinfo_ptr, 80, std::mem::size_of::<JpegDecompressPublic>());
     jpeg_mem_src(cinfo_ptr, jpeg_bytes.as_ptr(), jpeg_bytes.len() as c_ulong);
 
     let rc: c_int = jpeg_read_header(cinfo_ptr, 1);
@@ -644,8 +648,7 @@ fn jpeg12_read_raw_data_reuse_clears_cache() {
             .get(b"jpeg_destroy_decompress")
             .expect("jpeg_destroy_decompress");
 
-        const CINFO_BYTES: usize = 4096;
-        let mut cinfo_buf: MaybeUninit<[u8; CINFO_BYTES]> = MaybeUninit::zeroed();
+        let mut cinfo_buf: MaybeUninit<JpegDecompressPublic> = MaybeUninit::zeroed();
         let cinfo_ptr: *mut c_void = cinfo_buf.as_mut_ptr() as *mut c_void;
 
         const ERR_BYTES: usize = 512;
@@ -655,7 +658,7 @@ fn jpeg12_read_raw_data_reuse_clears_cache() {
         (cinfo_ptr as *mut *mut c_void).write(err_ptr);
 
         // Single create — both decodes share this cinfo.
-        jpeg_create_decompress(cinfo_ptr, 80, CINFO_BYTES);
+        jpeg_create_decompress(cinfo_ptr, 80, std::mem::size_of::<JpegDecompressPublic>());
 
         let decode_into_y_plane = |jpeg: &[u8]| -> Vec<i16> {
             jpeg_mem_src(cinfo_ptr, jpeg.as_ptr(), jpeg.len() as c_ulong);

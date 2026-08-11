@@ -10,6 +10,7 @@
 //! `tj3Compress8` entry point so this test stays self-contained (no
 //! external fixture files needed).
 
+use libjpeg_turbo_rs_capi::jpeglib::JpegDecompressPublic;
 use std::ffi::{c_char, c_int, c_void, CString};
 use std::mem::MaybeUninit;
 use std::os::raw::c_ulong;
@@ -133,15 +134,7 @@ fn jpeg_lib_decode_roundtrip_matches_rust_native() {
     let (jpeg, original_rgb, w, h_px): (Vec<u8>, Vec<u8>, usize, usize) = build_fixture_jpeg(&lib);
 
     unsafe {
-        // --------------------------------------------------------------
-        // The libjpeg-style API is allocated by the caller, so we reserve
-        // a sufficiently large opaque byte buffer and initialise its first
-        // couple of words through the public entry points. The struct has
-        // `err: *mut jpeg_error_mgr` as the very first field, which the
-        // application must set before calling `jpeg_create_decompress`.
-        // --------------------------------------------------------------
-        const CINFO_BYTES: usize = 4096;
-        let mut cinfo: MaybeUninit<[u8; CINFO_BYTES]> = MaybeUninit::zeroed();
+        let mut cinfo: MaybeUninit<JpegDecompressPublic> = MaybeUninit::zeroed();
         let cinfo_ptr: *mut c_void = cinfo.as_mut_ptr() as *mut c_void;
 
         const ERR_BYTES: usize = 512;
@@ -171,7 +164,11 @@ fn jpeg_lib_decode_roundtrip_matches_rust_native() {
             .expect("jpeg_CreateDecompress");
         // JPEG_LIB_VERSION constant used by libjpeg-turbo 3.x.
         let jpeg_lib_version: c_int = 80;
-        jpeg_create_decompress(cinfo_ptr, jpeg_lib_version, CINFO_BYTES);
+        jpeg_create_decompress(
+            cinfo_ptr,
+            jpeg_lib_version,
+            std::mem::size_of::<JpegDecompressPublic>(),
+        );
 
         // `jpeg_mem_src(cinfo, buf, size)` points the decoder at an
         // in-memory JPEG datastream.
@@ -311,8 +308,7 @@ fn jpeg_consume_input_loop_terminates_after_header_parsed() {
     let (jpeg, _src, _w, _h_px): (Vec<u8>, Vec<u8>, usize, usize) = build_fixture_jpeg(&lib);
 
     unsafe {
-        const CINFO_BYTES: usize = 4096;
-        let mut cinfo: MaybeUninit<[u8; CINFO_BYTES]> = MaybeUninit::zeroed();
+        let mut cinfo: MaybeUninit<JpegDecompressPublic> = MaybeUninit::zeroed();
         let cinfo_ptr: *mut c_void = cinfo.as_mut_ptr() as *mut c_void;
 
         const ERR_BYTES: usize = 512;
@@ -329,7 +325,7 @@ fn jpeg_consume_input_loop_terminates_after_header_parsed() {
         > = lib
             .get(b"jpeg_CreateDecompress")
             .expect("jpeg_CreateDecompress");
-        jpeg_create_decompress(cinfo_ptr, 80, CINFO_BYTES);
+        jpeg_create_decompress(cinfo_ptr, 80, std::mem::size_of::<JpegDecompressPublic>());
 
         let jpeg_mem_src: libloading::Symbol<
             unsafe extern "C" fn(*mut c_void, *const u8, c_ulong),

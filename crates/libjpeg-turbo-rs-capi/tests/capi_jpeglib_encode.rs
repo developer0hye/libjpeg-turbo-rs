@@ -8,6 +8,7 @@
 #[path = "../../../tests/helpers/mod.rs"]
 mod helpers;
 
+use libjpeg_turbo_rs_capi::jpeglib::JpegCompressPublic;
 use std::ffi::{c_int, c_uint, c_void};
 use std::mem::MaybeUninit;
 use std::os::raw::c_ulong;
@@ -89,9 +90,8 @@ fn classic_scanline_encode(
     case: ClassicEncodeCase,
 ) -> Vec<u8> {
     unsafe {
-        const CINFO_BYTES: usize = 4096;
         const ERR_BYTES: usize = 512;
-        let mut cinfo: MaybeUninit<[u8; CINFO_BYTES]> = MaybeUninit::zeroed();
+        let mut cinfo: MaybeUninit<JpegCompressPublic> = MaybeUninit::zeroed();
         let cinfo_ptr: *mut c_void = cinfo.as_mut_ptr() as *mut c_void;
         let mut err: MaybeUninit<[u8; ERR_BYTES]> = MaybeUninit::zeroed();
         let err_ptr: *mut c_void = err.as_mut_ptr() as *mut c_void;
@@ -106,7 +106,7 @@ fn classic_scanline_encode(
         > = lib
             .get(b"jpeg_CreateCompress")
             .expect("jpeg_CreateCompress");
-        jpeg_create_compress(cinfo_ptr, 80, CINFO_BYTES);
+        jpeg_create_compress(cinfo_ptr, 80, std::mem::size_of::<JpegCompressPublic>());
 
         let set_dims: libloading::Symbol<
             unsafe extern "C" fn(*mut c_void, u32, u32, c_int, c_int),
@@ -230,8 +230,7 @@ fn restart_marker_count(jpeg: &[u8]) -> usize {
 fn c2_1_compress_create_setup_destroy() {
     let lib = unsafe { libloading::Library::new(cdylib_path()) }.expect("dlopen");
     unsafe {
-        const CINFO_BYTES: usize = 4096;
-        let mut cinfo: MaybeUninit<[u8; CINFO_BYTES]> = MaybeUninit::zeroed();
+        let mut cinfo: MaybeUninit<JpegCompressPublic> = MaybeUninit::zeroed();
         let cinfo_ptr: *mut c_void = cinfo.as_mut_ptr() as *mut c_void;
 
         const ERR_BYTES: usize = 512;
@@ -248,7 +247,7 @@ fn c2_1_compress_create_setup_destroy() {
         > = lib
             .get(b"jpeg_CreateCompress")
             .expect("jpeg_CreateCompress");
-        jpeg_create_compress(cinfo_ptr, 80, CINFO_BYTES);
+        jpeg_create_compress(cinfo_ptr, 80, std::mem::size_of::<JpegCompressPublic>());
 
         // Populate the 3 fields cjpeg sets before jpeg_set_defaults.
         let jpeg_capi_test_set_compress_dims: libloading::Symbol<
@@ -294,8 +293,7 @@ fn c2_1_compress_create_setup_destroy() {
 fn c2_1_calc_jpeg_dimensions_sets_public_compress_fields() {
     let lib = unsafe { libloading::Library::new(cdylib_path()) }.expect("dlopen");
     unsafe {
-        const CINFO_BYTES: usize = 4096;
-        let mut cinfo: MaybeUninit<[u8; CINFO_BYTES]> = MaybeUninit::zeroed();
+        let mut cinfo: MaybeUninit<JpegCompressPublic> = MaybeUninit::zeroed();
         let cinfo_ptr: *mut c_void = cinfo.as_mut_ptr() as *mut c_void;
 
         const ERR_BYTES: usize = 512;
@@ -312,7 +310,7 @@ fn c2_1_calc_jpeg_dimensions_sets_public_compress_fields() {
         > = lib
             .get(b"jpeg_CreateCompress")
             .expect("jpeg_CreateCompress");
-        jpeg_create_compress(cinfo_ptr, 80, CINFO_BYTES);
+        jpeg_create_compress(cinfo_ptr, 80, std::mem::size_of::<JpegCompressPublic>());
 
         let jpeg_capi_test_set_compress_dims: libloading::Symbol<
             unsafe extern "C" fn(*mut c_void, u32, u32, c_int, c_int),
@@ -358,8 +356,7 @@ fn c2_1_calc_jpeg_dimensions_sets_public_compress_fields() {
 fn c2_1_mem_dest_installs_cleanly() {
     let lib = unsafe { libloading::Library::new(cdylib_path()) }.expect("dlopen");
     unsafe {
-        const CINFO_BYTES: usize = 4096;
-        let mut cinfo: MaybeUninit<[u8; CINFO_BYTES]> = MaybeUninit::zeroed();
+        let mut cinfo: MaybeUninit<JpegCompressPublic> = MaybeUninit::zeroed();
         let cinfo_ptr: *mut c_void = cinfo.as_mut_ptr() as *mut c_void;
 
         const ERR_BYTES: usize = 512;
@@ -376,7 +373,7 @@ fn c2_1_mem_dest_installs_cleanly() {
         > = lib
             .get(b"jpeg_CreateCompress")
             .expect("jpeg_CreateCompress");
-        jpeg_create_compress(cinfo_ptr, 80, CINFO_BYTES);
+        jpeg_create_compress(cinfo_ptr, 80, std::mem::size_of::<JpegCompressPublic>());
 
         let jpeg_mem_dest: libloading::Symbol<
             unsafe extern "C" fn(*mut c_void, *mut *mut u8, *mut c_ulong),
@@ -416,8 +413,7 @@ fn c2_1_mem_dest_installs_cleanly() {
 fn c2_2_write_scanlines_roundtrip_pixel_matches_rust_native() {
     let lib = unsafe { libloading::Library::new(cdylib_path()) }.expect("dlopen");
     unsafe {
-        const CINFO_BYTES: usize = 4096;
-        let mut cinfo: MaybeUninit<[u8; CINFO_BYTES]> = MaybeUninit::zeroed();
+        let mut cinfo: MaybeUninit<JpegCompressPublic> = MaybeUninit::zeroed();
         let cinfo_ptr: *mut c_void = cinfo.as_mut_ptr() as *mut c_void;
 
         const ERR_BYTES: usize = 512;
@@ -434,7 +430,7 @@ fn c2_2_write_scanlines_roundtrip_pixel_matches_rust_native() {
         > = lib
             .get(b"jpeg_CreateCompress")
             .expect("jpeg_CreateCompress");
-        jpeg_create_compress(cinfo_ptr, 80, CINFO_BYTES);
+        jpeg_create_compress(cinfo_ptr, 80, std::mem::size_of::<JpegCompressPublic>());
 
         // Fill a 64x64 RGB gradient, identical to the decode-side fixture.
         let w: usize = 64;
@@ -583,8 +579,7 @@ fn c2_3_quality_scaling_matches_libjpeg_formula() {
 fn c2_3_simple_progression_emits_progressive_stream() {
     let lib = unsafe { libloading::Library::new(cdylib_path()) }.expect("dlopen");
     unsafe {
-        const CINFO_BYTES: usize = 4096;
-        let mut cinfo: MaybeUninit<[u8; CINFO_BYTES]> = MaybeUninit::zeroed();
+        let mut cinfo: MaybeUninit<JpegCompressPublic> = MaybeUninit::zeroed();
         let cinfo_ptr: *mut c_void = cinfo.as_mut_ptr() as *mut c_void;
         const ERR_BYTES: usize = 512;
         let mut err: MaybeUninit<[u8; ERR_BYTES]> = MaybeUninit::zeroed();
@@ -600,7 +595,7 @@ fn c2_3_simple_progression_emits_progressive_stream() {
         > = lib
             .get(b"jpeg_CreateCompress")
             .expect("jpeg_CreateCompress");
-        jpeg_create_compress(cinfo_ptr, 80, CINFO_BYTES);
+        jpeg_create_compress(cinfo_ptr, 80, std::mem::size_of::<JpegCompressPublic>());
 
         let w: usize = 32;
         let h_px: usize = 32;
@@ -959,8 +954,7 @@ fn c2_1_null_arguments_return_safely() {
 fn c2_4_write_marker_inserts_custom_segment_after_soi() {
     let lib = unsafe { libloading::Library::new(cdylib_path()) }.expect("dlopen");
     unsafe {
-        const CINFO_BYTES: usize = 4096;
-        let mut cinfo: MaybeUninit<[u8; CINFO_BYTES]> = MaybeUninit::zeroed();
+        let mut cinfo: MaybeUninit<JpegCompressPublic> = MaybeUninit::zeroed();
         let cinfo_ptr: *mut c_void = cinfo.as_mut_ptr() as *mut c_void;
         const ERR_BYTES: usize = 512;
         let mut err: MaybeUninit<[u8; ERR_BYTES]> = MaybeUninit::zeroed();
@@ -976,7 +970,7 @@ fn c2_4_write_marker_inserts_custom_segment_after_soi() {
         > = lib
             .get(b"jpeg_CreateCompress")
             .expect("jpeg_CreateCompress");
-        jpeg_create_compress(cinfo_ptr, 80, CINFO_BYTES);
+        jpeg_create_compress(cinfo_ptr, 80, std::mem::size_of::<JpegCompressPublic>());
 
         let w: usize = 16;
         let h_px: usize = 16;
@@ -1077,8 +1071,7 @@ fn c2_4_write_marker_inserts_custom_segment_after_soi() {
 fn c2_4_write_icc_profile_roundtrips_bytes() {
     let lib = unsafe { libloading::Library::new(cdylib_path()) }.expect("dlopen");
     unsafe {
-        const CINFO_BYTES: usize = 4096;
-        let mut cinfo: MaybeUninit<[u8; CINFO_BYTES]> = MaybeUninit::zeroed();
+        let mut cinfo: MaybeUninit<JpegCompressPublic> = MaybeUninit::zeroed();
         let cinfo_ptr: *mut c_void = cinfo.as_mut_ptr() as *mut c_void;
         const ERR_BYTES: usize = 512;
         let mut err: MaybeUninit<[u8; ERR_BYTES]> = MaybeUninit::zeroed();
@@ -1094,7 +1087,7 @@ fn c2_4_write_icc_profile_roundtrips_bytes() {
         > = lib
             .get(b"jpeg_CreateCompress")
             .expect("jpeg_CreateCompress");
-        jpeg_create_compress(cinfo_ptr, 80, CINFO_BYTES);
+        jpeg_create_compress(cinfo_ptr, 80, std::mem::size_of::<JpegCompressPublic>());
 
         let w: usize = 16;
         let h_px: usize = 16;
@@ -1252,8 +1245,7 @@ fn c2_5_high_precision_write_scanlines_null_guards() {
 fn c2_4_write_tables_emits_tables_only_datastream() {
     let lib = unsafe { libloading::Library::new(cdylib_path()) }.expect("dlopen");
     unsafe {
-        const CINFO_BYTES: usize = 4096;
-        let mut cinfo: MaybeUninit<[u8; CINFO_BYTES]> = MaybeUninit::zeroed();
+        let mut cinfo: MaybeUninit<JpegCompressPublic> = MaybeUninit::zeroed();
         let cinfo_ptr: *mut c_void = cinfo.as_mut_ptr() as *mut c_void;
         const ERR_BYTES: usize = 512;
         let mut err: MaybeUninit<[u8; ERR_BYTES]> = MaybeUninit::zeroed();
@@ -1269,7 +1261,7 @@ fn c2_4_write_tables_emits_tables_only_datastream() {
         > = lib
             .get(b"jpeg_CreateCompress")
             .expect("jpeg_CreateCompress");
-        jpeg_create_compress(cinfo_ptr, 80, CINFO_BYTES);
+        jpeg_create_compress(cinfo_ptr, 80, std::mem::size_of::<JpegCompressPublic>());
         // Minimum setup so set_quality has a valid struct.
         let jpeg_capi_test_set_compress_dims: libloading::Symbol<
             unsafe extern "C" fn(*mut c_void, u32, u32, c_int, c_int),
@@ -1329,13 +1321,26 @@ fn c2_4_write_tables_emits_tables_only_datastream() {
 fn sa2_6_stock_abi_cinfo_size_encode_pipeline_works() {
     let lib = unsafe { libloading::Library::new(cdylib_path()) }.expect("dlopen");
     unsafe {
-        // Exact libjpeg v80 LP64 sizeof — see jpeglib.rs offset assertions.
-        const CINFO_BYTES: usize = 584;
+        // The exact mirrored sizeof. This was the literal 584 (v8 LP64), which
+        // P4-110's guard would reject on any target where the struct is a
+        // different size — the guard requires equality, and the mirror is
+        // cross-checked against C by `abi_offsets.rs`.
+        const CINFO_BYTES: usize = std::mem::size_of::<JpegCompressPublic>();
         // Embed the cinfo in a larger buffer with red-zone bytes around
         // it so we can detect out-of-bounds writes from the shim.
+        //
+        // `REDZONE` is a multiple of the struct's alignment and the backing
+        // store is over-allocated by one alignment so the cinfo pointer can be
+        // aligned explicitly. A plain `vec![0u8; n]` guarantees only byte
+        // alignment, which would make every access through `cinfo_ptr`
+        // misaligned — undefined regardless of what the red-zone then shows.
         const REDZONE: usize = 32;
-        let mut backing: Vec<u8> = vec![0xAAu8; REDZONE * 2 + CINFO_BYTES];
-        let cinfo_ptr: *mut c_void = backing.as_mut_ptr().add(REDZONE) as *mut c_void;
+        let align: usize = std::mem::align_of::<JpegCompressPublic>();
+        assert_eq!(REDZONE % align, 0, "red-zone must preserve alignment");
+        let mut backing: Vec<u8> = vec![0xAAu8; REDZONE * 2 + CINFO_BYTES + align];
+        let pad: usize = align - (backing.as_ptr() as usize % align);
+        let pad: usize = if pad == align { 0 } else { pad };
+        let cinfo_ptr: *mut c_void = backing.as_mut_ptr().add(pad + REDZONE) as *mut c_void;
         // Zero just the cinfo region (mirrors the `memset` in jcapimin).
         std::ptr::write_bytes(cinfo_ptr as *mut u8, 0, CINFO_BYTES);
 
@@ -1423,18 +1428,21 @@ fn sa2_6_stock_abi_cinfo_size_encode_pipeline_works() {
             .expect("jpeg_destroy_compress");
         destroy_fn(cinfo_ptr);
 
-        // Verify the red-zone: bytes outside [REDZONE, REDZONE+CINFO_BYTES)
-        // must remain 0xAA — any corruption means the shim wrote past the
-        // canonical 584-byte envelope.
+        // Verify the red-zone: the bytes on either side of the struct must
+        // still be 0xAA. Offsets are relative to the *aligned* base, so every
+        // index carries `pad`; indexing from the allocation start would walk
+        // into the struct on any run where the allocator handed back an
+        // unaligned pointer, and quietly pass.
         for i in 0..REDZONE {
             assert_eq!(
-                backing[i], 0xAA,
+                backing[pad + i],
+                0xAA,
                 "red-zone byte {i} corrupted (shim wrote before cinfo)"
             );
             assert_eq!(
-                backing[REDZONE + CINFO_BYTES + i],
+                backing[pad + REDZONE + CINFO_BYTES + i],
                 0xAA,
-                "red-zone byte {i} corrupted (shim wrote past canonical 584-byte struct)"
+                "red-zone byte {i} corrupted (shim wrote past the declared struct)"
             );
         }
 

@@ -36,6 +36,11 @@ const EXPECTED: &[(&str, i32, &str)] = &[
     ),
     ("JERR_BAD_LENGTH", 12, "Bogus marker length"),
     (
+        "JERR_BAD_LIB_VERSION",
+        13,
+        "Wrong JPEG library version: library is %d, caller expects %d",
+    ),
+    (
         "JERR_BAD_PRECISION",
         16,
         "Unsupported JPEG data precision %d",
@@ -44,6 +49,11 @@ const EXPECTED: &[(&str, i32, &str)] = &[
         "JERR_BAD_STATE",
         21,
         "Improper call to JPEG library in state %d",
+    ),
+    (
+        "JERR_BAD_STRUCT_SIZE",
+        22,
+        "JPEG parameter struct mismatch: library thinks size is %u, caller expects %u",
     ),
     (
         "JERR_BUFFER_SIZE",
