@@ -422,6 +422,30 @@ jobs:
       # Named because this crate's tests are selected by name, and the whole
       # assertion is pointer identity — a suite that never runs proves nothing
       # about it.
+      # P4-147: the restart-marker cost ratio is `#[ignore]`d out of the
+      # default suite and run here **serially**. `cargo test` parallelises
+      # binaries and threads; a timing comparison under that is a coin flip,
+      # which is exactly how the old absolute bound produced a failure blaming
+      # a regression that had not happened.
+      #
+      # This covers `worker_b8_restart_bomb` only. Five absolute wall-clock
+      # assertions remain in the default suite —
+      # `worker_b8_huffman_bomb.rs:213`, `worker_b8_memory_bounds.rs:82,99`,
+      # `worker_b8_progressive_bomb.rs:188,234` — with the same contention
+      # failure mode. They are tracked as P4-152, not fixed here: P4-147 is
+      # scoped to the test that actually flaked, and each of the others needs
+      # its own answer to "what is the deterministic measure?".
+      - name: Restart-marker cost ratio, serial (P4-147)
+        run: >
+          cargo test --release --test worker_b8_restart_bomb --
+          --include-ignored --test-threads=1
+        # Sub-second once built. A generous cap that still fails promptly: the
+        # regression this guards is an `O(MCUs * RST)` scan over 65,536
+        # restarts, which does not slow the decode — it hangs it, and without a
+        # cap the ratio assertion is never reached and the runner sits until the
+        # job limit.
+        timeout-minutes: 15
+
       - name: TurboJPEG NOREALLOC ownership (P4-145)
         run: >
           cargo test -p libjpeg-turbo-rs-capi

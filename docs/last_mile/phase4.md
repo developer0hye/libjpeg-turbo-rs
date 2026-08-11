@@ -2778,7 +2778,7 @@ comparison and fails closed if any case skips or if `/dev/full` was not
 exercised. Before the fix the stack-buffer canary aborted inside `free()`,
 `mem_grow` produced a non-JPEG, and all three stdio error cases reported
 success. `cargo test --workspace --no-fail-fast`: 2455 passed, 0 failed,
-1 ignored (`restart_bomb_4096x4096`, release-only).
+1 ignored (`restart_markers_do_not_multiply_decode_cost`, release-only).
 
 One review finding was fixed structurally rather than locally: the destination
 callbacks originally re-derived `&mut CompressPrivate` from `cinfo->master`
@@ -3034,10 +3034,10 @@ from the source, e.g. S420 handle over an S444 source); and the P4-145 oracle
 gains a legacy-wrapper case so the comparison is against C rather than against
 this description.
 
-## P4-147. `worker_b8_restart_bomb` Asserts a Wall-Clock Bound and Flakes Under Parallel Load — **OPEN**
+## P4-147. `worker_b8_restart_bomb` Asserts a Wall-Clock Bound and Flakes Under Parallel Load — **CLOSED 2026-08-12**
 
 **Motivation.** Filed 2026-08-11 (issue #523) during the P4-104 work.
-`tests/worker_b8_restart_bomb.rs::restart_bomb_4096x4096_decodes_within_measured_bound`
+`tests/worker_b8_restart_bomb.rs::restart_bomb_4096x4096_decodes_within_measured_bound` (renamed to `restart_markers_do_not_multiply_decode_cost` when this closed)
 asserts `m.wall_clock.as_millis() < BOMB_WALL_CLOCK_MS`. It failed once during a
 full `cargo test --workspace --release` run with a parallel build competing for
 CPU, and passes 3/3 in isolation.
@@ -3057,6 +3057,128 @@ a deterministic measure — a restart-marker scan counter with an O(n) bound, or
 equivalent work-based assertion — and no wall-clock comparison remains in the
 default suite. Timing-based checks, if kept at all, move to `experiments/` or a
 serial-only harness.
+
+**Status (2026-08-12): closed.** `cargo test --release --test
+worker_b8_restart_bomb -- --include-ignored --test-threads=1` passes 5 tests, and
+the default parallel run reports the timing test as **ignored**.
+
+**The deterministic half lives in a unit test**, which is what the criterion
+above actually asks for. `decode::bitstream::tests::reset_consumes_exactly_the_marker_it_is_positioned_at`
+asserts the *mechanism*: on a well-formed stream `BitReader::reset()` consumes
+exactly the two marker bytes it is positioned at, scanning nothing, across 64
+consecutive intervals. That is what makes a 65 536-restart decode linear, and it
+cannot flake — it reads no clock.
+
+It asserts **examined bytes**, not just cursor movement, via a `#[cfg(test)]`
+counter in the scan loop. Review found why that distinction matters: a scan
+rewritten as `data.windows(2).enumerate().skip(pos)` walks the entire prefix
+and *then* advances exactly two bytes, so a cursor-only assertion passes while
+65 536 intervals become O(n²). Both regressions were injected and both fail:
+
+```
+rescan from position 0   interval 1: reset() consumed 0 bytes, not the 2 …
+walk the prefix first    reset() examined 4096 bytes across 64 intervals
+```
+
+4096 is 64² — the quadratic signature, in a test that runs in microseconds.
+
+The timing ratio below is now **supplemental evidence**, not the guard. It
+measures the consequence end-to-end, which is worth having, but a duration ratio
+calibrated on one machine can only ever be evidence — a point review made after
+the ratio had already been tightened from 10x to 1.5x, which is exactly the
+tension that says timing was the wrong instrument for the primary assertion.
+
+Two further things had to change about that ratio, and the first attempt only
+did one of them.
+
+**The assertion.** The absolute bound is gone; the test decodes the *same image
+twice* — once with RI=1, once with no restart markers — and asserts the ratio,
+which is what actually carries the complexity claim:
+
+- a loaded machine slows both halves together, so the ratio holds where an
+  absolute bound flakes;
+- an `O(MCUs * RST)` scan multiplies only the RI=1 half, by orders of magnitude.
+
+Each variant is decoded three times, **alternating** between them, and the
+minimum of each is taken: contention can only add time, so the fastest run is
+the closest available estimate of the work required. Alternating is not
+decoration — the first version ran every RI=1 decode and then every control
+decode, so a load spike during the first group inflated the numerator alone and
+the "ratio cancels load" argument did not hold. Review caught that.
+
+**Where it runs.** The criterion above says *no wall-clock comparison remains in
+the default suite*, and a ratio is still a wall-clock comparison. The test is
+therefore `#[ignore]`d out of the default run and executed by a named CI step
+with `--test-threads=1` — the "serial-only harness" this item's own options
+list. That is what makes the parallel-contention failure mode impossible rather
+than merely unlikely.
+
+Measured on darwin arm64 release, ten rounds of min-of-three: **min 0.988,
+median 0.997, max 1.007**. Restart parsing costs nothing measurable today, and
+the minimum-of-three makes the ratio tight enough to bound closely. The bound is
+**1.5** — the measured worst case plus ~50%.
+
+An earlier draft used 10x on flake-avoidance grounds. Review pointed out that
+this was a guess rather than a measurement and would have accepted a 5x
+restart-handling regression — *worse* than the absolute bound it replaced. The
+tolerance is now measured reality plus a small margin, as `CLAUDE.md` requires.
+
+Verified live rather than assumed: with the bound temporarily set to 0.5 the
+assertion fires with real numbers (`0.98x … 21.402083ms vs 21.796125ms`), so it
+compares measurements and not two zeros. A bound of 1.0 does *not* reliably
+fail, which is itself the finding — the two decodes are within noise of each
+other.
+
+**The fixtures are checked, not assumed.** A ratio near 1.0 proves nothing if
+the "control" also carries restart markers, so the control is asserted to have
+no DRI marker and zero `FF D0`..`FF D7` sequences, while the bomb must carry
+DRI=1 and >60 000 of them. Both decode to identical pixels — restarts are
+framing, not content — and both are compared byte-for-byte against stock
+`djpeg`, because two Rust-encoded streams checked with the Rust decoder cannot
+reveal a shared restart-marker bug.
+
+Ordering matters there too: the measured decodes run **first**. `measure()`
+reports a delta against the process high-water mark, so a content decode
+performed earlier would fold its transient peak into that mark and leave the
+RSS assertion measuring only what the later run adds — the per-RST allocation
+guard would stop guarding. Review caught that.
+
+**What this does not cover**, stated because the previous version implied
+otherwise: a regression that slows *both* paths equally leaves the ratio
+unchanged. General decode performance belongs in `experiments/`, not in a
+correctness suite.
+
+## P4-152. Five Absolute Wall-Clock Assertions Remain in the Parallel Default Suite — **OPEN**
+
+**Motivation.** Found 2026-08-12 (issue #534) while closing P4-147, which
+fixed exactly one of them. The same contention failure mode is still live at:
+
+| File | Line | Bound |
+| --- | --- | --- |
+| `tests/worker_b8_huffman_bomb.rs` | 213 | `BOMB_WALL_CLOCK_MS` |
+| `tests/worker_b8_memory_bounds.rs` | 82 | `SMALL_DECODE_WALL_CLOCK_MS` |
+| `tests/worker_b8_memory_bounds.rs` | 99 | `MEDIUM_PROG_DECODE_WALL_CLOCK_MS` |
+| `tests/worker_b8_progressive_bomb.rs` | 188 | `LIMITED_DECODE_WALL_CLOCK_MS` |
+| `tests/worker_b8_progressive_bomb.rs` | 234 | `UNLIMITED_PARSE_WALL_CLOCK_MS` |
+
+Each asserts an absolute millisecond bound while `cargo test` runs binaries and
+threads in parallel. P4-147's failure showed what that costs: a green-on-rerun
+failure whose message names a regression that did not happen, which burns a
+debugging session before anyone re-runs.
+
+**Why not fixed with P4-147.** That item is scoped to the test that actually
+flaked, and the fix was not mechanical — it needed a *control* to compare
+against (the same image without restart markers) before a ratio meant anything.
+Each of these needs its own answer to "what is the deterministic measure?", and
+the answer differs: a Huffman bomb has no natural control, while the
+memory-bounds cases may be better served by asserting the bound they actually
+care about (peak RSS) and dropping the clock entirely.
+
+**Acceptance criteria.** No absolute wall-clock comparison remains in the
+default parallel suite. Each site either (a) becomes a ratio against a control
+and moves to the serial CI step P4-147 added, (b) asserts a non-timing
+property that carries the same regression, or (c) is deleted with the reason
+recorded — a bound nothing can trip is not worth its flake risk.
 
 ## P4-148. Test Error-Manager Blobs Are Under-Aligned `[u8; N]` Buffers — **OPEN**
 

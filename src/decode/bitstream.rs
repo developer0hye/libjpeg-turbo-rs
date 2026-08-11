@@ -17,6 +17,15 @@ pub struct BitReader<'a> {
     /// checkpoint is unreliable and must be discarded, the window
     /// extended, and the work retried. Never set when `is_final`.
     starved: bool,
+    /// Bytes examined by `reset()`'s forward scan, cumulative.
+    ///
+    /// Test-only, and the point is complexity rather than performance:
+    /// restart handling must be O(1) per interval, so 65 536 restarts cost
+    /// 65 536 scans and not 65 536². Cursor movement alone cannot show that —
+    /// a scan that walks the whole prefix and *then* advances two bytes looks
+    /// identical from outside — so the loop counts what it touches (P4-147).
+    #[cfg(test)]
+    scan_bytes_examined: usize,
 }
 
 /// Resumable byte/bit cursor for windowed decoding (P4-58): captures
@@ -40,6 +49,8 @@ impl<'a> BitReader<'a> {
             bits_left: 0,
             is_final: true,
             starved: false,
+            #[cfg(test)]
+            scan_bytes_examined: 0,
         }
     }
 
@@ -55,6 +66,8 @@ impl<'a> BitReader<'a> {
             bits_left: state.bits_left,
             is_final,
             starved: false,
+            #[cfg(test)]
+            scan_bytes_examined: 0,
         }
     }
 
@@ -289,6 +302,10 @@ impl<'a> BitReader<'a> {
         // non-restart marker (EOI/SOS/…) stops the scan without being
         // consumed so end-of-scan handling still sees it.
         while self.pos + 1 < self.data.len() {
+            #[cfg(test)]
+            {
+                self.scan_bytes_examined += 1;
+            }
             if self.data[self.pos] != 0xFF {
                 self.pos += 1;
                 continue;
@@ -435,6 +452,64 @@ mod tests {
         let mut br = BitReader::new(&data);
         br.reset();
         assert_eq!(br.position(), 2, "reset() consumes the RST marker at pos");
+    }
+
+    /// The deterministic half of P4-147: restart handling is O(1) per
+    /// interval, so a whole decode is O(intervals).
+    ///
+    /// `worker_b8_restart_bomb` measures the *consequence* — a 4096x4096 RI=1
+    /// decode costing no more than the same image without restarts — but a
+    /// duration ratio is calibrated on one machine and can only ever be
+    /// evidence. This asserts the mechanism itself, and it cannot flake: on a
+    /// well-formed stream `reset()` must consume exactly the two marker bytes
+    /// it is positioned at, scanning nothing.
+    ///
+    /// That is what makes the bomb linear. An implementation that rescanned
+    /// from the start of the scan — the `O(MCUs * RST)` regression the bomb
+    /// exists to catch — would have to advance `pos` by more than 2 here, or
+    /// examine bytes behind it, and either way this fails.
+    #[test]
+    fn reset_consumes_exactly_the_marker_it_is_positioned_at() {
+        // A long run of intervals, each ending exactly at its RST marker —
+        // the shape a valid encoder produces.
+        const INTERVALS: usize = 64;
+        let mut data: Vec<u8> = Vec::new();
+        for i in 0..INTERVALS {
+            data.push(0xFF);
+            data.push(0xD0 + (i % 8) as u8);
+        }
+        data.push(0x00); // trailing byte so the last scan has somewhere to be
+
+        let mut br = BitReader::new(&data);
+        for i in 0..INTERVALS {
+            let before: usize = br.position();
+            br.reset();
+            assert_eq!(
+                br.position() - before,
+                2,
+                "interval {i}: reset() consumed {} bytes, not the 2 of the \
+                 marker it was positioned at — restart handling that scans \
+                 further is the O(MCUs * RST) regression P4-147 guards",
+                br.position() - before
+            );
+        }
+        assert_eq!(
+            br.position(),
+            INTERVALS * 2,
+            "the whole run must cost exactly two bytes per interval"
+        );
+
+        // The cursor alone does not bound the *work*. A scan rewritten to walk
+        // the whole prefix — `data.windows(2).enumerate().skip(pos)`, say —
+        // would still advance exactly two bytes per call while turning 65 536
+        // intervals into O(n²). So assert what the loop actually touched.
+        assert_eq!(
+            br.scan_bytes_examined, INTERVALS,
+            "reset() examined {} bytes across {INTERVALS} intervals; O(1) per \
+             interval means one examination each — anything that grows with \
+             the prefix is the quadratic regression P4-147 guards",
+            br.scan_bytes_examined
+        );
     }
 
     #[test]
