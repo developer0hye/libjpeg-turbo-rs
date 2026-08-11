@@ -2935,7 +2935,7 @@ bug** and are filed separately as P4-148.
 ## P4-149. Preserved `client_data` May Be Uninitialized While Create Holds `&mut` — **OPEN**
 
 **Motivation.** Raised in review while closing P4-110 (2026-08-11) and
-deliberately not resolved there. `jpeg_Create*` must preserve `client_data`
+deliberately not resolved there; filed as issue #527. `jpeg_Create*` must preserve `client_data`
 across its zeroing — that is upstream's contract and one of P4-110's acceptance
 criteria — but the standard idiom leaves the slot uninitialized (stock `djpeg`
 sets only `err`). Create then holds `&mut JpegDecompressPublic` to write the
@@ -2990,7 +2990,7 @@ serial-only harness.
 
 ## P4-148. Test Error-Manager Blobs Are Under-Aligned `[u8; N]` Buffers — **OPEN**
 
-**Motivation.** Discovered while closing P4-110. Across the C-ABI test suite
+**Motivation.** Discovered while closing P4-110; filed as issue #526. Across the C-ABI test suite
 the error manager is allocated as `MaybeUninit<[u8; ERR_BYTES]>` and cast to
 `*mut JpegErrorMgr`. `[u8; N]` has alignment 1, so nothing guarantees the
 pointer meets `align_of::<JpegErrorMgr>()`; `jpeg_std_error` then writes a
